@@ -1,0 +1,35 @@
+[package]
+name = "mamba-rs"
+version = "0.1.4"
+edition = "2024"
+rust-version = "1.94"
+authors = ["silvermpx"]
+description = "Mamba SSM (Selective State Space Model) in Rust with CUDA GPU support. Training + inference, forward + backward (BPTT), burn-in, custom CUDA kernels."
+homepage = "https://github.com/silvermpx/mamba-rs"
+documentation = "https://docs.rs/mamba-rs"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/silvermpx/mamba-rs"
+keywords = ["mamba", "ssm", "deep-learning", "cuda", "state-space-model"]
+categories = ["science", "mathematics"]
+readme = "README.md"
+
+[features]
+default = []
+cuda = ["cudarc"]
+accelerate = []
+gemm-blas = ["gemm"]
+
+[dependencies]
+rayon = "1.10"
+safetensors = "0.7"
+
+[dependencies.gemm]
+version = "0.19"
+optional = true
+default-features = false
+features = ["std", "rayon"]
+
+[dependencies.cudarc]
+version = "0.19.4"
+optional = true
+features = ["driver", "cublas", "nvrtc", "cuda-version-from-build-system"]
