@@ -81,6 +81,10 @@ impl GpuMambaLM {
         })
     }
 
+    pub fn capture_graph(&mut self) -> Result<(), String> {
+        self.backbone.capture_graph()
+    }
+
     pub fn generate(&mut self, prompt: &[u32], params: &SampleParams) -> Result<Vec<u32>, String> {
         let mut tokens = Vec::with_capacity(params.max_tokens);
         self.generate_streaming(prompt, params, |tok, _| {
