@@ -74,10 +74,12 @@ fn main() {
 
     let tokenizer = load_tokenizer(&model_dir, &args);
 
-    let encoding = tokenizer.encode(args.prompt.as_str(), false).unwrap_or_else(|e| {
-        eprintln!("error: tokenization failed: {e}");
-        std::process::exit(1);
-    });
+    let encoding = tokenizer
+        .encode(args.prompt.as_str(), false)
+        .unwrap_or_else(|e| {
+            eprintln!("error: tokenization failed: {e}");
+            std::process::exit(1);
+        });
     let prompt_ids: Vec<u32> = encoding.get_ids().to_vec();
     let n_prompt = prompt_ids.len();
 

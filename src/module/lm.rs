@@ -2,9 +2,9 @@
 
 use std::path::Path;
 
+use crate::mamba_ssm::cpu::inference::MambaStepScratch;
 use crate::mamba3_siso::cpu::inference::Mamba3StepScratch;
 use crate::mamba3_siso::state::Mamba3State;
-use crate::mamba_ssm::cpu::inference::MambaStepScratch;
 use crate::state::MambaState;
 
 use super::backbone::MambaBackbone;

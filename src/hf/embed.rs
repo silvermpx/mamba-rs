@@ -1,6 +1,6 @@
 //! Embedding lookup and lm_head projection for LM inference.
 
-use crate::ops::blas::matvec_forward;
+use crate::ops::blas::{matvec_forward, sgemm_forward};
 
 /// Look up one token's embedding vector.
 ///
@@ -16,11 +16,14 @@ pub fn embed_lookup(embed: &[f32], token_id: u32, d_model: usize, vocab_size: us
     &embed[id * d_model..(id + 1) * d_model]
 }
 
-/// Compute logits = embed @ hidden (row-major gemv).
+/// Compute logits = embed @ hidden (tied lm_head).
 ///
-/// `embed`: `[vocab_size_padded * d_model]` row-major.
+/// `embed`: `[vocab_size_padded * d_model]` row-major — each row is one token's embedding.
 /// `hidden`: `[d_model]`.
 /// `logits`: `[vocab_size]` output (clamped to real vocab, not padded).
+///
+/// Mathematically: `logits[v] = dot(embed[v, :], hidden)` = `embed[V,D] @ hidden[D,1]`.
+/// This is `sgemm_forward(batch=V, n_in=D, n_out=1)` with embed as "X" and hidden as "W".
 pub fn lm_head_logits(
     logits: &mut [f32],
     hidden: &[f32],
@@ -30,16 +33,19 @@ pub fn lm_head_logits(
     d_model: usize,
 ) {
     if vocab_size == vocab_size_padded {
-        matvec_forward(logits, hidden, embed, None, d_model, vocab_size);
+        // Y[V,1] = embed[V,D] @ hidden[D,1]
+        sgemm_forward(logits, embed, hidden, None, vocab_size, d_model, 1);
     } else {
         let mut padded_logits = vec![0.0f32; vocab_size_padded];
-        matvec_forward(
+        // Y[V_pad,1] = embed[V_pad,D] @ hidden[D,1]
+        sgemm_forward(
             &mut padded_logits,
-            hidden,
             embed,
+            hidden,
             None,
-            d_model,
             vocab_size_padded,
+            d_model,
+            1,
         );
         logits[..vocab_size].copy_from_slice(&padded_logits[..vocab_size]);
     }
@@ -47,7 +53,9 @@ pub fn lm_head_logits(
 
 /// Compute logits using a separate lm_head weight matrix (untied weights).
 ///
-/// `lm_head_w`: `[vocab_size * d_model]` row-major.
+/// `lm_head_w`: `[vocab_size * d_model]` row-major (PyTorch layout: [out, in]).
+/// After transpose during HF loading, this becomes `[d_model, vocab_size]`.
+/// So we use matvec: `logits[V] = hidden[D] @ W[D,V]`.
 pub fn lm_head_logits_untied(
     logits: &mut [f32],
     hidden: &[f32],

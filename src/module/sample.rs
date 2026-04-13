@@ -111,10 +111,7 @@ pub fn apply_top_k(logits: &mut [f32], k: usize) -> usize {
 
 /// Softmax in-place (numerically stable).
 pub fn softmax_inplace(logits: &mut [f32]) {
-    let max = logits
-        .iter()
-        .copied()
-        .fold(f32::NEG_INFINITY, f32::max);
+    let max = logits.iter().copied().fold(f32::NEG_INFINITY, f32::max);
     let mut sum = 0.0f32;
     for l in logits.iter_mut() {
         *l = (*l - max).exp();

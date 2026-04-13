@@ -7,7 +7,7 @@ use half::slice::HalfFloatSliceExt;
 ///
 /// `raw_bytes` must have length divisible by 2 (each bf16 is 2 bytes).
 pub fn bf16_bytes_to_f32(raw_bytes: &[u8]) -> Result<Vec<f32>, String> {
-    if raw_bytes.len() % 2 != 0 {
+    if !raw_bytes.len().is_multiple_of(2) {
         return Err(format!(
             "bf16 buffer length {} is not even",
             raw_bytes.len()
@@ -40,7 +40,10 @@ mod tests {
         let result = bf16_bytes_to_f32(bytes).unwrap();
         assert_eq!(result.len(), 4);
         for (got, &expected) in result.iter().zip(&vals) {
-            assert!((got - expected).abs() < 0.02, "bf16 roundtrip: {got} vs {expected}");
+            assert!(
+                (got - expected).abs() < 0.02,
+                "bf16 roundtrip: {got} vs {expected}"
+            );
         }
     }
 

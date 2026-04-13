@@ -45,12 +45,11 @@ pub fn load_hf(dir: &Path) -> Result<HfModel, String> {
     let mut embed = vec![0.0f32; vocab_size_padded * hf_cfg.d_model];
     let mut lm_head: Option<Vec<f32>> = None;
     let mut norm_f_weight = vec![0.0f32; hf_cfg.d_model];
-    let mut layer_weights: Vec<Option<LayerAccum>> =
-        (0..hf_cfg.n_layers).map(|_| None).collect();
+    let mut layer_weights: Vec<Option<LayerAccum>> = (0..hf_cfg.n_layers).map(|_| None).collect();
 
     for shard_path in &shard_paths {
-        let file_bytes =
-            std::fs::read(shard_path).map_err(|e| format!("cannot read {}: {e}", shard_path.display()))?;
+        let file_bytes = std::fs::read(shard_path)
+            .map_err(|e| format!("cannot read {}: {e}", shard_path.display()))?;
         let st = SafeTensors::deserialize(&file_bytes)
             .map_err(|e| format!("safetensors parse error in {}: {e}", shard_path.display()))?;
 
@@ -104,6 +103,19 @@ pub fn load_hf(dir: &Path) -> Result<HfModel, String> {
     }
     if hf_cfg.tie_word_embeddings {
         lm_head = None;
+    }
+
+    // Transpose untied lm_head from PyTorch [vocab_size, d_model] to [d_model, vocab_size].
+    // Our matvec_forward expects W as [n_in, n_out] = [d_model, vocab_size].
+    if let Some(ref mut lm) = lm_head {
+        let expected = hf_cfg.vocab_size * hf_cfg.d_model;
+        if lm.len() != expected {
+            return Err(format!(
+                "lm_head.weight: expected {expected} elements, got {}",
+                lm.len()
+            ));
+        }
+        *lm = transpose_2d(std::mem::take(lm), hf_cfg.vocab_size, hf_cfg.d_model);
     }
 
     let mamba_cfg = MambaConfig {
@@ -216,20 +228,46 @@ impl LayerAccum {
     }
 
     fn into_layer_weights(mut self, cfg: &MambaConfig) -> Result<MambaLayerWeights, String> {
+        let d = cfg.d_model;
         let di = cfg.d_inner();
         let ds = cfg.d_state;
+        let dr = cfg.dt_rank();
+        let xd = cfg.xdbl_dim();
+
+        // PyTorch nn.Linear(in, out) stores weight as [out, in] row-major.
+        // Our BLAS convention: W is [n_in, n_out] row-major (y = x @ W).
+        // All four linear weight matrices must be transposed from HF layout.
         Ok(MambaLayerWeights {
             norm_weight: self.take("norm_weight")?,
-            in_proj_w: self.take("in_proj_w")?,
+            // HF: [2*d_inner, d_model] -> need [d_model, 2*d_inner]
+            in_proj_w: transpose_2d(self.take("in_proj_w")?, 2 * di, d),
             conv1d_weight: self.take("conv1d_weight")?,
             conv1d_bias: self.take("conv1d_bias")?,
-            x_proj_w: self.take("x_proj_w")?,
-            dt_proj_w: self.take("dt_proj_w")?,
+            // HF: [xdbl_dim, d_inner] -> need [d_inner, xdbl_dim]
+            x_proj_w: transpose_2d(self.take("x_proj_w")?, xd, di),
+            // HF: [d_inner, dt_rank] -> need [dt_rank, d_inner]
+            dt_proj_w: transpose_2d(self.take("dt_proj_w")?, di, dr),
             dt_proj_b: self.take("dt_proj_b")?,
             a_log: self.take("a_log")?,
             a_neg: vec![0.0; di * ds],
             d_param: self.take("d_param")?,
-            out_proj_w: self.take("out_proj_w")?,
+            // HF: [d_model, d_inner] -> need [d_inner, d_model]
+            out_proj_w: transpose_2d(self.take("out_proj_w")?, d, di),
         })
     }
+}
+
+/// Transpose a row-major `[rows, cols]` matrix to `[cols, rows]`.
+///
+/// PyTorch nn.Linear stores weights as `[out_features, in_features]`.
+/// Our BLAS expects `[n_in, n_out]`. This converts between the two.
+fn transpose_2d(src: Vec<f32>, rows: usize, cols: usize) -> Vec<f32> {
+    debug_assert_eq!(src.len(), rows * cols);
+    let mut dst = vec![0.0f32; rows * cols];
+    for r in 0..rows {
+        for c in 0..cols {
+            dst[c * rows + r] = src[r * cols + c];
+        }
+    }
+    dst
 }

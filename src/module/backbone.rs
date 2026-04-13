@@ -64,9 +64,16 @@ impl MambaBackbone {
     /// Performs targeted layer-weight validation and calls `compute_a_neg()`
     /// on every layer (critical — SSM reads `a_neg`, never `a_log` at inference time).
     #[cfg(feature = "hf")]
-    pub fn from_weights_no_proj(cfg: MambaConfig, mut weights: MambaWeights) -> Result<Self, String> {
+    pub fn from_weights_no_proj(
+        cfg: MambaConfig,
+        mut weights: MambaWeights,
+    ) -> Result<Self, String> {
         if weights.layers.len() != cfg.n_layers {
-            return Err(format!("expected {} layers, got {}", cfg.n_layers, weights.layers.len()));
+            return Err(format!(
+                "expected {} layers, got {}",
+                cfg.n_layers,
+                weights.layers.len()
+            ));
         }
         let d = cfg.d_model;
         let di = cfg.d_inner();
@@ -77,7 +84,9 @@ impl MambaBackbone {
         for (i, lw) in weights.layers.iter().enumerate() {
             let check = |name: &str, actual: usize, expected: usize| -> Result<(), String> {
                 if actual != expected {
-                    return Err(format!("layer[{i}].{name}: expected {expected}, got {actual}"));
+                    return Err(format!(
+                        "layer[{i}].{name}: expected {expected}, got {actual}"
+                    ));
                 }
                 Ok(())
             };
@@ -93,7 +102,10 @@ impl MambaBackbone {
             check("out_proj_w", lw.out_proj_w.len(), di * d)?;
         }
         if weights.norm_f_weight.len() != d {
-            return Err(format!("norm_f_weight: expected {d}, got {}", weights.norm_f_weight.len()));
+            return Err(format!(
+                "norm_f_weight: expected {d}, got {}",
+                weights.norm_f_weight.len()
+            ));
         }
         for lw in &mut weights.layers {
             lw.compute_a_neg();

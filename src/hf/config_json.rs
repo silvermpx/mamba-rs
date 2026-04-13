@@ -56,9 +56,7 @@ pub fn parse_config_json(json_bytes: &[u8]) -> Result<HfMambaConfig, String> {
     let family = detect_family(&raw)?;
     let (d_model, n_layers, d_state, d_conv) = extract_dims(&raw)?;
     let expand = raw.expand.unwrap_or(2);
-    let vocab_size = raw
-        .vocab_size
-        .ok_or("missing vocab_size in config.json")?;
+    let vocab_size = raw.vocab_size.ok_or("missing vocab_size in config.json")?;
 
     if let Some(tsr) = raw.time_step_rank {
         let expected = d_model.div_ceil(16);
@@ -99,9 +97,7 @@ fn detect_family(raw: &RawConfig) -> Result<ModelFamily, String> {
 
 fn extract_dims(raw: &RawConfig) -> Result<(usize, usize, usize, usize), String> {
     if raw.model_type.is_some() || raw.hidden_size.is_some() {
-        let d_model = raw
-            .hidden_size
-            .ok_or("HF config missing hidden_size")?;
+        let d_model = raw.hidden_size.ok_or("HF config missing hidden_size")?;
         let n_layers = raw
             .num_hidden_layers
             .ok_or("HF config missing num_hidden_layers")?;

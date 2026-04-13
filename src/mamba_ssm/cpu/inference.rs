@@ -288,7 +288,16 @@ pub fn mamba_step(
     cfg: &MambaConfig,
     input_dim: usize,
 ) {
-    mamba_step_inner(input, output, weights, state, scratch, cfg, input_dim, false);
+    let d_model = cfg.d_model;
+    matvec_with_bias(
+        &mut output[..d_model],
+        input,
+        &weights.input_proj_w,
+        Some(&weights.input_proj_b),
+        input_dim,
+        d_model,
+    );
+    mamba_blocks_and_norm(output, weights, state, scratch, cfg);
 }
 
 /// Like [`mamba_step`] but skips the input projection (identity: input copied to output).
@@ -301,40 +310,22 @@ pub fn mamba_step_no_proj(
     scratch: &mut MambaStepScratch,
     cfg: &MambaConfig,
 ) {
-    mamba_step_inner(input, output, weights, state, scratch, cfg, cfg.d_model, true);
+    output[..cfg.d_model].copy_from_slice(&input[..cfg.d_model]);
+    mamba_blocks_and_norm(output, weights, state, scratch, cfg);
 }
 
-fn mamba_step_inner(
-    input: &[f32],
+#[inline]
+fn mamba_blocks_and_norm(
     output: &mut [f32],
     weights: &MambaWeights,
     state: &mut [MambaLayerState],
     scratch: &mut MambaStepScratch,
     cfg: &MambaConfig,
-    input_dim: usize,
-    identity_proj: bool,
 ) {
     let d_model = cfg.d_model;
-
-    if identity_proj {
-        output[..d_model].copy_from_slice(&input[..d_model]);
-    } else {
-        matvec_with_bias(
-            &mut output[..d_model],
-            input,
-            &weights.input_proj_w,
-            Some(&weights.input_proj_b),
-            input_dim,
-            d_model,
-        );
-    }
-
-    // N blocks
     for (layer_idx, lw) in weights.layers.iter().enumerate() {
         mamba_block_step(output, lw, &mut state[layer_idx], scratch, cfg);
     }
-
-    // Final RmsNorm (norm_f)
     let mean_sq: f32 = output[..d_model].iter().map(|v| v * v).sum::<f32>() / d_model as f32;
     let inv_rms = 1.0 / (mean_sq + RMS_NORM_EPS).sqrt();
     for (o, &nfw) in output[..d_model]

@@ -59,33 +59,92 @@ fn write_synthetic_checkpoint(dir: &Path, include_lm_head: bool) {
 
     // Embedding
     let embed = rand_vec(VOCAB_SIZE * D_MODEL, 100);
-    tensors.push(("backbone.embeddings.weight".into(), f32_to_bytes(&embed), vec![VOCAB_SIZE, D_MODEL]));
+    tensors.push((
+        "backbone.embeddings.weight".into(),
+        f32_to_bytes(&embed),
+        vec![VOCAB_SIZE, D_MODEL],
+    ));
 
     // Optional lm_head
     if include_lm_head {
         let lm = rand_vec(VOCAB_SIZE * D_MODEL, 200);
-        tensors.push(("lm_head.weight".into(), f32_to_bytes(&lm), vec![VOCAB_SIZE, D_MODEL]));
+        tensors.push((
+            "lm_head.weight".into(),
+            f32_to_bytes(&lm),
+            vec![VOCAB_SIZE, D_MODEL],
+        ));
     }
 
     // norm_f
-    tensors.push(("backbone.norm_f.weight".into(), f32_to_bytes(&vec![1.0f32; D_MODEL]), vec![D_MODEL]));
+    tensors.push((
+        "backbone.norm_f.weight".into(),
+        f32_to_bytes(&vec![1.0f32; D_MODEL]),
+        vec![D_MODEL],
+    ));
 
     // Per-layer weights
     for i in 0..N_LAYERS {
         let seed_base = (i as u64 + 1) * 1000;
         let prefix = format!("backbone.layers.{i}");
-        tensors.push((format!("{prefix}.norm.weight"), f32_to_bytes(&vec![1.0f32; D_MODEL]), vec![D_MODEL]));
-        tensors.push((format!("{prefix}.mixer.in_proj.weight"), f32_to_bytes(&rand_vec(D_MODEL * 2 * di, seed_base + 1)), vec![D_MODEL, 2 * di]));
-        tensors.push((format!("{prefix}.mixer.conv1d.weight"), f32_to_bytes(&rand_vec(di * D_CONV, seed_base + 2)), vec![di, 1, D_CONV]));
-        tensors.push((format!("{prefix}.mixer.conv1d.bias"), f32_to_bytes(&vec![0.0f32; di]), vec![di]));
-        tensors.push((format!("{prefix}.mixer.x_proj.weight"), f32_to_bytes(&rand_vec(di * xd, seed_base + 3)), vec![di, xd]));
-        tensors.push((format!("{prefix}.mixer.dt_proj.weight"), f32_to_bytes(&rand_vec(dr * di, seed_base + 4)), vec![dr, di]));
-        tensors.push((format!("{prefix}.mixer.dt_proj.bias"), f32_to_bytes(&rand_vec(di, seed_base + 5)), vec![di]));
+        tensors.push((
+            format!("{prefix}.norm.weight"),
+            f32_to_bytes(&vec![1.0f32; D_MODEL]),
+            vec![D_MODEL],
+        ));
+        // Shape metadata matches PyTorch nn.Linear convention: [out_features, in_features].
+        // in_proj: nn.Linear(d_model, 2*d_inner) -> stored as [2*d_inner, d_model]
+        tensors.push((
+            format!("{prefix}.mixer.in_proj.weight"),
+            f32_to_bytes(&rand_vec(2 * di * D_MODEL, seed_base + 1)),
+            vec![2 * di, D_MODEL],
+        ));
+        tensors.push((
+            format!("{prefix}.mixer.conv1d.weight"),
+            f32_to_bytes(&rand_vec(di * D_CONV, seed_base + 2)),
+            vec![di, 1, D_CONV],
+        ));
+        tensors.push((
+            format!("{prefix}.mixer.conv1d.bias"),
+            f32_to_bytes(&vec![0.0f32; di]),
+            vec![di],
+        ));
+        // x_proj: nn.Linear(d_inner, xdbl_dim) -> stored as [xdbl_dim, d_inner]
+        tensors.push((
+            format!("{prefix}.mixer.x_proj.weight"),
+            f32_to_bytes(&rand_vec(xd * di, seed_base + 3)),
+            vec![xd, di],
+        ));
+        // dt_proj: nn.Linear(dt_rank, d_inner) -> stored as [d_inner, dt_rank]
+        tensors.push((
+            format!("{prefix}.mixer.dt_proj.weight"),
+            f32_to_bytes(&rand_vec(di * dr, seed_base + 4)),
+            vec![di, dr],
+        ));
+        tensors.push((
+            format!("{prefix}.mixer.dt_proj.bias"),
+            f32_to_bytes(&rand_vec(di, seed_base + 5)),
+            vec![di],
+        ));
         // a_log: needs nonzero values for compute_a_neg test
-        let a_log: Vec<f32> = (0..di * D_STATE).map(|j| -((j as f32 + 1.0).ln())).collect();
-        tensors.push((format!("{prefix}.mixer.A_log"), f32_to_bytes(&a_log), vec![di, D_STATE]));
-        tensors.push((format!("{prefix}.mixer.D"), f32_to_bytes(&vec![1.0f32; di]), vec![di]));
-        tensors.push((format!("{prefix}.mixer.out_proj.weight"), f32_to_bytes(&rand_vec(di * D_MODEL, seed_base + 6)), vec![di, D_MODEL]));
+        let a_log: Vec<f32> = (0..di * D_STATE)
+            .map(|j| -((j as f32 + 1.0).ln()))
+            .collect();
+        tensors.push((
+            format!("{prefix}.mixer.A_log"),
+            f32_to_bytes(&a_log),
+            vec![di, D_STATE],
+        ));
+        tensors.push((
+            format!("{prefix}.mixer.D"),
+            f32_to_bytes(&vec![1.0f32; di]),
+            vec![di],
+        ));
+        // out_proj: nn.Linear(d_inner, d_model) -> stored as [d_model, d_inner]
+        tensors.push((
+            format!("{prefix}.mixer.out_proj.weight"),
+            f32_to_bytes(&rand_vec(D_MODEL * di, seed_base + 6)),
+            vec![D_MODEL, di],
+        ));
     }
 
     // Write config.json
@@ -146,7 +205,10 @@ fn test_weight_tying_detected() {
     let tokens = lm.generate(&[1, 2, 3], &params);
     assert_eq!(tokens.len(), 5);
     for &t in &tokens {
-        assert!((t as usize) < VOCAB_SIZE, "generated token {t} >= vocab {VOCAB_SIZE}");
+        assert!(
+            (t as usize) < VOCAB_SIZE,
+            "generated token {t} >= vocab {VOCAB_SIZE}"
+        );
     }
 }
 
@@ -190,7 +252,11 @@ fn test_compute_a_neg_called() {
     if let mamba_rs::module::lm::AnyBackbone::M1(ref bb) = lm.backbone {
         let lw = bb.layer(0);
         // a_log has nonzero values → a_neg = -exp(a_log) should be negative
-        assert!(lw.a_neg[0] < 0.0, "a_neg[0] = {}, expected negative", lw.a_neg[0]);
+        assert!(
+            lw.a_neg[0] < 0.0,
+            "a_neg[0] = {}, expected negative",
+            lw.a_neg[0]
+        );
         assert!(lw.a_neg[0].is_finite(), "a_neg[0] is not finite");
     } else {
         panic!("expected M1 backbone");
@@ -246,7 +312,7 @@ fn test_generate_state_save_restore() {
 #[test]
 fn test_m1_through_any_backbone() {
     use mamba_rs::module::lm::AnyBackbone;
-    use mamba_rs::{MambaConfig, MambaBackbone};
+    use mamba_rs::{MambaBackbone, MambaConfig};
 
     let cfg = MambaConfig {
         d_model: 32,
@@ -263,7 +329,12 @@ fn test_m1_through_any_backbone() {
     let mut scratch_direct = bb.alloc_scratch();
     let mut out_direct = vec![0.0f32; 32];
     let input = vec![0.1f32; 32];
-    bb.forward_step(&input, &mut out_direct, &mut state_direct, &mut scratch_direct);
+    bb.forward_step(
+        &input,
+        &mut out_direct,
+        &mut state_direct,
+        &mut scratch_direct,
+    );
 
     // Through AnyBackbone
     let bb2 = MambaBackbone::init(cfg, 32, 42);
