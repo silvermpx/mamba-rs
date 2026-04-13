@@ -758,7 +758,13 @@ impl GpuMambaBackbone {
 
     /// Download temporal from GPU to CPU.
     pub fn download_temporal(&self, output: &mut [f32]) -> Result<(), String> {
-        self.engine.ctx.stream.synchronize().map_err(|e| format!("sync: {e:?}"))?;
-        self.scratch.temporal.download(&self.engine.ctx.stream, output)
+        self.engine
+            .ctx
+            .stream
+            .synchronize()
+            .map_err(|e| format!("sync: {e:?}"))?;
+        self.scratch
+            .temporal
+            .download(&self.engine.ctx.stream, output)
     }
 }

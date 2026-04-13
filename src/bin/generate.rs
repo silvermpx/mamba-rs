@@ -1,12 +1,11 @@
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use clap::Parser;
 use hf_hub::api::sync::Api;
 use tokenizers::Tokenizer;
 
-use mamba_rs::module::lm::MambaLM;
 use mamba_rs::module::sample::SampleParams;
 
 #[derive(Parser)]
@@ -27,6 +26,14 @@ struct Args {
 
     /// Prompt text
     prompt: String,
+
+    /// Use GPU inference (requires CUDA)
+    #[arg(long)]
+    gpu: bool,
+
+    /// GPU device index
+    #[arg(long, default_value_t = 0)]
+    gpu_device: usize,
 
     /// Sampling temperature (0 = greedy)
     #[arg(short, long, default_value_t = 0.7)]
@@ -65,13 +72,6 @@ fn main() {
         None => download_model(&args.model_id, &args.revision),
     };
 
-    let t_load = Instant::now();
-    let mut lm = MambaLM::from_hf(&model_dir).unwrap_or_else(|e| {
-        eprintln!("error: failed to load model: {e}");
-        std::process::exit(1);
-    });
-    let load_ms = t_load.elapsed().as_millis();
-
     let tokenizer = load_tokenizer(&model_dir, &args);
 
     let encoding = tokenizer
@@ -82,12 +82,6 @@ fn main() {
         });
     let prompt_ids: Vec<u32> = encoding.get_ids().to_vec();
     let n_prompt = prompt_ids.len();
-
-    eprintln!(
-        "model: {} | d_model={} vocab={} | loaded in {load_ms}ms",
-        args.model_id, lm.d_model, lm.vocab_size
-    );
-    eprintln!("prompt: {n_prompt} tokens");
 
     let params = SampleParams {
         temperature: args.temperature,
@@ -100,32 +94,140 @@ fn main() {
         seed: args.seed,
     };
 
+    #[cfg(feature = "cuda")]
+    if args.gpu {
+        run_gpu(
+            &model_dir,
+            &args,
+            &prompt_ids,
+            n_prompt,
+            &params,
+            &tokenizer,
+        );
+        return;
+    }
+
+    #[cfg(not(feature = "cuda"))]
+    if args.gpu {
+        eprintln!("error: --gpu requires the 'cuda' feature (rebuild with --features cli,cuda)");
+        std::process::exit(1);
+    }
+
+    run_cpu(
+        &model_dir,
+        &args,
+        &prompt_ids,
+        n_prompt,
+        &params,
+        &tokenizer,
+    );
+}
+
+fn run_cpu(
+    model_dir: &Path,
+    args: &Args,
+    prompt_ids: &[u32],
+    n_prompt: usize,
+    params: &SampleParams,
+    tokenizer: &Tokenizer,
+) {
+    let t_load = Instant::now();
+    let mut lm = mamba_rs::module::lm::MambaLM::from_hf(model_dir).unwrap_or_else(|e| {
+        eprintln!("error: failed to load model: {e}");
+        std::process::exit(1);
+    });
+    let load_ms = t_load.elapsed().as_millis();
+
+    eprintln!(
+        "model: {} (CPU) | d_model={} vocab={} | loaded in {load_ms}ms",
+        args.model_id, lm.d_model, lm.vocab_size
+    );
+    eprintln!("prompt: {n_prompt} tokens");
+
     let mut stdout = std::io::stdout().lock();
     let mut n_generated = 0u64;
     let mut byte_buf = Vec::new();
     let t_start = Instant::now();
     let mut ttft: Option<u128> = None;
 
-    lm.generate_streaming(&prompt_ids, &params, |token_id, _| {
+    lm.generate_streaming(prompt_ids, params, |token_id, _| {
         if ttft.is_none() {
             ttft = Some(t_start.elapsed().as_millis());
         }
         n_generated += 1;
-        if let Some(piece) = decode_token(&tokenizer, token_id, &mut byte_buf) {
+        if let Some(piece) = decode_token(tokenizer, token_id, &mut byte_buf) {
             let _ = stdout.write_all(piece.as_bytes());
             let _ = stdout.flush();
         }
     });
 
+    print_stats(&mut stdout, n_prompt, n_generated, ttft, t_start);
+}
+
+#[cfg(feature = "cuda")]
+fn run_gpu(
+    model_dir: &Path,
+    args: &Args,
+    prompt_ids: &[u32],
+    n_prompt: usize,
+    params: &SampleParams,
+    tokenizer: &Tokenizer,
+) {
+    let t_load = Instant::now();
+    let mut lm = mamba_rs::module::gpu_lm::GpuMambaLM::from_hf(model_dir, args.gpu_device)
+        .unwrap_or_else(|e| {
+            eprintln!("error: failed to load GPU model: {e}");
+            std::process::exit(1);
+        });
+    lm.capture_graph().unwrap_or_else(|e| {
+        eprintln!("warning: CUDA Graph capture failed ({e}), running without graph");
+    });
+    let load_ms = t_load.elapsed().as_millis();
+
+    eprintln!(
+        "model: {} (GPU:{}) | d_model={} vocab={} | loaded in {load_ms}ms",
+        args.model_id, args.gpu_device, lm.d_model, lm.vocab_size
+    );
+    eprintln!("prompt: {n_prompt} tokens");
+
+    let mut stdout = std::io::stdout().lock();
+    let mut n_generated = 0u64;
+    let mut byte_buf = Vec::new();
+    let t_start = Instant::now();
+    let mut ttft: Option<u128> = None;
+
+    lm.generate_streaming(prompt_ids, params, |token_id, _| {
+        if ttft.is_none() {
+            ttft = Some(t_start.elapsed().as_millis());
+        }
+        n_generated += 1;
+        if let Some(piece) = decode_token(tokenizer, token_id, &mut byte_buf) {
+            let _ = stdout.write_all(piece.as_bytes());
+            let _ = stdout.flush();
+        }
+    })
+    .unwrap_or_else(|e| {
+        eprintln!("\nerror: generation failed: {e}");
+        std::process::exit(1);
+    });
+
+    print_stats(&mut stdout, n_prompt, n_generated, ttft, t_start);
+}
+
+fn print_stats(
+    stdout: &mut std::io::StdoutLock,
+    n_prompt: usize,
+    n_generated: u64,
+    ttft: Option<u128>,
+    t_start: Instant,
+) {
     let elapsed = t_start.elapsed();
     let _ = writeln!(stdout);
-
     let tok_s = if elapsed.as_secs_f64() > 0.0 {
         n_generated as f64 / elapsed.as_secs_f64()
     } else {
         0.0
     };
-
     eprintln!(
         "{n_prompt} prompt, prefill {}ms | {n_generated} tokens at {tok_s:.1} tok/s ({:.1}s total)",
         ttft.unwrap_or(0),
@@ -186,7 +288,7 @@ fn download_model(model_id: &str, revision: &str) -> PathBuf {
     model_dir
 }
 
-fn load_tokenizer(model_dir: &PathBuf, args: &Args) -> Tokenizer {
+fn load_tokenizer(model_dir: &Path, args: &Args) -> Tokenizer {
     let tok_path = model_dir.join("tokenizer.json");
     if tok_path.exists() {
         Tokenizer::from_file(&tok_path).unwrap_or_else(|e| {

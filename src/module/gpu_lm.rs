@@ -10,7 +10,7 @@ use crate::mamba_ssm::gpu::buffers::GpuBuffer;
 use crate::mamba_ssm::gpu::inference::GpuMambaBackbone;
 
 use crate::hf::embed::embed_lookup;
-use crate::hf::load::{load_hf, HfModel};
+use crate::hf::load::{HfModel, load_hf};
 
 use super::sample::{SampleParams, Xoshiro256PlusPlus, sample_token};
 
@@ -41,29 +41,23 @@ impl GpuMambaLM {
         } = load_hf(dir)?;
 
         let cfg = *cpu_backbone.config();
-        let gpu_bb = GpuMambaBackbone::new(
-            gpu_ordinal,
-            cpu_backbone.weights(),
-            cfg,
-            d_model,
-            1,
-        )?;
+        let gpu_bb = GpuMambaBackbone::new(gpu_ordinal, cpu_backbone.weights(), cfg, d_model, 1)?;
 
         let stream = gpu_bb.stream();
 
-        let mut gpu_embed = GpuBuffer::zeros(&stream, vocab_size_padded * d_model)?;
-        gpu_embed.upload(&stream, &embed)?;
+        let mut gpu_embed = GpuBuffer::zeros(stream, vocab_size_padded * d_model)?;
+        gpu_embed.upload(stream, &embed)?;
 
         let gpu_lm_head = if let Some(ref lm_w) = lm_head {
-            let mut buf = GpuBuffer::zeros(&stream, lm_w.len())?;
-            buf.upload(&stream, lm_w)?;
+            let mut buf = GpuBuffer::zeros(stream, lm_w.len())?;
+            buf.upload(stream, lm_w)?;
             Some(buf)
         } else {
             None
         };
 
-        let gpu_hidden = GpuBuffer::zeros(&stream, d_model)?;
-        let gpu_logits = GpuBuffer::zeros(&stream, vocab_size_padded)?;
+        let gpu_hidden = GpuBuffer::zeros(stream, d_model)?;
+        let gpu_logits = GpuBuffer::zeros(stream, vocab_size_padded)?;
 
         Ok(Self {
             backbone: gpu_bb,
@@ -140,7 +134,7 @@ impl GpuMambaLM {
             // Untied: need temporal as GpuBuffer x-input.
             // D2H temporal → H2D to gpu_hidden (small: d_model floats).
             self.backbone.download_temporal(&mut self.input_cpu)?;
-            self.gpu_hidden.upload(&stream, &self.input_cpu)?;
+            self.gpu_hidden.upload(stream, &self.input_cpu)?;
             gpu_sgemm_forward_raw(
                 ctx,
                 &mut self.gpu_logits,
@@ -166,7 +160,7 @@ impl GpuMambaLM {
             .map_err(|e| format!("logits sync: {e:?}"))?;
 
         self.gpu_logits
-            .download(&stream, &mut self.logits_padded_cpu)?;
+            .download(stream, &mut self.logits_padded_cpu)?;
         self.logits_cpu
             .copy_from_slice(&self.logits_padded_cpu[..self.vocab_size]);
 
