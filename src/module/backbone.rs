@@ -1,5 +1,5 @@
 use crate::config::MambaConfig;
-use crate::inference::{MambaStepScratch, mamba_step};
+use crate::inference::{MambaStepScratch, mamba_step, mamba_step_no_proj};
 use crate::state::MambaState;
 use crate::weights::{MambaLayerWeights, MambaWeights};
 
@@ -26,6 +26,7 @@ pub struct MambaBackbone {
     weights: MambaWeights,
     cfg: MambaConfig,
     input_dim: usize,
+    identity_proj: bool,
 }
 
 impl MambaBackbone {
@@ -39,6 +40,7 @@ impl MambaBackbone {
             weights,
             cfg,
             input_dim,
+            identity_proj: false,
         }
     }
 
@@ -52,6 +54,55 @@ impl MambaBackbone {
             weights,
             cfg,
             input_dim,
+            identity_proj: false,
+        })
+    }
+
+    /// Create a backbone from HF weights that have no input_proj.
+    ///
+    /// Skips the standard `validate()` (which rejects empty `input_proj_w`).
+    /// Performs targeted layer-weight validation and calls `compute_a_neg()`
+    /// on every layer (critical — SSM reads `a_neg`, never `a_log` at inference time).
+    #[cfg(feature = "hf")]
+    pub fn from_weights_no_proj(cfg: MambaConfig, mut weights: MambaWeights) -> Result<Self, String> {
+        if weights.layers.len() != cfg.n_layers {
+            return Err(format!("expected {} layers, got {}", cfg.n_layers, weights.layers.len()));
+        }
+        let d = cfg.d_model;
+        let di = cfg.d_inner();
+        let ds = cfg.d_state;
+        let dc = cfg.d_conv;
+        let dr = cfg.dt_rank();
+        let xd = cfg.xdbl_dim();
+        for (i, lw) in weights.layers.iter().enumerate() {
+            let check = |name: &str, actual: usize, expected: usize| -> Result<(), String> {
+                if actual != expected {
+                    return Err(format!("layer[{i}].{name}: expected {expected}, got {actual}"));
+                }
+                Ok(())
+            };
+            check("norm_weight", lw.norm_weight.len(), d)?;
+            check("in_proj_w", lw.in_proj_w.len(), d * 2 * di)?;
+            check("conv1d_weight", lw.conv1d_weight.len(), di * dc)?;
+            check("conv1d_bias", lw.conv1d_bias.len(), di)?;
+            check("x_proj_w", lw.x_proj_w.len(), di * xd)?;
+            check("dt_proj_w", lw.dt_proj_w.len(), dr * di)?;
+            check("dt_proj_b", lw.dt_proj_b.len(), di)?;
+            check("a_log", lw.a_log.len(), di * ds)?;
+            check("d_param", lw.d_param.len(), di)?;
+            check("out_proj_w", lw.out_proj_w.len(), di * d)?;
+        }
+        if weights.norm_f_weight.len() != d {
+            return Err(format!("norm_f_weight: expected {d}, got {}", weights.norm_f_weight.len()));
+        }
+        for lw in &mut weights.layers {
+            lw.compute_a_neg();
+        }
+        Ok(Self {
+            weights,
+            cfg,
+            input_dim: d,
+            identity_proj: true,
         })
     }
 
@@ -112,15 +163,26 @@ impl MambaBackbone {
         state: &mut MambaState,
         scratch: &mut MambaStepScratch,
     ) {
-        mamba_step(
-            input,
-            output,
-            &self.weights,
-            &mut state.layers,
-            scratch,
-            &self.cfg,
-            self.input_dim,
-        );
+        if self.identity_proj {
+            mamba_step_no_proj(
+                input,
+                output,
+                &self.weights,
+                &mut state.layers,
+                scratch,
+                &self.cfg,
+            );
+        } else {
+            mamba_step(
+                input,
+                output,
+                &self.weights,
+                &mut state.layers,
+                scratch,
+                &self.cfg,
+                self.input_dim,
+            );
+        }
     }
 
     /// Run T inference steps sequentially, collecting all outputs.

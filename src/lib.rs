@@ -21,6 +21,8 @@
 //! - [`config`], [`state`], [`weights`], [`serialize`] — Mamba-1 data types
 
 pub mod config;
+#[cfg(feature = "hf")]
+pub mod hf;
 pub mod mamba3_siso;
 pub mod mamba_ssm;
 pub mod module;
@@ -57,6 +59,7 @@ pub mod gpu {
 pub use config::MambaConfig;
 pub use mamba_ssm::cpu::inference::{
     MambaLayerScratch, MambaStepScratch, mamba_block_step, mamba_layer_step, mamba_step,
+    mamba_step_no_proj,
 };
 pub use module::MambaBackbone;
 pub use state::{MambaLayerState, MambaState};

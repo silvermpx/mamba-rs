@@ -2,6 +2,7 @@
 ///
 /// Holds the conv1d shift register and SSM hidden state.
 /// Reset on episode/sequence boundaries.
+#[derive(Clone)]
 pub struct MambaLayerState {
     /// Conv1d shift register `[(d_conv - 1) * d_inner]`
     pub conv_state: Vec<f32>,
@@ -31,6 +32,7 @@ impl MambaLayerState {
 }
 
 /// Full recurrent state for the Mamba backbone (all layers).
+#[derive(Clone)]
 pub struct MambaState {
     pub layers: Vec<MambaLayerState>,
 }

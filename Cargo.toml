@@ -13,11 +13,18 @@ keywords = ["mamba", "ssm", "deep-learning", "cuda", "state-space-model"]
 categories = ["science", "mathematics"]
 readme = "README.md"
 
+[[bin]]
+name = "mamba-generate"
+path = "src/bin/generate.rs"
+required-features = ["cli"]
+
 [features]
 default = []
 cuda = ["cudarc"]
 accelerate = []
 gemm-blas = ["gemm"]
+hf = ["dep:half", "dep:bytemuck", "dep:memmap2", "dep:serde", "dep:serde_json"]
+cli = ["hf", "dep:clap", "dep:tokenizers", "dep:hf-hub"]
 
 [dependencies]
 pulp = "0.22"
@@ -29,6 +36,45 @@ version = "0.19"
 optional = true
 default-features = false
 features = ["std", "rayon"]
+
+[dependencies.half]
+version = "2"
+optional = true
+features = ["bytemuck"]
+
+[dependencies.bytemuck]
+version = "1"
+optional = true
+features = ["derive"]
+
+[dependencies.memmap2]
+version = "0.9"
+optional = true
+
+[dependencies.serde]
+version = "1"
+optional = true
+features = ["derive"]
+
+[dependencies.serde_json]
+version = "1"
+optional = true
+
+[dependencies.clap]
+version = "4"
+optional = true
+features = ["derive"]
+
+[dependencies.tokenizers]
+version = "0.22"
+optional = true
+
+[dependencies.hf-hub]
+version = "0.5"
+optional = true
+
+[dev-dependencies]
+tempfile = "3"
 
 [dependencies.cudarc]
 version = "0.19.4"

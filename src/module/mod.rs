@@ -4,5 +4,11 @@
 //! and provides both single-step inference and batched training methods.
 
 mod backbone;
+#[cfg(feature = "hf")]
+pub mod backbone3;
+#[cfg(feature = "hf")]
+pub mod lm;
+#[cfg(feature = "hf")]
+pub mod sample;
 
 pub use backbone::MambaBackbone;

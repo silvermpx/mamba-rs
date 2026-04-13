@@ -9,6 +9,7 @@
 use super::config::Mamba3Config;
 
 /// Persistent recurrent state for one Mamba-3 SISO layer.
+#[derive(Clone)]
 pub struct Mamba3LayerState {
     /// SSM hidden state: `[nheads * headdim * d_state]`.
     pub ssm_state: Vec<f32>,
@@ -42,6 +43,7 @@ impl Mamba3LayerState {
 }
 
 /// Full recurrent state for the Mamba-3 SISO backbone (all layers).
+#[derive(Clone)]
 pub struct Mamba3State {
     pub layers: Vec<Mamba3LayerState>,
 }
