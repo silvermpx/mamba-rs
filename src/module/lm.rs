@@ -96,6 +96,7 @@ pub struct MambaLM {
     embed: Vec<f32>,
     lm_head: Option<Vec<f32>>,
     logits: Vec<f32>,
+    logits_scratch: Vec<f32>,
     pub vocab_size: usize,
     vocab_size_padded: usize,
     pub d_model: usize,
@@ -117,6 +118,7 @@ impl MambaLM {
         let scratch = any.alloc_scratch();
         let temporal = vec![0.0f32; d_model];
         let logits = vec![0.0f32; vocab_size];
+        let logits_scratch = vec![0.0f32; vocab_size_padded];
 
         Ok(Self {
             backbone: any,
@@ -126,6 +128,7 @@ impl MambaLM {
             embed,
             lm_head,
             logits,
+            logits_scratch,
             vocab_size,
             vocab_size_padded,
             d_model,
@@ -201,6 +204,7 @@ impl MambaLM {
                 self.vocab_size,
                 self.vocab_size_padded,
                 self.d_model,
+                &mut self.logits_scratch,
             );
         }
     }

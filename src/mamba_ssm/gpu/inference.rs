@@ -319,6 +319,30 @@ impl GpuMambaInference {
         Ok(())
     }
 
+    /// Run backbone step without D2H download. Returns GPU temporal pointer.
+    /// Use for chaining with lm_head SGEMM on GPU without round-trip.
+    pub fn step_gpu_only(
+        &self,
+        input: &[f32],
+        state: &mut GpuInferenceState,
+        scratch: &mut GpuInferenceScratch,
+    ) -> Result<(), String> {
+        scratch.gpu_input.upload(&self.ctx.stream, input)?;
+        if let Some(ref g) = self.graph {
+            assert_eq!(state.conv.cached_ptr(), self.captured_state_ptr);
+            assert_eq!(scratch.gpu_input.cached_ptr(), self.captured_scratch_ptr);
+            g.launch().map_err(|e| format!("graph launch: {e:?}"))?;
+        } else {
+            self.step_kernels(state, scratch)?;
+        }
+        Ok(())
+    }
+
+    /// Get the temporal output buffer (on GPU). Valid after `step_gpu_only`.
+    pub fn temporal_buffer<'a>(&self, scratch: &'a GpuInferenceScratch) -> &'a GpuBuffer {
+        &scratch.temporal
+    }
+
     /// Launch the full T=1 forward pipeline on GPU.
     ///
     /// Pipeline per layer:
@@ -709,5 +733,32 @@ impl GpuMambaBackbone {
     /// Whether CUDA Graph is captured.
     pub fn has_graph(&self) -> bool {
         self.engine.has_graph()
+    }
+
+    /// Access the GPU compute context (for external SGEMM calls like lm_head).
+    pub fn ctx(&self) -> &GpuCtx {
+        &self.engine.ctx
+    }
+
+    /// Access the GPU stream.
+    pub fn stream(&self) -> &std::sync::Arc<cudarc::driver::CudaStream> {
+        &self.engine.ctx.stream
+    }
+
+    /// Run backbone step, keep output on GPU (no D2H). For chaining with lm_head.
+    pub fn step_gpu_only(&mut self, input: &[f32]) -> Result<(), String> {
+        self.engine
+            .step_gpu_only(input, &mut self.state, &mut self.scratch)
+    }
+
+    /// GPU temporal buffer pointer (valid after `step_gpu_only`).
+    pub fn temporal_ptr(&self) -> cudarc::driver::sys::CUdeviceptr {
+        self.scratch.temporal.cached_ptr()
+    }
+
+    /// Download temporal from GPU to CPU.
+    pub fn download_temporal(&self, output: &mut [f32]) -> Result<(), String> {
+        self.engine.ctx.stream.synchronize().map_err(|e| format!("sync: {e:?}"))?;
+        self.scratch.temporal.download(&self.engine.ctx.stream, output)
     }
 }

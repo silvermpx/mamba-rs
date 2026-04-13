@@ -24,6 +24,7 @@ pub fn embed_lookup(embed: &[f32], token_id: u32, d_model: usize, vocab_size: us
 ///
 /// Mathematically: `logits[v] = dot(embed[v, :], hidden)` = `embed[V,D] @ hidden[D,1]`.
 /// This is `sgemm_forward(batch=V, n_in=D, n_out=1)` with embed as "X" and hidden as "W".
+/// Compute logits with tied weights. `scratch` must be `[vocab_size_padded]` (pre-allocated, reused).
 pub fn lm_head_logits(
     logits: &mut [f32],
     hidden: &[f32],
@@ -31,24 +32,19 @@ pub fn lm_head_logits(
     vocab_size: usize,
     vocab_size_padded: usize,
     d_model: usize,
+    scratch: &mut [f32],
 ) {
-    if vocab_size == vocab_size_padded {
-        // Y[V,1] = embed[V,D] @ hidden[D,1]
-        sgemm_forward(logits, embed, hidden, None, vocab_size, d_model, 1);
-    } else {
-        let mut padded_logits = vec![0.0f32; vocab_size_padded];
-        // Y[V_pad,1] = embed[V_pad,D] @ hidden[D,1]
-        sgemm_forward(
-            &mut padded_logits,
-            embed,
-            hidden,
-            None,
-            vocab_size_padded,
-            d_model,
-            1,
-        );
-        logits[..vocab_size].copy_from_slice(&padded_logits[..vocab_size]);
-    }
+    debug_assert!(scratch.len() >= vocab_size_padded);
+    sgemm_forward(
+        &mut scratch[..vocab_size_padded],
+        embed,
+        hidden,
+        None,
+        vocab_size_padded,
+        d_model,
+        1,
+    );
+    logits[..vocab_size].copy_from_slice(&scratch[..vocab_size]);
 }
 
 /// Compute logits using a separate lm_head weight matrix (untied weights).
