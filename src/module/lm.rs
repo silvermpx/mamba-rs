@@ -82,6 +82,30 @@ impl AnyBackbone {
             Self::M3(bb) => AnyScratch::M3(bb.alloc_scratch()),
         }
     }
+
+    pub fn forward_sequence(
+        &self,
+        inputs: &[f32],
+        outputs: &mut [f32],
+        state: &mut AnyState,
+        scratch: &mut AnyScratch,
+        seq_len: usize,
+    ) {
+        match (self, state, scratch) {
+            (Self::M1(bb), AnyState::M1(st), AnyScratch::M1(sc)) => {
+                bb.forward_sequence(inputs, outputs, st, sc, seq_len);
+            }
+            (Self::M3(bb), AnyState::M3(st), AnyScratch::M3(sc)) => {
+                let dm = bb.d_model();
+                for t in 0..seq_len {
+                    let inp = &inputs[t * dm..(t + 1) * dm];
+                    let out = &mut outputs[t * dm..(t + 1) * dm];
+                    bb.forward_step(inp, out, sc, &mut st.layers);
+                }
+            }
+            _ => panic!("backbone/state/scratch type mismatch"),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -93,6 +117,8 @@ pub struct MambaLM {
     state: AnyState,
     scratch: AnyScratch,
     temporal: Vec<f32>,
+    prefill_inputs: Vec<f32>,
+    prefill_outputs: Vec<f32>,
     embed: Vec<f32>,
     lm_head: Option<Vec<f32>>,
     logits: Vec<f32>,
@@ -125,6 +151,8 @@ impl MambaLM {
             state,
             scratch,
             temporal,
+            prefill_inputs: Vec::new(),
+            prefill_outputs: Vec::new(),
             embed,
             lm_head,
             logits,
@@ -152,16 +180,29 @@ impl MambaLM {
         self.state.reset();
         let mut rng = Xoshiro256PlusPlus::new(params.seed);
 
-        for &token_id in prompt {
-            let hidden = embed_lookup(&self.embed, token_id, self.d_model, self.vocab_size);
-            self.temporal.copy_from_slice(hidden);
-            self.backbone.forward_step(
-                hidden,
-                &mut self.temporal,
-                &mut self.state,
-                &mut self.scratch,
-            );
+        let seq_len = prompt.len();
+        let dm = self.d_model;
+
+        // Batch all prompt embeddings into one contiguous buffer
+        self.prefill_inputs.resize(seq_len * dm, 0.0);
+        self.prefill_outputs.resize(seq_len * dm, 0.0);
+        for (t, &token_id) in prompt.iter().enumerate() {
+            let emb = embed_lookup(&self.embed, token_id, dm, self.vocab_size);
+            self.prefill_inputs[t * dm..(t + 1) * dm].copy_from_slice(emb);
         }
+
+        // Process entire prompt in one forward_sequence call
+        self.backbone.forward_sequence(
+            &self.prefill_inputs[..seq_len * dm],
+            &mut self.prefill_outputs[..seq_len * dm],
+            &mut self.state,
+            &mut self.scratch,
+            seq_len,
+        );
+
+        // Last output → temporal for lm_head
+        self.temporal
+            .copy_from_slice(&self.prefill_outputs[(seq_len - 1) * dm..seq_len * dm]);
         self.compute_logits();
 
         let mut seen: Vec<u32> = prompt.to_vec();
