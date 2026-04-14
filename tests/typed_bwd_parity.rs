@@ -593,3 +593,175 @@ fn conv1d_burnin_bwd_bf16_matches_f32() {
     assert_grad_close(&dw_ref_v, &dw_bf_v, 8e-2, 2e-3, 0.998, 8e-3, "d_weight bf16 (f32 master)");
     assert_grad_close(&db_ref_v, &db_bf_v, 8e-2, 2e-3, 0.998, 8e-3, "d_bias bf16 (f32 master)");
 }
+
+// ─── ssm_backward_local (HOTTEST kernel) ─────────────────────────────
+
+#[allow(clippy::too_many_arguments)]
+fn run_ssm_backward_local(
+    ctx: &GpuCtx,
+    batch: usize,
+    t: usize,
+    di: usize,
+    ds: usize,
+    h_saved: &GpuBuffer,
+    delta: &DtypedBuf,
+    u: &DtypedBuf,
+    b_in: &DtypedBuf,
+    c_in: &DtypedBuf,
+    a_neg: &GpuBuffer,
+    d_param: &GpuBuffer,
+    dy: &DtypedBuf,
+    dtype: WeightDtype,
+) -> (
+    DtypedBuf,  // d_delta
+    DtypedBuf,  // d_u
+    DtypedBuf,  // d_B_local
+    DtypedBuf,  // d_C_local
+    GpuBuffer,  // d_D_local (f32)
+    GpuBuffer,  // d_a_log_local (f32)
+) {
+    let bt = batch * t;
+    let d_delta = DtypedBuf::zeros(&ctx.stream, bt * di, dtype).unwrap();
+    let d_u = DtypedBuf::zeros(&ctx.stream, bt * di, dtype).unwrap();
+    let d_b_local = DtypedBuf::zeros(&ctx.stream, bt * di * ds, dtype).unwrap();
+    let d_c_local = DtypedBuf::zeros(&ctx.stream, bt * di * ds, dtype).unwrap();
+    let d_d_local = GpuBuffer::zeros(&ctx.stream, batch * di).unwrap();
+    let d_a_log_local = GpuBuffer::zeros(&ctx.stream, batch * di * ds).unwrap();
+    ctx.stream.synchronize().unwrap();
+
+    let bi = batch as i32;
+    let ti = t as i32;
+    let dii = di as i32;
+    let dsi = ds as i32;
+    let mut bld = ctx
+        .stream
+        .launch_builder(ctx.kernels.ssm_backward_local_typed.get(dtype));
+    let h_ptr = h_saved.cached_ptr();
+    let dl_ptr = delta.cached_ptr();
+    let u_ptr = u.cached_ptr();
+    let b_ptr = b_in.cached_ptr();
+    let c_ptr = c_in.cached_ptr();
+    let an_ptr = a_neg.cached_ptr();
+    let d_ptr = d_param.cached_ptr();
+    let dy_ptr = dy.cached_ptr();
+    let dd_ptr = d_delta.cached_ptr();
+    let du_ptr = d_u.cached_ptr();
+    let dbl_ptr = d_b_local.cached_ptr();
+    let dcl_ptr = d_c_local.cached_ptr();
+    let ddl_ptr = d_d_local.cached_ptr();
+    let dal_ptr = d_a_log_local.cached_ptr();
+
+    bld.arg(&h_ptr);
+    bld.arg(&dl_ptr);
+    bld.arg(&u_ptr);
+    bld.arg(&b_ptr);
+    bld.arg(&c_ptr);
+    bld.arg(&an_ptr);
+    bld.arg(&d_ptr);
+    bld.arg(&dy_ptr);
+    bld.arg(&dd_ptr);
+    bld.arg(&du_ptr);
+    bld.arg(&dbl_ptr);
+    bld.arg(&dcl_ptr);
+    bld.arg(&ddl_ptr);
+    bld.arg(&dal_ptr);
+    bld.arg(&bi);
+    bld.arg(&ti);
+    bld.arg(&dii);
+    bld.arg(&dsi);
+    unsafe { bld.launch(grid_1d(batch * di)) }.unwrap();
+    ctx.stream.synchronize().unwrap();
+    (d_delta, d_u, d_b_local, d_c_local, d_d_local, d_a_log_local)
+}
+
+#[test]
+fn ssm_backward_local_bf16_matches_f32() {
+    let dev = GpuDevice::new(0).unwrap();
+    let ctx = GpuCtx::new(&dev).unwrap();
+    // Production-realistic shape: B=4, T=32, di=512, ds=16.
+    // (mamba-130m has di=1536, ds=16 — this is a quarter-scale parity test.)
+    let batch = 4;
+    let t = 32;
+    let di = 512;
+    let ds = 16;
+
+    // Inputs — Gaussian, scaled to typical activation ranges.
+    // delta is post-softplus → strictly positive, mean ~0.5.
+    let delta_f: Vec<f32> = deterministic_gaussian(batch * t * di, 0xD1, 0.3)
+        .iter()
+        .map(|&v| (1.0 + v.exp()).ln().max(1e-3)) // softplus, clamp
+        .collect();
+    let u_f = deterministic_gaussian(batch * t * di, 0xD2, 0.5);
+    let b_f = deterministic_gaussian(batch * t * ds, 0xD3, 1.0 / (ds as f32).sqrt());
+    let c_f = deterministic_gaussian(batch * t * ds, 0xD4, 1.0 / (ds as f32).sqrt());
+    // a_neg ~ -softplus(N(0,1)) → always negative, mean ~ -1.0
+    let a_neg_f: Vec<f32> = deterministic_gaussian(di * ds, 0xD5, 1.0)
+        .iter()
+        .map(|&v| -(1.0 + v.exp()).ln().max(1e-3))
+        .collect();
+    let d_param_f = deterministic_gaussian(di, 0xD6, 0.1);
+    let dy_f = deterministic_gaussian(batch * t * di, 0xD7, 0.1);
+    // h_saved built by simulating the forward recurrence (random h0 = 0).
+    // For test purposes just use a deterministic noise field — kernel only
+    // reads h_curr / h_prev, doesn't validate they came from real fwd.
+    let h_saved_f = deterministic_gaussian(batch * (t + 1) * di * ds, 0xD8, 0.5);
+
+    // Upload f32 buffers (always f32 regardless of test variant).
+    let mut h_buf = GpuBuffer::zeros(&ctx.stream, h_saved_f.len()).unwrap();
+    h_buf.upload(&ctx.stream, &h_saved_f).unwrap();
+    let mut a_neg_buf = GpuBuffer::zeros(&ctx.stream, a_neg_f.len()).unwrap();
+    a_neg_buf.upload(&ctx.stream, &a_neg_f).unwrap();
+    let mut d_param_buf = GpuBuffer::zeros(&ctx.stream, d_param_f.len()).unwrap();
+    d_param_buf.upload(&ctx.stream, &d_param_f).unwrap();
+    ctx.stream.synchronize().unwrap();
+
+    // f32 oracle.
+    let delta32 = upload_typed(&ctx.stream, &delta_f, WeightDtype::F32);
+    let u32 = upload_typed(&ctx.stream, &u_f, WeightDtype::F32);
+    let b32 = upload_typed(&ctx.stream, &b_f, WeightDtype::F32);
+    let c32 = upload_typed(&ctx.stream, &c_f, WeightDtype::F32);
+    let dy32 = upload_typed(&ctx.stream, &dy_f, WeightDtype::F32);
+    let (dd_ref, du_ref, dbl_ref, dcl_ref, ddd_ref, da_ref) = run_ssm_backward_local(
+        &ctx, batch, t, di, ds, &h_buf, &delta32, &u32, &b32, &c32,
+        &a_neg_buf, &d_param_buf, &dy32, WeightDtype::F32,
+    );
+    let dd_ref_v = download_typed(&ctx.stream, &dd_ref, WeightDtype::F32);
+    let du_ref_v = download_typed(&ctx.stream, &du_ref, WeightDtype::F32);
+    let dbl_ref_v = download_typed(&ctx.stream, &dbl_ref, WeightDtype::F32);
+    let dcl_ref_v = download_typed(&ctx.stream, &dcl_ref, WeightDtype::F32);
+    let mut ddd_ref_v = vec![0f32; batch * di];
+    ddd_ref.download(&ctx.stream, &mut ddd_ref_v).unwrap();
+    let mut da_ref_v = vec![0f32; batch * di * ds];
+    da_ref.download(&ctx.stream, &mut da_ref_v).unwrap();
+
+    // bf16 typed.
+    let delta_bf = upload_typed(&ctx.stream, &delta_f, WeightDtype::Bf16);
+    let u_bf = upload_typed(&ctx.stream, &u_f, WeightDtype::Bf16);
+    let b_bf = upload_typed(&ctx.stream, &b_f, WeightDtype::Bf16);
+    let c_bf = upload_typed(&ctx.stream, &c_f, WeightDtype::Bf16);
+    let dy_bf = upload_typed(&ctx.stream, &dy_f, WeightDtype::Bf16);
+    let (dd_bf, du_bf, dbl_bf, dcl_bf, ddd_bf, da_bf) = run_ssm_backward_local(
+        &ctx, batch, t, di, ds, &h_buf, &delta_bf, &u_bf, &b_bf, &c_bf,
+        &a_neg_buf, &d_param_buf, &dy_bf, WeightDtype::Bf16,
+    );
+    let dd_bf_v = download_typed(&ctx.stream, &dd_bf, WeightDtype::Bf16);
+    let du_bf_v = download_typed(&ctx.stream, &du_bf, WeightDtype::Bf16);
+    let dbl_bf_v = download_typed(&ctx.stream, &dbl_bf, WeightDtype::Bf16);
+    let dcl_bf_v = download_typed(&ctx.stream, &dcl_bf, WeightDtype::Bf16);
+    let mut ddd_bf_v = vec![0f32; batch * di];
+    ddd_bf.download(&ctx.stream, &mut ddd_bf_v).unwrap();
+    let mut da_bf_v = vec![0f32; batch * di * ds];
+    da_bf.download(&ctx.stream, &mut da_bf_v).unwrap();
+
+    eprintln!("ssm_backward_local bf16 parity (B={batch}, T={t}, di={di}, ds={ds}):");
+    // d_delta and d_u are typed outputs — bf16 quantization on store.
+    assert_grad_close(&dd_ref_v, &dd_bf_v, 5e-2, 5e-3, 0.999, 5e-3, "d_delta bf16");
+    assert_grad_close(&du_ref_v, &du_bf_v, 5e-2, 5e-3, 0.999, 5e-3, "d_u bf16");
+    // d_B_local and d_C_local are huge typed scratches — pre-reduction.
+    assert_grad_close(&dbl_ref_v, &dbl_bf_v, 5e-2, 5e-3, 0.999, 5e-3, "d_B_local bf16");
+    assert_grad_close(&dcl_ref_v, &dcl_bf_v, 5e-2, 5e-3, 0.999, 5e-3, "d_C_local bf16");
+    // d_D_local and d_a_log_local stay f32 (T-length accumulators) — only
+    // bf16 quantization of dy/u/B/C inputs propagates here. Tighter tol.
+    assert_grad_close(&ddd_ref_v, &ddd_bf_v, 5e-2, 5e-3, 0.999, 5e-3, "d_D_local f32 (typed inputs)");
+    assert_grad_close(&da_ref_v, &da_bf_v, 5e-2, 5e-3, 0.999, 5e-3, "d_a_log_local f32 (typed inputs)");
+}

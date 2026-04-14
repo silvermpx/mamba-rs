@@ -156,6 +156,21 @@ pub struct MambaKernels {
     /// macro in conv1d.cu.
     pub conv1d_burnin_bwd_typed: TypedKernel,
 
+    // -- Typed training-backward kernels (Step 4b — HOTTEST kernel) --
+    /// Typed dispatch (f32/bf16/f16) for `ssm_backward_local` — the BPTT
+    /// recurrence backward. delta/u/B/C/dy/d_delta/d_u/d_B_local/d_C_local
+    /// typed; h_saved/a_neg/D/d_D_local/d_a_log_local stay f32 (BPTT state +
+    /// T-length accumulators). Matches DEFINE_SSM_BACKWARD_LOCAL_BWD macro
+    /// in mamba_ssm.cu. Validated against state-spaces/mamba reference.
+    pub ssm_backward_local_typed: TypedKernel,
+    /// Typed-input variant of `ssm_reduce_d_B` (output stays f32 master).
+    /// Used when ssm_backward_local writes typed d_B_local. Promote each
+    /// contribution to f32 in the inner sum, write f32 sum.
+    pub ssm_reduce_d_b_bf16: CudaFunction,
+    pub ssm_reduce_d_b_f16: CudaFunction,
+    pub ssm_reduce_d_c_bf16: CudaFunction,
+    pub ssm_reduce_d_c_f16: CudaFunction,
+
     // -- Typed inference kernels (f32/bf16/f16 variants) --
     pub silu_fwd_typed: TypedKernel,
     pub softplus_fwd_typed: TypedKernel,
@@ -345,6 +360,12 @@ impl MambaKernels {
             gating_bwd_typed: load_typed("gating_backward")?,
             rmsnorm_bwd_typed: load_typed("rmsnorm_backward")?,
             conv1d_burnin_bwd_typed: load_typed("conv1d_burnin_backward")?,
+            // Step 4b: ssm_backward_local typed + typed-input reducers
+            ssm_backward_local_typed: load_typed("ssm_backward_local")?,
+            ssm_reduce_d_b_bf16: get("ssm_reduce_d_B_bf16")?,
+            ssm_reduce_d_b_f16: get("ssm_reduce_d_B_f16")?,
+            ssm_reduce_d_c_bf16: get("ssm_reduce_d_C_bf16")?,
+            ssm_reduce_d_c_f16: get("ssm_reduce_d_C_f16")?,
 
             // dual-dtype (half-only)
             rmsnorm_fwd_f32in_typed: load_half("rmsnorm_forward_f32in")?,

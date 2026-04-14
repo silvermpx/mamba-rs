@@ -568,6 +568,103 @@ extern "C" __global__ void ssm_backward_local(
     d_D_local[b * d_inner + d] = local_d_D;
 }
 
+// ssm_backward_local typed (bf16/f16/f32) for mixed-precision training.
+// HOTTEST + HIGHEST RISK kernel in M1 backward. Validated against:
+//   - state-spaces/mamba csrc/selective_scan_bwd_kernel.cuh
+//     (scan_t = float2 → BPTT state stays f32)
+//   - NVIDIA AMP backward best-practice (typed IO, f32 accumulators)
+//
+// PRECISION RULES (per validation table):
+//   - h_saved, a_neg, D                 → f32 (BPTT state + model params)
+//   - delta, u, B, C, dy                → typed (post-promote on load)
+//   - d_delta, d_u, d_B_local, d_C_local → typed (downcast on store)
+//   - d_D_local, d_a_log_local          → f32 master (T-length += accumulators)
+//   - register dh[64], a_local[64], local_d_D → f32 (BPTT precision invariant)
+//
+// CONSTRAINT: d_state ≤ 64 (compile-time register array). All shipped
+// state-spaces/mamba checkpoints use d_state=16.
+//
+// Math identical to f32 ssm_backward_local above; only IO dtype differs.
+#define DEFINE_SSM_BACKWARD_LOCAL_BWD(SUFFIX, TY, FROM_F)                       \
+extern "C" __global__ void ssm_backward_local_##SUFFIX(                         \
+    const float* h_saved,                                                       \
+    const TY*    delta_saved,                                                   \
+    const TY*    u_saved,                                                       \
+    const TY*    B_saved,                                                       \
+    const TY*    C_saved,                                                       \
+    const float* a_neg,                                                         \
+    const float* D,                                                             \
+    const TY*    dy,                                                            \
+    TY*          d_delta,                                                       \
+    TY*          d_u,                                                           \
+    TY*          d_B_local,                                                     \
+    TY*          d_C_local,                                                     \
+    float*       d_D_local,                                                     \
+    float*       d_a_log_local,                                                 \
+    int batch, int T, int d_inner, int d_state                                  \
+) {                                                                             \
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;                            \
+    int total = batch * d_inner;                                                \
+    if (idx >= total) return;                                                   \
+    int b = idx / d_inner;                                                      \
+    int d = idx % d_inner;                                                      \
+    if (d_state > 64) return;                                                   \
+                                                                                \
+    float local_d_D = 0.0f;                                                     \
+    float a_local[64];                                                          \
+    float d_h[64];                                                              \
+    for (int n = 0; n < d_state; n++) {                                         \
+        a_local[n] = a_neg[d * d_state + n];                                    \
+        d_h[n] = 0.0f;                                                          \
+    }                                                                           \
+                                                                                \
+    for (int t = T - 1; t >= 0; t--) {                                          \
+        int bt_di = (b * T + t) * d_inner + d;                                  \
+        int bt_ds = (b * T + t) * d_state;                                      \
+        float dy_d    = to_f(dy[bt_di]);                                        \
+        float delta_d = to_f(delta_saved[bt_di]);                               \
+        float u_d     = to_f(u_saved[bt_di]);                                   \
+                                                                                \
+        local_d_D += dy_d * u_d;                                                \
+        float d_u_val = dy_d * D[d];                                            \
+        float d_delta_val = 0.0f;                                               \
+                                                                                \
+        for (int n = 0; n < d_state; n++) {                                     \
+            int h_idx      = (b * (T + 1) + (t + 1)) * d_inner * d_state        \
+                             + (d * d_state + n);                               \
+            int h_prev_idx = (b * (T + 1) + t)       * d_inner * d_state        \
+                             + (d * d_state + n);                               \
+            float h_curr = h_saved[h_idx];                                      \
+            float h_prev = h_saved[h_prev_idx];                                 \
+            float B_n    = to_f(B_saved[bt_ds + n]);                            \
+            float C_n    = to_f(C_saved[bt_ds + n]);                            \
+            float da     = exp2f(delta_d * a_local[n] * LOG2E);                 \
+                                                                                \
+            d_h[n] += dy_d * C_n;                                               \
+            int btdn = ((b * T + t) * d_inner + d) * d_state + n;               \
+            d_C_local[btdn] = FROM_F(dy_d * h_curr);                            \
+                                                                                \
+            d_delta_val += d_h[n] * (a_local[n] * da * h_prev + u_d * B_n);     \
+            d_u_val     += d_h[n] * delta_d * B_n;                              \
+            d_B_local[btdn] = FROM_F(d_h[n] * delta_d * u_d);                   \
+                                                                                \
+            d_a_log_local[(b * d_inner + d) * d_state + n] +=                   \
+                d_h[n] * da * delta_d * a_local[n] * h_prev;                    \
+                                                                                \
+            d_h[n] = da * d_h[n];                                               \
+        }                                                                       \
+                                                                                \
+        d_delta[bt_di] = FROM_F(d_delta_val);                                   \
+        d_u[bt_di]     = FROM_F(d_u_val);                                       \
+    }                                                                           \
+                                                                                \
+    d_D_local[b * d_inner + d] = local_d_D;                                     \
+}
+
+DEFINE_SSM_BACKWARD_LOCAL_BWD(f32,  float,         from_f_f32)
+DEFINE_SSM_BACKWARD_LOCAL_BWD(bf16, __nv_bfloat16, from_f_bf16)
+DEFINE_SSM_BACKWARD_LOCAL_BWD(f16,  __half,        from_f_f16)
+
 // Reduction kernels: sum per-sample gradients across batch dimension.
 
 // Reduce d_B across d_inner: d_B_out[b*T*ds + t*ds + n] = sum_d(d_B_local[...])
@@ -620,6 +717,38 @@ extern "C" __global__ void ssm_reduce_d_D(
     }
     d_D_out[d] += sum;
 }
+
+// Typed reducers for d_B / d_C: when ssm_backward_local writes typed
+// (bf16/f16) per-thread d_B_local / d_C_local, the reducer must promote
+// each contribution to f32 in the inner sum loop. Output stays f32 master
+// (gradient buffer is f32 always per AMP convention; no precision loss
+// at write because dst is f32 += f32 sum).
+//
+// d_D and d_a_log reducers are NOT typed: their inputs are already f32
+// per the precision rules in DEFINE_SSM_BACKWARD_LOCAL_BWD (T-length
+// accumulators stay f32 regardless of activation dtype).
+#define DEFINE_SSM_REDUCE_D_BC_TYPED(SUFFIX, TY, KERNEL_NAME)                  \
+extern "C" __global__ void KERNEL_NAME##_##SUFFIX(                             \
+    float* dst_out,                                                            \
+    const TY* src_local,                                                       \
+    int batch, int T, int d_inner, int d_state                                 \
+) {                                                                            \
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;                           \
+    int total = batch * T * d_state;                                           \
+    if (idx >= total) return;                                                  \
+    int bt = idx / d_state;                                                    \
+    int n = idx % d_state;                                                     \
+    float sum = 0.0f;                                                          \
+    for (int d = 0; d < d_inner; d++) {                                        \
+        sum += to_f(src_local[(bt * d_inner + d) * d_state + n]);              \
+    }                                                                          \
+    dst_out[idx] += sum;                                                       \
+}
+
+DEFINE_SSM_REDUCE_D_BC_TYPED(bf16, __nv_bfloat16, ssm_reduce_d_B)
+DEFINE_SSM_REDUCE_D_BC_TYPED(f16,  __half,        ssm_reduce_d_B)
+DEFINE_SSM_REDUCE_D_BC_TYPED(bf16, __nv_bfloat16, ssm_reduce_d_C)
+DEFINE_SSM_REDUCE_D_BC_TYPED(f16,  __half,        ssm_reduce_d_C)
 
 // Reduce d_a_log: d_a_log_out[d*ds+n] = sum_b(d_a_log_local[b*di*ds + d*ds + n])
 extern "C" __global__ void ssm_reduce_d_a_log(
