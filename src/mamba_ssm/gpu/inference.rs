@@ -156,15 +156,15 @@ impl GpuInferenceScratch {
 /// 4. Optionally call `capture_graph()` for ~2-5x speedup
 /// 5. Call `state.reset()` on episode boundaries
 pub struct GpuMambaInference {
-    ctx: GpuCtx,
-    weights: GpuMambaWeights,
-    a_neg_all: GpuBuffer,
-    cfg: MambaConfig,
-    input_dim: usize,
-    batch: usize,
+    pub(super) ctx: GpuCtx,
+    pub(super) weights: GpuMambaWeights,
+    pub(super) a_neg_all: GpuBuffer,
+    pub(super) cfg: MambaConfig,
+    pub(super) input_dim: usize,
+    pub(super) batch: usize,
     /// When true (HF Mamba with no input_proj), skip input projection and copy
     /// `gpu_input` → `temporal` directly. Mirrors CPU `mamba_step_no_proj`.
-    identity_proj: bool,
+    pub(super) identity_proj: bool,
     graph: Option<cudarc::driver::CudaGraph>,
     /// Raw pointers captured during graph capture for runtime validation.
     captured_state_ptr: u64,
@@ -895,6 +895,16 @@ impl GpuMambaInferenceMixed {
     pub fn engine_ref(&self) -> &GpuMambaInference {
         &self.engine
     }
+
+    /// Access the mixed-precision weights (for parallel prefill path).
+    pub fn weights_mixed_ref(&self) -> &GpuMambaMixedWeights {
+        &self.mixed_weights
+    }
+
+    /// Access the precomputed a_neg arena (shared between engine paths).
+    pub fn a_neg_all_ref(&self) -> &GpuBuffer {
+        &self.a_neg_all
+    }
 }
 
 // Mark a_neg_all used to silence warning (only used during new()).
@@ -1116,6 +1126,60 @@ impl GpuMambaBackbone {
     pub fn download_temporal(&self, output: &mut [f32]) -> Result<(), String> {
         self.stream().synchronize().map_err(|e| format!("sync: {e:?}"))?;
         self.scratch.temporal.download(self.stream(), output)
+    }
+
+    /// Run parallel prefill over T tokens using burnin kernels.
+    ///
+    /// `ip_out_flat`: `[B * T * d_model]` of pre-embedded prompt tokens (f32).
+    /// After this call, the backbone's recurrent state holds position T, and
+    /// `self.scratch.temporal` contains the last-timestep hidden state (ready
+    /// for lm_head).
+    pub fn prefill_sequence(
+        &mut self,
+        ip_out_flat: &GpuBuffer,
+        prefill_scratch: &mut super::backward::GpuMambaTargetScratch,
+    ) -> Result<(), String> {
+        match &self.engine {
+            BackboneEngine::F32(e) => super::prefill::gpu_forward_inference_prefill(
+                &e.ctx,
+                &mut self.scratch.temporal,
+                ip_out_flat,
+                &e.weights,
+                &mut self.state,
+                &e.a_neg_all,
+                prefill_scratch,
+            ),
+            BackboneEngine::Mixed(e) => super::prefill::gpu_forward_inference_prefill(
+                e.ctx(),
+                &mut self.scratch.temporal,
+                ip_out_flat,
+                e.weights_mixed_ref(),
+                &mut self.state,
+                e.a_neg_all_ref(),
+                prefill_scratch,
+            ),
+        }
+    }
+
+    /// Build a target scratch allocated for this backbone + seq_len.
+    pub fn alloc_prefill_scratch(
+        &self,
+        seq_len: usize,
+    ) -> Result<super::backward::GpuMambaTargetScratch, String> {
+        let cfg = self.config();
+        let dims = super::forward::GpuMambaDims {
+            batch: self.batch(),
+            seq_len,
+            n_layers: cfg.n_layers,
+            d_model: cfg.d_model,
+            d_inner: cfg.d_inner(),
+            d_state: cfg.d_state,
+            d_conv: cfg.d_conv,
+            dt_rank: cfg.dt_rank(),
+            xdbl_dim: cfg.xdbl_dim(),
+            mamba_input_dim: cfg.d_model, // HF LLM path: no input_proj, input_dim == d_model
+        };
+        super::backward::GpuMambaTargetScratch::new(self.stream(), &dims)
     }
 }
 

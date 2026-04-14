@@ -35,7 +35,7 @@ use std::sync::Arc;
 /// The parallel scan launches (batch * d_inner) blocks of 128 threads with shared memory,
 /// vs the sequential kernel which launches ceil(batch * d_inner / 256) blocks of 256 threads.
 /// The crossover point depends on GPU occupancy; 256 is a conservative safe choice.
-const PARALLEL_SCAN_THRESHOLD: usize = 256;
+pub const PARALLEL_SCAN_THRESHOLD: usize = 256;
 
 // ---------------------------------------------------------------------------
 // GPU Mamba dimensions (mirrors CPU MambaDims)

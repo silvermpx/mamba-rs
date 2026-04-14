@@ -14,6 +14,13 @@ use crate::mamba_ssm::gpu::buffers::{GpuBuffer, GpuByteBuffer};
 use crate::mamba_ssm::gpu::dtype::WeightDtype;
 use crate::mamba_ssm::gpu::inference::GpuMambaBackbone;
 
+/// Threshold: if a prompt has more tokens than this, use the parallel prefill
+/// path (single kernel launch per layer over all T tokens) instead of the
+/// step-by-step loop. Lower values favor parallel; typical LLM prompts ≥ 8
+/// already benefit. Conservative default is 4 — parallel scan within a layer
+/// amortizes the per-layer kernel-launch overhead over T tokens.
+const PREFILL_PARALLEL_THRESHOLD: usize = 4;
+
 use crate::hf::embed::embed_lookup;
 use crate::hf::load::{HfModel, load_hf};
 
@@ -222,11 +229,17 @@ impl GpuMambaLM {
         self.backbone.reset()?;
         let mut rng = Xoshiro256PlusPlus::new(params.seed);
 
-        // Prefill: step-by-step, keep temporal on GPU (no D2H until lm_head).
-        for &token_id in prompt {
-            let emb = embed_lookup(&self.embed_cpu, token_id, self.d_model, self.vocab_size);
-            self.input_cpu.copy_from_slice(emb);
-            self.backbone.step_gpu_only(&self.input_cpu)?;
+        // Prefill: parallel (one kernel per layer over all T) if long enough;
+        // otherwise step-by-step (lower overhead for small T).
+        if prompt.len() >= PREFILL_PARALLEL_THRESHOLD {
+            self.prefill_parallel(prompt)?;
+        } else {
+            for &token_id in prompt {
+                let emb = embed_lookup(&self.embed_cpu, token_id, self.d_model, self.vocab_size);
+                self.input_cpu[..self.d_model].copy_from_slice(emb);
+                self.backbone
+                    .step_gpu_only(&self.input_cpu[..self.d_model])?;
+            }
         }
         self.compute_logits()?;
 
@@ -346,6 +359,39 @@ impl GpuMambaLM {
         }
 
         Ok(outputs)
+    }
+
+    /// Parallel prefill: uploads all T prompt embeddings to GPU at once and
+    /// runs one burnin forward per layer (vs T step calls). After this call,
+    /// backbone state is at position T and temporal holds the last timestep
+    /// hidden state — ready for lm_head + decode.
+    fn prefill_parallel(&mut self, prompt: &[u32]) -> Result<(), String> {
+        let t = prompt.len();
+        let d = self.d_model;
+        let b = self.batch;
+        let stream = self.backbone.stream().clone();
+
+        // Build flat embed input [B*T*d_model] on CPU (batch=1 for now; batched
+        // prefill with different prompt lengths per slot uses step-by-step).
+        let mut embed_flat = vec![0.0f32; b * t * d];
+        for ti in 0..t {
+            let emb = embed_lookup(&self.embed_cpu, prompt[ti], d, self.vocab_size);
+            // batch=1 case: sample 0, timestep ti
+            embed_flat[ti * d..(ti + 1) * d].copy_from_slice(emb);
+        }
+
+        // Upload to GPU.
+        let mut ip_out_flat = GpuBuffer::zeros(&stream, b * t * d)?;
+        ip_out_flat.upload(&stream, &embed_flat)?;
+
+        // Allocate prefill scratch sized for this T.
+        let mut prefill_scratch = self.backbone.alloc_prefill_scratch(t)?;
+
+        // Run parallel prefill — updates backbone state + writes last temporal.
+        self.backbone
+            .prefill_sequence(&ip_out_flat, &mut prefill_scratch)?;
+
+        Ok(())
     }
 
     fn compute_logits(&mut self) -> Result<(), String> {

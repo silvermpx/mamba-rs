@@ -19,6 +19,7 @@ pub mod forward;
 pub mod inference;
 pub mod kernels;
 pub mod launch;
+pub mod prefill;
 pub mod weights;
 
 pub use dtype::WeightDtype;
