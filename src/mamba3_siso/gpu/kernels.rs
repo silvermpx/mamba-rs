@@ -86,6 +86,10 @@ pub struct Mamba3Kernels {
     pub rmsnorm_gated_fwd_typed: TypedKernel,
     /// M3 SSM step — shared with training, already templated in mamba3_ssd.cu.
     pub m3_step_fwd_typed: TypedKernel,
+    /// M3 burnin forward (training) — sequential T-loop SSM with activation
+    /// saves. Typed x/k/q/y; f32 state + alpha/beta/gamma + D + saves.
+    pub m3_burnin_fwd_typed_bf16: CudaFunction,
+    pub m3_burnin_fwd_typed_f16: CudaFunction,
     /// Shared from M1: f32 residual → half post-norm (identical kernel, reused).
     pub rmsnorm_fwd_f32in_typed: HalfKernel,
     /// Shared from M1: f32 residual += half branch (stays f32).
@@ -246,6 +250,8 @@ impl Mamba3Kernels {
                 bf16: get("m3_step_fwd_bf16")?,
                 f16: get("m3_step_fwd_f16")?,
             },
+            m3_burnin_fwd_typed_bf16: get("m3_burnin_fwd_bf16")?,
+            m3_burnin_fwd_typed_f16: get("m3_burnin_fwd_f16")?,
             rmsnorm_fwd_f32in_typed: HalfKernel {
                 bf16: get("rmsnorm_forward_f32in_bf16")?,
                 f16: get("rmsnorm_forward_f32in_f16")?,
