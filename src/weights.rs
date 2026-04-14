@@ -4,6 +4,7 @@ use crate::config::MambaConfig;
 ///
 /// Matches the parameter layout from Gu & Dao (2023).
 /// All tensors stored as flat `Vec<f32>` in row-major order.
+#[derive(Clone)]
 pub struct MambaLayerWeights {
     /// RMSNorm scale `[d_model]`
     pub norm_weight: Vec<f32>,
@@ -49,6 +50,7 @@ impl MambaLayerWeights {
 }
 
 /// Weight storage for the complete Mamba backbone.
+#[derive(Clone)]
 pub struct MambaWeights {
     /// Input projection `[input_dim, d_model]`
     pub input_proj_w: Vec<f32>,

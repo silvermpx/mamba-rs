@@ -276,6 +276,13 @@ DEFINE_CONV1D_BURNIN_NOSAVE(f16,  __half,        from_f_f16)
 
 // Templated conv1d burnin WITH saves — used for training/backward.
 // u_out + post_conv + x_branch in T_IN, states/weights in f32.
+// IMPORTANT: save order must match f32 `conv1d_burnin_forward` exactly —
+// save conv_states AFTER shift+insert so that `conv_states[t]` reflects
+// the state WINDOW that was consumed at time t for the dot product (i.e.
+// `[x_branch[t-d_conv+1], ..., x_branch[t]]`). Backward `d_weight[k] +=
+// conv_states[t][k] * d_conv_out[t]` is only correct with this ordering.
+// Saving BEFORE shift+insert produces an off-by-one window and flips the
+// sign of `d_conv_weight` (caught by the parity test vs the f32 oracle).
 #define DEFINE_CONV1D_BURNIN(SUFFIX, TY, FROM_F)                             \
 extern "C" __global__ void conv1d_burnin_forward_##SUFFIX(                   \
     TY* u_out, float* state, float* conv_states_saved, TY* post_conv,        \
@@ -290,14 +297,14 @@ extern "C" __global__ void conv1d_burnin_forward_##SUFFIX(                   \
     int state_base = (b * d_inner + d) * d_conv;                             \
     for (int t = 0; t < T_len; t++) {                                        \
         int bt_di = (b * T_len + t) * d_inner + d;                           \
-        for (int k = 0; k < d_conv; k++) {                                   \
-            int save_idx = ((b * T_len + t) * d_inner + d) * d_conv + k;     \
-            conv_states_saved[save_idx] = state[state_base + k];             \
-        }                                                                    \
         for (int k = 0; k < d_conv - 1; k++) {                               \
             state[state_base + k] = state[state_base + k + 1];               \
         }                                                                    \
         state[state_base + d_conv - 1] = to_f(x_branch[bt_di]);              \
+        for (int k = 0; k < d_conv; k++) {                                   \
+            int save_idx = ((b * T_len + t) * d_inner + d) * d_conv + k;     \
+            conv_states_saved[save_idx] = state[state_base + k];             \
+        }                                                                    \
         float val = bias[d];                                                 \
         for (int k = 0; k < d_conv; k++) {                                   \
             val += state[state_base + k] * weight[d * d_conv + k];           \
