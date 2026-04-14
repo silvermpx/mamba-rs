@@ -388,12 +388,21 @@ impl GpuMambaLM {
         let mut ip_out_flat = GpuBuffer::zeros(&stream, b * t * d)?;
         ip_out_flat.upload(&stream, &embed_flat)?;
 
-        // Allocate prefill scratch sized for this T.
-        let mut prefill_scratch = self.backbone.alloc_prefill_scratch(t)?;
-
-        // Run parallel prefill — updates backbone state + writes last temporal.
-        self.backbone
-            .prefill_sequence(&ip_out_flat, &mut prefill_scratch)?;
+        // Allocate prefill scratch and dispatch on backbone dtype.
+        // Mixed backbone → native bf16/f16 prefill (DtypedBuf scratch).
+        // F32 backbone → f32 prefill (GpuBuffer scratch).
+        match self.backbone.dtype() {
+            WeightDtype::F32 => {
+                let mut prefill_scratch = self.backbone.alloc_prefill_scratch(t)?;
+                self.backbone
+                    .prefill_sequence(&ip_out_flat, &mut prefill_scratch)?;
+            }
+            WeightDtype::Bf16 | WeightDtype::F16 => {
+                let mut prefill_scratch = self.backbone.alloc_prefill_mixed_scratch(t)?;
+                self.backbone
+                    .prefill_sequence_mixed(&ip_out_flat, &mut prefill_scratch)?;
+            }
+        }
 
         Ok(())
     }

@@ -149,6 +149,7 @@ pub struct MambaKernels {
     pub conv1d_burnin_nosave_typed: TypedKernel,
     pub silu_bwd_typed: TypedKernel,
     pub softplus_bwd_typed: TypedKernel,
+    pub gather_last_timestep_typed: TypedKernel,
 
     // -- Dual-dtype kernels for end-to-end bf16/f16 inference --
     /// RMSNorm: f32 residual input → half output. Keeps residual stream in
@@ -297,6 +298,7 @@ impl MambaKernels {
             conv1d_burnin_nosave_typed: load_typed("conv1d_burnin_forward_nosave")?,
             silu_bwd_typed: load_typed("silu_backward")?,
             softplus_bwd_typed: load_typed("softplus_backward")?,
+            gather_last_timestep_typed: load_typed("gather_last_timestep")?,
 
             // dual-dtype (half-only)
             rmsnorm_fwd_f32in_typed: load_half("rmsnorm_forward_f32in")?,

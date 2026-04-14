@@ -176,6 +176,26 @@ extern "C" __global__ void gather_last_timestep(
     dst[idx] = src[(b * T + (T - 1)) * D + d];
 }
 
+// Templated gather_last_timestep — T_out may differ from T_in (e.g., f32 dst
+// from bf16 src for mixed prefill when the downstream lm_head expects f32).
+// When dst/src share the same dtype, this is a simple typed copy.
+#define DEFINE_GATHER_LAST_TIMESTEP(SUFFIX, T)                                \
+extern "C" __global__ void gather_last_timestep_##SUFFIX(                     \
+    T* __restrict__ dst,                                                      \
+    const T* __restrict__ src,                                                \
+    int B, int Tlen, int D                                                    \
+) {                                                                           \
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;                          \
+    if (idx >= B * D) return;                                                 \
+    int b = idx / D;                                                          \
+    int d = idx % D;                                                          \
+    dst[idx] = src[(b * Tlen + (Tlen - 1)) * D + d];                          \
+}
+
+DEFINE_GATHER_LAST_TIMESTEP(f32,  float)
+DEFINE_GATHER_LAST_TIMESTEP(bf16, __nv_bfloat16)
+DEFINE_GATHER_LAST_TIMESTEP(f16,  __half)
+
 extern "C" __global__ void residual_add(
     float* dst, const float* a, const float* b, int n
 ) {

@@ -1732,9 +1732,13 @@ impl GpuMambaBackbone {
     /// After this call, the backbone's recurrent state holds position T, and
     /// the temporal buffer (accessible via `temporal_ptr()`) contains the
     /// last-timestep hidden state (ready for lm_head). Dtype matches
-    /// `temporal_dtype()` — f32 for the F32 engine; for the Mixed engine,
-    /// prefill uses the legacy f32 path internally and downcasts into the
-    /// bf16/f16 temporal scratch so the downstream lm_head path is uniform.
+    /// `temporal_dtype()`.
+    ///
+    /// - F32 engine: uses `gpu_forward_inference_prefill` (f32 path).
+    /// - Mixed engine: uses `gpu_forward_inference_prefill_mixed` — bf16/f16
+    ///   activations end-to-end with f32 residual stream. Caller must pass a
+    ///   `GpuMambaTargetMixedScratch` via the parallel `prefill_sequence_mixed`
+    ///   entry point (f32 `GpuMambaTargetScratch` here is the F32-only path).
     pub fn prefill_sequence(
         &mut self,
         ip_out_flat: &GpuBuffer,
@@ -1753,19 +1757,27 @@ impl GpuMambaBackbone {
                 &mut self.state,
                 prefill_scratch,
             ),
+            (BackboneEngine::Mixed(_), _) => {
+                Err("mixed backbone: use prefill_sequence_mixed with a \
+                 GpuMambaTargetMixedScratch (native bf16/f16 prefill)"
+                    .to_string())
+            }
+            _ => Err("engine/scratch dtype mismatch".to_string()),
+        }
+    }
+
+    /// Mixed-native prefill. Requires a Mixed backbone and matching mixed scratch.
+    pub fn prefill_sequence_mixed(
+        &mut self,
+        ip_out_flat: &GpuBuffer,
+        prefill_scratch: &mut super::backward::GpuMambaTargetMixedScratch,
+    ) -> Result<(), String> {
+        use super::prefill::{PrefillInputs, gpu_forward_inference_prefill_mixed};
+        match (&self.engine, &mut self.scratch) {
             (BackboneEngine::Mixed(e), BackboneScratch::Mixed(sc)) => {
-                // Legacy f32 prefill path: write last temporal as f32 into
-                // prefill_scratch.target_temporal, then cast to bf16/f16 into sc.temporal.
-                // Full mixed-native prefill follows in a later phase.
-                let ctx = e.ctx();
-                // Reuse prefill_scratch.out_flat as f32 staging for the last-timestep
-                // temporal extraction. We write it into a temporary owned by the call.
-                let batch = e.engine_ref().batch;
-                let dm = e.engine_ref().cfg.d_model;
-                let mut tmp_f32 = GpuBuffer::zeros(&ctx.stream, batch * dm)?;
-                gpu_forward_inference_prefill(
-                    ctx,
-                    &mut tmp_f32,
+                gpu_forward_inference_prefill_mixed(
+                    e.ctx(),
+                    &sc.temporal,
                     PrefillInputs {
                         ip_out_flat,
                         weights: e.weights_mixed_ref(),
@@ -1773,27 +1785,37 @@ impl GpuMambaBackbone {
                     },
                     &mut self.state,
                     prefill_scratch,
-                )?;
-                // Downcast f32 tmp → bf16/f16 into sc.temporal.
-                use cudarc::driver::PushKernelArg;
-                let n = (batch * dm) as i32;
-                let kernel = match sc.dtype {
-                    WeightDtype::Bf16 => &ctx.kernels.cast_f32_to_bf16,
-                    WeightDtype::F16 => &ctx.kernels.cast_f32_to_f16,
-                    WeightDtype::F32 => unreachable!(),
-                };
-                let dst_ptr = sc.temporal.cached_ptr();
-                let src_ptr = tmp_f32.cached_ptr();
-                let mut builder = ctx.stream.launch_builder(kernel);
-                builder.arg(&dst_ptr);
-                builder.arg(&src_ptr);
-                builder.arg(&n);
-                unsafe { builder.launch(grid_1d(batch * dm)) }
-                    .map_err(|e| format!("cast prefill f32→half: {e:?}"))?;
-                Ok(())
+                )
             }
-            _ => Err("engine/scratch dtype mismatch".to_string()),
+            _ => Err("prefill_sequence_mixed requires Mixed backbone + Mixed scratch".to_string()),
         }
+    }
+
+    /// Allocate a mixed-native prefill scratch matching this backbone.
+    pub fn alloc_prefill_mixed_scratch(
+        &self,
+        seq_len: usize,
+    ) -> Result<super::backward::GpuMambaTargetMixedScratch, String> {
+        let dtype = match &self.engine {
+            BackboneEngine::Mixed(e) => e.bulk_dtype(),
+            BackboneEngine::F32(_) => {
+                return Err("alloc_prefill_mixed_scratch: backbone is F32".to_string());
+            }
+        };
+        let cfg = self.config();
+        let dims = super::forward::GpuMambaDims {
+            batch: self.batch(),
+            seq_len,
+            n_layers: cfg.n_layers,
+            d_model: cfg.d_model,
+            d_inner: cfg.d_inner(),
+            d_state: cfg.d_state,
+            d_conv: cfg.d_conv,
+            dt_rank: cfg.dt_rank(),
+            xdbl_dim: cfg.xdbl_dim(),
+            mamba_input_dim: cfg.d_model,
+        };
+        super::backward::GpuMambaTargetMixedScratch::new(self.stream(), &dims, dtype)
     }
 
     /// Build a target scratch allocated for this backbone + seq_len.

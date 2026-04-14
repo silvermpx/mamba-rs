@@ -535,3 +535,71 @@ impl GpuMambaTargetScratch {
         })
     }
 }
+
+// ---------------------------------------------------------------------------
+// Mixed-precision target scratch for end-to-end bf16/f16 prefill.
+//
+// All activation-layer tensors are DtypedBuf (bf16/f16), residual stays f32
+// (HF residual_in_fp32), rms_discard stays f32 (per-batch stats).
+// ---------------------------------------------------------------------------
+
+use super::buffers::DtypedBuf;
+use super::dtype::WeightDtype;
+
+pub struct GpuMambaTargetMixedScratch {
+    pub proj_flat: DtypedBuf,
+    pub x_branch: DtypedBuf,
+    pub gate_silu: DtypedBuf,
+    pub u: DtypedBuf,
+    pub xdbl: DtypedBuf,
+    pub dt_gather: DtypedBuf,
+    pub delta: DtypedBuf,
+    pub y: DtypedBuf,
+    pub gated: DtypedBuf,
+    pub out_flat: DtypedBuf,
+    /// Residual accumulator — f32 across layers (HF residual_in_fp32).
+    pub residual: GpuBuffer,
+    pub rms_discard: GpuBuffer,
+    pub b_gathered: DtypedBuf,
+    pub c_gathered: DtypedBuf,
+    pub dims: super::forward::GpuMambaDims,
+    pub dtype: WeightDtype,
+}
+
+impl GpuMambaTargetMixedScratch {
+    pub fn new(
+        stream: &Arc<cudarc::driver::CudaStream>,
+        dims: &super::forward::GpuMambaDims,
+        dtype: WeightDtype,
+    ) -> Result<Self, String> {
+        if matches!(dtype, WeightDtype::F32) {
+            return Err("GpuMambaTargetMixedScratch requires bf16 or f16 dtype".to_string());
+        }
+        let batch = dims.batch;
+        let d_model = dims.d_model;
+        let d_inner = dims.d_inner;
+        let d_state = dims.d_state;
+        let dt_rank = dims.dt_rank;
+        let bt = batch * dims.seq_len;
+        let xdbl_dim = dt_rank + 2 * d_state;
+
+        Ok(Self {
+            proj_flat: DtypedBuf::zeros(stream, bt * 2 * d_inner, dtype)?,
+            x_branch: DtypedBuf::zeros(stream, bt * d_inner, dtype)?,
+            gate_silu: DtypedBuf::zeros(stream, bt * d_inner, dtype)?,
+            u: DtypedBuf::zeros(stream, bt * d_inner, dtype)?,
+            xdbl: DtypedBuf::zeros(stream, bt * xdbl_dim, dtype)?,
+            dt_gather: DtypedBuf::zeros(stream, bt * dt_rank, dtype)?,
+            delta: DtypedBuf::zeros(stream, bt * d_inner, dtype)?,
+            y: DtypedBuf::zeros(stream, bt * d_inner, dtype)?,
+            gated: DtypedBuf::zeros(stream, bt * d_inner, dtype)?,
+            out_flat: DtypedBuf::zeros(stream, bt * d_model, dtype)?,
+            residual: GpuBuffer::zeros(stream, bt * d_model)?,
+            rms_discard: GpuBuffer::zeros(stream, bt)?,
+            b_gathered: DtypedBuf::zeros(stream, bt * d_state, dtype)?,
+            c_gathered: DtypedBuf::zeros(stream, bt * d_state, dtype)?,
+            dims: *dims,
+            dtype,
+        })
+    }
+}
