@@ -3,8 +3,26 @@
 //! Uses NVRTC to compile .cu source to native CUBIN at runtime.
 //! No pre-built PTX or binaries required.
 
+use super::dtype::WeightDtype;
 use cudarc::driver::{CudaContext, CudaFunction, CudaModule};
 use std::sync::Arc;
+
+/// Dtype-indexed kernel holder for activation-touching kernels.
+pub struct TypedKernel {
+    pub f32: CudaFunction,
+    pub bf16: CudaFunction,
+    pub f16: CudaFunction,
+}
+
+impl TypedKernel {
+    pub fn get(&self, dt: WeightDtype) -> &CudaFunction {
+        match dt {
+            WeightDtype::F32 => &self.f32,
+            WeightDtype::Bf16 => &self.bf16,
+            WeightDtype::F16 => &self.f16,
+        }
+    }
+}
 
 /// All compiled CUDA kernels needed for Mamba forward/backward.
 ///
@@ -94,6 +112,20 @@ pub struct MambaKernels {
     /// f32 → f16 downcast for weight storage.
     pub cast_f32_to_f16: CudaFunction,
 
+    // -- Typed inference kernels (f32/bf16/f16 variants) --
+    pub silu_fwd_typed: TypedKernel,
+    pub softplus_fwd_typed: TypedKernel,
+    pub rmsnorm_fwd_typed: TypedKernel,
+    pub bias_broadcast_typed: TypedKernel,
+    pub elementwise_mul_typed: TypedKernel,
+    pub residual_add_typed: TypedKernel,
+    pub gather_cols_typed: TypedKernel,
+    pub gather_bc_cols_typed: TypedKernel,
+    pub split_gate_silu_typed: TypedKernel,
+    pub softplus_copy_typed: TypedKernel,
+    pub ssm_step_fwd_typed: TypedKernel,
+    pub conv1d_step_fwd_typed: TypedKernel,
+
     // -- Parallel scan (optional, for T>128) --
     /// Parallel prefix scan SSM forward with activation saves.
     pub ssm_parallel_fwd: CudaFunction,
@@ -104,7 +136,11 @@ pub struct MambaKernels {
 impl MambaKernels {
     /// Compile all CUDA kernels from source. Takes ~100-200ms.
     pub fn compile(ctx: &Arc<CudaContext>, arch: &'static str) -> Result<Self, String> {
+        // Prelude is inlined first so templated kernels can use to_f / from_f_*
+        // helpers without needing NVRTC to resolve #include "_typed_prelude.cuh"
+        // (NVRTC compiles a single combined source blob, no filesystem search).
         let sources = [
+            include_str!("../../../kernels/_typed_prelude.cuh"),
             include_str!("../../../kernels/mamba_ssm.cu"),
             include_str!("../../../kernels/mamba_ssm_parallel.cu"),
             include_str!("../../../kernels/conv1d.cu"),
@@ -113,7 +149,17 @@ impl MambaKernels {
             include_str!("../../../kernels/elementwise.cu"),
         ];
 
-        let combined = sources.join("\n");
+        // Strip `#include "_typed_prelude.cuh"` lines (prelude is inlined above).
+        let combined: String = sources
+            .iter()
+            .map(|s| {
+                s.lines()
+                    .filter(|l| !l.trim().starts_with("#include \"_typed_prelude.cuh\""))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
         // No --use_fast_math: it flushes denormals to zero and replaces
         // exp/sqrt with approximate intrinsics (__expf/__rsqrtf), which
         // breaks gradient flow through SSM BPTT chains and RMSNorm.
@@ -139,6 +185,13 @@ impl MambaKernels {
             module
                 .load_function(name)
                 .map_err(|e| format!("Kernel '{name}' not found: {e:?}"))
+        };
+        let load_typed = |base: &str| -> Result<TypedKernel, String> {
+            Ok(TypedKernel {
+                f32: get(&format!("{base}_f32"))?,
+                bf16: get(&format!("{base}_bf16"))?,
+                f16: get(&format!("{base}_f16"))?,
+            })
         };
 
         Ok(Self {
@@ -188,6 +241,20 @@ impl MambaKernels {
             // parallel scan
             ssm_parallel_fwd: get("ssm_parallel_scan_fwd")?,
             ssm_parallel_fwd_nosave: get("ssm_parallel_scan_fwd_nosave")?,
+
+            // typed inference kernels
+            silu_fwd_typed: load_typed("silu_forward")?,
+            softplus_fwd_typed: load_typed("softplus_forward")?,
+            rmsnorm_fwd_typed: load_typed("rmsnorm_forward")?,
+            bias_broadcast_typed: load_typed("bias_broadcast")?,
+            elementwise_mul_typed: load_typed("elementwise_mul")?,
+            residual_add_typed: load_typed("residual_add")?,
+            gather_cols_typed: load_typed("gather_cols")?,
+            gather_bc_cols_typed: load_typed("gather_bc_cols")?,
+            split_gate_silu_typed: load_typed("split_gate_silu")?,
+            softplus_copy_typed: load_typed("softplus_copy")?,
+            ssm_step_fwd_typed: load_typed("ssm_step_forward")?,
+            conv1d_step_fwd_typed: load_typed("conv1d_step_forward")?,
 
             _module: module,
         })

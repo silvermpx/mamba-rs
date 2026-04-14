@@ -4,7 +4,13 @@
 // Grid: (batch, 1, 1). Block: (min(next_power_of_2(dim), 1024), 1, 1).
 // Strided loop handles dim > blockDim.x (e.g., dim=2048 with 1024 threads).
 //
+// Forward templated over activation dtype. Reduction always in f32 for
+// numerical stability (per CLAUDE.md §5.7 and bf16 mantissa precision).
+// Scale weight stays f32 — it's a model parameter, not an activation.
+//
 // Reference: Zhang & Sennrich (2019), "Root Mean Square Layer Normalization"
+
+#include "_typed_prelude.cuh"
 
 __device__ __forceinline__ float warp_reduce_sum(float val) {
     for (int offset = 16; offset > 0; offset >>= 1)
@@ -60,6 +66,49 @@ extern "C" __global__ void rmsnorm_forward(
         y[off + i] = x[off + i] * inv_rms * scale[i];
     }
 }
+
+// Templated forward: input/output in T_IN, reduction in f32, scale in f32.
+#define DEFINE_RMSNORM_FWD(SUFFIX, T, FROM_F)                                \
+extern "C" __global__ void rmsnorm_forward_##SUFFIX(                         \
+    T* y, float* rms_out,                                                    \
+    const T* x, const float* scale,                                          \
+    int batch, int dim, float eps                                            \
+) {                                                                          \
+    int b = blockIdx.x;                                                      \
+    if (b >= batch) return;                                                  \
+    int d = threadIdx.x;                                                     \
+    extern __shared__ float sdata[];                                         \
+    int off = b * dim;                                                       \
+    float sum = 0.0f;                                                        \
+    for (int i = d; i < dim; i += blockDim.x) {                              \
+        float v = to_f(x[off + i]);                                          \
+        sum += v * v;                                                        \
+    }                                                                        \
+    sdata[d] = sum;                                                          \
+    __syncthreads();                                                         \
+    for (unsigned int s = blockDim.x / 2; s > 32; s >>= 1) {                 \
+        if (d < s) sdata[d] += sdata[d + s];                                 \
+        __syncthreads();                                                     \
+    }                                                                        \
+    if (d < 32) {                                                            \
+        float v = sdata[d];                                                  \
+        if (d + 32 < blockDim.x) v += sdata[d + 32];                         \
+        v = warp_reduce_sum(v);                                              \
+        if (d == 0) sdata[0] = v;                                            \
+    }                                                                        \
+    __syncthreads();                                                         \
+    float rms = sqrtf(sdata[0] / (float)dim + eps);                          \
+    if (d == 0) rms_out[b] = rms;                                            \
+    __syncthreads();                                                         \
+    float inv_rms = 1.0f / rms;                                              \
+    for (int i = d; i < dim; i += blockDim.x) {                              \
+        y[off + i] = FROM_F(to_f(x[off + i]) * inv_rms * scale[i]);          \
+    }                                                                        \
+}
+
+DEFINE_RMSNORM_FWD(f32,  float,         from_f_f32)
+DEFINE_RMSNORM_FWD(bf16, __nv_bfloat16, from_f_bf16)
+DEFINE_RMSNORM_FWD(f16,  __half,        from_f_f16)
 
 extern "C" __global__ void rmsnorm_backward(
     float* dx, float* d_scale,

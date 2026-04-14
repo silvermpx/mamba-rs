@@ -16,8 +16,7 @@
 // Source: CPU reference: train/forward.rs (phases F4d, B3)
 // Paper: Gu & Dao 2023 "Mamba: Linear-Time Sequence Modeling with Selective State Spaces"
 
-// LOG2E = 1/ln(2) — converts natural log argument to log2 for exp2f
-#define LOG2E 1.4426950408889634f
+#include "_typed_prelude.cuh"
 
 // ======================== FORWARD ========================
 
@@ -71,6 +70,50 @@ extern "C" __global__ void ssm_step_forward(
 
     y[idx] = y_d;
 }
+
+// Templated SSM step forward — activations in T_IN, state/a_neg/D stay f32.
+#define DEFINE_SSM_STEP_FWD(SUFFIX, T, FROM_F)                             \
+extern "C" __global__ void ssm_step_forward_##SUFFIX(                       \
+    float* h,                                                              \
+    T* y,                                                                  \
+    const T* delta,                                                        \
+    const T* u,                                                            \
+    const T* B,                                                            \
+    const T* C,                                                            \
+    const float* a_neg,                                                    \
+    const float* D,                                                        \
+    int batch, int d_inner, int d_state                                    \
+) {                                                                        \
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;                       \
+    int total = batch * d_inner;                                           \
+    if (idx >= total) return;                                              \
+    int b = idx / d_inner;                                                 \
+    int d = idx % d_inner;                                                 \
+    int h_base = (b * d_inner + d) * d_state;                              \
+    float h_local[64];                                                     \
+    float a_local[64];                                                     \
+    if (d_state > 64) return;                                              \
+    for (int n = 0; n < d_state; n++) {                                    \
+        h_local[n] = h[h_base + n];                                        \
+        a_local[n] = a_neg[d * d_state + n];                               \
+    }                                                                      \
+    float delta_d = to_f(delta[idx]);                                      \
+    float u_d = to_f(u[idx]);                                              \
+    float delta_u_d = delta_d * u_d;                                       \
+    float y_d = D[d] * u_d;                                                \
+    for (int n = 0; n < d_state; n++) {                                    \
+        float da = exp2f(delta_d * a_local[n] * LOG2E);                    \
+        h_local[n] = da * h_local[n] + delta_u_d * to_f(B[b * d_state + n]);\
+        y_d += h_local[n] * to_f(C[b * d_state + n]);                      \
+    }                                                                      \
+    for (int n = 0; n < d_state; n++)                                      \
+        h[h_base + n] = h_local[n];                                        \
+    y[idx] = FROM_F(y_d);                                                  \
+}
+
+DEFINE_SSM_STEP_FWD(f32,  float,         from_f_f32)
+DEFINE_SSM_STEP_FWD(bf16, __nv_bfloat16, from_f_bf16)
+DEFINE_SSM_STEP_FWD(f16,  __half,        from_f_f16)
 
 // SSM burn-in forward (T>1): iterate T steps for each (batch, d_inner) thread.
 // Saves h_saved[B*(T+1)*d_inner*d_state] for backward BPTT and

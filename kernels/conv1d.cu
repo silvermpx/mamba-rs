@@ -5,6 +5,8 @@
 //
 // Source: CPU reference: train/backward_ops.rs backward_conv1d_step
 
+#include "_typed_prelude.cuh"
+
 // Conv1d step forward (T=1): shift register + depthwise dot product
 // state[b, d, 0..d_conv-1] = state[b, d, 1..d_conv]
 // state[b, d, d_conv-1] = new_x[b, d]
@@ -39,6 +41,38 @@ extern "C" __global__ void conv1d_step_forward(
     }
     out[idx] = sum;
 }
+
+// Templated conv1d step — input activations in T_IN, output in T_IN,
+// conv state/weight/bias stay f32.
+#define DEFINE_CONV1D_STEP_FWD(SUFFIX, T, FROM_F)                          \
+extern "C" __global__ void conv1d_step_forward_##SUFFIX(                    \
+    T* out,                                                                \
+    float* state,                                                          \
+    const T* new_x,                                                        \
+    const float* weight,                                                   \
+    const float* bias,                                                     \
+    int batch, int d_inner, int d_conv                                     \
+) {                                                                        \
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;                       \
+    int total = batch * d_inner;                                           \
+    if (idx >= total) return;                                              \
+    int b = idx / d_inner;                                                 \
+    int d = idx % d_inner;                                                 \
+    int state_base = (b * d_inner + d) * d_conv;                           \
+    for (int k = 0; k < d_conv - 1; k++) {                                 \
+        state[state_base + k] = state[state_base + k + 1];                 \
+    }                                                                      \
+    state[state_base + d_conv - 1] = to_f(new_x[idx]);                     \
+    float sum = bias[d];                                                   \
+    for (int k = 0; k < d_conv; k++) {                                     \
+        sum += state[state_base + k] * weight[d * d_conv + k];             \
+    }                                                                      \
+    out[idx] = FROM_F(sum);                                                \
+}
+
+DEFINE_CONV1D_STEP_FWD(f32,  float,         from_f_f32)
+DEFINE_CONV1D_STEP_FWD(bf16, __nv_bfloat16, from_f_bf16)
+DEFINE_CONV1D_STEP_FWD(f16,  __half,        from_f_f16)
 
 // Conv1d step backward:
 //   d_new_x[b,d] = weight[d, d_conv-1] * dy[b,d]
