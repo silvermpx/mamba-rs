@@ -53,11 +53,19 @@
 // Warp-level inclusive scan of (a, b) pairs using warp shuffle.
 // After return, lane k holds compose(pair_0, ..., pair_k) within its warp.
 // ============================================================================
-__device__ __forceinline__ void warp_inclusive_scan_ab(float &a, float &b) {
+// BUG FIX (Step 8b): accept a mask parameter rather than hardcoding
+// 0xffffffff. Step 3 of `block_inclusive_scan_ab` calls this with only
+// NWARPS=4 active lanes out of the warp; `__shfl_up_sync(0xffffffff, ...)`
+// is UB when mask members don't all execute → silent hang on Ada/sm_89.
+// CUDA docs explicitly require the mask to describe the set of actively
+// participating threads.
+__device__ __forceinline__ void warp_inclusive_scan_ab(
+    float &a, float &b, unsigned mask = 0xffffffff
+) {
     #pragma unroll
     for (int offset = 1; offset < 32; offset <<= 1) {
-        float a_prev = __shfl_up_sync(0xffffffff, a, offset);
-        float b_prev = __shfl_up_sync(0xffffffff, b, offset);
+        float a_prev = __shfl_up_sync(mask, a, offset);
+        float b_prev = __shfl_up_sync(mask, b, offset);
         if ((threadIdx.x & 31) >= (unsigned)offset) {
             b = a * b_prev + b;
             a = a * a_prev;
@@ -87,11 +95,14 @@ __device__ __forceinline__ void block_inclusive_scan_ab(
     }
     __syncthreads();
 
-    // Step 3: first warp scans the NWARPS totals
+    // Step 3: first warp scans the NWARPS totals. Only lanes 0..NWARPS-1
+    // participate — mask must reflect that or the __shfl_up_sync calls
+    // inside warp_inclusive_scan_ab deadlock on Ada/sm_89 (mask
+    // 0xffffffff requires all 32 lanes to execute the same sync).
     if (warp_id == 0 && lane < NWARPS) {
         float wa = smem_wa[lane];
         float wb = smem_wb[lane];
-        warp_inclusive_scan_ab(wa, wb);
+        warp_inclusive_scan_ab(wa, wb, (1u << NWARPS) - 1u);
         smem_wa[lane] = wa;
         smem_wb[lane] = wb;
     }
