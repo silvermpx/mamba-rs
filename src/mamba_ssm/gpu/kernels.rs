@@ -24,6 +24,26 @@ impl TypedKernel {
     }
 }
 
+/// Mixed-precision kernel holder with only half-dtype variants (bf16/f16).
+/// Used for kernels that bridge f32 and half (e.g., `rmsnorm_fwd_f32in`
+/// which reads f32 residual and writes bf16/f16 output).
+pub struct HalfKernel {
+    pub bf16: CudaFunction,
+    pub f16: CudaFunction,
+}
+
+impl HalfKernel {
+    pub fn get(&self, dt: WeightDtype) -> &CudaFunction {
+        match dt {
+            WeightDtype::Bf16 => &self.bf16,
+            WeightDtype::F16 => &self.f16,
+            WeightDtype::F32 => {
+                panic!("HalfKernel has no f32 variant (use the TypedKernel f32 path instead)")
+            }
+        }
+    }
+}
+
 /// All compiled CUDA kernels needed for Mamba forward/backward.
 ///
 /// Kernels are compiled once via NVRTC at startup. Grouped by pipeline stage.
@@ -130,6 +150,17 @@ pub struct MambaKernels {
     pub silu_bwd_typed: TypedKernel,
     pub softplus_bwd_typed: TypedKernel,
 
+    // -- Dual-dtype kernels for end-to-end bf16/f16 inference --
+    /// Softplus from half input → f32 `delta` output. `delta` stays f32 for
+    /// SSM recurrence precision (Mamba convention: accumulators f32).
+    pub softplus_copy_to_f32_typed: HalfKernel,
+    /// RMSNorm: f32 residual input → half output. Keeps residual stream in
+    /// f32 across layers while feeding the branch path in bf16/f16.
+    pub rmsnorm_fwd_f32in_typed: HalfKernel,
+    /// Residual add: f32 accumulator + half branch → f32 output. Paired with
+    /// `rmsnorm_fwd_f32in_typed` to preserve `residual_in_fp32` semantics.
+    pub residual_add_f32_typed: HalfKernel,
+
     // -- Parallel scan (optional, for T>128) --
     /// Parallel prefix scan SSM forward with activation saves.
     pub ssm_parallel_fwd: CudaFunction,
@@ -193,6 +224,12 @@ impl MambaKernels {
         let load_typed = |base: &str| -> Result<TypedKernel, String> {
             Ok(TypedKernel {
                 f32: get(&format!("{base}_f32"))?,
+                bf16: get(&format!("{base}_bf16"))?,
+                f16: get(&format!("{base}_f16"))?,
+            })
+        };
+        let load_half = |base: &str| -> Result<HalfKernel, String> {
+            Ok(HalfKernel {
                 bf16: get(&format!("{base}_bf16"))?,
                 f16: get(&format!("{base}_f16"))?,
             })
@@ -263,6 +300,11 @@ impl MambaKernels {
             conv1d_burnin_nosave_typed: load_typed("conv1d_burnin_forward_nosave")?,
             silu_bwd_typed: load_typed("silu_backward")?,
             softplus_bwd_typed: load_typed("softplus_backward")?,
+
+            // dual-dtype (half-only)
+            softplus_copy_to_f32_typed: load_half("softplus_copy_to_f32")?,
+            rmsnorm_fwd_f32in_typed: load_half("rmsnorm_forward_f32in")?,
+            residual_add_f32_typed: load_half("residual_add_f32")?,
 
             _module: module,
         })

@@ -43,6 +43,24 @@ DEFINE_SOFTPLUS_FWD(f32,  float,         from_f_f32)
 DEFINE_SOFTPLUS_FWD(bf16, __nv_bfloat16, from_f_bf16)
 DEFINE_SOFTPLUS_FWD(f16,  __half,        from_f_f16)
 
+// ===================== Softplus mixed (T_in → f32) =====================
+// Reads bf16/f16 source (e.g., dt_proj GEMM output), writes f32 delta.
+// Used in end-to-end bf16 inference where linear activations are bf16 but
+// `delta` downstream stays f32 for SSM recurrence precision.
+
+#define DEFINE_SOFTPLUS_COPY_TO_F32(SUFFIX, T_IN)                         \
+extern "C" __global__ void softplus_copy_to_f32_##SUFFIX(                 \
+    float* dst, const T_IN* src, int n                                    \
+) {                                                                       \
+    int i = blockIdx.x * blockDim.x + threadIdx.x;                        \
+    if (i >= n) return;                                                   \
+    float v = to_f(src[i]);                                               \
+    dst[i] = v > 20.0f ? v : logf(1.0f + exp2f(v * LOG2E));               \
+}
+
+DEFINE_SOFTPLUS_COPY_TO_F32(bf16, __nv_bfloat16)
+DEFINE_SOFTPLUS_COPY_TO_F32(f16,  __half)
+
 // Legacy alias
 extern "C" __global__ void softplus_forward(float* x, int n) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;

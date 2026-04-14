@@ -255,6 +255,22 @@ DEFINE_RESIDUAL_ADD(f32,  float,         from_f_f32)
 DEFINE_RESIDUAL_ADD(bf16, __nv_bfloat16, from_f_bf16)
 DEFINE_RESIDUAL_ADD(f16,  __half,        from_f_f16)
 
+// Mixed residual add: f32 residual accumulator + bf16/f16 branch output
+// → writes f32 (replaces residual in place or into a new f32 dst).
+// Used in end-to-end bf16 inference where `residual_in_fp32` keeps the
+// cross-layer residual stream f32 while per-layer branch outputs are bf16.
+#define DEFINE_RESIDUAL_ADD_F32_T(SUFFIX, T_IN)                               \
+extern "C" __global__ void residual_add_f32_##SUFFIX(                         \
+    float* dst, const float* a, const T_IN* b, int n                          \
+) {                                                                           \
+    int i = blockIdx.x * blockDim.x + threadIdx.x;                            \
+    if (i >= n) return;                                                       \
+    dst[i] = a[i] + to_f(b[i]);                                               \
+}
+
+DEFINE_RESIDUAL_ADD_F32_T(bf16, __nv_bfloat16)
+DEFINE_RESIDUAL_ADD_F32_T(f16,  __half)
+
 #define DEFINE_GATHER_COLS(SUFFIX, T)                                         \
 extern "C" __global__ void gather_cols_##SUFFIX(                              \
     T* dst, const T* src,                                                     \
