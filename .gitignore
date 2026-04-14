@@ -1,3 +1,6 @@
+### Local-only notes and scratch work (never commit) ###
+internal/
+
 ### IntelliJ IDEA ###
 out/
 !**/src/main/**/out/
