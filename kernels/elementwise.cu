@@ -408,3 +408,79 @@ extern "C" __global__ void vec_add_inplace_##SUFFIX(                          \
 DEFINE_VEC_ADD_INPLACE(f32,  float,         from_f_f32)
 DEFINE_VEC_ADD_INPLACE(bf16, __nv_bfloat16, from_f_bf16)
 DEFINE_VEC_ADD_INPLACE(f16,  __half,        from_f_f16)
+
+// Typed concat_halves — mirrors f32 `concat_halves` for the mixed backward
+// wiring where both `first_half` and `second_half` are typed gradient
+// scratches (d_x_branch, d_gate) and the output `proj` feeds a typed dW
+// GEMM via in_proj backward. Pure-load/store op, no arithmetic.
+#define DEFINE_CONCAT_HALVES(SUFFIX, TY)                                      \
+extern "C" __global__ void concat_halves_##SUFFIX(                            \
+    TY* proj,                                                                 \
+    const TY* first_half,                                                     \
+    const TY* second_half,                                                    \
+    int batch, int d_inner                                                    \
+) {                                                                           \
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;                          \
+    int total = batch * d_inner;                                              \
+    if (idx >= total) return;                                                 \
+    int b = idx / d_inner;                                                    \
+    int d = idx % d_inner;                                                    \
+    int proj_off = b * 2 * d_inner;                                           \
+    proj[proj_off + d] = first_half[idx];                                     \
+    proj[proj_off + d_inner + d] = second_half[idx];                          \
+}
+
+DEFINE_CONCAT_HALVES(f32,  float)
+DEFINE_CONCAT_HALVES(bf16, __nv_bfloat16)
+DEFINE_CONCAT_HALVES(f16,  __half)
+
+// Typed scatter_add_cols — for mixed backward: d_xdbl (typed) accumulates
+// d_delta_raw / d_B / d_C slices (typed). Accumulate in f32 then downcast
+// to avoid compounded bf16 round-off during successive scatters.
+#define DEFINE_SCATTER_ADD_COLS(SUFFIX, TY, FROM_F)                           \
+extern "C" __global__ void scatter_add_cols_##SUFFIX(                         \
+    TY* dst, const TY* src,                                                   \
+    int batch, int dst_stride, int src_dim, int offset                        \
+) {                                                                           \
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;                          \
+    int total = batch * src_dim;                                              \
+    if (idx >= total) return;                                                 \
+    int b = idx / src_dim;                                                    \
+    int d = idx % src_dim;                                                    \
+    int di = b * dst_stride + offset + d;                                     \
+    dst[di] = FROM_F(to_f(dst[di]) + to_f(src[idx]));                         \
+}
+
+DEFINE_SCATTER_ADD_COLS(f32,  float,         from_f_f32)
+DEFINE_SCATTER_ADD_COLS(bf16, __nv_bfloat16, from_f_bf16)
+DEFINE_SCATTER_ADD_COLS(f16,  __half,        from_f_f16)
+
+// Typed bias reduction: `d_bias[i] += sum over (b, t) of dy[b, t, i]` where
+// `dy` is typed and `d_bias` is f32 master grad. Used by mixed dt_proj
+// backward to accumulate the bias gradient. One block per bias index i; one
+// warp per block handles the B*T reduction. atomicAdd avoids a second
+// reduction pass when grid is launched as <<<dim>>>.
+#define DEFINE_REDUCE_BIAS(SUFFIX, TY)                                        \
+extern "C" __global__ void reduce_bias_##SUFFIX(                              \
+    float* d_bias, const TY* dy, int bt, int dim                              \
+) {                                                                           \
+    int i = blockIdx.x;                                                       \
+    if (i >= dim) return;                                                     \
+    float sum = 0.0f;                                                         \
+    for (int r = threadIdx.x; r < bt; r += blockDim.x) {                      \
+        sum += to_f(dy[r * dim + i]);                                         \
+    }                                                                         \
+    /* Warp + block reduction via shared memory. */                           \
+    extern __shared__ float sdata[];                                          \
+    sdata[threadIdx.x] = sum;                                                 \
+    __syncthreads();                                                          \
+    for (unsigned s = blockDim.x / 2; s > 0; s >>= 1) {                       \
+        if (threadIdx.x < s) sdata[threadIdx.x] += sdata[threadIdx.x + s];    \
+        __syncthreads();                                                      \
+    }                                                                         \
+    if (threadIdx.x == 0) atomicAdd(&d_bias[i], sdata[0]);                    \
+}
+
+DEFINE_REDUCE_BIAS(f32,  float)
+DEFINE_REDUCE_BIAS(bf16, __nv_bfloat16)
+DEFINE_REDUCE_BIAS(f16,  __half)

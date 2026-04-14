@@ -16,7 +16,8 @@
 
 use cudarc::driver::PushKernelArg;
 use mamba_rs::mamba_ssm::gpu::blas::{
-    TypedPtr, gpu_sgemm_backward_dw_grad, gpu_sgemm_backward_dw_grad_typed,
+    TypedPtr, gpu_gemm_ex_backward_dx_typed, gpu_sgemm_backward_dw_grad,
+    gpu_sgemm_backward_dw_grad_typed, gpu_sgemm_backward_dx_raw,
 };
 use mamba_rs::mamba_ssm::gpu::buffers::{DtypedBuf, GpuBuffer, GradSlice};
 use mamba_rs::mamba_ssm::gpu::context::GpuCtx;
@@ -1064,4 +1065,98 @@ fn sgemm_backward_dw_grad_typed_accumulates() {
             "dW 2× accum",
         );
     }
+}
+
+// ─── gpu_gemm_ex_backward_dx_typed (Step 5a) ─────────────────────────
+//
+// Typed dX backward GEMM: dX[B,K] = dY[B,N] @ W^T[N,K]. Mirrors f32
+// `gpu_sgemm_backward_dx_raw` math (OP_T on W, OP_N on dY) with typed
+// A/B/C and CUBLAS_COMPUTE_32F_PEDANTIC. Production shape matches the
+// dW test (mamba-130m in_proj bwd: B*T=2048, n_in=768, n_out=3072).
+
+fn run_dx_f32(
+    ctx: &GpuCtx,
+    dy: &GpuBuffer,
+    w_ptr: cudarc::driver::sys::CUdeviceptr,
+    batch: usize,
+    n_in: usize,
+    n_out: usize,
+) -> Vec<f32> {
+    let mut dx = GpuBuffer::zeros(&ctx.stream, batch * n_in).unwrap();
+    ctx.stream.synchronize().unwrap();
+    gpu_sgemm_backward_dx_raw(ctx, &mut dx, dy, w_ptr, batch, n_in, n_out).unwrap();
+    ctx.stream.synchronize().unwrap();
+    let mut out = vec![0f32; batch * n_in];
+    dx.download(&ctx.stream, &mut out).unwrap();
+    out
+}
+
+fn run_dx_typed(
+    ctx: &GpuCtx,
+    dy: &DtypedBuf,
+    w: &DtypedBuf,
+    batch: usize,
+    n_in: usize,
+    n_out: usize,
+    dtype: WeightDtype,
+) -> Vec<f32> {
+    let dx = DtypedBuf::zeros(&ctx.stream, batch * n_in, dtype).unwrap();
+    ctx.stream.synchronize().unwrap();
+    let dx_typed = TypedPtr {
+        ptr: dx.cached_ptr(),
+        dtype,
+    };
+    let dy_typed = TypedPtr {
+        ptr: dy.cached_ptr(),
+        dtype,
+    };
+    let w_typed = TypedPtr {
+        ptr: w.cached_ptr(),
+        dtype,
+    };
+    gpu_gemm_ex_backward_dx_typed(ctx, dx_typed, dy_typed, w_typed, batch, n_in, n_out).unwrap();
+    ctx.stream.synchronize().unwrap();
+    download_typed(&ctx.stream, &dx, dtype)
+}
+
+#[test]
+fn gemm_ex_backward_dx_bf16_matches_f32() {
+    let dev = GpuDevice::new(0).unwrap();
+    let ctx = GpuCtx::new(&dev).unwrap();
+    // Production shape: mamba-130m in_proj bwd.
+    let batch = 2048;
+    let n_in = 768;
+    let n_out = 3072;
+
+    // Gaussian: W is post-L2Norm-ish (σ=0.05 small weights), dY is
+    // post-kernel gradient (σ=0.1). dX magnitudes end up O(σ_W·σ_dY·sqrt(n_out)).
+    let w_f = deterministic_gaussian(n_in * n_out, 0xE1, 0.05);
+    let dy_f = deterministic_gaussian(batch * n_out, 0xE2, 0.1);
+
+    // f32 oracle.
+    let mut w32 = GpuBuffer::zeros(&ctx.stream, n_in * n_out).unwrap();
+    let mut dy32 = GpuBuffer::zeros(&ctx.stream, batch * n_out).unwrap();
+    ctx.stream.synchronize().unwrap();
+    w32.upload(&ctx.stream, &w_f).unwrap();
+    dy32.upload(&ctx.stream, &dy_f).unwrap();
+    ctx.stream.synchronize().unwrap();
+    let dx_ref = run_dx_f32(&ctx, &dy32, w32.cached_ptr(), batch, n_in, n_out);
+
+    // bf16 typed.
+    let w_bf = upload_typed(&ctx.stream, &w_f, WeightDtype::Bf16);
+    let dy_bf = upload_typed(&ctx.stream, &dy_f, WeightDtype::Bf16);
+    let dx_bf = run_dx_typed(&ctx, &dy_bf, &w_bf, batch, n_in, n_out, WeightDtype::Bf16);
+
+    eprintln!("gemm_ex_backward_dx bf16 parity (B={batch}, n_in={n_in}, n_out={n_out}):");
+    // bf16: inputs quantized + output quantized + f32 PEDANTIC accumulate.
+    // cos ≥ 0.9995, outliers ≤ 30% (activations, not T-length accumulator).
+    assert_grad_close(&dx_ref, &dx_bf, 5e-2, 1e-3, 0.9995, 5e-3, "dX bf16");
+
+    // f16 typed.
+    let w_h = upload_typed(&ctx.stream, &w_f, WeightDtype::F16);
+    let dy_h = upload_typed(&ctx.stream, &dy_f, WeightDtype::F16);
+    let dx_h = run_dx_typed(&ctx, &dy_h, &w_h, batch, n_in, n_out, WeightDtype::F16);
+
+    eprintln!("gemm_ex_backward_dx f16 parity (B={batch}, n_in={n_in}, n_out={n_out}):");
+    assert_grad_close(&dx_ref, &dx_h, 2e-2, 5e-4, 0.9995, 5e-3, "dX f16");
 }

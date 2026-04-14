@@ -152,11 +152,14 @@ impl GpuMambaBackboneMixedActs {
 
 /// Per-step scratch for mixed-precision training. Pre-allocated once at
 /// trainer construction; reused every forward+backward pass — zero alloc on
-/// hot path. f32 fields needed by backward (residual_out, lm_head feed) are
-/// also kept here.
+/// hot path (**required** for CUDA Graph capture: stable pointers, no resize
+/// between captures). Typed buffers carry activation gradients; f32 buffers
+/// hold BPTT accumulators and the residual-stream gradient.
 pub struct GpuMambaMixedTrainScratch {
     pub dims: GpuMambaDims,
     pub dtype: WeightDtype,
+
+    // ── Forward scratch ───────────────────────────────────────────────
     /// in_proj output [B*T * 2*d_inner].
     pub proj_flat: DtypedBuf,
     /// split's x branch [B*T * d_inner].
@@ -171,6 +174,53 @@ pub struct GpuMambaMixedTrainScratch {
     pub out_flat: DtypedBuf,
     /// Final lm_head feed (post norm_f) — typed [B*T * d_model].
     pub temporal_typed: DtypedBuf,
+
+    // ── Backward scratch — typed activation grads ────────────────────
+    /// out_proj dX [B*T * d_inner].
+    pub d_gated: DtypedBuf,
+    /// gating dY [B*T * d_inner] — feeds `ssm_backward_local_typed`.
+    pub d_y: DtypedBuf,
+    /// gating d_gate_pre [B*T * d_inner] — feeds `concat_halves_typed`.
+    pub d_gate: DtypedBuf,
+    /// ssm_backward_local per-sample d_B buffer [B*T * d_inner * d_state].
+    pub d_b_local: DtypedBuf,
+    /// ssm_backward_local per-sample d_C buffer [B*T * d_inner * d_state].
+    pub d_c_local: DtypedBuf,
+    /// ssm_backward_local d_delta output [B*T * d_inner].
+    pub d_delta: DtypedBuf,
+    /// ssm_backward_local d_u output [B*T * d_inner] — later += d_u_xproj.
+    pub d_u: DtypedBuf,
+    /// x_proj dX [B*T * d_inner].
+    pub d_u_xproj: DtypedBuf,
+    /// softplus_bwd dx [B*T * d_inner].
+    pub d_delta_raw: DtypedBuf,
+    /// Gathered dt slice from xdbl for dt_proj dW [B*T * dt_rank].
+    pub dt_xdbl_buf: DtypedBuf,
+    /// dt_proj dX [B*T * dt_rank].
+    pub d_dt_input: DtypedBuf,
+    /// d_xdbl accumulator [B*T * xdbl_dim] — feeds x_proj dW.
+    pub d_xdbl: DtypedBuf,
+    /// conv1d_burnin_bwd d_x_branch [B*T * d_inner].
+    pub d_x_branch: DtypedBuf,
+    /// concat(d_x_branch, d_gate) [B*T * 2*d_inner] — feeds in_proj dW.
+    pub d_proj: DtypedBuf,
+    /// in_proj dX [B*T * d_model] — feeds per-layer `rmsnorm_bwd_f32in`.
+    pub d_norm: DtypedBuf,
+
+    // ── Backward scratch — f32 master grads / accumulators ────────────
+    /// Reduced d_B master grad [B*T * d_state].
+    pub d_b_reduced: GpuBuffer,
+    /// Reduced d_C master grad [B*T * d_state].
+    pub d_c_reduced: GpuBuffer,
+    /// Per-sample d_D accumulator [B * d_inner].
+    pub d_d_local: GpuBuffer,
+    /// Per-sample d_a_log accumulator [B * d_inner * d_state].
+    pub d_a_log_local: GpuBuffer,
+    /// rmsnorm bwd dx (f32 residual stream) [B*T * d_model] — accumulates
+    /// into outer `d_temporal` via `vec_add_inplace`.
+    pub d_pre_norm: GpuBuffer,
+    /// Discarded dx for backbone input_proj backward [B*T * mamba_input_dim].
+    pub d_input_proj_dx: GpuBuffer,
 }
 
 impl GpuMambaMixedTrainScratch {
@@ -181,17 +231,44 @@ impl GpuMambaMixedTrainScratch {
     ) -> Result<Self, String> {
         let bt = dims.batch * dims.seq_len;
         let xdbl_dim = dims.dt_rank + 2 * dims.d_state;
-        let _ = xdbl_dim; // xdbl is in acts, not scratch
+        let di = dims.d_inner;
+        let ds = dims.d_state;
+        let dm = dims.d_model;
+        let b = dims.batch;
         let s = Self {
             dims: *dims,
             dtype,
-            proj_flat: DtypedBuf::zeros(stream, bt * 2 * dims.d_inner, dtype)?,
-            x_branch: DtypedBuf::zeros(stream, bt * dims.d_inner, dtype)?,
+            // forward
+            proj_flat: DtypedBuf::zeros(stream, bt * 2 * di, dtype)?,
+            x_branch: DtypedBuf::zeros(stream, bt * di, dtype)?,
             dt_gather: DtypedBuf::zeros(stream, bt * dims.dt_rank, dtype)?,
-            b_buf: DtypedBuf::zeros(stream, bt * dims.d_state, dtype)?,
-            c_buf: DtypedBuf::zeros(stream, bt * dims.d_state, dtype)?,
-            out_flat: DtypedBuf::zeros(stream, bt * dims.d_model, dtype)?,
-            temporal_typed: DtypedBuf::zeros(stream, bt * dims.d_model, dtype)?,
+            b_buf: DtypedBuf::zeros(stream, bt * ds, dtype)?,
+            c_buf: DtypedBuf::zeros(stream, bt * ds, dtype)?,
+            out_flat: DtypedBuf::zeros(stream, bt * dm, dtype)?,
+            temporal_typed: DtypedBuf::zeros(stream, bt * dm, dtype)?,
+            // backward typed
+            d_gated: DtypedBuf::zeros(stream, bt * di, dtype)?,
+            d_y: DtypedBuf::zeros(stream, bt * di, dtype)?,
+            d_gate: DtypedBuf::zeros(stream, bt * di, dtype)?,
+            d_b_local: DtypedBuf::zeros(stream, bt * di * ds, dtype)?,
+            d_c_local: DtypedBuf::zeros(stream, bt * di * ds, dtype)?,
+            d_delta: DtypedBuf::zeros(stream, bt * di, dtype)?,
+            d_u: DtypedBuf::zeros(stream, bt * di, dtype)?,
+            d_u_xproj: DtypedBuf::zeros(stream, bt * di, dtype)?,
+            d_delta_raw: DtypedBuf::zeros(stream, bt * di, dtype)?,
+            dt_xdbl_buf: DtypedBuf::zeros(stream, bt * dims.dt_rank, dtype)?,
+            d_dt_input: DtypedBuf::zeros(stream, bt * dims.dt_rank, dtype)?,
+            d_xdbl: DtypedBuf::zeros(stream, bt * xdbl_dim, dtype)?,
+            d_x_branch: DtypedBuf::zeros(stream, bt * di, dtype)?,
+            d_proj: DtypedBuf::zeros(stream, bt * 2 * di, dtype)?,
+            d_norm: DtypedBuf::zeros(stream, bt * dm, dtype)?,
+            // backward f32
+            d_b_reduced: GpuBuffer::zeros(stream, bt * ds)?,
+            d_c_reduced: GpuBuffer::zeros(stream, bt * ds)?,
+            d_d_local: GpuBuffer::zeros(stream, b * di)?,
+            d_a_log_local: GpuBuffer::zeros(stream, b * di * ds)?,
+            d_pre_norm: GpuBuffer::zeros(stream, bt * dm)?,
+            d_input_proj_dx: GpuBuffer::zeros(stream, bt * dims.mamba_input_dim)?,
         };
         // Race-fix invariant (a950648): callers may immediately upload from
         // host via default-stream HtoD; sync first.

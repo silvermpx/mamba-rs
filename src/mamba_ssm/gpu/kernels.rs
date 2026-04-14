@@ -199,6 +199,23 @@ pub struct MambaKernels {
     pub silu_bwd_typed: TypedKernel,
     pub softplus_bwd_typed: TypedKernel,
     pub gather_last_timestep_typed: TypedKernel,
+    /// Typed vec_add_inplace — `a[i] += b[i]` where `a` is typed (activations
+    /// or typed grad accumulator) and `b` is f32 (master bias). Used in mixed
+    /// backward residual-add sequences where one operand is f32.
+    pub vec_add_inplace_typed: TypedKernel,
+    /// Typed concat_halves — pure load/store with typed src/dst. Used by mixed
+    /// backward to concat `d_x_branch` and `d_gate_pre` into `d_proj` before
+    /// the in_proj dX backward.
+    pub concat_halves_typed: TypedKernel,
+    /// Typed scatter_add_cols — `dst[b, off+d] += src[b, d]` with typed src/dst.
+    /// Used to scatter `d_delta_raw`, `d_B`, `d_C` into the combined `d_xdbl`
+    /// buffer that feeds x_proj dW backward.
+    pub scatter_add_cols_typed: TypedKernel,
+    /// Typed bias reduction — `d_bias[i] += sum_{b,t} dy[b, t, i]` with
+    /// typed `dy` and f32 `d_bias` master grad. Used by mixed dt_proj
+    /// backward (dt_proj has a learned bias; dW goes via typed GemmEx,
+    /// bias grad via this launch).
+    pub reduce_bias_typed: TypedKernel,
 
     // -- Dual-dtype kernels for end-to-end bf16/f16 inference --
     /// RMSNorm: f32 residual input → half output. Keeps residual stream in
@@ -207,6 +224,12 @@ pub struct MambaKernels {
     /// Residual add: f32 accumulator + half branch → f32 output. Paired with
     /// `rmsnorm_fwd_f32in_typed` to preserve `residual_in_fp32` semantics.
     pub residual_add_f32_typed: HalfKernel,
+    /// RmsNorm backward: typed `dy` + f32 `x` → f32 `dx`, f32 `d_scale`.
+    /// Dual-dtype twin of `rmsnorm_fwd_f32in_typed`. Used in mixed backward
+    /// per-layer rmsnorm where `d_norm` arrives typed (from in_proj dX) but
+    /// the residual stream `d_pre_norm` must be f32 to accumulate into the
+    /// f32 outer `d_temporal`.
+    pub rmsnorm_bwd_f32in_typed: HalfKernel,
 
     // -- Parallel scan (optional, for T>128) --
     /// Parallel prefix scan SSM forward with activation saves.
@@ -355,6 +378,10 @@ impl MambaKernels {
             silu_bwd_typed: load_typed("silu_backward")?,
             softplus_bwd_typed: load_typed("softplus_backward")?,
             gather_last_timestep_typed: load_typed("gather_last_timestep")?,
+            vec_add_inplace_typed: load_typed("vec_add_inplace")?,
+            concat_halves_typed: load_typed("concat_halves")?,
+            scatter_add_cols_typed: load_typed("scatter_add_cols")?,
+            reduce_bias_typed: load_typed("reduce_bias")?,
 
             // typed training-backward kernels (Step 4a)
             gating_bwd_typed: load_typed("gating_backward")?,
@@ -369,6 +396,7 @@ impl MambaKernels {
 
             // dual-dtype (half-only)
             rmsnorm_fwd_f32in_typed: load_half("rmsnorm_forward_f32in")?,
+            rmsnorm_bwd_f32in_typed: load_half("rmsnorm_backward_f32in")?,
             residual_add_f32_typed: load_half("residual_add_f32")?,
 
             _module: module,
