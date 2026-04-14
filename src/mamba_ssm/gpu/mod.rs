@@ -14,8 +14,11 @@ pub mod blas;
 pub mod buffers;
 pub mod context;
 pub mod device;
+pub mod dtype;
 pub mod forward;
 pub mod inference;
 pub mod kernels;
 pub mod launch;
 pub mod weights;
+
+pub use dtype::WeightDtype;

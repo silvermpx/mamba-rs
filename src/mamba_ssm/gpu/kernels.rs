@@ -88,6 +88,12 @@ pub struct MambaKernels {
     /// Gather the last timestep from `[B*T*D]` into `[B*D]`.
     pub gather_last_timestep: CudaFunction,
 
+    // -- Mixed precision casts (mixed inference only) --
+    /// f32 → bf16 downcast for weight storage.
+    pub cast_f32_to_bf16: CudaFunction,
+    /// f32 → f16 downcast for weight storage.
+    pub cast_f32_to_f16: CudaFunction,
+
     // -- Parallel scan (optional, for T>128) --
     /// Parallel prefix scan SSM forward with activation saves.
     pub ssm_parallel_fwd: CudaFunction,
@@ -118,6 +124,7 @@ impl MambaKernels {
                 "--fmad=true".to_string(),
                 "--extra-device-vectorization".to_string(),
             ],
+            include_paths: cuda_include_paths(),
             ..Default::default()
         };
 
@@ -174,6 +181,10 @@ impl MambaKernels {
             softplus_copy: get("softplus_copy")?,
             gather_last_timestep: get("gather_last_timestep")?,
 
+            // mixed precision casts
+            cast_f32_to_bf16: get("cast_f32_to_bf16")?,
+            cast_f32_to_f16: get("cast_f32_to_f16")?,
+
             // parallel scan
             ssm_parallel_fwd: get("ssm_parallel_scan_fwd")?,
             ssm_parallel_fwd_nosave: get("ssm_parallel_scan_fwd_nosave")?,
@@ -181,4 +192,30 @@ impl MambaKernels {
             _module: module,
         })
     }
+}
+
+/// Discover CUDA include directory (for cuda_fp16.h, cuda_bf16.h).
+/// Checks CUDA_HOME, CUDA_PATH, CUDA_ROOT, then standard install paths.
+fn cuda_include_paths() -> Vec<String> {
+    let mut candidates: Vec<String> = Vec::new();
+    for var in ["CUDA_HOME", "CUDA_PATH", "CUDA_ROOT"] {
+        if let Ok(p) = std::env::var(var) {
+            candidates.push(format!("{p}/include"));
+        }
+    }
+    for std_path in [
+        "/usr/local/cuda/include",
+        "/usr/local/cuda-13.2/include",
+        "/usr/local/cuda-12.8/include",
+        "/usr/local/cuda-12.6/include",
+        "/usr/local/cuda-12.4/include",
+        "/usr/local/cuda-12.2/include",
+        "/opt/cuda/include",
+    ] {
+        candidates.push(std_path.to_string());
+    }
+    candidates
+        .into_iter()
+        .filter(|p| std::path::Path::new(p).join("cuda_fp16.h").exists())
+        .collect()
 }

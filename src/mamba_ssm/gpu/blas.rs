@@ -8,9 +8,10 @@
 
 use super::buffers::{GpuBuffer, GradSlice};
 use super::context::GpuCtx;
+use super::dtype::WeightDtype;
 use super::launch::grid_1d;
 use cudarc::driver::PushKernelArg;
-use std::ffi::c_int;
+use std::ffi::{c_int, c_void};
 
 /// Batched linear forward: `Y[B,N] = X[B,K] @ W[K,N] + bias[N]`.
 /// `dims` = `(batch, n_in, n_out)`.
@@ -175,6 +176,75 @@ pub fn gpu_sgemm_backward_grad_raw(
         builder.arg(&n_i);
         unsafe { builder.launch(grid_1d(n_out)) }
             .map_err(|e| format!("colsum_accumulate_grad_raw: {:?}", e))?;
+    }
+
+    Ok(())
+}
+
+/// Mixed-precision GEMM forward: `Y[B,N] = X[B,K] @ W[K,N] + bias[N]`.
+///
+/// Inputs X and W are in `w_dtype` (f32/f16/bf16). Output Y is always f32.
+/// Compute type is f32 (CUBLAS_COMPUTE_32F) — f32 accumulation regardless of input dtype.
+///
+/// For `WeightDtype::F32`, this is mathematically identical to `gpu_sgemm_forward_raw`
+/// (callers should prefer sgemm path for f32 to avoid gemmEx overhead).
+///
+/// `dims` = `(batch, n_in, n_out)`. `x_ptr` and `w_ptr` are raw device pointers (CUDA
+/// Graph safe). `x_dtype` typically matches `w_dtype` for Mamba inference.
+///
+/// Bias (if provided) is always f32 (Mamba convention: biases stay f32 regardless of
+/// weight dtype). It is added via a separate broadcast kernel on the f32 output.
+pub fn gpu_gemm_ex_forward_raw(
+    ctx: &GpuCtx,
+    y: &mut GpuBuffer,
+    x_ptr: cudarc::driver::sys::CUdeviceptr,
+    x_dtype: WeightDtype,
+    w_ptr: cudarc::driver::sys::CUdeviceptr,
+    w_dtype: WeightDtype,
+    bias_ptr: Option<cudarc::driver::sys::CUdeviceptr>,
+    dims: (usize, usize, usize),
+) -> Result<(), String> {
+    let (batch, n_in, n_out) = dims;
+    let beta = if let Some(b_ptr) = bias_ptr {
+        let b_i = batch as i32;
+        let n_i = n_out as i32;
+        let y_ptr = y.cached_ptr();
+        let mut builder = ctx.stream.launch_builder(&ctx.kernels.bias_broadcast);
+        builder.arg(&y_ptr);
+        builder.arg(&b_ptr);
+        builder.arg(&b_i);
+        builder.arg(&n_i);
+        unsafe { builder.launch(grid_1d(batch * n_out)) }
+            .map_err(|e| format!("bias_broadcast_ex: {:?}", e))?;
+        1.0f32
+    } else {
+        0.0f32
+    };
+    let alpha: f32 = 1.0;
+
+    unsafe {
+        cudarc::cublas::result::gemm_ex(
+            *ctx.blas.handle(),
+            cudarc::cublas::sys::cublasOperation_t::CUBLAS_OP_N,
+            cudarc::cublas::sys::cublasOperation_t::CUBLAS_OP_N,
+            n_out as c_int,
+            batch as c_int,
+            n_in as c_int,
+            &alpha as *const f32 as *const c_void,
+            w_ptr as *const c_void,
+            w_dtype.cuda_data_type(),
+            n_out as c_int,
+            x_ptr as *const c_void,
+            x_dtype.cuda_data_type(),
+            n_in as c_int,
+            &beta as *const f32 as *const c_void,
+            y.cached_ptr() as *mut c_void,
+            cudarc::cublas::sys::cudaDataType::CUDA_R_32F,
+            n_out as c_int,
+            w_dtype.compute_type(),
+            cudarc::cublas::sys::cublasGemmAlgo_t::CUBLAS_GEMM_DEFAULT,
+        )
+        .map_err(|e| format!("cuBLAS gemm_ex failed: {e:?}"))?;
     }
 
     Ok(())

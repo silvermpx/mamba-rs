@@ -3,6 +3,31 @@
 // Bias broadcast, gating, SSM column gather/scatter, residual add, etc.
 // All kernels: 1D grid, 256 threads/block.
 
+#include <cuda_fp16.h>
+#include <cuda_bf16.h>
+
+// ---------------------------------------------------------------------------
+// Dtype cast kernels — for mixed-precision inference weight upload.
+// f32 -> bf16: used when HF checkpoint is f32 but user requested bf16 storage.
+// f32 -> f16:  same, but for f16 storage (rare — bf16 preferred for Mamba).
+// ---------------------------------------------------------------------------
+
+extern "C" __global__ void cast_f32_to_bf16(
+    __nv_bfloat16* dst, const float* src, int n
+) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    dst[i] = __float2bfloat16(src[i]);
+}
+
+extern "C" __global__ void cast_f32_to_f16(
+    __half* dst, const float* src, int n
+) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    dst[i] = __float2half(src[i]);
+}
+
 extern "C" __global__ void bias_broadcast(
     float* y, const float* bias,
     int batch, int n_out
