@@ -107,6 +107,21 @@ pub struct Mamba3Kernels {
     /// typed d_y/d_z/d_out/y/z; f32 weight + d_weight (per-sample,
     /// reduced later). Step 9c for M3 training.
     pub rmsnorm_gated_bwd_typed: TypedKernel,
+    // -- Step 8c: typed M3 chunked parallel forward kernels --
+    /// Per-chunk gamma/scale + qk_dot + K prescale. Typed K/Q/K_scaled,
+    /// f32 DT/trap_sig/qk_dot/scale/gamma (these are scalars computed in
+    /// float and reused by the scan path).
+    pub m3_preprocess_chunks_typed: TypedKernel,
+    /// Per-chunk SSM state matmul (typed x, typed K_scaled, f32 dA_cumsum,
+    /// f32 states_out — BPTT state MUST remain f32 per Tri Dao invariant).
+    pub m3_chunk_state_fwd_typed: TypedKernel,
+    /// Persist final states to ssm_state/k_state/v_state (all f32 persistent
+    /// buffers). Typed inputs k_flat/x_flat.
+    pub m3_writeback_parallel_states_typed: TypedKernel,
+    /// Intra-chunk output: typed y_out/x/Q/K_scaled; f32 qk_dot/dA_cumsum/
+    /// prev_states/D.
+    pub m3_chunk_scan_fwd_typed: TypedKernel,
+
     /// Shared from M1: f32 residual → half post-norm (identical kernel, reused).
     pub rmsnorm_fwd_f32in_typed: HalfKernel,
     /// Shared from M1: f32 residual += half branch (stays f32).
@@ -294,6 +309,27 @@ impl Mamba3Kernels {
                 bf16: get("rmsnorm_gated_backward_bf16")?,
                 f16: get("rmsnorm_gated_backward_f16")?,
             },
+            m3_preprocess_chunks_typed: TypedKernel {
+                f32: get("m3_preprocess_chunks")?,
+                bf16: get("m3_preprocess_chunks_bf16")?,
+                f16: get("m3_preprocess_chunks_f16")?,
+            },
+            m3_chunk_state_fwd_typed: TypedKernel {
+                f32: get("m3_chunk_state_fwd")?,
+                bf16: get("m3_chunk_state_fwd_bf16")?,
+                f16: get("m3_chunk_state_fwd_f16")?,
+            },
+            m3_writeback_parallel_states_typed: TypedKernel {
+                f32: get("m3_writeback_parallel_states")?,
+                bf16: get("m3_writeback_parallel_states_bf16")?,
+                f16: get("m3_writeback_parallel_states_f16")?,
+            },
+            m3_chunk_scan_fwd_typed: TypedKernel {
+                f32: get("m3_chunk_scan_fwd")?,
+                bf16: get("m3_chunk_scan_fwd_bf16")?,
+                f16: get("m3_chunk_scan_fwd_f16")?,
+            },
+
             rmsnorm_fwd_f32in_typed: HalfKernel {
                 bf16: get("rmsnorm_forward_f32in_bf16")?,
                 f16: get("rmsnorm_forward_f32in_f16")?,

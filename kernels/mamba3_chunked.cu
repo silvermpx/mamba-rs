@@ -21,9 +21,8 @@
 // Thread/grid conventions follow mamba2_ssd.cu and mamba3_ssd.cu.
 // All kernels handle partial last chunk (T not multiple of chunk_size).
 
-#ifndef LOG2E
-#define LOG2E 1.4426950408889634f
-#endif
+#include "_typed_prelude.cuh"
+
 #ifndef FAST_EXP
 #define FAST_EXP(x) exp2f((x) * LOG2E)
 #endif
@@ -1378,3 +1377,210 @@ extern "C" __global__ void m3_final_grads(
         d_dd_a_raw[i] = d_a_val * (-sig_a);
     }
 }
+
+// ============================================================================
+// Step 8c — typed (bf16/f16) variants of the chunked parallel forward kernels.
+//
+// Typed I/O: activation tensors (K, Q, K_scaled, x/V, y_out, k_flat, x_flat)
+// are T_ACT in storage. All math + state remain f32 (BPTT states, dA_cumsum,
+// prev_states, ssm/k/v persistent state, DT/trap_sig/qk_dot/scale/gamma/D).
+//
+// The following kernels stay f32-only and are NOT typed (per validation
+// agents — O(T) compounding scan state mandates float for numerical safety):
+//   - m3_dA_cumsum  (prefix-sum scan)
+//   - m3_state_passing_fwd  (inter-chunk prefix recurrence)
+// ============================================================================
+
+#define DEFINE_M3_PREPROCESS_CHUNKS(SUFFIX, T_ACT, FROM_F)                    \
+extern "C" __global__ void                                                    \
+m3_preprocess_chunks_##SUFFIX(                                                \
+    T_ACT* __restrict__ K_scaled,                                             \
+    float* __restrict__ qk_dot,                                               \
+    float* __restrict__ scale_out,                                            \
+    float* __restrict__ gamma_out,                                            \
+    const T_ACT* __restrict__ K,                                              \
+    const T_ACT* __restrict__ Q,                                              \
+    const float* __restrict__ DT,                                             \
+    const float* __restrict__ trap_sig,                                       \
+    int batch, int T, int nh, int ds, int chunk_size                          \
+) {                                                                           \
+    int n_chunks = (T + chunk_size - 1) / chunk_size;                         \
+    int bc = blockIdx.x;                                                      \
+    int b = bc / n_chunks;                                                    \
+    int chunk = bc % n_chunks;                                                \
+    int h = blockIdx.y;                                                       \
+    int t_local = threadIdx.x;                                                \
+    int chunk_start = chunk * chunk_size;                                     \
+    int t = chunk_start + t_local;                                            \
+    if (t >= T) return;                                                       \
+    int th = (b * T + t) * nh + h;                                            \
+    float dt_cur = DT[th];                                                    \
+    float trap_cur = trap_sig[th];                                            \
+    float gamma_val = dt_cur * trap_cur;                                      \
+    float shifted_gamma = 0.0f;                                               \
+    if (t + 1 < T) {                                                          \
+        int th_next = (b * T + t + 1) * nh + h;                               \
+        float dt_next = DT[th_next];                                          \
+        float trap_next = trap_sig[th_next];                                  \
+        shifted_gamma = dt_next * (1.0f - trap_next);                         \
+    }                                                                         \
+    float scale_val = shifted_gamma + gamma_val;                              \
+    scale_out[th] = scale_val;                                                \
+    gamma_out[th] = gamma_val;                                                \
+    int kq_base = (b * T + t) * nh * ds + h * ds;                             \
+    float dot = 0.0f;                                                         \
+    for (int n = 0; n < ds; n++) {                                            \
+        dot += to_f(Q[kq_base + n]) * to_f(K[kq_base + n]);                   \
+    }                                                                         \
+    qk_dot[th] = dot * gamma_val;                                             \
+    for (int n = 0; n < ds; n++) {                                            \
+        float ks = to_f(K[kq_base + n]) * scale_val;                          \
+        K_scaled[kq_base + n] = FROM_F(ks);                                   \
+    }                                                                         \
+}
+
+DEFINE_M3_PREPROCESS_CHUNKS(bf16, __nv_bfloat16, from_f_bf16)
+DEFINE_M3_PREPROCESS_CHUNKS(f16,  __half,        from_f_f16)
+
+#define DEFINE_M3_CHUNK_STATE_FWD(SUFFIX, T_ACT, FROM_F)                      \
+extern "C" __global__ void                                                    \
+m3_chunk_state_fwd_##SUFFIX(                                                  \
+    float* __restrict__ states_out,                                           \
+    const T_ACT* __restrict__ x,                                              \
+    const T_ACT* __restrict__ K_scaled,                                       \
+    const float* __restrict__ dA_cumsum,                                      \
+    int batch, int T, int nh, int hd, int ds, int chunk_size                  \
+) {                                                                           \
+    int d_inner = nh * hd;                                                    \
+    int n_chunks = (T + chunk_size - 1) / chunk_size;                         \
+    int bc = blockIdx.x;                                                      \
+    int b = bc / n_chunks;                                                    \
+    int chunk = bc % n_chunks;                                                \
+    int h = blockIdx.y;                                                       \
+    int p = threadIdx.x;                                                      \
+    if (p >= hd) return;                                                      \
+    int chunk_start = chunk * chunk_size;                                     \
+    int chunk_end = chunk_start + chunk_size;                                 \
+    if (chunk_end > T) chunk_end = T;                                         \
+    int chunk_len = chunk_end - chunk_start;                                  \
+    int cs_base = ((b * n_chunks + chunk) * nh + h) * chunk_size;             \
+    float dA_end = dA_cumsum[cs_base + chunk_len - 1];                        \
+    int state_base = ((b * n_chunks + chunk) * nh + h) * hd * ds + p * ds;    \
+    for (int n = 0; n < ds; n++) {                                            \
+        float acc = 0.0f;                                                     \
+        for (int t = chunk_start; t < chunk_end; t++) {                       \
+            int t_local = t - chunk_start;                                    \
+            float dA_t = dA_cumsum[cs_base + t_local];                        \
+            float decay = FAST_EXP(dA_end - dA_t);                            \
+            float v_t = to_f(x[(b * T + t) * d_inner + h * hd + p]);          \
+            float ks_t = to_f(K_scaled[(b * T + t) * nh * ds + h * ds + n]);  \
+            acc += decay * ks_t * v_t;                                        \
+        }                                                                     \
+        states_out[state_base + n] = acc;                                     \
+    }                                                                         \
+    (void)FROM_F;                                                             \
+}
+
+DEFINE_M3_CHUNK_STATE_FWD(bf16, __nv_bfloat16, from_f_bf16)
+DEFINE_M3_CHUNK_STATE_FWD(f16,  __half,        from_f_f16)
+
+#define DEFINE_M3_WRITEBACK_PARALLEL_STATES(SUFFIX, T_ACT, FROM_F)            \
+extern "C" __global__ void                                                    \
+m3_writeback_parallel_states_##SUFFIX(                                        \
+    float* __restrict__ ssm_state,                                            \
+    float* __restrict__ k_state,                                              \
+    float* __restrict__ v_state,                                              \
+    const float* __restrict__ final_states,                                   \
+    const T_ACT* __restrict__ k_flat,                                         \
+    const T_ACT* __restrict__ x_flat,                                         \
+    int batch, int T, int nh, int hd, int ds                                  \
+) {                                                                           \
+    int b = blockIdx.x;                                                       \
+    int h = blockIdx.y;                                                       \
+    int p = threadIdx.x;                                                      \
+    if (b >= batch || h >= nh) return;                                        \
+    int d_inner = nh * hd;                                                    \
+    int dim = hd * ds;                                                        \
+    if (p < hd) {                                                             \
+        for (int n = 0; n < ds; n++) {                                        \
+            int idx = b * nh * dim + h * dim + p * ds + n;                    \
+            ssm_state[idx] = final_states[idx];                               \
+        }                                                                     \
+    }                                                                         \
+    if (p < ds) {                                                             \
+        int src_idx = (b * T + (T - 1)) * nh * ds + h * ds + p;               \
+        int dst_idx = b * nh * ds + h * ds + p;                               \
+        k_state[dst_idx] = to_f(k_flat[src_idx]);                             \
+    }                                                                         \
+    if (p < hd) {                                                             \
+        int src_idx = (b * T + (T - 1)) * d_inner + h * hd + p;               \
+        int dst_idx = b * nh * hd + h * hd + p;                               \
+        v_state[dst_idx] = to_f(x_flat[src_idx]);                             \
+    }                                                                         \
+    (void)FROM_F;                                                             \
+}
+
+DEFINE_M3_WRITEBACK_PARALLEL_STATES(bf16, __nv_bfloat16, from_f_bf16)
+DEFINE_M3_WRITEBACK_PARALLEL_STATES(f16,  __half,        from_f_f16)
+
+#define DEFINE_M3_CHUNK_SCAN_FWD(SUFFIX, T_ACT, FROM_F)                       \
+extern "C" __global__ void                                                    \
+m3_chunk_scan_fwd_##SUFFIX(                                                   \
+    T_ACT* __restrict__ y_out,                                                \
+    const T_ACT* __restrict__ x,                                              \
+    const T_ACT* __restrict__ Q,                                              \
+    const T_ACT* __restrict__ K_scaled,                                       \
+    const float* __restrict__ qk_dot,                                         \
+    const float* __restrict__ dA_cumsum,                                      \
+    const float* __restrict__ prev_states,                                    \
+    const float* __restrict__ D,                                              \
+    int batch, int T, int nh, int hd, int ds, int chunk_size                  \
+) {                                                                           \
+    int d_inner = nh * hd;                                                    \
+    int n_chunks = (T + chunk_size - 1) / chunk_size;                         \
+    int bc = blockIdx.x;                                                      \
+    int b = bc / n_chunks;                                                    \
+    int chunk = bc % n_chunks;                                                \
+    int h = blockIdx.y;                                                       \
+    int p = threadIdx.x;                                                      \
+    if (p >= hd) return;                                                      \
+    int chunk_start = chunk * chunk_size;                                     \
+    int chunk_end = chunk_start + chunk_size;                                 \
+    if (chunk_end > T) chunk_end = T;                                         \
+    int chunk_len = chunk_end - chunk_start;                                  \
+    int cs_base = ((b * n_chunks + chunk) * nh + h) * chunk_size;             \
+    int state_base = ((b * n_chunks + chunk) * nh + h) * hd * ds + p * ds;    \
+    float d_skip = D[h];                                                      \
+    for (int t_local = 0; t_local < chunk_len; t_local++) {                   \
+        int t = chunk_start + t_local;                                        \
+        float dA_t = dA_cumsum[cs_base + t_local];                            \
+        float y_off = 0.0f;                                                   \
+        float state_decay = FAST_EXP(dA_t);                                   \
+        int q_base = (b * T + t) * nh * ds + h * ds;                          \
+        for (int n = 0; n < ds; n++) {                                        \
+            y_off += to_f(Q[q_base + n]) * prev_states[state_base + n];       \
+        }                                                                     \
+        y_off *= state_decay;                                                 \
+        float y_diag = 0.0f;                                                  \
+        for (int s_local = 0; s_local < t_local; s_local++) {                 \
+            int s = chunk_start + s_local;                                    \
+            float dA_s = dA_cumsum[cs_base + s_local];                        \
+            float decay = FAST_EXP(dA_t - dA_s);                              \
+            float qk_val = 0.0f;                                              \
+            int ks_base = (b * T + s) * nh * ds + h * ds;                     \
+            for (int n = 0; n < ds; n++) {                                    \
+                qk_val += to_f(Q[q_base + n]) * to_f(K_scaled[ks_base + n]);  \
+            }                                                                 \
+            float v_s = to_f(x[(b * T + s) * d_inner + h * hd + p]);          \
+            y_diag += decay * qk_val * v_s;                                   \
+        }                                                                     \
+        float x_t = to_f(x[(b * T + t) * d_inner + h * hd + p]);              \
+        int th = (b * T + t) * nh + h;                                        \
+        float y_skip = (d_skip + qk_dot[th]) * x_t;                           \
+        float y_val = y_diag + y_off + y_skip;                                \
+        y_out[(b * T + t) * d_inner + h * hd + p] = FROM_F(y_val);            \
+    }                                                                         \
+}
+
+DEFINE_M3_CHUNK_SCAN_FWD(bf16, __nv_bfloat16, from_f_bf16)
+DEFINE_M3_CHUNK_SCAN_FWD(f16,  __half,        from_f_f16)
