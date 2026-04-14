@@ -217,7 +217,14 @@ pub fn gpu_gemm_forward_dispatch(
             builder.arg(&n);
             unsafe { builder.launch(grid_1d(batch * n_in)) }
                 .map_err(|e| format!("cast_f32_to_half: {e:?}"))?;
-            gpu_gemm_ex_forward_raw(ctx, y, half_ptr, w_dtype, w_ptr, w_dtype, bias_ptr, dims)
+            gpu_gemm_ex_forward_raw(
+                ctx,
+                y,
+                TypedPtr { ptr: half_ptr, dtype: w_dtype },
+                TypedPtr { ptr: w_ptr, dtype: w_dtype },
+                bias_ptr,
+                dims,
+            )
         }
     }
 }
@@ -264,6 +271,21 @@ pub fn gpu_sgemm_tied_lm_head_raw(
     Ok(())
 }
 
+/// Typed device pointer: raw ptr + element dtype.
+#[derive(Copy, Clone)]
+pub struct TypedPtr {
+    pub ptr: cudarc::driver::sys::CUdeviceptr,
+    pub dtype: WeightDtype,
+}
+
+/// Tied LM head dims: `(batch, d_model, vocab_padded)`.
+#[derive(Copy, Clone)]
+pub struct TiedLmDims {
+    pub batch: usize,
+    pub d_model: usize,
+    pub vocab_padded: usize,
+}
+
 /// Half-precision twin of `gpu_sgemm_tied_lm_head_raw` for bf16/f16 embed.
 /// `temporal_ptr` input activations must already be in `dtype` (not f32).
 pub fn gpu_gemm_ex_tied_lm_head_raw(
@@ -272,10 +294,9 @@ pub fn gpu_gemm_ex_tied_lm_head_raw(
     temporal_ptr: cudarc::driver::sys::CUdeviceptr,
     embed_ptr: cudarc::driver::sys::CUdeviceptr,
     dtype: WeightDtype,
-    batch: usize,
-    d_model: usize,
-    vocab_padded: usize,
+    dims: TiedLmDims,
 ) -> Result<(), String> {
+    let TiedLmDims { batch, d_model, vocab_padded } = dims;
     let alpha: f32 = 1.0;
     let beta: f32 = 0.0;
     unsafe {
@@ -305,63 +326,6 @@ pub fn gpu_gemm_ex_tied_lm_head_raw(
     Ok(())
 }
 
-/// Variant of `gpu_gemm_ex_forward_raw` that takes Y as a raw device pointer
-/// (not a `&mut GpuBuffer`). Useful when Y is an offset into a larger buffer
-/// (e.g., per-slot logits in batched LM head).
-#[allow(clippy::too_many_arguments)]
-pub fn gpu_gemm_ex_forward_raw_at(
-    ctx: &GpuCtx,
-    y_ptr: cudarc::driver::sys::CUdeviceptr,
-    x_ptr: cudarc::driver::sys::CUdeviceptr,
-    x_dtype: WeightDtype,
-    w_ptr: cudarc::driver::sys::CUdeviceptr,
-    w_dtype: WeightDtype,
-    bias_ptr: Option<cudarc::driver::sys::CUdeviceptr>,
-    dims: (usize, usize, usize),
-) -> Result<(), String> {
-    let (batch, n_in, n_out) = dims;
-    let beta = if let Some(b_ptr) = bias_ptr {
-        let b_i = batch as i32;
-        let n_i = n_out as i32;
-        let mut builder = ctx.stream.launch_builder(&ctx.kernels.bias_broadcast);
-        builder.arg(&y_ptr);
-        builder.arg(&b_ptr);
-        builder.arg(&b_i);
-        builder.arg(&n_i);
-        unsafe { builder.launch(grid_1d(batch * n_out)) }
-            .map_err(|e| format!("bias_broadcast_ex_at: {:?}", e))?;
-        1.0f32
-    } else {
-        0.0f32
-    };
-    let alpha: f32 = 1.0;
-    unsafe {
-        cudarc::cublas::result::gemm_ex(
-            *ctx.blas.handle(),
-            cudarc::cublas::sys::cublasOperation_t::CUBLAS_OP_N,
-            cudarc::cublas::sys::cublasOperation_t::CUBLAS_OP_N,
-            n_out as c_int,
-            batch as c_int,
-            n_in as c_int,
-            &alpha as *const f32 as *const c_void,
-            w_ptr as *const c_void,
-            w_dtype.cuda_data_type(),
-            n_out as c_int,
-            x_ptr as *const c_void,
-            x_dtype.cuda_data_type(),
-            n_in as c_int,
-            &beta as *const f32 as *const c_void,
-            y_ptr as *mut c_void,
-            cudarc::cublas::sys::cudaDataType::CUDA_R_32F,
-            n_out as c_int,
-            w_dtype.compute_type(),
-            cudarc::cublas::sys::cublasGemmAlgo_t::CUBLAS_GEMM_DEFAULT,
-        )
-        .map_err(|e| format!("cuBLAS gemm_ex_at failed: {e:?}"))?;
-    }
-    Ok(())
-}
-
 /// Mixed-precision GEMM forward: `Y[B,N] = X[B,K] @ W[K,N] + bias[N]`.
 ///
 /// Inputs X and W are in `w_dtype` (f32/f16/bf16). Output Y is always f32.
@@ -375,18 +339,17 @@ pub fn gpu_gemm_ex_forward_raw_at(
 ///
 /// Bias (if provided) is always f32 (Mamba convention: biases stay f32 regardless of
 /// weight dtype). It is added via a separate broadcast kernel on the f32 output.
-#[allow(clippy::too_many_arguments)]
 pub fn gpu_gemm_ex_forward_raw(
     ctx: &GpuCtx,
     y: &mut GpuBuffer,
-    x_ptr: cudarc::driver::sys::CUdeviceptr,
-    x_dtype: WeightDtype,
-    w_ptr: cudarc::driver::sys::CUdeviceptr,
-    w_dtype: WeightDtype,
+    x: TypedPtr,
+    w: TypedPtr,
     bias_ptr: Option<cudarc::driver::sys::CUdeviceptr>,
     dims: (usize, usize, usize),
 ) -> Result<(), String> {
     let (batch, n_in, n_out) = dims;
+    let (x_ptr, x_dtype) = (x.ptr, x.dtype);
+    let (w_ptr, w_dtype) = (w.ptr, w.dtype);
     let beta = if let Some(b_ptr) = bias_ptr {
         let b_i = batch as i32;
         let n_i = n_out as i32;

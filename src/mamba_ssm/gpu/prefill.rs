@@ -29,19 +29,24 @@ use cudarc::driver::PushKernelArg;
 /// - `a_neg_all`: precomputed `-exp(a_log)` for all layers `[n_layers * d_inner * d_state]`
 /// - `scratch`: batched B*T working buffers
 ///
+/// Inputs bundle for `gpu_forward_inference_prefill`.
+pub struct PrefillInputs<'a, W: MambaWeightsView> {
+    pub ip_out_flat: &'a GpuBuffer,
+    pub weights: &'a W,
+    pub a_neg_all: &'a GpuBuffer,
+}
+
 /// After this call, `state` holds the recurrent state at position T, and
 /// `target_temporal` holds the pre-lm_head hidden state for token T (last).
 /// Follow with normal `step()` calls to continue decoding.
-#[allow(clippy::too_many_arguments)]
 pub fn gpu_forward_inference_prefill<W: MambaWeightsView>(
     ctx: &GpuCtx,
     target_temporal: &mut GpuBuffer,
-    ip_out_flat: &GpuBuffer,
-    weights: &W,
+    inputs: PrefillInputs<'_, W>,
     state: &mut GpuInferenceState,
-    a_neg_all: &GpuBuffer,
     scratch: &mut GpuMambaTargetScratch,
 ) -> Result<(), String> {
+    let PrefillInputs { ip_out_flat, weights, a_neg_all } = inputs;
     let dims: GpuMambaDims = scratch.dims;
     let seq_len = dims.seq_len;
     let b = dims.batch;

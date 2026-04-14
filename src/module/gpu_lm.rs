@@ -7,8 +7,8 @@
 use std::path::Path;
 
 use crate::mamba_ssm::gpu::blas::{
-    gpu_gemm_ex_forward_raw, gpu_gemm_ex_tied_lm_head_raw, gpu_sgemm_forward_raw,
-    gpu_sgemm_tied_lm_head_raw,
+    TiedLmDims, TypedPtr, gpu_gemm_ex_forward_raw, gpu_gemm_ex_tied_lm_head_raw,
+    gpu_sgemm_forward_raw, gpu_sgemm_tied_lm_head_raw,
 };
 use crate::mamba_ssm::gpu::buffers::{GpuBuffer, GpuByteBuffer};
 use crate::mamba_ssm::gpu::dtype::WeightDtype;
@@ -461,10 +461,8 @@ impl GpuMambaLM {
                     gpu_gemm_ex_forward_raw(
                         ctx,
                         &mut self.gpu_logits,
-                        temporal_half_ptr,
-                        *dtype,
-                        lm.cached_ptr(),
-                        *dtype,
+                        TypedPtr { ptr: temporal_half_ptr, dtype: *dtype },
+                        TypedPtr { ptr: lm.cached_ptr(), dtype: *dtype },
                         None,
                         (b, d, self.vocab_size),
                     )?;
@@ -476,9 +474,11 @@ impl GpuMambaLM {
                         temporal_half_ptr,
                         embed.cached_ptr(),
                         *dtype,
-                        b,
-                        d,
-                        self.vocab_size_padded,
+                        TiedLmDims {
+                            batch: b,
+                            d_model: d,
+                            vocab_padded: self.vocab_size_padded,
+                        },
                     )?;
                 }
             }

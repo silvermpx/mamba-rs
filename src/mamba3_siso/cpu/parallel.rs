@@ -101,23 +101,33 @@ unsafe impl Sync for BatchPtrs {}
 
 // ── Parallel forward ──
 
+/// Mamba-3 per-layer recurrent state buffers (all batched `[B * n_layers * ...]`).
+pub struct Mamba3States<'a> {
+    pub ssm: &'a mut [f32],
+    pub k: &'a mut [f32],
+    pub v: &'a mut [f32],
+    pub angle: &'a mut [f32],
+}
+
 /// Parallel Mamba-3 forward for B samples.
 ///
 /// Each sample: per-layer forward with state carry.
 /// `temporal_out`: `[B * seq_len * d_model]` — input and output.
 /// `batch_acts`: `[B]` vec of per-layer activation flats.
-#[allow(clippy::too_many_arguments)]
 pub fn parallel_mamba3_forward(
     temporal_out: &mut [f32],
     batch_acts: &mut [Vec<Mamba3LayerFlat>],
-    ssm_states: &mut [f32],
-    k_states: &mut [f32],
-    v_states: &mut [f32],
-    angle_states: &mut [f32],
+    states: Mamba3States<'_>,
     weights: &TrainMamba3Weights,
     dims: &Mamba3Dims,
     batch_size: usize,
 ) {
+    let Mamba3States {
+        ssm: ssm_states,
+        k: k_states,
+        v: v_states,
+        angle: angle_states,
+    } = states;
     let dm = dims.d_model;
     let nl = dims.n_layers;
     let nh = dims.nheads;
@@ -183,7 +193,6 @@ pub fn parallel_mamba3_forward(
 ///
 /// Each sample processes backward independently, accumulating into thread-local
 /// gradient buffers. After all samples, gradients are tree-reduced into `d_weights`.
-#[allow(clippy::too_many_arguments)]
 pub fn parallel_mamba3_backward(
     d_temporal_out: &mut [f32],
     batch_acts: &[Vec<Mamba3LayerFlat>],
@@ -191,7 +200,6 @@ pub fn parallel_mamba3_backward(
     d_weights: &mut TrainMamba3Weights,
     dims: &Mamba3Dims,
     batch_size: usize,
-    _input_dim: usize,
 ) {
     let dm = dims.d_model;
     let seq_len = dims.seq_len;
@@ -281,10 +289,12 @@ mod tests {
         parallel_mamba3_forward(
             &mut temporal,
             &mut acts,
-            &mut ssm,
-            &mut k,
-            &mut v,
-            &mut angle,
+            Mamba3States {
+                ssm: &mut ssm,
+                k: &mut k,
+                v: &mut v,
+                angle: &mut angle,
+            },
             &w,
             &dims,
             batch,

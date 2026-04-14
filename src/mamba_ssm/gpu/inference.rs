@@ -1139,23 +1139,28 @@ impl GpuMambaBackbone {
         ip_out_flat: &GpuBuffer,
         prefill_scratch: &mut super::backward::GpuMambaTargetScratch,
     ) -> Result<(), String> {
+        use super::prefill::{PrefillInputs, gpu_forward_inference_prefill};
         match &self.engine {
-            BackboneEngine::F32(e) => super::prefill::gpu_forward_inference_prefill(
+            BackboneEngine::F32(e) => gpu_forward_inference_prefill(
                 &e.ctx,
                 &mut self.scratch.temporal,
-                ip_out_flat,
-                &e.weights,
+                PrefillInputs {
+                    ip_out_flat,
+                    weights: &e.weights,
+                    a_neg_all: &e.a_neg_all,
+                },
                 &mut self.state,
-                &e.a_neg_all,
                 prefill_scratch,
             ),
-            BackboneEngine::Mixed(e) => super::prefill::gpu_forward_inference_prefill(
+            BackboneEngine::Mixed(e) => gpu_forward_inference_prefill(
                 e.ctx(),
                 &mut self.scratch.temporal,
-                ip_out_flat,
-                e.weights_mixed_ref(),
+                PrefillInputs {
+                    ip_out_flat,
+                    weights: e.weights_mixed_ref(),
+                    a_neg_all: e.a_neg_all_ref(),
+                },
                 &mut self.state,
-                e.a_neg_all_ref(),
                 prefill_scratch,
             ),
         }
