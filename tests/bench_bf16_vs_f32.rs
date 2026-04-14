@@ -89,7 +89,7 @@ fn bench_m1_bf16_vs_f32_130m() {
             return;
         }
     };
-    eprintln!("\n=== Mamba-1 130m bf16 vs f32 (RTX 4090) ===");
+    eprintln!("\n=== Mamba-1 130m bf16 vs f32 (RTX 6000 Ada) ===");
     for use_graph in [false, true] {
         use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
         bench_m1_dtype(&dir, WeightDtype::F32, "f32 ", use_graph);

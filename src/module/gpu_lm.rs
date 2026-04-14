@@ -221,6 +221,28 @@ impl GpuMambaLM {
         self.backbone.download_temporal(out)
     }
 
+    /// Debug-only: reset state, embed `token`, run the backbone but stop after
+    /// `layer_limit` layers, and download the post-layer residual to `out`.
+    /// Always returns f32 regardless of storage dtype. For step-by-step
+    /// f32-vs-bf16 parity bisection.
+    pub fn debug_step_one_token(
+        &mut self,
+        token: u32,
+        layer_limit: usize,
+        out: &mut [f32],
+    ) -> Result<(), String> {
+        self.backbone.reset()?;
+        let emb = crate::hf::embed::embed_lookup(
+            &self.embed_cpu,
+            token,
+            self.d_model,
+            self.vocab_size,
+        );
+        self.input_cpu[..self.d_model].copy_from_slice(emb);
+        self.backbone
+            .debug_step_partial(&self.input_cpu[..self.d_model], layer_limit, out)
+    }
+
     pub fn reset(&mut self) -> Result<(), String> {
         self.backbone.reset()
     }

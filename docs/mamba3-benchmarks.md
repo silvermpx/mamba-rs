@@ -1,6 +1,6 @@
 # Mamba-3 SISO Benchmarks
 
-Hardware: Ada server — Intel Xeon Gold 5412U (48 threads) + NVIDIA RTX 4090 Ada (48 GB), CUDA 12.8, Driver 595.45.
+Hardware: Ada server — Intel Xeon Gold 5412U (48 threads) + NVIDIA RTX 6000 Ada Generation (48 GB), CUDA 12.8, Driver 595.45.
 
 > **Note**: all numbers below are against synthetic weights via
 > `Mamba3Weights::init` — no public Mamba-3 SISO checkpoints exist yet.

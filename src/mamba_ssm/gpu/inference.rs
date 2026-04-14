@@ -449,6 +449,17 @@ impl GpuMambaInference {
         self.step_kernels_generic(&self.weights, state, scratch)
     }
 
+    /// Debug-only: f32 step stopping after `stop_after_layer` so the caller
+    /// can download `scratch.temporal` for layer-by-layer parity comparison.
+    pub fn step_kernels_f32_debug(
+        &self,
+        state: &mut GpuInferenceState,
+        scratch: &mut GpuInferenceScratch,
+        stop_after_layer: usize,
+    ) -> Result<(), String> {
+        self.step_kernels_generic_impl(&self.weights, state, scratch, Some(stop_after_layer))
+    }
+
     /// Generic step pipeline — works with any weight view (f32 or bf16/f16).
     /// Bulk weights dispatch to SGEMM (f32) or cublasGemmEx (bf16/f16).
     /// Always-f32 weights read directly from their pointers.
@@ -457,6 +468,16 @@ impl GpuMambaInference {
         weights: &W,
         state: &mut GpuInferenceState,
         scratch: &mut GpuInferenceScratch,
+    ) -> Result<(), String> {
+        self.step_kernels_generic_impl(weights, state, scratch, None)
+    }
+
+    fn step_kernels_generic_impl<W: MambaWeightsView>(
+        &self,
+        weights: &W,
+        state: &mut GpuInferenceState,
+        scratch: &mut GpuInferenceScratch,
+        stop_after_layer: Option<usize>,
     ) -> Result<(), String> {
         let b = self.batch;
         let cfg = &self.cfg;
@@ -494,7 +515,11 @@ impl GpuMambaInference {
 
         let f32_sz = std::mem::size_of::<f32>() as u64;
 
-        for layer_idx in 0..weights.n_layers() {
+        let layer_limit = stop_after_layer
+            .map(|n| n.min(weights.n_layers()))
+            .unwrap_or(weights.n_layers());
+
+        for layer_idx in 0..layer_limit {
             let lw = weights.layer(layer_idx);
             let conv_ptr = state.conv.cached_ptr() + (state.conv_offset(layer_idx) as u64) * f32_sz;
             let ssm_ptr = state.ssm.cached_ptr() + (state.ssm_offset(layer_idx) as u64) * f32_sz;
@@ -731,8 +756,9 @@ impl GpuMambaInference {
             }
         }
 
-        // Final RmsNorm (norm_f)
-        {
+        // Final RmsNorm (norm_f) — skipped in debug stop-early mode so the
+        // caller sees the raw residual/temporal at the requested layer.
+        if stop_after_layer.is_none() {
             let b_i = b as i32;
             let dm_i = dm as i32;
             let eps: f32 = 1e-5;
@@ -912,10 +938,34 @@ impl GpuMambaInferenceMixed {
     ///
     /// Requires `identity_proj=true` (HF LLM use case). The RL path keeps
     /// using `step_kernels_generic` against `GpuInferenceScratch`.
+    /// Debug-only: run the mixed-native step stopping after `stop_after_layer`
+    /// has been processed (so the caller can download `scratch.residual` /
+    /// `scratch.temporal` and compare layer-by-layer against the f32 path).
+    /// `stop_after_layer == w.n_layers()` runs the full step (identical math
+    /// to `step_kernels_mixed_native`).
+    pub fn step_kernels_mixed_native_debug(
+        &self,
+        state: &mut GpuInferenceState,
+        scratch: &mut GpuInferenceMixedScratch,
+        stop_after_layer: usize,
+    ) -> Result<(), String> {
+        self.step_kernels_mixed_native_impl(state, scratch, Some(stop_after_layer))
+    }
+
     pub(super) fn step_kernels_mixed_native(
         &self,
         state: &mut GpuInferenceState,
         scratch: &mut GpuInferenceMixedScratch,
+    ) -> Result<(), String> {
+        self.step_kernels_mixed_native_impl(state, scratch, None)
+    }
+
+
+    fn step_kernels_mixed_native_impl(
+        &self,
+        state: &mut GpuInferenceState,
+        scratch: &mut GpuInferenceMixedScratch,
+        stop_after_layer: Option<usize>,
     ) -> Result<(), String> {
         let engine = &self.engine;
         assert!(
@@ -947,7 +997,11 @@ impl GpuMambaInferenceMixed {
 
         let f32_sz = std::mem::size_of::<f32>() as u64;
 
-        for layer_idx in 0..w.n_layers() {
+        let layer_limit = stop_after_layer
+            .map(|n| n.min(w.n_layers()))
+            .unwrap_or(w.n_layers());
+
+        for layer_idx in 0..layer_limit {
             let lw = w.layer(layer_idx);
             let conv_ptr = state.conv.cached_ptr() + (state.conv_offset(layer_idx) as u64) * f32_sz;
             let ssm_ptr = state.ssm.cached_ptr() + (state.ssm_offset(layer_idx) as u64) * f32_sz;
@@ -1204,7 +1258,9 @@ impl GpuMambaInferenceMixed {
         }
 
         // Final rmsnorm norm_f: residual_f32 → temporal_bf16 (output for lm_head).
-        {
+        // Skipped in debug mode if we stopped early — caller wants residual /
+        // temporal as it stands after the requested layer, not after norm_f.
+        if stop_after_layer.is_none() {
             let b_i = b as i32;
             let dm_i = dm as i32;
             let eps: f32 = 1e-5;
@@ -1677,6 +1733,39 @@ impl GpuMambaBackbone {
             }
             (BackboneEngine::Mixed(e), BackboneScratch::Mixed(sc)) => {
                 e.step_gpu_only_mixed_native(input, &mut self.state, sc)
+            }
+            _ => Err("engine/scratch dtype mismatch".to_string()),
+        }
+    }
+
+    /// Debug-only: drive a single step from the current state, but stop after
+    /// processing `layer_limit` layers. Downloads the post-layer residual
+    /// (always f32 — for the F32 backbone this is `scratch.temporal` because
+    /// the residual is copied into temporal at the start of every layer; for
+    /// the Mixed backbone this is `scratch.residual` directly).
+    pub fn debug_step_partial(
+        &mut self,
+        input: &[f32],
+        layer_limit: usize,
+        out: &mut [f32],
+    ) -> Result<(), String> {
+        match (&self.engine, &mut self.scratch) {
+            (BackboneEngine::F32(e), BackboneScratch::F32(sc)) => {
+                sc.gpu_input.upload(&e.ctx.stream, input)?;
+                e.step_kernels_f32_debug(&mut self.state, sc, layer_limit)?;
+                e.ctx
+                    .stream
+                    .synchronize()
+                    .map_err(|err| format!("sync: {err:?}"))?;
+                sc.temporal.download(&e.ctx.stream, out)
+            }
+            (BackboneEngine::Mixed(e), BackboneScratch::Mixed(sc)) => {
+                sc.gpu_input.upload(e.stream(), input)?;
+                e.step_kernels_mixed_native_debug(&mut self.state, sc, layer_limit)?;
+                e.stream()
+                    .synchronize()
+                    .map_err(|err| format!("sync: {err:?}"))?;
+                sc.residual.download(e.stream(), out)
             }
             _ => Err("engine/scratch dtype mismatch".to_string()),
         }

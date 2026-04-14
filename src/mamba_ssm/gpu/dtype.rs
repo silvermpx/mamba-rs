@@ -39,7 +39,7 @@ impl WeightDtype {
     /// For bf16/f16 inputs we explicitly use `CUBLAS_COMPUTE_32F_PEDANTIC`
     /// rather than `CUBLAS_COMPUTE_32F`. The non-pedantic variant is
     /// allowed by cuBLAS to pick a TF32/faster-than-f32 accumulation on
-    /// Ampere+ GPUs, and in practice on RTX 4090 + CUDA 12.8 this chose
+    /// Ampere+ GPUs, and in practice on RTX 6000 Ada + CUDA 12.8 this chose
     /// a kernel that silently reduced precision on large bf16 GEMMs
     /// (mamba-1.4b, d_inner=4096) — greedy decode on bf16 diverged from
     /// bf16 HF reference. Pedantic forces true f32 accumulation with a

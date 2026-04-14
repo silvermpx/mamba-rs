@@ -1,6 +1,6 @@
 # Mamba-1 SSM Benchmarks
 
-Hardware: Ada server — Intel Xeon Gold 5412U (48 threads) + NVIDIA RTX 4090 Ada (48 GB), CUDA 12.8, Driver 595.45.
+Hardware: Ada server — Intel Xeon Gold 5412U (48 threads) + NVIDIA RTX 6000 Ada Generation (48 GB), CUDA 12.8, Driver 595.45.
 
 ## LLM Inference — state-spaces/mamba-*-hf (end-to-end, graph-captured)
 
