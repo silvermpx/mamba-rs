@@ -347,20 +347,52 @@ pub fn gpu_gemm_ex_forward_raw(
     bias_ptr: Option<cudarc::driver::sys::CUdeviceptr>,
     dims: (usize, usize, usize),
 ) -> Result<(), String> {
+    gpu_gemm_typed_forward_raw(
+        ctx,
+        TypedPtr { ptr: y.cached_ptr(), dtype: WeightDtype::F32 },
+        x,
+        w,
+        bias_ptr,
+        dims,
+    )
+}
+
+/// Fully typed GEMM forward: `C[B,N] = A[B,K] @ W[K,N] + bias[N]`.
+///
+/// All three operand dtypes are independent (`a.dtype`, `w.dtype`, `c.dtype`).
+/// Compute type is f32 (CUBLAS_COMPUTE_32F) regardless of I/O dtypes —
+/// tensor-core accumulation stays f32 for numerical stability.
+///
+/// Bias (if provided) is always stored f32 (Mamba convention) and is
+/// broadcast into C via the typed `bias_broadcast_<c.dtype>` kernel,
+/// which upcasts bias to f32, adds f32, and downcasts to `c.dtype`.
+///
+/// Used for end-to-end bf16/f16 activation paths where GEMM writes
+/// directly to half-precision output without a staging f32 copy.
+pub fn gpu_gemm_typed_forward_raw(
+    ctx: &GpuCtx,
+    c: TypedPtr,
+    x: TypedPtr,
+    w: TypedPtr,
+    bias_ptr: Option<cudarc::driver::sys::CUdeviceptr>,
+    dims: (usize, usize, usize),
+) -> Result<(), String> {
     let (batch, n_in, n_out) = dims;
-    let (x_ptr, x_dtype) = (x.ptr, x.dtype);
-    let (w_ptr, w_dtype) = (w.ptr, w.dtype);
     let beta = if let Some(b_ptr) = bias_ptr {
         let b_i = batch as i32;
         let n_i = n_out as i32;
-        let y_ptr = y.cached_ptr();
-        let mut builder = ctx.stream.launch_builder(&ctx.kernels.bias_broadcast);
-        builder.arg(&y_ptr);
+        let c_ptr = c.ptr;
+        let bias_kernel = match c.dtype {
+            WeightDtype::F32 => &ctx.kernels.bias_broadcast,
+            d => ctx.kernels.bias_broadcast_typed.get(d),
+        };
+        let mut builder = ctx.stream.launch_builder(bias_kernel);
+        builder.arg(&c_ptr);
         builder.arg(&b_ptr);
         builder.arg(&b_i);
         builder.arg(&n_i);
         unsafe { builder.launch(grid_1d(batch * n_out)) }
-            .map_err(|e| format!("bias_broadcast_ex: {:?}", e))?;
+            .map_err(|e| format!("bias_broadcast_typed: {:?}", e))?;
         1.0f32
     } else {
         0.0f32
@@ -376,20 +408,22 @@ pub fn gpu_gemm_ex_forward_raw(
             batch as c_int,
             n_in as c_int,
             &alpha as *const f32 as *const c_void,
-            w_ptr as *const c_void,
-            w_dtype.cuda_data_type(),
+            w.ptr as *const c_void,
+            w.dtype.cuda_data_type(),
             n_out as c_int,
-            x_ptr as *const c_void,
-            x_dtype.cuda_data_type(),
+            x.ptr as *const c_void,
+            x.dtype.cuda_data_type(),
             n_in as c_int,
             &beta as *const f32 as *const c_void,
-            y.cached_ptr() as *mut c_void,
-            cudarc::cublas::sys::cudaDataType::CUDA_R_32F,
+            c.ptr as *mut c_void,
+            c.dtype.cuda_data_type(),
             n_out as c_int,
-            w_dtype.compute_type(),
+            // Compute type derives from W dtype (f32 for F32 weights, f32 for
+            // bf16/f16 — all our paths use CUBLAS_COMPUTE_32F accumulate).
+            w.dtype.compute_type(),
             cudarc::cublas::sys::cublasGemmAlgo_t::CUBLAS_GEMM_DEFAULT,
         )
-        .map_err(|e| format!("cuBLAS gemm_ex failed: {e:?}"))?;
+        .map_err(|e| format!("cuBLAS gemm_ex typed failed: {e:?}"))?;
     }
 
     Ok(())

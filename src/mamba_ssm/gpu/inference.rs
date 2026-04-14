@@ -6,7 +6,7 @@
 //! All 12 existing CUDA kernels are reused — zero new kernel code needed.
 
 use super::blas::gpu_gemm_forward_dispatch;
-use super::buffers::GpuBuffer;
+use super::buffers::{DtypedBuf, GpuBuffer};
 use super::context::GpuCtx;
 use super::device::GpuDevice;
 use super::dtype::WeightDtype;
@@ -139,6 +139,87 @@ impl GpuInferenceScratch {
             c_buf: GpuBuffer::zeros(stream, batch * ds)?,
             y: GpuBuffer::zeros(stream, batch * di)?,
             rms_buf: GpuBuffer::zeros(stream, batch)?,
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// GPU Inference Mixed Scratch (end-to-end bf16/f16 activations)
+// ---------------------------------------------------------------------------
+
+/// Scratch for mixed-precision inference with bf16/f16 activations.
+///
+/// Kept separate from `GpuInferenceScratch` (f32) so the RL training path
+/// touches nothing. Dtype policy per-tensor:
+///
+/// - **Half dtype** (bf16/f16, matches weight dtype) — GEMM I/O and
+///   activation-storage tensors: `gpu_input`, `temporal`, `proj`,
+///   `x_branch`, `gate_silu`, `u`, `xdbl`, `dt_gather`, `b_buf`, `c_buf`,
+///   `y`. Half-precision mantissa (bf16: 7-bit, f16: 10-bit) is sufficient
+///   for stored activations; compute happens in f32 (CUBLAS_COMPUTE_32F
+///   for GEMMs, upcast-inside-kernel for activation kernels).
+/// - **f32** — `residual`, `delta`, `rms_buf`. The residual stream
+///   accumulates across ~24 layers and must stay f32 (HF Mamba default
+///   `residual_in_fp32=True`). `delta = softplus(dt_proj)` feeds the SSM
+///   recurrence whose state is f32; keeping `delta` f32 avoids a cast
+///   inside the hot SSM kernel. `rms_buf` is a per-batch statistic (small)
+///   used by RMSNorm — never dtype-sensitive.
+pub struct GpuInferenceMixedScratch {
+    pub gpu_input: DtypedBuf,
+    pub temporal: DtypedBuf,
+    pub residual: GpuBuffer,
+    pub proj: DtypedBuf,
+    pub x_branch: DtypedBuf,
+    pub gate_silu: DtypedBuf,
+    pub u: DtypedBuf,
+    pub xdbl: DtypedBuf,
+    pub dt_gather: DtypedBuf,
+    pub delta: GpuBuffer,
+    pub b_buf: DtypedBuf,
+    pub c_buf: DtypedBuf,
+    pub y: DtypedBuf,
+    pub rms_buf: GpuBuffer,
+    pub dtype: WeightDtype,
+}
+
+impl GpuInferenceMixedScratch {
+    /// Allocate mixed-precision scratch. `dtype` must match the weight dtype
+    /// of the `GpuMambaInferenceMixed` engine that will use this scratch.
+    pub fn new(
+        stream: &Arc<cudarc::driver::CudaStream>,
+        batch: usize,
+        cfg: &MambaConfig,
+        input_dim: usize,
+        dtype: WeightDtype,
+    ) -> Result<Self, String> {
+        if matches!(dtype, WeightDtype::F32) {
+            return Err(
+                "GpuInferenceMixedScratch requires bf16 or f16 dtype (use \
+                 GpuInferenceScratch for f32)"
+                    .to_string(),
+            );
+        }
+        let dm = cfg.d_model;
+        let di = cfg.d_inner();
+        let ds = cfg.d_state;
+        let dt_rank = cfg.dt_rank();
+        let xdbl_dim = cfg.xdbl_dim();
+        Ok(Self {
+            gpu_input: DtypedBuf::zeros(stream, batch * input_dim, dtype)?,
+            temporal: DtypedBuf::zeros(stream, batch * dm, dtype)?,
+            residual: GpuBuffer::zeros(stream, batch * dm)?,
+            proj: DtypedBuf::zeros(stream, batch * 2 * di, dtype)?,
+            x_branch: DtypedBuf::zeros(stream, batch * di, dtype)?,
+            gate_silu: DtypedBuf::zeros(stream, batch * di, dtype)?,
+            u: DtypedBuf::zeros(stream, batch * di, dtype)?,
+            xdbl: DtypedBuf::zeros(stream, batch * xdbl_dim, dtype)?,
+            dt_gather: DtypedBuf::zeros(stream, batch * dt_rank, dtype)?,
+            delta: GpuBuffer::zeros(stream, batch * di)?,
+            b_buf: DtypedBuf::zeros(stream, batch * ds, dtype)?,
+            c_buf: DtypedBuf::zeros(stream, batch * ds, dtype)?,
+            y: DtypedBuf::zeros(stream, batch * di, dtype)?,
+            rms_buf: GpuBuffer::zeros(stream, batch)?,
+            dtype,
         })
     }
 }
