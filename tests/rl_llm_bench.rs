@@ -224,7 +224,9 @@ fn rl_cpu_training_step_batch_sweep() {
     let iters = 30;
     let n_threads = rayon::current_num_threads();
 
-    eprintln!("\n=== RL training step: M3 small (d_model=128, 4 layers), T={seq_len}, threads={n_threads} ===");
+    eprintln!(
+        "\n=== RL training step: M3 small (d_model=128, 4 layers), T={seq_len}, threads={n_threads} ==="
+    );
     eprintln!(
         "{:>5} | {:>10} {:>10} {:>12}",
         "B", "fwd (ms)", "bwd (ms)", "steps/s"
@@ -256,7 +258,10 @@ fn rl_cpu_training_step_model_sweep() {
         "config", "fwd (ms)", "bwd (ms)", "steps/s"
     );
 
-    for (label, cfg) in [("tiny(d64)", rl_config_tiny()), ("small(d128)", rl_config_small())] {
+    for (label, cfg) in [
+        ("tiny(d64)", rl_config_tiny()),
+        ("small(d128)", rl_config_small()),
+    ] {
         let (fwd, bwd) = time_training_step(&cfg, batch, seq_len, iters);
         let step_ms = (fwd + bwd) / 1000.0;
         let steps_s = 1000.0 / step_ms;
@@ -345,7 +350,12 @@ mod llm {
             "{:>14} | {:>13} {:>12} {:>12} {:>12}",
             "model", "prefill (ms)", "dec (ms)", "dec tok/s", "TTFT (ms)"
         );
-        for name in ["mamba-130m-hf", "mamba-370m-hf", "mamba-1.4b-hf", "mamba-2.8b-hf"] {
+        for name in [
+            "mamba-130m-hf",
+            "mamba-370m-hf",
+            "mamba-1.4b-hf",
+            "mamba-2.8b-hf",
+        ] {
             let dir = match find_model_dir(name) {
                 Some(d) => d,
                 None => {
@@ -492,9 +502,7 @@ mod llm {
             }
         };
 
-        eprintln!(
-            "\n=== GPU batched step throughput: {name} bf16 (RL parallel envs) ==="
-        );
+        eprintln!("\n=== GPU batched step throughput: {name} bf16 (RL parallel envs) ===");
         eprintln!(
             "NOTE: batched generate_batch has a known correctness bug \
              (test_gpu_batch_generation failing); these numbers measure \
@@ -550,7 +558,12 @@ mod llm {
             "{:>14} | {:>6} | {:>8} {:>10}",
             "model", "dtype", "tok/s", "ms/tok"
         );
-        for name in ["mamba-130m-hf", "mamba-370m-hf", "mamba-1.4b-hf", "mamba-2.8b-hf"] {
+        for name in [
+            "mamba-130m-hf",
+            "mamba-370m-hf",
+            "mamba-1.4b-hf",
+            "mamba-2.8b-hf",
+        ] {
             let dir = match find_model_dir(name) {
                 Some(d) => d,
                 None => {
@@ -583,10 +596,7 @@ mod llm {
                 let secs = t0.elapsed().as_secs_f64();
                 let tps = toks.len() as f64 / secs;
                 let ms_per_tok = secs * 1000.0 / toks.len() as f64;
-                eprintln!(
-                    "{name:>14} | {label} | {:>8.0} {:>10.2}",
-                    tps, ms_per_tok
-                );
+                eprintln!("{name:>14} | {label} | {:>8.0} {:>10.2}", tps, ms_per_tok);
             }
         }
     }

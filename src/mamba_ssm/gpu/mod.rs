@@ -16,11 +16,11 @@ pub mod context;
 pub mod device;
 pub mod dtype;
 pub mod forward;
+pub mod forward_mixed;
 pub mod inference;
 pub mod kernels;
 pub mod launch;
 pub mod prefill;
-pub mod forward_mixed;
 pub mod weights;
 pub mod weights_mixed_train;
 

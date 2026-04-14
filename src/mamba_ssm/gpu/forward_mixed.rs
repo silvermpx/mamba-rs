@@ -256,7 +256,7 @@ pub fn gpu_forward_mamba_backbone_mixed(
     if mamba_w.input_proj_w.len_elems() == 0 {
         // Identity-proj. Skip any save (input_proj_inputs/outputs unused in
         // backward when input_proj is identity).
-        let bytes = (bt * dm * 4) as usize;
+        let bytes = bt * dm * 4;
         let res = unsafe {
             cudarc::driver::sys::cuMemcpyDtoDAsync_v2(
                 acts.layers[0].residual.cached_ptr(),
@@ -317,9 +317,18 @@ pub fn gpu_forward_mamba_backbone_mixed(
         // F2: in_proj GEMM typed — [B*T, dm] -> [B*T, 2*di].
         gpu_gemm_typed_forward_raw(
             ctx,
-            TypedPtr { ptr: scratch.proj_flat.cached_ptr(), dtype: dt },
-            TypedPtr { ptr: layer_acts.post_norm.cached_ptr(), dtype: dt },
-            TypedPtr { ptr: lw.in_proj_w.ptr(), dtype: dt },
+            TypedPtr {
+                ptr: scratch.proj_flat.cached_ptr(),
+                dtype: dt,
+            },
+            TypedPtr {
+                ptr: layer_acts.post_norm.cached_ptr(),
+                dtype: dt,
+            },
+            TypedPtr {
+                ptr: lw.in_proj_w.ptr(),
+                dtype: dt,
+            },
             None,
             (bt, dm, 2 * di),
         )?;
@@ -379,9 +388,18 @@ pub fn gpu_forward_mamba_backbone_mixed(
         // F4b: x_proj GEMM typed.
         gpu_gemm_typed_forward_raw(
             ctx,
-            TypedPtr { ptr: layer_acts.xdbl.cached_ptr(), dtype: dt },
-            TypedPtr { ptr: layer_acts.u.cached_ptr(), dtype: dt },
-            TypedPtr { ptr: lw.x_proj_w.ptr(), dtype: dt },
+            TypedPtr {
+                ptr: layer_acts.xdbl.cached_ptr(),
+                dtype: dt,
+            },
+            TypedPtr {
+                ptr: layer_acts.u.cached_ptr(),
+                dtype: dt,
+            },
+            TypedPtr {
+                ptr: lw.x_proj_w.ptr(),
+                dtype: dt,
+            },
             None,
             (bt, di, xdbl_dim),
         )?;
@@ -406,9 +424,18 @@ pub fn gpu_forward_mamba_backbone_mixed(
         }
         gpu_gemm_typed_forward_raw(
             ctx,
-            TypedPtr { ptr: layer_acts.delta_raw.cached_ptr(), dtype: dt },
-            TypedPtr { ptr: scratch.dt_gather.cached_ptr(), dtype: dt },
-            TypedPtr { ptr: lw.dt_proj_w.ptr(), dtype: dt },
+            TypedPtr {
+                ptr: layer_acts.delta_raw.cached_ptr(),
+                dtype: dt,
+            },
+            TypedPtr {
+                ptr: scratch.dt_gather.cached_ptr(),
+                dtype: dt,
+            },
+            TypedPtr {
+                ptr: lw.dt_proj_w.ptr(),
+                dtype: dt,
+            },
             Some(lw.dt_proj_b.ptr()),
             (bt, dt_rank, di),
         )?;
@@ -510,9 +537,18 @@ pub fn gpu_forward_mamba_backbone_mixed(
         // F5: out_proj GEMM typed → scratch.out_flat [B*T, d_model].
         gpu_gemm_typed_forward_raw(
             ctx,
-            TypedPtr { ptr: scratch.out_flat.cached_ptr(), dtype: dt },
-            TypedPtr { ptr: layer_acts.gated.cached_ptr(), dtype: dt },
-            TypedPtr { ptr: lw.out_proj_w.ptr(), dtype: dt },
+            TypedPtr {
+                ptr: scratch.out_flat.cached_ptr(),
+                dtype: dt,
+            },
+            TypedPtr {
+                ptr: layer_acts.gated.cached_ptr(),
+                dtype: dt,
+            },
+            TypedPtr {
+                ptr: lw.out_proj_w.ptr(),
+                dtype: dt,
+            },
             None,
             (bt, di, dm),
         )?;
@@ -531,8 +567,8 @@ pub fn gpu_forward_mamba_backbone_mixed(
             let cur_res = acts.layers[layer_idx].residual.cached_ptr();
             let of = scratch.out_flat.cached_ptr();
             bld.arg(&next_res_ptr); // dst f32
-            bld.arg(&cur_res);      // a f32
-            bld.arg(&of);           // b typed
+            bld.arg(&cur_res); // a f32
+            bld.arg(&of); // b typed
             bld.arg(&n);
             unsafe { bld.launch(grid_1d(bt * dm)) }
                 .map_err(|e| format!("residual_add_f32_typed L{layer_idx}: {e:?}"))?;

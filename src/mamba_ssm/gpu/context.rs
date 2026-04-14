@@ -53,14 +53,14 @@ impl GpuCtx {
         }
     }
 
-    /// Pre-size the half-precision staging buffer for a known engine config
-    /// + batch + dtype. Eliminates lazy-grow during the hot path — critical
-    /// for CUDA Graph capture safety: if a captured graph baked a staging
-    /// pointer and a later call grew the buffer, the freed allocation would
-    /// be dereferenced on replay (CUDA_ERROR_ILLEGAL_ADDRESS or silent
-    /// corruption). Sizes for the worst-case step-time GEMM operand
-    /// (in_proj input = batch × d_model, the largest staging consumer in
-    /// step_kernels). Idempotent — safe to call multiple times.
+    /// Pre-size the half-precision staging buffer for a known engine
+    /// config, batch, and dtype. Eliminates lazy-grow during the hot path
+    /// — critical for CUDA Graph capture safety: if a captured graph baked
+    /// a staging pointer and a later call grew the buffer, the freed
+    /// allocation would be dereferenced on replay (CUDA_ERROR_ILLEGAL_ADDRESS
+    /// or silent corruption). Sizes for the worst-case step-time GEMM
+    /// operand (in_proj input = batch × d_model, the largest staging consumer
+    /// in step_kernels). Idempotent — safe to call multiple times.
     pub fn presize_half_staging_for_step(
         &self,
         cfg: &MambaConfig,

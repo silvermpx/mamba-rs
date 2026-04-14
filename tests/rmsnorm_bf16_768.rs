@@ -71,7 +71,12 @@ fn rmsnorm_bf16_dim768_direct() {
     let ss: f32 = x_host.iter().map(|v| v * v).sum::<f32>() / dim as f32;
     let expected_rms = (ss + eps).sqrt();
     let rms_err = (rms_host[0] - expected_rms).abs() / expected_rms;
-    assert!(rms_err < 1e-4, "rms mismatch: got {}, expected {}", rms_host[0], expected_rms);
+    assert!(
+        rms_err < 1e-4,
+        "rms mismatch: got {}, expected {}",
+        rms_host[0],
+        expected_rms
+    );
     assert!(
         nonzero >= dim - 1,
         "bf16 output has {nonzero}/{dim} non-zero elements — expected nearly all"

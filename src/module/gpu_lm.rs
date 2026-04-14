@@ -234,12 +234,8 @@ impl GpuMambaLM {
         out: &mut [f32],
     ) -> Result<(), String> {
         self.backbone.reset()?;
-        let emb = crate::hf::embed::embed_lookup(
-            &self.embed_cpu,
-            token,
-            self.d_model,
-            self.vocab_size,
-        );
+        let emb =
+            crate::hf::embed::embed_lookup(&self.embed_cpu, token, self.d_model, self.vocab_size);
         self.input_cpu[..self.d_model].copy_from_slice(emb);
         self.backbone
             .debug_step_partial(&self.input_cpu[..self.d_model], layer_limit, out)

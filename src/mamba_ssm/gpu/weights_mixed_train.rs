@@ -63,7 +63,12 @@ impl GpuMambaTrainMixedWeights {
     /// master weights, before the next forward pass reads from `compute`.
     pub fn sync_master_to_compute(&self, ctx: &GpuCtx) -> Result<(), String> {
         // input_proj — bulk
-        sync_one(ctx, &self.master.input_proj_w, &self.compute.input_proj_w, self.dtype)?;
+        sync_one(
+            ctx,
+            &self.master.input_proj_w,
+            &self.compute.input_proj_w,
+            self.dtype,
+        )?;
         // input_proj_b — f32 stays f32
         sync_f32(ctx, &self.master.input_proj_b, &self.compute.input_proj_b)?;
 

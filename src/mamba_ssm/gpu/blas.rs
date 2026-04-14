@@ -147,6 +147,64 @@ pub fn gpu_sgemm_backward_dw_grad(
     Ok(())
 }
 
+/// Typed dW backward GEMM (Step 4c). Matches the f32
+/// [`gpu_sgemm_backward_dw_grad`] math with bf16/f16 inputs and f32 master
+/// gradient accumulator.
+///
+/// Math: `dW[K=n_in, N=n_out] += X^T @ dY` where X is `[batch, n_in]` and
+/// dY is `[batch, n_out]`. Mirrors NVIDIA Apex `mlp_bp` weight grad pattern:
+/// - A = dY (typed, OP_N), `lda=n_out`
+/// - B = X  (typed, OP_T), `ldb=n_in`
+/// - C = dW (f32 master, accumulator), `ldc=n_out`
+/// - alpha=1.0, beta=1.0 (f32 scalars; PEDANTIC requires host f32, not f64)
+/// - compute = `CUBLAS_COMPUTE_32F_PEDANTIC` (true f32 accumulate; we
+///   intentionally diverge from PyTorch's TF32 default — see commit 61325b3
+///   for the 1.4b regression that motivated PEDANTIC).
+///
+/// `dy.dtype` and `x.dtype` MUST match (cuBLAS GemmEx requires same A/B
+/// element type). Output buffer `dw` is always f32 (master grad).
+pub fn gpu_sgemm_backward_dw_grad_typed(
+    ctx: &GpuCtx,
+    dw: &GradSlice,
+    dy: TypedPtr,
+    x_saved: TypedPtr,
+    batch: usize,
+    n_in: usize,
+    n_out: usize,
+) -> Result<(), String> {
+    debug_assert_eq!(
+        dy.dtype, x_saved.dtype,
+        "cuBLAS GemmEx requires A.dtype == B.dtype"
+    );
+    let alpha: f32 = 1.0;
+    let beta: f32 = 1.0;
+    unsafe {
+        cudarc::cublas::result::gemm_ex(
+            *ctx.blas.handle(),
+            cudarc::cublas::sys::cublasOperation_t::CUBLAS_OP_N,
+            cudarc::cublas::sys::cublasOperation_t::CUBLAS_OP_T,
+            n_out as c_int,
+            n_in as c_int,
+            batch as c_int,
+            &alpha as *const f32 as *const c_void,
+            dy.ptr as *const c_void,
+            dy.dtype.cuda_data_type(),
+            n_out as c_int,
+            x_saved.ptr as *const c_void,
+            x_saved.dtype.cuda_data_type(),
+            n_in as c_int,
+            &beta as *const f32 as *const c_void,
+            dw.ptr() as *mut c_void,
+            cudarc::cublas::sys::cudaDataType::CUDA_R_32F,
+            n_out as c_int,
+            dy.dtype.compute_type(),
+            cudarc::cublas::sys::cublasGemmAlgo_t::CUBLAS_GEMM_DEFAULT,
+        )
+        .map_err(|e| format!("cuBLAS gemm_ex backward dW typed failed: {e:?}"))?;
+    }
+    Ok(())
+}
+
 /// Full backward: dW (accumulated), dX (overwritten), db (accumulated).
 ///
 /// `grads` = `(dw, db)`. `dims` = `(batch, n_in, n_out)`.

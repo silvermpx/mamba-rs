@@ -47,9 +47,7 @@ impl WeightDtype {
     pub fn compute_type(self) -> cublas_sys::cublasComputeType_t {
         match self {
             Self::F32 => cublas_sys::cublasComputeType_t::CUBLAS_COMPUTE_32F,
-            Self::Bf16 | Self::F16 => {
-                cublas_sys::cublasComputeType_t::CUBLAS_COMPUTE_32F_PEDANTIC
-            }
+            Self::Bf16 | Self::F16 => cublas_sys::cublasComputeType_t::CUBLAS_COMPUTE_32F_PEDANTIC,
         }
     }
 

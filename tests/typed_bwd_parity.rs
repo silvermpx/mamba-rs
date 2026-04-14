@@ -15,7 +15,10 @@
 #![cfg(feature = "cuda")]
 
 use cudarc::driver::PushKernelArg;
-use mamba_rs::mamba_ssm::gpu::buffers::{DtypedBuf, GpuBuffer};
+use mamba_rs::mamba_ssm::gpu::blas::{
+    TypedPtr, gpu_sgemm_backward_dw_grad, gpu_sgemm_backward_dw_grad_typed,
+};
+use mamba_rs::mamba_ssm::gpu::buffers::{DtypedBuf, GpuBuffer, GradSlice};
 use mamba_rs::mamba_ssm::gpu::context::GpuCtx;
 use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
 use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
@@ -299,8 +302,7 @@ fn gating_bwd_bf16_matches_f32() {
     let y32 = upload_typed(&ctx.stream, &y_f, WeightDtype::F32);
     let gp32 = upload_typed(&ctx.stream, &gate_pre_f, WeightDtype::F32);
     let gs32 = upload_typed(&ctx.stream, &gate_post_f, WeightDtype::F32);
-    let (dy_ref, dgate_ref) =
-        run_gating_bwd(&ctx, n, &dg32, &y32, &gp32, &gs32, WeightDtype::F32);
+    let (dy_ref, dgate_ref) = run_gating_bwd(&ctx, n, &dg32, &y32, &gp32, &gs32, WeightDtype::F32);
     let dy_ref_v = download_typed(&ctx.stream, &dy_ref, WeightDtype::F32);
     let dgate_ref_v = download_typed(&ctx.stream, &dgate_ref, WeightDtype::F32);
 
@@ -316,7 +318,15 @@ fn gating_bwd_bf16_matches_f32() {
 
     eprintln!("gating_bwd bf16 parity (n={n}):");
     assert_grad_close(&dy_ref_v, &dy_bf_v, 5e-2, 1e-3, 0.999, 5e-3, "d_y bf16");
-    assert_grad_close(&dgate_ref_v, &dgate_bf_v, 5e-2, 1e-3, 0.999, 5e-3, "d_gate_pre bf16");
+    assert_grad_close(
+        &dgate_ref_v,
+        &dgate_bf_v,
+        5e-2,
+        1e-3,
+        0.999,
+        5e-3,
+        "d_gate_pre bf16",
+    );
 
     // f16 typed.
     let dg_h = upload_typed(&ctx.stream, &d_gated_f, WeightDtype::F16);
@@ -329,35 +339,44 @@ fn gating_bwd_bf16_matches_f32() {
 
     eprintln!("gating_bwd f16 parity (n={n}):");
     assert_grad_close(&dy_ref_v, &dy_h_v, 1e-2, 5e-4, 0.9995, 2e-3, "d_y f16");
-    assert_grad_close(&dgate_ref_v, &dgate_h_v, 1e-2, 5e-4, 0.9995, 2e-3, "d_gate_pre f16");
+    assert_grad_close(
+        &dgate_ref_v,
+        &dgate_h_v,
+        1e-2,
+        5e-4,
+        0.9995,
+        2e-3,
+        "d_gate_pre f16",
+    );
 }
 
 // ─── rmsnorm_backward ────────────────────────────────────────────────
 
-fn run_rmsnorm_bwd(
-    ctx: &GpuCtx,
+struct RmsnormBwdInputs<'a> {
     batch: usize,
     dim: usize,
-    dy: &DtypedBuf,
-    x: &DtypedBuf,
-    scale: &GpuBuffer,
-    rms_saved: &GpuBuffer,
+    dy: &'a DtypedBuf,
+    x: &'a DtypedBuf,
+    scale: &'a GpuBuffer,
+    rms_saved: &'a GpuBuffer,
     dtype: WeightDtype,
-) -> (DtypedBuf, GpuBuffer) {
-    let dx = DtypedBuf::zeros(&ctx.stream, batch * dim, dtype).unwrap();
-    let d_scale = GpuBuffer::zeros(&ctx.stream, dim).unwrap();
+}
+
+fn run_rmsnorm_bwd(ctx: &GpuCtx, i: RmsnormBwdInputs<'_>) -> (DtypedBuf, GpuBuffer) {
+    let dx = DtypedBuf::zeros(&ctx.stream, i.batch * i.dim, i.dtype).unwrap();
+    let d_scale = GpuBuffer::zeros(&ctx.stream, i.dim).unwrap();
     ctx.stream.synchronize().unwrap(); // race-fix: alloc_zeros before launch
-    let bi = batch as i32;
-    let di = dim as i32;
+    let bi = i.batch as i32;
+    let di = i.dim as i32;
     let mut bld = ctx
         .stream
-        .launch_builder(ctx.kernels.rmsnorm_bwd_typed.get(dtype));
+        .launch_builder(ctx.kernels.rmsnorm_bwd_typed.get(i.dtype));
     let dx_ptr = dx.cached_ptr();
     let dsc_ptr = d_scale.cached_ptr();
-    let dy_ptr = dy.cached_ptr();
-    let x_ptr = x.cached_ptr();
-    let sc_ptr = scale.cached_ptr();
-    let rms_ptr = rms_saved.cached_ptr();
+    let dy_ptr = i.dy.cached_ptr();
+    let x_ptr = i.x.cached_ptr();
+    let sc_ptr = i.scale.cached_ptr();
+    let rms_ptr = i.rms_saved.cached_ptr();
     bld.arg(&dx_ptr);
     bld.arg(&dsc_ptr);
     bld.arg(&dy_ptr);
@@ -366,7 +385,7 @@ fn run_rmsnorm_bwd(
     bld.arg(&rms_ptr);
     bld.arg(&bi);
     bld.arg(&di);
-    unsafe { bld.launch(grid_norm(batch, dim)) }.unwrap();
+    unsafe { bld.launch(grid_norm(i.batch, i.dim)) }.unwrap();
     ctx.stream.synchronize().unwrap();
     (dx, d_scale)
 }
@@ -412,13 +431,15 @@ fn rmsnorm_bwd_bf16_matches_f32() {
     let x32 = upload_typed(&ctx.stream, &x_f, WeightDtype::F32);
     let (dx_ref, dsc_ref) = run_rmsnorm_bwd(
         &ctx,
-        batch,
-        dim,
-        &dy32,
-        &x32,
-        &scale_buf,
-        &rms_buf,
-        WeightDtype::F32,
+        RmsnormBwdInputs {
+            batch,
+            dim,
+            dy: &dy32,
+            x: &x32,
+            scale: &scale_buf,
+            rms_saved: &rms_buf,
+            dtype: WeightDtype::F32,
+        },
     );
     let dx_ref_v = download_typed(&ctx.stream, &dx_ref, WeightDtype::F32);
     let mut dsc_ref_v = vec![0f32; dim];
@@ -429,13 +450,15 @@ fn rmsnorm_bwd_bf16_matches_f32() {
     let x_bf = upload_typed(&ctx.stream, &x_f, WeightDtype::Bf16);
     let (dx_bf, dsc_bf) = run_rmsnorm_bwd(
         &ctx,
-        batch,
-        dim,
-        &dy_bf,
-        &x_bf,
-        &scale_buf,
-        &rms_buf,
-        WeightDtype::Bf16,
+        RmsnormBwdInputs {
+            batch,
+            dim,
+            dy: &dy_bf,
+            x: &x_bf,
+            scale: &scale_buf,
+            rms_saved: &rms_buf,
+            dtype: WeightDtype::Bf16,
+        },
     );
     let dx_bf_v = download_typed(&ctx.stream, &dx_bf, WeightDtype::Bf16);
     let mut dsc_bf_v = vec![0f32; dim];
@@ -447,20 +470,30 @@ fn rmsnorm_bwd_bf16_matches_f32() {
     // x_hat ≈ x/rms can swing ±3 with ULP_bf16 ≈ 0.024 absolute per term;
     // CLT sum noise ≈ sqrt(B)*ULP × 1/B per element ≈ 3% relative. PyTorch
     // AMP / Apex use rtol=5% for bf16 backward grads.
-    assert_grad_close(&dsc_ref_v, &dsc_bf_v, 5e-2, 1e-3, 0.999, 5e-3, "d_scale bf16 (f32 master)");
+    assert_grad_close(
+        &dsc_ref_v,
+        &dsc_bf_v,
+        5e-2,
+        1e-3,
+        0.999,
+        5e-3,
+        "d_scale bf16 (f32 master)",
+    );
 
     // f16.
     let dy_h = upload_typed(&ctx.stream, &dy_f, WeightDtype::F16);
     let x_h = upload_typed(&ctx.stream, &x_f, WeightDtype::F16);
     let (dx_h, dsc_h) = run_rmsnorm_bwd(
         &ctx,
-        batch,
-        dim,
-        &dy_h,
-        &x_h,
-        &scale_buf,
-        &rms_buf,
-        WeightDtype::F16,
+        RmsnormBwdInputs {
+            batch,
+            dim,
+            dy: &dy_h,
+            x: &x_h,
+            scale: &scale_buf,
+            rms_saved: &rms_buf,
+            dtype: WeightDtype::F16,
+        },
     );
     let dx_h_v = download_typed(&ctx.stream, &dx_h, WeightDtype::F16);
     let mut dsc_h_v = vec![0f32; dim];
@@ -471,41 +504,53 @@ fn rmsnorm_bwd_bf16_matches_f32() {
     // flush — at dim=768 reductions where small contributions accumulate,
     // f16 gets the same cosine quality as bf16, not better.
     assert_grad_close(&dx_ref_v, &dx_h_v, 1e-2, 1e-3, 0.999, 5e-3, "dx f16");
-    assert_grad_close(&dsc_ref_v, &dsc_h_v, 1e-2, 5e-4, 0.999, 5e-3, "d_scale f16 (f32 master)");
+    assert_grad_close(
+        &dsc_ref_v,
+        &dsc_h_v,
+        1e-2,
+        5e-4,
+        0.999,
+        5e-3,
+        "d_scale f16 (f32 master)",
+    );
 }
 
 // ─── conv1d_burnin_backward ─────────────────────────────────────────
 
-fn run_conv1d_burnin_bwd(
-    ctx: &GpuCtx,
+struct Conv1dBurninBwdInputs<'a> {
     batch: usize,
     t: usize,
     di: usize,
     dconv: usize,
-    d_u: &DtypedBuf,
-    post_conv: &DtypedBuf,
-    conv_states: &GpuBuffer,
-    weight: &GpuBuffer,
+    d_u: &'a DtypedBuf,
+    post_conv: &'a DtypedBuf,
+    conv_states: &'a GpuBuffer,
+    weight: &'a GpuBuffer,
     dtype: WeightDtype,
+}
+
+fn run_conv1d_burnin_bwd(
+    ctx: &GpuCtx,
+    i: Conv1dBurninBwdInputs<'_>,
 ) -> (DtypedBuf, GpuBuffer, GpuBuffer) {
-    let d_x_branch = DtypedBuf::zeros(&ctx.stream, batch * t * di, dtype).unwrap();
-    let d_weight = GpuBuffer::zeros(&ctx.stream, di * dconv).unwrap();
-    let d_bias = GpuBuffer::zeros(&ctx.stream, di).unwrap();
+    let d_x_branch = DtypedBuf::zeros(&ctx.stream, i.batch * i.t * i.di, i.dtype).unwrap();
+    let d_weight = GpuBuffer::zeros(&ctx.stream, i.di * i.dconv).unwrap();
+    let d_bias = GpuBuffer::zeros(&ctx.stream, i.di).unwrap();
     ctx.stream.synchronize().unwrap();
-    let bi = batch as i32;
-    let ti = t as i32;
-    let dii = di as i32;
-    let dci = dconv as i32;
+    let bi = i.batch as i32;
+    let ti = i.t as i32;
+    let dii = i.di as i32;
+    let dci = i.dconv as i32;
     let mut bld = ctx
         .stream
-        .launch_builder(ctx.kernels.conv1d_burnin_bwd_typed.get(dtype));
+        .launch_builder(ctx.kernels.conv1d_burnin_bwd_typed.get(i.dtype));
     let dxb_ptr = d_x_branch.cached_ptr();
     let dw_ptr = d_weight.cached_ptr();
     let db_ptr = d_bias.cached_ptr();
-    let du_ptr = d_u.cached_ptr();
-    let pc_ptr = post_conv.cached_ptr();
-    let cs_ptr = conv_states.cached_ptr();
-    let w_ptr = weight.cached_ptr();
+    let du_ptr = i.d_u.cached_ptr();
+    let pc_ptr = i.post_conv.cached_ptr();
+    let cs_ptr = i.conv_states.cached_ptr();
+    let w_ptr = i.weight.cached_ptr();
     bld.arg(&dxb_ptr);
     bld.arg(&dw_ptr);
     bld.arg(&db_ptr);
@@ -517,7 +562,7 @@ fn run_conv1d_burnin_bwd(
     bld.arg(&ti);
     bld.arg(&dii);
     bld.arg(&dci);
-    unsafe { bld.launch(grid_1d(batch * di)) }.unwrap();
+    unsafe { bld.launch(grid_1d(i.batch * i.di)) }.unwrap();
     ctx.stream.synchronize().unwrap();
     (d_x_branch, d_weight, d_bias)
 }
@@ -548,15 +593,17 @@ fn conv1d_burnin_bwd_bf16_matches_f32() {
     let pc32 = upload_typed(&ctx.stream, &post_conv_f, WeightDtype::F32);
     let (dxb_ref, dw_ref, db_ref) = run_conv1d_burnin_bwd(
         &ctx,
-        batch,
-        t,
-        di,
-        dconv,
-        &du32,
-        &pc32,
-        &conv_states_buf,
-        &weight_buf,
-        WeightDtype::F32,
+        Conv1dBurninBwdInputs {
+            batch,
+            t,
+            di,
+            dconv,
+            d_u: &du32,
+            post_conv: &pc32,
+            conv_states: &conv_states_buf,
+            weight: &weight_buf,
+            dtype: WeightDtype::F32,
+        },
     );
     let dxb_ref_v = download_typed(&ctx.stream, &dxb_ref, WeightDtype::F32);
     let mut dw_ref_v = vec![0f32; di * dconv];
@@ -569,15 +616,17 @@ fn conv1d_burnin_bwd_bf16_matches_f32() {
     let pc_bf = upload_typed(&ctx.stream, &post_conv_f, WeightDtype::Bf16);
     let (dxb_bf, dw_bf, db_bf) = run_conv1d_burnin_bwd(
         &ctx,
-        batch,
-        t,
-        di,
-        dconv,
-        &du_bf,
-        &pc_bf,
-        &conv_states_buf,
-        &weight_buf,
-        WeightDtype::Bf16,
+        Conv1dBurninBwdInputs {
+            batch,
+            t,
+            di,
+            dconv,
+            d_u: &du_bf,
+            post_conv: &pc_bf,
+            conv_states: &conv_states_buf,
+            weight: &weight_buf,
+            dtype: WeightDtype::Bf16,
+        },
     );
     let dxb_bf_v = download_typed(&ctx.stream, &dxb_bf, WeightDtype::Bf16);
     let mut dw_bf_v = vec![0f32; di * dconv];
@@ -587,11 +636,35 @@ fn conv1d_burnin_bwd_bf16_matches_f32() {
 
     eprintln!("conv1d_burnin_bwd bf16 parity (B={batch}, T={t}, di={di}, d_conv={dconv}):");
     // d_x_branch: T-step BUG-M2 carry accumulation with bf16 input.
-    assert_grad_close(&dxb_ref_v, &dxb_bf_v, 8e-2, 5e-3, 0.998, 8e-3, "d_x_branch bf16");
+    assert_grad_close(
+        &dxb_ref_v,
+        &dxb_bf_v,
+        8e-2,
+        5e-3,
+        0.998,
+        8e-3,
+        "d_x_branch bf16",
+    );
     // d_weight: B*T=64 atomicAdds per element. Expected ~sqrt(64)*ULP_bf16 ≈ 0.03
     // relative + bf16 input quantization (~4e-3). Total bound ~5%.
-    assert_grad_close(&dw_ref_v, &dw_bf_v, 8e-2, 2e-3, 0.998, 8e-3, "d_weight bf16 (f32 master)");
-    assert_grad_close(&db_ref_v, &db_bf_v, 8e-2, 2e-3, 0.998, 8e-3, "d_bias bf16 (f32 master)");
+    assert_grad_close(
+        &dw_ref_v,
+        &dw_bf_v,
+        8e-2,
+        2e-3,
+        0.998,
+        8e-3,
+        "d_weight bf16 (f32 master)",
+    );
+    assert_grad_close(
+        &db_ref_v,
+        &db_bf_v,
+        8e-2,
+        2e-3,
+        0.998,
+        8e-3,
+        "d_bias bf16 (f32 master)",
+    );
 }
 
 // ─── ssm_backward_local (HOTTEST kernel) ─────────────────────────────
@@ -613,12 +686,12 @@ fn run_ssm_backward_local(
     dy: &DtypedBuf,
     dtype: WeightDtype,
 ) -> (
-    DtypedBuf,  // d_delta
-    DtypedBuf,  // d_u
-    DtypedBuf,  // d_B_local
-    DtypedBuf,  // d_C_local
-    GpuBuffer,  // d_D_local (f32)
-    GpuBuffer,  // d_a_log_local (f32)
+    DtypedBuf, // d_delta
+    DtypedBuf, // d_u
+    DtypedBuf, // d_B_local
+    DtypedBuf, // d_C_local
+    GpuBuffer, // d_D_local (f32)
+    GpuBuffer, // d_a_log_local (f32)
 ) {
     let bt = batch * t;
     let d_delta = DtypedBuf::zeros(&ctx.stream, bt * di, dtype).unwrap();
@@ -722,8 +795,20 @@ fn ssm_backward_local_bf16_matches_f32() {
     let c32 = upload_typed(&ctx.stream, &c_f, WeightDtype::F32);
     let dy32 = upload_typed(&ctx.stream, &dy_f, WeightDtype::F32);
     let (dd_ref, du_ref, dbl_ref, dcl_ref, ddd_ref, da_ref) = run_ssm_backward_local(
-        &ctx, batch, t, di, ds, &h_buf, &delta32, &u32, &b32, &c32,
-        &a_neg_buf, &d_param_buf, &dy32, WeightDtype::F32,
+        &ctx,
+        batch,
+        t,
+        di,
+        ds,
+        &h_buf,
+        &delta32,
+        &u32,
+        &b32,
+        &c32,
+        &a_neg_buf,
+        &d_param_buf,
+        &dy32,
+        WeightDtype::F32,
     );
     let dd_ref_v = download_typed(&ctx.stream, &dd_ref, WeightDtype::F32);
     let du_ref_v = download_typed(&ctx.stream, &du_ref, WeightDtype::F32);
@@ -741,8 +826,20 @@ fn ssm_backward_local_bf16_matches_f32() {
     let c_bf = upload_typed(&ctx.stream, &c_f, WeightDtype::Bf16);
     let dy_bf = upload_typed(&ctx.stream, &dy_f, WeightDtype::Bf16);
     let (dd_bf, du_bf, dbl_bf, dcl_bf, ddd_bf, da_bf) = run_ssm_backward_local(
-        &ctx, batch, t, di, ds, &h_buf, &delta_bf, &u_bf, &b_bf, &c_bf,
-        &a_neg_buf, &d_param_buf, &dy_bf, WeightDtype::Bf16,
+        &ctx,
+        batch,
+        t,
+        di,
+        ds,
+        &h_buf,
+        &delta_bf,
+        &u_bf,
+        &b_bf,
+        &c_bf,
+        &a_neg_buf,
+        &d_param_buf,
+        &dy_bf,
+        WeightDtype::Bf16,
     );
     let dd_bf_v = download_typed(&ctx.stream, &dd_bf, WeightDtype::Bf16);
     let du_bf_v = download_typed(&ctx.stream, &du_bf, WeightDtype::Bf16);
@@ -758,10 +855,203 @@ fn ssm_backward_local_bf16_matches_f32() {
     assert_grad_close(&dd_ref_v, &dd_bf_v, 5e-2, 5e-3, 0.999, 5e-3, "d_delta bf16");
     assert_grad_close(&du_ref_v, &du_bf_v, 5e-2, 5e-3, 0.999, 5e-3, "d_u bf16");
     // d_B_local and d_C_local are huge typed scratches — pre-reduction.
-    assert_grad_close(&dbl_ref_v, &dbl_bf_v, 5e-2, 5e-3, 0.999, 5e-3, "d_B_local bf16");
-    assert_grad_close(&dcl_ref_v, &dcl_bf_v, 5e-2, 5e-3, 0.999, 5e-3, "d_C_local bf16");
+    assert_grad_close(
+        &dbl_ref_v,
+        &dbl_bf_v,
+        5e-2,
+        5e-3,
+        0.999,
+        5e-3,
+        "d_B_local bf16",
+    );
+    assert_grad_close(
+        &dcl_ref_v,
+        &dcl_bf_v,
+        5e-2,
+        5e-3,
+        0.999,
+        5e-3,
+        "d_C_local bf16",
+    );
     // d_D_local and d_a_log_local stay f32 (T-length accumulators) — only
     // bf16 quantization of dy/u/B/C inputs propagates here. Tighter tol.
-    assert_grad_close(&ddd_ref_v, &ddd_bf_v, 5e-2, 5e-3, 0.999, 5e-3, "d_D_local f32 (typed inputs)");
-    assert_grad_close(&da_ref_v, &da_bf_v, 5e-2, 5e-3, 0.999, 5e-3, "d_a_log_local f32 (typed inputs)");
+    assert_grad_close(
+        &ddd_ref_v,
+        &ddd_bf_v,
+        5e-2,
+        5e-3,
+        0.999,
+        5e-3,
+        "d_D_local f32 (typed inputs)",
+    );
+    assert_grad_close(
+        &da_ref_v,
+        &da_bf_v,
+        5e-2,
+        5e-3,
+        0.999,
+        5e-3,
+        "d_a_log_local f32 (typed inputs)",
+    );
+}
+
+// ─── gpu_sgemm_backward_dw_grad_typed (Step 4c) ──────────────────────
+//
+// cuBLAS GemmEx typed dW: dW[n_in, n_out] += X^T @ dY. bf16/f16 A,B with
+// f32 master C, CUBLAS_COMPUTE_32F_PEDANTIC (true f32 accumulate — we
+// intentionally diverge from PyTorch's TF32 default; see commit 61325b3
+// for the 1.4b regression that motivated PEDANTIC).
+//
+// Production shape: mamba-130m in_proj bwd has B*T=2048, n_in=768,
+// n_out=3072. We test at that exact shape so cuBLAS picks a realistic
+// tile/kernel path.
+
+fn run_dw_grad_f32(
+    ctx: &GpuCtx,
+    x: &GpuBuffer,
+    dy: &GpuBuffer,
+    batch: usize,
+    n_in: usize,
+    n_out: usize,
+) -> Vec<f32> {
+    let dw = GpuBuffer::zeros(&ctx.stream, n_in * n_out).unwrap();
+    ctx.stream.synchronize().unwrap();
+    let dw_slice = GradSlice::from_raw(dw.cached_ptr(), n_in * n_out);
+    gpu_sgemm_backward_dw_grad(ctx, &dw_slice, dy, x, batch, n_in, n_out).unwrap();
+    ctx.stream.synchronize().unwrap();
+    let mut out = vec![0f32; n_in * n_out];
+    dw.download(&ctx.stream, &mut out).unwrap();
+    out
+}
+
+fn run_dw_grad_typed(
+    ctx: &GpuCtx,
+    x: &DtypedBuf,
+    dy: &DtypedBuf,
+    batch: usize,
+    n_in: usize,
+    n_out: usize,
+    dtype: WeightDtype,
+) -> Vec<f32> {
+    let dw = GpuBuffer::zeros(&ctx.stream, n_in * n_out).unwrap();
+    ctx.stream.synchronize().unwrap();
+    let dw_slice = GradSlice::from_raw(dw.cached_ptr(), n_in * n_out);
+    let dy_typed = TypedPtr {
+        ptr: dy.cached_ptr(),
+        dtype,
+    };
+    let x_typed = TypedPtr {
+        ptr: x.cached_ptr(),
+        dtype,
+    };
+    gpu_sgemm_backward_dw_grad_typed(ctx, &dw_slice, dy_typed, x_typed, batch, n_in, n_out)
+        .unwrap();
+    ctx.stream.synchronize().unwrap();
+    let mut out = vec![0f32; n_in * n_out];
+    dw.download(&ctx.stream, &mut out).unwrap();
+    out
+}
+
+#[test]
+fn sgemm_backward_dw_grad_bf16_matches_f32() {
+    let dev = GpuDevice::new(0).unwrap();
+    let ctx = GpuCtx::new(&dev).unwrap();
+    // Production shape: mamba-130m in_proj bwd (d_model=768, d_inner*2=3072).
+    let batch = 2048;
+    let n_in = 768;
+    let n_out = 3072;
+
+    // Gaussian inputs match real activation distribution after RMSNorm.
+    // σ=0.1 for dY (small gradient), σ=1.0 for X (post-norm activation).
+    let x_f = deterministic_gaussian(batch * n_in, 0xC1, 1.0);
+    let dy_f = deterministic_gaussian(batch * n_out, 0xC2, 0.1);
+
+    // ── f32 oracle ───────────────────────────────────────────────
+    let mut x32 = GpuBuffer::zeros(&ctx.stream, batch * n_in).unwrap();
+    let mut dy32 = GpuBuffer::zeros(&ctx.stream, batch * n_out).unwrap();
+    ctx.stream.synchronize().unwrap();
+    x32.upload(&ctx.stream, &x_f).unwrap();
+    dy32.upload(&ctx.stream, &dy_f).unwrap();
+    ctx.stream.synchronize().unwrap();
+    let dw_ref = run_dw_grad_f32(&ctx, &x32, &dy32, batch, n_in, n_out);
+
+    // ── bf16 typed ───────────────────────────────────────────────
+    let x_bf = upload_typed(&ctx.stream, &x_f, WeightDtype::Bf16);
+    let dy_bf = upload_typed(&ctx.stream, &dy_f, WeightDtype::Bf16);
+    let dw_bf = run_dw_grad_typed(&ctx, &x_bf, &dy_bf, batch, n_in, n_out, WeightDtype::Bf16);
+
+    eprintln!("sgemm_backward_dw_grad bf16 parity (B={batch}, n_in={n_in}, n_out={n_out}):");
+    // bf16 accumulated via TRUE f32 (PEDANTIC) — only input quantization loss.
+    // Expect cos ≥ 0.9995, norm within 0.5%, outliers < 20% vs f32 oracle.
+    assert_grad_close(&dw_ref, &dw_bf, 5e-2, 1e-3, 0.9995, 5e-3, "dW bf16");
+
+    // ── f16 typed ────────────────────────────────────────────────
+    let x_h = upload_typed(&ctx.stream, &x_f, WeightDtype::F16);
+    let dy_h = upload_typed(&ctx.stream, &dy_f, WeightDtype::F16);
+    let dw_h = run_dw_grad_typed(&ctx, &x_h, &dy_h, batch, n_in, n_out, WeightDtype::F16);
+
+    eprintln!("sgemm_backward_dw_grad f16 parity (B={batch}, n_in={n_in}, n_out={n_out}):");
+    assert_grad_close(&dw_ref, &dw_h, 2e-2, 5e-4, 0.9995, 5e-3, "dW f16");
+}
+
+/// Accumulator check: calling typed twice with beta=1.0 must produce ≈ 2×
+/// single-call result. Catches accidental beta=0.0 (overwrite) — a common
+/// cuBLAS-binding bug.
+#[test]
+fn sgemm_backward_dw_grad_typed_accumulates() {
+    let dev = GpuDevice::new(0).unwrap();
+    let ctx = GpuCtx::new(&dev).unwrap();
+    // Smaller shape (still TC-friendly multiples of 64) for speed — the
+    // accumulator property is shape-independent.
+    let batch = 256;
+    let n_in = 128;
+    let n_out = 256;
+
+    let x_f = deterministic_gaussian(batch * n_in, 0xD1, 1.0);
+    let dy_f = deterministic_gaussian(batch * n_out, 0xD2, 0.1);
+
+    for dtype in [WeightDtype::Bf16, WeightDtype::F16] {
+        let x = upload_typed(&ctx.stream, &x_f, dtype);
+        let dy = upload_typed(&ctx.stream, &dy_f, dtype);
+
+        // Single call, zero-init.
+        let dw_single = run_dw_grad_typed(&ctx, &x, &dy, batch, n_in, n_out, dtype);
+
+        // Two calls, zero-init, accumulate via beta=1.0.
+        let dw = GpuBuffer::zeros(&ctx.stream, n_in * n_out).unwrap();
+        ctx.stream.synchronize().unwrap();
+        let dw_slice = GradSlice::from_raw(dw.cached_ptr(), n_in * n_out);
+        let dy_typed = TypedPtr {
+            ptr: dy.cached_ptr(),
+            dtype,
+        };
+        let x_typed = TypedPtr {
+            ptr: x.cached_ptr(),
+            dtype,
+        };
+        gpu_sgemm_backward_dw_grad_typed(&ctx, &dw_slice, dy_typed, x_typed, batch, n_in, n_out)
+            .unwrap();
+        gpu_sgemm_backward_dw_grad_typed(&ctx, &dw_slice, dy_typed, x_typed, batch, n_in, n_out)
+            .unwrap();
+        ctx.stream.synchronize().unwrap();
+        let mut dw_double = vec![0f32; n_in * n_out];
+        dw.download(&ctx.stream, &mut dw_double).unwrap();
+
+        // Expect dw_double ≈ 2 * dw_single. Compare via ratio — bf16/f16
+        // quantization is deterministic across calls, so the difference is
+        // pure accumulator behavior.
+        let expected: Vec<f32> = dw_single.iter().map(|&v| 2.0 * v).collect();
+        eprintln!("sgemm_backward_dw_grad {dtype:?} accumulator (2× single):");
+        // Two identical deterministic launches → dw_double should match
+        // 2× exactly within cuBLAS atomic-ordering noise. Tight gates.
+        assert_grad_close(
+            &expected,
+            &dw_double,
+            1e-3,
+            1e-5,
+            0.99999,
+            1e-4,
+            "dW 2× accum",
+        );
+    }
 }

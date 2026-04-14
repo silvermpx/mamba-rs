@@ -76,7 +76,14 @@ fn bf16_130m_divergence_bisect() {
     );
     eprintln!(
         "{:>4} | {:>11} {:>11} | {:>5} {:>5} | {:>11} {:>10} | {}",
-        "len", "f32 |L|∞", "bf16 |L|∞", "f32_nan", "bf_nan", "L∞ diff", "top1 same", "top3 f32 → bf16"
+        "len",
+        "f32 |L|∞",
+        "bf16 |L|∞",
+        "f32_nan",
+        "bf_nan",
+        "L∞ diff",
+        "top1 same",
+        "top3 f32 → bf16"
     );
 
     let d = lm_f32.d_model;
@@ -96,7 +103,11 @@ fn bf16_130m_divergence_bisect() {
         // Temporal diff (backbone output, before lm_head).
         lm_f32.debug_download_temporal(&mut t_f32).unwrap();
         lm_bf16.debug_download_temporal(&mut t_bf).unwrap();
-        let t_diff = t_f32.iter().zip(&t_bf).map(|(a, b)| (a - b).abs()).fold(0f32, f32::max);
+        let t_diff = t_f32
+            .iter()
+            .zip(&t_bf)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0f32, f32::max);
         let (tf_max, tf_nan, _) = stats(&t_f32);
         let (tb_max, tb_nan, _) = stats(&t_bf);
 
@@ -111,7 +122,13 @@ fn bf16_130m_divergence_bisect() {
         let b_top = top_k_idx(&bf_logits, 3);
         eprintln!(
             "{:>4} | temp f32|x|∞={:>9.3e} bf16|x|∞={:>9.3e} diff={:>9.3e} nan={}+{} | logit Δ={:>9.3e} top1same={} | {:?} → {:?}",
-            len, tf_max, tb_max, t_diff, tf_nan, tb_nan, ldiff,
+            len,
+            tf_max,
+            tb_max,
+            t_diff,
+            tf_nan,
+            tb_nan,
+            ldiff,
             f_top.first().map(|p| p.0) == b_top.first().map(|p| p.0),
             f_top.iter().map(|p| p.0).collect::<Vec<_>>(),
             b_top.iter().map(|p| p.0).collect::<Vec<_>>(),

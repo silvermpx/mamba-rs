@@ -962,7 +962,6 @@ impl GpuMambaInferenceMixed {
         self.step_kernels_mixed_native_impl(state, scratch, None)
     }
 
-
     fn step_kernels_mixed_native_impl(
         &self,
         state: &mut GpuInferenceState,
@@ -1923,4 +1922,3 @@ impl GpuMambaBackbone {
         super::backward::GpuMambaTargetScratch::new(self.stream(), &dims)
     }
 }
-

@@ -169,11 +169,21 @@ fn test_m3_bf16_matches_f32_realistic() {
     weights.input_proj_b.clear();
 
     let mut bb_f32 = GpuMamba3Backbone::new_with_dtype(
-        0, &weights, cfg.clone(), input_dim, batch, WeightDtype::F32,
+        0,
+        &weights,
+        cfg.clone(),
+        input_dim,
+        batch,
+        WeightDtype::F32,
     )
     .unwrap();
     let mut bb_bf16 = GpuMamba3Backbone::new_with_dtype(
-        0, &weights, cfg.clone(), input_dim, batch, WeightDtype::Bf16,
+        0,
+        &weights,
+        cfg.clone(),
+        input_dim,
+        batch,
+        WeightDtype::Bf16,
     )
     .unwrap();
 

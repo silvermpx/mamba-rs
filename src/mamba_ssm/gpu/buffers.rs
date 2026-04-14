@@ -259,6 +259,14 @@ pub struct GradSlice {
 }
 
 impl GradSlice {
+    /// Construct a `GradSlice` from a raw device pointer + length. For
+    /// internal use and parity tests; production code should obtain
+    /// `GradSlice`s via [`GpuMambaGrads`] which manages the flat allocation.
+    #[doc(hidden)]
+    pub fn from_raw(ptr: cudarc::driver::sys::CUdeviceptr, len: usize) -> Self {
+        Self { ptr, len }
+    }
+
     /// Raw device pointer (for kernel args and cuBLAS raw calls).
     pub fn ptr(&self) -> cudarc::driver::sys::CUdeviceptr {
         self.ptr
