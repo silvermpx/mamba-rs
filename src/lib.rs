@@ -56,6 +56,12 @@ pub mod gpu {
     pub use crate::mamba_ssm::gpu::*;
 }
 
+#[cfg(feature = "cuda")]
+pub mod gpu3 {
+    //! Convenience re-exports for the Mamba-3 SISO GPU path.
+    pub use crate::mamba3_siso::gpu::*;
+}
+
 pub use config::MambaConfig;
 pub use mamba_ssm::cpu::inference::{
     MambaLayerScratch, MambaStepScratch, mamba_block_step, mamba_layer_step, mamba_step,
@@ -70,3 +76,9 @@ pub use mamba3_siso::{
     Mamba3Config, Mamba3Dims, Mamba3LayerState, Mamba3LayerWeights, Mamba3State, Mamba3StepScratch,
     Mamba3Weights,
 };
+
+/// Convenience re-export of the storage-dtype selector used by the
+/// mixed-precision GPU API (`GpuMambaBackbone::new_with_dtype`,
+/// `GpuMamba3Backbone::new_with_dtype`, `GpuMambaLM::from_hf_with_dtype`).
+#[cfg(feature = "cuda")]
+pub use mamba_ssm::gpu::dtype::WeightDtype;

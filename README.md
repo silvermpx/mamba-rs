@@ -13,7 +13,7 @@ Full inference and training pipelines with BPTT through recurrent SSM state. Cus
 - **GPU training** — custom CUDA forward + backward kernels (47 for M3, 12 for M1)
 - **Serialization** — safetensors format (HuggingFace compatible)
 - **Standalone** — no framework dependency (no PyTorch, no Burn, no Candle)
-- **f32** — native single precision, TF32 Tensor Cores on Ampere/Hopper
+- **f32 / bf16 / f16** — end-to-end half-precision GPU inference (since 0.2.2): 2× weight VRAM compression, +24 % tok/s on Mamba-1 130m, +47 % on Mamba-3. f32 stays the default; bf16/f16 opt-in via `WeightDtype`.
 
 ## Quick Start — Mamba SSM
 
@@ -77,6 +77,48 @@ gpu.reset()?;
 ```
 
 Requires NVIDIA GPU + CUDA toolkit. Kernels compiled at runtime via NVRTC.
+
+### End-to-end bf16 / f16 inference (0.2.2+)
+
+Choose weight and activation dtype at construction. Compute stays f32
+(CUBLAS_COMPUTE_32F, upcast-inside-kernel) — no precision loss in
+accumulation. Residual stream and SSM state stay f32 for stability
+(matches HF `residual_in_fp32=True`). Weight VRAM is halved; typical
+decode speedup +20–50 % on Ada/Hopper.
+
+```rust
+use mamba_rs::gpu::inference::GpuMambaBackbone;
+use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
+
+// Same API; the Mixed engine + native bf16 pipeline is picked automatically
+// when dtype != F32.
+let mut gpu_bf16 = GpuMambaBackbone::new_with_dtype(
+    0, &weights, cfg, input_dim, batch, WeightDtype::Bf16,
+)?;
+gpu_bf16.capture_graph()?;
+gpu_bf16.step(&input, &mut output)?;
+```
+
+For LLM inference with HuggingFace-format Mamba-1 checkpoints:
+
+```rust
+use mamba_rs::module::gpu_lm::GpuMambaLM;
+use mamba_rs::module::sample::SampleParams;
+use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
+use std::path::Path;
+
+let mut lm = GpuMambaLM::from_hf_with_dtype(
+    Path::new("./mamba-130m-hf"), 0, WeightDtype::Bf16,
+)?;
+lm.capture_graph()?;
+let tokens = lm.generate(&[1, 2, 3, 4, 5], &SampleParams::default())?;
+```
+
+Mamba-3 mirrors the same API — `GpuMamba3Backbone::new_with_dtype`
+and `GpuMamba3LM::from_weights_with_dtype` (no HF loader yet; no
+public Mamba-3 SISO checkpoint exists). Validation: bf16 vs f32
+greedy match 20/20 tokens on `state-spaces/mamba-130m-hf`,
+KL ≈ 1e-3 on final logits.
 
 ## Weight Serialization
 

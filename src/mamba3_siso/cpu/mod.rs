@@ -1,9 +1,14 @@
 //! Mamba-3 SISO CPU backend.
 //!
 //! - `dims` — dimension calculator
-//! - `inference` — T=1 recurrent step (TODO)
-//! - `forward` — training forward (TODO)
-//! - `backward` — training backward (TODO)
+//! - `inference` — T=1 recurrent step
+//! - `forward` — training forward (F1-F7)
+//! - `backward` — training BPTT backward (B1-B8)
+//! - `parallel` — rayon batch forward + backward
+//! - `scratch` — reusable per-sample activation scratch
+//! - `target` — target-network forward (no activation saves)
+//! - `flat` — packed flat layer layout for GPU upload
+//! - `weights` — training weight structs
 
 pub mod backward;
 pub mod dims;

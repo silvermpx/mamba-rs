@@ -1507,9 +1507,13 @@ impl BackboneScratch {
 /// High-level GPU Mamba backbone — unified API over f32 / bf16 / f16 storage.
 ///
 /// Weights are uploaded to GPU in the requested dtype. Compute is always f32
-/// (CUBLAS_COMPUTE_32F for GEMMs, f32 for custom kernels). Activations stay
-/// f32 in scratch buffers; downcast to weight dtype happens automatically
-/// before GEMMs when needed.
+/// (CUBLAS_COMPUTE_32F for GEMMs, f32 internally in kernels via upcast).
+///
+/// Activation storage tracks the weight dtype end-to-end on the Mixed path
+/// (bf16/f16): the scratch carries half activations through the layer and
+/// GEMMs write half output directly, no per-GEMM cast staging. The residual
+/// stream and SSM recurrent state stay f32 for numerical stability (matches
+/// HF `residual_in_fp32=True`). The F32 path keeps f32 scratch throughout.
 ///
 /// ```rust,no_run
 /// use mamba_rs::MambaConfig;
