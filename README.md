@@ -7,13 +7,13 @@ Full inference and training pipelines with BPTT through recurrent SSM state. Cus
 ## Features
 
 - **Two architectures** — Mamba SSM (Gu & Dao, 2023) and Mamba-3 SISO (Lahoti et al., ICLR 2026)
-- **CPU inference** — zero-allocation single-step recurrent forward pass with SIMD + BLAS
+- **CPU inference** — zero-allocation single-step recurrent forward pass with SIMD + BLAS. Scope: small-model RL workflows (SQV-RS, gym-class envs) + reference/parity against GPU. **f32 only** — LLM inference on CPU is out of scope (use the GPU path).
 - **GPU inference** — CUDA kernels with optional CUDA Graph capture (~1.6x speedup)
-- **CPU training** — full backward pass with BPTT, parallel batch training via Rayon
-- **GPU training** — custom CUDA forward + backward kernels (47 for M3, 12 for M1)
+- **CPU training** — full backward pass with BPTT, parallel batch training via Rayon. Scope: small-model RL training where CPU is feasible (~O(minutes–hours) per episode). **f32 only** — LLM training on CPU is impractical at any scale.
+- **GPU training** — custom CUDA forward + backward kernels (47 for M3, 12 for M1). **Supports f32 / bf16 / f16 mixed-precision** (since 0.2.2) — this is the production training path.
 - **Serialization** — safetensors format (HuggingFace compatible)
 - **Standalone** — no framework dependency (no PyTorch, no Burn, no Candle)
-- **f32 / bf16 / f16** — end-to-end half-precision GPU inference (since 0.2.2): 2× weight VRAM compression, +24 % tok/s on Mamba-1 130m, +47 % on Mamba-3. f32 stays the default; bf16/f16 opt-in via `WeightDtype`.
+- **f32 / bf16 / f16** — end-to-end half-precision GPU inference AND training (since 0.2.2): 2× weight VRAM compression, +24 % tok/s on Mamba-1 130m inference, +47 % on Mamba-3. f32 master weights + typed compute copies (PyTorch AMP convention); f32 stays the default. **CPU paths remain f32-only**.
 
 ## Quick Start — Mamba SSM
 

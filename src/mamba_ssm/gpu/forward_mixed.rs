@@ -550,50 +550,79 @@ pub fn gpu_forward_mamba_backbone_mixed(
             unsafe { bld.launch(grid_1d(bt * ds)) }
                 .map_err(|e| format!("gather_bc_cols typed L{layer_idx}: {e:?}"))?;
         }
-        // ssm_burnin_forward_typed (with saves: h, h_saved f32; y typed).
-        // Note: parallel scan path is f32-only (no typed variant); for mixed
-        // we always use the sequential ssm_burnin_forward_<dtype> kernel.
-        // d_state > 64 silently early-returns (config validation guarantees
-        // d_state <= 64 for shipped checkpoints).
+        // SSM forward: parallel prefix scan for T > PARALLEL_SCAN_THRESHOLD
+        // or ds > 64 (matches f32 path dispatch in forward.rs:544). Typed
+        // variants (Step 8b) keep scan state + h_saved + da_exp + smem f32
+        // per state-spaces/mamba `scan_t = float2` invariant; only
+        // delta/u/B/C/y are typed.
         {
             let b_i = b as i32;
             let t_i = t as i32;
             let di_i = di as i32;
             let ds_i = ds as i32;
-            assert!(
-                ds <= 64,
-                "ssm_burnin_forward_typed requires d_state <= 64 (got {ds})"
-            );
-            let kernel = match dt {
-                WeightDtype::F32 => &k.ssm_burnin_fwd,
-                WeightDtype::Bf16 => &k.ssm_burnin_fwd_bf16,
-                WeightDtype::F16 => &k.ssm_burnin_fwd_f16,
-            };
-            let mut bld = ctx.stream.launch_builder(kernel);
-            let y = layer_acts.y.cached_ptr();
-            let hs = layer_acts.h_saved.cached_ptr();
-            let dae = layer_acts.da_exp.cached_ptr();
-            let dl = layer_acts.delta.cached_ptr();
-            let u = layer_acts.u.cached_ptr();
-            let bb = scratch.b_buf.cached_ptr();
-            let cb = scratch.c_buf.cached_ptr();
-            let dp = lw.d_param.ptr();
-            bld.arg(&ssm_ptr);
-            bld.arg(&y);
-            bld.arg(&hs);
-            bld.arg(&dae);
-            bld.arg(&dl);
-            bld.arg(&u);
-            bld.arg(&bb);
-            bld.arg(&cb);
-            bld.arg(&aneg_ptr);
-            bld.arg(&dp);
-            bld.arg(&b_i);
-            bld.arg(&t_i);
-            bld.arg(&di_i);
-            bld.arg(&ds_i);
-            unsafe { bld.launch(grid_1d(b * di)) }
-                .map_err(|e| format!("ssm_burnin_forward typed L{layer_idx}: {e:?}"))?;
+            if t > super::forward::PARALLEL_SCAN_THRESHOLD || ds > 64 {
+                let kernel = k.ssm_parallel_fwd_typed.get(dt);
+                let mut bld = ctx.stream.launch_builder(kernel);
+                let y = layer_acts.y.cached_ptr();
+                let hs = layer_acts.h_saved.cached_ptr();
+                let dae = layer_acts.da_exp.cached_ptr();
+                let dl = layer_acts.delta.cached_ptr();
+                let u = layer_acts.u.cached_ptr();
+                let bb = scratch.b_buf.cached_ptr();
+                let cb = scratch.c_buf.cached_ptr();
+                let dp = lw.d_param.ptr();
+                bld.arg(&ssm_ptr);
+                bld.arg(&y);
+                bld.arg(&hs);
+                bld.arg(&dae);
+                bld.arg(&dl);
+                bld.arg(&u);
+                bld.arg(&bb);
+                bld.arg(&cb);
+                bld.arg(&aneg_ptr);
+                bld.arg(&dp);
+                bld.arg(&b_i);
+                bld.arg(&t_i);
+                bld.arg(&di_i);
+                bld.arg(&ds_i);
+                unsafe { bld.launch(super::launch::grid_parallel_scan(b, di)) }
+                    .map_err(|e| format!("ssm_parallel_fwd typed L{layer_idx}: {e:?}"))?;
+            } else {
+                assert!(
+                    ds <= 64,
+                    "ssm_burnin_forward_typed requires d_state <= 64 (got {ds})"
+                );
+                let kernel = match dt {
+                    WeightDtype::F32 => &k.ssm_burnin_fwd,
+                    WeightDtype::Bf16 => &k.ssm_burnin_fwd_bf16,
+                    WeightDtype::F16 => &k.ssm_burnin_fwd_f16,
+                };
+                let mut bld = ctx.stream.launch_builder(kernel);
+                let y = layer_acts.y.cached_ptr();
+                let hs = layer_acts.h_saved.cached_ptr();
+                let dae = layer_acts.da_exp.cached_ptr();
+                let dl = layer_acts.delta.cached_ptr();
+                let u = layer_acts.u.cached_ptr();
+                let bb = scratch.b_buf.cached_ptr();
+                let cb = scratch.c_buf.cached_ptr();
+                let dp = lw.d_param.ptr();
+                bld.arg(&ssm_ptr);
+                bld.arg(&y);
+                bld.arg(&hs);
+                bld.arg(&dae);
+                bld.arg(&dl);
+                bld.arg(&u);
+                bld.arg(&bb);
+                bld.arg(&cb);
+                bld.arg(&aneg_ptr);
+                bld.arg(&dp);
+                bld.arg(&b_i);
+                bld.arg(&t_i);
+                bld.arg(&di_i);
+                bld.arg(&ds_i);
+                unsafe { bld.launch(grid_1d(b * di)) }
+                    .map_err(|e| format!("ssm_burnin_forward typed L{layer_idx}: {e:?}"))?;
+            }
         }
 
         // F4e: gating — gated = y * gate_post_silu (elementwise_mul_typed).

@@ -236,6 +236,12 @@ pub struct MambaKernels {
     pub ssm_parallel_fwd: CudaFunction,
     /// Parallel prefix scan SSM forward without saves (target network).
     pub ssm_parallel_fwd_nosave: CudaFunction,
+    /// Typed parallel scan forward (Step 8b) — typed delta/u/B/C/y_out,
+    /// all scan state (smem_run, block scan, h, h_saved) remains f32 per
+    /// `state-spaces/mamba` `scan_t = float2` invariant.
+    pub ssm_parallel_fwd_typed: TypedKernel,
+    /// Typed parallel scan forward nosave twin (target network / prefill).
+    pub ssm_parallel_fwd_nosave_typed: TypedKernel,
 }
 
 impl MambaKernels {
@@ -356,6 +362,16 @@ impl MambaKernels {
             // parallel scan
             ssm_parallel_fwd: get("ssm_parallel_scan_fwd")?,
             ssm_parallel_fwd_nosave: get("ssm_parallel_scan_fwd_nosave")?,
+            ssm_parallel_fwd_typed: TypedKernel {
+                f32: get("ssm_parallel_scan_fwd")?,
+                bf16: get("ssm_parallel_scan_fwd_bf16")?,
+                f16: get("ssm_parallel_scan_fwd_f16")?,
+            },
+            ssm_parallel_fwd_nosave_typed: TypedKernel {
+                f32: get("ssm_parallel_scan_fwd_nosave")?,
+                bf16: get("ssm_parallel_scan_fwd_nosave_bf16")?,
+                f16: get("ssm_parallel_scan_fwd_nosave_f16")?,
+            },
 
             // typed inference kernels
             silu_fwd_typed: load_typed("silu_forward")?,
