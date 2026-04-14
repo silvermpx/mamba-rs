@@ -23,13 +23,13 @@ fn find_model_dir(name: &str) -> Option<std::path::PathBuf> {
 fn test_gpu_lm_bf16_130m_loads_and_generates() {
     let dir = find_model_dir("mamba-130m-hf").expect("model not in cache");
     use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
-    use mamba_rs::module::gpu_lm::GpuMambaLMMixed;
+    use mamba_rs::module::gpu_lm::GpuMambaLM;
     use mamba_rs::module::sample::SampleParams;
 
     let t_load = Instant::now();
-    let mut lm = GpuMambaLMMixed::from_hf(&dir, 0, WeightDtype::Bf16).unwrap();
+    let mut lm = GpuMambaLM::from_hf_with_dtype(&dir, 0, WeightDtype::Bf16).unwrap();
     eprintln!(
-        "GpuMambaLMMixed bf16 loaded in {}ms (vocab={}, d_model={})",
+        "GpuMambaLM bf16 loaded in {}ms (vocab={}, d_model={})",
         t_load.elapsed().as_millis(),
         lm.vocab_size,
         lm.d_model

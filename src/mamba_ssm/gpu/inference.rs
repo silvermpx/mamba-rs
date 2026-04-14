@@ -885,6 +885,16 @@ impl GpuMambaInferenceMixed {
     pub fn bulk_dtype(&self) -> WeightDtype {
         self.mixed_weights.bulk_dtype
     }
+
+    pub fn has_graph(&self) -> bool {
+        self.graph.is_some()
+    }
+
+    /// Access the underlying f32 inference engine (used by unified backbone
+    /// wrapper to read cfg/batch/input_dim).
+    pub fn engine_ref(&self) -> &GpuMambaInference {
+        &self.engine
+    }
 }
 
 // Mark a_neg_all used to silence warning (only used during new()).
@@ -917,17 +927,48 @@ impl GpuMambaInferenceMixed {
 /// bb.step(&input, &mut output).unwrap();
 /// bb.reset().unwrap();
 /// ```
+/// Internal engine variant. Box the larger variant to keep enum size small
+/// (Mixed includes f32 engine + mixed weights arena + a_neg_all).
+enum BackboneEngine {
+    F32(Box<GpuMambaInference>),
+    Mixed(Box<GpuMambaInferenceMixed>),
+}
+
+/// High-level GPU Mamba backbone — unified API over f32 / bf16 / f16 storage.
+///
+/// Weights are uploaded to GPU in the requested dtype. Compute is always f32
+/// (CUBLAS_COMPUTE_32F for GEMMs, f32 for custom kernels). Activations stay
+/// f32 in scratch buffers; downcast to weight dtype happens automatically
+/// before GEMMs when needed.
+///
+/// ```rust,no_run
+/// use mamba_rs::MambaConfig;
+/// use mamba_rs::gpu::inference::GpuMambaBackbone;
+/// use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
+///
+/// let cfg = MambaConfig::default();
+/// let weights = mamba_rs::MambaWeights::init(&cfg, 128, 42);
+///
+/// // f32 (default)
+/// let mut bb = GpuMambaBackbone::new(0, &weights, cfg, 128, 1).unwrap();
+///
+/// // bf16 (half VRAM)
+/// let mut bb_bf16 = GpuMambaBackbone::new_with_dtype(
+///     0, &weights, cfg, 128, 1, WeightDtype::Bf16
+/// ).unwrap();
+///
+/// bb.capture_graph().unwrap();
+/// let mut output = vec![0.0f32; 128];
+/// bb.step(&vec![0.1f32; 128], &mut output).unwrap();
+/// ```
 pub struct GpuMambaBackbone {
-    engine: GpuMambaInference,
+    engine: BackboneEngine,
     state: GpuInferenceState,
     scratch: GpuInferenceScratch,
 }
 
 impl GpuMambaBackbone {
-    /// Create a GPU backbone from CPU weights.
-    ///
-    /// - `gpu_ordinal`: GPU device index (0 = first GPU)
-    /// - `batch`: number of parallel inference streams
+    /// Create an f32 GPU backbone (equivalent to `new_with_dtype(F32)`).
     pub fn new(
         gpu_ordinal: usize,
         cpu_weights: &MambaWeights,
@@ -935,10 +976,40 @@ impl GpuMambaBackbone {
         input_dim: usize,
         batch: usize,
     ) -> Result<Self, String> {
+        Self::new_with_dtype(gpu_ordinal, cpu_weights, cfg, input_dim, batch, WeightDtype::F32)
+    }
+
+    /// Create a GPU backbone with explicit storage dtype.
+    ///
+    /// - `WeightDtype::F32`: native f32 (highest accuracy, 4 bytes/weight)
+    /// - `WeightDtype::Bf16`: bf16 storage (half VRAM, ~1-2x throughput, safe for Mamba)
+    /// - `WeightDtype::F16`: f16 storage (half VRAM, f16 has known numerical issues
+    ///   with Mamba recurrence — use bf16 unless you know what you're doing)
+    pub fn new_with_dtype(
+        gpu_ordinal: usize,
+        cpu_weights: &MambaWeights,
+        cfg: MambaConfig,
+        input_dim: usize,
+        batch: usize,
+        dtype: WeightDtype,
+    ) -> Result<Self, String> {
         let device = GpuDevice::new(gpu_ordinal)?;
-        let engine = GpuMambaInference::new(&device, cpu_weights, cfg, input_dim, batch)?;
-        let state = engine.alloc_state()?;
-        let scratch = engine.alloc_scratch()?;
+        let (engine, state, scratch) = match dtype {
+            WeightDtype::F32 => {
+                let e = GpuMambaInference::new(&device, cpu_weights, cfg, input_dim, batch)?;
+                let s = e.alloc_state()?;
+                let sc = e.alloc_scratch()?;
+                (BackboneEngine::F32(Box::new(e)), s, sc)
+            }
+            WeightDtype::Bf16 | WeightDtype::F16 => {
+                let e = GpuMambaInferenceMixed::new(
+                    &device, cpu_weights, cfg, input_dim, batch, dtype,
+                )?;
+                let s = e.alloc_state()?;
+                let sc = e.alloc_scratch()?;
+                (BackboneEngine::Mixed(Box::new(e)), s, sc)
+            }
+        };
         Ok(Self {
             engine,
             state,
@@ -946,64 +1017,94 @@ impl GpuMambaBackbone {
         })
     }
 
-    /// Run one inference step.
-    ///
-    /// `input`: `[batch * input_dim]` on CPU.
-    /// `output`: `[batch * d_model]` on CPU.
+    /// Storage dtype for this backbone's weights.
+    pub fn dtype(&self) -> WeightDtype {
+        match &self.engine {
+            BackboneEngine::F32(_) => WeightDtype::F32,
+            BackboneEngine::Mixed(e) => e.bulk_dtype(),
+        }
+    }
+
+    /// Run one inference step. `input`: `[batch * input_dim]`, `output`: `[batch * d_model]`.
     pub fn step(&mut self, input: &[f32], output: &mut [f32]) -> Result<(), String> {
-        self.engine
-            .step(input, output, &mut self.state, &mut self.scratch)
+        match &self.engine {
+            BackboneEngine::F32(e) => e.step(input, output, &mut self.state, &mut self.scratch),
+            BackboneEngine::Mixed(e) => e.step(input, output, &mut self.state, &mut self.scratch),
+        }
     }
 
     /// Reset recurrent state (episode/sequence boundary).
     pub fn reset(&mut self) -> Result<(), String> {
-        self.state.reset(&self.engine.ctx.stream)
+        let stream = match &self.engine {
+            BackboneEngine::F32(e) => e.ctx.stream.clone(),
+            BackboneEngine::Mixed(e) => e.stream().clone(),
+        };
+        self.state.reset(&stream)
     }
 
-    /// Capture CUDA Graph for faster inference.
-    /// Call after at least one warmup `step()`.
+    /// Capture CUDA Graph for faster inference. Call after at least one warmup step.
     pub fn capture_graph(&mut self) -> Result<(), String> {
-        // Warmup step (dummy input, result discarded)
-        let input = vec![0.0f32; self.engine.batch * self.engine.input_dim];
-        let mut output = vec![0.0f32; self.engine.batch * self.engine.cfg.d_model];
-        self.engine
-            .step(&input, &mut output, &mut self.state, &mut self.scratch)?;
-        self.state.reset(&self.engine.ctx.stream)?;
-
-        // Capture
-        self.engine
-            .capture_graph(&mut self.state, &mut self.scratch)
+        let (input_dim, batch, d_model) = match &self.engine {
+            BackboneEngine::F32(e) => (e.input_dim, e.batch, e.cfg.d_model),
+            BackboneEngine::Mixed(e) => (
+                e.engine_ref().input_dim,
+                e.engine_ref().batch,
+                e.engine_ref().cfg.d_model,
+            ),
+        };
+        let input = vec![0.0f32; batch * input_dim];
+        let mut output = vec![0.0f32; batch * d_model];
+        self.step(&input, &mut output)?;
+        self.reset()?;
+        match &mut self.engine {
+            BackboneEngine::F32(e) => e.capture_graph(&mut self.state, &mut self.scratch),
+            BackboneEngine::Mixed(e) => e.capture_graph(&mut self.state, &mut self.scratch),
+        }
     }
 
-    /// Config reference.
     pub fn config(&self) -> &MambaConfig {
-        self.engine.config()
+        match &self.engine {
+            BackboneEngine::F32(e) => e.config(),
+            BackboneEngine::Mixed(e) => e.config(),
+        }
     }
 
-    /// Batch size.
     pub fn batch(&self) -> usize {
-        self.engine.batch()
+        match &self.engine {
+            BackboneEngine::F32(e) => e.batch(),
+            BackboneEngine::Mixed(e) => e.batch(),
+        }
     }
 
-    /// Whether CUDA Graph is captured.
     pub fn has_graph(&self) -> bool {
-        self.engine.has_graph()
+        match &self.engine {
+            BackboneEngine::F32(e) => e.has_graph(),
+            BackboneEngine::Mixed(e) => e.has_graph(),
+        }
     }
 
-    /// Access the GPU compute context (for external SGEMM calls like lm_head).
+    /// Access the GPU compute context.
     pub fn ctx(&self) -> &GpuCtx {
-        &self.engine.ctx
+        match &self.engine {
+            BackboneEngine::F32(e) => &e.ctx,
+            BackboneEngine::Mixed(e) => e.ctx(),
+        }
     }
 
     /// Access the GPU stream.
     pub fn stream(&self) -> &std::sync::Arc<cudarc::driver::CudaStream> {
-        &self.engine.ctx.stream
+        match &self.engine {
+            BackboneEngine::F32(e) => &e.ctx.stream,
+            BackboneEngine::Mixed(e) => e.stream(),
+        }
     }
 
-    /// Run backbone step, keep output on GPU (no D2H). For chaining with lm_head.
+    /// Run step, keep output on GPU (for chaining with lm_head).
     pub fn step_gpu_only(&mut self, input: &[f32]) -> Result<(), String> {
-        self.engine
-            .step_gpu_only(input, &mut self.state, &mut self.scratch)
+        match &self.engine {
+            BackboneEngine::F32(e) => e.step_gpu_only(input, &mut self.state, &mut self.scratch),
+            BackboneEngine::Mixed(e) => e.step_gpu_only(input, &mut self.state, &mut self.scratch),
+        }
     }
 
     /// GPU temporal buffer pointer (valid after `step_gpu_only`).
@@ -1013,23 +1114,17 @@ impl GpuMambaBackbone {
 
     /// Download temporal from GPU to CPU.
     pub fn download_temporal(&self, output: &mut [f32]) -> Result<(), String> {
-        self.engine
-            .ctx
-            .stream
-            .synchronize()
-            .map_err(|e| format!("sync: {e:?}"))?;
-        self.scratch
-            .temporal
-            .download(&self.engine.ctx.stream, output)
+        self.stream().synchronize().map_err(|e| format!("sync: {e:?}"))?;
+        self.scratch.temporal.download(self.stream(), output)
     }
 }
 
 // ---------------------------------------------------------------------------
-// High-level mixed-precision GPU Backbone
+// Internal mixed-precision backbone (kept for legacy test access — not in
+// public mamba-rs API; users go through GpuMambaBackbone::new_with_dtype).
 // ---------------------------------------------------------------------------
 
-/// High-level mixed-precision GPU Mamba backbone.
-/// Weights stored in bf16/f16, compute in f32 (CUBLAS_COMPUTE_32F).
+#[doc(hidden)]
 pub struct GpuMambaBackboneMixed {
     engine: GpuMambaInferenceMixed,
     state: GpuInferenceState,
