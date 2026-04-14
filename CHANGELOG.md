@@ -38,10 +38,40 @@
 - `gpu_sgemm_tied_lm_head_blas` + `gpu_gemm_ex_tied_lm_head_blas` — blas-only tied-lm_head helpers.
 
 **Parity & benchmarks**
-- `tests/gpu_bf16_parity.rs`: Mamba-1 bf16 vs f32 on mamba-130m-hf. **20/20 greedy token match, KL(f32‖bf16) ≈ 1.0e-3.**
-- `tests/m3_bf16_parity.rs`: Mamba-3 f32 vs bf16 synthetic-weight parity (monotone convergence, final cosine > 0.994).
+- `tests/gpu_bf16_parity.rs`: Mamba-1 bf16 vs f32. Two tests:
+  - `test_gpu_lm_bf16_matches_f32_130m`: 20/20 greedy token match on
+    mamba-130m-hf, KL(f32 ‖ bf16) ≈ 1.0e-3.
+  - `test_gpu_lm_bf16_matches_f32_all_cached_models`: parametric over every
+    cached `state-spaces/mamba-*-hf` snapshot. Verified 15/15 greedy match
+    with KL ≤ 1.6e-3 on all four sizes (130m, 370m, 1.4b, 2.8b):
+      | model | KL |
+      |---|---|
+      | 130m | 0.001583 |
+      | 370m | 0.000421 |
+      | 1.4b | 0.000053 |
+      | 2.8b | 0.000038 |
+    Asserts ≥ 90 % match and KL < 5e-3 per model. Ignored by default
+    (needs HF cache + ≥ 16 GB VRAM for 2.8b).
+- `tests/m3_bf16_parity.rs`: Mamba-3 f32 vs bf16 synthetic-weight parity
+  (monotone convergence, final cosine > 0.994).
 - `tests/gpu_mamba3_lm_test.rs`: M3 LM smoke tests for both dtypes.
 - `tests/bench_bf16_vs_f32.rs`: dtype × graph benchmark harness for M1 + M3.
+
+**Crate API + ecosystem plumbing**
+- `cuda` feature now pulls `half` and `bytemuck` directly. Previously they
+  were only enabled by `hf`, so `cargo build --features cuda` (no `hf`)
+  failed at import-resolution in `gpu/buffers.rs`. The phantom `memmap2`
+  dep was dropped (no source imported it).
+- `WeightDtype` is re-exported from the crate root (`mamba_rs::WeightDtype`)
+  when the `cuda` feature is on.
+- New `pub mod gpu3 { pub use crate::mamba3_siso::gpu::*; }` mirrors the
+  existing `pub mod gpu` so M3 types land one import deep.
+- README rewritten with a bf16/f16 quickstart block and a HuggingFace LLM
+  example. Stale comments in `gpu/inference.rs` (claimed activations stay
+  f32 in scratch) corrected to reflect the new native path.
+- `Mamba3Weights` / `Mamba3LayerWeights` now `#[derive(Clone)]` so
+  `GpuMamba3LM` can take `&Mamba3Weights` and internally clone+clear
+  `input_proj` for the identity_proj fast path.
 
 ### Performance (RTX 4090, greedy generation, 100 tokens)
 
@@ -54,11 +84,43 @@ Weight VRAM footprint: **bf16 / f16 = 0.50× f32** (clean 2× compression).
 
 ### Fixed
 
-- `GpuMambaWeights` / `GpuMambaMixedWeights`: layout formula used hardcoded `d_model`-sized input_proj; HF Mamba-1 checkpoints have empty input_proj (identity projection) and tripped `debug_assert!(off == total)` in debug builds. Formula now uses the actual CPU weight lengths. No release-mode effect — pure debug guard.
-- `step_kernels_mixed_native` (M1 + M3): used `GpuBuffer::copy_from` to seed the f32 residual from input; that path goes through a `SyncOnDrop`-creating CUDA slice view which invalidates CUDA Graph capture. Switched to `copy_from_raw` (cuMemcpyDtoDAsync on cached raw ptrs — capture safe).
-- M3 NVRTC compile now inlines `_typed_prelude.cuh` and strips `#include` lines to match the M1 setup — the prelude's bf16/fp16 helpers must be in scope before any `DEFINE_*` macro expansion.
-- Clippy hygiene: removed all `#[allow(clippy::too_many_arguments)]` by bundling parameters into named structs (`TypedPtr`, `TiedLmDims`, `PrefillInputs`, `Mamba3States`, `Mamba3LmBuild`).
-- `Mamba3Weights` / `Mamba3LayerWeights`: `#[derive(Clone)]` so `GpuMamba3LM` can take `&Mamba3Weights` and internally clone+clear `input_proj` for identity_proj.
+- **Critical — RMSNorm finite-guard**: on 48+-layer bf16 models a transient
+  bf16 activation overflow could produce a single NaN/Inf, which then
+  cascaded through every subsequent RMSNorm (inv_rms = 1/NaN = NaN). This
+  was catastrophic on `state-spaces/mamba-1.4b-hf` (0/15 greedy match vs
+  f32, KL = 6.66) and untested but likely worse on 2.8b. Added
+  `if (!isfinite(rms) || rms < 1e-20f) rms = 1.0f` to
+  `rmsnorm_forward_f32in_{bf16,f16}` (`kernels/norms.cu`) and the same
+  pattern to `bcnorm_fwd` (f32 + templated) and `rmsnorm_gated_forward`
+  (f32 + templated) in `kernels/mamba3_ops.cu`. Post-fix: all four cached
+  HF Mambas match f32 at 15/15 greedy tokens with KL ≤ 1.6e-3 (best
+  0.00004 at 2.8b).
+- M3 `step_kernels_mixed_native` angle_dt launch: replaced `.inner()`
+  kernel args (creates SyncOnDrop guards that invalidate CUDA Graph
+  capture) with cached raw device pointers, mirroring the M1
+  `copy_from_raw` fix. Companion bug to the M1 fix; affected any M3 model
+  with `num_rope_angles() > 0` under graph replay.
+- M3 `b_bias` / `c_bias` zero-initialized (was `vec![1.0; ...]`). Matches
+  `state-spaces/mamba/mamba3.py` reference:
+  `nn.Parameter(torch.zeros(nheads, mimo_rank, d_state))`. Additive bias
+  at +1 before RoPE was systematically biasing the initial B/C dynamics
+  on freshly-initialized (non-HF) M3 models.
+- `GpuMambaWeights` / `GpuMambaMixedWeights`: layout formula used
+  hardcoded `d_model`-sized input_proj; HF Mamba-1 checkpoints have empty
+  input_proj (identity projection) and tripped
+  `debug_assert!(off == total)` in debug builds. Formula now uses the
+  actual CPU weight lengths. No release-mode effect — pure debug guard.
+- `step_kernels_mixed_native` (M1 + M3): used `GpuBuffer::copy_from` to
+  seed the f32 residual from input; that path goes through a
+  `SyncOnDrop`-creating CUDA slice view which invalidates CUDA Graph
+  capture. Switched to `copy_from_raw` (cuMemcpyDtoDAsync on cached raw
+  ptrs — capture safe).
+- M3 NVRTC compile now inlines `_typed_prelude.cuh` and strips `#include`
+  lines to match the M1 setup — the prelude's bf16/fp16 helpers must be
+  in scope before any `DEFINE_*` macro expansion.
+- Clippy hygiene: removed all `#[allow(clippy::too_many_arguments)]` by
+  bundling parameters into named structs (`TypedPtr`, `TiedLmDims`,
+  `PrefillInputs`, `Mamba3States`, `Mamba3LmBuild`).
 
 ### Notes
 
