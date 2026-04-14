@@ -132,6 +132,16 @@ pub struct MambaKernels {
     /// f32 → f16 downcast for weight storage.
     pub cast_f32_to_f16: CudaFunction,
 
+    // -- Typed training-forward kernels (bf16/f16 variants of burnin save) --
+    /// bf16 multi-step SSM forward with typed I/O + f32 saves.
+    pub ssm_burnin_fwd_bf16: CudaFunction,
+    /// f16 multi-step SSM forward with typed I/O + f32 saves.
+    pub ssm_burnin_fwd_f16: CudaFunction,
+    /// bf16 multi-step conv1d forward with typed I/O + f32 saves.
+    pub conv1d_burnin_fwd_bf16: CudaFunction,
+    /// f16 multi-step conv1d forward with typed I/O + f32 saves.
+    pub conv1d_burnin_fwd_f16: CudaFunction,
+
     // -- Typed inference kernels (f32/bf16/f16 variants) --
     pub silu_fwd_typed: TypedKernel,
     pub softplus_fwd_typed: TypedKernel,
@@ -286,6 +296,10 @@ impl MambaKernels {
             // mixed precision casts
             cast_f32_to_bf16: get("cast_f32_to_bf16")?,
             cast_f32_to_f16: get("cast_f32_to_f16")?,
+            ssm_burnin_fwd_bf16: get("ssm_burnin_forward_bf16")?,
+            ssm_burnin_fwd_f16: get("ssm_burnin_forward_f16")?,
+            conv1d_burnin_fwd_bf16: get("conv1d_burnin_forward_bf16")?,
+            conv1d_burnin_fwd_f16: get("conv1d_burnin_forward_f16")?,
 
             // parallel scan
             ssm_parallel_fwd: get("ssm_parallel_scan_fwd")?,

@@ -19,9 +19,16 @@
 
 use std::sync::Arc;
 
+use cudarc::driver::PushKernelArg;
+
+use crate::mamba_ssm::gpu::blas::{TypedPtr, gpu_gemm_typed_forward_raw};
 use crate::mamba_ssm::gpu::buffers::{DtypedBuf, GpuBuffer};
+use crate::mamba_ssm::gpu::context::GpuCtx;
 use crate::mamba_ssm::gpu::dtype::WeightDtype;
-use crate::mamba_ssm::gpu::forward::GpuMambaDims;
+use crate::mamba_ssm::gpu::forward::{GpuMambaDims, GpuRecurrentState};
+use crate::mamba_ssm::gpu::launch::{grid_1d, grid_norm};
+use crate::mamba_ssm::gpu::weights::GpuMambaMixedWeights;
+use crate::mamba_ssm::gpu::weights_mixed_train::GpuMambaTrainMixedWeights;
 
 /// Mixed-precision saved activations for one Mamba layer.
 pub struct GpuMambaLayerMixedActs {
@@ -138,3 +145,437 @@ impl GpuMambaBackboneMixedActs {
         Ok(s)
     }
 }
+
+// ════════════════════════════════════════════════════════════════════════
+// Mixed-precision training scratch (typed I/O between layer kernels).
+// ════════════════════════════════════════════════════════════════════════
+
+/// Per-step scratch for mixed-precision training. Pre-allocated once at
+/// trainer construction; reused every forward+backward pass — zero alloc on
+/// hot path. f32 fields needed by backward (residual_out, lm_head feed) are
+/// also kept here.
+pub struct GpuMambaMixedTrainScratch {
+    pub dims: GpuMambaDims,
+    pub dtype: WeightDtype,
+    /// in_proj output [B*T * 2*d_inner].
+    pub proj_flat: DtypedBuf,
+    /// split's x branch [B*T * d_inner].
+    pub x_branch: DtypedBuf,
+    /// dt gather buffer [B*T * dt_rank].
+    pub dt_gather: DtypedBuf,
+    /// B gather buffer [B*T * d_state].
+    pub b_buf: DtypedBuf,
+    /// C gather buffer [B*T * d_state].
+    pub c_buf: DtypedBuf,
+    /// out_proj output [B*T * d_model].
+    pub out_flat: DtypedBuf,
+    /// Final lm_head feed (post norm_f) — typed [B*T * d_model].
+    pub temporal_typed: DtypedBuf,
+}
+
+impl GpuMambaMixedTrainScratch {
+    pub fn new(
+        stream: &Arc<cudarc::driver::CudaStream>,
+        dims: &GpuMambaDims,
+        dtype: WeightDtype,
+    ) -> Result<Self, String> {
+        let bt = dims.batch * dims.seq_len;
+        let xdbl_dim = dims.dt_rank + 2 * dims.d_state;
+        let _ = xdbl_dim; // xdbl is in acts, not scratch
+        let s = Self {
+            dims: *dims,
+            dtype,
+            proj_flat: DtypedBuf::zeros(stream, bt * 2 * dims.d_inner, dtype)?,
+            x_branch: DtypedBuf::zeros(stream, bt * dims.d_inner, dtype)?,
+            dt_gather: DtypedBuf::zeros(stream, bt * dims.dt_rank, dtype)?,
+            b_buf: DtypedBuf::zeros(stream, bt * dims.d_state, dtype)?,
+            c_buf: DtypedBuf::zeros(stream, bt * dims.d_state, dtype)?,
+            out_flat: DtypedBuf::zeros(stream, bt * dims.d_model, dtype)?,
+            temporal_typed: DtypedBuf::zeros(stream, bt * dims.d_model, dtype)?,
+        };
+        // Race-fix invariant (a950648): callers may immediately upload from
+        // host via default-stream HtoD; sync first.
+        stream
+            .synchronize()
+            .map_err(|e| format!("sync after mixed train scratch alloc: {e:?}"))?;
+        Ok(s)
+    }
+}
+
+// ════════════════════════════════════════════════════════════════════════
+// Mixed-precision training forward backbone (delegates to typed kernels).
+// ════════════════════════════════════════════════════════════════════════
+
+/// Mamba-1 backbone forward in mixed precision (bf16/f16/f32 dispatched by
+/// `acts.dtype`). Mirrors [`super::forward::gpu_forward_mamba_backbone`] but
+/// reads compute weights from [`GpuMambaMixedWeights`] and saves typed
+/// activations in [`GpuMambaBackboneMixedActs`].
+///
+/// Precision conventions:
+/// - Residual stream stays f32 across layers (`acts.layers[L].residual`,
+///   `acts.norm_f_input`). All intermediate GEMM/elementwise activations
+///   are typed.
+/// - Recurrent SSM and conv1d state stay f32 (BPTT stability, per
+///   state-spaces/mamba `scan_t = float2`).
+///
+/// Usage: pass `weights.compute()` from a [`GpuMambaTrainMixedWeights`].
+pub fn gpu_forward_mamba_backbone_mixed(
+    ctx: &GpuCtx,
+    acts: &mut GpuMambaBackboneMixedActs,
+    mamba_w: &GpuMambaMixedWeights,
+    mamba_input: &GpuBuffer, // f32 input embeddings
+    state: &mut GpuRecurrentState,
+    scratch: &mut GpuMambaMixedTrainScratch,
+) -> Result<(), String> {
+    assert_eq!(acts.dtype, scratch.dtype, "acts/scratch dtype mismatch");
+    assert_eq!(
+        acts.dtype, mamba_w.bulk_dtype,
+        "acts dtype must match weights bulk_dtype"
+    );
+
+    let dims = scratch.dims;
+    let bt = dims.batch * dims.seq_len;
+    let dm = dims.d_model;
+    let di = dims.d_inner;
+    let ds = dims.d_state;
+    let dt_rank = dims.dt_rank;
+    let xdbl_dim = dt_rank + 2 * ds;
+    let b = dims.batch;
+    let t = dims.seq_len;
+    let d_conv = dims.d_conv;
+    let dt = acts.dtype;
+    let k = &ctx.kernels;
+
+    // ─── Input projection (or identity-proj for HF Mamba) ───
+    // For from_cpu loaded weights with zero-len input_proj_w, treat as identity:
+    // residual_f32 := f32 input directly (D2D copy, no cast needed).
+    // Otherwise: cast f32 input → typed (saved for backward), GEMM, then
+    // residual_f32 stream is seeded by an extra residual_add at layer 0
+    // (we re-cast typed input_proj_outputs back to f32 since norm_f path needs
+    // the residual stream in f32 always — see AMP residual_in_fp32).
+    if mamba_w.input_proj_w.len_elems() == 0 {
+        // Identity-proj. Skip any save (input_proj_inputs/outputs unused in
+        // backward when input_proj is identity).
+        let bytes = (bt * dm * 4) as usize;
+        let res = unsafe {
+            cudarc::driver::sys::cuMemcpyDtoDAsync_v2(
+                acts.layers[0].residual.cached_ptr(),
+                mamba_input.cached_ptr(),
+                bytes,
+                ctx.stream.cu_stream(),
+            )
+        };
+        if res != cudarc::driver::sys::CUresult::CUDA_SUCCESS {
+            return Err(format!("identity proj D2D failed: {res:?}"));
+        }
+    } else {
+        return Err(
+            "non-identity input_proj for mixed training not yet implemented \
+             (HF Mamba uses identity_proj — use from_hf path)"
+                .to_string(),
+        );
+    }
+
+    // ─── Per-layer offsets into flat state buffers ───
+    let conv_per_layer = b * di * d_conv;
+    let ssm_per_layer = b * di * ds;
+    let a_neg_per_layer = di * ds;
+    let f32_sz = std::mem::size_of::<f32>() as u64;
+    let conv_base = state.conv_states.cached_ptr();
+    let ssm_base = state.ssm_states.cached_ptr();
+    let aneg_base = state.a_neg_all.cached_ptr();
+
+    for layer_idx in 0..dims.n_layers {
+        let conv_ptr = conv_base + (layer_idx * conv_per_layer) as u64 * f32_sz;
+        let ssm_ptr = ssm_base + (layer_idx * ssm_per_layer) as u64 * f32_sz;
+        let aneg_ptr = aneg_base + (layer_idx * a_neg_per_layer) as u64 * f32_sz;
+        let lw = &mamba_w.layers[layer_idx];
+        let layer_acts = &mut acts.layers[layer_idx];
+
+        // F1: rmsnorm_fwd_f32in_typed — read f32 residual, write typed post_norm.
+        // Side effect: rms_vals_f32 saved for backward.
+        {
+            let bt_i = bt as i32;
+            let dm_i = dm as i32;
+            let eps: f32 = 1e-5;
+            let mut bld = ctx.stream.launch_builder(k.rmsnorm_fwd_f32in_typed.get(dt));
+            let pn_ptr = layer_acts.post_norm.cached_ptr();
+            let rms_ptr = layer_acts.rms_vals.cached_ptr();
+            let res_ptr = layer_acts.residual.cached_ptr();
+            bld.arg(&pn_ptr);
+            bld.arg(&rms_ptr);
+            bld.arg(&res_ptr);
+            let nw = lw.norm_weight.ptr();
+            bld.arg(&nw);
+            bld.arg(&bt_i);
+            bld.arg(&dm_i);
+            bld.arg(&eps);
+            unsafe { bld.launch(grid_norm(bt, dm)) }
+                .map_err(|e| format!("rmsnorm_f32in_typed L{layer_idx}: {e:?}"))?;
+        }
+
+        // F2: in_proj GEMM typed — [B*T, dm] -> [B*T, 2*di].
+        gpu_gemm_typed_forward_raw(
+            ctx,
+            TypedPtr { ptr: scratch.proj_flat.cached_ptr(), dtype: dt },
+            TypedPtr { ptr: layer_acts.post_norm.cached_ptr(), dtype: dt },
+            TypedPtr { ptr: lw.in_proj_w.ptr(), dtype: dt },
+            None,
+            (bt, dm, 2 * di),
+        )?;
+
+        // F3: split_gate_silu_typed.
+        {
+            let bt_i = bt as i32;
+            let di_i = di as i32;
+            let mut bld = ctx.stream.launch_builder(k.split_gate_silu_typed.get(dt));
+            let xb = scratch.x_branch.cached_ptr();
+            let gp = layer_acts.gate_pre_silu.cached_ptr();
+            let gs = layer_acts.gate_post_silu.cached_ptr();
+            let pf = scratch.proj_flat.cached_ptr();
+            bld.arg(&xb);
+            bld.arg(&gp);
+            bld.arg(&gs);
+            bld.arg(&pf);
+            bld.arg(&bt_i);
+            bld.arg(&di_i);
+            unsafe { bld.launch(grid_1d(bt * di)) }
+                .map_err(|e| format!("split_gate_silu_typed L{layer_idx}: {e:?}"))?;
+        }
+
+        // F4a: conv1d_burnin_forward_typed — typed I/O, f32 state save.
+        {
+            let b_i = b as i32;
+            let t_i = t as i32;
+            let di_i = di as i32;
+            let dc_i = d_conv as i32;
+            let kernel = match dt {
+                WeightDtype::F32 => &k.conv1d_burnin_fwd,
+                WeightDtype::Bf16 => &k.conv1d_burnin_fwd_bf16,
+                WeightDtype::F16 => &k.conv1d_burnin_fwd_f16,
+            };
+            let mut bld = ctx.stream.launch_builder(kernel);
+            let u = layer_acts.u.cached_ptr();
+            let cs = layer_acts.conv_states.cached_ptr();
+            let pc = layer_acts.post_conv.cached_ptr();
+            let xb = scratch.x_branch.cached_ptr();
+            bld.arg(&u);
+            bld.arg(&conv_ptr); // state (f32, layer offset)
+            bld.arg(&cs);
+            bld.arg(&pc);
+            bld.arg(&xb);
+            let cw = lw.conv1d_weight.ptr();
+            let cb = lw.conv1d_bias.ptr();
+            bld.arg(&cw);
+            bld.arg(&cb);
+            bld.arg(&b_i);
+            bld.arg(&t_i);
+            bld.arg(&di_i);
+            bld.arg(&dc_i);
+            unsafe { bld.launch(grid_1d(b * di)) }
+                .map_err(|e| format!("conv1d_burnin_typed L{layer_idx}: {e:?}"))?;
+        }
+
+        // F4b: x_proj GEMM typed.
+        gpu_gemm_typed_forward_raw(
+            ctx,
+            TypedPtr { ptr: layer_acts.xdbl.cached_ptr(), dtype: dt },
+            TypedPtr { ptr: layer_acts.u.cached_ptr(), dtype: dt },
+            TypedPtr { ptr: lw.x_proj_w.ptr(), dtype: dt },
+            None,
+            (bt, di, xdbl_dim),
+        )?;
+
+        // F4c: gather_cols_typed (dt slice) + dt_proj GEMM typed + softplus_copy_typed.
+        {
+            let bt_i = bt as i32;
+            let xdbl_i = xdbl_dim as i32;
+            let dt_i = dt_rank as i32;
+            let offset: i32 = 0;
+            let mut bld = ctx.stream.launch_builder(k.gather_cols_typed.get(dt));
+            let dg = scratch.dt_gather.cached_ptr();
+            let xd = layer_acts.xdbl.cached_ptr();
+            bld.arg(&dg);
+            bld.arg(&xd);
+            bld.arg(&bt_i);
+            bld.arg(&xdbl_i);
+            bld.arg(&dt_i);
+            bld.arg(&offset);
+            unsafe { bld.launch(grid_1d(bt * dt_rank)) }
+                .map_err(|e| format!("gather_cols dt typed L{layer_idx}: {e:?}"))?;
+        }
+        gpu_gemm_typed_forward_raw(
+            ctx,
+            TypedPtr { ptr: layer_acts.delta_raw.cached_ptr(), dtype: dt },
+            TypedPtr { ptr: scratch.dt_gather.cached_ptr(), dtype: dt },
+            TypedPtr { ptr: lw.dt_proj_w.ptr(), dtype: dt },
+            Some(lw.dt_proj_b.ptr()),
+            (bt, dt_rank, di),
+        )?;
+        {
+            let n = (bt * di) as i32;
+            let mut bld = ctx.stream.launch_builder(k.softplus_copy_typed.get(dt));
+            let dl = layer_acts.delta.cached_ptr();
+            let dr = layer_acts.delta_raw.cached_ptr();
+            bld.arg(&dl);
+            bld.arg(&dr);
+            bld.arg(&n);
+            unsafe { bld.launch(grid_1d(bt * di)) }
+                .map_err(|e| format!("softplus_copy_typed L{layer_idx}: {e:?}"))?;
+        }
+
+        // F4d: gather_bc_cols_typed → b_buf, c_buf; ssm_burnin_forward typed.
+        {
+            let bt_i = bt as i32;
+            let xdbl_i = xdbl_dim as i32;
+            let ds_i = ds as i32;
+            let b_off = dt_rank as i32;
+            let c_off = (dt_rank + ds) as i32;
+            let mut bld = ctx.stream.launch_builder(k.gather_bc_cols_typed.get(dt));
+            let bb = scratch.b_buf.cached_ptr();
+            let cb = scratch.c_buf.cached_ptr();
+            let xd = layer_acts.xdbl.cached_ptr();
+            bld.arg(&bb);
+            bld.arg(&cb);
+            bld.arg(&xd);
+            bld.arg(&bt_i);
+            bld.arg(&xdbl_i);
+            bld.arg(&ds_i);
+            bld.arg(&b_off);
+            bld.arg(&c_off);
+            unsafe { bld.launch(grid_1d(bt * ds)) }
+                .map_err(|e| format!("gather_bc_cols typed L{layer_idx}: {e:?}"))?;
+        }
+        // ssm_burnin_forward_typed (with saves: h, h_saved f32; y typed).
+        // Note: parallel scan path is f32-only (no typed variant); for mixed
+        // we always use the sequential ssm_burnin_forward_<dtype> kernel.
+        // d_state > 64 silently early-returns (config validation guarantees
+        // d_state <= 64 for shipped checkpoints).
+        {
+            let b_i = b as i32;
+            let t_i = t as i32;
+            let di_i = di as i32;
+            let ds_i = ds as i32;
+            assert!(
+                ds <= 64,
+                "ssm_burnin_forward_typed requires d_state <= 64 (got {ds})"
+            );
+            let kernel = match dt {
+                WeightDtype::F32 => &k.ssm_burnin_fwd,
+                WeightDtype::Bf16 => &k.ssm_burnin_fwd_bf16,
+                WeightDtype::F16 => &k.ssm_burnin_fwd_f16,
+            };
+            let mut bld = ctx.stream.launch_builder(kernel);
+            let y = layer_acts.y.cached_ptr();
+            let hs = layer_acts.h_saved.cached_ptr();
+            let dae = layer_acts.da_exp.cached_ptr();
+            let dl = layer_acts.delta.cached_ptr();
+            let u = layer_acts.u.cached_ptr();
+            let bb = scratch.b_buf.cached_ptr();
+            let cb = scratch.c_buf.cached_ptr();
+            let dp = lw.d_param.ptr();
+            bld.arg(&ssm_ptr);
+            bld.arg(&y);
+            bld.arg(&hs);
+            bld.arg(&dae);
+            bld.arg(&dl);
+            bld.arg(&u);
+            bld.arg(&bb);
+            bld.arg(&cb);
+            bld.arg(&aneg_ptr);
+            bld.arg(&dp);
+            bld.arg(&b_i);
+            bld.arg(&t_i);
+            bld.arg(&di_i);
+            bld.arg(&ds_i);
+            unsafe { bld.launch(grid_1d(b * di)) }
+                .map_err(|e| format!("ssm_burnin_forward typed L{layer_idx}: {e:?}"))?;
+        }
+
+        // F4e: gating — gated = y * gate_post_silu (elementwise_mul_typed).
+        {
+            let n = (bt * di) as i32;
+            let mut bld = ctx.stream.launch_builder(k.elementwise_mul_typed.get(dt));
+            let g = layer_acts.gated.cached_ptr();
+            let y = layer_acts.y.cached_ptr();
+            let gs = layer_acts.gate_post_silu.cached_ptr();
+            bld.arg(&g);
+            bld.arg(&y);
+            bld.arg(&gs);
+            bld.arg(&n);
+            unsafe { bld.launch(grid_1d(bt * di)) }
+                .map_err(|e| format!("elementwise_mul_typed L{layer_idx}: {e:?}"))?;
+        }
+
+        // F5: out_proj GEMM typed → scratch.out_flat [B*T, d_model].
+        gpu_gemm_typed_forward_raw(
+            ctx,
+            TypedPtr { ptr: scratch.out_flat.cached_ptr(), dtype: dt },
+            TypedPtr { ptr: layer_acts.gated.cached_ptr(), dtype: dt },
+            TypedPtr { ptr: lw.out_proj_w.ptr(), dtype: dt },
+            None,
+            (bt, di, dm),
+        )?;
+
+        // F6: residual_add_f32 typed — residual_f32 += out_flat_typed (f32 stays).
+        // Output destination = next layer's residual buffer (or norm_f_input
+        // if this is the last layer).
+        let next_res_ptr = if layer_idx + 1 < dims.n_layers {
+            acts.layers[layer_idx + 1].residual.cached_ptr()
+        } else {
+            acts.norm_f_input.cached_ptr()
+        };
+        {
+            let n = (bt * dm) as i32;
+            let mut bld = ctx.stream.launch_builder(k.residual_add_f32_typed.get(dt));
+            let cur_res = acts.layers[layer_idx].residual.cached_ptr();
+            let of = scratch.out_flat.cached_ptr();
+            bld.arg(&next_res_ptr); // dst f32
+            bld.arg(&cur_res);      // a f32
+            bld.arg(&of);           // b typed
+            bld.arg(&n);
+            unsafe { bld.launch(grid_1d(bt * dm)) }
+                .map_err(|e| format!("residual_add_f32_typed L{layer_idx}: {e:?}"))?;
+        }
+    }
+
+    // ─── Final norm_f: residual_f32 → temporal_typed via rmsnorm_fwd_f32in_typed.
+    {
+        let bt_i = bt as i32;
+        let dm_i = dm as i32;
+        let eps: f32 = 1e-5;
+        let mut bld = ctx.stream.launch_builder(k.rmsnorm_fwd_f32in_typed.get(dt));
+        let tt = scratch.temporal_typed.cached_ptr();
+        let nfr = acts.norm_f_rms.cached_ptr();
+        let nfi = acts.norm_f_input.cached_ptr();
+        bld.arg(&tt);
+        bld.arg(&nfr);
+        bld.arg(&nfi);
+        let nfw = mamba_w.norm_f_weight.ptr();
+        bld.arg(&nfw);
+        bld.arg(&bt_i);
+        bld.arg(&dm_i);
+        bld.arg(&eps);
+        unsafe { bld.launch(grid_norm(bt, dm)) }
+            .map_err(|e| format!("rmsnorm_f32in_typed norm_f: {e:?}"))?;
+    }
+
+    Ok(())
+}
+
+/// Convenience overload: build the bf16 mixed weights from a
+/// [`GpuMambaTrainMixedWeights`] and dispatch.
+pub fn gpu_forward_mamba_backbone_train_mixed(
+    ctx: &GpuCtx,
+    acts: &mut GpuMambaBackboneMixedActs,
+    train_w: &GpuMambaTrainMixedWeights,
+    mamba_input: &GpuBuffer,
+    state: &mut GpuRecurrentState,
+    scratch: &mut GpuMambaMixedTrainScratch,
+) -> Result<(), String> {
+    gpu_forward_mamba_backbone_mixed(ctx, acts, &train_w.compute, mamba_input, state, scratch)
+}
+
+// (typed↔f32 cast helpers are not needed in this path — residual stream is
+// seeded directly from f32 input via D2D copy, and post-layer residual stays
+// in f32 throughout. typed→f32 only matters for inference lm_head, not here.)

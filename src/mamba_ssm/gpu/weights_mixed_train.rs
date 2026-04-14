@@ -100,7 +100,7 @@ fn sync_one(
     if matches!(dtype, WeightDtype::F32) {
         // f32 → f32: D2D async copy on stream (no cast needed).
         let bytes = n_elems * 4;
-        let dst_ptr = compute.cached_ptr();
+        let dst_ptr = compute.ptr();
         let src_ptr = master.cached_ptr();
         let res = unsafe {
             cudarc::driver::sys::cuMemcpyDtoDAsync_v2(
@@ -123,7 +123,7 @@ fn sync_one(
         WeightDtype::F32 => unreachable!(),
     };
     let n_i32 = n_elems as i32;
-    let dst_ptr = compute.cached_ptr();
+    let dst_ptr = compute.ptr();
     let src_ptr = master.cached_ptr();
     let mut builder = ctx.stream.launch_builder(kernel);
     builder.arg(&dst_ptr);
@@ -145,7 +145,7 @@ fn sync_f32(
     let bytes = n_elems * 4;
     let res = unsafe {
         cudarc::driver::sys::cuMemcpyDtoDAsync_v2(
-            compute.cached_ptr(),
+            compute.ptr(),
             master.cached_ptr(),
             bytes,
             ctx.stream.cu_stream(),
