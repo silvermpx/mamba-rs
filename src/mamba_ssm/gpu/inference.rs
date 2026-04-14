@@ -162,6 +162,9 @@ pub struct GpuMambaInference {
     cfg: MambaConfig,
     input_dim: usize,
     batch: usize,
+    /// When true (HF Mamba with no input_proj), skip input projection and copy
+    /// `gpu_input` → `temporal` directly. Mirrors CPU `mamba_step_no_proj`.
+    identity_proj: bool,
     graph: Option<cudarc::driver::CudaGraph>,
     /// Raw pointers captured during graph capture for runtime validation.
     captured_state_ptr: u64,
@@ -200,6 +203,8 @@ impl GpuMambaInference {
                 .map_err(|e| format!("exp_negate layer {layer_idx}: {e:?}"))?;
         }
 
+        let identity_proj = cpu_weights.input_proj_w.is_empty();
+
         Ok(Self {
             ctx,
             weights,
@@ -207,6 +212,7 @@ impl GpuMambaInference {
             cfg,
             input_dim,
             batch,
+            identity_proj,
             graph: None,
             captured_state_ptr: 0,
             captured_scratch_ptr: 0,
@@ -359,6 +365,9 @@ impl GpuMambaInference {
         state: &mut GpuInferenceState,
         scratch: &mut GpuInferenceScratch,
     ) -> Result<(), String> {
+        // F32 path uses the typed-kernel dispatch via generic. This should be
+        // identical to the legacy f32-only kernels because TypedKernel.get(F32)
+        // returns the _f32 suffix variant which is the same PTX as legacy.
         self.step_kernels_generic(&self.weights, state, scratch)
     }
 
@@ -382,16 +391,28 @@ impl GpuMambaInference {
         let k = &self.ctx.kernels;
 
         // Input projection: [B, input_dim] → [B, d_model]
-        let (ipw_ptr, ipw_dtype) = weights.input_proj_w();
-        gpu_gemm_forward_dispatch(
-            &self.ctx,
-            &mut scratch.temporal,
-            &scratch.gpu_input,
-            ipw_ptr,
-            ipw_dtype,
-            Some(weights.input_proj_b()),
-            (b, self.input_dim, dm),
-        )?;
+        // HF Mamba models have no input_proj (embedding is already d_model).
+        // Identity branch mirrors CPU `mamba_step_no_proj`.
+        if self.identity_proj {
+            debug_assert_eq!(
+                self.input_dim, dm,
+                "identity_proj requires input_dim == d_model"
+            );
+            scratch
+                .temporal
+                .copy_from_raw(&scratch.gpu_input, &self.ctx.stream)?;
+        } else {
+            let (ipw_ptr, ipw_dtype) = weights.input_proj_w();
+            gpu_gemm_forward_dispatch(
+                &self.ctx,
+                &mut scratch.temporal,
+                &scratch.gpu_input,
+                ipw_ptr,
+                ipw_dtype,
+                Some(weights.input_proj_b()),
+                (b, self.input_dim, dm),
+            )?;
+        }
 
         let f32_sz = std::mem::size_of::<f32>() as u64;
 

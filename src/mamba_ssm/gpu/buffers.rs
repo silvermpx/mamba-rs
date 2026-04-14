@@ -418,6 +418,149 @@ impl GpuByteBuffer {
     }
 }
 
+/// Dtype-aware owning buffer — holds activation scratch in any dtype.
+///
+/// Used by GpuInferenceScratch to hold activations in f32/bf16/fp16 uniformly.
+/// Exposes `.cached_ptr()` + `.len_elems()` so all existing kernel call-sites
+/// work unchanged. `upload_f32` / `download_f32` do on-the-fly dtype conversion
+/// for CPU <-> GPU transfers.
+pub struct DtypedBuf {
+    inner: GpuByteBuffer,
+    n_elems: usize,
+    dtype: WeightDtype,
+}
+
+impl DtypedBuf {
+    pub fn zeros(
+        stream: &Arc<cudarc::driver::CudaStream>,
+        n_elems: usize,
+        dtype: WeightDtype,
+    ) -> Result<Self, String> {
+        let inner = GpuByteBuffer::zeros(stream, n_elems * dtype.size_bytes())?;
+        Ok(Self {
+            inner,
+            n_elems,
+            dtype,
+        })
+    }
+
+    pub fn cached_ptr(&self) -> cudarc::driver::sys::CUdeviceptr {
+        self.inner.cached_ptr()
+    }
+
+    pub fn len_elems(&self) -> usize {
+        self.n_elems
+    }
+
+    pub fn dtype(&self) -> WeightDtype {
+        self.dtype
+    }
+
+    pub fn size_bytes(&self) -> usize {
+        self.n_elems * self.dtype.size_bytes()
+    }
+
+    /// Upload f32 data from CPU, converting to dtype on-the-fly.
+    pub fn upload_f32(
+        &self,
+        _stream: &Arc<cudarc::driver::CudaStream>,
+        src: &[f32],
+    ) -> Result<(), String> {
+        assert_eq!(src.len(), self.n_elems, "DtypedBuf upload size mismatch");
+        let ptr = self.inner.cached_ptr();
+        match self.dtype {
+            WeightDtype::F32 => {
+                let bytes: &[u8] = bytemuck::cast_slice(src);
+                cu_memcpy_htod_raw(ptr, bytes)
+            }
+            WeightDtype::Bf16 => {
+                let buf: Vec<half::bf16> = src.iter().map(|&v| half::bf16::from_f32(v)).collect();
+                let bytes: &[u8] = bytemuck::cast_slice(&buf);
+                cu_memcpy_htod_raw(ptr, bytes)
+            }
+            WeightDtype::F16 => {
+                let buf: Vec<half::f16> = src.iter().map(|&v| half::f16::from_f32(v)).collect();
+                let bytes: &[u8] = bytemuck::cast_slice(&buf);
+                cu_memcpy_htod_raw(ptr, bytes)
+            }
+        }
+    }
+
+    /// Download to f32, converting from dtype on-the-fly.
+    pub fn download_f32(
+        &self,
+        _stream: &Arc<cudarc::driver::CudaStream>,
+        dst: &mut [f32],
+    ) -> Result<(), String> {
+        assert_eq!(dst.len(), self.n_elems, "DtypedBuf download size mismatch");
+        let ptr = self.inner.cached_ptr();
+        match self.dtype {
+            WeightDtype::F32 => {
+                let bytes: &mut [u8] = bytemuck::cast_slice_mut(dst);
+                cu_memcpy_dtoh_raw(ptr, bytes)
+            }
+            WeightDtype::Bf16 => {
+                let mut buf = vec![half::bf16::ZERO; self.n_elems];
+                let bytes: &mut [u8] = bytemuck::cast_slice_mut(&mut buf);
+                cu_memcpy_dtoh_raw(ptr, bytes)?;
+                for (d, &v) in dst.iter_mut().zip(&buf) {
+                    *d = v.to_f32();
+                }
+                Ok(())
+            }
+            WeightDtype::F16 => {
+                let mut buf = vec![half::f16::ZERO; self.n_elems];
+                let bytes: &mut [u8] = bytemuck::cast_slice_mut(&mut buf);
+                cu_memcpy_dtoh_raw(ptr, bytes)?;
+                for (d, &v) in dst.iter_mut().zip(&buf) {
+                    *d = v.to_f32();
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
+fn cu_memcpy_htod_raw(
+    dst: cudarc::driver::sys::CUdeviceptr,
+    bytes: &[u8],
+) -> Result<(), String> {
+    if bytes.is_empty() {
+        return Ok(());
+    }
+    let r = unsafe {
+        cudarc::driver::sys::cuMemcpyHtoD_v2(
+            dst,
+            bytes.as_ptr() as *const std::ffi::c_void,
+            bytes.len(),
+        )
+    };
+    if r != cudarc::driver::sys::CUresult::CUDA_SUCCESS {
+        return Err(format!("cuMemcpyHtoD: {r:?}"));
+    }
+    Ok(())
+}
+
+fn cu_memcpy_dtoh_raw(
+    src: cudarc::driver::sys::CUdeviceptr,
+    bytes: &mut [u8],
+) -> Result<(), String> {
+    if bytes.is_empty() {
+        return Ok(());
+    }
+    let r = unsafe {
+        cudarc::driver::sys::cuMemcpyDtoH_v2(
+            bytes.as_mut_ptr() as *mut std::ffi::c_void,
+            src,
+            bytes.len(),
+        )
+    };
+    if r != cudarc::driver::sys::CUresult::CUDA_SUCCESS {
+        return Err(format!("cuMemcpyDtoH: {r:?}"));
+    }
+    Ok(())
+}
+
 /// Non-owning view into a dtype-tagged region of a `GpuByteBuffer`.
 #[derive(Clone, Copy)]
 pub struct WeightSliceDyn {
