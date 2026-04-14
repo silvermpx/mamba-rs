@@ -4,7 +4,9 @@
 //! to 1 (ctx). All GPU forward/backward/inference functions take `&GpuCtx`.
 
 use super::device::GpuDevice;
+use super::dtype::WeightDtype;
 use super::kernels::MambaKernels;
+use crate::config::MambaConfig;
 use std::cell::RefCell;
 use std::sync::Arc;
 
@@ -51,14 +53,47 @@ impl GpuCtx {
         }
     }
 
+    /// Pre-size the half-precision staging buffer for a known engine config
+    /// + batch + dtype. Eliminates lazy-grow during the hot path — critical
+    /// for CUDA Graph capture safety: if a captured graph baked a staging
+    /// pointer and a later call grew the buffer, the freed allocation would
+    /// be dereferenced on replay (CUDA_ERROR_ILLEGAL_ADDRESS or silent
+    /// corruption). Sizes for the worst-case step-time GEMM operand
+    /// (in_proj input = batch × d_model, the largest staging consumer in
+    /// step_kernels). Idempotent — safe to call multiple times.
+    pub fn presize_half_staging_for_step(
+        &self,
+        cfg: &MambaConfig,
+        batch: usize,
+        dtype: WeightDtype,
+    ) -> Result<(), String> {
+        if matches!(dtype, WeightDtype::F32) {
+            return Ok(());
+        }
+        let dm = cfg.d_model;
+        let di = cfg.d_inner();
+        let dt_rank = cfg.dt_rank();
+        let max_in_elems = batch * dm.max(di).max(dt_rank);
+        let bytes = max_in_elems * dtype.size_bytes();
+        self.ensure_half_staging(bytes)
+    }
+
     /// Ensure the half-precision staging buffer is at least `bytes` in size.
-    /// Lazy allocation; reused across GEMMs.
+    /// In the steady state this is a no-op when `presize_half_staging_for_step`
+    /// was called at engine construction; the lazy grow path remains as a
+    /// fallback for prefill (which runs outside any captured graph) or for
+    /// callers that don't presize.
     pub fn ensure_half_staging(&self, bytes: usize) -> Result<(), String> {
         let mut cur = self.half_staging_bytes.borrow_mut();
         if *cur >= bytes {
             return Ok(());
         }
-        let new_size = bytes.max(*cur * 2).max(4096);
+        // Grow by at least the requested size, rounded up to a 4 KiB page —
+        // no speculative doubling that wastes memory at the plateau (the old
+        // `bytes.max(*cur * 2)` rule could leave us at 4× the actual need
+        // after a few growths).
+        let page = 4096;
+        let new_size = bytes.div_ceil(page) * page;
         let buf = self
             .stream
             .alloc_zeros::<u8>(new_size)

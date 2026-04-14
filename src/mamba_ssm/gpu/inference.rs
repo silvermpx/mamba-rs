@@ -804,6 +804,16 @@ impl GpuMambaInferenceMixed {
         let mixed_weights =
             GpuMambaMixedWeights::from_cpu(&engine.ctx.stream, cpu_weights, &cfg, bulk_dtype)?;
 
+        // Pre-size half_staging for the worst-case step-time GEMM operand.
+        // Eliminates lazy-grow during graph capture (a re-allocation would
+        // free the buffer the captured graph baked a pointer into → silent
+        // dangling on replay). Native step path already bypasses staging,
+        // but the legacy step_kernels_mixed path and compute_logits fallback
+        // still go through it.
+        engine
+            .ctx
+            .presize_half_staging_for_step(&cfg, batch, bulk_dtype)?;
+
         // Precompute a_neg into a separate arena (same as engine but from mixed weights'
         // f32 a_log — they match since a_log is f32 in both storages).
         let di = cfg.d_inner();
