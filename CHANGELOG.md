@@ -1,5 +1,71 @@
 # Changelog
 
+## 0.2.2
+
+**End-to-end bf16/f16 inference for both Mamba-1 and Mamba-3.**
+
+### Added
+
+**Unified half-precision inference API**
+- `GpuMambaBackbone::new_with_dtype(ordinal, weights, cfg, input_dim, batch, dtype)` for Mamba-1 and the symmetric `GpuMamba3Backbone::new_with_dtype` for Mamba-3. `WeightDtype::{F32, Bf16, F16}` chooses storage dtype at construction; compute stays f32 (CUBLAS_COMPUTE_32F, upcast-inside-kernel).
+- New `GpuMamba3LM` wrapper (`src/module/gpu_lm3.rs`), mirror of `GpuMambaLM` — same `generate / generate_streaming / generate_batch / capture_graph / reset` API for M3. Construction via `from_weights_with_dtype` (no HF loader: no real Mamba-3 SISO checkpoint is public yet).
+- `GpuMambaLM::last_logits(b)` accessor.
+- `GpuMamba3Backbone::blas()` / `download_temporal()` / `temporal_dtype()` accessors.
+
+**End-to-end bf16/f16 activation pipeline (Mamba-1)**
+- `GpuMambaInferenceMixed::step_kernels_mixed_native` — new execution path that keeps activations in the weight dtype throughout (no cast-staging per GEMM). Residual stream stays f32 (matches HF `residual_in_fp32=True`). SSM state stays f32.
+- `gpu_forward_inference_prefill_mixed` + `GpuMambaTargetMixedScratch` — native bf16/f16 parallel prefill. Replaces the legacy "f32 prefill + downcast" fallback.
+- `GpuMambaBackbone::prefill_sequence_mixed` + `alloc_prefill_mixed_scratch`.
+
+**End-to-end bf16/f16 activation pipeline (Mamba-3)**
+- `Mamba3GpuInferenceMixed` engine with `step_kernels_mixed_native` + CUDA Graph capture, mirroring the M1 pipeline.
+- `Mamba3GpuInferenceMixedScratch` — DtypedBuf activations, f32 residual/coefficients/stats.
+- `GpuMamba3MixedWeights` bulk arena (bf16/f16 linear weights) + f32 arena (norms, biases, per-head coefficients).
+
+**New CUDA kernels (all with f32/bf16/f16 variants via `DEFINE_*` macros)**
+- `rmsnorm_forward_f32in_{bf16,f16}`: f32 residual → half post-norm (shared by M1 + M3).
+- `residual_add_f32_{bf16,f16}`: f32 accumulator += half branch → f32 output (shared).
+- `gather_last_timestep_{f32,bf16,f16}`: last-timestep extractor (shared).
+- `m3_split_{bf16,f16}`: 8-way split + fused softplus/sigmoid (M3).
+- `bcnorm_fwd_{bf16,f16}`, `bc_bias_add_{bf16,f16}`: B/C RMSNorm + bias add (M3).
+- `rope_fwd_{bf16,f16}`: RoPE rotation with f32 angle_cumsum (M3).
+- `silu_gate_fwd_{bf16,f16}`, `rmsnorm_gated_forward_{bf16,f16}`: M3 output gating.
+
+**New dispatch helpers**
+- `HalfKernel` struct (bf16/f16 only) for dual-dtype bridge kernels.
+- `gpu_gemm_typed_forward_raw` with fully-independent A/W/C dtypes.
+- `gpu_gemm_typed_raw_no_bias` — blas-only variant (no GpuCtx dependency; used by M3).
+- `gpu_sgemm_tied_lm_head_blas` + `gpu_gemm_ex_tied_lm_head_blas` — blas-only tied-lm_head helpers.
+
+**Parity & benchmarks**
+- `tests/gpu_bf16_parity.rs`: Mamba-1 bf16 vs f32 on mamba-130m-hf. **20/20 greedy token match, KL(f32‖bf16) ≈ 1.0e-3.**
+- `tests/m3_bf16_parity.rs`: Mamba-3 f32 vs bf16 synthetic-weight parity (monotone convergence, final cosine > 0.994).
+- `tests/gpu_mamba3_lm_test.rs`: M3 LM smoke tests for both dtypes.
+- `tests/bench_bf16_vs_f32.rs`: dtype × graph benchmark harness for M1 + M3.
+
+### Performance (RTX 4090, greedy generation, 100 tokens)
+
+| Model                       | f32 +graph | bf16 +graph | speedup |
+|---                          |---         |---          |---      |
+| Mamba-1 130m-hf             | 398 tok/s  | 494 tok/s   | +24%    |
+| Mamba-3 synthetic (d=256×8) | 546 tok/s  | 802 tok/s   | +47%    |
+
+Weight VRAM footprint: **bf16 / f16 = 0.50× f32** (clean 2× compression).
+
+### Fixed
+
+- `GpuMambaWeights` / `GpuMambaMixedWeights`: layout formula used hardcoded `d_model`-sized input_proj; HF Mamba-1 checkpoints have empty input_proj (identity projection) and tripped `debug_assert!(off == total)` in debug builds. Formula now uses the actual CPU weight lengths. No release-mode effect — pure debug guard.
+- `step_kernels_mixed_native` (M1 + M3): used `GpuBuffer::copy_from` to seed the f32 residual from input; that path goes through a `SyncOnDrop`-creating CUDA slice view which invalidates CUDA Graph capture. Switched to `copy_from_raw` (cuMemcpyDtoDAsync on cached raw ptrs — capture safe).
+- M3 NVRTC compile now inlines `_typed_prelude.cuh` and strips `#include` lines to match the M1 setup — the prelude's bf16/fp16 helpers must be in scope before any `DEFINE_*` macro expansion.
+- Clippy hygiene: removed all `#[allow(clippy::too_many_arguments)]` by bundling parameters into named structs (`TypedPtr`, `TiedLmDims`, `PrefillInputs`, `Mamba3States`, `Mamba3LmBuild`).
+- `Mamba3Weights` / `Mamba3LayerWeights`: `#[derive(Clone)]` so `GpuMamba3LM` can take `&Mamba3Weights` and internally clone+clear `input_proj` for identity_proj.
+
+### Notes
+
+- The RL training path (`GpuMambaTrainWeights` + training forward/backward) is bit-identical to 0.2.1. The `BackboneEngine::F32` variant never touches the new mixed code; regression-guarded by `test_gpu_f32_backbone_unchanged_after_mixed_refactor` (M1) and the M3 equivalent.
+- No real Mamba-3 SISO HF checkpoint exists publicly; `GpuMamba3LM` therefore has no `from_hf` constructor. When checkpoints land, adding one is a 2-3 hour additive change (new HF loader + key remapper), no pipeline changes needed.
+- `m3_compute_abg`, `m3_angle_dt_fwd*` stay f32 — they operate on coefficient scalars (dt/a/trap/α/β/γ) and the RoPE angle state is accumulated in f64. Keeping them f32 preserves parity with the state-spaces/mamba reference.
+
 ## 0.2.1
 
 ### Fixed
