@@ -71,8 +71,8 @@ fn upload_typed(
 ) -> DtypedBuf {
     let buf = DtypedBuf::zeros(stream, src.len(), dtype).unwrap();
     // Race-fix (a950648 lesson): wait for async zero-memset on custom stream
-    // BEFORE issuing default-stream sync HtoD upload. Without this, the
-    // memset can clobber the just-uploaded bytes.
+    // BEFORE issuing HtoD upload. Without this, the memset can clobber the
+    // just-uploaded bytes.
     stream.synchronize().unwrap();
     let bytes: Vec<u8> = match dtype {
         WeightDtype::F32 => bytemuck::cast_slice(src).to_vec(),
@@ -85,11 +85,17 @@ fn upload_typed(
             bytemuck::cast_slice(&v).to_vec()
         }
     };
+    // Stream-ordered HtoD on the CUSTOM stream (not NULL default). In CUDA
+    // 12+ with per-thread default-stream semantics, cuMemcpyHtoD_v2 runs on
+    // NULL stream and has no ordering with custom-stream allocs/kernels; use
+    // cuMemcpyHtoDAsync_v2 on our custom stream, then sync before return so
+    // the source host bytes can drop safely.
     let res = unsafe {
-        cudarc::driver::sys::cuMemcpyHtoD_v2(
+        cudarc::driver::sys::cuMemcpyHtoDAsync_v2(
             buf.cached_ptr(),
             bytes.as_ptr() as *const _,
             bytes.len(),
+            stream.cu_stream() as cudarc::driver::sys::CUstream,
         )
     };
     assert_eq!(res, cudarc::driver::sys::CUresult::CUDA_SUCCESS);
@@ -105,11 +111,15 @@ fn download_typed(
     let n = src.len_elems();
     let bytes_n = n * dtype.size_bytes();
     let mut bytes = vec![0u8; bytes_n];
+    // Stream-ordered D2H on the CUSTOM stream (same reasoning as upload_typed):
+    // ensures the D2H waits for any pending custom-stream writes to complete,
+    // rather than reading stale DRAM via the NULL default stream.
     let res = unsafe {
-        cudarc::driver::sys::cuMemcpyDtoH_v2(
+        cudarc::driver::sys::cuMemcpyDtoHAsync_v2(
             bytes.as_mut_ptr() as *mut _,
             src.cached_ptr(),
             bytes_n,
+            stream.cu_stream() as cudarc::driver::sys::CUstream,
         )
     };
     assert_eq!(res, cudarc::driver::sys::CUresult::CUDA_SUCCESS);
