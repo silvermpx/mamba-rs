@@ -489,7 +489,7 @@ pub fn gpu_forward_mamba3_layer(
     let na = dims.n_angles;
 
     // F1: RMSNorm -- save residual, compute post_norm
-    acts.residual.copy_from(temporal, &ctx.stream)?;
+    acts.residual.copy_from_raw(temporal, &ctx.stream)?;
     {
         let mut builder = ctx.stream.launch_builder(&m3k.rmsnorm_fwd);
         builder.arg(acts.post_norm.inner_mut());
@@ -680,8 +680,8 @@ pub fn gpu_forward_mamba3_layer(
         unsafe { builder.launch(grid_1d(bt * nh * ds)) }
             .map_err(|e| format!("rope_fwd F4ef: {:?}", e))?;
     } else {
-        acts.k.copy_from(&acts.b_biased, &ctx.stream)?;
-        acts.q.copy_from(&acts.c_biased, &ctx.stream)?;
+        acts.k.copy_from_raw(&acts.b_biased, &ctx.stream)?;
+        acts.q.copy_from_raw(&acts.c_biased, &ctx.stream)?;
     }
 
     // F5b: Compute alpha, beta, gamma from dt, a_val, trap
@@ -834,13 +834,13 @@ pub fn gpu_forward_mamba3_layer(
         // Save intermediates for backward (skip recompute: eliminates 6 kernel launches)
         // D2D copies are async and cheap (~0.01ms each on same stream)
         acts.da_cumsum_saved
-            .copy_from(&scratch.da_cumsum, &ctx.stream)?;
-        acts.k_scaled_saved.copy_from(&scratch.d_q, &ctx.stream)?; // K_scaled stored in d_q
-        acts.scale_saved.copy_from(&scratch.d_gamma, &ctx.stream)?; // scale stored in d_gamma
-        acts.gamma_saved.copy_from(&scratch.d_dd_dt, &ctx.stream)?; // gamma stored in d_dd_dt
-        acts.qk_dot_saved.copy_from(&scratch.d_beta, &ctx.stream)?; // qk_dot stored in d_beta
+            .copy_from_raw(&scratch.da_cumsum, &ctx.stream)?;
+        acts.k_scaled_saved.copy_from_raw(&scratch.d_q, &ctx.stream)?; // K_scaled stored in d_q
+        acts.scale_saved.copy_from_raw(&scratch.d_gamma, &ctx.stream)?; // scale stored in d_gamma
+        acts.gamma_saved.copy_from_raw(&scratch.d_dd_dt, &ctx.stream)?; // gamma stored in d_dd_dt
+        acts.qk_dot_saved.copy_from_raw(&scratch.d_beta, &ctx.stream)?; // qk_dot stored in d_beta
         acts.chunk_states_saved
-            .copy_from(&scratch.chunk_states, &ctx.stream)?;
+            .copy_from_raw(&scratch.chunk_states, &ctx.stream)?;
 
         // Writeback persistent SSM/K/V state (parallel path does not mutate layer_ptrs
         // in-place like the sequential m3_burnin_fwd kernel does).
@@ -993,7 +993,7 @@ pub fn gpu_forward_mamba3_backbone(
     let na = dims.n_angles.max(1);
 
     // Save input projection inputs
-    acts.input_proj_inputs.copy_from(mamba_input, &ctx.stream)?;
+    acts.input_proj_inputs.copy_from_raw(mamba_input, &ctx.stream)?;
 
     // Input projection SGEMM: [B*T, mamba_input_dim] -> [B*T, d_model]
     gpu_sgemm_forward_raw(
@@ -1005,7 +1005,7 @@ pub fn gpu_forward_mamba3_backbone(
         (bt, dims.mamba_input_dim, dm),
     )?;
 
-    acts.input_proj_outputs.copy_from(temporal, &ctx.stream)?;
+    acts.input_proj_outputs.copy_from_raw(temporal, &ctx.stream)?;
 
     // N layers
     let f32_sz = std::mem::size_of::<f32>() as u64;
@@ -1040,7 +1040,7 @@ pub fn gpu_forward_mamba3_backbone(
     }
 
     // Final RMSNorm (norm_f)
-    acts.norm_f_input.copy_from(temporal, &ctx.stream)?;
+    acts.norm_f_input.copy_from_raw(temporal, &ctx.stream)?;
     {
         let nf_ptr = mamba_w.norm_f_weight.raw_ptr(&ctx.stream);
         let bt_i = bt as i32;
@@ -1227,8 +1227,8 @@ pub fn gpu_backward_mamba3_layer(
             unsafe { builder.launch(grid_1d(bt * nh * ds)) }
                 .map_err(|e| format!("rope_bwd seq B6: {:?}", e))?;
         } else {
-            scratch.d_b_pre_rope.copy_from(&scratch.d_k, &ctx.stream)?;
-            scratch.d_c_pre_rope.copy_from(&scratch.d_q, &ctx.stream)?;
+            scratch.d_b_pre_rope.copy_from_raw(&scratch.d_k, &ctx.stream)?;
+            scratch.d_c_pre_rope.copy_from_raw(&scratch.d_q, &ctx.stream)?;
         }
 
         // B/C bias gradients: colsum d_b_pre_rope [B*T*nh*ds] → lg.b_bias [nh*ds]
@@ -1303,20 +1303,20 @@ pub fn gpu_backward_mamba3_layer(
         // Load saved intermediates from forward (replaces R1+R2 recompute: 6 fewer kernel launches)
         scratch
             .da_cumsum
-            .copy_from(&acts.da_cumsum_saved, &ctx.stream)?;
+            .copy_from_raw(&acts.da_cumsum_saved, &ctx.stream)?;
         scratch
             .d_b_pre_rope
-            .copy_from(&acts.k_scaled_saved, &ctx.stream)?; // K_scaled
-        scratch.d_scale.copy_from(&acts.scale_saved, &ctx.stream)?;
+            .copy_from_raw(&acts.k_scaled_saved, &ctx.stream)?; // K_scaled
+        scratch.d_scale.copy_from_raw(&acts.scale_saved, &ctx.stream)?;
         scratch
             .d_gamma_par
-            .copy_from(&acts.gamma_saved, &ctx.stream)?;
+            .copy_from_raw(&acts.gamma_saved, &ctx.stream)?;
         scratch
             .d_qk_dot
-            .copy_from(&acts.qk_dot_saved, &ctx.stream)?;
+            .copy_from_raw(&acts.qk_dot_saved, &ctx.stream)?;
         scratch
             .chunk_states
-            .copy_from(&acts.chunk_states_saved, &ctx.stream)?;
+            .copy_from_raw(&acts.chunk_states_saved, &ctx.stream)?;
 
         // R3: Extract da_cs_sum (per-chunk cumsum totals)
         {
@@ -1450,8 +1450,8 @@ pub fn gpu_backward_mamba3_layer(
         }
 
         // Copy dQ_pre/dK_pre to d_q/d_k (these are the final pre-bias grads)
-        scratch.d_q.copy_from(&scratch.d_c_pre_rope, &ctx.stream)?;
-        scratch.d_k.copy_from(&scratch.d_b_pre_rope, &ctx.stream)?;
+        scratch.d_q.copy_from_raw(&scratch.d_c_pre_rope, &ctx.stream)?;
+        scratch.d_k.copy_from_raw(&scratch.d_b_pre_rope, &ctx.stream)?;
 
         // S3: m3_ddt_dtrap -- dScale/dGamma -> dDT, dTrap
         // Grid: ceil(B*T*nh/256), Block: 256 -- one thread per (b,t,h)
@@ -1481,8 +1481,8 @@ pub fn gpu_backward_mamba3_layer(
 
         // Copy dQ/dK through to d_b_pre_rope/d_c_pre_rope for downstream
         // (these are the pre-bias gradients needed by B4)
-        scratch.d_b_pre_rope.copy_from(&scratch.d_k, &ctx.stream)?;
-        scratch.d_c_pre_rope.copy_from(&scratch.d_q, &ctx.stream)?;
+        scratch.d_b_pre_rope.copy_from_raw(&scratch.d_k, &ctx.stream)?;
+        scratch.d_c_pre_rope.copy_from_raw(&scratch.d_q, &ctx.stream)?;
 
         // Note: d_alpha now holds dADT, d_dd_dt holds dDT from trapezoidal path.
         // d_trap_raw holds dTrap. These are the correct gradient paths.
@@ -1857,7 +1857,7 @@ pub fn gpu_backward_mamba3_backbone(
             .map_err(|e| format!("rmsnorm_bwd norm_f m3: {:?}", e))?;
     }
     // Copy d_norm -> d_temporal for layer backward chain
-    d_temporal.copy_from(&scratch.d_norm, &ctx.stream)?;
+    d_temporal.copy_from_raw(&scratch.d_norm, &ctx.stream)?;
 
     // Backward through layers (reverse order)
     for l in (0..dims.n_layers).rev() {
@@ -1937,7 +1937,7 @@ pub fn gpu_forward_mamba3_target_burnin(
         let lw = &mamba_w.layers[l];
 
         // Residual
-        tgt.residual.copy_from(&tgt.temporal_work, &ctx.stream)?;
+        tgt.residual.copy_from_raw(&tgt.temporal_work, &ctx.stream)?;
 
         // RMSNorm
         {
@@ -2131,8 +2131,8 @@ pub fn gpu_forward_mamba3_target_burnin(
                     .map_err(|e| format!("rope_fwd tgt L{l}: {:?}", e))?;
             }
         } else {
-            tgt.k.copy_from(&tgt.b_biased, &ctx.stream)?;
-            tgt.q.copy_from(&tgt.c_biased, &ctx.stream)?;
+            tgt.k.copy_from_raw(&tgt.b_biased, &ctx.stream)?;
+            tgt.q.copy_from_raw(&tgt.c_biased, &ctx.stream)?;
         }
 
         // Compute alpha/beta/gamma for target
@@ -2250,7 +2250,7 @@ pub fn gpu_forward_mamba3_target_burnin(
 
     // Final RMSNorm (norm_f) — output still in temporal_work [B*T*dm]
     {
-        tgt.residual.copy_from(&tgt.temporal_work, &ctx.stream)?;
+        tgt.residual.copy_from_raw(&tgt.temporal_work, &ctx.stream)?;
         let nf_ptr = mamba_w.norm_f_weight.raw_ptr(&ctx.stream);
         let bt_i = bt as i32;
         let dm_i = dm as i32;
