@@ -212,6 +212,13 @@ impl GpuMambaWeights {
             + cpu.norm_f_weight.len();
 
         let flat = GpuBuffer::zeros(stream, total)?;
+        // Wait for the async zero-memset to finish before host-sync uploads
+        // (cuMemcpyHtoD_v2 on default stream does NOT serialize with custom
+        // streams under per-thread default-stream semantics). See
+        // `GpuMambaMixedWeights::from_cpu` for details.
+        stream
+            .synchronize()
+            .map_err(|e| format!("sync after f32 weight alloc: {e:?}"))?;
         let base = flat.cached_ptr();
 
         let mut off = 0usize;
@@ -326,6 +333,20 @@ impl GpuMambaMixedWeights {
 
         let bulk_arena = GpuByteBuffer::zeros(stream, bulk_elems * bulk_dtype.size_bytes())?;
         let f32_arena = GpuByteBuffer::zeros(stream, f32_elems * 4)?;
+
+        // Wait for the async zero-memsets queued by `alloc_zeros` on the custom
+        // stream to finish before uploading weight data via `cuMemcpyHtoD_v2`
+        // (which runs on the default stream). Without this barrier, under
+        // per-thread default-stream semantics (CUDA 12+), the default-stream
+        // sync memcpy does NOT serialize with custom-stream async ops; the
+        // memset then races with the copy and zeros out just-uploaded data.
+        // Observed on mamba-130m-hf bf16 (d_model=768) where layer-0
+        // norm_weight was silently overwritten with zeros between upload and
+        // first RMSNorm kernel launch, producing zero output and stuck-token
+        // decoding.
+        stream
+            .synchronize()
+            .map_err(|e| format!("sync after arena zero-init: {e:?}"))?;
 
         let bulk_base = bulk_arena.cached_ptr();
         let f32_base = f32_arena.cached_ptr();

@@ -172,6 +172,17 @@ impl GpuMamba3MixedWeights {
         let bulk_arena = GpuByteBuffer::zeros(stream, bulk_elems * bulk_dtype.size_bytes())?;
         let f32_arena = GpuByteBuffer::zeros(stream, f32_elems * 4)?;
 
+        // Wait for the async zero-memsets queued by `alloc_zeros` on the custom
+        // stream to finish before uploading weight data via `cuMemcpyHtoD_v2`
+        // (which runs on the default stream). Without this barrier, under
+        // per-thread default-stream semantics (CUDA 12+), the default-stream
+        // sync memcpy does NOT serialize with custom-stream async ops; the
+        // memset then races with the copy and zeros out just-uploaded data.
+        // See `GpuMambaMixedWeights::from_cpu` for the original bug report.
+        stream
+            .synchronize()
+            .map_err(|e| format!("sync after m3 mixed arena zero-init: {e:?}"))?;
+
         let bulk_base = bulk_arena.cached_ptr();
         let f32_base = f32_arena.cached_ptr();
 
