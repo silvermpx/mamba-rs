@@ -250,19 +250,38 @@ pub fn parallel_mamba_forward(
 /// every thread that `par_iter` may use (the calling thread can differ).
 static BWD_EPOCH: AtomicU64 = AtomicU64::new(0);
 
+/// Serializes concurrent `parallel_mamba_backward` invocations so they cannot
+/// interleave their epoch bumps and thread-local zero/accumulate phases. In
+/// production this is a no-op (gradient steps run one at a time). Needed
+/// because cargo runs `#[test]` functions in parallel and shares the rayon
+/// pool + thread-local statics across test threads; mirrors M3's
+/// `M3_BWD_GUARD`.
+static BWD_GUARD: Mutex<()> = Mutex::new(());
+
 thread_local! {
     static THREAD_GRADS: RefCell<Option<TrainMambaWeights>> = const { RefCell::new(None) };
     /// Last epoch at which this thread's THREAD_GRADS was zeroed.
     static THREAD_GRADS_EPOCH: Cell<u64> = const { Cell::new(0) };
 }
 
-/// Zero this thread's THREAD_GRADS if stale (epoch mismatch), returning a
-/// mutable reference to the zeroed accumulator.
+/// Zero this thread's THREAD_GRADS if stale (epoch mismatch) or if a prior
+/// call left a buffer whose shape does not match the current dims (tuner
+/// trials can change dims between calls).
 fn ensure_thread_grads_zeroed(dims: &MambaDims, epoch: u64) {
     THREAD_GRADS_EPOCH.with(|ep| {
         if ep.get() != epoch {
             THREAD_GRADS.with(|cell| {
                 let mut opt = cell.borrow_mut();
+                // Invalidate stale shape if dims changed between calls.
+                let dim_mismatch = opt.as_ref().is_some_and(|g| {
+                    g.layers.len() != dims.n_layers
+                        || g.norm_f_weight.len() != dims.d_model
+                        || g.layers.first().map(|l| l.a_log.len()).unwrap_or(0)
+                            != dims.d_inner * dims.d_state
+                });
+                if dim_mismatch {
+                    *opt = None;
+                }
                 let g = opt.get_or_insert_with(|| TrainMambaWeights::zeros_from_dims(dims));
                 g.zero();
             });
@@ -307,6 +326,10 @@ pub fn parallel_mamba_backward(
     debug_assert_eq!(d_temporal_seqs.len(), mamba_batch_acts.len());
 
     // Single-thread BLAS inside rayon to prevent thread explosion.
+
+    // Hold the global guard so concurrent callers cannot interleave epoch
+    // bumps with other threads' accumulation (see BWD_GUARD docstring).
+    let _guard = BWD_GUARD.lock().unwrap_or_else(|e| e.into_inner());
 
     // Advance the global epoch so every thread will zero its accumulators on
     // first access during this call (lazy zeroing inside par_iter_mut).
