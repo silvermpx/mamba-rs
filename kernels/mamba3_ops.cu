@@ -1419,3 +1419,206 @@ extern "C" __global__ void rmsnorm_gated_forward_##SUFFIX(                      
 
 DEFINE_RMSNORM_GATED_FWD(bf16, __nv_bfloat16, from_f_bf16)
 DEFINE_RMSNORM_GATED_FWD(f16,  __half,        from_f_f16)
+
+// ============================================================================
+// Step 9a: typed M3 backward kernels (bcnorm + rope + bc_bias + split).
+//
+// Dtype split follows the same precision discipline as Step 8c (M3 fwd mixed):
+//   - Activation I/O tensors (B_raw, C_raw, B_normed, C_normed, B_biased,
+//     C_biased, k/q-post-rope, z, x, d_proj) are T_ACT.
+//   - All per-group RMS saves, angle_cumsum, dt/a_val/trap coefficients,
+//     plus every atomicAdd weight-grad target remain f32.
+//   - Math runs entirely in f32 internally (promote-on-load via to_f,
+//     downcast-on-store via FROM_F).
+// ============================================================================
+
+// bcnorm_bwd typed: dy T_ACT, d_B T_ACT, B_raw T_ACT, rms_val f32,
+// weight f32, d_weight f32 (atomicAdd master-grad accumulator).
+#define DEFINE_BCNORM_BWD(SUFFIX, T_ACT, FROM_F)                               \
+extern "C" __global__ void bcnorm_bwd_##SUFFIX(                                \
+    T_ACT* __restrict__ d_B,                                                   \
+    float* __restrict__ d_weight,                                              \
+    const T_ACT* __restrict__ d_out,                                           \
+    const T_ACT* __restrict__ B_raw,                                           \
+    const float* __restrict__ rms_val,                                         \
+    const float* __restrict__ weight,                                          \
+    int N, int ng, int ds                                                      \
+) {                                                                            \
+    int block_id = blockIdx.x;                                                 \
+    if (block_id >= N * ng) return;                                            \
+    int d = threadIdx.x;                                                       \
+    if (d >= ds) return;                                                       \
+    int base = block_id * ds;                                                  \
+    float rms = rms_val[block_id];                                             \
+    float inv_rms = 1.0f / fmaxf(rms, 1e-12f);                                 \
+    float x_val = to_f(B_raw[base + d]);                                       \
+    float w = weight[d];                                                       \
+    float dy = to_f(d_out[base + d]);                                          \
+    float x_hat = x_val * inv_rms;                                             \
+    extern __shared__ float sdata[];                                           \
+    sdata[d] = x_hat * w * dy;                                                 \
+    __syncthreads();                                                           \
+    int stride = 1;                                                            \
+    while (stride < ds) stride <<= 1;                                          \
+    stride >>= 1;                                                              \
+    for (; stride > 0; stride >>= 1) {                                         \
+        if (d < stride && (d + stride) < ds) {                                 \
+            sdata[d] += sdata[d + stride];                                     \
+        }                                                                      \
+        __syncthreads();                                                       \
+    }                                                                          \
+    float c1 = sdata[0] / (float)ds;                                           \
+    d_B[base + d] = FROM_F((w * dy - x_hat * c1) * inv_rms);                   \
+    d_weight[base + d] = dy * x_hat;                                           \
+}
+
+DEFINE_BCNORM_BWD(bf16, __nv_bfloat16, from_f_bf16)
+DEFINE_BCNORM_BWD(f16,  __half,        from_f_f16)
+
+// bc_bias_add_bwd typed: reduce typed d_B_biased [N*nh*ds] over heads
+// within each group → typed d_B_normed [N*ng*ds]. Bias grad is the
+// identity reduction over the same axis (handled by a separate
+// reduce_bias launch, same pattern as M1 dt_proj_bias).
+#define DEFINE_BC_BIAS_ADD_BWD(SUFFIX, T_ACT, FROM_F)                          \
+extern "C" __global__ void bc_bias_add_bwd_##SUFFIX(                           \
+    T_ACT* __restrict__ d_B_normed,                                            \
+    const T_ACT* __restrict__ d_B_biased,                                      \
+    int N, int nh, int ng, int ds                                              \
+) {                                                                            \
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;                           \
+    int total = N * ng * ds;                                                   \
+    if (idx >= total) return;                                                  \
+    int ng_ds = ng * ds;                                                       \
+    int sample = idx / ng_ds;                                                  \
+    int rem = idx % ng_ds;                                                     \
+    int g = rem / ds;                                                          \
+    int d = rem % ds;                                                          \
+    int heads_per_group = nh / ng;                                             \
+    float sum = 0.0f;                                                          \
+    int base = sample * nh * ds;                                               \
+    for (int local_h = 0; local_h < heads_per_group; local_h++) {              \
+        int h = g * heads_per_group + local_h;                                 \
+        sum += to_f(d_B_biased[base + h * ds + d]);                            \
+    }                                                                          \
+    d_B_normed[idx] = FROM_F(sum);                                             \
+}
+
+DEFINE_BC_BIAS_ADD_BWD(bf16, __nv_bfloat16, from_f_bf16)
+DEFINE_BC_BIAS_ADD_BWD(f16,  __half,        from_f_f16)
+
+// rope_bwd typed: typed d_B/C_rotated, typed d_B/C_pre_rope output,
+// typed B/C_biased saved; angle_cumsum + d_angle_cumsum stay f32
+// (accumulator precision critical — the rotation angles are summed
+// over T timesteps, f32 atomicAdd at the reducer).
+#define DEFINE_ROPE_BWD(SUFFIX, T_ACT, FROM_F)                                 \
+extern "C" __global__ void rope_bwd_##SUFFIX(                                  \
+    T_ACT* __restrict__ d_B_pre_rope,                                          \
+    T_ACT* __restrict__ d_C_pre_rope,                                          \
+    float* __restrict__ d_angle_cumsum,                                        \
+    const T_ACT* __restrict__ d_B_rotated,                                     \
+    const T_ACT* __restrict__ d_C_rotated,                                     \
+    const T_ACT* __restrict__ B_biased,                                        \
+    const T_ACT* __restrict__ C_biased,                                        \
+    const float* __restrict__ angle_cumsum,                                    \
+    int N, int nh, int ds, int n_angles                                        \
+) {                                                                            \
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;                           \
+    int total = N * nh * ds;                                                   \
+    if (idx >= total) return;                                                  \
+    int nh_ds = nh * ds;                                                       \
+    int sample = idx / nh_ds;                                                  \
+    int rem = idx % nh_ds;                                                     \
+    int h = rem / ds;                                                          \
+    int n = rem % ds;                                                          \
+    int base_bc = sample * nh_ds + h * ds;                                     \
+    int rope_end = 2 * n_angles;                                               \
+    if (n >= rope_end) {                                                       \
+        d_B_pre_rope[idx] = d_B_rotated[idx];                                  \
+        d_C_pre_rope[idx] = d_C_rotated[idx];                                  \
+    } else if ((n & 1) == 0) {                                                 \
+        int a = n / 2;                                                         \
+        int angle_idx = sample * nh * n_angles + h * n_angles + a;             \
+        float cos_a, sin_a;                                                    \
+        sincosf(angle_cumsum[angle_idx], &sin_a, &cos_a);                      \
+        int i0 = base_bc + n;                                                  \
+        int i1 = i0 + 1;                                                       \
+        float db0 = to_f(d_B_rotated[i0]);                                     \
+        float db1 = to_f(d_B_rotated[i1]);                                     \
+        d_B_pre_rope[i0] = FROM_F( cos_a * db0 + sin_a * db1);                 \
+        d_B_pre_rope[i1] = FROM_F(-sin_a * db0 + cos_a * db1);                 \
+        float dc0 = to_f(d_C_rotated[i0]);                                     \
+        float dc1 = to_f(d_C_rotated[i1]);                                     \
+        d_C_pre_rope[i0] = FROM_F( cos_a * dc0 + sin_a * dc1);                 \
+        d_C_pre_rope[i1] = FROM_F(-sin_a * dc0 + cos_a * dc1);                 \
+        float b_pre0 = to_f(B_biased[i0]);                                     \
+        float b_pre1 = to_f(B_biased[i1]);                                     \
+        float d_angle_b = db0 * (-sin_a * b_pre0 - cos_a * b_pre1)             \
+                        + db1 * ( cos_a * b_pre0 - sin_a * b_pre1);            \
+        float c_pre0 = to_f(C_biased[i0]);                                     \
+        float c_pre1 = to_f(C_biased[i1]);                                     \
+        float d_angle_c = dc0 * (-sin_a * c_pre0 - cos_a * c_pre1)             \
+                        + dc1 * ( cos_a * c_pre0 - sin_a * c_pre1);            \
+        d_angle_cumsum[angle_idx] = d_angle_b + d_angle_c;                     \
+    }                                                                          \
+}
+
+DEFINE_ROPE_BWD(bf16, __nv_bfloat16, from_f_bf16)
+DEFINE_ROPE_BWD(f16,  __half,        from_f_f16)
+
+// m3_split_bwd typed: assembles d_proj (T_ACT, feeds in_proj dX GEMM)
+// from 8 gradient components. Per Step 7/8 layout: d_z, d_x, d_B_raw,
+// d_C_raw are T_ACT (come from typed backward chain); d_dd_dt,
+// d_dd_a, d_trap, d_angles stay f32 (m3_split_typed writes them as
+// f32 in forward, and the f32 abg_bwd / angle_dt_bwd paths produce
+// them in f32).
+#define DEFINE_M3_SPLIT_BWD(SUFFIX, T_ACT, FROM_F)                             \
+extern "C" __global__ void m3_split_bwd_##SUFFIX(                              \
+    T_ACT* __restrict__ d_proj,                                                \
+    const T_ACT* __restrict__ d_z,                                             \
+    const T_ACT* __restrict__ d_x,                                             \
+    const T_ACT* __restrict__ d_B_raw,                                         \
+    const T_ACT* __restrict__ d_C_raw,                                         \
+    const float* __restrict__ d_dd_dt,                                         \
+    const float* __restrict__ d_dd_a,                                          \
+    const float* __restrict__ d_trap,                                          \
+    const float* __restrict__ d_angles,                                        \
+    int N, int di, int ng, int ds, int nh, int n_angles                        \
+) {                                                                            \
+    int in_proj_dim = 2 * di + 2 * ng * ds + 3 * nh + n_angles;                \
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;                           \
+    int total = N * in_proj_dim;                                               \
+    if (idx >= total) return;                                                  \
+    int sample = idx / in_proj_dim;                                            \
+    int col = idx % in_proj_dim;                                               \
+    int ng_ds = ng * ds;                                                       \
+    int off0 = di;                                                             \
+    int off1 = 2 * di;                                                         \
+    int off2 = off1 + ng_ds;                                                   \
+    int off3 = off2 + ng_ds;                                                   \
+    int off4 = off3 + nh;                                                      \
+    int off5 = off4 + nh;                                                      \
+    int off6 = off5 + nh;                                                      \
+    float val;                                                                 \
+    if (col < off0) {                                                          \
+        val = to_f(d_z[sample * di + col]);                                    \
+    } else if (col < off1) {                                                   \
+        val = to_f(d_x[sample * di + (col - off0)]);                           \
+    } else if (col < off2) {                                                   \
+        val = to_f(d_B_raw[sample * ng_ds + (col - off1)]);                    \
+    } else if (col < off3) {                                                   \
+        val = to_f(d_C_raw[sample * ng_ds + (col - off2)]);                    \
+    } else if (col < off4) {                                                   \
+        val = d_dd_dt[sample * nh + (col - off3)];                             \
+    } else if (col < off5) {                                                   \
+        val = d_dd_a[sample * nh + (col - off4)];                              \
+    } else if (col < off6) {                                                   \
+        val = d_trap[sample * nh + (col - off5)];                              \
+    } else {                                                                   \
+        int a = col - off6;                                                    \
+        val = (a < n_angles) ? d_angles[sample * n_angles + a] : 0.0f;         \
+    }                                                                          \
+    d_proj[idx] = FROM_F(val);                                                 \
+}
+
+DEFINE_M3_SPLIT_BWD(bf16, __nv_bfloat16, from_f_bf16)
+DEFINE_M3_SPLIT_BWD(f16,  __half,        from_f_f16)

@@ -90,6 +90,19 @@ pub struct Mamba3Kernels {
     /// saves. Typed x/k/q/y; f32 state + alpha/beta/gamma + D + saves.
     pub m3_burnin_fwd_typed_bf16: CudaFunction,
     pub m3_burnin_fwd_typed_f16: CudaFunction,
+
+    // -- Step 9a: typed M3 sequential backward kernels --
+    /// RmsNorm over B/C groups, typed dy → typed d_B; f32 rms + weight +
+    /// d_weight master-grad accumulator.
+    pub bcnorm_bwd_typed: TypedKernel,
+    /// Per-head bias reduction from typed d_B_biased → typed d_B_normed
+    /// (expand groups backward). Bias grad handled by reduce_bias_typed.
+    pub bc_bias_add_bwd_typed: TypedKernel,
+    /// RoPE rotation backward, typed B/C grads + saved B/C, f32 angle saves.
+    pub rope_bwd_typed: TypedKernel,
+    /// 8-way split backward: assemble typed d_proj from typed d_z/d_x/
+    /// d_B_raw/d_C_raw plus f32 dd_dt/dd_a/trap/angles.
+    pub m3_split_bwd_typed: TypedKernel,
     /// Shared from M1: f32 residual → half post-norm (identical kernel, reused).
     pub rmsnorm_fwd_f32in_typed: HalfKernel,
     /// Shared from M1: f32 residual += half branch (stays f32).
@@ -252,6 +265,26 @@ impl Mamba3Kernels {
             },
             m3_burnin_fwd_typed_bf16: get("m3_burnin_fwd_bf16")?,
             m3_burnin_fwd_typed_f16: get("m3_burnin_fwd_f16")?,
+            bcnorm_bwd_typed: TypedKernel {
+                f32: get("bcnorm_bwd")?,
+                bf16: get("bcnorm_bwd_bf16")?,
+                f16: get("bcnorm_bwd_f16")?,
+            },
+            bc_bias_add_bwd_typed: TypedKernel {
+                f32: get("bc_bias_add_bwd")?,
+                bf16: get("bc_bias_add_bwd_bf16")?,
+                f16: get("bc_bias_add_bwd_f16")?,
+            },
+            rope_bwd_typed: TypedKernel {
+                f32: get("rope_bwd")?,
+                bf16: get("rope_bwd_bf16")?,
+                f16: get("rope_bwd_f16")?,
+            },
+            m3_split_bwd_typed: TypedKernel {
+                f32: get("m3_split_bwd")?,
+                bf16: get("m3_split_bwd_bf16")?,
+                f16: get("m3_split_bwd_f16")?,
+            },
             rmsnorm_fwd_f32in_typed: HalfKernel {
                 bf16: get("rmsnorm_forward_f32in_bf16")?,
                 f16: get("rmsnorm_forward_f32in_f16")?,
