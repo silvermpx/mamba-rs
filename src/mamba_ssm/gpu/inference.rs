@@ -1158,6 +1158,12 @@ impl GpuMambaInferenceMixed {
             }
 
             // F10: y *= gate_silu (elementwise_mul typed bf16).
+            // Note: tried fusing this into ssm_step_forward_gather_gate but
+            // observed catastrophic 1.4b/2.8b divergence (0/15 token match,
+            // KL=6.6) — likely a NaN-cascade interaction that the separate
+            // mul kernel breaks via its own arithmetic boundaries. Keeping
+            // the launch separate; the +5% theoretical win isn't worth the
+            // correctness regression on deep models.
             {
                 let n = (b * di) as i32;
                 let mut bld = engine

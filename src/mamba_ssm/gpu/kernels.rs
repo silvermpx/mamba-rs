@@ -148,6 +148,9 @@ pub struct MambaKernels {
     /// (gather_bc_cols + ssm_step_forward) launch pair with a single kernel,
     /// also eliminates b_buf / c_buf scratch allocations.
     pub ssm_step_fwd_gather_typed: TypedKernel,
+    /// SSM step with fused B/C gather AND fused gating multiplication.
+    /// Replaces (gather_bc + ssm_step + elementwise_mul) triplet.
+    pub ssm_step_fwd_gather_gate_typed: TypedKernel,
     pub conv1d_step_fwd_typed: TypedKernel,
     /// Conv1d step with fused SiLU on output. Inference-only: replaces the
     /// (conv1d_step + silu_fwd) launch pair with a single kernel.
@@ -301,6 +304,7 @@ impl MambaKernels {
             softplus_copy_typed: load_typed("softplus_copy")?,
             ssm_step_fwd_typed: load_typed("ssm_step_forward")?,
             ssm_step_fwd_gather_typed: load_typed("ssm_step_forward_gather")?,
+            ssm_step_fwd_gather_gate_typed: load_typed("ssm_step_forward_gather_gate")?,
             conv1d_step_fwd_typed: load_typed("conv1d_step_forward")?,
             conv1d_step_fwd_silu_typed: load_typed("conv1d_step_forward_silu")?,
             ssm_burnin_nosave_typed: load_typed("ssm_burnin_forward_nosave")?,
