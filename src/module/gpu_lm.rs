@@ -214,6 +214,13 @@ impl GpuMambaLM {
         self.backbone.capture_graph()
     }
 
+    /// Download the backbone's temporal buffer (last-layer hidden state, last
+    /// timestep) as f32 regardless of storage dtype. Intended for debugging /
+    /// parity harnesses.
+    pub fn debug_download_temporal(&self, out: &mut [f32]) -> Result<(), String> {
+        self.backbone.download_temporal(out)
+    }
+
     pub fn reset(&mut self) -> Result<(), String> {
         self.backbone.reset()
     }
