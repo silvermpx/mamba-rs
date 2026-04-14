@@ -8,10 +8,108 @@
 //! - **Gradients** (`GpuMambaGrads`): flat buffer + GradSlice views.
 //!   One memset zeros all grads. Industry standard (PyTorch DDP, FSDP2).
 
-use super::buffers::{GpuBuffer, GradSlice, WeightSlice};
+use super::buffers::{GpuBuffer, GpuByteBuffer, GradSlice, WeightSlice, WeightSliceDyn};
+use super::dtype::WeightDtype;
 use crate::config::MambaConfig;
 use crate::weights::MambaWeights;
 use std::sync::Arc;
+
+// ---------------------------------------------------------------------------
+// Unified weight view trait: abstracts over f32-only (GpuMambaWeights) vs
+// mixed-precision (GpuMambaMixedWeights) for inference.
+// ---------------------------------------------------------------------------
+
+/// Abstraction over per-layer weights for inference.
+/// - Bulk weights return `(ptr, dtype)` — dispatch to sgemm or gemm_ex.
+/// - Always-f32 weights return only `ptr`.
+pub trait MambaLayerWeightsView {
+    // Bulk (dispatches to sgemm if F32, gemm_ex otherwise).
+    fn in_proj_w(&self) -> (cudarc::driver::sys::CUdeviceptr, WeightDtype);
+    fn x_proj_w(&self) -> (cudarc::driver::sys::CUdeviceptr, WeightDtype);
+    fn dt_proj_w(&self) -> (cudarc::driver::sys::CUdeviceptr, WeightDtype);
+    fn out_proj_w(&self) -> (cudarc::driver::sys::CUdeviceptr, WeightDtype);
+    // Always-f32
+    fn norm_weight(&self) -> cudarc::driver::sys::CUdeviceptr;
+    fn conv1d_weight(&self) -> cudarc::driver::sys::CUdeviceptr;
+    fn conv1d_bias(&self) -> cudarc::driver::sys::CUdeviceptr;
+    fn dt_proj_b(&self) -> cudarc::driver::sys::CUdeviceptr;
+    fn a_log(&self) -> cudarc::driver::sys::CUdeviceptr;
+    fn d_param(&self) -> cudarc::driver::sys::CUdeviceptr;
+}
+
+/// Abstraction over backbone-level weights.
+pub trait MambaWeightsView {
+    type Layer: MambaLayerWeightsView;
+    fn input_proj_w(&self) -> (cudarc::driver::sys::CUdeviceptr, WeightDtype);
+    fn input_proj_b(&self) -> cudarc::driver::sys::CUdeviceptr;
+    fn norm_f_weight(&self) -> cudarc::driver::sys::CUdeviceptr;
+    fn n_layers(&self) -> usize;
+    fn layer(&self, i: usize) -> &Self::Layer;
+}
+
+impl MambaLayerWeightsView for GpuMambaLayerWeights {
+    fn in_proj_w(&self) -> (cudarc::driver::sys::CUdeviceptr, WeightDtype) {
+        (self.in_proj_w.ptr(), WeightDtype::F32)
+    }
+    fn x_proj_w(&self) -> (cudarc::driver::sys::CUdeviceptr, WeightDtype) {
+        (self.x_proj_w.ptr(), WeightDtype::F32)
+    }
+    fn dt_proj_w(&self) -> (cudarc::driver::sys::CUdeviceptr, WeightDtype) {
+        (self.dt_proj_w.ptr(), WeightDtype::F32)
+    }
+    fn out_proj_w(&self) -> (cudarc::driver::sys::CUdeviceptr, WeightDtype) {
+        (self.out_proj_w.ptr(), WeightDtype::F32)
+    }
+    fn norm_weight(&self) -> cudarc::driver::sys::CUdeviceptr { self.norm_weight.ptr() }
+    fn conv1d_weight(&self) -> cudarc::driver::sys::CUdeviceptr { self.conv1d_weight.ptr() }
+    fn conv1d_bias(&self) -> cudarc::driver::sys::CUdeviceptr { self.conv1d_bias.ptr() }
+    fn dt_proj_b(&self) -> cudarc::driver::sys::CUdeviceptr { self.dt_proj_b.ptr() }
+    fn a_log(&self) -> cudarc::driver::sys::CUdeviceptr { self.a_log.ptr() }
+    fn d_param(&self) -> cudarc::driver::sys::CUdeviceptr { self.d_param.ptr() }
+}
+
+impl MambaWeightsView for GpuMambaWeights {
+    type Layer = GpuMambaLayerWeights;
+    fn input_proj_w(&self) -> (cudarc::driver::sys::CUdeviceptr, WeightDtype) {
+        (self.input_proj_w.ptr(), WeightDtype::F32)
+    }
+    fn input_proj_b(&self) -> cudarc::driver::sys::CUdeviceptr { self.input_proj_b.ptr() }
+    fn norm_f_weight(&self) -> cudarc::driver::sys::CUdeviceptr { self.norm_f_weight.ptr() }
+    fn n_layers(&self) -> usize { self.layers.len() }
+    fn layer(&self, i: usize) -> &Self::Layer { &self.layers[i] }
+}
+
+impl MambaLayerWeightsView for GpuMambaMixedLayerWeights {
+    fn in_proj_w(&self) -> (cudarc::driver::sys::CUdeviceptr, WeightDtype) {
+        (self.in_proj_w.ptr(), self.in_proj_w.dtype())
+    }
+    fn x_proj_w(&self) -> (cudarc::driver::sys::CUdeviceptr, WeightDtype) {
+        (self.x_proj_w.ptr(), self.x_proj_w.dtype())
+    }
+    fn dt_proj_w(&self) -> (cudarc::driver::sys::CUdeviceptr, WeightDtype) {
+        (self.dt_proj_w.ptr(), self.dt_proj_w.dtype())
+    }
+    fn out_proj_w(&self) -> (cudarc::driver::sys::CUdeviceptr, WeightDtype) {
+        (self.out_proj_w.ptr(), self.out_proj_w.dtype())
+    }
+    fn norm_weight(&self) -> cudarc::driver::sys::CUdeviceptr { self.norm_weight.ptr() }
+    fn conv1d_weight(&self) -> cudarc::driver::sys::CUdeviceptr { self.conv1d_weight.ptr() }
+    fn conv1d_bias(&self) -> cudarc::driver::sys::CUdeviceptr { self.conv1d_bias.ptr() }
+    fn dt_proj_b(&self) -> cudarc::driver::sys::CUdeviceptr { self.dt_proj_b.ptr() }
+    fn a_log(&self) -> cudarc::driver::sys::CUdeviceptr { self.a_log.ptr() }
+    fn d_param(&self) -> cudarc::driver::sys::CUdeviceptr { self.d_param.ptr() }
+}
+
+impl MambaWeightsView for GpuMambaMixedWeights {
+    type Layer = GpuMambaMixedLayerWeights;
+    fn input_proj_w(&self) -> (cudarc::driver::sys::CUdeviceptr, WeightDtype) {
+        (self.input_proj_w.ptr(), self.input_proj_w.dtype())
+    }
+    fn input_proj_b(&self) -> cudarc::driver::sys::CUdeviceptr { self.input_proj_b.ptr() }
+    fn norm_f_weight(&self) -> cudarc::driver::sys::CUdeviceptr { self.norm_f_weight.ptr() }
+    fn n_layers(&self) -> usize { self.layers.len() }
+    fn layer(&self, i: usize) -> &Self::Layer { &self.layers[i] }
+}
 
 // ---------------------------------------------------------------------------
 // Inference weights — flat buffer + WeightSlice views (read-only, CUDA Graph safe)
@@ -109,6 +207,131 @@ impl GpuMambaWeights {
 
         Ok(Self {
             flat,
+            input_proj_w,
+            input_proj_b,
+            layers,
+            norm_f_weight,
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Mixed-precision inference weights — two arenas:
+//   - bulk_arena (bf16/f16): linear projection weights (in_proj, x_proj,
+//     dt_proj, out_proj, input_proj)
+//   - f32_arena: always-f32 tensors (norms, biases, a_log, D, dt_proj_b,
+//     conv1d_bias, conv1d_weight, input_proj_b) — critical for numerical
+//     stability (exp, softplus, rsqrt, SSM recurrence).
+//
+// Use this for LLM inference. Training keeps GpuMambaTrainWeights (f32 only).
+// ---------------------------------------------------------------------------
+
+pub struct GpuMambaMixedLayerWeights {
+    pub norm_weight: WeightSliceDyn,    // f32
+    pub in_proj_w: WeightSliceDyn,      // bulk (bf16/f16)
+    pub conv1d_weight: WeightSliceDyn,  // f32 (small, custom kernel reads directly)
+    pub conv1d_bias: WeightSliceDyn,    // f32
+    pub x_proj_w: WeightSliceDyn,       // bulk
+    pub dt_proj_w: WeightSliceDyn,      // bulk
+    pub dt_proj_b: WeightSliceDyn,      // f32
+    pub a_log: WeightSliceDyn,          // f32 (used in exp, critical)
+    pub d_param: WeightSliceDyn,        // f32 (SSM skip, critical)
+    pub out_proj_w: WeightSliceDyn,     // bulk
+}
+
+pub struct GpuMambaMixedWeights {
+    /// Arena holding bulk weights in bulk_dtype (bf16/f16).
+    pub bulk_arena: GpuByteBuffer,
+    /// Arena holding always-f32 weights.
+    pub f32_arena: GpuByteBuffer,
+    /// Dtype of bulk_arena.
+    pub bulk_dtype: WeightDtype,
+    pub input_proj_w: WeightSliceDyn,   // bulk
+    pub input_proj_b: WeightSliceDyn,   // f32
+    pub layers: Vec<GpuMambaMixedLayerWeights>,
+    pub norm_f_weight: WeightSliceDyn,  // f32
+}
+
+impl GpuMambaMixedWeights {
+    pub fn from_cpu(
+        stream: &Arc<cudarc::driver::CudaStream>,
+        cpu: &MambaWeights,
+        cfg: &MambaConfig,
+        bulk_dtype: WeightDtype,
+    ) -> Result<Self, String> {
+        let d_model = cfg.d_model;
+        let d_inner = cfg.d_inner();
+        let d_state = cfg.d_state;
+        let d_conv = cfg.d_conv;
+        let dt_rank = cfg.dt_rank();
+        let xdbl_dim = cfg.xdbl_dim();
+
+        let input_dim = cpu.input_proj_w.len() / d_model;
+
+        // bulk (per layer): in_proj_w + x_proj_w + dt_proj_w + out_proj_w
+        let per_layer_bulk = d_model * 2 * d_inner
+            + d_inner * xdbl_dim
+            + dt_rank * d_inner
+            + d_inner * d_model;
+        // f32 (per layer): norm + conv1d_w + conv1d_b + dt_proj_b + a_log + d_param
+        let per_layer_f32 =
+            d_model + d_inner * d_conv + d_inner + d_inner + d_inner * d_state + d_inner;
+
+        let bulk_elems = input_dim * d_model + cfg.n_layers * per_layer_bulk;
+        let f32_elems = d_model + cfg.n_layers * per_layer_f32 + d_model;
+
+        let bulk_arena = GpuByteBuffer::zeros(stream, bulk_elems * bulk_dtype.size_bytes())?;
+        let f32_arena = GpuByteBuffer::zeros(stream, f32_elems * 4)?;
+
+        let bulk_base = bulk_arena.cached_ptr();
+        let f32_base = f32_arena.cached_ptr();
+
+        let mut bulk_off = 0usize; // byte offset in bulk_arena
+        let mut f32_off = 0usize;  // byte offset in f32_arena
+
+        let mut alloc_bulk = |data: &[f32]| -> Result<WeightSliceDyn, String> {
+            let len = data.len();
+            let slice = WeightSliceDyn::from_byte_offset(bulk_base, bulk_off, len, bulk_dtype);
+            slice.upload_from_cpu_f32(data)?;
+            bulk_off += len * bulk_dtype.size_bytes();
+            Ok(slice)
+        };
+        let mut alloc_f32 = |data: &[f32]| -> Result<WeightSliceDyn, String> {
+            let len = data.len();
+            let slice = WeightSliceDyn::from_byte_offset(f32_base, f32_off, len, WeightDtype::F32);
+            slice.upload_from_cpu_f32(data)?;
+            f32_off += len * 4;
+            Ok(slice)
+        };
+
+        let input_proj_w = alloc_bulk(&cpu.input_proj_w)?;
+        let input_proj_b = alloc_f32(&cpu.input_proj_b)?;
+
+        let mut layers = Vec::with_capacity(cfg.n_layers);
+        for lw in &cpu.layers {
+            layers.push(GpuMambaMixedLayerWeights {
+                norm_weight: alloc_f32(&lw.norm_weight)?,
+                in_proj_w: alloc_bulk(&lw.in_proj_w)?,
+                conv1d_weight: alloc_f32(&lw.conv1d_weight)?,
+                conv1d_bias: alloc_f32(&lw.conv1d_bias)?,
+                x_proj_w: alloc_bulk(&lw.x_proj_w)?,
+                dt_proj_w: alloc_bulk(&lw.dt_proj_w)?,
+                dt_proj_b: alloc_f32(&lw.dt_proj_b)?,
+                a_log: alloc_f32(&lw.a_log)?,
+                d_param: alloc_f32(&lw.d_param)?,
+                out_proj_w: alloc_bulk(&lw.out_proj_w)?,
+            });
+        }
+
+        let norm_f_weight = alloc_f32(&cpu.norm_f_weight)?;
+
+        debug_assert_eq!(bulk_off, bulk_elems * bulk_dtype.size_bytes());
+        debug_assert_eq!(f32_off, f32_elems * 4);
+
+        Ok(Self {
+            bulk_arena,
+            f32_arena,
+            bulk_dtype,
             input_proj_w,
             input_proj_b,
             layers,

@@ -367,6 +367,132 @@ impl GradSlice {
 /// The alias clarifies intent: GradSlice for gradient views, WeightSlice for weight views.
 pub type WeightSlice = GradSlice;
 
+// ---------------------------------------------------------------------------
+// Mixed-precision weight storage (inference only).
+//
+// GpuByteBuffer: raw bytes for a single arena that can hold mixed dtypes.
+// WeightSliceDyn: (ptr, len_elems, dtype) view into the arena.
+// Used by GpuMambaMixedWeights for bf16/f16 inference weight storage.
+// Training and grads stay f32 via GpuBuffer/GradSlice above (unchanged).
+// ---------------------------------------------------------------------------
+
+use super::dtype::WeightDtype;
+
+/// Raw byte-backed GPU buffer — used for mixed-dtype weight arenas.
+pub struct GpuByteBuffer {
+    data: cudarc::driver::CudaSlice<u8>,
+    len_bytes: usize,
+    cached_ptr: cudarc::driver::sys::CUdeviceptr,
+}
+
+impl GpuByteBuffer {
+    pub fn zeros(
+        stream: &Arc<cudarc::driver::CudaStream>,
+        len_bytes: usize,
+    ) -> Result<Self, String> {
+        let data = stream
+            .alloc_zeros::<u8>(len_bytes)
+            .map_err(|e| format!("GPU alloc_zeros({len_bytes} bytes) failed: {e:?}"))?;
+        let cached_ptr = {
+            use cudarc::driver::DevicePtr;
+            let (ptr, _g) = data.device_ptr(stream);
+            ptr
+        };
+        Ok(Self {
+            data,
+            len_bytes,
+            cached_ptr,
+        })
+    }
+
+    pub fn cached_ptr(&self) -> cudarc::driver::sys::CUdeviceptr {
+        self.cached_ptr
+    }
+
+    pub fn len_bytes(&self) -> usize {
+        self.len_bytes
+    }
+
+    pub fn inner(&self) -> &cudarc::driver::CudaSlice<u8> {
+        &self.data
+    }
+}
+
+/// Non-owning view into a dtype-tagged region of a `GpuByteBuffer`.
+#[derive(Clone, Copy)]
+pub struct WeightSliceDyn {
+    ptr: cudarc::driver::sys::CUdeviceptr,
+    len_elems: usize,
+    dtype: WeightDtype,
+}
+
+impl WeightSliceDyn {
+    pub fn from_byte_offset(
+        base: cudarc::driver::sys::CUdeviceptr,
+        byte_offset: usize,
+        len_elems: usize,
+        dtype: WeightDtype,
+    ) -> Self {
+        Self {
+            ptr: base + byte_offset as u64,
+            len_elems,
+            dtype,
+        }
+    }
+
+    pub fn ptr(&self) -> cudarc::driver::sys::CUdeviceptr {
+        self.ptr
+    }
+
+    pub fn len_elems(&self) -> usize {
+        self.len_elems
+    }
+
+    pub fn dtype(&self) -> WeightDtype {
+        self.dtype
+    }
+
+    pub fn size_bytes(&self) -> usize {
+        self.len_elems * self.dtype.size_bytes()
+    }
+
+    /// Upload f32 CPU data, downcasting to `dtype` on CPU side.
+    pub fn upload_from_cpu_f32(&self, src: &[f32]) -> Result<(), String> {
+        assert_eq!(src.len(), self.len_elems, "size mismatch");
+        if self.len_elems == 0 {
+            return Ok(());
+        }
+        match self.dtype {
+            WeightDtype::F32 => self.upload_raw_bytes(bytemuck::cast_slice(src)),
+            WeightDtype::Bf16 => {
+                let buf: Vec<half::bf16> = src.iter().map(|&v| half::bf16::from_f32(v)).collect();
+                self.upload_raw_bytes(bytemuck::cast_slice(&buf))
+            }
+            WeightDtype::F16 => {
+                let buf: Vec<half::f16> = src.iter().map(|&v| half::f16::from_f32(v)).collect();
+                self.upload_raw_bytes(bytemuck::cast_slice(&buf))
+            }
+        }
+    }
+
+    /// Upload raw bytes matching this slice's dtype (no conversion).
+    /// Caller must ensure `bytes.len() == self.size_bytes()`.
+    pub fn upload_raw_bytes(&self, bytes: &[u8]) -> Result<(), String> {
+        assert_eq!(bytes.len(), self.size_bytes(), "byte size mismatch");
+        let result = unsafe {
+            cudarc::driver::sys::cuMemcpyHtoD_v2(
+                self.ptr,
+                bytes.as_ptr() as *const std::ffi::c_void,
+                bytes.len(),
+            )
+        };
+        if result != cudarc::driver::sys::CUresult::CUDA_SUCCESS {
+            return Err(format!("WeightSliceDyn upload failed: {result:?}"));
+        }
+        Ok(())
+    }
+}
+
 impl std::fmt::Debug for GpuBuffer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(

@@ -5,7 +5,10 @@
 //! - **Training**: per-tensor GpuBuffer (optimizer compatible)
 //! - **Gradients**: flat buffer + GradSlice views (single zero() clears all)
 
-use crate::mamba_ssm::gpu::buffers::{GpuBuffer, GradSlice, WeightSlice};
+use crate::mamba_ssm::gpu::buffers::{
+    GpuBuffer, GpuByteBuffer, GradSlice, WeightSlice, WeightSliceDyn,
+};
+use crate::mamba_ssm::gpu::dtype::WeightDtype;
 use crate::mamba3_siso::config::Mamba3Config;
 use std::sync::Arc;
 
@@ -97,6 +100,125 @@ impl GpuMamba3WeightsInf {
             layers,
             norm_f_weight,
             flat,
+        })
+    }
+}
+
+// ═══ Mixed-precision inference weights ═══
+//
+// For Mamba-3, bulk (bf16/f16) weights are:
+//   - in_proj_w (large: d_model × in_proj_dim)
+//   - out_proj_w (large: d_inner × d_model)
+//   - input_proj_w (if user has non-identity input proj)
+//
+// All other M3 tensors stay f32 (norms, biases, d_param, dt_bias — all small,
+// critical for numerical stability per research).
+
+pub struct GpuMamba3MixedLayerWeights {
+    pub norm_weight: WeightSliceDyn,      // f32
+    pub in_proj_w: WeightSliceDyn,        // bulk
+    pub dt_bias: WeightSliceDyn,          // f32
+    pub b_norm_weight: WeightSliceDyn,    // f32
+    pub c_norm_weight: WeightSliceDyn,    // f32
+    pub b_bias: WeightSliceDyn,           // f32
+    pub c_bias: WeightSliceDyn,           // f32
+    pub d_param: WeightSliceDyn,          // f32
+    pub norm_gate_weight: WeightSliceDyn, // f32
+    pub out_proj_w: WeightSliceDyn,       // bulk
+}
+
+pub struct GpuMamba3MixedWeights {
+    pub bulk_arena: GpuByteBuffer,
+    pub f32_arena: GpuByteBuffer,
+    pub bulk_dtype: WeightDtype,
+    pub input_proj_w: WeightSliceDyn,   // bulk
+    pub input_proj_b: WeightSliceDyn,   // f32
+    pub layers: Vec<GpuMamba3MixedLayerWeights>,
+    pub norm_f_weight: WeightSliceDyn,  // f32
+}
+
+impl GpuMamba3MixedWeights {
+    pub fn from_cpu(
+        stream: &Stream,
+        cpu: &crate::mamba3_siso::weights::Mamba3Weights,
+        bulk_dtype: WeightDtype,
+    ) -> Result<Self, String> {
+        // Compute arena sizes (in elements)
+        let bulk_elems: usize = std::iter::once(cpu.input_proj_w.len())
+            .chain(cpu.layers.iter().flat_map(|lw| {
+                [lw.in_proj_w.len(), lw.out_proj_w.len()]
+            }))
+            .sum();
+
+        let f32_elems: usize = cpu.input_proj_b.len()
+            + cpu.norm_f_weight.len()
+            + cpu.layers.iter().map(|lw| {
+                lw.norm_weight.len()
+                    + lw.dt_bias.len()
+                    + lw.b_norm_weight.len()
+                    + lw.c_norm_weight.len()
+                    + lw.b_bias.len()
+                    + lw.c_bias.len()
+                    + lw.d_param.len()
+                    + lw.norm_gate_weight.len()
+            }).sum::<usize>();
+
+        let bulk_arena = GpuByteBuffer::zeros(stream, bulk_elems * bulk_dtype.size_bytes())?;
+        let f32_arena = GpuByteBuffer::zeros(stream, f32_elems * 4)?;
+
+        let bulk_base = bulk_arena.cached_ptr();
+        let f32_base = f32_arena.cached_ptr();
+
+        let mut bulk_off = 0usize;
+        let mut f32_off = 0usize;
+
+        let mut alloc_bulk = |data: &[f32]| -> Result<WeightSliceDyn, String> {
+            let len = data.len();
+            let slice = WeightSliceDyn::from_byte_offset(bulk_base, bulk_off, len, bulk_dtype);
+            slice.upload_from_cpu_f32(data)?;
+            bulk_off += len * bulk_dtype.size_bytes();
+            Ok(slice)
+        };
+        let mut alloc_f32 = |data: &[f32]| -> Result<WeightSliceDyn, String> {
+            let len = data.len();
+            let slice = WeightSliceDyn::from_byte_offset(f32_base, f32_off, len, WeightDtype::F32);
+            slice.upload_from_cpu_f32(data)?;
+            f32_off += len * 4;
+            Ok(slice)
+        };
+
+        let input_proj_w = alloc_bulk(&cpu.input_proj_w)?;
+        let input_proj_b = alloc_f32(&cpu.input_proj_b)?;
+
+        let mut layers = Vec::with_capacity(cpu.layers.len());
+        for lw in &cpu.layers {
+            layers.push(GpuMamba3MixedLayerWeights {
+                norm_weight: alloc_f32(&lw.norm_weight)?,
+                in_proj_w: alloc_bulk(&lw.in_proj_w)?,
+                dt_bias: alloc_f32(&lw.dt_bias)?,
+                b_norm_weight: alloc_f32(&lw.b_norm_weight)?,
+                c_norm_weight: alloc_f32(&lw.c_norm_weight)?,
+                b_bias: alloc_f32(&lw.b_bias)?,
+                c_bias: alloc_f32(&lw.c_bias)?,
+                d_param: alloc_f32(&lw.d_param)?,
+                norm_gate_weight: alloc_f32(&lw.norm_gate_weight)?,
+                out_proj_w: alloc_bulk(&lw.out_proj_w)?,
+            });
+        }
+
+        let norm_f_weight = alloc_f32(&cpu.norm_f_weight)?;
+
+        debug_assert_eq!(bulk_off, bulk_elems * bulk_dtype.size_bytes());
+        debug_assert_eq!(f32_off, f32_elems * 4);
+
+        Ok(Self {
+            bulk_arena,
+            f32_arena,
+            bulk_dtype,
+            input_proj_w,
+            input_proj_b,
+            layers,
+            norm_f_weight,
         })
     }
 }

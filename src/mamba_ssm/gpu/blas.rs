@@ -181,6 +181,35 @@ pub fn gpu_sgemm_backward_grad_raw(
     Ok(())
 }
 
+/// Dispatch SGEMM or GEMMex based on weight dtype.
+///
+/// Activations are always f32; this is the single entry point used by the
+/// unified inference pipeline to support f32 / bf16 / fp16 weight storage
+/// with identical activation dataflow.
+pub fn gpu_gemm_forward_dispatch(
+    ctx: &GpuCtx,
+    y: &mut GpuBuffer,
+    x: &GpuBuffer,
+    w_ptr: cudarc::driver::sys::CUdeviceptr,
+    w_dtype: WeightDtype,
+    bias_ptr: Option<cudarc::driver::sys::CUdeviceptr>,
+    dims: (usize, usize, usize),
+) -> Result<(), String> {
+    match w_dtype {
+        WeightDtype::F32 => gpu_sgemm_forward_raw(ctx, y, x, w_ptr, bias_ptr, dims),
+        WeightDtype::F16 | WeightDtype::Bf16 => gpu_gemm_ex_forward_raw(
+            ctx,
+            y,
+            x.cached_ptr(),
+            WeightDtype::F32,
+            w_ptr,
+            w_dtype,
+            bias_ptr,
+            dims,
+        ),
+    }
+}
+
 /// Mixed-precision GEMM forward: `Y[B,N] = X[B,K] @ W[K,N] + bias[N]`.
 ///
 /// Inputs X and W are in `w_dtype` (f32/f16/bf16). Output Y is always f32.
