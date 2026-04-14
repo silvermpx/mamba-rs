@@ -1622,3 +1622,62 @@ extern "C" __global__ void m3_split_bwd_##SUFFIX(                              \
 
 DEFINE_M3_SPLIT_BWD(bf16, __nv_bfloat16, from_f_bf16)
 DEFINE_M3_SPLIT_BWD(f16,  __half,        from_f_f16)
+
+// Step 9c: typed rmsnorm_gated_backward. Typed d_y/d_z/d_out/y/z; f32
+// weight/d_weight (master grad, atomicAdd-free per-sample write —
+// reducer accumulates across N later) and f32 rms_vals. All
+// recurrence math (SiLU gradient, RMSNorm c1 reduction) in f32
+// registers; typed only at I/O boundaries.
+#define DEFINE_RMSNORM_GATED_BWD(SUFFIX, T_ACT, FROM_F)                        \
+extern "C" __global__ void rmsnorm_gated_backward_##SUFFIX(                    \
+    T_ACT* d_y,                                                                \
+    T_ACT* d_z,                                                                \
+    float* d_weight,                                                           \
+    const T_ACT* d_out,                                                        \
+    const T_ACT* y,                                                            \
+    const T_ACT* z,                                                            \
+    const float* weight,                                                       \
+    const float* rms_vals,                                                     \
+    int N, int d_inner, int group_size                                         \
+) {                                                                            \
+    if (d_inner > 1024) return;                                                \
+    int sample = blockIdx.x;                                                   \
+    if (sample >= N) return;                                                   \
+    int d = threadIdx.x;                                                       \
+    if (d >= d_inner) return;                                                  \
+    int n_groups = d_inner / group_size;                                       \
+    int group_id = d / group_size;                                             \
+    int local_id = d % group_size;                                             \
+    int base = sample * d_inner;                                               \
+    float rstd = rms_vals[sample * n_groups + group_id];                       \
+    float y_val = to_f(y[base + d]);                                           \
+    float z_val = to_f(z[base + d]);                                           \
+    float w = weight[d];                                                       \
+    float d_out_val = to_f(d_out[base + d]);                                   \
+    float y_hat = y_val * rstd;                                                \
+    float y_normed = y_hat * w;                                                \
+    float sig_z = 1.0f / (1.0f + FAST_EXP(-z_val));                            \
+    float silu_z = z_val * sig_z;                                              \
+    float d_silu = sig_z + z_val * sig_z * (1.0f - sig_z);                     \
+    d_z[base + d] = FROM_F(d_out_val * y_normed * d_silu);                     \
+    float dy_scaled = d_out_val * silu_z;                                      \
+    d_weight[base + d] = dy_scaled * y_hat;                                    \
+    extern __shared__ float shared_sum[];                                      \
+    shared_sum[group_id * group_size + local_id] = y_hat * w * dy_scaled;      \
+    __syncthreads();                                                           \
+    int stride = 1;                                                            \
+    while (stride < group_size) stride <<= 1;                                  \
+    stride >>= 1;                                                              \
+    for (; stride > 0; stride >>= 1) {                                         \
+        if (local_id < stride) {                                               \
+            int idx = group_id * group_size + local_id;                        \
+            shared_sum[idx] += shared_sum[idx + stride];                       \
+        }                                                                      \
+        __syncthreads();                                                       \
+    }                                                                          \
+    float c1 = shared_sum[group_id * group_size] / (float)group_size;          \
+    d_y[base + d] = FROM_F((w * dy_scaled - y_hat * c1) * rstd);               \
+}
+
+DEFINE_RMSNORM_GATED_BWD(bf16, __nv_bfloat16, from_f_bf16)
+DEFINE_RMSNORM_GATED_BWD(f16,  __half,        from_f_f16)

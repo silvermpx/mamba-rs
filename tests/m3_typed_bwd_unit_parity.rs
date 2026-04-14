@@ -553,3 +553,134 @@ fn rope_bwd_bf16() {
 fn rope_bwd_f16() {
     check_rope_bwd(WeightDtype::F16);
 }
+
+// ─── rmsnorm_gated_bwd (Step 9c) ───────────────────────────────────────
+
+fn check_rmsnorm_gated_bwd(dtype: WeightDtype) {
+    let dev = GpuDevice::new(0).unwrap();
+    let ctx = GpuCtx::new(&dev).unwrap();
+    let m3k = make_m3k(&ctx);
+    // group_size == headdim (M3 convention) → n_groups == nheads.
+    let group_size = HD;
+    let n_groups = DI / group_size;
+    let n = N_SAMPLES;
+    let n_elems = n * DI;
+    let n_rms = n * n_groups;
+
+    let d_out = det_rand(n_elems, 0xF1);
+    let y_f = det_rand(n_elems, 0xF2);
+    let z_f = det_rand(n_elems, 0xF3);
+    let weight: Vec<f32> = (0..DI).map(|i| 1.0 + 0.01 * (i as f32)).collect();
+    let rms: Vec<f32> = (0..n_rms).map(|i| 0.5 + 0.1 * (i as f32)).collect();
+
+    // f32 oracle
+    let up = |v: &[f32]| {
+        let mut b = GpuBuffer::zeros(&ctx.stream, v.len()).unwrap();
+        ctx.stream.synchronize().unwrap();
+        b.upload(&ctx.stream, v).unwrap();
+        b
+    };
+    let do32 = up(&d_out);
+    let y32 = up(&y_f);
+    let z32 = up(&z_f);
+    let w32 = up(&weight);
+    let r32 = up(&rms);
+    let dy32 = GpuBuffer::zeros(&ctx.stream, n_elems).unwrap();
+    let dz32 = GpuBuffer::zeros(&ctx.stream, n_elems).unwrap();
+    let dw32 = GpuBuffer::zeros(&ctx.stream, n_elems).unwrap();
+    ctx.stream.synchronize().unwrap();
+
+    let ni = n as i32;
+    let dii = DI as i32;
+    let gsi = group_size as i32;
+    let cfg = LaunchConfig {
+        grid_dim: (n as u32, 1, 1),
+        block_dim: (DI as u32, 1, 1),
+        shared_mem_bytes: (DI * std::mem::size_of::<f32>()) as u32,
+    };
+    let mut bld = ctx.stream.launch_builder(&m3k.rmsnorm_gated_bwd);
+    let dy = dy32.cached_ptr();
+    let dz = dz32.cached_ptr();
+    let dw = dw32.cached_ptr();
+    let do_p = do32.cached_ptr();
+    let y_p = y32.cached_ptr();
+    let z_p = z32.cached_ptr();
+    let w_p = w32.cached_ptr();
+    let r_p = r32.cached_ptr();
+    bld.arg(&dy);
+    bld.arg(&dz);
+    bld.arg(&dw);
+    bld.arg(&do_p);
+    bld.arg(&y_p);
+    bld.arg(&z_p);
+    bld.arg(&w_p);
+    bld.arg(&r_p);
+    bld.arg(&ni);
+    bld.arg(&dii);
+    bld.arg(&gsi);
+    unsafe { bld.launch(cfg) }.unwrap();
+    ctx.stream.synchronize().unwrap();
+    let mut dy_ref = vec![0f32; n_elems];
+    let mut dz_ref = vec![0f32; n_elems];
+    let mut dw_ref = vec![0f32; n_elems];
+    dy32.download(&ctx.stream, &mut dy_ref).unwrap();
+    dz32.download(&ctx.stream, &mut dz_ref).unwrap();
+    dw32.download(&ctx.stream, &mut dw_ref).unwrap();
+
+    // typed
+    let do_t = upload_typed(&ctx, &d_out, dtype);
+    let y_t = upload_typed(&ctx, &y_f, dtype);
+    let z_t = upload_typed(&ctx, &z_f, dtype);
+    let dy_t = DtypedBuf::zeros(&ctx.stream, n_elems, dtype).unwrap();
+    let dz_t = DtypedBuf::zeros(&ctx.stream, n_elems, dtype).unwrap();
+    let dw_t = GpuBuffer::zeros(&ctx.stream, n_elems).unwrap();
+    ctx.stream.synchronize().unwrap();
+
+    let mut bld = ctx
+        .stream
+        .launch_builder(m3k.rmsnorm_gated_bwd_typed.get(dtype));
+    let dy = dy_t.cached_ptr();
+    let dz = dz_t.cached_ptr();
+    let dw = dw_t.cached_ptr();
+    let do_p = do_t.cached_ptr();
+    let y_p = y_t.cached_ptr();
+    let z_p = z_t.cached_ptr();
+    let w_p = w32.cached_ptr();
+    let r_p = r32.cached_ptr();
+    bld.arg(&dy);
+    bld.arg(&dz);
+    bld.arg(&dw);
+    bld.arg(&do_p);
+    bld.arg(&y_p);
+    bld.arg(&z_p);
+    bld.arg(&w_p);
+    bld.arg(&r_p);
+    bld.arg(&ni);
+    bld.arg(&dii);
+    bld.arg(&gsi);
+    unsafe { bld.launch(cfg) }.unwrap();
+    ctx.stream.synchronize().unwrap();
+    let dy_typ = download_typed(&ctx, &dy_t);
+    let dz_typ = download_typed(&ctx, &dz_t);
+    let mut dw_typ = vec![0f32; n_elems];
+    dw_t.download(&ctx.stream, &mut dw_typ).unwrap();
+
+    eprintln!("rmsnorm_gated_bwd {dtype:?}:");
+    let (cos_min, norm_tol) = match dtype {
+        WeightDtype::Bf16 => (0.995_f32, 0.03_f32),
+        WeightDtype::F16 => (0.9995_f32, 0.01_f32),
+        _ => unreachable!(),
+    };
+    assert_close("d_y", &dy_ref, &dy_typ, cos_min, norm_tol);
+    assert_close("d_z", &dz_ref, &dz_typ, cos_min, norm_tol);
+    assert_close("d_weight (f32 master)", &dw_ref, &dw_typ, cos_min, norm_tol);
+}
+
+#[test]
+fn rmsnorm_gated_bwd_bf16() {
+    check_rmsnorm_gated_bwd(WeightDtype::Bf16);
+}
+#[test]
+fn rmsnorm_gated_bwd_f16() {
+    check_rmsnorm_gated_bwd(WeightDtype::F16);
+}

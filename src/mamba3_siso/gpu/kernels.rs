@@ -103,6 +103,10 @@ pub struct Mamba3Kernels {
     /// 8-way split backward: assemble typed d_proj from typed d_z/d_x/
     /// d_B_raw/d_C_raw plus f32 dd_dt/dd_a/trap/angles.
     pub m3_split_bwd_typed: TypedKernel,
+    /// RMSNorm-gated backward (`out = RMSNorm(y) * weight * SiLU(z)`) —
+    /// typed d_y/d_z/d_out/y/z; f32 weight + d_weight (per-sample,
+    /// reduced later). Step 9c for M3 training.
+    pub rmsnorm_gated_bwd_typed: TypedKernel,
     /// Shared from M1: f32 residual → half post-norm (identical kernel, reused).
     pub rmsnorm_fwd_f32in_typed: HalfKernel,
     /// Shared from M1: f32 residual += half branch (stays f32).
@@ -284,6 +288,11 @@ impl Mamba3Kernels {
                 f32: get("m3_split_bwd")?,
                 bf16: get("m3_split_bwd_bf16")?,
                 f16: get("m3_split_bwd_f16")?,
+            },
+            rmsnorm_gated_bwd_typed: TypedKernel {
+                f32: get("rmsnorm_gated_backward")?,
+                bf16: get("rmsnorm_gated_backward_bf16")?,
+                f16: get("rmsnorm_gated_backward_f16")?,
             },
             rmsnorm_fwd_f32in_typed: HalfKernel {
                 bf16: get("rmsnorm_forward_f32in_bf16")?,
