@@ -400,6 +400,12 @@ pub fn gpu_backward_mamba_layer(
 /// GPU Mamba backbone backward: layers in reverse + input_proj backward.
 ///
 /// Mirrors CPU `backward_mamba_backbone_batched` from train/forward.rs.
+///
+/// **IMPORTANT**: weight gradients in `d_mamba` are **accumulated** via
+/// `beta=1.0` in `gpu_sgemm_backward_dw_grad`. The caller MUST call
+/// [`GpuMambaGrads::zero`] before each training step if the buffer is
+/// reused across iterations; otherwise gradients from step N−1 pollute
+/// step N and the optimizer sees doubled updates.
 pub fn gpu_backward_mamba_backbone(
     ctx: &GpuCtx,
     d_temporal: &mut GpuBuffer,

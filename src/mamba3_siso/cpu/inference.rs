@@ -9,7 +9,7 @@
 use crate::mamba3_siso::config::Mamba3Config;
 use crate::mamba3_siso::state::Mamba3LayerState;
 use crate::mamba3_siso::weights::{Mamba3LayerWeights, Mamba3Weights};
-use crate::ops::fast_math::{RMS_NORM_EPS, fast_exp_scalar, fast_tanh};
+use crate::ops::fast_math::{RMS_NORM_EPS, fast_exp_scalar};
 use crate::ops::norms::{bcnorm, rms_norm_weighted, rmsnorm_gated};
 
 /// Pre-allocated scratch buffers for Mamba-3 T=1 step.
@@ -165,7 +165,7 @@ pub fn mamba3_layer_step(
             let pi = std::f32::consts::PI;
             for a in 0..n_rope {
                 let raw = scratch.proj[angles_off + a];
-                let delta = fast_tanh(raw) * pi * dt_val;
+                let delta = raw.tanh() * pi * dt_val;
                 let mut acc = state.angle_state[angle_base + a] as f64 + delta as f64;
                 let two_pi_64 = 2.0 * std::f64::consts::PI;
                 acc -= two_pi_64 * (acc / two_pi_64).floor();

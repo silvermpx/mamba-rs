@@ -217,6 +217,7 @@ impl GpuMambaLM {
     /// Download the backbone's temporal buffer (last-layer hidden state, last
     /// timestep) as f32 regardless of storage dtype. Intended for debugging /
     /// parity harnesses.
+    #[doc(hidden)]
     pub fn debug_download_temporal(&self, out: &mut [f32]) -> Result<(), String> {
         self.backbone.download_temporal(out)
     }
@@ -225,6 +226,7 @@ impl GpuMambaLM {
     /// `layer_limit` layers, and download the post-layer residual to `out`.
     /// Always returns f32 regardless of storage dtype. For step-by-step
     /// f32-vs-bf16 parity bisection.
+    #[doc(hidden)]
     pub fn debug_step_one_token(
         &mut self,
         token: u32,

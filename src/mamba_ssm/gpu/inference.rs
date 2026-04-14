@@ -451,6 +451,7 @@ impl GpuMambaInference {
 
     /// Debug-only: f32 step stopping after `stop_after_layer` so the caller
     /// can download `scratch.temporal` for layer-by-layer parity comparison.
+    #[doc(hidden)]
     pub fn step_kernels_f32_debug(
         &self,
         state: &mut GpuInferenceState,
@@ -943,6 +944,7 @@ impl GpuMambaInferenceMixed {
     /// `scratch.temporal` and compare layer-by-layer against the f32 path).
     /// `stop_after_layer == w.n_layers()` runs the full step (identical math
     /// to `step_kernels_mixed_native`).
+    #[doc(hidden)]
     pub fn step_kernels_mixed_native_debug(
         &self,
         state: &mut GpuInferenceState,
@@ -1743,6 +1745,7 @@ impl GpuMambaBackbone {
     /// (always f32 — for the F32 backbone this is `scratch.temporal` because
     /// the residual is copied into temporal at the start of every layer; for
     /// the Mixed backbone this is `scratch.residual` directly).
+    #[doc(hidden)]
     pub fn debug_step_partial(
         &mut self,
         input: &[f32],
@@ -1913,8 +1916,7 @@ impl GpuMambaBackbone {
 // public mamba-rs API; users go through GpuMambaBackbone::new_with_dtype).
 // ---------------------------------------------------------------------------
 
-#[doc(hidden)]
-pub struct GpuMambaBackboneMixed {
+pub(crate) struct GpuMambaBackboneMixed {
     engine: GpuMambaInferenceMixed,
     state: GpuInferenceState,
     scratch: GpuInferenceScratch,

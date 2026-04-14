@@ -1844,6 +1844,11 @@ pub fn gpu_backward_mamba3_layer(
 // ---------------------------------------------------------------------------
 
 /// Mamba-3 SISO full backbone backward.
+///
+/// **IMPORTANT**: weight gradients in `grads` are **accumulated** (`beta=1.0`
+/// on the dW GEMMs). The caller MUST call [`GpuMamba3Grads::zero`] before
+/// each training step if the buffer is reused across iterations; otherwise
+/// gradients from step N−1 pollute step N.
 pub fn gpu_backward_mamba3_backbone(
     ctx: &GpuCtx,
     m3k: &Mamba3Kernels,

@@ -16,7 +16,7 @@ use super::forward::{simd_sum_sq, softplus};
 use super::scratch::Mamba3Scratch;
 use super::weights::TrainMamba3LayerWeights;
 use crate::ops::blas::sgemm_backward;
-use crate::ops::fast_math::{RMS_NORM_EPS, fast_exp_scalar, fast_tanh};
+use crate::ops::fast_math::{RMS_NORM_EPS, fast_exp_scalar};
 
 const MAX_DS: usize = 64;
 // MAX_NH_DS removed — d_k_carry now uses Vec to support all valid configs
@@ -143,7 +143,7 @@ pub fn backward_mamba3_layer_batched(
                 let dt_h = acts.data[base_s + o.dt_val + h];
                 for (a, r) in running[..n_angles].iter_mut().enumerate() {
                     let raw = acts.data[base_s + o.angles_raw + a];
-                    *r += fast_tanh(raw) * pi * dt_h;
+                    *r += raw.tanh() * pi * dt_h;
                     *r -= two_pi * (*r / two_pi).floor();
                 }
                 let off = t * nh * n_angles + h * n_angles;
@@ -385,7 +385,7 @@ pub fn backward_mamba3_layer_batched(
                 let pi = std::f32::consts::PI;
                 for a in 0..n_angles {
                     let raw = acts.data[base_t + o.angles_raw + a];
-                    let tanh_raw = fast_tanh(raw);
+                    let tanh_raw = raw.tanh();
                     let d_delta = scratch.d_angle_cumsum_flat[t * nh * n_angles + h * n_angles + a];
                     d_dt_from_angles += d_delta * tanh_raw * pi;
                     scratch.d_angles_flat[t * n_angles + a] +=

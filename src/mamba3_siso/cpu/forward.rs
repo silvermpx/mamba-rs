@@ -15,7 +15,7 @@ use super::flat::Mamba3LayerFlat;
 use super::scratch::Mamba3Scratch;
 use super::weights::TrainMamba3LayerWeights;
 use crate::ops::blas::sgemm_forward;
-use crate::ops::fast_math::{RMS_NORM_EPS, fast_exp_scalar, fast_tanh};
+use crate::ops::fast_math::{RMS_NORM_EPS, fast_exp_scalar};
 
 // Stack-array limits (must match config validation)
 const MAX_DS: usize = 64;
@@ -313,7 +313,7 @@ pub fn forward_mamba3_layer_batched(
                 let pi = std::f32::consts::PI;
                 for a in 0..n_angles {
                     let raw = acts.data[base_t + o.angles_raw + a];
-                    let delta = fast_tanh(raw) * pi * dt_val;
+                    let delta = raw.tanh() * pi * dt_val;
                     let mut acc = angle_state[ab + a] as f64 + delta as f64;
                     let two_pi_64 = 2.0 * std::f64::consts::PI;
                     acc -= two_pi_64 * (acc / two_pi_64).floor();
@@ -339,7 +339,7 @@ pub fn forward_mamba3_layer_batched(
                 let pi = std::f32::consts::PI;
                 for a in 0..n_angles {
                     acts.data[base_t + o.angle_cumsum + a] =
-                        fast_tanh(acts.data[base_t + o.angles_raw + a]) * pi;
+                        acts.data[base_t + o.angles_raw + a].tanh() * pi;
                 }
             }
 

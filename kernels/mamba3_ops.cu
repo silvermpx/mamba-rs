@@ -1179,6 +1179,9 @@ extern "C" __global__ void bcnorm_fwd_##SUFFIX(                                 
         __syncthreads();                                                        \
     }                                                                           \
     float rms = sqrtf(sdata[0] / (float)ds + RMS_EPS);                          \
+    /* Finite-guard: match the fused bcnorm_fwd_bc guard so a bf16 overflow    \
+     * upstream does not silently contaminate every downstream layer. */       \
+    if (!isfinite(rms) || rms < 1e-20f) rms = 1.0f;                             \
     if (d == 0) rms_val[block_id] = rms;                                        \
     __syncthreads();                                                            \
     float inv_rms = 1.0f / rms;                                                 \
@@ -1402,6 +1405,11 @@ extern "C" __global__ void rmsnorm_gated_forward_##SUFFIX(                      
         __syncthreads();                                                        \
     }                                                                           \
     float rstd = rsqrtf(shared_sum[group_id * group_size] / (float)group_size + RMS_EPS); \
+    /* Finite-guard: match the f32 rmsnorm_gated_forward guard at line 982.    \
+     * Without this, bf16 overflow upstream produces rstd=Inf/NaN and silently \
+     * zeroes the entire gated output, cascading NaN through the rest of the   \
+     * stack. Mirrors the bf16 stability fix applied to bcnorm_fwd_bc. */      \
+    if (!isfinite(rstd) || rstd > 1e20f) rstd = 1.0f;                           \
     if (local_id == 0) rms_vals[sample * n_groups + group_id] = rstd;           \
     __syncthreads();                                                            \
     float z_val = to_f(z[base + d]);                                            \

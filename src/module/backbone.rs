@@ -47,9 +47,16 @@ impl MambaBackbone {
     /// Create a backbone from pre-loaded weights.
     ///
     /// Validates dimensions against config. Returns `Err` on mismatch.
-    pub fn from_weights(cfg: MambaConfig, weights: MambaWeights) -> Result<Self, String> {
+    /// Recomputes `a_neg = -exp(a_log)` for every layer — inference reads
+    /// `a_neg` exclusively and `from_weights` must accept weight bundles
+    /// whose `a_neg` field may be stale (e.g. fresh-constructed, post
+    /// serialize/deserialize, or loaded from a non-HF source).
+    pub fn from_weights(cfg: MambaConfig, mut weights: MambaWeights) -> Result<Self, String> {
         let input_dim = weights.input_proj_w.len() / cfg.d_model;
         weights.validate(&cfg, input_dim)?;
+        for lw in &mut weights.layers {
+            lw.compute_a_neg();
+        }
         Ok(Self {
             weights,
             cfg,
