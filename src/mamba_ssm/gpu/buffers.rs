@@ -617,6 +617,40 @@ impl WeightSliceDyn {
         self.len_elems * self.dtype.size_bytes()
     }
 
+    /// Download contents to f32 CPU buffer, upcasting from typed dtype.
+    /// Counterpart of [`Self::upload_from_cpu_f32`]; use for parity tests
+    /// that compare typed device weights against f32 master copies.
+    pub fn download_to_f32(&self, dst: &mut [f32]) -> Result<(), String> {
+        assert_eq!(dst.len(), self.len_elems, "size mismatch");
+        if self.len_elems == 0 {
+            return Ok(());
+        }
+        match self.dtype {
+            WeightDtype::F32 => {
+                let bytes: &mut [u8] = bytemuck::cast_slice_mut(dst);
+                cu_memcpy_dtoh_raw(self.ptr, bytes)
+            }
+            WeightDtype::Bf16 => {
+                let mut buf = vec![half::bf16::ZERO; self.len_elems];
+                let bytes: &mut [u8] = bytemuck::cast_slice_mut(&mut buf);
+                cu_memcpy_dtoh_raw(self.ptr, bytes)?;
+                for (d, &v) in dst.iter_mut().zip(&buf) {
+                    *d = v.to_f32();
+                }
+                Ok(())
+            }
+            WeightDtype::F16 => {
+                let mut buf = vec![half::f16::ZERO; self.len_elems];
+                let bytes: &mut [u8] = bytemuck::cast_slice_mut(&mut buf);
+                cu_memcpy_dtoh_raw(self.ptr, bytes)?;
+                for (d, &v) in dst.iter_mut().zip(&buf) {
+                    *d = v.to_f32();
+                }
+                Ok(())
+            }
+        }
+    }
+
     /// Upload f32 CPU data, downcasting to `dtype` on CPU side.
     pub fn upload_from_cpu_f32(&self, src: &[f32]) -> Result<(), String> {
         assert_eq!(src.len(), self.len_elems, "size mismatch");

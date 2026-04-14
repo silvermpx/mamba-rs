@@ -175,8 +175,16 @@ fn run_f32(
     let mut temporal = GpuBuffer::zeros(&ctx.stream, bt * dims.d_model).unwrap();
     ctx.stream.synchronize().unwrap();
 
-    gpu_forward_mamba_backbone(ctx, &mut temporal, &mut acts, &w, &input, &mut state, &mut scratch)
-        .unwrap();
+    gpu_forward_mamba_backbone(
+        ctx,
+        &mut temporal,
+        &mut acts,
+        &w,
+        &input,
+        &mut state,
+        &mut scratch,
+    )
+    .unwrap();
 
     let mut d_temporal = GpuBuffer::zeros(&ctx.stream, bt * dims.d_model).unwrap();
     ctx.stream.synchronize().unwrap();
@@ -240,10 +248,8 @@ fn run_mixed(
     ctx.stream.synchronize().unwrap();
     input.upload(&ctx.stream, mamba_input).unwrap();
 
-    gpu_forward_mamba_backbone_train_mixed(
-        ctx, &mut acts, &w, &input, &mut state, &mut scratch,
-    )
-    .unwrap();
+    gpu_forward_mamba_backbone_train_mixed(ctx, &mut acts, &w, &input, &mut state, &mut scratch)
+        .unwrap();
 
     let mut d_temporal = GpuBuffer::zeros(&ctx.stream, bt * dims.d_model).unwrap();
     ctx.stream.synchronize().unwrap();
@@ -310,10 +316,8 @@ fn forward_mixed_post_normf(
     ctx.stream.synchronize().unwrap();
     input.upload(&ctx.stream, mamba_input).unwrap();
 
-    gpu_forward_mamba_backbone_train_mixed(
-        ctx, &mut acts, &w, &input, &mut state, &mut scratch,
-    )
-    .unwrap();
+    gpu_forward_mamba_backbone_train_mixed(ctx, &mut acts, &w, &input, &mut state, &mut scratch)
+        .unwrap();
     ctx.stream.synchronize().unwrap();
 
     let mut out = vec![0f32; bt * dims.d_model];
@@ -369,7 +373,8 @@ fn backbone_grad_parity(dtype: WeightDtype) {
     let ctx = GpuCtx::new(&dev).unwrap();
 
     let (dt_ref, grads_ref) = run_f32(&ctx, &w_f32, &cfg, &dims, &mamba_input, &d_temporal);
-    let (dt_typ, grads_typ) = run_mixed(&ctx, &w_mix, &cfg, &dims, dtype, &mamba_input, &d_temporal);
+    let (dt_typ, grads_typ) =
+        run_mixed(&ctx, &w_mix, &cfg, &dims, dtype, &mamba_input, &d_temporal);
 
     assert_eq!(grads_ref.len(), grads_typ.len(), "grad arena sizes differ");
 
@@ -451,8 +456,16 @@ fn forward_f32_post_normf(
     let mut temporal = GpuBuffer::zeros(&ctx.stream, bt * dims.d_model).unwrap();
     ctx.stream.synchronize().unwrap();
 
-    gpu_forward_mamba_backbone(ctx, &mut temporal, &mut acts, &w, &input, &mut state, &mut scratch)
-        .unwrap();
+    gpu_forward_mamba_backbone(
+        ctx,
+        &mut temporal,
+        &mut acts,
+        &w,
+        &input,
+        &mut state,
+        &mut scratch,
+    )
+    .unwrap();
     ctx.stream.synchronize().unwrap();
 
     // After the full backbone, `temporal` holds the post-norm_f output
@@ -519,8 +532,11 @@ fn finite_diff_f32_oracle() {
     let rel_tol: f32 = 0.30;
 
     let slice = &grads[tensor_off..tensor_off + tensor_len];
-    let mut ranked: Vec<(usize, f32)> =
-        slice.iter().enumerate().map(|(i, &g)| (i, g.abs())).collect();
+    let mut ranked: Vec<(usize, f32)> = slice
+        .iter()
+        .enumerate()
+        .map(|(i, &g)| (i, g.abs()))
+        .collect();
     ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
     let probe_idx: Vec<usize> = ranked.iter().take(5).map(|(i, _)| *i).collect();
 
@@ -624,8 +640,7 @@ fn loss_curve(dtype: WeightDtype, n_steps: usize, lr: f32) {
                     for (w, &g) in cpu.layers[0].a_log.iter_mut().zip(slice) {
                         *w -= lr * g;
                     }
-                    cpu.layers[0].a_neg =
-                        cpu.layers[0].a_log.iter().map(|&v| -v.exp()).collect();
+                    cpu.layers[0].a_neg = cpu.layers[0].a_log.iter().map(|&v| -v.exp()).collect();
                 }
                 "d_param" => {
                     for (w, &g) in cpu.layers[0].d_param.iter_mut().zip(slice) {
@@ -658,7 +673,11 @@ fn loss_curve(dtype: WeightDtype, n_steps: usize, lr: f32) {
         "{dtype:?}: loss did not decrease (initial={initial_loss:.3e} final={final_loss:.3e})"
     );
     let reduction = (initial_loss - final_loss) / initial_loss;
-    eprintln!("  → reduction = {:.1}% over {} steps", reduction * 100.0, n_steps);
+    eprintln!(
+        "  → reduction = {:.1}% over {} steps",
+        reduction * 100.0,
+        n_steps
+    );
     assert!(
         reduction >= 0.02,
         "{dtype:?}: loss reduction < 2% ({reduction:.3})"
