@@ -1052,3 +1052,267 @@ extern "C" __global__ void rmsnorm_gated_backward(
     float c1 = shared_sum[group_id * group_size] / (float)group_size;
     d_y[base + d] = (w * dy_scaled - y_hat * c1) * rstd;
 }
+
+// ============================================================================
+// Templated variants for end-to-end bf16/f16 activations (inference only).
+//
+// Dtype split for Mamba-3 bf16 path (matches M1 and state-spaces conventions):
+// - Activations/linear tensors: T_ACT (bf16/f16)
+//   proj, z, x, B_raw, C_raw, B_normed, C_normed, B_biased, C_biased,
+//   B_rotated, C_rotated, y, gated, post_norm
+// - Coefficient/scalar tensors: f32
+//   dt, a_val, trap, alpha, beta, gamma, angles_raw, angle_cumsum,
+//   dt_bias, norm weights, rms stats
+// - Recurrent state: f32 (see mamba3_ssd.cu m3_step_fwd templated variant)
+// - Residual stream: f32 (HF residual_in_fp32=True)
+//
+// Backward/training tensors (dd_*_raw, trap_raw saves) are not used in
+// inference — the templated variants still accept them as f32 pointers so
+// callers can pass unused scratch without branching.
+// ============================================================================
+
+// ------- m3_split typed -------
+// proj: T_ACT input; outputs split into bf16 activations + f32 coefficients.
+#define DEFINE_M3_SPLIT(SUFFIX, T_ACT, FROM_F)                                \
+extern "C" __global__ void m3_split_##SUFFIX(                                  \
+    T_ACT* __restrict__ z,           /* [N * di] */                            \
+    T_ACT* __restrict__ x,           /* [N * di] */                            \
+    T_ACT* __restrict__ B_raw,       /* [N * ng * ds] */                       \
+    T_ACT* __restrict__ C_raw,       /* [N * ng * ds] */                       \
+    float* __restrict__ dt,          /* [N * nh] — coefficient, f32 */          \
+    float* __restrict__ a_val,       /* [N * nh] — coefficient, f32 */          \
+    float* __restrict__ trap,        /* [N * nh] — coefficient, f32 */          \
+    float* __restrict__ angles,      /* [N * n_angles] — coefficient, f32 */    \
+    float* __restrict__ dd_dt_raw,   /* [N * nh] — backward save (f32) */       \
+    float* __restrict__ dd_a_raw,    /* [N * nh] — backward save (f32) */       \
+    float* __restrict__ trap_raw,    /* [N * nh] — backward save (f32) */       \
+    const T_ACT* __restrict__ proj,  /* [N * in_proj_dim] */                    \
+    const float* __restrict__ dt_bias, /* [nh] */                              \
+    float a_floor,                                                              \
+    int N, int di, int ng, int ds, int nh, int n_angles                         \
+) {                                                                             \
+    int in_proj_dim = 2 * di + 2 * ng * ds + 3 * nh + n_angles;                 \
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;                            \
+    int total = N * in_proj_dim;                                                \
+    if (idx >= total) return;                                                   \
+    int sample = idx / in_proj_dim;                                             \
+    int col = idx % in_proj_dim;                                                \
+    float val = to_f(proj[idx]);                                                \
+    int off0 = di;                                                              \
+    int off1 = 2 * di;                                                          \
+    int ng_ds = ng * ds;                                                        \
+    int off2 = off1 + ng_ds;                                                    \
+    int off3 = off2 + ng_ds;                                                    \
+    int off4 = off3 + nh;                                                       \
+    int off5 = off4 + nh;                                                       \
+    int off6 = off5 + nh;                                                       \
+    if (col < off0) {                                                           \
+        z[sample * di + col] = FROM_F(val);                                     \
+    } else if (col < off1) {                                                    \
+        x[sample * di + (col - off0)] = FROM_F(val);                            \
+    } else if (col < off2) {                                                    \
+        B_raw[sample * ng_ds + (col - off1)] = FROM_F(val);                     \
+    } else if (col < off3) {                                                    \
+        C_raw[sample * ng_ds + (col - off2)] = FROM_F(val);                     \
+    } else if (col < off4) {                                                    \
+        int h = col - off3;                                                     \
+        int dt_idx = sample * nh + h;                                           \
+        dd_dt_raw[dt_idx] = val;                                                \
+        float biased = val + dt_bias[h];                                        \
+        dt[dt_idx] = (biased > 20.0f) ? biased : logf(1.0f + FAST_EXP(biased)); \
+    } else if (col < off5) {                                                    \
+        int h = col - off4;                                                     \
+        int a_idx = sample * nh + h;                                            \
+        dd_a_raw[a_idx] = val;                                                  \
+        float sp = (val > 20.0f) ? val : logf(1.0f + FAST_EXP(val));            \
+        float a = -sp;                                                          \
+        a_val[a_idx] = fminf(a, -a_floor);                                      \
+    } else if (col < off6) {                                                    \
+        int h = col - off5;                                                     \
+        int t_idx = sample * nh + h;                                            \
+        trap_raw[t_idx] = val;                                                  \
+        trap[t_idx] = 1.0f / (1.0f + FAST_EXP(-val));                           \
+    } else {                                                                    \
+        int a = col - off6;                                                     \
+        if (a < n_angles) {                                                     \
+            angles[sample * n_angles + a] = val;                                \
+        }                                                                       \
+    }                                                                           \
+}
+
+DEFINE_M3_SPLIT(bf16, __nv_bfloat16, from_f_bf16)
+DEFINE_M3_SPLIT(f16,  __half,        from_f_f16)
+
+// ------- bcnorm_fwd typed -------
+// B_raw: T_ACT in; B_normed: T_ACT out; rms_val f32; weight f32.
+#define DEFINE_BCNORM_FWD(SUFFIX, T_ACT, FROM_F)                               \
+extern "C" __global__ void bcnorm_fwd_##SUFFIX(                                 \
+    T_ACT* __restrict__ B_normed,                                               \
+    float* __restrict__ rms_val,                                                \
+    const T_ACT* __restrict__ B_raw,                                            \
+    const float* __restrict__ weight,                                           \
+    int N, int ng, int ds                                                       \
+) {                                                                             \
+    int block_id = blockIdx.x;                                                  \
+    if (block_id >= N * ng) return;                                             \
+    int d = threadIdx.x;                                                        \
+    if (d >= ds) return;                                                        \
+    int base = block_id * ds;                                                   \
+    float val = to_f(B_raw[base + d]);                                          \
+    extern __shared__ float sdata[];                                            \
+    sdata[d] = val * val;                                                       \
+    __syncthreads();                                                            \
+    int stride = 1;                                                             \
+    while (stride < ds) stride <<= 1;                                           \
+    stride >>= 1;                                                               \
+    for (; stride > 0; stride >>= 1) {                                          \
+        if (d < stride && (d + stride) < ds) {                                  \
+            sdata[d] += sdata[d + stride];                                      \
+        }                                                                       \
+        __syncthreads();                                                        \
+    }                                                                           \
+    float rms = sqrtf(sdata[0] / (float)ds + RMS_EPS);                          \
+    if (d == 0) rms_val[block_id] = rms;                                        \
+    __syncthreads();                                                            \
+    float inv_rms = 1.0f / rms;                                                 \
+    B_normed[base + d] = FROM_F(val * inv_rms * weight[d]);                     \
+}
+
+DEFINE_BCNORM_FWD(bf16, __nv_bfloat16, from_f_bf16)
+DEFINE_BCNORM_FWD(f16,  __half,        from_f_f16)
+
+// ------- bc_bias_add typed -------
+// B_normed: T_ACT in; B_biased: T_ACT out; bias f32.
+#define DEFINE_BC_BIAS_ADD(SUFFIX, T_ACT, FROM_F)                              \
+extern "C" __global__ void bc_bias_add_##SUFFIX(                                \
+    T_ACT* __restrict__ B_biased,                                               \
+    const T_ACT* __restrict__ B_normed,                                         \
+    const float* __restrict__ bias,                                             \
+    int N, int nh, int ng, int ds                                               \
+) {                                                                             \
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;                            \
+    int total = N * nh * ds;                                                    \
+    if (idx >= total) return;                                                   \
+    int nh_ds = nh * ds;                                                        \
+    int sample = idx / nh_ds;                                                   \
+    int rem = idx % nh_ds;                                                      \
+    int h = rem / ds;                                                           \
+    int n = rem % ds;                                                           \
+    int heads_per_group = nh / ng;                                              \
+    int g = h / heads_per_group;                                                \
+    float nv = to_f(B_normed[sample * ng * ds + g * ds + n]);                   \
+    B_biased[idx] = FROM_F(nv + bias[h * ds + n]);                              \
+}
+
+DEFINE_BC_BIAS_ADD(bf16, __nv_bfloat16, from_f_bf16)
+DEFINE_BC_BIAS_ADD(f16,  __half,        from_f_f16)
+
+// ------- rope_fwd typed -------
+// B_biased/C_biased: T_ACT in; B_rotated/C_rotated: T_ACT out;
+// angle_cumsum f32 (coefficient, keeps f64-accumulated precision upstream).
+#define DEFINE_ROPE_FWD(SUFFIX, T_ACT, FROM_F)                                 \
+extern "C" __global__ void rope_fwd_##SUFFIX(                                   \
+    T_ACT* __restrict__ B_rotated,                                              \
+    T_ACT* __restrict__ C_rotated,                                              \
+    const T_ACT* __restrict__ B_biased,                                         \
+    const T_ACT* __restrict__ C_biased,                                         \
+    const float* __restrict__ angle_cumsum,                                     \
+    int N, int nh, int ds, int n_angles                                         \
+) {                                                                             \
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;                            \
+    int total = N * nh * ds;                                                    \
+    if (idx >= total) return;                                                   \
+    int nh_ds = nh * ds;                                                        \
+    int sample = idx / nh_ds;                                                   \
+    int rem = idx % nh_ds;                                                      \
+    int h = rem / ds;                                                           \
+    int n = rem % ds;                                                           \
+    int base_bc = sample * nh_ds + h * ds;                                      \
+    int rope_end = 2 * n_angles;                                                \
+    if (n >= rope_end) {                                                        \
+        B_rotated[idx] = B_biased[idx];                                         \
+        C_rotated[idx] = C_biased[idx];                                         \
+    } else if ((n & 1) == 0) {                                                  \
+        int a = n / 2;                                                          \
+        int angle_idx = sample * nh * n_angles + h * n_angles + a;              \
+        float cos_a, sin_a;                                                     \
+        sincosf(angle_cumsum[angle_idx], &sin_a, &cos_a);                       \
+        int i0 = base_bc + n;                                                   \
+        int i1 = i0 + 1;                                                        \
+        float b0 = to_f(B_biased[i0]);                                          \
+        float b1 = to_f(B_biased[i1]);                                          \
+        B_rotated[i0] = FROM_F(cos_a * b0 - sin_a * b1);                        \
+        B_rotated[i1] = FROM_F(sin_a * b0 + cos_a * b1);                        \
+        float c0 = to_f(C_biased[i0]);                                          \
+        float c1 = to_f(C_biased[i1]);                                          \
+        C_rotated[i0] = FROM_F(cos_a * c0 - sin_a * c1);                        \
+        C_rotated[i1] = FROM_F(sin_a * c0 + cos_a * c1);                        \
+    }                                                                           \
+}
+
+DEFINE_ROPE_FWD(bf16, __nv_bfloat16, from_f_bf16)
+DEFINE_ROPE_FWD(f16,  __half,        from_f_f16)
+
+// ------- silu_gate_fwd typed -------
+// y, z, out: T_ACT. Simple elementwise.
+#define DEFINE_SILU_GATE_FWD(SUFFIX, T_ACT, FROM_F)                            \
+extern "C" __global__ void silu_gate_fwd_##SUFFIX(                              \
+    T_ACT* __restrict__ out,                                                    \
+    const T_ACT* __restrict__ y,                                                \
+    const T_ACT* __restrict__ z,                                                \
+    int n                                                                       \
+) {                                                                             \
+    int i = blockIdx.x * blockDim.x + threadIdx.x;                              \
+    if (i >= n) return;                                                         \
+    float z_val = to_f(z[i]);                                                   \
+    float silu_z = z_val / (1.0f + exp2f(-z_val * LOG2E));                      \
+    out[i] = FROM_F(to_f(y[i]) * silu_z);                                       \
+}
+
+DEFINE_SILU_GATE_FWD(bf16, __nv_bfloat16, from_f_bf16)
+DEFINE_SILU_GATE_FWD(f16,  __half,        from_f_f16)
+
+// ------- rmsnorm_gated_forward typed -------
+// y, z, out: T_ACT; weight, rms_vals: f32. Per-group RMSNorm * SiLU(z).
+#define DEFINE_RMSNORM_GATED_FWD(SUFFIX, T_ACT, FROM_F)                        \
+extern "C" __global__ void rmsnorm_gated_forward_##SUFFIX(                      \
+    T_ACT* __restrict__ out,                                                    \
+    float* __restrict__ rms_vals,                                               \
+    const T_ACT* __restrict__ y,                                                \
+    const T_ACT* __restrict__ z,                                                \
+    const float* __restrict__ weight,                                           \
+    int N, int d_inner, int group_size                                          \
+) {                                                                             \
+    if (d_inner > 1024) return;                                                 \
+    int sample = blockIdx.x;                                                    \
+    if (sample >= N) return;                                                    \
+    int d = threadIdx.x;                                                        \
+    if (d >= d_inner) return;                                                   \
+    int n_groups = d_inner / group_size;                                        \
+    int group_id = d / group_size;                                              \
+    int local_id = d % group_size;                                              \
+    int base = sample * d_inner;                                                \
+    float y_val = to_f(y[base + d]);                                            \
+    extern __shared__ float shared_sum[];                                       \
+    shared_sum[group_id * group_size + local_id] = y_val * y_val;               \
+    __syncthreads();                                                            \
+    int stride = 1;                                                             \
+    while (stride < group_size) stride <<= 1;                                   \
+    stride >>= 1;                                                               \
+    for (; stride > 0; stride >>= 1) {                                          \
+        if (local_id < stride) {                                                \
+            int sidx = group_id * group_size + local_id;                        \
+            shared_sum[sidx] += shared_sum[sidx + stride];                      \
+        }                                                                       \
+        __syncthreads();                                                        \
+    }                                                                           \
+    float rstd = rsqrtf(shared_sum[group_id * group_size] / (float)group_size + RMS_EPS); \
+    if (local_id == 0) rms_vals[sample * n_groups + group_id] = rstd;           \
+    __syncthreads();                                                            \
+    float z_val = to_f(z[base + d]);                                            \
+    float silu_z = z_val / (1.0f + FAST_EXP(-z_val));                           \
+    out[base + d] = FROM_F(y_val * rstd * weight[d] * silu_z);                  \
+}
+
+DEFINE_RMSNORM_GATED_FWD(bf16, __nv_bfloat16, from_f_bf16)
+DEFINE_RMSNORM_GATED_FWD(f16,  __half,        from_f_f16)

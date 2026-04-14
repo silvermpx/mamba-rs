@@ -211,6 +211,112 @@ impl Mamba3GpuInferenceScratch {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Mixed-precision scratch for end-to-end bf16/f16 Mamba-3 inference.
+// Activation-linear tensors are DtypedBuf (bf16/f16). Scalars per-head
+// (dt, a_val, trap, alpha, beta, gamma, angles, rms stats) and the residual
+// stream stay f32 — see mamba3_siso/cpu/inference.rs for the parity contract.
+// ---------------------------------------------------------------------------
+
+use crate::mamba_ssm::gpu::buffers::DtypedBuf;
+use crate::mamba_ssm::gpu::dtype::WeightDtype;
+
+pub struct Mamba3GpuInferenceMixedScratch {
+    pub gpu_input: GpuBuffer, // f32 — CPU upload staging (seeds f32 residual)
+    pub temporal: DtypedBuf,  // bf16/f16 — post-norm branch + final lm_head input
+    pub residual: GpuBuffer,  // f32 — cross-layer accumulator (HF residual_in_fp32)
+    pub proj: DtypedBuf,
+    pub z: DtypedBuf,
+    pub x: DtypedBuf,
+    pub b_raw: DtypedBuf,
+    pub c_raw: DtypedBuf,
+    pub b_normed: DtypedBuf,
+    pub c_normed: DtypedBuf,
+    pub b_rms: GpuBuffer, // f32 stats
+    pub c_rms: GpuBuffer, // f32 stats
+    pub b_biased: DtypedBuf,
+    pub c_biased: DtypedBuf,
+    pub k_cur: DtypedBuf, // bf16 — post-RoPE B fed to ssm_step typed
+    pub q_cur: DtypedBuf, // bf16 — post-RoPE C fed to ssm_step typed
+    // Backward-save tensors — allocated but unused in inference.
+    pub dd_dt_raw: GpuBuffer,
+    pub dd_a_raw: GpuBuffer,
+    pub trap_raw: GpuBuffer,
+    // Recurrence coefficients — stay f32 for numerical stability.
+    pub dt: GpuBuffer,
+    pub a_val: GpuBuffer,
+    pub trap: GpuBuffer,
+    pub angles_raw: GpuBuffer,   // f32 (tanh/PI·dt products accumulate in f64)
+    pub angle_cumsum: GpuBuffer, // f32 (sincosf consumer)
+    pub alpha: GpuBuffer,
+    pub beta: GpuBuffer,
+    pub gamma: GpuBuffer,
+    pub y: DtypedBuf,
+    pub gated: DtypedBuf,
+    pub post_norm: DtypedBuf,
+    pub rms_buf: GpuBuffer,
+    pub gated_rms_buf: GpuBuffer,
+    pub dtype: WeightDtype,
+}
+
+impl Mamba3GpuInferenceMixedScratch {
+    pub fn zeros(
+        stream: &Stream,
+        batch: usize,
+        cfg: &Mamba3Config,
+        input_dim: usize,
+        dtype: WeightDtype,
+    ) -> Result<Self, String> {
+        if matches!(dtype, WeightDtype::F32) {
+            return Err(
+                "Mamba3GpuInferenceMixedScratch requires bf16 or f16 dtype".to_string(),
+            );
+        }
+        let dm = cfg.d_model;
+        let di = cfg.d_inner();
+        let ds = cfg.d_state;
+        let nh = cfg.nheads();
+        let ng = cfg.ngroups;
+        let ip = cfg.in_proj_out_dim();
+        let na = cfg.num_rope_angles().max(1);
+        Ok(Self {
+            gpu_input: GpuBuffer::zeros(stream, batch * input_dim)?,
+            temporal: DtypedBuf::zeros(stream, batch * dm, dtype)?,
+            residual: GpuBuffer::zeros(stream, batch * dm)?,
+            proj: DtypedBuf::zeros(stream, batch * ip, dtype)?,
+            z: DtypedBuf::zeros(stream, batch * di, dtype)?,
+            x: DtypedBuf::zeros(stream, batch * di, dtype)?,
+            b_raw: DtypedBuf::zeros(stream, batch * ng * ds, dtype)?,
+            c_raw: DtypedBuf::zeros(stream, batch * ng * ds, dtype)?,
+            b_normed: DtypedBuf::zeros(stream, batch * ng * ds, dtype)?,
+            c_normed: DtypedBuf::zeros(stream, batch * ng * ds, dtype)?,
+            b_rms: GpuBuffer::zeros(stream, batch * ng)?,
+            c_rms: GpuBuffer::zeros(stream, batch * ng)?,
+            b_biased: DtypedBuf::zeros(stream, batch * nh * ds, dtype)?,
+            c_biased: DtypedBuf::zeros(stream, batch * nh * ds, dtype)?,
+            k_cur: DtypedBuf::zeros(stream, batch * nh * ds, dtype)?,
+            q_cur: DtypedBuf::zeros(stream, batch * nh * ds, dtype)?,
+            dd_dt_raw: GpuBuffer::zeros(stream, batch * nh)?,
+            dd_a_raw: GpuBuffer::zeros(stream, batch * nh)?,
+            trap_raw: GpuBuffer::zeros(stream, batch * nh)?,
+            dt: GpuBuffer::zeros(stream, batch * nh)?,
+            a_val: GpuBuffer::zeros(stream, batch * nh)?,
+            trap: GpuBuffer::zeros(stream, batch * nh)?,
+            angles_raw: GpuBuffer::zeros(stream, batch * na)?,
+            angle_cumsum: GpuBuffer::zeros(stream, batch * nh * na)?,
+            alpha: GpuBuffer::zeros(stream, batch * nh)?,
+            beta: GpuBuffer::zeros(stream, batch * nh)?,
+            gamma: GpuBuffer::zeros(stream, batch * nh)?,
+            y: DtypedBuf::zeros(stream, batch * di, dtype)?,
+            gated: DtypedBuf::zeros(stream, batch * di, dtype)?,
+            post_norm: DtypedBuf::zeros(stream, batch * dm, dtype)?,
+            rms_buf: GpuBuffer::zeros(stream, batch)?,
+            gated_rms_buf: GpuBuffer::zeros(stream, batch * nh)?,
+            dtype,
+        })
+    }
+}
+
 /// Mamba-3 SISO GPU inference engine.
 ///
 /// Holds compiled kernels, weights (flat buffer), cuBLAS handle.
@@ -798,6 +904,573 @@ impl Mamba3GpuInferenceEngine {
 }
 
 // ═══════════════════════════════════════════════════════════════════
+// Mamba3GpuInferenceMixed — end-to-end bf16/f16 inference engine.
+//
+// Wraps the f32 engine (for ctx/kernels/cublas/cfg) plus mixed-dtype
+// weights. All activations run in bf16/f16 through the layer; recurrence
+// coefficients (dt/a_val/trap/alpha/beta/gamma), RoPE angles and the
+// residual stream stay f32 for numerical stability.
+// ═══════════════════════════════════════════════════════════════════
+
+use crate::mamba3_siso::gpu::weights::GpuMamba3MixedWeights;
+use crate::mamba_ssm::gpu::blas::{TypedPtr, gpu_gemm_typed_raw_no_bias};
+
+pub struct Mamba3GpuInferenceMixed {
+    engine: Mamba3GpuInferenceEngine, // owns ctx + kernels + blas + (unused f32 weights)
+    mixed_weights: GpuMamba3MixedWeights,
+    graph: Option<cudarc::driver::CudaGraph>,
+    captured_state_ptr: u64,
+    captured_scratch_ptr: u64,
+}
+
+impl Mamba3GpuInferenceMixed {
+    pub fn new(
+        device: &GpuDevice,
+        cpu_weights: &Mamba3Weights,
+        cfg: Mamba3Config,
+        input_dim: usize,
+        batch: usize,
+        bulk_dtype: WeightDtype,
+    ) -> Result<Self, String> {
+        cfg.validate();
+        // Reuse the f32 engine constructor to compile kernels + upload f32
+        // weights (needed because the mixed path still consumes f32 biases
+        // and per-head coefficients via the f32 engine's weight-agnostic
+        // pointer views).
+        let engine = Mamba3GpuInferenceEngine::new(device, cpu_weights, cfg, input_dim, batch)?;
+        let mixed_weights = GpuMamba3MixedWeights::from_cpu(&engine.stream, cpu_weights, bulk_dtype)?;
+        Ok(Self {
+            engine,
+            mixed_weights,
+            graph: None,
+            captured_state_ptr: 0,
+            captured_scratch_ptr: 0,
+        })
+    }
+
+    pub fn alloc_state(&self) -> Result<Mamba3GpuInferenceState, String> {
+        self.engine.alloc_state()
+    }
+
+    pub fn alloc_mixed_scratch(&self) -> Result<Mamba3GpuInferenceMixedScratch, String> {
+        Mamba3GpuInferenceMixedScratch::zeros(
+            &self.engine.stream,
+            self.engine.batch,
+            &self.engine.cfg,
+            self.engine.input_dim,
+            self.mixed_weights.bulk_dtype,
+        )
+    }
+
+    pub fn ctx_stream(&self) -> &Stream {
+        &self.engine.stream
+    }
+
+    pub fn bulk_dtype(&self) -> WeightDtype {
+        self.mixed_weights.bulk_dtype
+    }
+
+    pub fn engine_ref(&self) -> &Mamba3GpuInferenceEngine {
+        &self.engine
+    }
+
+    pub fn has_graph(&self) -> bool {
+        self.graph.is_some()
+    }
+
+    /// End-to-end bf16/f16 T=1 Mamba-3 pipeline.
+    ///
+    /// Requires identity_proj (LLM use case) — non-identity input projection
+    /// in mixed mode is not supported here because it would need a mixed-
+    /// dtype GEMM writing directly into the f32 residual buffer.
+    pub(super) fn step_kernels_mixed_native(
+        &self,
+        state: &mut Mamba3GpuInferenceState,
+        scratch: &mut Mamba3GpuInferenceMixedScratch,
+    ) -> Result<(), String> {
+        use crate::mamba_ssm::gpu::launch::grid_1d;
+        use cudarc::driver::PushKernelArg;
+
+        let engine = &self.engine;
+        assert!(
+            engine.identity_proj,
+            "Mamba3 step_kernels_mixed_native requires identity_proj=true (LLM path)"
+        );
+        assert_eq!(
+            scratch.dtype,
+            self.mixed_weights.bulk_dtype,
+            "Mamba3 mixed scratch dtype must match mixed weights bulk_dtype"
+        );
+        let dt = scratch.dtype;
+        let b = engine.batch;
+        let cfg = &engine.cfg;
+        let dm = cfg.d_model;
+        let di = cfg.d_inner();
+        let ds = cfg.d_state;
+        let nh = cfg.nheads();
+        let hd = cfg.headdim;
+        let ng = cfg.ngroups;
+        let ip = cfg.in_proj_out_dim();
+        let na = cfg.num_rope_angles();
+        let a_floor = cfg.a_floor;
+        let k = &engine.kernels;
+        let w = &self.mixed_weights;
+
+        let b_i = b as i32;
+        let dm_i = dm as i32;
+        let di_i = di as i32;
+        let ds_i = ds as i32;
+        let nh_i = nh as i32;
+        let hd_i = hd as i32;
+        let ng_i = ng as i32;
+        let na_i = na as i32;
+
+        // Seed f32 residual with f32 gpu_input (identity_proj).
+        scratch.residual.copy_from(&scratch.gpu_input, &engine.stream)?;
+
+        let f32_sz = std::mem::size_of::<f32>() as u64;
+
+        for layer_idx in 0..w.layers.len() {
+            let lw = &w.layers[layer_idx];
+            let ssm_off = layer_idx * state.ssm_per_layer();
+            let k_off = layer_idx * state.k_per_layer();
+            let v_off = layer_idx * state.v_per_layer();
+            let a_off = layer_idx * state.angle_per_layer();
+            let _ = f32_sz; // reserved for future offset math
+
+            // F1: rmsnorm f32in → half post_norm.
+            {
+                let eps: f32 = 1e-5;
+                let grid = crate::mamba_ssm::gpu::launch::grid_norm(b, dm);
+                let mut bld = engine
+                    .stream
+                    .launch_builder(k.rmsnorm_fwd_f32in_typed.get(dt));
+                let pn_ptr = scratch.post_norm.cached_ptr();
+                let rms_ptr = scratch.rms_buf.cached_ptr();
+                let res_ptr = scratch.residual.cached_ptr();
+                let nw = lw.norm_weight.ptr();
+                bld.arg(&pn_ptr);
+                bld.arg(&rms_ptr);
+                bld.arg(&res_ptr);
+                bld.arg(&nw);
+                bld.arg(&b_i);
+                bld.arg(&dm_i);
+                bld.arg(&eps);
+                unsafe { bld.launch(grid) }.map_err(|e| format!("M3 F1 rmsnorm: {e:?}"))?;
+            }
+
+            // F2: in_proj GEMM typed (bf16 × bf16 → bf16).
+            gpu_gemm_typed_raw_no_bias(
+                &engine.blas,
+                TypedPtr {
+                    ptr: scratch.proj.cached_ptr(),
+                    dtype: dt,
+                },
+                TypedPtr {
+                    ptr: scratch.post_norm.cached_ptr(),
+                    dtype: dt,
+                },
+                TypedPtr {
+                    ptr: lw.in_proj_w.ptr(),
+                    dtype: lw.in_proj_w.dtype(),
+                },
+                (b, dm, ip),
+            )?;
+
+            // F3: m3_split typed — splits bf16 proj, writes bf16 activations + f32 coefficients.
+            {
+                let n = b * ip;
+                let grid = grid_1d(n);
+                let mut bld = engine.stream.launch_builder(k.m3_split_typed.get(dt));
+                let z_ptr = scratch.z.cached_ptr();
+                let x_ptr = scratch.x.cached_ptr();
+                let br_ptr = scratch.b_raw.cached_ptr();
+                let cr_ptr = scratch.c_raw.cached_ptr();
+                let dt_ptr = scratch.dt.cached_ptr();
+                let av_ptr = scratch.a_val.cached_ptr();
+                let tp_ptr = scratch.trap.cached_ptr();
+                let ang_ptr = scratch.angles_raw.cached_ptr();
+                let dd_dt_ptr = scratch.dd_dt_raw.cached_ptr();
+                let dd_a_ptr = scratch.dd_a_raw.cached_ptr();
+                let tr_ptr = scratch.trap_raw.cached_ptr();
+                let proj_ptr = scratch.proj.cached_ptr();
+                let dtb_ptr = lw.dt_bias.ptr();
+                bld.arg(&z_ptr);
+                bld.arg(&x_ptr);
+                bld.arg(&br_ptr);
+                bld.arg(&cr_ptr);
+                bld.arg(&dt_ptr);
+                bld.arg(&av_ptr);
+                bld.arg(&tp_ptr);
+                bld.arg(&ang_ptr);
+                bld.arg(&dd_dt_ptr);
+                bld.arg(&dd_a_ptr);
+                bld.arg(&tr_ptr);
+                bld.arg(&proj_ptr);
+                bld.arg(&dtb_ptr);
+                bld.arg(&a_floor);
+                bld.arg(&b_i);
+                bld.arg(&di_i);
+                bld.arg(&ng_i);
+                bld.arg(&ds_i);
+                bld.arg(&nh_i);
+                bld.arg(&na_i);
+                unsafe { bld.launch(grid) }.map_err(|e| format!("M3 F3 split: {e:?}"))?;
+            }
+
+            // F4a: bcnorm typed × 2.
+            for (which, src_ptr, dst_ptr, rms_ptr, nw_ptr) in [
+                (
+                    "B",
+                    scratch.b_raw.cached_ptr(),
+                    scratch.b_normed.cached_ptr(),
+                    scratch.b_rms.cached_ptr(),
+                    lw.b_norm_weight.ptr(),
+                ),
+                (
+                    "C",
+                    scratch.c_raw.cached_ptr(),
+                    scratch.c_normed.cached_ptr(),
+                    scratch.c_rms.cached_ptr(),
+                    lw.c_norm_weight.ptr(),
+                ),
+            ] {
+                let grid = cudarc::driver::LaunchConfig {
+                    grid_dim: ((b * ng) as u32, 1, 1),
+                    block_dim: (ds as u32, 1, 1),
+                    shared_mem_bytes: (ds * 4) as u32,
+                };
+                let mut bld = engine.stream.launch_builder(k.bcnorm_fwd_typed.get(dt));
+                bld.arg(&dst_ptr);
+                bld.arg(&rms_ptr);
+                bld.arg(&src_ptr);
+                bld.arg(&nw_ptr);
+                bld.arg(&b_i);
+                bld.arg(&ng_i);
+                bld.arg(&ds_i);
+                unsafe { bld.launch(grid) }
+                    .map_err(|e| format!("M3 F4a bcnorm {which}: {e:?}"))?;
+            }
+
+            // F4b: bc_bias_add typed × 2.
+            for (which, src_ptr, dst_ptr, bias_ptr) in [
+                (
+                    "B",
+                    scratch.b_normed.cached_ptr(),
+                    scratch.b_biased.cached_ptr(),
+                    lw.b_bias.ptr(),
+                ),
+                (
+                    "C",
+                    scratch.c_normed.cached_ptr(),
+                    scratch.c_biased.cached_ptr(),
+                    lw.c_bias.ptr(),
+                ),
+            ] {
+                let n = b * nh * ds;
+                let grid = grid_1d(n);
+                let mut bld = engine.stream.launch_builder(k.bc_bias_add_typed.get(dt));
+                bld.arg(&dst_ptr);
+                bld.arg(&src_ptr);
+                bld.arg(&bias_ptr);
+                bld.arg(&b_i);
+                bld.arg(&nh_i);
+                bld.arg(&ng_i);
+                bld.arg(&ds_i);
+                unsafe { bld.launch(grid) }
+                    .map_err(|e| format!("M3 F4b bias {which}: {e:?}"))?;
+            }
+
+            // F4c: Angle accumulation + RoPE.
+            if na > 0 {
+                // angle_dt stays f32 (angles_raw f32 + dt f32, f64 accumulator internally).
+                let grid = cudarc::driver::LaunchConfig {
+                    grid_dim: (b as u32, ((nh * na).div_ceil(256)) as u32, 1),
+                    block_dim: (256.min((nh * na) as u32), 1, 1),
+                    shared_mem_bytes: 0,
+                };
+                let a_ptr = state.angle_state.inner_at(a_off);
+                let mut bld = engine.stream.launch_builder(&k.m3_angle_dt_fwd_batch);
+                bld.arg(scratch.angle_cumsum.inner());
+                bld.arg(&a_ptr);
+                bld.arg(scratch.angles_raw.inner());
+                bld.arg(scratch.dt.inner());
+                bld.arg(&b_i);
+                bld.arg(&nh_i);
+                bld.arg(&na_i);
+                unsafe { bld.launch(grid) }
+                    .map_err(|e| format!("M3 F4c angle_dt: {e:?}"))?;
+
+                // rope typed: half B/C, f32 angle_cumsum.
+                let n = b * nh * ds;
+                let grid = grid_1d(n);
+                let mut bld = engine.stream.launch_builder(k.rope_fwd_typed.get(dt));
+                let kc_ptr = scratch.k_cur.cached_ptr();
+                let qc_ptr = scratch.q_cur.cached_ptr();
+                let bb_ptr = scratch.b_biased.cached_ptr();
+                let cb_ptr = scratch.c_biased.cached_ptr();
+                let ac_ptr = scratch.angle_cumsum.cached_ptr();
+                bld.arg(&kc_ptr);
+                bld.arg(&qc_ptr);
+                bld.arg(&bb_ptr);
+                bld.arg(&cb_ptr);
+                bld.arg(&ac_ptr);
+                bld.arg(&b_i);
+                bld.arg(&nh_i);
+                bld.arg(&ds_i);
+                bld.arg(&na_i);
+                unsafe { bld.launch(grid) }.map_err(|e| format!("M3 F4c rope: {e:?}"))?;
+            } else {
+                // No RoPE: copy B_biased → k_cur and C_biased → q_cur (same dtype, bytes copy).
+                let bytes = b * nh * ds * dt.size_bytes();
+                unsafe {
+                    cudarc::driver::sys::cuMemcpyDtoDAsync_v2(
+                        scratch.k_cur.cached_ptr(),
+                        scratch.b_biased.cached_ptr(),
+                        bytes,
+                        engine.stream.cu_stream(),
+                    );
+                    cudarc::driver::sys::cuMemcpyDtoDAsync_v2(
+                        scratch.q_cur.cached_ptr(),
+                        scratch.c_biased.cached_ptr(),
+                        bytes,
+                        engine.stream.cu_stream(),
+                    );
+                }
+            }
+
+            // F5: m3_compute_abg — stays f32 (pure coefficient kernel).
+            {
+                let n = b * nh;
+                let n_i = n as i32;
+                let grid = grid_1d(n);
+                let mut bld = engine.stream.launch_builder(&k.m3_compute_abg);
+                bld.arg(scratch.alpha.inner());
+                bld.arg(scratch.beta.inner());
+                bld.arg(scratch.gamma.inner());
+                bld.arg(scratch.dt.inner());
+                bld.arg(scratch.a_val.inner());
+                bld.arg(scratch.trap.inner());
+                bld.arg(&n_i);
+                unsafe { bld.launch(grid) }
+                    .map_err(|e| format!("M3 F5 compute_abg: {e:?}"))?;
+            }
+
+            // F6: m3_step_fwd typed — f32 state, bf16 x/k_cur/q_cur/y, f32 α/β/γ/D.
+            {
+                let grid = cudarc::driver::LaunchConfig {
+                    grid_dim: (b as u32, nh as u32, 1),
+                    block_dim: (hd as u32, 1, 1),
+                    shared_mem_bytes: 0,
+                };
+                let ssm_ptr = state.ssm_state.inner_at(ssm_off);
+                let kst_ptr = state.k_state.inner_at(k_off);
+                let vst_ptr = state.v_state.inner_at(v_off);
+                let mut bld = engine.stream.launch_builder(k.m3_step_fwd_typed.get(dt));
+                let y_ptr = scratch.y.cached_ptr();
+                let x_ptr = scratch.x.cached_ptr();
+                let kc_ptr = scratch.k_cur.cached_ptr();
+                let qc_ptr = scratch.q_cur.cached_ptr();
+                bld.arg(&ssm_ptr);
+                bld.arg(&kst_ptr);
+                bld.arg(&vst_ptr);
+                bld.arg(&y_ptr);
+                bld.arg(&x_ptr);
+                bld.arg(&kc_ptr);
+                bld.arg(&qc_ptr);
+                let alpha_ptr = scratch.alpha.cached_ptr();
+                let beta_ptr = scratch.beta.cached_ptr();
+                let gamma_ptr = scratch.gamma.cached_ptr();
+                let dp_ptr = lw.d_param.ptr();
+                bld.arg(&alpha_ptr);
+                bld.arg(&beta_ptr);
+                bld.arg(&gamma_ptr);
+                bld.arg(&dp_ptr);
+                bld.arg(&b_i);
+                bld.arg(&nh_i);
+                bld.arg(&hd_i);
+                bld.arg(&ds_i);
+                unsafe { bld.launch(grid) }
+                    .map_err(|e| format!("M3 F6 step_fwd: {e:?}"))?;
+            }
+
+            // F7: output gating (typed).
+            if cfg.is_outproj_norm {
+                let grid = crate::mamba_ssm::gpu::launch::grid_norm(b, di);
+                let mut bld = engine
+                    .stream
+                    .launch_builder(k.rmsnorm_gated_fwd_typed.get(dt));
+                let gated_ptr = scratch.gated.cached_ptr();
+                let gr_ptr = scratch.gated_rms_buf.cached_ptr();
+                let y_ptr = scratch.y.cached_ptr();
+                let z_ptr = scratch.z.cached_ptr();
+                let nw_ptr = lw.norm_gate_weight.ptr();
+                bld.arg(&gated_ptr);
+                bld.arg(&gr_ptr);
+                bld.arg(&y_ptr);
+                bld.arg(&z_ptr);
+                bld.arg(&nw_ptr);
+                bld.arg(&b_i);
+                bld.arg(&di_i);
+                bld.arg(&hd_i);
+                unsafe { bld.launch(grid) }
+                    .map_err(|e| format!("M3 F7 rmsnorm_gated: {e:?}"))?;
+            } else {
+                let n = b * di;
+                let n_i = n as i32;
+                let grid = grid_1d(n);
+                let mut bld = engine.stream.launch_builder(k.silu_gate_fwd_typed.get(dt));
+                let gated_ptr = scratch.gated.cached_ptr();
+                let y_ptr = scratch.y.cached_ptr();
+                let z_ptr = scratch.z.cached_ptr();
+                bld.arg(&gated_ptr);
+                bld.arg(&y_ptr);
+                bld.arg(&z_ptr);
+                bld.arg(&n_i);
+                unsafe { bld.launch(grid) }.map_err(|e| format!("M3 F7 silu_gate: {e:?}"))?;
+            }
+
+            // F8: out_proj GEMM typed.
+            gpu_gemm_typed_raw_no_bias(
+                &engine.blas,
+                TypedPtr {
+                    ptr: scratch.temporal.cached_ptr(),
+                    dtype: dt,
+                },
+                TypedPtr {
+                    ptr: scratch.gated.cached_ptr(),
+                    dtype: dt,
+                },
+                TypedPtr {
+                    ptr: lw.out_proj_w.ptr(),
+                    dtype: lw.out_proj_w.dtype(),
+                },
+                (b, di, dm),
+            )?;
+
+            // F9: residual_add_f32_typed — residual (f32) += temporal (half), stays f32.
+            {
+                let n = (b * dm) as i32;
+                let grid = grid_1d(b * dm);
+                let mut bld = engine.stream.launch_builder(k.residual_add_f32_typed.get(dt));
+                let r_ptr = scratch.residual.cached_ptr();
+                let t_ptr = scratch.temporal.cached_ptr();
+                bld.arg(&r_ptr);
+                bld.arg(&r_ptr);
+                bld.arg(&t_ptr);
+                bld.arg(&n);
+                unsafe { bld.launch(grid) }
+                    .map_err(|e| format!("M3 F9 residual_add_f32: {e:?}"))?;
+            }
+        }
+
+        // Final norm_f: residual_f32 → temporal (half).
+        {
+            let grid = crate::mamba_ssm::gpu::launch::grid_norm(b, dm);
+            let eps: f32 = 1e-5;
+            let mut bld = engine
+                .stream
+                .launch_builder(k.rmsnorm_fwd_f32in_typed.get(dt));
+            let t_ptr = scratch.temporal.cached_ptr();
+            let rms_ptr = scratch.rms_buf.cached_ptr();
+            let res_ptr = scratch.residual.cached_ptr();
+            let nfw = w.norm_f_weight.ptr();
+            bld.arg(&t_ptr);
+            bld.arg(&rms_ptr);
+            bld.arg(&res_ptr);
+            bld.arg(&nfw);
+            bld.arg(&b_i);
+            bld.arg(&dm_i);
+            bld.arg(&eps);
+            unsafe { bld.launch(grid) }.map_err(|e| format!("M3 norm_f: {e:?}"))?;
+        }
+
+        Ok(())
+    }
+
+    pub fn step_mixed_native(
+        &self,
+        input: &[f32],
+        output: &mut [f32],
+        state: &mut Mamba3GpuInferenceState,
+        scratch: &mut Mamba3GpuInferenceMixedScratch,
+    ) -> Result<(), String> {
+        scratch.gpu_input.upload(&self.engine.stream, input)?;
+        if let Some(ref g) = self.graph {
+            assert_eq!(state.ssm_state.cached_ptr(), self.captured_state_ptr);
+            assert_eq!(scratch.gpu_input.cached_ptr(), self.captured_scratch_ptr);
+            g.launch()
+                .map_err(|e| format!("M3 graph launch mixed: {e:?}"))?;
+        } else {
+            self.step_kernels_mixed_native(state, scratch)?;
+        }
+        self.engine
+            .stream
+            .synchronize()
+            .map_err(|e| format!("M3 sync: {e:?}"))?;
+        scratch
+            .temporal
+            .download_f32(&self.engine.stream, output)?;
+        Ok(())
+    }
+
+    pub fn step_gpu_only_mixed_native(
+        &self,
+        input: &[f32],
+        state: &mut Mamba3GpuInferenceState,
+        scratch: &mut Mamba3GpuInferenceMixedScratch,
+    ) -> Result<(), String> {
+        scratch.gpu_input.upload(&self.engine.stream, input)?;
+        if let Some(ref g) = self.graph {
+            assert_eq!(state.ssm_state.cached_ptr(), self.captured_state_ptr);
+            assert_eq!(scratch.gpu_input.cached_ptr(), self.captured_scratch_ptr);
+            g.launch()
+                .map_err(|e| format!("M3 graph launch mixed: {e:?}"))?;
+            Ok(())
+        } else {
+            self.step_kernels_mixed_native(state, scratch)
+        }
+    }
+
+    pub fn capture_graph_mixed_native(
+        &mut self,
+        state: &mut Mamba3GpuInferenceState,
+        scratch: &mut Mamba3GpuInferenceMixedScratch,
+    ) -> Result<(), String> {
+        self.engine
+            .stream
+            .synchronize()
+            .map_err(|e| format!("M3 pre-capture sync: {e:?}"))?;
+        self.engine
+            .stream
+            .begin_capture(
+                cudarc::driver::sys::CUstreamCaptureMode::CU_STREAM_CAPTURE_MODE_THREAD_LOCAL,
+            )
+            .map_err(|e| format!("M3 begin_capture mixed: {e:?}"))?;
+        let captured_state_ptr = state.ssm_state.cached_ptr();
+        let captured_scratch_ptr = scratch.gpu_input.cached_ptr();
+        if let Err(e) = self.step_kernels_mixed_native(state, scratch) {
+            let _ = self.engine.stream.end_capture(
+                cudarc::driver::sys::CUgraphInstantiate_flags::CUDA_GRAPH_INSTANTIATE_FLAG_AUTO_FREE_ON_LAUNCH,
+            );
+            return Err(format!("M3 capture body mixed failed: {e}"));
+        }
+        let graph = self
+            .engine
+            .stream
+            .end_capture(
+                cudarc::driver::sys::CUgraphInstantiate_flags::CUDA_GRAPH_INSTANTIATE_FLAG_AUTO_FREE_ON_LAUNCH,
+            )
+            .map_err(|e| format!("M3 end_capture mixed: {e:?}"))?
+            .ok_or("M3: no graph captured (mixed)")?;
+        self.graph = Some(graph);
+        self.captured_state_ptr = captured_state_ptr;
+        self.captured_scratch_ptr = captured_scratch_ptr;
+        Ok(())
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════
 // GpuMamba3Backbone — high-level wrapper (owns engine + state + scratch)
 // ═══════════════════════════════════════════════════════════════════
 
@@ -805,14 +1478,41 @@ impl Mamba3GpuInferenceEngine {
 ///
 /// Guarantees the same buffers are used during capture and replay.
 /// Simple API: `new()` → `step()` → `capture_graph()` → `reset()`.
+enum M3BackboneEngine {
+    F32(Box<Mamba3GpuInferenceEngine>),
+    Mixed(Box<Mamba3GpuInferenceMixed>),
+}
+
+enum M3BackboneScratch {
+    F32(Mamba3GpuInferenceScratch),
+    Mixed(Mamba3GpuInferenceMixedScratch),
+}
+
+impl M3BackboneScratch {
+    fn temporal_ptr(&self) -> cudarc::driver::sys::CUdeviceptr {
+        match self {
+            M3BackboneScratch::F32(s) => s.temporal.cached_ptr(),
+            M3BackboneScratch::Mixed(s) => s.temporal.cached_ptr(),
+        }
+    }
+
+    fn temporal_dtype(&self) -> WeightDtype {
+        match self {
+            M3BackboneScratch::F32(_) => WeightDtype::F32,
+            M3BackboneScratch::Mixed(s) => s.dtype,
+        }
+    }
+}
+
+/// High-level Mamba-3 GPU backbone — unified API over f32 / bf16 / f16 storage.
 pub struct GpuMamba3Backbone {
-    engine: Mamba3GpuInferenceEngine,
+    engine: M3BackboneEngine,
     state: Mamba3GpuInferenceState,
-    scratch: Mamba3GpuInferenceScratch,
+    scratch: M3BackboneScratch,
 }
 
 impl GpuMamba3Backbone {
-    /// Create a GPU backbone from CPU weights.
+    /// Create an f32 GPU backbone (equivalent to `new_with_dtype(F32)`).
     pub fn new(
         gpu_ordinal: usize,
         cpu_weights: &Mamba3Weights,
@@ -820,10 +1520,43 @@ impl GpuMamba3Backbone {
         input_dim: usize,
         batch: usize,
     ) -> Result<Self, String> {
+        Self::new_with_dtype(
+            gpu_ordinal,
+            cpu_weights,
+            cfg,
+            input_dim,
+            batch,
+            WeightDtype::F32,
+        )
+    }
+
+    /// Create a Mamba-3 GPU backbone with explicit storage dtype.
+    pub fn new_with_dtype(
+        gpu_ordinal: usize,
+        cpu_weights: &Mamba3Weights,
+        cfg: Mamba3Config,
+        input_dim: usize,
+        batch: usize,
+        dtype: WeightDtype,
+    ) -> Result<Self, String> {
         let device = GpuDevice::new(gpu_ordinal)?;
-        let engine = Mamba3GpuInferenceEngine::new(&device, cpu_weights, cfg, input_dim, batch)?;
-        let state = engine.alloc_state()?;
-        let scratch = engine.alloc_scratch()?;
+        let (engine, state, scratch) = match dtype {
+            WeightDtype::F32 => {
+                let e =
+                    Mamba3GpuInferenceEngine::new(&device, cpu_weights, cfg, input_dim, batch)?;
+                let s = e.alloc_state()?;
+                let sc = M3BackboneScratch::F32(e.alloc_scratch()?);
+                (M3BackboneEngine::F32(Box::new(e)), s, sc)
+            }
+            WeightDtype::Bf16 | WeightDtype::F16 => {
+                let e = Mamba3GpuInferenceMixed::new(
+                    &device, cpu_weights, cfg, input_dim, batch, dtype,
+                )?;
+                let s = e.alloc_state()?;
+                let sc = M3BackboneScratch::Mixed(e.alloc_mixed_scratch()?);
+                (M3BackboneEngine::Mixed(Box::new(e)), s, sc)
+            }
+        };
         Ok(Self {
             engine,
             state,
@@ -831,41 +1564,104 @@ impl GpuMamba3Backbone {
         })
     }
 
-    /// Run one inference step.
+    pub fn dtype(&self) -> WeightDtype {
+        match &self.engine {
+            M3BackboneEngine::F32(_) => WeightDtype::F32,
+            M3BackboneEngine::Mixed(e) => e.bulk_dtype(),
+        }
+    }
+
+    pub fn temporal_ptr(&self) -> cudarc::driver::sys::CUdeviceptr {
+        self.scratch.temporal_ptr()
+    }
+
+    pub fn temporal_dtype(&self) -> WeightDtype {
+        self.scratch.temporal_dtype()
+    }
+
     pub fn step(&mut self, input: &[f32], output: &mut [f32]) -> Result<(), String> {
-        self.engine
-            .step(input, output, &mut self.state, &mut self.scratch)
+        match (&self.engine, &mut self.scratch) {
+            (M3BackboneEngine::F32(e), M3BackboneScratch::F32(sc)) => {
+                e.step(input, output, &mut self.state, sc)
+            }
+            (M3BackboneEngine::Mixed(e), M3BackboneScratch::Mixed(sc)) => {
+                e.step_mixed_native(input, output, &mut self.state, sc)
+            }
+            _ => Err("M3 engine/scratch dtype mismatch (internal invariant)".to_string()),
+        }
     }
 
-    /// Reset recurrent state (episode boundary).
+    pub fn step_gpu_only(&mut self, input: &[f32]) -> Result<(), String> {
+        match (&self.engine, &mut self.scratch) {
+            (M3BackboneEngine::F32(e), M3BackboneScratch::F32(sc)) => {
+                // f32 engine has no step_gpu_only yet — run full step but ignore output download.
+                // For now, call the full step and discard output.
+                let mut scratch_out = vec![0.0f32; e.batch * e.cfg.d_model];
+                e.step(input, &mut scratch_out, &mut self.state, sc)
+            }
+            (M3BackboneEngine::Mixed(e), M3BackboneScratch::Mixed(sc)) => {
+                e.step_gpu_only_mixed_native(input, &mut self.state, sc)
+            }
+            _ => Err("M3 engine/scratch dtype mismatch".to_string()),
+        }
+    }
+
     pub fn reset(&mut self) -> Result<(), String> {
-        self.state.reset(&self.engine.stream)
+        let stream = match &self.engine {
+            M3BackboneEngine::F32(e) => e.stream.clone(),
+            M3BackboneEngine::Mixed(e) => e.ctx_stream().clone(),
+        };
+        self.state.reset(&stream)
     }
 
-    /// Capture CUDA Graph for faster inference.
-    /// Runs one warmup step, resets state, then captures.
     pub fn capture_graph(&mut self) -> Result<(), String> {
-        let input = vec![0.0f32; self.engine.batch * self.engine.input_dim];
-        let mut output = vec![0.0f32; self.engine.batch * self.engine.cfg.d_model];
-        self.engine
-            .step(&input, &mut output, &mut self.state, &mut self.scratch)?;
-        self.state.reset(&self.engine.stream)?;
-        self.engine
-            .capture_graph(&mut self.state, &mut self.scratch)
+        let (input_dim, batch, d_model) = match &self.engine {
+            M3BackboneEngine::F32(e) => (e.input_dim, e.batch, e.cfg.d_model),
+            M3BackboneEngine::Mixed(e) => {
+                let er = e.engine_ref();
+                (er.input_dim, er.batch, er.cfg.d_model)
+            }
+        };
+        let input = vec![0.0f32; batch * input_dim];
+        let mut output = vec![0.0f32; batch * d_model];
+        self.step(&input, &mut output)?;
+        self.reset()?;
+        match (&mut self.engine, &mut self.scratch) {
+            (M3BackboneEngine::F32(e), M3BackboneScratch::F32(sc)) => {
+                e.capture_graph(&mut self.state, sc)
+            }
+            (M3BackboneEngine::Mixed(e), M3BackboneScratch::Mixed(sc)) => {
+                e.capture_graph_mixed_native(&mut self.state, sc)
+            }
+            _ => Err("M3 engine/scratch dtype mismatch".to_string()),
+        }
     }
 
-    /// Config reference.
     pub fn config(&self) -> &Mamba3Config {
-        &self.engine.cfg
+        match &self.engine {
+            M3BackboneEngine::F32(e) => &e.cfg,
+            M3BackboneEngine::Mixed(e) => &e.engine_ref().cfg,
+        }
     }
 
-    /// Batch size.
     pub fn batch(&self) -> usize {
-        self.engine.batch
+        match &self.engine {
+            M3BackboneEngine::F32(e) => e.batch,
+            M3BackboneEngine::Mixed(e) => e.engine_ref().batch,
+        }
     }
 
-    /// Whether CUDA Graph is captured.
     pub fn has_graph(&self) -> bool {
-        self.engine.has_graph()
+        match &self.engine {
+            M3BackboneEngine::F32(e) => e.has_graph(),
+            M3BackboneEngine::Mixed(e) => e.has_graph(),
+        }
+    }
+
+    pub fn stream(&self) -> &Stream {
+        match &self.engine {
+            M3BackboneEngine::F32(e) => &e.stream,
+            M3BackboneEngine::Mixed(e) => e.ctx_stream(),
+        }
     }
 }

@@ -3,6 +3,7 @@
 //! 47 kernels across 5 .cu files, compiled via NVRTC at runtime.
 //! Separate from Mamba-1's `MambaKernels` — different pipeline, no conv1d.
 
+use crate::mamba_ssm::gpu::kernels::{HalfKernel, TypedKernel};
 use cudarc::driver::{CudaContext, CudaFunction, CudaModule};
 use std::sync::Arc;
 
@@ -64,12 +65,38 @@ pub struct Mamba3Kernels {
     pub m3_dqktheta: CudaFunction,
     pub m3_ddt_dtrap: CudaFunction,
     pub m3_final_grads: CudaFunction,
+
+    // ── Typed variants for end-to-end bf16/f16 inference ──
+    /// 8-way split + fused softplus/sigmoid, bf16/f16 proj and activation outputs.
+    /// Coefficient outputs (dt, a_val, trap, angles, raw saves) stay f32.
+    pub m3_split_typed: TypedKernel,
+    /// RMSNorm on B/C per group, half I/O, f32 rms_val and weight.
+    pub bcnorm_fwd_typed: TypedKernel,
+    /// Per-head bias add, half I/O, f32 bias.
+    pub bc_bias_add_typed: TypedKernel,
+    /// RoPE rotation, half B/C, f32 angle_cumsum.
+    pub rope_fwd_typed: TypedKernel,
+    /// Plain SiLU gate (no norm), half I/O.
+    pub silu_gate_fwd_typed: TypedKernel,
+    /// RMSNorm-gated output (half I/O, f32 weight/rms_vals).
+    pub rmsnorm_gated_fwd_typed: TypedKernel,
+    /// M3 SSM step — shared with training, already templated in mamba3_ssd.cu.
+    pub m3_step_fwd_typed: TypedKernel,
+    /// Shared from M1: f32 residual → half post-norm (identical kernel, reused).
+    pub rmsnorm_fwd_f32in_typed: HalfKernel,
+    /// Shared from M1: f32 residual += half branch (stays f32).
+    pub residual_add_f32_typed: HalfKernel,
+    /// Shared from M1: gather last timestep of B×T×D into B×D, dtype-preserving.
+    pub gather_last_timestep_typed: TypedKernel,
 }
 
 impl Mamba3Kernels {
     /// Compile all 47 Mamba-3 CUDA kernels from source. Takes ~100-200ms.
     pub fn compile(ctx: &Arc<CudaContext>, arch: &'static str) -> Result<Self, String> {
         let sources = [
+            // Inline the prelude first so each source file's
+            // `#include "_typed_prelude.cuh"` can be safely stripped below.
+            include_str!("../../../kernels/_typed_prelude.cuh"),
             include_str!("../../../kernels/mamba3_ssd.cu"),
             include_str!("../../../kernels/mamba3_ops.cu"),
             include_str!("../../../kernels/mamba3_chunked.cu"),
@@ -78,13 +105,23 @@ impl Mamba3Kernels {
             include_str!("../../../kernels/elementwise.cu"),
         ];
 
-        let combined = sources.join("\n");
+        let combined: String = sources
+            .iter()
+            .map(|s| {
+                s.lines()
+                    .filter(|l| !l.trim().starts_with("#include \"_typed_prelude.cuh\""))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
         let opts = cudarc::nvrtc::CompileOptions {
             arch: Some(arch),
             options: vec![
                 "--fmad=true".to_string(),
                 "--extra-device-vectorization".to_string(),
             ],
+            include_paths: crate::mamba_ssm::gpu::kernels::cuda_include_paths(),
             ..Default::default()
         };
 
@@ -156,6 +193,56 @@ impl Mamba3Kernels {
             m3_dqktheta: get("m3_dqktheta")?,
             m3_ddt_dtrap: get("m3_ddt_dtrap")?,
             m3_final_grads: get("m3_final_grads")?,
+
+            // Typed variants for mixed-dtype inference
+            m3_split_typed: TypedKernel {
+                f32: get("m3_split")?,
+                bf16: get("m3_split_bf16")?,
+                f16: get("m3_split_f16")?,
+            },
+            bcnorm_fwd_typed: TypedKernel {
+                f32: get("bcnorm_fwd")?,
+                bf16: get("bcnorm_fwd_bf16")?,
+                f16: get("bcnorm_fwd_f16")?,
+            },
+            bc_bias_add_typed: TypedKernel {
+                f32: get("bc_bias_add")?,
+                bf16: get("bc_bias_add_bf16")?,
+                f16: get("bc_bias_add_f16")?,
+            },
+            rope_fwd_typed: TypedKernel {
+                f32: get("rope_fwd")?,
+                bf16: get("rope_fwd_bf16")?,
+                f16: get("rope_fwd_f16")?,
+            },
+            silu_gate_fwd_typed: TypedKernel {
+                f32: get("silu_gate_fwd")?,
+                bf16: get("silu_gate_fwd_bf16")?,
+                f16: get("silu_gate_fwd_f16")?,
+            },
+            rmsnorm_gated_fwd_typed: TypedKernel {
+                f32: get("rmsnorm_gated_forward")?,
+                bf16: get("rmsnorm_gated_forward_bf16")?,
+                f16: get("rmsnorm_gated_forward_f16")?,
+            },
+            m3_step_fwd_typed: TypedKernel {
+                f32: get("m3_step_fwd")?,
+                bf16: get("m3_step_fwd_bf16")?,
+                f16: get("m3_step_fwd_f16")?,
+            },
+            rmsnorm_fwd_f32in_typed: HalfKernel {
+                bf16: get("rmsnorm_forward_f32in_bf16")?,
+                f16: get("rmsnorm_forward_f32in_f16")?,
+            },
+            residual_add_f32_typed: HalfKernel {
+                bf16: get("residual_add_f32_bf16")?,
+                f16: get("residual_add_f32_f16")?,
+            },
+            gather_last_timestep_typed: TypedKernel {
+                f32: get("gather_last_timestep_f32")?,
+                bf16: get("gather_last_timestep_bf16")?,
+                f16: get("gather_last_timestep_f16")?,
+            },
 
             _module: module,
         })

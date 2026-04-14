@@ -382,6 +382,46 @@ pub fn gpu_gemm_ex_forward_raw(
 ///
 /// Used for end-to-end bf16/f16 activation paths where GEMM writes
 /// directly to half-precision output without a staging f32 copy.
+/// No-context twin of `gpu_gemm_typed_forward_raw` for callers that don't
+/// hold a `GpuCtx` (e.g., the Mamba-3 engine has its own blas/kernels and
+/// never passes a bias through this helper). Takes only the cuBLAS handle.
+pub fn gpu_gemm_typed_raw_no_bias(
+    blas: &cudarc::cublas::CudaBlas,
+    c: TypedPtr,
+    x: TypedPtr,
+    w: TypedPtr,
+    dims: (usize, usize, usize),
+) -> Result<(), String> {
+    let (batch, n_in, n_out) = dims;
+    let alpha: f32 = 1.0;
+    let beta: f32 = 0.0;
+    unsafe {
+        cudarc::cublas::result::gemm_ex(
+            *blas.handle(),
+            cudarc::cublas::sys::cublasOperation_t::CUBLAS_OP_N,
+            cudarc::cublas::sys::cublasOperation_t::CUBLAS_OP_N,
+            n_out as c_int,
+            batch as c_int,
+            n_in as c_int,
+            &alpha as *const f32 as *const c_void,
+            w.ptr as *const c_void,
+            w.dtype.cuda_data_type(),
+            n_out as c_int,
+            x.ptr as *const c_void,
+            x.dtype.cuda_data_type(),
+            n_in as c_int,
+            &beta as *const f32 as *const c_void,
+            c.ptr as *mut c_void,
+            c.dtype.cuda_data_type(),
+            n_out as c_int,
+            w.dtype.compute_type(),
+            cudarc::cublas::sys::cublasGemmAlgo_t::CUBLAS_GEMM_DEFAULT,
+        )
+        .map_err(|e| format!("cuBLAS gemm_ex typed (no-bias) failed: {e:?}"))?;
+    }
+    Ok(())
+}
+
 pub fn gpu_gemm_typed_forward_raw(
     ctx: &GpuCtx,
     c: TypedPtr,

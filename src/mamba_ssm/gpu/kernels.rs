@@ -311,7 +311,7 @@ impl MambaKernels {
 
 /// Discover CUDA include directory (for cuda_fp16.h, cuda_bf16.h).
 /// Checks CUDA_HOME, CUDA_PATH, CUDA_ROOT, then standard install paths.
-fn cuda_include_paths() -> Vec<String> {
+pub(crate) fn cuda_include_paths() -> Vec<String> {
     let mut candidates: Vec<String> = Vec::new();
     for var in ["CUDA_HOME", "CUDA_PATH", "CUDA_ROOT"] {
         if let Ok(p) = std::env::var(var) {
