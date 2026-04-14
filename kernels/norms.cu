@@ -55,6 +55,10 @@ extern "C" __global__ void rmsnorm_forward(
     __syncthreads();
 
     float rms = sqrtf(sdata[0] / (float)dim + eps);
+    // Finite-guard: match the typed DEFINE_RMSNORM_FWD variants. Without it,
+    // a NaN/Inf anywhere in x produces inv_rms = NaN and contaminates every
+    // downstream layer. In f32 training this matters when loss diverges.
+    if (!isfinite(rms) || rms < 1e-20f) rms = 1.0f;
     if (d == 0) {
         rms_out[b] = rms;
     }

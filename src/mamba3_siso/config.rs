@@ -108,7 +108,11 @@ impl Default for Mamba3Config {
             ngroups: 1,
             n_layers: 4,
             rope_fraction: 0.5,
-            a_floor: 0.0625,
+            // state-spaces/mamba mamba3.py default: A_floor=1e-4. Earlier
+            // mamba-rs used 0.0625 (≈625× stronger clamp) which forced much
+            // faster state decay than reference. Switched to 1e-4 for training
+            // parity with upstream.
+            a_floor: 1e-4,
             is_outproj_norm: false,
         }
     }

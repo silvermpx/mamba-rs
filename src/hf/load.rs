@@ -132,7 +132,7 @@ pub fn load_hf(dir: &Path) -> Result<HfModel, String> {
         .enumerate()
         .map(|(i, opt)| {
             opt.ok_or(format!("layer {i}: no weights found"))
-                .and_then(|a| a.into_layer_weights(&mamba_cfg))
+                .and_then(|a| a.into_layer_weights(&mamba_cfg, &hf_cfg))
         })
         .collect::<Result<Vec<_>, _>>()?;
 
@@ -227,7 +227,11 @@ impl LayerAccum {
             .ok_or_else(|| format!("missing field: {field}"))
     }
 
-    fn into_layer_weights(mut self, cfg: &MambaConfig) -> Result<MambaLayerWeights, String> {
+    fn into_layer_weights(
+        mut self,
+        cfg: &MambaConfig,
+        hf_cfg: &crate::hf::config_json::HfMambaConfig,
+    ) -> Result<MambaLayerWeights, String> {
         let d = cfg.d_model;
         let di = cfg.d_inner();
         let ds = cfg.d_state;
@@ -237,12 +241,32 @@ impl LayerAccum {
         // PyTorch nn.Linear(in, out) stores weight as [out, in] row-major.
         // Our BLAS convention: W is [n_in, n_out] row-major (y = x @ W).
         // All four linear weight matrices must be transposed from HF layout.
+        //
+        // `use_conv_bias=false` checkpoints omit `conv1d_bias` entirely;
+        // we synthesize a zero bias so the conv1d kernel (which always
+        // reads a `bias[di]` tensor) sees a no-op. Same for `use_bias=true`
+        // scenarios where the projection biases are present (we don't
+        // currently support those, but we warn loudly here rather than
+        // silently take the default zero-bias path).
+        let conv1d_bias = if hf_cfg.use_conv_bias {
+            self.take("conv1d_bias")?
+        } else {
+            vec![0.0f32; di]
+        };
+        if hf_cfg.use_bias {
+            return Err(
+                "HF config has use_bias=true (non-default) — projection biases \
+                 on in_proj / out_proj / x_proj / dt_proj are not wired into \
+                 mamba-rs inference kernels. Open an issue if you need this."
+                    .to_string(),
+            );
+        }
         Ok(MambaLayerWeights {
             norm_weight: self.take("norm_weight")?,
             // HF: [2*d_inner, d_model] -> need [d_model, 2*d_inner]
             in_proj_w: transpose_2d(self.take("in_proj_w")?, 2 * di, d),
             conv1d_weight: self.take("conv1d_weight")?,
-            conv1d_bias: self.take("conv1d_bias")?,
+            conv1d_bias,
             // HF: [xdbl_dim, d_inner] -> need [d_inner, xdbl_dim]
             x_proj_w: transpose_2d(self.take("x_proj_w")?, xd, di),
             // HF: [d_inner, dt_rank] -> need [dt_rank, d_inner]

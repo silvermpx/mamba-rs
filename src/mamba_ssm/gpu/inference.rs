@@ -1186,6 +1186,19 @@ impl GpuMambaInferenceMixed {
             // at 0/15 token match. Root cause was the missing RMSNorm
             // finite-guard (fixed in 2b0670d + e270d78). With that guard in
             // place, the fused gating is safe across all four HF model sizes.
+            //
+            // Hard guard: the fused kernel uses `float h_local[64]` +
+            // `float a_local[64]` on-register arrays and early-returns if
+            // `d_state > 64`, which would silently produce wrong output. All
+            // shipped state-spaces/mamba-*-hf checkpoints use d_state=16 and
+            // fit trivially; assert here so a user hand-authored config with
+            // d_state > 64 fails loudly rather than silently.
+            assert!(
+                ds <= 64,
+                "ssm_step_fwd_gather_gate_typed requires d_state <= 64 (got {ds}); \
+                 the fused kernel uses on-register arrays sized 64. For d_state > 64 \
+                 route through the unfused ssm_step_fwd_typed + elementwise_mul path."
+            );
             {
                 let b_i = b as i32;
                 let di_i = di as i32;

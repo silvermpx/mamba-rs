@@ -68,8 +68,12 @@ impl Xoshiro256PlusPlus {
 }
 
 /// Apply repetition penalty (CTRL paper, Keskar et al. 2019).
+///
+/// `penalty` must be strictly positive and not 1.0. Values ≤ 0 or NaN are
+/// ignored (treated as "disabled") to avoid producing `+Inf` logits via
+/// division by zero.
 pub fn apply_repetition_penalty(logits: &mut [f32], seen_tokens: &[u32], penalty: f32) {
-    if penalty == 1.0 {
+    if !(penalty > 0.0) || penalty == 1.0 {
         return;
     }
     for &tok in seen_tokens {
@@ -126,8 +130,13 @@ pub fn softmax_inplace(logits: &mut [f32]) {
 }
 
 /// Apply top-p (nucleus) filtering on probabilities (must be after softmax).
+///
+/// `p ≥ 1.0` or `p ≤ 0.0` (or NaN) disables filtering — the ≤ 0 case would
+/// otherwise silently collapse to a single-token distribution (whichever
+/// token sorted first by probability) which surprises callers expecting
+/// "disabled" behavior matching `top_k = 0`.
 pub fn apply_top_p(probs: &mut [f32], p: f32) {
-    if p >= 1.0 {
+    if !(p > 0.0) || p >= 1.0 {
         return;
     }
     let mut indexed: Vec<(usize, f32)> = probs.iter().copied().enumerate().collect();

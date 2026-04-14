@@ -183,27 +183,35 @@ impl MambaLM {
         let seq_len = prompt.len();
         let dm = self.d_model;
 
-        // Batch all prompt embeddings into one contiguous buffer
-        self.prefill_inputs.resize(seq_len * dm, 0.0);
-        self.prefill_outputs.resize(seq_len * dm, 0.0);
-        for (t, &token_id) in prompt.iter().enumerate() {
-            let emb = embed_lookup(&self.embed, token_id, dm, self.vocab_size);
-            self.prefill_inputs[t * dm..(t + 1) * dm].copy_from_slice(emb);
+        // Empty-prompt path: decode directly from zero state. The prefill path
+        // below assumes seq_len >= 1 (reads `prefill_outputs[seq_len - 1]`);
+        // for seq_len == 0 we skip it and start decoding with zero temporal.
+        if seq_len == 0 {
+            self.temporal.fill(0.0);
+            self.compute_logits();
+        } else {
+            // Batch all prompt embeddings into one contiguous buffer
+            self.prefill_inputs.resize(seq_len * dm, 0.0);
+            self.prefill_outputs.resize(seq_len * dm, 0.0);
+            for (t, &token_id) in prompt.iter().enumerate() {
+                let emb = embed_lookup(&self.embed, token_id, dm, self.vocab_size);
+                self.prefill_inputs[t * dm..(t + 1) * dm].copy_from_slice(emb);
+            }
+
+            // Process entire prompt in one forward_sequence call
+            self.backbone.forward_sequence(
+                &self.prefill_inputs[..seq_len * dm],
+                &mut self.prefill_outputs[..seq_len * dm],
+                &mut self.state,
+                &mut self.scratch,
+                seq_len,
+            );
+
+            // Last output → temporal for lm_head
+            self.temporal
+                .copy_from_slice(&self.prefill_outputs[(seq_len - 1) * dm..seq_len * dm]);
+            self.compute_logits();
         }
-
-        // Process entire prompt in one forward_sequence call
-        self.backbone.forward_sequence(
-            &self.prefill_inputs[..seq_len * dm],
-            &mut self.prefill_outputs[..seq_len * dm],
-            &mut self.state,
-            &mut self.scratch,
-            seq_len,
-        );
-
-        // Last output → temporal for lm_head
-        self.temporal
-            .copy_from_slice(&self.prefill_outputs[(seq_len - 1) * dm..seq_len * dm]);
-        self.compute_logits();
 
         let mut seen: Vec<u32> = prompt.to_vec();
         for _ in 0..params.max_tokens {

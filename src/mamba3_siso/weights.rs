@@ -94,13 +94,13 @@ impl Mamba3Weights {
                     dt_bias: vec![0.0; nh],
                     b_norm_weight: vec![1.0; ds],
                     c_norm_weight: vec![1.0; ds],
-                    // Reference `state-spaces/mamba/mamba3.py` initializes
-                    // B_bias / C_bias as `nn.Parameter(torch.zeros(...))`.
-                    // Additive bias at 1.0 would offset every B/C element by
-                    // +1 before RoPE, systematically biasing initial SSM
-                    // dynamics.
-                    b_bias: vec![0.0; nh * ds],
-                    c_bias: vec![0.0; nh * ds],
+                    // Reference `state-spaces/mamba/mamba_ssm/modules/mamba3.py`:
+                    //     self.B_bias = nn.Parameter(1 + torch.zeros(...))
+                    //     self.C_bias = nn.Parameter(1 + torch.zeros(...))
+                    // Init to ones (not zeros — a prior version's comment here
+                    // misread the reference as plain `zeros(...)`).
+                    b_bias: vec![1.0; nh * ds],
+                    c_bias: vec![1.0; nh * ds],
                     d_param: vec![1.0; nh],
                     norm_gate_weight: vec![1.0; di],
                     out_proj_w: vec![0.0; di * d],
@@ -115,7 +115,8 @@ impl Mamba3Weights {
     /// - Linear layers: Kaiming uniform (fan_in)
     /// - dt_bias: inverse softplus of log-uniform(0.001, 0.1)
     /// - D, norm weights: ones
-    /// - B/C biases: zeros (per state-spaces/mamba `mamba3.py` reference)
+    /// - B/C biases: ones (per state-spaces/mamba `mamba3.py`:
+    ///   `B_bias = 1 + torch.zeros(...)`, `C_bias = 1 + torch.zeros(...)`)
     pub fn init(cfg: &Mamba3Config, input_dim: usize, seed: u64) -> Self {
         cfg.validate();
         let mut w = Self::zeros(cfg, input_dim);
@@ -137,8 +138,9 @@ impl Mamba3Weights {
                 *b = inv_softplus(dt);
             }
 
-            // D=ones, norm_weight=ones, b/c_bias=ones, b/c_norm_weight=ones
-            // already set in zeros()
+            // D=ones, norm_weight=ones, b_bias=ones, c_bias=ones,
+            // b_norm_weight=ones, c_norm_weight=ones — all set by zeros()
+            // above (zeros() initializes these to 1.0 per reference).
         }
 
         w
