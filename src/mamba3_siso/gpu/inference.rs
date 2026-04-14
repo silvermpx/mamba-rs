@@ -246,7 +246,7 @@ pub struct Mamba3GpuInferenceMixedScratch {
     pub dt: GpuBuffer,
     pub a_val: GpuBuffer,
     pub trap: GpuBuffer,
-    pub angles_raw: GpuBuffer,   // f32 (tanh/PI·dt products accumulate in f64)
+    pub angles_raw: GpuBuffer, // f32 (tanh/PI·dt products accumulate in f64)
     pub angle_cumsum: GpuBuffer, // f32 (sincosf consumer)
     pub alpha: GpuBuffer,
     pub beta: GpuBuffer,
@@ -268,9 +268,7 @@ impl Mamba3GpuInferenceMixedScratch {
         dtype: WeightDtype,
     ) -> Result<Self, String> {
         if matches!(dtype, WeightDtype::F32) {
-            return Err(
-                "Mamba3GpuInferenceMixedScratch requires bf16 or f16 dtype".to_string(),
-            );
+            return Err("Mamba3GpuInferenceMixedScratch requires bf16 or f16 dtype".to_string());
         }
         let dm = cfg.d_model;
         let di = cfg.d_inner();
@@ -912,8 +910,8 @@ impl Mamba3GpuInferenceEngine {
 // residual stream stay f32 for numerical stability.
 // ═══════════════════════════════════════════════════════════════════
 
-use crate::mamba3_siso::gpu::weights::GpuMamba3MixedWeights;
 use crate::mamba_ssm::gpu::blas::{TypedPtr, gpu_gemm_typed_raw_no_bias};
+use crate::mamba3_siso::gpu::weights::GpuMamba3MixedWeights;
 
 pub struct Mamba3GpuInferenceMixed {
     engine: Mamba3GpuInferenceEngine, // owns ctx + kernels + blas + (unused f32 weights)
@@ -938,7 +936,8 @@ impl Mamba3GpuInferenceMixed {
         // and per-head coefficients via the f32 engine's weight-agnostic
         // pointer views).
         let engine = Mamba3GpuInferenceEngine::new(device, cpu_weights, cfg, input_dim, batch)?;
-        let mixed_weights = GpuMamba3MixedWeights::from_cpu(&engine.stream, cpu_weights, bulk_dtype)?;
+        let mixed_weights =
+            GpuMamba3MixedWeights::from_cpu(&engine.stream, cpu_weights, bulk_dtype)?;
         Ok(Self {
             engine,
             mixed_weights,
@@ -997,8 +996,7 @@ impl Mamba3GpuInferenceMixed {
             "Mamba3 step_kernels_mixed_native requires identity_proj=true (LLM path)"
         );
         assert_eq!(
-            scratch.dtype,
-            self.mixed_weights.bulk_dtype,
+            scratch.dtype, self.mixed_weights.bulk_dtype,
             "Mamba3 mixed scratch dtype must match mixed weights bulk_dtype"
         );
         let dt = scratch.dtype;
@@ -1026,7 +1024,9 @@ impl Mamba3GpuInferenceMixed {
         let na_i = na as i32;
 
         // Seed f32 residual with f32 gpu_input (identity_proj).
-        scratch.residual.copy_from(&scratch.gpu_input, &engine.stream)?;
+        scratch
+            .residual
+            .copy_from(&scratch.gpu_input, &engine.stream)?;
 
         let f32_sz = std::mem::size_of::<f32>() as u64;
 
@@ -1148,8 +1148,7 @@ impl Mamba3GpuInferenceMixed {
                 bld.arg(&b_i);
                 bld.arg(&ng_i);
                 bld.arg(&ds_i);
-                unsafe { bld.launch(grid) }
-                    .map_err(|e| format!("M3 F4a bcnorm {which}: {e:?}"))?;
+                unsafe { bld.launch(grid) }.map_err(|e| format!("M3 F4a bcnorm {which}: {e:?}"))?;
             }
 
             // F4b: bc_bias_add typed × 2.
@@ -1177,8 +1176,7 @@ impl Mamba3GpuInferenceMixed {
                 bld.arg(&nh_i);
                 bld.arg(&ng_i);
                 bld.arg(&ds_i);
-                unsafe { bld.launch(grid) }
-                    .map_err(|e| format!("M3 F4b bias {which}: {e:?}"))?;
+                unsafe { bld.launch(grid) }.map_err(|e| format!("M3 F4b bias {which}: {e:?}"))?;
             }
 
             // F4c: Angle accumulation + RoPE.
@@ -1198,8 +1196,7 @@ impl Mamba3GpuInferenceMixed {
                 bld.arg(&b_i);
                 bld.arg(&nh_i);
                 bld.arg(&na_i);
-                unsafe { bld.launch(grid) }
-                    .map_err(|e| format!("M3 F4c angle_dt: {e:?}"))?;
+                unsafe { bld.launch(grid) }.map_err(|e| format!("M3 F4c angle_dt: {e:?}"))?;
 
                 // rope typed: half B/C, f32 angle_cumsum.
                 let n = b * nh * ds;
@@ -1252,8 +1249,7 @@ impl Mamba3GpuInferenceMixed {
                 bld.arg(scratch.a_val.inner());
                 bld.arg(scratch.trap.inner());
                 bld.arg(&n_i);
-                unsafe { bld.launch(grid) }
-                    .map_err(|e| format!("M3 F5 compute_abg: {e:?}"))?;
+                unsafe { bld.launch(grid) }.map_err(|e| format!("M3 F5 compute_abg: {e:?}"))?;
             }
 
             // F6: m3_step_fwd typed — f32 state, bf16 x/k_cur/q_cur/y, f32 α/β/γ/D.
@@ -1290,8 +1286,7 @@ impl Mamba3GpuInferenceMixed {
                 bld.arg(&nh_i);
                 bld.arg(&hd_i);
                 bld.arg(&ds_i);
-                unsafe { bld.launch(grid) }
-                    .map_err(|e| format!("M3 F6 step_fwd: {e:?}"))?;
+                unsafe { bld.launch(grid) }.map_err(|e| format!("M3 F6 step_fwd: {e:?}"))?;
             }
 
             // F7: output gating (typed).
@@ -1313,8 +1308,7 @@ impl Mamba3GpuInferenceMixed {
                 bld.arg(&b_i);
                 bld.arg(&di_i);
                 bld.arg(&hd_i);
-                unsafe { bld.launch(grid) }
-                    .map_err(|e| format!("M3 F7 rmsnorm_gated: {e:?}"))?;
+                unsafe { bld.launch(grid) }.map_err(|e| format!("M3 F7 rmsnorm_gated: {e:?}"))?;
             } else {
                 let n = b * di;
                 let n_i = n as i32;
@@ -1352,7 +1346,9 @@ impl Mamba3GpuInferenceMixed {
             {
                 let n = (b * dm) as i32;
                 let grid = grid_1d(b * dm);
-                let mut bld = engine.stream.launch_builder(k.residual_add_f32_typed.get(dt));
+                let mut bld = engine
+                    .stream
+                    .launch_builder(k.residual_add_f32_typed.get(dt));
                 let r_ptr = scratch.residual.cached_ptr();
                 let t_ptr = scratch.temporal.cached_ptr();
                 bld.arg(&r_ptr);
@@ -1408,9 +1404,7 @@ impl Mamba3GpuInferenceMixed {
             .stream
             .synchronize()
             .map_err(|e| format!("M3 sync: {e:?}"))?;
-        scratch
-            .temporal
-            .download_f32(&self.engine.stream, output)?;
+        scratch.temporal.download_f32(&self.engine.stream, output)?;
         Ok(())
     }
 
@@ -1484,8 +1478,8 @@ enum M3BackboneEngine {
 }
 
 enum M3BackboneScratch {
-    F32(Mamba3GpuInferenceScratch),
-    Mixed(Mamba3GpuInferenceMixedScratch),
+    F32(Box<Mamba3GpuInferenceScratch>),
+    Mixed(Box<Mamba3GpuInferenceMixedScratch>),
 }
 
 impl M3BackboneScratch {
@@ -1542,18 +1536,22 @@ impl GpuMamba3Backbone {
         let device = GpuDevice::new(gpu_ordinal)?;
         let (engine, state, scratch) = match dtype {
             WeightDtype::F32 => {
-                let e =
-                    Mamba3GpuInferenceEngine::new(&device, cpu_weights, cfg, input_dim, batch)?;
+                let e = Mamba3GpuInferenceEngine::new(&device, cpu_weights, cfg, input_dim, batch)?;
                 let s = e.alloc_state()?;
-                let sc = M3BackboneScratch::F32(e.alloc_scratch()?);
+                let sc = M3BackboneScratch::F32(Box::new(e.alloc_scratch()?));
                 (M3BackboneEngine::F32(Box::new(e)), s, sc)
             }
             WeightDtype::Bf16 | WeightDtype::F16 => {
                 let e = Mamba3GpuInferenceMixed::new(
-                    &device, cpu_weights, cfg, input_dim, batch, dtype,
+                    &device,
+                    cpu_weights,
+                    cfg,
+                    input_dim,
+                    batch,
+                    dtype,
                 )?;
                 let s = e.alloc_state()?;
-                let sc = M3BackboneScratch::Mixed(e.alloc_mixed_scratch()?);
+                let sc = M3BackboneScratch::Mixed(Box::new(e.alloc_mixed_scratch()?));
                 (M3BackboneEngine::Mixed(Box::new(e)), s, sc)
             }
         };
