@@ -360,7 +360,9 @@ impl Mamba3GpuInferenceEngine {
             // HF M3 models have no input_proj — embedding is already d_model.
             // Copy gpu_input → temporal directly (mirrors CPU mamba3_step no-proj).
             debug_assert_eq!(self.input_dim, dm);
-            scratch.temporal.copy_from_raw(&scratch.gpu_input, &self.stream)?;
+            scratch
+                .temporal
+                .copy_from_raw(&scratch.gpu_input, &self.stream)?;
         } else {
             // Input projection SGEMM
             sgemm_no_bias(

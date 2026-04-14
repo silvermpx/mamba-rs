@@ -325,3 +325,18 @@ extern "C" __global__ void softplus_copy_##SUFFIX(                            \
 DEFINE_SOFTPLUS_COPY(f32,  float,         from_f_f32)
 DEFINE_SOFTPLUS_COPY(bf16, __nv_bfloat16, from_f_bf16)
 DEFINE_SOFTPLUS_COPY(f16,  __half,        from_f_f16)
+
+// Typed vec_add_inplace — for input_proj / out_proj bias add in M3 pipeline.
+// bias is always f32, activations in TY.
+#define DEFINE_VEC_ADD_INPLACE(SUFFIX, TY, FROM_F)                            \
+extern "C" __global__ void vec_add_inplace_##SUFFIX(                          \
+    TY* a, const float* b, int n                                              \
+) {                                                                           \
+    int i = blockIdx.x * blockDim.x + threadIdx.x;                            \
+    if (i >= n) return;                                                       \
+    a[i] = FROM_F(to_f(a[i]) + b[i]);                                         \
+}
+
+DEFINE_VEC_ADD_INPLACE(f32,  float,         from_f_f32)
+DEFINE_VEC_ADD_INPLACE(bf16, __nv_bfloat16, from_f_bf16)
+DEFINE_VEC_ADD_INPLACE(f16,  __half,        from_f_f16)

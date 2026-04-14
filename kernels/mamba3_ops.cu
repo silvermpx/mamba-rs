@@ -7,6 +7,8 @@
 // T=1 step: mamba3_siso/cpu/inference.rs
 // Paper: Lahoti et al., "Mamba-3: SISO" (ICLR 2026)
 
+#include "_typed_prelude.cuh"
+
 #ifndef RMS_EPS
 #define RMS_EPS 1e-5f
 #endif
