@@ -25,6 +25,12 @@ use crate::hf::embed::embed_lookup;
 use crate::hf::load::{HfModel, load_hf};
 
 use super::sample::{SampleParams, Xoshiro256PlusPlus, sample_token};
+use rayon::prelude::*;
+
+/// Threshold for parallelizing per-slot sampling in `generate_batch`. Below
+/// this batch size the rayon job-submit overhead beats the per-slot
+/// `sample_token` cost (greedy ≈ 12 µs, top-k+top-p ≈ 30-60 µs).
+const SAMPLE_PARALLEL_THRESHOLD: usize = 8;
 
 /// Internal: embed + optional lm_head storage. F32 uses GpuBuffer (f32 typed);
 /// bf16/f16 use GpuByteBuffer (raw bytes, typed via dtype field).
@@ -337,20 +343,53 @@ impl GpuMambaLM {
             // Compute logits [b * vocab_size_padded] → download to CPU.
             self.compute_logits()?;
 
-            // Per-slot decision: either consume next prompt token or sample.
+            // Per-slot decision. Sampling for decode-phase slots is
+            // parallelized across rayon workers when batch is large enough;
+            // each slot has disjoint logits (par_chunks_mut), an independent
+            // RNG, and read-only access to its own params/outputs. The
+            // resulting tokens are applied to per-slot mutable state in a
+            // serial pass below (cheap scalar updates, no contention).
+            let need_decode_for_slot: Vec<bool> = (0..b)
+                .map(|i| !finished[i] && prompt_pos[i] >= prompts[i].len())
+                .collect();
+            let new_tokens: Vec<Option<u32>> = if b >= SAMPLE_PARALLEL_THRESHOLD {
+                self.logits_cpu
+                    .par_chunks_mut(vocab_size)
+                    .zip(rngs.par_iter_mut())
+                    .enumerate()
+                    .map(|(i, (slot_logits, rng))| {
+                        if need_decode_for_slot[i] {
+                            Some(sample_token(slot_logits, &params[i], &outputs[i], rng))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect()
+            } else {
+                (0..b)
+                    .map(|i| {
+                        if need_decode_for_slot[i] {
+                            let slot_logits =
+                                &mut self.logits_cpu[i * vocab_size..(i + 1) * vocab_size];
+                            Some(sample_token(slot_logits, &params[i], &outputs[i], &mut rngs[i]))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect()
+            };
+
             for i in 0..b {
                 if finished[i] {
                     continue;
                 }
                 if prompt_pos[i] < prompts[i].len() {
-                    // Still prefilling — use next prompt token; discard sampled output.
+                    // Still prefilling — feed next prompt token; sampler skipped.
                     last_token[i] = prompts[i][prompt_pos[i]];
                     prompt_pos[i] += 1;
                     continue;
                 }
-                // Decode phase: sample from slot's logits.
-                let slot_logits = &mut self.logits_cpu[i * vocab_size..(i + 1) * vocab_size];
-                let next = sample_token(slot_logits, &params[i], &outputs[i], &mut rngs[i]);
+                let next = new_tokens[i].expect("decode-phase slot must have a sampled token");
                 if params[i].eos_token_ids.contains(&next)
                     || outputs[i].len() >= params[i].max_tokens
                 {

@@ -20,6 +20,12 @@ use crate::mamba3_siso::gpu::inference::GpuMamba3Backbone;
 use crate::mamba3_siso::weights::Mamba3Weights;
 
 use super::sample::{SampleParams, Xoshiro256PlusPlus, sample_token};
+use rayon::prelude::*;
+
+/// Mirror of the M1 LM threshold (`SAMPLE_PARALLEL_THRESHOLD`): below this
+/// batch size, rayon job-submit overhead beats the per-slot `sample_token`
+/// cost for typical sampling configs. See `module::gpu_lm` for rationale.
+const SAMPLE_PARALLEL_THRESHOLD: usize = 8;
 
 /// Internal: embed + optional lm_head storage. F32 uses typed GpuBuffer;
 /// bf16/f16 use GpuByteBuffer (raw bytes, typed via `dtype`).
@@ -329,6 +335,39 @@ impl GpuMamba3LM {
             self.backbone.step_gpu_only(&self.input_cpu)?;
             self.compute_logits()?;
 
+            // Per-slot sampling. Decode-phase slots are computed in parallel
+            // when batch >= SAMPLE_PARALLEL_THRESHOLD; mutable state is then
+            // applied serially. Each slot has disjoint logits + independent RNG.
+            let need_decode_for_slot: Vec<bool> = (0..b)
+                .map(|i| !finished[i] && prompt_pos[i] >= prompts[i].len())
+                .collect();
+            let new_tokens: Vec<Option<u32>> = if b >= SAMPLE_PARALLEL_THRESHOLD {
+                self.logits_cpu
+                    .par_chunks_mut(vocab_size)
+                    .zip(rngs.par_iter_mut())
+                    .enumerate()
+                    .map(|(i, (slot_logits, rng))| {
+                        if need_decode_for_slot[i] {
+                            Some(sample_token(slot_logits, &params[i], &outputs[i], rng))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect()
+            } else {
+                (0..b)
+                    .map(|i| {
+                        if need_decode_for_slot[i] {
+                            let slot_logits =
+                                &mut self.logits_cpu[i * vocab_size..(i + 1) * vocab_size];
+                            Some(sample_token(slot_logits, &params[i], &outputs[i], &mut rngs[i]))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect()
+            };
+
             for i in 0..b {
                 if finished[i] {
                     continue;
@@ -338,8 +377,7 @@ impl GpuMamba3LM {
                     prompt_pos[i] += 1;
                     continue;
                 }
-                let slot_logits = &mut self.logits_cpu[i * vocab_size..(i + 1) * vocab_size];
-                let next = sample_token(slot_logits, &params[i], &outputs[i], &mut rngs[i]);
+                let next = new_tokens[i].expect("decode-phase slot must have a sampled token");
                 if params[i].eos_token_ids.contains(&next)
                     || outputs[i].len() >= params[i].max_tokens
                 {
