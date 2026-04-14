@@ -35,8 +35,22 @@ impl WeightDtype {
     }
 
     /// cuBLAS compute type — always f32 for inference stability.
+    ///
+    /// For bf16/f16 inputs we explicitly use `CUBLAS_COMPUTE_32F_PEDANTIC`
+    /// rather than `CUBLAS_COMPUTE_32F`. The non-pedantic variant is
+    /// allowed by cuBLAS to pick a TF32/faster-than-f32 accumulation on
+    /// Ampere+ GPUs, and in practice on RTX 4090 + CUDA 12.8 this chose
+    /// a kernel that silently reduced precision on large bf16 GEMMs
+    /// (mamba-1.4b, d_inner=4096) — greedy decode on bf16 diverged from
+    /// bf16 HF reference. Pedantic forces true f32 accumulation with a
+    /// modest perf cost on small-M GEMMs.
     pub fn compute_type(self) -> cublas_sys::cublasComputeType_t {
-        cublas_sys::cublasComputeType_t::CUBLAS_COMPUTE_32F
+        match self {
+            Self::F32 => cublas_sys::cublasComputeType_t::CUBLAS_COMPUTE_32F,
+            Self::Bf16 | Self::F16 => {
+                cublas_sys::cublasComputeType_t::CUBLAS_COMPUTE_32F_PEDANTIC
+            }
+        }
     }
 
     pub fn is_f32(self) -> bool {
