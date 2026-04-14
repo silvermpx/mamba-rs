@@ -9,6 +9,7 @@ use super::config::Mamba3Config;
 ///
 /// No conv1d (removed), no fixed A (input-dependent).
 /// Added: BCNorm weights, per-head biases, RoPE via in_proj.
+#[derive(Clone)]
 pub struct Mamba3LayerWeights {
     /// RMSNorm scale: `[d_model]`.
     pub norm_weight: Vec<f32>,
@@ -34,6 +35,7 @@ pub struct Mamba3LayerWeights {
 }
 
 /// Weights for the complete Mamba-3 SISO backbone.
+#[derive(Clone)]
 pub struct Mamba3Weights {
     /// Input projection: `[input_dim, d_model]`.
     pub input_proj_w: Vec<f32>,

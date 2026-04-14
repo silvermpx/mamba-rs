@@ -8,6 +8,8 @@ mod backbone;
 pub mod backbone3;
 #[cfg(all(feature = "hf", feature = "cuda"))]
 pub mod gpu_lm;
+#[cfg(all(feature = "hf", feature = "cuda"))]
+pub mod gpu_lm3;
 #[cfg(feature = "hf")]
 pub mod lm;
 #[cfg(feature = "hf")]

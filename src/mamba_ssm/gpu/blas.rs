@@ -253,11 +253,34 @@ pub fn gpu_sgemm_tied_lm_head_raw(
     d_model: usize,
     vocab_padded: usize,
 ) -> Result<(), String> {
+    gpu_sgemm_tied_lm_head_blas(
+        &ctx.blas,
+        logits_ptr,
+        temporal_ptr,
+        embed_ptr,
+        batch,
+        d_model,
+        vocab_padded,
+    )
+}
+
+/// No-context twin of `gpu_sgemm_tied_lm_head_raw` — takes only the cuBLAS
+/// handle so callers without a `GpuCtx` (e.g., Mamba-3 LLM wrapper) can use
+/// the same OP_T row-major trick without synthesizing a context.
+pub fn gpu_sgemm_tied_lm_head_blas(
+    blas: &cudarc::cublas::CudaBlas,
+    logits_ptr: cudarc::driver::sys::CUdeviceptr,
+    temporal_ptr: cudarc::driver::sys::CUdeviceptr,
+    embed_ptr: cudarc::driver::sys::CUdeviceptr,
+    batch: usize,
+    d_model: usize,
+    vocab_padded: usize,
+) -> Result<(), String> {
     let alpha: f32 = 1.0;
     let beta: f32 = 0.0;
     unsafe {
         cudarc::cublas::result::sgemm(
-            *ctx.blas.handle(),
+            *blas.handle(),
             cudarc::cublas::sys::cublasOperation_t::CUBLAS_OP_T,
             cudarc::cublas::sys::cublasOperation_t::CUBLAS_OP_N,
             vocab_padded as c_int,
@@ -302,6 +325,18 @@ pub fn gpu_gemm_ex_tied_lm_head_raw(
     dtype: WeightDtype,
     dims: TiedLmDims,
 ) -> Result<(), String> {
+    gpu_gemm_ex_tied_lm_head_blas(&ctx.blas, logits_ptr, temporal_ptr, embed_ptr, dtype, dims)
+}
+
+/// No-context twin of `gpu_gemm_ex_tied_lm_head_raw` — blas-only variant.
+pub fn gpu_gemm_ex_tied_lm_head_blas(
+    blas: &cudarc::cublas::CudaBlas,
+    logits_ptr: cudarc::driver::sys::CUdeviceptr,
+    temporal_ptr: cudarc::driver::sys::CUdeviceptr,
+    embed_ptr: cudarc::driver::sys::CUdeviceptr,
+    dtype: WeightDtype,
+    dims: TiedLmDims,
+) -> Result<(), String> {
     let TiedLmDims {
         batch,
         d_model,
@@ -311,7 +346,7 @@ pub fn gpu_gemm_ex_tied_lm_head_raw(
     let beta: f32 = 0.0;
     unsafe {
         cudarc::cublas::result::gemm_ex(
-            *ctx.blas.handle(),
+            *blas.handle(),
             cudarc::cublas::sys::cublasOperation_t::CUBLAS_OP_T,
             cudarc::cublas::sys::cublasOperation_t::CUBLAS_OP_N,
             vocab_padded as c_int,

@@ -1662,4 +1662,28 @@ impl GpuMamba3Backbone {
             M3BackboneEngine::Mixed(e) => e.ctx_stream(),
         }
     }
+
+    /// Access the cuBLAS handle (for downstream lm_head GEMM).
+    pub fn blas(&self) -> &Arc<cudarc::cublas::CudaBlas> {
+        match &self.engine {
+            M3BackboneEngine::F32(e) => &e.blas,
+            M3BackboneEngine::Mixed(e) => &e.engine_ref().blas,
+        }
+    }
+
+    /// Download the last-computed temporal hidden state to CPU (f32).
+    /// Mixed path upcasts from bf16/f16 on the fly.
+    pub fn download_temporal(&self, output: &mut [f32]) -> Result<(), String> {
+        self.stream()
+            .synchronize()
+            .map_err(|e| format!("M3 sync: {e:?}"))?;
+        match &self.scratch {
+            M3BackboneScratch::F32(s) => {
+                let tmp = s.temporal.to_cpu(self.stream())?;
+                output[..tmp.len()].copy_from_slice(&tmp);
+                Ok(())
+            }
+            M3BackboneScratch::Mixed(s) => s.temporal.download_f32(self.stream(), output),
+        }
+    }
 }
