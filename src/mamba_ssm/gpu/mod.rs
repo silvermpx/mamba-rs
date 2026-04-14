@@ -20,6 +20,8 @@ pub mod inference;
 pub mod kernels;
 pub mod launch;
 pub mod prefill;
+pub mod forward_mixed;
 pub mod weights;
+pub mod weights_mixed_train;
 
 pub use dtype::WeightDtype;
