@@ -899,6 +899,28 @@ impl Mamba3GpuInferenceEngine {
 
         Ok(())
     }
+
+    /// Run a step and keep `scratch.temporal` on GPU (no D2H download).
+    /// Mirrors `GpuMambaInference::step_gpu_only` on the M1 side — the LM
+    /// wrapper chains `step_gpu_only → lm_head_gemm` without going through
+    /// CPU for the hidden state.
+    pub fn step_gpu_only(
+        &self,
+        input: &[f32],
+        state: &mut Mamba3GpuInferenceState,
+        scratch: &mut Mamba3GpuInferenceScratch,
+    ) -> Result<(), String> {
+        scratch.gpu_input.upload(&self.stream, input)?;
+        if let Some(ref g) = self.graph {
+            assert_eq!(state.ssm_state.cached_ptr(), self.captured_state_ptr);
+            assert_eq!(scratch.gpu_input.cached_ptr(), self.captured_scratch_ptr);
+            g.launch()
+                .map_err(|e| format!("graph launch (step_gpu_only): {e:?}"))?;
+        } else {
+            self.step_kernels(state, scratch)?;
+        }
+        Ok(())
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -1597,10 +1619,7 @@ impl GpuMamba3Backbone {
     pub fn step_gpu_only(&mut self, input: &[f32]) -> Result<(), String> {
         match (&self.engine, &mut self.scratch) {
             (M3BackboneEngine::F32(e), M3BackboneScratch::F32(sc)) => {
-                // f32 engine has no step_gpu_only yet — run full step but ignore output download.
-                // For now, call the full step and discard output.
-                let mut scratch_out = vec![0.0f32; e.batch * e.cfg.d_model];
-                e.step(input, &mut scratch_out, &mut self.state, sc)
+                e.step_gpu_only(input, &mut self.state, sc)
             }
             (M3BackboneEngine::Mixed(e), M3BackboneScratch::Mixed(sc)) => {
                 e.step_gpu_only_mixed_native(input, &mut self.state, sc)
