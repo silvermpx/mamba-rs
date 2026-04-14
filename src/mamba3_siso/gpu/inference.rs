@@ -1189,11 +1189,16 @@ impl Mamba3GpuInferenceMixed {
                     shared_mem_bytes: 0,
                 };
                 let a_ptr = state.angle_state.inner_at(a_off);
+                let ac_ptr = scratch.angle_cumsum.cached_ptr();
+                let ar_ptr = scratch.angles_raw.cached_ptr();
+                let dt_ptr = scratch.dt.cached_ptr();
                 let mut bld = engine.stream.launch_builder(&k.m3_angle_dt_fwd_batch);
-                bld.arg(scratch.angle_cumsum.inner());
+                // Pass cached raw pointers (CUDA Graph safe) — .inner() creates
+                // SyncOnDrop guards that invalidate capture.
+                bld.arg(&ac_ptr);
                 bld.arg(&a_ptr);
-                bld.arg(scratch.angles_raw.inner());
-                bld.arg(scratch.dt.inner());
+                bld.arg(&ar_ptr);
+                bld.arg(&dt_ptr);
                 bld.arg(&b_i);
                 bld.arg(&nh_i);
                 bld.arg(&na_i);
