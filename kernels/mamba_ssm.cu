@@ -115,6 +115,60 @@ DEFINE_SSM_STEP_FWD(f32,  float,         from_f_f32)
 DEFINE_SSM_STEP_FWD(bf16, __nv_bfloat16, from_f_bf16)
 DEFINE_SSM_STEP_FWD(f16,  __half,        from_f_f16)
 
+// SSM step fused with B/C gather from xdbl — eliminates the gather_bc_cols
+// kernel by reading B and C directly from xdbl with offsets. Saves one
+// launch per layer per step plus the b_buf/c_buf scratch buffers.
+//
+// Layout: xdbl is [batch * xdbl_dim] where xdbl_dim = dt_rank + 2*d_state.
+// B slice starts at offset dt_rank, C slice at dt_rank + d_state.
+//
+// Math identical to running gather_bc_cols + ssm_step_forward sequentially.
+#define DEFINE_SSM_STEP_FWD_GATHER(SUFFIX, T, FROM_F)                      \
+extern "C" __global__ void ssm_step_forward_gather_##SUFFIX(                \
+    float* h,                                                              \
+    T* y,                                                                  \
+    const T* delta,                                                        \
+    const T* u,                                                            \
+    const T* xdbl,                                                         \
+    const float* a_neg,                                                    \
+    const float* D,                                                        \
+    int batch, int d_inner, int d_state,                                   \
+    int xdbl_stride, int b_offset, int c_offset                            \
+) {                                                                        \
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;                       \
+    int total = batch * d_inner;                                           \
+    if (idx >= total) return;                                              \
+    int b = idx / d_inner;                                                 \
+    int d = idx % d_inner;                                                 \
+    int h_base = (b * d_inner + d) * d_state;                              \
+    int xdbl_base = b * xdbl_stride;                                       \
+    float h_local[64];                                                     \
+    float a_local[64];                                                     \
+    if (d_state > 64) return;                                              \
+    for (int n = 0; n < d_state; n++) {                                    \
+        h_local[n] = h[h_base + n];                                        \
+        a_local[n] = a_neg[d * d_state + n];                               \
+    }                                                                      \
+    float delta_d = to_f(delta[idx]);                                      \
+    float u_d = to_f(u[idx]);                                              \
+    float delta_u_d = delta_d * u_d;                                       \
+    float y_d = D[d] * u_d;                                                \
+    for (int n = 0; n < d_state; n++) {                                    \
+        float da = exp2f(delta_d * a_local[n] * LOG2E);                    \
+        float B_n = to_f(xdbl[xdbl_base + b_offset + n]);                  \
+        float C_n = to_f(xdbl[xdbl_base + c_offset + n]);                  \
+        h_local[n] = da * h_local[n] + delta_u_d * B_n;                    \
+        y_d += h_local[n] * C_n;                                           \
+    }                                                                      \
+    for (int n = 0; n < d_state; n++)                                      \
+        h[h_base + n] = h_local[n];                                        \
+    y[idx] = FROM_F(y_d);                                                  \
+}
+
+DEFINE_SSM_STEP_FWD_GATHER(f32,  float,         from_f_f32)
+DEFINE_SSM_STEP_FWD_GATHER(bf16, __nv_bfloat16, from_f_bf16)
+DEFINE_SSM_STEP_FWD_GATHER(f16,  __half,        from_f_f16)
+
 // SSM burn-in forward (T>1): iterate T steps for each (batch, d_inner) thread.
 // Saves h_saved[B*(T+1)*d_inner*d_state] for backward BPTT and
 // da_exp[B*T*d_inner*d_state] for backward discretization.

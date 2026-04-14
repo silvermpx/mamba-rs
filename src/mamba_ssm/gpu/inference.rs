@@ -1121,60 +1121,40 @@ impl GpuMambaInferenceMixed {
                     .map_err(|e| format!("softplus L{layer_idx}: {e:?}"))?;
             }
 
-            // F8: gather_bc_cols typed — B,C slices into b_buf/c_buf (bf16).
-            {
-                let b_i = b as i32;
-                let xdbl_i = xdbl_dim as i32;
-                let ds_i = ds as i32;
-                let b_off = dt_rank as i32;
-                let c_off = (dt_rank + ds) as i32;
-                let mut bld = engine
-                    .ctx
-                    .stream
-                    .launch_builder(k.gather_bc_cols_typed.get(dt));
-                let bb_ptr = scratch.b_buf.cached_ptr();
-                let cb_ptr = scratch.c_buf.cached_ptr();
-                let xdbl_bc_ptr = scratch.xdbl.cached_ptr();
-                bld.arg(&bb_ptr);
-                bld.arg(&cb_ptr);
-                bld.arg(&xdbl_bc_ptr);
-                bld.arg(&b_i);
-                bld.arg(&xdbl_i);
-                bld.arg(&ds_i);
-                bld.arg(&b_off);
-                bld.arg(&c_off);
-                unsafe { bld.launch(grid_1d(b * ds)) }
-                    .map_err(|e| format!("gather_bc L{layer_idx}: {e:?}"))?;
-            }
-
-            // F9: ssm_step typed (bf16 delta/u/B/C, f32 state h, bf16 y).
+            // F8 + F9 fused: ssm_step reads B, C directly from xdbl with
+            // computed offsets. Eliminates the gather_bc_cols launch and
+            // the b_buf / c_buf scratch round-trip — single fused kernel.
             {
                 let b_i = b as i32;
                 let di_i = di as i32;
                 let ds_i = ds as i32;
+                let xdbl_stride_i = xdbl_dim as i32;
+                let b_off = dt_rank as i32;
+                let c_off = (dt_rank + ds) as i32;
                 let dp = lw.d_param();
                 let mut bld = engine
                     .ctx
                     .stream
-                    .launch_builder(k.ssm_step_fwd_typed.get(dt));
+                    .launch_builder(k.ssm_step_fwd_gather_typed.get(dt));
                 let y_ssm_ptr = scratch.y.cached_ptr();
                 let delta_ssm_ptr = scratch.delta.cached_ptr();
                 let u_ssm_ptr = scratch.u.cached_ptr();
-                let b_ssm_ptr = scratch.b_buf.cached_ptr();
-                let c_ssm_ptr = scratch.c_buf.cached_ptr();
+                let xdbl_ssm_ptr = scratch.xdbl.cached_ptr();
                 bld.arg(&ssm_ptr);
                 bld.arg(&y_ssm_ptr);
                 bld.arg(&delta_ssm_ptr);
                 bld.arg(&u_ssm_ptr);
-                bld.arg(&b_ssm_ptr);
-                bld.arg(&c_ssm_ptr);
+                bld.arg(&xdbl_ssm_ptr);
                 bld.arg(&aneg_ptr);
                 bld.arg(&dp);
                 bld.arg(&b_i);
                 bld.arg(&di_i);
                 bld.arg(&ds_i);
+                bld.arg(&xdbl_stride_i);
+                bld.arg(&b_off);
+                bld.arg(&c_off);
                 unsafe { bld.launch(grid_1d(b * di)) }
-                    .map_err(|e| format!("ssm_step L{layer_idx}: {e:?}"))?;
+                    .map_err(|e| format!("ssm_step+gather L{layer_idx}: {e:?}"))?;
             }
 
             // F10: y *= gate_silu (elementwise_mul typed bf16).
