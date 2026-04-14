@@ -2,22 +2,6 @@
 
 use std::time::Instant;
 
-fn find_model_dir(name: &str) -> Option<std::path::PathBuf> {
-    let cache = std::path::Path::new("/root/.cache/huggingface/hub");
-    for entry in std::fs::read_dir(cache).ok()? {
-        let entry = entry.ok()?;
-        let fname = entry.file_name().into_string().ok()?;
-        if fname.contains(name) {
-            let snaps = entry.path().join("snapshots");
-            if snaps.exists() {
-                let snap = std::fs::read_dir(&snaps).ok()?.next()?.ok()?;
-                return Some(snap.path());
-            }
-        }
-    }
-    None
-}
-
 #[test]
 #[ignore]
 fn profile_gpu_backbone_only() {

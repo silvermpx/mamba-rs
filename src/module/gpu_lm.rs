@@ -86,6 +86,14 @@ pub struct GpuMambaLM {
 }
 
 impl GpuMambaLM {
+    /// Access the last-computed logits for batch slot `b`.
+    /// Length = `vocab_size`. Valid after `generate` / `generate_batch`.
+    pub fn last_logits(&self, b: usize) -> &[f32] {
+        &self.logits_cpu[b * self.vocab_size..(b + 1) * self.vocab_size]
+    }
+}
+
+impl GpuMambaLM {
     /// Load HF model with f32 storage, batch=1.
     pub fn from_hf(dir: &Path, gpu_ordinal: usize) -> Result<Self, String> {
         Self::from_hf_with_dtype_batch(dir, gpu_ordinal, WeightDtype::F32, 1)
@@ -204,11 +212,7 @@ impl GpuMambaLM {
         self.backbone.reset()
     }
 
-    pub fn generate(
-        &mut self,
-        prompt: &[u32],
-        params: &SampleParams,
-    ) -> Result<Vec<u32>, String> {
+    pub fn generate(&mut self, prompt: &[u32], params: &SampleParams) -> Result<Vec<u32>, String> {
         let mut tokens = Vec::with_capacity(params.max_tokens);
         self.generate_streaming(prompt, params, |tok, _| {
             tokens.push(tok);
@@ -435,11 +439,18 @@ impl GpuMambaLM {
                 lm_head,
                 dtype,
             } => {
-                // Downcast batched temporal f32 → dtype.
-                let half_bytes = b * d * dtype.size_bytes();
-                ctx.ensure_half_staging(half_bytes)?;
-                let temporal_half_ptr = ctx.half_staging_ptr();
-                {
+                // With end-to-end bf16 inference, temporal is already in `dtype`
+                // from the Mixed engine — feed directly into lm_head, no staging.
+                // Legacy fall-back: if temporal is still f32 (e.g., prefill path
+                // for mixed hasn't been fully migrated yet), downcast once.
+                let backbone_dtype = self.backbone.temporal_dtype();
+                let temporal_half_ptr = if backbone_dtype == *dtype {
+                    temporal_ptr
+                } else {
+                    // Legacy: f32 temporal → cast to half into half_staging.
+                    let half_bytes = b * d * dtype.size_bytes();
+                    ctx.ensure_half_staging(half_bytes)?;
+                    let staging_ptr = ctx.half_staging_ptr();
                     use cudarc::driver::PushKernelArg;
                     let n = (b * d) as i32;
                     let kernel = match *dtype {
@@ -448,21 +459,28 @@ impl GpuMambaLM {
                         WeightDtype::F32 => unreachable!(),
                     };
                     let mut builder = stream.launch_builder(kernel);
-                    builder.arg(&temporal_half_ptr);
+                    builder.arg(&staging_ptr);
                     builder.arg(&temporal_ptr);
                     builder.arg(&n);
                     use crate::mamba_ssm::gpu::launch::grid_1d;
                     unsafe { builder.launch(grid_1d(b * d)) }
                         .map_err(|e| format!("cast temporal: {e:?}"))?;
-                }
+                    staging_ptr
+                };
 
                 if let Some(lm) = lm_head {
-                    // Untied: Y[B,V] = hidden_half[B,D] @ lm_head[D,V]
+                    // Untied: Y[B,V] = temporal_half[B,D] @ lm_head[D,V]
                     gpu_gemm_ex_forward_raw(
                         ctx,
                         &mut self.gpu_logits,
-                        TypedPtr { ptr: temporal_half_ptr, dtype: *dtype },
-                        TypedPtr { ptr: lm.cached_ptr(), dtype: *dtype },
+                        TypedPtr {
+                            ptr: temporal_half_ptr,
+                            dtype: *dtype,
+                        },
+                        TypedPtr {
+                            ptr: lm.cached_ptr(),
+                            dtype: *dtype,
+                        },
                         None,
                         (b, d, self.vocab_size),
                     )?;

@@ -203,8 +203,13 @@ impl GpuMambaWeights {
             + d_inner
             + d_inner * d_model;
 
-        let input_dim = cpu.input_proj_w.len() / d_model;
-        let total = input_dim * d_model + d_model + cfg.n_layers * per_layer + d_model;
+        // Use the CPU weights' actual lengths. For HF Mamba (identity_proj),
+        // both input_proj_w and input_proj_b are empty; the formula must not
+        // assume d_model-length bias when the whole projection is skipped.
+        let total = cpu.input_proj_w.len()
+            + cpu.input_proj_b.len()
+            + cfg.n_layers * per_layer
+            + cpu.norm_f_weight.len();
 
         let flat = GpuBuffer::zeros(stream, total)?;
         let base = flat.cached_ptr();
@@ -306,8 +311,6 @@ impl GpuMambaMixedWeights {
         let dt_rank = cfg.dt_rank();
         let xdbl_dim = cfg.xdbl_dim();
 
-        let input_dim = cpu.input_proj_w.len() / d_model;
-
         // bulk (per layer): in_proj_w + x_proj_w + dt_proj_w + out_proj_w
         let per_layer_bulk =
             d_model * 2 * d_inner + d_inner * xdbl_dim + dt_rank * d_inner + d_inner * d_model;
@@ -315,8 +318,11 @@ impl GpuMambaMixedWeights {
         let per_layer_f32 =
             d_model + d_inner * d_conv + d_inner + d_inner + d_inner * d_state + d_inner;
 
-        let bulk_elems = input_dim * d_model + cfg.n_layers * per_layer_bulk;
-        let f32_elems = d_model + cfg.n_layers * per_layer_f32 + d_model;
+        // Use actual CPU weight lengths — HF Mamba has empty input_proj_w/b
+        // (identity_proj), while MambaBackbone::init populates both to d_model.
+        let bulk_elems = cpu.input_proj_w.len() + cfg.n_layers * per_layer_bulk;
+        let f32_elems =
+            cpu.input_proj_b.len() + cfg.n_layers * per_layer_f32 + cpu.norm_f_weight.len();
 
         let bulk_arena = GpuByteBuffer::zeros(stream, bulk_elems * bulk_dtype.size_bytes())?;
         let f32_arena = GpuByteBuffer::zeros(stream, f32_elems * 4)?;

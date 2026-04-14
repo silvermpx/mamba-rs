@@ -100,7 +100,14 @@ fn main() {
 
     #[cfg(feature = "cuda")]
     if args.gpu {
-        run_gpu(&model_dir, &args, &prompt_ids, n_prompt, &params, &tokenizer);
+        run_gpu(
+            &model_dir,
+            &args,
+            &prompt_ids,
+            n_prompt,
+            &params,
+            &tokenizer,
+        );
         return;
     }
 
@@ -110,7 +117,14 @@ fn main() {
         std::process::exit(1);
     }
 
-    run_cpu(&model_dir, &args, &prompt_ids, n_prompt, &params, &tokenizer);
+    run_cpu(
+        &model_dir,
+        &args,
+        &prompt_ids,
+        n_prompt,
+        &params,
+        &tokenizer,
+    );
 }
 
 fn run_cpu(

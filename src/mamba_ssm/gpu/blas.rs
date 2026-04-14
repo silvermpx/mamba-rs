@@ -220,8 +220,14 @@ pub fn gpu_gemm_forward_dispatch(
             gpu_gemm_ex_forward_raw(
                 ctx,
                 y,
-                TypedPtr { ptr: half_ptr, dtype: w_dtype },
-                TypedPtr { ptr: w_ptr, dtype: w_dtype },
+                TypedPtr {
+                    ptr: half_ptr,
+                    dtype: w_dtype,
+                },
+                TypedPtr {
+                    ptr: w_ptr,
+                    dtype: w_dtype,
+                },
                 bias_ptr,
                 dims,
             )
@@ -296,7 +302,11 @@ pub fn gpu_gemm_ex_tied_lm_head_raw(
     dtype: WeightDtype,
     dims: TiedLmDims,
 ) -> Result<(), String> {
-    let TiedLmDims { batch, d_model, vocab_padded } = dims;
+    let TiedLmDims {
+        batch,
+        d_model,
+        vocab_padded,
+    } = dims;
     let alpha: f32 = 1.0;
     let beta: f32 = 0.0;
     unsafe {
@@ -349,7 +359,10 @@ pub fn gpu_gemm_ex_forward_raw(
 ) -> Result<(), String> {
     gpu_gemm_typed_forward_raw(
         ctx,
-        TypedPtr { ptr: y.cached_ptr(), dtype: WeightDtype::F32 },
+        TypedPtr {
+            ptr: y.cached_ptr(),
+            dtype: WeightDtype::F32,
+        },
         x,
         w,
         bias_ptr,

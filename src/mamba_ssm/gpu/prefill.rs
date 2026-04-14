@@ -46,7 +46,11 @@ pub fn gpu_forward_inference_prefill<W: MambaWeightsView>(
     state: &mut GpuInferenceState,
     scratch: &mut GpuMambaTargetScratch,
 ) -> Result<(), String> {
-    let PrefillInputs { ip_out_flat, weights, a_neg_all } = inputs;
+    let PrefillInputs {
+        ip_out_flat,
+        weights,
+        a_neg_all,
+    } = inputs;
     let dims: GpuMambaDims = scratch.dims;
     let seq_len = dims.seq_len;
     let b = dims.batch;

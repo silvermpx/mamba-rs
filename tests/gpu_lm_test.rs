@@ -22,26 +22,26 @@ fn find_model_dir(name: &str) -> Option<std::path::PathBuf> {
 #[ignore = "requires downloaded mamba-130m-hf model"]
 fn test_gpu_lm_130m() {
     let dir = find_model_dir("mamba-130m-hf").expect("model not in cache");
-    
+
     let mut lm = mamba_rs::module::gpu_lm::GpuMambaLM::from_hf(&dir, 0).unwrap();
-    
+
     let params = mamba_rs::module::sample::SampleParams {
         temperature: 0.0,
         max_tokens: 20,
         ..Default::default()
     };
-    
+
     let tokens = lm.generate(&[1, 2, 3, 4, 5], &params).unwrap();
     assert_eq!(tokens.len(), 20);
     for &t in &tokens {
         assert!((t as usize) < 50280);
     }
-    
+
     // Determinism
     lm.reset().unwrap();
     let tokens2 = lm.generate(&[1, 2, 3, 4, 5], &params).unwrap();
     assert_eq!(tokens, tokens2, "GPU greedy must be deterministic");
-    
+
     let t = Instant::now();
     lm.reset().unwrap();
     let _ = lm.generate(&[1, 2, 3, 4, 5], &params).unwrap();

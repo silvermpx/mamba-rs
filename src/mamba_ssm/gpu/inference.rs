@@ -192,11 +192,9 @@ impl GpuInferenceMixedScratch {
         dtype: WeightDtype,
     ) -> Result<Self, String> {
         if matches!(dtype, WeightDtype::F32) {
-            return Err(
-                "GpuInferenceMixedScratch requires bf16 or f16 dtype (use \
+            return Err("GpuInferenceMixedScratch requires bf16 or f16 dtype (use \
                  GpuInferenceScratch for f32)"
-                    .to_string(),
-            );
+                .to_string());
         }
         let dm = cfg.d_model;
         let di = cfg.d_inner();
@@ -915,8 +913,7 @@ impl GpuMambaInferenceMixed {
             "step_kernels_mixed_native requires identity_proj=true (LLM path)"
         );
         assert_eq!(
-            scratch.dtype,
-            self.mixed_weights.bulk_dtype,
+            scratch.dtype, self.mixed_weights.bulk_dtype,
             "mixed scratch dtype must match mixed weights bulk_dtype"
         );
         let dt = scratch.dtype;
@@ -973,9 +970,18 @@ impl GpuMambaInferenceMixed {
             let (ipw, ipw_dt) = lw.in_proj_w();
             gpu_gemm_typed_forward_raw(
                 &engine.ctx,
-                TypedPtr { ptr: scratch.proj.cached_ptr(), dtype: dt },
-                TypedPtr { ptr: scratch.temporal.cached_ptr(), dtype: dt },
-                TypedPtr { ptr: ipw, dtype: ipw_dt },
+                TypedPtr {
+                    ptr: scratch.proj.cached_ptr(),
+                    dtype: dt,
+                },
+                TypedPtr {
+                    ptr: scratch.temporal.cached_ptr(),
+                    dtype: dt,
+                },
+                TypedPtr {
+                    ptr: ipw,
+                    dtype: ipw_dt,
+                },
                 None,
                 (b, dm, 2 * di),
             )?;
@@ -1041,9 +1047,18 @@ impl GpuMambaInferenceMixed {
             let (xpw, xpw_dt) = lw.x_proj_w();
             gpu_gemm_typed_forward_raw(
                 &engine.ctx,
-                TypedPtr { ptr: scratch.xdbl.cached_ptr(), dtype: dt },
-                TypedPtr { ptr: scratch.u.cached_ptr(), dtype: dt },
-                TypedPtr { ptr: xpw, dtype: xpw_dt },
+                TypedPtr {
+                    ptr: scratch.xdbl.cached_ptr(),
+                    dtype: dt,
+                },
+                TypedPtr {
+                    ptr: scratch.u.cached_ptr(),
+                    dtype: dt,
+                },
+                TypedPtr {
+                    ptr: xpw,
+                    dtype: xpw_dt,
+                },
                 None,
                 (b, di, xdbl_dim),
             )?;
@@ -1074,9 +1089,18 @@ impl GpuMambaInferenceMixed {
             let (dpw, dpw_dt) = lw.dt_proj_w();
             gpu_gemm_typed_forward_raw(
                 &engine.ctx,
-                TypedPtr { ptr: scratch.delta.cached_ptr(), dtype: dt },
-                TypedPtr { ptr: scratch.dt_gather.cached_ptr(), dtype: dt },
-                TypedPtr { ptr: dpw, dtype: dpw_dt },
+                TypedPtr {
+                    ptr: scratch.delta.cached_ptr(),
+                    dtype: dt,
+                },
+                TypedPtr {
+                    ptr: scratch.dt_gather.cached_ptr(),
+                    dtype: dt,
+                },
+                TypedPtr {
+                    ptr: dpw,
+                    dtype: dpw_dt,
+                },
                 Some(lw.dt_proj_b()),
                 (b, dt_rank, di),
             )?;
@@ -1170,9 +1194,18 @@ impl GpuMambaInferenceMixed {
             let (opw, opw_dt) = lw.out_proj_w();
             gpu_gemm_typed_forward_raw(
                 &engine.ctx,
-                TypedPtr { ptr: scratch.temporal.cached_ptr(), dtype: dt },
-                TypedPtr { ptr: scratch.y.cached_ptr(), dtype: dt },
-                TypedPtr { ptr: opw, dtype: opw_dt },
+                TypedPtr {
+                    ptr: scratch.temporal.cached_ptr(),
+                    dtype: dt,
+                },
+                TypedPtr {
+                    ptr: scratch.y.cached_ptr(),
+                    dtype: dt,
+                },
+                TypedPtr {
+                    ptr: opw,
+                    dtype: opw_dt,
+                },
                 None,
                 (b, di, dm),
             )?;
@@ -1215,8 +1248,7 @@ impl GpuMambaInferenceMixed {
             bld.arg(&b_i);
             bld.arg(&dm_i);
             bld.arg(&eps);
-            unsafe { bld.launch(grid_norm(b, dm)) }
-                .map_err(|e| format!("norm_f_mixed: {e:?}"))?;
+            unsafe { bld.launch(grid_norm(b, dm)) }.map_err(|e| format!("norm_f_mixed: {e:?}"))?;
         }
 
         Ok(())
@@ -1513,7 +1545,14 @@ impl GpuMambaBackbone {
         input_dim: usize,
         batch: usize,
     ) -> Result<Self, String> {
-        Self::new_with_dtype(gpu_ordinal, cpu_weights, cfg, input_dim, batch, WeightDtype::F32)
+        Self::new_with_dtype(
+            gpu_ordinal,
+            cpu_weights,
+            cfg,
+            input_dim,
+            batch,
+            WeightDtype::F32,
+        )
     }
 
     /// Create a GPU backbone with explicit storage dtype.
@@ -1540,7 +1579,12 @@ impl GpuMambaBackbone {
             }
             WeightDtype::Bf16 | WeightDtype::F16 => {
                 let e = GpuMambaInferenceMixed::new(
-                    &device, cpu_weights, cfg, input_dim, batch, dtype,
+                    &device,
+                    cpu_weights,
+                    cfg,
+                    input_dim,
+                    batch,
+                    dtype,
                 )?;
                 let s = e.alloc_state()?;
                 let sc = BackboneScratch::Mixed(e.alloc_mixed_scratch()?);
@@ -1673,7 +1717,9 @@ impl GpuMambaBackbone {
     /// Download temporal from GPU to CPU (always f32 output; Mixed path
     /// upcasts half → f32 on the fly).
     pub fn download_temporal(&self, output: &mut [f32]) -> Result<(), String> {
-        self.stream().synchronize().map_err(|e| format!("sync: {e:?}"))?;
+        self.stream()
+            .synchronize()
+            .map_err(|e| format!("sync: {e:?}"))?;
         match &self.scratch {
             BackboneScratch::F32(s) => s.temporal.download(self.stream(), output),
             BackboneScratch::Mixed(s) => s.temporal.download_f32(self.stream(), output),

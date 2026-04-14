@@ -34,7 +34,7 @@ mod tests {
 
     #[test]
     fn test_bf16_known_values() {
-        let vals = [1.0f32, -1.0, 0.5, 3.14];
+        let vals = [1.0f32, -1.0, 0.5, 2.75];
         let bf16_vals: Vec<bf16> = vals.iter().map(|&v| bf16::from_f32(v)).collect();
         let bytes: &[u8] = bytemuck::cast_slice(&bf16_vals);
         let result = bf16_bytes_to_f32(bytes).unwrap();
