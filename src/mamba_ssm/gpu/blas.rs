@@ -222,6 +222,146 @@ pub fn gpu_gemm_forward_dispatch(
     }
 }
 
+/// Tied lm_head: logits[B, V] = temporal[B, D] @ embed^T[D, V].
+/// All three buffers row-major. `embed[V, D]` reused from input embedding (no copy).
+///
+/// Single GEMM via OP_T on embed + OP_N on temporal.
+/// Derivation: row-major Y[B,V] = X[B,D]·E^T[D,V] ⇔
+///             col-major Y^T[V,B] = E[V,D] · X^T[D,B]
+///   `embed` row-major [V,D] = col-major [D,V], OP_T → logical [V,D].
+///   `temporal` row-major [B,D] = col-major [D,B], OP_N → logical [D,B].
+///   Output col-major [V,B] = row-major [B,V].
+pub fn gpu_sgemm_tied_lm_head_raw(
+    ctx: &GpuCtx,
+    logits_ptr: cudarc::driver::sys::CUdeviceptr,
+    temporal_ptr: cudarc::driver::sys::CUdeviceptr,
+    embed_ptr: cudarc::driver::sys::CUdeviceptr,
+    batch: usize,
+    d_model: usize,
+    vocab_padded: usize,
+) -> Result<(), String> {
+    let alpha: f32 = 1.0;
+    let beta: f32 = 0.0;
+    unsafe {
+        cudarc::cublas::result::sgemm(
+            *ctx.blas.handle(),
+            cudarc::cublas::sys::cublasOperation_t::CUBLAS_OP_T,
+            cudarc::cublas::sys::cublasOperation_t::CUBLAS_OP_N,
+            vocab_padded as c_int,
+            batch as c_int,
+            d_model as c_int,
+            &alpha as *const f32,
+            embed_ptr as *const f32,
+            d_model as c_int,
+            temporal_ptr as *const f32,
+            d_model as c_int,
+            &beta as *const f32,
+            logits_ptr as *mut f32,
+            vocab_padded as c_int,
+        )
+        .map_err(|e| format!("cuBLAS tied sgemm failed: {e:?}"))?;
+    }
+    Ok(())
+}
+
+/// Half-precision twin of `gpu_sgemm_tied_lm_head_raw` for bf16/f16 embed.
+/// `temporal_ptr` input activations must already be in `dtype` (not f32).
+pub fn gpu_gemm_ex_tied_lm_head_raw(
+    ctx: &GpuCtx,
+    logits_ptr: cudarc::driver::sys::CUdeviceptr,
+    temporal_ptr: cudarc::driver::sys::CUdeviceptr,
+    embed_ptr: cudarc::driver::sys::CUdeviceptr,
+    dtype: WeightDtype,
+    batch: usize,
+    d_model: usize,
+    vocab_padded: usize,
+) -> Result<(), String> {
+    let alpha: f32 = 1.0;
+    let beta: f32 = 0.0;
+    unsafe {
+        cudarc::cublas::result::gemm_ex(
+            *ctx.blas.handle(),
+            cudarc::cublas::sys::cublasOperation_t::CUBLAS_OP_T,
+            cudarc::cublas::sys::cublasOperation_t::CUBLAS_OP_N,
+            vocab_padded as c_int,
+            batch as c_int,
+            d_model as c_int,
+            &alpha as *const f32 as *const c_void,
+            embed_ptr as *const c_void,
+            dtype.cuda_data_type(),
+            d_model as c_int,
+            temporal_ptr as *const c_void,
+            dtype.cuda_data_type(),
+            d_model as c_int,
+            &beta as *const f32 as *const c_void,
+            logits_ptr as *mut c_void,
+            cudarc::cublas::sys::cudaDataType::CUDA_R_32F,
+            vocab_padded as c_int,
+            dtype.compute_type(),
+            cudarc::cublas::sys::cublasGemmAlgo_t::CUBLAS_GEMM_DEFAULT,
+        )
+        .map_err(|e| format!("cuBLAS tied gemm_ex failed: {e:?}"))?;
+    }
+    Ok(())
+}
+
+/// Variant of `gpu_gemm_ex_forward_raw` that takes Y as a raw device pointer
+/// (not a `&mut GpuBuffer`). Useful when Y is an offset into a larger buffer
+/// (e.g., per-slot logits in batched LM head).
+#[allow(clippy::too_many_arguments)]
+pub fn gpu_gemm_ex_forward_raw_at(
+    ctx: &GpuCtx,
+    y_ptr: cudarc::driver::sys::CUdeviceptr,
+    x_ptr: cudarc::driver::sys::CUdeviceptr,
+    x_dtype: WeightDtype,
+    w_ptr: cudarc::driver::sys::CUdeviceptr,
+    w_dtype: WeightDtype,
+    bias_ptr: Option<cudarc::driver::sys::CUdeviceptr>,
+    dims: (usize, usize, usize),
+) -> Result<(), String> {
+    let (batch, n_in, n_out) = dims;
+    let beta = if let Some(b_ptr) = bias_ptr {
+        let b_i = batch as i32;
+        let n_i = n_out as i32;
+        let mut builder = ctx.stream.launch_builder(&ctx.kernels.bias_broadcast);
+        builder.arg(&y_ptr);
+        builder.arg(&b_ptr);
+        builder.arg(&b_i);
+        builder.arg(&n_i);
+        unsafe { builder.launch(grid_1d(batch * n_out)) }
+            .map_err(|e| format!("bias_broadcast_ex_at: {:?}", e))?;
+        1.0f32
+    } else {
+        0.0f32
+    };
+    let alpha: f32 = 1.0;
+    unsafe {
+        cudarc::cublas::result::gemm_ex(
+            *ctx.blas.handle(),
+            cudarc::cublas::sys::cublasOperation_t::CUBLAS_OP_N,
+            cudarc::cublas::sys::cublasOperation_t::CUBLAS_OP_N,
+            n_out as c_int,
+            batch as c_int,
+            n_in as c_int,
+            &alpha as *const f32 as *const c_void,
+            w_ptr as *const c_void,
+            w_dtype.cuda_data_type(),
+            n_out as c_int,
+            x_ptr as *const c_void,
+            x_dtype.cuda_data_type(),
+            n_in as c_int,
+            &beta as *const f32 as *const c_void,
+            y_ptr as *mut c_void,
+            cudarc::cublas::sys::cudaDataType::CUDA_R_32F,
+            n_out as c_int,
+            w_dtype.compute_type(),
+            cudarc::cublas::sys::cublasGemmAlgo_t::CUBLAS_GEMM_DEFAULT,
+        )
+        .map_err(|e| format!("cuBLAS gemm_ex_at failed: {e:?}"))?;
+    }
+    Ok(())
+}
+
 /// Mixed-precision GEMM forward: `Y[B,N] = X[B,K] @ W[K,N] + bias[N]`.
 ///
 /// Inputs X and W are in `w_dtype` (f32/f16/bf16). Output Y is always f32.

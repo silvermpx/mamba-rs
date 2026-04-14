@@ -6,7 +6,10 @@
 
 use std::path::Path;
 
-use crate::mamba_ssm::gpu::blas::{gpu_gemm_ex_forward_raw, gpu_sgemm_forward_raw};
+use crate::mamba_ssm::gpu::blas::{
+    gpu_gemm_ex_forward_raw, gpu_gemm_ex_tied_lm_head_raw, gpu_sgemm_forward_raw,
+    gpu_sgemm_tied_lm_head_raw,
+};
 use crate::mamba_ssm::gpu::buffers::{GpuBuffer, GpuByteBuffer};
 use crate::mamba_ssm::gpu::dtype::WeightDtype;
 use crate::mamba_ssm::gpu::inference::GpuMambaBackbone;
@@ -71,19 +74,35 @@ pub struct GpuMambaLM {
     pub vocab_size: usize,
     vocab_size_padded: usize,
     pub d_model: usize,
+    /// Batch size (number of parallel sequences).
+    pub batch: usize,
 }
 
 impl GpuMambaLM {
-    /// Load HF model with f32 storage.
+    /// Load HF model with f32 storage, batch=1.
     pub fn from_hf(dir: &Path, gpu_ordinal: usize) -> Result<Self, String> {
-        Self::from_hf_with_dtype(dir, gpu_ordinal, WeightDtype::F32)
+        Self::from_hf_with_dtype_batch(dir, gpu_ordinal, WeightDtype::F32, 1)
     }
 
-    /// Load HF model with explicit storage dtype.
+    /// Load HF model with explicit storage dtype, batch=1.
     pub fn from_hf_with_dtype(
         dir: &Path,
         gpu_ordinal: usize,
         dtype: WeightDtype,
+    ) -> Result<Self, String> {
+        Self::from_hf_with_dtype_batch(dir, gpu_ordinal, dtype, 1)
+    }
+
+    /// Load HF model with explicit dtype and batch size.
+    ///
+    /// `batch > 1` enables parallel generation of multiple independent
+    /// sequences sharing the same weights. Each batch slot has its own
+    /// recurrent state. Use `generate_batch` to drive them.
+    pub fn from_hf_with_dtype_batch(
+        dir: &Path,
+        gpu_ordinal: usize,
+        dtype: WeightDtype,
+        batch: usize,
     ) -> Result<Self, String> {
         let HfModel {
             backbone: cpu_backbone,
@@ -100,7 +119,7 @@ impl GpuMambaLM {
             cpu_backbone.weights(),
             cfg,
             d_model,
-            1,
+            batch,
             dtype,
         )?;
         let stream = backbone.stream();
@@ -143,21 +162,22 @@ impl GpuMambaLM {
             }
         };
 
-        let gpu_logits = GpuBuffer::zeros(stream, vocab_size_padded)?;
-        let gpu_hidden = GpuBuffer::zeros(stream, d_model)?;
+        let gpu_logits = GpuBuffer::zeros(stream, batch * vocab_size_padded)?;
+        let gpu_hidden = GpuBuffer::zeros(stream, batch * d_model)?;
 
         Ok(Self {
             backbone,
             embed_storage,
             embed_cpu: embed,
-            input_cpu: vec![0.0; d_model],
+            input_cpu: vec![0.0; batch * d_model],
             gpu_logits,
             gpu_hidden,
-            logits_padded_cpu: vec![0.0; vocab_size_padded],
-            logits_cpu: vec![0.0; vocab_size],
+            logits_padded_cpu: vec![0.0; batch * vocab_size_padded],
+            logits_cpu: vec![0.0; batch * vocab_size],
             vocab_size,
             vocab_size_padded,
             d_model,
+            batch,
         })
     }
 
@@ -195,6 +215,10 @@ impl GpuMambaLM {
         params: &SampleParams,
         mut cb: impl FnMut(u32, &str),
     ) -> Result<(), String> {
+        assert_eq!(
+            self.batch, 1,
+            "generate_streaming requires batch=1; use generate_batch for batch>1"
+        );
         self.backbone.reset()?;
         let mut rng = Xoshiro256PlusPlus::new(params.seed);
 
@@ -223,16 +247,119 @@ impl GpuMambaLM {
         Ok(())
     }
 
+    /// Batch generation: generate N sequences in parallel.
+    ///
+    /// `prompts.len()` must equal `self.batch`. All prompts may have different
+    /// lengths; shorter prompts are padded with their last token during prefill
+    /// (this affects nothing since their output is discarded until they finish
+    /// prefill). Each slot uses per-slot RNG seeded from `params[i].seed` and
+    /// its own EOS token list from `params[i].eos_token_ids`.
+    ///
+    /// Returns one token vector per slot, up to each slot's `max_tokens` or
+    /// EOS, whichever is first. Generation stops when ALL slots are finished.
+    pub fn generate_batch(
+        &mut self,
+        prompts: &[&[u32]],
+        params: &[SampleParams],
+    ) -> Result<Vec<Vec<u32>>, String> {
+        assert_eq!(prompts.len(), self.batch, "prompts.len() != batch");
+        assert_eq!(params.len(), self.batch, "params.len() != batch");
+
+        self.backbone.reset()?;
+        let mut rngs: Vec<Xoshiro256PlusPlus> = params
+            .iter()
+            .map(|p| Xoshiro256PlusPlus::new(p.seed))
+            .collect();
+
+        let b = self.batch;
+        let d = self.d_model;
+        let vocab_size = self.vocab_size;
+        let max_prompt = prompts.iter().map(|p| p.len()).max().unwrap_or(0);
+        let max_tokens = params.iter().map(|p| p.max_tokens).max().unwrap_or(0);
+
+        // Per-slot state for streaming generation loop.
+        let mut prompt_pos = vec![0usize; b]; // how many prompt tokens consumed
+        let mut finished = vec![false; b];
+        let mut outputs: Vec<Vec<u32>> = (0..b).map(|_| Vec::new()).collect();
+        // `last_token[slot]` = token to feed next step for this slot.
+        let mut last_token = vec![0u32; b];
+
+        // Initial input: first prompt token per slot.
+        for i in 0..b {
+            if prompts[i].is_empty() {
+                finished[i] = true;
+                continue;
+            }
+            last_token[i] = prompts[i][0];
+            prompt_pos[i] = 1; // we will feed this token in first step
+        }
+
+        let total_steps = max_prompt + max_tokens;
+
+        for _step in 0..total_steps {
+            if finished.iter().all(|&f| f) {
+                break;
+            }
+
+            // Build input batch [b * d_model]: embed lookup per slot.
+            for i in 0..b {
+                if finished[i] {
+                    // Feed zero vector for finished slots (their state update is discarded).
+                    for v in &mut self.input_cpu[i * d..(i + 1) * d] {
+                        *v = 0.0;
+                    }
+                } else {
+                    let emb = embed_lookup(&self.embed_cpu, last_token[i], d, vocab_size);
+                    self.input_cpu[i * d..(i + 1) * d].copy_from_slice(emb);
+                }
+            }
+
+            // GPU step (all slots in parallel).
+            self.backbone.step_gpu_only(&self.input_cpu)?;
+
+            // Compute logits [b * vocab_size_padded] → download to CPU.
+            self.compute_logits()?;
+
+            // Per-slot decision: either consume next prompt token or sample.
+            for i in 0..b {
+                if finished[i] {
+                    continue;
+                }
+                if prompt_pos[i] < prompts[i].len() {
+                    // Still prefilling — use next prompt token; discard sampled output.
+                    last_token[i] = prompts[i][prompt_pos[i]];
+                    prompt_pos[i] += 1;
+                    continue;
+                }
+                // Decode phase: sample from slot's logits.
+                let slot_logits = &mut self.logits_cpu[i * vocab_size..(i + 1) * vocab_size];
+                let next = sample_token(slot_logits, &params[i], &outputs[i], &mut rngs[i]);
+                if params[i].eos_token_ids.contains(&next)
+                    || outputs[i].len() >= params[i].max_tokens
+                {
+                    finished[i] = true;
+                    continue;
+                }
+                outputs[i].push(next);
+                last_token[i] = next;
+            }
+        }
+
+        Ok(outputs)
+    }
+
     fn compute_logits(&mut self) -> Result<(), String> {
         let ctx = self.backbone.ctx();
         let stream = self.backbone.stream().clone();
         let temporal_ptr = self.backbone.temporal_ptr();
+        let b = self.batch;
+        let d = self.d_model;
 
         match &self.embed_storage {
             EmbedStorage::F32 { embed, lm_head } => {
                 if let Some(lm) = lm_head {
-                    // Untied: logits[1,V] = hidden[1,D] @ lm_head[D,V]
-                    // Need hidden as a GpuBuffer for sgemm; download+upload path.
+                    // Untied: logits[B,V] = hidden[B,D] @ lm_head[D,V]
+                    // Download batched temporal → upload to gpu_hidden → single batched SGEMM.
                     self.backbone.download_temporal(&mut self.input_cpu)?;
                     self.gpu_hidden.upload(&stream, &self.input_cpu)?;
                     gpu_sgemm_forward_raw(
@@ -241,17 +368,19 @@ impl GpuMambaLM {
                         &self.gpu_hidden,
                         lm.cached_ptr(),
                         None,
-                        (1, self.d_model, self.vocab_size),
+                        (b, d, self.vocab_size),
                     )?;
                 } else {
-                    // Tied: Y[V,1] = embed[V,D] @ temporal[D,1] — temporal as raw W ptr.
-                    gpu_sgemm_forward_raw(
+                    // Tied: logits[B,V] = temporal[B,D] @ embed^T[D,V]
+                    // Single SGEMM via OP_T on embed (reuses row-major [V,D] buffer).
+                    gpu_sgemm_tied_lm_head_raw(
                         ctx,
-                        &mut self.gpu_logits,
-                        embed,
+                        self.gpu_logits.cached_ptr(),
                         temporal_ptr,
-                        None,
-                        (self.vocab_size_padded, self.d_model, 1),
+                        embed.cached_ptr(),
+                        b,
+                        d,
+                        self.vocab_size_padded,
                     )?;
                 }
             }
@@ -260,13 +389,13 @@ impl GpuMambaLM {
                 lm_head,
                 dtype,
             } => {
-                // Downcast temporal f32 → dtype via cast kernel (both GEMM inputs must match).
-                let half_bytes = self.d_model * dtype.size_bytes();
+                // Downcast batched temporal f32 → dtype.
+                let half_bytes = b * d * dtype.size_bytes();
                 ctx.ensure_half_staging(half_bytes)?;
                 let temporal_half_ptr = ctx.half_staging_ptr();
                 {
                     use cudarc::driver::PushKernelArg;
-                    let n = self.d_model as i32;
+                    let n = (b * d) as i32;
                     let kernel = match *dtype {
                         WeightDtype::Bf16 => &ctx.kernels.cast_f32_to_bf16,
                         WeightDtype::F16 => &ctx.kernels.cast_f32_to_f16,
@@ -277,11 +406,12 @@ impl GpuMambaLM {
                     builder.arg(&temporal_ptr);
                     builder.arg(&n);
                     use crate::mamba_ssm::gpu::launch::grid_1d;
-                    unsafe { builder.launch(grid_1d(self.d_model)) }
+                    unsafe { builder.launch(grid_1d(b * d)) }
                         .map_err(|e| format!("cast temporal: {e:?}"))?;
                 }
 
                 if let Some(lm) = lm_head {
+                    // Untied: Y[B,V] = hidden_half[B,D] @ lm_head[D,V]
                     gpu_gemm_ex_forward_raw(
                         ctx,
                         &mut self.gpu_logits,
@@ -290,18 +420,19 @@ impl GpuMambaLM {
                         lm.cached_ptr(),
                         *dtype,
                         None,
-                        (1, self.d_model, self.vocab_size),
+                        (b, d, self.vocab_size),
                     )?;
                 } else {
-                    gpu_gemm_ex_forward_raw(
+                    // Tied: logits[B,V] = temporal_half[B,D] @ embed^T[D,V]
+                    gpu_gemm_ex_tied_lm_head_raw(
                         ctx,
-                        &mut self.gpu_logits,
+                        self.gpu_logits.cached_ptr(),
+                        temporal_half_ptr,
                         embed.cached_ptr(),
                         *dtype,
-                        temporal_half_ptr,
-                        *dtype,
-                        None,
-                        (self.vocab_size_padded, self.d_model, 1),
+                        b,
+                        d,
+                        self.vocab_size_padded,
                     )?;
                 }
             }
@@ -312,8 +443,14 @@ impl GpuMambaLM {
             .map_err(|e| format!("logits sync: {e:?}"))?;
         self.gpu_logits
             .download(&stream, &mut self.logits_padded_cpu)?;
-        self.logits_cpu
-            .copy_from_slice(&self.logits_padded_cpu[..self.vocab_size]);
+        // Both tied and untied paths produce row-major [B, vocab_padded].
+        // Slice off padding per slot.
+        for bi in 0..self.batch {
+            let src = &self.logits_padded_cpu
+                [bi * self.vocab_size_padded..bi * self.vocab_size_padded + self.vocab_size];
+            let dst = &mut self.logits_cpu[bi * self.vocab_size..(bi + 1) * self.vocab_size];
+            dst.copy_from_slice(src);
+        }
         Ok(())
     }
 }
