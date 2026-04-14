@@ -25,6 +25,23 @@ fn small_m3_cfg() -> Mamba3Config {
     }
 }
 
+/// Realistic config matching mamba-370m-hf shape (d_model=1024, 48 layers
+/// would be 370m but we use 12 layers here to keep the test fast — the
+/// per-layer bf16 drift characteristics are the same).
+fn realistic_m3_cfg() -> Mamba3Config {
+    Mamba3Config {
+        d_model: 1024,
+        d_state: 16,
+        expand: 2,
+        headdim: 16,
+        ngroups: 1,
+        n_layers: 12,
+        rope_fraction: 0.5,
+        a_floor: 0.0625,
+        is_outproj_norm: false,
+    }
+}
+
 fn cosine_sim(a: &[f32], b: &[f32]) -> f32 {
     assert_eq!(a.len(), b.len());
     let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
@@ -133,6 +150,58 @@ fn test_m3_bf16_matches_f32_synthetic() {
     assert!(
         final_cs > 0.99,
         "final step cosine {final_cs:.6} < 0.99 — no convergence"
+    );
+}
+
+/// Realistic-scale bf16 parity (d_model=1024, 12 layers). Exercises the same
+/// GEMM shapes that surfaced the 1.4b Mamba-1 bf16 precision bug fixed via
+/// `CUBLAS_COMPUTE_32F_PEDANTIC`, and the race-with-alloc_zeros fix to
+/// `GpuMamba3MixedWeights::from_cpu`. With both fixes in place we expect
+/// cosine > 0.995 after a short warmup.
+#[test]
+#[ignore]
+fn test_m3_bf16_matches_f32_realistic() {
+    let cfg = realistic_m3_cfg();
+    let input_dim = cfg.d_model;
+    let batch = 1;
+    let mut weights = Mamba3Weights::init(&cfg, input_dim, 0xDEADBEEF);
+    weights.input_proj_w.clear();
+    weights.input_proj_b.clear();
+
+    let mut bb_f32 = GpuMamba3Backbone::new_with_dtype(
+        0, &weights, cfg.clone(), input_dim, batch, WeightDtype::F32,
+    )
+    .unwrap();
+    let mut bb_bf16 = GpuMamba3Backbone::new_with_dtype(
+        0, &weights, cfg.clone(), input_dim, batch, WeightDtype::Bf16,
+    )
+    .unwrap();
+
+    let dm = cfg.d_model;
+    let mut out_f32 = vec![0.0f32; batch * dm];
+    let mut out_bf16 = vec![0.0f32; batch * dm];
+
+    const WARMUP: usize = 5;
+    const TOTAL: usize = 20;
+    let mut cos_worst = 1.0f32;
+    for step in 0..TOTAL {
+        let inputs: Vec<f32> = (0..batch * input_dim)
+            .map(|i| ((step * batch * input_dim + i) as f32) * 0.001)
+            .collect();
+        bb_f32.step(&inputs, &mut out_f32).unwrap();
+        bb_bf16.step(&inputs, &mut out_bf16).unwrap();
+        assert!(out_f32.iter().all(|v| v.is_finite()), "f32 non-finite");
+        assert!(out_bf16.iter().all(|v| v.is_finite()), "bf16 non-finite");
+        let cs = cosine_sim(&out_f32, &out_bf16);
+        let diff = max_abs_diff(&out_f32, &out_bf16);
+        eprintln!("step {step}: cos={cs:.6} max_diff={diff:.4}");
+        if step >= WARMUP && cs < cos_worst {
+            cos_worst = cs;
+        }
+    }
+    assert!(
+        cos_worst > 0.995,
+        "realistic M3 bf16 vs f32 cosine worst (post-warmup) {cos_worst:.6} <= 0.995"
     );
 }
 
