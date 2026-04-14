@@ -1018,7 +1018,11 @@ impl GpuMambaInferenceMixed {
                     .map_err(|e| format!("split_gate_silu L{layer_idx}: {e:?}"))?;
             }
 
-            // F4: conv1d_step typed (bf16 x_branch → bf16 u, state f32 preserved).
+            // F4 + F4b fused: conv1d_step with epilogue SiLU. Single launch
+            // replaces the (conv1d_step + silu_fwd) pair — saves one launch
+            // per layer per step (~3-5 µs on Ada). Math identical to the
+            // separate kernels: conv1d output → silu(x) = x / (1 + exp(-x))
+            // applied before downcast to bf16/f16.
             {
                 let b_i = b as i32;
                 let di_i = di as i32;
@@ -1026,7 +1030,7 @@ impl GpuMambaInferenceMixed {
                 let mut bld = engine
                     .ctx
                     .stream
-                    .launch_builder(k.conv1d_step_fwd_typed.get(dt));
+                    .launch_builder(k.conv1d_step_fwd_silu_typed.get(dt));
                 let u_ptr = scratch.u.cached_ptr();
                 let xb_ptr2 = scratch.x_branch.cached_ptr();
                 bld.arg(&u_ptr);
@@ -1040,18 +1044,7 @@ impl GpuMambaInferenceMixed {
                 bld.arg(&di_i);
                 bld.arg(&dc_i);
                 unsafe { bld.launch(grid_1d(b * di)) }
-                    .map_err(|e| format!("conv1d_step L{layer_idx}: {e:?}"))?;
-            }
-
-            // F4b: SiLU typed (bf16 in-place on u).
-            {
-                let n = (b * di) as i32;
-                let mut bld = engine.ctx.stream.launch_builder(k.silu_fwd_typed.get(dt));
-                let u_silu_ptr = scratch.u.cached_ptr();
-                bld.arg(&u_silu_ptr);
-                bld.arg(&n);
-                unsafe { bld.launch(grid_1d(b * di)) }
-                    .map_err(|e| format!("silu L{layer_idx}: {e:?}"))?;
+                    .map_err(|e| format!("conv1d_step+silu L{layer_idx}: {e:?}"))?;
             }
 
             // F5: x_proj GEMM (bf16 everywhere).

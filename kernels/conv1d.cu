@@ -74,6 +74,46 @@ DEFINE_CONV1D_STEP_FWD(f32,  float,         from_f_f32)
 DEFINE_CONV1D_STEP_FWD(bf16, __nv_bfloat16, from_f_bf16)
 DEFINE_CONV1D_STEP_FWD(f16,  __half,        from_f_f16)
 
+// Templated conv1d step with fused SiLU on output. Inference-only fast
+// path — replaces the F4 (conv1d_step) + F4b (silu_fwd) launch pair with
+// a single kernel. Saves one kernel launch per layer per step (~3-5 µs
+// each on Ada). Math identical to running conv1d_step_forward then
+// silu_forward in sequence (silu = x / (1 + exp(-x))).
+//
+// Training kernels (conv1d_burnin_*) keep silu separate so the silu
+// backward gets its own activation save buffer — DO NOT fuse those.
+#define DEFINE_CONV1D_STEP_FWD_SILU(SUFFIX, T, FROM_F)                     \
+extern "C" __global__ void conv1d_step_forward_silu_##SUFFIX(               \
+    T* out,                                                                \
+    float* state,                                                          \
+    const T* new_x,                                                        \
+    const float* weight,                                                   \
+    const float* bias,                                                     \
+    int batch, int d_inner, int d_conv                                     \
+) {                                                                        \
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;                       \
+    int total = batch * d_inner;                                           \
+    if (idx >= total) return;                                              \
+    int b = idx / d_inner;                                                 \
+    int d = idx % d_inner;                                                 \
+    int state_base = (b * d_inner + d) * d_conv;                           \
+    for (int k = 0; k < d_conv - 1; k++) {                                 \
+        state[state_base + k] = state[state_base + k + 1];                 \
+    }                                                                      \
+    state[state_base + d_conv - 1] = to_f(new_x[idx]);                     \
+    float sum = bias[d];                                                   \
+    for (int k = 0; k < d_conv; k++) {                                     \
+        sum += state[state_base + k] * weight[d * d_conv + k];             \
+    }                                                                      \
+    /* SiLU: x * sigmoid(x), via fast exp2f trick */                       \
+    float silu = sum / (1.0f + exp2f(-sum * LOG2E));                       \
+    out[idx] = FROM_F(silu);                                               \
+}
+
+DEFINE_CONV1D_STEP_FWD_SILU(f32,  float,         from_f_f32)
+DEFINE_CONV1D_STEP_FWD_SILU(bf16, __nv_bfloat16, from_f_bf16)
+DEFINE_CONV1D_STEP_FWD_SILU(f16,  __half,        from_f_f16)
+
 // Conv1d step backward:
 //   d_new_x[b,d] = weight[d, d_conv-1] * dy[b,d]
 //   d_weight[d,k] += state_saved[b,d,k] * dy[b,d]  (accumulated across batch)
