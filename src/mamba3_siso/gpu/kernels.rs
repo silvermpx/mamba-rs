@@ -72,8 +72,12 @@ pub struct Mamba3Kernels {
     pub m3_split_typed: TypedKernel,
     /// RMSNorm on B/C per group, half I/O, f32 rms_val and weight.
     pub bcnorm_fwd_typed: TypedKernel,
+    /// Fused B+C variant of bcnorm_fwd_typed (2× grid via blockIdx.y).
+    pub bcnorm_fwd_bc_typed: TypedKernel,
     /// Per-head bias add, half I/O, f32 bias.
     pub bc_bias_add_typed: TypedKernel,
+    /// Fused B+C variant of bc_bias_add_typed (2× grid via blockIdx.y).
+    pub bc_bias_add_bc_typed: TypedKernel,
     /// RoPE rotation, half B/C, f32 angle_cumsum.
     pub rope_fwd_typed: TypedKernel,
     /// Plain SiLU gate (no norm), half I/O.
@@ -205,10 +209,22 @@ impl Mamba3Kernels {
                 bf16: get("bcnorm_fwd_bf16")?,
                 f16: get("bcnorm_fwd_f16")?,
             },
+            bcnorm_fwd_bc_typed: TypedKernel {
+                // f32 fused variant not yet implemented; reuse bcnorm_fwd
+                // (callers select this only on bf16/f16 paths).
+                f32: get("bcnorm_fwd")?,
+                bf16: get("bcnorm_fwd_bc_bf16")?,
+                f16: get("bcnorm_fwd_bc_f16")?,
+            },
             bc_bias_add_typed: TypedKernel {
                 f32: get("bc_bias_add")?,
                 bf16: get("bc_bias_add_bf16")?,
                 f16: get("bc_bias_add_f16")?,
+            },
+            bc_bias_add_bc_typed: TypedKernel {
+                f32: get("bc_bias_add")?,
+                bf16: get("bc_bias_add_bc_bf16")?,
+                f16: get("bc_bias_add_bc_f16")?,
             },
             rope_fwd_typed: TypedKernel {
                 f32: get("rope_fwd")?,

@@ -1119,65 +1119,64 @@ impl Mamba3GpuInferenceMixed {
                 unsafe { bld.launch(grid) }.map_err(|e| format!("M3 F3 split: {e:?}"))?;
             }
 
-            // F4a: bcnorm typed × 2.
-            for (which, src_ptr, dst_ptr, rms_ptr, nw_ptr) in [
-                (
-                    "B",
-                    scratch.b_raw.cached_ptr(),
-                    scratch.b_normed.cached_ptr(),
-                    scratch.b_rms.cached_ptr(),
-                    lw.b_norm_weight.ptr(),
-                ),
-                (
-                    "C",
-                    scratch.c_raw.cached_ptr(),
-                    scratch.c_normed.cached_ptr(),
-                    scratch.c_rms.cached_ptr(),
-                    lw.c_norm_weight.ptr(),
-                ),
-            ] {
+            // F4a: bcnorm typed — fused B+C in single launch (gridDim.y=2
+            // selects the B or C path).
+            {
                 let grid = cudarc::driver::LaunchConfig {
-                    grid_dim: ((b * ng) as u32, 1, 1),
+                    grid_dim: ((b * ng) as u32, 2, 1),
                     block_dim: (ds as u32, 1, 1),
                     shared_mem_bytes: (ds * 4) as u32,
                 };
-                let mut bld = engine.stream.launch_builder(k.bcnorm_fwd_typed.get(dt));
-                bld.arg(&dst_ptr);
-                bld.arg(&rms_ptr);
-                bld.arg(&src_ptr);
-                bld.arg(&nw_ptr);
+                let bn_ptr = scratch.b_normed.cached_ptr();
+                let cn_ptr = scratch.c_normed.cached_ptr();
+                let br_ptr = scratch.b_rms.cached_ptr();
+                let cr_ptr = scratch.c_rms.cached_ptr();
+                let bs_ptr = scratch.b_raw.cached_ptr();
+                let cs_ptr = scratch.c_raw.cached_ptr();
+                let bw_ptr = lw.b_norm_weight.ptr();
+                let cw_ptr = lw.c_norm_weight.ptr();
+                let mut bld = engine.stream.launch_builder(k.bcnorm_fwd_bc_typed.get(dt));
+                bld.arg(&bn_ptr);
+                bld.arg(&cn_ptr);
+                bld.arg(&br_ptr);
+                bld.arg(&cr_ptr);
+                bld.arg(&bs_ptr);
+                bld.arg(&cs_ptr);
+                bld.arg(&bw_ptr);
+                bld.arg(&cw_ptr);
                 bld.arg(&b_i);
                 bld.arg(&ng_i);
                 bld.arg(&ds_i);
-                unsafe { bld.launch(grid) }.map_err(|e| format!("M3 F4a bcnorm {which}: {e:?}"))?;
+                unsafe { bld.launch(grid) }.map_err(|e| format!("M3 F4a bcnorm B+C: {e:?}"))?;
             }
 
-            // F4b: bc_bias_add typed × 2.
-            for (which, src_ptr, dst_ptr, bias_ptr) in [
-                (
-                    "B",
-                    scratch.b_normed.cached_ptr(),
-                    scratch.b_biased.cached_ptr(),
-                    lw.b_bias.ptr(),
-                ),
-                (
-                    "C",
-                    scratch.c_normed.cached_ptr(),
-                    scratch.c_biased.cached_ptr(),
-                    lw.c_bias.ptr(),
-                ),
-            ] {
+            // F4b: bc_bias_add typed — fused B+C in single launch.
+            {
                 let n = b * nh * ds;
-                let grid = grid_1d(n);
-                let mut bld = engine.stream.launch_builder(k.bc_bias_add_typed.get(dt));
-                bld.arg(&dst_ptr);
-                bld.arg(&src_ptr);
-                bld.arg(&bias_ptr);
+                let grid_1 = grid_1d(n);
+                let grid = cudarc::driver::LaunchConfig {
+                    grid_dim: (grid_1.grid_dim.0, 2, 1),
+                    block_dim: grid_1.block_dim,
+                    shared_mem_bytes: grid_1.shared_mem_bytes,
+                };
+                let bb_ptr = scratch.b_biased.cached_ptr();
+                let cb_ptr = scratch.c_biased.cached_ptr();
+                let bn_ptr = scratch.b_normed.cached_ptr();
+                let cn_ptr = scratch.c_normed.cached_ptr();
+                let bbi_ptr = lw.b_bias.ptr();
+                let cbi_ptr = lw.c_bias.ptr();
+                let mut bld = engine.stream.launch_builder(k.bc_bias_add_bc_typed.get(dt));
+                bld.arg(&bb_ptr);
+                bld.arg(&cb_ptr);
+                bld.arg(&bn_ptr);
+                bld.arg(&cn_ptr);
+                bld.arg(&bbi_ptr);
+                bld.arg(&cbi_ptr);
                 bld.arg(&b_i);
                 bld.arg(&nh_i);
                 bld.arg(&ng_i);
                 bld.arg(&ds_i);
-                unsafe { bld.launch(grid) }.map_err(|e| format!("M3 F4b bias {which}: {e:?}"))?;
+                unsafe { bld.launch(grid) }.map_err(|e| format!("M3 F4b bias B+C: {e:?}"))?;
             }
 
             // F4c: Angle accumulation + RoPE.

@@ -1188,6 +1188,58 @@ extern "C" __global__ void bcnorm_fwd_##SUFFIX(                                 
 DEFINE_BCNORM_FWD(bf16, __nv_bfloat16, from_f_bf16)
 DEFINE_BCNORM_FWD(f16,  __half,        from_f_f16)
 
+// ------- bcnorm_fwd_bc fused (B + C in one launch) -------
+// Same per-(sample, group) RMSNorm as bcnorm_fwd, but processes B and C
+// concurrently via gridDim.y ∈ {0, 1}. Saves a kernel launch per layer
+// per step (~3-5 µs each on Ada). Identical math to two sequential bcnorm
+// calls; tested via finite-diff parity with the unfused path.
+#define DEFINE_BCNORM_FWD_BC(SUFFIX, T_ACT, FROM_F)                            \
+extern "C" __global__ void bcnorm_fwd_bc_##SUFFIX(                              \
+    T_ACT* __restrict__ B_normed,                                               \
+    T_ACT* __restrict__ C_normed,                                               \
+    float* __restrict__ B_rms,                                                  \
+    float* __restrict__ C_rms,                                                  \
+    const T_ACT* __restrict__ B_raw,                                            \
+    const T_ACT* __restrict__ C_raw,                                            \
+    const float* __restrict__ B_weight,                                         \
+    const float* __restrict__ C_weight,                                         \
+    int N, int ng, int ds                                                       \
+) {                                                                             \
+    /* gridDim.y == 2: 0 → B path, 1 → C path */                                \
+    int which = blockIdx.y;                                                     \
+    int block_id = blockIdx.x;                                                  \
+    if (block_id >= N * ng) return;                                             \
+    int d = threadIdx.x;                                                        \
+    if (d >= ds) return;                                                        \
+    const T_ACT* raw = (which == 0) ? B_raw : C_raw;                            \
+    T_ACT* normed = (which == 0) ? B_normed : C_normed;                         \
+    float* rms_out = (which == 0) ? B_rms : C_rms;                              \
+    const float* weight = (which == 0) ? B_weight : C_weight;                   \
+    int base = block_id * ds;                                                   \
+    float val = to_f(raw[base + d]);                                            \
+    extern __shared__ float sdata[];                                            \
+    sdata[d] = val * val;                                                       \
+    __syncthreads();                                                            \
+    int stride = 1;                                                             \
+    while (stride < ds) stride <<= 1;                                           \
+    stride >>= 1;                                                               \
+    for (; stride > 0; stride >>= 1) {                                          \
+        if (d < stride && (d + stride) < ds) {                                  \
+            sdata[d] += sdata[d + stride];                                      \
+        }                                                                       \
+        __syncthreads();                                                        \
+    }                                                                           \
+    float rms = sqrtf(sdata[0] / (float)ds + RMS_EPS);                          \
+    if (!isfinite(rms) || rms < 1e-20f) rms = 1.0f;                             \
+    if (d == 0) rms_out[block_id] = rms;                                        \
+    __syncthreads();                                                            \
+    float inv_rms = 1.0f / rms;                                                 \
+    normed[base + d] = FROM_F(val * inv_rms * weight[d]);                       \
+}
+
+DEFINE_BCNORM_FWD_BC(bf16, __nv_bfloat16, from_f_bf16)
+DEFINE_BCNORM_FWD_BC(f16,  __half,        from_f_f16)
+
 // ------- bc_bias_add typed -------
 // B_normed: T_ACT in; B_biased: T_ACT out; bias f32.
 #define DEFINE_BC_BIAS_ADD(SUFFIX, T_ACT, FROM_F)                              \
@@ -1213,6 +1265,42 @@ extern "C" __global__ void bc_bias_add_##SUFFIX(                                
 
 DEFINE_BC_BIAS_ADD(bf16, __nv_bfloat16, from_f_bf16)
 DEFINE_BC_BIAS_ADD(f16,  __half,        from_f_f16)
+
+// ------- bc_bias_add_bc fused (B + C in one launch) -------
+// Same per-(sample, head, n) bias add as bc_bias_add, but processes B and C
+// concurrently via a 2× grid extension. Saves a launch per layer per step.
+// Identical math to two sequential bc_bias_add calls.
+#define DEFINE_BC_BIAS_ADD_BC(SUFFIX, T_ACT, FROM_F)                           \
+extern "C" __global__ void bc_bias_add_bc_##SUFFIX(                             \
+    T_ACT* __restrict__ B_biased,                                               \
+    T_ACT* __restrict__ C_biased,                                               \
+    const T_ACT* __restrict__ B_normed,                                         \
+    const T_ACT* __restrict__ C_normed,                                         \
+    const float* __restrict__ B_bias,                                           \
+    const float* __restrict__ C_bias,                                           \
+    int N, int nh, int ng, int ds                                               \
+) {                                                                             \
+    /* gridDim.y == 2: 0 → B path, 1 → C path */                                \
+    int which = blockIdx.y;                                                     \
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;                            \
+    int total = N * nh * ds;                                                    \
+    if (idx >= total) return;                                                   \
+    const T_ACT* normed = (which == 0) ? B_normed : C_normed;                   \
+    T_ACT* biased = (which == 0) ? B_biased : C_biased;                         \
+    const float* bias = (which == 0) ? B_bias : C_bias;                         \
+    int nh_ds = nh * ds;                                                        \
+    int sample = idx / nh_ds;                                                   \
+    int rem = idx % nh_ds;                                                      \
+    int h = rem / ds;                                                           \
+    int n = rem % ds;                                                           \
+    int heads_per_group = nh / ng;                                              \
+    int g = h / heads_per_group;                                                \
+    float nv = to_f(normed[sample * ng * ds + g * ds + n]);                     \
+    biased[idx] = FROM_F(nv + bias[h * ds + n]);                                \
+}
+
+DEFINE_BC_BIAS_ADD_BC(bf16, __nv_bfloat16, from_f_bf16)
+DEFINE_BC_BIAS_ADD_BC(f16,  __half,        from_f_f16)
 
 // ------- rope_fwd typed -------
 // B_biased/C_biased: T_ACT in; B_rotated/C_rotated: T_ACT out;
