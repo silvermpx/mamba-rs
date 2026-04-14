@@ -19,7 +19,12 @@ extern "C" __global__ void cast_f32_to_bf16(
 ) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
-    dst[i] = __float2bfloat16(src[i]);
+    // Round-to-nearest, matching the intermediate-value downcasts in all
+    // typed kernels (from_f_bf16 in _typed_prelude.cuh). The default
+    // `__float2bfloat16` is round-toward-zero, which adds a systematic
+    // negative bias to every weight and compounds across GEMMs — visible
+    // as degenerate greedy decoding on small models (e.g. mamba-130m).
+    dst[i] = __float2bfloat16_rn(src[i]);
 }
 
 extern "C" __global__ void cast_f32_to_f16(
@@ -27,7 +32,9 @@ extern "C" __global__ void cast_f32_to_f16(
 ) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
-    dst[i] = __float2half(src[i]);
+    // Same rationale as cast_f32_to_bf16: match the _rn rounding mode used
+    // by from_f_f16 in _typed_prelude.cuh.
+    dst[i] = __float2half_rn(src[i]);
 }
 
 extern "C" __global__ void bias_broadcast(
