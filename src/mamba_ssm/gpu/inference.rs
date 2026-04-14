@@ -1121,9 +1121,15 @@ impl GpuMambaInferenceMixed {
                     .map_err(|e| format!("softplus L{layer_idx}: {e:?}"))?;
             }
 
-            // F8 + F9 fused: ssm_step reads B, C directly from xdbl with
-            // computed offsets. Eliminates the gather_bc_cols launch and
-            // the b_buf / c_buf scratch round-trip — single fused kernel.
+            // F8 + F9 + F10 fused: ssm_step reads B, C directly from xdbl with
+            // computed offsets AND applies the gate_silu multiplication before
+            // the final downcast. Replaces the (gather_bc + ssm_step +
+            // elementwise_mul) triplet with a single kernel.
+            //
+            // Prior attempt (commit 39b248d) observed a 1.4b/2.8b NaN cascade
+            // at 0/15 token match. Root cause was the missing RMSNorm
+            // finite-guard (fixed in 2b0670d + e270d78). With that guard in
+            // place, the fused gating is safe across all four HF model sizes.
             {
                 let b_i = b as i32;
                 let di_i = di as i32;
@@ -1135,16 +1141,18 @@ impl GpuMambaInferenceMixed {
                 let mut bld = engine
                     .ctx
                     .stream
-                    .launch_builder(k.ssm_step_fwd_gather_typed.get(dt));
+                    .launch_builder(k.ssm_step_fwd_gather_gate_typed.get(dt));
                 let y_ssm_ptr = scratch.y.cached_ptr();
                 let delta_ssm_ptr = scratch.delta.cached_ptr();
                 let u_ssm_ptr = scratch.u.cached_ptr();
                 let xdbl_ssm_ptr = scratch.xdbl.cached_ptr();
+                let gs_ptr = scratch.gate_silu.cached_ptr();
                 bld.arg(&ssm_ptr);
                 bld.arg(&y_ssm_ptr);
                 bld.arg(&delta_ssm_ptr);
                 bld.arg(&u_ssm_ptr);
                 bld.arg(&xdbl_ssm_ptr);
+                bld.arg(&gs_ptr);
                 bld.arg(&aneg_ptr);
                 bld.arg(&dp);
                 bld.arg(&b_i);
@@ -1154,30 +1162,7 @@ impl GpuMambaInferenceMixed {
                 bld.arg(&b_off);
                 bld.arg(&c_off);
                 unsafe { bld.launch(grid_1d(b * di)) }
-                    .map_err(|e| format!("ssm_step+gather L{layer_idx}: {e:?}"))?;
-            }
-
-            // F10: y *= gate_silu (elementwise_mul typed bf16).
-            // Note: tried fusing this into ssm_step_forward_gather_gate but
-            // observed catastrophic 1.4b/2.8b divergence (0/15 token match,
-            // KL=6.6) — likely a NaN-cascade interaction that the separate
-            // mul kernel breaks via its own arithmetic boundaries. Keeping
-            // the launch separate; the +5% theoretical win isn't worth the
-            // correctness regression on deep models.
-            {
-                let n = (b * di) as i32;
-                let mut bld = engine
-                    .ctx
-                    .stream
-                    .launch_builder(k.elementwise_mul_typed.get(dt));
-                let y_ptr = scratch.y.cached_ptr();
-                let gs_ptr = scratch.gate_silu.cached_ptr();
-                bld.arg(&y_ptr);
-                bld.arg(&y_ptr);
-                bld.arg(&gs_ptr);
-                bld.arg(&n);
-                unsafe { bld.launch(grid_1d(b * di)) }
-                    .map_err(|e| format!("gating L{layer_idx}: {e:?}"))?;
+                    .map_err(|e| format!("ssm_step+gather+gate L{layer_idx}: {e:?}"))?;
             }
 
             // F11: out_proj GEMM (bf16 y → bf16 temporal).
