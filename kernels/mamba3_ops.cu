@@ -173,6 +173,10 @@ extern "C" __global__ void bcnorm_fwd(
     }
 
     float rms = sqrtf(sdata[0] / (float)ds + RMS_EPS);
+    // Finite-guard: parallel to the fix in norms.cu DEFINE_RMSNORM_FWD —
+    // on deep bf16 models a single overflowed bf16 activation can make rms
+    // non-finite and NaN-cascade into every subsequent layer.
+    if (!isfinite(rms) || rms < 1e-20f) rms = 1.0f;
     if (d == 0) rms_val[block_id] = rms;
     __syncthreads();
 
@@ -973,6 +977,9 @@ extern "C" __global__ void rmsnorm_gated_forward(
     }
 
     float rstd = rsqrtf(shared_sum[group_id * group_size] / (float)group_size + RMS_EPS);
+    // Finite-guard (mirrors norms.cu RMSNorm fix): NaN/Inf in y would produce
+    // rstd=NaN and cascade through the output gating into residual stream.
+    if (!isfinite(rstd) || rstd > 1e20f) rstd = 1.0f;
     if (local_id == 0) rms_vals[sample * n_groups + group_id] = rstd;
     __syncthreads();
 
