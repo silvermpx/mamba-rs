@@ -928,11 +928,12 @@ impl GpuMambaInferenceMixed {
         let k = &engine.ctx.kernels;
         let w = &self.mixed_weights;
 
-        // Entry: residual_f32 <- gpu_input (identity_proj).
-        // gpu_input is f32 (CPU upload staging); use cuMemcpy to preserve dtype.
+        // Entry: residual_f32 <- gpu_input (identity_proj). Use copy_from_raw
+        // (cuMemcpyDtoDAsync on raw ptrs) — CUDA Graph safe; copy_from creates
+        // SyncOnDrop guards that invalidate the capture.
         scratch
             .residual
-            .copy_from(&scratch.gpu_input, &engine.ctx.stream)?;
+            .copy_from_raw(&scratch.gpu_input, &engine.ctx.stream)?;
 
         let f32_sz = std::mem::size_of::<f32>() as u64;
 

@@ -1023,10 +1023,11 @@ impl Mamba3GpuInferenceMixed {
         let ng_i = ng as i32;
         let na_i = na as i32;
 
-        // Seed f32 residual with f32 gpu_input (identity_proj).
+        // Seed f32 residual with f32 gpu_input (identity_proj). copy_from_raw
+        // is CUDA Graph safe (cuMemcpyDtoDAsync on raw ptrs, no SyncOnDrop).
         scratch
             .residual
-            .copy_from(&scratch.gpu_input, &engine.stream)?;
+            .copy_from_raw(&scratch.gpu_input, &engine.stream)?;
 
         let f32_sz = std::mem::size_of::<f32>() as u64;
 
