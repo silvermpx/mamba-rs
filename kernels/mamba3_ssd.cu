@@ -142,6 +142,73 @@ extern "C" __global__ void m3_step_fwd(
     v_state[b * nh * hd + h * hd + p] = x_val;
 }
 
+// Templated m3_step_fwd — activations in T_IN, state/D stay f32.
+// Used for T=1 decode in Mamba-3 LLM inference.
+#define DEFINE_M3_STEP_FWD(SUFFIX, TY, FROM_F)                              \
+extern "C" __global__ void m3_step_fwd_##SUFFIX(                             \
+    float* ssm_state,                                                        \
+    float* k_state,                                                          \
+    float* v_state,                                                          \
+    TY* y,                                                                   \
+    const TY* x,                                                             \
+    const TY* k_cur,                                                         \
+    const TY* q_cur,                                                         \
+    const float* alpha, const float* beta, const float* gamma,               \
+    const float* D,                                                          \
+    int batch, int nh, int hd, int ds                                        \
+) {                                                                          \
+    int b = blockIdx.x;                                                      \
+    int h = blockIdx.y;                                                      \
+    int p = threadIdx.x;                                                     \
+    if (b >= batch || h >= nh || p >= hd) return;                            \
+    int d_inner = nh * hd;                                                   \
+    float h_local[64];                                                       \
+    if (ds > 64) return;                                                     \
+    int h_base = (b * nh * hd + h * hd + p) * ds;                            \
+    for (int n = 0; n < ds; n++) h_local[n] = ssm_state[h_base + n];         \
+    float alpha_h = 0.0f;                                                    \
+    if (p == 0) alpha_h = alpha[b * nh + h];                                 \
+    alpha_h = __shfl_sync(0xFFFFFFFF, alpha_h, 0, hd);                       \
+    float beta_h = 0.0f;                                                     \
+    if (p == 0) beta_h = beta[b * nh + h];                                   \
+    beta_h = __shfl_sync(0xFFFFFFFF, beta_h, 0, hd);                         \
+    float gamma_h = 0.0f;                                                    \
+    if (p == 0) gamma_h = gamma[b * nh + h];                                 \
+    gamma_h = __shfl_sync(0xFFFFFFFF, gamma_h, 0, hd);                       \
+    float d_skip = 0.0f;                                                     \
+    if (p == 0) d_skip = D[h];                                               \
+    d_skip = __shfl_sync(0xFFFFFFFF, d_skip, 0, hd);                         \
+    float x_val = to_f(x[b * d_inner + h * hd + p]);                         \
+    float v_prev = v_state[b * nh * hd + h * hd + p];                        \
+    float y_val = d_skip * x_val;                                            \
+    for (int n = 0; n < ds; n++) {                                           \
+        float kc_n = 0.0f, kp_n = 0.0f, qc_n = 0.0f;                         \
+        if (p == 0) {                                                        \
+            kc_n = to_f(k_cur[b * nh * ds + h * ds + n]);                    \
+            kp_n = k_state[b * nh * ds + h * ds + n];                        \
+            qc_n = to_f(q_cur[b * nh * ds + h * ds + n]);                    \
+        }                                                                    \
+        kc_n = __shfl_sync(0xFFFFFFFF, kc_n, 0, hd);                         \
+        kp_n = __shfl_sync(0xFFFFFFFF, kp_n, 0, hd);                         \
+        qc_n = __shfl_sync(0xFFFFFFFF, qc_n, 0, hd);                         \
+        h_local[n] = alpha_h * h_local[n] + beta_h * v_prev * kp_n +         \
+                     gamma_h * x_val * kc_n;                                 \
+        y_val += h_local[n] * qc_n;                                          \
+    }                                                                        \
+    for (int n = 0; n < ds; n++) ssm_state[h_base + n] = h_local[n];         \
+    y[b * d_inner + h * hd + p] = FROM_F(y_val);                             \
+    if (p == 0) {                                                            \
+        for (int n = 0; n < ds; n++)                                         \
+            k_state[b * nh * ds + h * ds + n] =                              \
+                to_f(k_cur[b * nh * ds + h * ds + n]);                       \
+    }                                                                        \
+    v_state[b * nh * hd + h * hd + p] = x_val;                               \
+}
+
+DEFINE_M3_STEP_FWD(f32,  float,         from_f_f32)
+DEFINE_M3_STEP_FWD(bf16, __nv_bfloat16, from_f_bf16)
+DEFINE_M3_STEP_FWD(f16,  __half,        from_f_f16)
+
 // ======================== BURN-IN FORWARD (with activation saves) ========================
 
 // m3_burnin_fwd: Sequential T>1 forward with activation saves for backward BPTT.

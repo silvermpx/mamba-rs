@@ -292,6 +292,61 @@ DEFINE_SSM_BURNIN_NOSAVE(f32,  float,         from_f_f32)
 DEFINE_SSM_BURNIN_NOSAVE(bf16, __nv_bfloat16, from_f_bf16)
 DEFINE_SSM_BURNIN_NOSAVE(f16,  __half,        from_f_f16)
 
+// Templated SSM burnin WITH saves — full forward sequence for training/backward.
+// h_saved and y_out in activation dtype; h_state + a_neg + D in f32.
+#define DEFINE_SSM_BURNIN(SUFFIX, TY, FROM_F)                               \
+extern "C" __global__ void ssm_burnin_forward_##SUFFIX(                     \
+    float* h, TY* y_out, float* h_saved, float* da_exp_out,                 \
+    const TY* delta, const TY* u,                                           \
+    const TY* B, const TY* C,                                               \
+    const float* a_neg, const float* D,                                     \
+    int batch, int T_len, int d_inner, int d_state                          \
+) {                                                                         \
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;                        \
+    int total = batch * d_inner;                                            \
+    if (idx >= total) return;                                               \
+    int b = idx / d_inner;                                                  \
+    int d = idx % d_inner;                                                  \
+    int h_base = (b * d_inner + d) * d_state;                               \
+    float h_local[64];                                                      \
+    float a_local[64];                                                      \
+    if (d_state > 64) return;                                               \
+    for (int n = 0; n < d_state; n++) {                                     \
+        h_local[n] = h[h_base + n];                                         \
+        a_local[n] = a_neg[d * d_state + n];                                \
+    }                                                                       \
+    for (int n = 0; n < d_state; n++) {                                     \
+        int hs_idx = (b * (T_len + 1) + 0) * d_inner * d_state              \
+                     + d * d_state + n;                                     \
+        h_saved[hs_idx] = h_local[n];                                       \
+    }                                                                       \
+    for (int t = 0; t < T_len; t++) {                                       \
+        int bt_di = (b * T_len + t) * d_inner + d;                          \
+        int bt_ds = (b * T_len + t) * d_state;                              \
+        float delta_d = to_f(delta[bt_di]);                                 \
+        float u_d = to_f(u[bt_di]);                                         \
+        float delta_u_d = delta_d * u_d;                                    \
+        float y_d = D[d] * u_d;                                             \
+        for (int n = 0; n < d_state; n++) {                                 \
+            float da = exp2f(delta_d * a_local[n] * LOG2E);                 \
+            h_local[n] = da * h_local[n] + delta_u_d * to_f(B[bt_ds + n]);  \
+            y_d += h_local[n] * to_f(C[bt_ds + n]);                         \
+        }                                                                   \
+        y_out[bt_di] = FROM_F(y_d);                                         \
+        for (int n = 0; n < d_state; n++) {                                 \
+            int hs_idx = (b * (T_len + 1) + (t + 1)) * d_inner * d_state    \
+                         + d * d_state + n;                                 \
+            h_saved[hs_idx] = h_local[n];                                   \
+        }                                                                   \
+    }                                                                       \
+    for (int n = 0; n < d_state; n++)                                       \
+        h[h_base + n] = h_local[n];                                         \
+}
+
+DEFINE_SSM_BURNIN(f32,  float,         from_f_f32)
+DEFINE_SSM_BURNIN(bf16, __nv_bfloat16, from_f_bf16)
+DEFINE_SSM_BURNIN(f16,  __half,        from_f_f16)
+
 // ======================== BACKWARD ========================
 
 // SSM backward with per-sample LOCAL gradient accumulation (no atomicAdd).
