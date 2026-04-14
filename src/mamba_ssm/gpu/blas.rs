@@ -183,9 +183,9 @@ pub fn gpu_sgemm_backward_grad_raw(
 
 /// Dispatch SGEMM or GEMMex based on weight dtype.
 ///
-/// Activations are always f32; this is the single entry point used by the
-/// unified inference pipeline to support f32 / bf16 / fp16 weight storage
-/// with identical activation dataflow.
+/// Activations are always f32; when weights are bf16/f16, activations are
+/// downcast to the weight dtype on-the-fly (via cast kernel) into a scratch
+/// buffer, then GemmEx runs with matching input dtypes. Output Y stays f32.
 pub fn gpu_gemm_forward_dispatch(
     ctx: &GpuCtx,
     y: &mut GpuBuffer,
@@ -197,16 +197,37 @@ pub fn gpu_gemm_forward_dispatch(
 ) -> Result<(), String> {
     match w_dtype {
         WeightDtype::F32 => gpu_sgemm_forward_raw(ctx, y, x, w_ptr, bias_ptr, dims),
-        WeightDtype::F16 | WeightDtype::Bf16 => gpu_gemm_ex_forward_raw(
-            ctx,
-            y,
-            x.cached_ptr(),
-            WeightDtype::F32,
-            w_ptr,
-            w_dtype,
-            bias_ptr,
-            dims,
-        ),
+        WeightDtype::F16 | WeightDtype::Bf16 => {
+            // cuBLAS requires A and B to have matching dtype. Downcast x f32 -> w_dtype
+            // into the ctx's reusable half-staging buffer.
+            let (batch, n_in, _) = dims;
+            let half_bytes = batch * n_in * w_dtype.size_bytes();
+            ctx.ensure_half_staging(half_bytes)?;
+            let half_ptr = ctx.half_staging_ptr();
+            let n = (batch * n_in) as i32;
+            let src_ptr = x.cached_ptr();
+            let kernel = match w_dtype {
+                WeightDtype::Bf16 => &ctx.kernels.cast_f32_to_bf16,
+                WeightDtype::F16 => &ctx.kernels.cast_f32_to_f16,
+                _ => unreachable!(),
+            };
+            let mut builder = ctx.stream.launch_builder(kernel);
+            builder.arg(&half_ptr);
+            builder.arg(&src_ptr);
+            builder.arg(&n);
+            unsafe { builder.launch(grid_1d(batch * n_in)) }
+                .map_err(|e| format!("cast_f32_to_half: {e:?}"))?;
+            gpu_gemm_ex_forward_raw(
+                ctx,
+                y,
+                half_ptr,
+                w_dtype,
+                w_ptr,
+                w_dtype,
+                bias_ptr,
+                dims,
+            )
+        }
     }
 }
 
