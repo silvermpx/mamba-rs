@@ -151,9 +151,6 @@ pub struct MambaKernels {
     pub softplus_bwd_typed: TypedKernel,
 
     // -- Dual-dtype kernels for end-to-end bf16/f16 inference --
-    /// Softplus from half input → f32 `delta` output. `delta` stays f32 for
-    /// SSM recurrence precision (Mamba convention: accumulators f32).
-    pub softplus_copy_to_f32_typed: HalfKernel,
     /// RMSNorm: f32 residual input → half output. Keeps residual stream in
     /// f32 across layers while feeding the branch path in bf16/f16.
     pub rmsnorm_fwd_f32in_typed: HalfKernel,
@@ -302,7 +299,6 @@ impl MambaKernels {
             softplus_bwd_typed: load_typed("softplus_backward")?,
 
             // dual-dtype (half-only)
-            softplus_copy_to_f32_typed: load_half("softplus_copy_to_f32")?,
             rmsnorm_fwd_f32in_typed: load_half("rmsnorm_forward_f32in")?,
             residual_add_f32_typed: load_half("residual_add_f32")?,
 
