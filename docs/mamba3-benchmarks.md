@@ -2,12 +2,10 @@
 
 Hardware: Ada server — Intel Xeon Gold 5412U (48 threads) + NVIDIA RTX 4090 Ada (48 GB), CUDA 12.8, Driver 595.45.
 
-> **Note**: no official Mamba-3 SISO checkpoints are released yet
-> (see [mamba3-checkpoints.md](mamba3-checkpoints.md)). All numbers below
-> are against synthetic weights via `Mamba3Weights::init`. For end-to-end
-> LLM inference benchmarks against production weights, see
-> [mamba1-benchmarks.md](mamba1-benchmarks.md) — those use HF Mamba-1
-> checkpoints.
+> **Note**: all numbers below are against synthetic weights via
+> `Mamba3Weights::init` — no public Mamba-3 SISO checkpoints exist yet.
+> For end-to-end LLM inference benchmarks against production weights,
+> see [mamba1-benchmarks.md](mamba1-benchmarks.md).
 
 ## GPU Inference (T=1 step, default config: d_model=128, 4 layers, nheads=16, headdim=16)
 
