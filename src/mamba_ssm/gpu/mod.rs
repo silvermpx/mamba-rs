@@ -10,6 +10,7 @@
 //! - `launch` — kernel launch helpers
 
 pub mod backward;
+pub mod backward_mixed;
 pub mod blas;
 pub mod buffers;
 pub mod context;

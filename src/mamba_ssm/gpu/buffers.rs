@@ -424,6 +424,13 @@ impl GpuByteBuffer {
     pub fn inner(&self) -> &cudarc::driver::CudaSlice<u8> {
         &self.data
     }
+
+    /// Async memset to zero on the given stream.
+    pub fn zero(&mut self, stream: &Arc<cudarc::driver::CudaStream>) -> Result<(), String> {
+        stream
+            .memset_zeros(&mut self.data)
+            .map_err(|e| format!("GPU op failed: {:?}", e))
+    }
 }
 
 /// Dtype-aware owning buffer — holds activation scratch in any dtype.
@@ -466,6 +473,12 @@ impl DtypedBuf {
 
     pub fn size_bytes(&self) -> usize {
         self.n_elems * self.dtype.size_bytes()
+    }
+
+    /// Async memset to zero on the given stream. Works regardless of dtype
+    /// (raw byte fill).
+    pub fn zero(&mut self, stream: &Arc<cudarc::driver::CudaStream>) -> Result<(), String> {
+        self.inner.zero(stream)
     }
 
     /// Upload f32 data from CPU, converting to dtype on-the-fly.
