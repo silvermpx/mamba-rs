@@ -155,6 +155,31 @@ extern "C" __global__ void gating_backward(
     d_gate_pre[i] = dg * y[i] * sigma * (1.0f + x * (1.0f - sigma));
 }
 
+// gating_backward typed (bf16/f16/f32) for mixed-precision training.
+// `y = ssm_out * gate_silu(z)` where z = gate_pre and gate_silu = z*sigma(z).
+// All math in f32, activations T_IN (typed). Outputs typed.
+// Reference math identical to f32 above; matches state-spaces/mamba
+// selective_scan_bwd_kernel.cuh z/gate-branch backward.
+#define DEFINE_GATING_BWD(SUFFIX, T, FROM_F)                                   \
+extern "C" __global__ void gating_backward_##SUFFIX(                           \
+    T* d_y, T* d_gate_pre,                                                     \
+    const T* d_gated, const T* y,                                              \
+    const T* gate_pre, const T* gate_post,                                     \
+    int n                                                                      \
+) {                                                                            \
+    int i = blockIdx.x * blockDim.x + threadIdx.x;                             \
+    if (i >= n) return;                                                        \
+    float dg = to_f(d_gated[i]);                                               \
+    d_y[i] = FROM_F(dg * to_f(gate_post[i]));                                  \
+    float xv = to_f(gate_pre[i]);                                              \
+    float sigma = 1.0f / (1.0f + exp2f(-xv * 1.4426950408889634f));            \
+    d_gate_pre[i] = FROM_F(dg * to_f(y[i]) * sigma * (1.0f + xv * (1.0f - sigma))); \
+}
+
+DEFINE_GATING_BWD(f32,  float,         from_f_f32)
+DEFINE_GATING_BWD(bf16, __nv_bfloat16, from_f_bf16)
+DEFINE_GATING_BWD(f16,  __half,        from_f_f16)
+
 extern "C" __global__ void concat_halves(
     float* proj,              // [batch * 2*d_inner] output
     const float* first_half,  // [batch * d_inner]

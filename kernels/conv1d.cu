@@ -375,3 +375,62 @@ extern "C" __global__ void conv1d_burnin_backward(
         }
     }
 }
+
+// conv1d_burnin_backward typed (bf16/f16/f32) for mixed-precision training.
+// Pattern matches Dao-AILab/causal-conv1d backward: activations T_IN, weights
+// f32 master, recurrent state save (`conv_states`) f32, weight/bias grads
+// accumulate via atomicAdd to f32 master grad slices.
+//
+// Carry register array stays float[8] regardless of T_IN (BUG-M2 fix needs
+// f32 precision for the back-propagated gradient through the shift register).
+//
+// CONSTRAINT: d_conv <= 8 (compile-time register array). All shipped
+// state-spaces/mamba checkpoints use d_conv=4.
+#define DEFINE_CONV1D_BURNIN_BWD(SUFFIX, T, FROM_F)                            \
+extern "C" __global__ void conv1d_burnin_backward_##SUFFIX(                    \
+    T* d_x_branch,                                                             \
+    float* d_weight,                                                           \
+    float* d_bias,                                                             \
+    const T* d_u,                                                              \
+    const T* post_conv,                                                        \
+    const float* conv_states,                                                  \
+    const float* weight,                                                       \
+    int batch, int T_, int d_inner, int d_conv                                 \
+) {                                                                            \
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;                           \
+    int total = batch * d_inner;                                               \
+    if (idx >= total) return;                                                  \
+    int b = idx / d_inner;                                                     \
+    int d = idx % d_inner;                                                     \
+    float carry[8];                                                            \
+    if (d_conv > 8) return;                                                    \
+    for (int k = 0; k < d_conv - 1; k++) carry[k] = 0.0f;                      \
+    for (int t = T_ - 1; t >= 0; t--) {                                        \
+        int bt_di = (b * T_ + t) * d_inner + d;                                \
+        float x = to_f(post_conv[bt_di]);                                      \
+        float sig = 1.0f / (1.0f + exp2f(-x * 1.4426950408889634f));           \
+        float silu_grad = sig * (1.0f + x * (1.0f - sig));                     \
+        float d_conv_out = to_f(d_u[bt_di]) * silu_grad;                       \
+        float dxb = d_conv_out * weight[d * d_conv + d_conv - 1];              \
+        int cs_base = ((b * T_ + t) * d_inner + d) * d_conv;                   \
+        for (int k = 0; k < d_conv; k++) {                                     \
+            atomicAdd(&d_weight[d * d_conv + k],                               \
+                      d_conv_out * conv_states[cs_base + k]);                  \
+        }                                                                      \
+        atomicAdd(&d_bias[d], d_conv_out);                                     \
+        if (d_conv > 1) {                                                      \
+            int carry_len = d_conv - 1;                                        \
+            dxb += carry[0];                                                   \
+            for (int k = 0; k < carry_len - 1; k++) {                          \
+                carry[k] = carry[k + 1]                                        \
+                         + d_conv_out * weight[d * d_conv + d_conv - 2 - k];   \
+            }                                                                  \
+            carry[carry_len - 1] = d_conv_out * weight[d * d_conv];            \
+        }                                                                      \
+        d_x_branch[bt_di] = FROM_F(dxb);                                       \
+    }                                                                          \
+}
+
+DEFINE_CONV1D_BURNIN_BWD(f32,  float,         from_f_f32)
+DEFINE_CONV1D_BURNIN_BWD(bf16, __nv_bfloat16, from_f_bf16)
+DEFINE_CONV1D_BURNIN_BWD(f16,  __half,        from_f_f16)

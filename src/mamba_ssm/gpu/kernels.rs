@@ -142,6 +142,20 @@ pub struct MambaKernels {
     /// f16 multi-step conv1d forward with typed I/O + f32 saves.
     pub conv1d_burnin_fwd_f16: CudaFunction,
 
+    // -- Typed training-backward kernels (Step 4a) --
+    /// Typed dispatch (f32/bf16/f16) for `gating_backward`. dx/dy/d_y/d_gate
+    /// typed; matches DEFINE_GATING_BWD macro in elementwise.cu.
+    pub gating_bwd_typed: TypedKernel,
+    /// Typed dispatch for `rmsnorm_backward`. dx/dy typed; d_scale stays f32
+    /// (atomicAdd to master grad). Matches DEFINE_RMSNORM_BWD macro in
+    /// norms.cu, follows NVIDIA Apex layer_norm pattern.
+    pub rmsnorm_bwd_typed: TypedKernel,
+    /// Typed dispatch for `conv1d_burnin_backward`. d_x_branch/d_u/post_conv
+    /// typed; conv_states stays f32 (recurrent state); d_weight/d_bias
+    /// accumulate via atomicAdd to f32 master. Matches DEFINE_CONV1D_BURNIN_BWD
+    /// macro in conv1d.cu.
+    pub conv1d_burnin_bwd_typed: TypedKernel,
+
     // -- Typed inference kernels (f32/bf16/f16 variants) --
     pub silu_fwd_typed: TypedKernel,
     pub softplus_fwd_typed: TypedKernel,
@@ -326,6 +340,11 @@ impl MambaKernels {
             silu_bwd_typed: load_typed("silu_backward")?,
             softplus_bwd_typed: load_typed("softplus_backward")?,
             gather_last_timestep_typed: load_typed("gather_last_timestep")?,
+
+            // typed training-backward kernels (Step 4a)
+            gating_bwd_typed: load_typed("gating_backward")?,
+            rmsnorm_bwd_typed: load_typed("rmsnorm_backward")?,
+            conv1d_burnin_bwd_typed: load_typed("conv1d_burnin_backward")?,
 
             // dual-dtype (half-only)
             rmsnorm_fwd_f32in_typed: load_half("rmsnorm_forward_f32in")?,
