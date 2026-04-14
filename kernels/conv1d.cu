@@ -199,6 +199,41 @@ extern "C" __global__ void conv1d_burnin_forward_nosave(
     }
 }
 
+// Templated conv1d burnin nosave — sequence forward for prefill / target net.
+// Activations in T_IN, state/weight/bias stay f32.
+#define DEFINE_CONV1D_BURNIN_NOSAVE(SUFFIX, T, FROM_F)                      \
+extern "C" __global__ void conv1d_burnin_forward_nosave_##SUFFIX(           \
+    T* u_out,                                                               \
+    float* state,                                                           \
+    const T* x_branch,                                                      \
+    const float* weight,                                                    \
+    const float* bias,                                                      \
+    int batch, int T_len, int d_inner, int d_conv                           \
+) {                                                                         \
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;                        \
+    int total = batch * d_inner;                                            \
+    if (idx >= total) return;                                               \
+    int b = idx / d_inner;                                                  \
+    int d = idx % d_inner;                                                  \
+    int state_base = (b * d_inner + d) * d_conv;                            \
+    for (int t = 0; t < T_len; t++) {                                       \
+        int bt_di = (b * T_len + t) * d_inner + d;                          \
+        for (int k = 0; k < d_conv - 1; k++) {                              \
+            state[state_base + k] = state[state_base + k + 1];              \
+        }                                                                   \
+        state[state_base + d_conv - 1] = to_f(x_branch[bt_di]);             \
+        float val = bias[d];                                                \
+        for (int k = 0; k < d_conv; k++) {                                  \
+            val += state[state_base + k] * weight[d * d_conv + k];          \
+        }                                                                   \
+        u_out[bt_di] = FROM_F(val / (1.0f + exp2f(-val * 1.4426950408889634f))); \
+    }                                                                       \
+}
+
+DEFINE_CONV1D_BURNIN_NOSAVE(f32,  float,         from_f_f32)
+DEFINE_CONV1D_BURNIN_NOSAVE(bf16, __nv_bfloat16, from_f_bf16)
+DEFINE_CONV1D_BURNIN_NOSAVE(f16,  __half,        from_f_f16)
+
 // Conv1d burnin backward (T>1, reverse): process T steps in reverse for each (b,d) thread.
 // Includes BUG-M2 carry fix: gradient propagates through shift register positions.
 // Fused with SiLU backward.

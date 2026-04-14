@@ -125,6 +125,10 @@ pub struct MambaKernels {
     pub softplus_copy_typed: TypedKernel,
     pub ssm_step_fwd_typed: TypedKernel,
     pub conv1d_step_fwd_typed: TypedKernel,
+    pub ssm_burnin_nosave_typed: TypedKernel,
+    pub conv1d_burnin_nosave_typed: TypedKernel,
+    pub silu_bwd_typed: TypedKernel,
+    pub softplus_bwd_typed: TypedKernel,
 
     // -- Parallel scan (optional, for T>128) --
     /// Parallel prefix scan SSM forward with activation saves.
@@ -255,6 +259,10 @@ impl MambaKernels {
             softplus_copy_typed: load_typed("softplus_copy")?,
             ssm_step_fwd_typed: load_typed("ssm_step_forward")?,
             conv1d_step_fwd_typed: load_typed("conv1d_step_forward")?,
+            ssm_burnin_nosave_typed: load_typed("ssm_burnin_forward_nosave")?,
+            conv1d_burnin_nosave_typed: load_typed("conv1d_burnin_forward_nosave")?,
+            silu_bwd_typed: load_typed("silu_backward")?,
+            softplus_bwd_typed: load_typed("softplus_backward")?,
 
             _module: module,
         })

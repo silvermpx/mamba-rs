@@ -230,6 +230,8 @@ pub struct Mamba3GpuInferenceEngine {
     pub cfg: Mamba3Config,
     pub batch: usize,
     pub input_dim: usize,
+    /// HF M3 models have no input_proj — skip GEMM, copy input → temporal.
+    pub identity_proj: bool,
     graph: Option<cudarc::driver::CudaGraph>,
     captured_state_ptr: u64,
     captured_scratch_ptr: u64,
@@ -251,6 +253,7 @@ impl Mamba3GpuInferenceEngine {
         let kernels = Mamba3Kernels::compile(device.context(), arch)?;
         let (blas, _ws) = device.create_cublas(&stream)?;
         let weights = GpuMamba3WeightsInf::from_cpu(&stream, cpu_weights, input_dim)?;
+        let identity_proj = cpu_weights.input_proj_w.is_empty();
 
         Ok(Self {
             kernels,
@@ -260,6 +263,7 @@ impl Mamba3GpuInferenceEngine {
             cfg,
             batch,
             input_dim,
+            identity_proj,
             graph: None,
             captured_state_ptr: 0,
             captured_scratch_ptr: 0,
@@ -352,26 +356,33 @@ impl Mamba3GpuInferenceEngine {
         let b_i = b as i32;
         let dm_i = dm as i32;
 
-        // Input projection SGEMM
-        sgemm_no_bias(
-            &self.blas,
-            &scratch.temporal,
-            &scratch.gpu_input,
-            self.weights.input_proj_w.ptr(),
-            b,
-            self.input_dim,
-            dm,
-        )?;
-        // Add bias
-        {
-            let n = b * dm;
-            let n_i = n as i32;
-            let grid = crate::mamba_ssm::gpu::launch::grid_1d(n);
-            let mut builder = self.stream.launch_builder(&self.kernels.vec_add_inplace);
-            builder.arg(scratch.temporal.inner());
-            builder.arg(self.weights.input_proj_b.inner());
-            builder.arg(&n_i);
-            unsafe { builder.launch(grid) }.map_err(|e| format!("input_proj bias: {e:?}"))?;
+        if self.identity_proj {
+            // HF M3 models have no input_proj — embedding is already d_model.
+            // Copy gpu_input → temporal directly (mirrors CPU mamba3_step no-proj).
+            debug_assert_eq!(self.input_dim, dm);
+            scratch.temporal.copy_from_raw(&scratch.gpu_input, &self.stream)?;
+        } else {
+            // Input projection SGEMM
+            sgemm_no_bias(
+                &self.blas,
+                &scratch.temporal,
+                &scratch.gpu_input,
+                self.weights.input_proj_w.ptr(),
+                b,
+                self.input_dim,
+                dm,
+            )?;
+            // Add bias
+            {
+                let n = b * dm;
+                let n_i = n as i32;
+                let grid = crate::mamba_ssm::gpu::launch::grid_1d(n);
+                let mut builder = self.stream.launch_builder(&self.kernels.vec_add_inplace);
+                builder.arg(scratch.temporal.inner());
+                builder.arg(self.weights.input_proj_b.inner());
+                builder.arg(&n_i);
+                unsafe { builder.launch(grid) }.map_err(|e| format!("input_proj bias: {e:?}"))?;
+            }
         }
 
         // Process each layer
