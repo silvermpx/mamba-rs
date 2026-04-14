@@ -98,6 +98,12 @@ extern "C" __global__ void rmsnorm_forward_##SUFFIX(                         \
     }                                                                        \
     __syncthreads();                                                         \
     float rms = sqrtf(sdata[0] / (float)dim + eps);                          \
+    /* Finite-guard: if an upstream kernel produced NaN or +inf (bf16/f16    \
+     * overflow on very deep models, 48+ layers), rms becomes non-finite    \
+     * and inv_rms contaminates every subsequent layer. Fall back to 1.0    \
+     * so output = x*scale without normalization — still wrong, but avoids  \
+     * the silent NaN cascade that breaks the rest of the network. */       \
+    if (!isfinite(rms) || rms < 1e-20f) rms = 1.0f;                          \
     if (d == 0) rms_out[b] = rms;                                            \
     __syncthreads();                                                         \
     float inv_rms = 1.0f / rms;                                              \
@@ -143,6 +149,12 @@ extern "C" __global__ void rmsnorm_forward_f32in_##SUFFIX(                   \
     }                                                                        \
     __syncthreads();                                                         \
     float rms = sqrtf(sdata[0] / (float)dim + eps);                          \
+    /* Finite-guard: if an upstream kernel produced NaN or +inf (bf16/f16    \
+     * overflow on very deep models, 48+ layers), rms becomes non-finite    \
+     * and inv_rms contaminates every subsequent layer. Fall back to 1.0    \
+     * so output = x*scale without normalization — still wrong, but avoids  \
+     * the silent NaN cascade that breaks the rest of the network. */       \
+    if (!isfinite(rms) || rms < 1e-20f) rms = 1.0f;                          \
     if (d == 0) rms_out[b] = rms;                                            \
     __syncthreads();                                                         \
     float inv_rms = 1.0f / rms;                                              \

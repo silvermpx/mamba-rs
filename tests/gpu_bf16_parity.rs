@@ -130,6 +130,79 @@ fn test_gpu_lm_bf16_matches_f32_130m() {
     assert!(kl < 1e-2, "KL divergence {kl} exceeds 1e-2 — bf16 drift");
 }
 
+/// Parametric parity across every cached `state-spaces/mamba-*-hf` snapshot.
+/// Drives each model as both f32 and bf16 and checks:
+/// 1. Greedy token match ≥ 90% over 15 tokens (bf16 drift can diverge earlier
+///    on larger models; the full-match 20/20 threshold only holds at 130m).
+/// 2. KL(f32 ‖ bf16) on the final logits < 5e-3 (looser than 130m's 1e-3
+///    to accommodate deeper models where bf16 residual accumulation is
+///    more pronounced — still well below any practical decision boundary).
+///
+/// Ignored by default — needs the full HF cache (several GB) + a GPU with
+/// ≥ 16 GB VRAM to host 2.8b in f32.
+#[test]
+#[ignore]
+fn test_gpu_lm_bf16_matches_f32_all_cached_models() {
+    use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
+    use mamba_rs::module::gpu_lm::GpuMambaLM;
+    use mamba_rs::module::sample::SampleParams;
+
+    let candidates = [
+        "mamba-130m-hf",
+        "mamba-370m-hf",
+        "mamba-1.4b-hf",
+        "mamba-2.8b-hf",
+    ];
+    let params = SampleParams {
+        temperature: 0.0,
+        max_tokens: 15,
+        ..Default::default()
+    };
+
+    let mut tested = 0;
+    for name in candidates {
+        let Some(dir) = find_model_dir(name) else {
+            eprintln!("[skip] {name} not in HF cache");
+            continue;
+        };
+        tested += 1;
+        eprintln!("\n=== {name} ===");
+
+        let mut lm_f32 = GpuMambaLM::from_hf_with_dtype(&dir, 0, WeightDtype::F32)
+            .unwrap_or_else(|e| panic!("{name} f32 load: {e}"));
+        let mut lm_bf16 = GpuMambaLM::from_hf_with_dtype(&dir, 0, WeightDtype::Bf16)
+            .unwrap_or_else(|e| panic!("{name} bf16 load: {e}"));
+
+        let tokens_f32 = lm_f32.generate(&[1, 2, 3, 4, 5], &params).unwrap();
+        let tokens_bf16 = lm_bf16.generate(&[1, 2, 3, 4, 5], &params).unwrap();
+
+        let matching = tokens_f32
+            .iter()
+            .zip(tokens_bf16.iter())
+            .filter(|(a, b)| a == b)
+            .count();
+        let kl = kl_divergence_logits(lm_f32.last_logits(0), lm_bf16.last_logits(0));
+        eprintln!(
+            "  {name}: greedy match {}/{}  KL={kl:.6}\n  f32  = {tokens_f32:?}\n  bf16 = {tokens_bf16:?}",
+            matching,
+            tokens_f32.len()
+        );
+
+        assert!(
+            matching as f64 / tokens_f32.len() as f64 >= 0.9,
+            "{name}: greedy match {matching}/{} < 90%",
+            tokens_f32.len()
+        );
+        assert!(kl < 5e-3, "{name}: KL {kl} >= 5e-3");
+    }
+
+    assert!(
+        tested > 0,
+        "no cached mamba-*-hf models found; test cannot verify anything"
+    );
+    eprintln!("\nTested {tested} cached model(s).");
+}
+
 /// Regression guard: F32 backbone behavior is bit-identical after the mixed
 /// native refactor. Uses synthetic weights (no HF cache needed). This is the
 /// "RL path untouched" proof — the F32 engine and its scratch never touch the
