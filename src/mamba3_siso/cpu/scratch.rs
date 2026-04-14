@@ -97,4 +97,40 @@ impl Mamba3Scratch {
             d_residual_buf: vec![0.0; t * dm],
         }
     }
+
+    /// Zero every buffer. Used when reusing a scratch across multiple backward
+    /// calls to guarantee no carry-over from a previous invocation. Cheaper
+    /// than reallocating but more defensive than relying on backward's internal
+    /// partial zeroing (which already resets hot BPTT fields but not every
+    /// intermediate).
+    pub fn zero_all(&mut self) {
+        self.post_norm_flat.fill(0.0);
+        self.proj_flat.fill(0.0);
+        self.gated_flat.fill(0.0);
+        self.out_flat.fill(0.0);
+        self.d_gated_flat.fill(0.0);
+        self.gated_buf.fill(0.0);
+        self.d_y_flat.fill(0.0);
+        self.d_z_flat.fill(0.0);
+        self.d_x_flat.fill(0.0);
+        self.d_b_flat.fill(0.0);
+        self.d_c_flat.fill(0.0);
+        self.d_h.fill(0.0);
+        self.d_alpha_flat.fill(0.0);
+        self.d_beta_flat.fill(0.0);
+        self.d_gamma_flat.fill(0.0);
+        self.d_b_pre_rope_flat.fill(0.0);
+        self.d_c_pre_rope_flat.fill(0.0);
+        self.d_angle_cumsum_flat.fill(0.0);
+        self.d_b_raw_flat.fill(0.0);
+        self.d_c_raw_flat.fill(0.0);
+        self.d_dd_dt_flat.fill(0.0);
+        self.d_dd_a_flat.fill(0.0);
+        self.d_trap_flat.fill(0.0);
+        self.d_angles_flat.fill(0.0);
+        self.d_proj_flat.fill(0.0);
+        self.d_post_norm_flat.fill(0.0);
+        self.post_norm_buf.fill(0.0);
+        self.d_residual_buf.fill(0.0);
+    }
 }

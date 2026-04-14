@@ -371,7 +371,12 @@ impl GpuMambaLM {
                         if need_decode_for_slot[i] {
                             let slot_logits =
                                 &mut self.logits_cpu[i * vocab_size..(i + 1) * vocab_size];
-                            Some(sample_token(slot_logits, &params[i], &outputs[i], &mut rngs[i]))
+                            Some(sample_token(
+                                slot_logits,
+                                &params[i],
+                                &outputs[i],
+                                &mut rngs[i],
+                            ))
                         } else {
                             None
                         }

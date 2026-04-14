@@ -251,4 +251,142 @@ fn m3_cpu_benchmark() {
         );
     }
     println!();
+
+    // ===================================================================
+    // Part 3: Parallel batched backward (B=8, T=32) via rayon
+    // ===================================================================
+    use mamba_rs::mamba3_siso::cpu::flat::Mamba3LayerFlat as LF;
+    use mamba_rs::mamba3_siso::cpu::parallel::{
+        Mamba3States, parallel_mamba3_backward, parallel_mamba3_forward,
+    };
+    use mamba_rs::mamba3_siso::cpu::weights::TrainMamba3Weights;
+
+    let batch = 8;
+    let seq_len = 32;
+    println!("mamba-3 SISO CPU parallel batched backward benchmark (B={batch}, T={seq_len})");
+    println!("=====================================================================");
+    let n_threads = rayon::current_num_threads();
+    println!("rayon threads available: {n_threads}");
+    println!();
+
+    for (name, cfg) in &configs() {
+        cfg.validate();
+        let input_dim = cfg.d_model;
+        let dims = Mamba3Dims::from_config(cfg, seq_len);
+        let nh = dims.nheads;
+        let hd = dims.headdim;
+        let ds = dims.d_state;
+        let nl = dims.n_layers;
+        let na = dims.num_rope_angles.max(1);
+
+        // Build weights for a multi-layer backbone.
+        let mut w = TrainMamba3Weights::zeros(&dims, input_dim);
+        for l in &mut w.layers {
+            let src = init_layer_w(&dims);
+            l.norm_weight.copy_from_slice(&src.norm_weight);
+            l.in_proj_w.copy_from_slice(&src.in_proj_w);
+            l.dt_bias.copy_from_slice(&src.dt_bias);
+            l.b_norm_weight.copy_from_slice(&src.b_norm_weight);
+            l.c_norm_weight.copy_from_slice(&src.c_norm_weight);
+            l.b_bias.copy_from_slice(&src.b_bias);
+            l.c_bias.copy_from_slice(&src.c_bias);
+            l.d_param.copy_from_slice(&src.d_param);
+            l.norm_gate_weight.copy_from_slice(&src.norm_gate_weight);
+            l.out_proj_w.copy_from_slice(&src.out_proj_w);
+        }
+
+        let mut temporal = vec![0.5f32; batch * seq_len * dims.d_model];
+        let mut acts: Vec<Vec<LF>> = (0..batch)
+            .map(|_| (0..nl).map(|_| LF::zeros(dims)).collect())
+            .collect();
+        let mut ssm = vec![0.0; batch * nl * nh * hd * ds];
+        let mut k = vec![0.0; batch * nl * nh * ds];
+        let mut v = vec![0.0; batch * nl * nh * hd];
+        let mut angle = vec![0.0; batch * nl * nh * na];
+        let mut d_temporal = vec![1.0f32; batch * seq_len * dims.d_model];
+        let mut d_w = TrainMamba3Weights::zeros(&dims, input_dim);
+
+        // Warmup (~3 iters) — both forward and backward populate thread-local
+        // scratch pools across all worker threads.
+        for _ in 0..3 {
+            temporal.fill(0.5);
+            ssm.fill(0.0);
+            k.fill(0.0);
+            v.fill(0.0);
+            angle.fill(0.0);
+            parallel_mamba3_forward(
+                &mut temporal,
+                &mut acts,
+                Mamba3States {
+                    ssm: &mut ssm,
+                    k: &mut k,
+                    v: &mut v,
+                    angle: &mut angle,
+                },
+                &w,
+                &dims,
+                batch,
+            );
+            d_temporal.fill(1.0);
+            d_w.zero();
+            parallel_mamba3_backward(
+                &mut d_temporal,
+                &acts,
+                &w,
+                &mut d_w,
+                &dims,
+                batch,
+                input_dim,
+            );
+        }
+
+        let iters = if cfg.d_model >= 512 { 20 } else { 100 };
+
+        // Forward baseline (already parallel).
+        let t0 = Instant::now();
+        for _ in 0..iters {
+            temporal.fill(0.5);
+            ssm.fill(0.0);
+            k.fill(0.0);
+            v.fill(0.0);
+            angle.fill(0.0);
+            parallel_mamba3_forward(
+                &mut temporal,
+                &mut acts,
+                Mamba3States {
+                    ssm: &mut ssm,
+                    k: &mut k,
+                    v: &mut v,
+                    angle: &mut angle,
+                },
+                &w,
+                &dims,
+                batch,
+            );
+        }
+        let fwd_us = t0.elapsed().as_micros() as f64 / iters as f64;
+
+        // Parallel backward timing.
+        let t0 = Instant::now();
+        for _ in 0..iters {
+            d_temporal.fill(1.0);
+            d_w.zero();
+            parallel_mamba3_backward(
+                &mut d_temporal,
+                &acts,
+                &w,
+                &mut d_w,
+                &dims,
+                batch,
+                input_dim,
+            );
+        }
+        let par_bwd_us = t0.elapsed().as_micros() as f64 / iters as f64;
+
+        println!(
+            "{name:>8}: d_model={:>3}, layers={}, B={} | parallel fwd {fwd_us:>8.1} us | parallel bwd {par_bwd_us:>8.1} us",
+            cfg.d_model, cfg.n_layers, batch,
+        );
+    }
+    println!();
 }

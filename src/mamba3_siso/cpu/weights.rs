@@ -110,6 +110,7 @@ impl TrainMamba3LayerWeights {
 }
 
 /// Training weights for the complete Mamba-3 backbone.
+#[derive(Clone)]
 pub struct TrainMamba3Weights {
     pub input_proj_w: Vec<f32>, // [input_dim * d_model]
     pub input_proj_b: Vec<f32>, // [d_model]
