@@ -131,10 +131,10 @@ pub struct GpuMamba3MixedWeights {
     pub bulk_arena: GpuByteBuffer,
     pub f32_arena: GpuByteBuffer,
     pub bulk_dtype: WeightDtype,
-    pub input_proj_w: WeightSliceDyn,   // bulk
-    pub input_proj_b: WeightSliceDyn,   // f32
+    pub input_proj_w: WeightSliceDyn, // bulk
+    pub input_proj_b: WeightSliceDyn, // f32
     pub layers: Vec<GpuMamba3MixedLayerWeights>,
-    pub norm_f_weight: WeightSliceDyn,  // f32
+    pub norm_f_weight: WeightSliceDyn, // f32
 }
 
 impl GpuMamba3MixedWeights {
@@ -145,23 +145,29 @@ impl GpuMamba3MixedWeights {
     ) -> Result<Self, String> {
         // Compute arena sizes (in elements)
         let bulk_elems: usize = std::iter::once(cpu.input_proj_w.len())
-            .chain(cpu.layers.iter().flat_map(|lw| {
-                [lw.in_proj_w.len(), lw.out_proj_w.len()]
-            }))
+            .chain(
+                cpu.layers
+                    .iter()
+                    .flat_map(|lw| [lw.in_proj_w.len(), lw.out_proj_w.len()]),
+            )
             .sum();
 
         let f32_elems: usize = cpu.input_proj_b.len()
             + cpu.norm_f_weight.len()
-            + cpu.layers.iter().map(|lw| {
-                lw.norm_weight.len()
-                    + lw.dt_bias.len()
-                    + lw.b_norm_weight.len()
-                    + lw.c_norm_weight.len()
-                    + lw.b_bias.len()
-                    + lw.c_bias.len()
-                    + lw.d_param.len()
-                    + lw.norm_gate_weight.len()
-            }).sum::<usize>();
+            + cpu
+                .layers
+                .iter()
+                .map(|lw| {
+                    lw.norm_weight.len()
+                        + lw.dt_bias.len()
+                        + lw.b_norm_weight.len()
+                        + lw.c_norm_weight.len()
+                        + lw.b_bias.len()
+                        + lw.c_bias.len()
+                        + lw.d_param.len()
+                        + lw.norm_gate_weight.len()
+                })
+                .sum::<usize>();
 
         let bulk_arena = GpuByteBuffer::zeros(stream, bulk_elems * bulk_dtype.size_bytes())?;
         let f32_arena = GpuByteBuffer::zeros(stream, f32_elems * 4)?;

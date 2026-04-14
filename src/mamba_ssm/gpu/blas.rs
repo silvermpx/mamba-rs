@@ -217,16 +217,7 @@ pub fn gpu_gemm_forward_dispatch(
             builder.arg(&n);
             unsafe { builder.launch(grid_1d(batch * n_in)) }
                 .map_err(|e| format!("cast_f32_to_half: {e:?}"))?;
-            gpu_gemm_ex_forward_raw(
-                ctx,
-                y,
-                half_ptr,
-                w_dtype,
-                w_ptr,
-                w_dtype,
-                bias_ptr,
-                dims,
-            )
+            gpu_gemm_ex_forward_raw(ctx, y, half_ptr, w_dtype, w_ptr, w_dtype, bias_ptr, dims)
         }
     }
 }
@@ -244,6 +235,7 @@ pub fn gpu_gemm_forward_dispatch(
 ///
 /// Bias (if provided) is always f32 (Mamba convention: biases stay f32 regardless of
 /// weight dtype). It is added via a separate broadcast kernel on the f32 output.
+#[allow(clippy::too_many_arguments)]
 pub fn gpu_gemm_ex_forward_raw(
     ctx: &GpuCtx,
     y: &mut GpuBuffer,

@@ -521,10 +521,7 @@ impl DtypedBuf {
     }
 }
 
-fn cu_memcpy_htod_raw(
-    dst: cudarc::driver::sys::CUdeviceptr,
-    bytes: &[u8],
-) -> Result<(), String> {
+fn cu_memcpy_htod_raw(dst: cudarc::driver::sys::CUdeviceptr, bytes: &[u8]) -> Result<(), String> {
     if bytes.is_empty() {
         return Ok(());
     }

@@ -197,7 +197,9 @@ fn run_gpu(
     if dtype == WeightDtype::F32 {
         run_gpu_f32(model_dir, args, prompt_ids, n_prompt, params, tokenizer);
     } else {
-        run_gpu_mixed(model_dir, args, prompt_ids, n_prompt, params, tokenizer, dtype);
+        run_gpu_mixed(
+            model_dir, args, prompt_ids, n_prompt, params, tokenizer, dtype,
+        );
     }
 }
 
@@ -262,15 +264,12 @@ fn run_gpu_mixed(
     dtype: mamba_rs::mamba_ssm::gpu::dtype::WeightDtype,
 ) {
     let t_load = Instant::now();
-    let mut lm = mamba_rs::module::gpu_lm::GpuMambaLMMixed::from_hf(
-        model_dir,
-        args.gpu_device,
-        dtype,
-    )
-    .unwrap_or_else(|e| {
-        eprintln!("error: failed to load GPU mixed model: {e}");
-        std::process::exit(1);
-    });
+    let mut lm =
+        mamba_rs::module::gpu_lm::GpuMambaLMMixed::from_hf(model_dir, args.gpu_device, dtype)
+            .unwrap_or_else(|e| {
+                eprintln!("error: failed to load GPU mixed model: {e}");
+                std::process::exit(1);
+            });
     lm.capture_graph().unwrap_or_else(|e| {
         eprintln!("warning: CUDA Graph capture failed ({e}), running without graph");
     });

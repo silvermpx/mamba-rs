@@ -8,8 +8,9 @@
 
 use cudarc::cublas::sys as cublas_sys;
 
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Default)]
 pub enum WeightDtype {
+    #[default]
     F32,
     F16,
     Bf16,
@@ -52,12 +53,6 @@ impl WeightDtype {
             Self::F16 => "f16",
             Self::Bf16 => "bf16",
         }
-    }
-}
-
-impl Default for WeightDtype {
-    fn default() -> Self {
-        Self::F32
     }
 }
 

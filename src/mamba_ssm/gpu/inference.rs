@@ -5,7 +5,7 @@
 //!
 //! All 12 existing CUDA kernels are reused — zero new kernel code needed.
 
-use super::blas::{gpu_gemm_forward_dispatch, gpu_sgemm_forward_raw};
+use super::blas::gpu_gemm_forward_dispatch;
 use super::buffers::GpuBuffer;
 use super::context::GpuCtx;
 use super::device::GpuDevice;
@@ -723,12 +723,8 @@ impl GpuMambaInferenceMixed {
         // Create f32 engine first (builds ctx, kernels, a_neg_all via CPU upload path).
         // We'll then discard its `weights` flat buffer and replace with mixed arena.
         let engine = GpuMambaInference::new(device, cpu_weights, cfg, input_dim, batch)?;
-        let mixed_weights = GpuMambaMixedWeights::from_cpu(
-            &engine.ctx.stream,
-            cpu_weights,
-            &cfg,
-            bulk_dtype,
-        )?;
+        let mixed_weights =
+            GpuMambaMixedWeights::from_cpu(&engine.ctx.stream, cpu_weights, &cfg, bulk_dtype)?;
 
         // Precompute a_neg into a separate arena (same as engine but from mixed weights'
         // f32 a_log — they match since a_log is f32 in both storages).
@@ -773,7 +769,8 @@ impl GpuMambaInferenceMixed {
         if let Some(ref g) = self.graph {
             assert_eq!(state.conv.cached_ptr(), self.captured_state_ptr);
             assert_eq!(scratch.gpu_input.cached_ptr(), self.captured_scratch_ptr);
-            g.launch().map_err(|e| format!("graph launch mixed: {e:?}"))?;
+            g.launch()
+                .map_err(|e| format!("graph launch mixed: {e:?}"))?;
         } else {
             self.step_kernels_mixed(state, scratch)?;
         }
@@ -796,7 +793,8 @@ impl GpuMambaInferenceMixed {
         if let Some(ref g) = self.graph {
             assert_eq!(state.conv.cached_ptr(), self.captured_state_ptr);
             assert_eq!(scratch.gpu_input.cached_ptr(), self.captured_scratch_ptr);
-            g.launch().map_err(|e| format!("graph launch mixed: {e:?}"))?;
+            g.launch()
+                .map_err(|e| format!("graph launch mixed: {e:?}"))?;
         } else {
             self.step_kernels_mixed(state, scratch)?;
         }
@@ -1048,14 +1046,8 @@ impl GpuMambaBackboneMixed {
         bulk_dtype: WeightDtype,
     ) -> Result<Self, String> {
         let device = GpuDevice::new(gpu_ordinal)?;
-        let engine = GpuMambaInferenceMixed::new(
-            &device,
-            cpu_weights,
-            cfg,
-            input_dim,
-            batch,
-            bulk_dtype,
-        )?;
+        let engine =
+            GpuMambaInferenceMixed::new(&device, cpu_weights, cfg, input_dim, batch, bulk_dtype)?;
         let state = engine.alloc_state()?;
         let scratch = engine.alloc_scratch()?;
         Ok(Self {
@@ -1066,7 +1058,8 @@ impl GpuMambaBackboneMixed {
     }
 
     pub fn step(&mut self, input: &[f32], output: &mut [f32]) -> Result<(), String> {
-        self.engine.step(input, output, &mut self.state, &mut self.scratch)
+        self.engine
+            .step(input, output, &mut self.state, &mut self.scratch)
     }
 
     pub fn step_gpu_only(&mut self, input: &[f32]) -> Result<(), String> {
@@ -1081,9 +1074,11 @@ impl GpuMambaBackboneMixed {
     pub fn capture_graph(&mut self) -> Result<(), String> {
         let input = vec![0.0f32; self.engine.engine.batch * self.engine.engine.input_dim];
         let mut output = vec![0.0f32; self.engine.engine.batch * self.engine.engine.cfg.d_model];
-        self.engine.step(&input, &mut output, &mut self.state, &mut self.scratch)?;
+        self.engine
+            .step(&input, &mut output, &mut self.state, &mut self.scratch)?;
         self.state.reset(&self.engine.engine.ctx.stream)?;
-        self.engine.capture_graph(&mut self.state, &mut self.scratch)
+        self.engine
+            .capture_graph(&mut self.state, &mut self.scratch)
     }
 
     pub fn config(&self) -> &MambaConfig {

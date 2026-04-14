@@ -190,6 +190,7 @@ pub struct GpuMambaLMMixed {
     /// Optional untied lm_head (also bulk dtype).
     gpu_lm_head: Option<GpuByteBuffer>,
     /// f32 staging buffer for hidden state (before lm_head).
+    #[allow(dead_code)]
     gpu_hidden: GpuBuffer,
     /// f32 logits output.
     gpu_logits: GpuBuffer,
