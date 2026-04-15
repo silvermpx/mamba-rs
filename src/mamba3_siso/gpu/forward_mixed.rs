@@ -192,7 +192,9 @@ impl GpuMamba3BackboneMixedActs {
                     c_biased: DtypedBuf::zeros(stream, bt * nh * ds, dtype)?,
                     k: DtypedBuf::zeros(stream, bt * nh * ds, dtype)?,
                     q: DtypedBuf::zeros(stream, bt * nh * ds, dtype)?,
-                    angle_cumsum: GpuBuffer::zeros(stream, bt * nh * na)?,
+                    // `.max(1)` — defense in depth, same rationale as
+                    // `angles_raw` above and the f32 `angle_cumsum` path.
+                    angle_cumsum: GpuBuffer::zeros(stream, bt * nh * na.max(1))?,
                     alpha: GpuBuffer::zeros(stream, bt * nh)?,
                     beta: GpuBuffer::zeros(stream, bt * nh)?,
                     gamma: GpuBuffer::zeros(stream, bt * nh)?,

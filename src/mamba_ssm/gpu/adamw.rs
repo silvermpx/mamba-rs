@@ -58,15 +58,28 @@ pub struct AdamWBiasFactors {
 }
 
 impl AdamWBiasFactors {
+    /// Allocate the 2-element device buffer. Initialises to `[1.0, 1.0]`
+    /// — the neutral bias-correction value (`1 / (1 - β^1)` for step 1 is
+    /// `~10` for β1=0.9 but the kernel tolerates any finite factor; 1.0
+    /// produces an "Adam without bias correction" update if the buffer is
+    /// ever read before `write()`). This guards against a silent-wrong
+    /// update path where a zero-init buffer would make `m_hat = v_hat = 0`
+    /// and the captured kernel would apply ONLY weight decay, no Adam
+    /// step, on the first replay if `write()` was forgotten.
     pub fn new(stream: &Arc<CudaStream>) -> Result<Self, String> {
-        Ok(Self {
-            buf: GpuBuffer::zeros(stream, 2)?,
-        })
+        let buf = GpuBuffer::zeros(stream, 2)?;
+        let mut this = Self { buf };
+        this.write(stream, 1.0, 1.0)?;
+        Ok(this)
     }
 
     /// Write `(bc1, bc2)` for the upcoming step. Async H2D — the next
     /// graph replay will see these values via the device pointer.
     pub fn write(&mut self, stream: &Arc<CudaStream>, bc1: f32, bc2: f32) -> Result<(), String> {
+        debug_assert!(
+            bc1.is_finite() && bc2.is_finite() && bc1 > 0.0 && bc2 > 0.0,
+            "AdamWBiasFactors::write got non-finite or non-positive values: bc1={bc1} bc2={bc2}"
+        );
         self.buf.upload(stream, &[bc1, bc2])
     }
 

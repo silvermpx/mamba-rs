@@ -191,11 +191,28 @@ impl GpuMamba3LM {
             GpuMamba3Backbone::new_with_dtype(gpu_ordinal, &weights, cfg, d_model, batch, dtype)?;
         let stream = backbone.stream();
 
+        // Pad untied lm_head to `vocab_size_padded` rows so the untied GEMM
+        // can write into `gpu_logits` with the same row stride as the tied
+        // path. Without padding the GEMM emits contiguous [B, vocab_size]
+        // while the CPU-side downloader reads with stride vocab_size_padded
+        // → every batch slot beyond the first gets wrong logits on any
+        // checkpoint whose vocab isn't 64-aligned. Same bug + same fix that
+        // landed in M1 (GpuMambaLM) at commit 5dde438.
+        let lm_head_padded: Option<Vec<f32>> = lm_head.as_ref().map(|lm| {
+            if vocab_size == vocab_size_padded {
+                lm.clone()
+            } else {
+                let mut padded = vec![0.0f32; vocab_size_padded * d_model];
+                padded[..vocab_size * d_model].copy_from_slice(lm);
+                padded
+            }
+        });
+
         let embed_storage = match dtype {
             WeightDtype::F32 => {
                 let mut e = GpuBuffer::zeros(stream, embed.len())?;
                 e.upload(stream, &embed)?;
-                let lm = if let Some(ref lm_w) = lm_head {
+                let lm = if let Some(ref lm_w) = lm_head_padded {
                     let mut b = GpuBuffer::zeros(stream, lm_w.len())?;
                     b.upload(stream, lm_w)?;
                     Some(b)
@@ -211,7 +228,7 @@ impl GpuMamba3LM {
                 let embed_bytes = embed.len() * dtype.size_bytes();
                 let e = GpuByteBuffer::zeros(stream, embed_bytes)?;
                 upload_f32_as_dtype(&e, &embed, dtype)?;
-                let lm = if let Some(ref lm_w) = lm_head {
+                let lm = if let Some(ref lm_w) = lm_head_padded {
                     let lm_bytes = lm_w.len() * dtype.size_bytes();
                     let b = GpuByteBuffer::zeros(stream, lm_bytes)?;
                     upload_f32_as_dtype(&b, lm_w, dtype)?;
@@ -432,7 +449,10 @@ impl GpuMamba3LM {
         match &self.embed_storage {
             EmbedStorage::F32 { embed, lm_head } => {
                 if let Some(lm) = lm_head {
-                    // Untied: logits[B,V] = hidden[B,D] @ lm_head[D,V]
+                    // Untied: logits[B,Vpad] = hidden[B,D] @ lm_head[D,Vpad].
+                    // `vocab_size_padded` matches lm_head and gpu_logits row
+                    // stride — see padding at lines 194-203 and same-bug fix
+                    // in M1 (commit 5dde438).
                     self.backbone.download_temporal(&mut self.input_cpu)?;
                     self.gpu_hidden.upload(&stream, &self.input_cpu)?;
                     gpu_gemm_typed_raw_no_bias(
@@ -449,7 +469,7 @@ impl GpuMamba3LM {
                             ptr: lm.cached_ptr(),
                             dtype: WeightDtype::F32,
                         },
-                        (b, d, self.vocab_size),
+                        (b, d, self.vocab_size_padded),
                     )?;
                 } else {
                     gpu_sgemm_tied_lm_head_blas(
@@ -475,6 +495,7 @@ impl GpuMamba3LM {
                 );
 
                 if let Some(lm) = lm_head {
+                    // Untied half path — same padded stride as F32 path above.
                     gpu_gemm_typed_raw_no_bias(
                         &blas,
                         TypedPtr {
@@ -489,7 +510,7 @@ impl GpuMamba3LM {
                             ptr: lm.cached_ptr(),
                             dtype: *dtype,
                         },
-                        (b, d, self.vocab_size),
+                        (b, d, self.vocab_size_padded),
                     )?;
                 } else {
                     gpu_gemm_ex_tied_lm_head_blas(

@@ -223,10 +223,14 @@ __device__ __forceinline__ void block_inclusive_scan_ab(
 //   SMEM_POST_A/B      = 2*MAX_DSTATE      (inter-chunk reverse-scan postfix)
 //   SMEM_NEXT_A        = NTHREADS          (next-thread δA exchange buffer)
 //   SMEM_DA_LOG_RED    = NTHREADS          (block-reduce of d_a_log per (n))
+//   SMEM_CHUNK_FIRST_A = MAX_DSTATE        (per-n boundary from later chunk
+//                                           used by earlier chunk's last
+//                                           thread as pair.a = a_{t+1})
 //
-// Total bwd extra: 2*4 + 2*256 + 128 + 128 = 776 floats = 3104 B added to
-// the 7200 B fwd footprint → 10304 B per block (still < 48 KB so no
-// cudaFuncSetAttribute needed at default MAX_DSTATE=256).
+// Total bwd extra: 2*4 + 2*256 + 128 + 128 + 256 = 1032 floats = 4128 B
+// added to the 7200 B fwd footprint → 11328 B per block (still < 48 KB so
+// no cudaFuncSetAttribute needed at default MAX_DSTATE=256). Rust launch
+// code (src/mamba_ssm/gpu/launch.rs::grid_parallel_scan_bwd) matches this.
 #define SMEM_REV_WA_OFF        (SMEM_TOTAL_FLOATS)
 #define SMEM_REV_WB_OFF        (SMEM_TOTAL_FLOATS + NWARPS)
 #define SMEM_POST_A_OFF        (SMEM_TOTAL_FLOATS + 2 * NWARPS)

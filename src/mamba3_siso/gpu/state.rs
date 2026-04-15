@@ -418,7 +418,11 @@ impl GpuMamba3TargetScratch {
             c_biased: GpuBuffer::zeros(stream, bt * nh * ds)?,
             k: GpuBuffer::zeros(stream, bt * nh * ds)?,
             q: GpuBuffer::zeros(stream, bt * nh * ds)?,
-            angle_cumsum: GpuBuffer::zeros(stream, bt * nh * na)?,
+            // `.max(1)` — keep the sentinel allocation when RoPE is disabled
+            // (na==0) so kernels that unconditionally index into the buffer
+            // don't touch a zero-length allocation. Mirrors the guard on
+            // f32 `GpuMamba3LayerActs::angle_cumsum`.
+            angle_cumsum: GpuBuffer::zeros(stream, bt * nh * na.max(1))?,
             alpha: GpuBuffer::zeros(stream, bt * nh)?,
             beta: GpuBuffer::zeros(stream, bt * nh)?,
             gamma: GpuBuffer::zeros(stream, bt * nh)?,
@@ -431,7 +435,7 @@ impl GpuMamba3TargetScratch {
             ssm_states: GpuBuffer::zeros(stream, b * nl * nh * hd * ds)?,
             k_states: GpuBuffer::zeros(stream, b * nl * nh * ds)?,
             v_states: GpuBuffer::zeros(stream, b * nl * nh * hd)?,
-            angle_states: GpuBuffer::zeros(stream, b * nl * nh * na)?,
+            angle_states: GpuBuffer::zeros(stream, b * nl * nh * na.max(1))?,
         })
     }
 }
