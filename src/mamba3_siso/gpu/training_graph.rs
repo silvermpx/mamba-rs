@@ -45,6 +45,8 @@ pub struct GpuMamba3TrainingStepGraph {
     captured_k_states_ptr: u64,
     captured_v_states_ptr: u64,
     captured_angle_states_ptr: u64,
+    // `temporal_f32` is written by the captured forward — pointer baked in.
+    captured_temporal_ptr: u64,
     // Weight-stability proxies: BOTH first- and last-allocated master/compute
     // tensors. See M1 training_graph.rs for the rationale.
     captured_master_input_proj_w_ptr: u64,
@@ -102,6 +104,7 @@ impl GpuMamba3TrainingStepGraph {
         let snap_k_states = k_states.cached_ptr();
         let snap_v_states = v_states.cached_ptr();
         let snap_angle_states = angle_states.cached_ptr();
+        let snap_temporal = temporal_f32.cached_ptr();
         let snap_master_input = train_w.master.input_proj_w.cached_ptr();
         let snap_master_norm_f = train_w.master.norm_f_weight.cached_ptr();
         let snap_compute_input = train_w.compute.input_proj_w.ptr();
@@ -162,6 +165,7 @@ impl GpuMamba3TrainingStepGraph {
             captured_k_states_ptr: snap_k_states,
             captured_v_states_ptr: snap_v_states,
             captured_angle_states_ptr: snap_angle_states,
+            captured_temporal_ptr: snap_temporal,
             captured_master_input_proj_w_ptr: snap_master_input,
             captured_master_norm_f_ptr: snap_master_norm_f,
             captured_compute_input_proj_w_ptr: snap_compute_input,
@@ -178,6 +182,7 @@ impl GpuMamba3TrainingStepGraph {
         adam: &GpuAdamW,
         bias: &AdamWBiasFactors,
         grads: &GpuMamba3Grads,
+        temporal_f32: &GpuBuffer,
         mamba_input: &GpuBuffer,
         d_temporal: &GpuBuffer,
         ssm_states: &GpuBuffer,
@@ -234,6 +239,11 @@ impl GpuMamba3TrainingStepGraph {
             angle_states.cached_ptr(),
             self.captured_angle_states_ptr,
             "M3 training_graph replay: angle_states pointer changed since capture"
+        );
+        assert_eq!(
+            temporal_f32.cached_ptr(),
+            self.captured_temporal_ptr,
+            "M3 training_graph replay: temporal_f32 pointer changed since capture"
         );
         assert_eq!(
             train_w.master.input_proj_w.cached_ptr(),
@@ -294,6 +304,8 @@ pub struct GpuMamba3F32TrainingStepGraph {
     captured_k_states_ptr: u64,
     captured_v_states_ptr: u64,
     captured_angle_states_ptr: u64,
+    // `temporal` is written by the captured forward — pointer baked in.
+    captured_temporal_ptr: u64,
     captured_weights_input_proj_w_ptr: u64,
     captured_weights_norm_f_ptr: u64,
 }
@@ -328,6 +340,7 @@ impl GpuMamba3F32TrainingStepGraph {
         let snap_k = k_states.cached_ptr();
         let snap_v = v_states.cached_ptr();
         let snap_angle = angle_states.cached_ptr();
+        let snap_temporal = temporal.cached_ptr();
         let snap_input_proj = weights.input_proj_w.cached_ptr();
         let snap_norm_f = weights.norm_f_weight.cached_ptr();
 
@@ -375,6 +388,7 @@ impl GpuMamba3F32TrainingStepGraph {
             captured_k_states_ptr: snap_k,
             captured_v_states_ptr: snap_v,
             captured_angle_states_ptr: snap_angle,
+            captured_temporal_ptr: snap_temporal,
             captured_weights_input_proj_w_ptr: snap_input_proj,
             captured_weights_norm_f_ptr: snap_norm_f,
         })
@@ -387,6 +401,7 @@ impl GpuMamba3F32TrainingStepGraph {
         adam: &GpuAdamW,
         bias: &AdamWBiasFactors,
         grads: &GpuMamba3Grads,
+        temporal: &GpuBuffer,
         mamba_input: &GpuBuffer,
         d_temporal: &GpuBuffer,
         ssm_states: &GpuBuffer,
@@ -443,6 +458,11 @@ impl GpuMamba3F32TrainingStepGraph {
             angle_states.cached_ptr(),
             self.captured_angle_states_ptr,
             "angle_states"
+        );
+        check!(
+            temporal.cached_ptr(),
+            self.captured_temporal_ptr,
+            "temporal"
         );
         check!(
             weights.input_proj_w.cached_ptr(),

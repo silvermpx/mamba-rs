@@ -266,6 +266,7 @@ fn training_graph_bf16_one_step_matches_eager() {
             &g.adam,
             &g.bias,
             &g.grads,
+            &g.a_neg_all,
             &g.mamba_input,
             &g.d_temporal,
             &g.state,
@@ -352,6 +353,7 @@ fn training_graph_bf16_multi_replay_matches_eager() {
                 &g.adam,
                 &g.bias,
                 &g.grads,
+                &g.a_neg_all,
                 &g.mamba_input,
                 &g.d_temporal,
                 &g.state,
@@ -425,6 +427,7 @@ fn training_graph_panics_on_pointer_mismatch() {
             &g.adam,
             &g.bias,
             &g.grads,
+            &g.a_neg_all,
             &new_input, // ← different buffer
             &g.d_temporal,
             &g.state,

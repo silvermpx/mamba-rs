@@ -196,7 +196,7 @@ fn m1_f32_training_graph_matches_eager() {
     g_bias.write(&ctx.stream, bc1, bc2).unwrap();
     graph
         .replay(
-            &g_w, &g_adam, &g_bias, &g_grads, &g_input, &g_dtemp, &g_state,
+            &g_w, &g_adam, &g_bias, &g_grads, &g_temp, &g_a_neg, &g_input, &g_dtemp, &g_state,
         )
         .unwrap();
     ctx.stream.synchronize().unwrap();
@@ -412,7 +412,8 @@ fn m3_f32_training_graph_matches_eager() {
     g_bias.write(&ctx.stream, bc1, bc2).unwrap();
     graph
         .replay(
-            &g_w, &g_adam, &g_bias, &g_grads, &g_mi, &g_dtemp, &g_ssm, &g_ks, &g_vs, &g_ang,
+            &g_w, &g_adam, &g_bias, &g_grads, &g_temp, &g_mi, &g_dtemp, &g_ssm, &g_ks, &g_vs,
+            &g_ang,
         )
         .unwrap();
     ctx.stream.synchronize().unwrap();

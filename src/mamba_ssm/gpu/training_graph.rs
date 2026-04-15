@@ -78,6 +78,8 @@ pub struct GpuMambaTrainingStepGraph {
     captured_adam_v_ptr: u64,
     captured_bias_factors_ptr: u64,
     captured_state_ptr: u64,
+    // `a_neg_all` is read by the captured backward; pointer baked into graph.
+    captured_a_neg_all_ptr: u64,
     // Weight-stability proxy: snapshot BOTH the first-allocated and the
     // last-allocated master tensor, plus their compute slices. If the
     // weight set is rebuilt (e.g. checkpoint reload), at least one of the
@@ -87,11 +89,12 @@ pub struct GpuMambaTrainingStepGraph {
     captured_master_norm_f_ptr: u64,
     captured_compute_input_proj_w_ptr: u64,
     captured_compute_norm_f_ptr: u64,
-    // Lazy-grow guard: forward_mixed's `ensure_half_staging` would silently
-    // bake a freed pointer into the graph if it grew between capture and
-    // replay. Capture pre-sizes via `presize_half_staging_for_train`, then
-    // snapshots the resulting pointer here. Replay asserts no grow has
-    // happened since.
+    // Defensive lazy-grow guard: today the typed mixed forward path uses
+    // `gpu_gemm_typed_forward_raw` which doesn't call `ensure_half_staging`,
+    // so this guard is currently inert. Kept (with cheap presize) so that
+    // any future refactor that routes a captured kernel through
+    // `gpu_gemm_forward_dispatch` doesn't silently bake a freed pointer
+    // (CUDA_ERROR_ILLEGAL_ADDRESS).
     captured_half_staging_ptr: u64,
 }
 
@@ -154,6 +157,7 @@ impl GpuMambaTrainingStepGraph {
         let snap_adam_v = adam.v.cached_ptr();
         let snap_bias = bias.ptr();
         let snap_state = state.ssm_states.cached_ptr();
+        let snap_a_neg = a_neg_all.cached_ptr();
         let snap_master_input = train_w.master.input_proj_w.cached_ptr();
         let snap_master_norm_f = train_w.master.norm_f_weight.cached_ptr();
         let snap_compute_input = train_w.compute.input_proj_w.ptr();
@@ -203,6 +207,7 @@ impl GpuMambaTrainingStepGraph {
             captured_adam_v_ptr: snap_adam_v,
             captured_bias_factors_ptr: snap_bias,
             captured_state_ptr: snap_state,
+            captured_a_neg_all_ptr: snap_a_neg,
             captured_master_input_proj_w_ptr: snap_master_input,
             captured_master_norm_f_ptr: snap_master_norm_f,
             captured_compute_input_proj_w_ptr: snap_compute_input,
@@ -228,6 +233,7 @@ impl GpuMambaTrainingStepGraph {
         adam: &GpuAdamW,
         bias: &AdamWBiasFactors,
         grads: &GpuMambaGrads,
+        a_neg_all: &GpuBuffer,
         mamba_input: &GpuBuffer,
         d_temporal: &GpuBuffer,
         state: &GpuRecurrentState,
@@ -266,6 +272,11 @@ impl GpuMambaTrainingStepGraph {
             state.ssm_states.cached_ptr(),
             self.captured_state_ptr,
             "training_graph replay: state pointer changed since capture"
+        );
+        assert_eq!(
+            a_neg_all.cached_ptr(),
+            self.captured_a_neg_all_ptr,
+            "training_graph replay: a_neg_all pointer changed since capture"
         );
         assert_eq!(
             train_w.master.input_proj_w.cached_ptr(),
@@ -319,6 +330,10 @@ pub struct GpuMambaF32TrainingStepGraph {
     captured_adam_v_ptr: u64,
     captured_bias_factors_ptr: u64,
     captured_state_ptr: u64,
+    // `temporal` and `a_neg_all` are written/read by forward+backward inside
+    // the captured body — pointers baked into the graph.
+    captured_temporal_ptr: u64,
+    captured_a_neg_all_ptr: u64,
     captured_weights_input_proj_w_ptr: u64,
     captured_weights_norm_f_ptr: u64,
 }
@@ -352,6 +367,8 @@ impl GpuMambaF32TrainingStepGraph {
         let snap_adam_v = adam.v.cached_ptr();
         let snap_bias = bias.ptr();
         let snap_state = state.ssm_states.cached_ptr();
+        let snap_temporal = temporal.cached_ptr();
+        let snap_a_neg = a_neg_all.cached_ptr();
         let snap_input_proj = weights.input_proj_w.cached_ptr();
         let snap_norm_f = weights.norm_f_weight.cached_ptr();
 
@@ -381,6 +398,8 @@ impl GpuMambaF32TrainingStepGraph {
             captured_adam_v_ptr: snap_adam_v,
             captured_bias_factors_ptr: snap_bias,
             captured_state_ptr: snap_state,
+            captured_temporal_ptr: snap_temporal,
+            captured_a_neg_all_ptr: snap_a_neg,
             captured_weights_input_proj_w_ptr: snap_input_proj,
             captured_weights_norm_f_ptr: snap_norm_f,
         })
@@ -393,6 +412,8 @@ impl GpuMambaF32TrainingStepGraph {
         adam: &GpuAdamW,
         bias: &AdamWBiasFactors,
         grads: &GpuMambaGrads,
+        temporal: &GpuBuffer,
+        a_neg_all: &GpuBuffer,
         mamba_input: &GpuBuffer,
         d_temporal: &GpuBuffer,
         state: &GpuRecurrentState,
@@ -431,6 +452,16 @@ impl GpuMambaF32TrainingStepGraph {
             state.ssm_states.cached_ptr(),
             self.captured_state_ptr,
             "f32 training_graph replay: state pointer changed since capture"
+        );
+        assert_eq!(
+            temporal.cached_ptr(),
+            self.captured_temporal_ptr,
+            "f32 training_graph replay: temporal pointer changed since capture"
+        );
+        assert_eq!(
+            a_neg_all.cached_ptr(),
+            self.captured_a_neg_all_ptr,
+            "f32 training_graph replay: a_neg_all pointer changed since capture"
         );
         assert_eq!(
             weights.input_proj_w.cached_ptr(),
