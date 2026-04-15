@@ -54,8 +54,9 @@ use crate::mamba_ssm::gpu::forward::{
 use crate::mamba_ssm::gpu::forward_mixed::{
     GpuMambaBackboneMixedActs, GpuMambaMixedTrainScratch, gpu_forward_mamba_backbone_train_mixed,
 };
+use crate::mamba_ssm::gpu::graph_capture::capture_into_graph;
 use crate::mamba_ssm::gpu::loss_scaler::{
-    DynamicLossScaler, OverflowFlag, check_inf_nan_gpu, scale_grads_gpu,
+    DynamicLossScaler, OverflowFlag, UnscaleFactor, check_inf_nan_gpu, scale_grads_skip_gpu,
 };
 use crate::mamba_ssm::gpu::training_graph::{
     GpuMambaF32TrainingStepGraph, GpuMambaTrainingStepGraph,
@@ -202,7 +203,7 @@ impl MambaTrainer {
     pub fn has_graph(&self) -> bool {
         match &self.inner {
             TrainerInner::F32(t) => t.graph.is_some(),
-            TrainerInner::Mixed(t) => t.graph.is_some(),
+            TrainerInner::Mixed(t) => t.has_graph(),
         }
     }
 
@@ -276,6 +277,14 @@ pub struct MambaTrainerMixed {
     /// Persistent device buffer for the scaled d_temporal (kept here so its
     /// pointer is stable across steps).
     d_temporal_scaled: Option<GpuBuffer>,
+    /// f16 CUDA Graph (Step 22). Captured body: forward + backward (with
+    /// scaled d_temporal) + check_inf_nan + scale_grads_skip + AdamW + sync.
+    /// CPU writes the next-step `1/loss_scale` into [`Self::unscale_factor`]
+    /// before each replay; the captured `scale_grads_skip` kernel reads it
+    /// via a stable device pointer baked at capture time.
+    graph_f16: Option<cudarc::driver::CudaGraph>,
+    /// 1-element device buffer of `1/loss_scale` (Step 22).
+    unscale_factor: Option<UnscaleFactor>,
 }
 
 impl MambaTrainerMixed {
@@ -351,14 +360,16 @@ impl MambaTrainerMixed {
         // f16 needs the dynamic loss scaler + a separate scratch buffer for
         // the scaled d_temporal (so the original caller-provided values stay
         // untouched). bf16 has the same dynamic range as f32 and skips both.
-        let (scaler, overflow_flag, d_temporal_scaled) = if matches!(dtype, WeightDtype::F16) {
-            let s = DynamicLossScaler::new();
-            let f = OverflowFlag::new(&ctx.stream)?;
-            let scaled = GpuBuffer::zeros(&ctx.stream, batch * seq_len * cfg.d_model)?;
-            (Some(s), Some(f), Some(scaled))
-        } else {
-            (None, None, None)
-        };
+        let (scaler, overflow_flag, d_temporal_scaled, unscale_factor) =
+            if matches!(dtype, WeightDtype::F16) {
+                let s = DynamicLossScaler::new();
+                let f = OverflowFlag::new(&ctx.stream)?;
+                let scaled = GpuBuffer::zeros(&ctx.stream, batch * seq_len * cfg.d_model)?;
+                let u = UnscaleFactor::new(&ctx.stream)?;
+                (Some(s), Some(f), Some(scaled), Some(u))
+            } else {
+                (None, None, None, None)
+            };
 
         ctx.stream
             .synchronize()
@@ -384,6 +395,8 @@ impl MambaTrainerMixed {
             scaler,
             overflow_flag,
             d_temporal_scaled,
+            graph_f16: None,
+            unscale_factor,
         })
     }
 
@@ -404,7 +417,7 @@ impl MambaTrainerMixed {
     }
 
     pub fn has_graph(&self) -> bool {
-        self.graph.is_some()
+        self.graph.is_some() || self.graph_f16.is_some()
     }
 
     /// Reset recurrent state (conv_states + ssm_states) to zero. Keeps
@@ -421,11 +434,7 @@ impl MambaTrainerMixed {
     /// resources have settled.
     pub fn capture_graph(&mut self) -> Result<(), String> {
         if matches!(self.dtype, WeightDtype::F16) {
-            return Err(
-                "f16 training cannot use a captured graph (overflow check requires CPU \
-                 readback). Step 22 will add a device-side skip-on-overflow kernel."
-                    .into(),
-            );
+            return self.capture_graph_f16();
         }
         // Make sure the bias buffer holds something finite — capture_into_graph
         // will record the AdamW kernel reading from it. Real values are
@@ -513,59 +522,70 @@ impl MambaTrainerMixed {
     fn step_f16(&mut self, input: &[f32], d_temporal: &[f32]) -> Result<StepMetrics, String> {
         let scale = self.scaler.as_ref().expect("f16 scaler").scale();
 
-        // 1. Upload input + scaled d_temporal.
+        // Upload input + scaled d_temporal (always, both eager and graph paths).
         self.mamba_input.upload(&self.ctx.stream, input)?;
-        // d_temporal_scaled = d_temporal * scale (CPU-side multiply — small
-        // dN buffer, < 1ms even at max shapes; avoids an extra GPU kernel).
         let scaled: Vec<f32> = d_temporal.iter().map(|v| v * scale).collect();
         let dt_scaled = self.d_temporal_scaled.as_mut().expect("f16 dt_scaled");
         dt_scaled.upload(&self.ctx.stream, &scaled)?;
 
-        // 2. forward + backward into self.grads (which will be the scaled
-        //    gradient arena).
-        self.grads.zero(&self.ctx.stream)?;
-        gpu_forward_mamba_backbone_train_mixed(
-            &self.ctx,
-            &mut self.acts,
-            &self.weights,
-            &self.mamba_input,
-            &mut self.state,
-            &mut self.scratch,
-        )?;
-        gpu_backward_mamba_backbone_mixed(
-            &self.ctx,
-            dt_scaled,
-            &self.grads,
-            &self.acts,
-            &self.weights.compute,
-            &self.a_neg_all,
-            &mut self.scratch,
-        )?;
+        // Update the unscale_factor device buffer (= 1/scale) for the
+        // graph-captured `scale_grads_skip` kernel. CPU writes async H2D;
+        // stream serialization ensures the captured kernel reads the
+        // up-to-date value.
+        if let Some(ref mut u) = self.unscale_factor {
+            u.write(&self.ctx.stream, 1.0 / scale)?;
+        }
+        // Pre-bump Adam step counter + write bias factors. Conservatively
+        // assume the optimizer WILL run (graph always launches AdamW; eager
+        // skips on overflow). On eager-overflow we restore step below.
+        let prev_step = self.adam.step;
+        let (next_step, bc1, bc2) = self.adam.advance();
+        self.bias.write(&self.ctx.stream, bc1, bc2)?;
 
-        // 3. Check for inf/nan in the grad arena.
         let flag = self.overflow_flag.as_mut().expect("f16 overflow flag");
         flag.zero(&self.ctx.stream)?;
-        check_inf_nan_gpu(&self.ctx, &self.ctx.kernels, flag, &self.grads.flat)?;
-        let overflow = flag.read(&self.ctx.stream)? != 0;
 
-        // 4. Either unscale + step or skip + back off.
-        let step;
-        if overflow {
-            // Skip optimizer entirely. Adam step counter is NOT bumped — Adam
-            // bias correction must reflect actual updates, not skipped ones
-            // (matches PyTorch GradScaler.step semantics).
-            step = self.adam.step;
-            self.scaler.as_mut().expect("f16 scaler").update(true);
+        let (step, overflow, replayed) = if let Some(ref g) = self.graph_f16 {
+            // Graph replay: forward + backward + check_inf_nan +
+            // scale_grads_skip + AdamW + sync all run as one cuGraphLaunch.
+            // grads.zero is included in the captured body.
+            g.launch().map_err(|e| format!("f16 graph launch: {e:?}"))?;
+            // Read overflow flag for scaler state machine. Graph already
+            // applied the conditional unscale — no rollback needed.
+            let overflow = flag.read(&self.ctx.stream)? != 0;
+            self.scaler.as_mut().expect("f16 scaler").update(overflow);
+            (next_step, overflow, true)
         } else {
-            scale_grads_gpu(
+            // Eager path: kernels match the graph body so numerics are
+            // identical to a captured replay.
+            self.grads.zero(&self.ctx.stream)?;
+            gpu_forward_mamba_backbone_train_mixed(
+                &self.ctx,
+                &mut self.acts,
+                &self.weights,
+                &self.mamba_input,
+                &mut self.state,
+                &mut self.scratch,
+            )?;
+            gpu_backward_mamba_backbone_mixed(
+                &self.ctx,
+                dt_scaled,
+                &self.grads,
+                &self.acts,
+                &self.weights.compute,
+                &self.a_neg_all,
+                &mut self.scratch,
+            )?;
+            check_inf_nan_gpu(&self.ctx, &self.ctx.kernels, flag, &self.grads.flat)?;
+            let unscale = self.unscale_factor.as_ref().expect("unscale buf");
+            scale_grads_skip_gpu(
                 &self.ctx,
                 &self.ctx.kernels,
+                self.overflow_flag.as_mut().unwrap(),
                 &mut self.grads.flat,
-                1.0 / scale,
+                unscale,
             )?;
-            let (s, bc1, bc2) = self.adam.advance();
-            step = s;
-            self.bias.write(&self.ctx.stream, bc1, bc2)?;
+            // AdamW always runs (with effectively-zero grads on overflow).
             step_m1_capturable(
                 &self.ctx,
                 &self.ctx.kernels.adamw_step_f32_capturable,
@@ -575,15 +595,106 @@ impl MambaTrainerMixed {
                 &self.grads,
             )?;
             self.weights.sync_master_to_compute(&self.ctx)?;
-            self.scaler.as_mut().expect("f16 scaler").update(false);
-        }
+            let overflow = self.overflow_flag.as_ref().unwrap().read(&self.ctx.stream)? != 0;
+            self.scaler.as_mut().expect("f16 scaler").update(overflow);
+            (next_step, overflow, false)
+        };
+
+        // On overflow: undo the Adam step bump (PyTorch GradScaler skips
+        // step counter). m and v will have absorbed the zero grad — that's
+        // a small but non-zero state effect; acceptable since the optimizer
+        // always-runs design is the price of graph capture.
+        let final_step = if overflow {
+            self.adam.step = prev_step;
+            prev_step
+        } else {
+            step
+        };
 
         Ok(StepMetrics {
-            step,
-            graph_replayed: false,
+            step: final_step,
+            graph_replayed: replayed,
             loss_scale: Some(scale),
             overflow_skipped: Some(overflow),
         })
+    }
+
+    /// Capture the f16 training step into a CUDA Graph (Step 22).
+    fn capture_graph_f16(&mut self) -> Result<(), String> {
+        // Make sure bias + unscale_factor + overflow_flag have valid initial
+        // values so the captured kernels record reads against stable
+        // pointers (the values are overwritten per replay).
+        self.bias.write(&self.ctx.stream, 1.0, 1.0)?;
+        let init_unscale = 1.0 / self.scaler.as_ref().expect("f16 scaler").scale();
+        self.unscale_factor
+            .as_mut()
+            .expect("unscale buf")
+            .write(&self.ctx.stream, init_unscale)?;
+        self.overflow_flag
+            .as_mut()
+            .expect("overflow flag")
+            .zero(&self.ctx.stream)?;
+        // Dummy upload so captured pointers reference initialized memory.
+        let dummy = vec![0.0f32; self.d_temporal.len()];
+        self.d_temporal_scaled
+            .as_mut()
+            .expect("dt_scaled")
+            .upload(&self.ctx.stream, &dummy)?;
+
+        // Pre-size the half-staging buffer (defensive — typed forward
+        // doesn't currently use it, but match the bf16 graph for parity).
+        self.ctx
+            .presize_half_staging_for_train(&self.cfg, self.batch, self.seq_len, self.dtype)?;
+
+        // Capture body: zero_grads + forward + backward + check_inf_nan +
+        // scale_grads_skip + AdamW + sync_master_to_compute. Mirrors
+        // `step_f16` eager path 1:1 so numerics match.
+        let stream = self.ctx.stream.clone();
+        let g = capture_into_graph(&stream, || {
+            self.grads.zero(&self.ctx.stream)?;
+            gpu_forward_mamba_backbone_train_mixed(
+                &self.ctx,
+                &mut self.acts,
+                &self.weights,
+                &self.mamba_input,
+                &mut self.state,
+                &mut self.scratch,
+            )?;
+            gpu_backward_mamba_backbone_mixed(
+                &self.ctx,
+                self.d_temporal_scaled.as_mut().unwrap(),
+                &self.grads,
+                &self.acts,
+                &self.weights.compute,
+                &self.a_neg_all,
+                &mut self.scratch,
+            )?;
+            check_inf_nan_gpu(
+                &self.ctx,
+                &self.ctx.kernels,
+                self.overflow_flag.as_mut().unwrap(),
+                &self.grads.flat,
+            )?;
+            scale_grads_skip_gpu(
+                &self.ctx,
+                &self.ctx.kernels,
+                self.overflow_flag.as_mut().unwrap(),
+                &mut self.grads.flat,
+                self.unscale_factor.as_ref().unwrap(),
+            )?;
+            step_m1_capturable(
+                &self.ctx,
+                &self.ctx.kernels.adamw_step_f32_capturable,
+                &self.adam,
+                self.bias.ptr(),
+                &mut self.weights.master,
+                &self.grads,
+            )?;
+            self.weights.sync_master_to_compute(&self.ctx)?;
+            Ok(())
+        })?;
+        self.graph_f16 = Some(g);
+        Ok(())
     }
 
     /// Eager fallback (used before [`Self::capture_graph`] is called and

@@ -11,8 +11,9 @@ use crate::mamba_ssm::gpu::buffers::GpuBuffer;
 use crate::mamba_ssm::gpu::context::GpuCtx;
 use crate::mamba_ssm::gpu::device::GpuDevice;
 use crate::mamba_ssm::gpu::dtype::WeightDtype;
+use crate::mamba_ssm::gpu::graph_capture::capture_into_graph;
 use crate::mamba_ssm::gpu::loss_scaler::{
-    DynamicLossScaler, OverflowFlag, check_inf_nan_gpu, scale_grads_gpu,
+    DynamicLossScaler, OverflowFlag, UnscaleFactor, check_inf_nan_gpu, scale_grads_skip_gpu,
 };
 use crate::mamba_ssm::gpu::trainer::StepMetrics;
 use crate::mamba3_siso::config::Mamba3Config;
@@ -134,7 +135,7 @@ impl Mamba3Trainer {
     pub fn has_graph(&self) -> bool {
         match &self.inner {
             Trainer3Inner::F32(t) => t.graph.is_some(),
-            Trainer3Inner::Mixed(t) => t.graph.is_some(),
+            Trainer3Inner::Mixed(t) => t.has_graph(),
         }
     }
     pub fn reset_state(&mut self) -> Result<(), String> {
@@ -193,6 +194,10 @@ pub struct Mamba3TrainerMixed {
     scaler: Option<DynamicLossScaler>,
     overflow_flag: Option<OverflowFlag>,
     d_temporal_scaled: Option<GpuBuffer>,
+    /// f16 CUDA Graph (Step 22, M3 analogue of M1's `graph_f16`).
+    graph_f16: Option<cudarc::driver::CudaGraph>,
+    /// 1-element device buffer of `1/loss_scale` (Step 22).
+    unscale_factor: Option<UnscaleFactor>,
 }
 
 impl Mamba3TrainerMixed {
@@ -265,14 +270,16 @@ impl Mamba3TrainerMixed {
             .with_weight_decay(weight_decay);
         let bias = AdamWBiasFactors::new(&ctx.stream)?;
 
-        let (scaler, overflow_flag, d_temporal_scaled) = if matches!(dtype, WeightDtype::F16) {
-            let s = DynamicLossScaler::new();
-            let f = OverflowFlag::new(&ctx.stream)?;
-            let scaled = GpuBuffer::zeros(&ctx.stream, batch * seq_len * cfg.d_model)?;
-            (Some(s), Some(f), Some(scaled))
-        } else {
-            (None, None, None)
-        };
+        let (scaler, overflow_flag, d_temporal_scaled, unscale_factor) =
+            if matches!(dtype, WeightDtype::F16) {
+                let s = DynamicLossScaler::new();
+                let f = OverflowFlag::new(&ctx.stream)?;
+                let scaled = GpuBuffer::zeros(&ctx.stream, batch * seq_len * cfg.d_model)?;
+                let u = UnscaleFactor::new(&ctx.stream)?;
+                (Some(s), Some(f), Some(scaled), Some(u))
+            } else {
+                (None, None, None, None)
+            };
 
         ctx.stream
             .synchronize()
@@ -302,6 +309,8 @@ impl Mamba3TrainerMixed {
             scaler,
             overflow_flag,
             d_temporal_scaled,
+            graph_f16: None,
+            unscale_factor,
         })
     }
 
@@ -322,7 +331,7 @@ impl Mamba3TrainerMixed {
     }
 
     pub fn has_graph(&self) -> bool {
-        self.graph.is_some()
+        self.graph.is_some() || self.graph_f16.is_some()
     }
 
     /// Reset SSM / K / V / angle states to zero (keeps weights untouched).
@@ -338,11 +347,7 @@ impl Mamba3TrainerMixed {
     /// warmup [`Self::step`].
     pub fn capture_graph(&mut self) -> Result<(), String> {
         if matches!(self.dtype, WeightDtype::F16) {
-            return Err(
-                "f16 training cannot use a captured graph (overflow check requires CPU \
-                 readback). Step 22 will add a device-side skip-on-overflow kernel."
-                    .into(),
-            );
+            return self.capture_graph_f16();
         }
         self.bias.write(&self.ctx.stream, 1.0, 1.0)?;
 
@@ -412,8 +417,8 @@ impl Mamba3TrainerMixed {
         Ok(StepMetrics::plain(step, replayed))
     }
 
-    /// f16 step (eager only). See [`crate::mamba_ssm::gpu::trainer::MambaTrainerMixed::step_f16`]
-    /// for the protocol.
+    /// f16 step. See M1 [`crate::mamba_ssm::gpu::trainer::MambaTrainerMixed::step_f16`]
+    /// for the full protocol; this is the M3 mirror.
     fn step_f16(&mut self, input: &[f32], d_temporal: &[f32]) -> Result<StepMetrics, String> {
         let scale = self.scaler.as_ref().expect("f16 scaler").scale();
         self.mamba_input.upload(&self.ctx.stream, input)?;
@@ -421,52 +426,58 @@ impl Mamba3TrainerMixed {
         let dt_scaled = self.d_temporal_scaled.as_mut().expect("f16 dt_scaled");
         dt_scaled.upload(&self.ctx.stream, &scaled)?;
 
-        self.grads.zero(&self.ctx.stream)?;
-        gpu_forward_mamba3_backbone_mixed(
-            &self.ctx,
-            &self.m3k,
-            &mut self.temporal,
-            &mut self.acts,
-            &self.weights,
-            &self.mamba_input,
-            &mut self.ssm_states,
-            &mut self.k_states,
-            &mut self.v_states,
-            &mut self.angle_states,
-            &mut self.mixed_scratch,
-            &self.dims,
-        )?;
-        gpu_backward_mamba3_backbone_mixed(
-            &self.ctx,
-            &self.m3k,
-            dt_scaled,
-            &self.acts,
-            &self.weights,
-            &self.grads,
-            &mut self.f32_scratch,
-            &mut self.mixed_scratch,
-            &self.dims,
-        )?;
+        if let Some(ref mut u) = self.unscale_factor {
+            u.write(&self.ctx.stream, 1.0 / scale)?;
+        }
+        let prev_step = self.adam.step;
+        let (next_step, bc1, bc2) = self.adam.advance();
+        self.bias.write(&self.ctx.stream, bc1, bc2)?;
 
         let flag = self.overflow_flag.as_mut().expect("f16 overflow flag");
         flag.zero(&self.ctx.stream)?;
-        check_inf_nan_gpu(&self.ctx, &self.ctx.kernels, flag, &self.grads.flat)?;
-        let overflow = flag.read(&self.ctx.stream)? != 0;
 
-        let step;
-        if overflow {
-            step = self.adam.step;
-            self.scaler.as_mut().expect("f16 scaler").update(true);
+        let (step, overflow, replayed) = if let Some(ref g) = self.graph_f16 {
+            g.launch()
+                .map_err(|e| format!("M3 f16 graph launch: {e:?}"))?;
+            let overflow = flag.read(&self.ctx.stream)? != 0;
+            self.scaler.as_mut().expect("f16 scaler").update(overflow);
+            (next_step, overflow, true)
         } else {
-            scale_grads_gpu(
+            self.grads.zero(&self.ctx.stream)?;
+            gpu_forward_mamba3_backbone_mixed(
+                &self.ctx,
+                &self.m3k,
+                &mut self.temporal,
+                &mut self.acts,
+                &self.weights,
+                &self.mamba_input,
+                &mut self.ssm_states,
+                &mut self.k_states,
+                &mut self.v_states,
+                &mut self.angle_states,
+                &mut self.mixed_scratch,
+                &self.dims,
+            )?;
+            gpu_backward_mamba3_backbone_mixed(
+                &self.ctx,
+                &self.m3k,
+                dt_scaled,
+                &self.acts,
+                &self.weights,
+                &self.grads,
+                &mut self.f32_scratch,
+                &mut self.mixed_scratch,
+                &self.dims,
+            )?;
+            check_inf_nan_gpu(&self.ctx, &self.ctx.kernels, flag, &self.grads.flat)?;
+            let unscale = self.unscale_factor.as_ref().unwrap();
+            scale_grads_skip_gpu(
                 &self.ctx,
                 &self.ctx.kernels,
+                self.overflow_flag.as_mut().unwrap(),
                 &mut self.grads.flat,
-                1.0 / scale,
+                unscale,
             )?;
-            let (s, bc1, bc2) = self.adam.advance();
-            step = s;
-            self.bias.write(&self.ctx.stream, bc1, bc2)?;
             step_m3_capturable(
                 &self.ctx,
                 &self.m3k.adamw_step_f32_capturable,
@@ -476,15 +487,110 @@ impl Mamba3TrainerMixed {
                 &self.grads,
             )?;
             self.weights.sync_master_to_compute(&self.ctx)?;
-            self.scaler.as_mut().expect("f16 scaler").update(false);
-        }
+            let overflow = self
+                .overflow_flag
+                .as_ref()
+                .unwrap()
+                .read(&self.ctx.stream)?
+                != 0;
+            self.scaler.as_mut().expect("f16 scaler").update(overflow);
+            (next_step, overflow, false)
+        };
+
+        let final_step = if overflow {
+            self.adam.step = prev_step;
+            prev_step
+        } else {
+            step
+        };
 
         Ok(StepMetrics {
-            step,
-            graph_replayed: false,
+            step: final_step,
+            graph_replayed: replayed,
             loss_scale: Some(scale),
             overflow_skipped: Some(overflow),
         })
+    }
+
+    /// Capture the M3 f16 training step (Step 22 — M3 mirror).
+    fn capture_graph_f16(&mut self) -> Result<(), String> {
+        self.bias.write(&self.ctx.stream, 1.0, 1.0)?;
+        let init_unscale = 1.0 / self.scaler.as_ref().expect("f16 scaler").scale();
+        self.unscale_factor
+            .as_mut()
+            .expect("unscale buf")
+            .write(&self.ctx.stream, init_unscale)?;
+        self.overflow_flag
+            .as_mut()
+            .expect("overflow flag")
+            .zero(&self.ctx.stream)?;
+        let dummy = vec![0.0f32; self.d_temporal.len()];
+        self.d_temporal_scaled
+            .as_mut()
+            .expect("dt_scaled")
+            .upload(&self.ctx.stream, &dummy)?;
+
+        self.ctx.presize_half_staging_for_train_m3(
+            &self.cfg,
+            self.dims.batch,
+            self.dims.seq_len,
+            self.dtype,
+        )?;
+
+        let stream = self.ctx.stream.clone();
+        let g = capture_into_graph(&stream, || {
+            self.grads.zero(&self.ctx.stream)?;
+            gpu_forward_mamba3_backbone_mixed(
+                &self.ctx,
+                &self.m3k,
+                &mut self.temporal,
+                &mut self.acts,
+                &self.weights,
+                &self.mamba_input,
+                &mut self.ssm_states,
+                &mut self.k_states,
+                &mut self.v_states,
+                &mut self.angle_states,
+                &mut self.mixed_scratch,
+                &self.dims,
+            )?;
+            gpu_backward_mamba3_backbone_mixed(
+                &self.ctx,
+                &self.m3k,
+                self.d_temporal_scaled.as_mut().unwrap(),
+                &self.acts,
+                &self.weights,
+                &self.grads,
+                &mut self.f32_scratch,
+                &mut self.mixed_scratch,
+                &self.dims,
+            )?;
+            check_inf_nan_gpu(
+                &self.ctx,
+                &self.ctx.kernels,
+                self.overflow_flag.as_mut().unwrap(),
+                &self.grads.flat,
+            )?;
+            scale_grads_skip_gpu(
+                &self.ctx,
+                &self.ctx.kernels,
+                self.overflow_flag.as_mut().unwrap(),
+                &mut self.grads.flat,
+                self.unscale_factor.as_ref().unwrap(),
+            )?;
+            step_m3_capturable(
+                &self.ctx,
+                &self.m3k.adamw_step_f32_capturable,
+                &self.adam,
+                self.bias.ptr(),
+                &mut self.weights.master,
+                &self.grads,
+            )?;
+            self.weights.sync_master_to_compute(&self.ctx)?;
+            Ok(())
+        })?;
+        self.graph_f16 = Some(g);
+        Ok(())
     }
 
     fn step_eager(&mut self) -> Result<(), String> {

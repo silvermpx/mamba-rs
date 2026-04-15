@@ -258,6 +258,9 @@ pub struct MambaKernels {
     pub check_inf_nan_f32: CudaFunction,
     /// In-place multiply f32 grads by a scalar (unscale, clip, etc.).
     pub scale_grads_f32: CudaFunction,
+    /// CUDA-Graph-capturable conditional unscale: zeros grads if the
+    /// overflow flag is set, otherwise multiplies by 1/loss_scale (Step 22).
+    pub scale_grads_skip_f32: CudaFunction,
 
     // -- AdamW optimizer (Step 12) --
     /// Fused AdamW step on f32 master weights + f32 optimizer state.
@@ -408,6 +411,7 @@ impl MambaKernels {
             // AMP loss scaler
             check_inf_nan_f32: get("check_inf_nan_f32")?,
             scale_grads_f32: get("scale_grads_f32")?,
+            scale_grads_skip_f32: get("scale_grads_skip_f32")?,
 
             // AdamW
             adamw_step_f32: get("adamw_step_f32")?,

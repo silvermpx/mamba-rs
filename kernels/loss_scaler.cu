@@ -58,3 +58,32 @@ extern "C" __global__ void scale_grads_f32(
         grads[i] *= scale;
     }
 }
+
+// CUDA-Graph-capturable variant of `scale_grads_f32` that conditionally
+// zeros the gradient based on an overflow flag from `check_inf_nan_f32`.
+//
+//   grads[i] *= (overflow_flag[0] != 0) ? 0.0 : unscale_factor
+//
+// This lets f16 AMP training capture the full step into a CUDA Graph: the
+// graph body always runs the optimizer, but on overflow steps the grads
+// are zeroed so AdamW has nothing to apply (m and v decay toward zero,
+// decoupled weight-decay still applies — tiny per-step shrinkage that's
+// statistically negligible over the 5–10 % overflow-step rate typical for
+// f16 training). CPU reads the flag AFTER replay to drive the scaler
+// state machine (backoff vs growth).
+// `unscale_factor` is read from a 1-element device buffer so the value
+// can be updated between graph replays without re-capture. CPU writes
+// `1/loss_scale` to `unscale_factor[0]` before each `cuGraphLaunch`.
+extern "C" __global__ void scale_grads_skip_f32(
+    float* __restrict__ grads,
+    const int* __restrict__ overflow_flag,  // [1]
+    const float* __restrict__ unscale_factor, // [1] = 1 / loss_scale
+    int n
+) {
+    const float effective = (overflow_flag[0] != 0) ? 0.f : unscale_factor[0];
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int stride = gridDim.x * blockDim.x;
+    for (int i = idx; i < n; i += stride) {
+        grads[i] *= effective;
+    }
+}

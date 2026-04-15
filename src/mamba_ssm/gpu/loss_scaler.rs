@@ -292,6 +292,60 @@ pub fn check_inf_nan_gpu(
     Ok(())
 }
 
+/// 1-element device buffer holding `1/loss_scale`. CPU writes the value
+/// here BEFORE each f16 graph replay; the captured `scale_grads_skip`
+/// kernel reads it via a stable device pointer baked at capture time.
+pub struct UnscaleFactor {
+    buf: GpuBuffer,
+}
+
+impl UnscaleFactor {
+    pub fn new(stream: &Arc<CudaStream>) -> Result<Self, String> {
+        Ok(Self {
+            buf: GpuBuffer::zeros(stream, 1)?,
+        })
+    }
+    /// Async H2D of the next-step `1/scale`. Stream-ordered so a subsequent
+    /// `cuGraphLaunch` on the same stream sees the new value.
+    pub fn write(&mut self, stream: &Arc<CudaStream>, unscale: f32) -> Result<(), String> {
+        self.buf.upload(stream, &[unscale])
+    }
+    pub fn ptr(&self) -> cudarc::driver::sys::CUdeviceptr {
+        self.buf.cached_ptr()
+    }
+}
+
+/// CUDA-Graph-capturable conditional unscale (Step 22). Reads the
+/// overflow flag and the unscale factor from device buffers; zeros grads
+/// if the flag is set, otherwise multiplies by `1/loss_scale`.
+pub fn scale_grads_skip_gpu(
+    ctx: &GpuCtx,
+    kernels: &MambaKernels,
+    flag: &mut OverflowFlag,
+    grads: &mut GpuBuffer,
+    unscale: &UnscaleFactor,
+) -> Result<(), String> {
+    if grads.is_empty() {
+        return Ok(());
+    }
+    let n = grads.len() as i32;
+    let cfg = grid_1d(grads.len());
+    let mut bld = ctx.stream.launch_builder(&kernels.scale_grads_skip_f32);
+    let flag_ptr = {
+        use cudarc::driver::DevicePtr;
+        let (p, _g) = flag.cuda_slice().device_ptr(&ctx.stream);
+        p
+    };
+    let grad_ptr = grads.cached_ptr();
+    let unscale_ptr = unscale.ptr();
+    bld.arg(&grad_ptr);
+    bld.arg(&flag_ptr);
+    bld.arg(&unscale_ptr);
+    bld.arg(&n);
+    unsafe { bld.launch(cfg) }.map_err(|e| format!("scale_grads_skip_f32: {e:?}"))?;
+    Ok(())
+}
+
 /// In-place multiply every element of `grads` by `scale`. Used both for
 /// unscaling (scale = 1 / loss_scale) and grad clipping (scale = clip /
 /// global_grad_norm).
