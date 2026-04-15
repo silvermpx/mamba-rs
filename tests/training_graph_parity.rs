@@ -380,6 +380,67 @@ fn training_graph_bf16_multi_replay_matches_eager() {
     assert!(max_err < 5e-5, "multi-step parity broke: max_err={max_err}");
 }
 
+/// Reallocating `state.conv_states` between capture and replay must trip
+/// the conv-state assertion (regression coverage for round-3 finding —
+/// before the fix this reallocation went silently undetected because only
+/// `state.ssm_states` was snapshotted).
+#[test]
+#[should_panic(expected = "state.conv_states pointer changed since capture")]
+fn training_graph_panics_on_state_conv_mismatch() {
+    let dev = GpuDevice::new(0).unwrap();
+    let ctx = GpuCtx::new(&dev).unwrap();
+    let batch = 1;
+    let seq_len = 4;
+    let n = batch * seq_len * tiny_cfg().d_model;
+
+    let mut g = build_setup(&ctx, WeightDtype::Bf16, batch, seq_len);
+    reset_state(&mut g, &ctx);
+    g.mamba_input.upload(&ctx.stream, &det_input(n, 1)).unwrap();
+    g.d_temporal.upload(&ctx.stream, &det_input(n, 2)).unwrap();
+    let (_, bc1, bc2) = g.adam.advance();
+    g.bias.write(&ctx.stream, bc1, bc2).unwrap();
+
+    let graph = GpuMambaTrainingStepGraph::capture(
+        &ctx,
+        &g.cfg,
+        &mut g.weights,
+        &g.adam,
+        &g.bias,
+        &mut g.grads,
+        &mut g.acts,
+        &mut g.scratch,
+        &g.a_neg_all,
+        &g.mamba_input,
+        &mut g.d_temporal,
+        &mut g.state,
+        batch,
+        seq_len,
+    )
+    .unwrap();
+
+    // Replace state.conv_states — different cached_ptr, replay must panic.
+    let cfg = &g.cfg;
+    let nl = cfg.n_layers;
+    let di = cfg.d_inner();
+    let dc = cfg.d_conv;
+    g.state.conv_states = GpuBuffer::zeros(&ctx.stream, nl * di * dc).unwrap();
+    let (_, bc1, bc2) = g.adam.advance();
+    g.bias.write(&ctx.stream, bc1, bc2).unwrap();
+    graph
+        .replay(
+            &ctx,
+            &g.weights,
+            &g.adam,
+            &g.bias,
+            &g.grads,
+            &g.a_neg_all,
+            &g.mamba_input,
+            &g.d_temporal,
+            &g.state,
+        )
+        .unwrap();
+}
+
 /// Sanity: the pointer-stability invariant fires when a buffer is
 /// reallocated between capture and replay.
 #[test]

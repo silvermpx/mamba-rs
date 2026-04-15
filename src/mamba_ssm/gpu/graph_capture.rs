@@ -51,8 +51,16 @@ where
         cudarc::driver::sys::CUgraphInstantiate_flags::CUDA_GRAPH_INSTANTIATE_FLAG_AUTO_FREE_ON_LAUNCH,
     );
 
-    body_result?;
-    end_result
-        .map_err(|e| format!("end_capture: {e:?}"))?
-        .ok_or_else(|| "end_capture returned no graph (empty body?)".to_string())
+    // Combine both error paths: if BOTH body and end_capture failed, we want
+    // the caller to see both — otherwise an `?`-shortcircuit on body_result
+    // would silently drop a stream-corrupting end_capture failure.
+    match (body_result, end_result) {
+        (Ok(()), Ok(Some(g))) => Ok(g),
+        (Ok(()), Ok(None)) => Err("end_capture returned no graph (empty body?)".to_string()),
+        (Ok(()), Err(e)) => Err(format!("end_capture: {e:?}")),
+        (Err(b), Ok(_)) => Err(format!("body: {b}")),
+        (Err(b), Err(e)) => Err(format!(
+            "body: {b}; end_capture ALSO failed (stream may be in invalid state): {e:?}"
+        )),
+    }
 }
