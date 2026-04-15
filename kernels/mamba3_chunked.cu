@@ -1584,3 +1584,207 @@ m3_chunk_scan_fwd_##SUFFIX(                                                   \
 
 DEFINE_M3_CHUNK_SCAN_FWD(bf16, __nv_bfloat16, from_f_bf16)
 DEFINE_M3_CHUNK_SCAN_FWD(f16,  __half,        from_f_f16)
+
+// ============================================================================
+// Step 9d — typed (bf16/f16) variants of the chunked parallel backward
+// kernels with typed input surface.
+//
+// All gradient OUTPUTS remain f32 — this is the PyTorch AMP master-grad
+// invariant: bf16/f16 atomicAdd is not supported on compute capability ≤ sm_89
+// and numerical safety requires f32 accumulation for reduction-style grads.
+// Typed I/O is limited to saved-activation inputs (x, Q, K_scaled, d_y).
+//
+// The following backward kernels stay f32-only (no typed surface):
+//   - m3_state_passing_bwd (inter-chunk prefix recurrence — f32 state only)
+//   - m3_cumsum_bwd (reverse prefix sum — f32)
+//   - m3_extract_da_cs_sum (f32-only utility)
+// ============================================================================
+
+#define DEFINE_M3_CHUNK_SCAN_BWD(SUFFIX, T_ACT, FROM_F)                       \
+extern "C" __global__ void                                                    \
+m3_chunk_scan_bwd_##SUFFIX(                                                   \
+    float* __restrict__ d_x,                                                  \
+    float* __restrict__ d_Q,                                                  \
+    float* __restrict__ d_K_scaled,                                           \
+    float* __restrict__ d_qk_dot,                                             \
+    float* __restrict__ d_D,                                                  \
+    float* __restrict__ d_prev_states,                                        \
+    float* __restrict__ d_dA_cumsum,                                          \
+    const T_ACT* __restrict__ d_y,                                            \
+    const T_ACT* __restrict__ x,                                              \
+    const T_ACT* __restrict__ Q,                                              \
+    const T_ACT* __restrict__ K_scaled,                                       \
+    const float* __restrict__ qk_dot_in,                                      \
+    const float* __restrict__ dA_cumsum,                                      \
+    const float* __restrict__ prev_states,                                    \
+    const float* __restrict__ D,                                              \
+    int batch, int T, int nh, int hd, int ds, int chunk_size                  \
+) {                                                                           \
+    int d_inner = nh * hd;                                                    \
+    int n_chunks = (T + chunk_size - 1) / chunk_size;                         \
+    int bc = blockIdx.x;                                                      \
+    int b = bc / n_chunks;                                                    \
+    int chunk = bc % n_chunks;                                                \
+    int h = blockIdx.y;                                                       \
+    int p = threadIdx.x;                                                      \
+    if (p >= hd) return;                                                      \
+    int chunk_start = chunk * chunk_size;                                     \
+    int chunk_end = chunk_start + chunk_size;                                 \
+    if (chunk_end > T) chunk_end = T;                                         \
+    int chunk_len = chunk_end - chunk_start;                                  \
+    int cs_base = ((b * n_chunks + chunk) * nh + h) * chunk_size;             \
+    int state_base = ((b * n_chunks + chunk) * nh + h) * hd * ds + p * ds;    \
+    float d_skip = D[h];                                                      \
+    float d_D_acc = 0.0f;                                                     \
+    for (int n = 0; n < ds; n++) {                                            \
+        float d_state_n = 0.0f;                                               \
+        for (int t_local = 0; t_local < chunk_len; t_local++) {               \
+            int t = chunk_start + t_local;                                    \
+            float dy = to_f(d_y[(b * T + t) * d_inner + h * hd + p]);         \
+            float q_n = to_f(Q[(b * T + t) * nh * ds + h * ds + n]);          \
+            float dA_t = dA_cumsum[cs_base + t_local];                        \
+            float state_decay = FAST_EXP(dA_t);                               \
+            d_state_n += dy * q_n * state_decay;                              \
+        }                                                                     \
+        d_prev_states[state_base + n] = d_state_n;                            \
+    }                                                                         \
+    for (int t_local = 0; t_local < chunk_len; t_local++) {                   \
+        int t = chunk_start + t_local;                                        \
+        int t_idx = b * T + t;                                                \
+        float dy = to_f(d_y[t_idx * d_inner + h * hd + p]);                   \
+        float dA_t = dA_cumsum[cs_base + t_local];                            \
+        float x_t = to_f(x[t_idx * d_inner + h * hd + p]);                    \
+        int th = t_idx * nh + h;                                              \
+        d_D_acc += dy * x_t;                                                  \
+        float d_x_val = dy * (d_skip + qk_dot_in[th]);                        \
+        float d_qk_val = dy * x_t;                                            \
+        for (int off = hd / 2; off > 0; off >>= 1)                            \
+            d_qk_val += __shfl_down_sync(0xFFFFFFFF, d_qk_val, off, hd);      \
+        if (p == 0)                                                           \
+            atomicAdd(&d_qk_dot[th], d_qk_val);                               \
+        int q_base_t = t_idx * nh * ds + h * ds;                              \
+        float state_decay = FAST_EXP(dA_t);                                   \
+        for (int n = 0; n < ds; n++) {                                        \
+            float d_q_state = dy * prev_states[state_base + n] * state_decay; \
+            for (int off = hd / 2; off > 0; off >>= 1)                        \
+                d_q_state += __shfl_down_sync(0xFFFFFFFF, d_q_state, off, hd);\
+            if (p == 0)                                                       \
+                atomicAdd(&d_Q[q_base_t + n], d_q_state);                     \
+        }                                                                     \
+        for (int s_local = 0; s_local < t_local; s_local++) {                 \
+            int s = chunk_start + s_local;                                    \
+            float dA_s = dA_cumsum[cs_base + s_local];                        \
+            float decay = FAST_EXP(dA_t - dA_s);                              \
+            int ks_base = (b * T + s) * nh * ds + h * ds;                     \
+            float qk_val = 0.0f;                                              \
+            for (int n = 0; n < ds; n++) {                                    \
+                qk_val += to_f(Q[q_base_t + n]) * to_f(K_scaled[ks_base + n]);\
+            }                                                                 \
+            float v_s = to_f(x[(b * T + s) * d_inner + h * hd + p]);          \
+            float contrib = dy * decay * v_s;                                 \
+            for (int n = 0; n < ds; n++) {                                    \
+                float d_q_val = contrib * to_f(K_scaled[ks_base + n]);        \
+                for (int off = hd / 2; off > 0; off >>= 1)                    \
+                    d_q_val += __shfl_down_sync(0xFFFFFFFF, d_q_val, off, hd);\
+                if (p == 0)                                                   \
+                    atomicAdd(&d_Q[q_base_t + n], d_q_val);                   \
+            }                                                                 \
+            for (int n = 0; n < ds; n++) {                                    \
+                float d_ks_val = contrib * to_f(Q[q_base_t + n]);             \
+                for (int off = hd / 2; off > 0; off >>= 1)                    \
+                    d_ks_val += __shfl_down_sync(0xFFFFFFFF, d_ks_val, off, hd);\
+                if (p == 0)                                                   \
+                    atomicAdd(&d_K_scaled[ks_base + n], d_ks_val);            \
+            }                                                                 \
+            float d_x_s = dy * decay * qk_val;                                \
+            atomicAdd(&d_x[(b * T + s) * d_inner + h * hd + p], d_x_s);       \
+            float dA_grad = dy * decay * qk_val * v_s;                        \
+            for (int off = hd / 2; off > 0; off >>= 1)                        \
+                dA_grad += __shfl_down_sync(0xFFFFFFFF, dA_grad, off, hd);    \
+            if (p == 0) {                                                     \
+                atomicAdd(&d_dA_cumsum[cs_base + t_local], dA_grad);          \
+                atomicAdd(&d_dA_cumsum[cs_base + s_local], -dA_grad);         \
+            }                                                                 \
+        }                                                                     \
+        {                                                                     \
+            float y_off = 0.0f;                                               \
+            for (int n = 0; n < ds; n++) {                                    \
+                y_off += to_f(Q[(b * T + t) * nh * ds + h * ds + n])          \
+                         * prev_states[state_base + n];                       \
+            }                                                                 \
+            float dA_state_grad = dy * y_off * state_decay;                   \
+            for (int off = hd / 2; off > 0; off >>= 1)                        \
+                dA_state_grad += __shfl_down_sync(0xFFFFFFFF,                 \
+                                                  dA_state_grad, off, hd);    \
+            if (p == 0)                                                       \
+                atomicAdd(&d_dA_cumsum[cs_base + t_local], dA_state_grad);    \
+        }                                                                     \
+        d_x[t_idx * d_inner + h * hd + p] += d_x_val;                         \
+    }                                                                         \
+    atomicAdd(&d_D[h], d_D_acc);                                              \
+    (void)FROM_F;                                                             \
+}
+
+DEFINE_M3_CHUNK_SCAN_BWD(bf16, __nv_bfloat16, from_f_bf16)
+DEFINE_M3_CHUNK_SCAN_BWD(f16,  __half,        from_f_f16)
+
+#define DEFINE_M3_CHUNK_STATE_BWD(SUFFIX, T_ACT, FROM_F)                      \
+extern "C" __global__ void                                                    \
+m3_chunk_state_bwd_##SUFFIX(                                                  \
+    float* __restrict__ d_x,                                                  \
+    float* __restrict__ d_K_scaled,                                           \
+    float* __restrict__ d_dA_cumsum,                                          \
+    const float* __restrict__ d_chunk_states,                                 \
+    const T_ACT* __restrict__ x,                                              \
+    const T_ACT* __restrict__ K_scaled,                                       \
+    const float* __restrict__ dA_cumsum,                                      \
+    int batch, int T, int nh, int hd, int ds, int chunk_size                  \
+) {                                                                           \
+    int d_inner = nh * hd;                                                    \
+    int n_chunks = (T + chunk_size - 1) / chunk_size;                         \
+    int bc = blockIdx.x;                                                      \
+    int b = bc / n_chunks;                                                    \
+    int chunk = bc % n_chunks;                                                \
+    int h = blockIdx.y;                                                       \
+    int p = threadIdx.x;                                                      \
+    if (p >= hd) return;                                                      \
+    int chunk_start = chunk * chunk_size;                                     \
+    int chunk_end = chunk_start + chunk_size;                                 \
+    if (chunk_end > T) chunk_end = T;                                         \
+    int chunk_len = chunk_end - chunk_start;                                  \
+    int cs_base = ((b * n_chunks + chunk) * nh + h) * chunk_size;             \
+    int state_base = ((b * n_chunks + chunk) * nh + h) * hd * ds + p * ds;    \
+    float dA_end = dA_cumsum[cs_base + chunk_len - 1];                        \
+    for (int t_local = 0; t_local < chunk_len; t_local++) {                   \
+        int t = chunk_start + t_local;                                        \
+        int t_idx = b * T + t;                                                \
+        float dA_t = dA_cumsum[cs_base + t_local];                            \
+        float decay = FAST_EXP(dA_end - dA_t);                                \
+        float x_val = to_f(x[t_idx * d_inner + h * hd + p]);                  \
+        float d_x_add = 0.0f;                                                 \
+        for (int n = 0; n < ds; n++) {                                        \
+            float dcs = d_chunk_states[state_base + n];                       \
+            float ks_n = to_f(K_scaled[t_idx * nh * ds + h * ds + n]);        \
+            float common = dcs * decay;                                       \
+            d_x_add += common * ks_n;                                         \
+            float d_ks_val = common * x_val;                                  \
+            for (int off = hd / 2; off > 0; off >>= 1)                        \
+                d_ks_val += __shfl_down_sync(0xFFFFFFFF, d_ks_val, off, hd);  \
+            if (p == 0)                                                       \
+                atomicAdd(&d_K_scaled[t_idx * nh * ds + h * ds + n],          \
+                          d_ks_val);                                          \
+            float dA_grad = common * ks_n * x_val;                            \
+            for (int off_r = hd / 2; off_r > 0; off_r >>= 1)                  \
+                dA_grad += __shfl_down_sync(0xFFFFFFFF, dA_grad, off_r, hd);  \
+            if (p == 0 && t_local != chunk_len - 1) {                         \
+                atomicAdd(&d_dA_cumsum[cs_base + chunk_len - 1], dA_grad);    \
+                atomicAdd(&d_dA_cumsum[cs_base + t_local], -dA_grad);         \
+            }                                                                 \
+        }                                                                     \
+        d_x[t_idx * d_inner + h * hd + p] += d_x_add;                         \
+    }                                                                         \
+    (void)FROM_F;                                                             \
+}
+
+DEFINE_M3_CHUNK_STATE_BWD(bf16, __nv_bfloat16, from_f_bf16)
+DEFINE_M3_CHUNK_STATE_BWD(f16,  __half,        from_f_f16)

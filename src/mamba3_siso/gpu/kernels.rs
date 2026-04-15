@@ -107,6 +107,14 @@ pub struct Mamba3Kernels {
     /// typed d_y/d_z/d_out/y/z; f32 weight + d_weight (per-sample,
     /// reduced later). Step 9c for M3 training.
     pub rmsnorm_gated_bwd_typed: TypedKernel,
+    // -- Step 9d: typed M3 chunked parallel backward kernels --
+    /// Intra-chunk backward: typed d_y/x/Q/K_scaled; all grad outputs f32
+    /// (atomicAdd requires f32 master grads per PyTorch AMP convention).
+    pub m3_chunk_scan_bwd_typed: TypedKernel,
+    /// Per-chunk state backward (additional d_x/d_K_scaled/d_dA contributions
+    /// from propagated d_prev_states). Typed x/K_scaled inputs; f32 grad out.
+    pub m3_chunk_state_bwd_typed: TypedKernel,
+
     // -- Step 8c: typed M3 chunked parallel forward kernels --
     /// Per-chunk gamma/scale + qk_dot + K prescale. Typed K/Q/K_scaled,
     /// f32 DT/trap_sig/qk_dot/scale/gamma (these are scalars computed in
@@ -309,6 +317,17 @@ impl Mamba3Kernels {
                 bf16: get("rmsnorm_gated_backward_bf16")?,
                 f16: get("rmsnorm_gated_backward_f16")?,
             },
+            m3_chunk_scan_bwd_typed: TypedKernel {
+                f32: get("m3_chunk_scan_bwd")?,
+                bf16: get("m3_chunk_scan_bwd_bf16")?,
+                f16: get("m3_chunk_scan_bwd_f16")?,
+            },
+            m3_chunk_state_bwd_typed: TypedKernel {
+                f32: get("m3_chunk_state_bwd")?,
+                bf16: get("m3_chunk_state_bwd_bf16")?,
+                f16: get("m3_chunk_state_bwd_f16")?,
+            },
+
             m3_preprocess_chunks_typed: TypedKernel {
                 f32: get("m3_preprocess_chunks")?,
                 bf16: get("m3_preprocess_chunks_bf16")?,
