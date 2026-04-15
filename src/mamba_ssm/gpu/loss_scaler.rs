@@ -106,25 +106,87 @@ impl DynamicLossScaler {
     /// Override the initial scale. Useful when resuming from a checkpoint
     /// with a known stable scale, or when training a small model that
     /// converges to a low scale.
+    ///
+    /// Panics if `init_scale` is not finite or ≤ 0 (would silently zero or
+    /// invert all grads — audit Agent 2 M2).
     #[must_use]
     pub fn with_init_scale(mut self, init_scale: f32) -> Self {
+        assert!(
+            init_scale.is_finite() && init_scale > 0.0,
+            "init_scale must be finite and positive, got {init_scale}"
+        );
         self.scale = init_scale;
         self
     }
 
     /// Override the growth interval (default 2000 clean steps).
+    ///
+    /// Panics if `n == 0` (would grow every step, defeating the dynamic-
+    /// discovery purpose — audit Agent 2 M1).
     #[must_use]
     pub fn with_growth_interval(mut self, n: u32) -> Self {
+        assert!(n > 0, "growth_interval must be > 0");
         self.growth_interval = n;
         self
     }
 
     /// Override max scale (default 2^24). Higher → more headroom for tiny
     /// grads, but increases inf risk on already-large grads.
+    ///
+    /// Panics if `s` is not finite or ≤ 0, or if `s < min_scale`.
     #[must_use]
     pub fn with_max_scale(mut self, s: f32) -> Self {
+        assert!(
+            s.is_finite() && s > 0.0,
+            "max_scale must be finite and positive, got {s}"
+        );
+        assert!(
+            s >= self.min_scale,
+            "max_scale ({s}) must be >= min_scale ({})",
+            self.min_scale
+        );
         self.max_scale = s;
         self
+    }
+
+    /// Override the minimum scale floor (default 1.0). Set to a small
+    /// value (e.g. `f32::MIN_POSITIVE`) to disable the floor and match
+    /// PyTorch GradScaler semantics where a chronically-broken model is
+    /// allowed to drive scale below 1.0 (signals to the user that
+    /// training is failing — see audit Agent 1 MED note).
+    ///
+    /// Panics if `s` is not finite, ≤ 0, or > max_scale.
+    #[must_use]
+    pub fn with_min_scale(mut self, s: f32) -> Self {
+        assert!(
+            s.is_finite() && s > 0.0,
+            "min_scale must be finite and positive, got {s}"
+        );
+        assert!(
+            s <= self.max_scale,
+            "min_scale ({s}) must be <= max_scale ({})",
+            self.max_scale
+        );
+        self.min_scale = s;
+        self
+    }
+
+    /// Serialize state for checkpoint resume — returns `(scale, growth_tracker)`.
+    /// Pass back into [`Self::load_state`] after loading config to resume
+    /// without re-paying the ~2000-step scale-discovery phase. Mirrors
+    /// `torch.cuda.amp.GradScaler.state_dict()` (audit Agent 1 HIGH).
+    pub fn state(&self) -> (f32, u32) {
+        (self.scale, self.growth_tracker)
+    }
+
+    /// Restore state from a previous [`Self::state`]. Validates inputs.
+    pub fn load_state(&mut self, scale: f32, growth_tracker: u32) {
+        assert!(
+            scale.is_finite() && scale > 0.0,
+            "loaded scale must be finite and positive, got {scale}"
+        );
+        self.scale = scale.clamp(self.min_scale, self.max_scale);
+        self.growth_tracker = growth_tracker.min(self.growth_interval.saturating_sub(1));
     }
 
     /// Current scale value to multiply the loss by.
@@ -311,5 +373,90 @@ mod tests {
         assert!(!s.enabled());
         s.update(true);
         assert_eq!(s.scale(), 1.0);
+    }
+
+    #[test]
+    fn state_dict_round_trip() {
+        let mut s = DynamicLossScaler::new()
+            .with_init_scale(8.0)
+            .with_growth_interval(10);
+        s.update(false);
+        s.update(false);
+        s.update(false);
+        let (saved_scale, saved_tracker) = s.state();
+        assert_eq!(saved_scale, 8.0);
+        assert_eq!(saved_tracker, 3);
+
+        let mut s2 = DynamicLossScaler::new().with_growth_interval(10);
+        s2.load_state(saved_scale, saved_tracker);
+        assert_eq!(s2.scale(), 8.0);
+        assert_eq!(s2.clean_step_count(), 3);
+    }
+
+    #[test]
+    fn load_state_clamps_to_bounds() {
+        let mut s = DynamicLossScaler::new()
+            .with_init_scale(8.0)
+            .with_max_scale(100.0);
+        s.load_state(1e9, 999_999); // way over max + tracker over interval
+        assert_eq!(s.scale(), 100.0); // clamped to max
+        // tracker clamped under growth_interval so it doesn't immediately grow
+        assert!(s.clean_step_count() < s.growth_interval);
+    }
+
+    #[test]
+    #[should_panic(expected = "init_scale must be finite and positive")]
+    fn init_scale_zero_panics() {
+        let _ = DynamicLossScaler::new().with_init_scale(0.0);
+    }
+
+    #[test]
+    #[should_panic(expected = "init_scale must be finite and positive")]
+    fn init_scale_neg_panics() {
+        let _ = DynamicLossScaler::new().with_init_scale(-1.0);
+    }
+
+    #[test]
+    #[should_panic(expected = "init_scale must be finite and positive")]
+    fn init_scale_inf_panics() {
+        let _ = DynamicLossScaler::new().with_init_scale(f32::INFINITY);
+    }
+
+    #[test]
+    #[should_panic(expected = "init_scale must be finite and positive")]
+    fn init_scale_nan_panics() {
+        let _ = DynamicLossScaler::new().with_init_scale(f32::NAN);
+    }
+
+    #[test]
+    #[should_panic(expected = "growth_interval must be > 0")]
+    fn growth_interval_zero_panics() {
+        let _ = DynamicLossScaler::new().with_growth_interval(0);
+    }
+
+    #[test]
+    #[should_panic(expected = "max_scale")]
+    fn max_below_min_panics() {
+        // default min_scale=1.0 → max=0.5 < 1.0 → panic
+        let _ = DynamicLossScaler::new().with_max_scale(0.5);
+    }
+
+    #[test]
+    #[should_panic(expected = "min_scale")]
+    fn min_above_max_panics() {
+        // default max_scale=2^24, set min above it
+        let _ = DynamicLossScaler::new().with_min_scale(1e10);
+    }
+
+    #[test]
+    fn min_scale_pytorch_equivalent() {
+        // PyTorch GradScaler has no floor — disable ours by setting a tiny min.
+        let mut s = DynamicLossScaler::new()
+            .with_init_scale(2.0)
+            .with_min_scale(f32::MIN_POSITIVE);
+        s.update(true); // 2 → 1 (above floor)
+        s.update(true); // 1 → 0.5
+        s.update(true); // 0.5 → 0.25
+        assert!((s.scale() - 0.25).abs() < 1e-6);
     }
 }

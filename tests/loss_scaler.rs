@@ -110,6 +110,103 @@ fn scale_grads_zero_length_noop() {
     assert_eq!(flag.read(&ctx.stream).unwrap(), 0);
 }
 
+#[test]
+fn scale_grads_with_zero_zeros_buffer() {
+    let (ctx, k) = make_ctx();
+    let mut grads = upload(&ctx, &[1.0, -2.0, 3.0]);
+    scale_grads_gpu(&ctx, &k, &mut grads, 0.0).unwrap();
+    let mut out = vec![0f32; 3];
+    grads.download(&ctx.stream, &mut out).unwrap();
+    ctx.stream.synchronize().unwrap();
+    assert_eq!(out, [0.0, 0.0, 0.0]);
+}
+
+#[test]
+fn scale_grads_inf_propagates_to_check() {
+    // scale_grads with scale=INF turns finite values into inf; the next
+    // check_inf_nan call must catch it (audit Agent 2 L7 behaviour test).
+    let (ctx, k) = make_ctx();
+    let mut grads = upload(&ctx, &[1.0, 2.0, 3.0]);
+    scale_grads_gpu(&ctx, &k, &mut grads, f32::INFINITY).unwrap();
+    let mut flag = OverflowFlag::new(&ctx.stream).unwrap();
+    flag.zero(&ctx.stream).unwrap();
+    check_inf_nan_gpu(&ctx, &k, &mut flag, &grads).unwrap();
+    assert_ne!(flag.read(&ctx.stream).unwrap(), 0);
+}
+
+#[test]
+fn scale_grads_nan_scale_propagates() {
+    let (ctx, k) = make_ctx();
+    let mut grads = upload(&ctx, &[1.0, 2.0]);
+    scale_grads_gpu(&ctx, &k, &mut grads, f32::NAN).unwrap();
+    let mut flag = OverflowFlag::new(&ctx.stream).unwrap();
+    flag.zero(&ctx.stream).unwrap();
+    check_inf_nan_gpu(&ctx, &k, &mut flag, &grads).unwrap();
+    assert_ne!(flag.read(&ctx.stream).unwrap(), 0);
+}
+
+#[test]
+fn flag_must_be_zeroed_between_passes() {
+    // Footgun documentation test: forgetting to zero the flag carries the
+    // overflow from the prior pass into the next one (false positive).
+    let (ctx, k) = make_ctx();
+    let dirty = upload(&ctx, &[f32::INFINITY]);
+    let clean = upload(&ctx, &[1.0]);
+    let mut flag = OverflowFlag::new(&ctx.stream).unwrap();
+    flag.zero(&ctx.stream).unwrap();
+
+    check_inf_nan_gpu(&ctx, &k, &mut flag, &dirty).unwrap();
+    assert_ne!(flag.read(&ctx.stream).unwrap(), 0);
+
+    // Forget to re-zero: clean buffer scan still reads the prior overflow.
+    check_inf_nan_gpu(&ctx, &k, &mut flag, &clean).unwrap();
+    assert_ne!(
+        flag.read(&ctx.stream).unwrap(),
+        0,
+        "atomicOr never clears — caller MUST zero between iterations"
+    );
+
+    // After explicit zero, clean buffer reads back as 0.
+    flag.zero(&ctx.stream).unwrap();
+    check_inf_nan_gpu(&ctx, &k, &mut flag, &clean).unwrap();
+    assert_eq!(flag.read(&ctx.stream).unwrap(), 0);
+}
+
+/// Drive a full GPU growth cycle: many clean steps → scale doubles, an
+/// overflow halves it. Validates the GPU helpers integrate with the CPU
+/// state machine end-to-end (audit Agent 2 M4 — was untested on GPU).
+#[test]
+fn gpu_growth_cycle_end_to_end() {
+    let (ctx, k) = make_ctx();
+    let mut scaler = DynamicLossScaler::new()
+        .with_init_scale(8.0)
+        .with_growth_interval(3);
+    let mut flag = OverflowFlag::new(&ctx.stream).unwrap();
+
+    let true_grads = [0.5_f32, -1.0, 0.25];
+
+    for iter in 0..3 {
+        let scaled: Vec<f32> = true_grads.iter().map(|x| x * scaler.scale()).collect();
+        let buf = upload(&ctx, &scaled);
+        flag.zero(&ctx.stream).unwrap();
+        check_inf_nan_gpu(&ctx, &k, &mut flag, &buf).unwrap();
+        let overflow = flag.read(&ctx.stream).unwrap() != 0;
+        assert!(!overflow, "iter {iter}: clean grads must not overflow");
+        scaler.update(false);
+    }
+    assert_eq!(scaler.scale(), 16.0, "3 clean steps → scale doubles");
+    assert_eq!(scaler.clean_step_count(), 0);
+
+    // Now feed an overflow → backoff
+    let bad = upload(&ctx, &[f32::INFINITY]);
+    flag.zero(&ctx.stream).unwrap();
+    check_inf_nan_gpu(&ctx, &k, &mut flag, &bad).unwrap();
+    let overflow = flag.read(&ctx.stream).unwrap() != 0;
+    assert!(overflow);
+    scaler.update(true);
+    assert_eq!(scaler.scale(), 8.0, "overflow halves scale");
+}
+
 /// End-to-end simulation: scale loss → simulated grads → check → unscale.
 #[test]
 fn full_amp_cycle_simulation() {
