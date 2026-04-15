@@ -274,6 +274,20 @@ pub struct MambaKernels {
     /// CUDA-Graph-capturable variant: reads bias-correction factors from a
     /// 2-elem device buffer instead of scalar args (Step 14).
     pub adamw_step_f32_capturable: CudaFunction,
+
+    // -- Batch-invariant GEMM (bf16 cross-batch determinism fix) --
+    /// Batch-invariant GEMM bf16×bf16→bf16 (projections in bf16 path).
+    /// Fixed 64x64x32 tile, no split-K, f32 accumulate. Guarantees that
+    /// `C[i]` is bit-identical regardless of batch size M of A.
+    pub gemm_bi_bf16_bf16: CudaFunction,
+    /// Batch-invariant GEMM f16×f16→f16.
+    pub gemm_bi_f16_f16: CudaFunction,
+    /// Batch-invariant GEMM bf16×bf16→f32 (tied lm_head: f32 logits).
+    pub gemm_bi_bf16_f32: CudaFunction,
+    /// Batch-invariant GEMM f16×f16→f32.
+    pub gemm_bi_f16_f32: CudaFunction,
+    /// Batch-invariant GEMM f32×f32→f32 (optional for training).
+    pub gemm_bi_f32_f32: CudaFunction,
 }
 
 impl MambaKernels {
@@ -424,6 +438,13 @@ impl MambaKernels {
             // AdamW
             adamw_step_f32: get("adamw_step_f32")?,
             adamw_step_f32_capturable: get("adamw_step_f32_capturable")?,
+
+            // Batch-invariant GEMM
+            gemm_bi_bf16_bf16: get("gemm_bi_bf16_bf16")?,
+            gemm_bi_f16_f16: get("gemm_bi_f16_f16")?,
+            gemm_bi_bf16_f32: get("gemm_bi_bf16_f32")?,
+            gemm_bi_f16_f32: get("gemm_bi_f16_f32")?,
+            gemm_bi_f32_f32: get("gemm_bi_f32_f32")?,
 
             // typed inference kernels
             silu_fwd_typed: load_typed("silu_forward")?,

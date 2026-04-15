@@ -574,6 +574,78 @@ pub fn gpu_gemm_typed_raw_no_bias(
     Ok(())
 }
 
+/// Pick the batch-invariant GEMM kernel for given I/O dtypes. Returns
+/// `None` if we should fall back to cuBLAS (e.g. mixed bf16/f32 combos
+/// we didn't compile — currently only homogeneous I/O paths have a
+/// batch-invariant kernel).
+fn pick_bi_gemm(
+    ctx: &GpuCtx,
+    a_dtype: WeightDtype,
+    b_dtype: WeightDtype,
+    c_dtype: WeightDtype,
+) -> Option<&cudarc::driver::CudaFunction> {
+    if a_dtype != b_dtype {
+        return None;
+    }
+    match (a_dtype, c_dtype) {
+        (WeightDtype::Bf16, WeightDtype::Bf16) => Some(&ctx.kernels.gemm_bi_bf16_bf16),
+        (WeightDtype::F16, WeightDtype::F16) => Some(&ctx.kernels.gemm_bi_f16_f16),
+        (WeightDtype::Bf16, WeightDtype::F32) => Some(&ctx.kernels.gemm_bi_bf16_f32),
+        (WeightDtype::F16, WeightDtype::F32) => Some(&ctx.kernels.gemm_bi_f16_f32),
+        (WeightDtype::F32, WeightDtype::F32) => Some(&ctx.kernels.gemm_bi_f32_f32),
+        _ => None,
+    }
+}
+
+/// Launch the batch-invariant GEMM kernel. All tensors row-major.
+///   A: [M, K] stride K
+///   B: [K, N] stride N
+///   C: [M, N] stride N
+/// bias_ptr: nullable [N] f32; alpha/beta standard GEMM scalars.
+fn launch_bi_gemm(
+    ctx: &GpuCtx,
+    kernel: &cudarc::driver::CudaFunction,
+    c_ptr: cudarc::driver::sys::CUdeviceptr,
+    a_ptr: cudarc::driver::sys::CUdeviceptr,
+    b_ptr: cudarc::driver::sys::CUdeviceptr,
+    bias_ptr: cudarc::driver::sys::CUdeviceptr, // pass 0 for "no bias"
+    alpha: f32,
+    beta: f32,
+    m: i32,
+    n: i32,
+    k: i32,
+) -> Result<(), String> {
+    const BLOCK_M: i32 = 64;
+    const BLOCK_N: i32 = 64;
+    const THREADS: u32 = 256;
+    let num_pid_m = (m + BLOCK_M - 1) / BLOCK_M;
+    let num_pid_n = (n + BLOCK_N - 1) / BLOCK_N;
+    let grid = (num_pid_m as u32) * (num_pid_n as u32);
+    let cfg = cudarc::driver::LaunchConfig {
+        grid_dim: (grid, 1, 1),
+        block_dim: (THREADS, 1, 1),
+        shared_mem_bytes: 0,
+    };
+    let lda = k;
+    let ldb = n;
+    let ldc = n;
+    let mut builder = ctx.stream.launch_builder(kernel);
+    builder.arg(&c_ptr);
+    builder.arg(&a_ptr);
+    builder.arg(&b_ptr);
+    builder.arg(&bias_ptr);
+    builder.arg(&alpha);
+    builder.arg(&beta);
+    builder.arg(&m);
+    builder.arg(&n);
+    builder.arg(&k);
+    builder.arg(&lda);
+    builder.arg(&ldb);
+    builder.arg(&ldc);
+    unsafe { builder.launch(cfg) }.map_err(|e| format!("gemm_bi launch failed: {e:?}"))?;
+    Ok(())
+}
+
 pub fn gpu_gemm_typed_forward_raw(
     ctx: &GpuCtx,
     c: TypedPtr,
@@ -583,6 +655,31 @@ pub fn gpu_gemm_typed_forward_raw(
     dims: (usize, usize, usize),
 ) -> Result<(), String> {
     let (batch, n_in, n_out) = dims;
+
+    // Try the batch-invariant path first — guarantees cross-M bit-identity
+    // which cuBLAS `cublasGemmEx` cannot provide (split-K + shape-dependent
+    // algo selection). Falls back to cuBLAS only for dtype combinations we
+    // didn't compile a batch-invariant kernel for.
+    if let Some(kernel) = pick_bi_gemm(ctx, x.dtype, w.dtype, c.dtype) {
+        let bias_arg = bias_ptr.unwrap_or(0);
+        return launch_bi_gemm(
+            ctx,
+            kernel,
+            c.ptr,
+            x.ptr,
+            w.ptr,
+            bias_arg,
+            1.0,
+            0.0,
+            batch as i32,
+            n_out as i32,
+            n_in as i32,
+        );
+    }
+
+    // cuBLAS fallback path (rare combos). Note that this path does NOT
+    // provide cross-M bit-identity — any caller hitting it should expect
+    // bf16-class numerical drift across batch sizes.
     let beta = if let Some(b_ptr) = bias_ptr {
         let b_i = batch as i32;
         let n_i = n_out as i32;
@@ -623,8 +720,6 @@ pub fn gpu_gemm_typed_forward_raw(
             c.ptr as *mut c_void,
             c.dtype.cuda_data_type(),
             n_out as c_int,
-            // Compute type derives from W dtype (f32 for F32 weights, f32 for
-            // bf16/f16 — all our paths use CUBLAS_COMPUTE_32F accumulate).
             w.dtype.compute_type(),
             cudarc::cublas::sys::cublasGemmAlgo_t::CUBLAS_GEMM_DEFAULT,
         )
