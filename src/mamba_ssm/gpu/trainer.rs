@@ -35,9 +35,12 @@
 //!   master weights in f32.
 //! - `WeightDtype::F32`: full graph capture, no compute shadow (weights stay
 //!   in f32 throughout). See [`MambaTrainerF32`].
-//! - `WeightDtype::F16`: not supported — the overflow check required by f16
-//!   training would force a CPU readback inside the captured body. Planned
-//!   for a future step via a device-side skip-on-overflow kernel.
+//! - `WeightDtype::F16`: supported via the [`DynamicLossScaler`] + a
+//!   device-side `scale_grads_skip_f32` kernel that conditionally zeros
+//!   the grad arena on overflow, letting the captured-graph body run AdamW
+//!   unconditionally. The eager f16 path takes the cleaner branch: it syncs
+//!   on the overflow flag and actually skips AdamW on overflow steps, which
+//!   matches PyTorch `torch.cuda.amp.GradScaler` semantics exactly.
 
 use cudarc::driver::PushKernelArg;
 
@@ -659,8 +662,12 @@ impl MambaTrainerMixed {
             self.scaler.as_mut().expect("f16 scaler").update(overflow);
             (next_step, overflow, true)
         } else {
-            // Eager path: kernels match the graph body so numerics are
-            // identical to a captured replay.
+            // Eager path: we can sync on the overflow flag and actually
+            // skip AdamW + sync when overflow is detected (matches PyTorch
+            // GradScaler semantics exactly). The captured-graph path has
+            // to run AdamW unconditionally because branching mid-graph
+            // isn't supported — the `scale_grads_skip_f32` device-side
+            // conditional + NaN-sanitization is the price paid there.
             self.grads.zero(&self.ctx.stream)?;
             gpu_forward_mamba_backbone_train_mixed(
                 &self.ctx,
@@ -685,30 +692,45 @@ impl MambaTrainerMixed {
                 self.overflow_flag.as_mut().unwrap(),
                 &self.grads.flat,
             )?;
-            let unscale = self.unscale_factor.as_ref().expect("unscale buf");
-            scale_grads_skip_gpu(
-                &self.ctx,
-                &self.ctx.kernels,
-                self.overflow_flag.as_mut().unwrap(),
-                &mut self.grads.flat,
-                unscale,
-            )?;
-            // AdamW always runs (with effectively-zero grads on overflow).
-            step_m1_capturable(
-                &self.ctx,
-                &self.ctx.kernels.adamw_step_f32_capturable,
-                &self.adam,
-                self.bias.ptr(),
-                &mut self.weights.master,
-                &self.grads,
-            )?;
-            self.weights.sync_master_to_compute(&self.ctx)?;
             let overflow = self
                 .overflow_flag
                 .as_ref()
                 .unwrap()
                 .read(&self.ctx.stream)?
                 != 0;
+            if !overflow {
+                // Clean step: unscale, run optimizer, sync compute weights,
+                // refresh a_neg. Matches bf16/f32 step_eager closely.
+                let unscale = self.unscale_factor.as_ref().expect("unscale buf");
+                scale_grads_skip_gpu(
+                    &self.ctx,
+                    &self.ctx.kernels,
+                    self.overflow_flag.as_mut().unwrap(),
+                    &mut self.grads.flat,
+                    unscale,
+                )?;
+                step_m1_capturable(
+                    &self.ctx,
+                    &self.ctx.kernels.adamw_step_f32_capturable,
+                    &self.adam,
+                    self.bias.ptr(),
+                    &mut self.weights.master,
+                    &self.grads,
+                )?;
+                self.weights.sync_master_to_compute(&self.ctx)?;
+                recompute_a_neg_all(
+                    &self.ctx,
+                    &self.weights.master.layers,
+                    &self.a_neg_all,
+                    &self.state.a_neg_all,
+                    self.cfg.d_inner(),
+                    self.cfg.d_state,
+                )?;
+            }
+            // else: overflow → skip AdamW entirely. Master weights, m/v
+            // and a_neg all stay at the previous step's state, matching
+            // torch.cuda.amp.GradScaler's skip semantics. The scaler will
+            // back off on the .update() below.
             self.scaler.as_mut().expect("f16 scaler").update(overflow);
             (next_step, overflow, false)
         };
