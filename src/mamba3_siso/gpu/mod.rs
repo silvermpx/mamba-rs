@@ -5,6 +5,7 @@
 //! - `inference` — GPU T=1 step + CUDA Graph
 //! - `weights` — GPU weight/gradient storage
 
+pub mod backward_mixed;
 pub mod forward_mixed;
 pub mod inference;
 pub mod kernels;
