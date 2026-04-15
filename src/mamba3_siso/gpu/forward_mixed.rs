@@ -154,7 +154,12 @@ impl GpuMamba3BackboneMixedActs {
         let na = cfg.num_rope_angles();
         let hd = cfg.headdim;
         let bt = batch * seq_len;
-        let nc_max = seq_len; // chunk count upper bound — mirror f32 scratch
+        // Match f32 GpuMamba3LayerActs: chunks sized by ceil(seq_len / chunk_size).
+        // chunk_size=64 mirrors GpuMamba3Dims::chunk_size (kernels/mamba3_chunked.cu).
+        let chunk_size = 64;
+        let nc_max = seq_len.div_ceil(chunk_size);
+        // da_cumsum_saved is [B * nc * nh * chunk_size] per f32 layout.
+        let da_cs_len = batch * nc_max * nh * chunk_size;
 
         let layers = (0..cfg.n_layers)
             .map(|_| {
@@ -189,7 +194,7 @@ impl GpuMamba3BackboneMixedActs {
                     k_prev_saved: GpuBuffer::zeros(stream, bt * nh * ds)?,
                     v_prev_saved: GpuBuffer::zeros(stream, bt * nh * hd)?,
                     y: DtypedBuf::zeros(stream, bt * di, dtype)?,
-                    da_cumsum_saved: GpuBuffer::zeros(stream, bt * nh)?,
+                    da_cumsum_saved: GpuBuffer::zeros(stream, da_cs_len)?,
                     k_scaled_saved: DtypedBuf::zeros(stream, bt * nh * ds, dtype)?,
                     scale_saved: GpuBuffer::zeros(stream, bt * nh)?,
                     gamma_saved: GpuBuffer::zeros(stream, bt * nh)?,
@@ -249,16 +254,12 @@ pub fn gpu_forward_mamba3_layer_mixed(
     alpha_scratch: &mut GpuBuffer,
     beta_scratch: &mut GpuBuffer,
     gamma_scratch: &mut GpuBuffer,
+    adt_temp_scratch: &mut GpuBuffer,
+    chunk_states_scratch: &mut GpuBuffer,
+    final_states_scratch: &mut GpuBuffer,
     dims: &GpuMamba3Dims,
     dtype: WeightDtype,
 ) -> Result<(), String> {
-    if dims.use_parallel_scan {
-        return Err(
-            "M3 mixed forward: parallel chunked scan not yet supported — run with \
-             use_parallel_scan=false (Step 8 scope is sequential SSM only)"
-                .into(),
-        );
-    }
     let bt = dims.bt();
     let dm = dims.d_model;
     let di = dims.d_inner;
@@ -531,8 +532,206 @@ pub fn gpu_forward_mamba3_layer_mixed(
     acts.beta.copy_from(beta_scratch, &ctx.stream)?;
     acts.gamma.copy_from(gamma_scratch, &ctx.stream)?;
 
-    // F6: sequential SSM burnin typed.
-    {
+    // F6: SSM forward — sequential burnin OR chunked parallel scan.
+    if dims.use_parallel_scan {
+        // Chunked parallel scan path. Mirrors gpu_forward_mamba3_layer's
+        // parallel branch but with typed I/O at the kernel boundaries.
+        // 6-kernel pipeline writes DIRECTLY into acts saved buffers
+        // (k_scaled_saved, scale/gamma/qk_dot_saved, chunk_states_saved,
+        // da_cumsum_saved) — no separate scratch→acts copy step needed.
+        let dp_ptr = w.d_param.ptr();
+        let b_i = dims.batch as i32;
+        let t_i = dims.seq_len as i32;
+        let nh_i = nh as i32;
+        let hd_i = hd as i32;
+        let ds_i = ds as i32;
+        let cs = dims.chunk_size() as i32;
+        let nc = dims.n_chunks();
+
+        // Kernel 0: adt = a_val · dt → adt_temp_scratch.
+        {
+            let n_total = (bt * nh) as i32;
+            let mut bld = ctx.stream.launch_builder(&m3k.elementwise_mul);
+            bld.arg(adt_temp_scratch.inner_mut());
+            bld.arg(acts.a_val.inner());
+            bld.arg(acts.dt.inner());
+            bld.arg(&n_total);
+            unsafe { bld.launch(grid_1d(bt * nh)) }
+                .map_err(|e| format!("m3_mixed F6 adt: {e:?}"))?;
+        }
+
+        // K1: m3_preprocess_chunks_typed — typed K/Q + f32 DT/trap →
+        // typed K_scaled (acts.k_scaled_saved) + f32 qk_dot/scale/gamma
+        // (acts.qk_dot_saved, scale_saved, gamma_saved).
+        {
+            let cfg = cudarc::driver::LaunchConfig {
+                grid_dim: ((dims.batch * nc) as u32, nh as u32, 1),
+                block_dim: (cs as u32, 1, 1),
+                shared_mem_bytes: 0,
+            };
+            let mut bld = ctx
+                .stream
+                .launch_builder(m3k.m3_preprocess_chunks_typed.get(dtype));
+            let ks = acts.k_scaled_saved.cached_ptr();
+            let kp = acts.k.cached_ptr();
+            let qp = acts.q.cached_ptr();
+            bld.arg(&ks);
+            bld.arg(acts.qk_dot_saved.inner_mut());
+            bld.arg(acts.scale_saved.inner_mut());
+            bld.arg(acts.gamma_saved.inner_mut());
+            bld.arg(&kp);
+            bld.arg(&qp);
+            bld.arg(acts.dt.inner());
+            bld.arg(acts.trap.inner());
+            bld.arg(&b_i);
+            bld.arg(&t_i);
+            bld.arg(&nh_i);
+            bld.arg(&ds_i);
+            bld.arg(&cs);
+            unsafe { bld.launch(cfg) }.map_err(|e| format!("m3_mixed F6 K1 preprocess: {e:?}"))?;
+        }
+
+        // K2: m3_dA_cumsum (pure f32) — adt → da_cumsum_saved.
+        {
+            let block_x = nh.min(256) as u32;
+            let grid_z = nh.div_ceil(block_x as usize) as u32;
+            let cfg = cudarc::driver::LaunchConfig {
+                grid_dim: (dims.batch as u32, nc as u32, grid_z),
+                block_dim: (block_x, 1, 1),
+                shared_mem_bytes: 0,
+            };
+            let mut bld = ctx.stream.launch_builder(&m3k.m3_da_cumsum);
+            bld.arg(acts.da_cumsum_saved.inner_mut());
+            bld.arg(adt_temp_scratch.inner());
+            bld.arg(&b_i);
+            bld.arg(&t_i);
+            bld.arg(&nh_i);
+            bld.arg(&cs);
+            unsafe { bld.launch(cfg) }.map_err(|e| format!("m3_mixed F6 K2 da_cumsum: {e:?}"))?;
+        }
+
+        // K3: m3_chunk_state_fwd_typed — typed x + typed K_scaled →
+        // f32 chunk_states (chunk_states_scratch, will be in-place
+        // mutated by K4).
+        {
+            let cfg = cudarc::driver::LaunchConfig {
+                grid_dim: ((dims.batch * nc) as u32, nh as u32, 1),
+                block_dim: (hd as u32, 1, 1),
+                shared_mem_bytes: 0,
+            };
+            let mut bld = ctx
+                .stream
+                .launch_builder(m3k.m3_chunk_state_fwd_typed.get(dtype));
+            let xp = acts.x.cached_ptr();
+            let ks = acts.k_scaled_saved.cached_ptr();
+            bld.arg(chunk_states_scratch.inner_mut());
+            bld.arg(&xp);
+            bld.arg(&ks);
+            bld.arg(acts.da_cumsum_saved.inner());
+            bld.arg(&b_i);
+            bld.arg(&t_i);
+            bld.arg(&nh_i);
+            bld.arg(&hd_i);
+            bld.arg(&ds_i);
+            bld.arg(&cs);
+            unsafe { bld.launch(cfg) }
+                .map_err(|e| format!("m3_mixed F6 K3 chunk_state_fwd: {e:?}"))?;
+        }
+
+        // K4: m3_state_passing_fwd (pure f32) — in-place mutate
+        // chunk_states + write final_states.
+        {
+            let dim = hd * ds;
+            let block_x = dim.min(256) as u32;
+            let grid_z = dim.div_ceil(block_x as usize) as u32;
+            let nc_i = nc as i32;
+            let cfg = cudarc::driver::LaunchConfig {
+                grid_dim: (dims.batch as u32, nh as u32, grid_z),
+                block_dim: (block_x, 1, 1),
+                shared_mem_bytes: 0,
+            };
+            let mut bld = ctx.stream.launch_builder(&m3k.m3_state_passing_fwd);
+            bld.arg(chunk_states_scratch.inner_mut());
+            bld.arg(final_states_scratch.inner_mut());
+            bld.arg(acts.da_cumsum_saved.inner());
+            bld.arg(&b_i);
+            bld.arg(&nc_i);
+            bld.arg(&nh_i);
+            bld.arg(&hd_i);
+            bld.arg(&ds_i);
+            bld.arg(&cs);
+            bld.arg(&t_i);
+            unsafe { bld.launch(cfg) }
+                .map_err(|e| format!("m3_mixed F6 K4 state_passing: {e:?}"))?;
+        }
+
+        // Save chunk_states → acts.chunk_states_saved BEFORE K5 reads them
+        // (K5 reads as prev_states; saved version is what bwd needs).
+        acts.chunk_states_saved
+            .copy_from(chunk_states_scratch, &ctx.stream)?;
+
+        // K5: m3_chunk_scan_fwd_typed — typed y_out, x, q, K_scaled +
+        // f32 qk_dot/da_cumsum/prev_states/D.
+        {
+            let cfg = cudarc::driver::LaunchConfig {
+                grid_dim: ((dims.batch * nc) as u32, nh as u32, 1),
+                block_dim: (hd as u32, 1, 1),
+                shared_mem_bytes: 0,
+            };
+            let mut bld = ctx
+                .stream
+                .launch_builder(m3k.m3_chunk_scan_fwd_typed.get(dtype));
+            let yp = acts.y.cached_ptr();
+            let xp = acts.x.cached_ptr();
+            let qp = acts.q.cached_ptr();
+            let ks = acts.k_scaled_saved.cached_ptr();
+            bld.arg(&yp);
+            bld.arg(&xp);
+            bld.arg(&qp);
+            bld.arg(&ks);
+            bld.arg(acts.qk_dot_saved.inner());
+            bld.arg(acts.da_cumsum_saved.inner());
+            bld.arg(chunk_states_scratch.inner());
+            bld.arg(&dp_ptr);
+            bld.arg(&b_i);
+            bld.arg(&t_i);
+            bld.arg(&nh_i);
+            bld.arg(&hd_i);
+            bld.arg(&ds_i);
+            bld.arg(&cs);
+            unsafe { bld.launch(cfg) }
+                .map_err(|e| format!("m3_mixed F6 K5 chunk_scan_fwd: {e:?}"))?;
+        }
+
+        // K6: m3_writeback_parallel_states_typed — final_states +
+        // typed k/x → persistent f32 ssm_state/k_state/v_state.
+        {
+            let block_x = hd.max(ds) as u32;
+            let cfg = cudarc::driver::LaunchConfig {
+                grid_dim: (dims.batch as u32, nh as u32, 1),
+                block_dim: (block_x, 1, 1),
+                shared_mem_bytes: 0,
+            };
+            let mut bld = ctx
+                .stream
+                .launch_builder(m3k.m3_writeback_parallel_states_typed.get(dtype));
+            let kp = acts.k.cached_ptr();
+            let xp = acts.x.cached_ptr();
+            bld.arg(&ssm_state);
+            bld.arg(&k_state);
+            bld.arg(&v_state);
+            bld.arg(final_states_scratch.inner());
+            bld.arg(&kp);
+            bld.arg(&xp);
+            bld.arg(&b_i);
+            bld.arg(&t_i);
+            bld.arg(&nh_i);
+            bld.arg(&hd_i);
+            bld.arg(&ds_i);
+            unsafe { bld.launch(cfg) }.map_err(|e| format!("m3_mixed F6 K6 writeback: {e:?}"))?;
+        }
+    } else {
+        // Sequential SSM burnin typed.
         let dp_ptr = w.d_param.ptr();
         let b_i = dims.batch as i32;
         let t_i = dims.seq_len as i32;
@@ -691,6 +890,19 @@ pub struct GpuMamba3MixedScratch {
     /// typed [B*T*d_model] — gradient of `post_norm` (in_proj dX → rmsnorm_bwd dy).
     pub d_post_norm_typed: DtypedBuf,
 
+    // F6 chunked-forward intermediates (added so use_parallel_scan=true works
+    // in the mixed forward; backward path uses the saved versions in acts).
+    /// f32 [B*nh] — adt = a_val · dt, fed into m3_dA_cumsum.
+    pub adt_temp: GpuBuffer,
+    /// f32 [B * n_chunks * nh * chunk_size] — chunked dA cumulative sums.
+    pub da_cumsum: GpuBuffer,
+    /// f32 [B * n_chunks * nh * hd * ds] — per-chunk SSM state (in-place
+    /// mutated by m3_state_passing_fwd from contributions to entering states).
+    pub chunk_states: GpuBuffer,
+    /// f32 [B * nh * hd * ds] — output of m3_state_passing_fwd, fed to
+    /// m3_writeback_parallel_states for persistent SSM state writeback.
+    pub final_states: GpuBuffer,
+
     pub dtype: WeightDtype,
 }
 
@@ -708,7 +920,10 @@ impl GpuMamba3MixedScratch {
         let ng = cfg.ngroups;
         let ds = cfg.d_state;
         let nh = cfg.nheads();
+        let hd = cfg.headdim;
         let ip = cfg.in_proj_out_dim();
+        let chunk_size = 64; // M3 chunk size (mirrors GpuMamba3Dims::chunk_size)
+        let n_chunks_max = seq_len.div_ceil(chunk_size);
         let s = Self {
             proj_flat: DtypedBuf::zeros(stream, bt * ip, dtype)?,
             out_flat: DtypedBuf::zeros(stream, bt * dm, dtype)?,
@@ -725,6 +940,10 @@ impl GpuMamba3MixedScratch {
             d_c_raw_typed: DtypedBuf::zeros(stream, bt * ng * ds, dtype)?,
             d_proj_typed: DtypedBuf::zeros(stream, bt * ip, dtype)?,
             d_post_norm_typed: DtypedBuf::zeros(stream, bt * dm, dtype)?,
+            adt_temp: GpuBuffer::zeros(stream, bt * nh)?,
+            da_cumsum: GpuBuffer::zeros(stream, batch * n_chunks_max * nh * chunk_size)?,
+            chunk_states: GpuBuffer::zeros(stream, batch * n_chunks_max * nh * hd * ds)?,
+            final_states: GpuBuffer::zeros(stream, batch * nh * hd * ds)?,
             dtype,
         };
         stream
@@ -814,6 +1033,9 @@ pub fn gpu_forward_mamba3_backbone_mixed(
             &mut scratch.alpha,
             &mut scratch.beta,
             &mut scratch.gamma,
+            &mut scratch.adt_temp,
+            &mut scratch.chunk_states,
+            &mut scratch.final_states,
             dims,
             dtype,
         )?;

@@ -133,8 +133,7 @@ fn check_dqkv(dtype: WeightDtype) {
             for h in 0..NH {
                 let base = ((b * N_CHUNKS + c) * NH + h) * CS;
                 let chunk_len = (CS).min(T - c * CS);
-                dcs_sum_vals[(b * N_CHUNKS + c) * NH + h] =
-                    dcs_vals[base + chunk_len - 1];
+                dcs_sum_vals[(b * N_CHUNKS + c) * NH + h] = dcs_vals[base + chunk_len - 1];
             }
         }
     }
@@ -177,12 +176,7 @@ fn check_dqkv(dtype: WeightDtype) {
     };
 
     let (bi, ti, nhi, hdi, dsi, csi) = (
-        B as i32,
-        T as i32,
-        NH as i32,
-        HD as i32,
-        DS as i32,
-        CS as i32,
+        B as i32, T as i32, NH as i32, HD as i32, DS as i32, CS as i32,
     );
 
     let mut bld = ctx.stream.launch_builder(&m3k.m3_dqkv);
