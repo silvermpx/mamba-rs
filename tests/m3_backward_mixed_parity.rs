@@ -335,7 +335,10 @@ fn grad_layout(cfg: &Mamba3Config, input_dim: usize) -> Vec<(&'static str, usize
 }
 
 fn check(dtype: WeightDtype, t: usize) {
-    let cfg = cfg_for_step10();
+    check_cfg(cfg_for_step10(), dtype, t);
+}
+
+fn check_cfg(cfg: Mamba3Config, dtype: WeightDtype, t: usize) {
     let dims = dims_for(&cfg, 1, t);
     let (w_f32, w_mix) = build_weights(&cfg, 0xC0FFEE);
 
@@ -400,4 +403,57 @@ fn m3_backward_mixed_parity_f16() {
 #[test]
 fn m3_backward_mixed_parity_multi_chunk_bf16() {
     check(WeightDtype::Bf16, 192);
+}
+
+/// ngroups = nheads: per-head B/C (no group sharing). Exercises the
+/// non-shared BCNorm path in the chunked bwd.
+#[test]
+fn m3_backward_mixed_parity_ngroups_eq_nheads_bf16() {
+    let cfg = Mamba3Config {
+        d_model: 32,
+        d_state: 8,
+        expand: 2,
+        headdim: 8,
+        ngroups: 8, // nheads = d_inner/headdim = 64/8 = 8 → per-head B/C
+        n_layers: 1,
+        rope_fraction: 0.5,
+        a_floor: 0.0625,
+        is_outproj_norm: true,
+    };
+    check_cfg(cfg, WeightDtype::Bf16, 128);
+}
+
+/// Larger d_state (stresses SSM recurrence matmul sizes in backward).
+#[test]
+fn m3_backward_mixed_parity_large_d_state_bf16() {
+    let cfg = Mamba3Config {
+        d_model: 32,
+        d_state: 16,
+        expand: 2,
+        headdim: 8,
+        ngroups: 1,
+        n_layers: 1,
+        rope_fraction: 0.5,
+        a_floor: 0.0625,
+        is_outproj_norm: true,
+    };
+    check_cfg(cfg, WeightDtype::Bf16, 128);
+}
+
+/// Multi-layer config — exercises the per-layer state slice offsetting
+/// and gradient accumulation across layers in backward_mixed.
+#[test]
+fn m3_backward_mixed_parity_two_layers_bf16() {
+    let cfg = Mamba3Config {
+        d_model: 32,
+        d_state: 8,
+        expand: 2,
+        headdim: 8,
+        ngroups: 1,
+        n_layers: 2,
+        rope_fraction: 0.5,
+        a_floor: 0.0625,
+        is_outproj_norm: true,
+    };
+    check_cfg(cfg, WeightDtype::Bf16, 128);
 }
