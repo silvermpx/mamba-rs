@@ -39,6 +39,21 @@ pub fn load_hf(dir: &Path) -> Result<HfModel, String> {
         ));
     }
 
+    // RMSNorm kernels across the codebase hardcode `eps = 1e-5` (see
+    // src/ops/fast_math.rs). That matches `state-spaces/mamba-*-hf`. If
+    // the loaded checkpoint specifies a different value (FalconMamba uses
+    // 1e-6), numerics will diverge slightly from the PyTorch reference
+    // (typically <1e-3 KL on final logits). Surface this so the user is
+    // aware until the eps is plumbed end-to-end through `MambaConfig` and
+    // every norm kernel launch.
+    if (hf_cfg.rms_norm_eps - 1e-5).abs() > 1e-9 {
+        eprintln!(
+            "[mamba-rs] WARNING: checkpoint has rms_norm_eps={:.3e} but kernels use 1e-5. \
+             Logits will differ slightly from PyTorch reference. See config_json.rs for context.",
+            hf_cfg.rms_norm_eps
+        );
+    }
+
     let shard_paths = discover_shards(dir)?;
 
     let vocab_size_padded = (hf_cfg.vocab_size + 63) & !63;
@@ -265,6 +280,14 @@ impl LayerAccum {
             norm_weight: self.take("norm_weight")?,
             // HF: [2*d_inner, d_model] -> need [d_model, 2*d_inner]
             in_proj_w: transpose_2d(self.take("in_proj_w")?, 2 * di, d),
+            // HF stores depthwise conv1d weight as [d_inner, 1, d_conv]
+            // (PyTorch `nn.Conv1d(groups=d_inner)` layout; the singleton
+            // middle dim is the per-group in-channel). mamba-rs flattens
+            // that to [d_inner, d_conv] row-major and the CUDA / CPU
+            // kernels index as `weight[d * d_conv + k]` — bit-identical
+            // to the squeezed PyTorch layout, so no transpose is needed.
+            // Source: mamba_ssm `MambaBlock.conv1d` in selective_scan /
+            // models/mixer_seq_simple.py; layout matches nn.Conv1d docs.
             conv1d_weight: self.take("conv1d_weight")?,
             conv1d_bias,
             // HF: [xdbl_dim, d_inner] -> need [d_inner, xdbl_dim]

@@ -120,6 +120,18 @@ pub struct GpuMambaLayerActs {
     /// Layout: `[B * (T+1) * d_inner * d_state]`.
     pub h_saved: GpuBuffer,
     /// Discretization exponential `exp(delta * A)` `[B*T*d_inner*d_state]`.
+    ///
+    /// **DEAD ALLOCATION** — kernels `ssm_burnin_forward`,
+    /// `ssm_parallel_scan_fwd` and their typed variants NEVER write this
+    /// buffer (the `da_exp_out` argument is ignored, see comments at the
+    /// kernel top). Backward recomputes `da` from saved `delta + a_neg`
+    /// on the fly. Kept as a named field and kernel argument for ABI
+    /// stability; planned removal once the kernel signatures are
+    /// refactored across all four dtypes × f32/parallel variants.
+    ///
+    /// Size at typical configs is significant: e.g. `B=32, T=32, d_inner=512,
+    /// d_state=16, n_layers=3` → ~1 GB wasted per trainer instance. Do
+    /// NOT rely on the contents for any computation.
     pub da_exp: GpuBuffer,
     /// SSM output before gating `[B*T*d_inner]`.
     pub y: GpuBuffer,

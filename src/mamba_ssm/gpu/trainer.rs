@@ -295,6 +295,30 @@ impl MambaTrainer {
             TrainerInner::Mixed(t) => t.debug_a_neg_all(),
         }
     }
+
+    /// Serialize the dynamic loss scaler state for checkpoint resume.
+    /// Returns `Some((scale, growth_tracker))` only for f16 training where
+    /// the scaler is active; `None` for bf16 / f32 (scaler is disabled).
+    ///
+    /// Paired with [`Self::load_scaler_state`]. Saving this alongside the
+    /// master weights and restoring on resume avoids re-paying the ~2000
+    /// steps of scale discovery and the overflow-spiral risk of restarting
+    /// at `init_scale = 65536` when training had converged to a lower
+    /// stable scale.
+    pub fn scaler_state(&self) -> Option<(f32, u32)> {
+        match &self.inner {
+            TrainerInner::F32(_) => None,
+            TrainerInner::Mixed(t) => t.scaler_state(),
+        }
+    }
+
+    /// Restore the dynamic loss scaler state saved via [`Self::scaler_state`].
+    /// No-op for non-f16 trainers.
+    pub fn load_scaler_state(&mut self, scale: f32, growth_tracker: u32) {
+        if let TrainerInner::Mixed(ref mut t) = self.inner {
+            t.load_scaler_state(scale, growth_tracker);
+        }
+    }
 }
 
 /// bf16 mixed-precision training inner (master f32 + compute bf16 shadow +
@@ -517,6 +541,31 @@ impl MambaTrainerMixed {
             .synchronize()
             .map_err(|e| format!("debug_a_neg_all sync: {e:?}"))?;
         self.a_neg_all.to_cpu(&self.ctx.stream)
+    }
+
+    /// Serialize dynamic loss scaler state. `None` when scaler is disabled
+    /// (bf16 / f32). See [`super::loss_scaler::DynamicLossScaler::state`].
+    pub fn scaler_state(&self) -> Option<(f32, u32)> {
+        self.scaler.as_ref().map(|s| s.state())
+    }
+
+    /// Restore scaler state from a prior `scaler_state()`. No-op if the
+    /// scaler is disabled (bf16 / f32 trainer).
+    pub fn load_scaler_state(&mut self, scale: f32, growth_tracker: u32) {
+        if let Some(ref mut s) = self.scaler {
+            s.load_state(scale, growth_tracker);
+            // Keep the on-device `unscale_factor` consistent with the
+            // restored CPU state so the very next f16 step uses the right
+            // unscale multiplier. Without this the first post-load step
+            // would unscale with the old (init_scale-derived) value.
+            if let Some(ref mut uf) = self.unscale_factor {
+                let unscale = 1.0 / s.scale();
+                // Best-effort — errors here shouldn't panic in a pure
+                // accessor; swallow and let the next step's normal write
+                // catch any real device error.
+                let _ = uf.write(&self.ctx.stream, unscale);
+            }
+        }
     }
 
     /// Capture the training-step CUDA Graph. Call once after at least one

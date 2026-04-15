@@ -254,11 +254,17 @@ impl GpuAdamW {
     /// bias-correction multipliers used inside the kernel.
     pub fn advance(&mut self) -> (u64, f32, f32) {
         self.step += 1;
-        let t = self.step as i32;
-        // PyTorch uses f64 internally for bias correction; mirror that to
-        // keep parity with `_single_tensor_adamw` for large step counts.
-        let bias_c1 = (1.0 / (1.0 - (self.beta1 as f64).powi(t))) as f32;
-        let bias_c2 = (1.0 / (1.0 - (self.beta2 as f64).powi(t))) as f32;
+        // `powi` takes i32 for the exponent. Clamp to a step count beyond
+        // which `β^t` is already below f64 round-off (≈ 1e-300 at step
+        // ~3000 for β=0.9, step ~700k for β=0.999). 2^30 is ≈ 1.07B, well
+        // inside i32 range and well past any realistic training horizon.
+        // This avoids the silent overflow that cast `u64 as i32` produced
+        // at step ≥ 2^31 (negative exponent → garbage bias factors).
+        let t = self.step.min(1 << 30) as i32;
+        let denom1 = 1.0 - (self.beta1 as f64).powi(t);
+        let denom2 = 1.0 - (self.beta2 as f64).powi(t);
+        let bias_c1 = (1.0 / denom1.max(1e-30)) as f32;
+        let bias_c2 = (1.0 / denom2.max(1e-30)) as f32;
         (self.step, bias_c1, bias_c2)
     }
 }

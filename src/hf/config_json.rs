@@ -32,6 +32,12 @@ struct RawConfig {
     use_conv_bias: Option<bool>,
     #[allow(dead_code)]
     residual_in_fp32: Option<bool>,
+    // RMSNorm epsilon — state-spaces/mamba-*-hf uses 1e-5 (default);
+    // FalconMamba uses 1e-6. Reading this from the config lets both
+    // loader paths produce numerically correct norms on the native
+    // architecture's scale. Name mirrors the HF field.
+    rms_norm_eps: Option<f32>,
+    layer_norm_epsilon: Option<f32>,
 }
 
 /// Parsed and validated Mamba config for HF loading.
@@ -47,6 +53,11 @@ pub struct HfMambaConfig {
     pub tie_word_embeddings: bool,
     pub use_bias: bool,
     pub use_conv_bias: bool,
+    /// RMSNorm epsilon from the HF config. `1e-5` is the state-spaces
+    /// default; FalconMamba ships `1e-6`. Callers should plumb this into
+    /// every norm kernel instead of hardcoding the constant so both
+    /// checkpoint families produce numerically correct outputs.
+    pub rms_norm_eps: f32,
 }
 
 pub fn parse_config_json(json_bytes: &[u8]) -> Result<HfMambaConfig, String> {
@@ -67,6 +78,14 @@ pub fn parse_config_json(json_bytes: &[u8]) -> Result<HfMambaConfig, String> {
         }
     }
 
+    // Accept either name. HF-native Mamba uses `rms_norm_eps`; some
+    // older forks / Mamba2 configs use `layer_norm_epsilon`. Default
+    // 1e-5 matches state-spaces/mamba reference.
+    let rms_norm_eps = raw
+        .rms_norm_eps
+        .or(raw.layer_norm_epsilon)
+        .unwrap_or(1e-5);
+
     Ok(HfMambaConfig {
         family,
         d_model,
@@ -78,6 +97,7 @@ pub fn parse_config_json(json_bytes: &[u8]) -> Result<HfMambaConfig, String> {
         tie_word_embeddings: raw.tie_word_embeddings.unwrap_or(true),
         use_bias: raw.use_bias.unwrap_or(false),
         use_conv_bias: raw.use_conv_bias.unwrap_or(true),
+        rms_norm_eps,
     })
 }
 
