@@ -102,6 +102,50 @@ impl GpuCtx {
         self.ensure_half_staging(bytes)
     }
 
+    /// Presize the half-staging buffer for a Mamba-3 training step.
+    /// Same rationale as [`Self::presize_half_staging_for_train`] but for
+    /// the M3 weight set whose `in_proj_out_dim` differs from M1.
+    pub fn presize_half_staging_for_train_m3(
+        &self,
+        cfg: &crate::mamba3_siso::config::Mamba3Config,
+        batch: usize,
+        seq_len: usize,
+        dtype: WeightDtype,
+    ) -> Result<(), String> {
+        if matches!(dtype, WeightDtype::F32) {
+            return Ok(());
+        }
+        let dm = cfg.d_model;
+        let di = cfg.d_inner();
+        let ip = cfg.in_proj_out_dim();
+        let max_dim = dm.max(di).max(ip);
+        let bytes = batch * seq_len * max_dim * dtype.size_bytes();
+        self.ensure_half_staging(bytes)
+    }
+
+    /// Presize the half-staging buffer for a training step (forward + backward).
+    /// Uses (batch * seq_len) instead of just batch — training operates on the
+    /// full sequence, not T=1. Critical for CUDA Graph capture: a lazy grow
+    /// during the captured body would bake a freed pointer into the graph,
+    /// causing CUDA_ERROR_ILLEGAL_ADDRESS on replay.
+    pub fn presize_half_staging_for_train(
+        &self,
+        cfg: &MambaConfig,
+        batch: usize,
+        seq_len: usize,
+        dtype: WeightDtype,
+    ) -> Result<(), String> {
+        if matches!(dtype, WeightDtype::F32) {
+            return Ok(());
+        }
+        let dm = cfg.d_model;
+        let di = cfg.d_inner();
+        let dt_rank = cfg.dt_rank();
+        let max_dim = dm.max(di).max(dt_rank);
+        let bytes = batch * seq_len * max_dim * dtype.size_bytes();
+        self.ensure_half_staging(bytes)
+    }
+
     /// Ensure the half-precision staging buffer is at least `bytes` in size.
     /// In the steady state this is a no-op when `presize_half_staging_for_step`
     /// was called at engine construction; the lazy grow path remains as a

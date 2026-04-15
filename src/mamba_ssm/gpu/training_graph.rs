@@ -46,16 +46,19 @@
 use cudarc::driver::CudaGraph;
 
 use crate::mamba_ssm::gpu::adamw::{AdamWBiasFactors, GpuAdamW, step_m1_capturable};
+use crate::mamba_ssm::gpu::backward::gpu_backward_mamba_backbone;
 use crate::mamba_ssm::gpu::backward_mixed::gpu_backward_mamba_backbone_mixed;
 use crate::mamba_ssm::gpu::buffers::GpuBuffer;
 use crate::mamba_ssm::gpu::context::GpuCtx;
 use crate::mamba_ssm::gpu::dtype::WeightDtype;
-use crate::mamba_ssm::gpu::forward::GpuRecurrentState;
+use crate::mamba_ssm::gpu::forward::{
+    GpuMambaBackboneActs, GpuMambaScratch, GpuRecurrentState, gpu_forward_mamba_backbone,
+};
 use crate::mamba_ssm::gpu::forward_mixed::{
     GpuMambaBackboneMixedActs, GpuMambaMixedTrainScratch, gpu_forward_mamba_backbone_mixed,
 };
 use crate::mamba_ssm::gpu::graph_capture::capture_into_graph;
-use crate::mamba_ssm::gpu::weights::GpuMambaGrads;
+use crate::mamba_ssm::gpu::weights::{GpuMambaGrads, GpuMambaTrainWeights};
 use crate::mamba_ssm::gpu::weights_mixed_train::GpuMambaTrainMixedWeights;
 
 /// CUDA-Graph holder for a single Mamba-1 training step (bf16).
@@ -75,8 +78,21 @@ pub struct GpuMambaTrainingStepGraph {
     captured_adam_v_ptr: u64,
     captured_bias_factors_ptr: u64,
     captured_state_ptr: u64,
+    // Weight-stability proxy: snapshot BOTH the first-allocated and the
+    // last-allocated master tensor, plus their compute slices. If the
+    // weight set is rebuilt (e.g. checkpoint reload), at least one of the
+    // four is virtually guaranteed to land at a different address (the
+    // allocator can't reuse all original slots simultaneously).
     captured_master_input_proj_w_ptr: u64,
+    captured_master_norm_f_ptr: u64,
     captured_compute_input_proj_w_ptr: u64,
+    captured_compute_norm_f_ptr: u64,
+    // Lazy-grow guard: forward_mixed's `ensure_half_staging` would silently
+    // bake a freed pointer into the graph if it grew between capture and
+    // replay. Capture pre-sizes via `presize_half_staging_for_train`, then
+    // snapshots the resulting pointer here. Replay asserts no grow has
+    // happened since.
+    captured_half_staging_ptr: u64,
 }
 
 impl GpuMambaTrainingStepGraph {
@@ -103,6 +119,7 @@ impl GpuMambaTrainingStepGraph {
     #[allow(clippy::too_many_arguments)]
     pub fn capture(
         ctx: &GpuCtx,
+        cfg: &crate::config::MambaConfig,
         train_w: &mut GpuMambaTrainMixedWeights,
         adam: &GpuAdamW,
         bias: &AdamWBiasFactors,
@@ -122,6 +139,12 @@ impl GpuMambaTrainingStepGraph {
         );
         assert_eq!(acts.dtype, WeightDtype::Bf16);
 
+        // CRITICAL: presize the half-precision staging buffer BEFORE capture
+        // so `ensure_half_staging` inside the body is a no-op. Otherwise a
+        // lazy grow during the captured forward bakes a freed pointer into
+        // the graph (CUDA_ERROR_ILLEGAL_ADDRESS on replay).
+        ctx.presize_half_staging_for_train(cfg, batch, seq_len, train_w.dtype)?;
+
         // Snapshot pointers BEFORE capture so we can stash them after the
         // helper consumes the &mut borrows.
         let snap_input = mamba_input.cached_ptr();
@@ -131,8 +154,11 @@ impl GpuMambaTrainingStepGraph {
         let snap_adam_v = adam.v.cached_ptr();
         let snap_bias = bias.ptr();
         let snap_state = state.ssm_states.cached_ptr();
-        let snap_master = train_w.master.input_proj_w.cached_ptr();
-        let snap_compute = train_w.compute.input_proj_w.ptr();
+        let snap_master_input = train_w.master.input_proj_w.cached_ptr();
+        let snap_master_norm_f = train_w.master.norm_f_weight.cached_ptr();
+        let snap_compute_input = train_w.compute.input_proj_w.ptr();
+        let snap_compute_norm_f = train_w.compute.norm_f_weight.ptr();
+        let snap_half_staging = ctx.half_staging_ptr();
 
         let graph = capture_into_graph(&ctx.stream, || {
             grads.zero(&ctx.stream)?;
@@ -177,8 +203,11 @@ impl GpuMambaTrainingStepGraph {
             captured_adam_v_ptr: snap_adam_v,
             captured_bias_factors_ptr: snap_bias,
             captured_state_ptr: snap_state,
-            captured_master_input_proj_w_ptr: snap_master,
-            captured_compute_input_proj_w_ptr: snap_compute,
+            captured_master_input_proj_w_ptr: snap_master_input,
+            captured_master_norm_f_ptr: snap_master_norm_f,
+            captured_compute_input_proj_w_ptr: snap_compute_input,
+            captured_compute_norm_f_ptr: snap_compute_norm_f,
+            captured_half_staging_ptr: snap_half_staging,
         })
     }
 
@@ -194,6 +223,7 @@ impl GpuMambaTrainingStepGraph {
     #[allow(clippy::too_many_arguments)]
     pub fn replay(
         &self,
+        ctx: &GpuCtx,
         train_w: &GpuMambaTrainMixedWeights,
         adam: &GpuAdamW,
         bias: &AdamWBiasFactors,
@@ -240,15 +270,180 @@ impl GpuMambaTrainingStepGraph {
         assert_eq!(
             train_w.master.input_proj_w.cached_ptr(),
             self.captured_master_input_proj_w_ptr,
-            "training_graph replay: master weight pointer changed since capture"
+            "training_graph replay: master input_proj_w pointer changed since capture"
+        );
+        assert_eq!(
+            train_w.master.norm_f_weight.cached_ptr(),
+            self.captured_master_norm_f_ptr,
+            "training_graph replay: master norm_f_weight pointer changed since capture"
         );
         assert_eq!(
             train_w.compute.input_proj_w.ptr(),
             self.captured_compute_input_proj_w_ptr,
-            "training_graph replay: compute weight pointer changed since capture"
+            "training_graph replay: compute input_proj_w pointer changed since capture"
+        );
+        assert_eq!(
+            train_w.compute.norm_f_weight.ptr(),
+            self.captured_compute_norm_f_ptr,
+            "training_graph replay: compute norm_f_weight pointer changed since capture"
+        );
+        assert_eq!(
+            ctx.half_staging_ptr(),
+            self.captured_half_staging_ptr,
+            "training_graph replay: half_staging pointer changed since capture \
+             (lazy grow during a previous step?)"
         );
         self.graph
             .launch()
             .map_err(|e| format!("training_graph launch: {e:?}"))
+    }
+}
+
+// ════════════════════════════════════════════════════════════════════════
+// f32 training step graph (no master/compute split, no half_staging).
+// ════════════════════════════════════════════════════════════════════════
+
+/// CUDA-Graph holder for a single Mamba-1 f32 training step. Captures
+/// `grads.zero + forward + backward + AdamW`. There's no
+/// `sync_master_to_compute` because f32 training has no compute shadow —
+/// weights are read directly during the next step's forward.
+pub struct GpuMambaF32TrainingStepGraph {
+    pub graph: CudaGraph,
+    pub batch: usize,
+    pub seq_len: usize,
+
+    captured_input_ptr: u64,
+    captured_d_temporal_ptr: u64,
+    captured_grads_flat_ptr: u64,
+    captured_adam_m_ptr: u64,
+    captured_adam_v_ptr: u64,
+    captured_bias_factors_ptr: u64,
+    captured_state_ptr: u64,
+    captured_weights_input_proj_w_ptr: u64,
+    captured_weights_norm_f_ptr: u64,
+}
+
+impl GpuMambaF32TrainingStepGraph {
+    /// Capture the f32 training step. Caller responsible for the same
+    /// warmup contract as the mixed variant: run one eager step before
+    /// calling this so cuBLAS has selected its kernels and any lazy
+    /// resources have settled.
+    #[allow(clippy::too_many_arguments)]
+    pub fn capture(
+        ctx: &GpuCtx,
+        weights: &mut GpuMambaTrainWeights,
+        adam: &GpuAdamW,
+        bias: &AdamWBiasFactors,
+        grads: &mut GpuMambaGrads,
+        acts: &mut GpuMambaBackboneActs,
+        scratch: &mut GpuMambaScratch,
+        a_neg_all: &GpuBuffer,
+        temporal: &mut GpuBuffer,
+        mamba_input: &GpuBuffer,
+        d_temporal: &mut GpuBuffer,
+        state: &mut GpuRecurrentState,
+        batch: usize,
+        seq_len: usize,
+    ) -> Result<Self, String> {
+        let snap_input = mamba_input.cached_ptr();
+        let snap_d_temporal = d_temporal.cached_ptr();
+        let snap_grads_flat = grads.flat.cached_ptr();
+        let snap_adam_m = adam.m.cached_ptr();
+        let snap_adam_v = adam.v.cached_ptr();
+        let snap_bias = bias.ptr();
+        let snap_state = state.ssm_states.cached_ptr();
+        let snap_input_proj = weights.input_proj_w.cached_ptr();
+        let snap_norm_f = weights.norm_f_weight.cached_ptr();
+
+        let graph = capture_into_graph(&ctx.stream, || {
+            grads.zero(&ctx.stream)?;
+            gpu_forward_mamba_backbone(ctx, temporal, acts, weights, mamba_input, state, scratch)?;
+            gpu_backward_mamba_backbone(ctx, d_temporal, grads, acts, weights, a_neg_all, scratch)?;
+            crate::mamba_ssm::gpu::adamw::step_m1_capturable(
+                ctx,
+                &ctx.kernels.adamw_step_f32_capturable,
+                adam,
+                bias.ptr(),
+                weights,
+                grads,
+            )?;
+            Ok(())
+        })?;
+
+        Ok(Self {
+            graph,
+            batch,
+            seq_len,
+            captured_input_ptr: snap_input,
+            captured_d_temporal_ptr: snap_d_temporal,
+            captured_grads_flat_ptr: snap_grads_flat,
+            captured_adam_m_ptr: snap_adam_m,
+            captured_adam_v_ptr: snap_adam_v,
+            captured_bias_factors_ptr: snap_bias,
+            captured_state_ptr: snap_state,
+            captured_weights_input_proj_w_ptr: snap_input_proj,
+            captured_weights_norm_f_ptr: snap_norm_f,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn replay(
+        &self,
+        weights: &GpuMambaTrainWeights,
+        adam: &GpuAdamW,
+        bias: &AdamWBiasFactors,
+        grads: &GpuMambaGrads,
+        mamba_input: &GpuBuffer,
+        d_temporal: &GpuBuffer,
+        state: &GpuRecurrentState,
+    ) -> Result<(), String> {
+        assert_eq!(
+            mamba_input.cached_ptr(),
+            self.captured_input_ptr,
+            "f32 training_graph replay: mamba_input pointer changed since capture"
+        );
+        assert_eq!(
+            d_temporal.cached_ptr(),
+            self.captured_d_temporal_ptr,
+            "f32 training_graph replay: d_temporal pointer changed since capture"
+        );
+        assert_eq!(
+            grads.flat.cached_ptr(),
+            self.captured_grads_flat_ptr,
+            "f32 training_graph replay: grads.flat pointer changed since capture"
+        );
+        assert_eq!(
+            adam.m.cached_ptr(),
+            self.captured_adam_m_ptr,
+            "f32 training_graph replay: adam.m pointer changed since capture"
+        );
+        assert_eq!(
+            adam.v.cached_ptr(),
+            self.captured_adam_v_ptr,
+            "f32 training_graph replay: adam.v pointer changed since capture"
+        );
+        assert_eq!(
+            bias.ptr(),
+            self.captured_bias_factors_ptr,
+            "f32 training_graph replay: bias_factors pointer changed since capture"
+        );
+        assert_eq!(
+            state.ssm_states.cached_ptr(),
+            self.captured_state_ptr,
+            "f32 training_graph replay: state pointer changed since capture"
+        );
+        assert_eq!(
+            weights.input_proj_w.cached_ptr(),
+            self.captured_weights_input_proj_w_ptr,
+            "f32 training_graph replay: input_proj_w pointer changed since capture"
+        );
+        assert_eq!(
+            weights.norm_f_weight.cached_ptr(),
+            self.captured_weights_norm_f_ptr,
+            "f32 training_graph replay: norm_f_weight pointer changed since capture"
+        );
+        self.graph
+            .launch()
+            .map_err(|e| format!("f32 training_graph launch: {e:?}"))
     }
 }

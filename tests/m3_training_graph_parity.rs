@@ -246,6 +246,7 @@ fn m3_training_graph_bf16_one_step_matches_eager() {
 
     let graph = GpuMamba3TrainingStepGraph::capture(
         &ctx,
+        &cfg_m3(),
         &m3k,
         &mut g.weights,
         &g.adam,
@@ -270,6 +271,7 @@ fn m3_training_graph_bf16_one_step_matches_eager() {
     g.bias.write(&ctx.stream, bc1, bc2).unwrap();
     graph
         .replay(
+            &ctx,
             &g.weights,
             &g.adam,
             &g.bias,
@@ -277,6 +279,9 @@ fn m3_training_graph_bf16_one_step_matches_eager() {
             &g.mamba_input,
             &g.d_temporal,
             &g.ssm_states,
+            &g.k_states,
+            &g.v_states,
+            &g.angle_states,
         )
         .unwrap();
     ctx.stream.synchronize().unwrap();
@@ -323,6 +328,7 @@ fn m3_training_graph_bf16_multi_replay_matches_eager() {
     g.bias.write(&ctx.stream, 1.0, 1.0).unwrap();
     let graph = GpuMamba3TrainingStepGraph::capture(
         &ctx,
+        &cfg_m3(),
         &m3k,
         &mut g.weights,
         &g.adam,
@@ -350,6 +356,7 @@ fn m3_training_graph_bf16_multi_replay_matches_eager() {
         g.bias.write(&ctx.stream, bc1, bc2).unwrap();
         graph
             .replay(
+                &ctx,
                 &g.weights,
                 &g.adam,
                 &g.bias,
@@ -357,6 +364,9 @@ fn m3_training_graph_bf16_multi_replay_matches_eager() {
                 &g.mamba_input,
                 &g.d_temporal,
                 &g.ssm_states,
+                &g.k_states,
+                &g.v_states,
+                &g.angle_states,
             )
             .unwrap();
     }

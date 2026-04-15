@@ -243,6 +243,7 @@ fn training_graph_bf16_one_step_matches_eager() {
 
     let graph = GpuMambaTrainingStepGraph::capture(
         &ctx,
+        &g.cfg,
         &mut g.weights,
         &g.adam,
         &g.bias,
@@ -260,6 +261,7 @@ fn training_graph_bf16_one_step_matches_eager() {
     // cuStreamBeginCapture only RECORDS — must call replay() to execute.
     graph
         .replay(
+            &ctx,
             &g.weights,
             &g.adam,
             &g.bias,
@@ -320,6 +322,7 @@ fn training_graph_bf16_multi_replay_matches_eager() {
     g.bias.write(&ctx.stream, 1.0, 1.0).unwrap(); // dummy; real values per replay
     let graph = GpuMambaTrainingStepGraph::capture(
         &ctx,
+        &g.cfg,
         &mut g.weights,
         &g.adam,
         &g.bias,
@@ -344,6 +347,7 @@ fn training_graph_bf16_multi_replay_matches_eager() {
         g.bias.write(&ctx.stream, bc1, bc2).unwrap();
         graph
             .replay(
+                &ctx,
                 &g.weights,
                 &g.adam,
                 &g.bias,
@@ -394,6 +398,7 @@ fn training_graph_panics_on_pointer_mismatch() {
 
     let graph = GpuMambaTrainingStepGraph::capture(
         &ctx,
+        &g.cfg,
         &mut g.weights,
         &g.adam,
         &g.bias,
@@ -415,6 +420,7 @@ fn training_graph_panics_on_pointer_mismatch() {
     g.bias.write(&ctx.stream, bc1, bc2).unwrap();
     graph
         .replay(
+            &ctx,
             &g.weights,
             &g.adam,
             &g.bias,
