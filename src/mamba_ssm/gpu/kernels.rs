@@ -129,6 +129,8 @@ pub struct MambaKernels {
     // -- Mixed precision casts (mixed inference only) --
     /// f32 → bf16 downcast for weight storage.
     pub cast_f32_to_bf16: CudaFunction,
+    pub cast_bf16_to_f32: CudaFunction,
+    pub cast_f16_to_f32: CudaFunction,
     /// f32 → f16 downcast for weight storage.
     pub cast_f32_to_f16: CudaFunction,
 
@@ -369,6 +371,8 @@ impl MambaKernels {
             // mixed precision casts
             cast_f32_to_bf16: get("cast_f32_to_bf16")?,
             cast_f32_to_f16: get("cast_f32_to_f16")?,
+            cast_bf16_to_f32: get("cast_bf16_to_f32")?,
+            cast_f16_to_f32: get("cast_f16_to_f32")?,
             ssm_burnin_fwd_bf16: get("ssm_burnin_forward_bf16")?,
             ssm_burnin_fwd_f16: get("ssm_burnin_forward_f16")?,
             conv1d_burnin_fwd_bf16: get("conv1d_burnin_forward_bf16")?,

@@ -666,6 +666,31 @@ pub struct GpuMamba3MixedScratch {
     pub alpha: GpuBuffer,
     pub beta: GpuBuffer,
     pub gamma: GpuBuffer,
+
+    // Step 10 — bwd-only typed staging buffers (activation grads on the
+    // wire match activation storage dtype per AMP precision invariant).
+    /// typed [B*T*d_model] — d_temporal staged for typed dW GEMM at out_proj.
+    pub d_temporal_typed: DtypedBuf,
+    /// typed [B*T*d_inner] — gradient of `gated` (out_proj_bwd dX → input to
+    /// rmsnorm_gated_bwd_typed).
+    pub d_gated_typed: DtypedBuf,
+    /// typed [B*T*d_inner] — gradient of `y` from rmsnorm_gated_bwd_typed.
+    pub d_y_typed: DtypedBuf,
+    /// typed [B*T*d_inner] — gradient of `z` from rmsnorm_gated_bwd_typed.
+    pub d_z_typed: DtypedBuf,
+    /// typed [B*T*ng*ds] — gradient of `b_normed` (head→group reduce).
+    pub d_b_normed_typed: DtypedBuf,
+    /// typed [B*T*ng*ds] — gradient of `c_normed`.
+    pub d_c_normed_typed: DtypedBuf,
+    /// typed [B*T*ng*ds] — gradient of `b_raw` (BCNorm bwd output).
+    pub d_b_raw_typed: DtypedBuf,
+    /// typed [B*T*ng*ds] — gradient of `c_raw`.
+    pub d_c_raw_typed: DtypedBuf,
+    /// typed [B*T*ip] — gradient of `proj_flat` (split_bwd output → in_proj dY).
+    pub d_proj_typed: DtypedBuf,
+    /// typed [B*T*d_model] — gradient of `post_norm` (in_proj dX → rmsnorm_bwd dy).
+    pub d_post_norm_typed: DtypedBuf,
+
     pub dtype: WeightDtype,
 }
 
@@ -678,14 +703,28 @@ impl GpuMamba3MixedScratch {
         dtype: WeightDtype,
     ) -> Result<Self, String> {
         let bt = batch * seq_len;
+        let dm = cfg.d_model;
+        let di = cfg.d_inner();
+        let ng = cfg.ngroups;
+        let ds = cfg.d_state;
         let nh = cfg.nheads();
         let ip = cfg.in_proj_out_dim();
         let s = Self {
             proj_flat: DtypedBuf::zeros(stream, bt * ip, dtype)?,
-            out_flat: DtypedBuf::zeros(stream, bt * cfg.d_model, dtype)?,
+            out_flat: DtypedBuf::zeros(stream, bt * dm, dtype)?,
             alpha: GpuBuffer::zeros(stream, bt * nh)?,
             beta: GpuBuffer::zeros(stream, bt * nh)?,
             gamma: GpuBuffer::zeros(stream, bt * nh)?,
+            d_temporal_typed: DtypedBuf::zeros(stream, bt * dm, dtype)?,
+            d_gated_typed: DtypedBuf::zeros(stream, bt * di, dtype)?,
+            d_y_typed: DtypedBuf::zeros(stream, bt * di, dtype)?,
+            d_z_typed: DtypedBuf::zeros(stream, bt * di, dtype)?,
+            d_b_normed_typed: DtypedBuf::zeros(stream, bt * ng * ds, dtype)?,
+            d_c_normed_typed: DtypedBuf::zeros(stream, bt * ng * ds, dtype)?,
+            d_b_raw_typed: DtypedBuf::zeros(stream, bt * ng * ds, dtype)?,
+            d_c_raw_typed: DtypedBuf::zeros(stream, bt * ng * ds, dtype)?,
+            d_proj_typed: DtypedBuf::zeros(stream, bt * ip, dtype)?,
+            d_post_norm_typed: DtypedBuf::zeros(stream, bt * dm, dtype)?,
             dtype,
         };
         stream

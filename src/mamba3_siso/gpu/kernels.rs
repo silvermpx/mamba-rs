@@ -46,6 +46,10 @@ pub struct Mamba3Kernels {
     pub vec_add_inplace: CudaFunction,
     pub elementwise_mul: CudaFunction,
     pub fill_scalar: CudaFunction,
+    pub cast_f32_to_bf16: CudaFunction,
+    pub cast_f32_to_f16: CudaFunction,
+    pub cast_bf16_to_f32: CudaFunction,
+    pub cast_f16_to_f32: CudaFunction,
     pub residual_add: CudaFunction,
     pub gather_last_timestep: CudaFunction,
 
@@ -229,6 +233,10 @@ impl Mamba3Kernels {
             vec_add_inplace: get("vec_add_inplace")?,
             elementwise_mul: get("elementwise_mul")?,
             fill_scalar: get("fill_scalar")?,
+            cast_f32_to_bf16: get("cast_f32_to_bf16")?,
+            cast_f32_to_f16: get("cast_f32_to_f16")?,
+            cast_bf16_to_f32: get("cast_bf16_to_f32")?,
+            cast_f16_to_f32: get("cast_f16_to_f32")?,
             residual_add: get("residual_add")?,
             gather_last_timestep: get("gather_last_timestep")?,
 
