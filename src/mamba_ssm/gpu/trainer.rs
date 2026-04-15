@@ -285,6 +285,16 @@ impl MambaTrainer {
             TrainerInner::Mixed(t) => t.snapshot_master(),
         }
     }
+
+    /// Download the SSM `a_neg_all` buffer. Test / debug only — see the
+    /// same-named method on the inner trainer for rationale.
+    #[doc(hidden)]
+    pub fn debug_a_neg_all(&self) -> Result<Vec<f32>, String> {
+        match &self.inner {
+            TrainerInner::F32(t) => t.debug_a_neg_all(),
+            TrainerInner::Mixed(t) => t.debug_a_neg_all(),
+        }
+    }
 }
 
 /// bf16 mixed-precision training inner (master f32 + compute bf16 shadow +
@@ -494,6 +504,19 @@ impl MambaTrainerMixed {
         self.state.conv_states.zero(&self.ctx.stream)?;
         self.state.ssm_states.zero(&self.ctx.stream)?;
         Ok(())
+    }
+
+    /// Download the current `a_neg_all` buffer used by the SSM backward
+    /// kernel. Exposed for regression tests verifying that `a_neg` is
+    /// refreshed from the updated `a_log` after AdamW (see audit round-2
+    /// CRIT bug).
+    #[doc(hidden)]
+    pub fn debug_a_neg_all(&self) -> Result<Vec<f32>, String> {
+        self.ctx
+            .stream
+            .synchronize()
+            .map_err(|e| format!("debug_a_neg_all sync: {e:?}"))?;
+        self.a_neg_all.to_cpu(&self.ctx.stream)
     }
 
     /// Capture the training-step CUDA Graph. Call once after at least one
@@ -1134,6 +1157,17 @@ impl MambaTrainerF32 {
         )?;
         self.graph = Some(g);
         Ok(())
+    }
+
+    /// Download the SSM `a_neg_all` buffer (f32 trainer variant). Used by
+    /// the regression test verifying the post-AdamW recompute is applied.
+    #[doc(hidden)]
+    pub fn debug_a_neg_all(&self) -> Result<Vec<f32>, String> {
+        self.ctx
+            .stream
+            .synchronize()
+            .map_err(|e| format!("debug_a_neg_all sync: {e:?}"))?;
+        self.a_neg_all.to_cpu(&self.ctx.stream)
     }
 
     pub fn step(&mut self, input: &[f32], d_temporal: &[f32]) -> Result<StepMetrics, String> {

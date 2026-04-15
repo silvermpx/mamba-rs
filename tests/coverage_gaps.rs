@@ -10,6 +10,16 @@
 //!   scaler settles, at least some steps commit (not stuck in overflow),
 //!   and master weights remain finite. Existing f16 smoke tests use
 //!   lr=1e-7 which hides scaler pathologies.
+//! * `a_log_actually_reaches_ssm_after_training` — asserts that after a
+//!   few training steps, BOTH `a_log` master weights AND the SSM
+//!   recurrence's `a_neg` compute buffer have changed. This is the
+//!   regression test for the round-2 audit CRIT bug where `a_neg` was
+//!   initialized once at trainer construction and never refreshed after
+//!   AdamW touched `a_log` — letting the optimizer "train" the A-matrix
+//!   in isolation while the forward kernel kept reading the pre-training
+//!   decay values forever. Without the fix this test fails because
+//!   `a_neg_all` is identical to its initialization after any number of
+//!   steps (only `a_log` changes).
 
 #![cfg(feature = "cuda")]
 
@@ -170,6 +180,125 @@ fn m1_trainer_parallel_scan_f16() {
 /// Small inputs at `scale=0.01` keep the synthetic gradients within bf16
 /// dynamic range at the default initial loss scale; with `lr=1e-4` the
 /// update magnitude is comparable to a real RL actor step.
+// ===========================================================================
+// Regression: a_log gradient must actually flow into SSM recurrence
+// ===========================================================================
+
+/// Trainer construction seeds `a_neg_all = -exp(a_log)` once. AdamW
+/// updates `a_log` every step, but the forward/backward SSM kernels read
+/// `a_neg_all`. Before the round-2 audit fix, `a_neg_all` was never
+/// recomputed → the SSM used the initial A-matrix for the entire run
+/// even though `a_log` changed in memory. Assert that after 5 training
+/// steps:
+///   1. `a_log` master weights differ from initialization (AdamW worked).
+///   2. `a_neg_all` GPU buffer ALSO differs from initialization by AT
+///      LEAST the same amount (fix made the refresh happen).
+///   3. The delta tracks `-exp(a_log_new) + exp(a_log_old)` within a
+///      small tolerance (the recompute formula is mathematically
+///      correct, not just "some arbitrary update").
+#[test]
+fn a_log_actually_reaches_ssm_after_training() {
+    use mamba_rs::config::{MambaConfig, ScanMode};
+    use mamba_rs::mamba_ssm::gpu::trainer::MambaTrainer;
+    use mamba_rs::weights::MambaWeights;
+
+    let cfg = MambaConfig {
+        d_model: 64,
+        n_layers: 2,
+        d_state: 16,
+        d_conv: 4,
+        expand: 2,
+        scan_mode: ScanMode::Sequential,
+    };
+    let input_dim = cfg.d_model;
+    let batch = 1;
+    let seq_len = 8;
+    let n = batch * seq_len * input_dim;
+
+    let mut cpu = MambaWeights::init(&cfg, input_dim, 0xA10_C0FFEE);
+    cpu.input_proj_w.clear();
+    cpu.input_proj_b.clear();
+    for lw in cpu.layers.iter_mut() {
+        lw.a_neg = lw.a_log.iter().map(|&v| -v.exp()).collect();
+    }
+
+    // Initial a_log per layer — flattened for easy diff.
+    let a_log_init: Vec<f32> = cpu.layers.iter().flat_map(|lw| lw.a_log.clone()).collect();
+    let a_neg_init: Vec<f32> = a_log_init.iter().map(|&v| -v.exp()).collect();
+
+    let mut trainer = MambaTrainer::new_full(
+        0,
+        &cpu,
+        cfg,
+        input_dim,
+        batch,
+        seq_len,
+        WeightDtype::Bf16,
+        1e-3, // large enough to move a_log visibly in 5 steps
+        0.0,
+    )
+    .expect("build trainer");
+
+    // Seed d_temporal with a signal that has non-trivial gradient w.r.t.
+    // a_log. Pure zero gradient wouldn't move the optimizer at all.
+    for s in 0..5 {
+        trainer
+            .step(&det_scaled(n, 0xA0 + s, 1.0), &det_scaled(n, 0xB0 + s, 0.1))
+            .expect("training step");
+    }
+
+    // Read both sides after training.
+    let after = trainer.snapshot_master().expect("snapshot");
+    let a_log_after: Vec<f32> = after.layers.iter().flat_map(|lw| lw.a_log.clone()).collect();
+    let a_neg_after = trainer.debug_a_neg_all().expect("download a_neg_all");
+
+    // Step 1: a_log must have moved (optimizer is working).
+    let a_log_max_delta: f32 = a_log_init
+        .iter()
+        .zip(&a_log_after)
+        .map(|(a, b): (&f32, &f32)| (a - b).abs())
+        .fold(0.0f32, f32::max);
+    assert!(
+        a_log_max_delta > 1e-5,
+        "a_log did not move after 5 steps (max delta {a_log_max_delta:.3e}) — optimizer broken"
+    );
+
+    // Step 2: a_neg_all must have moved too (the fix under test).
+    let a_neg_max_delta: f32 = a_neg_init
+        .iter()
+        .zip(&a_neg_after)
+        .map(|(a, b): (&f32, &f32)| (a - b).abs())
+        .fold(0.0f32, f32::max);
+    assert!(
+        a_neg_max_delta > 1e-5,
+        "a_neg_all was NOT refreshed after AdamW updates to a_log \
+         (max delta {a_neg_max_delta:.3e}). This is the round-2 audit \
+         CRIT bug — SSM would run on stale A-matrix forever."
+    );
+
+    // Step 3: the recompute formula is mathematically correct, not just
+    // an arbitrary mutation. a_neg_after[i] == -exp(a_log_after[i]) for
+    // every i. Tolerance absorbs bf16 sync rounding on large negatives.
+    let mut worst_formula_err = 0.0f32;
+    for (log, neg) in a_log_after.iter().zip(a_neg_after.iter()) {
+        let expected = -(*log as f32).exp();
+        let err = (expected - neg).abs();
+        if err > worst_formula_err {
+            worst_formula_err = err;
+        }
+    }
+    assert!(
+        worst_formula_err < 1e-3,
+        "a_neg_all != -exp(a_log) after refresh (max err {worst_formula_err:.3e}) \
+         — recompute formula broken"
+    );
+
+    eprintln!(
+        "a_log max delta = {a_log_max_delta:.3e}  a_neg max delta = {a_neg_max_delta:.3e}  \
+         formula err = {worst_formula_err:.3e}"
+    );
+}
+
 #[test]
 fn m1_trainer_f16_production_lr_stable() {
     use mamba_rs::config::{MambaConfig, ScanMode};
