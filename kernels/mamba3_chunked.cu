@@ -1191,100 +1191,128 @@ extern "C" __global__ void m3_dqktheta(
     int b = b_chunk / n_chunks;
     int chunk = b_chunk % n_chunks;
     int gt = chunk * CS + t_local;
-    if (gt >= T || b >= B || h >= nh) return;
 
-    int base = ((b * T + gt) * nh + h) * ds;
-    float scale = Scale_in[(b * T + gt) * nh + h];
-    float gamma = Gamma_in[(b * T + gt) * nh + h];
-    float dqk = dQK_dot[(b * T + gt) * nh + h];
+    // ds > 64 is a pre-existing kernel limit (q_pre/k_pre/dq_in[64] register
+    // arrays). All threads of the block read the same `ds` arg → safe early
+    // return (no smem alloc reached, no syncthreads needed).
+    if (ds > 64) return;
+    if (b >= B || h >= nh) return;
 
-    // Load Q_raw + K_raw (pre-RoPE, post-bias)
-    float q_pre[64], k_pre[64]; // max ds
-    for (int n = 0; n < ds; n++) {
-        q_pre[n] = Q_raw[base + n];
-        k_pre[n] = K_raw[base + n];
+    bool valid = (gt < T);
+
+    // Per-block smem accumulator for dQ_bias / dK_bias to remove HBM-atomic
+    // contention (audit Agent 2 M2: previously CS threads serialized on the
+    // same h*ds+n slot per block; now one HBM atomic per slot per block).
+    __shared__ float dq_bias_smem[64];
+    __shared__ float dk_bias_smem[64];
+    for (int i = t_local; i < ds; i += blockDim.x) {
+        dq_bias_smem[i] = 0.0f;
+        dk_bias_smem[i] = 0.0f;
     }
-    float dq_in[64], dk_in[64];
-    for (int n = 0; n < ds; n++) {
-        dq_in[n] = dQ_mid[base + n];
-        dk_in[n] = dK_mid[base + n];
+    __syncthreads();
+
+    if (valid) {
+        int base = ((b * T + gt) * nh + h) * ds;
+        float scale = Scale_in[(b * T + gt) * nh + h];
+        float gamma = Gamma_in[(b * T + gt) * nh + h];
+        float dqk = dQK_dot[(b * T + gt) * nh + h];
+
+        // Load Q_raw + K_raw (pre-RoPE, post-bias)
+        float q_pre[64], k_pre[64]; // max ds
+        for (int n = 0; n < ds; n++) {
+            q_pre[n] = Q_raw[base + n];
+            k_pre[n] = K_raw[base + n];
+        }
+        float dq_in[64], dk_in[64];
+        for (int n = 0; n < ds; n++) {
+            dq_in[n] = dQ_mid[base + n];
+            dk_in[n] = dK_mid[base + n];
+        }
+
+        // Forward RoPE on K_raw to get K_rot (for dScale computation)
+        float k_rot[64];
+        int angle_base = ((b * T + gt) * nh + h) * n_angles;
+        for (int a = 0; a < n_angles && 2 * a + 1 < ds; a++) {
+            float theta = Angles[angle_base + a];
+            float cos_t = cosf(theta);
+            float sin_t = sinf(theta);
+            int i0 = 2 * a, i1 = 2 * a + 1;
+            k_rot[i0] = k_pre[i0] * cos_t - k_pre[i1] * sin_t;
+            k_rot[i1] = k_pre[i0] * sin_t + k_pre[i1] * cos_t;
+        }
+        for (int n = 2 * n_angles; n < ds; n++) k_rot[n] = k_pre[n];
+
+        // dScale = sum_n(dK_mid[n] * K_rot[n])
+        float d_scale = 0.0f;
+        for (int n = 0; n < ds; n++) d_scale += dk_in[n] * k_rot[n];
+        dScale[(b * T + gt) * nh + h] = d_scale;
+
+        // dGamma = dQK * sum_n(Q_raw[n] * K_raw[n])
+        float qk_raw = 0.0f;
+        for (int n = 0; n < ds; n++) qk_raw += q_pre[n] * k_pre[n];
+        dGamma[(b * T + gt) * nh + h] = dqk * qk_raw;
+
+        // Scale dK_mid by scale before inverse RoPE
+        for (int n = 0; n < ds; n++) dk_in[n] *= scale;
+
+        // Inverse RoPE on dQ_mid and scaled dK_mid
+        float dq_pre_out[64], dk_pre_out[64];
+        for (int n = 0; n < ds; n++) { dq_pre_out[n] = dq_in[n]; dk_pre_out[n] = dk_in[n]; }
+        for (int a = 0; a < n_angles && 2 * a + 1 < ds; a++) {
+            float theta = Angles[angle_base + a];
+            float cos_t = cosf(theta);
+            float sin_t = sinf(theta);
+            int i0 = 2 * a, i1 = 2 * a + 1;
+            // Inverse rotation: R^T = [[cos, sin], [-sin, cos]]
+            dq_pre_out[i0] = dq_in[i0] * cos_t + dq_in[i1] * sin_t;
+            dq_pre_out[i1] = -dq_in[i0] * sin_t + dq_in[i1] * cos_t;
+            dk_pre_out[i0] = dk_in[i0] * cos_t + dk_in[i1] * sin_t;
+            dk_pre_out[i1] = -dk_in[i0] * sin_t + dk_in[i1] * cos_t;
+        }
+
+        // Add dQK path: dQ_pre += dqk * gamma * K_raw, dK_pre += dqk * gamma * Q_raw
+        float dqk_gamma = dqk * gamma;
+        for (int n = 0; n < ds; n++) {
+            dq_pre_out[n] += dqk_gamma * k_pre[n];
+            dk_pre_out[n] += dqk_gamma * q_pre[n];
+        }
+
+        // Store dQ_pre, dK_pre
+        for (int n = 0; n < ds; n++) {
+            dQ_pre[base + n] = dq_pre_out[n];
+            dK_pre[base + n] = dk_pre_out[n];
+        }
+
+        // dQ_bias, dK_bias: accumulate into smem first (block-level atomic
+        // is ~10× faster than HBM atomic and removes intra-block contention).
+        for (int n = 0; n < ds; n++) {
+            atomicAdd(&dq_bias_smem[n], dq_pre_out[n]);
+            atomicAdd(&dk_bias_smem[n], dk_pre_out[n]);
+        }
+
+        // dAngles_cumsum from rotary gradient
+        // dtheta = dQ_in * d(Q_rot)/d(theta) + dK_in_scaled * d(K_rot)/d(theta)
+        for (int a = 0; a < n_angles && 2 * a + 1 < ds; a++) {
+            float theta = Angles[angle_base + a];
+            float cos_t = cosf(theta);
+            float sin_t = sinf(theta);
+            int i0 = 2 * a, i1 = 2 * a + 1;
+            // d(Q_rot)/dtheta: Q_rot[i0] = Q[i0]*cos - Q[i1]*sin
+            //                  Q_rot[i1] = Q[i0]*sin + Q[i1]*cos
+            // d/dtheta: [-Q[i0]*sin - Q[i1]*cos, Q[i0]*cos - Q[i1]*sin]
+            float dtheta_q = dq_in[i0] * (-q_pre[i0] * sin_t - q_pre[i1] * cos_t)
+                           + dq_in[i1] * (q_pre[i0] * cos_t - q_pre[i1] * sin_t);
+            float dtheta_k = dk_in[i0] * (-k_pre[i0] * sin_t - k_pre[i1] * cos_t)
+                           + dk_in[i1] * (k_pre[i0] * cos_t - k_pre[i1] * sin_t);
+            dAngles_cumsum[((b * T + gt) * nh + h) * n_angles + a] = dtheta_q + dtheta_k;
+        }
     }
 
-    // Forward RoPE on K_raw to get K_rot (for dScale computation)
-    float k_rot[64];
-    int angle_base = ((b * T + gt) * nh + h) * n_angles;
-    for (int a = 0; a < n_angles && 2 * a + 1 < ds; a++) {
-        float theta = Angles[angle_base + a];
-        float cos_t = cosf(theta);
-        float sin_t = sinf(theta);
-        int i0 = 2 * a, i1 = 2 * a + 1;
-        k_rot[i0] = k_pre[i0] * cos_t - k_pre[i1] * sin_t;
-        k_rot[i1] = k_pre[i0] * sin_t + k_pre[i1] * cos_t;
-    }
-    for (int n = 2 * n_angles; n < ds; n++) k_rot[n] = k_pre[n];
-
-    // dScale = sum_n(dK_mid[n] * K_rot[n])
-    float d_scale = 0.0f;
-    for (int n = 0; n < ds; n++) d_scale += dk_in[n] * k_rot[n];
-    dScale[(b * T + gt) * nh + h] = d_scale;
-
-    // dGamma = dQK * sum_n(Q_raw[n] * K_raw[n])
-    float qk_raw = 0.0f;
-    for (int n = 0; n < ds; n++) qk_raw += q_pre[n] * k_pre[n];
-    dGamma[(b * T + gt) * nh + h] = dqk * qk_raw;
-
-    // Scale dK_mid by scale before inverse RoPE
-    for (int n = 0; n < ds; n++) dk_in[n] *= scale;
-
-    // Inverse RoPE on dQ_mid and scaled dK_mid
-    float dq_pre_out[64], dk_pre_out[64];
-    for (int n = 0; n < ds; n++) { dq_pre_out[n] = dq_in[n]; dk_pre_out[n] = dk_in[n]; }
-    for (int a = 0; a < n_angles && 2 * a + 1 < ds; a++) {
-        float theta = Angles[angle_base + a];
-        float cos_t = cosf(theta);
-        float sin_t = sinf(theta);
-        int i0 = 2 * a, i1 = 2 * a + 1;
-        // Inverse rotation: R^T = [[cos, sin], [-sin, cos]]
-        dq_pre_out[i0] = dq_in[i0] * cos_t + dq_in[i1] * sin_t;
-        dq_pre_out[i1] = -dq_in[i0] * sin_t + dq_in[i1] * cos_t;
-        dk_pre_out[i0] = dk_in[i0] * cos_t + dk_in[i1] * sin_t;
-        dk_pre_out[i1] = -dk_in[i0] * sin_t + dk_in[i1] * cos_t;
-    }
-
-    // Add dQK path: dQ_pre += dqk * gamma * K_raw, dK_pre += dqk * gamma * Q_raw
-    float dqk_gamma = dqk * gamma;
-    for (int n = 0; n < ds; n++) {
-        dq_pre_out[n] += dqk_gamma * k_pre[n];
-        dk_pre_out[n] += dqk_gamma * q_pre[n];
-    }
-
-    // Store dQ_pre, dK_pre
-    for (int n = 0; n < ds; n++) {
-        dQ_pre[base + n] = dq_pre_out[n];
-        dK_pre[base + n] = dk_pre_out[n];
-    }
-
-    // dQ_bias, dK_bias: accumulate via atomicAdd
-    for (int n = 0; n < ds; n++) {
-        atomicAdd(&dQ_bias[h * ds + n], dq_pre_out[n]);
-        atomicAdd(&dK_bias[h * ds + n], dk_pre_out[n]);
-    }
-
-    // dAngles_cumsum from rotary gradient
-    // dtheta = dQ_in * d(Q_rot)/d(theta) + dK_in_scaled * d(K_rot)/d(theta)
-    for (int a = 0; a < n_angles && 2 * a + 1 < ds; a++) {
-        float theta = Angles[angle_base + a];
-        float cos_t = cosf(theta);
-        float sin_t = sinf(theta);
-        int i0 = 2 * a, i1 = 2 * a + 1;
-        // d(Q_rot)/dtheta: Q_rot[i0] = Q[i0]*cos - Q[i1]*sin
-        //                  Q_rot[i1] = Q[i0]*sin + Q[i1]*cos
-        // d/dtheta: [-Q[i0]*sin - Q[i1]*cos, Q[i0]*cos - Q[i1]*sin]
-        float dtheta_q = dq_in[i0] * (-q_pre[i0] * sin_t - q_pre[i1] * cos_t)
-                       + dq_in[i1] * (q_pre[i0] * cos_t - q_pre[i1] * sin_t);
-        float dtheta_k = dk_in[i0] * (-k_pre[i0] * sin_t - k_pre[i1] * cos_t)
-                       + dk_in[i1] * (k_pre[i0] * cos_t - k_pre[i1] * sin_t);
-        dAngles_cumsum[((b * T + gt) * nh + h) * n_angles + a] = dtheta_q + dtheta_k;
+    // One HBM atomic per (h, n) per block instead of CS×ds atomics.
+    __syncthreads();
+    for (int i = t_local; i < ds; i += blockDim.x) {
+        atomicAdd(&dQ_bias[h * ds + i], dq_bias_smem[i]);
+        atomicAdd(&dK_bias[h * ds + i], dk_bias_smem[i]);
     }
 }
 
@@ -2096,7 +2124,17 @@ m3_dqktheta_##SUFFIX(                                                         \
     int b = b_chunk / n_chunks;                                               \
     int chunk = b_chunk % n_chunks;                                           \
     int gt = chunk * CS + t_local;                                            \
-    if (gt >= T || b >= B || h >= nh) return;                                 \
+    if (ds > 64) return;                                                      \
+    if (b >= B || h >= nh) return;                                            \
+    bool valid = (gt < T);                                                    \
+    __shared__ float dq_bias_smem[64];                                        \
+    __shared__ float dk_bias_smem[64];                                        \
+    for (int i = t_local; i < ds; i += blockDim.x) {                          \
+        dq_bias_smem[i] = 0.0f;                                               \
+        dk_bias_smem[i] = 0.0f;                                               \
+    }                                                                         \
+    __syncthreads();                                                          \
+    if (valid) {                                                              \
     int base = ((b * T + gt) * nh + h) * ds;                                  \
     float scale = Scale_in[(b * T + gt) * nh + h];                            \
     float gamma = Gamma_in[(b * T + gt) * nh + h];                            \
@@ -2154,8 +2192,8 @@ m3_dqktheta_##SUFFIX(                                                         \
         dK_pre[base + n] = dk_pre_out[n];                                     \
     }                                                                         \
     for (int n = 0; n < ds; n++) {                                            \
-        atomicAdd(&dQ_bias[h * ds + n], dq_pre_out[n]);                       \
-        atomicAdd(&dK_bias[h * ds + n], dk_pre_out[n]);                       \
+        atomicAdd(&dq_bias_smem[n], dq_pre_out[n]);                           \
+        atomicAdd(&dk_bias_smem[n], dk_pre_out[n]);                           \
     }                                                                         \
     for (int a = 0; a < n_angles && 2 * a + 1 < ds; a++) {                    \
         float theta = Angles[angle_base + a];                                 \
@@ -2170,6 +2208,12 @@ m3_dqktheta_##SUFFIX(                                                         \
             + dk_in[i1] * (k_pre[i0] * cos_t - k_pre[i1] * sin_t);            \
         dAngles_cumsum[((b * T + gt) * nh + h) * n_angles + a] =              \
             dtheta_q + dtheta_k;                                              \
+    }                                                                         \
+    } /* end if (valid) */                                                    \
+    __syncthreads();                                                          \
+    for (int i = t_local; i < ds; i += blockDim.x) {                          \
+        atomicAdd(&dQ_bias[h * ds + i], dq_bias_smem[i]);                     \
+        atomicAdd(&dK_bias[h * ds + i], dk_bias_smem[i]);                     \
     }                                                                         \
     (void)FROM_F;                                                             \
 }
