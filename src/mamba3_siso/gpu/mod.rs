@@ -13,6 +13,7 @@ pub mod inference;
 pub mod kernels;
 pub mod mamba3_gpu;
 pub mod state;
+pub mod trainer;
 pub mod training_graph;
 pub mod weights;
 pub mod weights_mixed_train;

@@ -25,6 +25,7 @@ pub mod kernels;
 pub mod launch;
 pub mod loss_scaler;
 pub mod prefill;
+pub mod trainer;
 pub mod training_graph;
 pub mod weights;
 pub mod weights_mixed_train;
