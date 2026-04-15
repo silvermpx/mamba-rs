@@ -285,6 +285,15 @@ pub struct MambaTrainerMixed {
     graph_f16: Option<cudarc::driver::CudaGraph>,
     /// 1-element device buffer of `1/loss_scale` (Step 22).
     unscale_factor: Option<UnscaleFactor>,
+    /// Pointer-stability snapshots for the f16 graph. The three device
+    /// buffers below are baked into the captured kernels; if any of them
+    /// is reallocated between capture and replay, the graph silently reads
+    /// freed memory. Asserted on every replay.
+    captured_f16_bias_ptr: u64,
+    captured_f16_unscale_ptr: u64,
+    captured_f16_overflow_ptr: u64,
+    captured_f16_grads_ptr: u64,
+    captured_f16_dt_scaled_ptr: u64,
 }
 
 impl MambaTrainerMixed {
@@ -397,6 +406,13 @@ impl MambaTrainerMixed {
             d_temporal_scaled,
             graph_f16: None,
             unscale_factor,
+            // Sentinel zeros — overwritten in capture_graph_f16; never used
+            // before the graph is captured (gated by `if graph_f16.is_some()`).
+            captured_f16_bias_ptr: 0,
+            captured_f16_unscale_ptr: 0,
+            captured_f16_overflow_ptr: 0,
+            captured_f16_grads_ptr: 0,
+            captured_f16_dt_scaled_ptr: 0,
         })
     }
 
@@ -542,17 +558,56 @@ impl MambaTrainerMixed {
         let (next_step, bc1, bc2) = self.adam.advance();
         self.bias.write(&self.ctx.stream, bc1, bc2)?;
 
-        let flag = self.overflow_flag.as_mut().expect("f16 overflow flag");
-        flag.zero(&self.ctx.stream)?;
+        // Zero the overflow flag (drops borrow immediately so we can re-borrow below).
+        self.overflow_flag
+            .as_mut()
+            .expect("f16 overflow flag")
+            .zero(&self.ctx.stream)?;
 
         let (step, overflow, replayed) = if let Some(ref g) = self.graph_f16 {
+            // Pointer-stability invariant — every device buffer baked into
+            // the captured kernels MUST have the same pointer at replay time.
+            assert_eq!(
+                self.bias.ptr(),
+                self.captured_f16_bias_ptr,
+                "f16 graph replay: bias pointer changed since capture"
+            );
+            assert_eq!(
+                self.unscale_factor.as_ref().unwrap().ptr(),
+                self.captured_f16_unscale_ptr,
+                "f16 graph replay: unscale_factor pointer changed since capture"
+            );
+            assert_eq!(
+                self.overflow_flag
+                    .as_ref()
+                    .unwrap()
+                    .stable_ptr(&self.ctx.stream),
+                self.captured_f16_overflow_ptr,
+                "f16 graph replay: overflow_flag pointer changed since capture"
+            );
+            assert_eq!(
+                self.grads.flat.cached_ptr(),
+                self.captured_f16_grads_ptr,
+                "f16 graph replay: grads.flat pointer changed since capture"
+            );
+            assert_eq!(
+                self.d_temporal_scaled.as_ref().unwrap().cached_ptr(),
+                self.captured_f16_dt_scaled_ptr,
+                "f16 graph replay: d_temporal_scaled pointer changed since capture"
+            );
+
             // Graph replay: forward + backward + check_inf_nan +
             // scale_grads_skip + AdamW + sync all run as one cuGraphLaunch.
             // grads.zero is included in the captured body.
             g.launch().map_err(|e| format!("f16 graph launch: {e:?}"))?;
             // Read overflow flag for scaler state machine. Graph already
             // applied the conditional unscale — no rollback needed.
-            let overflow = flag.read(&self.ctx.stream)? != 0;
+            let overflow = self
+                .overflow_flag
+                .as_ref()
+                .unwrap()
+                .read(&self.ctx.stream)?
+                != 0;
             self.scaler.as_mut().expect("f16 scaler").update(overflow);
             (next_step, overflow, true)
         } else {
@@ -576,7 +631,12 @@ impl MambaTrainerMixed {
                 &self.a_neg_all,
                 &mut self.scratch,
             )?;
-            check_inf_nan_gpu(&self.ctx, &self.ctx.kernels, flag, &self.grads.flat)?;
+            check_inf_nan_gpu(
+                &self.ctx,
+                &self.ctx.kernels,
+                self.overflow_flag.as_mut().unwrap(),
+                &self.grads.flat,
+            )?;
             let unscale = self.unscale_factor.as_ref().expect("unscale buf");
             scale_grads_skip_gpu(
                 &self.ctx,
@@ -595,7 +655,12 @@ impl MambaTrainerMixed {
                 &self.grads,
             )?;
             self.weights.sync_master_to_compute(&self.ctx)?;
-            let overflow = self.overflow_flag.as_ref().unwrap().read(&self.ctx.stream)? != 0;
+            let overflow = self
+                .overflow_flag
+                .as_ref()
+                .unwrap()
+                .read(&self.ctx.stream)?
+                != 0;
             self.scaler.as_mut().expect("f16 scaler").update(overflow);
             (next_step, overflow, false)
         };
@@ -646,6 +711,19 @@ impl MambaTrainerMixed {
         self.ctx
             .presize_half_staging_for_train(&self.cfg, self.batch, self.seq_len, self.dtype)?;
 
+        // Snapshot every device pointer the captured kernels reference, so
+        // step_f16 can assert pointer-stability on each replay (audit Step
+        // 22 round-1 finding: f16 graph was missing these guards).
+        let snap_bias = self.bias.ptr();
+        let snap_unscale = self.unscale_factor.as_ref().unwrap().ptr();
+        let snap_overflow = self
+            .overflow_flag
+            .as_ref()
+            .unwrap()
+            .stable_ptr(&self.ctx.stream);
+        let snap_grads = self.grads.flat.cached_ptr();
+        let snap_dt_scaled = self.d_temporal_scaled.as_ref().unwrap().cached_ptr();
+
         // Capture body: zero_grads + forward + backward + check_inf_nan +
         // scale_grads_skip + AdamW + sync_master_to_compute. Mirrors
         // `step_f16` eager path 1:1 so numerics match.
@@ -694,6 +772,11 @@ impl MambaTrainerMixed {
             Ok(())
         })?;
         self.graph_f16 = Some(g);
+        self.captured_f16_bias_ptr = snap_bias;
+        self.captured_f16_unscale_ptr = snap_unscale;
+        self.captured_f16_overflow_ptr = snap_overflow;
+        self.captured_f16_grads_ptr = snap_grads;
+        self.captured_f16_dt_scaled_ptr = snap_dt_scaled;
         Ok(())
     }
 

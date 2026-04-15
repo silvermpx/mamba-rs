@@ -261,6 +261,15 @@ impl OverflowFlag {
     pub(crate) fn cuda_slice(&mut self) -> &mut CudaSlice<i32> {
         &mut self.data
     }
+
+    /// Stable device pointer for snapshot/assertion in CUDA-Graph holders.
+    /// Equivalent to `device_ptr(stream).0` but without creating a
+    /// `SyncOnDrop` guard — safe under `disable_event_tracking`.
+    pub fn stable_ptr(&self, stream: &Arc<CudaStream>) -> cudarc::driver::sys::CUdeviceptr {
+        use cudarc::driver::DevicePtr;
+        let (p, _g) = self.data.device_ptr(stream);
+        p
+    }
 }
 
 /// Scan one f32 grad buffer for inf/nan. Atomically OR-s a 1 into `flag`
