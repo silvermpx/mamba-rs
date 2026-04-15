@@ -258,6 +258,10 @@ pub struct MambaKernels {
     pub check_inf_nan_f32: CudaFunction,
     /// In-place multiply f32 grads by a scalar (unscale, clip, etc.).
     pub scale_grads_f32: CudaFunction,
+
+    // -- AdamW optimizer (Step 12) --
+    /// Fused AdamW step on f32 master weights + f32 optimizer state.
+    pub adamw_step_f32: CudaFunction,
 }
 
 impl MambaKernels {
@@ -275,6 +279,7 @@ impl MambaKernels {
             include_str!("../../../kernels/norms.cu"),
             include_str!("../../../kernels/elementwise.cu"),
             include_str!("../../../kernels/loss_scaler.cu"),
+            include_str!("../../../kernels/adamw.cu"),
         ];
 
         // Strip `#include "_typed_prelude.cuh"` lines (prelude is inlined above).
@@ -400,6 +405,9 @@ impl MambaKernels {
             // AMP loss scaler
             check_inf_nan_f32: get("check_inf_nan_f32")?,
             scale_grads_f32: get("scale_grads_f32")?,
+
+            // AdamW
+            adamw_step_f32: get("adamw_step_f32")?,
 
             // typed inference kernels
             silu_fwd_typed: load_typed("silu_forward")?,

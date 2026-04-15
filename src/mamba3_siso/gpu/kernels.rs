@@ -53,6 +53,9 @@ pub struct Mamba3Kernels {
     pub residual_add: CudaFunction,
     pub gather_last_timestep: CudaFunction,
 
+    // ── AdamW optimizer (Step 12, adamw.cu) ──
+    pub adamw_step_f32: CudaFunction,
+
     // ── Chunked parallel scan (mamba3_chunked.cu) ──
     pub m3_preprocess_chunks: CudaFunction,
     pub m3_da_cumsum: CudaFunction,
@@ -162,6 +165,7 @@ impl Mamba3Kernels {
             // Shared kernels needed by training pipeline
             include_str!("../../../kernels/norms.cu"),
             include_str!("../../../kernels/elementwise.cu"),
+            include_str!("../../../kernels/adamw.cu"),
         ];
 
         let combined: String = sources
@@ -239,6 +243,9 @@ impl Mamba3Kernels {
             cast_f16_to_f32: get("cast_f16_to_f32")?,
             residual_add: get("residual_add")?,
             gather_last_timestep: get("gather_last_timestep")?,
+
+            // AdamW optimizer
+            adamw_step_f32: get("adamw_step_f32")?,
 
             // Chunked parallel scan
             m3_preprocess_chunks: get("m3_preprocess_chunks")?,

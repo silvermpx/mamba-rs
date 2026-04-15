@@ -9,6 +9,7 @@
 //! - `blas` — cuBLAS SGEMM wrappers
 //! - `launch` — kernel launch helpers
 
+pub mod adamw;
 pub mod backward;
 pub mod backward_mixed;
 pub mod blas;
