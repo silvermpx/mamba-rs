@@ -19,7 +19,25 @@ use crate::mamba_ssm::gpu::inference::GpuMambaBackbone;
 /// step-by-step loop. Lower values favor parallel; typical LLM prompts ≥ 8
 /// already benefit. Conservative default is 4 — parallel scan within a layer
 /// amortizes the per-layer kernel-launch overhead over T tokens.
-const PREFILL_PARALLEL_THRESHOLD: usize = 4;
+/// Minimum prompt length before `generate_streaming` (batch=1) switches
+/// from per-token step-by-step prefill to the parallel prefill kernel.
+///
+/// HISTORY: was `4`, which meant a 5-token prompt used parallel prefill
+/// at batch=1 while the same prompt in `generate_batch` (batch > 1)
+/// always uses step-by-step. The two paths are mathematically equivalent
+/// but have different numerical precision at bf16 — parallel scan and
+/// sequential scan reduce the K-dim in different orders, producing sub-
+/// ULP differences that amplify through 24 SSM layers on adversarial
+/// prompts (KL ≈ 2.7 on [100..104], originally reported in
+/// `bf16_batch_divergence_known`).
+///
+/// Raised to 64 so typical chat-style prompts (≤ 63 tokens) go through
+/// the identical step-by-step path as batched generation, restoring
+/// batch-invariant inference at bf16. Longer prompts (documents, RAG
+/// contexts) still get the parallel-scan perf win where it matters.
+/// For a 5-token prompt the step-by-step path is ~2 ms slower on 130m
+/// at bf16 — negligible for any realistic latency budget.
+const PREFILL_PARALLEL_THRESHOLD: usize = 64;
 
 use crate::hf::embed::embed_lookup;
 use crate::hf::load::{HfModel, load_hf};

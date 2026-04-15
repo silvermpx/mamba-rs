@@ -121,7 +121,10 @@ impl GpuDevice {
         let blas = cudarc::cublas::CudaBlas::new(compute_stream.clone())
             .map_err(|e| format!("cuBLAS init failed: {:?}", e))?;
 
-        // Enable TF32 Tensor Cores for all SGEMM operations.
+        // Enable TF32 Tensor Cores for all SGEMM operations. Per-op
+        // compute type for bf16/f16 paths is CUBLAS_COMPUTE_32F_PEDANTIC
+        // so TF32 math mode doesn't actually apply to typed GEMMs —
+        // this is purely an f32-SGEMM perf flag.
         unsafe {
             let status = cudarc::cublas::sys::cublasSetMathMode(
                 *blas.handle(),

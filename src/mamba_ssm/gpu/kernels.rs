@@ -292,6 +292,7 @@ impl MambaKernels {
             include_str!("../../../kernels/elementwise.cu"),
             include_str!("../../../kernels/loss_scaler.cu"),
             include_str!("../../../kernels/adamw.cu"),
+            include_str!("../../../kernels/gemm_batch_invariant.cu"),
         ];
 
         // Strip `#include "_typed_prelude.cuh"` lines (prelude is inlined above).
