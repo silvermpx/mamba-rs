@@ -591,10 +591,14 @@ extern "C" __global__ void m3_backward_seq(
     int d_inner = nh * hd;
     int nhd_ds = d_inner * ds;
 
+    // Warp-reduce mask: only `hd` lanes are launched (block_dim = hd, hd ≤ 32).
+    // Hardcoded 0xFFFFFFFF = UB per CUDA Programming Guide §B.15.1.
+    unsigned warp_mask = (hd >= 32) ? 0xFFFFFFFFu : ((1u << hd) - 1u);
+
     // O1: D[h] broadcast once
     float d_skip = 0.0f;
     if (p == 0) d_skip = D[h];
-    d_skip = __shfl_sync(0xFFFFFFFF, d_skip, 0, hd);
+    d_skip = __shfl_sync(warp_mask, d_skip, 0, hd);
 
     // d_h: BPTT hidden state gradient carried backward through time
     float d_h_reg[64];

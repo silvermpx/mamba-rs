@@ -453,6 +453,11 @@ extern "C" __global__ void m3_chunk_scan_bwd(
     int cs_base = ((b * n_chunks + chunk) * nh + h) * chunk_size;
     int state_base = ((b * n_chunks + chunk) * nh + h) * hd * ds + p * ds;
 
+    // Warp-reduce mask: only `hd` lanes are launched (block_dim = hd, hd ≤ 32 by
+    // config). Hardcoded 0xFFFFFFFF would name lanes that never executed the
+    // intrinsic — documented UB per CUDA Programming Guide §B.15.1.
+    unsigned warp_mask = (hd >= 32) ? 0xFFFFFFFFu : ((1u << hd) - 1u);
+
     float d_skip = D[h];
     float d_D_acc = 0.0f;
 
@@ -490,7 +495,7 @@ extern "C" __global__ void m3_chunk_scan_bwd(
         // Warp reduce over p, atomicAdd
         float d_qk_val = dy * x_t;
         for (int off = hd / 2; off > 0; off >>= 1)
-            d_qk_val += __shfl_down_sync(0xFFFFFFFF, d_qk_val, off, hd);
+            d_qk_val += __shfl_down_sync(warp_mask, d_qk_val, off, hd);
         if (p == 0)
             atomicAdd(&d_qk_dot[th], d_qk_val);
 
@@ -510,7 +515,7 @@ extern "C" __global__ void m3_chunk_scan_bwd(
         for (int n = 0; n < ds; n++) {
             float d_q_state = dy * prev_states[state_base + n] * state_decay;
             for (int off = hd / 2; off > 0; off >>= 1)
-                d_q_state += __shfl_down_sync(0xFFFFFFFF, d_q_state, off, hd);
+                d_q_state += __shfl_down_sync(warp_mask, d_q_state, off, hd);
             if (p == 0)
                 atomicAdd(&d_Q[q_base_t + n], d_q_state);
         }
@@ -535,7 +540,7 @@ extern "C" __global__ void m3_chunk_scan_bwd(
             for (int n = 0; n < ds; n++) {
                 float d_q_val = contrib * K_scaled[ks_base + n];
                 for (int off = hd / 2; off > 0; off >>= 1)
-                    d_q_val += __shfl_down_sync(0xFFFFFFFF, d_q_val, off, hd);
+                    d_q_val += __shfl_down_sync(warp_mask, d_q_val, off, hd);
                 if (p == 0)
                     atomicAdd(&d_Q[q_base_t + n], d_q_val);
             }
@@ -544,7 +549,7 @@ extern "C" __global__ void m3_chunk_scan_bwd(
             for (int n = 0; n < ds; n++) {
                 float d_ks_val = contrib * Q[q_base_t + n];
                 for (int off = hd / 2; off > 0; off >>= 1)
-                    d_ks_val += __shfl_down_sync(0xFFFFFFFF, d_ks_val, off, hd);
+                    d_ks_val += __shfl_down_sync(warp_mask, d_ks_val, off, hd);
                 if (p == 0)
                     atomicAdd(&d_K_scaled[ks_base + n], d_ks_val);
             }
@@ -560,7 +565,7 @@ extern "C" __global__ void m3_chunk_scan_bwd(
             float dA_grad = dy * decay * qk_val * v_s;
             // Warp reduce dA_grad over p
             for (int off = hd / 2; off > 0; off >>= 1)
-                dA_grad += __shfl_down_sync(0xFFFFFFFF, dA_grad, off, hd);
+                dA_grad += __shfl_down_sync(warp_mask, dA_grad, off, hd);
             if (p == 0) {
                 atomicAdd(&d_dA_cumsum[cs_base + t_local], dA_grad);
                 atomicAdd(&d_dA_cumsum[cs_base + s_local], -dA_grad);
@@ -576,7 +581,7 @@ extern "C" __global__ void m3_chunk_scan_bwd(
             float dA_state_grad = dy * y_off * state_decay;
             // Warp reduce over p
             for (int off = hd / 2; off > 0; off >>= 1)
-                dA_state_grad += __shfl_down_sync(0xFFFFFFFF, dA_state_grad, off, hd);
+                dA_state_grad += __shfl_down_sync(warp_mask, dA_state_grad, off, hd);
             if (p == 0)
                 atomicAdd(&d_dA_cumsum[cs_base + t_local], dA_state_grad);
         }
@@ -702,6 +707,10 @@ extern "C" __global__ void m3_chunk_state_bwd(
     int cs_base = ((b * n_chunks + chunk) * nh + h) * chunk_size;
     int state_base = ((b * n_chunks + chunk) * nh + h) * hd * ds + p * ds;
 
+    // Warp-reduce mask: only `hd` lanes are launched (block_dim = hd, hd ≤ 32).
+    // Hardcoded 0xFFFFFFFF = UB per CUDA Programming Guide §B.15.1.
+    unsigned warp_mask = (hd >= 32) ? 0xFFFFFFFFu : ((1u << hd) - 1u);
+
     // dA at end of this chunk
     float dA_end = dA_cumsum[cs_base + chunk_len - 1];
 
@@ -726,7 +735,7 @@ extern "C" __global__ void m3_chunk_state_bwd(
             // d_K_scaled += d_chunk_states * decay * x (atomicAdd across p)
             float d_ks_val = common * x_val;
             for (int off = hd / 2; off > 0; off >>= 1)
-                d_ks_val += __shfl_down_sync(0xFFFFFFFF, d_ks_val, off, hd);
+                d_ks_val += __shfl_down_sync(warp_mask, d_ks_val, off, hd);
             if (p == 0)
                 atomicAdd(&d_K_scaled[t_idx * nh * ds + h * ds + n], d_ks_val);
 
@@ -735,7 +744,7 @@ extern "C" __global__ void m3_chunk_state_bwd(
             float dA_grad = common * ks_n * x_val;
             // Warp reduce dA_grad over p
             for (int off_r = hd / 2; off_r > 0; off_r >>= 1)
-                dA_grad += __shfl_down_sync(0xFFFFFFFF, dA_grad, off_r, hd);
+                dA_grad += __shfl_down_sync(warp_mask, dA_grad, off_r, hd);
             if (p == 0 && t_local != chunk_len - 1) {
                 atomicAdd(&d_dA_cumsum[cs_base + chunk_len - 1], dA_grad);
                 atomicAdd(&d_dA_cumsum[cs_base + t_local], -dA_grad);
@@ -849,6 +858,10 @@ extern "C" __global__ void m3_dqkv(
     if (h >= nh_total || b >= B || p >= hd) return;
     if (ds > 64 || CS > 64) return;  // Safety: d_state[64], dM_rev[64] fixed arrays
 
+    // Warp-reduce mask: only `hd` lanes are launched (block_dim = hd, hd ≤ 32).
+    // Hardcoded 0xFFFFFFFF = UB per CUDA Programming Guide §B.15.1.
+    unsigned warp_mask = (hd >= 32) ? 0xFFFFFFFFu : ((1u << hd) - 1u);
+
     int d_inner = nh_total * hd;
     int n_chunks = (T + CS - 1) / CS;
     float D_val = D_param[h];
@@ -953,7 +966,7 @@ extern "C" __global__ void m3_dqkv(
             float dqk_val = do_sm[t * hd + p] * v_sm[t * hd + p];
             // Warp reduce
             for (int off = hd / 2; off > 0; off >>= 1)
-                dqk_val += __shfl_down_sync(0xFFFFFFFF, dqk_val, off, hd);
+                dqk_val += __shfl_down_sync(warp_mask, dqk_val, off, hd);
             if (p == 0) {
                 dQK_dot_out[(b * T + gt) * nh_total + h] = dqk_val;
                 dD_acc += dqk_val;
@@ -1634,6 +1647,7 @@ m3_chunk_scan_bwd_##SUFFIX(                                                   \
     int chunk_len = chunk_end - chunk_start;                                  \
     int cs_base = ((b * n_chunks + chunk) * nh + h) * chunk_size;             \
     int state_base = ((b * n_chunks + chunk) * nh + h) * hd * ds + p * ds;    \
+    unsigned warp_mask = (hd >= 32) ? 0xFFFFFFFFu : ((1u << hd) - 1u);        \
     float d_skip = D[h];                                                      \
     float d_D_acc = 0.0f;                                                     \
     for (int n = 0; n < ds; n++) {                                            \
@@ -1659,7 +1673,7 @@ m3_chunk_scan_bwd_##SUFFIX(                                                   \
         float d_x_val = dy * (d_skip + qk_dot_in[th]);                        \
         float d_qk_val = dy * x_t;                                            \
         for (int off = hd / 2; off > 0; off >>= 1)                            \
-            d_qk_val += __shfl_down_sync(0xFFFFFFFF, d_qk_val, off, hd);      \
+            d_qk_val += __shfl_down_sync(warp_mask, d_qk_val, off, hd);       \
         if (p == 0)                                                           \
             atomicAdd(&d_qk_dot[th], d_qk_val);                               \
         int q_base_t = t_idx * nh * ds + h * ds;                              \
@@ -1667,7 +1681,7 @@ m3_chunk_scan_bwd_##SUFFIX(                                                   \
         for (int n = 0; n < ds; n++) {                                        \
             float d_q_state = dy * prev_states[state_base + n] * state_decay; \
             for (int off = hd / 2; off > 0; off >>= 1)                        \
-                d_q_state += __shfl_down_sync(0xFFFFFFFF, d_q_state, off, hd);\
+                d_q_state += __shfl_down_sync(warp_mask, d_q_state, off, hd);\
             if (p == 0)                                                       \
                 atomicAdd(&d_Q[q_base_t + n], d_q_state);                     \
         }                                                                     \
@@ -1685,14 +1699,14 @@ m3_chunk_scan_bwd_##SUFFIX(                                                   \
             for (int n = 0; n < ds; n++) {                                    \
                 float d_q_val = contrib * to_f(K_scaled[ks_base + n]);        \
                 for (int off = hd / 2; off > 0; off >>= 1)                    \
-                    d_q_val += __shfl_down_sync(0xFFFFFFFF, d_q_val, off, hd);\
+                    d_q_val += __shfl_down_sync(warp_mask, d_q_val, off, hd);\
                 if (p == 0)                                                   \
                     atomicAdd(&d_Q[q_base_t + n], d_q_val);                   \
             }                                                                 \
             for (int n = 0; n < ds; n++) {                                    \
                 float d_ks_val = contrib * to_f(Q[q_base_t + n]);             \
                 for (int off = hd / 2; off > 0; off >>= 1)                    \
-                    d_ks_val += __shfl_down_sync(0xFFFFFFFF, d_ks_val, off, hd);\
+                    d_ks_val += __shfl_down_sync(warp_mask, d_ks_val, off, hd);\
                 if (p == 0)                                                   \
                     atomicAdd(&d_K_scaled[ks_base + n], d_ks_val);            \
             }                                                                 \
@@ -1700,7 +1714,7 @@ m3_chunk_scan_bwd_##SUFFIX(                                                   \
             atomicAdd(&d_x[(b * T + s) * d_inner + h * hd + p], d_x_s);       \
             float dA_grad = dy * decay * qk_val * v_s;                        \
             for (int off = hd / 2; off > 0; off >>= 1)                        \
-                dA_grad += __shfl_down_sync(0xFFFFFFFF, dA_grad, off, hd);    \
+                dA_grad += __shfl_down_sync(warp_mask, dA_grad, off, hd);    \
             if (p == 0) {                                                     \
                 atomicAdd(&d_dA_cumsum[cs_base + t_local], dA_grad);          \
                 atomicAdd(&d_dA_cumsum[cs_base + s_local], -dA_grad);         \
@@ -1714,7 +1728,7 @@ m3_chunk_scan_bwd_##SUFFIX(                                                   \
             }                                                                 \
             float dA_state_grad = dy * y_off * state_decay;                   \
             for (int off = hd / 2; off > 0; off >>= 1)                        \
-                dA_state_grad += __shfl_down_sync(0xFFFFFFFF,                 \
+                dA_state_grad += __shfl_down_sync(warp_mask,                  \
                                                   dA_state_grad, off, hd);    \
             if (p == 0)                                                       \
                 atomicAdd(&d_dA_cumsum[cs_base + t_local], dA_state_grad);    \
@@ -1754,6 +1768,7 @@ m3_chunk_state_bwd_##SUFFIX(                                                  \
     int chunk_len = chunk_end - chunk_start;                                  \
     int cs_base = ((b * n_chunks + chunk) * nh + h) * chunk_size;             \
     int state_base = ((b * n_chunks + chunk) * nh + h) * hd * ds + p * ds;    \
+    unsigned warp_mask = (hd >= 32) ? 0xFFFFFFFFu : ((1u << hd) - 1u);        \
     float dA_end = dA_cumsum[cs_base + chunk_len - 1];                        \
     for (int t_local = 0; t_local < chunk_len; t_local++) {                   \
         int t = chunk_start + t_local;                                        \
@@ -1769,13 +1784,13 @@ m3_chunk_state_bwd_##SUFFIX(                                                  \
             d_x_add += common * ks_n;                                         \
             float d_ks_val = common * x_val;                                  \
             for (int off = hd / 2; off > 0; off >>= 1)                        \
-                d_ks_val += __shfl_down_sync(0xFFFFFFFF, d_ks_val, off, hd);  \
+                d_ks_val += __shfl_down_sync(warp_mask, d_ks_val, off, hd);   \
             if (p == 0)                                                       \
                 atomicAdd(&d_K_scaled[t_idx * nh * ds + h * ds + n],          \
                           d_ks_val);                                          \
             float dA_grad = common * ks_n * x_val;                            \
             for (int off_r = hd / 2; off_r > 0; off_r >>= 1)                  \
-                dA_grad += __shfl_down_sync(0xFFFFFFFF, dA_grad, off_r, hd);  \
+                dA_grad += __shfl_down_sync(warp_mask, dA_grad, off_r, hd);  \
             if (p == 0 && t_local != chunk_len - 1) {                         \
                 atomicAdd(&d_dA_cumsum[cs_base + chunk_len - 1], dA_grad);    \
                 atomicAdd(&d_dA_cumsum[cs_base + t_local], -dA_grad);         \
@@ -1827,6 +1842,7 @@ m3_dqkv_##SUFFIX(                                                             \
     int p = threadIdx.x;                                                      \
     if (h >= nh_total || b >= B || p >= hd) return;                           \
     if (ds > 64 || CS > 64) return;                                           \
+    unsigned warp_mask = (hd >= 32) ? 0xFFFFFFFFu : ((1u << hd) - 1u);        \
     int d_inner = nh_total * hd;                                              \
     int n_chunks = (T + CS - 1) / CS;                                         \
     float D_val = D_param[h];                                                 \
@@ -1908,7 +1924,7 @@ m3_dqkv_##SUFFIX(                                                             \
                 dv_intra + dv_inter + dv_skip;                                \
             float dqk_val = do_sm[t * hd + p] * v_sm[t * hd + p];             \
             for (int off = hd / 2; off > 0; off >>= 1)                        \
-                dqk_val += __shfl_down_sync(0xFFFFFFFF, dqk_val, off, hd);    \
+                dqk_val += __shfl_down_sync(warp_mask, dqk_val, off, hd);    \
             if (p == 0) {                                                     \
                 dQK_dot_out[(b * T + gt) * nh_total + h] = dqk_val;            \
                 dD_acc += dqk_val;                                            \
