@@ -489,25 +489,16 @@ fn gpu_backward_mamba3_layer_mixed(
     }
 
     // ----------------------------------------------------------------
-    // B4b: bc_bias_add_bwd_typed — head→group reduce.
-    // d_b_pre_rope (f32) → d_b_normed_typed.
-    // ----------------------------------------------------------------
-    // The bc_bias_add_bwd_typed expects typed input/output; our
-    // d_b_pre_rope is f32. Cast it to typed first.
-    cast_f32_to_typed(
-        ctx,
-        m3k,
-        &mut msc.d_b_normed_typed, // temp typed buf
-        &sc.d_b_pre_rope,
-        bt * nh * ds,
-    )?;
-    // Allocate input typed buffer reuse: we need d_b_pre_rope_typed but
-    // didn't add one. Re-use d_b_normed_typed as TEMPORARY input, then
-    // run the reduce. That's incorrect — the kernel reads input AND
-    // writes a different-sized output. Use a different buf or handle
-    // separately. SOLUTION: run the f32 bc_bias_add_bwd directly (it's
-    // simple sum, output f32). The typed kernel is just for typed I/O
-    // optimization, not correctness.
+    // B4b: bc_bias_add_bwd — head→group reduce.
+    //
+    // We use the f32 kernel (not the typed variant): bc_bias_add_bwd_typed
+    // would require both input AND output to be typed, but the upstream
+    // d_b_pre_rope is f32 (output of m3_dqktheta which writes f32 master
+    // grads), and we need d_b_normed staged for the next typed kernel
+    // (bcnorm_bwd_typed). Casting f32→typed→f32 here adds 2 kernel
+    // launches per side for no precision benefit. The f32 reduce is also
+    // cheap (head→group sum, no math). v0.3 cleanup: route m3_dqktheta
+    // output via typed scratch so this whole section can become typed.
     {
         let mut builder = ctx.stream.launch_builder(&m3k.bc_bias_add_bwd);
         builder.arg(sc.d_b_normed.inner_mut());

@@ -198,16 +198,15 @@ pub fn gpu_backward_mamba_layer_mixed(
     // Zero T-length accumulator before SSM backward (kernel uses += over T).
     scratch.d_a_log_local.zero(&ctx.stream)?;
 
-    // ssm_backward_local_typed: typed delta/u/B/C in; typed d_delta/d_u/
-    // d_B_local/d_C_local out; f32 h_saved/a_neg/D/d_D_local/d_a_log_local.
+    // SSM backward: parallel reverse-scan when T > PARALLEL_SCAN_THRESHOLD
+    // (Step 8e — wires the typed parallel bwd kernel into production) or
+    // d_state > 64 (sequential kernel cap from register array size).
+    // Otherwise sequential ssm_backward_local_typed.
     {
         let b_i = b as i32;
         let t_i = t as i32;
         let di_i = di as i32;
         let ds_i = ds as i32;
-        let mut bld = ctx
-            .stream
-            .launch_builder(k.ssm_backward_local_typed.get(dtype));
         let h_p = acts.h_saved.cached_ptr();
         let delta_p = acts.delta.cached_ptr();
         let u_p = acts.u.cached_ptr();
@@ -221,26 +220,67 @@ pub fn gpu_backward_mamba_layer_mixed(
         let dcl = scratch.d_c_local.cached_ptr();
         let ddd = scratch.d_d_local.cached_ptr();
         let da = scratch.d_a_log_local.cached_ptr();
-        bld.arg(&h_p);
-        bld.arg(&delta_p);
-        bld.arg(&u_p);
-        bld.arg(&b_p);
-        bld.arg(&c_p);
-        bld.arg(&a_neg_ptr);
-        bld.arg(&dp);
-        bld.arg(&dy);
-        bld.arg(&dd);
-        bld.arg(&du);
-        bld.arg(&dbl);
-        bld.arg(&dcl);
-        bld.arg(&ddd);
-        bld.arg(&da);
-        bld.arg(&b_i);
-        bld.arg(&t_i);
-        bld.arg(&di_i);
-        bld.arg(&ds_i);
-        unsafe { bld.launch(grid_1d(b * di)) }
-            .map_err(|e| format!("ssm_backward_local_typed: {e:?}"))?;
+
+        if t > super::forward::PARALLEL_SCAN_THRESHOLD || ds > 64 {
+            // Parallel reverse-scan typed bwd (Step 8e).
+            // Signature: h_saved, delta, u, B, C, a_neg, D, dy, d_delta,
+            //   d_u, d_B_local, d_C_local, d_D_local, d_a_log_local,
+            //   batch, T, d_inner, d_state.
+            let mut bld = ctx
+                .stream
+                .launch_builder(k.ssm_parallel_bwd_typed.get(dtype));
+            bld.arg(&h_p);
+            bld.arg(&delta_p);
+            bld.arg(&u_p);
+            bld.arg(&b_p);
+            bld.arg(&c_p);
+            bld.arg(&a_neg_ptr);
+            bld.arg(&dp);
+            bld.arg(&dy);
+            bld.arg(&dd);
+            bld.arg(&du);
+            bld.arg(&dbl);
+            bld.arg(&dcl);
+            bld.arg(&ddd);
+            bld.arg(&da);
+            bld.arg(&b_i);
+            bld.arg(&t_i);
+            bld.arg(&di_i);
+            bld.arg(&ds_i);
+            unsafe {
+                bld.launch(super::launch::grid_parallel_scan_bwd(
+                    b,
+                    di,
+                    dtype.size_bytes(),
+                ))
+            }
+            .map_err(|e| format!("ssm_parallel_bwd_typed: {e:?}"))?;
+        } else {
+            // Sequential typed bwd.
+            let mut bld = ctx
+                .stream
+                .launch_builder(k.ssm_backward_local_typed.get(dtype));
+            bld.arg(&h_p);
+            bld.arg(&delta_p);
+            bld.arg(&u_p);
+            bld.arg(&b_p);
+            bld.arg(&c_p);
+            bld.arg(&a_neg_ptr);
+            bld.arg(&dp);
+            bld.arg(&dy);
+            bld.arg(&dd);
+            bld.arg(&du);
+            bld.arg(&dbl);
+            bld.arg(&dcl);
+            bld.arg(&ddd);
+            bld.arg(&da);
+            bld.arg(&b_i);
+            bld.arg(&t_i);
+            bld.arg(&di_i);
+            bld.arg(&ds_i);
+            unsafe { bld.launch(grid_1d(b * di)) }
+                .map_err(|e| format!("ssm_backward_local_typed: {e:?}"))?;
+        }
     }
 
     // Reductions: zero f32 targets; typed → f32 for d_b/c, f32 → f32 for
