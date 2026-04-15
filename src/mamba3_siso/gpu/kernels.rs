@@ -107,6 +107,13 @@ pub struct Mamba3Kernels {
     /// typed d_y/d_z/d_out/y/z; f32 weight + d_weight (per-sample,
     /// reduced later). Step 9c for M3 training.
     pub rmsnorm_gated_bwd_typed: TypedKernel,
+    // -- Step 9b: typed M3 "final grad" kernels (HIGHEST RISK) --
+    /// Huge dqkv kernel with smem tiles — typed Q_rot/K_scaled/V_in/dO;
+    /// all 6 grad outputs stay f32 (atomicAdd on dD; master grads on others).
+    pub m3_dqkv_typed: TypedKernel,
+    /// Inverse-RoPE + bias backward — typed Q_raw/K_raw; 7 grad outputs f32.
+    pub m3_dqktheta_typed: TypedKernel,
+
     // -- Step 9d: typed M3 chunked parallel backward kernels --
     /// Intra-chunk backward: typed d_y/x/Q/K_scaled; all grad outputs f32
     /// (atomicAdd requires f32 master grads per PyTorch AMP convention).
@@ -317,6 +324,17 @@ impl Mamba3Kernels {
                 bf16: get("rmsnorm_gated_backward_bf16")?,
                 f16: get("rmsnorm_gated_backward_f16")?,
             },
+            m3_dqkv_typed: TypedKernel {
+                f32: get("m3_dqkv")?,
+                bf16: get("m3_dqkv_bf16")?,
+                f16: get("m3_dqkv_f16")?,
+            },
+            m3_dqktheta_typed: TypedKernel {
+                f32: get("m3_dqktheta")?,
+                bf16: get("m3_dqktheta_bf16")?,
+                f16: get("m3_dqktheta_f16")?,
+            },
+
             m3_chunk_scan_bwd_typed: TypedKernel {
                 f32: get("m3_chunk_scan_bwd")?,
                 bf16: get("m3_chunk_scan_bwd_bf16")?,

@@ -1788,3 +1788,370 @@ m3_chunk_state_bwd_##SUFFIX(                                                  \
 
 DEFINE_M3_CHUNK_STATE_BWD(bf16, __nv_bfloat16, from_f_bf16)
 DEFINE_M3_CHUNK_STATE_BWD(f16,  __half,        from_f_f16)
+
+// ============================================================================
+// Step 9b — typed (bf16/f16) variants of the HIGHEST-RISK "final grad"
+// kernels. Two of the four chunked-bwd tail kernels accept typed activation
+// input; the other two operate on f32 scalar grads only.
+//
+// Typed:
+//   - m3_dqkv       : typed Q_rot/K_scaled/V_in/dO; all grad outputs f32
+//   - m3_dqktheta   : typed Q_raw/K_raw; all grad outputs f32
+// Pure f32 (NO typed variant — operate on f32 scalar grad arrays only):
+//   - m3_ddt_dtrap  (scale/gamma → dt/trap grads, f32 scalar math)
+//   - m3_final_grads (combines f32 dADT + dDT + dDT_angle into final grads)
+// ============================================================================
+
+#define DEFINE_M3_DQKV(SUFFIX, T_ACT, FROM_F)                                 \
+extern "C" __global__ void                                                    \
+m3_dqkv_##SUFFIX(                                                             \
+    float* __restrict__ dQ_mid,                                               \
+    float* __restrict__ dK_mid,                                               \
+    float* __restrict__ dV,                                                   \
+    float* __restrict__ dADT,                                                 \
+    float* __restrict__ dQK_dot_out,                                          \
+    float* __restrict__ dD_out,                                               \
+    const T_ACT* __restrict__ Q_rot,                                          \
+    const T_ACT* __restrict__ K_scaled,                                       \
+    const T_ACT* __restrict__ V_in,                                           \
+    const float* __restrict__ DA_CS,                                          \
+    const float* __restrict__ DA_CS_SUM,                                      \
+    const float* __restrict__ QK_dot_in,                                      \
+    const float* __restrict__ SSM_States,                                     \
+    const T_ACT* __restrict__ dO,                                             \
+    const float* __restrict__ D_param,                                        \
+    int B, int T, int nh_total, int hd, int ds, int CS                        \
+) {                                                                           \
+    int h = blockIdx.x;                                                       \
+    int b = blockIdx.y;                                                       \
+    int p = threadIdx.x;                                                      \
+    if (h >= nh_total || b >= B || p >= hd) return;                           \
+    if (ds > 64 || CS > 64) return;                                           \
+    int d_inner = nh_total * hd;                                              \
+    int n_chunks = (T + CS - 1) / CS;                                         \
+    float D_val = D_param[h];                                                 \
+    float dD_acc = 0.0f;                                                      \
+    float d_state[64];                                                        \
+    for (int n = 0; n < ds; n++) d_state[n] = 0.0f;                           \
+    extern __shared__ float smem[];                                           \
+    float* q_sm    = smem;                                                    \
+    float* k_sm    = q_sm + CS * ds;                                          \
+    float* v_sm    = k_sm + CS * ds;                                          \
+    float* do_sm   = v_sm + CS * hd;                                          \
+    float* da_cs_sm = do_sm + CS * hd;                                        \
+    float* qk_sm   = da_cs_sm + CS;                                           \
+    float* ssm_sm  = qk_sm + CS;                                              \
+    for (int chunk_loop = 0; chunk_loop < n_chunks; chunk_loop++) {           \
+        int chunk_idx = n_chunks - 1 - chunk_loop;                            \
+        int chunk_start = chunk_idx * CS;                                     \
+        int chunk_len = min(CS, T - chunk_start);                             \
+        for (int t = 0; t < chunk_len; t++) {                                 \
+            int gt = chunk_start + t;                                         \
+            v_sm[t * hd + p] = to_f(V_in[(b * T + gt) * d_inner + h * hd + p]);\
+            do_sm[t * hd + p] = to_f(dO[(b * T + gt) * d_inner + h * hd + p]);\
+        }                                                                     \
+        for (int t = chunk_len; t < CS; t++) {                                \
+            v_sm[t * hd + p] = 0.0f;                                          \
+            do_sm[t * hd + p] = 0.0f;                                         \
+        }                                                                     \
+        if (p < ds) {                                                         \
+            for (int t = 0; t < chunk_len; t++) {                             \
+                int gt = chunk_start + t;                                     \
+                q_sm[t * ds + p] = to_f(                                      \
+                    Q_rot[((b * T + gt) * nh_total + h) * ds + p]);           \
+                k_sm[t * ds + p] = to_f(                                      \
+                    K_scaled[((b * T + gt) * nh_total + h) * ds + p]);        \
+            }                                                                 \
+            for (int t = chunk_len; t < CS; t++) {                            \
+                q_sm[t * ds + p] = 0.0f;                                      \
+                k_sm[t * ds + p] = 0.0f;                                      \
+            }                                                                 \
+        }                                                                     \
+        if (p == 0) {                                                         \
+            for (int t = 0; t < chunk_len; t++) {                             \
+                da_cs_sm[t] = DA_CS[                                          \
+                    ((b * n_chunks + chunk_idx) * nh_total + h) * CS + t];    \
+                qk_sm[t] = QK_dot_in[                                         \
+                    (b * T + chunk_start + t) * nh_total + h];                \
+            }                                                                 \
+            for (int t = chunk_len; t < CS; t++) {                            \
+                da_cs_sm[t] = 0.0f;                                           \
+                qk_sm[t] = 0.0f;                                              \
+            }                                                                 \
+        }                                                                     \
+        for (int n = 0; n < ds; n++) {                                        \
+            ssm_sm[p * ds + n] = SSM_States[                                  \
+                ((b * n_chunks + chunk_idx) * nh_total + h) * hd * ds         \
+                + p * ds + n];                                                \
+        }                                                                     \
+        __syncthreads();                                                      \
+        float da_cs_chunk_sum = DA_CS_SUM[                                    \
+            (b * n_chunks + chunk_idx) * nh_total + h];                       \
+        for (int t = 0; t < chunk_len; t++) {                                 \
+            int gt = chunk_start + t;                                         \
+            float dA_t = da_cs_sm[t];                                         \
+            float exp_rev_t = exp2f((da_cs_chunk_sum - dA_t) * LOG2E);        \
+            float dv_intra = 0.0f;                                            \
+            for (int s = t + 1; s < chunk_len; s++) {                         \
+                float kq = 0.0f;                                              \
+                for (int n = 0; n < ds; n++)                                  \
+                    kq += k_sm[t * ds + n] * q_sm[s * ds + n];                \
+                float decay = exp2f((da_cs_sm[s] - dA_t) * LOG2E);            \
+                dv_intra += kq * decay * do_sm[s * hd + p];                   \
+            }                                                                 \
+            float dv_inter = 0.0f;                                            \
+            for (int n = 0; n < ds; n++)                                      \
+                dv_inter += k_sm[t * ds + n] * d_state[n];                    \
+            dv_inter *= exp_rev_t;                                            \
+            float dv_skip = do_sm[t * hd + p] * (D_val + qk_sm[t]);           \
+            dV[(b * T + gt) * d_inner + h * hd + p] =                         \
+                dv_intra + dv_inter + dv_skip;                                \
+            float dqk_val = do_sm[t * hd + p] * v_sm[t * hd + p];             \
+            for (int off = hd / 2; off > 0; off >>= 1)                        \
+                dqk_val += __shfl_down_sync(0xFFFFFFFF, dqk_val, off, hd);    \
+            if (p == 0) {                                                     \
+                dQK_dot_out[(b * T + gt) * nh_total + h] = dqk_val;            \
+                dD_acc += dqk_val;                                            \
+            }                                                                 \
+        }                                                                     \
+        __syncthreads();                                                      \
+        if (p < ds) {                                                         \
+            int n = p;                                                        \
+            for (int t = 0; t < chunk_len; t++) {                             \
+                int gt = chunk_start + t;                                     \
+                float dA_t = da_cs_sm[t];                                     \
+                float dk_intra = 0.0f;                                        \
+                for (int s = t + 1; s < chunk_len; s++) {                     \
+                    float vdo = 0.0f;                                         \
+                    for (int pp = 0; pp < hd; pp++)                           \
+                        vdo += v_sm[t * hd + pp] * do_sm[s * hd + pp];        \
+                    float decay = exp2f((da_cs_sm[s] - dA_t) * LOG2E);        \
+                    dk_intra += vdo * decay * q_sm[s * ds + n];               \
+                }                                                             \
+                dK_mid[((b * T + gt) * nh_total + h) * ds + n] = dk_intra;    \
+                float dq_intra = 0.0f;                                        \
+                for (int s = 0; s < t; s++) {                                 \
+                    float vdo = 0.0f;                                         \
+                    for (int pp = 0; pp < hd; pp++)                           \
+                        vdo += v_sm[s * hd + pp] * do_sm[t * hd + pp];        \
+                    float decay = exp2f((dA_t - da_cs_sm[s]) * LOG2E);        \
+                    dq_intra += vdo * decay * k_sm[s * ds + n];               \
+                }                                                             \
+                float dq_inter = 0.0f;                                        \
+                for (int pp = 0; pp < hd; pp++)                               \
+                    dq_inter += do_sm[t * hd + pp] * ssm_sm[pp * ds + n];     \
+                dq_inter *= exp2f(dA_t * LOG2E);                              \
+                dQ_mid[((b * T + gt) * nh_total + h) * ds + n] =              \
+                    dq_intra + dq_inter;                                      \
+            }                                                                 \
+        }                                                                     \
+        __syncthreads();                                                      \
+        for (int n = 0; n < ds; n++)                                          \
+            ssm_sm[p * ds + n] = d_state[n];                                  \
+        __syncthreads();                                                      \
+        if (p < ds) {                                                         \
+            int n = p;                                                        \
+            for (int t = 0; t < chunk_len; t++) {                             \
+                float dk_inter = 0.0f;                                        \
+                float exp_rev_t = exp2f(                                      \
+                    (da_cs_chunk_sum - da_cs_sm[t]) * LOG2E);                 \
+                for (int pp = 0; pp < hd; pp++)                               \
+                    dk_inter += v_sm[t * hd + pp] * ssm_sm[pp * ds + n];      \
+                dk_inter *= exp_rev_t;                                        \
+                int gt = chunk_start + t;                                     \
+                dK_mid[((b * T + gt) * nh_total + h) * ds + n] += dk_inter;   \
+            }                                                                 \
+        }                                                                     \
+        __syncthreads();                                                      \
+        if (p == 0) {                                                         \
+            float dM_rev[64];                                                 \
+            for (int t = 0; t < CS; t++) dM_rev[t] = 0.0f;                    \
+            for (int i = 0; i < chunk_len; i++) {                             \
+                for (int j = i + 1; j < chunk_len; j++) {                     \
+                    float vdo = 0.0f;                                         \
+                    for (int pp = 0; pp < hd; pp++)                           \
+                        vdo += v_sm[i * hd + pp] * do_sm[j * hd + pp];        \
+                    float decay = exp2f((da_cs_sm[j] - da_cs_sm[i]) * LOG2E); \
+                    float kq = 0.0f;                                          \
+                    for (int n = 0; n < ds; n++)                              \
+                        kq += k_sm[i * ds + n] * q_sm[j * ds + n];            \
+                    float dAinv = vdo * decay * kq;                           \
+                    dM_rev[j] += dAinv;                                       \
+                    dM_rev[i] -= dAinv;                                       \
+                }                                                             \
+            }                                                                 \
+            for (int t = 0; t < chunk_len; t++) {                             \
+                float qs_do = 0.0f;                                           \
+                for (int pp = 0; pp < hd; pp++) {                             \
+                    float qs = 0.0f;                                          \
+                    for (int n = 0; n < ds; n++) {                            \
+                        float ssm_val = SSM_States[                           \
+                            ((b * n_chunks + chunk_idx) * nh_total + h)       \
+                            * hd * ds + pp * ds + n];                         \
+                        qs += q_sm[t * ds + n] * ssm_val;                     \
+                    }                                                         \
+                    qs_do += qs * do_sm[t * hd + pp];                         \
+                }                                                             \
+                dM_rev[t] += qs_do * exp2f(da_cs_sm[t] * LOG2E);              \
+            }                                                                 \
+            float dM_scalar = 0.0f;                                           \
+            for (int pp = 0; pp < hd; pp++) {                                 \
+                for (int n = 0; n < ds; n++) {                                \
+                    float ssm_val = SSM_States[                               \
+                        ((b * n_chunks + chunk_idx) * nh_total + h)           \
+                        * hd * ds + pp * ds + n];                             \
+                    dM_scalar += ssm_val * ssm_sm[pp * ds + n];               \
+                }                                                             \
+            }                                                                 \
+            dM_scalar *= exp2f(da_cs_chunk_sum * LOG2E);                      \
+            float dM_vector[64];                                              \
+            for (int t = 0; t < chunk_len; t++) {                             \
+                float dsk_v = 0.0f;                                           \
+                for (int pp = 0; pp < hd; pp++) {                             \
+                    float dsk = 0.0f;                                         \
+                    for (int n = 0; n < ds; n++)                              \
+                        dsk += k_sm[t * ds + n] * ssm_sm[pp * ds + n];        \
+                    dsk_v += dsk * v_sm[t * hd + pp];                         \
+                }                                                             \
+                dM_vector[t] = dsk_v                                          \
+                    * exp2f((da_cs_chunk_sum - da_cs_sm[t]) * LOG2E);         \
+            }                                                                 \
+            float total_rev = 0.0f;                                           \
+            for (int t = 0; t < chunk_len; t++) total_rev += dM_rev[t];       \
+            total_rev += dM_scalar;                                           \
+            float cumsum = 0.0f;                                              \
+            for (int t = 0; t < chunk_len; t++) {                             \
+                cumsum += dM_vector[t] - dM_rev[t];                           \
+                dM_rev[t] += total_rev + cumsum - dM_vector[t];               \
+            }                                                                 \
+            for (int t = 0; t < chunk_len; t++) {                             \
+                int gt = chunk_start + t;                                     \
+                dADT[(b * T + gt) * nh_total + h] = dM_rev[t];                \
+            }                                                                 \
+        }                                                                     \
+        __syncthreads();                                                      \
+        for (int n = 0; n < ds; n++) {                                        \
+            float new_val = exp2f(da_cs_chunk_sum * LOG2E) * d_state[n];      \
+            for (int t = 0; t < chunk_len; t++) {                             \
+                new_val += do_sm[t * hd + p]                                  \
+                    * exp2f(da_cs_sm[t] * LOG2E) * q_sm[t * ds + n];          \
+            }                                                                 \
+            d_state[n] = new_val;                                             \
+        }                                                                     \
+        __syncthreads();                                                      \
+    }                                                                         \
+    if (p == 0) atomicAdd(&dD_out[h], dD_acc);                                \
+    (void)FROM_F;                                                             \
+}
+
+DEFINE_M3_DQKV(bf16, __nv_bfloat16, from_f_bf16)
+DEFINE_M3_DQKV(f16,  __half,        from_f_f16)
+
+#define DEFINE_M3_DQKTHETA(SUFFIX, T_ACT, FROM_F)                             \
+extern "C" __global__ void                                                    \
+m3_dqktheta_##SUFFIX(                                                         \
+    float* __restrict__ dQ_pre,                                               \
+    float* __restrict__ dK_pre,                                               \
+    float* __restrict__ dAngles_cumsum,                                       \
+    float* __restrict__ dScale,                                               \
+    float* __restrict__ dGamma,                                               \
+    float* __restrict__ dQ_bias,                                              \
+    float* __restrict__ dK_bias,                                              \
+    const T_ACT* __restrict__ Q_raw,                                          \
+    const T_ACT* __restrict__ K_raw,                                          \
+    const float* __restrict__ Scale_in,                                       \
+    const float* __restrict__ Gamma_in,                                       \
+    const float* __restrict__ Angles,                                         \
+    const float* __restrict__ dQ_mid,                                         \
+    const float* __restrict__ dK_mid,                                         \
+    const float* __restrict__ dQK_dot,                                        \
+    int B, int T, int nh, int ds, int n_angles, int CS                        \
+) {                                                                           \
+    int n_chunks = (T + CS - 1) / CS;                                         \
+    int bc = blockIdx.x;                                                      \
+    int b_chunk = bc;                                                         \
+    int h = blockIdx.y;                                                       \
+    int t_local = threadIdx.x;                                                \
+    int b = b_chunk / n_chunks;                                               \
+    int chunk = b_chunk % n_chunks;                                           \
+    int gt = chunk * CS + t_local;                                            \
+    if (gt >= T || b >= B || h >= nh) return;                                 \
+    int base = ((b * T + gt) * nh + h) * ds;                                  \
+    float scale = Scale_in[(b * T + gt) * nh + h];                            \
+    float gamma = Gamma_in[(b * T + gt) * nh + h];                            \
+    float dqk = dQK_dot[(b * T + gt) * nh + h];                               \
+    float q_pre[64], k_pre[64];                                               \
+    for (int n = 0; n < ds; n++) {                                            \
+        q_pre[n] = to_f(Q_raw[base + n]);                                     \
+        k_pre[n] = to_f(K_raw[base + n]);                                     \
+    }                                                                         \
+    float dq_in[64], dk_in[64];                                               \
+    for (int n = 0; n < ds; n++) {                                            \
+        dq_in[n] = dQ_mid[base + n];                                          \
+        dk_in[n] = dK_mid[base + n];                                          \
+    }                                                                         \
+    float k_rot[64];                                                          \
+    int angle_base = ((b * T + gt) * nh + h) * n_angles;                      \
+    for (int a = 0; a < n_angles && 2 * a + 1 < ds; a++) {                    \
+        float theta = Angles[angle_base + a];                                 \
+        float cos_t = cosf(theta);                                            \
+        float sin_t = sinf(theta);                                            \
+        int i0 = 2 * a, i1 = 2 * a + 1;                                       \
+        k_rot[i0] = k_pre[i0] * cos_t - k_pre[i1] * sin_t;                    \
+        k_rot[i1] = k_pre[i0] * sin_t + k_pre[i1] * cos_t;                    \
+    }                                                                         \
+    for (int n = 2 * n_angles; n < ds; n++) k_rot[n] = k_pre[n];              \
+    float d_scale = 0.0f;                                                     \
+    for (int n = 0; n < ds; n++) d_scale += dk_in[n] * k_rot[n];              \
+    dScale[(b * T + gt) * nh + h] = d_scale;                                  \
+    float qk_raw = 0.0f;                                                      \
+    for (int n = 0; n < ds; n++) qk_raw += q_pre[n] * k_pre[n];               \
+    dGamma[(b * T + gt) * nh + h] = dqk * qk_raw;                             \
+    for (int n = 0; n < ds; n++) dk_in[n] *= scale;                           \
+    float dq_pre_out[64], dk_pre_out[64];                                     \
+    for (int n = 0; n < ds; n++) {                                            \
+        dq_pre_out[n] = dq_in[n];                                             \
+        dk_pre_out[n] = dk_in[n];                                             \
+    }                                                                         \
+    for (int a = 0; a < n_angles && 2 * a + 1 < ds; a++) {                    \
+        float theta = Angles[angle_base + a];                                 \
+        float cos_t = cosf(theta);                                            \
+        float sin_t = sinf(theta);                                            \
+        int i0 = 2 * a, i1 = 2 * a + 1;                                       \
+        dq_pre_out[i0] = dq_in[i0] * cos_t + dq_in[i1] * sin_t;               \
+        dq_pre_out[i1] = -dq_in[i0] * sin_t + dq_in[i1] * cos_t;              \
+        dk_pre_out[i0] = dk_in[i0] * cos_t + dk_in[i1] * sin_t;               \
+        dk_pre_out[i1] = -dk_in[i0] * sin_t + dk_in[i1] * cos_t;              \
+    }                                                                         \
+    float dqk_gamma = dqk * gamma;                                            \
+    for (int n = 0; n < ds; n++) {                                            \
+        dq_pre_out[n] += dqk_gamma * k_pre[n];                                \
+        dk_pre_out[n] += dqk_gamma * q_pre[n];                                \
+    }                                                                         \
+    for (int n = 0; n < ds; n++) {                                            \
+        dQ_pre[base + n] = dq_pre_out[n];                                     \
+        dK_pre[base + n] = dk_pre_out[n];                                     \
+    }                                                                         \
+    for (int n = 0; n < ds; n++) {                                            \
+        atomicAdd(&dQ_bias[h * ds + n], dq_pre_out[n]);                       \
+        atomicAdd(&dK_bias[h * ds + n], dk_pre_out[n]);                       \
+    }                                                                         \
+    for (int a = 0; a < n_angles && 2 * a + 1 < ds; a++) {                    \
+        float theta = Angles[angle_base + a];                                 \
+        float cos_t = cosf(theta);                                            \
+        float sin_t = sinf(theta);                                            \
+        int i0 = 2 * a, i1 = 2 * a + 1;                                       \
+        float dtheta_q = dq_in[i0]                                            \
+            * (-q_pre[i0] * sin_t - q_pre[i1] * cos_t)                        \
+            + dq_in[i1] * (q_pre[i0] * cos_t - q_pre[i1] * sin_t);            \
+        float dtheta_k = dk_in[i0]                                            \
+            * (-k_pre[i0] * sin_t - k_pre[i1] * cos_t)                        \
+            + dk_in[i1] * (k_pre[i0] * cos_t - k_pre[i1] * sin_t);            \
+        dAngles_cumsum[((b * T + gt) * nh + h) * n_angles + a] =              \
+            dtheta_q + dtheta_k;                                              \
+    }                                                                         \
+    (void)FROM_F;                                                             \
+}
+
+DEFINE_M3_DQKTHETA(bf16, __nv_bfloat16, from_f_bf16)
+DEFINE_M3_DQKTHETA(f16,  __half,        from_f_f16)
