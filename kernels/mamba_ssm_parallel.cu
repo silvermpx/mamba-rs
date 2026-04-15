@@ -650,7 +650,7 @@ extern "C" __global__ __launch_bounds__(128, 3) void ssm_parallel_scan_fwd_nosav
 // ============================================================================
 
 #define DEFINE_SSM_PARALLEL_SCAN_FWD(SUFFIX, T_ACT, FROM_F)                   \
-extern "C" __global__ __launch_bounds__(128, 3) void                          \
+extern "C" __global__ __launch_bounds__(128, 4) void                          \
 ssm_parallel_scan_fwd_##SUFFIX(                                               \
     float* __restrict__ h,                                                    \
     T_ACT* __restrict__ y_out,                                                \
@@ -675,7 +675,13 @@ ssm_parallel_scan_fwd_##SUFFIX(                                               \
     float *smem_run_b  = smem + SMEM_RUN_B_OFF;                               \
     float *smem_exch_a = smem + SMEM_EXCH_A_OFF;                              \
     float *smem_exch_b = smem + SMEM_EXCH_B_OFF;                              \
-    float *smem_stage  = smem + SMEM_STAGE_OFF;                               \
+    /* Typed smem stage: 2-byte slots reuse the f32 stage region. The         \
+       typed launch helper only allocates CHUNK_SIZE * sizeof(T_ACT) bytes    \
+       for this region (vs CHUNK_SIZE * 4 for the f32 path), saving 2 KB     \
+       per block → enables an extra resident block on Ada (audit Agent 5     \
+       optimization #1). Load stores T_ACT directly; upcast happens only     \
+       inside the compute loop via to_f(). */                                 \
+    T_ACT *smem_stage = (T_ACT *)(smem + SMEM_STAGE_OFF);                     \
     float D_d = D[did];                                                       \
     int h_base = (bid * d_inner + did) * d_state;                             \
     for (int n = threadIdx.x; n < d_state; n += NTHREADS) {                   \
@@ -694,28 +700,28 @@ ssm_parallel_scan_fwd_##SUFFIX(                                               \
         for (int s = threadIdx.x; s < CHUNK_SIZE; s += NTHREADS) {            \
             int t = chunk_start + s;                                          \
             smem_stage[s] = (t < T)                                           \
-                ? to_f(delta[(bid * T + t) * d_inner + did])                  \
-                : 0.0f;                                                       \
+                ? delta[(bid * T + t) * d_inner + did]                        \
+                : FROM_F(0.0f);                                               \
         }                                                                     \
         __syncthreads();                                                      \
         float delta_vals[NITEMS];                                             \
                                                              \
         for (int i = 0; i < NITEMS; i++) {                                    \
-            delta_vals[i] = smem_stage[threadIdx.x * NITEMS + i];             \
+            delta_vals[i] = to_f(smem_stage[threadIdx.x * NITEMS + i]);       \
         }                                                                     \
         __syncthreads();                                                      \
         for (int s = threadIdx.x; s < CHUNK_SIZE; s += NTHREADS) {            \
             int t = chunk_start + s;                                          \
             smem_stage[s] = (t < T)                                           \
-                ? to_f(u[(bid * T + t) * d_inner + did])                      \
-                : 0.0f;                                                       \
+                ? u[(bid * T + t) * d_inner + did]                            \
+                : FROM_F(0.0f);                                               \
         }                                                                     \
         __syncthreads();                                                      \
         float u_vals[NITEMS];                                                 \
         float delta_u_vals[NITEMS];                                           \
                                                              \
         for (int i = 0; i < NITEMS; i++) {                                    \
-            u_vals[i] = smem_stage[threadIdx.x * NITEMS + i];                 \
+            u_vals[i] = to_f(smem_stage[threadIdx.x * NITEMS + i]);           \
             delta_u_vals[i] = delta_vals[i] * u_vals[i];                      \
         }                                                                     \
         __syncthreads();                                                      \
@@ -729,8 +735,8 @@ ssm_parallel_scan_fwd_##SUFFIX(                                               \
             for (int s = threadIdx.x; s < CHUNK_SIZE; s += NTHREADS) {        \
                 int t = chunk_start + s;                                      \
                 smem_stage[s] = (t < T)                                       \
-                    ? to_f(B[bid * T * d_state + t * d_state + n])            \
-                    : 0.0f;                                                   \
+                    ? B[bid * T * d_state + t * d_state + n]                  \
+                    : T_ACT(FROM_F(0.0f));                                    \
             }                                                                 \
             __syncthreads();                                                  \
             float thread_a[NITEMS];                                           \
@@ -740,7 +746,7 @@ ssm_parallel_scan_fwd_##SUFFIX(                                               \
                 int t = chunk_start + threadIdx.x * NITEMS + i;               \
                 if (t < T) {                                                  \
                     float da = exp2f(delta_vals[i] * a_dn);                   \
-                    float b_t = smem_stage[threadIdx.x * NITEMS + i];         \
+                    float b_t = to_f(smem_stage[threadIdx.x * NITEMS + i]);   \
                     thread_a[i] = da;                                         \
                     thread_b[i] = delta_u_vals[i] * b_t;                      \
                 } else {                                                      \
@@ -783,8 +789,8 @@ ssm_parallel_scan_fwd_##SUFFIX(                                               \
             for (int s = threadIdx.x; s < CHUNK_SIZE; s += NTHREADS) {        \
                 int t = chunk_start + s;                                      \
                 smem_stage[s] = (t < T)                                       \
-                    ? to_f(C[bid * T * d_state + t * d_state + n])            \
-                    : 0.0f;                                                   \
+                    ? C[bid * T * d_state + t * d_state + n]                  \
+                    : T_ACT(FROM_F(0.0f));                                    \
             }                                                                 \
             __syncthreads();                                                  \
                                                              \
@@ -799,7 +805,7 @@ ssm_parallel_scan_fwd_##SUFFIX(                                               \
                     int hs_idx = (bid * (T + 1) + (t + 1)) * d_inner * d_state\
                                  + did * d_state + n;                         \
                     h_saved[hs_idx] = h_t;                                    \
-                    float c_t = smem_stage[threadIdx.x * NITEMS + i];         \
+                    float c_t = to_f(smem_stage[threadIdx.x * NITEMS + i]);   \
                     out_vals[i] += h_t * c_t;                                 \
                 }                                                             \
             }                                                                 \
@@ -807,13 +813,13 @@ ssm_parallel_scan_fwd_##SUFFIX(                                               \
         }                                                                     \
                                                              \
         for (int i = 0; i < NITEMS; i++) {                                    \
-            smem_stage[threadIdx.x * NITEMS + i] = out_vals[i];               \
+            smem_stage[threadIdx.x * NITEMS + i] = FROM_F(out_vals[i]);       \
         }                                                                     \
         __syncthreads();                                                      \
         for (int s = threadIdx.x; s < CHUNK_SIZE; s += NTHREADS) {            \
             int t = chunk_start + s;                                          \
             if (t < T) {                                                      \
-                y_out[(bid * T + t) * d_inner + did] = FROM_F(smem_stage[s]); \
+                y_out[(bid * T + t) * d_inner + did] = smem_stage[s];         \
             }                                                                 \
         }                                                                     \
         __syncthreads();                                                      \
@@ -829,7 +835,7 @@ DEFINE_SSM_PARALLEL_SCAN_FWD(bf16, __nv_bfloat16, from_f_bf16)
 DEFINE_SSM_PARALLEL_SCAN_FWD(f16,  __half,        from_f_f16)
 
 #define DEFINE_SSM_PARALLEL_SCAN_FWD_NOSAVE(SUFFIX, T_ACT, FROM_F)            \
-extern "C" __global__ __launch_bounds__(128, 3) void                          \
+extern "C" __global__ __launch_bounds__(128, 4) void                          \
 ssm_parallel_scan_fwd_nosave_##SUFFIX(                                        \
     float* __restrict__ h,                                                    \
     T_ACT* __restrict__ y_out,                                                \
@@ -852,7 +858,8 @@ ssm_parallel_scan_fwd_nosave_##SUFFIX(                                        \
     float *smem_run_b  = smem + SMEM_RUN_B_OFF;                               \
     float *smem_exch_a = smem + SMEM_EXCH_A_OFF;                              \
     float *smem_exch_b = smem + SMEM_EXCH_B_OFF;                              \
-    float *smem_stage  = smem + SMEM_STAGE_OFF;                               \
+    /* Typed smem stage (audit Agent 5 #1): 2-byte slots vs 4-byte f32. */    \
+    T_ACT *smem_stage = (T_ACT *)(smem + SMEM_STAGE_OFF);                     \
     float D_d = D[did];                                                       \
     int h_base = (bid * d_inner + did) * d_state;                             \
     for (int n = threadIdx.x; n < d_state; n += NTHREADS) {                   \
@@ -866,28 +873,28 @@ ssm_parallel_scan_fwd_nosave_##SUFFIX(                                        \
         for (int s = threadIdx.x; s < CHUNK_SIZE; s += NTHREADS) {            \
             int t = chunk_start + s;                                          \
             smem_stage[s] = (t < T)                                           \
-                ? to_f(delta[(bid * T + t) * d_inner + did])                  \
-                : 0.0f;                                                       \
+                ? delta[(bid * T + t) * d_inner + did]                        \
+                : FROM_F(0.0f);                                               \
         }                                                                     \
         __syncthreads();                                                      \
         float delta_vals[NITEMS];                                             \
                                                              \
         for (int i = 0; i < NITEMS; i++) {                                    \
-            delta_vals[i] = smem_stage[threadIdx.x * NITEMS + i];             \
+            delta_vals[i] = to_f(smem_stage[threadIdx.x * NITEMS + i]);       \
         }                                                                     \
         __syncthreads();                                                      \
         for (int s = threadIdx.x; s < CHUNK_SIZE; s += NTHREADS) {            \
             int t = chunk_start + s;                                          \
             smem_stage[s] = (t < T)                                           \
-                ? to_f(u[(bid * T + t) * d_inner + did])                      \
-                : 0.0f;                                                       \
+                ? u[(bid * T + t) * d_inner + did]                            \
+                : FROM_F(0.0f);                                               \
         }                                                                     \
         __syncthreads();                                                      \
         float u_vals[NITEMS];                                                 \
         float delta_u_vals[NITEMS];                                           \
                                                              \
         for (int i = 0; i < NITEMS; i++) {                                    \
-            u_vals[i] = smem_stage[threadIdx.x * NITEMS + i];                 \
+            u_vals[i] = to_f(smem_stage[threadIdx.x * NITEMS + i]);           \
             delta_u_vals[i] = delta_vals[i] * u_vals[i];                      \
         }                                                                     \
         __syncthreads();                                                      \
@@ -901,8 +908,8 @@ ssm_parallel_scan_fwd_nosave_##SUFFIX(                                        \
             for (int s = threadIdx.x; s < CHUNK_SIZE; s += NTHREADS) {        \
                 int t = chunk_start + s;                                      \
                 smem_stage[s] = (t < T)                                       \
-                    ? to_f(B[bid * T * d_state + t * d_state + n])            \
-                    : 0.0f;                                                   \
+                    ? B[bid * T * d_state + t * d_state + n]                  \
+                    : FROM_F(0.0f);                                           \
             }                                                                 \
             __syncthreads();                                                  \
             float thread_a[NITEMS];                                           \
@@ -912,7 +919,7 @@ ssm_parallel_scan_fwd_nosave_##SUFFIX(                                        \
                 int t = chunk_start + threadIdx.x * NITEMS + i;               \
                 if (t < T) {                                                  \
                     float da = exp2f(delta_vals[i] * a_dn);                   \
-                    float b_t = smem_stage[threadIdx.x * NITEMS + i];         \
+                    float b_t = to_f(smem_stage[threadIdx.x * NITEMS + i]);   \
                     thread_a[i] = da;                                         \
                     thread_b[i] = delta_u_vals[i] * b_t;                      \
                 } else {                                                      \
@@ -955,8 +962,8 @@ ssm_parallel_scan_fwd_nosave_##SUFFIX(                                        \
             for (int s = threadIdx.x; s < CHUNK_SIZE; s += NTHREADS) {        \
                 int t = chunk_start + s;                                      \
                 smem_stage[s] = (t < T)                                       \
-                    ? to_f(C[bid * T * d_state + t * d_state + n])            \
-                    : 0.0f;                                                   \
+                    ? C[bid * T * d_state + t * d_state + n]                  \
+                    : FROM_F(0.0f);                                           \
             }                                                                 \
             __syncthreads();                                                  \
                                                              \
@@ -968,7 +975,7 @@ ssm_parallel_scan_fwd_nosave_##SUFFIX(                                        \
                     float final_a = comp_a * run_a;                           \
                     float final_b = comp_a * run_b + comp_b;                  \
                     float h_t = final_a * h_0 + final_b;                      \
-                    float c_t = smem_stage[threadIdx.x * NITEMS + i];         \
+                    float c_t = to_f(smem_stage[threadIdx.x * NITEMS + i]);   \
                     out_vals[i] += h_t * c_t;                                 \
                 }                                                             \
             }                                                                 \
@@ -976,13 +983,13 @@ ssm_parallel_scan_fwd_nosave_##SUFFIX(                                        \
         }                                                                     \
                                                              \
         for (int i = 0; i < NITEMS; i++) {                                    \
-            smem_stage[threadIdx.x * NITEMS + i] = out_vals[i];               \
+            smem_stage[threadIdx.x * NITEMS + i] = FROM_F(out_vals[i]);       \
         }                                                                     \
         __syncthreads();                                                      \
         for (int s = threadIdx.x; s < CHUNK_SIZE; s += NTHREADS) {            \
             int t = chunk_start + s;                                          \
             if (t < T) {                                                      \
-                y_out[(bid * T + t) * d_inner + did] = FROM_F(smem_stage[s]); \
+                y_out[(bid * T + t) * d_inner + did] = smem_stage[s];         \
             }                                                                 \
         }                                                                     \
         __syncthreads();                                                      \

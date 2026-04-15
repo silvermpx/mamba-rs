@@ -68,3 +68,31 @@ pub fn grid_parallel_scan(batch: usize, d_inner: usize) -> LaunchConfig {
         shared_mem_bytes: (smem_floats * std::mem::size_of::<f32>()) as u32,
     }
 }
+
+/// Launch config for the typed (bf16/f16) M1 parallel scan forward kernel.
+///
+/// Differs from [`grid_parallel_scan`] by allocating only `CHUNK_SIZE *
+/// sizeof(T_ACT)` bytes for the smem staging area (vs 4 bytes per slot for
+/// f32). On bf16/f16 this saves 2 KB per block, taking total smem from
+/// 7200 B → 5152 B and enabling the kernel's `__launch_bounds__(128, 4)`
+/// to actually fit 4 resident blocks per SM on Ada (~10–15 % throughput
+/// lift on memory-bound configs per audit Agent 5 #1).
+///
+/// `bytes_per_act` must be `2` for bf16/f16 or `4` for f32 (in which case
+/// this is identical to [`grid_parallel_scan`]).
+pub fn grid_parallel_scan_typed(batch: usize, d_inner: usize, bytes_per_act: usize) -> LaunchConfig {
+    debug_assert!(bytes_per_act == 2 || bytes_per_act == 4);
+    const NTHREADS: u32 = 128;
+    const NWARPS: usize = NTHREADS as usize / 32;
+    const MAX_DSTATE: usize = 256;
+    const CHUNK_SIZE: usize = NTHREADS as usize * 8;
+    // Fixed f32 region (block scan, running prefix, exchange).
+    let fixed_floats = 2 * NWARPS + 2 * MAX_DSTATE + 2 * NTHREADS as usize;
+    let fixed_bytes = fixed_floats * std::mem::size_of::<f32>();
+    let stage_bytes = CHUNK_SIZE * bytes_per_act;
+    LaunchConfig {
+        grid_dim: (batch as u32, d_inner as u32, 1),
+        block_dim: (NTHREADS, 1, 1),
+        shared_mem_bytes: (fixed_bytes + stage_bytes) as u32,
+    }
+}
