@@ -27,10 +27,11 @@ use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
 use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
 use mamba_rs::mamba3_siso::gpu::kernels::Mamba3Kernels;
 
-// Small config — forces 2 chunks of size 4, partial-last path exercised via
-// second seed (T=7 below).
+// Small config — T=10, CS=4 forces 3 chunks with the LAST chunk PARTIAL (len=2).
+// Audit Agent 3 (HIGH): T%CS==0 left partial-chunk path of typed bwd kernels
+// untested at bf16/f16 rounding boundary. T=10 CS=4 covers it.
 const B: usize = 2;
-const T: usize = 8;
+const T: usize = 10;
 const NH: usize = 2;
 const HD: usize = 4;
 const DS: usize = 4;

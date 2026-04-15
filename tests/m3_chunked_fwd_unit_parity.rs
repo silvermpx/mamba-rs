@@ -17,9 +17,12 @@ use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
 use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
 use mamba_rs::mamba3_siso::gpu::kernels::Mamba3Kernels;
 
-// Small config — big enough for 2 chunks, small enough to stay fast.
+// Small config — T=10, CS=4 forces 3 chunks with the LAST chunk PARTIAL (len=2).
+// Previously T=8 CS=4 left the partial-last-chunk path of the typed kernels
+// (zero-pad of smem tiles, chunk_len = min(CS, T-chunk_start)) untested at
+// bf16/f16 rounding boundary — flagged HIGH by audit Agent 3.
 const B: usize = 2;
-const T: usize = 8;
+const T: usize = 10;
 const NH: usize = 2;
 const HD: usize = 4;
 const DS: usize = 4;
