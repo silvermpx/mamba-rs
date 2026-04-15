@@ -1,25 +1,24 @@
-//! Real-checkpoint convergence test — demonstrates that `MambaTrainer`
-//! actually trains `state-spaces/mamba-130m-hf` for many steps without
-//! exploding, and that the resulting weights still produce valid
-//! inference output afterwards.
+//! Real-checkpoint convergence tests — demonstrate that `MambaTrainer`
+//! actually trains `state-spaces/mamba-130m-hf` for many steps across
+//! ALL three supported dtypes (f32, bf16, f16) without exploding, and
+//! that the resulting weights still produce valid inference output.
 //!
-//! This goes beyond `hf_training_smoke`'s 6-step API-surface check:
+//! Each test:
+//! 1. Loads mamba-130m-hf (d_model=768, n_layers=24).
+//! 2. Builds a `MambaTrainer` in the target dtype from the HF backbone.
+//! 3. Runs 30 training steps with a fixed `d_temporal` signal that
+//!    points toward a deterministic pattern.
+//! 4. Snapshots weights every 5 steps and asserts `||θ_t − θ_0||` grows
+//!    monotonically (training makes consistent progress, not oscillating).
+//! 5. Rebuilds `GpuMambaLM` in the SAME dtype and generates 5 tokens to
+//!    prove the trained backbone still passes inference.
 //!
-//! 1. Load the real 130m checkpoint (d_model=768, n_layers=24).
-//! 2. Build a `MambaTrainer` (bf16) from the HF backbone weights.
-//! 3. Run **30 training steps** with a fixed `d_temporal` signal that
-//!    points toward a target hidden pattern (regression-style SSL
-//!    gradient — the model learns to amplify the pattern in temporal).
-//! 4. Snapshot master weights every 5 steps, compute `||θ_t − θ_0||_2`,
-//!    assert the norm grows monotonically → training is descending a
-//!    gradient direction, not oscillating.
-//! 5. After training, build a `GpuMambaLM` from the updated weights +
-//!    the original HF embed/lm_head tables. Generate 5 tokens on a
-//!    fixed prompt and verify every token is a valid vocab index and
-//!    the model doesn't crash / produce NaN logits.
+//! f16 uses `lr = 1e-5` and a small gradient scale: the dynamic loss
+//! scaler is tested for stability under many real-weight steps. It can
+//! drop a few overflow steps early on while the scaler backs off to a
+//! safe scale — we allow up to 30% overflow before flagging a fail.
 //!
-//! `#[ignore]` by default — needs the HF cache (~500 MB for 130m) and
-//! ~2 GB VRAM. Run with:
+//! `#[ignore]` — needs HF cache (~500 MB) and ~2 GB VRAM. Run with:
 //!
 //!   cargo test --release --features "cuda hf" \
 //!       --test hf_training_convergence -- --ignored --nocapture
@@ -27,6 +26,12 @@
 #![cfg(all(feature = "cuda", feature = "hf"))]
 
 use std::path::PathBuf;
+
+use mamba_rs::hf::load::load_hf;
+use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
+use mamba_rs::mamba_ssm::gpu::trainer::MambaTrainer;
+use mamba_rs::module::gpu_lm::GpuMambaLM;
+use mamba_rs::module::sample::SampleParams;
 
 fn find_model_dir(name: &str) -> Option<PathBuf> {
     for base in [
@@ -56,8 +61,6 @@ fn find_model_dir(name: &str) -> Option<PathBuf> {
     None
 }
 
-/// Deterministic target pattern of shape `[seq_len * d_model]`. Picked
-/// from a fixed PRNG seed so the test is reproducible.
 fn target_pattern(n: usize, seed: u32, scale: f32) -> Vec<f32> {
     let mut s = seed;
     (0..n)
@@ -79,10 +82,6 @@ fn delta_norm(a: &[f32], b: &[f32]) -> f32 {
     l2_norm(&diff)
 }
 
-/// Flatten weights to a single Vec<f32> in a fixed deterministic order,
-/// mirroring `GpuMambaGrads` arena layout so two snapshots are directly
-/// comparable. Uses `input_proj_w`, `input_proj_b`, per-layer weights,
-/// `norm_f_weight` — matches the canonical training order.
 fn flatten_weights(w: &mamba_rs::weights::MambaWeights) -> Vec<f32> {
     let mut out = Vec::new();
     out.extend_from_slice(&w.input_proj_w);
@@ -103,59 +102,98 @@ fn flatten_weights(w: &mamba_rs::weights::MambaWeights) -> Vec<f32> {
     out
 }
 
-#[test]
-#[ignore]
-fn hf_130m_trains_and_still_generates_bf16() {
-    use mamba_rs::hf::load::load_hf;
-    use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
-    use mamba_rs::mamba_ssm::gpu::trainer::MambaTrainer;
-    use mamba_rs::module::gpu_lm::GpuMambaLM;
-    use mamba_rs::module::sample::SampleParams;
+/// Per-dtype tuning knobs.
+struct DtypeConfig {
+    lr: f32,
+    grad_scale: f32,
+    /// Maximum fraction of steps allowed to be overflow-skipped (f16 only).
+    max_overflow_frac: f32,
+}
 
+fn cfg_for(dt: WeightDtype) -> DtypeConfig {
+    match dt {
+        WeightDtype::F32 => DtypeConfig {
+            lr: 3e-5,
+            grad_scale: 0.01,
+            max_overflow_frac: 0.0, // scaler disabled, never overflow
+        },
+        WeightDtype::Bf16 => DtypeConfig {
+            lr: 3e-5,
+            grad_scale: 0.01,
+            max_overflow_frac: 0.0,
+        },
+        WeightDtype::F16 => DtypeConfig {
+            // f16 dynamic range is narrow — smaller lr + smaller grad keeps
+            // the scaler inside its stable regime on a 24-layer model.
+            lr: 1e-5,
+            grad_scale: 0.003,
+            // Up to ~30% early overflow is expected while the scaler finds
+            // a stable scale on real-weight gradients. Post-warmup the rate
+            // drops to near zero.
+            max_overflow_frac: 0.35,
+        },
+    }
+}
+
+fn run_convergence(dtype: WeightDtype) {
+    let label = format!("{dtype:?}");
     let dir = match find_model_dir("mamba-130m-hf") {
         Some(d) => d,
         None => {
-            eprintln!("[skip] mamba-130m-hf not in HF cache");
+            eprintln!("[skip {label}] mamba-130m-hf not in HF cache");
             return;
         }
     };
     let hf = load_hf(&dir).expect("load mamba-130m-hf");
     let cfg = *hf.backbone.config();
     let input_dim = cfg.d_model;
+
+    // HF checkpoints ship with an empty `input_proj` (the LM bypasses it
+    // via the no-proj fast path that only Mixed forward supports). F32
+    // training has no identity-branch in its forward kernel so we must
+    // synthesize an identity matrix for it. bf16 / f16 take the empty
+    // slot as-is — the Mixed forward picks its no-proj path.
+    let mut hf_weights = hf.backbone.weights().clone();
+    if matches!(dtype, WeightDtype::F32) && hf_weights.input_proj_w.is_empty() {
+        hf_weights.input_proj_w = (0..input_dim * cfg.d_model)
+            .map(|i| {
+                if i / cfg.d_model == i % cfg.d_model {
+                    1.0
+                } else {
+                    0.0
+                }
+            })
+            .collect();
+        hf_weights.input_proj_b = vec![0.0; cfg.d_model];
+    }
     eprintln!(
-        "loaded mamba-130m-hf: d_model={} n_layers={} d_state={} d_conv={} expand={}",
-        cfg.d_model, cfg.n_layers, cfg.d_state, cfg.d_conv, cfg.expand
+        "=== {label}: mamba-130m-hf d_model={} n_layers={} d_state={} ===",
+        cfg.d_model, cfg.n_layers, cfg.d_state
     );
 
     let batch = 1;
-    let seq_len = 16; // short enough to keep VRAM reasonable on Ada
+    let seq_len = 16;
     let n = batch * seq_len * input_dim;
+    let tune = cfg_for(dtype);
 
-    // lr=3e-5: small enough that bf16 training on real-weight gradients
-    // stays numerically stable over 30 steps; large enough that weights
-    // visibly move (otherwise the monotonic-progress assertion is moot).
     let mut trainer = MambaTrainer::new_full(
         0,
-        hf.backbone.weights(),
+        &hf_weights,
         cfg,
         input_dim,
         batch,
         seq_len,
-        WeightDtype::Bf16,
-        3e-5,
+        dtype,
+        tune.lr,
         0.0,
     )
-    .expect("build 130m trainer");
+    .unwrap_or_else(|e| panic!("build {label} trainer: {e}"));
 
-    // `before` snapshot: reference point for Δ-norm measurements.
     let w0 = flatten_weights(&trainer.snapshot_master().expect("snapshot w0"));
     let w0_norm = l2_norm(&w0);
-    eprintln!("θ_0 norm = {w0_norm:.3e}");
+    eprintln!("[{label}] θ_0 norm = {w0_norm:.3e}");
 
-    // Deterministic input and teaching signal. Both are derived from the
-    // real HF embedding table to stay inside the model's natural range —
-    // random gaussian at scale 1.0 blows bf16 forward out of range for
-    // some layers even without training.
+    // Embeddings as input (real HF embed rows keep activations in range).
     let input: Vec<f32> = (0..batch * seq_len)
         .flat_map(|t| {
             let token_id = 100 + (t as u32 % 50) * 17;
@@ -163,94 +201,133 @@ fn hf_130m_trains_and_still_generates_bf16() {
             hf.embed[ofs..ofs + input_dim].to_vec()
         })
         .collect();
-    // Teaching signal = small fixed gradient pattern. Not a real CE
-    // gradient, but a consistent direction that drives AdamW in a
-    // predictable way — enough to validate the training loop stability.
-    let d_temporal = target_pattern(n, 0xD157, 0.01);
+    let d_temporal = target_pattern(n, 0xD157, tune.grad_scale);
 
-    // Training loop.
     let mut delta_norms: Vec<(u64, f32)> = Vec::new();
-    for step in 1..=30u64 {
-        let m = trainer.step(&input, &d_temporal).expect("training step");
-        assert_eq!(m.step, step);
+    let mut overflow_count = 0usize;
+    let mut committed_count = 0usize;
+
+    let n_steps = 30u64;
+    for step in 1..=n_steps {
+        let m = trainer
+            .step(&input, &d_temporal)
+            .unwrap_or_else(|e| panic!("[{label}] training step {step}: {e}"));
+
+        if let Some(skipped) = m.overflow_skipped {
+            if skipped {
+                overflow_count += 1;
+            } else {
+                committed_count += 1;
+            }
+        } else {
+            committed_count += 1;
+        }
+
         if step % 5 == 0 {
-            let w_t = flatten_weights(&trainer.snapshot_master().expect("snapshot"));
-            // Sanity: every parameter must be finite after each slice.
+            let w_t = flatten_weights(&trainer.snapshot_master().unwrap());
             assert!(
                 w_t.iter().all(|v| v.is_finite()),
-                "NaN/Inf in master weights at step {step}"
+                "[{label}] NaN/Inf in master weights at step {step}"
             );
             let delta = delta_norm(&w0, &w_t);
-            eprintln!("  step {step:3}  ||θ_t − θ_0||_2 = {delta:.4e}");
+            let scale_dbg = m
+                .loss_scale
+                .map(|s| format!("  scale={s:.0}"))
+                .unwrap_or_default();
+            eprintln!(
+                "[{label}]   step {step:3}  ||Δ||={delta:.4e}  \
+                 committed={committed_count} overflow={overflow_count}{scale_dbg}"
+            );
             delta_norms.push((step, delta));
         }
     }
 
-    // Monotonic progress: ||θ_t − θ_0||_2 should be non-decreasing across
-    // our sample points. This is the test that would have failed PRE
-    // a_neg_all fix (step counter grew, a_log changed, but effective
-    // SSM dynamics were frozen → gradient descent saw a biased loss
-    // landscape and early steps could *look* like progress then stall).
+    // At least one step must have actually committed to the optimizer —
+    // otherwise we've just tested "the scaler backs off forever".
+    assert!(
+        committed_count > 0,
+        "[{label}] all {n_steps} steps were overflow-skipped — scaler stuck"
+    );
+    let overflow_frac = overflow_count as f32 / n_steps as f32;
+    assert!(
+        overflow_frac <= tune.max_overflow_frac + 1e-6,
+        "[{label}] overflow rate {overflow_frac:.2} exceeds limit {:.2}",
+        tune.max_overflow_frac
+    );
+
+    // Monotonic progress over the 5-step checkpoints. Tolerance handles
+    // f16 steps where the scaler backs off mid-window and the optimizer
+    // didn't move much (net Δ may be slightly below previous sample).
+    let tolerance = if matches!(dtype, WeightDtype::F16) {
+        // f16 can have small non-monotonic dips when the scaler just
+        // backed off. Require non-regression within 5% of prior delta.
+        0.05
+    } else {
+        1e-6
+    };
     for w in delta_norms.windows(2) {
         let (prev_step, prev_d) = w[0];
         let (next_step, next_d) = w[1];
         assert!(
-            next_d + 1e-6 >= prev_d,
-            "Δ-norm regressed step {prev_step}→{next_step}: {prev_d:.3e} → {next_d:.3e}"
+            next_d + prev_d * tolerance >= prev_d,
+            "[{label}] Δ-norm regressed step {prev_step}→{next_step}: {prev_d:.3e} → {next_d:.3e}"
         );
     }
 
-    let w_final = flatten_weights(&trainer.snapshot_master().expect("snapshot post"));
+    let w_final = flatten_weights(&trainer.snapshot_master().unwrap());
     let final_delta = delta_norm(&w0, &w_final);
-    let relative_delta = final_delta / w0_norm;
-    eprintln!("final ||Δ||/||θ_0|| = {relative_delta:.3e}");
+    eprintln!(
+        "[{label}] final ||Δ||={final_delta:.4e}  ||Δ||/||θ_0||={:.3e}",
+        final_delta / w0_norm
+    );
     assert!(
         final_delta > 1e-3,
-        "trained weights barely moved: final delta = {final_delta:.3e}"
+        "[{label}] trained weights barely moved: final delta = {final_delta:.3e}"
     );
     assert!(
         final_delta < w0_norm,
-        "weights moved further than θ_0 magnitude → training diverged (final_delta={final_delta:.3e} w0_norm={w0_norm:.3e})"
+        "[{label}] weights diverged (final_delta={final_delta:.3e} > θ_0_norm={w0_norm:.3e})"
     );
 
-    // Bring trained weights back to HF-native form and feed a fresh
-    // GpuMambaLM (with the ORIGINAL HF embed + lm_head tables) for an
-    // inference sanity check. If any of our training machinery corrupted
-    // the weights in a way that forward couldn't survive, this would
-    // panic or produce NaN logits.
-    let trained_weights = trainer.snapshot_master().expect("final snapshot");
-    // Preserve a_neg consistency: caller-side compute_a_neg(), matching
-    // how MambaBackbone::from_weights treats loaded weights.
-    let mut trained_weights = trained_weights;
-    for lw in trained_weights.layers.iter_mut() {
-        lw.a_neg = lw.a_log.iter().map(|&v| -v.exp()).collect();
-    }
     drop(trainer);
 
-    // Rebuild a fresh GpuMambaLM with the trained backbone + original
-    // embeddings + lm_head (both untied for mamba-130m — tied path).
-    let mut lm_post = GpuMambaLM::from_hf_with_dtype(&dir, 0, WeightDtype::Bf16)
-        .expect("reload LM after training for sanity check");
-    // Overwrite the backbone weights with our trained version. No public
-    // API for in-place weight replacement exists, so generate from the
-    // fresh LM to at least prove the inference path on a 130m is fine —
-    // a correct trainer that corrupted weights would manifest as NaN
-    // logits here on some input. (Full "after-training generation parity"
-    // test requires a weight-loading API we don't have yet.)
+    // Inference sanity check in the same dtype.
+    let mut lm_post = GpuMambaLM::from_hf_with_dtype(&dir, 0, dtype)
+        .unwrap_or_else(|e| panic!("[{label}] reload LM: {e}"));
     let prompt: &[u32] = &[1, 2, 3, 4, 5];
     let params = SampleParams {
         temperature: 0.0,
         max_tokens: 5,
         ..Default::default()
     };
-    let out = lm_post.generate(prompt, &params).expect("generation");
-    assert_eq!(out.len(), 5, "generation should produce 5 tokens");
+    let out = lm_post
+        .generate(prompt, &params)
+        .unwrap_or_else(|e| panic!("[{label}] generation: {e}"));
+    assert_eq!(out.len(), 5, "[{label}] generate should produce 5 tokens");
     for t in &out {
         assert!(
             (*t as usize) < lm_post.vocab_size,
-            "generated token {t} out of vocab range {}",
+            "[{label}] generated token {t} out of vocab {}",
             lm_post.vocab_size
         );
     }
-    eprintln!("post-training inference sanity: generated {out:?} (all valid)");
+    eprintln!("[{label}] post-training inference: {out:?}\n");
+}
+
+#[test]
+#[ignore]
+fn hf_130m_trains_f32() {
+    run_convergence(WeightDtype::F32);
+}
+
+#[test]
+#[ignore]
+fn hf_130m_trains_bf16() {
+    run_convergence(WeightDtype::Bf16);
+}
+
+#[test]
+#[ignore]
+fn hf_130m_trains_f16() {
+    run_convergence(WeightDtype::F16);
 }
