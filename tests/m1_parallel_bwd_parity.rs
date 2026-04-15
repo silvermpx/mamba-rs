@@ -357,3 +357,22 @@ fn parity_partial_last_chunk_f32() {
 fn parity_multi_batch_f32() {
     check_parity(2, 256, 8, 16, WeightDtype::F32);
 }
+
+// 3-chunk regression case for the audit-found postfix double-count bug
+// (kernels/mamba_ssm_parallel.cu:1349-1354). With the bug, the last 8
+// timesteps of every chunk except the very last would silently corrupt
+// d_delta/d_u/d_B/d_a_log when n_chunks ≥ 2. CHUNK_SIZE = NTHREADS *
+// NITEMS = 128 * 8 = 1024 → T = 3072 forces 3 chunks. The bug would
+// fire on 2 of those (chunks 0 and 1, i.e. the earlier-in-time ones).
+// Regression introduced post-Step 8e by audit Agent 2 (M1 deep), fixed
+// in the same patch by setting next_a=1.0, next_b=0.0 for the last
+// thread (identity for the exclusive-next-thread compose).
+#[test]
+fn parity_three_chunks_postfix_regression_f32() {
+    check_parity(1, 3072, 4, 8, WeightDtype::F32);
+}
+
+#[test]
+fn parity_three_chunks_postfix_regression_bf16() {
+    check_parity(1, 3072, 4, 8, WeightDtype::Bf16);
+}

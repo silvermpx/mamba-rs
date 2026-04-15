@@ -1347,10 +1347,16 @@ ssm_parallel_scan_bwd_##SUFFIX(                                               \
                 next_a = smem_exch_a[threadIdx.x + 1];                        \
                 next_b = smem_exch_b[threadIdx.x + 1];                        \
             } else {                                                          \
-                /* Last thread: postfix from next chunk (was carried in       \
-                   smem_post_a/b). For first chunk processed, this is (1,0). */\
-                next_a = smem_post_a[n];                                      \
-                next_b = smem_post_b[n];                                      \
+                /* Last thread of block: no more lanes within THIS chunk →    \
+                   the exclusive-next-thread postfix is identity (1, 0).      \
+                   The inter-chunk postfix (smem_post_a/b) is composed in     \
+                   separately via (run_a, run_b) below. Audit fix: previous  \
+                   code aliased next_a = smem_post_a[n] which then double-   \
+                   composed with run_a/b at L1378-1379 → wrong dh for the    \
+                   last 8 timesteps of every chunk except the very last     \
+                   (manifests at T > CHUNK_SIZE = 1024, n_chunks ≥ 2). */    \
+                next_a = 1.0f;                                                \
+                next_b = 0.0f;                                                \
             }                                                                 \
             float run_a = smem_post_a[n];                                     \
             float run_b = smem_post_b[n];                                     \
