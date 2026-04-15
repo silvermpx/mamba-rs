@@ -243,6 +243,14 @@ pub struct MambaKernels {
     /// Typed parallel scan forward nosave twin (target network / prefill).
     pub ssm_parallel_fwd_nosave_typed: TypedKernel,
 
+    // -- Step 8e: M1 parallel scan BACKWARD (new) --
+    /// Parallel reverse-scan backward, mirrors state-spaces/mamba
+    /// `selective_scan_bwd_kernel.cuh`. Uses h_saved (per-t fwd state save)
+    /// to skip forward re-derivation. Outputs follow the existing _local
+    /// convention so the existing reduction kernels work unchanged.
+    /// f32 / bf16 / f16 instantiations from one DEFINE_* macro.
+    pub ssm_parallel_bwd_typed: TypedKernel,
+
     // -- AMP loss scaler helpers (Step 13) --
     /// Scan an f32 grad buffer for inf/nan, atomicOr into device int.
     pub check_inf_nan_f32: CudaFunction,
@@ -378,6 +386,11 @@ impl MambaKernels {
                 f32: get("ssm_parallel_scan_fwd_nosave")?,
                 bf16: get("ssm_parallel_scan_fwd_nosave_bf16")?,
                 f16: get("ssm_parallel_scan_fwd_nosave_f16")?,
+            },
+            ssm_parallel_bwd_typed: TypedKernel {
+                f32: get("ssm_parallel_scan_bwd_f32")?,
+                bf16: get("ssm_parallel_scan_bwd_bf16")?,
+                f16: get("ssm_parallel_scan_bwd_f16")?,
             },
 
             // AMP loss scaler

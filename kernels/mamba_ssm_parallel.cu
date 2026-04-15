@@ -74,6 +74,83 @@ __device__ __forceinline__ void warp_inclusive_scan_ab(
 }
 
 // ============================================================================
+// Warp-level inclusive REVERSE scan of (a, b) pairs (Tri Dao
+// `ThreadReverseScan` from `selective_scan/reverse_scan.cuh`).
+//
+// Forward scan composes left→right: lane k holds compose(p_0, ..., p_k).
+// Reverse scan composes right→left: lane k holds compose(p_k, ..., p_31).
+//
+// Compose op (same as forward):
+//   (a2, b2) ∘ (a1, b1) = (a2*a1, a2*b1 + b2)
+//
+// In the SSM bwd, this propagates dh_t backward in time:
+//   p_t = (delta_A_next[t], dout[t]*B[t]*C[t])
+//   reverse_scan_t = compose(p_t, p_{t+1}, ..., p_{T-1})
+// so reverse_scan_t.b is dh_t. The "next-step" delta_A is what makes the
+// gradient correctly multiply by future-step decay (Tri Dao trick).
+// ============================================================================
+__device__ __forceinline__ void warp_inclusive_reverse_scan_ab(
+    float &a, float &b, unsigned mask = 0xffffffff
+) {
+    #pragma unroll
+    for (int offset = 1; offset < 32; offset <<= 1) {
+        float a_next = __shfl_down_sync(mask, a, offset);
+        float b_next = __shfl_down_sync(mask, b, offset);
+        if ((threadIdx.x & 31) + (unsigned)offset < 32) {
+            // compose(self, next): (a*a_next, a*b_next + b) NO — careful:
+            // reverse semantic: lane k accumulates (p_k ∘ p_{k+1} ∘ ...).
+            // op (a2,b2)∘(a1,b1) = (a2*a1, a2*b1 + b2) with self=2nd arg.
+            // So acc_k = self ∘ acc_{k+1} where acc_{k+1} arrives via shfl.
+            b = a * b_next + b;
+            a = a * a_next;
+        }
+    }
+}
+
+// ============================================================================
+// Block-level inclusive REVERSE scan of (a, b) pairs.
+// Mirror of `block_inclusive_scan_ab` walking right-to-left.
+// ============================================================================
+__device__ __forceinline__ void block_inclusive_reverse_scan_ab(
+    float &a, float &b,
+    float *smem_wa, float *smem_wb
+) {
+    int warp_id = threadIdx.x / 32;
+    int lane    = threadIdx.x & 31;
+
+    // Step 1: intra-warp inclusive reverse scan (lane 0 holds full warp tail)
+    warp_inclusive_reverse_scan_ab(a, b);
+
+    // Step 2: lane 0 of each warp stores its inclusive total (the full
+    // composition of that warp from right-most lane back to lane 0).
+    if (lane == 0) {
+        smem_wa[warp_id] = a;
+        smem_wb[warp_id] = b;
+    }
+    __syncthreads();
+
+    // Step 3: first warp scans the NWARPS totals in REVERSE.
+    // Same partial-mask correctness fix as forward variant.
+    if (warp_id == 0 && lane < NWARPS) {
+        float wa = smem_wa[lane];
+        float wb = smem_wb[lane];
+        warp_inclusive_reverse_scan_ab(wa, wb, (1u << NWARPS) - 1u);
+        smem_wa[lane] = wa;
+        smem_wb[lane] = wb;
+    }
+    __syncthreads();
+
+    // Step 4: threads in warp < NWARPS-1 compose with the NEXT warp's postfix.
+    if (warp_id < NWARPS - 1) {
+        float na = smem_wa[warp_id + 1];
+        float nb = smem_wb[warp_id + 1];
+        b = a * nb + b;
+        a = a * na;
+    }
+    // No __syncthreads here — caller syncs before next smem_wa/wb use.
+}
+
+// ============================================================================
 // Block-level inclusive scan of (a, b) pairs.
 // Two-level: warp scan -> inter-warp scan via shared memory -> compose.
 // This is CUB's BLOCK_SCAN_WARP_SCANS algorithm.
@@ -139,6 +216,29 @@ __device__ __forceinline__ void block_inclusive_scan_ab(
 #define SMEM_EXCH_B_OFF    (2 * NWARPS + 2 * MAX_DSTATE + NTHREADS)
 #define SMEM_STAGE_OFF     (2 * NWARPS + 2 * MAX_DSTATE + 2 * NTHREADS)
 #define SMEM_TOTAL_FLOATS  (2 * NWARPS + 2 * MAX_DSTATE + 2 * NTHREADS + CHUNK_SIZE)
+
+// Step 8e — extra smem offsets for the backward-pass reverse scan.
+// Layout (appended after the forward layout):
+//   SMEM_REV_WA/WB     = 2*NWARPS floats   (reverse warp-scan workspace)
+//   SMEM_POST_A/B      = 2*MAX_DSTATE      (inter-chunk reverse-scan postfix)
+//   SMEM_NEXT_A        = NTHREADS          (next-thread δA exchange buffer)
+//   SMEM_DA_LOG_RED    = NTHREADS          (block-reduce of d_a_log per (n))
+//
+// Total bwd extra: 2*4 + 2*256 + 128 + 128 = 776 floats = 3104 B added to
+// the 7200 B fwd footprint → 10304 B per block (still < 48 KB so no
+// cudaFuncSetAttribute needed at default MAX_DSTATE=256).
+#define SMEM_REV_WA_OFF        (SMEM_TOTAL_FLOATS)
+#define SMEM_REV_WB_OFF        (SMEM_TOTAL_FLOATS + NWARPS)
+#define SMEM_POST_A_OFF        (SMEM_TOTAL_FLOATS + 2 * NWARPS)
+#define SMEM_POST_B_OFF        (SMEM_TOTAL_FLOATS + 2 * NWARPS + MAX_DSTATE)
+#define SMEM_NEXT_A_OFF        (SMEM_TOTAL_FLOATS + 2 * NWARPS + 2 * MAX_DSTATE)
+#define SMEM_DA_RED_OFF        (SMEM_TOTAL_FLOATS + 2 * NWARPS + 2 * MAX_DSTATE + NTHREADS)
+// Boundary: stores the "first thread's first da" of THIS chunk so that the
+// PREVIOUS (earlier-in-time) chunk's last thread can use it as its
+// `pair.a = a_{t+1}` boundary when computing reverse-scan dh. Initialized
+// to 1.0 (identity) for the very-last chunk in time.
+#define SMEM_CHUNK_FIRST_A_OFF (SMEM_TOTAL_FLOATS + 2 * NWARPS + 2 * MAX_DSTATE + 2 * NTHREADS)
+#define SMEM_BWD_FLOATS        (SMEM_TOTAL_FLOATS + 2 * NWARPS + 3 * MAX_DSTATE + 2 * NTHREADS)
 
 // ============================================================================
 // Forward: parallel prefix scan with activation saves (training path).
@@ -1002,6 +1102,372 @@ ssm_parallel_scan_fwd_nosave_##SUFFIX(                                        \
 
 DEFINE_SSM_PARALLEL_SCAN_FWD_NOSAVE(bf16, __nv_bfloat16, from_f_bf16)
 DEFINE_SSM_PARALLEL_SCAN_FWD_NOSAVE(f16,  __half,        from_f_f16)
+
+// ============================================================================
+// Step 8e — parallel selective-scan BACKWARD pass.
+//
+// Mirrors state-spaces/mamba `selective_scan_bwd_kernel.cuh`.
+// Grid: (batch, d_inner). Block: NTHREADS=128 (1 block per (b, di)).
+//
+// Algorithm (per (b, di)):
+//   For each chunk in REVERSE (n_chunks-1 → 0):
+//     Coalesced typed load delta/u/dy → smem → registers (per-thread NITEMS)
+//     For each n in [0, d_state):  (sequential outer loop)
+//       Coalesced typed load B[*, n], C[*, n] → smem → registers
+//       Per-i: da[i] = exp2f(δ·a_neg·LOG2E),  d_local[i] = dy[i]·c[i]
+//       Build reverse-scan pair_t = (a_{t+1}, d_local[t]):
+//         intra-thread: pair[i].a = da[i+1] for i < NITEMS-1
+//         inter-thread: pair[NITEMS-1].a = next thread's da[0] (smem exch)
+//         inter-chunk:  last thread's pair.a = postfix-saved next-chunk a
+//         globally last: pair.a = 1.0 (no future)
+//       Per-thread compose NITEMS pairs → block_inclusive_REVERSE_scan_ab
+//       Compose with running_postfix → dh[i] for each timestep
+//       Per-i outputs (typed acts loaded from h_saved, b_t, etc.):
+//         d_C_local[btdn] = dy * h_saved[t+1]    (typed, store FROM_F)
+//         d_B_local[btdn] = dh * δ * u           (typed)
+//         d_delta_acc[i] += dh * (a·da·h_prev + u·b)  (register f32)
+//         d_u_acc[i]     += dh * δ · b                  (register f32)
+//         d_a_per_thread += dh · da · δ · a · h_prev    (register f32)
+//       Block-reduce d_a_per_thread → thread 0 += d_a_log_local[bid·di·ds + did·ds + n]
+//       Update running_postfix via block_inclusive_reverse_scan_ab tail
+//     Store d_delta_acc, d_u_acc to typed HBM (smem coalesced + downcast)
+//   Final: d_D_local[bid·d_inner + did] = local_d_D
+//
+// All scan state, h_saved, registers stay f32 (BPTT scan_t = float2 invariant).
+// Outputs follow the existing _local convention so the existing reduction
+// kernels (reduce_d_B, reduce_d_C, reduce_d_D, reduce_d_a_log) work unchanged.
+// ============================================================================
+
+#define DEFINE_SSM_PARALLEL_SCAN_BWD(SUFFIX, T_ACT, FROM_F)                   \
+extern "C" __global__ __launch_bounds__(128, 3) void                          \
+ssm_parallel_scan_bwd_##SUFFIX(                                               \
+    const float* __restrict__ h_saved,    /* [B*(T+1)*di*ds] */               \
+    const T_ACT* __restrict__ delta,                                          \
+    const T_ACT* __restrict__ u,                                              \
+    const T_ACT* __restrict__ B_in,                                           \
+    const T_ACT* __restrict__ C_in,                                           \
+    const float* __restrict__ a_neg,      /* [di*ds] */                       \
+    const float* __restrict__ D,          /* [di] */                          \
+    const T_ACT* __restrict__ dy,         /* [B*T*di] */                      \
+    T_ACT* __restrict__ d_delta,          /* [B*T*di] */                      \
+    T_ACT* __restrict__ d_u,              /* [B*T*di] */                      \
+    T_ACT* __restrict__ d_B_local,        /* [B*T*di*ds] */                   \
+    T_ACT* __restrict__ d_C_local,        /* [B*T*di*ds] */                   \
+    float* __restrict__ d_D_local,        /* [B*di] f32 master */             \
+    float* __restrict__ d_a_log_local,    /* [B*di*ds] f32 master */          \
+    int batch, int T, int d_inner, int d_state                                \
+) {                                                                           \
+    int bid = blockIdx.x;                                                     \
+    int did = blockIdx.y;                                                     \
+    if (bid >= batch || did >= d_inner) return;                               \
+    if (d_state > MAX_DSTATE) return;                                         \
+    extern __shared__ float smem[];                                           \
+    /* smem_wa/wb/run_a/run_b are forward-layout (small NWARPS-sized warp     \
+       totals + MAX_DSTATE running prefix) — UNUSED in the bwd kernel.       \
+       smem_exch_a/b are NTHREADS-sized — we repurpose them as the per-      \
+       thread inclusive-reverse-scan postfix tile (read by lane k as        \
+       smem_exch_*[k+1] for the exclusive-next postfix). */                  \
+    float *smem_rev_wa  = smem + SMEM_REV_WA_OFF;                             \
+    float *smem_rev_wb  = smem + SMEM_REV_WB_OFF;                             \
+    float *smem_exch_a  = smem + SMEM_EXCH_A_OFF;                             \
+    float *smem_exch_b  = smem + SMEM_EXCH_B_OFF;                             \
+    float *smem_post_a  = smem + SMEM_POST_A_OFF;                             \
+    float *smem_post_b  = smem + SMEM_POST_B_OFF;                             \
+    float *smem_next_a  = smem + SMEM_NEXT_A_OFF;                             \
+    float *smem_da_red  = smem + SMEM_DA_RED_OFF;                             \
+    float *smem_chunk_first_a = smem + SMEM_CHUNK_FIRST_A_OFF;                \
+    T_ACT *smem_stage   = (T_ACT *)(smem + SMEM_STAGE_OFF);                   \
+    float D_d = D[did];                                                       \
+    int hsave_base_b = bid * (T + 1) * d_inner * d_state;                     \
+    /* Initialize inter-chunk reverse-scan postfix to identity (1, 0). The   \
+       chunk_first_a buffer is set to 1.0 to act as `a_{t+1}=1` for the      \
+       very-last timestep of the very-last chunk (no future). */              \
+    for (int n = threadIdx.x; n < d_state; n += NTHREADS) {                   \
+        smem_post_a[n] = 1.0f;                                                \
+        smem_post_b[n] = 0.0f;                                                \
+        smem_chunk_first_a[n] = 1.0f;                                         \
+    }                                                                         \
+    __syncthreads();                                                          \
+    float local_d_D = 0.0f;                                                   \
+    int n_chunks = (T + CHUNK_SIZE - 1) / CHUNK_SIZE;                         \
+    for (int chunk_loop = 0; chunk_loop < n_chunks; chunk_loop++) {           \
+        int chunk = n_chunks - 1 - chunk_loop;  /* walk REVERSE */            \
+        int chunk_start = chunk * CHUNK_SIZE;                                 \
+        /* ---- Load typed delta into smem and upcast per-thread ---- */      \
+        for (int s = threadIdx.x; s < CHUNK_SIZE; s += NTHREADS) {            \
+            int t = chunk_start + s;                                          \
+            smem_stage[s] = (t < T)                                           \
+                ? delta[(bid * T + t) * d_inner + did]                        \
+                : FROM_F(0.0f);                                               \
+        }                                                                     \
+        __syncthreads();                                                      \
+        float delta_vals[NITEMS];                                             \
+        for (int i = 0; i < NITEMS; i++) {                                    \
+            delta_vals[i] = to_f(smem_stage[threadIdx.x * NITEMS + i]);       \
+        }                                                                     \
+        __syncthreads();                                                      \
+        /* ---- Load typed u ---- */                                          \
+        for (int s = threadIdx.x; s < CHUNK_SIZE; s += NTHREADS) {            \
+            int t = chunk_start + s;                                          \
+            smem_stage[s] = (t < T)                                           \
+                ? u[(bid * T + t) * d_inner + did]                            \
+                : FROM_F(0.0f);                                               \
+        }                                                                     \
+        __syncthreads();                                                      \
+        float u_vals[NITEMS];                                                 \
+        for (int i = 0; i < NITEMS; i++) {                                    \
+            u_vals[i] = to_f(smem_stage[threadIdx.x * NITEMS + i]);           \
+        }                                                                     \
+        __syncthreads();                                                      \
+        /* ---- Load typed dy ---- */                                         \
+        for (int s = threadIdx.x; s < CHUNK_SIZE; s += NTHREADS) {            \
+            int t = chunk_start + s;                                          \
+            smem_stage[s] = (t < T)                                           \
+                ? dy[(bid * T + t) * d_inner + did]                           \
+                : FROM_F(0.0f);                                               \
+        }                                                                     \
+        __syncthreads();                                                      \
+        float dy_vals[NITEMS];                                                \
+        for (int i = 0; i < NITEMS; i++) {                                    \
+            dy_vals[i] = to_f(smem_stage[threadIdx.x * NITEMS + i]);          \
+        }                                                                     \
+        __syncthreads();                                                      \
+        /* ---- Per-t skip-path contributions accumulate in registers ---- */ \
+        float d_u_acc[NITEMS];                                                \
+        float d_delta_acc[NITEMS];                                            \
+        for (int i = 0; i < NITEMS; i++) {                                    \
+            int t = chunk_start + threadIdx.x * NITEMS + i;                   \
+            if (t < T) {                                                      \
+                local_d_D += dy_vals[i] * u_vals[i];                          \
+                d_u_acc[i] = dy_vals[i] * D_d;                                \
+            } else {                                                          \
+                d_u_acc[i] = 0.0f;                                            \
+            }                                                                 \
+            d_delta_acc[i] = 0.0f;                                            \
+        }                                                                     \
+        /* ---- Outer d_state loop ---- */                                    \
+        for (int n = 0; n < d_state; n++) {                                   \
+            float a_dn = a_neg[did * d_state + n];                            \
+            float a_dn_log2 = a_dn * LOG2E;                                   \
+            /* Load typed B[chunk, n] */                                      \
+            for (int s = threadIdx.x; s < CHUNK_SIZE; s += NTHREADS) {        \
+                int t = chunk_start + s;                                      \
+                smem_stage[s] = (t < T)                                       \
+                    ? B_in[bid * T * d_state + t * d_state + n]               \
+                    : FROM_F(0.0f);                                           \
+            }                                                                 \
+            __syncthreads();                                                  \
+            float b_vals[NITEMS];                                             \
+            for (int i = 0; i < NITEMS; i++) {                                \
+                b_vals[i] = to_f(smem_stage[threadIdx.x * NITEMS + i]);       \
+            }                                                                 \
+            __syncthreads();                                                  \
+            /* Load typed C[chunk, n] */                                      \
+            for (int s = threadIdx.x; s < CHUNK_SIZE; s += NTHREADS) {        \
+                int t = chunk_start + s;                                      \
+                smem_stage[s] = (t < T)                                       \
+                    ? C_in[bid * T * d_state + t * d_state + n]               \
+                    : FROM_F(0.0f);                                           \
+            }                                                                 \
+            __syncthreads();                                                  \
+            float c_vals[NITEMS];                                             \
+            for (int i = 0; i < NITEMS; i++) {                                \
+                c_vals[i] = to_f(smem_stage[threadIdx.x * NITEMS + i]);       \
+            }                                                                 \
+            __syncthreads();                                                  \
+            /* Per-i: da[i] = exp2(delta * a_neg), d_local[i] = dy * c */     \
+            float da_vals[NITEMS];                                            \
+            float d_local[NITEMS];                                            \
+            for (int i = 0; i < NITEMS; i++) {                                \
+                int t = chunk_start + threadIdx.x * NITEMS + i;               \
+                if (t < T) {                                                  \
+                    da_vals[i] = exp2f(delta_vals[i] * a_dn_log2);            \
+                    d_local[i] = dy_vals[i] * c_vals[i];                      \
+                } else {                                                      \
+                    da_vals[i] = 1.0f;                                        \
+                    d_local[i] = 0.0f;                                        \
+                }                                                             \
+            }                                                                 \
+            /* Exchange: each thread publishes its first da into smem so the  \
+               left-neighbor thread can read it as its (NITEMS-1).a (the      \
+               "next-step a" trick — Tri Dao reverse_scan). */                \
+            smem_next_a[threadIdx.x] = da_vals[0];                            \
+            __syncthreads();                                                  \
+            /* Build reverse-scan pairs (a_next, d_local).                    \
+               pair[i].a = da_vals[i+1] for i in [0, NITEMS-1)                \
+               pair[NITEMS-1].a = next thread's da_vals[0] from smem_next_a;  \
+               last thread of block uses postfix-saved next-chunk's first a. */\
+            float thread_a[NITEMS];                                           \
+            float thread_b[NITEMS];                                           \
+            for (int i = 0; i < NITEMS - 1; i++) {                            \
+                thread_a[i] = da_vals[i + 1];                                 \
+                thread_b[i] = d_local[i];                                     \
+            }                                                                 \
+            float boundary_next_a;                                            \
+            if ((int)threadIdx.x < NTHREADS - 1) {                            \
+                boundary_next_a = smem_next_a[threadIdx.x + 1];               \
+            } else {                                                          \
+                /* Last thread of block: need a_{t+1} where t+1 is the FIRST \
+                   timestep of the NEXT (later-in-time) chunk. Saved into    \
+                   smem_chunk_first_a[n] when that chunk was processed.      \
+                   Initialized to 1.0 for the very-last chunk in time. */    \
+                boundary_next_a = smem_chunk_first_a[n];                      \
+            }                                                                 \
+            thread_a[NITEMS - 1] = boundary_next_a;                           \
+            thread_b[NITEMS - 1] = d_local[NITEMS - 1];                       \
+            __syncthreads();                                                  \
+            /* Mask out-of-range elements to identity (a=1, b=0). */          \
+            for (int i = 0; i < NITEMS; i++) {                                \
+                int t = chunk_start + threadIdx.x * NITEMS + i;               \
+                if (t >= T) {                                                 \
+                    thread_a[i] = 1.0f;                                       \
+                    thread_b[i] = 0.0f;                                       \
+                }                                                             \
+            }                                                                 \
+            /* Intra-thread reverse compose (right→left) the NITEMS pairs.    \
+               result.b = a · b_right + b_left where compose(left, right). */ \
+            for (int i = NITEMS - 2; i >= 0; i--) {                           \
+                thread_b[i] = thread_a[i] * thread_b[i + 1] + thread_b[i];    \
+                thread_a[i] = thread_a[i] * thread_a[i + 1];                  \
+            }                                                                 \
+            float scan_a = thread_a[0];                                       \
+            float scan_b = thread_b[0];                                       \
+            block_inclusive_reverse_scan_ab(                                  \
+                scan_a, scan_b, smem_rev_wa, smem_rev_wb);                    \
+            __syncthreads();                                                  \
+            /* Reverse scan exclusive-NEXT: lane k needs the postfix from     \
+               lane k+1 (excl_next_a/b). Save inclusive scan_a/b into the    \
+               NTHREADS-sized exch tiles (smem_wa is only NWARPS floats!).   \
+               Then read [threadIdx.x + 1]. */                                \
+            smem_exch_a[threadIdx.x] = scan_a;                                \
+            smem_exch_b[threadIdx.x] = scan_b;                                \
+            __syncthreads();                                                  \
+            float next_a, next_b;                                             \
+            if ((int)threadIdx.x < NTHREADS - 1) {                            \
+                next_a = smem_exch_a[threadIdx.x + 1];                        \
+                next_b = smem_exch_b[threadIdx.x + 1];                        \
+            } else {                                                          \
+                /* Last thread: postfix from next chunk (was carried in       \
+                   smem_post_a/b). For first chunk processed, this is (1,0). */\
+                next_a = smem_post_a[n];                                      \
+                next_b = smem_post_b[n];                                      \
+            }                                                                 \
+            float run_a = smem_post_a[n];                                     \
+            float run_b = smem_post_b[n];                                     \
+            /* Update postfix carry for the NEXT (earlier) chunk. Block-wide  \
+               reverse compose end-to-end: thread 0 holds the full chunk      \
+               composition. */                                                \
+            if (threadIdx.x == 0) {                                           \
+                /* Full chunk composition is at lane 0 after rev-scan. */     \
+                float chunk_a = scan_a;                                       \
+                float chunk_b = scan_b;                                       \
+                /* New postfix = compose(chunk_composition, old_postfix).     \
+                   compose order: chunk is to the LEFT (earlier), postfix to  \
+                   the RIGHT. op_rev(left, right) = (left.a*right.a,          \
+                   left.a*right.b + left.b). */                               \
+                smem_post_a[n] = chunk_a * run_a;                             \
+                smem_post_b[n] = chunk_a * run_b + chunk_b;                   \
+            }                                                                 \
+            __syncthreads();                                                  \
+            /* Now per-i compute dh[i] for each timestep in this thread.      \
+               After intra-thread compose: thread_a/b[i] already contains     \
+               compose(pair[i], pair[i+1], ..., pair[NITEMS-1]).              \
+               Compose with (next_a, next_b) which represents pairs after     \
+               this thread, AND with (run_a, run_b) the postfix from later    \
+               chunks. Final per-i pair: compose(thread_state[i], next_then_run). */\
+            float post_a = next_a * run_a;                                    \
+            float post_b = next_a * run_b + next_b;                           \
+            float dh_vals[NITEMS];                                            \
+            for (int i = 0; i < NITEMS; i++) {                                \
+                /* dh[i] = thread_a[i]*post_b + thread_b[i] */                \
+                dh_vals[i] = thread_a[i] * post_b + thread_b[i];              \
+            }                                                                 \
+            /* ---- Per-t output writes (typed) and accumulation ---- */      \
+            float d_a_acc = 0.0f;                                             \
+            for (int i = 0; i < NITEMS; i++) {                                \
+                int t = chunk_start + threadIdx.x * NITEMS + i;               \
+                if (t >= T) continue;                                         \
+                int btdn_typed = ((bid * T + t) * d_inner + did) * d_state    \
+                                 + n;                                         \
+                int h_curr_idx = hsave_base_b                                 \
+                    + (t + 1) * d_inner * d_state                             \
+                    + did * d_state + n;                                      \
+                int h_prev_idx = hsave_base_b                                 \
+                    + t * d_inner * d_state                                   \
+                    + did * d_state + n;                                      \
+                float h_curr = h_saved[h_curr_idx];                           \
+                float h_prev = h_saved[h_prev_idx];                           \
+                float dh = dh_vals[i];                                        \
+                d_C_local[btdn_typed] = FROM_F(dy_vals[i] * h_curr);          \
+                d_B_local[btdn_typed] = FROM_F(dh * delta_vals[i] * u_vals[i]);\
+                d_delta_acc[i] += dh * (a_dn * da_vals[i] * h_prev            \
+                                        + u_vals[i] * b_vals[i]);             \
+                d_u_acc[i] += dh * delta_vals[i] * b_vals[i];                 \
+                d_a_acc += dh * da_vals[i] * delta_vals[i] * a_dn * h_prev;   \
+            }                                                                 \
+            /* Block-reduce d_a_acc → thread 0 → += d_a_log_local */          \
+            smem_da_red[threadIdx.x] = d_a_acc;                               \
+            __syncthreads();                                                  \
+            for (int stride = NTHREADS / 2; stride > 0; stride >>= 1) {       \
+                if ((int)threadIdx.x < stride) {                              \
+                    smem_da_red[threadIdx.x] += smem_da_red[threadIdx.x +     \
+                                                            stride];          \
+                }                                                             \
+                __syncthreads();                                              \
+            }                                                                 \
+            if (threadIdx.x == 0) {                                           \
+                d_a_log_local[(bid * d_inner + did) * d_state + n]            \
+                    += smem_da_red[0];                                        \
+                /* Save THIS chunk's first thread's first da into the         \
+                   chunk_first_a[n] slot — the EARLIER chunk (next iter)      \
+                   will read this as its boundary `a_{t+1}` for the very-     \
+                   last timestep before this chunk starts. */                 \
+                smem_chunk_first_a[n] = smem_next_a[0];                       \
+            }                                                                 \
+            __syncthreads();                                                  \
+        }                                                                     \
+        /* ---- Store d_delta_acc, d_u_acc to typed HBM via smem ---- */      \
+        for (int i = 0; i < NITEMS; i++) {                                    \
+            smem_stage[threadIdx.x * NITEMS + i] = FROM_F(d_delta_acc[i]);    \
+        }                                                                     \
+        __syncthreads();                                                      \
+        for (int s = threadIdx.x; s < CHUNK_SIZE; s += NTHREADS) {            \
+            int t = chunk_start + s;                                          \
+            if (t < T) {                                                      \
+                d_delta[(bid * T + t) * d_inner + did] = smem_stage[s];       \
+            }                                                                 \
+        }                                                                     \
+        __syncthreads();                                                      \
+        for (int i = 0; i < NITEMS; i++) {                                    \
+            smem_stage[threadIdx.x * NITEMS + i] = FROM_F(d_u_acc[i]);        \
+        }                                                                     \
+        __syncthreads();                                                      \
+        for (int s = threadIdx.x; s < CHUNK_SIZE; s += NTHREADS) {            \
+            int t = chunk_start + s;                                          \
+            if (t < T) {                                                      \
+                d_u[(bid * T + t) * d_inner + did] = smem_stage[s];           \
+            }                                                                 \
+        }                                                                     \
+        __syncthreads();                                                      \
+    }                                                                         \
+    /* Final: per-block d_D contribution. local_d_D is per-thread so          \
+       reduce within block first. */                                          \
+    smem_da_red[threadIdx.x] = local_d_D;                                     \
+    __syncthreads();                                                          \
+    for (int stride = NTHREADS / 2; stride > 0; stride >>= 1) {               \
+        if ((int)threadIdx.x < stride) {                                      \
+            smem_da_red[threadIdx.x] += smem_da_red[threadIdx.x + stride];    \
+        }                                                                     \
+        __syncthreads();                                                      \
+    }                                                                         \
+    if (threadIdx.x == 0) {                                                   \
+        d_D_local[bid * d_inner + did] = smem_da_red[0];                      \
+    }                                                                         \
+}
+
+DEFINE_SSM_PARALLEL_SCAN_BWD(f32,  float,         from_f_f32)
+DEFINE_SSM_PARALLEL_SCAN_BWD(bf16, __nv_bfloat16, from_f_bf16)
+DEFINE_SSM_PARALLEL_SCAN_BWD(f16,  __half,        from_f_f16)
 
 // Clean up macros to avoid polluting subsequent translation units
 // (all .cu files are concatenated before NVRTC compilation)
