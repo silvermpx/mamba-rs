@@ -901,16 +901,19 @@ extern "C" __global__ void m3_dqkv(
             v_sm[t * hd + p] = 0.0f;
             do_sm[t * hd + p] = 0.0f;
         }
-        // Q and K: only threads p < ds load
-        if (p < ds) {
+        // Q and K: each thread loads ALL ds entries for indices n stride hd.
+        // OLD bug: `if (p < ds)` only worked when ds <= hd; for ds > hd
+        // (e.g. ds=16, hd=8) entries n=hd..ds-1 were left as garbage in
+        // shared memory, corrupting every dot/dQK computation downstream.
+        for (int n = p; n < ds; n += hd) {
             for (int t = 0; t < chunk_len; t++) {
                 int gt = chunk_start + t;
-                q_sm[t * ds + p] = Q_rot[((b * T + gt) * nh_total + h) * ds + p];
-                k_sm[t * ds + p] = K_scaled[((b * T + gt) * nh_total + h) * ds + p];
+                q_sm[t * ds + n] = Q_rot[((b * T + gt) * nh_total + h) * ds + n];
+                k_sm[t * ds + n] = K_scaled[((b * T + gt) * nh_total + h) * ds + n];
             }
             for (int t = chunk_len; t < CS; t++) {
-                q_sm[t * ds + p] = 0.0f;
-                k_sm[t * ds + p] = 0.0f;
+                q_sm[t * ds + n] = 0.0f;
+                k_sm[t * ds + n] = 0.0f;
             }
         }
         // da_cs and qk_dot: one thread loads
@@ -1901,17 +1904,20 @@ m3_dqkv_##SUFFIX(                                                             \
             v_sm[t * hd + p] = 0.0f;                                          \
             do_sm[t * hd + p] = 0.0f;                                         \
         }                                                                     \
-        if (p < ds) {                                                         \
+        /* Each thread loads ALL ds entries with stride hd. Old `p < ds`     \
+         * filter only worked when ds <= hd; for ds > hd (e.g. ds=16, hd=8)  \
+         * entries n=hd..ds-1 stayed garbage in shared memory.               */\
+        for (int n = p; n < ds; n += hd) {                                    \
             for (int t = 0; t < chunk_len; t++) {                             \
                 int gt = chunk_start + t;                                     \
-                q_sm[t * ds + p] = to_f(                                      \
-                    Q_rot[((b * T + gt) * nh_total + h) * ds + p]);           \
-                k_sm[t * ds + p] = to_f(                                      \
-                    K_scaled[((b * T + gt) * nh_total + h) * ds + p]);        \
+                q_sm[t * ds + n] = to_f(                                      \
+                    Q_rot[((b * T + gt) * nh_total + h) * ds + n]);           \
+                k_sm[t * ds + n] = to_f(                                      \
+                    K_scaled[((b * T + gt) * nh_total + h) * ds + n]);        \
             }                                                                 \
             for (int t = chunk_len; t < CS; t++) {                            \
-                q_sm[t * ds + p] = 0.0f;                                      \
-                k_sm[t * ds + p] = 0.0f;                                      \
+                q_sm[t * ds + n] = 0.0f;                                      \
+                k_sm[t * ds + n] = 0.0f;                                      \
             }                                                                 \
         }                                                                     \
         if (p == 0) {                                                         \
