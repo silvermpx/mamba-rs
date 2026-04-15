@@ -177,6 +177,7 @@ fn m1_f32_training_graph_matches_eager() {
 
     let graph = GpuMambaF32TrainingStepGraph::capture(
         &ctx,
+        &cfg,
         &mut g_w,
         &g_adam,
         &g_bias,

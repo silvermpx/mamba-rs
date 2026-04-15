@@ -39,6 +39,8 @@
 //!   training would force a CPU readback inside the captured body. Planned
 //!   for a future step via a device-side skip-on-overflow kernel.
 
+use cudarc::driver::PushKernelArg;
+
 use crate::config::MambaConfig;
 use crate::mamba_ssm::gpu::adamw::{AdamWBiasFactors, GpuAdamW, step_m1, step_m1_capturable};
 use crate::mamba_ssm::gpu::backward::gpu_backward_mamba_backbone;
@@ -55,6 +57,52 @@ use crate::mamba_ssm::gpu::forward_mixed::{
     GpuMambaBackboneMixedActs, GpuMambaMixedTrainScratch, gpu_forward_mamba_backbone_train_mixed,
 };
 use crate::mamba_ssm::gpu::graph_capture::capture_into_graph;
+use crate::mamba_ssm::gpu::launch::grid_1d;
+use crate::mamba_ssm::gpu::weights::GpuMambaTrainLayerWeights;
+
+/// Recompute `a_neg = -exp(a_log)` from the current master weights after
+/// AdamW has updated `a_log`. Writes to BOTH `a_neg_all` (consumed by the
+/// backward kernels) and `state.a_neg_all` (consumed by the forward SSM
+/// recurrence).
+///
+/// Must be called after every optimizer step — without it, forward and
+/// backward read stale `a_neg` values from trainer construction time and
+/// the `d_a_log` gradient never reaches the recurrence (silent no-op on
+/// the A-matrix learning).
+fn recompute_a_neg_all(
+    ctx: &GpuCtx,
+    master_layers: &[GpuMambaTrainLayerWeights],
+    a_neg_all: &crate::mamba_ssm::gpu::buffers::GpuBuffer,
+    state_a_neg_all: &crate::mamba_ssm::gpu::buffers::GpuBuffer,
+    d_inner: usize,
+    d_state: usize,
+) -> Result<(), String> {
+    let per_layer = d_inner * d_state;
+    if per_layer == 0 {
+        return Ok(());
+    }
+    let n_i32 = per_layer as i32;
+    for (li, mw) in master_layers.iter().enumerate() {
+        let src = mw.a_log.cached_ptr();
+        // Write-1: backward-side a_neg_all
+        let dst_a = a_neg_all.inner_at(li * per_layer);
+        let mut b1 = ctx.stream.launch_builder(&ctx.kernels.exp_negate);
+        b1.arg(&dst_a);
+        b1.arg(&src);
+        b1.arg(&n_i32);
+        unsafe { b1.launch(grid_1d(per_layer)) }
+            .map_err(|e| format!("exp_negate self.a_neg_all L{li}: {e:?}"))?;
+        // Write-2: forward-side state.a_neg_all (separate allocation today).
+        let dst_s = state_a_neg_all.inner_at(li * per_layer);
+        let mut b2 = ctx.stream.launch_builder(&ctx.kernels.exp_negate);
+        b2.arg(&dst_s);
+        b2.arg(&src);
+        b2.arg(&n_i32);
+        unsafe { b2.launch(grid_1d(per_layer)) }
+            .map_err(|e| format!("exp_negate state.a_neg_all L{li}: {e:?}"))?;
+    }
+    Ok(())
+}
 use crate::mamba_ssm::gpu::loss_scaler::{
     DynamicLossScaler, OverflowFlag, UnscaleFactor, check_inf_nan_gpu, scale_grads_skip_gpu,
 };
@@ -769,6 +817,16 @@ impl MambaTrainerMixed {
                 &self.grads,
             )?;
             self.weights.sync_master_to_compute(&self.ctx)?;
+            // Recompute a_neg after AdamW so each replay sees the updated
+            // A-matrix (same rationale as the eager and bf16-graph paths).
+            recompute_a_neg_all(
+                &self.ctx,
+                &self.weights.master.layers,
+                &self.a_neg_all,
+                &self.state.a_neg_all,
+                self.cfg.d_inner(),
+                self.cfg.d_state,
+            )?;
             Ok(())
         })?;
         self.graph_f16 = Some(g);
@@ -814,6 +872,19 @@ impl MambaTrainerMixed {
             &self.grads,
         )?;
         self.weights.sync_master_to_compute(&self.ctx)?;
+        // a_log was just updated by AdamW — recompute a_neg = -exp(a_log)
+        // so the next forward sees the updated A-matrix. Without this, the
+        // SSM kernel reads stale decay values from construction time and
+        // the learned a_log gradient never reaches the recurrence (silent
+        // training no-op on the A-matrix).
+        recompute_a_neg_all(
+            &self.ctx,
+            &self.weights.master.layers,
+            &self.a_neg_all,
+            &self.state.a_neg_all,
+            self.cfg.d_inner(),
+            self.cfg.d_state,
+        )?;
         Ok(())
     }
 
@@ -826,7 +897,6 @@ impl MambaTrainerMixed {
             self.graph.is_none(),
             "step_debug_scalar_adamw cannot run while a graph is captured"
         );
-        let (step, _, _) = self.adam.advance();
         self.grads.zero(&self.ctx.stream)?;
         gpu_forward_mamba_backbone_train_mixed(
             &self.ctx,
@@ -845,9 +915,11 @@ impl MambaTrainerMixed {
             &self.a_neg_all,
             &mut self.scratch,
         )?;
-        // step_m1 calls adam.advance() internally, so we need a fresh
-        // GpuAdamW with step=step-1 to match. Easier: skip this path's
-        // step bookkeeping and don't use it in the hot loop.
+        // step_m1 owns the counter (calls `adam.advance()` internally).
+        // The previous version of this path also called `adam.advance()` here,
+        // which double-bumped the counter — every debug step was worth 2
+        // optimizer steps so bias-correction factors ran ahead of the m/v
+        // state. Don't advance here; read the post-advance counter below.
         step_m1(
             &self.ctx,
             &self.ctx.kernels.adamw_step_f32,
@@ -856,7 +928,15 @@ impl MambaTrainerMixed {
             &self.grads,
         )?;
         self.weights.sync_master_to_compute(&self.ctx)?;
-        Ok(StepMetrics::plain(step, false))
+        recompute_a_neg_all(
+            &self.ctx,
+            &self.weights.master.layers,
+            &self.a_neg_all,
+            &self.state.a_neg_all,
+            self.cfg.d_inner(),
+            self.cfg.d_state,
+        )?;
+        Ok(StepMetrics::plain(self.adam.step, false))
     }
 
     /// Download the master weights to a CPU-side `MambaWeights` for
@@ -1015,6 +1095,7 @@ impl MambaTrainerF32 {
         self.bias.write(&self.ctx.stream, 1.0, 1.0)?;
         let g = GpuMambaF32TrainingStepGraph::capture(
             &self.ctx,
+            &self.cfg,
             &mut self.weights,
             &self.adam,
             &self.bias,
@@ -1094,6 +1175,16 @@ impl MambaTrainerF32 {
             self.bias.ptr(),
             &mut self.weights,
             &self.grads,
+        )?;
+        // Recompute a_neg after AdamW updated a_log — see docstring on
+        // `recompute_a_neg_all` above. Without this, SSM uses stale A-matrix.
+        recompute_a_neg_all(
+            &self.ctx,
+            &self.weights.layers,
+            &self.a_neg_all,
+            &self.state.a_neg_all,
+            self.cfg.d_inner(),
+            self.cfg.d_state,
         )?;
         Ok(())
     }

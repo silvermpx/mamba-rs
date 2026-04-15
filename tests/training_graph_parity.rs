@@ -210,6 +210,35 @@ fn one_eager_step(setup: &mut Setup, ctx: &GpuCtx, input: &[f32], d_temp: &[f32]
     )
     .unwrap();
     setup.weights.sync_master_to_compute(ctx).unwrap();
+    // Mirror the captured body's post-AdamW a_neg recompute so eager and
+    // graph paths produce bit-identical master-weight trajectories.
+    recompute_a_neg_eager_test(ctx, setup);
+}
+
+fn recompute_a_neg_eager_test(ctx: &GpuCtx, setup: &mut Setup) {
+    use cudarc::driver::PushKernelArg;
+    let di = setup.cfg.d_inner();
+    let ds = setup.cfg.d_state;
+    let per_layer = di * ds;
+    if per_layer == 0 {
+        return;
+    }
+    let n_i32 = per_layer as i32;
+    for (li, mw) in setup.weights.master.layers.iter().enumerate() {
+        let src = mw.a_log.cached_ptr();
+        let dst_a = setup.a_neg_all.inner_at(li * per_layer);
+        let mut b1 = ctx.stream.launch_builder(&ctx.kernels.exp_negate);
+        b1.arg(&dst_a);
+        b1.arg(&src);
+        b1.arg(&n_i32);
+        unsafe { b1.launch(mamba_rs::mamba_ssm::gpu::launch::grid_1d(per_layer)) }.unwrap();
+        let dst_s = setup.state.a_neg_all.inner_at(li * per_layer);
+        let mut b2 = ctx.stream.launch_builder(&ctx.kernels.exp_negate);
+        b2.arg(&dst_s);
+        b2.arg(&src);
+        b2.arg(&n_i32);
+        unsafe { b2.launch(mamba_rs::mamba_ssm::gpu::launch::grid_1d(per_layer)) }.unwrap();
+    }
 }
 
 #[test]

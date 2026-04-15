@@ -43,7 +43,7 @@
 //! `torch.cuda.CUDAGraph` + `capturable=True` optimizer mode (PyTorch
 //! 2.5, `torch/cuda/graphs.py` and `_multi_tensor_adamw`).
 
-use cudarc::driver::CudaGraph;
+use cudarc::driver::{CudaGraph, PushKernelArg};
 
 use crate::mamba_ssm::gpu::adamw::{AdamWBiasFactors, GpuAdamW, step_m1_capturable};
 use crate::mamba_ssm::gpu::backward::gpu_backward_mamba_backbone;
@@ -58,8 +58,49 @@ use crate::mamba_ssm::gpu::forward_mixed::{
     GpuMambaBackboneMixedActs, GpuMambaMixedTrainScratch, gpu_forward_mamba_backbone_mixed,
 };
 use crate::mamba_ssm::gpu::graph_capture::capture_into_graph;
-use crate::mamba_ssm::gpu::weights::{GpuMambaGrads, GpuMambaTrainWeights};
+use crate::mamba_ssm::gpu::launch::grid_1d;
+use crate::mamba_ssm::gpu::weights::{GpuMambaGrads, GpuMambaTrainLayerWeights, GpuMambaTrainWeights};
 use crate::mamba_ssm::gpu::weights_mixed_train::GpuMambaTrainMixedWeights;
+
+/// Capture-side variant of the trainer's `recompute_a_neg_all` helper.
+/// Launches `exp_negate` per layer from `master_layers[l].a_log` into
+/// BOTH `a_neg_all[l*per_layer..]` (backward) and
+/// `state_a_neg_all[l*per_layer..]` (forward). These launches must be
+/// inside the captured body so replay picks up the freshly-updated
+/// `a_log` from AdamW. Without them, every replay runs the SSM with the
+/// A-matrix from graph-capture time, effectively freezing the decay.
+fn recompute_a_neg_captured(
+    ctx: &GpuCtx,
+    master_layers: &[GpuMambaTrainLayerWeights],
+    a_neg_all: &GpuBuffer,
+    state_a_neg_all: &GpuBuffer,
+    d_inner: usize,
+    d_state: usize,
+) -> Result<(), String> {
+    let per_layer = d_inner * d_state;
+    if per_layer == 0 {
+        return Ok(());
+    }
+    let n_i32 = per_layer as i32;
+    for (li, mw) in master_layers.iter().enumerate() {
+        let src = mw.a_log.cached_ptr();
+        let dst_a = a_neg_all.inner_at(li * per_layer);
+        let mut b1 = ctx.stream.launch_builder(&ctx.kernels.exp_negate);
+        b1.arg(&dst_a);
+        b1.arg(&src);
+        b1.arg(&n_i32);
+        unsafe { b1.launch(grid_1d(per_layer)) }
+            .map_err(|e| format!("exp_negate captured a_neg_all L{li}: {e:?}"))?;
+        let dst_s = state_a_neg_all.inner_at(li * per_layer);
+        let mut b2 = ctx.stream.launch_builder(&ctx.kernels.exp_negate);
+        b2.arg(&dst_s);
+        b2.arg(&src);
+        b2.arg(&n_i32);
+        unsafe { b2.launch(grid_1d(per_layer)) }
+            .map_err(|e| format!("exp_negate captured state.a_neg_all L{li}: {e:?}"))?;
+    }
+    Ok(())
+}
 
 /// CUDA-Graph holder for a single Mamba-1 training step (bf16).
 pub struct GpuMambaTrainingStepGraph {
@@ -202,6 +243,19 @@ impl GpuMambaTrainingStepGraph {
                 grads,
             )?;
             train_w.sync_master_to_compute(ctx)?;
+            // Recompute a_neg = -exp(a_log) into BOTH a_neg_all buffers
+            // used by forward and backward. Without these launches baked
+            // into the captured body the graph replays a stale A-matrix
+            // forever — a_log moves per AdamW step but the SSM kernel
+            // reads the initial a_neg values until re-capture.
+            recompute_a_neg_captured(
+                ctx,
+                &train_w.master.layers,
+                a_neg_all,
+                &state.a_neg_all,
+                cfg.d_inner(),
+                cfg.d_state,
+            )?;
             Ok(())
         })?;
 
@@ -371,6 +425,7 @@ impl GpuMambaF32TrainingStepGraph {
     #[allow(clippy::too_many_arguments)]
     pub fn capture(
         ctx: &GpuCtx,
+        cfg: &crate::config::MambaConfig,
         weights: &mut GpuMambaTrainWeights,
         adam: &GpuAdamW,
         bias: &AdamWBiasFactors,
@@ -399,6 +454,7 @@ impl GpuMambaF32TrainingStepGraph {
         let snap_input_proj = weights.input_proj_w.cached_ptr();
         let snap_norm_f = weights.norm_f_weight.cached_ptr();
 
+        let cfg_local = *cfg;
         let graph = capture_into_graph(&ctx.stream, || {
             grads.zero(&ctx.stream)?;
             gpu_forward_mamba_backbone(ctx, temporal, acts, weights, mamba_input, state, scratch)?;
@@ -410,6 +466,17 @@ impl GpuMambaF32TrainingStepGraph {
                 bias.ptr(),
                 weights,
                 grads,
+            )?;
+            // Recompute a_neg after AdamW — see mixed graph above for
+            // rationale. Without this the f32 SSM runs on a stale A-matrix
+            // across every replay.
+            recompute_a_neg_captured(
+                ctx,
+                &weights.layers,
+                a_neg_all,
+                &state.a_neg_all,
+                cfg_local.d_inner(),
+                cfg_local.d_state,
             )?;
             Ok(())
         })?;
