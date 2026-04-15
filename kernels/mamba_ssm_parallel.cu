@@ -736,7 +736,7 @@ ssm_parallel_scan_fwd_##SUFFIX(                                               \
                 int t = chunk_start + s;                                      \
                 smem_stage[s] = (t < T)                                       \
                     ? B[bid * T * d_state + t * d_state + n]                  \
-                    : T_ACT(FROM_F(0.0f));                                    \
+                    : FROM_F(0.0f);                                           \
             }                                                                 \
             __syncthreads();                                                  \
             float thread_a[NITEMS];                                           \
@@ -790,7 +790,7 @@ ssm_parallel_scan_fwd_##SUFFIX(                                               \
                 int t = chunk_start + s;                                      \
                 smem_stage[s] = (t < T)                                       \
                     ? C[bid * T * d_state + t * d_state + n]                  \
-                    : T_ACT(FROM_F(0.0f));                                    \
+                    : FROM_F(0.0f);                                           \
             }                                                                 \
             __syncthreads();                                                  \
                                                              \
