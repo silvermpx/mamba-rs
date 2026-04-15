@@ -1456,7 +1456,7 @@ DEFINE_M3_PREPROCESS_CHUNKS(bf16, __nv_bfloat16, from_f_bf16)
 DEFINE_M3_PREPROCESS_CHUNKS(f16,  __half,        from_f_f16)
 
 #define DEFINE_M3_CHUNK_STATE_FWD(SUFFIX, T_ACT, FROM_F)                      \
-extern "C" __global__ void                                                    \
+extern "C" __global__ __launch_bounds__(32, 4) void                           \
 m3_chunk_state_fwd_##SUFFIX(                                                  \
     float* __restrict__ states_out,                                           \
     const T_ACT* __restrict__ x,                                              \
@@ -1537,7 +1537,7 @@ DEFINE_M3_WRITEBACK_PARALLEL_STATES(bf16, __nv_bfloat16, from_f_bf16)
 DEFINE_M3_WRITEBACK_PARALLEL_STATES(f16,  __half,        from_f_f16)
 
 #define DEFINE_M3_CHUNK_SCAN_FWD(SUFFIX, T_ACT, FROM_F)                       \
-extern "C" __global__ void                                                    \
+extern "C" __global__ __launch_bounds__(32, 4) void                           \
 m3_chunk_scan_fwd_##SUFFIX(                                                   \
     T_ACT* __restrict__ y_out,                                                \
     const T_ACT* __restrict__ x,                                              \
@@ -1614,7 +1614,7 @@ DEFINE_M3_CHUNK_SCAN_FWD(f16,  __half,        from_f_f16)
 // ============================================================================
 
 #define DEFINE_M3_CHUNK_SCAN_BWD(SUFFIX, T_ACT, FROM_F)                       \
-extern "C" __global__ void                                                    \
+extern "C" __global__ __launch_bounds__(32, 4) void                           \
 m3_chunk_scan_bwd_##SUFFIX(                                                   \
     float* __restrict__ d_x,                                                  \
     float* __restrict__ d_Q,                                                  \
@@ -1743,7 +1743,7 @@ DEFINE_M3_CHUNK_SCAN_BWD(bf16, __nv_bfloat16, from_f_bf16)
 DEFINE_M3_CHUNK_SCAN_BWD(f16,  __half,        from_f_f16)
 
 #define DEFINE_M3_CHUNK_STATE_BWD(SUFFIX, T_ACT, FROM_F)                      \
-extern "C" __global__ void                                                    \
+extern "C" __global__ __launch_bounds__(32, 4) void                           \
 m3_chunk_state_bwd_##SUFFIX(                                                  \
     float* __restrict__ d_x,                                                  \
     float* __restrict__ d_K_scaled,                                           \
@@ -1817,8 +1817,11 @@ DEFINE_M3_CHUNK_STATE_BWD(f16,  __half,        from_f_f16)
 //   - m3_final_grads (combines f32 dADT + dDT + dDT_angle into final grads)
 // ============================================================================
 
+// __launch_bounds__: hd ≤ 32 per config (block_dim=hd), pin to 4 blocks/SM
+// to keep the 64-element register arrays from spilling to local memory under
+// nvcc's heuristics (audit Agent 5 M1).
 #define DEFINE_M3_DQKV(SUFFIX, T_ACT, FROM_F)                                 \
-extern "C" __global__ void                                                    \
+extern "C" __global__ __launch_bounds__(32, 4) void                           \
 m3_dqkv_##SUFFIX(                                                             \
     float* __restrict__ dQ_mid,                                               \
     float* __restrict__ dK_mid,                                               \
@@ -2063,8 +2066,10 @@ m3_dqkv_##SUFFIX(                                                             \
 DEFINE_M3_DQKV(bf16, __nv_bfloat16, from_f_bf16)
 DEFINE_M3_DQKV(f16,  __half,        from_f_f16)
 
+// __launch_bounds__: block_dim=CS ≤ 64. 6× float[64] register arrays per
+// thread risk spilling under nvcc heuristics — pin to 4 blocks/SM.
 #define DEFINE_M3_DQKTHETA(SUFFIX, T_ACT, FROM_F)                             \
-extern "C" __global__ void                                                    \
+extern "C" __global__ __launch_bounds__(64, 4) void                           \
 m3_dqktheta_##SUFFIX(                                                         \
     float* __restrict__ dQ_pre,                                               \
     float* __restrict__ dK_pre,                                               \
