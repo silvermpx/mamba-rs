@@ -163,6 +163,15 @@ impl MambaLM {
         })
     }
 
+    /// Last computed logits for batch slot `b` (MambaLM is single-batch,
+    /// so the `b` parameter exists only for API symmetry with
+    /// `GpuMambaLM::last_logits`). Valid after the last `generate` /
+    /// `generate_streaming` call; `b` must be 0.
+    pub fn last_logits(&self, b: usize) -> &[f32] {
+        assert_eq!(b, 0, "MambaLM is single-batch");
+        &self.logits
+    }
+
     pub fn generate(&mut self, prompt: &[u32], params: &SampleParams) -> Vec<u32> {
         let mut tokens = Vec::with_capacity(params.max_tokens);
         self.generate_streaming(prompt, params, |tok, _| {
