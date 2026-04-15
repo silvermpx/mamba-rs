@@ -84,6 +84,107 @@ fn m1_trainer_bf16_smoke() {
 }
 
 #[test]
+fn m1_trainer_f16_smoke_eager_with_loss_scaler() {
+    use mamba_rs::config::MambaConfig;
+    use mamba_rs::mamba_ssm::gpu::trainer::MambaTrainer;
+    use mamba_rs::weights::MambaWeights;
+
+    let cfg = MambaConfig {
+        d_model: 32,
+        n_layers: 1,
+        d_state: 8,
+        d_conv: 4,
+        expand: 2,
+        scan_mode: mamba_rs::config::ScanMode::Sequential,
+    };
+    let input_dim = cfg.d_model;
+    let batch = 1;
+    let seq_len = 4;
+    let n = batch * seq_len * input_dim;
+
+    let mut cpu = MambaWeights::init(&cfg, input_dim, 0xF16_C0FF);
+    cpu.input_proj_w.clear();
+    cpu.input_proj_b.clear();
+    for lw in cpu.layers.iter_mut() {
+        lw.a_neg = lw.a_log.iter().map(|&v| -v.exp()).collect();
+    }
+
+    let mut trainer =
+        MambaTrainer::new_with_dtype(0, &cpu, cfg, input_dim, batch, seq_len, WeightDtype::F16)
+            .expect("construct f16");
+    assert_eq!(trainer.dtype(), WeightDtype::F16);
+
+    // f16 must report loss_scale + overflow flag every step.
+    for s in 0..5 {
+        let m = trainer.step(&det(n, 0xA0 + s), &det(n, 0xB0 + s)).unwrap();
+        assert!(!m.graph_replayed, "f16 must run eager (no graph)");
+        assert!(m.loss_scale.is_some(), "f16 must report loss_scale");
+        assert!(
+            m.overflow_skipped.is_some(),
+            "f16 must report overflow_skipped"
+        );
+    }
+
+    // capture_graph must reject f16 with a clear error.
+    let err = trainer.capture_graph().unwrap_err();
+    assert!(
+        err.contains("f16 training cannot use a captured graph"),
+        "wrong error: {err}"
+    );
+
+    let snap = trainer.snapshot_master().unwrap();
+    assert!(snap.layers[0].in_proj_w.iter().all(|v| v.is_finite()));
+}
+
+#[test]
+fn m3_trainer_f16_smoke_eager_with_loss_scaler() {
+    use mamba_rs::mamba3_siso::config::Mamba3Config;
+    use mamba_rs::mamba3_siso::gpu::trainer::Mamba3Trainer;
+    use mamba_rs::mamba3_siso::weights::Mamba3Weights;
+
+    let cfg = Mamba3Config {
+        d_model: 32,
+        d_state: 8,
+        expand: 2,
+        headdim: 8,
+        ngroups: 1,
+        n_layers: 1,
+        rope_fraction: 0.5,
+        a_floor: 0.0625,
+        is_outproj_norm: true,
+    };
+    let input_dim = cfg.d_model;
+    let batch = 1;
+    let seq_len = 64;
+    let n = batch * seq_len * input_dim;
+
+    let mut cpu = Mamba3Weights::init(&cfg, input_dim, 0x000F_16DE);
+    cpu.input_proj_w.clear();
+    cpu.input_proj_b.clear();
+
+    let mut trainer =
+        Mamba3Trainer::new_with_dtype(0, &cpu, cfg, input_dim, batch, seq_len, WeightDtype::F16)
+            .expect("construct M3 f16");
+    assert_eq!(trainer.dtype(), WeightDtype::F16);
+
+    for s in 0..5 {
+        let m = trainer.step(&det(n, 0xE0 + s), &det(n, 0xF0 + s)).unwrap();
+        assert!(!m.graph_replayed);
+        assert!(m.loss_scale.is_some());
+        assert!(m.overflow_skipped.is_some());
+    }
+
+    let err = trainer.capture_graph().unwrap_err();
+    assert!(
+        err.contains("f16 training cannot use a captured graph"),
+        "{err}"
+    );
+
+    let snap = trainer.snapshot_master().unwrap();
+    assert!(snap.layers[0].in_proj_w.iter().all(|v| v.is_finite()));
+}
+
+#[test]
 fn m1_trainer_f32_smoke() {
     use mamba_rs::config::MambaConfig;
     use mamba_rs::mamba_ssm::gpu::trainer::MambaTrainer;
@@ -114,9 +215,7 @@ fn m1_trainer_f32_smoke() {
     assert_eq!(trainer.dtype(), WeightDtype::F32);
 
     for s in 0..2 {
-        let m = trainer
-            .step(&det(n, 0xA0 + s), &det(n, 0xB0 + s))
-            .unwrap();
+        let m = trainer.step(&det(n, 0xA0 + s), &det(n, 0xB0 + s)).unwrap();
         assert!(!m.graph_replayed);
     }
     trainer.capture_graph().unwrap();
@@ -211,7 +310,13 @@ fn m3_trainer_f32_smoke() {
     // f32 M3 forward needs eye(dm) input_proj.
     let mut cpu = Mamba3Weights::init(&cfg, input_dim, 0x000F_3F32);
     cpu.input_proj_w = (0..input_dim * cfg.d_model)
-        .map(|i| if i / cfg.d_model == i % cfg.d_model { 1.0 } else { 0.0 })
+        .map(|i| {
+            if i / cfg.d_model == i % cfg.d_model {
+                1.0
+            } else {
+                0.0
+            }
+        })
         .collect();
     cpu.input_proj_b = vec![0.0; cfg.d_model];
 

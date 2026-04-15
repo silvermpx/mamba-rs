@@ -54,6 +54,9 @@ use crate::mamba_ssm::gpu::forward::{
 use crate::mamba_ssm::gpu::forward_mixed::{
     GpuMambaBackboneMixedActs, GpuMambaMixedTrainScratch, gpu_forward_mamba_backbone_train_mixed,
 };
+use crate::mamba_ssm::gpu::loss_scaler::{
+    DynamicLossScaler, OverflowFlag, check_inf_nan_gpu, scale_grads_gpu,
+};
 use crate::mamba_ssm::gpu::training_graph::{
     GpuMambaF32TrainingStepGraph, GpuMambaTrainingStepGraph,
 };
@@ -69,6 +72,24 @@ pub struct StepMetrics {
     /// Whether the step was executed via captured-graph replay (true) or
     /// the eager kernel-by-kernel path (false).
     pub graph_replayed: bool,
+    /// `Some(scale)` when the f16 loss-scaler is active. `None` for bf16 /
+    /// f32 where no scaling is applied.
+    pub loss_scale: Option<f32>,
+    /// `Some(true)` if the f16 loss-scaler detected an inf/nan in the
+    /// grad arena and the optimizer step was skipped. `None` for bf16/f32.
+    pub overflow_skipped: Option<bool>,
+}
+
+impl StepMetrics {
+    /// Convenience constructor for paths without loss-scaler activity.
+    pub fn plain(step: u64, graph_replayed: bool) -> Self {
+        Self {
+            step,
+            graph_replayed,
+            loss_scale: None,
+            overflow_skipped: None,
+        }
+    }
 }
 
 /// Internal precision-dispatch enum. Hidden behind [`MambaTrainer`] so the
@@ -98,7 +119,15 @@ impl MambaTrainer {
         dtype: WeightDtype,
     ) -> Result<Self, String> {
         Self::new_full(
-            gpu_ordinal, cpu_weights, cfg, input_dim, batch, seq_len, dtype, 1e-3, 1e-2,
+            gpu_ordinal,
+            cpu_weights,
+            cfg,
+            input_dim,
+            batch,
+            seq_len,
+            dtype,
+            1e-3,
+            1e-2,
         )
     }
 
@@ -125,23 +154,18 @@ impl MambaTrainer {
                 lr,
                 weight_decay,
             )?)),
-            WeightDtype::Bf16 => TrainerInner::Mixed(Box::new(MambaTrainerMixed::new_full(
-                gpu_ordinal,
-                cpu_weights,
-                cfg,
-                input_dim,
-                batch,
-                seq_len,
-                dtype,
-                lr,
-                weight_decay,
-            )?)),
-            WeightDtype::F16 => {
-                return Err(
-                    "f16 training not yet supported by MambaTrainer (needs in-graph overflow \
-                     check) — use Bf16 mixed or F32 for now"
-                        .into(),
-                );
+            WeightDtype::Bf16 | WeightDtype::F16 => {
+                TrainerInner::Mixed(Box::new(MambaTrainerMixed::new_full(
+                    gpu_ordinal,
+                    cpu_weights,
+                    cfg,
+                    input_dim,
+                    batch,
+                    seq_len,
+                    dtype,
+                    lr,
+                    weight_decay,
+                )?))
             }
         };
         Ok(Self { inner })
@@ -239,7 +263,19 @@ pub struct MambaTrainerMixed {
     d_temporal: GpuBuffer,
 
     // Lazily-populated CUDA Graph. None → eager path; Some → replayed.
+    // Always None for f16 (loss-scaler overflow check requires CPU readback,
+    // which breaks graph capture).
     graph: Option<GpuMambaTrainingStepGraph>,
+
+    // f16 AMP loss scaler — populated for `WeightDtype::F16`, None otherwise.
+    // When present, every step scales d_temporal by `scaler.scale()` before
+    // backward, then checks the grad arena for inf/nan and either unscales
+    // and runs AdamW or skips the step and backs off the scale.
+    scaler: Option<DynamicLossScaler>,
+    overflow_flag: Option<OverflowFlag>,
+    /// Persistent device buffer for the scaled d_temporal (kept here so its
+    /// pointer is stable across steps).
+    d_temporal_scaled: Option<GpuBuffer>,
 }
 
 impl MambaTrainerMixed {
@@ -256,8 +292,8 @@ impl MambaTrainerMixed {
         weight_decay: f32,
     ) -> Result<Self, String> {
         assert!(
-            matches!(dtype, WeightDtype::Bf16),
-            "MambaTrainerMixed currently supports bf16 only (f16 planned via Step 22)"
+            matches!(dtype, WeightDtype::Bf16 | WeightDtype::F16),
+            "MambaTrainerMixed accepts Bf16 or F16; got {dtype:?}"
         );
 
         let device = GpuDevice::new(gpu_ordinal)?;
@@ -312,6 +348,18 @@ impl MambaTrainerMixed {
             .with_weight_decay(weight_decay);
         let bias = AdamWBiasFactors::new(&ctx.stream)?;
 
+        // f16 needs the dynamic loss scaler + a separate scratch buffer for
+        // the scaled d_temporal (so the original caller-provided values stay
+        // untouched). bf16 has the same dynamic range as f32 and skips both.
+        let (scaler, overflow_flag, d_temporal_scaled) = if matches!(dtype, WeightDtype::F16) {
+            let s = DynamicLossScaler::new();
+            let f = OverflowFlag::new(&ctx.stream)?;
+            let scaled = GpuBuffer::zeros(&ctx.stream, batch * seq_len * cfg.d_model)?;
+            (Some(s), Some(f), Some(scaled))
+        } else {
+            (None, None, None)
+        };
+
         ctx.stream
             .synchronize()
             .map_err(|e| format!("sync: {e:?}"))?;
@@ -333,6 +381,9 @@ impl MambaTrainerMixed {
             mamba_input,
             d_temporal,
             graph: None,
+            scaler,
+            overflow_flag,
+            d_temporal_scaled,
         })
     }
 
@@ -369,6 +420,13 @@ impl MambaTrainerMixed {
     /// warmup [`Self::step`] so cuBLAS has selected its kernels and lazy
     /// resources have settled.
     pub fn capture_graph(&mut self) -> Result<(), String> {
+        if matches!(self.dtype, WeightDtype::F16) {
+            return Err(
+                "f16 training cannot use a captured graph (overflow check requires CPU \
+                 readback). Step 22 will add a device-side skip-on-overflow kernel."
+                    .into(),
+            );
+        }
         // Make sure the bias buffer holds something finite — capture_into_graph
         // will record the AdamW kernel reading from it. Real values are
         // overwritten per step by `step()`.
@@ -394,10 +452,11 @@ impl MambaTrainerMixed {
         Ok(())
     }
 
-    /// Run one training step. Uploads `input` (`[batch * seq_len * input_dim]`)
-    /// and `d_temporal` (`[batch * seq_len * d_model]`), advances the Adam
-    /// step counter, and executes forward + backward + AdamW + master-to-
-    /// compute sync. Uses the captured graph if available.
+    /// Run one training step. For bf16 this is the existing
+    /// forward+backward+AdamW+sync path (graph-accelerated when captured).
+    /// For f16 the path runs eager only and goes through the dynamic loss
+    /// scaler (scale d_temporal → backward → check overflow → unscale +
+    /// step OR skip + back off).
     pub fn step(&mut self, input: &[f32], d_temporal: &[f32]) -> Result<StepMetrics, String> {
         assert_eq!(
             input.len(),
@@ -414,15 +473,16 @@ impl MambaTrainerMixed {
             d_temporal.len()
         );
 
-        // 1. Upload per-step data (outside any graph).
+        if matches!(self.dtype, WeightDtype::F16) {
+            return self.step_f16(input, d_temporal);
+        }
+
+        // bf16 path: existing graph / eager dispatch.
         self.mamba_input.upload(&self.ctx.stream, input)?;
         self.d_temporal.upload(&self.ctx.stream, d_temporal)?;
-
-        // 2. Advance Adam step counter + write fresh bias factors.
         let (step, bc1, bc2) = self.adam.advance();
         self.bias.write(&self.ctx.stream, bc1, bc2)?;
 
-        // 3. Run training step — graph replay when captured, eager fallback otherwise.
         let replayed = if let Some(ref g) = self.graph {
             g.replay(
                 &self.ctx,
@@ -441,9 +501,88 @@ impl MambaTrainerMixed {
             false
         };
 
+        Ok(StepMetrics::plain(step, replayed))
+    }
+
+    /// f16 step (eager, no graph). Mirrors PyTorch GradScaler protocol:
+    ///   1. Upload d_temporal scaled by `scaler.scale()`
+    ///   2. forward + backward → grads (also scaled)
+    ///   3. check_inf_nan over the grad arena, CPU readback of the flag
+    ///   4. clean: unscale grads (`*= 1/scale`), AdamW + sync, scaler.update(false)
+    ///      overflow: skip AdamW + sync, scaler.update(true) → scale halves
+    fn step_f16(&mut self, input: &[f32], d_temporal: &[f32]) -> Result<StepMetrics, String> {
+        let scale = self.scaler.as_ref().expect("f16 scaler").scale();
+
+        // 1. Upload input + scaled d_temporal.
+        self.mamba_input.upload(&self.ctx.stream, input)?;
+        // d_temporal_scaled = d_temporal * scale (CPU-side multiply — small
+        // dN buffer, < 1ms even at max shapes; avoids an extra GPU kernel).
+        let scaled: Vec<f32> = d_temporal.iter().map(|v| v * scale).collect();
+        let dt_scaled = self.d_temporal_scaled.as_mut().expect("f16 dt_scaled");
+        dt_scaled.upload(&self.ctx.stream, &scaled)?;
+
+        // 2. forward + backward into self.grads (which will be the scaled
+        //    gradient arena).
+        self.grads.zero(&self.ctx.stream)?;
+        gpu_forward_mamba_backbone_train_mixed(
+            &self.ctx,
+            &mut self.acts,
+            &self.weights,
+            &self.mamba_input,
+            &mut self.state,
+            &mut self.scratch,
+        )?;
+        gpu_backward_mamba_backbone_mixed(
+            &self.ctx,
+            dt_scaled,
+            &self.grads,
+            &self.acts,
+            &self.weights.compute,
+            &self.a_neg_all,
+            &mut self.scratch,
+        )?;
+
+        // 3. Check for inf/nan in the grad arena.
+        let flag = self.overflow_flag.as_mut().expect("f16 overflow flag");
+        flag.zero(&self.ctx.stream)?;
+        check_inf_nan_gpu(&self.ctx, &self.ctx.kernels, flag, &self.grads.flat)?;
+        let overflow = flag.read(&self.ctx.stream)? != 0;
+
+        // 4. Either unscale + step or skip + back off.
+        let step;
+        if overflow {
+            // Skip optimizer entirely. Adam step counter is NOT bumped — Adam
+            // bias correction must reflect actual updates, not skipped ones
+            // (matches PyTorch GradScaler.step semantics).
+            step = self.adam.step;
+            self.scaler.as_mut().expect("f16 scaler").update(true);
+        } else {
+            scale_grads_gpu(
+                &self.ctx,
+                &self.ctx.kernels,
+                &mut self.grads.flat,
+                1.0 / scale,
+            )?;
+            let (s, bc1, bc2) = self.adam.advance();
+            step = s;
+            self.bias.write(&self.ctx.stream, bc1, bc2)?;
+            step_m1_capturable(
+                &self.ctx,
+                &self.ctx.kernels.adamw_step_f32_capturable,
+                &self.adam,
+                self.bias.ptr(),
+                &mut self.weights.master,
+                &self.grads,
+            )?;
+            self.weights.sync_master_to_compute(&self.ctx)?;
+            self.scaler.as_mut().expect("f16 scaler").update(false);
+        }
+
         Ok(StepMetrics {
             step,
-            graph_replayed: replayed,
+            graph_replayed: false,
+            loss_scale: Some(scale),
+            overflow_skipped: Some(overflow),
         })
     }
 
@@ -523,10 +662,7 @@ impl MambaTrainerMixed {
             &self.grads,
         )?;
         self.weights.sync_master_to_compute(&self.ctx)?;
-        Ok(StepMetrics {
-            step,
-            graph_replayed: false,
-        })
+        Ok(StepMetrics::plain(step, false))
     }
 
     /// Download the master weights to a CPU-side `MambaWeights` for
@@ -734,10 +870,7 @@ impl MambaTrainerF32 {
             false
         };
 
-        Ok(StepMetrics {
-            step,
-            graph_replayed: replayed,
-        })
+        Ok(StepMetrics::plain(step, replayed))
     }
 
     fn step_eager(&mut self) -> Result<(), String> {
