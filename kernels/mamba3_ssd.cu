@@ -77,6 +77,10 @@ extern "C" __global__ void m3_step_fwd(
 
     int d_inner = nh * hd;
 
+    // Warp-reduce/broadcast mask: only `hd` lanes launched (block_dim=hd, hd≤32).
+    // Hardcoded 0xFFFFFFFF = UB per CUDA Programming Guide §B.15.1.
+    unsigned warp_mask = (hd >= 32) ? 0xFFFFFFFFu : ((1u << hd) - 1u);
+
     // Load h_local into registers
     float h_local[64];
     if (ds > 64) return;
@@ -87,20 +91,20 @@ extern "C" __global__ void m3_step_fwd(
     // O1: alpha, beta, gamma broadcast from p=0
     float alpha_h = 0.0f;
     if (p == 0) alpha_h = alpha[b * nh + h];
-    alpha_h = __shfl_sync(0xFFFFFFFF, alpha_h, 0, hd);
+    alpha_h = __shfl_sync(warp_mask, alpha_h, 0, hd);
 
     float beta_h = 0.0f;
     if (p == 0) beta_h = beta[b * nh + h];
-    beta_h = __shfl_sync(0xFFFFFFFF, beta_h, 0, hd);
+    beta_h = __shfl_sync(warp_mask, beta_h, 0, hd);
 
     float gamma_h = 0.0f;
     if (p == 0) gamma_h = gamma[b * nh + h];
-    gamma_h = __shfl_sync(0xFFFFFFFF, gamma_h, 0, hd);
+    gamma_h = __shfl_sync(warp_mask, gamma_h, 0, hd);
 
     // O1: D[h] broadcast from p=0
     float d_skip = 0.0f;
     if (p == 0) d_skip = D[h];
-    d_skip = __shfl_sync(0xFFFFFFFF, d_skip, 0, hd);
+    d_skip = __shfl_sync(warp_mask, d_skip, 0, hd);
 
     // Per-thread unique values
     float x_val = x[b * d_inner + h * hd + p];
@@ -116,9 +120,9 @@ extern "C" __global__ void m3_step_fwd(
             kp_n = k_state[b * nh * ds + h * ds + n];
             qc_n = q_cur[b * nh * ds + h * ds + n];
         }
-        kc_n = __shfl_sync(0xFFFFFFFF, kc_n, 0, hd);
-        kp_n = __shfl_sync(0xFFFFFFFF, kp_n, 0, hd);
-        qc_n = __shfl_sync(0xFFFFFFFF, qc_n, 0, hd);
+        kc_n = __shfl_sync(warp_mask, kc_n, 0, hd);
+        kp_n = __shfl_sync(warp_mask, kp_n, 0, hd);
+        qc_n = __shfl_sync(warp_mask, qc_n, 0, hd);
 
         // Trapezoidal recurrence
         h_local[n] = alpha_h * h_local[n] + beta_h * v_prev * kp_n + gamma_h * x_val * kc_n;
@@ -162,22 +166,23 @@ extern "C" __global__ void m3_step_fwd_##SUFFIX(                             \
     int p = threadIdx.x;                                                     \
     if (b >= batch || h >= nh || p >= hd) return;                            \
     int d_inner = nh * hd;                                                   \
+    unsigned warp_mask = (hd >= 32) ? 0xFFFFFFFFu : ((1u << hd) - 1u);       \
     float h_local[64];                                                       \
     if (ds > 64) return;                                                     \
     int h_base = (b * nh * hd + h * hd + p) * ds;                            \
     for (int n = 0; n < ds; n++) h_local[n] = ssm_state[h_base + n];         \
     float alpha_h = 0.0f;                                                    \
     if (p == 0) alpha_h = alpha[b * nh + h];                                 \
-    alpha_h = __shfl_sync(0xFFFFFFFF, alpha_h, 0, hd);                       \
+    alpha_h = __shfl_sync(warp_mask, alpha_h, 0, hd);                       \
     float beta_h = 0.0f;                                                     \
     if (p == 0) beta_h = beta[b * nh + h];                                   \
-    beta_h = __shfl_sync(0xFFFFFFFF, beta_h, 0, hd);                         \
+    beta_h = __shfl_sync(warp_mask, beta_h, 0, hd);                         \
     float gamma_h = 0.0f;                                                    \
     if (p == 0) gamma_h = gamma[b * nh + h];                                 \
-    gamma_h = __shfl_sync(0xFFFFFFFF, gamma_h, 0, hd);                       \
+    gamma_h = __shfl_sync(warp_mask, gamma_h, 0, hd);                       \
     float d_skip = 0.0f;                                                     \
     if (p == 0) d_skip = D[h];                                               \
-    d_skip = __shfl_sync(0xFFFFFFFF, d_skip, 0, hd);                         \
+    d_skip = __shfl_sync(warp_mask, d_skip, 0, hd);                         \
     float x_val = to_f(x[b * d_inner + h * hd + p]);                         \
     float v_prev = v_state[b * nh * hd + h * hd + p];                        \
     float y_val = d_skip * x_val;                                            \
@@ -188,9 +193,9 @@ extern "C" __global__ void m3_step_fwd_##SUFFIX(                             \
             kp_n = k_state[b * nh * ds + h * ds + n];                        \
             qc_n = to_f(q_cur[b * nh * ds + h * ds + n]);                    \
         }                                                                    \
-        kc_n = __shfl_sync(0xFFFFFFFF, kc_n, 0, hd);                         \
-        kp_n = __shfl_sync(0xFFFFFFFF, kp_n, 0, hd);                         \
-        qc_n = __shfl_sync(0xFFFFFFFF, qc_n, 0, hd);                         \
+        kc_n = __shfl_sync(warp_mask, kc_n, 0, hd);                         \
+        kp_n = __shfl_sync(warp_mask, kp_n, 0, hd);                         \
+        qc_n = __shfl_sync(warp_mask, qc_n, 0, hd);                         \
         h_local[n] = alpha_h * h_local[n] + beta_h * v_prev * kp_n +         \
                      gamma_h * x_val * kc_n;                                 \
         y_val += h_local[n] * qc_n;                                          \
@@ -250,6 +255,9 @@ extern "C" __global__ void m3_burnin_fwd(
     int d_inner = nh * hd;
     int nhd_ds = d_inner * ds;
 
+    // Warp-reduce/broadcast mask: only `hd` lanes launched (block_dim=hd, hd≤32).
+    unsigned warp_mask = (hd >= 32) ? 0xFFFFFFFFu : ((1u << hd) - 1u);
+
     // Load h_local from persistent state into registers
     float h_local[64];
     if (ds > 64) return;
@@ -260,7 +268,7 @@ extern "C" __global__ void m3_burnin_fwd(
     // O1: D[h] broadcast once before T loop
     float d_skip = 0.0f;
     if (p == 0) d_skip = D[h];
-    d_skip = __shfl_sync(0xFFFFFFFF, d_skip, 0, hd);
+    d_skip = __shfl_sync(warp_mask, d_skip, 0, hd);
 
     // Save initial h at time 0 (O5 transposed layout)
     for (int n = 0; n < ds; n++) {
@@ -281,15 +289,15 @@ extern "C" __global__ void m3_burnin_fwd(
         // O1: alpha, beta, gamma broadcast from p=0
         float alpha_h = 0.0f;
         if (p == 0) alpha_h = alpha_flat[(b * T + t) * nh + h];
-        alpha_h = __shfl_sync(0xFFFFFFFF, alpha_h, 0, hd);
+        alpha_h = __shfl_sync(warp_mask, alpha_h, 0, hd);
 
         float beta_h = 0.0f;
         if (p == 0) beta_h = beta_flat[(b * T + t) * nh + h];
-        beta_h = __shfl_sync(0xFFFFFFFF, beta_h, 0, hd);
+        beta_h = __shfl_sync(warp_mask, beta_h, 0, hd);
 
         float gamma_h = 0.0f;
         if (p == 0) gamma_h = gamma_flat[(b * T + t) * nh + h];
-        gamma_h = __shfl_sync(0xFFFFFFFF, gamma_h, 0, hd);
+        gamma_h = __shfl_sync(warp_mask, gamma_h, 0, hd);
 
         // Per-thread unique values
         int x_idx = (b * T + t) * d_inner + h * hd + p;
@@ -306,9 +314,9 @@ extern "C" __global__ void m3_burnin_fwd(
                 kp_n = k_state[b * nh * ds + h * ds + n];
                 qc_n = q_flat[(b * T + t) * nh * ds + h * ds + n];
             }
-            kc_n = __shfl_sync(0xFFFFFFFF, kc_n, 0, hd);
-            kp_n = __shfl_sync(0xFFFFFFFF, kp_n, 0, hd);
-            qc_n = __shfl_sync(0xFFFFFFFF, qc_n, 0, hd);
+            kc_n = __shfl_sync(warp_mask, kc_n, 0, hd);
+            kp_n = __shfl_sync(warp_mask, kp_n, 0, hd);
+            qc_n = __shfl_sync(warp_mask, qc_n, 0, hd);
 
             // Trapezoidal recurrence
             h_local[n] = alpha_h * h_local[n] + beta_h * v_prev * kp_n + gamma_h * x_val * kc_n;
@@ -371,13 +379,14 @@ extern "C" __global__ void m3_burnin_fwd_##SUFFIX(                           \
     if (b >= batch || h >= nh || p >= hd) return;                            \
     int d_inner = nh * hd;                                                   \
     int nhd_ds = d_inner * ds;                                               \
+    unsigned warp_mask = (hd >= 32) ? 0xFFFFFFFFu : ((1u << hd) - 1u);       \
     float h_local[64];                                                       \
     if (ds > 64) return;                                                     \
     int h_base = (b * nh * hd + h * hd + p) * ds;                            \
     for (int n = 0; n < ds; n++) h_local[n] = ssm_state[h_base + n];         \
     float d_skip = 0.0f;                                                     \
     if (p == 0) d_skip = D[h];                                               \
-    d_skip = __shfl_sync(0xFFFFFFFF, d_skip, 0, hd);                         \
+    d_skip = __shfl_sync(warp_mask, d_skip, 0, hd);                          \
     for (int n = 0; n < ds; n++) {                                           \
         int hs_idx = n * d_inner + h * hd + p;                               \
         h_saved[b * (T + 1) * nhd_ds + hs_idx] = h_local[n];                 \
@@ -396,9 +405,9 @@ extern "C" __global__ void m3_burnin_fwd_##SUFFIX(                           \
             beta_h  = beta_flat[(b * T + t) * nh + h];                       \
             gamma_h = gamma_flat[(b * T + t) * nh + h];                      \
         }                                                                    \
-        alpha_h = __shfl_sync(0xFFFFFFFF, alpha_h, 0, hd);                   \
-        beta_h  = __shfl_sync(0xFFFFFFFF, beta_h,  0, hd);                   \
-        gamma_h = __shfl_sync(0xFFFFFFFF, gamma_h, 0, hd);                   \
+        alpha_h = __shfl_sync(warp_mask, alpha_h, 0, hd);                   \
+        beta_h  = __shfl_sync(warp_mask, beta_h,  0, hd);                    \
+        gamma_h = __shfl_sync(warp_mask, gamma_h, 0, hd);                   \
         int x_idx = (b * T + t) * d_inner + h * hd + p;                      \
         float x_val = to_f(x_flat[x_idx]);                                   \
         float v_prev = v_state[b * nh * hd + h * hd + p];                    \
@@ -410,9 +419,9 @@ extern "C" __global__ void m3_burnin_fwd_##SUFFIX(                           \
                 kp_n = k_state[b * nh * ds + h * ds + n];                    \
                 qc_n = to_f(q_flat[(b * T + t) * nh * ds + h * ds + n]);     \
             }                                                                \
-            kc_n = __shfl_sync(0xFFFFFFFF, kc_n, 0, hd);                     \
-            kp_n = __shfl_sync(0xFFFFFFFF, kp_n, 0, hd);                     \
-            qc_n = __shfl_sync(0xFFFFFFFF, qc_n, 0, hd);                     \
+            kc_n = __shfl_sync(warp_mask, kc_n, 0, hd);                     \
+            kp_n = __shfl_sync(warp_mask, kp_n, 0, hd);                     \
+            qc_n = __shfl_sync(warp_mask, qc_n, 0, hd);                     \
             h_local[n] = alpha_h * h_local[n] + beta_h * v_prev * kp_n       \
                        + gamma_h * x_val * kc_n;                             \
             y_val += h_local[n] * qc_n;                                      \
@@ -465,6 +474,9 @@ extern "C" __global__ void m3_burnin_fwd_nosave(
 
     int d_inner = nh * hd;
 
+    // Warp-reduce/broadcast mask: only `hd` lanes launched (block_dim=hd, hd≤32).
+    unsigned warp_mask = (hd >= 32) ? 0xFFFFFFFFu : ((1u << hd) - 1u);
+
     // Load h_local from persistent state into registers
     float h_local[64];
     if (ds > 64) return;
@@ -475,21 +487,21 @@ extern "C" __global__ void m3_burnin_fwd_nosave(
     // O1: D[h] broadcast once before T loop
     float d_skip = 0.0f;
     if (p == 0) d_skip = D[h];
-    d_skip = __shfl_sync(0xFFFFFFFF, d_skip, 0, hd);
+    d_skip = __shfl_sync(warp_mask, d_skip, 0, hd);
 
     for (int t = 0; t < T; t++) {
         // O1: alpha, beta, gamma broadcast from p=0
         float alpha_h = 0.0f;
         if (p == 0) alpha_h = alpha_flat[(b * T + t) * nh + h];
-        alpha_h = __shfl_sync(0xFFFFFFFF, alpha_h, 0, hd);
+        alpha_h = __shfl_sync(warp_mask, alpha_h, 0, hd);
 
         float beta_h = 0.0f;
         if (p == 0) beta_h = beta_flat[(b * T + t) * nh + h];
-        beta_h = __shfl_sync(0xFFFFFFFF, beta_h, 0, hd);
+        beta_h = __shfl_sync(warp_mask, beta_h, 0, hd);
 
         float gamma_h = 0.0f;
         if (p == 0) gamma_h = gamma_flat[(b * T + t) * nh + h];
-        gamma_h = __shfl_sync(0xFFFFFFFF, gamma_h, 0, hd);
+        gamma_h = __shfl_sync(warp_mask, gamma_h, 0, hd);
 
         // Per-thread unique values
         int x_idx = (b * T + t) * d_inner + h * hd + p;
@@ -506,9 +518,9 @@ extern "C" __global__ void m3_burnin_fwd_nosave(
                 kp_n = k_state[b * nh * ds + h * ds + n];
                 qc_n = q_flat[(b * T + t) * nh * ds + h * ds + n];
             }
-            kc_n = __shfl_sync(0xFFFFFFFF, kc_n, 0, hd);
-            kp_n = __shfl_sync(0xFFFFFFFF, kp_n, 0, hd);
-            qc_n = __shfl_sync(0xFFFFFFFF, qc_n, 0, hd);
+            kc_n = __shfl_sync(warp_mask, kc_n, 0, hd);
+            kp_n = __shfl_sync(warp_mask, kp_n, 0, hd);
+            qc_n = __shfl_sync(warp_mask, qc_n, 0, hd);
 
             // Trapezoidal recurrence
             h_local[n] = alpha_h * h_local[n] + beta_h * v_prev * kp_n + gamma_h * x_val * kc_n;
@@ -642,15 +654,15 @@ extern "C" __global__ void m3_backward_seq(
         // O1: alpha, beta, gamma broadcast from p=0
         float alpha_h = 0.0f;
         if (p == 0) alpha_h = alpha_flat[(b * T + t) * nh + h];
-        alpha_h = __shfl_sync(0xFFFFFFFF, alpha_h, 0, hd);
+        alpha_h = __shfl_sync(warp_mask, alpha_h, 0, hd);
 
         float beta_h = 0.0f;
         if (p == 0) beta_h = beta_flat[(b * T + t) * nh + h];
-        beta_h = __shfl_sync(0xFFFFFFFF, beta_h, 0, hd);
+        beta_h = __shfl_sync(warp_mask, beta_h, 0, hd);
 
         float gamma_h = 0.0f;
         if (p == 0) gamma_h = gamma_flat[(b * T + t) * nh + h];
-        gamma_h = __shfl_sync(0xFFFFFFFF, gamma_h, 0, hd);
+        gamma_h = __shfl_sync(warp_mask, gamma_h, 0, hd);
 
         // Skip connection: d_D accumulation + d_x from D path
         sum_d_D += dy_val * x_val;
@@ -673,9 +685,9 @@ extern "C" __global__ void m3_backward_seq(
                 kp_n = k_prev_saved[(b * T + t) * nh * ds + h * ds + n];
                 qc_n = q_flat[(b * T + t) * nh * ds + h * ds + n];
             }
-            kc_n = __shfl_sync(0xFFFFFFFF, kc_n, 0, hd);
-            kp_n = __shfl_sync(0xFFFFFFFF, kp_n, 0, hd);
-            qc_n = __shfl_sync(0xFFFFFFFF, qc_n, 0, hd);
+            kc_n = __shfl_sync(warp_mask, kc_n, 0, hd);
+            kp_n = __shfl_sync(warp_mask, kp_n, 0, hd);
+            qc_n = __shfl_sync(warp_mask, qc_n, 0, hd);
 
             // O5: coalesced h_saved reads
             float h_prev_n = h_saved[h_b_base + t * nhd_ds + n * d_inner + h * hd + p];
@@ -687,7 +699,7 @@ extern "C" __global__ void m3_backward_seq(
             // d_q[n] = sum_p(d_y[p] * h_curr[p,n]): warp reduce over p
             float d_q_val = dy_val * h_curr_n;
             for (int off = hd / 2; off > 0; off >>= 1)
-                d_q_val += __shfl_down_sync(0xFFFFFFFF, d_q_val, off, hd);
+                d_q_val += __shfl_down_sync(warp_mask, d_q_val, off, hd);
             if (p == 0)
                 atomicAdd(&d_q[(b * T + t) * nh * ds + h * ds + n], d_q_val);
 
@@ -709,7 +721,7 @@ extern "C" __global__ void m3_backward_seq(
             // d_k_prev[n] += dh * beta * v_prev  (sum over p -> warp reduce -> carry)
             float d_kp_val = dh_n * beta_h * v_prev;
             for (int off = hd / 2; off > 0; off >>= 1)
-                d_kp_val += __shfl_down_sync(0xFFFFFFFF, d_kp_val, off, hd);
+                d_kp_val += __shfl_down_sync(warp_mask, d_kp_val, off, hd);
             if (p == 0)
                 d_k_carry[n] += d_kp_val;
 
@@ -719,7 +731,7 @@ extern "C" __global__ void m3_backward_seq(
             // d_k_cur[n] += dh * gamma * x  (sum over p -> warp reduce -> d_k[t])
             float d_kc_val = dh_n * gamma_h * x_val;
             for (int off = hd / 2; off > 0; off >>= 1)
-                d_kc_val += __shfl_down_sync(0xFFFFFFFF, d_kc_val, off, hd);
+                d_kc_val += __shfl_down_sync(warp_mask, d_kc_val, off, hd);
             if (p == 0)
                 atomicAdd(&d_k[(b * T + t) * nh * ds + h * ds + n], d_kc_val);
 
@@ -735,17 +747,17 @@ extern "C" __global__ void m3_backward_seq(
 
         // Warp reduce d_alpha, d_beta, d_gamma over p, then atomicAdd
         for (int off = hd / 2; off > 0; off >>= 1)
-            d_alpha_acc += __shfl_down_sync(0xFFFFFFFF, d_alpha_acc, off, hd);
+            d_alpha_acc += __shfl_down_sync(warp_mask, d_alpha_acc, off, hd);
         if (p == 0)
             atomicAdd(&d_alpha[(b * T + t) * nh + h], d_alpha_acc);
 
         for (int off = hd / 2; off > 0; off >>= 1)
-            d_beta_acc += __shfl_down_sync(0xFFFFFFFF, d_beta_acc, off, hd);
+            d_beta_acc += __shfl_down_sync(warp_mask, d_beta_acc, off, hd);
         if (p == 0)
             atomicAdd(&d_beta[(b * T + t) * nh + h], d_beta_acc);
 
         for (int off = hd / 2; off > 0; off >>= 1)
-            d_gamma_acc += __shfl_down_sync(0xFFFFFFFF, d_gamma_acc, off, hd);
+            d_gamma_acc += __shfl_down_sync(warp_mask, d_gamma_acc, off, hd);
         if (p == 0)
             atomicAdd(&d_gamma[(b * T + t) * nh + h], d_gamma_acc);
     }
