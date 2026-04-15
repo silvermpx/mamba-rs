@@ -411,6 +411,69 @@ fn backbone_grad_parity_f16() {
     backbone_grad_parity(WeightDtype::F16);
 }
 
+/// Multi-layer (n_layers=3) backbone grad parity. Validates that the
+/// per-layer residual stream + d_temporal hand-off across layers is
+/// numerically faithful between f32 oracle and mixed bf16/f16. Single-
+/// layer parity tests above don't exercise inter-layer gradient flow.
+fn backbone_grad_parity_multi_layer(dtype: WeightDtype) {
+    let cfg = MambaConfig {
+        d_model: 32,
+        n_layers: 3,
+        d_state: 8,
+        d_conv: 4,
+        expand: 2,
+        scan_mode: ScanMode::Sequential,
+    };
+    let dims = dims_for(&cfg, 1, 4);
+    let (w_f32, w_mix) = build_weights(&cfg, 0xCAFEBABE);
+
+    let bt = dims.bt();
+    let mamba_input = det_rand(bt * dims.mamba_input_dim, 0xA1);
+    let d_temporal = det_rand(bt * dims.d_model, 0xA2);
+
+    let dev = GpuDevice::new(0).unwrap();
+    let ctx = GpuCtx::new(&dev).unwrap();
+
+    let (dt_ref, grads_ref) = run_f32(&ctx, &w_f32, &cfg, &dims, &mamba_input, &d_temporal);
+    let (dt_typ, grads_typ) =
+        run_mixed(&ctx, &w_mix, &cfg, &dims, dtype, &mamba_input, &d_temporal);
+
+    assert_eq!(grads_ref.len(), grads_typ.len());
+
+    // Multi-layer gradient drift accumulates per-layer; loosen tolerances.
+    let (cos_min, norm_tol) = match dtype {
+        WeightDtype::Bf16 => (0.99_f32, 0.10_f32),
+        WeightDtype::F16 => (0.995_f32, 0.05_f32),
+        WeightDtype::F32 => unreachable!(),
+    };
+
+    eprintln!("backbone_grad_parity_multi_layer (n_layers=3) {dtype:?}:");
+    assert_close("d_temporal", &dt_ref, &dt_typ, cos_min, norm_tol);
+
+    let layout = grad_layout(&cfg, dims.mamba_input_dim);
+    let mut off = 0usize;
+    for (label, len) in layout {
+        let skip = label == "input_proj_w" || label == "input_proj_b";
+        if !skip {
+            let r = &grads_ref[off..off + len];
+            let t = &grads_typ[off..off + len];
+            assert_close(label, r, t, cos_min, norm_tol);
+        }
+        off += len;
+    }
+    assert_eq!(off, grads_ref.len());
+}
+
+#[test]
+fn backbone_grad_parity_multi_layer_bf16() {
+    backbone_grad_parity_multi_layer(WeightDtype::Bf16);
+}
+
+#[test]
+fn backbone_grad_parity_multi_layer_f16() {
+    backbone_grad_parity_multi_layer(WeightDtype::F16);
+}
+
 // ─── Gate 2: finite-difference check (f32 oracle only) ──────────────
 //
 // Finite-difference is fundamentally ill-defined in mixed precision: bf16
