@@ -386,38 +386,16 @@ impl Mamba3GpuInferenceEngine {
         state: &mut Mamba3GpuInferenceState,
         scratch: &mut Mamba3GpuInferenceScratch,
     ) -> Result<(), String> {
-        self.stream
-            .synchronize()
-            .map_err(|e| format!("pre-capture sync: {e:?}"))?;
-
-        self.stream
-            .begin_capture(
-                cudarc::driver::sys::CUstreamCaptureMode::CU_STREAM_CAPTURE_MODE_THREAD_LOCAL,
-            )
-            .map_err(|e| format!("begin_capture: {e:?}"))?;
-
-        let capture_result = self.step_kernels(state, scratch);
-        if capture_result.is_err() {
-            let _ = self.stream.end_capture(
-                cudarc::driver::sys::CUgraphInstantiate_flags::CUDA_GRAPH_INSTANTIATE_FLAG_AUTO_FREE_ON_LAUNCH,
-            );
-            return capture_result;
-        }
-
-        let graph = self.stream
-            .end_capture(
-                cudarc::driver::sys::CUgraphInstantiate_flags::CUDA_GRAPH_INSTANTIATE_FLAG_AUTO_FREE_ON_LAUNCH,
-            )
-            .map_err(|e| format!("end_capture: {e:?}"))?;
-
-        // Pre-upload graph resources for zero first-launch latency
-        if let Some(ref g) = graph {
-            g.upload().map_err(|e| format!("graph upload: {e:?}"))?;
-        }
-
-        self.graph = graph;
-        self.captured_state_ptr = state.ssm_state.cached_ptr();
-        self.captured_scratch_ptr = scratch.gpu_input.cached_ptr();
+        let snap_state = state.ssm_state.cached_ptr();
+        let snap_scratch = scratch.gpu_input.cached_ptr();
+        let stream = self.stream.clone();
+        let graph = crate::mamba_ssm::gpu::graph_capture::capture_into_graph(&stream, || {
+            self.step_kernels(state, scratch)
+        })?;
+        graph.upload().map_err(|e| format!("graph upload: {e:?}"))?;
+        self.graph = Some(graph);
+        self.captured_state_ptr = snap_state;
+        self.captured_scratch_ptr = snap_scratch;
         Ok(())
     }
 
@@ -1458,35 +1436,15 @@ impl Mamba3GpuInferenceMixed {
         state: &mut Mamba3GpuInferenceState,
         scratch: &mut Mamba3GpuInferenceMixedScratch,
     ) -> Result<(), String> {
-        self.engine
-            .stream
-            .synchronize()
-            .map_err(|e| format!("M3 pre-capture sync: {e:?}"))?;
-        self.engine
-            .stream
-            .begin_capture(
-                cudarc::driver::sys::CUstreamCaptureMode::CU_STREAM_CAPTURE_MODE_THREAD_LOCAL,
-            )
-            .map_err(|e| format!("M3 begin_capture mixed: {e:?}"))?;
-        let captured_state_ptr = state.ssm_state.cached_ptr();
-        let captured_scratch_ptr = scratch.gpu_input.cached_ptr();
-        if let Err(e) = self.step_kernels_mixed_native(state, scratch) {
-            let _ = self.engine.stream.end_capture(
-                cudarc::driver::sys::CUgraphInstantiate_flags::CUDA_GRAPH_INSTANTIATE_FLAG_AUTO_FREE_ON_LAUNCH,
-            );
-            return Err(format!("M3 capture body mixed failed: {e}"));
-        }
-        let graph = self
-            .engine
-            .stream
-            .end_capture(
-                cudarc::driver::sys::CUgraphInstantiate_flags::CUDA_GRAPH_INSTANTIATE_FLAG_AUTO_FREE_ON_LAUNCH,
-            )
-            .map_err(|e| format!("M3 end_capture mixed: {e:?}"))?
-            .ok_or("M3: no graph captured (mixed)")?;
+        let snap_state = state.ssm_state.cached_ptr();
+        let snap_scratch = scratch.gpu_input.cached_ptr();
+        let stream = self.engine.stream.clone();
+        let graph = crate::mamba_ssm::gpu::graph_capture::capture_into_graph(&stream, || {
+            self.step_kernels_mixed_native(state, scratch)
+        })?;
         self.graph = Some(graph);
-        self.captured_state_ptr = captured_state_ptr;
-        self.captured_scratch_ptr = captured_scratch_ptr;
+        self.captured_state_ptr = snap_state;
+        self.captured_scratch_ptr = snap_scratch;
         Ok(())
     }
 }

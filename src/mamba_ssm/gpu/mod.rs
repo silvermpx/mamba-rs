@@ -19,11 +19,13 @@ pub mod device;
 pub mod dtype;
 pub mod forward;
 pub mod forward_mixed;
+pub mod graph_capture;
 pub mod inference;
 pub mod kernels;
 pub mod launch;
 pub mod loss_scaler;
 pub mod prefill;
+pub mod training_graph;
 pub mod weights;
 pub mod weights_mixed_train;
 

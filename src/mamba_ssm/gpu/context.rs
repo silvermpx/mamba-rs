@@ -28,6 +28,30 @@ pub struct GpuCtx {
 impl GpuCtx {
     /// Create a GPU context: compile kernels, init cuBLAS with TF32.
     pub fn new(device: &GpuDevice) -> Result<Self, String> {
+        // Disable cudarc's per-slice CudaEvent tracking. Rationale: we
+        // execute every op on a single ctx.stream throughout fwd / bwd /
+        // optimizer, so the multi-stream synchronization events cudarc
+        // would otherwise auto-record per `&CudaSlice` kernel arg
+        // (driver/safe/launch.rs:100) only add overhead — and worse,
+        // they emit cuStreamWaitEvent ops that reference work issued
+        // BEFORE `cuStreamBeginCapture`, breaking CUDA Graph capture
+        // with CUDA_ERROR_STREAM_CAPTURE_ISOLATION ("dependency created
+        // on uncaptured work in another stream"). Inference graphs work
+        // today only because they exclusively use `cached_ptr()` (raw
+        // u64) which bypasses the slice-arg path. Backward + optimizer
+        // hit the slice path, so disabling event tracking is the proper
+        // fix that doesn't require rewriting every kernel call.
+        //
+        // Safety contract (per cudarc::CudaContext::disable_event_tracking):
+        //   1. No slice freed while another stream uses it. ✓ (single stream)
+        //   2. No slice used on another stream before alloc completes.
+        //      ✓ (we sync on ctx.stream after every batch alloc)
+        //   3. No concurrent writes from multiple streams. ✓ (single stream)
+        // All three hold by construction since GpuCtx owns exactly ONE
+        // CudaStream and every op routes through it.
+        unsafe {
+            device.context().disable_event_tracking();
+        }
         let stream = device.fork_stream()?;
         let arch = GpuDevice::nvrtc_arch(device.compute_capability);
         let kernels = MambaKernels::compile(device.context(), arch)?;

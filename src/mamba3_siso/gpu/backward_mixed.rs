@@ -106,11 +106,9 @@ pub fn gpu_backward_mamba3_backbone_mixed(
 
     // input_proj bwd skipped when identity (production config).
     if mamba_w.compute.input_proj_w.len_elems() > 0 {
-        return Err(
-            "m3_mixed bwd: non-identity input_proj bwd not yet wired — \
+        return Err("m3_mixed bwd: non-identity input_proj bwd not yet wired — \
              run with cpu.input_proj_w.clear() (identity branch)"
-                .into(),
-        );
+            .into());
     }
     Ok(())
 }
@@ -242,9 +240,11 @@ fn gpu_backward_mamba3_layer_mixed(
 
     // Load saved intermediates from typed/f32 fwd save into f32 scratch
     // (the parallel bwd kernels read these from f32 buffers).
-    sc.da_cumsum.copy_from_raw(&acts.da_cumsum_saved, &ctx.stream)?;
+    sc.da_cumsum
+        .copy_from_raw(&acts.da_cumsum_saved, &ctx.stream)?;
     sc.d_scale.copy_from_raw(&acts.scale_saved, &ctx.stream)?;
-    sc.d_gamma_par.copy_from_raw(&acts.gamma_saved, &ctx.stream)?;
+    sc.d_gamma_par
+        .copy_from_raw(&acts.gamma_saved, &ctx.stream)?;
     sc.d_qk_dot.copy_from_raw(&acts.qk_dot_saved, &ctx.stream)?;
     sc.chunk_states
         .copy_from_raw(&acts.chunk_states_saved, &ctx.stream)?;
@@ -289,8 +289,7 @@ fn gpu_backward_mamba3_layer_mixed(
 
     // m3_dqkv typed — typed Q_rot/K_scaled/V_in/dO; all grad outputs f32.
     {
-        let smem =
-            (cs_u * ds + cs_u * ds + cs_u * hd + cs_u * hd + cs_u + cs_u + hd * ds) * 4;
+        let smem = (cs_u * ds + cs_u * ds + cs_u * hd + cs_u * hd + cs_u + cs_u + hd * ds) * 4;
         let cfg = LaunchConfig {
             grid_dim: (nh as u32, dims.batch as u32, 1),
             block_dim: (hd as u32, 1, 1),
@@ -323,8 +322,7 @@ fn gpu_backward_mamba3_layer_mixed(
         builder.arg(&hd_i);
         builder.arg(&ds_i);
         builder.arg(&cs);
-        unsafe { builder.launch(cfg) }
-            .map_err(|e| format!("m3_dqkv_typed B6: {:?}", e))?;
+        unsafe { builder.launch(cfg) }.map_err(|e| format!("m3_dqkv_typed B6: {:?}", e))?;
     }
 
     // Zero d_angle_cumsum before m3_dqktheta.
@@ -349,9 +347,7 @@ fn gpu_backward_mamba3_layer_mixed(
         };
         let d_cb_ptr = lg.c_bias.ptr();
         let d_bb_ptr = lg.b_bias.ptr();
-        let mut builder = ctx
-            .stream
-            .launch_builder(m3k.m3_dqktheta_typed.get(dtype));
+        let mut builder = ctx.stream.launch_builder(m3k.m3_dqktheta_typed.get(dtype));
         builder.arg(sc.d_c_pre_rope.inner_mut());
         builder.arg(sc.d_b_pre_rope.inner_mut());
         builder.arg(sc.d_angle_cumsum.inner_mut());
@@ -377,8 +373,7 @@ fn gpu_backward_mamba3_layer_mixed(
         builder.arg(&ds_i);
         builder.arg(&na_i);
         builder.arg(&cs);
-        unsafe { builder.launch(cfg) }
-            .map_err(|e| format!("m3_dqktheta_typed B6: {:?}", e))?;
+        unsafe { builder.launch(cfg) }.map_err(|e| format!("m3_dqktheta_typed B6: {:?}", e))?;
     }
 
     // Copy dQ_pre/dK_pre into d_q/d_k for downstream consumption (matches
@@ -420,8 +415,7 @@ fn gpu_backward_mamba3_layer_mixed(
             builder.arg(buf.inner_mut());
             builder.arg(&zero);
             builder.arg(&ne);
-            unsafe { builder.launch(grid_1d(sz)) }
-                .map_err(|e| format!("zero B5a: {:?}", e))?;
+            unsafe { builder.launch(grid_1d(sz)) }.map_err(|e| format!("zero B5a: {:?}", e))?;
         }
         let na_i = na as i32;
         let mut builder = ctx.stream.launch_builder(&m3k.m3_angle_dt_bwd_seq);
@@ -526,8 +520,20 @@ fn gpu_backward_mamba3_layer_mixed(
     // B4c: bcnorm_bwd_typed — typed d_out + typed d_B output.
     // ----------------------------------------------------------------
     // Cast d_b_normed (f32) to typed for the typed bcnorm_bwd input.
-    cast_f32_to_typed(ctx, m3k, &mut msc.d_b_normed_typed, &sc.d_b_normed, bt * ng * ds)?;
-    cast_f32_to_typed(ctx, m3k, &mut msc.d_c_normed_typed, &sc.d_c_normed, bt * ng * ds)?;
+    cast_f32_to_typed(
+        ctx,
+        m3k,
+        &mut msc.d_b_normed_typed,
+        &sc.d_b_normed,
+        bt * ng * ds,
+    )?;
+    cast_f32_to_typed(
+        ctx,
+        m3k,
+        &mut msc.d_c_normed_typed,
+        &sc.d_c_normed,
+        bt * ng * ds,
+    )?;
 
     // BCNorm bwd for B (typed).
     {
@@ -551,8 +557,7 @@ fn gpu_backward_mamba3_layer_mixed(
         builder.arg(&n_i);
         builder.arg(&ng_i);
         builder.arg(&ds_i);
-        unsafe { builder.launch(cfg) }
-            .map_err(|e| format!("bcnorm_bwd_typed B B4c: {:?}", e))?;
+        unsafe { builder.launch(cfg) }.map_err(|e| format!("bcnorm_bwd_typed B B4c: {:?}", e))?;
     }
     // Reduce d_b_norm_w → lg.b_norm_weight.
     {
@@ -589,8 +594,7 @@ fn gpu_backward_mamba3_layer_mixed(
         builder.arg(&n_i);
         builder.arg(&ng_i);
         builder.arg(&ds_i);
-        unsafe { builder.launch(cfg) }
-            .map_err(|e| format!("bcnorm_bwd_typed C B4c: {:?}", e))?;
+        unsafe { builder.launch(cfg) }.map_err(|e| format!("bcnorm_bwd_typed C B4c: {:?}", e))?;
     }
     {
         let d_cnw_ptr = lg.c_norm_weight.ptr();
@@ -616,9 +620,7 @@ fn gpu_backward_mamba3_layer_mixed(
     cast_f32_to_typed(ctx, m3k, &mut msc.d_y_typed, &sc.d_x, bt * di)?;
     {
         let na_i = na as i32;
-        let mut builder = ctx
-            .stream
-            .launch_builder(m3k.m3_split_bwd_typed.get(dtype));
+        let mut builder = ctx.stream.launch_builder(m3k.m3_split_bwd_typed.get(dtype));
         let dprojp = msc.d_proj_typed.cached_ptr();
         let dzp = msc.d_z_typed.cached_ptr();
         let dxp_typed = msc.d_y_typed.cached_ptr(); // typed d_x via temp
@@ -742,8 +744,7 @@ fn cast_f32_to_typed(
     builder.arg(&dstp);
     builder.arg(&srcp);
     builder.arg(&n_i);
-    unsafe { builder.launch(grid_1d(n)) }
-        .map_err(|e| format!("cast_f32_to_typed: {:?}", e))?;
+    unsafe { builder.launch(grid_1d(n)) }.map_err(|e| format!("cast_f32_to_typed: {:?}", e))?;
     Ok(())
 }
 
@@ -782,7 +783,6 @@ fn cast_typed_to_f32(
     builder.arg(&dstp);
     builder.arg(&srcp);
     builder.arg(&n_i);
-    unsafe { builder.launch(grid_1d(n)) }
-        .map_err(|e| format!("cast_typed_to_f32: {:?}", e))?;
+    unsafe { builder.launch(grid_1d(n)) }.map_err(|e| format!("cast_typed_to_f32: {:?}", e))?;
     Ok(())
 }

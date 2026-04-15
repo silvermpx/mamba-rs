@@ -21,6 +21,45 @@
 // must be in f32 to avoid precision collapse after many accumulations; bf16
 // Adam accumulators empirically diverge within ~1k steps on SSM-class models.
 
+// CUDA-Graph-capturable variant: bias-correction factors are read from a
+// 2-element device buffer instead of taken as scalar kernel args. The CPU
+// writes [bc1, bc2] into that buffer (async H2D) BEFORE each graph replay,
+// so the captured kernel sees the updated values via a stable device
+// pointer. Mirrors PyTorch `torch.optim.AdamW(capturable=True)` semantics
+// (PyTorch 2.5, `_multi_tensor_adamw` capturable branch).
+extern "C" __global__ void adamw_step_f32_capturable(
+    float* __restrict__ param,
+    const float* __restrict__ grad,
+    float* __restrict__ m,
+    float* __restrict__ v,
+    float lr,
+    float beta1,
+    float beta2,
+    float eps,
+    float weight_decay,
+    const float* __restrict__ bias_factors,  // [2] = {bc1, bc2}
+    int n
+) {
+    const float bias_c1 = bias_factors[0];
+    const float bias_c2 = bias_factors[1];
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int stride = gridDim.x * blockDim.x;
+    const float one_minus_b1 = 1.f - beta1;
+    const float one_minus_b2 = 1.f - beta2;
+    const float decay_factor = 1.f - lr * weight_decay;
+    for (int i = idx; i < n; i += stride) {
+        float g = grad[i];
+        float p = param[i];
+        float mi = m[i] * beta1 + one_minus_b1 * g;
+        float vi = v[i] * beta2 + one_minus_b2 * g * g;
+        m[i] = mi;
+        v[i] = vi;
+        float m_hat = mi * bias_c1;
+        float v_hat = vi * bias_c2;
+        param[i] = decay_factor * p - lr * m_hat / (sqrtf(v_hat) + eps);
+    }
+}
+
 extern "C" __global__ void adamw_step_f32(
     float* __restrict__ param,
     const float* __restrict__ grad,

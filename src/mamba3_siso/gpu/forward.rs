@@ -205,7 +205,11 @@ pub fn gpu_forward_mamba3_layer(
         builder.arg(&nh_i);
         builder.arg(&na_i);
         let grid = cudarc::driver::LaunchConfig {
-            grid_dim: ((bt / dims.seq_len) as u32, (nh * na).div_ceil(256) as u32, 1),
+            grid_dim: (
+                (bt / dims.seq_len) as u32,
+                (nh * na).div_ceil(256) as u32,
+                1,
+            ),
             block_dim: (256.min((nh * na) as u32), 1, 1),
             shared_mem_bytes: 0,
         };
@@ -380,12 +384,18 @@ pub fn gpu_forward_mamba3_layer(
                 .map_err(|e| format!("m3_chunk_scan_fwd F6 K5: {:?}", e))?;
         }
 
-        acts.da_cumsum_saved.copy_from_raw(&scratch.da_cumsum, &ctx.stream)?;
-        acts.k_scaled_saved.copy_from_raw(&scratch.d_q, &ctx.stream)?;
-        acts.scale_saved.copy_from_raw(&scratch.d_gamma, &ctx.stream)?;
-        acts.gamma_saved.copy_from_raw(&scratch.d_dd_dt, &ctx.stream)?;
-        acts.qk_dot_saved.copy_from_raw(&scratch.d_beta, &ctx.stream)?;
-        acts.chunk_states_saved.copy_from_raw(&scratch.chunk_states, &ctx.stream)?;
+        acts.da_cumsum_saved
+            .copy_from_raw(&scratch.da_cumsum, &ctx.stream)?;
+        acts.k_scaled_saved
+            .copy_from_raw(&scratch.d_q, &ctx.stream)?;
+        acts.scale_saved
+            .copy_from_raw(&scratch.d_gamma, &ctx.stream)?;
+        acts.gamma_saved
+            .copy_from_raw(&scratch.d_dd_dt, &ctx.stream)?;
+        acts.qk_dot_saved
+            .copy_from_raw(&scratch.d_beta, &ctx.stream)?;
+        acts.chunk_states_saved
+            .copy_from_raw(&scratch.chunk_states, &ctx.stream)?;
 
         {
             let block_x = hd.max(ds) as u32;
@@ -525,7 +535,8 @@ pub fn gpu_forward_mamba3_backbone(
     let hd = dims.headdim;
     let na = dims.n_angles.max(1);
 
-    acts.input_proj_inputs.copy_from_raw(mamba_input, &ctx.stream)?;
+    acts.input_proj_inputs
+        .copy_from_raw(mamba_input, &ctx.stream)?;
     gpu_sgemm_forward_raw(
         ctx,
         temporal,
@@ -534,7 +545,8 @@ pub fn gpu_forward_mamba3_backbone(
         Some(mamba_w.input_proj_b.raw_ptr(&ctx.stream)),
         (bt, dims.mamba_input_dim, dm),
     )?;
-    acts.input_proj_outputs.copy_from_raw(temporal, &ctx.stream)?;
+    acts.input_proj_outputs
+        .copy_from_raw(temporal, &ctx.stream)?;
 
     let f32_sz = std::mem::size_of::<f32>() as u64;
     let ssm_base = ssm_states.raw_ptr(&ctx.stream);
@@ -628,7 +640,8 @@ pub fn gpu_forward_mamba3_target_burnin(
 
     for l in 0..dims.n_layers {
         let lw = &mamba_w.layers[l];
-        tgt.residual.copy_from_raw(&tgt.temporal_work, &ctx.stream)?;
+        tgt.residual
+            .copy_from_raw(&tgt.temporal_work, &ctx.stream)?;
         {
             let bt_i = bt as i32;
             let dm_i = dm as i32;
@@ -913,7 +926,8 @@ pub fn gpu_forward_mamba3_target_burnin(
     }
 
     {
-        tgt.residual.copy_from_raw(&tgt.temporal_work, &ctx.stream)?;
+        tgt.residual
+            .copy_from_raw(&tgt.temporal_work, &ctx.stream)?;
         let nf_ptr = mamba_w.norm_f_weight.raw_ptr(&ctx.stream);
         let bt_i = bt as i32;
         let dm_i = dm as i32;

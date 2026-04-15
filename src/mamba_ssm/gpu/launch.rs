@@ -87,8 +87,7 @@ pub fn grid_parallel_scan_bwd(batch: usize, d_inner: usize, bytes_per_act: usize
     // bwd-extra (reverse warp scan + postfix + next-A exchange + da-reduce
     // + chunk-first-A boundary).
     let fwd_fixed_floats = 2 * NWARPS + 2 * MAX_DSTATE + 2 * NTHREADS as usize;
-    let bwd_extra_floats =
-        2 * NWARPS + 2 * MAX_DSTATE + 2 * NTHREADS as usize + MAX_DSTATE;
+    let bwd_extra_floats = 2 * NWARPS + 2 * MAX_DSTATE + 2 * NTHREADS as usize + MAX_DSTATE;
     let fixed_bytes = (fwd_fixed_floats + bwd_extra_floats) * std::mem::size_of::<f32>();
     let stage_bytes = CHUNK_SIZE * bytes_per_act;
     LaunchConfig {
@@ -109,7 +108,11 @@ pub fn grid_parallel_scan_bwd(batch: usize, d_inner: usize, bytes_per_act: usize
 ///
 /// `bytes_per_act` must be `2` for bf16/f16 or `4` for f32 (in which case
 /// this is identical to [`grid_parallel_scan`]).
-pub fn grid_parallel_scan_typed(batch: usize, d_inner: usize, bytes_per_act: usize) -> LaunchConfig {
+pub fn grid_parallel_scan_typed(
+    batch: usize,
+    d_inner: usize,
+    bytes_per_act: usize,
+) -> LaunchConfig {
     debug_assert!(bytes_per_act == 2 || bytes_per_act == 4);
     const NTHREADS: u32 = 128;
     const NWARPS: usize = NTHREADS as usize / 32;

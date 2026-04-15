@@ -102,6 +102,14 @@ fn sync_one(
     let n_elems = master.len();
     debug_assert_eq!(n_elems, compute.len_elems());
 
+    // Empty master tensor (HF Mamba identity input_proj). Compute slot is
+    // also empty by construction; skipping avoids a degenerate 0-element
+    // kernel launch (which fails with CUDA_ERROR_INVALID_VALUE for an
+    // empty grid).
+    if n_elems == 0 {
+        return Ok(());
+    }
+
     if matches!(dtype, WeightDtype::F32) {
         // f32 → f32: D2D async copy on stream (no cast needed).
         let bytes = n_elems * 4;
@@ -147,6 +155,9 @@ fn sync_f32(
 ) -> Result<(), String> {
     let n_elems = master.len();
     debug_assert_eq!(n_elems, compute.len_elems());
+    if n_elems == 0 {
+        return Ok(());
+    }
     let bytes = n_elems * 4;
     let res = unsafe {
         cudarc::driver::sys::cuMemcpyDtoDAsync_v2(

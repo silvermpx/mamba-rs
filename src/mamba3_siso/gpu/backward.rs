@@ -8,7 +8,9 @@
 
 use super::kernels::Mamba3Kernels;
 use super::state::{GpuMamba3BackboneActs, GpuMamba3Dims, GpuMamba3LayerActs, GpuMamba3Scratch};
-use super::weights::{GpuMamba3Grads, GpuMamba3LayerGrads, GpuMamba3LayerWeights, GpuMamba3Weights};
+use super::weights::{
+    GpuMamba3Grads, GpuMamba3LayerGrads, GpuMamba3LayerWeights, GpuMamba3Weights,
+};
 use crate::mamba_ssm::gpu::blas::gpu_sgemm_backward_grad_raw;
 use crate::mamba_ssm::gpu::buffers::GpuBuffer;
 use crate::mamba_ssm::gpu::context::GpuCtx;
@@ -171,8 +173,12 @@ pub fn gpu_backward_mamba3_layer(
             unsafe { builder.launch(grid_1d(bt * nh * ds)) }
                 .map_err(|e| format!("rope_bwd seq B6: {:?}", e))?;
         } else {
-            scratch.d_b_pre_rope.copy_from_raw(&scratch.d_k, &ctx.stream)?;
-            scratch.d_c_pre_rope.copy_from_raw(&scratch.d_q, &ctx.stream)?;
+            scratch
+                .d_b_pre_rope
+                .copy_from_raw(&scratch.d_k, &ctx.stream)?;
+            scratch
+                .d_c_pre_rope
+                .copy_from_raw(&scratch.d_q, &ctx.stream)?;
         }
 
         {
@@ -230,12 +236,24 @@ pub fn gpu_backward_mamba3_layer(
         let b_i = dims.batch as i32;
         let na = dims.n_angles;
 
-        scratch.da_cumsum.copy_from_raw(&acts.da_cumsum_saved, &ctx.stream)?;
-        scratch.d_b_pre_rope.copy_from_raw(&acts.k_scaled_saved, &ctx.stream)?;
-        scratch.d_scale.copy_from_raw(&acts.scale_saved, &ctx.stream)?;
-        scratch.d_gamma_par.copy_from_raw(&acts.gamma_saved, &ctx.stream)?;
-        scratch.d_qk_dot.copy_from_raw(&acts.qk_dot_saved, &ctx.stream)?;
-        scratch.chunk_states.copy_from_raw(&acts.chunk_states_saved, &ctx.stream)?;
+        scratch
+            .da_cumsum
+            .copy_from_raw(&acts.da_cumsum_saved, &ctx.stream)?;
+        scratch
+            .d_b_pre_rope
+            .copy_from_raw(&acts.k_scaled_saved, &ctx.stream)?;
+        scratch
+            .d_scale
+            .copy_from_raw(&acts.scale_saved, &ctx.stream)?;
+        scratch
+            .d_gamma_par
+            .copy_from_raw(&acts.gamma_saved, &ctx.stream)?;
+        scratch
+            .d_qk_dot
+            .copy_from_raw(&acts.qk_dot_saved, &ctx.stream)?;
+        scratch
+            .chunk_states
+            .copy_from_raw(&acts.chunk_states_saved, &ctx.stream)?;
 
         {
             let block_x = nh.min(256) as u32;
@@ -354,8 +372,12 @@ pub fn gpu_backward_mamba3_layer(
             unsafe { builder.launch(cfg) }.map_err(|e| format!("m3_dqktheta B6 S2: {:?}", e))?;
         }
 
-        scratch.d_q.copy_from_raw(&scratch.d_c_pre_rope, &ctx.stream)?;
-        scratch.d_k.copy_from_raw(&scratch.d_b_pre_rope, &ctx.stream)?;
+        scratch
+            .d_q
+            .copy_from_raw(&scratch.d_c_pre_rope, &ctx.stream)?;
+        scratch
+            .d_k
+            .copy_from_raw(&scratch.d_b_pre_rope, &ctx.stream)?;
 
         {
             let mut builder = ctx.stream.launch_builder(&m3k.m3_ddt_dtrap);
@@ -372,21 +394,27 @@ pub fn gpu_backward_mamba3_layer(
                 .map_err(|e| format!("m3_ddt_dtrap B6 S3: {:?}", e))?;
         }
 
-        scratch.d_b_pre_rope.copy_from_raw(&scratch.d_k, &ctx.stream)?;
-        scratch.d_c_pre_rope.copy_from_raw(&scratch.d_q, &ctx.stream)?;
+        scratch
+            .d_b_pre_rope
+            .copy_from_raw(&scratch.d_k, &ctx.stream)?;
+        scratch
+            .d_c_pre_rope
+            .copy_from_raw(&scratch.d_q, &ctx.stream)?;
     }
 
     // B5a: angle_dt_bwd.
     if na > 0 {
-        for (buf, sz) in [(&mut scratch.d_angles_raw, bt * na), (&mut scratch.d_dt_angle, bt * nh)] {
+        for (buf, sz) in [
+            (&mut scratch.d_angles_raw, bt * na),
+            (&mut scratch.d_dt_angle, bt * nh),
+        ] {
             let ne = sz as i32;
             let zero: f32 = 0.0;
             let mut builder = ctx.stream.launch_builder(&m3k.fill_scalar);
             builder.arg(buf.inner_mut());
             builder.arg(&zero);
             builder.arg(&ne);
-            unsafe { builder.launch(grid_1d(sz)) }
-                .map_err(|e| format!("fill B5a: {:?}", e))?;
+            unsafe { builder.launch(grid_1d(sz)) }.map_err(|e| format!("fill B5a: {:?}", e))?;
         }
         let t_i = t;
         let nh_i = nh as i32;

@@ -81,7 +81,7 @@ impl DynamicLossScaler {
     /// Default scaler suitable for f16 training.
     pub fn new() -> Self {
         Self {
-            scale: 65_536.0,        // 2^16
+            scale: 65_536.0, // 2^16
             growth_factor: 2.0,
             backoff_factor: 0.5,
             growth_interval: 2_000,

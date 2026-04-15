@@ -262,6 +262,9 @@ pub struct MambaKernels {
     // -- AdamW optimizer (Step 12) --
     /// Fused AdamW step on f32 master weights + f32 optimizer state.
     pub adamw_step_f32: CudaFunction,
+    /// CUDA-Graph-capturable variant: reads bias-correction factors from a
+    /// 2-elem device buffer instead of scalar args (Step 14).
+    pub adamw_step_f32_capturable: CudaFunction,
 }
 
 impl MambaKernels {
@@ -408,6 +411,7 @@ impl MambaKernels {
 
             // AdamW
             adamw_step_f32: get("adamw_step_f32")?,
+            adamw_step_f32_capturable: get("adamw_step_f32_capturable")?,
 
             // typed inference kernels
             silu_fwd_typed: load_typed("silu_forward")?,

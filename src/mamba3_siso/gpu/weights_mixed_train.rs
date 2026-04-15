@@ -101,6 +101,12 @@ fn sync_one(
     let n_elems = master.len();
     debug_assert_eq!(n_elems, compute.len_elems());
 
+    // Empty master tensor (HF Mamba identity input_proj). Skipping avoids
+    // a degenerate 0-element kernel launch (CUDA_ERROR_INVALID_VALUE).
+    if n_elems == 0 {
+        return Ok(());
+    }
+
     if matches!(dtype, WeightDtype::F32) {
         let bytes = n_elems * 4;
         let res = unsafe {
@@ -138,6 +144,9 @@ fn sync_one(
 fn sync_f32(ctx: &GpuCtx, master: &GpuBuffer, compute: &WeightSliceDyn) -> Result<(), String> {
     let n_elems = master.len();
     debug_assert_eq!(n_elems, compute.len_elems());
+    if n_elems == 0 {
+        return Ok(());
+    }
     let bytes = n_elems * 4;
     let res = unsafe {
         cudarc::driver::sys::cuMemcpyDtoDAsync_v2(
