@@ -160,7 +160,9 @@ fn adamw_multi_step_accumulates_correctly() {
             bc2,
         )
         .unwrap();
-        cpu_adamw_step(&mut p, &g, &mut m, &mut v, 1e-3, 0.9, 0.999, 1e-8, 1e-2, step);
+        cpu_adamw_step(
+            &mut p, &g, &mut m, &mut v, 1e-3, 0.9, 0.999, 1e-8, 1e-2, step,
+        );
     }
     ctx.stream.synchronize().unwrap();
 
@@ -246,22 +248,61 @@ fn adamw_m1_backbone_walks_all_tensors() {
     // Snapshot ALL master tensors as (label, before-image) in arena order.
     let snap_w = |w: &GpuMambaTrainWeights| -> Vec<(String, Vec<f32>)> {
         let mut v = vec![
-            ("input_proj_w".into(), w.input_proj_w.to_cpu(&ctx.stream).unwrap()),
-            ("input_proj_b".into(), w.input_proj_b.to_cpu(&ctx.stream).unwrap()),
+            (
+                "input_proj_w".into(),
+                w.input_proj_w.to_cpu(&ctx.stream).unwrap(),
+            ),
+            (
+                "input_proj_b".into(),
+                w.input_proj_b.to_cpu(&ctx.stream).unwrap(),
+            ),
         ];
         for (li, lw) in w.layers.iter().enumerate() {
-            v.push((format!("L{li}.norm"), lw.norm_weight.to_cpu(&ctx.stream).unwrap()));
-            v.push((format!("L{li}.in_proj"), lw.in_proj_w.to_cpu(&ctx.stream).unwrap()));
-            v.push((format!("L{li}.conv1d_w"), lw.conv1d_weight.to_cpu(&ctx.stream).unwrap()));
-            v.push((format!("L{li}.conv1d_b"), lw.conv1d_bias.to_cpu(&ctx.stream).unwrap()));
-            v.push((format!("L{li}.x_proj"), lw.x_proj_w.to_cpu(&ctx.stream).unwrap()));
-            v.push((format!("L{li}.dt_proj_w"), lw.dt_proj_w.to_cpu(&ctx.stream).unwrap()));
-            v.push((format!("L{li}.dt_proj_b"), lw.dt_proj_b.to_cpu(&ctx.stream).unwrap()));
-            v.push((format!("L{li}.a_log"), lw.a_log.to_cpu(&ctx.stream).unwrap()));
-            v.push((format!("L{li}.d_param"), lw.d_param.to_cpu(&ctx.stream).unwrap()));
-            v.push((format!("L{li}.out_proj"), lw.out_proj_w.to_cpu(&ctx.stream).unwrap()));
+            v.push((
+                format!("L{li}.norm"),
+                lw.norm_weight.to_cpu(&ctx.stream).unwrap(),
+            ));
+            v.push((
+                format!("L{li}.in_proj"),
+                lw.in_proj_w.to_cpu(&ctx.stream).unwrap(),
+            ));
+            v.push((
+                format!("L{li}.conv1d_w"),
+                lw.conv1d_weight.to_cpu(&ctx.stream).unwrap(),
+            ));
+            v.push((
+                format!("L{li}.conv1d_b"),
+                lw.conv1d_bias.to_cpu(&ctx.stream).unwrap(),
+            ));
+            v.push((
+                format!("L{li}.x_proj"),
+                lw.x_proj_w.to_cpu(&ctx.stream).unwrap(),
+            ));
+            v.push((
+                format!("L{li}.dt_proj_w"),
+                lw.dt_proj_w.to_cpu(&ctx.stream).unwrap(),
+            ));
+            v.push((
+                format!("L{li}.dt_proj_b"),
+                lw.dt_proj_b.to_cpu(&ctx.stream).unwrap(),
+            ));
+            v.push((
+                format!("L{li}.a_log"),
+                lw.a_log.to_cpu(&ctx.stream).unwrap(),
+            ));
+            v.push((
+                format!("L{li}.d_param"),
+                lw.d_param.to_cpu(&ctx.stream).unwrap(),
+            ));
+            v.push((
+                format!("L{li}.out_proj"),
+                lw.out_proj_w.to_cpu(&ctx.stream).unwrap(),
+            ));
         }
-        v.push(("norm_f".into(), w.norm_f_weight.to_cpu(&ctx.stream).unwrap()));
+        v.push((
+            "norm_f".into(),
+            w.norm_f_weight.to_cpu(&ctx.stream).unwrap(),
+        ));
         v
     };
     let before = snap_w(&weights);
@@ -307,11 +348,11 @@ fn adamw_m1_backbone_walks_all_tensors() {
 /// M3 backbone equivalent of `adamw_m1_backbone_walks_all_tensors`.
 #[test]
 fn adamw_m3_backbone_walks_all_tensors() {
+    use mamba_rs::mamba_ssm::gpu::adamw::step_m3;
     use mamba_rs::mamba3_siso::config::Mamba3Config;
     use mamba_rs::mamba3_siso::gpu::kernels::Mamba3Kernels;
     use mamba_rs::mamba3_siso::gpu::weights::{GpuMamba3Grads, GpuMamba3Weights};
     use mamba_rs::mamba3_siso::weights::Mamba3Weights;
-    use mamba_rs::mamba_ssm::gpu::adamw::step_m3;
 
     let dev = GpuDevice::new(0).unwrap();
     let ctx = GpuCtx::new(&dev).unwrap();
@@ -341,22 +382,61 @@ fn adamw_m3_backbone_walks_all_tensors() {
 
     let snap_w = |w: &GpuMamba3Weights| -> Vec<(String, Vec<f32>)> {
         let mut v = vec![
-            ("input_proj_w".into(), w.input_proj_w.to_cpu(&ctx.stream).unwrap()),
-            ("input_proj_b".into(), w.input_proj_b.to_cpu(&ctx.stream).unwrap()),
+            (
+                "input_proj_w".into(),
+                w.input_proj_w.to_cpu(&ctx.stream).unwrap(),
+            ),
+            (
+                "input_proj_b".into(),
+                w.input_proj_b.to_cpu(&ctx.stream).unwrap(),
+            ),
         ];
         for (li, lw) in w.layers.iter().enumerate() {
-            v.push((format!("L{li}.norm"), lw.norm_weight.to_cpu(&ctx.stream).unwrap()));
-            v.push((format!("L{li}.in_proj"), lw.in_proj_w.to_cpu(&ctx.stream).unwrap()));
-            v.push((format!("L{li}.dt_bias"), lw.dt_bias.to_cpu(&ctx.stream).unwrap()));
-            v.push((format!("L{li}.b_norm"), lw.b_norm_weight.to_cpu(&ctx.stream).unwrap()));
-            v.push((format!("L{li}.c_norm"), lw.c_norm_weight.to_cpu(&ctx.stream).unwrap()));
-            v.push((format!("L{li}.b_bias"), lw.b_bias.to_cpu(&ctx.stream).unwrap()));
-            v.push((format!("L{li}.c_bias"), lw.c_bias.to_cpu(&ctx.stream).unwrap()));
-            v.push((format!("L{li}.d_param"), lw.d_param.to_cpu(&ctx.stream).unwrap()));
-            v.push((format!("L{li}.norm_gate"), lw.norm_gate_weight.to_cpu(&ctx.stream).unwrap()));
-            v.push((format!("L{li}.out_proj"), lw.out_proj_w.to_cpu(&ctx.stream).unwrap()));
+            v.push((
+                format!("L{li}.norm"),
+                lw.norm_weight.to_cpu(&ctx.stream).unwrap(),
+            ));
+            v.push((
+                format!("L{li}.in_proj"),
+                lw.in_proj_w.to_cpu(&ctx.stream).unwrap(),
+            ));
+            v.push((
+                format!("L{li}.dt_bias"),
+                lw.dt_bias.to_cpu(&ctx.stream).unwrap(),
+            ));
+            v.push((
+                format!("L{li}.b_norm"),
+                lw.b_norm_weight.to_cpu(&ctx.stream).unwrap(),
+            ));
+            v.push((
+                format!("L{li}.c_norm"),
+                lw.c_norm_weight.to_cpu(&ctx.stream).unwrap(),
+            ));
+            v.push((
+                format!("L{li}.b_bias"),
+                lw.b_bias.to_cpu(&ctx.stream).unwrap(),
+            ));
+            v.push((
+                format!("L{li}.c_bias"),
+                lw.c_bias.to_cpu(&ctx.stream).unwrap(),
+            ));
+            v.push((
+                format!("L{li}.d_param"),
+                lw.d_param.to_cpu(&ctx.stream).unwrap(),
+            ));
+            v.push((
+                format!("L{li}.norm_gate"),
+                lw.norm_gate_weight.to_cpu(&ctx.stream).unwrap(),
+            ));
+            v.push((
+                format!("L{li}.out_proj"),
+                lw.out_proj_w.to_cpu(&ctx.stream).unwrap(),
+            ));
         }
-        v.push(("norm_f".into(), w.norm_f_weight.to_cpu(&ctx.stream).unwrap()));
+        v.push((
+            "norm_f".into(),
+            w.norm_f_weight.to_cpu(&ctx.stream).unwrap(),
+        ));
         v
     };
     let before = snap_w(&weights);

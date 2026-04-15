@@ -131,11 +131,7 @@ fn make_inputs(b: usize, t: usize, di: usize, ds: usize) -> BwdInputs {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn run_seq_f32(
-    ctx: &GpuCtx,
-    k: &MambaKernels,
-    inp: &BwdInputs,
-) -> BwdOuts {
+fn run_seq_f32(ctx: &GpuCtx, k: &MambaKernels, inp: &BwdInputs) -> BwdOuts {
     let (b, t, di, ds) = (inp.b, inp.t, inp.di, inp.ds);
     let h_saved = upload_f32(ctx, &inp.h_saved);
     let delta = upload_f32(ctx, &inp.delta);
@@ -217,12 +213,7 @@ fn run_seq_f32(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn run_par_typed(
-    ctx: &GpuCtx,
-    k: &MambaKernels,
-    inp: &BwdInputs,
-    dtype: WeightDtype,
-) -> BwdOuts {
+fn run_par_typed(ctx: &GpuCtx, k: &MambaKernels, inp: &BwdInputs, dtype: WeightDtype) -> BwdOuts {
     let (b, t, di, ds) = (inp.b, inp.t, inp.di, inp.ds);
     let h_saved = upload_f32(ctx, &inp.h_saved);
     let delta = upload_typed(ctx, &inp.delta, dtype);
@@ -250,7 +241,9 @@ fn run_par_typed(
     let ti = t as i32;
     let di_i = di as i32;
     let ds_i = ds as i32;
-    let mut bld = ctx.stream.launch_builder(k.ssm_parallel_bwd_typed.get(dtype));
+    let mut bld = ctx
+        .stream
+        .launch_builder(k.ssm_parallel_bwd_typed.get(dtype));
     let h = h_saved.cached_ptr();
     let dl = delta.cached_ptr();
     let uu = u.cached_ptr();
@@ -300,12 +293,9 @@ fn check_parity(b: usize, t: usize, di: usize, ds: usize, dtype: WeightDtype) {
     let (ctx, k) = make_ctx();
     let inp = make_inputs(b, t, di, ds);
     let (dd_seq, du_seq, dbl_seq, dcl_seq, ddd_seq, dal_seq) = run_seq_f32(&ctx, &k, &inp);
-    let (dd_par, du_par, dbl_par, dcl_par, ddd_par, dal_par) =
-        run_par_typed(&ctx, &k, &inp, dtype);
+    let (dd_par, du_par, dbl_par, dcl_par, ddd_par, dal_par) = run_par_typed(&ctx, &k, &inp, dtype);
 
-    eprintln!(
-        "ssm_parallel_scan_bwd ({dtype:?}, B={b} T={t} di={di} ds={ds}):"
-    );
+    eprintln!("ssm_parallel_scan_bwd ({dtype:?}, B={b} T={t} di={di} ds={ds}):");
     let (cos_min, norm_tol) = match dtype {
         WeightDtype::F32 => (1.0 - 1e-4, 0.02),
         WeightDtype::Bf16 => (0.99, 0.05),

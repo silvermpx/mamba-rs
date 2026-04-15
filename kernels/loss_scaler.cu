@@ -80,10 +80,18 @@ extern "C" __global__ void scale_grads_skip_f32(
     const float* __restrict__ unscale_factor, // [1] = 1 / loss_scale
     int n
 ) {
-    const float effective = (overflow_flag[0] != 0) ? 0.f : unscale_factor[0];
+    // Branch on overflow and ASSIGN, not multiply. A multiply-by-zero would
+    // propagate NaN: `Inf * 0 = NaN`, `NaN * 0 = NaN`. On overflow the raw
+    // grads already contain ±Inf or NaN (that is *why* we overflowed), so
+    // `grads[i] *= 0.0f` silently poisons master weights on the next AdamW
+    // step. Assignment sanitises the buffer to a clean zero regardless of
+    // the current contents, matching PyTorch GradScaler's behaviour of
+    // skipping the optimizer step entirely on overflow.
+    const int overflow = (overflow_flag[0] != 0);
+    const float unscale = unscale_factor[0];
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     int stride = gridDim.x * blockDim.x;
     for (int i = idx; i < n; i += stride) {
-        grads[i] *= effective;
+        grads[i] = overflow ? 0.0f : (grads[i] * unscale);
     }
 }
