@@ -145,12 +145,32 @@ impl GpuMambaLM {
         )?;
         let stream = backbone.stream();
 
+        // Pad the untied lm_head to `vocab_size_padded` columns so the
+        // untied GEMM can write into `gpu_logits` with the SAME row stride
+        // (`vocab_size_padded`) as the tied path. Without padding, the
+        // GEMM writes contiguous rows of `vocab_size` while the CPU reads
+        // with stride `vocab_size_padded`, silently producing wrong logits
+        // for every batch slot beyond the first when `vocab_size` is not
+        // already 64-aligned (e.g. HF mamba-130m's 50280 vs padded 50304).
+        let lm_head_padded: Option<Vec<f32>> = lm_head.as_ref().map(|lm| {
+            if vocab_size == vocab_size_padded {
+                lm.clone()
+            } else {
+                // HF convention: nn.Linear weight is stored as [out, in] =
+                // [vocab_size, d_model]. Pad the row dimension with zeros
+                // so stored shape becomes [vocab_size_padded, d_model].
+                let mut padded = vec![0.0f32; vocab_size_padded * d_model];
+                padded[..vocab_size * d_model].copy_from_slice(lm);
+                padded
+            }
+        });
+
         // Upload embed + optional lm_head in requested dtype.
         let embed_storage = match dtype {
             WeightDtype::F32 => {
                 let mut e = GpuBuffer::zeros(stream, vocab_size_padded * d_model)?;
                 e.upload(stream, &embed)?;
-                let lm = if let Some(ref lm_w) = lm_head {
+                let lm = if let Some(ref lm_w) = lm_head_padded {
                     let mut b = GpuBuffer::zeros(stream, lm_w.len())?;
                     b.upload(stream, lm_w)?;
                     Some(b)
@@ -167,7 +187,7 @@ impl GpuMambaLM {
                 let e = GpuByteBuffer::zeros(stream, embed_bytes)?;
                 upload_f32_as_dtype(&e, 0, &embed, embed.len(), dtype)?;
 
-                let lm = if let Some(ref lm_w) = lm_head {
+                let lm = if let Some(ref lm_w) = lm_head_padded {
                     let lm_bytes = lm_w.len() * dtype.size_bytes();
                     let b = GpuByteBuffer::zeros(stream, lm_bytes)?;
                     upload_f32_as_dtype(&b, 0, lm_w, lm_w.len(), dtype)?;
@@ -488,8 +508,9 @@ impl GpuMambaLM {
         match &self.embed_storage {
             EmbedStorage::F32 { embed, lm_head } => {
                 if let Some(lm) = lm_head {
-                    // Untied: logits[B,V] = hidden[B,D] @ lm_head[D,V]
-                    // Download batched temporal → upload to gpu_hidden → single batched SGEMM.
+                    // Untied: logits[B,Vpad] = hidden[B,D] @ lm_head[D,Vpad].
+                    // `vocab_size_padded` matches the lm_head and gpu_logits
+                    // row stride — see the padding applied in `from_hf_with_dtype_batch`.
                     self.backbone.download_temporal(&mut self.input_cpu)?;
                     self.gpu_hidden.upload(&stream, &self.input_cpu)?;
                     gpu_sgemm_forward_raw(
@@ -498,7 +519,7 @@ impl GpuMambaLM {
                         &self.gpu_hidden,
                         lm.cached_ptr(),
                         None,
-                        (b, d, self.vocab_size),
+                        (b, d, self.vocab_size_padded),
                     )?;
                 } else {
                     // Tied: logits[B,V] = temporal[B,D] @ embed^T[D,V]
@@ -549,7 +570,8 @@ impl GpuMambaLM {
                 };
 
                 if let Some(lm) = lm_head {
-                    // Untied: Y[B,V] = temporal_half[B,D] @ lm_head[D,V]
+                    // Untied: Y[B,Vpad] = temporal_half[B,D] @ lm_head[D,Vpad]
+                    // `vocab_size_padded` matches lm_head and gpu_logits row stride.
                     gpu_gemm_ex_forward_raw(
                         ctx,
                         &mut self.gpu_logits,
@@ -562,7 +584,7 @@ impl GpuMambaLM {
                             dtype: *dtype,
                         },
                         None,
-                        (b, d, self.vocab_size),
+                        (b, d, self.vocab_size_padded),
                     )?;
                 } else {
                     // Tied: logits[B,V] = temporal_half[B,D] @ embed^T[D,V]

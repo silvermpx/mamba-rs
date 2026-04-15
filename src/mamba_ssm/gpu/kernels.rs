@@ -143,6 +143,12 @@ pub struct MambaKernels {
     pub conv1d_burnin_fwd_bf16: CudaFunction,
     /// f16 multi-step conv1d forward with typed I/O + f32 saves.
     pub conv1d_burnin_fwd_f16: CudaFunction,
+    /// f32 typed-signature conv1d burnin (matches the bf16/f16 argument
+    /// order `(u_out, state, conv_states_saved, post_conv, x_branch, ...)`
+    /// rather than the legacy f32 `(u_out, post_conv, conv_states, state,
+    /// x_branch, ...)`). Used by the mixed forward `WeightDtype::F32`
+    /// branch so all three dtypes share one calling convention.
+    pub conv1d_burnin_fwd_f32_typed: CudaFunction,
 
     // -- Typed training-backward kernels (Step 4a) --
     /// Typed dispatch (f32/bf16/f16) for `gating_backward`. dx/dy/d_y/d_gate
@@ -388,6 +394,7 @@ impl MambaKernels {
             ssm_burnin_fwd_f16: get("ssm_burnin_forward_f16")?,
             conv1d_burnin_fwd_bf16: get("conv1d_burnin_forward_bf16")?,
             conv1d_burnin_fwd_f16: get("conv1d_burnin_forward_f16")?,
+            conv1d_burnin_fwd_f32_typed: get("conv1d_burnin_forward_f32")?,
 
             // parallel scan
             ssm_parallel_fwd: get("ssm_parallel_scan_fwd")?,

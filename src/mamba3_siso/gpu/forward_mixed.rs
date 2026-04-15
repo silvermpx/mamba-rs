@@ -174,7 +174,13 @@ impl GpuMamba3BackboneMixedActs {
                     dd_dt_raw: GpuBuffer::zeros(stream, bt * nh)?,
                     dd_a_raw: GpuBuffer::zeros(stream, bt * nh)?,
                     trap_raw: GpuBuffer::zeros(stream, bt * nh)?,
-                    angles_raw: GpuBuffer::zeros(stream, bt * na)?,
+                    // `.max(1)` matches the f32 path — keeps a 1-elem sentinel
+                    // allocation when RoPE is disabled (num_rope_angles == 0)
+                    // so kernels that unconditionally index the buffer don't
+                    // touch a zero-length allocation. Config validate()
+                    // rejects `rope_fraction` other than 0.5 / 1.0 today,
+                    // but the guard keeps this path symmetric with f32.
+                    angles_raw: GpuBuffer::zeros(stream, bt * na.max(1))?,
                     dt: GpuBuffer::zeros(stream, bt * nh)?,
                     a_val: GpuBuffer::zeros(stream, bt * nh)?,
                     trap: GpuBuffer::zeros(stream, bt * nh)?,

@@ -435,8 +435,14 @@ pub fn gpu_forward_mamba_backbone_mixed(
             let t_i = t as i32;
             let di_i = di as i32;
             let dc_i = d_conv as i32;
+            // Use the TYPED-signature f32 variant here so the argument order
+            // below matches the bf16/f16 kernels. The legacy `conv1d_burnin_fwd`
+            // f32 kernel has `(u_out, post_conv, conv_states, state, x_branch,
+            // ...)` which is a different order — previously plugging it into
+            // the typed call path silently swapped `state` with `post_conv`,
+            // corrupting the persistent conv state on every mixed f32 step.
             let kernel = match dt {
-                WeightDtype::F32 => &k.conv1d_burnin_fwd,
+                WeightDtype::F32 => &k.conv1d_burnin_fwd_f32_typed,
                 WeightDtype::Bf16 => &k.conv1d_burnin_fwd_bf16,
                 WeightDtype::F16 => &k.conv1d_burnin_fwd_f16,
             };
