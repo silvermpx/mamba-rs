@@ -21,6 +21,7 @@ pub mod forward_mixed;
 pub mod inference;
 pub mod kernels;
 pub mod launch;
+pub mod loss_scaler;
 pub mod prefill;
 pub mod weights;
 pub mod weights_mixed_train;

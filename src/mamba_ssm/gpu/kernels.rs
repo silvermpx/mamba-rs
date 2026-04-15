@@ -242,6 +242,12 @@ pub struct MambaKernels {
     pub ssm_parallel_fwd_typed: TypedKernel,
     /// Typed parallel scan forward nosave twin (target network / prefill).
     pub ssm_parallel_fwd_nosave_typed: TypedKernel,
+
+    // -- AMP loss scaler helpers (Step 13) --
+    /// Scan an f32 grad buffer for inf/nan, atomicOr into device int.
+    pub check_inf_nan_f32: CudaFunction,
+    /// In-place multiply f32 grads by a scalar (unscale, clip, etc.).
+    pub scale_grads_f32: CudaFunction,
 }
 
 impl MambaKernels {
@@ -258,6 +264,7 @@ impl MambaKernels {
             include_str!("../../../kernels/activations.cu"),
             include_str!("../../../kernels/norms.cu"),
             include_str!("../../../kernels/elementwise.cu"),
+            include_str!("../../../kernels/loss_scaler.cu"),
         ];
 
         // Strip `#include "_typed_prelude.cuh"` lines (prelude is inlined above).
@@ -372,6 +379,10 @@ impl MambaKernels {
                 bf16: get("ssm_parallel_scan_fwd_nosave_bf16")?,
                 f16: get("ssm_parallel_scan_fwd_nosave_f16")?,
             },
+
+            // AMP loss scaler
+            check_inf_nan_f32: get("check_inf_nan_f32")?,
+            scale_grads_f32: get("scale_grads_f32")?,
 
             // typed inference kernels
             silu_fwd_typed: load_typed("silu_forward")?,
