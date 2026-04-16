@@ -2,8 +2,9 @@
 //!
 //! - [`MambaBackbone`] — the primary CPU API for Mamba SSM. Single-step
 //!   inference + batched training methods.
-//! - [`backbone3::Mamba3Backbone`] — peer wrapper for Mamba-3 SISO,
-//!   inference-only (training goes through `mamba3_siso::cpu`).
+//! - `Mamba3Backbone` (in submodule `backbone3`, under `hf` feature) —
+//!   peer wrapper for Mamba-3 SISO, inference-only (training goes
+//!   through `crate::mamba3_siso::cpu`).
 //! - `gpu_lm` / `gpu_lm3` (under `cuda` + `hf` features) — LM-style
 //!   generation (`generate`, `generate_streaming`, `generate_batch`) with
 //!   sampling on top of the GPU backbones.
