@@ -17,10 +17,12 @@ at runtime via NVRTC.
 - **f32 / bf16 / f16** — a single `WeightDtype` selector at construction.
   Compute stays f32 (upcast-in-kernel, f32 accumulators) regardless of
   storage dtype.
-- **Batch-invariant bf16 inference** (0.3.0) — custom GEMM kernel
-  (`kernels/gemm_batch_invariant.cu`) guarantees that logits for the same
-  prompt are bit-identical across batch sizes. Follows the vLLM /
-  Thinking Machines Lab recipe (fixed 64×64×32 tile, no split-K).
+- **Batch-invariant bf16 inference** (0.3.0) — own CUDA matvec kernel
+  (`kernels/gemm_batch_invariant.cu`) gives the same logits per row
+  regardless of batch size. KL ≈ 1e-11 cross-batch (vs cuBLAS's ~1e-3
+  algorithm-selection drift). 86 % of cuBLAS gemv throughput;
+  ~6 percentage points ahead of vLLM / Thinking Machines Lab's opt-in
+  Triton kernel, and the default path here, not opt-in.
 - **HuggingFace loader** — safetensors, synthetic + real Mamba SSM
   checkpoints (130m / 370m / 1.4b / 2.8b validated).
 - **Standalone** — no framework dependency.
@@ -187,19 +189,26 @@ let (weights, input_dim) = load_mamba3(Path::new("m3.safetensors"), &cfg)?;
 
 | Model         | f32 tok/s | bf16 tok/s | f16 tok/s | bf16 vs f32 |
 |---------------|-----------|-----------:|----------:|------------:|
-| mamba-130m-hf | 723       | **1 039**  | 1 043     | +44 %       |
-| mamba-370m-hf | 325       | **451**    | 448       | +39 %       |
-| mamba-1.4b-hf | 125       | **217**    | 218       | +74 %       |
-| mamba-2.8b-hf |  66       | **118**    | 119       | +79 %       |
+| mamba-130m-hf | 725       | **898**    | 899       | +24 %       |
+| mamba-370m-hf | 305       | **396**    | 395       | +30 %       |
+| mamba-1.4b-hf | 116       | **189**    | 190       | +63 %       |
+| mamba-2.8b-hf |  61       | **104**    | 104       | +70 %       |
+
+All produced by the **batch-invariant matvec kernel** — pure Rust + NVRTC,
+no Python / Triton dependency. Strict cross-batch bit-identity at
+KL ≈ 1e-11 (`b=1` vs `b=N` produce the same logits per slot). Reaches
+~86 % of cuBLAS gemv throughput; ~6 percentage points faster than
+vLLM / Thinking Machines Lab `batch_invariant` Triton (~80 % of cuBLAS,
+opt-in).
 
 ### Per-step latency (default config: d_model=128, 3 layers)
 
 | | Mamba SSM | Mamba-3 SISO |
 |---|---|---|
 | GPU inference B=1 (CUDA Graph) | **79 µs** | **86 µs** |
-| GPU training fwd+bwd (T=32)    | 1 640 µs | 2 170 µs |
-| CPU inference B=1              | 84 µs    | **65 µs** |
-| CPU training fwd+bwd (T=32)    | 15 870 µs | **3 610 µs** |
+| GPU training fwd+bwd (T=32)    | 1 629 µs | 2 169 µs |
+| CPU inference B=1              | 88 µs    | **70 µs** |
+| CPU training fwd+bwd (T=32)    | 15 874 µs | **3 609 µs** |
 
 Detailed tables: [Mamba SSM benchmarks](docs/mamba1-benchmarks.md),
 [Mamba-3 SISO benchmarks](docs/mamba3-benchmarks.md).

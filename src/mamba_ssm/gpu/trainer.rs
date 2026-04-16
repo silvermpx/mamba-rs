@@ -990,7 +990,7 @@ impl MambaTrainerMixed {
         Ok(())
     }
 
-/// Download the master weights to a CPU-side `MambaWeights` for
+    /// Download the master weights to a CPU-side `MambaWeights` for
     /// checkpointing. Includes a stream sync.
     pub fn snapshot_master(&self) -> Result<MambaWeights, String> {
         self.ctx

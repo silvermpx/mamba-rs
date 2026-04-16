@@ -22,8 +22,8 @@ pub struct Mamba3Scratch {
     pub d_z_flat: Vec<f32>, // [T * d_inner]
 
     // ── Backward B3: BPTT ──
-    pub d_x_flat: Vec<f32>, // [T * d_inner]
-    pub d_h: Vec<f32>,      // [nheads * headdim * d_state]
+    pub d_x_flat: Vec<f32>,     // [T * d_inner]
+    pub d_h: Vec<f32>,          // [nheads * headdim * d_state]
     pub d_alpha_flat: Vec<f32>, // [T * nheads]
     pub d_beta_flat: Vec<f32>,  // [T * nheads]
     pub d_gamma_flat: Vec<f32>, // [T * nheads]

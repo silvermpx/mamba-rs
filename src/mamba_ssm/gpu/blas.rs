@@ -614,6 +614,12 @@ struct BiGemmArgs {
     k: i32,
 }
 
+// Retained for v0.4.0: the WMMA GEMM path is registered in MambaKernels
+// but not in the default dispatcher yet. Current matvec (launch_bi_matvec)
+// handles all M via a 2D grid and matches cuBLAS at ~86% throughput; the
+// WMMA GEMM will be promoted once its persistent + cp.async rewrite
+// closes the gap at larger M.
+#[allow(dead_code)]
 fn launch_bi_gemm(
     ctx: &GpuCtx,
     kernel: &cudarc::driver::CudaFunction,

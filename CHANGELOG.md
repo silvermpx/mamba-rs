@@ -2,180 +2,210 @@
 
 ## 0.3.0
 
-GPU training and end-to-end half-precision (bf16 / f16) inference for both
-Mamba SSM and Mamba-3 SISO. Unified `MambaTrainer` / `Mamba3Trainer` API,
-batch-invariant inference, real-HF-checkpoint test coverage.
+GPU training and bf16/f16 inference for Mamba SSM and Mamba-3 SISO,
+unified trainer API, custom batch-invariant matvec.
 
 ### Trainer API
 
-- `MambaTrainer` and `Mamba3Trainer` — one entry point per architecture.
-  `.step(input, d_temporal)` runs forward + backward + AdamW + (for mixed)
-  master→compute sync. Constructor takes `WeightDtype`; the f32 vs mixed
-  engine split is internal.
-- `capture_graph()` records the full training step into a CUDA Graph; all
-  weight, gradient, and optimizer pointers are snapshotted at capture and
-  asserted stable on every replay.
-- `scaler_state()` / `load_scaler_state()` for f16 — persists the dynamic
-  loss scaler across checkpoint resume so training picks up at the same
-  scale instead of repaying the discovery phase.
-- `GpuAdamW` with decoupled weight decay (Loshchilov 2019), bias correction
-  in f64, capturable variant that reads bias factors from a 2-element
-  device buffer.
-- `DynamicLossScaler` matching `torch.cuda.amp.GradScaler`. Eager path
-  skips AdamW on overflow; captured-graph path runs a device-side
-  conditional unscale that sanitizes inf / NaN to zero.
+`MambaTrainer` / `Mamba3Trainer` — one entry point per arch.
+`step(input, d_temporal)` does forward + backward + AdamW + (for mixed)
+master→compute sync. `WeightDtype` chosen at construction; the F32/Mixed
+engine split is internal.
+
+`capture_graph()` records the whole training step into a CUDA Graph and
+asserts pointer stability on every replay (catches the silent-corruption
+class if any backing buffer gets reallocated between capture and replay).
+
+`scaler_state()` / `load_scaler_state()` round-trip the f16 dynamic
+loss scaler across checkpoint resume so training picks up at the
+last-known scale instead of repaying the ~2000 step discovery phase.
+
+`GpuAdamW` matches PyTorch — decoupled WD, f64 bias correction,
+capturable variant reads bias factors from a 2-element device buffer.
+`DynamicLossScaler` matches `torch.cuda.amp.GradScaler`; eager skips
+AdamW on overflow, captured-graph runs a device-side conditional
+unscale that sanitises inf/NaN to zero.
 
 ### Inference
 
-- Native bf16 / f16 activation pipeline for both Mamba SSM and Mamba-3
-  SISO — activations stay in weight dtype throughout, residual stream
-  stays f32 (matches HF `residual_in_fp32 = True`), SSM state stays f32.
-  `step_kernels_mixed_native` replaces the old cast-staged path.
-- `GpuMambaBackbone::new_with_dtype` / `GpuMamba3Backbone::new_with_dtype`
-  + the matching `GpuMambaLM` / `GpuMamba3LM` LM wrappers.
-- Native bf16 / f16 parallel prefill — no f32 fallback.
-- Batch-invariant GEMM (`kernels/gemm_batch_invariant.cu`): same logits
-  for the same prompt at any batch size. Fixed 64×64×32 tile, no split-K,
-  f32 accumulate. Drives `gpu_gemm_typed_forward_raw`; cuBLAS retained
-  only for dtype combinations without a custom kernel.
-  KL(B=1 ‖ B=32) on `mamba-130m-hf` bf16: **2e-11** (was ~1e-3).
+Native bf16/f16 activation pipeline for both archs. Activations stay
+in weight dtype, residual stream stays f32 (matches HF
+`residual_in_fp32=True`), SSM state stays f32. `step_kernels_mixed_native`
+replaces the cast-staged path. Native parallel prefill — no f32 fallback.
 
-### Kernels
+`GpuMambaBackbone::new_with_dtype` / `GpuMamba3Backbone::new_with_dtype`,
+plus the corresponding `GpuMambaLM` / `GpuMamba3LM` LM wrappers.
 
-- New typed (`f32` / `bf16` / `f16`) variants via `DEFINE_*` macros:
-  `rmsnorm_forward_f32in_*`, `residual_add_f32_*`, `gather_last_timestep_*`
-  (shared); `m3_split_*`, `bcnorm_fwd_*`, `bc_bias_add_*`, `rope_fwd_*`,
-  `silu_gate_fwd_*`, `rmsnorm_gated_forward_*` (Mamba-3 SISO).
-- Custom batch-invariant GEMM kernel (above).
-- `gpu_gemm_typed_forward_raw` with independent A / W / C dtypes;
-  `gpu_gemm_typed_raw_no_bias` blas-only variant for Mamba-3.
+### Batch-invariant matvec (the headline change)
+
+Custom CUDA kernel in `kernels/gemm_batch_invariant.cu` — no Python
+or Triton in the build. Output is bit-identical across batch sizes
+(KL ≈ 1e-11), against cuBLAS's `cublasGemmEx` which drifts to KL ≈ 1e-3
+between M=1 and M=N because it picks a different split-K / tile / algo
+per M.
+
+Layout: 8 warps × 32 threads per CTA, K split across warps, per-warp
+partials reduced in smem with a fixed reduction tree
+`(((p0+p1)+(p2+p3))+((p4+p5)+(p6+p7)))`. Grid is 2D
+`(ceil(N/32), M)` — one CTA per `(m_row, col_chunk)`, each row
+independent. The same kernel handles M=1 (decode) and M>1 (RL parallel
+envs, prefill) — cross-batch parity by construction, no opt-in flag.
+
+Throughput on RTX 6000 Ada, mamba-130m-hf, CUDA Graph, 100 greedy tokens:
+
+| dtype | tok/s | vs cuBLAS gemv |
+|---|---:|---:|
+| f32  | 725 | — |
+| bf16 | **898** | 86 % |
+| f16  | 899 | 86 % |
+
+Parity guardrails (`tests/hf_batch_parity.rs`, `tests/extreme_edge_coverage.rs`):
+
+- `bf16_batch_divergence_known` (adversarial prompt that hit
+  KL ≈ 2.7 with cuBLAS): now **KL = 0.0000**.
+- `bf16_multi_length_parity` lengths 3, 5, 32, 63, 64, 65, 128:
+  all KL ≤ 3.5e-11.
+- `inference_extreme_batch_parity_bf16_b{16,32}`: KL ≤ 2.2e-11.
+- `hf_cpu_vs_gpu_inference_bf16`: 20/20 token match, KL = 2e-6.
+
+For comparison, vLLM / Thinking Machines Lab `batch_invariant_ops`
+(opt-in Triton kernel) lands at ~80 % of cuBLAS on the same workload.
 
 ### HuggingFace
 
-- `rms_norm_eps` and `layer_norm_epsilon` read from `config.json`; loader
-  warns when the value differs from the kernel-hardcoded `1e-5` (e.g.
-  FalconMamba uses 1e-6).
-- Untied `lm_head` stride mismatch fixed — the GEMM wrote at `vocab_size`
-  while the downloader sliced at `vocab_size_padded`, corrupting batch
-  slots beyond the first on any vocab not 64-aligned (mamba-130m's 50 280
-  among them). Padded on upload; fixed in both LM wrappers.
-- Verified end-to-end bf16 inference on every cached `state-spaces/mamba-*-hf`
-  snapshot (130m / 370m / 1.4b / 2.8b): 15/15 greedy-token match vs f32,
-  KL ≤ 1.6e-3 (best 4e-5 at 2.8b).
+`rms_norm_eps` and `layer_norm_epsilon` are read from `config.json`;
+the loader warns when a checkpoint specifies a value other than the
+kernel-hardcoded `1e-5` (e.g. FalconMamba uses 1e-6).
+
+Untied `lm_head` stride bug — the GEMM wrote at `vocab_size` but the
+CPU downloader sliced at `vocab_size_padded`, so batch slots beyond
+the first got wrong logits on any vocab not already 64-aligned (e.g.
+mamba-130m's 50 280). Padded on upload in both LM wrappers.
+
+End-to-end bf16 inference verified on every cached
+`state-spaces/mamba-*-hf` snapshot (130m / 370m / 1.4b / 2.8b):
+15/15 greedy match vs f32, KL ≤ 1.6e-3 (best 4e-5 at 2.8b).
 
 ### Critical bugfixes
 
-- `a_neg` staleness in training. The per-layer `a_neg = -exp(a_log)` buffer
-  used by every SSM forward and backward was computed once at trainer
-  construction and never refreshed, so optimizer updates to `a_log` never
-  reached the SSM. Added recompute after every AdamW step across eager,
-  CUDA Graph, and f16 paths. Without this, gradient descent on the
-  A-matrix was a no-op for the entire training run.
-- f16 loss scaler overflow corruption. The captured-graph unscale kernel
-  used `grads[i] *= 0.0f` on overflow; `±Inf * 0 = NaN` then poisoned the
-  next AdamW step, turning master weights NaN. Switched to an explicit
-  `grads[i] = overflow ? 0 : grads[i] * unscale` so overflow is always a
-  clean skip.
-- Mamba SSM mixed forward argument swap at `WeightDtype::F32`. The mixed
-  forward routed F32 through the legacy `conv1d_burnin_forward` whose
-  argument order differs from the typed variants — silently swapping the
-  persistent conv state with the post-conv activation buffer every step.
-  Routed through a typed-signature f32 kernel.
-- RMSNorm finite-guard. On 48-layer bf16 models a transient activation
-  overflow produced one NaN that cascaded through every subsequent
-  RMSNorm via `1 / NaN = NaN`. Catastrophic on mamba-1.4b-hf (0/15 vs
-  f32 pre-fix). Added `if (!isfinite(rms) || rms < 1e-20f) rms = 1.0f`
-  to all RMSNorm / BCNorm / RMSNormGated variants (M1 + M3, f32 + typed).
-- Parallel scan at d_state > 64 — too-restrictive shared-memory load
-  filter; replaced with a strided loop so all `ds` entries load
-  regardless of the `ds / hd` ratio.
+`a_neg` staleness in training — the per-layer `a_neg = -exp(a_log)`
+buffer was computed once at trainer construction and never refreshed,
+so optimizer updates to `a_log` never reached the SSM. Recomputed
+after every AdamW step across the eager, captured-graph, and f16
+paths. Pre-fix, gradient descent on the A-matrix was a silent no-op
+for the entire training run.
+
+f16 loss-scaler overflow corruption — the captured-graph unscale
+kernel did `grads[i] *= 0.0f`, and `±Inf * 0 = NaN` poisoned the
+next AdamW step. Switched to `grads[i] = overflow ? 0 : grads[i] * unscale`
+so overflow is always a clean skip.
+
+Mamba SSM mixed forward routed `WeightDtype::F32` through the legacy
+`conv1d_burnin_forward`, whose argument order differs from the typed
+variants — the persistent conv state and the post-conv activation
+buffer got silently swapped every step. Routed through a typed-signature
+f32 kernel.
+
+RMSNorm finite-guard — on 48-layer bf16 models a transient activation
+overflow produced one NaN that cascaded through every subsequent
+RMSNorm via `1/NaN = NaN`. Catastrophic on mamba-1.4b-hf (0/15 vs f32
+pre-fix). Added the `if (!isfinite(rms) || rms < 1e-20f) rms = 1.0f`
+guard to every RMSNorm / BCNorm / RMSNormGated variant.
+
+M1 parallel scan at d_state > 64 used a too-restrictive smem load
+filter; replaced with a strided loop so every `ds` entry loads regardless
+of the `ds / hd` ratio.
 
 ### Other fixes
 
-- f16 eager overflow path skips AdamW + sync + a_neg recompute on
-  scaler-detected overflow (matches `GradScaler`). Spurious skips on
-  `m1_trainer_f16_production_lr_stable`: 47/50 → 3/50.
-- `AdamWBiasFactors` initializes to `[1.0, 1.0]` instead of `[0.0, 0.0]`,
-  preventing an all-weight-decay update if a graph is captured before
-  the first bias-factor write.
-- AdamW step counter clamps the bias-correction exponent at `2^30` —
-  the prior `as i32` cast went negative past `i32::MAX` (cosmetic, but
-  free correctness).
-- `step_kernels_mixed_native` (M1 + M3) uses `cuMemcpyDtoDAsync` on
-  cached raw pointers instead of `GpuBuffer::copy_from`, which goes
-  through a `SyncOnDrop` slice view that invalidates graph capture.
-- M3 angle_dt launch uses cached raw pointers instead of `.inner()`
-  for the same reason.
-- M3 NVRTC inlines `_typed_prelude.cuh` so bf16 / f16 helpers are in
-  scope before any `DEFINE_*` macro expansion.
-- `GpuMambaWeights` / `GpuMambaMixedWeights` layout formula uses actual
-  CPU weight lengths instead of hardcoded `d_model`-sized input_proj —
-  HF checkpoints often have empty `input_proj` (identity).
+f16 eager overflow path now skips AdamW + sync + `a_neg` recompute on
+scaler-detected overflow (matches `GradScaler`). Spurious skips on
+`m1_trainer_f16_production_lr_stable`: 47/50 → 3/50.
+
+`AdamWBiasFactors` defaults to `[1.0, 1.0]` instead of `[0.0, 0.0]`,
+which would have produced an all-weight-decay update if a graph were
+captured before the first bias-factor write.
+
+AdamW step counter clamps the bias-correction exponent at `2^30` — the
+prior `as i32` cast went negative past `i32::MAX`. Cosmetic, free fix.
+
+`step_kernels_mixed_native` (M1 + M3) uses `cuMemcpyDtoDAsync` on
+cached raw pointers instead of `GpuBuffer::copy_from`, which goes
+through a `SyncOnDrop` slice view that invalidates graph capture.
+M3 `angle_dt` launch fixed for the same reason.
+
+M3 NVRTC inlines `_typed_prelude.cuh` so the bf16 / f16 helpers are
+in scope before any `DEFINE_*` macro expansion.
+
+`GpuMambaWeights` / `GpuMambaMixedWeights` layout formula uses the
+actual CPU weight lengths instead of `d_model`-sized `input_proj` —
+HF checkpoints frequently have an empty `input_proj` (identity).
 
 ### API + crate plumbing
 
-- Inner trainer engines (`MambaTrainerMixed`, `MambaTrainerF32`,
-  `Mamba3TrainerMixed`, `Mamba3TrainerF32`) are `pub(crate)`. Public
-  surface is the wrappers only.
-- `gpu/trainer.rs` mirrors the inference `BackboneEngine` pattern —
-  public `MambaTrainer` is a thin dispatch over a private
-  `TrainerInner::{F32, Mixed}` enum.
-- `cuda` feature pulls `half` + `bytemuck` directly so
-  `cargo build --features cuda` (no `hf`) works.
-- `WeightDtype` re-exported from the crate root.
-- `pub mod gpu3` mirrors the existing `pub mod gpu` so Mamba-3 types
-  land one import deep.
-- `Mamba3Weights` / `Mamba3LayerWeights` are `#[derive(Clone)]`.
-- All `#[allow(clippy::too_many_arguments)]` removed by bundling args
-  into named structs (`TypedPtr`, `TiedLmDims`, `PrefillInputs`,
-  `Mamba3States`, `Mamba3LmBuild`, `BiGemmArgs`).
-- README rewritten with bf16 / f16 quickstart and an HF LLM example.
+Inner trainer engines (`MambaTrainerMixed`, `MambaTrainerF32`,
+`Mamba3TrainerMixed`, `Mamba3TrainerF32`) are now `pub(crate)`. Public
+surface is the wrappers only — the F32/Mixed dispatch lives behind a
+private enum, mirroring the existing inference `BackboneEngine` pattern.
+
+`cuda` feature pulls `half` + `bytemuck` directly so
+`cargo build --features cuda` (no `hf`) works on its own.
+
+`WeightDtype` is re-exported from the crate root. `pub mod gpu3`
+mirrors the existing `pub mod gpu` so Mamba-3 types land one import deep.
+`Mamba3Weights` / `Mamba3LayerWeights` are `#[derive(Clone)]`.
+
+All remaining `#[allow(clippy::too_many_arguments)]` removed by
+bundling args into named structs (`TypedPtr`, `TiedLmDims`,
+`PrefillInputs`, `Mamba3States`, `Mamba3LmBuild`, `BiGemmArgs`).
+
+README rewritten with a bf16/f16 quickstart and an HF LLM example.
 
 ### Tests
 
-49 test files, 280+ tests. Notable:
+49 test files, 287 tests pass on Ada with `cuda hf` + 60 ignored
+benches. Notable:
 
-- `hf_training_convergence` — 30-step real-checkpoint training on
-  mamba-130m-hf for all three dtypes; asserts monotone weight progress
-  and post-training inference validity.
-- `hf_full_cycle` — load → infer → train → re-infer.
-- `hf_batch_parity` — cross-batch logit parity on real weights;
-  CPU ↔ GPU f32 20/20 exact, bf16 20/20 KL ≤ 3e-6.
-- `extreme_edge_coverage` — batch=16/32, 1024-token generation
-  stability, M3 training at T=512 / T=1024.
-- `stability_stress` — CUDA Graph replay determinism, training
-  repeatability across independent trainer instances.
-- `cpu_gpu_train_parity` — M1 CPU vs GPU backward parity at f32.
-- `coverage_gaps::a_log_actually_reaches_ssm_after_training` —
-  regression guard for the `a_neg` staleness fix.
-- `backward_mixed_parity::backbone_grad_parity_multi_layer_{bf16,f16}`,
-  `trainer_smoke::m{1,3}_trainer_multi_layer_bf16` —
-  multi-layer (`n_layers = 3`) parity coverage.
+`hf_training_convergence` — 30-step real-checkpoint training on
+mamba-130m-hf for all three dtypes, monotone weight progress + valid
+post-training inference. `hf_full_cycle` — load → infer → train →
+re-infer. `hf_batch_parity` — cross-batch logit parity on real weights
+(CPU ↔ GPU f32 20/20 exact; bf16 20/20 KL ≤ 3e-6). `extreme_edge_coverage`
+— batch=16/32, 1024-token generation stability, M3 training at
+T=512/1024. `stability_stress` — CUDA Graph replay determinism, training
+repeatability across independent trainer instances. `cpu_gpu_train_parity`
+— M1 CPU vs GPU backward parity at f32. `coverage_gaps::a_log_actually_reaches_ssm_after_training`
+— regression guard for the `a_neg` staleness fix.
+`backward_mixed_parity::backbone_grad_parity_multi_layer_{bf16,f16}` and
+`trainer_smoke::m{1,3}_trainer_multi_layer_bf16` — multi-layer
+(`n_layers = 3`) parity coverage.
 
-### Performance
+### Performance summary
 
-`state-spaces/mamba-130m-hf`, RTX 6000 Ada, CUDA Graph:
+`state-spaces/mamba-130m-hf` on RTX 6000 Ada with CUDA Graph:
 
 | | f32 | bf16 | f16 |
-|---|---|---|---|
-| Inference B=1 (tok/s)               | 506   | 645   | 656   |
-| Training step B=1 T=32 (µs)         | 1 640 | 1 120 | 1 110 |
-| 30-step real-checkpoint convergence | 3.8 s | 2.9 s | 3.1 s |
+|---|---:|---:|---:|
+| Decode tok/s (B=1)                  | 725   | **898**   | 899   |
+| Training step (B=1, T=32) µs        | 1 640 | 1 120     | 1 110 |
+| 30-step real-checkpoint convergence | 3.8 s | 2.9 s     | 3.1 s |
 | Cross-batch KL (B=1 vs B=32)        | —     | **2e-11** | 2e-11 |
 
 Weight VRAM: bf16 / f16 = 0.50 × f32.
 
 ### Notes
 
-- No public Mamba-3 SISO HuggingFace checkpoint exists yet; the M3 LM
-  wrapper drives synthetic weights. When a real M3 checkpoint lands the
-  HF loader becomes a key remapper on top of the existing safetensors
-  path (purely additive).
-- `m3_compute_abg`, `m3_angle_dt_fwd_*` stay f32 by design; the RoPE
-  angle accumulator stays f64. Matches `state-spaces/mamba/mamba3.py`.
-- The pure-f32 inference and pure-f32 training paths are byte-unchanged
-  from 0.2.x; regression-guarded by
-  `test_gpu_f32_backbone_unchanged_after_mixed_refactor` (M1 + M3).
+No public Mamba-3 SISO HuggingFace checkpoint exists yet — the M3 LM
+wrapper drives synthetic weights for now. When a real M3 checkpoint
+lands, the HF loader becomes a key remapper on top of the existing
+safetensors path, no pipeline changes.
+
+`m3_compute_abg` and `m3_angle_dt_fwd_*` stay f32 by design; the
+RoPE angle accumulator stays f64. Both match `state-spaces/mamba/mamba3.py`.
+
+Pure-f32 inference and pure-f32 training are byte-unchanged from 0.2.x,
+regression-guarded by `test_gpu_f32_backbone_unchanged_after_mixed_refactor`
+on both archs.
 
 ## 0.2.1
 
