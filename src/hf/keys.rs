@@ -1,4 +1,4 @@
-//! HuggingFace tensor key remapping for Mamba-1.
+//! HuggingFace tensor key remapping for Mamba SSM.
 
 /// Result of remapping an HF safetensors key.
 #[derive(Debug, PartialEq)]
@@ -15,7 +15,7 @@ pub enum RemappedKey {
     Unknown,
 }
 
-/// Remap an HF Mamba-1 safetensors key to our internal field name.
+/// Remap an HF Mamba SSM safetensors key to our internal field name.
 pub fn remap_m1_hf_key(hf_key: &str) -> RemappedKey {
     if hf_key == "backbone.embeddings.weight" || hf_key == "backbone.embedding.weight" {
         return RemappedKey::Embedding;

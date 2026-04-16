@@ -229,6 +229,16 @@ unsafe impl Sync for BwdPtrs {}
 /// Only layer gradients are accumulated here; input_proj and norm_f are owned
 /// by the caller and handled outside this function. `input_dim` is only needed
 /// to allocate thread-local storage that matches `d_weights`'s layout.
+///
+/// **Burn-in limitation.** This entrypoint passes `angle_state_init = None`
+/// to the per-sample backward, which means the cumulative RoPE angle is
+/// reconstructed assuming the window starts at angle zero. That matches
+/// fresh-state training (the only mode all in-tree callers use). If a
+/// future workflow runs this on a window that started mid-sequence with a
+/// non-zero angle accumulator, the RoPE backward gradient would be off by
+/// the (unrecorded) offset. In that case, call
+/// [`crate::mamba3_siso::cpu::backward::backward_mamba3_layer_batched`]
+/// directly per-sample with the captured `angle_state_init`.
 pub fn parallel_mamba3_backward(
     d_temporal_out: &mut [f32],
     batch_acts: &[Vec<Mamba3LayerFlat>],

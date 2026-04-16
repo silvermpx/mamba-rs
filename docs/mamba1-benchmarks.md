@@ -1,4 +1,4 @@
-# Mamba-1 SSM Benchmarks
+# Mamba SSM Benchmarks
 
 Hardware: Ada server — Intel Xeon Gold 5412U (48 threads) + NVIDIA RTX 6000 Ada Generation (48 GB), CUDA 12.8, Driver 595.45.
 

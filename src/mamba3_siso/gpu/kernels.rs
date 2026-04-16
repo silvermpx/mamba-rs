@@ -1,7 +1,7 @@
 //! Compile and register Mamba-3 SISO CUDA kernels.
 //!
 //! 47 kernels across 5 .cu files, compiled via NVRTC at runtime.
-//! Separate from Mamba-1's `MambaKernels` — different pipeline, no conv1d.
+//! Separate from Mamba SSM's `MambaKernels` — different pipeline, no conv1d.
 
 use crate::mamba_ssm::gpu::kernels::{HalfKernel, TypedKernel};
 use cudarc::driver::{CudaContext, CudaFunction, CudaModule};

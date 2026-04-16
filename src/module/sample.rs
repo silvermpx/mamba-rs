@@ -73,7 +73,9 @@ impl Xoshiro256PlusPlus {
 /// ignored (treated as "disabled") to avoid producing `+Inf` logits via
 /// division by zero.
 pub fn apply_repetition_penalty(logits: &mut [f32], seen_tokens: &[u32], penalty: f32) {
-    if !(penalty > 0.0) || penalty == 1.0 {
+    // Treat NaN, ≤ 0, and exactly 1.0 as "disabled" — dividing by NaN or
+    // non-positive would blow up logits; 1.0 is an identity operation.
+    if !penalty.is_finite() || penalty <= 0.0 || penalty == 1.0 {
         return;
     }
     for &tok in seen_tokens {
@@ -106,7 +108,11 @@ pub fn apply_top_k(logits: &mut [f32], k: usize) -> usize {
     }
     let n = logits.len();
     let mut indices: Vec<usize> = (0..n).collect();
-    indices.select_nth_unstable_by(k, |&a, &b| logits[b].partial_cmp(&logits[a]).unwrap());
+    indices.select_nth_unstable_by(k, |&a, &b| {
+        logits[b]
+            .partial_cmp(&logits[a])
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     for &idx in &indices[k..] {
         logits[idx] = f32::NEG_INFINITY;
     }
@@ -136,11 +142,12 @@ pub fn softmax_inplace(logits: &mut [f32]) {
 /// token sorted first by probability) which surprises callers expecting
 /// "disabled" behavior matching `top_k = 0`.
 pub fn apply_top_p(probs: &mut [f32], p: f32) {
-    if !(p > 0.0) || p >= 1.0 {
+    // NaN / non-positive / ≥ 1.0 disables filtering (see rustdoc above).
+    if !p.is_finite() || p <= 0.0 || p >= 1.0 {
         return;
     }
     let mut indexed: Vec<(usize, f32)> = probs.iter().copied().enumerate().collect();
-    indexed.sort_unstable_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+    indexed.sort_unstable_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
     let mut cumsum = 0.0f32;
     let mut cutoff = indexed.len();
     for (i, &(_, prob)) in indexed.iter().enumerate() {
@@ -207,7 +214,7 @@ pub fn sample_token(
         return logits
             .iter()
             .enumerate()
-            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
             .map(|(i, _)| i as u32)
             .unwrap_or(0);
     }

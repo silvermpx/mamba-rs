@@ -1,8 +1,13 @@
-//! CPU training example: forward + backward + simple SGD update.
+//! Mamba SSM CPU training — forward + backward + manual SGD.
 //!
 //! ```bash
-//! cargo run --example training
+//! cargo run --release --example training
 //! ```
+//!
+//! Demonstrates the low-level CPU training primitives
+//! (`forward_mamba_backbone_batched` + `backward_mamba_backbone_batched`).
+//! Fine for RL actors and research sandboxes. For production GPU training
+//! see [`MambaTrainer`] and the `gpu_training_bf16` example.
 
 use mamba_rs::MambaWeights;
 use mamba_rs::config::MambaConfig;

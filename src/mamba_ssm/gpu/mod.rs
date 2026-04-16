@@ -1,4 +1,4 @@
-//! CUDA GPU backend for Mamba-1 SSM.
+//! CUDA GPU backend for Mamba SSM.
 //!
 //! - `inference` — GPU T=1 step with CUDA Graphs
 //! - `forward` — GPU training forward pass

@@ -23,7 +23,7 @@ use super::scratch::PhaseScratch;
 use super::weights::{TrainMambaLayerWeights, TrainMambaWeights};
 use crate::ops::blas::{matvec_forward, sgemm_forward};
 use crate::ops::dims::{MambaDims, MambaRecurrentState};
-use crate::ops::fast_math::{RMS_NORM_EPS, fast_exp_scalar};
+use crate::ops::fast_math::{RMS_NORM_EPS, fast_exp_inplace, fast_exp_scalar};
 
 /// O2 optimized single-layer Mamba forward pass: 7-phase pipeline with batched SGEMM.
 ///
@@ -233,15 +233,25 @@ pub fn forward_mamba_layer_batched(
                 let delta_d = acts.data[delta_start + d];
                 let u_d = acts.data[u_start + d];
                 let delta_u_d = delta_d * u_d; // hoisted from inner loop (C2/T6)
-                let mut y_d = 0.0_f32;
+                let a_base = d * ds;
 
+                // Batch `da[n] = exp(delta * a_neg[n])` across the d_state
+                // lane via SIMD `fast_exp_inplace` (NEON 4-wide, AVX2 8-wide).
+                // Bit-identical to the per-element `fast_exp_scalar` it
+                // replaces — same Cephes degree-7 + roundeven — verified by
+                // the CPU↔GPU train parity test.
                 for n in 0..ds {
-                    let idx = d * ds + n;
-                    let a_dn = a_neg[idx];
+                    scratch.da_buf[n] = delta_d * a_neg[a_base + n];
+                }
+                fast_exp_inplace(&mut scratch.da_buf[..ds]);
+
+                let mut y_d = 0.0_f32;
+                for n in 0..ds {
+                    let idx = a_base + n;
                     let b_n = acts.data[xdbl_start + b_offset + n];
                     let c_n = acts.data[xdbl_start + c_offset + n];
 
-                    let da = fast_exp_scalar(delta_d * a_dn);
+                    let da = scratch.da_buf[n];
                     acts.data[da_start + idx] = da;
 
                     let h_prev = ssm_state[idx];

@@ -1,4 +1,4 @@
-//! CPU backend for Mamba-1 SSM.
+//! CPU backend for Mamba SSM.
 //!
 //! - `inference` — zero-alloc T=1 step (single + batch + sequence)
 //! - `forward` — training forward pass (batched SGEMM)

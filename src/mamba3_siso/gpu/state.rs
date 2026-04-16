@@ -42,9 +42,10 @@ impl GpuMamba3Dims {
         self.batch * self.seq_len
     }
 
-    /// Chunk size for parallel scan (64, matching Mamba-3 reference implementation).
+    /// Chunk size for parallel scan (matches Mamba-3 reference implementation
+    /// `state-spaces/mamba/mamba_ssm/modules/mamba3.py`).
     pub fn chunk_size(&self) -> usize {
-        64
+        CHUNK_SIZE
     }
 
     /// Number of chunks for parallel scan.
@@ -52,6 +53,11 @@ impl GpuMamba3Dims {
         self.seq_len.div_ceil(self.chunk_size())
     }
 }
+
+/// Chunk size for the Mamba-3 SISO chunked SSD parallel scan. Single source
+/// of truth — every site that allocates `[B * n_chunks * nh * chunk_size]`
+/// scratch must reference this constant rather than re-spelling `64`.
+pub const CHUNK_SIZE: usize = 64;
 
 // ---------------------------------------------------------------------------
 // Saved activations (per layer)

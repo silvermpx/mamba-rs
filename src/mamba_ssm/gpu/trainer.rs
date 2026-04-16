@@ -1,4 +1,4 @@
-//! High-level Mamba-1 training API.
+//! High-level Mamba SSM training API.
 //!
 //! Mirrors the shape of [`super::inference::GpuMambaBackbone`] but on the
 //! training side. A single [`MambaTrainer`] owns EVERY piece of state
@@ -45,7 +45,7 @@
 use cudarc::driver::PushKernelArg;
 
 use crate::config::MambaConfig;
-use crate::mamba_ssm::gpu::adamw::{AdamWBiasFactors, GpuAdamW, step_m1, step_m1_capturable};
+use crate::mamba_ssm::gpu::adamw::{AdamWBiasFactors, GpuAdamW, step_m1_capturable};
 use crate::mamba_ssm::gpu::backward::gpu_backward_mamba_backbone;
 use crate::mamba_ssm::gpu::backward_mixed::gpu_backward_mamba_backbone_mixed;
 use crate::mamba_ssm::gpu::buffers::GpuBuffer;
@@ -152,7 +152,7 @@ enum TrainerInner {
     Mixed(Box<MambaTrainerMixed>),
 }
 
-/// High-level Mamba-1 training wrapper. Same shape as
+/// High-level Mamba SSM training wrapper. Same shape as
 /// [`super::inference::GpuMambaBackbone`]: one public struct, one method
 /// per operation, dtype dispatch happens internally on the private enum.
 pub struct MambaTrainer {
@@ -223,6 +223,7 @@ impl MambaTrainer {
         Ok(Self { inner })
     }
 
+    /// Weight storage dtype the trainer was constructed with.
     pub fn dtype(&self) -> WeightDtype {
         match &self.inner {
             TrainerInner::F32(_) => WeightDtype::F32,
@@ -230,6 +231,8 @@ impl MambaTrainer {
         }
     }
 
+    /// Batch dimension fixed at construction; CUDA Graph capture binds
+    /// device pointers for this exact `batch * seq_len` shape.
     pub fn batch(&self) -> usize {
         match &self.inner {
             TrainerInner::F32(t) => t.batch,
@@ -237,6 +240,7 @@ impl MambaTrainer {
         }
     }
 
+    /// Sequence length fixed at construction. See [`Self::batch`].
     pub fn seq_len(&self) -> usize {
         match &self.inner {
             TrainerInner::F32(t) => t.seq_len,
@@ -244,6 +248,8 @@ impl MambaTrainer {
         }
     }
 
+    /// CUDA context (stream + cuBLAS handle + device handle) the trainer
+    /// runs on. Useful for callers that share a stream across components.
     pub fn ctx(&self) -> &GpuCtx {
         match &self.inner {
             TrainerInner::F32(t) => &t.ctx,
@@ -251,6 +257,8 @@ impl MambaTrainer {
         }
     }
 
+    /// `true` once [`Self::capture_graph`] has been called and the
+    /// captured graph is ready for replay on subsequent [`Self::step`]s.
     pub fn has_graph(&self) -> bool {
         match &self.inner {
             TrainerInner::F32(t) => t.graph.is_some(),
@@ -258,6 +266,9 @@ impl MambaTrainer {
         }
     }
 
+    /// Reset the recurrent SSM + conv states to zero. Call between
+    /// independent training sequences (e.g. on episode boundary in RL
+    /// or document boundary in LM).
     pub fn reset_state(&mut self) -> Result<(), String> {
         match &mut self.inner {
             TrainerInner::F32(t) => t.reset_state(),
@@ -265,6 +276,12 @@ impl MambaTrainer {
         }
     }
 
+    /// Record the full training step (forward + backward + AdamW + sync)
+    /// into a CUDA Graph. Run at least one warmup [`Self::step`] before
+    /// capturing so cuBLAS has settled on its kernel selection. After
+    /// capture, every weight / gradient / optimizer pointer is asserted
+    /// stable on each replay; reallocating any of them invalidates the
+    /// graph and the next [`Self::step`] will return an error.
     pub fn capture_graph(&mut self) -> Result<(), String> {
         match &mut self.inner {
             TrainerInner::F32(t) => t.capture_graph(),
@@ -272,6 +289,10 @@ impl MambaTrainer {
         }
     }
 
+    /// Run one training step on `(input, d_temporal)`. `input` must have
+    /// length `batch * seq_len * input_dim`; `d_temporal` must have
+    /// length `batch * d_model` (gradient w.r.t. the final temporal
+    /// output). Returns [`StepMetrics`] with overflow / replay flags.
     pub fn step(&mut self, input: &[f32], d_temporal: &[f32]) -> Result<StepMetrics, String> {
         match &mut self.inner {
             TrainerInner::F32(t) => t.step(input, d_temporal),
@@ -279,6 +300,9 @@ impl MambaTrainer {
         }
     }
 
+    /// Download the f32 master weights to CPU for checkpointing. Always
+    /// f32 regardless of the compute dtype — mixed-precision training
+    /// keeps a separate master copy that the optimizer updates.
     pub fn snapshot_master(&self) -> Result<MambaWeights, String> {
         match &self.inner {
             TrainerInner::F32(t) => t.snapshot_master(),
@@ -323,7 +347,7 @@ impl MambaTrainer {
 
 /// bf16 mixed-precision training inner (master f32 + compute bf16 shadow +
 /// sync_master_to_compute each step).
-pub struct MambaTrainerMixed {
+pub(crate) struct MambaTrainerMixed {
     ctx: GpuCtx,
     cfg: MambaConfig,
     batch: usize,
@@ -499,22 +523,6 @@ impl MambaTrainerMixed {
             captured_f16_grads_ptr: 0,
             captured_f16_dt_scaled_ptr: 0,
         })
-    }
-
-    pub fn dtype(&self) -> WeightDtype {
-        self.dtype
-    }
-
-    pub fn batch(&self) -> usize {
-        self.batch
-    }
-
-    pub fn seq_len(&self) -> usize {
-        self.seq_len
-    }
-
-    pub fn ctx(&self) -> &GpuCtx {
-        &self.ctx
     }
 
     pub fn has_graph(&self) -> bool {
@@ -982,58 +990,7 @@ impl MambaTrainerMixed {
         Ok(())
     }
 
-    /// Alternative non-capturable step that uses the scalar-arg AdamW
-    /// kernel (the original `step_m1`). Produces the same math as
-    /// [`Self::step_eager`] but does not exercise the graph's bias-factor
-    /// device buffer path — useful for one-off debugging.
-    pub fn step_debug_scalar_adamw(&mut self) -> Result<StepMetrics, String> {
-        assert!(
-            self.graph.is_none(),
-            "step_debug_scalar_adamw cannot run while a graph is captured"
-        );
-        self.grads.zero(&self.ctx.stream)?;
-        gpu_forward_mamba_backbone_train_mixed(
-            &self.ctx,
-            &mut self.acts,
-            &self.weights,
-            &self.mamba_input,
-            &mut self.state,
-            &mut self.scratch,
-        )?;
-        gpu_backward_mamba_backbone_mixed(
-            &self.ctx,
-            &mut self.d_temporal,
-            &self.grads,
-            &self.acts,
-            &self.weights.compute,
-            &self.a_neg_all,
-            &mut self.scratch,
-        )?;
-        // step_m1 owns the counter (calls `adam.advance()` internally).
-        // The previous version of this path also called `adam.advance()` here,
-        // which double-bumped the counter — every debug step was worth 2
-        // optimizer steps so bias-correction factors ran ahead of the m/v
-        // state. Don't advance here; read the post-advance counter below.
-        step_m1(
-            &self.ctx,
-            &self.ctx.kernels.adamw_step_f32,
-            &mut self.adam,
-            &mut self.weights.master,
-            &self.grads,
-        )?;
-        self.weights.sync_master_to_compute(&self.ctx)?;
-        recompute_a_neg_all(
-            &self.ctx,
-            &self.weights.master.layers,
-            &self.a_neg_all,
-            &self.state.a_neg_all,
-            self.cfg.d_inner(),
-            self.cfg.d_state,
-        )?;
-        Ok(StepMetrics::plain(self.adam.step, false))
-    }
-
-    /// Download the master weights to a CPU-side `MambaWeights` for
+/// Download the master weights to a CPU-side `MambaWeights` for
     /// checkpointing. Includes a stream sync.
     pub fn snapshot_master(&self) -> Result<MambaWeights, String> {
         self.ctx
@@ -1072,7 +1029,7 @@ impl MambaTrainerMixed {
 
 /// f32 training inner. Weights stay in f32 throughout — no compute shadow,
 /// no master→compute sync step in the training loop.
-pub struct MambaTrainerF32 {
+pub(crate) struct MambaTrainerF32 {
     pub ctx: GpuCtx,
     pub cfg: MambaConfig,
     pub batch: usize,
@@ -1220,11 +1177,19 @@ impl MambaTrainerF32 {
     }
 
     pub fn step(&mut self, input: &[f32], d_temporal: &[f32]) -> Result<StepMetrics, String> {
-        assert_eq!(input.len(), self.mamba_input.len(), "input shape mismatch");
+        assert_eq!(
+            input.len(),
+            self.mamba_input.len(),
+            "input shape mismatch: expected batch*seq_len*input_dim={}, got {}",
+            self.mamba_input.len(),
+            input.len(),
+        );
         assert_eq!(
             d_temporal.len(),
             self.d_temporal.len(),
-            "d_temporal shape mismatch"
+            "d_temporal shape mismatch: expected batch*d_model={}, got {}",
+            self.d_temporal.len(),
+            d_temporal.len(),
         );
         self.mamba_input.upload(&self.ctx.stream, input)?;
         self.d_temporal.upload(&self.ctx.stream, d_temporal)?;

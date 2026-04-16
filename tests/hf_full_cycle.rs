@@ -143,9 +143,18 @@ fn run_full_cycle(dtype: WeightDtype) {
         _ => (3e-5f32, 0.01f32),
     };
 
-    let mut trainer =
-        MambaTrainer::new_full(0, &hf_weights, cfg, input_dim, batch, seq_len, dtype, lr, 0.0)
-            .expect("build trainer");
+    let mut trainer = MambaTrainer::new_full(
+        0,
+        &hf_weights,
+        cfg,
+        input_dim,
+        batch,
+        seq_len,
+        dtype,
+        lr,
+        0.0,
+    )
+    .expect("build trainer");
 
     // Real HF embed rows keep activations in natural range.
     let input: Vec<f32> = (0..batch * seq_len)
@@ -196,9 +205,7 @@ fn run_full_cycle(dtype: WeightDtype) {
         "[{label}] inference nondeterministic between reloads"
     );
     let diff = mean_abs_diff(&logits_before, &logits_after);
-    eprintln!(
-        "[{label}] post-reload inference: {tokens_after:?}  logits mean|diff|={diff:.3e}"
-    );
+    eprintln!("[{label}] post-reload inference: {tokens_after:?}  logits mean|diff|={diff:.3e}");
     assert!(
         diff < 1e-3,
         "[{label}] logits drifted {diff:.3e} between reloads of same checkpoint"

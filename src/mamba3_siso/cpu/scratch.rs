@@ -22,10 +22,8 @@ pub struct Mamba3Scratch {
     pub d_z_flat: Vec<f32>, // [T * d_inner]
 
     // ── Backward B3: BPTT ──
-    pub d_x_flat: Vec<f32>,     // [T * d_inner]
-    pub d_b_flat: Vec<f32>,     // [T * ngroups * d_state]
-    pub d_c_flat: Vec<f32>,     // [T * ngroups * d_state]
-    pub d_h: Vec<f32>,          // [nheads * headdim * d_state]
+    pub d_x_flat: Vec<f32>, // [T * d_inner]
+    pub d_h: Vec<f32>,      // [nheads * headdim * d_state]
     pub d_alpha_flat: Vec<f32>, // [T * nheads]
     pub d_beta_flat: Vec<f32>,  // [T * nheads]
     pub d_gamma_flat: Vec<f32>, // [T * nheads]
@@ -76,8 +74,6 @@ impl Mamba3Scratch {
             d_y_flat: vec![0.0; t * di],
             d_z_flat: vec![0.0; t * di],
             d_x_flat: vec![0.0; t * di],
-            d_b_flat: vec![0.0; t * ng * ds],
-            d_c_flat: vec![0.0; t * ng * ds],
             d_h: vec![0.0; nh * hd * ds],
             d_alpha_flat: vec![0.0; t * nh],
             d_beta_flat: vec![0.0; t * nh],
@@ -113,8 +109,6 @@ impl Mamba3Scratch {
         self.d_y_flat.fill(0.0);
         self.d_z_flat.fill(0.0);
         self.d_x_flat.fill(0.0);
-        self.d_b_flat.fill(0.0);
-        self.d_c_flat.fill(0.0);
         self.d_h.fill(0.0);
         self.d_alpha_flat.fill(0.0);
         self.d_beta_flat.fill(0.0);

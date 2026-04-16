@@ -1,36 +1,87 @@
 # mamba-rs
 
-Mamba SSM implementation in Rust with optional CUDA GPU acceleration. Supports Mamba-1 and Mamba-3 SISO.
+Mamba SSM and Mamba-3 SISO in Rust with optional CUDA GPU acceleration.
+Inference and training for both, with custom CUDA kernels.
 
-Full inference and training pipelines with BPTT through recurrent SSM state. Custom CUDA kernels with CUDA Graph capture for minimal-latency GPU inference.
+Pure Rust + CUDA — no PyTorch, no Triton, no Burn, no Candle. Kernels compile
+at runtime via NVRTC.
 
 ## Features
 
-- **Two architectures** — Mamba SSM (Gu & Dao, 2023) and Mamba-3 SISO (Lahoti et al., ICLR 2026)
-- **CPU inference** — zero-allocation single-step recurrent forward pass with SIMD + BLAS
-- **GPU inference** — CUDA kernels with optional CUDA Graph capture (~1.6x speedup)
-- **CPU training** — full backward pass with BPTT, parallel batch training via Rayon
-- **GPU training** — custom CUDA forward + backward kernels (47 for M3, 12 for M1)
-- **Serialization** — safetensors format (HuggingFace compatible)
-- **Standalone** — no framework dependency (no PyTorch, no Burn, no Candle)
-- **f32 / bf16 / f16** — end-to-end half-precision GPU inference (since 0.2.2): 2× weight VRAM compression, +24 % tok/s on Mamba-1 130m, +47 % on Mamba-3. f32 stays the default; bf16/f16 opt-in via `WeightDtype`.
+- **Two architectures** — Mamba SSM (Gu & Dao, 2023) and Mamba-3 SISO (Lahoti
+  et al., ICLR 2026).
+- **CPU + GPU** — both paths exposed, with a cross-path parity test on shared
+  weights.
+- **Inference + training** — full backward pass with BPTT through the
+  recurrent SSM state; AdamW optimizer; CUDA Graph capture for both.
+- **f32 / bf16 / f16** — a single `WeightDtype` selector at construction.
+  Compute stays f32 (upcast-in-kernel, f32 accumulators) regardless of
+  storage dtype.
+- **Batch-invariant bf16 inference** (0.3.0) — custom GEMM kernel
+  (`kernels/gemm_batch_invariant.cu`) guarantees that logits for the same
+  prompt are bit-identical across batch sizes. Follows the vLLM /
+  Thinking Machines Lab recipe (fixed 64×64×32 tile, no split-K).
+- **HuggingFace loader** — safetensors, synthetic + real Mamba SSM
+  checkpoints (130m / 370m / 1.4b / 2.8b validated).
+- **Standalone** — no framework dependency.
 
-## Quick Start — Mamba SSM
+## Use cases and API choice
+
+The crate targets two workloads. Pick the entry point that matches yours.
+
+### Reinforcement learning / small custom models
+
+Latency-critical, typically `d_model ≤ 256`, often batch = 1 for actor
+rollouts. Both CPU and GPU paths are supported; CPU is competitive at
+these sizes (~85 µs/step on Ada Xeon vs 79 µs/step on RTX 6000 Ada).
+
+- **Inference** — `mamba_step` (CPU) or `GpuMambaBackbone::step` (GPU)
+- **Training** — `parallel_mamba_forward` / `parallel_mamba_backward`
+  (CPU, Rayon-parallel batch) or `MambaTrainer::step` (GPU, CUDA-Graph-
+  captured forward + backward + AdamW + sync)
+
+CPU training works for model sizes where GPU overhead dominates
+(`d_model ≤ 128`, `batch ≤ 8`); GPU training scales well to `batch ≥ 32`.
+
+### Large language models
+
+Throughput-critical, `d_model ≥ 768`, sequence-level decoding with a
+HuggingFace checkpoint. GPU-only in practice — a 2.8b model on CPU is
+single-digit tokens/sec regardless of implementation.
+
+- **Inference** — `GpuMambaLM::from_hf_with_dtype` + `generate`
+- **Fine-tuning** — `MambaTrainer::new_full` accepting the HF
+  backbone weights (Mamba SSM only; no public Mamba-3 SISO checkpoint
+  exists yet)
+
+The CPU `MambaLM` path compiles and runs end-to-end, but exists for
+CPU↔GPU parity testing (`tests/hf_batch_parity.rs`), not for production
+LLM serving.
+
+### Sharing weights across paths
+
+All paths consume the same `MambaWeights` / `Mamba3Weights` struct.
+A training run's `MambaTrainer::snapshot_master()` output loads directly
+into `GpuMambaBackbone`, `GpuMambaLM`, or the CPU `MambaBackbone` without
+conversion.
+
+## Quick start (CPU)
+
+### Mamba SSM
 
 ```rust
 use mamba_rs::{MambaConfig, MambaState, MambaStepScratch, MambaWeights, mamba_step};
 
-let cfg = MambaConfig::default(); // d_model=128, 3 layers
+let cfg = MambaConfig::default();
 let weights = MambaWeights::init(&cfg, input_dim, 42);
 let mut state = MambaState::zeros(cfg.n_layers, cfg.d_inner(), cfg.d_state, cfg.d_conv);
 let mut scratch = MambaStepScratch::new(&cfg);
 let mut output = vec![0.0f32; cfg.d_model];
 
 mamba_step(&input, &mut output, &weights, &mut state.layers, &mut scratch, &cfg, input_dim);
-state.reset(); // episode boundary
 ```
 
-## Quick Start — Mamba-3 SISO
+### Mamba-3
 
 ```rust
 use mamba_rs::mamba3_siso::config::Mamba3Config;
@@ -47,64 +98,32 @@ let mut output = vec![0.0f32; cfg.d_model];
 mamba3_step(&mut output, &input, &mut scratch, &weights, &mut state.layers, &cfg);
 ```
 
-## GPU Inference (CUDA)
+## Quick start (GPU inference)
 
 ```toml
 [dependencies]
-mamba-rs = { version = "0.2", features = ["cuda"] }
+mamba-rs = { version = "0.3", features = ["cuda"] }
 ```
 
-### Mamba SSM
+`GpuMambaBackbone::new_with_dtype` and the symmetric Mamba-3 constructor take
+`WeightDtype::{F32, Bf16, F16}` — the rest of the API is unchanged.
 
 ```rust
 use mamba_rs::gpu::inference::GpuMambaBackbone;
+use mamba_rs::WeightDtype;
 
-let mut gpu = GpuMambaBackbone::new(0, &weights, cfg, input_dim, batch)?;
-gpu.capture_graph()?; // optional ~2x speedup
+let mut gpu = GpuMambaBackbone::new_with_dtype(0, &weights, cfg, input_dim, batch, WeightDtype::Bf16)?;
+gpu.capture_graph()?; // optional; ~2× decode speedup
 gpu.step(&input, &mut output)?;
 gpu.reset()?;
 ```
 
-### Mamba-3
-
-```rust
-use mamba_rs::mamba3_siso::gpu::inference::GpuMamba3Backbone;
-
-let mut gpu = GpuMamba3Backbone::new(0, &weights, cfg, input_dim, batch)?;
-gpu.capture_graph()?; // optional ~1.6x speedup
-gpu.step(&input, &mut output)?;
-gpu.reset()?;
-```
-
-Requires NVIDIA GPU + CUDA toolkit. Kernels compiled at runtime via NVRTC.
-
-### End-to-end bf16 / f16 inference (0.2.2+)
-
-Choose weight and activation dtype at construction. Compute stays f32
-(CUBLAS_COMPUTE_32F, upcast-inside-kernel) — no precision loss in
-accumulation. Residual stream and SSM state stay f32 for stability
-(matches HF `residual_in_fp32=True`). Weight VRAM is halved; typical
-decode speedup +20–50 % on Ada/Hopper.
-
-```rust
-use mamba_rs::gpu::inference::GpuMambaBackbone;
-use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
-
-// Same API; the Mixed engine + native bf16 pipeline is picked automatically
-// when dtype != F32.
-let mut gpu_bf16 = GpuMambaBackbone::new_with_dtype(
-    0, &weights, cfg, input_dim, batch, WeightDtype::Bf16,
-)?;
-gpu_bf16.capture_graph()?;
-gpu_bf16.step(&input, &mut output)?;
-```
-
-For LLM inference with HuggingFace-format Mamba-1 checkpoints:
+### HuggingFace LM inference
 
 ```rust
 use mamba_rs::module::gpu_lm::GpuMambaLM;
 use mamba_rs::module::sample::SampleParams;
-use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
+use mamba_rs::WeightDtype;
 use std::path::Path;
 
 let mut lm = GpuMambaLM::from_hf_with_dtype(
@@ -114,18 +133,45 @@ lm.capture_graph()?;
 let tokens = lm.generate(&[1, 2, 3, 4, 5], &SampleParams::default())?;
 ```
 
-Mamba-3 mirrors the same API — `GpuMamba3Backbone::new_with_dtype`
-and `GpuMamba3LM::from_weights_with_dtype` (no HF loader yet; no
-public Mamba-3 SISO checkpoint exists). Validation: bf16 vs f32
-greedy match 20/20 tokens on `state-spaces/mamba-130m-hf`,
-KL ≈ 1e-3 on final logits.
+bf16 vs f32 on all four cached `state-spaces/mamba-*-hf` checkpoints:
+15/15 greedy match, KL ≤ 1.6e-3. Batch=1 vs batch=32 on the same prompt:
+KL ≈ 2e-11 (bit-identical up to f32 roundoff of the fixed reduction tree).
 
-## Weight Serialization
+## Quick start (GPU training)
+
+`MambaTrainer` / `Mamba3Trainer` wrap the full forward + backward + AdamW +
+sync pipeline behind a single `.step()` call. One dispatch struct per
+architecture; an internal enum selects the f32 or mixed (bf16/f16) inner
+engine based on the `WeightDtype` constructor argument.
+
+```rust
+use mamba_rs::mamba_ssm::gpu::trainer::MambaTrainer;
+use mamba_rs::WeightDtype;
+
+let mut trainer = MambaTrainer::new_full(
+    /* gpu_ordinal */ 0,
+    &cpu_weights, cfg, input_dim,
+    /* batch */ 2, /* seq_len */ 64,
+    WeightDtype::Bf16,
+    /* lr */ 3e-4, /* weight_decay */ 1e-2,
+)?;
+trainer.capture_graph()?; // optional; one cuGraphLaunch per step after this
+
+let metrics = trainer.step(&input, &d_temporal_upstream)?;
+// metrics.step, metrics.graph_replayed, metrics.loss_scale (f16), metrics.overflow_skipped (f16)
+
+let master = trainer.snapshot_master()?; // CPU-side MambaWeights for checkpointing
+```
+
+`Mamba3Trainer` mirrors the same API. f16 training activates the dynamic
+loss scaler automatically; `metrics.loss_scale` / `metrics.overflow_skipped`
+report its state each step.
+
+## Serialization
 
 ```rust
 use mamba_rs::serialize;
 
-// Mamba-1
 serialize::save(Path::new("model.safetensors"), backbone.weights(), cfg, input_dim)?;
 let (weights, cfg, input_dim) = serialize::load(Path::new("model.safetensors"))?;
 
@@ -137,23 +183,57 @@ let (weights, input_dim) = load_mamba3(Path::new("m3.safetensors"), &cfg)?;
 
 ## Performance (RTX 6000 Ada)
 
+### LLM throughput — `state-spaces/mamba-*-hf`, greedy decode, CUDA Graph
+
+| Model         | f32 tok/s | bf16 tok/s | f16 tok/s | bf16 vs f32 |
+|---------------|-----------|-----------:|----------:|------------:|
+| mamba-130m-hf | 723       | **1 039**  | 1 043     | +44 %       |
+| mamba-370m-hf | 325       | **451**    | 448       | +39 %       |
+| mamba-1.4b-hf | 125       | **217**    | 218       | +74 %       |
+| mamba-2.8b-hf |  66       | **118**    | 119       | +79 %       |
+
+### Per-step latency (default config: d_model=128, 3 layers)
+
 | | Mamba SSM | Mamba-3 SISO |
 |---|---|---|
-| GPU Inference B=1 (CUDA Graph) | **79 us** | **86 us** |
-| GPU Training Fwd+Bwd (T=32) | 1,640 us | 2,169 us |
-| CPU Inference B=1 | 84 us | **65 us** |
-| CPU Training Fwd+Bwd (T=32) | 15,874 us | **3,609 us** |
+| GPU inference B=1 (CUDA Graph) | **79 µs** | **86 µs** |
+| GPU training fwd+bwd (T=32)    | 1 640 µs | 2 170 µs |
+| CPU inference B=1              | 84 µs    | **65 µs** |
+| CPU training fwd+bwd (T=32)    | 15 870 µs | **3 610 µs** |
 
-Zero heap allocations per inference step. See detailed results:
-- [Mamba SSM benchmarks](docs/mamba1-benchmarks.md)
-- [Mamba-3 benchmarks](docs/mamba3-benchmarks.md)
+Detailed tables: [Mamba SSM benchmarks](docs/mamba1-benchmarks.md),
+[Mamba-3 SISO benchmarks](docs/mamba3-benchmarks.md).
+
+## Testing
+
+49 test files, 280+ individual tests:
+
+- Correctness: bit-parity across CPU ↔ GPU, eager ↔ CUDA Graph, f32 ↔ bf16/f16
+- Gradient checks: finite-difference vs analytical on every weight tensor
+- Real checkpoints: 30-step training convergence + inference on
+  `state-spaces/mamba-130m-hf` for all three dtypes
+- Batch invariance: KL < 1e-4 across batch sizes 1 / 4 / 16 / 32 at bf16
+- Long-sequence stability: 1024-token generation + T=1024 M3 training
+- CUDA Graph: replay determinism, pointer-stability assertions
+
+Run the fast suite:
+
+```sh
+cargo test --release --features cuda
+```
+
+Full suite including HuggingFace-backed tests (needs the HF cache):
+
+```sh
+cargo test --release --features "cuda hf" -- --include-ignored
+```
 
 ## Documentation
 
-- [Mamba SSM architecture](docs/mamba1-architecture.md) — pipeline, modular API, weight layout
-- [Mamba-3 architecture](docs/mamba3-architecture.md) — trapezoidal SSM, RoPE, BCNorm, CUDA kernels
-- [Mamba SSM benchmarks](docs/mamba1-benchmarks.md) — GPU/CPU inference + training numbers
-- [Mamba-3 benchmarks](docs/mamba3-benchmarks.md) — GPU/CPU inference + training numbers
+- [Mamba SSM architecture](docs/mamba1-architecture.md)
+- [Mamba-3 SISO architecture](docs/mamba3-architecture.md)
+- [Mamba SSM benchmarks](docs/mamba1-benchmarks.md)
+- [Mamba-3 SISO benchmarks](docs/mamba3-benchmarks.md)
 
 ## Citation
 

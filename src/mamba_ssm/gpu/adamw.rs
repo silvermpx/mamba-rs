@@ -379,7 +379,7 @@ pub fn run_pairs_capturable(
     Ok(())
 }
 
-/// Mamba-1 backbone AdamW step. Iterates the per-tensor master weights in
+/// Mamba SSM backbone AdamW step. Iterates the per-tensor master weights in
 /// the SAME order as `GpuMambaGrads::new` wrote them into the flat arena,
 /// so the m/v offsets line up element-for-element with grads.flat.
 pub fn step_m1(

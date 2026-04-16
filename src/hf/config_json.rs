@@ -81,10 +81,7 @@ pub fn parse_config_json(json_bytes: &[u8]) -> Result<HfMambaConfig, String> {
     // Accept either name. HF-native Mamba uses `rms_norm_eps`; some
     // older forks / Mamba2 configs use `layer_norm_epsilon`. Default
     // 1e-5 matches state-spaces/mamba reference.
-    let rms_norm_eps = raw
-        .rms_norm_eps
-        .or(raw.layer_norm_epsilon)
-        .unwrap_or(1e-5);
+    let rms_norm_eps = raw.rms_norm_eps.or(raw.layer_norm_epsilon).unwrap_or(1e-5);
 
     Ok(HfMambaConfig {
         family,

@@ -1,4 +1,4 @@
-//! Mixed-precision (bf16/f16) training activations for Mamba-1.
+//! Mixed-precision (bf16/f16) training activations for Mamba SSM.
 //!
 //! Mirrors [`super::forward::GpuMambaBackboneActs`] structure but stores
 //! activations in `DtypedBuf` (bf16/f16/f32) where appropriate. Tensors that
@@ -283,7 +283,7 @@ impl GpuMambaMixedTrainScratch {
 // Mixed-precision training forward backbone (delegates to typed kernels).
 // ════════════════════════════════════════════════════════════════════════
 
-/// Mamba-1 backbone forward in mixed precision (bf16/f16/f32 dispatched by
+/// Mamba SSM backbone forward in mixed precision (bf16/f16/f32 dispatched by
 /// `acts.dtype`). Mirrors [`super::forward::gpu_forward_mamba_backbone`] but
 /// reads compute weights from [`GpuMambaMixedWeights`] and saves typed
 /// activations in [`GpuMambaBackboneMixedActs`].

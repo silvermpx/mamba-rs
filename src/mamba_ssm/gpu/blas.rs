@@ -597,52 +597,116 @@ fn pick_bi_gemm(
     }
 }
 
-/// Launch the batch-invariant GEMM kernel. All tensors row-major.
-///   A: [M, K] stride K
-///   B: [K, N] stride N
-///   C: [M, N] stride N
-/// bias_ptr: nullable [N] f32; alpha/beta standard GEMM scalars.
-fn launch_bi_gemm(
-    ctx: &GpuCtx,
-    kernel: &cudarc::driver::CudaFunction,
-    c_ptr: cudarc::driver::sys::CUdeviceptr,
-    a_ptr: cudarc::driver::sys::CUdeviceptr,
-    b_ptr: cudarc::driver::sys::CUdeviceptr,
-    bias_ptr: cudarc::driver::sys::CUdeviceptr, // pass 0 for "no bias"
+/// Arguments for the batch-invariant GEMM kernel. All row-major:
+///   A: `[m, k]` stride `k`
+///   B: `[k, n]` stride `n`
+///   C: `[m, n]` stride `n`
+/// `bias`: nullable `[n]` f32. Pass `0` for "no bias".
+struct BiGemmArgs {
+    c: cudarc::driver::sys::CUdeviceptr,
+    a: cudarc::driver::sys::CUdeviceptr,
+    b: cudarc::driver::sys::CUdeviceptr,
+    bias: cudarc::driver::sys::CUdeviceptr,
     alpha: f32,
     beta: f32,
     m: i32,
     n: i32,
     k: i32,
+}
+
+fn launch_bi_gemm(
+    ctx: &GpuCtx,
+    kernel: &cudarc::driver::CudaFunction,
+    args: BiGemmArgs,
 ) -> Result<(), String> {
     const BLOCK_M: i32 = 64;
     const BLOCK_N: i32 = 64;
     const THREADS: u32 = 256;
-    let num_pid_m = (m + BLOCK_M - 1) / BLOCK_M;
-    let num_pid_n = (n + BLOCK_N - 1) / BLOCK_N;
+    let num_pid_m = (args.m + BLOCK_M - 1) / BLOCK_M;
+    let num_pid_n = (args.n + BLOCK_N - 1) / BLOCK_N;
     let grid = (num_pid_m as u32) * (num_pid_n as u32);
     let cfg = cudarc::driver::LaunchConfig {
         grid_dim: (grid, 1, 1),
         block_dim: (THREADS, 1, 1),
         shared_mem_bytes: 0,
     };
-    let lda = k;
-    let ldb = n;
-    let ldc = n;
+    let lda = args.k;
+    let ldb = args.n;
+    let ldc = args.n;
     let mut builder = ctx.stream.launch_builder(kernel);
-    builder.arg(&c_ptr);
-    builder.arg(&a_ptr);
-    builder.arg(&b_ptr);
-    builder.arg(&bias_ptr);
-    builder.arg(&alpha);
-    builder.arg(&beta);
-    builder.arg(&m);
-    builder.arg(&n);
-    builder.arg(&k);
+    builder.arg(&args.c);
+    builder.arg(&args.a);
+    builder.arg(&args.b);
+    builder.arg(&args.bias);
+    builder.arg(&args.alpha);
+    builder.arg(&args.beta);
+    builder.arg(&args.m);
+    builder.arg(&args.n);
+    builder.arg(&args.k);
     builder.arg(&lda);
     builder.arg(&ldb);
     builder.arg(&ldc);
     unsafe { builder.launch(cfg) }.map_err(|e| format!("gemm_bi launch failed: {e:?}"))?;
+    Ok(())
+}
+
+/// Pick the M=1 matvec kernel — much faster than gemm_bi at M=1 because
+/// the GEMM tile wastes 98% of smem bandwidth on zero-padding at M=1.
+fn pick_bi_matvec(
+    ctx: &GpuCtx,
+    a_dtype: WeightDtype,
+    b_dtype: WeightDtype,
+    c_dtype: WeightDtype,
+) -> Option<&cudarc::driver::CudaFunction> {
+    if a_dtype != b_dtype {
+        return None;
+    }
+    match (a_dtype, c_dtype) {
+        (WeightDtype::Bf16, WeightDtype::Bf16) => Some(&ctx.kernels.matvec_bi_bf16_bf16),
+        (WeightDtype::F16, WeightDtype::F16) => Some(&ctx.kernels.matvec_bi_f16_f16),
+        (WeightDtype::Bf16, WeightDtype::F32) => Some(&ctx.kernels.matvec_bi_bf16_f32),
+        (WeightDtype::F16, WeightDtype::F32) => Some(&ctx.kernels.matvec_bi_f16_f32),
+        (WeightDtype::F32, WeightDtype::F32) => Some(&ctx.kernels.matvec_bi_f32_f32),
+        _ => None,
+    }
+}
+
+fn launch_bi_matvec(
+    ctx: &GpuCtx,
+    kernel: &cudarc::driver::CudaFunction,
+    args: BiGemmArgs,
+    io_dtype: WeightDtype,
+) -> Result<(), String> {
+    // Must match kernel constants in kernels/gemm_batch_invariant.cu:
+    //   BLOCK_N_MV = 32, WARPS_PER_BLOCK = 8, THREADS_PER_BLOCK = 256
+    // Grid is 2D: (ceil(N / BLOCK_N_MV), M) — one CTA per (m_row, col_chunk).
+    const BLOCK_N_MV: i32 = 32;
+    const THREADS_PER_BLOCK: i32 = 256;
+    let a_bytes = (args.k as u32) * (io_dtype.size_bytes() as u32);
+    let smem_bytes = (a_bytes + 15) & !15;
+    let num_pid_n = (args.n + BLOCK_N_MV - 1) / BLOCK_N_MV;
+    let cfg = cudarc::driver::LaunchConfig {
+        grid_dim: (num_pid_n as u32, args.m as u32, 1),
+        block_dim: (THREADS_PER_BLOCK as u32, 1, 1),
+        shared_mem_bytes: smem_bytes,
+    };
+    let lda = args.k;
+    let ldb = args.n;
+    let ldc = args.n;
+    let mut builder = ctx.stream.launch_builder(kernel);
+    builder.arg(&args.c);
+    builder.arg(&args.a);
+    builder.arg(&args.b);
+    builder.arg(&args.bias);
+    builder.arg(&args.alpha);
+    builder.arg(&args.beta);
+    builder.arg(&args.m);
+    builder.arg(&args.n);
+    builder.arg(&args.k);
+    builder.arg(&lda);
+    builder.arg(&ldb);
+    builder.arg(&ldc);
+    unsafe { builder.launch(cfg) }.map_err(|e| format!("matvec_bi launch failed: {e:?}"))?;
     Ok(())
 }
 
@@ -656,30 +720,46 @@ pub fn gpu_gemm_typed_forward_raw(
 ) -> Result<(), String> {
     let (batch, n_in, n_out) = dims;
 
-    // Try the batch-invariant path first — guarantees cross-M bit-identity
-    // which cuBLAS `cublasGemmEx` cannot provide (split-K + shape-dependent
-    // algo selection). Falls back to cuBLAS only for dtype combinations we
-    // didn't compile a batch-invariant kernel for.
-    if let Some(kernel) = pick_bi_gemm(ctx, x.dtype, w.dtype, c.dtype) {
+    // Dispatch:
+    //   M=1   → batch-invariant matvec (decode hot path; ~1000 tok/s
+    //           target, same as cuBLAS gemv, PLUS trivially deterministic
+    //           because M=1 has no batch dim).
+    //   M≥2   → cuBLAS GemmEx (fast Tensor-Core path; deterministic for
+    //           fixed M within a process — sufficient for fixed-batch RL
+    //           and prefill workloads).
+    //
+    // The `gemm_bi_*` WMMA kernels are registered but not in the default
+    // path — they hit ~30% of cuBLAS throughput in their current form,
+    // pending the v0.4.0 persistent+cp.async+stream-K rewrite. Keep
+    // the reference alive for the compiler.
+    let _ = pick_bi_gemm(ctx, x.dtype, w.dtype, c.dtype);
+
+    // The matvec kernel now handles any M ≥ 1 via a 2D grid (CTA per
+    // (m_row, col_chunk)). At M=1 it matches cuBLAS-gemv throughput; at
+    // M>1 it's slower than cuBLAS-gemm because B is streamed once per
+    // row (no tile-level reuse across M), but each row's output is
+    // bit-identical to the M=1 computation — giving strict cross-batch
+    // determinism without a `relaxed` / `pedantic` flag.
+    if let Some(kernel) = pick_bi_matvec(ctx, x.dtype, w.dtype, c.dtype) {
         let bias_arg = bias_ptr.unwrap_or(0);
-        return launch_bi_gemm(
+        return launch_bi_matvec(
             ctx,
             kernel,
-            c.ptr,
-            x.ptr,
-            w.ptr,
-            bias_arg,
-            1.0,
-            0.0,
-            batch as i32,
-            n_out as i32,
-            n_in as i32,
+            BiGemmArgs {
+                c: c.ptr,
+                a: x.ptr,
+                b: w.ptr,
+                bias: bias_arg,
+                alpha: 1.0,
+                beta: 0.0,
+                m: batch as i32,
+                n: n_out as i32,
+                k: n_in as i32,
+            },
+            x.dtype,
         );
     }
 
-    // cuBLAS fallback path (rare combos). Note that this path does NOT
-    // provide cross-M bit-identity — any caller hitting it should expect
-    // bf16-class numerical drift across batch sizes.
     let beta = if let Some(b_ptr) = bias_ptr {
         let b_i = batch as i32;
         let n_i = n_out as i32;
@@ -720,6 +800,8 @@ pub fn gpu_gemm_typed_forward_raw(
             c.ptr as *mut c_void,
             c.dtype.cuda_data_type(),
             n_out as c_int,
+            // Compute type derives from W dtype (f32 for F32 weights, f32 for
+            // bf16/f16 — all our paths use CUBLAS_COMPUTE_32F accumulate).
             w.dtype.compute_type(),
             cudarc::cublas::sys::cublasGemmAlgo_t::CUBLAS_GEMM_DEFAULT,
         )

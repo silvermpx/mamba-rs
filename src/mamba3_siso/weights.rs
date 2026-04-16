@@ -26,7 +26,7 @@ pub struct Mamba3LayerWeights {
     pub b_bias: Vec<f32>,
     /// C bias: `[nheads * d_state]`. Added after BCNorm, before RoPE.
     pub c_bias: Vec<f32>,
-    /// D skip connection: `[nheads]`. Per-head (not per-channel like Mamba-1).
+    /// D skip connection: `[nheads]`. Per-head (not per-channel like Mamba SSM).
     pub d_param: Vec<f32>,
     /// RMSNormGated weight: `[d_inner]`. Only used if `is_outproj_norm=true`.
     pub norm_gate_weight: Vec<f32>,

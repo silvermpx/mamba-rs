@@ -32,6 +32,7 @@ use crate::mamba_ssm::gpu::launch::{grid_1d, grid_norm};
 use crate::mamba3_siso::config::Mamba3Config;
 use crate::mamba3_siso::gpu::kernels::Mamba3Kernels;
 use crate::mamba3_siso::gpu::mamba3_gpu::GpuMamba3Dims;
+use crate::mamba3_siso::gpu::state::CHUNK_SIZE;
 use crate::mamba3_siso::gpu::weights_mixed_train::GpuMamba3TrainMixedWeights;
 
 /// Per-layer saved activations for M3 mixed-precision backward.
@@ -155,11 +156,9 @@ impl GpuMamba3BackboneMixedActs {
         let hd = cfg.headdim;
         let bt = batch * seq_len;
         // Match f32 GpuMamba3LayerActs: chunks sized by ceil(seq_len / chunk_size).
-        // chunk_size=64 mirrors GpuMamba3Dims::chunk_size (kernels/mamba3_chunked.cu).
-        let chunk_size = 64;
-        let nc_max = seq_len.div_ceil(chunk_size);
+        let nc_max = seq_len.div_ceil(CHUNK_SIZE);
         // da_cumsum_saved is [B * nc * nh * chunk_size] per f32 layout.
-        let da_cs_len = batch * nc_max * nh * chunk_size;
+        let da_cs_len = batch * nc_max * nh * CHUNK_SIZE;
 
         let layers = (0..cfg.n_layers)
             .map(|_| {
@@ -930,8 +929,7 @@ impl GpuMamba3MixedScratch {
         let nh = cfg.nheads();
         let hd = cfg.headdim;
         let ip = cfg.in_proj_out_dim();
-        let chunk_size = 64; // M3 chunk size (mirrors GpuMamba3Dims::chunk_size)
-        let n_chunks_max = seq_len.div_ceil(chunk_size);
+        let n_chunks_max = seq_len.div_ceil(CHUNK_SIZE);
         let s = Self {
             proj_flat: DtypedBuf::zeros(stream, bt * ip, dtype)?,
             out_flat: DtypedBuf::zeros(stream, bt * dm, dtype)?,
@@ -949,7 +947,7 @@ impl GpuMamba3MixedScratch {
             d_proj_typed: DtypedBuf::zeros(stream, bt * ip, dtype)?,
             d_post_norm_typed: DtypedBuf::zeros(stream, bt * dm, dtype)?,
             adt_temp: GpuBuffer::zeros(stream, bt * nh)?,
-            da_cumsum: GpuBuffer::zeros(stream, batch * n_chunks_max * nh * chunk_size)?,
+            da_cumsum: GpuBuffer::zeros(stream, batch * n_chunks_max * nh * CHUNK_SIZE)?,
             chunk_states: GpuBuffer::zeros(stream, batch * n_chunks_max * nh * hd * ds)?,
             final_states: GpuBuffer::zeros(stream, batch * nh * hd * ds)?,
             dtype,

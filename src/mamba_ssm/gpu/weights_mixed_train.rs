@@ -1,4 +1,4 @@
-//! Mixed-precision training weights for Mamba-1.
+//! Mixed-precision training weights for Mamba SSM.
 //!
 //! Architecture (PyTorch-AMP convention):
 //! - **Master weights** = f32, owned by [`GpuMambaTrainWeights`] (existing

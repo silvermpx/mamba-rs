@@ -108,63 +108,102 @@ impl Mamba3Trainer {
         Ok(Self { inner })
     }
 
+    /// Weight storage dtype the trainer was constructed with.
     pub fn dtype(&self) -> WeightDtype {
         match &self.inner {
             Trainer3Inner::F32(_) => WeightDtype::F32,
             Trainer3Inner::Mixed(t) => t.dtype,
         }
     }
+
+    /// Batch dimension fixed at construction.
     pub fn batch(&self) -> usize {
         match &self.inner {
             Trainer3Inner::F32(t) => t.dims.batch,
             Trainer3Inner::Mixed(t) => t.dims.batch,
         }
     }
+
+    /// Sequence length fixed at construction.
     pub fn seq_len(&self) -> usize {
         match &self.inner {
             Trainer3Inner::F32(t) => t.dims.seq_len,
             Trainer3Inner::Mixed(t) => t.dims.seq_len,
         }
     }
+
+    /// CUDA context the trainer runs on.
     pub fn ctx(&self) -> &GpuCtx {
         match &self.inner {
             Trainer3Inner::F32(t) => &t.ctx,
             Trainer3Inner::Mixed(t) => &t.ctx,
         }
     }
+
+    /// `true` once [`Self::capture_graph`] has been called.
     pub fn has_graph(&self) -> bool {
         match &self.inner {
             Trainer3Inner::F32(t) => t.graph.is_some(),
             Trainer3Inner::Mixed(t) => t.has_graph(),
         }
     }
+
+    /// Reset the recurrent SSM, K, V, and angle states to zero.
     pub fn reset_state(&mut self) -> Result<(), String> {
         match &mut self.inner {
             Trainer3Inner::F32(t) => t.reset_state(),
             Trainer3Inner::Mixed(t) => t.reset_state(),
         }
     }
+
+    /// Record the full training step into a CUDA Graph. Run at least one
+    /// warmup [`Self::step`] first. See [`MambaTrainer::capture_graph`]
+    /// for the pointer-stability contract — same rules apply here.
     pub fn capture_graph(&mut self) -> Result<(), String> {
         match &mut self.inner {
             Trainer3Inner::F32(t) => t.capture_graph(),
             Trainer3Inner::Mixed(t) => t.capture_graph(),
         }
     }
+
+    /// Run one training step on `(input, d_temporal)`. Shapes match
+    /// [`MambaTrainer::step`]. Returns [`StepMetrics`].
     pub fn step(&mut self, input: &[f32], d_temporal: &[f32]) -> Result<StepMetrics, String> {
         match &mut self.inner {
             Trainer3Inner::F32(t) => t.step(input, d_temporal),
             Trainer3Inner::Mixed(t) => t.step(input, d_temporal),
         }
     }
+
+    /// Download f32 master weights for checkpointing.
     pub fn snapshot_master(&self) -> Result<Mamba3Weights, String> {
         match &self.inner {
             Trainer3Inner::F32(t) => t.snapshot_master(),
             Trainer3Inner::Mixed(t) => t.snapshot_master(),
         }
     }
+
+    /// Serialize the dynamic loss scaler state for checkpoint resume.
+    /// Returns `Some((scale, growth_tracker))` only for f16 training where
+    /// the scaler is active; `None` for bf16 / f32. Mirrors
+    /// [`MambaTrainer::scaler_state`].
+    pub fn scaler_state(&self) -> Option<(f32, u32)> {
+        match &self.inner {
+            Trainer3Inner::F32(_) => None,
+            Trainer3Inner::Mixed(t) => t.scaler_state(),
+        }
+    }
+
+    /// Restore the dynamic loss scaler state saved via [`Self::scaler_state`].
+    /// No-op for non-f16 trainers.
+    pub fn load_scaler_state(&mut self, scale: f32, growth_tracker: u32) {
+        if let Trainer3Inner::Mixed(ref mut t) = self.inner {
+            t.load_scaler_state(scale, growth_tracker);
+        }
+    }
 }
 
-pub struct Mamba3TrainerMixed {
+pub(crate) struct Mamba3TrainerMixed {
     ctx: GpuCtx,
     m3k: Mamba3Kernels,
     cfg: Mamba3Config,
@@ -727,13 +766,32 @@ impl Mamba3TrainerMixed {
         out.norm_f_weight = m.norm_f_weight.to_cpu(&self.ctx.stream)?;
         Ok(out)
     }
+
+    /// Serialize dynamic loss scaler state. `None` when scaler is disabled
+    /// (bf16). Mirrors `MambaTrainerMixed::scaler_state`.
+    pub fn scaler_state(&self) -> Option<(f32, u32)> {
+        self.scaler.as_ref().map(|s| s.state())
+    }
+
+    /// Restore scaler state from a prior `scaler_state()`. No-op when the
+    /// scaler is disabled (bf16). Also rewrites the on-device unscale
+    /// factor so the next f16 step uses the restored scale.
+    pub fn load_scaler_state(&mut self, scale: f32, growth_tracker: u32) {
+        if let Some(ref mut s) = self.scaler {
+            s.load_state(scale, growth_tracker);
+            if let Some(ref mut uf) = self.unscale_factor {
+                let unscale = 1.0 / s.scale();
+                let _ = uf.write(&self.ctx.stream, unscale);
+            }
+        }
+    }
 }
 
 // ════════════════════════════════════════════════════════════════════════
 // f32 M3 training wrapper.
 // ════════════════════════════════════════════════════════════════════════
 
-pub struct Mamba3TrainerF32 {
+pub(crate) struct Mamba3TrainerF32 {
     pub ctx: GpuCtx,
     pub m3k: Mamba3Kernels,
     pub cfg: Mamba3Config,

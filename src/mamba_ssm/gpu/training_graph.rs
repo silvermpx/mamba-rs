@@ -1,4 +1,4 @@
-//! CUDA-Graph-captured training step for Mamba-1 mixed-precision (bf16).
+//! CUDA-Graph-captured training step for Mamba SSM mixed-precision (bf16).
 //!
 //! Captures **forward + backward + AdamW + master→compute sync** as a
 //! single CUDA Graph. On replay, the entire training step launches with
@@ -59,7 +59,9 @@ use crate::mamba_ssm::gpu::forward_mixed::{
 };
 use crate::mamba_ssm::gpu::graph_capture::capture_into_graph;
 use crate::mamba_ssm::gpu::launch::grid_1d;
-use crate::mamba_ssm::gpu::weights::{GpuMambaGrads, GpuMambaTrainLayerWeights, GpuMambaTrainWeights};
+use crate::mamba_ssm::gpu::weights::{
+    GpuMambaGrads, GpuMambaTrainLayerWeights, GpuMambaTrainWeights,
+};
 use crate::mamba_ssm::gpu::weights_mixed_train::GpuMambaTrainMixedWeights;
 
 /// Capture-side variant of the trainer's `recompute_a_neg_all` helper.
@@ -102,7 +104,7 @@ fn recompute_a_neg_captured(
     Ok(())
 }
 
-/// CUDA-Graph holder for a single Mamba-1 training step (bf16).
+/// CUDA-Graph holder for a single Mamba SSM training step (bf16).
 pub struct GpuMambaTrainingStepGraph {
     pub graph: CudaGraph,
     pub batch: usize,
@@ -390,7 +392,7 @@ impl GpuMambaTrainingStepGraph {
 // f32 training step graph (no master/compute split, no half_staging).
 // ════════════════════════════════════════════════════════════════════════
 
-/// CUDA-Graph holder for a single Mamba-1 f32 training step. Captures
+/// CUDA-Graph holder for a single Mamba SSM f32 training step. Captures
 /// `grads.zero + forward + backward + AdamW`. There's no
 /// `sync_master_to_compute` because f32 training has no compute shadow —
 /// weights are read directly during the next step's forward.

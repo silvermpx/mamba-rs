@@ -75,15 +75,8 @@ fn bf16_130m_divergence_bisect() {
         "\n=== 130m bf16 vs f32 logits divergence (prompt length → logits at last position) ==="
     );
     eprintln!(
-        "{:>4} | {:>11} {:>11} | {:>5} {:>5} | {:>11} {:>10} | {}",
-        "len",
-        "f32 |L|∞",
-        "bf16 |L|∞",
-        "f32_nan",
-        "bf_nan",
-        "L∞ diff",
-        "top1 same",
-        "top3 f32 → bf16"
+        "{:>4} | {:>11} {:>11} | {:>5} {:>5} | {:>11} {:>10} | top3 f32 → bf16",
+        "len", "f32 |L|∞", "bf16 |L|∞", "f32_nan", "bf_nan", "L∞ diff", "top1 same",
     );
 
     let d = lm_f32.d_model;

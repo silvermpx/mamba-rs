@@ -1,10 +1,10 @@
 [package]
 name = "mamba-rs"
-version = "0.2.2"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.94"
 authors = ["silvermpx"]
-description = "Mamba SSM (Selective State Space Model) in Rust with CUDA GPU support. Training + inference, forward + backward (BPTT), burn-in, custom CUDA kernels."
+description = "Mamba in Rust with CUDA GPU support. Training + inference for Mamba SSM and Mamba-3 SISO, forward + backward (BPTT), custom CUDA kernels, CUDA Graph capture, f32 / bf16 / f16, batch-invariant inference."
 homepage = "https://github.com/silvermpx/mamba-rs"
 documentation = "https://docs.rs/mamba-rs"
 license = "MIT OR Apache-2.0"

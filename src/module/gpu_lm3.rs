@@ -1,6 +1,6 @@
 //! GPU-accelerated language model wrapper for Mamba-3 SISO.
 //!
-//! Mirrors `GpuMambaLM` (Mamba-1). Same unified API over f32 / bf16 / f16
+//! Mirrors `GpuMambaLM` (Mamba SSM). Same unified API over f32 / bf16 / f16
 //! weight storage — dtype chosen at construction via `from_weights_with_dtype`.
 //!
 //! No real Mamba-3 SISO HF checkpoint is published yet. This wrapper drives
@@ -9,6 +9,7 @@
 
 use std::sync::Arc;
 
+use crate::hf::embed::embed_lookup;
 use crate::mamba_ssm::gpu::blas::{
     TiedLmDims, TypedPtr, gpu_gemm_ex_tied_lm_head_blas, gpu_gemm_typed_raw_no_bias,
     gpu_sgemm_tied_lm_head_blas,
@@ -59,27 +60,44 @@ pub struct GpuMamba3LM {
     gpu_hidden: GpuBuffer,
     logits_padded_cpu: Vec<f32>,
     logits_cpu: Vec<f32>,
+    /// Vocabulary size — the number of valid token IDs.
     pub vocab_size: usize,
     vocab_size_padded: usize,
+    /// Backbone hidden width (`d_model` in the paper).
     pub d_model: usize,
+    /// Batch dimension fixed at construction.
     pub batch: usize,
 }
 
 impl GpuMamba3LM {
+    /// Borrow the most recent logits for batch slot `b`. Returns
+    /// `[vocab_size]`. Valid after [`Self::generate`] /
+    /// [`Self::generate_streaming`] / [`Self::generate_batch`] returns.
     pub fn last_logits(&self, b: usize) -> &[f32] {
         &self.logits_cpu[b * self.vocab_size..(b + 1) * self.vocab_size]
     }
 }
 
-/// Arguments bundle for `GpuMamba3LM::build`.
+/// Arguments bundle for [`GpuMamba3LM::build`]. Carried as a struct to
+/// keep the call site readable (the constructor would otherwise take
+/// 8+ positional arguments).
 pub struct Mamba3LmBuild<'a> {
+    /// CPU-side backbone weights.
     pub cpu_weights: &'a Mamba3Weights,
+    /// Backbone architecture config.
     pub cfg: Mamba3Config,
+    /// Embedding matrix `[vocab_size * d_model]` row-major.
     pub embed: Vec<f32>,
+    /// Optional untied lm_head `[vocab_size * d_model]` row-major; pass
+    /// `None` to tie lm_head with the embedding (saves memory).
     pub lm_head: Option<Vec<f32>>,
+    /// Vocabulary size.
     pub vocab_size: usize,
+    /// Target GPU ordinal (CUDA device index).
     pub gpu_ordinal: usize,
+    /// Storage dtype for backbone weights and activations.
     pub dtype: WeightDtype,
+    /// Batch dimension. Use `1` for streaming generation.
     pub batch: usize,
 }
 
@@ -263,6 +281,7 @@ impl GpuMamba3LM {
         })
     }
 
+    /// Storage dtype the LM was constructed with.
     pub fn dtype(&self) -> WeightDtype {
         match &self.embed_storage {
             EmbedStorage::F32 { .. } => WeightDtype::F32,
@@ -270,14 +289,21 @@ impl GpuMamba3LM {
         }
     }
 
+    /// Capture the backbone's per-step CUDA Graph for accelerated decode.
+    /// Run at least one warmup step before capture so cuBLAS settles.
+    /// The lm_head GEMM runs eagerly outside the graph.
     pub fn capture_graph(&mut self) -> Result<(), String> {
         self.backbone.capture_graph()
     }
 
+    /// Reset the backbone's recurrent SSM, K, V, and angle states to zero.
     pub fn reset(&mut self) -> Result<(), String> {
         self.backbone.reset()
     }
 
+    /// Greedy / sampled generation. Returns the sequence of newly
+    /// generated tokens (excludes `prompt`). Requires `batch = 1`; for
+    /// parallel batched decode use [`Self::generate_batch`].
     pub fn generate(&mut self, prompt: &[u32], params: &SampleParams) -> Result<Vec<u32>, String> {
         let mut tokens = Vec::with_capacity(params.max_tokens);
         self.generate_streaming(prompt, params, |tok, _| {
@@ -286,6 +312,8 @@ impl GpuMamba3LM {
         Ok(tokens)
     }
 
+    /// Streaming variant of [`Self::generate`]: invokes `cb(token, "")`
+    /// for each newly generated token. Requires `batch = 1`.
     pub fn generate_streaming(
         &mut self,
         prompt: &[u32],
@@ -319,8 +347,9 @@ impl GpuMamba3LM {
             seen.push(next);
             cb(next, "");
             let emb = embed_lookup(&self.embed_cpu, next, self.d_model, self.vocab_size);
-            self.input_cpu.copy_from_slice(emb);
-            self.backbone.step_gpu_only(&self.input_cpu)?;
+            self.input_cpu[..self.d_model].copy_from_slice(emb);
+            self.backbone
+                .step_gpu_only(&self.input_cpu[..self.d_model])?;
             self.compute_logits()?;
         }
         Ok(())
@@ -542,11 +571,6 @@ impl GpuMamba3LM {
         }
         Ok(())
     }
-}
-
-fn embed_lookup(embed: &[f32], token_id: u32, d_model: usize, vocab_size: usize) -> &[f32] {
-    let id = (token_id as usize).min(vocab_size.saturating_sub(1));
-    &embed[id * d_model..(id + 1) * d_model]
 }
 
 fn upload_f32_as_dtype(dst: &GpuByteBuffer, src: &[f32], dtype: WeightDtype) -> Result<(), String> {

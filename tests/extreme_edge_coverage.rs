@@ -8,8 +8,8 @@
 //!     batch-invariant GEMM kernel should keep KL < 1e-4 regardless of
 //!     batch size; if cuBLAS fallback is hit (or the kernel has an
 //!     overlooked M-dependent path), large-batch drift surfaces here.
-//!   * `very_long_prompt_1024_stability_{bf16,f16}` — 256-token prompt
-//!     + 768 generated = 1024 tokens total on mamba-130m. Asserts no
+//!   * `very_long_prompt_1024_stability_{bf16,f16}` — 1024-token trajectory
+//!     (256-token prompt plus 768 generated) on mamba-130m. Asserts no
 //!     NaN, logit magnitude bounded, all vocab indices valid. The SSM
 //!     recurrence decay has to stay numerically stable over this length.
 //!   * `m3_long_sequence_stability_{bf16,f16}` — synthetic M3 config
@@ -104,8 +104,7 @@ mod hf {
 
         // Reference: batch=1, fixed prompt.
         let prompt: &[u32] = &[1, 2, 3, 4, 5];
-        let mut lm1 =
-            GpuMambaLM::from_hf_with_dtype_batch(&dir, 0, dtype, 1).expect("b=1 load");
+        let mut lm1 = GpuMambaLM::from_hf_with_dtype_batch(&dir, 0, dtype, 1).expect("b=1 load");
         lm1.generate(prompt, &params).expect("b=1 gen");
         let ref_logits = lm1.last_logits(0).to_vec();
 
@@ -121,7 +120,9 @@ mod hf {
             prompts.push(&filler);
         }
         let params_n: Vec<SampleParams> = (0..batch).map(|_| params.clone()).collect();
-        lm_large.generate_batch(&prompts, &params_n).expect("b=N gen");
+        lm_large
+            .generate_batch(&prompts, &params_n)
+            .expect("b=N gen");
         let slot0_logits = lm_large.last_logits(0).to_vec();
 
         let kl = kl_divergence(&ref_logits, &slot0_logits);
@@ -283,10 +284,9 @@ fn run_m3_long_seq(dtype: WeightDtype, seq_len: usize) {
     }
 
     let label = format!("M3-{dtype:?}-T{seq_len}");
-    let mut trainer = Mamba3Trainer::new_full(
-        0, &cpu, cfg, input_dim, batch, seq_len, dtype, 1e-6, 0.0,
-    )
-    .unwrap_or_else(|e| panic!("[{label}] construct: {e}"));
+    let mut trainer =
+        Mamba3Trainer::new_full(0, &cpu, cfg, input_dim, batch, seq_len, dtype, 1e-6, 0.0)
+            .unwrap_or_else(|e| panic!("[{label}] construct: {e}"));
 
     // 3 training steps — exercises chunk boundaries (seq_len 512 = 8 chunks
     // of size 64). Any state-carry bug between chunks would show up as NaN

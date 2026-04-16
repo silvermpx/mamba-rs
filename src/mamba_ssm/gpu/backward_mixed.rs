@@ -1,4 +1,4 @@
-//! Mixed-precision (bf16/f16) backward for Mamba-1. Mirrors the f32 twin
+//! Mixed-precision (bf16/f16) backward for Mamba SSM. Mirrors the f32 twin
 //! [`super::backward::gpu_backward_mamba_backbone`] step-by-step, dispatching
 //! typed CUDA kernels and typed cuBLAS GemmEx where applicable.
 //!

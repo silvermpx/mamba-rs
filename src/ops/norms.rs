@@ -1,5 +1,5 @@
 #![allow(clippy::needless_range_loop)]
-//! Shared normalization operations for Mamba-1 and Mamba-3.
+//! Shared normalization operations for Mamba SSM and Mamba-3 SISO.
 //!
 //! - `rms_norm` — standard RMSNorm (scale only, no bias)
 //! - `rms_norm_weighted` — RMSNorm with learnable weight

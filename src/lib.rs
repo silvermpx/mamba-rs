@@ -1,24 +1,37 @@
 //! # mamba-rs
 //!
-//! Mamba SSM (Selective State Space Model) implementation in Rust.
+//! Mamba SSM and Mamba-3 SISO in Rust with optional CUDA GPU acceleration.
+//! Supports **Mamba SSM** (Gu & Dao, 2023) and **Mamba-3 SISO** (Lahoti
+//! et al., 2026) on CPU and GPU, with full inference and training pipelines.
 //!
-//! Provides both CPU and GPU (CUDA) paths for inference and training,
-//! including full backward pass with BPTT through recurrent state.
+//! Standalone — no PyTorch, no Triton, no Burn, no Candle. Kernels compile
+//! at runtime via NVRTC.
 //!
-//! Based on: Gu & Dao, "Mamba: Linear-Time Sequence Modeling with
-//! Selective State Spaces" (NeurIPS 2024).
+//! ## Capabilities
+//!
+//! - Mamba SSM and Mamba-3 SISO architectures
+//! - CPU and GPU (CUDA) paths for both
+//! - Full training with BPTT through the recurrent SSM state + AdamW
+//! - `WeightDtype::{F32, Bf16, F16}` — f32 compute regardless of storage
+//! - CUDA Graph capture for inference and training steps
+//! - Batch-invariant bf16 inference (custom GEMM kernel; logits are
+//!   bit-identical across batch sizes for the same prompt)
+//! - HuggingFace safetensors loader for Mamba SSM checkpoints
 //!
 //! ## Module Structure
 //!
-//! - [`mamba_ssm`] — Mamba-1 implementation (CPU + GPU)
-//!   - `cpu/` — inference, forward, backward
-//!   - `gpu/` — CUDA inference, forward, backward
-//! - [`mamba3_siso`] — Mamba-3 SISO implementation (CPU + GPU)
-//!   - `cpu/` — inference, forward, backward, parallel
-//!   - `gpu/` — CUDA kernels (38 kernels)
-//! - [`ops`] — shared operations (dims, BLAS, math, norms)
-//! - [`module`] — high-level MambaBackbone API
-//! - [`config`], [`state`], [`weights`], [`serialize`] — Mamba-1 data types
+//! - [`mamba_ssm`] — Mamba SSM (CPU + GPU forward, backward, training)
+//! - [`mamba3_siso`] — Mamba-3 SISO (CPU + GPU forward, backward, training)
+//! - [`module`] — high-level backbone and LM wrappers, HF integration
+//! - [`ops`] — shared dimensions, BLAS, norms, fast-math helpers
+//! - [`config`], [`state`], [`weights`], [`serialize`] — Mamba SSM data types
+//!
+//! ## References
+//!
+//! - Gu & Dao, *Mamba: Linear-Time Sequence Modeling with Selective State
+//!   Spaces*, ICLR 2024.
+//! - Lahoti et al., *Mamba-3: Improved Sequence Modeling using State Space
+//!   Principles*, ICLR 2026.
 
 pub mod config;
 #[cfg(feature = "hf")]
@@ -31,8 +44,10 @@ pub mod serialize;
 pub mod state;
 pub mod weights;
 
-// Re-export old paths for backward compatibility during transition.
-// These will be removed once all external users migrate.
+// Convenience re-export aliases for the Mamba SSM CPU + GPU paths.
+// The canonical module paths are `mamba_ssm::cpu::*` / `mamba_ssm::gpu::*`;
+// these aliases keep `mamba_rs::inference` / `train` / `gpu` short for the
+// most common entrypoints.
 pub mod inference {
     pub use crate::mamba_ssm::cpu::inference::*;
 }

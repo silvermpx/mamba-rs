@@ -1,6 +1,6 @@
 //! GPU weight storage for Mamba-3 SISO.
 //!
-//! Same dual pattern as Mamba-1:
+//! Same dual pattern as Mamba SSM:
 //! - **Inference**: flat buffer + WeightSlice views (CUDA Graph safe, read-only)
 //! - **Training**: per-tensor GpuBuffer (optimizer compatible)
 //! - **Gradients**: flat buffer + GradSlice views (single zero() clears all)

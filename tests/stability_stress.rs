@@ -93,14 +93,10 @@ fn run_repeatability(dtype: WeightDtype) {
         lw.a_neg = lw.a_log.iter().map(|&v| -v.exp()).collect();
     }
 
-    let mut a = MambaTrainer::new_full(
-        0, &cpu, cfg_m, input_dim, batch, seq_len, dtype, 1e-4, 0.0,
-    )
-    .unwrap();
-    let mut b = MambaTrainer::new_full(
-        0, &cpu, cfg_m, input_dim, batch, seq_len, dtype, 1e-4, 0.0,
-    )
-    .unwrap();
+    let mut a = MambaTrainer::new_full(0, &cpu, cfg_m, input_dim, batch, seq_len, dtype, 1e-4, 0.0)
+        .unwrap();
+    let mut b = MambaTrainer::new_full(0, &cpu, cfg_m, input_dim, batch, seq_len, dtype, 1e-4, 0.0)
+        .unwrap();
 
     // 10 identical steps on both trainers.
     let g_scale = if matches!(dtype, WeightDtype::F16) {
@@ -181,10 +177,8 @@ fn run_graph_determinism(dtype: WeightDtype) {
     };
 
     // Trainer A: eager for 3 steps
-    let mut a = MambaTrainer::new_full(
-        0, &cpu, cfg_m, input_dim, batch, seq_len, dtype, 1e-4, 0.0,
-    )
-    .unwrap();
+    let mut a = MambaTrainer::new_full(0, &cpu, cfg_m, input_dim, batch, seq_len, dtype, 1e-4, 0.0)
+        .unwrap();
     for s in 0..3 {
         let inp = det(n, 0xC0 + s);
         let mut dtg: Vec<f32> = det(n, 0xD0 + s);
@@ -198,10 +192,8 @@ fn run_graph_determinism(dtype: WeightDtype) {
 
     // Trainer B: warmup eager 1 step, then capture + replay 2 times on
     // the SAME inputs that eager A used for steps 2,3.
-    let mut b = MambaTrainer::new_full(
-        0, &cpu, cfg_m, input_dim, batch, seq_len, dtype, 1e-4, 0.0,
-    )
-    .unwrap();
+    let mut b = MambaTrainer::new_full(0, &cpu, cfg_m, input_dim, batch, seq_len, dtype, 1e-4, 0.0)
+        .unwrap();
     let inp0 = det(n, 0xC0);
     let mut dt0: Vec<f32> = det(n, 0xD0);
     for v in dt0.iter_mut() {
@@ -239,10 +231,8 @@ fn run_graph_determinism(dtype: WeightDtype) {
 
     // Now drive a SECOND B trainer and replay 10 times — all replays
     // must land at the same terminal weights.
-    let mut c = MambaTrainer::new_full(
-        0, &cpu, cfg_m, input_dim, batch, seq_len, dtype, 1e-4, 0.0,
-    )
-    .unwrap();
+    let mut c = MambaTrainer::new_full(0, &cpu, cfg_m, input_dim, batch, seq_len, dtype, 1e-4, 0.0)
+        .unwrap();
     c.step(&inp0, &dt0).unwrap();
     c.capture_graph().unwrap();
     let inp1 = det(n, 0xE0);
@@ -264,10 +254,16 @@ fn run_graph_determinism(dtype: WeightDtype) {
         .map(|(x, y)| (x - y).abs())
         .fold(0.0f32, f32::max);
     eprintln!("10-replay drift [{dtype:?}] step_0→step_9 max_abs_diff = {first_last_diff:.3e}");
-    assert!(
-        first_last_diff > 0.0 || matches!(dtype, WeightDtype::F16),
-        "[{dtype:?}] weights did not evolve across replays"
-    );
+    // f16 with a tiny grad scale (0.001) frequently overflows or underflows
+    // the loss scaler so commits get skipped — under that regime weights may
+    // legitimately stay still. For f32/bf16 we require visible AdamW motion
+    // across 10 replays of the same input (each step reuses accumulated m/v).
+    if !matches!(dtype, WeightDtype::F16) {
+        assert!(
+            first_last_diff > 0.0,
+            "[{dtype:?}] weights did not evolve across replays (max_abs_diff=0)"
+        );
+    }
 }
 
 #[test]

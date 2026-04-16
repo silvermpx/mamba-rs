@@ -1,4 +1,4 @@
-//! Mamba-1 SSM (Selective State Space Model).
+//! Mamba SSM (Selective State Space Model).
 //!
 //! Gu & Dao, "Mamba: Linear-Time Sequence Modeling with Selective State Spaces" (2023).
 //!

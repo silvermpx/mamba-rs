@@ -44,9 +44,9 @@ Reference: Lahoti et al., *Mamba-3: Improved Sequence Modeling using State Space
     output [B, T, d_model]
 ```
 
-## Key Differences from Mamba-1
+## Key Differences from Mamba SSM
 
-| Feature | Mamba-1 | Mamba-3 SISO |
+| Feature | Mamba SSM | Mamba-3 SISO |
 |---------|---------|-------------|
 | Conv1d | Yes | No |
 | A matrix | Fixed (A_log) | Input-dependent per-head |

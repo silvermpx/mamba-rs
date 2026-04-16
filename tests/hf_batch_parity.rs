@@ -132,8 +132,7 @@ fn run_batch_parity(dtype: WeightDtype) {
     let mut tokens_b1: Vec<Vec<u32>> = Vec::with_capacity(4);
     let mut last_logits_b1: Vec<Vec<f32>> = Vec::with_capacity(4);
     for p in &prompts_b4 {
-        let mut lm =
-            GpuMambaLM::from_hf_with_dtype_batch(&dir, 0, dtype, 1).expect("load batch=1");
+        let mut lm = GpuMambaLM::from_hf_with_dtype_batch(&dir, 0, dtype, 1).expect("load batch=1");
         let toks = lm.generate(p, &params).expect("b=1 generate");
         last_logits_b1.push(lm.last_logits(0).to_vec());
         tokens_b1.push(toks);
@@ -197,7 +196,10 @@ fn run_batch_parity(dtype: WeightDtype) {
                 "[{label}] slot {i} KL {kl:.3e} exceeds 5e-3 (batch-parity failure, not just rounding)"
             );
         }
-        eprintln!("[{label}] batch-parity OK via KL parity (max {:.4e})", per_slot_kl.iter().cloned().fold(0.0f32, f32::max));
+        eprintln!(
+            "[{label}] batch-parity OK via KL parity (max {:.4e})",
+            per_slot_kl.iter().cloned().fold(0.0f32, f32::max)
+        );
     }
 }
 
@@ -212,14 +214,14 @@ fn gather_kl_per_slot(
     assert_eq!(ref_logits.len(), batch);
     let mut kls = Vec::with_capacity(batch);
     let mut matches = Vec::with_capacity(batch);
-    for i in 0..batch {
+    for (i, slot_ref) in ref_logits.iter().enumerate().take(batch) {
         let b4_logits = lm_b4.last_logits(i);
         assert_eq!(
             b4_logits.len(),
-            ref_logits[i].len(),
+            slot_ref.len(),
             "slot {i} logit length mismatch"
         );
-        kls.push(kl_divergence(&ref_logits[i], b4_logits));
+        kls.push(kl_divergence(slot_ref, b4_logits));
         // Cosine similarity as a secondary diagnostic (float placeholder).
         matches.push(0.0);
     }
@@ -311,10 +313,7 @@ fn hf_cpu_vs_gpu_inference_f32() {
         matching >= 18,
         "CPU and GPU f32 diverged: greedy match {matching}/20 < 18"
     );
-    assert!(
-        kl < 5e-3,
-        "CPU-vs-GPU f32 KL divergence {kl} exceeds 5e-3"
-    );
+    assert!(kl < 5e-3, "CPU-vs-GPU f32 KL divergence {kl} exceeds 5e-3");
 }
 
 // =====================================================================
@@ -360,15 +359,15 @@ fn bf16_batch_divergence_known() {
         ..Default::default()
     };
 
-    let mut lm_b1 = GpuMambaLM::from_hf_with_dtype_batch(&dir, 0, WeightDtype::Bf16, 1)
-        .expect("load bf16 b=1");
+    let mut lm_b1 =
+        GpuMambaLM::from_hf_with_dtype_batch(&dir, 0, WeightDtype::Bf16, 1).expect("load bf16 b=1");
     let toks_b1 = lm_b1
         .generate(&[100, 101, 102, 103, 104], &params)
         .expect("b=1 gen");
     let logits_b1 = lm_b1.last_logits(0).to_vec();
 
-    let mut lm_b4 = GpuMambaLM::from_hf_with_dtype_batch(&dir, 0, WeightDtype::Bf16, 4)
-        .expect("load bf16 b=4");
+    let mut lm_b4 =
+        GpuMambaLM::from_hf_with_dtype_batch(&dir, 0, WeightDtype::Bf16, 4).expect("load bf16 b=4");
     let prompts: [&[u32]; 4] = [
         &[1, 2, 3, 4, 5],
         &[10, 20, 30, 40, 50],
@@ -376,7 +375,9 @@ fn bf16_batch_divergence_known() {
         &[1, 2, 3, 4, 5],
     ];
     let params_batch: Vec<SampleParams> = (0..4).map(|_| params.clone()).collect();
-    let toks_b4 = lm_b4.generate_batch(&prompts, &params_batch).expect("b=4 gen");
+    let toks_b4 = lm_b4
+        .generate_batch(&prompts, &params_batch)
+        .expect("b=4 gen");
     let logits_b4_slot2 = lm_b4.last_logits(2).to_vec();
 
     let kl = kl_divergence(&logits_b1, &logits_b4_slot2);

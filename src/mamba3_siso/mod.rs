@@ -7,7 +7,7 @@
 
 //! Mamba-3 SISO (Single-Input Single-Output) implementation.
 //!
-//! A separate module alongside `mamba_ssm` (Mamba-1). No conv1d, input-dependent A,
+//! A separate module alongside `mamba_ssm` (Mamba SSM). No conv1d, input-dependent A,
 //! trapezoidal integration, RoPE, BCNorm.
 //!
 //! Source: Lahoti et al., "Mamba-3", ICLR 2026 (arXiv 2603.15569).

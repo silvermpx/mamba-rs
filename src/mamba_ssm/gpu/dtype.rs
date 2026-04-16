@@ -10,9 +10,20 @@ use cudarc::cublas::sys as cublas_sys;
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Default)]
 pub enum WeightDtype {
+    /// IEEE 754 single precision. Default. Largest memory footprint and
+    /// the safe choice for math sensitive to precision (full pre-training,
+    /// long-horizon RL). Compute is always f32 internally regardless.
     #[default]
     F32,
+    /// IEEE 754 half precision (`half::f16`). Tightest dynamic range —
+    /// requires the dynamic loss scaler in training to avoid gradient
+    /// underflow. ~2× memory savings and ~1.3× tok/s speedup at
+    /// inference vs f32 on Ada / Hopper.
     F16,
+    /// Brain float 16 (`half::bf16`). Same exponent range as f32 with
+    /// reduced mantissa — no loss scaler needed in training. The
+    /// recommended default for mixed-precision: ~2× memory, ~1.3×
+    /// tok/s, no overflow regime to manage.
     Bf16,
 }
 

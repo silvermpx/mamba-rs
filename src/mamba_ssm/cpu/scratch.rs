@@ -21,6 +21,12 @@ pub struct PhaseScratch {
     pub gated_flat: Vec<f32>,
     /// Out-projection outputs: `[T * d_model]`.
     pub out_flat: Vec<f32>,
+    /// Per-channel `delta * a_neg` then in-place `fast_exp_inplace`. Sized
+    /// `[d_state]` and reused inside F4d's per-d loop. Mirrors the
+    /// `MambaScratch::da_buf` SIMD pattern from CPU inference: NEON / AVX2
+    /// can vectorize `exp` across `d_state` lanes, but only if the inputs
+    /// are contiguous — hence the per-d fill-then-batch sequence.
+    pub da_buf: Vec<f32>,
 }
 
 impl PhaseScratch {
@@ -33,6 +39,7 @@ impl PhaseScratch {
             gate_silu_flat: vec![0.0; t * dims.d_inner],
             gated_flat: vec![0.0; t * dims.d_inner],
             out_flat: vec![0.0; t * dims.d_model],
+            da_buf: vec![0.0; dims.d_state],
         }
     }
 }

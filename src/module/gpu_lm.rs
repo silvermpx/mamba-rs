@@ -37,7 +37,15 @@ use crate::mamba_ssm::gpu::inference::GpuMambaBackbone;
 /// contexts) still get the parallel-scan perf win where it matters.
 /// For a 5-token prompt the step-by-step path is ~2 ms slower on 130m
 /// at bf16 — negligible for any realistic latency budget.
-const PREFILL_PARALLEL_THRESHOLD: usize = 64;
+/// Threshold above which a single-batch prefill uses the parallel
+/// (T-batched) SSM kernel instead of per-step (T=1) decode. Above this
+/// threshold, prefill is faster but uses a different SSM implementation
+/// from per-step decode — resulting in a tiny bf16 rounding divergence
+/// between `b=1` prefill and `b>1` per-step at the same prompt. Kept
+/// high enough that mainstream decode tests stay on the unified T=1
+/// path (bit-identical cross-batch); long-context prefills (≥256)
+/// trade that for parallel-prefill speed.
+const PREFILL_PARALLEL_THRESHOLD: usize = 256;
 
 use crate::hf::embed::embed_lookup;
 use crate::hf::load::{HfModel, load_hf};
@@ -102,8 +110,10 @@ pub struct GpuMambaLM {
     logits_padded_cpu: Vec<f32>,
     /// CPU logits clamped to real vocab_size.
     logits_cpu: Vec<f32>,
+    /// Vocabulary size — the number of valid token IDs.
     pub vocab_size: usize,
     vocab_size_padded: usize,
+    /// Backbone hidden width (`d_model` in the paper).
     pub d_model: usize,
     /// Batch size (number of parallel sequences).
     pub batch: usize,
@@ -174,11 +184,22 @@ impl GpuMambaLM {
             if vocab_size == vocab_size_padded {
                 lm.clone()
             } else {
-                // HF convention: nn.Linear weight is stored as [out, in] =
-                // [vocab_size, d_model]. Pad the row dimension with zeros
-                // so stored shape becomes [vocab_size_padded, d_model].
+                // `load_hf` returns `lm` transposed to [d_model, vocab_size]
+                // row-major (d_model rows of length vocab_size). The GEMM
+                // reads it as [d_model, vocab_size_padded] row-major
+                // (stride = vocab_size_padded). Pad each of the d_model
+                // rows to `vocab_size_padded` columns with trailing zeros
+                // — a flat `copy_from_slice` would instead interleave src
+                // rows into different dst row offsets, yielding wrong
+                // logits on any vocab not already 64-aligned (e.g.
+                // 50280 → 50304 on mamba-130m-hf).
                 let mut padded = vec![0.0f32; vocab_size_padded * d_model];
-                padded[..vocab_size * d_model].copy_from_slice(lm);
+                for row in 0..d_model {
+                    let src = &lm[row * vocab_size..(row + 1) * vocab_size];
+                    let dst =
+                        &mut padded[row * vocab_size_padded..row * vocab_size_padded + vocab_size];
+                    dst.copy_from_slice(src);
+                }
                 padded
             }
         });
@@ -248,6 +269,10 @@ impl GpuMambaLM {
         }
     }
 
+    /// Capture the backbone's per-step CUDA Graph for accelerated decode.
+    /// Run at least one warmup [`Self::generate`] (or any single backbone
+    /// step) before capture so cuBLAS settles. The lm_head GEMM runs
+    /// eagerly outside the graph; only the backbone step is captured.
     pub fn capture_graph(&mut self) -> Result<(), String> {
         self.backbone.capture_graph()
     }
@@ -279,10 +304,18 @@ impl GpuMambaLM {
             .debug_step_partial(&self.input_cpu[..self.d_model], layer_limit, out)
     }
 
+    /// Reset the backbone's recurrent SSM + conv states to zero. Call
+    /// between independent prompts so state from the previous generation
+    /// does not leak.
     pub fn reset(&mut self) -> Result<(), String> {
         self.backbone.reset()
     }
 
+    /// Greedy / sampled generation. Returns the full sequence of newly
+    /// generated tokens (excludes `prompt`). Equivalent to collecting
+    /// the callback output of [`Self::generate_streaming`]. Requires
+    /// `batch = 1`; for parallel batched decoding use
+    /// [`Self::generate_batch`].
     pub fn generate(&mut self, prompt: &[u32], params: &SampleParams) -> Result<Vec<u32>, String> {
         let mut tokens = Vec::with_capacity(params.max_tokens);
         self.generate_streaming(prompt, params, |tok, _| {
@@ -291,6 +324,9 @@ impl GpuMambaLM {
         Ok(tokens)
     }
 
+    /// Streaming variant of [`Self::generate`]: invokes `cb(token, "")`
+    /// for each newly generated token as it is produced, allowing the
+    /// caller to print-as-you-go or stop early. Requires `batch = 1`.
     pub fn generate_streaming(
         &mut self,
         prompt: &[u32],
@@ -328,8 +364,9 @@ impl GpuMambaLM {
             seen.push(next);
             cb(next, "");
             let emb = embed_lookup(&self.embed_cpu, next, self.d_model, self.vocab_size);
-            self.input_cpu.copy_from_slice(emb);
-            self.backbone.step_gpu_only(&self.input_cpu)?;
+            self.input_cpu[..self.d_model].copy_from_slice(emb);
+            self.backbone
+                .step_gpu_only(&self.input_cpu[..self.d_model])?;
             self.compute_logits()?;
         }
         Ok(())

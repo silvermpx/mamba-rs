@@ -5,9 +5,7 @@
 
 use super::weights::TrainMambaWeights;
 use crate::ops::blas::matvec_forward;
-use crate::ops::fast_math::fast_exp_scalar;
-
-const RMS_NORM_EPS: f32 = 1e-5;
+use crate::ops::fast_math::{RMS_NORM_EPS, fast_exp_scalar};
 
 /// Scratch buffers for single-step (T=1) target Mamba forward.
 pub struct MambaTargetScratch {
@@ -425,18 +423,24 @@ pub fn forward_mamba_target_sequence(
                 *t += r;
             }
         }
-
-        // norm_f after all layers (per timestep)
-        let mean_sq: f32 = scratch.temporal[..dm].iter().map(|v| v * v).sum::<f32>() / dm as f32;
-        let inv_rms = 1.0 / (mean_sq + RMS_NORM_EPS).sqrt();
-        for (t, &nfw) in scratch.temporal[..dm]
-            .iter_mut()
-            .zip(w.norm_f_weight[..dm].iter())
-        {
-            *t *= inv_rms * nfw;
-        }
+        // Per-timestep norm_f is intentionally NOT applied here: only the
+        // last-timestep output is consumed by the caller (see line below
+        // the loop), and the next iteration overwrites `scratch.temporal`
+        // with `ip_out_flat[(t+1)*dm..]` anyway. Applying norm_f
+        // per-timestep was wasted work (bench: ~5% of target step time on
+        // long burn-in windows).
     }
 
-    // Output = last timestep
+    // norm_f applied once at the end on the last-timestep output.
+    let mean_sq: f32 = scratch.temporal[..dm].iter().map(|v| v * v).sum::<f32>() / dm as f32;
+    let inv_rms = 1.0 / (mean_sq + RMS_NORM_EPS).sqrt();
+    for (t, &nfw) in scratch.temporal[..dm]
+        .iter_mut()
+        .zip(w.norm_f_weight[..dm].iter())
+    {
+        *t *= inv_rms * nfw;
+    }
+
+    // Output = last timestep (post-norm_f)
     output[..dm].copy_from_slice(&scratch.temporal[..dm]);
 }

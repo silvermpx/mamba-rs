@@ -1,13 +1,23 @@
+//! Mamba SSM CPU inference — zero-allocation single-step loop.
+//!
+//! ```bash
+//! cargo run --release --example inference
+//! ```
+//!
+//! Demonstrates the minimal CPU path: allocate state and scratch once,
+//! then call `forward_step` per token. Used for RL actors and similar
+//! small-model latency-critical workloads where GPU overhead dominates.
+
 use mamba_rs::{MambaBackbone, MambaConfig};
 
 fn main() {
     let cfg = MambaConfig::default();
     let input_dim = cfg.d_model;
 
-    // Initialize backbone with paper-default weights
+    // Initialize backbone with paper-default weights.
     let backbone = MambaBackbone::init(cfg, input_dim, 42);
     println!(
-        "Mamba: {} layers, d_model={}, d_inner={}, {} params",
+        "Mamba SSM: {} layers, d_model={}, d_inner={}, {} params",
         backbone.n_layers(),
         backbone.config().d_model,
         backbone.config().d_inner(),

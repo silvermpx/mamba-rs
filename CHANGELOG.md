@@ -1,132 +1,181 @@
 # Changelog
 
-## 0.2.2
+## 0.3.0
 
-**End-to-end bf16/f16 inference for both Mamba-1 and Mamba-3.**
+GPU training and end-to-end half-precision (bf16 / f16) inference for both
+Mamba SSM and Mamba-3 SISO. Unified `MambaTrainer` / `Mamba3Trainer` API,
+batch-invariant inference, real-HF-checkpoint test coverage.
 
-### Added
+### Trainer API
 
-**Unified half-precision inference API**
-- `GpuMambaBackbone::new_with_dtype(ordinal, weights, cfg, input_dim, batch, dtype)` for Mamba-1 and the symmetric `GpuMamba3Backbone::new_with_dtype` for Mamba-3. `WeightDtype::{F32, Bf16, F16}` chooses storage dtype at construction; compute stays f32 (CUBLAS_COMPUTE_32F, upcast-inside-kernel).
-- New `GpuMamba3LM` wrapper (`src/module/gpu_lm3.rs`), mirror of `GpuMambaLM` — same `generate / generate_streaming / generate_batch / capture_graph / reset` API for M3. Construction via `from_weights_with_dtype` (no HF loader: no real Mamba-3 SISO checkpoint is public yet).
-- `GpuMambaLM::last_logits(b)` accessor.
-- `GpuMamba3Backbone::blas()` / `download_temporal()` / `temporal_dtype()` accessors.
+- `MambaTrainer` and `Mamba3Trainer` — one entry point per architecture.
+  `.step(input, d_temporal)` runs forward + backward + AdamW + (for mixed)
+  master→compute sync. Constructor takes `WeightDtype`; the f32 vs mixed
+  engine split is internal.
+- `capture_graph()` records the full training step into a CUDA Graph; all
+  weight, gradient, and optimizer pointers are snapshotted at capture and
+  asserted stable on every replay.
+- `scaler_state()` / `load_scaler_state()` for f16 — persists the dynamic
+  loss scaler across checkpoint resume so training picks up at the same
+  scale instead of repaying the discovery phase.
+- `GpuAdamW` with decoupled weight decay (Loshchilov 2019), bias correction
+  in f64, capturable variant that reads bias factors from a 2-element
+  device buffer.
+- `DynamicLossScaler` matching `torch.cuda.amp.GradScaler`. Eager path
+  skips AdamW on overflow; captured-graph path runs a device-side
+  conditional unscale that sanitizes inf / NaN to zero.
 
-**End-to-end bf16/f16 activation pipeline (Mamba-1)**
-- `GpuMambaInferenceMixed::step_kernels_mixed_native` — new execution path that keeps activations in the weight dtype throughout (no cast-staging per GEMM). Residual stream stays f32 (matches HF `residual_in_fp32=True`). SSM state stays f32.
-- `gpu_forward_inference_prefill_mixed` + `GpuMambaTargetMixedScratch` — native bf16/f16 parallel prefill. Replaces the legacy "f32 prefill + downcast" fallback.
-- `GpuMambaBackbone::prefill_sequence_mixed` + `alloc_prefill_mixed_scratch`.
+### Inference
 
-**End-to-end bf16/f16 activation pipeline (Mamba-3)**
-- `Mamba3GpuInferenceMixed` engine with `step_kernels_mixed_native` + CUDA Graph capture, mirroring the M1 pipeline.
-- `Mamba3GpuInferenceMixedScratch` — DtypedBuf activations, f32 residual/coefficients/stats.
-- `GpuMamba3MixedWeights` bulk arena (bf16/f16 linear weights) + f32 arena (norms, biases, per-head coefficients).
+- Native bf16 / f16 activation pipeline for both Mamba SSM and Mamba-3
+  SISO — activations stay in weight dtype throughout, residual stream
+  stays f32 (matches HF `residual_in_fp32 = True`), SSM state stays f32.
+  `step_kernels_mixed_native` replaces the old cast-staged path.
+- `GpuMambaBackbone::new_with_dtype` / `GpuMamba3Backbone::new_with_dtype`
+  + the matching `GpuMambaLM` / `GpuMamba3LM` LM wrappers.
+- Native bf16 / f16 parallel prefill — no f32 fallback.
+- Batch-invariant GEMM (`kernels/gemm_batch_invariant.cu`): same logits
+  for the same prompt at any batch size. Fixed 64×64×32 tile, no split-K,
+  f32 accumulate. Drives `gpu_gemm_typed_forward_raw`; cuBLAS retained
+  only for dtype combinations without a custom kernel.
+  KL(B=1 ‖ B=32) on `mamba-130m-hf` bf16: **2e-11** (was ~1e-3).
 
-**New CUDA kernels (all with f32/bf16/f16 variants via `DEFINE_*` macros)**
-- `rmsnorm_forward_f32in_{bf16,f16}`: f32 residual → half post-norm (shared by M1 + M3).
-- `residual_add_f32_{bf16,f16}`: f32 accumulator += half branch → f32 output (shared).
-- `gather_last_timestep_{f32,bf16,f16}`: last-timestep extractor (shared).
-- `m3_split_{bf16,f16}`: 8-way split + fused softplus/sigmoid (M3).
-- `bcnorm_fwd_{bf16,f16}`, `bc_bias_add_{bf16,f16}`: B/C RMSNorm + bias add (M3).
-- `rope_fwd_{bf16,f16}`: RoPE rotation with f32 angle_cumsum (M3).
-- `silu_gate_fwd_{bf16,f16}`, `rmsnorm_gated_forward_{bf16,f16}`: M3 output gating.
+### Kernels
 
-**New dispatch helpers**
-- `HalfKernel` struct (bf16/f16 only) for dual-dtype bridge kernels.
-- `gpu_gemm_typed_forward_raw` with fully-independent A/W/C dtypes.
-- `gpu_gemm_typed_raw_no_bias` — blas-only variant (no GpuCtx dependency; used by M3).
-- `gpu_sgemm_tied_lm_head_blas` + `gpu_gemm_ex_tied_lm_head_blas` — blas-only tied-lm_head helpers.
+- New typed (`f32` / `bf16` / `f16`) variants via `DEFINE_*` macros:
+  `rmsnorm_forward_f32in_*`, `residual_add_f32_*`, `gather_last_timestep_*`
+  (shared); `m3_split_*`, `bcnorm_fwd_*`, `bc_bias_add_*`, `rope_fwd_*`,
+  `silu_gate_fwd_*`, `rmsnorm_gated_forward_*` (Mamba-3 SISO).
+- Custom batch-invariant GEMM kernel (above).
+- `gpu_gemm_typed_forward_raw` with independent A / W / C dtypes;
+  `gpu_gemm_typed_raw_no_bias` blas-only variant for Mamba-3.
 
-**Parity & benchmarks**
-- `tests/gpu_bf16_parity.rs`: Mamba-1 bf16 vs f32. Two tests:
-  - `test_gpu_lm_bf16_matches_f32_130m`: 20/20 greedy token match on
-    mamba-130m-hf, KL(f32 ‖ bf16) ≈ 1.0e-3.
-  - `test_gpu_lm_bf16_matches_f32_all_cached_models`: parametric over every
-    cached `state-spaces/mamba-*-hf` snapshot. Verified 15/15 greedy match
-    with KL ≤ 1.6e-3 on all four sizes (130m, 370m, 1.4b, 2.8b):
-      | model | KL |
-      |---|---|
-      | 130m | 0.001583 |
-      | 370m | 0.000421 |
-      | 1.4b | 0.000053 |
-      | 2.8b | 0.000038 |
-    Asserts ≥ 90 % match and KL < 5e-3 per model. Ignored by default
-    (needs HF cache + ≥ 16 GB VRAM for 2.8b).
-- `tests/m3_bf16_parity.rs`: Mamba-3 f32 vs bf16 synthetic-weight parity
-  (monotone convergence, final cosine > 0.994).
-- `tests/gpu_mamba3_lm_test.rs`: M3 LM smoke tests for both dtypes.
-- `tests/bench_bf16_vs_f32.rs`: dtype × graph benchmark harness for M1 + M3.
+### HuggingFace
 
-**Crate API + ecosystem plumbing**
-- `cuda` feature now pulls `half` and `bytemuck` directly. Previously they
-  were only enabled by `hf`, so `cargo build --features cuda` (no `hf`)
-  failed at import-resolution in `gpu/buffers.rs`. The phantom `memmap2`
-  dep was dropped (no source imported it).
-- `WeightDtype` is re-exported from the crate root (`mamba_rs::WeightDtype`)
-  when the `cuda` feature is on.
-- New `pub mod gpu3 { pub use crate::mamba3_siso::gpu::*; }` mirrors the
-  existing `pub mod gpu` so M3 types land one import deep.
-- README rewritten with a bf16/f16 quickstart block and a HuggingFace LLM
-  example. Stale comments in `gpu/inference.rs` (claimed activations stay
-  f32 in scratch) corrected to reflect the new native path.
-- `Mamba3Weights` / `Mamba3LayerWeights` now `#[derive(Clone)]` so
-  `GpuMamba3LM` can take `&Mamba3Weights` and internally clone+clear
-  `input_proj` for the identity_proj fast path.
+- `rms_norm_eps` and `layer_norm_epsilon` read from `config.json`; loader
+  warns when the value differs from the kernel-hardcoded `1e-5` (e.g.
+  FalconMamba uses 1e-6).
+- Untied `lm_head` stride mismatch fixed — the GEMM wrote at `vocab_size`
+  while the downloader sliced at `vocab_size_padded`, corrupting batch
+  slots beyond the first on any vocab not 64-aligned (mamba-130m's 50 280
+  among them). Padded on upload; fixed in both LM wrappers.
+- Verified end-to-end bf16 inference on every cached `state-spaces/mamba-*-hf`
+  snapshot (130m / 370m / 1.4b / 2.8b): 15/15 greedy-token match vs f32,
+  KL ≤ 1.6e-3 (best 4e-5 at 2.8b).
 
-### Performance (RTX 4090, greedy generation, 100 tokens)
+### Critical bugfixes
 
-| Model                       | f32 +graph | bf16 +graph | speedup |
-|---                          |---         |---          |---      |
-| Mamba-1 130m-hf             | 398 tok/s  | 494 tok/s   | +24%    |
-| Mamba-3 synthetic (d=256×8) | 546 tok/s  | 802 tok/s   | +47%    |
+- `a_neg` staleness in training. The per-layer `a_neg = -exp(a_log)` buffer
+  used by every SSM forward and backward was computed once at trainer
+  construction and never refreshed, so optimizer updates to `a_log` never
+  reached the SSM. Added recompute after every AdamW step across eager,
+  CUDA Graph, and f16 paths. Without this, gradient descent on the
+  A-matrix was a no-op for the entire training run.
+- f16 loss scaler overflow corruption. The captured-graph unscale kernel
+  used `grads[i] *= 0.0f` on overflow; `±Inf * 0 = NaN` then poisoned the
+  next AdamW step, turning master weights NaN. Switched to an explicit
+  `grads[i] = overflow ? 0 : grads[i] * unscale` so overflow is always a
+  clean skip.
+- Mamba SSM mixed forward argument swap at `WeightDtype::F32`. The mixed
+  forward routed F32 through the legacy `conv1d_burnin_forward` whose
+  argument order differs from the typed variants — silently swapping the
+  persistent conv state with the post-conv activation buffer every step.
+  Routed through a typed-signature f32 kernel.
+- RMSNorm finite-guard. On 48-layer bf16 models a transient activation
+  overflow produced one NaN that cascaded through every subsequent
+  RMSNorm via `1 / NaN = NaN`. Catastrophic on mamba-1.4b-hf (0/15 vs
+  f32 pre-fix). Added `if (!isfinite(rms) || rms < 1e-20f) rms = 1.0f`
+  to all RMSNorm / BCNorm / RMSNormGated variants (M1 + M3, f32 + typed).
+- Parallel scan at d_state > 64 — too-restrictive shared-memory load
+  filter; replaced with a strided loop so all `ds` entries load
+  regardless of the `ds / hd` ratio.
 
-Weight VRAM footprint: **bf16 / f16 = 0.50× f32** (clean 2× compression).
+### Other fixes
 
-### Fixed
+- f16 eager overflow path skips AdamW + sync + a_neg recompute on
+  scaler-detected overflow (matches `GradScaler`). Spurious skips on
+  `m1_trainer_f16_production_lr_stable`: 47/50 → 3/50.
+- `AdamWBiasFactors` initializes to `[1.0, 1.0]` instead of `[0.0, 0.0]`,
+  preventing an all-weight-decay update if a graph is captured before
+  the first bias-factor write.
+- AdamW step counter clamps the bias-correction exponent at `2^30` —
+  the prior `as i32` cast went negative past `i32::MAX` (cosmetic, but
+  free correctness).
+- `step_kernels_mixed_native` (M1 + M3) uses `cuMemcpyDtoDAsync` on
+  cached raw pointers instead of `GpuBuffer::copy_from`, which goes
+  through a `SyncOnDrop` slice view that invalidates graph capture.
+- M3 angle_dt launch uses cached raw pointers instead of `.inner()`
+  for the same reason.
+- M3 NVRTC inlines `_typed_prelude.cuh` so bf16 / f16 helpers are in
+  scope before any `DEFINE_*` macro expansion.
+- `GpuMambaWeights` / `GpuMambaMixedWeights` layout formula uses actual
+  CPU weight lengths instead of hardcoded `d_model`-sized input_proj —
+  HF checkpoints often have empty `input_proj` (identity).
 
-- **Critical — RMSNorm finite-guard**: on 48+-layer bf16 models a transient
-  bf16 activation overflow could produce a single NaN/Inf, which then
-  cascaded through every subsequent RMSNorm (inv_rms = 1/NaN = NaN). This
-  was catastrophic on `state-spaces/mamba-1.4b-hf` (0/15 greedy match vs
-  f32, KL = 6.66) and untested but likely worse on 2.8b. Added
-  `if (!isfinite(rms) || rms < 1e-20f) rms = 1.0f` to
-  `rmsnorm_forward_f32in_{bf16,f16}` (`kernels/norms.cu`) and the same
-  pattern to `bcnorm_fwd` (f32 + templated) and `rmsnorm_gated_forward`
-  (f32 + templated) in `kernels/mamba3_ops.cu`. Post-fix: all four cached
-  HF Mambas match f32 at 15/15 greedy tokens with KL ≤ 1.6e-3 (best
-  0.00004 at 2.8b).
-- M3 `step_kernels_mixed_native` angle_dt launch: replaced `.inner()`
-  kernel args (creates SyncOnDrop guards that invalidate CUDA Graph
-  capture) with cached raw device pointers, mirroring the M1
-  `copy_from_raw` fix. Companion bug to the M1 fix; affected any M3 model
-  with `num_rope_angles() > 0` under graph replay.
-- M3 `b_bias` / `c_bias` zero-initialized (was `vec![1.0; ...]`). Matches
-  `state-spaces/mamba/mamba3.py` reference:
-  `nn.Parameter(torch.zeros(nheads, mimo_rank, d_state))`. Additive bias
-  at +1 before RoPE was systematically biasing the initial B/C dynamics
-  on freshly-initialized (non-HF) M3 models.
-- `GpuMambaWeights` / `GpuMambaMixedWeights`: layout formula used
-  hardcoded `d_model`-sized input_proj; HF Mamba-1 checkpoints have empty
-  input_proj (identity projection) and tripped
-  `debug_assert!(off == total)` in debug builds. Formula now uses the
-  actual CPU weight lengths. No release-mode effect — pure debug guard.
-- `step_kernels_mixed_native` (M1 + M3): used `GpuBuffer::copy_from` to
-  seed the f32 residual from input; that path goes through a
-  `SyncOnDrop`-creating CUDA slice view which invalidates CUDA Graph
-  capture. Switched to `copy_from_raw` (cuMemcpyDtoDAsync on cached raw
-  ptrs — capture safe).
-- M3 NVRTC compile now inlines `_typed_prelude.cuh` and strips `#include`
-  lines to match the M1 setup — the prelude's bf16/fp16 helpers must be
-  in scope before any `DEFINE_*` macro expansion.
-- Clippy hygiene: removed all `#[allow(clippy::too_many_arguments)]` by
-  bundling parameters into named structs (`TypedPtr`, `TiedLmDims`,
-  `PrefillInputs`, `Mamba3States`, `Mamba3LmBuild`).
+### API + crate plumbing
+
+- Inner trainer engines (`MambaTrainerMixed`, `MambaTrainerF32`,
+  `Mamba3TrainerMixed`, `Mamba3TrainerF32`) are `pub(crate)`. Public
+  surface is the wrappers only.
+- `gpu/trainer.rs` mirrors the inference `BackboneEngine` pattern —
+  public `MambaTrainer` is a thin dispatch over a private
+  `TrainerInner::{F32, Mixed}` enum.
+- `cuda` feature pulls `half` + `bytemuck` directly so
+  `cargo build --features cuda` (no `hf`) works.
+- `WeightDtype` re-exported from the crate root.
+- `pub mod gpu3` mirrors the existing `pub mod gpu` so Mamba-3 types
+  land one import deep.
+- `Mamba3Weights` / `Mamba3LayerWeights` are `#[derive(Clone)]`.
+- All `#[allow(clippy::too_many_arguments)]` removed by bundling args
+  into named structs (`TypedPtr`, `TiedLmDims`, `PrefillInputs`,
+  `Mamba3States`, `Mamba3LmBuild`, `BiGemmArgs`).
+- README rewritten with bf16 / f16 quickstart and an HF LLM example.
+
+### Tests
+
+49 test files, 280+ tests. Notable:
+
+- `hf_training_convergence` — 30-step real-checkpoint training on
+  mamba-130m-hf for all three dtypes; asserts monotone weight progress
+  and post-training inference validity.
+- `hf_full_cycle` — load → infer → train → re-infer.
+- `hf_batch_parity` — cross-batch logit parity on real weights;
+  CPU ↔ GPU f32 20/20 exact, bf16 20/20 KL ≤ 3e-6.
+- `extreme_edge_coverage` — batch=16/32, 1024-token generation
+  stability, M3 training at T=512 / T=1024.
+- `stability_stress` — CUDA Graph replay determinism, training
+  repeatability across independent trainer instances.
+- `cpu_gpu_train_parity` — M1 CPU vs GPU backward parity at f32.
+- `coverage_gaps::a_log_actually_reaches_ssm_after_training` —
+  regression guard for the `a_neg` staleness fix.
+- `backward_mixed_parity::backbone_grad_parity_multi_layer_{bf16,f16}`,
+  `trainer_smoke::m{1,3}_trainer_multi_layer_bf16` —
+  multi-layer (`n_layers = 3`) parity coverage.
+
+### Performance
+
+`state-spaces/mamba-130m-hf`, RTX 6000 Ada, CUDA Graph:
+
+| | f32 | bf16 | f16 |
+|---|---|---|---|
+| Inference B=1 (tok/s)               | 506   | 645   | 656   |
+| Training step B=1 T=32 (µs)         | 1 640 | 1 120 | 1 110 |
+| 30-step real-checkpoint convergence | 3.8 s | 2.9 s | 3.1 s |
+| Cross-batch KL (B=1 vs B=32)        | —     | **2e-11** | 2e-11 |
+
+Weight VRAM: bf16 / f16 = 0.50 × f32.
 
 ### Notes
 
-- The RL training path (`GpuMambaTrainWeights` + training forward/backward) is bit-identical to 0.2.1. The `BackboneEngine::F32` variant never touches the new mixed code; regression-guarded by `test_gpu_f32_backbone_unchanged_after_mixed_refactor` (M1) and the M3 equivalent.
-- No real Mamba-3 SISO HF checkpoint exists publicly; `GpuMamba3LM` therefore has no `from_hf` constructor. When checkpoints land, adding one is a 2-3 hour additive change (new HF loader + key remapper), no pipeline changes needed.
-- `m3_compute_abg`, `m3_angle_dt_fwd*` stay f32 — they operate on coefficient scalars (dt/a/trap/α/β/γ) and the RoPE angle state is accumulated in f64. Keeping them f32 preserves parity with the state-spaces/mamba reference.
+- No public Mamba-3 SISO HuggingFace checkpoint exists yet; the M3 LM
+  wrapper drives synthetic weights. When a real M3 checkpoint lands the
+  HF loader becomes a key remapper on top of the existing safetensors
+  path (purely additive).
+- `m3_compute_abg`, `m3_angle_dt_fwd_*` stay f32 by design; the RoPE
+  angle accumulator stays f64. Matches `state-spaces/mamba/mamba3.py`.
+- The pure-f32 inference and pure-f32 training paths are byte-unchanged
+  from 0.2.x; regression-guarded by
+  `test_gpu_f32_backbone_unchanged_after_mixed_refactor` (M1 + M3).
 
 ## 0.2.1
 

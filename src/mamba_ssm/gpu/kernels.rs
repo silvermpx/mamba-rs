@@ -276,18 +276,33 @@ pub struct MambaKernels {
     pub adamw_step_f32_capturable: CudaFunction,
 
     // -- Batch-invariant GEMM (bf16 cross-batch determinism fix) --
-    /// Batch-invariant GEMM bf16×bf16→bf16 (projections in bf16 path).
-    /// Fixed 64x64x32 tile, no split-K, f32 accumulate. Guarantees that
-    /// `C[i]` is bit-identical regardless of batch size M of A.
+    /// Batch-invariant GEMM bf16×bf16→bf16. Tensor-Core inner GEMM via
+    /// `nvcuda::wmma` (m16n16k16 fragments, f32 accumulator). Fixed
+    /// 64x64x32 tile, no split-K. `C[i, j]` is bit-identical regardless
+    /// of batch size M of A.
     pub gemm_bi_bf16_bf16: CudaFunction,
-    /// Batch-invariant GEMM f16×f16→f16.
+    /// Batch-invariant GEMM f16×f16→f16. Tensor Cores via WMMA.
     pub gemm_bi_f16_f16: CudaFunction,
     /// Batch-invariant GEMM bf16×bf16→f32 (tied lm_head: f32 logits).
     pub gemm_bi_bf16_f32: CudaFunction,
-    /// Batch-invariant GEMM f16×f16→f32.
+    /// Batch-invariant GEMM f16×f16→f32. Tensor Cores via WMMA.
     pub gemm_bi_f16_f32: CudaFunction,
-    /// Batch-invariant GEMM f32×f32→f32 (optional for training).
+    /// Batch-invariant GEMM f32×f32→f32. CUDA-core path (Tensor Cores
+    /// require fp16/bf16/tf32 inputs; tf32 would lose 13 mantissa bits).
     pub gemm_bi_f32_f32: CudaFunction,
+
+    // -- Batch-invariant matvec (M=1 specialization) --
+    /// Specialized M=1 matvec. The GEMM kernels above waste 98% of smem
+    /// bandwidth at M=1 (load BLOCK_M=64 rows, only row 0 is real).
+    /// Decode (single-token per step) uses this instead — one thread per
+    /// output column, K-loop with register-scalar f32 accumulator, no
+    /// cross-thread reductions. Trivially batch-invariant (M=1 has no
+    /// batch dim) and ~5× faster than gemm_bi_* at M=1.
+    pub matvec_bi_bf16_bf16: CudaFunction,
+    pub matvec_bi_f16_f16: CudaFunction,
+    pub matvec_bi_bf16_f32: CudaFunction,
+    pub matvec_bi_f16_f32: CudaFunction,
+    pub matvec_bi_f32_f32: CudaFunction,
 }
 
 impl MambaKernels {
@@ -445,6 +460,13 @@ impl MambaKernels {
             gemm_bi_bf16_f32: get("gemm_bi_bf16_f32")?,
             gemm_bi_f16_f32: get("gemm_bi_f16_f32")?,
             gemm_bi_f32_f32: get("gemm_bi_f32_f32")?,
+
+            // Batch-invariant matvec (M=1 specialization)
+            matvec_bi_bf16_bf16: get("matvec_bi_bf16_bf16")?,
+            matvec_bi_f16_f16: get("matvec_bi_f16_f16")?,
+            matvec_bi_bf16_f32: get("matvec_bi_bf16_f32")?,
+            matvec_bi_f16_f32: get("matvec_bi_f16_f32")?,
+            matvec_bi_f32_f32: get("matvec_bi_f32_f32")?,
 
             // typed inference kernels
             silu_fwd_typed: load_typed("silu_forward")?,

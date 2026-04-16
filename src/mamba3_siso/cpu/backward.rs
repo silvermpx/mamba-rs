@@ -19,7 +19,6 @@ use crate::ops::blas::sgemm_backward;
 use crate::ops::fast_math::{RMS_NORM_EPS, fast_exp_scalar};
 
 const MAX_DS: usize = 64;
-// MAX_NH_DS removed — d_k_carry now uses Vec to support all valid configs
 const MAX_ANGLES: usize = MAX_DS / 2;
 
 /// Mamba-3 SISO single-layer batched backward pass.
@@ -423,7 +422,9 @@ pub fn backward_mamba3_layer_batched(
     }
 
     // ═══ B7: in_proj SGEMM backward ═══
-    let n_angles_alloc = n_angles.max(1);
+    // in_proj layout: [z|x|b_raw|c_raw|dd_dt|dd_a|trap|angles?]
+    // The angles slot only exists when num_rope_angles > 0; otherwise the
+    // tail of the layout ends after `trap` and we must not write past it.
     for t in 0..seq_len {
         let dp = &mut scratch.d_proj_flat[t * ip..(t + 1) * ip];
         let mut off = 0;
@@ -443,9 +444,7 @@ pub fn backward_mamba3_layer_batched(
         off += nh;
         if n_angles > 0 {
             dp[off..off + n_angles]
-                .copy_from_slice(&scratch.d_angles_flat[t * n_angles..t * n_angles + n_angles]);
-        } else {
-            dp[off..off + n_angles_alloc].fill(0.0);
+                .copy_from_slice(&scratch.d_angles_flat[t * n_angles..(t + 1) * n_angles]);
         }
     }
 

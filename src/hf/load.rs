@@ -34,7 +34,7 @@ pub fn load_hf(dir: &Path) -> Result<HfModel, String> {
 
     if hf_cfg.family != ModelFamily::Mamba1 {
         return Err(format!(
-            "only Mamba-1 supported in v1, got {:?}",
+            "only Mamba SSM supported by this loader, got {:?}",
             hf_cfg.family
         ));
     }

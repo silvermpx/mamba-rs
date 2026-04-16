@@ -163,23 +163,19 @@ fn m1_trainer_parallel_scan_f16() {
 
 // ===========================================================================
 // Gap 3: f16 training at production learning rate over 50 steps
-// ===========================================================================
-
-/// f16 training at realistic `lr=1e-4` with the dynamic loss scaler running
-/// 50 eager steps. Previous f16 tests used `lr=1e-7` which makes updates
-/// vanish and sidesteps the whole point of f16 + loss scaling. This test
-/// verifies:
-///
-/// 1. Weights remain finite after 50 steps.
-/// 2. The loss scaler stays inside `[1.0, 2^24]` (PyTorch GradScaler default
-///    bounds).
-/// 3. At least one step is NOT overflow-skipped (otherwise the test is just
-///    "the optimizer stood still", which tells us nothing).
-/// 4. Weights actually move between pre-train and post-train snapshots.
-///
-/// Small inputs at `scale=0.01` keep the synthetic gradients within bf16
-/// dynamic range at the default initial loss scale; with `lr=1e-4` the
-/// update magnitude is comparable to a real RL actor step.
+//
+// `m1_trainer_f16_production_lr_stable` (defined below, further down the
+// file) exercises f16 training at realistic `lr=1e-4` with the dynamic
+// loss scaler over 50 eager steps. Previous f16 tests used `lr=1e-7`
+// which makes updates vanish and sidesteps the whole point of f16 +
+// loss scaling. The test asserts weights stay finite, the loss scaler
+// stays inside `[1.0, 2^24]` (PyTorch GradScaler default bounds), at
+// least one step commits (not stuck in overflow), and weights actually
+// move between pre-train and post-train snapshots.
+//
+// Small inputs at `scale=0.01` keep the synthetic gradients within bf16
+// dynamic range at the default initial loss scale; with `lr=1e-4` the
+// update magnitude is comparable to a real RL actor step.
 // ===========================================================================
 // Regression: a_log gradient must actually flow into SSM recurrence
 // ===========================================================================
@@ -249,7 +245,11 @@ fn a_log_actually_reaches_ssm_after_training() {
 
     // Read both sides after training.
     let after = trainer.snapshot_master().expect("snapshot");
-    let a_log_after: Vec<f32> = after.layers.iter().flat_map(|lw| lw.a_log.clone()).collect();
+    let a_log_after: Vec<f32> = after
+        .layers
+        .iter()
+        .flat_map(|lw| lw.a_log.clone())
+        .collect();
     let a_neg_after = trainer.debug_a_neg_all().expect("download a_neg_all");
 
     // Step 1: a_log must have moved (optimizer is working).
@@ -281,7 +281,7 @@ fn a_log_actually_reaches_ssm_after_training() {
     // every i. Tolerance absorbs bf16 sync rounding on large negatives.
     let mut worst_formula_err = 0.0f32;
     for (log, neg) in a_log_after.iter().zip(a_neg_after.iter()) {
-        let expected = -(*log as f32).exp();
+        let expected = -log.exp();
         let err = (expected - neg).abs();
         if err > worst_formula_err {
             worst_formula_err = err;
