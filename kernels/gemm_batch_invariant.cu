@@ -45,6 +45,7 @@
 
 #include "_typed_prelude.cuh"
 #include <mma.h>
+#include <cuda_pipeline.h>
 
 #define BLOCK_M 64
 #define BLOCK_N 64
@@ -394,9 +395,30 @@ NAME(                                                                           
     extern __shared__ unsigned char smem_a_raw[];                               \
     T_IO* smem_a = reinterpret_cast<T_IO*>(smem_a_raw);                         \
                                                                                 \
-    /* Cooperative global→smem load of a_row[0..K). */                          \
-    for (int i = threadIdx.x; i < k; i += THREADS_PER_BLOCK) {                  \
-        smem_a[i] = a_row[i];                                                   \
+    /* Cooperative global→smem load of a_row[0..K).                         */  \
+    /* Vectorized 128-bit async loads via cp.async.cg (sm_80+).             */  \
+    /* uint4 = 16 bytes = 8 bf16/f16 or 4 f32. Batch-invariance preserved:  */  \
+    /* element values are identical to scalar path; smem write order        */  \
+    /* does not affect later per-col K reduction.                           */  \
+    {                                                                           \
+        const int VEC = 16 / (int)sizeof(T_IO);                                 \
+        const int k_vec = k / VEC;                                              \
+        const uint4* a_vec =                                                    \
+            reinterpret_cast<const uint4*>(a_row);                              \
+        uint4* smem_a_vec = reinterpret_cast<uint4*>(smem_a);                   \
+        _Pragma("unroll 1")                                                     \
+        for (int i = threadIdx.x; i < k_vec; i += THREADS_PER_BLOCK) {          \
+            __pipeline_memcpy_async(                                            \
+                &smem_a_vec[i], &a_vec[i], sizeof(uint4));                      \
+        }                                                                       \
+        __pipeline_commit();                                                    \
+        /* Scalar tail for k % VEC != 0 (still sync). */                        \
+        const int k_tail_start = k_vec * VEC;                                   \
+        for (int i = k_tail_start + threadIdx.x; i < k;                         \
+             i += THREADS_PER_BLOCK) {                                          \
+            smem_a[i] = a_row[i];                                               \
+        }                                                                       \
+        __pipeline_wait_prior(0);                                               \
     }                                                                           \
     __syncthreads();                                                            \
                                                                                 \
