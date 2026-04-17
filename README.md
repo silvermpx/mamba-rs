@@ -3,8 +3,7 @@
 Mamba SSM and Mamba-3 SISO in Rust with optional CUDA GPU acceleration.
 Inference and training for both, with custom CUDA kernels.
 
-Pure Rust + CUDA — no PyTorch, no Triton, no Burn, no Candle. Kernels compile
-at runtime via NVRTC.
+Pure Rust + CUDA — Kernels compile at runtime via NVRTC.
 
 ## Features
 
@@ -18,11 +17,6 @@ at runtime via NVRTC.
   Compute stays f32 (upcast-in-kernel, f32 accumulators) regardless of
   storage dtype.
 - **Batch-invariant bf16 inference** (0.3.0) — own CUDA matvec kernel
-  (`kernels/gemm_batch_invariant.cu`) gives the same logits per row
-  regardless of batch size. KL ≈ 1e-11 cross-batch (vs cuBLAS's ~1e-3
-  algorithm-selection drift). 86 % of cuBLAS gemv throughput;
-  ~6 percentage points ahead of vLLM / Thinking Machines Lab's opt-in
-  Triton kernel, and the default path here, not opt-in.
 - **HuggingFace loader** — safetensors, synthetic + real Mamba SSM
   checkpoints (130m / 370m / 1.4b / 2.8b validated).
 - **Standalone** — no framework dependency.
