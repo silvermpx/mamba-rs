@@ -3,7 +3,7 @@
 Mamba SSM and Mamba-3 SISO in Rust with optional CUDA GPU acceleration.
 Inference and training for both, with custom CUDA kernels.
 
-Pure Rust + CUDA — Kernels compile at runtime via NVRTC.
+Pure Rust + CUDA. Kernels compile at runtime via NVRTC.
 
 ## Features
 
@@ -16,7 +16,11 @@ Pure Rust + CUDA — Kernels compile at runtime via NVRTC.
 - **f32 / bf16 / f16** — a single `WeightDtype` selector at construction.
   Compute stays f32 (upcast-in-kernel, f32 accumulators) regardless of
   storage dtype.
-- **Batch-invariant bf16 inference** (0.3.0) — own CUDA matvec kernel
+- **Batch-invariant bf16 inference** — optional via
+  `ctx.set_batch_invariant(true)` or `MAMBA_RS_BATCH_INVARIANT=1`. The
+  own CUDA matvec kernel (`kernels/gemm_batch_invariant.cu`) gives the
+  same logits per row regardless of batch size (KL ≈ 1e-11 cross-batch).
+  Default path is cuBLAS gemv for maximum throughput.
 - **HuggingFace loader** — safetensors, synthetic + real Mamba SSM
   checkpoints (130m / 370m / 1.4b / 2.8b validated).
 - **Standalone** — no framework dependency.
@@ -179,21 +183,23 @@ let (weights, input_dim) = load_mamba3(Path::new("m3.safetensors"), &cfg)?;
 
 ## Performance (RTX 6000 Ada)
 
-### LLM throughput — `state-spaces/mamba-*-hf`, greedy decode, CUDA Graph
+### LLM throughput — mamba-130m-hf, greedy decode, CUDA Graph, RTX 6000 Ada
 
-| Model         | f32 tok/s | bf16 tok/s | f16 tok/s | bf16 vs f32 |
-|---------------|-----------|-----------:|----------:|------------:|
-| mamba-130m-hf | 725       | **898**    | 899       | +24 %       |
-| mamba-370m-hf | 305       | **396**    | 395       | +30 %       |
-| mamba-1.4b-hf | 116       | **189**    | 190       | +63 %       |
-| mamba-2.8b-hf |  61       | **104**    | 104       | +70 %       |
+| dtype | cuBLAS (default) | batch-invariant matvec | Δ |
+|-------|-----------------:|-----------------------:|--:|
+| f32   | 723 tok/s        | 723 tok/s              | 0 % |
+| bf16  | **1 046 tok/s**  | 923 tok/s              | −12 % |
+| f16   | 1 047 tok/s      | 919 tok/s              | −12 % |
 
-All produced by the **batch-invariant matvec kernel** — pure Rust + NVRTC,
-no Python / Triton dependency. Strict cross-batch bit-identity at
-KL ≈ 1e-11 (`b=1` vs `b=N` produce the same logits per slot). Reaches
-~86 % of cuBLAS gemv throughput; ~6 percentage points faster than
-vLLM / Thinking Machines Lab `batch_invariant` Triton (~80 % of cuBLAS,
-opt-in).
+On f32 the two paths are equivalent — cuBLAS SGEMM and the custom
+matvec kernel both run on CUDA cores with no Tensor Core path. On
+bf16/f16 cuBLAS routes through Tensor Cores (TF32-style accumulation)
+and wins ~12 % on per-token latency, at the cost of M=1 vs M=N
+algorithm-selection drift (KL ≈ 1e-3 on adversarial prompts).
+
+Enable the batch-invariant path when cross-batch bit-identity matters
+(KL ≈ 1e-11 between `b=1` and `b=N` per slot): set
+`MAMBA_RS_BATCH_INVARIANT=1` or call `ctx.set_batch_invariant(true)`.
 
 ### Per-step latency (default config: d_model=128, 3 layers)
 

@@ -1,5 +1,24 @@
 # Changelog
 
+## Unreleased
+
+### Batch-invariant matvec is now opt-in
+
+The `matvec_bi_*` kernel dispatch, introduced as the default in 0.3.0,
+is now behind an opt-in flag — cuBLAS gemv is the default path.
+
+Enable via either:
+- `ctx.set_batch_invariant(true)` on the `GpuCtx`
+- `MAMBA_RS_BATCH_INVARIANT=1` environment variable at process start
+
+When enabled, output is bit-identical across batch sizes (KL ≈ 1e-11
+between `b=1` and `b=N` per slot). When disabled, cuBLAS's per-M algo
+selection may produce sub-ULP differences between decode and prefill.
+
+Also: the `matvec_bi` kernel now uses vectorized 128-bit `cp.async`
+loads for the A-row staging path (sm_80+). Parity and KL guardrails
+unchanged.
+
 ## 0.3.0
 
 GPU training and bf16/f16 inference for Mamba SSM and Mamba-3 SISO,
@@ -38,26 +57,17 @@ plus the corresponding `GpuMambaLM` / `GpuMamba3LM` LM wrappers.
 
 ### Batch-invariant matvec (the headline change)
 
-Custom CUDA kernel in `kernels/gemm_batch_invariant.cu` — no Python
-or Triton in the build. Output is bit-identical across batch sizes
-(KL ≈ 1e-11), against cuBLAS's `cublasGemmEx` which drifts to KL ≈ 1e-3
-between M=1 and M=N because it picks a different split-K / tile / algo
-per M.
+Custom CUDA kernel in `kernels/gemm_batch_invariant.cu`. Output is
+bit-identical across batch sizes (KL ≈ 1e-11), against cuBLAS's
+`cublasGemmEx` which drifts to KL ≈ 1e-3 between M=1 and M=N because
+it picks a different split-K / tile / algo per M.
 
 Layout: 8 warps × 32 threads per CTA, K split across warps, per-warp
 partials reduced in smem with a fixed reduction tree
 `(((p0+p1)+(p2+p3))+((p4+p5)+(p6+p7)))`. Grid is 2D
 `(ceil(N/32), M)` — one CTA per `(m_row, col_chunk)`, each row
 independent. The same kernel handles M=1 (decode) and M>1 (RL parallel
-envs, prefill) — cross-batch parity by construction, no opt-in flag.
-
-Throughput on RTX 6000 Ada, mamba-130m-hf, CUDA Graph, 100 greedy tokens:
-
-| dtype | tok/s | vs cuBLAS gemv |
-|---|---:|---:|
-| f32  | 725 | — |
-| bf16 | **898** | 86 % |
-| f16  | 899 | 86 % |
+envs, prefill).
 
 Parity guardrails (`tests/hf_batch_parity.rs`, `tests/extreme_edge_coverage.rs`):
 
@@ -67,9 +77,6 @@ Parity guardrails (`tests/hf_batch_parity.rs`, `tests/extreme_edge_coverage.rs`)
   all KL ≤ 3.5e-11.
 - `inference_extreme_batch_parity_bf16_b{16,32}`: KL ≤ 2.2e-11.
 - `hf_cpu_vs_gpu_inference_bf16`: 20/20 token match, KL = 2e-6.
-
-For comparison, vLLM / Thinking Machines Lab `batch_invariant_ops`
-(opt-in Triton kernel) lands at ~80 % of cuBLAS on the same workload.
 
 ### HuggingFace
 

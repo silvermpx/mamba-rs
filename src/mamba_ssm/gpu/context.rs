@@ -23,6 +23,12 @@ pub struct GpuCtx {
     half_staging: RefCell<Option<cudarc::driver::CudaSlice<u8>>>,
     half_staging_ptr: RefCell<cudarc::driver::sys::CUdeviceptr>,
     half_staging_bytes: RefCell<usize>,
+    /// Opt-in flag for the batch-invariant matvec path (`matvec_bi_*`).
+    /// Default: `false` → cuBLAS gemv (faster, but M=1/M=N may differ at
+    /// sub-ULP scale). Set via `set_batch_invariant(true)` or the
+    /// `MAMBA_RS_BATCH_INVARIANT=1` environment variable when strict
+    /// cross-batch bit-identity is required.
+    batch_invariant: std::cell::Cell<bool>,
 }
 
 impl GpuCtx {
@@ -56,6 +62,9 @@ impl GpuCtx {
         let arch = GpuDevice::nvrtc_arch(device.compute_capability);
         let kernels = MambaKernels::compile(device.context(), arch)?;
         let (blas, ws) = device.create_cublas(&stream)?;
+        let batch_invariant = std::env::var("MAMBA_RS_BATCH_INVARIANT")
+            .ok()
+            .is_some_and(|v| matches!(v.as_str(), "1" | "true" | "yes" | "on"));
         Ok(Self {
             stream,
             kernels,
@@ -64,7 +73,21 @@ impl GpuCtx {
             half_staging: RefCell::new(None),
             half_staging_ptr: RefCell::new(0),
             half_staging_bytes: RefCell::new(0),
+            batch_invariant: std::cell::Cell::new(batch_invariant),
         })
+    }
+
+    /// Enable or disable the batch-invariant matvec path.
+    /// When `true`, dispatches to the custom `matvec_bi_*` kernel which
+    /// produces bit-identical logits regardless of batch size. When `false`
+    /// (default), uses cuBLAS gemv for maximum throughput.
+    pub fn set_batch_invariant(&self, on: bool) {
+        self.batch_invariant.set(on);
+    }
+
+    /// Returns `true` if the batch-invariant matvec path is enabled.
+    pub fn batch_invariant(&self) -> bool {
+        self.batch_invariant.get()
     }
 
     /// Disable TF32 Tensor Cores — use full f32 SGEMM for parity tests.

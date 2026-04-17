@@ -87,7 +87,7 @@ pub fn save(
     views.push(view(&weights.norm_f_weight, &[dm]));
 
     // Build name-view pairs
-    for (name, v) in names.iter().zip(views.into_iter()) {
+    for (name, v) in names.iter().zip(views) {
         tensors.push((name.as_str(), v));
     }
 

@@ -740,13 +740,14 @@ pub fn gpu_gemm_typed_forward_raw(
     // the reference alive for the compiler.
     let _ = pick_bi_gemm(ctx, x.dtype, w.dtype, c.dtype);
 
-    // The matvec kernel now handles any M ≥ 1 via a 2D grid (CTA per
-    // (m_row, col_chunk)). At M=1 it matches cuBLAS-gemv throughput; at
-    // M>1 it's slower than cuBLAS-gemm because B is streamed once per
-    // row (no tile-level reuse across M), but each row's output is
-    // bit-identical to the M=1 computation — giving strict cross-batch
-    // determinism without a `relaxed` / `pedantic` flag.
-    if let Some(kernel) = pick_bi_matvec(ctx, x.dtype, w.dtype, c.dtype) {
+    // The matvec kernel handles any M ≥ 1 via a 2D grid (CTA per
+    // (m_row, col_chunk)) and gives strict cross-batch bit-identity.
+    // Opt-in only — default is cuBLAS gemv for maximum throughput.
+    // Enable via `ctx.set_batch_invariant(true)` or the
+    // `MAMBA_RS_BATCH_INVARIANT=1` environment variable.
+    if ctx.batch_invariant()
+        && let Some(kernel) = pick_bi_matvec(ctx, x.dtype, w.dtype, c.dtype)
+    {
         let bias_arg = bias_ptr.unwrap_or(0);
         return launch_bi_matvec(
             ctx,
