@@ -101,6 +101,10 @@ pub struct MambaKernels {
     pub bias_broadcast: CudaFunction,
     /// Column-wise sum: `db[j] += sum_b(dy[b*N + j])`.
     pub colsum_accumulate: CudaFunction,
+    /// Generic 2D axis-0 tree reduce: `out[d] = [out[d] +] sum_b(partials[b * dim + d])`.
+    /// Stage-2 finalizer for Rule-B per-sample partials (replaces atomicAdd
+    /// in backward accumulators). Deterministic across runs.
+    pub reduce_sum_axis0: CudaFunction,
     /// In-place vector add: `a[i] += b[i]`.
     pub vec_add_inplace: CudaFunction,
     /// Elementwise multiply: `c[i] = a[i] * b[i]`.
@@ -402,6 +406,7 @@ impl MambaKernels {
             // elementwise
             bias_broadcast: get("bias_broadcast")?,
             colsum_accumulate: get("colsum_accumulate")?,
+            reduce_sum_axis0: get("reduce_sum_axis0")?,
             vec_add_inplace: get("vec_add_inplace")?,
             elementwise_mul: get("elementwise_mul")?,
             exp_negate: get("exp_negate")?,

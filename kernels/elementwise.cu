@@ -80,6 +80,39 @@ extern "C" __global__ void colsum_accumulate(
     db[j] += sum;
 }
 
+// Generic 2D reduce-along-axis-0: out[d] = sum_b(partials[b * dim + d]).
+// Used as the stage-2 finalizer after Rule-B per-sample partials writes,
+// replacing atomicAdd accumulators with a deterministic tree reduction.
+// Grid: dim blocks (one per output column). Block: next_pow2(batch).clamp(32, 256).
+// Shared memory: block_dim * sizeof(float).
+// Deterministic across runs: tree reduce in fixed order, single-thread write.
+extern "C" __global__ __launch_bounds__(256, 4)
+void reduce_sum_axis0(
+    float* __restrict__ out,            // [dim]
+    const float* __restrict__ partials, // [batch * dim]
+    int batch, int dim,
+    int accumulate                      // 0 = overwrite, 1 = +=
+) {
+    int d = blockIdx.x;
+    if (d >= dim) return;
+    int tid = threadIdx.x;
+    extern __shared__ float sdata[];
+
+    float sum = 0.0f;
+    for (int b = tid; b < batch; b += blockDim.x) {
+        sum += partials[b * dim + d];
+    }
+    sdata[tid] = sum;
+    __syncthreads();
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (tid < s) sdata[tid] += sdata[tid + s];
+        __syncthreads();
+    }
+    if (tid == 0) {
+        out[d] = accumulate ? out[d] + sdata[0] : sdata[0];
+    }
+}
+
 extern "C" __global__ void fill_scalar(
     float* dst, float val, int n
 ) {
@@ -477,11 +510,13 @@ DEFINE_SCATTER_ADD_COLS(f16,  __half,        from_f_f16)
 // Typed bias reduction: `d_bias[i] += sum over (b, t) of dy[b, t, i]` where
 // `dy` is typed and `d_bias` is f32 master grad. Used by mixed dt_proj
 // backward to accumulate the bias gradient. One block per bias index i; one
-// warp per block handles the B*T reduction. atomicAdd avoids a second
-// reduction pass when grid is launched as <<<dim>>>.
+// warp per block handles the B*T reduction. Each block writes to a distinct
+// index `i`, so the final `d_bias[i] += sdata[0]` write has no race —
+// deterministic without atomics.
 #define DEFINE_REDUCE_BIAS(SUFFIX, TY)                                        \
-extern "C" __global__ void reduce_bias_##SUFFIX(                              \
-    float* d_bias, const TY* dy, int bt, int dim                              \
+extern "C" __global__ __launch_bounds__(256, 4)                               \
+void reduce_bias_##SUFFIX(                                                    \
+    float* __restrict__ d_bias, const TY* __restrict__ dy, int bt, int dim    \
 ) {                                                                           \
     int i = blockIdx.x;                                                       \
     if (i >= dim) return;                                                     \
@@ -497,7 +532,8 @@ extern "C" __global__ void reduce_bias_##SUFFIX(                              \
         if (threadIdx.x < s) sdata[threadIdx.x] += sdata[threadIdx.x + s];    \
         __syncthreads();                                                      \
     }                                                                         \
-    if (threadIdx.x == 0) atomicAdd(&d_bias[i], sdata[0]);                    \
+    /* No race: each block handles a distinct bias index i. */                \
+    if (threadIdx.x == 0) d_bias[i] = d_bias[i] + sdata[0];                   \
 }
 
 DEFINE_REDUCE_BIAS(f32,  float)

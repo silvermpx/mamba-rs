@@ -170,10 +170,21 @@ extern "C" __global__ void rmsnorm_forward_f32in_##SUFFIX(                   \
 DEFINE_RMSNORM_FWD_F32IN(bf16, __nv_bfloat16, from_f_bf16)
 DEFINE_RMSNORM_FWD_F32IN(f16,  __half,        from_f_f16)
 
+// Rule B (no atomicAdd): per-sample per-dim write to `d_scale_partials[b*dim + i]`.
+// Caller MUST follow with `reduce_sum_axis0(d_scale, partials, batch, dim, accumulate=1)`
+// to finalize the gradient deterministically.
+//
+// No `__launch_bounds__` — block_dim follows `grid_norm` and can reach 1024 on
+// d_model=768/1024/1536/2048/2560 HF checkpoints. The strided accumulation
+// loop + shared-memory tree reduce is correct at any power-of-2 block size
+// up to 1024.
 extern "C" __global__ void rmsnorm_backward(
-    float* dx, float* d_scale,
-    const float* dy, const float* x, const float* scale,
-    const float* rms_saved,
+    float* __restrict__ dx,
+    float* __restrict__ d_scale_partials,   // [batch * dim] per-sample per-dim OUTPUT
+    const float* __restrict__ dy,
+    const float* __restrict__ x,
+    const float* __restrict__ scale,
+    const float* __restrict__ rms_saved,
     int batch, int dim
 ) {
     int b = blockIdx.x;
@@ -217,30 +228,38 @@ extern "C" __global__ void rmsnorm_backward(
         float x_hat = x[off + i] * inv_rms;
         float dy_val = dy[off + i];
         dx[off + i] = (scale[i] * dy_val - x_hat * mean_dy_y) * inv_rms;
-        atomicAdd(&d_scale[i], dy_val * x_hat);
+        // Rule B: per-sample per-dim partial (no atomic; reduced externally).
+        d_scale_partials[off + i] = dy_val * x_hat;
     }
 }
 
 // rmsnorm_backward typed (bf16/f16/f32) for mixed-precision training.
 // Pattern matches NVIDIA Apex layer_norm_cuda_kernel.cu and state-spaces/mamba
 // reference: load activations cast to f32, reduce mean(dy·ŷ) in f32 shmem,
-// store dx as T (downcast), accumulate dscale via atomicAdd into f32 master
-// slice (bf16 atomicAdd loses ~7 mantissa bits per update — use f32 master).
+// store dx as T (downcast).
+//
+// Rule B (no atomicAdd): per-sample per-dim write to
+// `d_scale_partials[b*dim + i]` in f32. Caller MUST follow with
+// `reduce_sum_axis0(d_scale, partials, batch, dim, accumulate=1)` to finalize
+// the f32 master-grad gradient deterministically.
 //
 // Inputs:
-//   dx          [batch * dim]  T          — output gradient w.r.t. x
-//   d_scale     [dim]          float      — output grad w.r.t. scale (atomic)
-//   dy          [batch * dim]  T          — incoming grad w.r.t. y
-//   x           [batch * dim]  T          — saved input (forward)
-//   scale       [dim]          float      — RMS scale weight
-//   rms_saved   [batch]        float      — saved RMS scalar per sample
+//   dx                [batch * dim]  T      — output gradient w.r.t. x
+//   d_scale_partials  [batch * dim]  float  — per-sample per-dim OUTPUT (f32)
+//   dy                [batch * dim]  T      — incoming grad w.r.t. y
+//   x                 [batch * dim]  T      — saved input (forward)
+//   scale             [dim]          float  — RMS scale weight
+//   rms_saved         [batch]        float  — saved RMS scalar per sample
 //
 // Shared memory: blockDim.x * sizeof(float)  (independent of T — see grid_norm).
+//
+// No `__launch_bounds__` — see rationale on the f32 `rmsnorm_backward` above.
 #define DEFINE_RMSNORM_BWD(SUFFIX, T, FROM_F)                                  \
 extern "C" __global__ void rmsnorm_backward_##SUFFIX(                          \
-    T* dx, float* d_scale,                                                     \
-    const T* dy, const T* x, const float* scale,                               \
-    const float* rms_saved,                                                    \
+    T* __restrict__ dx, float* __restrict__ d_scale_partials,                  \
+    const T* __restrict__ dy, const T* __restrict__ x,                         \
+    const float* __restrict__ scale,                                           \
+    const float* __restrict__ rms_saved,                                       \
     int batch, int dim                                                         \
 ) {                                                                            \
     int b = blockIdx.x;                                                        \
@@ -274,7 +293,8 @@ extern "C" __global__ void rmsnorm_backward_##SUFFIX(                          \
         float x_hat = to_f(x[off + i]) * inv_rms;                              \
         float dy_val = to_f(dy[off + i]);                                      \
         dx[off + i] = FROM_F((scale[i] * dy_val - x_hat * mean_dy_y) * inv_rms); \
-        atomicAdd(&d_scale[i], dy_val * x_hat);                                \
+        /* Rule B: per-sample per-dim partial (no atomic; reduced externally). */ \
+        d_scale_partials[off + i] = dy_val * x_hat;                            \
     }                                                                          \
 }
 
@@ -283,21 +303,28 @@ DEFINE_RMSNORM_BWD(bf16, __nv_bfloat16, from_f_bf16)
 DEFINE_RMSNORM_BWD(f16,  __half,        from_f_f16)
 
 // Dual-dtype backward twin of `rmsnorm_forward_f32in_typed`:
-//   dy          [batch, dim]   T          — typed upstream gradient
-//   x           [batch, dim]   float      — f32 pre-norm input (residual)
-//   scale       [dim]          float      — f32 weight
-//   rms_saved   [batch]        float
+//   dy                [batch, dim]   T      — typed upstream gradient
+//   x                 [batch, dim]   float  — f32 pre-norm input (residual)
+//   scale             [dim]          float  — f32 weight
+//   rms_saved         [batch]        float
 // Outputs:
-//   dx          [batch, dim]   float      — f32 (feeds f32 residual `d_temporal`)
-//   d_scale     [dim]          float      — f32 master grad via atomicAdd
+//   dx                [batch, dim]   float  — f32 (feeds f32 residual `d_temporal`)
+//   d_scale_partials  [batch, dim]   float  — Rule-B per-sample per-dim OUTPUT
+//
 // Used in the mixed backward per-layer rmsnorm: `d_norm` arrives typed
 // from the in_proj dX backward, and must write back into the f32 residual
 // stream `d_temporal` via `d_pre_norm` without an intermediate cast kernel.
+//
+// Rule B (no atomicAdd): caller MUST follow with
+// `reduce_sum_axis0(d_scale, partials, batch, dim, accumulate=1)`.
+//
+// No `__launch_bounds__` — see rationale on the f32 `rmsnorm_backward` above.
 #define DEFINE_RMSNORM_BWD_F32IN(SUFFIX, T)                                    \
 extern "C" __global__ void rmsnorm_backward_f32in_##SUFFIX(                    \
-    float* dx, float* d_scale,                                                 \
-    const T* dy, const float* x, const float* scale,                           \
-    const float* rms_saved,                                                    \
+    float* __restrict__ dx, float* __restrict__ d_scale_partials,              \
+    const T* __restrict__ dy, const float* __restrict__ x,                     \
+    const float* __restrict__ scale,                                           \
+    const float* __restrict__ rms_saved,                                       \
     int batch, int dim                                                         \
 ) {                                                                            \
     int b = blockIdx.x;                                                        \
@@ -331,7 +358,8 @@ extern "C" __global__ void rmsnorm_backward_f32in_##SUFFIX(                    \
         float x_hat = x[off + i] * inv_rms;                                    \
         float dy_val = to_f(dy[off + i]);                                      \
         dx[off + i] = (scale[i] * dy_val - x_hat * mean_dy_y) * inv_rms;       \
-        atomicAdd(&d_scale[i], dy_val * x_hat);                                \
+        /* Rule B: per-sample per-dim partial (no atomic; reduced externally). */ \
+        d_scale_partials[off + i] = dy_val * x_hat;                            \
     }                                                                          \
 }
 

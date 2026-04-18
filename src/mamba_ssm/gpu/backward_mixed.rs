@@ -575,36 +575,84 @@ pub fn gpu_backward_mamba_layer_mixed(
     }
 
     // ─── B6: Conv1d burnin backward ──────────────────────────────────
-    // conv1d_burnin_bwd_typed writes typed d_x_branch, atomicAdds f32
-    // d_conv_w/d_conv_b master grads.
+    // Rule B (no atomicAdd): two-stage launch.
+    // Stage 1: conv1d_burnin_bwd_typed writes typed d_x_branch + per-(b,d)
+    //          f32 partials into axis0_partials split as [weight | bias].
+    // Stage 2: two reduce_sum_axis0 launches reduce across B → f32 master
+    //          grads in d_lw.conv1d_weight / d_lw.conv1d_bias.
     {
         let b_i = b as i32;
         let t_i = t as i32;
         let di_i = di as i32;
         let dc_i = d_conv as i32;
-        let mut bld = ctx
-            .stream
-            .launch_builder(k.conv1d_burnin_bwd_typed.get(dtype));
-        let dxb = scratch.d_x_branch.cached_ptr();
-        let dw = d_lw.conv1d_weight.ptr();
-        let db = d_lw.conv1d_bias.ptr();
-        let du = scratch.d_u.cached_ptr();
-        let pc = acts.post_conv.cached_ptr();
-        let cs = acts.conv_states.cached_ptr();
-        let w = lw.conv1d_weight.ptr();
-        bld.arg(&dxb);
-        bld.arg(&dw);
-        bld.arg(&db);
-        bld.arg(&du);
-        bld.arg(&pc);
-        bld.arg(&cs);
-        bld.arg(&w);
-        bld.arg(&b_i);
-        bld.arg(&t_i);
-        bld.arg(&di_i);
-        bld.arg(&dc_i);
-        unsafe { bld.launch(grid_1d(b * di)) }
-            .map_err(|e| format!("conv1d_burnin_bwd_typed: {e:?}"))?;
+        let weight_partials_elems = b * di * d_conv;
+        let bias_offset_bytes = (weight_partials_elems * std::mem::size_of::<f32>()) as u64;
+        let axis0_base = scratch.axis0_partials.cached_ptr();
+        let wp_ptr = axis0_base;
+        let bp_ptr = axis0_base + bias_offset_bytes;
+        // Stage 1: per-(b,d) partials.
+        {
+            let mut bld = ctx
+                .stream
+                .launch_builder(k.conv1d_burnin_bwd_typed.get(dtype));
+            let dxb = scratch.d_x_branch.cached_ptr();
+            let du = scratch.d_u.cached_ptr();
+            let pc = acts.post_conv.cached_ptr();
+            let cs = acts.conv_states.cached_ptr();
+            let w = lw.conv1d_weight.ptr();
+            bld.arg(&dxb);
+            bld.arg(&wp_ptr); // d_weight_partials
+            bld.arg(&bp_ptr); // d_bias_partials
+            bld.arg(&du);
+            bld.arg(&pc);
+            bld.arg(&cs);
+            bld.arg(&w);
+            bld.arg(&b_i);
+            bld.arg(&t_i);
+            bld.arg(&di_i);
+            bld.arg(&dc_i);
+            unsafe { bld.launch(grid_1d(b * di)) }
+                .map_err(|e| format!("conv1d_burnin_bwd_typed partial: {e:?}"))?;
+        }
+        // Stage 2a: reduce weight partials [B, di*d_conv] → d_lw.conv1d_weight.
+        {
+            let block_dim = (b as u32).next_power_of_two().clamp(32, 256);
+            let accumulate_i: i32 = 1;
+            let dim_w = (di * d_conv) as i32;
+            let p = d_lw.conv1d_weight.ptr();
+            let mut bld = ctx.stream.launch_builder(&ctx.kernels.reduce_sum_axis0);
+            bld.arg(&p);
+            bld.arg(&wp_ptr);
+            bld.arg(&b_i);
+            bld.arg(&dim_w);
+            bld.arg(&accumulate_i);
+            let cfg = cudarc::driver::LaunchConfig {
+                grid_dim: ((di * d_conv) as u32, 1, 1),
+                block_dim: (block_dim, 1, 1),
+                shared_mem_bytes: (block_dim as usize * std::mem::size_of::<f32>()) as u32,
+            };
+            unsafe { bld.launch(cfg) }
+                .map_err(|e| format!("conv1d_burnin_bwd_typed weight final: {e:?}"))?;
+        }
+        // Stage 2b: reduce bias partials [B, di] → d_lw.conv1d_bias.
+        {
+            let block_dim = (b as u32).next_power_of_two().clamp(32, 256);
+            let accumulate_i: i32 = 1;
+            let p = d_lw.conv1d_bias.ptr();
+            let mut bld = ctx.stream.launch_builder(&ctx.kernels.reduce_sum_axis0);
+            bld.arg(&p);
+            bld.arg(&bp_ptr);
+            bld.arg(&b_i);
+            bld.arg(&di_i);
+            bld.arg(&accumulate_i);
+            let cfg = cudarc::driver::LaunchConfig {
+                grid_dim: (di as u32, 1, 1),
+                block_dim: (block_dim, 1, 1),
+                shared_mem_bytes: (block_dim as usize * std::mem::size_of::<f32>()) as u32,
+            };
+            unsafe { bld.launch(cfg) }
+                .map_err(|e| format!("conv1d_burnin_bwd_typed bias final: {e:?}"))?;
+        }
     }
 
     // ─── B7: in_proj backward ────────────────────────────────────────
@@ -663,9 +711,12 @@ pub fn gpu_backward_mamba_layer_mixed(
     )?;
 
     // ─── B8: RmsNorm backward (typed dy + f32 x → f32 dx) + residual ─
-    // rmsnorm_backward_f32in writes f32 d_pre_norm + atomicAdds f32
-    // d_norm_weight master grad. Dispatch: bf16/f16 → dual-dtype f32in
-    // kernel; f32 → existing pure-f32 rmsnorm_bwd (same signature).
+    // Rule B (no atomicAdd): two-stage launch.
+    // Stage 1: rmsnorm_bwd variant writes f32 d_pre_norm + per-sample per-dim
+    //          f32 partials into axis0_partials[bt * dm].
+    // Stage 2: reduce_sum_axis0 reduces across bt → d_lw.norm_weight (f32
+    //          master grad, accumulate=1).
+    // Dispatch: bf16/f16 → dual-dtype f32in kernel; f32 → pure-f32 rmsnorm_bwd.
     let rmsnorm_bwd = match dtype {
         WeightDtype::F32 => &k.rmsnorm_bwd,
         WeightDtype::Bf16 | WeightDtype::F16 => k.rmsnorm_bwd_f32in_typed.get(dtype),
@@ -673,23 +724,45 @@ pub fn gpu_backward_mamba_layer_mixed(
     {
         let bt_i = bt as i32;
         let dm_i = dm as i32;
-        let mut bld = ctx.stream.launch_builder(rmsnorm_bwd);
-        let dx = scratch.d_pre_norm.cached_ptr();
-        let dsc = d_lw.norm_weight.ptr();
-        let dy = scratch.d_norm.cached_ptr();
-        let x = acts.residual.cached_ptr();
-        let sc = lw.norm_weight.ptr();
-        let rms = acts.rms_vals.cached_ptr();
-        bld.arg(&dx);
-        bld.arg(&dsc);
-        bld.arg(&dy);
-        bld.arg(&x);
-        bld.arg(&sc);
-        bld.arg(&rms);
-        bld.arg(&bt_i);
-        bld.arg(&dm_i);
-        unsafe { bld.launch(grid_norm(bt, dm)) }
-            .map_err(|e| format!("rmsnorm_bwd_f32in_typed: {e:?}"))?;
+        let axis0_ptr = scratch.axis0_partials.cached_ptr();
+        // Stage 1
+        {
+            let mut bld = ctx.stream.launch_builder(rmsnorm_bwd);
+            let dx = scratch.d_pre_norm.cached_ptr();
+            let dy = scratch.d_norm.cached_ptr();
+            let x = acts.residual.cached_ptr();
+            let sc = lw.norm_weight.ptr();
+            let rms = acts.rms_vals.cached_ptr();
+            bld.arg(&dx);
+            bld.arg(&axis0_ptr); // d_scale_partials
+            bld.arg(&dy);
+            bld.arg(&x);
+            bld.arg(&sc);
+            bld.arg(&rms);
+            bld.arg(&bt_i);
+            bld.arg(&dm_i);
+            unsafe { bld.launch(grid_norm(bt, dm)) }
+                .map_err(|e| format!("rmsnorm_bwd_f32in_typed partial: {e:?}"))?;
+        }
+        // Stage 2
+        {
+            let block_dim = (bt as u32).next_power_of_two().clamp(32, 256);
+            let accumulate_i: i32 = 1;
+            let p = d_lw.norm_weight.ptr();
+            let mut bld = ctx.stream.launch_builder(&ctx.kernels.reduce_sum_axis0);
+            bld.arg(&p);
+            bld.arg(&axis0_ptr);
+            bld.arg(&bt_i);
+            bld.arg(&dm_i);
+            bld.arg(&accumulate_i);
+            let cfg = cudarc::driver::LaunchConfig {
+                grid_dim: (dm as u32, 1, 1),
+                block_dim: (block_dim, 1, 1),
+                shared_mem_bytes: (block_dim as usize * std::mem::size_of::<f32>()) as u32,
+            };
+            unsafe { bld.launch(cfg) }
+                .map_err(|e| format!("rmsnorm_bwd_f32in_typed final: {e:?}"))?;
+        }
     }
     // Residual: d_temporal (f32) += d_pre_norm (f32).
     {
@@ -731,22 +804,45 @@ pub fn gpu_backward_mamba_backbone_mixed(
 
     // norm_f backward — always f32 (dy=f32 d_temporal, x=f32 norm_f_input,
     // dx=f32). Result copied back into d_temporal.
+    // Rule B (no atomicAdd): two-stage launch for d_scale accumulator.
     {
         let bt_i = bt as i32;
         let dm_i = dims.d_model as i32;
-        let mut bld = ctx.stream.launch_builder(&ctx.kernels.rmsnorm_bwd);
-        bld.arg(scratch.d_pre_norm.inner_mut());
-        let p = d_mamba.norm_f_weight.ptr();
-        bld.arg(&p);
-        bld.arg(d_temporal.inner());
-        bld.arg(acts.norm_f_input.inner());
-        let nf = mamba_w.norm_f_weight.ptr();
-        bld.arg(&nf);
-        bld.arg(acts.norm_f_rms.inner());
-        bld.arg(&bt_i);
-        bld.arg(&dm_i);
-        unsafe { bld.launch(grid_norm(bt, dims.d_model)) }
-            .map_err(|e| format!("rmsnorm_bwd norm_f mixed: {e:?}"))?;
+        let axis0_ptr = scratch.axis0_partials.cached_ptr();
+        // Stage 1
+        {
+            let mut bld = ctx.stream.launch_builder(&ctx.kernels.rmsnorm_bwd);
+            bld.arg(scratch.d_pre_norm.inner_mut());
+            bld.arg(&axis0_ptr); // d_scale_partials
+            bld.arg(d_temporal.inner());
+            bld.arg(acts.norm_f_input.inner());
+            let nf = mamba_w.norm_f_weight.ptr();
+            bld.arg(&nf);
+            bld.arg(acts.norm_f_rms.inner());
+            bld.arg(&bt_i);
+            bld.arg(&dm_i);
+            unsafe { bld.launch(grid_norm(bt, dims.d_model)) }
+                .map_err(|e| format!("rmsnorm_bwd norm_f mixed partial: {e:?}"))?;
+        }
+        // Stage 2
+        {
+            let block_dim = (bt as u32).next_power_of_two().clamp(32, 256);
+            let accumulate_i: i32 = 1;
+            let p = d_mamba.norm_f_weight.ptr();
+            let mut bld = ctx.stream.launch_builder(&ctx.kernels.reduce_sum_axis0);
+            bld.arg(&p);
+            bld.arg(&axis0_ptr);
+            bld.arg(&bt_i);
+            bld.arg(&dm_i);
+            bld.arg(&accumulate_i);
+            let cfg = cudarc::driver::LaunchConfig {
+                grid_dim: (dims.d_model as u32, 1, 1),
+                block_dim: (block_dim, 1, 1),
+                shared_mem_bytes: (block_dim as usize * std::mem::size_of::<f32>()) as u32,
+            };
+            unsafe { bld.launch(cfg) }
+                .map_err(|e| format!("rmsnorm_bwd norm_f mixed final: {e:?}"))?;
+        }
         d_temporal.copy_from(&scratch.d_pre_norm, &ctx.stream)?;
     }
 

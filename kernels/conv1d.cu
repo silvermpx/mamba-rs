@@ -116,15 +116,19 @@ DEFINE_CONV1D_STEP_FWD_SILU(f16,  __half,        from_f_f16)
 
 // Conv1d step backward:
 //   d_new_x[b,d] = weight[d, d_conv-1] * dy[b,d]
-//   d_weight[d,k] += state_saved[b,d,k] * dy[b,d]  (accumulated across batch)
-//   d_bias[d] += dy[b,d]  (accumulated across batch)
-extern "C" __global__ void conv1d_step_backward(
-    float* d_new_x,     // [batch * d_inner]
-    float* d_weight,     // [d_inner * d_conv] accumulated
-    float* d_bias,       // [d_inner] accumulated
-    const float* dy,     // [batch * d_inner]
-    const float* state_saved, // [batch * d_inner * d_conv]
-    const float* weight, // [d_inner * d_conv]
+//   d_weight_partials[b,d,k] = state_saved[b,d,k] * dy[b,d]  (per-sample)
+//   d_bias_partials[b,d]     = dy[b,d]                        (per-sample)
+//
+// Rule B (no atomicAdd): caller MUST follow with two reduce_sum_axis0 launches
+// to reduce across batch deterministically.
+extern "C" __global__ __launch_bounds__(256, 4)
+void conv1d_step_backward(
+    float* __restrict__ d_new_x,             // [batch * d_inner]
+    float* __restrict__ d_weight_partials,   // [batch * d_inner * d_conv] OUTPUT
+    float* __restrict__ d_bias_partials,     // [batch * d_inner] OUTPUT
+    const float* __restrict__ dy,            // [batch * d_inner]
+    const float* __restrict__ state_saved,   // [batch * d_inner * d_conv]
+    const float* __restrict__ weight,        // [d_inner * d_conv]
     int batch, int d_inner, int d_conv
 ) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -138,14 +142,13 @@ extern "C" __global__ void conv1d_step_backward(
     // d_new_x: gradient flows through position d_conv-1 only
     d_new_x[idx] = dy_val * weight[d * d_conv + d_conv - 1];
 
-    // d_weight: accumulated across batch
+    // Rule B: per-(b,d) write to partials — caller reduces across batch.
     int state_base = (b * d_inner + d) * d_conv;
+    int wp_base = (b * d_inner + d) * d_conv;
     for (int k = 0; k < d_conv; k++) {
-        atomicAdd(&d_weight[d * d_conv + k], dy_val * state_saved[state_base + k]);
+        d_weight_partials[wp_base + k] = dy_val * state_saved[state_base + k];
     }
-
-    // d_bias: accumulated across batch
-    atomicAdd(&d_bias[d], dy_val);
+    d_bias_partials[b * d_inner + d] = dy_val;
 }
 
 // ======================== BURNIN (T>1) ========================
@@ -322,15 +325,23 @@ DEFINE_CONV1D_BURNIN(f16,  __half,        from_f_f16)
 // Includes BUG-M2 carry fix: gradient propagates through shift register positions.
 // Fused with SiLU backward.
 //
+// Rule B (no atomicAdd): each thread accumulates its local d_weight/d_bias
+// contributions across T timesteps into registers, then writes a single
+// per-(b,d) partial at the end. Caller MUST follow with two reduce_sum_axis0
+// launches to reduce across batch deterministically:
+//   reduce_sum_axis0(d_weight, d_weight_partials, batch, d_inner*d_conv, 1)
+//   reduce_sum_axis0(d_bias,   d_bias_partials,   batch, d_inner,         1)
+//
 // Source: CPU reference: train/forward.rs phase B6
-extern "C" __global__ void conv1d_burnin_backward(
-    float* d_x_branch,    // [batch * T * d_inner] output gradient
-    float* d_weight,       // [d_inner * d_conv] accumulated (atomicAdd across batch*T)
-    float* d_bias,         // [d_inner] accumulated (atomicAdd across batch*T)
-    const float* d_u,      // [batch * T * d_inner] incoming gradient (after x_proj bwd accumulation)
-    const float* post_conv,// [batch * T * d_inner] saved pre-SiLU values
-    const float* conv_states, // [batch * T * d_inner * d_conv] saved states
-    const float* weight,   // [d_inner * d_conv]
+extern "C" __global__ __launch_bounds__(256, 4)
+void conv1d_burnin_backward(
+    float* __restrict__ d_x_branch,       // [batch * T * d_inner] output gradient
+    float* __restrict__ d_weight_partials, // [batch * d_inner * d_conv] OUTPUT (no atomicAdd)
+    float* __restrict__ d_bias_partials,   // [batch * d_inner] OUTPUT (no atomicAdd)
+    const float* __restrict__ d_u,         // [batch * T * d_inner]
+    const float* __restrict__ post_conv,   // [batch * T * d_inner] saved pre-SiLU
+    const float* __restrict__ conv_states, // [batch * T * d_inner * d_conv]
+    const float* __restrict__ weight,      // [d_inner * d_conv]
     int batch, int T, int d_inner, int d_conv
 ) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -346,6 +357,11 @@ extern "C" __global__ void conv1d_burnin_backward(
     if (d_conv > 8) return; // safety guard
     for (int k = 0; k < d_conv - 1; k++) carry[k] = 0.0f;
 
+    // Local T-accumulators for Rule B (avoid T atomicAdds per thread).
+    float local_d_weight[8];
+    for (int k = 0; k < d_conv; k++) local_d_weight[k] = 0.0f;
+    float local_d_bias = 0.0f;
+
     for (int t = T - 1; t >= 0; t--) {
         int bt_di = (b * T + t) * d_inner + d;
 
@@ -359,14 +375,12 @@ extern "C" __global__ void conv1d_burnin_backward(
         // d_x_branch[b,t,d] = weight[d, d_conv-1] * d_conv_out
         d_x_branch[bt_di] = d_conv_out * weight[d * d_conv + d_conv - 1];
 
-        // d_weight[d,k] += conv_states[b,t,d,k] * d_conv_out
+        // Accumulate into local d_weight/d_bias (no atomic)
         int cs_base = ((b * T + t) * d_inner + d) * d_conv;
         for (int k = 0; k < d_conv; k++) {
-            atomicAdd(&d_weight[d * d_conv + k], d_conv_out * conv_states[cs_base + k]);
+            local_d_weight[k] += d_conv_out * conv_states[cs_base + k];
         }
-
-        // d_bias[d] += d_conv_out
-        atomicAdd(&d_bias[d], d_conv_out);
+        local_d_bias += d_conv_out;
 
         // BUG-M2 carry fix: propagate gradient through shift register
         if (d_conv > 1) {
@@ -381,12 +395,24 @@ extern "C" __global__ void conv1d_burnin_backward(
             carry[carry_len - 1] = d_conv_out * weight[d * d_conv];
         }
     }
+
+    // Rule B stage-1 output: single per-(b,d) write after T-loop.
+    int wp_base = (b * d_inner + d) * d_conv;
+    for (int k = 0; k < d_conv; k++) {
+        d_weight_partials[wp_base + k] = local_d_weight[k];
+    }
+    d_bias_partials[b * d_inner + d] = local_d_bias;
 }
 
 // conv1d_burnin_backward typed (bf16/f16/f32) for mixed-precision training.
 // Pattern matches Dao-AILab/causal-conv1d backward: activations T_IN, weights
-// f32 master, recurrent state save (`conv_states`) f32, weight/bias grads
-// accumulate via atomicAdd to f32 master grad slices.
+// f32 master, recurrent state save (`conv_states`) f32.
+//
+// Rule B (no atomicAdd): accumulate d_weight/d_bias into thread-local
+// registers across the T-loop, then write one per-(b,d) partial at the end.
+// Caller MUST follow with two reduce_sum_axis0 launches:
+//   reduce_sum_axis0(d_weight, d_weight_partials, batch, d_inner*d_conv, 1)
+//   reduce_sum_axis0(d_bias,   d_bias_partials,   batch, d_inner,         1)
 //
 // Carry register array stays float[8] regardless of T_IN (BUG-M2 fix needs
 // f32 precision for the back-propagated gradient through the shift register).
@@ -394,14 +420,15 @@ extern "C" __global__ void conv1d_burnin_backward(
 // CONSTRAINT: d_conv <= 8 (compile-time register array). All shipped
 // state-spaces/mamba checkpoints use d_conv=4.
 #define DEFINE_CONV1D_BURNIN_BWD(SUFFIX, T, FROM_F)                            \
-extern "C" __global__ void conv1d_burnin_backward_##SUFFIX(                    \
-    T* d_x_branch,                                                             \
-    float* d_weight,                                                           \
-    float* d_bias,                                                             \
-    const T* d_u,                                                              \
-    const T* post_conv,                                                        \
-    const float* conv_states,                                                  \
-    const float* weight,                                                       \
+extern "C" __global__ __launch_bounds__(256, 4)                                \
+void conv1d_burnin_backward_##SUFFIX(                                          \
+    T* __restrict__ d_x_branch,                                                \
+    float* __restrict__ d_weight_partials,                                     \
+    float* __restrict__ d_bias_partials,                                       \
+    const T* __restrict__ d_u,                                                 \
+    const T* __restrict__ post_conv,                                           \
+    const float* __restrict__ conv_states,                                     \
+    const float* __restrict__ weight,                                          \
     int batch, int T_, int d_inner, int d_conv                                 \
 ) {                                                                            \
     int idx = blockIdx.x * blockDim.x + threadIdx.x;                           \
@@ -412,6 +439,9 @@ extern "C" __global__ void conv1d_burnin_backward_##SUFFIX(                    \
     float carry[8];                                                            \
     if (d_conv > 8) return;                                                    \
     for (int k = 0; k < d_conv - 1; k++) carry[k] = 0.0f;                      \
+    float local_d_weight[8];                                                   \
+    for (int k = 0; k < d_conv; k++) local_d_weight[k] = 0.0f;                 \
+    float local_d_bias = 0.0f;                                                 \
     for (int t = T_ - 1; t >= 0; t--) {                                        \
         int bt_di = (b * T_ + t) * d_inner + d;                                \
         float x = to_f(post_conv[bt_di]);                                      \
@@ -421,10 +451,9 @@ extern "C" __global__ void conv1d_burnin_backward_##SUFFIX(                    \
         float dxb = d_conv_out * weight[d * d_conv + d_conv - 1];              \
         int cs_base = ((b * T_ + t) * d_inner + d) * d_conv;                   \
         for (int k = 0; k < d_conv; k++) {                                     \
-            atomicAdd(&d_weight[d * d_conv + k],                               \
-                      d_conv_out * conv_states[cs_base + k]);                  \
+            local_d_weight[k] += d_conv_out * conv_states[cs_base + k];        \
         }                                                                      \
-        atomicAdd(&d_bias[d], d_conv_out);                                     \
+        local_d_bias += d_conv_out;                                            \
         if (d_conv > 1) {                                                      \
             int carry_len = d_conv - 1;                                        \
             dxb += carry[0];                                                   \
@@ -436,6 +465,12 @@ extern "C" __global__ void conv1d_burnin_backward_##SUFFIX(                    \
         }                                                                      \
         d_x_branch[bt_di] = FROM_F(dxb);                                       \
     }                                                                          \
+    /* Rule B stage-1 output: single per-(b,d) write. */                       \
+    int wp_base = (b * d_inner + d) * d_conv;                                  \
+    for (int k = 0; k < d_conv; k++) {                                         \
+        d_weight_partials[wp_base + k] = local_d_weight[k];                    \
+    }                                                                          \
+    d_bias_partials[b * d_inner + d] = local_d_bias;                           \
 }
 
 DEFINE_CONV1D_BURNIN_BWD(f32,  float,         from_f_f32)

@@ -221,6 +221,17 @@ pub struct GpuMambaMixedTrainScratch {
     pub d_pre_norm: GpuBuffer,
     /// Discarded dx for backbone input_proj backward [B*T * mamba_input_dim].
     pub d_input_proj_dx: GpuBuffer,
+
+    // ── Rule-B axis-0 reduction partials (Phase 2.7.4 determinism fix) ─
+    /// Scratch for per-sample partials produced by Rule-B backward kernels
+    /// (rmsnorm_bwd d_scale, conv1d_burnin_bwd d_weight+d_bias). Reduced via
+    /// `reduce_sum_axis0` to produce deterministic cross-batch accumulators
+    /// (replaces the previous atomicAdd accumulators).
+    ///
+    /// Sized to the max of the two consumer requirements:
+    ///   - rmsnorm_bwd partials:      B*T * d_model
+    ///   - conv1d_bwd partials:       B * d_inner * (d_conv + 1)
+    pub axis0_partials: GpuBuffer,
 }
 
 impl GpuMambaMixedTrainScratch {
@@ -269,6 +280,11 @@ impl GpuMambaMixedTrainScratch {
             d_a_log_local: GpuBuffer::zeros(stream, b * di * ds)?,
             d_pre_norm: GpuBuffer::zeros(stream, bt * dm)?,
             d_input_proj_dx: GpuBuffer::zeros(stream, bt * dims.mamba_input_dim)?,
+            // Rule-B axis-0 partials scratch — sized to fit largest consumer.
+            axis0_partials: GpuBuffer::zeros(
+                stream,
+                std::cmp::max(bt * dm, b * di * (dims.d_conv + 1)),
+            )?,
         };
         // Race-fix invariant (a950648): callers may immediately upload from
         // host via default-stream HtoD; sync first.

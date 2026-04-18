@@ -376,14 +376,17 @@ struct RmsnormBwdInputs<'a> {
 fn run_rmsnorm_bwd(ctx: &GpuCtx, i: RmsnormBwdInputs<'_>) -> (DtypedBuf, GpuBuffer) {
     let dx = DtypedBuf::zeros(&ctx.stream, i.batch * i.dim, i.dtype).unwrap();
     let d_scale = GpuBuffer::zeros(&ctx.stream, i.dim).unwrap();
+    // Rule-B partials buffer: [batch * dim] for per-sample per-dim values.
+    let d_scale_partials = GpuBuffer::zeros(&ctx.stream, i.batch * i.dim).unwrap();
     ctx.stream.synchronize().unwrap(); // race-fix: alloc_zeros before launch
     let bi = i.batch as i32;
     let di = i.dim as i32;
+    // Stage 1: per-sample per-dim partials (no atomicAdd).
     let mut bld = ctx
         .stream
         .launch_builder(ctx.kernels.rmsnorm_bwd_typed.get(i.dtype));
     let dx_ptr = dx.cached_ptr();
-    let dsc_ptr = d_scale.cached_ptr();
+    let dsc_ptr = d_scale_partials.cached_ptr();
     let dy_ptr = i.dy.cached_ptr();
     let x_ptr = i.x.cached_ptr();
     let sc_ptr = i.scale.cached_ptr();
@@ -397,6 +400,24 @@ fn run_rmsnorm_bwd(ctx: &GpuCtx, i: RmsnormBwdInputs<'_>) -> (DtypedBuf, GpuBuff
     bld.arg(&bi);
     bld.arg(&di);
     unsafe { bld.launch(grid_norm(i.batch, i.dim)) }.unwrap();
+    // Stage 2: reduce partials across batch into d_scale (accumulate=0 = overwrite).
+    {
+        let block_dim = (i.batch as u32).next_power_of_two().clamp(32, 256);
+        let accumulate_i: i32 = 0;
+        let out_ptr = d_scale.cached_ptr();
+        let mut bld2 = ctx.stream.launch_builder(&ctx.kernels.reduce_sum_axis0);
+        bld2.arg(&out_ptr);
+        bld2.arg(&dsc_ptr);
+        bld2.arg(&bi);
+        bld2.arg(&di);
+        bld2.arg(&accumulate_i);
+        let cfg = cudarc::driver::LaunchConfig {
+            grid_dim: (i.dim as u32, 1, 1),
+            block_dim: (block_dim, 1, 1),
+            shared_mem_bytes: (block_dim as usize * std::mem::size_of::<f32>()) as u32,
+        };
+        unsafe { bld2.launch(cfg) }.unwrap();
+    }
     ctx.stream.synchronize().unwrap();
     (dx, d_scale)
 }
@@ -547,34 +568,81 @@ fn run_conv1d_burnin_bwd(
     let d_x_branch = DtypedBuf::zeros(&ctx.stream, i.batch * i.t * i.di, i.dtype).unwrap();
     let d_weight = GpuBuffer::zeros(&ctx.stream, i.di * i.dconv).unwrap();
     let d_bias = GpuBuffer::zeros(&ctx.stream, i.di).unwrap();
+    // Rule-B partials buffer: [B * di * d_conv] weight + [B * di] bias stacked.
+    let wp_elems = i.batch * i.di * i.dconv;
+    let bp_elems = i.batch * i.di;
+    let partials = GpuBuffer::zeros(&ctx.stream, wp_elems + bp_elems).unwrap();
     ctx.stream.synchronize().unwrap();
     let bi = i.batch as i32;
     let ti = i.t as i32;
     let dii = i.di as i32;
     let dci = i.dconv as i32;
-    let mut bld = ctx
-        .stream
-        .launch_builder(ctx.kernels.conv1d_burnin_bwd_typed.get(i.dtype));
-    let dxb_ptr = d_x_branch.cached_ptr();
-    let dw_ptr = d_weight.cached_ptr();
-    let db_ptr = d_bias.cached_ptr();
-    let du_ptr = i.d_u.cached_ptr();
-    let pc_ptr = i.post_conv.cached_ptr();
-    let cs_ptr = i.conv_states.cached_ptr();
-    let w_ptr = i.weight.cached_ptr();
-    bld.arg(&dxb_ptr);
-    bld.arg(&dw_ptr);
-    bld.arg(&db_ptr);
-    bld.arg(&du_ptr);
-    bld.arg(&pc_ptr);
-    bld.arg(&cs_ptr);
-    bld.arg(&w_ptr);
-    bld.arg(&bi);
-    bld.arg(&ti);
-    bld.arg(&dii);
-    bld.arg(&dci);
-    unsafe { bld.launch(grid_1d(i.batch * i.di)) }.unwrap();
+    let base = partials.cached_ptr();
+    let wp_ptr = base;
+    let bp_ptr = base + (wp_elems * std::mem::size_of::<f32>()) as u64;
+    // Stage 1: per-(b,d) partials (no atomicAdd).
+    {
+        let mut bld = ctx
+            .stream
+            .launch_builder(ctx.kernels.conv1d_burnin_bwd_typed.get(i.dtype));
+        let dxb_ptr = d_x_branch.cached_ptr();
+        let du_ptr = i.d_u.cached_ptr();
+        let pc_ptr = i.post_conv.cached_ptr();
+        let cs_ptr = i.conv_states.cached_ptr();
+        let w_ptr = i.weight.cached_ptr();
+        bld.arg(&dxb_ptr);
+        bld.arg(&wp_ptr);
+        bld.arg(&bp_ptr);
+        bld.arg(&du_ptr);
+        bld.arg(&pc_ptr);
+        bld.arg(&cs_ptr);
+        bld.arg(&w_ptr);
+        bld.arg(&bi);
+        bld.arg(&ti);
+        bld.arg(&dii);
+        bld.arg(&dci);
+        unsafe { bld.launch(grid_1d(i.batch * i.di)) }.unwrap();
+    }
+    // Stage 2a: reduce weight partials [B, di*dconv] → d_weight.
+    {
+        let block_dim = (i.batch as u32).next_power_of_two().clamp(32, 256);
+        let accumulate_i: i32 = 0;
+        let dim_w = (i.di * i.dconv) as i32;
+        let out_ptr = d_weight.cached_ptr();
+        let mut bld = ctx.stream.launch_builder(&ctx.kernels.reduce_sum_axis0);
+        bld.arg(&out_ptr);
+        bld.arg(&wp_ptr);
+        bld.arg(&bi);
+        bld.arg(&dim_w);
+        bld.arg(&accumulate_i);
+        let cfg = cudarc::driver::LaunchConfig {
+            grid_dim: ((i.di * i.dconv) as u32, 1, 1),
+            block_dim: (block_dim, 1, 1),
+            shared_mem_bytes: (block_dim as usize * std::mem::size_of::<f32>()) as u32,
+        };
+        unsafe { bld.launch(cfg) }.unwrap();
+    }
+    // Stage 2b: reduce bias partials [B, di] → d_bias.
+    {
+        let block_dim = (i.batch as u32).next_power_of_two().clamp(32, 256);
+        let accumulate_i: i32 = 0;
+        let out_ptr = d_bias.cached_ptr();
+        let mut bld = ctx.stream.launch_builder(&ctx.kernels.reduce_sum_axis0);
+        bld.arg(&out_ptr);
+        bld.arg(&bp_ptr);
+        bld.arg(&bi);
+        bld.arg(&dii);
+        bld.arg(&accumulate_i);
+        let cfg = cudarc::driver::LaunchConfig {
+            grid_dim: (i.di as u32, 1, 1),
+            block_dim: (block_dim, 1, 1),
+            shared_mem_bytes: (block_dim as usize * std::mem::size_of::<f32>()) as u32,
+        };
+        unsafe { bld.launch(cfg) }.unwrap();
+    }
     ctx.stream.synchronize().unwrap();
+    // Keep `partials` alive until after the sync; Drop it explicitly.
+    drop(partials);
     (d_x_branch, d_weight, d_bias)
 }
 
