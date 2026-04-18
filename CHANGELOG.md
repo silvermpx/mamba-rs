@@ -1,6 +1,19 @@
 # Changelog
 
-## Unreleased
+## 0.3.1
+
+### `matvec_bi_*` perf
+
+Decode throughput on RTX 6000 Ada (mamba-130m-hf, M=1, CUDA Graph):
+923 → 974 tok/s bf16, 919 → 972 tok/s f16. f32 unchanged at 727 tok/s.
+
+Changes:
+- Vectorized 128-bit `cp.async` loads for the A-row staging path (sm_80+).
+- Packed `pair_to_f2` smem reads, `__builtin_assume((k & 7) == 0)` to
+  drop the tail loop.
+- `__ldcs` streaming load on B-tile reads (bypasses L1).
+
+KL parity unchanged (≈ 1e-11 between `b=1` and `b=N` per slot).
 
 ### Batch-invariant matvec is now opt-in
 
@@ -11,13 +24,22 @@ Enable via either:
 - `ctx.set_batch_invariant(true)` on the `GpuCtx`
 - `MAMBA_RS_BATCH_INVARIANT=1` environment variable at process start
 
-When enabled, output is bit-identical across batch sizes (KL ≈ 1e-11
-between `b=1` and `b=N` per slot). When disabled, cuBLAS's per-M algo
-selection may produce sub-ULP differences between decode and prefill.
+When enabled, output is bit-identical across batch sizes. When
+disabled, cuBLAS's per-M algo selection may produce sub-ULP
+differences between decode and prefill.
 
-Also: the `matvec_bi` kernel now uses vectorized 128-bit `cp.async`
-loads for the A-row staging path (sm_80+). Parity and KL guardrails
-unchanged.
+### Deterministic CPU parallel backward (M1 + M3)
+
+`parallel_mamba_backward` and `parallel_mamba3_backward` now use
+static sample-to-thread partitioning + pre-allocated per-thread
+gradient slots + fixed balanced binary-tree reduce, replacing the
+prior rayon work-stealing + `rayon::broadcast` collection path.
+
+Result: bit-identical output across runs with the same input,
+regardless of thread scheduling. No throughput change.
+
+Removed: `BWD_EPOCH`, `BWD_GUARD`, `THREAD_GRADS`, `THREAD_GRADS_EPOCH`,
+`ensure_thread_grads_zeroed` (M1) and the M3 equivalents.
 
 ## 0.3.0
 

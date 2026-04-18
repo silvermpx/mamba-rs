@@ -187,15 +187,16 @@ let (weights, input_dim) = load_mamba3(Path::new("m3.safetensors"), &cfg)?;
 
 | dtype | cuBLAS (default) | batch-invariant matvec | Δ |
 |-------|-----------------:|-----------------------:|--:|
-| f32   | 723 tok/s        | 723 tok/s              | 0 % |
-| bf16  | **1 046 tok/s**  | 923 tok/s              | −12 % |
-| f16   | 1 047 tok/s      | 919 tok/s              | −12 % |
+| f32   | 727 tok/s        | 727 tok/s              | 0 % |
+| bf16  | **1 046 tok/s**  | 974 tok/s              | −7 % |
+| f16   | 1 047 tok/s      | 972 tok/s              | −7 % |
 
 On f32 the two paths are equivalent — cuBLAS SGEMM and the custom
 matvec kernel both run on CUDA cores with no Tensor Core path. On
 bf16/f16 cuBLAS routes through Tensor Cores (TF32-style accumulation)
-and wins ~12 % on per-token latency, at the cost of M=1 vs M=N
-algorithm-selection drift (KL ≈ 1e-3 on adversarial prompts).
+and wins ~7 % on per-token latency, at the cost of M=1 vs M=N
+algorithm-selection drift (KL ≈ 1e-3 on adversarial prompts). The
+batch-invariant path keeps `b=1` ≡ `b=N` per slot (KL ≈ 1e-11).
 
 Enable the batch-invariant path when cross-batch bit-identity matters
 (KL ≈ 1e-11 between `b=1` and `b=N` per slot): set
