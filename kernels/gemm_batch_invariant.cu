@@ -366,12 +366,6 @@ DEFINE_GEMM_BI_FFMA(gemm_bi_f32_f32, float, float, from_f_f32, zero_f32)
 #define BLOCK_N_MV 32
 #define WARPS_PER_BLOCK 8
 #define THREADS_PER_BLOCK (BLOCK_N_MV * WARPS_PER_BLOCK)
-/* Double-buffer B chunk size. 16 elements × 32 cols × sizeof(T_IO):
- *   bf16/f16: 16 × 32 × 2 = 1 KB per stage per warp → 16 KB total static smem
- *   f32:      16 × 32 × 4 = 2 KB per stage per warp → 32 KB total static smem
- * Plus ~1 KB smem_partials + dynamic smem_a ≤ 10 KB → fits 48 KB static cap.
- */
-#define BK_CHUNK 16
 #define DEFINE_MATVEC_BI(NAME, T_IO, T_OUT, FROM_F_OUT)                         \
 extern "C" __global__ __launch_bounds__(THREADS_PER_BLOCK, 6) void              \
 NAME(                                                                           \
@@ -395,13 +389,9 @@ NAME(                                                                           
     const T_IO* a_row = a + row * lda;                                          \
     T_OUT* c_row = c + row * ldc;                                               \
                                                                                 \
-    /* Static smem: 2 KB for partials (8 warps × 32 cols × 4 bytes)         */  \
-    /* + per-warp double-buffered B staging (16–32 KB total)                */  \
-    /* + dynamic smem for a[K]. Separating them avoids offset arithmetic    */  \
-    /* bugs.                                                                */  \
+    /* Static smem: 2 KB for partials (8 warps × 32 cols × 4 bytes) +       */  \
+    /* dynamic smem for a[K]. Separating them avoids offset arithmetic bugs.*/  \
     __shared__ float smem_partials[WARPS_PER_BLOCK * BLOCK_N_MV];               \
-    __shared__ T_IO                                                             \
-        smem_b[WARPS_PER_BLOCK][2][BK_CHUNK * BLOCK_N_MV];                      \
     extern __shared__ unsigned char smem_a_raw[];                               \
     T_IO* smem_a = reinterpret_cast<T_IO*>(smem_a_raw);                         \
                                                                                 \
@@ -436,128 +426,12 @@ NAME(                                                                           
     const int k_per_warp = (k + WARPS_PER_BLOCK - 1) / WARPS_PER_BLOCK;         \
     const int k_start = warp_id * k_per_warp;                                   \
     const int k_stop = min(k, k_start + k_per_warp);                            \
-    const int my_k_range = k_stop - k_start;                                    \
-    const int num_chunks = my_k_range / BK_CHUNK;                               \
-    const int col0 = blockIdx.x * BLOCK_N_MV;                                   \
-                                                                                \
-    /* cp.async vectorized load params. 16 B per transfer = uint4 =         */  \
-    /* 8 bf16 / 8 f16 / 4 f32 elements.                                     */  \
-    const int VEC_ELEMS = 16 / (int)sizeof(T_IO);                               \
-    const int chunks_per_row = BLOCK_N_MV / VEC_ELEMS;                          \
-    const int total_chunks_per_stage = BK_CHUNK * chunks_per_row;               \
-    const int iters_per_lane = total_chunks_per_stage / 32;               \
-                                                                                \
-    /* Issue async loads of one B-chunk (BK_CHUNK rows × BLOCK_N_MV cols)   */  \
-    /* from global into smem_b[warp_id][stage]. Each lane emits             */  \
-    /* iters_per_lane 16-byte cp.async copies; OOB tail (col0+VEC > n)      */  \
-    /* falls back to scalar zero-fill.                                      */  \
-    auto issue_b_chunk =                                                        \
-        [&](int stage, int chunk_k_off) __attribute__((always_inline)) {        \
-            const int k_base = k_start + chunk_k_off;                           \
-            _Pragma("unroll")                                                   \
-            for (int it = 0; it < iters_per_lane; it++) {                       \
-                int flat = lane + it * 32;                                \
-                int row = flat / chunks_per_row;                                \
-                int col_chunk = flat % chunks_per_row;                          \
-                int smem_off = row * BLOCK_N_MV + col_chunk * VEC_ELEMS;        \
-                int gmem_col = col0 + col_chunk * VEC_ELEMS;                    \
-                int gmem_row_k = k_base + row;                                  \
-                bool full_row = (gmem_row_k < k) &&                             \
-                                (gmem_col + VEC_ELEMS <= n);                    \
-                if (full_row) {                                                 \
-                    const uint4* src = reinterpret_cast<const uint4*>(          \
-                        &b[gmem_row_k * ldb + gmem_col]);                       \
-                    uint4* dst = reinterpret_cast<uint4*>(                      \
-                        &smem_b[warp_id][stage][smem_off]);                     \
-                    __pipeline_memcpy_async(dst, src, sizeof(uint4));           \
-                } else {                                                        \
-                    _Pragma("unroll")                                           \
-                    for (int v = 0; v < VEC_ELEMS; v++) {                       \
-                        T_IO val = (T_IO)0;                                     \
-                        if (gmem_row_k < k && gmem_col + v < n) {               \
-                            val = b[gmem_row_k * ldb + gmem_col + v];           \
-                        }                                                       \
-                        smem_b[warp_id][stage][smem_off + v] = val;             \
-                    }                                                           \
-                }                                                               \
-            }                                                                   \
-        };                                                                      \
-                                                                                \
-    /* Prologue: prefetch first two chunks, if available. */                    \
-    if (num_chunks >= 1) issue_b_chunk(0, 0 * BK_CHUNK);                        \
-    __pipeline_commit();                                                        \
-    if (num_chunks >= 2) issue_b_chunk(1, 1 * BK_CHUNK);                        \
-    __pipeline_commit();                                                        \
                                                                                 \
     float acc = 0.0f;                                                           \
-    /* Steady-state: ALL lanes participate in cp.async pipeline (warp-wide */  \
-    /* sync barriers must be reached uniformly). Compute branch is gated   */  \
-    /* by `in_range` per lane.                                             */  \
-    for (int c = 0; c < num_chunks; c++) {                                      \
-        int stage = c & 1;                                                      \
-        /* Want chunk c ready. Pipeline has 2 in-flight in steady state.   */  \
-        /* Wait until exactly 1 remains pending (the one we're not yet     */  \
-        /* about to read). Last iter drains fully (no further issue).      */  \
-        int pending = (c + 1 < num_chunks) ? 1 : 0;                             \
-        __pipeline_wait_prior(pending);                                         \
-        __syncwarp();                                                           \
-                                                                                \
-        if (in_range) {                                                         \
-            int ka = k_start + c * BK_CHUNK;                                    \
-            _Pragma("unroll")                                                   \
-            for (int sub = 0; sub < BK_CHUNK; sub += 8) {                       \
-                float a0 = to_f(smem_a[ka + sub + 0]);                          \
-                float a1 = to_f(smem_a[ka + sub + 1]);                          \
-                float a2 = to_f(smem_a[ka + sub + 2]);                          \
-                float a3 = to_f(smem_a[ka + sub + 3]);                          \
-                float a4 = to_f(smem_a[ka + sub + 4]);                          \
-                float a5 = to_f(smem_a[ka + sub + 5]);                          \
-                float a6 = to_f(smem_a[ka + sub + 6]);                          \
-                float a7 = to_f(smem_a[ka + sub + 7]);                          \
-                float b0 = to_f(smem_b[warp_id][stage]                          \
-                                      [(sub + 0) * BLOCK_N_MV + lane]);         \
-                float b1 = to_f(smem_b[warp_id][stage]                          \
-                                      [(sub + 1) * BLOCK_N_MV + lane]);         \
-                float b2 = to_f(smem_b[warp_id][stage]                          \
-                                      [(sub + 2) * BLOCK_N_MV + lane]);         \
-                float b3 = to_f(smem_b[warp_id][stage]                          \
-                                      [(sub + 3) * BLOCK_N_MV + lane]);         \
-                float b4 = to_f(smem_b[warp_id][stage]                          \
-                                      [(sub + 4) * BLOCK_N_MV + lane]);         \
-                float b5 = to_f(smem_b[warp_id][stage]                          \
-                                      [(sub + 5) * BLOCK_N_MV + lane]);         \
-                float b6 = to_f(smem_b[warp_id][stage]                          \
-                                      [(sub + 6) * BLOCK_N_MV + lane]);         \
-                float b7 = to_f(smem_b[warp_id][stage]                          \
-                                      [(sub + 7) * BLOCK_N_MV + lane]);         \
-                acc = fmaf(a0, b0, acc);                                        \
-                acc = fmaf(a1, b1, acc);                                        \
-                acc = fmaf(a2, b2, acc);                                        \
-                acc = fmaf(a3, b3, acc);                                        \
-                acc = fmaf(a4, b4, acc);                                        \
-                acc = fmaf(a5, b5, acc);                                        \
-                acc = fmaf(a6, b6, acc);                                        \
-                acc = fmaf(a7, b7, acc);                                        \
-            }                                                                   \
-        }                                                                       \
-                                                                                \
-        /* All lanes prefetch chunk c+2 — OOB lanes write zeros to smem.    */  \
-        if (c + 2 < num_chunks) {                                               \
-            issue_b_chunk(stage, (c + 2) * BK_CHUNK);                           \
-            __pipeline_commit();                                                \
-        }                                                                       \
-    }                                                                           \
-                                                                                \
-    /* Drain any remaining cp.async groups before K-tail / function exit.   */  \
-    __pipeline_wait_prior(0);                                                   \
-                                                                                \
-    /* K-tail: scalar global reads for leftover beyond num_chunks*BK_CHUNK. */  \
-    if (in_range && my_k_range > 0) {                                           \
-        const int tail_start = k_start + num_chunks * BK_CHUNK;                 \
-        const int k_main_tail =                                                 \
-            tail_start + (((k_stop - tail_start) >> 3) << 3);                   \
-        int kk = tail_start;                                                    \
-        for (; kk < k_main_tail; kk += 8) {                                     \
+    if (in_range && k_start < k_stop) {                                         \
+        int kk = k_start;                                                       \
+        int k_main = k_start + (((k_stop - k_start) >> 3) << 3);                \
+        for (; kk < k_main; kk += 8) {                                          \
             float a0 = to_f(smem_a[kk    ]);                                    \
             float a1 = to_f(smem_a[kk + 1]);                                    \
             float a2 = to_f(smem_a[kk + 2]);                                    \
