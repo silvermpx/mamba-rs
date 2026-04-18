@@ -181,6 +181,19 @@ pub struct GpuMamba3Scratch {
     pub d_scale: GpuBuffer,     // [B * T * nh] -- dScale from dqktheta
     pub d_gamma_par: GpuBuffer, // [B * T * nh] -- dGamma from dqktheta
     pub d_qk_dot: GpuBuffer,    // [B * T * nh] -- dQK_dot from dqkv
+
+    // -- Rule-B axis-0 reduction partials (Phase 2.7.5 M3 determinism fix) --
+    /// Scratch for per-sample partials produced by Rule-B backward kernels.
+    /// Reduced via `reduce_sum_axis0` to produce deterministic cross-batch
+    /// accumulators (replaces the previous atomicAdd accumulators).
+    ///
+    /// Sized to fit the largest consumer:
+    ///   - rmsnorm_bwd partials:              B*T * d_model
+    ///   - angle_dt_bwd partials (2 tensors): nh * B*T*na + na * B*T*nh
+    ///                                        = 2 * nh * B*T * na
+    ///   - m3_dqkv dD_partials:               B * nh
+    /// The buffer is reused across kernels; only one consumer writes at a time.
+    pub axis0_partials: GpuBuffer,
 }
 
 /// Layer pointers for persistent state (ssm + k_state + v_state + angle_state).
@@ -383,6 +396,17 @@ impl GpuMamba3Scratch {
             d_scale: GpuBuffer::zeros(stream, bt * nh)?,
             d_gamma_par: GpuBuffer::zeros(stream, bt * nh)?,
             d_qk_dot: GpuBuffer::zeros(stream, bt * nh)?,
+            // Rule-B axis-0 partials — sized to fit largest M3 consumer.
+            axis0_partials: {
+                let na = dims.n_angles.max(1);
+                let angle_dt_sz = 2 * nh * bt * na;
+                let rmsnorm_sz = bt * dm;
+                let d_d_sz = b * nh;
+                GpuBuffer::zeros(
+                    stream,
+                    angle_dt_sz.max(rmsnorm_sz).max(d_d_sz),
+                )?
+            },
         })
     }
 }

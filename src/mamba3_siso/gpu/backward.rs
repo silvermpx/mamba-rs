@@ -299,6 +299,9 @@ pub fn gpu_backward_mamba3_layer(
             }
         }
 
+        // m3_dqkv — Phase 2.7.5 Rule B: dD_partials[B*nh] via axis0_partials,
+        // followed by reduce_sum_axis0 → lg.d_param[nh] (accumulate=1 across
+        // layers since GpuMamba3Grads::zero runs once per step).
         {
             let cs_u = dims.chunk_size();
             let smem = (cs_u * ds + cs_u * ds + cs_u * hd + cs_u * hd + cs_u + cs_u + hd * ds) * 4;
@@ -313,8 +316,8 @@ pub fn gpu_backward_mamba3_layer(
             builder.arg(scratch.d_x.inner_mut());
             builder.arg(scratch.d_alpha.inner_mut());
             builder.arg(scratch.d_beta.inner_mut());
-            let d_dp_ptr = lg.d_param.ptr();
-            builder.arg(&d_dp_ptr);
+            // Phase 2.7.5: dD_partials [B*nh] — reduced after kernel.
+            builder.arg(scratch.axis0_partials.inner_mut());
             builder.arg(acts.q.inner());
             builder.arg(scratch.d_b_pre_rope.inner());
             builder.arg(acts.x.inner());
@@ -332,6 +335,26 @@ pub fn gpu_backward_mamba3_layer(
             builder.arg(&cs);
             unsafe { builder.launch(cfg) }.map_err(|e| format!("m3_dqkv B6 S1: {:?}", e))?;
         }
+        // Stage 2: reduce dD_partials[B, nh] → lg.d_param[nh] (accumulate=1
+        // across layers; GpuMamba3Grads::zero runs once per training step).
+        {
+            let block_dim = (dims.batch as u32).next_power_of_two().clamp(32, 256);
+            let accumulate_i: i32 = 1;
+            let d_dp_ptr = lg.d_param.ptr();
+            let mut rb = ctx.stream.launch_builder(&m3k.reduce_sum_axis0);
+            rb.arg(&d_dp_ptr);
+            rb.arg(scratch.axis0_partials.inner());
+            rb.arg(&b_i);
+            rb.arg(&nh_i);
+            rb.arg(&accumulate_i);
+            let red_cfg = cudarc::driver::LaunchConfig {
+                grid_dim: (nh as u32, 1, 1),
+                block_dim: (block_dim, 1, 1),
+                shared_mem_bytes: (block_dim as usize * std::mem::size_of::<f32>()) as u32,
+            };
+            unsafe { rb.launch(red_cfg) }
+                .map_err(|e| format!("m3_dqkv dD reduce B6 S1: {:?}", e))?;
+        }
 
         if na > 0 {
             let n_ac = (dims.batch * dims.seq_len * nh * na) as i32;
@@ -344,6 +367,8 @@ pub fn gpu_backward_mamba3_layer(
                 .map_err(|e| format!("zero d_angle_cumsum: {:?}", e))?;
         }
 
+        // m3_dqktheta — Phase 2.7.5: dQ_bias/dK_bias removed from kernel args
+        // (caller does colsum_accumulate on dQ_pre/dK_pre scratch below).
         {
             let na_i = na as i32;
             let cfg = cudarc::driver::LaunchConfig {
@@ -351,8 +376,6 @@ pub fn gpu_backward_mamba3_layer(
                 block_dim: (dims.chunk_size() as u32, 1, 1),
                 shared_mem_bytes: 0,
             };
-            let d_cb_ptr = lg.c_bias.ptr();
-            let d_bb_ptr = lg.b_bias.ptr();
             let mut builder = ctx.stream.launch_builder(&m3k.m3_dqktheta);
             builder.arg(scratch.d_c_pre_rope.inner_mut());
             builder.arg(scratch.d_b_pre_rope.inner_mut());
@@ -361,8 +384,6 @@ pub fn gpu_backward_mamba3_layer(
             let gamma_in_ptr = scratch.d_gamma_par.raw_ptr(&ctx.stream);
             builder.arg(scratch.d_scale.inner_mut());
             builder.arg(scratch.d_gamma_par.inner_mut());
-            builder.arg(&d_cb_ptr);
-            builder.arg(&d_bb_ptr);
             builder.arg(acts.c_biased.inner());
             builder.arg(acts.b_biased.inner());
             builder.arg(&scale_in_ptr);
@@ -378,6 +399,31 @@ pub fn gpu_backward_mamba3_layer(
             builder.arg(&na_i);
             builder.arg(&cs);
             unsafe { builder.launch(cfg) }.map_err(|e| format!("m3_dqktheta B6 S2: {:?}", e))?;
+        }
+        // Phase 2.7.5: colsum dQ_pre / dK_pre → c_bias / b_bias (deterministic).
+        {
+            let d_cb_ptr = lg.c_bias.ptr();
+            let bt_i = bt as i32;
+            let nhds_i = (nh * ds) as i32;
+            let mut cb = ctx.stream.launch_builder(&m3k.colsum_accumulate);
+            cb.arg(&d_cb_ptr);
+            cb.arg(scratch.d_c_pre_rope.inner());
+            cb.arg(&bt_i);
+            cb.arg(&nhds_i);
+            unsafe { cb.launch(grid_1d(nh * ds)) }
+                .map_err(|e| format!("colsum d_c_bias par: {:?}", e))?;
+        }
+        {
+            let d_bb_ptr = lg.b_bias.ptr();
+            let bt_i = bt as i32;
+            let nhds_i = (nh * ds) as i32;
+            let mut cb = ctx.stream.launch_builder(&m3k.colsum_accumulate);
+            cb.arg(&d_bb_ptr);
+            cb.arg(scratch.d_b_pre_rope.inner());
+            cb.arg(&bt_i);
+            cb.arg(&nhds_i);
+            unsafe { cb.launch(grid_1d(nh * ds)) }
+                .map_err(|e| format!("colsum d_b_bias par: {:?}", e))?;
         }
 
         scratch
@@ -410,40 +456,79 @@ pub fn gpu_backward_mamba3_layer(
             .copy_from_raw(&scratch.d_q, &ctx.stream)?;
     }
 
-    // B5a: angle_dt_bwd.
+    // B5a: angle_dt_bwd — Phase 2.7.5 Rule B (no atomicAdd).
+    // Stage 1: kernel writes contrib_angles[nh, B*T*na] + contrib_dt[na, B*T*nh]
+    //          into split axis0_partials scratch.
+    // Stage 2a: reduce_sum_axis0(d_angles_raw, contrib_angles, nh, B*T*na, 0).
+    // Stage 2b: reduce_sum_axis0(d_dt_angle, contrib_dt, na, B*T*nh, 0).
     if na > 0 {
-        for (buf, sz) in [
-            (&mut scratch.d_angles_raw, bt * na),
-            (&mut scratch.d_dt_angle, bt * nh),
-        ] {
-            let ne = sz as i32;
-            let zero: f32 = 0.0;
-            let mut builder = ctx.stream.launch_builder(&m3k.fill_scalar);
-            builder.arg(buf.inner_mut());
-            builder.arg(&zero);
-            builder.arg(&ne);
-            unsafe { builder.launch(grid_1d(sz)) }.map_err(|e| format!("fill B5a: {:?}", e))?;
-        }
         let t_i = t;
         let nh_i = nh as i32;
         let na_i = na as i32;
         let b_i = b;
-        let mut builder = ctx.stream.launch_builder(&m3k.m3_angle_dt_bwd_seq);
-        builder.arg(scratch.d_angles_raw.inner_mut());
-        builder.arg(scratch.d_dt_angle.inner_mut());
-        builder.arg(scratch.d_angle_cumsum.inner());
-        builder.arg(acts.angles_raw.inner());
-        builder.arg(acts.dt.inner());
-        builder.arg(&b_i);
-        builder.arg(&t_i);
-        builder.arg(&nh_i);
-        builder.arg(&na_i);
-        let grid = cudarc::driver::LaunchConfig {
-            grid_dim: (dims.batch as u32, (nh * na).div_ceil(256) as u32, 1),
-            block_dim: (256.min((nh * na) as u32), 1, 1),
-            shared_mem_bytes: 0,
-        };
-        unsafe { builder.launch(grid) }.map_err(|e| format!("m3_angle_dt_bwd_seq B5a: {:?}", e))?;
+        let btna = (bt * na) as i32;
+        let btnh = (bt * nh) as i32;
+        let contrib_angles_elems = nh * bt * na;
+        let contrib_dt_offset_bytes =
+            (contrib_angles_elems * std::mem::size_of::<f32>()) as u64;
+        let contrib_angles_ptr = scratch.axis0_partials.cached_ptr();
+        let contrib_dt_ptr = scratch.axis0_partials.cached_ptr() + contrib_dt_offset_bytes;
+        // Stage 1
+        {
+            let mut builder = ctx.stream.launch_builder(&m3k.m3_angle_dt_bwd_seq);
+            builder.arg(&contrib_angles_ptr);
+            builder.arg(&contrib_dt_ptr);
+            builder.arg(scratch.d_angle_cumsum.inner());
+            builder.arg(acts.angles_raw.inner());
+            builder.arg(acts.dt.inner());
+            builder.arg(&b_i);
+            builder.arg(&t_i);
+            builder.arg(&nh_i);
+            builder.arg(&na_i);
+            let grid = cudarc::driver::LaunchConfig {
+                grid_dim: (dims.batch as u32, (nh * na).div_ceil(256) as u32, 1),
+                block_dim: (256.min((nh * na) as u32), 1, 1),
+                shared_mem_bytes: 0,
+            };
+            unsafe { builder.launch(grid) }
+                .map_err(|e| format!("m3_angle_dt_bwd_seq B5a stage1: {:?}", e))?;
+        }
+        // Stage 2a: reduce nh → d_angles_raw[B*T*na]
+        {
+            let block_dim = (nh as u32).next_power_of_two().clamp(32, 256);
+            let accumulate_i: i32 = 0;
+            let mut builder = ctx.stream.launch_builder(&m3k.reduce_sum_axis0);
+            builder.arg(scratch.d_angles_raw.inner_mut());
+            builder.arg(&contrib_angles_ptr);
+            builder.arg(&nh_i);
+            builder.arg(&btna);
+            builder.arg(&accumulate_i);
+            let cfg = cudarc::driver::LaunchConfig {
+                grid_dim: ((bt * na) as u32, 1, 1),
+                block_dim: (block_dim, 1, 1),
+                shared_mem_bytes: (block_dim as usize * std::mem::size_of::<f32>()) as u32,
+            };
+            unsafe { builder.launch(cfg) }
+                .map_err(|e| format!("angle_dt_bwd B5a reduce angles: {:?}", e))?;
+        }
+        // Stage 2b: reduce na → d_dt_angle[B*T*nh]
+        {
+            let block_dim = (na as u32).next_power_of_two().clamp(32, 256);
+            let accumulate_i: i32 = 0;
+            let mut builder = ctx.stream.launch_builder(&m3k.reduce_sum_axis0);
+            builder.arg(scratch.d_dt_angle.inner_mut());
+            builder.arg(&contrib_dt_ptr);
+            builder.arg(&na_i);
+            builder.arg(&btnh);
+            builder.arg(&accumulate_i);
+            let cfg = cudarc::driver::LaunchConfig {
+                grid_dim: ((bt * nh) as u32, 1, 1),
+                block_dim: (block_dim, 1, 1),
+                shared_mem_bytes: (block_dim as usize * std::mem::size_of::<f32>()) as u32,
+            };
+            unsafe { builder.launch(cfg) }
+                .map_err(|e| format!("angle_dt_bwd B5a reduce dt: {:?}", e))?;
+        }
     } else {
         let ne = (bt * nh) as i32;
         let zero: f32 = 0.0;
@@ -656,23 +741,45 @@ pub fn gpu_backward_mamba3_layer(
         (bt, dm, ip),
     )?;
 
-    // B1: RMSNorm backward.
+    // B1: RMSNorm backward — Phase 2.7.5 Rule B.
+    // Stage 1: rmsnorm_bwd writes per-sample per-dim partials to axis0_partials.
+    // Stage 2: reduce_sum_axis0 → lg.norm_weight (accumulate=1).
     {
         let nw_ptr = lw.norm_weight.raw_ptr(&ctx.stream);
-        let d_nw_ptr = lg.norm_weight.ptr();
         let bt_i = bt as i32;
         let dm_i = dm as i32;
-        let mut builder = ctx.stream.launch_builder(&m3k.rmsnorm_bwd);
-        builder.arg(scratch.d_pre_norm.inner_mut());
-        builder.arg(&d_nw_ptr);
-        builder.arg(scratch.d_norm.inner());
-        builder.arg(acts.residual.inner());
-        builder.arg(&nw_ptr);
-        builder.arg(acts.rms_vals.inner());
-        builder.arg(&bt_i);
-        builder.arg(&dm_i);
-        unsafe { builder.launch(grid_norm(bt, dm)) }
-            .map_err(|e| format!("rmsnorm_bwd m3 B1: {:?}", e))?;
+        let axis0_ptr = scratch.axis0_partials.cached_ptr();
+        {
+            let mut builder = ctx.stream.launch_builder(&m3k.rmsnorm_bwd);
+            builder.arg(scratch.d_pre_norm.inner_mut());
+            builder.arg(&axis0_ptr); // d_scale_partials [bt*dm]
+            builder.arg(scratch.d_norm.inner());
+            builder.arg(acts.residual.inner());
+            builder.arg(&nw_ptr);
+            builder.arg(acts.rms_vals.inner());
+            builder.arg(&bt_i);
+            builder.arg(&dm_i);
+            unsafe { builder.launch(grid_norm(bt, dm)) }
+                .map_err(|e| format!("rmsnorm_bwd m3 B1 stage1: {:?}", e))?;
+        }
+        {
+            let block_dim = (bt as u32).next_power_of_two().clamp(32, 256);
+            let accumulate_i: i32 = 1;
+            let d_nw_ptr = lg.norm_weight.ptr();
+            let mut builder = ctx.stream.launch_builder(&m3k.reduce_sum_axis0);
+            builder.arg(&d_nw_ptr);
+            builder.arg(&axis0_ptr);
+            builder.arg(&bt_i);
+            builder.arg(&dm_i);
+            builder.arg(&accumulate_i);
+            let cfg = cudarc::driver::LaunchConfig {
+                grid_dim: (dm as u32, 1, 1),
+                block_dim: (block_dim, 1, 1),
+                shared_mem_bytes: (block_dim as usize * std::mem::size_of::<f32>()) as u32,
+            };
+            unsafe { builder.launch(cfg) }
+                .map_err(|e| format!("rmsnorm_bwd m3 B1 reduce: {:?}", e))?;
+        }
     }
 
     // Residual pass-through: d_temporal += d_pre_norm.
@@ -708,15 +815,15 @@ pub fn gpu_backward_mamba3_backbone(
     let bt = dims.bt();
     let dm = dims.d_model;
 
-    // norm_f bwd.
+    // norm_f bwd — Phase 2.7.5 Rule B.
     {
         let nf_ptr = mamba_w.norm_f_weight.raw_ptr(&ctx.stream);
-        let d_nf_ptr = grads.norm_f_weight.ptr();
         let bt_i = bt as i32;
         let dm_i = dm as i32;
+        let axis0_ptr = scratch.axis0_partials.cached_ptr();
         let mut builder = ctx.stream.launch_builder(&m3k.rmsnorm_bwd);
         builder.arg(scratch.d_norm.inner_mut());
-        builder.arg(&d_nf_ptr);
+        builder.arg(&axis0_ptr); // d_scale_partials [bt*dm]
         builder.arg(d_temporal.inner());
         builder.arg(acts.norm_f_input.inner());
         builder.arg(&nf_ptr);
@@ -724,7 +831,29 @@ pub fn gpu_backward_mamba3_backbone(
         builder.arg(&bt_i);
         builder.arg(&dm_i);
         unsafe { builder.launch(grid_norm(bt, dm)) }
-            .map_err(|e| format!("rmsnorm_bwd norm_f m3: {:?}", e))?;
+            .map_err(|e| format!("rmsnorm_bwd norm_f m3 stage1: {:?}", e))?;
+    }
+    // Stage 2: reduce axis0_partials[bt, dm] → grads.norm_f_weight[dm] (accumulate=1).
+    {
+        let bt_i = bt as i32;
+        let dm_i = dm as i32;
+        let block_dim = (bt as u32).next_power_of_two().clamp(32, 256);
+        let accumulate_i: i32 = 1;
+        let d_nf_ptr = grads.norm_f_weight.ptr();
+        let axis0_ptr = scratch.axis0_partials.cached_ptr();
+        let mut builder = ctx.stream.launch_builder(&m3k.reduce_sum_axis0);
+        builder.arg(&d_nf_ptr);
+        builder.arg(&axis0_ptr);
+        builder.arg(&bt_i);
+        builder.arg(&dm_i);
+        builder.arg(&accumulate_i);
+        let cfg = cudarc::driver::LaunchConfig {
+            grid_dim: (dm as u32, 1, 1),
+            block_dim: (block_dim, 1, 1),
+            shared_mem_bytes: (block_dim as usize * std::mem::size_of::<f32>()) as u32,
+        };
+        unsafe { builder.launch(cfg) }
+            .map_err(|e| format!("rmsnorm_bwd norm_f m3 reduce: {:?}", e))?;
     }
     d_temporal.copy_from_raw(&scratch.d_norm, &ctx.stream)?;
 

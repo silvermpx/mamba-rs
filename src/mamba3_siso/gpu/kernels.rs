@@ -43,6 +43,11 @@ pub struct Mamba3Kernels {
     pub rmsnorm_fwd: CudaFunction,
     pub rmsnorm_bwd: CudaFunction,
     pub colsum_accumulate: CudaFunction,
+    /// Deterministic axis-0 reduction — finalises Rule-B per-sample partials
+    /// into f32 master-grad slots. Replaces atomicAdd accumulators used in
+    /// M3 backward (dD from m3_dqkv, d_angles_raw/d_dt_angle from
+    /// m3_angle_dt_bwd_seq, and d_scale from rmsnorm_bwd).
+    pub reduce_sum_axis0: CudaFunction,
     pub vec_add_inplace: CudaFunction,
     pub elementwise_mul: CudaFunction,
     pub fill_scalar: CudaFunction,
@@ -66,10 +71,9 @@ pub struct Mamba3Kernels {
     pub m3_state_passing_fwd: CudaFunction,
     pub m3_writeback_parallel_states: CudaFunction,
     pub m3_chunk_scan_fwd: CudaFunction,
-    pub m3_chunk_scan_bwd: CudaFunction,
-    pub m3_state_passing_bwd: CudaFunction,
-    pub m3_chunk_state_bwd: CudaFunction,
-    pub m3_cumsum_bwd: CudaFunction,
+    // Phase 2.7.5: m3_chunk_scan_bwd, m3_state_passing_bwd, m3_chunk_state_bwd,
+    // m3_cumsum_bwd removed — dead code replaced by monolithic m3_dqkv +
+    // m3_dqktheta path below.
     pub m3_extract_da_cs_sum: CudaFunction,
     pub m3_dqkv: CudaFunction,
     pub m3_dqktheta: CudaFunction,
@@ -124,13 +128,9 @@ pub struct Mamba3Kernels {
     /// Inverse-RoPE + bias backward — typed Q_raw/K_raw; 7 grad outputs f32.
     pub m3_dqktheta_typed: TypedKernel,
 
-    // -- Step 9d: typed M3 chunked parallel backward kernels --
-    /// Intra-chunk backward: typed d_y/x/Q/K_scaled; all grad outputs f32
-    /// (atomicAdd requires f32 master grads per PyTorch AMP convention).
-    pub m3_chunk_scan_bwd_typed: TypedKernel,
-    /// Per-chunk state backward (additional d_x/d_K_scaled/d_dA contributions
-    /// from propagated d_prev_states). Typed x/K_scaled inputs; f32 grad out.
-    pub m3_chunk_state_bwd_typed: TypedKernel,
+    // Phase 2.7.5: m3_chunk_scan_bwd_typed + m3_chunk_state_bwd_typed
+    // removed (dead — the typed backward path, like the f32 path, now routes
+    // through m3_dqkv_typed + m3_dqktheta_typed monolithic kernels).
 
     // -- Step 8c: typed M3 chunked parallel forward kernels --
     /// Per-chunk gamma/scale + qk_dot + K prescale. Typed K/Q/K_scaled,
@@ -237,6 +237,7 @@ impl Mamba3Kernels {
             rmsnorm_fwd: get("rmsnorm_forward")?,
             rmsnorm_bwd: get("rmsnorm_backward")?,
             colsum_accumulate: get("colsum_accumulate")?,
+            reduce_sum_axis0: get("reduce_sum_axis0")?,
             vec_add_inplace: get("vec_add_inplace")?,
             elementwise_mul: get("elementwise_mul")?,
             fill_scalar: get("fill_scalar")?,
@@ -258,10 +259,6 @@ impl Mamba3Kernels {
             m3_state_passing_fwd: get("m3_state_passing_fwd")?,
             m3_writeback_parallel_states: get("m3_writeback_parallel_states")?,
             m3_chunk_scan_fwd: get("m3_chunk_scan_fwd")?,
-            m3_chunk_scan_bwd: get("m3_chunk_scan_bwd")?,
-            m3_state_passing_bwd: get("m3_state_passing_bwd")?,
-            m3_chunk_state_bwd: get("m3_chunk_state_bwd")?,
-            m3_cumsum_bwd: get("m3_cumsum_bwd")?,
             m3_extract_da_cs_sum: get("m3_extract_da_cs_sum")?,
             m3_dqkv: get("m3_dqkv")?,
             m3_dqktheta: get("m3_dqktheta")?,
@@ -352,17 +349,6 @@ impl Mamba3Kernels {
                 f32: get("m3_dqktheta")?,
                 bf16: get("m3_dqktheta_bf16")?,
                 f16: get("m3_dqktheta_f16")?,
-            },
-
-            m3_chunk_scan_bwd_typed: TypedKernel {
-                f32: get("m3_chunk_scan_bwd")?,
-                bf16: get("m3_chunk_scan_bwd_bf16")?,
-                f16: get("m3_chunk_scan_bwd_f16")?,
-            },
-            m3_chunk_state_bwd_typed: TypedKernel {
-                f32: get("m3_chunk_state_bwd")?,
-                bf16: get("m3_chunk_state_bwd_bf16")?,
-                f16: get("m3_chunk_state_bwd_f16")?,
             },
 
             m3_preprocess_chunks_typed: TypedKernel {

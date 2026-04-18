@@ -428,16 +428,18 @@ extern "C" __global__ void m3_angle_dt_fwd_seq(
 //     d_angles_raw[t,a] += d_delta[t,h,a] * PI * dt[t,h] * sech^2(angles_raw[t,a])
 //     d_dt[t,h] += d_delta[t,h,a] * PI * tanh(angles_raw[t,a])
 //
-// NOTE: d_angles_raw is accumulated across all heads (atomicAdd needed).
-//       d_dt_angle is per-head (no conflict across angles, sum within thread).
+// Phase 2.7.5 (Rule B): contribution-only variant. Stage 1 per-(h,a) thread
+// writes per-t contributions to two transposed scratch tensors (no atomicAdd):
+//   contrib_angles[h, t, a] — reduce over h to get d_angles_raw[t, a]
+//   contrib_dt[a, t, h]    — reduce over a to get d_dt_angle[t, h]
+// Stage 2 (caller): two reduce_sum_axis0 launches finalise the outputs.
 //
 // Input:  d_angle_cumsum[T * nh * n_angles], angles_raw[T * n_angles], dt[T * nh]
-// Output: d_angles_raw[T * n_angles] (atomicAdd across heads),
-//         d_dt_angle[T * nh] (per-head sum across angles)
+// Output: contrib_angles[nh * T*n_angles], contrib_dt[n_angles * T*nh]
 // Grid: nh * n_angles threads. Sequential over T (reverse) inside each thread.
 extern "C" __global__ void angle_dt_bwd(
-    float* __restrict__ d_angles_raw,        // [T * n_angles] -- atomicAdd across heads
-    float* __restrict__ d_dt_angle,          // [T * nh] -- per-head angle contribution to d_dt
+    float* __restrict__ contrib_angles,      // [nh * T*n_angles] OUTPUT
+    float* __restrict__ contrib_dt,          // [n_angles * T*nh] OUTPUT
     const float* __restrict__ d_angle_cumsum,// [T * nh * n_angles]
     const float* __restrict__ angles_raw,    // [T * n_angles]
     const float* __restrict__ dt_arr,        // [T * nh]
@@ -450,6 +452,9 @@ extern "C" __global__ void angle_dt_bwd(
     int h = idx / n_angles;
     int a = idx % n_angles;
 
+    int tn = T * n_angles;
+    int tnh = T * nh;
+
     // Reverse cumsum: d_delta[t] = sum_{s=t}^{T-1} d_angle_cumsum[s]
     float running = 0.0f;
     for (int t = T - 1; t >= 0; t--) {
@@ -459,13 +464,10 @@ extern "C" __global__ void angle_dt_bwd(
         float raw = angles_raw[t * n_angles + a];
         float th = tanhf(raw);
         float dt_val = dt_arr[t * nh + h];
-
-        // d_angles_raw[t, a] += d_delta * PI * dt_val * (1 - tanh^2(raw))
         float sech2 = 1.0f - th * th;
-        atomicAdd(&d_angles_raw[t * n_angles + a], d_delta * PI * dt_val * sech2);
 
-        // d_dt_angle[t, h] += d_delta * PI * tanh(raw)
-        atomicAdd(&d_dt_angle[t * nh + h], d_delta * PI * th);
+        contrib_angles[h * tn + t * n_angles + a] = d_delta * PI * dt_val * sech2;
+        contrib_dt[a * tnh + t * nh + h] = d_delta * PI * th;
     }
 }
 
@@ -481,13 +483,19 @@ extern "C" __global__ void angle_dt_bwd(
 //
 // Backward (reverse cumsum per batch element):
 //   d_delta[t,h,a] = sum_{s=t}^{T-1} d_angle_cumsum[s,h,a]
-//   d_angles_raw[bt,a] += d_delta * PI * dt_val * sech^2(raw)   (atomicAdd across heads)
-//   d_dt_angle[bt,h]   += d_delta * PI * tanh(raw)              (atomicAdd across angles)
+//   d_angles_raw[bt,a] += d_delta * PI * dt_val * sech^2(raw)
+//   d_dt_angle[bt,h]   += d_delta * PI * tanh(raw)
 //
 // Grid: (B, ceil(nh*n_angles/256)). Block: (min(256, nh*n_angles)).
+// Phase 2.7.5 (Rule B): two-pass deterministic variant. Stage 1 per-(b,h,a)
+// thread writes per-t contributions to two transposed scratch tensors (no
+// atomicAdd):
+//   contrib_angles[h, b, t, a] — reduce over h to get d_angles_raw[bt, a]
+//   contrib_dt[a, b, t, h]    — reduce over a to get d_dt_angle[bt, h]
+// Stage 2 (caller): two reduce_sum_axis0 launches finalise the outputs.
 extern "C" __global__ void m3_angle_dt_bwd_seq(
-    float* __restrict__ d_angles_raw,        // [B*T * n_angles] -- atomicAdd across heads
-    float* __restrict__ d_dt_angle,          // [B*T * nh]
+    float* __restrict__ contrib_angles,      // [nh * B*T*n_angles] OUTPUT
+    float* __restrict__ contrib_dt,          // [n_angles * B*T*nh] OUTPUT
     const float* __restrict__ d_angle_cumsum,// [B*T * nh * n_angles]
     const float* __restrict__ angles_raw,    // [B*T * n_angles]
     const float* __restrict__ dt_arr,        // [B*T * nh]
@@ -502,6 +510,9 @@ extern "C" __global__ void m3_angle_dt_bwd_seq(
     int h = idx / n_angles;
     int a = idx % n_angles;
 
+    int btn = B * T * n_angles;
+    int btnh = B * T * nh;
+
     // Reverse cumsum over T for this (batch, head, angle)
     float running = 0.0f;
     for (int t = T - 1; t >= 0; t--) {
@@ -512,13 +523,12 @@ extern "C" __global__ void m3_angle_dt_bwd_seq(
         float raw = angles_raw[bt * n_angles + a];
         float th = tanhf(raw);
         float dt_val = dt_arr[bt * nh + h];
-
-        // d_angles_raw[bt, a] += d_delta * PI * dt_val * (1 - tanh^2(raw))
         float sech2 = 1.0f - th * th;
-        atomicAdd(&d_angles_raw[bt * n_angles + a], d_delta * PI * dt_val * sech2);
 
-        // d_dt_angle[bt, h] += d_delta * PI * tanh(raw)
-        atomicAdd(&d_dt_angle[bt * nh + h], d_delta * PI * th);
+        // contrib_angles[h, b, t, a]
+        contrib_angles[h * btn + bt * n_angles + a] = d_delta * PI * dt_val * sech2;
+        // contrib_dt[a, b, t, h]
+        contrib_dt[a * btnh + bt * nh + h] = d_delta * PI * th;
     }
 }
 

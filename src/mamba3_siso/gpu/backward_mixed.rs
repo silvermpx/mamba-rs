@@ -67,23 +67,43 @@ pub fn gpu_backward_mamba3_backbone_mixed(
     let dm = dims.d_model;
     let dtype = acts.dtype;
 
-    // norm_f bwd (f32, residual stays f32).
+    // norm_f bwd (f32, residual stays f32) — Phase 2.7.5 Rule B.
     {
         let nf_ptr = mamba_w.master.norm_f_weight.raw_ptr(&ctx.stream);
-        let d_nf_ptr = grads.norm_f_weight.ptr();
         let bt_i = bt as i32;
         let dm_i = dm as i32;
-        let mut builder = ctx.stream.launch_builder(&m3k.rmsnorm_bwd);
-        builder.arg(f32_scratch.d_norm.inner_mut());
-        builder.arg(&d_nf_ptr);
-        builder.arg(d_temporal.inner());
-        builder.arg(acts.norm_f_input.inner());
-        builder.arg(&nf_ptr);
-        builder.arg(acts.norm_f_rms.inner());
-        builder.arg(&bt_i);
-        builder.arg(&dm_i);
-        unsafe { builder.launch(grid_norm(bt, dm)) }
-            .map_err(|e| format!("rmsnorm_bwd norm_f m3 mixed: {:?}", e))?;
+        let axis0_ptr = f32_scratch.axis0_partials.cached_ptr();
+        {
+            let mut builder = ctx.stream.launch_builder(&m3k.rmsnorm_bwd);
+            builder.arg(f32_scratch.d_norm.inner_mut());
+            builder.arg(&axis0_ptr); // d_scale_partials [bt*dm]
+            builder.arg(d_temporal.inner());
+            builder.arg(acts.norm_f_input.inner());
+            builder.arg(&nf_ptr);
+            builder.arg(acts.norm_f_rms.inner());
+            builder.arg(&bt_i);
+            builder.arg(&dm_i);
+            unsafe { builder.launch(grid_norm(bt, dm)) }
+                .map_err(|e| format!("rmsnorm_bwd norm_f m3 mixed stage1: {:?}", e))?;
+        }
+        {
+            let block_dim = (bt as u32).next_power_of_two().clamp(32, 256);
+            let accumulate_i: i32 = 1;
+            let d_nf_ptr = grads.norm_f_weight.ptr();
+            let mut builder = ctx.stream.launch_builder(&m3k.reduce_sum_axis0);
+            builder.arg(&d_nf_ptr);
+            builder.arg(&axis0_ptr);
+            builder.arg(&bt_i);
+            builder.arg(&dm_i);
+            builder.arg(&accumulate_i);
+            let cfg = LaunchConfig {
+                grid_dim: (dm as u32, 1, 1),
+                block_dim: (block_dim, 1, 1),
+                shared_mem_bytes: (block_dim as usize * std::mem::size_of::<f32>()) as u32,
+            };
+            unsafe { builder.launch(cfg) }
+                .map_err(|e| format!("rmsnorm_bwd norm_f m3 mixed reduce: {:?}", e))?;
+        }
     }
     d_temporal.copy_from_raw(&f32_scratch.d_norm, &ctx.stream)?;
 
@@ -287,7 +307,8 @@ fn gpu_backward_mamba3_layer_mixed(
         }
     }
 
-    // m3_dqkv typed — typed Q_rot/K_scaled/V_in/dO; all grad outputs f32.
+    // m3_dqkv typed — Phase 2.7.5 Rule B: dD_partials[B*nh] via axis0_partials,
+    // followed by reduce_sum_axis0 → lg.d_param[nh] (accumulate=1).
     {
         let smem = (cs_u * ds + cs_u * ds + cs_u * hd + cs_u * hd + cs_u + cs_u + hd * ds) * 4;
         let cfg = LaunchConfig {
@@ -301,8 +322,7 @@ fn gpu_backward_mamba3_layer_mixed(
         builder.arg(sc.d_x.inner_mut()); // dV
         builder.arg(sc.d_alpha.inner_mut()); // dADT
         builder.arg(sc.d_beta.inner_mut()); // dQK_dot
-        let d_dp_ptr = lg.d_param.ptr();
-        builder.arg(&d_dp_ptr); // dD atomicAdd
+        builder.arg(sc.axis0_partials.inner_mut()); // dD_partials [B*nh] (Phase 2.7.5)
         let q_p = acts.q.cached_ptr(); // typed Q_rot
         let ks_p = acts.k_scaled_saved.cached_ptr(); // typed K_scaled
         let v_p = acts.x.cached_ptr(); // typed V = x
@@ -324,6 +344,25 @@ fn gpu_backward_mamba3_layer_mixed(
         builder.arg(&cs);
         unsafe { builder.launch(cfg) }.map_err(|e| format!("m3_dqkv_typed B6: {:?}", e))?;
     }
+    // Stage 2: reduce dD_partials[B, nh] → lg.d_param[nh] (accumulate=1).
+    {
+        let block_dim = (dims.batch as u32).next_power_of_two().clamp(32, 256);
+        let accumulate_i: i32 = 1;
+        let d_dp_ptr = lg.d_param.ptr();
+        let mut rb = ctx.stream.launch_builder(&m3k.reduce_sum_axis0);
+        rb.arg(&d_dp_ptr);
+        rb.arg(sc.axis0_partials.inner());
+        rb.arg(&b);
+        rb.arg(&nh_i);
+        rb.arg(&accumulate_i);
+        let red_cfg = LaunchConfig {
+            grid_dim: (nh as u32, 1, 1),
+            block_dim: (block_dim, 1, 1),
+            shared_mem_bytes: (block_dim as usize * std::mem::size_of::<f32>()) as u32,
+        };
+        unsafe { rb.launch(red_cfg) }
+            .map_err(|e| format!("m3_dqkv_typed dD reduce: {:?}", e))?;
+    }
 
     // Zero d_angle_cumsum before m3_dqktheta.
     if na > 0 {
@@ -337,7 +376,8 @@ fn gpu_backward_mamba3_layer_mixed(
             .map_err(|e| format!("zero d_angle_cumsum mixed: {:?}", e))?;
     }
 
-    // m3_dqktheta typed — typed Q_raw/K_raw; 7 f32 grad outputs.
+    // m3_dqktheta typed — Phase 2.7.5: dQ_bias/dK_bias removed from args
+    // (caller does colsum_accumulate on dQ_pre/dK_pre scratch below).
     {
         let na_i = na as i32;
         let cfg = LaunchConfig {
@@ -345,8 +385,6 @@ fn gpu_backward_mamba3_layer_mixed(
             block_dim: (cs_u as u32, 1, 1),
             shared_mem_bytes: 0,
         };
-        let d_cb_ptr = lg.c_bias.ptr();
-        let d_bb_ptr = lg.b_bias.ptr();
         let mut builder = ctx.stream.launch_builder(m3k.m3_dqktheta_typed.get(dtype));
         builder.arg(sc.d_c_pre_rope.inner_mut());
         builder.arg(sc.d_b_pre_rope.inner_mut());
@@ -355,8 +393,6 @@ fn gpu_backward_mamba3_layer_mixed(
         let gamma_in_ptr = sc.d_gamma_par.raw_ptr(&ctx.stream);
         builder.arg(sc.d_scale.inner_mut());
         builder.arg(sc.d_gamma_par.inner_mut());
-        builder.arg(&d_cb_ptr);
-        builder.arg(&d_bb_ptr);
         let cb_p = acts.c_biased.cached_ptr(); // typed Q_raw
         let bb_p = acts.b_biased.cached_ptr(); // typed K_raw
         builder.arg(&cb_p);
@@ -374,6 +410,29 @@ fn gpu_backward_mamba3_layer_mixed(
         builder.arg(&na_i);
         builder.arg(&cs);
         unsafe { builder.launch(cfg) }.map_err(|e| format!("m3_dqktheta_typed B6: {:?}", e))?;
+    }
+    // Phase 2.7.5: colsum dQ_pre / dK_pre → c_bias / b_bias (deterministic).
+    {
+        let d_cb_ptr = lg.c_bias.ptr();
+        let nhds_i = (nh * ds) as i32;
+        let mut cb = ctx.stream.launch_builder(&m3k.colsum_accumulate);
+        cb.arg(&d_cb_ptr);
+        cb.arg(sc.d_c_pre_rope.inner());
+        cb.arg(&bt_i);
+        cb.arg(&nhds_i);
+        unsafe { cb.launch(grid_1d(nh * ds)) }
+            .map_err(|e| format!("colsum d_c_bias mixed: {:?}", e))?;
+    }
+    {
+        let d_bb_ptr = lg.b_bias.ptr();
+        let nhds_i = (nh * ds) as i32;
+        let mut cb = ctx.stream.launch_builder(&m3k.colsum_accumulate);
+        cb.arg(&d_bb_ptr);
+        cb.arg(sc.d_b_pre_rope.inner());
+        cb.arg(&bt_i);
+        cb.arg(&nhds_i);
+        unsafe { cb.launch(grid_1d(nh * ds)) }
+            .map_err(|e| format!("colsum d_b_bias mixed: {:?}", e))?;
     }
 
     // Copy dQ_pre/dK_pre into d_q/d_k for downstream consumption (matches
@@ -402,39 +461,75 @@ fn gpu_backward_mamba3_layer_mixed(
     sc.d_c_pre_rope.copy_from_raw(&sc.d_q, &ctx.stream)?;
 
     // ----------------------------------------------------------------
-    // B5a: angle_dt_bwd (pure f32) — d_angle_cumsum → d_angles_raw + d_dt_angle.
+    // B5a: angle_dt_bwd — Phase 2.7.5 Rule B (pure f32, no atomicAdd).
+    // Stage 1: kernel writes contrib_angles + contrib_dt into axis0_partials.
+    // Stage 2a/b: reduce_sum_axis0 → d_angles_raw / d_dt_angle.
     // ----------------------------------------------------------------
     if na > 0 {
-        for (buf, sz) in [
-            (&mut sc.d_angles_raw, bt * na),
-            (&mut sc.d_dt_angle, bt * nh),
-        ] {
-            let ne = sz as i32;
-            let zero: f32 = 0.0;
-            let mut builder = ctx.stream.launch_builder(&m3k.fill_scalar);
-            builder.arg(buf.inner_mut());
-            builder.arg(&zero);
-            builder.arg(&ne);
-            unsafe { builder.launch(grid_1d(sz)) }.map_err(|e| format!("zero B5a: {:?}", e))?;
-        }
         let na_i = na as i32;
-        let mut builder = ctx.stream.launch_builder(&m3k.m3_angle_dt_bwd_seq);
-        builder.arg(sc.d_angles_raw.inner_mut());
-        builder.arg(sc.d_dt_angle.inner_mut());
-        builder.arg(sc.d_angle_cumsum.inner());
-        builder.arg(acts.angles_raw.inner());
-        builder.arg(acts.dt.inner());
-        builder.arg(&b);
-        builder.arg(&t);
-        builder.arg(&nh_i);
-        builder.arg(&na_i);
-        let grid = LaunchConfig {
-            grid_dim: (dims.batch as u32, (nh * na).div_ceil(256) as u32, 1),
-            block_dim: (256.min((nh * na) as u32), 1, 1),
-            shared_mem_bytes: 0,
-        };
-        unsafe { builder.launch(grid) }
-            .map_err(|e| format!("m3_angle_dt_bwd_seq mixed: {:?}", e))?;
+        let btna = (bt * na) as i32;
+        let btnh = (bt * nh) as i32;
+        let contrib_angles_elems = nh * bt * na;
+        let contrib_dt_offset_bytes =
+            (contrib_angles_elems * std::mem::size_of::<f32>()) as u64;
+        let contrib_angles_ptr = sc.axis0_partials.cached_ptr();
+        let contrib_dt_ptr = sc.axis0_partials.cached_ptr() + contrib_dt_offset_bytes;
+        // Stage 1
+        {
+            let mut builder = ctx.stream.launch_builder(&m3k.m3_angle_dt_bwd_seq);
+            builder.arg(&contrib_angles_ptr);
+            builder.arg(&contrib_dt_ptr);
+            builder.arg(sc.d_angle_cumsum.inner());
+            builder.arg(acts.angles_raw.inner());
+            builder.arg(acts.dt.inner());
+            builder.arg(&b);
+            builder.arg(&t);
+            builder.arg(&nh_i);
+            builder.arg(&na_i);
+            let grid = LaunchConfig {
+                grid_dim: (dims.batch as u32, (nh * na).div_ceil(256) as u32, 1),
+                block_dim: (256.min((nh * na) as u32), 1, 1),
+                shared_mem_bytes: 0,
+            };
+            unsafe { builder.launch(grid) }
+                .map_err(|e| format!("m3_angle_dt_bwd_seq mixed stage1: {:?}", e))?;
+        }
+        // Stage 2a: reduce nh → d_angles_raw[B*T*na]
+        {
+            let block_dim = (nh as u32).next_power_of_two().clamp(32, 256);
+            let accumulate_i: i32 = 0;
+            let mut builder = ctx.stream.launch_builder(&m3k.reduce_sum_axis0);
+            builder.arg(sc.d_angles_raw.inner_mut());
+            builder.arg(&contrib_angles_ptr);
+            builder.arg(&nh_i);
+            builder.arg(&btna);
+            builder.arg(&accumulate_i);
+            let cfg = LaunchConfig {
+                grid_dim: ((bt * na) as u32, 1, 1),
+                block_dim: (block_dim, 1, 1),
+                shared_mem_bytes: (block_dim as usize * std::mem::size_of::<f32>()) as u32,
+            };
+            unsafe { builder.launch(cfg) }
+                .map_err(|e| format!("angle_dt_bwd mixed reduce angles: {:?}", e))?;
+        }
+        // Stage 2b: reduce na → d_dt_angle[B*T*nh]
+        {
+            let block_dim = (na as u32).next_power_of_two().clamp(32, 256);
+            let accumulate_i: i32 = 0;
+            let mut builder = ctx.stream.launch_builder(&m3k.reduce_sum_axis0);
+            builder.arg(sc.d_dt_angle.inner_mut());
+            builder.arg(&contrib_dt_ptr);
+            builder.arg(&na_i);
+            builder.arg(&btnh);
+            builder.arg(&accumulate_i);
+            let cfg = LaunchConfig {
+                grid_dim: ((bt * nh) as u32, 1, 1),
+                block_dim: (block_dim, 1, 1),
+                shared_mem_bytes: (block_dim as usize * std::mem::size_of::<f32>()) as u32,
+            };
+            unsafe { builder.launch(cfg) }
+                .map_err(|e| format!("angle_dt_bwd mixed reduce dt: {:?}", e))?;
+        }
     } else {
         let ne = (bt * nh) as i32;
         let zero: f32 = 0.0;
@@ -674,20 +769,41 @@ fn gpu_backward_mamba3_layer_mixed(
     // Cast typed d_post_norm → f32 d_norm scratch, then call f32 rmsnorm_bwd.
     // ----------------------------------------------------------------
     cast_typed_to_f32(ctx, m3k, &mut sc.d_norm, &msc.d_post_norm_typed, bt * dm)?;
+    // Phase 2.7.5 Rule B two-stage:
     {
         let nw_ptr = lw_master.norm_weight.raw_ptr(&ctx.stream);
-        let d_nw_ptr = lg.norm_weight.ptr();
-        let mut builder = ctx.stream.launch_builder(&m3k.rmsnorm_bwd);
-        builder.arg(sc.d_pre_norm.inner_mut());
-        builder.arg(&d_nw_ptr);
-        builder.arg(sc.d_norm.inner());
-        builder.arg(acts.residual.inner());
-        builder.arg(&nw_ptr);
-        builder.arg(acts.rms_vals.inner());
-        builder.arg(&bt_i);
-        builder.arg(&dm_i);
-        unsafe { builder.launch(grid_norm(bt, dm)) }
-            .map_err(|e| format!("rmsnorm_bwd m3 B1 mixed: {:?}", e))?;
+        let axis0_ptr = sc.axis0_partials.cached_ptr();
+        {
+            let mut builder = ctx.stream.launch_builder(&m3k.rmsnorm_bwd);
+            builder.arg(sc.d_pre_norm.inner_mut());
+            builder.arg(&axis0_ptr); // d_scale_partials [bt*dm]
+            builder.arg(sc.d_norm.inner());
+            builder.arg(acts.residual.inner());
+            builder.arg(&nw_ptr);
+            builder.arg(acts.rms_vals.inner());
+            builder.arg(&bt_i);
+            builder.arg(&dm_i);
+            unsafe { builder.launch(grid_norm(bt, dm)) }
+                .map_err(|e| format!("rmsnorm_bwd m3 B1 mixed stage1: {:?}", e))?;
+        }
+        {
+            let block_dim = (bt as u32).next_power_of_two().clamp(32, 256);
+            let accumulate_i: i32 = 1;
+            let d_nw_ptr = lg.norm_weight.ptr();
+            let mut builder = ctx.stream.launch_builder(&m3k.reduce_sum_axis0);
+            builder.arg(&d_nw_ptr);
+            builder.arg(&axis0_ptr);
+            builder.arg(&bt_i);
+            builder.arg(&dm_i);
+            builder.arg(&accumulate_i);
+            let cfg = LaunchConfig {
+                grid_dim: (dm as u32, 1, 1),
+                block_dim: (block_dim, 1, 1),
+                shared_mem_bytes: (block_dim as usize * std::mem::size_of::<f32>()) as u32,
+            };
+            unsafe { builder.launch(cfg) }
+                .map_err(|e| format!("rmsnorm_bwd m3 B1 mixed reduce: {:?}", e))?;
+        }
     }
 
     // Residual: d_temporal += d_pre_norm.

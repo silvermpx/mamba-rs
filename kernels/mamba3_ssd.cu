@@ -565,7 +565,9 @@ extern "C" __global__ void m3_burnin_fwd_nosave(
 //
 // Gradient outputs:
 //   d_x: direct write (unique per thread per timestep)
-//   d_k, d_q, d_alpha, d_beta, d_gamma: atomicAdd after warp reduction over p
+//   d_k, d_q, d_alpha, d_beta, d_gamma: direct store from lane 0 (Phase 2.7.5
+//     Rule B) — grid (B, nh) × block (hd) gives one block per (b,h), so lane
+//     0 is the unique writer to each (b, t, h, *) slot.
 //   d_D_local: per-thread accumulator, reduced by m3_reduce_d_D kernel
 //
 // From the forward recurrence:
@@ -586,13 +588,13 @@ extern "C" __global__ void m3_backward_seq(
     // Incoming gradient
     const float* d_y_flat,      // [B * T * d_inner]
     // Output gradients
-    float* d_x,         // [B * T * d_inner] (direct write per thread)
-    float* d_k,         // [B * T * nh * ds] (atomicAdd after warp reduce)
-    float* d_q,         // [B * T * nh * ds] (atomicAdd after warp reduce)
-    float* d_alpha,     // [B * T * nh] (atomicAdd after warp reduce)
-    float* d_beta,      // [B * T * nh] (atomicAdd after warp reduce)
-    float* d_gamma,     // [B * T * nh] (atomicAdd after warp reduce)
-    float* d_D_local,   // [B * d_inner] per-thread, reduced by m3_reduce_d_D
+    float* __restrict__ d_x,         // [B * T * d_inner] (direct write per thread)
+    float* __restrict__ d_k,         // [B * T * nh * ds] (lane-0 direct store per (b,t,h,n))
+    float* __restrict__ d_q,         // [B * T * nh * ds] (lane-0 direct store per (b,t,h,n))
+    float* __restrict__ d_alpha,     // [B * T * nh] (lane-0 direct store per (b,t,h))
+    float* __restrict__ d_beta,      // [B * T * nh] (lane-0 direct store per (b,t,h))
+    float* __restrict__ d_gamma,     // [B * T * nh] (lane-0 direct store per (b,t,h))
+    float* __restrict__ d_D_local,   // [B * d_inner] per-thread, reduced by m3_reduce_d_D
     int batch, int T, int nh, int hd, int ds
 ) {
     int b = blockIdx.x;
@@ -635,13 +637,18 @@ extern "C" __global__ void m3_backward_seq(
     int h_b_base = b * (T + 1) * nhd_ds;
 
     for (int t = T - 1; t >= 0; t--) {
-        // --- Flush d_k_carry from previous iteration ---
+        // Phase 2.7.5: lane 0 of the unique block per (b,h) is the sole writer
+        // to d_k[(b,t,h,n)]. No atomic needed — direct store. Later d_kc_val
+        // from current iteration adds to same slot, merge via local accumulator
+        // `d_k_write[n]` flushed once per t (see after main n-loop).
+        float d_k_write[64];
+        for (int n = 0; n < ds; n++) d_k_write[n] = 0.0f;
+        // --- Flush d_k_carry from previous iteration into local d_k_write ---
         // d_k_carry holds gradient for k_prev[t+1] = k_cur[t], so write to d_k[t].
         // Skip at first iteration (t == T-1): carry is zero.
         if (t < T - 1 && p == 0) {
             for (int n = 0; n < ds; n++) {
-                if (d_k_carry[n] != 0.0f)
-                    atomicAdd(&d_k[(b * T + t) * nh * ds + h * ds + n], d_k_carry[n]);
+                d_k_write[n] += d_k_carry[n];
                 d_k_carry[n] = 0.0f;
             }
         }
@@ -696,12 +703,13 @@ extern "C" __global__ void m3_backward_seq(
             // From y[p] = sum_n(h[p,n] * q[n]): d_h += d_y * q
             d_h_reg[n] += dy_val * qc_n;
 
-            // d_q[n] = sum_p(d_y[p] * h_curr[p,n]): warp reduce over p
+            // d_q[n] = sum_p(d_y[p] * h_curr[p,n]): warp reduce over p.
+            // Phase 2.7.5: lane 0 is unique writer for d_q[(b,t,h,n)] — direct store.
             float d_q_val = dy_val * h_curr_n;
             for (int off = hd / 2; off > 0; off >>= 1)
                 d_q_val += __shfl_down_sync(warp_mask, d_q_val, off, hd);
             if (p == 0)
-                atomicAdd(&d_q[(b * T + t) * nh * ds + h * ds + n], d_q_val);
+                d_q[(b * T + t) * nh * ds + h * ds + n] = d_q_val;
 
             // Gradients through trapezoidal recurrence
             float dh_n = d_h_reg[n];
@@ -729,11 +737,13 @@ extern "C" __global__ void m3_backward_seq(
             d_x_val += dh_n * gamma_h * kc_n;
 
             // d_k_cur[n] += dh * gamma * x  (sum over p -> warp reduce -> d_k[t])
+            // Phase 2.7.5: merge with d_k_write[n] (carry from t+1), flushed
+            // once per-t after the n-loop.
             float d_kc_val = dh_n * gamma_h * x_val;
             for (int off = hd / 2; off > 0; off >>= 1)
                 d_kc_val += __shfl_down_sync(warp_mask, d_kc_val, off, hd);
             if (p == 0)
-                atomicAdd(&d_k[(b * T + t) * nh * ds + h * ds + n], d_kc_val);
+                d_k_write[n] += d_kc_val;
 
             // BPTT: propagate d_h backward through alpha
             d_h_reg[n] = alpha_h * dh_n;
@@ -745,21 +755,28 @@ extern "C" __global__ void m3_backward_seq(
         // d_v_carry for next iteration: v_prev[t] = x[t-1], so this flows to d_x[t-1]
         d_v_carry = d_v_prev_acc;
 
-        // Warp reduce d_alpha, d_beta, d_gamma over p, then atomicAdd
+        // Phase 2.7.5: flush d_k for this timestep (single writer from lane 0).
+        if (p == 0) {
+            for (int n = 0; n < ds; n++) {
+                d_k[(b * T + t) * nh * ds + h * ds + n] = d_k_write[n];
+            }
+        }
+
+        // Warp reduce d_alpha, d_beta, d_gamma over p, then direct store from lane 0.
         for (int off = hd / 2; off > 0; off >>= 1)
             d_alpha_acc += __shfl_down_sync(warp_mask, d_alpha_acc, off, hd);
         if (p == 0)
-            atomicAdd(&d_alpha[(b * T + t) * nh + h], d_alpha_acc);
+            d_alpha[(b * T + t) * nh + h] = d_alpha_acc;
 
         for (int off = hd / 2; off > 0; off >>= 1)
             d_beta_acc += __shfl_down_sync(warp_mask, d_beta_acc, off, hd);
         if (p == 0)
-            atomicAdd(&d_beta[(b * T + t) * nh + h], d_beta_acc);
+            d_beta[(b * T + t) * nh + h] = d_beta_acc;
 
         for (int off = hd / 2; off > 0; off >>= 1)
             d_gamma_acc += __shfl_down_sync(warp_mask, d_gamma_acc, off, hd);
         if (p == 0)
-            atomicAdd(&d_gamma[(b * T + t) * nh + h], d_gamma_acc);
+            d_gamma[(b * T + t) * nh + h] = d_gamma_acc;
     }
 
     // After loop: d_k_carry holds gradient for k_prev[0] = initial k_state (not trained).
@@ -775,9 +792,12 @@ extern "C" __global__ void m3_backward_seq(
 // Reduce d_D_local from [B * d_inner] to [nh] by summing across batch and headdim.
 // O2 Warp-Parallel: 1 warp (32 threads) per head.
 // Launch: grid_dim=(nh, 1, 1), block_dim=(32, 1, 1).
+// Phase 2.7.5: single block per head → lane 0 unique writer.
+// Caller pre-zeros d_D_out in GpuMamba3Grads::zero (one memset per step);
+// direct store preserves the old atomicAdd-into-zero semantics exactly.
 extern "C" __global__ void m3_reduce_d_D(
-    float* d_D_out,           // [nh]
-    const float* d_D_local,   // [B * d_inner]
+    float* __restrict__ d_D_out,           // [nh]
+    const float* __restrict__ d_D_local,   // [B * d_inner]
     int batch, int nh, int hd
 ) {
     int head = blockIdx.x;
@@ -801,5 +821,5 @@ extern "C" __global__ void m3_reduce_d_D(
     sum += __shfl_down_sync(0xFFFFFFFF, sum, 2);
     sum += __shfl_down_sync(0xFFFFFFFF, sum, 1);
 
-    if (lane == 0) atomicAdd(&d_D_out[head], sum);
+    if (lane == 0) d_D_out[head] = sum;
 }

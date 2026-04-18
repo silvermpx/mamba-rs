@@ -112,8 +112,9 @@ fn tolerances(dtype: WeightDtype) -> (f32, f32) {
 
 // ─── m3_dqkv ───────────────────────────────────────────────────────────
 //
-// 6 outputs: dQ_mid, dK_mid, dV, dADT, dQK_dot_out, dD_out.
-// dV is written (non-atomic); dD_out uses atomicAdd across B; others stored.
+// 6 outputs: dQ_mid, dK_mid, dV, dADT, dQK_dot_out, dD_partials.
+// Phase 2.7.5: dD output is now per-(b,h) partials of length B*nh instead of
+// [nh] atomicAdd accumulator. Callers reduce across B via reduce_sum_axis0.
 
 fn check_dqkv(dtype: WeightDtype) {
     let dev = GpuDevice::new(0).unwrap();
@@ -155,7 +156,8 @@ fn check_dqkv(dtype: WeightDtype) {
     let n_q = B * T * NH * DS;
     let n_v = B * T * D_INNER;
     let n_th = B * T * NH;
-    let n_d = NH;
+    // Phase 2.7.5: dD output is per-(b,h) partials length B*NH.
+    let n_d = B * NH;
 
     // f32 oracle.
     let dq_ref = GpuBuffer::zeros(&ctx.stream, n_q).unwrap();
@@ -288,7 +290,11 @@ fn m3_dqkv_f16() {
 
 // ─── m3_dqktheta ───────────────────────────────────────────────────────
 //
-// 7 outputs: dQ_pre, dK_pre, dAngles_cumsum, dScale, dGamma, dQ_bias, dK_bias.
+// Phase 2.7.5: kernel now writes 5 outputs (dQ_pre, dK_pre, dAngles_cumsum,
+// dScale, dGamma). dQ_bias / dK_bias are produced by a caller-side
+// colsum_accumulate over dQ_pre / dK_pre respectively — the f32 oracle vs
+// typed comparison still covers them since both paths produce the same
+// dQ_pre / dK_pre and run the same colsum on top.
 
 fn check_dqktheta(dtype: WeightDtype) {
     let dev = GpuDevice::new(0).unwrap();
@@ -355,8 +361,6 @@ fn check_dqktheta(dtype: WeightDtype) {
         dang_ref.cached_ptr(),
         dscale_ref.cached_ptr(),
         dgamma_ref.cached_ptr(),
-        dqb_ref.cached_ptr(),
-        dkb_ref.cached_ptr(),
         q_raw_f32.cached_ptr(),
         k_raw_f32.cached_ptr(),
         scale_buf.cached_ptr(),
@@ -376,6 +380,36 @@ fn check_dqktheta(dtype: WeightDtype) {
     bld.arg(&nai);
     bld.arg(&csi);
     unsafe { bld.launch(cfg) }.unwrap();
+    ctx.stream.synchronize().unwrap();
+
+    // Phase 2.7.5: produce dQ_bias/dK_bias from dQ_pre/dK_pre via colsum_accumulate.
+    let cs_grid = LaunchConfig {
+        grid_dim: (((NH * DS) as u32).div_ceil(256), 1, 1),
+        block_dim: (256, 1, 1),
+        shared_mem_bytes: 0,
+    };
+    {
+        let rows = (B * T) as i32;
+        let cols = (NH * DS) as i32;
+        let mut bld = ctx.stream.launch_builder(&m3k.colsum_accumulate);
+        let dqb_p = dqb_ref.cached_ptr();
+        bld.arg(&dqb_p);
+        bld.arg(dqpre_ref.inner());
+        bld.arg(&rows);
+        bld.arg(&cols);
+        unsafe { bld.launch(cs_grid) }.unwrap();
+    }
+    {
+        let rows = (B * T) as i32;
+        let cols = (NH * DS) as i32;
+        let mut bld = ctx.stream.launch_builder(&m3k.colsum_accumulate);
+        let dkb_p = dkb_ref.cached_ptr();
+        bld.arg(&dkb_p);
+        bld.arg(dkpre_ref.inner());
+        bld.arg(&rows);
+        bld.arg(&cols);
+        unsafe { bld.launch(cs_grid) }.unwrap();
+    }
     ctx.stream.synchronize().unwrap();
 
     let dqpre_ref_v = download_f32(&ctx, &dqpre_ref, n_q);
@@ -406,8 +440,6 @@ fn check_dqktheta(dtype: WeightDtype) {
         dang_t.cached_ptr(),
         dscale_t.cached_ptr(),
         dgamma_t.cached_ptr(),
-        dqb_t.cached_ptr(),
-        dkb_t.cached_ptr(),
         q_raw_t.cached_ptr(),
         k_raw_t.cached_ptr(),
         scale_buf.cached_ptr(),
@@ -427,6 +459,31 @@ fn check_dqktheta(dtype: WeightDtype) {
     bld.arg(&nai);
     bld.arg(&csi);
     unsafe { bld.launch(cfg) }.unwrap();
+    ctx.stream.synchronize().unwrap();
+
+    // Phase 2.7.5: typed path also colsums dQ_pre/dK_pre to produce bias grads.
+    {
+        let rows = (B * T) as i32;
+        let cols = (NH * DS) as i32;
+        let mut bld = ctx.stream.launch_builder(&m3k.colsum_accumulate);
+        let dqb_p = dqb_t.cached_ptr();
+        bld.arg(&dqb_p);
+        bld.arg(dqpre_t.inner());
+        bld.arg(&rows);
+        bld.arg(&cols);
+        unsafe { bld.launch(cs_grid) }.unwrap();
+    }
+    {
+        let rows = (B * T) as i32;
+        let cols = (NH * DS) as i32;
+        let mut bld = ctx.stream.launch_builder(&m3k.colsum_accumulate);
+        let dkb_p = dkb_t.cached_ptr();
+        bld.arg(&dkb_p);
+        bld.arg(dkpre_t.inner());
+        bld.arg(&rows);
+        bld.arg(&cols);
+        unsafe { bld.launch(cs_grid) }.unwrap();
+    }
     ctx.stream.synchronize().unwrap();
 
     let dqpre_t_v = download_f32(&ctx, &dqpre_t, n_q);
