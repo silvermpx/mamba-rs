@@ -1,6 +1,4 @@
-use std::cell::{Cell, RefCell};
-use std::sync::Mutex;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::cell::RefCell;
 
 use rayon::prelude::*;
 
@@ -97,12 +95,6 @@ pub fn invalidate_mamba_scratch() {
     });
     THREAD_TARGET_SEQ_SCRATCH.with(|cell| {
         *cell.borrow_mut() = None;
-    });
-    THREAD_GRADS.with(|cell| {
-        *cell.borrow_mut() = None;
-    });
-    THREAD_GRADS_EPOCH.with(|ep| {
-        ep.set(0);
     });
 }
 
@@ -240,81 +232,28 @@ pub fn parallel_mamba_forward(
 }
 
 // ---------------------------------------------------------------------------
-// O1: Parallel Mamba backward — two-pass rayon + thread-local gradient reduce
+// Parallel Mamba backward — deterministic static partition + tree reduce
 // ---------------------------------------------------------------------------
-
-/// Monotonic epoch counter for thread-local gradient zeroing.
-/// Each call to `parallel_mamba_backward` increments this. Threads compare
-/// their local epoch against the global one to know when to zero their
-/// accumulators. This eliminates dependence on `rayon::broadcast` reaching
-/// every thread that `par_iter` may use (the calling thread can differ).
-static BWD_EPOCH: AtomicU64 = AtomicU64::new(0);
-
-/// Serializes concurrent `parallel_mamba_backward` invocations so they cannot
-/// interleave their epoch bumps and thread-local zero/accumulate phases. In
-/// production this is a no-op (gradient steps run one at a time). Needed
-/// because cargo runs `#[test]` functions in parallel and shares the rayon
-/// pool + thread-local statics across test threads; mirrors M3's
-/// `M3_BWD_GUARD`.
-static BWD_GUARD: Mutex<()> = Mutex::new(());
-
-thread_local! {
-    static THREAD_GRADS: RefCell<Option<TrainMambaWeights>> = const { RefCell::new(None) };
-    /// Last epoch at which this thread's THREAD_GRADS was zeroed.
-    static THREAD_GRADS_EPOCH: Cell<u64> = const { Cell::new(0) };
-}
-
-/// Zero this thread's THREAD_GRADS if stale (epoch mismatch) or if a prior
-/// call left a buffer whose shape does not match the current dims (tuner
-/// trials can change dims between calls).
-fn ensure_thread_grads_zeroed(dims: &MambaDims, epoch: u64) {
-    THREAD_GRADS_EPOCH.with(|ep| {
-        if ep.get() != epoch {
-            THREAD_GRADS.with(|cell| {
-                let mut opt = cell.borrow_mut();
-                // Invalidate stale shape if dims changed between calls.
-                let dim_mismatch = opt.as_ref().is_some_and(|g| {
-                    g.layers.len() != dims.n_layers
-                        || g.norm_f_weight.len() != dims.d_model
-                        || g.layers.first().map(|l| l.a_log.len()).unwrap_or(0)
-                            != dims.d_inner * dims.d_state
-                });
-                if dim_mismatch {
-                    *opt = None;
-                }
-                let g = opt.get_or_insert_with(|| TrainMambaWeights::zeros_from_dims(dims));
-                g.zero();
-            });
-            ep.set(epoch);
-        }
-    });
-}
 
 /// Run `backward_mamba_backbone_batched` for B samples in parallel using rayon,
 /// then reduce per-thread weight gradients into `grads_mamba`.
 ///
-/// **Epoch-based two-pass approach:**
+/// **Deterministic static-partition approach** (replaces the old epoch-based
+/// dynamic work-stealing + broadcast collection):
 ///
-/// 1. **Pass 1** (`par_iter_mut`): Each rayon worker runs backward for its
-///    assigned samples. Data gradients go into the disjoint `d_temporal_seqs[b]`.
-///    Weight gradients accumulate into thread-local `THREAD_GRADS`. Each thread
-///    lazily zeroes its accumulator on the first access of a new epoch, so
-///    `rayon::broadcast` is not needed for zeroing.
+/// 1. Pre-allocate `N_THREADS` gradient slots, each zeroed.
+/// 2. Static partition: thread `tid` owns samples `[start..end)` where the
+///    mapping is a pure function of `(B, N_THREADS, tid)`. Same samples
+///    always go to the same slot → same intra-slot accumulation order.
+/// 3. Each thread runs backward for its assigned samples sequentially,
+///    accumulating into its pre-assigned slot.
+/// 4. Fixed balanced binary-tree reduce: always
+///    `((slot[0]+slot[1])+(slot[2]+slot[3]))+((slot[4]+slot[5])+...)`
+///    regardless of thread scheduling.
 ///
-/// 2. **Pass 2** (collect + tree-reduce): Gradients are collected via
-///    `rayon::broadcast` plus an explicit collection on the calling thread
-///    (which `broadcast` may or may not include). The epoch is used to avoid
-///    double-collection: each thread marks itself as collected, so a second
-///    call (broadcast + explicit) is a no-op.
-///
-/// # Arguments
-///
-/// - `d_temporal_seqs`: `[B]` slices of `[T * d_model]` — incoming/outgoing data gradients.
-/// - `grads_mamba`: accumulated weight gradient output.
-/// - `mamba_batch_acts`: `[B]` — per-sample saved activations from forward pass.
-/// - `mamba_w`: shared read-only Mamba weights.
-/// - `a_neg_all`: `[n_layers * d_inner * d_state]` — pre-computed `-exp(a_log)`.
-/// - `dims`: collected Mamba dimensions.
+/// Result: **bit-identical** output across runs with the same input,
+/// regardless of OS thread scheduling or Rayon work-stealing order.
+/// Same principle as the batch-invariant matvec kernel.
 pub fn parallel_mamba_backward(
     d_temporal_seqs: &mut [Vec<f32>],
     grads_mamba: &mut TrainMambaWeights,
@@ -324,106 +263,84 @@ pub fn parallel_mamba_backward(
     dims: &MambaDims,
 ) {
     debug_assert_eq!(d_temporal_seqs.len(), mamba_batch_acts.len());
+    let b_sz = d_temporal_seqs.len();
+    if b_sz == 0 {
+        return;
+    }
 
-    // Single-thread BLAS inside rayon to prevent thread explosion.
+    let n_threads = rayon::current_num_threads().min(b_sz);
 
-    // Hold the global guard so concurrent callers cannot interleave epoch
-    // bumps with other threads' accumulation (see BWD_GUARD docstring).
-    let _guard = BWD_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+    // Pre-allocate per-thread gradient slots (zeroed).
+    let mut slots: Vec<TrainMambaWeights> = (0..n_threads)
+        .map(|_| TrainMambaWeights::zeros_from_dims(dims))
+        .collect();
 
-    // Advance the global epoch so every thread will zero its accumulators on
-    // first access during this call (lazy zeroing inside par_iter_mut).
-    let epoch = BWD_EPOCH.fetch_add(1, Ordering::SeqCst) + 1;
+    // SAFETY: each thread writes to disjoint regions:
+    // - slots[tid]: exclusive (static partition by tid)
+    // - d_temporal_seqs[b]: exclusive per-sample (b in [start..end))
+    // - mamba_batch_acts[b], mamba_w, a_neg_all: shared read-only
+    struct BwdRawPtrs {
+        slots: *mut TrainMambaWeights,
+        d_temporal_seqs: *mut Vec<f32>,
+        mamba_batch_acts: *const MambaBackboneFlat,
+    }
+    unsafe impl Send for BwdRawPtrs {}
+    unsafe impl Sync for BwdRawPtrs {}
 
-    // Pass 1: parallel backward — each sample gets disjoint &mut d_temporal_seqs[b].
-    // Weight gradients accumulate into thread-local THREAD_GRADS (no contention).
-    // Each thread lazily zeroes its accumulator on first access of this epoch.
-    d_temporal_seqs
-        .par_iter_mut()
-        .enumerate()
-        .for_each(|(b, d_temporal)| {
-            ensure_thread_grads_zeroed(dims, epoch);
-            THREAD_GRADS.with(|grad_cell| {
-                with_thread_scratch(dims, |scratch| {
-                    let mut grad_opt = grad_cell.borrow_mut();
-                    let thread_grads =
-                        grad_opt.get_or_insert_with(|| TrainMambaWeights::zeros_from_dims(dims));
-
-                    backward_mamba_backbone_batched(
-                        d_temporal,
-                        thread_grads,
-                        &mamba_batch_acts[b],
-                        mamba_w,
-                        a_neg_all,
-                        &mut scratch.bwd,
-                        dims,
-                    );
-                });
-            });
-        });
-
-    // Pass 2: tree-reduce thread-local grads into grads_mamba.
-    //
-    // Collect from pool threads via broadcast, then also try the calling thread
-    // explicitly (broadcast may or may not include it depending on rayon version
-    // and whether the caller belongs to the pool). The epoch check inside
-    // `try_collect_thread_grads` prevents double-collection.
-    let collected: Mutex<Vec<TrainMambaWeights>> = Mutex::new(Vec::with_capacity(32));
-    let collect_epoch = epoch;
-
-    let try_collect = |collected: &Mutex<Vec<TrainMambaWeights>>| {
-        THREAD_GRADS_EPOCH.with(|ep| {
-            // Only collect from threads that participated in this epoch's backward.
-            if ep.get() == collect_epoch {
-                THREAD_GRADS.with(|cell| {
-                    let borrow = cell.borrow();
-                    if let Some(ref tg) = *borrow {
-                        collected.lock().unwrap().push(tg.clone());
-                    }
-                });
-                // Mark as collected so a redundant call is a no-op.
-                ep.set(0);
-            }
-        });
+    let ptrs = BwdRawPtrs {
+        slots: slots.as_mut_ptr(),
+        d_temporal_seqs: d_temporal_seqs.as_mut_ptr(),
+        mamba_batch_acts: mamba_batch_acts.as_ptr(),
     };
 
-    rayon::broadcast(|_| try_collect(&collected));
-    // Also try the calling thread (safe even if broadcast already handled it,
-    // because the epoch is set to 0 after collection).
-    try_collect(&collected);
+    let ptrs_ref = &ptrs;
+    (0..n_threads).into_par_iter().for_each(|tid| {
+        let start = tid * b_sz / n_threads;
+        let end = (tid + 1) * b_sz / n_threads;
 
-    let mut grads_vec = collected.into_inner().unwrap();
+        // SAFETY: tid is unique per thread, start..end is disjoint per tid.
+        let slot = unsafe { &mut *ptrs_ref.slots.add(tid) };
+        for b in start..end {
+            let d_temporal = unsafe { &mut *ptrs_ref.d_temporal_seqs.add(b) };
+            let acts = unsafe { &*ptrs_ref.mamba_batch_acts.add(b) };
 
-    // Tree reduce: pairwise add until one remains.
-    // Round 1: 16 pairs, Round 2: 8, Round 3: 4, Round 4: 2, Round 5: 1.
-    while grads_vec.len() > 1 {
-        let half = grads_vec.len() / 2;
-        let remainder = grads_vec.len() % 2;
-        // Split into pairs: left[0..half] and right[0..half].
-        // Odd element stays untouched at the end.
-        let (left, right_and_rest) = grads_vec.split_at_mut(half);
+            with_thread_scratch(dims, |scratch| {
+                backward_mamba_backbone_batched(
+                    d_temporal,
+                    slot,
+                    acts,
+                    mamba_w,
+                    a_neg_all,
+                    &mut scratch.bwd,
+                    dims,
+                );
+            });
+        }
+    });
+
+    // Fixed balanced binary-tree reduce: deterministic order regardless of
+    // thread count. Always ((slot[0]+slot[1])+(slot[2]+slot[3]))+...
+    while slots.len() > 1 {
+        let half = slots.len() / 2;
+        let remainder = slots.len() % 2;
+        let (left, right_and_rest) = slots.split_at_mut(half);
         let right = &right_and_rest[..half];
         left.par_iter_mut()
             .zip(right.par_iter())
             .for_each(|(a, b)| {
                 a.add_inplace(b);
             });
-        // Keep reduced left half + odd element if any.
         if remainder == 1 {
-            // Swap odd element (last) into position after the reduced half.
-            let last_idx = grads_vec.len() - 1;
-            grads_vec.swap(half, last_idx);
-            grads_vec.truncate(half + 1);
+            let last_idx = slots.len() - 1;
+            slots.swap(half, last_idx);
+            slots.truncate(half + 1);
         } else {
-            grads_vec.truncate(half);
+            slots.truncate(half);
         }
     }
-    // Add final reduced result into grads_mamba.
-    if let Some(reduced) = grads_vec.pop() {
+    if let Some(reduced) = slots.pop() {
         grads_mamba.add_inplace(&reduced);
     }
-
-    // Restore multi-threaded BLAS for batch SGEMM.
 }
 
 // ---------------------------------------------------------------------------

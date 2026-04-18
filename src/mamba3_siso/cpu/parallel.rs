@@ -1,14 +1,12 @@
 //! Rayon-parallel batch processing for Mamba-3 SISO training.
 //!
 //! - Thread-local scratch pool with dimension-based invalidation
-//! - Tree-reduce gradient accumulation (O(log N) merge)
-//! - Epoch-based gradient zeroing (prevents double-accumulation)
+//! - Static-partition per-thread gradient slots (deterministic across runs)
+//! - Fixed balanced binary-tree reduce (deterministic accumulation order)
 //!
 //! Source: Lahoti et al., "Mamba-3", ICLR 2026.
 
-use std::cell::{Cell, RefCell};
-use std::sync::Mutex;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::cell::RefCell;
 
 use rayon::prelude::*;
 
@@ -41,41 +39,8 @@ impl Mamba3ThreadScratch {
     }
 }
 
-static M3_BWD_EPOCH: AtomicU64 = AtomicU64::new(0);
-
-/// Serializes `parallel_mamba3_backward` invocations so concurrent callers
-/// cannot clobber each other's thread-local grad accumulators. In production
-/// this is a no-op (gradient steps run sequentially). Needed because test
-/// binaries run `#[test]` functions in parallel and share the rayon pool +
-/// thread-local statics.
-static M3_BWD_GUARD: Mutex<()> = Mutex::new(());
-
 thread_local! {
     static M3_THREAD_SCRATCH: RefCell<Option<Mamba3ThreadScratch>> = const { RefCell::new(None) };
-    static M3_THREAD_GRADS: RefCell<Option<TrainMamba3Weights>> = const { RefCell::new(None) };
-    static M3_THREAD_GRADS_EPOCH: Cell<u64> = const { Cell::new(0) };
-}
-
-fn ensure_grads_zeroed(dims: &Mamba3Dims, input_dim: usize, epoch: u64) {
-    M3_THREAD_GRADS_EPOCH.with(|ep| {
-        if ep.get() != epoch {
-            M3_THREAD_GRADS.with(|cell| {
-                let mut opt = cell.borrow_mut();
-                // Invalidate if dims changed (n_layers, d_model, input_dim).
-                let dim_mismatch = opt.as_ref().is_some_and(|g| {
-                    g.layers.len() != dims.n_layers
-                        || g.norm_f_weight.len() != dims.d_model
-                        || g.input_proj_w.len() != input_dim * dims.d_model
-                });
-                if dim_mismatch {
-                    *opt = None;
-                }
-                let g = opt.get_or_insert_with(|| TrainMamba3Weights::zeros(dims, input_dim));
-                g.zero();
-            });
-            ep.set(epoch);
-        }
-    });
 }
 
 fn with_scratch<F, R>(dims: &Mamba3Dims, f: F) -> R
@@ -95,11 +60,10 @@ where
     })
 }
 
-/// Invalidate all thread-local scratch/grads (call when dimensions change).
+/// Invalidate all thread-local scratch (call when dimensions change).
 pub fn invalidate_mamba3_scratch() {
     rayon::broadcast(|_| {
         M3_THREAD_SCRATCH.with(|cell| *cell.borrow_mut() = None);
-        M3_THREAD_GRADS.with(|cell| *cell.borrow_mut() = None);
     });
 }
 
@@ -217,18 +181,18 @@ unsafe impl Sync for BwdPtrs {}
 
 /// Parallel Mamba-3 backward with tree-reduce gradient accumulation.
 ///
-/// Pass 1: `par_iter` runs per-sample backward. Data gradients go into disjoint
-/// regions of `d_temporal_out`. Weight gradients accumulate into thread-local
-/// `M3_THREAD_GRADS`. Each thread lazily zeroes its accumulator on first access
-/// of the current epoch (no `rayon::broadcast` needed for zeroing).
+/// **Deterministic static-partition approach.** Each of `n_threads` worker
+/// owns a fixed sample range `[start..end)` and a pre-allocated gradient slot.
+/// Thread-local scratch is zeroed at the start of each sample. After all
+/// workers finish, slots are merged via fixed balanced binary-tree reduce.
 ///
-/// Pass 2: collect thread-local grads via `rayon::broadcast` + calling-thread
-/// fallback, then tree-reduce (pairwise add) into `d_weights`. Epoch check
-/// prevents double-collection.
+/// Result: bit-identical output across runs regardless of OS thread
+/// scheduling or rayon work-stealing order. Same principle as the
+/// batch-invariant matvec kernel.
 ///
 /// Only layer gradients are accumulated here; input_proj and norm_f are owned
-/// by the caller and handled outside this function. `input_dim` is only needed
-/// to allocate thread-local storage that matches `d_weights`'s layout.
+/// by the caller and handled outside this function. `input_dim` is needed to
+/// allocate per-thread slots that match `d_weights`'s layout.
 ///
 /// **Burn-in limitation.** This entrypoint passes `angle_state_init = None`
 /// to the per-sample backward, which means the cumulative RoPE angle is
@@ -249,41 +213,53 @@ pub fn parallel_mamba3_backward(
     input_dim: usize,
 ) {
     debug_assert_eq!(batch_acts.len(), batch_size);
+    if batch_size == 0 {
+        return;
+    }
 
     let dm = dims.d_model;
     let seq_len = dims.seq_len;
     let t_per = seq_len * dm;
 
-    // Hold the global guard for the whole op so concurrent callers do not
-    // interleave epoch bumps with other threads' accumulation.
-    let _guard = M3_BWD_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+    let n_threads = rayon::current_num_threads().min(batch_size);
 
-    // Bump epoch so every thread zeros its accumulator on first access this call.
-    let epoch = M3_BWD_EPOCH.fetch_add(1, Ordering::SeqCst) + 1;
+    // Pre-allocate per-thread gradient slots (zeroed).
+    let mut slots: Vec<TrainMamba3Weights> = (0..n_threads)
+        .map(|_| TrainMamba3Weights::zeros(dims, input_dim))
+        .collect();
 
-    let ptrs = &BwdPtrs {
+    // SAFETY: each thread writes to disjoint regions:
+    // - slots[tid]: exclusive (static partition by tid)
+    // - d_temporal_out[b*t_per .. (b+1)*t_per]: exclusive per-sample
+    // - batch_acts[b], weights, dims: shared read-only
+    struct BwdRawPtrs {
+        slots: *mut TrainMamba3Weights,
+        d_temporal: *mut f32,
+        batch_acts: *const Vec<Mamba3LayerFlat>,
+    }
+    unsafe impl Send for BwdRawPtrs {}
+    unsafe impl Sync for BwdRawPtrs {}
+
+    let ptrs = BwdRawPtrs {
+        slots: slots.as_mut_ptr(),
         d_temporal: d_temporal_out.as_mut_ptr(),
         batch_acts: batch_acts.as_ptr(),
     };
 
-    // Pass 1: parallel per-sample backward. Thread-local grads accumulate layers only.
-    // Thread-local scratch is zeroed at the start of each sample to avoid state
-    // leakage from a prior backward call on the same thread (some intermediate
-    // fields in `Mamba3Scratch` are not fully overwritten on every invocation).
-    (0..batch_size).into_par_iter().for_each(|b| {
-        ensure_grads_zeroed(dims, input_dim, epoch);
-        with_scratch(dims, |tls| {
-            M3_THREAD_GRADS.with(|grad_cell| {
-                let mut grad_opt = grad_cell.borrow_mut();
-                let thread_grads = grad_opt
-                    .as_mut()
-                    .expect("grads zeroed above for this epoch");
+    let ptrs_ref = &ptrs;
+    (0..n_threads).into_par_iter().for_each(|tid| {
+        let start = tid * batch_size / n_threads;
+        let end = (tid + 1) * batch_size / n_threads;
 
+        // SAFETY: tid is unique per thread, start..end is disjoint per tid.
+        let slot = unsafe { &mut *ptrs_ref.slots.add(tid) };
+        for b in start..end {
+            with_scratch(dims, |tls| {
                 // SAFETY: disjoint per-sample slices via raw pointer offset.
                 let d_temporal = unsafe {
-                    std::slice::from_raw_parts_mut(ptrs.d_temporal.add(b * t_per), t_per)
+                    std::slice::from_raw_parts_mut(ptrs_ref.d_temporal.add(b * t_per), t_per)
                 };
-                let acts = unsafe { &*ptrs.batch_acts.add(b) };
+                let acts = unsafe { &*ptrs_ref.batch_acts.add(b) };
 
                 tls.phase.zero_all();
                 for (layer_idx, lw) in weights.layers.iter().enumerate().rev() {
@@ -291,45 +267,22 @@ pub fn parallel_mamba3_backward(
                         d_temporal,
                         &acts[layer_idx],
                         lw,
-                        &mut thread_grads.layers[layer_idx],
+                        &mut slot.layers[layer_idx],
                         &mut tls.phase,
                         dims,
                         None,
                     );
                 }
             });
-        });
+        }
     });
 
-    // Pass 2: collect thread-local grads and tree-reduce into d_weights.
-    let collected: Mutex<Vec<TrainMamba3Weights>> = Mutex::new(Vec::with_capacity(32));
-    let collect_epoch = epoch;
-
-    let try_collect = |collected: &Mutex<Vec<TrainMamba3Weights>>| {
-        M3_THREAD_GRADS_EPOCH.with(|ep| {
-            if ep.get() == collect_epoch {
-                M3_THREAD_GRADS.with(|cell| {
-                    let borrow = cell.borrow();
-                    if let Some(ref tg) = *borrow {
-                        collected.lock().unwrap().push(tg.clone());
-                    }
-                });
-                // Mark collected so redundant call is a no-op.
-                ep.set(0);
-            }
-        });
-    };
-
-    rayon::broadcast(|_| try_collect(&collected));
-    try_collect(&collected);
-
-    let mut grads_vec = collected.into_inner().unwrap();
-
-    // Tree-reduce: pairwise add until one remains.
-    while grads_vec.len() > 1 {
-        let half = grads_vec.len() / 2;
-        let remainder = grads_vec.len() % 2;
-        let (left, right_and_rest) = grads_vec.split_at_mut(half);
+    // Fixed balanced binary-tree reduce: deterministic order regardless of
+    // thread count. Always ((slot[0]+slot[1])+(slot[2]+slot[3]))+...
+    while slots.len() > 1 {
+        let half = slots.len() / 2;
+        let remainder = slots.len() % 2;
+        let (left, right_and_rest) = slots.split_at_mut(half);
         let right = &right_and_rest[..half];
         left.par_iter_mut()
             .zip(right.par_iter())
@@ -337,14 +290,14 @@ pub fn parallel_mamba3_backward(
                 a.add_inplace(b);
             });
         if remainder == 1 {
-            let last_idx = grads_vec.len() - 1;
-            grads_vec.swap(half, last_idx);
-            grads_vec.truncate(half + 1);
+            let last_idx = slots.len() - 1;
+            slots.swap(half, last_idx);
+            slots.truncate(half + 1);
         } else {
-            grads_vec.truncate(half);
+            slots.truncate(half);
         }
     }
-    if let Some(reduced) = grads_vec.pop() {
+    if let Some(reduced) = slots.pop() {
         d_weights.add_inplace(&reduced);
     }
 }
