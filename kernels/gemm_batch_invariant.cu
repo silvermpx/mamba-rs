@@ -431,6 +431,10 @@ NAME(                                                                           
     /* halves LDS instruction count (1 LDS.U32 → 2 elements vs 2× LDS.U16).*/  \
     /* Address must be 4-byte aligned: kk steps by 8, smem_a starts at 0,  */  \
     /* so kk is always even and pair-aligned.                              */  \
+    /* OPT E: tell ptxas K is a multiple of 8 (HF Mamba: d_model ∈ {768,   */  \
+    /* 1024, 2048, 2560} all div by 8). Lets compiler drop the tail loop   */  \
+    /* and keep `kk < k_main` purely as a single-strand bound.             */  \
+    __builtin_assume((k & 7) == 0);                                             \
     float acc = 0.0f;                                                           \
     if (in_range && k_start < k_stop) {                                         \
         int kk = k_start;                                                       \
