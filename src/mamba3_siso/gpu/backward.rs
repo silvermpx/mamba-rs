@@ -469,8 +469,7 @@ pub fn gpu_backward_mamba3_layer(
         let btna = (bt * na) as i32;
         let btnh = (bt * nh) as i32;
         let contrib_angles_elems = nh * bt * na;
-        let contrib_dt_offset_bytes =
-            (contrib_angles_elems * std::mem::size_of::<f32>()) as u64;
+        let contrib_dt_offset_bytes = (contrib_angles_elems * std::mem::size_of::<f32>()) as u64;
         let contrib_angles_ptr = scratch.axis0_partials.cached_ptr();
         let contrib_dt_ptr = scratch.axis0_partials.cached_ptr() + contrib_dt_offset_bytes;
         // Stage 1

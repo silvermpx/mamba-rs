@@ -360,8 +360,7 @@ fn gpu_backward_mamba3_layer_mixed(
             block_dim: (block_dim, 1, 1),
             shared_mem_bytes: (block_dim as usize * std::mem::size_of::<f32>()) as u32,
         };
-        unsafe { rb.launch(red_cfg) }
-            .map_err(|e| format!("m3_dqkv_typed dD reduce: {:?}", e))?;
+        unsafe { rb.launch(red_cfg) }.map_err(|e| format!("m3_dqkv_typed dD reduce: {:?}", e))?;
     }
 
     // Zero d_angle_cumsum before m3_dqktheta.
@@ -470,8 +469,7 @@ fn gpu_backward_mamba3_layer_mixed(
         let btna = (bt * na) as i32;
         let btnh = (bt * nh) as i32;
         let contrib_angles_elems = nh * bt * na;
-        let contrib_dt_offset_bytes =
-            (contrib_angles_elems * std::mem::size_of::<f32>()) as u64;
+        let contrib_dt_offset_bytes = (contrib_angles_elems * std::mem::size_of::<f32>()) as u64;
         let contrib_angles_ptr = sc.axis0_partials.cached_ptr();
         let contrib_dt_ptr = sc.axis0_partials.cached_ptr() + contrib_dt_offset_bytes;
         // Stage 1

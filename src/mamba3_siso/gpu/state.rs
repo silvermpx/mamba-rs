@@ -402,10 +402,7 @@ impl GpuMamba3Scratch {
                 let angle_dt_sz = 2 * nh * bt * na;
                 let rmsnorm_sz = bt * dm;
                 let d_d_sz = b * nh;
-                GpuBuffer::zeros(
-                    stream,
-                    angle_dt_sz.max(rmsnorm_sz).max(d_d_sz),
-                )?
+                GpuBuffer::zeros(stream, angle_dt_sz.max(rmsnorm_sz).max(d_d_sz))?
             },
         })
     }

@@ -345,10 +345,7 @@ impl GpuMambaScratch {
             // [B * d_inner * d_conv] + [B * d_inner] stacked.
             axis0_partials: GpuBuffer::zeros(
                 stream,
-                std::cmp::max(
-                    bt * d_model,
-                    batch * d_inner * (dims.d_conv + 1),
-                ),
+                std::cmp::max(bt * d_model, batch * d_inner * (dims.d_conv + 1)),
             )?,
         })
     }
