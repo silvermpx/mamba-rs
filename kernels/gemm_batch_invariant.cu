@@ -427,19 +427,23 @@ NAME(                                                                           
     const int k_start = warp_id * k_per_warp;                                   \
     const int k_stop = min(k, k_start + k_per_warp);                            \
                                                                                 \
+    /* OPT C: packed smem_a reads via pair_to_f2 helper. For bf16/f16 this  */ \
+    /* halves LDS instruction count (1 LDS.U32 → 2 elements vs 2× LDS.U16).*/  \
+    /* Address must be 4-byte aligned: kk steps by 8, smem_a starts at 0,  */  \
+    /* so kk is always even and pair-aligned.                              */  \
     float acc = 0.0f;                                                           \
     if (in_range && k_start < k_stop) {                                         \
         int kk = k_start;                                                       \
         int k_main = k_start + (((k_stop - k_start) >> 3) << 3);                \
         for (; kk < k_main; kk += 8) {                                          \
-            float a0 = to_f(smem_a[kk    ]);                                    \
-            float a1 = to_f(smem_a[kk + 1]);                                    \
-            float a2 = to_f(smem_a[kk + 2]);                                    \
-            float a3 = to_f(smem_a[kk + 3]);                                    \
-            float a4 = to_f(smem_a[kk + 4]);                                    \
-            float a5 = to_f(smem_a[kk + 5]);                                    \
-            float a6 = to_f(smem_a[kk + 6]);                                    \
-            float a7 = to_f(smem_a[kk + 7]);                                    \
+            float2 a01 = pair_to_f2(&smem_a[kk    ]);                           \
+            float2 a23 = pair_to_f2(&smem_a[kk + 2]);                           \
+            float2 a45 = pair_to_f2(&smem_a[kk + 4]);                           \
+            float2 a67 = pair_to_f2(&smem_a[kk + 6]);                           \
+            float a0 = a01.x, a1 = a01.y;                                       \
+            float a2 = a23.x, a3 = a23.y;                                       \
+            float a4 = a45.x, a5 = a45.y;                                       \
+            float a6 = a67.x, a7 = a67.y;                                       \
             float b0 = to_f(b[(kk    ) * ldb + col]);                           \
             float b1 = to_f(b[(kk + 1) * ldb + col]);                           \
             float b2 = to_f(b[(kk + 2) * ldb + col]);                           \
