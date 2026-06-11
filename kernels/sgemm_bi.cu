@@ -5065,37 +5065,105 @@ DEFINE_SGEMM_BI_NT_BIG_T(f16,  __half,        from_f_f16)
 // Stage 5: tensor-core deterministic NN forward (bi_tensor_cores tier).
 // ============================================================================
 // mma.sync.aligned.m16n8k16 with f32 accumulators. SEPARATE numeric contract
-// from the scalar triad: the TC dataflow's reduction tree differs from the
-// ascending-K __fmaf_rn chain, so outputs do NOT bit-match the f32/typed
-// kernels — but the kernel is fully deterministic (fixed K order, fixed
-// fragment/tile assignment, no atomics, no split-K) and batch-invariant
-// across ALL M: each output element's entire K-reduction lives in one warp
-// whose math is independent of gridDim/M.
+// from the scalar triad (TC reduction tree, not the ascending-K FMA chain) —
+// fully deterministic (fixed K order, fixed fragment/tile assignment, no
+// atomics, no split-K) and batch-invariant across ALL M: each output
+// element's entire K-reduction lives in one warp, independent of gridDim/M.
 //
-// Geometry: CTA 256 threads = 8 warps as 2x4 (warpRow x warpCol).
-//   BM=128 BN=128 BK=32; warp tile 64x32 = 4 m-frags(16) x 4 n-frags(8).
-//   Per K-step (16): 16 mma/warp; 2 K-steps per BK tile.
-// Smem: As[BM][BK+2] T_ACT, Bs[BN][BK+2] T_ACT (B staged TRANSPOSED so the
-// k16n8 col-major fragment reads are contiguous pairs), single-buffered,
-// static — ~17.4 KB, no dynamic-smem attribute needed.
-// Staging: sync ld.global -> st.shared with zero-fill OOB (zeros are exact
-// in mma: 0*x + acc == acc).
-// Bias: pre-seeded into the f32 accumulators (single accumulation chain),
-// alpha must be 1.0 when bias is present (same contract as sgemm_bi_nn).
-// Epilogue: one RNE downcast per element on store.
+// v3 (cp.async iteration):
+//   - As[m][k] (row-major) AND Bs[k][n] (row-major, global layout) are both
+//     16B-chunk contiguous -> 2-stage cp.async pipeline with 4-operand
+//     zero-fill for tails (bit-exact vs scalar zero stores). B fragments
+//     come from ldmatrix.x2.TRANS of the k-major tile (delivers the
+//     col-major k16n8 fragment without a staging transpose).
+//   - Pads keep every ldmatrix row chunk in a distinct 4-bank group:
+//     A row stride 40 halves (20 words ≡ 4 mod 8), B row stride 136 halves
+//     (68 words ≡ 4 mod 8). Row bases are 16B-aligned (80 B / 272 B).
+//   - Scalar staging fallback (uniform branch) when lda/ldb % 8 != 0.
+//   - Smem: 2 x (10240 + 8704) B = 37.9 KB static.
+//
+// Geometry: CTA 256 threads = 8 warps as 2x4; BM=BN=128 BK=32; warp tile
+// 64x32 = 4 m-frags(16) x 4 n-frags(8); bias pre-seeded into the f32
+// accumulators (alpha must be 1.0 with bias); one RNE downcast at store.
 //
 // Fragment thread maps (PTX ISA m16n8k16, 16-bit A/B, .row.col):
 //   lane L: g = L>>2, t = L&3
-//   A (m16k16 row): a0={(g,2t),(g,2t+1)} a1={(g+8,2t),(g+8,2t+1)}
-//                   a2={(g,2t+8),(g,2t+9)} a3={(g+8,2t+8),(g+8,2t+9)}
-//   B (k16n8 col):  b0={(2t,g),(2t+1,g)}  b1={(2t+8,g),(2t+9,g)}
-//   C/D (m16n8):    c0=(g,2t) c1=(g,2t+1) c2=(g+8,2t) c3=(g+8,2t+1)
+//   A: a0={(g,2t),(g,2t+1)} a1={(g+8,..)} a2={(g,2t+8),..} a3={(g+8,2t+8),..}
+//   B: b0={(2t,g),(2t+1,g)} b1={(2t+8,g),(2t+9,g)}
+//   C: c0=(g,2t) c1=(g,2t+1) c2=(g+8,2t) c3=(g+8,2t+1)
+// A x4: lanes 0-7/8-15/16-23/24-31 -> (rows 0-7,k0)/(rows 8-15,k0)/
+// (rows 0-7,k0+8)/(rows 8-15,k0+8). B x2.trans: lanes 0-7/8-15 -> stored
+// rows (k0..k0+7)/(k0+8..k0+15) at column n0; .trans delivers M^T fragments
+// = the col-major b-frags.
 
 #define TC_BM 128
 #define TC_BN 128
 #define TC_BK 32
-#define TC_PAD 2
-#define TC_WARPS 8
+#define TC_PAD_A 8
+#define TC_PAD_B 8
+#define TC_LDA (TC_BK + TC_PAD_A)
+#define TC_LDB (TC_BN + TC_PAD_B)
+
+// Issue one A+B tile into smem stage `buf` via 16B cp.async with zero-fill
+// (fast path; requires lda%8==0 && ldb%8==0, checked by caller-side branch).
+// A: 128 rows x 4 chunks; B: 32 rows x 16 chunks; 1024 cp.async / 256 thr.
+#define SGB_TC_STAGE_ASYNC(buf, bkIdx)                                        \
+    do {                                                                      \
+        unsigned _as = As_sbase + (unsigned)((buf) * TC_BM * TC_LDA * 2);     \
+        unsigned _bs = Bs_sbase + (unsigned)((buf) * TC_BK * TC_LDB * 2);     \
+        for (int _i = threadIdx.x; _i < TC_BM * (TC_BK / 8); _i += 256) {     \
+            int _m = _i / (TC_BK / 8);                                        \
+            int _c = _i % (TC_BK / 8);                                        \
+            int _k = _c * 8;                                                  \
+            int _gr = pid_m * TC_BM + _m;                                     \
+            int _gc = (bkIdx) + _k;                                           \
+            int _valid = (_gr < M) ? (K - _gc) : 0;                           \
+            int _bytes = _valid >= 8 ? 16 : (_valid > 0 ? _valid * 2 : 0);    \
+            unsigned _dst = _as + (unsigned)((_m * TC_LDA + _k) * 2);         \
+            const void* _src = &A[(long long)_gr * lda + _gc];               \
+            asm volatile("cp.async.ca.shared.global [%0], [%1], 16, %2;\n"    \
+                         :: "r"(_dst), "l"(_src), "r"(_bytes));               \
+        }                                                                     \
+        for (int _i = threadIdx.x; _i < TC_BK * (TC_BN / 8); _i += 256) {     \
+            int _k = _i / (TC_BN / 8);                                        \
+            int _c = _i % (TC_BN / 8);                                        \
+            int _n = _c * 8;                                                  \
+            int _gk = (bkIdx) + _k;                                           \
+            int _gn = pid_n * TC_BN + _n;                                     \
+            int _valid = (_gk < K) ? (N - _gn) : 0;                           \
+            int _bytes = _valid >= 8 ? 16 : (_valid > 0 ? _valid * 2 : 0);    \
+            unsigned _dst = _bs + (unsigned)((_k * TC_LDB + _n) * 2);         \
+            const void* _src = &B[(long long)_gk * ldb + _gn];               \
+            asm volatile("cp.async.ca.shared.global [%0], [%1], 16, %2;\n"    \
+                         :: "r"(_dst), "l"(_src), "r"(_bytes));               \
+        }                                                                     \
+        asm volatile("cp.async.commit_group;\n");                            \
+    } while (0)
+
+// Scalar staging fallback for misaligned lda/ldb (rare; uniform branch).
+#define SGB_TC_STAGE_SCALAR(buf, bkIdx, TT, FF)                               \
+    do {                                                                      \
+        TT* _Asw = &As[buf][0][0];                                            \
+        TT* _Bsw = &Bs[buf][0][0];                                            \
+        for (int _i = threadIdx.x; _i < TC_BM * TC_BK; _i += 256) {           \
+            int _m = _i / TC_BK;                                              \
+            int _k = _i % TC_BK;                                              \
+            int _gr = pid_m * TC_BM + _m;                                     \
+            int _gc = (bkIdx) + _k;                                           \
+            _Asw[_m * TC_LDA + _k] = (_gr < M && _gc < K)                     \
+                                         ? A[(long long)_gr * lda + _gc]      \
+                                         : FF(0.0f);                          \
+        }                                                                     \
+        for (int _i = threadIdx.x; _i < TC_BK * TC_BN; _i += 256) {           \
+            int _k = _i / TC_BN;                                              \
+            int _n = _i % TC_BN;                                              \
+            int _gk = (bkIdx) + _k;                                           \
+            int _gn = pid_n * TC_BN + _n;                                     \
+            _Bsw[_k * TC_LDB + _n] = (_gk < K && _gn < N)                     \
+                                         ? B[(long long)_gk * ldb + _gn]      \
+                                         : FF(0.0f);                          \
+        }                                                                     \
+    } while (0)
 
 #define DEFINE_SGEMM_BI_NN_TC(SUFFIX, T_ACT, FROM_F, MMA_T)                    \
 extern "C" __global__ __launch_bounds__(256, 1)                                \
@@ -5109,8 +5177,8 @@ void sgemm_bi_nn_tc_##SUFFIX(                                                  \
     int lda, int ldb, int ldc                                                  \
 ) {                                                                            \
     assert(alpha == 1.0f || bias == nullptr);                                  \
-    __shared__ T_ACT As[TC_BM][TC_BK + TC_PAD];                                \
-    __shared__ T_ACT Bs[TC_BN][TC_BK + TC_PAD];                                \
+    __shared__ __align__(16) T_ACT As[2][TC_BM][TC_LDA];                       \
+    __shared__ __align__(16) T_ACT Bs[2][TC_BK][TC_LDB];                       \
     int num_pid_n = (N + TC_BN - 1) / TC_BN;                                   \
     int pid_m = blockIdx.x / num_pid_n;                                        \
     int pid_n = blockIdx.x % num_pid_n;                                        \
@@ -5122,7 +5190,14 @@ void sgemm_bi_nn_tc_##SUFFIX(                                                  \
     int warpN = warpCol * 32;                                                  \
     int g = lane >> 2;                                                         \
     int t = lane & 3;                                                          \
-    /* 16 (fm, fn) accumulator fragments x 4 f32 */                            \
+    int lm_r = lane & 7;                                                       \
+    int lm_q = lane >> 3;                                                      \
+    int lm_row_off = (lm_q & 1) ? 8 : 0;                                       \
+    int lm_col_off = (lm_q & 2) ? 8 : 0;                                       \
+    int lmb_row_off = (lm_q & 1) ? 8 : 0;                                      \
+    unsigned As_sbase = (unsigned)__cvta_generic_to_shared(&As[0][0][0]);      \
+    unsigned Bs_sbase = (unsigned)__cvta_generic_to_shared(&Bs[0][0][0]);      \
+    bool fast_stage = ((lda & 7) == 0) && ((ldb & 7) == 0);                    \
     float acc[4][4][4];                                                        \
     _Pragma("unroll")                                                          \
     for (int fm = 0; fm < 4; fm++) {                                           \
@@ -5141,28 +5216,27 @@ void sgemm_bi_nn_tc_##SUFFIX(                                                  \
         }                                                                      \
     }                                                                          \
     int num_k_tiles = (K + TC_BK - 1) / TC_BK;                                 \
+    if (fast_stage) {                                                          \
+        SGB_TC_STAGE_ASYNC(0, 0);                                              \
+    } else {                                                                   \
+        SGB_TC_STAGE_SCALAR(0, 0, T_ACT, FROM_F);                              \
+    }                                                                          \
+    int read_buf = 0;                                                          \
     for (int kt = 0; kt < num_k_tiles; kt++) {                                 \
-        int bk = kt * TC_BK;                                                   \
-        /* stage A[m][k] and B^T[n][k], zero-fill OOB */                       \
-        for (int i = threadIdx.x; i < TC_BM * TC_BK; i += 256) {               \
-            int m = i / TC_BK;                                                 \
-            int k = i % TC_BK;                                                 \
-            int gr = pid_m * TC_BM + m;                                        \
-            int gc = bk + k;                                                   \
-            As[m][k] = (gr < M && gc < K)                                      \
-                           ? A[(long long)gr * lda + gc]                       \
-                           : FROM_F(0.0f);                                     \
-        }                                                                      \
-        for (int i = threadIdx.x; i < TC_BN * TC_BK; i += 256) {               \
-            int n = i / TC_BK;                                                 \
-            int k = i % TC_BK;                                                 \
-            int gn = pid_n * TC_BN + n;                                        \
-            int gk = bk + k;                                                   \
-            Bs[n][k] = (gk < K && gn < N)                                      \
-                           ? B[(long long)gk * ldb + gn]                       \
-                           : FROM_F(0.0f);                                     \
+        if (fast_stage) {                                                      \
+            asm volatile("cp.async.wait_group 0;\n");                          \
         }                                                                      \
         __syncthreads();                                                       \
+        if (kt + 1 < num_k_tiles) {                                            \
+            if (fast_stage) {                                                  \
+                SGB_TC_STAGE_ASYNC(read_buf ^ 1, (kt + 1) * TC_BK);            \
+            } else {                                                           \
+                SGB_TC_STAGE_SCALAR(read_buf ^ 1, (kt + 1) * TC_BK, T_ACT,     \
+                                    FROM_F);                                   \
+            }                                                                  \
+        }                                                                      \
+        unsigned As_rd = As_sbase + (unsigned)(read_buf * TC_BM * TC_LDA * 2); \
+        unsigned Bs_rd = Bs_sbase + (unsigned)(read_buf * TC_BK * TC_LDB * 2); \
         _Pragma("unroll")                                                      \
         for (int ks = 0; ks < 2; ks++) {                                       \
             int k0 = ks * 16;                                                  \
@@ -5170,23 +5244,26 @@ void sgemm_bi_nn_tc_##SUFFIX(                                                  \
             unsigned b_frag[4][2];                                             \
             _Pragma("unroll")                                                  \
             for (int fm = 0; fm < 4; fm++) {                                   \
-                int r0 = warpM + fm * 16 + g;                                  \
-                a_frag[fm][0] =                                                \
-                    *(const unsigned*)&As[r0][k0 + 2 * t];                     \
-                a_frag[fm][1] =                                                \
-                    *(const unsigned*)&As[r0 + 8][k0 + 2 * t];                 \
-                a_frag[fm][2] =                                                \
-                    *(const unsigned*)&As[r0][k0 + 2 * t + 8];                 \
-                a_frag[fm][3] =                                                \
-                    *(const unsigned*)&As[r0 + 8][k0 + 2 * t + 8];             \
+                int row = warpM + fm * 16 + lm_row_off + lm_r;                 \
+                unsigned addr = As_rd +                                        \
+                    (unsigned)((row * TC_LDA + k0 + lm_col_off) * 2);          \
+                asm volatile(                                                  \
+                    "ldmatrix.sync.aligned.m8n8.x4.shared.b16 "                \
+                    "{%0,%1,%2,%3}, [%4];\n"                                   \
+                    : "=r"(a_frag[fm][0]), "=r"(a_frag[fm][1]),                \
+                      "=r"(a_frag[fm][2]), "=r"(a_frag[fm][3])                 \
+                    : "r"(addr));                                              \
             }                                                                  \
             _Pragma("unroll")                                                  \
             for (int fn = 0; fn < 4; fn++) {                                   \
-                int c0 = warpN + fn * 8 + g;                                   \
-                b_frag[fn][0] =                                                \
-                    *(const unsigned*)&Bs[c0][k0 + 2 * t];                     \
-                b_frag[fn][1] =                                                \
-                    *(const unsigned*)&Bs[c0][k0 + 2 * t + 8];                 \
+                int row = k0 + lmb_row_off + lm_r;                             \
+                unsigned addr = Bs_rd +                                        \
+                    (unsigned)((row * TC_LDB + warpN + fn * 8) * 2);           \
+                asm volatile(                                                  \
+                    "ldmatrix.sync.aligned.m8n8.x2.trans.shared.b16 "          \
+                    "{%0,%1}, [%2];\n"                                         \
+                    : "=r"(b_frag[fn][0]), "=r"(b_frag[fn][1])                 \
+                    : "r"(addr));                                              \
             }                                                                  \
             _Pragma("unroll")                                                  \
             for (int fm = 0; fm < 4; fm++) {                                   \
@@ -5205,9 +5282,8 @@ void sgemm_bi_nn_tc_##SUFFIX(                                                  \
                 }                                                              \
             }                                                                  \
         }                                                                      \
-        __syncthreads();                                                       \
+        read_buf ^= 1;                                                         \
     }                                                                          \
-    /* epilogue: c0=(g,2t) c1=(g,2t+1) c2=(g+8,2t) c3=(g+8,2t+1) */            \
     _Pragma("unroll")                                                          \
     for (int fm = 0; fm < 4; fm++) {                                           \
         _Pragma("unroll")                                                      \
