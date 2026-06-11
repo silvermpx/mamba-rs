@@ -1546,6 +1546,165 @@ pub fn sgemm_bi_backward_dx(
 use super::blas::TypedPtr;
 use super::dtype::WeightDtype;
 
+// ---------------------------------------------------------------------------
+// f32-cascade routing predicates (stage 3). Each returns true iff the f32
+// dispatcher would run the BIG kernel (BN=128, 2-stage 33 KB smem) for this
+// shape — i.e. NO earlier bucket in the cascade claims it AND the final
+// slim/big split picks Big. The typed dispatch uses these so a native typed
+// Big kernel fires exactly where the f32 reference runs the same FMA chain;
+// any drift between a predicate and the real cascade shows up as a bit
+// mismatch in tests/sgemm_bi_typed_parity.rs.
+// ---------------------------------------------------------------------------
+
+/// NN forward: mirrors `sgemm_bi_forward` (gemv, ultra-thin, narrow tiers,
+/// split-K thin-M K-tail/main, split-K slim, gap-fill, then big/slim).
+pub(super) fn nn_routes_to_big(batch: usize, n_in: usize, n_out: usize) -> bool {
+    if n_out == 1 {
+        return false; // gemv (or panic tail) — never Big
+    }
+    if (1..32).contains(&batch) && (32..=2048).contains(&n_in) && n_out >= 32 {
+        return false; // ultra-thin
+    }
+    if (2..=127).contains(&n_out) {
+        return false; // narrow tiers
+    }
+    let plain_slim_blocks = (batch as u32).div_ceil(128) * (n_out as u32).div_ceil(64);
+    let underfill = plain_slim_blocks < NUM_SMS;
+    // split-K thin-M K-tail
+    if (32..=1024).contains(&batch)
+        && (64..=2048).contains(&n_out)
+        && n_out.is_multiple_of(4)
+        && n_in >= 33
+        && !n_in.is_multiple_of(32)
+        && underfill
+    {
+        let k_main = n_in - n_in % 32;
+        if k_main >= 32 && (k_main / 32) * batch * n_out <= SPLITK_SCRATCH_CAP {
+            return false;
+        }
+    }
+    // split-K thin-M main
+    if (32..=1024).contains(&batch)
+        && (64..=2048).contains(&n_out)
+        && n_out.is_multiple_of(4)
+        && n_in >= 32
+        && n_in.is_multiple_of(32)
+        && (n_in / 32) * batch * n_out <= SPLITK_SCRATCH_CAP
+        && underfill
+    {
+        return false;
+    }
+    // split-K slim
+    if batch > 1024
+        && (128..=SGEMM_SLIM_MAX).contains(&n_out)
+        && n_in >= 64
+        && n_in.is_multiple_of(32)
+    {
+        let f_final = (n_in as u32).div_ceil(64);
+        if f_final >= 6 && (f_final as usize) * batch * n_out <= SPLITK_SCRATCH_CAP {
+            let base_blocks = (batch as u32).div_ceil(128) * (n_out as u32).div_ceil(64);
+            if base_blocks > 0 && base_blocks < 3 * NUM_SMS {
+                return false;
+            }
+        }
+    }
+    if batch < 128 {
+        return false; // gap-fill territory
+    }
+    if !(batch >= SGEMM_CUSTOM_MIN && n_out >= SGEMM_CUSTOM_MIN) {
+        return false;
+    }
+    let slim = n_out <= SGEMM_SLIM_MAX || (batch < SGEMM_M_SLIM_FORCE && n_out >= SGEMM_CUSTOM_MIN);
+    !slim
+}
+
+/// TN dW: mirrors `sgemm_bi_backward_dw` (gemv, narrow, split-M, big/slim
+/// keyed on output rows = `n_in`).
+pub(super) fn tn_routes_to_big(batch: usize, n_in: usize, n_out: usize) -> bool {
+    if n_out == 1 || (2..=127).contains(&n_out) {
+        return false; // gemv / narrow
+    }
+    if splitm_tn_partition(batch, n_in, n_out).is_some() {
+        return false;
+    }
+    if !(n_in >= 1 && n_out >= SGEMM_CUSTOM_MIN) {
+        return false;
+    }
+    let slim = n_out <= SGEMM_SLIM_MAX || (n_in < SGEMM_M_SLIM_FORCE && n_out >= SGEMM_CUSTOM_MIN);
+    !slim
+}
+
+/// NT dX: mirrors `sgemm_bi_backward_dx` (narrow, col-gemv, gemv, split-N
+/// K-tail/main, split-N slim, gap-fill, big/slim keyed on (`batch`, `n_in`)).
+pub(super) fn nt_routes_to_big(batch: usize, n_in: usize, n_out: usize) -> bool {
+    if (2..=127).contains(&n_out) {
+        return false; // NT narrow (small reduction N)
+    }
+    if batch < 32 && n_out >= 128 {
+        return false; // dx_col_gemv
+    }
+    if n_out == 1 {
+        return false; // NT gemv
+    }
+    const SPLITK_NT_TRANSPOSE_CAP: usize = 1 << 22;
+    let plain_slim_blocks = (batch as u32).div_ceil(128) * (n_in as u32).div_ceil(64);
+    let underfill = plain_slim_blocks < NUM_SMS;
+    // split-N K-tail
+    if (32..=1024).contains(&batch)
+        && (64..=4096).contains(&n_in)
+        && n_in >= 33
+        && !n_in.is_multiple_of(32)
+        && (32..=2048).contains(&n_out)
+        && n_out.is_multiple_of(32)
+        && underfill
+    {
+        let k_main = n_in - n_in % 32;
+        if k_main >= 32
+            && k_main * n_out <= SPLITK_NT_TRANSPOSE_CAP
+            && (n_out / 32) * batch * k_main <= SPLITK_SCRATCH_CAP
+        {
+            return false;
+        }
+    }
+    // split-N main
+    let n_main = n_out - n_out % 32;
+    if (32..=1024).contains(&batch)
+        && (64..=4096).contains(&n_in)
+        && n_in.is_multiple_of(4)
+        && n_in.is_multiple_of(32)
+        && (32..=2048).contains(&n_out)
+        && n_main >= 32
+        && n_in * n_out <= SPLITK_NT_TRANSPOSE_CAP
+        && (n_main / 32) * batch * n_in <= SPLITK_SCRATCH_CAP
+        && underfill
+    {
+        return false;
+    }
+    // split-N slim
+    if batch > 1024
+        && (128..=SGEMM_SLIM_NT_NIN_MAX).contains(&n_in)
+        && n_out >= 64
+        && n_out.is_multiple_of(32)
+        && n_in * n_out <= SPLITK_NT_TRANSPOSE_CAP
+    {
+        let f_final = (n_out as u32).div_ceil(64);
+        if f_final >= 2 && (f_final as usize) * batch * n_in <= SPLITK_SCRATCH_CAP {
+            let base_blocks = (batch as u32).div_ceil(128) * (n_in as u32).div_ceil(64);
+            if base_blocks > 0 && base_blocks < 3 * NUM_SMS {
+                return false;
+            }
+        }
+    }
+    if (32..128).contains(&batch) {
+        return false; // gap-fill NT
+    }
+    if !(batch >= SGEMM_CUSTOM_MIN && n_in >= 1) {
+        return false;
+    }
+    let slim = n_in <= SGEMM_SLIM_MAX || (batch < SGEMM_M_SLIM_FORCE && n_in >= SGEMM_CUSTOM_MIN);
+    !slim
+}
+
 fn require_half(dt: WeightDtype, what: &str) -> Result<(), String> {
     if dt == WeightDtype::F32 {
         return Err(format!(
@@ -1665,6 +1824,32 @@ pub fn sgemm_bi_forward_typed(
         return Ok(());
     }
 
+    // Big NN (stage 3): native typed twin of `sgemm_bi_nn`, fired exactly
+    // where the f32 cascade would run Big (predicate-mirrored gates).
+    if nn_routes_to_big(batch, n_in, n_out) {
+        let total_tiles = (batch as u32).div_ceil(128) * (n_out as u32).div_ceil(128);
+        let cfg = cudarc::driver::LaunchConfig {
+            grid_dim: (total_tiles, 1, 1),
+            block_dim: (256, 1, 1),
+            shared_mem_bytes: 34 * 1024,
+        };
+        let mut b = stream.launch_builder(kernels.sgemm_nn_big_typed.get(dt));
+        b.arg(&y.ptr);
+        b.arg(&x.ptr);
+        b.arg(&w.ptr);
+        b.arg(&bias_ptr);
+        b.arg(&alpha);
+        b.arg(&beta);
+        b.arg(&m_i);
+        b.arg(&n_i);
+        b.arg(&k_i);
+        b.arg(&k_i);
+        b.arg(&n_i);
+        b.arg(&n_i);
+        unsafe { b.launch(cfg) }.map_err(|e| format!("sgemm_bi_nn_big typed: {e:?}"))?;
+        return Ok(());
+    }
+
     Err(format!(
         "sgemm_bi_forward_typed: Big/Slim buckets not yet implemented (stage 3) — \
          shape M={batch} K={n_in} N={n_out}. Disable the batch-invariant flag for \
@@ -1739,10 +1924,33 @@ pub fn sgemm_bi_backward_dw_typed(
         return Ok(());
     }
 
+    // Big TN (stage 3): native typed twin of `sgemm_bi_tn`. dW stays f32 +=.
+    if tn_routes_to_big(batch, n_in, n_out) {
+        let alpha: f32 = 1.0;
+        let m_red_i = batch as i32;
+        let k_out_i = n_in as i32;
+        let n_i = n_out as i32;
+        let total_tiles = (n_in as u32).div_ceil(128) * (n_out as u32).div_ceil(128);
+        let cfg = cudarc::driver::LaunchConfig {
+            grid_dim: (total_tiles, 1, 1),
+            block_dim: (256, 1, 1),
+            shared_mem_bytes: 34 * 1024,
+        };
+        let mut b = stream.launch_builder(kernels.sgemm_tn_big_typed.get(dt));
+        b.arg(&dw_ptr);
+        b.arg(&x_saved.ptr);
+        b.arg(&dy.ptr);
+        b.arg(&alpha);
+        b.arg(&m_red_i);
+        b.arg(&k_out_i);
+        b.arg(&n_i);
+        unsafe { b.launch(cfg) }.map_err(|e| format!("sgemm_bi_tn_big typed: {e:?}"))?;
+        return Ok(());
+    }
+
     Err(format!(
-        "sgemm_bi_backward_dw_typed: Big/split-M buckets not yet implemented (stage 3) — \
-         shape M={batch} K={n_in} N={n_out}. Disable the batch-invariant flag for \
-         this configuration."
+        "sgemm_bi_backward_dw_typed: split-M/Slim buckets are upcast-fallback territory — \
+         shape M={batch} K={n_in} N={n_out}."
     ))
 }
 
@@ -1814,9 +2022,32 @@ pub fn sgemm_bi_backward_dx_typed(
         return Ok(());
     }
 
+    // Big NT (stage 3): native typed twin of `sgemm_bi_nt` (typed dX overwrite).
+    if nt_routes_to_big(batch, n_in, n_out) {
+        let alpha: f32 = 1.0;
+        let m_i = batch as i32;
+        let n_i = n_out as i32;
+        let k_out_i = n_in as i32;
+        let total_tiles = (batch as u32).div_ceil(128) * (n_in as u32).div_ceil(128);
+        let cfg = cudarc::driver::LaunchConfig {
+            grid_dim: (total_tiles, 1, 1),
+            block_dim: (256, 1, 1),
+            shared_mem_bytes: 34 * 1024,
+        };
+        let mut b = stream.launch_builder(kernels.sgemm_nt_big_typed.get(dt));
+        b.arg(&dx.ptr);
+        b.arg(&dy.ptr);
+        b.arg(&w.ptr);
+        b.arg(&alpha);
+        b.arg(&m_i);
+        b.arg(&n_i);
+        b.arg(&k_out_i);
+        unsafe { b.launch(cfg) }.map_err(|e| format!("sgemm_bi_nt_big typed: {e:?}"))?;
+        return Ok(());
+    }
+
     Err(format!(
-        "sgemm_bi_backward_dx_typed: Big/Slim buckets not yet implemented (stage 3) — \
-         shape M={batch} K={n_in} N={n_out}. Disable the batch-invariant flag for \
-         this configuration."
+        "sgemm_bi_backward_dx_typed: split-N/Slim buckets are upcast-fallback territory — \
+         shape M={batch} K={n_in} N={n_out}."
     ))
 }

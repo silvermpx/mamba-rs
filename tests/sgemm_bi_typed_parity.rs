@@ -340,6 +340,130 @@ fn typed_full_coverage_bit_match_f32_triad() {
     }
 }
 
+/// Gate-drift sweep: the typed dispatch decides native-Big vs fallback via
+/// predicates that MIRROR the f32 cascade (`nn/tn/nt_routes_to_big`). If a
+/// predicate ever disagrees with the real cascade, the typed path runs a
+/// different bucket than the f32 reference and the bits diverge — this
+/// sweep walks the M/N gate boundaries (slim 512, splitk 1024/2048,
+/// gap-fill 128, M_SLIM_FORCE 512) to catch exactly that.
+#[test]
+fn typed_gate_boundary_sweep_bit_match() {
+    let t = Ctx::new();
+    let dt = WeightDtype::Bf16;
+    let k = 384usize;
+    for m in [128usize, 256, 511, 512, 513, 1024, 1025, 2048] {
+        for n in [128usize, 512, 513, 516, 2048, 2052, 3072] {
+            check_forward(&t, dt, (m, k, n), true, true);
+            check_dw(&t, dt, (m, k, n), true);
+            check_dx(&t, dt, (m, k, n), true);
+        }
+    }
+    // K-axis boundaries at a Big-routed (M, N).
+    for kk in [96usize, 100, 768, 2560] {
+        check_forward(&t, dt, (512, kk, 3072), true, true);
+        check_dw(&t, dt, (512, kk, 3072), true);
+        check_dx(&t, dt, (512, kk, 3072), true);
+    }
+}
+
+/// Measures the upcast-fallback tax on Big training shapes: typed entry
+/// (upcast → f32 kernel → downcast) vs the bare f32 kernel on pre-upcast
+/// operands. The delta is the ceiling on what native typed Big kernels
+/// (stage 3) could recover with a SLOWER-than-cp.async staging scheme.
+#[test]
+#[ignore] // wall-clock benchmark — run explicitly on a quiet GPU
+fn bench_upcast_fallback_tax() {
+    use std::time::Instant;
+    let t = Ctx::new();
+    let dt = WeightDtype::Bf16;
+    // (M, K, N) Big-bucket training shapes.
+    for (m, k, n) in [
+        (2048usize, 768usize, 512usize),
+        (2048, 768, 3072),
+        (4096, 1536, 3072),
+        (256, 384, 512),
+    ] {
+        let qx = quantize(&det(m * k, 11, 1.0), dt);
+        let qw = quantize(&det(k * n, 22, 0.5), dt);
+        let x32 = t.f32_buf(&qx);
+        let w32 = t.f32_buf(&qw);
+        let mut y32 = GpuBuffer::zeros(&t.ctx.stream, m * n).unwrap();
+        let xt = t.typed_buf(&qx, dt);
+        let wt = t.typed_buf(&qw, dt);
+        let yt = DtypedBuf::zeros(&t.ctx.stream, m * n, dt).unwrap();
+
+        let iters = 50;
+        // Bare f32 kernel (operands already f32).
+        for _ in 0..3 {
+            sgemm_bi::sgemm_bi_forward(
+                &t.ctx.stream,
+                &t.ctx.kernels,
+                &mut y32,
+                &x32,
+                w32.cached_ptr(),
+                0,
+                (m, k, n),
+            )
+            .unwrap();
+        }
+        t.ctx.stream.synchronize().unwrap();
+        let t0 = Instant::now();
+        for _ in 0..iters {
+            sgemm_bi::sgemm_bi_forward(
+                &t.ctx.stream,
+                &t.ctx.kernels,
+                &mut y32,
+                &x32,
+                w32.cached_ptr(),
+                0,
+                (m, k, n),
+            )
+            .unwrap();
+        }
+        t.ctx.stream.synchronize().unwrap();
+        let f32_us = t0.elapsed().as_secs_f64() * 1e6 / iters as f64;
+
+        // Typed entry: upcast → same f32 kernel → RNE downcast.
+        let run_typed = || {
+            bi_sgemm_forward_typed(
+                &t.ctx,
+                TypedPtr {
+                    ptr: yt.cached_ptr(),
+                    dtype: dt,
+                },
+                TypedPtr {
+                    ptr: xt.cached_ptr(),
+                    dtype: dt,
+                },
+                TypedPtr {
+                    ptr: wt.cached_ptr(),
+                    dtype: dt,
+                },
+                0,
+                (m, k, n),
+            )
+            .unwrap();
+        };
+        for _ in 0..3 {
+            run_typed();
+        }
+        t.ctx.stream.synchronize().unwrap();
+        let t0 = Instant::now();
+        for _ in 0..iters {
+            run_typed();
+        }
+        t.ctx.stream.synchronize().unwrap();
+        let typed_us = t0.elapsed().as_secs_f64() * 1e6 / iters as f64;
+
+        eprintln!(
+            "[M{m} K{k} N{n}] f32 kernel {f32_us:.1} us | typed fallback {typed_us:.1} us | \
+             cast tax {:.1} us ({:.1}%)",
+            typed_us - f32_us,
+            (typed_us - f32_us) / f32_us * 100.0
+        );
+    }
+}
+
 /// Typed forward is batch-invariant WITHIN a dispatch bucket: row 0 of Y is
 /// bit-identical across batch sizes that route to the same bucket, exactly
 /// like the f32 triad (see `nn_forward_is_batch_invariant_within_bucket`).

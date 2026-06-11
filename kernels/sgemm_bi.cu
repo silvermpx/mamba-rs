@@ -4630,3 +4630,433 @@ void NAME(                                                                    \
 
 DEFINE_SGEMM_BI_NT_NARROW_T(sgemm_bi_nt_narrow_bf16, __nv_bfloat16, from_f_bf16)
 DEFINE_SGEMM_BI_NT_NARROW_T(sgemm_bi_nt_narrow_f16,  __half,        from_f_f16)
+
+// ============================================================================
+// Typed Big NN/TN/NT (stage 3 v1): bf16/f16 twins of the Big warptiling
+// kernels. Smem stays f32 — fragment loads and the __fmaf_rn chain are
+// BYTE-IDENTICAL to the f32 kernels; only the staging instruction differs
+// (synchronous ld.global -> to_f -> st.shared replaces cp.async, since
+// cp.async cannot copy or convert 2-byte elements into the transposed f32
+// As layout). Smem CONTENTS per (stage, cell) are bit-equal to the f32
+// kernel's tiles on upcast inputs (incl. zero-fill OOB), so each typed
+// kernel is bit-identical to "upcast inputs, run the f32 Big kernel,
+// RNE-downcast the output" — the stage-2 contract.
+//
+// Pipeline: 2-stage rotation retained. One __syncthreads() per K-tile:
+//   stage(0); loop { sync; if(next) stage(write); compute(read); rotate; }
+// The sync at loop top (a) publishes the previous iteration's staging and
+// (b) fences compute(read) of iter i-1 before iter i overwrites that stage
+// (K_PIPE=2: write(i) == read(i-1)). Latency hiding falls to warp-level
+// parallelism (8 warps/CTA, 2 CTA/SM) instead of async DMA.
+// Dynamic smem = 33 KB -> host must set MAX_DYNAMIC_SHARED_SIZE_BYTES
+// (34 KB) on these handles, same as the f32 Big kernels.
+
+// Shared compute block: register-fragment double-buffered BK dot-product
+// sweep, verbatim semantics of the f32 Big mainloop. Uses As_buf/Bs_buf/
+// read_stage/regM/regN/threadResults and the warp placement values from
+// the enclosing kernel scope.
+#define SGB_T_COMPUTE_TILE()                                                   \
+    do {                                                                       \
+        float* As_rd = As_buf + read_stage * A_STAGE;                          \
+        float* Bs_rd = Bs_buf + read_stage * B_STAGE;                          \
+        float regM_next[WMITER * TM];                                          \
+        float regN_next[WNITER * TN];                                          \
+        _Pragma("unroll")                                                      \
+        for (int wSubRowIdx = 0; wSubRowIdx < WMITER; ++wSubRowIdx)            \
+            _Pragma("unroll")                                                  \
+            for (int i = 0; i < TM; ++i)                                       \
+                regM[wSubRowIdx * TM + i] =                                    \
+                    As_rd[0 * (BM + SMEM_A_PAD) + warpRow * WM +               \
+                          wSubRowIdx * WSUBM + threadRowInWarp * TM + i];      \
+        _Pragma("unroll")                                                      \
+        for (int wSubColIdx = 0; wSubColIdx < WNITER; ++wSubColIdx)            \
+            _Pragma("unroll")                                                  \
+            for (int i = 0; i < TN; ++i)                                       \
+                regN[wSubColIdx * TN + i] =                                    \
+                    Bs_rd[0 * (BN + SMEM_B_PAD) + warpCol * WN +               \
+                          wSubColIdx * WSUBN + threadColInWarp * TN + i];      \
+        for (int dotIdx = 0; dotIdx < BK; ++dotIdx) {                          \
+            if (dotIdx + 1 < BK) {                                             \
+                _Pragma("unroll")                                              \
+                for (int wSubRowIdx = 0; wSubRowIdx < WMITER; ++wSubRowIdx)    \
+                    _Pragma("unroll")                                          \
+                    for (int i = 0; i < TM; ++i)                               \
+                        regM_next[wSubRowIdx * TM + i] =                       \
+                            As_rd[(dotIdx + 1) * (BM + SMEM_A_PAD) +           \
+                                  warpRow * WM + wSubRowIdx * WSUBM +          \
+                                  threadRowInWarp * TM + i];                   \
+                _Pragma("unroll")                                              \
+                for (int wSubColIdx = 0; wSubColIdx < WNITER; ++wSubColIdx)    \
+                    _Pragma("unroll")                                          \
+                    for (int i = 0; i < TN; ++i)                               \
+                        regN_next[wSubColIdx * TN + i] =                       \
+                            Bs_rd[(dotIdx + 1) * (BN + SMEM_B_PAD) +           \
+                                  warpCol * WN + wSubColIdx * WSUBN +          \
+                                  threadColInWarp * TN + i];                   \
+            }                                                                  \
+            _Pragma("unroll")                                                  \
+            for (int wSubRowIdx = 0; wSubRowIdx < WMITER; ++wSubRowIdx)        \
+                _Pragma("unroll")                                              \
+                for (int wSubColIdx = 0; wSubColIdx < WNITER; ++wSubColIdx)    \
+                    _Pragma("unroll")                                          \
+                    for (int resIdxM = 0; resIdxM < TM; ++resIdxM)             \
+                        _Pragma("unroll")                                      \
+                        for (int resIdxN = 0; resIdxN < TN; ++resIdxN) {       \
+                            int idx = (wSubRowIdx * TM + resIdxM) *            \
+                                          (WNITER * TN) +                      \
+                                      wSubColIdx * TN + resIdxN;               \
+                            threadResults[idx] = __fmaf_rn(                    \
+                                regM[wSubRowIdx * TM + resIdxM],               \
+                                regN[wSubColIdx * TN + resIdxN],               \
+                                threadResults[idx]);                           \
+                        }                                                      \
+            if (dotIdx + 1 < BK) {                                             \
+                _Pragma("unroll")                                              \
+                for (int i = 0; i < WMITER * TM; ++i) regM[i] = regM_next[i];  \
+                _Pragma("unroll")                                              \
+                for (int i = 0; i < WNITER * TN; ++i) regN[i] = regN_next[i];  \
+            }                                                                  \
+        }                                                                      \
+    } while (0)
+
+// NN staging: As[k][m] = A[(pid_m*BM+m)*lda + bk+k], Bs[k][n] = B[(bk+k)*ldb
+// + pid_n*BN+n], zero-fill OOB. Iteration order picked for contiguous global
+// reads (A along k, B along n); placement equals the f32 cp.async tiles.
+#define SGB_T_STAGE_NN(s, bkIdx)                                               \
+    do {                                                                       \
+        float* _As_w = As_buf + (s) * A_STAGE;                                 \
+        float* _Bs_w = Bs_buf + (s) * B_STAGE;                                 \
+        for (int _i = threadIdx.x; _i < BM * BK; _i += NUM_THREADS) {          \
+            int _m = _i / BK;                                                  \
+            int _k = _i % BK;                                                  \
+            int _gr = pid_m * BM + _m;                                         \
+            int _gc = (bkIdx) + _k;                                            \
+            _As_w[_k * (BM + SMEM_A_PAD) + _m] =                               \
+                (_gr < M && _gc < K)                                           \
+                    ? to_f(A[(long long)_gr * lda + _gc])                      \
+                    : 0.0f;                                                    \
+        }                                                                      \
+        for (int _i = threadIdx.x; _i < BK * BN; _i += NUM_THREADS) {          \
+            int _k = _i / BN;                                                  \
+            int _n = _i % BN;                                                  \
+            int _gr = (bkIdx) + _k;                                            \
+            int _gc = pid_n * BN + _n;                                         \
+            _Bs_w[_k * (BN + SMEM_B_PAD) + _n] =                               \
+                (_gr < K && _gc < N)                                           \
+                    ? to_f(B[(long long)_gr * ldb + _gc])                      \
+                    : 0.0f;                                                    \
+        }                                                                      \
+    } while (0)
+
+// TN staging (A = X[M_red, K_out] read transposed, B = dY[M_red, N]):
+// As[r][c] = A[(mIdx+r)*K_out + pid_m*BM+c], Bs[r][c] = B[(mIdx+r)*N +
+// pid_n*BN+c]. Contiguous global reads along c.
+#define SGB_T_STAGE_TN(s, mIdx)                                                \
+    do {                                                                       \
+        float* _As_w = As_buf + (s) * A_STAGE;                                 \
+        float* _Bs_w = Bs_buf + (s) * B_STAGE;                                 \
+        for (int _i = threadIdx.x; _i < BK * BM; _i += NUM_THREADS) {          \
+            int _r = _i / BM;                                                  \
+            int _c = _i % BM;                                                  \
+            int _gm = (mIdx) + _r;                                             \
+            int _gk = pid_m * BM + _c;                                         \
+            _As_w[_r * (BM + SMEM_A_PAD) + _c] =                               \
+                (_gm < M_red && _gk < K_out)                                   \
+                    ? to_f(A[(long long)_gm * K_out + _gk])                    \
+                    : 0.0f;                                                    \
+        }                                                                      \
+        for (int _i = threadIdx.x; _i < BK * BN; _i += NUM_THREADS) {          \
+            int _r = _i / BN;                                                  \
+            int _c = _i % BN;                                                  \
+            int _gm = (mIdx) + _r;                                             \
+            int _gn = pid_n * BN + _c;                                         \
+            _Bs_w[_r * (BN + SMEM_B_PAD) + _c] =                               \
+                (_gm < M_red && _gn < N)                                       \
+                    ? to_f(B[(long long)_gm * N + _gn])                        \
+                    : 0.0f;                                                    \
+        }                                                                      \
+    } while (0)
+
+// NT staging (A = dY[M, N], B = W[K_out, N], both read along the N
+// reduction): As[r][c] = A[(pid_m*BM+c)*N + nIdx+r], Bs[r][c] =
+// B[(pid_n*BN+c)*N + nIdx+r]. Contiguous global reads along r.
+#define SGB_T_STAGE_NT(s, nIdx)                                                \
+    do {                                                                       \
+        float* _As_w = As_buf + (s) * A_STAGE;                                 \
+        float* _Bs_w = Bs_buf + (s) * B_STAGE;                                 \
+        for (int _i = threadIdx.x; _i < BM * BK; _i += NUM_THREADS) {          \
+            int _c = _i / BK;                                                  \
+            int _r = _i % BK;                                                  \
+            int _gm = pid_m * BM + _c;                                         \
+            int _gn = (nIdx) + _r;                                             \
+            _As_w[_r * (BM + SMEM_A_PAD) + _c] =                               \
+                (_gm < M && _gn < N)                                           \
+                    ? to_f(A[(long long)_gm * N + _gn])                        \
+                    : 0.0f;                                                    \
+        }                                                                      \
+        for (int _i = threadIdx.x; _i < BN * BK; _i += NUM_THREADS) {          \
+            int _c = _i / BK;                                                  \
+            int _r = _i % BK;                                                  \
+            int _gk = pid_n * BN + _c;                                         \
+            int _gn = (nIdx) + _r;                                             \
+            _Bs_w[_r * (BN + SMEM_B_PAD) + _c] =                               \
+                (_gk < K_out && _gn < N)                                       \
+                    ? to_f(B[(long long)_gk * N + _gn])                        \
+                    : 0.0f;                                                    \
+        }                                                                      \
+    } while (0)
+
+#define DEFINE_SGEMM_BI_NN_BIG_T(SUFFIX, T_ACT, FROM_F)                        \
+extern "C" __global__ __launch_bounds__(NUM_THREADS, 2)                        \
+void sgemm_bi_nn_big_##SUFFIX(                                                 \
+    T_ACT* __restrict__ C,                                                     \
+    const T_ACT* __restrict__ A,                                               \
+    const T_ACT* __restrict__ B,                                               \
+    const float* __restrict__ bias,                                            \
+    float alpha, float beta,                                                   \
+    int M, int N, int K,                                                       \
+    int lda, int ldb, int ldc                                                  \
+) {                                                                            \
+    assert(alpha == 1.0f || bias == nullptr);                                  \
+    constexpr int K_PIPE = 2;                                                  \
+    extern __shared__ __align__(16) float smem[];                              \
+    constexpr int A_STAGE = BK * (BM + SMEM_A_PAD);                            \
+    constexpr int B_STAGE = BK * (BN + SMEM_B_PAD);                            \
+    float* As_buf = smem;                                                      \
+    float* Bs_buf = smem + K_PIPE * A_STAGE;                                   \
+    int num_pid_m = (M + BM - 1) / BM;                                         \
+    int num_pid_n = (N + BN - 1) / BN;                                         \
+    int num_pid_in_group = SGB_GROUP_M * num_pid_n;                            \
+    int warpIdx = threadIdx.x / WARPSIZE;                                      \
+    int warpCol = warpIdx % (BN / WN);                                         \
+    int warpRow = warpIdx / (BN / WN);                                         \
+    int tidInWarp = threadIdx.x % WARPSIZE;                                    \
+    int threadColInWarp = tidInWarp % (WSUBN / TN);                            \
+    int threadRowInWarp = tidInWarp / (WSUBN / TN);                            \
+    float regM[WMITER * TM] = {0.0f};                                          \
+    float regN[WNITER * TN] = {0.0f};                                          \
+    int tile_id = blockIdx.x;                                                  \
+    float threadResults[WMITER * TM * WNITER * TN];                            \
+    int group_id = tile_id / num_pid_in_group;                                 \
+    int first_pid_m = group_id * SGB_GROUP_M;                                  \
+    int group_size_m = min(num_pid_m - first_pid_m, SGB_GROUP_M);              \
+    int pid_m = first_pid_m + ((tile_id % num_pid_in_group) % group_size_m);   \
+    int pid_n = (tile_id % num_pid_in_group) / group_size_m;                   \
+    if (bias != nullptr) {                                                     \
+        _Pragma("unroll")                                                      \
+        for (int wSubColIdx = 0; wSubColIdx < WNITER; ++wSubColIdx) {          \
+            _Pragma("unroll")                                                  \
+            for (int resIdxN = 0; resIdxN < TN; ++resIdxN) {                   \
+                int g_col = pid_n * BN + warpCol * WN + wSubColIdx * WSUBN +   \
+                            threadColInWarp * TN + resIdxN;                    \
+                float b_val = (g_col < N) ? bias[g_col] : 0.0f;                \
+                _Pragma("unroll")                                              \
+                for (int wSubRowIdx = 0; wSubRowIdx < WMITER; ++wSubRowIdx) {  \
+                    _Pragma("unroll")                                          \
+                    for (int resIdxM = 0; resIdxM < TM; ++resIdxM) {           \
+                        int idx = (wSubRowIdx * TM + resIdxM) * (WNITER * TN)  \
+                                  + wSubColIdx * TN + resIdxN;                 \
+                        threadResults[idx] = b_val;                            \
+                    }                                                          \
+                }                                                              \
+            }                                                                  \
+        }                                                                      \
+    } else {                                                                   \
+        _Pragma("unroll")                                                      \
+        for (int i = 0; i < WMITER * TM * WNITER * TN; ++i) {                  \
+            threadResults[i] = 0.0f;                                           \
+        }                                                                      \
+    }                                                                          \
+    T_ACT* C_warp =                                                            \
+        C + (pid_m * BM + warpRow * WM) * ldc + pid_n * BN + warpCol * WN;     \
+    int num_k_tiles = (K + BK - 1) / BK;                                       \
+    SGB_T_STAGE_NN(0, 0);                                                      \
+    int read_stage = 0;                                                        \
+    int write_stage = 1;                                                       \
+    for (int tile = 0; tile < num_k_tiles; ++tile) {                           \
+        __syncthreads();                                                       \
+        if (tile + 1 < num_k_tiles) {                                          \
+            SGB_T_STAGE_NN(write_stage, (tile + 1) * BK);                      \
+        }                                                                      \
+        SGB_T_COMPUTE_TILE();                                                  \
+        read_stage = (read_stage + 1) % K_PIPE;                                \
+        write_stage = (write_stage + 1) % K_PIPE;                              \
+    }                                                                          \
+    for (int wSubRowIdx = 0; wSubRowIdx < WMITER; ++wSubRowIdx) {              \
+        for (int wSubColIdx = 0; wSubColIdx < WNITER; ++wSubColIdx) {          \
+            T_ACT* C_sub = C_warp + wSubRowIdx * WSUBM * ldc +                 \
+                           wSubColIdx * WSUBN;                                 \
+            for (int resIdxM = 0; resIdxM < TM; ++resIdxM) {                   \
+                int g_row = pid_m * BM + warpRow * WM + wSubRowIdx * WSUBM +   \
+                            threadRowInWarp * TM + resIdxM;                    \
+                if (g_row >= M) continue;                                      \
+                for (int resIdxN = 0; resIdxN < TN; ++resIdxN) {               \
+                    int g_col = pid_n * BN + warpCol * WN +                    \
+                                wSubColIdx * WSUBN + threadColInWarp * TN +    \
+                                resIdxN;                                       \
+                    if (g_col >= N) continue;                                  \
+                    int idx = (wSubRowIdx * TM + resIdxM) * (WNITER * TN) +    \
+                              wSubColIdx * TN + resIdxN;                       \
+                    int c_off = (threadRowInWarp * TM + resIdxM) * ldc +       \
+                                threadColInWarp * TN + resIdxN;                \
+                    float val = alpha * threadResults[idx];                    \
+                    if (beta != 0.0f) val += beta * to_f(C_sub[c_off]);        \
+                    C_sub[c_off] = FROM_F(val);                                \
+                }                                                              \
+            }                                                                  \
+        }                                                                      \
+    }                                                                          \
+}
+
+DEFINE_SGEMM_BI_NN_BIG_T(bf16, __nv_bfloat16, from_f_bf16)
+DEFINE_SGEMM_BI_NN_BIG_T(f16,  __half,        from_f_f16)
+
+#define DEFINE_SGEMM_BI_TN_BIG_T(SUFFIX, T_ACT)                                \
+extern "C" __global__ __launch_bounds__(NUM_THREADS, 2)                        \
+void sgemm_bi_tn_big_##SUFFIX(                                                 \
+    float* __restrict__ C,                                                     \
+    const T_ACT* __restrict__ A,                                               \
+    const T_ACT* __restrict__ B,                                               \
+    float alpha,                                                               \
+    int M_red, int K_out, int N                                                \
+) {                                                                            \
+    constexpr int K_PIPE = 2;                                                  \
+    extern __shared__ __align__(16) float smem[];                              \
+    constexpr int A_STAGE = BK * (BM + SMEM_A_PAD);                            \
+    constexpr int B_STAGE = BK * (BN + SMEM_B_PAD);                            \
+    float* As_buf = smem;                                                      \
+    float* Bs_buf = smem + K_PIPE * A_STAGE;                                   \
+    int num_pid_m = (K_out + BM - 1) / BM;                                     \
+    int num_pid_n = (N + BN - 1) / BN;                                         \
+    int num_pid_in_group = SGB_GROUP_M * num_pid_n;                            \
+    int warpIdx = threadIdx.x / WARPSIZE;                                      \
+    int warpCol = warpIdx % (BN / WN);                                         \
+    int warpRow = warpIdx / (BN / WN);                                         \
+    int tidInWarp = threadIdx.x % WARPSIZE;                                    \
+    int threadColInWarp = tidInWarp % (WSUBN / TN);                            \
+    int threadRowInWarp = tidInWarp / (WSUBN / TN);                            \
+    float regM[WMITER * TM] = {0.0f};                                          \
+    float regN[WNITER * TN] = {0.0f};                                          \
+    int tile_id = blockIdx.x;                                                  \
+    float threadResults[WMITER * TM * WNITER * TN] = {0.0f};                   \
+    int group_id = tile_id / num_pid_in_group;                                 \
+    int first_pid_m = group_id * SGB_GROUP_M;                                  \
+    int group_size_m = min(num_pid_m - first_pid_m, SGB_GROUP_M);              \
+    int pid_m = first_pid_m + ((tile_id % num_pid_in_group) % group_size_m);   \
+    int pid_n = (tile_id % num_pid_in_group) / group_size_m;                   \
+    float* C_warp =                                                            \
+        C + (pid_m * BM + warpRow * WM) * N + pid_n * BN + warpCol * WN;       \
+    int num_m_tiles = (M_red + BK - 1) / BK;                                   \
+    SGB_T_STAGE_TN(0, 0);                                                      \
+    int read_stage = 0;                                                        \
+    int write_stage = 1;                                                       \
+    for (int tile = 0; tile < num_m_tiles; ++tile) {                           \
+        __syncthreads();                                                       \
+        if (tile + 1 < num_m_tiles) {                                          \
+            SGB_T_STAGE_TN(write_stage, (tile + 1) * BK);                      \
+        }                                                                      \
+        SGB_T_COMPUTE_TILE();                                                  \
+        read_stage = (read_stage + 1) % K_PIPE;                                \
+        write_stage = (write_stage + 1) % K_PIPE;                              \
+    }                                                                          \
+    for (int wSubRowIdx = 0; wSubRowIdx < WMITER; ++wSubRowIdx) {              \
+        for (int wSubColIdx = 0; wSubColIdx < WNITER; ++wSubColIdx) {          \
+            float* C_sub =                                                     \
+                C_warp + wSubRowIdx * WSUBM * N + wSubColIdx * WSUBN;          \
+            for (int resIdxM = 0; resIdxM < TM; ++resIdxM) {                   \
+                int g_row = pid_m * BM + warpRow * WM + wSubRowIdx * WSUBM +   \
+                            threadRowInWarp * TM + resIdxM;                    \
+                if (g_row >= K_out) continue;                                  \
+                for (int resIdxN = 0; resIdxN < TN; ++resIdxN) {               \
+                    int g_col = pid_n * BN + warpCol * WN +                    \
+                                wSubColIdx * WSUBN + threadColInWarp * TN +    \
+                                resIdxN;                                       \
+                    if (g_col >= N) continue;                                  \
+                    int idx = (wSubRowIdx * TM + resIdxM) * (WNITER * TN) +    \
+                              wSubColIdx * TN + resIdxN;                       \
+                    C_sub[(threadRowInWarp * TM + resIdxM) * N +               \
+                          threadColInWarp * TN + resIdxN] +=                   \
+                        alpha * threadResults[idx];                            \
+                }                                                              \
+            }                                                                  \
+        }                                                                      \
+    }                                                                          \
+}
+
+DEFINE_SGEMM_BI_TN_BIG_T(bf16, __nv_bfloat16)
+DEFINE_SGEMM_BI_TN_BIG_T(f16,  __half)
+
+#define DEFINE_SGEMM_BI_NT_BIG_T(SUFFIX, T_ACT, FROM_F)                        \
+extern "C" __global__ __launch_bounds__(NUM_THREADS, 2)                        \
+void sgemm_bi_nt_big_##SUFFIX(                                                 \
+    T_ACT* __restrict__ C,                                                     \
+    const T_ACT* __restrict__ A,                                               \
+    const T_ACT* __restrict__ B,                                               \
+    float alpha,                                                               \
+    int M, int N, int K_out                                                    \
+) {                                                                            \
+    constexpr int K_PIPE = 2;                                                  \
+    extern __shared__ __align__(16) float smem[];                              \
+    constexpr int A_STAGE = BK * (BM + SMEM_A_PAD);                            \
+    constexpr int B_STAGE = BK * (BN + SMEM_B_PAD);                            \
+    float* As_buf = smem;                                                      \
+    float* Bs_buf = smem + K_PIPE * A_STAGE;                                   \
+    int num_pid_m = (M + BM - 1) / BM;                                         \
+    int num_pid_n = (K_out + BN - 1) / BN;                                     \
+    int num_pid_in_group = SGB_GROUP_M * num_pid_n;                            \
+    int warpIdx = threadIdx.x / WARPSIZE;                                      \
+    int warpCol = warpIdx % (BN / WN);                                         \
+    int warpRow = warpIdx / (BN / WN);                                         \
+    int tidInWarp = threadIdx.x % WARPSIZE;                                    \
+    int threadColInWarp = tidInWarp % (WSUBN / TN);                            \
+    int threadRowInWarp = tidInWarp / (WSUBN / TN);                            \
+    float regM[WMITER * TM] = {0.0f};                                          \
+    float regN[WNITER * TN] = {0.0f};                                          \
+    int tile_id = blockIdx.x;                                                  \
+    float threadResults[WMITER * TM * WNITER * TN] = {0.0f};                   \
+    int group_id = tile_id / num_pid_in_group;                                 \
+    int first_pid_m = group_id * SGB_GROUP_M;                                  \
+    int group_size_m = min(num_pid_m - first_pid_m, SGB_GROUP_M);              \
+    int pid_m = first_pid_m + ((tile_id % num_pid_in_group) % group_size_m);   \
+    int pid_n = (tile_id % num_pid_in_group) / group_size_m;                   \
+    T_ACT* C_warp =                                                            \
+        C + (pid_m * BM + warpRow * WM) * K_out + pid_n * BN + warpCol * WN;   \
+    int num_n_tiles = (N + BK - 1) / BK;                                       \
+    SGB_T_STAGE_NT(0, 0);                                                      \
+    int read_stage = 0;                                                        \
+    int write_stage = 1;                                                       \
+    for (int tile = 0; tile < num_n_tiles; ++tile) {                           \
+        __syncthreads();                                                       \
+        if (tile + 1 < num_n_tiles) {                                          \
+            SGB_T_STAGE_NT(write_stage, (tile + 1) * BK);                      \
+        }                                                                      \
+        SGB_T_COMPUTE_TILE();                                                  \
+        read_stage = (read_stage + 1) % K_PIPE;                                \
+        write_stage = (write_stage + 1) % K_PIPE;                              \
+    }                                                                          \
+    for (int wSubRowIdx = 0; wSubRowIdx < WMITER; ++wSubRowIdx) {              \
+        for (int wSubColIdx = 0; wSubColIdx < WNITER; ++wSubColIdx) {          \
+            T_ACT* C_sub =                                                     \
+                C_warp + wSubRowIdx * WSUBM * K_out + wSubColIdx * WSUBN;      \
+            for (int resIdxM = 0; resIdxM < TM; ++resIdxM) {                   \
+                int g_row = pid_m * BM + warpRow * WM + wSubRowIdx * WSUBM +   \
+                            threadRowInWarp * TM + resIdxM;                    \
+                if (g_row >= M) continue;                                      \
+                for (int resIdxN = 0; resIdxN < TN; ++resIdxN) {               \
+                    int g_col = pid_n * BN + warpCol * WN +                    \
+                                wSubColIdx * WSUBN + threadColInWarp * TN +    \
+                                resIdxN;                                       \
+                    if (g_col >= K_out) continue;                              \
+                    int idx = (wSubRowIdx * TM + resIdxM) * (WNITER * TN) +    \
+                              wSubColIdx * TN + resIdxN;                       \
+                    C_sub[(threadRowInWarp * TM + resIdxM) * K_out +           \
+                          threadColInWarp * TN + resIdxN] =                    \
+                        FROM_F(alpha * threadResults[idx]);                    \
+                }                                                              \
+            }                                                                  \
+        }                                                                      \
+    }                                                                          \
+}
+
+DEFINE_SGEMM_BI_NT_BIG_T(bf16, __nv_bfloat16, from_f_bf16)
+DEFINE_SGEMM_BI_NT_BIG_T(f16,  __half,        from_f_f16)

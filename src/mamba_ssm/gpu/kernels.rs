@@ -354,6 +354,12 @@ pub struct MambaKernels {
     pub sgemm_nn_narrow_small_typed: HalfKernel,
     pub sgemm_tn_narrow_typed: HalfKernel,
     pub sgemm_nt_narrow_typed: HalfKernel,
+    /// Typed Big NN/TN/NT (stage 3): bf16/f16 twins of the f32 Big kernels
+    /// with sync staging + f32 smem. Dynamic smem 33 KB — the 34 KB
+    /// MAX_DYNAMIC_SHARED attribute is set at load like the f32 Bigs.
+    pub sgemm_nn_big_typed: HalfKernel,
+    pub sgemm_tn_big_typed: HalfKernel,
+    pub sgemm_nt_big_typed: HalfKernel,
 }
 
 impl MambaKernels {
@@ -434,6 +440,19 @@ impl MambaKernels {
                 bf16: get(&format!("{base}_bf16"))?,
                 f16: get(&format!("{base}_f16"))?,
             })
+        };
+        // Like `load_half`, plus the 34 KB MAX_DYNAMIC_SHARED carveout the
+        // Big-tile kernels need (2-stage f32 smem = 33 KB dynamic).
+        let load_half_dynsmem = |base: &str| -> Result<HalfKernel, String> {
+            let k = load_half(base)?;
+            for f in [&k.bf16, &k.f16] {
+                f.set_attribute(
+                    cudarc::driver::sys::CUfunction_attribute_enum::CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
+                    34 * 1024,
+                )
+                .map_err(|e| format!("set MAX_DYNAMIC_SHARED for {base}: {e:?}"))?;
+            }
+            Ok(k)
         };
 
         Ok(Self {
@@ -659,6 +678,9 @@ impl MambaKernels {
             sgemm_nn_narrow_small_typed: load_half("sgemm_bi_nn_narrow_small")?,
             sgemm_tn_narrow_typed: load_half("sgemm_bi_tn_narrow")?,
             sgemm_nt_narrow_typed: load_half("sgemm_bi_nt_narrow")?,
+            sgemm_nn_big_typed: load_half_dynsmem("sgemm_bi_nn_big")?,
+            sgemm_tn_big_typed: load_half_dynsmem("sgemm_bi_tn_big")?,
+            sgemm_nt_big_typed: load_half_dynsmem("sgemm_bi_nt_big")?,
 
             _module: module,
         })
