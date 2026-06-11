@@ -122,8 +122,8 @@ fn dispatch_slim_or_big<'k>(
 
 /// Batched linear forward on GPU: `Y[B,N] = X[B,K] @ W[K,N] + bias[N]`.
 ///
-/// cuBLAS computes: Y^T[N,B] = W^T[N,K] @ X^T[K,B] (column-major).
-/// With row-major data, this is equivalent to: Y[B,N] = X[B,K] @ W[K,N].
+/// cuBLAS computes: `Y^T[N,B] = W^T[N,K] @ X^T[K,B]` (column-major).
+/// With row-major data, this is equivalent to: `Y[B,N] = X[B,K] @ W[K,N]`.
 ///
 /// Bias is broadcast via pre-fill + beta=1.0 accumulate.
 ///
@@ -711,8 +711,8 @@ pub fn sgemm_bi_forward(
 
 /// Weight gradient: `dW[K,N] += X^T[K,B] @ dY[B,N]` (accumulated, beta=1.0).
 ///
-/// cuBLAS: dW^T[N,K] += dY^T[N,B] @ X[B,K]
-/// In col-major: A=dY (transa=N gives dY^T[N,B]), B=X_saved (transb=T gives X[B,K])
+/// cuBLAS: `dW^T[N,K] += dY^T[N,B] @ X[B,K]`
+/// In col-major: A=dY (transa=N gives `dY^T[N,B]`), B=X_saved (transb=T gives `X[B,K]`)
 /// gemm(N, T, N, K, B, 1.0, dY, N, X_saved, K, 1.0, dW, N)
 ///
 /// Note: beta=1.0 for gradient accumulation.
@@ -902,9 +902,9 @@ pub fn sgemm_bi_backward_dw(
 
 /// Input gradient: `dX[B,K] = dY[B,N] @ W^T[N,K]` (overwritten, beta=0.0).
 ///
-/// cuBLAS: dX^T[K,B] = W[K,N] @ dY^T[N,B]
+/// cuBLAS: `dX^T[K,B] = W[K,N] @ dY^T[N,B]`
 /// But we want dX row-major, so:
-/// dX^T[K,B] = W[K,N](as col-major=W^T[N,K]) @ dY^T[N,B]
+/// `dX^T[K,B] = W[K,N](as col-major=W^T[N,K]) @ dY^T[N,B]`
 ///
 /// Actually, row-major trick:
 /// For C = A @ B^T in row-major:

@@ -34,7 +34,7 @@
 //! - `WeightDtype::Bf16`: full graph capture, sync_master_to_compute, AMP-style
 //!   master weights in f32.
 //! - `WeightDtype::F32`: full graph capture, no compute shadow (weights stay
-//!   in f32 throughout). See [`MambaTrainerF32`].
+//!   in f32 throughout). See `MambaTrainerF32`.
 //! - `WeightDtype::F16`: supported via the [`DynamicLossScaler`] + a
 //!   device-side `scale_grads_skip_f32` kernel that conditionally zeros
 //!   the grad arena on overflow, letting the captured-graph body run AdamW

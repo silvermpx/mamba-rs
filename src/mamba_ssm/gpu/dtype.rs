@@ -60,7 +60,7 @@ impl WeightDtype {
     /// HMMA/BMMA acceleration for bf16/f16 GEMMs on Ada/Hopper — possibly
     /// 2–4× speed regression on large GEMMs. For models you have validated
     /// not to regress under non-pedantic accumulation (e.g. small models
-    /// where the rounding bias cancels), use [`compute_type_fast`] instead.
+    /// where the rounding bias cancels), use [`Self::compute_type_fast`] instead.
     /// For mamba-1.4b and similar, keep PEDANTIC — it is the only mode
     /// known to bit-match the HF reference at greedy decode.
     pub fn compute_type(self) -> cublas_sys::cublasComputeType_t {
@@ -72,7 +72,7 @@ impl WeightDtype {
 
     /// Opt-in faster cuBLAS compute mode — `CUBLAS_COMPUTE_32F` (non-PEDANTIC)
     /// for bf16/f16, allowing cuBLAS to pick BMMA/HMMA Tensor Core kernels
-    /// with f32 accumulate. Up to 2–4× faster than [`compute_type`] on
+    /// with f32 accumulate. Up to 2–4× faster than [`Self::compute_type`] on
     /// large bf16/f16 GEMMs, but cuBLAS is permitted to use approximate
     /// accumulation that may lose precision on large reductions. For small
     /// RL-scope models (d_inner ≤ 512) the difference is typically below
@@ -80,7 +80,7 @@ impl WeightDtype {
     ///
     /// **VALIDATE PER MODEL** before switching production training to this.
     /// mamba-1.4b regressed under this mode on Ada + CUDA 12.8 — that is
-    /// why [`compute_type`] defaults to PEDANTIC.
+    /// why [`Self::compute_type`] defaults to PEDANTIC.
     pub fn compute_type_fast(self) -> cublas_sys::cublasComputeType_t {
         // Same f32 mode for all dtypes — non-pedantic lets cuBLAS choose
         // the best Tensor Core kernel for bf16/f16 inputs.

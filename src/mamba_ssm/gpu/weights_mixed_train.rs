@@ -10,7 +10,7 @@
 //!   for the bulk weights; D2D copy for the f32-stays-f32 weights
 //!   (norm/conv1d/dt_proj_b/a_log/D).
 //!
-//! No new primitive types — reuses [`GpuBuffer`], [`WeightSliceDyn`], and
+//! No new primitive types — reuses `GpuBuffer`, `WeightSliceDyn`, and
 //! the existing `cast_f32_to_bf16` / `cast_f32_to_f16` kernels.
 
 use std::sync::Arc;

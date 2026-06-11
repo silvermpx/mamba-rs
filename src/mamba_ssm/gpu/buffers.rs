@@ -1,4 +1,4 @@
-//! GPU memory buffer wrapping CudaSlice<f32>.
+//! GPU memory buffer wrapping `CudaSlice<f32>`.
 //!
 //! Drop-safe: CudaSlice deallocates on drop.
 //! All GPU memory management goes through GpuBuffer to prevent leaks.

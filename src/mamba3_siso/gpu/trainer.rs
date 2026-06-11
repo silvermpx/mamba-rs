@@ -153,7 +153,7 @@ impl Mamba3Trainer {
     }
 
     /// Record the full training step into a CUDA Graph. Run at least one
-    /// warmup [`Self::step`] first. See [`MambaTrainer::capture_graph`]
+    /// warmup [`Self::step`] first. See [`Self::capture_graph`]
     /// for the pointer-stability contract — same rules apply here.
     pub fn capture_graph(&mut self) -> Result<(), String> {
         match &mut self.inner {
@@ -163,7 +163,7 @@ impl Mamba3Trainer {
     }
 
     /// Run one training step on `(input, d_temporal)`. Shapes match
-    /// [`MambaTrainer::step`]. Returns [`StepMetrics`].
+    /// [`Self::step`]. Returns `StepMetrics`.
     pub fn step(&mut self, input: &[f32], d_temporal: &[f32]) -> Result<StepMetrics, String> {
         match &mut self.inner {
             Trainer3Inner::F32(t) => t.step(input, d_temporal),
@@ -182,7 +182,7 @@ impl Mamba3Trainer {
     /// Serialize the dynamic loss scaler state for checkpoint resume.
     /// Returns `Some((scale, growth_tracker))` only for f16 training where
     /// the scaler is active; `None` for bf16 / f32. Mirrors
-    /// [`MambaTrainer::scaler_state`].
+    /// [`Self::scaler_state`].
     pub fn scaler_state(&self) -> Option<(f32, u32)> {
         match &self.inner {
             Trainer3Inner::F32(_) => None,

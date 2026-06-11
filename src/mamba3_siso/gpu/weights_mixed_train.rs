@@ -6,7 +6,7 @@
 //! - **Compute copies** = bf16/f16 (or f32 passthrough), owned by
 //!   [`GpuMamba3MixedWeights`] (existing bulk_arena + f32_arena layout).
 //!   GEMMs + typed kernels read these.
-//! - **Sync** after each optimizer step via [`Self::sync_master_to_compute`]:
+//! - **Sync** after each optimizer step via `sync_master_to_compute`:
 //!   cast f32 master → typed compute for `in_proj_w`, `out_proj_w`, and
 //!   `input_proj_w` (bulk); D2D copy for everything else (norm weights,
 //!   biases, `d_param`, `dt_bias`, `b_bias`, `c_bias`, `norm_gate_weight`).

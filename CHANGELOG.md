@@ -1,5 +1,89 @@
 # Changelog
 
+## 0.4.0
+
+Deterministic GPU training for all three dtypes, plus an opt-in
+tensor-core tier that makes deterministic bf16/f16 training FASTER than
+cuBLAS on LLM-sized models. Validated on RTX 6000 Ada, CUDA 13.2:
+299 tests + 62 ignored (HF checkpoints 130m–2.8b), zero failures.
+
+### Batch-invariant training GEMM triad (f32 + bf16 + f16)
+
+With `MAMBA_RS_BATCH_INVARIANT=1` / `ctx.set_batch_invariant(true)`,
+every training GEMM (NN forward, TN dW, NT dX) routes through custom
+deterministic kernels in `kernels/sgemm_bi.cu` — two runs with the same
+seed/inputs produce bit-identical weights on every dtype.
+
+- f32 triad: bucketed dispatch (GEMV, ultra-thin, narrow, split-K32,
+  gap-fill, Big/Slim, split-M/N) under a zero-cuBLAS contract: an
+  uncovered shape panics loudly, never falls back silently.
+- bf16/f16: native typed buckets keep f32 smem + accumulation with the
+  f32 twin's exact FMA chain and ONE RNE downcast at store; shapes
+  without a native bucket run "upcast → f32 kernel → RNE downcast" —
+  bit-identical to a native typed kernel by contract
+  (tests/sgemm_bi_typed_parity.rs, incl. a 60-shape gate-boundary sweep).
+- Native typed Big NN/TN/NT kernels fire exactly where the f32 cascade
+  picks Big (predicate-mirrored gates) and eliminate the Big-shape upcast
+  scratch (~0.5 GB at 2.8b mixed).
+- Forward dispatcher gap-fill extended past N=2048 / K=2048 (Mamba-1
+  in_proj at micro-batch for d_model ≥ 576; d_model=2560 at M < 32).
+- Invariance contract: training is per-bucket batch-invariant (same
+  bucket → row 0 bit-identical across M); typed inference decode
+  (M < 128) always routes the strict all-M `matvec_bi` path, preserving
+  cross-batch logits parity (KL ≈ 1e-12).
+- Cost per step vs cuBLAS: f32 1.28–1.53× (TF32 baseline), bf16
+  1.11–1.20×, f16 1.20–1.37× (PEDANTIC baseline).
+
+### Tensor-core deterministic tier (opt-in)
+
+`MAMBA_RS_BI_TENSOR_CORES=1` / `ctx.set_bi_tensor_cores(true)` (on top
+of the batch-invariant flag) swaps the typed training triad for
+mma.sync.m16n8k16 kernels: 2-stage cp.async staging, ldmatrix
+(.trans where the operand layout needs it) fragment loads, conflict-free
+smem strides, f32 accumulators, no atomics or splits.
+
+- SEPARATE numeric contract: tensor-core reduction order differs from
+  the scalar FMA chain, so outputs do not bit-match the scalar tier —
+  but runs are bit-identical to each other (incl. through CUDA Graph
+  capture/replay) and the forward is STRICTLY batch-invariant across
+  all M (each element's K-reduction lives in one warp).
+- GEMM speedups vs the scalar deterministic tier (bf16, Ada): forward
+  3.0–3.4×, dW 2.1–3.5×, dX 4.3–6.7×.
+- End-to-end mixed training step: d768 0.88× of cuBLAS-PEDANTIC,
+  d1536 0.77× — deterministic training faster than cuBLAS (and faster
+  than f32 TF32 at d1536).
+
+### Stream-ordering fixes (latent races)
+
+`ctx.stream` is NON_BLOCKING and never orders against the legacy
+stream; several host↔device copies used synchronous legacy-stream
+`cuMemcpyHtoD_v2`/`DtoH_v2`, whose tail DMA can race kernels launched
+right after. All converted to stream-ordered async copies + sync:
+`DtypedBuf::{upload,download}_f32`, `WeightSliceDyn` weight uploads
+(M1 + M3 + gpu_lm/gpu_lm3 embeddings), `GradSlice` copies (bracketed
+by device sync), and a one-time drain after kernel compilation for the
+split-K scratch buffers.
+
+### CUDA Graph guards
+
+The typed-GEMM upcast scratch is presized BEFORE training-graph capture
+(`presize_bi_upcast_scratch_for_train[_m3]`) and its pointers are
+asserted at every replay, same discipline as `half_staging` — a lazy
+regrow after capture can no longer leave a captured graph pointing at
+freed memory.
+
+### API
+
+- `GpuCtx::set_bi_tensor_cores` / `bi_tensor_cores` (new flag,
+  `MAMBA_RS_BI_TENSOR_CORES` env).
+- `blas::bi_sgemm_forward_typed` / `bi_sgemm_backward_dw_typed` /
+  `bi_sgemm_backward_dx_typed` — full-coverage typed deterministic GEMM
+  entries.
+- `WeightSliceDyn::{download_to_f32, upload_from_cpu_f32,
+  upload_raw_bytes}` now take the stream they order against (breaking
+  for direct callers).
+
+
 ## 0.3.1
 
 ### `matvec_bi_*` perf

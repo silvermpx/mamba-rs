@@ -881,31 +881,31 @@ pub struct GpuMamba3MixedScratch {
 
     // Step 10 — bwd-only typed staging buffers (activation grads on the
     // wire match activation storage dtype per AMP precision invariant).
-    /// typed [B*T*d_model] — d_temporal staged for typed dW GEMM at out_proj.
+    /// typed `[B*T*d_model]` — d_temporal staged for typed dW GEMM at out_proj.
     pub d_temporal_typed: DtypedBuf,
-    /// typed [B*T*d_inner] — gradient of `gated` (out_proj_bwd dX → input to
+    /// typed `[B*T*d_inner]` — gradient of `gated` (out_proj_bwd dX → input to
     /// rmsnorm_gated_bwd_typed).
     pub d_gated_typed: DtypedBuf,
-    /// typed [B*T*d_inner] — gradient of `y` from rmsnorm_gated_bwd_typed.
+    /// typed `[B*T*d_inner]` — gradient of `y` from rmsnorm_gated_bwd_typed.
     pub d_y_typed: DtypedBuf,
-    /// typed [B*T*d_inner] — gradient of `z` from rmsnorm_gated_bwd_typed.
+    /// typed `[B*T*d_inner]` — gradient of `z` from rmsnorm_gated_bwd_typed.
     pub d_z_typed: DtypedBuf,
-    /// typed [B*T*ng*ds] — gradient of `b_normed` (head→group reduce).
+    /// typed `[B*T*ng*ds]` — gradient of `b_normed` (head→group reduce).
     pub d_b_normed_typed: DtypedBuf,
-    /// typed [B*T*ng*ds] — gradient of `c_normed`.
+    /// typed `[B*T*ng*ds]` — gradient of `c_normed`.
     pub d_c_normed_typed: DtypedBuf,
-    /// typed [B*T*ng*ds] — gradient of `b_raw` (BCNorm bwd output).
+    /// typed `[B*T*ng*ds]` — gradient of `b_raw` (BCNorm bwd output).
     pub d_b_raw_typed: DtypedBuf,
-    /// typed [B*T*ng*ds] — gradient of `c_raw`.
+    /// typed `[B*T*ng*ds]` — gradient of `c_raw`.
     pub d_c_raw_typed: DtypedBuf,
-    /// typed [B*T*ip] — gradient of `proj_flat` (split_bwd output → in_proj dY).
+    /// typed `[B*T*ip]` — gradient of `proj_flat` (split_bwd output → in_proj dY).
     pub d_proj_typed: DtypedBuf,
-    /// typed [B*T*d_model] — gradient of `post_norm` (in_proj dX → rmsnorm_bwd dy).
+    /// typed `[B*T*d_model]` — gradient of `post_norm` (in_proj dX → rmsnorm_bwd dy).
     pub d_post_norm_typed: DtypedBuf,
 
     // F6 chunked-forward intermediates (added so use_parallel_scan=true works
     // in the mixed forward; backward path uses the saved versions in acts).
-    /// f32 [B*nh] — adt = a_val · dt, fed into m3_dA_cumsum.
+    /// f32 `[B*nh]` — adt = a_val · dt, fed into m3_dA_cumsum.
     pub adt_temp: GpuBuffer,
     /// f32 [B * n_chunks * nh * chunk_size] — chunked dA cumulative sums.
     pub da_cumsum: GpuBuffer,

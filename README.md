@@ -16,11 +16,17 @@ Pure Rust + CUDA. Kernels compile at runtime via NVRTC.
 - **f32 / bf16 / f16** — a single `WeightDtype` selector at construction.
   Compute stays f32 (upcast-in-kernel, f32 accumulators) regardless of
   storage dtype.
-- **Batch-invariant bf16 inference** — optional via
-  `ctx.set_batch_invariant(true)` or `MAMBA_RS_BATCH_INVARIANT=1`. The
-  own CUDA matvec kernel (`kernels/gemm_batch_invariant.cu`) gives the
-  same logits per row regardless of batch size (KL ≈ 1e-11 cross-batch).
-  Default path is cuBLAS gemv for maximum throughput.
+- **Deterministic inference & training (opt-in)** — `MAMBA_RS_BATCH_INVARIANT=1`
+  / `ctx.set_batch_invariant(true)` routes every GEMM through custom
+  deterministic kernels (`kernels/sgemm_bi.cu`, `gemm_batch_invariant.cu`):
+  inference logits are bit-identical across batch sizes (KL ≈ 1e-11), and
+  f32 / bf16 / f16 training is bit-identical across runs. Default path is
+  cuBLAS for maximum throughput.
+- **Tensor-core deterministic tier (opt-in)** — `MAMBA_RS_BI_TENSOR_CORES=1`
+  / `ctx.set_bi_tensor_cores(true)` on top of the flag above swaps the
+  training GEMM triad for mma.sync tensor-core kernels: still fully
+  deterministic (own numeric contract), and **faster than cuBLAS** on
+  d_model ≥ 768 (0.77× of PEDANTIC per step at d1536).
 - **HuggingFace loader** — safetensors, synthetic + real Mamba SSM
   checkpoints (130m / 370m / 1.4b / 2.8b validated).
 - **Standalone** — no framework dependency.
@@ -102,7 +108,7 @@ mamba3_step(&mut output, &input, &mut scratch, &weights, &mut state.layers, &cfg
 
 ```toml
 [dependencies]
-mamba-rs = { version = "0.3", features = ["cuda"] }
+mamba-rs = { version = "0.4", features = ["cuda"] }
 ```
 
 `GpuMambaBackbone::new_with_dtype` and the symmetric Mamba-3 constructor take
@@ -145,15 +151,20 @@ architecture; an internal enum selects the f32 or mixed (bf16/f16) inner
 engine based on the `WeightDtype` constructor argument.
 
 ```rust
-use mamba_rs::mamba_ssm::gpu::trainer::MambaTrainer;
+use mamba_rs::mamba_ssm::gpu::trainer::{MambaTrainer, TrainSessionCfg};
 use mamba_rs::WeightDtype;
 
+let session = TrainSessionCfg {
+    input_dim,
+    batch: 2,
+    seq_len: 64,
+    lr: 3e-4,
+    weight_decay: 1e-2,
+};
 let mut trainer = MambaTrainer::new_full(
     /* gpu_ordinal */ 0,
-    &cpu_weights, cfg, input_dim,
-    /* batch */ 2, /* seq_len */ 64,
+    &cpu_weights, cfg, session,
     WeightDtype::Bf16,
-    /* lr */ 3e-4, /* weight_decay */ 1e-2,
 )?;
 trainer.capture_graph()?; // optional; one cuGraphLaunch per step after this
 
@@ -202,6 +213,30 @@ Enable the batch-invariant path when cross-batch bit-identity matters
 (KL ≈ 1e-11 between `b=1` and `b=N` per slot): set
 `MAMBA_RS_BATCH_INVARIANT=1` or call `ctx.set_batch_invariant(true)`.
 
+### Deterministic training — cost per step (RTX 6000 Ada, `MambaTrainer`)
+
+With the batch-invariant flag on, every training GEMM (forward, dW, dX)
+runs on custom fixed-reduction-order kernels: two runs with the same
+seed/inputs produce bit-identical weights, on every dtype. The optional
+tensor-core tier keeps full determinism under its own numeric contract
+(mma.sync f32 accumulation instead of the scalar FMA chain) and turns the
+determinism overhead into a speedUP on LLM-sized models:
+
+| model | dtype | cuBLAS baseline | deterministic (scalar) | deterministic + TC |
+|---|---|---:|---:|---:|
+| d768, B=8 T=256  | bf16 | 25.6 ms (PEDANTIC) | 28.8 ms (1.13×) | **22.6 ms (0.88×)** |
+| d1536, B=4 T=256 | bf16 | 17.5 ms (PEDANTIC) | 19.6 ms (1.12×) | **13.6 ms (0.77×)** |
+| d1536, B=4 T=256 | f32  | 14.1 ms (TF32)     | 21.6 ms (1.53×) | — |
+| d128 (RL), B=16 T=64 | bf16 | 2.1 ms (PEDANTIC) | 2.5 ms (1.20×) | 2.3 ms (1.10×) |
+
+```rust
+trainer.ctx().set_batch_invariant(true);   // bit-identical runs, scalar contract
+trainer.ctx().set_bi_tensor_cores(true);   // + tensor-core tier (own contract)
+```
+
+GEMM-level tensor-core speedups vs the scalar deterministic tier: forward
+3.0–3.4×, dW 2.1–3.5×, dX 4.3–6.7× (bf16, M=2048-class shapes).
+
 ### Per-step latency (default config: d_model=128, 3 layers)
 
 | | Mamba SSM | Mamba-3 SISO |
@@ -216,13 +251,16 @@ Detailed tables: [Mamba SSM benchmarks](docs/mamba1-benchmarks.md),
 
 ## Testing
 
-48 test files, 280+ individual tests:
+52 test files, 360+ individual tests:
 
 - Correctness: bit-parity across CPU ↔ GPU, eager ↔ CUDA Graph, f32 ↔ bf16/f16
 - Gradient checks: finite-difference vs analytical on every weight tensor
 - Real checkpoints: 30-step training convergence + inference on
   `state-spaces/mamba-130m-hf` for all three dtypes
 - Batch invariance: KL < 1e-4 across batch sizes 1 / 4 / 16 / 32 at bf16
+- Determinism: bit-identical training across runs (f32/bf16/f16, scalar
+  and tensor-core tiers), typed-GEMM bit-parity vs the f32 reference
+  across a 60-shape dispatch-gate boundary sweep
 - Long-sequence stability: 1024-token generation + T=1024 M3 training
 - CUDA Graph: replay determinism, pointer-stability assertions
 
