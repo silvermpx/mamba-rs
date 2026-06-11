@@ -286,7 +286,7 @@ fn bench_sgemm_bi_vs_tf32() {
         let input = det(n, 1, 1.0);
         let dtemp = det(n, 2, 0.1);
 
-        let time_mode = |invariant: bool, dtype: WeightDtype| -> f64 {
+        let time_mode = |invariant: bool, tc: bool, dtype: WeightDtype| -> f64 {
             let mut cpu = MambaWeights::init(&cfg, input_dim, 7);
             if dtype != WeightDtype::F32 {
                 // The mixed-precision pipeline requires an identity input_proj.
@@ -298,6 +298,7 @@ fn bench_sgemm_bi_vs_tf32() {
             }
             let mut tr = MambaTrainer::new_full(0, &cpu, cfg, session, dtype).expect("trainer");
             tr.ctx().set_batch_invariant(invariant);
+            tr.ctx().set_bi_tensor_cores(tc);
             for _ in 0..3 {
                 tr.step(&input, &dtemp).expect("warmup");
             }
@@ -317,14 +318,23 @@ fn bench_sgemm_bi_vs_tf32() {
             } else {
                 "cuBLAS-PEDANTIC"
             };
-            let t_blas = time_mode(false, dt);
-            let t_bi = time_mode(true, dt);
+            let t_blas = time_mode(false, false, dt);
+            let t_bi = time_mode(true, false, dt);
             eprintln!(
                 "[{label} {dt:?}] B={b} T={t}: {baseline} {:.3} ms/step | sgemm_bi {:.3} ms/step | ratio {:.2}x",
                 t_blas * 1e3,
                 t_bi * 1e3,
                 t_bi / t_blas
             );
+            if dt != WeightDtype::F32 {
+                let t_tc = time_mode(true, true, dt);
+                eprintln!(
+                    "[{label} {dt:?}] B={b} T={t}: sgemm_bi+TC {:.3} ms/step | vs {baseline} {:.2}x | vs scalar bi {:.2}x",
+                    t_tc * 1e3,
+                    t_tc / t_blas,
+                    t_tc / t_bi
+                );
+            }
         }
     }
 }

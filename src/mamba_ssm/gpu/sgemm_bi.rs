@@ -1768,6 +1768,94 @@ pub fn sgemm_bi_forward_tc(
     Ok(())
 }
 
+/// Tensor-core TN dW (stage 5): `dW[K,N] += X^T @ dY` via mma.sync with f32
+/// accumulate straight into the f32 master gradient. Same TC contract as
+/// [`sgemm_bi_forward_tc`]. Covers K_out >= 128 && N >= 128.
+pub fn sgemm_bi_backward_dw_tc(
+    stream: &Arc<cudarc::driver::CudaStream>,
+    kernels: &GpuKernels,
+    dw_ptr: CUptr,
+    dy: TypedPtr,
+    x_saved: TypedPtr,
+    dims: (usize, usize, usize),
+) -> Result<(), String> {
+    let (batch, n_in, n_out) = dims;
+    require_half(dy.dtype, "dY")?;
+    if dy.dtype != x_saved.dtype {
+        return Err("sgemm_bi_backward_dw_tc: mixed dtypes not supported".into());
+    }
+    if !(n_in >= 128 && n_out >= 128 && batch >= 1) {
+        return Err(format!(
+            "sgemm_bi_backward_dw_tc: shape M={batch} K={n_in} N={n_out} below the TC tile gate"
+        ));
+    }
+    let dt = dy.dtype;
+    let alpha: f32 = 1.0;
+    let m_red_i = batch as i32;
+    let k_out_i = n_in as i32;
+    let n_i = n_out as i32;
+    let total_tiles = (n_in as u32).div_ceil(128) * (n_out as u32).div_ceil(128);
+    let cfg = cudarc::driver::LaunchConfig {
+        grid_dim: (total_tiles, 1, 1),
+        block_dim: (256, 1, 1),
+        shared_mem_bytes: 0,
+    };
+    let mut b = stream.launch_builder(kernels.sgemm_tn_tc_typed.get(dt));
+    b.arg(&dw_ptr);
+    b.arg(&x_saved.ptr);
+    b.arg(&dy.ptr);
+    b.arg(&alpha);
+    b.arg(&m_red_i);
+    b.arg(&k_out_i);
+    b.arg(&n_i);
+    unsafe { b.launch(cfg) }.map_err(|e| format!("sgemm_bi_tn_tc: {e:?}"))?;
+    Ok(())
+}
+
+/// Tensor-core NT dX (stage 5): `dX[M,K] = dY @ W^T` via mma.sync, typed RNE
+/// overwrite. Same TC contract as [`sgemm_bi_forward_tc`]. Covers
+/// M >= 128 && K_out >= 128.
+pub fn sgemm_bi_backward_dx_tc(
+    stream: &Arc<cudarc::driver::CudaStream>,
+    kernels: &GpuKernels,
+    dx: TypedPtr,
+    dy: TypedPtr,
+    w: TypedPtr,
+    dims: (usize, usize, usize),
+) -> Result<(), String> {
+    let (batch, n_in, n_out) = dims;
+    require_half(dx.dtype, "dX")?;
+    if dx.dtype != dy.dtype || dy.dtype != w.dtype {
+        return Err("sgemm_bi_backward_dx_tc: mixed dtypes not supported".into());
+    }
+    if !(batch >= 128 && n_in >= 128 && n_out >= 1) {
+        return Err(format!(
+            "sgemm_bi_backward_dx_tc: shape M={batch} K={n_in} N={n_out} below the TC tile gate"
+        ));
+    }
+    let dt = dx.dtype;
+    let alpha: f32 = 1.0;
+    let m_i = batch as i32;
+    let n_i = n_out as i32;
+    let k_out_i = n_in as i32;
+    let total_tiles = (batch as u32).div_ceil(128) * (n_in as u32).div_ceil(128);
+    let cfg = cudarc::driver::LaunchConfig {
+        grid_dim: (total_tiles, 1, 1),
+        block_dim: (256, 1, 1),
+        shared_mem_bytes: 0,
+    };
+    let mut b = stream.launch_builder(kernels.sgemm_nt_tc_typed.get(dt));
+    b.arg(&dx.ptr);
+    b.arg(&dy.ptr);
+    b.arg(&w.ptr);
+    b.arg(&alpha);
+    b.arg(&m_i);
+    b.arg(&n_i);
+    b.arg(&k_out_i);
+    unsafe { b.launch(cfg) }.map_err(|e| format!("sgemm_bi_nt_tc: {e:?}"))?;
+    Ok(())
+}
+
 /// Typed NN forward: `Y = X @ W + bias` (bias f32, fused into the kernel).
 pub fn sgemm_bi_forward_typed(
     stream: &Arc<cudarc::driver::CudaStream>,

@@ -477,6 +477,19 @@ pub fn bi_sgemm_backward_dw_typed(
     x_saved: TypedPtr,
     dims: (usize, usize, usize),
 ) -> Result<(), String> {
+    if ctx.bi_tensor_cores()
+        && super::sgemm_bi::sgemm_bi_backward_dw_tc(
+            &ctx.stream,
+            &ctx.kernels,
+            dw_ptr,
+            dy,
+            x_saved,
+            dims,
+        )
+        .is_ok()
+    {
+        return Ok(());
+    }
     if super::sgemm_bi::sgemm_bi_backward_dw_typed(
         &ctx.stream,
         &ctx.kernels,
@@ -508,6 +521,12 @@ pub fn bi_sgemm_backward_dx_typed(
     w: TypedPtr,
     dims: (usize, usize, usize),
 ) -> Result<(), String> {
+    if ctx.bi_tensor_cores()
+        && super::sgemm_bi::sgemm_bi_backward_dx_tc(&ctx.stream, &ctx.kernels, dx, dy, w, dims)
+            .is_ok()
+    {
+        return Ok(());
+    }
     if super::sgemm_bi::sgemm_bi_backward_dx_typed(&ctx.stream, &ctx.kernels, dx, dy, w, dims)
         .is_ok()
     {

@@ -204,6 +204,166 @@ fn tc_forward_is_deterministic_and_all_m_batch_invariant() {
 }
 
 #[test]
+fn tc_backward_matches_f32_reference_loosely() {
+    let t = Ctx::new();
+    for dt in [WeightDtype::Bf16, WeightDtype::F16] {
+        for (m, k, n) in [
+            (256usize, 384usize, 512usize),
+            (300, 768, 3072), // tails on every axis
+            (2048, 768, 512),
+        ] {
+            let qx = quantize(&det(m * k, 44, 1.0), dt);
+            let qdy = quantize(&det(m * n, 55, 0.5), dt);
+            let qw = quantize(&det(k * n, 77, 0.5), dt);
+
+            // --- dW: f32 reference vs TC, both accumulate into f32 ---
+            let x32 = t.f32_buf(&qx);
+            let dy32 = t.f32_buf(&qdy);
+            let dw_ref = GpuBuffer::zeros(&t.ctx.stream, k * n).unwrap();
+            sgemm_bi::sgemm_bi_backward_dw(
+                &t.ctx.stream,
+                &t.ctx.kernels,
+                dw_ref.cached_ptr(),
+                &dy32,
+                &x32,
+                (m, k, n),
+            )
+            .unwrap();
+            t.ctx.stream.synchronize().unwrap();
+            let dw_want = dw_ref.to_cpu(&t.ctx.stream).unwrap();
+
+            let xt = t.typed_buf(&qx, dt);
+            let dyt = t.typed_buf(&qdy, dt);
+            let dw_tc = GpuBuffer::zeros(&t.ctx.stream, k * n).unwrap();
+            sgemm_bi::sgemm_bi_backward_dw_tc(
+                &t.ctx.stream,
+                &t.ctx.kernels,
+                dw_tc.cached_ptr(),
+                TypedPtr {
+                    ptr: dyt.cached_ptr(),
+                    dtype: dt,
+                },
+                TypedPtr {
+                    ptr: xt.cached_ptr(),
+                    dtype: dt,
+                },
+                (m, k, n),
+            )
+            .unwrap();
+            t.ctx.stream.synchronize().unwrap();
+            let dw_got = dw_tc.to_cpu(&t.ctx.stream).unwrap();
+            let cos = cos_sim(&dw_got, &dw_want);
+            eprintln!("TC dW {dt:?} M{m} K{k} N{n}: cos vs f32 = {cos:.9}");
+            assert!(cos > 0.9999, "TC dW {dt:?} M{m} K{k} N{n}: cos {cos}");
+
+            // --- dX: typed output vs f32 reference ---
+            let w32 = t.f32_buf(&qw);
+            let mut dx_ref = GpuBuffer::zeros(&t.ctx.stream, m * k).unwrap();
+            sgemm_bi::sgemm_bi_backward_dx(
+                &t.ctx.stream,
+                &t.ctx.kernels,
+                &mut dx_ref,
+                &dy32,
+                w32.cached_ptr(),
+                (m, k, n),
+            )
+            .unwrap();
+            t.ctx.stream.synchronize().unwrap();
+            let dx_want = dx_ref.to_cpu(&t.ctx.stream).unwrap();
+
+            let wt = t.typed_buf(&qw, dt);
+            let dxt = DtypedBuf::zeros(&t.ctx.stream, m * k, dt).unwrap();
+            sgemm_bi::sgemm_bi_backward_dx_tc(
+                &t.ctx.stream,
+                &t.ctx.kernels,
+                TypedPtr {
+                    ptr: dxt.cached_ptr(),
+                    dtype: dt,
+                },
+                TypedPtr {
+                    ptr: dyt.cached_ptr(),
+                    dtype: dt,
+                },
+                TypedPtr {
+                    ptr: wt.cached_ptr(),
+                    dtype: dt,
+                },
+                (m, k, n),
+            )
+            .unwrap();
+            t.ctx.stream.synchronize().unwrap();
+            let mut dx_got = vec![0.0f32; m * k];
+            dxt.download_f32(&t.ctx.stream, &mut dx_got).unwrap();
+            let cos = cos_sim(&dx_got, &dx_want);
+            eprintln!("TC dX {dt:?} M{m} K{k} N{n}: cos vs f32 = {cos:.9}");
+            assert!(cos > 0.9999, "TC dX {dt:?} M{m} K{k} N{n}: cos {cos}");
+        }
+    }
+}
+
+#[test]
+fn tc_mixed_training_is_bit_identical_across_runs() {
+    // End-to-end: bf16 mixed trainer with BOTH flags on. The TC contract
+    // is different bits than the scalar tier, but it must still be
+    // bit-identical across fresh runs (incl. CUDA Graph capture/replay).
+    use mamba_rs::config::{MambaConfig, ScanMode};
+    use mamba_rs::mamba_ssm::gpu::trainer::{MambaTrainer, TrainSessionCfg};
+    use mamba_rs::weights::MambaWeights;
+
+    let cfg = MambaConfig {
+        d_model: 128,
+        d_state: 16,
+        d_conv: 4,
+        expand: 2,
+        n_layers: 2,
+        scan_mode: ScanMode::Auto,
+        rms_norm_eps: 1e-5,
+    };
+    let run = || -> Vec<f32> {
+        let mut cpu = MambaWeights::init(&cfg, cfg.d_model, 0xDE7E_4213);
+        cpu.input_proj_w.clear();
+        cpu.input_proj_b.clear();
+        for lw in cpu.layers.iter_mut() {
+            lw.a_neg = lw.a_log.iter().map(|&v| -v.exp()).collect();
+        }
+        let session = TrainSessionCfg {
+            input_dim: cfg.d_model,
+            batch: 4,
+            seq_len: 64,
+            lr: 1e-3,
+            weight_decay: 0.0,
+        };
+        let mut tr =
+            MambaTrainer::new_full(0, &cpu, cfg, session, WeightDtype::Bf16).expect("trainer");
+        tr.ctx().set_batch_invariant(true);
+        tr.ctx().set_bi_tensor_cores(true);
+        let n = 4 * 64 * cfg.d_model;
+        for s in 0..5 {
+            tr.step(&det(n, 0x11 + s as u32, 1.0), &det(n, 0x77 + s as u32, 0.1))
+                .expect("step");
+        }
+        let w = tr.snapshot_master().expect("snapshot");
+        let mut out = Vec::new();
+        for l in &w.layers {
+            out.extend_from_slice(&l.in_proj_w);
+            out.extend_from_slice(&l.out_proj_w);
+        }
+        out
+    };
+    let a = run();
+    let b = run();
+    let diffs = a
+        .iter()
+        .zip(&b)
+        .filter(|(x, y)| x.to_bits() != y.to_bits())
+        .count();
+    assert_eq!(
+        diffs, 0,
+        "TC mixed training must be bit-identical across runs"
+    );
+}
+
+#[test]
 #[ignore] // wall-clock benchmark — run explicitly on a quiet GPU
 fn bench_tc_vs_scalar_paths() {
     use mamba_rs::mamba_ssm::gpu::blas::bi_sgemm_forward_typed;
@@ -268,5 +428,52 @@ fn bench_tc_vs_scalar_paths() {
             .unwrap();
         });
         eprintln!("  TC speedup vs scalar bi: {:.2}x", scalar / tc);
+
+        // Backward twins on the same shape.
+        use mamba_rs::mamba_ssm::gpu::blas::{
+            bi_sgemm_backward_dw_typed, bi_sgemm_backward_dx_typed,
+        };
+        let qdy = quantize(&det(m * n, 55, 0.5), dt);
+        let dyt = t.typed_buf(&qdy, dt);
+        let dytp = TypedPtr {
+            ptr: dyt.cached_ptr(),
+            dtype: dt,
+        };
+        let dw = GpuBuffer::zeros(&t.ctx.stream, k * n).unwrap();
+        let dxt = DtypedBuf::zeros(&t.ctx.stream, m * k, dt).unwrap();
+        let dxtp = TypedPtr {
+            ptr: dxt.cached_ptr(),
+            dtype: dt,
+        };
+        let dw_s = time_path("dW scalar bi", &|| {
+            bi_sgemm_backward_dw_typed(&t.ctx, dw.cached_ptr(), dytp, xtp, (m, k, n)).unwrap();
+        });
+        let dw_tc = time_path("dW tensor-core", &|| {
+            sgemm_bi::sgemm_bi_backward_dw_tc(
+                &t.ctx.stream,
+                &t.ctx.kernels,
+                dw.cached_ptr(),
+                dytp,
+                xtp,
+                (m, k, n),
+            )
+            .unwrap();
+        });
+        eprintln!("  dW TC speedup: {:.2}x", dw_s / dw_tc);
+        let dx_s = time_path("dX scalar bi", &|| {
+            bi_sgemm_backward_dx_typed(&t.ctx, dxtp, dytp, wtp, (m, k, n)).unwrap();
+        });
+        let dx_tc = time_path("dX tensor-core", &|| {
+            sgemm_bi::sgemm_bi_backward_dx_tc(
+                &t.ctx.stream,
+                &t.ctx.kernels,
+                dxtp,
+                dytp,
+                wtp,
+                (m, k, n),
+            )
+            .unwrap();
+        });
+        eprintln!("  dX TC speedup: {:.2}x", dx_s / dx_tc);
     }
 }
