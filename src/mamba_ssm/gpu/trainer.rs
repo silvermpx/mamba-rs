@@ -459,9 +459,11 @@ impl MambaTrainerMixed {
         let mut a_neg_all = GpuBuffer::zeros(&ctx.stream, n_layers * d_inner * d_state)?;
         a_neg_all.upload(&ctx.stream, &a_neg_flat)?;
 
+        // conv/ssm states are per-sample: forward indexes layers with a
+        // batch * d_inner * d_conv (resp. d_state) per-layer stride.
         let mut state = GpuRecurrentState {
-            conv_states: GpuBuffer::zeros(&ctx.stream, n_layers * d_inner * d_conv)?,
-            ssm_states: GpuBuffer::zeros(&ctx.stream, n_layers * d_inner * d_state)?,
+            conv_states: GpuBuffer::zeros(&ctx.stream, n_layers * batch * d_inner * d_conv)?,
+            ssm_states: GpuBuffer::zeros(&ctx.stream, n_layers * batch * d_inner * d_state)?,
             a_neg_all: GpuBuffer::zeros(&ctx.stream, n_layers * d_inner * d_state)?,
         };
         state.a_neg_all.upload(&ctx.stream, &a_neg_flat)?;
@@ -1095,9 +1097,11 @@ impl MambaTrainerF32 {
         let mut a_neg_all = GpuBuffer::zeros(&ctx.stream, n_layers * d_inner * d_state)?;
         a_neg_all.upload(&ctx.stream, &a_neg_flat)?;
 
+        // conv/ssm states are per-sample: forward indexes layers with a
+        // batch * d_inner * d_conv (resp. d_state) per-layer stride.
         let mut state = GpuRecurrentState {
-            conv_states: GpuBuffer::zeros(&ctx.stream, n_layers * d_inner * d_conv)?,
-            ssm_states: GpuBuffer::zeros(&ctx.stream, n_layers * d_inner * d_state)?,
+            conv_states: GpuBuffer::zeros(&ctx.stream, n_layers * batch * d_inner * d_conv)?,
+            ssm_states: GpuBuffer::zeros(&ctx.stream, n_layers * batch * d_inner * d_state)?,
             a_neg_all: GpuBuffer::zeros(&ctx.stream, n_layers * d_inner * d_state)?,
         };
         state.a_neg_all.upload(&ctx.stream, &a_neg_flat)?;
