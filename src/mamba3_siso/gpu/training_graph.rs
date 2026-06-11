@@ -92,6 +92,9 @@ pub struct GpuMamba3TrainingStepGraph {
     // `presize_half_staging_for_train_m3`, then snapshots the resulting
     // pointer here; replay asserts no grow has happened since.
     captured_half_staging_ptr: u64,
+    // Same guard for the batch-invariant typed-GEMM upcast scratch triple
+    // (see the M1 mixed graph) — M3 bf16 bi GEMMs route through it too.
+    captured_bi_upcast_ptrs: [u64; 3],
 }
 
 impl GpuMamba3TrainingStepGraph {
@@ -129,6 +132,7 @@ impl GpuMamba3TrainingStepGraph {
         // Presize half-staging BEFORE capture (see M1 training_graph for the
         // CUDA_ERROR_ILLEGAL_ADDRESS rationale).
         ctx.presize_half_staging_for_train_m3(cfg, dims.batch, dims.seq_len, train_w.dtype)?;
+        ctx.presize_bi_upcast_scratch_for_train_m3(cfg, dims.batch, dims.seq_len, train_w.dtype)?;
 
         let snap_input = mamba_input.cached_ptr();
         let snap_d_temporal = d_temporal.cached_ptr();
@@ -146,6 +150,7 @@ impl GpuMamba3TrainingStepGraph {
         let snap_compute_input = train_w.compute.input_proj_w.ptr();
         let snap_compute_norm_f = train_w.compute.norm_f_weight.ptr();
         let snap_half_staging = ctx.half_staging_ptr();
+        let snap_bi_upcast = ctx.bi_upcast_scratch_ptrs();
 
         let graph = capture_into_graph(&ctx.stream, || {
             grads.zero(&ctx.stream)?;
@@ -200,6 +205,7 @@ impl GpuMamba3TrainingStepGraph {
             captured_compute_input_proj_w_ptr: snap_compute_input,
             captured_compute_norm_f_ptr: snap_compute_norm_f,
             captured_half_staging_ptr: snap_half_staging,
+            captured_bi_upcast_ptrs: snap_bi_upcast,
         })
     }
 
@@ -297,6 +303,13 @@ impl GpuMamba3TrainingStepGraph {
             self.captured_half_staging_ptr,
             "M3 training_graph replay: half_staging pointer changed since capture \
              (lazy grow during a previous step?)"
+        );
+        assert_eq!(
+            ctx.bi_upcast_scratch_ptrs(),
+            self.captured_bi_upcast_ptrs,
+            "M3 training_graph replay: bi_upcast_scratch pointer changed since \
+             capture (a larger typed bi GEMM regrew the scratch after this \
+             graph was captured — re-capture or presize for the larger shape)"
         );
         self.graph
             .launch()

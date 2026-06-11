@@ -230,12 +230,12 @@ impl GpuMambaLM {
             WeightDtype::Bf16 | WeightDtype::F16 => {
                 let embed_bytes = embed.len() * dtype.size_bytes();
                 let e = GpuByteBuffer::zeros(stream, embed_bytes)?;
-                upload_f32_as_dtype(&e, 0, &embed, embed.len(), dtype)?;
+                upload_f32_as_dtype(stream, &e, 0, &embed, embed.len(), dtype)?;
 
                 let lm = if let Some(ref lm_w) = lm_head_padded {
                     let lm_bytes = lm_w.len() * dtype.size_bytes();
                     let b = GpuByteBuffer::zeros(stream, lm_bytes)?;
-                    upload_f32_as_dtype(&b, 0, lm_w, lm_w.len(), dtype)?;
+                    upload_f32_as_dtype(stream, &b, 0, lm_w, lm_w.len(), dtype)?;
                     Some(b)
                 } else {
                     None
@@ -681,12 +681,14 @@ impl GpuMambaLM {
 
 /// Upload an f32 slice into a byte buffer at given element offset, converting to `dtype`.
 fn upload_f32_as_dtype(
+    stream: &std::sync::Arc<cudarc::driver::CudaStream>,
     dst: &GpuByteBuffer,
     elem_offset: usize,
     src: &[f32],
     src_elems: usize,
     dtype: WeightDtype,
 ) -> Result<(), String> {
+    use crate::mamba_ssm::gpu::buffers::cu_memcpy_htod_raw;
     assert_eq!(src.len(), src_elems, "src size mismatch");
     let byte_off = elem_offset * dtype.size_bytes();
     let byte_count = src_elems * dtype.size_bytes();
@@ -696,33 +698,19 @@ fn upload_f32_as_dtype(
         WeightDtype::F32 => {
             let bytes: &[u8] = bytemuck::cast_slice(src);
             assert_eq!(bytes.len(), byte_count);
-            cu_memcpy_htod(dst_ptr, bytes)
+            cu_memcpy_htod_raw(stream, dst_ptr, bytes)
         }
         WeightDtype::Bf16 => {
             let buf: Vec<half::bf16> = src.iter().map(|&v| half::bf16::from_f32(v)).collect();
             let bytes: &[u8] = bytemuck::cast_slice(&buf);
             assert_eq!(bytes.len(), byte_count);
-            cu_memcpy_htod(dst_ptr, bytes)
+            cu_memcpy_htod_raw(stream, dst_ptr, bytes)
         }
         WeightDtype::F16 => {
             let buf: Vec<half::f16> = src.iter().map(|&v| half::f16::from_f32(v)).collect();
             let bytes: &[u8] = bytemuck::cast_slice(&buf);
             assert_eq!(bytes.len(), byte_count);
-            cu_memcpy_htod(dst_ptr, bytes)
+            cu_memcpy_htod_raw(stream, dst_ptr, bytes)
         }
     }
-}
-
-fn cu_memcpy_htod(dst_ptr: cudarc::driver::sys::CUdeviceptr, bytes: &[u8]) -> Result<(), String> {
-    let result = unsafe {
-        cudarc::driver::sys::cuMemcpyHtoD_v2(
-            dst_ptr,
-            bytes.as_ptr() as *const std::ffi::c_void,
-            bytes.len(),
-        )
-    };
-    if result != cudarc::driver::sys::CUresult::CUDA_SUCCESS {
-        return Err(format!("cu_memcpy_htod failed: {result:?}"));
-    }
-    Ok(())
 }

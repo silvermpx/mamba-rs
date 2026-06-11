@@ -313,12 +313,14 @@ impl GradSlice {
     /// Uses raw cuMemcpyDtoH on the slice's device pointer.
     /// Unlike GpuBuffer::to_cpu(), this works on non-owning views.
     ///
-    /// IMPORTANT: caller must `stream.synchronize()` before calling this
-    /// if async operations (kernels, cuBLAS) are pending on a non-default stream.
-    /// `cuMemcpyDtoH_v2` is host-synchronous but does NOT wait for non-default streams.
+    /// Performs a full `cuCtxSynchronize` first — `cuMemcpyDtoH_v2` is
+    /// host-synchronous but does NOT order against NON_BLOCKING streams,
+    /// so pending kernels could otherwise still be writing the region.
+    /// GradSlice copies happen at idle points; the device-wide sync is fine.
     pub fn to_cpu(&self) -> Result<Vec<f32>, String> {
         let mut dst = vec![0.0f32; self.len];
         if self.len > 0 {
+            cu_ctx_sync("GradSlice::to_cpu")?;
             let byte_count = self.len * std::mem::size_of::<f32>();
             let result = unsafe {
                 cudarc::driver::sys::cuMemcpyDtoH_v2(
@@ -339,7 +341,10 @@ impl GradSlice {
 
     /// Upload CPU data into this slice's GPU memory region.
     ///
-    /// Uses raw cuMemcpyHtoD on the slice's device pointer.
+    /// Uses raw cuMemcpyHtoD on the slice's device pointer, bracketed by
+    /// `cuCtxSynchronize`: the leading sync lets in-flight kernels finish
+    /// reading the region; the trailing sync flushes the pageable-copy
+    /// tail DMA before later kernel launches on NON_BLOCKING streams.
     /// Panics if src.len() != self.len.
     pub fn upload_from_cpu(&self, src: &[f32]) -> Result<(), String> {
         assert_eq!(
@@ -350,6 +355,7 @@ impl GradSlice {
             self.len
         );
         if self.len > 0 {
+            cu_ctx_sync("GradSlice::upload_from_cpu (pre)")?;
             let byte_count = self.len * std::mem::size_of::<f32>();
             let result = unsafe {
                 cudarc::driver::sys::cuMemcpyHtoD_v2(
@@ -364,9 +370,21 @@ impl GradSlice {
                     self.len, result
                 ));
             }
+            cu_ctx_sync("GradSlice::upload_from_cpu (post)")?;
         }
         Ok(())
     }
+}
+
+/// Device-wide sync (`cuCtxSynchronize`) — waits for ALL streams including
+/// NON_BLOCKING ones. Used to bracket legacy-stream memcpys that cannot
+/// take a stream parameter without breaking their call sites.
+fn cu_ctx_sync(what: &str) -> Result<(), String> {
+    let r = unsafe { cudarc::driver::sys::cuCtxSynchronize() };
+    if r != cudarc::driver::sys::CUresult::CUDA_SUCCESS {
+        return Err(format!("{what}: cuCtxSynchronize failed: {r:?}"));
+    }
+    Ok(())
 }
 
 /// Type alias for non-owning weight views into flat weight buffers.
@@ -482,9 +500,10 @@ impl DtypedBuf {
     }
 
     /// Upload f32 data from CPU, converting to dtype on-the-fly.
+    /// Stream-ordered on `stream` and synchronized before returning.
     pub fn upload_f32(
         &self,
-        _stream: &Arc<cudarc::driver::CudaStream>,
+        stream: &Arc<cudarc::driver::CudaStream>,
         src: &[f32],
     ) -> Result<(), String> {
         assert_eq!(src.len(), self.n_elems, "DtypedBuf upload size mismatch");
@@ -492,25 +511,26 @@ impl DtypedBuf {
         match self.dtype {
             WeightDtype::F32 => {
                 let bytes: &[u8] = bytemuck::cast_slice(src);
-                cu_memcpy_htod_raw(ptr, bytes)
+                cu_memcpy_htod_raw(stream, ptr, bytes)
             }
             WeightDtype::Bf16 => {
                 let buf: Vec<half::bf16> = src.iter().map(|&v| half::bf16::from_f32(v)).collect();
                 let bytes: &[u8] = bytemuck::cast_slice(&buf);
-                cu_memcpy_htod_raw(ptr, bytes)
+                cu_memcpy_htod_raw(stream, ptr, bytes)
             }
             WeightDtype::F16 => {
                 let buf: Vec<half::f16> = src.iter().map(|&v| half::f16::from_f32(v)).collect();
                 let bytes: &[u8] = bytemuck::cast_slice(&buf);
-                cu_memcpy_htod_raw(ptr, bytes)
+                cu_memcpy_htod_raw(stream, ptr, bytes)
             }
         }
     }
 
     /// Download to f32, converting from dtype on-the-fly.
+    /// Stream-ordered on `stream` and synchronized before returning.
     pub fn download_f32(
         &self,
-        _stream: &Arc<cudarc::driver::CudaStream>,
+        stream: &Arc<cudarc::driver::CudaStream>,
         dst: &mut [f32],
     ) -> Result<(), String> {
         assert_eq!(dst.len(), self.n_elems, "DtypedBuf download size mismatch");
@@ -518,12 +538,12 @@ impl DtypedBuf {
         match self.dtype {
             WeightDtype::F32 => {
                 let bytes: &mut [u8] = bytemuck::cast_slice_mut(dst);
-                cu_memcpy_dtoh_raw(ptr, bytes)
+                cu_memcpy_dtoh_raw(stream, ptr, bytes)
             }
             WeightDtype::Bf16 => {
                 let mut buf = vec![half::bf16::ZERO; self.n_elems];
                 let bytes: &mut [u8] = bytemuck::cast_slice_mut(&mut buf);
-                cu_memcpy_dtoh_raw(ptr, bytes)?;
+                cu_memcpy_dtoh_raw(stream, ptr, bytes)?;
                 for (d, &v) in dst.iter_mut().zip(&buf) {
                     *d = v.to_f32();
                 }
@@ -532,7 +552,7 @@ impl DtypedBuf {
             WeightDtype::F16 => {
                 let mut buf = vec![half::f16::ZERO; self.n_elems];
                 let bytes: &mut [u8] = bytemuck::cast_slice_mut(&mut buf);
-                cu_memcpy_dtoh_raw(ptr, bytes)?;
+                cu_memcpy_dtoh_raw(stream, ptr, bytes)?;
                 for (d, &v) in dst.iter_mut().zip(&buf) {
                     *d = v.to_f32();
                 }
@@ -542,24 +562,41 @@ impl DtypedBuf {
     }
 }
 
-fn cu_memcpy_htod_raw(dst: cudarc::driver::sys::CUdeviceptr, bytes: &[u8]) -> Result<(), String> {
+/// Stream-ordered HtoD copy + sync. The synchronous legacy-stream
+/// `cuMemcpyHtoD_v2` may return while the tail DMA into device memory is
+/// still in flight ("synchronous w.r.t. host" only covers the source
+/// buffer), and `ctx.stream` is NON_BLOCKING — it does not serialize with
+/// the legacy stream, so a kernel launched right after could read a
+/// half-written buffer. Enqueue on the caller's stream instead, then sync
+/// so the (possibly temporary) host buffer can be dropped.
+pub(crate) fn cu_memcpy_htod_raw(
+    stream: &Arc<cudarc::driver::CudaStream>,
+    dst: cudarc::driver::sys::CUdeviceptr,
+    bytes: &[u8],
+) -> Result<(), String> {
     if bytes.is_empty() {
         return Ok(());
     }
     let r = unsafe {
-        cudarc::driver::sys::cuMemcpyHtoD_v2(
+        cudarc::driver::sys::cuMemcpyHtoDAsync_v2(
             dst,
             bytes.as_ptr() as *const std::ffi::c_void,
             bytes.len(),
+            stream.cu_stream(),
         )
     };
     if r != cudarc::driver::sys::CUresult::CUDA_SUCCESS {
-        return Err(format!("cuMemcpyHtoD: {r:?}"));
+        return Err(format!("cuMemcpyHtoDAsync: {r:?}"));
     }
-    Ok(())
+    stream
+        .synchronize()
+        .map_err(|e| format!("cuMemcpyHtoDAsync sync: {e:?}"))
 }
 
-fn cu_memcpy_dtoh_raw(
+/// Stream-ordered DtoH copy + sync — see [`cu_memcpy_htod_raw`] for why the
+/// legacy-stream synchronous copy is unsafe against a NON_BLOCKING stream.
+pub(crate) fn cu_memcpy_dtoh_raw(
+    stream: &Arc<cudarc::driver::CudaStream>,
     src: cudarc::driver::sys::CUdeviceptr,
     bytes: &mut [u8],
 ) -> Result<(), String> {
@@ -567,16 +604,19 @@ fn cu_memcpy_dtoh_raw(
         return Ok(());
     }
     let r = unsafe {
-        cudarc::driver::sys::cuMemcpyDtoH_v2(
+        cudarc::driver::sys::cuMemcpyDtoHAsync_v2(
             bytes.as_mut_ptr() as *mut std::ffi::c_void,
             src,
             bytes.len(),
+            stream.cu_stream(),
         )
     };
     if r != cudarc::driver::sys::CUresult::CUDA_SUCCESS {
-        return Err(format!("cuMemcpyDtoH: {r:?}"));
+        return Err(format!("cuMemcpyDtoHAsync: {r:?}"));
     }
-    Ok(())
+    stream
+        .synchronize()
+        .map_err(|e| format!("cuMemcpyDtoHAsync sync: {e:?}"))
 }
 
 /// Non-owning view into a dtype-tagged region of a `GpuByteBuffer`.
@@ -620,7 +660,11 @@ impl WeightSliceDyn {
     /// Download contents to f32 CPU buffer, upcasting from typed dtype.
     /// Counterpart of [`Self::upload_from_cpu_f32`]; use for parity tests
     /// that compare typed device weights against f32 master copies.
-    pub fn download_to_f32(&self, dst: &mut [f32]) -> Result<(), String> {
+    pub fn download_to_f32(
+        &self,
+        stream: &Arc<cudarc::driver::CudaStream>,
+        dst: &mut [f32],
+    ) -> Result<(), String> {
         assert_eq!(dst.len(), self.len_elems, "size mismatch");
         if self.len_elems == 0 {
             return Ok(());
@@ -628,12 +672,12 @@ impl WeightSliceDyn {
         match self.dtype {
             WeightDtype::F32 => {
                 let bytes: &mut [u8] = bytemuck::cast_slice_mut(dst);
-                cu_memcpy_dtoh_raw(self.ptr, bytes)
+                cu_memcpy_dtoh_raw(stream, self.ptr, bytes)
             }
             WeightDtype::Bf16 => {
                 let mut buf = vec![half::bf16::ZERO; self.len_elems];
                 let bytes: &mut [u8] = bytemuck::cast_slice_mut(&mut buf);
-                cu_memcpy_dtoh_raw(self.ptr, bytes)?;
+                cu_memcpy_dtoh_raw(stream, self.ptr, bytes)?;
                 for (d, &v) in dst.iter_mut().zip(&buf) {
                     *d = v.to_f32();
                 }
@@ -642,7 +686,7 @@ impl WeightSliceDyn {
             WeightDtype::F16 => {
                 let mut buf = vec![half::f16::ZERO; self.len_elems];
                 let bytes: &mut [u8] = bytemuck::cast_slice_mut(&mut buf);
-                cu_memcpy_dtoh_raw(self.ptr, bytes)?;
+                cu_memcpy_dtoh_raw(stream, self.ptr, bytes)?;
                 for (d, &v) in dst.iter_mut().zip(&buf) {
                     *d = v.to_f32();
                 }
@@ -652,39 +696,37 @@ impl WeightSliceDyn {
     }
 
     /// Upload f32 CPU data, downcasting to `dtype` on CPU side.
-    pub fn upload_from_cpu_f32(&self, src: &[f32]) -> Result<(), String> {
+    pub fn upload_from_cpu_f32(
+        &self,
+        stream: &Arc<cudarc::driver::CudaStream>,
+        src: &[f32],
+    ) -> Result<(), String> {
         assert_eq!(src.len(), self.len_elems, "size mismatch");
         if self.len_elems == 0 {
             return Ok(());
         }
         match self.dtype {
-            WeightDtype::F32 => self.upload_raw_bytes(bytemuck::cast_slice(src)),
+            WeightDtype::F32 => self.upload_raw_bytes(stream, bytemuck::cast_slice(src)),
             WeightDtype::Bf16 => {
                 let buf: Vec<half::bf16> = src.iter().map(|&v| half::bf16::from_f32(v)).collect();
-                self.upload_raw_bytes(bytemuck::cast_slice(&buf))
+                self.upload_raw_bytes(stream, bytemuck::cast_slice(&buf))
             }
             WeightDtype::F16 => {
                 let buf: Vec<half::f16> = src.iter().map(|&v| half::f16::from_f32(v)).collect();
-                self.upload_raw_bytes(bytemuck::cast_slice(&buf))
+                self.upload_raw_bytes(stream, bytemuck::cast_slice(&buf))
             }
         }
     }
 
     /// Upload raw bytes matching this slice's dtype (no conversion).
     /// Caller must ensure `bytes.len() == self.size_bytes()`.
-    pub fn upload_raw_bytes(&self, bytes: &[u8]) -> Result<(), String> {
+    pub fn upload_raw_bytes(
+        &self,
+        stream: &Arc<cudarc::driver::CudaStream>,
+        bytes: &[u8],
+    ) -> Result<(), String> {
         assert_eq!(bytes.len(), self.size_bytes(), "byte size mismatch");
-        let result = unsafe {
-            cudarc::driver::sys::cuMemcpyHtoD_v2(
-                self.ptr,
-                bytes.as_ptr() as *const std::ffi::c_void,
-                bytes.len(),
-            )
-        };
-        if result != cudarc::driver::sys::CUresult::CUDA_SUCCESS {
-            return Err(format!("WeightSliceDyn upload failed: {result:?}"));
-        }
-        Ok(())
+        cu_memcpy_htod_raw(stream, self.ptr, bytes)
     }
 }
 

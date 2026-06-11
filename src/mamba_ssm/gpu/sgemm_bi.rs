@@ -94,7 +94,7 @@ const SGEMM_SLIM_NT_NIN_MAX: usize = 768;
 const SGEMM_M_SLIM_FORCE: usize = 512;
 
 /// Single source of truth for Split-K/M scratch buffer cap, in f32 elements.
-/// Must match `splitk_scratch` allocation in `kernels.rs` (1 << 25 = 32M f32 = 128 MB).
+/// Must match `splitk_scratch` allocation in `kernels.rs` (1 << 23 = 8M f32 = 32 MB).
 /// All Split-K dispatch gates (NN fwd, NT bwd_dx, Split-M TN bwd_dw) read this.
 pub(super) const SPLITK_SCRATCH_CAP: usize = 1 << 23;
 
@@ -474,7 +474,8 @@ pub fn sgemm_bi_forward(
     // Determinism: K_CHUNK is a COMPILE-TIME CONSTANT → F = ceil(K / K_CHUNK)
     // depends ONLY on K. Same K always produces same F (and same per-fc
     // k-range) regardless of M, N, batch, stream, or SM scheduling.
-    // Reducer f64 ascending-fc order. Batch-invariant by construction.
+    // Reducer f32 ascending-fc order (`sgemm_bi_splitk_reduce`; only the
+    // split-M TN reducer is f64). Batch-invariant by construction.
     //
     // Gate ordering: fires AFTER Thin-M cap (batch > 1024) so it never steals
     // shapes Thin-M handles well (M ≤ 1024 has 4× BM=32 tiles vs 1× BM=128,
@@ -587,11 +588,17 @@ pub fn sgemm_bi_forward(
     }
 
     // ===== Gap-fill: thin-M wide-N shapes not caught by specialized branches =====
-    // Closes the dispatcher gap at (M < 128, N >= 128) that ultra-thin (M < 32),
-    // narrow tier 1/2 (N ≤ 127), splitk-thin (requires N%4==0 + K-tail or K%32==0),
-    // splitk-slim (M > 1024), and big-NN (M >= 128) all miss. Example shape:
-    // M=32 K=32 N=194 (N%4=2 fails splitk-thin, M<128 fails big-NN, was hitting
-    // cuBLAS-panic).
+    // Closes the dispatcher gap at (M < 128, N >= 128) that ultra-thin (M < 32,
+    // K ≤ 2048), narrow tier 1/2 (N ≤ 127), splitk-thin (N ≤ 2048, requires
+    // N%4==0 + K-tail or K%32==0), splitk-slim (M > 1024), and big-NN (M >= 128)
+    // all miss. Example shapes: M=32 K=32 N=194 (N%4=2 fails splitk-thin, M<128
+    // fails big-NN); Mamba-1 in_proj at micro-batch — M ∈ [32,128) with
+    // N = 2·d_inner > 2048 for d_model ≥ 576, and M < 32 with K = d_model >
+    // 2048 (d_model = 2560) where ultra-thin's smem K-cap excludes it.
+    //
+    // No upper N bound: `sgemm_nn_narrow` tiles N via ceil(N/32) CTAs with
+    // M/N predication — unbounded by construction. K likewise unbounded
+    // (strict ascending-K loop, no smem K staging).
     //
     // Re-uses `sgemm_nn_narrow` kernel (BM=64 BN=32, M/N predicated) — per-output
     // FMA chain is byte-identical to CPU mirror `narrow_nn_sgemm_nn` (strict
@@ -601,7 +608,7 @@ pub fn sgemm_bi_forward(
     // Perf: ~43% tile fill at boundary shapes (M=32 padded to BM=64) —
     // acceptable for shapes that no specialized branch handles. Specialized
     // branches above always take priority via gate ordering.
-    if batch < 128 && (128..=2048).contains(&n_out) && n_in >= 1 {
+    if batch < 128 && n_out >= 128 && n_in >= 1 {
         let m_i = batch as i32;
         let n_i = n_out as i32;
         let k_i = n_in as i32;
@@ -1045,7 +1052,7 @@ pub fn sgemm_bi_backward_dx(
         // F-KTAIL-CAP-PARITY (2026-05-17): w_size cap = SPLITK_NT_TRANSPOSE_CAP
         // (the GPU transpose_scratch capacity), partial cap = SPLITK_SCRATCH_CAP
         // (the GPU splitk_scratch capacity). Earlier hardcoded `1<<23` partial
-        // cap was tighter than the underlying scratch (1<<25) and caused k_tail
+        // cap was tighter than the underlying scratch (1<<23) and caused k_tail
         // to fall through at batch=1024 (partial=10.5M > 8M cap) while CPU has
         // no cap → catastrophic dispatch divergence on critic.head0.input_proj
         // dX at BATCH=1024 (max_ulp=2.1M on synthetic LCG). Lifting matches the
@@ -1526,4 +1533,290 @@ pub fn sgemm_bi_backward_dx(
          The zero-cuBLAS contract requires every shape to route through a custom \
          kernel — add a dispatcher branch in this function for this shape."
     );
+}
+
+// ============================================================================
+// Typed (bf16/f16) dispatch — Phase 11 stage 2 buckets.
+// ============================================================================
+// Same bucket geometry and launch configs as the f32 dispatcher above; the
+// typed kernels are bit-identical to "upcast inputs to f32, run the f32
+// kernel". Buckets not yet covered (Big/Slim/split-K — stage 3) return Err:
+// callers must not silently fall back to non-deterministic cuBLAS.
+
+use super::blas::TypedPtr;
+use super::dtype::WeightDtype;
+
+fn require_half(dt: WeightDtype, what: &str) -> Result<(), String> {
+    if dt == WeightDtype::F32 {
+        return Err(format!(
+            "sgemm_bi typed dispatch: {what} is f32 — use the f32 entry points"
+        ));
+    }
+    Ok(())
+}
+
+/// Typed NN forward: `Y = X @ W + bias` (bias f32, fused into the kernel).
+pub fn sgemm_bi_forward_typed(
+    stream: &Arc<cudarc::driver::CudaStream>,
+    kernels: &GpuKernels,
+    y: TypedPtr,
+    x: TypedPtr,
+    w: TypedPtr,
+    bias_ptr: CUptr, // f32, 0 = none
+    dims: (usize, usize, usize),
+) -> Result<(), String> {
+    let (batch, n_in, n_out) = dims;
+    require_half(y.dtype, "output")?;
+    if x.dtype != y.dtype || w.dtype != y.dtype {
+        return Err("sgemm_bi_forward_typed: mixed dtypes not supported".into());
+    }
+    let dt = y.dtype;
+    let alpha: f32 = 1.0;
+    let beta: f32 = 0.0;
+    let m_i = batch as i32;
+    let n_i = n_out as i32;
+    let k_i = n_in as i32;
+
+    // GEMV N=1.
+    if n_out == 1 && batch >= 1 && n_in >= 32 {
+        let lda_i = n_in as i32;
+        let ldy_i: i32 = 1;
+        let cfg = cudarc::driver::LaunchConfig {
+            grid_dim: ((batch as u32).div_ceil(4), 1, 1),
+            block_dim: (128, 1, 1),
+            shared_mem_bytes: 0,
+        };
+        let mut b = stream.launch_builder(kernels.sgemm_nn_gemv_typed.get(dt));
+        b.arg(&y.ptr);
+        b.arg(&x.ptr);
+        b.arg(&w.ptr);
+        b.arg(&bias_ptr);
+        b.arg(&alpha);
+        b.arg(&beta);
+        b.arg(&m_i);
+        b.arg(&k_i);
+        b.arg(&lda_i);
+        b.arg(&ldy_i);
+        unsafe { b.launch(cfg) }.map_err(|e| format!("sgemm_bi_nn_gemv typed: {e:?}"))?;
+        return Ok(());
+    }
+
+    // Ultra-thin M (1..32).
+    if (1..32).contains(&batch) && (32..=2048).contains(&n_in) && n_out >= 32 {
+        let cfg = cudarc::driver::LaunchConfig {
+            grid_dim: ((n_out as u32).div_ceil(32), batch as u32, 1),
+            block_dim: (256, 1, 1),
+            shared_mem_bytes: (n_in * std::mem::size_of::<f32>()) as u32,
+        };
+        let mut b = stream.launch_builder(kernels.sgemm_nn_ultra_thin_typed.get(dt));
+        b.arg(&y.ptr);
+        b.arg(&x.ptr);
+        b.arg(&w.ptr);
+        b.arg(&bias_ptr);
+        b.arg(&alpha);
+        b.arg(&beta);
+        b.arg(&m_i);
+        b.arg(&n_i);
+        b.arg(&k_i);
+        b.arg(&k_i);
+        b.arg(&n_i);
+        b.arg(&n_i);
+        unsafe { b.launch(cfg) }.map_err(|e| format!("sgemm_bi_nn_ultra_thin typed: {e:?}"))?;
+        return Ok(());
+    }
+
+    // Narrow N (2..=127): small tile for batch <= 64, big-narrow otherwise.
+    if (2..=127).contains(&n_out) && batch >= 1 && n_in >= 1 {
+        let post_op: i32 = 0;
+        let small = batch <= 64;
+        let (grid, block, func) = if small {
+            (
+                (batch as u32).div_ceil(16) * (n_out as u32).div_ceil(16),
+                64u32,
+                kernels.sgemm_nn_narrow_small_typed.get(dt),
+            )
+        } else {
+            (
+                (batch as u32).div_ceil(64) * (n_out as u32).div_ceil(32),
+                128u32,
+                kernels.sgemm_nn_narrow_typed.get(dt),
+            )
+        };
+        let cfg = cudarc::driver::LaunchConfig {
+            grid_dim: (grid, 1, 1),
+            block_dim: (block, 1, 1),
+            shared_mem_bytes: 0,
+        };
+        let mut b = stream.launch_builder(func);
+        b.arg(&y.ptr);
+        b.arg(&x.ptr);
+        b.arg(&w.ptr);
+        b.arg(&bias_ptr);
+        b.arg(&alpha);
+        b.arg(&beta);
+        b.arg(&m_i);
+        b.arg(&n_i);
+        b.arg(&k_i);
+        b.arg(&k_i);
+        b.arg(&n_i);
+        b.arg(&n_i);
+        b.arg(&post_op);
+        unsafe { b.launch(cfg) }.map_err(|e| format!("sgemm_bi_nn_narrow typed: {e:?}"))?;
+        return Ok(());
+    }
+
+    Err(format!(
+        "sgemm_bi_forward_typed: Big/Slim buckets not yet implemented (stage 3) — \
+         shape M={batch} K={n_in} N={n_out}. Disable the batch-invariant flag for \
+         this configuration."
+    ))
+}
+
+/// Typed TN dW: `dW[K_out=n_in, n_out] += X^T @ dY` into the f32 master grad.
+pub fn sgemm_bi_backward_dw_typed(
+    stream: &Arc<cudarc::driver::CudaStream>,
+    kernels: &GpuKernels,
+    dw_ptr: CUptr, // f32 master, accumulated
+    dy: TypedPtr,
+    x_saved: TypedPtr,
+    dims: (usize, usize, usize),
+) -> Result<(), String> {
+    let (batch, n_in, n_out) = dims;
+    require_half(dy.dtype, "dY")?;
+    if x_saved.dtype != dy.dtype {
+        return Err("sgemm_bi_backward_dw_typed: mixed dtypes not supported".into());
+    }
+    let dt = dy.dtype;
+    let alpha: f32 = 1.0;
+
+    // GEMV N=1.
+    if n_out == 1 && n_in >= 4 && batch >= 32 {
+        let m_i = batch as i32;
+        let k_i = n_in as i32;
+        let lda_i = n_in as i32;
+        let ldy_i: i32 = 1;
+        let cfg = cudarc::driver::LaunchConfig {
+            grid_dim: ((n_in as u32).div_ceil(4), 1, 1),
+            block_dim: (128, 1, 1),
+            shared_mem_bytes: 0,
+        };
+        let mut b = stream.launch_builder(kernels.sgemm_tn_gemv_typed.get(dt));
+        b.arg(&dw_ptr);
+        b.arg(&x_saved.ptr);
+        b.arg(&dy.ptr);
+        b.arg(&alpha);
+        b.arg(&m_i);
+        b.arg(&k_i);
+        b.arg(&lda_i);
+        b.arg(&ldy_i);
+        unsafe { b.launch(cfg) }.map_err(|e| format!("sgemm_bi_tn_gemv typed: {e:?}"))?;
+        return Ok(());
+    }
+
+    // Narrow N (2..=127).
+    if (2..=127).contains(&n_out) && batch >= 1 && n_in >= 1 {
+        let m_red_i = batch as i32;
+        let k_out_i = n_in as i32;
+        let n_i = n_out as i32;
+        let cfg = cudarc::driver::LaunchConfig {
+            grid_dim: (
+                (n_in as u32).div_ceil(64) * (n_out as u32).div_ceil(32),
+                1,
+                1,
+            ),
+            block_dim: (128, 1, 1),
+            shared_mem_bytes: 0,
+        };
+        let mut b = stream.launch_builder(kernels.sgemm_tn_narrow_typed.get(dt));
+        b.arg(&dw_ptr);
+        b.arg(&x_saved.ptr);
+        b.arg(&dy.ptr);
+        b.arg(&alpha);
+        b.arg(&m_red_i);
+        b.arg(&k_out_i);
+        b.arg(&n_i);
+        unsafe { b.launch(cfg) }.map_err(|e| format!("sgemm_bi_tn_narrow typed: {e:?}"))?;
+        return Ok(());
+    }
+
+    Err(format!(
+        "sgemm_bi_backward_dw_typed: Big/split-M buckets not yet implemented (stage 3) — \
+         shape M={batch} K={n_in} N={n_out}. Disable the batch-invariant flag for \
+         this configuration."
+    ))
+}
+
+/// Typed NT dX: `dX[batch, n_in] = dY[batch, n_out] @ W^T` (overwrite).
+pub fn sgemm_bi_backward_dx_typed(
+    stream: &Arc<cudarc::driver::CudaStream>,
+    kernels: &GpuKernels,
+    dx: TypedPtr,
+    dy: TypedPtr,
+    w: TypedPtr,
+    dims: (usize, usize, usize),
+) -> Result<(), String> {
+    let (batch, n_in, n_out) = dims;
+    require_half(dx.dtype, "dX")?;
+    if dy.dtype != dx.dtype || w.dtype != dx.dtype {
+        return Err("sgemm_bi_backward_dx_typed: mixed dtypes not supported".into());
+    }
+    let dt = dx.dtype;
+    let alpha: f32 = 1.0;
+
+    // GEMV N=1 (outer product).
+    if n_out == 1 && batch >= 1 && n_in >= 1 {
+        let m_i = batch as i32;
+        let k_i = n_in as i32;
+        let ldx_i = n_in as i32;
+        let ldy_i: i32 = 1;
+        let total = (batch * n_in) as u32;
+        let cfg = cudarc::driver::LaunchConfig {
+            grid_dim: (total.div_ceil(256), 1, 1),
+            block_dim: (256, 1, 1),
+            shared_mem_bytes: 0,
+        };
+        let mut b = stream.launch_builder(kernels.sgemm_nt_gemv_typed.get(dt));
+        b.arg(&dx.ptr);
+        b.arg(&dy.ptr);
+        b.arg(&w.ptr);
+        b.arg(&alpha);
+        b.arg(&m_i);
+        b.arg(&k_i);
+        b.arg(&ldx_i);
+        b.arg(&ldy_i);
+        unsafe { b.launch(cfg) }.map_err(|e| format!("sgemm_bi_nt_gemv typed: {e:?}"))?;
+        return Ok(());
+    }
+
+    // Narrow reduction N (2..=127).
+    if (2..=127).contains(&n_out) && batch >= 1 && n_in >= 1 {
+        let m_i = batch as i32;
+        let n_i = n_out as i32;
+        let k_out_i = n_in as i32;
+        let cfg = cudarc::driver::LaunchConfig {
+            grid_dim: (
+                (batch as u32).div_ceil(64) * (n_in as u32).div_ceil(32),
+                1,
+                1,
+            ),
+            block_dim: (128, 1, 1),
+            shared_mem_bytes: 0,
+        };
+        let mut b = stream.launch_builder(kernels.sgemm_nt_narrow_typed.get(dt));
+        b.arg(&dx.ptr);
+        b.arg(&dy.ptr);
+        b.arg(&w.ptr);
+        b.arg(&alpha);
+        b.arg(&m_i);
+        b.arg(&n_i);
+        b.arg(&k_out_i);
+        unsafe { b.launch(cfg) }.map_err(|e| format!("sgemm_bi_nt_narrow typed: {e:?}"))?;
+        return Ok(());
+    }
+
+    Err(format!(
+        "sgemm_bi_backward_dx_typed: Big/Slim buckets not yet implemented (stage 3) — \
+         shape M={batch} K={n_in} N={n_out}. Disable the batch-invariant flag for \
+         this configuration."
+    ))
 }

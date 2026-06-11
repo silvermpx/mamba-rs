@@ -74,7 +74,9 @@ fn run_sync(dtype: WeightDtype) {
         .unwrap();
 
     let mut compute_vals = vec![0f32; n];
-    cw.in_proj_w.download_to_f32(&mut compute_vals).unwrap();
+    cw.in_proj_w
+        .download_to_f32(&ctx.stream, &mut compute_vals)
+        .unwrap();
     ctx.stream.synchronize().unwrap();
 
     let cos = cos_sim(&master_vals, &compute_vals);
@@ -97,7 +99,9 @@ fn run_sync(dtype: WeightDtype) {
         .download(&ctx.stream, &mut master_norm)
         .unwrap();
     let mut compute_norm = vec![0f32; n_norm];
-    cw.norm_weight.download_to_f32(&mut compute_norm).unwrap();
+    cw.norm_weight
+        .download_to_f32(&ctx.stream, &mut compute_norm)
+        .unwrap();
     ctx.stream.synchronize().unwrap();
     for (m, c) in master_norm.iter().zip(&compute_norm) {
         assert_eq!(m.to_bits(), c.to_bits(), "norm_weight D2D not bit-exact");

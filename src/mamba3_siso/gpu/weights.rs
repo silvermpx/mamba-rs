@@ -192,14 +192,14 @@ impl GpuMamba3MixedWeights {
         let mut alloc_bulk = |data: &[f32]| -> Result<WeightSliceDyn, String> {
             let len = data.len();
             let slice = WeightSliceDyn::from_byte_offset(bulk_base, bulk_off, len, bulk_dtype);
-            slice.upload_from_cpu_f32(data)?;
+            slice.upload_from_cpu_f32(stream, data)?;
             bulk_off += len * bulk_dtype.size_bytes();
             Ok(slice)
         };
         let mut alloc_f32 = |data: &[f32]| -> Result<WeightSliceDyn, String> {
             let len = data.len();
             let slice = WeightSliceDyn::from_byte_offset(f32_base, f32_off, len, WeightDtype::F32);
-            slice.upload_from_cpu_f32(data)?;
+            slice.upload_from_cpu_f32(stream, data)?;
             f32_off += len * 4;
             Ok(slice)
         };

@@ -267,6 +267,14 @@ pub fn gpu_sgemm_backward_dw_grad_typed(
         dy.dtype, x_saved.dtype,
         "cuBLAS GemmEx requires A.dtype == B.dtype"
     );
+    debug_assert!(
+        dy.dtype != WeightDtype::F32 || !ctx.batch_invariant(),
+        "f32 TypedPtr under the batch-invariant flag would silently take \
+         non-deterministic cuBLAS — use gpu_sgemm_backward_dw_grad instead"
+    );
+    if ctx.batch_invariant() && dy.dtype != WeightDtype::F32 {
+        return bi_sgemm_backward_dw_typed(ctx, dw.ptr(), dy, x_saved, (batch, n_in, n_out));
+    }
     let alpha: f32 = 1.0;
     let beta: f32 = 1.0;
     unsafe {
@@ -326,6 +334,14 @@ pub fn gpu_gemm_ex_backward_dx_typed(
         dx.dtype, dy.dtype,
         "typed dX GEMM: dx.dtype must match dy/w for PEDANTIC path"
     );
+    debug_assert!(
+        dx.dtype != WeightDtype::F32 || !ctx.batch_invariant(),
+        "f32 TypedPtr under the batch-invariant flag would silently take \
+         non-deterministic cuBLAS — use gpu_sgemm_backward_dx_raw instead"
+    );
+    if ctx.batch_invariant() && dx.dtype != WeightDtype::F32 {
+        return bi_sgemm_backward_dx_typed(ctx, dx, dy, w, (batch, n_in, n_out));
+    }
     let alpha: f32 = 1.0;
     let beta: f32 = 0.0;
     unsafe {
@@ -353,6 +369,155 @@ pub fn gpu_gemm_ex_backward_dx_typed(
         .map_err(|e| format!("cuBLAS gemm_ex backward dX typed failed: {e:?}"))?;
     }
     Ok(())
+}
+
+/// Elementwise upcast of a typed (bf16/f16) device buffer into f32 (exact —
+/// 16-bit grids embed in f32 without rounding).
+fn bi_upcast_to_f32(
+    ctx: &GpuCtx,
+    src: TypedPtr,
+    dst_ptr: cudarc::driver::sys::CUdeviceptr,
+    n: usize,
+) -> Result<(), String> {
+    let kernel = match src.dtype {
+        WeightDtype::Bf16 => &ctx.kernels.cast_bf16_to_f32,
+        WeightDtype::F16 => &ctx.kernels.cast_f16_to_f32,
+        WeightDtype::F32 => return Err("bi_upcast_to_f32: src is already f32".into()),
+    };
+    let n_i = n as i32;
+    let src_ptr = src.ptr;
+    let mut b = ctx.stream.launch_builder(kernel);
+    b.arg(&dst_ptr);
+    b.arg(&src_ptr);
+    b.arg(&n_i);
+    unsafe { b.launch(grid_1d(n)) }
+        .map(|_| ())
+        .map_err(|e| format!("bi_upcast_to_f32: {e:?}"))
+}
+
+/// Elementwise RNE downcast of an f32 device buffer into a typed (bf16/f16)
+/// buffer — the single rounding the typed-GEMM contract allows.
+fn bi_downcast_from_f32(
+    ctx: &GpuCtx,
+    dst: TypedPtr,
+    src_ptr: cudarc::driver::sys::CUdeviceptr,
+    n: usize,
+) -> Result<(), String> {
+    let kernel = match dst.dtype {
+        WeightDtype::Bf16 => &ctx.kernels.cast_f32_to_bf16,
+        WeightDtype::F16 => &ctx.kernels.cast_f32_to_f16,
+        WeightDtype::F32 => return Err("bi_downcast_from_f32: dst is already f32".into()),
+    };
+    let n_i = n as i32;
+    let dst_ptr = dst.ptr;
+    let mut b = ctx.stream.launch_builder(kernel);
+    b.arg(&dst_ptr);
+    b.arg(&src_ptr);
+    b.arg(&n_i);
+    unsafe { b.launch(grid_1d(n)) }
+        .map(|_| ())
+        .map_err(|e| format!("bi_downcast_from_f32: {e:?}"))
+}
+
+/// Batch-invariant typed NN forward with FULL shape coverage:
+/// `Y[B,N] = X[B,K] @ W[K,N] (+ bias)` for homogeneous bf16/f16 operands.
+/// Covered typed buckets run natively; every other shape routes through
+/// "upcast inputs → f32 sgemm_bi → RNE downcast Y", which produces the
+/// SAME bits as a native typed kernel (the stage-2 contract: typed kernels
+/// keep f32 accumulation and the f32 twin's FMA chain, with exactly one
+/// RNE downcast at the store). `dims` = `(batch, n_in, n_out)`.
+pub fn bi_sgemm_forward_typed(
+    ctx: &GpuCtx,
+    y: TypedPtr,
+    x: TypedPtr,
+    w: TypedPtr,
+    bias_ptr: cudarc::driver::sys::CUdeviceptr,
+    dims: (usize, usize, usize),
+) -> Result<(), String> {
+    if super::sgemm_bi::sgemm_bi_forward_typed(&ctx.stream, &ctx.kernels, y, x, w, bias_ptr, dims)
+        .is_ok()
+    {
+        return Ok(());
+    }
+    let (m, k, n) = dims;
+    ctx.with_bi_upcast_scratch((m * k, k * n, m * n), |xs, ws, ys| {
+        bi_upcast_to_f32(ctx, x, xs.cached_ptr(), m * k)?;
+        bi_upcast_to_f32(ctx, w, ws.cached_ptr(), k * n)?;
+        super::sgemm_bi::sgemm_bi_forward(
+            &ctx.stream,
+            &ctx.kernels,
+            ys,
+            xs,
+            ws.cached_ptr(),
+            bias_ptr,
+            dims,
+        )?;
+        bi_downcast_from_f32(ctx, y, ys.cached_ptr(), m * n)
+    })
+}
+
+/// Batch-invariant typed dW backward with FULL shape coverage:
+/// `dW[K,N] += X^T[K,B] @ dY[B,N]` — typed dY/X, f32 master dW (no
+/// downcast; gradients accumulate in f32 by design). Uncovered typed
+/// buckets upcast dY/X and run the f32 TN dispatcher — bit-identical to a
+/// native typed kernel. `dims` = `(batch, n_in, n_out)`.
+pub fn bi_sgemm_backward_dw_typed(
+    ctx: &GpuCtx,
+    dw_ptr: cudarc::driver::sys::CUdeviceptr,
+    dy: TypedPtr,
+    x_saved: TypedPtr,
+    dims: (usize, usize, usize),
+) -> Result<(), String> {
+    if super::sgemm_bi::sgemm_bi_backward_dw_typed(
+        &ctx.stream,
+        &ctx.kernels,
+        dw_ptr,
+        dy,
+        x_saved,
+        dims,
+    )
+    .is_ok()
+    {
+        return Ok(());
+    }
+    let (m, k, n) = dims;
+    ctx.with_bi_upcast_scratch((m * n, m * k, 0), |dys, xs, _| {
+        bi_upcast_to_f32(ctx, dy, dys.cached_ptr(), m * n)?;
+        bi_upcast_to_f32(ctx, x_saved, xs.cached_ptr(), m * k)?;
+        super::sgemm_bi::sgemm_bi_backward_dw(&ctx.stream, &ctx.kernels, dw_ptr, dys, xs, dims)
+    })
+}
+
+/// Batch-invariant typed dX backward with FULL shape coverage:
+/// `dX[B,K] = dY[B,N] @ W^T[N,K]` — typed dY/W/dX. Uncovered typed buckets
+/// upcast dY/W, run the f32 NT dispatcher, and RNE-downcast dX —
+/// bit-identical to a native typed kernel. `dims` = `(batch, n_in, n_out)`.
+pub fn bi_sgemm_backward_dx_typed(
+    ctx: &GpuCtx,
+    dx: TypedPtr,
+    dy: TypedPtr,
+    w: TypedPtr,
+    dims: (usize, usize, usize),
+) -> Result<(), String> {
+    if super::sgemm_bi::sgemm_bi_backward_dx_typed(&ctx.stream, &ctx.kernels, dx, dy, w, dims)
+        .is_ok()
+    {
+        return Ok(());
+    }
+    let (m, k, n) = dims;
+    ctx.with_bi_upcast_scratch((m * n, k * n, m * k), |dys, ws, dxs| {
+        bi_upcast_to_f32(ctx, dy, dys.cached_ptr(), m * n)?;
+        bi_upcast_to_f32(ctx, w, ws.cached_ptr(), k * n)?;
+        super::sgemm_bi::sgemm_bi_backward_dx(
+            &ctx.stream,
+            &ctx.kernels,
+            dxs,
+            dys,
+            ws.cached_ptr(),
+            dims,
+        )?;
+        bi_downcast_from_f32(ctx, dx, dxs.cached_ptr(), m * k)
+    })
 }
 
 /// Full backward: dW (accumulated), dX (overwritten), db (accumulated).
@@ -836,6 +1001,31 @@ pub fn gpu_gemm_typed_forward_raw(
     // Opt-in only — default is cuBLAS gemv for maximum throughput.
     // Enable via `ctx.set_batch_invariant(true)` or the
     // `MAMBA_RS_BATCH_INVARIANT=1` environment variable.
+    // Typed sgemm_bi (Phase 11), homogeneous bf16/f16 operand triples only.
+    // Routing by M:
+    //   - M >= 128 (training prefill scale): full-coverage entry — native
+    //     typed buckets, else upcast → f32 sgemm_bi (Big/narrow cover all
+    //     M >= 128, N >= 2) → RNE downcast. Bit-identical by contract,
+    //     and the Big-tile kernels beat matvec by a wide margin here.
+    //   - M < 128 (decode / small-batch inference): fall through to
+    //     matvec_bi below. Inference batch-parity asserts STRICT all-M
+    //     bit-invariance of decode logits (KL ~1e-12 across batch sizes);
+    //     any M-dependent bucket choice here quantizes through the bf16
+    //     state each step and compounds to KL ~1e-3 (measured at b=1
+    //     ultra-thin vs b=32 matvec on mamba-130m). matvec_bi is one
+    //     reduction order for every M — that property is the contract.
+    // Mixed-dtype combos (e.g. f32 activations × half weights) also use
+    // matvec_bi — ALSO deterministic (never silent cuBLAS).
+    if ctx.batch_invariant()
+        && c.dtype != WeightDtype::F32
+        && c.dtype == x.dtype
+        && x.dtype == w.dtype
+        && batch >= 128
+        && n_out >= 2
+    {
+        return bi_sgemm_forward_typed(ctx, c, x, w, bias_ptr.unwrap_or(0), dims);
+    }
+
     if ctx.batch_invariant()
         && let Some(kernel) = pick_bi_matvec(ctx, x.dtype, w.dtype, c.dtype)
     {

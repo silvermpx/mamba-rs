@@ -73,12 +73,24 @@ fn flat_weights(w: &MambaWeights) -> Vec<f32> {
     out
 }
 
-/// Build an f32 trainer with the batch-invariant flag set as requested and
-/// run `steps` identical training steps. Returns the final master snapshot.
-fn run_training(batch: usize, seq_len: usize, steps: usize, invariant: bool) -> Vec<f32> {
+/// Build a trainer (f32 master, `dtype` compute weights) with the
+/// batch-invariant flag set as requested and run `steps` identical training
+/// steps. Returns the final f32 master snapshot.
+fn run_training(
+    batch: usize,
+    seq_len: usize,
+    steps: usize,
+    invariant: bool,
+    dtype: WeightDtype,
+) -> Vec<f32> {
     let cfg = cfg();
     let input_dim = cfg.d_model;
     let mut cpu = MambaWeights::init(&cfg, input_dim, 0xDE7E_4213);
+    if dtype != WeightDtype::F32 {
+        // The mixed-precision pipeline requires an identity input_proj.
+        cpu.input_proj_w.clear();
+        cpu.input_proj_b.clear();
+    }
     for lw in cpu.layers.iter_mut() {
         lw.a_neg = lw.a_log.iter().map(|&v| -v.exp()).collect();
     }
@@ -89,8 +101,8 @@ fn run_training(batch: usize, seq_len: usize, steps: usize, invariant: bool) -> 
         lr: 1e-3,
         weight_decay: 0.0,
     };
-    let mut trainer = MambaTrainer::new_full(0, &cpu, cfg, session, WeightDtype::F32)
-        .expect("construct f32 trainer");
+    let mut trainer =
+        MambaTrainer::new_full(0, &cpu, cfg, session, dtype).expect("construct trainer");
     trainer.ctx().set_batch_invariant(invariant);
 
     let n = batch * seq_len * input_dim;
@@ -104,8 +116,8 @@ fn run_training(batch: usize, seq_len: usize, steps: usize, invariant: bool) -> 
 
 #[test]
 fn flag_on_training_is_bit_identical_across_runs() {
-    let a = run_training(4, 64, 5, true);
-    let b = run_training(4, 64, 5, true);
+    let a = run_training(4, 64, 5, true, WeightDtype::F32);
+    let b = run_training(4, 64, 5, true, WeightDtype::F32);
     assert_eq!(a.len(), b.len());
     let mut diffs = 0usize;
     for (i, (&x, &y)) in a.iter().zip(&b).enumerate() {
@@ -127,8 +139,8 @@ fn flag_on_matches_cublas_loosely() {
     // Same training trajectory with the deterministic triad vs cuBLAS TF32.
     // TF32's 10-bit mantissa compounds through 5 steps; this is a sanity
     // bound against transpose/accumulation bugs, not a precision claim.
-    let inv = run_training(4, 64, 5, true);
-    let blas = run_training(4, 64, 5, false);
+    let inv = run_training(4, 64, 5, true, WeightDtype::F32);
+    let blas = run_training(4, 64, 5, false, WeightDtype::F32);
     let mut dot = 0.0f64;
     let mut na = 0.0f64;
     let mut nb = 0.0f64;
@@ -142,6 +154,54 @@ fn flag_on_matches_cublas_loosely() {
     assert!(
         cos > 0.99999,
         "deterministic triad diverged from cuBLAS trajectory: cos={cos}"
+    );
+}
+
+#[test]
+fn flag_on_mixed_training_is_bit_identical_across_runs() {
+    // Phase 11: bf16/f16 mixed training with the flag on routes every GEMM
+    // through the typed sgemm_bi buckets or the upcast fallback — both
+    // fully deterministic. Two fresh trainers must agree bit for bit.
+    for dt in [WeightDtype::Bf16, WeightDtype::F16] {
+        let a = run_training(4, 64, 5, true, dt);
+        let b = run_training(4, 64, 5, true, dt);
+        assert_eq!(a.len(), b.len());
+        let mut diffs = 0usize;
+        for (i, (&x, &y)) in a.iter().zip(&b).enumerate() {
+            if x.to_bits() != y.to_bits() {
+                if diffs < 5 {
+                    eprintln!("{dt:?} bit mismatch at {i}: {x:?} vs {y:?}");
+                }
+                diffs += 1;
+            }
+        }
+        assert_eq!(
+            diffs, 0,
+            "{dt:?} batch-invariant mixed training must be bit-identical across runs"
+        );
+    }
+}
+
+#[test]
+fn flag_on_mixed_matches_pedantic_loosely() {
+    // Same bf16 trajectory: deterministic typed triad vs cuBLAS GemmEx
+    // PEDANTIC. Both quantize identically (bf16 weights/activations); only
+    // the GEMM accumulation order differs, compounded over 5 steps.
+    let inv = run_training(4, 64, 5, true, WeightDtype::Bf16);
+    let ped = run_training(4, 64, 5, false, WeightDtype::Bf16);
+    let mut dot = 0.0f64;
+    let mut na = 0.0f64;
+    let mut nb = 0.0f64;
+    for (&x, &y) in inv.iter().zip(&ped) {
+        dot += x as f64 * y as f64;
+        na += x as f64 * x as f64;
+        nb += y as f64 * y as f64;
+    }
+    let cos = dot / (na.sqrt() * nb.sqrt()).max(1e-30);
+    eprintln!("bf16 sgemm_bi vs cuBLAS-PEDANTIC snapshot cosine = {cos:.9}");
+    assert!(
+        cos > 0.999,
+        "deterministic bf16 triad diverged from PEDANTIC trajectory: cos={cos}"
     );
 }
 
@@ -215,10 +275,6 @@ fn bench_sgemm_bi_vs_tf32() {
             ..cfg()
         };
         let input_dim = cfg.d_model;
-        let mut cpu = MambaWeights::init(&cfg, input_dim, 7);
-        for lw in cpu.layers.iter_mut() {
-            lw.a_neg = lw.a_log.iter().map(|&v| -v.exp()).collect();
-        }
         let session = TrainSessionCfg {
             input_dim,
             batch: b,
@@ -230,9 +286,17 @@ fn bench_sgemm_bi_vs_tf32() {
         let input = det(n, 1, 1.0);
         let dtemp = det(n, 2, 0.1);
 
-        let time_mode = |invariant: bool| -> f64 {
-            let mut tr =
-                MambaTrainer::new_full(0, &cpu, cfg, session, WeightDtype::F32).expect("trainer");
+        let time_mode = |invariant: bool, dtype: WeightDtype| -> f64 {
+            let mut cpu = MambaWeights::init(&cfg, input_dim, 7);
+            if dtype != WeightDtype::F32 {
+                // The mixed-precision pipeline requires an identity input_proj.
+                cpu.input_proj_w.clear();
+                cpu.input_proj_b.clear();
+            }
+            for lw in cpu.layers.iter_mut() {
+                lw.a_neg = lw.a_log.iter().map(|&v| -v.exp()).collect();
+            }
+            let mut tr = MambaTrainer::new_full(0, &cpu, cfg, session, dtype).expect("trainer");
             tr.ctx().set_batch_invariant(invariant);
             for _ in 0..3 {
                 tr.step(&input, &dtemp).expect("warmup");
@@ -245,13 +309,22 @@ fn bench_sgemm_bi_vs_tf32() {
             start.elapsed().as_secs_f64() / iters as f64
         };
 
-        let t_blas = time_mode(false);
-        let t_bi = time_mode(true);
-        eprintln!(
-            "[{label}] B={b} T={t}: cuBLAS-TF32 {:.3} ms/step | sgemm_bi {:.3} ms/step | ratio {:.2}x",
-            t_blas * 1e3,
-            t_bi * 1e3,
-            t_bi / t_blas
-        );
+        for dt in [WeightDtype::F32, WeightDtype::Bf16, WeightDtype::F16] {
+            // flag-off baseline: cuBLAS TF32 for f32, cuBLAS GemmEx
+            // PEDANTIC (f32 accumulate, no tensor cores) for bf16/f16.
+            let baseline = if dt == WeightDtype::F32 {
+                "cuBLAS-TF32"
+            } else {
+                "cuBLAS-PEDANTIC"
+            };
+            let t_blas = time_mode(false, dt);
+            let t_bi = time_mode(true, dt);
+            eprintln!(
+                "[{label} {dt:?}] B={b} T={t}: {baseline} {:.3} ms/step | sgemm_bi {:.3} ms/step | ratio {:.2}x",
+                t_blas * 1e3,
+                t_bi * 1e3,
+                t_bi / t_blas
+            );
+        }
     }
 }

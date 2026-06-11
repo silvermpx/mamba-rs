@@ -29,6 +29,12 @@ pub struct GpuCtx {
     /// `MAMBA_RS_BATCH_INVARIANT=1` environment variable when strict
     /// cross-batch bit-identity is required.
     batch_invariant: std::cell::Cell<bool>,
+    /// Grow-only f32 scratch triple for the batch-invariant typed-GEMM
+    /// upcast fallback: typed shapes without a native typed bucket run as
+    /// "upcast inputs → f32 sgemm_bi → RNE downcast output", bit-identical
+    /// to a native typed kernel by the stage-2 contract. Lazily grown on
+    /// first hit; steady-state training steps reuse without allocation.
+    bi_upcast_scratch: [RefCell<Option<super::buffers::GpuBuffer>>; 3],
 }
 
 impl GpuCtx {
@@ -61,6 +67,15 @@ impl GpuCtx {
         let stream = device.fork_stream()?;
         let arch = GpuDevice::nvrtc_arch(device.compute_capability);
         let kernels = MambaKernels::compile(device.context(), arch)?;
+        // The splitk/transpose scratch buffers inside `kernels` were
+        // alloc_zeros'd on the DEFAULT stream; `ctx.stream` is NON_BLOCKING
+        // and never orders against it. Drain once here so first use on
+        // ctx.stream can't race the init memset (same hazard class as the
+        // legacy-stream memcpy fix in buffers.rs).
+        device
+            .default_stream()
+            .synchronize()
+            .map_err(|e| format!("default-stream drain after kernel compile: {e:?}"))?;
         let (blas, ws) = device.create_cublas(&stream)?;
         let batch_invariant = std::env::var("MAMBA_RS_BATCH_INVARIANT")
             .ok()
@@ -74,7 +89,110 @@ impl GpuCtx {
             half_staging_ptr: RefCell::new(0),
             half_staging_bytes: RefCell::new(0),
             batch_invariant: std::cell::Cell::new(batch_invariant),
+            bi_upcast_scratch: [RefCell::new(None), RefCell::new(None), RefCell::new(None)],
         })
+    }
+
+    /// Run `f` with the three grow-only f32 scratch buffers used by the
+    /// batch-invariant typed-GEMM upcast fallback, sized to at least
+    /// `elems = (a, b, c)` f32 elements each. Buffers persist across calls
+    /// (grow-only) so steady-state training steps do not allocate.
+    pub(crate) fn with_bi_upcast_scratch<R>(
+        &self,
+        elems: (usize, usize, usize),
+        f: impl FnOnce(
+            &mut super::buffers::GpuBuffer,
+            &mut super::buffers::GpuBuffer,
+            &mut super::buffers::GpuBuffer,
+        ) -> Result<R, String>,
+    ) -> Result<R, String> {
+        let sizes = [elems.0, elems.1, elems.2];
+        for (cell, &need) in self.bi_upcast_scratch.iter().zip(&sizes) {
+            let mut slot = cell.borrow_mut();
+            let have = slot.as_ref().map_or(0, |b| b.len());
+            let need = need.max(1);
+            if have < need {
+                *slot = Some(super::buffers::GpuBuffer::zeros(&self.stream, need)?);
+            }
+        }
+        let mut a = self.bi_upcast_scratch[0].borrow_mut();
+        let mut b = self.bi_upcast_scratch[1].borrow_mut();
+        let mut c = self.bi_upcast_scratch[2].borrow_mut();
+        f(
+            a.as_mut().expect("bi_upcast_scratch[0] sized above"),
+            b.as_mut().expect("bi_upcast_scratch[1] sized above"),
+            c.as_mut().expect("bi_upcast_scratch[2] sized above"),
+        )
+    }
+
+    /// Current device pointers of the three `bi_upcast_scratch` slots
+    /// (0 = unallocated). CUDA-Graph guard: capture snapshots these and
+    /// replay asserts they have not moved — a lazy regrow after capture
+    /// would leave the graph dereferencing freed memory.
+    pub(crate) fn bi_upcast_scratch_ptrs(&self) -> [cudarc::driver::sys::CUdeviceptr; 3] {
+        let p = |i: usize| {
+            self.bi_upcast_scratch[i]
+                .borrow()
+                .as_ref()
+                .map_or(0, |b| b.cached_ptr())
+        };
+        [p(0), p(1), p(2)]
+    }
+
+    /// Pre-size the batch-invariant typed-GEMM upcast scratch for a mixed
+    /// training step BEFORE CUDA Graph capture, so `with_bi_upcast_scratch`
+    /// inside the captured body never grows (a lazy grow during capture
+    /// fails the capture; one after capture frees pointers a previously
+    /// captured graph still references). Sizing covers every step GEMM
+    /// (in_proj / x_proj / dt_proj / out_proj fwd, dW, dX) at
+    /// `m = batch·seq_len`. No-op for f32 or when the batch-invariant
+    /// flag is off (the captured body then never touches this scratch).
+    pub fn presize_bi_upcast_scratch_for_train(
+        &self,
+        cfg: &MambaConfig,
+        batch: usize,
+        seq_len: usize,
+        dtype: WeightDtype,
+    ) -> Result<(), String> {
+        if matches!(dtype, WeightDtype::F32) || !self.batch_invariant() {
+            return Ok(());
+        }
+        let m = batch * seq_len;
+        let dm = cfg.d_model;
+        let di = cfg.d_inner();
+        let xproj_out = cfg.dt_rank() + 2 * cfg.d_state;
+        // Largest single GEMM operand dim and largest K×N weight across the
+        // step's GEMMs; every slot request (m·k, k·n, m·n) is ≤ this bound.
+        let max_dim = dm.max(2 * di).max(xproj_out);
+        let max_kn = (dm * 2 * di)
+            .max(di * xproj_out)
+            .max(cfg.dt_rank() * di)
+            .max(di * dm);
+        let elems = (m * max_dim).max(max_kn);
+        self.with_bi_upcast_scratch((elems, elems, elems), |_, _, _| Ok(()))
+    }
+
+    /// Mamba-3 twin of [`Self::presize_bi_upcast_scratch_for_train`] — the
+    /// M3 step GEMMs are in_proj (`d_model → in_proj_out_dim`) and
+    /// out_proj (`d_inner → d_model`).
+    pub fn presize_bi_upcast_scratch_for_train_m3(
+        &self,
+        cfg: &crate::mamba3_siso::config::Mamba3Config,
+        batch: usize,
+        seq_len: usize,
+        dtype: WeightDtype,
+    ) -> Result<(), String> {
+        if matches!(dtype, WeightDtype::F32) || !self.batch_invariant() {
+            return Ok(());
+        }
+        let m = batch * seq_len;
+        let dm = cfg.d_model;
+        let di = cfg.d_inner();
+        let ip = cfg.in_proj_out_dim();
+        let max_dim = dm.max(ip).max(di);
+        let max_kn = (dm * ip).max(di * dm);
+        let elems = (m * max_dim).max(max_kn);
+        self.with_bi_upcast_scratch((elems, elems, elems), |_, _, _| Ok(()))
     }
 
     /// Enable or disable the batch-invariant matvec path.

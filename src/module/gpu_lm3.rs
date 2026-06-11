@@ -219,11 +219,11 @@ impl GpuMamba3LM {
             WeightDtype::Bf16 | WeightDtype::F16 => {
                 let embed_bytes = embed.len() * dtype.size_bytes();
                 let e = GpuByteBuffer::zeros(stream, embed_bytes)?;
-                upload_f32_as_dtype(&e, &embed, dtype)?;
+                upload_f32_as_dtype(stream, &e, &embed, dtype)?;
                 let lm = if let Some(ref lm_w) = lm_head_padded {
                     let lm_bytes = lm_w.len() * dtype.size_bytes();
                     let b = GpuByteBuffer::zeros(stream, lm_bytes)?;
-                    upload_f32_as_dtype(&b, lm_w, dtype)?;
+                    upload_f32_as_dtype(stream, &b, lm_w, dtype)?;
                     Some(b)
                 } else {
                     None
@@ -547,36 +547,28 @@ impl GpuMamba3LM {
     }
 }
 
-fn upload_f32_as_dtype(dst: &GpuByteBuffer, src: &[f32], dtype: WeightDtype) -> Result<(), String> {
+fn upload_f32_as_dtype(
+    stream: &std::sync::Arc<cudarc::driver::CudaStream>,
+    dst: &GpuByteBuffer,
+    src: &[f32],
+    dtype: WeightDtype,
+) -> Result<(), String> {
+    use crate::mamba_ssm::gpu::buffers::cu_memcpy_htod_raw;
     let dst_ptr = dst.cached_ptr();
     match dtype {
         WeightDtype::F32 => {
             let bytes: &[u8] = bytemuck::cast_slice(src);
-            cu_memcpy_htod(dst_ptr, bytes)
+            cu_memcpy_htod_raw(stream, dst_ptr, bytes)
         }
         WeightDtype::Bf16 => {
             let buf: Vec<half::bf16> = src.iter().map(|&v| half::bf16::from_f32(v)).collect();
             let bytes: &[u8] = bytemuck::cast_slice(&buf);
-            cu_memcpy_htod(dst_ptr, bytes)
+            cu_memcpy_htod_raw(stream, dst_ptr, bytes)
         }
         WeightDtype::F16 => {
             let buf: Vec<half::f16> = src.iter().map(|&v| half::f16::from_f32(v)).collect();
             let bytes: &[u8] = bytemuck::cast_slice(&buf);
-            cu_memcpy_htod(dst_ptr, bytes)
+            cu_memcpy_htod_raw(stream, dst_ptr, bytes)
         }
     }
-}
-
-fn cu_memcpy_htod(dst_ptr: cudarc::driver::sys::CUdeviceptr, bytes: &[u8]) -> Result<(), String> {
-    let result = unsafe {
-        cudarc::driver::sys::cuMemcpyHtoD_v2(
-            dst_ptr,
-            bytes.as_ptr() as *const std::ffi::c_void,
-            bytes.len(),
-        )
-    };
-    if result != cudarc::driver::sys::CUresult::CUDA_SUCCESS {
-        return Err(format!("M3 cu_memcpy_htod failed: {result:?}"));
-    }
-    Ok(())
 }

@@ -342,6 +342,18 @@ pub struct MambaKernels {
     pub splitk_scratch: cudarc::driver::CudaSlice<f32>,
     /// W-transpose staging for the bwd_dx wide path: 4M f32 = 16 MB.
     pub transpose_scratch: cudarc::driver::CudaSlice<f32>,
+
+    // -- sgemm_bi typed (bf16/f16) variants — Phase 11 stage 2 buckets.
+    // X/W/Y/dY/dX typed, dW + bias f32, f32 accumulation throughout; each
+    // kernel is bit-identical to "upcast inputs to f32, run the f32 twin".
+    pub sgemm_nn_gemv_typed: HalfKernel,
+    pub sgemm_tn_gemv_typed: HalfKernel,
+    pub sgemm_nt_gemv_typed: HalfKernel,
+    pub sgemm_nn_ultra_thin_typed: HalfKernel,
+    pub sgemm_nn_narrow_typed: HalfKernel,
+    pub sgemm_nn_narrow_small_typed: HalfKernel,
+    pub sgemm_tn_narrow_typed: HalfKernel,
+    pub sgemm_nt_narrow_typed: HalfKernel,
 }
 
 impl MambaKernels {
@@ -639,6 +651,14 @@ impl MambaKernels {
                 .default_stream()
                 .alloc_zeros::<f32>(1 << 22)
                 .map_err(|e| format!("transpose_scratch alloc: {e:?}"))?,
+            sgemm_nn_gemv_typed: load_half("sgemm_bi_nn_gemv")?,
+            sgemm_tn_gemv_typed: load_half("sgemm_bi_tn_gemv")?,
+            sgemm_nt_gemv_typed: load_half("sgemm_bi_nt_gemv")?,
+            sgemm_nn_ultra_thin_typed: load_half("sgemm_bi_nn_ultra_thin")?,
+            sgemm_nn_narrow_typed: load_half("sgemm_bi_nn_narrow")?,
+            sgemm_nn_narrow_small_typed: load_half("sgemm_bi_nn_narrow_small")?,
+            sgemm_tn_narrow_typed: load_half("sgemm_bi_tn_narrow")?,
+            sgemm_nt_narrow_typed: load_half("sgemm_bi_nt_narrow")?,
 
             _module: module,
         })

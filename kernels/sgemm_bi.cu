@@ -33,7 +33,7 @@
 // reduce the working set so it fits in a smaller L2.
 //
 // Host-side (kernels.rs::group_m_for_cc) selects a per-architecture value and
-// passes `-DGROUP_M=N` to NVRTC, overriding this default:
+// passes `-DSGB_GROUP_M=N` to NVRTC, overriding this default:
 //   sm_80 (A100 40MB L2 / sm_86 RTX 30xx 6MB L2): SGB_GROUP_M=8
 //   sm_89 (RTX 40xx / 6000 Ada 96MB L2):          SGB_GROUP_M=16
 //   sm_90 (H100 60MB L2 / GH200):                 SGB_GROUP_M=16
@@ -4161,3 +4161,472 @@ void sgemm_transpose_f32_2d(
         dst[out_row * rows + out_col] = tile[tx][ty];
     }
 }
+
+// ============================================================================
+// Typed (bf16/f16) variants — Phase 11 stage 2: sync-load buckets.
+// ============================================================================
+// Contract (per the typed-triad design research):
+//   - X / W / Y / dY / dX are T_ACT (typed I/O); loads upcast via to_f at the
+//     read site, EXACTLY one RNE downcast (FROM_F) at the final store.
+//   - dW and bias stay f32 (master gradients / f32 bias) — never rounded.
+//   - All accumulation and the epilogue (alpha*acc + bias + beta*C) stay f32
+//     with the same ascending-K __fmaf_rn chains and fixed reduce trees as
+//     the f32 kernels: a typed kernel is bit-identical to "upcast inputs to
+//     f32, run the f32 kernel" (bf16/f16 products are exact in f32).
+//   - to_f / from_f_* come from _typed_prelude.cuh (inlined first in the
+//     NVRTC blob; conversions are RNE, no FTZ — see kernels.rs flags).
+
+#define DEFINE_SGEMM_BI_NN_GEMV(SUFFIX, T_ACT, FROM_F)                        \
+extern "C" __global__ __launch_bounds__(128, 4)                               \
+void sgemm_bi_nn_gemv_##SUFFIX(                                               \
+    T_ACT* __restrict__ Y,                                                    \
+    const T_ACT* __restrict__ X,                                              \
+    const T_ACT* __restrict__ W,                                              \
+    const float* __restrict__ bias,                                           \
+    float alpha, float beta,                                                  \
+    int M, int K,                                                             \
+    int lda, int ldy                                                          \
+) {                                                                           \
+    const int tid = threadIdx.x;                                              \
+    const int warp = tid >> 5;                                                \
+    const int lane = tid & 31;                                                \
+    const int row = blockIdx.x * 4 + warp;                                    \
+    if (row >= M) return;                                                     \
+    float acc = 0.0f;                                                         \
+    const T_ACT* X_row = X + row * lda;                                       \
+    for (int k = lane; k < K; k += 32) {                                      \
+        acc = __fmaf_rn(to_f(X_row[k]), to_f(W[k]), acc);                     \
+    }                                                                         \
+    acc += __shfl_xor_sync(0xffffffff, acc, 16);                              \
+    acc += __shfl_xor_sync(0xffffffff, acc, 8);                               \
+    acc += __shfl_xor_sync(0xffffffff, acc, 4);                               \
+    acc += __shfl_xor_sync(0xffffffff, acc, 2);                               \
+    acc += __shfl_xor_sync(0xffffffff, acc, 1);                               \
+    if (lane == 0) {                                                          \
+        float val = alpha * acc;                                              \
+        if (bias != nullptr) val += bias[0];                                  \
+        if (beta != 0.0f) val += beta * to_f(Y[row * ldy]);                   \
+        Y[row * ldy] = FROM_F(val);                                           \
+    }                                                                         \
+}
+
+DEFINE_SGEMM_BI_NN_GEMV(bf16, __nv_bfloat16, from_f_bf16)
+DEFINE_SGEMM_BI_NN_GEMV(f16,  __half,        from_f_f16)
+
+// TN GEMV: dW[K] += alpha * X^T[K,M] @ dY[M]. dW stays f32 (master grad).
+#define DEFINE_SGEMM_BI_TN_GEMV(SUFFIX, T_ACT, FROM_F)                        \
+extern "C" __global__ __launch_bounds__(128, 4)                               \
+void sgemm_bi_tn_gemv_##SUFFIX(                                               \
+    float* __restrict__ dW,                                                   \
+    const T_ACT* __restrict__ X,                                              \
+    const T_ACT* __restrict__ dY,                                             \
+    float alpha,                                                              \
+    int M_red, int K_out,                                                     \
+    int lda, int ldy                                                          \
+) {                                                                           \
+    const int tid = threadIdx.x;                                              \
+    const int warp = tid >> 5;                                                \
+    const int lane = tid & 31;                                                \
+    const int k = blockIdx.x * 4 + warp;                                      \
+    if (k >= K_out) return;                                                   \
+    float acc = 0.0f;                                                         \
+    for (int m = lane; m < M_red; m += 32) {                                  \
+        acc = __fmaf_rn(to_f(X[m * lda + k]), to_f(dY[m * ldy]), acc);        \
+    }                                                                         \
+    acc += __shfl_xor_sync(0xffffffff, acc, 16);                              \
+    acc += __shfl_xor_sync(0xffffffff, acc, 8);                               \
+    acc += __shfl_xor_sync(0xffffffff, acc, 4);                               \
+    acc += __shfl_xor_sync(0xffffffff, acc, 2);                               \
+    acc += __shfl_xor_sync(0xffffffff, acc, 1);                               \
+    if (lane == 0) {                                                          \
+        dW[k] += alpha * acc;                                                 \
+    }                                                                         \
+    (void)FROM_F;                                                             \
+}
+
+DEFINE_SGEMM_BI_TN_GEMV(bf16, __nv_bfloat16, from_f_bf16)
+DEFINE_SGEMM_BI_TN_GEMV(f16,  __half,        from_f_f16)
+
+// NT GEMV: dX[M,K] = alpha * dY[M] @ W^T[K]. Pure outer product.
+#define DEFINE_SGEMM_BI_NT_GEMV(SUFFIX, T_ACT, FROM_F)                        \
+extern "C" __global__ __launch_bounds__(256)                                  \
+void sgemm_bi_nt_gemv_##SUFFIX(                                               \
+    T_ACT* __restrict__ dX,                                                   \
+    const T_ACT* __restrict__ dY,                                             \
+    const T_ACT* __restrict__ W,                                              \
+    float alpha,                                                              \
+    int M, int K,                                                             \
+    int ldx, int ldy                                                          \
+) {                                                                           \
+    const int tid = blockIdx.x * blockDim.x + threadIdx.x;                    \
+    const int total = M * K;                                                  \
+    if (tid >= total) return;                                                 \
+    const int m = tid / K;                                                    \
+    const int k = tid - m * K;                                                \
+    dX[m * ldx + k] = FROM_F(alpha * to_f(dY[m * ldy]) * to_f(W[k]));         \
+}
+
+DEFINE_SGEMM_BI_NT_GEMV(bf16, __nv_bfloat16, from_f_bf16)
+DEFINE_SGEMM_BI_NT_GEMV(f16,  __half,        from_f_f16)
+
+// Ultra-thin-M NN: M in [1, 32), smem-staged X row, 8-warp K-slab partials
+// with the fixed 8-way tree reduce. smem_x stays f32 (upcast at stage-in) —
+// the FMA chain is then bit-identical to the f32 kernel on upcast inputs.
+#define DEFINE_SGEMM_BI_NN_ULTRA_THIN(SUFFIX, T_ACT, FROM_F)                  \
+extern "C" __global__ __launch_bounds__(256, 4)                               \
+void sgemm_bi_nn_ultra_thin_##SUFFIX(                                         \
+    T_ACT* __restrict__ Y,                                                    \
+    const T_ACT* __restrict__ X,                                              \
+    const T_ACT* __restrict__ W,                                              \
+    const float* __restrict__ bias,                                           \
+    float alpha, float beta,                                                  \
+    int M, int N, int K,                                                      \
+    int lda, int ldb, int ldc                                                 \
+) {                                                                           \
+    const int tid = threadIdx.x;                                              \
+    const int warp = tid >> 5;                                                \
+    const int lane = tid & 31;                                                \
+    const int n_tile = blockIdx.x;                                            \
+    const int m = blockIdx.y;                                                 \
+    if (m >= M) return;                                                       \
+    const int col = n_tile * 32 + lane;                                       \
+    extern __shared__ float smem_x[];                                         \
+    for (int k = tid; k < K; k += blockDim.x) {                               \
+        smem_x[k] = to_f(X[m * lda + k]);                                     \
+    }                                                                         \
+    __syncthreads();                                                          \
+    const int K_per_warp = (K + 7) / 8;                                       \
+    const int k_start = warp * K_per_warp;                                    \
+    const int k_end = (k_start + K_per_warp > K) ? K : (k_start + K_per_warp);\
+    float acc = 0.0f;                                                         \
+    if (col < N) {                                                            \
+        for (int k = k_start; k < k_end; k++) {                               \
+            acc = __fmaf_rn(smem_x[k], to_f(W[k * ldb + col]), acc);          \
+        }                                                                     \
+    }                                                                         \
+    __shared__ float smem_partials[8 * 32];                                   \
+    smem_partials[warp * 32 + lane] = acc;                                    \
+    __syncthreads();                                                          \
+    if (warp == 0 && col < N) {                                               \
+        float p0 = smem_partials[0 * 32 + lane];                              \
+        float p1 = smem_partials[1 * 32 + lane];                              \
+        float p2 = smem_partials[2 * 32 + lane];                              \
+        float p3 = smem_partials[3 * 32 + lane];                              \
+        float p4 = smem_partials[4 * 32 + lane];                              \
+        float p5 = smem_partials[5 * 32 + lane];                              \
+        float p6 = smem_partials[6 * 32 + lane];                              \
+        float p7 = smem_partials[7 * 32 + lane];                              \
+        float s01 = p0 + p1;                                                  \
+        float s23 = p2 + p3;                                                  \
+        float s45 = p4 + p5;                                                  \
+        float s67 = p6 + p7;                                                  \
+        float s0123 = s01 + s23;                                              \
+        float s4567 = s45 + s67;                                              \
+        float sum = s0123 + s4567;                                            \
+        float val = alpha * sum;                                              \
+        if (bias != nullptr) val += bias[col];                                \
+        if (beta != 0.0f) val += beta * to_f(Y[m * ldc + col]);               \
+        Y[m * ldc + col] = FROM_F(val);                                       \
+    }                                                                         \
+}
+
+DEFINE_SGEMM_BI_NN_ULTRA_THIN(bf16, __nv_bfloat16, from_f_bf16)
+DEFINE_SGEMM_BI_NN_ULTRA_THIN(f16,  __half,        from_f_f16)
+
+// Typed narrow-N NN (generic over tile): A1 route — smem stays f32, typed
+// inputs upcast at the SYNC stage-in with the exact zero-fill predication of
+// the f32 kernels (the per-tile cp.async there is wait_all-fenced, i.e. not
+// pipelined, so sync loads cost ~nothing). FMA mainloop, bias pre-seed at
+// K=0 and the scalar-N epilogue are byte-identical to the f32 kernels —
+// outputs are bit-identical to "upcast inputs, run f32 kernel".
+#define DEFINE_SGEMM_BI_NN_NARROW_T(NAME, T_ACT, FROM_F, BM_, BN_, BK_, WM_, WN_, TM_, TN_, NTHR_, LB_) \
+extern "C" __global__ __launch_bounds__(NTHR_, LB_)                           \
+void NAME(                                                                    \
+    T_ACT* __restrict__ C,                                                    \
+    const T_ACT* __restrict__ A,                                              \
+    const T_ACT* __restrict__ B,                                              \
+    const float* __restrict__ bias,                                           \
+    float alpha, float beta,                                                  \
+    int M, int N, int K,                                                      \
+    int lda, int ldb, int ldc,                                                \
+    int post_op                                                               \
+) {                                                                           \
+    (void)post_op;                                                            \
+    __shared__ float As[BK_ * (BM_ + SMEM_A_PAD)];                            \
+    __shared__ float Bs[BK_ * (BN_ + SMEM_B_PAD)];                            \
+    int num_pid_m = (M + BM_ - 1) / BM_;                                      \
+    int num_pid_n = (N + BN_ - 1) / BN_;                                      \
+    int num_pid_in_group = SGB_GROUP_M * num_pid_n;                           \
+    int warpIdx = threadIdx.x / WARPSIZE;                                     \
+    int warpCol = warpIdx % (BN_ / WN_);                                      \
+    int warpRow = warpIdx / (BN_ / WN_);                                      \
+    int tidInWarp = threadIdx.x % WARPSIZE;                                   \
+    int threadColInWarp = tidInWarp % (WN_ / TN_);                            \
+    int threadRowInWarp = tidInWarp / (WN_ / TN_);                            \
+    float regM[TM_] = {0.0f};                                                 \
+    float regN[TN_] = {0.0f};                                                 \
+    int tile_id = blockIdx.x;                                                 \
+    {                                                                         \
+        int group_id = tile_id / num_pid_in_group;                            \
+        int first_pid_m = group_id * SGB_GROUP_M;                             \
+        int group_size_m = min(num_pid_m - first_pid_m, SGB_GROUP_M);         \
+        int pid_m = first_pid_m + ((tile_id % num_pid_in_group) % group_size_m); \
+        int pid_n = (tile_id % num_pid_in_group) / group_size_m;              \
+        const T_ACT* A_block = A + pid_m * BM_ * lda;                         \
+        const T_ACT* B_block = B + pid_n * BN_;                               \
+        T_ACT* C_warp = C + (pid_m * BM_ + warpRow * WM_) * ldc               \
+                        + pid_n * BN_ + warpCol * WN_;                        \
+        float threadResults[TM_ * TN_];                                       \
+        _Pragma("unroll")                                                     \
+        for (int rm = 0; rm < TM_; ++rm) {                                    \
+            int g_col_base = pid_n * BN_ + warpCol * WN_ + threadColInWarp * TN_; \
+            _Pragma("unroll")                                                 \
+            for (int rn = 0; rn < TN_; ++rn) {                                \
+                int g_col = g_col_base + rn;                                  \
+                threadResults[rm * TN_ + rn] =                                \
+                    (bias != nullptr && g_col < N) ? bias[g_col] : 0.0f;      \
+            }                                                                 \
+        }                                                                     \
+        for (int bkIdx = 0; bkIdx < K; bkIdx += BK_) {                        \
+            for (int idx = threadIdx.x; idx < BK_ * BM_; idx += NTHR_) {      \
+                int _k = idx / BM_;                                           \
+                int _m = idx % BM_;                                           \
+                int _g_row = pid_m * BM_ + _m;                                \
+                int _g_col = bkIdx + _k;                                      \
+                As[_k * (BM_ + SMEM_A_PAD) + _m] =                            \
+                    (_g_row < M && _g_col < K)                                \
+                        ? to_f(A_block[_m * lda + _k]) : 0.0f;                \
+            }                                                                 \
+            for (int idx = threadIdx.x; idx < BK_ * BN_; idx += NTHR_) {      \
+                int _k = idx / BN_;                                           \
+                int _n = idx % BN_;                                           \
+                int g_row = bkIdx + _k;                                       \
+                int g_col = pid_n * BN_ + _n;                                 \
+                Bs[_k * (BN_ + SMEM_B_PAD) + _n] =                            \
+                    (g_row < K && g_col < N)                                  \
+                        ? to_f(B_block[_k * ldb + _n]) : 0.0f;                \
+            }                                                                 \
+            __syncthreads();                                                  \
+            for (int dotIdx = 0; dotIdx < BK_; ++dotIdx) {                    \
+                for (int i = 0; i < TM_; ++i) {                               \
+                    regM[i] = As[dotIdx * (BM_ + SMEM_A_PAD)                  \
+                                 + warpRow * WM_ + threadRowInWarp * TM_ + i]; \
+                }                                                             \
+                for (int i = 0; i < TN_; ++i) {                               \
+                    regN[i] = Bs[dotIdx * (BN_ + SMEM_B_PAD)                  \
+                                 + warpCol * WN_ + threadColInWarp * TN_ + i]; \
+                }                                                             \
+                for (int resIdxM = 0; resIdxM < TM_; ++resIdxM) {             \
+                    for (int resIdxN = 0; resIdxN < TN_; ++resIdxN) {         \
+                        threadResults[resIdxM * TN_ + resIdxN] = __fmaf_rn(   \
+                            regM[resIdxM], regN[resIdxN],                     \
+                            threadResults[resIdxM * TN_ + resIdxN]);          \
+                    }                                                         \
+                }                                                             \
+            }                                                                 \
+            A_block += BK_;                                                   \
+            B_block += BK_ * ldb;                                             \
+            __syncthreads();                                                  \
+        }                                                                     \
+        for (int resIdxM = 0; resIdxM < TM_; ++resIdxM) {                     \
+            int g_row = pid_m * BM_ + warpRow * WM_ + threadRowInWarp * TM_ + resIdxM; \
+            if (g_row >= M) continue;                                         \
+            for (int resIdxN = 0; resIdxN < TN_; ++resIdxN) {                 \
+                int g_col = pid_n * BN_ + warpCol * WN_ + threadColInWarp * TN_ + resIdxN; \
+                if (g_col >= N) continue;                                     \
+                float val = alpha * threadResults[resIdxM * TN_ + resIdxN];   \
+                int coff = (threadRowInWarp * TM_ + resIdxM) * ldc            \
+                           + threadColInWarp * TN_ + resIdxN;                 \
+                if (beta != 0.0f) val += beta * to_f(C_warp[coff]);           \
+                C_warp[coff] = FROM_F(val);                                   \
+            }                                                                 \
+        }                                                                     \
+        __syncthreads();                                                      \
+    }                                                                         \
+}
+
+DEFINE_SGEMM_BI_NN_NARROW_T(sgemm_bi_nn_narrow_bf16, __nv_bfloat16, from_f_bf16, 64, 32, 16, 32, 16, 4, 4, 128, 4)
+DEFINE_SGEMM_BI_NN_NARROW_T(sgemm_bi_nn_narrow_f16,  __half,        from_f_f16,  64, 32, 16, 32, 16, 4, 4, 128, 4)
+DEFINE_SGEMM_BI_NN_NARROW_T(sgemm_bi_nn_narrow_small_bf16, __nv_bfloat16, from_f_bf16, 16, 16, 16, 8, 16, 2, 2, 64, 8)
+DEFINE_SGEMM_BI_NN_NARROW_T(sgemm_bi_nn_narrow_small_f16,  __half,        from_f_f16,  16, 16, 16, 8, 16, 2, 2, 64, 8)
+
+// Typed narrow TN (dW): C stays f32 (master grad, += epilogue); A=X and
+// B=dY are typed. Same A1 route: f32 smem, sync typed stage-in with the
+// f32 kernels' exact zero-fill predication; FMA chain unchanged.
+#define DEFINE_SGEMM_BI_TN_NARROW_T(NAME, T_ACT)                              \
+extern "C" __global__ __launch_bounds__(128, 4)                               \
+void NAME(                                                                    \
+    float* __restrict__ C,                                                    \
+    const T_ACT* __restrict__ A,                                              \
+    const T_ACT* __restrict__ B,                                              \
+    float alpha,                                                              \
+    int M_red, int K_out, int N                                               \
+) {                                                                           \
+    __shared__ float As[16 * (64 + SMEM_A_PAD)];                              \
+    __shared__ float Bs[16 * (32 + SMEM_B_PAD)];                              \
+    int num_pid_m = (K_out + 63) / 64;                                        \
+    int num_pid_n = (N + 31) / 32;                                            \
+    int num_pid_in_group = SGB_GROUP_M * num_pid_n;                           \
+    int warpIdx = threadIdx.x / WARPSIZE;                                     \
+    int warpCol = warpIdx % 2;                                                \
+    int warpRow = warpIdx / 2;                                                \
+    int tidInWarp = threadIdx.x % WARPSIZE;                                   \
+    int threadColInWarp = tidInWarp % 4;                                      \
+    int threadRowInWarp = tidInWarp / 4;                                      \
+    float regM[4] = {0.0f};                                                   \
+    float regN[4] = {0.0f};                                                   \
+    int tile_id = blockIdx.x;                                                 \
+    {                                                                         \
+        float threadResults[16] = {0.0f};                                     \
+        int group_id = tile_id / num_pid_in_group;                            \
+        int first_pid_m = group_id * SGB_GROUP_M;                             \
+        int group_size_m = min(num_pid_m - first_pid_m, SGB_GROUP_M);         \
+        int pid_m = first_pid_m + ((tile_id % num_pid_in_group) % group_size_m); \
+        int pid_n = (tile_id % num_pid_in_group) / group_size_m;              \
+        float* C_warp = C + (pid_m * 64 + warpRow * 32) * N                   \
+                        + pid_n * 32 + warpCol * 16;                          \
+        for (int mIdx = 0; mIdx < M_red; mIdx += 16) {                        \
+            for (int idx = threadIdx.x; idx < 16 * 64; idx += 128) {          \
+                int _k = idx / 64;                                            \
+                int _m = idx % 64;                                            \
+                int _g_m = mIdx + _k;                                         \
+                int _g_k = pid_m * 64 + _m;                                   \
+                As[_k * (64 + SMEM_A_PAD) + _m] =                             \
+                    (_g_m < M_red && _g_k < K_out)                            \
+                        ? to_f(A[(long long)_g_m * K_out + _g_k]) : 0.0f;     \
+            }                                                                 \
+            for (int idx = threadIdx.x; idx < 16 * 32; idx += 128) {          \
+                int _k = idx / 32;                                            \
+                int _n = idx % 32;                                            \
+                int g_m = mIdx + _k;                                          \
+                int g_n = pid_n * 32 + _n;                                    \
+                Bs[_k * (32 + SMEM_B_PAD) + _n] =                             \
+                    (g_m < M_red && g_n < N)                                  \
+                        ? to_f(B[(long long)g_m * N + g_n]) : 0.0f;           \
+            }                                                                 \
+            __syncthreads();                                                  \
+            for (int dotIdx = 0; dotIdx < 16; ++dotIdx) {                     \
+                for (int i = 0; i < 4; ++i) {                                 \
+                    regM[i] = As[dotIdx * (64 + SMEM_A_PAD)                   \
+                                 + warpRow * 32 + threadRowInWarp * 4 + i];   \
+                }                                                             \
+                for (int i = 0; i < 4; ++i) {                                 \
+                    regN[i] = Bs[dotIdx * (32 + SMEM_B_PAD)                   \
+                                 + warpCol * 16 + threadColInWarp * 4 + i];   \
+                }                                                             \
+                for (int rm = 0; rm < 4; ++rm) {                              \
+                    for (int rn = 0; rn < 4; ++rn) {                          \
+                        threadResults[rm * 4 + rn] = __fmaf_rn(               \
+                            regM[rm], regN[rn], threadResults[rm * 4 + rn]);  \
+                    }                                                         \
+                }                                                             \
+            }                                                                 \
+            __syncthreads();                                                  \
+        }                                                                     \
+        for (int rm = 0; rm < 4; ++rm) {                                      \
+            int g_row = pid_m * 64 + warpRow * 32 + threadRowInWarp * 4 + rm; \
+            if (g_row >= K_out) continue;                                     \
+            for (int rn = 0; rn < 4; ++rn) {                                  \
+                int g_col = pid_n * 32 + warpCol * 16 + threadColInWarp * 4 + rn; \
+                if (g_col >= N) continue;                                     \
+                C_warp[(threadRowInWarp * 4 + rm) * N + threadColInWarp * 4 + rn] += \
+                    alpha * threadResults[rm * 4 + rn];                       \
+            }                                                                 \
+        }                                                                     \
+        __syncthreads();                                                      \
+    }                                                                         \
+}
+
+DEFINE_SGEMM_BI_TN_NARROW_T(sgemm_bi_tn_narrow_bf16, __nv_bfloat16)
+DEFINE_SGEMM_BI_TN_NARROW_T(sgemm_bi_tn_narrow_f16,  __half)
+
+// Typed narrow NT (dX): C=dX typed output (overwrite), A=dY and B=W typed.
+// B tile staged TRANSPOSED (rows = reduction n, cols = k_out), exactly as
+// the f32 kernel's float4 transposed stores.
+#define DEFINE_SGEMM_BI_NT_NARROW_T(NAME, T_ACT, FROM_F)                      \
+extern "C" __global__ __launch_bounds__(128, 4)                               \
+void NAME(                                                                    \
+    T_ACT* __restrict__ C,                                                    \
+    const T_ACT* __restrict__ A,                                              \
+    const T_ACT* __restrict__ B,                                              \
+    float alpha,                                                              \
+    int M, int N, int K_out                                                   \
+) {                                                                           \
+    __shared__ float As[16 * (64 + SMEM_A_PAD)];                              \
+    __shared__ float Bs[16 * (32 + SMEM_B_PAD)];                              \
+    int num_pid_m = (M + 63) / 64;                                            \
+    int num_pid_n = (K_out + 31) / 32;                                        \
+    int num_pid_in_group = SGB_GROUP_M * num_pid_n;                           \
+    int warpIdx = threadIdx.x / WARPSIZE;                                     \
+    int warpCol = warpIdx % 2;                                                \
+    int warpRow = warpIdx / 2;                                                \
+    int tidInWarp = threadIdx.x % WARPSIZE;                                   \
+    int threadColInWarp = tidInWarp % 4;                                      \
+    int threadRowInWarp = tidInWarp / 4;                                      \
+    float regM[4] = {0.0f};                                                   \
+    float regN[4] = {0.0f};                                                   \
+    int tile_id = blockIdx.x;                                                 \
+    {                                                                         \
+        float threadResults[16] = {0.0f};                                     \
+        int group_id = tile_id / num_pid_in_group;                            \
+        int first_pid_m = group_id * SGB_GROUP_M;                             \
+        int group_size_m = min(num_pid_m - first_pid_m, SGB_GROUP_M);         \
+        int pid_m = first_pid_m + ((tile_id % num_pid_in_group) % group_size_m); \
+        int pid_n = (tile_id % num_pid_in_group) / group_size_m;              \
+        for (int nIdx = 0; nIdx < N; nIdx += 16) {                            \
+            for (int idx = threadIdx.x; idx < 16 * 64; idx += 128) {          \
+                int _n = idx / 64;                                            \
+                int _m = idx % 64;                                            \
+                int _g_m = pid_m * 64 + _m;                                   \
+                int _g_n = nIdx + _n;                                         \
+                As[_n * (64 + SMEM_A_PAD) + _m] =                             \
+                    (_g_m < M && _g_n < N)                                    \
+                        ? to_f(A[(long long)_g_m * N + _g_n]) : 0.0f;         \
+            }                                                                 \
+            for (int idx = threadIdx.x; idx < 16 * 32; idx += 128) {          \
+                int _n = idx / 32;                                            \
+                int _kb = idx % 32;                                           \
+                int g_k = pid_n * 32 + _kb;                                   \
+                int g_n = nIdx + _n;                                          \
+                Bs[_n * (32 + SMEM_B_PAD) + _kb] =                            \
+                    (g_k < K_out && g_n < N)                                  \
+                        ? to_f(B[(long long)g_k * N + g_n]) : 0.0f;           \
+            }                                                                 \
+            __syncthreads();                                                  \
+            for (int dotIdx = 0; dotIdx < 16; ++dotIdx) {                     \
+                for (int i = 0; i < 4; ++i) {                                 \
+                    regM[i] = As[dotIdx * (64 + SMEM_A_PAD)                   \
+                                 + warpRow * 32 + threadRowInWarp * 4 + i];   \
+                }                                                             \
+                for (int i = 0; i < 4; ++i) {                                 \
+                    regN[i] = Bs[dotIdx * (32 + SMEM_B_PAD)                   \
+                                 + warpCol * 16 + threadColInWarp * 4 + i];   \
+                }                                                             \
+                for (int rm = 0; rm < 4; ++rm) {                              \
+                    for (int rn = 0; rn < 4; ++rn) {                          \
+                        threadResults[rm * 4 + rn] = __fmaf_rn(               \
+                            regM[rm], regN[rn], threadResults[rm * 4 + rn]);  \
+                    }                                                         \
+                }                                                             \
+            }                                                                 \
+            __syncthreads();                                                  \
+        }                                                                     \
+        T_ACT* C_warp = C + (pid_m * 64 + warpRow * 32) * K_out               \
+                        + pid_n * 32 + warpCol * 16;                          \
+        for (int rm = 0; rm < 4; ++rm) {                                      \
+            int g_row = pid_m * 64 + warpRow * 32 + threadRowInWarp * 4 + rm; \
+            if (g_row >= M) continue;                                         \
+            for (int rn = 0; rn < 4; ++rn) {                                  \
+                int g_col = pid_n * 32 + warpCol * 16 + threadColInWarp * 4 + rn; \
+                if (g_col >= K_out) continue;                                 \
+                C_warp[(threadRowInWarp * 4 + rm) * K_out                     \
+                       + threadColInWarp * 4 + rn] =                          \
+                    FROM_F(alpha * threadResults[rm * 4 + rn]);               \
+            }                                                                 \
+        }                                                                     \
+        __syncthreads();                                                      \
+    }                                                                         \
+}
+
+DEFINE_SGEMM_BI_NT_NARROW_T(sgemm_bi_nt_narrow_bf16, __nv_bfloat16, from_f_bf16)
+DEFINE_SGEMM_BI_NT_NARROW_T(sgemm_bi_nt_narrow_f16,  __half,        from_f_f16)

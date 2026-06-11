@@ -180,6 +180,10 @@ pub struct GpuMambaTrainingStepGraph {
     // `gpu_gemm_forward_dispatch` doesn't silently bake a freed pointer
     // (CUDA_ERROR_ILLEGAL_ADDRESS).
     captured_half_staging_ptr: u64,
+    // Same guard for the batch-invariant typed-GEMM upcast scratch triple:
+    // every bf16 bi GEMM without a native typed bucket (all Big/split-K
+    // training shapes) reads/writes these buffers inside the captured body.
+    captured_bi_upcast_ptrs: [u64; 3],
 }
 
 impl GpuMambaTrainingStepGraph {
@@ -233,6 +237,10 @@ impl GpuMambaTrainingStepGraph {
         // lazy grow during the captured forward bakes a freed pointer into
         // the graph (CUDA_ERROR_ILLEGAL_ADDRESS on replay).
         ctx.presize_half_staging_for_train(cfg, batch, seq_len, train_w.dtype)?;
+        // Same contract for the bi upcast scratch: when the batch-invariant
+        // flag is on, the captured body routes its typed GEMMs through
+        // `with_bi_upcast_scratch` — grow it to the step's maximum now.
+        ctx.presize_bi_upcast_scratch_for_train(cfg, batch, seq_len, train_w.dtype)?;
 
         // Snapshot pointers BEFORE capture so we can stash them after the
         // helper consumes the &mut borrows.
@@ -251,6 +259,7 @@ impl GpuMambaTrainingStepGraph {
         let snap_compute_input = train_w.compute.input_proj_w.ptr();
         let snap_compute_norm_f = train_w.compute.norm_f_weight.ptr();
         let snap_half_staging = ctx.half_staging_ptr();
+        let snap_bi_upcast = ctx.bi_upcast_scratch_ptrs();
 
         let graph = capture_into_graph(&ctx.stream, || {
             grads.zero(&ctx.stream)?;
@@ -316,6 +325,7 @@ impl GpuMambaTrainingStepGraph {
             captured_compute_input_proj_w_ptr: snap_compute_input,
             captured_compute_norm_f_ptr: snap_compute_norm_f,
             captured_half_staging_ptr: snap_half_staging,
+            captured_bi_upcast_ptrs: snap_bi_upcast,
         })
     }
 
@@ -414,6 +424,13 @@ impl GpuMambaTrainingStepGraph {
             self.captured_half_staging_ptr,
             "training_graph replay: half_staging pointer changed since capture \
              (lazy grow during a previous step?)"
+        );
+        assert_eq!(
+            ctx.bi_upcast_scratch_ptrs(),
+            self.captured_bi_upcast_ptrs,
+            "training_graph replay: bi_upcast_scratch pointer changed since \
+             capture (a larger typed bi GEMM regrew the scratch after this \
+             graph was captured — re-capture or presize for the larger shape)"
         );
         self.graph
             .launch()
