@@ -288,9 +288,8 @@ pub struct GpuMambaScratch {
     /// (replaces the previous atomicAdd accumulators).
     ///
     /// Sized to the max of the two consumer requirements:
-    ///   - rmsnorm_bwd partials:      B*T * d_model
-    ///   - conv1d_bwd partials:       B * d_inner * d_conv + B * d_inner
-    ///                               = B * d_inner * (d_conv + 1)
+    ///   - rmsnorm_bwd partials: `B*T * d_model`
+    ///   - conv1d_bwd partials: `B * d_inner * d_conv + B * d_inner = B * d_inner * (d_conv + 1)`
     pub axis0_partials: GpuBuffer,
 }
 

@@ -24,30 +24,6 @@
 
 use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
 
-fn kl_divergence(p_logits: &[f32], q_logits: &[f32]) -> f32 {
-    assert_eq!(p_logits.len(), q_logits.len());
-    let pmax = p_logits.iter().copied().fold(f32::NEG_INFINITY, f32::max) as f64;
-    let qmax = q_logits.iter().copied().fold(f32::NEG_INFINITY, f32::max) as f64;
-    let mut psum = 0.0f64;
-    let mut qsum = 0.0f64;
-    for (&pl, &ql) in p_logits.iter().zip(q_logits.iter()) {
-        psum += ((pl as f64) - pmax).exp();
-        qsum += ((ql as f64) - qmax).exp();
-    }
-    let log_ps = psum.ln();
-    let log_qs = qsum.ln();
-    let mut kl = 0.0f64;
-    for (&pl, &ql) in p_logits.iter().zip(q_logits.iter()) {
-        let lp = ((pl as f64) - pmax) - log_ps;
-        let lq = ((ql as f64) - qmax) - log_qs;
-        let p = lp.exp();
-        if p > 1e-30 {
-            kl += p * (lp - lq);
-        }
-    }
-    kl as f32
-}
-
 // ===========================================================================
 // HF 130m — extreme batch size parity + very long prompts
 // ===========================================================================
@@ -58,6 +34,32 @@ mod hf {
     use mamba_rs::module::gpu_lm::GpuMambaLM;
     use mamba_rs::module::sample::SampleParams;
     use std::path::PathBuf;
+
+    // Lives inside the hf module: its only callers are hf-gated, and a
+    // cuda-only build would otherwise see it as dead code.
+    fn kl_divergence(p_logits: &[f32], q_logits: &[f32]) -> f32 {
+        assert_eq!(p_logits.len(), q_logits.len());
+        let pmax = p_logits.iter().copied().fold(f32::NEG_INFINITY, f32::max) as f64;
+        let qmax = q_logits.iter().copied().fold(f32::NEG_INFINITY, f32::max) as f64;
+        let mut psum = 0.0f64;
+        let mut qsum = 0.0f64;
+        for (&pl, &ql) in p_logits.iter().zip(q_logits.iter()) {
+            psum += ((pl as f64) - pmax).exp();
+            qsum += ((ql as f64) - qmax).exp();
+        }
+        let log_ps = psum.ln();
+        let log_qs = qsum.ln();
+        let mut kl = 0.0f64;
+        for (&pl, &ql) in p_logits.iter().zip(q_logits.iter()) {
+            let lp = ((pl as f64) - pmax) - log_ps;
+            let lq = ((ql as f64) - qmax) - log_qs;
+            let p = lp.exp();
+            if p > 1e-30 {
+                kl += p * (lp - lq);
+            }
+        }
+        kl as f32
+    }
 
     pub fn find_model_dir(name: &str) -> Option<PathBuf> {
         for base in [

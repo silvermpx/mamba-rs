@@ -188,10 +188,10 @@ pub struct GpuMamba3Scratch {
     /// accumulators (replaces the previous atomicAdd accumulators).
     ///
     /// Sized to fit the largest consumer:
-    ///   - rmsnorm_bwd partials:              B*T * d_model
-    ///   - angle_dt_bwd partials (2 tensors): nh * B*T*na + na * B*T*nh
-    ///                                        = 2 * nh * B*T * na
-    ///   - m3_dqkv dD_partials:               B * nh
+    ///   - rmsnorm_bwd partials: `B*T * d_model`
+    ///   - angle_dt_bwd partials (2 tensors): `nh * B*T*na + na * B*T*nh = 2 * nh * B*T * na`
+    ///   - m3_dqkv dD_partials: `B * nh`
+    ///
     /// The buffer is reused across kernels; only one consumer writes at a time.
     pub axis0_partials: GpuBuffer,
 }
