@@ -114,6 +114,14 @@ Greedy top-1 match over 15 tokens + KL(f32 ‖ bf16) on final logits:
 
 CUDA Graph capture saves ~45 µs/step in kernel launch overhead.
 
+## Deterministic training GEMM (0.4.0)
+
+Opt-in deterministic GEMM tiers (scalar `MAMBA_RS_BATCH_INVARIANT` +
+tensor-core `MAMBA_RS_BI_TENSOR_CORES`): bit-identical training across
+runs on f32/bf16/f16; the TC tier is FASTER than cuBLAS-PEDANTIC from
+d768 up (0.77× per step at d1536 bf16). Full tables:
+[determinism-benchmarks.md](determinism-benchmarks.md).
+
 ## GPU Training (mamba-130m, B=1, T=32, graph-captured)
 
 | dtype | per step |

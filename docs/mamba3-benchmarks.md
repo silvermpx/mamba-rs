@@ -104,3 +104,11 @@ cargo test --release --test m3_cpu_benchmark -- --ignored --nocapture
 cargo test --release --features "cuda hf" --test rl_llm_bench \
     rl_ -- --ignored --nocapture
 ```
+
+## Deterministic training GEMM (0.4.0)
+
+The Mamba-3 trainer shares the deterministic GEMM layer with Mamba SSM:
+both opt-in tiers (`MAMBA_RS_BATCH_INVARIANT`, `MAMBA_RS_BI_TENSOR_CORES`)
+apply, with the same contracts and CUDA-Graph guards
+(`presize_bi_upcast_scratch_for_train_m3`). Measurement tables:
+[determinism-benchmarks.md](determinism-benchmarks.md).

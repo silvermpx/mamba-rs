@@ -235,7 +235,8 @@ trainer.ctx().set_bi_tensor_cores(true);   // + tensor-core tier (own contract)
 ```
 
 GEMM-level tensor-core speedups vs the scalar deterministic tier: forward
-3.0–3.4×, dW 2.1–3.5×, dX 4.3–6.7× (bf16, M=2048-class shapes).
+3.0–3.4×, dW 2.1–3.5×, dX 4.3–6.7× (bf16, M=2048-class shapes). Full
+tables and contracts: [deterministic GEMM benchmarks](docs/determinism-benchmarks.md).
 
 ### Per-step latency (default config: d_model=128, 3 layers)
 
@@ -282,6 +283,9 @@ cargo test --release --features "cuda hf" -- --include-ignored
 - [Mamba-3 SISO architecture](docs/mamba3-architecture.md)
 - [Mamba SSM benchmarks](docs/mamba1-benchmarks.md)
 - [Mamba-3 SISO benchmarks](docs/mamba3-benchmarks.md)
+- [Deterministic GEMM benchmarks](docs/determinism-benchmarks.md) — tiers,
+  contracts, full measurement tables (training step, tensor-core GEMM
+  level, fallback tax), reproduction commands
 
 ## Citation
 
