@@ -119,6 +119,13 @@ pub struct GpuMambaLM {
 }
 
 impl GpuMambaLM {
+    /// CUDA context of the underlying backbone — e.g. to enable
+    /// `set_batch_invariant(true)` before generation when bit-stable
+    /// logits across batch sizes are required.
+    pub fn ctx(&self) -> &crate::mamba_ssm::gpu::context::GpuCtx {
+        self.backbone.ctx()
+    }
+
     /// Access the last-computed logits for batch slot `b`.
     /// Length = `vocab_size`. Valid after `generate` / `generate_batch`.
     pub fn last_logits(&self, b: usize) -> &[f32] {

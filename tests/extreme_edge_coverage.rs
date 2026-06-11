@@ -106,7 +106,12 @@ mod hf {
 
         // Reference: batch=1, fixed prompt.
         let prompt: &[u32] = &[1, 2, 3, 4, 5];
+        // The cross-batch KL envelope asserted here is the batch-invariant
+        // GEMM kernel's contract — an OPT-IN path — so enable it explicitly
+        // (without the flag, cuBLAS algorithm heuristics give bf16 KL ~1e-3
+        // by design).
         let mut lm1 = GpuMambaLM::from_hf_with_dtype_batch(&dir, 0, dtype, 1).expect("b=1 load");
+        lm1.ctx().set_batch_invariant(true);
         lm1.generate(prompt, &params).expect("b=1 gen");
         let ref_logits = lm1.last_logits(0).to_vec();
 
@@ -115,6 +120,7 @@ mod hf {
         // slot-0 decodes exactly 1 token matching the b=1 reference).
         let mut lm_large =
             GpuMambaLM::from_hf_with_dtype_batch(&dir, 0, dtype, batch).expect("b=N load");
+        lm_large.ctx().set_batch_invariant(true);
         let filler: Vec<u32> = (200..205).collect();
         let mut prompts: Vec<&[u32]> = Vec::with_capacity(batch);
         prompts.push(prompt);

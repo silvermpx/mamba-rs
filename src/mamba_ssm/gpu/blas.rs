@@ -24,6 +24,21 @@ pub fn gpu_sgemm_forward_raw(
     dims: (usize, usize, usize),
 ) -> Result<(), String> {
     let (batch, n_in, n_out) = dims;
+
+    // Opt-in deterministic path: the batch-invariant SGEMM dispatcher
+    // (bias is fused into its kernels — no separate broadcast launch).
+    if ctx.batch_invariant() {
+        return super::sgemm_bi::sgemm_bi_forward(
+            &ctx.stream,
+            &ctx.kernels,
+            y,
+            x,
+            w_ptr,
+            bias_ptr.unwrap_or(0),
+            (batch, n_in, n_out),
+        );
+    }
+
     let beta = if let Some(b_ptr) = bias_ptr {
         let b_i = batch as i32;
         let n_i = n_out as i32;
@@ -134,6 +149,16 @@ pub fn gpu_sgemm_backward_dx_raw(
     n_in: usize,
     n_out: usize,
 ) -> Result<(), String> {
+    if ctx.batch_invariant() {
+        return super::sgemm_bi::sgemm_bi_backward_dx(
+            &ctx.stream,
+            &ctx.kernels,
+            dx,
+            dy,
+            w_ptr,
+            (batch, n_in, n_out),
+        );
+    }
     let alpha: f32 = 1.0;
     let beta: f32 = 0.0;
 
@@ -174,6 +199,16 @@ pub fn gpu_sgemm_backward_dw_grad(
     n_in: usize,
     n_out: usize,
 ) -> Result<(), String> {
+    if ctx.batch_invariant() {
+        return super::sgemm_bi::sgemm_bi_backward_dw(
+            &ctx.stream,
+            &ctx.kernels,
+            dw.ptr(),
+            dy,
+            x_saved,
+            (batch, n_in, n_out),
+        );
+    }
     let alpha: f32 = 1.0;
     let beta: f32 = 1.0;
 

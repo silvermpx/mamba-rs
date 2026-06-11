@@ -307,6 +307,41 @@ pub struct MambaKernels {
     pub matvec_bi_bf16_f32: CudaFunction,
     pub matvec_bi_f16_f32: CudaFunction,
     pub matvec_bi_f32_f32: CudaFunction,
+
+    // -- sgemm_bi: deterministic batch-invariant f32 training SGEMM triad --
+    // (kernels/sgemm_bi.cu, ported from SQV-RS; siboehm warptiling + shape
+    // dispatcher). Used by gpu/sgemm_bi.rs when ctx.batch_invariant() is on.
+    // Big NN/TN/NT use 2-stage cp.async with 33 KB dynamic smem — loader
+    // opts into the sm_80+ carveout per CUfunction.
+    pub sgemm_nn: CudaFunction,
+    pub sgemm_tn: CudaFunction,
+    pub sgemm_nt: CudaFunction,
+    pub sgemm_nn_slim: CudaFunction,
+    pub sgemm_tn_slim: CudaFunction,
+    pub sgemm_nt_slim: CudaFunction,
+    pub sgemm_nn_ultra_thin: CudaFunction,
+    pub sgemm_nn_gemv: CudaFunction,
+    pub sgemm_tn_gemv: CudaFunction,
+    pub sgemm_nt_gemv: CudaFunction,
+    pub sgemm_nn_narrow: CudaFunction,
+    pub sgemm_nn_narrow_small: CudaFunction,
+    pub sgemm_tn_narrow: CudaFunction,
+    pub sgemm_tn_narrow_splitm_partial: CudaFunction,
+    pub sgemm_nt_narrow: CudaFunction,
+    pub sgemm_nn_splitk32_partial: CudaFunction,
+    pub sgemm_splitk_reduce: CudaFunction,
+    pub sgemm_tn_splitm_partial: CudaFunction,
+    pub sgemm_splitm_reduce: CudaFunction,
+    pub sgemm_nn_splitk_big_partial: CudaFunction,
+    pub sgemm_nt_splitn_big_partial: CudaFunction,
+    pub sgemm_nn_splitk_slim_partial: CudaFunction,
+    pub sgemm_transpose_f32_2d: CudaFunction,
+    pub sgemm_dx_col_gemv: CudaFunction,
+    /// Split-K/Split-M partial scratch for the sgemm_bi dispatcher:
+    /// 8M f32 = 32 MB. The dispatcher asserts chunk*M*N fits before launch.
+    pub splitk_scratch: cudarc::driver::CudaSlice<f32>,
+    /// W-transpose staging for the bwd_dx wide path: 4M f32 = 16 MB.
+    pub transpose_scratch: cudarc::driver::CudaSlice<f32>,
 }
 
 impl MambaKernels {
@@ -326,6 +361,7 @@ impl MambaKernels {
             include_str!("../../../kernels/loss_scaler.cu"),
             include_str!("../../../kernels/adamw.cu"),
             include_str!("../../../kernels/gemm_batch_invariant.cu"),
+            include_str!("../../../kernels/sgemm_bi.cu"),
         ];
 
         // Strip `#include "_typed_prelude.cuh"` lines (prelude is inlined above).
@@ -343,11 +379,20 @@ impl MambaKernels {
         // exp/sqrt with approximate intrinsics (__expf/__rsqrtf), which
         // breaks gradient flow through SSM BPTT chains and RMSNorm.
         // --fmad=true enables fused multiply-add (safe, precise).
+        // SGB_GROUP_M: L2-swizzle row-group size for the sgemm_bi tile walker.
+        // sm_80/sm_86 prefer 8 (smaller L2 working set); sm_89+ (Ada 96 MB L2,
+        // Hopper, Blackwell) prefer 16. Bit-exact across values — only the
+        // CTA emission order changes, never a C[m,n] reduction order.
+        let group_m: usize = match arch {
+            "sm_80" | "sm_86" | "sm_87" => 8,
+            _ => 16,
+        };
         let opts = cudarc::nvrtc::CompileOptions {
             arch: Some(arch),
             options: vec![
                 "--fmad=true".to_string(),
                 "--extra-device-vectorization".to_string(),
+                format!("-DSGB_GROUP_M={group_m}"),
             ],
             include_paths: cuda_include_paths(),
             ..Default::default()
@@ -514,6 +559,86 @@ impl MambaKernels {
             rmsnorm_fwd_f32in_typed: load_half("rmsnorm_forward_f32in")?,
             rmsnorm_bwd_f32in_typed: load_half("rmsnorm_backward_f32in")?,
             residual_add_f32_typed: load_half("residual_add_f32")?,
+
+            // -- sgemm_bi triad --
+            sgemm_nn: {
+                let f = get("sgemm_bi_nn")?;
+                // Big NN: 2-stage cp.async, 33 KB dynamic smem (> 48 KB
+                // static cap). Opt into the sm_80+ carveout per function.
+                f.set_attribute(
+                    cudarc::driver::sys::CUfunction_attribute_enum::CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
+                    34 * 1024,
+                )
+                .map_err(|e| format!("set MAX_DYNAMIC_SHARED for sgemm_nn: {e:?}"))?;
+                f
+            },
+            sgemm_tn: {
+                let f = get("sgemm_bi_tn")?;
+                f.set_attribute(
+                    cudarc::driver::sys::CUfunction_attribute_enum::CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
+                    34 * 1024,
+                )
+                .map_err(|e| format!("set MAX_DYNAMIC_SHARED for sgemm_tn: {e:?}"))?;
+                f
+            },
+            sgemm_nt: {
+                let f = get("sgemm_bi_nt")?;
+                f.set_attribute(
+                    cudarc::driver::sys::CUfunction_attribute_enum::CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
+                    34 * 1024,
+                )
+                .map_err(|e| format!("set MAX_DYNAMIC_SHARED for sgemm_nt: {e:?}"))?;
+                f
+            },
+            sgemm_nn_slim: get("sgemm_bi_nn_slim")?,
+            sgemm_tn_slim: get("sgemm_bi_tn_slim")?,
+            sgemm_nt_slim: get("sgemm_bi_nt_slim")?,
+            sgemm_nn_ultra_thin: get("sgemm_bi_nn_ultra_thin")?,
+            sgemm_nn_gemv: get("sgemm_bi_nn_gemv")?,
+            sgemm_tn_gemv: get("sgemm_bi_tn_gemv")?,
+            sgemm_nt_gemv: get("sgemm_bi_nt_gemv")?,
+            sgemm_nn_narrow: get("sgemm_bi_nn_narrow")?,
+            sgemm_nn_narrow_small: get("sgemm_bi_nn_narrow_small")?,
+            sgemm_tn_narrow: get("sgemm_bi_tn_narrow")?,
+            sgemm_tn_narrow_splitm_partial: get("sgemm_bi_tn_narrow_splitm_partial")?,
+            sgemm_nt_narrow: get("sgemm_bi_nt_narrow")?,
+            sgemm_nn_splitk32_partial: get("sgemm_bi_nn_splitk32_partial")?,
+            sgemm_splitk_reduce: get("sgemm_bi_splitk_reduce")?,
+            sgemm_tn_splitm_partial: get("sgemm_bi_tn_splitm_partial")?,
+            sgemm_splitm_reduce: get("sgemm_bi_splitm_reduce")?,
+            sgemm_nn_splitk_big_partial: {
+                let f = get("sgemm_bi_nn_splitk_big_partial")?;
+                f.set_attribute(
+                    cudarc::driver::sys::CUfunction_attribute_enum::CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
+                    34 * 1024,
+                )
+                .map_err(|e| {
+                    format!("set MAX_DYNAMIC_SHARED for sgemm_nn_splitk_big_partial: {e:?}")
+                })?;
+                f
+            },
+            sgemm_nt_splitn_big_partial: {
+                let f = get("sgemm_bi_nt_splitn_big_partial")?;
+                f.set_attribute(
+                    cudarc::driver::sys::CUfunction_attribute_enum::CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
+                    34 * 1024,
+                )
+                .map_err(|e| {
+                    format!("set MAX_DYNAMIC_SHARED for sgemm_nt_splitn_big_partial: {e:?}")
+                })?;
+                f
+            },
+            sgemm_nn_splitk_slim_partial: get("sgemm_bi_nn_splitk_slim_partial")?,
+            sgemm_transpose_f32_2d: get("sgemm_transpose_f32_2d")?,
+            sgemm_dx_col_gemv: get("sgemm_bi_dx_col_gemv")?,
+            splitk_scratch: ctx
+                .default_stream()
+                .alloc_zeros::<f32>(1 << 23)
+                .map_err(|e| format!("splitk_scratch alloc: {e:?}"))?,
+            transpose_scratch: ctx
+                .default_stream()
+                .alloc_zeros::<f32>(1 << 22)
+                .map_err(|e| format!("transpose_scratch alloc: {e:?}"))?,
 
             _module: module,
         })

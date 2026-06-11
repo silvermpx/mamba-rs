@@ -69,6 +69,19 @@ pub fn grid_reduce(total_elements: usize) -> LaunchConfig {
     grid_1d(total_elements)
 }
 
+/// Launch config for the deterministic column tree-reduce used by the
+/// batch-invariant SGEMM bias/colsum path.
+///
+/// Grid: `n_cols` blocks. Block: 256 threads. Shared memory: 256 * sizeof(f32).
+/// Each block reduces one column via strided loop + smem tree + warp shuffle.
+pub fn grid_col_tree_reduce(n_cols: usize) -> LaunchConfig {
+    LaunchConfig {
+        grid_dim: (n_cols as u32, 1, 1),
+        block_dim: (BLOCK_1D, 1, 1),
+        shared_mem_bytes: (BLOCK_1D as usize * std::mem::size_of::<f32>()) as u32,
+    }
+}
+
 /// Launch config for norm kernels (L2Norm, RMSNorm).
 ///
 /// Grid: `batch` blocks. Block: min(dim, 1024) threads.
