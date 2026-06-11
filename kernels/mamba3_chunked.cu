@@ -1013,7 +1013,7 @@ extern "C" __global__ void m3_final_grads(
 
     // d_dd_a_raw: from d_a_val, through clamp and -softplus
     float raw_a = dd_a_raw_saved[i];
-    float sp_a = (raw_a > 20.0f) ? raw_a : logf(1.0f + FAST_EXP(raw_a));
+    float sp_a = (raw_a > 20.0f) ? raw_a : log1pf(FAST_EXP(raw_a));
     float a_unclamped = -sp_a; // -softplus(raw_a)
     // Was clamped to max(-a_floor)?
     // a_val = max(-softplus(raw), -a_floor) => a_val >= -a_floor (more negative)

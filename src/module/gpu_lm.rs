@@ -8,7 +8,7 @@ use std::path::Path;
 
 use crate::mamba_ssm::gpu::blas::{
     TiedLmDims, TypedPtr, gpu_gemm_ex_forward_raw, gpu_gemm_ex_tied_lm_head_raw,
-    gpu_sgemm_forward_raw, gpu_sgemm_tied_lm_head_raw,
+    gpu_sgemm_forward_ptr, gpu_sgemm_tied_lm_head_raw,
 };
 use crate::mamba_ssm::gpu::buffers::{GpuBuffer, GpuByteBuffer};
 use crate::mamba_ssm::gpu::dtype::WeightDtype;
@@ -105,7 +105,6 @@ pub struct GpuMambaLM {
     /// GPU logits output (f32).
     gpu_logits: GpuBuffer,
     /// GPU f32 hidden staging (used only by untied-lm_head half path).
-    gpu_hidden: GpuBuffer,
     /// CPU mirror of logits (padded).
     logits_padded_cpu: Vec<f32>,
     /// CPU logits clamped to real vocab_size.
@@ -243,7 +242,6 @@ impl GpuMambaLM {
         };
 
         let gpu_logits = GpuBuffer::zeros(stream, batch * vocab_size_padded)?;
-        let gpu_hidden = GpuBuffer::zeros(stream, batch * d_model)?;
 
         Ok(Self {
             backbone,
@@ -251,7 +249,6 @@ impl GpuMambaLM {
             embed_cpu: embed,
             input_cpu: vec![0.0; batch * d_model],
             gpu_logits,
-            gpu_hidden,
             logits_padded_cpu: vec![0.0; batch * vocab_size_padded],
             logits_cpu: vec![0.0; batch * vocab_size],
             vocab_size,
@@ -564,14 +561,13 @@ impl GpuMambaLM {
             EmbedStorage::F32 { embed, lm_head } => {
                 if let Some(lm) = lm_head {
                     // Untied: logits[B,Vpad] = hidden[B,D] @ lm_head[D,Vpad].
-                    // `vocab_size_padded` matches the lm_head and gpu_logits
-                    // row stride — see the padding applied in `from_hf_with_dtype_batch`.
-                    self.backbone.download_temporal(&mut self.input_cpu)?;
-                    self.gpu_hidden.upload(&stream, &self.input_cpu)?;
-                    gpu_sgemm_forward_raw(
+                    // The hidden state already lives on the GPU (temporal_ptr)
+                    // — feed it directly; the old path bounced it through host
+                    // memory (D2H + H2D) on every decoded token.
+                    gpu_sgemm_forward_ptr(
                         ctx,
                         &mut self.gpu_logits,
-                        &self.gpu_hidden,
+                        temporal_ptr,
                         lm.cached_ptr(),
                         None,
                         (b, d, self.vocab_size_padded),

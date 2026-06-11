@@ -105,13 +105,13 @@ extern "C" __global__ void m3_split(
         int dt_idx = sample * nh + h;
         dd_dt_raw[dt_idx] = val;
         float biased = val + dt_bias[h];
-        dt[dt_idx] = (biased > 20.0f) ? biased : logf(1.0f + FAST_EXP(biased));
+        dt[dt_idx] = (biased > 20.0f) ? biased : log1pf(FAST_EXP(biased));
     } else if (col < off5) {
         // dd_A: save raw, apply -softplus(dd_A), clamp max = -a_floor
         int h = col - off4;
         int a_idx = sample * nh + h;
         dd_a_raw[a_idx] = val;
-        float sp = (val > 20.0f) ? val : logf(1.0f + FAST_EXP(val));
+        float sp = (val > 20.0f) ? val : log1pf(FAST_EXP(val));
         float a = -sp;
         a_val[a_idx] = fminf(a, -a_floor);
     } else if (col < off6) {
@@ -817,7 +817,7 @@ extern "C" __global__ void m3_abg_bwd(
     // A = -softplus(dd_a_raw), clamped to max = -a_floor
     // If clamped (a_val == -a_floor), gradient is zero.
     float raw_a = dd_a_raw[idx];
-    float sp_a = (raw_a > 20.0f) ? raw_a : logf(1.0f + FAST_EXP(raw_a));
+    float sp_a = (raw_a > 20.0f) ? raw_a : log1pf(FAST_EXP(raw_a));
     float a_unclamped = -sp_a;
     if (a_unclamped > -a_floor) {
         // Was clamped: gradient is zero
@@ -1152,12 +1152,12 @@ extern "C" __global__ void m3_split_##SUFFIX(                                  \
         int dt_idx = sample * nh + h;                                           \
         dd_dt_raw[dt_idx] = val;                                                \
         float biased = val + dt_bias[h];                                        \
-        dt[dt_idx] = (biased > 20.0f) ? biased : logf(1.0f + FAST_EXP(biased)); \
+        dt[dt_idx] = (biased > 20.0f) ? biased : log1pf(FAST_EXP(biased)); \
     } else if (col < off5) {                                                    \
         int h = col - off4;                                                     \
         int a_idx = sample * nh + h;                                            \
         dd_a_raw[a_idx] = val;                                                  \
-        float sp = (val > 20.0f) ? val : logf(1.0f + FAST_EXP(val));            \
+        float sp = (val > 20.0f) ? val : log1pf(FAST_EXP(val));            \
         float a = -sp;                                                          \
         a_val[a_idx] = fminf(a, -a_floor);                                      \
     } else if (col < off6) {                                                    \

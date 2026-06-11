@@ -6,6 +6,8 @@
 //! Currently supports bf16 mixed-precision only. See the M1 trainer for
 //! the precision-support rationale.
 
+use cudarc::driver::PushKernelArg;
+
 use crate::mamba_ssm::gpu::adamw::{AdamWBiasFactors, GpuAdamW, step_m3_capturable};
 use crate::mamba_ssm::gpu::buffers::GpuBuffer;
 use crate::mamba_ssm::gpu::context::GpuCtx;
@@ -478,9 +480,22 @@ impl Mamba3TrainerMixed {
     fn step_f16(&mut self, input: &[f32], d_temporal: &[f32]) -> Result<StepMetrics, String> {
         let scale = self.scaler.as_ref().expect("f16 scaler").scale();
         self.mamba_input.upload(&self.ctx.stream, input)?;
-        let scaled: Vec<f32> = d_temporal.iter().map(|v| v * scale).collect();
+        // Scale d_temporal on-device — the old path built a scaled Vec<f32>
+        // on the host every step (B*T*d_model alloc + traversal).
         let dt_scaled = self.d_temporal_scaled.as_mut().expect("f16 dt_scaled");
-        dt_scaled.upload(&self.ctx.stream, &scaled)?;
+        dt_scaled.upload(&self.ctx.stream, d_temporal)?;
+        {
+            let n = d_temporal.len() as i32;
+            let mut builder = self
+                .ctx
+                .stream
+                .launch_builder(&self.ctx.kernels.scale_grads_f32);
+            builder.arg(dt_scaled.inner_mut());
+            builder.arg(&scale);
+            builder.arg(&n);
+            unsafe { builder.launch(crate::mamba_ssm::gpu::launch::grid_1d(d_temporal.len())) }
+                .map_err(|e| format!("scale d_temporal (m3 f16): {e:?}"))?;
+        }
 
         if let Some(ref mut u) = self.unscale_factor {
             u.write(&self.ctx.stream, 1.0 / scale)?;

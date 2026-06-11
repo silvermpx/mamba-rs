@@ -672,11 +672,24 @@ impl MambaTrainerMixed {
     fn step_f16(&mut self, input: &[f32], d_temporal: &[f32]) -> Result<StepMetrics, String> {
         let scale = self.scaler.as_ref().expect("f16 scaler").scale();
 
-        // Upload input + scaled d_temporal (always, both eager and graph paths).
+        // Upload input + d_temporal (always, both eager and graph paths),
+        // then scale d_temporal on-device: the old path built a scaled
+        // Vec<f32> on the host every step (B*T*d_model alloc + traversal).
         self.mamba_input.upload(&self.ctx.stream, input)?;
-        let scaled: Vec<f32> = d_temporal.iter().map(|v| v * scale).collect();
         let dt_scaled = self.d_temporal_scaled.as_mut().expect("f16 dt_scaled");
-        dt_scaled.upload(&self.ctx.stream, &scaled)?;
+        dt_scaled.upload(&self.ctx.stream, d_temporal)?;
+        {
+            let n = d_temporal.len() as i32;
+            let mut builder = self
+                .ctx
+                .stream
+                .launch_builder(&self.ctx.kernels.scale_grads_f32);
+            builder.arg(dt_scaled.inner_mut());
+            builder.arg(&scale);
+            builder.arg(&n);
+            unsafe { builder.launch(crate::mamba_ssm::gpu::launch::grid_1d(d_temporal.len())) }
+                .map_err(|e| format!("scale d_temporal (f16): {e:?}"))?;
+        }
 
         // Update the unscale_factor device buffer (= 1/scale) for the
         // graph-captured `scale_grads_skip` kernel. CPU writes async H2D;

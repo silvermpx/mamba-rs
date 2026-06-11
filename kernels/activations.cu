@@ -36,7 +36,7 @@ extern "C" __global__ void softplus_forward_##SUFFIX(T* x, int n) {       \
     int i = blockIdx.x * blockDim.x + threadIdx.x;                        \
     if (i >= n) return;                                                   \
     float v = to_f(x[i]);                                                 \
-    x[i] = FROM_F(v > 20.0f ? v : logf(1.0f + exp2f(v * LOG2E)));         \
+    x[i] = FROM_F(v > 20.0f ? v : log1pf(exp2f(v * LOG2E)));         \
 }
 
 DEFINE_SOFTPLUS_FWD(f32,  float,         from_f_f32)
@@ -48,7 +48,7 @@ extern "C" __global__ void softplus_forward(float* x, int n) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
     float v = x[i];
-    x[i] = v > 20.0f ? v : logf(1.0f + exp2f(v * LOG2E));
+    x[i] = v > 20.0f ? v : log1pf(exp2f(v * LOG2E));
 }
 
 // ===================== Backward (legacy f32 + typed variants) =====================

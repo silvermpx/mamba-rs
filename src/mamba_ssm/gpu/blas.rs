@@ -68,6 +68,62 @@ pub fn gpu_sgemm_forward_raw(
     Ok(())
 }
 
+/// Same as [`gpu_sgemm_forward_raw`] but the input is a raw device pointer
+/// (e.g. the backbone's temporal buffer during decode — avoids a per-token
+/// D2H + H2D round trip just to re-wrap an on-device tensor).
+pub fn gpu_sgemm_forward_ptr(
+    ctx: &GpuCtx,
+    y: &mut GpuBuffer,
+    x_ptr: cudarc::driver::sys::CUdeviceptr,
+    w_ptr: cudarc::driver::sys::CUdeviceptr,
+    bias_ptr: Option<cudarc::driver::sys::CUdeviceptr>,
+    dims: (usize, usize, usize),
+) -> Result<(), String> {
+    let (batch, n_in, n_out) = dims;
+    let beta = if let Some(b_ptr) = bias_ptr {
+        let b_i = batch as i32;
+        let n_i = n_out as i32;
+        let y_ptr = y.cached_ptr();
+        let mut builder = ctx.stream.launch_builder(&ctx.kernels.bias_broadcast);
+        builder.arg(&y_ptr);
+        builder.arg(&b_ptr);
+        builder.arg(&b_i);
+        builder.arg(&n_i);
+        unsafe { builder.launch(grid_1d(batch * n_out)) }
+            .map_err(|e| format!("bias_broadcast_ptr: {:?}", e))?;
+        1.0f32
+    } else {
+        0.0f32
+    };
+
+    let alpha: f32 = 1.0;
+    let w_raw = w_ptr as *const f32;
+    let x_raw = x_ptr as *const f32;
+    let y_raw = y.raw_ptr(&ctx.stream) as *mut f32;
+
+    unsafe {
+        cudarc::cublas::result::sgemm(
+            *ctx.blas.handle(),
+            cudarc::cublas::sys::cublasOperation_t::CUBLAS_OP_N,
+            cudarc::cublas::sys::cublasOperation_t::CUBLAS_OP_N,
+            n_out as c_int,
+            batch as c_int,
+            n_in as c_int,
+            &alpha as *const f32,
+            w_raw,
+            n_out as c_int,
+            x_raw,
+            n_in as c_int,
+            &beta as *const f32,
+            y_raw,
+            n_out as c_int,
+        )
+        .map_err(|e| format!("cuBLAS sgemm_forward_ptr failed: {e:?}"))?;
+    }
+
+    Ok(())
+}
+
 /// Input gradient: `dX[B,K] = dY[B,N] @ W^T[N,K]`.
 pub fn gpu_sgemm_backward_dx_raw(
     ctx: &GpuCtx,

@@ -309,7 +309,7 @@ extern "C" __global__ void softplus_copy(
     if (i >= n) return;
     float x = src[i];
     // Numerically stable softplus using exp2f (matches softplus_forward in activations.cu)
-    dst[i] = (x > 20.0f) ? x : logf(1.0f + exp2f(x * 1.4426950408889634f));
+    dst[i] = (x > 20.0f) ? x : log1pf(exp2f(x * 1.4426950408889634f));
 }
 
 // ===========================================================================
@@ -439,7 +439,7 @@ extern "C" __global__ void softplus_copy_##SUFFIX(                            \
     int i = blockIdx.x * blockDim.x + threadIdx.x;                            \
     if (i >= n) return;                                                       \
     float x = to_f(src[i]);                                                   \
-    dst[i] = FROM_F(x > 20.0f ? x : logf(1.0f + exp2f(x * LOG2E)));           \
+    dst[i] = FROM_F(x > 20.0f ? x : log1pf(exp2f(x * LOG2E)));           \
 }
 
 DEFINE_SOFTPLUS_COPY(f32,  float,         from_f_f32)
