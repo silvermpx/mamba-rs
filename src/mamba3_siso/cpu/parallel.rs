@@ -123,6 +123,16 @@ pub fn parallel_mamba3_forward(
     let a_per = nl * nh * na;
     let t_per = seq_len * dm;
 
+    // Hard bounds checks before the raw-pointer fan-out below: this is a
+    // pub fn, and undersized slices would otherwise be out-of-bounds UB in
+    // release builds (raw `from_raw_parts_mut` regions, not safe indexing).
+    assert!(temporal_out.len() >= batch_size * t_per);
+    assert!(ssm_states.len() >= batch_size * ssm_per);
+    assert!(k_states.len() >= batch_size * k_per);
+    assert!(v_states.len() >= batch_size * v_per);
+    assert!(angle_states.len() >= batch_size * a_per);
+    assert!(batch_acts.len() >= batch_size);
+
     let ptrs = &BatchPtrs {
         temporal: temporal_out.as_mut_ptr(),
         ssm: ssm_states.as_mut_ptr(),
@@ -212,7 +222,7 @@ pub fn parallel_mamba3_backward(
     batch_size: usize,
     input_dim: usize,
 ) {
-    debug_assert_eq!(batch_acts.len(), batch_size);
+    assert_eq!(batch_acts.len(), batch_size);
     if batch_size == 0 {
         return;
     }
@@ -220,6 +230,10 @@ pub fn parallel_mamba3_backward(
     let dm = dims.d_model;
     let seq_len = dims.seq_len;
     let t_per = seq_len * dm;
+
+    // Hard bounds check before the raw-pointer partitioning below (UB in
+    // release builds otherwise, not a panic).
+    assert!(d_temporal_out.len() >= batch_size * t_per);
 
     let n_threads = rayon::current_num_threads().min(batch_size);
 

@@ -95,6 +95,25 @@ impl MambaConfig {
         if self.n_layers == 0 {
             return Err("n_layers must be > 0".into());
         }
+        // Upper bounds. Configs can come from untrusted sources (safetensors
+        // metadata, HF config.json): keep dimension products from wrapping
+        // and keep grid.y (= d_inner for the CUDA parallel scan) under the
+        // hardware limit of 65535.
+        if self.d_model > (1 << 20) {
+            return Err(format!("d_model ({}) must be <= 2^20", self.d_model));
+        }
+        if self.n_layers > 4096 {
+            return Err(format!("n_layers ({}) must be <= 4096", self.n_layers));
+        }
+        let d_inner = self
+            .expand
+            .checked_mul(self.d_model)
+            .ok_or("expand * d_model overflows usize")?;
+        if d_inner > 65535 {
+            return Err(format!(
+                "d_inner ({d_inner}) must be <= 65535 (CUDA grid.y limit for the parallel scan)"
+            ));
+        }
         // CUDA parallel scan SSM kernel supports d_state up to MAX_DSTATE=256.
         // Sequential SSM kernels are limited to d_state <= 64 (register arrays),
         // but the dispatch in forward.rs forces the parallel scan path when

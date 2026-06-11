@@ -9,11 +9,46 @@ use cudarc::driver::LaunchConfig;
 /// Standard block size for 1D element-wise kernels.
 const BLOCK_1D: u32 = 256;
 
+/// Validate that the largest per-tensor element count of a run fits in i32.
+///
+/// CUDA kernels take element counts and strides as 32-bit `int`s; a count
+/// of 2^31 or more wraps to a negative argument and the kernel silently
+/// processes nothing (or indexes out of bounds via overflowed products in
+/// device code). The largest tensor in the training pipeline is `h_saved`
+/// at `B * (T+1) * d_inner * d_state`. Call this once at trainer/state
+/// construction — per-launch checks would be redundant after this.
+pub fn validate_kernel_arg_capacity(
+    batch: usize,
+    seq_len: usize,
+    d_inner: usize,
+    d_state: usize,
+) -> Result<(), String> {
+    let elems = batch
+        .checked_mul(seq_len + 1)
+        .and_then(|v| v.checked_mul(d_inner))
+        .and_then(|v| v.checked_mul(d_state))
+        .ok_or("batch * (seq_len+1) * d_inner * d_state overflows usize")?;
+    if elems > i32::MAX as usize {
+        return Err(format!(
+            "batch({batch}) * (seq_len({seq_len})+1) * d_inner({d_inner}) * d_state({d_state}) \
+             = {elems} elements exceeds i32::MAX; CUDA kernels take element counts as 32-bit ints"
+        ));
+    }
+    Ok(())
+}
+
 /// Launch config for 1D element-wise kernel on `n` elements.
 ///
 /// Grid: `ceil(n / 256)` blocks of 256 threads.
 /// Suitable for: activations, vec_add, elementwise_mul, gating, etc.
 pub fn grid_1d(n: usize) -> LaunchConfig {
+    // `n as u32` would silently truncate for n >= 2^32 and launch a grid
+    // covering a fraction of the elements. Capacity is validated up front
+    // by `validate_kernel_arg_capacity`; this is the cheap backstop.
+    assert!(
+        n <= i32::MAX as usize,
+        "grid_1d: element count {n} exceeds i32::MAX"
+    );
     let num_blocks = (n as u32).div_ceil(BLOCK_1D);
     LaunchConfig {
         grid_dim: (num_blocks, 1, 1),
@@ -57,6 +92,10 @@ pub fn grid_norm(batch: usize, dim: usize) -> LaunchConfig {
 ///   Layout (floats): 2*NWARPS + 2*MAX_DSTATE + 2*NTHREADS + CHUNK_SIZE
 ///   = 2*4 + 2*256 + 2*128 + 1024 = 1800 floats = 7200 bytes.
 pub fn grid_parallel_scan(batch: usize, d_inner: usize) -> LaunchConfig {
+    assert!(
+        d_inner <= 65535,
+        "grid_parallel_scan: d_inner {d_inner} exceeds CUDA grid.y limit 65535"
+    );
     const NTHREADS: u32 = 128;
     const NWARPS: usize = NTHREADS as usize / 32;
     const MAX_DSTATE: usize = 256;
@@ -82,6 +121,10 @@ pub fn grid_parallel_scan(batch: usize, d_inner: usize) -> LaunchConfig {
 /// reinterpret the stage slots as T_ACT in place, so the byte size must
 /// always be the f32 layout size.
 pub fn grid_parallel_scan_bwd(batch: usize, d_inner: usize) -> LaunchConfig {
+    assert!(
+        d_inner <= 65535,
+        "grid_parallel_scan_bwd: d_inner {d_inner} exceeds CUDA grid.y limit 65535"
+    );
     const NTHREADS: u32 = 128;
     const NWARPS: usize = NTHREADS as usize / 32;
     const MAX_DSTATE: usize = 256;
@@ -116,6 +159,10 @@ pub fn grid_parallel_scan_typed(
     bytes_per_act: usize,
 ) -> LaunchConfig {
     debug_assert!(bytes_per_act == 2 || bytes_per_act == 4);
+    assert!(
+        d_inner <= 65535,
+        "grid_parallel_scan_typed: d_inner {d_inner} exceeds CUDA grid.y limit 65535"
+    );
     const NTHREADS: u32 = 128;
     const NWARPS: usize = NTHREADS as usize / 32;
     const MAX_DSTATE: usize = 256;

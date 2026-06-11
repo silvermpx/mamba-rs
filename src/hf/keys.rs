@@ -28,12 +28,15 @@ pub fn remap_m1_hf_key(hf_key: &str) -> RemappedKey {
     }
 
     if let Some(rest) = hf_key.strip_prefix("backbone.layers.") {
-        let dot = rest.find('.').unwrap_or(rest.len());
-        let layer_idx: usize = match rest[..dot].parse() {
+        // A key like "backbone.layers.0" (numeric tail, no field suffix) is
+        // not ours — the old `&rest[dot + 1..]` slicing panicked on it.
+        let Some((idx_str, suffix)) = rest.split_once('.') else {
+            return RemappedKey::Unknown;
+        };
+        let layer_idx: usize = match idx_str.parse() {
             Ok(i) => i,
             Err(_) => return RemappedKey::Unknown,
         };
-        let suffix = &rest[dot + 1..];
 
         let field = match suffix {
             "mixer.in_proj.weight" => "in_proj_w",
@@ -109,6 +112,14 @@ mod tests {
             remap_m1_hf_key("something.else.weight"),
             RemappedKey::Unknown
         );
+    }
+
+    #[test]
+    fn test_remap_numeric_tail_without_suffix_is_unknown() {
+        // Regression: a checkpoint tensor literally named "backbone.layers.0"
+        // used to panic via out-of-range slicing (`&rest[dot + 1..]`).
+        assert_eq!(remap_m1_hf_key("backbone.layers.0"), RemappedKey::Unknown);
+        assert_eq!(remap_m1_hf_key("backbone.layers."), RemappedKey::Unknown);
     }
 
     #[test]

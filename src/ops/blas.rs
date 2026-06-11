@@ -47,6 +47,29 @@ pub fn sgemm_forward(
     n_in: usize,
     n_out: usize,
 ) {
+    // Guard the FFI paths: cblas_sgemm/gemm read raw pointers with sizes
+    // derived from the dims, so undersized slices (e.g. weights from an
+    // unvalidated checkpoint) would read out of bounds. Negligible cost
+    // relative to the GEMM itself.
+    assert!(
+        x.len() >= batch * n_in,
+        "sgemm_forward: x.len() {} < batch*n_in {}",
+        x.len(),
+        batch * n_in
+    );
+    assert!(
+        w.len() >= n_in * n_out,
+        "sgemm_forward: w.len() {} < n_in*n_out {}",
+        w.len(),
+        n_in * n_out
+    );
+    assert!(
+        y.len() >= batch * n_out,
+        "sgemm_forward: y.len() {} < batch*n_out {}",
+        y.len(),
+        batch * n_out
+    );
+
     // Pre-fill with bias
     if let Some(b) = bias {
         for row in 0..batch {
@@ -156,6 +179,38 @@ pub fn sgemm_backward(
     dims: (usize, usize, usize), // (batch, n_in, n_out)
 ) {
     let (batch, n_in, n_out) = dims;
+
+    // Guard the FFI paths (see sgemm_forward).
+    assert!(
+        dy.len() >= batch * n_out,
+        "sgemm_backward: dy.len() {} < batch*n_out {}",
+        dy.len(),
+        batch * n_out
+    );
+    assert!(
+        x_saved.len() >= batch * n_in,
+        "sgemm_backward: x_saved.len() {} < batch*n_in {}",
+        x_saved.len(),
+        batch * n_in
+    );
+    assert!(
+        w.len() >= n_in * n_out,
+        "sgemm_backward: w.len() {} < n_in*n_out {}",
+        w.len(),
+        n_in * n_out
+    );
+    assert!(
+        dx.len() >= batch * n_in,
+        "sgemm_backward: dx.len() {} < batch*n_in {}",
+        dx.len(),
+        batch * n_in
+    );
+    assert!(
+        dw.len() >= n_in * n_out,
+        "sgemm_backward: dw.len() {} < n_in*n_out {}",
+        dw.len(),
+        n_in * n_out
+    );
 
     // dX[B,K] = dY[B,N] @ W^T[N,K]
     dx[..batch * n_in].fill(0.0);

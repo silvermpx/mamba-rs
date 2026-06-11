@@ -80,6 +80,12 @@ impl Mamba3Trainer {
         lr: f32,
         weight_decay: f32,
     ) -> Result<Self, String> {
+        crate::mamba_ssm::gpu::launch::validate_kernel_arg_capacity(
+            batch,
+            seq_len,
+            cfg.d_inner(),
+            cfg.d_state,
+        )?;
         let inner = match dtype {
             WeightDtype::F32 => Trainer3Inner::F32(Box::new(Mamba3TrainerF32::new_full(
                 gpu_ordinal,

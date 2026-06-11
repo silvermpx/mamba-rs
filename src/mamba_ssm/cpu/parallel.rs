@@ -151,14 +151,15 @@ pub fn parallel_mamba_forward(
     //   conv_states[b*conv_per .. (b+1)*conv_per]
     //   ssm_states[b*ssm_per .. (b+1)*ssm_per]
     //   mamba_batch_acts[b]
-    // No two iterations share any memory. The slices are bounds-checked via
-    // debug_assert before the parallel loop.
-
-    debug_assert!(temporal_out.len() >= b_sz * dm);
-    debug_assert!(state.conv.len() >= b_sz * conv_per_sample);
-    debug_assert!(state.ssm.len() >= b_sz * ssm_per_sample);
-    debug_assert!(mamba_inputs.len() >= b_sz * inp_per_sample);
-    debug_assert!(mamba_batch_acts.len() >= b_sz);
+    // No two iterations share any memory. The slices are bounds-checked
+    // before the parallel loop — hard asserts, not debug_assert: this is a
+    // pub fn whose raw-pointer regions would otherwise go out of bounds in
+    // release builds on undersized inputs (UB, not a panic).
+    assert!(temporal_out.len() >= b_sz * dm);
+    assert!(state.conv.len() >= b_sz * conv_per_sample);
+    assert!(state.ssm.len() >= b_sz * ssm_per_sample);
+    assert!(mamba_inputs.len() >= b_sz * inp_per_sample);
+    assert!(mamba_batch_acts.len() >= b_sz);
 
     let a_neg_all = state.a_neg;
     let temporal_ptr = temporal_out.as_mut_ptr();
@@ -262,7 +263,7 @@ pub fn parallel_mamba_backward(
     a_neg_all: &[f32],
     dims: &MambaDims,
 ) {
-    debug_assert_eq!(d_temporal_seqs.len(), mamba_batch_acts.len());
+    assert_eq!(d_temporal_seqs.len(), mamba_batch_acts.len());
     let b_sz = d_temporal_seqs.len();
     if b_sz == 0 {
         return;
@@ -378,8 +379,10 @@ pub fn parallel_mamba_target_forward(
     let dr = dims.dt_rank;
     let mid = dims.mamba_input_dim;
 
-    debug_assert!(target_temporal.len() >= b_sz * dm);
-    debug_assert!(target_mamba_inputs.len() >= b_sz * mid);
+    // Hard asserts: raw-pointer regions below would be UB on undersized
+    // inputs in release builds.
+    assert!(target_temporal.len() >= b_sz * dm);
+    assert!(target_mamba_inputs.len() >= b_sz * mid);
 
     let temporal_ptr = target_temporal.as_mut_ptr();
     // Take a reference so edition-2024 closure captures `&TargetRawPtr` (Sync)
@@ -450,8 +453,10 @@ pub fn parallel_mamba_target_forward_burnin(
     let dr = dims.dt_rank;
     let nl = dims.n_layers;
 
-    debug_assert!(target_temporal.len() >= b_sz * dm);
-    debug_assert!(target_ip_out_flat.len() >= b_sz * seq_len * dm);
+    // Hard asserts: raw-pointer regions below would be UB on undersized
+    // inputs in release builds.
+    assert!(target_temporal.len() >= b_sz * dm);
+    assert!(target_ip_out_flat.len() >= b_sz * seq_len * dm);
 
     let temporal_ptr = target_temporal.as_mut_ptr();
     let ptr = &TargetRawPtr {

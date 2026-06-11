@@ -195,6 +195,7 @@ impl MambaTrainer {
         lr: f32,
         weight_decay: f32,
     ) -> Result<Self, String> {
+        super::launch::validate_kernel_arg_capacity(batch, seq_len, cfg.d_inner(), cfg.d_state)?;
         let inner = match dtype {
             WeightDtype::F32 => TrainerInner::F32(Box::new(MambaTrainerF32::new_full(
                 gpu_ordinal,

@@ -152,22 +152,31 @@ pub fn load(path: &Path) -> Result<(MambaWeights, MambaConfig, usize), String> {
     };
     cfg.validate()?;
 
-    let _di = cfg.d_inner();
-    let _dt_rank = cfg.dt_rank();
-    let _xdbl_dim = cfg.xdbl_dim();
-
-    // Helper: read tensor as Vec<f32>
+    // Helper: read tensor as Vec<f32>. Decodes byte-wise: the safetensors
+    // spec does not guarantee 4-byte alignment of the data section, so
+    // casting the raw buffer to `*const f32` would be UB on a spec-valid
+    // file written with an unpadded header.
     let read = |name: &str| -> Result<Vec<f32>, String> {
         let tv = st
             .tensor(name)
             .map_err(|e| format!("tensor '{name}': {e}"))?;
+        if tv.dtype() != safetensors::Dtype::F32 {
+            return Err(format!(
+                "tensor '{name}': dtype {:?}, expected F32",
+                tv.dtype()
+            ));
+        }
         let bytes = tv.data();
         if bytes.len() % 4 != 0 {
-            return Err(format!("tensor '{name}': not aligned to f32"));
+            return Err(format!(
+                "tensor '{name}': byte length {} is not a multiple of 4",
+                bytes.len()
+            ));
         }
-        let floats =
-            unsafe { std::slice::from_raw_parts(bytes.as_ptr() as *const f32, bytes.len() / 4) };
-        Ok(floats.to_vec())
+        Ok(bytes
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect())
     };
 
     let input_proj_w = read("input_proj.weight")?;
@@ -200,6 +209,10 @@ pub fn load(path: &Path) -> Result<(MambaWeights, MambaConfig, usize), String> {
         layers,
         norm_f_weight,
     };
+
+    // Reject undersized/oversized tensors before they can reach the BLAS
+    // FFI paths (which trust config-derived dims for their pointer math).
+    weights.validate(&cfg, input_dim)?;
 
     Ok((weights, cfg, input_dim))
 }

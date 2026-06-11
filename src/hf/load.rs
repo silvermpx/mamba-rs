@@ -56,8 +56,26 @@ pub fn load_hf(dir: &Path) -> Result<HfModel, String> {
 
     let shard_paths = discover_shards(dir)?;
 
+    // config.json is untrusted input: bound the dims before sizing
+    // allocations from their products (otherwise a hostile file can demand
+    // a near-arbitrary allocation or wrap the product in release builds).
+    if hf_cfg.vocab_size == 0 || hf_cfg.vocab_size > (1 << 24) {
+        return Err(format!(
+            "vocab_size {} out of supported range (1..=2^24)",
+            hf_cfg.vocab_size
+        ));
+    }
+    if hf_cfg.d_model == 0 || hf_cfg.d_model > (1 << 20) {
+        return Err(format!(
+            "d_model {} out of supported range (1..=2^20)",
+            hf_cfg.d_model
+        ));
+    }
     let vocab_size_padded = (hf_cfg.vocab_size + 63) & !63;
-    let mut embed = vec![0.0f32; vocab_size_padded * hf_cfg.d_model];
+    let embed_len = vocab_size_padded
+        .checked_mul(hf_cfg.d_model)
+        .ok_or("vocab_size_padded * d_model overflows usize")?;
+    let mut embed = vec![0.0f32; embed_len];
     let mut lm_head: Option<Vec<f32>> = None;
     let mut norm_f_weight = vec![0.0f32; hf_cfg.d_model];
     let mut layer_weights: Vec<Option<LayerAccum>> = (0..hf_cfg.n_layers).map(|_| None).collect();

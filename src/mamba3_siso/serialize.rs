@@ -99,14 +99,30 @@ pub fn load_mamba3(path: &Path, cfg: &Mamba3Config) -> Result<(Mamba3Weights, us
 
     let st = SafeTensors::deserialize(&data).map_err(|e| format!("deserialize: {e:?}"))?;
 
+    // Byte-wise decode: the safetensors spec does not guarantee 4-byte
+    // alignment of the data section, so a `*const f32` cast on the raw
+    // buffer would be UB for a spec-valid file with an unpadded header.
     let get = |name: &str| -> Result<Vec<f32>, String> {
         let t = st
             .tensor(name)
             .map_err(|e| format!("tensor '{name}': {e:?}"))?;
+        if t.dtype() != safetensors::Dtype::F32 {
+            return Err(format!(
+                "tensor '{name}': dtype {:?}, expected F32",
+                t.dtype()
+            ));
+        }
         let bytes = t.data();
-        let floats =
-            unsafe { std::slice::from_raw_parts(bytes.as_ptr() as *const f32, bytes.len() / 4) };
-        Ok(floats.to_vec())
+        if bytes.len() % 4 != 0 {
+            return Err(format!(
+                "tensor '{name}': byte length {} is not a multiple of 4",
+                bytes.len()
+            ));
+        }
+        Ok(bytes
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect())
     };
 
     let mut layers = Vec::new();
