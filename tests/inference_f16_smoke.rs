@@ -23,6 +23,7 @@ fn m1_inference_f16_wrapper_smoke() {
         d_conv: 4,
         expand: 2,
         scan_mode: mamba_rs::config::ScanMode::Sequential,
+        rms_norm_eps: 1e-5,
     };
     let input_dim = cfg.d_model;
     let batch = 1;

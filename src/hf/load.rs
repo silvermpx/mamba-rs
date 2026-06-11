@@ -39,21 +39,6 @@ pub fn load_hf(dir: &Path) -> Result<HfModel, String> {
         ));
     }
 
-    // RMSNorm kernels across the codebase hardcode `eps = 1e-5` (see
-    // src/ops/fast_math.rs). That matches `state-spaces/mamba-*-hf`. If
-    // the loaded checkpoint specifies a different value (FalconMamba uses
-    // 1e-6), numerics will diverge slightly from the PyTorch reference
-    // (typically <1e-3 KL on final logits). Surface this so the user is
-    // aware until the eps is plumbed end-to-end through `MambaConfig` and
-    // every norm kernel launch.
-    if (hf_cfg.rms_norm_eps - 1e-5).abs() > 1e-9 {
-        eprintln!(
-            "[mamba-rs] WARNING: checkpoint has rms_norm_eps={:.3e} but kernels use 1e-5. \
-             Logits will differ slightly from PyTorch reference. See config_json.rs for context.",
-            hf_cfg.rms_norm_eps
-        );
-    }
-
     let shard_paths = discover_shards(dir)?;
 
     // config.json is untrusted input: bound the dims before sizing
@@ -157,6 +142,9 @@ pub fn load_hf(dir: &Path) -> Result<HfModel, String> {
         d_conv: hf_cfg.d_conv,
         expand: hf_cfg.expand,
         n_layers: hf_cfg.n_layers,
+        // Checkpoint-specified norm epsilon (FalconMamba: 1e-6) — plumbed
+        // through every CPU/GPU inference norm via MambaConfig/MambaDims.
+        rms_norm_eps: hf_cfg.rms_norm_eps,
         ..MambaConfig::default()
     };
 

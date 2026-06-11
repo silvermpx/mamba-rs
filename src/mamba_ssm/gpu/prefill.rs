@@ -88,7 +88,7 @@ pub fn gpu_forward_inference_prefill<W: MambaWeightsView>(
         {
             let bt_i = bt as i32;
             let dm_i = dm as i32;
-            let eps: f32 = 1e-5;
+            let eps: f32 = dims.rms_norm_eps;
             let mut builder = ctx.stream.launch_builder(&ctx.kernels.rmsnorm_fwd);
             builder.arg(scratch.out_flat.inner_mut());
             builder.arg(scratch.rms_discard.inner_mut());
@@ -306,7 +306,7 @@ pub fn gpu_forward_inference_prefill<W: MambaWeightsView>(
     {
         let bt_i = bt as i32;
         let dm_i = dm as i32;
-        let eps: f32 = 1e-5;
+        let eps: f32 = dims.rms_norm_eps;
         scratch.residual.copy_from(&scratch.out_flat, &ctx.stream)?;
         let mut builder = ctx.stream.launch_builder(&ctx.kernels.rmsnorm_fwd);
         builder.arg(scratch.out_flat.inner_mut());
@@ -402,7 +402,7 @@ pub fn gpu_forward_inference_prefill_mixed<W: MambaWeightsView>(
         {
             let bt_i = bt as i32;
             let dm_i = dm as i32;
-            let eps: f32 = 1e-5;
+            let eps: f32 = dims.rms_norm_eps;
             let mut bld = ctx.stream.launch_builder(k.rmsnorm_fwd_f32in_typed.get(dt));
             let out_ptr = scratch.out_flat.cached_ptr();
             let rms_ptr = scratch.rms_discard.cached_ptr();
@@ -656,7 +656,7 @@ pub fn gpu_forward_inference_prefill_mixed<W: MambaWeightsView>(
     {
         let bt_i = bt as i32;
         let dm_i = dm as i32;
-        let eps: f32 = 1e-5;
+        let eps: f32 = dims.rms_norm_eps;
         let mut bld = ctx.stream.launch_builder(k.rmsnorm_fwd_f32in_typed.get(dt));
         let out_ptr = scratch.out_flat.cached_ptr();
         let rms_ptr = scratch.rms_discard.cached_ptr();

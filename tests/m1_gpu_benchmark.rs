@@ -116,6 +116,7 @@ fn m1_gpu_benchmark() {
             mamba_input_dim: input_dim,
             n_layers: cfg.n_layers,
             scan_mode: mamba_rs::config::ScanMode::Auto,
+            rms_norm_eps: 1e-5,
         };
 
         let gpu_w = GpuMambaTrainWeights::from_cpu(&ctx.stream, &cpu_weights).unwrap();

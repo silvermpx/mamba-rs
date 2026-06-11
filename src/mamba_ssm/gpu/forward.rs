@@ -70,6 +70,9 @@ pub struct GpuMambaDims {
     /// T > PARALLEL_SCAN_THRESHOLD heuristic). d_state > 64 always forces
     /// the parallel kernels regardless of mode (register-array limit).
     pub scan_mode: crate::config::ScanMode,
+    /// RMSNorm epsilon (layer norms + norm_f). 1e-5 unless the checkpoint
+    /// specifies otherwise (FalconMamba: 1e-6).
+    pub rms_norm_eps: f32,
 }
 
 impl GpuMambaDims {
@@ -402,7 +405,7 @@ pub fn gpu_forward_mamba_layer(
     {
         let batch_i = bt as i32;
         let dim_i = dm as i32;
-        let eps: f32 = 1e-5;
+        let eps: f32 = dims.rms_norm_eps;
         let mut builder = ctx.stream.launch_builder(&ctx.kernels.rmsnorm_fwd);
         builder.arg(acts.post_norm.inner_mut());
         builder.arg(acts.rms_vals.inner_mut());
@@ -735,7 +738,7 @@ pub fn gpu_forward_mamba_backbone(
     {
         let bt_i = bt as i32;
         let dm_i = dims.d_model as i32;
-        let eps: f32 = 1e-5;
+        let eps: f32 = dims.rms_norm_eps;
         // Save pre-norm input for backward
         acts.norm_f_input.copy_from(temporal, &ctx.stream)?;
         let mut builder = ctx.stream.launch_builder(&ctx.kernels.rmsnorm_fwd);
@@ -814,7 +817,7 @@ pub fn gpu_forward_mamba_target_burnin(
         {
             let bt_i = bt as i32;
             let dm_i = dm as i32;
-            let eps: f32 = 1e-5;
+            let eps: f32 = dims.rms_norm_eps;
             let mut builder = ctx.stream.launch_builder(&ctx.kernels.rmsnorm_fwd);
             builder.arg(scratch.out_flat.inner_mut()); // normed output
             builder.arg(scratch.rms_discard.inner_mut()); // rms scalars (discarded)
@@ -1031,7 +1034,7 @@ pub fn gpu_forward_mamba_target_burnin(
     {
         let bt_i = bt as i32;
         let dm_i = dm as i32;
-        let eps: f32 = 1e-5;
+        let eps: f32 = dims.rms_norm_eps;
         // Use residual as temp input buffer, rms_discard for rms scalars
         scratch.residual.copy_from(&scratch.out_flat, &ctx.stream)?;
         let mut builder = ctx.stream.launch_builder(&ctx.kernels.rmsnorm_fwd);

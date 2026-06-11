@@ -23,7 +23,7 @@ use super::scratch::PhaseScratch;
 use super::weights::{TrainMambaLayerWeights, TrainMambaWeights};
 use crate::ops::blas::sgemm_forward;
 use crate::ops::dims::{MambaDims, MambaRecurrentState};
-use crate::ops::fast_math::{RMS_NORM_EPS, fast_exp_inplace, fast_exp_scalar};
+use crate::ops::fast_math::{fast_exp_inplace, fast_exp_scalar};
 
 /// O2 optimized single-layer Mamba forward pass: 7-phase pipeline with batched SGEMM.
 ///
@@ -88,7 +88,7 @@ pub fn forward_mamba_layer_batched(
             sum_sq += v * v;
         }
         let mean_sq = sum_sq / dm as f32;
-        let rms = (mean_sq + RMS_NORM_EPS).sqrt();
+        let rms = (mean_sq + dims.rms_norm_eps).sqrt();
         acts.set_rms_val(t, rms);
         let inv_rms = 1.0 / rms;
 
@@ -417,7 +417,7 @@ pub fn forward_mamba_backbone_batched(
             .map(|v| v * v)
             .sum::<f32>()
             / dm as f32;
-        let rms = (mean_sq + RMS_NORM_EPS).sqrt();
+        let rms = (mean_sq + dims.rms_norm_eps).sqrt();
         acts.norm_f_rms[t] = rms;
         let inv_rms = 1.0 / rms;
         for d in 0..dm {

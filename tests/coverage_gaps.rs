@@ -55,6 +55,7 @@ fn run_parallel_scan_trainer(dtype: WeightDtype) {
         d_conv: 4,
         expand: 2,
         scan_mode: ScanMode::Parallel,
+        rms_norm_eps: 1e-5,
     };
     let input_dim = cfg.d_model;
     let batch = 1;
@@ -216,6 +217,7 @@ fn a_log_actually_reaches_ssm_after_training() {
         d_conv: 4,
         expand: 2,
         scan_mode: ScanMode::Sequential,
+        rms_norm_eps: 1e-5,
     };
     let input_dim = cfg.d_model;
     let batch = 1;
@@ -326,6 +328,7 @@ fn m1_trainer_f16_production_lr_stable() {
         d_conv: 4,
         expand: 2,
         scan_mode: ScanMode::Sequential,
+        rms_norm_eps: 1e-5,
     };
     let input_dim = cfg.d_model;
     let batch = 2;

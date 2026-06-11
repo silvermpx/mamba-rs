@@ -390,7 +390,7 @@ pub fn gpu_forward_mamba_backbone_mixed(
         {
             let bt_i = bt as i32;
             let dm_i = dm as i32;
-            let eps: f32 = 1e-5;
+            let eps: f32 = dims.rms_norm_eps;
             let mut bld = ctx.stream.launch_builder(k.rmsnorm_fwd_f32in_typed.get(dt));
             let pn_ptr = layer_acts.post_norm.cached_ptr();
             let rms_ptr = layer_acts.rms_vals.cached_ptr();
@@ -713,7 +713,7 @@ pub fn gpu_forward_mamba_backbone_mixed(
     {
         let bt_i = bt as i32;
         let dm_i = dm as i32;
-        let eps: f32 = 1e-5;
+        let eps: f32 = dims.rms_norm_eps;
         let mut bld = ctx.stream.launch_builder(k.rmsnorm_fwd_f32in_typed.get(dt));
         let tt = scratch.temporal_typed.cached_ptr();
         let nfr = acts.norm_f_rms.cached_ptr();

@@ -2,6 +2,10 @@
 //!
 //! Used for target network inference (no gradient tracking): T=1 cold-state forward, or
 //! T=seq_len burn-in forward with state carry.
+//!
+//! Norm eps: target forwards use the default `RMS_NORM_EPS` (1e-5) — the RL
+//! target path never loads HF checkpoints, so the per-checkpoint
+//! `rms_norm_eps` plumbing (FalconMamba) intentionally stops before here.
 
 use super::weights::TrainMambaWeights;
 use crate::ops::blas::matvec_forward;

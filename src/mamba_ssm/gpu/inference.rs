@@ -510,7 +510,7 @@ impl GpuMambaInference {
             {
                 let b_i = b as i32;
                 let dm_i = dm as i32;
-                let eps: f32 = 1e-5;
+                let eps: f32 = cfg.rms_norm_eps;
                 let mut bld = self.ctx.stream.launch_builder(&k.rmsnorm_fwd);
                 let t_ptr = scratch.temporal.cached_ptr();
                 let rms_ptr = scratch.rms_buf.cached_ptr();
@@ -739,7 +739,7 @@ impl GpuMambaInference {
         if stop_after_layer.is_none() {
             let b_i = b as i32;
             let dm_i = dm as i32;
-            let eps: f32 = 1e-5;
+            let eps: f32 = cfg.rms_norm_eps;
             let mut bld = self.ctx.stream.launch_builder(&k.rmsnorm_fwd);
             let t_ptr = scratch.temporal.cached_ptr();
             let rms_ptr = scratch.rms_buf.cached_ptr();
@@ -989,7 +989,7 @@ impl GpuMambaInferenceMixed {
             {
                 let b_i = b as i32;
                 let dm_i = dm as i32;
-                let eps: f32 = 1e-5;
+                let eps: f32 = cfg.rms_norm_eps;
                 let mut bld = engine
                     .ctx
                     .stream
@@ -1254,7 +1254,7 @@ impl GpuMambaInferenceMixed {
         if stop_after_layer.is_none() {
             let b_i = b as i32;
             let dm_i = dm as i32;
-            let eps: f32 = 1e-5;
+            let eps: f32 = cfg.rms_norm_eps;
             let mut bld = engine
                 .ctx
                 .stream
@@ -1821,6 +1821,7 @@ impl GpuMambaBackbone {
             xdbl_dim: cfg.xdbl_dim(),
             mamba_input_dim: cfg.d_model,
             scan_mode: cfg.scan_mode,
+            rms_norm_eps: cfg.rms_norm_eps,
         };
         super::backward::GpuMambaTargetMixedScratch::new(self.stream(), &dims, dtype)
     }
@@ -1843,6 +1844,7 @@ impl GpuMambaBackbone {
             xdbl_dim: cfg.xdbl_dim(),
             mamba_input_dim: cfg.d_model, // HF LLM path: no input_proj, input_dim == d_model
             scan_mode: cfg.scan_mode,
+            rms_norm_eps: cfg.rms_norm_eps,
         };
         super::backward::GpuMambaTargetScratch::new(self.stream(), &dims)
     }

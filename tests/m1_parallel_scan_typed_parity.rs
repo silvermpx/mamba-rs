@@ -32,6 +32,7 @@ fn tiny_cfg() -> MambaConfig {
         d_conv: 4,
         expand: 2,
         scan_mode: ScanMode::Sequential,
+        rms_norm_eps: 1e-5,
     }
 }
 
@@ -48,6 +49,7 @@ fn dims_for(cfg: &MambaConfig, batch: usize, seq_len: usize) -> GpuMambaDims {
         mamba_input_dim: cfg.d_model,
         n_layers: cfg.n_layers,
         scan_mode: cfg.scan_mode,
+        rms_norm_eps: cfg.rms_norm_eps,
     }
 }
 

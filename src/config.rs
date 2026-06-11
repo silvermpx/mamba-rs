@@ -55,7 +55,7 @@ impl ScanMode {
 ///
 /// Source: Gu & Dao (2023) "Mamba: Linear-Time Sequence Modeling with Selective State Spaces"
 /// Paper: <https://arxiv.org/abs/2312.00752>
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct MambaConfig {
     /// Model dimension — input features projected to this size.
     pub d_model: usize,
@@ -74,9 +74,14 @@ pub struct MambaConfig {
     /// Number of stacked Mamba layers. Paper default: varies by model size.
     pub n_layers: usize,
 
-    /// GPU SSM scan mode. Default: Auto (sequential T<=128, parallel T>128).
+    /// GPU SSM scan mode. Default: Auto (see [`ScanMode`]).
     /// Only affects GPU training forward/backward. CPU always uses sequential.
     pub scan_mode: ScanMode,
+
+    /// RMSNorm epsilon for every layer norm and the final norm_f.
+    /// Default 1e-5 (state-spaces/mamba). FalconMamba checkpoints use 1e-6 —
+    /// the HF loader plumbs the checkpoint's value through here.
+    pub rms_norm_eps: f32,
 }
 
 impl MambaConfig {
@@ -176,6 +181,7 @@ impl Default for MambaConfig {
             expand: 2,
             n_layers: 3,
             scan_mode: ScanMode::Auto,
+            rms_norm_eps: crate::ops::fast_math::RMS_NORM_EPS,
         }
     }
 }

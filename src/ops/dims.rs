@@ -6,7 +6,7 @@ use crate::config::MambaConfig;
 
 /// Collected Mamba dimensions to avoid passing 8+ separate usize params.
 /// Used by all optimized forward/backward functions.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct MambaDims {
     /// Model dimension (features projected to this size).
     pub d_model: usize,
@@ -26,6 +26,9 @@ pub struct MambaDims {
     pub mamba_input_dim: usize,
     /// Number of stacked Mamba layers.
     pub n_layers: usize,
+    /// RMSNorm epsilon (layer norms + norm_f). 1e-5 unless the checkpoint
+    /// specifies otherwise (FalconMamba: 1e-6).
+    pub rms_norm_eps: f32,
 }
 
 impl MambaDims {
@@ -55,12 +58,13 @@ impl MambaDims {
             seq_len,
             mamba_input_dim,
             n_layers,
+            rms_norm_eps: crate::ops::fast_math::RMS_NORM_EPS,
         }
     }
 
     /// Construct from [`MambaConfig`] with explicit input dimension.
     pub fn from_config(config: &MambaConfig, seq_len: usize, input_dim: usize) -> Self {
-        Self::new((
+        let mut dims = Self::new((
             config.d_model,
             config.d_inner(),
             config.d_state,
@@ -69,7 +73,9 @@ impl MambaDims {
             seq_len,
             input_dim,
             config.n_layers,
-        ))
+        ));
+        dims.rms_norm_eps = config.rms_norm_eps;
+        dims
     }
 }
 

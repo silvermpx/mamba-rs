@@ -6,7 +6,7 @@
 //! - [`mamba_step`]: Full backbone: input_proj + N blocks + norm_f.
 
 use crate::config::MambaConfig;
-use crate::ops::fast_math::{RMS_NORM_EPS, fast_exp_inplace, fast_exp_scalar};
+use crate::ops::fast_math::{fast_exp_inplace, fast_exp_scalar};
 use crate::state::MambaLayerState;
 use crate::weights::{MambaLayerWeights, MambaWeights};
 
@@ -238,7 +238,7 @@ pub fn mamba_block_step(
 
     // RMSNorm
     let mean_sq: f32 = hidden[..d_model].iter().map(|v| v * v).sum::<f32>() / d_model as f32;
-    let inv_rms = 1.0 / (mean_sq + RMS_NORM_EPS).sqrt();
+    let inv_rms = 1.0 / (mean_sq + cfg.rms_norm_eps).sqrt();
     for (nb, (&h, &nw)) in scratch.norm_buf[..d_model]
         .iter_mut()
         .zip(hidden[..d_model].iter().zip(lw.norm_weight.iter()))
@@ -327,7 +327,7 @@ fn mamba_blocks_and_norm(
         mamba_block_step(output, lw, &mut state[layer_idx], scratch, cfg);
     }
     let mean_sq: f32 = output[..d_model].iter().map(|v| v * v).sum::<f32>() / d_model as f32;
-    let inv_rms = 1.0 / (mean_sq + RMS_NORM_EPS).sqrt();
+    let inv_rms = 1.0 / (mean_sq + cfg.rms_norm_eps).sqrt();
     for (o, &nfw) in output[..d_model]
         .iter_mut()
         .zip(weights.norm_f_weight[..d_model].iter())

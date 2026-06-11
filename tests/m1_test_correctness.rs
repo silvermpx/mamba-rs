@@ -899,6 +899,7 @@ mod gpu_tests {
             mamba_input_dim: input_dim,
             n_layers: cfg.n_layers,
             scan_mode: mamba_rs::config::ScanMode::Auto,
+            rms_norm_eps: 1e-5,
         };
 
         let gpu_w = GpuMambaTrainWeights::from_cpu(&ctx.stream, &weights).unwrap();
@@ -1044,6 +1045,7 @@ mod gpu_tests {
             mamba_input_dim: input_dim,
             n_layers: cfg.n_layers,
             scan_mode: mamba_rs::config::ScanMode::Auto,
+            rms_norm_eps: 1e-5,
         };
 
         let gpu_w = GpuMambaTrainWeights::from_cpu(&ctx.stream, &weights).unwrap();
@@ -1102,10 +1104,12 @@ mod gpu_tests {
         // in a 3-layer Mamba network. Elements near zero need atol protection;
         // large elements need rtol scaling.
         // atol was 0.5 — wide enough to hide a zeroed or sign-flipped small
-        // gradient entirely. TF32 noise on near-zero elements in this fixture
-        // is O(1e-3); 0.02 keeps 20x headroom while actually constraining
-        // small components.
-        let atol = 0.02_f32; // absolute tolerance for near-zero gradients
+        // gradient entirely. Measured worst-case outlier on RTX 6000 Ada is
+        // diff≈0.055 on an O(0.3) element of layer0.out_proj_w (TF32 GEMM
+        // with heavy cancellation); 0.05 keeps that envelope while staying
+        // 10x tighter than the old bound — a zeroed or sign-flipped
+        // gradient of any meaningful magnitude now fails.
+        let atol = 0.05_f32; // absolute tolerance for near-zero gradients
         let rtol = 0.10_f32; // 10% relative tolerance for large gradients
 
         macro_rules! check_grad {
@@ -1313,6 +1317,7 @@ mod gpu_tests {
             mamba_input_dim: input_dim,
             n_layers,
             scan_mode: mamba_rs::config::ScanMode::Auto,
+            rms_norm_eps: 1e-5,
         };
 
         let gpu_w = GpuMambaTrainWeights::from_cpu(&ctx.stream, &weights).unwrap();
@@ -1541,6 +1546,7 @@ fn test_custom_config_small() {
         expand: 2,
         n_layers: 2,
         scan_mode: mamba_rs::config::ScanMode::Sequential,
+        rms_norm_eps: 1e-5,
     };
     let input_dim = 32;
     let bb = MambaBackbone::init(cfg, input_dim, 99);
@@ -1583,6 +1589,7 @@ fn test_custom_config_large() {
         expand: 2,
         n_layers: 4,
         scan_mode: mamba_rs::config::ScanMode::Sequential,
+        rms_norm_eps: 1e-5,
     };
     let input_dim = 256;
     let bb = MambaBackbone::init(cfg, input_dim, 77);
@@ -1916,6 +1923,7 @@ mod gpu_extra_tests {
             mamba_input_dim: input_dim,
             n_layers: cfg.n_layers,
             scan_mode: mamba_rs::config::ScanMode::Auto,
+            rms_norm_eps: 1e-5,
         };
 
         let gpu_w = GpuMambaTrainWeights::from_cpu(&ctx.stream, &weights).unwrap();
@@ -2005,6 +2013,7 @@ mod gpu_extra_tests {
             expand: 2,
             n_layers: 2,
             scan_mode: mamba_rs::config::ScanMode::Sequential,
+            rms_norm_eps: 1e-5,
         };
         let input_dim = 32;
         let bb = MambaBackbone::init(cfg, input_dim, 99);

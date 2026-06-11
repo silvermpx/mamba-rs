@@ -464,6 +464,7 @@ impl MambaTrainerMixed {
             mamba_input_dim: input_dim,
             n_layers,
             scan_mode: cfg.scan_mode,
+            rms_norm_eps: cfg.rms_norm_eps,
         };
 
         let acts = GpuMambaBackboneMixedActs::new(&ctx.stream, &dims, dtype)?;
@@ -1123,6 +1124,7 @@ impl MambaTrainerF32 {
             mamba_input_dim: input_dim,
             n_layers,
             scan_mode: cfg.scan_mode,
+            rms_norm_eps: cfg.rms_norm_eps,
         };
 
         let acts = GpuMambaBackboneActs::new(&ctx.stream, &dims)?;

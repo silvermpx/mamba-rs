@@ -30,8 +30,9 @@ struct RawConfig {
     tie_word_embeddings: Option<bool>,
     use_bias: Option<bool>,
     use_conv_bias: Option<bool>,
-    #[allow(dead_code)]
-    residual_in_fp32: Option<bool>,
+    // (residual_in_fp32 intentionally not parsed — serde skips unknown
+    // fields, and nothing reads it; our mixed pipeline is always
+    // residual-in-f32.)
     // RMSNorm epsilon — state-spaces/mamba-*-hf uses 1e-5 (default);
     // FalconMamba uses 1e-6. Reading this from the config lets both
     // loader paths produce numerically correct norms on the native

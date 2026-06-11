@@ -49,6 +49,7 @@ fn lm_cfg() -> mamba_rs::config::MambaConfig {
         d_conv: 4,
         expand: 2,
         scan_mode: mamba_rs::config::ScanMode::Sequential,
+        rms_norm_eps: 1e-5,
     }
 }
 
