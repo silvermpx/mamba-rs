@@ -10,7 +10,8 @@
 //!   sampling on top of the GPU backbones.
 
 mod backbone;
-#[cfg(feature = "hf")]
+// backbone3 and sample have no HF dependency — a default-feature build
+// gets both CPU backbones and the sampling utilities.
 pub mod backbone3;
 #[cfg(all(feature = "hf", feature = "cuda"))]
 pub mod gpu_lm;
@@ -18,9 +19,7 @@ pub mod gpu_lm;
 pub mod gpu_lm3;
 #[cfg(feature = "hf")]
 pub mod lm;
-#[cfg(feature = "hf")]
 pub mod sample;
 
 pub use backbone::MambaBackbone;
-#[cfg(feature = "hf")]
 pub use backbone3::Mamba3Backbone;

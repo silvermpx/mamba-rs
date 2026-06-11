@@ -216,7 +216,7 @@ Detailed tables: [Mamba SSM benchmarks](docs/mamba1-benchmarks.md),
 
 ## Testing
 
-49 test files, 280+ individual tests:
+48 test files, 280+ individual tests:
 
 - Correctness: bit-parity across CPU ↔ GPU, eager ↔ CUDA Graph, f32 ↔ bf16/f16
 - Gradient checks: finite-difference vs analytical on every weight tensor

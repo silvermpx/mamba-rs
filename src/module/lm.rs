@@ -163,6 +163,64 @@ impl MambaLM {
         })
     }
 
+    /// Build an LM around a Mamba-3 backbone with a caller-provided
+    /// embedding table (row-major `[vocab_rows, d_model]`, possibly padded
+    /// beyond `vocab_size`) and an optional untied lm_head (flat
+    /// `[d_model, vocab_size]`, see [`crate::hf::embed::lm_head_logits_untied`]).
+    ///
+    /// There is no public Mamba-3 HF checkpoint, so unlike [`Self::from_hf`]
+    /// the weights come from local training (`Mamba3Trainer::snapshot_master`)
+    /// or `mamba3_siso::serialize::load_mamba3` +
+    /// [`Mamba3Backbone::from_weights`].
+    pub fn from_mamba3(
+        backbone: Mamba3Backbone,
+        embed: Vec<f32>,
+        lm_head: Option<Vec<f32>>,
+        vocab_size: usize,
+    ) -> Result<Self, String> {
+        let d_model = backbone.d_model();
+        if d_model == 0 || !embed.len().is_multiple_of(d_model) {
+            return Err(format!(
+                "embed length {} is not a multiple of d_model {d_model}",
+                embed.len()
+            ));
+        }
+        let vocab_size_padded = embed.len() / d_model;
+        if vocab_size == 0 || vocab_size > vocab_size_padded {
+            return Err(format!(
+                "vocab_size {vocab_size} out of range (embed holds {vocab_size_padded} rows)"
+            ));
+        }
+        if let Some(ref lm) = lm_head
+            && lm.len() < vocab_size * d_model
+        {
+            return Err(format!(
+                "lm_head length {} < vocab_size*d_model {}",
+                lm.len(),
+                vocab_size * d_model
+            ));
+        }
+
+        let any = AnyBackbone::M3(backbone);
+        let state = any.alloc_state();
+        let scratch = any.alloc_scratch();
+        Ok(Self {
+            backbone: any,
+            state,
+            scratch,
+            temporal: vec![0.0f32; d_model],
+            prefill_inputs: Vec::new(),
+            prefill_outputs: Vec::new(),
+            embed,
+            lm_head,
+            logits: vec![0.0f32; vocab_size],
+            logits_scratch: vec![0.0f32; vocab_size_padded],
+            vocab_size,
+            vocab_size_padded,
+            d_model,
+        })
+    }
+
     /// Last computed logits for batch slot `b` (MambaLM is single-batch,
     /// so the `b` parameter exists only for API symmetry with
     /// `GpuMambaLM::last_logits`). Valid after the last `generate` /

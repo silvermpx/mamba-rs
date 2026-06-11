@@ -145,32 +145,6 @@ impl GpuMamba3LM {
         })
     }
 
-    /// Dtype + batch-size construction — mirrors
-    /// `GpuMambaLM::from_hf_with_dtype_batch` on the M1 side so `generate_batch`
-    /// has a flat convenience entry point on M3 too.
-    #[allow(clippy::too_many_arguments)]
-    pub fn from_weights_with_dtype_batch(
-        cpu_weights: &Mamba3Weights,
-        cfg: Mamba3Config,
-        embed: Vec<f32>,
-        lm_head: Option<Vec<f32>>,
-        vocab_size: usize,
-        gpu_ordinal: usize,
-        dtype: WeightDtype,
-        batch: usize,
-    ) -> Result<Self, String> {
-        Self::build(Mamba3LmBuild {
-            cpu_weights,
-            cfg,
-            embed,
-            lm_head,
-            vocab_size,
-            gpu_ordinal,
-            dtype,
-            batch,
-        })
-    }
-
     /// Full constructor.
     ///
     /// `embed`: `[vocab_size_padded * d_model]` row-major; `lm_head` (if

@@ -35,6 +35,25 @@ impl Mamba3Backbone {
         Self { weights, cfg }
     }
 
+    /// Wrap pre-loaded weights — e.g. from
+    /// [`crate::mamba3_siso::serialize::load_mamba3`] or a trainer's
+    /// `snapshot_master`. Validates every tensor length against `cfg`
+    /// before accepting, so undersized checkpoints are rejected here
+    /// rather than panicking mid-inference.
+    pub fn from_weights(
+        weights: Mamba3Weights,
+        cfg: Mamba3Config,
+        input_dim: usize,
+    ) -> Result<Self, String> {
+        weights.validate(&cfg, input_dim)?;
+        Ok(Self { weights, cfg })
+    }
+
+    /// Borrow the weight bundle (e.g. for serialization).
+    pub fn weights(&self) -> &Mamba3Weights {
+        &self.weights
+    }
+
     /// Borrow the architecture config.
     pub fn config(&self) -> &Mamba3Config {
         &self.cfg
