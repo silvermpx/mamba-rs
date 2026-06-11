@@ -9,8 +9,8 @@ use mamba_rs::mamba3_siso::config::Mamba3Config;
 use mamba_rs::mamba3_siso::gpu::inference::GpuMamba3Backbone;
 use mamba_rs::mamba3_siso::gpu::kernels::Mamba3Kernels;
 use mamba_rs::mamba3_siso::gpu::mamba3_gpu::{
-    GpuMamba3BackboneActs, GpuMamba3Dims, GpuMamba3Scratch, gpu_backward_mamba3_backbone,
-    gpu_forward_mamba3_backbone,
+    GpuMamba3BackboneActs, GpuMamba3Dims, GpuMamba3Scratch, GpuMamba3StateBufs, M3Exec,
+    gpu_backward_mamba3_backbone, gpu_forward_mamba3_backbone,
 };
 use mamba_rs::mamba3_siso::gpu::weights::{GpuMamba3Grads, GpuMamba3Weights};
 use mamba_rs::mamba3_siso::weights::Mamba3Weights;
@@ -143,18 +143,22 @@ fn m3_gpu_benchmark() {
             let mut v_st = GpuBuffer::zeros(&ctx.stream, nl * nh * hd).unwrap();
             let mut a_st = GpuBuffer::zeros(&ctx.stream, nl * nh * na).unwrap();
             gpu_forward_mamba3_backbone(
-                &ctx,
-                &m3k,
+                &M3Exec {
+                    ctx: &ctx,
+                    kernels: &m3k,
+                    dims: &dims,
+                },
                 &mut temporal,
                 &mut acts,
                 &gpu_w,
                 &input_gpu,
-                &mut ssm,
-                &mut k_st,
-                &mut v_st,
-                &mut a_st,
+                GpuMamba3StateBufs {
+                    ssm: &mut ssm,
+                    k: &mut k_st,
+                    v: &mut v_st,
+                    angle: &mut a_st,
+                },
                 &mut scratch,
-                &dims,
             )
             .unwrap();
         }
@@ -172,18 +176,22 @@ fn m3_gpu_benchmark() {
             let mut v_st = GpuBuffer::zeros(&ctx.stream, nl * nh * hd).unwrap();
             let mut a_st = GpuBuffer::zeros(&ctx.stream, nl * nh * na).unwrap();
             gpu_forward_mamba3_backbone(
-                &ctx,
-                &m3k,
+                &M3Exec {
+                    ctx: &ctx,
+                    kernels: &m3k,
+                    dims: &dims,
+                },
                 &mut temporal,
                 &mut acts,
                 &gpu_w,
                 &input_gpu,
-                &mut ssm,
-                &mut k_st,
-                &mut v_st,
-                &mut a_st,
+                GpuMamba3StateBufs {
+                    ssm: &mut ssm,
+                    k: &mut k_st,
+                    v: &mut v_st,
+                    angle: &mut a_st,
+                },
                 &mut scratch,
-                &dims,
             )
             .unwrap();
         }
@@ -203,18 +211,22 @@ fn m3_gpu_benchmark() {
             let mut v_st = GpuBuffer::zeros(&ctx.stream, nl * nh * hd).unwrap();
             let mut a_st = GpuBuffer::zeros(&ctx.stream, nl * nh * na).unwrap();
             gpu_forward_mamba3_backbone(
-                &ctx,
-                &m3k,
+                &M3Exec {
+                    ctx: &ctx,
+                    kernels: &m3k,
+                    dims: &dims,
+                },
                 &mut temporal,
                 &mut acts,
                 &gpu_w,
                 &input_gpu,
-                &mut ssm,
-                &mut k_st,
-                &mut v_st,
-                &mut a_st,
+                GpuMamba3StateBufs {
+                    ssm: &mut ssm,
+                    k: &mut k_st,
+                    v: &mut v_st,
+                    angle: &mut a_st,
+                },
                 &mut scratch,
-                &dims,
             )
             .unwrap();
 
@@ -222,14 +234,16 @@ fn m3_gpu_benchmark() {
             let mut d_temporal =
                 GpuBuffer::from_cpu(&ctx.stream, &vec![1.0f32; bt * cfg.d_model]).unwrap();
             gpu_backward_mamba3_backbone(
-                &ctx,
-                &m3k,
+                &M3Exec {
+                    ctx: &ctx,
+                    kernels: &m3k,
+                    dims: &dims,
+                },
                 &mut d_temporal,
                 &acts,
                 &gpu_w,
                 &grads,
                 &mut scratch,
-                &dims,
             )
             .unwrap();
         }

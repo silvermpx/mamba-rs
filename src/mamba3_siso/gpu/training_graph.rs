@@ -20,11 +20,44 @@ use crate::mamba3_siso::gpu::backward_mixed::gpu_backward_mamba3_backbone_mixed;
 use crate::mamba3_siso::gpu::forward_mixed::{
     GpuMamba3BackboneMixedActs, GpuMamba3MixedScratch, gpu_forward_mamba3_backbone_mixed,
 };
-use crate::mamba3_siso::gpu::kernels::Mamba3Kernels;
-use crate::mamba3_siso::gpu::mamba3_gpu::GpuMamba3Dims;
-use crate::mamba3_siso::gpu::state::GpuMamba3Scratch;
+use crate::mamba3_siso::gpu::state::{GpuMamba3Scratch, GpuMamba3StateBufs, M3Exec};
 use crate::mamba3_siso::gpu::weights::GpuMamba3Grads;
 use crate::mamba3_siso::gpu::weights_mixed_train::GpuMamba3TrainMixedWeights;
+
+/// Buffers and parameter state borrowed into the captured M3 bf16
+/// training-step body (forward + backward + AdamW + master→compute sync).
+pub struct Mamba3MixedCapture<'a> {
+    pub train_w: &'a mut GpuMamba3TrainMixedWeights,
+    pub adam: &'a GpuAdamW,
+    pub bias: &'a AdamWBiasFactors,
+    pub grads: &'a mut GpuMamba3Grads,
+    pub acts: &'a mut GpuMamba3BackboneMixedActs,
+    pub f32_scratch: &'a mut GpuMamba3Scratch,
+    pub mixed_scratch: &'a mut GpuMamba3MixedScratch,
+    /// Written by the captured forward — pointer baked in.
+    pub temporal_f32: &'a mut GpuBuffer,
+    pub mamba_input: &'a GpuBuffer,
+    pub d_temporal: &'a mut GpuBuffer,
+    /// ALL four state buffers are written by forward and read by backward.
+    pub states: GpuMamba3StateBufs<'a>,
+}
+
+/// Live buffers checked against the captured pointers on every M3 bf16
+/// graph replay.
+#[derive(Clone, Copy)]
+pub struct Mamba3MixedReplay<'a> {
+    pub train_w: &'a GpuMamba3TrainMixedWeights,
+    pub adam: &'a GpuAdamW,
+    pub bias: &'a AdamWBiasFactors,
+    pub grads: &'a GpuMamba3Grads,
+    pub temporal_f32: &'a GpuBuffer,
+    pub mamba_input: &'a GpuBuffer,
+    pub d_temporal: &'a GpuBuffer,
+    pub ssm_states: &'a GpuBuffer,
+    pub k_states: &'a GpuBuffer,
+    pub v_states: &'a GpuBuffer,
+    pub angle_states: &'a GpuBuffer,
+}
 
 /// CUDA-Graph holder for a single Mamba-3 training step (bf16).
 pub struct GpuMamba3TrainingStepGraph {
@@ -63,27 +96,29 @@ pub struct GpuMamba3TrainingStepGraph {
 impl GpuMamba3TrainingStepGraph {
     /// See M1 [`crate::mamba_ssm::gpu::training_graph::GpuMambaTrainingStepGraph::capture`]
     /// for the warmup / caller-ordering contract — identical here.
-    #[allow(clippy::too_many_arguments)]
     pub fn capture(
-        ctx: &GpuCtx,
+        exec: &M3Exec<'_>,
         cfg: &crate::mamba3_siso::config::Mamba3Config,
-        m3k: &Mamba3Kernels,
-        train_w: &mut GpuMamba3TrainMixedWeights,
-        adam: &GpuAdamW,
-        bias: &AdamWBiasFactors,
-        grads: &mut GpuMamba3Grads,
-        acts: &mut GpuMamba3BackboneMixedActs,
-        f32_scratch: &mut GpuMamba3Scratch,
-        mixed_scratch: &mut GpuMamba3MixedScratch,
-        temporal_f32: &mut GpuBuffer,
-        mamba_input: &GpuBuffer,
-        d_temporal: &mut GpuBuffer,
-        ssm_states: &mut GpuBuffer,
-        k_states: &mut GpuBuffer,
-        v_states: &mut GpuBuffer,
-        angle_states: &mut GpuBuffer,
-        dims: &GpuMamba3Dims,
+        cap: Mamba3MixedCapture<'_>,
     ) -> Result<Self, String> {
+        let M3Exec {
+            ctx,
+            kernels: m3k,
+            dims,
+        } = *exec;
+        let Mamba3MixedCapture {
+            train_w,
+            adam,
+            bias,
+            grads,
+            acts,
+            f32_scratch,
+            mixed_scratch,
+            temporal_f32,
+            mamba_input,
+            d_temporal,
+            mut states,
+        } = cap;
         assert!(
             matches!(train_w.dtype, WeightDtype::Bf16),
             "M3 training graph capture supports bf16 only"
@@ -100,10 +135,10 @@ impl GpuMamba3TrainingStepGraph {
         let snap_adam_m = adam.m.cached_ptr();
         let snap_adam_v = adam.v.cached_ptr();
         let snap_bias = bias.ptr();
-        let snap_ssm_states = ssm_states.cached_ptr();
-        let snap_k_states = k_states.cached_ptr();
-        let snap_v_states = v_states.cached_ptr();
-        let snap_angle_states = angle_states.cached_ptr();
+        let snap_ssm_states = states.ssm.cached_ptr();
+        let snap_k_states = states.k.cached_ptr();
+        let snap_v_states = states.v.cached_ptr();
+        let snap_angle_states = states.angle.cached_ptr();
         let snap_temporal = temporal_f32.cached_ptr();
         let snap_master_input = train_w.master.input_proj_w.cached_ptr();
         let snap_master_norm_f = train_w.master.norm_f_weight.cached_ptr();
@@ -114,29 +149,22 @@ impl GpuMamba3TrainingStepGraph {
         let graph = capture_into_graph(&ctx.stream, || {
             grads.zero(&ctx.stream)?;
             gpu_forward_mamba3_backbone_mixed(
-                ctx,
-                m3k,
+                exec,
                 temporal_f32,
                 acts,
                 train_w,
                 mamba_input,
-                ssm_states,
-                k_states,
-                v_states,
-                angle_states,
+                states.reborrow(),
                 mixed_scratch,
-                dims,
             )?;
             gpu_backward_mamba3_backbone_mixed(
-                ctx,
-                m3k,
+                exec,
                 d_temporal,
                 acts,
                 train_w,
                 grads,
                 f32_scratch,
                 mixed_scratch,
-                dims,
             )?;
             step_m3_capturable(
                 ctx,
@@ -174,22 +202,20 @@ impl GpuMamba3TrainingStepGraph {
         })
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub fn replay(
-        &self,
-        ctx: &GpuCtx,
-        train_w: &GpuMamba3TrainMixedWeights,
-        adam: &GpuAdamW,
-        bias: &AdamWBiasFactors,
-        grads: &GpuMamba3Grads,
-        temporal_f32: &GpuBuffer,
-        mamba_input: &GpuBuffer,
-        d_temporal: &GpuBuffer,
-        ssm_states: &GpuBuffer,
-        k_states: &GpuBuffer,
-        v_states: &GpuBuffer,
-        angle_states: &GpuBuffer,
-    ) -> Result<(), String> {
+    pub fn replay(&self, ctx: &GpuCtx, rp: &Mamba3MixedReplay<'_>) -> Result<(), String> {
+        let Mamba3MixedReplay {
+            train_w,
+            adam,
+            bias,
+            grads,
+            temporal_f32,
+            mamba_input,
+            d_temporal,
+            ssm_states,
+            k_states,
+            v_states,
+            angle_states,
+        } = *rp;
         assert_eq!(
             mamba_input.cached_ptr(),
             self.captured_input_ptr,
@@ -286,6 +312,39 @@ use crate::mamba3_siso::gpu::forward::gpu_forward_mamba3_backbone;
 use crate::mamba3_siso::gpu::state::GpuMamba3BackboneActs;
 use crate::mamba3_siso::gpu::weights::GpuMamba3Weights;
 
+/// Buffers and parameter state borrowed into the captured M3 f32
+/// training-step body (`grads.zero + forward + backward + AdamW`).
+pub struct Mamba3F32Capture<'a> {
+    pub weights: &'a mut GpuMamba3Weights,
+    pub adam: &'a GpuAdamW,
+    pub bias: &'a AdamWBiasFactors,
+    pub grads: &'a mut GpuMamba3Grads,
+    pub acts: &'a mut GpuMamba3BackboneActs,
+    pub scratch: &'a mut GpuMamba3Scratch,
+    /// Written by the captured forward — pointer baked in.
+    pub temporal: &'a mut GpuBuffer,
+    pub mamba_input: &'a GpuBuffer,
+    pub d_temporal: &'a mut GpuBuffer,
+    pub states: GpuMamba3StateBufs<'a>,
+}
+
+/// Live buffers checked against the captured pointers on every M3 f32
+/// graph replay.
+#[derive(Clone, Copy)]
+pub struct Mamba3F32Replay<'a> {
+    pub weights: &'a GpuMamba3Weights,
+    pub adam: &'a GpuAdamW,
+    pub bias: &'a AdamWBiasFactors,
+    pub grads: &'a GpuMamba3Grads,
+    pub temporal: &'a GpuBuffer,
+    pub mamba_input: &'a GpuBuffer,
+    pub d_temporal: &'a GpuBuffer,
+    pub ssm_states: &'a GpuBuffer,
+    pub k_states: &'a GpuBuffer,
+    pub v_states: &'a GpuBuffer,
+    pub angle_states: &'a GpuBuffer,
+}
+
 /// CUDA-Graph holder for a single Mamba-3 f32 training step. Captures
 /// `grads.zero + forward + backward + AdamW`. No `sync_master_to_compute`
 /// — f32 training has no compute shadow.
@@ -311,35 +370,34 @@ pub struct GpuMamba3F32TrainingStepGraph {
 }
 
 impl GpuMamba3F32TrainingStepGraph {
-    #[allow(clippy::too_many_arguments)]
-    pub fn capture(
-        ctx: &GpuCtx,
-        m3k: &Mamba3Kernels,
-        weights: &mut GpuMamba3Weights,
-        adam: &GpuAdamW,
-        bias: &AdamWBiasFactors,
-        grads: &mut GpuMamba3Grads,
-        acts: &mut GpuMamba3BackboneActs,
-        scratch: &mut GpuMamba3Scratch,
-        temporal: &mut GpuBuffer,
-        mamba_input: &GpuBuffer,
-        d_temporal: &mut GpuBuffer,
-        ssm_states: &mut GpuBuffer,
-        k_states: &mut GpuBuffer,
-        v_states: &mut GpuBuffer,
-        angle_states: &mut GpuBuffer,
-        dims: &GpuMamba3Dims,
-    ) -> Result<Self, String> {
+    pub fn capture(exec: &M3Exec<'_>, cap: Mamba3F32Capture<'_>) -> Result<Self, String> {
+        let M3Exec {
+            ctx,
+            kernels: m3k,
+            dims,
+        } = *exec;
+        let Mamba3F32Capture {
+            weights,
+            adam,
+            bias,
+            grads,
+            acts,
+            scratch,
+            temporal,
+            mamba_input,
+            d_temporal,
+            mut states,
+        } = cap;
         let snap_input = mamba_input.cached_ptr();
         let snap_d_temporal = d_temporal.cached_ptr();
         let snap_grads_flat = grads.flat.cached_ptr();
         let snap_adam_m = adam.m.cached_ptr();
         let snap_adam_v = adam.v.cached_ptr();
         let snap_bias = bias.ptr();
-        let snap_ssm = ssm_states.cached_ptr();
-        let snap_k = k_states.cached_ptr();
-        let snap_v = v_states.cached_ptr();
-        let snap_angle = angle_states.cached_ptr();
+        let snap_ssm = states.ssm.cached_ptr();
+        let snap_k = states.k.cached_ptr();
+        let snap_v = states.v.cached_ptr();
+        let snap_angle = states.angle.cached_ptr();
         let snap_temporal = temporal.cached_ptr();
         let snap_input_proj = weights.input_proj_w.cached_ptr();
         let snap_norm_f = weights.norm_f_weight.cached_ptr();
@@ -347,22 +405,15 @@ impl GpuMamba3F32TrainingStepGraph {
         let graph = capture_into_graph(&ctx.stream, || {
             grads.zero(&ctx.stream)?;
             gpu_forward_mamba3_backbone(
-                ctx,
-                m3k,
+                exec,
                 temporal,
                 acts,
                 weights,
                 mamba_input,
-                ssm_states,
-                k_states,
-                v_states,
-                angle_states,
+                states.reborrow(),
                 scratch,
-                dims,
             )?;
-            gpu_backward_mamba3_backbone(
-                ctx, m3k, d_temporal, acts, weights, grads, scratch, dims,
-            )?;
+            gpu_backward_mamba3_backbone(exec, d_temporal, acts, weights, grads, scratch)?;
             step_m3_capturable(
                 ctx,
                 &m3k.adamw_step_f32_capturable,
@@ -394,21 +445,20 @@ impl GpuMamba3F32TrainingStepGraph {
         })
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub fn replay(
-        &self,
-        weights: &GpuMamba3Weights,
-        adam: &GpuAdamW,
-        bias: &AdamWBiasFactors,
-        grads: &GpuMamba3Grads,
-        temporal: &GpuBuffer,
-        mamba_input: &GpuBuffer,
-        d_temporal: &GpuBuffer,
-        ssm_states: &GpuBuffer,
-        k_states: &GpuBuffer,
-        v_states: &GpuBuffer,
-        angle_states: &GpuBuffer,
-    ) -> Result<(), String> {
+    pub fn replay(&self, rp: &Mamba3F32Replay<'_>) -> Result<(), String> {
+        let Mamba3F32Replay {
+            weights,
+            adam,
+            bias,
+            grads,
+            temporal,
+            mamba_input,
+            d_temporal,
+            ssm_states,
+            k_states,
+            v_states,
+            angle_states,
+        } = *rp;
         macro_rules! check {
             ($live:expr, $snap:expr, $name:literal) => {
                 assert_eq!(

@@ -257,55 +257,13 @@ unsafe fn fast_exp_avx2(buf: &mut [f32]) {
     } // unsafe
 }
 
-// ═══════════════════════════════════════════════════════════════════════
-// Mamba-3 SISO fast math functions
-// ═══════════════════════════════════════════════════════════════════════
-
-/// Fast sin/cos via Chebyshev polynomial. Max error < 5e-7 on [-pi, pi].
-/// Input must be in [0, 2pi) — subtract pi to center.
-#[inline(always)]
-pub fn fast_sin_cos(x: f32) -> (f32, f32) {
-    let x = x - std::f32::consts::PI;
-    let x2 = x * x;
-    let sin = x * (1.0 - x2 * (0.16666667 - x2 * (0.008333334 - x2 * 0.0001984127)));
-    let cos = 1.0 - x2 * (0.5 - x2 * (0.041666668 - x2 * (0.001388889 - x2 * 0.0000248016)));
-    (sin, cos)
-}
-
-/// Fast ln(x) for x > 0. Polynomial approx via bit manipulation. Max error ~1e-5.
-#[inline(always)]
-pub fn fast_ln(x: f32) -> f32 {
-    let bits = x.to_bits();
-    let exponent = ((bits >> 23) & 0xFF) as f32 - 127.0;
-    let mantissa = f32::from_bits((bits & 0x007F_FFFF) | 0x3F80_0000);
-    let log2_m =
-        -1.7417939 + mantissa * (2.8212026 + mantissa * (-1.4699568 + mantissa * 0.44717955));
-    (exponent + log2_m) * std::f32::consts::LN_2
-}
-
-/// Fast softplus: ln(1 + exp(x)). Linear bypass for x > 20, exp approx for x < -15.
-#[inline(always)]
-pub fn fast_softplus(x: f32) -> f32 {
-    if x > 20.0 {
-        x
-    } else if x < -15.0 {
-        fast_exp_scalar(x)
-    } else {
-        fast_ln(1.0 + fast_exp_scalar(x))
-    }
-}
-
-/// Fast tanh via Padé [7/6] approximation. Max error ~1e-5.
-#[inline(always)]
-pub fn fast_tanh(x: f32) -> f32 {
-    if x.abs() > 4.97 {
-        return if x > 0.0 { 1.0 } else { -1.0 };
-    }
-    let x2 = x * x;
-    let num = x * (135135.0 + x2 * (17325.0 + x2 * (378.0 + x2)));
-    let den = 135135.0 + x2 * (62370.0 + x2 * (3150.0 + x2 * 28.0));
-    num / den
-}
+// Note: the former `fast_sin_cos` / `fast_ln` / `fast_softplus` / `fast_tanh`
+// helpers were deleted — they had no callers, and `fast_sin_cos`'s docstring
+// claimed "< 5e-7" accuracy while the truncated-Taylor coefficients actually
+// erred by ~7.5e-2 at the domain edge (exactly where wrapped RoPE angles
+// land). Production paths use stdlib sin_cos/tanh and ln_1p, which keep
+// CPU↔GPU rotation parity. Re-introduce only with verified minimax
+// coefficients and a parity test.
 
 // ---------------------------------------------------------------------------
 // Tests

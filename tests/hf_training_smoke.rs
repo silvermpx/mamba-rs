@@ -71,7 +71,7 @@ fn det(n: usize, seed: u32, scale: f32) -> Vec<f32> {
 fn hf_training_130m_bf16_smoke() {
     use mamba_rs::hf::load::load_hf;
     use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
-    use mamba_rs::mamba_ssm::gpu::trainer::MambaTrainer;
+    use mamba_rs::mamba_ssm::gpu::trainer::{MambaTrainer, TrainSessionCfg};
 
     let dir = match find_model_dir("mamba-130m-hf") {
         Some(d) => d,
@@ -105,12 +105,14 @@ fn hf_training_130m_bf16_smoke() {
         0,
         hf.backbone.weights(),
         cfg,
-        input_dim,
-        batch,
-        seq_len,
+        TrainSessionCfg {
+            input_dim,
+            batch,
+            seq_len,
+            lr: 1e-6,
+            weight_decay: 0.0,
+        },
         WeightDtype::Bf16,
-        1e-6,
-        0.0,
     )
     .expect("construct 130m bf16 trainer");
 

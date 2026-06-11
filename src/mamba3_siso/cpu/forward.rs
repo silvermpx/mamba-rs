@@ -150,6 +150,16 @@ pub(crate) fn softplus(x: f32) -> f32 {
 // FORWARD: 7 phases
 // ═══════════════════════════════════════════════════════════════════
 
+/// Mutable per-layer recurrent state slices: SSM + K + V + RoPE angle.
+///
+/// Groups the four state buffers a Mamba-3 layer mutates so layer-level
+/// entry points stay within the 7-argument budget.
+pub struct Mamba3LayerStateMut<'a> {
+    pub ssm: &'a mut [f32],
+    pub k: &'a mut [f32],
+    pub v: &'a mut [f32],
+    pub angle: &'a mut [f32],
+}
 /// Mamba-3 SISO single-layer batched forward pass.
 ///
 /// Processes `seq_len` timesteps, saves all activations in `acts` for backward.
@@ -158,13 +168,16 @@ pub fn forward_mamba3_layer_batched(
     temporal_flat: &mut [f32],
     acts: &mut Mamba3LayerFlat,
     layer_w: &TrainMamba3LayerWeights,
-    ssm_state: &mut [f32],
-    k_state: &mut [f32],
-    v_state: &mut [f32],
-    angle_state: &mut [f32],
+    state: Mamba3LayerStateMut<'_>,
     scratch: &mut Mamba3Scratch,
     dims: &Mamba3Dims,
 ) {
+    let Mamba3LayerStateMut {
+        ssm: ssm_state,
+        k: k_state,
+        v: v_state,
+        angle: angle_state,
+    } = state;
     let dm = dims.d_model;
     let di = dims.d_inner;
     let ds = dims.d_state;
@@ -484,10 +497,12 @@ mod tests {
             &mut temporal,
             &mut acts,
             &w,
-            &mut ssm,
-            &mut k_st,
-            &mut v_st,
-            &mut a_st,
+            Mamba3LayerStateMut {
+                ssm: &mut ssm,
+                k: &mut k_st,
+                v: &mut v_st,
+                angle: &mut a_st,
+            },
             &mut scratch,
             &dims,
         );

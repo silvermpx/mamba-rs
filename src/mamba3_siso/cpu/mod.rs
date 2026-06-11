@@ -6,7 +6,6 @@
 //! - `backward` — training BPTT backward (B1-B8)
 //! - `parallel` — rayon batch forward + backward
 //! - `scratch` — reusable per-sample activation scratch
-//! - `target` — target-network forward (no activation saves)
 //! - `flat` — packed flat layer layout for GPU upload
 //! - `weights` — training weight structs
 
@@ -17,7 +16,6 @@ pub mod forward;
 pub mod inference;
 pub mod parallel;
 pub mod scratch;
-pub mod target;
 pub mod weights;
 
 pub use dims::Mamba3Dims;

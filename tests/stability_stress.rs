@@ -26,7 +26,7 @@
 
 use mamba_rs::config::{MambaConfig, ScanMode};
 use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
-use mamba_rs::mamba_ssm::gpu::trainer::MambaTrainer;
+use mamba_rs::mamba_ssm::gpu::trainer::{MambaTrainer, TrainSessionCfg};
 use mamba_rs::weights::MambaWeights;
 
 fn det(n: usize, seed: u32) -> Vec<f32> {
@@ -93,10 +93,34 @@ fn run_repeatability(dtype: WeightDtype) {
         lw.a_neg = lw.a_log.iter().map(|&v| -v.exp()).collect();
     }
 
-    let mut a = MambaTrainer::new_full(0, &cpu, cfg_m, input_dim, batch, seq_len, dtype, 1e-4, 0.0)
-        .unwrap();
-    let mut b = MambaTrainer::new_full(0, &cpu, cfg_m, input_dim, batch, seq_len, dtype, 1e-4, 0.0)
-        .unwrap();
+    let mut a = MambaTrainer::new_full(
+        0,
+        &cpu,
+        cfg_m,
+        TrainSessionCfg {
+            input_dim,
+            batch,
+            seq_len,
+            lr: 1e-4,
+            weight_decay: 0.0,
+        },
+        dtype,
+    )
+    .unwrap();
+    let mut b = MambaTrainer::new_full(
+        0,
+        &cpu,
+        cfg_m,
+        TrainSessionCfg {
+            input_dim,
+            batch,
+            seq_len,
+            lr: 1e-4,
+            weight_decay: 0.0,
+        },
+        dtype,
+    )
+    .unwrap();
 
     // 10 identical steps on both trainers.
     let g_scale = if matches!(dtype, WeightDtype::F16) {
@@ -177,8 +201,20 @@ fn run_graph_determinism(dtype: WeightDtype) {
     };
 
     // Trainer A: eager for 3 steps
-    let mut a = MambaTrainer::new_full(0, &cpu, cfg_m, input_dim, batch, seq_len, dtype, 1e-4, 0.0)
-        .unwrap();
+    let mut a = MambaTrainer::new_full(
+        0,
+        &cpu,
+        cfg_m,
+        TrainSessionCfg {
+            input_dim,
+            batch,
+            seq_len,
+            lr: 1e-4,
+            weight_decay: 0.0,
+        },
+        dtype,
+    )
+    .unwrap();
     for s in 0..3 {
         let inp = det(n, 0xC0 + s);
         let mut dtg: Vec<f32> = det(n, 0xD0 + s);
@@ -192,8 +228,20 @@ fn run_graph_determinism(dtype: WeightDtype) {
 
     // Trainer B: warmup eager 1 step, then capture + replay 2 times on
     // the SAME inputs that eager A used for steps 2,3.
-    let mut b = MambaTrainer::new_full(0, &cpu, cfg_m, input_dim, batch, seq_len, dtype, 1e-4, 0.0)
-        .unwrap();
+    let mut b = MambaTrainer::new_full(
+        0,
+        &cpu,
+        cfg_m,
+        TrainSessionCfg {
+            input_dim,
+            batch,
+            seq_len,
+            lr: 1e-4,
+            weight_decay: 0.0,
+        },
+        dtype,
+    )
+    .unwrap();
     let inp0 = det(n, 0xC0);
     let mut dt0: Vec<f32> = det(n, 0xD0);
     for v in dt0.iter_mut() {
@@ -231,8 +279,20 @@ fn run_graph_determinism(dtype: WeightDtype) {
 
     // Now drive a SECOND B trainer and replay 10 times — all replays
     // must land at the same terminal weights.
-    let mut c = MambaTrainer::new_full(0, &cpu, cfg_m, input_dim, batch, seq_len, dtype, 1e-4, 0.0)
-        .unwrap();
+    let mut c = MambaTrainer::new_full(
+        0,
+        &cpu,
+        cfg_m,
+        TrainSessionCfg {
+            input_dim,
+            batch,
+            seq_len,
+            lr: 1e-4,
+            weight_decay: 0.0,
+        },
+        dtype,
+    )
+    .unwrap();
     c.step(&inp0, &dt0).unwrap();
     c.capture_graph().unwrap();
     let inp1 = det(n, 0xE0);

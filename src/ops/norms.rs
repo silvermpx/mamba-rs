@@ -1,4 +1,3 @@
-#![allow(clippy::needless_range_loop)]
 //! Shared normalization operations for Mamba SSM and Mamba-3 SISO.
 //!
 //! - `rms_norm` — standard RMSNorm (scale only, no bias)
@@ -62,7 +61,7 @@ pub fn bcnorm(
     debug_assert_eq!(weight.len(), d_state);
     debug_assert!(inv_rms_out.len() >= ngroups);
 
-    for g in 0..ngroups {
+    for (g, inv_rms_slot) in inv_rms_out[..ngroups].iter_mut().enumerate() {
         let start = g * d_state;
         let end = start + d_state;
         let group = &x[start..end];
@@ -72,10 +71,10 @@ pub fn bcnorm(
             sum_sq += v * v;
         }
         let inv_rms = 1.0 / (sum_sq / d_state as f32 + eps).sqrt();
-        inv_rms_out[g] = inv_rms;
+        *inv_rms_slot = inv_rms;
 
-        for i in 0..d_state {
-            out[start + i] = group[i] * inv_rms * weight[i];
+        for ((o, &v), &w) in out[start..end].iter_mut().zip(group).zip(weight) {
+            *o = v * inv_rms * w;
         }
     }
 }
@@ -101,8 +100,8 @@ pub fn rmsnorm_gated(
         let g_len = g_end - g_start;
 
         let mut sum_sq = 0.0_f32;
-        for i in g_start..g_end {
-            sum_sq += y[i] * y[i];
+        for &yv in &y[g_start..g_end] {
+            sum_sq += yv * yv;
         }
         let inv_rms = 1.0 / (sum_sq / g_len as f32 + eps).sqrt();
 

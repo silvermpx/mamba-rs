@@ -5,10 +5,47 @@
 //! structs and constructors live here; `forward.rs` and `backward.rs`
 //! contain the launch-orchestration code.
 
+use super::kernels::Mamba3Kernels;
 use crate::mamba_ssm::gpu::buffers::GpuBuffer;
+use crate::mamba_ssm::gpu::context::GpuCtx;
 use std::sync::Arc;
 
 pub(crate) type CUptr = cudarc::driver::sys::CUdeviceptr;
+
+/// The four persistent Mamba-3 state buffers (SSM + K + V + RoPE angle),
+/// grouped so call sites pass one bundle instead of four `&mut GpuBuffer`.
+pub struct GpuMamba3StateBufs<'a> {
+    /// SSM hidden state `[B * n_layers * nh * hd * ds]`.
+    pub ssm: &'a mut GpuBuffer,
+    /// K state `[B * n_layers * nh * ds]`.
+    pub k: &'a mut GpuBuffer,
+    /// V state `[B * n_layers * nh * hd]`.
+    pub v: &'a mut GpuBuffer,
+    /// RoPE angle accumulator `[B * n_layers * nh * n_angles]`.
+    pub angle: &'a mut GpuBuffer,
+}
+
+impl GpuMamba3StateBufs<'_> {
+    /// Reborrow the bundle so it can be handed to a callee without giving
+    /// up the caller's exclusive borrows.
+    pub fn reborrow(&mut self) -> GpuMamba3StateBufs<'_> {
+        GpuMamba3StateBufs {
+            ssm: self.ssm,
+            k: self.k,
+            v: self.v,
+            angle: self.angle,
+        }
+    }
+}
+
+/// Execution context shared by every Mamba-3 GPU launch: CUDA context
+/// (stream + cuBLAS), compiled M3 kernel handles, and launch dimensions.
+#[derive(Clone, Copy)]
+pub struct M3Exec<'a> {
+    pub ctx: &'a GpuCtx,
+    pub kernels: &'a Mamba3Kernels,
+    pub dims: &'a GpuMamba3Dims,
+}
 
 // ---------------------------------------------------------------------------
 // Dimensions
@@ -197,6 +234,7 @@ pub struct GpuMamba3Scratch {
 }
 
 /// Layer pointers for persistent state (ssm + k_state + v_state + angle_state).
+#[derive(Clone, Copy)]
 pub struct Mamba3LayerPtrs {
     pub ssm_state: CUptr,   // &mut [B * nh * hd * ds]
     pub k_state: CUptr,     // &mut [B * nh * ds]

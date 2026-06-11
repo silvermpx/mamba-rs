@@ -1418,14 +1418,6 @@ impl GpuMambaInferenceMixed {
     }
 }
 
-// Mark a_neg_all used to silence warning (only used during new()).
-#[allow(dead_code)]
-impl GpuMambaInferenceMixed {
-    fn _a_neg_keepalive(&self) -> &GpuBuffer {
-        &self.a_neg_all
-    }
-}
-
 // ---------------------------------------------------------------------------
 // High-level GPU Backbone
 // ---------------------------------------------------------------------------

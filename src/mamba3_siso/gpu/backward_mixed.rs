@@ -33,7 +33,8 @@ use crate::mamba3_siso::gpu::forward_mixed::{
     GpuMamba3BackboneMixedActs, GpuMamba3LayerMixedActs, GpuMamba3MixedScratch,
 };
 use crate::mamba3_siso::gpu::kernels::Mamba3Kernels;
-use crate::mamba3_siso::gpu::mamba3_gpu::{GpuMamba3Dims, GpuMamba3Scratch};
+use crate::mamba3_siso::gpu::mamba3_gpu::GpuMamba3Scratch;
+use crate::mamba3_siso::gpu::state::M3Exec;
 use crate::mamba3_siso::gpu::weights::{
     GpuMamba3Grads, GpuMamba3LayerGrads, GpuMamba3MixedLayerWeights,
 };
@@ -51,18 +52,20 @@ fn tp(ptr: cudarc::driver::sys::CUdeviceptr, dtype: WeightDtype) -> TypedPtr {
 /// **IMPORTANT**: weight gradients in `grads` are **accumulated** (`beta=1.0`
 /// on the dW GEMMs). Caller MUST call [`GpuMamba3Grads::zero`] before each
 /// training step.
-#[allow(clippy::too_many_arguments)]
 pub fn gpu_backward_mamba3_backbone_mixed(
-    ctx: &GpuCtx,
-    m3k: &Mamba3Kernels,
+    exec: &M3Exec<'_>,
     d_temporal: &mut GpuBuffer,
     acts: &GpuMamba3BackboneMixedActs,
     mamba_w: &GpuMamba3TrainMixedWeights,
     grads: &GpuMamba3Grads,
     f32_scratch: &mut GpuMamba3Scratch,
     mixed_scratch: &mut GpuMamba3MixedScratch,
-    dims: &GpuMamba3Dims,
 ) -> Result<(), String> {
+    let M3Exec {
+        ctx,
+        kernels: m3k,
+        dims,
+    } = *exec;
     let bt = dims.bt();
     let dm = dims.d_model;
     let dtype = acts.dtype;
@@ -110,16 +113,16 @@ pub fn gpu_backward_mamba3_backbone_mixed(
     // Per-layer bwd in REVERSE order.
     for l in (0..dims.n_layers).rev() {
         gpu_backward_mamba3_layer_mixed(
-            ctx,
-            m3k,
+            exec,
             d_temporal,
-            &acts.layers[l],
-            &mamba_w.compute.layers[l],
-            &mamba_w.master.layers[l],
-            &grads.layers[l],
+            &M3MixedLayerBwd {
+                acts: &acts.layers[l],
+                lw: &mamba_w.compute.layers[l],
+                lw_master: &mamba_w.master.layers[l],
+                lg: &grads.layers[l],
+            },
             f32_scratch,
             mixed_scratch,
-            dims,
             dtype,
         )?;
     }
@@ -133,20 +136,35 @@ pub fn gpu_backward_mamba3_backbone_mixed(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
+/// Per-layer bundle for the M3 mixed backward: saved activations, compute
+/// + master weights, and the layer's master-grad slots.
+#[derive(Clone, Copy)]
+struct M3MixedLayerBwd<'a> {
+    acts: &'a GpuMamba3LayerMixedActs,
+    lw: &'a GpuMamba3MixedLayerWeights,
+    lw_master: &'a crate::mamba3_siso::gpu::weights::GpuMamba3LayerWeights,
+    lg: &'a GpuMamba3LayerGrads,
+}
+
 fn gpu_backward_mamba3_layer_mixed(
-    ctx: &GpuCtx,
-    m3k: &Mamba3Kernels,
+    exec: &M3Exec<'_>,
     d_temporal: &mut GpuBuffer,
-    acts: &GpuMamba3LayerMixedActs,
-    lw: &GpuMamba3MixedLayerWeights,
-    lw_master: &crate::mamba3_siso::gpu::weights::GpuMamba3LayerWeights,
-    lg: &GpuMamba3LayerGrads,
+    layer: &M3MixedLayerBwd<'_>,
     sc: &mut GpuMamba3Scratch,
     msc: &mut GpuMamba3MixedScratch,
-    dims: &GpuMamba3Dims,
     dtype: WeightDtype,
 ) -> Result<(), String> {
+    let M3Exec {
+        ctx,
+        kernels: m3k,
+        dims,
+    } = *exec;
+    let M3MixedLayerBwd {
+        acts,
+        lw,
+        lw_master,
+        lg,
+    } = *layer;
     if !dims.use_parallel_scan {
         return Err("m3_mixed bwd: sequential SSM bwd not yet supported".into());
     }

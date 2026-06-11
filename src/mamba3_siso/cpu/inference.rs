@@ -172,8 +172,8 @@ pub fn mamba3_layer_step(
         // RoPE: per-head angle accumulation and rotation
         if n_rope > 0 {
             let angle_base = h * n_rope;
-            for a in 0..n_rope {
-                let delta = tanh_pi[a] * dt_val;
+            for (a, &tp) in tanh_pi[..n_rope].iter().enumerate() {
+                let delta = tp * dt_val;
                 let mut acc = state.angle_state[angle_base + a] as f64 + delta as f64;
                 let two_pi_64 = 2.0 * std::f64::consts::PI;
                 acc -= two_pi_64 * (acc / two_pi_64).floor();
@@ -251,8 +251,8 @@ pub fn mamba3_layer_step(
         di,
         dm,
     );
-    for j in 0..dm {
-        temporal[j] += scratch.residual[j];
+    for (t_out, &r) in temporal[..dm].iter_mut().zip(&scratch.residual[..dm]) {
+        *t_out += r;
     }
 }
 
@@ -294,6 +294,73 @@ pub fn mamba3_step(
         RMS_NORM_EPS,
     );
     temporal[..dm].copy_from_slice(&scratch.norm_buf[..dm]);
+}
+
+/// Batched single-step inference: B independent samples, each with its own
+/// recurrent state and scratch. Mirrors `mamba_step_batch` (CPU perf rule 5):
+/// samples are independent at T=1, so they parallelize across rayon workers
+/// when the batch is large enough to amortize the fork.
+///
+/// - `inputs`: `[batch * input_dim]`
+/// - `outputs`: `[batch * d_model]`
+/// - `states` / `scratches`: one per sample
+pub fn mamba3_step_batch(
+    inputs: &[f32],
+    outputs: &mut [f32],
+    weights: &Mamba3Weights,
+    states: &mut [crate::mamba3_siso::state::Mamba3State],
+    scratches: &mut [Mamba3StepScratch],
+    cfg: &Mamba3Config,
+    input_dim: usize,
+) {
+    let batch = states.len();
+    let d_model = cfg.d_model;
+    assert_eq!(
+        inputs.len(),
+        batch * input_dim,
+        "inputs size mismatch: expected {}, got {}",
+        batch * input_dim,
+        inputs.len()
+    );
+    assert_eq!(
+        outputs.len(),
+        batch * d_model,
+        "outputs size mismatch: expected {}, got {}",
+        batch * d_model,
+        outputs.len()
+    );
+    assert_eq!(
+        scratches.len(),
+        batch,
+        "scratches count mismatch: expected {batch}, got {}",
+        scratches.len()
+    );
+
+    if batch >= rayon::current_num_threads().max(2) {
+        use rayon::prelude::*;
+        outputs
+            .par_chunks_mut(d_model)
+            .zip(states.par_iter_mut())
+            .zip(scratches.par_iter_mut())
+            .enumerate()
+            .for_each(|(b, ((out, state), scratch))| {
+                let inp = &inputs[b * input_dim..(b + 1) * input_dim];
+                mamba3_step(out, inp, scratch, weights, &mut state.layers, cfg);
+            });
+    } else {
+        for b in 0..batch {
+            let inp = &inputs[b * input_dim..(b + 1) * input_dim];
+            let out = &mut outputs[b * d_model..(b + 1) * d_model];
+            mamba3_step(
+                out,
+                inp,
+                &mut scratches[b],
+                weights,
+                &mut states[b].layers,
+                cfg,
+            );
+        }
+    }
 }
 
 #[cfg(test)]
@@ -489,5 +556,61 @@ mod tests {
             (rms - 1.0).abs() < 0.01,
             "BCNorm with unit weight should produce ~unit RMS, got {rms}"
         );
+    }
+
+    #[test]
+    fn test_mamba3_step_batch_matches_sequential() {
+        use crate::mamba3_siso::state::Mamba3State;
+        let cfg = Mamba3Config::default();
+        let input_dim = 32;
+        let weights = Mamba3Weights::init(&cfg, input_dim, 7);
+        let batch = 16;
+
+        let inputs: Vec<f32> = (0..batch * input_dim)
+            .map(|i| ((i * 37 % 101) as f32 / 101.0) - 0.5)
+            .collect();
+
+        // Reference: sequential mamba3_step per sample.
+        let mut seq_outputs = vec![0.0f32; batch * cfg.d_model];
+        let mut seq_states: Vec<Mamba3State> =
+            (0..batch).map(|_| Mamba3State::zeros(&cfg)).collect();
+        let mut scratch = Mamba3StepScratch::new(&cfg);
+        for b in 0..batch {
+            mamba3_step(
+                &mut seq_outputs[b * cfg.d_model..(b + 1) * cfg.d_model],
+                &inputs[b * input_dim..(b + 1) * input_dim],
+                &mut scratch,
+                &weights,
+                &mut seq_states[b].layers,
+                &cfg,
+            );
+        }
+
+        // Batched path (parallel branch taken when batch >= threads).
+        let mut batch_outputs = vec![0.0f32; batch * cfg.d_model];
+        let mut batch_states: Vec<Mamba3State> =
+            (0..batch).map(|_| Mamba3State::zeros(&cfg)).collect();
+        let mut scratches: Vec<Mamba3StepScratch> =
+            (0..batch).map(|_| Mamba3StepScratch::new(&cfg)).collect();
+        mamba3_step_batch(
+            &inputs,
+            &mut batch_outputs,
+            &weights,
+            &mut batch_states,
+            &mut scratches,
+            &cfg,
+            input_dim,
+        );
+
+        // Bit-identical: same math per sample, no cross-sample reduction.
+        for (i, (&a, &b)) in seq_outputs.iter().zip(&batch_outputs).enumerate() {
+            assert_eq!(a, b, "output mismatch at {i}");
+        }
+        for (s1, s2) in seq_states.iter().zip(&batch_states) {
+            for (l1, l2) in s1.layers.iter().zip(&s2.layers) {
+                assert_eq!(l1.ssm_state, l2.ssm_state);
+                assert_eq!(l1.angle_state, l2.angle_state);
+            }
+        }
     }
 }

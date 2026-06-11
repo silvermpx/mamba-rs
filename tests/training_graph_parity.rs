@@ -21,7 +21,9 @@ use mamba_rs::mamba_ssm::gpu::forward::{GpuMambaDims, GpuRecurrentState};
 use mamba_rs::mamba_ssm::gpu::forward_mixed::{
     GpuMambaBackboneMixedActs, GpuMambaMixedTrainScratch, gpu_forward_mamba_backbone_train_mixed,
 };
-use mamba_rs::mamba_ssm::gpu::training_graph::GpuMambaTrainingStepGraph;
+use mamba_rs::mamba_ssm::gpu::training_graph::{
+    GpuMambaTrainingStepGraph, MambaMixedCapture, MambaMixedReplay,
+};
 use mamba_rs::mamba_ssm::gpu::weights::GpuMambaGrads;
 use mamba_rs::mamba_ssm::gpu::weights_mixed_train::GpuMambaTrainMixedWeights;
 use mamba_rs::weights::MambaWeights;
@@ -273,16 +275,18 @@ fn training_graph_bf16_one_step_matches_eager() {
     let graph = GpuMambaTrainingStepGraph::capture(
         &ctx,
         &g.cfg,
-        &mut g.weights,
-        &g.adam,
-        &g.bias,
-        &mut g.grads,
-        &mut g.acts,
-        &mut g.scratch,
-        &g.a_neg_all,
-        &g.mamba_input,
-        &mut g.d_temporal,
-        &mut g.state,
+        MambaMixedCapture {
+            train_w: &mut g.weights,
+            adam: &g.adam,
+            bias: &g.bias,
+            grads: &mut g.grads,
+            acts: &mut g.acts,
+            scratch: &mut g.scratch,
+            a_neg_all: &g.a_neg_all,
+            mamba_input: &g.mamba_input,
+            d_temporal: &mut g.d_temporal,
+            state: &mut g.state,
+        },
         batch,
         seq_len,
     )
@@ -291,14 +295,16 @@ fn training_graph_bf16_one_step_matches_eager() {
     graph
         .replay(
             &ctx,
-            &g.weights,
-            &g.adam,
-            &g.bias,
-            &g.grads,
-            &g.a_neg_all,
-            &g.mamba_input,
-            &g.d_temporal,
-            &g.state,
+            &MambaMixedReplay {
+                train_w: &g.weights,
+                adam: &g.adam,
+                bias: &g.bias,
+                grads: &g.grads,
+                a_neg_all: &g.a_neg_all,
+                mamba_input: &g.mamba_input,
+                d_temporal: &g.d_temporal,
+                state: &g.state,
+            },
         )
         .unwrap();
     ctx.stream.synchronize().unwrap();
@@ -353,16 +359,18 @@ fn training_graph_bf16_multi_replay_matches_eager() {
     let graph = GpuMambaTrainingStepGraph::capture(
         &ctx,
         &g.cfg,
-        &mut g.weights,
-        &g.adam,
-        &g.bias,
-        &mut g.grads,
-        &mut g.acts,
-        &mut g.scratch,
-        &g.a_neg_all,
-        &g.mamba_input,
-        &mut g.d_temporal,
-        &mut g.state,
+        MambaMixedCapture {
+            train_w: &mut g.weights,
+            adam: &g.adam,
+            bias: &g.bias,
+            grads: &mut g.grads,
+            acts: &mut g.acts,
+            scratch: &mut g.scratch,
+            a_neg_all: &g.a_neg_all,
+            mamba_input: &g.mamba_input,
+            d_temporal: &mut g.d_temporal,
+            state: &mut g.state,
+        },
         batch,
         seq_len,
     )
@@ -378,14 +386,16 @@ fn training_graph_bf16_multi_replay_matches_eager() {
         graph
             .replay(
                 &ctx,
-                &g.weights,
-                &g.adam,
-                &g.bias,
-                &g.grads,
-                &g.a_neg_all,
-                &g.mamba_input,
-                &g.d_temporal,
-                &g.state,
+                &MambaMixedReplay {
+                    train_w: &g.weights,
+                    adam: &g.adam,
+                    bias: &g.bias,
+                    grads: &g.grads,
+                    a_neg_all: &g.a_neg_all,
+                    mamba_input: &g.mamba_input,
+                    d_temporal: &g.d_temporal,
+                    state: &g.state,
+                },
             )
             .unwrap();
     }
@@ -432,16 +442,18 @@ fn training_graph_panics_on_state_conv_mismatch() {
     let graph = GpuMambaTrainingStepGraph::capture(
         &ctx,
         &g.cfg,
-        &mut g.weights,
-        &g.adam,
-        &g.bias,
-        &mut g.grads,
-        &mut g.acts,
-        &mut g.scratch,
-        &g.a_neg_all,
-        &g.mamba_input,
-        &mut g.d_temporal,
-        &mut g.state,
+        MambaMixedCapture {
+            train_w: &mut g.weights,
+            adam: &g.adam,
+            bias: &g.bias,
+            grads: &mut g.grads,
+            acts: &mut g.acts,
+            scratch: &mut g.scratch,
+            a_neg_all: &g.a_neg_all,
+            mamba_input: &g.mamba_input,
+            d_temporal: &mut g.d_temporal,
+            state: &mut g.state,
+        },
         batch,
         seq_len,
     )
@@ -458,14 +470,16 @@ fn training_graph_panics_on_state_conv_mismatch() {
     graph
         .replay(
             &ctx,
-            &g.weights,
-            &g.adam,
-            &g.bias,
-            &g.grads,
-            &g.a_neg_all,
-            &g.mamba_input,
-            &g.d_temporal,
-            &g.state,
+            &MambaMixedReplay {
+                train_w: &g.weights,
+                adam: &g.adam,
+                bias: &g.bias,
+                grads: &g.grads,
+                a_neg_all: &g.a_neg_all,
+                mamba_input: &g.mamba_input,
+                d_temporal: &g.d_temporal,
+                state: &g.state,
+            },
         )
         .unwrap();
 }
@@ -491,16 +505,18 @@ fn training_graph_panics_on_pointer_mismatch() {
     let graph = GpuMambaTrainingStepGraph::capture(
         &ctx,
         &g.cfg,
-        &mut g.weights,
-        &g.adam,
-        &g.bias,
-        &mut g.grads,
-        &mut g.acts,
-        &mut g.scratch,
-        &g.a_neg_all,
-        &g.mamba_input,
-        &mut g.d_temporal,
-        &mut g.state,
+        MambaMixedCapture {
+            train_w: &mut g.weights,
+            adam: &g.adam,
+            bias: &g.bias,
+            grads: &mut g.grads,
+            acts: &mut g.acts,
+            scratch: &mut g.scratch,
+            a_neg_all: &g.a_neg_all,
+            mamba_input: &g.mamba_input,
+            d_temporal: &mut g.d_temporal,
+            state: &mut g.state,
+        },
         batch,
         seq_len,
     )
@@ -513,14 +529,17 @@ fn training_graph_panics_on_pointer_mismatch() {
     graph
         .replay(
             &ctx,
-            &g.weights,
-            &g.adam,
-            &g.bias,
-            &g.grads,
-            &g.a_neg_all,
-            &new_input, // ← different buffer
-            &g.d_temporal,
-            &g.state,
+            &MambaMixedReplay {
+                train_w: &g.weights,
+                adam: &g.adam,
+                bias: &g.bias,
+                grads: &g.grads,
+                a_neg_all: &g.a_neg_all,
+                // ← different buffer
+                mamba_input: &new_input,
+                d_temporal: &g.d_temporal,
+                state: &g.state,
+            },
         )
         .unwrap();
 }

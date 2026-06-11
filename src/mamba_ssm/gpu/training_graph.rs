@@ -104,6 +104,38 @@ fn recompute_a_neg_captured(
     Ok(())
 }
 
+/// Buffers and parameter state borrowed into the captured M1 bf16
+/// training-step body (forward + backward + AdamW + master→compute sync
+/// + a_neg recompute).
+pub struct MambaMixedCapture<'a> {
+    pub train_w: &'a mut GpuMambaTrainMixedWeights,
+    pub adam: &'a GpuAdamW,
+    pub bias: &'a AdamWBiasFactors,
+    pub grads: &'a mut GpuMambaGrads,
+    pub acts: &'a mut GpuMambaBackboneMixedActs,
+    pub scratch: &'a mut GpuMambaMixedTrainScratch,
+    /// Backward-side `a_neg_all` — a SEPARATE buffer from `state.a_neg_all`.
+    pub a_neg_all: &'a GpuBuffer,
+    pub mamba_input: &'a GpuBuffer,
+    pub d_temporal: &'a mut GpuBuffer,
+    pub state: &'a mut GpuRecurrentState,
+}
+
+/// Live buffers checked against the captured pointers on every M1 bf16
+/// graph replay.
+#[derive(Clone, Copy)]
+pub struct MambaMixedReplay<'a> {
+    pub train_w: &'a GpuMambaTrainMixedWeights,
+    pub adam: &'a GpuAdamW,
+    pub bias: &'a AdamWBiasFactors,
+    pub grads: &'a GpuMambaGrads,
+    /// Backward-side `a_neg_all` — a SEPARATE buffer from `state.a_neg_all`.
+    pub a_neg_all: &'a GpuBuffer,
+    pub mamba_input: &'a GpuBuffer,
+    pub d_temporal: &'a GpuBuffer,
+    pub state: &'a GpuRecurrentState,
+}
+
 /// CUDA-Graph holder for a single Mamba SSM training step (bf16).
 pub struct GpuMambaTrainingStepGraph {
     pub graph: CudaGraph,
@@ -170,23 +202,25 @@ impl GpuMambaTrainingStepGraph {
     /// (or whatever step number you'll start replaying at). The captured
     /// AdamW reads from `bias`'s device pointer; CPU-side `adam.advance()`
     /// + `bias.write()` between replays drives the per-step values.
-    #[allow(clippy::too_many_arguments)]
     pub fn capture(
         ctx: &GpuCtx,
         cfg: &crate::config::MambaConfig,
-        train_w: &mut GpuMambaTrainMixedWeights,
-        adam: &GpuAdamW,
-        bias: &AdamWBiasFactors,
-        grads: &mut GpuMambaGrads,
-        acts: &mut GpuMambaBackboneMixedActs,
-        scratch: &mut GpuMambaMixedTrainScratch,
-        a_neg_all: &GpuBuffer,
-        mamba_input: &GpuBuffer,
-        d_temporal: &mut GpuBuffer,
-        state: &mut GpuRecurrentState,
+        cap: MambaMixedCapture<'_>,
         batch: usize,
         seq_len: usize,
     ) -> Result<Self, String> {
+        let MambaMixedCapture {
+            train_w,
+            adam,
+            bias,
+            grads,
+            acts,
+            scratch,
+            a_neg_all,
+            mamba_input,
+            d_temporal,
+            state,
+        } = cap;
         assert!(
             matches!(train_w.dtype, WeightDtype::Bf16),
             "Step 14 graph capture supports bf16 only (f16 needs in-graph overflow check)"
@@ -293,19 +327,17 @@ impl GpuMambaTrainingStepGraph {
     ///
     /// Asserts every captured pointer still matches the live buffer's
     /// `cached_ptr()` — any reallocation since capture is a panic.
-    #[allow(clippy::too_many_arguments)]
-    pub fn replay(
-        &self,
-        ctx: &GpuCtx,
-        train_w: &GpuMambaTrainMixedWeights,
-        adam: &GpuAdamW,
-        bias: &AdamWBiasFactors,
-        grads: &GpuMambaGrads,
-        a_neg_all: &GpuBuffer,
-        mamba_input: &GpuBuffer,
-        d_temporal: &GpuBuffer,
-        state: &GpuRecurrentState,
-    ) -> Result<(), String> {
+    pub fn replay(&self, ctx: &GpuCtx, rp: &MambaMixedReplay<'_>) -> Result<(), String> {
+        let MambaMixedReplay {
+            train_w,
+            adam,
+            bias,
+            grads,
+            a_neg_all,
+            mamba_input,
+            d_temporal,
+            state,
+        } = *rp;
         assert_eq!(
             mamba_input.cached_ptr(),
             self.captured_input_ptr,
@@ -392,6 +424,41 @@ impl GpuMambaTrainingStepGraph {
 // f32 training step graph (no master/compute split, no half_staging).
 // ════════════════════════════════════════════════════════════════════════
 
+/// Buffers and parameter state borrowed into the captured M1 f32
+/// training-step body (`grads.zero + forward + backward + AdamW` +
+/// a_neg recompute).
+pub struct MambaF32Capture<'a> {
+    pub weights: &'a mut GpuMambaTrainWeights,
+    pub adam: &'a GpuAdamW,
+    pub bias: &'a AdamWBiasFactors,
+    pub grads: &'a mut GpuMambaGrads,
+    pub acts: &'a mut GpuMambaBackboneActs,
+    pub scratch: &'a mut GpuMambaScratch,
+    /// Backward-side `a_neg_all` — a SEPARATE buffer from `state.a_neg_all`.
+    pub a_neg_all: &'a GpuBuffer,
+    /// Written by the captured forward — pointer baked in.
+    pub temporal: &'a mut GpuBuffer,
+    pub mamba_input: &'a GpuBuffer,
+    pub d_temporal: &'a mut GpuBuffer,
+    pub state: &'a mut GpuRecurrentState,
+}
+
+/// Live buffers checked against the captured pointers on every M1 f32
+/// graph replay.
+#[derive(Clone, Copy)]
+pub struct MambaF32Replay<'a> {
+    pub weights: &'a GpuMambaTrainWeights,
+    pub adam: &'a GpuAdamW,
+    pub bias: &'a AdamWBiasFactors,
+    pub grads: &'a GpuMambaGrads,
+    pub temporal: &'a GpuBuffer,
+    /// Backward-side `a_neg_all` — a SEPARATE buffer from `state.a_neg_all`.
+    pub a_neg_all: &'a GpuBuffer,
+    pub mamba_input: &'a GpuBuffer,
+    pub d_temporal: &'a GpuBuffer,
+    pub state: &'a GpuRecurrentState,
+}
+
 /// CUDA-Graph holder for a single Mamba SSM f32 training step. Captures
 /// `grads.zero + forward + backward + AdamW`. There's no
 /// `sync_master_to_compute` because f32 training has no compute shadow —
@@ -424,24 +491,26 @@ impl GpuMambaF32TrainingStepGraph {
     /// warmup contract as the mixed variant: run one eager step before
     /// calling this so cuBLAS has selected its kernels and any lazy
     /// resources have settled.
-    #[allow(clippy::too_many_arguments)]
     pub fn capture(
         ctx: &GpuCtx,
         cfg: &crate::config::MambaConfig,
-        weights: &mut GpuMambaTrainWeights,
-        adam: &GpuAdamW,
-        bias: &AdamWBiasFactors,
-        grads: &mut GpuMambaGrads,
-        acts: &mut GpuMambaBackboneActs,
-        scratch: &mut GpuMambaScratch,
-        a_neg_all: &GpuBuffer,
-        temporal: &mut GpuBuffer,
-        mamba_input: &GpuBuffer,
-        d_temporal: &mut GpuBuffer,
-        state: &mut GpuRecurrentState,
+        cap: MambaF32Capture<'_>,
         batch: usize,
         seq_len: usize,
     ) -> Result<Self, String> {
+        let MambaF32Capture {
+            weights,
+            adam,
+            bias,
+            grads,
+            acts,
+            scratch,
+            a_neg_all,
+            temporal,
+            mamba_input,
+            d_temporal,
+            state,
+        } = cap;
         let snap_input = mamba_input.cached_ptr();
         let snap_d_temporal = d_temporal.cached_ptr();
         let snap_grads_flat = grads.flat.cached_ptr();
@@ -503,19 +572,18 @@ impl GpuMambaF32TrainingStepGraph {
         })
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub fn replay(
-        &self,
-        weights: &GpuMambaTrainWeights,
-        adam: &GpuAdamW,
-        bias: &AdamWBiasFactors,
-        grads: &GpuMambaGrads,
-        temporal: &GpuBuffer,
-        a_neg_all: &GpuBuffer,
-        mamba_input: &GpuBuffer,
-        d_temporal: &GpuBuffer,
-        state: &GpuRecurrentState,
-    ) -> Result<(), String> {
+    pub fn replay(&self, rp: &MambaF32Replay<'_>) -> Result<(), String> {
+        let MambaF32Replay {
+            weights,
+            adam,
+            bias,
+            grads,
+            temporal,
+            a_neg_all,
+            mamba_input,
+            d_temporal,
+            state,
+        } = *rp;
         assert_eq!(
             mamba_input.cached_ptr(),
             self.captured_input_ptr,

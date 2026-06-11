@@ -43,7 +43,7 @@ fn det_scaled(n: usize, seed: u32, scale: f32) -> Vec<f32> {
 
 fn run_parallel_scan_trainer(dtype: WeightDtype) {
     use mamba_rs::config::{MambaConfig, ScanMode};
-    use mamba_rs::mamba_ssm::gpu::trainer::MambaTrainer;
+    use mamba_rs::mamba_ssm::gpu::trainer::{MambaTrainer, TrainSessionCfg};
     use mamba_rs::weights::MambaWeights;
 
     // T=256 triggers the parallel prefix-scan kernels for both forward and
@@ -72,9 +72,20 @@ fn run_parallel_scan_trainer(dtype: WeightDtype) {
 
     // lr=1e-7 keeps synthetic-gradient f16 runs finite; scan correctness is
     // what this test proves, not optimizer convergence.
-    let mut trainer =
-        MambaTrainer::new_full(0, &cpu, cfg, input_dim, batch, seq_len, dtype, 1e-7, 0.0)
-            .expect("construct parallel-scan trainer");
+    let mut trainer = MambaTrainer::new_full(
+        0,
+        &cpu,
+        cfg,
+        TrainSessionCfg {
+            input_dim,
+            batch,
+            seq_len,
+            lr: 1e-7,
+            weight_decay: 0.0,
+        },
+        dtype,
+    )
+    .expect("construct parallel-scan trainer");
 
     let before = trainer.snapshot_master().expect("snapshot pre");
 
@@ -195,7 +206,7 @@ fn m1_trainer_parallel_scan_f16() {
 #[test]
 fn a_log_actually_reaches_ssm_after_training() {
     use mamba_rs::config::{MambaConfig, ScanMode};
-    use mamba_rs::mamba_ssm::gpu::trainer::MambaTrainer;
+    use mamba_rs::mamba_ssm::gpu::trainer::{MambaTrainer, TrainSessionCfg};
     use mamba_rs::weights::MambaWeights;
 
     let cfg = MambaConfig {
@@ -226,12 +237,15 @@ fn a_log_actually_reaches_ssm_after_training() {
         0,
         &cpu,
         cfg,
-        input_dim,
-        batch,
-        seq_len,
+        TrainSessionCfg {
+            input_dim,
+            batch,
+            seq_len,
+            // large enough to move a_log visibly in 5 steps
+            lr: 1e-3,
+            weight_decay: 0.0,
+        },
         WeightDtype::Bf16,
-        1e-3, // large enough to move a_log visibly in 5 steps
-        0.0,
     )
     .expect("build trainer");
 
@@ -302,7 +316,7 @@ fn a_log_actually_reaches_ssm_after_training() {
 #[test]
 fn m1_trainer_f16_production_lr_stable() {
     use mamba_rs::config::{MambaConfig, ScanMode};
-    use mamba_rs::mamba_ssm::gpu::trainer::MambaTrainer;
+    use mamba_rs::mamba_ssm::gpu::trainer::{MambaTrainer, TrainSessionCfg};
     use mamba_rs::weights::MambaWeights;
 
     let cfg = MambaConfig {
@@ -329,12 +343,15 @@ fn m1_trainer_f16_production_lr_stable() {
         0,
         &cpu,
         cfg,
-        input_dim,
-        batch,
-        seq_len,
+        TrainSessionCfg {
+            input_dim,
+            batch,
+            seq_len,
+            // production-ish learning rate + weight decay
+            lr: 1e-4,
+            weight_decay: 0.01,
+        },
         WeightDtype::F16,
-        1e-4, // production-ish learning rate
-        0.01, // weight decay
     )
     .expect("construct f16 prod-lr trainer");
 

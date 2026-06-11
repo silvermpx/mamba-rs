@@ -18,7 +18,9 @@ use mamba_rs::mamba_ssm::gpu::forward::{
     GpuMambaBackboneActs, GpuMambaDims, GpuMambaScratch, GpuRecurrentState,
     gpu_forward_mamba_backbone,
 };
-use mamba_rs::mamba_ssm::gpu::training_graph::GpuMambaF32TrainingStepGraph;
+use mamba_rs::mamba_ssm::gpu::training_graph::{
+    GpuMambaF32TrainingStepGraph, MambaF32Capture, MambaF32Replay,
+};
 use mamba_rs::mamba_ssm::gpu::weights::{GpuMambaGrads, GpuMambaTrainWeights};
 use mamba_rs::weights::MambaWeights;
 
@@ -178,17 +180,19 @@ fn m1_f32_training_graph_matches_eager() {
     let graph = GpuMambaF32TrainingStepGraph::capture(
         &ctx,
         &cfg,
-        &mut g_w,
-        &g_adam,
-        &g_bias,
-        &mut g_grads,
-        &mut g_acts,
-        &mut g_scratch,
-        &g_a_neg,
-        &mut g_temp,
-        &g_input,
-        &mut g_dtemp,
-        &mut g_state,
+        MambaF32Capture {
+            weights: &mut g_w,
+            adam: &g_adam,
+            bias: &g_bias,
+            grads: &mut g_grads,
+            acts: &mut g_acts,
+            scratch: &mut g_scratch,
+            a_neg_all: &g_a_neg,
+            temporal: &mut g_temp,
+            mamba_input: &g_input,
+            d_temporal: &mut g_dtemp,
+            state: &mut g_state,
+        },
         batch,
         seq_len,
     )
@@ -196,9 +200,17 @@ fn m1_f32_training_graph_matches_eager() {
     let (_, bc1, bc2) = g_adam.advance();
     g_bias.write(&ctx.stream, bc1, bc2).unwrap();
     graph
-        .replay(
-            &g_w, &g_adam, &g_bias, &g_grads, &g_temp, &g_a_neg, &g_input, &g_dtemp, &g_state,
-        )
+        .replay(&MambaF32Replay {
+            weights: &g_w,
+            adam: &g_adam,
+            bias: &g_bias,
+            grads: &g_grads,
+            temporal: &g_temp,
+            a_neg_all: &g_a_neg,
+            mamba_input: &g_input,
+            d_temporal: &g_dtemp,
+            state: &g_state,
+        })
         .unwrap();
     ctx.stream.synchronize().unwrap();
     let after_graph = g_w.norm_f_weight.to_cpu(&ctx.stream).unwrap();
@@ -227,9 +239,11 @@ fn m3_f32_training_graph_matches_eager() {
     use mamba_rs::mamba3_siso::gpu::forward::gpu_forward_mamba3_backbone;
     use mamba_rs::mamba3_siso::gpu::kernels::Mamba3Kernels;
     use mamba_rs::mamba3_siso::gpu::state::{
-        GpuMamba3BackboneActs, GpuMamba3Dims, GpuMamba3Scratch,
+        GpuMamba3BackboneActs, GpuMamba3Dims, GpuMamba3Scratch, GpuMamba3StateBufs, M3Exec,
     };
-    use mamba_rs::mamba3_siso::gpu::training_graph::GpuMamba3F32TrainingStepGraph;
+    use mamba_rs::mamba3_siso::gpu::training_graph::{
+        GpuMamba3F32TrainingStepGraph, Mamba3F32Capture, Mamba3F32Replay,
+    };
     use mamba_rs::mamba3_siso::gpu::weights::{GpuMamba3Grads, GpuMamba3Weights};
     use mamba_rs::mamba3_siso::weights::Mamba3Weights;
 
@@ -331,29 +345,35 @@ fn m3_f32_training_graph_matches_eager() {
     e_dtemp.upload(&ctx.stream, &dt).unwrap();
     e_grads.zero(&ctx.stream).unwrap();
     gpu_forward_mamba3_backbone(
-        &ctx,
-        &m3k,
+        &M3Exec {
+            ctx: &ctx,
+            kernels: &m3k,
+            dims: &dims,
+        },
         &mut e_temp,
         &mut e_acts,
         &e_w,
         &e_mi,
-        &mut e_ssm,
-        &mut e_ks,
-        &mut e_vs,
-        &mut e_ang,
+        GpuMamba3StateBufs {
+            ssm: &mut e_ssm,
+            k: &mut e_ks,
+            v: &mut e_vs,
+            angle: &mut e_ang,
+        },
         &mut e_scratch,
-        &dims,
     )
     .unwrap();
     gpu_backward_mamba3_backbone(
-        &ctx,
-        &m3k,
+        &M3Exec {
+            ctx: &ctx,
+            kernels: &m3k,
+            dims: &dims,
+        },
         &mut e_dtemp,
         &e_acts,
         &e_w,
         &e_grads,
         &mut e_scratch,
-        &dims,
     )
     .unwrap();
     let (_, bc1, bc2) = e_adam.advance();
@@ -391,31 +411,46 @@ fn m3_f32_training_graph_matches_eager() {
     g_dtemp.upload(&ctx.stream, &dt).unwrap();
     g_bias.write(&ctx.stream, 1.0, 1.0).unwrap();
     let graph = GpuMamba3F32TrainingStepGraph::capture(
-        &ctx,
-        &m3k,
-        &mut g_w,
-        &g_adam,
-        &g_bias,
-        &mut g_grads,
-        &mut g_acts,
-        &mut g_scratch,
-        &mut g_temp,
-        &g_mi,
-        &mut g_dtemp,
-        &mut g_ssm,
-        &mut g_ks,
-        &mut g_vs,
-        &mut g_ang,
-        &dims,
+        &M3Exec {
+            ctx: &ctx,
+            kernels: &m3k,
+            dims: &dims,
+        },
+        Mamba3F32Capture {
+            weights: &mut g_w,
+            adam: &g_adam,
+            bias: &g_bias,
+            grads: &mut g_grads,
+            acts: &mut g_acts,
+            scratch: &mut g_scratch,
+            temporal: &mut g_temp,
+            mamba_input: &g_mi,
+            d_temporal: &mut g_dtemp,
+            states: GpuMamba3StateBufs {
+                ssm: &mut g_ssm,
+                k: &mut g_ks,
+                v: &mut g_vs,
+                angle: &mut g_ang,
+            },
+        },
     )
     .unwrap();
     let (_, bc1, bc2) = g_adam.advance();
     g_bias.write(&ctx.stream, bc1, bc2).unwrap();
     graph
-        .replay(
-            &g_w, &g_adam, &g_bias, &g_grads, &g_temp, &g_mi, &g_dtemp, &g_ssm, &g_ks, &g_vs,
-            &g_ang,
-        )
+        .replay(&Mamba3F32Replay {
+            weights: &g_w,
+            adam: &g_adam,
+            bias: &g_bias,
+            grads: &g_grads,
+            temporal: &g_temp,
+            mamba_input: &g_mi,
+            d_temporal: &g_dtemp,
+            ssm_states: &g_ssm,
+            k_states: &g_ks,
+            v_states: &g_vs,
+            angle_states: &g_ang,
+        })
         .unwrap();
     ctx.stream.synchronize().unwrap();
     let after_graph = g_w.norm_f_weight.to_cpu(&ctx.stream).unwrap();

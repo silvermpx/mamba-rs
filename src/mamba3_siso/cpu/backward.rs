@@ -98,16 +98,23 @@ pub fn backward_mamba3_layer_batched(
                 }
 
                 let mut c1 = 0.0_f32;
-                for d in g_start..g_end {
-                    let y_hat = acts.data[ys + d] * rstd;
-                    c1 += y_hat * layer_w.norm_gate_weight[d] * dy[d];
+                for ((&yv, &w), &dyv) in acts.data[ys + g_start..ys + g_end]
+                    .iter()
+                    .zip(&layer_w.norm_gate_weight[g_start..g_end])
+                    .zip(&dy[g_start..g_end])
+                {
+                    c1 += yv * rstd * w * dyv;
                 }
                 c1 /= g_len as f32;
 
-                for d in g_start..g_end {
-                    let y_hat = acts.data[ys + d] * rstd;
-                    let wdy = layer_w.norm_gate_weight[d] * dy[d];
-                    dy[d] = (wdy - y_hat * c1) * rstd;
+                for ((&yv, &w), dyv) in acts.data[ys + g_start..ys + g_end]
+                    .iter()
+                    .zip(&layer_w.norm_gate_weight[g_start..g_end])
+                    .zip(&mut dy[g_start..g_end])
+                {
+                    let y_hat = yv * rstd;
+                    let wdy = w * *dyv;
+                    *dyv = (wdy - y_hat * c1) * rstd;
                 }
             }
         } else {
@@ -197,8 +204,8 @@ pub fn backward_mamba3_layer_batched(
                 let ca_off = t * nh * n_angles + h * n_angles;
                 cum_angle_h[..n_angles]
                     .copy_from_slice(&scratch.cum_angles_flat[ca_off..ca_off + n_angles]);
-                for a in 0..n_angles {
-                    let (sin_a, cos_a) = cum_angle_h[a].sin_cos();
+                for (a, ca) in cum_angle_h[..n_angles].iter().enumerate() {
+                    let (sin_a, cos_a) = ca.sin_cos();
                     let (i0, i1) = (2 * a, 2 * a + 1);
                     let b0 = k_local[i0];
                     let b1 = k_local[i1];
@@ -258,8 +265,8 @@ pub fn backward_mamba3_layer_batched(
             let mut d_c_pre_rope = d_c_h;
 
             if n_angles > 0 {
-                for a in 0..n_angles {
-                    let (sin_a, cos_a) = cum_angle_h[a].sin_cos();
+                for (a, ca) in cum_angle_h[..n_angles].iter().enumerate() {
+                    let (sin_a, cos_a) = ca.sin_cos();
                     let (i0, i1) = (2 * a, 2 * a + 1);
                     d_k_pre_rope[i0] = cos_a * d_k_h[i0] + sin_a * d_k_h[i1];
                     d_k_pre_rope[i1] = -sin_a * d_k_h[i0] + cos_a * d_k_h[i1];
@@ -398,8 +405,7 @@ pub fn backward_mamba3_layer_batched(
             let mut d_dt_from_angles = 0.0_f32;
             if n_angles > 0 {
                 let pi = std::f32::consts::PI;
-                for a in 0..n_angles {
-                    let tanh_raw = tanh_raw_t[a];
+                for (a, &tanh_raw) in tanh_raw_t[..n_angles].iter().enumerate() {
                     let d_delta = scratch.d_angle_cumsum_flat[t * nh * n_angles + h * n_angles + a];
                     d_dt_from_angles += d_delta * tanh_raw * pi;
                     scratch.d_angles_flat[t * n_angles + a] +=
@@ -517,7 +523,7 @@ pub fn backward_mamba3_layer_batched(
 
 #[cfg(test)]
 mod tests {
-    use super::super::forward::forward_mamba3_layer_batched;
+    use super::super::forward::{Mamba3LayerStateMut, forward_mamba3_layer_batched};
     use super::*;
     use crate::mamba3_siso::config::Mamba3Config;
 
@@ -566,10 +572,12 @@ mod tests {
             &mut temporal,
             &mut acts,
             &w,
-            &mut ssm,
-            &mut k_st,
-            &mut v_st,
-            &mut a_st,
+            Mamba3LayerStateMut {
+                ssm: &mut ssm,
+                k: &mut k_st,
+                v: &mut v_st,
+                angle: &mut a_st,
+            },
             &mut scratch,
             &dims,
         );
@@ -636,10 +644,12 @@ mod tests {
             &mut temporal,
             &mut acts,
             &w,
-            &mut ssm,
-            &mut k_st,
-            &mut v_st,
-            &mut a_st,
+            Mamba3LayerStateMut {
+                ssm: &mut ssm,
+                k: &mut k_st,
+                v: &mut v_st,
+                angle: &mut a_st,
+            },
             &mut scratch,
             &dims,
         );

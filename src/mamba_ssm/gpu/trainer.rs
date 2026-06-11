@@ -110,11 +110,29 @@ use crate::mamba_ssm::gpu::loss_scaler::{
     DynamicLossScaler, OverflowFlag, UnscaleFactor, check_inf_nan_gpu, scale_grads_skip_gpu,
 };
 use crate::mamba_ssm::gpu::training_graph::{
-    GpuMambaF32TrainingStepGraph, GpuMambaTrainingStepGraph,
+    GpuMambaF32TrainingStepGraph, GpuMambaTrainingStepGraph, MambaF32Capture, MambaF32Replay,
+    MambaMixedCapture, MambaMixedReplay,
 };
 use crate::mamba_ssm::gpu::weights::{GpuMambaGrads, GpuMambaTrainWeights};
 use crate::mamba_ssm::gpu::weights_mixed_train::GpuMambaTrainMixedWeights;
 use crate::weights::MambaWeights;
+
+/// Training-session hyperparameters shared by the M1 and M3 trainer
+/// constructors: tensor shape fixed at construction + AdamW hyperparams.
+#[derive(Clone, Copy, Debug)]
+pub struct TrainSessionCfg {
+    /// Input feature dimension fed to the backbone.
+    pub input_dim: usize,
+    /// Batch dimension fixed at construction; CUDA Graph capture binds
+    /// device pointers for this exact `batch * seq_len` shape.
+    pub batch: usize,
+    /// Sequence length fixed at construction.
+    pub seq_len: usize,
+    /// AdamW learning rate.
+    pub lr: f32,
+    /// AdamW decoupled weight decay.
+    pub weight_decay: f32,
+}
 
 /// Per-step metrics returned by [`MambaTrainer::step`].
 #[derive(Debug, Clone)]
@@ -174,52 +192,40 @@ impl MambaTrainer {
             gpu_ordinal,
             cpu_weights,
             cfg,
-            input_dim,
-            batch,
-            seq_len,
+            TrainSessionCfg {
+                input_dim,
+                batch,
+                seq_len,
+                lr: 1e-3,
+                weight_decay: 1e-2,
+            },
             dtype,
-            1e-3,
-            1e-2,
         )
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub fn new_full(
         gpu_ordinal: usize,
         cpu_weights: &MambaWeights,
         cfg: MambaConfig,
-        input_dim: usize,
-        batch: usize,
-        seq_len: usize,
+        session: TrainSessionCfg,
         dtype: WeightDtype,
-        lr: f32,
-        weight_decay: f32,
     ) -> Result<Self, String> {
-        super::launch::validate_kernel_arg_capacity(batch, seq_len, cfg.d_inner(), cfg.d_state)?;
+        super::launch::validate_kernel_arg_capacity(
+            session.batch,
+            session.seq_len,
+            cfg.d_inner(),
+            cfg.d_state,
+        )?;
         let inner = match dtype {
             WeightDtype::F32 => TrainerInner::F32(Box::new(MambaTrainerF32::new_full(
                 gpu_ordinal,
                 cpu_weights,
                 cfg,
-                input_dim,
-                batch,
-                seq_len,
-                lr,
-                weight_decay,
+                session,
             )?)),
-            WeightDtype::Bf16 | WeightDtype::F16 => {
-                TrainerInner::Mixed(Box::new(MambaTrainerMixed::new_full(
-                    gpu_ordinal,
-                    cpu_weights,
-                    cfg,
-                    input_dim,
-                    batch,
-                    seq_len,
-                    dtype,
-                    lr,
-                    weight_decay,
-                )?))
-            }
+            WeightDtype::Bf16 | WeightDtype::F16 => TrainerInner::Mixed(Box::new(
+                MambaTrainerMixed::new_full(gpu_ordinal, cpu_weights, cfg, session, dtype)?,
+            )),
         };
         Ok(Self { inner })
     }
@@ -407,18 +413,20 @@ pub(crate) struct MambaTrainerMixed {
 }
 
 impl MambaTrainerMixed {
-    #[allow(clippy::too_many_arguments)]
     fn new_full(
         gpu_ordinal: usize,
         cpu_weights: &MambaWeights,
         cfg: MambaConfig,
-        input_dim: usize,
-        batch: usize,
-        seq_len: usize,
+        session: TrainSessionCfg,
         dtype: WeightDtype,
-        lr: f32,
-        weight_decay: f32,
     ) -> Result<Self, String> {
+        let TrainSessionCfg {
+            input_dim,
+            batch,
+            seq_len,
+            lr,
+            weight_decay,
+        } = session;
         assert!(
             matches!(dtype, WeightDtype::Bf16 | WeightDtype::F16),
             "MambaTrainerMixed accepts Bf16 or F16; got {dtype:?}"
@@ -594,16 +602,18 @@ impl MambaTrainerMixed {
         let g = GpuMambaTrainingStepGraph::capture(
             &self.ctx,
             &self.cfg,
-            &mut self.weights,
-            &self.adam,
-            &self.bias,
-            &mut self.grads,
-            &mut self.acts,
-            &mut self.scratch,
-            &self.a_neg_all,
-            &self.mamba_input,
-            &mut self.d_temporal,
-            &mut self.state,
+            MambaMixedCapture {
+                train_w: &mut self.weights,
+                adam: &self.adam,
+                bias: &self.bias,
+                grads: &mut self.grads,
+                acts: &mut self.acts,
+                scratch: &mut self.scratch,
+                a_neg_all: &self.a_neg_all,
+                mamba_input: &self.mamba_input,
+                d_temporal: &mut self.d_temporal,
+                state: &mut self.state,
+            },
             self.batch,
             self.seq_len,
         )?;
@@ -645,14 +655,16 @@ impl MambaTrainerMixed {
         let replayed = if let Some(ref g) = self.graph {
             g.replay(
                 &self.ctx,
-                &self.weights,
-                &self.adam,
-                &self.bias,
-                &self.grads,
-                &self.a_neg_all,
-                &self.mamba_input,
-                &self.d_temporal,
-                &self.state,
+                &MambaMixedReplay {
+                    train_w: &self.weights,
+                    adam: &self.adam,
+                    bias: &self.bias,
+                    grads: &self.grads,
+                    a_neg_all: &self.a_neg_all,
+                    mamba_input: &self.mamba_input,
+                    d_temporal: &self.d_temporal,
+                    state: &self.state,
+                },
             )?;
             true
         } else {
@@ -1065,17 +1077,19 @@ pub(crate) struct MambaTrainerF32 {
 }
 
 impl MambaTrainerF32 {
-    #[allow(clippy::too_many_arguments)]
     fn new_full(
         gpu_ordinal: usize,
         cpu_weights: &MambaWeights,
         cfg: MambaConfig,
-        input_dim: usize,
-        batch: usize,
-        seq_len: usize,
-        lr: f32,
-        weight_decay: f32,
+        session: TrainSessionCfg,
     ) -> Result<Self, String> {
+        let TrainSessionCfg {
+            input_dim,
+            batch,
+            seq_len,
+            lr,
+            weight_decay,
+        } = session;
         let device = GpuDevice::new(gpu_ordinal)?;
         let ctx = GpuCtx::new(&device)?;
 
@@ -1165,17 +1179,19 @@ impl MambaTrainerF32 {
         let g = GpuMambaF32TrainingStepGraph::capture(
             &self.ctx,
             &self.cfg,
-            &mut self.weights,
-            &self.adam,
-            &self.bias,
-            &mut self.grads,
-            &mut self.acts,
-            &mut self.scratch,
-            &self.a_neg_all,
-            &mut self.temporal,
-            &self.mamba_input,
-            &mut self.d_temporal,
-            &mut self.state,
+            MambaF32Capture {
+                weights: &mut self.weights,
+                adam: &self.adam,
+                bias: &self.bias,
+                grads: &mut self.grads,
+                acts: &mut self.acts,
+                scratch: &mut self.scratch,
+                a_neg_all: &self.a_neg_all,
+                temporal: &mut self.temporal,
+                mamba_input: &self.mamba_input,
+                d_temporal: &mut self.d_temporal,
+                state: &mut self.state,
+            },
             self.batch,
             self.seq_len,
         )?;
@@ -1216,17 +1232,17 @@ impl MambaTrainerF32 {
         self.bias.write(&self.ctx.stream, bc1, bc2)?;
 
         let replayed = if let Some(ref g) = self.graph {
-            g.replay(
-                &self.weights,
-                &self.adam,
-                &self.bias,
-                &self.grads,
-                &self.temporal,
-                &self.a_neg_all,
-                &self.mamba_input,
-                &self.d_temporal,
-                &self.state,
-            )?;
+            g.replay(&MambaF32Replay {
+                weights: &self.weights,
+                adam: &self.adam,
+                bias: &self.bias,
+                grads: &self.grads,
+                temporal: &self.temporal,
+                a_neg_all: &self.a_neg_all,
+                mamba_input: &self.mamba_input,
+                d_temporal: &self.d_temporal,
+                state: &self.state,
+            })?;
             true
         } else {
             self.step_eager()?;

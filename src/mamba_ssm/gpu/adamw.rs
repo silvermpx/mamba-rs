@@ -88,6 +88,17 @@ impl AdamWBiasFactors {
     }
 }
 
+/// Device pointers for one AdamW tensor update: weight + grad + the
+/// matching `m`/`v` slices (offset into the flat arenas by the same
+/// amount as `grad` is into `grads.flat`).
+#[derive(Clone, Copy, Debug)]
+pub struct AdamWParamPtrs {
+    pub weight: cudarc::driver::sys::CUdeviceptr,
+    pub grad: cudarc::driver::sys::CUdeviceptr,
+    pub m: cudarc::driver::sys::CUdeviceptr,
+    pub v: cudarc::driver::sys::CUdeviceptr,
+}
+
 /// f32 fused AdamW optimizer (matches `torch.optim.AdamW`).
 pub struct GpuAdamW {
     /// First moment (m) in f32, layout matches the flat grad arena.
@@ -173,20 +184,16 @@ impl GpuAdamW {
     }
 
     /// Run one fused AdamW update on a single tensor. Caller supplies the
-    /// device pointers to weight, grad, and the matching slice of `m`/`v`
-    /// (offset by the same amount as `grad` is into `grads.flat`).
+    /// device pointers (weight + grad + matching `m`/`v` slices) bundled
+    /// in [`AdamWParamPtrs`].
     ///
-    /// You normally want [`Self::step_m1`] / [`Self::step_m3`]; this is the
-    /// low-level building block they use.
-    #[allow(clippy::too_many_arguments)]
+    /// You normally want [`step_m1`] / [`step_m3`]; this is the low-level
+    /// building block they use.
     pub fn step_one(
         &self,
         ctx: &GpuCtx,
         adamw_kernel: &CudaFunction,
-        weight_ptr: cudarc::driver::sys::CUdeviceptr,
-        grad_ptr: cudarc::driver::sys::CUdeviceptr,
-        m_ptr: cudarc::driver::sys::CUdeviceptr,
-        v_ptr: cudarc::driver::sys::CUdeviceptr,
+        ptrs: AdamWParamPtrs,
         len: usize,
         bias_c1: f32,
         bias_c2: f32,
@@ -197,10 +204,10 @@ impl GpuAdamW {
         let n = len as i32;
         let cfg = grid_1d(len);
         let mut bld = ctx.stream.launch_builder(adamw_kernel);
-        bld.arg(&weight_ptr);
-        bld.arg(&grad_ptr);
-        bld.arg(&m_ptr);
-        bld.arg(&v_ptr);
+        bld.arg(&ptrs.weight);
+        bld.arg(&ptrs.grad);
+        bld.arg(&ptrs.m);
+        bld.arg(&ptrs.v);
         bld.arg(&self.lr);
         bld.arg(&self.beta1);
         bld.arg(&self.beta2);
@@ -216,15 +223,11 @@ impl GpuAdamW {
     /// CUDA-Graph-capturable variant of [`Self::step_one`]. Bias factors
     /// are read from a 2-element device buffer (see [`AdamWBiasFactors`]),
     /// which the CPU updates BEFORE each graph replay.
-    #[allow(clippy::too_many_arguments)]
     pub fn step_one_capturable(
         &self,
         ctx: &GpuCtx,
         adamw_kernel: &CudaFunction,
-        weight_ptr: cudarc::driver::sys::CUdeviceptr,
-        grad_ptr: cudarc::driver::sys::CUdeviceptr,
-        m_ptr: cudarc::driver::sys::CUdeviceptr,
-        v_ptr: cudarc::driver::sys::CUdeviceptr,
+        ptrs: AdamWParamPtrs,
         bias_factors_ptr: cudarc::driver::sys::CUdeviceptr,
         len: usize,
     ) -> Result<(), String> {
@@ -234,10 +237,10 @@ impl GpuAdamW {
         let n = len as i32;
         let cfg = grid_1d(len);
         let mut bld = ctx.stream.launch_builder(adamw_kernel);
-        bld.arg(&weight_ptr);
-        bld.arg(&grad_ptr);
-        bld.arg(&m_ptr);
-        bld.arg(&v_ptr);
+        bld.arg(&ptrs.weight);
+        bld.arg(&ptrs.grad);
+        bld.arg(&ptrs.m);
+        bld.arg(&ptrs.v);
         bld.arg(&self.lr);
         bld.arg(&self.beta1);
         bld.arg(&self.beta2);
@@ -317,10 +320,12 @@ pub fn run_pairs(
         adam.step_one(
             ctx,
             adamw_kernel,
-            w.cached_ptr(),
-            g_ptr,
-            m_ptr,
-            v_ptr,
+            AdamWParamPtrs {
+                weight: w.cached_ptr(),
+                grad: g_ptr,
+                m: m_ptr,
+                v: v_ptr,
+            },
             g.len(),
             bias_c1,
             bias_c2,
@@ -368,10 +373,12 @@ pub fn run_pairs_capturable(
         adam.step_one_capturable(
             ctx,
             adamw_kernel,
-            w.cached_ptr(),
-            g_ptr,
-            m_ptr,
-            v_ptr,
+            AdamWParamPtrs {
+                weight: w.cached_ptr(),
+                grad: g_ptr,
+                m: m_ptr,
+                v: v_ptr,
+            },
             bias_factors_ptr,
             g.len(),
         )?;

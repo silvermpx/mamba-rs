@@ -748,22 +748,25 @@ fn conv1d_burnin_bwd_bf16_matches_f32() {
 
 // ─── ssm_backward_local (HOTTEST kernel) ─────────────────────────────
 
-#[allow(clippy::too_many_arguments)]
-fn run_ssm_backward_local(
-    ctx: &GpuCtx,
+struct SsmBackwardLocalInputs<'a> {
     batch: usize,
     t: usize,
     di: usize,
     ds: usize,
-    h_saved: &GpuBuffer,
-    delta: &DtypedBuf,
-    u: &DtypedBuf,
-    b_in: &DtypedBuf,
-    c_in: &DtypedBuf,
-    a_neg: &GpuBuffer,
-    d_param: &GpuBuffer,
-    dy: &DtypedBuf,
+    h_saved: &'a GpuBuffer,
+    delta: &'a DtypedBuf,
+    u: &'a DtypedBuf,
+    b_in: &'a DtypedBuf,
+    c_in: &'a DtypedBuf,
+    a_neg: &'a GpuBuffer,
+    d_param: &'a GpuBuffer,
+    dy: &'a DtypedBuf,
     dtype: WeightDtype,
+}
+
+fn run_ssm_backward_local(
+    ctx: &GpuCtx,
+    i: SsmBackwardLocalInputs<'_>,
 ) -> (
     DtypedBuf, // d_delta
     DtypedBuf, // d_u
@@ -772,6 +775,21 @@ fn run_ssm_backward_local(
     GpuBuffer, // d_D_local (f32)
     GpuBuffer, // d_a_log_local (f32)
 ) {
+    let SsmBackwardLocalInputs {
+        batch,
+        t,
+        di,
+        ds,
+        h_saved,
+        delta,
+        u,
+        b_in,
+        c_in,
+        a_neg,
+        d_param,
+        dy,
+        dtype,
+    } = i;
     let bt = batch * t;
     let d_delta = DtypedBuf::zeros(&ctx.stream, bt * di, dtype).unwrap();
     let d_u = DtypedBuf::zeros(&ctx.stream, bt * di, dtype).unwrap();
@@ -875,19 +893,21 @@ fn ssm_backward_local_bf16_matches_f32() {
     let dy32 = upload_typed(&ctx.stream, &dy_f, WeightDtype::F32);
     let (dd_ref, du_ref, dbl_ref, dcl_ref, ddd_ref, da_ref) = run_ssm_backward_local(
         &ctx,
-        batch,
-        t,
-        di,
-        ds,
-        &h_buf,
-        &delta32,
-        &u32,
-        &b32,
-        &c32,
-        &a_neg_buf,
-        &d_param_buf,
-        &dy32,
-        WeightDtype::F32,
+        SsmBackwardLocalInputs {
+            batch,
+            t,
+            di,
+            ds,
+            h_saved: &h_buf,
+            delta: &delta32,
+            u: &u32,
+            b_in: &b32,
+            c_in: &c32,
+            a_neg: &a_neg_buf,
+            d_param: &d_param_buf,
+            dy: &dy32,
+            dtype: WeightDtype::F32,
+        },
     );
     let dd_ref_v = download_typed(&ctx.stream, &dd_ref, WeightDtype::F32);
     let du_ref_v = download_typed(&ctx.stream, &du_ref, WeightDtype::F32);
@@ -906,19 +926,21 @@ fn ssm_backward_local_bf16_matches_f32() {
     let dy_bf = upload_typed(&ctx.stream, &dy_f, WeightDtype::Bf16);
     let (dd_bf, du_bf, dbl_bf, dcl_bf, ddd_bf, da_bf) = run_ssm_backward_local(
         &ctx,
-        batch,
-        t,
-        di,
-        ds,
-        &h_buf,
-        &delta_bf,
-        &u_bf,
-        &b_bf,
-        &c_bf,
-        &a_neg_buf,
-        &d_param_buf,
-        &dy_bf,
-        WeightDtype::Bf16,
+        SsmBackwardLocalInputs {
+            batch,
+            t,
+            di,
+            ds,
+            h_saved: &h_buf,
+            delta: &delta_bf,
+            u: &u_bf,
+            b_in: &b_bf,
+            c_in: &c_bf,
+            a_neg: &a_neg_buf,
+            d_param: &d_param_buf,
+            dy: &dy_bf,
+            dtype: WeightDtype::Bf16,
+        },
     );
     let dd_bf_v = download_typed(&ctx.stream, &dd_bf, WeightDtype::Bf16);
     let du_bf_v = download_typed(&ctx.stream, &du_bf, WeightDtype::Bf16);

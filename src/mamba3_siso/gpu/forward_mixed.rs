@@ -26,13 +26,10 @@ use cudarc::driver::{CudaStream, PushKernelArg};
 
 use crate::mamba_ssm::gpu::blas::{TypedPtr, gpu_gemm_typed_forward_raw};
 use crate::mamba_ssm::gpu::buffers::{DtypedBuf, GpuBuffer};
-use crate::mamba_ssm::gpu::context::GpuCtx;
 use crate::mamba_ssm::gpu::dtype::WeightDtype;
 use crate::mamba_ssm::gpu::launch::{grid_1d, grid_norm};
 use crate::mamba3_siso::config::Mamba3Config;
-use crate::mamba3_siso::gpu::kernels::Mamba3Kernels;
-use crate::mamba3_siso::gpu::mamba3_gpu::GpuMamba3Dims;
-use crate::mamba3_siso::gpu::state::CHUNK_SIZE;
+use crate::mamba3_siso::gpu::state::{CHUNK_SIZE, GpuMamba3StateBufs, M3Exec, Mamba3LayerPtrs};
 use crate::mamba3_siso::gpu::weights_mixed_train::GpuMamba3TrainMixedWeights;
 
 /// Per-layer saved activations for M3 mixed-precision backward.
@@ -245,28 +242,37 @@ impl GpuMamba3BackboneMixedActs {
 /// **Scope**: sequential SSM only (`dims.use_parallel_scan = false`). The
 /// chunked parallel pipeline has 10 sub-kernels that all need typed
 /// variants — deferred to a follow-up step.
-#[allow(clippy::too_many_arguments)]
 pub fn gpu_forward_mamba3_layer_mixed(
-    ctx: &GpuCtx,
-    m3k: &Mamba3Kernels,
+    exec: &M3Exec<'_>,
     temporal_f32: &mut GpuBuffer,
     acts: &mut GpuMamba3LayerMixedActs,
     w: &crate::mamba3_siso::gpu::weights::GpuMamba3MixedLayerWeights,
-    ssm_state: cudarc::driver::sys::CUdeviceptr,
-    k_state: cudarc::driver::sys::CUdeviceptr,
-    v_state: cudarc::driver::sys::CUdeviceptr,
-    angle_state: cudarc::driver::sys::CUdeviceptr,
-    proj_flat_scratch: &mut DtypedBuf,
-    out_flat_scratch: &mut DtypedBuf,
-    alpha_scratch: &mut GpuBuffer,
-    beta_scratch: &mut GpuBuffer,
-    gamma_scratch: &mut GpuBuffer,
-    adt_temp_scratch: &mut GpuBuffer,
-    chunk_states_scratch: &mut GpuBuffer,
-    final_states_scratch: &mut GpuBuffer,
-    dims: &GpuMamba3Dims,
+    layer_ptrs: &Mamba3LayerPtrs,
+    scratch: &mut GpuMamba3MixedScratch,
     dtype: WeightDtype,
 ) -> Result<(), String> {
+    let M3Exec {
+        ctx,
+        kernels: m3k,
+        dims,
+    } = *exec;
+    let Mamba3LayerPtrs {
+        ssm_state,
+        k_state,
+        v_state,
+        angle_state,
+    } = *layer_ptrs;
+    let GpuMamba3MixedScratch {
+        proj_flat: proj_flat_scratch,
+        out_flat: out_flat_scratch,
+        alpha: alpha_scratch,
+        beta: beta_scratch,
+        gamma: gamma_scratch,
+        adt_temp: adt_temp_scratch,
+        chunk_states: chunk_states_scratch,
+        final_states: final_states_scratch,
+        ..
+    } = scratch;
     let bt = dims.bt();
     let dm = dims.d_model;
     let di = dims.d_inner;
@@ -961,21 +967,20 @@ impl GpuMamba3MixedScratch {
 
 /// Full backbone M3 forward in mixed precision. Mirrors
 /// [`super::mamba3_gpu::gpu_forward_mamba3_backbone`].
-#[allow(clippy::too_many_arguments)]
 pub fn gpu_forward_mamba3_backbone_mixed(
-    ctx: &GpuCtx,
-    m3k: &Mamba3Kernels,
+    exec: &M3Exec<'_>,
     temporal_f32: &mut GpuBuffer,
     acts: &mut GpuMamba3BackboneMixedActs,
     w: &GpuMamba3TrainMixedWeights,
     mamba_input: &GpuBuffer,
-    ssm_states: &mut GpuBuffer,
-    k_states: &mut GpuBuffer,
-    v_states: &mut GpuBuffer,
-    angle_states: &mut GpuBuffer,
+    states: GpuMamba3StateBufs<'_>,
     scratch: &mut GpuMamba3MixedScratch,
-    dims: &GpuMamba3Dims,
 ) -> Result<(), String> {
+    let M3Exec {
+        ctx,
+        kernels: m3k,
+        dims,
+    } = *exec;
     let dtype = acts.dtype;
     let bt = dims.bt();
     let dm = dims.d_model;
@@ -988,10 +993,10 @@ pub fn gpu_forward_mamba3_backbone_mixed(
         // Stateless window: the chunked kernels ignore entering SSM/K/V
         // state; zero the angle accumulator too so all four states behave
         // identically (see gpu_forward_mamba3_backbone).
-        ssm_states.zero(&ctx.stream)?;
-        k_states.zero(&ctx.stream)?;
-        v_states.zero(&ctx.stream)?;
-        angle_states.zero(&ctx.stream)?;
+        states.ssm.zero(&ctx.stream)?;
+        states.k.zero(&ctx.stream)?;
+        states.v.zero(&ctx.stream)?;
+        states.angle.zero(&ctx.stream)?;
     }
 
     // input_proj: if identity (len_elems==0), D2D copy mamba_input →
@@ -1020,39 +1025,29 @@ pub fn gpu_forward_mamba3_backbone_mixed(
 
     // Mamba layers in forward order — per-layer offset into flat state buffers.
     let f32_sz = std::mem::size_of::<f32>() as u64;
-    let ssm_base = ssm_states.cached_ptr();
-    let k_base = k_states.cached_ptr();
-    let v_base = v_states.cached_ptr();
-    let a_base = angle_states.cached_ptr();
+    let ssm_base = states.ssm.cached_ptr();
+    let k_base = states.k.cached_ptr();
+    let v_base = states.v.cached_ptr();
+    let a_base = states.angle.cached_ptr();
 
     for l in 0..dims.n_layers {
         let ssm_off = dims.batch * l * nh * hd * ds;
         let k_off = dims.batch * l * nh * ds;
         let v_off = dims.batch * l * nh * hd;
         let a_off = dims.batch * l * nh * na;
-        let ssm_ptr = ssm_base + ssm_off as u64 * f32_sz;
-        let k_ptr = k_base + k_off as u64 * f32_sz;
-        let v_ptr = v_base + v_off as u64 * f32_sz;
-        let a_ptr = a_base + a_off as u64 * f32_sz;
+        let layer_ptrs = Mamba3LayerPtrs {
+            ssm_state: ssm_base + ssm_off as u64 * f32_sz,
+            k_state: k_base + k_off as u64 * f32_sz,
+            v_state: v_base + v_off as u64 * f32_sz,
+            angle_state: a_base + a_off as u64 * f32_sz,
+        };
         gpu_forward_mamba3_layer_mixed(
-            ctx,
-            m3k,
+            exec,
             temporal_f32,
             &mut acts.layers[l],
             &w.compute.layers[l],
-            ssm_ptr,
-            k_ptr,
-            v_ptr,
-            a_ptr,
-            &mut scratch.proj_flat,
-            &mut scratch.out_flat,
-            &mut scratch.alpha,
-            &mut scratch.beta,
-            &mut scratch.gamma,
-            &mut scratch.adt_temp,
-            &mut scratch.chunk_states,
-            &mut scratch.final_states,
-            dims,
+            &layer_ptrs,
+            scratch,
             dtype,
         )?;
     }

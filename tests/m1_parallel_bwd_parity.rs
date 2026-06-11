@@ -130,7 +130,6 @@ fn make_inputs(b: usize, t: usize, di: usize, ds: usize) -> BwdInputs {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn run_seq_f32(ctx: &GpuCtx, k: &MambaKernels, inp: &BwdInputs) -> BwdOuts {
     let (b, t, di, ds) = (inp.b, inp.t, inp.di, inp.ds);
     let h_saved = upload_f32(ctx, &inp.h_saved);
@@ -212,7 +211,6 @@ fn run_seq_f32(ctx: &GpuCtx, k: &MambaKernels, inp: &BwdInputs) -> BwdOuts {
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 fn run_par_typed(ctx: &GpuCtx, k: &MambaKernels, inp: &BwdInputs, dtype: WeightDtype) -> BwdOuts {
     let (b, t, di, ds) = (inp.b, inp.t, inp.di, inp.ds);
     let h_saved = upload_f32(ctx, &inp.h_saved);

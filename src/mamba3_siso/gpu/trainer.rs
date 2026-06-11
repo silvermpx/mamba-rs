@@ -18,6 +18,7 @@ use crate::mamba_ssm::gpu::loss_scaler::{
     DynamicLossScaler, OverflowFlag, UnscaleFactor, check_inf_nan_gpu, scale_grads_skip_gpu,
 };
 use crate::mamba_ssm::gpu::trainer::StepMetrics;
+pub use crate::mamba_ssm::gpu::trainer::TrainSessionCfg;
 use crate::mamba3_siso::config::Mamba3Config;
 use crate::mamba3_siso::gpu::backward::gpu_backward_mamba3_backbone;
 use crate::mamba3_siso::gpu::backward_mixed::gpu_backward_mamba3_backbone_mixed;
@@ -26,9 +27,12 @@ use crate::mamba3_siso::gpu::forward_mixed::{
     GpuMamba3BackboneMixedActs, GpuMamba3MixedScratch, gpu_forward_mamba3_backbone_mixed,
 };
 use crate::mamba3_siso::gpu::kernels::Mamba3Kernels;
-use crate::mamba3_siso::gpu::state::{GpuMamba3BackboneActs, GpuMamba3Dims, GpuMamba3Scratch};
+use crate::mamba3_siso::gpu::state::{
+    GpuMamba3BackboneActs, GpuMamba3Dims, GpuMamba3Scratch, GpuMamba3StateBufs, M3Exec,
+};
 use crate::mamba3_siso::gpu::training_graph::{
-    GpuMamba3F32TrainingStepGraph, GpuMamba3TrainingStepGraph,
+    GpuMamba3F32TrainingStepGraph, GpuMamba3TrainingStepGraph, Mamba3F32Capture, Mamba3F32Replay,
+    Mamba3MixedCapture, Mamba3MixedReplay,
 };
 use crate::mamba3_siso::gpu::weights::{GpuMamba3Grads, GpuMamba3Weights};
 use crate::mamba3_siso::gpu::weights_mixed_train::GpuMamba3TrainMixedWeights;
@@ -61,30 +65,27 @@ impl Mamba3Trainer {
             gpu_ordinal,
             cpu_weights,
             cfg,
-            input_dim,
-            batch,
-            seq_len,
+            TrainSessionCfg {
+                input_dim,
+                batch,
+                seq_len,
+                lr: 1e-3,
+                weight_decay: 1e-2,
+            },
             dtype,
-            1e-3,
-            1e-2,
         )
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub fn new_full(
         gpu_ordinal: usize,
         cpu_weights: &Mamba3Weights,
         cfg: Mamba3Config,
-        input_dim: usize,
-        batch: usize,
-        seq_len: usize,
+        session: TrainSessionCfg,
         dtype: WeightDtype,
-        lr: f32,
-        weight_decay: f32,
     ) -> Result<Self, String> {
         crate::mamba_ssm::gpu::launch::validate_kernel_arg_capacity(
-            batch,
-            seq_len,
+            session.batch,
+            session.seq_len,
             cfg.d_inner(),
             cfg.d_state,
         )?;
@@ -93,25 +94,11 @@ impl Mamba3Trainer {
                 gpu_ordinal,
                 cpu_weights,
                 cfg,
-                input_dim,
-                batch,
-                seq_len,
-                lr,
-                weight_decay,
+                session,
             )?)),
-            WeightDtype::Bf16 | WeightDtype::F16 => {
-                Trainer3Inner::Mixed(Box::new(Mamba3TrainerMixed::new_full(
-                    gpu_ordinal,
-                    cpu_weights,
-                    cfg,
-                    input_dim,
-                    batch,
-                    seq_len,
-                    dtype,
-                    lr,
-                    weight_decay,
-                )?))
-            }
+            WeightDtype::Bf16 | WeightDtype::F16 => Trainer3Inner::Mixed(Box::new(
+                Mamba3TrainerMixed::new_full(gpu_ordinal, cpu_weights, cfg, session, dtype)?,
+            )),
         };
         Ok(Self { inner })
     }
@@ -254,18 +241,20 @@ pub(crate) struct Mamba3TrainerMixed {
 }
 
 impl Mamba3TrainerMixed {
-    #[allow(clippy::too_many_arguments)]
     fn new_full(
         gpu_ordinal: usize,
         cpu_weights: &Mamba3Weights,
         cfg: Mamba3Config,
-        input_dim: usize,
-        batch: usize,
-        seq_len: usize,
+        session: TrainSessionCfg,
         dtype: WeightDtype,
-        lr: f32,
-        weight_decay: f32,
     ) -> Result<Self, String> {
+        let TrainSessionCfg {
+            input_dim,
+            batch,
+            seq_len,
+            lr,
+            weight_decay,
+        } = session;
         assert!(
             matches!(dtype, WeightDtype::Bf16 | WeightDtype::F16),
             "Mamba3TrainerMixed accepts Bf16 or F16; got {dtype:?}"
@@ -372,22 +361,6 @@ impl Mamba3TrainerMixed {
         })
     }
 
-    pub fn dtype(&self) -> WeightDtype {
-        self.dtype
-    }
-
-    pub fn batch(&self) -> usize {
-        self.dims.batch
-    }
-
-    pub fn seq_len(&self) -> usize {
-        self.dims.seq_len
-    }
-
-    pub fn ctx(&self) -> &GpuCtx {
-        &self.ctx
-    }
-
     pub fn has_graph(&self) -> bool {
         self.graph.is_some() || self.graph_f16.is_some()
     }
@@ -410,24 +383,30 @@ impl Mamba3TrainerMixed {
         self.bias.write(&self.ctx.stream, 1.0, 1.0)?;
 
         let g = GpuMamba3TrainingStepGraph::capture(
-            &self.ctx,
+            &M3Exec {
+                ctx: &self.ctx,
+                kernels: &self.m3k,
+                dims: &self.dims,
+            },
             &self.cfg,
-            &self.m3k,
-            &mut self.weights,
-            &self.adam,
-            &self.bias,
-            &mut self.grads,
-            &mut self.acts,
-            &mut self.f32_scratch,
-            &mut self.mixed_scratch,
-            &mut self.temporal,
-            &self.mamba_input,
-            &mut self.d_temporal,
-            &mut self.ssm_states,
-            &mut self.k_states,
-            &mut self.v_states,
-            &mut self.angle_states,
-            &self.dims,
+            Mamba3MixedCapture {
+                train_w: &mut self.weights,
+                adam: &self.adam,
+                bias: &self.bias,
+                grads: &mut self.grads,
+                acts: &mut self.acts,
+                f32_scratch: &mut self.f32_scratch,
+                mixed_scratch: &mut self.mixed_scratch,
+                temporal_f32: &mut self.temporal,
+                mamba_input: &self.mamba_input,
+                d_temporal: &mut self.d_temporal,
+                states: GpuMamba3StateBufs {
+                    ssm: &mut self.ssm_states,
+                    k: &mut self.k_states,
+                    v: &mut self.v_states,
+                    angle: &mut self.angle_states,
+                },
+            },
         )?;
         self.graph = Some(g);
         Ok(())
@@ -454,17 +433,19 @@ impl Mamba3TrainerMixed {
         let replayed = if let Some(ref g) = self.graph {
             g.replay(
                 &self.ctx,
-                &self.weights,
-                &self.adam,
-                &self.bias,
-                &self.grads,
-                &self.temporal,
-                &self.mamba_input,
-                &self.d_temporal,
-                &self.ssm_states,
-                &self.k_states,
-                &self.v_states,
-                &self.angle_states,
+                &Mamba3MixedReplay {
+                    train_w: &self.weights,
+                    adam: &self.adam,
+                    bias: &self.bias,
+                    grads: &self.grads,
+                    temporal_f32: &self.temporal,
+                    mamba_input: &self.mamba_input,
+                    d_temporal: &self.d_temporal,
+                    ssm_states: &self.ssm_states,
+                    k_states: &self.k_states,
+                    v_states: &self.v_states,
+                    angle_states: &self.angle_states,
+                },
             )?;
             true
         } else {
@@ -551,30 +532,33 @@ impl Mamba3TrainerMixed {
             (next_step, overflow, true)
         } else {
             self.grads.zero(&self.ctx.stream)?;
+            let exec = M3Exec {
+                ctx: &self.ctx,
+                kernels: &self.m3k,
+                dims: &self.dims,
+            };
             gpu_forward_mamba3_backbone_mixed(
-                &self.ctx,
-                &self.m3k,
+                &exec,
                 &mut self.temporal,
                 &mut self.acts,
                 &self.weights,
                 &self.mamba_input,
-                &mut self.ssm_states,
-                &mut self.k_states,
-                &mut self.v_states,
-                &mut self.angle_states,
+                GpuMamba3StateBufs {
+                    ssm: &mut self.ssm_states,
+                    k: &mut self.k_states,
+                    v: &mut self.v_states,
+                    angle: &mut self.angle_states,
+                },
                 &mut self.mixed_scratch,
-                &self.dims,
             )?;
             gpu_backward_mamba3_backbone_mixed(
-                &self.ctx,
-                &self.m3k,
+                &exec,
                 dt_scaled,
                 &self.acts,
                 &self.weights,
                 &self.grads,
                 &mut self.f32_scratch,
                 &mut self.mixed_scratch,
-                &self.dims,
             )?;
             check_inf_nan_gpu(
                 &self.ctx,
@@ -663,30 +647,33 @@ impl Mamba3TrainerMixed {
         let stream = self.ctx.stream.clone();
         let g = capture_into_graph(&stream, || {
             self.grads.zero(&self.ctx.stream)?;
+            let exec = M3Exec {
+                ctx: &self.ctx,
+                kernels: &self.m3k,
+                dims: &self.dims,
+            };
             gpu_forward_mamba3_backbone_mixed(
-                &self.ctx,
-                &self.m3k,
+                &exec,
                 &mut self.temporal,
                 &mut self.acts,
                 &self.weights,
                 &self.mamba_input,
-                &mut self.ssm_states,
-                &mut self.k_states,
-                &mut self.v_states,
-                &mut self.angle_states,
+                GpuMamba3StateBufs {
+                    ssm: &mut self.ssm_states,
+                    k: &mut self.k_states,
+                    v: &mut self.v_states,
+                    angle: &mut self.angle_states,
+                },
                 &mut self.mixed_scratch,
-                &self.dims,
             )?;
             gpu_backward_mamba3_backbone_mixed(
-                &self.ctx,
-                &self.m3k,
+                &exec,
                 self.d_temporal_scaled.as_mut().unwrap(),
                 &self.acts,
                 &self.weights,
                 &self.grads,
                 &mut self.f32_scratch,
                 &mut self.mixed_scratch,
-                &self.dims,
             )?;
             check_inf_nan_gpu(
                 &self.ctx,
@@ -723,30 +710,33 @@ impl Mamba3TrainerMixed {
 
     fn step_eager(&mut self) -> Result<(), String> {
         self.grads.zero(&self.ctx.stream)?;
+        let exec = M3Exec {
+            ctx: &self.ctx,
+            kernels: &self.m3k,
+            dims: &self.dims,
+        };
         gpu_forward_mamba3_backbone_mixed(
-            &self.ctx,
-            &self.m3k,
+            &exec,
             &mut self.temporal,
             &mut self.acts,
             &self.weights,
             &self.mamba_input,
-            &mut self.ssm_states,
-            &mut self.k_states,
-            &mut self.v_states,
-            &mut self.angle_states,
+            GpuMamba3StateBufs {
+                ssm: &mut self.ssm_states,
+                k: &mut self.k_states,
+                v: &mut self.v_states,
+                angle: &mut self.angle_states,
+            },
             &mut self.mixed_scratch,
-            &self.dims,
         )?;
         gpu_backward_mamba3_backbone_mixed(
-            &self.ctx,
-            &self.m3k,
+            &exec,
             &mut self.d_temporal,
             &self.acts,
             &self.weights,
             &self.grads,
             &mut self.f32_scratch,
             &mut self.mixed_scratch,
-            &self.dims,
         )?;
         step_m3_capturable(
             &self.ctx,
@@ -834,17 +824,19 @@ pub(crate) struct Mamba3TrainerF32 {
 }
 
 impl Mamba3TrainerF32 {
-    #[allow(clippy::too_many_arguments)]
     fn new_full(
         gpu_ordinal: usize,
         cpu_weights: &Mamba3Weights,
         cfg: Mamba3Config,
-        input_dim: usize,
-        batch: usize,
-        seq_len: usize,
-        lr: f32,
-        weight_decay: f32,
+        session: TrainSessionCfg,
     ) -> Result<Self, String> {
+        let TrainSessionCfg {
+            input_dim,
+            batch,
+            seq_len,
+            lr,
+            weight_decay,
+        } = session;
         let device = GpuDevice::new(gpu_ordinal)?;
         let ctx = GpuCtx::new(&device)?;
         let arch = GpuDevice::nvrtc_arch(device.compute_capability);
@@ -931,22 +923,28 @@ impl Mamba3TrainerF32 {
     pub fn capture_graph(&mut self) -> Result<(), String> {
         self.bias.write(&self.ctx.stream, 1.0, 1.0)?;
         let g = GpuMamba3F32TrainingStepGraph::capture(
-            &self.ctx,
-            &self.m3k,
-            &mut self.weights,
-            &self.adam,
-            &self.bias,
-            &mut self.grads,
-            &mut self.acts,
-            &mut self.scratch,
-            &mut self.temporal,
-            &self.mamba_input,
-            &mut self.d_temporal,
-            &mut self.ssm_states,
-            &mut self.k_states,
-            &mut self.v_states,
-            &mut self.angle_states,
-            &self.dims,
+            &M3Exec {
+                ctx: &self.ctx,
+                kernels: &self.m3k,
+                dims: &self.dims,
+            },
+            Mamba3F32Capture {
+                weights: &mut self.weights,
+                adam: &self.adam,
+                bias: &self.bias,
+                grads: &mut self.grads,
+                acts: &mut self.acts,
+                scratch: &mut self.scratch,
+                temporal: &mut self.temporal,
+                mamba_input: &self.mamba_input,
+                d_temporal: &mut self.d_temporal,
+                states: GpuMamba3StateBufs {
+                    ssm: &mut self.ssm_states,
+                    k: &mut self.k_states,
+                    v: &mut self.v_states,
+                    angle: &mut self.angle_states,
+                },
+            },
         )?;
         self.graph = Some(g);
         Ok(())
@@ -964,19 +962,19 @@ impl Mamba3TrainerF32 {
         let (step, bc1, bc2) = self.adam.advance();
         self.bias.write(&self.ctx.stream, bc1, bc2)?;
         let replayed = if let Some(ref g) = self.graph {
-            g.replay(
-                &self.weights,
-                &self.adam,
-                &self.bias,
-                &self.grads,
-                &self.temporal,
-                &self.mamba_input,
-                &self.d_temporal,
-                &self.ssm_states,
-                &self.k_states,
-                &self.v_states,
-                &self.angle_states,
-            )?;
+            g.replay(&Mamba3F32Replay {
+                weights: &self.weights,
+                adam: &self.adam,
+                bias: &self.bias,
+                grads: &self.grads,
+                temporal: &self.temporal,
+                mamba_input: &self.mamba_input,
+                d_temporal: &self.d_temporal,
+                ssm_states: &self.ssm_states,
+                k_states: &self.k_states,
+                v_states: &self.v_states,
+                angle_states: &self.angle_states,
+            })?;
             true
         } else {
             self.step_eager()?;
@@ -987,29 +985,32 @@ impl Mamba3TrainerF32 {
 
     fn step_eager(&mut self) -> Result<(), String> {
         self.grads.zero(&self.ctx.stream)?;
+        let exec = M3Exec {
+            ctx: &self.ctx,
+            kernels: &self.m3k,
+            dims: &self.dims,
+        };
         gpu_forward_mamba3_backbone(
-            &self.ctx,
-            &self.m3k,
+            &exec,
             &mut self.temporal,
             &mut self.acts,
             &self.weights,
             &self.mamba_input,
-            &mut self.ssm_states,
-            &mut self.k_states,
-            &mut self.v_states,
-            &mut self.angle_states,
+            GpuMamba3StateBufs {
+                ssm: &mut self.ssm_states,
+                k: &mut self.k_states,
+                v: &mut self.v_states,
+                angle: &mut self.angle_states,
+            },
             &mut self.scratch,
-            &self.dims,
         )?;
         gpu_backward_mamba3_backbone(
-            &self.ctx,
-            &self.m3k,
+            &exec,
             &mut self.d_temporal,
             &self.acts,
             &self.weights,
             &self.grads,
             &mut self.scratch,
-            &self.dims,
         )?;
         step_m3_capturable(
             &self.ctx,

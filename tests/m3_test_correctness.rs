@@ -5,7 +5,7 @@ use mamba_rs::mamba3_siso::config::Mamba3Config;
 use mamba_rs::mamba3_siso::cpu::backward::backward_mamba3_layer_batched;
 use mamba_rs::mamba3_siso::cpu::dims::Mamba3Dims;
 use mamba_rs::mamba3_siso::cpu::flat::Mamba3LayerFlat;
-use mamba_rs::mamba3_siso::cpu::forward::forward_mamba3_layer_batched;
+use mamba_rs::mamba3_siso::cpu::forward::{Mamba3LayerStateMut, forward_mamba3_layer_batched};
 use mamba_rs::mamba3_siso::cpu::inference::{Mamba3StepScratch, mamba3_step};
 use mamba_rs::mamba3_siso::cpu::scratch::Mamba3Scratch;
 use mamba_rs::mamba3_siso::cpu::weights::TrainMamba3LayerWeights;
@@ -70,10 +70,12 @@ fn run_training_forward(
         temporal,
         &mut acts,
         w,
-        &mut ssm,
-        &mut k,
-        &mut v,
-        &mut a,
+        Mamba3LayerStateMut {
+            ssm: &mut ssm,
+            k: &mut k,
+            v: &mut v,
+            angle: &mut a,
+        },
         &mut scratch,
         dims,
     );

@@ -68,18 +68,25 @@ use cudarc::driver::PushKernelArg;
 
 // ---------------------------------------------------------------------------
 
+/// Per-layer bundle for the M1 mixed backward: the layer's master-grad
+/// slots, saved activations, and compute weights.
+#[derive(Clone, Copy)]
+pub struct MixedLayerBwd<'a> {
+    pub d_lw: &'a GpuMambaLayerGrads,
+    pub acts: &'a GpuMambaLayerMixedActs,
+    pub lw: &'a GpuMambaMixedLayerWeights,
+}
+
 /// Per-layer mixed backward. Matches `gpu_backward_mamba_layer` step-by-step.
-#[allow(clippy::too_many_arguments)]
 pub fn gpu_backward_mamba_layer_mixed(
     ctx: &GpuCtx,
     d_temporal: &mut GpuBuffer,
-    d_lw: &GpuMambaLayerGrads,
-    acts: &GpuMambaLayerMixedActs,
-    lw: &GpuMambaMixedLayerWeights,
+    layer: &MixedLayerBwd<'_>,
     a_neg_ptr: cudarc::driver::sys::CUdeviceptr,
     scratch: &mut GpuMambaMixedTrainScratch,
     dtype: WeightDtype,
 ) -> Result<(), String> {
+    let MixedLayerBwd { d_lw, acts, lw } = *layer;
     let dims = scratch.dims;
     let bt = dims.bt();
     let dm = dims.d_model;
@@ -848,9 +855,11 @@ pub fn gpu_backward_mamba_backbone_mixed(
         gpu_backward_mamba_layer_mixed(
             ctx,
             d_temporal,
-            &d_mamba.layers[layer_idx],
-            &acts.layers[layer_idx],
-            &mamba_w.layers[layer_idx],
+            &MixedLayerBwd {
+                d_lw: &d_mamba.layers[layer_idx],
+                acts: &acts.layers[layer_idx],
+                lw: &mamba_w.layers[layer_idx],
+            },
             a_neg_ptr,
             scratch,
             dtype,

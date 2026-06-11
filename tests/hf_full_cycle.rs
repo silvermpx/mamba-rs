@@ -31,7 +31,7 @@ use std::path::PathBuf;
 
 use mamba_rs::hf::load::load_hf;
 use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
-use mamba_rs::mamba_ssm::gpu::trainer::MambaTrainer;
+use mamba_rs::mamba_ssm::gpu::trainer::{MambaTrainer, TrainSessionCfg};
 use mamba_rs::module::gpu_lm::GpuMambaLM;
 use mamba_rs::module::sample::SampleParams;
 
@@ -147,12 +147,14 @@ fn run_full_cycle(dtype: WeightDtype) {
         0,
         &hf_weights,
         cfg,
-        input_dim,
-        batch,
-        seq_len,
+        TrainSessionCfg {
+            input_dim,
+            batch,
+            seq_len,
+            lr,
+            weight_decay: 0.0,
+        },
         dtype,
-        lr,
-        0.0,
     )
     .expect("build trainer");
 

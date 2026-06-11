@@ -249,7 +249,7 @@ fn det(n: usize, seed: u32) -> Vec<f32> {
 
 fn run_m3_long_seq(dtype: WeightDtype, seq_len: usize) {
     use mamba_rs::mamba3_siso::config::Mamba3Config;
-    use mamba_rs::mamba3_siso::gpu::trainer::Mamba3Trainer;
+    use mamba_rs::mamba3_siso::gpu::trainer::{Mamba3Trainer, TrainSessionCfg};
     use mamba_rs::mamba3_siso::weights::Mamba3Weights;
 
     let cfg = Mamba3Config {
@@ -286,9 +286,20 @@ fn run_m3_long_seq(dtype: WeightDtype, seq_len: usize) {
     }
 
     let label = format!("M3-{dtype:?}-T{seq_len}");
-    let mut trainer =
-        Mamba3Trainer::new_full(0, &cpu, cfg, input_dim, batch, seq_len, dtype, 1e-6, 0.0)
-            .unwrap_or_else(|e| panic!("[{label}] construct: {e}"));
+    let mut trainer = Mamba3Trainer::new_full(
+        0,
+        &cpu,
+        cfg,
+        TrainSessionCfg {
+            input_dim,
+            batch,
+            seq_len,
+            lr: 1e-6,
+            weight_decay: 0.0,
+        },
+        dtype,
+    )
+    .unwrap_or_else(|e| panic!("[{label}] construct: {e}"));
 
     // 3 training steps — exercises chunk boundaries (seq_len 512 = 8 chunks
     // of size 64). Any state-carry bug between chunks would show up as NaN

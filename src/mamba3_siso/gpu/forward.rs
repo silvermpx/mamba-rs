@@ -13,30 +13,30 @@
 //!
 //! For mixed-precision (bf16/f16) forward see [`super::forward_mixed`].
 
-use super::kernels::Mamba3Kernels;
 use super::state::{
-    GpuMamba3BackboneActs, GpuMamba3Dims, GpuMamba3LayerActs, GpuMamba3Scratch,
-    GpuMamba3TargetScratch, Mamba3LayerPtrs,
+    GpuMamba3BackboneActs, GpuMamba3LayerActs, GpuMamba3Scratch, GpuMamba3StateBufs,
+    GpuMamba3TargetScratch, M3Exec, Mamba3LayerPtrs,
 };
 use super::weights::{GpuMamba3LayerWeights, GpuMamba3Weights};
 use crate::mamba_ssm::gpu::blas::gpu_sgemm_forward_raw;
 use crate::mamba_ssm::gpu::buffers::GpuBuffer;
-use crate::mamba_ssm::gpu::context::GpuCtx;
 use crate::mamba_ssm::gpu::launch::{grid_1d, grid_norm};
 use cudarc::driver::PushKernelArg;
 
 /// Mamba-3 SISO single-layer GPU forward (8-phase pipeline).
-#[allow(clippy::too_many_arguments)]
 pub fn gpu_forward_mamba3_layer(
-    ctx: &GpuCtx,
-    m3k: &Mamba3Kernels,
+    exec: &M3Exec<'_>,
     temporal: &mut GpuBuffer,
     acts: &mut GpuMamba3LayerActs,
     lw: &GpuMamba3LayerWeights,
     layer_ptrs: &Mamba3LayerPtrs,
     scratch: &mut GpuMamba3Scratch,
-    dims: &GpuMamba3Dims,
 ) -> Result<(), String> {
+    let M3Exec {
+        ctx,
+        kernels: m3k,
+        dims,
+    } = *exec;
     let bt = dims.bt();
     let dm = dims.d_model;
     let di = dims.d_inner;
@@ -521,21 +521,20 @@ pub fn gpu_forward_mamba3_layer(
 /// window states are still written back for inspection. State continuity
 /// across calls is only supported by the sequential path
 /// (`use_parallel_scan = false`, `m3_burnin_fwd`).
-#[allow(clippy::too_many_arguments)]
 pub fn gpu_forward_mamba3_backbone(
-    ctx: &GpuCtx,
-    m3k: &Mamba3Kernels,
+    exec: &M3Exec<'_>,
     temporal: &mut GpuBuffer,
     acts: &mut GpuMamba3BackboneActs,
     mamba_w: &GpuMamba3Weights,
     mamba_input: &GpuBuffer,
-    ssm_states: &mut GpuBuffer,
-    k_states: &mut GpuBuffer,
-    v_states: &mut GpuBuffer,
-    angle_states: &mut GpuBuffer,
+    states: GpuMamba3StateBufs<'_>,
     scratch: &mut GpuMamba3Scratch,
-    dims: &GpuMamba3Dims,
 ) -> Result<(), String> {
+    let M3Exec {
+        ctx,
+        kernels: m3k,
+        dims,
+    } = *exec;
     let bt = dims.bt();
     let dm = dims.d_model;
     let ds = dims.d_state;
@@ -549,10 +548,10 @@ pub fn gpu_forward_mamba3_backbone(
         // that matches neither stateless-window nor full-continuity
         // semantics. Zero all four so every parallel window is cleanly
         // stateless. (Async memsets — CUDA Graph capture safe.)
-        ssm_states.zero(&ctx.stream)?;
-        k_states.zero(&ctx.stream)?;
-        v_states.zero(&ctx.stream)?;
-        angle_states.zero(&ctx.stream)?;
+        states.ssm.zero(&ctx.stream)?;
+        states.k.zero(&ctx.stream)?;
+        states.v.zero(&ctx.stream)?;
+        states.angle.zero(&ctx.stream)?;
     }
 
     acts.input_proj_inputs
@@ -569,10 +568,10 @@ pub fn gpu_forward_mamba3_backbone(
         .copy_from_raw(temporal, &ctx.stream)?;
 
     let f32_sz = std::mem::size_of::<f32>() as u64;
-    let ssm_base = ssm_states.raw_ptr(&ctx.stream);
-    let k_base = k_states.raw_ptr(&ctx.stream);
-    let v_base = v_states.raw_ptr(&ctx.stream);
-    let a_base = angle_states.raw_ptr(&ctx.stream);
+    let ssm_base = states.ssm.raw_ptr(&ctx.stream);
+    let k_base = states.k.raw_ptr(&ctx.stream);
+    let v_base = states.v.raw_ptr(&ctx.stream);
+    let a_base = states.angle.raw_ptr(&ctx.stream);
 
     for l in 0..dims.n_layers {
         let ssm_off = dims.batch * l * nh * hd * ds;
@@ -586,14 +585,12 @@ pub fn gpu_forward_mamba3_backbone(
             angle_state: a_base + a_off as u64 * f32_sz,
         };
         gpu_forward_mamba3_layer(
-            ctx,
-            m3k,
+            exec,
             temporal,
             &mut acts.layers[l],
             &mamba_w.layers[l],
             &layer_ptrs,
             scratch,
-            dims,
         )?;
     }
 
@@ -621,16 +618,18 @@ pub fn gpu_forward_mamba3_backbone(
 ///
 /// Output: `temporal` receives `[B * d_model]` — the LAST timestep's representation.
 /// Internally uses `tgt.temporal_work` as `[B*T*d_model]` working buffer.
-#[allow(clippy::too_many_arguments)]
 pub fn gpu_forward_mamba3_target_burnin(
-    ctx: &GpuCtx,
-    m3k: &Mamba3Kernels,
+    exec: &M3Exec<'_>,
     temporal: &mut GpuBuffer,
     mamba_w: &GpuMamba3Weights,
     mamba_input: &GpuBuffer,
     tgt: &mut GpuMamba3TargetScratch,
-    dims: &GpuMamba3Dims,
 ) -> Result<(), String> {
+    let M3Exec {
+        ctx,
+        kernels: m3k,
+        dims,
+    } = *exec;
     let bt = dims.bt();
     let dm = dims.d_model;
     let di = dims.d_inner;

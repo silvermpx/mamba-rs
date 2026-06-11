@@ -6,29 +6,29 @@
 //!
 //! For mixed-precision (bf16/f16) backward see [`super::backward_mixed`].
 
-use super::kernels::Mamba3Kernels;
-use super::state::{GpuMamba3BackboneActs, GpuMamba3Dims, GpuMamba3LayerActs, GpuMamba3Scratch};
+use super::state::{GpuMamba3BackboneActs, GpuMamba3LayerActs, GpuMamba3Scratch, M3Exec};
 use super::weights::{
     GpuMamba3Grads, GpuMamba3LayerGrads, GpuMamba3LayerWeights, GpuMamba3Weights,
 };
 use crate::mamba_ssm::gpu::blas::gpu_sgemm_backward_grad_raw;
 use crate::mamba_ssm::gpu::buffers::GpuBuffer;
-use crate::mamba_ssm::gpu::context::GpuCtx;
 use crate::mamba_ssm::gpu::launch::{grid_1d, grid_norm};
 use cudarc::driver::PushKernelArg;
 
 /// Mamba-3 SISO single-layer GPU backward (sequential SSM backward).
-#[allow(clippy::too_many_arguments)]
 pub fn gpu_backward_mamba3_layer(
-    ctx: &GpuCtx,
-    m3k: &Mamba3Kernels,
+    exec: &M3Exec<'_>,
     d_temporal: &mut GpuBuffer, // [B*T*d_model] in/out gradient
     acts: &GpuMamba3LayerActs,
     lw: &GpuMamba3LayerWeights,
     lg: &GpuMamba3LayerGrads,
     scratch: &mut GpuMamba3Scratch,
-    dims: &GpuMamba3Dims,
 ) -> Result<(), String> {
+    let M3Exec {
+        ctx,
+        kernels: m3k,
+        dims,
+    } = *exec;
     let bt = dims.bt();
     let dm = dims.d_model;
     let di = dims.d_inner;
@@ -800,17 +800,19 @@ pub fn gpu_backward_mamba3_layer(
 /// **IMPORTANT**: weight gradients in `grads` are **accumulated** (`beta=1.0`
 /// on the dW GEMMs). Caller MUST call [`GpuMamba3Grads::zero`] before each
 /// training step.
-#[allow(clippy::too_many_arguments)]
 pub fn gpu_backward_mamba3_backbone(
-    ctx: &GpuCtx,
-    m3k: &Mamba3Kernels,
+    exec: &M3Exec<'_>,
     d_temporal: &mut GpuBuffer,
     acts: &GpuMamba3BackboneActs,
     mamba_w: &GpuMamba3Weights,
     grads: &GpuMamba3Grads,
     scratch: &mut GpuMamba3Scratch,
-    dims: &GpuMamba3Dims,
 ) -> Result<(), String> {
+    let M3Exec {
+        ctx,
+        kernels: m3k,
+        dims,
+    } = *exec;
     let bt = dims.bt();
     let dm = dims.d_model;
 
@@ -858,14 +860,12 @@ pub fn gpu_backward_mamba3_backbone(
 
     for l in (0..dims.n_layers).rev() {
         gpu_backward_mamba3_layer(
-            ctx,
-            m3k,
+            exec,
             d_temporal,
             &acts.layers[l],
             &mamba_w.layers[l],
             &grads.layers[l],
             scratch,
-            dims,
         )?;
     }
 

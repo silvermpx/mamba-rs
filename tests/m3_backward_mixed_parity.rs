@@ -28,7 +28,9 @@ use mamba_rs::mamba3_siso::gpu::forward_mixed::{
     GpuMamba3BackboneMixedActs, GpuMamba3MixedScratch, gpu_forward_mamba3_backbone_mixed,
 };
 use mamba_rs::mamba3_siso::gpu::kernels::Mamba3Kernels;
-use mamba_rs::mamba3_siso::gpu::state::{GpuMamba3BackboneActs, GpuMamba3Dims, GpuMamba3Scratch};
+use mamba_rs::mamba3_siso::gpu::state::{
+    GpuMamba3BackboneActs, GpuMamba3Dims, GpuMamba3Scratch, GpuMamba3StateBufs, M3Exec,
+};
 use mamba_rs::mamba3_siso::gpu::weights::{GpuMamba3Grads, GpuMamba3Weights};
 use mamba_rs::mamba3_siso::gpu::weights_mixed_train::GpuMamba3TrainMixedWeights;
 use mamba_rs::mamba3_siso::weights::Mamba3Weights;
@@ -131,14 +133,13 @@ fn build_weights(cfg: &Mamba3Config, seed: u64) -> (Mamba3Weights, Mamba3Weights
 }
 
 fn run_f32(
-    ctx: &GpuCtx,
-    m3k: &Mamba3Kernels,
+    exec: &M3Exec<'_>,
     cpu: &Mamba3Weights,
     cfg: &Mamba3Config,
-    dims: &GpuMamba3Dims,
     mamba_input: &[f32],
     d_temporal_init: &[f32],
 ) -> (Vec<f32>, Vec<f32>) {
+    let M3Exec { ctx, dims, .. } = *exec;
     let w = GpuMamba3Weights::from_cpu(&ctx.stream, cpu, cfg, dims.mamba_input_dim).unwrap();
 
     let bt = dims.bt();
@@ -166,18 +167,18 @@ fn run_f32(
     ctx.stream.synchronize().unwrap();
 
     gpu_forward_mamba3_backbone(
-        ctx,
-        m3k,
+        exec,
         &mut temporal,
         &mut acts,
         &w,
         &mi,
-        &mut ssm,
-        &mut ks,
-        &mut vs,
-        &mut ang,
+        GpuMamba3StateBufs {
+            ssm: &mut ssm,
+            k: &mut ks,
+            v: &mut vs,
+            angle: &mut ang,
+        },
         &mut scratch,
-        dims,
     )
     .unwrap();
     ctx.stream.synchronize().unwrap();
@@ -191,17 +192,7 @@ fn run_f32(
     grads.zero(&ctx.stream).unwrap();
     ctx.stream.synchronize().unwrap();
 
-    gpu_backward_mamba3_backbone(
-        ctx,
-        m3k,
-        &mut d_temporal,
-        &acts,
-        &w,
-        &grads,
-        &mut scratch,
-        dims,
-    )
-    .unwrap();
+    gpu_backward_mamba3_backbone(exec, &mut d_temporal, &acts, &w, &grads, &mut scratch).unwrap();
     ctx.stream.synchronize().unwrap();
 
     let mut dt_out = vec![0f32; bt * dims.d_model];
@@ -211,17 +202,15 @@ fn run_f32(
     (dt_out, arena)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn run_mixed(
-    ctx: &GpuCtx,
-    m3k: &Mamba3Kernels,
+    exec: &M3Exec<'_>,
     cpu: &Mamba3Weights,
     cfg: &Mamba3Config,
-    dims: &GpuMamba3Dims,
     dtype: WeightDtype,
     mamba_input: &[f32],
     d_temporal_init: &[f32],
 ) -> (Vec<f32>, Vec<f32>) {
+    let M3Exec { ctx, dims, .. } = *exec;
     let w =
         GpuMamba3TrainMixedWeights::from_cpu(&ctx.stream, cpu, cfg, dims.mamba_input_dim, dtype)
             .unwrap();
@@ -261,18 +250,18 @@ fn run_mixed(
     ctx.stream.synchronize().unwrap();
 
     gpu_forward_mamba3_backbone_mixed(
-        ctx,
-        m3k,
+        exec,
         &mut temporal,
         &mut acts,
         &w,
         &mi,
-        &mut ssm,
-        &mut ks,
-        &mut vs,
-        &mut ang,
+        GpuMamba3StateBufs {
+            ssm: &mut ssm,
+            k: &mut ks,
+            v: &mut vs,
+            angle: &mut ang,
+        },
         &mut mixed_scratch,
-        dims,
     )
     .unwrap();
     ctx.stream.synchronize().unwrap();
@@ -287,15 +276,13 @@ fn run_mixed(
     ctx.stream.synchronize().unwrap();
 
     gpu_backward_mamba3_backbone_mixed(
-        ctx,
-        m3k,
+        exec,
         &mut d_temporal,
         &acts,
         &w,
         &grads,
         &mut f32_scratch,
         &mut mixed_scratch,
-        dims,
     )
     .unwrap();
     ctx.stream.synchronize().unwrap();
@@ -350,17 +337,13 @@ fn check_cfg(cfg: Mamba3Config, dtype: WeightDtype, t: usize) {
     let ctx = GpuCtx::new(&dev).unwrap();
     let m3k = Mamba3Kernels::compile(dev.context(), "sm_89").unwrap();
 
-    let (dt_ref, grads_ref) = run_f32(&ctx, &m3k, &w_f32, &cfg, &dims, &mamba_input, &d_temporal);
-    let (dt_typ, grads_typ) = run_mixed(
-        &ctx,
-        &m3k,
-        &w_mix,
-        &cfg,
-        &dims,
-        dtype,
-        &mamba_input,
-        &d_temporal,
-    );
+    let exec = M3Exec {
+        ctx: &ctx,
+        kernels: &m3k,
+        dims: &dims,
+    };
+    let (dt_ref, grads_ref) = run_f32(&exec, &w_f32, &cfg, &mamba_input, &d_temporal);
+    let (dt_typ, grads_typ) = run_mixed(&exec, &w_mix, &cfg, dtype, &mamba_input, &d_temporal);
 
     assert_eq!(grads_ref.len(), grads_typ.len(), "grad arena sizes differ");
 

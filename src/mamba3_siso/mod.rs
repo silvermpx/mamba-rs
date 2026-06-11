@@ -1,10 +1,3 @@
-// Mamba-3 is a new module — allow some clippy noise during integration.
-#![allow(clippy::too_many_arguments)]
-#![allow(clippy::needless_range_loop)]
-#![allow(clippy::manual_is_multiple_of)]
-#![allow(clippy::approx_constant)]
-#![allow(dead_code)]
-
 //! Mamba-3 SISO (Single-Input Single-Output) implementation.
 //!
 //! A separate module alongside `mamba_ssm` (Mamba SSM). No conv1d, input-dependent A,
@@ -31,7 +24,7 @@ pub use cpu::backward::backward_mamba3_layer_batched;
 pub use cpu::dims::Mamba3Dims;
 pub use cpu::flat::{Mamba3FieldOffsets, Mamba3LayerFlat};
 pub use cpu::forward::forward_mamba3_layer_batched;
-pub use cpu::inference::{Mamba3StepScratch, mamba3_layer_step, mamba3_step};
+pub use cpu::inference::{Mamba3StepScratch, mamba3_layer_step, mamba3_step, mamba3_step_batch};
 pub use cpu::parallel::{
     invalidate_mamba3_scratch, parallel_mamba3_backward, parallel_mamba3_forward,
 };

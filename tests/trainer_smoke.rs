@@ -90,7 +90,7 @@ fn m1_trainer_bf16_smoke() {
 #[test]
 fn m1_trainer_multi_layer_bf16() {
     use mamba_rs::config::MambaConfig;
-    use mamba_rs::mamba_ssm::gpu::trainer::MambaTrainer;
+    use mamba_rs::mamba_ssm::gpu::trainer::{MambaTrainer, TrainSessionCfg};
     use mamba_rs::weights::MambaWeights;
 
     let cfg = MambaConfig {
@@ -117,12 +117,14 @@ fn m1_trainer_multi_layer_bf16() {
         0,
         &cpu,
         cfg,
-        input_dim,
-        batch,
-        seq_len,
+        TrainSessionCfg {
+            input_dim,
+            batch,
+            seq_len,
+            lr: 1e-5,
+            weight_decay: 0.0,
+        },
         WeightDtype::Bf16,
-        1e-5,
-        0.0,
     )
     .expect("construct multi-layer bf16");
 
@@ -154,7 +156,7 @@ fn m1_trainer_multi_layer_bf16() {
 #[test]
 fn m3_trainer_multi_layer_bf16() {
     use mamba_rs::mamba3_siso::config::Mamba3Config;
-    use mamba_rs::mamba3_siso::gpu::trainer::Mamba3Trainer;
+    use mamba_rs::mamba3_siso::gpu::trainer::{Mamba3Trainer, TrainSessionCfg};
     use mamba_rs::mamba3_siso::weights::Mamba3Weights;
 
     let cfg = Mamba3Config {
@@ -181,12 +183,14 @@ fn m3_trainer_multi_layer_bf16() {
         0,
         &cpu,
         cfg,
-        input_dim,
-        batch,
-        seq_len,
+        TrainSessionCfg {
+            input_dim,
+            batch,
+            seq_len,
+            lr: 1e-5,
+            weight_decay: 0.0,
+        },
         WeightDtype::Bf16,
-        1e-5,
-        0.0,
     )
     .expect("construct multi-layer M3 bf16");
 
@@ -216,7 +220,7 @@ fn m3_trainer_multi_layer_bf16() {
 #[test]
 fn m1_trainer_f16_smoke_eager_with_loss_scaler() {
     use mamba_rs::config::MambaConfig;
-    use mamba_rs::mamba_ssm::gpu::trainer::MambaTrainer;
+    use mamba_rs::mamba_ssm::gpu::trainer::{MambaTrainer, TrainSessionCfg};
     use mamba_rs::weights::MambaWeights;
 
     let cfg = MambaConfig {
@@ -246,12 +250,14 @@ fn m1_trainer_f16_smoke_eager_with_loss_scaler() {
         0,
         &cpu,
         cfg,
-        input_dim,
-        batch,
-        seq_len,
+        TrainSessionCfg {
+            input_dim,
+            batch,
+            seq_len,
+            lr: 1e-7,
+            weight_decay: 0.0,
+        },
         WeightDtype::F16,
-        1e-7,
-        0.0,
     )
     .expect("construct f16");
     assert_eq!(trainer.dtype(), WeightDtype::F16);
@@ -284,7 +290,7 @@ fn m1_trainer_f16_smoke_eager_with_loss_scaler() {
 #[test]
 fn m3_trainer_f16_smoke_eager_with_loss_scaler() {
     use mamba_rs::mamba3_siso::config::Mamba3Config;
-    use mamba_rs::mamba3_siso::gpu::trainer::Mamba3Trainer;
+    use mamba_rs::mamba3_siso::gpu::trainer::{Mamba3Trainer, TrainSessionCfg};
     use mamba_rs::mamba3_siso::weights::Mamba3Weights;
 
     let cfg = Mamba3Config {
@@ -311,12 +317,14 @@ fn m3_trainer_f16_smoke_eager_with_loss_scaler() {
         0,
         &cpu,
         cfg,
-        input_dim,
-        batch,
-        seq_len,
+        TrainSessionCfg {
+            input_dim,
+            batch,
+            seq_len,
+            lr: 1e-7,
+            weight_decay: 0.0,
+        },
         WeightDtype::F16,
-        1e-7,
-        0.0,
     )
     .expect("construct M3 f16");
     assert_eq!(trainer.dtype(), WeightDtype::F16);

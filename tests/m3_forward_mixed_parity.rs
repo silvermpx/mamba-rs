@@ -14,7 +14,8 @@ use mamba_rs::mamba3_siso::gpu::forward_mixed::{
 };
 use mamba_rs::mamba3_siso::gpu::kernels::Mamba3Kernels;
 use mamba_rs::mamba3_siso::gpu::mamba3_gpu::{
-    GpuMamba3BackboneActs, GpuMamba3Dims, GpuMamba3Scratch, gpu_forward_mamba3_backbone,
+    GpuMamba3BackboneActs, GpuMamba3Dims, GpuMamba3Scratch, GpuMamba3StateBufs, M3Exec,
+    gpu_forward_mamba3_backbone,
 };
 use mamba_rs::mamba3_siso::gpu::weights::GpuMamba3Weights;
 use mamba_rs::mamba3_siso::gpu::weights_mixed_train::GpuMamba3TrainMixedWeights;
@@ -124,18 +125,22 @@ fn run_f32(
     ctx.stream.synchronize().unwrap();
 
     gpu_forward_mamba3_backbone(
-        &ctx,
-        &m3k,
+        &M3Exec {
+            ctx: &ctx,
+            kernels: &m3k,
+            dims,
+        },
         &mut temporal,
         &mut acts,
         &w,
         &mi,
-        &mut ssm,
-        &mut ks,
-        &mut vs,
-        &mut ang,
+        GpuMamba3StateBufs {
+            ssm: &mut ssm,
+            k: &mut ks,
+            v: &mut vs,
+            angle: &mut ang,
+        },
         &mut scratch,
-        dims,
     )
     .unwrap();
     ctx.stream.synchronize().unwrap();
@@ -197,18 +202,22 @@ fn run_mixed(
     ctx.stream.synchronize().unwrap();
 
     gpu_forward_mamba3_backbone_mixed(
-        &ctx,
-        &m3k,
+        &M3Exec {
+            ctx: &ctx,
+            kernels: &m3k,
+            dims,
+        },
         &mut temporal,
         &mut acts,
         &w,
         &mi,
-        &mut ssm,
-        &mut ks,
-        &mut vs,
-        &mut ang,
+        GpuMamba3StateBufs {
+            ssm: &mut ssm,
+            k: &mut ks,
+            v: &mut vs,
+            angle: &mut ang,
+        },
         &mut scratch,
-        dims,
     )
     .unwrap();
     ctx.stream.synchronize().unwrap();
@@ -270,18 +279,22 @@ fn run_f32_pre_normf(
     let mut scratch = GpuMamba3Scratch::new(&ctx.stream, dims).unwrap();
     ctx.stream.synchronize().unwrap();
     gpu_forward_mamba3_backbone(
-        &ctx,
-        &m3k,
+        &M3Exec {
+            ctx: &ctx,
+            kernels: &m3k,
+            dims,
+        },
         &mut temporal,
         &mut acts,
         &w,
         &mi,
-        &mut ssm,
-        &mut ks,
-        &mut vs,
-        &mut ang,
+        GpuMamba3StateBufs {
+            ssm: &mut ssm,
+            k: &mut ks,
+            v: &mut vs,
+            angle: &mut ang,
+        },
         &mut scratch,
-        dims,
     )
     .unwrap();
     ctx.stream.synchronize().unwrap();

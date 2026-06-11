@@ -11,25 +11,32 @@
 
 #![cfg(feature = "cuda")]
 
-use mamba_rs::mamba_ssm::gpu::adamw::GpuAdamW;
+use mamba_rs::mamba_ssm::gpu::adamw::{AdamWParamPtrs, GpuAdamW};
 use mamba_rs::mamba_ssm::gpu::buffers::GpuBuffer;
 use mamba_rs::mamba_ssm::gpu::context::GpuCtx;
 use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
 use mamba_rs::mamba_ssm::gpu::kernels::MambaKernels;
 
-#[allow(clippy::too_many_arguments)]
-fn cpu_adamw_step(
-    p: &mut [f32],
-    g: &[f32],
-    m: &mut [f32],
-    v: &mut [f32],
+/// CPU-side AdamW hyperparameters for the reference walk.
+#[derive(Clone, Copy)]
+struct CpuAdamHp {
     lr: f32,
     beta1: f32,
     beta2: f32,
     eps: f32,
     wd: f32,
     step: i32,
-) {
+}
+
+fn cpu_adamw_step(p: &mut [f32], g: &[f32], m: &mut [f32], v: &mut [f32], hp: CpuAdamHp) {
+    let CpuAdamHp {
+        lr,
+        beta1,
+        beta2,
+        eps,
+        wd,
+        step,
+    } = hp;
     let bc1 = 1.0 / (1.0 - (beta1 as f64).powi(step));
     let bc2 = 1.0 / (1.0 - (beta2 as f64).powi(step));
     let bc1 = bc1 as f32;
@@ -104,10 +111,12 @@ fn adamw_single_tensor_step1_matches_cpu() {
     adam.step_one(
         &ctx,
         &kern.adamw_step_f32,
-        p_gpu.cached_ptr(),
-        g_gpu.cached_ptr(),
-        adam.m.cached_ptr(),
-        adam.v.cached_ptr(),
+        AdamWParamPtrs {
+            weight: p_gpu.cached_ptr(),
+            grad: g_gpu.cached_ptr(),
+            m: adam.m.cached_ptr(),
+            v: adam.v.cached_ptr(),
+        },
         n,
         bc1,
         bc2,
@@ -120,7 +129,20 @@ fn adamw_single_tensor_step1_matches_cpu() {
     let v_after = adam.v.to_cpu(&ctx.stream).unwrap();
 
     // CPU reference
-    cpu_adamw_step(&mut p, &g, &mut m, &mut v, 3e-4, 0.9, 0.999, 1e-8, 1e-2, 1);
+    cpu_adamw_step(
+        &mut p,
+        &g,
+        &mut m,
+        &mut v,
+        CpuAdamHp {
+            lr: 3e-4,
+            beta1: 0.9,
+            beta2: 0.999,
+            eps: 1e-8,
+            wd: 1e-2,
+            step: 1,
+        },
+    );
 
     assert_close("param", &p_after, &p, 1e-6);
     assert_close("m", &m_after, &m, 1e-6);
@@ -151,17 +173,30 @@ fn adamw_multi_step_accumulates_correctly() {
         adam.step_one(
             &ctx,
             &kern.adamw_step_f32,
-            p_gpu.cached_ptr(),
-            g_gpu.cached_ptr(),
-            adam.m.cached_ptr(),
-            adam.v.cached_ptr(),
+            AdamWParamPtrs {
+                weight: p_gpu.cached_ptr(),
+                grad: g_gpu.cached_ptr(),
+                m: adam.m.cached_ptr(),
+                v: adam.v.cached_ptr(),
+            },
             n,
             bc1,
             bc2,
         )
         .unwrap();
         cpu_adamw_step(
-            &mut p, &g, &mut m, &mut v, 1e-3, 0.9, 0.999, 1e-8, 1e-2, step,
+            &mut p,
+            &g,
+            &mut m,
+            &mut v,
+            CpuAdamHp {
+                lr: 1e-3,
+                beta1: 0.9,
+                beta2: 0.999,
+                eps: 1e-8,
+                wd: 1e-2,
+                step,
+            },
         );
     }
     ctx.stream.synchronize().unwrap();
@@ -194,16 +229,31 @@ fn adamw_zero_weight_decay_matches_adam() {
     adam.step_one(
         &ctx,
         &kern.adamw_step_f32,
-        p_gpu.cached_ptr(),
-        g_gpu.cached_ptr(),
-        adam.m.cached_ptr(),
-        adam.v.cached_ptr(),
+        AdamWParamPtrs {
+            weight: p_gpu.cached_ptr(),
+            grad: g_gpu.cached_ptr(),
+            m: adam.m.cached_ptr(),
+            v: adam.v.cached_ptr(),
+        },
         n,
         bc1,
         bc2,
     )
     .unwrap();
-    cpu_adamw_step(&mut p, &g, &mut m, &mut v, 1e-3, 0.9, 0.999, 1e-8, 0.0, 1);
+    cpu_adamw_step(
+        &mut p,
+        &g,
+        &mut m,
+        &mut v,
+        CpuAdamHp {
+            lr: 1e-3,
+            beta1: 0.9,
+            beta2: 0.999,
+            eps: 1e-8,
+            wd: 0.0,
+            step: 1,
+        },
+    );
     ctx.stream.synchronize().unwrap();
 
     let p_after = p_gpu.to_cpu(&ctx.stream).unwrap();
@@ -332,12 +382,14 @@ fn adamw_m1_backbone_walks_all_tensors() {
             g,
             &mut m_cpu[off..off + len],
             &mut v_cpu[off..off + len],
-            3e-4,
-            0.9,
-            0.999,
-            1e-8,
-            1e-2,
-            1,
+            CpuAdamHp {
+                lr: 3e-4,
+                beta1: 0.9,
+                beta2: 0.999,
+                eps: 1e-8,
+                wd: 1e-2,
+                step: 1,
+            },
         );
         assert_close(label, p_after, &p, 1e-5);
         off += len;
@@ -463,12 +515,14 @@ fn adamw_m3_backbone_walks_all_tensors() {
             g,
             &mut m_cpu[off..off + len],
             &mut v_cpu[off..off + len],
-            3e-4,
-            0.9,
-            0.999,
-            1e-8,
-            1e-2,
-            1,
+            CpuAdamHp {
+                lr: 3e-4,
+                beta1: 0.9,
+                beta2: 0.999,
+                eps: 1e-8,
+                wd: 1e-2,
+                step: 1,
+            },
         );
         assert_close(label, p_after, &p, 1e-5);
         off += len;
@@ -500,10 +554,12 @@ fn adamw_zero_grad_is_pure_decay() {
     adam.step_one(
         &ctx,
         &kern.adamw_step_f32,
-        p_gpu.cached_ptr(),
-        g_gpu.cached_ptr(),
-        adam.m.cached_ptr(),
-        adam.v.cached_ptr(),
+        AdamWParamPtrs {
+            weight: p_gpu.cached_ptr(),
+            grad: g_gpu.cached_ptr(),
+            m: adam.m.cached_ptr(),
+            v: adam.v.cached_ptr(),
+        },
         n,
         bc1,
         bc2,

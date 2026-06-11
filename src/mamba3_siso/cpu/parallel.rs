@@ -13,7 +13,7 @@ use rayon::prelude::*;
 use super::backward::backward_mamba3_layer_batched;
 use super::dims::Mamba3Dims;
 use super::flat::Mamba3LayerFlat;
-use super::forward::forward_mamba3_layer_batched;
+use super::forward::{Mamba3LayerStateMut, forward_mamba3_layer_batched};
 use super::scratch::Mamba3Scratch;
 use super::weights::TrainMamba3Weights;
 
@@ -21,7 +21,6 @@ use super::weights::TrainMamba3Weights;
 
 struct Mamba3ThreadScratch {
     phase: Mamba3Scratch,
-    temporal_flat: Vec<f32>,
     /// Full dims snapshot — any field change resizes some buffer.
     dims: Mamba3Dims,
 }
@@ -30,7 +29,6 @@ impl Mamba3ThreadScratch {
     fn new(dims: &Mamba3Dims) -> Self {
         Self {
             phase: Mamba3Scratch::zeros(dims),
-            temporal_flat: vec![0.0; dims.seq_len * dims.d_model],
             dims: *dims,
         }
     }
@@ -161,10 +159,7 @@ pub fn parallel_mamba3_forward(
                     temporal,
                     &mut acts[layer_idx],
                     lw,
-                    ssm,
-                    k,
-                    v,
-                    angle,
+                    Mamba3LayerStateMut { ssm, k, v, angle },
                     &mut tls.phase,
                     dims,
                 );
@@ -174,15 +169,6 @@ pub fn parallel_mamba3_forward(
 }
 
 // ── Parallel backward ──
-
-// ── Raw pointer wrapper for rayon Send/Sync on backward inputs ──
-
-struct BwdPtrs {
-    d_temporal: *mut f32,
-    batch_acts: *const Vec<Mamba3LayerFlat>,
-}
-unsafe impl Send for BwdPtrs {}
-unsafe impl Sync for BwdPtrs {}
 
 /// Parallel Mamba-3 backward with tree-reduce gradient accumulation.
 ///

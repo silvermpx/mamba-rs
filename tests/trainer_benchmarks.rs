@@ -53,7 +53,7 @@ fn lm_cfg() -> mamba_rs::config::MambaConfig {
 }
 
 fn run_lm_for_dtype(dtype: WeightDtype) -> Result<(), String> {
-    use mamba_rs::mamba_ssm::gpu::trainer::MambaTrainer;
+    use mamba_rs::mamba_ssm::gpu::trainer::{MambaTrainer, TrainSessionCfg};
     use mamba_rs::weights::MambaWeights;
 
     let cfg = lm_cfg();
@@ -73,8 +73,19 @@ fn run_lm_for_dtype(dtype: WeightDtype) -> Result<(), String> {
     }
 
     // Conservative lr so f16 doesn't NaN out before timing finishes.
-    let mut trainer =
-        MambaTrainer::new_full(0, &cpu, cfg, input_dim, batch, seq_len, dtype, 1e-7, 0.0)?;
+    let mut trainer = MambaTrainer::new_full(
+        0,
+        &cpu,
+        cfg,
+        TrainSessionCfg {
+            input_dim,
+            batch,
+            seq_len,
+            lr: 1e-7,
+            weight_decay: 0.0,
+        },
+        dtype,
+    )?;
 
     // Warmup
     for s in 0..WARMUP {
@@ -169,7 +180,7 @@ fn rl_cfg() -> mamba_rs::mamba3_siso::config::Mamba3Config {
 }
 
 fn run_rl_for_dtype(dtype: WeightDtype) -> Result<(), String> {
-    use mamba_rs::mamba3_siso::gpu::trainer::Mamba3Trainer;
+    use mamba_rs::mamba3_siso::gpu::trainer::{Mamba3Trainer, TrainSessionCfg};
     use mamba_rs::mamba3_siso::weights::Mamba3Weights;
 
     let cfg = rl_cfg();
@@ -197,8 +208,19 @@ fn run_rl_for_dtype(dtype: WeightDtype) -> Result<(), String> {
         cpu.input_proj_b.clear();
     }
 
-    let mut trainer =
-        Mamba3Trainer::new_full(0, &cpu, cfg, input_dim, batch, seq_len, dtype, 1e-7, 0.0)?;
+    let mut trainer = Mamba3Trainer::new_full(
+        0,
+        &cpu,
+        cfg,
+        TrainSessionCfg {
+            input_dim,
+            batch,
+            seq_len,
+            lr: 1e-7,
+            weight_decay: 0.0,
+        },
+        dtype,
+    )?;
 
     for s in 0..WARMUP {
         trainer.step(

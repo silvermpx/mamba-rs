@@ -65,7 +65,7 @@ impl Mamba3Config {
             self.headdim
         );
         assert!(
-            self.d_inner() % self.headdim == 0,
+            self.d_inner().is_multiple_of(self.headdim),
             "d_inner ({}) must be divisible by headdim ({})",
             self.d_inner(),
             self.headdim
@@ -89,7 +89,7 @@ impl Mamba3Config {
         );
         assert!(self.ngroups >= 1, "ngroups must be >= 1");
         assert!(
-            self.nheads() % self.ngroups == 0,
+            self.nheads().is_multiple_of(self.ngroups),
             "nheads ({}) must be divisible by ngroups ({})",
             self.nheads(),
             self.ngroups

@@ -18,8 +18,12 @@ use mamba_rs::mamba3_siso::gpu::forward_mixed::{
     GpuMamba3BackboneMixedActs, GpuMamba3MixedScratch, gpu_forward_mamba3_backbone_mixed,
 };
 use mamba_rs::mamba3_siso::gpu::kernels::Mamba3Kernels;
-use mamba_rs::mamba3_siso::gpu::state::{GpuMamba3Dims, GpuMamba3Scratch};
-use mamba_rs::mamba3_siso::gpu::training_graph::GpuMamba3TrainingStepGraph;
+use mamba_rs::mamba3_siso::gpu::state::{
+    GpuMamba3Dims, GpuMamba3Scratch, GpuMamba3StateBufs, M3Exec,
+};
+use mamba_rs::mamba3_siso::gpu::training_graph::{
+    GpuMamba3TrainingStepGraph, Mamba3MixedCapture, Mamba3MixedReplay,
+};
 use mamba_rs::mamba3_siso::gpu::weights::GpuMamba3Grads;
 use mamba_rs::mamba3_siso::gpu::weights_mixed_train::GpuMamba3TrainMixedWeights;
 use mamba_rs::mamba3_siso::weights::Mamba3Weights;
@@ -179,31 +183,34 @@ fn one_eager_step(s: &mut Setup, ctx: &GpuCtx, m3k: &Mamba3Kernels, inp: &[f32],
     s.mamba_input.upload(&ctx.stream, inp).unwrap();
     s.d_temporal.upload(&ctx.stream, dt).unwrap();
     s.grads.zero(&ctx.stream).unwrap();
-    gpu_forward_mamba3_backbone_mixed(
+    let exec = M3Exec {
         ctx,
-        m3k,
+        kernels: m3k,
+        dims: &s.dims,
+    };
+    gpu_forward_mamba3_backbone_mixed(
+        &exec,
         &mut s.temporal,
         &mut s.acts,
         &s.weights,
         &s.mamba_input,
-        &mut s.ssm_states,
-        &mut s.k_states,
-        &mut s.v_states,
-        &mut s.angle_states,
+        GpuMamba3StateBufs {
+            ssm: &mut s.ssm_states,
+            k: &mut s.k_states,
+            v: &mut s.v_states,
+            angle: &mut s.angle_states,
+        },
         &mut s.mixed_scratch,
-        &s.dims,
     )
     .unwrap();
     gpu_backward_mamba3_backbone_mixed(
-        ctx,
-        m3k,
+        &exec,
         &mut s.d_temporal,
         &s.acts,
         &s.weights,
         &s.grads,
         &mut s.f32_scratch,
         &mut s.mixed_scratch,
-        &s.dims,
     )
     .unwrap();
     let (_, bc1, bc2) = s.adam.advance();
@@ -245,24 +252,30 @@ fn m3_training_graph_bf16_one_step_matches_eager() {
     g.bias.write(&ctx.stream, 1.0, 1.0).unwrap();
 
     let graph = GpuMamba3TrainingStepGraph::capture(
-        &ctx,
+        &M3Exec {
+            ctx: &ctx,
+            kernels: &m3k,
+            dims: &g.dims,
+        },
         &cfg_m3(),
-        &m3k,
-        &mut g.weights,
-        &g.adam,
-        &g.bias,
-        &mut g.grads,
-        &mut g.acts,
-        &mut g.f32_scratch,
-        &mut g.mixed_scratch,
-        &mut g.temporal,
-        &g.mamba_input,
-        &mut g.d_temporal,
-        &mut g.ssm_states,
-        &mut g.k_states,
-        &mut g.v_states,
-        &mut g.angle_states,
-        &g.dims,
+        Mamba3MixedCapture {
+            train_w: &mut g.weights,
+            adam: &g.adam,
+            bias: &g.bias,
+            grads: &mut g.grads,
+            acts: &mut g.acts,
+            f32_scratch: &mut g.f32_scratch,
+            mixed_scratch: &mut g.mixed_scratch,
+            temporal_f32: &mut g.temporal,
+            mamba_input: &g.mamba_input,
+            d_temporal: &mut g.d_temporal,
+            states: GpuMamba3StateBufs {
+                ssm: &mut g.ssm_states,
+                k: &mut g.k_states,
+                v: &mut g.v_states,
+                angle: &mut g.angle_states,
+            },
+        },
     )
     .unwrap();
 
@@ -272,17 +285,19 @@ fn m3_training_graph_bf16_one_step_matches_eager() {
     graph
         .replay(
             &ctx,
-            &g.weights,
-            &g.adam,
-            &g.bias,
-            &g.grads,
-            &g.temporal,
-            &g.mamba_input,
-            &g.d_temporal,
-            &g.ssm_states,
-            &g.k_states,
-            &g.v_states,
-            &g.angle_states,
+            &Mamba3MixedReplay {
+                train_w: &g.weights,
+                adam: &g.adam,
+                bias: &g.bias,
+                grads: &g.grads,
+                temporal_f32: &g.temporal,
+                mamba_input: &g.mamba_input,
+                d_temporal: &g.d_temporal,
+                ssm_states: &g.ssm_states,
+                k_states: &g.k_states,
+                v_states: &g.v_states,
+                angle_states: &g.angle_states,
+            },
         )
         .unwrap();
     ctx.stream.synchronize().unwrap();
@@ -328,24 +343,30 @@ fn m3_training_graph_bf16_multi_replay_matches_eager() {
     g.d_temporal.upload(&ctx.stream, &d_temps[0]).unwrap();
     g.bias.write(&ctx.stream, 1.0, 1.0).unwrap();
     let graph = GpuMamba3TrainingStepGraph::capture(
-        &ctx,
+        &M3Exec {
+            ctx: &ctx,
+            kernels: &m3k,
+            dims: &g.dims,
+        },
         &cfg_m3(),
-        &m3k,
-        &mut g.weights,
-        &g.adam,
-        &g.bias,
-        &mut g.grads,
-        &mut g.acts,
-        &mut g.f32_scratch,
-        &mut g.mixed_scratch,
-        &mut g.temporal,
-        &g.mamba_input,
-        &mut g.d_temporal,
-        &mut g.ssm_states,
-        &mut g.k_states,
-        &mut g.v_states,
-        &mut g.angle_states,
-        &g.dims,
+        Mamba3MixedCapture {
+            train_w: &mut g.weights,
+            adam: &g.adam,
+            bias: &g.bias,
+            grads: &mut g.grads,
+            acts: &mut g.acts,
+            f32_scratch: &mut g.f32_scratch,
+            mixed_scratch: &mut g.mixed_scratch,
+            temporal_f32: &mut g.temporal,
+            mamba_input: &g.mamba_input,
+            d_temporal: &mut g.d_temporal,
+            states: GpuMamba3StateBufs {
+                ssm: &mut g.ssm_states,
+                k: &mut g.k_states,
+                v: &mut g.v_states,
+                angle: &mut g.angle_states,
+            },
+        },
     )
     .unwrap();
 
@@ -358,17 +379,19 @@ fn m3_training_graph_bf16_multi_replay_matches_eager() {
         graph
             .replay(
                 &ctx,
-                &g.weights,
-                &g.adam,
-                &g.bias,
-                &g.grads,
-                &g.temporal,
-                &g.mamba_input,
-                &g.d_temporal,
-                &g.ssm_states,
-                &g.k_states,
-                &g.v_states,
-                &g.angle_states,
+                &Mamba3MixedReplay {
+                    train_w: &g.weights,
+                    adam: &g.adam,
+                    bias: &g.bias,
+                    grads: &g.grads,
+                    temporal_f32: &g.temporal,
+                    mamba_input: &g.mamba_input,
+                    d_temporal: &g.d_temporal,
+                    ssm_states: &g.ssm_states,
+                    k_states: &g.k_states,
+                    v_states: &g.v_states,
+                    angle_states: &g.angle_states,
+                },
             )
             .unwrap();
     }

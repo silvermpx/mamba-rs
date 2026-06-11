@@ -1030,13 +1030,16 @@ mod tests {
     }
 
     /// Determinism test: running parallel_mamba_backward twice with the same
-    /// inputs produces weight gradients within 1e-6 of each other.
+    /// inputs produces BIT-IDENTICAL gradients.
     ///
-    /// This verifies that thread-local accumulation + reduce does not
-    /// introduce non-deterministic noise beyond expected FP limits.
+    /// The static-partition + fixed stride-half tree reduce makes the f32
+    /// summation order a pure function of the rayon pool size, so within a
+    /// process two runs must agree exactly — this is the headline property
+    /// of the deterministic backward and is asserted at diff == 0.0. (The
+    /// old #[ignore] reason — "accumulation order differs between runs" —
+    /// described the pre-refactor dynamic scheme.)
     #[test]
-    #[ignore] // f32 accumulation order differs between parallel reduce runs
-    fn test_rayon_backward_gradient_noise_bounded() {
+    fn test_rayon_backward_bit_identical_across_runs() {
         let setup = setup_backward_test();
         let BackwardTestSetup {
             dims,
@@ -1071,8 +1074,8 @@ mod tests {
             dims,
         );
 
-        // Compare weight gradients between runs.
-        let noise_tol = 1e-4; // f32 rounding from parallel reduce ordering
+        // Compare weight gradients between runs — bit equality.
+        let noise_tol = 0.0;
 
         let all_grads_1 = collect_all_grad_values(&grads_1);
         let all_grads_2 = collect_all_grad_values(&grads_2);

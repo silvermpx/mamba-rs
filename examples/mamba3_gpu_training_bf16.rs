@@ -21,7 +21,7 @@ mod cuda_example {
 
     use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
     use mamba_rs::mamba3_siso::config::Mamba3Config;
-    use mamba_rs::mamba3_siso::gpu::trainer::Mamba3Trainer;
+    use mamba_rs::mamba3_siso::gpu::trainer::{Mamba3Trainer, TrainSessionCfg};
     use mamba_rs::mamba3_siso::weights::Mamba3Weights;
 
     /// Deterministic pseudo-random input. `scale` caps the magnitude — with
@@ -82,12 +82,14 @@ mod cuda_example {
             0,
             &cpu,
             cfg,
-            input_dim,
-            batch,
-            seq_len,
+            TrainSessionCfg {
+                input_dim,
+                batch,
+                seq_len,
+                lr,
+                weight_decay: wd,
+            },
             WeightDtype::Bf16,
-            lr,
-            wd,
         )?;
 
         // Warmup eager.

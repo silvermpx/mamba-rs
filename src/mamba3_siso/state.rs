@@ -95,7 +95,7 @@ mod tests {
         let cfg = Mamba3Config::default();
         let mut state = Mamba3State::zeros(&cfg);
         state.layers[0].ssm_state[0] = 42.0;
-        state.layers[0].angle_state[0] = 3.14;
+        state.layers[0].angle_state[0] = std::f32::consts::PI;
         state.reset();
         assert_eq!(state.layers[0].ssm_state[0], 0.0);
         assert_eq!(state.layers[0].angle_state[0], 0.0);
