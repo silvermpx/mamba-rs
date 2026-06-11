@@ -581,6 +581,13 @@ extern "C" __global__ void rope_fwd(
         B_rotated[idx] = B_biased[idx];
         C_rotated[idx] = C_biased[idx];
     } else if ((n & 1) == 0) {
+        if (n + 1 >= ds) {
+            // Degenerate trailing "pair" (config guards 2*n_angles <= ds so
+            // this is unreachable, but never index into the next head).
+            B_rotated[idx] = B_biased[idx];
+            C_rotated[idx] = C_biased[idx];
+            return;
+        }
         // Even index: this thread handles the pair (n, n+1)
         int a = n / 2;  // angle index
         int angle_idx = sample * nh * n_angles + h * n_angles + a;
@@ -656,6 +663,15 @@ extern "C" __global__ void rope_bwd(
         d_B_pre_rope[idx] = d_B_rotated[idx];
         d_C_pre_rope[idx] = d_C_rotated[idx];
     } else if ((n & 1) == 0) {
+        if (n + 1 >= ds) {
+            // Degenerate trailing "pair" — pass through, never cross the
+            // head boundary (unreachable with 2*n_angles <= d_state).
+            d_B_pre_rope[idx] = d_B_rotated[idx];
+            d_C_pre_rope[idx] = d_C_rotated[idx];
+            int a = n / 2;
+            d_angle_cumsum[sample * nh * n_angles + h * n_angles + a] = 0.0f;
+            return;
+        }
         // Even index: handle pair (n, n+1)
         int a = n / 2;
         int angle_idx = sample * nh * n_angles + h * n_angles + a;
@@ -1341,6 +1357,12 @@ extern "C" __global__ void rope_fwd_##SUFFIX(                                   
         B_rotated[idx] = B_biased[idx];                                         \
         C_rotated[idx] = C_biased[idx];                                         \
     } else if ((n & 1) == 0) {                                                  \
+        if (n + 1 >= ds) {                                                      \
+            /* degenerate trailing pair: pass through, stay in head slice */   \
+            B_rotated[idx] = B_biased[idx];                                     \
+            C_rotated[idx] = C_biased[idx];                                     \
+            return;                                                             \
+        }                                                                       \
         int a = n / 2;                                                          \
         int angle_idx = sample * nh * n_angles + h * n_angles + a;              \
         float cos_a, sin_a;                                                     \
@@ -1546,6 +1568,14 @@ extern "C" __global__ void rope_bwd_##SUFFIX(                                  \
         d_B_pre_rope[idx] = d_B_rotated[idx];                                  \
         d_C_pre_rope[idx] = d_C_rotated[idx];                                  \
     } else if ((n & 1) == 0) {                                                 \
+        if (n + 1 >= ds) {                                                     \
+            /* degenerate trailing pair: pass through, stay in head slice */  \
+            d_B_pre_rope[idx] = d_B_rotated[idx];                              \
+            d_C_pre_rope[idx] = d_C_rotated[idx];                              \
+            int a = n / 2;                                                     \
+            d_angle_cumsum[sample * nh * n_angles + h * n_angles + a] = 0.0f; \
+            return;                                                            \
+        }                                                                      \
         int a = n / 2;                                                         \
         int angle_idx = sample * nh * n_angles + h * n_angles + a;             \
         float cos_a, sin_a;                                                    \

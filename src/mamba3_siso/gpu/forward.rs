@@ -513,6 +513,14 @@ pub fn gpu_forward_mamba3_layer(
 }
 
 /// Mamba-3 SISO full backbone forward (input proj + N layers + norm_f).
+///
+/// State semantics: with `dims.use_parallel_scan` the window is STATELESS —
+/// the chunked kernels do not consume entering SSM/K/V state (chunk 0 always
+/// starts from zero), so all four state buffers (including the RoPE angle
+/// accumulator) are zeroed up front to keep the semantics consistent. Final
+/// window states are still written back for inspection. State continuity
+/// across calls is only supported by the sequential path
+/// (`use_parallel_scan = false`, `m3_burnin_fwd`).
 #[allow(clippy::too_many_arguments)]
 pub fn gpu_forward_mamba3_backbone(
     ctx: &GpuCtx,
@@ -534,6 +542,18 @@ pub fn gpu_forward_mamba3_backbone(
     let nh = dims.nheads;
     let hd = dims.headdim;
     let na = dims.n_angles.max(1);
+
+    if dims.use_parallel_scan {
+        // The chunked SSM kernels ignore entering SSM/K/V state, but the
+        // angle kernel WOULD carry the persistent accumulator — a hybrid
+        // that matches neither stateless-window nor full-continuity
+        // semantics. Zero all four so every parallel window is cleanly
+        // stateless. (Async memsets — CUDA Graph capture safe.)
+        ssm_states.zero(&ctx.stream)?;
+        k_states.zero(&ctx.stream)?;
+        v_states.zero(&ctx.stream)?;
+        angle_states.zero(&ctx.stream)?;
+    }
 
     acts.input_proj_inputs
         .copy_from_raw(mamba_input, &ctx.stream)?;

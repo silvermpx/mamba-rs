@@ -205,7 +205,12 @@ extern "C" __global__ void m3_chunk_state_fwd(
 // Sequential scan over n_chunks: out[c] = state entering chunk c.
 // Forward recurrence: new_state = exp(dA_chunk_end) * prev_state + chunk_contribution
 // Converts states in-place from chunk contributions to prefix-scanned entering states.
-// Also computes initial state contribution from k_state/v_state if applicable.
+//
+// STATELESS WINDOW: chunk 0 always enters with state = 0. The chunked path
+// does NOT consume persistent ssm/k/v state from a previous window (and the
+// host zeroes all four state buffers — including the RoPE angle accumulator
+// — at the start of every parallel-scan forward). Use the sequential path
+// (m3_burnin_fwd) when state continuity across calls is required.
 //
 // Handles partial last chunk (T not multiple of chunk_size).
 //
@@ -260,8 +265,10 @@ extern "C" __global__ void m3_state_passing_fwd(
 //
 // The parallel chunked scan path does not update the persistent layer state
 // buffers (ssm_state, k_state, v_state) unlike the sequential m3_burnin_fwd
-// kernel. This kernel writes back the final states so that state continuity
-// between forward calls is maintained.
+// kernel. This kernel writes back the final states of the WINDOW so callers
+// can inspect/export them. NOTE: the next parallel-scan window does NOT
+// consume them (stateless window — see m3_state_passing_fwd); only the
+// sequential path reads persistent state.
 //
 // SSM state: copy from final_states[B * nh * hd * ds] (output of K4)
 // K state:   extract last timestep (T-1) from k_flat[B * T * nh * ds]
@@ -786,16 +793,20 @@ extern "C" __global__ void m3_dqktheta(
     float* __restrict__ dQ_pre,         // [B*T*nh*ds] — pre-RoPE Q gradient
     float* __restrict__ dK_pre,         // [B*T*nh*ds] — pre-RoPE K gradient
     float* __restrict__ dAngles_cumsum, // [B*T*nh*n_angles]
-    float* __restrict__ dScale,         // [B*T*nh]
-    float* __restrict__ dGamma,         // [B*T*nh]
+    // NO __restrict__ on dScale/dGamma/Scale_in/Gamma_in: the host passes
+    // the SAME buffer as Scale_in and dScale (resp. Gamma_in/dGamma) — the
+    // value is loaded into a register before the aliased store, which is
+    // well-defined only without the no-alias promise.
+    float* dScale,                      // [B*T*nh] (may alias Scale_in)
+    float* dGamma,                      // [B*T*nh] (may alias Gamma_in)
     // Phase 2.7.5: dQ_bias/dK_bias accumulators removed from kernel — caller
     // does colsum_accumulate on dQ_pre/dK_pre (already per-(b,t,h,n) scratch).
     // Deterministic, no atomicAdd.
     // Inputs
     const float* __restrict__ Q_raw,    // [B*T*nh*ds] — acts.c_biased (pre-RoPE)
     const float* __restrict__ K_raw,    // [B*T*nh*ds] — acts.b_biased (pre-RoPE)
-    const float* __restrict__ Scale_in, // [B*T*nh] — recomputed
-    const float* __restrict__ Gamma_in, // [B*T*nh] — recomputed
+    const float* Scale_in,              // [B*T*nh] (may alias dScale)
+    const float* Gamma_in,              // [B*T*nh] (may alias dGamma)
     const float* __restrict__ Angles,   // [B*T*nh*n_angles] — acts.angle_cumsum
     const float* __restrict__ dQ_mid,   // [B*T*nh*ds] — from m3_dqkv
     const float* __restrict__ dK_mid,   // [B*T*nh*ds] — from m3_dqkv
@@ -1518,14 +1529,15 @@ m3_dqktheta_##SUFFIX(                                                         \
     float* __restrict__ dQ_pre,                                               \
     float* __restrict__ dK_pre,                                               \
     float* __restrict__ dAngles_cumsum,                                       \
-    float* __restrict__ dScale,                                               \
-    float* __restrict__ dGamma,                                               \
+    /* no __restrict__: host aliases dScale/Scale_in and dGamma/Gamma_in */   \
+    float* dScale,                                                            \
+    float* dGamma,                                                            \
     /* Phase 2.7.5: dQ_bias/dK_bias removed — caller does colsum_accumulate   \
      * on dQ_pre/dK_pre (already per-(b,t,h,n) scratch). No atomicAdd here.*/\
     const T_ACT* __restrict__ Q_raw,                                          \
     const T_ACT* __restrict__ K_raw,                                          \
-    const float* __restrict__ Scale_in,                                       \
-    const float* __restrict__ Gamma_in,                                       \
+    const float* Scale_in,                                                    \
+    const float* Gamma_in,                                                    \
     const float* __restrict__ Angles,                                         \
     const float* __restrict__ dQ_mid,                                         \
     const float* __restrict__ dK_mid,                                         \

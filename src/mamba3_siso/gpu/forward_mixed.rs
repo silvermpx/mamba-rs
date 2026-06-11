@@ -984,6 +984,16 @@ pub fn gpu_forward_mamba3_backbone_mixed(
     let hd = dims.headdim;
     let na = dims.n_angles.max(1);
 
+    if dims.use_parallel_scan {
+        // Stateless window: the chunked kernels ignore entering SSM/K/V
+        // state; zero the angle accumulator too so all four states behave
+        // identically (see gpu_forward_mamba3_backbone).
+        ssm_states.zero(&ctx.stream)?;
+        k_states.zero(&ctx.stream)?;
+        v_states.zero(&ctx.stream)?;
+        angle_states.zero(&ctx.stream)?;
+    }
+
     // input_proj: if identity (len_elems==0), D2D copy mamba_input →
     // temporal. Otherwise typed GEMM. Matches M1 pattern.
     if w.compute.input_proj_w.len_elems() == 0 {

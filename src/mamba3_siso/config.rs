@@ -36,9 +36,14 @@ impl Mamba3Config {
         self.d_inner() / self.headdim
     }
 
-    /// Number of RoPE angle pairs: ceil(d_state * rope_fraction / 2).
+    /// Number of RoPE angle pairs: floor(d_state * rope_fraction) / 2.
+    ///
+    /// Floor semantics match the reference (`int(d_state * rope_fraction)
+    /// // 2` in state-spaces/mamba). The previous ceil variant rotated one
+    /// pair too many for odd `d_state * rope_fraction`, indexing past the
+    /// head slice (out of bounds in the GPU rope kernels).
     pub fn num_rope_angles(&self) -> usize {
-        ((self.d_state as f32 * self.rope_fraction) / 2.0).ceil() as usize
+        (self.d_state as f32 * self.rope_fraction) as usize / 2
     }
 
     /// in_proj output dimension (8-way split).
@@ -66,8 +71,15 @@ impl Mamba3Config {
             self.headdim
         );
         assert!(
-            self.d_state <= 64,
-            "d_state ({}) must be <= 64 (CUDA register limit)",
+            self.d_state >= 1 && self.d_state <= 64,
+            "d_state ({}) must be in 1..=64 (CUDA register limit)",
+            self.d_state
+        );
+        assert!(
+            2 * self.num_rope_angles() <= self.d_state,
+            "2 * num_rope_angles ({}) must be <= d_state ({}) — rotation \
+             pairs may not cross the head boundary",
+            2 * self.num_rope_angles(),
             self.d_state
         );
         assert!(
