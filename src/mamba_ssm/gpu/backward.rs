@@ -110,12 +110,26 @@ pub fn gpu_backward_mamba_layer(
     // ssm_backward_local(h_saved, delta_saved, u_saved, B_saved, C_saved, a_neg, D,
     //   dy, d_delta, d_u, d_B_local, d_C_local, d_D_local, d_a_log_local,
     //   batch, T, d_inner, d_state)
+    //
+    // Dispatch mirrors the mixed-precision path: the sequential kernel keeps
+    // per-(b,d) state in registers and contains a `d_state > 64` early-return
+    // guard, so d_state in (64, 256] MUST take the parallel reverse-scan
+    // kernel (it used to silently no-op, leaving stale scratch as gradients).
+    // Long T also prefers the parallel kernel for wall-clock.
     {
         let b_i = b as i32;
         let t_i = t as i32;
         let di_i = di as i32;
         let ds_i = ds as i32;
-        let mut builder = ctx.stream.launch_builder(&ctx.kernels.ssm_backward_local);
+        let use_parallel = t > super::forward::PARALLEL_SCAN_THRESHOLD || ds > 64;
+        let kernel = if use_parallel {
+            ctx.kernels
+                .ssm_parallel_bwd_typed
+                .get(super::dtype::WeightDtype::F32)
+        } else {
+            &ctx.kernels.ssm_backward_local
+        };
+        let mut builder = ctx.stream.launch_builder(kernel);
         builder.arg(acts.h_saved.inner());
         builder.arg(acts.delta.inner());
         builder.arg(acts.u.inner());
@@ -135,8 +149,13 @@ pub fn gpu_backward_mamba_layer(
         builder.arg(&t_i);
         builder.arg(&di_i);
         builder.arg(&ds_i);
-        unsafe { builder.launch(grid_1d(b * di)) }
-            .map_err(|e| format!("ssm_backward_local mamba: {:?}", e))?;
+        let cfg = if use_parallel {
+            super::launch::grid_parallel_scan_bwd(b, di)
+        } else {
+            grid_1d(b * di)
+        };
+        unsafe { builder.launch(cfg) }
+            .map_err(|e| format!("ssm bwd (parallel={use_parallel}): {e:?}"))?;
     }
 
     // Reductions: sum per-sample gradients across batch/d_inner
