@@ -44,6 +44,16 @@
 // Grid: (B*n_chunks, nh, 1), Block: (chunk_size, 1, 1)
 // Each thread handles one timestep within a chunk, looping over ds for
 // the QK dot product and K scaling.
+// Reference A-activation (see kernels/mamba3_ops.cu — kept in sync).
+__device__ __forceinline__ float m3c_heavy_tail(float x) {
+    return (x >= 0.0f) ? (1.0f + x) : (1.0f / (1.0f - x));
+}
+__device__ __forceinline__ float m3c_heavy_tail_deriv(float x) {
+    if (x >= 0.0f) return 1.0f;
+    float d = 1.0f - x;
+    return 1.0f / (d * d);
+}
+
 extern "C" __global__ void m3_preprocess_chunks(
     // Outputs
     float* __restrict__ K_scaled,   // [B * T * nh * ds] -- prescaled K
@@ -1011,21 +1021,16 @@ extern "C" __global__ void m3_final_grads(
     float sig_dt = 1.0f / (1.0f + exp2f(-raw_dt * LOG2E));
     d_dd_dt_raw[i] = d_dt_total * sig_dt;
 
-    // d_dd_a_raw: from d_a_val, through clamp and -softplus
+    // d_dd_a_raw: from d_a_val, through clamp and -heavy_tail
     float raw_a = dd_a_raw_saved[i];
-    float sp_a = (raw_a > 20.0f) ? raw_a : log1pf(FAST_EXP(raw_a));
-    float a_unclamped = -sp_a; // -softplus(raw_a)
-    // Was clamped to max(-a_floor)?
-    // a_val = max(-softplus(raw), -a_floor) => a_val >= -a_floor (more negative)
-    // Actually: a_val = min(-softplus(raw), -a_floor) = clamp(-, max=-a_floor)
-    // If unclamped value > -a_floor (i.e., less negative than floor): gradient passes
-    // If clamped: gradient = 0
+    float a_unclamped = -m3c_heavy_tail(raw_a);
+    // a_val = min(-heavy_tail(raw), -a_floor) = clamp(-, max=-a_floor)
+    // If the clamp was active: gradient = 0.
     if (a_unclamped > -a_floor) {
         d_dd_a_raw[i] = 0.0f; // clamped, no gradient
     } else {
-        // -softplus backward: d_raw = d_a_val * (-sigmoid(raw))
-        float sig_a = 1.0f / (1.0f + exp2f(-raw_a * LOG2E));
-        d_dd_a_raw[i] = d_a_val * (-sig_a);
+        // -heavy_tail backward: d_raw = d_a_val * (-heavy_tail'(raw))
+        d_dd_a_raw[i] = d_a_val * (-m3c_heavy_tail_deriv(raw_a));
     }
 }
 

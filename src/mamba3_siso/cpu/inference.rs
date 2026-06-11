@@ -155,8 +155,9 @@ pub fn mamba3_layer_step(
     for h in 0..nh {
         let g = h / (nh / ng);
 
-        // Input-dependent A: A = -softplus(dd_A), clamp max=-a_floor
-        let a_val = (-super::forward::softplus(scratch.proj[dd_a_off + h])).min(-a_floor);
+        // Input-dependent A: A = -heavy_tail(dd_A), clamp max=-a_floor
+        // (reference: state-spaces/mamba `heavy_tail_activation`)
+        let a_val = (-super::forward::heavy_tail(scratch.proj[dd_a_off + h])).min(-a_floor);
 
         // DT = softplus(dd_dt + dt_bias)
         let dt_val = super::forward::softplus(scratch.proj[dd_dt_off + h] + lw.dt_bias[h]);

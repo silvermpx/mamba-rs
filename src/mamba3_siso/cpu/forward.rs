@@ -138,6 +138,25 @@ pub(crate) fn simd_ssm_recurrence(
 }
 
 #[inline(always)]
+/// Reference A-activation (state-spaces/mamba `heavy_tail_activation`):
+/// `1 + x` for x >= 0, `1 / (1 - x)` for x < 0. Always positive; polynomial
+/// decay for negative inputs where softplus saturates exponentially — using
+/// softplus here changed the decay-spectrum distribution and gradient tails
+/// relative to the published model (paper-fidelity audit finding #1).
+pub(crate) fn heavy_tail(x: f32) -> f32 {
+    if x >= 0.0 { 1.0 + x } else { 1.0 / (1.0 - x) }
+}
+
+/// d/dx of [`heavy_tail`]: `1` for x >= 0, `1/(1-x)^2` for x < 0.
+pub(crate) fn heavy_tail_deriv(x: f32) -> f32 {
+    if x >= 0.0 {
+        1.0
+    } else {
+        let d = 1.0 - x;
+        1.0 / (d * d)
+    }
+}
+
 pub(crate) fn softplus(x: f32) -> f32 {
     if x > 20.0 {
         x
@@ -314,8 +333,8 @@ pub fn forward_mamba3_layer_batched(
         for h in 0..nh {
             let g = h / (nh / ng);
 
-            // A = -softplus(dd_A), clamp
-            let a_val = (-softplus(acts.data[base_t + o.dd_a_raw + h])).min(-a_floor);
+            // A = -heavy_tail(dd_A), clamp (reference activation)
+            let a_val = (-heavy_tail(acts.data[base_t + o.dd_a_raw + h])).min(-a_floor);
             let dt_val = softplus(acts.data[base_t + o.dd_dt_raw + h] + layer_w.dt_bias[h]);
             acts.data[base_t + o.a_val + h] = a_val;
             acts.data[base_t + o.dt_val + h] = dt_val;

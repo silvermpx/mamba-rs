@@ -12,7 +12,7 @@
 
 use super::dims::Mamba3Dims;
 use super::flat::Mamba3LayerFlat;
-use super::forward::{simd_sum_sq, softplus};
+use super::forward::simd_sum_sq;
 use super::scratch::Mamba3Scratch;
 use super::weights::TrainMamba3LayerWeights;
 use crate::ops::blas::sgemm_backward;
@@ -429,15 +429,12 @@ pub fn backward_mamba3_layer_batched(
 
             let d_a_val = d_adt * dt_val;
             let dd_a_raw = acts.data[base_t + o.dd_a_raw + h];
-            let a_unclamped = -softplus(dd_a_raw);
+            let a_unclamped = -super::forward::heavy_tail(dd_a_raw);
             let was_clamped = a_unclamped > -dims.a_floor;
             if !was_clamped {
-                let sp_deriv_a = if dd_a_raw > 20.0 {
-                    1.0
-                } else {
-                    1.0 / (1.0 + fast_exp_scalar(-dd_a_raw))
-                };
-                scratch.d_dd_a_flat[t * nh + h] = d_a_val * (-sp_deriv_a);
+                // d(-heavy_tail(x))/dx = -heavy_tail'(x)
+                scratch.d_dd_a_flat[t * nh + h] =
+                    d_a_val * (-super::forward::heavy_tail_deriv(dd_a_raw));
             }
         }
     }

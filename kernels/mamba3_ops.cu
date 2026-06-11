@@ -52,6 +52,23 @@
 //          trap_raw[N*nh] (saved for backward)
 // Params: dt_bias[nh], a_floor (scalar)
 // Grid: ceil(N * in_proj_dim / 256) blocks, 256 threads
+// ---------------------------------------------------------------------------
+// Reference A-activation (state-spaces/mamba `heavy_tail_activation`):
+//   heavy_tail(x) = 1 + x        for x >= 0
+//                 = 1 / (1 - x)  for x <  0
+// Always positive; polynomial decay for negative inputs (softplus saturates
+// exponentially — different decay-spectrum distribution and gradient tails,
+// i.e. different training dynamics from the published model).
+// ---------------------------------------------------------------------------
+__device__ __forceinline__ float m3_heavy_tail(float x) {
+    return (x >= 0.0f) ? (1.0f + x) : (1.0f / (1.0f - x));
+}
+__device__ __forceinline__ float m3_heavy_tail_deriv(float x) {
+    if (x >= 0.0f) return 1.0f;
+    float d = 1.0f - x;
+    return 1.0f / (d * d);
+}
+
 extern "C" __global__ void m3_split(
     float* __restrict__ z,          // [N * di]
     float* __restrict__ x,          // [N * di]
@@ -107,12 +124,12 @@ extern "C" __global__ void m3_split(
         float biased = val + dt_bias[h];
         dt[dt_idx] = (biased > 20.0f) ? biased : log1pf(FAST_EXP(biased));
     } else if (col < off5) {
-        // dd_A: save raw, apply -softplus(dd_A), clamp max = -a_floor
+        // dd_A: save raw, apply -heavy_tail(dd_A), clamp max = -a_floor
+        // (reference: state-spaces/mamba mamba3.py `heavy_tail_activation`)
         int h = col - off4;
         int a_idx = sample * nh + h;
         dd_a_raw[a_idx] = val;
-        float sp = (val > 20.0f) ? val : log1pf(FAST_EXP(val));
-        float a = -sp;
+        float a = -m3_heavy_tail(val);
         a_val[a_idx] = fminf(a, -a_floor);
     } else if (col < off6) {
         // trap: save raw, apply sigmoid
@@ -814,18 +831,16 @@ extern "C" __global__ void m3_abg_bwd(
 
     // d_a_val = d_adt * dt_val
     float d_a_val = d_adt * dt_v;
-    // A = -softplus(dd_a_raw), clamped to max = -a_floor
+    // A = -heavy_tail(dd_a_raw), clamped to max = -a_floor
     // If clamped (a_val == -a_floor), gradient is zero.
     float raw_a = dd_a_raw[idx];
-    float sp_a = (raw_a > 20.0f) ? raw_a : log1pf(FAST_EXP(raw_a));
-    float a_unclamped = -sp_a;
+    float a_unclamped = -m3_heavy_tail(raw_a);
     if (a_unclamped > -a_floor) {
         // Was clamped: gradient is zero
         d_dd_a[idx] = 0.0f;
     } else {
-        float sp_deriv_a = (raw_a > 20.0f) ? 1.0f : (1.0f / (1.0f + FAST_EXP(-raw_a)));
-        // d(-softplus(x))/dx = -sigmoid(x)
-        d_dd_a[idx] = d_a_val * (-sp_deriv_a);
+        // d(-heavy_tail(x))/dx = -heavy_tail'(x)
+        d_dd_a[idx] = d_a_val * (-m3_heavy_tail_deriv(raw_a));
     }
 }
 
@@ -1157,8 +1172,7 @@ extern "C" __global__ void m3_split_##SUFFIX(                                  \
         int h = col - off4;                                                     \
         int a_idx = sample * nh + h;                                            \
         dd_a_raw[a_idx] = val;                                                  \
-        float sp = (val > 20.0f) ? val : log1pf(FAST_EXP(val));            \
-        float a = -sp;                                                          \
+        float a = -m3_heavy_tail(val);                                          \
         a_val[a_idx] = fminf(a, -a_floor);                                      \
     } else if (col < off6) {                                                    \
         int h = col - off5;                                                     \
