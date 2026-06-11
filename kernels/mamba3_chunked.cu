@@ -596,10 +596,10 @@ extern "C" __global__ void m3_dqkv(
         // === dK_mid and dQ_mid ===
         // These need sum over hd (reduction across threads).
         // dK_mid[t,n] = sum_p(intra_contrib[t,p,n] + inter_contrib[t,p,n])
-        // Since each thread has its own p, we compute per-thread then warp reduce.
-        if (p < ds) {
-            // Use p as n-index (thread p computes d_state dim n=p)
-            int n = p;
+        // Threads stride over state dims: for ds > hd, thread p covers
+        // n = p, p+hd, p+2*hd, ... (mirrors the cooperative Q/K load above;
+        // the old `if (p < ds) { n = p; }` silently zeroed n >= hd).
+        for (int n = p; n < ds; n += hd) {
             for (int t = 0; t < chunk_len; t++) {
                 int gt = chunk_start + t;
                 float dA_t = da_cs_sm[t];
@@ -664,8 +664,8 @@ extern "C" __global__ void m3_dqkv(
         __syncthreads();
 
         // Now fix dK_mid inter-chunk: sum_p(V[t,p] * d_state[p][n]) * exp_rev
-        if (p < ds) {
-            int n = p;
+        // Strided over state dims so ds > hd is fully covered (see dK/dQ_mid above).
+        for (int n = p; n < ds; n += hd) {
             for (int t = 0; t < chunk_len; t++) {
                 float dk_inter = 0.0f;
                 float exp_rev_t = exp2f((da_cs_chunk_sum - da_cs_sm[t]) * LOG2E);
@@ -1378,8 +1378,8 @@ m3_dqkv_##SUFFIX(                                                             \
             }                                                                 \
         }                                                                     \
         __syncthreads();                                                      \
-        if (p < ds) {                                                         \
-            int n = p;                                                        \
+        /* strided over state dims: ds > hd fully covered (see f32 kernel) */ \
+        for (int n = p; n < ds; n += hd) {                                    \
             for (int t = 0; t < chunk_len; t++) {                             \
                 int gt = chunk_start + t;                                     \
                 float dA_t = da_cs_sm[t];                                     \
@@ -1412,8 +1412,7 @@ m3_dqkv_##SUFFIX(                                                             \
         for (int n = 0; n < ds; n++)                                          \
             ssm_sm[p * ds + n] = d_state[n];                                  \
         __syncthreads();                                                      \
-        if (p < ds) {                                                         \
-            int n = p;                                                        \
+        for (int n = p; n < ds; n += hd) {                                    \
             for (int t = 0; t < chunk_len; t++) {                             \
                 float dk_inter = 0.0f;                                        \
                 float exp_rev_t = exp2f(                                      \
