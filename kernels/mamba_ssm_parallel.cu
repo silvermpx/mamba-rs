@@ -89,14 +89,21 @@ __device__ __forceinline__ void warp_inclusive_scan_ab(
 // so reverse_scan_t.b is dh_t. The "next-step" delta_A is what makes the
 // gradient correctly multiply by future-step decay (Tri Dao trick).
 // ============================================================================
+// `active` = number of participating low lanes (must equal popcount(mask)
+// for a contiguous low mask). The update guard must stop at `active`, not
+// 32: __shfl_down_sync from a lane outside the mask returns an UNDEFINED
+// value, and the old `lane + offset < 32` guard composed those undefined
+// values into the scan whenever mask < full warp (the NWARPS-total scan in
+// block_inclusive_reverse_scan_ab). The forward twin is immune because its
+// shfl_up guard `lane >= offset` only ever reads lower (in-mask) lanes.
 __device__ __forceinline__ void warp_inclusive_reverse_scan_ab(
-    float &a, float &b, unsigned mask = 0xffffffff
+    float &a, float &b, unsigned mask = 0xffffffff, int active = 32
 ) {
     #pragma unroll
     for (int offset = 1; offset < 32; offset <<= 1) {
         float a_next = __shfl_down_sync(mask, a, offset);
         float b_next = __shfl_down_sync(mask, b, offset);
-        if ((threadIdx.x & 31) + (unsigned)offset < 32) {
+        if ((int)(threadIdx.x & 31) + offset < active) {
             // compose(self, next): (a*a_next, a*b_next + b) NO — careful:
             // reverse semantic: lane k accumulates (p_k ∘ p_{k+1} ∘ ...).
             // op (a2,b2)∘(a1,b1) = (a2*a1, a2*b1 + b2) with self=2nd arg.
@@ -130,11 +137,13 @@ __device__ __forceinline__ void block_inclusive_reverse_scan_ab(
     __syncthreads();
 
     // Step 3: first warp scans the NWARPS totals in REVERSE.
-    // Same partial-mask correctness fix as forward variant.
+    // Partial mask AND matching `active` bound: only lanes < NWARPS hold
+    // valid totals, so the compose guard must stop at NWARPS (see the
+    // helper's comment — stopping at 32 composed undefined shuffle values).
     if (warp_id == 0 && lane < NWARPS) {
         float wa = smem_wa[lane];
         float wb = smem_wb[lane];
-        warp_inclusive_reverse_scan_ab(wa, wb, (1u << NWARPS) - 1u);
+        warp_inclusive_reverse_scan_ab(wa, wb, (1u << NWARPS) - 1u, NWARPS);
         smem_wa[lane] = wa;
         smem_wb[lane] = wb;
     }
@@ -436,6 +445,12 @@ extern "C" __global__ __launch_bounds__(128, 3) void ssm_parallel_scan_fwd(
             // Initial state for this (b, d, n) triple
             float h_0 = h[h_base + n];
 
+            // Barrier: every warp must have READ run_a/run_b before thread 0
+            // overwrites them below — without it a warp scheduled late reads
+            // the post-chunk prefix and composes wrong h_t (CUB's prefix-
+            // callback machinery synchronizes here internally; we must too).
+            __syncthreads();
+
             // Update running prefix for next chunk (thread 0 only -- data dependency):
             //   new_run = block_total o old_run
             if (threadIdx.x == 0) {
@@ -679,6 +694,10 @@ extern "C" __global__ __launch_bounds__(128, 3) void ssm_parallel_scan_fwd_nosav
             float run_b = smem_run_b[n];
             float h_0 = h[h_base + n];
 
+            // Barrier: all warps must read run_a/b before thread 0 updates
+            // them (same read-write race as the saving variant above).
+            __syncthreads();
+
             if (threadIdx.x == 0) {
                 float block_a = smem_exch_a[NTHREADS - 1];
                 float block_b = smem_exch_b[NTHREADS - 1];
@@ -883,6 +902,8 @@ ssm_parallel_scan_fwd_##SUFFIX(                                               \
             float run_a = smem_run_a[n];                                      \
             float run_b = smem_run_b[n];                                      \
             float h_0 = h[h_base + n];                                        \
+            /* barrier: all warps read run_a/b before thread 0 updates */     \
+            __syncthreads();                                                  \
             if (threadIdx.x == 0) {                                           \
                 float block_a = smem_exch_a[NTHREADS - 1];                    \
                 float block_b = smem_exch_b[NTHREADS - 1];                    \
@@ -1056,6 +1077,8 @@ ssm_parallel_scan_fwd_nosave_##SUFFIX(                                        \
             float run_a = smem_run_a[n];                                      \
             float run_b = smem_run_b[n];                                      \
             float h_0 = h[h_base + n];                                        \
+            /* barrier: all warps read run_a/b before thread 0 updates */     \
+            __syncthreads();                                                  \
             if (threadIdx.x == 0) {                                           \
                 float block_a = smem_exch_a[NTHREADS - 1];                    \
                 float block_b = smem_exch_b[NTHREADS - 1];                    \
@@ -1364,6 +1387,9 @@ ssm_parallel_scan_bwd_##SUFFIX(                                               \
             }                                                                 \
             float run_a = smem_post_a[n];                                     \
             float run_b = smem_post_b[n];                                     \
+            /* Barrier: all warps must READ the postfix before thread 0       \
+               overwrites it (same race as the forward smem_run update). */   \
+            __syncthreads();                                                  \
             /* Update postfix carry for the NEXT (earlier) chunk. Block-wide  \
                reverse compose end-to-end: thread 0 holds the full chunk      \
                composition. */                                                \

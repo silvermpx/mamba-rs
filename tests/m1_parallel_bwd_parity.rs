@@ -276,7 +276,7 @@ fn run_par_typed(ctx: &GpuCtx, k: &MambaKernels, inp: &BwdInputs, dtype: WeightD
     bld.arg(&ti);
     bld.arg(&di_i);
     bld.arg(&ds_i);
-    let cfg: LaunchConfig = grid_parallel_scan_bwd(b, di, dtype.size_bytes());
+    let cfg: LaunchConfig = grid_parallel_scan_bwd(b, di);
     unsafe { bld.launch(cfg) }.unwrap();
     ctx.stream.synchronize().unwrap();
     (

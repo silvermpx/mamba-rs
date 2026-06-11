@@ -75,25 +75,27 @@ pub fn grid_parallel_scan(batch: usize, d_inner: usize) -> LaunchConfig {
 /// next-thread δA exchange + d_a_log block-reduce + chunk-first-a boundary.
 /// Total = SMEM_BWD_FLOATS = 2832 floats = 11 328 bytes (well under 48 KB).
 ///
-/// `bytes_per_act` controls the typed smem_stage region (2 for bf16/f16,
-/// 4 for f32) — same trick as `grid_parallel_scan_typed`.
-pub fn grid_parallel_scan_bwd(batch: usize, d_inner: usize, bytes_per_act: usize) -> LaunchConfig {
-    debug_assert!(bytes_per_act == 2 || bytes_per_act == 4);
+/// Unlike the forward (`grid_parallel_scan_typed`), the allocation does NOT
+/// shrink for bf16/f16: the bwd-extra regions live at fixed f32 offsets
+/// AFTER the full `CHUNK_SIZE * sizeof(f32)` stage region (SMEM_REV_WA_OFF
+/// = SMEM_TOTAL_FLOATS in mamba_ssm_parallel.cu). The typed kernels merely
+/// reinterpret the stage slots as T_ACT in place, so the byte size must
+/// always be the f32 layout size.
+pub fn grid_parallel_scan_bwd(batch: usize, d_inner: usize) -> LaunchConfig {
     const NTHREADS: u32 = 128;
     const NWARPS: usize = NTHREADS as usize / 32;
     const MAX_DSTATE: usize = 256;
     const CHUNK_SIZE: usize = NTHREADS as usize * 8;
-    // Fwd-layout fixed region (block scan, running prefix, exchange) +
-    // bwd-extra (reverse warp scan + postfix + next-A exchange + da-reduce
-    // + chunk-first-A boundary).
-    let fwd_fixed_floats = 2 * NWARPS + 2 * MAX_DSTATE + 2 * NTHREADS as usize;
-    let bwd_extra_floats = 2 * NWARPS + 2 * MAX_DSTATE + 2 * NTHREADS as usize + MAX_DSTATE;
-    let fixed_bytes = (fwd_fixed_floats + bwd_extra_floats) * std::mem::size_of::<f32>();
-    let stage_bytes = CHUNK_SIZE * bytes_per_act;
+    // SMEM_TOTAL_FLOATS (fwd layout incl. f32-sized stage) + bwd-extra
+    // (reverse warp scan + postfix + next-A exchange + da-reduce +
+    // chunk-first-A boundary). Must match SMEM_BWD_FLOATS in the kernel.
+    let fwd_total_floats = 2 * NWARPS + 2 * MAX_DSTATE + 2 * NTHREADS as usize + CHUNK_SIZE;
+    let bwd_extra_floats = 2 * NWARPS + 3 * MAX_DSTATE + 2 * NTHREADS as usize;
+    let total_bytes = (fwd_total_floats + bwd_extra_floats) * std::mem::size_of::<f32>();
     LaunchConfig {
         grid_dim: (batch as u32, d_inner as u32, 1),
         block_dim: (NTHREADS, 1, 1),
-        shared_mem_bytes: (fixed_bytes + stage_bytes) as u32,
+        shared_mem_bytes: total_bytes as u32,
     }
 }
 

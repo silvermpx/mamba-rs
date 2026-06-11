@@ -247,14 +247,8 @@ pub fn gpu_backward_mamba_layer_mixed(
             bld.arg(&t_i);
             bld.arg(&di_i);
             bld.arg(&ds_i);
-            unsafe {
-                bld.launch(super::launch::grid_parallel_scan_bwd(
-                    b,
-                    di,
-                    dtype.size_bytes(),
-                ))
-            }
-            .map_err(|e| format!("ssm_parallel_bwd_typed: {e:?}"))?;
+            unsafe { bld.launch(super::launch::grid_parallel_scan_bwd(b, di)) }
+                .map_err(|e| format!("ssm_parallel_bwd_typed: {e:?}"))?;
         } else {
             // Sequential typed bwd.
             let mut bld = ctx
