@@ -358,6 +358,9 @@ pub struct MambaKernels {
     /// with sync staging + f32 smem. Dynamic smem 33 KB — the 34 KB
     /// MAX_DYNAMIC_SHARED attribute is set at load like the f32 Bigs.
     pub sgemm_nn_big_typed: HalfKernel,
+    /// Tensor-core NN forward (stage 5, `bi_tensor_cores` tier) — separate
+    /// numeric contract (mma.sync f32 accumulate), static smem.
+    pub sgemm_nn_tc_typed: HalfKernel,
     pub sgemm_tn_big_typed: HalfKernel,
     pub sgemm_nt_big_typed: HalfKernel,
 }
@@ -679,6 +682,7 @@ impl MambaKernels {
             sgemm_tn_narrow_typed: load_half("sgemm_bi_tn_narrow")?,
             sgemm_nt_narrow_typed: load_half("sgemm_bi_nt_narrow")?,
             sgemm_nn_big_typed: load_half_dynsmem("sgemm_bi_nn_big")?,
+            sgemm_nn_tc_typed: load_half("sgemm_bi_nn_tc")?,
             sgemm_tn_big_typed: load_half_dynsmem("sgemm_bi_tn_big")?,
             sgemm_nt_big_typed: load_half_dynsmem("sgemm_bi_nt_big")?,
 

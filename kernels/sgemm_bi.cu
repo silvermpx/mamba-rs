@@ -5060,3 +5060,173 @@ void sgemm_bi_nt_big_##SUFFIX(                                                 \
 
 DEFINE_SGEMM_BI_NT_BIG_T(bf16, __nv_bfloat16, from_f_bf16)
 DEFINE_SGEMM_BI_NT_BIG_T(f16,  __half,        from_f_f16)
+
+// ============================================================================
+// Stage 5: tensor-core deterministic NN forward (bi_tensor_cores tier).
+// ============================================================================
+// mma.sync.aligned.m16n8k16 with f32 accumulators. SEPARATE numeric contract
+// from the scalar triad: the TC dataflow's reduction tree differs from the
+// ascending-K __fmaf_rn chain, so outputs do NOT bit-match the f32/typed
+// kernels — but the kernel is fully deterministic (fixed K order, fixed
+// fragment/tile assignment, no atomics, no split-K) and batch-invariant
+// across ALL M: each output element's entire K-reduction lives in one warp
+// whose math is independent of gridDim/M.
+//
+// Geometry: CTA 256 threads = 8 warps as 2x4 (warpRow x warpCol).
+//   BM=128 BN=128 BK=32; warp tile 64x32 = 4 m-frags(16) x 4 n-frags(8).
+//   Per K-step (16): 16 mma/warp; 2 K-steps per BK tile.
+// Smem: As[BM][BK+2] T_ACT, Bs[BN][BK+2] T_ACT (B staged TRANSPOSED so the
+// k16n8 col-major fragment reads are contiguous pairs), single-buffered,
+// static — ~17.4 KB, no dynamic-smem attribute needed.
+// Staging: sync ld.global -> st.shared with zero-fill OOB (zeros are exact
+// in mma: 0*x + acc == acc).
+// Bias: pre-seeded into the f32 accumulators (single accumulation chain),
+// alpha must be 1.0 when bias is present (same contract as sgemm_bi_nn).
+// Epilogue: one RNE downcast per element on store.
+//
+// Fragment thread maps (PTX ISA m16n8k16, 16-bit A/B, .row.col):
+//   lane L: g = L>>2, t = L&3
+//   A (m16k16 row): a0={(g,2t),(g,2t+1)} a1={(g+8,2t),(g+8,2t+1)}
+//                   a2={(g,2t+8),(g,2t+9)} a3={(g+8,2t+8),(g+8,2t+9)}
+//   B (k16n8 col):  b0={(2t,g),(2t+1,g)}  b1={(2t+8,g),(2t+9,g)}
+//   C/D (m16n8):    c0=(g,2t) c1=(g,2t+1) c2=(g+8,2t) c3=(g+8,2t+1)
+
+#define TC_BM 128
+#define TC_BN 128
+#define TC_BK 32
+#define TC_PAD 2
+#define TC_WARPS 8
+
+#define DEFINE_SGEMM_BI_NN_TC(SUFFIX, T_ACT, FROM_F, MMA_T)                    \
+extern "C" __global__ __launch_bounds__(256, 1)                                \
+void sgemm_bi_nn_tc_##SUFFIX(                                                  \
+    T_ACT* __restrict__ C,                                                     \
+    const T_ACT* __restrict__ A,                                               \
+    const T_ACT* __restrict__ B,                                               \
+    const float* __restrict__ bias,                                            \
+    float alpha, float beta,                                                   \
+    int M, int N, int K,                                                       \
+    int lda, int ldb, int ldc                                                  \
+) {                                                                            \
+    assert(alpha == 1.0f || bias == nullptr);                                  \
+    __shared__ T_ACT As[TC_BM][TC_BK + TC_PAD];                                \
+    __shared__ T_ACT Bs[TC_BN][TC_BK + TC_PAD];                                \
+    int num_pid_n = (N + TC_BN - 1) / TC_BN;                                   \
+    int pid_m = blockIdx.x / num_pid_n;                                        \
+    int pid_n = blockIdx.x % num_pid_n;                                        \
+    int warp = threadIdx.x / 32;                                               \
+    int lane = threadIdx.x % 32;                                               \
+    int warpRow = warp / 4;                                                    \
+    int warpCol = warp % 4;                                                    \
+    int warpM = warpRow * 64;                                                  \
+    int warpN = warpCol * 32;                                                  \
+    int g = lane >> 2;                                                         \
+    int t = lane & 3;                                                          \
+    /* 16 (fm, fn) accumulator fragments x 4 f32 */                            \
+    float acc[4][4][4];                                                        \
+    _Pragma("unroll")                                                          \
+    for (int fm = 0; fm < 4; fm++) {                                           \
+        _Pragma("unroll")                                                      \
+        for (int fn = 0; fn < 4; fn++) {                                       \
+            float b0 = 0.0f, b1 = 0.0f;                                        \
+            if (bias != nullptr) {                                             \
+                int c0 = pid_n * TC_BN + warpN + fn * 8 + 2 * t;               \
+                b0 = (c0 < N) ? bias[c0] : 0.0f;                               \
+                b1 = (c0 + 1 < N) ? bias[c0 + 1] : 0.0f;                       \
+            }                                                                  \
+            acc[fm][fn][0] = b0;                                               \
+            acc[fm][fn][1] = b1;                                               \
+            acc[fm][fn][2] = b0;                                               \
+            acc[fm][fn][3] = b1;                                               \
+        }                                                                      \
+    }                                                                          \
+    int num_k_tiles = (K + TC_BK - 1) / TC_BK;                                 \
+    for (int kt = 0; kt < num_k_tiles; kt++) {                                 \
+        int bk = kt * TC_BK;                                                   \
+        /* stage A[m][k] and B^T[n][k], zero-fill OOB */                       \
+        for (int i = threadIdx.x; i < TC_BM * TC_BK; i += 256) {               \
+            int m = i / TC_BK;                                                 \
+            int k = i % TC_BK;                                                 \
+            int gr = pid_m * TC_BM + m;                                        \
+            int gc = bk + k;                                                   \
+            As[m][k] = (gr < M && gc < K)                                      \
+                           ? A[(long long)gr * lda + gc]                       \
+                           : FROM_F(0.0f);                                     \
+        }                                                                      \
+        for (int i = threadIdx.x; i < TC_BN * TC_BK; i += 256) {               \
+            int n = i / TC_BK;                                                 \
+            int k = i % TC_BK;                                                 \
+            int gn = pid_n * TC_BN + n;                                        \
+            int gk = bk + k;                                                   \
+            Bs[n][k] = (gk < K && gn < N)                                      \
+                           ? B[(long long)gk * ldb + gn]                       \
+                           : FROM_F(0.0f);                                     \
+        }                                                                      \
+        __syncthreads();                                                       \
+        _Pragma("unroll")                                                      \
+        for (int ks = 0; ks < 2; ks++) {                                       \
+            int k0 = ks * 16;                                                  \
+            unsigned a_frag[4][4];                                             \
+            unsigned b_frag[4][2];                                             \
+            _Pragma("unroll")                                                  \
+            for (int fm = 0; fm < 4; fm++) {                                   \
+                int r0 = warpM + fm * 16 + g;                                  \
+                a_frag[fm][0] =                                                \
+                    *(const unsigned*)&As[r0][k0 + 2 * t];                     \
+                a_frag[fm][1] =                                                \
+                    *(const unsigned*)&As[r0 + 8][k0 + 2 * t];                 \
+                a_frag[fm][2] =                                                \
+                    *(const unsigned*)&As[r0][k0 + 2 * t + 8];                 \
+                a_frag[fm][3] =                                                \
+                    *(const unsigned*)&As[r0 + 8][k0 + 2 * t + 8];             \
+            }                                                                  \
+            _Pragma("unroll")                                                  \
+            for (int fn = 0; fn < 4; fn++) {                                   \
+                int c0 = warpN + fn * 8 + g;                                   \
+                b_frag[fn][0] =                                                \
+                    *(const unsigned*)&Bs[c0][k0 + 2 * t];                     \
+                b_frag[fn][1] =                                                \
+                    *(const unsigned*)&Bs[c0][k0 + 2 * t + 8];                 \
+            }                                                                  \
+            _Pragma("unroll")                                                  \
+            for (int fm = 0; fm < 4; fm++) {                                   \
+                _Pragma("unroll")                                              \
+                for (int fn = 0; fn < 4; fn++) {                               \
+                    asm volatile(                                              \
+                        "mma.sync.aligned.m16n8k16.row.col.f32." MMA_T "."     \
+                        MMA_T ".f32 "                                          \
+                        "{%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, "              \
+                        "{%0,%1,%2,%3};\n"                                     \
+                        : "+f"(acc[fm][fn][0]), "+f"(acc[fm][fn][1]),          \
+                          "+f"(acc[fm][fn][2]), "+f"(acc[fm][fn][3])           \
+                        : "r"(a_frag[fm][0]), "r"(a_frag[fm][1]),              \
+                          "r"(a_frag[fm][2]), "r"(a_frag[fm][3]),              \
+                          "r"(b_frag[fn][0]), "r"(b_frag[fn][1]));             \
+                }                                                              \
+            }                                                                  \
+        }                                                                      \
+        __syncthreads();                                                       \
+    }                                                                          \
+    /* epilogue: c0=(g,2t) c1=(g,2t+1) c2=(g+8,2t) c3=(g+8,2t+1) */            \
+    _Pragma("unroll")                                                          \
+    for (int fm = 0; fm < 4; fm++) {                                           \
+        _Pragma("unroll")                                                      \
+        for (int fn = 0; fn < 4; fn++) {                                       \
+            int r0 = pid_m * TC_BM + warpM + fm * 16 + g;                      \
+            int c0 = pid_n * TC_BN + warpN + fn * 8 + 2 * t;                   \
+            _Pragma("unroll")                                                  \
+            for (int e = 0; e < 4; e++) {                                      \
+                int gr = r0 + (e >= 2 ? 8 : 0);                                \
+                int gc = c0 + (e & 1);                                         \
+                if (gr >= M || gc >= N) continue;                              \
+                float val = alpha * acc[fm][fn][e];                            \
+                if (beta != 0.0f)                                              \
+                    val += beta * to_f(C[(long long)gr * ldc + gc]);           \
+                C[(long long)gr * ldc + gc] = FROM_F(val);                     \
+            }                                                                  \
+        }                                                                      \
+    }                                                                          \
+}
+
+DEFINE_SGEMM_BI_NN_TC(bf16, __nv_bfloat16, from_f_bf16, "bf16")
+DEFINE_SGEMM_BI_NN_TC(f16,  __half,        from_f_f16,  "f16")

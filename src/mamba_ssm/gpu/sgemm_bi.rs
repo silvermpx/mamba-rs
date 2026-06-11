@@ -1714,6 +1714,60 @@ fn require_half(dt: WeightDtype, what: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Tensor-core NN forward (stage 5, `bi_tensor_cores` tier):
+/// `Y = X @ W + bias` via mma.sync.m16n8k16 with f32 accumulation.
+/// SEPARATE numeric contract from the scalar triad (TC reduction tree, not
+/// the ascending-K FMA chain) — deterministic and batch-invariant across
+/// ALL M (each element's full K-reduction lives in one warp, independent of
+/// grid shape). Covers M >= 128 && N >= 128 && K >= 1; Err otherwise.
+pub fn sgemm_bi_forward_tc(
+    stream: &Arc<cudarc::driver::CudaStream>,
+    kernels: &GpuKernels,
+    y: TypedPtr,
+    x: TypedPtr,
+    w: TypedPtr,
+    bias_ptr: CUptr,
+    dims: (usize, usize, usize),
+) -> Result<(), String> {
+    let (batch, n_in, n_out) = dims;
+    require_half(y.dtype, "output")?;
+    if x.dtype != y.dtype || w.dtype != y.dtype {
+        return Err("sgemm_bi_forward_tc: mixed dtypes not supported".into());
+    }
+    if !(batch >= 128 && n_out >= 128 && n_in >= 1) {
+        return Err(format!(
+            "sgemm_bi_forward_tc: shape M={batch} K={n_in} N={n_out} below the TC tile gate"
+        ));
+    }
+    let dt = y.dtype;
+    let alpha: f32 = 1.0;
+    let beta: f32 = 0.0;
+    let m_i = batch as i32;
+    let n_i = n_out as i32;
+    let k_i = n_in as i32;
+    let total_tiles = (batch as u32).div_ceil(128) * (n_out as u32).div_ceil(128);
+    let cfg = cudarc::driver::LaunchConfig {
+        grid_dim: (total_tiles, 1, 1),
+        block_dim: (256, 1, 1),
+        shared_mem_bytes: 0,
+    };
+    let mut b = stream.launch_builder(kernels.sgemm_nn_tc_typed.get(dt));
+    b.arg(&y.ptr);
+    b.arg(&x.ptr);
+    b.arg(&w.ptr);
+    b.arg(&bias_ptr);
+    b.arg(&alpha);
+    b.arg(&beta);
+    b.arg(&m_i);
+    b.arg(&n_i);
+    b.arg(&k_i);
+    b.arg(&k_i);
+    b.arg(&n_i);
+    b.arg(&n_i);
+    unsafe { b.launch(cfg) }.map_err(|e| format!("sgemm_bi_nn_tc: {e:?}"))?;
+    Ok(())
+}
+
 /// Typed NN forward: `Y = X @ W + bias` (bias f32, fused into the kernel).
 pub fn sgemm_bi_forward_typed(
     stream: &Arc<cudarc::driver::CudaStream>,

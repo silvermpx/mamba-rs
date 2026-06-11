@@ -29,6 +29,13 @@ pub struct GpuCtx {
     /// `MAMBA_RS_BATCH_INVARIANT=1` environment variable when strict
     /// cross-batch bit-identity is required.
     batch_invariant: std::cell::Cell<bool>,
+    /// Opt-in tensor-core tier for the batch-invariant typed GEMMs
+    /// (stage 5). SEPARATE numeric contract: mma.sync f32 accumulation
+    /// differs from the scalar __fmaf_rn chain, so outputs do not bit-match
+    /// the scalar triad — but the TC kernels are fully deterministic and
+    /// batch-invariant across all M. Effective only together with
+    /// `batch_invariant`. Env: MAMBA_RS_BI_TENSOR_CORES.
+    bi_tensor_cores: std::cell::Cell<bool>,
     /// Grow-only f32 scratch triple for the batch-invariant typed-GEMM
     /// upcast fallback: typed shapes without a native typed bucket run as
     /// "upcast inputs → f32 sgemm_bi → RNE downcast output", bit-identical
@@ -80,6 +87,9 @@ impl GpuCtx {
         let batch_invariant = std::env::var("MAMBA_RS_BATCH_INVARIANT")
             .ok()
             .is_some_and(|v| matches!(v.as_str(), "1" | "true" | "yes" | "on"));
+        let bi_tensor_cores = std::env::var("MAMBA_RS_BI_TENSOR_CORES")
+            .ok()
+            .is_some_and(|v| matches!(v.as_str(), "1" | "true" | "yes" | "on"));
         Ok(Self {
             stream,
             kernels,
@@ -89,6 +99,7 @@ impl GpuCtx {
             half_staging_ptr: RefCell::new(0),
             half_staging_bytes: RefCell::new(0),
             batch_invariant: std::cell::Cell::new(batch_invariant),
+            bi_tensor_cores: std::cell::Cell::new(bi_tensor_cores),
             bi_upcast_scratch: [RefCell::new(None), RefCell::new(None), RefCell::new(None)],
         })
     }
@@ -206,6 +217,18 @@ impl GpuCtx {
     /// Returns `true` if the batch-invariant matvec path is enabled.
     pub fn batch_invariant(&self) -> bool {
         self.batch_invariant.get()
+    }
+
+    /// Enable or disable the tensor-core tier of the batch-invariant typed
+    /// GEMMs (stage 5). Different numeric contract than the scalar triad —
+    /// deterministic and batch-invariant, but not bit-equal to it.
+    pub fn set_bi_tensor_cores(&self, on: bool) {
+        self.bi_tensor_cores.set(on);
+    }
+
+    /// Returns `true` if the tensor-core bi tier is enabled.
+    pub fn bi_tensor_cores(&self) -> bool {
+        self.bi_tensor_cores.get()
     }
 
     /// Disable TF32 Tensor Cores — use full f32 SGEMM for parity tests.

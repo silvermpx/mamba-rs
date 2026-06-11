@@ -434,6 +434,15 @@ pub fn bi_sgemm_forward_typed(
     bias_ptr: cudarc::driver::sys::CUdeviceptr,
     dims: (usize, usize, usize),
 ) -> Result<(), String> {
+    // Stage 5 tensor-core tier: opt-in, SEPARATE numeric contract (see
+    // `sgemm_bi_forward_tc`). Tried first so big shapes get the TC speed;
+    // shapes below its gate fall through to the scalar buckets.
+    if ctx.bi_tensor_cores()
+        && super::sgemm_bi::sgemm_bi_forward_tc(&ctx.stream, &ctx.kernels, y, x, w, bias_ptr, dims)
+            .is_ok()
+    {
+        return Ok(());
+    }
     if super::sgemm_bi::sgemm_bi_forward_typed(&ctx.stream, &ctx.kernels, y, x, w, bias_ptr, dims)
         .is_ok()
     {
