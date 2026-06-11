@@ -50,6 +50,13 @@ pub struct Mamba3Scratch {
 
     // ── Backward B8: residual ──
     pub d_residual_buf: Vec<f32>, // [T * d_model]
+
+    // ── Backward B3 hot-path buffers (zero-allocation rule: these used to
+    // be per-call vec! allocations inside backward_mamba3_layer_batched) ──
+    pub d_d_param_buf: Vec<f32>,   // [nheads]
+    pub cum_angles_flat: Vec<f32>, // [T * nheads * n_angles]
+    pub d_k_carry: Vec<f32>,       // [nheads * d_state]
+    pub d_k_carry_next: Vec<f32>,  // [nheads * d_state]
 }
 
 impl Mamba3Scratch {
@@ -91,6 +98,10 @@ impl Mamba3Scratch {
             d_post_norm_flat: vec![0.0; t * dm],
             post_norm_buf: vec![0.0; t * dm],
             d_residual_buf: vec![0.0; t * dm],
+            d_d_param_buf: vec![0.0; nh],
+            cum_angles_flat: vec![0.0; t * nh * na],
+            d_k_carry: vec![0.0; nh * ds],
+            d_k_carry_next: vec![0.0; nh * ds],
         }
     }
 
@@ -126,5 +137,9 @@ impl Mamba3Scratch {
         self.d_post_norm_flat.fill(0.0);
         self.post_norm_buf.fill(0.0);
         self.d_residual_buf.fill(0.0);
+        self.d_d_param_buf.fill(0.0);
+        self.cum_angles_flat.fill(0.0);
+        self.d_k_carry.fill(0.0);
+        self.d_k_carry_next.fill(0.0);
     }
 }

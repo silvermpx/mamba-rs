@@ -161,7 +161,7 @@ pub fn mamba_layer_step(
         scratch.delta[d] = if raw > 20.0 {
             raw
         } else {
-            (1.0 + fast_exp_scalar(raw)).ln()
+            fast_exp_scalar(raw).ln_1p()
         };
     }
 
@@ -373,10 +373,10 @@ pub fn mamba_step_batch(
         // Parallel: each sample is independent at T=1 (no cross-sample dependencies)
         use rayon::prelude::*;
 
-        // Split output into per-sample chunks for safe parallel write
-        let out_chunks: Vec<&mut [f32]> = outputs.chunks_mut(d_model).collect();
-        out_chunks
-            .into_par_iter()
+        // par_chunks_mut iterates per-sample output slices directly —
+        // no per-step Vec of pointers (zero-allocation hot path).
+        outputs
+            .par_chunks_mut(d_model)
             .zip(states.par_iter_mut())
             .zip(scratches.par_iter_mut())
             .enumerate()

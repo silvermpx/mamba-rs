@@ -1,5 +1,21 @@
 //! LLM token sampling: temperature, top-k, top-p, min-p, repetition penalty.
 
+use std::cell::RefCell;
+
+// Reusable per-thread scratch: top-k index permutation and top-p
+// (index, prob) staging. Capacity persists across tokens, so the
+// per-generated-token sampling pipeline performs no heap allocation
+// after the first call on a thread.
+#[derive(Default)]
+struct SampleScratch {
+    indices: Vec<usize>,
+    indexed: Vec<(usize, f32)>,
+}
+
+thread_local! {
+    static SAMPLE_SCRATCH: RefCell<SampleScratch> = RefCell::new(SampleScratch::default());
+}
+
 /// Sampling parameters for text generation.
 #[derive(Clone, Debug)]
 pub struct SampleParams {
@@ -107,26 +123,33 @@ pub fn apply_top_k(logits: &mut [f32], k: usize) -> usize {
         return logits.len();
     }
     let n = logits.len();
-    let mut indices: Vec<usize> = (0..n).collect();
-    indices.select_nth_unstable_by(k, |&a, &b| {
-        logits[b]
-            .partial_cmp(&logits[a])
-            .unwrap_or(std::cmp::Ordering::Equal)
+    SAMPLE_SCRATCH.with(|cell| {
+        let mut scratch = cell.borrow_mut();
+        let indices = &mut scratch.indices;
+        indices.clear();
+        indices.extend(0..n);
+        indices.select_nth_unstable_by(k, |&a, &b| {
+            logits[b]
+                .partial_cmp(&logits[a])
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        for &idx in &indices[k..] {
+            logits[idx] = f32::NEG_INFINITY;
+        }
     });
-    for &idx in &indices[k..] {
-        logits[idx] = f32::NEG_INFINITY;
-    }
     k
 }
 
 /// Softmax in-place (numerically stable).
 pub fn softmax_inplace(logits: &mut [f32]) {
     let max = logits.iter().copied().fold(f32::NEG_INFINITY, f32::max);
-    let mut sum = 0.0f32;
     for l in logits.iter_mut() {
-        *l = (*l - max).exp();
-        sum += *l;
+        *l -= max;
     }
+    // SIMD exp over the whole vocab (NEON/AVX2). Inputs masked to -inf by
+    // top-k clamp to fast_exp's lower bound and come out as exactly 0.0.
+    crate::ops::fast_math::fast_exp_inplace(logits);
+    let sum: f32 = logits.iter().sum();
     if sum > 0.0 {
         let inv_sum = 1.0 / sum;
         for l in logits.iter_mut() {
@@ -146,20 +169,34 @@ pub fn apply_top_p(probs: &mut [f32], p: f32) {
     if !p.is_finite() || p <= 0.0 || p >= 1.0 {
         return;
     }
-    let mut indexed: Vec<(usize, f32)> = probs.iter().copied().enumerate().collect();
-    indexed.sort_unstable_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-    let mut cumsum = 0.0f32;
-    let mut cutoff = indexed.len();
-    for (i, &(_, prob)) in indexed.iter().enumerate() {
-        cumsum += prob;
-        if cumsum > p {
-            cutoff = i + 1;
-            break;
+    SAMPLE_SCRATCH.with(|cell| {
+        let mut scratch = cell.borrow_mut();
+        let indexed = &mut scratch.indexed;
+        indexed.clear();
+        // Zero-probability entries (masked by top-k) can't affect the
+        // nucleus and are already zero — only sort the survivors. With
+        // top-k active this is a k·log(k) sort instead of V·log(V).
+        indexed.extend(
+            probs
+                .iter()
+                .copied()
+                .enumerate()
+                .filter(|&(_, prob)| prob > 0.0),
+        );
+        indexed.sort_unstable_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        let mut cumsum = 0.0f32;
+        let mut cutoff = indexed.len();
+        for (i, &(_, prob)) in indexed.iter().enumerate() {
+            cumsum += prob;
+            if cumsum > p {
+                cutoff = i + 1;
+                break;
+            }
         }
-    }
-    for &(idx, _) in &indexed[cutoff..] {
-        probs[idx] = 0.0;
-    }
+        for &(idx, _) in &indexed[cutoff..] {
+            probs[idx] = 0.0;
+        }
+    });
     renormalize(probs);
 }
 

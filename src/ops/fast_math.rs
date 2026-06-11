@@ -75,22 +75,41 @@ pub fn fast_exp_scalar(x: f32) -> f32 {
 
 /// Apply fast exp() to each element in a slice (in-place).
 /// Dispatches to SIMD when available: NEON (AArch64, 4-wide), AVX2+FMA (x86_64, 8-wide).
+///
+/// On x86_64 the AVX2+FMA feature check is resolved ONCE into a cached
+/// function pointer: this function is called per channel per timestep per
+/// layer with only `d_state` elements, where two `is_x86_feature_detected!`
+/// lookups per call are measurable overhead.
 #[inline]
 pub fn fast_exp_inplace(buf: &mut [f32]) {
     #[cfg(target_arch = "aarch64")]
     {
         fast_exp_neon(buf);
     }
-    #[cfg(not(target_arch = "aarch64"))]
+    #[cfg(target_arch = "x86_64")]
     {
-        #[cfg(target_arch = "x86_64")]
-        if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
-            unsafe { fast_exp_avx2(buf) };
-            return;
-        }
-        for v in buf.iter_mut() {
-            *v = fast_exp_scalar(*v);
-        }
+        use std::sync::OnceLock;
+        static DISPATCH: OnceLock<fn(&mut [f32])> = OnceLock::new();
+        let f = DISPATCH.get_or_init(|| {
+            if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
+                |b: &mut [f32]| unsafe { fast_exp_avx2(b) }
+            } else {
+                fast_exp_scalar_slice
+            }
+        });
+        f(buf);
+    }
+    #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+    {
+        fast_exp_scalar_slice(buf);
+    }
+}
+
+/// Scalar fallback over a slice (non-SIMD targets / no AVX2 at runtime).
+#[cfg(not(target_arch = "aarch64"))]
+fn fast_exp_scalar_slice(buf: &mut [f32]) {
+    for v in buf.iter_mut() {
+        *v = fast_exp_scalar(*v);
     }
 }
 

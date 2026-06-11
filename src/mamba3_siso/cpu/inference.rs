@@ -142,6 +142,16 @@ pub fn mamba3_layer_step(
     );
 
     // 6. Per-head: bias + RoPE + A/DT + trapezoidal SSM
+    // tanh(angles_raw) * pi depends only on the angle index — hoist out of
+    // the head loop (it was recomputed nh times per step).
+    let mut tanh_pi = [0.0_f32; 64];
+    if n_rope > 0 {
+        let pi = std::f32::consts::PI;
+        for (a, tp) in tanh_pi[..n_rope].iter_mut().enumerate() {
+            *tp = scratch.proj[angles_off + a].tanh() * pi;
+        }
+    }
+
     for h in 0..nh {
         let g = h / (nh / ng);
 
@@ -162,10 +172,8 @@ pub fn mamba3_layer_step(
         // RoPE: per-head angle accumulation and rotation
         if n_rope > 0 {
             let angle_base = h * n_rope;
-            let pi = std::f32::consts::PI;
             for a in 0..n_rope {
-                let raw = scratch.proj[angles_off + a];
-                let delta = raw.tanh() * pi * dt_val;
+                let delta = tanh_pi[a] * dt_val;
                 let mut acc = state.angle_state[angle_base + a] as f64 + delta as f64;
                 let two_pi_64 = 2.0 * std::f64::consts::PI;
                 acc -= two_pi_64 * (acc / two_pi_64).floor();

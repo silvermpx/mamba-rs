@@ -22,9 +22,8 @@ use super::weights::TrainMamba3Weights;
 struct Mamba3ThreadScratch {
     phase: Mamba3Scratch,
     temporal_flat: Vec<f32>,
-    d_model: usize,
-    d_inner: usize,
-    seq_len: usize,
+    /// Full dims snapshot — any field change resizes some buffer.
+    dims: Mamba3Dims,
 }
 
 impl Mamba3ThreadScratch {
@@ -32,9 +31,7 @@ impl Mamba3ThreadScratch {
         Self {
             phase: Mamba3Scratch::zeros(dims),
             temporal_flat: vec![0.0; dims.seq_len * dims.d_model],
-            d_model: dims.d_model,
-            d_inner: dims.d_inner,
-            seq_len: dims.seq_len,
+            dims: *dims,
         }
     }
 }
@@ -49,9 +46,7 @@ where
 {
     M3_THREAD_SCRATCH.with(|cell| {
         let mut opt = cell.borrow_mut();
-        let needs_reinit = opt.as_ref().is_some_and(|s| {
-            s.d_model != dims.d_model || s.d_inner != dims.d_inner || s.seq_len != dims.seq_len
-        });
+        let needs_reinit = opt.as_ref().is_some_and(|s| s.dims != *dims);
         if needs_reinit {
             *opt = None;
         }
@@ -237,10 +232,26 @@ pub fn parallel_mamba3_backward(
 
     let n_threads = rayon::current_num_threads().min(batch_size);
 
-    // Pre-allocate per-thread gradient slots (zeroed).
-    let mut slots: Vec<TrainMamba3Weights> = (0..n_threads)
-        .map(|_| TrainMamba3Weights::zeros(dims, input_dim))
-        .collect();
+    // Reusable per-thread gradient slots (zero-allocation rule) — see the
+    // M1 counterpart in mamba_ssm/cpu/parallel.rs for rationale.
+    let mut pool_guard = M3_GRAD_SLOT_POOL.lock().unwrap();
+    let rebuild = match pool_guard.as_ref() {
+        Some(p) => p.dims != *dims || p.input_dim != input_dim || p.slots.len() < n_threads,
+        None => true,
+    };
+    if rebuild {
+        *pool_guard = Some(M3GradSlotPool {
+            slots: (0..n_threads)
+                .map(|_| TrainMamba3Weights::zeros(dims, input_dim))
+                .collect(),
+            dims: *dims,
+            input_dim,
+        });
+    }
+    let slots = &mut pool_guard.as_mut().unwrap().slots[..n_threads];
+    for slot in slots.iter_mut() {
+        slot.zero();
+    }
 
     // SAFETY: each thread writes to disjoint regions:
     // - slots[tid]: exclusive (static partition by tid)
@@ -291,12 +302,15 @@ pub fn parallel_mamba3_backward(
         }
     });
 
-    // Fixed balanced binary-tree reduce: deterministic order regardless of
-    // thread count. Always ((slot[0]+slot[1])+(slot[2]+slot[3]))+...
-    while slots.len() > 1 {
-        let half = slots.len() / 2;
-        let remainder = slots.len() % 2;
-        let (left, right_and_rest) = slots.split_at_mut(half);
+    // Fixed stride-half tree reduce over the first `len` slots: pairing is
+    // slot[i] += slot[i+half] with the odd leftover swapped into place — a
+    // pure function of n_threads, so the f32 summation order (and result
+    // bits) are reproducible for a fixed thread-pool size.
+    let mut len = slots.len();
+    while len > 1 {
+        let half = len / 2;
+        let remainder = len % 2;
+        let (left, right_and_rest) = slots[..len].split_at_mut(half);
         let right = &right_and_rest[..half];
         left.par_iter_mut()
             .zip(right.par_iter())
@@ -304,17 +318,22 @@ pub fn parallel_mamba3_backward(
                 a.add_inplace(b);
             });
         if remainder == 1 {
-            let last_idx = slots.len() - 1;
-            slots.swap(half, last_idx);
-            slots.truncate(half + 1);
+            slots.swap(half, len - 1);
+            len = half + 1;
         } else {
-            slots.truncate(half);
+            len = half;
         }
     }
-    if let Some(reduced) = slots.pop() {
-        d_weights.add_inplace(&reduced);
-    }
+    d_weights.add_inplace(&slots[0]);
 }
+
+/// Process-wide reusable gradient-slot pool for [`parallel_mamba3_backward`].
+struct M3GradSlotPool {
+    slots: Vec<TrainMamba3Weights>,
+    dims: Mamba3Dims,
+    input_dim: usize,
+}
+static M3_GRAD_SLOT_POOL: std::sync::Mutex<Option<M3GradSlotPool>> = std::sync::Mutex::new(None);
 
 #[cfg(test)]
 mod tests {

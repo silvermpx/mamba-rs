@@ -27,6 +27,14 @@ pub struct PhaseScratch {
     /// can vectorize `exp` across `d_state` lanes, but only if the inputs
     /// are contiguous — hence the per-d fill-then-batch sequence.
     pub da_buf: Vec<f32>,
+    /// Contiguous post-conv u rows for the batched x_proj SGEMM: `[T * d_inner]`.
+    pub u_flat: Vec<f32>,
+    /// Batched x_proj output: `[T * xdbl_dim]`.
+    pub xdbl_flat: Vec<f32>,
+    /// Contiguous delta_raw input rows (xdbl[:, :dt_rank]): `[T * dt_rank]`.
+    pub dt_in_flat: Vec<f32>,
+    /// Batched dt_proj output: `[T * d_inner]`.
+    pub delta_raw_flat: Vec<f32>,
 }
 
 impl PhaseScratch {
@@ -40,6 +48,10 @@ impl PhaseScratch {
             gated_flat: vec![0.0; t * dims.d_inner],
             out_flat: vec![0.0; t * dims.d_model],
             da_buf: vec![0.0; dims.d_state],
+            u_flat: vec![0.0; t * dims.d_inner],
+            xdbl_flat: vec![0.0; t * (dims.dt_rank + 2 * dims.d_state)],
+            dt_in_flat: vec![0.0; t * dims.dt_rank],
+            delta_raw_flat: vec![0.0; t * dims.d_inner],
         }
     }
 }

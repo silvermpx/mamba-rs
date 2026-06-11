@@ -142,7 +142,7 @@ pub(crate) fn softplus(x: f32) -> f32 {
     if x > 20.0 {
         x
     } else {
-        (1.0_f32 + fast_exp_scalar(x)).ln()
+        fast_exp_scalar(x).ln_1p()
     }
 }
 
@@ -288,6 +288,16 @@ pub fn forward_mamba3_layer_batched(
         let vp = base_t + o.v_prev;
         acts.data[vp..vp + nh * hd].copy_from_slice(&v_state[..nh * hd]);
 
+        // tanh(angles_raw) * pi depends only on (t, a) — hoist out of the
+        // head loop (it was recomputed nh times per timestep).
+        let mut tanh_pi = [0.0_f32; MAX_ANGLES];
+        if n_angles > 0 {
+            let pi = std::f32::consts::PI;
+            for (a, tp) in tanh_pi[..n_angles].iter_mut().enumerate() {
+                *tp = acts.data[base_t + o.angles_raw + a].tanh() * pi;
+            }
+        }
+
         for h in 0..nh {
             let g = h / (nh / ng);
 
@@ -310,10 +320,8 @@ pub fn forward_mamba3_layer_batched(
             // RoPE
             if n_angles > 0 {
                 let ab = h * n_angles;
-                let pi = std::f32::consts::PI;
                 for a in 0..n_angles {
-                    let raw = acts.data[base_t + o.angles_raw + a];
-                    let delta = raw.tanh() * pi * dt_val;
+                    let delta = tanh_pi[a] * dt_val;
                     let mut acc = angle_state[ab + a] as f64 + delta as f64;
                     let two_pi_64 = 2.0 * std::f64::consts::PI;
                     acc -= two_pi_64 * (acc / two_pi_64).floor();
@@ -334,13 +342,11 @@ pub fn forward_mamba3_layer_batched(
                 }
             }
 
-            // Save angle_cumsum
+            // Save per-step angle velocity tanh(raw)*pi (backward reads it
+            // to rebuild cumulative angles without recomputing tanh).
             if h == nh - 1 && n_angles > 0 {
-                let pi = std::f32::consts::PI;
-                for a in 0..n_angles {
-                    acts.data[base_t + o.angle_cumsum + a] =
-                        acts.data[base_t + o.angles_raw + a].tanh() * pi;
-                }
+                acts.data[base_t + o.angle_cumsum..base_t + o.angle_cumsum + n_angles]
+                    .copy_from_slice(&tanh_pi[..n_angles]);
             }
 
             // Alpha, beta, gamma

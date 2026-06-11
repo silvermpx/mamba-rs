@@ -122,15 +122,17 @@ pub fn backward_mamba3_layer_batched(
         }
     }
 
-    let mut d_d_param = vec![0.0_f32; nh];
-
-    // Pre-compute cumulative angles for backward RoPE reconstruction.
-    // If angle_state_init is provided (burn-in case), initialize running from it
-    // so that cumulative angles match what forward actually used.
-    let cum_angles = if n_angles > 0 {
-        let mut ca = vec![0.0_f32; seq_len * nh * n_angles];
-        let pi = std::f32::consts::PI;
-        let two_pi = 2.0 * pi;
+    // Pre-compute cumulative angles for backward RoPE reconstruction into
+    // pre-allocated scratch (zero-allocation hot path). If angle_state_init
+    // is provided (burn-in case), initialize running from it so that
+    // cumulative angles match what forward actually used.
+    //
+    // The accumulation mirrors forward EXACTLY (f64 add + f64 2*pi wrap,
+    // rounded to f32 each step): a pure-f32 reconstruction drifts from the
+    // forward rotation at every wrap event and the error random-walks over
+    // long sequences.
+    if n_angles > 0 {
+        let two_pi_64 = 2.0 * std::f64::consts::PI;
         for h in 0..nh {
             let mut running = [0.0_f32; MAX_ANGLES];
             if let Some(init) = angle_state_init {
@@ -141,18 +143,18 @@ pub fn backward_mamba3_layer_batched(
                 let base_s = acts.base(t);
                 let dt_h = acts.data[base_s + o.dt_val + h];
                 for (a, r) in running[..n_angles].iter_mut().enumerate() {
-                    let raw = acts.data[base_s + o.angles_raw + a];
-                    *r += raw.tanh() * pi * dt_h;
-                    *r -= two_pi * (*r / two_pi).floor();
+                    // Forward saved tanh(raw)*pi in the angle_cumsum field —
+                    // reuse it instead of recomputing tanh nh times per t.
+                    let delta = acts.data[base_s + o.angle_cumsum + a] * dt_h;
+                    let mut acc = *r as f64 + delta as f64;
+                    acc -= two_pi_64 * (acc / two_pi_64).floor();
+                    *r = acc as f32;
                 }
                 let off = t * nh * n_angles + h * n_angles;
-                ca[off..off + n_angles].copy_from_slice(&running[..n_angles]);
+                scratch.cum_angles_flat[off..off + n_angles].copy_from_slice(&running[..n_angles]);
             }
         }
-        ca
-    } else {
-        Vec::new()
-    };
+    }
 
     // ═══ B3+B4+B5 (fused): BPTT + RoPE backward + bias accumulation ═══
     scratch.d_h.fill(0.0);
@@ -163,16 +165,14 @@ pub fn backward_mamba3_layer_batched(
     scratch.d_angle_cumsum_flat.fill(0.0);
     scratch.d_b_pre_rope_flat.fill(0.0);
     scratch.d_c_pre_rope_flat.fill(0.0);
-    d_d_param.fill(0.0);
-
-    let mut d_k_carry = vec![0.0_f32; nh * ds];
-    let mut d_k_carry_next = vec![0.0_f32; nh * ds];
+    scratch.d_d_param_buf.fill(0.0);
+    scratch.d_k_carry[..nh * ds].fill(0.0);
 
     for t in (0..seq_len).rev() {
         let base_t = acts.base(t);
         let d_y = &scratch.d_y_flat[t * di..(t + 1) * di];
 
-        d_k_carry_next[..nh * ds].fill(0.0);
+        scratch.d_k_carry_next[..nh * ds].fill(0.0);
 
         for h in 0..nh {
             let g = h / (nh / ng);
@@ -195,7 +195,8 @@ pub fn backward_mamba3_layer_batched(
             let mut cum_angle_h = [0.0_f32; MAX_ANGLES];
             if n_angles > 0 {
                 let ca_off = t * nh * n_angles + h * n_angles;
-                cum_angle_h[..n_angles].copy_from_slice(&cum_angles[ca_off..ca_off + n_angles]);
+                cum_angle_h[..n_angles]
+                    .copy_from_slice(&scratch.cum_angles_flat[ca_off..ca_off + n_angles]);
                 for a in 0..n_angles {
                     let (sin_a, cos_a) = cum_angle_h[a].sin_cos();
                     let (i0, i1) = (2 * a, 2 * a + 1);
@@ -211,7 +212,7 @@ pub fn backward_mamba3_layer_batched(
             }
 
             let mut d_k_h = [0.0_f32; MAX_DS];
-            d_k_h[..ds].copy_from_slice(&d_k_carry[h * ds..h * ds + ds]);
+            d_k_h[..ds].copy_from_slice(&scratch.d_k_carry[h * ds..h * ds + ds]);
             let mut d_c_h = [0.0_f32; MAX_DS];
 
             for p in 0..hd {
@@ -219,7 +220,7 @@ pub fn backward_mamba3_layer_batched(
                 let dy_val = d_y[h * hd + p];
                 let v_prev = acts.data[base_t + o.v_prev + h * hd + p];
 
-                d_d_param[h] += dy_val * x_val;
+                scratch.d_d_param_buf[h] += dy_val * x_val;
 
                 for n in 0..ds {
                     let idx = (h * hd + p) * ds + n;
@@ -242,7 +243,7 @@ pub fn backward_mamba3_layer_batched(
                     if t > 0 {
                         scratch.d_x_flat[(t - 1) * di + h * hd + p] += dh * beta_h * k_prev_n;
                     }
-                    d_k_carry_next[h * ds + n] += dh * beta_h * v_prev;
+                    scratch.d_k_carry_next[h * ds + n] += dh * beta_h * v_prev;
                     d_x_val += dh * gamma_h * k_local[n];
                     d_k_h[n] += dh * gamma_h * x_val;
 
@@ -284,10 +285,14 @@ pub fn backward_mamba3_layer_batched(
             }
         }
 
-        d_k_carry[..nh * ds].copy_from_slice(&d_k_carry_next[..nh * ds]);
+        let (carry, carry_next) = (&mut scratch.d_k_carry, &scratch.d_k_carry_next);
+        carry[..nh * ds].copy_from_slice(&carry_next[..nh * ds]);
     }
 
-    for (dl, &dd) in d_layer.d_param[..nh].iter_mut().zip(&d_d_param[..nh]) {
+    for (dl, &dd) in d_layer.d_param[..nh]
+        .iter_mut()
+        .zip(&scratch.d_d_param_buf[..nh])
+    {
         *dl += dd;
     }
 
@@ -347,15 +352,18 @@ pub fn backward_mamba3_layer_batched(
     scratch.d_trap_flat.fill(0.0);
     scratch.d_angles_flat.fill(0.0);
 
-    // Reverse cumsum of d_angle_cumsum
+    // Reverse cumsum of d_angle_cumsum. Each (h, a) lane is independent, so
+    // walk t outermost and add whole contiguous [nh * n_angles] rows —
+    // unit-stride and auto-vectorizable (the old h→a→t(rev) nest strode
+    // nh*n_angles floats per inner iteration).
     if n_angles > 0 {
-        for h in 0..nh {
-            for a in 0..n_angles {
-                for t in (0..seq_len.saturating_sub(1)).rev() {
-                    let cur = t * nh * n_angles + h * n_angles + a;
-                    let nxt = (t + 1) * nh * n_angles + h * n_angles + a;
-                    scratch.d_angle_cumsum_flat[cur] += scratch.d_angle_cumsum_flat[nxt];
-                }
+        let row = nh * n_angles;
+        for t in (0..seq_len.saturating_sub(1)).rev() {
+            let (head, tail) = scratch.d_angle_cumsum_flat.split_at_mut((t + 1) * row);
+            let cur_row = &mut head[t * row..(t + 1) * row];
+            let nxt_row = &tail[..row];
+            for (c, &n) in cur_row.iter_mut().zip(nxt_row) {
+                *c += n;
             }
         }
     }
@@ -365,6 +373,14 @@ pub fn backward_mamba3_layer_batched(
         let d_alpha = &scratch.d_alpha_flat[t * nh..(t + 1) * nh];
         let d_beta = &scratch.d_beta_flat[t * nh..(t + 1) * nh];
         let d_gamma = &scratch.d_gamma_flat[t * nh..(t + 1) * nh];
+
+        // tanh(angles_raw) is head-invariant — hoist out of the head loop.
+        let mut tanh_raw_t = [0.0_f32; MAX_ANGLES];
+        if n_angles > 0 {
+            for (a, tr) in tanh_raw_t[..n_angles].iter_mut().enumerate() {
+                *tr = acts.data[base_t + o.angles_raw + a].tanh();
+            }
+        }
 
         for h in 0..nh {
             let a_val = acts.data[base_t + o.a_val + h];
@@ -383,8 +399,7 @@ pub fn backward_mamba3_layer_batched(
             if n_angles > 0 {
                 let pi = std::f32::consts::PI;
                 for a in 0..n_angles {
-                    let raw = acts.data[base_t + o.angles_raw + a];
-                    let tanh_raw = raw.tanh();
+                    let tanh_raw = tanh_raw_t[a];
                     let d_delta = scratch.d_angle_cumsum_flat[t * nh * n_angles + h * n_angles + a];
                     d_dt_from_angles += d_delta * tanh_raw * pi;
                     scratch.d_angles_flat[t * n_angles + a] +=

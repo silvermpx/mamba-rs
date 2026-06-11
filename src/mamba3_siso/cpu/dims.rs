@@ -6,7 +6,7 @@
 use crate::mamba3_siso::config::Mamba3Config;
 
 /// Collected Mamba-3 SISO dimensions for a given sequence length.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Mamba3Dims {
     pub d_model: usize,
     pub d_inner: usize,

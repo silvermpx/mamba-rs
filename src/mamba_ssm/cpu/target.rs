@@ -5,7 +5,7 @@
 
 use super::weights::TrainMambaWeights;
 use crate::ops::blas::matvec_forward;
-use crate::ops::fast_math::{RMS_NORM_EPS, fast_exp_scalar};
+use crate::ops::fast_math::{RMS_NORM_EPS, fast_exp_inplace, fast_exp_scalar};
 
 /// Scratch buffers for single-step (T=1) target Mamba forward.
 pub struct MambaTargetScratch {
@@ -27,6 +27,11 @@ pub struct MambaTargetScratch {
     pub y: Vec<f32>,
     /// SSM hidden state (zero-initialized per call) `[d_inner * d_state]`.
     pub h: Vec<f32>,
+    /// Per-call cache of `exp(a_log)` `[d_inner * d_state]` (CPU perf rule 3:
+    /// never recompute the decay base inside the recurrence loop).
+    pub a_exp: Vec<f32>,
+    /// Contiguous `da` staging for SIMD exp `[d_state]` (CPU perf rule 4).
+    pub da: Vec<f32>,
 }
 
 impl MambaTargetScratch {
@@ -47,6 +52,8 @@ impl MambaTargetScratch {
             delta: vec![0.0; d_inner],
             y: vec![0.0; d_inner],
             h: vec![0.0; d_inner * d_state],
+            a_exp: vec![0.0; d_inner * d_state],
+            da: vec![0.0; d_state],
         }
     }
 }
@@ -141,7 +148,7 @@ pub fn forward_mamba_target_step(
             scratch.delta[d] = if raw > 20.0 {
                 raw
             } else {
-                (1.0 + fast_exp_scalar(raw)).ln()
+                fast_exp_scalar(raw).ln_1p()
             };
         }
 
@@ -149,20 +156,29 @@ pub fn forward_mamba_target_step(
         scratch.h[..di * ds].fill(0.0);
         let b_offset = dr;
         let c_offset = dr + ds;
+        // exp(a_log) once per layer, SIMD (perf rules 3+4: the old code
+        // recomputed -exp(a_log) per element per step, scalar).
+        scratch.a_exp[..di * ds].copy_from_slice(&lw.a_log[..di * ds]);
+        fast_exp_inplace(&mut scratch.a_exp[..di * ds]);
         for d in 0..di {
             let delta_d = scratch.delta[d];
             let u_d = scratch.x[d];
             let delta_u_d = delta_d * u_d;
             let mut y_d = 0.0_f32;
 
+            // Batch da = exp(delta * -exp(a_log)) into contiguous buffer,
+            // then one SIMD exp pass.
+            for n in 0..ds {
+                scratch.da[n] = -delta_d * scratch.a_exp[d * ds + n];
+            }
+            fast_exp_inplace(&mut scratch.da[..ds]);
+
             for n in 0..ds {
                 let idx = d * ds + n;
-                let a_dn = -fast_exp_scalar(lw.a_log[idx]);
-                let da = fast_exp_scalar(delta_d * a_dn);
                 let b_n = scratch.xdbl[b_offset + n];
                 let c_n = scratch.xdbl[c_offset + n];
 
-                scratch.h[idx] = da * scratch.h[idx] + delta_u_d * b_n;
+                scratch.h[idx] = scratch.da[n] * scratch.h[idx] + delta_u_d * b_n;
                 y_d += scratch.h[idx] * c_n;
             }
 
@@ -223,6 +239,10 @@ pub struct MambaTargetSeqScratch {
     pub conv_states: Vec<f32>,
     /// SSM hidden state across layers `[n_layers * d_inner * d_state]`.
     pub ssm_states: Vec<f32>,
+    /// Per-call cache of `exp(a_log)` for all layers `[n_layers * d_inner * d_state]`.
+    pub a_exp: Vec<f32>,
+    /// Contiguous `da` staging for SIMD exp `[d_state]`.
+    pub da: Vec<f32>,
     /// Sequence length (number of timesteps to process).
     pub seq_len: usize,
 }
@@ -258,6 +278,8 @@ impl MambaTargetSeqScratch {
             residual: vec![0.0; dm],
             conv_states: vec![0.0; nl * di * dc],
             ssm_states: vec![0.0; nl * di * ds],
+            a_exp: vec![0.0; nl * di * ds],
+            da: vec![0.0; ds],
             seq_len,
         }
     }
@@ -285,6 +307,16 @@ pub fn forward_mamba_target_sequence(
     let xdbl_dim = dr + 2 * ds;
     let conv_per_layer = di * dc;
     let ssm_per_layer = di * ds;
+
+    // exp(a_log) for every layer, once per call, SIMD (perf rules 3+4: the
+    // old code recomputed -exp(a_log) per element per TIMESTEP, scalar —
+    // ~2x the transcendental count of the optimized path, T times over).
+    let n_layers = w.layers.len();
+    for (l, lw) in w.layers.iter().enumerate() {
+        scratch.a_exp[l * ssm_per_layer..(l + 1) * ssm_per_layer]
+            .copy_from_slice(&lw.a_log[..ssm_per_layer]);
+    }
+    fast_exp_inplace(&mut scratch.a_exp[..n_layers * ssm_per_layer]);
 
     for t in 0..seq_len {
         // Load this timestep's input_proj output
@@ -371,29 +403,34 @@ pub fn forward_mamba_target_sequence(
                 scratch.delta[d] = if raw > 20.0 {
                     raw
                 } else {
-                    (1.0 + fast_exp_scalar(raw)).ln()
+                    fast_exp_scalar(raw).ln_1p()
                 };
             }
 
             // SSM
             let b_offset = dr;
             let c_offset = dr + ds;
-            let h = &mut scratch.ssm_states[ssm_start..ssm_start + ssm_per_layer];
             for d in 0..di {
                 let delta_d = scratch.delta[d];
                 let u_d = scratch.x[d];
                 let delta_u_d = delta_d * u_d;
                 let mut y_d = 0.0_f32;
 
+                // Batch da into contiguous buffer, one SIMD exp pass, using
+                // the per-call exp(a_log) cache.
                 for n in 0..ds {
-                    let idx = d * ds + n;
-                    let a_dn = -fast_exp_scalar(lw.a_log[idx]);
-                    let da = fast_exp_scalar(delta_d * a_dn);
+                    scratch.da[n] = -delta_d * scratch.a_exp[ssm_start + d * ds + n];
+                }
+                fast_exp_inplace(&mut scratch.da[..ds]);
+
+                for n in 0..ds {
+                    let idx = ssm_start + d * ds + n;
                     let b_n = scratch.xdbl[b_offset + n];
                     let c_n = scratch.xdbl[c_offset + n];
 
-                    h[idx] = da * h[idx] + delta_u_d * b_n;
-                    y_d += h[idx] * c_n;
+                    scratch.ssm_states[idx] =
+                        scratch.da[n] * scratch.ssm_states[idx] + delta_u_d * b_n;
+                    y_d += scratch.ssm_states[idx] * c_n;
                 }
 
                 y_d += lw.d_param[d] * u_d;

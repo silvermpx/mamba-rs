@@ -6,7 +6,7 @@ use crate::config::MambaConfig;
 
 /// Collected Mamba dimensions to avoid passing 8+ separate usize params.
 /// Used by all optimized forward/backward functions.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MambaDims {
     /// Model dimension (features projected to this size).
     pub d_model: usize,

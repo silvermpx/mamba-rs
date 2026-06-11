@@ -21,7 +21,7 @@
 use super::flat::{MambaBackboneFlat, MambaLayerFlat};
 use super::scratch::PhaseScratch;
 use super::weights::{TrainMambaLayerWeights, TrainMambaWeights};
-use crate::ops::blas::{matvec_forward, sgemm_forward};
+use crate::ops::blas::sgemm_forward;
 use crate::ops::dims::{MambaDims, MambaRecurrentState};
 use crate::ops::fast_math::{RMS_NORM_EPS, fast_exp_inplace, fast_exp_scalar};
 
@@ -141,14 +141,20 @@ pub fn forward_mamba_layer_batched(
     }
 
     // ===================================================================
-    // Phase F4: Sequential SSM core (per-timestep)
-    //           conv1d -> x_proj -> dt_proj -> SSM recurrence -> gating
+    // Phase F4: conv1d (sequential state) -> BATCHED x_proj/dt_proj ->
+    //           sequential SSM recurrence -> gating
+    //
+    // The depthwise conv depends only on x_branch (fully known after F3),
+    // so conv + SiLU runs for all T first, then x_proj and dt_proj become
+    // ONE SGEMM each over [T, ...] rows — exactly mirroring how backward
+    // B4/B5 already batch these projections. The old code issued 2*T
+    // matvecs, re-streaming both weight matrices T times.
     // ===================================================================
     let b_offset = dt_rank;
     let c_offset = dt_rank + ds;
 
+    // -- F4a: conv1d shift + fused SiLU for ALL timesteps --
     for t in 0..seq_len {
-        // -- F4a: conv1d shift + fused SiLU --
         {
             let x_branch = acts.x_branch(t);
             for (d, &xb) in x_branch.iter().enumerate().take(di) {
@@ -162,11 +168,14 @@ pub fn forward_mamba_layer_batched(
         acts.conv_state_mut(t)
             .copy_from_slice(&conv_state[..di * dc]);
 
-        // Fused depthwise conv1d dot product + SiLU
+        // Fused depthwise conv1d dot product + SiLU. u is written both to
+        // acts (backward reads it) and to the contiguous u_flat rows the
+        // batched x_proj SGEMM consumes.
         {
             let step_base = t * acts.offsets.step_stride;
             let pc_start = step_base + acts.offsets.post_conv;
             let u_start = step_base + acts.offsets.u;
+            let uf = t * di;
             for d in 0..di {
                 let base = d * dc;
                 let mut val = layer_w.conv1d_bias[d];
@@ -174,50 +183,56 @@ pub fn forward_mamba_layer_batched(
                     val += conv_state[base + k] * layer_w.conv1d_weight[base + k];
                 }
                 acts.data[pc_start + d] = val;
-                acts.data[u_start + d] = val / (1.0 + fast_exp_scalar(-val));
+                let u = val / (1.0 + fast_exp_scalar(-val));
+                acts.data[u_start + d] = u;
+                scratch.u_flat[uf + d] = u;
             }
         }
+    }
 
-        // -- F4b: x_proj: u -> xdbl --
-        // Copy u out to avoid aliasing (u and xdbl in same flat buffer).
-        let gs_off = t * di;
-        scratch.gate_silu_flat[..di].copy_from_slice(acts.u(t));
-        matvec_forward(
-            acts.xdbl_mut(t),
-            &scratch.gate_silu_flat[..di],
-            &layer_w.x_proj_w,
-            None,
-            di,
-            xdbl_dim,
-        );
+    // -- F4b: x_proj as ONE SGEMM over all T rows --
+    sgemm_forward(
+        &mut scratch.xdbl_flat[..seq_len * xdbl_dim],
+        &scratch.u_flat[..seq_len * di],
+        &layer_w.x_proj_w,
+        None,
+        seq_len,
+        di,
+        xdbl_dim,
+    );
+    for t in 0..seq_len {
+        let row = &scratch.xdbl_flat[t * xdbl_dim..(t + 1) * xdbl_dim];
+        acts.xdbl_mut(t).copy_from_slice(row);
+        scratch.dt_in_flat[t * dt_rank..(t + 1) * dt_rank].copy_from_slice(&row[..dt_rank]);
+    }
 
-        // -- F4c: dt_proj + softplus --
-        // Copy dt portion out (xdbl and delta_raw alias in same flat buffer).
-        scratch.gate_silu_flat[..dt_rank].copy_from_slice(&acts.xdbl(t)[..dt_rank]);
-        matvec_forward(
-            acts.delta_raw_mut(t),
-            &scratch.gate_silu_flat[..dt_rank],
-            &layer_w.dt_proj_w,
-            Some(&layer_w.dt_proj_b),
-            dt_rank,
-            di,
-        );
-
-        // Softplus
-        {
-            let step_base = t * acts.offsets.step_stride;
-            let dr_start = step_base + acts.offsets.delta_raw;
-            let d_start = step_base + acts.offsets.delta;
-            for d in 0..di {
-                let raw = acts.data[dr_start + d];
-                acts.data[d_start + d] = if raw > 20.0 {
-                    raw
-                } else {
-                    (1.0_f32 + fast_exp_scalar(raw)).ln()
-                };
-            }
+    // -- F4c: dt_proj as ONE SGEMM + softplus --
+    sgemm_forward(
+        &mut scratch.delta_raw_flat[..seq_len * di],
+        &scratch.dt_in_flat[..seq_len * dt_rank],
+        &layer_w.dt_proj_w,
+        Some(&layer_w.dt_proj_b),
+        seq_len,
+        dt_rank,
+        di,
+    );
+    for t in 0..seq_len {
+        let step_base = t * acts.offsets.step_stride;
+        let dr_start = step_base + acts.offsets.delta_raw;
+        let d_start = step_base + acts.offsets.delta;
+        let df = t * di;
+        for d in 0..di {
+            let raw = scratch.delta_raw_flat[df + d];
+            acts.data[dr_start + d] = raw;
+            acts.data[d_start + d] = if raw > 20.0 {
+                raw
+            } else {
+                fast_exp_scalar(raw).ln_1p()
+            };
         }
+    }
 
+    for t in 0..seq_len {
         // -- F4d: SSM recurrence --
         acts.h_prev_mut(t).copy_from_slice(&ssm_state[..di * ds]);
 
@@ -273,6 +288,7 @@ pub fn forward_mamba_layer_batched(
             let y_start = step_base + acts.offsets.y;
             let gpost_start = step_base + acts.offsets.gate_post_silu;
             let gated_start = step_base + acts.offsets.gated;
+            let gs_off = t * di;
             for d in 0..di {
                 scratch.gated_flat[gs_off + d] =
                     acts.data[y_start + d] * acts.data[gpost_start + d];

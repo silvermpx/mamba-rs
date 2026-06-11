@@ -31,10 +31,11 @@ pub struct MambaThreadScratch {
     pub mamba_input_flat: Vec<f32>,
     /// Gradient of mamba input (single timestep) `[mamba_input_dim]`.
     pub d_mamba_input: Vec<f32>,
-    /// Cached d_model for invalidation when tuner changes dims.
-    pub d_model: usize,
-    /// Cached d_inner for invalidation when tuner changes dims.
-    pub d_inner: usize,
+    /// Full dims snapshot for invalidation when the tuner changes the model
+    /// architecture between trials. Comparing only d_model/d_inner missed
+    /// changes to d_state/d_conv/dt_rank/mamba_input_dim, leaving stale
+    /// undersized buffers on warmed rayon workers (OOB panic).
+    pub dims: MambaDims,
 }
 
 impl MambaThreadScratch {
@@ -48,8 +49,7 @@ impl MambaThreadScratch {
             temporal_flat: vec![0.0; dims.seq_len * dims.d_model],
             mamba_input_flat: vec![0.0; dims.seq_len * dims.mamba_input_dim],
             d_mamba_input: vec![0.0; dims.mamba_input_dim],
-            d_model: dims.d_model,
-            d_inner: dims.d_inner,
+            dims: *dims,
         }
     }
 }
@@ -70,12 +70,9 @@ where
 {
     THREAD_SCRATCH.with(|cell| {
         let mut opt = cell.borrow_mut();
-        // Check if dims changed (tuner changes model architecture between trials)
-        let needs_reinit = opt.as_ref().is_some_and(|s| {
-            s.d_model != dims.d_model
-                || s.d_inner != dims.d_inner
-                || s.temporal_flat.len() != dims.seq_len * dims.d_model
-        });
+        // Check if dims changed (tuner changes model architecture between
+        // trials) — full struct compare: every field sizes some buffer.
+        let needs_reinit = opt.as_ref().is_some_and(|s| s.dims != *dims);
         if needs_reinit {
             *opt = None;
         }
@@ -271,10 +268,28 @@ pub fn parallel_mamba_backward(
 
     let n_threads = rayon::current_num_threads().min(b_sz);
 
-    // Pre-allocate per-thread gradient slots (zeroed).
-    let mut slots: Vec<TrainMambaWeights> = (0..n_threads)
-        .map(|_| TrainMambaWeights::zeros_from_dims(dims))
-        .collect();
+    // Reusable per-thread gradient slots (zero-allocation rule: rebuilding
+    // n_threads full TrainMambaWeights every call was the last remaining
+    // per-step heap allocation in the CPU training path). The pool persists
+    // across calls behind a process-wide mutex and is rebuilt only when
+    // dims or the required slot count change.
+    let mut pool_guard = M1_GRAD_SLOT_POOL.lock().unwrap();
+    let rebuild = match pool_guard.as_ref() {
+        Some(p) => p.dims != *dims || p.slots.len() < n_threads,
+        None => true,
+    };
+    if rebuild {
+        *pool_guard = Some(M1GradSlotPool {
+            slots: (0..n_threads)
+                .map(|_| TrainMambaWeights::zeros_from_dims(dims))
+                .collect(),
+            dims: *dims,
+        });
+    }
+    let slots = &mut pool_guard.as_mut().unwrap().slots[..n_threads];
+    for slot in slots.iter_mut() {
+        slot.zero();
+    }
 
     // SAFETY: each thread writes to disjoint regions:
     // - slots[tid]: exclusive (static partition by tid)
@@ -319,12 +334,15 @@ pub fn parallel_mamba_backward(
         }
     });
 
-    // Fixed balanced binary-tree reduce: deterministic order regardless of
-    // thread count. Always ((slot[0]+slot[1])+(slot[2]+slot[3]))+...
-    while slots.len() > 1 {
-        let half = slots.len() / 2;
-        let remainder = slots.len() % 2;
-        let (left, right_and_rest) = slots.split_at_mut(half);
+    // Fixed stride-half tree reduce over the first `len` slots: the
+    // pairing (slot[i] += slot[i+half], odd leftover swapped into place) is
+    // a pure function of n_threads, so the f32 summation order — and the
+    // result bits — are reproducible for a fixed thread-pool size.
+    let mut len = slots.len();
+    while len > 1 {
+        let half = len / 2;
+        let remainder = len % 2;
+        let (left, right_and_rest) = slots[..len].split_at_mut(half);
         let right = &right_and_rest[..half];
         left.par_iter_mut()
             .zip(right.par_iter())
@@ -332,17 +350,21 @@ pub fn parallel_mamba_backward(
                 a.add_inplace(b);
             });
         if remainder == 1 {
-            let last_idx = slots.len() - 1;
-            slots.swap(half, last_idx);
-            slots.truncate(half + 1);
+            slots.swap(half, len - 1);
+            len = half + 1;
         } else {
-            slots.truncate(half);
+            len = half;
         }
     }
-    if let Some(reduced) = slots.pop() {
-        grads_mamba.add_inplace(&reduced);
-    }
+    grads_mamba.add_inplace(&slots[0]);
 }
+
+/// Process-wide reusable gradient-slot pool for [`parallel_mamba_backward`].
+struct M1GradSlotPool {
+    slots: Vec<TrainMambaWeights>,
+    dims: MambaDims,
+}
+static M1_GRAD_SLOT_POOL: std::sync::Mutex<Option<M1GradSlotPool>> = std::sync::Mutex::new(None);
 
 // ---------------------------------------------------------------------------
 // O1: Parallel Mamba target forward — rayon across B samples (Bellman targets)
