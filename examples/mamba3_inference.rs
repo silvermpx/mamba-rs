@@ -18,10 +18,10 @@ fn main() {
         ngroups: 1,
         n_layers: 4,
         rope_fraction: 0.5,
-        a_floor: 0.0625,
+        a_floor: 1e-4, // reference default (state-spaces/mamba A_floor)
         is_outproj_norm: false,
     };
-    cfg.validate();
+    cfg.validate().unwrap();
 
     let input_dim = 32;
     let weights = Mamba3Weights::init(&cfg, input_dim, 42);

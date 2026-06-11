@@ -95,6 +95,7 @@ fn build_setup(ctx: &GpuCtx, dtype: WeightDtype, batch: usize, seq_len: usize) -
         seq_len,
         mamba_input_dim: d_model,
         n_layers,
+        scan_mode: mamba_rs::config::ScanMode::Auto,
     };
 
     let acts = GpuMambaBackboneMixedActs::new(&ctx.stream, &dims, dtype).unwrap();

@@ -71,6 +71,7 @@ fn run_smoke(dtype: WeightDtype) {
         seq_len,
         mamba_input_dim: d_model,
         n_layers,
+        scan_mode: mamba_rs::config::ScanMode::Auto,
     };
 
     let mut acts = GpuMambaBackboneMixedActs::new(&ctx.stream, &dims, dtype).unwrap();

@@ -385,7 +385,7 @@ mod tests {
     #[test]
     fn test_m3_single_step_nonzero() {
         let cfg = test_cfg();
-        cfg.validate();
+        cfg.validate().expect("invalid Mamba3Config");
         let w = Mamba3Weights::init(&cfg, 16, 42);
         let mut state = Mamba3State::zeros(&cfg);
         let mut scratch = Mamba3StepScratch::new(&cfg);

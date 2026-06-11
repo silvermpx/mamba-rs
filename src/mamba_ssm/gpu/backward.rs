@@ -121,7 +121,7 @@ pub fn gpu_backward_mamba_layer(
         let t_i = t as i32;
         let di_i = di as i32;
         let ds_i = ds as i32;
-        let use_parallel = t > super::forward::PARALLEL_SCAN_THRESHOLD || ds > 64;
+        let use_parallel = dims.scan_mode.use_parallel(t, ds);
         let kernel = if use_parallel {
             ctx.kernels
                 .ssm_parallel_bwd_typed

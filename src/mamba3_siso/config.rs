@@ -57,56 +57,75 @@ impl Mamba3Config {
         2 * di + 2 * ng * ds + 3 * nh + na
     }
 
-    /// Validate all constraints. Panics on invalid configuration.
-    pub fn validate(&self) {
-        assert!(
-            self.headdim <= 32 && self.headdim.is_power_of_two(),
-            "headdim ({}) must be <= 32 and power of 2 (warp shuffle)",
-            self.headdim
-        );
-        assert!(
-            self.d_inner().is_multiple_of(self.headdim),
-            "d_inner ({}) must be divisible by headdim ({})",
-            self.d_inner(),
-            self.headdim
-        );
-        assert!(
-            self.d_state >= 1 && self.d_state <= 64,
-            "d_state ({}) must be in 1..=64 (CUDA register limit)",
-            self.d_state
-        );
-        assert!(
-            2 * self.num_rope_angles() <= self.d_state,
-            "2 * num_rope_angles ({}) must be <= d_state ({}) — rotation \
-             pairs may not cross the head boundary",
-            2 * self.num_rope_angles(),
-            self.d_state
-        );
-        assert!(
-            self.headdim * self.d_state <= 1024,
-            "headdim*d_state ({}) must be <= 1024 (CUDA register budget)",
-            self.headdim * self.d_state
-        );
-        assert!(self.ngroups >= 1, "ngroups must be >= 1");
-        assert!(
-            self.nheads().is_multiple_of(self.ngroups),
-            "nheads ({}) must be divisible by ngroups ({})",
-            self.nheads(),
-            self.ngroups
-        );
-        assert!(
-            self.rope_fraction == 0.5 || self.rope_fraction == 1.0,
-            "rope_fraction must be 0.5 or 1.0, got {}",
-            self.rope_fraction
-        );
-        assert!(
-            self.a_floor > 0.0,
-            "a_floor must be positive, got {}",
-            self.a_floor
-        );
-        assert!(self.n_layers >= 1, "n_layers must be >= 1");
-        assert!(self.d_model >= 1, "d_model must be >= 1");
-        assert!(self.expand >= 1, "expand must be >= 1");
+    /// Validate all constraints.
+    ///
+    /// Returns `Err` with a description on invalid configuration — same
+    /// contract as [`crate::config::MambaConfig::validate`] (the old
+    /// panicking variant made library constructors abort instead of
+    /// surfacing a recoverable error).
+    pub fn validate(&self) -> Result<(), String> {
+        if !(self.headdim <= 32 && self.headdim.is_power_of_two()) {
+            return Err(format!(
+                "headdim ({}) must be <= 32 and power of 2 (warp shuffle)",
+                self.headdim
+            ));
+        }
+        if !self.d_inner().is_multiple_of(self.headdim) {
+            return Err(format!(
+                "d_inner ({}) must be divisible by headdim ({})",
+                self.d_inner(),
+                self.headdim
+            ));
+        }
+        if !(self.d_state >= 1 && self.d_state <= 64) {
+            return Err(format!(
+                "d_state ({}) must be in 1..=64 (CUDA register limit)",
+                self.d_state
+            ));
+        }
+        if 2 * self.num_rope_angles() > self.d_state {
+            return Err(format!(
+                "2 * num_rope_angles ({}) must be <= d_state ({}) — rotation \
+                 pairs may not cross the head boundary",
+                2 * self.num_rope_angles(),
+                self.d_state
+            ));
+        }
+        if self.headdim * self.d_state > 1024 {
+            return Err(format!(
+                "headdim*d_state ({}) must be <= 1024 (CUDA register budget)",
+                self.headdim * self.d_state
+            ));
+        }
+        if self.ngroups < 1 {
+            return Err("ngroups must be >= 1".into());
+        }
+        if !self.nheads().is_multiple_of(self.ngroups) {
+            return Err(format!(
+                "nheads ({}) must be divisible by ngroups ({})",
+                self.nheads(),
+                self.ngroups
+            ));
+        }
+        if !(self.rope_fraction == 0.5 || self.rope_fraction == 1.0) {
+            return Err(format!(
+                "rope_fraction must be 0.5 or 1.0, got {}",
+                self.rope_fraction
+            ));
+        }
+        if self.a_floor <= 0.0 {
+            return Err(format!("a_floor must be positive, got {}", self.a_floor));
+        }
+        if self.n_layers < 1 {
+            return Err("n_layers must be >= 1".into());
+        }
+        if self.d_model < 1 {
+            return Err("d_model must be >= 1".into());
+        }
+        if self.expand < 1 {
+            return Err("expand must be >= 1".into());
+        }
+        Ok(())
     }
 }
 
@@ -137,7 +156,7 @@ mod tests {
     #[test]
     fn test_default_config_valid() {
         let cfg = Mamba3Config::default();
-        cfg.validate();
+        cfg.validate().unwrap();
         assert_eq!(cfg.d_inner(), 256);
         assert_eq!(cfg.nheads(), 16);
         assert_eq!(cfg.num_rope_angles(), 4); // ceil(16 * 0.5 / 2) = 4
@@ -145,32 +164,35 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "headdim")]
     fn test_invalid_headdim() {
-        Mamba3Config {
+        let err = Mamba3Config {
             headdim: 7,
             ..Mamba3Config::default()
         }
-        .validate();
+        .validate()
+        .unwrap_err();
+        assert!(err.contains("headdim"), "{err}");
     }
 
     #[test]
-    #[should_panic(expected = "d_state")]
     fn test_invalid_d_state() {
-        Mamba3Config {
+        let err = Mamba3Config {
             d_state: 128,
             ..Mamba3Config::default()
         }
-        .validate();
+        .validate()
+        .unwrap_err();
+        assert!(err.contains("d_state"), "{err}");
     }
 
     #[test]
-    #[should_panic(expected = "rope_fraction")]
     fn test_invalid_rope_fraction() {
-        Mamba3Config {
+        let err = Mamba3Config {
             rope_fraction: 0.25,
             ..Mamba3Config::default()
         }
-        .validate();
+        .validate()
+        .unwrap_err();
+        assert!(err.contains("rope_fraction"), "{err}");
     }
 }

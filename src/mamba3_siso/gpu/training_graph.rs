@@ -5,8 +5,9 @@
 //! sync_master_to_compute` as one CUDA Graph; replay launches the full
 //! training step with a single `cuGraphLaunch`.
 //!
-//! Same constraints as the M1 variant: bf16 only (f16 needs in-graph
-//! overflow handling), per (batch, seq_len) shape, all scratch
+//! Same constraints as the M1 variant: this module's structs are bf16-only
+//! by assert (the trainer's `capture_graph_f16` adds the in-graph
+//! loss-scaler handling for f16), per (batch, seq_len) shape, all scratch
 //! pre-allocated, pointer-stability invariant enforced on replay.
 
 use cudarc::driver::CudaGraph;

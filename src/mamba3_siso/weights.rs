@@ -118,7 +118,7 @@ impl Mamba3Weights {
     /// - B/C biases: ones (per state-spaces/mamba `mamba3.py`:
     ///   `B_bias = 1 + torch.zeros(...)`, `C_bias = 1 + torch.zeros(...)`)
     pub fn init(cfg: &Mamba3Config, input_dim: usize, seed: u64) -> Self {
-        cfg.validate();
+        cfg.validate().expect("invalid Mamba3Config");
         let mut w = Self::zeros(cfg, input_dim);
         let mut rng = SimpleRng::new(seed);
         let d = cfg.d_model;

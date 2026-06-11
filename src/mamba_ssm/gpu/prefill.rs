@@ -225,7 +225,7 @@ pub fn gpu_forward_inference_prefill<W: MambaWeightsView>(
             let t_i = t as i32;
             let di_i = di as i32;
             let ds_i = ds as i32;
-            if t > PARALLEL_SCAN_THRESHOLD || ds > 64 {
+            if dims.scan_mode.use_parallel(t, ds) {
                 let mut builder = ctx
                     .stream
                     .launch_builder(&ctx.kernels.ssm_parallel_fwd_nosave);

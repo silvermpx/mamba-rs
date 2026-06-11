@@ -35,7 +35,7 @@ use std::sync::Arc;
 /// The parallel scan launches (batch * d_inner) blocks of 128 threads with shared memory,
 /// vs the sequential kernel which launches ceil(batch * d_inner / 256) blocks of 256 threads.
 /// The crossover point depends on GPU occupancy; 256 is a conservative safe choice.
-pub const PARALLEL_SCAN_THRESHOLD: usize = 256;
+pub const PARALLEL_SCAN_THRESHOLD: usize = crate::config::ScanMode::PARALLEL_SCAN_THRESHOLD;
 
 // ---------------------------------------------------------------------------
 // GPU Mamba dimensions (mirrors CPU MambaDims)
@@ -66,6 +66,10 @@ pub struct GpuMambaDims {
     pub mamba_input_dim: usize,
     /// Number of stacked Mamba layers.
     pub n_layers: usize,
+    /// GPU SSM scan dispatch (Sequential / Parallel / Auto with the
+    /// T > PARALLEL_SCAN_THRESHOLD heuristic). d_state > 64 always forces
+    /// the parallel kernels regardless of mode (register-array limit).
+    pub scan_mode: crate::config::ScanMode,
 }
 
 impl GpuMambaDims {
@@ -571,7 +575,7 @@ pub fn gpu_forward_mamba_layer(
         let di_i = di as i32;
         let ds_i = ds as i32;
 
-        if t > PARALLEL_SCAN_THRESHOLD || ds > 64 {
+        if dims.scan_mode.use_parallel(t, ds) {
             // Parallel prefix scan: O(T / NTHREADS) per thread instead of O(T).
             // Grid: (batch, d_inner) — one block per (b, d) pair.
             let mut builder = ctx.stream.launch_builder(&ctx.kernels.ssm_parallel_fwd);
@@ -947,7 +951,7 @@ pub fn gpu_forward_mamba_target_burnin(
             let di_i = di as i32;
             let ds_i = ds as i32;
 
-            if t > PARALLEL_SCAN_THRESHOLD || ds > 64 {
+            if dims.scan_mode.use_parallel(t, ds) {
                 let mut builder = ctx
                     .stream
                     .launch_builder(&ctx.kernels.ssm_parallel_fwd_nosave);

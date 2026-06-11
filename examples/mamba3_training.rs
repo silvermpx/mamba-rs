@@ -21,10 +21,10 @@ fn main() {
         ngroups: 1,
         n_layers: 1,
         rope_fraction: 0.5,
-        a_floor: 0.0625,
+        a_floor: 1e-4, // reference default (state-spaces/mamba A_floor)
         is_outproj_norm: false,
     };
-    cfg.validate();
+    cfg.validate().unwrap();
 
     let seq_len = 16;
     let dims = Mamba3Dims::from_config(&cfg, seq_len);

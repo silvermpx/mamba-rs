@@ -1820,6 +1820,7 @@ impl GpuMambaBackbone {
             dt_rank: cfg.dt_rank(),
             xdbl_dim: cfg.xdbl_dim(),
             mamba_input_dim: cfg.d_model,
+            scan_mode: cfg.scan_mode,
         };
         super::backward::GpuMambaTargetMixedScratch::new(self.stream(), &dims, dtype)
     }
@@ -1841,6 +1842,7 @@ impl GpuMambaBackbone {
             dt_rank: cfg.dt_rank(),
             xdbl_dim: cfg.xdbl_dim(),
             mamba_input_dim: cfg.d_model, // HF LLM path: no input_proj, input_dim == d_model
+            scan_mode: cfg.scan_mode,
         };
         super::backward::GpuMambaTargetScratch::new(self.stream(), &dims)
     }

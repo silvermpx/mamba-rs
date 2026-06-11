@@ -256,6 +256,7 @@ fn m1_cpu_gpu_backward_parity_f32() {
         seq_len,
         mamba_input_dim: input_dim,
         n_layers: nl,
+        scan_mode: mamba_rs::config::ScanMode::Auto,
     };
     let mut gpu_acts = GpuMambaBackboneActs::new(&ctx.stream, &gpu_dims).expect("gpu acts");
     let mut gpu_scratch = GpuMambaScratch::new(&ctx.stream, &gpu_dims).expect("gpu scratch");

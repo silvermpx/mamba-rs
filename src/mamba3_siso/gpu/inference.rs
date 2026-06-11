@@ -350,7 +350,7 @@ impl Mamba3GpuInferenceEngine {
         input_dim: usize,
         batch: usize,
     ) -> Result<Self, String> {
-        cfg.validate();
+        cfg.validate()?;
         unsafe { device.context().disable_event_tracking() };
         let stream = device.fork_stream()?;
         let arch = GpuDevice::nvrtc_arch(device.compute_capability);
@@ -930,7 +930,7 @@ impl Mamba3GpuInferenceMixed {
         batch: usize,
         bulk_dtype: WeightDtype,
     ) -> Result<Self, String> {
-        cfg.validate();
+        cfg.validate()?;
         // Reuse the f32 engine constructor to compile kernels + upload f32
         // weights (needed because the mixed path still consumes f32 biases
         // and per-head coefficients via the f32 engine's weight-agnostic

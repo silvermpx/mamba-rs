@@ -117,7 +117,7 @@ fn time_training_step(
     };
     use mamba_rs::mamba3_siso::cpu::weights::TrainMamba3Weights;
 
-    cfg.validate();
+    cfg.validate().unwrap();
     let input_dim = cfg.d_model;
     let dims = Mamba3Dims::from_config(cfg, seq_len);
     let w = init_rl_weights(&dims, input_dim);

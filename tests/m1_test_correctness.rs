@@ -898,6 +898,7 @@ mod gpu_tests {
             seq_len,
             mamba_input_dim: input_dim,
             n_layers: cfg.n_layers,
+            scan_mode: mamba_rs::config::ScanMode::Auto,
         };
 
         let gpu_w = GpuMambaTrainWeights::from_cpu(&ctx.stream, &weights).unwrap();
@@ -1042,6 +1043,7 @@ mod gpu_tests {
             seq_len,
             mamba_input_dim: input_dim,
             n_layers: cfg.n_layers,
+            scan_mode: mamba_rs::config::ScanMode::Auto,
         };
 
         let gpu_w = GpuMambaTrainWeights::from_cpu(&ctx.stream, &weights).unwrap();
@@ -1099,7 +1101,11 @@ mod gpu_tests {
         // TF32 (10-bit mantissa) compounds ~5e-3 per SGEMM through ~50 backward ops
         // in a 3-layer Mamba network. Elements near zero need atol protection;
         // large elements need rtol scaling.
-        let atol = 0.5_f32; // absolute tolerance for near-zero gradients
+        // atol was 0.5 — wide enough to hide a zeroed or sign-flipped small
+        // gradient entirely. TF32 noise on near-zero elements in this fixture
+        // is O(1e-3); 0.02 keeps 20x headroom while actually constraining
+        // small components.
+        let atol = 0.02_f32; // absolute tolerance for near-zero gradients
         let rtol = 0.10_f32; // 10% relative tolerance for large gradients
 
         macro_rules! check_grad {
@@ -1306,6 +1312,7 @@ mod gpu_tests {
             seq_len,
             mamba_input_dim: input_dim,
             n_layers,
+            scan_mode: mamba_rs::config::ScanMode::Auto,
         };
 
         let gpu_w = GpuMambaTrainWeights::from_cpu(&ctx.stream, &weights).unwrap();
@@ -1908,6 +1915,7 @@ mod gpu_extra_tests {
             seq_len,
             mamba_input_dim: input_dim,
             n_layers: cfg.n_layers,
+            scan_mode: mamba_rs::config::ScanMode::Auto,
         };
 
         let gpu_w = GpuMambaTrainWeights::from_cpu(&ctx.stream, &weights).unwrap();

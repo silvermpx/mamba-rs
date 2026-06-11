@@ -564,7 +564,7 @@ fn test_m3_custom_config_ngroups() {
         a_floor: 0.0625,
         is_outproj_norm: false,
     };
-    cfg.validate();
+    cfg.validate().unwrap();
     let input_dim = 16;
     let w = Mamba3Weights::init(&cfg, input_dim, 123);
     let mut state = Mamba3State::zeros(&cfg);

@@ -1,4 +1,4 @@
-//! CUDA-Graph-captured training step for Mamba SSM mixed-precision (bf16).
+//! CUDA-Graph-captured training step for Mamba SSM mixed precision.
 //!
 //! Captures **forward + backward + AdamW + master→compute sync** as a
 //! single CUDA Graph. On replay, the entire training step launches with
@@ -6,10 +6,11 @@
 //! cuts launch overhead from ~50–100 µs per step to ~5 µs.
 //!
 //! ## Scope
-//! - **bf16 only**: the f16 path needs the inf/nan overflow check after
-//!   backward, which forces a CPU readback (`OverflowFlag::read`) and
-//!   thus breaks graph capture. f16 needs a separate "polling kernel"
-//!   refactor — out of scope for Step 14.
+//! - **bf16 directly**; **f16 via the trainer's `capture_graph_f16`**,
+//!   which extends this body with the in-graph loss-scaler kernels
+//!   (`check_inf_nan` + `scale_grads_skip`) so AdamW can run
+//!   unconditionally and the CPU reads the overflow flag only AFTER
+//!   replay. The structs in this module stay bf16-only by assert.
 //! - **Per (batch, seq_len) shape**: a captured graph bakes in tensor
 //!   sizes via the kernel launch configs. A new shape requires a new
 //!   capture; the [`GpuMambaTrainingStepGraph`] holder records its dims

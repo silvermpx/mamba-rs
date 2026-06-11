@@ -80,6 +80,7 @@ fn m1_f32_training_graph_matches_eager() {
         seq_len,
         mamba_input_dim: dm,
         n_layers: nl,
+        scan_mode: mamba_rs::config::ScanMode::Auto,
     };
 
     let n = batch * seq_len * dm;

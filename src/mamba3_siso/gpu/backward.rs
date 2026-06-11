@@ -154,12 +154,12 @@ pub fn gpu_backward_mamba3_layer(
 
         if na > 0 {
             // ORDERING INVARIANT (important): `rope_bwd` writes
-            // `d_angle_cumsum` with a plain store (not atomicAdd). It MUST
-            // precede `m3_angle_dt_bwd_seq` (launched ~line 420 below)
-            // which accumulates INTO the same buffer via atomicAdd. If the
-            // order were reversed, rope_bwd's plain store would silently
-            // overwrite m3_angle_dt_bwd_seq's accumulated contribution.
-            // Both kernels target the same stream so serialisation is
+            // `d_angle_cumsum` with a plain store. It MUST precede
+            // `m3_angle_dt_bwd_seq` (launched below), which READS the
+            // buffer and emits Rule-B contribution tensors (post-refactor:
+            // no atomicAdd anywhere in this path). If the order were
+            // reversed, the angle backward would read stale values. Both
+            // kernels target the same stream, so serialization is
             // automatic; only the launch order in this function matters.
             let n_i = bt as i32;
             let nh_i = nh as i32;

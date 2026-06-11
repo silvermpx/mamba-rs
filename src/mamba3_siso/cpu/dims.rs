@@ -29,7 +29,7 @@ pub struct Mamba3Dims {
 impl Mamba3Dims {
     /// Construct from [`Mamba3Config`] and sequence length.
     pub fn from_config(config: &Mamba3Config, seq_len: usize) -> Self {
-        config.validate();
+        config.validate().expect("invalid Mamba3Config");
         Self {
             d_model: config.d_model,
             d_inner: config.d_inner(),

@@ -175,8 +175,12 @@ pub fn parallel_mamba_forward(
         acts: acts_ptr,
     };
 
-    // Single-thread BLAS inside rayon to prevent thread explosion
-    // (64 rayon workers × N BLIS threads). Per-sample SGEMM is tiny (T×d_model).
+    // BLAS threading note: nothing here forces single-threaded BLAS — the
+    // gemm-blas path is compiled with Parallelism::None, and the naive
+    // fallback is scalar, so neither oversubscribes. Apple Accelerate MAY
+    // use internal GCD threading; if rayon-worker × Accelerate
+    // oversubscription shows up in profiles, set VECLIB_MAXIMUM_THREADS=1
+    // in the environment (no programmatic API).
 
     (0..b_sz).into_par_iter().for_each(|b| {
         // SAFETY: each `b` accesses a disjoint region of the output arrays.
@@ -225,8 +229,6 @@ pub fn parallel_mamba_forward(
             out_b.copy_from_slice(&scratch.temporal_flat[last_t_start..last_t_start + dm]);
         });
     });
-
-    // Restore default BLAS threading
 }
 
 // ---------------------------------------------------------------------------
@@ -413,8 +415,6 @@ pub fn parallel_mamba_target_forward(
         temporal: temporal_ptr,
     };
 
-    // Single-thread BLAS inside rayon (target forward uses T=1, tiny matrices).
-
     (0..b_sz).into_par_iter().for_each(|b| {
         let inp_b = &target_mamba_inputs[b * mid..(b + 1) * mid];
 
@@ -484,8 +484,6 @@ pub fn parallel_mamba_target_forward_burnin(
     let ptr = &TargetRawPtr {
         temporal: temporal_ptr,
     };
-
-    // Single-thread BLAS inside rayon (per-sample SGEMMs are small).
 
     (0..b_sz).into_par_iter().for_each(|b| {
         let ip_b = &target_ip_out_flat[b * seq_len * dm..(b + 1) * seq_len * dm];

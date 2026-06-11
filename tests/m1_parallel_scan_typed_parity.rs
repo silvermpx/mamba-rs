@@ -47,6 +47,7 @@ fn dims_for(cfg: &MambaConfig, batch: usize, seq_len: usize) -> GpuMambaDims {
         seq_len,
         mamba_input_dim: cfg.d_model,
         n_layers: cfg.n_layers,
+        scan_mode: cfg.scan_mode,
     }
 }
 

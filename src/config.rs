@@ -4,21 +4,43 @@
 /// or parallel prefix scan O(T) work / O(log T) depth.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ScanMode {
-    /// Sequential O(T) scan — optimal for T <= 128. Zero overhead.
+    /// Sequential O(T) scan — zero overhead, optimal for short sequences.
     Sequential,
-    /// Parallel prefix scan — optimal for T >= 256. Uses warp shuffle + shared memory.
+    /// Parallel prefix scan — warp shuffle + shared memory, optimal for long T.
     Parallel,
-    /// Auto-select: Sequential for T <= 128, Parallel for T > 128.
+    /// Auto-select: Sequential for T <= 256, Parallel for T > 256
+    /// (PARALLEL_SCAN_THRESHOLD, tuned on RTX 6000 Ada).
     #[default]
     Auto,
 }
 
 impl ScanMode {
+    /// Auto threshold: sequential at or below, parallel above. Single source
+    /// of truth for the GPU dispatch (re-exported as
+    /// `mamba_ssm::gpu::forward::PARALLEL_SCAN_THRESHOLD`).
+    pub const PARALLEL_SCAN_THRESHOLD: usize = 256;
+
+    /// Resolve the effective scan choice for a sequence length and state dim.
+    ///
+    /// `d_state > 64` ALWAYS takes the parallel path regardless of the
+    /// requested mode: the sequential CUDA kernels keep per-(b,d) state in
+    /// register arrays capped at 64 and would silently no-op beyond that.
+    pub fn use_parallel(self, seq_len: usize, d_state: usize) -> bool {
+        if d_state > 64 {
+            return true;
+        }
+        match self {
+            Self::Sequential => false,
+            Self::Parallel => true,
+            Self::Auto => seq_len > Self::PARALLEL_SCAN_THRESHOLD,
+        }
+    }
+
     /// Resolve Auto to a concrete mode based on sequence length.
     pub fn resolve(self, seq_len: usize) -> Self {
         match self {
             Self::Auto => {
-                if seq_len <= 128 {
+                if seq_len <= Self::PARALLEL_SCAN_THRESHOLD {
                     Self::Sequential
                 } else {
                     Self::Parallel

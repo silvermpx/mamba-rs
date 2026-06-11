@@ -13,8 +13,10 @@
 //!   `ssm_backward_local_typed` kernel promotes typed `delta/u/B/C` on load
 //!   but keeps all scan variables in f32.
 //! - **T-length accumulators (`d_D_local`, `d_a_log_local`) stay f32**.
-//! - **Weight gradients stay f32** and accumulate via `atomicAdd` (elementwise
-//!   kernels) or `beta=1.0` cuBLAS GemmEx (`gpu_sgemm_backward_dw_grad_typed`).
+//! - **Weight gradients stay f32** and accumulate deterministically: Rule-B
+//!   per-sample partials + fixed-order `reduce_sum_axis0` for the elementwise
+//!   kernels, `beta=1.0` cuBLAS GemmEx for the GEMM grads (no atomicAdd
+//!   remains in any M1 backward kernel).
 //! - **Compute type `CUBLAS_COMPUTE_32F_PEDANTIC`** on every GemmEx —
 //!   intentional divergence from PyTorch's TF32 default; see 61325b3 for the
 //!   mamba-1.4b regression that proved TF32 on top of bf16 loses stability.
@@ -43,7 +45,7 @@
 //! - **B5** x_proj backward (typed dW + typed dX → `d_u_xproj`), then
 //!   `d_u += d_u_xproj` via `scatter_add_cols_typed` with `offset=0`.
 //! - **B6** conv1d_burnin_bwd_typed → `d_x_branch` + f32 `d_conv_w/b`
-//!   master grads (atomicAdd).
+//!   master grads (Rule-B partials + reduce).
 //! - **B7** concat(`d_x_branch`, `d_gate`) → `d_proj`; in_proj backward
 //!   (typed dW + typed dX → `d_norm`).
 //! - **B8** rmsnorm_bwd_f32in_typed: typed `d_norm` + f32 `residual` → f32
@@ -228,7 +230,7 @@ pub fn gpu_backward_mamba_layer_mixed(
         let ddd = scratch.d_d_local.cached_ptr();
         let da = scratch.d_a_log_local.cached_ptr();
 
-        if t > super::forward::PARALLEL_SCAN_THRESHOLD || ds > 64 {
+        if dims.scan_mode.use_parallel(t, ds) {
             // Parallel reverse-scan typed bwd (Step 8e).
             // Signature: h_saved, delta, u, B, C, a_neg, D, dy, d_delta,
             //   d_u, d_B_local, d_C_local, d_D_local, d_a_log_local,

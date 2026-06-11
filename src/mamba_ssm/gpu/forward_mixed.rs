@@ -582,7 +582,7 @@ pub fn gpu_forward_mamba_backbone_mixed(
             let t_i = t as i32;
             let di_i = di as i32;
             let ds_i = ds as i32;
-            if t > super::forward::PARALLEL_SCAN_THRESHOLD || ds > 64 {
+            if dims.scan_mode.use_parallel(t, ds) {
                 let kernel = k.ssm_parallel_fwd_typed.get(dt);
                 let mut bld = ctx.stream.launch_builder(kernel);
                 let y = layer_acts.y.cached_ptr();

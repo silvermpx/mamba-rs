@@ -159,12 +159,12 @@ pub struct MambaKernels {
     /// typed; matches DEFINE_GATING_BWD macro in elementwise.cu.
     pub gating_bwd_typed: TypedKernel,
     /// Typed dispatch for `rmsnorm_backward`. dx/dy typed; d_scale stays f32
-    /// (atomicAdd to master grad). Matches DEFINE_RMSNORM_BWD macro in
+    /// (Rule-B per-sample partials + reduce). Matches DEFINE_RMSNORM_BWD macro in
     /// norms.cu, follows NVIDIA Apex layer_norm pattern.
     pub rmsnorm_bwd_typed: TypedKernel,
     /// Typed dispatch for `conv1d_burnin_backward`. d_x_branch/d_u/post_conv
     /// typed; conv_states stays f32 (recurrent state); d_weight/d_bias
-    /// accumulate via atomicAdd to f32 master. Matches DEFINE_CONV1D_BURNIN_BWD
+    /// accumulate via Rule-B partials + fixed-order reduce. Matches DEFINE_CONV1D_BURNIN_BWD
     /// macro in conv1d.cu.
     pub conv1d_burnin_bwd_typed: TypedKernel,
 

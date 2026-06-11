@@ -48,7 +48,7 @@ mod cuda_example {
             ngroups: 1,
             n_layers: 2,
             rope_fraction: 0.5,
-            a_floor: 0.0625,
+            a_floor: 1e-4, // reference default (state-spaces/mamba A_floor)
             is_outproj_norm: true,
         };
         let input_dim = cfg.d_model;

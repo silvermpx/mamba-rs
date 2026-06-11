@@ -96,7 +96,7 @@ fn m3_cpu_benchmark() {
     println!();
 
     for (name, cfg) in &configs() {
-        cfg.validate();
+        cfg.validate().unwrap();
         let input_dim = cfg.d_model;
         let w = Mamba3Weights::init(cfg, input_dim, 42);
         let mut state = Mamba3State::zeros(cfg);
@@ -151,7 +151,7 @@ fn m3_cpu_benchmark() {
     println!();
 
     for (name, cfg) in &configs() {
-        cfg.validate();
+        cfg.validate().unwrap();
         let dims = Mamba3Dims::from_config(cfg, seq_len);
         let w = init_layer_w(&dims);
 
@@ -276,7 +276,7 @@ fn m3_cpu_benchmark() {
     println!();
 
     for (name, cfg) in &configs() {
-        cfg.validate();
+        cfg.validate().unwrap();
         let input_dim = cfg.d_model;
         let dims = Mamba3Dims::from_config(cfg, seq_len);
         let nh = dims.nheads;
