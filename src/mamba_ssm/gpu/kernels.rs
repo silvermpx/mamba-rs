@@ -363,6 +363,14 @@ pub struct MambaKernels {
     pub sgemm_nn_tc_typed: HalfKernel,
     pub sgemm_tn_tc_typed: HalfKernel,
     pub sgemm_nt_tc_typed: HalfKernel,
+    /// 64x64-tile TC twins (stage 5b): 128 threads / 4 warps per CTA,
+    /// bit-identical per element to the 128-tile TC kernels (same 32-wide
+    /// reduction slabs, same mma chain). Used by the dispatcher when the
+    /// 128-tile grid would underfill the GPU and for shapes with an output
+    /// dim in [64, 128).
+    pub sgemm_nn_tc64_typed: HalfKernel,
+    pub sgemm_tn_tc64_typed: HalfKernel,
+    pub sgemm_nt_tc64_typed: HalfKernel,
     pub sgemm_tn_big_typed: HalfKernel,
     pub sgemm_nt_big_typed: HalfKernel,
 }
@@ -687,6 +695,9 @@ impl MambaKernels {
             sgemm_nn_tc_typed: load_half("sgemm_bi_nn_tc")?,
             sgemm_tn_tc_typed: load_half("sgemm_bi_tn_tc")?,
             sgemm_nt_tc_typed: load_half("sgemm_bi_nt_tc")?,
+            sgemm_nn_tc64_typed: load_half("sgemm_bi_nn_tc64")?,
+            sgemm_tn_tc64_typed: load_half("sgemm_bi_tn_tc64")?,
+            sgemm_nt_tc64_typed: load_half("sgemm_bi_nt_tc64")?,
             sgemm_tn_big_typed: load_half_dynsmem("sgemm_bi_tn_big")?,
             sgemm_nt_big_typed: load_half_dynsmem("sgemm_bi_nt_big")?,
 

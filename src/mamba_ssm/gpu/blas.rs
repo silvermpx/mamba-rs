@@ -447,7 +447,7 @@ pub fn bi_sgemm_forward_typed(
             bias_ptr,
             dims,
         ) {
-            Ok(()) => return Ok(()),
+            Ok(_tile) => return Ok(()),
             // Below-tile-gate shapes drop to the scalar tier; real launch
             // failures must surface, not be recomputed around.
             Err(e) if e.starts_with("UNCOVERED") => {}
@@ -507,7 +507,7 @@ pub fn bi_sgemm_backward_dw_typed(
             x_saved,
             dims,
         ) {
-            Ok(()) => return Ok(()),
+            Ok(_tile) => return Ok(()),
             Err(e) if e.starts_with("UNCOVERED") => {}
             Err(e) => return Err(e),
         }
@@ -545,7 +545,7 @@ pub fn bi_sgemm_backward_dx_typed(
 ) -> Result<(), String> {
     if ctx.bi_tensor_cores() {
         match super::sgemm_bi::sgemm_bi_backward_dx_tc(&ctx.stream, &ctx.kernels, dx, dy, w, dims) {
-            Ok(()) => return Ok(()),
+            Ok(_tile) => return Ok(()),
             Err(e) if e.starts_with("UNCOVERED") => {}
             Err(e) => return Err(e),
         }
