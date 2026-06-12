@@ -1731,7 +1731,7 @@ pub enum TcTile {
 /// a 142-SM Ada is mostly idle on e.g. the d128 in_proj dW's 4-CTA grid).
 ///
 /// SAFE under the strict all-M invariance contract because the 64- and
-/// 128-tile TC kernels are BIT-IDENTICAL per output element (same 32-wide
+/// 128-tile TC kernels are BIT-IDENTICAL per output element (same BK=64
 /// reduction slabs, same ascending mma chain, same tail zero-fill —
 /// asserted by `tc64_and_tc128_bit_identical` in tests/sgemm_bi_tc.rs), so
 /// an M-dependent tile pick never changes output bits. 72 keeps every
@@ -1775,13 +1775,26 @@ impl TcTile {
     }
 
     /// 1-D launch config over the output tile grid `rows x cols`.
-    fn launch_cfg(self, rows: usize, cols: usize) -> cudarc::driver::LaunchConfig {
+    /// `dyn_bytes128`: the Tile128 kernel's dynamic-smem footprint (the
+    /// BK=64 staging exceeds the 48 KB static cap, so the 128-tile family
+    /// uses `extern __shared__`; per-op: NN 71 680, TN 69 632, NT 73 728 —
+    /// must stay <= the MAX_DYNAMIC_SHARED opt-in set at load,
+    /// kernels.rs). The Tile64 family stays on static smem (36 864 B).
+    fn launch_cfg(
+        self,
+        rows: usize,
+        cols: usize,
+        dyn_bytes128: u32,
+    ) -> cudarc::driver::LaunchConfig {
         let e = self.edge();
         let total_tiles = (rows as u32).div_ceil(e) * (cols as u32).div_ceil(e);
         cudarc::driver::LaunchConfig {
             grid_dim: (total_tiles, 1, 1),
             block_dim: (self.block_dim(), 1, 1),
-            shared_mem_bytes: 0,
+            shared_mem_bytes: match self {
+                TcTile::Tile128 => dyn_bytes128,
+                TcTile::Tile64 => 0,
+            },
         }
     }
 }
@@ -1847,7 +1860,7 @@ pub fn sgemm_bi_forward_tc_with_tile(
     let m_i = batch as i32;
     let n_i = n_out as i32;
     let k_i = n_in as i32;
-    let cfg = tile.launch_cfg(batch, n_out);
+    let cfg = tile.launch_cfg(batch, n_out, 71_680);
     let func = match tile {
         TcTile::Tile128 => kernels.sgemm_nn_tc_typed.get(dt),
         TcTile::Tile64 => kernels.sgemm_nn_tc64_typed.get(dt),
@@ -1913,7 +1926,7 @@ pub fn sgemm_bi_backward_dw_tc_with_tile(
     let m_red_i = batch as i32;
     let k_out_i = n_in as i32;
     let n_i = n_out as i32;
-    let cfg = tile.launch_cfg(n_in, n_out);
+    let cfg = tile.launch_cfg(n_in, n_out, 69_632);
     let func = match tile {
         TcTile::Tile128 => kernels.sgemm_tn_tc_typed.get(dt),
         TcTile::Tile64 => kernels.sgemm_tn_tc64_typed.get(dt),
@@ -1971,7 +1984,7 @@ pub fn sgemm_bi_backward_dx_tc_with_tile(
     let m_i = batch as i32;
     let n_i = n_out as i32;
     let k_out_i = n_in as i32;
-    let cfg = tile.launch_cfg(batch, n_in);
+    let cfg = tile.launch_cfg(batch, n_in, 73_728);
     let func = match tile {
         TcTile::Tile128 => kernels.sgemm_nt_tc_typed.get(dt),
         TcTile::Tile64 => kernels.sgemm_nt_tc64_typed.get(dt),

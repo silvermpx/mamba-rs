@@ -454,14 +454,16 @@ impl MambaKernels {
                 f16: get(&format!("{base}_f16"))?,
             })
         };
-        // Like `load_half`, plus the 34 KB MAX_DYNAMIC_SHARED carveout the
-        // Big-tile kernels need (2-stage f32 smem = 33 KB dynamic).
-        let load_half_dynsmem = |base: &str| -> Result<HalfKernel, String> {
+        // Like `load_half`, plus the MAX_DYNAMIC_SHARED carveout for kernels
+        // whose staging exceeds the 48 KB static cap: 34 KB for the typed
+        // Big tiles (2-stage f32 smem = 33 KB), 74 KB for the BK=64 TC
+        // family (NN 70 KB / TN 68 KB / NT 72 KB, padded bf16/f16).
+        let load_half_dynsmem = |base: &str, bytes: i32| -> Result<HalfKernel, String> {
             let k = load_half(base)?;
             for f in [&k.bf16, &k.f16] {
                 f.set_attribute(
                     cudarc::driver::sys::CUfunction_attribute_enum::CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
-                    34 * 1024,
+                    bytes,
                 )
                 .map_err(|e| format!("set MAX_DYNAMIC_SHARED for {base}: {e:?}"))?;
             }
@@ -691,15 +693,15 @@ impl MambaKernels {
             sgemm_nn_narrow_small_typed: load_half("sgemm_bi_nn_narrow_small")?,
             sgemm_tn_narrow_typed: load_half("sgemm_bi_tn_narrow")?,
             sgemm_nt_narrow_typed: load_half("sgemm_bi_nt_narrow")?,
-            sgemm_nn_big_typed: load_half_dynsmem("sgemm_bi_nn_big")?,
-            sgemm_nn_tc_typed: load_half("sgemm_bi_nn_tc")?,
-            sgemm_tn_tc_typed: load_half("sgemm_bi_tn_tc")?,
-            sgemm_nt_tc_typed: load_half("sgemm_bi_nt_tc")?,
+            sgemm_nn_big_typed: load_half_dynsmem("sgemm_bi_nn_big", 34 * 1024)?,
+            sgemm_nn_tc_typed: load_half_dynsmem("sgemm_bi_nn_tc", 75_776)?,
+            sgemm_tn_tc_typed: load_half_dynsmem("sgemm_bi_tn_tc", 75_776)?,
+            sgemm_nt_tc_typed: load_half_dynsmem("sgemm_bi_nt_tc", 75_776)?,
             sgemm_nn_tc64_typed: load_half("sgemm_bi_nn_tc64")?,
             sgemm_tn_tc64_typed: load_half("sgemm_bi_tn_tc64")?,
             sgemm_nt_tc64_typed: load_half("sgemm_bi_nt_tc64")?,
-            sgemm_tn_big_typed: load_half_dynsmem("sgemm_bi_tn_big")?,
-            sgemm_nt_big_typed: load_half_dynsmem("sgemm_bi_nt_big")?,
+            sgemm_tn_big_typed: load_half_dynsmem("sgemm_bi_tn_big", 34 * 1024)?,
+            sgemm_nt_big_typed: load_half_dynsmem("sgemm_bi_nt_big", 34 * 1024)?,
 
             _module: module,
         })

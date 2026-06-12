@@ -1061,3 +1061,158 @@ fn bench_tc_vs_scalar_paths() {
         eprintln!("  dX TC speedup: {:.2}x", dx_s / dx_tc);
     }
 }
+
+/// Step-0 instrumentation for the BK=64 squeeze (internal/tc-bk64-blueprint.md):
+/// function attributes (regs / spills / static smem), bit-level golden hashes
+/// of the full TC triad on the contract shapes, and baseline fwd timings.
+/// Run before and after each blueprint step; goldens must not move on steps
+/// that promise bit-identity (swizzle, dynsmem, BK=64 on K%64 ∉ (0,32] shapes).
+#[test]
+#[ignore]
+fn step0_tc_attrs_and_goldens() {
+    use mamba_rs::mamba_ssm::gpu::blas::TypedPtr;
+    use std::time::Instant;
+    let t = Ctx::new();
+    let k = &t.ctx.kernels;
+
+    println!("== function attributes ==");
+    let fams = [
+        ("nn_tc", &k.sgemm_nn_tc_typed),
+        ("tn_tc", &k.sgemm_tn_tc_typed),
+        ("nt_tc", &k.sgemm_nt_tc_typed),
+        ("nn_tc64", &k.sgemm_nn_tc64_typed),
+        ("tn_tc64", &k.sgemm_tn_tc64_typed),
+        ("nt_tc64", &k.sgemm_nt_tc64_typed),
+    ];
+    for (name, kern) in fams {
+        for (dtn, f) in [("bf16", &kern.bf16), ("f16", &kern.f16)] {
+            println!(
+                "{name}_{dtn}: regs={} local={} smem={} maxthr={}",
+                f.num_regs().unwrap(),
+                f.local_size_bytes().unwrap(),
+                f.shared_size_bytes().unwrap(),
+                f.max_threads_per_block().unwrap(),
+            );
+        }
+    }
+
+    fn fnv(bits: impl Iterator<Item = u32>) -> u64 {
+        let mut h = 0xcbf29ce484222325u64;
+        for b in bits {
+            h ^= b as u64;
+            h = h.wrapping_mul(0x100000001b3);
+        }
+        h
+    }
+
+    println!("== golden hashes (fwd/dW/dX bits) ==");
+    for dt in [WeightDtype::Bf16, WeightDtype::F16] {
+        for (m, k_, n) in [
+            (256usize, 384usize, 512usize),
+            (256, 100, 512),
+            (300, 768, 3072),
+            (2048, 768, 3072),
+        ] {
+            let qx = quantize(&det(m * k_, 11, 1.0), dt);
+            let qw = quantize(&det(k_ * n, 22, 0.5), dt);
+            let bias = det(n, 33, 0.25);
+            let b32 = t.f32_buf(&bias);
+            let y = run_tc(&t, dt, (m, k_, n), &qx, &qw, Some(&b32));
+            let h_fwd = fnv(y.iter().map(|v| v.to_bits()));
+
+            let qdy = quantize(&det(m * n, 44, 0.5), dt);
+            let dyt = t.typed_buf(&qdy, dt);
+            let xt = t.typed_buf(&qx, dt);
+            let wt = t.typed_buf(&qw, dt);
+
+            let dw = GpuBuffer::zeros(&t.ctx.stream, k_ * n).unwrap();
+            sgemm_bi::sgemm_bi_backward_dw_tc(
+                &t.ctx.stream,
+                &t.ctx.kernels,
+                dw.cached_ptr(),
+                TypedPtr {
+                    ptr: dyt.cached_ptr(),
+                    dtype: dt,
+                },
+                TypedPtr {
+                    ptr: xt.cached_ptr(),
+                    dtype: dt,
+                },
+                (m, k_, n),
+            )
+            .unwrap();
+            let dxt = DtypedBuf::zeros(&t.ctx.stream, m * k_, dt).unwrap();
+            sgemm_bi::sgemm_bi_backward_dx_tc(
+                &t.ctx.stream,
+                &t.ctx.kernels,
+                TypedPtr {
+                    ptr: dxt.cached_ptr(),
+                    dtype: dt,
+                },
+                TypedPtr {
+                    ptr: dyt.cached_ptr(),
+                    dtype: dt,
+                },
+                TypedPtr {
+                    ptr: wt.cached_ptr(),
+                    dtype: dt,
+                },
+                (m, k_, n),
+            )
+            .unwrap();
+            t.ctx.stream.synchronize().unwrap();
+            let dwh = dw.to_cpu(&t.ctx.stream).unwrap();
+            let mut dxh = vec![0.0f32; m * k_];
+            dxt.download_f32(&t.ctx.stream, &mut dxh).unwrap();
+            println!(
+                "[{:?} M{m} K{k_} N{n}] fwd={:016x} dW={:016x} dX={:016x}",
+                dt,
+                h_fwd,
+                fnv(dwh.iter().map(|v| v.to_bits())),
+                fnv(dxh.iter().map(|v| v.to_bits())),
+            );
+        }
+    }
+
+    println!("== baseline fwd timings (bf16, 128-tile route) ==");
+    for (m, k_, n) in [(2048usize, 768usize, 3072usize), (4096, 1536, 3072)] {
+        let qx = quantize(&det(m * k_, 11, 1.0), WeightDtype::Bf16);
+        let qw = quantize(&det(k_ * n, 22, 0.5), WeightDtype::Bf16);
+        let xt = t.typed_buf(&qx, WeightDtype::Bf16);
+        let wt = t.typed_buf(&qw, WeightDtype::Bf16);
+        let yt = DtypedBuf::zeros(&t.ctx.stream, m * n, WeightDtype::Bf16).unwrap();
+        let run = || {
+            sgemm_bi::sgemm_bi_forward_tc(
+                &t.ctx.stream,
+                &t.ctx.kernels,
+                TypedPtr {
+                    ptr: yt.cached_ptr(),
+                    dtype: WeightDtype::Bf16,
+                },
+                TypedPtr {
+                    ptr: xt.cached_ptr(),
+                    dtype: WeightDtype::Bf16,
+                },
+                TypedPtr {
+                    ptr: wt.cached_ptr(),
+                    dtype: WeightDtype::Bf16,
+                },
+                0,
+                (m, k_, n),
+            )
+            .unwrap();
+        };
+        for _ in 0..3 {
+            run();
+        }
+        t.ctx.stream.synchronize().unwrap();
+        let t0 = Instant::now();
+        for _ in 0..50 {
+            run();
+        }
+        t.ctx.stream.synchronize().unwrap();
+        let us = t0.elapsed().as_secs_f64() * 1e6 / 50.0;
+        let tflops = 2.0 * m as f64 * k_ as f64 * n as f64 / (us * 1e-6) / 1e12;
+        println!("fwd M{m} K{k_} N{n}: {us:.1} us = {tflops:.1} TFLOPS");
+    }
+}

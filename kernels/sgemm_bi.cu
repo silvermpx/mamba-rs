@@ -5097,12 +5097,18 @@ DEFINE_SGEMM_BI_NT_BIG_T(f16,  __half,        from_f_f16)
 //     come from ldmatrix.x2.TRANS of the k-major tile (delivers the
 //     col-major k16n8 fragment without a staging transpose).
 //   - Pads keep every ldmatrix row chunk in a distinct 4-bank group:
-//     A row stride 40 halves (20 words ≡ 4 mod 8), B row stride 136 halves
-//     (68 words ≡ 4 mod 8). Row bases are 16B-aligned (80 B / 272 B).
+//     A row stride 72 halves (36 words ≡ 4 mod 8), B row stride 136 halves
+//     (68 words ≡ 4 mod 8). Row bases are 16B-aligned (144 B / 272 B).
 //   - Scalar staging fallback (uniform branch) when lda/ldb % 8 != 0.
-//   - Smem: 2 x (10240 + 8704) B = 37.9 KB static.
+//   - Smem (BK=64): NN 71 680 B / TN 69 632 B / NT 73 728 B — beyond the
+//     48 KB static cap, so all three use dynamic smem with the
+//     MAX_DYNAMIC_SHARED_SIZE_BYTES opt-in set at module load
+//     (kernels.rs); launch passes the exact per-kernel byte count.
+//     BK=64 halves the wait_group/__syncthreads boundary count per CTA
+//     vs BK=32 (the measured per-boundary cost dominated the gap to
+//     cuBLAS-TC; see internal/tc-bk64-blueprint.md).
 //
-// Geometry: CTA 256 threads = 8 warps as 2x4; BM=BN=128 BK=32; warp tile
+// Geometry: CTA 256 threads = 8 warps as 2x4; BM=BN=128 BK=64; warp tile
 // 64x32 = 4 m-frags(16) x 4 n-frags(8); bias pre-seeded into the f32
 // accumulators (alpha must be 1.0 with bias); one RNE downcast at store.
 //
@@ -5118,7 +5124,7 @@ DEFINE_SGEMM_BI_NT_BIG_T(f16,  __half,        from_f_f16)
 
 #define TC_BM 128
 #define TC_BN 128
-#define TC_BK 32
+#define TC_BK 64
 #define TC_PAD_A 8
 #define TC_PAD_B 8
 #define TC_LDA (TC_BK + TC_PAD_A)
@@ -5126,7 +5132,7 @@ DEFINE_SGEMM_BI_NT_BIG_T(f16,  __half,        from_f_f16)
 
 // Issue one A+B tile into smem stage `buf` via 16B cp.async with zero-fill
 // (fast path; requires lda%8==0 && ldb%8==0, checked by caller-side branch).
-// A: 128 rows x 4 chunks; B: 32 rows x 16 chunks; 1024 cp.async / 256 thr.
+// A: 128 rows x 8 chunks; B: 64 rows x 16 chunks; 2048 cp.async / 256 thr.
 #define SGB_TC_STAGE_ASYNC(buf, bkIdx)                                        \
     do {                                                                      \
         unsigned _as = As_sbase + (unsigned)((buf) * TC_BM * TC_LDA * 2);     \
@@ -5197,8 +5203,11 @@ void sgemm_bi_nn_tc_##SUFFIX(                                                  \
     int lda, int ldb, int ldc                                                  \
 ) {                                                                            \
     assert(alpha == 1.0f || bias == nullptr);                                  \
-    __shared__ __align__(16) T_ACT As[2][TC_BM][TC_LDA];                       \
-    __shared__ __align__(16) T_ACT Bs[2][TC_BK][TC_LDB];                       \
+    extern __shared__ __align__(16) unsigned char sgb_tc_dynsmem[];           \
+    T_ACT (*As)[TC_BM][TC_LDA] =                                               \
+        reinterpret_cast<T_ACT (*)[TC_BM][TC_LDA]>(sgb_tc_dynsmem);            \
+    T_ACT (*Bs)[TC_BK][TC_LDB] = reinterpret_cast<T_ACT (*)[TC_BK][TC_LDB]>(   \
+        sgb_tc_dynsmem + 2 * TC_BM * TC_LDA * (int)sizeof(T_ACT));             \
     int num_pid_n = (N + TC_BN - 1) / TC_BN;                                   \
     int pid_m = blockIdx.x / num_pid_n;                                        \
     int pid_n = blockIdx.x % num_pid_n;                                        \
@@ -5258,7 +5267,7 @@ void sgemm_bi_nn_tc_##SUFFIX(                                                  \
         unsigned As_rd = As_sbase + (unsigned)(read_buf * TC_BM * TC_LDA * 2); \
         unsigned Bs_rd = Bs_sbase + (unsigned)(read_buf * TC_BK * TC_LDB * 2); \
         _Pragma("unroll")                                                      \
-        for (int ks = 0; ks < 2; ks++) {                                       \
+        for (int ks = 0; ks < (TC_BK / 16); ks++) {                            \
             int k0 = ks * 16;                                                  \
             unsigned a_frag[4][4];                                             \
             unsigned b_frag[4][2];                                             \
@@ -5414,8 +5423,11 @@ void sgemm_bi_tn_tc_##SUFFIX(                                                  \
     float alpha,                                                               \
     int M_red, int K_out, int N                                                \
 ) {                                                                            \
-    __shared__ __align__(16) T_ACT Xs[2][TC_BK][TC_LDB];                       \
-    __shared__ __align__(16) T_ACT Ys[2][TC_BK][TC_LDB];                       \
+    extern __shared__ __align__(16) unsigned char sgb_tc_dynsmem[];           \
+    T_ACT (*Xs)[TC_BK][TC_LDB] =                                               \
+        reinterpret_cast<T_ACT (*)[TC_BK][TC_LDB]>(sgb_tc_dynsmem);            \
+    T_ACT (*Ys)[TC_BK][TC_LDB] = reinterpret_cast<T_ACT (*)[TC_BK][TC_LDB]>(   \
+        sgb_tc_dynsmem + 2 * TC_BK * TC_LDB * (int)sizeof(T_ACT));             \
     int num_pid_n = (N + TC_BN - 1) / TC_BN;                                   \
     int pid_m = blockIdx.x / num_pid_n;                                        \
     int pid_n = blockIdx.x % num_pid_n;                                        \
@@ -5465,7 +5477,7 @@ void sgemm_bi_tn_tc_##SUFFIX(                                                  \
         unsigned Xs_rd = Xs_sbase + (unsigned)(read_buf * TC_BK * TC_LDB * 2); \
         unsigned Ys_rd = Ys_sbase + (unsigned)(read_buf * TC_BK * TC_LDB * 2); \
         _Pragma("unroll")                                                      \
-        for (int ks = 0; ks < 2; ks++) {                                       \
+        for (int ks = 0; ks < (TC_BK / 16); ks++) {                            \
             int k0 = ks * 16;                                                  \
             unsigned a_frag[4][4];                                             \
             unsigned b_frag[4][2];                                             \
@@ -5599,8 +5611,11 @@ void sgemm_bi_nt_tc_##SUFFIX(                                                  \
     float alpha,                                                               \
     int M, int N, int K_out                                                    \
 ) {                                                                            \
-    __shared__ __align__(16) T_ACT Ys[2][TC_BM][TC_LDA];                       \
-    __shared__ __align__(16) T_ACT Ws[2][TC_BN][TC_LDA];                       \
+    extern __shared__ __align__(16) unsigned char sgb_tc_dynsmem[];           \
+    T_ACT (*Ys)[TC_BM][TC_LDA] =                                               \
+        reinterpret_cast<T_ACT (*)[TC_BM][TC_LDA]>(sgb_tc_dynsmem);            \
+    T_ACT (*Ws)[TC_BN][TC_LDA] = reinterpret_cast<T_ACT (*)[TC_BN][TC_LDA]>(   \
+        sgb_tc_dynsmem + 2 * TC_BM * TC_LDA * (int)sizeof(T_ACT));             \
     int num_pid_n = (K_out + TC_BN - 1) / TC_BN;                               \
     int pid_m = blockIdx.x / num_pid_n;                                        \
     int pid_n = blockIdx.x % num_pid_n;                                        \
@@ -5648,7 +5663,7 @@ void sgemm_bi_nt_tc_##SUFFIX(                                                  \
         unsigned Ys_rd = Ys_sbase + (unsigned)(read_buf * TC_BM * TC_LDA * 2); \
         unsigned Ws_rd = Ws_sbase + (unsigned)(read_buf * TC_BN * TC_LDA * 2); \
         _Pragma("unroll")                                                      \
-        for (int ks = 0; ks < 2; ks++) {                                       \
+        for (int ks = 0; ks < (TC_BK / 16); ks++) {                            \
             int k0 = ks * 16;                                                  \
             unsigned a_frag[4][4];                                             \
             unsigned b_frag[4][2];                                             \
@@ -5722,7 +5737,8 @@ DEFINE_SGEMM_BI_NT_TC(f16,  __half,        from_f_f16,  "f16")
 // Same numeric contract class as the 128-tile TC kernels above — and one
 // property stronger: BIT-IDENTICAL to them per output element. All three
 // walk the reduction dim (K for NN, M for TN, N for NT) in ascending
-// 32-wide slabs split into two ascending m16n8k16 mma steps, with the same
+// BK-wide slabs split into ascending m16n8k16 mma steps (BK lockstep across
+// both families: 64), with the same
 // 16B-chunk zero-fill for tails, so every output element's f32 accumulator
 // sees the exact same mma chain regardless of which tile size the
 // dispatcher picked. That bit-match is what makes the underfill-aware
@@ -5732,12 +5748,13 @@ DEFINE_SGEMM_BI_NT_TC(f16,  __half,        from_f_f16,  "f16")
 // the tail zero-fill here without changing the 128-tile kernels in
 // lockstep.
 //
-// Geometry: CTA 128 threads = 4 warps as 2x2; BM=BN=64, BK=32; warp tile
+// Geometry: CTA 128 threads = 4 warps as 2x2; BM=BN=64, BK=64; warp tile
 // 32x32 = 2 m-frags(16) x 4 n-frags(8). Same 2-stage cp.async staging (16B
 // chunks, 4-operand zero-fill tails), same ldmatrix x4 / x2(.trans)
 // fragment loads, same conflict-free pads (row strides ≡ 4 mod 8 words,
 // 16B-aligned row bases): A-layout rows 40 halves (BK wide), B-layout rows
-// 72 halves (BN wide). Static smem: NN 19.0 KB, TN 18.0 KB, NT 20.0 KB.
+// 72 halves (BN wide). Static smem at BK=64: 36 864 B per kernel (< 48 KB,
+// so the Tile64 family stays static while Tile128 goes dynamic).
 // Why it wins on small shapes: a 128-tile CTA grid underfills the GPU
 // (e.g. d128 in_proj dW = 4 CTAs on a 142-SM Ada); quartering the tile
 // quadruples the CTA count at the same total FLOPs.
@@ -5748,9 +5765,9 @@ DEFINE_SGEMM_BI_NT_TC(f16,  __half,        from_f_f16,  "f16")
 
 #define SGB_TC64_BM 64
 #define SGB_TC64_BN 64
-#define SGB_TC64_BK 32
+#define SGB_TC64_BK 64
 #define SGB_TC64_THREADS 128
-#define SGB_TC64_LDA (SGB_TC64_BK + 8) /* 40 halves = 80 B rows, 20 words ≡ 4 mod 8 */
+#define SGB_TC64_LDA (SGB_TC64_BK + 8) /* 72 halves = 144 B rows, 36 words ≡ 4 mod 8 */
 #define SGB_TC64_LDB (SGB_TC64_BN + 8) /* 72 halves = 144 B rows, 36 words ≡ 4 mod 8 */
 
 // NN staging: A 64 rows x 4 chunks + B 32 rows x 8 chunks = 512 cp.async
@@ -5890,7 +5907,7 @@ void sgemm_bi_nn_tc64_##SUFFIX(                                                \
         unsigned Bs_rd =                                                       \
             Bs_sbase + (unsigned)(read_buf * SGB_TC64_BK * SGB_TC64_LDB * 2);  \
         _Pragma("unroll")                                                      \
-        for (int ks = 0; ks < 2; ks++) {                                       \
+        for (int ks = 0; ks < (SGB_TC64_BK / 16); ks++) {                            \
             int k0 = ks * 16;                                                  \
             unsigned a_frag[2][4];                                             \
             unsigned b_frag[4][2];                                             \
@@ -6084,7 +6101,7 @@ void sgemm_bi_tn_tc64_##SUFFIX(                                                \
         unsigned Ys_rd =                                                       \
             Ys_sbase + (unsigned)(read_buf * SGB_TC64_BK * SGB_TC64_LDB * 2);  \
         _Pragma("unroll")                                                      \
-        for (int ks = 0; ks < 2; ks++) {                                       \
+        for (int ks = 0; ks < (SGB_TC64_BK / 16); ks++) {                            \
             int k0 = ks * 16;                                                  \
             unsigned a_frag[2][4];                                             \
             unsigned b_frag[4][2];                                             \
@@ -6275,7 +6292,7 @@ void sgemm_bi_nt_tc64_##SUFFIX(                                                \
         unsigned Ws_rd =                                                       \
             Ws_sbase + (unsigned)(read_buf * SGB_TC64_BN * SGB_TC64_LDA * 2);  \
         _Pragma("unroll")                                                      \
-        for (int ks = 0; ks < 2; ks++) {                                       \
+        for (int ks = 0; ks < (SGB_TC64_BK / 16); ks++) {                            \
             int k0 = ks * 16;                                                  \
             unsigned a_frag[2][4];                                             \
             unsigned b_frag[4][2];                                             \
