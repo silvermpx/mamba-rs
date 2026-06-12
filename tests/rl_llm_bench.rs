@@ -504,8 +504,8 @@ mod llm {
 
         eprintln!("\n=== GPU batched step throughput: {name} bf16 (RL parallel envs) ===");
         eprintln!(
-            "NOTE: batched generate_batch has a known correctness bug \
-             (test_gpu_batch_generation failing); these numbers measure \
+            "NOTE: throughput-only view of the batched decode path; \
+             cross-slot bit-identity is covered by gpu_batch_test — these numbers measure \
              throughput only."
         );
         eprintln!(

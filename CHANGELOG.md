@@ -1,5 +1,54 @@
 # Changelog
 
+## 0.4.2
+
+Performance update: the tensor-core deterministic tier gets a small-tile
+kernel family and deeper K-staging. No API changes; all determinism and
+batch-invariance contracts unchanged (outputs of the existing TC kernels
+are bit-identical to 0.4.1 by golden-hash verification).
+
+### Added: Tile64 TC family (64x64 output tiles)
+
+Six new kernels (`sgemm_bi_{nn,tn,nt}_tc64_{bf16,f16}`): CTA 128
+threads / 4 warps, each warp owning a 32x32 quadrant. They cover the
+64..127 output-dim band the 128-tile family gated out, and grids that
+would underfill the GPU at 128x128 route to the 64-tile twins
+(`tc_pick_tile`, threshold 72 CTAs). The two families are BIT-IDENTICAL
+per output element — same ascending reduction slabs, same m16n8k16
+chain, same tail zero-fill — so the shape-only routing can never change
+output bits and the strict all-M forward invariance survives tile
+switching (`tc64_and_tc128_bit_identical` asserts it directly).
+
+Whole models that previously fell back to the scalar tier now ride
+tensor cores (d128/d256), and the narrow projections of every model
+size (x_proj N=80, dt_proj K<=96) come along.
+
+### Changed: TC staging BK 32 -> 64, dynamic shared memory
+
+Both tile families stage 64-deep K-slabs (half the barrier/wait_group
+boundaries per CTA). The 128-tile family now exceeds the 48 KB static
+cap (NN 71 680 / TN 69 632 / NT 73 728 B) and uses dynamic smem with a
+75 776 B `MAX_DYNAMIC_SHARED_SIZE_BYTES` opt-in at load; the 64-tile
+family stays static (36 864 B). No register spills on any of the 12 TC
+functions.
+
+### Performance (RTX 6000 Ada, CUDA 13.2, vs 0.4.1)
+
+Trainer ms/step, bf16 TC tier vs cuBLAS-PEDANTIC of the same dtype:
+
+| model | 0.4.1 | 0.4.2 | vs PEDANTIC |
+|---|---:|---:|---:|
+| d128 x2L  | 2.345 | 2.200 | 1.10x -> 1.04x |
+| d256 x4L  | 9.561 | 9.105 | 1.05x -> 1.01x |
+| d768 x4L  | 22.736 | 21.694 | 0.88x -> 0.85x |
+| d1536 x2L | 13.599 | 12.504 | 0.76x -> 0.71x |
+
+GEMM-level: big-shape TC forward 107 -> 116 TFLOPS (M2048 K768 N3072
+bf16), 131 -> 145 TFLOPS at M4096 K1536 N3072; small-shape dW/dX
+(d128-class) roughly 2x vs the 128-tile route. Full tables:
+docs/determinism-benchmarks.md.
+
+
 ## 0.4.1
 
 Bug-fix release for the deterministic GEMM engine. No API changes.

@@ -25,8 +25,9 @@ Pure Rust + CUDA. Kernels compile at runtime via NVRTC.
 - **Tensor-core deterministic tier (opt-in)** — `MAMBA_RS_BI_TENSOR_CORES=1`
   / `ctx.set_bi_tensor_cores(true)` on top of the flag above swaps the
   training GEMM triad for mma.sync tensor-core kernels: still fully
-  deterministic (own numeric contract), and **faster than cuBLAS** on
-  d_model ≥ 768 (0.77× of PEDANTIC per step at d1536).
+  deterministic (own numeric contract), at-or-near cuBLAS parity even on
+  d128/d256 models and **faster than cuBLAS** from d_model ≥ 768
+  (0.70× of PEDANTIC per step at d1536 bf16).
 - **HuggingFace loader** — safetensors, synthetic + real Mamba SSM
   checkpoints (130m / 370m / 1.4b / 2.8b validated).
 - **Standalone** — no framework dependency.
@@ -39,7 +40,7 @@ The crate targets two workloads. Pick the entry point that matches yours.
 
 Latency-critical, typically `d_model ≤ 256`, often batch = 1 for actor
 rollouts. Both CPU and GPU paths are supported; CPU is competitive at
-these sizes (~85 µs/step on Ada Xeon vs 79 µs/step on RTX 6000 Ada).
+these sizes (~87 µs/step on Ada Xeon vs 79 µs/step on RTX 6000 Ada).
 
 - **Inference** — `mamba_step` (CPU) or `GpuMambaBackbone::step` (GPU)
 - **Training** — `parallel_mamba_forward` / `parallel_mamba_backward`
@@ -198,12 +199,12 @@ let (weights, input_dim) = load_mamba3(Path::new("m3.safetensors"), &cfg)?;
 
 | dtype | cuBLAS (default) | batch-invariant matvec | Δ |
 |-------|-----------------:|-----------------------:|--:|
-| f32   | 727 tok/s        | 727 tok/s              | 0 % |
-| bf16  | **1 046 tok/s**  | 974 tok/s              | −7 % |
-| f16   | 1 047 tok/s      | 972 tok/s              | −7 % |
+| f32   | 725 tok/s        | 686 tok/s              | −5 % |
+| bf16  | **1 029 tok/s**  | 958 tok/s              | −7 % |
+| f16   | 1 028 tok/s      | 958 tok/s              | −7 % |
 
-On f32 the two paths are equivalent — cuBLAS SGEMM and the custom
-matvec kernel both run on CUDA cores with no Tensor Core path. On
+On f32 both paths run on CUDA cores (no Tensor Core route), so the gap
+is small. On
 bf16/f16 cuBLAS routes through Tensor Cores (TF32-style accumulation)
 and wins ~7 % on per-token latency, at the cost of M=1 vs M=N
 algorithm-selection drift (KL ≈ 1e-3 on adversarial prompts). The
@@ -224,10 +225,10 @@ determinism overhead into a speedUP on LLM-sized models:
 
 | model | dtype | cuBLAS baseline | deterministic (scalar) | deterministic + TC |
 |---|---|---:|---:|---:|
-| d768, B=8 T=256  | bf16 | 25.9 ms (PEDANTIC) | 28.5 ms (1.10×) | **22.7 ms (0.88×)** |
-| d1536, B=4 T=256 | bf16 | 18.0 ms (PEDANTIC) | 19.5 ms (1.09×) | **13.6 ms (0.76×)** |
-| d1536, B=4 T=256 | f32  | 14.2 ms (TF32)     | 21.7 ms (1.54×) | — |
-| d128 (RL), B=16 T=64 | bf16 | 2.1 ms (PEDANTIC) | 2.5 ms (1.20×) | 2.3 ms (1.10×) |
+| d768, B=8 T=256  | bf16 | 25.7 ms (PEDANTIC) | 28.5 ms (1.11×) | **21.7 ms (0.84×)** |
+| d1536, B=4 T=256 | bf16 | 17.8 ms (PEDANTIC) | 19.4 ms (1.09×) | **12.5 ms (0.70×)** |
+| d1536, B=4 T=256 | f32  | 14.1 ms (TF32)     | 21.6 ms (1.53×) | — |
+| d128 (RL), B=16 T=64 | bf16 | 2.12 ms (PEDANTIC) | 2.54 ms (1.20×) | 2.20 ms (1.04×) |
 
 ```rust
 trainer.ctx().set_batch_invariant(true);   // bit-identical runs, scalar contract
@@ -235,17 +236,19 @@ trainer.ctx().set_bi_tensor_cores(true);   // + tensor-core tier (own contract)
 ```
 
 GEMM-level tensor-core speedups vs the scalar deterministic tier: forward
-3.0–3.4×, dW 2.1–3.5×, dX 4.3–6.7× (bf16, M=2048-class shapes). Full
-tables and contracts: [deterministic GEMM benchmarks](docs/determinism-benchmarks.md).
+3.2–6.4×, dW 4.0–5.6×, dX 3.5–5.1× (bf16, M=2048-class shapes). Two
+bit-identical tile families (128×128 and 64×64, shape-routed) cover
+everything from d128 RL models to LLM projections. Full tables and
+contracts: [deterministic GEMM benchmarks](docs/determinism-benchmarks.md).
 
 ### Per-step latency (default config: d_model=128, 3 layers)
 
 | | Mamba SSM | Mamba-3 SISO |
 |---|---|---|
-| GPU inference B=1 (CUDA Graph) | **79 µs** | **86 µs** |
-| GPU training fwd+bwd (T=32)    | 1 629 µs | 2 169 µs |
-| CPU inference B=1              | 88 µs    | **70 µs** |
-| CPU training fwd+bwd (T=32)    | 15 874 µs | **3 609 µs** |
+| GPU inference B=1 (CUDA Graph) | **79 µs** | **87 µs** |
+| GPU training fwd+bwd (T=32)    | 1 653 µs | 1 784 µs |
+| CPU inference B=1              | 87 µs    | **65 µs** |
+| CPU training fwd+bwd (T=32)    | 14 859 µs | **3 635 µs** |
 
 Detailed tables: [Mamba SSM benchmarks](docs/mamba1-benchmarks.md),
 [Mamba-3 SISO benchmarks](docs/mamba3-benchmarks.md).
