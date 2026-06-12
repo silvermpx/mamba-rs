@@ -1736,7 +1736,7 @@ pub fn sgemm_bi_forward_tc(
     }
     if !(batch >= 128 && n_out >= 128 && n_in >= 1) {
         return Err(format!(
-            "sgemm_bi_forward_tc: shape M={batch} K={n_in} N={n_out} below the TC tile gate"
+            "UNCOVERED sgemm_bi_forward_tc: shape M={batch} K={n_in} N={n_out} below the TC tile gate"
         ));
     }
     let dt = y.dtype;
@@ -1786,7 +1786,7 @@ pub fn sgemm_bi_backward_dw_tc(
     }
     if !(n_in >= 128 && n_out >= 128 && batch >= 1) {
         return Err(format!(
-            "sgemm_bi_backward_dw_tc: shape M={batch} K={n_in} N={n_out} below the TC tile gate"
+            "UNCOVERED sgemm_bi_backward_dw_tc: shape M={batch} K={n_in} N={n_out} below the TC tile gate"
         ));
     }
     let dt = dy.dtype;
@@ -1830,7 +1830,7 @@ pub fn sgemm_bi_backward_dx_tc(
     }
     if !(batch >= 128 && n_in >= 128 && n_out >= 1) {
         return Err(format!(
-            "sgemm_bi_backward_dx_tc: shape M={batch} K={n_in} N={n_out} below the TC tile gate"
+            "UNCOVERED sgemm_bi_backward_dx_tc: shape M={batch} K={n_in} N={n_out} below the TC tile gate"
         ));
     }
     let dt = dx.dtype;
@@ -1993,7 +1993,7 @@ pub fn sgemm_bi_forward_typed(
     }
 
     Err(format!(
-        "sgemm_bi_forward_typed: Big/Slim buckets not yet implemented (stage 3) — \
+        "UNCOVERED sgemm_bi_forward_typed: Big/Slim buckets not yet implemented — \
          shape M={batch} K={n_in} N={n_out}. Disable the batch-invariant flag for \
          this configuration."
     ))
@@ -2091,7 +2091,7 @@ pub fn sgemm_bi_backward_dw_typed(
     }
 
     Err(format!(
-        "sgemm_bi_backward_dw_typed: split-M/Slim buckets are upcast-fallback territory — \
+        "UNCOVERED sgemm_bi_backward_dw_typed: split-M/Slim buckets are upcast-fallback territory — \
          shape M={batch} K={n_in} N={n_out}."
     ))
 }
@@ -2189,7 +2189,7 @@ pub fn sgemm_bi_backward_dx_typed(
     }
 
     Err(format!(
-        "sgemm_bi_backward_dx_typed: split-N/Slim buckets are upcast-fallback territory — \
+        "UNCOVERED sgemm_bi_backward_dx_typed: split-N/Slim buckets are upcast-fallback territory — \
          shape M={batch} K={n_in} N={n_out}."
     ))
 }

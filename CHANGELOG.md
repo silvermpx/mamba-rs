@@ -1,5 +1,51 @@
 # Changelog
 
+## 0.4.1
+
+Bug-fix release for the deterministic GEMM engine. No API changes.
+
+### Fixed: native typed Big kernels never actually ran
+
+The bf16/f16 Big NN/TN/NT kernels introduced in 0.4.0 compiled with the
+WRONG tile geometry: `kernels/sgemm_bi.cu` redefines `BM/BN/BK/NUM_THREADS`
+for the Slim section partway through the file and leaves them redefined,
+so the typed Big kernels (appended at the end) silently picked up Slim
+constants — 128-thread launch bounds and 32-deep K tiles against a
+dispatcher launching 256 threads with 16-deep-tile shared memory sizing.
+Every launch failed with `CUDA_ERROR_INVALID_VALUE`.
+
+This was invisible in 0.4.0 because the typed dispatch chain treated ANY
+kernel error as "bucket not covered" and silently took the upcast
+fallback. The fallback produces bit-identical results by contract, so all
+parity and determinism tests stayed green — but the native kernels never
+executed, and the Big-shape upcast scratch (~0.5 GB at 2.8b mixed) was
+still being allocated and paid for.
+
+- The typed Big section now carries its own `SGB_T_*` tile constants
+  (256 threads, 128x128x16 tiles), immune to preprocessor state left by
+  earlier sections. The kernels execute for real and remain bit-identical
+  to the f32 reference on upcast inputs (typed parity + 60-shape
+  gate-boundary sweep, all green).
+- Found while extracting the engine into the standalone `sgemm-bi` crate,
+  whose error handling does not mask launch failures.
+
+### Fixed: dispatch fallbacks no longer swallow launch errors
+
+`bi_sgemm_forward_typed` / `_backward_dw_typed` / `_backward_dx_typed`
+and the tensor-core try-first paths matched on `.is_ok()`, so a genuine
+launch failure in a covered bucket was silently "recovered" by
+recomputing through the fallback — hiding the root cause (this is exactly
+how the dead-kernel bug above survived). Uncovered-shape errors now carry
+an `UNCOVERED` marker; only those fall through. Real launch errors
+propagate to the caller.
+
+### Validation
+
+Full `cuda,hf` suite + ignored (HF checkpoints 130m-2.8b) green on
+RTX 6000 Ada, CUDA 13.2; performance tables in
+`docs/determinism-benchmarks.md` re-measured with the native Big kernels
+actually executing.
+
 ## 0.4.0
 
 Deterministic GPU training for all three dtypes, plus an opt-in

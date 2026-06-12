@@ -1,4 +1,4 @@
-# Deterministic GEMM Benchmarks (0.4.0)
+# Deterministic GEMM Benchmarks (0.4.1)
 
 All numbers: RTX 6000 Ada (sm_89, 142 SMs), CUDA 13.2, driver 595.45,
 `--release`, `--test-threads=1`, quiet GPU. The GEMM layer is shared by
@@ -23,18 +23,18 @@ TC dW (f32 accumulate) cos 1.000000000.
 
 | model | dtype | cuBLAS baseline | scalar deterministic | + tensor cores |
 |---|---|---:|---:|---:|
-| d128 ×2L, B=16 T=64  | f32  | 2.053 (TF32) | 2.638 (1.28×) | — |
-| d128 ×2L, B=16 T=64  | bf16 | 2.125 (PEDANTIC) | 2.544 (1.20×) | 2.338 (1.10×) |
-| d128 ×2L, B=16 T=64  | f16  | 1.873 (PEDANTIC) | 2.571 (1.37×) | 2.363 (1.26×) |
-| d256 ×4L, B=16 T=128 | f32  | 8.734 | 11.241 (1.29×) | — |
-| d256 ×4L, B=16 T=128 | bf16 | 9.034 | 10.337 (1.14×) | 9.525 (1.05×) |
-| d256 ×4L, B=16 T=128 | f16  | 7.730 | 10.361 (1.34×) | 9.553 (1.24×) |
-| d768 ×4L, B=8 T=256  | f32  | 24.008 | 32.236 (1.34×) | — |
-| d768 ×4L, B=8 T=256  | bf16 | 25.605 | 28.842 (1.13×) | **22.616 (0.88×)** |
-| d768 ×4L, B=8 T=256  | f16  | 24.129 | 29.040 (1.20×) | **22.767 (0.94×)** |
-| d1536 ×2L, B=4 T=256 | f32  | 14.121 (TF32) | 21.617 (1.53×) | — |
-| d1536 ×2L, B=4 T=256 | bf16 | 17.525 | 19.597 (1.12×) | **13.559 (0.77×)** |
-| d1536 ×2L, B=4 T=256 | f16  | 16.701 | 20.092 (1.20×) | **13.894 (0.83×)** |
+| d128 ×2L, B=16 T=64  | f32  | 2.060 (TF32) | 2.644 (1.28×) | — |
+| d128 ×2L, B=16 T=64  | bf16 | 2.131 (PEDANTIC) | 2.549 (1.20×) | 2.345 (1.10×) |
+| d128 ×2L, B=16 T=64  | f16  | 1.881 (PEDANTIC) | 2.580 (1.37×) | 2.372 (1.26×) |
+| d256 ×4L, B=16 T=128 | f32  | 8.754 | 11.278 (1.29×) | — |
+| d256 ×4L, B=16 T=128 | bf16 | 9.067 | 10.407 (1.15×) | 9.561 (1.05×) |
+| d256 ×4L, B=16 T=128 | f16  | 7.775 | 10.431 (1.34×) | 9.589 (1.23×) |
+| d768 ×4L, B=8 T=256  | f32  | 24.238 | 32.363 (1.34×) | — |
+| d768 ×4L, B=8 T=256  | bf16 | 25.890 | 28.490 (1.10×) | **22.736 (0.88×)** |
+| d768 ×4L, B=8 T=256  | f16  | 24.625 | 28.624 (1.16×) | **22.754 (0.92×)** |
+| d1536 ×2L, B=4 T=256 | f32  | 14.152 (TF32) | 21.727 (1.54×) | — |
+| d1536 ×2L, B=4 T=256 | bf16 | 17.951 | 19.537 (1.09×) | **13.599 (0.76×)** |
+| d1536 ×2L, B=4 T=256 | f16  | 16.815 | 19.845 (1.18×) | **13.931 (0.83×)** |
 
 Ratios are vs the cuBLAS baseline of the same dtype. Bold = deterministic
 training FASTER than cuBLAS. The TC tier beats the scalar tier end-to-end
@@ -63,23 +63,26 @@ the TC kernel does it in one pass. Staging history: a naive prototype
 was also tried and measured FLAT, so the remaining ~2× to cuBLAS parity
 needs BK=64 + occupancy work, not deeper pipelining.
 
-## Scalar tier — typed upcast-fallback tax (bf16, µs)
+## Scalar tier — typed Big / upcast-fallback cost (bf16, µs)
 
-`tests/sgemm_bi_typed_parity.rs::bench_upcast_fallback_tax`. Shapes
-WITHOUT a native typed bucket run "upcast → f32 kernel → RNE downcast";
-the delta vs the bare f32 kernel is the conversion cost:
+`tests/sgemm_bi_typed_parity.rs::bench_upcast_fallback_tax`, re-measured
+in 0.4.1 with the native typed Big kernels actually executing (in 0.4.0
+they compiled with wrong tile constants and silently fell back — see
+CHANGELOG). Big-routed shapes now run the native kernel; split-K/Slim
+shapes still run "upcast → f32 kernel → RNE downcast". The delta vs the
+bare f32 kernel is the sync-staging cost (native) or the cast cost
+(fallback) — empirically the two are equal within noise:
 
-| shape (M, K, N) | f32 kernel | typed fallback | tax |
-|---|---:|---:|---:|
-| 2048, 768, 512  | 77.0 | 88.3 | 11.3 (14.6 %) |
-| 2048, 768, 3072 | 242.7 | 284.2 | 41.5 (17.1 %) |
-| 4096, 1536, 3072 | 992.8 | 1398.3 | 405.5 (40.8 %) |
-| 256, 384, 512   | 13.6 | 20.2 | 6.5 (47.8 %) |
+| shape (M, K, N) | route | f32 kernel | typed | overhead |
+|---|---|---:|---:|---:|
+| 2048, 768, 3072 | native Big | 244.8 | 293.8 | 20.0 % |
+| 4096, 1536, 3072 | native Big | 1025.8 | 1394.3 | 35.9 % |
+| 2048, 768, 512  | fallback (Slim) | 77.4 | 88.3 | 14.1 % |
+| 256, 384, 512   | fallback (split-K) | 12.6 | 19.1 | 51.2 % |
 
-The native typed Big kernels (stage 3) cover the Big bucket at
-fallback-equal speed while eliminating the f32 scratch (~0.5 GB at 2.8b
-mixed); split-K/M/N and Slim shapes still take the fallback. With the TC
-tier on, none of this is on the bf16/f16 hot path.
+The native Big path matches the fallback's speed while eliminating the
+f32 upcast scratch (~0.5 GB at 2.8b mixed) and 3 extra launches per
+GEMM. With the TC tier on, none of this is on the bf16/f16 hot path.
 
 ## Reproducing
 

@@ -224,9 +224,9 @@ determinism overhead into a speedUP on LLM-sized models:
 
 | model | dtype | cuBLAS baseline | deterministic (scalar) | deterministic + TC |
 |---|---|---:|---:|---:|
-| d768, B=8 T=256  | bf16 | 25.6 ms (PEDANTIC) | 28.8 ms (1.13×) | **22.6 ms (0.88×)** |
-| d1536, B=4 T=256 | bf16 | 17.5 ms (PEDANTIC) | 19.6 ms (1.12×) | **13.6 ms (0.77×)** |
-| d1536, B=4 T=256 | f32  | 14.1 ms (TF32)     | 21.6 ms (1.53×) | — |
+| d768, B=8 T=256  | bf16 | 25.9 ms (PEDANTIC) | 28.5 ms (1.10×) | **22.7 ms (0.88×)** |
+| d1536, B=4 T=256 | bf16 | 18.0 ms (PEDANTIC) | 19.5 ms (1.09×) | **13.6 ms (0.76×)** |
+| d1536, B=4 T=256 | f32  | 14.2 ms (TF32)     | 21.7 ms (1.54×) | — |
 | d128 (RL), B=16 T=64 | bf16 | 2.1 ms (PEDANTIC) | 2.5 ms (1.20×) | 2.3 ms (1.10×) |
 
 ```rust

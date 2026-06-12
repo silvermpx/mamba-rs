@@ -437,16 +437,37 @@ pub fn bi_sgemm_forward_typed(
     // Stage 5 tensor-core tier: opt-in, SEPARATE numeric contract (see
     // `sgemm_bi_forward_tc`). Tried first so big shapes get the TC speed;
     // shapes below its gate fall through to the scalar buckets.
-    if ctx.bi_tensor_cores()
-        && super::sgemm_bi::sgemm_bi_forward_tc(&ctx.stream, &ctx.kernels, y, x, w, bias_ptr, dims)
-            .is_ok()
-    {
-        return Ok(());
+    if ctx.bi_tensor_cores() {
+        match super::sgemm_bi::sgemm_bi_forward_tc(
+            &ctx.stream,
+            &ctx.kernels,
+            y,
+            x,
+            w,
+            bias_ptr,
+            dims,
+        ) {
+            Ok(()) => return Ok(()),
+            // Below-tile-gate shapes drop to the scalar tier; real launch
+            // failures must surface, not be recomputed around.
+            Err(e) if e.starts_with("UNCOVERED") => {}
+            Err(e) => return Err(e),
+        }
     }
-    if super::sgemm_bi::sgemm_bi_forward_typed(&ctx.stream, &ctx.kernels, y, x, w, bias_ptr, dims)
-        .is_ok()
-    {
-        return Ok(());
+    match super::sgemm_bi::sgemm_bi_forward_typed(
+        &ctx.stream,
+        &ctx.kernels,
+        y,
+        x,
+        w,
+        bias_ptr,
+        dims,
+    ) {
+        Ok(()) => return Ok(()),
+        // Only a bucket miss may fall through to the upcast path; a real
+        // launch failure must surface, not be recomputed around.
+        Err(e) if e.starts_with("UNCOVERED") => {}
+        Err(e) => return Err(e),
     }
     let (m, k, n) = dims;
     ctx.with_bi_upcast_scratch((m * k, k * n, m * n), |xs, ws, ys| {
@@ -477,30 +498,31 @@ pub fn bi_sgemm_backward_dw_typed(
     x_saved: TypedPtr,
     dims: (usize, usize, usize),
 ) -> Result<(), String> {
-    if ctx.bi_tensor_cores()
-        && super::sgemm_bi::sgemm_bi_backward_dw_tc(
+    if ctx.bi_tensor_cores() {
+        match super::sgemm_bi::sgemm_bi_backward_dw_tc(
             &ctx.stream,
             &ctx.kernels,
             dw_ptr,
             dy,
             x_saved,
             dims,
-        )
-        .is_ok()
-    {
-        return Ok(());
+        ) {
+            Ok(()) => return Ok(()),
+            Err(e) if e.starts_with("UNCOVERED") => {}
+            Err(e) => return Err(e),
+        }
     }
-    if super::sgemm_bi::sgemm_bi_backward_dw_typed(
+    match super::sgemm_bi::sgemm_bi_backward_dw_typed(
         &ctx.stream,
         &ctx.kernels,
         dw_ptr,
         dy,
         x_saved,
         dims,
-    )
-    .is_ok()
-    {
-        return Ok(());
+    ) {
+        Ok(()) => return Ok(()),
+        Err(e) if e.starts_with("UNCOVERED") => {}
+        Err(e) => return Err(e),
     }
     let (m, k, n) = dims;
     ctx.with_bi_upcast_scratch((m * n, m * k, 0), |dys, xs, _| {
@@ -521,16 +543,17 @@ pub fn bi_sgemm_backward_dx_typed(
     w: TypedPtr,
     dims: (usize, usize, usize),
 ) -> Result<(), String> {
-    if ctx.bi_tensor_cores()
-        && super::sgemm_bi::sgemm_bi_backward_dx_tc(&ctx.stream, &ctx.kernels, dx, dy, w, dims)
-            .is_ok()
-    {
-        return Ok(());
+    if ctx.bi_tensor_cores() {
+        match super::sgemm_bi::sgemm_bi_backward_dx_tc(&ctx.stream, &ctx.kernels, dx, dy, w, dims) {
+            Ok(()) => return Ok(()),
+            Err(e) if e.starts_with("UNCOVERED") => {}
+            Err(e) => return Err(e),
+        }
     }
-    if super::sgemm_bi::sgemm_bi_backward_dx_typed(&ctx.stream, &ctx.kernels, dx, dy, w, dims)
-        .is_ok()
-    {
-        return Ok(());
+    match super::sgemm_bi::sgemm_bi_backward_dx_typed(&ctx.stream, &ctx.kernels, dx, dy, w, dims) {
+        Ok(()) => return Ok(()),
+        Err(e) if e.starts_with("UNCOVERED") => {}
+        Err(e) => return Err(e),
     }
     let (m, k, n) = dims;
     ctx.with_bi_upcast_scratch((m * n, k * n, m * k), |dys, ws, dxs| {
