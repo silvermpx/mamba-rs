@@ -593,7 +593,7 @@ pub fn gpu_backward_mamba_backbone(
 
 /// Scratch buffers for GPU Mamba target forward (batched B*T pipeline).
 ///
-/// Uses nosave burnin kernels (no h_saved/da_exp/conv_states writes).
+/// Uses nosave burnin kernels (no h_saved/conv_states writes).
 /// Per-layer conv/SSM state via flat buffers with layer offsets (matches online).
 ///
 /// Uses batched B*T pipeline instead of per-sample step-by-step approach.

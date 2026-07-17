@@ -228,13 +228,11 @@ DEFINE_SSM_STEP_FWD_GATHER_GATE(f16,  __half,        from_f_f16)
 
 // SSM burn-in forward (T>1): iterate T steps for each (batch, d_inner) thread.
 // Saves h_saved[B*(T+1)*d_inner*d_state] for backward BPTT and
-// da_exp[B*T*d_inner*d_state] for backward discretization.
 // h and a_neg cached in registers (Opt A). Uses exp2f (Opt B).
 extern "C" __global__ void ssm_burnin_forward(
     float* h,             // [batch * d_inner * d_state] hidden state (mutated through T steps)
     float* y_out,         // [batch * T * d_inner] output
     float* h_saved,       // [batch * (T+1) * d_inner * d_state] h BEFORE each step
-    float* da_exp_out,    // [batch * T * d_inner * d_state] discretization exp
     const float* delta,   // [batch * T * d_inner]
     const float* u,       // [batch * T * d_inner]
     const float* B,       // [batch * T * d_state]
@@ -279,10 +277,8 @@ extern "C" __global__ void ssm_burnin_forward(
             // Opt B: exp2f instead of expf
             float da = exp2f(delta_d * a_local[n] * LOG2E);
 
-            // da_exp_out write removed: backward kernel recomputes da from
-            // delta and a_neg (cheaper than global memory round-trip for
-            // typical d_state=16). Saves bandwidth; buffer kept in interface
-            // for ABI stability.
+            // No da saved: backward recomputes da from delta and a_neg
+            // (cheaper than a global-memory round-trip at d_state=16).
 
             h_local[n] = da * h_local[n] + delta_u_d * B[bt_ds + n];
             y_d += h_local[n] * C[bt_ds + n];
@@ -303,7 +299,7 @@ extern "C" __global__ void ssm_burnin_forward(
 }
 
 // SSM burn-in forward NOSAVE variant (target network — no backward needed).
-// Identical recurrence to ssm_burnin_forward but skips h_saved and da_exp writes.
+// Identical recurrence to ssm_burnin_forward but skips the h_saved writes.
 // Saves ~50% memory bandwidth per layer for target path.
 extern "C" __global__ void ssm_burnin_forward_nosave(
     float* h,             // [batch * d_inner * d_state] hidden state (mutated through T steps)
@@ -407,7 +403,7 @@ DEFINE_SSM_BURNIN_NOSAVE(f16,  __half,        from_f_f16)
 // h_saved and y_out in activation dtype; h_state + a_neg + D in f32.
 #define DEFINE_SSM_BURNIN(SUFFIX, TY, FROM_F)                               \
 extern "C" __global__ void ssm_burnin_forward_##SUFFIX(                     \
-    float* h, TY* y_out, float* h_saved, float* da_exp_out,                 \
+    float* h, TY* y_out, float* h_saved,                                    \
     const TY* delta, const TY* u,                                           \
     const TY* B, const TY* C,                                               \
     const float* a_neg, const float* D,                                     \

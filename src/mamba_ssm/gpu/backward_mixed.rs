@@ -9,7 +9,7 @@
 //!   (residual) and writes f32 `dx` directly into the residual gradient —
 //!   no extra cast round-trip. Matches PyTorch AMP `residual_in_fp32=True`
 //!   and state-spaces/mamba `residual = residual.to(torch.float32)`.
-//! - **BPTT state (`h_saved`, `conv_states`, `da_exp`) stays f32**. The
+//! - **BPTT state (`h_saved`, `conv_states`) stays f32**. The
 //!   `ssm_backward_local_typed` kernel promotes typed `delta/u/B/C` on load
 //!   but keeps all scan variables in f32.
 //! - **T-length accumulators (`d_D_local`, `d_a_log_local`) stay f32**.
