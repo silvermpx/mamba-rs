@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use clap::Parser;
-use hf_hub::api::sync::Api;
+use hf_hub::{HFClientSync, split_id};
 use tokenizers::Tokenizer;
 
 use mamba_rs::module::sample::SampleParams;
@@ -261,18 +261,21 @@ fn print_stats(
 
 fn download_model(model_id: &str, revision: &str) -> PathBuf {
     eprintln!("downloading {model_id} (rev: {revision})...");
-    let api = Api::new().unwrap_or_else(|e| {
-        eprintln!("error: HF Hub API init failed: {e}");
+    let client = HFClientSync::new().unwrap_or_else(|e| {
+        eprintln!("error: HF Hub client init failed: {e}");
         eprintln!("hint: set HF_TOKEN env var for gated models");
         std::process::exit(1);
     });
-    let repo = api.repo(hf_hub::Repo::with_revision(
-        model_id.to_string(),
-        hf_hub::RepoType::Model,
-        revision.to_string(),
-    ));
+    let (owner, name) = split_id(model_id);
+    let repo = client.model(owner, name);
+    let get = |file: &str| {
+        repo.download_file()
+            .filename(file)
+            .revision(revision.to_string())
+            .send()
+    };
 
-    let config = repo.get("config.json").unwrap_or_else(|e| {
+    let config = get("config.json").unwrap_or_else(|e| {
         eprintln!("error: cannot download config.json: {e}");
         std::process::exit(1);
     });
@@ -282,7 +285,7 @@ fn download_model(model_id: &str, revision: &str) -> PathBuf {
     let idx_path = model_dir.join("model.safetensors.index.json");
 
     if !st_path.exists() && !idx_path.exists() {
-        if let Ok(idx) = repo.get("model.safetensors.index.json") {
+        if let Ok(idx) = get("model.safetensors.index.json") {
             let idx_bytes = std::fs::read(&idx).unwrap();
             let index: serde_json::Value = serde_json::from_slice(&idx_bytes).unwrap();
             if let Some(wm) = index.get("weight_map").and_then(|v| v.as_object()) {
@@ -291,14 +294,14 @@ fn download_model(model_id: &str, revision: &str) -> PathBuf {
                 shards.dedup();
                 for shard in shards {
                     eprintln!("  downloading {shard}...");
-                    repo.get(shard).unwrap_or_else(|e| {
+                    get(shard).unwrap_or_else(|e| {
                         eprintln!("error: cannot download {shard}: {e}");
                         std::process::exit(1);
                     });
                 }
             }
         } else {
-            repo.get("model.safetensors").unwrap_or_else(|e| {
+            get("model.safetensors").unwrap_or_else(|e| {
                 eprintln!("error: cannot download model weights: {e}");
                 std::process::exit(1);
             });
@@ -306,7 +309,7 @@ fn download_model(model_id: &str, revision: &str) -> PathBuf {
     }
 
     for name in ["tokenizer.json", "tokenizer_config.json"] {
-        let _ = repo.get(name);
+        let _ = get(name);
     }
 
     model_dir
@@ -321,12 +324,17 @@ fn load_tokenizer(model_dir: &Path, args: &Args) -> Tokenizer {
         })
     } else {
         eprintln!("warning: tokenizer.json not found, trying HF download...");
-        let api = Api::new().unwrap();
-        let repo = api.repo(hf_hub::Repo::model(args.model_id.clone()));
-        let path = repo.get("tokenizer.json").unwrap_or_else(|e| {
-            eprintln!("error: cannot download tokenizer: {e}");
-            std::process::exit(1);
-        });
+        let client = HFClientSync::new().unwrap();
+        let (owner, name) = split_id(&args.model_id);
+        let path = client
+            .model(owner, name)
+            .download_file()
+            .filename("tokenizer.json")
+            .send()
+            .unwrap_or_else(|e| {
+                eprintln!("error: cannot download tokenizer: {e}");
+                std::process::exit(1);
+            });
         Tokenizer::from_file(&path).unwrap_or_else(|e| {
             eprintln!("error: cannot parse tokenizer: {e}");
             std::process::exit(1);
