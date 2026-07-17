@@ -466,7 +466,8 @@ pub fn step_m1(
 
     // Build paired iterator in the EXACT layout of `GpuMambaGrads::new`:
     // input_proj_w, input_proj_b, [layers...], norm_f_weight.
-    let mut pairs: Vec<(&GpuBuffer, &GradSlice)> = Vec::new();
+    let mut pairs: Vec<(&GpuBuffer, &GradSlice)> =
+        Vec::with_capacity(3 + 10 * weights.layers.len());
     pairs.push((&weights.input_proj_w, &grads.input_proj_w));
     pairs.push((&weights.input_proj_b, &grads.input_proj_b));
     for (lw, lg) in weights.layers.iter().zip(&grads.layers) {
@@ -501,7 +502,8 @@ pub fn step_m1_capturable(
     // (weight, grad, reference-no-decay?). The no-decay group is the set the
     // reference implementation marks `_no_weight_decay`: a_log, D, dt bias,
     // plus every RMSNorm scale — active only when `adam.reference_no_decay`.
-    let mut pairs: Vec<(&GpuBuffer, &GradSlice, bool)> = Vec::new();
+    let mut pairs: Vec<(&GpuBuffer, &GradSlice, bool)> =
+        Vec::with_capacity(3 + 10 * weights.layers.len());
     pairs.push((&weights.input_proj_w, &grads.input_proj_w, false));
     pairs.push((&weights.input_proj_b, &grads.input_proj_b, false));
     for (lw, lg) in weights.layers.iter().zip(&grads.layers) {
@@ -550,7 +552,8 @@ pub fn step_m3_capturable(
     // every norm scale. M3 has no fixed a_log (A is input-dependent); the
     // B/C biases stay decayed (only the reference-named analogues are
     // exempted). Active only when `adam.reference_no_decay`.
-    let mut pairs: Vec<(&GpuBuffer, &GradSlice, bool)> = Vec::new();
+    let mut pairs: Vec<(&GpuBuffer, &GradSlice, bool)> =
+        Vec::with_capacity(3 + 10 * weights.layers.len());
     pairs.push((&weights.input_proj_w, &grads.input_proj_w, false));
     pairs.push((&weights.input_proj_b, &grads.input_proj_b, false));
     for (lw, lg) in weights.layers.iter().zip(&grads.layers) {
@@ -597,7 +600,8 @@ pub fn step_m3(
     let (_, bc1, bc2) = adam.advance();
     let flat_base = grads.flat.cached_ptr();
 
-    let mut pairs: Vec<(&GpuBuffer, &GradSlice)> = Vec::new();
+    let mut pairs: Vec<(&GpuBuffer, &GradSlice)> =
+        Vec::with_capacity(3 + 10 * weights.layers.len());
     pairs.push((&weights.input_proj_w, &grads.input_proj_w));
     pairs.push((&weights.input_proj_b, &grads.input_proj_b));
     for (lw, lg) in weights.layers.iter().zip(&grads.layers) {

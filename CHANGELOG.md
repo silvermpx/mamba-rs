@@ -1,5 +1,137 @@
 # Changelog
 
+## 0.5.0 (unreleased)
+
+Feature release: the bring-your-own-loss training split, full-sequence
+CPU prefill, and the supervised-training toolkit (grad clipping, gradient
+accumulation, LR schedules, no-decay groups, trainable bf16/f16
+input_proj). All additive; the fused `step()` and every captured-graph
+path are byte-untouched (the split composes the exact eager phase bodies
+the fused step already ran -- pinned by bit-identity tests).
+
+MSRV 1.94 -> 1.97 (dev/CI toolchain 1.97.1 -- never 1.97.0, which carries
+an LLVM miscompilation). cudarc 0.19.8, safetensors 0.8, hf-hub 1.0,
+tokenizers 0.23.
+
+### Added: forward/backward split on both trainers
+
+`MambaTrainer::forward()` / `backward_step()` (and the `Mamba3Trainer`
+mirrors): `forward` returns the full `batch * seq_len * d_model`
+post-norm_f temporal output on the host (f32 on every dtype -- bf16/f16
+upcast on device before download), so a caller-side loss can run between
+the halves; `backward_step` backprops the caller's `d_temporal` through
+the saved activations and runs AdamW. `BackwardOpts` carries:
+
+- `clip_max_norm` -- `torch.nn.utils.clip_grad_norm_` semantics on a
+  DETERMINISTIC fixed-order f64 partials reduction (one new kernel,
+  `kernels/grad_clip.cu` -- the only new kernel in the release). For f16
+  the norm is computed after the unscale, per the
+  unscale-then-norm-then-clip ordering law.
+- `accumulate_only` -- exact gradient accumulation: the arena is not
+  zeroed, Adam does not advance, the optimizer tail is skipped. The
+  fused `step()` refuses while a window is open (it would zero the
+  arena and silently discard the accumulated gradients). Two accumulated
+  micro-batches reproduce the one-big-batch weights to <=1e-5 under the
+  batch-invariant flag.
+
+f16 rides the GradScaler protocol through the split (overflow skip, step
+rollback, scaler update); `accumulate_only` is rejected on f16 (the
+loss-scale freeze window across micro-batches has no defined semantics).
+`examples/custom_loss.rs` shows the full loop.
+
+### Added: full-sequence CPU prefill (both architectures)
+
+The CPU inference path was per-step matvec only -- a T-token prompt paid
+T dispatches and re-streamed every weight matrix T times.
+`forward_mamba_backbone_prefill(_mode)` and the M3 twin
+`forward_mamba3_backbone_prefill(_mode)` run the training forward's
+batched-SGEMM pipeline on inference types with no activation tape, write
+the post-norm_f output at EVERY position, and carry the recurrent state
+so the step path continues seamlessly (prefill-then-decode).
+`PrefillMode::Parallel` parallelizes every phase (GEMMs via the gemm
+crate's rayon parallelism, per-channel/per-head loops, transpose tiles)
+with no cross-task reductions -- bit-equal to `Single` by construction,
+and both bit-equal to the training forward (anchor tests pin all three
+across the {default, gemm-blas, accelerate} backends). Batch helpers
+`prefill_batch` / `prefill3_batch` parallelize per sample instead.
+`examples/cpu_prefill.rs` demonstrates prefill-then-decode and pooling.
+
+### Added: training-loop controls
+
+- `set_lr` / `lr` / `drop_graph` on both trainers. `set_lr` errs while a
+  captured graph exists -- the lr is baked BY VALUE into the captured
+  AdamW kernel and a bare field write would be a silent no-op under
+  replay; `drop_graph -> set_lr -> capture_graph` re-arms graph stepping.
+- `set_reference_no_decay(true)` -- the reference `_no_weight_decay`
+  parameter groups (M1: `a_log`, `D`, dt bias, every RMSNorm scale; M3:
+  dt bias, `D`, every norm scale) get `weight_decay = 0`, matching
+  upstream AdamW grouping. Default OFF preserves the historical
+  decay-everything behavior bit-for-bit.
+
+### Added: trainable input_proj in the mixed (bf16/f16) trainer
+
+The mixed trainer previously rejected a non-identity `input_proj`
+(HF-LM-shaped assumption). Both stubs are now filled -- typed forward
+GEMM with f32 bias + upcast into the residual stream; backward computes
+db (deterministic bias reduce) and dW (typed TN GEMM); dX below the
+projection is intentionally not produced (nothing upstream of the
+projection is trainable). Covered by the mixed parity walk (the
+input_proj skip is REMOVED), a rectangular split==fused bit-identity
+test, graph capture at a large patch dim, and batch-invariant probes.
+
+### Fixed: matvec_bi faulted on arbitrary K
+
+Pre-existing 0.4.x bug: `k_per_warp = ceil(K/8)` could be ODD (K=200 ->
+25), producing a misaligned paired `LDS.U32` smem read
+(`CUDA_ERROR_MISALIGNED_ADDRESS`); the vectorized `uint4` A-row load
+also assumed 16-byte row alignment, and a `__builtin_assume(K % 8 == 0)`
+was UB for most K. Historic HF d_models (768/1024/2048/2560) all
+produced even spans, masking it. Fixed: even per-warp span (existing
+shapes' reduction order untouched -- determinism suite bit-green),
+alignment-guarded vector loads, assume removed. Fresh-process per-K
+probes in `tests/matvec_probe.rs`.
+
+### Fixed / changed, smaller
+
+- Dead `da_exp` activation buffer removed from the GPU forward: kernels
+  never wrote it and backward recomputes the value -- ~0.9 GB/layer at
+  vision-class shapes (21.8 GB at d384x24 T=4617). Measured after
+  removal (bf16, 32 GB 5090, T=4617, input_dim=1024): B=1 = 9.6 GiB,
+  B=2 = 18.0 GiB, B=4 = OOM -> micro-batch 2 + accumulation.
+- f16 graph capture pre-sizes the input_dim-aware batch-invariant upcast
+  scratch (a lazy grow inside capture is illegal).
+- Stale `step()` rustdoc claimed `d_temporal` is `batch * d_model`; the
+  actual contract is `batch * seq_len * d_model` (fixed in all three
+  sites plus the M3 heavy-tail A comment block).
+- Slim GEMM geometry macros are `#undef`'d at the end of their section
+  (the 0.4.0 geometry-leak class cannot recur by appending kernels).
+- AdamW per-step pairs Vecs are pre-sized (no grow-reallocs per step).
+- f64 shadow-forward gradient oracle for the CPU training path
+  (`tests/grad_oracle.rs`) -- certifies every weight-tensor gradient
+  against an independent f64 recomputation, replacing noisy
+  finite-difference checks as the analytic reference.
+- docs.rs metadata: renders the CPU API surface (`hf`, `gemm-blas`,
+  `cli`); GPU doc-badge plumbing is a planned follow-up.
+
+### Named and deferred (post-0.5.0 tickets, each with a trigger)
+
+- int64 kernel offset arithmetic (upstream #880 class) -- index products
+  overflow i32 only beyond batch*T*d_inner*d_state > 2^31; trigger:
+  LLM-scale training shapes.
+- Device-side LR (capturable `set_lr` without graph re-capture);
+  captured-split package; device temporal handles / pooled readback --
+  trigger: profiling shows host readback dominating a real training loop.
+- GpuAdamW state export (warm optimizer resume) -- trigger: long
+  multi-session runs measurably suffering from cold Adam restarts.
+- `serialize` metadata for `rms_norm_eps` / `scan_mode` (additive) --
+  trigger: first non-default-eps deployment.
+- Selective-scan recomputation in backward (~4x activation memory cut) --
+  trigger: T >= 8k training or a hard single-pass B >= 4 need.
+- dX plumb-through below input_proj -- trigger: conv stem / learnable
+  pos-embed; per-block FFN channel mixer -- trigger: accuracy-lever
+  escalation on a real consumer.
+
+
 ## 0.4.2
 
 Performance update: the tensor-core deterministic tier gets a small-tile

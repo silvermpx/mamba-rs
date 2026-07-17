@@ -2596,6 +2596,24 @@ void sgemm_bi_nt_slim(
     } // end persistent CTA loop (slim NT)
 }
 
+// Slim geometry ends here — undef everything so no later-appended section
+// can silently inherit BM=128/BN=64/BK=32 (the 0.4.0 geometry-leak class).
+// Every section below defines its own prefixed macros and undefs them.
+#undef BM
+#undef BN
+#undef BK
+#undef WM
+#undef WN
+#undef WNITER
+#undef TM
+#undef TN
+#undef WMITER
+#undef WSUBM
+#undef WSUBN
+#undef ROW_STRIDE_A
+#undef ROW_STRIDE_B
+#undef NUM_THREADS
+
 // ============================================================================
 // Phase 2.2 — GEMV-N1 NN (forward, N=1): Y[M] = alpha * X[M,K] @ W[K] + beta*Y + bias
 // ============================================================================
