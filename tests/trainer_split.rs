@@ -472,3 +472,121 @@ fn f16_split_scaler_protocol() {
     assert_eq!(m.overflow_skipped, Some(false));
     assert!(m.optimizer_stepped);
 }
+
+fn flat_weights(s: &MambaWeights) -> Vec<f32> {
+    let mut v = Vec::new();
+    v.extend_from_slice(&s.input_proj_w);
+    v.extend_from_slice(&s.input_proj_b);
+    for l in &s.layers {
+        v.extend_from_slice(&l.norm_weight);
+        v.extend_from_slice(&l.in_proj_w);
+        v.extend_from_slice(&l.conv1d_weight);
+        v.extend_from_slice(&l.conv1d_bias);
+        v.extend_from_slice(&l.x_proj_w);
+        v.extend_from_slice(&l.dt_proj_w);
+        v.extend_from_slice(&l.dt_proj_b);
+        v.extend_from_slice(&l.a_log);
+        v.extend_from_slice(&l.d_param);
+        v.extend_from_slice(&l.out_proj_w);
+    }
+    v.extend_from_slice(&s.norm_f_weight);
+    v
+}
+
+/// The first AdamW update is exactly proportional to lr — the
+/// `m_hat/(sqrt(v_hat)+eps)` term is lr-independent and the decoupled decay
+/// term carries lr too — so set_lr(10x) must scale the first-step weight
+/// delta ~10x.
+#[test]
+fn set_lr_scales_first_step_delta() {
+    let cfg = test_cfg();
+    let input_dim = cfg.d_model;
+    let (batch, seq_len) = (1usize, 4usize);
+    let w = MambaWeights::init(&cfg, input_dim, 0xC0FFEE);
+    let input = det(batch * seq_len * input_dim, 0xAA, 0.05);
+    let d_temporal = det(batch * seq_len * cfg.d_model, 0xBB, 0.01);
+    let w0 = flat_weights(&w);
+
+    let max_delta = |snapshot: &MambaWeights| -> f64 {
+        flat_weights(snapshot)
+            .iter()
+            .zip(w0.iter())
+            .map(|(a, b)| (a - b).abs() as f64)
+            .fold(0.0, f64::max)
+    };
+
+    let mut a = MambaTrainer::new_full(
+        0,
+        &w,
+        cfg,
+        session(batch, seq_len, input_dim),
+        WeightDtype::F32,
+    )
+    .expect("trainer a");
+    assert!((a.lr() - 1e-3).abs() < 1e-9);
+    a.step(&input, &d_temporal).expect("step a");
+    let da = max_delta(&a.snapshot_master().expect("a"));
+
+    let mut b = MambaTrainer::new_full(
+        0,
+        &w,
+        cfg,
+        session(batch, seq_len, input_dim),
+        WeightDtype::F32,
+    )
+    .expect("trainer b");
+    b.set_lr(1e-2).expect("set_lr");
+    assert!((b.lr() - 1e-2).abs() < 1e-9);
+    b.step(&input, &d_temporal).expect("step b");
+    let db = max_delta(&b.snapshot_master().expect("b"));
+
+    let ratio = db / da;
+    assert!(
+        (9.5..10.5).contains(&ratio),
+        "set_lr(10x) must scale the first-step delta ~10x: got {ratio} ({da} -> {db})"
+    );
+
+    assert!(b.set_lr(0.0).is_err(), "lr=0 must be rejected");
+    assert!(b.set_lr(f32::NAN).is_err(), "NaN lr must be rejected");
+}
+
+/// set_lr under a captured graph errs (the lr is baked into the captured
+/// AdamW kernel); drop_graph unblocks it and steps fall back to eager.
+#[test]
+fn set_lr_under_graph_errs_and_drop_graph_unblocks() {
+    let cfg = test_cfg();
+    let input_dim = cfg.d_model;
+    let (batch, seq_len) = (1usize, 4usize);
+    let w = MambaWeights::init(&cfg, input_dim, 0xC0FFEE);
+    let input = det(batch * seq_len * input_dim, 0xAA, 0.05);
+    let d_temporal = det(batch * seq_len * cfg.d_model, 0xBB, 0.01);
+
+    let mut t = MambaTrainer::new_full(
+        0,
+        &w,
+        cfg,
+        session(batch, seq_len, input_dim),
+        WeightDtype::F32,
+    )
+    .expect("trainer");
+    t.step(&input, &d_temporal).expect("warmup");
+    t.capture_graph().expect("capture");
+    assert!(t.has_graph());
+    let m = t.step(&input, &d_temporal).expect("graph step");
+    assert!(m.graph_replayed);
+
+    assert!(
+        t.set_lr(5e-4).is_err(),
+        "set_lr under a captured graph must err"
+    );
+
+    t.drop_graph();
+    assert!(!t.has_graph());
+    t.set_lr(5e-4).expect("set_lr after drop_graph");
+    assert!((t.lr() - 5e-4).abs() < 1e-9);
+    let m2 = t.step(&input, &d_temporal).expect("eager step");
+    assert!(
+        !m2.graph_replayed,
+        "after drop_graph steps must run eagerly"
+    );
+}

@@ -335,6 +335,53 @@ impl MambaTrainer {
         }
     }
 
+    /// Set the AdamW learning rate for subsequent EAGER steps. Errs while a
+    /// captured graph exists: the lr is baked BY VALUE into the captured
+    /// AdamW kernel at capture time, so a bare field write would be a
+    /// silent no-op under replay — the exact silent-wrong class this
+    /// crate's history punishes. Call [`Self::drop_graph`] first, then
+    /// `set_lr`, then re-[`Self::capture_graph`] if graph stepping is
+    /// still wanted.
+    pub fn set_lr(&mut self, lr: f32) -> Result<(), String> {
+        if !lr.is_finite() || lr <= 0.0 {
+            return Err(format!("set_lr: invalid learning rate {lr}"));
+        }
+        if self.has_graph() {
+            return Err(
+                "set_lr under a captured graph: the lr is baked by value into the \
+                 captured AdamW kernel and a field write would silently not apply — \
+                 drop_graph() first, then set_lr, then re-capture"
+                    .into(),
+            );
+        }
+        match &mut self.inner {
+            TrainerInner::F32(t) => t.adam.lr = lr,
+            TrainerInner::Mixed(t) => t.adam.lr = lr,
+        }
+        Ok(())
+    }
+
+    /// Current AdamW learning rate.
+    pub fn lr(&self) -> f32 {
+        match &self.inner {
+            TrainerInner::F32(t) => t.adam.lr,
+            TrainerInner::Mixed(t) => t.adam.lr,
+        }
+    }
+
+    /// Drop any captured step graph so `drop_graph -> set_lr ->
+    /// capture_graph` is expressible. Subsequent [`Self::step`]s run
+    /// eagerly until re-captured.
+    pub fn drop_graph(&mut self) {
+        match &mut self.inner {
+            TrainerInner::F32(t) => t.graph = None,
+            TrainerInner::Mixed(t) => {
+                t.graph = None;
+                t.graph_f16 = None;
+            }
+        }
+    }
+
     /// Reset the recurrent SSM + conv states to zero. Call between
     /// independent training sequences (e.g. on episode boundary in RL
     /// or document boundary in LM).
