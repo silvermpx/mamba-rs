@@ -48,7 +48,7 @@ use crate::config::MambaConfig;
 use crate::mamba_ssm::gpu::adamw::{AdamWBiasFactors, GpuAdamW, step_m1_capturable};
 use crate::mamba_ssm::gpu::backward::gpu_backward_mamba_backbone;
 use crate::mamba_ssm::gpu::backward_mixed::gpu_backward_mamba_backbone_mixed;
-use crate::mamba_ssm::gpu::buffers::GpuBuffer;
+use crate::mamba_ssm::gpu::buffers::{GpuBuffer, GpuByteBuffer};
 use crate::mamba_ssm::gpu::context::GpuCtx;
 use crate::mamba_ssm::gpu::device::GpuDevice;
 use crate::mamba_ssm::gpu::dtype::WeightDtype;
@@ -58,6 +58,9 @@ use crate::mamba_ssm::gpu::forward::{
 };
 use crate::mamba_ssm::gpu::forward_mixed::{
     GpuMambaBackboneMixedActs, GpuMambaMixedTrainScratch, gpu_forward_mamba_backbone_train_mixed,
+};
+use crate::mamba_ssm::gpu::grad_clip::{
+    GRAD_CLIP_PARTIALS, alloc_partials, global_grad_norm, scale_grads,
 };
 use crate::mamba_ssm::gpu::graph_capture::capture_into_graph;
 use crate::mamba_ssm::gpu::launch::grid_1d;
@@ -173,9 +176,11 @@ impl StepMetrics {
 pub struct BackwardOpts {
     /// `Some(c)`: after backward (and, for f16, after unscale) scale the
     /// gradients by `min(1, c / (||g||_2 + 1e-6))` before AdamW —
-    /// `torch.nn.utils.clip_grad_norm_` semantics. NOT WIRED YET: returns
-    /// an error until the deterministic `grad_clip` kernel lands (the next
-    /// step of this branch).
+    /// `torch.nn.utils.clip_grad_norm_` semantics. The norm is computed by
+    /// a deterministic fixed-order f64 reduction and returned in
+    /// [`BackwardMetrics::grad_norm`]. A non-finite norm is an error.
+    /// Incompatible with `accumulate_only` (the norm is only defined over
+    /// the complete accumulated gradient — clip on the applying call).
     pub clip_max_norm: Option<f32>,
     /// `true`: accumulate only — the gradient arena is NOT zeroed by the
     /// next `backward_step`, Adam does not advance, and AdamW /
@@ -487,6 +492,10 @@ pub(crate) struct MambaTrainerMixed {
     /// to run (its body zeroes the arena and would silently discard the
     /// accumulated gradients).
     grads_dirty: bool,
+    /// Device partials for the deterministic grad-clip norm (512 f64).
+    clip_partials: GpuByteBuffer,
+    /// Host mirror of the partials — pre-allocated (zero-alloc hot path).
+    clip_partials_host: Vec<f64>,
 
     // Lazily-populated CUDA Graph. None → eager path; Some → replayed.
     // Always None for f16 (loss-scaler overflow check requires CPU readback,
@@ -626,6 +635,8 @@ impl MambaTrainerMixed {
             .synchronize()
             .map_err(|e| format!("sync: {e:?}"))?;
 
+        let clip_partials = alloc_partials(&ctx.stream)?;
+
         Ok(Self {
             ctx,
             cfg,
@@ -645,6 +656,8 @@ impl MambaTrainerMixed {
             temporal_f32,
             split_forward_pending: false,
             grads_dirty: false,
+            clip_partials,
+            clip_partials_host: vec![0.0; GRAD_CLIP_PARTIALS],
             graph: None,
             scaler,
             overflow_flag,
@@ -872,10 +885,11 @@ impl MambaTrainerMixed {
                     .into(),
             );
         }
-        if opts.clip_max_norm.is_some() {
+        if opts.clip_max_norm.is_some() && opts.accumulate_only {
             return Err(
-                "clip_max_norm is not wired yet — the deterministic grad_clip kernel \
-                 lands in the next step of this branch"
+                "clip_max_norm + accumulate_only is unsupported: the global norm is only \
+                 defined over the COMPLETE accumulated gradient — request the clip on the \
+                 final (applying) backward_step"
                     .into(),
             );
         }
@@ -895,7 +909,7 @@ impl MambaTrainerMixed {
                         .into(),
                 );
             }
-            let m = self.backward_split_f16(d_temporal)?;
+            let m = self.backward_split_f16(d_temporal, opts.clip_max_norm)?;
             self.split_forward_pending = false;
             return Ok(m);
         }
@@ -917,6 +931,10 @@ impl MambaTrainerMixed {
                 overflow_skipped: None,
             })
         } else {
+            let grad_norm = match opts.clip_max_norm {
+                Some(c) => Some(self.apply_clip(c)?),
+                None => None,
+            };
             let (step, bc1, bc2) = self.adam.advance();
             self.bias.write(&self.ctx.stream, bc1, bc2)?;
             self.eager_optimize()?;
@@ -924,17 +942,44 @@ impl MambaTrainerMixed {
             Ok(BackwardMetrics {
                 step,
                 optimizer_stepped: true,
-                grad_norm: None,
+                grad_norm,
                 loss_scale: None,
                 overflow_skipped: None,
             })
         }
     }
 
+    /// Compute the deterministic global grad norm, apply the clip
+    /// coefficient when needed, and return the PRE-clip norm.
+    fn apply_clip(&mut self, max_norm: f32) -> Result<f32, String> {
+        let norm = global_grad_norm(
+            &self.ctx,
+            &self.grads.flat,
+            &mut self.clip_partials,
+            &mut self.clip_partials_host,
+        )?;
+        if !norm.is_finite() {
+            return Err(format!(
+                "clip_max_norm: non-finite global grad norm ({norm})"
+            ));
+        }
+        let coef = max_norm as f64 / (norm + 1e-6);
+        if coef < 1.0 {
+            scale_grads(&self.ctx, &mut self.grads.flat, coef as f32)?;
+        }
+        Ok(norm as f32)
+    }
+
     /// f16 split backward: mirrors the `step_f16` eager branch minus the
     /// forward (GradScaler protocol — scale, backward, overflow check,
-    /// conditional unscale + optimize, scaler update, step rollback).
-    fn backward_split_f16(&mut self, d_temporal: &[f32]) -> Result<BackwardMetrics, String> {
+    /// conditional unscale + clip + optimize, scaler update, step rollback).
+    /// The clip norm is computed AFTER the unscale, per the
+    /// unscale-then-norm-then-clip ordering law.
+    fn backward_split_f16(
+        &mut self,
+        d_temporal: &[f32],
+        clip_max_norm: Option<f32>,
+    ) -> Result<BackwardMetrics, String> {
         let scale = self.scaler.as_ref().expect("f16 scaler").scale();
         {
             let dt_scaled = self.d_temporal_scaled.as_mut().expect("f16 dt_scaled");
@@ -975,6 +1020,7 @@ impl MambaTrainerMixed {
             .unwrap()
             .read(&self.ctx.stream)?
             != 0;
+        let mut grad_norm = None;
         if !overflow {
             let unscale = self.unscale_factor.as_ref().expect("unscale buf");
             scale_grads_skip_gpu(
@@ -984,6 +1030,9 @@ impl MambaTrainerMixed {
                 &mut self.grads.flat,
                 unscale,
             )?;
+            if let Some(c) = clip_max_norm {
+                grad_norm = Some(self.apply_clip(c)?);
+            }
             self.eager_optimize()?;
         }
         self.scaler.as_mut().expect("f16 scaler").update(overflow);
@@ -996,7 +1045,7 @@ impl MambaTrainerMixed {
         Ok(BackwardMetrics {
             step: final_step,
             optimizer_stepped: !overflow,
-            grad_norm: None,
+            grad_norm,
             loss_scale: Some(scale),
             overflow_skipped: Some(overflow),
         })
@@ -1371,6 +1420,10 @@ pub(crate) struct MambaTrainerF32 {
     /// True while an `accumulate_only` backward window is open (see the
     /// same-named field on `MambaTrainerMixed`).
     grads_dirty: bool,
+    /// Device partials for the deterministic grad-clip norm (512 f64).
+    clip_partials: GpuByteBuffer,
+    /// Host mirror of the partials — pre-allocated (zero-alloc hot path).
+    clip_partials_host: Vec<f64>,
 }
 
 impl MambaTrainerF32 {
@@ -1447,6 +1500,8 @@ impl MambaTrainerF32 {
             .synchronize()
             .map_err(|e| format!("sync: {e:?}"))?;
 
+        let clip_partials = alloc_partials(&ctx.stream)?;
+
         Ok(Self {
             ctx,
             cfg,
@@ -1466,6 +1521,8 @@ impl MambaTrainerF32 {
             graph: None,
             split_forward_pending: false,
             grads_dirty: false,
+            clip_partials,
+            clip_partials_host: vec![0.0; GRAD_CLIP_PARTIALS],
         })
     }
 
@@ -1608,10 +1665,11 @@ impl MambaTrainerF32 {
                     .into(),
             );
         }
-        if opts.clip_max_norm.is_some() {
+        if opts.clip_max_norm.is_some() && opts.accumulate_only {
             return Err(
-                "clip_max_norm is not wired yet — the deterministic grad_clip kernel \
-                 lands in the next step of this branch"
+                "clip_max_norm + accumulate_only is unsupported: the global norm is only \
+                 defined over the COMPLETE accumulated gradient — request the clip on the \
+                 final (applying) backward_step"
                     .into(),
             );
         }
@@ -1639,6 +1697,10 @@ impl MambaTrainerF32 {
                 overflow_skipped: None,
             })
         } else {
+            let grad_norm = match opts.clip_max_norm {
+                Some(c) => Some(self.apply_clip(c)?),
+                None => None,
+            };
             let (step, bc1, bc2) = self.adam.advance();
             self.bias.write(&self.ctx.stream, bc1, bc2)?;
             self.eager_optimize()?;
@@ -1646,7 +1708,7 @@ impl MambaTrainerF32 {
             Ok(BackwardMetrics {
                 step,
                 optimizer_stepped: true,
-                grad_norm: None,
+                grad_norm,
                 loss_scale: None,
                 overflow_skipped: None,
             })
@@ -1712,6 +1774,27 @@ impl MambaTrainerF32 {
         self.eager_forward()?;
         self.eager_backward()?;
         self.eager_optimize()
+    }
+
+    /// Compute the deterministic global grad norm, apply the clip
+    /// coefficient when needed, and return the PRE-clip norm.
+    fn apply_clip(&mut self, max_norm: f32) -> Result<f32, String> {
+        let norm = global_grad_norm(
+            &self.ctx,
+            &self.grads.flat,
+            &mut self.clip_partials,
+            &mut self.clip_partials_host,
+        )?;
+        if !norm.is_finite() {
+            return Err(format!(
+                "clip_max_norm: non-finite global grad norm ({norm})"
+            ));
+        }
+        let coef = max_norm as f64 / (norm + 1e-6);
+        if coef < 1.0 {
+            scale_grads(&self.ctx, &mut self.grads.flat, coef as f32)?;
+        }
+        Ok(norm as f32)
     }
 
     pub fn snapshot_master(&self) -> Result<MambaWeights, String> {

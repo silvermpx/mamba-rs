@@ -449,6 +449,26 @@ impl GpuByteBuffer {
             .memset_zeros(&mut self.data)
             .map_err(|e| format!("GPU op failed: {:?}", e))
     }
+
+    /// Download the buffer contents as f64 values (the buffer must hold
+    /// exactly `dst.len()` f64s). Used for the grad-clip norm partials.
+    pub fn download_f64(
+        &self,
+        stream: &Arc<cudarc::driver::CudaStream>,
+        dst: &mut [f64],
+    ) -> Result<(), String> {
+        assert_eq!(
+            std::mem::size_of_val(dst),
+            self.len_bytes,
+            "download_f64 size mismatch: dst={} f64s, gpu={} bytes",
+            dst.len(),
+            self.len_bytes
+        );
+        let bytes: &mut [u8] = bytemuck::cast_slice_mut(dst);
+        stream
+            .memcpy_dtoh(&self.data, bytes)
+            .map_err(|e| format!("GPU op failed: {:?}", e))
+    }
 }
 
 /// Dtype-aware owning buffer — holds activation scratch in any dtype.
