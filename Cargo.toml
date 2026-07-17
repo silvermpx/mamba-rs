@@ -2,7 +2,7 @@
 name = "mamba-rs"
 version = "0.4.2"
 edition = "2024"
-rust-version = "1.94"
+rust-version = "1.97"
 authors = ["silvermpx"]
 description = "Mamba SSM and Mamba-3 SISO in Rust with optional CUDA GPU acceleration. Inference and training (BPTT through SSM state, AdamW), CPU + GPU paths, custom CUDA kernels, CUDA Graph capture, f32 / bf16 / f16. Opt-in deterministic training (bit-identical runs, batch-invariant inference) with a tensor-core tier that beats cuBLAS on LLM-sized models."
 homepage = "https://github.com/silvermpx/mamba-rs"
