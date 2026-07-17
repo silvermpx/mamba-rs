@@ -112,6 +112,16 @@ pub struct GpuAdamW {
     pub beta2: f32,
     pub eps: f32,
     pub weight_decay: f32,
+    /// Reference-faithful no-decay parameter groups. When true, the
+    /// per-tensor step functions ([`step_m1_capturable`] /
+    /// [`step_m3_capturable`]) pass `weight_decay = 0` for the parameters
+    /// the reference implementation marks `_no_weight_decay` — M1: `a_log`,
+    /// `d_param`, `dt_proj_b` and the RMSNorm scales; M3: `dt_bias`,
+    /// `d_param` and every norm scale. Decaying `a_log` pulls all decay
+    /// rates toward A = -1 over long runs. Default `false` preserves the
+    /// historical decay-everything behavior bit-for-bit; costs nothing
+    /// either way (the decay coefficient is a per-launch scalar).
+    pub reference_no_decay: bool,
 }
 
 impl GpuAdamW {
@@ -130,7 +140,16 @@ impl GpuAdamW {
             beta2: 0.999,
             eps: 1e-8,
             weight_decay: 1e-2,
+            reference_no_decay: false,
         })
+    }
+
+    /// Toggle the reference-faithful no-decay parameter groups (see the
+    /// field docs on [`Self::reference_no_decay`]).
+    #[must_use]
+    pub fn with_reference_no_decay(mut self, on: bool) -> Self {
+        self.reference_no_decay = on;
+        self
     }
 
     #[must_use]
@@ -231,6 +250,29 @@ impl GpuAdamW {
         bias_factors_ptr: cudarc::driver::sys::CUdeviceptr,
         len: usize,
     ) -> Result<(), String> {
+        self.step_one_capturable_wd(
+            ctx,
+            adamw_kernel,
+            ptrs,
+            bias_factors_ptr,
+            len,
+            self.weight_decay,
+        )
+    }
+
+    /// [`Self::step_one_capturable`] with an explicit per-tensor weight
+    /// decay — the mechanism behind the reference no-decay groups (the
+    /// decay coefficient is a per-launch scalar, so per-tensor decay costs
+    /// nothing).
+    pub fn step_one_capturable_wd(
+        &self,
+        ctx: &GpuCtx,
+        adamw_kernel: &CudaFunction,
+        ptrs: AdamWParamPtrs,
+        bias_factors_ptr: cudarc::driver::sys::CUdeviceptr,
+        len: usize,
+        weight_decay: f32,
+    ) -> Result<(), String> {
         if len == 0 {
             return Ok(());
         }
@@ -245,7 +287,7 @@ impl GpuAdamW {
         bld.arg(&self.beta1);
         bld.arg(&self.beta2);
         bld.arg(&self.eps);
-        bld.arg(&self.weight_decay);
+        bld.arg(&weight_decay);
         bld.arg(&bias_factors_ptr);
         bld.arg(&n);
         unsafe { bld.launch(cfg) }.map_err(|e| format!("adamw_step_f32_capturable: {e:?}"))?;
@@ -346,44 +388,67 @@ pub fn run_pairs_capturable(
     flat_grad_base: cudarc::driver::sys::CUdeviceptr,
     pairs: &[(&GpuBuffer, &GradSlice)],
 ) -> Result<(), String> {
-    let m_base = adam.m.cached_ptr();
-    let v_base = adam.v.cached_ptr();
-    for (w, g) in pairs {
-        // Skip empty master tensors (HF Mamba identity input_proj). See
-        // `run_pairs` for the rationale.
-        if w.is_empty() {
-            continue;
-        }
-        if g.len() != w.len() {
-            return Err(format!(
-                "adamw: weight/grad len mismatch: w={} g={}",
-                w.len(),
-                g.len()
-            ));
-        }
-        let g_ptr = g.ptr();
-        let off_bytes = g_ptr - flat_grad_base;
-        let off_elems = off_bytes / 4;
-        let m_ptr = m_base + off_bytes;
-        let v_ptr = v_base + off_bytes;
-        debug_assert!(
-            off_elems as usize + g.len() <= adam.m.len(),
-            "adamw m/v slice OOB"
-        );
-        adam.step_one_capturable(
+    for pair in pairs {
+        run_one_capturable_wd(
             ctx,
             adamw_kernel,
-            AdamWParamPtrs {
-                weight: w.cached_ptr(),
-                grad: g_ptr,
-                m: m_ptr,
-                v: v_ptr,
-            },
+            adam,
             bias_factors_ptr,
-            g.len(),
+            flat_grad_base,
+            *pair,
+            adam.weight_decay,
         )?;
     }
     Ok(())
+}
+
+/// One capturable AdamW launch for a (weight, grad-slice) pair with an
+/// explicit weight decay. Shared body of [`run_pairs_capturable`] and the
+/// per-tensor no-decay paths in [`step_m1_capturable`] /
+/// [`step_m3_capturable`].
+fn run_one_capturable_wd(
+    ctx: &GpuCtx,
+    adamw_kernel: &CudaFunction,
+    adam: &GpuAdamW,
+    bias_factors_ptr: cudarc::driver::sys::CUdeviceptr,
+    flat_grad_base: cudarc::driver::sys::CUdeviceptr,
+    (w, g): (&GpuBuffer, &GradSlice),
+    weight_decay: f32,
+) -> Result<(), String> {
+    // Skip empty master tensors (HF Mamba identity input_proj). See
+    // `run_pairs` for the rationale.
+    if w.is_empty() {
+        return Ok(());
+    }
+    if g.len() != w.len() {
+        return Err(format!(
+            "adamw: weight/grad len mismatch: w={} g={}",
+            w.len(),
+            g.len()
+        ));
+    }
+    let g_ptr = g.ptr();
+    let off_bytes = g_ptr - flat_grad_base;
+    let off_elems = off_bytes / 4;
+    let m_ptr = adam.m.cached_ptr() + off_bytes;
+    let v_ptr = adam.v.cached_ptr() + off_bytes;
+    debug_assert!(
+        off_elems as usize + g.len() <= adam.m.len(),
+        "adamw m/v slice OOB"
+    );
+    adam.step_one_capturable_wd(
+        ctx,
+        adamw_kernel,
+        AdamWParamPtrs {
+            weight: w.cached_ptr(),
+            grad: g_ptr,
+            m: m_ptr,
+            v: v_ptr,
+        },
+        bias_factors_ptr,
+        g.len(),
+        weight_decay,
+    )
 }
 
 /// Mamba SSM backbone AdamW step. Iterates the per-tensor master weights in
@@ -433,23 +498,42 @@ pub fn step_m1_capturable(
     grads: &crate::mamba_ssm::gpu::weights::GpuMambaGrads,
 ) -> Result<(), String> {
     let flat_base = grads.flat.cached_ptr();
-    let mut pairs: Vec<(&GpuBuffer, &GradSlice)> = Vec::new();
-    pairs.push((&weights.input_proj_w, &grads.input_proj_w));
-    pairs.push((&weights.input_proj_b, &grads.input_proj_b));
+    // (weight, grad, reference-no-decay?). The no-decay group is the set the
+    // reference implementation marks `_no_weight_decay`: a_log, D, dt bias,
+    // plus every RMSNorm scale — active only when `adam.reference_no_decay`.
+    let mut pairs: Vec<(&GpuBuffer, &GradSlice, bool)> = Vec::new();
+    pairs.push((&weights.input_proj_w, &grads.input_proj_w, false));
+    pairs.push((&weights.input_proj_b, &grads.input_proj_b, false));
     for (lw, lg) in weights.layers.iter().zip(&grads.layers) {
-        pairs.push((&lw.norm_weight, &lg.norm_weight));
-        pairs.push((&lw.in_proj_w, &lg.in_proj_w));
-        pairs.push((&lw.conv1d_weight, &lg.conv1d_weight));
-        pairs.push((&lw.conv1d_bias, &lg.conv1d_bias));
-        pairs.push((&lw.x_proj_w, &lg.x_proj_w));
-        pairs.push((&lw.dt_proj_w, &lg.dt_proj_w));
-        pairs.push((&lw.dt_proj_b, &lg.dt_proj_b));
-        pairs.push((&lw.a_log, &lg.a_log));
-        pairs.push((&lw.d_param, &lg.d_param));
-        pairs.push((&lw.out_proj_w, &lg.out_proj_w));
+        pairs.push((&lw.norm_weight, &lg.norm_weight, true));
+        pairs.push((&lw.in_proj_w, &lg.in_proj_w, false));
+        pairs.push((&lw.conv1d_weight, &lg.conv1d_weight, false));
+        pairs.push((&lw.conv1d_bias, &lg.conv1d_bias, false));
+        pairs.push((&lw.x_proj_w, &lg.x_proj_w, false));
+        pairs.push((&lw.dt_proj_w, &lg.dt_proj_w, false));
+        pairs.push((&lw.dt_proj_b, &lg.dt_proj_b, true));
+        pairs.push((&lw.a_log, &lg.a_log, true));
+        pairs.push((&lw.d_param, &lg.d_param, true));
+        pairs.push((&lw.out_proj_w, &lg.out_proj_w, false));
     }
-    pairs.push((&weights.norm_f_weight, &grads.norm_f_weight));
-    run_pairs_capturable(ctx, adamw_kernel, adam, bias_factors_ptr, flat_base, &pairs)
+    pairs.push((&weights.norm_f_weight, &grads.norm_f_weight, true));
+    for (w, g, no_decay) in pairs {
+        let wd = if no_decay && adam.reference_no_decay {
+            0.0
+        } else {
+            adam.weight_decay
+        };
+        run_one_capturable_wd(
+            ctx,
+            adamw_kernel,
+            adam,
+            bias_factors_ptr,
+            flat_base,
+            (w, g),
+            wd,
+        )?;
+    }
+    Ok(())
 }
 
 /// CUDA-Graph-capturable variant of [`step_m3`].
@@ -462,23 +546,43 @@ pub fn step_m3_capturable(
     grads: &crate::mamba3_siso::gpu::weights::GpuMamba3Grads,
 ) -> Result<(), String> {
     let flat_base = grads.flat.cached_ptr();
-    let mut pairs: Vec<(&GpuBuffer, &GradSlice)> = Vec::new();
-    pairs.push((&weights.input_proj_w, &grads.input_proj_w));
-    pairs.push((&weights.input_proj_b, &grads.input_proj_b));
+    // M3 no-decay group (mirror of the M1 set's principle): dt bias, D and
+    // every norm scale. M3 has no fixed a_log (A is input-dependent); the
+    // B/C biases stay decayed (only the reference-named analogues are
+    // exempted). Active only when `adam.reference_no_decay`.
+    let mut pairs: Vec<(&GpuBuffer, &GradSlice, bool)> = Vec::new();
+    pairs.push((&weights.input_proj_w, &grads.input_proj_w, false));
+    pairs.push((&weights.input_proj_b, &grads.input_proj_b, false));
     for (lw, lg) in weights.layers.iter().zip(&grads.layers) {
-        pairs.push((&lw.norm_weight, &lg.norm_weight));
-        pairs.push((&lw.in_proj_w, &lg.in_proj_w));
-        pairs.push((&lw.dt_bias, &lg.dt_bias));
-        pairs.push((&lw.b_norm_weight, &lg.b_norm_weight));
-        pairs.push((&lw.c_norm_weight, &lg.c_norm_weight));
-        pairs.push((&lw.b_bias, &lg.b_bias));
-        pairs.push((&lw.c_bias, &lg.c_bias));
-        pairs.push((&lw.d_param, &lg.d_param));
-        pairs.push((&lw.norm_gate_weight, &lg.norm_gate_weight));
-        pairs.push((&lw.out_proj_w, &lg.out_proj_w));
+        pairs.push((&lw.norm_weight, &lg.norm_weight, true));
+        pairs.push((&lw.in_proj_w, &lg.in_proj_w, false));
+        pairs.push((&lw.dt_bias, &lg.dt_bias, true));
+        pairs.push((&lw.b_norm_weight, &lg.b_norm_weight, true));
+        pairs.push((&lw.c_norm_weight, &lg.c_norm_weight, true));
+        pairs.push((&lw.b_bias, &lg.b_bias, false));
+        pairs.push((&lw.c_bias, &lg.c_bias, false));
+        pairs.push((&lw.d_param, &lg.d_param, true));
+        pairs.push((&lw.norm_gate_weight, &lg.norm_gate_weight, true));
+        pairs.push((&lw.out_proj_w, &lg.out_proj_w, false));
     }
-    pairs.push((&weights.norm_f_weight, &grads.norm_f_weight));
-    run_pairs_capturable(ctx, adamw_kernel, adam, bias_factors_ptr, flat_base, &pairs)
+    pairs.push((&weights.norm_f_weight, &grads.norm_f_weight, true));
+    for (w, g, no_decay) in pairs {
+        let wd = if no_decay && adam.reference_no_decay {
+            0.0
+        } else {
+            adam.weight_decay
+        };
+        run_one_capturable_wd(
+            ctx,
+            adamw_kernel,
+            adam,
+            bias_factors_ptr,
+            flat_base,
+            (w, g),
+            wd,
+        )?;
+    }
+    Ok(())
 }
 
 /// Mamba-3 backbone AdamW step. Same idea as [`step_m1`] but for the M3
