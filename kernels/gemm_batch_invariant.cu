@@ -395,46 +395,51 @@ NAME(                                                                           
     extern __shared__ unsigned char smem_a_raw[];                               \
     T_IO* smem_a = reinterpret_cast<T_IO*>(smem_a_raw);                         \
                                                                                 \
-    /* Cooperative global→smem load of a_row[0..K).                         */  \
-    /* Vectorized 128-bit async loads via cp.async.cg (sm_80+).             */  \
-    /* uint4 = 16 bytes = 8 bf16/f16 or 4 f32. Batch-invariance preserved:  */  \
-    /* element values are identical to scalar path; smem write order        */  \
-    /* does not affect later per-col K reduction.                           */  \
-    {                                                                           \
-        const int VEC = 16 / (int)sizeof(T_IO);                                 \
-        const int k_vec = k / VEC;                                              \
-        const uint4* a_vec =                                                    \
-            reinterpret_cast<const uint4*>(a_row);                              \
-        uint4* smem_a_vec = reinterpret_cast<uint4*>(smem_a);                   \
-        _Pragma("unroll 1")                                                     \
-        for (int i = threadIdx.x; i < k_vec; i += THREADS_PER_BLOCK) {          \
-            __pipeline_memcpy_async(                                            \
-                &smem_a_vec[i], &a_vec[i], sizeof(uint4));                      \
-        }                                                                       \
-        __pipeline_commit();                                                    \
-        /* Scalar tail for k % VEC != 0 (still sync). */                        \
-        const int k_tail_start = k_vec * VEC;                                   \
-        for (int i = k_tail_start + threadIdx.x; i < k;                         \
-             i += THREADS_PER_BLOCK) {                                          \
-            smem_a[i] = a_row[i];                                               \
-        }                                                                       \
-        __pipeline_wait_prior(0);                                               \
-    }                                                                           \
-    __syncthreads();                                                            \
-                                                                                \
-    /* K-partition: each warp takes a contiguous range of K. */                 \
-    const int k_per_warp = (k + WARPS_PER_BLOCK - 1) / WARPS_PER_BLOCK;         \
-    const int k_start = warp_id * k_per_warp;                                   \
-    const int k_stop = min(k, k_start + k_per_warp);                            \
+    /* Cooperative global->smem load of a_row[0..K). Vectorized 128-bit */ \
+    /* cp.async.cg (sm_80+) when EVERY A row is 16-byte aligned (row     */ \
+    /* offset = row*k*sizeof(T_IO)); an arbitrary K (e.g. a vision patch */ \
+    /* dim) can misalign rows - those take the all-scalar fill. smem     */ \
+    /* contents are identical either way, so the per-col K reduction     */ \
+    /* (and its bits) never depends on the path taken.                   */ \
+    {                                                                       \
+        const int VEC = 16 / (int)sizeof(T_IO);                             \
+        if ((k * (int)sizeof(T_IO)) % 16 == 0) {                            \
+            const int k_vec = k / VEC;                                      \
+            const uint4* a_vec =                                            \
+                reinterpret_cast<const uint4*>(a_row);                      \
+            uint4* smem_a_vec = reinterpret_cast<uint4*>(smem_a);           \
+            _Pragma("unroll 1")                                             \
+            for (int i = threadIdx.x; i < k_vec; i += THREADS_PER_BLOCK) {  \
+                __pipeline_memcpy_async(                                    \
+                    &smem_a_vec[i], &a_vec[i], sizeof(uint4));              \
+            }                                                               \
+            __pipeline_commit();                                            \
+            __pipeline_wait_prior(0);                                       \
+        } else {                                                            \
+            for (int i = threadIdx.x; i < k; i += THREADS_PER_BLOCK) {      \
+                smem_a[i] = a_row[i];                                       \
+            }                                                               \
+        }                                                                   \
+    }                                                                       \
+    __syncthreads();                                                        \
+                                                                            \
+    /* K-partition: each warp takes a contiguous range of K, rounded up  */ \
+    /* to an EVEN span so every warp's k_start stays pair-aligned for    */ \
+    /* the packed smem reads below. Even spans (every historic HF        */ \
+    /* d_model) are unchanged - bit-stability preserved; odd spans       */ \
+    /* previously FAULTED (misaligned LDS.U32 at an odd element offset). */ \
+    int k_per_warp = (k + WARPS_PER_BLOCK - 1) / WARPS_PER_BLOCK;           \
+    k_per_warp += (k_per_warp & 1);                                         \
+    const int k_start = warp_id * k_per_warp;                               \
+    const int k_stop = min(k, k_start + k_per_warp);                        \
                                                                                 \
     /* OPT C: packed smem_a reads via pair_to_f2 helper. For bf16/f16 this  */ \
     /* halves LDS instruction count (1 LDS.U32 → 2 elements vs 2× LDS.U16).*/  \
     /* Address must be 4-byte aligned: kk steps by 8, smem_a starts at 0,  */  \
     /* so kk is always even and pair-aligned.                              */  \
-    /* OPT E: tell ptxas K is a multiple of 8 (HF Mamba: d_model ∈ {768,   */  \
-    /* 1024, 2048, 2560} all div by 8). Lets compiler drop the tail loop   */  \
-    /* and keep `kk < k_main` purely as a single-strand bound.             */  \
-    __builtin_assume((k & 7) == 0);                                             \
+    /* (An earlier __builtin_assume((k & 7) == 0) was removed: it was UB */ \
+    /* for arbitrary K - vision patch dims - and the scalar tail below   */ \
+    /* already handles k % 8 != 0 correctly at negligible cost.)         */ \
     float acc = 0.0f;                                                           \
     if (in_range && k_start < k_stop) {                                         \
         int kk = k_start;                                                       \
