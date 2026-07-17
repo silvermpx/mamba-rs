@@ -148,6 +148,84 @@ pub fn sgemm_forward(
     }
 }
 
+/// [`sgemm_forward`] with the gemm crate's internal rayon parallelism —
+/// the prefill serving path's single-page latency lever (a lone sequence
+/// cannot amortize across a batch, so the GEMM itself must parallelize).
+/// Tile-local accumulation keeps results bit-identical to the serial path
+/// (verified by the prefill parallel-invariance test). The Accelerate
+/// branch already threads internally and the scalar fallback is not a
+/// serving configuration — both delegate to [`sgemm_forward`].
+pub fn sgemm_forward_par(
+    y: &mut [f32],
+    x: &[f32],
+    w: &[f32],
+    bias: Option<&[f32]>,
+    batch: usize,
+    n_in: usize,
+    n_out: usize,
+) {
+    #[cfg(all(
+        feature = "gemm-blas",
+        not(all(feature = "accelerate", target_os = "macos"))
+    ))]
+    {
+        assert!(
+            x.len() >= batch * n_in,
+            "sgemm_forward_par: x.len() {} < batch*n_in {}",
+            x.len(),
+            batch * n_in
+        );
+        assert!(
+            w.len() >= n_in * n_out,
+            "sgemm_forward_par: w.len() {} < n_in*n_out {}",
+            w.len(),
+            n_in * n_out
+        );
+        assert!(
+            y.len() >= batch * n_out,
+            "sgemm_forward_par: y.len() {} < batch*n_out {}",
+            y.len(),
+            batch * n_out
+        );
+        if let Some(b) = bias {
+            for row in 0..batch {
+                let off = row * n_out;
+                y[off..off + n_out].copy_from_slice(&b[..n_out]);
+            }
+        } else {
+            y[..batch * n_out].fill(0.0);
+        }
+        unsafe {
+            gemm::gemm(
+                batch,
+                n_out,
+                n_in,
+                y.as_mut_ptr(),
+                1,
+                n_out as isize,
+                true,
+                x.as_ptr(),
+                1,
+                n_in as isize,
+                w.as_ptr(),
+                1,
+                n_out as isize,
+                1.0,
+                1.0,
+                false,
+                false,
+                false,
+                gemm::Parallelism::Rayon(rayon::current_num_threads()),
+            );
+        }
+    }
+    #[cfg(not(all(
+        feature = "gemm-blas",
+        not(all(feature = "accelerate", target_os = "macos"))
+    )))]
+    sgemm_forward(y, x, w, bias, batch, n_in, n_out);
+}
+
 /// Single-sample matrix-vector forward: `y[N] = x[K] @ W[K,N] + bias[N]`.
 pub fn matvec_forward(
     y: &mut [f32],
