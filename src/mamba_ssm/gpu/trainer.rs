@@ -701,9 +701,9 @@ impl MambaTrainerMixed {
         // then scale d_temporal on-device: the old path built a scaled
         // Vec<f32> on the host every step (B*T*d_model alloc + traversal).
         self.mamba_input.upload(&self.ctx.stream, input)?;
-        let dt_scaled = self.d_temporal_scaled.as_mut().expect("f16 dt_scaled");
-        dt_scaled.upload(&self.ctx.stream, d_temporal)?;
         {
+            let dt_scaled = self.d_temporal_scaled.as_mut().expect("f16 dt_scaled");
+            dt_scaled.upload(&self.ctx.stream, d_temporal)?;
             let n = d_temporal.len() as i32;
             let mut builder = self
                 .ctx
@@ -790,23 +790,8 @@ impl MambaTrainerMixed {
             // isn't supported — the `scale_grads_skip_f32` device-side
             // conditional + NaN-sanitization is the price paid there.
             self.grads.zero(&self.ctx.stream)?;
-            gpu_forward_mamba_backbone_train_mixed(
-                &self.ctx,
-                &mut self.acts,
-                &self.weights,
-                &self.mamba_input,
-                &mut self.state,
-                &mut self.scratch,
-            )?;
-            gpu_backward_mamba_backbone_mixed(
-                &self.ctx,
-                dt_scaled,
-                &self.grads,
-                &self.acts,
-                &self.weights.compute,
-                &self.a_neg_all,
-                &mut self.scratch,
-            )?;
+            self.eager_forward()?;
+            self.eager_backward(true)?;
             check_inf_nan_gpu(
                 &self.ctx,
                 &self.ctx.kernels,
@@ -830,23 +815,7 @@ impl MambaTrainerMixed {
                     &mut self.grads.flat,
                     unscale,
                 )?;
-                step_m1_capturable(
-                    &self.ctx,
-                    &self.ctx.kernels.adamw_step_f32_capturable,
-                    &self.adam,
-                    self.bias.ptr(),
-                    &mut self.weights.master,
-                    &self.grads,
-                )?;
-                self.weights.sync_master_to_compute(&self.ctx)?;
-                recompute_a_neg_all(
-                    &self.ctx,
-                    &self.weights.master.layers,
-                    &self.a_neg_all,
-                    &self.state.a_neg_all,
-                    self.cfg.d_inner(),
-                    self.cfg.d_state,
-                )?;
+                self.eager_optimize()?;
             }
             // else: overflow → skip AdamW entirely. Master weights, m/v
             // and a_neg all stay at the previous step's state, matching
@@ -921,23 +890,8 @@ impl MambaTrainerMixed {
         let stream = self.ctx.stream.clone();
         let g = capture_into_graph(&stream, || {
             self.grads.zero(&self.ctx.stream)?;
-            gpu_forward_mamba_backbone_train_mixed(
-                &self.ctx,
-                &mut self.acts,
-                &self.weights,
-                &self.mamba_input,
-                &mut self.state,
-                &mut self.scratch,
-            )?;
-            gpu_backward_mamba_backbone_mixed(
-                &self.ctx,
-                self.d_temporal_scaled.as_mut().unwrap(),
-                &self.grads,
-                &self.acts,
-                &self.weights.compute,
-                &self.a_neg_all,
-                &mut self.scratch,
-            )?;
+            self.eager_forward()?;
+            self.eager_backward(true)?;
             check_inf_nan_gpu(
                 &self.ctx,
                 &self.ctx.kernels,
@@ -951,25 +905,12 @@ impl MambaTrainerMixed {
                 &mut self.grads.flat,
                 self.unscale_factor.as_ref().unwrap(),
             )?;
-            step_m1_capturable(
-                &self.ctx,
-                &self.ctx.kernels.adamw_step_f32_capturable,
-                &self.adam,
-                self.bias.ptr(),
-                &mut self.weights.master,
-                &self.grads,
-            )?;
-            self.weights.sync_master_to_compute(&self.ctx)?;
-            // Recompute a_neg after AdamW so each replay sees the updated
-            // A-matrix (same rationale as the eager and bf16-graph paths).
-            recompute_a_neg_all(
-                &self.ctx,
-                &self.weights.master.layers,
-                &self.a_neg_all,
-                &self.state.a_neg_all,
-                self.cfg.d_inner(),
-                self.cfg.d_state,
-            )?;
+            // AdamW runs unconditionally in the captured body (branching
+            // mid-graph is unsupported); scale_grads_skip has already
+            // sanitized the arena on overflow. eager_optimize also recomputes
+            // a_neg after AdamW so each replay sees the updated A-matrix
+            // (same rationale as the eager and bf16-graph paths).
+            self.eager_optimize()?;
             Ok(())
         })?;
         self.graph_f16 = Some(g);
@@ -981,11 +922,11 @@ impl MambaTrainerMixed {
         Ok(())
     }
 
-    /// Eager fallback (used before [`Self::capture_graph`] is called and
-    /// shared as the body of capture). Mirrors the exact op sequence the
-    /// captured graph records.
-    fn step_eager(&mut self) -> Result<(), String> {
-        self.grads.zero(&self.ctx.stream)?;
+    /// Eager forward body: run the mixed training forward (saves the typed
+    /// activations backward reads). One of the three shared phase bodies the
+    /// fused eager step, the f16 eager step, and the f16 capture body all
+    /// compose; the forward/backward split API builds on exactly these seams.
+    fn eager_forward(&mut self) -> Result<(), String> {
         gpu_forward_mamba_backbone_train_mixed(
             &self.ctx,
             &mut self.acts,
@@ -993,19 +934,38 @@ impl MambaTrainerMixed {
             &self.mamba_input,
             &mut self.state,
             &mut self.scratch,
-        )?;
+        )
+    }
+
+    /// Eager backward body: accumulate gradients into the grad arena
+    /// (beta=1.0 — zeroing is the caller's responsibility). `scaled` selects
+    /// the f16 loss-scaled `d_temporal_scaled` buffer over the plain
+    /// `d_temporal` upload buffer.
+    fn eager_backward(&mut self, scaled: bool) -> Result<(), String> {
+        let d_temporal = if scaled {
+            self.d_temporal_scaled
+                .as_mut()
+                .expect("eager_backward(scaled): f16 d_temporal_scaled missing")
+        } else {
+            &mut self.d_temporal
+        };
         gpu_backward_mamba_backbone_mixed(
             &self.ctx,
-            &mut self.d_temporal,
+            d_temporal,
             &self.grads,
             &self.acts,
             &self.weights.compute,
             &self.a_neg_all,
             &mut self.scratch,
-        )?;
-        // Use the capturable kernel here too so the graph's and eager path's
-        // numerics are bit-identical (the kernel reads bias_factors from a
-        // device pointer that the `bias.write` above populated).
+        )
+    }
+
+    /// Eager optimizer tail: AdamW on the f32 master weights (capturable
+    /// kernel so graph and eager numerics stay bit-identical), master →
+    /// compute sync, then the mandatory `a_neg = -exp(a_log)` refresh
+    /// (without it the SSM reads a stale A-matrix and the a_log gradient is
+    /// a silent no-op — see `recompute_a_neg_all`).
+    fn eager_optimize(&mut self) -> Result<(), String> {
         step_m1_capturable(
             &self.ctx,
             &self.ctx.kernels.adamw_step_f32_capturable,
@@ -1015,11 +975,6 @@ impl MambaTrainerMixed {
             &self.grads,
         )?;
         self.weights.sync_master_to_compute(&self.ctx)?;
-        // a_log was just updated by AdamW — recompute a_neg = -exp(a_log)
-        // so the next forward sees the updated A-matrix. Without this, the
-        // SSM kernel reads stale decay values from construction time and
-        // the learned a_log gradient never reaches the recurrence (silent
-        // training no-op on the A-matrix).
         recompute_a_neg_all(
             &self.ctx,
             &self.weights.master.layers,
@@ -1027,8 +982,17 @@ impl MambaTrainerMixed {
             &self.state.a_neg_all,
             self.cfg.d_inner(),
             self.cfg.d_state,
-        )?;
-        Ok(())
+        )
+    }
+
+    /// Eager fallback (used before [`Self::capture_graph`] is called and
+    /// shared as the body of capture). Mirrors the exact op sequence the
+    /// captured graph records.
+    fn step_eager(&mut self) -> Result<(), String> {
+        self.grads.zero(&self.ctx.stream)?;
+        self.eager_forward()?;
+        self.eager_backward(false)?;
+        self.eager_optimize()
     }
 
     /// Download the master weights to a CPU-side `MambaWeights` for
@@ -1267,8 +1231,11 @@ impl MambaTrainerF32 {
         Ok(StepMetrics::plain(step, replayed))
     }
 
-    fn step_eager(&mut self) -> Result<(), String> {
-        self.grads.zero(&self.ctx.stream)?;
+    /// Eager forward body: run the training forward, writing the post-norm_f
+    /// output into `self.temporal`. One of the three shared phase bodies the
+    /// fused eager step composes; the forward/backward split API builds on
+    /// exactly these seams.
+    fn eager_forward(&mut self) -> Result<(), String> {
         gpu_forward_mamba_backbone(
             &self.ctx,
             &mut self.temporal,
@@ -1277,7 +1244,13 @@ impl MambaTrainerF32 {
             &self.mamba_input,
             &mut self.state,
             &mut self.scratch,
-        )?;
+        )
+    }
+
+    /// Eager backward body: accumulate gradients from `self.d_temporal`
+    /// through the saved activations into the grad arena (beta=1.0 —
+    /// zeroing is the caller's responsibility).
+    fn eager_backward(&mut self) -> Result<(), String> {
         gpu_backward_mamba_backbone(
             &self.ctx,
             &mut self.d_temporal,
@@ -1286,7 +1259,14 @@ impl MambaTrainerF32 {
             &self.weights,
             &self.a_neg_all,
             &mut self.scratch,
-        )?;
+        )
+    }
+
+    /// Eager optimizer tail: AdamW over the grad arena, then the mandatory
+    /// `a_neg = -exp(a_log)` refresh (without it the SSM reads a stale
+    /// A-matrix and the a_log gradient is a silent no-op — see
+    /// `recompute_a_neg_all`).
+    fn eager_optimize(&mut self) -> Result<(), String> {
         step_m1_capturable(
             &self.ctx,
             &self.ctx.kernels.adamw_step_f32_capturable,
@@ -1295,8 +1275,6 @@ impl MambaTrainerF32 {
             &mut self.weights,
             &self.grads,
         )?;
-        // Recompute a_neg after AdamW updated a_log — see docstring on
-        // `recompute_a_neg_all` above. Without this, SSM uses stale A-matrix.
         recompute_a_neg_all(
             &self.ctx,
             &self.weights.layers,
@@ -1304,8 +1282,14 @@ impl MambaTrainerF32 {
             &self.state.a_neg_all,
             self.cfg.d_inner(),
             self.cfg.d_state,
-        )?;
-        Ok(())
+        )
+    }
+
+    fn step_eager(&mut self) -> Result<(), String> {
+        self.grads.zero(&self.ctx.stream)?;
+        self.eager_forward()?;
+        self.eager_backward()?;
+        self.eager_optimize()
     }
 
     pub fn snapshot_master(&self) -> Result<MambaWeights, String> {
