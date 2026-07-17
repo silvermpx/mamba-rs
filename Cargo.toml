@@ -13,6 +13,13 @@ keywords = ["mamba", "ssm", "deep-learning", "cuda", "state-space-model"]
 categories = ["science", "mathematics"]
 readme = "README.md"
 
+# docs.rs builds have no CUDA toolkit -- render the CPU-side API surface
+# (hf loaders, BLAS-backed GEMM, the CLI types). The cuda feature's docs
+# render locally; doc(cfg) badge plumbing is a planned follow-up.
+[package.metadata.docs.rs]
+features = ["hf", "gemm-blas", "cli"]
+rustdoc-args = ["--cfg", "docsrs"]
+
 [[bin]]
 name = "mamba-generate"
 path = "src/bin/generate.rs"
@@ -64,18 +71,19 @@ optional = true
 features = ["derive"]
 
 [dependencies.tokenizers]
-version = "0.22"
+version = "0.23"
 optional = true
 
 [dependencies.hf-hub]
-version = "0.5"
+version = "1"
 optional = true
+features = ["blocking"]
 
 
 [dev-dependencies]
 tempfile = "3"
 
 [dependencies.cudarc]
-version = "0.19.7"
+version = "0.19.8"
 optional = true
 features = ["driver", "cublas", "nvrtc", "cuda-version-from-build-system"]
