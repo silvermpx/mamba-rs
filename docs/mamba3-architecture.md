@@ -91,6 +91,10 @@ Applied as 2D rotation pairs to B and C before SSM recurrence.
 - `v_state`: `[nheads, headdim]` — previous x
 - `angle_state`: `[nheads, num_rope_angles]` — cumulative RoPE angles
 
+All four carry through `forward_mamba3_backbone_prefill` (0.5.0 —
+full-sequence batched-SGEMM CPU forward, no activation tape) exactly as
+through `mamba3_step`, so prefill-then-decode is seamless.
+
 ## Weight Layout
 
 | Weight | Shape | Bias |
