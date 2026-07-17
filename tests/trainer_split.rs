@@ -590,3 +590,130 @@ fn set_lr_under_graph_errs_and_drop_graph_unblocks() {
         "after drop_graph steps must run eagerly"
     );
 }
+
+/// Reference no-decay groups: with the mask ON, masked tensors (a_log,
+/// d_param, dt_proj_b, norm scales) skip the decoupled decay term exactly
+/// (w_on - w_off == lr*wd*w0 elementwise), while unmasked tensors stay
+/// bit-identical to the mask-OFF run. Default OFF must be the historical
+/// behavior.
+#[test]
+fn reference_no_decay_masks_exactly_the_named_tensors() {
+    let cfg = test_cfg();
+    let input_dim = cfg.d_model;
+    let (batch, seq_len) = (1usize, 4usize);
+    let w = MambaWeights::init(&cfg, input_dim, 0xC0FFEE);
+    let input = det(batch * seq_len * input_dim, 0xAA, 0.05);
+    let d_temporal = det(batch * seq_len * cfg.d_model, 0xBB, 0.01);
+    let (lr, wd) = (1e-3f64, 1e-2f64);
+
+    let mut off = MambaTrainer::new_full(
+        0,
+        &w,
+        cfg,
+        session(batch, seq_len, input_dim),
+        WeightDtype::F32,
+    )
+    .expect("off trainer");
+    off.step(&input, &d_temporal).expect("off step");
+    let s_off = off.snapshot_master().expect("off snapshot");
+
+    let mut on = MambaTrainer::new_full(
+        0,
+        &w,
+        cfg,
+        session(batch, seq_len, input_dim),
+        WeightDtype::F32,
+    )
+    .expect("on trainer");
+    on.set_reference_no_decay(true).expect("enable mask");
+    on.step(&input, &d_temporal).expect("on step");
+    let s_on = on.snapshot_master().expect("on snapshot");
+
+    // Unmasked tensors: bit-identical between the two runs.
+    let unmasked = |s: &MambaWeights| -> Vec<f32> {
+        let mut v = Vec::new();
+        v.extend_from_slice(&s.input_proj_w);
+        v.extend_from_slice(&s.input_proj_b);
+        for l in &s.layers {
+            v.extend_from_slice(&l.in_proj_w);
+            v.extend_from_slice(&l.conv1d_weight);
+            v.extend_from_slice(&l.conv1d_bias);
+            v.extend_from_slice(&l.x_proj_w);
+            v.extend_from_slice(&l.dt_proj_w);
+            v.extend_from_slice(&l.out_proj_w);
+        }
+        v
+    };
+    for (i, (a, b)) in unmasked(&s_off)
+        .iter()
+        .zip(unmasked(&s_on).iter())
+        .enumerate()
+    {
+        assert_eq!(
+            a.to_bits(),
+            b.to_bits(),
+            "unmasked tensor element [{i}] changed under the mask: {a} vs {b}"
+        );
+    }
+
+    // Masked tensors: w_on - w_off == lr*wd*w0 (the decay term), elementwise.
+    let masked_with_origin = |s: &MambaWeights, w0: &MambaWeights| -> Vec<(f32, f32)> {
+        let mut v: Vec<(f32, f32)> = Vec::new();
+        for (l, l0) in s.layers.iter().zip(w0.layers.iter()) {
+            v.extend(
+                l.norm_weight
+                    .iter()
+                    .copied()
+                    .zip(l0.norm_weight.iter().copied()),
+            );
+            v.extend(
+                l.dt_proj_b
+                    .iter()
+                    .copied()
+                    .zip(l0.dt_proj_b.iter().copied()),
+            );
+            v.extend(l.a_log.iter().copied().zip(l0.a_log.iter().copied()));
+            v.extend(l.d_param.iter().copied().zip(l0.d_param.iter().copied()));
+        }
+        v.extend(
+            s.norm_f_weight
+                .iter()
+                .copied()
+                .zip(w0.norm_f_weight.iter().copied()),
+        );
+        v
+    };
+    let off_m = masked_with_origin(&s_off, &w);
+    let on_m = masked_with_origin(&s_on, &w);
+    let mut any_moved = false;
+    for (i, ((a, w0), (b, _))) in off_m.iter().zip(on_m.iter()).enumerate() {
+        let expected_gap = lr * wd * (*w0 as f64);
+        let gap = (*b as f64) - (*a as f64);
+        // Tolerance: the OFF run computes w0*(1 - lr*wd) in f32, whose
+        // rounding is ~ulp(w0) = |w0| * 2^-23 — the dominant error term,
+        // proportional to |w0| (not to the tiny decay gap itself).
+        let tol = 1e-7 + (*w0 as f64).abs() * 5e-7;
+        assert!(
+            (gap - expected_gap).abs() < tol,
+            "masked element [{i}]: gap {gap:e} vs expected decay term {expected_gap:e} \
+             (tol {tol:e})"
+        );
+        if gap.abs() > 0.0 {
+            any_moved = true;
+        }
+    }
+    assert!(any_moved, "the mask never changed a single masked element");
+
+    // Toggle under a captured graph must err.
+    let mut g = MambaTrainer::new_full(
+        0,
+        &w,
+        cfg,
+        session(batch, seq_len, input_dim),
+        WeightDtype::F32,
+    )
+    .expect("graph trainer");
+    g.step(&input, &d_temporal).expect("warmup");
+    g.capture_graph().expect("capture");
+    assert!(g.set_reference_no_decay(true).is_err());
+}

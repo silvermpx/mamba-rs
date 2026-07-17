@@ -369,6 +369,30 @@ impl MambaTrainer {
         }
     }
 
+    /// Toggle the reference-faithful AdamW no-decay parameter groups
+    /// (`a_log` / `d_param` / `dt_proj_b` / RMSNorm scales get
+    /// `weight_decay = 0`, matching the reference `_no_weight_decay`
+    /// marks — decaying `a_log` pulls every decay rate toward A = -1 over
+    /// long runs). Default OFF preserves the historical decay-everything
+    /// behavior bit-for-bit. Errs while a captured graph exists: the decay
+    /// coefficient is baked by value into the captured per-tensor AdamW
+    /// launches.
+    pub fn set_reference_no_decay(&mut self, on: bool) -> Result<(), String> {
+        if self.has_graph() {
+            return Err(
+                "set_reference_no_decay under a captured graph: the decay coefficient \
+                 is baked by value into the captured AdamW launches — drop_graph() \
+                 first, then toggle, then re-capture"
+                    .into(),
+            );
+        }
+        match &mut self.inner {
+            TrainerInner::F32(t) => t.adam.reference_no_decay = on,
+            TrainerInner::Mixed(t) => t.adam.reference_no_decay = on,
+        }
+        Ok(())
+    }
+
     /// Drop any captured step graph so `drop_graph -> set_lr ->
     /// capture_graph` is expressible. Subsequent [`Self::step`]s run
     /// eagerly until re-captured.
