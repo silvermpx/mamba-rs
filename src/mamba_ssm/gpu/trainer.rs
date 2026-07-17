@@ -1304,6 +1304,17 @@ impl MambaTrainerMixed {
         // doesn't currently use it, but match the bf16 graph for parity).
         self.ctx
             .presize_half_staging_for_train(&self.cfg, self.batch, self.seq_len, self.dtype)?;
+        // Same for the bi upcast scratch (input_dim-aware): under the
+        // batch-invariant flag the captured body's typed GEMMs route through
+        // with_bi_upcast_scratch — a lazy grow inside capture is illegal.
+        let input_dim = self.mamba_input.len() / (self.batch * self.seq_len);
+        self.ctx.presize_bi_upcast_scratch_for_train_with_input(
+            &self.cfg,
+            self.batch,
+            self.seq_len,
+            input_dim,
+            self.dtype,
+        )?;
 
         // Snapshot every device pointer the captured kernels reference, so
         // step_f16 can assert pointer-stability on each replay (audit Step
