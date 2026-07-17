@@ -31,7 +31,7 @@ cli = ["hf", "dep:clap", "dep:tokenizers", "dep:hf-hub"]
 [dependencies]
 pulp = "0.22"
 rayon = "1.10"
-safetensors = "0.7"
+safetensors = "0.8"
 
 [dependencies.gemm]
 version = "0.19"
