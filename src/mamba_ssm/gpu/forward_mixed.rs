@@ -362,11 +362,66 @@ pub fn gpu_forward_mamba_backbone_mixed(
             return Err(format!("identity proj D2D failed: {res:?}"));
         }
     } else {
-        return Err(
-            "non-identity input_proj for mixed training not yet implemented \
-             (HF Mamba uses identity_proj — use from_hf path)"
-                .to_string(),
-        );
+        // Non-identity input_proj — the trainable patch-embed path. Three
+        // launches: (1) cast the f32 input to the compute dtype, SAVED in
+        // acts (the backward dW consumes it); (2) typed GEMM with the f32
+        // bias into the saved typed outputs; (3) upcast the outputs to seed
+        // the f32 residual stream (AMP residual_in_fp32 — norm math and
+        // every residual carry stay f32).
+        let mid = dims.mamba_input_dim;
+        {
+            let n = (bt * mid) as i32;
+            let cast = match dt {
+                WeightDtype::Bf16 => &k.cast_f32_to_bf16,
+                WeightDtype::F16 => &k.cast_f32_to_f16,
+                WeightDtype::F32 => {
+                    return Err("mixed forward: unexpected f32 compute dtype".into());
+                }
+            };
+            let dst = acts.input_proj_inputs.cached_ptr();
+            let src = mamba_input.cached_ptr();
+            let mut bld = ctx.stream.launch_builder(cast);
+            bld.arg(&dst);
+            bld.arg(&src);
+            bld.arg(&n);
+            unsafe { bld.launch(grid_1d(bt * mid)) }
+                .map_err(|e| format!("input_proj input cast: {e:?}"))?;
+        }
+        gpu_gemm_typed_forward_raw(
+            ctx,
+            TypedPtr {
+                ptr: acts.input_proj_outputs.cached_ptr(),
+                dtype: dt,
+            },
+            TypedPtr {
+                ptr: acts.input_proj_inputs.cached_ptr(),
+                dtype: dt,
+            },
+            TypedPtr {
+                ptr: mamba_w.input_proj_w.ptr(),
+                dtype: dt,
+            },
+            Some(mamba_w.input_proj_b.ptr()),
+            (bt, mid, dm),
+        )?;
+        {
+            let n = (bt * dm) as i32;
+            let cast = match dt {
+                WeightDtype::Bf16 => &k.cast_bf16_to_f32,
+                WeightDtype::F16 => &k.cast_f16_to_f32,
+                WeightDtype::F32 => {
+                    return Err("mixed forward: unexpected f32 compute dtype".into());
+                }
+            };
+            let dst = acts.layers[0].residual.cached_ptr();
+            let src = acts.input_proj_outputs.cached_ptr();
+            let mut bld = ctx.stream.launch_builder(cast);
+            bld.arg(&dst);
+            bld.arg(&src);
+            bld.arg(&n);
+            unsafe { bld.launch(grid_1d(bt * dm)) }
+                .map_err(|e| format!("input_proj residual upcast: {e:?}"))?;
+        }
     }
 
     // ─── Per-layer offsets into flat state buffers ───

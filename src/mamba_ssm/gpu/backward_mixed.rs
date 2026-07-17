@@ -868,12 +868,71 @@ pub fn gpu_backward_mamba_backbone_mixed(
         )?;
     }
 
-    // input_proj backward — identity-proj path only (matches forward_mixed).
+    // input_proj backward — identity leaves it untouched; non-identity
+    // computes dW/db only. The dX below the projection is deliberately
+    // discarded (nothing trainable sits under it; the future plumb-through's
+    // landing site is `scratch.d_input_proj_dx`).
     if mamba_w.input_proj_w.len_elems() != 0 {
-        return Err(
-            "mixed backward: non-identity input_proj not yet supported (matches forward_mixed)"
-                .into(),
-        );
+        let bt = dims.batch * dims.seq_len;
+        let dm = dims.d_model;
+        let mid = dims.mamba_input_dim;
+        // d_temporal now holds the f32 gradient w.r.t. the input_proj
+        // OUTPUT (every layer's dX has been folded back into it). Cast it
+        // to the compute dtype, reusing the saved typed OUTPUTS buffer —
+        // its forward value has no remaining consumer.
+        let dy_ptr = acts.input_proj_outputs.cached_ptr();
+        {
+            let n = (bt * dm) as i32;
+            let cast = match dtype {
+                WeightDtype::Bf16 => &ctx.kernels.cast_f32_to_bf16,
+                WeightDtype::F16 => &ctx.kernels.cast_f32_to_f16,
+                WeightDtype::F32 => {
+                    return Err("mixed backward: unexpected f32 compute dtype".into());
+                }
+            };
+            let src = d_temporal.cached_ptr();
+            let mut bld = ctx.stream.launch_builder(cast);
+            bld.arg(&dy_ptr);
+            bld.arg(&src);
+            bld.arg(&n);
+            unsafe { bld.launch(grid_1d(bt * dm)) }
+                .map_err(|e| format!("input_proj dY cast: {e:?}"))?;
+        }
+        // db: typed accumulating reduction of dY over (b, t) into the f32
+        // grad slice (deterministic — one block per bias index, no atomics).
+        {
+            let bt_i = bt as i32;
+            let dm_i = dm as i32;
+            let mut bld = ctx
+                .stream
+                .launch_builder(ctx.kernels.reduce_bias_typed.get(dtype));
+            let db = d_mamba.input_proj_b.ptr();
+            bld.arg(&db);
+            bld.arg(&dy_ptr);
+            bld.arg(&bt_i);
+            bld.arg(&dm_i);
+            let threads = 256u32;
+            let cfg = cudarc::driver::LaunchConfig {
+                grid_dim: (dm as u32, 1, 1),
+                block_dim: (threads, 1, 1),
+                shared_mem_bytes: (threads as usize * std::mem::size_of::<f32>()) as u32,
+            };
+            unsafe { bld.launch(cfg) }.map_err(|e| format!("reduce_bias input_proj: {e:?}"))?;
+        }
+        // dW: saved typed inputs^T @ dY, accumulated into the f32 grad
+        // slice (bi-deterministic or cuBLAS, routed inside the helper).
+        gpu_sgemm_backward_dw_grad_typed(
+            ctx,
+            &d_mamba.input_proj_w,
+            TypedPtr { ptr: dy_ptr, dtype },
+            TypedPtr {
+                ptr: acts.input_proj_inputs.cached_ptr(),
+                dtype,
+            },
+            bt,
+            mid,
+            dm,
+        )?;
     }
     Ok(())
 }
