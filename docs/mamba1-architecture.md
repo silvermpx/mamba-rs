@@ -60,12 +60,19 @@ mamba_block_step(hidden, layer_weights, state, scratch, cfg);
 
 // Level 3: Full backbone — input_proj + N blocks + norm_f
 mamba_step(input, output, weights, states, scratch, cfg, input_dim);
+
+// Full-sequence variant of level 3 (0.5.0): one batched-SGEMM pass over
+// T positions instead of T step dispatches; state carries in AND out so
+// mamba_step continues from it (prefill-then-decode).
+forward_mamba_backbone_prefill(out, input, weights, state, scratch, dims);
 ```
 
 ## Recurrent State
 
 2 persistent states per layer:
-- `conv_state`: `[d_inner, d_conv]` — conv1d shift register
+- `conv_state`: `[(d_conv - 1) * d_inner]` — conv1d history (the training
+  pipeline uses a `d_conv`-wide shift register; the prefill widens on
+  entry and writes the last `d_conv - 1` entries back on exit)
 - `ssm_state`: `[d_inner, d_state]` — SSM hidden state
 
 ## Weight Layout
