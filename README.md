@@ -28,9 +28,33 @@ Pure Rust + CUDA. Kernels compile at runtime via NVRTC.
   deterministic (own numeric contract), at-or-near cuBLAS parity even on
   d128/d256 models and **faster than cuBLAS** from d_model ≥ 768
   (0.70× of PEDANTIC per step at d1536 bf16).
+- **Bring-your-own-loss training split** — `trainer.forward()` returns the
+  full `batch * seq_len * d_model` post-norm_f temporal output on the host;
+  compute ANY loss gradient in plain Rust and feed it to
+  `trainer.backward_step()` (global-norm clipping, exact gradient
+  accumulation, LR schedules via `set_lr`, reference-faithful AdamW
+  no-decay groups). Bit-identical to the fused `step()` — both compose the
+  same eager phase bodies. Same API on `Mamba3Trainer`.
+- **Full-sequence CPU prefill** — `forward_prefill` runs a whole prompt/page
+  through the training forward's batched-SGEMM pipeline (no activation
+  tape) instead of T per-step dispatches, then hands the recurrent state to
+  the step path (prefill-then-decode). Serial mode is the deterministic
+  reference; `PrefillMode::Parallel` parallelizes every phase and stays
+  bit-equal. Both architectures.
 - **HuggingFace loader** — safetensors, synthetic + real Mamba SSM
   checkpoints (130m / 370m / 1.4b / 2.8b validated).
-- **Standalone** — no framework dependency.
+- **Standalone** — no framework dependency. MSRV 1.97.
+
+## Cargo features
+
+| feature | what it enables | when |
+|---|---|---|
+| *(default)* | pure-Rust scalar GEMM | correctness work only — 5-20x slower |
+| `gemm-blas` | [`gemm`] crate BLAS-class CPU GEMM (+ rayon) | ANY serious CPU use |
+| `accelerate` | Apple Accelerate GEMM (macOS) | macOS deployments |
+| `cuda` | GPU inference + training (NVRTC-compiled kernels) | needs the CUDA toolkit |
+| `hf` | safetensors/HF checkpoint loaders | LM checkpoints |
+| `cli` | `mamba-generate` binary (tokenizers + hf-hub) | text generation CLI |
 
 ## Use cases and API choice
 
@@ -64,6 +88,18 @@ single-digit tokens/sec regardless of implementation.
 The CPU `MambaLM` path compiles and runs end-to-end, but exists for
 CPU↔GPU parity testing (`tests/hf_batch_parity.rs`), not for production
 LLM serving.
+
+### Sequence classification / embeddings / custom heads
+
+Whole-sequence reads with a caller-defined loss (document classifiers,
+distillation, contrastive embedding). GPU training rides the
+forward/backward split; CPU serving rides the prefill.
+
+- **Training** — `MambaTrainer::forward` + host-side loss +
+  `MambaTrainer::backward_step` (see `examples/custom_loss.rs`)
+- **CPU serving** — `MambaBackbone::forward_prefill` /
+  `forward_mamba3_backbone_prefill` (see `examples/cpu_prefill.rs`);
+  batches of sequences via `prefill_batch` / `prefill3_batch`
 
 ### Sharing weights across paths
 
@@ -109,7 +145,7 @@ mamba3_step(&mut output, &input, &mut scratch, &weights, &mut state.layers, &cfg
 
 ```toml
 [dependencies]
-mamba-rs = { version = "0.4", features = ["cuda"] }
+mamba-rs = { version = "0.5", features = ["cuda"] }
 ```
 
 `GpuMambaBackbone::new_with_dtype` and the symmetric Mamba-3 constructor take
@@ -178,6 +214,51 @@ let master = trainer.snapshot_master()?; // CPU-side MambaWeights for checkpoint
 `Mamba3Trainer` mirrors the same API. f16 training activates the dynamic
 loss scaler automatically; `metrics.loss_scale` / `metrics.overflow_skipped`
 report its state each step.
+
+### Custom losses: the forward/backward split
+
+The fused `step()` needs the loss gradient up front; the split lets you
+compute it from the actual forward output:
+
+```rust
+use mamba_rs::mamba_ssm::gpu::trainer::BackwardOpts;
+
+let mut temporal = vec![0.0f32; batch * seq_len * cfg.d_model];
+trainer.forward(&input, &mut temporal)?;          // full temporal readback (f32)
+let d_temporal = my_loss_grad(&temporal);          // any host-side loss
+let m = trainer.backward_step(
+    &d_temporal,
+    BackwardOpts::default().with_clip_max_norm(1.0),
+)?;                                                // backward + clip + AdamW
+// gradient accumulation: .with_accumulate_only(true) on the non-applying
+// micro-batches (the fused step() refuses while a window is open).
+```
+
+Always eager (a caller-side loss cannot live inside a captured graph), and
+bit-identical to the fused `step()` — both compose the same phase bodies.
+See `examples/custom_loss.rs` for a complete training loop.
+
+## Quick start (CPU prefill)
+
+```rust
+use mamba_rs::inference::PrefillMode;
+use mamba_rs::module::MambaBackbone;
+
+let backbone = MambaBackbone::init(cfg, input_dim, 42);
+let mut state = backbone.alloc_state();
+let mut scratch = backbone.alloc_prefill_scratch(seq_len);
+let mut out = vec![0.0f32; seq_len * backbone.config().d_model];
+
+// One batched-SGEMM pass over the whole prompt instead of T step dispatches.
+backbone.forward_prefill(&prompt, &mut out, &mut state, &mut scratch,
+                         seq_len, PrefillMode::Parallel);
+// `out` holds the post-norm_f output at EVERY position (pooling-ready);
+// `state` is positioned after the prompt — forward_step continues from it.
+```
+
+Enable `gemm-blas` (or `accelerate` on macOS) — the default scalar GEMM is
+a correctness fallback, not a serving configuration. Mamba-3 has the same
+surface (`forward_mamba3_backbone_prefill` + `Mamba3PrefillScratch`).
 
 ## Serialization
 
