@@ -162,6 +162,63 @@ impl StepMetrics {
     }
 }
 
+/// Options for [`MambaTrainer::backward_step`].
+///
+/// `#[non_exhaustive]` + `with_*` builders: cross-crate struct literals are
+/// blocked on purpose so future fields stay semver-minor. The derived
+/// `Default` is the safe fused-step behavior (zero the arena, run backward,
+/// run the full optimizer tail).
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct BackwardOpts {
+    /// `Some(c)`: after backward (and, for f16, after unscale) scale the
+    /// gradients by `min(1, c / (||g||_2 + 1e-6))` before AdamW —
+    /// `torch.nn.utils.clip_grad_norm_` semantics. NOT WIRED YET: returns
+    /// an error until the deterministic `grad_clip` kernel lands (the next
+    /// step of this branch).
+    pub clip_max_norm: Option<f32>,
+    /// `true`: accumulate only — the gradient arena is NOT zeroed by the
+    /// next `backward_step`, Adam does not advance, and AdamW /
+    /// master→compute sync / the `a_neg` refresh are all skipped. Loss
+    /// averaging stays caller-side (scale `d_temporal` by `1/n_micro`).
+    /// Unsupported for f16 (the loss-scale freeze window across
+    /// micro-batches has no defined semantics).
+    pub accumulate_only: bool,
+}
+
+impl BackwardOpts {
+    /// Request global-norm gradient clipping at `c`.
+    pub fn with_clip_max_norm(mut self, c: f32) -> Self {
+        self.clip_max_norm = Some(c);
+        self
+    }
+
+    /// Toggle accumulate-only mode (see the field docs).
+    pub fn with_accumulate_only(mut self, on: bool) -> Self {
+        self.accumulate_only = on;
+        self
+    }
+}
+
+/// Metrics returned by [`MambaTrainer::backward_step`].
+#[non_exhaustive]
+#[derive(Debug, Clone)]
+pub struct BackwardMetrics {
+    /// Adam step counter AFTER this call; unchanged on an accumulate-only
+    /// call and on an f16 overflow-skipped step.
+    pub step: u64,
+    /// Whether AdamW actually ran (false on accumulate-only / f16 overflow).
+    pub optimizer_stepped: bool,
+    /// Pre-clip, post-unscale global gradient L2 norm; `Some` iff clipping
+    /// was requested. Deliberately never added to [`StepMetrics`] — the
+    /// fused step must not grow a hidden device sync.
+    pub grad_norm: Option<f32>,
+    /// `Some(scale)` when the f16 loss scaler is active.
+    pub loss_scale: Option<f32>,
+    /// `Some(true)` when the f16 scaler detected inf/nan and skipped AdamW.
+    pub overflow_skipped: Option<bool>,
+}
+
 /// Internal precision-dispatch enum. Hidden behind [`MambaTrainer`] so the
 /// public API is a single struct with a single set of method names — caller
 /// never matches `F32`/`Mixed` directly. Mirrors `inference::BackboneEngine`.
@@ -308,6 +365,42 @@ impl MambaTrainer {
         }
     }
 
+    /// Eager forward half of the split step: runs the training forward and
+    /// writes the FULL `batch * seq_len * d_model` POST-norm_f temporal
+    /// output into caller-owned `temporal_out` — f32 on ALL dtypes
+    /// (bf16/f16 outputs are upcast on-device before download).
+    /// Stream-synchronized on return, so `temporal_out` is valid host data.
+    ///
+    /// Advances the recurrent conv/SSM state — call [`Self::reset_state`]
+    /// between independent sequences. Always runs the eager path, even when
+    /// a step graph is captured: the split exists so a caller-side loss can
+    /// run between forward and backward, which a captured whole-step graph
+    /// cannot express. The fused [`Self::step`] remains the
+    /// graph-capturable fast path and is byte-identical in numerics (both
+    /// compose the same eager bodies).
+    pub fn forward(&mut self, input: &[f32], temporal_out: &mut [f32]) -> Result<(), String> {
+        match &mut self.inner {
+            TrainerInner::F32(t) => t.forward_split(input, temporal_out),
+            TrainerInner::Mixed(t) => t.forward_split(input, temporal_out),
+        }
+    }
+
+    /// Backward + optimizer half of the split step. `d_temporal` is the
+    /// gradient w.r.t. the IMMEDIATELY PRECEDING [`Self::forward`]'s
+    /// temporal output (`batch * seq_len * d_model`, f32 — exactly the
+    /// tensor `temporal_out` held). Errs when no forward is pending (the
+    /// saved activations would be stale or missing). Always eager.
+    pub fn backward_step(
+        &mut self,
+        d_temporal: &[f32],
+        opts: BackwardOpts,
+    ) -> Result<BackwardMetrics, String> {
+        match &mut self.inner {
+            TrainerInner::F32(t) => t.backward_split(d_temporal, opts),
+            TrainerInner::Mixed(t) => t.backward_split(d_temporal, opts),
+        }
+    }
+
     /// Download the f32 master weights to CPU for checkpointing. Always
     /// f32 regardless of the compute dtype — mixed-precision training
     /// keeps a separate master copy that the optimizer updates.
@@ -379,6 +472,21 @@ pub(crate) struct MambaTrainerMixed {
     // Upload buffers (stable pointers — reused every step).
     mamba_input: GpuBuffer,
     d_temporal: GpuBuffer,
+
+    /// Dedicated f32 staging for the split forward's readback: the typed
+    /// post-norm_f output (`scratch.temporal_typed`) is clobbered by the
+    /// backward's B0 pass, and `DtypedBuf::download_f32` heap-allocates a
+    /// full-size Vec per call — so `forward_split` upcasts into this
+    /// pre-allocated buffer and downloads from it.
+    temporal_f32: GpuBuffer,
+    /// True between a `forward_split` and the `backward_split` consuming its
+    /// saved activations (split-phase interlock).
+    split_forward_pending: bool,
+    /// True while an `accumulate_only` backward window is open: the next
+    /// backward must NOT zero the arena, and the fused `step()` must refuse
+    /// to run (its body zeroes the arena and would silently discard the
+    /// accumulated gradients).
+    grads_dirty: bool,
 
     // Lazily-populated CUDA Graph. None → eager path; Some → replayed.
     // Always None for f16 (loss-scaler overflow check requires CPU readback,
@@ -492,6 +600,7 @@ impl MambaTrainerMixed {
 
         let mamba_input = GpuBuffer::zeros(&ctx.stream, batch * seq_len * input_dim)?;
         let d_temporal = GpuBuffer::zeros(&ctx.stream, batch * seq_len * cfg.d_model)?;
+        let temporal_f32 = GpuBuffer::zeros(&ctx.stream, batch * seq_len * cfg.d_model)?;
         let grads = GpuMambaGrads::new(&ctx.stream, &cfg, input_dim)?;
 
         let adam = GpuAdamW::new(&ctx.stream, grads.flat.len())?
@@ -533,6 +642,9 @@ impl MambaTrainerMixed {
             a_neg_all,
             mamba_input,
             d_temporal,
+            temporal_f32,
+            split_forward_pending: false,
+            grads_dirty: false,
             graph: None,
             scaler,
             overflow_flag,
@@ -654,6 +766,14 @@ impl MambaTrainerMixed {
             self.d_temporal.len(),
             d_temporal.len()
         );
+        if self.grads_dirty {
+            return Err(
+                "step(): an accumulate_only backward window is open — close it with \
+                 backward_step(accumulate_only=false); the fused step zeroes the grad \
+                 arena and would silently discard the accumulated gradients"
+                    .into(),
+            );
+        }
 
         if matches!(self.dtype, WeightDtype::F16) {
             return self.step_f16(input, d_temporal);
@@ -686,6 +806,200 @@ impl MambaTrainerMixed {
         };
 
         Ok(StepMetrics::plain(step, replayed))
+    }
+
+    /// Split forward (see [`MambaTrainer::forward`]): eager forward, upcast
+    /// the typed post-norm_f output into the dedicated f32 staging buffer,
+    /// sync, download into `temporal_out`.
+    pub(crate) fn forward_split(
+        &mut self,
+        input: &[f32],
+        temporal_out: &mut [f32],
+    ) -> Result<(), String> {
+        assert_eq!(
+            input.len(),
+            self.mamba_input.len(),
+            "input shape mismatch: expected batch*seq_len*input_dim={}, got {}",
+            self.mamba_input.len(),
+            input.len(),
+        );
+        assert_eq!(
+            temporal_out.len(),
+            self.temporal_f32.len(),
+            "temporal_out shape mismatch: expected batch*seq_len*d_model={}, got {}",
+            self.temporal_f32.len(),
+            temporal_out.len(),
+        );
+        self.mamba_input.upload(&self.ctx.stream, input)?;
+        self.eager_forward()?;
+        {
+            let dst = self.temporal_f32.cached_ptr();
+            let src = self.scratch.temporal_typed.cached_ptr();
+            let kernel = match self.scratch.temporal_typed.dtype() {
+                WeightDtype::Bf16 => &self.ctx.kernels.cast_bf16_to_f32,
+                WeightDtype::F16 => &self.ctx.kernels.cast_f16_to_f32,
+                WeightDtype::F32 => {
+                    return Err("forward_split: unexpected f32 temporal_typed in Mixed".into());
+                }
+            };
+            let n = self.temporal_f32.len() as i32;
+            let mut b = self.ctx.stream.launch_builder(kernel);
+            b.arg(&dst);
+            b.arg(&src);
+            b.arg(&n);
+            unsafe { b.launch(grid_1d(self.temporal_f32.len())) }
+                .map_err(|e| format!("forward_split: temporal upcast: {e:?}"))?;
+        }
+        self.ctx
+            .stream
+            .synchronize()
+            .map_err(|e| format!("forward_split sync: {e:?}"))?;
+        self.temporal_f32.download(&self.ctx.stream, temporal_out)?;
+        self.split_forward_pending = true;
+        Ok(())
+    }
+
+    /// Split backward + optimizer (see [`MambaTrainer::backward_step`]).
+    pub(crate) fn backward_split(
+        &mut self,
+        d_temporal: &[f32],
+        opts: BackwardOpts,
+    ) -> Result<BackwardMetrics, String> {
+        if !self.split_forward_pending {
+            return Err(
+                "backward_step() without a pending forward() — the saved activations \
+                 are stale or missing; call forward() first"
+                    .into(),
+            );
+        }
+        if opts.clip_max_norm.is_some() {
+            return Err(
+                "clip_max_norm is not wired yet — the deterministic grad_clip kernel \
+                 lands in the next step of this branch"
+                    .into(),
+            );
+        }
+        assert_eq!(
+            d_temporal.len(),
+            self.d_temporal.len(),
+            "d_temporal shape mismatch: expected batch*seq_len*d_model={}, got {}",
+            self.d_temporal.len(),
+            d_temporal.len(),
+        );
+
+        if matches!(self.dtype, WeightDtype::F16) {
+            if opts.accumulate_only {
+                return Err(
+                    "f16 + accumulate_only is unsupported: the loss-scale freeze window \
+                     across micro-batches has no defined semantics"
+                        .into(),
+                );
+            }
+            let m = self.backward_split_f16(d_temporal)?;
+            self.split_forward_pending = false;
+            return Ok(m);
+        }
+
+        self.d_temporal.upload(&self.ctx.stream, d_temporal)?;
+        if !self.grads_dirty {
+            self.grads.zero(&self.ctx.stream)?;
+        }
+        self.eager_backward(false)?;
+        self.split_forward_pending = false;
+
+        if opts.accumulate_only {
+            self.grads_dirty = true;
+            Ok(BackwardMetrics {
+                step: self.adam.step,
+                optimizer_stepped: false,
+                grad_norm: None,
+                loss_scale: None,
+                overflow_skipped: None,
+            })
+        } else {
+            let (step, bc1, bc2) = self.adam.advance();
+            self.bias.write(&self.ctx.stream, bc1, bc2)?;
+            self.eager_optimize()?;
+            self.grads_dirty = false;
+            Ok(BackwardMetrics {
+                step,
+                optimizer_stepped: true,
+                grad_norm: None,
+                loss_scale: None,
+                overflow_skipped: None,
+            })
+        }
+    }
+
+    /// f16 split backward: mirrors the `step_f16` eager branch minus the
+    /// forward (GradScaler protocol — scale, backward, overflow check,
+    /// conditional unscale + optimize, scaler update, step rollback).
+    fn backward_split_f16(&mut self, d_temporal: &[f32]) -> Result<BackwardMetrics, String> {
+        let scale = self.scaler.as_ref().expect("f16 scaler").scale();
+        {
+            let dt_scaled = self.d_temporal_scaled.as_mut().expect("f16 dt_scaled");
+            dt_scaled.upload(&self.ctx.stream, d_temporal)?;
+            let n = d_temporal.len() as i32;
+            let mut builder = self
+                .ctx
+                .stream
+                .launch_builder(&self.ctx.kernels.scale_grads_f32);
+            builder.arg(dt_scaled.inner_mut());
+            builder.arg(&scale);
+            builder.arg(&n);
+            unsafe { builder.launch(grid_1d(d_temporal.len())) }
+                .map_err(|e| format!("scale d_temporal (f16 split): {e:?}"))?;
+        }
+        if let Some(ref mut u) = self.unscale_factor {
+            u.write(&self.ctx.stream, 1.0 / scale)?;
+        }
+        let prev_step = self.adam.step;
+        let (next_step, bc1, bc2) = self.adam.advance();
+        self.bias.write(&self.ctx.stream, bc1, bc2)?;
+        self.overflow_flag
+            .as_mut()
+            .expect("f16 overflow flag")
+            .zero(&self.ctx.stream)?;
+
+        self.grads.zero(&self.ctx.stream)?;
+        self.eager_backward(true)?;
+        check_inf_nan_gpu(
+            &self.ctx,
+            &self.ctx.kernels,
+            self.overflow_flag.as_mut().unwrap(),
+            &self.grads.flat,
+        )?;
+        let overflow = self
+            .overflow_flag
+            .as_ref()
+            .unwrap()
+            .read(&self.ctx.stream)?
+            != 0;
+        if !overflow {
+            let unscale = self.unscale_factor.as_ref().expect("unscale buf");
+            scale_grads_skip_gpu(
+                &self.ctx,
+                &self.ctx.kernels,
+                self.overflow_flag.as_mut().unwrap(),
+                &mut self.grads.flat,
+                unscale,
+            )?;
+            self.eager_optimize()?;
+        }
+        self.scaler.as_mut().expect("f16 scaler").update(overflow);
+        let final_step = if overflow {
+            self.adam.step = prev_step;
+            prev_step
+        } else {
+            next_step
+        };
+        Ok(BackwardMetrics {
+            step: final_step,
+            optimizer_stepped: !overflow,
+            grad_norm: None,
+            loss_scale: Some(scale),
+            overflow_skipped: Some(overflow),
+        })
     }
 
     /// f16 step (eager, no graph). Mirrors PyTorch GradScaler protocol:
@@ -1051,6 +1365,12 @@ pub(crate) struct MambaTrainerF32 {
     mamba_input: GpuBuffer,
     d_temporal: GpuBuffer,
     graph: Option<GpuMambaF32TrainingStepGraph>,
+    /// True between a `forward_split` and the `backward_split` consuming its
+    /// saved activations (split-phase interlock).
+    split_forward_pending: bool,
+    /// True while an `accumulate_only` backward window is open (see the
+    /// same-named field on `MambaTrainerMixed`).
+    grads_dirty: bool,
 }
 
 impl MambaTrainerF32 {
@@ -1144,6 +1464,8 @@ impl MambaTrainerF32 {
             mamba_input,
             d_temporal,
             graph: None,
+            split_forward_pending: false,
+            grads_dirty: false,
         })
     }
 
@@ -1204,6 +1526,14 @@ impl MambaTrainerF32 {
             self.d_temporal.len(),
             d_temporal.len(),
         );
+        if self.grads_dirty {
+            return Err(
+                "step(): an accumulate_only backward window is open — close it with \
+                 backward_step(accumulate_only=false); the fused step zeroes the grad \
+                 arena and would silently discard the accumulated gradients"
+                    .into(),
+            );
+        }
         self.mamba_input.upload(&self.ctx.stream, input)?;
         self.d_temporal.upload(&self.ctx.stream, d_temporal)?;
 
@@ -1229,6 +1559,98 @@ impl MambaTrainerF32 {
         };
 
         Ok(StepMetrics::plain(step, replayed))
+    }
+
+    /// Split forward (see [`MambaTrainer::forward`]): eager forward into the
+    /// existing `self.temporal` device buffer, sync, download into
+    /// `temporal_out`. Zero new device allocation — the buffer already
+    /// exists and was previously write-only.
+    pub(crate) fn forward_split(
+        &mut self,
+        input: &[f32],
+        temporal_out: &mut [f32],
+    ) -> Result<(), String> {
+        assert_eq!(
+            input.len(),
+            self.mamba_input.len(),
+            "input shape mismatch: expected batch*seq_len*input_dim={}, got {}",
+            self.mamba_input.len(),
+            input.len(),
+        );
+        assert_eq!(
+            temporal_out.len(),
+            self.temporal.len(),
+            "temporal_out shape mismatch: expected batch*seq_len*d_model={}, got {}",
+            self.temporal.len(),
+            temporal_out.len(),
+        );
+        self.mamba_input.upload(&self.ctx.stream, input)?;
+        self.eager_forward()?;
+        self.ctx
+            .stream
+            .synchronize()
+            .map_err(|e| format!("forward_split sync: {e:?}"))?;
+        self.temporal.download(&self.ctx.stream, temporal_out)?;
+        self.split_forward_pending = true;
+        Ok(())
+    }
+
+    /// Split backward + optimizer (see [`MambaTrainer::backward_step`]).
+    pub(crate) fn backward_split(
+        &mut self,
+        d_temporal: &[f32],
+        opts: BackwardOpts,
+    ) -> Result<BackwardMetrics, String> {
+        if !self.split_forward_pending {
+            return Err(
+                "backward_step() without a pending forward() — the saved activations \
+                 are stale or missing; call forward() first"
+                    .into(),
+            );
+        }
+        if opts.clip_max_norm.is_some() {
+            return Err(
+                "clip_max_norm is not wired yet — the deterministic grad_clip kernel \
+                 lands in the next step of this branch"
+                    .into(),
+            );
+        }
+        assert_eq!(
+            d_temporal.len(),
+            self.d_temporal.len(),
+            "d_temporal shape mismatch: expected batch*seq_len*d_model={}, got {}",
+            self.d_temporal.len(),
+            d_temporal.len(),
+        );
+        self.d_temporal.upload(&self.ctx.stream, d_temporal)?;
+        if !self.grads_dirty {
+            self.grads.zero(&self.ctx.stream)?;
+        }
+        self.eager_backward()?;
+        self.split_forward_pending = false;
+
+        if opts.accumulate_only {
+            self.grads_dirty = true;
+            Ok(BackwardMetrics {
+                step: self.adam.step,
+                optimizer_stepped: false,
+                grad_norm: None,
+                loss_scale: None,
+                overflow_skipped: None,
+            })
+        } else {
+            let (step, bc1, bc2) = self.adam.advance();
+            self.bias.write(&self.ctx.stream, bc1, bc2)?;
+            self.eager_optimize()?;
+            self.grads_dirty = false;
+            Ok(BackwardMetrics {
+                step,
+                optimizer_stepped: true,
+                grad_norm: None,
+                loss_scale: None,
+                overflow_skipped: None,
+            })
+        }
     }
 
     /// Eager forward body: run the training forward, writing the post-norm_f
