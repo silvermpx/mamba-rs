@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.5.0 (unreleased)
+## 0.5.0
 
 Feature release: the bring-your-own-loss training split, full-sequence
 CPU prefill, and the supervised-training toolkit (grad clipping, gradient
