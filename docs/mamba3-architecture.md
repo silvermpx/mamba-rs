@@ -20,7 +20,7 @@ Reference: Lahoti et al., *Mamba-3: Improved Sequence Modeling using State Space
     |   /  |  |  |  |  |  |  \     |
     |  z   x  B  C  dt  A  λ  θ    |
     |      |  |  |  |   |  |  |    |
-    |      | BCNorm    softplus     |
+    |      | BCNorm    sp / -ht     |
     |      |  |  |  |   |  sig     |
     |      | bias  bias clamp      |
     |      |  |  |  |              |
@@ -43,6 +43,11 @@ Reference: Lahoti et al., *Mamba-3: Improved Sequence Modeling using State Space
         |
     output [B, T, d_model]
 ```
+
+Activations in the split: `sp` = softplus(dd_dt + dt_bias) on dt; `-ht` =
+`-heavy_tail(dd_A)` clamped at `-a_floor` on A (state-spaces/mamba
+`heavy_tail_activation`: `1 + x` for `x >= 0`, `1 / (1 - x)` for `x < 0`);
+`sig` = sigmoid on the trapezoid gate λ.
 
 ## Key Differences from Mamba SSM
 

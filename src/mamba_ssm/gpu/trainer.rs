@@ -298,8 +298,9 @@ impl MambaTrainer {
 
     /// Run one training step on `(input, d_temporal)`. `input` must have
     /// length `batch * seq_len * input_dim`; `d_temporal` must have
-    /// length `batch * d_model` (gradient w.r.t. the final temporal
-    /// output). Returns [`StepMetrics`] with overflow / replay flags.
+    /// length `batch * seq_len * d_model` (gradient w.r.t. the FULL
+    /// post-norm_f temporal output sequence, not just the last position).
+    /// Returns [`StepMetrics`] with overflow / replay flags.
     pub fn step(&mut self, input: &[f32], d_temporal: &[f32]) -> Result<StepMetrics, String> {
         match &mut self.inner {
             TrainerInner::F32(t) => t.step(input, d_temporal),
@@ -1235,7 +1236,7 @@ impl MambaTrainerF32 {
         assert_eq!(
             d_temporal.len(),
             self.d_temporal.len(),
-            "d_temporal shape mismatch: expected batch*d_model={}, got {}",
+            "d_temporal shape mismatch: expected batch*seq_len*d_model={}, got {}",
             self.d_temporal.len(),
             d_temporal.len(),
         );
