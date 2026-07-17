@@ -183,6 +183,40 @@ impl GpuCtx {
         self.with_bi_upcast_scratch((elems, elems, elems), |_, _, _| Ok(()))
     }
 
+    /// [`Self::presize_bi_upcast_scratch_for_train`] for a trainable
+    /// NON-IDENTITY input projection: extends the sizing bound with the
+    /// input_proj GEMM operands — the `m·input_dim` activation slot and the
+    /// `input_dim·d_model` weight. Without this, an `input_dim` (e.g. a
+    /// vision patch dim P²) exceeding `max(d_model, 2·d_inner, xproj_out)`
+    /// makes `with_bi_upcast_scratch` grow INSIDE CUDA Graph capture
+    /// (illegal alloc) or after it (freed-pointer replay). With
+    /// `input_dim <= d_model` (incl. identity) the bound equals the base
+    /// function's.
+    pub fn presize_bi_upcast_scratch_for_train_with_input(
+        &self,
+        cfg: &MambaConfig,
+        batch: usize,
+        seq_len: usize,
+        input_dim: usize,
+        dtype: WeightDtype,
+    ) -> Result<(), String> {
+        if matches!(dtype, WeightDtype::F32) || !self.batch_invariant() {
+            return Ok(());
+        }
+        let m = batch * seq_len;
+        let dm = cfg.d_model;
+        let di = cfg.d_inner();
+        let xproj_out = cfg.dt_rank() + 2 * cfg.d_state;
+        let max_dim = dm.max(2 * di).max(xproj_out).max(input_dim);
+        let max_kn = (dm * 2 * di)
+            .max(di * xproj_out)
+            .max(cfg.dt_rank() * di)
+            .max(di * dm)
+            .max(input_dim * dm);
+        let elems = (m * max_dim).max(max_kn);
+        self.with_bi_upcast_scratch((elems, elems, elems), |_, _, _| Ok(()))
+    }
+
     /// Mamba-3 twin of [`Self::presize_bi_upcast_scratch_for_train`] — the
     /// M3 step GEMMs are in_proj (`d_model → in_proj_out_dim`) and
     /// out_proj (`d_inner → d_model`).

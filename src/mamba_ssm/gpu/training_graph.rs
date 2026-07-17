@@ -240,7 +240,17 @@ impl GpuMambaTrainingStepGraph {
         // Same contract for the bi upcast scratch: when the batch-invariant
         // flag is on, the captured body routes its typed GEMMs through
         // `with_bi_upcast_scratch` — grow it to the step's maximum now.
-        ctx.presize_bi_upcast_scratch_for_train(cfg, batch, seq_len, train_w.dtype)?;
+        // input_dim-aware: a trainable patch-embed input_proj can exceed
+        // every backbone dim and would otherwise grow the scratch INSIDE
+        // capture.
+        let input_dim = mamba_input.len() / (batch * seq_len);
+        ctx.presize_bi_upcast_scratch_for_train_with_input(
+            cfg,
+            batch,
+            seq_len,
+            input_dim,
+            train_w.dtype,
+        )?;
 
         // Snapshot pointers BEFORE capture so we can stash them after the
         // helper consumes the &mut borrows.
