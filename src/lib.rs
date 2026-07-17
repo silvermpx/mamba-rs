@@ -50,6 +50,7 @@ pub mod weights;
 // most common entrypoints.
 pub mod inference {
     pub use crate::mamba_ssm::cpu::inference::*;
+    pub use crate::mamba_ssm::cpu::prefill::*;
 }
 pub mod train {
     pub use crate::mamba_ssm::cpu::backward;

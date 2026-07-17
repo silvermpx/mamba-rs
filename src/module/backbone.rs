@@ -263,4 +263,41 @@ impl MambaBackbone {
     pub fn alloc_scratch(&self) -> MambaStepScratch {
         MambaStepScratch::new(&self.cfg)
     }
+
+    /// Allocate a full-sequence prefill scratch for sequences of `seq_len`.
+    pub fn alloc_prefill_scratch(
+        &self,
+        seq_len: usize,
+    ) -> crate::mamba_ssm::cpu::prefill::PrefillScratch {
+        let dims = crate::ops::dims::MambaDims::from_config(&self.cfg, seq_len, self.input_dim);
+        crate::mamba_ssm::cpu::prefill::PrefillScratch::new(&dims)
+    }
+
+    /// Full-sequence prefill: run `seq_len` inputs through the batched
+    /// SGEMM pipeline (orders of magnitude faster than the per-step
+    /// [`Self::forward_sequence`] loop), writing the post-norm_f output at
+    /// EVERY position and carrying the recurrent state so
+    /// [`Self::forward_step`] continues seamlessly (prefill-then-decode).
+    ///
+    /// `inputs`: `[seq_len * input_dim]`; `outputs`: `[seq_len * d_model]`.
+    pub fn forward_prefill(
+        &self,
+        inputs: &[f32],
+        outputs: &mut [f32],
+        state: &mut MambaState,
+        scratch: &mut crate::mamba_ssm::cpu::prefill::PrefillScratch,
+        seq_len: usize,
+        mode: crate::mamba_ssm::cpu::prefill::PrefillMode,
+    ) {
+        let dims = crate::ops::dims::MambaDims::from_config(&self.cfg, seq_len, self.input_dim);
+        crate::mamba_ssm::cpu::prefill::forward_mamba_backbone_prefill_mode(
+            outputs,
+            inputs,
+            &self.weights,
+            state,
+            scratch,
+            &dims,
+            mode,
+        );
+    }
 }

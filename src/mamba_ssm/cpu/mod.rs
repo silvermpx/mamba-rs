@@ -11,6 +11,7 @@ pub mod flat;
 pub mod forward;
 pub mod inference;
 pub mod parallel;
+pub mod prefill;
 pub mod scratch;
 pub mod target;
 pub mod weights;
