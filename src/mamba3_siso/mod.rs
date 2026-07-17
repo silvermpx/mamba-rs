@@ -28,6 +28,10 @@ pub use cpu::inference::{Mamba3StepScratch, mamba3_layer_step, mamba3_step, mamb
 pub use cpu::parallel::{
     invalidate_mamba3_scratch, parallel_mamba3_backward, parallel_mamba3_forward,
 };
+pub use cpu::prefill::{
+    Mamba3PrefillScratch, forward_mamba3_backbone_prefill, forward_mamba3_backbone_prefill_mode,
+    prefill3_batch,
+};
 pub use cpu::scratch::Mamba3Scratch;
 pub use cpu::weights::{TrainMamba3LayerWeights, TrainMamba3Weights};
 pub use state::{Mamba3LayerState, Mamba3State};

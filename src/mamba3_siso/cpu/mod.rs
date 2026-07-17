@@ -2,6 +2,7 @@
 //!
 //! - `dims` — dimension calculator
 //! - `inference` — T=1 recurrent step
+//! - `prefill` — full-sequence batched inference forward (no tape)
 //! - `forward` — training forward (F1-F7)
 //! - `backward` — training BPTT backward (B1-B8)
 //! - `parallel` — rayon batch forward + backward
@@ -15,11 +16,16 @@ pub mod flat;
 pub mod forward;
 pub mod inference;
 pub mod parallel;
+pub mod prefill;
 pub mod scratch;
 pub mod weights;
 
 pub use dims::Mamba3Dims;
 pub use flat::{Mamba3FieldOffsets, Mamba3LayerFlat};
 pub use inference::{Mamba3StepScratch, mamba3_layer_step, mamba3_step};
+pub use prefill::{
+    Mamba3PrefillScratch, forward_mamba3_backbone_prefill, forward_mamba3_backbone_prefill_mode,
+    prefill3_batch,
+};
 pub use scratch::Mamba3Scratch;
 pub use weights::{TrainMamba3LayerWeights, TrainMamba3Weights};
