@@ -36,7 +36,7 @@
 //   - z, x:        pass-through
 //   - B_raw, C_raw: pass-through
 //   - dt:          softplus(dd_dt + dt_bias)
-//   - a_val:       -softplus(dd_A), clamped to max = -a_floor
+//   - a_val:       -heavy_tail(dd_A), clamped to max = -a_floor
 //   - trap:        sigmoid(trap_raw)
 //   - angles:      pass-through
 //
@@ -46,7 +46,7 @@
 //
 // Input:  proj[N * in_proj_dim]
 // Outputs: z[N*di], x[N*di], B_raw[N*ng*ds], C_raw[N*ng*ds],
-//          dt[N*nh] (post-softplus), a_val[N*nh] (neg-softplus clamped),
+//          dt[N*nh] (post-softplus), a_val[N*nh] (neg-heavy-tail clamped),
 //          trap[N*nh] (post-sigmoid), angles[N*n_angles] (pass-through),
 //          dd_dt_raw[N*nh] (saved for backward), dd_a_raw[N*nh] (saved for backward),
 //          trap_raw[N*nh] (saved for backward)
@@ -75,7 +75,7 @@ extern "C" __global__ void m3_split(
     float* __restrict__ B_raw,      // [N * ng * ds]
     float* __restrict__ C_raw,      // [N * ng * ds]
     float* __restrict__ dt,         // [N * nh] -- post-softplus
-    float* __restrict__ a_val,      // [N * nh] -- -softplus(dd_A), clamped
+    float* __restrict__ a_val,      // [N * nh] -- -heavy_tail(dd_A), clamped
     float* __restrict__ trap,       // [N * nh] -- post-sigmoid
     float* __restrict__ angles,     // [N * n_angles]
     float* __restrict__ dd_dt_raw,  // [N * nh] -- saved for backward
@@ -744,7 +744,7 @@ extern "C" __global__ void m3_compute_abg(
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= N) return;
     float dt_v = dt[idx];
-    float a_v = a_val[idx];    // already negative (-softplus clamped)
+    float a_v = a_val[idx];    // already negative (-heavy_tail clamped)
     float t_v = trap[idx];     // already sigmoided
     float alpha_v = FAST_EXP(a_v * dt_v);
     alpha[idx] = alpha_v;
@@ -753,12 +753,12 @@ extern "C" __global__ void m3_compute_abg(
 }
 
 // ============================================================================
-// 9. m3_abg_bwd -- Backward through alpha/beta/gamma + softplus/sigmoid
+// 9. m3_abg_bwd -- Backward through alpha/beta/gamma + softplus/heavy-tail/sigmoid
 // ============================================================================
 //
 // Forward (m3_compute_abg + m3_split activations):
 //   dt_val = softplus(dd_dt_raw + dt_bias)
-//   a_val  = clamp(-softplus(dd_a_raw), max = -a_floor)
+//   a_val  = clamp(-heavy_tail(dd_a_raw), max = -a_floor)
 //   trap_sig = sigmoid(trap_raw)
 //   alpha  = exp(a_val * dt_val)
 //   beta   = alpha * dt_val * (1 - trap_sig)
@@ -784,10 +784,10 @@ extern "C" __global__ void m3_abg_bwd(
     const float* __restrict__ d_gamma, // [N]
     const float* __restrict__ d_dt_angle, // [N] -- angle contribution to d_dt (from angle_dt_bwd)
     const float* __restrict__ dt,      // [N] -- post-softplus dt
-    const float* __restrict__ a_val,   // [N] -- clamped -softplus(dd_a)
+    const float* __restrict__ a_val,   // [N] -- clamped -heavy_tail(dd_a)
     const float* __restrict__ alpha,   // [N] -- exp(a_val * dt)
     const float* __restrict__ dd_dt_raw, // [N] -- saved raw (pre-softplus)
-    const float* __restrict__ dd_a_raw,  // [N] -- saved raw (pre-softplus)
+    const float* __restrict__ dd_a_raw,  // [N] -- saved raw (pre-heavy-tail)
     const float* __restrict__ trap_raw,  // [N] -- saved raw (pre-sigmoid)
     const float* __restrict__ dt_bias, // [nh]
     float a_floor,
