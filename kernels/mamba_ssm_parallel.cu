@@ -29,7 +29,7 @@
 // Typed-I/O prelude (to_f / from_f_* upcast/downcast helpers).
 // Step 8b: bf16/f16 mixed-precision parallel scan forward. Following
 // state-spaces/mamba's `scan_t = float2` invariant (all scan state in
-// f32) and our Step 5 BPTT precision discipline (h, h_saved, da_exp_out,
+// f32) and our Step 5 BPTT precision discipline (h, h_saved,
 // a_neg, D, smem_* remain f32). Only the activation I/O tensors
 // (delta, u, B, C, y_out) are typed.
 #include "_typed_prelude.cuh"
@@ -266,7 +266,6 @@ extern "C" __global__ __launch_bounds__(128, 3) void ssm_parallel_scan_fwd(
     float* __restrict__ h,             // [batch * d_inner * d_state] SSM state (mutated)
     float* __restrict__ y_out,         // [batch * T * d_inner] output
     float* __restrict__ h_saved,       // [batch * (T+1) * d_inner * d_state] saved for backward
-    float* __restrict__ da_exp_out,    // [batch * T * d_inner * d_state] saved exp(delta*A)
     const float* __restrict__ delta,   // [batch * T * d_inner]
     const float* __restrict__ u,       // [batch * T * d_inner]
     const float* __restrict__ B,       // [batch * T * d_state]
@@ -398,9 +397,8 @@ extern "C" __global__ __launch_bounds__(128, 3) void ssm_parallel_scan_fwd(
                     float b_t = smem_stage[threadIdx.x * NITEMS + i];
                     thread_a[i] = da;
                     thread_b[i] = delta_u_vals[i] * b_t;
-                    // da_exp_out write removed: backward recomputes da from
-                    // delta and a_neg. Saves bandwidth; buffer kept in
-                    // interface for ABI stability.
+                    // No da saved: backward recomputes da from delta
+                    // and a_neg (bandwidth win).
                 } else {
                     thread_a[i] = 1.0f;  // identity
                     thread_b[i] = 0.0f;
@@ -537,7 +535,7 @@ extern "C" __global__ __launch_bounds__(128, 3) void ssm_parallel_scan_fwd(
 // Forward without saves (target network -- no backward needed).
 //
 // Same interface as ssm_burnin_forward_nosave.
-// Same parallel scan algorithm, skips h_saved and da_exp writes.
+// Same parallel scan algorithm, skips the h_saved writes.
 // ============================================================================
 extern "C" __global__ __launch_bounds__(128, 3) void ssm_parallel_scan_fwd_nosave(
     float* __restrict__ h,             // [batch * d_inner * d_state] SSM state (mutated)
@@ -768,7 +766,7 @@ extern "C" __global__ __launch_bounds__(128, 3) void ssm_parallel_scan_fwd_nosav
 // Follow `state-spaces/mamba`'s `scan_t = float2` discipline: all scan
 // state + running prefix + block scan + registers stay f32. Only the
 // activation I/O tensors (delta, u, B, C, y_out) become typed. BPTT
-// state (`h`, `h_saved`, `da_exp_out`), model parameters (`a_neg`, `D`),
+// state (`h`, `h_saved`), model parameters (`a_neg`, `D`),
 // and ALL `smem_*` (including smem_stage) remain f32.
 // ============================================================================
 
@@ -778,7 +776,6 @@ ssm_parallel_scan_fwd_##SUFFIX(                                               \
     float* __restrict__ h,                                                    \
     T_ACT* __restrict__ y_out,                                                \
     float* __restrict__ h_saved,                                              \
-    float* __restrict__ da_exp_out,                                           \
     const T_ACT* __restrict__ delta,                                          \
     const T_ACT* __restrict__ u,                                              \
     const T_ACT* __restrict__ B,                                              \
@@ -953,7 +950,6 @@ ssm_parallel_scan_fwd_##SUFFIX(                                               \
         float h_0 = h[h_base + n];                                            \
         h[h_base + n] = smem_run_a[n] * h_0 + smem_run_b[n];                  \
     }                                                                         \
-    (void)da_exp_out;                                                         \
 }
 
 DEFINE_SSM_PARALLEL_SCAN_FWD(bf16, __nv_bfloat16, from_f_bf16)

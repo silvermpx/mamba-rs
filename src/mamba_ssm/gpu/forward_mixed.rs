@@ -9,7 +9,7 @@
 //! Precision rules:
 //! - **f32 always**: `residual` (residual stream), `rms_vals`/`norm_f_rms`
 //!   (reduction stats), `conv_states` (recurrent state), `h_saved` (BPTT
-//!   carry), `da_exp` (state-derived).
+//!   carry).
 //! - **typed (bf16/f16/f32)**: `post_norm`, `gate_pre_silu`, `gate_post_silu`,
 //!   `post_conv`, `u`, `xdbl`, `delta_raw`, `delta`, `y`, `gated`,
 //!   `input_proj_inputs`, `input_proj_outputs`, `norm_f_input` — these are
@@ -57,8 +57,6 @@ pub struct GpuMambaLayerMixedActs {
     /// f32 — hidden state saved BEFORE each step (T+1 entries)
     /// `[B*(T+1)*d_inner*d_state]`. STAYS f32 (BPTT recurrence).
     pub h_saved: GpuBuffer,
-    /// f32 — discretization `exp(delta * A)` `[B*T*d_inner*d_state]`.
-    pub da_exp: GpuBuffer,
     /// typed — SSM output before gating `[B*T*d_inner]`.
     pub y: DtypedBuf,
     /// typed — gated output `y * gate_silu` `[B*T*d_inner]`.
@@ -111,7 +109,6 @@ impl GpuMambaBackboneMixedActs {
                     rms_vals: GpuBuffer::zeros(stream, bt)?,
                     conv_states: GpuBuffer::zeros(stream, bt * d_inner * d_conv)?,
                     h_saved: GpuBuffer::zeros(stream, batch * (seq_len + 1) * d_inner * d_state)?,
-                    da_exp: GpuBuffer::zeros(stream, bt * d_inner * d_state)?,
                     // typed — GEMM I/O / elementwise
                     post_norm: DtypedBuf::zeros(stream, bt * d_model, dtype)?,
                     gate_pre_silu: DtypedBuf::zeros(stream, bt * d_inner, dtype)?,
@@ -629,7 +626,7 @@ pub fn gpu_forward_mamba_backbone_mixed(
         }
         // SSM forward: parallel prefix scan for T > PARALLEL_SCAN_THRESHOLD
         // or ds > 64 (matches f32 path dispatch in forward.rs:544). Typed
-        // variants (Step 8b) keep scan state + h_saved + da_exp + smem f32
+        // variants (Step 8b) keep scan state + h_saved + smem f32
         // per state-spaces/mamba `scan_t = float2` invariant; only
         // delta/u/B/C/y are typed.
         {
@@ -642,7 +639,6 @@ pub fn gpu_forward_mamba_backbone_mixed(
                 let mut bld = ctx.stream.launch_builder(kernel);
                 let y = layer_acts.y.cached_ptr();
                 let hs = layer_acts.h_saved.cached_ptr();
-                let dae = layer_acts.da_exp.cached_ptr();
                 let dl = layer_acts.delta.cached_ptr();
                 let u = layer_acts.u.cached_ptr();
                 let bb = scratch.b_buf.cached_ptr();
@@ -651,7 +647,6 @@ pub fn gpu_forward_mamba_backbone_mixed(
                 bld.arg(&ssm_ptr);
                 bld.arg(&y);
                 bld.arg(&hs);
-                bld.arg(&dae);
                 bld.arg(&dl);
                 bld.arg(&u);
                 bld.arg(&bb);
@@ -683,7 +678,6 @@ pub fn gpu_forward_mamba_backbone_mixed(
                 let mut bld = ctx.stream.launch_builder(kernel);
                 let y = layer_acts.y.cached_ptr();
                 let hs = layer_acts.h_saved.cached_ptr();
-                let dae = layer_acts.da_exp.cached_ptr();
                 let dl = layer_acts.delta.cached_ptr();
                 let u = layer_acts.u.cached_ptr();
                 let bb = scratch.b_buf.cached_ptr();
@@ -692,7 +686,6 @@ pub fn gpu_forward_mamba_backbone_mixed(
                 bld.arg(&ssm_ptr);
                 bld.arg(&y);
                 bld.arg(&hs);
-                bld.arg(&dae);
                 bld.arg(&dl);
                 bld.arg(&u);
                 bld.arg(&bb);

@@ -126,20 +126,6 @@ pub struct GpuMambaLayerActs {
     /// index 0 = initial state, index t+1 = state after step t.
     /// Layout: `[B * (T+1) * d_inner * d_state]`.
     pub h_saved: GpuBuffer,
-    /// Discretization exponential `exp(delta * A)` `[B*T*d_inner*d_state]`.
-    ///
-    /// **DEAD ALLOCATION** — kernels `ssm_burnin_forward`,
-    /// `ssm_parallel_scan_fwd` and their typed variants NEVER write this
-    /// buffer (the `da_exp_out` argument is ignored, see comments at the
-    /// kernel top). Backward recomputes `da` from saved `delta + a_neg`
-    /// on the fly. Kept as a named field and kernel argument for ABI
-    /// stability; planned removal once the kernel signatures are
-    /// refactored across all four dtypes × f32/parallel variants.
-    ///
-    /// Size at typical configs is significant: e.g. `B=32, T=32, d_inner=512,
-    /// d_state=16, n_layers=3` → ~1 GB wasted per trainer instance. Do
-    /// NOT rely on the contents for any computation.
-    pub da_exp: GpuBuffer,
     /// SSM output before gating `[B*T*d_inner]`.
     pub y: GpuBuffer,
 
@@ -200,7 +186,6 @@ impl GpuMambaBackboneActs {
                     delta: GpuBuffer::zeros(stream, bt * d_inner)?,
                     // F4d: SSM — h_saved has T+1 entries
                     h_saved: GpuBuffer::zeros(stream, batch * (seq_len + 1) * d_inner * d_state)?,
-                    da_exp: GpuBuffer::zeros(stream, bt * d_inner * d_state)?,
                     y: GpuBuffer::zeros(stream, bt * d_inner)?,
                     // F4e: Gating
                     gated: GpuBuffer::zeros(stream, bt * d_inner)?,
@@ -585,7 +570,6 @@ pub fn gpu_forward_mamba_layer(
             builder.arg(&layer_ptrs.ssm_state);
             builder.arg(acts.y.inner_mut());
             builder.arg(acts.h_saved.inner_mut());
-            builder.arg(acts.da_exp.inner_mut());
             builder.arg(acts.delta.inner());
             builder.arg(acts.u.inner());
             builder.arg(scratch.d_b_reduced.inner());
@@ -605,7 +589,6 @@ pub fn gpu_forward_mamba_layer(
             builder.arg(&layer_ptrs.ssm_state);
             builder.arg(acts.y.inner_mut());
             builder.arg(acts.h_saved.inner_mut());
-            builder.arg(acts.da_exp.inner_mut());
             builder.arg(acts.delta.inner());
             builder.arg(acts.u.inner());
             builder.arg(scratch.d_b_reduced.inner());
