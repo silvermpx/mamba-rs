@@ -48,7 +48,7 @@ pub(crate) fn simd_sum_sq(x: &[f32]) -> f32 {
 }
 
 #[inline]
-fn simd_rms_scale(out: &mut [f32], x: &[f32], weight: &[f32], inv_rms: f32) {
+pub(crate) fn simd_rms_scale(out: &mut [f32], x: &[f32], weight: &[f32], inv_rms: f32) {
     struct Scale<'a> {
         out: &'a mut [f32],
         x: &'a [f32],

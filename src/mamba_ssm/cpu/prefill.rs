@@ -71,7 +71,7 @@ pub enum PrefillMode {
 /// Run a per-row transform over `dst` rows zipped with `src` rows,
 /// serial or rayon-parallel per `mode`. Rows are disjoint, so both
 /// dispatches perform the identical per-element arithmetic.
-fn zip_rows<F>(mode: PrefillMode, dst: (&mut [f32], usize), src: (&[f32], usize), f: F)
+pub(crate) fn zip_rows<F>(mode: PrefillMode, dst: (&mut [f32], usize), src: (&[f32], usize), f: F)
 where
     F: Fn(&mut [f32], &[f32]) + Sync + Send,
 {
@@ -90,7 +90,7 @@ where
 }
 
 /// Run a per-row transform over `buf` rows, serial or rayon-parallel.
-fn for_rows<F>(mode: PrefillMode, buf: &mut [f32], row_w: usize, f: F)
+pub(crate) fn for_rows<F>(mode: PrefillMode, buf: &mut [f32], row_w: usize, f: F)
 where
     F: Fn(&mut [f32]) + Sync + Send,
 {
@@ -316,7 +316,13 @@ fn ssm_channels(
 
 /// `dst[t * di + d] = src[d * t_len + t]` — channel-major → row-major,
 /// cache-blocked; parallel over row-tiles in `Parallel` (disjoint dst rows).
-fn transpose_cm_to_rm(dst: &mut [f32], src: &[f32], di: usize, t_len: usize, mode: PrefillMode) {
+pub(crate) fn transpose_cm_to_rm(
+    dst: &mut [f32],
+    src: &[f32],
+    di: usize,
+    t_len: usize,
+    mode: PrefillMode,
+) {
     let row_block = TRANSPOSE_TILE * di;
     let work = |(tb, dst_tile): (usize, &mut [f32])| {
         let t0 = tb * TRANSPOSE_TILE;
@@ -348,7 +354,7 @@ fn transpose_cm_to_rm(dst: &mut [f32], src: &[f32], di: usize, t_len: usize, mod
 /// `Parallel` (disjoint dst columns). `src_stride`/`src_off` let the x
 /// branch be pulled straight out of the interleaved `[T, 2*di]` in_proj
 /// output without a compaction pass.
-fn transpose_rows_to_cm(
+pub(crate) fn transpose_rows_to_cm(
     dst: &mut [f32],
     src: &[f32],
     di: usize,
