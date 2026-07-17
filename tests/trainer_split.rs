@@ -130,7 +130,9 @@ fn run_split_vs_fused(dtype: WeightDtype) {
 
     let mut w = MambaWeights::init(&cfg, input_dim, 0xC0FFEE);
     if !matches!(dtype, WeightDtype::F32) {
-        // Mixed trainers support only the identity input_proj branch today.
+        // Keep the Mixed variant on the identity D2D branch — this test IS
+        // the identity-path regression; the trainable input_proj has its
+        // own split-vs-fused test below.
         w.input_proj_w.clear();
         w.input_proj_b.clear();
     }
@@ -716,4 +718,146 @@ fn reference_no_decay_masks_exactly_the_named_tensors() {
     g.step(&input, &d_temporal).expect("warmup");
     g.capture_graph().expect("capture");
     assert!(g.set_reference_no_decay(true).is_err());
+}
+
+/// bf16 with a REAL rectangular input_proj (the vision patch-embed shape):
+/// constructs (the guard is gone), trains it (input_proj_w/b move), and the
+/// split==fused bit-identity holds through the new branch.
+#[test]
+fn bf16_trainable_input_proj_split_matches_fused() {
+    let cfg = test_cfg();
+    let input_dim = 20usize;
+    let (batch, seq_len) = (2usize, 8usize);
+    let n_in = batch * seq_len * input_dim;
+    let n_out = batch * seq_len * cfg.d_model;
+    let w = MambaWeights::init(&cfg, input_dim, 0xC0FFEE);
+
+    let mut fused = MambaTrainer::new_full(
+        0,
+        &w,
+        cfg,
+        session(batch, seq_len, input_dim),
+        WeightDtype::Bf16,
+    )
+    .expect("fused trainer");
+    let mut split = MambaTrainer::new_full(
+        0,
+        &w,
+        cfg,
+        session(batch, seq_len, input_dim),
+        WeightDtype::Bf16,
+    )
+    .expect("split trainer");
+    let mut out = vec![0.0f32; n_out];
+    for step in 0..3u32 {
+        let input = det(n_in, 0xA0 + step, 0.05);
+        let d_temporal = det(n_out, 0xB0 + step, 0.01);
+        fused.step(&input, &d_temporal).expect("fused step");
+        split.forward(&input, &mut out).expect("split fwd");
+        split
+            .backward_step(&d_temporal, BackwardOpts::default())
+            .expect("split bwd");
+    }
+    let sa = fused.snapshot_master().expect("fused snapshot");
+    let sb = split.snapshot_master().expect("split snapshot");
+    assert_snapshots_bit_eq(&sa, &sb, "bf16 rect input_proj split-vs-fused");
+
+    // The patch embed actually trained.
+    assert!(
+        sa.input_proj_w
+            .iter()
+            .zip(w.input_proj_w.iter())
+            .any(|(a, b)| a != b),
+        "input_proj_w never moved over 3 steps"
+    );
+    assert!(
+        sa.input_proj_b
+            .iter()
+            .zip(w.input_proj_b.iter())
+            .any(|(a, b)| a != b),
+        "input_proj_b never moved over 3 steps"
+    );
+}
+
+/// Presize-twin regression (bug #1): a patch dim exceeding every backbone
+/// dim under batch-invariant graph capture. Without the input_dim-aware
+/// presize, the upcast scratch grows INSIDE capture (illegal alloc) or
+/// after it (freed-pointer replay).
+#[test]
+fn bf16_input_proj_graph_capture_with_large_patch_dim() {
+    let cfg = test_cfg(); // d_model=32, d_inner=64 -> 2*d_inner = 128
+    let input_dim = 200usize; // exceeds max(d_model, 2*d_inner, xdbl_dim)
+    let (batch, seq_len) = (1usize, 4usize);
+    let w = MambaWeights::init(&cfg, input_dim, 0xC0FFEE);
+    let mut t = MambaTrainer::new_full(
+        0,
+        &w,
+        cfg,
+        session(batch, seq_len, input_dim),
+        WeightDtype::Bf16,
+    )
+    .expect("trainer");
+    t.ctx().set_batch_invariant(true);
+    let input = det(batch * seq_len * input_dim, 0xAA, 0.05);
+    let d_temporal = det(batch * seq_len * cfg.d_model, 0xBB, 0.01);
+    t.step(&input, &d_temporal).expect("warmup");
+    t.capture_graph().expect("capture");
+    let m = t.step(&input, &d_temporal).expect("replay 1");
+    assert!(m.graph_replayed);
+    t.step(&input, &d_temporal).expect("replay 2");
+}
+
+/// Bisection probe: batch-invariant mode + trainable input_proj, EAGER only.
+#[test]
+fn bf16_input_proj_eager_under_batch_invariant() {
+    let cfg = test_cfg();
+    let input_dim = 20usize;
+    eager_bi_probe(cfg, input_dim);
+}
+
+/// Same probe at the large patch dim.
+#[test]
+fn bf16_input_proj_eager_under_batch_invariant_large() {
+    let cfg = test_cfg();
+    let input_dim = 200usize;
+    eager_bi_probe(cfg, input_dim);
+}
+
+/// Forward-only variant of the probe (the split API syncs internally).
+#[test]
+fn bf16_input_proj_eager_bi_large_forward_only() {
+    let cfg = test_cfg();
+    let input_dim = 200usize;
+    let (batch, seq_len) = (1usize, 4usize);
+    let w = MambaWeights::init(&cfg, input_dim, 0xC0FFEE);
+    let mut t = MambaTrainer::new_full(
+        0,
+        &w,
+        cfg,
+        session(batch, seq_len, input_dim),
+        WeightDtype::Bf16,
+    )
+    .expect("trainer");
+    t.ctx().set_batch_invariant(true);
+    let input = det(batch * seq_len * input_dim, 0xAA, 0.05);
+    let mut out = vec![0.0f32; batch * seq_len * cfg.d_model];
+    t.forward(&input, &mut out).expect("BI forward only");
+}
+
+fn eager_bi_probe(cfg: MambaConfig, input_dim: usize) {
+    let (batch, seq_len) = (1usize, 4usize);
+    let w = MambaWeights::init(&cfg, input_dim, 0xC0FFEE);
+    let mut t = MambaTrainer::new_full(
+        0,
+        &w,
+        cfg,
+        session(batch, seq_len, input_dim),
+        WeightDtype::Bf16,
+    )
+    .expect("trainer");
+    t.ctx().set_batch_invariant(true);
+    let input = det(batch * seq_len * input_dim, 0xAA, 0.05);
+    let d_temporal = det(batch * seq_len * cfg.d_model, 0xBB, 0.01);
+    t.step(&input, &d_temporal).expect("eager BI step");
+    t.step(&input, &d_temporal).expect("eager BI step 2");
 }

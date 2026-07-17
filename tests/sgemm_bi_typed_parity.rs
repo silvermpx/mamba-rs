@@ -531,3 +531,20 @@ fn typed_forward_is_batch_invariant_within_bucket() {
         }
     }
 }
+
+/// Classifier patch-embed (input_proj) GEMM shapes: fwd NN
+/// [B*T=18468, P^2=1024, d_model=384] and its dW TN twin, through the
+/// full-coverage entries the production path uses. Proves bucket/fallback
+/// coverage under the bit contract for the vision-training GEMMs.
+#[test]
+fn typed_classifier_input_proj_shapes_bit_match() {
+    let t = Ctx::new();
+    for dt in [WeightDtype::Bf16, WeightDtype::F16] {
+        check_forward(&t, dt, (18468, 1024, 384), true, true);
+        check_dw(&t, dt, (18468, 1024, 384), true);
+        // Tiny-M + K-tail combo (the capture-regression trainer shape):
+        // bt=4, input_dim=200, d_model=32.
+        check_forward(&t, dt, (4, 200, 32), true, true);
+        check_dw(&t, dt, (4, 200, 32), true);
+    }
+}

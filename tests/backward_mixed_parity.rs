@@ -60,28 +60,16 @@ fn dims_for(cfg: &MambaConfig, batch: usize, seq_len: usize) -> GpuMambaDims {
     }
 }
 
-/// Build CPU weights for both paths. f32 uses `eye(d_model)` input_proj_w +
-/// zero bias so `temporal = mamba_input @ I + 0 = mamba_input`. Mixed uses
-/// empty (len_elems()==0) input_proj to trigger the D2D identity branch.
-/// Both paths see identical `acts.layers[0].residual = mamba_input`.
+/// Build CPU weights for both paths. Both carry the SAME real
+/// (non-identity) input projection: the mixed path implements the trainable
+/// input_proj natively, so the parity walk covers input_proj_w/b too. (The
+/// identity D2D branch keeps its own regression in backward_mixed_smoke.)
 fn build_weights(cfg: &MambaConfig, seed: u64) -> (MambaWeights, MambaWeights) {
     let mut w = MambaWeights::init(cfg, cfg.d_model, seed);
     for lw in w.layers.iter_mut() {
         lw.a_neg = lw.a_log.iter().map(|&v| -v.exp()).collect();
     }
-    let mut w_f32 = w.clone();
-    w_f32.input_proj_w = (0..cfg.d_model * cfg.d_model)
-        .map(|i| {
-            let r = i / cfg.d_model;
-            let c = i % cfg.d_model;
-            if r == c { 1.0 } else { 0.0 }
-        })
-        .collect();
-    w_f32.input_proj_b = vec![0.0; cfg.d_model];
-    let mut w_mixed = w;
-    w_mixed.input_proj_w.clear();
-    w_mixed.input_proj_b.clear();
-    (w_f32, w_mixed)
+    (w.clone(), w)
 }
 
 fn det_rand(n: usize, seed: u32) -> Vec<f32> {
@@ -393,12 +381,9 @@ fn backbone_grad_parity(dtype: WeightDtype) {
     let layout = grad_layout(&cfg, dims.mamba_input_dim);
     let mut off = 0usize;
     for (label, len) in layout {
-        let skip = label == "input_proj_w" || label == "input_proj_b";
-        if !skip {
-            let r = &grads_ref[off..off + len];
-            let t = &grads_typ[off..off + len];
-            assert_close(label, r, t, cos_min, norm_tol);
-        }
+        let r = &grads_ref[off..off + len];
+        let t = &grads_typ[off..off + len];
+        assert_close(label, r, t, cos_min, norm_tol);
         off += len;
     }
     assert_eq!(off, grads_ref.len());
@@ -457,12 +442,9 @@ fn backbone_grad_parity_multi_layer(dtype: WeightDtype) {
     let layout = grad_layout(&cfg, dims.mamba_input_dim);
     let mut off = 0usize;
     for (label, len) in layout {
-        let skip = label == "input_proj_w" || label == "input_proj_b";
-        if !skip {
-            let r = &grads_ref[off..off + len];
-            let t = &grads_typ[off..off + len];
-            assert_close(label, r, t, cos_min, norm_tol);
-        }
+        let r = &grads_ref[off..off + len];
+        let t = &grads_typ[off..off + len];
+        assert_close(label, r, t, cos_min, norm_tol);
         off += len;
     }
     assert_eq!(off, grads_ref.len());
@@ -555,7 +537,21 @@ fn scalar_loss_f64(t: &[f32]) -> f64 {
 fn finite_diff_f32_oracle() {
     let cfg = tiny_cfg();
     let dims = dims_for(&cfg, 1, 4);
-    let (w_f32, _) = build_weights(&cfg, 0xF1D1D1FF);
+    // This coarse f32 finite-diff (h=1e-2, 30% tolerance, top-5 probes) was
+    // calibrated against an identity input projection; a random projection
+    // shifts the loss landscape enough to push 1-2 probes past the noise
+    // floor. Keep its original eye/zero-bias environment — the REAL
+    // gradient certification (all tensors, rel<5e-3, incl. a rectangular
+    // input_proj) lives in tests/grad_oracle.rs.
+    let (mut w_f32, _) = build_weights(&cfg, 0xF1D1D1FF);
+    w_f32.input_proj_w = (0..cfg.d_model * cfg.d_model)
+        .map(|i| {
+            let r = i / cfg.d_model;
+            let c = i % cfg.d_model;
+            if r == c { 1.0 } else { 0.0 }
+        })
+        .collect();
+    w_f32.input_proj_b = vec![0.0; cfg.d_model];
 
     let bt = dims.bt();
     let mamba_input = det_rand(bt * dims.mamba_input_dim, 0xF1);

@@ -609,16 +609,6 @@ impl MambaTrainerMixed {
         session: TrainSessionCfg,
         dtype: WeightDtype,
     ) -> Result<Self, String> {
-        // Fail at construction, not on the first step(): the mixed forward
-        // only implements the identity-input_proj branch today.
-        if !cpu_weights.input_proj_w.is_empty() {
-            return Err(
-                "MambaTrainerMixed: non-identity input_proj is not yet supported in the \
-                 mixed-precision pipeline — clear input_proj_w/input_proj_b (identity \
-                 D2D branch) or train with WeightDtype::F32"
-                    .into(),
-            );
-        }
         let TrainSessionCfg {
             input_dim,
             batch,
