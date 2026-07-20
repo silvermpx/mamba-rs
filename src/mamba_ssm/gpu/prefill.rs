@@ -8,6 +8,13 @@
 //!
 //! Mirrors `gpu_forward_mamba_target_burnin` but uses the inference-path
 //! flat `GpuMambaWeights` (not training `GpuMambaTrainWeights`).
+//!
+//! Serving entries (0.5.1): `gpu_forward_inference_prefill_full` exposes the
+//! post-norm_f temporal for ALL T positions, and
+//! `gpu_forward_inference_prefill_from_raw` additionally applies the input
+//! projection internally with the exact training-forward SGEMM call — both
+//! bit-identical to `gpu_forward_mamba_backbone` on the same device
+//! (tests/gpu_inference_prefill_parity.rs).
 
 use super::backward::{GpuMambaTargetMixedScratch, GpuMambaTargetScratch};
 use super::blas::{
@@ -15,6 +22,7 @@ use super::blas::{
 };
 use super::buffers::GpuBuffer;
 use super::context::GpuCtx;
+use super::dtype::WeightDtype;
 use super::forward::{GpuMambaDims, PARALLEL_SCAN_THRESHOLD};
 use super::inference::GpuInferenceState;
 use super::launch::{grid_1d, grid_norm, grid_parallel_scan};
@@ -38,6 +46,30 @@ pub struct PrefillInputs<'a, W: MambaWeightsView> {
     pub a_neg_all: &'a GpuBuffer,
 }
 
+/// Inputs bundle for `gpu_forward_inference_prefill_from_raw`: the sequence
+/// BEFORE the input projection (`[B * T * mamba_input_dim]`) — the
+/// classifier/regressor serving shape, where the model consumes raw
+/// features instead of pre-embedded tokens.
+pub struct PrefillRawInputs<'a, W: MambaWeightsView> {
+    pub input_flat: &'a GpuBuffer,
+    pub weights: &'a W,
+    pub a_neg_all: &'a GpuBuffer,
+}
+
+/// Output request for the `_full` / `_from_raw` prefill entries.
+///
+/// `full_temporal`, when present, receives the post-`norm_f` temporal for
+/// ALL T positions (`[B * T * d_model]`) — the official contract for
+/// consumers that pool over the whole sequence (e.g. a mean-pool
+/// classification head). This is the same buffer content the training
+/// forward emits, bit-for-bit (pinned by tests/gpu_inference_prefill_parity.rs).
+pub struct PrefillOutputs<'a> {
+    /// `[B * d_model]` — last-timestep hidden state (pre-lm_head).
+    pub last_temporal: &'a mut GpuBuffer,
+    /// `[B * T * d_model]` — optional post-norm_f output for every position.
+    pub full_temporal: Option<&'a mut GpuBuffer>,
+}
+
 /// After this call, `state` holds the recurrent state at position T, and
 /// `target_temporal` holds the pre-lm_head hidden state for token T (last).
 /// Follow with normal `step()` calls to continue decoding.
@@ -53,6 +85,101 @@ pub fn gpu_forward_inference_prefill<W: MambaWeightsView>(
         weights,
         a_neg_all,
     } = inputs;
+    // State is the persistent inference state — do NOT zero. We build on top.
+    // Working temporal: start with the input embeddings for all T timesteps.
+    scratch.out_flat.copy_from(ip_out_flat, &ctx.stream)?;
+    prefill_body(ctx, weights, a_neg_all, state, scratch)?;
+    emit_outputs(
+        ctx,
+        scratch,
+        PrefillOutputs {
+            last_temporal: target_temporal,
+            full_temporal: None,
+        },
+    )
+}
+
+/// `gpu_forward_inference_prefill` with the all-T output surface: identical
+/// kernel chain, plus the optional full post-norm_f temporal out.
+///
+/// The `_mixed` prefill deliberately has no all-T twin yet: its temporal
+/// lives in a typed (bf16/f16) scratch and no mixed consumer pools over the
+/// full sequence today — the entry is added when one exists.
+pub fn gpu_forward_inference_prefill_full<W: MambaWeightsView>(
+    ctx: &GpuCtx,
+    outputs: PrefillOutputs<'_>,
+    inputs: PrefillInputs<'_, W>,
+    state: &mut GpuInferenceState,
+    scratch: &mut GpuMambaTargetScratch,
+) -> Result<(), String> {
+    let PrefillInputs {
+        ip_out_flat,
+        weights,
+        a_neg_all,
+    } = inputs;
+    scratch.out_flat.copy_from(ip_out_flat, &ctx.stream)?;
+    prefill_body(ctx, weights, a_neg_all, state, scratch)?;
+    emit_outputs(ctx, scratch, outputs)
+}
+
+/// Prefill from RAW (pre-projection) input: applies `input_proj` internally
+/// through the SAME `gpu_sgemm_forward_raw` call the training forward makes
+/// (`gpu_forward_mamba_backbone`), so the projected bits equal training's
+/// `ip_out` — then runs the shared prefill body. This is the one-call GPU
+/// serving entry for classifier-style consumers.
+pub fn gpu_forward_inference_prefill_from_raw<W: MambaWeightsView>(
+    ctx: &GpuCtx,
+    outputs: PrefillOutputs<'_>,
+    inputs: PrefillRawInputs<'_, W>,
+    state: &mut GpuInferenceState,
+    scratch: &mut GpuMambaTargetScratch,
+) -> Result<(), String> {
+    let PrefillRawInputs {
+        input_flat,
+        weights,
+        a_neg_all,
+    } = inputs;
+    let dims: GpuMambaDims = scratch.dims;
+    let bt = dims.batch * dims.seq_len;
+    let expected = bt * dims.mamba_input_dim;
+    if input_flat.len() != expected {
+        return Err(format!(
+            "prefill_from_raw: input_flat len {} != batch*seq_len*mamba_input_dim = {expected}",
+            input_flat.len()
+        ));
+    }
+    let (ipw, ipw_dt) = weights.input_proj_w();
+    if ipw_dt != WeightDtype::F32 {
+        return Err(format!(
+            "prefill_from_raw: input_proj weight must be f32 (got {ipw_dt:?}) — \
+             the mixed prefill has no raw-input entry"
+        ));
+    }
+    // Projected values land directly in the working temporal; the body's
+    // first step snapshots it into the residual, exactly as if it had been
+    // copied from a caller-provided ip_out buffer.
+    gpu_sgemm_forward_raw(
+        ctx,
+        &mut scratch.out_flat,
+        input_flat,
+        ipw,
+        Some(weights.input_proj_b()),
+        (bt, dims.mamba_input_dim, dims.d_model),
+    )?;
+    prefill_body(ctx, weights, a_neg_all, state, scratch)?;
+    emit_outputs(ctx, scratch, outputs)
+}
+
+/// The shared prefill kernel chain: layer loop + final norm_f. Assumes
+/// `scratch.out_flat` is seeded with the projected input for all T; leaves
+/// the post-norm_f temporal for all T in `scratch.out_flat`.
+fn prefill_body<W: MambaWeightsView>(
+    ctx: &GpuCtx,
+    weights: &W,
+    a_neg_all: &GpuBuffer,
+    state: &mut GpuInferenceState,
+    scratch: &mut GpuMambaTargetScratch,
+) -> Result<(), String> {
     let dims: GpuMambaDims = scratch.dims;
     let seq_len = dims.seq_len;
     let b = dims.batch;
@@ -64,10 +191,6 @@ pub fn gpu_forward_inference_prefill<W: MambaWeightsView>(
     let xdbl_dim = dims.xdbl_dim;
     let d_conv = dims.d_conv;
     let t = seq_len;
-
-    // State is the persistent inference state — do NOT zero. We build on top.
-    // Working temporal: start with the input embeddings for all T timesteps.
-    scratch.out_flat.copy_from(ip_out_flat, &ctx.stream)?;
 
     let f32_sz = std::mem::size_of::<f32>() as u64;
 
@@ -321,13 +444,37 @@ pub fn gpu_forward_inference_prefill<W: MambaWeightsView>(
             .map_err(|e| format!("norm_f prefill: {e:?}"))?;
     }
 
-    // Extract last timestep into target_temporal [B * dm]
+    Ok(())
+}
+
+/// Deliver the prefill outputs from the finished body: the last-timestep
+/// gather (always) and the optional all-T copy of the post-norm_f temporal.
+fn emit_outputs(
+    ctx: &GpuCtx,
+    scratch: &GpuMambaTargetScratch,
+    outputs: PrefillOutputs<'_>,
+) -> Result<(), String> {
+    let dims: GpuMambaDims = scratch.dims;
+    let (b, t, dm) = (dims.batch, dims.seq_len, dims.d_model);
+    let PrefillOutputs {
+        last_temporal,
+        full_temporal,
+    } = outputs;
+    if last_temporal.len() != b * dm {
+        return Err(format!(
+            "prefill outputs: last_temporal len {} != batch*d_model = {}",
+            last_temporal.len(),
+            b * dm
+        ));
+    }
+
+    // Extract last timestep into last_temporal [B * dm]
     {
         let b_i = b as i32;
         let t_i = t as i32;
         let dm_i = dm as i32;
         let mut builder = ctx.stream.launch_builder(&ctx.kernels.gather_last_timestep);
-        builder.arg(target_temporal.inner_mut());
+        builder.arg(last_temporal.inner_mut());
         builder.arg(scratch.out_flat.inner());
         builder.arg(&b_i);
         builder.arg(&t_i);
@@ -336,8 +483,16 @@ pub fn gpu_forward_inference_prefill<W: MambaWeightsView>(
             .map_err(|e| format!("gather_last prefill: {e:?}"))?;
     }
 
-    // Avoid unused warning on the identity_proj-unused sgemm import
-    let _ = gpu_sgemm_forward_raw;
+    if let Some(full) = full_temporal {
+        if full.len() != b * t * dm {
+            return Err(format!(
+                "prefill outputs: full_temporal len {} != batch*seq_len*d_model = {}",
+                full.len(),
+                b * t * dm
+            ));
+        }
+        full.copy_from(&scratch.out_flat, &ctx.stream)?;
+    }
 
     Ok(())
 }

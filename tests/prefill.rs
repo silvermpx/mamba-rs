@@ -326,7 +326,9 @@ fn prefill_bench_classifier_shape() {
         rms_norm_eps: 1e-5,
     };
     let input_dim = 1024usize;
-    let seq_len = 4617usize;
+    // Production patchify T_TOTAL: 57x81 patches + 4 register tokens
+    // (wellwon_classify src/patchify.rs).
+    let seq_len = 4621usize;
     let w = init_weights(&cfg, input_dim, 0xC0FFEE);
     let dims = MambaDims::from_config(&cfg, seq_len, input_dim);
     let (di, ds, dc, nl) = (cfg.d_inner(), cfg.d_state, cfg.d_conv, cfg.n_layers);
