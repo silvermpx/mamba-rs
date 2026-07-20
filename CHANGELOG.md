@@ -1,5 +1,67 @@
 # Changelog
 
+## 0.5.1
+
+Patch release: the GPU serving surface for pooled-output consumers. The
+first production consumer (a 23M-param page classifier serving at
+T=4621) scored through implementation details -- a pub scratch field for
+the all-T temporal and a hand-rolled input projection; 0.5.1 makes both
+official. No math changes; every existing bit-anchor is byte-untouched
+(the new entries compose the exact body the existing prefill already ran).
+
+### Added: official all-T + raw-input GPU inference prefill
+
+- `gpu_forward_inference_prefill_full` -- the f32 prefill with a
+  `PrefillOutputs` surface: the post-norm_f temporal for ALL T positions
+  (`[B*T*d_model]`) as an official out-param alongside the last-timestep
+  gather. Consumers that pool over the whole sequence (mean-pool
+  classification heads) no longer read `scratch.out_flat` directly.
+- `gpu_forward_inference_prefill_from_raw` -- one-call serving entry for
+  pre-projection input (`PrefillRawInputs`, `[B*T*mamba_input_dim]`):
+  applies `input_proj` internally with the SAME SGEMM call the training
+  forward makes, then runs the shared prefill body -- the projected bits
+  equal training's `ip_out` by construction. Rejects non-f32 input_proj
+  weights loudly.
+- All three f32 entries (legacy last-only, `_full`, `_from_raw`) now
+  compose one private body -- drift between them is structurally
+  impossible.
+- The `_mixed` prefill deliberately has no all-T twin: its temporal is
+  typed (bf16/f16) and no mixed consumer pools over the full sequence
+  today; the entry lands when one exists.
+
+### Added: GPU inference-prefill parity suite
+
+`tests/gpu_inference_prefill_parity.rs` pins the serving claim: the
+nosave inference prefill produces the SAME BITS as the GPU training
+forward -- full temporal at every position, the last-position gather,
+both scan kernels (Sequential small-T and Auto/parallel-scan above the
+threshold), and end-to-end through `_from_raw` INCLUDING the internal
+input projection. Before this suite the nosave prefill had zero test
+coverage.
+
+### Fixed
+
+- `prefill_bench_classifier_shape` ran T=4617 (the bare patch grid); the
+  production patchify appends 4 register tokens -- T=4621.
+
+### Named and deferred (post-0.5.1 tickets, each with a trigger)
+
+- int64 kernel offset arithmetic (upstream #880 class) -- index products
+  overflow i32 only beyond `batch*T*d_inner*d_state > 2^31`; trigger:
+  LLM-scale training shapes.
+- Device-side LR (capturable `set_lr` without graph re-capture);
+  captured-split package; device temporal handles / pooled readback --
+  trigger: profiling shows host readback dominating a real training loop.
+- GpuAdamW state export (warm optimizer resume) -- trigger: long
+  multi-session runs measurably suffering from cold Adam restarts.
+- serialize metadata for `rms_norm_eps` / `scan_mode` (additive) --
+  trigger: first non-default-eps deployment.
+- Selective-scan recomputation in backward (~4x activation memory cut) --
+  trigger: T >= 8k training or a hard single-pass B >= 4 need.
+- dX plumb-through below input_proj -- trigger: conv stem / learnable
+  pos-embed; per-block FFN channel mixer -- trigger: accuracy-lever
+  escalation on a real consumer.
+
 ## 0.5.0
 
 Feature release: the bring-your-own-loss training split, full-sequence
