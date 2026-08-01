@@ -36,6 +36,13 @@ pub struct GpuCtx {
     /// batch-invariant across all M. Effective only together with
     /// `batch_invariant`. Env: MAMBA_RS_BI_TENSOR_CORES.
     bi_tensor_cores: std::cell::Cell<bool>,
+    /// Opt-in non-PEDANTIC cuBLAS compute for the typed (bf16/f16) GEMMs:
+    /// `CUBLAS_COMPUTE_32F` lets cuBLAS pick BMMA/HMMA tensor-core kernels
+    /// with f32 accumulate. SEPARATE numeric contract from the PEDANTIC
+    /// default (different reduction trees; still deterministic for a fixed
+    /// shape within a process). Ignored by the batch-invariant path, which
+    /// never calls cuBLAS. Env: MAMBA_RS_FAST_GEMM.
+    fast_gemm: std::cell::Cell<bool>,
     /// Grow-only f32 scratch triple for the batch-invariant typed-GEMM
     /// upcast fallback: typed shapes without a native typed bucket run as
     /// "upcast inputs → f32 sgemm_bi → RNE downcast output", bit-identical
@@ -90,6 +97,9 @@ impl GpuCtx {
         let bi_tensor_cores = std::env::var("MAMBA_RS_BI_TENSOR_CORES")
             .ok()
             .is_some_and(|v| matches!(v.as_str(), "1" | "true" | "yes" | "on"));
+        let fast_gemm = std::env::var("MAMBA_RS_FAST_GEMM")
+            .ok()
+            .is_some_and(|v| matches!(v.as_str(), "1" | "true" | "yes" | "on"));
         Ok(Self {
             stream,
             kernels,
@@ -100,6 +110,7 @@ impl GpuCtx {
             half_staging_bytes: RefCell::new(0),
             batch_invariant: std::cell::Cell::new(batch_invariant),
             bi_tensor_cores: std::cell::Cell::new(bi_tensor_cores),
+            fast_gemm: std::cell::Cell::new(fast_gemm),
             bi_upcast_scratch: [RefCell::new(None), RefCell::new(None), RefCell::new(None)],
         })
     }
@@ -258,6 +269,17 @@ impl GpuCtx {
     /// deterministic and batch-invariant, but not bit-equal to it.
     pub fn set_bi_tensor_cores(&self, on: bool) {
         self.bi_tensor_cores.set(on);
+    }
+
+    /// Enable or disable the non-PEDANTIC cuBLAS compute mode for typed
+    /// GEMMs (see the `fast_gemm` field doc for the numeric contract).
+    pub fn set_fast_gemm(&self, on: bool) {
+        self.fast_gemm.set(on);
+    }
+
+    /// Returns `true` if the non-PEDANTIC typed-GEMM compute is enabled.
+    pub fn fast_gemm(&self) -> bool {
+        self.fast_gemm.get()
     }
 
     /// Returns `true` if the tensor-core bi tier is enabled.
