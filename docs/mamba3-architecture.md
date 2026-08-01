@@ -121,3 +121,21 @@ Where `in_proj_dim = 2·d_inner + 2·ngroups·d_state + 3·nheads + num_rope_ang
 | mamba3_chunked.cu | 15 | Chunked parallel scan (T>64) |
 | norms.cu | 3 | RMSNorm forward/backward |
 | elementwise.cu | 5 | Residual, fill, gather, vec ops |
+
+## Chunked-scan statelessness (contract)
+
+The chunked parallel scan is stateless BY CONSTRUCTION: chunk 0 always
+starts from a zero SSM state, the `initial_states` plumbing of the
+reference SSD implementation is not implemented, and the state written
+back by `m3_writeback_parallel_states` is consumed by nothing today.
+Consequences a consumer must respect (scan-audit 2026-08-01, M-I):
+
+- `reset_state()` before a chunked training window is a no-op by design —
+  the window never sees a nonzero incoming state either way.
+- Packing multiple documents into one row is NOT masked: without a
+  `seq_idx` boundary mechanism the scan would bleed state across document
+  boundaries inside a window. Train one document (or one padded page) per
+  row, as the shipped trainers do.
+- TBPTT-style carry across windows is not available on the chunked path.
+  Triggers to implement `initial_states`/`seq_idx` (deferred): an M3
+  consumer that needs cross-window carry or packed rows.

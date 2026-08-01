@@ -87,6 +87,10 @@ impl Mamba3Trainer {
         session: TrainSessionCfg,
         dtype: WeightDtype,
     ) -> Result<Self, String> {
+        // M-H (scan-audit 2026-08-01): hoisted here so BOTH branches get it -
+        // the f32 branch never validated, un-guarding the shfl width and
+        // n_angles preconditions its kernels rely on.
+        cfg.validate()?;
         crate::mamba_ssm::gpu::launch::validate_kernel_arg_capacity(
             session.batch,
             session.seq_len,

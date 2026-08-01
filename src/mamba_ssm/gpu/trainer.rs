@@ -848,6 +848,11 @@ impl MambaTrainerMixed {
                     .into(),
             );
         }
+        // m-3 (scan-audit 2026-08-01): a fused step overwrites the saved
+        // activations; a forward() left pending would otherwise let a later
+        // backward_step back-prop through this step's tape as if it were its
+        // own — invalidate the split half-cycle instead of guessing.
+        self.split_forward_pending = false;
 
         if matches!(self.dtype, WeightDtype::F16) {
             return self.step_f16(input, d_temporal);

@@ -91,13 +91,16 @@ pub fn save(
         tensors.push((name.as_str(), v));
     }
 
-    // Metadata: config as JSON
+    // Metadata: config as JSON. scan_mode + rms_norm_eps ride along (M-B,
+    // scan-audit 2026-08-01): they are part of the checkpoint's numeric
+    // route — dropping them silently re-routed a non-default-eps model to
+    // 1e-5 on load.
     let mut metadata = HashMap::new();
     metadata.insert(
         "config".to_string(),
         format!(
-            r#"{{"d_model":{},"d_state":{},"d_conv":{},"expand":{},"n_layers":{},"input_dim":{}}}"#,
-            dm, ds, dc, cfg.expand, cfg.n_layers, input_dim
+            r#"{{"d_model":{},"d_state":{},"d_conv":{},"expand":{},"n_layers":{},"input_dim":{},"scan_mode":"{:?}","rms_norm_eps":{}}}"#,
+            dm, ds, dc, cfg.expand, cfg.n_layers, input_dim, cfg.scan_mode, cfg.rms_norm_eps
         ),
     );
 
@@ -142,13 +145,38 @@ pub fn load(path: &Path) -> Result<(MambaWeights, MambaConfig, usize), String> {
     let n_layers = parse_field(config_json, "n_layers")?;
     let input_dim = parse_field(config_json, "input_dim")?;
 
+    // Route fields are OPTIONAL for backward compatibility with pre-0.5.2
+    // checkpoints (which carry neither): absent -> library defaults, same
+    // behavior as before; present -> restored exactly (M-B).
+    let scan_mode = if config_json.contains(r#""scan_mode":"Sequential""#) {
+        crate::config::ScanMode::Sequential
+    } else if config_json.contains(r#""scan_mode":"Parallel""#) {
+        crate::config::ScanMode::Parallel
+    } else {
+        crate::config::ScanMode::default()
+    };
+    let rms_norm_eps = config_json
+        .find(r#""rms_norm_eps":"#)
+        .map(|p| {
+            let tail = &config_json[p + r#""rms_norm_eps":"#.len()..];
+            let end = tail
+                .find(|c: char| !(c.is_ascii_digit() || c == '.' || c == '-' || c == 'e'))
+                .unwrap_or(tail.len());
+            tail[..end]
+                .parse::<f32>()
+                .map_err(|e| format!("parse 'rms_norm_eps': {e}"))
+        })
+        .transpose()?
+        .unwrap_or_else(|| MambaConfig::default().rms_norm_eps);
+
     let cfg = MambaConfig {
         d_model,
         d_state,
         d_conv,
         expand,
         n_layers,
-        ..Default::default()
+        scan_mode,
+        rms_norm_eps,
     };
     cfg.validate()?;
 

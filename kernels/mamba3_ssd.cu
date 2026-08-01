@@ -821,5 +821,9 @@ extern "C" __global__ void m3_reduce_d_D(
     sum += __shfl_down_sync(0xFFFFFFFF, sum, 2);
     sum += __shfl_down_sync(0xFFFFFFFF, sum, 1);
 
-    if (lane == 0) d_D_out[head] = sum;
+    /* M-G (scan-audit 2026-08-01): ACCUMULATE, never overwrite - every
+       sibling gradient writer follows the += contract (the caller zeroes
+       the arena once per window); an = here silently discarded prior
+       micro-batch d_D under accumulate_only gradient accumulation. */
+    if (lane == 0) d_D_out[head] += sum;
 }

@@ -23,6 +23,15 @@ pub fn validate_kernel_arg_capacity(
     d_inner: usize,
     d_state: usize,
 ) -> Result<(), String> {
+    // m-4 (scan-audit 2026-08-01): T=0 survives every arithmetic check but
+    // produces grid_dim.x = 0 launches that surface as an opaque CUDA error
+    // on a NEIGHBOURING kernel — reject it with a name at the front door.
+    if seq_len == 0 {
+        return Err("seq_len must be > 0".into());
+    }
+    if batch == 0 {
+        return Err("batch must be > 0".into());
+    }
     let elems = batch
         .checked_mul(seq_len + 1)
         .and_then(|v| v.checked_mul(d_inner))
