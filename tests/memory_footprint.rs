@@ -30,11 +30,13 @@ fn classifier_shape_memory_footprint() {
         d_state: 16,
         d_conv: 4,
         expand: 2,
-        scan_mode: mamba_rs::config::ScanMode::Sequential,
+        // Auto = the production classifier route since the 2026-08-01
+        // scan audit (parallel at this T); footprint must match what ships.
+        scan_mode: mamba_rs::config::ScanMode::Auto,
         rms_norm_eps: 1e-5,
     };
     let input_dim = 1024usize; // 32x32 grayscale patch
-    let seq_len = 4617usize;
+    let seq_len = 4621usize;
     let w = MambaWeights::init(&cfg, input_dim, 0xC0FFEE);
 
     for batch in [1usize, 2, 4] {

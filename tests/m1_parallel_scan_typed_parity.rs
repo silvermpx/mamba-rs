@@ -25,13 +25,17 @@ use mamba_rs::mamba_ssm::gpu::weights_mixed_train::GpuMambaTrainMixedWeights;
 use mamba_rs::weights::MambaWeights;
 
 fn tiny_cfg() -> MambaConfig {
+    // C-1 re-arm (scan-audit wave 2026-08-01): this was ScanMode::Sequential —
+    // every "parallel" test in this file silently ran the SEQUENTIAL kernels
+    // while the header claimed parallel coverage. Auto + the use_parallel
+    // assert in check_at_t make the dispatch claim load-bearing.
     MambaConfig {
         d_model: 32,
         n_layers: 1,
         d_state: 8,
         d_conv: 4,
         expand: 2,
-        scan_mode: ScanMode::Sequential,
+        scan_mode: ScanMode::Auto,
         rms_norm_eps: 1e-5,
     }
 }
@@ -232,6 +236,13 @@ fn run_mixed(
 
 fn check_at_t(dtype: WeightDtype, seq_len: usize) {
     let cfg = tiny_cfg();
+    // Anti-defuse guard: the whole point of this file is the PARALLEL
+    // dispatch — refuse to run green if the config stops routing there.
+    assert!(
+        cfg.scan_mode.use_parallel(seq_len, cfg.d_state),
+        "test defused: T={seq_len} ds={} does not dispatch the parallel scan",
+        cfg.d_state
+    );
     let dims = dims_for(&cfg, 1, seq_len);
     let (w_f32, w_mix) = build_weights(&cfg, 0xDEAD00F1);
 
@@ -292,4 +303,11 @@ fn m1_parallel_scan_typed_parity_bf16_t512() {
 #[test]
 fn m1_parallel_scan_typed_parity_f16_t512() {
     check_at_t(WeightDtype::F16, 512);
+}
+
+// Deep-chunk regime: T=2048 exercises many scan blocks (the production
+// classifier runs T=4621); compounding drift and inter-block carries.
+#[test]
+fn m1_parallel_scan_typed_parity_bf16_t2048() {
+    check_at_t(WeightDtype::Bf16, 2048);
 }

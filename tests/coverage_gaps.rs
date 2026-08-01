@@ -46,8 +46,9 @@ fn run_parallel_scan_trainer(dtype: WeightDtype) {
     use mamba_rs::mamba_ssm::gpu::trainer::{MambaTrainer, TrainSessionCfg};
     use mamba_rs::weights::MambaWeights;
 
-    // T=256 triggers the parallel prefix-scan kernels for both forward and
-    // backward on the GPU training path.
+    // ScanMode::Parallel FORCES the prefix-scan kernels regardless of T
+    // (the Auto threshold routes parallel only at T > 256, not T == 256 —
+    // the old comment claimed the length did the work; the mode does).
     let cfg = MambaConfig {
         d_model: 32,
         n_layers: 2,
