@@ -23,7 +23,7 @@ use super::blas::{
 use super::buffers::GpuBuffer;
 use super::context::GpuCtx;
 use super::dtype::WeightDtype;
-use super::forward::{GpuMambaDims, PARALLEL_SCAN_THRESHOLD};
+use super::forward::GpuMambaDims;
 use super::inference::GpuInferenceState;
 use super::launch::{grid_1d, grid_norm, grid_parallel_scan};
 use super::weights::{MambaLayerWeightsView, MambaWeightsView};
@@ -503,11 +503,10 @@ fn emit_outputs(
 /// Target output (`target_temporal`) is a `DtypedBuf` in the same dtype as
 /// the mixed weights — downstream lm_head expects bf16/f16 directly.
 ///
-/// Note: the sequential `ssm_burnin_forward_nosave_<dtype>` kernel is used
-/// unconditionally. The optimized parallel-scan variant is only implemented
-/// in f32 today; for T > 256 the sequential path will be measurably slower
-/// but still functionally correct. Typical LLM prompts (≤ 256 tokens) get
-/// the full bandwidth savings.
+/// Scan dispatch mirrors the f32 prefill and the mixed training forward:
+/// `use_parallel(T, d_state)` routes long prompts to the typed parallel
+/// nosave kernel; the short-prompt sequential route asserts the kernel's
+/// `d_state <= 64` contract instead of silently returning.
 pub fn gpu_forward_inference_prefill_mixed<W: MambaWeightsView>(
     ctx: &GpuCtx,
     target_temporal: &super::buffers::DtypedBuf,
@@ -731,30 +730,63 @@ pub fn gpu_forward_inference_prefill_mixed<W: MambaWeightsView>(
             let t_i = t as i32;
             let di_i = di as i32;
             let ds_i = ds as i32;
-            // Note: parallel scan is f32-only; for mixed we unconditionally use
-            // the sequential typed burnin (slower for T > 256 but correct).
-            let _ = (PARALLEL_SCAN_THRESHOLD, grid_parallel_scan);
-            let mut bld = ctx.stream.launch_builder(k.ssm_burnin_nosave_typed.get(dt));
             let y_ptr = scratch.y.cached_ptr();
             let delta_ptr = scratch.delta.cached_ptr();
             let u_ptr = scratch.u.cached_ptr();
             let bb_ptr = scratch.b_gathered.cached_ptr();
             let cb_ptr = scratch.c_gathered.cached_ptr();
-            bld.arg(&ssm_ptr);
-            bld.arg(&y_ptr);
-            bld.arg(&delta_ptr);
-            bld.arg(&u_ptr);
-            bld.arg(&bb_ptr);
-            bld.arg(&cb_ptr);
-            bld.arg(&a_neg_ptr);
             let dp = lw.d_param();
-            bld.arg(&dp);
-            bld.arg(&b_i);
-            bld.arg(&t_i);
-            bld.arg(&di_i);
-            bld.arg(&ds_i);
-            unsafe { bld.launch(grid_1d(b * di)) }
-                .map_err(|e| format!("ssm_nosave prefill L{layer_idx}: {e:?}"))?;
+            // M-A (scan-audit 2026-08-01): this dispatch used to bypass the
+            // scan router on a stale "parallel scan is f32-only" premise —
+            // the typed parallel nosave kernel exists and mirrors the f32
+            // route above; long prompts paid O(T) for nothing, and the
+            // sequential kernel's silent d_state>64 return had no guard.
+            if dims.scan_mode.use_parallel(t, ds) {
+                let mut bld = ctx
+                    .stream
+                    .launch_builder(k.ssm_parallel_fwd_nosave_typed.get(dt));
+                bld.arg(&ssm_ptr);
+                bld.arg(&y_ptr);
+                bld.arg(&delta_ptr);
+                bld.arg(&u_ptr);
+                bld.arg(&bb_ptr);
+                bld.arg(&cb_ptr);
+                bld.arg(&a_neg_ptr);
+                bld.arg(&dp);
+                bld.arg(&b_i);
+                bld.arg(&t_i);
+                bld.arg(&di_i);
+                bld.arg(&ds_i);
+                unsafe {
+                    bld.launch(super::launch::grid_parallel_scan_typed(
+                        b,
+                        di,
+                        dt.size_bytes(),
+                    ))
+                }
+                .map_err(|e| format!("ssm_parallel_nosave prefill L{layer_idx}: {e:?}"))?;
+            } else {
+                assert!(
+                    ds <= 64,
+                    "ssm_burnin_nosave_typed requires d_state <= 64 (got {ds}) - \
+                     the kernel returns without writing y otherwise"
+                );
+                let mut bld = ctx.stream.launch_builder(k.ssm_burnin_nosave_typed.get(dt));
+                bld.arg(&ssm_ptr);
+                bld.arg(&y_ptr);
+                bld.arg(&delta_ptr);
+                bld.arg(&u_ptr);
+                bld.arg(&bb_ptr);
+                bld.arg(&cb_ptr);
+                bld.arg(&a_neg_ptr);
+                bld.arg(&dp);
+                bld.arg(&b_i);
+                bld.arg(&t_i);
+                bld.arg(&di_i);
+                bld.arg(&ds_i);
+                unsafe { bld.launch(grid_1d(b * di)) }
+                    .map_err(|e| format!("ssm_nosave prefill L{layer_idx}: {e:?}"))?;
+            }
         }
 
         // F4e: gating — y * gate_silu (typed).

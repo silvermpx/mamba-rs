@@ -313,9 +313,13 @@ extern "C" __global__ __launch_bounds__(128, 3) void ssm_parallel_scan_fwd(
         // Coalesced delta load via shared memory staging.
         // Striped load: thread k loads indices k, k+NTHREADS, k+2*NTHREADS, ...
         // Then blocked read from smem_stage for per-thread NITEMS.
-        // Layout in global: delta[(bid*T + t) * d_inner + did] -- stride d_inner
-        // between adjacent t, so adjacent threads reading adjacent t gives
-        // coalesced access when d_inner is the innermost dim.
+        // Layout in global: delta[(bid*T + t) * d_inner + did] -- adjacent t
+        // are d_inner elements apart, so threads in ONE block (fixed did)
+        // stride by d_inner: NOT coalesced within a block. The win comes
+        // from ACROSS blocks - blocks with adjacent did hit adjacent
+        // addresses at each t, and the striped smem stage amortizes the
+        // pattern to one pass per chunk. (m-8: the old text claimed
+        // in-block coalescing, inverted.)
         // ================================================================
         for (int s = threadIdx.x; s < CHUNK_SIZE; s += NTHREADS) {
             int t = chunk_start + s;
@@ -826,6 +830,7 @@ ssm_parallel_scan_fwd_##SUFFIX(                                               \
         __syncthreads();                                                      \
         float delta_vals[NITEMS];                                             \
                                                              \
+        _Pragma("unroll")                                                      \
         for (int i = 0; i < NITEMS; i++) {                                    \
             delta_vals[i] = to_f(smem_stage[threadIdx.x * NITEMS + i]);       \
         }                                                                     \
@@ -840,6 +845,7 @@ ssm_parallel_scan_fwd_##SUFFIX(                                               \
         float u_vals[NITEMS];                                                 \
         float delta_u_vals[NITEMS];                                           \
                                                              \
+        _Pragma("unroll")                                                      \
         for (int i = 0; i < NITEMS; i++) {                                    \
             u_vals[i] = to_f(smem_stage[threadIdx.x * NITEMS + i]);           \
             delta_u_vals[i] = delta_vals[i] * u_vals[i];                      \
@@ -847,6 +853,7 @@ ssm_parallel_scan_fwd_##SUFFIX(                                               \
         __syncthreads();                                                      \
         float out_vals[NITEMS];                                               \
                                                              \
+        _Pragma("unroll")                                                      \
         for (int i = 0; i < NITEMS; i++) {                                    \
             out_vals[i] = D_d * u_vals[i];                                    \
         }                                                                     \
@@ -862,6 +869,7 @@ ssm_parallel_scan_fwd_##SUFFIX(                                               \
             float thread_a[NITEMS];                                           \
             float thread_b[NITEMS];                                           \
                                                              \
+            _Pragma("unroll")                                                  \
             for (int i = 0; i < NITEMS; i++) {                                \
                 int t = chunk_start + threadIdx.x * NITEMS + i;               \
                 if (t < T) {                                                  \
@@ -876,6 +884,7 @@ ssm_parallel_scan_fwd_##SUFFIX(                                               \
             }                                                                 \
             __syncthreads();                                                  \
                                                              \
+            _Pragma("unroll")                                                  \
             for (int i = 1; i < NITEMS; i++) {                                \
                 thread_b[i] = thread_a[i] * thread_b[i - 1] + thread_b[i];    \
                 thread_a[i] = thread_a[i] * thread_a[i - 1];                  \
@@ -916,6 +925,7 @@ ssm_parallel_scan_fwd_##SUFFIX(                                               \
             }                                                                 \
             __syncthreads();                                                  \
                                                              \
+            _Pragma("unroll")                                                  \
             for (int i = 0; i < NITEMS; i++) {                                \
                 int t = chunk_start + threadIdx.x * NITEMS + i;               \
                 if (t < T) {                                                  \
@@ -934,6 +944,7 @@ ssm_parallel_scan_fwd_##SUFFIX(                                               \
             __syncthreads();                                                  \
         }                                                                     \
                                                              \
+        _Pragma("unroll")                                                      \
         for (int i = 0; i < NITEMS; i++) {                                    \
             smem_stage[threadIdx.x * NITEMS + i] = FROM_F(out_vals[i]);       \
         }                                                                     \
@@ -1000,6 +1011,7 @@ ssm_parallel_scan_fwd_nosave_##SUFFIX(                                        \
         __syncthreads();                                                      \
         float delta_vals[NITEMS];                                             \
                                                              \
+        _Pragma("unroll")                                                      \
         for (int i = 0; i < NITEMS; i++) {                                    \
             delta_vals[i] = to_f(smem_stage[threadIdx.x * NITEMS + i]);       \
         }                                                                     \
@@ -1014,6 +1026,7 @@ ssm_parallel_scan_fwd_nosave_##SUFFIX(                                        \
         float u_vals[NITEMS];                                                 \
         float delta_u_vals[NITEMS];                                           \
                                                              \
+        _Pragma("unroll")                                                      \
         for (int i = 0; i < NITEMS; i++) {                                    \
             u_vals[i] = to_f(smem_stage[threadIdx.x * NITEMS + i]);           \
             delta_u_vals[i] = delta_vals[i] * u_vals[i];                      \
@@ -1021,6 +1034,7 @@ ssm_parallel_scan_fwd_nosave_##SUFFIX(                                        \
         __syncthreads();                                                      \
         float out_vals[NITEMS];                                               \
                                                              \
+        _Pragma("unroll")                                                      \
         for (int i = 0; i < NITEMS; i++) {                                    \
             out_vals[i] = D_d * u_vals[i];                                    \
         }                                                                     \
@@ -1036,6 +1050,7 @@ ssm_parallel_scan_fwd_nosave_##SUFFIX(                                        \
             float thread_a[NITEMS];                                           \
             float thread_b[NITEMS];                                           \
                                                              \
+            _Pragma("unroll")                                                  \
             for (int i = 0; i < NITEMS; i++) {                                \
                 int t = chunk_start + threadIdx.x * NITEMS + i;               \
                 if (t < T) {                                                  \
@@ -1050,6 +1065,7 @@ ssm_parallel_scan_fwd_nosave_##SUFFIX(                                        \
             }                                                                 \
             __syncthreads();                                                  \
                                                              \
+            _Pragma("unroll")                                                  \
             for (int i = 1; i < NITEMS; i++) {                                \
                 thread_b[i] = thread_a[i] * thread_b[i - 1] + thread_b[i];    \
                 thread_a[i] = thread_a[i] * thread_a[i - 1];                  \
@@ -1090,6 +1106,7 @@ ssm_parallel_scan_fwd_nosave_##SUFFIX(                                        \
             }                                                                 \
             __syncthreads();                                                  \
                                                              \
+            _Pragma("unroll")                                                  \
             for (int i = 0; i < NITEMS; i++) {                                \
                 int t = chunk_start + threadIdx.x * NITEMS + i;               \
                 if (t < T) {                                                  \
@@ -1105,6 +1122,7 @@ ssm_parallel_scan_fwd_nosave_##SUFFIX(                                        \
             __syncthreads();                                                  \
         }                                                                     \
                                                              \
+        _Pragma("unroll")                                                      \
         for (int i = 0; i < NITEMS; i++) {                                    \
             smem_stage[threadIdx.x * NITEMS + i] = FROM_F(out_vals[i]);       \
         }                                                                     \
@@ -1225,6 +1243,7 @@ ssm_parallel_scan_bwd_##SUFFIX(                                               \
         }                                                                     \
         __syncthreads();                                                      \
         float delta_vals[NITEMS];                                             \
+        _Pragma("unroll")                                                      \
         for (int i = 0; i < NITEMS; i++) {                                    \
             delta_vals[i] = to_f(smem_stage[threadIdx.x * NITEMS + i]);       \
         }                                                                     \
@@ -1238,6 +1257,7 @@ ssm_parallel_scan_bwd_##SUFFIX(                                               \
         }                                                                     \
         __syncthreads();                                                      \
         float u_vals[NITEMS];                                                 \
+        _Pragma("unroll")                                                      \
         for (int i = 0; i < NITEMS; i++) {                                    \
             u_vals[i] = to_f(smem_stage[threadIdx.x * NITEMS + i]);           \
         }                                                                     \
@@ -1251,6 +1271,7 @@ ssm_parallel_scan_bwd_##SUFFIX(                                               \
         }                                                                     \
         __syncthreads();                                                      \
         float dy_vals[NITEMS];                                                \
+        _Pragma("unroll")                                                      \
         for (int i = 0; i < NITEMS; i++) {                                    \
             dy_vals[i] = to_f(smem_stage[threadIdx.x * NITEMS + i]);          \
         }                                                                     \
@@ -1258,6 +1279,7 @@ ssm_parallel_scan_bwd_##SUFFIX(                                               \
         /* ---- Per-t skip-path contributions accumulate in registers ---- */ \
         float d_u_acc[NITEMS];                                                \
         float d_delta_acc[NITEMS];                                            \
+        _Pragma("unroll")                                                      \
         for (int i = 0; i < NITEMS; i++) {                                    \
             int t = chunk_start + threadIdx.x * NITEMS + i;                   \
             if (t < T) {                                                      \
@@ -1281,6 +1303,7 @@ ssm_parallel_scan_bwd_##SUFFIX(                                               \
             }                                                                 \
             __syncthreads();                                                  \
             float b_vals[NITEMS];                                             \
+            _Pragma("unroll")                                                  \
             for (int i = 0; i < NITEMS; i++) {                                \
                 b_vals[i] = to_f(smem_stage[threadIdx.x * NITEMS + i]);       \
             }                                                                 \
@@ -1294,6 +1317,7 @@ ssm_parallel_scan_bwd_##SUFFIX(                                               \
             }                                                                 \
             __syncthreads();                                                  \
             float c_vals[NITEMS];                                             \
+            _Pragma("unroll")                                                  \
             for (int i = 0; i < NITEMS; i++) {                                \
                 c_vals[i] = to_f(smem_stage[threadIdx.x * NITEMS + i]);       \
             }                                                                 \
@@ -1301,6 +1325,7 @@ ssm_parallel_scan_bwd_##SUFFIX(                                               \
             /* Per-i: da[i] = exp2(delta * a_neg), d_local[i] = dy * c */     \
             float da_vals[NITEMS];                                            \
             float d_local[NITEMS];                                            \
+            _Pragma("unroll")                                                  \
             for (int i = 0; i < NITEMS; i++) {                                \
                 int t = chunk_start + threadIdx.x * NITEMS + i;               \
                 if (t < T) {                                                  \
@@ -1340,6 +1365,7 @@ ssm_parallel_scan_bwd_##SUFFIX(                                               \
             thread_b[NITEMS - 1] = d_local[NITEMS - 1];                       \
             __syncthreads();                                                  \
             /* Mask out-of-range elements to identity (a=1, b=0). */          \
+            _Pragma("unroll")                                                  \
             for (int i = 0; i < NITEMS; i++) {                                \
                 int t = chunk_start + threadIdx.x * NITEMS + i;               \
                 if (t >= T) {                                                 \
@@ -1410,12 +1436,14 @@ ssm_parallel_scan_bwd_##SUFFIX(                                               \
             float post_a = next_a * run_a;                                    \
             float post_b = next_a * run_b + next_b;                           \
             float dh_vals[NITEMS];                                            \
+            _Pragma("unroll")                                                  \
             for (int i = 0; i < NITEMS; i++) {                                \
                 /* dh[i] = thread_a[i]*post_b + thread_b[i] */                \
                 dh_vals[i] = thread_a[i] * post_b + thread_b[i];              \
             }                                                                 \
             /* ---- Per-t output writes (typed) and accumulation ---- */      \
             float d_a_acc = 0.0f;                                             \
+            _Pragma("unroll")                                                  \
             for (int i = 0; i < NITEMS; i++) {                                \
                 int t = chunk_start + threadIdx.x * NITEMS + i;               \
                 if (t >= T) continue;                                         \
@@ -1459,6 +1487,7 @@ ssm_parallel_scan_bwd_##SUFFIX(                                               \
             __syncthreads();                                                  \
         }                                                                     \
         /* ---- Store d_delta_acc, d_u_acc to typed HBM via smem ---- */      \
+        _Pragma("unroll")                                                      \
         for (int i = 0; i < NITEMS; i++) {                                    \
             smem_stage[threadIdx.x * NITEMS + i] = FROM_F(d_delta_acc[i]);    \
         }                                                                     \
@@ -1470,6 +1499,7 @@ ssm_parallel_scan_bwd_##SUFFIX(                                               \
             }                                                                 \
         }                                                                     \
         __syncthreads();                                                      \
+        _Pragma("unroll")                                                      \
         for (int i = 0; i < NITEMS; i++) {                                    \
             smem_stage[threadIdx.x * NITEMS + i] = FROM_F(d_u_acc[i]);        \
         }                                                                     \
@@ -1516,3 +1546,17 @@ DEFINE_SSM_PARALLEL_SCAN_BWD(f16,  __half,        from_f_f16)
 #undef SMEM_EXCH_B_OFF
 #undef SMEM_STAGE_OFF
 #undef SMEM_TOTAL_FLOATS
+/* m-5 (scan-audit 2026-08-01): the epilogue stopped at the forward set,
+   leaving the backward smem offsets + the DEFINE_* generator names alive
+   in the concatenated NVRTC TU. Complete the cleanup. */
+#undef SMEM_REV_WA_OFF
+#undef SMEM_REV_WB_OFF
+#undef SMEM_POST_A_OFF
+#undef SMEM_POST_B_OFF
+#undef SMEM_NEXT_A_OFF
+#undef SMEM_DA_RED_OFF
+#undef SMEM_CHUNK_FIRST_A_OFF
+#undef SMEM_BWD_FLOATS
+#undef DEFINE_SSM_PARALLEL_SCAN_FWD
+#undef DEFINE_SSM_PARALLEL_SCAN_FWD_NOSAVE
+#undef DEFINE_SSM_PARALLEL_SCAN_BWD

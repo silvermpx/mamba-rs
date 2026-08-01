@@ -671,6 +671,10 @@ impl GpuMambaInference {
                 let b_i = b as i32;
                 let di_i = di as i32;
                 let ds_i = ds as i32;
+                // m-2 (scan-audit 2026-08-01): the step kernel silently
+                // returns without writing y beyond its register cap - and
+                // T=1 decode has no parallel alternative to route to.
+                assert!(ds <= 64, "ssm_step_fwd requires d_state <= 64 (got {ds})");
                 let dp = lw.d_param();
                 let mut bld = self.ctx.stream.launch_builder(&k.ssm_step_fwd);
                 let y_ssm_ptr = scratch.y.cached_ptr();

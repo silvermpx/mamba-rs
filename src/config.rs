@@ -37,16 +37,15 @@ impl ScanMode {
     }
 
     /// Resolve Auto to a concrete mode based on sequence length.
-    pub fn resolve(self, seq_len: usize) -> Self {
-        match self {
-            Self::Auto => {
-                if seq_len <= Self::PARALLEL_SCAN_THRESHOLD {
-                    Self::Sequential
-                } else {
-                    Self::Parallel
-                }
-            }
-            other => other,
+    /// Resolve `Auto` for a shape. Delegates to [`Self::use_parallel`] so the
+    /// `d_state > 64` sequential override can never diverge between the two
+    /// entry points (m-1, scan-audit 2026-08-01: this used to duplicate the
+    /// threshold WITHOUT the d_state override - a safety-divergent copy).
+    pub fn resolve(self, seq_len: usize, d_state: usize) -> Self {
+        if self.use_parallel(seq_len, d_state) {
+            Self::Parallel
+        } else {
+            Self::Sequential
         }
     }
 }
