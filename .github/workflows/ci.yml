@@ -112,6 +112,32 @@ jobs:
           key: ${{ matrix.rust }}
       - run: cargo test --workspace
 
+  cuda-check:
+    # C-1 (GEMM-map audit 2026-08-01): every GPU/tier test file is
+    # cfg(feature = "cuda"), so the featureless legs compile ~50 test files
+    # to nothing — the whole GEMM suite could bit-rot invisibly. Hosted
+    # runners have no GPU, but type-checking only needs rustc + nvcc
+    # (cudarc's build script probes `nvcc --version`; execution is not
+    # attempted). Running the suite on a GPU runner stays a separate,
+    # deliberate decision.
+    name: CUDA feature type-check
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install CUDA toolkit (nvcc only, no driver)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq nvidia-cuda-toolkit
+          nvcc --version
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.97"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: cuda-check
+      - run: cargo check --workspace --all-targets --features cuda
+
   publish-check:
     name: Publish dry-run
     needs: [basics, test]
