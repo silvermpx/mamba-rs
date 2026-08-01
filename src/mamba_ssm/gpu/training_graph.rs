@@ -184,6 +184,10 @@ pub struct GpuMambaTrainingStepGraph {
     // every bf16 bi GEMM without a native typed bucket (all Big/split-K
     // training shapes) reads/writes these buffers inside the captured body.
     captured_bi_upcast_ptrs: [u64; 3],
+    // G1 (GEMM-map audit 2026-08-01): the GEMM-tier flags at capture time.
+    // A post-capture flip cannot change the recorded kernels; replay
+    // asserts the route identity instead of silently ignoring the flip.
+    captured_gemm_flags: (bool, bool, bool),
 }
 
 impl GpuMambaTrainingStepGraph {
@@ -336,6 +340,10 @@ impl GpuMambaTrainingStepGraph {
             captured_compute_norm_f_ptr: snap_compute_norm_f,
             captured_half_staging_ptr: snap_half_staging,
             captured_bi_upcast_ptrs: snap_bi_upcast,
+            captured_gemm_flags: {
+                ctx.note_graph_capture();
+                ctx.gemm_flags()
+            },
         })
     }
 
@@ -442,6 +450,13 @@ impl GpuMambaTrainingStepGraph {
              capture (a larger typed bi GEMM regrew the scratch after this \
              graph was captured — re-capture or presize for the larger shape)"
         );
+        assert_eq!(
+            ctx.gemm_flags(),
+            self.captured_gemm_flags,
+            "training_graph replay: GEMM-tier flags changed since capture \
+             (batch_invariant, bi_tensor_cores, fast_gemm) - the captured \
+             kernels cannot follow a flag flip; re-capture instead"
+        );
         self.graph
             .launch()
             .map_err(|e| format!("training_graph launch: {e:?}"))
@@ -512,9 +527,19 @@ pub struct GpuMambaF32TrainingStepGraph {
     captured_a_neg_all_ptr: u64,
     captured_weights_input_proj_w_ptr: u64,
     captured_weights_norm_f_ptr: u64,
+    // G1: GEMM-tier flags at capture; replay() predates a ctx parameter, so
+    // the trainer asserts against this getter at its call site.
+    captured_gemm_flags: (bool, bool, bool),
 }
 
 impl GpuMambaF32TrainingStepGraph {
+    /// GEMM-tier flags (batch_invariant, bi_tensor_cores, fast_gemm) at
+    /// capture time. Assert equality with `ctx.gemm_flags()` before every
+    /// replay - the captured kernels cannot follow a post-capture flip.
+    pub fn captured_gemm_flags(&self) -> (bool, bool, bool) {
+        self.captured_gemm_flags
+    }
+
     /// Capture the f32 training step. Caller responsible for the same
     /// warmup contract as the mixed variant: run one eager step before
     /// calling this so cuBLAS has selected its kernels and any lazy
@@ -597,6 +622,10 @@ impl GpuMambaF32TrainingStepGraph {
             captured_a_neg_all_ptr: snap_a_neg,
             captured_weights_input_proj_w_ptr: snap_input_proj,
             captured_weights_norm_f_ptr: snap_norm_f,
+            captured_gemm_flags: {
+                ctx.note_graph_capture();
+                ctx.gemm_flags()
+            },
         })
     }
 

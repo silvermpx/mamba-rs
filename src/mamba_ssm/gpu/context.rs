@@ -43,6 +43,10 @@ pub struct GpuCtx {
     /// shape within a process). Ignored by the batch-invariant path, which
     /// never calls cuBLAS. Env: MAMBA_RS_FAST_GEMM.
     fast_gemm: std::cell::Cell<bool>,
+    /// Number of CUDA graphs captured on this context (G3 belt): the tier
+    /// setters warn when flipped after a capture - the captured kernels
+    /// cannot follow, and G1 will hard-assert at the next replay.
+    graphs_captured: std::cell::Cell<u64>,
     /// Grow-only f32 scratch triple for the batch-invariant typed-GEMM
     /// upcast fallback: typed shapes without a native typed bucket run as
     /// "upcast inputs → f32 sgemm_bi → RNE downcast output", bit-identical
@@ -111,6 +115,7 @@ impl GpuCtx {
             batch_invariant: std::cell::Cell::new(batch_invariant),
             bi_tensor_cores: std::cell::Cell::new(bi_tensor_cores),
             fast_gemm: std::cell::Cell::new(fast_gemm),
+            graphs_captured: std::cell::Cell::new(0),
             bi_upcast_scratch: [RefCell::new(None), RefCell::new(None), RefCell::new(None)],
         })
     }
@@ -256,6 +261,12 @@ impl GpuCtx {
     /// produces bit-identical logits regardless of batch size. When `false`
     /// (default), uses cuBLAS gemv for maximum throughput.
     pub fn set_batch_invariant(&self, on: bool) {
+        if self.graphs_captured.get() > 0 {
+            eprintln!(
+                "mamba-rs WARNING: GEMM-tier flag flipped after a graph capture; \
+                 captured kernels keep the old tier and replay will assert (G1)"
+            );
+        }
         self.batch_invariant.set(on);
     }
 
@@ -268,18 +279,50 @@ impl GpuCtx {
     /// GEMMs (stage 5). Different numeric contract than the scalar triad —
     /// deterministic and batch-invariant, but not bit-equal to it.
     pub fn set_bi_tensor_cores(&self, on: bool) {
+        if self.graphs_captured.get() > 0 {
+            eprintln!(
+                "mamba-rs WARNING: GEMM-tier flag flipped after a graph capture; \
+                 captured kernels keep the old tier and replay will assert (G1)"
+            );
+        }
         self.bi_tensor_cores.set(on);
     }
 
     /// Enable or disable the non-PEDANTIC cuBLAS compute mode for typed
     /// GEMMs (see the `fast_gemm` field doc for the numeric contract).
     pub fn set_fast_gemm(&self, on: bool) {
+        if self.graphs_captured.get() > 0 {
+            eprintln!(
+                "mamba-rs WARNING: GEMM-tier flag flipped after a graph capture; \
+                 captured kernels keep the old tier and replay will assert (G1)"
+            );
+        }
         self.fast_gemm.set(on);
     }
 
     /// Returns `true` if the non-PEDANTIC typed-GEMM compute is enabled.
     pub fn fast_gemm(&self) -> bool {
         self.fast_gemm.get()
+    }
+
+    /// Snapshot of the three GEMM-tier flags (batch_invariant,
+    /// bi_tensor_cores, fast_gemm) — the numeric-route identity of every
+    /// GEMM this context launches. Graph captures snapshot it and replays
+    /// assert it (G1, GEMM-map audit 2026-08-01): a flag flipped after
+    /// capture cannot change the recorded kernels, so the flip would
+    /// otherwise be a silent no-op on the graph path and a live divergence
+    /// on any eager path sharing the context.
+    /// Record that a CUDA graph was captured on this context (G3 belt).
+    pub(crate) fn note_graph_capture(&self) {
+        self.graphs_captured.set(self.graphs_captured.get() + 1);
+    }
+
+    pub fn gemm_flags(&self) -> (bool, bool, bool) {
+        (
+            self.batch_invariant.get(),
+            self.bi_tensor_cores.get(),
+            self.fast_gemm.get(),
+        )
     }
 
     /// Returns `true` if the tensor-core bi tier is enabled.

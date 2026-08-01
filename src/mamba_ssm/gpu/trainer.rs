@@ -558,6 +558,10 @@ pub(crate) struct MambaTrainerMixed {
     /// True between a `forward_split` and the `backward_split` consuming its
     /// saved activations (split-phase interlock).
     split_forward_pending: bool,
+    // G2 (GEMM-map audit 2026-08-01): the GEMM-tier flags at forward()
+    // time; backward_step refuses on drift - a mid-cycle flip would pair
+    // gradients with activations from a different numeric route.
+    split_forward_flags: (bool, bool, bool),
     /// True while an `accumulate_only` backward window is open: the next
     /// backward must NOT zero the arena, and the fused `step()` must refuse
     /// to run (its body zeroes the arena and would silently discard the
@@ -599,6 +603,12 @@ pub(crate) struct MambaTrainerMixed {
     captured_f16_overflow_ptr: u64,
     captured_f16_grads_ptr: u64,
     captured_f16_dt_scaled_ptr: u64,
+    // G4 (GEMM-map audit 2026-08-01): the f16 graph presizes these two
+    // scratches but never asserted them at replay - the one graph without
+    // the guard the bf16 graph already has. Plus the G1 flag snapshot.
+    captured_f16_half_staging_ptr: u64,
+    captured_f16_bi_upcast_ptrs: [u64; 3],
+    captured_f16_gemm_flags: (bool, bool, bool),
 }
 
 impl MambaTrainerMixed {
@@ -716,6 +726,7 @@ impl MambaTrainerMixed {
             d_temporal,
             temporal_f32,
             split_forward_pending: false,
+            split_forward_flags: (false, false, false),
             grads_dirty: false,
             clip_partials,
             clip_partials_host: vec![0.0; GRAD_CLIP_PARTIALS],
@@ -732,6 +743,9 @@ impl MambaTrainerMixed {
             captured_f16_overflow_ptr: 0,
             captured_f16_grads_ptr: 0,
             captured_f16_dt_scaled_ptr: 0,
+            captured_f16_half_staging_ptr: 0,
+            captured_f16_bi_upcast_ptrs: [0; 3],
+            captured_f16_gemm_flags: (false, false, false),
         })
     }
 
@@ -935,6 +949,7 @@ impl MambaTrainerMixed {
             .map_err(|e| format!("forward_split sync: {e:?}"))?;
         self.temporal_f32.download(&self.ctx.stream, temporal_out)?;
         self.split_forward_pending = true;
+        self.split_forward_flags = self.ctx.gemm_flags();
         Ok(())
     }
 
@@ -950,6 +965,15 @@ impl MambaTrainerMixed {
                  are stale or missing; call forward() first"
                     .into(),
             );
+        }
+        if self.split_forward_flags != self.ctx.gemm_flags() {
+            return Err(format!(
+                "backward_step(): GEMM-tier flags changed since forward() \
+                 ({:?} -> {:?}) — gradients would pair with activations from \
+                 a different numeric route; restore the flags or re-run forward()",
+                self.split_forward_flags,
+                self.ctx.gemm_flags()
+            ));
         }
         if opts.clip_max_norm.is_some() && opts.accumulate_only {
             return Err(
@@ -1196,6 +1220,23 @@ impl MambaTrainerMixed {
                 self.captured_f16_dt_scaled_ptr,
                 "f16 graph replay: d_temporal_scaled pointer changed since capture"
             );
+            assert_eq!(
+                self.ctx.half_staging_ptr(),
+                self.captured_f16_half_staging_ptr,
+                "f16 graph replay: half_staging pointer changed since capture \
+                 (lazy grow after capture - re-capture or presize larger)"
+            );
+            assert_eq!(
+                self.ctx.bi_upcast_scratch_ptrs(),
+                self.captured_f16_bi_upcast_ptrs,
+                "f16 graph replay: bi_upcast_scratch pointer changed since capture"
+            );
+            assert_eq!(
+                self.ctx.gemm_flags(),
+                self.captured_f16_gemm_flags,
+                "f16 graph replay: GEMM-tier flags changed since capture - \
+                 the captured kernels cannot follow a flag flip; re-capture"
+            );
 
             // Graph replay: forward + backward + check_inf_nan +
             // scale_grads_skip + AdamW + sync all run as one cuGraphLaunch.
@@ -1359,6 +1400,10 @@ impl MambaTrainerMixed {
         self.captured_f16_overflow_ptr = snap_overflow;
         self.captured_f16_grads_ptr = snap_grads;
         self.captured_f16_dt_scaled_ptr = snap_dt_scaled;
+        self.captured_f16_half_staging_ptr = self.ctx.half_staging_ptr();
+        self.captured_f16_bi_upcast_ptrs = self.ctx.bi_upcast_scratch_ptrs();
+        self.ctx.note_graph_capture();
+        self.captured_f16_gemm_flags = self.ctx.gemm_flags();
         Ok(())
     }
 
@@ -1494,6 +1539,10 @@ pub(crate) struct MambaTrainerF32 {
     /// True between a `forward_split` and the `backward_split` consuming its
     /// saved activations (split-phase interlock).
     split_forward_pending: bool,
+    // G2 (GEMM-map audit 2026-08-01): the GEMM-tier flags at forward()
+    // time; backward_step refuses on drift - a mid-cycle flip would pair
+    // gradients with activations from a different numeric route.
+    split_forward_flags: (bool, bool, bool),
     /// True while an `accumulate_only` backward window is open (see the
     /// same-named field on `MambaTrainerMixed`).
     grads_dirty: bool,
@@ -1597,6 +1646,7 @@ impl MambaTrainerF32 {
             d_temporal,
             graph: None,
             split_forward_pending: false,
+            split_forward_flags: (false, false, false),
             grads_dirty: false,
             clip_partials,
             clip_partials_host: vec![0.0; GRAD_CLIP_PARTIALS],
@@ -1675,6 +1725,13 @@ impl MambaTrainerF32 {
         self.bias.write(&self.ctx.stream, bc1, bc2)?;
 
         let replayed = if let Some(ref g) = self.graph {
+            // G1 at the call site: replay() predates a ctx parameter.
+            assert_eq!(
+                self.ctx.gemm_flags(),
+                g.captured_gemm_flags(),
+                "f32 graph replay: GEMM-tier flags changed since capture - \
+                 the captured kernels cannot follow a flag flip; re-capture"
+            );
             g.replay(&MambaF32Replay {
                 weights: &self.weights,
                 adam: &self.adam,
@@ -1726,6 +1783,7 @@ impl MambaTrainerF32 {
             .map_err(|e| format!("forward_split sync: {e:?}"))?;
         self.temporal.download(&self.ctx.stream, temporal_out)?;
         self.split_forward_pending = true;
+        self.split_forward_flags = self.ctx.gemm_flags();
         Ok(())
     }
 
@@ -1741,6 +1799,15 @@ impl MambaTrainerF32 {
                  are stale or missing; call forward() first"
                     .into(),
             );
+        }
+        if self.split_forward_flags != self.ctx.gemm_flags() {
+            return Err(format!(
+                "backward_step(): GEMM-tier flags changed since forward() \
+                 ({:?} -> {:?}) — gradients would pair with activations from \
+                 a different numeric route; restore the flags or re-run forward()",
+                self.split_forward_flags,
+                self.ctx.gemm_flags()
+            ));
         }
         if opts.clip_max_norm.is_some() && opts.accumulate_only {
             return Err(

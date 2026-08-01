@@ -41,6 +41,9 @@ fn probe_one(m: usize, k: usize, n: usize) {
     let dev = GpuDevice::new(0).expect("dev");
     let ctx = GpuCtx::new(&dev).expect("ctx");
     ctx.set_batch_invariant(true);
+    // M-13: env-independence - the probe pins its whole tier explicitly.
+    ctx.set_bi_tensor_cores(false);
+    ctx.set_fast_gemm(false);
     probe(&ctx, m, k, n).unwrap_or_else(|e| panic!("shape ({m},{k},{n}): {e}"));
 }
 

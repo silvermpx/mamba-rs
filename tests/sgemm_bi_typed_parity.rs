@@ -61,6 +61,12 @@ impl Ctx {
     fn new() -> Self {
         let device = GpuDevice::new(0).expect("gpu");
         let ctx = GpuCtx::new(&device).expect("ctx");
+        // M-13 (GEMM-map audit): pin the tier explicitly - a shell with
+        // MAMBA_RS_BI_TENSOR_CORES exported used to silently reroute this
+        // suite through the TC kernels, testing a different contract.
+        ctx.set_batch_invariant(true);
+        ctx.set_bi_tensor_cores(false);
+        ctx.set_fast_gemm(false);
         Self { ctx }
     }
 
