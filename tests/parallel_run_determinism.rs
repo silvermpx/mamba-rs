@@ -4,6 +4,12 @@
 //! sequential kernels; this suite pins the same law for the parallel scan
 //! (T > PARALLEL_SCAN_THRESHOLD, ScanMode::Auto): two identical training
 //! runs from identical init must produce bit-identical master weights.
+//!
+//! BOTH GEMM tiers are covered, because both ship: the cuBLAS tier (crate
+//! default) and the batch-invariant custom-kernel tier with its tensor-core
+//! variant (`set_batch_invariant` + `set_bi_tensor_cores` — what the
+//! production classifier trainer enables). A tier is only pinned by the
+//! test that actually selects it.
 
 #![cfg(feature = "cuda")]
 
@@ -43,7 +49,18 @@ fn flatten(w: &MambaWeights) -> Vec<f32> {
     out
 }
 
-fn run_once(steps: usize) -> Vec<f32> {
+/// Which GEMM tier the run selects. Both ship; both must be deterministic.
+#[derive(Clone, Copy, Debug)]
+enum GemmTier {
+    /// Crate default: cuBLAS GemmEx.
+    Cublas,
+    /// Batch-invariant custom kernels, scalar tier.
+    BatchInvariant,
+    /// Batch-invariant custom kernels, tensor-core tier (production).
+    BatchInvariantTc,
+}
+
+fn run_once(steps: usize, tier: GemmTier) -> Vec<f32> {
     let (batch, input_dim) = (1usize, 48usize);
     let seq_len = PARALLEL_SCAN_THRESHOLD + 44;
     let cfg = MambaConfig {
@@ -62,6 +79,14 @@ fn run_once(steps: usize) -> Vec<f32> {
     let mut trainer =
         MambaTrainer::new_with_dtype(0, &cpu, cfg, input_dim, batch, seq_len, WeightDtype::Bf16)
             .expect("trainer");
+    match tier {
+        GemmTier::Cublas => {}
+        GemmTier::BatchInvariant => trainer.ctx().set_batch_invariant(true),
+        GemmTier::BatchInvariantTc => {
+            trainer.ctx().set_batch_invariant(true);
+            trainer.ctx().set_bi_tensor_cores(true);
+        }
+    }
     let mut temporal = vec![0.0f32; batch * seq_len * cfg.d_model];
     for s in 0..steps {
         let input = det(batch * seq_len * input_dim, 0xA5 + s as u32, 0.05);
@@ -74,16 +99,78 @@ fn run_once(steps: usize) -> Vec<f32> {
     flatten(&trainer.snapshot_master().expect("snapshot"))
 }
 
-#[test]
-fn parallel_training_is_bit_reproducible_run_to_run() {
-    let a = run_once(4);
-    let b = run_once(4);
+fn assert_reproducible(tier: GemmTier) {
+    let a = run_once(4, tier);
+    let b = run_once(4, tier);
     assert_eq!(a.len(), b.len());
     for (i, (x, y)) in a.iter().zip(b.iter()).enumerate() {
         assert_eq!(
             x.to_bits(),
             y.to_bits(),
-            "master weight [{i}] diverged across identical parallel-mode runs: {x} vs {y}"
+            "{tier:?}: master weight [{i}] diverged across identical parallel-mode runs: \
+             {x} vs {y}"
         );
+    }
+}
+
+#[test]
+fn parallel_training_is_bit_reproducible_cublas() {
+    assert_reproducible(GemmTier::Cublas);
+}
+
+#[test]
+fn parallel_training_is_bit_reproducible_batch_invariant() {
+    assert_reproducible(GemmTier::BatchInvariant);
+}
+
+/// The production classifier tier: batch-invariant custom kernels with the
+/// tensor-core variant enabled (classify_trainer sets exactly this pair).
+#[test]
+fn parallel_training_is_bit_reproducible_batch_invariant_tc() {
+    assert_reproducible(GemmTier::BatchInvariantTc);
+}
+
+/// The two BI tiers have SEPARATE numeric contracts (the tensor-core
+/// reduction tree is not the scalar FMA chain), so they must NOT be
+/// expected to agree bit-for-bit — pin that they differ deliberately
+/// rather than by accident, and that neither matches cuBLAS.
+#[test]
+fn gemm_tiers_are_distinct_numeric_routes() {
+    let cublas = run_once(2, GemmTier::Cublas);
+    let bi = run_once(2, GemmTier::BatchInvariant);
+    let bi_tc = run_once(2, GemmTier::BatchInvariantTc);
+    let differs = |a: &[f32], b: &[f32]| a.iter().zip(b).any(|(x, y)| x.to_bits() != y.to_bits());
+    assert!(
+        differs(&cublas, &bi),
+        "cuBLAS vs BI-scalar unexpectedly bit-equal"
+    );
+    assert!(
+        differs(&bi, &bi_tc),
+        "BI-scalar vs BI-tensor-core unexpectedly bit-equal"
+    );
+}
+
+/// Manual (--ignored): stable digest of a fixed parallel-mode training run
+/// per GEMM tier. Used to A/B two BUILDS (e.g. before/after a kernel edit
+/// that must not move bits) — run on both, diff the printed lines.
+#[test]
+#[ignore]
+fn print_run_digests() {
+    for tier in [
+        GemmTier::Cublas,
+        GemmTier::BatchInvariant,
+        GemmTier::BatchInvariantTc,
+    ] {
+        let w = run_once(4, tier);
+        // FNV-1a over the raw bits: order-sensitive, collision-safe enough
+        // for an A/B, and dependency-free.
+        let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+        for v in &w {
+            for b in v.to_bits().to_le_bytes() {
+                h ^= u64::from(b);
+                h = h.wrapping_mul(0x100_0000_01b3);
+            }
+        }
+        println!("DIGEST {tier:?}: {h:016x} ({} weights)", w.len());
     }
 }
