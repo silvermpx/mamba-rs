@@ -87,3 +87,29 @@ forward_mamba_backbone_prefill(out, input, weights, state, scratch, dims);
 | D | [d_inner] | — |
 | out_proj | [d_inner, d_model] | No |
 | norm | [d_model] | — |
+
+## Numeric routes (scan + GEMM), and how one is selected
+
+A "numeric route" is the pair (scan implementation, GEMM tier). Bits are
+guaranteed stable WITHIN a route (run-to-run, eager vs captured graph,
+save vs nosave prefill); ACROSS routes only tolerance parity holds —
+different reduction orders are different bit families, permanently.
+
+Scan: `ScanMode::{Sequential, Parallel, Auto}` on `MambaConfig`;
+`use_parallel(T, d_state)` is the single dispatch predicate (Auto routes
+parallel above T=256; `d_state > 64` always forces parallel because the
+sequential kernels cap per-thread state at 64). At the classifier shape
+(T=4621) the parallel scan is both ~5x faster and numerically preferable
+(~220x shorter rounding chains).
+
+GEMM tiers, per `GpuCtx` flags (see CLAUDE.md for coverage boundaries):
+- default: cuBLAS (TF32 for f32 sgemm, PEDANTIC f32-accumulate for typed);
+- `set_fast_gemm(true)`: typed GEMMs use non-PEDANTIC `CUBLAS_COMPUTE_32F`
+  (tensor-core cuBLAS kernels; opt-in, unmeasured — see changelog);
+- `set_batch_invariant(true)`: training triads + typed decode matvec on
+  custom fixed-order kernels (deterministic, batch-invariant);
+- + `set_bi_tensor_cores(true)`: the mma.sync tier of the same contract.
+
+Graph captures snapshot the flags and replays assert them; the split
+forward/backward cycle refuses a mid-cycle flip. Checkpoint provenance:
+`serialize` carries `scan_mode` + `rms_norm_eps` from 0.5.2.

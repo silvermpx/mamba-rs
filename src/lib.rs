@@ -33,6 +33,10 @@
 //! - Lahoti et al., *Mamba-3: Improved Sequence Modeling using State Space
 //!   Principles*, ICLR 2026.
 
+/// Crate version, for consumers stamping numeric-route provenance
+/// (checkpoint sidecars, serve fingerprints) without parsing Cargo.lock.
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
 pub mod config;
 #[cfg(feature = "hf")]
 pub mod hf;

@@ -134,3 +134,22 @@ f32 triad incl. a 60-shape dispatch-gate boundary sweep
 accuracy / cross-tile bit-identity / gate boundary sweep / launch-reality
 geometry (`sgemm_bi_tc.rs`), cross-batch inference parity
 (`hf_batch_parity.rs`, `extreme_edge_coverage.rs`).
+
+## Run-to-run bit determinism across GEMM tiers (2026-08-01, RTX 5090)
+
+`tests/parallel_run_determinism.rs`: two identical 4-step training runs in
+the parallel-scan regime (T > threshold, bf16), master weights compared
+bit-for-bit, one test per tier:
+
+| tier | selected by | run-to-run |
+|---|---|---|
+| cuBLAS (crate default) | no flags | bit-identical |
+| batch-invariant scalar | `set_batch_invariant(true)` | bit-identical |
+| batch-invariant tensor-core | + `set_bi_tensor_cores(true)` | bit-identical |
+
+A companion test pins that the three tiers do NOT agree with each other
+bit-for-bit: separate reduction orders are separate bit families by
+design. The `--ignored` `print_run_digests` test emits an FNV-1a digest of
+the final weights per tier for A/B-ing two BUILDS across a kernel edit
+(used to prove the `_Pragma("unroll")` restoration bit-neutral on all
+three tiers).

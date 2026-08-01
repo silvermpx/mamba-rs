@@ -1,5 +1,95 @@
 # Changelog
 
+## 0.5.2 (unreleased — release gate: tmp/mamba-rs-0.5.2-release-gate.md in the consumer repo)
+
+Correctness-and-contract release driven by two audit waves (26 read-only
+lenses over the scan kernels and the GEMM execution paths, cross-checked
+against the original state-spaces/mamba). No change to any number the 0.5.1
+default paths produce; every fix is a latent path, a guard, a test, or
+provenance.
+
+### Fixed
+
+- Mixed (bf16/f16) inference prefill now routes through the scan
+  dispatcher: it used to launch the sequential typed burnin unconditionally
+  on a stale "parallel scan is f32-only" premise — long prompts paid O(T)
+  while the compiled typed parallel nosave kernel had zero call sites, and
+  the one unguarded `d_state > 64` silent-return in the crate sat on this
+  path. The sequential branch now asserts the register-cap contract; the
+  f32 T=1 decode gets the same assert.
+- `ScanMode::resolve` delegated to `use_parallel` — it used to duplicate
+  the threshold WITHOUT the `d_state > 64` override (a safety-divergent
+  copy). Signature now takes `d_state`.
+- M3: `m3_reduce_d_D` accumulated instead of overwriting (the D
+  skip-connection gradient of prior micro-batches was silently discarded
+  under `accumulate_only`); `Mamba3Trainer::new_full` validates the config
+  for BOTH dtype branches (the f32 branch never did); the fused `step()`
+  invalidates a pending split forward instead of letting a later
+  `backward_step` run on overwritten activations.
+- `seq_len == 0` / `batch == 0` are rejected by name at the capacity gate
+  instead of surfacing as an opaque CUDA error on a neighbouring launch.
+- GEMM-tier flags are guarded across capture/replay and the split cycle:
+  graphs snapshot `(batch_invariant, bi_tensor_cores, fast_gemm)` at
+  capture and assert at replay; `backward_step` refuses a mid-cycle flip;
+  the f16 graph gains the half-staging/upcast pointer asserts its bf16
+  twin already had; setters warn once a graph exists.
+- `serialize` round-trips `scan_mode` and `rms_norm_eps` (load used to
+  reset both to defaults — a non-default-eps checkpoint silently served at
+  1e-5). Both fields optional on read; pre-0.5.2 files load unchanged.
+- Doc claims narrowed to what the code does: the batch-invariant flag
+  covers the training triads + typed decode matvec, NOT the tied LM heads
+  / no-context twins / M3 engine; "bit-parity" is a within-route contract,
+  tolerance across routes.
+
+### Added
+
+- `pub const VERSION` (provenance stamping for consumers).
+- `GpuCtx::gemm_flags()` — the numeric-route identity snapshot.
+- Opt-in non-PEDANTIC typed-GEMM compute (`set_fast_gemm` /
+  `MAMBA_RS_FAST_GEMM`), default OFF. HELD-BACK QUALITY NOTE: unmeasured on
+  a quiet GPU and it does not cover the tied LM head; treat as
+  experimental until the A/B lands. (Housekeeping: the `_Pragma` unroll
+  restoration attributed to the perf commit actually landed in the
+  dispatch-fix commit — kernel history reads across both.)
+- `_Pragma("unroll")` restored in the typed scan macros (their f32
+  originals carry `#pragma unroll`; a bare pragma cannot survive macro
+  expansion). Proven bit-neutral on all three GEMM tiers by weight digest.
+- Tests: parallel-scan oracle re-armed (the typed parity suite pinned
+  `Sequential` — all four "parallel" tests ran sequential kernels; an
+  in-test dispatch assert prevents re-defusing, T=2048 added), CPU-only
+  scan-mode boundary pins (runs in CI), run-to-run bit determinism per
+  GEMM tier + tier-distinctness pin + build A/B digest printer, scan-mode
+  step bench at the classifier shape.
+- CI: `cargo check --features cuda` leg (the whole GPU suite was invisible
+  to CI — cfg'd out on every existing leg).
+- Docs: numeric-routes section (mamba1-architecture), three-tier
+  determinism results, M3 chunked statelessness contract.
+
+### Named and deferred (post-0.5.2 tickets, each with a trigger)
+
+- End-to-end sequential-vs-parallel forward oracle at multi-chunk T with
+  chunk-boundary slices; production-shape backward parity with per-element
+  metric; tighter f32 parity gate (cos 1-1e-9) — trigger: first 0.5.2
+  patch cycle (the re-armed suite covers the regression risk meanwhile).
+- TC sub-BK value asserts (K=24, N_red=56) and a production-combo
+  trajectory oracle — trigger: same cycle; the shapes run in production
+  today with run-to-run pins only.
+- Always-runnable matvec_bi numeric test — trigger: same cycle.
+- `GemmTier` enum replacing the three booleans (additive, shims kept) —
+  trigger: owner API decision.
+- BI coverage (or documented exemption) for the ctx-carrying tied LM
+  heads; ctx plumbing for M3 GEMMs — trigger: an invariance-sensitive LM
+  consumer.
+- Typed-Big launch-reality token + dispatch-predicate table test —
+  trigger: next typed-GEMM kernel edit.
+- M3 `initial_states`/`seq_idx` (chunked carry + packed rows) — trigger:
+  an M3 adopter needing TBPTT or packing. M3 sequential-save buffers
+  allocated only when used (~10 GiB dead at vision shapes) — trigger: M3
+  adoption.
+- fast_gemm tied-LM-head coverage + quiet-GPU A/B — trigger: before
+  promoting the knob out of experimental.
+
+
 ## 0.5.1
 
 Patch release: the GPU serving surface for pooled-output consumers. The

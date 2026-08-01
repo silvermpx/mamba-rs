@@ -17,11 +17,14 @@ Pure Rust + CUDA. Kernels compile at runtime via NVRTC.
   Compute stays f32 (upcast-in-kernel, f32 accumulators) regardless of
   storage dtype.
 - **Deterministic inference & training (opt-in)** — `MAMBA_RS_BATCH_INVARIANT=1`
-  / `ctx.set_batch_invariant(true)` routes every GEMM through custom
+  / `ctx.set_batch_invariant(true)` routes the TRAINING GEMM triads
+  (forward, dW, dX) and the M<128 typed decode matvec through custom
   deterministic kernels (`kernels/sgemm_bi.cu`, `gemm_batch_invariant.cu`):
   inference logits are bit-identical across batch sizes (KL ≈ 1e-11), and
   f32 / bf16 / f16 training is bit-identical across runs. Default path is
-  cuBLAS for maximum throughput.
+  cuBLAS for maximum throughput. Scope note: the tied LM heads, the
+  no-context `*_blas` twins and the M3 engine stay on cuBLAS regardless of
+  the flag — see "numeric routes" in the architecture docs.
 - **Tensor-core deterministic tier (opt-in)** — `MAMBA_RS_BI_TENSOR_CORES=1`
   / `ctx.set_bi_tensor_cores(true)` on top of the flag above swaps the
   training GEMM triad for mma.sync tensor-core kernels: still fully
@@ -338,7 +341,11 @@ Detailed tables: [Mamba SSM benchmarks](docs/mamba1-benchmarks.md),
 
 52 test files, 360+ individual tests:
 
-- Correctness: bit-parity across CPU ↔ GPU, eager ↔ CUDA Graph, f32 ↔ bf16/f16
+- Correctness: bit-parity WITHIN a numeric route (eager ↔ CUDA Graph,
+  run ↔ run, save ↔ nosave prefill, CPU Single ↔ CPU Parallel); tolerance
+  parity ACROSS routes (CPU ↔ GPU, sequential ↔ parallel scan, f32 ↔
+  bf16/f16, scalar ↔ tensor-core GEMM) — different reduction orders are
+  different bit families by design
 - Gradient checks: finite-difference vs analytical on every weight tensor
 - Real checkpoints: 30-step training convergence + inference on
   `state-spaces/mamba-130m-hf` for all three dtypes
