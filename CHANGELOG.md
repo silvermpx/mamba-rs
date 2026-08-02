@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.5.2 (unreleased)
+## 0.5.2
 
 Correctness-and-contract release driven by two audit waves (26 read-only
 lenses over the scan kernels and the GEMM execution paths, cross-checked
