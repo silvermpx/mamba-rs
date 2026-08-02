@@ -120,14 +120,14 @@ pub fn load(path: &Path) -> Result<(MambaWeights, MambaConfig, usize), String> {
 pub fn load_from_bytes(data: &[u8]) -> Result<(MambaWeights, MambaConfig, usize), String> {
     // Read metadata first to get config
     let (_, meta) =
-        SafeTensors::read_metadata(&data).map_err(|e| format!("safetensors metadata: {e}"))?;
+        SafeTensors::read_metadata(data).map_err(|e| format!("safetensors metadata: {e}"))?;
     let config_json = meta
         .metadata()
         .as_ref()
         .and_then(|m| m.get("config"))
         .ok_or("missing 'config' metadata")?;
 
-    let st = SafeTensors::deserialize(&data).map_err(|e| format!("safetensors parse: {e}"))?;
+    let st = SafeTensors::deserialize(data).map_err(|e| format!("safetensors parse: {e}"))?;
 
     // Minimal JSON parsing (no serde_json dependency)
     let parse_field = |json: &str, key: &str| -> Result<usize, String> {
