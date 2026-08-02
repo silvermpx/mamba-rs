@@ -361,16 +361,20 @@ fn prefill_body<W: MambaWeightsView>(
         let ssm_ptr = state.ssm.cached_ptr() + (layer_idx * ssm_per_layer) as u64 * f32_sz;
         let a_neg_ptr = a_neg_all.cached_ptr() + (layer_idx * di * ds) as u64 * f32_sz;
 
-        // F1: RmsNorm [B*T] ← save residual first
-        scratch.residual.copy_from(&scratch.out_flat, &ctx.stream)?;
+        // F1: RmsNorm [B*T]. Ping-pong (perf audit W5): the activations
+        // STAY in out_flat; the normed values land in `residual` (which is
+        // dead until F5 reuses it as the block output). The old
+        // copy-then-overwrite spent a full [B*T*dm] D2D per layer
+        // (25 x 7.1 MB per page at the serve shape) moving the same bytes.
+        // Values are untouched — same kernel, same inputs, other buffer.
         {
             let bt_i = bt as i32;
             let dm_i = dm as i32;
             let eps: f32 = dims.rms_norm_eps;
             let mut builder = ctx.stream.launch_builder(&ctx.kernels.rmsnorm_fwd);
-            builder.arg(scratch.out_flat.inner_mut());
+            builder.arg(scratch.residual.inner_mut());
             builder.arg(scratch.rms_discard.inner_mut());
-            builder.arg(scratch.residual.inner());
+            builder.arg(scratch.out_flat.inner());
             let nw = lw.norm_weight();
             builder.arg(&nw);
             builder.arg(&bt_i);
@@ -380,12 +384,14 @@ fn prefill_body<W: MambaWeightsView>(
                 .map_err(|e| format!("rmsnorm prefill L{layer_idx}: {e:?}"))?;
         }
 
-        // F2: in_proj GEMM [B*T, dm] → [B*T, 2*di] (dtype-dispatched)
+        // F2: in_proj GEMM [B*T, dm] → [B*T, 2*di] (dtype-dispatched).
+        // Reads the NORMED values from `residual` (ping-pong); after this
+        // call the buffer is dead until F5 reuses it as the block output.
         let (ipw, ipw_dt) = lw.in_proj_w();
         gpu_gemm_forward_dispatch(
             ctx,
             &mut scratch.proj_flat,
-            &scratch.out_flat,
+            &scratch.residual,
             ipw,
             ipw_dt,
             None,
@@ -556,11 +562,12 @@ fn prefill_body<W: MambaWeightsView>(
                 .map_err(|e| format!("gating prefill L{layer_idx}: {e:?}"))?;
         }
 
-        // F5: out_proj GEMM [B*T, di] → [B*T, dm]
+        // F5: out_proj GEMM [B*T, di] → [B*T, dm] — the block output lands
+        // in `residual` (dead since F2 consumed the normed values).
         let (opw, opw_dt) = lw.out_proj_w();
         gpu_gemm_forward_dispatch(
             ctx,
-            &mut scratch.out_flat,
+            &mut scratch.residual,
             &scratch.gated,
             opw,
             opw_dt,
@@ -568,7 +575,11 @@ fn prefill_body<W: MambaWeightsView>(
             (bt, di, dm),
         )?;
 
-        // F6: residual add (in-place on out_flat)
+        // F6: residual add — the running activations (out_flat) absorb the
+        // block output. The roles are swapped versus the old
+        // copy-then-overwrite layout, but IEEE f32 addition of the same two
+        // values is commutative: a + b and b + a round identically, so the
+        // sum is bit-equal to the old route.
         {
             let n = (bt * dm) as i32;
             let mut builder = ctx.stream.launch_builder(&ctx.kernels.vec_add_inplace);
