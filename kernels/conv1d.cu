@@ -207,11 +207,11 @@ extern "C" __global__ void conv1d_burnin_forward(
 // Identical to conv1d_burnin_forward but skips conv_states_out and post_conv_out writes.
 // Saves ~50% memory bandwidth for target path.
 extern "C" __global__ void conv1d_burnin_forward_nosave(
-    float* u_out,          // [batch * T * d_inner] post-SiLU output
-    float* state,          // [batch * d_inner * d_conv] persistent state (mutated)
-    const float* x_branch, // [batch * T * d_inner] input from in_proj split
-    const float* weight,   // [d_inner * d_conv]
-    const float* bias,     // [d_inner]
+    float* __restrict__ u_out,          // [batch * T * d_inner] post-SiLU output
+    float* __restrict__ state,          // [batch * d_inner * d_conv] persistent state (mutated)
+    const float* __restrict__ x_branch, // [batch * T * d_inner] input from in_proj split
+    const float* __restrict__ weight,   // [d_inner * d_conv]
+    const float* __restrict__ bias,     // [d_inner]
     int batch, int T, int d_inner, int d_conv
 ) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -221,6 +221,43 @@ extern "C" __global__ void conv1d_burnin_forward_nosave(
     int b = idx / d_inner;
     int d = idx % d_inner;
     int state_base = (b * d_inner + d) * d_conv;
+
+    // Serve-shape fast path (d_conv == 4, the production value): the shift
+    // register and the taps live in REGISTERS across the whole T loop, and
+    // global memory sees one x_branch read + one u_out write per t plus a
+    // single state writeback at the end. Value contract: the accumulation
+    // below is the k-ascending chain of the generic loop, term for term —
+    // an f32 kept in a register holds the exact bits a global round-trip
+    // would have returned, so the emitted FMA chain is unchanged.
+    if (d_conv == 4) {
+        float s0 = state[state_base];
+        float s1 = state[state_base + 1];
+        float s2 = state[state_base + 2];
+        float s3 = state[state_base + 3];
+        const float w0 = weight[d * 4];
+        const float w1 = weight[d * 4 + 1];
+        const float w2 = weight[d * 4 + 2];
+        const float w3 = weight[d * 4 + 3];
+        const float bd = bias[d];
+        for (int t = 0; t < T; t++) {
+            int bt_di = (b * T + t) * d_inner + d;
+            s0 = s1;
+            s1 = s2;
+            s2 = s3;
+            s3 = x_branch[bt_di];
+            float val = bd;
+            val += s0 * w0;
+            val += s1 * w1;
+            val += s2 * w2;
+            val += s3 * w3;
+            u_out[bt_di] = val / (1.0f + exp2f(-val * 1.4426950408889634f));
+        }
+        state[state_base] = s0;
+        state[state_base + 1] = s1;
+        state[state_base + 2] = s2;
+        state[state_base + 3] = s3;
+        return;
+    }
 
     for (int t = 0; t < T; t++) {
         int bt_di = (b * T + t) * d_inner + d;
