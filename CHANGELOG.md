@@ -1,5 +1,41 @@
 # Changelog
 
+## 0.5.3 (unreleased)
+
+Serving-performance release. No change to any number the 0.5.2 paths
+produce; the new entries reproduce existing routes bit-for-bit (pinned
+by tests).
+
+### Added
+
+- `gpu_forward_inference_prefill_pooled_sum_from_raw` — the raw-input
+  prefill emitting the on-device column sum of the post-`norm_f`
+  temporal. Mean-pool consumers download `d_model` floats and divide by
+  T on the host instead of downloading the full `[T * d_model]`
+  temporal (7.1 MB -> 1.5 KB at a 23M-classifier shape). Bit-identical
+  to the host column sum by reduction-order construction (oracle in
+  tests/gpu_pooled_prefill.rs).
+- Disk cache for the NVRTC-emitted PTX, keyed by source blob + arch +
+  compile options + NVRTC version (`MAMBA_RS_KERNEL_CACHE` overrides the
+  location; `0`/`off` disables). A hit skips the NVRTC half of the boot
+  tax; the emitted PTX is byte-identical by construction. Hit-path
+  failures invalidate the entry and recompile; failures are never
+  cached.
+- `PinnedHostBuf` — cacheable page-locked host staging (cuMemHostAlloc
+  flags=0; never the write-combined `alloc_pinned`, which regresses
+  host-read consumers). Exposes plain slices for the existing
+  upload/download paths, so the driver takes the true-DMA route with
+  the same calls and the same bytes.
+- `serialize::load_from_bytes` — for consumers that hash-verify the
+  artifact and should not read the file twice.
+
+### Changed
+
+- The sgemm_bi split-K/split-M and transpose scratches (32 + 16 MB)
+  allocate lazily on first batch-invariant use — inference-only
+  consumers no longer hold 48 MB of dead VRAM.
+
+
 ## 0.5.2
 
 Correctness and hardening release. No change to any number the 0.5.1
