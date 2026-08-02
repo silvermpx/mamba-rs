@@ -340,7 +340,7 @@ pub fn sgemm_bi_forward(
             };
             let partial_ptr = {
                 use cudarc::driver::DevicePtr;
-                let (ptr, _r) = kernels.splitk_scratch.device_ptr(stream);
+                let (ptr, _r) = kernels.splitk_scratch_buf(stream)?.device_ptr(stream);
                 ptr
             };
             // Main Split-K partial on A columns [0..k_main), B rows [0..k_main).
@@ -424,7 +424,7 @@ pub fn sgemm_bi_forward(
         let partial_ptr = {
             // Raw device pointer to pre-allocated scratch (1 MB, shared across calls).
             use cudarc::driver::DevicePtr;
-            let (ptr, _r) = kernels.splitk_scratch.device_ptr(stream);
+            let (ptr, _r) = kernels.splitk_scratch_buf(stream)?.device_ptr(stream);
             ptr
         };
         let lda_i = n_in as i32; // A row stride = full K (no tail in this branch)
@@ -536,7 +536,7 @@ pub fn sgemm_bi_forward(
 
                 let partial_ptr = {
                     use cudarc::driver::DevicePtr;
-                    let (ptr, _r) = kernels.splitk_scratch.device_ptr(stream);
+                    let (ptr, _r) = kernels.splitk_scratch_buf(stream)?.device_ptr(stream);
                     ptr
                 };
 
@@ -807,7 +807,7 @@ pub fn sgemm_bi_backward_dw(
 
         let partial_ptr = {
             use cudarc::driver::DevicePtr;
-            let (ptr, _r) = kernels.splitk_scratch.device_ptr(stream);
+            let (ptr, _r) = kernels.splitk_scratch_buf(stream)?.device_ptr(stream);
             ptr
         };
 
@@ -1074,7 +1074,7 @@ pub fn sgemm_bi_backward_dx(
             };
             let w_t_ptr = {
                 use cudarc::driver::DevicePtr;
-                let (ptr, _r) = kernels.transpose_scratch.device_ptr(stream);
+                let (ptr, _r) = kernels.transpose_scratch_buf(stream)?.device_ptr(stream);
                 ptr
             };
             let mut tb = stream.launch_builder(&kernels.sgemm_transpose_f32_2d);
@@ -1099,7 +1099,7 @@ pub fn sgemm_bi_backward_dx(
             };
             let partial_ptr = {
                 use cudarc::driver::DevicePtr;
-                let (ptr, _r) = kernels.splitk_scratch.device_ptr(stream);
+                let (ptr, _r) = kernels.splitk_scratch_buf(stream)?.device_ptr(stream);
                 ptr
             };
             let mut pb = stream.launch_builder(&kernels.sgemm_nn_splitk32_partial);
@@ -1231,7 +1231,7 @@ pub fn sgemm_bi_backward_dx(
         };
         let w_t_ptr = {
             use cudarc::driver::DevicePtr;
-            let (ptr, _r) = kernels.transpose_scratch.device_ptr(stream);
+            let (ptr, _r) = kernels.transpose_scratch_buf(stream)?.device_ptr(stream);
             ptr
         };
         let mut tb = stream.launch_builder(&kernels.sgemm_transpose_f32_2d);
@@ -1258,7 +1258,7 @@ pub fn sgemm_bi_backward_dx(
         };
         let partial_ptr = {
             use cudarc::driver::DevicePtr;
-            let (ptr, _r) = kernels.splitk_scratch.device_ptr(stream);
+            let (ptr, _r) = kernels.splitk_scratch_buf(stream)?.device_ptr(stream);
             ptr
         };
         let lda_i = n_out as i32; // dY row stride = N_full (NOT n_main)
@@ -1363,7 +1363,7 @@ pub fn sgemm_bi_backward_dx(
                 };
                 let w_t_ptr = {
                     use cudarc::driver::DevicePtr;
-                    let (ptr, _r) = kernels.transpose_scratch.device_ptr(stream);
+                    let (ptr, _r) = kernels.transpose_scratch_buf(stream)?.device_ptr(stream);
                     ptr
                 };
                 let mut tb = stream.launch_builder(&kernels.sgemm_transpose_f32_2d);
@@ -1384,7 +1384,7 @@ pub fn sgemm_bi_backward_dx(
 
                 let partial_ptr = {
                     use cudarc::driver::DevicePtr;
-                    let (ptr, _r) = kernels.splitk_scratch.device_ptr(stream);
+                    let (ptr, _r) = kernels.splitk_scratch_buf(stream)?.device_ptr(stream);
                     ptr
                 };
 
