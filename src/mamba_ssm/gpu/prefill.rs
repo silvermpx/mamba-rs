@@ -249,6 +249,82 @@ pub fn gpu_forward_inference_prefill_pooled_sum_from_raw<W: MambaWeightsView>(
     Ok(())
 }
 
+/// A CUDA Graph capture of the ENTIRE per-page pooled-prefill sequence —
+/// state reset + input_proj SGEMM + layer chain + norm_f + pooled column
+/// sum (~hundreds of launches at real depths collapse into one replay).
+///
+/// Contract:
+/// - Buffers are FIXED at capture: replays read the SAME `input_flat`
+///   buffer (upload the next page into it first) and write the SAME
+///   `pooled_sum` buffer (download after). The state buffer is reset
+///   INSIDE the graph, so every replay starts a fresh page.
+/// - Bit-identity: a replay re-issues the exact captured kernel sequence
+///   with the exact pointers — outputs are bit-identical to the eager
+///   entry by construction (pinned by tests/gpu_pooled_prefill.rs).
+/// - G1 belt: the GEMM-tier flags are snapshotted at capture and asserted
+///   at every launch — a mid-flight tier flip cannot silently replay
+///   kernels from another numeric route.
+pub struct PrefillPooledGraph {
+    graph: cudarc::driver::CudaGraph,
+    flags_at_capture: (bool, bool, bool),
+}
+
+impl PrefillPooledGraph {
+    /// Capture the pooled prefill over the given fixed buffers.
+    pub fn capture<W: MambaWeightsView>(
+        ctx: &GpuCtx,
+        pooled_sum: &mut GpuBuffer,
+        inputs: PrefillRawInputs<'_, W>,
+        state: &mut GpuInferenceState,
+        scratch: &mut GpuMambaTargetScratch,
+    ) -> Result<Self, String> {
+        let flags_at_capture = ctx.gemm_flags();
+        let PrefillRawInputs {
+            input_flat,
+            weights,
+            a_neg_all,
+        } = inputs;
+        let graph = super::graph_capture::capture_into_graph(&ctx.stream, || {
+            state.reset(&ctx.stream)?;
+            gpu_forward_inference_prefill_pooled_sum_from_raw(
+                ctx,
+                pooled_sum,
+                PrefillRawInputs {
+                    input_flat,
+                    weights,
+                    a_neg_all,
+                },
+                state,
+                scratch,
+            )
+        })?;
+        ctx.note_graph_capture();
+        Ok(Self {
+            graph,
+            flags_at_capture,
+        })
+    }
+
+    /// Replay the captured page. The caller uploads the page into the
+    /// capture-time `input_flat` buffer before, and downloads the
+    /// capture-time `pooled_sum` buffer after (both transfers stay OUTSIDE
+    /// the graph).
+    pub fn launch(&self, ctx: &GpuCtx) -> Result<(), String> {
+        let now = ctx.gemm_flags();
+        if now != self.flags_at_capture {
+            return Err(format!(
+                "PrefillPooledGraph: GEMM flags changed since capture \
+                 ({:?} -> {now:?}) — the captured kernels belong to the old \
+                 tier (G1)",
+                self.flags_at_capture
+            ));
+        }
+        self.graph
+            .launch()
+            .map_err(|e| format!("PrefillPooledGraph launch: {e:?}"))
+    }
+}
+
 /// The shared prefill kernel chain: layer loop + final norm_f. Assumes
 /// `scratch.out_flat` is seeded with the projected input for all T; leaves
 /// the post-norm_f temporal for all T in `scratch.out_flat`.

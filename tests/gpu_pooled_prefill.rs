@@ -181,3 +181,55 @@ fn pinned_staging_is_byte_transparent() {
         assert_eq!(host[i].to_bits(), back_pageable[i].to_bits());
     }
 }
+
+/// The captured graph replays the exact kernel sequence: replay output ==
+/// eager output bitwise, and 100 replays of the same page are all stable.
+#[test]
+fn pooled_graph_replays_bitwise() {
+    use mamba_rs::mamba_ssm::gpu::prefill::PrefillPooledGraph;
+    let t = 333usize;
+    let mut r = rig(t);
+    let dm = r.dims.d_model;
+    // Eager reference.
+    let mut pooled = GpuBuffer::zeros(&r.ctx.stream, dm).unwrap();
+    r.state.reset(&r.ctx.stream).unwrap();
+    gpu_forward_inference_prefill_pooled_sum_from_raw(
+        &r.ctx,
+        &mut pooled,
+        PrefillRawInputs {
+            input_flat: &r.input,
+            weights: &r.weights,
+            a_neg_all: &r.a_neg,
+        },
+        &mut r.state,
+        &mut r.scratch,
+    )
+    .expect("eager pooled");
+    let mut eager = vec![0.0f32; dm];
+    pooled.download(&r.ctx.stream, &mut eager).unwrap();
+    // Capture (runs the body once as part of capture) then replay 100x.
+    let graph = PrefillPooledGraph::capture(
+        &r.ctx,
+        &mut pooled,
+        PrefillRawInputs {
+            input_flat: &r.input,
+            weights: &r.weights,
+            a_neg_all: &r.a_neg,
+        },
+        &mut r.state,
+        &mut r.scratch,
+    )
+    .expect("capture");
+    for rep in 0..100 {
+        graph.launch(&r.ctx).expect("replay");
+        let mut got = vec![0.0f32; dm];
+        pooled.download(&r.ctx.stream, &mut got).unwrap();
+        for (j, (a, b)) in eager.iter().zip(&got).enumerate() {
+            assert_eq!(
+                a.to_bits(),
+                b.to_bits(),
+                "replay {rep} dim {j}: eager {a} vs graph {b}"
+            );
+        }
+    }
+}
