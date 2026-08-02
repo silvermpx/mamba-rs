@@ -343,9 +343,15 @@ pub struct MambaKernels {
     pub sgemm_dx_col_gemv: CudaFunction,
     /// Split-K/Split-M partial scratch for the sgemm_bi dispatcher:
     /// 8M f32 = 32 MB. The dispatcher asserts chunk*M*N fits before launch.
-    pub splitk_scratch: cudarc::driver::CudaSlice<f32>,
+    /// LAZY (perf audit I.3): only the batch-invariant tier reads it, and
+    /// inference-only consumers never enable that tier — the eager alloc
+    /// held 32 MB of dead VRAM on every serve boot. Access via
+    /// [`MambaKernels::splitk_scratch_buf`].
+    pub splitk_scratch: std::sync::OnceLock<cudarc::driver::CudaSlice<f32>>,
     /// W-transpose staging for the bwd_dx wide path: 4M f32 = 16 MB.
-    pub transpose_scratch: cudarc::driver::CudaSlice<f32>,
+    /// Lazy for the same reason; access via
+    /// [`MambaKernels::transpose_scratch_buf`].
+    pub transpose_scratch: std::sync::OnceLock<cudarc::driver::CudaSlice<f32>>,
 
     // -- sgemm_bi typed (bf16/f16) variants — Phase 11 stage 2 buckets.
     // X/W/Y/dY/dX typed, dW + bias f32, f32 accumulation throughout; each
@@ -379,8 +385,69 @@ pub struct MambaKernels {
     pub sgemm_nt_big_typed: HalfKernel,
 }
 
+/// NVRTC library version, part of the kernel-cache key (a toolkit upgrade
+/// must invalidate cached PTX). (0, 0) when the query itself fails — the
+/// cache then still keys on source + arch + options.
+fn nvrtc_version() -> (i32, i32) {
+    let mut major: core::ffi::c_int = 0;
+    let mut minor: core::ffi::c_int = 0;
+    let rc = unsafe { cudarc::nvrtc::sys::nvrtcVersion(&mut major, &mut minor) };
+    if rc == cudarc::nvrtc::sys::nvrtcResult::NVRTC_SUCCESS {
+        (major, minor)
+    } else {
+        (0, 0)
+    }
+}
+
+/// Kernel-cache directory. `MAMBA_RS_KERNEL_CACHE` overrides (a path, or
+/// `0`/`off` to disable); default is `$HOME/.cache/mamba-rs/kernels`,
+/// falling back to the system temp dir when HOME is absent (systemd units
+/// without a HOME — exactly the environment that motivated the cache).
+fn kernel_cache_dir() -> Option<std::path::PathBuf> {
+    match std::env::var("MAMBA_RS_KERNEL_CACHE") {
+        Ok(v) if matches!(v.trim(), "0" | "off" | "OFF") => None,
+        Ok(v) if !v.trim().is_empty() => Some(std::path::PathBuf::from(v.trim())),
+        _ => {
+            let base = std::env::var("XDG_CACHE_HOME")
+                .map(std::path::PathBuf::from)
+                .or_else(|_| {
+                    std::env::var("HOME").map(|h| std::path::PathBuf::from(h).join(".cache"))
+                })
+                .unwrap_or_else(|_| std::env::temp_dir());
+            Some(base.join("mamba-rs").join("kernels"))
+        }
+    }
+}
+
+/// 128-bit content key as hex: two FNV-1a-64 passes with distinct offset
+/// bases over the same bytes. Not cryptographic — the cache is a local,
+/// non-adversarial directory and a wrong hit requires colliding BOTH
+/// lanes; a corrupt entry fails loudly at module load and is deleted.
+fn cache_key(material: &str) -> String {
+    let fnv = |seed: u64| -> u64 {
+        let mut h = seed;
+        for b in material.as_bytes() {
+            h ^= u64::from(*b);
+            h = h.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        h
+    };
+    format!(
+        "{:016x}{:016x}",
+        fnv(0xcbf2_9ce4_8422_2325),
+        fnv(0x6c62_272e_07bb_0142)
+    )
+}
+
 impl MambaKernels {
-    /// Compile all CUDA kernels from source. Takes ~100-200ms.
+    /// Compile all CUDA kernels from source (NVRTC), with a disk cache for
+    /// the emitted PTX (perf audit C1 Tier A): a cache hit skips the NVRTC
+    /// half of the boot tax entirely; the PTX->SASS half is the driver
+    /// JIT's own cache (CUDA_CACHE_PATH). Key = source blob + arch +
+    /// options + NVRTC version; identical PTX by construction, so a hit
+    /// cannot change a single emitted instruction. Any hit-path failure
+    /// deletes the entry and falls through to a real compile; a failed
+    /// compile is never cached.
     pub fn compile(ctx: &Arc<CudaContext>, arch: &'static str) -> Result<Self, String> {
         // Prelude is inlined first so templated kernels can use to_f / from_f_*
         // helpers without needing NVRTC to resolve #include "_typed_prelude.cuh"
@@ -423,23 +490,59 @@ impl MambaKernels {
             "sm_80" | "sm_86" | "sm_87" => 8,
             _ => 16,
         };
+        let option_strings = vec![
+            "--fmad=true".to_string(),
+            "--extra-device-vectorization".to_string(),
+            format!("-DSGB_GROUP_M={group_m}"),
+        ];
         let opts = cudarc::nvrtc::CompileOptions {
             arch: Some(arch),
-            options: vec![
-                "--fmad=true".to_string(),
-                "--extra-device-vectorization".to_string(),
-                format!("-DSGB_GROUP_M={group_m}"),
-            ],
+            options: option_strings.clone(),
             include_paths: cuda_include_paths(),
             ..Default::default()
         };
 
-        let ptx = cudarc::nvrtc::compile_ptx_with_opts(combined, opts)
-            .map_err(|e| format!("NVRTC compile failed: {e:?}"))?;
+        let (nv_major, nv_minor) = nvrtc_version();
+        let key = cache_key(&format!(
+            "{combined}\u{1f}{arch}\u{1f}{option_strings:?}\u{1f}nvrtc{nv_major}.{nv_minor}"
+        ));
+        let cache_path = kernel_cache_dir().map(|d| d.join(format!("mamba-kernels-{key}.ptx")));
 
-        let module = ctx
-            .load_module(ptx)
-            .map_err(|e| format!("Module load failed: {e:?}"))?;
+        // Cache hit: load the stored PTX. A module that fails to load from
+        // a cached entry (torn write, disk rot) invalidates it and falls
+        // through to the real compile.
+        let mut module = None;
+        if let Some(path) = &cache_path
+            && let Ok(src) = std::fs::read_to_string(path)
+        {
+            match ctx.load_module(cudarc::nvrtc::Ptx::from_src(src)) {
+                Ok(m) => module = Some(m),
+                Err(_) => {
+                    let _ = std::fs::remove_file(path);
+                }
+            }
+        }
+        let module = match module {
+            Some(m) => m,
+            None => {
+                let ptx = cudarc::nvrtc::compile_ptx_with_opts(combined, opts)
+                    .map_err(|e| format!("NVRTC compile failed: {e:?}"))?;
+                if let Some(path) = &cache_path
+                    && let Some(dir) = path.parent()
+                    && std::fs::create_dir_all(dir).is_ok()
+                {
+                    // Atomic publish: write-then-rename so a concurrent boot
+                    // never reads a torn entry. Failures are non-fatal — the
+                    // cache is an accelerator, never a correctness gate.
+                    let tmp = path.with_extension(format!("tmp-{}", std::process::id()));
+                    if std::fs::write(&tmp, ptx.to_src()).is_ok() {
+                        let _ = std::fs::rename(&tmp, path);
+                    }
+                }
+                ctx.load_module(ptx)
+                    .map_err(|e| format!("Module load failed: {e:?}"))?
+            }
+        };
 
         let get = |name: &str| -> Result<CudaFunction, String> {
             module
@@ -683,14 +786,8 @@ impl MambaKernels {
             sgemm_nn_splitk_slim_partial: get("sgemm_bi_nn_splitk_slim_partial")?,
             sgemm_transpose_f32_2d: get("sgemm_transpose_f32_2d")?,
             sgemm_dx_col_gemv: get("sgemm_bi_dx_col_gemv")?,
-            splitk_scratch: ctx
-                .default_stream()
-                .alloc_zeros::<f32>(1 << 23)
-                .map_err(|e| format!("splitk_scratch alloc: {e:?}"))?,
-            transpose_scratch: ctx
-                .default_stream()
-                .alloc_zeros::<f32>(1 << 22)
-                .map_err(|e| format!("transpose_scratch alloc: {e:?}"))?,
+            splitk_scratch: std::sync::OnceLock::new(),
+            transpose_scratch: std::sync::OnceLock::new(),
             sgemm_nn_gemv_typed: load_half("sgemm_bi_nn_gemv")?,
             sgemm_tn_gemv_typed: load_half("sgemm_bi_tn_gemv")?,
             sgemm_nt_gemv_typed: load_half("sgemm_bi_nt_gemv")?,
@@ -711,6 +808,43 @@ impl MambaKernels {
 
             _module: module,
         })
+    }
+
+    /// The Split-K/Split-M partial scratch (8M f32 = 32 MB), allocated on
+    /// first batch-invariant use. Zero-initialized like the old eager
+    /// alloc; the partial kernels overwrite their region before the
+    /// reduce reads it, so first-use contents were never load-bearing.
+    pub fn splitk_scratch_buf(
+        &self,
+        stream: &Arc<cudarc::driver::CudaStream>,
+    ) -> Result<&cudarc::driver::CudaSlice<f32>, String> {
+        if self.splitk_scratch.get().is_none() {
+            let buf = stream
+                .alloc_zeros::<f32>(1 << 23)
+                .map_err(|e| format!("splitk_scratch alloc: {e:?}"))?;
+            // A concurrent racer's set loses and drops its buffer — safe.
+            let _ = self.splitk_scratch.set(buf);
+        }
+        self.splitk_scratch
+            .get()
+            .ok_or_else(|| "splitk_scratch cell empty after init".to_string())
+    }
+
+    /// The W-transpose staging scratch (4M f32 = 16 MB), allocated on
+    /// first batch-invariant bwd_dx wide-path use.
+    pub fn transpose_scratch_buf(
+        &self,
+        stream: &Arc<cudarc::driver::CudaStream>,
+    ) -> Result<&cudarc::driver::CudaSlice<f32>, String> {
+        if self.transpose_scratch.get().is_none() {
+            let buf = stream
+                .alloc_zeros::<f32>(1 << 22)
+                .map_err(|e| format!("transpose_scratch alloc: {e:?}"))?;
+            let _ = self.transpose_scratch.set(buf);
+        }
+        self.transpose_scratch
+            .get()
+            .ok_or_else(|| "transpose_scratch cell empty after init".to_string())
     }
 }
 
