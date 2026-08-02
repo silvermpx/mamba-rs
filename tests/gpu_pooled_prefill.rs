@@ -53,7 +53,7 @@ fn rig(seq_len: usize) -> Rig {
         rms_norm_eps: 1e-5,
     };
     let mid = 96usize;
-    let mut w = MambaWeights::init_with_input(&cfg, mid, 0xBEEF);
+    let mut w = MambaWeights::init(&cfg, mid, 0xBEEF);
     for lw in w.layers.iter_mut() {
         lw.a_neg = lw.a_log.iter().map(|&v| -v.exp()).collect();
     }
