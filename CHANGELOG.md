@@ -29,8 +29,25 @@ by tests).
 - `serialize::load_from_bytes` — for consumers that hash-verify the
   artifact and should not read the file twice.
 
+### Added (serving kernels)
+
+- `PrefillPooledGraph` — the whole per-page pooled prefill (state reset +
+  projection + layer chain + norm_f + column sum) captured as one CUDA
+  Graph over fixed buffers; a replay re-issues the exact captured
+  kernels, bit-identical to the eager entry (100x-replay oracle). GEMM
+  flags are snapshotted at capture and asserted at launch.
+
 ### Changed
 
+- conv1d nosave burnin: `__restrict__` everywhere plus a d_conv==4
+  register-window fast path — the shift register, taps and bias live in
+  registers across the T loop instead of round-tripping global memory
+  per timestep. Same FMA chain term for term; bitwise
+  prefill-vs-training parity holds.
+- Prefill residual handling ping-pongs buffers instead of copying the
+  full activations every layer (was ~25 D2D copies of [T * d_model] per
+  page). The one value-affecting change is the operand order of a
+  commutative f32 addition — bit-equal, pinned by the parity suite.
 - The sgemm_bi split-K/split-M and transpose scratches (32 + 16 MB)
   allocate lazily on first batch-invariant use — inference-only
   consumers no longer hold 48 MB of dead VRAM.
