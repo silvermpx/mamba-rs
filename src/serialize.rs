@@ -112,6 +112,12 @@ pub fn save(
 /// Returns `(weights, config, input_dim)`.
 pub fn load(path: &Path) -> Result<(MambaWeights, MambaConfig, usize), String> {
     let data = std::fs::read(path).map_err(|e| format!("read {}: {e}", path.display()))?;
+    load_from_bytes(&data)
+}
+
+/// Load weights from already-read `.safetensors` bytes — for consumers
+/// that hash/verify the file first and should not read it twice.
+pub fn load_from_bytes(data: &[u8]) -> Result<(MambaWeights, MambaConfig, usize), String> {
     // Read metadata first to get config
     let (_, meta) =
         SafeTensors::read_metadata(&data).map_err(|e| format!("safetensors metadata: {e}"))?;
