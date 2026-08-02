@@ -100,24 +100,6 @@ coverage.
 - `prefill_bench_classifier_shape` ran T=4617 (the bare patch grid); the
   production patchify appends 4 register tokens -- T=4621.
 
-### Named and deferred (post-0.5.1 tickets, each with a trigger)
-
-- int64 kernel offset arithmetic (upstream #880 class) -- index products
-  overflow i32 only beyond `batch*T*d_inner*d_state > 2^31`; trigger:
-  LLM-scale training shapes.
-- Device-side LR (capturable `set_lr` without graph re-capture);
-  captured-split package; device temporal handles / pooled readback --
-  trigger: profiling shows host readback dominating a real training loop.
-- GpuAdamW state export (warm optimizer resume) -- trigger: long
-  multi-session runs measurably suffering from cold Adam restarts.
-- serialize metadata for `rms_norm_eps` / `scan_mode` (additive) --
-  trigger: first non-default-eps deployment.
-- Selective-scan recomputation in backward (~4x activation memory cut) --
-  trigger: T >= 8k training or a hard single-pass B >= 4 need.
-- dX plumb-through below input_proj -- trigger: conv stem / learnable
-  pos-embed; per-block FFN channel mixer -- trigger: accuracy-lever
-  escalation on a real consumer.
-
 ## 0.5.0
 
 Feature release: the bring-your-own-loss training split, full-sequence
@@ -230,25 +212,6 @@ probes in `tests/matvec_probe.rs`.
   finite-difference checks as the analytic reference.
 - docs.rs metadata: renders the CPU API surface (`hf`, `gemm-blas`,
   `cli`); GPU doc-badge plumbing is a planned follow-up.
-
-### Named and deferred (post-0.5.0 tickets, each with a trigger)
-
-- int64 kernel offset arithmetic (upstream #880 class) -- index products
-  overflow i32 only beyond batch*T*d_inner*d_state > 2^31; trigger:
-  LLM-scale training shapes.
-- Device-side LR (capturable `set_lr` without graph re-capture);
-  captured-split package; device temporal handles / pooled readback --
-  trigger: profiling shows host readback dominating a real training loop.
-- GpuAdamW state export (warm optimizer resume) -- trigger: long
-  multi-session runs measurably suffering from cold Adam restarts.
-- `serialize` metadata for `rms_norm_eps` / `scan_mode` (additive) --
-  trigger: first non-default-eps deployment.
-- Selective-scan recomputation in backward (~4x activation memory cut) --
-  trigger: T >= 8k training or a hard single-pass B >= 4 need.
-- dX plumb-through below input_proj -- trigger: conv stem / learnable
-  pos-embed; per-block FFN channel mixer -- trigger: accuracy-lever
-  escalation on a real consumer.
-
 
 ## 0.4.2
 
