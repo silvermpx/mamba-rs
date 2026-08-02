@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.5.3 (unreleased)
+## 0.5.3
 
 Serving-performance release. No change to any number the 0.5.2 paths
 produce; the new entries reproduce existing routes bit-for-bit (pinned
