@@ -766,3 +766,67 @@ mod tests {
     // Tests require CUDA device — run on GPU server only
     // cargo test --features cuda -- gpu
 }
+
+/// Page-locked (pinned) host staging buffer for the H2D/D2H hot path.
+///
+/// Allocated with `cuMemHostAlloc(flags = 0)` — CACHEABLE pinned memory.
+/// Never use `CudaContext::alloc_pinned` for host-READ buffers: cudarc
+/// 0.19 hardcodes `CU_MEMHOSTALLOC_WRITECOMBINED` there, and reading
+/// write-combined memory from the CPU is a large regression (the
+/// mean-pool / patchify consumers read every float).
+///
+/// Usage contract: expose the buffer as ordinary slices and pass them to
+/// the normal [`GpuBuffer::upload`] / [`GpuBuffer::download`] — the CUDA
+/// driver detects the page-locked pointer and takes the true-DMA path
+/// (no pageable staging copy), while the safe wrapper's stream sync keeps
+/// the read-after-download contract exactly as before. Same calls, same
+/// bytes — the pin changes WHERE the copy engine reads, never a value.
+pub struct PinnedHostBuf {
+    ptr: *mut f32,
+    len: usize,
+}
+
+// SAFETY: the allocation is plain process memory (page-locked, cacheable);
+// the raw pointer is owned uniquely by this struct and freed exactly once.
+unsafe impl Send for PinnedHostBuf {}
+unsafe impl Sync for PinnedHostBuf {}
+
+impl PinnedHostBuf {
+    /// Allocate `len` f32s of zero-initialized pinned host memory.
+    pub fn zeroed(len: usize) -> Result<Self, String> {
+        let bytes = len
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| format!("PinnedHostBuf: {len} floats overflows"))?;
+        let ptr = unsafe { cudarc::driver::result::malloc_host(bytes, 0) }
+            .map_err(|e| format!("cuMemHostAlloc({bytes} bytes): {e:?}"))?
+            .cast::<f32>();
+        let buf = Self { ptr, len };
+        // malloc_host memory is uninitialized — zero it once at build.
+        unsafe { std::ptr::write_bytes(buf.ptr, 0, len) };
+        Ok(buf)
+    }
+
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    pub fn as_slice(&self) -> &[f32] {
+        unsafe { std::slice::from_raw_parts(self.ptr, self.len) }
+    }
+
+    pub fn as_mut_slice(&mut self) -> &mut [f32] {
+        unsafe { std::slice::from_raw_parts_mut(self.ptr, self.len) }
+    }
+}
+
+impl Drop for PinnedHostBuf {
+    fn drop(&mut self) {
+        // A failed free leaks the pages but cannot corrupt anything —
+        // ignore (process teardown frees them regardless).
+        let _ = unsafe { cudarc::driver::result::free_host(self.ptr.cast()) };
+    }
+}
