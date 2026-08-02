@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.5.2 (unreleased — release gate: tmp/mamba-rs-0.5.2-release-gate.md in the consumer repo)
+## 0.5.2 (unreleased)
 
 Correctness-and-contract release driven by two audit waves (26 read-only
 lenses over the scan kernels and the GEMM execution paths, cross-checked
