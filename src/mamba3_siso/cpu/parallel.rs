@@ -349,18 +349,10 @@ mod tests {
 
         let mut w = TrainMamba3Weights::zeros(&dims, 16);
         for l in &mut w.layers {
-            for v in &mut l.norm_weight {
-                *v = 1.0;
-            }
-            for v in &mut l.d_param {
-                *v = 1.0;
-            }
-            for v in &mut l.b_norm_weight {
-                *v = 1.0;
-            }
-            for v in &mut l.c_norm_weight {
-                *v = 1.0;
-            }
+            l.norm_weight.fill(1.0);
+            l.d_param.fill(1.0);
+            l.b_norm_weight.fill(1.0);
+            l.c_norm_weight.fill(1.0);
         }
 
         let nh = dims.nheads;

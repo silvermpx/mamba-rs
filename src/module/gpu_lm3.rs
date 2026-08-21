@@ -402,9 +402,7 @@ impl GpuMamba3LM {
             }
             for i in 0..b {
                 if finished[i] {
-                    for v in &mut self.input_cpu[i * d..(i + 1) * d] {
-                        *v = 0.0;
-                    }
+                    self.input_cpu[i * d..(i + 1) * d].fill(0.0);
                 } else {
                     let emb = embed_lookup(&self.embed_cpu, last_token[i], d, vocab_size);
                     self.input_cpu[i * d..(i + 1) * d].copy_from_slice(emb);

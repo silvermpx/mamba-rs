@@ -32,18 +32,10 @@ fn main() {
 
     // Init weights with some nonzero values
     let mut w = TrainMamba3LayerWeights::zeros(&dims);
-    for v in &mut w.norm_weight {
-        *v = 1.0;
-    }
-    for v in &mut w.d_param {
-        *v = 1.0;
-    }
-    for v in &mut w.b_norm_weight {
-        *v = 1.0;
-    }
-    for v in &mut w.c_norm_weight {
-        *v = 1.0;
-    }
+    w.norm_weight.fill(1.0);
+    w.d_param.fill(1.0);
+    w.b_norm_weight.fill(1.0);
+    w.c_norm_weight.fill(1.0);
     for (i, v) in w.in_proj_w.iter_mut().enumerate() {
         *v = ((i % 7) as f32 - 3.0) * 0.01;
     }

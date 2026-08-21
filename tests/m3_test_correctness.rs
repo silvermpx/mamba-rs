@@ -29,18 +29,10 @@ fn test_cfg() -> Mamba3Config {
 
 fn init_layer_w(dims: &Mamba3Dims) -> TrainMamba3LayerWeights {
     let mut w = TrainMamba3LayerWeights::zeros(dims);
-    for v in &mut w.norm_weight {
-        *v = 1.0;
-    }
-    for v in &mut w.d_param {
-        *v = 1.0;
-    }
-    for v in &mut w.b_norm_weight {
-        *v = 1.0;
-    }
-    for v in &mut w.c_norm_weight {
-        *v = 1.0;
-    }
+    w.norm_weight.fill(1.0);
+    w.d_param.fill(1.0);
+    w.b_norm_weight.fill(1.0);
+    w.c_norm_weight.fill(1.0);
     for (i, v) in w.in_proj_w.iter_mut().enumerate() {
         *v = ((i % 7) as f32 - 3.0) * 0.01;
     }
@@ -210,9 +202,7 @@ fn test_m3_finite_diff_norm_gate_weight() {
 
     let mut w = init_layer_w(&dims);
     // Set norm_gate to nonzero for gradient flow
-    for v in &mut w.norm_gate_weight {
-        *v = 1.0;
-    }
+    w.norm_gate_weight.fill(1.0);
     let mut temporal = vec![0.5_f32; dims.seq_len * dims.d_model];
     let acts = run_training_forward(&w, &dims, &mut temporal);
 

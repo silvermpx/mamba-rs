@@ -500,12 +500,8 @@ mod tests {
         let w = TrainMamba3LayerWeights::zeros(&dims);
         // Init some weights so output isn't all zeros
         let mut w = w;
-        for v in &mut w.norm_weight {
-            *v = 1.0;
-        }
-        for v in &mut w.d_param {
-            *v = 1.0;
-        }
+        w.norm_weight.fill(1.0);
+        w.d_param.fill(1.0);
 
         let mut acts = Mamba3LayerFlat::zeros(dims);
         let mut scratch = Mamba3Scratch::zeros(&dims);
