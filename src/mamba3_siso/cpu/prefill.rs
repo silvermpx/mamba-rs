@@ -31,7 +31,7 @@ use crate::mamba3_siso::cpu::forward::{
 use crate::mamba3_siso::state::Mamba3LayerState;
 use crate::mamba3_siso::weights::{Mamba3LayerWeights, Mamba3Weights};
 use crate::ops::blas::{sgemm_forward, sgemm_forward_par};
-use crate::ops::fast_math::{RMS_NORM_EPS, fast_exp_scalar};
+use crate::ops::fast_math::fast_exp_scalar;
 
 /// Stack-array limits (match `forward.rs` / config validation).
 const MAX_DS: usize = 64;
@@ -342,7 +342,7 @@ pub fn forward_mamba3_backbone_prefill_mode(
             (&temporal_out[..t_dm], dm),
             |dst, src| {
                 let sum_sq = simd_sum_sq(src);
-                let inv_rms = 1.0 / (sum_sq / dm as f32 + RMS_NORM_EPS).sqrt();
+                let inv_rms = 1.0 / (sum_sq / dm as f32 + dims.rms_norm_eps).sqrt();
                 simd_rms_scale(dst, src, &lw.norm_weight[..dm], inv_rms);
             },
         );
@@ -372,7 +372,7 @@ pub fn forward_mamba3_backbone_prefill_mode(
                 for g in 0..ng {
                     let raw = &proj_row[b_off + g * ds..b_off + g * ds + ds];
                     let sum_sq = simd_sum_sq(raw);
-                    let inv_rms = 1.0 / (sum_sq / ds as f32 + RMS_NORM_EPS).sqrt();
+                    let inv_rms = 1.0 / (sum_sq / ds as f32 + dims.rms_norm_eps).sqrt();
                     for (i, (d, &r)) in dst[g * ds..g * ds + ds].iter_mut().zip(raw).enumerate() {
                         *d = r * inv_rms * lw.b_norm_weight[i];
                     }
@@ -387,7 +387,7 @@ pub fn forward_mamba3_backbone_prefill_mode(
                 for g in 0..ng {
                     let raw = &proj_row[c_off + g * ds..c_off + g * ds + ds];
                     let sum_sq = simd_sum_sq(raw);
-                    let inv_rms = 1.0 / (sum_sq / ds as f32 + RMS_NORM_EPS).sqrt();
+                    let inv_rms = 1.0 / (sum_sq / ds as f32 + dims.rms_norm_eps).sqrt();
                     for (i, (d, &r)) in dst[g * ds..g * ds + ds].iter_mut().zip(raw).enumerate() {
                         *d = r * inv_rms * lw.c_norm_weight[i];
                     }
@@ -526,7 +526,7 @@ pub fn forward_mamba3_backbone_prefill_mode(
                         let g_end = (g_start + hd).min(di);
                         let g_len = g_end - g_start;
                         let sum_sq = simd_sum_sq(&y_row[g_start..g_end]);
-                        let rstd = 1.0 / (sum_sq / g_len as f32 + RMS_NORM_EPS).sqrt();
+                        let rstd = 1.0 / (sum_sq / g_len as f32 + dims.rms_norm_eps).sqrt();
                         for d in g_start..g_end {
                             let z = z_row[d];
                             let silu = z / (1.0 + fast_exp_scalar(-z));
@@ -567,7 +567,7 @@ pub fn forward_mamba3_backbone_prefill_mode(
     // norm_f at EVERY position, via the public in-place RMSNorm (the anchor
     // test reproduces the exact same call per row).
     for_rows(mode, &mut temporal_out[..t_dm], dm, |row| {
-        crate::ops::norms::rms_norm_inplace(row, &w.norm_f_weight[..dm], RMS_NORM_EPS);
+        crate::ops::norms::rms_norm_inplace(row, &w.norm_f_weight[..dm], dims.rms_norm_eps);
     });
 }
 

@@ -69,8 +69,8 @@ pub struct GpuMamba3Dims {
     pub a_floor: f32,
     pub is_outproj_norm: bool,
     /// RMSNorm/BCNorm epsilon for every norm kernel launch on this backbone
-    /// (G5, 0.6): flows from `Mamba3Config::rms_norm_eps` and rides
-    /// checkpoint metadata — a different eps is a different model.
+    /// — flows from `Mamba3Config::rms_norm_eps` and rides checkpoint
+    /// metadata: a different eps is a different model.
     pub rms_norm_eps: f32,
     /// false = sequential SSM (m3_burnin_fwd/m3_backward_seq), faster at T<=64.
     /// true = parallel chunked scan (10-kernel pipeline), faster at T>64.
@@ -93,12 +93,91 @@ impl GpuMamba3Dims {
     pub fn n_chunks(&self) -> usize {
         self.seq_len.div_ceil(self.chunk_size())
     }
+
+    /// Reject shapes whose LINEAR INDEX RANGES overflow `i32`.
+    ///
+    /// Every CUDA kernel in the Mamba-3 family takes its dims as `int` and
+    /// forms flat indices like `((b*T + t)*nh + h)*ds + n` in 32-bit
+    /// arithmetic — past `i32::MAX` the index wraps and the kernel reads
+    /// and writes the WRONG elements while returning success (the silent
+    /// long-context corruption class known from other CUDA codebases). The
+    /// largest ranges are the activation tapes; guard them all at the host
+    /// so an oversized shape fails loudly at construction, never numerically.
+    pub fn validate_index_budget(&self) -> Result<(), String> {
+        let b = self.batch;
+        let t = self.seq_len;
+        let di = self.d_inner;
+        let ds = self.d_state;
+        let nh = self.nheads;
+        let candidates: [(&str, usize); 6] = [
+            (
+                "sequential tape B*(T+1)*d_inner*d_state",
+                b * (t + 1) * di * ds,
+            ),
+            ("chunk-state tape B*n_chunks*nheads*headdim*d_state", {
+                b * self.n_chunks() * nh * self.headdim * ds
+            }),
+            ("da cumsum B*n_chunks*nheads*chunk_size", {
+                b * self.n_chunks() * nh * CHUNK_SIZE
+            }),
+            ("activation B*T*in_proj_dim", b * t * self.in_proj_dim),
+            ("activation B*T*d_inner", b * t * di),
+            ("bc lanes B*T*nheads*d_state", b * t * nh * ds),
+        ];
+        for (name, len) in candidates {
+            if len > i32::MAX as usize {
+                return Err(format!(
+                    "index budget overflow: {name} = {len} exceeds i32::MAX — the CUDA \
+                     kernels index this range in 32-bit arithmetic and would silently \
+                     corrupt; shrink batch/seq_len or split the run"
+                ));
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Chunk size for the Mamba-3 SISO chunked SSD parallel scan. Single source
 /// of truth — every site that allocates `[B * n_chunks * nh * chunk_size]`
 /// scratch must reference this constant rather than re-spelling `64`.
 pub const CHUNK_SIZE: usize = 64;
+
+#[cfg(test)]
+mod index_budget_tests {
+    use super::GpuMamba3Dims;
+
+    fn dims(batch: usize, seq_len: usize) -> GpuMamba3Dims {
+        GpuMamba3Dims {
+            batch,
+            d_model: 384,
+            d_inner: 768,
+            d_state: 64,
+            nheads: 48,
+            headdim: 16,
+            ngroups: 1,
+            in_proj_dim: 1700,
+            seq_len,
+            mamba_input_dim: 384,
+            n_layers: 24,
+            n_angles: 16,
+            a_floor: 1e-4,
+            is_outproj_norm: false,
+            rms_norm_eps: 1e-5,
+            use_parallel_scan: true,
+        }
+    }
+
+    /// Realistic shapes pass; a sequence long enough to wrap the 32-bit
+    /// index range of the sequential tape is rejected LOUDLY — the kernels
+    /// would otherwise read and write the wrong elements while reporting
+    /// success.
+    #[test]
+    fn index_budget_guards_long_context() {
+        dims(2, 4621).validate_index_budget().unwrap();
+        let err = dims(2, 25_000_000).validate_index_budget().unwrap_err();
+        assert!(err.contains("index budget overflow"), "{err}");
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Saved activations (per layer)

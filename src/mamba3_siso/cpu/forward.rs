@@ -15,7 +15,7 @@ use super::flat::Mamba3LayerFlat;
 use super::scratch::Mamba3Scratch;
 use super::weights::TrainMamba3LayerWeights;
 use crate::ops::blas::sgemm_forward;
-use crate::ops::fast_math::{RMS_NORM_EPS, fast_exp_scalar};
+use crate::ops::fast_math::fast_exp_scalar;
 
 // Stack-array limits (must match config validation)
 const MAX_DS: usize = 64;
@@ -220,7 +220,7 @@ pub fn forward_mamba3_layer_batched(
         acts.data[base_t + o.residual..base_t + o.residual + dm].copy_from_slice(src);
 
         let sum_sq = simd_sum_sq(src);
-        let rms = (sum_sq / dm as f32 + RMS_NORM_EPS).sqrt();
+        let rms = (sum_sq / dm as f32 + dims.rms_norm_eps).sqrt();
         acts.data[base_t + o.rms_val] = rms;
         let inv_rms = 1.0 / rms;
 
@@ -281,7 +281,7 @@ pub fn forward_mamba3_layer_batched(
         for g in 0..ng {
             let gs = g * ds;
             let sum_sq = simd_sum_sq(&acts.data[b_raw_start + gs..b_raw_start + gs + ds]);
-            let rms = (sum_sq / ds as f32 + RMS_NORM_EPS).sqrt();
+            let rms = (sum_sq / ds as f32 + dims.rms_norm_eps).sqrt();
             acts.data[base_t + o.bcnorm_rms_b + g] = rms;
             let inv_rms = 1.0 / rms;
             for i in 0..ds {
@@ -295,7 +295,7 @@ pub fn forward_mamba3_layer_batched(
         for g in 0..ng {
             let gs = g * ds;
             let sum_sq = simd_sum_sq(&acts.data[c_raw_start + gs..c_raw_start + gs + ds]);
-            let rms = (sum_sq / ds as f32 + RMS_NORM_EPS).sqrt();
+            let rms = (sum_sq / ds as f32 + dims.rms_norm_eps).sqrt();
             acts.data[base_t + o.bcnorm_rms_c + g] = rms;
             let inv_rms = 1.0 / rms;
             for i in 0..ds {
@@ -432,7 +432,7 @@ pub fn forward_mamba3_layer_batched(
                 let g_end = (g_start + hd).min(di);
                 let g_len = g_end - g_start;
                 let sum_sq = simd_sum_sq(&acts.data[ys + g_start..ys + g_end]);
-                let rstd = 1.0 / (sum_sq / g_len as f32 + RMS_NORM_EPS).sqrt();
+                let rstd = 1.0 / (sum_sq / g_len as f32 + dims.rms_norm_eps).sqrt();
                 for d in g_start..g_end {
                     let z = acts.data[zs + d];
                     let silu = z / (1.0 + fast_exp_scalar(-z));

@@ -420,6 +420,7 @@ impl Mamba3TrainerMixed {
             is_outproj_norm: cfg.is_outproj_norm,
             use_parallel_scan: cfg.train_use_parallel_scan(),
         };
+        dims.validate_index_budget()?;
 
         let acts =
             GpuMamba3BackboneMixedActs::new(&ctx.stream, &cfg, batch, seq_len, input_dim, dtype)?;
@@ -1200,6 +1201,7 @@ impl Mamba3TrainerF32 {
             is_outproj_norm: cfg.is_outproj_norm,
             use_parallel_scan: cfg.train_use_parallel_scan(),
         };
+        dims.validate_index_budget()?;
 
         let acts = GpuMamba3BackboneActs::new(&ctx.stream, &dims)?;
         let scratch = GpuMamba3Scratch::new(&ctx.stream, &dims)?;

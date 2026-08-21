@@ -9,7 +9,7 @@
 use crate::mamba3_siso::config::Mamba3Config;
 use crate::mamba3_siso::state::Mamba3LayerState;
 use crate::mamba3_siso::weights::{Mamba3LayerWeights, Mamba3Weights};
-use crate::ops::fast_math::{RMS_NORM_EPS, fast_exp_scalar};
+use crate::ops::fast_math::fast_exp_scalar;
 use crate::ops::norms::{bcnorm, rms_norm_weighted, rmsnorm_gated};
 
 /// Pre-allocated scratch buffers for Mamba-3 T=1 step.
@@ -90,7 +90,7 @@ pub fn mamba3_layer_step(
         &mut scratch.norm_buf[..dm],
         &temporal[..dm],
         &lw.norm_weight,
-        RMS_NORM_EPS,
+        cfg.rms_norm_eps,
     );
 
     // 3. in_proj: [d_model] → [in_proj_dim] (BLAS matvec, no bias)
@@ -128,7 +128,7 @@ pub fn mamba3_layer_step(
         &lw.b_norm_weight,
         ng,
         ds,
-        RMS_NORM_EPS,
+        cfg.rms_norm_eps,
         &mut scratch.bc_inv_rms,
     );
     bcnorm(
@@ -137,7 +137,7 @@ pub fn mamba3_layer_step(
         &lw.c_norm_weight,
         ng,
         ds,
-        RMS_NORM_EPS,
+        cfg.rms_norm_eps,
         &mut scratch.bc_inv_rms,
     );
 
@@ -233,7 +233,7 @@ pub fn mamba3_layer_step(
             &scratch.z[..di],
             &lw.norm_gate_weight,
             hd,
-            RMS_NORM_EPS,
+            cfg.rms_norm_eps,
         );
     } else {
         for i in 0..di {
@@ -292,7 +292,7 @@ pub fn mamba3_step(
         &mut scratch.norm_buf[..dm],
         &temporal[..dm],
         &weights.norm_f_weight,
-        RMS_NORM_EPS,
+        cfg.rms_norm_eps,
     );
     temporal[..dm].copy_from_slice(&scratch.norm_buf[..dm]);
 }

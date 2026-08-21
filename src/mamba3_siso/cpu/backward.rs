@@ -16,7 +16,7 @@ use super::forward::simd_sum_sq;
 use super::scratch::Mamba3Scratch;
 use super::weights::TrainMamba3LayerWeights;
 use crate::ops::blas::sgemm_backward;
-use crate::ops::fast_math::{RMS_NORM_EPS, fast_exp_scalar};
+use crate::ops::fast_math::fast_exp_scalar;
 
 const MAX_DS: usize = 64;
 const MAX_ANGLES: usize = MAX_DS / 2;
@@ -83,7 +83,7 @@ pub fn backward_mamba3_layer_batched(
                 let g_end = (g_start + hd).min(di);
                 let g_len = g_end - g_start;
                 let sum_sq = simd_sum_sq(&acts.data[ys + g_start..ys + g_end]);
-                let rstd = 1.0 / (sum_sq / g_len as f32 + RMS_NORM_EPS).sqrt();
+                let rstd = 1.0 / (sum_sq / g_len as f32 + dims.rms_norm_eps).sqrt();
 
                 for d in g_start..g_end {
                     let z = acts.data[zs + d];
