@@ -287,3 +287,117 @@ fn gpu_prefill_split_window_reproduces_full_window() {
         assert_close(&format!("split={split} angle"), &s_angle, &f_angle, 1e-4);
     }
 }
+
+/// Prefill-then-decode handoff through the ENGINE entries: prefill the
+/// prompt in one pass, then step one more token — the step must continue
+/// from the prefilled state exactly like the CPU oracle that stepped the
+/// same sequence.
+#[test]
+fn gpu_prefill_then_decode_handoff() {
+    use mamba_rs::mamba3_siso::Mamba3StepScratch;
+    use mamba_rs::mamba3_siso::cpu::inference::mamba3_step;
+    use mamba_rs::mamba3_siso::gpu::inference::Mamba3GpuInferenceEngine;
+
+    let cfg = tiny_cfg();
+    // FULL weights incl a real input projection: the CPU step path has no
+    // identity-proj branch (it feeds matvec unconditionally), so the
+    // handoff is exercised with the projection live on both sides.
+    let w = Mamba3Weights::init(&cfg, cfg.d_model, 21);
+    let seq_len = 100usize;
+    let dm = cfg.d_model;
+    let input = det_input((seq_len + 1) * dm, 7);
+    let (prompt, next) = input.split_at(seq_len * dm);
+
+    // CPU oracle: prefill the prompt, then one step.
+    let (_, mut cpu_state) = cpu_oracle(&cfg, &w, prompt, seq_len);
+    let mut cpu_out = vec![0.0f32; dm];
+    let mut cpu_scratch = Mamba3StepScratch::new(&cfg);
+    mamba3_step(
+        &mut cpu_out,
+        next,
+        &mut cpu_scratch,
+        &w,
+        &mut cpu_state.layers,
+        &cfg,
+    );
+
+    // GPU: engine prefill entry, then the ordinary decode step.
+    let device = GpuDevice::new(0).expect("cuda device");
+    let engine = Mamba3GpuInferenceEngine::new(&device, &w, tiny_cfg(), dm, 1).unwrap();
+    let mut state = engine.alloc_state().unwrap();
+    let mut scratch = engine.alloc_scratch().unwrap();
+    let mut prefill = engine.alloc_prefill(seq_len).unwrap();
+    let gpu_prompt = GpuBuffer::from_cpu(&engine.ctx.stream, prompt).unwrap();
+    let mut last_hidden = GpuBuffer::zeros(&engine.ctx.stream, dm).unwrap();
+    engine
+        .prefill_sequence(
+            &mut prefill,
+            &gpu_prompt,
+            seq_len,
+            &mut state,
+            false,
+            &mut last_hidden,
+        )
+        .unwrap();
+    let mut gpu_out = vec![0.0f32; dm];
+    engine
+        .step(next, &mut gpu_out, &mut state, &mut scratch)
+        .unwrap();
+
+    assert_close("handoff step output", &gpu_out, &cpu_out, 1e-3);
+}
+
+/// Graph replay determinism: a captured prefill window replayed twice over
+/// re-zeroed state produces BIT-IDENTICAL exit states, and matches the
+/// eager run of the same window bit-for-bit (same launch sequence, same
+/// device).
+#[test]
+fn gpu_prefill_graph_replay_is_bitwise() {
+    use mamba_rs::mamba3_siso::gpu::prefill::Mamba3PrefillGraph;
+
+    let cfg = tiny_cfg();
+    let w = identity_weights(&cfg, 33);
+    let rig = rig();
+    let seq_len = 192usize;
+    let dims = gpu_dims(&cfg, 1, seq_len);
+    let input = det_input(seq_len * cfg.d_model, 55);
+    let gw = GpuMamba3WeightsInf::from_cpu(&rig.ctx.stream, &w, cfg.d_model).unwrap();
+    let gpu_input = GpuBuffer::from_cpu(&rig.ctx.stream, &input).unwrap();
+    let mut states = GpuStates::zeros(&rig, &dims);
+    let mut prefill = Mamba3Prefill::new(&rig.ctx.stream, &dims).unwrap();
+    let mut last_hidden = GpuBuffer::zeros(&rig.ctx.stream, cfg.d_model).unwrap();
+
+    // Eager reference run.
+    let run = |carry: bool| Mamba3PrefillRun {
+        ctx: &rig.ctx,
+        kernels: &rig.kernels,
+        dims: &dims,
+        weights: &gw,
+        mamba_input: &gpu_input,
+        identity_proj: true,
+        carry_state: carry,
+    };
+    prefill
+        .run(&run(false), states.bufs(), &mut last_hidden)
+        .unwrap();
+    let (eager_ssm, ..) = states.download(&rig);
+
+    // Warmed-up capture, then two replays.
+    let graph =
+        Mamba3PrefillGraph::capture(&mut prefill, &run(false), states.bufs(), &mut last_hidden)
+            .unwrap();
+    let replay = |states: &mut GpuStates| {
+        let bufs = states.bufs();
+        graph.replay(&rig.ctx, &gpu_input, &bufs).unwrap();
+    };
+    replay(&mut states);
+    let (r1_ssm, ..) = states.download(&rig);
+    replay(&mut states);
+    let (r2_ssm, ..) = states.download(&rig);
+
+    assert_eq!(r1_ssm, r2_ssm, "two replays must be bit-identical");
+    assert_eq!(
+        r1_ssm, eager_ssm,
+        "replay must match the eager run bit-for-bit"
+    );
+}

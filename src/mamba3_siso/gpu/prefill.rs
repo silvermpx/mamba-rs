@@ -643,3 +643,74 @@ impl Mamba3Prefill {
         Ok(())
     }
 }
+
+/// A captured CUDA graph of one prefill window over FIXED buffers: replay
+/// re-runs the whole window at graph-launch cost. The GEMM-tier flags are
+/// snapshotted at capture and asserted at replay — flipping the
+/// batch-invariant / tensor-core routing after capture would silently
+/// replay the OLD kernels, which is a numeric-route swap the crate treats
+/// as a hard error.
+pub struct Mamba3PrefillGraph {
+    graph: cudarc::driver::CudaGraph,
+    flags_at_capture: (bool, bool, bool),
+    input_ptr: CUptr,
+    ssm_ptr: CUptr,
+}
+
+impl Mamba3PrefillGraph {
+    /// Capture the window over the given fixed input/state/output buffers.
+    /// Upload fresh bytes into the SAME input buffer before each replay.
+    pub fn capture(
+        prefill: &mut Mamba3Prefill,
+        run: &Mamba3PrefillRun<'_>,
+        mut states: GpuMamba3StateBufs<'_>,
+        last_hidden: &mut GpuBuffer,
+    ) -> Result<Self, String> {
+        let flags_at_capture = run.ctx.gemm_flags();
+        let input_ptr = run.mamba_input.cached_ptr();
+        let ssm_ptr = states.ssm.cached_ptr();
+        let graph =
+            crate::mamba_ssm::gpu::graph_capture::capture_into_graph(&run.ctx.stream, || {
+                prefill.run(run, states.reborrow(), last_hidden)
+            })?;
+        graph
+            .upload()
+            .map_err(|e| format!("prefill graph upload: {e:?}"))?;
+        Ok(Self {
+            graph,
+            flags_at_capture,
+            input_ptr,
+            ssm_ptr,
+        })
+    }
+
+    /// Replay the captured window. `mamba_input` and the state buffers must
+    /// be the SAME allocations the capture saw (the graph baked their
+    /// device pointers in).
+    pub fn replay(
+        &self,
+        ctx: &GpuCtx,
+        mamba_input: &GpuBuffer,
+        states: &GpuMamba3StateBufs<'_>,
+    ) -> Result<(), String> {
+        if ctx.gemm_flags() != self.flags_at_capture {
+            return Err(format!(
+                "prefill graph replay refused: GEMM-tier flags changed since capture \
+                 (captured {:?}, now {:?}) — a replay would silently run the old \
+                 numeric route",
+                self.flags_at_capture,
+                ctx.gemm_flags()
+            ));
+        }
+        if mamba_input.cached_ptr() != self.input_ptr || states.ssm.cached_ptr() != self.ssm_ptr {
+            return Err(
+                "prefill graph replay refused: input/state buffers differ from the \
+                 captured allocations"
+                    .to_string(),
+            );
+        }
+        self.graph
+            .launch()
+            .map_err(|e| format!("prefill graph launch: {e:?}"))
+    }
+}

@@ -28,6 +28,14 @@ use rayon::prelude::*;
 /// cost for typical sampling configs. See `module::gpu_lm` for rationale.
 const SAMPLE_PARALLEL_THRESHOLD: usize = 8;
 
+/// Minimum prompt length before `generate_streaming` switches from the
+/// per-token step loop to the one-pass chunked prefill. Same value and
+/// batch-invariance rationale as the M1 LM: short prompts stay on the
+/// unified step path so single-batch and batched generation share one
+/// numeric route; long prompts (documents, RAG contexts) trade that for
+/// the chunked-scan speedup.
+const PREFILL_PARALLEL_THRESHOLD: usize = 256;
+
 /// Internal: embed + optional lm_head storage. F32 uses typed GpuBuffer;
 /// bf16/f16 use GpuByteBuffer (raw bytes, typed via `dtype`).
 enum EmbedStorage {
@@ -310,16 +318,29 @@ impl GpuMamba3LM {
         self.backbone.reset()?;
         let mut rng = Xoshiro256PlusPlus::new(params.seed);
 
-        // Mamba-3 prefill is a step-by-step loop for now: the chunked SSD
-        // kernels are typed and live, but the PREFILL SURFACE (entering-state
-        // carry + prefill entries + pooled graph, M1-parity) has not been
-        // built yet. Until then every prompt
-        // token pays a full step pipeline.
-        for &token_id in prompt {
-            let emb = embed_lookup(&self.embed_cpu, token_id, self.d_model, self.vocab_size);
-            self.input_cpu[..self.d_model].copy_from_slice(emb);
+        // Long prompts take the one-pass chunked prefill; short ones stay
+        // on the unified per-token step path (the SAME threshold and
+        // batch-invariance rationale as the M1 LM: below it, single-batch
+        // prefill and batched generation share one numeric route).
+        if prompt.len() >= PREFILL_PARALLEL_THRESHOLD && self.backbone.supports_prefill() {
+            let d = self.d_model;
+            let mut flat = vec![0.0f32; prompt.len() * d];
+            for (t, &token_id) in prompt.iter().enumerate() {
+                let emb = embed_lookup(&self.embed_cpu, token_id, d, self.vocab_size);
+                flat[t * d..(t + 1) * d].copy_from_slice(emb);
+            }
+            let stream = self.backbone.stream().clone();
+            let gpu_flat = GpuBuffer::from_cpu(&stream, &flat)?;
+            let mut prefill = self.backbone.alloc_prefill(prompt.len())?;
             self.backbone
-                .step_gpu_only(&self.input_cpu[..self.d_model])?;
+                .prefill_sequence(&mut prefill, &gpu_flat, prompt.len(), false)?;
+        } else {
+            for &token_id in prompt {
+                let emb = embed_lookup(&self.embed_cpu, token_id, self.d_model, self.vocab_size);
+                self.input_cpu[..self.d_model].copy_from_slice(emb);
+                self.backbone
+                    .step_gpu_only(&self.input_cpu[..self.d_model])?;
+            }
         }
         self.compute_logits()?;
 

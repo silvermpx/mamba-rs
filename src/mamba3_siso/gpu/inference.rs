@@ -1764,6 +1764,46 @@ impl GpuMamba3Backbone {
         }
     }
 
+    /// Whether this backbone can run the one-pass chunked prompt prefill
+    /// (F32 engines; mixed engines ride the step loop for now).
+    pub fn supports_prefill(&self) -> bool {
+        matches!(&self.engine, M3BackboneEngine::F32(_))
+    }
+
+    /// Allocate a one-pass prompt executor for a fixed prompt length.
+    pub fn alloc_prefill(&self, seq_len: usize) -> Result<super::prefill::Mamba3Prefill, String> {
+        match &self.engine {
+            M3BackboneEngine::F32(e) => e.alloc_prefill(seq_len),
+            M3BackboneEngine::Mixed(_) => {
+                Err("M3 prefill: mixed backbone rides the step loop for now".to_string())
+            }
+        }
+    }
+
+    /// One-pass prompt window (`[batch * seq_len * input_dim]` on the GPU)
+    /// straight into the persistent decode state. The final post-norm
+    /// hidden lands in the decode temporal, so logits consumers continue
+    /// exactly as after a step.
+    pub fn prefill_sequence(
+        &mut self,
+        prefill: &mut super::prefill::Mamba3Prefill,
+        mamba_input: &GpuBuffer,
+        seq_len: usize,
+        carry_state: bool,
+    ) -> Result<(), String> {
+        match (&self.engine, &mut self.scratch) {
+            (M3BackboneEngine::F32(e), M3BackboneScratch::F32(sc)) => e.prefill_sequence(
+                prefill,
+                mamba_input,
+                seq_len,
+                &mut self.state,
+                carry_state,
+                &mut sc.temporal,
+            ),
+            _ => Err("M3 prefill: mixed backbone rides the step loop for now".to_string()),
+        }
+    }
+
     /// Access the cuBLAS handle (for downstream lm_head GEMM).
     pub fn blas(&self) -> &cudarc::cublas::CudaBlas {
         match &self.engine {
