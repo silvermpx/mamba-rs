@@ -671,6 +671,9 @@ pub fn gpu_forward_mamba3_layer_mixed(
             bld.arg(chunk_states_scratch.inner_mut());
             bld.arg(final_states_scratch.inner_mut());
             bld.arg(acts.da_cumsum_saved.inner());
+            // Training forward: stateless window — chunk 0 enters at zero.
+            let init_states_null: crate::mamba3_siso::gpu::state::CUptr = 0;
+            bld.arg(&init_states_null);
             bld.arg(&b_i);
             bld.arg(&nc_i);
             bld.arg(&nh_i);

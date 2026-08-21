@@ -216,23 +216,63 @@ extern "C" __global__ void m3_chunk_state_fwd(
 // Forward recurrence: new_state = exp(dA_chunk_end) * prev_state + chunk_contribution
 // Converts states in-place from chunk contributions to prefix-scanned entering states.
 //
-// STATELESS WINDOW: chunk 0 always enters with state = 0. The chunked path
-// does NOT consume persistent ssm/k/v state from a previous window (and the
-// host zeroes all four state buffers — including the RoPE angle accumulator
-// — at the start of every parallel-scan forward). Use the sequential path
-// (m3_burnin_fwd) when state continuity across calls is required.
+// WINDOW SEMANTICS: with init_states == nullptr, chunk 0 enters with
+// state = 0 (the stateless-window contract every training forward uses —
+// the host zeroes all four persistent state buffers, including the RoPE
+// angle accumulator, at the start of every parallel-scan forward). A
+// prefill that CONTINUES a previous window passes init_states (the
+// entering SSM state, with the trapezoidal boundary fold already applied
+// by m3_chunk_entering_state) and chunk 0 starts from it.
 //
 // Handles partial last chunk (T not multiple of chunk_size).
 //
 // Input/Output: states[B * n_chunks * nh * hd * ds] (in-place)
 // Output:       final_states[B * nh * hd * ds]
 // Input:        dA_cumsum[B * n_chunks * nh * chunk_size]
+// Input:        init_states[B * nh * hd * ds] or nullptr
 //
+// Trapezoidal boundary fold for a prefill that CONTINUES a previous
+// window: the trapezoidal discretization's beta term reaches one step
+// BACK across the window seam, so carrying the SSM state alone is wrong
+// at exactly the first position of the new window. Following the
+// reference (mamba3_siso_fwd.py, HAS_INITIAL_STATES):
+//
+//   h_enter[b,h,p,n] += v_state[b,h,p] * k_state[b,h,n]
+//                       * dt[b,0,h] * (1 - trap[b,0,h])
+//
+// dt is post-softplus and trap post-sigmoid (both saved that way by the
+// split/activation kernels — no extra sigmoid here, unlike the raw-input
+// reference). All inputs f32; runs once per prefill, cost negligible.
+//
+// Grid: (B, nh, ceil(hd*ds / BLOCK)), Block: (min(hd*ds, 256))
+extern "C" __global__ void m3_chunk_entering_state(
+    float* __restrict__ h_enter,        // [B * nh * hd * ds] in/out
+    const float* __restrict__ k_state,  // [B * nh * ds]
+    const float* __restrict__ v_state,  // [B * nh * hd]
+    const float* __restrict__ dt,       // [B * T * nh] (post-softplus)
+    const float* __restrict__ trap,     // [B * T * nh] (post-sigmoid)
+    int batch, int nh, int hd, int ds, int T
+) {
+    int b = blockIdx.x;
+    int h = blockIdx.y;
+    int pd = blockIdx.z * blockDim.x + threadIdx.x;
+    int dim = hd * ds;
+    if (b >= batch || pd >= dim) return;
+    int p = pd / ds;
+    int n = pd % ds;
+    float dt0 = dt[b * T * nh + h];    // t = 0
+    float trap0 = trap[b * T * nh + h];
+    float v = v_state[(b * nh + h) * hd + p];
+    float k = k_state[(b * nh + h) * ds + n];
+    h_enter[(b * nh + h) * dim + pd] += v * k * dt0 * (1.0f - trap0);
+}
+
 // Grid: (B, nh, ceil(hd*ds / BLOCK)), Block: (min(hd*ds, 256))
 extern "C" __global__ void m3_state_passing_fwd(
     float* __restrict__ states,          // [B * n_chunks * nh * hd * ds] in/out
     float* __restrict__ final_states,    // [B * nh * hd * ds] output
     const float* __restrict__ dA_cumsum, // [B * n_chunks * nh * chunk_size]
+    const float* __restrict__ init_states, // [B * nh * hd * ds] or nullptr
     int batch, int n_chunks, int nh, int hd, int ds, int chunk_size, int T
 ) {
     int b = blockIdx.x;
@@ -241,8 +281,9 @@ extern "C" __global__ void m3_state_passing_fwd(
     int dim = hd * ds;
     if (pd >= dim) return;
 
-    // Exclusive prefix scan: states[c] = state ENTERING chunk c
-    float state = 0.0f;
+    // Exclusive prefix scan: states[c] = state ENTERING chunk c. With an
+    // entering state the scan seeds from it instead of zero.
+    float state = init_states ? init_states[b * nh * dim + h * dim + pd] : 0.0f;
 
     for (int c = 0; c < n_chunks; c++) {
         int state_idx = (b * n_chunks + c) * nh * dim + h * dim + pd;

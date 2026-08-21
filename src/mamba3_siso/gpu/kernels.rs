@@ -69,6 +69,11 @@ pub struct Mamba3Kernels {
     pub m3_da_cumsum: CudaFunction,
     pub m3_chunk_state_fwd: CudaFunction,
     pub m3_state_passing_fwd: CudaFunction,
+    /// Trapezoidal boundary fold for state-carrying prefill: seeds the
+    /// entering SSM state with `v_state (x) k_state * dt0 * (1 - trap0)`
+    /// so the beta term's one-step reach-back across the window seam is
+    /// honored (reference: mamba3_siso_fwd.py HAS_INITIAL_STATES).
+    pub m3_chunk_entering_state: CudaFunction,
     pub m3_writeback_parallel_states: CudaFunction,
     pub m3_chunk_scan_fwd: CudaFunction,
     // Phase 2.7.5: m3_chunk_scan_bwd, m3_state_passing_bwd, m3_chunk_state_bwd,
@@ -257,6 +262,7 @@ impl Mamba3Kernels {
             m3_da_cumsum: get("m3_dA_cumsum")?,
             m3_chunk_state_fwd: get("m3_chunk_state_fwd")?,
             m3_state_passing_fwd: get("m3_state_passing_fwd")?,
+            m3_chunk_entering_state: get("m3_chunk_entering_state")?,
             m3_writeback_parallel_states: get("m3_writeback_parallel_states")?,
             m3_chunk_scan_fwd: get("m3_chunk_scan_fwd")?,
             m3_extract_da_cs_sum: get("m3_extract_da_cs_sum")?,

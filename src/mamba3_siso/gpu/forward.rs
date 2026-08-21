@@ -353,6 +353,10 @@ pub fn gpu_forward_mamba3_layer(
             builder.arg(scratch.chunk_states.inner_mut());
             builder.arg(scratch.final_states.inner_mut());
             builder.arg(scratch.da_cumsum.inner());
+            // Training forward: stateless window — chunk 0 enters at zero.
+            // A state-carrying prefill passes the folded entering state.
+            let init_states_null: crate::mamba3_siso::gpu::state::CUptr = 0;
+            builder.arg(&init_states_null);
             builder.arg(&b_i);
             builder.arg(&nc_i);
             builder.arg(&nh_i);
@@ -521,12 +525,15 @@ pub fn gpu_forward_mamba3_layer(
 /// Mamba-3 SISO full backbone forward (input proj + N layers + norm_f).
 ///
 /// State semantics: with `dims.use_parallel_scan` the window is STATELESS —
-/// the chunked kernels do not consume entering SSM/K/V state (chunk 0 always
-/// starts from zero), so all four state buffers (including the RoPE angle
-/// accumulator) are zeroed up front to keep the semantics consistent. Final
-/// window states are still written back for inspection. State continuity
-/// across calls is only supported by the sequential path
-/// (`use_parallel_scan = false`, `m3_burnin_fwd`).
+/// this TRAINING forward runs stateless windows: it passes a null entering
+/// state to `m3_state_passing_fwd` (chunk 0 starts from zero) and zeroes
+/// all four state buffers (including the RoPE angle accumulator) up front
+/// to keep the semantics consistent. Final window states are still written
+/// back for inspection. The chunked kernels themselves DO support an
+/// entering state (nullable `init_states` + the `m3_chunk_entering_state`
+/// trapezoidal boundary fold) — that route belongs to the state-carrying
+/// prefill; within training, cross-call continuity remains the sequential
+/// path's job (`use_parallel_scan = false`, `m3_burnin_fwd`).
 pub fn gpu_forward_mamba3_backbone(
     exec: &M3Exec<'_>,
     temporal: &mut GpuBuffer,
@@ -549,8 +556,8 @@ pub fn gpu_forward_mamba3_backbone(
     let na = dims.n_angles.max(1);
 
     if dims.use_parallel_scan {
-        // The chunked SSM kernels ignore entering SSM/K/V state, but the
-        // angle kernel WOULD carry the persistent accumulator — a hybrid
+        // This training window is STATELESS (null entering state to the
+        // chunked kernels), but the angle kernel WOULD carry the persistent accumulator — a hybrid
         // that matches neither stateless-window nor full-continuity
         // semantics. Zero all four so every parallel window is cleanly
         // stateless. (Async memsets — CUDA Graph capture safe.)
