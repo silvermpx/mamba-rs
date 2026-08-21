@@ -304,7 +304,10 @@ pub fn gpu_backward_mamba3_layer(
         // layers since GpuMamba3Grads::zero runs once per step).
         {
             let cs_u = dims.chunk_size();
-            let smem = (cs_u * ds + cs_u * ds + cs_u * hd + cs_u * hd + cs_u + cs_u + hd * ds) * 4;
+            // Two chunk-by-state operand tiles, V/dO tiles, two per-step
+            // lanes, the da/qk lanes, and TWO head-state tiles (true
+            // states + d_state staging for the warp-parallel dADT).
+            let smem = (2 * cs_u * ds + 2 * cs_u * hd + 4 * cs_u + 2 * hd * ds) * 4;
             let cfg = cudarc::driver::LaunchConfig {
                 grid_dim: (nh as u32, dims.batch as u32, 1),
                 block_dim: (hd as u32, 1, 1),

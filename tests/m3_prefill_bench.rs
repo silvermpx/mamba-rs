@@ -76,3 +76,62 @@ fn m3_prefill_latency_at_serve_shape() {
         iters as f64 / dt
     );
 }
+
+/// Training step latency at a multi-chunk shape (the chunked backward is
+/// the target). Run manually, release build.
+#[test]
+#[ignore]
+fn m3_train_step_at_multichunk_shape() {
+    use mamba_rs::mamba3_siso::gpu::trainer::Mamba3Trainer;
+
+    let cfg = Mamba3Config {
+        d_model: 384,
+        d_state: 16,
+        expand: 2,
+        headdim: 16,
+        ngroups: 1,
+        n_layers: 24,
+        rope_fraction: 0.5,
+        a_floor: 1e-4,
+        is_outproj_norm: true,
+        ..Mamba3Config::default()
+    };
+    let (batch, seq_len) = (1usize, 256usize);
+    let n = batch * seq_len * cfg.d_model;
+
+    for dtype in [WeightDtype::F32, WeightDtype::Bf16] {
+        // The f32 forward always runs the input-projection GEMM (eye
+        // weights = identity semantics); the mixed pipeline wants the
+        // identity branch (cleared weights).
+        let mut w = Mamba3Weights::init(&cfg, cfg.d_model, 42);
+        if matches!(dtype, WeightDtype::F32) {
+            let dm = cfg.d_model;
+            w.input_proj_w = (0..dm * dm)
+                .map(|i| if i / dm == i % dm { 1.0 } else { 0.0 })
+                .collect();
+            w.input_proj_b = vec![0.0; dm];
+        } else {
+            w.input_proj_w.clear();
+            w.input_proj_b.clear();
+        }
+        let mut tr =
+            Mamba3Trainer::new_with_dtype(0, &w, cfg.clone(), cfg.d_model, batch, seq_len, dtype)
+                .unwrap();
+        let input = det(n, 0x91);
+        let d_temporal = det(n, 0x92);
+        for _ in 0..3 {
+            tr.step(&input, &d_temporal).unwrap();
+        }
+        let iters = 20usize;
+        let t0 = Instant::now();
+        for _ in 0..iters {
+            tr.step(&input, &d_temporal).unwrap();
+        }
+        let dt = t0.elapsed().as_secs_f64();
+        eprintln!(
+            "train step {dtype:?} B={batch} T={seq_len} layers={}: {:.2} ms/step",
+            cfg.n_layers,
+            1e3 * dt / iters as f64
+        );
+    }
+}

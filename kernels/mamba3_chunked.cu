@@ -601,6 +601,12 @@ extern "C" __global__ void m3_dqkv(
     float* da_cs_sm = do_sm + CS * hd;
     float* qk_sm   = da_cs_sm + CS;
     float* ssm_sm  = qk_sm + CS; // [hd][ds] for SSM_States tile
+    // Extra staging for the warp-parallel dADT section: the true
+    // SSM_States tile (ssm_sm gets overwritten with d_state before the
+    // section runs) plus the two per-step lanes the combine reads.
+    float* ssm2_sm   = ssm_sm + hd * ds; // [hd][ds]
+    float* dm_rev_sm = ssm2_sm + hd * ds; // [CS]
+    float* dm_vec_sm = dm_rev_sm + CS;    // [CS]
 
     for (int chunk_loop = 0; chunk_loop < n_chunks; chunk_loop++) {
         int chunk_idx = n_chunks - 1 - chunk_loop;
@@ -781,83 +787,85 @@ extern "C" __global__ void m3_dqkv(
         __syncthreads();
 
         // === dADT computation (all 4 parts) ===
-        // This is complex — computed on thread 0 using shared memory data
+        // Formerly a single-lane section (~95% of the kernel serial on
+        // lane 0). Restructured per OUTPUT step: each lane owns a strided
+        // set of steps and computes that step's contributions with a
+        // fixed serial order (below-diagonal pairs ascending, then
+        // above-diagonal), so no cross-lane reduction exists and the
+        // result is deterministic by construction. The true SSM_States
+        // tile is staged in shared memory once (ssm_sm already holds
+        // d_state at this point), replacing the per-element global
+        // re-reads of the old code.
+        for (int n = p; n < hd * ds; n += hd) {
+            ssm2_sm[n] =
+                SSM_States[((b * n_chunks + chunk_idx) * nh_total + h) * hd * ds + n];
+        }
+        __syncthreads();
+        for (int t = p; t < chunk_len; t += hd) {
+            float acc = 0.0f;
+            // Below-diagonal: pairs (i, t) with i < t contribute +dAinv.
+            for (int i = 0; i < t; i++) {
+                float vdo = 0.0f;
+                for (int pp = 0; pp < hd; pp++)
+                    vdo += v_sm[i * hd + pp] * do_sm[t * hd + pp];
+                float decay = exp2f((da_cs_sm[t] - da_cs_sm[i]) * LOG2E);
+                float kq = 0.0f;
+                for (int n = 0; n < ds; n++)
+                    kq += k_sm[i * ds + n] * q_sm[t * ds + n];
+                acc += vdo * decay * kq;
+            }
+            // Above-diagonal: pairs (t, j) with j > t contribute -dAinv.
+            for (int j = t + 1; j < chunk_len; j++) {
+                float vdo = 0.0f;
+                for (int pp = 0; pp < hd; pp++)
+                    vdo += v_sm[t * hd + pp] * do_sm[j * hd + pp];
+                float decay = exp2f((da_cs_sm[j] - da_cs_sm[t]) * LOG2E);
+                float kq = 0.0f;
+                for (int n = 0; n < ds; n++)
+                    kq += k_sm[t * ds + n] * q_sm[j * ds + n];
+                acc -= vdo * decay * kq;
+            }
+            // Entering-state term: Q @ ssm_states^T dot dO * exp.
+            float qs_do = 0.0f;
+            for (int pp = 0; pp < hd; pp++) {
+                float qs = 0.0f;
+                for (int n = 0; n < ds; n++)
+                    qs += q_sm[t * ds + n] * ssm2_sm[pp * ds + n];
+                qs_do += qs * do_sm[t * hd + pp];
+            }
+            acc += qs_do * exp2f(da_cs_sm[t] * LOG2E);
+            dm_rev_sm[t] = acc;
+            // Exit-state term: K @ d_state^T dot V * exp_rev
+            // (ssm_sm holds d_state here).
+            float dsk_v = 0.0f;
+            for (int pp = 0; pp < hd; pp++) {
+                float dsk = 0.0f;
+                for (int n = 0; n < ds; n++)
+                    dsk += k_sm[t * ds + n] * ssm_sm[pp * ds + n];
+                dsk_v += dsk * v_sm[t * hd + pp];
+            }
+            dm_vec_sm[t] = dsk_v * exp2f((da_cs_chunk_sum - da_cs_sm[t]) * LOG2E);
+        }
+        __syncthreads();
         if (p == 0) {
-            float dM_rev[64]; // CS max (matches reference chunk_size=64)
-            for (int t = 0; t < CS; t++) dM_rev[t] = 0.0f;
-
-            // Part 1: from intra-chunk attention
-            // dAinv[i][j] = sum_p(V[i,p]*dO[j,p]) * mask[i,j] * sum_n(K[i,n]*Q[j,n])
-            for (int i = 0; i < chunk_len; i++) {
-                for (int j = i + 1; j < chunk_len; j++) {
-                    float vdo = 0.0f;
-                    for (int pp = 0; pp < hd; pp++)
-                        vdo += v_sm[i * hd + pp] * do_sm[j * hd + pp];
-                    float decay = exp2f((da_cs_sm[j] - da_cs_sm[i]) * LOG2E);
-                    float kq = 0.0f;
-                    for (int n = 0; n < ds; n++)
-                        kq += k_sm[i * ds + n] * q_sm[j * ds + n];
-                    float dAinv = vdo * decay * kq;
-                    dM_rev[j] += dAinv; // rowsum contribution (j is row in transposed)
-                    dM_rev[i] -= dAinv; // colsum contribution
-                }
-            }
-
-            // Part 2: Q @ ssm_states^T dot dO * exp
-            // NOTE: ssm_sm now holds d_state (overwritten at line 1031).
-            // Must reload SSM_States from global memory for this part.
-            for (int t = 0; t < chunk_len; t++) {
-                float qs_do = 0.0f;
-                for (int pp = 0; pp < hd; pp++) {
-                    float qs = 0.0f;
-                    for (int n = 0; n < ds; n++) {
-                        float ssm_val = SSM_States[((b * n_chunks + chunk_idx) * nh_total + h) * hd * ds + pp * ds + n];
-                        qs += q_sm[t * ds + n] * ssm_val;
-                    }
-                    qs_do += qs * do_sm[t * hd + pp];
-                }
-                dM_rev[t] += qs_do * exp2f(da_cs_sm[t] * LOG2E);
-            }
-
-            // Part 3: sum(SSM_States * d_state) * exp(cs_sum)
-            // ssm_sm holds d_state; reload SSM_States from global memory.
+            // Scalar term + the serial reverse-cumsum combine (cheap,
+            // and its order is the numeric contract).
             float dM_scalar = 0.0f;
             for (int pp = 0; pp < hd; pp++) {
-                for (int n = 0; n < ds; n++) {
-                    float ssm_val = SSM_States[((b * n_chunks + chunk_idx) * nh_total + h) * hd * ds + pp * ds + n];
-                    // d_state is in ssm_sm[pp*ds+n] (we stored it there)
-                    dM_scalar += ssm_val * ssm_sm[pp * ds + n];
-                }
+                for (int n = 0; n < ds; n++)
+                    dM_scalar += ssm2_sm[pp * ds + n] * ssm_sm[pp * ds + n];
             }
             dM_scalar *= exp2f(da_cs_chunk_sum * LOG2E);
 
-            // Part 4: K @ d_state^T dot V * exp_rev
-            float dM_vector[64];
-            for (int t = 0; t < chunk_len; t++) {
-                float dsk_v = 0.0f;
-                for (int pp = 0; pp < hd; pp++) {
-                    float dsk = 0.0f;
-                    for (int n = 0; n < ds; n++)
-                        dsk += k_sm[t * ds + n] * ssm_sm[pp * ds + n]; // d_state[pp][n]
-                    dsk_v += dsk * v_sm[t * hd + pp];
-                }
-                dM_vector[t] = dsk_v * exp2f((da_cs_chunk_sum - da_cs_sm[t]) * LOG2E);
-            }
-
-            // Reverse cumsum combine (Python line 590)
             float total_rev = 0.0f;
-            for (int t = 0; t < chunk_len; t++) total_rev += dM_rev[t];
+            for (int t = 0; t < chunk_len; t++) total_rev += dm_rev_sm[t];
             total_rev += dM_scalar;
             float cumsum = 0.0f;
             for (int t = 0; t < chunk_len; t++) {
-                cumsum += dM_vector[t] - dM_rev[t];
-                dM_rev[t] += total_rev + cumsum - dM_vector[t];
-            }
-
-            // Store dADT
-            for (int t = 0; t < chunk_len; t++) {
+                cumsum += dm_vec_sm[t] - dm_rev_sm[t];
+                float out = dm_rev_sm[t] + total_rev + cumsum - dm_vec_sm[t];
                 int gt = chunk_start + t;
-                dADT[(b * T + gt) * nh_total + h] = dM_rev[t];
+                dADT[(b * T + gt) * nh_total + h] = out;
             }
         }
         __syncthreads();
@@ -1421,6 +1429,9 @@ m3_dqkv_##SUFFIX(                                                             \
     float* da_cs_sm = do_sm + CS * hd;                                        \
     float* qk_sm   = da_cs_sm + CS;                                           \
     float* ssm_sm  = qk_sm + CS;                                              \
+    float* ssm2_sm   = ssm_sm + hd * ds;                                      \
+    float* dm_rev_sm = ssm2_sm + hd * ds;                                     \
+    float* dm_vec_sm = dm_rev_sm + CS;                                        \
     for (int chunk_loop = 0; chunk_loop < n_chunks; chunk_loop++) {           \
         int chunk_idx = n_chunks - 1 - chunk_loop;                            \
         int chunk_start = chunk_idx * CS;                                     \
@@ -1545,70 +1556,69 @@ m3_dqkv_##SUFFIX(                                                             \
             }                                                                 \
         }                                                                     \
         __syncthreads();                                                      \
+        for (int n = p; n < hd * ds; n += hd) {                              \
+            ssm2_sm[n] = SSM_States[                                          \
+                ((b * n_chunks + chunk_idx) * nh_total + h) * hd * ds + n];   \
+        }                                                                     \
+        __syncthreads();                                                      \
+        for (int t = p; t < chunk_len; t += hd) {                             \
+            float acc = 0.0f;                                                 \
+            for (int i = 0; i < t; i++) {                                     \
+                float vdo = 0.0f;                                             \
+                for (int pp = 0; pp < hd; pp++)                               \
+                    vdo += v_sm[i * hd + pp] * do_sm[t * hd + pp];            \
+                float decay = exp2f((da_cs_sm[t] - da_cs_sm[i]) * LOG2E);     \
+                float kq = 0.0f;                                              \
+                for (int n = 0; n < ds; n++)                                  \
+                    kq += k_sm[i * ds + n] * q_sm[t * ds + n];                \
+                acc += vdo * decay * kq;                                      \
+            }                                                                 \
+            for (int j = t + 1; j < chunk_len; j++) {                         \
+                float vdo = 0.0f;                                             \
+                for (int pp = 0; pp < hd; pp++)                               \
+                    vdo += v_sm[t * hd + pp] * do_sm[j * hd + pp];            \
+                float decay = exp2f((da_cs_sm[j] - da_cs_sm[t]) * LOG2E);     \
+                float kq = 0.0f;                                              \
+                for (int n = 0; n < ds; n++)                                  \
+                    kq += k_sm[t * ds + n] * q_sm[j * ds + n];                \
+                acc -= vdo * decay * kq;                                      \
+            }                                                                 \
+            float qs_do = 0.0f;                                               \
+            for (int pp = 0; pp < hd; pp++) {                                 \
+                float qs = 0.0f;                                              \
+                for (int n = 0; n < ds; n++)                                  \
+                    qs += q_sm[t * ds + n] * ssm2_sm[pp * ds + n];            \
+                qs_do += qs * do_sm[t * hd + pp];                             \
+            }                                                                 \
+            acc += qs_do * exp2f(da_cs_sm[t] * LOG2E);                        \
+            dm_rev_sm[t] = acc;                                               \
+            float dsk_v = 0.0f;                                               \
+            for (int pp = 0; pp < hd; pp++) {                                 \
+                float dsk = 0.0f;                                             \
+                for (int n = 0; n < ds; n++)                                  \
+                    dsk += k_sm[t * ds + n] * ssm_sm[pp * ds + n];            \
+                dsk_v += dsk * v_sm[t * hd + pp];                             \
+            }                                                                 \
+            dm_vec_sm[t] = dsk_v                                              \
+                * exp2f((da_cs_chunk_sum - da_cs_sm[t]) * LOG2E);             \
+        }                                                                     \
+        __syncthreads();                                                      \
         if (p == 0) {                                                         \
-            float dM_rev[64];                                                 \
-            for (int t = 0; t < CS; t++) dM_rev[t] = 0.0f;                    \
-            for (int i = 0; i < chunk_len; i++) {                             \
-                for (int j = i + 1; j < chunk_len; j++) {                     \
-                    float vdo = 0.0f;                                         \
-                    for (int pp = 0; pp < hd; pp++)                           \
-                        vdo += v_sm[i * hd + pp] * do_sm[j * hd + pp];        \
-                    float decay = exp2f((da_cs_sm[j] - da_cs_sm[i]) * LOG2E); \
-                    float kq = 0.0f;                                          \
-                    for (int n = 0; n < ds; n++)                              \
-                        kq += k_sm[i * ds + n] * q_sm[j * ds + n];            \
-                    float dAinv = vdo * decay * kq;                           \
-                    dM_rev[j] += dAinv;                                       \
-                    dM_rev[i] -= dAinv;                                       \
-                }                                                             \
-            }                                                                 \
-            for (int t = 0; t < chunk_len; t++) {                             \
-                float qs_do = 0.0f;                                           \
-                for (int pp = 0; pp < hd; pp++) {                             \
-                    float qs = 0.0f;                                          \
-                    for (int n = 0; n < ds; n++) {                            \
-                        float ssm_val = SSM_States[                           \
-                            ((b * n_chunks + chunk_idx) * nh_total + h)       \
-                            * hd * ds + pp * ds + n];                         \
-                        qs += q_sm[t * ds + n] * ssm_val;                     \
-                    }                                                         \
-                    qs_do += qs * do_sm[t * hd + pp];                         \
-                }                                                             \
-                dM_rev[t] += qs_do * exp2f(da_cs_sm[t] * LOG2E);              \
-            }                                                                 \
             float dM_scalar = 0.0f;                                           \
             for (int pp = 0; pp < hd; pp++) {                                 \
-                for (int n = 0; n < ds; n++) {                                \
-                    float ssm_val = SSM_States[                               \
-                        ((b * n_chunks + chunk_idx) * nh_total + h)           \
-                        * hd * ds + pp * ds + n];                             \
-                    dM_scalar += ssm_val * ssm_sm[pp * ds + n];               \
-                }                                                             \
+                for (int n = 0; n < ds; n++)                                  \
+                    dM_scalar += ssm2_sm[pp * ds + n] * ssm_sm[pp * ds + n];  \
             }                                                                 \
             dM_scalar *= exp2f(da_cs_chunk_sum * LOG2E);                      \
-            float dM_vector[64];                                              \
-            for (int t = 0; t < chunk_len; t++) {                             \
-                float dsk_v = 0.0f;                                           \
-                for (int pp = 0; pp < hd; pp++) {                             \
-                    float dsk = 0.0f;                                         \
-                    for (int n = 0; n < ds; n++)                              \
-                        dsk += k_sm[t * ds + n] * ssm_sm[pp * ds + n];        \
-                    dsk_v += dsk * v_sm[t * hd + pp];                         \
-                }                                                             \
-                dM_vector[t] = dsk_v                                          \
-                    * exp2f((da_cs_chunk_sum - da_cs_sm[t]) * LOG2E);         \
-            }                                                                 \
             float total_rev = 0.0f;                                           \
-            for (int t = 0; t < chunk_len; t++) total_rev += dM_rev[t];       \
+            for (int t = 0; t < chunk_len; t++) total_rev += dm_rev_sm[t];    \
             total_rev += dM_scalar;                                           \
             float cumsum = 0.0f;                                              \
             for (int t = 0; t < chunk_len; t++) {                             \
-                cumsum += dM_vector[t] - dM_rev[t];                           \
-                dM_rev[t] += total_rev + cumsum - dM_vector[t];               \
-            }                                                                 \
-            for (int t = 0; t < chunk_len; t++) {                             \
+                cumsum += dm_vec_sm[t] - dm_rev_sm[t];                        \
+                float out = dm_rev_sm[t] + total_rev + cumsum - dm_vec_sm[t]; \
                 int gt = chunk_start + t;                                     \
-                dADT[(b * T + gt) * nh_total + h] = dM_rev[t];                \
+                dADT[(b * T + gt) * nh_total + h] = out;                      \
             }                                                                 \
         }                                                                     \
         __syncthreads();                                                      \

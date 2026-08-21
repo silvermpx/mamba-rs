@@ -120,9 +120,11 @@ impl Mamba3Config {
         // Only the chunked training path runs that kernel: an explicit
         // Sequential scan mode trains without it and skips this bound.
         let cs = 64usize;
-        let chunked_bwd_smem =
-            (2 * cs * self.d_state + 2 * cs * self.headdim + 2 * cs + self.headdim * self.d_state)
-                * 4;
+        let chunked_bwd_smem = (2 * cs * self.d_state
+            + 2 * cs * self.headdim
+            + 4 * cs
+            + 2 * self.headdim * self.d_state)
+            * 4;
         if self.train_use_parallel_scan() && chunked_bwd_smem > 99 * 1024 {
             return Err(format!(
                 "headdim {} with d_state {} needs {} KB of shared memory in the \
