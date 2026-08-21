@@ -433,7 +433,7 @@ fn gpu_prefill_mixed_backbone_handoff() {
 
     // Reference: typed step loop over prompt + decode tokens.
     let mut bb_steps =
-        GpuMamba3Backbone::new_with_dtype(0, &w, cfg.clone(), dm, 1, WeightDtype::Bf16).unwrap();
+        GpuMamba3Backbone::new_with_dtype(0, &w, cfg, dm, 1, WeightDtype::Bf16).unwrap();
     let mut out_ref = vec![0.0f32; dm];
     let mut ref_outs = Vec::new();
     for t in 0..t_prompt {
@@ -450,7 +450,7 @@ fn gpu_prefill_mixed_backbone_handoff() {
 
     // Prefill lane: one-pass prompt, then the same decode tokens.
     let mut bb_pre =
-        GpuMamba3Backbone::new_with_dtype(0, &w, cfg.clone(), dm, 1, WeightDtype::Bf16).unwrap();
+        GpuMamba3Backbone::new_with_dtype(0, &w, cfg, dm, 1, WeightDtype::Bf16).unwrap();
     let stream = bb_pre.stream().clone();
     let mut gpu_prompt = GpuBuffer::zeros(&stream, t_prompt * dm).unwrap();
     stream.synchronize().unwrap();

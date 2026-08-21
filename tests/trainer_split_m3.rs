@@ -122,14 +122,8 @@ fn run_split_vs_fused(dtype: WeightDtype) {
         w.input_proj_b.clear();
     }
 
-    let mut fused = Mamba3Trainer::new_full(
-        0,
-        &w,
-        cfg.clone(),
-        session(batch, seq_len, input_dim),
-        dtype,
-    )
-    .expect("fused trainer");
+    let mut fused = Mamba3Trainer::new_full(0, &w, cfg, session(batch, seq_len, input_dim), dtype)
+        .expect("fused trainer");
     let mut split = Mamba3Trainer::new_full(0, &w, cfg, session(batch, seq_len, input_dim), dtype)
         .expect("split trainer");
 
@@ -176,7 +170,7 @@ fn m3_split_interlock_and_accumulate_window() {
     let mut t = Mamba3Trainer::new_full(
         0,
         &w,
-        cfg.clone(),
+        cfg,
         session(batch, seq_len, input_dim),
         WeightDtype::F32,
     )
@@ -238,7 +232,7 @@ fn m3_f16_split_scaler_protocol() {
     let mut t = Mamba3Trainer::new_full(
         0,
         &w,
-        cfg.clone(),
+        cfg,
         session(batch, seq_len, input_dim),
         WeightDtype::F16,
     )

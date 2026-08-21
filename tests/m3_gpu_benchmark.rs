@@ -51,7 +51,7 @@ fn m3_gpu_benchmark() {
     // ===================================================================
     println!("--- GPU Inference (T=1, no graph) ---");
     for &b in &[1usize, 4, 16, 64] {
-        let mut bb = GpuMamba3Backbone::new(0, &cpu_weights, cfg.clone(), input_dim, b).unwrap();
+        let mut bb = GpuMamba3Backbone::new(0, &cpu_weights, cfg, input_dim, b).unwrap();
         let input = vec![0.1f32; b * input_dim];
         let mut output = vec![0.0f32; b * cfg.d_model];
 
@@ -75,7 +75,7 @@ fn m3_gpu_benchmark() {
     // ===================================================================
     println!("--- GPU Inference (T=1, CUDA Graph) ---");
     for &b in &[1usize, 4, 16, 64] {
-        let mut bb = GpuMamba3Backbone::new(0, &cpu_weights, cfg.clone(), input_dim, b).unwrap();
+        let mut bb = GpuMamba3Backbone::new(0, &cpu_weights, cfg, input_dim, b).unwrap();
         bb.capture_graph().unwrap();
         let input = vec![0.1f32; b * input_dim];
         let mut output = vec![0.0f32; b * cfg.d_model];

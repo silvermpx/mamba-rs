@@ -17,9 +17,9 @@ use cudarc::nccl::{result, sys};
 
 use super::error::DistError;
 
-/// Minimum library version this crate accepts (major*10000 + minor*100
-/// + patch, the NCCL convention). Older versions carry known collective
-/// hangs on modern architectures.
+/// Minimum library version this crate accepts, encoded as
+/// `major*10000 + minor*100 + patch` (the NCCL convention). Older
+/// versions carry known collective hangs on modern architectures.
 const MIN_NCCL_VERSION: i32 = 22600;
 
 pub struct MambaComm {

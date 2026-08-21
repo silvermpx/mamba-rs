@@ -63,7 +63,7 @@ fn weight_bits(w: &Mamba3Weights) -> Vec<u32> {
 
 fn build(cpu: &Mamba3Weights, dtype: WeightDtype) -> Mamba3Trainer {
     let c = cfg();
-    Mamba3Trainer::new_with_dtype(0, cpu, c.clone(), c.d_model, 1, 64, dtype).unwrap()
+    Mamba3Trainer::new_with_dtype(0, cpu, c, c.d_model, 1, 64, dtype).unwrap()
 }
 
 /// The f32 forward has no identity-proj branch (it always runs the GEMM),
@@ -270,7 +270,7 @@ fn m1_resume_with_recurrent_state_is_bit_continuous() {
         out
     }
     fn m1_build(cpu: &MambaWeights, c: &MambaConfig) -> MambaTrainer {
-        MambaTrainer::new_with_dtype(0, cpu, c.clone(), c.d_model, 1, 4, WeightDtype::F32).unwrap()
+        MambaTrainer::new_with_dtype(0, cpu, *c, c.d_model, 1, 4, WeightDtype::F32).unwrap()
     }
 
     let c = m1_cfg();

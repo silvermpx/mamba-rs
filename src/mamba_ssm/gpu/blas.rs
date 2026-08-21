@@ -13,9 +13,6 @@ use super::launch::grid_1d;
 use cudarc::driver::PushKernelArg;
 use std::ffi::{c_int, c_void};
 
-/// Batched linear forward: `Y[B,N] = X[B,K] @ W[K,N] + bias[N]`.
-/// `dims` = `(batch, n_in, n_out)`.
-
 /// Effective cuBLAS compute type for a typed GEMM: the PEDANTIC default,
 /// or the opt-in non-PEDANTIC tensor-core mode (`ctx.set_fast_gemm` /
 /// MAMBA_RS_FAST_GEMM). Separate numeric contract - see GpuCtx::fast_gemm.

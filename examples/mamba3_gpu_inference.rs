@@ -27,10 +27,7 @@ fn main() {
         // Create GPU backbone (uploads weights, compiles 47 CUDA kernels)
         let mut gpu = GpuMamba3Backbone::new(
             0, // GPU device 0
-            &weights,
-            cfg.clone(),
-            input_dim,
-            1, // batch = 1
+            &weights, cfg, input_dim, 1, // batch = 1
         )
         .expect("GPU init failed");
 

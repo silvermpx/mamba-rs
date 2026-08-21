@@ -73,24 +73,12 @@ fn test_m3_bf16_matches_f32_synthetic() {
     weights.input_proj_w.clear();
     weights.input_proj_b.clear();
 
-    let mut bb_f32 = GpuMamba3Backbone::new_with_dtype(
-        0,
-        &weights,
-        cfg.clone(),
-        input_dim,
-        batch,
-        WeightDtype::F32,
-    )
-    .unwrap();
-    let mut bb_bf16 = GpuMamba3Backbone::new_with_dtype(
-        0,
-        &weights,
-        cfg.clone(),
-        input_dim,
-        batch,
-        WeightDtype::Bf16,
-    )
-    .unwrap();
+    let mut bb_f32 =
+        GpuMamba3Backbone::new_with_dtype(0, &weights, cfg, input_dim, batch, WeightDtype::F32)
+            .unwrap();
+    let mut bb_bf16 =
+        GpuMamba3Backbone::new_with_dtype(0, &weights, cfg, input_dim, batch, WeightDtype::Bf16)
+            .unwrap();
 
     assert_eq!(bb_f32.dtype(), WeightDtype::F32);
     assert_eq!(bb_bf16.dtype(), WeightDtype::Bf16);
@@ -170,24 +158,12 @@ fn test_m3_bf16_matches_f32_realistic() {
     weights.input_proj_w.clear();
     weights.input_proj_b.clear();
 
-    let mut bb_f32 = GpuMamba3Backbone::new_with_dtype(
-        0,
-        &weights,
-        cfg.clone(),
-        input_dim,
-        batch,
-        WeightDtype::F32,
-    )
-    .unwrap();
-    let mut bb_bf16 = GpuMamba3Backbone::new_with_dtype(
-        0,
-        &weights,
-        cfg.clone(),
-        input_dim,
-        batch,
-        WeightDtype::Bf16,
-    )
-    .unwrap();
+    let mut bb_f32 =
+        GpuMamba3Backbone::new_with_dtype(0, &weights, cfg, input_dim, batch, WeightDtype::F32)
+            .unwrap();
+    let mut bb_bf16 =
+        GpuMamba3Backbone::new_with_dtype(0, &weights, cfg, input_dim, batch, WeightDtype::Bf16)
+            .unwrap();
 
     let dm = cfg.d_model;
     let mut out_f32 = vec![0.0f32; batch * dm];
@@ -223,7 +199,7 @@ fn test_m3_f32_backbone_unchanged_after_mixed_refactor() {
     let input_dim = cfg.d_model;
     let batch = 2;
     let weights = Mamba3Weights::init(&cfg, input_dim, 0xABCDEF);
-    let cfg_copy = cfg.clone();
+    let cfg_copy = cfg;
     let mut bb = GpuMamba3Backbone::new_with_dtype(
         0,
         &weights,

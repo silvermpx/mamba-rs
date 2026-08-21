@@ -761,12 +761,6 @@ impl std::fmt::Debug for GpuBuffer {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    // Tests require CUDA device — run on GPU server only
-    // cargo test --features cuda -- gpu
-}
-
 /// Page-locked (pinned) host staging buffer for the H2D/D2H hot path.
 ///
 /// Allocated with `cuMemHostAlloc(flags = 0)` — CACHEABLE pinned memory.
@@ -829,4 +823,10 @@ impl Drop for PinnedHostBuf {
         // ignore (process teardown frees them regardless).
         let _ = unsafe { cudarc::driver::result::free_host(self.ptr.cast()) };
     }
+}
+
+#[cfg(test)]
+mod tests {
+    // Tests require CUDA device — run on GPU server only
+    // cargo test --features cuda -- gpu
 }

@@ -47,8 +47,7 @@ fn m3_prefill_latency_at_serve_shape() {
     w.input_proj_w.clear();
     w.input_proj_b.clear();
 
-    let mut bb =
-        GpuMamba3Backbone::new_with_dtype(0, &w, cfg.clone(), dm, 1, WeightDtype::F32).unwrap();
+    let mut bb = GpuMamba3Backbone::new_with_dtype(0, &w, cfg, dm, 1, WeightDtype::F32).unwrap();
     let stream = bb.stream().clone();
     let mut gpu_input = GpuBuffer::zeros(&stream, t * dm).unwrap();
     stream.synchronize().unwrap();
@@ -115,8 +114,7 @@ fn m3_train_step_at_multichunk_shape() {
             w.input_proj_b.clear();
         }
         let mut tr =
-            Mamba3Trainer::new_with_dtype(0, &w, cfg.clone(), cfg.d_model, batch, seq_len, dtype)
-                .unwrap();
+            Mamba3Trainer::new_with_dtype(0, &w, cfg, cfg.d_model, batch, seq_len, dtype).unwrap();
         let input = det(n, 0x91);
         let d_temporal = det(n, 0x92);
         for _ in 0..3 {

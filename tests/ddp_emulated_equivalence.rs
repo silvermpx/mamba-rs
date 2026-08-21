@@ -97,9 +97,7 @@ fn run_emulated_ddp_tier(
 
     let ew = EmulatedWorld::new(world).unwrap();
     let mut ranks: Vec<Mamba3Trainer> = (0..world)
-        .map(|_| {
-            Mamba3Trainer::new_with_dtype(0, &cpu, c.clone(), c.d_model, 1, seq_len, dtype).unwrap()
-        })
+        .map(|_| Mamba3Trainer::new_with_dtype(0, &cpu, c, c.d_model, 1, seq_len, dtype).unwrap())
         .collect();
     if bi_tier {
         for t in &ranks {

@@ -36,7 +36,7 @@ fn check_step_parity(d_state: usize) {
     let input_dim = cfg.d_model;
     let dm = cfg.d_model;
 
-    let cpu_bb = MambaBackbone::init(cfg.clone(), input_dim, 42);
+    let cpu_bb = MambaBackbone::init(cfg, input_dim, 42);
     let weights: MambaWeights = cpu_bb.weights().clone();
     let mut state = cpu_bb.alloc_state();
     let mut scratch = cpu_bb.alloc_scratch();
@@ -114,7 +114,7 @@ fn m1_step_cost_across_state_capacities() {
             rms_norm_eps: 1e-5,
         };
         let input_dim = cfg.d_model;
-        let cpu_bb = MambaBackbone::init(cfg.clone(), input_dim, 42);
+        let cpu_bb = MambaBackbone::init(cfg, input_dim, 42);
         let weights: MambaWeights = cpu_bb.weights().clone();
         let mut gpu_bb = GpuMambaBackbone::new(0, &weights, cfg, input_dim, 1).unwrap();
         let input = det(input_dim, 0x77);
