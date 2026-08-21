@@ -645,8 +645,8 @@ pub fn gpu_forward_mamba3_layer_mixed(
         // mutated by K4).
         {
             let cfg = cudarc::driver::LaunchConfig {
-                grid_dim: ((dims.batch * nc) as u32, nh as u32, 1),
-                block_dim: (hd as u32, 1, 1),
+                grid_dim: ((dims.batch * nc) as u32, nh.div_ceil(2) as u32, 1),
+                block_dim: (hd as u32, 2, 1),
                 shared_mem_bytes: 0,
             };
             let mut bld = ctx
@@ -707,8 +707,8 @@ pub fn gpu_forward_mamba3_layer_mixed(
         // f32 qk_dot/da_cumsum/prev_states/D.
         {
             let cfg = cudarc::driver::LaunchConfig {
-                grid_dim: ((dims.batch * nc) as u32, nh as u32, 1),
-                block_dim: (hd as u32, 1, 1),
+                grid_dim: ((dims.batch * nc) as u32, nh.div_ceil(2) as u32, 1),
+                block_dim: (hd as u32, 2, 1),
                 shared_mem_bytes: 0,
             };
             let mut bld = ctx

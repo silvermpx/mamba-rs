@@ -438,8 +438,8 @@ impl Mamba3Prefill {
             }
             {
                 let cfg = cudarc::driver::LaunchConfig {
-                    grid_dim: ((dims.batch * nc) as u32, nh as u32, 1),
-                    block_dim: (hd as u32, 1, 1),
+                    grid_dim: ((dims.batch * nc) as u32, nh.div_ceil(2) as u32, 1),
+                    block_dim: (hd as u32, 2, 1),
                     shared_mem_bytes: 0,
                 };
                 let mut b = ctx.stream.launch_builder(&m3k.m3_chunk_state_fwd);
@@ -518,8 +518,8 @@ impl Mamba3Prefill {
             {
                 let dp = lw.d_param.ptr();
                 let cfg = cudarc::driver::LaunchConfig {
-                    grid_dim: ((dims.batch * nc) as u32, nh as u32, 1),
-                    block_dim: (hd as u32, 1, 1),
+                    grid_dim: ((dims.batch * nc) as u32, nh.div_ceil(2) as u32, 1),
+                    block_dim: (hd as u32, 2, 1),
                     shared_mem_bytes: 0,
                 };
                 let mut b = ctx.stream.launch_builder(&m3k.m3_chunk_scan_fwd);
