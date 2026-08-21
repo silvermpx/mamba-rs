@@ -12,6 +12,7 @@ pub mod forward_mixed;
 pub mod inference;
 pub mod kernels;
 pub mod mamba3_gpu;
+pub mod prefill;
 pub mod state;
 pub mod trainer;
 pub mod training_graph;
