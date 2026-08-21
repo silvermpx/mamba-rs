@@ -66,6 +66,11 @@ chunked kernels.
 
 ### Changed
 
+- cudarc floor raised to 0.19.9: upstream gates CudaSlice/SyncOnDrop
+  teardown behind is_managing_stream_synchronization, so with per-slice
+  event tracking disabled (this crate's standing mode — the CUDA Graph
+  capture prerequisite) a drop can no longer issue a stream wait that
+  breaks an in-flight capture.
 - The chunked intra-chunk output kernel computes the decayed causal
   Q·K tile once per (chunk, head) in shared memory instead of once per
   lane; the chunk-state kernel hoists its per-step exponential and V

@@ -88,6 +88,9 @@ features = ["blocking"]
 tempfile = "3"
 
 [dependencies.cudarc]
-version = "0.19.8"
+# 0.19.9 floor: SyncOnDrop teardown gated behind is_managing_stream_
+# synchronization (PR 591) — the correct-drop story for our disabled
+# per-slice event tracking (the CUDA Graph capture prerequisite).
+version = "0.19.9"
 optional = true
 features = ["driver", "cublas", "nvrtc", "cuda-version-from-build-system"]
