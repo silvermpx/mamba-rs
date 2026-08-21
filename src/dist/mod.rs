@@ -23,6 +23,8 @@
 //! with no communicator involved.
 
 mod bootstrap;
+#[cfg(feature = "nccl")]
+pub mod comm;
 mod config;
 mod context;
 mod error;
@@ -30,6 +32,8 @@ mod fold;
 mod seed;
 
 pub use bootstrap::{Bootstrap, SupervisorStatus, attach, bootstrap};
+#[cfg(feature = "nccl")]
+pub use comm::MambaComm;
 pub use config::{Devices, DistConfig, ReduceContract, Rendezvous};
 pub use context::{DistContext, EmulatedWorld};
 pub use error::DistError;

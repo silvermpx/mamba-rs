@@ -33,6 +33,8 @@ enum ContextInner {
         barrier_dir: PathBuf,
         barrier_generation: std::cell::Cell<u64>,
         barrier_timeout: Duration,
+        #[cfg(feature = "nccl")]
+        comm: Option<super::comm::MambaComm>,
     },
 }
 
@@ -64,7 +66,43 @@ impl DistContext {
                 barrier_dir,
                 barrier_generation: std::cell::Cell::new(0),
                 barrier_timeout,
+                #[cfg(feature = "nccl")]
+                comm: None,
             },
+        }
+    }
+
+    /// Attach an initialized communicator (bootstrap does this for
+    /// multi-process worlds when the transport feature is on).
+    #[cfg(feature = "nccl")]
+    pub(super) fn set_comm(&mut self, c: super::comm::MambaComm) {
+        if let ContextInner::Process { comm, .. } = &mut self.inner {
+            *comm = Some(c);
+        }
+    }
+
+    /// In-place SUM of the flat f32 gradient arena across ranks — the
+    /// transport half of the gradient exchange. The mean scale and the
+    /// optimizer tail stay with the trainer (sum then multiply by 1/W,
+    /// exact for power-of-two worlds). Single-process worlds return
+    /// immediately.
+    #[cfg(feature = "cuda")]
+    pub fn all_reduce_grad_sum(
+        &self,
+        arena: &mut crate::mamba_ssm::gpu::buffers::GpuBuffer,
+        stream: &cudarc::driver::CudaStream,
+    ) -> Result<(), DistError> {
+        match &self.inner {
+            ContextInner::Single { .. } => Ok(()),
+            #[cfg(feature = "nccl")]
+            ContextInner::Process { comm: Some(c), .. } => {
+                c.all_reduce_sum_f32(arena.cached_ptr(), arena.len(), stream)
+            }
+            ContextInner::Process { .. } => Err(DistError::Transport(
+                "no communicator attached to this rank (built without the nccl \
+                 feature, or bootstrap did not initialize one)"
+                    .into(),
+            )),
         }
     }
 

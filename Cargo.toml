@@ -30,6 +30,10 @@ default = []
 # half + bytemuck are needed by the cuda buffers (DtypedBuf bf16/f16 cast
 # helpers); they must be in scope for `cargo build --features cuda` alone.
 cuda = ["cudarc", "dep:half", "dep:bytemuck"]
+# Distributed data-parallel over NCCL. The cudarc NCCL binding is pinned
+# to one wire version explicitly; the crate-and-libnccl pair must move
+# together (the same discipline as any native-library pair).
+nccl = ["cuda", "cudarc/nccl-02030"]
 accelerate = []
 gemm-blas = ["gemm"]
 hf = ["dep:half", "dep:bytemuck", "dep:serde", "dep:serde_json"]

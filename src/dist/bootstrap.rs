@@ -217,14 +217,31 @@ fn rank_context(cfg: &DistConfig, er: EnvRank) -> Result<DistContext, DistError>
     let barrier_dir = dir.join(&job);
     std::fs::create_dir_all(&barrier_dir)
         .map_err(|e| DistError::Rendezvous(format!("create {}: {e}", barrier_dir.display())))?;
-    Ok(DistContext::process(
+    #[cfg_attr(not(feature = "nccl"), allow(unused_mut))]
+    let mut ctx = DistContext::process(
         er.rank,
         er.world,
         er.device,
         seed,
-        barrier_dir,
+        barrier_dir.clone(),
         cfg.collective_timeout,
-    ))
+    );
+    // With the transport feature on, join the NCCL world here: bind the
+    // rank's CUDA device (the primary context the trainer will reuse),
+    // exchange the unique id through the job's rendezvous directory, and
+    // run the blocking init.
+    #[cfg(feature = "nccl")]
+    {
+        use super::comm::MambaComm;
+        MambaComm::preflight_version()?;
+        cudarc::driver::CudaContext::new(er.device)
+            .map_err(|e| DistError::Transport(format!("bind device {}: {e:?}", er.device)))?;
+        let id_path = barrier_dir.join("nccl-id");
+        let id = MambaComm::exchange_unique_id(&id_path, er.rank, cfg.init_timeout)?;
+        let comm = MambaComm::init(id, er.rank, er.world)?;
+        ctx.set_comm(comm);
+    }
+    Ok(ctx)
 }
 
 /// Join a world whose ranks an EXTERNAL launcher started. Errs when the

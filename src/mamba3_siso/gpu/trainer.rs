@@ -217,6 +217,41 @@ impl Mamba3Trainer {
         }
     }
 
+    /// Data-parallel applying backward: local backward with the window
+    /// left open, cross-rank SUM of the flat gradient arena, the mean
+    /// scale, then the optimizer tail. With a single-process world this
+    /// is byte-identical to a plain `backward_step`. Micro-batch
+    /// (accumulate-only) calls stay purely local — the reduction
+    /// happens once per optimizer step, on the window-closing call.
+    pub fn backward_step_dist(
+        &mut self,
+        d_temporal: &[f32],
+        opts: BackwardOpts,
+        dist: &crate::dist::DistContext,
+    ) -> Result<BackwardMetrics, String> {
+        let world = dist.world_size();
+        if world == 1 || opts.accumulate_only {
+            return self.backward_step(d_temporal, opts);
+        }
+        let clip = opts.clip_max_norm;
+        let m = self.backward_step(
+            d_temporal,
+            BackwardOpts::default().with_accumulate_only(true),
+        )?;
+        debug_assert!(!m.optimizer_stepped);
+        let stream = self.ctx().stream.clone();
+        dist.all_reduce_grad_sum(self.grad_arena(), &stream)?;
+        // Mean = sum then multiply: for power-of-two worlds the scale
+        // only moves exponents (exact); other sizes still get one
+        // deterministic per-element rounding.
+        let inv_w = 1.0f32 / world as f32;
+        match &mut self.inner {
+            Trainer3Inner::F32(t) => scale_grads(&t.ctx, &mut t.grads.flat, inv_w)?,
+            Trainer3Inner::Mixed(t) => scale_grads(&t.ctx, &mut t.grads.flat, inv_w)?,
+        }
+        self.apply_step(clip)
+    }
+
     /// Borrow the flat f32 gradient arena — the single contiguous buffer
     /// every parameter's gradient accumulates into. A distributed
     /// reducer sums this buffer across ranks between the window-closing
