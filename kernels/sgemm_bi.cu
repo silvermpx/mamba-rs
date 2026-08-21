@@ -1,9 +1,15 @@
-// Batch-invariant deterministic f32 SGEMM — training kernel.
+// Batch-invariant deterministic SGEMM — training kernels.
 //
 // Based on siboehm's warptiling kernel (93.7% cuBLAS on A6000).
 // Adapted for NVRTC compilation (no templates, no includes).
 //
-// Three variants for training:
+// Dtypes: f32 is the base contract; bf16/f16 variants (typed section at
+// the end of this file) share the same kernel structure with typed I/O
+// and f32 accumulation throughout — a typed kernel is bit-identical to
+// upcasting its inputs and running the f32 kernel. dW and bias stay f32
+// in every dtype (master-gradient invariant).
+//
+// Three operand layouts for training:
 //   NN (forward):     C[M,N]  = alpha * A[M,K] @ B[K,N] + beta*C + bias
 //   TN (backward dW): C[K,N] += alpha * A^T[K,M] @ B[M,N]
 //   NT (backward dX): C[M,K]  = alpha * A[M,N] @ B^T[N,K]
@@ -4181,7 +4187,7 @@ void sgemm_transpose_f32_2d(
 }
 
 // ============================================================================
-// Typed (bf16/f16) variants — typed sync-load: sync-load buckets.
+// Typed (bf16/f16) variants — the sync-load buckets.
 // ============================================================================
 // Contract (per the typed-triad design research):
 //   - X / W / Y / dY / dX are T_ACT (typed I/O); loads upcast via to_f at the

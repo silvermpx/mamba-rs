@@ -1,4 +1,4 @@
-//! Deterministic batch-invariant f32 SGEMM dispatcher (training triad).
+//! Deterministic batch-invariant SGEMM dispatcher (training triad).
 //!
 //! Ported from SQV-RS `sqv_uaac` (`blas_gpu.rs` + `kernels/sgemm_bi.cu`,
 //! siboehm warptiling lineage). Three entry points used when
@@ -8,6 +8,12 @@
 //!   - [`sgemm_bi_backward_dw`]  TN: `dW += X^T @ dY` (accumulated)
 //!   - [`sgemm_bi_backward_dx`]  NT: `dX = dY @ W^T`
 //!
+//! Dtypes: the f32 triad is the base; the typed (bf16/f16) entry points
+//! further down route homogeneous typed operand triples through the
+//! typed kernel variants — typed I/O, f32 accumulation, dW/bias always
+//! f32 — bit-identical to upcasting the inputs and running the f32
+//! kernels.
+//!
 //! Every shape routes through a fixed-tile custom kernel (Big / Slim /
 //! narrow / GEMV / split-K with deterministic tree reduce) — never cuBLAS.
 //! Guarantees, in decreasing strength:
@@ -16,7 +22,7 @@
 //!     bucket (the per-cell K order is fixed within a bucket; crossing a
 //!     bucket boundary — e.g. ultra-thin M<32 vs split-K M>=32 — changes
 //!     the reduction association deterministically);
-//!   - full f32 precision (no TF32 mantissa truncation).
+//!   - full f32 accumulation precision (no TF32 mantissa truncation).
 //!
 //! Unsupported shapes return `Err` (instead of SQV's panic): callers should
 //! disable the batch-invariant flag for such configs rather than silently
