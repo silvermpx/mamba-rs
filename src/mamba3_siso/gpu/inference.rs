@@ -15,6 +15,7 @@
 use super::kernels::Mamba3Kernels;
 use super::weights::GpuMamba3WeightsInf;
 use crate::mamba_ssm::gpu::buffers::GpuBuffer;
+use crate::mamba_ssm::gpu::context::GpuCtx;
 use crate::mamba_ssm::gpu::device::GpuDevice;
 use crate::mamba3_siso::config::Mamba3Config;
 use crate::mamba3_siso::weights::Mamba3Weights;
@@ -329,13 +330,11 @@ impl Mamba3GpuInferenceMixedScratch {
 pub struct Mamba3GpuInferenceEngine {
     pub kernels: Mamba3Kernels,
     pub weights: GpuMamba3WeightsInf,
-    pub stream: Stream,
-    pub blas: Arc<cudarc::cublas::CudaBlas>,
-    /// cuBLAS workspace backing the handle above: the handle
-    /// points at this allocation for CUDA-Graph-safe GEMM scratch — dropping
-    /// it while the handle lives is exactly the use-after-free the buffer
-    /// exists to prevent. Owned here, never read directly.
-    _blas_workspace: cudarc::driver::CudaSlice<u8>,
+    /// Full CUDA execution context (stream + cuBLAS with its Graph-safe
+    /// workspace + GEMM-tier flags). One context for step, prefill and the
+    /// lm-head GEMMs alike: the batch-invariant / tensor-core routing and
+    /// the flag belt all hang off it.
+    pub ctx: GpuCtx,
     pub cfg: Mamba3Config,
     pub batch: usize,
     pub input_dim: usize,
@@ -356,20 +355,19 @@ impl Mamba3GpuInferenceEngine {
         batch: usize,
     ) -> Result<Self, String> {
         cfg.validate()?;
-        unsafe { device.context().disable_event_tracking() };
-        let stream = device.fork_stream()?;
+        // GpuCtx disables cudarc's per-slice event tracking itself (the
+        // CUDA-Graph capture prerequisite) and owns the cuBLAS handle plus
+        // its Graph-safe workspace.
+        let ctx = GpuCtx::new(device)?;
         let arch = GpuDevice::nvrtc_arch(device.compute_capability);
         let kernels = Mamba3Kernels::compile(device.context(), arch)?;
-        let (blas, ws) = device.create_cublas(&stream)?;
-        let weights = GpuMamba3WeightsInf::from_cpu(&stream, cpu_weights, input_dim)?;
+        let weights = GpuMamba3WeightsInf::from_cpu(&ctx.stream, cpu_weights, input_dim)?;
         let identity_proj = cpu_weights.input_proj_w.is_empty();
 
         Ok(Self {
             kernels,
             weights,
-            stream,
-            blas: Arc::new(blas),
-            _blas_workspace: ws,
+            ctx,
             cfg,
             batch,
             input_dim,
@@ -394,7 +392,7 @@ impl Mamba3GpuInferenceEngine {
     ) -> Result<(), String> {
         let snap_state = state.ssm_state.cached_ptr();
         let snap_scratch = scratch.gpu_input.cached_ptr();
-        let stream = self.stream.clone();
+        let stream = self.ctx.stream.clone();
         let graph = crate::mamba_ssm::gpu::graph_capture::capture_into_graph(&stream, || {
             self.step_kernels(state, scratch)
         })?;
@@ -412,12 +410,82 @@ impl Mamba3GpuInferenceEngine {
 
     /// Allocate zeroed inference state.
     pub fn alloc_state(&self) -> Result<Mamba3GpuInferenceState, String> {
-        Mamba3GpuInferenceState::zeros(&self.stream, self.batch, &self.cfg)
+        Mamba3GpuInferenceState::zeros(&self.ctx.stream, self.batch, &self.cfg)
     }
 
     /// Allocate scratch buffers.
     pub fn alloc_scratch(&self) -> Result<Mamba3GpuInferenceScratch, String> {
-        Mamba3GpuInferenceScratch::zeros(&self.stream, self.batch, &self.cfg, self.input_dim)
+        Mamba3GpuInferenceScratch::zeros(&self.ctx.stream, self.batch, &self.cfg, self.input_dim)
+    }
+
+    /// CUDA execution context — e.g. to enable batch-invariant or
+    /// tensor-core GEMM routing before generation.
+    pub fn ctx(&self) -> &GpuCtx {
+        &self.ctx
+    }
+
+    /// Launch dimensions for a prompt window of `seq_len` on this engine.
+    fn prefill_dims(&self, seq_len: usize) -> super::state::GpuMamba3Dims {
+        super::state::GpuMamba3Dims {
+            batch: self.batch,
+            d_model: self.cfg.d_model,
+            d_inner: self.cfg.d_inner(),
+            d_state: self.cfg.d_state,
+            nheads: self.cfg.nheads(),
+            headdim: self.cfg.headdim,
+            ngroups: self.cfg.ngroups,
+            in_proj_dim: self.cfg.in_proj_out_dim(),
+            seq_len,
+            mamba_input_dim: self.input_dim,
+            n_layers: self.cfg.n_layers,
+            n_angles: self.cfg.num_rope_angles(),
+            a_floor: self.cfg.a_floor,
+            is_outproj_norm: self.cfg.is_outproj_norm,
+            rms_norm_eps: self.cfg.rms_norm_eps,
+            use_parallel_scan: true,
+        }
+    }
+
+    /// Allocate a prefill executor for a FIXED prompt length (scratch is
+    /// shaped by `seq_len`; reuse it for windows of the same length).
+    pub fn alloc_prefill(&self, seq_len: usize) -> Result<super::prefill::Mamba3Prefill, String> {
+        super::prefill::Mamba3Prefill::new(&self.ctx.stream, &self.prefill_dims(seq_len))
+    }
+
+    /// One-pass prompt window straight into the persistent decode state:
+    /// after this returns, `state` sits after the window's last token and
+    /// `step()` continues from it. `last_hidden` (`[batch * d_model]`)
+    /// receives the final post-norm hidden state. `carry_state = false`
+    /// zeroes the state first (stateless window); `true` continues across
+    /// the seam with the trapezoidal boundary fold.
+    pub fn prefill_sequence(
+        &self,
+        prefill: &mut super::prefill::Mamba3Prefill,
+        mamba_input: &GpuBuffer,
+        seq_len: usize,
+        state: &mut Mamba3GpuInferenceState,
+        carry_state: bool,
+        last_hidden: &mut GpuBuffer,
+    ) -> Result<(), String> {
+        let dims = self.prefill_dims(seq_len);
+        prefill.run(
+            &super::prefill::Mamba3PrefillRun {
+                ctx: &self.ctx,
+                kernels: &self.kernels,
+                dims: &dims,
+                weights: &self.weights,
+                mamba_input,
+                identity_proj: self.identity_proj,
+                carry_state,
+            },
+            super::state::GpuMamba3StateBufs {
+                ssm: &mut state.ssm_state,
+                k: &mut state.k_state,
+                v: &mut state.v_state,
+                angle: &mut state.angle_state,
+            },
+            last_hidden,
+        )
     }
 
     /// Config reference.
@@ -450,11 +518,11 @@ impl Mamba3GpuInferenceEngine {
             debug_assert_eq!(self.input_dim, dm);
             scratch
                 .temporal
-                .copy_from_raw(&scratch.gpu_input, &self.stream)?;
+                .copy_from_raw(&scratch.gpu_input, &self.ctx.stream)?;
         } else {
             // Input projection SGEMM
             sgemm_no_bias(
-                &self.blas,
+                &self.ctx.blas,
                 &scratch.temporal,
                 &scratch.gpu_input,
                 self.weights.input_proj_w.ptr(),
@@ -467,7 +535,10 @@ impl Mamba3GpuInferenceEngine {
                 let n = b * dm;
                 let n_i = n as i32;
                 let grid = crate::mamba_ssm::gpu::launch::grid_1d(n);
-                let mut builder = self.stream.launch_builder(&self.kernels.vec_add_inplace);
+                let mut builder = self
+                    .ctx
+                    .stream
+                    .launch_builder(&self.kernels.vec_add_inplace);
                 builder.arg(scratch.temporal.inner());
                 builder.arg(self.weights.input_proj_b.inner());
                 builder.arg(&n_i);
@@ -488,14 +559,14 @@ impl Mamba3GpuInferenceEngine {
                     scratch.post_norm.cached_ptr(),
                     scratch.temporal.cached_ptr(),
                     bytes,
-                    self.stream.cu_stream(),
+                    self.ctx.stream.cu_stream(),
                 );
             }
         }
         {
             let grid = crate::mamba_ssm::gpu::launch::grid_norm(b, dm);
             let eps: f32 = self.cfg.rms_norm_eps;
-            let mut builder = self.stream.launch_builder(&self.kernels.rmsnorm_fwd);
+            let mut builder = self.ctx.stream.launch_builder(&self.kernels.rmsnorm_fwd);
             builder.arg(scratch.temporal.inner());
             builder.arg(scratch.rms_buf.inner());
             builder.arg(scratch.post_norm.inner());
@@ -557,7 +628,12 @@ impl Mamba3GpuInferenceEngine {
             let dst = scratch.residual.cached_ptr();
             let bytes = b * dm * std::mem::size_of::<f32>();
             let result = unsafe {
-                cudarc::driver::sys::cuMemcpyDtoDAsync_v2(dst, src, bytes, self.stream.cu_stream())
+                cudarc::driver::sys::cuMemcpyDtoDAsync_v2(
+                    dst,
+                    src,
+                    bytes,
+                    self.ctx.stream.cu_stream(),
+                )
             };
             if result != cudarc::driver::sys::CUresult::CUDA_SUCCESS {
                 return Err(format!("D2D copy residual: {:?}", result));
@@ -569,7 +645,7 @@ impl Mamba3GpuInferenceEngine {
             let grid = crate::mamba_ssm::gpu::launch::grid_norm(b, dm);
             let eps: f32 = self.cfg.rms_norm_eps;
             let nw_ptr = lw.norm_weight.ptr();
-            let mut builder = self.stream.launch_builder(&self.kernels.rmsnorm_fwd);
+            let mut builder = self.ctx.stream.launch_builder(&self.kernels.rmsnorm_fwd);
             builder.arg(scratch.post_norm.inner());
             builder.arg(scratch.rms_buf.inner());
             builder.arg(scratch.residual.inner());
@@ -582,7 +658,7 @@ impl Mamba3GpuInferenceEngine {
 
         // F2: in_proj SGEMM [batch, d_model] → [batch, in_proj_dim]
         sgemm_no_bias(
-            &self.blas,
+            &self.ctx.blas,
             &scratch.proj,
             &scratch.post_norm,
             lw.in_proj_w.ptr(),
@@ -595,7 +671,7 @@ impl Mamba3GpuInferenceEngine {
         {
             let n = b * ip;
             let grid = crate::mamba_ssm::gpu::launch::grid_1d(n);
-            let mut builder = self.stream.launch_builder(&self.kernels.m3_split);
+            let mut builder = self.ctx.stream.launch_builder(&self.kernels.m3_split);
             builder.arg(scratch.z.inner());
             builder.arg(scratch.x.inner());
             builder.arg(scratch.b_raw.inner());
@@ -627,7 +703,7 @@ impl Mamba3GpuInferenceEngine {
                 block_dim: (ds as u32, 1, 1),
                 shared_mem_bytes: (ds * 4) as u32,
             };
-            let mut builder = self.stream.launch_builder(&self.kernels.bcnorm_fwd);
+            let mut builder = self.ctx.stream.launch_builder(&self.kernels.bcnorm_fwd);
             builder.arg(scratch.b_normed.inner());
             builder.arg(scratch.b_rms.inner());
             builder.arg(scratch.b_raw.inner());
@@ -647,7 +723,7 @@ impl Mamba3GpuInferenceEngine {
                 block_dim: (ds as u32, 1, 1),
                 shared_mem_bytes: (ds * 4) as u32,
             };
-            let mut builder = self.stream.launch_builder(&self.kernels.bcnorm_fwd);
+            let mut builder = self.ctx.stream.launch_builder(&self.kernels.bcnorm_fwd);
             builder.arg(scratch.c_normed.inner());
             builder.arg(scratch.c_rms.inner());
             builder.arg(scratch.c_raw.inner());
@@ -664,7 +740,7 @@ impl Mamba3GpuInferenceEngine {
         {
             let n = b * nh * ds;
             let grid = crate::mamba_ssm::gpu::launch::grid_1d(n);
-            let mut builder = self.stream.launch_builder(&self.kernels.bc_bias_add);
+            let mut builder = self.ctx.stream.launch_builder(&self.kernels.bc_bias_add);
             builder.arg(scratch.b_biased.inner());
             builder.arg(scratch.b_normed.inner());
             builder.arg(lw.b_bias.inner());
@@ -679,7 +755,7 @@ impl Mamba3GpuInferenceEngine {
         {
             let n = b * nh * ds;
             let grid = crate::mamba_ssm::gpu::launch::grid_1d(n);
-            let mut builder = self.stream.launch_builder(&self.kernels.bc_bias_add);
+            let mut builder = self.ctx.stream.launch_builder(&self.kernels.bc_bias_add);
             builder.arg(scratch.c_biased.inner());
             builder.arg(scratch.c_normed.inner());
             builder.arg(lw.c_bias.inner());
@@ -700,6 +776,7 @@ impl Mamba3GpuInferenceEngine {
             };
             let a_ptr = state.angle_state.inner_at(a_off);
             let mut builder = self
+                .ctx
                 .stream
                 .launch_builder(&self.kernels.m3_angle_dt_fwd_batch);
             // CUDA signature: angle_cumsum (output), angle_state (in/out)
@@ -715,7 +792,7 @@ impl Mamba3GpuInferenceEngine {
             // rope_fwd: rotate B and C pairs
             let n = b * nh * ds;
             let grid = crate::mamba_ssm::gpu::launch::grid_1d(n);
-            let mut builder = self.stream.launch_builder(&self.kernels.rope_fwd);
+            let mut builder = self.ctx.stream.launch_builder(&self.kernels.rope_fwd);
             builder.arg(scratch.k_cur.inner());
             builder.arg(scratch.q_cur.inner());
             builder.arg(scratch.b_biased.inner());
@@ -735,13 +812,13 @@ impl Mamba3GpuInferenceEngine {
                         scratch.k_cur.cached_ptr(),
                         scratch.b_biased.cached_ptr(),
                         bytes,
-                        self.stream.cu_stream(),
+                        self.ctx.stream.cu_stream(),
                     );
                     cudarc::driver::sys::cuMemcpyDtoDAsync_v2(
                         scratch.q_cur.cached_ptr(),
                         scratch.c_biased.cached_ptr(),
                         bytes,
-                        self.stream.cu_stream(),
+                        self.ctx.stream.cu_stream(),
                     );
                 }
             }
@@ -752,7 +829,7 @@ impl Mamba3GpuInferenceEngine {
             let n = b * nh;
             let n_i = n as i32;
             let grid = crate::mamba_ssm::gpu::launch::grid_1d(n);
-            let mut builder = self.stream.launch_builder(&self.kernels.m3_compute_abg);
+            let mut builder = self.ctx.stream.launch_builder(&self.kernels.m3_compute_abg);
             builder.arg(scratch.alpha.inner());
             builder.arg(scratch.beta.inner());
             builder.arg(scratch.gamma.inner());
@@ -773,7 +850,7 @@ impl Mamba3GpuInferenceEngine {
             let ssm_ptr = state.ssm_state.inner_at(ssm_off);
             let k_ptr = state.k_state.inner_at(k_off);
             let v_ptr = state.v_state.inner_at(v_off);
-            let mut builder = self.stream.launch_builder(&self.kernels.m3_step_fwd);
+            let mut builder = self.ctx.stream.launch_builder(&self.kernels.m3_step_fwd);
             // CUDA signature: ssm_state, k_state, v_state, y, ...
             builder.arg(&ssm_ptr);
             builder.arg(&k_ptr);
@@ -796,7 +873,10 @@ impl Mamba3GpuInferenceEngine {
         // F7: Output gating
         if self.cfg.is_outproj_norm {
             let grid = crate::mamba_ssm::gpu::launch::grid_norm(b, di);
-            let mut builder = self.stream.launch_builder(&self.kernels.rmsnorm_gated_fwd);
+            let mut builder = self
+                .ctx
+                .stream
+                .launch_builder(&self.kernels.rmsnorm_gated_fwd);
             builder.arg(scratch.gated.inner());
             builder.arg(scratch.gated_rms_buf.inner()); // rms_vals (rstd per group)
             builder.arg(scratch.y.inner());
@@ -812,7 +892,7 @@ impl Mamba3GpuInferenceEngine {
             let n = b * di;
             let n_i = n as i32;
             let grid = crate::mamba_ssm::gpu::launch::grid_1d(n);
-            let mut builder = self.stream.launch_builder(&self.kernels.silu_gate_fwd);
+            let mut builder = self.ctx.stream.launch_builder(&self.kernels.silu_gate_fwd);
             builder.arg(scratch.gated.inner());
             builder.arg(scratch.y.inner());
             builder.arg(scratch.z.inner());
@@ -822,7 +902,7 @@ impl Mamba3GpuInferenceEngine {
 
         // F8: out_proj SGEMM [batch, d_inner] → [batch, d_model]
         sgemm_no_bias(
-            &self.blas,
+            &self.ctx.blas,
             &scratch.temporal,
             &scratch.gated,
             lw.out_proj_w.ptr(),
@@ -836,7 +916,10 @@ impl Mamba3GpuInferenceEngine {
             let n = b * dm;
             let n_i = n as i32;
             let grid = crate::mamba_ssm::gpu::launch::grid_1d(n);
-            let mut builder = self.stream.launch_builder(&self.kernels.vec_add_inplace);
+            let mut builder = self
+                .ctx
+                .stream
+                .launch_builder(&self.kernels.vec_add_inplace);
             builder.arg(scratch.temporal.inner());
             builder.arg(scratch.residual.inner());
             builder.arg(&n_i);
@@ -861,7 +944,7 @@ impl Mamba3GpuInferenceEngine {
         scratch: &mut Mamba3GpuInferenceScratch,
     ) -> Result<(), String> {
         // H2D: upload input (outside graph)
-        scratch.gpu_input.upload(&self.stream, input)?;
+        scratch.gpu_input.upload(&self.ctx.stream, input)?;
 
         // GPU kernel pipeline (graph replay or individual launches)
         if let Some(ref g) = self.graph {
@@ -881,10 +964,11 @@ impl Mamba3GpuInferenceEngine {
         }
 
         // Sync + D2H download
-        self.stream
+        self.ctx
+            .stream
             .synchronize()
             .map_err(|e| format!("sync: {e:?}"))?;
-        let cpu_out = scratch.temporal.to_cpu(&self.stream)?;
+        let cpu_out = scratch.temporal.to_cpu(&self.ctx.stream)?;
         output[..cpu_out.len()].copy_from_slice(&cpu_out);
 
         Ok(())
@@ -900,7 +984,7 @@ impl Mamba3GpuInferenceEngine {
         state: &mut Mamba3GpuInferenceState,
         scratch: &mut Mamba3GpuInferenceScratch,
     ) -> Result<(), String> {
-        scratch.gpu_input.upload(&self.stream, input)?;
+        scratch.gpu_input.upload(&self.ctx.stream, input)?;
         if let Some(ref g) = self.graph {
             assert_eq!(state.ssm_state.cached_ptr(), self.captured_state_ptr);
             assert_eq!(scratch.gpu_input.cached_ptr(), self.captured_scratch_ptr);
@@ -949,7 +1033,7 @@ impl Mamba3GpuInferenceMixed {
         // pointer views).
         let engine = Mamba3GpuInferenceEngine::new(device, cpu_weights, cfg, input_dim, batch)?;
         let mixed_weights =
-            GpuMamba3MixedWeights::from_cpu(&engine.stream, cpu_weights, bulk_dtype)?;
+            GpuMamba3MixedWeights::from_cpu(&engine.ctx.stream, cpu_weights, bulk_dtype)?;
         Ok(Self {
             engine,
             mixed_weights,
@@ -965,7 +1049,7 @@ impl Mamba3GpuInferenceMixed {
 
     pub fn alloc_mixed_scratch(&self) -> Result<Mamba3GpuInferenceMixedScratch, String> {
         Mamba3GpuInferenceMixedScratch::zeros(
-            &self.engine.stream,
+            &self.engine.ctx.stream,
             self.engine.batch,
             &self.engine.cfg,
             self.engine.input_dim,
@@ -974,7 +1058,7 @@ impl Mamba3GpuInferenceMixed {
     }
 
     pub fn ctx_stream(&self) -> &Stream {
-        &self.engine.stream
+        &self.engine.ctx.stream
     }
 
     pub fn bulk_dtype(&self) -> WeightDtype {
@@ -1039,7 +1123,7 @@ impl Mamba3GpuInferenceMixed {
         // is CUDA Graph safe (cuMemcpyDtoDAsync on raw ptrs, no SyncOnDrop).
         scratch
             .residual
-            .copy_from_raw(&scratch.gpu_input, &engine.stream)?;
+            .copy_from_raw(&scratch.gpu_input, &engine.ctx.stream)?;
 
         let f32_sz = std::mem::size_of::<f32>() as u64;
 
@@ -1056,6 +1140,7 @@ impl Mamba3GpuInferenceMixed {
                 let eps: f32 = engine.cfg.rms_norm_eps;
                 let grid = crate::mamba_ssm::gpu::launch::grid_norm(b, dm);
                 let mut bld = engine
+                    .ctx
                     .stream
                     .launch_builder(k.rmsnorm_fwd_f32in_typed.get(dt));
                 let pn_ptr = scratch.post_norm.cached_ptr();
@@ -1074,7 +1159,7 @@ impl Mamba3GpuInferenceMixed {
 
             // F2: in_proj GEMM typed (bf16 × bf16 → bf16).
             gpu_gemm_typed_raw_no_bias(
-                &engine.blas,
+                &engine.ctx.blas,
                 TypedPtr {
                     ptr: scratch.proj.cached_ptr(),
                     dtype: dt,
@@ -1094,7 +1179,7 @@ impl Mamba3GpuInferenceMixed {
             {
                 let n = b * ip;
                 let grid = grid_1d(n);
-                let mut bld = engine.stream.launch_builder(k.m3_split_typed.get(dt));
+                let mut bld = engine.ctx.stream.launch_builder(k.m3_split_typed.get(dt));
                 let z_ptr = scratch.z.cached_ptr();
                 let x_ptr = scratch.x.cached_ptr();
                 let br_ptr = scratch.b_raw.cached_ptr();
@@ -1147,7 +1232,10 @@ impl Mamba3GpuInferenceMixed {
                 let cs_ptr = scratch.c_raw.cached_ptr();
                 let bw_ptr = lw.b_norm_weight.ptr();
                 let cw_ptr = lw.c_norm_weight.ptr();
-                let mut bld = engine.stream.launch_builder(k.bcnorm_fwd_bc_typed.get(dt));
+                let mut bld = engine
+                    .ctx
+                    .stream
+                    .launch_builder(k.bcnorm_fwd_bc_typed.get(dt));
                 bld.arg(&bn_ptr);
                 bld.arg(&cn_ptr);
                 bld.arg(&br_ptr);
@@ -1179,7 +1267,10 @@ impl Mamba3GpuInferenceMixed {
                 let cn_ptr = scratch.c_normed.cached_ptr();
                 let bbi_ptr = lw.b_bias.ptr();
                 let cbi_ptr = lw.c_bias.ptr();
-                let mut bld = engine.stream.launch_builder(k.bc_bias_add_bc_typed.get(dt));
+                let mut bld = engine
+                    .ctx
+                    .stream
+                    .launch_builder(k.bc_bias_add_bc_typed.get(dt));
                 bld.arg(&bb_ptr);
                 bld.arg(&cb_ptr);
                 bld.arg(&bn_ptr);
@@ -1205,7 +1296,7 @@ impl Mamba3GpuInferenceMixed {
                 let ac_ptr = scratch.angle_cumsum.cached_ptr();
                 let ar_ptr = scratch.angles_raw.cached_ptr();
                 let dt_ptr = scratch.dt.cached_ptr();
-                let mut bld = engine.stream.launch_builder(&k.m3_angle_dt_fwd_batch);
+                let mut bld = engine.ctx.stream.launch_builder(&k.m3_angle_dt_fwd_batch);
                 // Pass cached raw pointers (CUDA Graph safe) — .inner() creates
                 // SyncOnDrop guards that invalidate capture.
                 bld.arg(&ac_ptr);
@@ -1220,7 +1311,7 @@ impl Mamba3GpuInferenceMixed {
                 // rope typed: half B/C, f32 angle_cumsum.
                 let n = b * nh * ds;
                 let grid = grid_1d(n);
-                let mut bld = engine.stream.launch_builder(k.rope_fwd_typed.get(dt));
+                let mut bld = engine.ctx.stream.launch_builder(k.rope_fwd_typed.get(dt));
                 let kc_ptr = scratch.k_cur.cached_ptr();
                 let qc_ptr = scratch.q_cur.cached_ptr();
                 let bb_ptr = scratch.b_biased.cached_ptr();
@@ -1244,13 +1335,13 @@ impl Mamba3GpuInferenceMixed {
                         scratch.k_cur.cached_ptr(),
                         scratch.b_biased.cached_ptr(),
                         bytes,
-                        engine.stream.cu_stream(),
+                        engine.ctx.stream.cu_stream(),
                     );
                     cudarc::driver::sys::cuMemcpyDtoDAsync_v2(
                         scratch.q_cur.cached_ptr(),
                         scratch.c_biased.cached_ptr(),
                         bytes,
-                        engine.stream.cu_stream(),
+                        engine.ctx.stream.cu_stream(),
                     );
                 }
             }
@@ -1260,7 +1351,7 @@ impl Mamba3GpuInferenceMixed {
                 let n = b * nh;
                 let n_i = n as i32;
                 let grid = grid_1d(n);
-                let mut bld = engine.stream.launch_builder(&k.m3_compute_abg);
+                let mut bld = engine.ctx.stream.launch_builder(&k.m3_compute_abg);
                 bld.arg(scratch.alpha.inner());
                 bld.arg(scratch.beta.inner());
                 bld.arg(scratch.gamma.inner());
@@ -1281,7 +1372,10 @@ impl Mamba3GpuInferenceMixed {
                 let ssm_ptr = state.ssm_state.inner_at(ssm_off);
                 let kst_ptr = state.k_state.inner_at(k_off);
                 let vst_ptr = state.v_state.inner_at(v_off);
-                let mut bld = engine.stream.launch_builder(k.m3_step_fwd_typed.get(dt));
+                let mut bld = engine
+                    .ctx
+                    .stream
+                    .launch_builder(k.m3_step_fwd_typed.get(dt));
                 let y_ptr = scratch.y.cached_ptr();
                 let x_ptr = scratch.x.cached_ptr();
                 let kc_ptr = scratch.k_cur.cached_ptr();
@@ -1312,6 +1406,7 @@ impl Mamba3GpuInferenceMixed {
             if cfg.is_outproj_norm {
                 let grid = crate::mamba_ssm::gpu::launch::grid_norm(b, di);
                 let mut bld = engine
+                    .ctx
                     .stream
                     .launch_builder(k.rmsnorm_gated_fwd_typed.get(dt));
                 let gated_ptr = scratch.gated.cached_ptr();
@@ -1334,7 +1429,10 @@ impl Mamba3GpuInferenceMixed {
                 let n = b * di;
                 let n_i = n as i32;
                 let grid = grid_1d(n);
-                let mut bld = engine.stream.launch_builder(k.silu_gate_fwd_typed.get(dt));
+                let mut bld = engine
+                    .ctx
+                    .stream
+                    .launch_builder(k.silu_gate_fwd_typed.get(dt));
                 let gated_ptr = scratch.gated.cached_ptr();
                 let y_ptr = scratch.y.cached_ptr();
                 let z_ptr = scratch.z.cached_ptr();
@@ -1347,7 +1445,7 @@ impl Mamba3GpuInferenceMixed {
 
             // F8: out_proj GEMM typed.
             gpu_gemm_typed_raw_no_bias(
-                &engine.blas,
+                &engine.ctx.blas,
                 TypedPtr {
                     ptr: scratch.temporal.cached_ptr(),
                     dtype: dt,
@@ -1368,6 +1466,7 @@ impl Mamba3GpuInferenceMixed {
                 let n = (b * dm) as i32;
                 let grid = grid_1d(b * dm);
                 let mut bld = engine
+                    .ctx
                     .stream
                     .launch_builder(k.residual_add_f32_typed.get(dt));
                 let r_ptr = scratch.residual.cached_ptr();
@@ -1386,6 +1485,7 @@ impl Mamba3GpuInferenceMixed {
             let grid = crate::mamba_ssm::gpu::launch::grid_norm(b, dm);
             let eps: f32 = engine.cfg.rms_norm_eps;
             let mut bld = engine
+                .ctx
                 .stream
                 .launch_builder(k.rmsnorm_fwd_f32in_typed.get(dt));
             let t_ptr = scratch.temporal.cached_ptr();
@@ -1412,7 +1512,7 @@ impl Mamba3GpuInferenceMixed {
         state: &mut Mamba3GpuInferenceState,
         scratch: &mut Mamba3GpuInferenceMixedScratch,
     ) -> Result<(), String> {
-        scratch.gpu_input.upload(&self.engine.stream, input)?;
+        scratch.gpu_input.upload(&self.engine.ctx.stream, input)?;
         if let Some(ref g) = self.graph {
             assert_eq!(state.ssm_state.cached_ptr(), self.captured_state_ptr);
             assert_eq!(scratch.gpu_input.cached_ptr(), self.captured_scratch_ptr);
@@ -1422,10 +1522,13 @@ impl Mamba3GpuInferenceMixed {
             self.step_kernels_mixed_native(state, scratch)?;
         }
         self.engine
+            .ctx
             .stream
             .synchronize()
             .map_err(|e| format!("M3 sync: {e:?}"))?;
-        scratch.temporal.download_f32(&self.engine.stream, output)?;
+        scratch
+            .temporal
+            .download_f32(&self.engine.ctx.stream, output)?;
         Ok(())
     }
 
@@ -1435,7 +1538,7 @@ impl Mamba3GpuInferenceMixed {
         state: &mut Mamba3GpuInferenceState,
         scratch: &mut Mamba3GpuInferenceMixedScratch,
     ) -> Result<(), String> {
-        scratch.gpu_input.upload(&self.engine.stream, input)?;
+        scratch.gpu_input.upload(&self.engine.ctx.stream, input)?;
         if let Some(ref g) = self.graph {
             assert_eq!(state.ssm_state.cached_ptr(), self.captured_state_ptr);
             assert_eq!(scratch.gpu_input.cached_ptr(), self.captured_scratch_ptr);
@@ -1454,7 +1557,7 @@ impl Mamba3GpuInferenceMixed {
     ) -> Result<(), String> {
         let snap_state = state.ssm_state.cached_ptr();
         let snap_scratch = scratch.gpu_input.cached_ptr();
-        let stream = self.engine.stream.clone();
+        let stream = self.engine.ctx.stream.clone();
         let graph = crate::mamba_ssm::gpu::graph_capture::capture_into_graph(&stream, || {
             self.step_kernels_mixed_native(state, scratch)
         })?;
@@ -1604,7 +1707,7 @@ impl GpuMamba3Backbone {
 
     pub fn reset(&mut self) -> Result<(), String> {
         let stream = match &self.engine {
-            M3BackboneEngine::F32(e) => e.stream.clone(),
+            M3BackboneEngine::F32(e) => e.ctx.stream.clone(),
             M3BackboneEngine::Mixed(e) => e.ctx_stream().clone(),
         };
         self.state.reset(&stream)
@@ -1656,16 +1759,16 @@ impl GpuMamba3Backbone {
 
     pub fn stream(&self) -> &Stream {
         match &self.engine {
-            M3BackboneEngine::F32(e) => &e.stream,
+            M3BackboneEngine::F32(e) => &e.ctx.stream,
             M3BackboneEngine::Mixed(e) => e.ctx_stream(),
         }
     }
 
     /// Access the cuBLAS handle (for downstream lm_head GEMM).
-    pub fn blas(&self) -> &Arc<cudarc::cublas::CudaBlas> {
+    pub fn blas(&self) -> &cudarc::cublas::CudaBlas {
         match &self.engine {
-            M3BackboneEngine::F32(e) => &e.blas,
-            M3BackboneEngine::Mixed(e) => &e.engine_ref().blas,
+            M3BackboneEngine::F32(e) => &e.ctx.blas,
+            M3BackboneEngine::Mixed(e) => &e.engine_ref().ctx.blas,
         }
     }
 

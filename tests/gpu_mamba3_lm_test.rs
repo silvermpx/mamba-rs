@@ -26,7 +26,13 @@ fn small_m3_cfg() -> Mamba3Config {
 fn build_synthetic_lm(dtype: WeightDtype, vocab_size: usize) -> GpuMamba3LM {
     let cfg = small_m3_cfg();
     let input_dim = cfg.d_model;
-    let weights = Mamba3Weights::init(&cfg, input_dim, 0xDEADBEEF);
+    let mut weights = Mamba3Weights::init(&cfg, input_dim, 0xDEADBEEF);
+    // The LM feeds embeddings straight at d_model: an IDENTITY (empty)
+    // input projection is the honest shape. The old constructor silently
+    // discarded a random projection here; it now rejects a non-identity
+    // proj on mixed engines, so the fixture clears it explicitly.
+    weights.input_proj_w.clear();
+    weights.input_proj_b.clear();
     // Tied lm_head: embed table is [vocab_size, d_model].
     let d = cfg.d_model;
     let mut embed = vec![0.0f32; vocab_size * d];

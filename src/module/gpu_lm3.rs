@@ -455,7 +455,7 @@ impl GpuMamba3LM {
 
     fn compute_logits(&mut self) -> Result<(), String> {
         let stream = self.backbone.stream().clone();
-        let blas: Arc<cudarc::cublas::CudaBlas> = self.backbone.blas().clone();
+        let blas = self.backbone.blas();
         let temporal_ptr = self.backbone.temporal_ptr();
         let b = self.batch;
         let d = self.d_model;
@@ -469,7 +469,7 @@ impl GpuMamba3LM {
                     // it through host memory (D2H + H2D) on EVERY decoded
                     // token. M1 removed this exact bounce earlier.
                     gpu_gemm_typed_raw_no_bias(
-                        &blas,
+                        blas,
                         TypedPtr {
                             ptr: self.gpu_logits.cached_ptr(),
                             dtype: WeightDtype::F32,
@@ -486,7 +486,7 @@ impl GpuMamba3LM {
                     )?;
                 } else {
                     gpu_sgemm_tied_lm_head_blas(
-                        &blas,
+                        blas,
                         self.gpu_logits.cached_ptr(),
                         temporal_ptr,
                         embed.cached_ptr(),
@@ -510,7 +510,7 @@ impl GpuMamba3LM {
                 if let Some(lm) = lm_head {
                     // Untied half path — same padded stride as F32 path above.
                     gpu_gemm_typed_raw_no_bias(
-                        &blas,
+                        blas,
                         TypedPtr {
                             ptr: self.gpu_logits.cached_ptr(),
                             dtype: WeightDtype::F32,
@@ -527,7 +527,7 @@ impl GpuMamba3LM {
                     )?;
                 } else {
                     gpu_gemm_ex_tied_lm_head_blas(
-                        &blas,
+                        blas,
                         self.gpu_logits.cached_ptr(),
                         temporal_ptr,
                         embed.cached_ptr(),
