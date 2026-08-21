@@ -57,7 +57,10 @@ Pure Rust + CUDA. Kernels compile at runtime via NVRTC.
   oracle; its transport-backed reducer is still to land, so a live
   multi-process world refuses it loudly. The `nccl` feature adds the
   transport with the explicit `NcclSum` tier (run-to-run stable on a
-  frozen box).
+  frozen box) — validated live on two RTX 5090s: both ranks' final
+  weights matched the emulated oracle bit for bit (a two-addend sum
+  has one association, so the library collective cannot differ from
+  the house fold at world size 2).
 - **Bit-continuous resume** — optimizer state (Adam moments, step,
   update hyperparameters) and the carried recurrence export/import, so
   a resumed run lands bit-for-bit where the unbroken run would.
@@ -170,7 +173,7 @@ mamba3_step(&mut output, &input, &mut scratch, &weights, &mut state.layers, &cfg
 
 ```toml
 [dependencies]
-mamba-rs = { version = "0.5", features = ["cuda"] }
+mamba-rs = { version = "0.6", features = ["cuda"] }
 ```
 
 `GpuMambaBackbone::new_with_dtype` and the symmetric Mamba-3 constructor take

@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.6.0 (unreleased)
+## 0.6.0 (2026-08-22)
 
 Deterministic data parallelism, the Mamba-3 prompt prefill, first-class
 large state dimensions, and a measured performance pass over the
@@ -23,7 +23,15 @@ chunked kernels.
   `EmulatedWorld` — a single-process oracle that runs the full sharded
   dataflow and is asserted bit-for-bit against the straight-line
   reference and against an emulated end-to-end two-replica training
-  run.
+  run. Validated live on a 2x RTX 5090 box: the supervisor self-spawned
+  two ranks over a real `ncclAllReduce` (the `NcclSum` tier) and the
+  final weights of both ranks matched the emulated oracle bit for bit —
+  at world size 2 the sum has one association, so the library
+  collective provably cannot differ from the house fold. The reduction
+  composes with every per-rank compute mode (any GEMM tier, scan mode,
+  dtype) — it consumes finished gradients and never participates in how
+  they were computed; pinned by an emulated-world test that runs the
+  batch-invariant house tier end to end.
 - `nccl` feature — the transport layer: a thin communicator over the
   pinned NCCL binding (byte movement plus the opt-in sum collective),
   rendezvous-based unique-id exchange, version preflight, fail-fast
@@ -66,6 +74,18 @@ chunked kernels.
 
 ### Changed
 
+- The f32 Mamba-3 trainer refuses an empty input projection at
+  construction with a nameable error (pass an identity matrix for a
+  pass-through). The empty-means-identity convention is mixed-only;
+  the f32 backbone runs the projection GEMM unconditionally, and the
+  empty weight used to surface later as an uninterpretable
+  CUDA_ERROR_ILLEGAL_ADDRESS inside a kernel.
+- The CPU-vs-GPU prefill oracle tolerance is recalibrated for
+  cross-architecture noise (2e-3): the same code measures rel_l2
+  just under 1e-3 on sm_89 and 1.32e-3 on sm_120 at cos 0.999999 —
+  fma scheduling and math-intrinsic differences move the float noise
+  floor between GPU generations, while a real defect still fails by
+  orders of magnitude.
 - cudarc floor raised to 0.19.9: upstream gates CudaSlice/SyncOnDrop
   teardown behind is_managing_stream_synchronization, so with per-slice
   event tracking disabled (this crate's standing mode — the CUDA Graph
@@ -98,16 +118,21 @@ chunked kernels.
 
 ### Performance
 
-Measured on an RTX 6000 Ada shared with other load; the ratios are the
-claim and the absolute numbers will be re-measured on an idle box for
-the release.
+Two measurement beds: the before/after ratios come from an RTX 6000
+Ada shared with other load; the release absolutes were re-measured on
+an idle RTX 5090 (CUDA 13.0, release build).
 
 - Prompt prefill at a production shape (T=4621, 24 layers,
-  d_model=384): 384 ms before this cycle's kernel work, 66.5 ms after.
+  d_model=384): 384 ms before this cycle's kernel work, 66.5 ms after
+  (shared Ada); 23.65 ms — 42.3 prefills/s — on the idle 5090.
 - Multi-chunk training step (B=1, T=256, 24 layers, d_model=384):
-  f32 424 -> 127 ms, bf16 395 -> 122 ms.
-- Fused decode step across state capacities (d_model=256, 4 layers):
-  0.29 ms at d_state 64, 0.38 ms at 128, 1.50 ms at 256.
+  f32 424 -> 127 ms, bf16 395 -> 122 ms (shared Ada); f32 110.5,
+  bf16 112.0 ms on the idle 5090.
+- Mamba-1 at the 130m-ish shape (B=2, T=64, 24 layers, d_model=768),
+  full step with AdamW, idle 5090: f32 28.5, bf16 44.5 ms.
+- Fused decode step across state capacities (Mamba-1, d_model=256,
+  4 layers, Ada): 0.29 ms at d_state 64, 0.38 ms at 128, 1.50 ms
+  at 256.
 
 ### Next
 

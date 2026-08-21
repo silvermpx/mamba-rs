@@ -41,10 +41,14 @@ are retired. Measured through the public trainer (`Mamba3Trainer::step`,
 full forward + backward + AdamW + sync), on a GPU shared with other
 load — treat the ratios as the claim:
 
-| dtype | before the 0.6 kernel pass | after |
-|-------|---------------------------:|------:|
-| f32   | 424 ms/step | **126.6 ms/step** |
-| bf16  | 395 ms/step | **121.9 ms/step** |
+| dtype | before the 0.6 kernel pass | after (shared Ada) | idle RTX 5090 |
+|-------|---------------------------:|-------------------:|--------------:|
+| f32   | 424 ms/step | **126.6 ms/step** | **110.5 ms/step** |
+| bf16  | 395 ms/step | **121.9 ms/step** | **112.0 ms/step** |
+
+The last column is the release re-measure on an idle RTX 5090
+(CUDA 13.0, release build) — the clean-card absolute for the same
+public-trainer step.
 
 The pass: warp-parallel decay-gradient section in the dominant
 backward kernel with the entering state staged in shared memory, the
@@ -63,6 +67,9 @@ One-pass prompt window through the chunked pipeline
 | + shared Q·K tile | 251 |
 | + chunk-parallel angle accumulation | 89.6 |
 | + loop-swapped chunk state, head-packed blocks | **66.5** |
+
+Release re-measure of the final stage on an idle RTX 5090 (CUDA 13.0,
+release build): **23.65 ms/prefill — 42.3 prefills/s**.
 
 ## Large d_state capacity cost (0.6; Mamba-1 fused decode step, d_model=256, 4 layers)
 
