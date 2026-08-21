@@ -659,6 +659,54 @@ pub struct GpuRecurrentState {
     pub a_neg_all: GpuBuffer,
 }
 
+/// CPU-side snapshot of the carried recurrence (conv + SSM state) for
+/// TBPTT-style window handoff and checkpointed resume. `a_neg_all` is
+/// deliberately NOT part of the blob — it is derived from `a_log` and
+/// refreshed after every optimizer step, so importing a stale copy
+/// would desynchronize it from the weights.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RecurrentStateBlob {
+    pub conv_states: Vec<f32>,
+    pub ssm_states: Vec<f32>,
+}
+
+impl GpuRecurrentState {
+    /// Download the carried recurrence to CPU.
+    pub fn export_state(
+        &self,
+        stream: &std::sync::Arc<cudarc::driver::CudaStream>,
+    ) -> Result<RecurrentStateBlob, String> {
+        Ok(RecurrentStateBlob {
+            conv_states: self.conv_states.to_cpu(stream)?,
+            ssm_states: self.ssm_states.to_cpu(stream)?,
+        })
+    }
+
+    /// Upload a previously exported recurrence. Errs on a length
+    /// mismatch — the blob belongs to a different shape.
+    pub fn import_state(
+        &mut self,
+        stream: &std::sync::Arc<cudarc::driver::CudaStream>,
+        blob: &RecurrentStateBlob,
+    ) -> Result<(), String> {
+        if blob.conv_states.len() != self.conv_states.len()
+            || blob.ssm_states.len() != self.ssm_states.len()
+        {
+            return Err(format!(
+                "recurrent state mismatch: blob conv/ssm = {}/{} elements, \
+                 state = {}/{} — the blob belongs to a different shape",
+                blob.conv_states.len(),
+                blob.ssm_states.len(),
+                self.conv_states.len(),
+                self.ssm_states.len()
+            ));
+        }
+        self.conv_states.upload(stream, &blob.conv_states)?;
+        self.ssm_states.upload(stream, &blob.ssm_states)?;
+        Ok(())
+    }
+}
+
 pub fn gpu_forward_mamba_backbone(
     ctx: &GpuCtx,
     temporal: &mut GpuBuffer,

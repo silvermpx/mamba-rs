@@ -172,3 +172,157 @@ fn optimizer_state_len_mismatch_is_refused() {
     let err = t.load_optimizer_state(&blob).unwrap_err();
     assert!(err.contains("different parameterization"), "{err}");
 }
+
+/// The split pair — window-closing `backward_step(accumulate_only=true)`
+/// followed by `apply_step` — must be bit-identical to a single applying
+/// `backward_step`. This is the seam a distributed gradient reducer
+/// slots into; if the pair ever drifts from the fused call, distributed
+/// and single-process training silently diverge.
+#[test]
+fn apply_step_pair_matches_fused_applying_backward() {
+    use mamba_rs::mamba_ssm::gpu::trainer::BackwardOpts;
+
+    let c = cfg();
+    let n = 64 * c.d_model;
+    let cpu = base_weights(&c, WeightDtype::Bf16);
+    let input = det(n, 0x51);
+    let d_temporal = det(n, 0x52);
+    let mut out = vec![0.0f32; n];
+
+    let mut fused = build(&cpu, WeightDtype::Bf16);
+    fused.forward(&input, &mut out).unwrap();
+    fused
+        .backward_step(&d_temporal, BackwardOpts::default().with_clip_max_norm(1.0))
+        .unwrap();
+    let w_fused = weight_bits(&fused.snapshot_master().unwrap());
+
+    let mut split = build(&cpu, WeightDtype::Bf16);
+    split.forward(&input, &mut out).unwrap();
+    let m1 = split
+        .backward_step(
+            &d_temporal,
+            BackwardOpts::default().with_accumulate_only(true),
+        )
+        .unwrap();
+    assert!(!m1.optimizer_stepped);
+    // (a reducer would sum grad_arena() across ranks right here)
+    let _ = split.grad_arena().len();
+    let m2 = split.apply_step(Some(1.0)).unwrap();
+    assert!(m2.optimizer_stepped);
+    let w_split = weight_bits(&split.snapshot_master().unwrap());
+
+    assert_eq!(
+        w_fused, w_split,
+        "split accumulate+apply_step must equal the fused applying backward bit-for-bit"
+    );
+
+    // A second apply_step on the closed window is refused.
+    let err = split.apply_step(None).unwrap_err();
+    assert!(err.contains("open accumulation window"), "{err}");
+}
+
+/// The M1 (sequential-scan) family carries conv + SSM state across
+/// steps, so its bit-continuous resume needs THREE blobs: weights,
+/// optimizer, and the carried recurrence. This is the TBPTT window
+/// handoff contract.
+#[test]
+fn m1_resume_with_recurrent_state_is_bit_continuous() {
+    use mamba_rs::config::MambaConfig;
+    use mamba_rs::mamba_ssm::gpu::trainer::MambaTrainer;
+    use mamba_rs::weights::MambaWeights;
+
+    fn m1_cfg() -> MambaConfig {
+        MambaConfig {
+            d_model: 32,
+            n_layers: 1,
+            d_state: 8,
+            d_conv: 4,
+            expand: 2,
+            scan_mode: mamba_rs::config::ScanMode::Sequential,
+            rms_norm_eps: 1e-5,
+        }
+    }
+    fn m1_weights(c: &MambaConfig) -> MambaWeights {
+        let mut cpu = MambaWeights::init(c, c.d_model, 0xF32C0FF);
+        for lw in cpu.layers.iter_mut() {
+            lw.a_neg = lw.a_log.iter().map(|&v| -v.exp()).collect();
+        }
+        cpu
+    }
+    fn m1_bits(w: &MambaWeights) -> Vec<u32> {
+        let mut out = Vec::new();
+        let mut push = |v: &[f32]| out.extend(v.iter().map(|x| x.to_bits()));
+        push(&w.input_proj_w);
+        push(&w.input_proj_b);
+        for lw in &w.layers {
+            push(&lw.norm_weight);
+            push(&lw.in_proj_w);
+            push(&lw.conv1d_weight);
+            push(&lw.conv1d_bias);
+            push(&lw.x_proj_w);
+            push(&lw.dt_proj_w);
+            push(&lw.dt_proj_b);
+            push(&lw.a_log);
+            push(&lw.d_param);
+            push(&lw.out_proj_w);
+        }
+        push(&w.norm_f_weight);
+        out
+    }
+    fn m1_build(cpu: &MambaWeights, c: &MambaConfig) -> MambaTrainer {
+        MambaTrainer::new_with_dtype(0, cpu, c.clone(), c.d_model, 1, 4, WeightDtype::F32).unwrap()
+    }
+
+    let c = m1_cfg();
+    let n = 4 * c.d_model;
+    let cpu = m1_weights(&c);
+
+    let mut a = m1_build(&cpu, &c);
+    for s in 0..2u32 {
+        a.step(&det(n, 0x31 + s), &det(n, 0x41 + s)).unwrap();
+    }
+    let w_a = m1_bits(&a.snapshot_master().unwrap());
+    let rec_a = a.recurrent_state().unwrap();
+
+    let mut b1 = m1_build(&cpu, &c);
+    b1.step(&det(n, 0x31), &det(n, 0x41)).unwrap();
+    let w_mid = b1.snapshot_master().unwrap();
+    let blob_opt = b1.optimizer_state().unwrap();
+    let blob_rec = b1.recurrent_state().unwrap();
+    drop(b1);
+
+    let mut b2 = m1_build(&w_mid, &c);
+    b2.load_optimizer_state(&blob_opt).unwrap();
+    b2.load_recurrent_state(&blob_rec).unwrap();
+    b2.step(&det(n, 0x32), &det(n, 0x42)).unwrap();
+    let w_b = m1_bits(&b2.snapshot_master().unwrap());
+    let rec_b = b2.recurrent_state().unwrap();
+
+    assert_eq!(w_a, w_b, "M1 resumed weights must be bit-continuous");
+    assert_eq!(
+        rec_a
+            .ssm_states
+            .iter()
+            .map(|x| x.to_bits())
+            .collect::<Vec<_>>(),
+        rec_b
+            .ssm_states
+            .iter()
+            .map(|x| x.to_bits())
+            .collect::<Vec<_>>(),
+        "carried SSM state must be bit-continuous"
+    );
+    assert_eq!(
+        rec_a
+            .conv_states
+            .iter()
+            .map(|x| x.to_bits())
+            .collect::<Vec<_>>(),
+        rec_b
+            .conv_states
+            .iter()
+            .map(|x| x.to_bits())
+            .collect::<Vec<_>>(),
+        "carried conv state must be bit-continuous"
+    );
+}

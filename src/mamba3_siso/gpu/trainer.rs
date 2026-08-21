@@ -217,6 +217,54 @@ impl Mamba3Trainer {
         }
     }
 
+    /// Borrow the flat f32 gradient arena — the single contiguous buffer
+    /// every parameter's gradient accumulates into. A distributed
+    /// reducer sums this buffer across ranks between the window-closing
+    /// `backward_step(accumulate_only = true)` and [`Self::apply_step`];
+    /// single-process training never needs it.
+    pub fn grad_arena(&mut self) -> &mut GpuBuffer {
+        match &mut self.inner {
+            Trainer3Inner::F32(t) => &mut t.grads.flat,
+            Trainer3Inner::Mixed(t) => &mut t.grads.flat,
+        }
+    }
+
+    /// Run ONLY the optimizer tail (optional clip, AdamW, window close)
+    /// over the already-accumulated gradient. Together with
+    /// `backward_step(accumulate_only = true)` this splits the applying
+    /// backward in two, so a gradient reducer can run in between; the
+    /// pair is bit-identical to a single applying `backward_step`.
+    /// Requires an open accumulation window. Not defined for f16 — the
+    /// loss-scaler protocol owns that tail end to end.
+    pub fn apply_step(&mut self, clip_max_norm: Option<f32>) -> Result<BackwardMetrics, String> {
+        if matches!(self.dtype(), WeightDtype::F16) {
+            return Err(
+                "apply_step is not defined for f16: the loss-scaler protocol (overflow \
+                 check, conditional unscale, scaler update, step rollback) owns the \
+                 optimizer tail — use the applying backward_step directly"
+                    .into(),
+            );
+        }
+        match &mut self.inner {
+            Trainer3Inner::F32(t) => {
+                if !t.grads_dirty {
+                    return Err("apply_step without an open accumulation window — run \
+                         backward_step(accumulate_only = true) first"
+                        .into());
+                }
+                t.apply_step_inner(clip_max_norm)
+            }
+            Trainer3Inner::Mixed(t) => {
+                if !t.grads_dirty {
+                    return Err("apply_step without an open accumulation window — run \
+                         backward_step(accumulate_only = true) first"
+                        .into());
+                }
+                t.apply_step_inner(clip_max_norm)
+            }
+        }
+    }
+
     /// Toggle the reference-faithful AdamW no-decay parameter groups
     /// (dt bias / `d_param` / every norm scale get `weight_decay = 0`).
     /// Default OFF preserves the historical behavior bit-for-bit. Errs
@@ -983,22 +1031,30 @@ impl Mamba3TrainerMixed {
                 overflow_skipped: None,
             })
         } else {
-            let grad_norm = match opts.clip_max_norm {
-                Some(c) => Some(self.apply_clip(c)?),
-                None => None,
-            };
-            let (step, bc1, bc2) = self.adam.advance();
-            self.bias.write(&self.ctx.stream, bc1, bc2)?;
-            self.eager_optimize()?;
-            self.grads_dirty = false;
-            Ok(BackwardMetrics {
-                step,
-                optimizer_stepped: true,
-                grad_norm,
-                loss_scale: None,
-                overflow_skipped: None,
-            })
+            self.apply_step_inner(opts.clip_max_norm)
         }
+    }
+
+    /// Optimizer-only tail of the applying backward: optional clip, bias
+    /// factors, fused AdamW over the accumulated gradient, window close.
+    /// A separate seam so a gradient reducer can run between the last
+    /// backward and the weight update.
+    fn apply_step_inner(&mut self, clip_max_norm: Option<f32>) -> Result<BackwardMetrics, String> {
+        let grad_norm = match clip_max_norm {
+            Some(c) => Some(self.apply_clip(c)?),
+            None => None,
+        };
+        let (step, bc1, bc2) = self.adam.advance();
+        self.bias.write(&self.ctx.stream, bc1, bc2)?;
+        self.eager_optimize()?;
+        self.grads_dirty = false;
+        Ok(BackwardMetrics {
+            step,
+            optimizer_stepped: true,
+            grad_norm,
+            loss_scale: None,
+            overflow_skipped: None,
+        })
     }
 
     /// f16 split backward: GradScaler protocol minus the forward — scale,
@@ -1497,22 +1553,30 @@ impl Mamba3TrainerF32 {
                 overflow_skipped: None,
             })
         } else {
-            let grad_norm = match opts.clip_max_norm {
-                Some(c) => Some(self.apply_clip(c)?),
-                None => None,
-            };
-            let (step, bc1, bc2) = self.adam.advance();
-            self.bias.write(&self.ctx.stream, bc1, bc2)?;
-            self.eager_optimize()?;
-            self.grads_dirty = false;
-            Ok(BackwardMetrics {
-                step,
-                optimizer_stepped: true,
-                grad_norm,
-                loss_scale: None,
-                overflow_skipped: None,
-            })
+            self.apply_step_inner(opts.clip_max_norm)
         }
+    }
+
+    /// Optimizer-only tail of the applying backward: optional clip, bias
+    /// factors, fused AdamW over the accumulated gradient, window close.
+    /// A separate seam so a gradient reducer can run between the last
+    /// backward and the weight update.
+    fn apply_step_inner(&mut self, clip_max_norm: Option<f32>) -> Result<BackwardMetrics, String> {
+        let grad_norm = match clip_max_norm {
+            Some(c) => Some(self.apply_clip(c)?),
+            None => None,
+        };
+        let (step, bc1, bc2) = self.adam.advance();
+        self.bias.write(&self.ctx.stream, bc1, bc2)?;
+        self.eager_optimize()?;
+        self.grads_dirty = false;
+        Ok(BackwardMetrics {
+            step,
+            optimizer_stepped: true,
+            grad_norm,
+            loss_scale: None,
+            overflow_skipped: None,
+        })
     }
 
     /// Compute the deterministic global grad norm, apply the clip

@@ -404,6 +404,77 @@ impl MambaTrainer {
         }
     }
 
+    /// Borrow the flat f32 gradient arena — the single contiguous buffer
+    /// every parameter's gradient accumulates into. A distributed
+    /// reducer sums this buffer across ranks between the window-closing
+    /// `backward_step(accumulate_only = true)` and [`Self::apply_step`];
+    /// single-process training never needs it.
+    pub fn grad_arena(&mut self) -> &mut GpuBuffer {
+        match &mut self.inner {
+            TrainerInner::F32(t) => &mut t.grads.flat,
+            TrainerInner::Mixed(t) => &mut t.grads.flat,
+        }
+    }
+
+    /// Run ONLY the optimizer tail (optional clip, AdamW, window close)
+    /// over the already-accumulated gradient. Together with
+    /// `backward_step(accumulate_only = true)` this splits the applying
+    /// backward in two, so a gradient reducer can run in between; the
+    /// pair is bit-identical to a single applying `backward_step`.
+    /// Requires an open accumulation window. Not defined for f16 — the
+    /// loss-scaler protocol owns that tail end to end.
+    pub fn apply_step(&mut self, clip_max_norm: Option<f32>) -> Result<BackwardMetrics, String> {
+        if matches!(self.dtype(), WeightDtype::F16) {
+            return Err(
+                "apply_step is not defined for f16: the loss-scaler protocol (overflow \
+                 check, conditional unscale, scaler update, step rollback) owns the \
+                 optimizer tail — use the applying backward_step directly"
+                    .into(),
+            );
+        }
+        match &mut self.inner {
+            TrainerInner::F32(t) => {
+                if !t.grads_dirty {
+                    return Err("apply_step without an open accumulation window — run \
+                         backward_step(accumulate_only = true) first"
+                        .into());
+                }
+                t.apply_step_inner(clip_max_norm)
+            }
+            TrainerInner::Mixed(t) => {
+                if !t.grads_dirty {
+                    return Err("apply_step without an open accumulation window — run \
+                         backward_step(accumulate_only = true) first"
+                        .into());
+                }
+                t.apply_step_inner(clip_max_norm)
+            }
+        }
+    }
+
+    /// Download the carried recurrence (conv + SSM state) — the TBPTT
+    /// window handoff and checkpointed-resume counterpart of
+    /// [`Self::optimizer_state`].
+    pub fn recurrent_state(
+        &self,
+    ) -> Result<crate::mamba_ssm::gpu::forward::RecurrentStateBlob, String> {
+        match &self.inner {
+            TrainerInner::F32(t) => t.state.export_state(&t.ctx.stream),
+            TrainerInner::Mixed(t) => t.state.export_state(&t.ctx.stream),
+        }
+    }
+
+    /// Upload a previously exported recurrence.
+    pub fn load_recurrent_state(
+        &mut self,
+        blob: &crate::mamba_ssm::gpu::forward::RecurrentStateBlob,
+    ) -> Result<(), String> {
+        match &mut self.inner {
+            TrainerInner::F32(t) => t.state.import_state(&t.ctx.stream, blob),
+            TrainerInner::Mixed(t) => t.state.import_state(&t.ctx.stream, blob),
+        }
+    }
+
     /// Toggle the reference-faithful AdamW no-decay parameter groups
     /// (`a_log` / `d_param` / `dt_proj_b` / RMSNorm scales get
     /// `weight_decay = 0`, matching the reference `_no_weight_decay`
@@ -694,24 +765,29 @@ impl MambaTrainerMixed {
         let acts = GpuMambaBackboneMixedActs::new(&ctx.stream, &dims, dtype)?;
         let scratch = GpuMambaMixedTrainScratch::new(&ctx.stream, &dims, dtype)?;
 
-        // Seed recurrent state: conv/ssm zero, a_neg = -exp(a_log).
-        let mut a_neg_flat = vec![0.0f32; n_layers * d_inner * d_state];
-        for (l, lw) in cpu_weights.layers.iter().enumerate() {
-            for i in 0..d_inner * d_state {
-                a_neg_flat[l * d_inner * d_state + i] = -lw.a_log[i].exp();
-            }
-        }
-        let mut a_neg_all = GpuBuffer::zeros(&ctx.stream, n_layers * d_inner * d_state)?;
-        a_neg_all.upload(&ctx.stream, &a_neg_flat)?;
+        // Seed recurrent state: conv/ssm zero; a_neg is recomputed from
+        // the uploaded a_log by the SAME GPU kernel the post-step refresh
+        // uses. Deriving it on the CPU here (libm exp vs the device expf)
+        // differs by ULPs, so a trainer rebuilt from a checkpoint would
+        // start from slightly different a_neg values than the unbroken
+        // run it resumes — breaking bit-continuity for the first window.
+        let a_neg_all = GpuBuffer::zeros(&ctx.stream, n_layers * d_inner * d_state)?;
 
         // conv/ssm states are per-sample: forward indexes layers with a
         // batch * d_inner * d_conv (resp. d_state) per-layer stride.
-        let mut state = GpuRecurrentState {
+        let state = GpuRecurrentState {
             conv_states: GpuBuffer::zeros(&ctx.stream, n_layers * batch * d_inner * d_conv)?,
             ssm_states: GpuBuffer::zeros(&ctx.stream, n_layers * batch * d_inner * d_state)?,
             a_neg_all: GpuBuffer::zeros(&ctx.stream, n_layers * d_inner * d_state)?,
         };
-        state.a_neg_all.upload(&ctx.stream, &a_neg_flat)?;
+        recompute_a_neg_all(
+            &ctx,
+            &weights.master.layers,
+            &a_neg_all,
+            &state.a_neg_all,
+            d_inner,
+            d_state,
+        )?;
 
         let mamba_input = GpuBuffer::zeros(&ctx.stream, batch * seq_len * input_dim)?;
         let d_temporal = GpuBuffer::zeros(&ctx.stream, batch * seq_len * cfg.d_model)?;
@@ -1056,22 +1132,30 @@ impl MambaTrainerMixed {
                 overflow_skipped: None,
             })
         } else {
-            let grad_norm = match opts.clip_max_norm {
-                Some(c) => Some(self.apply_clip(c)?),
-                None => None,
-            };
-            let (step, bc1, bc2) = self.adam.advance();
-            self.bias.write(&self.ctx.stream, bc1, bc2)?;
-            self.eager_optimize()?;
-            self.grads_dirty = false;
-            Ok(BackwardMetrics {
-                step,
-                optimizer_stepped: true,
-                grad_norm,
-                loss_scale: None,
-                overflow_skipped: None,
-            })
+            self.apply_step_inner(opts.clip_max_norm)
         }
+    }
+
+    /// Optimizer-only tail of the applying backward: optional clip, bias
+    /// factors, fused AdamW over the accumulated gradient, window close.
+    /// A separate seam so a gradient reducer can run between the last
+    /// backward and the weight update.
+    fn apply_step_inner(&mut self, clip_max_norm: Option<f32>) -> Result<BackwardMetrics, String> {
+        let grad_norm = match clip_max_norm {
+            Some(c) => Some(self.apply_clip(c)?),
+            None => None,
+        };
+        let (step, bc1, bc2) = self.adam.advance();
+        self.bias.write(&self.ctx.stream, bc1, bc2)?;
+        self.eager_optimize()?;
+        self.grads_dirty = false;
+        Ok(BackwardMetrics {
+            step,
+            optimizer_stepped: true,
+            grad_norm,
+            loss_scale: None,
+            overflow_skipped: None,
+        })
     }
 
     /// Compute the deterministic global grad norm, apply the clip
@@ -1629,23 +1713,27 @@ impl MambaTrainerF32 {
         let acts = GpuMambaBackboneActs::new(&ctx.stream, &dims)?;
         let scratch = GpuMambaScratch::new(&ctx.stream, &dims)?;
 
-        let mut a_neg_flat = vec![0.0f32; n_layers * d_inner * d_state];
-        for (l, lw) in cpu_weights.layers.iter().enumerate() {
-            for i in 0..d_inner * d_state {
-                a_neg_flat[l * d_inner * d_state + i] = -lw.a_log[i].exp();
-            }
-        }
-        let mut a_neg_all = GpuBuffer::zeros(&ctx.stream, n_layers * d_inner * d_state)?;
-        a_neg_all.upload(&ctx.stream, &a_neg_flat)?;
+        // a_neg is recomputed from the uploaded a_log by the SAME GPU
+        // kernel the post-step refresh uses — a CPU-side exp here differs
+        // by ULPs from the device expf and breaks bit-continuous resume
+        // (see the mixed constructor's twin comment).
+        let a_neg_all = GpuBuffer::zeros(&ctx.stream, n_layers * d_inner * d_state)?;
 
         // conv/ssm states are per-sample: forward indexes layers with a
         // batch * d_inner * d_conv (resp. d_state) per-layer stride.
-        let mut state = GpuRecurrentState {
+        let state = GpuRecurrentState {
             conv_states: GpuBuffer::zeros(&ctx.stream, n_layers * batch * d_inner * d_conv)?,
             ssm_states: GpuBuffer::zeros(&ctx.stream, n_layers * batch * d_inner * d_state)?,
             a_neg_all: GpuBuffer::zeros(&ctx.stream, n_layers * d_inner * d_state)?,
         };
-        state.a_neg_all.upload(&ctx.stream, &a_neg_flat)?;
+        recompute_a_neg_all(
+            &ctx,
+            &weights.layers,
+            &a_neg_all,
+            &state.a_neg_all,
+            d_inner,
+            d_state,
+        )?;
 
         let temporal = GpuBuffer::zeros(&ctx.stream, batch * seq_len * cfg.d_model)?;
         let mamba_input = GpuBuffer::zeros(&ctx.stream, batch * seq_len * input_dim)?;
@@ -1876,22 +1964,30 @@ impl MambaTrainerF32 {
                 overflow_skipped: None,
             })
         } else {
-            let grad_norm = match opts.clip_max_norm {
-                Some(c) => Some(self.apply_clip(c)?),
-                None => None,
-            };
-            let (step, bc1, bc2) = self.adam.advance();
-            self.bias.write(&self.ctx.stream, bc1, bc2)?;
-            self.eager_optimize()?;
-            self.grads_dirty = false;
-            Ok(BackwardMetrics {
-                step,
-                optimizer_stepped: true,
-                grad_norm,
-                loss_scale: None,
-                overflow_skipped: None,
-            })
+            self.apply_step_inner(opts.clip_max_norm)
         }
+    }
+
+    /// Optimizer-only tail of the applying backward: optional clip, bias
+    /// factors, fused AdamW over the accumulated gradient, window close.
+    /// A separate seam so a gradient reducer can run between the last
+    /// backward and the weight update.
+    fn apply_step_inner(&mut self, clip_max_norm: Option<f32>) -> Result<BackwardMetrics, String> {
+        let grad_norm = match clip_max_norm {
+            Some(c) => Some(self.apply_clip(c)?),
+            None => None,
+        };
+        let (step, bc1, bc2) = self.adam.advance();
+        self.bias.write(&self.ctx.stream, bc1, bc2)?;
+        self.eager_optimize()?;
+        self.grads_dirty = false;
+        Ok(BackwardMetrics {
+            step,
+            optimizer_stepped: true,
+            grad_norm,
+            loss_scale: None,
+            overflow_skipped: None,
+        })
     }
 
     /// Eager forward body: run the training forward, writing the post-norm_f
