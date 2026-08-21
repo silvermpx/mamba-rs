@@ -707,7 +707,7 @@ fn upload_f32_as_dtype(
 /// offsets and silently produces wrong logits for every vocab that is not
 /// already 64-aligned (e.g. 50280 -> 50304 on mamba-130m-hf). M1 fixed
 /// this at commit 5dde438; the M3 LM shipped the flat copy until 0.6
-/// (G10d) — both now share this one implementation.
+/// — both archs now share this one implementation.
 pub(crate) fn pad_lm_head_rows(
     lm: &[f32],
     d_model: usize,
@@ -727,11 +727,11 @@ pub(crate) fn pad_lm_head_rows(
 mod pad_tests {
     use super::pad_lm_head_rows;
 
-    /// G10d pin: padding is PER-ROW, never a flat copy. With d_model=2,
+    /// Pin: padding is PER-ROW, never a flat copy. With d_model=2,
     /// vocab=3, padded=4 the flat copy would smear row 1 across the row
     /// boundary; the row pad keeps each row's values at its own stride.
     #[test]
-    fn pad_lm_head_rows_is_row_strided_g10d() {
+    fn pad_lm_head_rows_is_row_strided() {
         let lm = [1.0, 2.0, 3.0, 10.0, 20.0, 30.0];
         let got = pad_lm_head_rows(&lm, 2, 3, 4);
         assert_eq!(got, vec![1.0, 2.0, 3.0, 0.0, 10.0, 20.0, 30.0, 0.0]);

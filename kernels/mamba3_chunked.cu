@@ -197,7 +197,7 @@ extern "C" __global__ void m3_chunk_state_fwd(
         for (int t = chunk_start; t < chunk_end; t++) {
             int t_local = t - chunk_start;
             float dA_t = dA_cumsum[cs_base + t_local];
-            float decay = FAST_EXP(fminf(dA_end - dA_t, 0.0f)); // A7 (0.6): cumsum diff is <=0 mathematically; fminf restores the reference safety net against float-noise positives (decay>1).
+            float decay = FAST_EXP(fminf(dA_end - dA_t, 0.0f)); // The cumsum diff is <=0 mathematically; fminf restores the reference safety net against float-noise positives (decay>1).
 
             float v_t = x[(b * T + t) * d_inner + h * hd + p];
             float ks_t = K_scaled[(b * T + t) * nh * ds + h * ds + n];
@@ -396,7 +396,7 @@ extern "C" __global__ void m3_chunk_scan_fwd(
         for (int s_local = 0; s_local < t_local; s_local++) {
             int s = chunk_start + s_local;
             float dA_s = dA_cumsum[cs_base + s_local];
-            float decay = FAST_EXP(fminf(dA_t - dA_s, 0.0f)); // A7 (0.6): see line ~200 - same reference safety net.
+            float decay = FAST_EXP(fminf(dA_t - dA_s, 0.0f)); // Same float-noise safety net as the state-passing kernel above.
 
             // Q[t] dot K_scaled[s] (in d_state dimension)
             float qk_val = 0.0f;
@@ -1018,7 +1018,7 @@ extern "C" __global__ void m3_final_grads(
 
     // softplus backward: sigmoid(dd_dt_raw + dt_bias) — must include bias!
     float raw_dt = dd_dt_raw_saved[i] + dt_bias[h];
-    float sig_dt = (raw_dt > 20.0f) ? 1.0f : 1.0f / (1.0f + exp2f(-raw_dt * LOG2E)); // P3 (0.6): softplus asymptote guard - matches m3_dqkv sp_deriv_dt (mamba3_ops.cu) and the CPU form; without it chunked disagreed with BOTH.
+    float sig_dt = (raw_dt > 20.0f) ? 1.0f : 1.0f / (1.0f + exp2f(-raw_dt * LOG2E)); // Softplus asymptote guard - matches m3_dqkv sp_deriv_dt (mamba3_ops.cu) and the CPU form; without it the chunked backward disagreed with both.
     d_dd_dt_raw[i] = d_dt_total * sig_dt;
 
     // d_dd_a_raw: from d_a_val, through clamp and -heavy_tail

@@ -644,7 +644,7 @@ pub fn gpu_forward_mamba3_target_burnin(
     let hd = dims.headdim;
     let ng = dims.ngroups;
     let ip = dims.in_proj_dim;
-    // D3 (0.6): the TRUE angle count goes to the m3_split kernel arg — the
+    // The TRUE angle count goes to the m3_split kernel arg — the
     // main forward already does this (see the top of this file). Passing the
     // buffer-sizing `.max(1)` here shifted the 8-way split by one slot for
     // the supported n_angles == 0 config.

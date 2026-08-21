@@ -272,12 +272,12 @@ mod tests {
         std::fs::remove_file(tmp).ok();
     }
 
-    /// G4 (0.6): a checkpoint fully describes its own model identity — the
+    /// A checkpoint fully describes its own model identity — the
     /// auto loader reconstructs the exact non-default config, and a caller
     /// supplying a CONTRADICTING config is rejected loudly instead of
     /// silently loading a different model.
     #[test]
-    fn test_self_describing_checkpoint_roundtrip_g4() {
+    fn test_self_describing_checkpoint_roundtrip() {
         let cfg = Mamba3Config {
             is_outproj_norm: true,
             rms_norm_eps: 3e-6,

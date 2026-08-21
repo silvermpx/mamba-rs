@@ -161,7 +161,7 @@ extern "C" __global__ void bcnorm_fwd(
     const float* __restrict__ B_raw,// [N * ng * ds]
     const float* __restrict__ weight, // [ds]
     int N, int ng, int ds,
-    float eps                       // G5 (0.6): config-driven, was #define RMS_EPS
+    float eps                       // config-driven eps (was a compile-time #define)
 ) {
     int block_id = blockIdx.x;       // sample * ng + group
     if (block_id >= N * ng) return;
@@ -967,7 +967,7 @@ extern "C" __global__ void silu_gate_bwd(
     float silu_z = z_val * sigma;
     float d_out_val = d_out[i];
     d_y[i] = d_out_val * silu_z;
-    // P1 (0.6) parity pin: FACTORED silu-grad form, kept in lockstep with the
+    // Parity pin: FACTORED silu-grad form, kept in lockstep with the
     // CPU twin in src/mamba3_siso/cpu/backward.rs - change both or neither.
     d_z[i] = d_out_val * y[i] * sigma * (1.0f + z_val * (1.0f - sigma));
 }
@@ -985,7 +985,7 @@ extern "C" __global__ void rmsnorm_gated_forward(
     const float* z,       // [N * d_inner]
     const float* weight,  // [d_inner]
     int N, int d_inner, int group_size,
-    float eps             // G5 (0.6): config-driven, was #define RMS_EPS
+    float eps             // config-driven eps (was a compile-time #define)
 ) {
     if (d_inner > 1024) return; // Guard: shared memory limit
     int sample = blockIdx.x;
@@ -1018,7 +1018,7 @@ extern "C" __global__ void rmsnorm_gated_forward(
         __syncthreads();
     }
 
-    float rstd = 1.0f / sqrtf(shared_sum[group_id * group_size] / (float)group_size + eps); // A9 (0.6): IEEE sqrtf + div, not the approximate MUFU.RSQ intrinsic - unifies the rstd form with every other norm in the tree.
+    float rstd = 1.0f / sqrtf(shared_sum[group_id * group_size] / (float)group_size + eps); // IEEE sqrtf + div, not the approximate MUFU.RSQ intrinsic - unifies the rstd form with every other norm in the tree.
     // Finite-guard (mirrors norms.cu RMSNorm fix): NaN/Inf in y would produce
     // rstd=NaN and cascade through the output gating into residual stream.
     if (!isfinite(rstd) || rstd > 1e20f) rstd = 1.0f;
@@ -1200,7 +1200,7 @@ extern "C" __global__ void bcnorm_fwd_##SUFFIX(                                 
     const T_ACT* __restrict__ B_raw,                                            \
     const float* __restrict__ weight,                                           \
     int N, int ng, int ds,                                                      \
-    float eps /* G5: config-driven */                                           \
+    float eps /* config-driven eps */                                           \
 ) {                                                                             \
     int block_id = blockIdx.x;                                                  \
     if (block_id >= N * ng) return;                                             \
@@ -1249,7 +1249,7 @@ extern "C" __global__ void bcnorm_fwd_bc_##SUFFIX(                              
     const float* __restrict__ B_weight,                                         \
     const float* __restrict__ C_weight,                                         \
     int N, int ng, int ds,                                                      \
-    float eps /* G5: config-driven */                                           \
+    float eps /* config-driven eps */                                           \
 ) {                                                                             \
     /* gridDim.y == 2: 0 → B path, 1 → C path */                                \
     int which = blockIdx.y;                                                     \
@@ -1429,7 +1429,7 @@ extern "C" __global__ void rmsnorm_gated_forward_##SUFFIX(                      
     const T_ACT* __restrict__ z,                                                \
     const float* __restrict__ weight,                                           \
     int N, int d_inner, int group_size,                                         \
-    float eps /* G5: config-driven */                                           \
+    float eps /* config-driven eps */                                           \
 ) {                                                                             \
     if (d_inner > 1024) return;                                                 \
     int sample = blockIdx.x;                                                    \
@@ -1454,7 +1454,7 @@ extern "C" __global__ void rmsnorm_gated_forward_##SUFFIX(                      
         }                                                                       \
         __syncthreads();                                                        \
     }                                                                           \
-    float rstd = 1.0f / sqrtf(shared_sum[group_id * group_size] / (float)group_size + eps); /* A9: IEEE form, see line 1020 */ \
+    float rstd = 1.0f / sqrtf(shared_sum[group_id * group_size] / (float)group_size + eps); /* IEEE form, see the f32 twin above */ \
     /* Finite-guard: match the f32 rmsnorm_gated_forward guard at line 982.    \
      * Without this, bf16 overflow upstream produces rstd=Inf/NaN and silently \
      * zeroes the entire gated output, cascading NaN through the rest of the   \

@@ -122,7 +122,7 @@ pub fn backward_mamba3_layer_batched(
                 let z = acts.data[zs + d];
                 let sig = 1.0 / (1.0 + fast_exp_scalar(-z));
                 let silu = z * sig;
-                // P1 (0.6): FACTORED form `sig * (1 + z*(1 - sig))` — the
+                // FACTORED form `sig * (1 + z*(1 - sig))` — the
                 // SAME algebraic shape as `silu_gate_bwd` in
                 // kernels/mamba3_ops.cu (parity pin: the expanded
                 // `sig + z*sig*(1-sig)` twin measured 88K max_ulp apart on

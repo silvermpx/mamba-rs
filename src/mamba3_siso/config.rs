@@ -146,7 +146,7 @@ impl Mamba3Config {
             return Err(format!(
                 "is_outproj_norm requires d_inner ({}) <= 1024: the \
                  rmsnorm_gated kernels launch one thread per channel and \
-                 SILENTLY no-op past 1024 (P4, 0.6) — reject loudly here \
+                 SILENTLY no-op past 1024 — reject loudly here \
                  until the kernels tile the channel dim",
                 self.d_inner()
             ));
@@ -228,12 +228,12 @@ mod tests {
         assert!(err.contains("d_state"), "{err}");
     }
 
-    /// Axis G (0.6): the boundary value just past the register cap is
+    /// The boundary value just past the register cap is
     /// rejected LOUDLY — silent wrong math at d_state=65 was the failure
     /// mode this guards. Interim until the W5 first-class d_state tiling
     /// removes the ceiling (owner ruling 2026-08-21).
     #[test]
-    fn test_d_state_65_rejected_loudly_axis_g() {
+    fn test_d_state_just_past_register_cap_rejected_loudly() {
         let err = Mamba3Config {
             d_state: 65,
             ..Mamba3Config::default()
@@ -243,11 +243,11 @@ mod tests {
         assert!(err.contains("d_state"), "{err}");
     }
 
-    /// Axis G (0.6): scan-mode resolver pins — Auto resolves to the chunked
+    /// Scan-mode resolver pins — Auto resolves to the chunked
     /// parallel path for TRAINING (the only route with a mixed backward);
     /// explicit Sequential is honored (f32 lane).
     #[test]
-    fn test_scan_mode_resolver_pins_axis_g() {
+    fn test_scan_mode_resolver_pins() {
         let auto = Mamba3Config::default();
         assert_eq!(auto.scan_mode, ScanMode::Auto);
         assert!(auto.train_use_parallel_scan());
@@ -267,11 +267,11 @@ mod tests {
         );
     }
 
-    /// P4 (0.6): the rmsnorm_gated kernels silently no-op at d_inner > 1024
+    /// The rmsnorm_gated kernels silently no-op at d_inner > 1024
     /// — the config now rejects that combination loudly. d_inner > 1024
     /// WITHOUT the gated norm stays valid (those kernels never launch).
     #[test]
-    fn test_gated_norm_d_inner_cap_rejected_loudly_p4() {
+    fn test_gated_norm_d_inner_cap_rejected_loudly() {
         let big_gated = Mamba3Config {
             d_model: 1024,
             expand: 2,

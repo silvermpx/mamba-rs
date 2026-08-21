@@ -72,7 +72,7 @@ fn kaiming_uniform(buf: &mut [f32], fan_in: usize, rng: &mut SimpleRng) {
 }
 
 /// Inverse softplus. `exp_m1` keeps the small-x branch cancellation-free
-/// (A10, 0.6): `(x.exp() - 1.0).ln()` loses ~half the mantissa at the
+/// — the naive `(x.exp() - 1.0).ln()` loses ~half the mantissa at the
 /// dt_init_floor end of the init range.
 fn inv_softplus(x: f32) -> f32 {
     if x > 20.0 { x } else { x.exp_m1().ln() }
@@ -136,7 +136,7 @@ impl Mamba3Weights {
             // dt_bias: inv_softplus(log-uniform(0.001, 0.1)), floored at
             // dt_init_floor per the reference init (state-spaces/mamba
             // `mamba3.py`: `dt = torch.clamp(dt, min=dt_init_floor)` with
-            // dt_init_floor=1e-4) — A10 (0.6): the floor was missing here.
+            // dt_init_floor=1e-4); the floor was missing here until 0.6.
             let log_dt_min = 0.001_f32.ln();
             let log_dt_max = 0.1_f32.ln();
             const DT_INIT_FLOOR: f32 = 1e-4;

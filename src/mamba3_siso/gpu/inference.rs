@@ -331,7 +331,7 @@ pub struct Mamba3GpuInferenceEngine {
     pub weights: GpuMamba3WeightsInf,
     pub stream: Stream,
     pub blas: Arc<cudarc::cublas::CudaBlas>,
-    /// cuBLAS workspace backing the handle above (G6a, 0.6): the handle
+    /// cuBLAS workspace backing the handle above: the handle
     /// points at this allocation for CUDA-Graph-safe GEMM scratch — dropping
     /// it while the handle lives is exactly the use-after-free the buffer
     /// exists to prevent. Owned here, never read directly.

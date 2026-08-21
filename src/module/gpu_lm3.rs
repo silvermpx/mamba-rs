@@ -172,13 +172,13 @@ impl GpuMamba3LM {
             "vocab_size_padded ({vocab_size_padded}) < vocab_size ({vocab_size})"
         );
 
-        // G10c (0.6): the old code UNCONDITIONALLY cleared input_proj here —
+        // The old code UNCONDITIONALLY cleared input_proj here —
         // a checkpoint trained WITH a projection silently lost it and
         // produced plausible-looking garbage. The LM path feeds embeddings
         // at d_model, so an identity (empty) proj is the expected shape;
         // a real projection is honored on the f32 engine and REJECTED
         // loudly on mixed (the mixed engine cannot apply it yet — the
-        // G12/Q1 non-identity-input_proj lane).
+        // mixed-training gap; tracked for a future release).
         let weights = cpu_weights.clone();
         if !weights.input_proj_w.is_empty() && dtype != WeightDtype::F32 {
             return Err(format!(
@@ -203,7 +203,7 @@ impl GpuMamba3LM {
             if vocab_size == vocab_size_padded {
                 lm.clone()
             } else {
-                // G10d (0.6): PER-ROW padding via the shared helper — the
+                // PER-ROW padding via the shared helper — the
                 // flat copy this replaced smeared rows across the padded
                 // stride and produced wrong logits for every non-64-aligned
                 // vocab (M1's 5dde438 bug, faithfully re-shipped here).
@@ -313,7 +313,7 @@ impl GpuMamba3LM {
         // Mamba-3 prefill is a step-by-step loop for now: the chunked SSD
         // kernels are typed and live, but the PREFILL SURFACE (entering-state
         // carry + prefill entries + pooled graph, M1-parity) has not been
-        // built yet — it is the 0.6 W2 work item. Until then every prompt
+        // built yet. Until then every prompt
         // token pays a full step pipeline.
         for &token_id in prompt {
             let emb = embed_lookup(&self.embed_cpu, token_id, self.d_model, self.vocab_size);
@@ -464,7 +464,7 @@ impl GpuMamba3LM {
             EmbedStorage::F32 { embed, lm_head } => {
                 if let Some(lm) = lm_head {
                     // Untied: logits[B,Vpad] = hidden[B,D] @ lm_head[D,Vpad].
-                    // G10a (0.6): the hidden state already lives on the GPU
+                    // The hidden state already lives on the GPU
                     // (temporal_ptr) — feed it directly; the old path bounced
                     // it through host memory (D2H + H2D) on EVERY decoded
                     // token. M1 removed this exact bounce earlier.
