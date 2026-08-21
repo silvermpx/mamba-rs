@@ -287,8 +287,10 @@ fn ssm_channels(
         fast_exp_inplace(&mut da[..ds * SSM_BLOCK]);
         y_acc.fill(0.0);
         for (n, (da_l, h_l)) in da
-            .chunks_exact(SSM_BLOCK)
-            .zip(hloc.chunks_exact_mut(SSM_BLOCK))
+            .as_chunks::<SSM_BLOCK>()
+            .0
+            .iter()
+            .zip(hloc.as_chunks_mut::<SSM_BLOCK>().0.iter_mut())
             .enumerate()
             .take(ds)
         {
