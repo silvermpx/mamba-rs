@@ -140,10 +140,12 @@ impl MambaConfig {
                 "d_inner ({d_inner}) must be <= 65535 (CUDA grid.y limit for the parallel scan)"
             ));
         }
-        // CUDA parallel scan SSM kernel supports d_state up to MAX_DSTATE=256.
-        // Sequential SSM kernels are limited to d_state <= 64 (register arrays),
-        // but the dispatch in forward.rs forces the parallel scan path when
-        // d_state > 64, so the effective GPU limit is 256.
+        // 256 is the reference implementations' own maximum. The
+        // sequential SSM kernels size their per-thread state arrays at
+        // JIT time from the model config (past ~128 the compiler spills
+        // to local memory — correct, slower); the training dispatch
+        // still routes d_state > 64 to the parallel scan as its faster
+        // numeric route.
         if self.d_state > 256 {
             return Err(format!(
                 "d_state ({}) must be <= 256 (CUDA parallel scan MAX_DSTATE limit)",

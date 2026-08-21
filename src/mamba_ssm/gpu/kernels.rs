@@ -50,6 +50,11 @@ impl HalfKernel {
 pub struct MambaKernels {
     _module: Arc<CudaModule>,
 
+    /// State-dimension capacity the kernels were compiled with (the
+    /// per-thread register-array size). Launch paths guard `d_state`
+    /// against it instead of a hardcoded 64.
+    pub state_cap: usize,
+
     // -- SSM recurrence --
     /// Single-step SSM forward (T=1 inference).
     pub ssm_step_fwd: CudaFunction,
@@ -439,7 +444,34 @@ fn cache_key(material: &str) -> String {
     )
 }
 
+/// Round a model's `d_state` up to the register-array capacity the
+/// kernels are compiled with. The capacity is a JIT-time knob: raising
+/// it grows per-thread register pressure (the compiler spills to local
+/// memory past its budget — correct, slower, accepted), so it is kept
+/// as tight as the model allows. The 256 ceiling is the reference
+/// implementation's own range; a larger `d_state` has no upstream
+/// precedent and is refused loudly rather than silently mis-run.
+pub fn state_capacity(d_state: usize) -> Result<usize, String> {
+    if d_state == 0 {
+        return Err("d_state must be positive".into());
+    }
+    if d_state > 256 {
+        return Err(format!(
+            "d_state {d_state} exceeds the supported range (reference \
+             implementations go to 256)"
+        ));
+    }
+    Ok(d_state.div_ceil(64) * 64)
+}
+
 impl MambaKernels {
+    /// Compile with the default state capacity of 64 — the common
+    /// shapes' tightest register budget. Models with a larger `d_state`
+    /// use [`Self::compile_with_state_cap`].
+    pub fn compile(ctx: &Arc<CudaContext>, arch: &'static str) -> Result<Self, String> {
+        Self::compile_with_state_cap(ctx, arch, 64)
+    }
+
     /// Compile all CUDA kernels from source (NVRTC), with a disk cache for
     /// the emitted PTX (perf audit C1 Tier A): a cache hit skips the NVRTC
     /// half of the boot tax entirely; the PTX->SASS half is the driver
@@ -448,7 +480,15 @@ impl MambaKernels {
     /// cannot change a single emitted instruction. Any hit-path failure
     /// deletes the entry and falls through to a real compile; a failed
     /// compile is never cached.
-    pub fn compile(ctx: &Arc<CudaContext>, arch: &'static str) -> Result<Self, String> {
+    ///
+    /// `state_cap` sizes the per-thread state register arrays (see
+    /// [`state_capacity`]); it rides the compile options and therefore
+    /// the cache key.
+    pub fn compile_with_state_cap(
+        ctx: &Arc<CudaContext>,
+        arch: &'static str,
+        state_cap: usize,
+    ) -> Result<Self, String> {
         // Prelude is inlined first so templated kernels can use to_f / from_f_*
         // helpers without needing NVRTC to resolve #include "_typed_prelude.cuh"
         // (NVRTC compiles a single combined source blob, no filesystem search).
@@ -494,6 +534,7 @@ impl MambaKernels {
             "--fmad=true".to_string(),
             "--extra-device-vectorization".to_string(),
             format!("-DSGB_GROUP_M={group_m}"),
+            format!("-DMAMBA_RS_STATE_CAP={state_cap}"),
         ];
         let opts = cudarc::nvrtc::CompileOptions {
             arch: Some(arch),
@@ -579,6 +620,7 @@ impl MambaKernels {
         };
 
         Ok(Self {
+            state_cap,
             // SSM
             ssm_step_fwd: get("ssm_step_forward")?,
             ssm_burnin_fwd: get("ssm_burnin_forward")?,

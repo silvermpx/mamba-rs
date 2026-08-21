@@ -360,7 +360,11 @@ impl Mamba3GpuInferenceEngine {
         // its Graph-safe workspace.
         let ctx = GpuCtx::new(device)?;
         let arch = GpuDevice::nvrtc_arch(device.compute_capability);
-        let kernels = Mamba3Kernels::compile(device.context(), arch)?;
+        let kernels = Mamba3Kernels::compile_with_state_cap(
+            device.context(),
+            arch,
+            crate::mamba_ssm::gpu::kernels::state_capacity(cfg.d_state)?,
+        )?;
         let weights = GpuMamba3WeightsInf::from_cpu(&ctx.stream, cpu_weights, input_dim)?;
         let identity_proj = cpu_weights.input_proj_w.is_empty();
 

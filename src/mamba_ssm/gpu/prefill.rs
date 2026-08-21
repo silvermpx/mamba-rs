@@ -933,9 +933,10 @@ pub fn gpu_forward_inference_prefill_mixed<W: MambaWeightsView>(
                 .map_err(|e| format!("ssm_parallel_nosave prefill L{layer_idx}: {e:?}"))?;
             } else {
                 assert!(
-                    ds <= 64,
-                    "ssm_burnin_nosave_typed requires d_state <= 64 (got {ds}) - \
-                     the kernel returns without writing y otherwise"
+                    ds <= k.state_cap,
+                    "ssm_burnin_nosave_typed: d_state {ds} exceeds the compiled state \
+                     capacity {} - the kernel returns without writing y otherwise",
+                    k.state_cap
                 );
                 let mut bld = ctx.stream.launch_builder(k.ssm_burnin_nosave_typed.get(dt));
                 bld.arg(&ssm_ptr);

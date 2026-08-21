@@ -16,6 +16,17 @@
 // Source: CPU reference: train/forward.rs (phases F4d, B3)
 // Paper: Gu & Dao 2023 "Mamba: Linear-Time Sequence Modeling with Selective State Spaces"
 
+// State-dimension capacity of the per-thread register arrays below.
+// Injected at JIT time (-DMAMBA_RS_STATE_CAP=...) from the model config
+// so any reference-range d_state runs the same code path; 64 covers the
+// common shapes at minimum register pressure. Past ~128 the compiler
+// spills these arrays to local memory - correct, measurably slower,
+// and accepted: capacity is a first-class knob, not a fallback.
+#ifndef MAMBA_RS_STATE_CAP
+#define MAMBA_RS_STATE_CAP 64
+#endif
+
+
 #include "_typed_prelude.cuh"
 
 // ======================== FORWARD ========================
@@ -44,9 +55,9 @@ extern "C" __global__ void ssm_step_forward(
 
     // Opt A: load h and a_neg into registers
     // CONSTRAINT: d_state <= 64. Validated in Rust launch code.
-    float h_local[64];
-    float a_local[64];
-    if (d_state > 64) return;
+    float h_local[MAMBA_RS_STATE_CAP];
+    float a_local[MAMBA_RS_STATE_CAP];
+    if (d_state > MAMBA_RS_STATE_CAP) return;
     for (int n = 0; n < d_state; n++) {
         h_local[n] = h[h_base + n];
         a_local[n] = a_neg[d * d_state + n];
@@ -90,9 +101,9 @@ extern "C" __global__ void ssm_step_forward_##SUFFIX(                       \
     int b = idx / d_inner;                                                 \
     int d = idx % d_inner;                                                 \
     int h_base = (b * d_inner + d) * d_state;                              \
-    float h_local[64];                                                     \
-    float a_local[64];                                                     \
-    if (d_state > 64) return;                                              \
+    float h_local[MAMBA_RS_STATE_CAP];                                                     \
+    float a_local[MAMBA_RS_STATE_CAP];                                                     \
+    if (d_state > MAMBA_RS_STATE_CAP) return;                                              \
     for (int n = 0; n < d_state; n++) {                                    \
         h_local[n] = h[h_base + n];                                        \
         a_local[n] = a_neg[d * d_state + n];                               \
@@ -142,9 +153,9 @@ extern "C" __global__ void ssm_step_forward_gather_##SUFFIX(                \
     int d = idx % d_inner;                                                 \
     int h_base = (b * d_inner + d) * d_state;                              \
     int xdbl_base = b * xdbl_stride;                                       \
-    float h_local[64];                                                     \
-    float a_local[64];                                                     \
-    if (d_state > 64) return;                                              \
+    float h_local[MAMBA_RS_STATE_CAP];                                                     \
+    float a_local[MAMBA_RS_STATE_CAP];                                                     \
+    if (d_state > MAMBA_RS_STATE_CAP) return;                                              \
     for (int n = 0; n < d_state; n++) {                                    \
         h_local[n] = h[h_base + n];                                        \
         a_local[n] = a_neg[d * d_state + n];                               \
@@ -197,9 +208,9 @@ extern "C" __global__ void ssm_step_forward_gather_gate_##SUFFIX(           \
     int d = idx % d_inner;                                                 \
     int h_base = (b * d_inner + d) * d_state;                              \
     int xdbl_base = b * xdbl_stride;                                       \
-    float h_local[64];                                                     \
-    float a_local[64];                                                     \
-    if (d_state > 64) return;                                              \
+    float h_local[MAMBA_RS_STATE_CAP];                                                     \
+    float a_local[MAMBA_RS_STATE_CAP];                                                     \
+    if (d_state > MAMBA_RS_STATE_CAP) return;                                              \
     for (int n = 0; n < d_state; n++) {                                    \
         h_local[n] = h[h_base + n];                                        \
         a_local[n] = a_neg[d * d_state + n];                               \
@@ -250,9 +261,9 @@ extern "C" __global__ void ssm_burnin_forward(
     int h_base = (b * d_inner + d) * d_state;
 
     // Opt A: load h and a_neg into registers
-    float h_local[64];
-    float a_local[64];
-    if (d_state > 64) return;
+    float h_local[MAMBA_RS_STATE_CAP];
+    float a_local[MAMBA_RS_STATE_CAP];
+    if (d_state > MAMBA_RS_STATE_CAP) return;
     for (int n = 0; n < d_state; n++) {
         h_local[n] = h[h_base + n];
         a_local[n] = a_neg[d * d_state + n];
@@ -321,9 +332,9 @@ extern "C" __global__ void ssm_burnin_forward_nosave(
     int h_base = (b * d_inner + d) * d_state;
 
     // Opt A: load h and a_neg into registers
-    float h_local[64];
-    float a_local[64];
-    if (d_state > 64) return;
+    float h_local[MAMBA_RS_STATE_CAP];
+    float a_local[MAMBA_RS_STATE_CAP];
+    if (d_state > MAMBA_RS_STATE_CAP) return;
     for (int n = 0; n < d_state; n++) {
         h_local[n] = h[h_base + n];
         a_local[n] = a_neg[d * d_state + n];
@@ -370,9 +381,9 @@ extern "C" __global__ void ssm_burnin_forward_nosave_##SUFFIX(             \
     int b = idx / d_inner;                                                 \
     int d = idx % d_inner;                                                 \
     int h_base = (b * d_inner + d) * d_state;                              \
-    float h_local[64];                                                     \
-    float a_local[64];                                                     \
-    if (d_state > 64) return;                                              \
+    float h_local[MAMBA_RS_STATE_CAP];                                                     \
+    float a_local[MAMBA_RS_STATE_CAP];                                                     \
+    if (d_state > MAMBA_RS_STATE_CAP) return;                                              \
     for (int n = 0; n < d_state; n++) {                                    \
         h_local[n] = h[h_base + n];                                        \
         a_local[n] = a_neg[d * d_state + n];                               \
@@ -415,9 +426,9 @@ extern "C" __global__ void ssm_burnin_forward_##SUFFIX(                     \
     int b = idx / d_inner;                                                  \
     int d = idx % d_inner;                                                  \
     int h_base = (b * d_inner + d) * d_state;                               \
-    float h_local[64];                                                      \
-    float a_local[64];                                                      \
-    if (d_state > 64) return;                                               \
+    float h_local[MAMBA_RS_STATE_CAP];                                                      \
+    float a_local[MAMBA_RS_STATE_CAP];                                                      \
+    if (d_state > MAMBA_RS_STATE_CAP) return;                                               \
     for (int n = 0; n < d_state; n++) {                                     \
         h_local[n] = h[h_base + n];                                         \
         a_local[n] = a_neg[d * d_state + n];                                \
@@ -495,13 +506,13 @@ extern "C" __global__ void ssm_backward_local(
     float local_d_D = 0.0f;
 
     // Opt A: cache a_neg in registers
-    float a_local[64];
-    if (d_state > 64) return;
+    float a_local[MAMBA_RS_STATE_CAP];
+    if (d_state > MAMBA_RS_STATE_CAP) return;
     for (int n = 0; n < d_state; n++)
         a_local[n] = a_neg[d * d_state + n];
 
     // d_h carries gradient backward through time
-    float d_h[64];
+    float d_h[MAMBA_RS_STATE_CAP];
     for (int n = 0; n < d_state; n++) d_h[n] = 0.0f;
 
     // Backward through time (reverse T)
@@ -575,7 +586,7 @@ extern "C" __global__ void ssm_backward_local(
 //   - delta, u, B, C, dy                → typed (post-promote on load)
 //   - d_delta, d_u, d_B_local, d_C_local → typed (downcast on store)
 //   - d_D_local, d_a_log_local          → f32 master (T-length += accumulators)
-//   - register dh[64], a_local[64], local_d_D → f32 (BPTT precision invariant)
+//   - register dh, a_local (state-capacity sized), local_d_D → f32 (BPTT precision invariant)
 //
 // CONSTRAINT: d_state ≤ 64 (compile-time register array). All shipped
 // state-spaces/mamba checkpoints use d_state=16.
@@ -604,11 +615,11 @@ extern "C" __global__ void ssm_backward_local_##SUFFIX(                         
     if (idx >= total) return;                                                   \
     int b = idx / d_inner;                                                      \
     int d = idx % d_inner;                                                      \
-    if (d_state > 64) return;                                                   \
+    if (d_state > MAMBA_RS_STATE_CAP) return;                                                   \
                                                                                 \
     float local_d_D = 0.0f;                                                     \
-    float a_local[64];                                                          \
-    float d_h[64];                                                              \
+    float a_local[MAMBA_RS_STATE_CAP];                                                          \
+    float d_h[MAMBA_RS_STATE_CAP];                                                              \
     for (int n = 0; n < d_state; n++) {                                         \
         a_local[n] = a_neg[d * d_state + n];                                    \
         d_h[n] = 0.0f;                                                          \

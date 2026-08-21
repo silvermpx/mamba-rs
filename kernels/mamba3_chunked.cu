@@ -21,6 +21,17 @@
 // Thread/grid conventions follow mamba2_ssd.cu and mamba3_ssd.cu.
 // All kernels handle partial last chunk (T not multiple of chunk_size).
 
+// State-dimension capacity of the per-thread register arrays below.
+// Injected at JIT time (-DMAMBA_RS_STATE_CAP=...) from the model config
+// so any reference-range d_state runs the same code path; 64 covers the
+// common shapes at minimum register pressure. Past ~128 the compiler
+// spills these arrays to local memory - correct, measurably slower,
+// and accepted: capacity is a first-class knob, not a fallback.
+#ifndef MAMBA_RS_STATE_CAP
+#define MAMBA_RS_STATE_CAP 64
+#endif
+
+
 #include "_typed_prelude.cuh"
 
 #ifndef FAST_EXP
@@ -530,7 +541,7 @@ extern "C" __global__ void m3_dqkv(
     int b = blockIdx.y;
     int p = threadIdx.x;
     if (h >= nh_total || b >= B || p >= hd) return;
-    if (ds > 64 || CS > 64) return;  // Safety: d_state[64], dM_rev[64] fixed arrays
+    if (ds > MAMBA_RS_STATE_CAP || CS > 64) return;  // capacity guard: state cap is a JIT knob, CS is fixed
 
     // Warp-reduce mask: only `hd` lanes are launched (block_dim = hd, hd ≤ 32).
     // Hardcoded 0xFFFFFFFF = UB per CUDA Programming Guide §B.15.1.
@@ -543,7 +554,7 @@ extern "C" __global__ void m3_dqkv(
 
     // Register state: d_ssm_states_acc — column p of [hd][ds] matrix
     // Each thread holds ds floats
-    float d_state[64]; // max ds
+    float d_state[MAMBA_RS_STATE_CAP]; // sized by the state capacity
     for (int n = 0; n < ds; n++) d_state[n] = 0.0f;
 
     // Shared memory layout (dynamically sized)
@@ -874,10 +885,10 @@ extern "C" __global__ void m3_dqktheta(
     int chunk = b_chunk % n_chunks;
     int gt = chunk * CS + t_local;
 
-    // ds > 64 is a pre-existing kernel limit (q_pre/k_pre/dq_in[64] register
-    // arrays). All threads of the block read the same `ds` arg → safe early
-    // return (no smem alloc reached, no syncthreads needed).
-    if (ds > 64) return;
+    // Capacity guard for the q_pre/k_pre/dq_in register arrays. All
+    // threads of the block read the same `ds` arg -> safe early return
+    // (no smem alloc reached, no syncthreads needed).
+    if (ds > MAMBA_RS_STATE_CAP) return;
     if (b >= B || h >= nh) return;
 
     bool valid = (gt < T);
@@ -889,19 +900,19 @@ extern "C" __global__ void m3_dqktheta(
         float dqk = dQK_dot[(b * T + gt) * nh + h];
 
         // Load Q_raw + K_raw (pre-RoPE, post-bias)
-        float q_pre[64], k_pre[64]; // max ds
+        float q_pre[MAMBA_RS_STATE_CAP], k_pre[MAMBA_RS_STATE_CAP]; // sized by the state capacity
         for (int n = 0; n < ds; n++) {
             q_pre[n] = Q_raw[base + n];
             k_pre[n] = K_raw[base + n];
         }
-        float dq_in[64], dk_in[64];
+        float dq_in[MAMBA_RS_STATE_CAP], dk_in[MAMBA_RS_STATE_CAP];
         for (int n = 0; n < ds; n++) {
             dq_in[n] = dQ_mid[base + n];
             dk_in[n] = dK_mid[base + n];
         }
 
         // Forward RoPE on K_raw to get K_rot (for dScale computation)
-        float k_rot[64];
+        float k_rot[MAMBA_RS_STATE_CAP];
         int angle_base = ((b * T + gt) * nh + h) * n_angles;
         for (int a = 0; a < n_angles && 2 * a + 1 < ds; a++) {
             float theta = Angles[angle_base + a];
@@ -927,7 +938,7 @@ extern "C" __global__ void m3_dqktheta(
         for (int n = 0; n < ds; n++) dk_in[n] *= scale;
 
         // Inverse RoPE on dQ_mid and scaled dK_mid
-        float dq_pre_out[64], dk_pre_out[64];
+        float dq_pre_out[MAMBA_RS_STATE_CAP], dk_pre_out[MAMBA_RS_STATE_CAP];
         for (int n = 0; n < ds; n++) { dq_pre_out[n] = dq_in[n]; dk_pre_out[n] = dk_in[n]; }
         for (int a = 0; a < n_angles && 2 * a + 1 < ds; a++) {
             float theta = Angles[angle_base + a];
@@ -1342,13 +1353,13 @@ m3_dqkv_##SUFFIX(                                                             \
     int b = blockIdx.y;                                                       \
     int p = threadIdx.x;                                                      \
     if (h >= nh_total || b >= B || p >= hd) return;                           \
-    if (ds > 64 || CS > 64) return;                                           \
+    if (ds > MAMBA_RS_STATE_CAP || CS > 64) return;                           \
     unsigned warp_mask = (hd >= 32) ? 0xFFFFFFFFu : ((1u << hd) - 1u);        \
     int d_inner = nh_total * hd;                                              \
     int n_chunks = (T + CS - 1) / CS;                                         \
     float D_val = D_param[h];                                                 \
     float dD_acc = 0.0f;                                                      \
-    float d_state[64];                                                        \
+    float d_state[MAMBA_RS_STATE_CAP];                                                        \
     for (int n = 0; n < ds; n++) d_state[n] = 0.0f;                           \
     extern __shared__ float smem[];                                           \
     float* q_sm    = smem;                                                    \
@@ -1567,7 +1578,7 @@ m3_dqkv_##SUFFIX(                                                             \
 DEFINE_M3_DQKV(bf16, __nv_bfloat16, from_f_bf16)
 DEFINE_M3_DQKV(f16,  __half,        from_f_f16)
 
-// __launch_bounds__: block_dim=CS ≤ 64. 6× float[64] register arrays per
+// __launch_bounds__: block_dim=CS <= 64. Six state-capacity register arrays per
 // thread risk spilling under nvcc heuristics — pin to 4 blocks/SM.
 #define DEFINE_M3_DQKTHETA(SUFFIX, T_ACT, FROM_F)                             \
 extern "C" __global__ __launch_bounds__(64, 4) void                           \
@@ -1598,7 +1609,7 @@ m3_dqktheta_##SUFFIX(                                                         \
     int b = b_chunk / n_chunks;                                               \
     int chunk = b_chunk % n_chunks;                                           \
     int gt = chunk * CS + t_local;                                            \
-    if (ds > 64) return;                                                      \
+    if (ds > MAMBA_RS_STATE_CAP) return;                                                      \
     if (b >= B || h >= nh) return;                                            \
     bool valid = (gt < T);                                                    \
     if (valid) {                                                              \
@@ -1606,17 +1617,17 @@ m3_dqktheta_##SUFFIX(                                                         \
     float scale = Scale_in[(b * T + gt) * nh + h];                            \
     float gamma = Gamma_in[(b * T + gt) * nh + h];                            \
     float dqk = dQK_dot[(b * T + gt) * nh + h];                               \
-    float q_pre[64], k_pre[64];                                               \
+    float q_pre[MAMBA_RS_STATE_CAP], k_pre[MAMBA_RS_STATE_CAP];                                               \
     for (int n = 0; n < ds; n++) {                                            \
         q_pre[n] = to_f(Q_raw[base + n]);                                     \
         k_pre[n] = to_f(K_raw[base + n]);                                     \
     }                                                                         \
-    float dq_in[64], dk_in[64];                                               \
+    float dq_in[MAMBA_RS_STATE_CAP], dk_in[MAMBA_RS_STATE_CAP];                                               \
     for (int n = 0; n < ds; n++) {                                            \
         dq_in[n] = dQ_mid[base + n];                                          \
         dk_in[n] = dK_mid[base + n];                                          \
     }                                                                         \
-    float k_rot[64];                                                          \
+    float k_rot[MAMBA_RS_STATE_CAP];                                                          \
     int angle_base = ((b * T + gt) * nh + h) * n_angles;                      \
     for (int a = 0; a < n_angles && 2 * a + 1 < ds; a++) {                    \
         float theta = Angles[angle_base + a];                                 \
@@ -1634,7 +1645,7 @@ m3_dqktheta_##SUFFIX(                                                         \
     for (int n = 0; n < ds; n++) qk_raw += q_pre[n] * k_pre[n];               \
     dGamma[(b * T + gt) * nh + h] = dqk * qk_raw;                             \
     for (int n = 0; n < ds; n++) dk_in[n] *= scale;                           \
-    float dq_pre_out[64], dk_pre_out[64];                                     \
+    float dq_pre_out[MAMBA_RS_STATE_CAP], dk_pre_out[MAMBA_RS_STATE_CAP];                                     \
     for (int n = 0; n < ds; n++) {                                            \
         dq_pre_out[n] = dq_in[n];                                             \
         dk_pre_out[n] = dk_in[n];                                             \

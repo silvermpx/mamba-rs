@@ -88,9 +88,13 @@ impl Mamba3Config {
                 self.headdim
             ));
         }
-        if !(self.d_state >= 1 && self.d_state <= 64) {
+        // 256 is the reference implementations' own maximum. The GPU
+        // kernels size their per-thread state arrays at JIT time from
+        // this value (past ~128 the compiler spills to local memory —
+        // correct, slower, accepted as a first-class capacity knob).
+        if !(self.d_state >= 1 && self.d_state <= 256) {
             return Err(format!(
-                "d_state ({}) must be in 1..=64 (CUDA register limit)",
+                "d_state ({}) must be in 1..=256 (the reference range)",
                 self.d_state
             ));
         }
@@ -102,10 +106,31 @@ impl Mamba3Config {
                 self.d_state
             ));
         }
-        if self.headdim * self.d_state > 1024 {
+        // The chunked-backward kernel stages two chunk-by-d_state operand
+        // tiles (chunk size 64) plus smaller pieces in dynamic shared
+        // memory; the kernel loader opts in to the device's extended
+        // budget, and 99 KB is the opt-in floor across every supported
+        // part since Ampere (some parts offer more; the floor keeps one
+        // portable bound). Shapes above it need the state-tiled redesign
+        // of that kernel and are refused loudly until it lands. (This
+        // replaces
+        // the cruder headdim*d_state <= 1024 product bound: the register
+        // arrays it protected spill gracefully under compiler control,
+        // while shared memory is a hard launch limit.)
+        // Only the chunked training path runs that kernel: an explicit
+        // Sequential scan mode trains without it and skips this bound.
+        let cs = 64usize;
+        let chunked_bwd_smem =
+            (2 * cs * self.d_state + 2 * cs * self.headdim + 2 * cs + self.headdim * self.d_state)
+                * 4;
+        if self.train_use_parallel_scan() && chunked_bwd_smem > 99 * 1024 {
             return Err(format!(
-                "headdim*d_state ({}) must be <= 1024 (CUDA register budget)",
-                self.headdim * self.d_state
+                "headdim {} with d_state {} needs {} KB of shared memory in the \
+                 chunked backward — over the 99 KB opt-in budget; this ceiling \
+                 falls with the state-tiled redesign of that kernel",
+                self.headdim,
+                self.d_state,
+                chunked_bwd_smem / 1024
             ));
         }
         if self.ngroups < 1 {
@@ -217,10 +242,22 @@ mod tests {
         assert!(err.contains("headdim"), "{err}");
     }
 
+    /// Large d_state is first-class up to the reference range: the
+    /// kernels size their state arrays at JIT time, so 65 and 128 are
+    /// plainly valid; past 256 there is no upstream precedent and the
+    /// config refuses loudly.
     #[test]
-    fn test_invalid_d_state() {
+    fn test_d_state_reference_range() {
+        for ds in [65usize, 128] {
+            Mamba3Config {
+                d_state: ds,
+                ..Mamba3Config::default()
+            }
+            .validate()
+            .unwrap_or_else(|e| panic!("d_state {ds} must validate: {e}"));
+        }
         let err = Mamba3Config {
-            d_state: 128,
+            d_state: 257,
             ..Mamba3Config::default()
         }
         .validate()
@@ -228,19 +265,20 @@ mod tests {
         assert!(err.contains("d_state"), "{err}");
     }
 
-    /// The boundary value just past the register cap is
-    /// rejected LOUDLY — silent wrong math at d_state=65 was the failure
-    /// mode this guards. Interim until the W5 first-class d_state tiling
-    /// removes the ceiling (owner ruling 2026-08-21).
+    /// Shapes whose chunked-backward shared-memory tiles exceed the
+    /// opt-in budget are refused loudly, naming the resource — silent
+    /// wrong math past a capacity was the failure mode all these guards
+    /// exist for.
     #[test]
-    fn test_d_state_just_past_register_cap_rejected_loudly() {
+    fn test_chunked_backward_smem_budget_rejected_loudly() {
         let err = Mamba3Config {
-            d_state: 65,
+            d_state: 256,
+            headdim: 32,
             ..Mamba3Config::default()
         }
         .validate()
         .unwrap_err();
-        assert!(err.contains("d_state"), "{err}");
+        assert!(err.contains("shared memory"), "{err}");
     }
 
     /// Scan-mode resolver pins — Auto resolves to the chunked

@@ -11,6 +11,11 @@ use std::sync::Arc;
 pub struct Mamba3Kernels {
     _module: Arc<CudaModule>,
 
+    /// State-dimension capacity the kernels were compiled with (the
+    /// per-thread register-array size). Launch paths guard `d_state`
+    /// against it instead of a hardcoded 64.
+    pub state_cap: usize,
+
     // ── Sequential SSM (mamba3_ssd.cu) ──
     pub m3_step_fwd: CudaFunction,
     pub m3_burnin_fwd: CudaFunction,
@@ -165,7 +170,23 @@ pub struct Mamba3Kernels {
 
 impl Mamba3Kernels {
     /// Compile all 47 Mamba-3 CUDA kernels from source. Takes ~100-200ms.
+    /// Compile with the default state capacity of 64. Models with a
+    /// larger `d_state` use [`Self::compile_with_state_cap`].
     pub fn compile(ctx: &Arc<CudaContext>, arch: &'static str) -> Result<Self, String> {
+        Self::compile_with_state_cap(ctx, arch, 64)
+    }
+
+    /// Compile all Mamba-3 kernels. `state_cap` sizes the per-thread
+    /// state register arrays (see
+    /// [`crate::mamba_ssm::gpu::kernels::state_capacity`]); raising it
+    /// past the register budget makes the compiler spill to local
+    /// memory — correct, slower, accepted as a first-class capacity
+    /// knob rather than a separate slow path.
+    pub fn compile_with_state_cap(
+        ctx: &Arc<CudaContext>,
+        arch: &'static str,
+        state_cap: usize,
+    ) -> Result<Self, String> {
         let sources = [
             // Inline the prelude first so each source file's
             // `#include "_typed_prelude.cuh"` can be safely stripped below.
@@ -194,6 +215,7 @@ impl Mamba3Kernels {
             options: vec![
                 "--fmad=true".to_string(),
                 "--extra-device-vectorization".to_string(),
+                format!("-DMAMBA_RS_STATE_CAP={state_cap}"),
             ],
             include_paths: crate::mamba_ssm::gpu::kernels::cuda_include_paths(),
             ..Default::default()
@@ -212,7 +234,8 @@ impl Mamba3Kernels {
                 .map_err(|e| format!("M3 kernel '{name}' not found: {e:?}"))
         };
 
-        Ok(Self {
+        let kernels = Self {
+            state_cap,
             // Sequential SSM
             m3_step_fwd: get("m3_step_fwd")?,
             m3_burnin_fwd: get("m3_burnin_fwd")?,
@@ -401,6 +424,31 @@ impl Mamba3Kernels {
             },
 
             _module: module,
-        })
+        };
+
+        // The chunked-backward kernel's dynamic shared memory grows
+        // linearly with d_state (two chunk-by-d_state operand tiles
+        // dominate) and exceeds the 48 KB default past d_state ~ 70.
+        // Opt these functions in to the device's extended budget so a
+        // larger state runs on the same code path. Best effort: on a
+        // device without the budget the attribute call fails here and
+        // an oversized launch later fails loudly with its own error —
+        // never silently.
+        if state_cap > 64 {
+            use cudarc::driver::sys::CUfunction_attribute_enum as FnAttr;
+            let budget: i32 = 99 * 1024;
+            for f in [
+                &kernels.m3_dqkv,
+                &kernels.m3_dqkv_typed.f32,
+                &kernels.m3_dqkv_typed.bf16,
+                &kernels.m3_dqkv_typed.f16,
+            ] {
+                let _ = f.set_attribute(
+                    FnAttr::CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
+                    budget,
+                );
+            }
+        }
+        Ok(kernels)
     }
 }

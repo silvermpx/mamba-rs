@@ -259,7 +259,8 @@ impl GpuMambaInference {
         batch: usize,
     ) -> Result<Self, String> {
         cfg.validate()?;
-        let ctx = GpuCtx::new(device)?;
+        let state_cap = crate::mamba_ssm::gpu::kernels::state_capacity(cfg.d_state)?;
+        let ctx = GpuCtx::new_with_state_cap(device, state_cap)?;
 
         let weights = GpuMambaWeights::from_cpu(&ctx.stream, cpu_weights, &cfg)?;
 
@@ -674,7 +675,11 @@ impl GpuMambaInference {
                 // m-2 (scan-audit 2026-08-01): the step kernel silently
                 // returns without writing y beyond its register cap - and
                 // T=1 decode has no parallel alternative to route to.
-                assert!(ds <= 64, "ssm_step_fwd requires d_state <= 64 (got {ds})");
+                assert!(
+                    ds <= k.state_cap,
+                    "ssm_step_fwd: d_state {ds} exceeds the compiled state capacity {}",
+                    k.state_cap
+                );
                 let dp = lw.d_param();
                 let mut bld = self.ctx.stream.launch_builder(&k.ssm_step_fwd);
                 let y_ssm_ptr = scratch.y.cached_ptr();
@@ -1174,10 +1179,11 @@ impl GpuMambaInferenceMixed {
             // fit trivially; assert here so a user hand-authored config with
             // d_state > 64 fails loudly rather than silently.
             assert!(
-                ds <= 64,
-                "ssm_step_fwd_gather_gate_typed requires d_state <= 64 (got {ds}); \
-                 the fused kernel uses on-register arrays sized 64. For d_state > 64 \
-                 route through the unfused ssm_step_fwd_typed + elementwise_mul path."
+                ds <= k.state_cap,
+                "ssm_step_fwd_gather_gate_typed: d_state {ds} exceeds the compiled \
+                 state capacity {} (the fused kernel keeps the state in registers \
+                 sized at compile time)",
+                k.state_cap
             );
             {
                 let b_i = b as i32;

@@ -57,7 +57,16 @@ pub struct GpuCtx {
 
 impl GpuCtx {
     /// Create a GPU context: compile kernels, init cuBLAS with TF32.
+    /// Kernels get the default state capacity of 64; models with a
+    /// larger `d_state` use [`Self::new_with_state_cap`].
     pub fn new(device: &GpuDevice) -> Result<Self, String> {
+        Self::new_with_state_cap(device, 64)
+    }
+
+    /// Create a GPU context whose kernels are compiled with the given
+    /// state capacity (see
+    /// [`crate::mamba_ssm::gpu::kernels::state_capacity`]).
+    pub fn new_with_state_cap(device: &GpuDevice, state_cap: usize) -> Result<Self, String> {
         // Disable cudarc's per-slice CudaEvent tracking. Rationale: we
         // execute every op on a single ctx.stream throughout fwd / bwd /
         // optimizer, so the multi-stream synchronization events cudarc
@@ -84,7 +93,7 @@ impl GpuCtx {
         }
         let stream = device.fork_stream()?;
         let arch = GpuDevice::nvrtc_arch(device.compute_capability);
-        let kernels = MambaKernels::compile(device.context(), arch)?;
+        let kernels = MambaKernels::compile_with_state_cap(device.context(), arch, state_cap)?;
         // The splitk/transpose scratch buffers inside `kernels` were
         // alloc_zeros'd on the DEFAULT stream; `ctx.stream` is NON_BLOCKING
         // and never orders against it. Drain once here so first use on

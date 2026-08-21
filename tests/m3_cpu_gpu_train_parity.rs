@@ -434,7 +434,12 @@ fn run_gpu(
     // enough to mask genuine small implementation bugs. TF32 numerics are
     // covered by the GPU-internal tests; this test isolates the math.
     ctx.disable_tf32();
-    let m3k = Mamba3Kernels::compile(dev.context(), "sm_89").expect("Mamba3Kernels");
+    let m3k = Mamba3Kernels::compile_with_state_cap(
+        dev.context(),
+        "sm_89",
+        mamba_rs::mamba_ssm::gpu::kernels::state_capacity(scn.cfg.d_state).unwrap(),
+    )
+    .expect("Mamba3Kernels");
 
     let dims = scn.gpu_dims();
     let bt = scn.bt();
@@ -570,4 +575,74 @@ fn m3_cpu_gpu_train_parity_chunked_t256() {
         use_parallel_scan: true,
     };
     check_scenario("chunked_t256", &scn);
+}
+
+/// Large state dimension (d_state = 128, past the historical 64-register
+/// ceiling): both scan modes against the CPU oracle. The kernels are
+/// compiled with the matching state capacity; the CPU side has no
+/// ceiling, so this is a true independent reference.
+#[test]
+fn m3_cpu_gpu_train_parity_chunked_large_d_state() {
+    let scn = Scenario {
+        cfg: Mamba3Config {
+            d_state: 128,
+            headdim: 16,
+            ..base_cfg(true)
+        },
+        batch: 1,
+        seq_len: 128,
+        use_parallel_scan: true,
+    };
+    check_scenario("chunked_ds128", &scn);
+}
+
+#[test]
+fn m3_cpu_gpu_train_parity_sequential_large_d_state() {
+    let scn = Scenario {
+        cfg: Mamba3Config {
+            d_state: 128,
+            headdim: 16,
+            ..base_cfg(false)
+        },
+        batch: 1,
+        seq_len: 64,
+        use_parallel_scan: false,
+    };
+    check_scenario("seq_ds128", &scn);
+}
+
+/// The top of the supported range (d_state = 256 - the reference
+/// implementations' own maximum) on the SEQUENTIAL path, which has no
+/// shared-memory tiles - pure register/spill, vs CPU.
+#[test]
+fn m3_cpu_gpu_train_parity_sequential_d_state_256() {
+    let scn = Scenario {
+        cfg: Mamba3Config {
+            d_state: 256,
+            headdim: 16,
+            // The explicit sequential mode skips the chunked-backward
+            // shared-memory bound — that kernel never runs here.
+            scan_mode: mamba_rs::config::ScanMode::Sequential,
+            ..base_cfg(false)
+        },
+        batch: 1,
+        seq_len: 64,
+        use_parallel_scan: false,
+    };
+    check_scenario("seq_ds256", &scn);
+}
+
+/// d_state = 256 on the CHUNKED path exceeds the chunked-backward
+/// kernel's shared-memory budget; the config validator must refuse it
+/// loudly (the ceiling falls with the state-tiled redesign of that
+/// kernel).
+#[test]
+fn m3_chunked_d_state_256_is_refused_loudly() {
+    let cfg = Mamba3Config {
+        d_state: 256,
+        headdim: 16,
+        ..base_cfg(true)
+    };
+    let err = cfg.validate().unwrap_err();
+    assert!(err.contains("shared memory"), "{err}");
 }

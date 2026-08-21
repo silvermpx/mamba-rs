@@ -18,7 +18,9 @@ use crate::ops::blas::sgemm_forward;
 use crate::ops::fast_math::fast_exp_scalar;
 
 // Stack-array limits (must match config validation)
-const MAX_DS: usize = 64;
+// Sized to the config validator's reference-range maximum; a
+// 256-float stack scratch per head is ~1 KB - negligible on CPU.
+const MAX_DS: usize = 256;
 const MAX_ANGLES: usize = MAX_DS / 2;
 
 // ── SIMD helpers ──

@@ -460,7 +460,11 @@ impl Mamba3TrainerMixed {
         let device = GpuDevice::new(gpu_ordinal)?;
         let ctx = GpuCtx::new(&device)?;
         let arch = GpuDevice::nvrtc_arch(device.compute_capability);
-        let m3k = Mamba3Kernels::compile(device.context(), arch)?;
+        let m3k = Mamba3Kernels::compile_with_state_cap(
+            device.context(),
+            arch,
+            crate::mamba_ssm::gpu::kernels::state_capacity(cfg.d_state)?,
+        )?;
 
         let weights =
             GpuMamba3TrainMixedWeights::from_cpu(&ctx.stream, cpu_weights, &cfg, input_dim, dtype)?;
@@ -1257,7 +1261,11 @@ impl Mamba3TrainerF32 {
         let device = GpuDevice::new(gpu_ordinal)?;
         let ctx = GpuCtx::new(&device)?;
         let arch = GpuDevice::nvrtc_arch(device.compute_capability);
-        let m3k = Mamba3Kernels::compile(device.context(), arch)?;
+        let m3k = Mamba3Kernels::compile_with_state_cap(
+            device.context(),
+            arch,
+            crate::mamba_ssm::gpu::kernels::state_capacity(cfg.d_state)?,
+        )?;
 
         let weights = GpuMamba3Weights::from_cpu(&ctx.stream, cpu_weights, &cfg, input_dim)?;
 

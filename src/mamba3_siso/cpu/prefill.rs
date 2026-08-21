@@ -34,7 +34,9 @@ use crate::ops::blas::{sgemm_forward, sgemm_forward_par};
 use crate::ops::fast_math::fast_exp_scalar;
 
 /// Stack-array limits (match `forward.rs` / config validation).
-const MAX_DS: usize = 64;
+// Sized to the config validator's reference-range maximum; a
+// 256-float stack scratch per head is ~1 KB - negligible on CPU.
+const MAX_DS: usize = 256;
 const MAX_ANGLES: usize = MAX_DS / 2;
 
 type GemmFn = fn(&mut [f32], &[f32], &[f32], Option<&[f32]>, usize, usize, usize);

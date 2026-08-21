@@ -39,6 +39,17 @@
 //   All headdim threads in a warp access consecutive addresses at each n step
 //   -> perfectly coalesced (1 cache line per warp per n step).
 
+// State-dimension capacity of the per-thread register arrays below.
+// Injected at JIT time (-DMAMBA_RS_STATE_CAP=...) from the model config
+// so any reference-range d_state runs the same code path; 64 covers the
+// common shapes at minimum register pressure. Past ~128 the compiler
+// spills these arrays to local memory - correct, measurably slower,
+// and accepted: capacity is a first-class knob, not a fallback.
+#ifndef MAMBA_RS_STATE_CAP
+#define MAMBA_RS_STATE_CAP 64
+#endif
+
+
 #ifndef LOG2E
 #define LOG2E 1.4426950408889634f
 #endif
@@ -82,8 +93,8 @@ extern "C" __global__ void m3_step_fwd(
     unsigned warp_mask = (hd >= 32) ? 0xFFFFFFFFu : ((1u << hd) - 1u);
 
     // Load h_local into registers
-    float h_local[64];
-    if (ds > 64) return;
+    float h_local[MAMBA_RS_STATE_CAP];
+    if (ds > MAMBA_RS_STATE_CAP) return;
     int h_base = (b * nh * hd + h * hd + p) * ds;
     for (int n = 0; n < ds; n++)
         h_local[n] = ssm_state[h_base + n];
@@ -167,8 +178,8 @@ extern "C" __global__ void m3_step_fwd_##SUFFIX(                             \
     if (b >= batch || h >= nh || p >= hd) return;                            \
     int d_inner = nh * hd;                                                   \
     unsigned warp_mask = (hd >= 32) ? 0xFFFFFFFFu : ((1u << hd) - 1u);       \
-    float h_local[64];                                                       \
-    if (ds > 64) return;                                                     \
+    float h_local[MAMBA_RS_STATE_CAP];                                                       \
+    if (ds > MAMBA_RS_STATE_CAP) return;                                                     \
     int h_base = (b * nh * hd + h * hd + p) * ds;                            \
     for (int n = 0; n < ds; n++) h_local[n] = ssm_state[h_base + n];         \
     float alpha_h = 0.0f;                                                    \
@@ -259,8 +270,8 @@ extern "C" __global__ void m3_burnin_fwd(
     unsigned warp_mask = (hd >= 32) ? 0xFFFFFFFFu : ((1u << hd) - 1u);
 
     // Load h_local from persistent state into registers
-    float h_local[64];
-    if (ds > 64) return;
+    float h_local[MAMBA_RS_STATE_CAP];
+    if (ds > MAMBA_RS_STATE_CAP) return;
     int h_base = (b * nh * hd + h * hd + p) * ds;
     for (int n = 0; n < ds; n++)
         h_local[n] = ssm_state[h_base + n];
@@ -380,8 +391,8 @@ extern "C" __global__ void m3_burnin_fwd_##SUFFIX(                           \
     int d_inner = nh * hd;                                                   \
     int nhd_ds = d_inner * ds;                                               \
     unsigned warp_mask = (hd >= 32) ? 0xFFFFFFFFu : ((1u << hd) - 1u);       \
-    float h_local[64];                                                       \
-    if (ds > 64) return;                                                     \
+    float h_local[MAMBA_RS_STATE_CAP];                                                       \
+    if (ds > MAMBA_RS_STATE_CAP) return;                                                     \
     int h_base = (b * nh * hd + h * hd + p) * ds;                            \
     for (int n = 0; n < ds; n++) h_local[n] = ssm_state[h_base + n];         \
     float d_skip = 0.0f;                                                     \
@@ -478,8 +489,8 @@ extern "C" __global__ void m3_burnin_fwd_nosave(
     unsigned warp_mask = (hd >= 32) ? 0xFFFFFFFFu : ((1u << hd) - 1u);
 
     // Load h_local from persistent state into registers
-    float h_local[64];
-    if (ds > 64) return;
+    float h_local[MAMBA_RS_STATE_CAP];
+    if (ds > MAMBA_RS_STATE_CAP) return;
     int h_base = (b * nh * hd + h * hd + p) * ds;
     for (int n = 0; n < ds; n++)
         h_local[n] = ssm_state[h_base + n];
@@ -615,15 +626,15 @@ extern "C" __global__ void m3_backward_seq(
     d_skip = __shfl_sync(warp_mask, d_skip, 0, hd);
 
     // d_h: BPTT hidden state gradient carried backward through time
-    float d_h_reg[64];
-    if (ds > 64) return;
+    float d_h_reg[MAMBA_RS_STATE_CAP];
+    if (ds > MAMBA_RS_STATE_CAP) return;
     for (int n = 0; n < ds; n++)
         d_h_reg[n] = 0.0f;
 
     // d_k_carry: gradient for k_prev accumulated at timestep (t+1).
     // Flushed to d_k[t] at the start of processing timestep t.
     // Only lane p=0 accumulates (after warp reduce over p).
-    float d_k_carry[64];
+    float d_k_carry[MAMBA_RS_STATE_CAP];
     for (int n = 0; n < ds; n++)
         d_k_carry[n] = 0.0f;
 
@@ -641,7 +652,7 @@ extern "C" __global__ void m3_backward_seq(
         // to d_k[(b,t,h,n)]. No atomic needed — direct store. Later d_kc_val
         // from current iteration adds to same slot, merge via local accumulator
         // `d_k_write[n]` flushed once per t (see after main n-loop).
-        float d_k_write[64];
+        float d_k_write[MAMBA_RS_STATE_CAP];
         for (int n = 0; n < ds; n++) d_k_write[n] = 0.0f;
         // --- Flush d_k_carry from previous iteration into local d_k_write ---
         // d_k_carry holds gradient for k_prev[t+1] = k_cur[t], so write to d_k[t].

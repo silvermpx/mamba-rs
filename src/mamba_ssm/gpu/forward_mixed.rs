@@ -667,8 +667,10 @@ pub fn gpu_forward_mamba_backbone_mixed(
                 .map_err(|e| format!("ssm_parallel_fwd typed L{layer_idx}: {e:?}"))?;
             } else {
                 assert!(
-                    ds <= 64,
-                    "ssm_burnin_forward_typed requires d_state <= 64 (got {ds})"
+                    ds <= k.state_cap,
+                    "ssm_burnin_forward_typed: d_state {ds} exceeds the compiled \
+                     state capacity {}",
+                    k.state_cap
                 );
                 let kernel = match dt {
                     WeightDtype::F32 => &k.ssm_burnin_fwd,
