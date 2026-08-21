@@ -111,12 +111,26 @@ impl Mamba3Trainer {
             cfg.d_state,
         )?;
         let inner = match dtype {
-            WeightDtype::F32 => Trainer3Inner::F32(Box::new(Mamba3TrainerF32::new_full(
-                gpu_ordinal,
-                cpu_weights,
-                cfg,
-                session,
-            )?)),
+            WeightDtype::F32 => {
+                // The f32 backbone runs the input projection GEMM
+                // unconditionally; an empty weight is a zero-size device
+                // allocation whose null pointer only surfaces later as
+                // CUDA_ERROR_ILLEGAL_ADDRESS inside a GEMM kernel. The
+                // empty-means-identity convention belongs to the mixed
+                // trainer — refuse it here while the cause is nameable.
+                if cpu_weights.input_proj_w.is_empty() {
+                    return Err("f32 M3 trainer requires an explicit input projection: \
+                         pass an identity matrix for a pass-through (the \
+                         empty-input_proj identity convention is mixed-only)"
+                        .into());
+                }
+                Trainer3Inner::F32(Box::new(Mamba3TrainerF32::new_full(
+                    gpu_ordinal,
+                    cpu_weights,
+                    cfg,
+                    session,
+                )?))
+            }
             WeightDtype::Bf16 | WeightDtype::F16 => Trainer3Inner::Mixed(Box::new(
                 Mamba3TrainerMixed::new_full(gpu_ordinal, cpu_weights, cfg, session, dtype)?,
             )),

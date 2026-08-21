@@ -65,30 +65,47 @@ fn weight_bits(w: &Mamba3Weights) -> Vec<u32> {
 /// Run `rounds` data-parallel optimizer steps across `world` emulated
 /// ranks on one GPU and return the final master-weight bits (identical
 /// on every rank — asserted inside). `permute_delivery` scrambles the
-/// order the fold receives peer contributions in.
-fn run_emulated_ddp(world: usize, rounds: usize, permute_delivery: bool) -> Vec<u32> {
+/// order the fold receives peer contributions in. `bi_tier` flips every
+/// rank onto the batch-invariant house GEMM kernels — the reduction
+/// must compose with any per-rank compute tier unchanged.
+fn run_emulated_ddp_tier(
+    world: usize,
+    rounds: usize,
+    permute_delivery: bool,
+    bi_tier: bool,
+    dtype: WeightDtype,
+) -> Vec<u32> {
     let c = cfg();
     let seq_len = 64usize;
     let n = seq_len * c.d_model;
     let mut cpu = Mamba3Weights::init(&c, c.d_model, 0xC0FFEE);
-    cpu.input_proj_w.clear();
-    cpu.input_proj_b.clear();
+    if dtype == WeightDtype::F32 {
+        // The f32 backbone has no identity-proj branch — it always runs
+        // the input-projection GEMM; eye(d_model) + zero bias is the
+        // pass-through. Empty-means-identity is the mixed convention.
+        let dm = c.d_model;
+        let mut eye = vec![0.0f32; dm * dm];
+        for i in 0..dm {
+            eye[i * dm + i] = 1.0;
+        }
+        cpu.input_proj_w = eye;
+        cpu.input_proj_b = vec![0.0f32; dm];
+    } else {
+        cpu.input_proj_w.clear();
+        cpu.input_proj_b.clear();
+    }
 
     let ew = EmulatedWorld::new(world).unwrap();
     let mut ranks: Vec<Mamba3Trainer> = (0..world)
         .map(|_| {
-            Mamba3Trainer::new_with_dtype(
-                0,
-                &cpu,
-                c.clone(),
-                c.d_model,
-                1,
-                seq_len,
-                WeightDtype::Bf16,
-            )
-            .unwrap()
+            Mamba3Trainer::new_with_dtype(0, &cpu, c.clone(), c.d_model, 1, seq_len, dtype).unwrap()
         })
         .collect();
+    if bi_tier {
+        for t in &ranks {
+            t.ctx().set_batch_invariant(true);
+        }
+    }
 
     let mut out = vec![0.0f32; n];
     for round in 0..rounds {
@@ -139,14 +156,40 @@ fn run_emulated_ddp(world: usize, rounds: usize, permute_delivery: bool) -> Vec<
 
 #[test]
 fn emulated_ddp_replays_bitwise_and_ignores_delivery_order() {
-    let a = run_emulated_ddp(2, 3, false);
-    let b = run_emulated_ddp(2, 3, false);
+    let a = run_emulated_ddp_tier(2, 3, false, false, WeightDtype::Bf16);
+    let b = run_emulated_ddp_tier(2, 3, false, false, WeightDtype::Bf16);
     assert_eq!(a, b, "same logical run must replay bit-identically");
-    let c = run_emulated_ddp(2, 3, true);
+    let c = run_emulated_ddp_tier(2, 3, true, false, WeightDtype::Bf16);
     assert_eq!(
         a, c,
         "transport delivery order leaked into the reduced gradient"
     );
+}
+
+#[test]
+fn emulated_ddp_composes_with_the_deterministic_gemm_tier() {
+    // The reducer consumes finished gradient arenas and never
+    // participates in how they were computed, so every per-rank GEMM
+    // tier must ride DDP unchanged. Pin the batch-invariant house tier
+    // on both trainer dtypes (on f32 the flag routes every projection
+    // GEMM to the sgemm_bi kernels by program text): replay stays
+    // bitwise and the fold stays delivery-order immune. No cross-tier
+    // bit-difference assertion — at these small shapes two correct
+    // GEMMs may legitimately agree bitwise, so a difference is an
+    // implementation coincidence, not a contract.
+    for dtype in [WeightDtype::F32, WeightDtype::Bf16] {
+        let a = run_emulated_ddp_tier(2, 2, false, true, dtype);
+        let b = run_emulated_ddp_tier(2, 2, false, true, dtype);
+        assert_eq!(
+            a, b,
+            "deterministic-tier DDP must replay bit-identically ({dtype:?})"
+        );
+        let c = run_emulated_ddp_tier(2, 2, true, true, dtype);
+        assert_eq!(
+            a, c,
+            "transport delivery order leaked into the deterministic-tier reduction ({dtype:?})"
+        );
+    }
 }
 
 #[test]
@@ -155,8 +198,8 @@ fn emulated_ddp_world_size_is_a_numeric_route() {
     // different tree — the bits are ALLOWED to differ, and do. This
     // test pins the honest scope: W is part of the numeric identity,
     // not a free deployment knob.
-    let w2 = run_emulated_ddp(2, 2, false);
-    let w4 = run_emulated_ddp(4, 2, false);
+    let w2 = run_emulated_ddp_tier(2, 2, false, false, WeightDtype::Bf16);
+    let w4 = run_emulated_ddp_tier(4, 2, false, false, WeightDtype::Bf16);
     assert_ne!(
         w2, w4,
         "different logical world sizes unexpectedly produced identical bits — \
