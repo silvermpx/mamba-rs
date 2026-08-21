@@ -41,6 +41,7 @@ fn test_cfg() -> Mamba3Config {
         rope_fraction: 0.5,
         a_floor: 0.0625,
         is_outproj_norm: true,
+        ..Mamba3Config::default()
     }
 }
 
@@ -360,6 +361,7 @@ fn m1_vs_m3_prefill_head_to_head() {
             rope_fraction: 0.5,
             a_floor: 0.0625,
             is_outproj_norm: true,
+            ..Mamba3Config::default()
         };
         let w = Mamba3Weights::init(&cfg, input_dim, 0xC0FFEE);
         let dims = Mamba3Dims::from_config(&cfg, seq_len);

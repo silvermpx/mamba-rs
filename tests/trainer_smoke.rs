@@ -171,6 +171,7 @@ fn m3_trainer_multi_layer_bf16() {
         rope_fraction: 0.5,
         a_floor: 0.0625,
         is_outproj_norm: true,
+        ..Mamba3Config::default()
     };
     let input_dim = cfg.d_model;
     let batch = 1;
@@ -306,6 +307,7 @@ fn m3_trainer_f16_smoke_eager_with_loss_scaler() {
         rope_fraction: 0.5,
         a_floor: 0.0625,
         is_outproj_norm: true,
+        ..Mamba3Config::default()
     };
     let input_dim = cfg.d_model;
     let batch = 1;
@@ -412,6 +414,7 @@ fn m3_trainer_bf16_smoke() {
         rope_fraction: 0.5,
         a_floor: 0.0625,
         is_outproj_norm: true,
+        ..Mamba3Config::default()
     };
     let input_dim = cfg.d_model;
     let batch = 1;
@@ -469,6 +472,7 @@ fn m3_trainer_f32_smoke() {
         rope_fraction: 0.5,
         a_floor: 0.0625,
         is_outproj_norm: true,
+        ..Mamba3Config::default()
     };
     let input_dim = cfg.d_model;
     let batch = 1;

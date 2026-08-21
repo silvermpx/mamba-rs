@@ -685,7 +685,7 @@ on both archs.
 
 ### Fixed
 
-- **Mamba-3 RoPE angle accumulation precision**: upcast angle accumulator to f64 for addition and modulo wrap, then back to f32 for sin/cos. Prevents drift over long inference sequences (390+ steps). Matches upstream `mamba3.py` fix from `state-spaces/mamba`. Applied to CPU inference, CPU training forward, and all 3 GPU CUDA angle kernels (`angle_dt_fwd`, `m3_angle_dt_fwd_batch`, `m3_angle_dt_fwd_seq`).
+- **Mamba-3 RoPE angle accumulation precision**: upcast angle accumulator to f64 for addition and modulo wrap, then back to f32 for sin/cos. Prevents drift over long inference sequences (390+ steps). Applied to CPU inference, CPU training forward, and all 3 GPU CUDA angle kernels (`angle_dt_fwd`, `m3_angle_dt_fwd_batch`, `m3_angle_dt_fwd_seq`). *(Provenance correction, 0.6: upstream `mamba3.py` is f32 throughout — the f64 accumulator is a deliberate mamba-rs DEVIATION for long-prefill accuracy, applied consistently CPU↔GPU; it does not mirror an upstream fix.)*
 
 ## 0.2.0
 

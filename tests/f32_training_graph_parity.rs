@@ -260,6 +260,7 @@ fn m3_f32_training_graph_matches_eager() {
         rope_fraction: 0.5,
         a_floor: 0.0625,
         is_outproj_norm: true,
+        ..Mamba3Config::default()
     };
     let dev = GpuDevice::new(0).unwrap();
     let ctx = GpuCtx::new(&dev).unwrap();
@@ -296,6 +297,7 @@ fn m3_f32_training_graph_matches_eager() {
         n_layers: nl,
         n_angles: cfg.num_rope_angles(),
         a_floor: cfg.a_floor,
+        rms_norm_eps: cfg.rms_norm_eps,
         is_outproj_norm: cfg.is_outproj_norm,
         use_parallel_scan: true,
     };

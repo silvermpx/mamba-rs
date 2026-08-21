@@ -61,13 +61,19 @@ impl GpuDevice {
 
     /// Get the NVRTC real-architecture target string for this GPU.
     ///
-    /// Returns `sm_XX` (real architecture) to compile directly to CUBIN (native SASS),
-    /// bypassing PTX entirely. This avoids CUDA_ERROR_UNSUPPORTED_PTX_VERSION when
-    /// the NVRTC toolkit version generates a PTX ISA version newer than what the
-    /// installed driver's JIT compiler supports (e.g., CUDA 12.8 NVRTC + driver 590).
+    /// Returns `sm_XX` (real architecture). NOTE (doc correction, 0.6): the
+    /// compile path is `compile_ptx_with_opts` → `nvrtcGetPTX` — NVRTC still
+    /// emits PTX and the driver still JIT-compiles it; nothing here produces
+    /// a CUBIN. Targeting the REAL arch pins the emitted PTX ISA to what the
+    /// local device/driver pair accepts, which is what avoids
+    /// CUDA_ERROR_UNSUPPORTED_PTX_VERSION (e.g., CUDA 12.8 NVRTC + driver
+    /// 590). A true CUBIN path (`nvrtcGetCUBIN`) is deliberately out of
+    /// scope — runtime JIT is THE delivery so every architecture the
+    /// installed toolkit supports works without crate rebuilds.
     ///
-    /// Trade-off: CUBIN is GPU-specific and not forward-compatible with newer GPUs.
-    /// This is fine — we detect the exact GPU at init and compile for it.
+    /// Trade-off: the real-arch PTX is GPU-specific and not
+    /// forward-compatible with newer GPUs. This is fine — we detect the
+    /// exact GPU at init and compile for it.
     pub fn nvrtc_arch(cc: (u32, u32)) -> &'static str {
         match cc {
             (12, _) => "sm_120", // Blackwell consumer (RTX 5090, RTX 5080, RTX 5070)

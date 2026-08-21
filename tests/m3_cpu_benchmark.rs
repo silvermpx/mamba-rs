@@ -25,6 +25,7 @@ fn configs() -> [(&'static str, Mamba3Config); 4] {
                 rope_fraction: 0.5,
                 a_floor: 0.0625,
                 is_outproj_norm: false,
+                ..Mamba3Config::default()
             },
         ),
         ("default", Mamba3Config::default()),
@@ -40,6 +41,7 @@ fn configs() -> [(&'static str, Mamba3Config); 4] {
                 rope_fraction: 0.5,
                 a_floor: 0.0625,
                 is_outproj_norm: false,
+                ..Mamba3Config::default()
             },
         ),
         (
@@ -54,6 +56,7 @@ fn configs() -> [(&'static str, Mamba3Config); 4] {
                 rope_fraction: 0.5,
                 a_floor: 0.0625,
                 is_outproj_norm: false,
+                ..Mamba3Config::default()
             },
         ),
     ]

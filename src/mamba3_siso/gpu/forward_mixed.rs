@@ -230,7 +230,7 @@ impl GpuMamba3BackboneMixedActs {
 }
 
 // ════════════════════════════════════════════════════════════════════════
-// Mixed-precision training forward — sequential SSM only.
+// Mixed-precision training forward — sequential AND chunked SSM.
 // ════════════════════════════════════════════════════════════════════════
 
 /// Per-layer forward in mixed precision. Mirrors
@@ -239,9 +239,11 @@ impl GpuMamba3BackboneMixedActs {
 /// state, and small coefficient paths (see field-level comments on
 /// `GpuMamba3LayerMixedActs`).
 ///
-/// **Scope**: sequential SSM only (`dims.use_parallel_scan = false`). The
-/// chunked parallel pipeline has 10 sub-kernels that all need typed
-/// variants — deferred to a follow-up step.
+/// **Scope**: BOTH scan routes dispatch here (`dims.use_parallel_scan`
+/// selects sequential vs chunked — the chunked typed kernels shipped after
+/// this header was first written). The remaining asymmetry lives in the
+/// BACKWARD: mixed sequential SSM backward is a documented non-goal (see
+/// `backward_mixed.rs`), so mixed TRAINING must run the chunked route.
 pub fn gpu_forward_mamba3_layer_mixed(
     exec: &M3Exec<'_>,
     temporal_f32: &mut GpuBuffer,
@@ -288,7 +290,7 @@ pub fn gpu_forward_mamba3_layer_mixed(
     {
         let bt_i = bt as i32;
         let dm_i = dm as i32;
-        let eps: f32 = 1e-5;
+        let eps: f32 = dims.rms_norm_eps;
         let mut bld = ctx
             .stream
             .launch_builder(m3k.rmsnorm_fwd_f32in_typed.get(dtype));
@@ -1059,7 +1061,7 @@ pub fn gpu_forward_mamba3_backbone_mixed(
     {
         let bt_i = bt as i32;
         let dm_i = dm as i32;
-        let eps: f32 = 1e-5;
+        let eps: f32 = dims.rms_norm_eps;
         let mut bld = ctx
             .stream
             .launch_builder(m3k.rmsnorm_fwd_f32in_typed.get(dtype));

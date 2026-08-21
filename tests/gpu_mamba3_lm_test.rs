@@ -19,6 +19,7 @@ fn small_m3_cfg() -> Mamba3Config {
         rope_fraction: 0.5,
         a_floor: 0.0625,
         is_outproj_norm: false,
+        ..Mamba3Config::default()
     }
 }
 

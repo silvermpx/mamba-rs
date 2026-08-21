@@ -46,6 +46,7 @@ fn cfg_for_step10() -> Mamba3Config {
         rope_fraction: 0.5, // n_angles > 0
         a_floor: 0.0625,
         is_outproj_norm: true, // RMSNormGated path
+        ..Mamba3Config::default()
     }
 }
 
@@ -64,6 +65,7 @@ fn dims_for(cfg: &Mamba3Config, batch: usize, seq_len: usize) -> GpuMamba3Dims {
         n_layers: cfg.n_layers,
         n_angles: cfg.num_rope_angles(),
         a_floor: cfg.a_floor,
+        rms_norm_eps: cfg.rms_norm_eps,
         is_outproj_norm: cfg.is_outproj_norm,
         use_parallel_scan: true, // chunked path required for Step 10
     }
@@ -402,6 +404,7 @@ fn m3_backward_mixed_parity_ngroups_eq_nheads_bf16() {
         rope_fraction: 0.5,
         a_floor: 0.0625,
         is_outproj_norm: true,
+        ..Mamba3Config::default()
     };
     check_cfg(cfg, WeightDtype::Bf16, 128);
 }
@@ -419,6 +422,7 @@ fn m3_backward_mixed_parity_large_d_state_bf16() {
         rope_fraction: 0.5,
         a_floor: 0.0625,
         is_outproj_norm: true,
+        ..Mamba3Config::default()
     };
     check_cfg(cfg, WeightDtype::Bf16, 128);
 }
@@ -437,6 +441,7 @@ fn m3_backward_mixed_parity_two_layers_bf16() {
         rope_fraction: 0.5,
         a_floor: 0.0625,
         is_outproj_norm: true,
+        ..Mamba3Config::default()
     };
     check_cfg(cfg, WeightDtype::Bf16, 128);
 }

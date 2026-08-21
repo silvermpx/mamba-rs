@@ -118,6 +118,7 @@ fn m3_gpu_benchmark() {
             n_layers: cfg.n_layers,
             n_angles: cfg.num_rope_angles(),
             a_floor: cfg.a_floor,
+            rms_norm_eps: cfg.rms_norm_eps,
             is_outproj_norm: cfg.is_outproj_norm,
             use_parallel_scan: false,
         };

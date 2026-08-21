@@ -58,7 +58,7 @@ pub fn gpu_forward_mamba3_layer(
         builder.arg(&nw_ptr);
         let bt_i = bt as i32;
         let dm_i = dm as i32;
-        let eps: f32 = 1e-5;
+        let eps: f32 = dims.rms_norm_eps;
         builder.arg(&bt_i);
         builder.arg(&dm_i);
         builder.arg(&eps);
@@ -599,7 +599,7 @@ pub fn gpu_forward_mamba3_backbone(
         let nf_ptr = mamba_w.norm_f_weight.raw_ptr(&ctx.stream);
         let bt_i = bt as i32;
         let dm_i = dm as i32;
-        let eps: f32 = 1e-5;
+        let eps: f32 = dims.rms_norm_eps;
         let mut builder = ctx.stream.launch_builder(&m3k.rmsnorm_fwd);
         builder.arg(temporal.inner_mut());
         builder.arg(acts.norm_f_rms.inner_mut());
@@ -638,7 +638,11 @@ pub fn gpu_forward_mamba3_target_burnin(
     let hd = dims.headdim;
     let ng = dims.ngroups;
     let ip = dims.in_proj_dim;
-    let na = dims.n_angles.max(1);
+    // D3 (0.6): the TRUE angle count goes to the m3_split kernel arg — the
+    // main forward already does this (see the top of this file). Passing the
+    // buffer-sizing `.max(1)` here shifted the 8-way split by one slot for
+    // the supported n_angles == 0 config.
+    let na = dims.n_angles;
     let b = dims.batch as i32;
     let t = dims.seq_len as i32;
     let f32_sz = std::mem::size_of::<f32>() as u64;
@@ -664,7 +668,7 @@ pub fn gpu_forward_mamba3_target_burnin(
         {
             let bt_i = bt as i32;
             let dm_i = dm as i32;
-            let eps: f32 = 1e-5;
+            let eps: f32 = dims.rms_norm_eps;
             let nw_ptr = lw.norm_weight.raw_ptr(&ctx.stream);
             let mut builder = ctx.stream.launch_builder(&m3k.rmsnorm_fwd);
             builder.arg(tgt.out_flat.inner_mut());
@@ -950,7 +954,7 @@ pub fn gpu_forward_mamba3_target_burnin(
         let nf_ptr = mamba_w.norm_f_weight.raw_ptr(&ctx.stream);
         let bt_i = bt as i32;
         let dm_i = dm as i32;
-        let eps: f32 = 1e-5;
+        let eps: f32 = dims.rms_norm_eps;
         let mut builder = ctx.stream.launch_builder(&m3k.rmsnorm_fwd);
         builder.arg(tgt.temporal_work.inner_mut());
         builder.arg(tgt.rms_discard.inner_mut());

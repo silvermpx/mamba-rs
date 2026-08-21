@@ -112,6 +112,7 @@ impl Scenario {
             n_layers: cfg.n_layers,
             n_angles: cfg.num_rope_angles(),
             a_floor: cfg.a_floor,
+            rms_norm_eps: cfg.rms_norm_eps,
             is_outproj_norm: cfg.is_outproj_norm,
             use_parallel_scan: self.use_parallel_scan,
         }
@@ -541,6 +542,7 @@ fn base_cfg(is_outproj_norm: bool) -> Mamba3Config {
         rope_fraction: 0.5,
         a_floor: 1e-4,
         is_outproj_norm,
+        ..Mamba3Config::default()
     }
 }
 

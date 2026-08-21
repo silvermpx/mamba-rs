@@ -68,6 +68,10 @@ pub struct GpuMamba3Dims {
     pub n_angles: usize,
     pub a_floor: f32,
     pub is_outproj_norm: bool,
+    /// RMSNorm/BCNorm epsilon for every norm kernel launch on this backbone
+    /// (G5, 0.6): flows from `Mamba3Config::rms_norm_eps` and rides
+    /// checkpoint metadata — a different eps is a different model.
+    pub rms_norm_eps: f32,
     /// false = sequential SSM (m3_burnin_fwd/m3_backward_seq), faster at T<=64.
     /// true = parallel chunked scan (10-kernel pipeline), faster at T>64.
     pub use_parallel_scan: bool,

@@ -2,8 +2,10 @@
 //!
 //! Source: Lahoti et al., "Mamba-3", ICLR 2026 (arXiv 2603.15569).
 
+use crate::config::ScanMode;
+
 /// Configuration for a Mamba-3 SISO backbone.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Mamba3Config {
     /// Model (embedding) dimension.
     pub d_model: usize,
@@ -23,6 +25,15 @@ pub struct Mamba3Config {
     pub a_floor: f32,
     /// Enable RMSNormGated before out_proj (default: false per reference).
     pub is_outproj_norm: bool,
+    /// GPU SSM scan mode for the TRAINING forward/backward. `Auto` resolves
+    /// to the chunked parallel path (see [`Mamba3Config::train_use_parallel_scan`]);
+    /// CPU paths and the T=1 decode step are unaffected.
+    pub scan_mode: ScanMode,
+    /// RMSNorm/BCNorm epsilon used by every norm site in this backbone
+    /// (layer RMSNorm, B/C BCNorm, RMSNormGated, final norm). A checkpoint
+    /// trained with a different eps loads a DIFFERENT model — the value
+    /// rides checkpoint metadata (see `serialize.rs`).
+    pub rms_norm_eps: f32,
 }
 
 impl Mamba3Config {
@@ -125,7 +136,26 @@ impl Mamba3Config {
         if self.expand < 1 {
             return Err("expand must be >= 1".into());
         }
+        if !self.rms_norm_eps.is_finite() || self.rms_norm_eps <= 0.0 {
+            return Err(format!(
+                "rms_norm_eps must be positive, got {}",
+                self.rms_norm_eps
+            ));
+        }
         Ok(())
+    }
+
+    /// Resolve the training-time scan choice from `scan_mode`.
+    ///
+    /// M3 semantics differ from Mamba-1's length-threshold `Auto`: the
+    /// chunked path is the only one with a mixed-precision backward (the
+    /// sequential mixed backward is a documented non-goal — its activation
+    /// tape costs CHUNK_SIZE x VRAM), and the trainers have always run
+    /// chunked. `Auto` therefore resolves to the chunked parallel path
+    /// regardless of T; `Sequential` is honored for the f32 lane only
+    /// (the mixed forward/backward reject it loudly downstream).
+    pub fn train_use_parallel_scan(&self) -> bool {
+        !matches!(self.scan_mode, ScanMode::Sequential)
     }
 }
 
@@ -145,6 +175,10 @@ impl Default for Mamba3Config {
             // parity with upstream.
             a_floor: 1e-4,
             is_outproj_norm: false,
+            scan_mode: ScanMode::Auto,
+            // Reference default (state-spaces/mamba RMSNorm eps). Rides
+            // checkpoint metadata; changing it re-defines the model.
+            rms_norm_eps: 1e-5,
         }
     }
 }
@@ -183,6 +217,58 @@ mod tests {
         .validate()
         .unwrap_err();
         assert!(err.contains("d_state"), "{err}");
+    }
+
+    /// Axis G (0.6): the boundary value just past the register cap is
+    /// rejected LOUDLY — silent wrong math at d_state=65 was the failure
+    /// mode this guards. Interim until the W5 first-class d_state tiling
+    /// removes the ceiling (owner ruling 2026-08-21).
+    #[test]
+    fn test_d_state_65_rejected_loudly_axis_g() {
+        let err = Mamba3Config {
+            d_state: 65,
+            ..Mamba3Config::default()
+        }
+        .validate()
+        .unwrap_err();
+        assert!(err.contains("d_state"), "{err}");
+    }
+
+    /// Axis G (0.6): scan-mode resolver pins — Auto resolves to the chunked
+    /// parallel path for TRAINING (the only route with a mixed backward);
+    /// explicit Sequential is honored (f32 lane).
+    #[test]
+    fn test_scan_mode_resolver_pins_axis_g() {
+        let auto = Mamba3Config::default();
+        assert_eq!(auto.scan_mode, ScanMode::Auto);
+        assert!(auto.train_use_parallel_scan());
+        assert!(
+            Mamba3Config {
+                scan_mode: ScanMode::Parallel,
+                ..Mamba3Config::default()
+            }
+            .train_use_parallel_scan()
+        );
+        assert!(
+            !Mamba3Config {
+                scan_mode: ScanMode::Sequential,
+                ..Mamba3Config::default()
+            }
+            .train_use_parallel_scan()
+        );
+    }
+
+    #[test]
+    fn test_invalid_rms_norm_eps() {
+        for bad in [0.0_f32, -1e-5, f32::NAN] {
+            let err = Mamba3Config {
+                rms_norm_eps: bad,
+                ..Mamba3Config::default()
+            }
+            .validate()
+            .unwrap_err();
+            assert!(err.contains("rms_norm_eps"), "{err}");
+        }
     }
 
     #[test]

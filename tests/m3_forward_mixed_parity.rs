@@ -32,6 +32,7 @@ fn tiny_cfg() -> Mamba3Config {
         rope_fraction: 0.5,
         a_floor: 0.0625,
         is_outproj_norm: false,
+        ..Mamba3Config::default()
     }
 }
 
@@ -50,6 +51,7 @@ fn dims_for(cfg: &Mamba3Config, batch: usize, seq_len: usize) -> GpuMamba3Dims {
         n_layers: cfg.n_layers,
         n_angles: cfg.num_rope_angles(),
         a_floor: cfg.a_floor,
+        rms_norm_eps: cfg.rms_norm_eps,
         is_outproj_norm: cfg.is_outproj_norm,
         use_parallel_scan: false,
     }

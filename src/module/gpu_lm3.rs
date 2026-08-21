@@ -301,9 +301,11 @@ impl GpuMamba3LM {
         self.backbone.reset()?;
         let mut rng = Xoshiro256PlusPlus::new(params.seed);
 
-        // Mamba-3 only supports step-by-step prefill for now (chunked SSD
-        // kernels aren't templated for bf16 — would require mixed parallel
-        // prefill work comparable to the M3 step pipeline itself).
+        // Mamba-3 prefill is a step-by-step loop for now: the chunked SSD
+        // kernels are typed and live, but the PREFILL SURFACE (entering-state
+        // carry + prefill entries + pooled graph, M1-parity) has not been
+        // built yet — it is the 0.6 W2 work item. Until then every prompt
+        // token pays a full step pipeline.
         for &token_id in prompt {
             let emb = embed_lookup(&self.embed_cpu, token_id, self.d_model, self.vocab_size);
             self.input_cpu[..self.d_model].copy_from_slice(emb);

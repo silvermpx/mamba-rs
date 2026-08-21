@@ -6,6 +6,10 @@ use serde::Deserialize;
 pub enum ModelFamily {
     Mamba1,
     Mamba2,
+    /// Detected so the loader can REJECT it with a precise message (the HF
+    /// loader serves Mamba-1 only; native M3 checkpoints use
+    /// `mamba3_siso::serialize`, not this path).
+    Mamba3,
 }
 
 /// Raw HF config.json — supports both HF-native and original formats.
@@ -104,6 +108,7 @@ fn detect_family(raw: &RawConfig) -> Result<ModelFamily, String> {
         match mt.as_str() {
             "mamba" | "falcon_mamba" => Ok(ModelFamily::Mamba1),
             "mamba2" => Ok(ModelFamily::Mamba2),
+            "mamba3" | "mamba3_siso" => Ok(ModelFamily::Mamba3),
             other => Err(format!("unsupported model_type: {other}")),
         }
     } else if raw.d_model.is_some() {
@@ -196,6 +201,13 @@ mod tests {
             parse_config_json(falcon).unwrap().family,
             ModelFamily::Mamba1
         );
+
+        // M3 is DETECTED (not an "unsupported model_type" error) so the
+        // loader can reject it with a precise family message.
+        let m3 = br#"{"model_type":"mamba3","hidden_size":64,"num_hidden_layers":2,"state_size":8,"conv_kernel":4,"vocab_size":100}"#;
+        assert_eq!(parse_config_json(m3).unwrap().family, ModelFamily::Mamba3);
+        let m3s = br#"{"model_type":"mamba3_siso","hidden_size":64,"num_hidden_layers":2,"state_size":8,"conv_kernel":4,"vocab_size":100}"#;
+        assert_eq!(parse_config_json(m3s).unwrap().family, ModelFamily::Mamba3);
     }
 
     #[test]

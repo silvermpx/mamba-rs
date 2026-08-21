@@ -420,6 +420,7 @@ fn adamw_m3_backbone_walks_all_tensors() {
         rope_fraction: 0.5,
         a_floor: 0.0625,
         is_outproj_norm: true,
+        ..Mamba3Config::default()
     };
     let input_dim = cfg.d_model;
     let cpu_w = Mamba3Weights::init(&cfg, input_dim, 0xC0DE);

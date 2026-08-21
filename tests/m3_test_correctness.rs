@@ -23,6 +23,7 @@ fn test_cfg() -> Mamba3Config {
         rope_fraction: 0.5,
         a_floor: 0.0625,
         is_outproj_norm: false,
+        ..Mamba3Config::default()
     }
 }
 
@@ -265,6 +266,7 @@ fn test_m3_sequence_matches_steps() {
         rope_fraction: 0.5,
         a_floor: 0.0625,
         is_outproj_norm: false,
+        ..Mamba3Config::default()
     };
     let w = Mamba3Weights::init(&cfg, 8, 42);
     let input = vec![0.5_f32; 8];
@@ -452,6 +454,7 @@ fn test_m3_custom_config_small() {
         rope_fraction: 0.5,
         a_floor: 0.0625,
         is_outproj_norm: false,
+        ..Mamba3Config::default()
     };
     let input_dim = 16;
     let w = Mamba3Weights::init(&cfg, input_dim, 99);
@@ -486,6 +489,7 @@ fn test_m3_custom_config_large() {
         rope_fraction: 0.5,
         a_floor: 0.0625,
         is_outproj_norm: false,
+        ..Mamba3Config::default()
     };
     let input_dim = 128;
     let w = Mamba3Weights::init(&cfg, input_dim, 77);
@@ -523,6 +527,7 @@ fn test_m3_custom_config_outproj_norm() {
         rope_fraction: 0.5,
         a_floor: 0.0625,
         is_outproj_norm: true,
+        ..Mamba3Config::default()
     };
     let input_dim = 32;
     let w = Mamba3Weights::init(&cfg, input_dim, 55);
@@ -563,6 +568,7 @@ fn test_m3_custom_config_ngroups() {
         rope_fraction: 0.5,
         a_floor: 0.0625,
         is_outproj_norm: false,
+        ..Mamba3Config::default()
     };
     cfg.validate().unwrap();
     let input_dim = 16;
@@ -735,6 +741,7 @@ fn test_m3_no_rope() {
         rope_fraction: 0.5, // with headdim=4, num_rope_angles = 4*0.5/2 = 1
         a_floor: 0.0625,
         is_outproj_norm: false,
+        ..Mamba3Config::default()
     };
     // Verify RoPE angles produce valid output
     assert!(cfg.num_rope_angles() > 0);

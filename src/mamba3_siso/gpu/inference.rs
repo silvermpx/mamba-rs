@@ -331,6 +331,11 @@ pub struct Mamba3GpuInferenceEngine {
     pub weights: GpuMamba3WeightsInf,
     pub stream: Stream,
     pub blas: Arc<cudarc::cublas::CudaBlas>,
+    /// cuBLAS workspace backing the handle above (G6a, 0.6): the handle
+    /// points at this allocation for CUDA-Graph-safe GEMM scratch — dropping
+    /// it while the handle lives is exactly the use-after-free the buffer
+    /// exists to prevent. Owned here, never read directly.
+    _blas_workspace: cudarc::driver::CudaSlice<u8>,
     pub cfg: Mamba3Config,
     pub batch: usize,
     pub input_dim: usize,
@@ -355,7 +360,7 @@ impl Mamba3GpuInferenceEngine {
         let stream = device.fork_stream()?;
         let arch = GpuDevice::nvrtc_arch(device.compute_capability);
         let kernels = Mamba3Kernels::compile(device.context(), arch)?;
-        let (blas, _ws) = device.create_cublas(&stream)?;
+        let (blas, ws) = device.create_cublas(&stream)?;
         let weights = GpuMamba3WeightsInf::from_cpu(&stream, cpu_weights, input_dim)?;
         let identity_proj = cpu_weights.input_proj_w.is_empty();
 
@@ -364,6 +369,7 @@ impl Mamba3GpuInferenceEngine {
             weights,
             stream,
             blas: Arc::new(blas),
+            _blas_workspace: ws,
             cfg,
             batch,
             input_dim,
@@ -488,7 +494,7 @@ impl Mamba3GpuInferenceEngine {
         }
         {
             let grid = crate::mamba_ssm::gpu::launch::grid_norm(b, dm);
-            let eps: f32 = 1e-5;
+            let eps: f32 = self.cfg.rms_norm_eps;
             let mut builder = self.stream.launch_builder(&self.kernels.rmsnorm_fwd);
             builder.arg(scratch.temporal.inner());
             builder.arg(scratch.rms_buf.inner());
@@ -561,7 +567,7 @@ impl Mamba3GpuInferenceEngine {
         // F1: RMSNorm (input=residual, output=post_norm — separate buffers)
         {
             let grid = crate::mamba_ssm::gpu::launch::grid_norm(b, dm);
-            let eps: f32 = 1e-5;
+            let eps: f32 = self.cfg.rms_norm_eps;
             let nw_ptr = lw.norm_weight.ptr();
             let mut builder = self.stream.launch_builder(&self.kernels.rmsnorm_fwd);
             builder.arg(scratch.post_norm.inner());
@@ -1041,7 +1047,7 @@ impl Mamba3GpuInferenceMixed {
 
             // F1: rmsnorm f32in → half post_norm.
             {
-                let eps: f32 = 1e-5;
+                let eps: f32 = engine.cfg.rms_norm_eps;
                 let grid = crate::mamba_ssm::gpu::launch::grid_norm(b, dm);
                 let mut bld = engine
                     .stream
@@ -1368,7 +1374,7 @@ impl Mamba3GpuInferenceMixed {
         // Final norm_f: residual_f32 → temporal (half).
         {
             let grid = crate::mamba_ssm::gpu::launch::grid_norm(b, dm);
-            let eps: f32 = 1e-5;
+            let eps: f32 = engine.cfg.rms_norm_eps;
             let mut bld = engine
                 .stream
                 .launch_builder(k.rmsnorm_fwd_f32in_typed.get(dt));

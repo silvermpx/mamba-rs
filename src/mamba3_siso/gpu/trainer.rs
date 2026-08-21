@@ -416,8 +416,9 @@ impl Mamba3TrainerMixed {
             n_layers: cfg.n_layers,
             n_angles: cfg.num_rope_angles(),
             a_floor: cfg.a_floor,
+            rms_norm_eps: cfg.rms_norm_eps,
             is_outproj_norm: cfg.is_outproj_norm,
-            use_parallel_scan: true,
+            use_parallel_scan: cfg.train_use_parallel_scan(),
         };
 
         let acts =
@@ -1195,8 +1196,9 @@ impl Mamba3TrainerF32 {
             n_layers: cfg.n_layers,
             n_angles: cfg.num_rope_angles(),
             a_floor: cfg.a_floor,
+            rms_norm_eps: cfg.rms_norm_eps,
             is_outproj_norm: cfg.is_outproj_norm,
-            use_parallel_scan: true,
+            use_parallel_scan: cfg.train_use_parallel_scan(),
         };
 
         let acts = GpuMamba3BackboneActs::new(&ctx.stream, &dims)?;

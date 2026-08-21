@@ -23,6 +23,7 @@ fn main() {
         rope_fraction: 0.5,
         a_floor: 1e-4, // reference default (state-spaces/mamba A_floor)
         is_outproj_norm: false,
+        ..Mamba3Config::default()
     };
     cfg.validate().unwrap();
 

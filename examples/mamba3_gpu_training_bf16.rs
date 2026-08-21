@@ -50,6 +50,7 @@ mod cuda_example {
             rope_fraction: 0.5,
             a_floor: 1e-4, // reference default (state-spaces/mamba A_floor)
             is_outproj_norm: true,
+            ..Mamba3Config::default()
         };
         let input_dim = cfg.d_model;
         let batch = 4;

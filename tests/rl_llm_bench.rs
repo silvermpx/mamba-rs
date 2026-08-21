@@ -33,6 +33,7 @@ fn rl_config_small() -> mamba_rs::mamba3_siso::config::Mamba3Config {
         rope_fraction: 0.5,
         a_floor: 0.0625,
         is_outproj_norm: false,
+        ..mamba_rs::mamba3_siso::config::Mamba3Config::default()
     }
 }
 
@@ -47,6 +48,7 @@ fn rl_config_tiny() -> mamba_rs::mamba3_siso::config::Mamba3Config {
         rope_fraction: 0.5,
         a_floor: 0.0625,
         is_outproj_norm: false,
+        ..mamba_rs::mamba3_siso::config::Mamba3Config::default()
     }
 }
 
