@@ -1,4 +1,4 @@
-//! Step 9a — per-kernel parity tests for the 4 new typed M3 backward
+//! per-kernel parity tests for the 4 new typed M3 backward
 //! kernels (`bcnorm_bwd_typed`, `bc_bias_add_bwd_typed`, `rope_bwd_typed`,
 //! `m3_split_bwd_typed`). Runs each typed variant against its f32 oracle
 //! on random inputs and asserts cosine + norm-ratio parity.
@@ -554,7 +554,7 @@ fn rope_bwd_f16() {
     check_rope_bwd(WeightDtype::F16);
 }
 
-// ─── rmsnorm_gated_bwd (Step 9c) ───────────────────────────────────────
+// ─── rmsnorm_gated_bwd ───────────────────────────────────────
 
 fn check_rmsnorm_gated_bwd(dtype: WeightDtype) {
     let dev = GpuDevice::new(0).unwrap();

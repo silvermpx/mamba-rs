@@ -159,7 +159,7 @@ fn flag_on_matches_cublas_loosely() {
 
 #[test]
 fn flag_on_mixed_training_is_bit_identical_across_runs() {
-    // Phase 11: bf16/f16 mixed training with the flag on routes every GEMM
+    // With the typed tier, bf16/f16 mixed training with the flag on routes every GEMM
     // through the typed sgemm_bi buckets or the upcast fallback — both
     // fully deterministic. Two fresh trainers must agree bit for bit.
     for dt in [WeightDtype::Bf16, WeightDtype::F16] {

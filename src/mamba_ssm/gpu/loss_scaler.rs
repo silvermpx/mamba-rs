@@ -108,7 +108,7 @@ impl DynamicLossScaler {
     /// converges to a low scale.
     ///
     /// Panics if `init_scale` is not finite or ≤ 0 (would silently zero or
-    /// invert all grads — audit Agent 2 M2).
+    /// invert all grads).
     #[must_use]
     pub fn with_init_scale(mut self, init_scale: f32) -> Self {
         assert!(
@@ -122,7 +122,7 @@ impl DynamicLossScaler {
     /// Override the growth interval (default 2000 clean steps).
     ///
     /// Panics if `n == 0` (would grow every step, defeating the dynamic-
-    /// discovery purpose — audit Agent 2 M1).
+    /// discovery purpose).
     #[must_use]
     pub fn with_growth_interval(mut self, n: u32) -> Self {
         assert!(n > 0, "growth_interval must be > 0");
@@ -153,7 +153,7 @@ impl DynamicLossScaler {
     /// value (e.g. `f32::MIN_POSITIVE`) to disable the floor and match
     /// PyTorch GradScaler semantics where a chronically-broken model is
     /// allowed to drive scale below 1.0 (signals to the user that
-    /// training is failing — see audit Agent 1 MED note).
+    /// training is failing — see the scaler notes).
     ///
     /// Panics if `s` is not finite, ≤ 0, or > max_scale.
     #[must_use]
@@ -174,7 +174,7 @@ impl DynamicLossScaler {
     /// Serialize state for checkpoint resume — returns `(scale, growth_tracker)`.
     /// Pass back into [`Self::load_state`] after loading config to resume
     /// without re-paying the ~2000-step scale-discovery phase. Mirrors
-    /// `torch.cuda.amp.GradScaler.state_dict()` (audit Agent 1 HIGH).
+    /// `torch.cuda.amp.GradScaler.state_dict()`.
     pub fn state(&self) -> (f32, u32) {
         (self.scale, self.growth_tracker)
     }
@@ -324,7 +324,7 @@ impl UnscaleFactor {
     }
 }
 
-/// CUDA-Graph-capturable conditional unscale (Step 22). Reads the
+/// CUDA-Graph-capturable conditional unscale. Reads the
 /// overflow flag and the unscale factor from device buffers; zeros grads
 /// if the flag is set, otherwise multiplies by `1/loss_scale`.
 pub fn scale_grads_skip_gpu(

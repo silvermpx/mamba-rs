@@ -576,7 +576,7 @@ extern "C" __global__ void m3_burnin_fwd_nosave(
 //
 // Gradient outputs:
 //   d_x: direct write (unique per thread per timestep)
-//   d_k, d_q, d_alpha, d_beta, d_gamma: direct store from lane 0 (Phase 2.7.5
+//   d_k, d_q, d_alpha, d_beta, d_gamma: direct store from lane 0 (single-writer
 //     Rule B) — grid (B, nh) × block (hd) gives one block per (b,h), so lane
 //     0 is the unique writer to each (b, t, h, *) slot.
 //   d_D_local: per-thread accumulator, reduced by m3_reduce_d_D kernel
@@ -648,7 +648,7 @@ extern "C" __global__ void m3_backward_seq(
     int h_b_base = b * (T + 1) * nhd_ds;
 
     for (int t = T - 1; t >= 0; t--) {
-        // Phase 2.7.5: lane 0 of the unique block per (b,h) is the sole writer
+        // lane 0 of the unique block per (b,h) is the sole writer
         // to d_k[(b,t,h,n)]. No atomic needed — direct store. Later d_kc_val
         // from current iteration adds to same slot, merge via local accumulator
         // `d_k_write[n]` flushed once per t (see after main n-loop).
@@ -715,7 +715,7 @@ extern "C" __global__ void m3_backward_seq(
             d_h_reg[n] += dy_val * qc_n;
 
             // d_q[n] = sum_p(d_y[p] * h_curr[p,n]): warp reduce over p.
-            // Phase 2.7.5: lane 0 is unique writer for d_q[(b,t,h,n)] — direct store.
+            // lane 0 is unique writer for d_q[(b,t,h,n)] — direct store.
             float d_q_val = dy_val * h_curr_n;
             for (int off = hd / 2; off > 0; off >>= 1)
                 d_q_val += __shfl_down_sync(warp_mask, d_q_val, off, hd);
@@ -748,7 +748,7 @@ extern "C" __global__ void m3_backward_seq(
             d_x_val += dh_n * gamma_h * kc_n;
 
             // d_k_cur[n] += dh * gamma * x  (sum over p -> warp reduce -> d_k[t])
-            // Phase 2.7.5: merge with d_k_write[n] (carry from t+1), flushed
+            // merge with d_k_write[n] (carry from t+1), flushed
             // once per-t after the n-loop.
             float d_kc_val = dh_n * gamma_h * x_val;
             for (int off = hd / 2; off > 0; off >>= 1)
@@ -766,7 +766,7 @@ extern "C" __global__ void m3_backward_seq(
         // d_v_carry for next iteration: v_prev[t] = x[t-1], so this flows to d_x[t-1]
         d_v_carry = d_v_prev_acc;
 
-        // Phase 2.7.5: flush d_k for this timestep (single writer from lane 0).
+        // flush d_k for this timestep (single writer from lane 0).
         if (p == 0) {
             for (int n = 0; n < ds; n++) {
                 d_k[(b * T + t) * nh * ds + h * ds + n] = d_k_write[n];
@@ -803,7 +803,7 @@ extern "C" __global__ void m3_backward_seq(
 // Reduce d_D_local from [B * d_inner] to [nh] by summing across batch and headdim.
 // O2 Warp-Parallel: 1 warp (32 threads) per head.
 // Launch: grid_dim=(nh, 1, 1), block_dim=(32, 1, 1).
-// Phase 2.7.5: single block per head → lane 0 unique writer.
+// single block per head → lane 0 unique writer.
 // Caller pre-zeros d_D_out in GpuMamba3Grads::zero (one memset per step);
 // direct store preserves the old atomicAdd-into-zero semantics exactly.
 extern "C" __global__ void m3_reduce_d_D(
@@ -832,7 +832,7 @@ extern "C" __global__ void m3_reduce_d_D(
     sum += __shfl_down_sync(0xFFFFFFFF, sum, 2);
     sum += __shfl_down_sync(0xFFFFFFFF, sum, 1);
 
-    /* M-G (scan-audit 2026-08-01): ACCUMULATE, never overwrite - every
+    /* ACCUMULATE, never overwrite - every
        sibling gradient writer follows the += contract (the caller zeroes
        the arena once per window); an = here silently discarded prior
        micro-batch d_D under accumulate_only gradient accumulation. */

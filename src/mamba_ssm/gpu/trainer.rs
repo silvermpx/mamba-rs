@@ -727,13 +727,13 @@ pub(crate) struct MambaTrainerMixed {
     /// Persistent device buffer for the scaled d_temporal (kept here so its
     /// pointer is stable across steps).
     d_temporal_scaled: Option<GpuBuffer>,
-    /// f16 CUDA Graph (Step 22). Captured body: forward + backward (with
+    /// f16 CUDA Graph. Captured body: forward + backward (with
     /// scaled d_temporal) + check_inf_nan + scale_grads_skip + AdamW + sync.
     /// CPU writes the next-step `1/loss_scale` into [`Self::unscale_factor`]
     /// before each replay; the captured `scale_grads_skip` kernel reads it
     /// via a stable device pointer baked at capture time.
     graph_f16: Option<cudarc::driver::CudaGraph>,
-    /// 1-element device buffer of `1/loss_scale` (Step 22).
+    /// 1-element device buffer of `1/loss_scale`.
     unscale_factor: Option<UnscaleFactor>,
     /// Pointer-stability snapshots for the f16 graph. The three device
     /// buffers below are baked into the captured kernels; if any of them
@@ -1009,7 +1009,7 @@ impl MambaTrainerMixed {
                     .into(),
             );
         }
-        // m-3 (scan-audit 2026-08-01): a fused step overwrites the saved
+        // a fused step overwrites the saved
         // activations; a forward() left pending would otherwise let a later
         // backward_step back-prop through this step's tape as if it were its
         // own — invalidate the split half-cycle instead of guessing.
@@ -1469,7 +1469,7 @@ impl MambaTrainerMixed {
         })
     }
 
-    /// Capture the f16 training step into a CUDA Graph (Step 22).
+    /// Capture the f16 training step into a CUDA Graph.
     fn capture_graph_f16(&mut self) -> Result<(), String> {
         // Make sure bias + unscale_factor + overflow_flag have valid initial
         // values so the captured kernels record reads against stable

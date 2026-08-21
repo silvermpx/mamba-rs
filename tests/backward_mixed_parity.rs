@@ -1,4 +1,4 @@
-//! Step 6 — Full end-to-end parity tests for mixed-precision (bf16/f16)
+//! Full end-to-end parity tests for mixed-precision (bf16/f16)
 //! M1 training against the f32 oracle.
 //!
 //! Three gates:

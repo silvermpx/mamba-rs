@@ -27,9 +27,9 @@
 //         selective_scan_fwd_kernel.cuh, selective_scan_common.h
 
 // Typed-I/O prelude (to_f / from_f_* upcast/downcast helpers).
-// Step 8b: bf16/f16 mixed-precision parallel scan forward. Following
+// Typed (bf16/f16) mixed-precision parallel scan forward. Following
 // state-spaces/mamba's `scan_t = float2` invariant (all scan state in
-// f32) and our Step 5 BPTT precision discipline (h, h_saved,
+// f32) and our BPTT precision discipline (h, h_saved,
 // a_neg, D, smem_* remain f32). Only the activation I/O tensors
 // (delta, u, B, C, y_out) are typed.
 #include "_typed_prelude.cuh"
@@ -53,7 +53,7 @@
 // Warp-level inclusive scan of (a, b) pairs using warp shuffle.
 // After return, lane k holds compose(pair_0, ..., pair_k) within its warp.
 // ============================================================================
-// BUG FIX (Step 8b): accept a mask parameter rather than hardcoding
+// BUG FIX: accept a mask parameter rather than hardcoding
 // 0xffffffff. Step 3 of `block_inclusive_scan_ab` calls this with only
 // NWARPS=4 active lanes out of the warp; `__shfl_up_sync(0xffffffff, ...)`
 // is UB when mask members don't all execute → silent hang on Ada/sm_89.
@@ -226,7 +226,7 @@ __device__ __forceinline__ void block_inclusive_scan_ab(
 #define SMEM_STAGE_OFF     (2 * NWARPS + 2 * MAX_DSTATE + 2 * NTHREADS)
 #define SMEM_TOTAL_FLOATS  (2 * NWARPS + 2 * MAX_DSTATE + 2 * NTHREADS + CHUNK_SIZE)
 
-// Step 8e — extra smem offsets for the backward-pass reverse scan.
+// Extra smem offsets for the backward-pass reverse scan.
 // Layout (appended after the forward layout):
 //   SMEM_REV_WA/WB     = 2*NWARPS floats   (reverse warp-scan workspace)
 //   SMEM_POST_A/B      = 2*MAX_DSTATE      (inter-chunk reverse-scan postfix)
@@ -765,7 +765,7 @@ extern "C" __global__ __launch_bounds__(128, 3) void ssm_parallel_scan_fwd_nosav
 }
 
 // ============================================================================
-// Typed variants (bf16/f16) — Step 8b of v0.2.2 mixed-precision training.
+// Typed variants (bf16/f16) — the mixed-precision training tier.
 //
 // Follow `state-spaces/mamba`'s `scan_t = float2` discipline: all scan
 // state + running prefix + block scan + registers stay f32. Only the
@@ -802,8 +802,7 @@ ssm_parallel_scan_fwd_##SUFFIX(                                               \
     /* Typed smem stage: 2-byte slots reuse the f32 stage region. The         \
        typed launch helper only allocates CHUNK_SIZE * sizeof(T_ACT) bytes    \
        for this region (vs CHUNK_SIZE * 4 for the f32 path), saving 2 KB     \
-       per block → enables an extra resident block on Ada (audit Agent 5     \
-       optimization #1). Load stores T_ACT directly; upcast happens only     \
+       per block → enables an extra resident block on Ada. Load stores T_ACT directly; upcast happens only     \
        inside the compute loop via to_f(). */                                 \
     T_ACT *smem_stage = (T_ACT *)(smem + SMEM_STAGE_OFF);                     \
     float D_d = D[did];                                                       \
@@ -990,7 +989,7 @@ ssm_parallel_scan_fwd_nosave_##SUFFIX(                                        \
     float *smem_run_b  = smem + SMEM_RUN_B_OFF;                               \
     float *smem_exch_a = smem + SMEM_EXCH_A_OFF;                              \
     float *smem_exch_b = smem + SMEM_EXCH_B_OFF;                              \
-    /* Typed smem stage (audit Agent 5 #1): 2-byte slots vs 4-byte f32. */    \
+    /* Typed smem stage: 2-byte slots vs 4-byte f32. */    \
     T_ACT *smem_stage = (T_ACT *)(smem + SMEM_STAGE_OFF);                     \
     float D_d = D[did];                                                       \
     int h_base = (bid * d_inner + did) * d_state;                             \
@@ -1145,7 +1144,7 @@ DEFINE_SSM_PARALLEL_SCAN_FWD_NOSAVE(bf16, __nv_bfloat16, from_f_bf16)
 DEFINE_SSM_PARALLEL_SCAN_FWD_NOSAVE(f16,  __half,        from_f_f16)
 
 // ============================================================================
-// Step 8e — parallel selective-scan BACKWARD pass.
+// Parallel selective-scan BACKWARD pass.
 //
 // Mirrors state-spaces/mamba `selective_scan_bwd_kernel.cuh`.
 // Grid: (batch, d_inner). Block: NTHREADS=128 (1 block per (b, di)).
@@ -1546,7 +1545,7 @@ DEFINE_SSM_PARALLEL_SCAN_BWD(f16,  __half,        from_f_f16)
 #undef SMEM_EXCH_B_OFF
 #undef SMEM_STAGE_OFF
 #undef SMEM_TOTAL_FLOATS
-/* m-5 (scan-audit 2026-08-01): the epilogue stopped at the forward set,
+/* the epilogue stopped at the forward set,
    leaving the backward smem offsets + the DEFINE_* generator names alive
    in the concatenated NVRTC TU. Complete the cleanup. */
 #undef SMEM_REV_WA_OFF

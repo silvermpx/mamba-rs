@@ -1,4 +1,4 @@
-//! Step 20 — verify f16 inference works end-to-end through the public
+//! verify f16 inference works end-to-end through the public
 //! `GpuMambaBackbone` / `GpuMamba3Backbone` wrappers.
 //!
 //! The audit flagged f16 inference as "not in wrapper API" — false alarm:

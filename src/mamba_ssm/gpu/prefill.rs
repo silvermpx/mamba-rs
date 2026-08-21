@@ -361,7 +361,7 @@ fn prefill_body<W: MambaWeightsView>(
         let ssm_ptr = state.ssm.cached_ptr() + (layer_idx * ssm_per_layer) as u64 * f32_sz;
         let a_neg_ptr = a_neg_all.cached_ptr() + (layer_idx * di * ds) as u64 * f32_sz;
 
-        // F1: RmsNorm [B*T]. Ping-pong (perf audit W5): the activations
+        // F1: RmsNorm [B*T]. Ping-pong: the activations
         // STAY in out_flat; the normed values land in `residual` (which is
         // dead until F5 reuses it as the block output). The old
         // copy-then-overwrite spent a full [B*T*dm] D2D per layer
@@ -902,7 +902,7 @@ pub fn gpu_forward_inference_prefill_mixed<W: MambaWeightsView>(
             let bb_ptr = scratch.b_gathered.cached_ptr();
             let cb_ptr = scratch.c_gathered.cached_ptr();
             let dp = lw.d_param();
-            // M-A (scan-audit 2026-08-01): this dispatch used to bypass the
+            // this dispatch used to bypass the
             // scan router on a stale "parallel scan is f32-only" premise —
             // the typed parallel nosave kernel exists and mirrors the f32
             // route above; long prompts paid O(T) for nothing, and the

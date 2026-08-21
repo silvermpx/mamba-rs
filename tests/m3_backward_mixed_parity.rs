@@ -1,17 +1,17 @@
-//! Step 11 — Mamba-3 SISO mixed-precision (bf16/f16) backward parity test.
-//! Compares `gpu_backward_mamba3_backbone_mixed` (Step 10 typed bwd)
+//! Mamba-3 SISO mixed-precision (bf16/f16) backward parity test.
+//! Compares `gpu_backward_mamba3_backbone_mixed` (the typed backward)
 //! against the f32 oracle `gpu_backward_mamba3_backbone` on identical
 //! inputs/weights, asserting tight cosine + norm-ratio thresholds across
 //! the full f32 master-grad arena.
 //!
 //! This was the top release blocker per the 6-agent pre-release audit
-//! (Agent 5 — GPU pipelines): Step 10 had unit parity for every typed
+//! the mixed backward had unit parity for every typed
 //! bwd kernel but no integration-level call site.
 //!
-//! ## Production-config required by Step 10
+//! ## Production-config requirements
 //!   - `use_parallel_scan = true` (chunked SSM bwd via Steps 9b + 9d)
-//!   - `is_outproj_norm = true` (RMSNormGated via Step 9c)
-//!   - `n_angles > 0` (RoPE via Step 9a)
+//!   - `is_outproj_norm = true` (the typed gated-norm backward)
+//!   - `n_angles > 0` (the typed RoPE backward)
 //!   - `input_proj_w` identity in the default pair (the dedicated
 //!     input_proj tests below run a live projection on both sides)
 
@@ -68,7 +68,7 @@ fn dims_for(cfg: &Mamba3Config, batch: usize, seq_len: usize) -> GpuMamba3Dims {
         a_floor: cfg.a_floor,
         rms_norm_eps: cfg.rms_norm_eps,
         is_outproj_norm: cfg.is_outproj_norm,
-        use_parallel_scan: true, // chunked path required for Step 10
+        use_parallel_scan: true, // the chunked path is the one with a mixed backward
     }
 }
 

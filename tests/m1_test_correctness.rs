@@ -795,7 +795,7 @@ mod gpu_tests {
 
         let input = vec![0.1f32; input_dim];
 
-        // Phase 1: run 5 steps without graph, save output
+        // First: run 5 steps without graph, save output
         let mut out_no_graph = vec![0.0f32; cfg.d_model];
         for _ in 0..5 {
             gpu_bb.step(&input, &mut out_no_graph).unwrap();

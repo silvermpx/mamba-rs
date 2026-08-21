@@ -232,7 +232,7 @@ impl GpuMambaTrainingStepGraph {
         } = cap;
         assert!(
             matches!(train_w.dtype, WeightDtype::Bf16),
-            "Step 14 graph capture supports bf16 only (f16 needs in-graph overflow check)"
+            "bf16-only graph capture: f16 needs the in-graph overflow check (f16 needs in-graph overflow check)"
         );
         assert_eq!(acts.dtype, WeightDtype::Bf16);
 

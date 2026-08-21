@@ -672,7 +672,7 @@ impl GpuMambaInference {
                 let b_i = b as i32;
                 let di_i = di as i32;
                 let ds_i = ds as i32;
-                // m-2 (scan-audit 2026-08-01): the step kernel silently
+                // the step kernel silently
                 // returns without writing y beyond its register cap - and
                 // T=1 decode has no parallel alternative to route to.
                 assert!(

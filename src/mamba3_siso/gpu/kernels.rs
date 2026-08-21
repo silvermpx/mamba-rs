@@ -69,10 +69,10 @@ pub struct Mamba3Kernels {
     pub residual_add: CudaFunction,
     pub gather_last_timestep: CudaFunction,
 
-    // ── AdamW optimizer (Step 12, adamw.cu) ──
+    // ── AdamW optimizer (adamw.cu) ──
     pub adamw_step_f32: CudaFunction,
     /// CUDA-Graph-capturable variant: bias factors read from device buffer
-    /// (Step 14).
+    ///.
     pub adamw_step_f32_capturable: CudaFunction,
 
     // ── Chunked parallel scan (mamba3_chunked.cu) ──
@@ -87,7 +87,7 @@ pub struct Mamba3Kernels {
     pub m3_chunk_entering_state: CudaFunction,
     pub m3_writeback_parallel_states: CudaFunction,
     pub m3_chunk_scan_fwd: CudaFunction,
-    // Phase 2.7.5: m3_chunk_scan_bwd, m3_state_passing_bwd, m3_chunk_state_bwd,
+    // m3_chunk_scan_bwd, m3_state_passing_bwd, m3_chunk_state_bwd,
     // m3_cumsum_bwd removed — dead code replaced by monolithic m3_dqkv +
     // m3_dqktheta path below.
     pub m3_extract_da_cs_sum: CudaFunction,
@@ -124,7 +124,7 @@ pub struct Mamba3Kernels {
     pub m3_burnin_fwd_typed_bf16: CudaFunction,
     pub m3_burnin_fwd_typed_f16: CudaFunction,
 
-    // -- Step 9a: typed M3 sequential backward kernels --
+    // -- Typed M3 sequential backward kernels --
     /// RmsNorm over B/C groups, typed dy → typed d_B; f32 rms + weight +
     /// d_weight master-grad accumulator.
     pub bcnorm_bwd_typed: TypedKernel,
@@ -138,20 +138,20 @@ pub struct Mamba3Kernels {
     pub m3_split_bwd_typed: TypedKernel,
     /// RMSNorm-gated backward (`out = RMSNorm(y) * weight * SiLU(z)`) —
     /// typed d_y/d_z/d_out/y/z; f32 weight + d_weight (per-sample,
-    /// reduced later). Step 9c for M3 training.
+    /// reduced later).
     pub rmsnorm_gated_bwd_typed: TypedKernel,
-    // -- Step 9b: typed M3 "final grad" kernels (HIGHEST RISK) --
+    // -- Typed M3 "final grad" kernels (HIGHEST RISK) --
     /// Huge dqkv kernel with smem tiles — typed Q_rot/K_scaled/V_in/dO;
     /// all 6 grad outputs stay f32 (atomicAdd on dD; master grads on others).
     pub m3_dqkv_typed: TypedKernel,
     /// Inverse-RoPE + bias backward — typed Q_raw/K_raw; 7 grad outputs f32.
     pub m3_dqktheta_typed: TypedKernel,
 
-    // Phase 2.7.5: m3_chunk_scan_bwd_typed + m3_chunk_state_bwd_typed
+    // m3_chunk_scan_bwd_typed + m3_chunk_state_bwd_typed
     // removed (dead — the typed backward path, like the f32 path, now routes
     // through m3_dqkv_typed + m3_dqktheta_typed monolithic kernels).
 
-    // -- Step 8c: typed M3 chunked parallel forward kernels --
+    // -- Typed M3 chunked parallel forward kernels --
     /// Per-chunk gamma/scale + qk_dot + K prescale. Typed K/Q/K_scaled,
     /// f32 DT/trap_sig/qk_dot/scale/gamma (these are scalars computed in
     /// float and reused by the scan path).

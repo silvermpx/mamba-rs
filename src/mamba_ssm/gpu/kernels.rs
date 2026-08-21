@@ -159,7 +159,7 @@ pub struct MambaKernels {
     /// branch so all three dtypes share one calling convention.
     pub conv1d_burnin_fwd_f32_typed: CudaFunction,
 
-    // -- Typed training-backward kernels (Step 4a) --
+    // -- Typed training-backward kernels --
     /// Typed dispatch (f32/bf16/f16) for `gating_backward`. dx/dy/d_y/d_gate
     /// typed; matches DEFINE_GATING_BWD macro in elementwise.cu.
     pub gating_bwd_typed: TypedKernel,
@@ -173,7 +173,7 @@ pub struct MambaKernels {
     /// macro in conv1d.cu.
     pub conv1d_burnin_bwd_typed: TypedKernel,
 
-    // -- Typed training-backward kernels (Step 4b — HOTTEST kernel) --
+    // -- Typed training-backward kernels (the HOTTEST kernel) --
     /// Typed dispatch (f32/bf16/f16) for `ssm_backward_local` — the BPTT
     /// recurrence backward. delta/u/B/C/dy/d_delta/d_u/d_B_local/d_C_local
     /// typed; h_saved/a_neg/D/d_D_local/d_a_log_local stay f32 (BPTT state +
@@ -253,14 +253,14 @@ pub struct MambaKernels {
     pub ssm_parallel_fwd: CudaFunction,
     /// Parallel prefix scan SSM forward without saves (target network).
     pub ssm_parallel_fwd_nosave: CudaFunction,
-    /// Typed parallel scan forward (Step 8b) — typed delta/u/B/C/y_out,
+    /// Typed parallel scan forward — typed delta/u/B/C/y_out,
     /// all scan state (smem_run, block scan, h, h_saved) remains f32 per
     /// `state-spaces/mamba` `scan_t = float2` invariant.
     pub ssm_parallel_fwd_typed: TypedKernel,
     /// Typed parallel scan forward nosave twin (target network / prefill).
     pub ssm_parallel_fwd_nosave_typed: TypedKernel,
 
-    // -- Step 8e: M1 parallel scan BACKWARD (new) --
+    // -- M1 parallel scan BACKWARD --
     /// Parallel reverse-scan backward, mirrors state-spaces/mamba
     /// `selective_scan_bwd_kernel.cuh`. Uses h_saved (per-t fwd state save)
     /// to skip forward re-derivation. Outputs follow the existing _local
@@ -268,24 +268,24 @@ pub struct MambaKernels {
     /// f32 / bf16 / f16 instantiations from one DEFINE_* macro.
     pub ssm_parallel_bwd_typed: TypedKernel,
 
-    // -- AMP loss scaler helpers (Step 13) --
+    // -- AMP loss scaler helpers --
     /// Scan an f32 grad buffer for inf/nan, atomicOr into device int.
     pub check_inf_nan_f32: CudaFunction,
     /// In-place multiply f32 grads by a scalar (unscale, clip, etc.).
     pub scale_grads_f32: CudaFunction,
     /// CUDA-Graph-capturable conditional unscale: zeros grads if the
-    /// overflow flag is set, otherwise multiplies by 1/loss_scale (Step 22).
+    /// overflow flag is set, otherwise multiplies by 1/loss_scale.
     pub scale_grads_skip_f32: CudaFunction,
     /// Deterministic global-norm support: fixed-grid sum-of-squares partial
     /// reduction with f64 accumulators (kernels/grad_clip.cu). The host sums
     /// the fixed 512 partials in order; scaling reuses `scale_grads_f32`.
     pub grad_sumsq_partial_f32: CudaFunction,
 
-    // -- AdamW optimizer (Step 12) --
+    // -- AdamW optimizer --
     /// Fused AdamW step on f32 master weights + f32 optimizer state.
     pub adamw_step_f32: CudaFunction,
     /// CUDA-Graph-capturable variant: reads bias-correction factors from a
-    /// 2-elem device buffer instead of scalar args (Step 14).
+    /// 2-elem device buffer instead of scalar args.
     pub adamw_step_f32_capturable: CudaFunction,
 
     // -- Batch-invariant GEMM (bf16 cross-batch determinism fix) --
@@ -348,7 +348,7 @@ pub struct MambaKernels {
     pub sgemm_dx_col_gemv: CudaFunction,
     /// Split-K/Split-M partial scratch for the sgemm_bi dispatcher:
     /// 8M f32 = 32 MB. The dispatcher asserts chunk*M*N fits before launch.
-    /// LAZY (perf audit I.3): only the batch-invariant tier reads it, and
+    /// LAZY: only the batch-invariant tier reads it, and
     /// inference-only consumers never enable that tier — the eager alloc
     /// held 32 MB of dead VRAM on every serve boot. Access via
     /// [`MambaKernels::splitk_scratch_buf`].
@@ -358,7 +358,7 @@ pub struct MambaKernels {
     /// [`MambaKernels::transpose_scratch_buf`].
     pub transpose_scratch: std::sync::OnceLock<cudarc::driver::CudaSlice<f32>>,
 
-    // -- sgemm_bi typed (bf16/f16) variants — Phase 11 stage 2 buckets.
+    // -- sgemm_bi typed (bf16/f16) variants — typed sync-load buckets.
     // X/W/Y/dY/dX typed, dW + bias f32, f32 accumulation throughout; each
     // kernel is bit-identical to "upcast inputs to f32, run the f32 twin".
     pub sgemm_nn_gemv_typed: HalfKernel,
@@ -473,7 +473,7 @@ impl MambaKernels {
     }
 
     /// Compile all CUDA kernels from source (NVRTC), with a disk cache for
-    /// the emitted PTX (perf audit C1 Tier A): a cache hit skips the NVRTC
+    /// the emitted PTX: a cache hit skips the NVRTC
     /// half of the boot tax entirely; the PTX->SASS half is the driver
     /// JIT's own cache (CUDA_CACHE_PATH). Key = source blob + arch +
     /// options + NVRTC version; identical PTX by construction, so a hit
@@ -741,11 +741,11 @@ impl MambaKernels {
             scatter_add_cols_typed: load_typed("scatter_add_cols")?,
             reduce_bias_typed: load_typed("reduce_bias")?,
 
-            // typed training-backward kernels (Step 4a)
+            // typed training-backward kernels
             gating_bwd_typed: load_typed("gating_backward")?,
             rmsnorm_bwd_typed: load_typed("rmsnorm_backward")?,
             conv1d_burnin_bwd_typed: load_typed("conv1d_burnin_backward")?,
-            // Step 4b: ssm_backward_local typed + typed-input reducers
+            // ssm_backward_local typed + typed-input reducers
             ssm_backward_local_typed: load_typed("ssm_backward_local")?,
             ssm_reduce_d_b_bf16: get("ssm_reduce_d_B_bf16")?,
             ssm_reduce_d_b_f16: get("ssm_reduce_d_B_f16")?,

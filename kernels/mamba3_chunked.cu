@@ -505,7 +505,7 @@ extern "C" __global__ void m3_chunk_scan_fwd(
 
 // ============================================================================
 // Sections 6-9 (m3_chunk_scan_bwd / m3_state_passing_bwd / m3_chunk_state_bwd
-// / m3_cumsum_bwd) removed in Phase 2.7.5.
+// / m3_cumsum_bwd) removed with the monolithic-backward consolidation.
 //
 // The live chunked backward path now uses the monolithic m3_dqkv + m3_dqktheta
 // path (sections 11-12 below) which has no atomicAdd. These four kernels
@@ -539,7 +539,7 @@ extern "C" __global__ void m3_extract_da_cs_sum(
 }
 
 // ============================================================================
-// 11. m3_dqkv -- Monolithic chunked backward (Python Step 2)
+// 11. m3_dqkv -- Monolithic chunked backward (reference backward stage 2)
 // ============================================================================
 //
 // Translates Python mamba3_siso_bwd_kernel_dqkv.
@@ -557,7 +557,7 @@ extern "C" __global__ void m3_dqkv(
     float* __restrict__ dV,           // [B*T*d_inner]
     float* __restrict__ dADT,         // [B*T*nh]
     float* __restrict__ dQK_dot_out,  // [B*T*nh]
-    float* __restrict__ dD_partials,  // [B * nh] per-(b,h) OUTPUT (Phase 2.7.5, no atomicAdd)
+    float* __restrict__ dD_partials,  // [B * nh] per-(b,h) OUTPUT (no atomicAdd)
     // Inputs
     const float* __restrict__ Q_rot,       // [B*T*nh*ds]
     const float* __restrict__ K_scaled,    // [B*T*nh*ds]
@@ -887,7 +887,7 @@ extern "C" __global__ void m3_dqkv(
 }
 
 // ============================================================================
-// 12. m3_dqktheta -- Inverse RoPE + scale + bias gradients (Python Step 3)
+// 12. m3_dqktheta -- Inverse RoPE + scale + bias gradients (reference backward stage 3)
 // ============================================================================
 // Grid: (B*n_chunks, nh), Block: (CS, 1, 1)
 // Each thread handles one timestep within a chunk.
@@ -902,7 +902,7 @@ extern "C" __global__ void m3_dqktheta(
     // well-defined only without the no-alias promise.
     float* dScale,                      // [B*T*nh] (may alias Scale_in)
     float* dGamma,                      // [B*T*nh] (may alias Gamma_in)
-    // Phase 2.7.5: dQ_bias/dK_bias accumulators removed from kernel — caller
+    // dQ_bias/dK_bias accumulators removed from kernel — caller
     // does colsum_accumulate on dQ_pre/dK_pre (already per-(b,t,h,n) scratch).
     // Deterministic, no atomicAdd.
     // Inputs
@@ -1002,7 +1002,7 @@ extern "C" __global__ void m3_dqktheta(
 
         // Store dQ_pre, dK_pre — these per-(b,t,h,n) scratch tensors are
         // reduced to dQ_bias/dK_bias by the caller via colsum_accumulate
-        // (Phase 2.7.5: no atomicAdd here).
+        // (no atomicAdd here).
         for (int n = 0; n < ds; n++) {
             dQ_pre[base + n] = dq_pre_out[n];
             dK_pre[base + n] = dk_pre_out[n];
@@ -1025,12 +1025,12 @@ extern "C" __global__ void m3_dqktheta(
             dAngles_cumsum[((b * T + gt) * nh + h) * n_angles + a] = dtheta_q + dtheta_k;
         }
     }
-    // Phase 2.7.5: dQ_bias/dK_bias produced via colsum_accumulate on
+    // dQ_bias/dK_bias produced via colsum_accumulate on
     // dQ_pre/dK_pre by the caller. No atomicAdd here.
 }
 
 // ============================================================================
-// 13. m3_ddt_dtrap -- dScale/dGamma -> dDT, dTrap (Python Step 4)
+// 13. m3_ddt_dtrap -- dScale/dGamma -> dDT, dTrap (reference backward stage 4)
 // ============================================================================
 // Grid: (nh, B), Block: (1, 1, 1) — one thread per (head, batch), loops over T
 // dDT[t] = (dGamma[t] + dScale[t]) * trap[t] + dScale[t-1] * (1 - trap[t])
@@ -1128,7 +1128,7 @@ extern "C" __global__ void m3_final_grads(
 }
 
 // ============================================================================
-// Step 8c — typed (bf16/f16) variants of the chunked parallel forward kernels.
+// Typed (bf16/f16) variants of the chunked parallel forward kernels.
 //
 // Typed I/O: activation tensors (K, Q, K_scaled, x/V, y_out, k_flat, x_flat)
 // are T_ACT in storage. All math + state remain f32 (BPTT states, dA_cumsum,
@@ -1354,7 +1354,7 @@ DEFINE_M3_CHUNK_SCAN_FWD(bf16, __nv_bfloat16, from_f_bf16)
 DEFINE_M3_CHUNK_SCAN_FWD(f16,  __half,        from_f_f16)
 
 // ============================================================================
-// Step 9d — typed (bf16/f16) variants of the chunked parallel backward
+// Typed (bf16/f16) variants of the chunked parallel backward
 // kernels with typed input surface.
 //
 // All gradient OUTPUTS remain f32 — this is the PyTorch AMP master-grad
@@ -1368,13 +1368,13 @@ DEFINE_M3_CHUNK_SCAN_FWD(f16,  __half,        from_f_f16)
 //   - m3_extract_da_cs_sum (f32-only utility)
 // ============================================================================
 
-// Phase 2.7.5: typed DEFINE_M3_CHUNK_SCAN_BWD + DEFINE_M3_CHUNK_STATE_BWD
+// typed DEFINE_M3_CHUNK_SCAN_BWD + DEFINE_M3_CHUNK_STATE_BWD
 // macros removed (dead — matches f32-section 6/8 removal above). The live
 // typed chunked bwd path routes through DEFINE_M3_DQKV / DEFINE_M3_DQKTHETA
 // below, just like the f32 path.
 
 // ============================================================================
-// Step 9b — typed (bf16/f16) variants of the HIGHEST-RISK "final grad"
+// Typed (bf16/f16) variants of the HIGHEST-RISK "final grad"
 // kernels. Two of the four chunked-bwd tail kernels accept typed activation
 // input; the other two operate on f32 scalar grads only.
 //
@@ -1388,7 +1388,7 @@ DEFINE_M3_CHUNK_SCAN_FWD(f16,  __half,        from_f_f16)
 
 // __launch_bounds__: hd ≤ 32 per config (block_dim=hd), pin to 4 blocks/SM
 // to keep the 64-element register arrays from spilling to local memory under
-// nvcc's heuristics (audit Agent 5 M1).
+// nvcc's heuristics.
 #define DEFINE_M3_DQKV(SUFFIX, T_ACT, FROM_F)                                 \
 extern "C" __global__ __launch_bounds__(32, 4) void                           \
 m3_dqkv_##SUFFIX(                                                             \
@@ -1397,7 +1397,7 @@ m3_dqkv_##SUFFIX(                                                             \
     float* __restrict__ dV,                                                   \
     float* __restrict__ dADT,                                                 \
     float* __restrict__ dQK_dot_out,                                          \
-    float* __restrict__ dD_partials, /* [B*nh] Phase 2.7.5, no atomicAdd */   \
+    float* __restrict__ dD_partials, /* [B*nh] partials, no atomicAdd */   \
     const T_ACT* __restrict__ Q_rot,                                          \
     const T_ACT* __restrict__ K_scaled,                                       \
     const T_ACT* __restrict__ V_in,                                           \
@@ -1632,7 +1632,7 @@ m3_dqkv_##SUFFIX(                                                             \
         }                                                                     \
         __syncthreads();                                                      \
     }                                                                         \
-    /* Phase 2.7.5: per-(b,h) store — caller reduces across B */              \
+    /* per-(b,h) store — caller reduces across B */              \
     if (p == 0) dD_partials[b * nh_total + h] = dD_acc;                       \
     (void)FROM_F;                                                             \
 }
@@ -1651,7 +1651,7 @@ m3_dqktheta_##SUFFIX(                                                         \
     /* no __restrict__: host aliases dScale/Scale_in and dGamma/Gamma_in */   \
     float* dScale,                                                            \
     float* dGamma,                                                            \
-    /* Phase 2.7.5: dQ_bias/dK_bias removed — caller does colsum_accumulate   \
+    /* dQ_bias/dK_bias removed — caller does colsum_accumulate   \
      * on dQ_pre/dK_pre (already per-(b,t,h,n) scratch). No atomicAdd here.*/\
     const T_ACT* __restrict__ Q_raw,                                          \
     const T_ACT* __restrict__ K_raw,                                          \
@@ -1746,7 +1746,7 @@ m3_dqktheta_##SUFFIX(                                                         \
             dtheta_q + dtheta_k;                                              \
     }                                                                         \
     } /* end if (valid) */                                                    \
-    /* Phase 2.7.5: dQ_bias/dK_bias produced via colsum_accumulate by caller.*/\
+    /* dQ_bias/dK_bias produced via colsum_accumulate by caller.*/\
     (void)FROM_F;                                                             \
 }
 

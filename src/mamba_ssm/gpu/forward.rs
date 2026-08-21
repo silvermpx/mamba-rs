@@ -273,7 +273,7 @@ pub struct GpuMambaScratch {
     /// Discarded dx for input_proj backward (input embedding detached) `[B*T*mamba_input_dim]`.
     pub d_input_proj_dx: GpuBuffer,
 
-    // -- Rule-B axis-0 reduction partials (Phase 2.7.4 determinism fix) --
+    // -- Rule-B axis-0 reduction partials (determinism fix) --
     /// Scratch for per-sample partials produced by Rule-B backward kernels
     /// (rmsnorm_bwd d_scale, conv1d_burnin_bwd d_weight+d_bias). Reduced via
     /// `reduce_sum_axis0` to produce deterministic cross-batch accumulators

@@ -92,7 +92,7 @@ pub fn save(
     }
 
     // Metadata: config as JSON. scan_mode + rms_norm_eps ride along (M-B,
-    // scan-audit 2026-08-01): they are part of the checkpoint's numeric
+    // they are part of the checkpoint's numeric
     // route — dropping them silently re-routed a non-default-eps model to
     // 1e-5 on load.
     let mut metadata = HashMap::new();

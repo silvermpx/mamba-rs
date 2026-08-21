@@ -1,4 +1,4 @@
-//! Step 12 — GPU AdamW parity vs PyTorch-equivalent CPU reference.
+//! GPU AdamW parity vs PyTorch-equivalent CPU reference.
 //!
 //! Asserts the fused `adamw_step_f32` kernel produces bit-close updates
 //! to the canonical `torch.optim.AdamW` formulation:

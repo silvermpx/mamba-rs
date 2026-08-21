@@ -1,4 +1,4 @@
-//! Step 9b — per-kernel parity tests for the 2 HIGHEST-RISK typed M3
+//! per-kernel parity tests for the 2 HIGHEST-RISK typed M3
 //! "final grad" kernels: `m3_dqkv`, `m3_dqktheta`. Each typed variant is
 //! compared against its f32 oracle on identical random inputs.
 //!
@@ -113,7 +113,7 @@ fn tolerances(dtype: WeightDtype) -> (f32, f32) {
 // ─── m3_dqkv ───────────────────────────────────────────────────────────
 //
 // 6 outputs: dQ_mid, dK_mid, dV, dADT, dQK_dot_out, dD_partials.
-// Phase 2.7.5: dD output is now per-(b,h) partials of length B*nh instead of
+// dD output is now per-(b,h) partials of length B*nh instead of
 // [nh] atomicAdd accumulator. Callers reduce across B via reduce_sum_axis0.
 
 fn check_dqkv(dtype: WeightDtype) {
@@ -156,7 +156,7 @@ fn check_dqkv(dtype: WeightDtype) {
     let n_q = B * T * NH * DS;
     let n_v = B * T * D_INNER;
     let n_th = B * T * NH;
-    // Phase 2.7.5: dD output is per-(b,h) partials length B*NH.
+    // dD output is per-(b,h) partials length B*NH.
     let n_d = B * NH;
 
     // f32 oracle.
@@ -290,7 +290,7 @@ fn m3_dqkv_f16() {
 
 // ─── m3_dqktheta ───────────────────────────────────────────────────────
 //
-// Phase 2.7.5: kernel now writes 5 outputs (dQ_pre, dK_pre, dAngles_cumsum,
+// kernel now writes 5 outputs (dQ_pre, dK_pre, dAngles_cumsum,
 // dScale, dGamma). dQ_bias / dK_bias are produced by a caller-side
 // colsum_accumulate over dQ_pre / dK_pre respectively — the f32 oracle vs
 // typed comparison still covers them since both paths produce the same
@@ -382,7 +382,7 @@ fn check_dqktheta(dtype: WeightDtype) {
     unsafe { bld.launch(cfg) }.unwrap();
     ctx.stream.synchronize().unwrap();
 
-    // Phase 2.7.5: produce dQ_bias/dK_bias from dQ_pre/dK_pre via colsum_accumulate.
+    // produce dQ_bias/dK_bias from dQ_pre/dK_pre via colsum_accumulate.
     let cs_grid = LaunchConfig {
         grid_dim: (((NH * DS) as u32).div_ceil(256), 1, 1),
         block_dim: (256, 1, 1),
@@ -461,7 +461,7 @@ fn check_dqktheta(dtype: WeightDtype) {
     unsafe { bld.launch(cfg) }.unwrap();
     ctx.stream.synchronize().unwrap();
 
-    // Phase 2.7.5: typed path also colsums dQ_pre/dK_pre to produce bias grads.
+    // typed path also colsums dQ_pre/dK_pre to produce bias grads.
     {
         let rows = (B * T) as i32;
         let cols = (NH * DS) as i32;

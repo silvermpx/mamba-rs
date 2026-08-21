@@ -1,12 +1,12 @@
-//! Step 10 — Mamba-3 SISO mixed-precision (bf16/f16) backward training
+//! Mamba-3 SISO mixed-precision (bf16/f16) backward training
 //! pipeline. Mirrors [`super::mamba3_gpu::gpu_backward_mamba3_layer`] +
 //! `_backbone` with typed activation I/O routed through the typed kernel
 //! variants from Steps 9a/9b/9c/9d.
 //!
 //! ## Production-config scope
 //! - `dims.use_parallel_scan = true` (chunked SSM bwd via Steps 9b + 9d)
-//! - `dims.is_outproj_norm = true` (RMSNormGated via Step 9c)
-//! - `dims.n_angles > 0` (RoPE via Step 9a)
+//! - `dims.is_outproj_norm = true` (the typed gated-norm backward)
+//! - `dims.n_angles > 0` (the typed RoPE backward)
 //!
 //! Non-production configs return `Err(...)` — fall back to the f32 path
 //! [`super::mamba3_gpu::gpu_backward_mamba3_backbone`].
@@ -70,7 +70,7 @@ pub fn gpu_backward_mamba3_backbone_mixed(
     let dm = dims.d_model;
     let dtype = acts.dtype;
 
-    // norm_f bwd (f32, residual stays f32) — Phase 2.7.5 Rule B.
+    // norm_f bwd (f32, residual stays f32) — no-atomics partials.
     {
         let nf_ptr = mamba_w.master.norm_f_weight.raw_ptr(&ctx.stream);
         let bt_i = bt as i32;
@@ -418,7 +418,7 @@ fn gpu_backward_mamba3_layer_mixed(
         }
     }
 
-    // m3_dqkv typed — Phase 2.7.5 Rule B: dD_partials[B*nh] via axis0_partials,
+    // m3_dqkv typed — no-atomics partials rule: dD_partials[B*nh] via axis0_partials,
     // followed by reduce_sum_axis0 → lg.d_param[nh] (accumulate=1).
     {
         // Two chunk-by-state operand tiles, V/dO tiles, two per-step
@@ -436,7 +436,7 @@ fn gpu_backward_mamba3_layer_mixed(
         builder.arg(sc.d_x.inner_mut()); // dV
         builder.arg(sc.d_alpha.inner_mut()); // dADT
         builder.arg(sc.d_beta.inner_mut()); // dQK_dot
-        builder.arg(sc.axis0_partials.inner_mut()); // dD_partials [B*nh] (Phase 2.7.5)
+        builder.arg(sc.axis0_partials.inner_mut()); // dD_partials [B*nh] (no-atomics partials)
         let q_p = acts.q.cached_ptr(); // typed Q_rot
         let ks_p = acts.k_scaled_saved.cached_ptr(); // typed K_scaled
         let v_p = acts.x.cached_ptr(); // typed V = x
@@ -489,7 +489,7 @@ fn gpu_backward_mamba3_layer_mixed(
             .map_err(|e| format!("zero d_angle_cumsum mixed: {:?}", e))?;
     }
 
-    // m3_dqktheta typed — Phase 2.7.5: dQ_bias/dK_bias removed from args
+    // m3_dqktheta typed — dQ_bias/dK_bias removed from args
     // (caller does colsum_accumulate on dQ_pre/dK_pre scratch below).
     {
         let na_i = na as i32;
@@ -524,7 +524,7 @@ fn gpu_backward_mamba3_layer_mixed(
         builder.arg(&cs);
         unsafe { builder.launch(cfg) }.map_err(|e| format!("m3_dqktheta_typed B6: {:?}", e))?;
     }
-    // Phase 2.7.5: colsum dQ_pre / dK_pre → c_bias / b_bias (deterministic).
+    // colsum dQ_pre / dK_pre → c_bias / b_bias (deterministic).
     {
         let d_cb_ptr = lg.c_bias.ptr();
         let nhds_i = (nh * ds) as i32;
@@ -574,7 +574,7 @@ fn gpu_backward_mamba3_layer_mixed(
     sc.d_c_pre_rope.copy_from_raw(&sc.d_q, &ctx.stream)?;
 
     // ----------------------------------------------------------------
-    // B5a: angle_dt_bwd — Phase 2.7.5 Rule B (pure f32, no atomicAdd).
+    // B5a: angle_dt_bwd — no-atomics partials rule (pure f32, no atomicAdd).
     // Stage 1: kernel writes contrib_angles + contrib_dt into axis0_partials.
     // Stage 2a/b: reduce_sum_axis0 → d_angles_raw / d_dt_angle.
     // ----------------------------------------------------------------
@@ -881,7 +881,7 @@ fn gpu_backward_mamba3_layer_mixed(
     // Cast typed d_post_norm → f32 d_norm scratch, then call f32 rmsnorm_bwd.
     // ----------------------------------------------------------------
     cast_typed_to_f32(ctx, m3k, &mut sc.d_norm, &msc.d_post_norm_typed, bt * dm)?;
-    // Phase 2.7.5 Rule B two-stage:
+    // no-atomics partials rule two-stage:
     {
         let nw_ptr = lw_master.norm_weight.raw_ptr(&ctx.stream);
         let axis0_ptr = sc.axis0_partials.cached_ptr();

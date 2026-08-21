@@ -1,4 +1,4 @@
-//! Step 7 smoke test: `GpuMamba3TrainMixedWeights` + `GpuMamba3BackboneMixedActs`.
+//! Smoke test: `GpuMamba3TrainMixedWeights` + `GpuMamba3BackboneMixedActs`.
 //!
 //! Validates:
 //! 1. Allocation of master (f32) + compute (typed) + typed acts without panic.

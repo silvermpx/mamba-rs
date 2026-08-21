@@ -56,7 +56,7 @@ impl WeightDtype {
     /// bf16 HF reference. Pedantic forces true f32 accumulation with a
     /// modest perf cost on small-M GEMMs.
     ///
-    /// **Trade-off (audit Agent 2/5)**: PEDANTIC may forfeit Tensor Core
+    /// **Trade-off**: PEDANTIC may forfeit Tensor Core
     /// HMMA/BMMA acceleration for bf16/f16 GEMMs on Ada/Hopper — possibly
     /// 2–4× speed regression on large GEMMs. For models you have validated
     /// not to regress under non-pedantic accumulation (e.g. small models

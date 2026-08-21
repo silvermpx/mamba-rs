@@ -1,4 +1,4 @@
-//! Step 13 — dynamic loss scaler integration tests on GPU.
+//! dynamic loss scaler integration tests on GPU.
 //!
 //! The CPU state-machine tests live inline in `loss_scaler.rs::tests`. This
 //! file exercises the GPU-side helpers (`check_inf_nan_gpu`, `scale_grads_gpu`)
@@ -124,7 +124,7 @@ fn scale_grads_with_zero_zeros_buffer() {
 #[test]
 fn scale_grads_inf_propagates_to_check() {
     // scale_grads with scale=INF turns finite values into inf; the next
-    // check_inf_nan call must catch it (audit Agent 2 L7 behaviour test).
+    // check_inf_nan call must catch it.
     let (ctx, k) = make_ctx();
     let mut grads = upload(&ctx, &[1.0, 2.0, 3.0]);
     scale_grads_gpu(&ctx, &k, &mut grads, f32::INFINITY).unwrap();
@@ -174,7 +174,7 @@ fn flag_must_be_zeroed_between_passes() {
 
 /// Drive a full GPU growth cycle: many clean steps → scale doubles, an
 /// overflow halves it. Validates the GPU helpers integrate with the CPU
-/// state machine end-to-end (audit Agent 2 M4 — was untested on GPU).
+/// state machine end-to-end.
 #[test]
 fn gpu_growth_cycle_end_to_end() {
     let (ctx, k) = make_ctx();

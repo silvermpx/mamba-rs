@@ -1,5 +1,5 @@
 //! Per-kernel finite-difference parity tests for the typed bf16/f16
-//! backward kernels added in Step 4a.
+//! backward kernels.
 //!
 //! Strategy: run the f32 kernel as oracle, then run the bf16/f16 typed
 //! variant on the same (cast) inputs, and compare outputs within a
@@ -996,7 +996,7 @@ fn ssm_backward_local_bf16_matches_f32() {
     );
 }
 
-// ─── gpu_sgemm_backward_dw_grad_typed (Step 4c) ──────────────────────
+// ─── gpu_sgemm_backward_dw_grad_typed ──────────────────────
 //
 // cuBLAS GemmEx typed dW: dW[n_in, n_out] += X^T @ dY. bf16/f16 A,B with
 // f32 master C, CUBLAS_COMPUTE_32F_PEDANTIC (true f32 accumulate — we
@@ -1157,7 +1157,7 @@ fn sgemm_backward_dw_grad_typed_accumulates() {
     }
 }
 
-// ─── gpu_gemm_ex_backward_dx_typed (Step 5a) ─────────────────────────
+// ─── gpu_gemm_ex_backward_dx_typed ─────────────────────────
 //
 // Typed dX backward GEMM: dX[B,K] = dY[B,N] @ W^T[N,K]. Mirrors f32
 // `gpu_sgemm_backward_dx_raw` math (OP_T on W, OP_N on dY) with typed

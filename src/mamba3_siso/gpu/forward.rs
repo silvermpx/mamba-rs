@@ -1,6 +1,6 @@
 //! Mamba-3 SISO GPU **forward** pass (training + target burn-in).
 //!
-//! Split from the former 2313-line `mamba3_gpu.rs` (task #381). 8-phase
+//! Split from the former 2313-line `mamba3_gpu.rs`. 8-phase
 //! pipeline:
 //!   F1: RMSNorm
 //!   F2: in_proj SGEMM

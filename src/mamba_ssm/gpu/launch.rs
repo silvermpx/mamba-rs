@@ -23,7 +23,7 @@ pub fn validate_kernel_arg_capacity(
     d_inner: usize,
     d_state: usize,
 ) -> Result<(), String> {
-    // m-4 (scan-audit 2026-08-01): T=0 survives every arithmetic check but
+    // T=0 survives every arithmetic check but
     // produces grid_dim.x = 0 launches that surface as an opaque CUDA error
     // on a NEIGHBOURING kernel — reject it with a name at the front door.
     if seq_len == 0 {
@@ -130,7 +130,7 @@ pub fn grid_parallel_scan(batch: usize, d_inner: usize) -> LaunchConfig {
     }
 }
 
-/// Launch config for the M1 parallel scan BACKWARD kernel (Step 8e).
+/// Launch config for the M1 parallel scan BACKWARD kernel.
 ///
 /// Smem layout = forward layout + reverse-scan workspace + postfix carry +
 /// next-thread δA exchange + d_a_log block-reduce + chunk-first-a boundary.
@@ -171,7 +171,7 @@ pub fn grid_parallel_scan_bwd(batch: usize, d_inner: usize) -> LaunchConfig {
 /// f32). On bf16/f16 this saves 2 KB per block, taking total smem from
 /// 7200 B → 5152 B and enabling the kernel's `__launch_bounds__(128, 4)`
 /// to actually fit 4 resident blocks per SM on Ada (~10–15 % throughput
-/// lift on memory-bound configs per audit Agent 5 #1).
+/// lift on memory-bound configs on memory-bound configs).
 ///
 /// `bytes_per_act` must be `2` for bf16/f16 or `4` for f32 (in which case
 /// this is identical to [`grid_parallel_scan`]).

@@ -1,4 +1,4 @@
-//! Step 8b — parity test for typed M1 parallel prefix scan forward
+//! parity test for typed M1 parallel prefix scan forward
 //! (`ssm_parallel_scan_fwd_{bf16,f16}`) against the f32 oracle. Also
 //! validates the warp-mask fix in `warp_inclusive_scan_ab`'s Step 3 call
 //! from `block_inclusive_scan_ab` (was deadlocking on Ada/sm_89 with
@@ -25,7 +25,7 @@ use mamba_rs::mamba_ssm::gpu::weights_mixed_train::GpuMambaTrainMixedWeights;
 use mamba_rs::weights::MambaWeights;
 
 fn tiny_cfg() -> MambaConfig {
-    // C-1 re-arm (scan-audit wave 2026-08-01): this was ScanMode::Sequential —
+    // C-1 re-arm: this was ScanMode::Sequential —
     // every "parallel" test in this file silently ran the SEQUENTIAL kernels
     // while the header claimed parallel coverage. Auto + the use_parallel
     // assert in check_at_t make the dispatch claim load-bearing.

@@ -1,6 +1,6 @@
 //! Mamba-3 SISO GPU **backward** training pass (f32 master grads).
 //!
-//! Split from the former 2313-line `mamba3_gpu.rs` (task #381). Mirrors
+//! Split from the former 2313-line `mamba3_gpu.rs`. Mirrors
 //! the forward layout but in reverse order: B8 → B7 → B6 → B5 → B4 → B3
 //! → B2 → B1 + residual add.
 //!
@@ -299,7 +299,7 @@ pub fn gpu_backward_mamba3_layer(
             }
         }
 
-        // m3_dqkv — Phase 2.7.5 Rule B: dD_partials[B*nh] via axis0_partials,
+        // m3_dqkv — no-atomics partials rule: dD_partials[B*nh] via axis0_partials,
         // followed by reduce_sum_axis0 → lg.d_param[nh] (accumulate=1 across
         // layers since GpuMamba3Grads::zero runs once per step).
         {
@@ -319,7 +319,7 @@ pub fn gpu_backward_mamba3_layer(
             builder.arg(scratch.d_x.inner_mut());
             builder.arg(scratch.d_alpha.inner_mut());
             builder.arg(scratch.d_beta.inner_mut());
-            // Phase 2.7.5: dD_partials [B*nh] — reduced after kernel.
+            // dD_partials [B*nh] — reduced after kernel.
             builder.arg(scratch.axis0_partials.inner_mut());
             builder.arg(acts.q.inner());
             builder.arg(scratch.d_b_pre_rope.inner());
@@ -370,7 +370,7 @@ pub fn gpu_backward_mamba3_layer(
                 .map_err(|e| format!("zero d_angle_cumsum: {:?}", e))?;
         }
 
-        // m3_dqktheta — Phase 2.7.5: dQ_bias/dK_bias removed from kernel args
+        // m3_dqktheta — dQ_bias/dK_bias removed from kernel args
         // (caller does colsum_accumulate on dQ_pre/dK_pre scratch below).
         {
             let na_i = na as i32;
@@ -403,7 +403,7 @@ pub fn gpu_backward_mamba3_layer(
             builder.arg(&cs);
             unsafe { builder.launch(cfg) }.map_err(|e| format!("m3_dqktheta B6 S2: {:?}", e))?;
         }
-        // Phase 2.7.5: colsum dQ_pre / dK_pre → c_bias / b_bias (deterministic).
+        // colsum dQ_pre / dK_pre → c_bias / b_bias (deterministic).
         {
             let d_cb_ptr = lg.c_bias.ptr();
             let bt_i = bt as i32;
@@ -459,7 +459,7 @@ pub fn gpu_backward_mamba3_layer(
             .copy_from_raw(&scratch.d_q, &ctx.stream)?;
     }
 
-    // B5a: angle_dt_bwd — Phase 2.7.5 Rule B (no atomicAdd).
+    // B5a: angle_dt_bwd — no-atomics partials rule (no atomicAdd).
     // Stage 1: kernel writes contrib_angles[nh, B*T*na] + contrib_dt[na, B*T*nh]
     //          into split axis0_partials scratch.
     // Stage 2a: reduce_sum_axis0(d_angles_raw, contrib_angles, nh, B*T*na, 0).
@@ -743,7 +743,7 @@ pub fn gpu_backward_mamba3_layer(
         (bt, dm, ip),
     )?;
 
-    // B1: RMSNorm backward — Phase 2.7.5 Rule B.
+    // B1: RMSNorm backward — no-atomics partials rule.
     // Stage 1: rmsnorm_bwd writes per-sample per-dim partials to axis0_partials.
     // Stage 2: reduce_sum_axis0 → lg.norm_weight (accumulate=1).
     {
@@ -819,7 +819,7 @@ pub fn gpu_backward_mamba3_backbone(
     let bt = dims.bt();
     let dm = dims.d_model;
 
-    // norm_f bwd — Phase 2.7.5 Rule B.
+    // norm_f bwd — no-atomics partials rule.
     {
         let nf_ptr = mamba_w.norm_f_weight.raw_ptr(&ctx.stream);
         let bt_i = bt as i32;

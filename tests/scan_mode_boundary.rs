@@ -1,4 +1,4 @@
-//! T-1 (scan-audit 2026-08-01): CPU-only pins for the scan-mode dispatch
+//! CPU-only pins for the scan-mode dispatch
 //! rules — the one scan test CI can run today (no cuda feature needed).
 //!
 //! Pins: the Auto threshold boundary, the `d_state > 64` sequential-kernel

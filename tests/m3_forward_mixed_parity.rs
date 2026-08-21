@@ -1,4 +1,4 @@
-//! Step 8 — parity test for M3 mixed forward (sequential SSM only) vs f32
+//! parity test for M3 mixed forward (sequential SSM only) vs f32
 //! backbone. Validates that the typed kernel wiring produces outputs within
 //! bf16/f16 ULP cosine of the f32 oracle.
 

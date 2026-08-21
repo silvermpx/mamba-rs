@@ -62,7 +62,7 @@
 #define WSUBN (WN / WNITER)   // 32
 
 // ============================================================================
-// Phase 2.9: CUTLASS-style cache hints (replaces failed __ldcs experiment).
+// CUTLASS-style cache hints (replaces failed __ldcs experiment).
 // ============================================================================
 // ld.global.L2::128B prefetches next L2 line alongside .ca caching. sm_75+.
 // Used by CUTLASS SGEMM mainloop B loads (cutlass/include/cutlass/arch/memory.h).
@@ -101,7 +101,7 @@ __device__ __forceinline__ float4 ld_global_L2_128B(const float* p) {
 // __launch_bounds__(128, 2) — target 2 blocks/SM on Ada sm_89.
 // With 168 regs × 128 threads × 2 blocks = 43008 regs (< 64K/SM) ✓
 // Smem 16KB × 2 = 32KB (< 48KB static) ✓
-// ptxas audit (Phase 0.1) confirmed 0 spill stores/loads.
+// ptxas audit  confirmed 0 spill stores/loads.
 extern "C" __global__ __launch_bounds__(NUM_THREADS, 2)
 void sgemm_bi_nn(
     float* __restrict__ C,
@@ -464,7 +464,7 @@ void sgemm_bi_nn(
 // B = dY [M, N]
 // C = dW [K, N] — accumulated
 // Output tile [BM, BN] over (K, N). M is reduction axis.
-// __launch_bounds__(128, 2) — target 2 blocks/SM (Phase 0.1 ptxas: 167 regs, 0 spill).
+// __launch_bounds__(128, 2) — target 2 blocks/SM (ptxas: 167 regs, 0 spill).
 extern "C" __global__ __launch_bounds__(NUM_THREADS, 2)
 void sgemm_bi_tn(
     float* __restrict__ C,
@@ -1223,7 +1223,7 @@ void sgemm_bi_nn_splitk_big_partial(
 // A = dY [M, N]
 // B = W [K, N] — read transposed as W^T[N,K]
 // C = dX [M, K] — overwrite
-// __launch_bounds__(128, 2) — target 2 blocks/SM (Phase 0.1 ptxas: 168 regs, 0 spill).
+// __launch_bounds__(128, 2) — target 2 blocks/SM (ptxas: 168 regs, 0 spill).
 extern "C" __global__ __launch_bounds__(NUM_THREADS, 2)
 void sgemm_bi_nt(
     float* __restrict__ C,
@@ -1451,7 +1451,7 @@ void sgemm_bi_nt(
                         alpha * threadResults[idx + 2],
                         alpha * threadResults[idx + 3]
                     };
-                    // Phase 2.9: __stwt — streaming store. NT backward dX is OVERWRITE (no accumulation),
+                    // __stwt — streaming store. NT backward dX is OVERWRITE (no accumulation),
                     // so marking C lines evict-first is safe and prevents C writes from evicting A staging / B working set.
                     __stwt(reinterpret_cast<float4*>(&C_sub[(threadRowInWarp * TM + resIdxM) * K_out + threadColInWarp * TN + resIdxN]), out);
                 }
@@ -1752,9 +1752,9 @@ void sgemm_bi_nt_splitn_big_partial(
 // ============================================================================
 // __launch_bounds__(128, 3) — target 3 blocks/SM on Ada sm_89.
 // 128 regs × 128 threads × 3 blocks = 49152 regs (< 64K/SM) ✓
-// Smem 24KB × 2 = 48KB (static limit) — 3 blocks requires 99KB dynamic opt-in (Phase 4.2).
+// Smem 24KB × 2 = 48KB (static limit) — 3 blocks requires 99KB dynamic opt-in .
 // At (128, 3) without dynamic opt-in, effective occupancy = 2 blocks/SM due to smem limit.
-// Phase 0.1 ptxas: 128 regs, 0 spill.
+// ptxas: 128 regs, 0 spill.
 extern "C" __global__ __launch_bounds__(NUM_THREADS, 2)
 void sgemm_bi_nn_slim(
     float* __restrict__ C,
@@ -2006,7 +2006,7 @@ void sgemm_bi_nn_slim(
 }
 
 // ============================================================================
-// Phase 6 v2: Split-K Slim NN partial — wave-fill extension for underfilled
+// Split-K Slim NN partial — wave-fill extension for underfilled
 // Slim NN shapes. Identical per-block FMA order to sgemm_bi_nn_slim on its
 // K-slice → bit-exact. Grid: (M_tiles * N_tiles, 1, F). blockIdx.z = fc ∈ [0, F).
 // Each fc owns K-chunk [fc*K_chunk, min(K, (fc+1)*K_chunk)) and writes to
@@ -2022,7 +2022,7 @@ void sgemm_bi_nn_slim(
 //   - No alpha / bias / beta in this kernel — raw tile sums only
 //   - Static 16 KB smem (same as Slim NN) — no dynamic-smem attribute needed
 //
-// Mirror of sgemm_bi_nn_splitk_big_partial (Phase 6 v1) but for BM=128 BN=64
+// Mirror of sgemm_bi_nn_splitk_big_partial (the big-tile variant) but for BM=128 BN=64
 // BK=32 tile. This is the tile that actually fires on b=64 production GEMMs.
 // ============================================================================
 extern "C" __global__ __launch_bounds__(NUM_THREADS, 2)
@@ -2231,7 +2231,7 @@ void sgemm_bi_nn_splitk_slim_partial(
 // B = dY [M, N]
 // C = dW [K, N] — accumulated
 // Output tile [BM, BN] over (K, N). M is reduction axis.
-// __launch_bounds__(128, 2) — target 2 blocks/SM (Phase 0.1 ptxas: 128 regs, 0 spill).
+// __launch_bounds__(128, 2) — target 2 blocks/SM (ptxas: 128 regs, 0 spill).
 // 2 blocks × 24KB smem = 48KB static limit exactly.
 extern "C" __global__ __launch_bounds__(NUM_THREADS, 2)
 void sgemm_bi_tn_slim(
@@ -2421,7 +2421,7 @@ void sgemm_bi_tn_slim(
 // A = dY [M, N]
 // B = W [K, N] — read transposed as W^T[N,K]
 // C = dX [M, K] — overwrite
-// __launch_bounds__(128, 2) — target 2 blocks/SM (Phase 0.1 ptxas: 128 regs, 0 spill).
+// __launch_bounds__(128, 2) — target 2 blocks/SM (ptxas: 128 regs, 0 spill).
 extern "C" __global__ __launch_bounds__(NUM_THREADS, 2)
 void sgemm_bi_nt_slim(
     float* __restrict__ C,
@@ -2585,7 +2585,7 @@ void sgemm_bi_nt_slim(
                         alpha * threadResults[idx + 2],
                         alpha * threadResults[idx + 3]
                     };
-                    // Phase 2.9: __stwt — streaming store. NT backward dX is OVERWRITE (no accumulation),
+                    // __stwt — streaming store. NT backward dX is OVERWRITE (no accumulation),
                     // so marking C lines evict-first is safe and prevents C writes from evicting A staging / B working set.
                     __stwt(reinterpret_cast<float4*>(&C_sub[(threadRowInWarp * TM + resIdxM) * K_out + threadColInWarp * TN + resIdxN]), out);
                 }
@@ -2615,7 +2615,7 @@ void sgemm_bi_nt_slim(
 #undef NUM_THREADS
 
 // ============================================================================
-// Phase 2.2 — GEMV-N1 NN (forward, N=1): Y[M] = alpha * X[M,K] @ W[K] + beta*Y + bias
+// GEMV-N1 NN (forward, N=1): Y[M] = alpha * X[M,K] @ W[K] + beta*Y + bias
 // ============================================================================
 // ============================================================================
 // Ultra-Thin-M NN forward: Y[M,N] = X[M,K] @ W[K,N] + bias
@@ -2773,7 +2773,7 @@ void sgemm_bi_nn_gemv(
 }
 
 // ============================================================================
-// Phase 2.2b — GEMV-N1 TN (backward dW, N=1): dW[K] += alpha * X^T[K,M] @ dY[M]
+// GEMV-N1 TN (backward dW, N=1): dW[K] += alpha * X^T[K,M] @ dY[M]
 // ============================================================================
 // Specialized for weight gradient of N=1 output layer. Replaces cuBLAS fallback
 // for actor mean_head.w2 / log_std_head.w2 backward pass.
@@ -2823,7 +2823,7 @@ void sgemm_bi_tn_gemv(
 }
 
 // ============================================================================
-// Phase 2.2c — GEMV-N1 NT (backward dX, N=1): dX[M,K] = alpha * dY[M] @ W^T[K]
+// GEMV-N1 NT (backward dX, N=1): dX[M,K] = alpha * dY[M] @ W^T[K]
 // ============================================================================
 // Pure element-wise outer product — no reduction. dX[m,k] = alpha * dY[m] * W[k].
 // Replaces cuBLAS fallback for input gradient of N=1 output layer.
@@ -2850,7 +2850,7 @@ void sgemm_bi_nt_gemv(
 }
 
 // ============================================================================
-// Phase 2.1 — Narrow-N NN (forward, N∈9..48): C[M,N] = alpha * A[M,K] @ B[K,N] + beta*C + bias
+// Narrow-N NN (forward, N∈9..48): C[M,N] = alpha * A[M,K] @ B[K,N] + beta*C + bias
 // ============================================================================
 // Specialized for narrow N (9..48). Replaces cuBLAS fallback for critic qhead
 // N=25 (TQC quantiles). Tile: BM=64 BN=32 BK=16, 128 threads, 2x2 warps.
@@ -2884,7 +2884,7 @@ void sgemm_bi_nn_narrow(
     float alpha, float beta,
     int M, int N, int K,
     int lda, int ldb, int ldc,
-    int post_op  // reserved for Phase 1.4 fusion; 0 = none (currently unused)
+    int post_op  // reserved for future epilogue fusion; 0 = none (currently unused)
 ) {
     (void)post_op;
     __shared__ float As[NBK * (NBM + SMEM_A_PAD)];
@@ -3293,7 +3293,7 @@ void sgemm_bi_nn_narrow_small(
 #undef NSROW_STRIDE_B
 
 // ============================================================================
-// Phase 2.1b — Narrow-N TN (backward dW, N∈9..48): C[K,N] += alpha * A^T[K,M] @ B[M,N]
+// Narrow-N TN (backward dW, N∈9..48): C[K,N] += alpha * A^T[K,M] @ B[M,N]
 // ============================================================================
 // A = X_saved [M, K_out] — read transposed into As
 // B = dY [M, N]
@@ -3688,7 +3688,7 @@ void sgemm_bi_tn_narrow_splitm_partial(
 }
 
 // ============================================================================
-// Phase 2.1c — Narrow-N NT (backward dX, N∈9..48): C[M,K_out] = alpha * A[M,N] @ B^T[N,K_out]
+// Narrow-N NT (backward dX, N∈9..48): C[M,K_out] = alpha * A[M,N] @ B^T[N,K_out]
 // ============================================================================
 // A = dY [M, N]
 // B = W [K_out, N] — read transposed as W^T[N, K_out]
@@ -3827,7 +3827,7 @@ void sgemm_bi_nt_narrow(
     float* C_warp = C + (pid_m * NBM + warpRow * NWM) * K_out + pid_n * NBN + warpCol * NWN;
 
     // Epilogue — overwrite (beta=0), scalar K_out-fallback
-    // Phase 2.9: __stwt streaming store (write-once output, evict-first safe).
+    // __stwt streaming store (write-once output, evict-first safe).
     for (int rm = 0; rm < NTM; ++rm) {
         int g_row = pid_m * NBM + warpRow * NWM + threadRowInWarp * NTM + rm;
         if (g_row >= M) continue;
@@ -3890,7 +3890,7 @@ void sgemm_bi_nt_narrow(
 // dispatcher contract guarantees `K_main ≤ K_full` and the kernel reads
 // strictly from [0..K_main). If a future dispatcher change ever passes
 // `K_CHUNKS · SBK > lda`, the kernel will OOB-read silently. Keep the
-// dispatcher (`blas_gpu.rs::gpu_sgemm_forward` Phase 4) honest.
+// dispatcher (`blas_gpu.rs::gpu_sgemm_forward` tier dispatch) honest.
 extern "C" __global__ __launch_bounds__(SNUM_THREADS, 4)
 void sgemm_bi_nn_splitk32_partial(
     float* __restrict__ partial,  // [K_CHUNKS * M * N]
@@ -4181,7 +4181,7 @@ void sgemm_transpose_f32_2d(
 }
 
 // ============================================================================
-// Typed (bf16/f16) variants — Phase 11 stage 2: sync-load buckets.
+// Typed (bf16/f16) variants — typed sync-load: sync-load buckets.
 // ============================================================================
 // Contract (per the typed-triad design research):
 //   - X / W / Y / dY / dX are T_ACT (typed I/O); loads upcast via to_f at the

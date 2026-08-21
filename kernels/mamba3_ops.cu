@@ -565,7 +565,7 @@ extern "C" __global__ void m3_angle_chunk_apply(
 //     d_angles_raw[t,a] += d_delta[t,h,a] * PI * dt[t,h] * sech^2(angles_raw[t,a])
 //     d_dt[t,h] += d_delta[t,h,a] * PI * tanh(angles_raw[t,a])
 //
-// Phase 2.7.5 (Rule B): contribution-only variant. Stage 1 per-(h,a) thread
+// The no-atomics partials rule: contribution-only variant. Stage 1 per-(h,a) thread
 // writes per-t contributions to two transposed scratch tensors (no atomicAdd):
 //   contrib_angles[h, t, a] — reduce over h to get d_angles_raw[t, a]
 //   contrib_dt[a, t, h]    — reduce over a to get d_dt_angle[t, h]
@@ -624,7 +624,7 @@ extern "C" __global__ void angle_dt_bwd(
 //   d_dt_angle[bt,h]   += d_delta * PI * tanh(raw)
 //
 // Grid: (B, ceil(nh*n_angles/256)). Block: (min(256, nh*n_angles)).
-// Phase 2.7.5 (Rule B): two-pass deterministic variant. Stage 1 per-(b,h,a)
+// The no-atomics partials rule: two-pass deterministic variant. Stage 1 per-(b,h,a)
 // thread writes per-t contributions to two transposed scratch tensors (no
 // atomicAdd):
 //   contrib_angles[h, b, t, a] — reduce over h to get d_angles_raw[bt, a]
@@ -1618,9 +1618,9 @@ DEFINE_RMSNORM_GATED_FWD(bf16, __nv_bfloat16, from_f_bf16)
 DEFINE_RMSNORM_GATED_FWD(f16,  __half,        from_f_f16)
 
 // ============================================================================
-// Step 9a: typed M3 backward kernels (bcnorm + rope + bc_bias + split).
+// Typed M3 backward kernels (bcnorm + rope + bc_bias + split).
 //
-// Dtype split follows the same precision discipline as Step 8c (M3 fwd mixed):
+// Dtype split follows the same precision discipline as the typed M3 forward:
 //   - Activation I/O tensors (B_raw, C_raw, B_normed, C_normed, B_biased,
 //     C_biased, k/q-post-rope, z, x, d_proj) are T_ACT.
 //   - All per-group RMS saves, angle_cumsum, dt/a_val/trap coefficients,
@@ -1771,7 +1771,7 @@ DEFINE_ROPE_BWD(bf16, __nv_bfloat16, from_f_bf16)
 DEFINE_ROPE_BWD(f16,  __half,        from_f_f16)
 
 // m3_split_bwd typed: assembles d_proj (T_ACT, feeds in_proj dX GEMM)
-// from 8 gradient components. Per Step 7/8 layout: d_z, d_x, d_B_raw,
+// from 8 gradient components. Layout: d_z, d_x, d_B_raw,
 // d_C_raw are T_ACT (come from typed backward chain); d_dd_dt,
 // d_dd_a, d_trap, d_angles stay f32 (m3_split_typed writes them as
 // f32 in forward, and the f32 abg_bwd / angle_dt_bwd paths produce
@@ -1828,7 +1828,7 @@ extern "C" __global__ void m3_split_bwd_##SUFFIX(                              \
 DEFINE_M3_SPLIT_BWD(bf16, __nv_bfloat16, from_f_bf16)
 DEFINE_M3_SPLIT_BWD(f16,  __half,        from_f_f16)
 
-// Step 9c: typed rmsnorm_gated_backward. Typed d_y/d_z/d_out/y/z; f32
+// Typed rmsnorm_gated_backward. Typed d_y/d_z/d_out/y/z; f32
 // weight/d_weight (master grad, atomicAdd-free per-sample write —
 // reducer accumulates across N later) and f32 rms_vals. All
 // recurrence math (SiLU gradient, RMSNorm c1 reduction) in f32

@@ -1,7 +1,7 @@
 //! Mamba-3 SISO shared state types: dimensions, saved activations,
 //! reusable scratch buffers, and target-network scratch.
 //!
-//! Split from the former 2313-line `mamba3_gpu.rs` (task #381). The
+//! Split from the former 2313-line `mamba3_gpu.rs`. The
 //! structs and constructors live here; `forward.rs` and `backward.rs`
 //! contain the launch-orchestration code.
 
@@ -307,7 +307,7 @@ pub struct GpuMamba3Scratch {
     pub d_gamma_par: GpuBuffer, // [B * T * nh] -- dGamma from dqktheta
     pub d_qk_dot: GpuBuffer,    // [B * T * nh] -- dQK_dot from dqkv
 
-    // -- Rule-B axis-0 reduction partials (Phase 2.7.5 M3 determinism fix) --
+    // -- Rule-B axis-0 reduction partials (determinism fix) --
     /// Scratch for per-sample partials produced by Rule-B backward kernels.
     /// Reduced via `reduce_sum_axis0` to produce deterministic cross-batch
     /// accumulators (replaces the previous atomicAdd accumulators).

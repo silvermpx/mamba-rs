@@ -4,7 +4,7 @@
 //! (forward-mixed + backward-mixed) on a tiny synthetic config without
 //! panicking and produces finite (non-NaN, non-inf) master weight
 //! gradients. Full numerical parity against the f32 oracle backbone is
-//! deferred to Step 6 (M1 mixed training tests — finite-diff + parity
+//! deferred (M1 mixed training tests — finite-diff + parity
 //! + loss curve).
 
 #![cfg(feature = "cuda")]

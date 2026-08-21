@@ -1,4 +1,4 @@
-//! Step 8c — per-kernel parity tests for the 4 new typed M3 chunked parallel
+//! per-kernel parity tests for the 4 new typed M3 chunked parallel
 //! forward kernels: `m3_preprocess_chunks`, `m3_chunk_state_fwd`,
 //! `m3_writeback_parallel_states`, `m3_chunk_scan_fwd`. Each typed variant is
 //! compared against its f32 oracle on identical random inputs.
@@ -20,7 +20,7 @@ use mamba_rs::mamba3_siso::gpu::kernels::Mamba3Kernels;
 // Small config — T=10, CS=4 forces 3 chunks with the LAST chunk PARTIAL (len=2).
 // Previously T=8 CS=4 left the partial-last-chunk path of the typed kernels
 // (zero-pad of smem tiles, chunk_len = min(CS, T-chunk_start)) untested at
-// bf16/f16 rounding boundary — flagged HIGH by audit Agent 3.
+// bf16/f16 rounding boundary — flagged HIGH by the pre-release audit.
 const B: usize = 2;
 const T: usize = 10;
 const NH: usize = 2;

@@ -1,4 +1,4 @@
-//! Step 14 follow-up — f32 training graph parity vs eager (M1 + M3).
+//! f32 training graph parity vs eager (M1 + M3).
 //!
 //! The bf16-mixed training graphs were validated in
 //! `tests/training_graph_parity.rs` and `tests/m3_training_graph_parity.rs`.

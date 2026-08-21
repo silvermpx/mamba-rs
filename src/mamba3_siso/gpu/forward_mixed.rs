@@ -16,7 +16,7 @@
 //!   plus `input_proj_inputs` and `input_proj_outputs`.
 //!
 //! This scaffolding carries only the storage + allocation. The actual
-//! forward wiring (Step 8) reads the compute weights from
+//! forward wiring reads the compute weights from
 //! [`super::weights_mixed_train::GpuMamba3TrainMixedWeights`] and writes
 //! into these acts.
 
@@ -35,7 +35,7 @@ use crate::mamba3_siso::gpu::weights_mixed_train::GpuMamba3TrainMixedWeights;
 /// Per-layer saved activations for M3 mixed-precision backward.
 ///
 /// Field dtype decisions are documented inline; they match the precision
-/// invariants from Step 5 (residual f32, BPTT f32, reduction saves f32,
+/// invariants (residual f32, BPTT f32, reduction saves f32,
 /// activation I/O typed).
 pub struct GpuMamba3LayerMixedActs {
     // F1: RMSNorm
@@ -905,7 +905,7 @@ pub struct GpuMamba3MixedScratch {
     pub angle_chunk_sums: crate::mamba_ssm::gpu::buffers::GpuByteBuffer,
     pub angle_chunk_carries: crate::mamba_ssm::gpu::buffers::GpuByteBuffer,
 
-    // Step 10 — bwd-only typed staging buffers (activation grads on the
+    // Backward-only typed staging buffers (activation grads on the
     // wire match activation storage dtype per AMP precision invariant).
     /// typed `[B*T*d_model]` — d_temporal staged for typed dW GEMM at out_proj.
     pub d_temporal_typed: DtypedBuf,

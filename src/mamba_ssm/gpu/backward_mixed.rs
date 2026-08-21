@@ -208,7 +208,7 @@ pub fn gpu_backward_mamba_layer_mixed(
     scratch.d_a_log_local.zero(&ctx.stream)?;
 
     // SSM backward: parallel reverse-scan when T > PARALLEL_SCAN_THRESHOLD
-    // (Step 8e — wires the typed parallel bwd kernel into production) or
+    // or
     // d_state > 64 (sequential kernel cap from register array size).
     // Otherwise sequential ssm_backward_local_typed.
     {
@@ -231,7 +231,7 @@ pub fn gpu_backward_mamba_layer_mixed(
         let da = scratch.d_a_log_local.cached_ptr();
 
         if dims.scan_mode.use_parallel(t, ds) {
-            // Parallel reverse-scan typed bwd (Step 8e).
+            // Parallel reverse-scan typed bwd.
             // Signature: h_saved, delta, u, B, C, a_neg, D, dy, d_delta,
             //   d_u, d_B_local, d_C_local, d_D_local, d_a_log_local,
             //   batch, T, d_inner, d_state.

@@ -1,4 +1,4 @@
-//! Step 23 — workload-style training benchmarks via the high-level
+//! workload-style training benchmarks via the high-level
 //! `MambaTrainer` / `Mamba3Trainer` API, sweeping all three precisions
 //! (f32 / bf16 / f16) × eager vs CUDA Graph.
 //!

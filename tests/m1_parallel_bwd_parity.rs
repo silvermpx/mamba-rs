@@ -1,4 +1,4 @@
-//! Step 8e — parity test for the new `ssm_parallel_scan_bwd` against the
+//! parity test for the new `ssm_parallel_scan_bwd` against the
 //! existing sequential `ssm_backward_local`. Validates the f32 + bf16 + f16
 //! instantiations of the typed macro DEFINE_SSM_PARALLEL_SCAN_BWD.
 
@@ -352,7 +352,7 @@ fn parity_multi_batch_f32() {
 // d_delta/d_u/d_B/d_a_log when n_chunks ≥ 2. CHUNK_SIZE = NTHREADS *
 // NITEMS = 128 * 8 = 1024 → T = 3072 forces 3 chunks. The bug would
 // fire on 2 of those (chunks 0 and 1, i.e. the earlier-in-time ones).
-// Regression introduced post-Step 8e by audit Agent 2 (M1 deep), fixed
+// Regression introduced by the pre-release audit, fixed
 // in the same patch by setting next_a=1.0, next_b=0.0 for the last
 // thread (identity for the exclusive-next-thread compose).
 #[test]

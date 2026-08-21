@@ -219,7 +219,7 @@ pub struct GpuMambaMixedTrainScratch {
     /// Discarded dx for backbone input_proj backward [B*T * mamba_input_dim].
     pub d_input_proj_dx: GpuBuffer,
 
-    // ── Rule-B axis-0 reduction partials (Phase 2.7.4 determinism fix) ─
+    // ── Rule-B axis-0 reduction partials (determinism fix) ─
     /// Scratch for per-sample partials produced by Rule-B backward kernels
     /// (rmsnorm_bwd d_scale, conv1d_burnin_bwd d_weight+d_bias). Reduced via
     /// `reduce_sum_axis0` to produce deterministic cross-batch accumulators
@@ -626,7 +626,7 @@ pub fn gpu_forward_mamba_backbone_mixed(
         }
         // SSM forward: parallel prefix scan for T > PARALLEL_SCAN_THRESHOLD
         // or ds > 64 (matches f32 path dispatch in forward.rs:544). Typed
-        // variants (Step 8b) keep scan state + h_saved + smem f32
+        // variants keep scan state + h_saved + smem f32
         // per state-spaces/mamba `scan_t = float2` invariant; only
         // delta/u/B/C/y are typed.
         {

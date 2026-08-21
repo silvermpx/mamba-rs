@@ -106,7 +106,7 @@ pub(super) const NUM_SMS: u32 = 142;
 
 /// Pick (kernel function, BN tile size) with M-aware wave-quantization fix.
 /// Slim-N for narrow output, or for small M with wide N.
-/// Phase 2 will extend this dispatcher with narrow / GEMV / small-K buckets.
+/// Later buckets extend this dispatcher with narrow / GEMV / small-K buckets.
 fn dispatch_slim_or_big<'k>(
     _kernels: &'k GpuKernels,
     m: usize,
@@ -222,7 +222,7 @@ pub fn sgemm_bi_forward(
         return Ok(());
     }
 
-    // Phase 2.1 Narrow-N NN dispatch: N∈[2..127], batch > 64.
+    // Narrow-N NN dispatch: N∈[2..127], batch > 64.
     // Tile BM=64 BN=32 BK=16, 128 threads, 2x2 warps. Scalar N-epilogue.
     // Kernel has M-predication (`if (g_row >= M) continue;`) and N-predication
     // (`if (g_col >= N) continue;`) → safe for any batch and any N via tile count.
@@ -261,10 +261,10 @@ pub fn sgemm_bi_forward(
         return Ok(());
     }
 
-    // Phase 2.2 GEMV-N1 dispatch: N=1 output (actor mean/log_std heads).
+    // GEMV-N1 dispatch: N=1 output (actor mean/log_std heads).
     // 4 rows/block, warp-shuffle K-reduction, deterministic batch-invariant.
     //
-    // Phase 2.2.1 (2026-05-04): batch lower bound relaxed 4 → 1. Kernel
+    // batch lower bound relaxed 4 → 1. Kernel
     // sgemm_bi_nn_gemv has `if (row >= M) return;` predication (kernels/sgemm_bi.cu:2201)
     // so M<4 is safe — partial last block. Closes single-env eval gap
     // (M=1 N=1 K=512 was hitting cuBLAS-fallback panic в gpu_eval_parity test).
@@ -465,7 +465,7 @@ pub fn sgemm_bi_forward(
         return Ok(());
     }
 
-    // Phase 6 v2: Split-K Slim NN for fat-M shapes (M > 1024) that underfill
+    // Split-K Slim NN for fat-M shapes (M > 1024) that underfill
     // the Slim grid. Targets Mamba layer shapes at b=64 seq=33 → M=2112.
     // Tile BM=128 BN=64 BK=32 (same as sgemm_bi_nn_slim) — each fc's K-slice
     // has identical per-block FMA order to Slim NN on that K-range. Reducer
@@ -645,7 +645,7 @@ pub fn sgemm_bi_forward(
     // Envelope: M ≥ 128, N ≥ 128, K ≥ 1. Non-%4 N handled by kernel scalar N-epilogue.
     // Non-%4 K handled by kernel scalar K-fallback (runtime lda%4 check).
     // K<BK: kernel's scalar bounds check zero-fills smem for dotIdx≥K; wastes a few FMAs
-    // but correct (handles Mamba-1 dt_proj K=4,8). Phase 2.4 — dropped `n_in >= 16` guard.
+    // but correct (handles Mamba-1 dt_proj K=4,8). dropped `n_in >= 16` guard.
     if batch >= SGEMM_CUSTOM_MIN && n_out >= SGEMM_CUSTOM_MIN && n_in >= 1 {
         let m_i = batch as i32;
         let n_i = n_out as i32;
@@ -725,7 +725,7 @@ pub fn sgemm_bi_backward_dw(
     dims: (usize, usize, usize),
 ) -> Result<(), String> {
     let (batch, n_in, n_out) = dims;
-    // Phase 2.2b GEMV-N1 TN dispatch: dW[K,1] += X^T[K,M] @ dY[M,1]
+    // GEMV-N1 TN dispatch: dW[K,1] += X^T[K,M] @ dY[M,1]
     if n_out == 1 && n_in >= 4 && batch >= 32 {
         let m_i = batch as i32;
         let k_i = n_in as i32;
@@ -751,7 +751,7 @@ pub fn sgemm_bi_backward_dw(
         return Ok(());
     }
 
-    // Phase 2.1b Narrow-N TN dispatch: N∈[2..127] (critic qhead + gap-fill for
+    // Narrow-N TN dispatch: N∈[2..127] (critic qhead + gap-fill for
     // N∈[49..127] where slim/big kernels (N>=128) don't apply).
     // T3.3 (2026-05-01): comment fixed — gate was relaxed to N≥2 in Stage 4
     // shape coverage; the stale `9..127` text predated that change.
@@ -847,7 +847,7 @@ pub fn sgemm_bi_backward_dw(
     // Custom: dW[K,N] += X^T[K,M] @ dY[M,N]
     // Envelope: K_out ≥ 1, N ≥ 128. Kernel A-load is scalar per-row (handles non-%4 M),
     // B-load has runtime N%4 scalar fallback. K scalar fallback handles non-%4 K.
-    // Phase 2.4: dropped `n_in >= 128` — kernel grid handles K_out<128 correctly;
+    // Dropped `n_in >= 128` — kernel grid handles K_out<128 correctly;
     // covers Mamba-1 dt_proj backward (K_out=8).
     if n_in >= 1 && n_out >= SGEMM_CUSTOM_MIN {
         let m_i = batch as i32;
@@ -919,7 +919,7 @@ pub fn sgemm_bi_backward_dx(
     dims: (usize, usize, usize),
 ) -> Result<(), String> {
     let (batch, n_in, n_out) = dims;
-    // Phase 2.1c Narrow-N NT dispatch: N∈[2..127] (critic qhead + gap-fill for
+    // Narrow-N NT dispatch: N∈[2..127] (critic qhead + gap-fill for
     // N∈[49..127] where slim/big kernels (N>=128) don't apply).
     // T3.3 (2026-05-01): comment fixed — gate was relaxed to N≥2 in Stage 4
     // shape coverage; the stale `9..127` text predated that change.
@@ -951,7 +951,7 @@ pub fn sgemm_bi_backward_dx(
         return Ok(());
     }
 
-    // Phase 2.1c+ (2026-05-04) Small-batch wide-N NT dispatch.
+    // Small-batch wide-N NT dispatch.
     // Gap: batch ∈ [1, 31], N >= 128 — Narrow NT capped at N=127, Split-K
     // NT-via-T requires batch >= 32, Big/Slim NT requires batch >= 128.
     // Solution: reuse sgemm_nt_narrow kernel — N is reduction-axis, kernel
@@ -990,8 +990,8 @@ pub fn sgemm_bi_backward_dx(
         return Ok(());
     }
 
-    // Phase 2.2c GEMV-N1 NT dispatch: dX[M,K] = dY[M,1] @ W^T[1,K] (outer product)
-    // Phase 2.2.1c (2026-05-04): batch lower bound relaxed 4 → 1.
+    // GEMV-N1 NT dispatch: dX[M,K] = dY[M,1] @ W^T[1,K] (outer product)
+    // batch lower bound relaxed 4 → 1.
     // Kernel sgemm_bi_nt_gemv computes per-element dX[m,k] = alpha*dY[m]*W[k]
     // с total = M*K total threads и `if (tid >= total) return;` predication
     // (kernels/sgemm_bi.cu:2296) — safe для M<4. Closes single-env eval gap.
@@ -1318,7 +1318,7 @@ pub fn sgemm_bi_backward_dx(
         return Ok(());
     }
 
-    // Phase 6 v2 Task 5: Split-K Slim NN via transpose for fat-M bwd_dx shapes
+    // Split-K Slim NN via transpose for fat-M bwd_dx shapes
     // (M > 1024). Mirrors the M<128 NT-via-T above but uses Slim Split-K partial
     // (BM=128 BN=64) for better arithmetic intensity on fat-M Mamba shapes.
     //
@@ -1482,7 +1482,7 @@ pub fn sgemm_bi_backward_dx(
     // Custom: dX[M,K] = dY[M,N] @ W^T[N,K]
     // Envelope: M ≥ 128, K_out ≥ 1. Kernel has scalar N-fallback for non-%4 N,
     // scalar K-fallback for non-%4 K_out.
-    // Phase 2.4: dropped `n_in >= 128` — covers Mamba-1 dt_proj backward_dx (K_out=8).
+    // Dropped `n_in >= 128` — covers Mamba-1 dt_proj backward_dx (K_out=8).
     if batch >= SGEMM_CUSTOM_MIN && n_in >= 1 {
         let m_i = batch as i32;
         let n_i = n_out as i32;
@@ -1536,7 +1536,7 @@ pub fn sgemm_bi_backward_dx(
 }
 
 // ============================================================================
-// Typed (bf16/f16) dispatch — Phase 11 stage 2 buckets.
+// Typed (bf16/f16) dispatch — typed sync-load buckets.
 // ============================================================================
 // Same bucket geometry and launch configs as the f32 dispatcher above; the
 // typed kernels are bit-identical to "upcast inputs to f32, run the f32

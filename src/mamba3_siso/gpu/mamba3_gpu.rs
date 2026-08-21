@@ -1,6 +1,6 @@
 //! Compatibility shim for the legacy `mamba3_gpu` module path.
 //!
-//! The 2313-line single-file `mamba3_gpu.rs` was split (task #381) into:
+//! The 2313-line single-file `mamba3_gpu.rs` was split into:
 //!   - [`super::state`]    — dimensions, saved acts, scratch, target scratch
 //!   - [`super::forward`]  — gpu_forward_mamba3_layer / _backbone / _target_burnin
 //!   - [`super::backward`] — gpu_backward_mamba3_layer / _backbone

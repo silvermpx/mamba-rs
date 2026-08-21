@@ -33,7 +33,7 @@ extern "C" __global__ void check_inf_nan_f32(
             break;  // one overflow is enough — no need to keep scanning
         }
     }
-    // Warp-collapse before HBM atomicOr (audit Agent 1 LOW): worst case
+    // Warp-collapse before HBM atomicOr: worst case
     // every lane has local=1 → 32 atomicOrs per warp → contention.
     // __any_sync collapses to a single ballot and one atomicOr per warp.
     if (__any_sync(0xFFFFFFFFu, local)) {

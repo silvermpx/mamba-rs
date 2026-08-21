@@ -37,7 +37,7 @@ extern "C" __global__ void cast_f32_to_f16(
     dst[i] = __float2half_rn(src[i]);
 }
 
-// Step 10 — typed → f32 casts for the M3 mixed-precision backward,
+// Typed → f32 casts for the M3 mixed-precision backward,
 // where some kernels (rmsnorm_bwd, m3_split_bwd's f32 inputs, etc.)
 // are pure-f32 and need a typed staging buffer cast back to f32.
 extern "C" __global__ void cast_bf16_to_f32(

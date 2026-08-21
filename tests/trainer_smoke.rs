@@ -1,4 +1,4 @@
-//! Step 15 smoke tests — `MambaTrainer` (M1) and `Mamba3Trainer` (M3)
+//! Smoke tests — `MambaTrainer` (M1) and `Mamba3Trainer` (M3)
 //! high-level APIs. Validates:
 //!   1. Eager steps run without panic.
 //!   2. `capture_graph()` succeeds.
@@ -277,7 +277,7 @@ fn m1_trainer_f16_smoke_eager_with_loss_scaler() {
         );
     }
 
-    // f16 graph capture must work (Step 22).
+    // f16 graph capture must work.
     trainer.capture_graph().expect("f16 capture");
     assert!(trainer.has_graph(), "f16 graph captured");
     for s in 0..3 {

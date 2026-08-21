@@ -1,4 +1,4 @@
-//! Step 14 — CUDA-Graph-captured M1 bf16 training step parity vs eager.
+//! CUDA-Graph-captured M1 bf16 training step parity vs eager.
 //!
 //! Runs N steps eagerly, then N steps via captured-graph replay (with
 //! identical inputs/seeds/weights). Asserts final master weights are

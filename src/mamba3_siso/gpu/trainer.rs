@@ -87,7 +87,7 @@ impl Mamba3Trainer {
         session: TrainSessionCfg,
         dtype: WeightDtype,
     ) -> Result<Self, String> {
-        // M-H (scan-audit 2026-08-01): hoisted here so BOTH branches get it -
+        // hoisted here so BOTH branches get it -
         // the f32 branch never validated, un-guarding the shfl width and
         // n_angles preconditions its kernels rely on.
         cfg.validate()?;
@@ -459,9 +459,9 @@ pub(crate) struct Mamba3TrainerMixed {
     scaler: Option<DynamicLossScaler>,
     overflow_flag: Option<OverflowFlag>,
     d_temporal_scaled: Option<GpuBuffer>,
-    /// f16 CUDA Graph (Step 22, M3 analogue of M1's `graph_f16`).
+    /// f16 CUDA Graph (M3 analogue of M1's `graph_f16`).
     graph_f16: Option<cudarc::driver::CudaGraph>,
-    /// 1-element device buffer of `1/loss_scale` (Step 22).
+    /// 1-element device buffer of `1/loss_scale`.
     unscale_factor: Option<UnscaleFactor>,
     /// Pointer-stability snapshots for the f16 graph.
     captured_f16_bias_ptr: u64,
@@ -835,7 +835,7 @@ impl Mamba3TrainerMixed {
         })
     }
 
-    /// Capture the M3 f16 training step (Step 22 — M3 mirror).
+    /// Capture the M3 f16 training step (M3 mirror of the M1 capture).
     fn capture_graph_f16(&mut self) -> Result<(), String> {
         self.bias.write(&self.ctx.stream, 1.0, 1.0)?;
         let init_unscale = 1.0 / self.scaler.as_ref().expect("f16 scaler").scale();

@@ -253,7 +253,7 @@ pub fn gpu_sgemm_backward_dw_grad(
     Ok(())
 }
 
-/// Typed dW backward GEMM (Step 4c). Matches the f32
+/// Typed dW backward GEMM. Matches the f32
 /// [`gpu_sgemm_backward_dw_grad`] math with bf16/f16 inputs and f32 master
 /// gradient accumulator.
 ///
@@ -319,7 +319,7 @@ pub fn gpu_sgemm_backward_dw_grad_typed(
     Ok(())
 }
 
-/// Typed dX backward GEMM (Step 5). Typed twin of
+/// Typed dX backward GEMM. Typed twin of
 /// [`gpu_sgemm_backward_dx_raw`]: `dX[B,K] = dY[B,N] @ W^T[N,K]` with
 /// bf16/f16 A,B,C and f32 master accumulate (no TC, PEDANTIC).
 ///
@@ -1067,7 +1067,7 @@ pub fn gpu_gemm_typed_forward_raw(
     // Opt-in only — default is cuBLAS gemv for maximum throughput.
     // Enable via `ctx.set_batch_invariant(true)` or the
     // `MAMBA_RS_BATCH_INVARIANT=1` environment variable.
-    // Typed sgemm_bi (Phase 11), homogeneous bf16/f16 operand triples only.
+    // Typed sgemm_bi , homogeneous bf16/f16 operand triples only.
     // Routing by M:
     //   - M >= 128 (training prefill scale): full-coverage entry — native
     //     typed buckets, else upcast → f32 sgemm_bi (Big/narrow cover all

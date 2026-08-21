@@ -1,4 +1,4 @@
-//! Step 14 — CUDA-Graph-captured M3 bf16 training step parity vs eager.
+//! CUDA-Graph-captured M3 bf16 training step parity vs eager.
 //!
 //! M3 analogue of `tests/training_graph_parity.rs`. Asserts that
 //! `GpuMamba3TrainingStepGraph::capture` + replay produces bit-identical
