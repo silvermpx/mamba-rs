@@ -190,23 +190,7 @@ impl GpuMambaLM {
             if vocab_size == vocab_size_padded {
                 lm.clone()
             } else {
-                // `load_hf` returns `lm` transposed to [d_model, vocab_size]
-                // row-major (d_model rows of length vocab_size). The GEMM
-                // reads it as [d_model, vocab_size_padded] row-major
-                // (stride = vocab_size_padded). Pad each of the d_model
-                // rows to `vocab_size_padded` columns with trailing zeros
-                // — a flat `copy_from_slice` would instead interleave src
-                // rows into different dst row offsets, yielding wrong
-                // logits on any vocab not already 64-aligned (e.g.
-                // 50280 → 50304 on mamba-130m-hf).
-                let mut padded = vec![0.0f32; vocab_size_padded * d_model];
-                for row in 0..d_model {
-                    let src = &lm[row * vocab_size..(row + 1) * vocab_size];
-                    let dst =
-                        &mut padded[row * vocab_size_padded..row * vocab_size_padded + vocab_size];
-                    dst.copy_from_slice(src);
-                }
-                padded
+                pad_lm_head_rows(lm, d_model, vocab_size, vocab_size_padded)
             }
         });
 
@@ -712,5 +696,47 @@ fn upload_f32_as_dtype(
             assert_eq!(bytes.len(), byte_count);
             cu_memcpy_htod_raw(stream, dst_ptr, bytes)
         }
+    }
+}
+
+/// Pad an untied lm_head from `[d_model, vocab]` row-major to
+/// `[d_model, vocab_padded]` row-major (trailing zeros per ROW).
+///
+/// The logits GEMM reads the head with stride `vocab_padded`; a flat
+/// `copy_from_slice` interleaves source rows into wrong destination
+/// offsets and silently produces wrong logits for every vocab that is not
+/// already 64-aligned (e.g. 50280 -> 50304 on mamba-130m-hf). M1 fixed
+/// this at commit 5dde438; the M3 LM shipped the flat copy until 0.6
+/// (G10d) — both now share this one implementation.
+pub(crate) fn pad_lm_head_rows(
+    lm: &[f32],
+    d_model: usize,
+    vocab_size: usize,
+    vocab_size_padded: usize,
+) -> Vec<f32> {
+    let mut padded = vec![0.0f32; vocab_size_padded * d_model];
+    for row in 0..d_model {
+        let src = &lm[row * vocab_size..(row + 1) * vocab_size];
+        let dst = &mut padded[row * vocab_size_padded..row * vocab_size_padded + vocab_size];
+        dst.copy_from_slice(src);
+    }
+    padded
+}
+
+#[cfg(test)]
+mod pad_tests {
+    use super::pad_lm_head_rows;
+
+    /// G10d pin: padding is PER-ROW, never a flat copy. With d_model=2,
+    /// vocab=3, padded=4 the flat copy would smear row 1 across the row
+    /// boundary; the row pad keeps each row's values at its own stride.
+    #[test]
+    fn pad_lm_head_rows_is_row_strided_g10d() {
+        let lm = [1.0, 2.0, 3.0, 10.0, 20.0, 30.0];
+        let got = pad_lm_head_rows(&lm, 2, 3, 4);
+        assert_eq!(got, vec![1.0, 2.0, 3.0, 0.0, 10.0, 20.0, 30.0, 0.0]);
+        let mut flat = vec![0.0f32; 8];
+        flat[..6].copy_from_slice(&lm);
+        assert_ne!(got, flat, "flat copy must differ - that was the M3 bug");
     }
 }

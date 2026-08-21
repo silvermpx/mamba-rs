@@ -57,7 +57,6 @@ pub struct GpuMamba3LM {
     embed_cpu: Vec<f32>,
     input_cpu: Vec<f32>,
     gpu_logits: GpuBuffer,
-    gpu_hidden: GpuBuffer,
     logits_padded_cpu: Vec<f32>,
     logits_cpu: Vec<f32>,
     /// Vocabulary size — the number of valid token IDs.
@@ -173,11 +172,21 @@ impl GpuMamba3LM {
             "vocab_size_padded ({vocab_size_padded}) < vocab_size ({vocab_size})"
         );
 
-        // For identity_proj construction: clear input_proj_w so the engine
-        // takes the no-proj fast path (required by Mixed engine).
-        let mut weights = cpu_weights.clone();
-        weights.input_proj_w.clear();
-        weights.input_proj_b.clear();
+        // G10c (0.6): the old code UNCONDITIONALLY cleared input_proj here —
+        // a checkpoint trained WITH a projection silently lost it and
+        // produced plausible-looking garbage. The LM path feeds embeddings
+        // at d_model, so an identity (empty) proj is the expected shape;
+        // a real projection is honored on the f32 engine and REJECTED
+        // loudly on mixed (the mixed engine cannot apply it yet — the
+        // G12/Q1 non-identity-input_proj lane).
+        let weights = cpu_weights.clone();
+        if !weights.input_proj_w.is_empty() && dtype != WeightDtype::F32 {
+            return Err(format!(
+                "M3 LM ({dtype:?}): checkpoint carries a non-identity input_proj — the \
+                 mixed engine cannot apply it yet; load as f32 or use a proj-free \
+                 checkpoint"
+            ));
+        }
 
         let backbone =
             GpuMamba3Backbone::new_with_dtype(gpu_ordinal, &weights, cfg, d_model, batch, dtype)?;
@@ -194,9 +203,11 @@ impl GpuMamba3LM {
             if vocab_size == vocab_size_padded {
                 lm.clone()
             } else {
-                let mut padded = vec![0.0f32; vocab_size_padded * d_model];
-                padded[..vocab_size * d_model].copy_from_slice(lm);
-                padded
+                // G10d (0.6): PER-ROW padding via the shared helper — the
+                // flat copy this replaced smeared rows across the padded
+                // stride and produced wrong logits for every non-64-aligned
+                // vocab (M1's 5dde438 bug, faithfully re-shipped here).
+                super::gpu_lm::pad_lm_head_rows(lm, d_model, vocab_size, vocab_size_padded)
             }
         });
 
@@ -237,7 +248,6 @@ impl GpuMamba3LM {
         };
 
         let gpu_logits = GpuBuffer::zeros(stream, batch * vocab_size_padded)?;
-        let gpu_hidden = GpuBuffer::zeros(stream, batch * d_model)?;
 
         Ok(Self {
             backbone,
@@ -245,7 +255,6 @@ impl GpuMamba3LM {
             embed_cpu: embed,
             input_cpu: vec![0.0; batch * d_model],
             gpu_logits,
-            gpu_hidden,
             logits_padded_cpu: vec![0.0; batch * vocab_size_padded],
             logits_cpu: vec![0.0; batch * vocab_size],
             vocab_size,
@@ -455,11 +464,10 @@ impl GpuMamba3LM {
             EmbedStorage::F32 { embed, lm_head } => {
                 if let Some(lm) = lm_head {
                     // Untied: logits[B,Vpad] = hidden[B,D] @ lm_head[D,Vpad].
-                    // `vocab_size_padded` matches lm_head and gpu_logits row
-                    // stride — see padding at lines 194-203 and same-bug fix
-                    // in M1 (commit 5dde438).
-                    self.backbone.download_temporal(&mut self.input_cpu)?;
-                    self.gpu_hidden.upload(&stream, &self.input_cpu)?;
+                    // G10a (0.6): the hidden state already lives on the GPU
+                    // (temporal_ptr) — feed it directly; the old path bounced
+                    // it through host memory (D2H + H2D) on EVERY decoded
+                    // token. M1 removed this exact bounce earlier.
                     gpu_gemm_typed_raw_no_bias(
                         &blas,
                         TypedPtr {
@@ -467,7 +475,7 @@ impl GpuMamba3LM {
                             dtype: WeightDtype::F32,
                         },
                         TypedPtr {
-                            ptr: self.gpu_hidden.cached_ptr(),
+                            ptr: temporal_ptr,
                             dtype: WeightDtype::F32,
                         },
                         TypedPtr {
