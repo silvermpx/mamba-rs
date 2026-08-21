@@ -161,6 +161,14 @@ fn ddp_two_ranks_one_gpu_matches_emulated() {
     let dist_cfg = DistConfig::default()
         .with_devices(Devices::List(vec![0, 1]))
         .with_seed(7)
+        // The live lane today is the explicit NcclSum tier (the default
+        // FixedOrder contract refuses a multi-process world until its
+        // transport-backed reducer lands). The bitwise oracle comparison
+        // below is still exact: at world size 2 the sum has ONE
+        // association and IEEE-754 addition is commutative, so the
+        // library collective cannot produce different bits than the
+        // house fold.
+        .with_reduce(mamba_rs::dist::ReduceContract::NcclSum)
         .with_rendezvous(Rendezvous::File {
             dir: dir.clone(),
             job_id: job.clone(),
