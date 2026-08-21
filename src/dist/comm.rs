@@ -1,11 +1,11 @@
 //! NCCL communicator wrapper for the data-parallel world.
 //!
-//! Thin by design: this layer moves bytes and performs the one library
+//! Thin by design: this layer moves bytes (send/recv/broadcast for the
+//! fixed-order reducer's shard exchange) and performs the one library
 //! collective the opt-in `NcclSum` tier uses. The default `FixedOrder`
-//! contract keeps its float math out of the library BY REFUSING to run
-//! over this transport until its house reducer is wired (the emulated
-//! world implements the fold today; the transport-backed tier lands
-//! with the multi-GPU validation). Bound at the `result` level of the
+//! contract keeps its float math out of the library entirely — its adds
+//! happen in the `det_sum_ranks` kernel, and this layer only carries
+//! the addends. Bound at the `result` level of the
 //! binding — the higher-level safe wrapper panics in Drop on abort
 //! errors, which is exactly wrong for a fail-fast world that aborts as
 //! a matter of course.
@@ -101,12 +101,50 @@ impl MambaComm {
         }
     }
 
+    /// Join the world with a hard deadline: the blocking library init
+    /// runs on a helper thread bound to `cuda_ctx`, and a peer that
+    /// never arrives turns into a rank error after `deadline` instead
+    /// of an eternal wait (the supervisor then reaps the world; the
+    /// blocked helper is reclaimed by process exit).
+    pub fn init_with_deadline(
+        unique_id: sys::ncclUniqueId,
+        rank: usize,
+        world: usize,
+        cuda_ctx: std::sync::Arc<cudarc::driver::CudaContext>,
+        deadline: Duration,
+    ) -> Result<Self, DistError> {
+        super::watchdog::run_with_deadline("nccl-init", deadline, move || {
+            cuda_ctx
+                .bind_to_thread()
+                .map_err(|e| DistError::Transport(format!("bind CUDA ctx for init: {e:?}")))?;
+            Self::init(unique_id, rank, world, cuda_ctx)
+        })?
+    }
+
+    /// Arm the collective watchdog around `f`: if the window does not
+    /// close within `deadline`, the communicator is ABORTED from the
+    /// timer thread (NCCL's sanctioned cross-thread unblock), which
+    /// converts a transport hang inside `f` into a loud error.
+    pub(super) fn with_watchdog<R>(
+        &self,
+        name: &str,
+        deadline: Duration,
+        f: impl FnOnce() -> Result<R, DistError>,
+    ) -> Result<R, DistError> {
+        let comm_addr = self.comm as usize;
+        let wd = super::watchdog::Watchdog::arm(name, deadline, move || {
+            let _ = unsafe { result::comm_abort(comm_addr as sys::ncclComm_t) };
+        })?;
+        let out = f();
+        wd.disarm();
+        out
+    }
+
     /// Join the world. The caller must have made `device_ordinal` the
     /// current CUDA context before calling (constructing the GPU context
-    /// does). Blocking init — a peer that never arrives leaves this
-    /// call waiting, which the supervising process converts into a
-    /// fail-fast kill; a nonblocking init with an in-process deadline is
-    /// a planned hardening.
+    /// does). Blocking, deadline-free — prefer
+    /// [`Self::init_with_deadline`]; this stays public for callers that
+    /// manage their own timeline.
     pub fn init(
         unique_id: sys::ncclUniqueId,
         rank: usize,
@@ -171,6 +209,93 @@ impl MambaComm {
         }
         .map_err(|e| DistError::Transport(format!("NCCL allreduce({count} f32): {e:?}")))?;
         Ok(())
+    }
+
+    /// Byte-movement primitive: send `count` f32s to `peer`. Carries no
+    /// arithmetic — the fixed-order reducer moves addends with this and
+    /// keeps every floating-point add in its own kernel.
+    pub(super) fn send_f32(
+        &self,
+        ptr: cudarc::driver::sys::CUdeviceptr,
+        count: usize,
+        peer: usize,
+        stream: &cudarc::driver::CudaStream,
+    ) -> Result<(), DistError> {
+        unsafe {
+            result::send(
+                ptr as *const core::ffi::c_void,
+                count,
+                sys::ncclDataType_t::ncclFloat32,
+                peer as core::ffi::c_int,
+                self.comm,
+                stream.cu_stream() as *mut _,
+            )
+        }
+        .map_err(|e| DistError::Transport(format!("NCCL send({count} f32 -> {peer}): {e:?}")))?;
+        Ok(())
+    }
+
+    /// Byte-movement primitive: receive `count` f32s from `peer`.
+    pub(super) fn recv_f32(
+        &self,
+        ptr: cudarc::driver::sys::CUdeviceptr,
+        count: usize,
+        peer: usize,
+        stream: &cudarc::driver::CudaStream,
+    ) -> Result<(), DistError> {
+        unsafe {
+            result::recv(
+                ptr as *mut core::ffi::c_void,
+                count,
+                sys::ncclDataType_t::ncclFloat32,
+                peer as core::ffi::c_int,
+                self.comm,
+                stream.cu_stream() as *mut _,
+            )
+        }
+        .map_err(|e| DistError::Transport(format!("NCCL recv({count} f32 <- {peer}): {e:?}")))?;
+        Ok(())
+    }
+
+    /// Byte-movement primitive: in-place broadcast of `count` f32s
+    /// rooted at `root` (send and receive buffers coincide — NCCL only
+    /// reads the buffer at the root).
+    pub(super) fn broadcast_f32(
+        &self,
+        ptr: cudarc::driver::sys::CUdeviceptr,
+        count: usize,
+        root: usize,
+        stream: &cudarc::driver::CudaStream,
+    ) -> Result<(), DistError> {
+        unsafe {
+            result::broadcast(
+                ptr as *const core::ffi::c_void,
+                ptr as *mut core::ffi::c_void,
+                count,
+                sys::ncclDataType_t::ncclFloat32,
+                root as core::ffi::c_int,
+                self.comm,
+                stream.cu_stream() as *mut _,
+            )
+        }
+        .map_err(|e| {
+            DistError::Transport(format!("NCCL broadcast({count} f32, root {root}): {e:?}"))
+        })?;
+        Ok(())
+    }
+
+    /// Run `f` inside one NCCL group (aggregated launch): the p2p calls
+    /// enqueued within are matched as a set, which is what makes the
+    /// all-pairs exchange deadlock-free. The group is closed even when
+    /// `f` errors — an unbalanced group_start poisons every later call.
+    pub(super) fn group<R>(f: impl FnOnce() -> Result<R, DistError>) -> Result<R, DistError> {
+        result::group_start()
+            .map_err(|e| DistError::Transport(format!("NCCL group start: {e:?}")))?;
+        let out = f();
+        let end = result::group_end();
+        let r = out?;
+        end.map_err(|e| DistError::Transport(format!("NCCL group end: {e:?}")))?;
+        Ok(r)
     }
 
     /// Integer maximum across ranks — the exact, dtype-independent

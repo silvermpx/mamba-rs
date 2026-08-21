@@ -69,16 +69,17 @@ pub enum ReduceContract {
     /// The house fold: shard-owner ranks sum the W addends per element
     /// in strictly ascending logical-rank order — bit-identical across
     /// runs regardless of transport, topology, library version, or
-    /// physical GPU permutation, for a fixed logical world size. The
-    /// emulated world implements it today; the transport-backed reducer
-    /// is not wired yet, so selecting this default in a live
-    /// multi-process world fails loudly instead of silently substituting
-    /// the library sum.
+    /// physical GPU permutation, for a fixed logical world size. Live
+    /// worlds run the transport-backed house reducer: addends move as
+    /// pure bytes (send/recv/broadcast, no library arithmetic) and
+    /// every floating-point add happens in the `det_sum_ranks` kernel
+    /// in program-text order. The emulated world remains the oracle the
+    /// transport path is asserted against.
     #[default]
     FixedOrder,
-    /// Library all-reduce — the transport-backed tier that exists today.
-    /// Run-to-run stable on a frozen box, but a CONFIG contract, not a
-    /// portability guarantee: the library picks the association.
+    /// Library all-reduce. Run-to-run stable on a frozen box, but a
+    /// CONFIG contract, not a portability guarantee: the library picks
+    /// the association.
     NcclSum,
 }
 

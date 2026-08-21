@@ -250,7 +250,8 @@ fn rank_context(cfg: &DistConfig, er: EnvRank) -> Result<DistContext, DistError>
             .map_err(|e| DistError::Transport(format!("bind device {}: {e:?}", er.device)))?;
         let id_path = barrier_dir.join("nccl-id");
         let id = MambaComm::exchange_unique_id(&id_path, er.rank, cfg.init_timeout)?;
-        let comm = MambaComm::init(id, er.rank, er.world, cuda_ctx)?;
+        let comm =
+            MambaComm::init_with_deadline(id, er.rank, er.world, cuda_ctx, cfg.init_timeout)?;
         ctx.set_comm(comm);
     }
     Ok(ctx)

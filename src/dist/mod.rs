@@ -18,7 +18,9 @@
 //!
 //! The seed law keeps every random decision rank-free so the sample
 //! stream and its noise are world-size-invariant; the fold plan module
-//! is the reduction's numeric contract; [`EmulatedWorld`] proves the
+//! is the reduction's numeric contract; the `reducer` module is the
+//! contract's transport-backed device implementation (byte-only shard
+//! exchange + the ascending fold kernel); [`EmulatedWorld`] proves the
 //! sharded dataflow against the straight-line reference in one process,
 //! with no communicator involved.
 
@@ -29,7 +31,10 @@ mod config;
 mod context;
 mod error;
 mod fold;
+#[cfg(feature = "cuda")]
+pub mod reducer;
 mod seed;
+mod watchdog;
 
 pub use bootstrap::{Bootstrap, SupervisorStatus, attach, bootstrap};
 #[cfg(feature = "nccl")]

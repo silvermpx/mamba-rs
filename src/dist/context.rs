@@ -19,6 +19,11 @@ use super::seed::SeedLaw;
 
 pub struct DistContext {
     inner: ContextInner,
+    /// Lazily-built device state for the transport-backed fixed-order
+    /// reducer (the fold kernel + stacked receive scratch). Lives on
+    /// the context so every reduction reuses one compile.
+    #[cfg(all(feature = "cuda", feature = "nccl"))]
+    fixed_order: std::cell::OnceCell<super::reducer::FixedOrderState>,
 }
 
 enum ContextInner {
@@ -48,6 +53,8 @@ impl DistContext {
                 device,
                 seed: SeedLaw::new(seed),
             },
+            #[cfg(all(feature = "cuda", feature = "nccl"))]
+            fixed_order: std::cell::OnceCell::new(),
         }
     }
 
@@ -73,6 +80,8 @@ impl DistContext {
                 #[cfg(feature = "nccl")]
                 comm: None,
             },
+            #[cfg(all(feature = "cuda", feature = "nccl"))]
+            fixed_order: std::cell::OnceCell::new(),
         }
     }
 
@@ -91,13 +100,15 @@ impl DistContext {
     /// exact for power-of-two worlds). Single-process worlds return
     /// immediately.
     ///
-    /// Contract honesty: only the `NcclSum` tier is transport-backed
-    /// today. The default `FixedOrder` contract (the ascending-rank
-    /// house fold, proven by the emulated-world oracle) does not have
-    /// its device reducer wired to a transport yet, and selecting it in
-    /// a multi-process world fails LOUDLY here rather than silently
-    /// substituting the library sum with different association
-    /// guarantees.
+    /// Both contracts are transport-backed. `FixedOrder` (the default)
+    /// runs the house reducer: peer addends move as pure bytes (NCCL
+    /// send/recv/broadcast — no library arithmetic) and every
+    /// floating-point add happens in the `det_sum_ranks` kernel in
+    /// strictly ascending source-rank order, so the reduced bits are
+    /// independent of transport, delivery order, topology, and library
+    /// version. `NcclSum` runs the library collective — run-to-run
+    /// stable on a frozen box configuration, without the fixed-order
+    /// portability guarantee.
     #[cfg(feature = "cuda")]
     pub fn all_reduce_grad_sum(
         &self,
@@ -106,21 +117,28 @@ impl DistContext {
     ) -> Result<(), DistError> {
         match &self.inner {
             ContextInner::Single { .. } => Ok(()),
+            #[cfg(feature = "nccl")]
             ContextInner::Process {
                 reduce: ReduceContract::FixedOrder,
+                comm: Some(c),
+                device,
+                barrier_timeout,
                 ..
-            } => Err(DistError::Transport(
-                "ReduceContract::FixedOrder is the numeric contract, but its \
-                 transport-backed reducer is not wired yet (it lands with the \
-                 multi-GPU validation). Opt into ReduceContract::NcclSum \
-                 explicitly to train over the library sum today — a run-to-run \
-                 config contract, not the fixed-order portability guarantee"
-                    .into(),
-            )),
-            #[cfg(feature = "nccl")]
-            ContextInner::Process { comm: Some(c), .. } => {
-                c.all_reduce_sum_f32(arena.cached_ptr(), arena.len(), stream)
+            } => {
+                let st = self.fixed_order_state(*device)?;
+                c.with_watchdog("fixed-order-reduce", *barrier_timeout, || {
+                    super::reducer::reduce_sum_fixed_order_nccl(c, st, arena, stream)
+                })
             }
+            #[cfg(feature = "nccl")]
+            ContextInner::Process {
+                reduce: ReduceContract::NcclSum,
+                comm: Some(c),
+                barrier_timeout,
+                ..
+            } => c.with_watchdog("nccl-sum", *barrier_timeout, || {
+                c.all_reduce_sum_f32(arena.cached_ptr(), arena.len(), stream)
+            }),
             ContextInner::Process { .. } => {
                 // Without the nccl feature this arm is the only Process
                 // path and the operands go unused — bind them so the
@@ -133,6 +151,26 @@ impl DistContext {
                 ))
             }
         }
+    }
+
+    /// The lazily-compiled device state for the fixed-order reducer.
+    #[cfg(all(feature = "cuda", feature = "nccl"))]
+    fn fixed_order_state(
+        &self,
+        device: usize,
+    ) -> Result<&super::reducer::FixedOrderState, DistError> {
+        if self.fixed_order.get().is_none() {
+            let st = super::reducer::FixedOrderState::compile(device)?;
+            // A concurrent set is impossible (the context is used from
+            // its owning thread); a lost race would only drop a spare.
+            let _ = self.fixed_order.set(st);
+        }
+        let Some(st) = self.fixed_order.get() else {
+            return Err(DistError::Transport(
+                "fixed-order reducer state missing after initialization".into(),
+            ));
+        };
+        Ok(st)
     }
 
     /// Logical rank of this process.
@@ -227,28 +265,99 @@ impl DistContext {
 
     /// Sum-then-mean over a host f32 buffer across ranks (the seam for
     /// small CPU-side heads riding a GPU backbone). Single-world: no-op.
+    /// The reduction rides the configured contract — the fixed-order
+    /// house reducer or the library sum — after a device round-trip
+    /// (NCCL only moves device memory).
     pub fn all_reduce_host_f32(&self, xs: &mut [f32]) -> Result<(), DistError> {
         match &self.inner {
             ContextInner::Single { .. } => Ok(()),
+            #[cfg(feature = "nccl")]
+            ContextInner::Process {
+                comm: Some(c),
+                reduce,
+                device,
+                world,
+                barrier_timeout,
+                ..
+            } => {
+                if xs.is_empty() {
+                    return Ok(());
+                }
+                let gpu = crate::mamba_ssm::gpu::device::GpuDevice::new(*device)
+                    .map_err(|e| DistError::Transport(format!("host reduce device: {e}")))?;
+                let stream = gpu.context().default_stream();
+                let mut buf = crate::mamba_ssm::gpu::buffers::GpuBuffer::from_cpu(&stream, xs)
+                    .map_err(|e| DistError::Transport(format!("host reduce stage: {e}")))?;
+                match reduce {
+                    ReduceContract::FixedOrder => {
+                        let st = self.fixed_order_state(*device)?;
+                        c.with_watchdog("host-fixed-order", *barrier_timeout, || {
+                            super::reducer::reduce_sum_fixed_order_nccl(c, st, &mut buf, &stream)
+                        })?;
+                    }
+                    ReduceContract::NcclSum => {
+                        c.with_watchdog("host-nccl-sum", *barrier_timeout, || {
+                            c.all_reduce_sum_f32(buf.cached_ptr(), buf.len(), &stream)
+                        })?;
+                    }
+                }
+                stream
+                    .synchronize()
+                    .map_err(|e| DistError::Transport(format!("host reduce sync: {e:?}")))?;
+                let summed = buf
+                    .to_cpu(&stream)
+                    .map_err(|e| DistError::Transport(format!("host reduce readback: {e}")))?;
+                let inv_w = 1.0f32 / *world as f32;
+                for (x, s) in xs.iter_mut().zip(&summed) {
+                    *x = s * inv_w;
+                }
+                Ok(())
+            }
             ContextInner::Process { .. } => {
-                let _ = xs;
+                let _ = &xs;
                 Err(DistError::Transport(
-                    "host-buffer reduction is not wired to the communicator yet — it \
-                     rides the fixed-order transport tier"
+                    "no communicator attached to this rank (built without the nccl \
+                     feature, or bootstrap did not initialize one)"
                         .into(),
                 ))
             }
         }
     }
 
-    /// Logical OR across ranks (encoded as an integer maximum — exact,
-    /// dtype-independent). Single-world: returns the local flag.
+    /// Logical OR across ranks (encoded as an integer maximum — exact
+    /// and order-independent by construction, so it is contract-neutral).
+    /// Single-world: returns the local flag.
     pub fn any(&self, flag: bool) -> Result<bool, DistError> {
         match &self.inner {
             ContextInner::Single { .. } => Ok(flag),
+            #[cfg(feature = "nccl")]
+            ContextInner::Process {
+                comm: Some(c),
+                device,
+                barrier_timeout,
+                ..
+            } => {
+                let gpu = crate::mamba_ssm::gpu::device::GpuDevice::new(*device)
+                    .map_err(|e| DistError::Transport(format!("flag reduce device: {e}")))?;
+                let stream = gpu.context().default_stream();
+                let staged = stream
+                    .clone_htod(&[i32::from(flag)])
+                    .map_err(|e| DistError::Transport(format!("flag stage: {e:?}")))?;
+                {
+                    use cudarc::driver::DevicePtr;
+                    let (ptr, _guard) = staged.device_ptr(&stream);
+                    c.with_watchdog("flag-reduce", *barrier_timeout, || {
+                        c.all_reduce_max_i32(ptr, 1, &stream)
+                    })?;
+                }
+                let back: Vec<i32> = stream
+                    .clone_dtoh(&staged)
+                    .map_err(|e| DistError::Transport(format!("flag readback: {e:?}")))?;
+                Ok(back.first().copied().unwrap_or(0) != 0)
+            }
             ContextInner::Process { .. } => Err(DistError::Transport(
-                "the flag reduction is not wired to the communicator yet — it \
-                 rides the fixed-order transport tier"
+                "no communicator attached to this rank (built without the nccl \
+                 feature, or bootstrap did not initialize one)"
                     .into(),
             )),
         }

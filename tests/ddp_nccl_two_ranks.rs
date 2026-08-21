@@ -147,28 +147,57 @@ fn digest_path(rank: usize) -> std::path::PathBuf {
 #[test]
 #[ignore]
 fn ddp_two_ranks_one_gpu_matches_emulated() {
+    // NcclSum tier: the bitwise oracle comparison is exact at world
+    // size 2 — the sum has ONE association and IEEE-754 addition is
+    // commutative, so the library collective cannot produce different
+    // bits than the house fold.
+    run_two_rank_e2e(mamba_rs::dist::ReduceContract::NcclSum, "ncclsum");
+}
+
+#[test]
+#[ignore]
+fn ddp_two_ranks_fixed_order_matches_emulated() {
+    // FixedOrder tier: the transport-backed house reducer (byte-only
+    // shard exchange + the ascending det_sum_ranks fold) must land the
+    // exact oracle bits at ANY world size by construction; this pins
+    // the live path at W=2.
+    run_two_rank_e2e(mamba_rs::dist::ReduceContract::FixedOrder, "fixedorder");
+}
+
+/// Env override so the CHILD processes always run the SUPERVISOR's
+/// contract: the harness re-executes the whole test binary in children
+/// and enters the alphabetically-first matching test, which is not
+/// necessarily the test the supervisor is running.
+const ENV_TEST_CONTRACT: &str = "MAMBA_RS_TEST_CONTRACT";
+
+fn run_two_rank_e2e(contract: mamba_rs::dist::ReduceContract, tag: &str) {
+    let is_child = std::env::var("MAMBA_RS_RANK").is_ok();
     // Supervisor-side skip: children inherit the rank contract and never
     // take this branch.
-    if std::env::var("MAMBA_RS_RANK").is_err() {
+    if !is_child {
         let n = cudarc::driver::CudaContext::device_count().unwrap_or(0);
         if n < 2 {
             eprintln!("SKIPPED: needs 2 GPUs (found {n}) — NCCL refuses duplicate devices");
             return;
         }
+        // SAFETY: single-threaded at this point in the test process;
+        // children inherit the variable through the spawn environment.
+        unsafe { std::env::set_var(ENV_TEST_CONTRACT, tag) };
     }
+    let (contract, tag) = if is_child {
+        match std::env::var(ENV_TEST_CONTRACT).as_deref() {
+            Ok("fixedorder") => (mamba_rs::dist::ReduceContract::FixedOrder, "fixedorder"),
+            _ => (mamba_rs::dist::ReduceContract::NcclSum, "ncclsum"),
+        }
+    } else {
+        (contract, tag)
+    };
     let dir = std::env::temp_dir().join("mamba-rs-ddp2");
-    let job = format!("run-{}", std::process::id());
+    let job = format!("run-{}-{tag}", std::process::id());
     let dist_cfg = DistConfig::default()
         .with_devices(Devices::List(vec![0, 1]))
         .with_seed(7)
-        // The live lane today is the explicit NcclSum tier (the default
-        // FixedOrder contract refuses a multi-process world until its
-        // transport-backed reducer lands). The bitwise oracle comparison
-        // below is still exact: at world size 2 the sum has ONE
-        // association and IEEE-754 addition is commutative, so the
-        // library collective cannot produce different bits than the
-        // house fold.
-        .with_reduce(mamba_rs::dist::ReduceContract::NcclSum)
+        .with_reduce(contract)
         .with_rendezvous(Rendezvous::File {
             dir: dir.clone(),
             job_id: job.clone(),
