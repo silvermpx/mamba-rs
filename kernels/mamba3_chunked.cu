@@ -192,6 +192,7 @@ extern "C" __global__ void m3_chunk_state_fwd(
     // its own thread row.
     int h = blockIdx.y * blockDim.y + threadIdx.y;
     int p = threadIdx.x;
+    if (ds > MAMBA_RS_STATE_CAP) return;  // capacity guard for acc[] below
     if (p >= hd || h >= nh) return;
 
     int chunk_start = chunk * chunk_size;
@@ -430,6 +431,7 @@ extern "C" __global__ void m3_chunk_scan_fwd(
     if (chunk_end > T) chunk_end = T;
     int chunk_len = chunk_end - chunk_start;
     if (chunk_size > 64) return;  // tile rows are sized for the fixed chunk of 64
+    if (ds > MAMBA_RS_STATE_CAP) return;  // capacity guard for q_reg[] (uniform: all threads agree)
 
     // dA_cumsum base for this (b, chunk, h)
     int cs_base = ((b * n_chunks + chunk) * nh + h) * chunk_size;
@@ -863,7 +865,10 @@ extern "C" __global__ void m3_dqkv(
             float cumsum = 0.0f;
             for (int t = 0; t < chunk_len; t++) {
                 cumsum += dm_vec_sm[t] - dm_rev_sm[t];
-                float out = dm_rev_sm[t] + total_rev + cumsum - dm_vec_sm[t];
+                // Same grouping as the historical in-place update
+                // (dM_rev[t] += total + cumsum - vec): the added term is
+                // evaluated first, then added once.
+                float out = dm_rev_sm[t] + (total_rev + cumsum - dm_vec_sm[t]);
                 int gt = chunk_start + t;
                 dADT[(b * T + gt) * nh_total + h] = out;
             }
@@ -1192,7 +1197,7 @@ DEFINE_M3_PREPROCESS_CHUNKS(bf16, __nv_bfloat16, from_f_bf16)
 DEFINE_M3_PREPROCESS_CHUNKS(f16,  __half,        from_f_f16)
 
 #define DEFINE_M3_CHUNK_STATE_FWD(SUFFIX, T_ACT, FROM_F)                      \
-extern "C" __global__ __launch_bounds__(32, 4) void                           \
+extern "C" __global__ __launch_bounds__(64, 4) void                           \
 m3_chunk_state_fwd_##SUFFIX(                                                  \
     float* __restrict__ states_out,                                           \
     const T_ACT* __restrict__ x,                                              \
@@ -1207,6 +1212,7 @@ m3_chunk_state_fwd_##SUFFIX(                                                  \
     int chunk = bc % n_chunks;                                                \
     int h = blockIdx.y * blockDim.y + threadIdx.y;                            \
     int p = threadIdx.x;                                                      \
+    if (ds > MAMBA_RS_STATE_CAP) return;                                      \
     if (p >= hd || h >= nh) return;                                           \
     int chunk_start = chunk * chunk_size;                                     \
     int chunk_end = chunk_start + chunk_size;                                 \
@@ -1274,7 +1280,7 @@ DEFINE_M3_WRITEBACK_PARALLEL_STATES(bf16, __nv_bfloat16, from_f_bf16)
 DEFINE_M3_WRITEBACK_PARALLEL_STATES(f16,  __half,        from_f_f16)
 
 #define DEFINE_M3_CHUNK_SCAN_FWD(SUFFIX, T_ACT, FROM_F)                       \
-extern "C" __global__ __launch_bounds__(32, 2) void                           \
+extern "C" __global__ __launch_bounds__(64, 2) void                           \
 m3_chunk_scan_fwd_##SUFFIX(                                                   \
     T_ACT* __restrict__ y_out,                                                \
     const T_ACT* __restrict__ x,                                              \
@@ -1300,6 +1306,7 @@ m3_chunk_scan_fwd_##SUFFIX(                                                   \
     if (chunk_end > T) chunk_end = T;                                         \
     int chunk_len = chunk_end - chunk_start;                                  \
     if (chunk_size > 64) return;                                              \
+    if (ds > MAMBA_RS_STATE_CAP) return;                                      \
     int cs_base = ((b * n_chunks + chunk) * nh + h) * chunk_size;             \
     int state_base = ((b * n_chunks + chunk) * nh + h) * hd * ds + p * ds;    \
     float d_skip = live ? D[h] : 0.0f;                                        \
@@ -1616,7 +1623,8 @@ m3_dqkv_##SUFFIX(                                                             \
             float cumsum = 0.0f;                                              \
             for (int t = 0; t < chunk_len; t++) {                             \
                 cumsum += dm_vec_sm[t] - dm_rev_sm[t];                        \
-                float out = dm_rev_sm[t] + total_rev + cumsum - dm_vec_sm[t]; \
+                float out =                                                   \
+                    dm_rev_sm[t] + (total_rev + cumsum - dm_vec_sm[t]);       \
                 int gt = chunk_start + t;                                     \
                 dADT[(b * T + gt) * nh_total + h] = out;                      \
             }                                                                 \

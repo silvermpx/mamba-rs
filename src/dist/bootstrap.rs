@@ -208,6 +208,15 @@ fn rank_context(cfg: &DistConfig, er: EnvRank) -> Result<DistContext, DistError>
         (Some(d), Some(j)) => (PathBuf::from(d), j),
         _ => rendezvous_paths(&cfg.rendezvous),
     };
+    if job.is_empty() {
+        return Err(DistError::Rendezvous(
+            "no job id: multi-process ranks must share ONE rendezvous. Under an \
+             external launcher set MAMBA_RS_RENDEZVOUS_DIR + MAMBA_RS_JOB_ID (or \
+             pass Rendezvous::File with an explicit, per-launch-unique job_id) — \
+             a rank-local default would put every rank in its own directory"
+                .into(),
+        ));
+    }
     let seed = match read_env(ENV_SEED) {
         Some(s) => s
             .parse()
@@ -223,6 +232,7 @@ fn rank_context(cfg: &DistConfig, er: EnvRank) -> Result<DistContext, DistError>
         er.world,
         er.device,
         seed,
+        cfg.reduce,
         barrier_dir.clone(),
         cfg.collective_timeout,
     );
@@ -234,11 +244,13 @@ fn rank_context(cfg: &DistConfig, er: EnvRank) -> Result<DistContext, DistError>
     {
         use super::comm::MambaComm;
         MambaComm::preflight_version()?;
-        cudarc::driver::CudaContext::new(er.device)
+        // The context handle must stay alive for the communicator's whole
+        // lifetime — NCCL binds to the context current at init.
+        let cuda_ctx = cudarc::driver::CudaContext::new(er.device)
             .map_err(|e| DistError::Transport(format!("bind device {}: {e:?}", er.device)))?;
         let id_path = barrier_dir.join("nccl-id");
         let id = MambaComm::exchange_unique_id(&id_path, er.rank, cfg.init_timeout)?;
-        let comm = MambaComm::init(id, er.rank, er.world)?;
+        let comm = MambaComm::init(id, er.rank, er.world, cuda_ctx)?;
         ctx.set_comm(comm);
     }
     Ok(ctx)
@@ -277,38 +289,94 @@ pub fn bootstrap(cfg: DistConfig) -> Result<Bootstrap, DistError> {
     }
     if world > devices.len() {
         return Err(DistError::Config(format!(
-            "replaying logical world {world} on {} devices is not wired yet — \
-             it arrives with the communicator layer",
+            "replaying logical world {world} on {} devices is planned (the \
+             logical-W replay mode) but not wired yet",
             devices.len()
         )));
     }
 
     // Supervisor: re-execute this binary once per rank with the rank
-    // contract in the child environment, inheriting argv so the child
-    // re-enters the same code path and lands in the Rank branch above.
+    // contract in the child environment, inheriting argv (as OS strings —
+    // argv is not required to be UTF-8) so the child re-enters the same
+    // code path and lands in the Rank branch above.
+    let mut cfg = cfg;
+    if let Rendezvous::File { job_id, .. } = &mut cfg.rendezvous
+        && job_id.is_empty()
+    {
+        *job_id = format!("job-{}", std::process::id());
+    }
+    // A crashed prior run with the same job id would leave barrier
+    // markers and a unique-id file behind; a stale marker makes a
+    // barrier pass with no peer present and a stale id cross-connects
+    // ranks to a dead world. No rank exists yet, so purging is safe.
+    {
+        let (dir, job) = rendezvous_paths(&cfg.rendezvous);
+        let _ = std::fs::remove_dir_all(dir.join(job));
+    }
     let exe =
         std::env::current_exe().map_err(|e| DistError::Config(format!("current_exe: {e}")))?;
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    let mut children = Vec::with_capacity(world);
+    let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+    let mut children: Vec<std::process::Child> = Vec::with_capacity(world);
     for (rank, device) in devices.iter().enumerate() {
         let mut cmd = std::process::Command::new(&exe);
         cmd.args(&args);
         for (k, v) in child_env(&cfg, rank, world, *device) {
             cmd.env(k, v);
         }
-        let child = cmd
-            .spawn()
-            .map_err(|e| DistError::Config(format!("spawn rank {rank}: {e}")))?;
-        children.push(child);
+        match cmd.spawn() {
+            Ok(child) => children.push(child),
+            Err(e) => {
+                // Do not leak already-spawned ranks: they would bind
+                // their GPUs and block in the communicator init forever
+                // waiting for a world that can no longer form.
+                for c in &mut children {
+                    let _ = c.kill();
+                    let _ = c.wait();
+                }
+                return Err(DistError::Config(format!("spawn rank {rank}: {e}")));
+            }
+        }
     }
-    let mut exit_codes = Vec::with_capacity(world);
-    for (rank, mut child) in children.into_iter().enumerate() {
-        let status = child.wait().map_err(|e| DistError::RankFailed {
-            rank,
-            detail: format!("wait: {e}"),
-        })?;
-        exit_codes.push(status.code().unwrap_or(-1));
+    // Fail-fast wait: poll every child; the FIRST non-zero exit kills
+    // the remaining ranks (a mid-run world-size change would silently
+    // change the numbers, so a partial world must never keep training).
+    let mut exit_codes: Vec<Option<i32>> = vec![None; children.len()];
+    loop {
+        let mut all_done = true;
+        let mut fail_fast = false;
+        for (rank, child) in children.iter_mut().enumerate() {
+            if exit_codes[rank].is_some() {
+                continue;
+            }
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    let code = status.code().unwrap_or(-1);
+                    exit_codes[rank] = Some(code);
+                    if code != 0 {
+                        fail_fast = true;
+                    }
+                }
+                Ok(None) => all_done = false,
+                Err(e) => {
+                    exit_codes[rank] = Some(-1);
+                    let _ = e;
+                    fail_fast = true;
+                }
+            }
+        }
+        if fail_fast {
+            for (rank, child) in children.iter_mut().enumerate() {
+                if exit_codes[rank].is_none() {
+                    let _ = child.kill();
+                }
+            }
+        }
+        if all_done {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
     }
+    let exit_codes: Vec<i32> = exit_codes.into_iter().map(|c| c.unwrap_or(-1)).collect();
     Ok(Bootstrap::Supervisor(SupervisorStatus { exit_codes }))
 }
 
@@ -351,10 +419,21 @@ mod tests {
             std::env::temp_dir().join(format!("mamba-rs-barrier-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let mk = |rank: usize| DistContext::process(rank, 2, rank, 0, dir.clone(), TEST_TIMEOUT);
+        let mk = |rank: usize| {
+            DistContext::process(
+                rank,
+                2,
+                rank,
+                0,
+                crate::dist::ReduceContract::default(),
+                dir.clone(),
+                TEST_TIMEOUT,
+            )
+        };
         let a = std::thread::spawn({
             let ctx = mk(0);
             move || {
+                ctx.barrier().unwrap();
                 ctx.barrier().unwrap();
                 ctx.barrier().unwrap();
             }
@@ -364,10 +443,19 @@ mod tests {
             move || {
                 ctx.barrier().unwrap();
                 ctx.barrier().unwrap();
+                ctx.barrier().unwrap();
             }
         });
         a.join().unwrap();
         b.join().unwrap();
+        // Generation cleanup: after barrier 2 completes, rank 0 removes
+        // gen-0; the two live generations stay.
+        assert!(
+            !dir.join("gen-0").exists(),
+            "stale barrier generation must be cleaned up"
+        );
+        assert!(dir.join("gen-1").exists());
+        assert!(dir.join("gen-2").exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -377,7 +465,15 @@ mod tests {
             std::env::temp_dir().join(format!("mamba-rs-barrier-solo-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let ctx = DistContext::process(0, 2, 0, 0, dir.clone(), Duration::from_millis(50));
+        let ctx = DistContext::process(
+            0,
+            2,
+            0,
+            0,
+            crate::dist::ReduceContract::default(),
+            dir.clone(),
+            Duration::from_millis(50),
+        );
         let err = ctx.barrier().unwrap_err();
         assert!(matches!(err, DistError::Rendezvous(_)), "{err}");
         let _ = std::fs::remove_dir_all(&dir);

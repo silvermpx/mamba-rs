@@ -1,12 +1,14 @@
 //! NCCL communicator wrapper for the data-parallel world.
 //!
 //! Thin by design: this layer moves bytes and performs the one library
-//! collective the opt-in `NcclSum` tier uses. The default reduction
-//! contract does its float math in house kernels; the communicator is
-//! never trusted with the association order of the gradient sum on that
-//! path. Bound at the `result` level of the binding — the higher-level
-//! safe wrapper panics in Drop on abort errors, which is exactly wrong
-//! for a fail-fast world that aborts as a matter of course.
+//! collective the opt-in `NcclSum` tier uses. The default `FixedOrder`
+//! contract keeps its float math out of the library BY REFUSING to run
+//! over this transport until its house reducer is wired (the emulated
+//! world implements the fold today; the transport-backed tier lands
+//! with the multi-GPU validation). Bound at the `result` level of the
+//! binding — the higher-level safe wrapper panics in Drop on abort
+//! errors, which is exactly wrong for a fail-fast world that aborts as
+//! a matter of course.
 
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -24,7 +26,19 @@ pub struct MambaComm {
     comm: sys::ncclComm_t,
     rank: usize,
     world: usize,
+    /// Keeps the rank's CUDA primary context retained for the
+    /// communicator's whole lifetime — NCCL binds to the context that is
+    /// current at init, and dropping it would release the device out
+    /// from under the communicator.
+    _cuda_ctx: std::sync::Arc<cudarc::driver::CudaContext>,
 }
+
+// The communicator is used from its owning thread only (the same
+// single-stream discipline the GPU context imposes), but moving that
+// ownership between threads is sound: NCCL communicators are not tied
+// to a thread, only to the CUDA context this struct retains. The raw
+// handle removes the auto-derived Send; restore it explicitly.
+unsafe impl Send for MambaComm {}
 
 // One communicator per process, used from the owning thread only — the
 // same single-stream discipline the GPU context already imposes.
@@ -97,6 +111,7 @@ impl MambaComm {
         unique_id: sys::ncclUniqueId,
         rank: usize,
         world: usize,
+        cuda_ctx: std::sync::Arc<cudarc::driver::CudaContext>,
     ) -> Result<Self, DistError> {
         let mut comm: sys::ncclComm_t = std::ptr::null_mut();
         unsafe { result::comm_init_rank(&mut comm, world as i32, unique_id, rank as i32) }
@@ -114,7 +129,12 @@ impl MambaComm {
                 };
                 DistError::Transport(format!("NCCL init rank {rank}/{world}: {e:?} — {detail}"))
             })?;
-        Ok(Self { comm, rank, world })
+        Ok(Self {
+            comm,
+            rank,
+            world,
+            _cuda_ctx: cuda_ctx,
+        })
     }
 
     pub fn rank(&self) -> usize {
@@ -182,10 +202,17 @@ impl MambaComm {
         let comm = std::mem::replace(&mut self.comm, std::ptr::null_mut());
         std::mem::forget(self);
         unsafe {
-            result::comm_finalize(comm)
-                .map_err(|e| DistError::Transport(format!("NCCL finalize: {e:?}")))?;
-            result::comm_destroy(comm)
-                .map_err(|e| DistError::Transport(format!("NCCL destroy: {e:?}")))?;
+            if let Err(e) = result::comm_finalize(comm) {
+                // Do not leak the handle on a failed finalize: tear it
+                // down the abort way before reporting.
+                let _ = result::comm_abort(comm);
+                let _ = result::comm_destroy(comm);
+                return Err(DistError::Transport(format!("NCCL finalize: {e:?}")));
+            }
+            if let Err(e) = result::comm_destroy(comm) {
+                let _ = result::comm_abort(comm);
+                return Err(DistError::Transport(format!("NCCL destroy: {e:?}")));
+            }
         }
         Ok(())
     }

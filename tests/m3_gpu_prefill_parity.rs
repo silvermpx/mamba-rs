@@ -388,7 +388,9 @@ fn gpu_prefill_graph_replay_is_bitwise() {
             .unwrap();
     let replay = |states: &mut GpuStates| {
         let bufs = states.bufs();
-        graph.replay(&rig.ctx, &gpu_input, &bufs).unwrap();
+        graph
+            .replay(&rig.ctx, &gpu_input, &bufs, &last_hidden)
+            .unwrap();
     };
     replay(&mut states);
     let (r1_ssm, ..) = states.download(&rig);

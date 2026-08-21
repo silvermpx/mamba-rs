@@ -42,6 +42,19 @@ use crate::mamba3_siso::gpu::weights::{GpuMamba3Grads, GpuMamba3Weights};
 use crate::mamba3_siso::gpu::weights_mixed_train::GpuMamba3TrainMixedWeights;
 use crate::mamba3_siso::weights::Mamba3Weights;
 
+/// CPU-side snapshot of the four carried Mamba-3 recurrences (SSM, K,
+/// V, RoPE angle) for TBPTT-style window handoff on the sequential
+/// path and checkpointed resume. The chunked training path runs
+/// stateless windows and zeroes these each forward, so the blob is
+/// meaningful for sequential-scan runs.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Mamba3RecurrentStateBlob {
+    pub ssm: Vec<f32>,
+    pub k: Vec<f32>,
+    pub v: Vec<f32>,
+    pub angle: Vec<f32>,
+}
+
 /// Internal precision-dispatch enum (mirrors `inference::M3BackboneEngine`).
 enum Trainer3Inner {
     F32(Box<Mamba3TrainerF32>),
@@ -257,6 +270,11 @@ impl Mamba3Trainer {
     /// reducer sums this buffer across ranks between the window-closing
     /// `backward_step(accumulate_only = true)` and [`Self::apply_step`];
     /// single-process training never needs it.
+    ///
+    /// Contract: mutate the CONTENTS only (upload / in-place collective).
+    /// The per-tensor gradient views cache this allocation's device
+    /// pointer, so replacing or reallocating the buffer itself would
+    /// leave them dangling.
     pub fn grad_arena(&mut self) -> &mut GpuBuffer {
         match &mut self.inner {
             Trainer3Inner::F32(t) => &mut t.grads.flat,
@@ -340,6 +358,77 @@ impl Mamba3Trainer {
             Trainer3Inner::F32(t) => t.reset_state(),
             Trainer3Inner::Mixed(t) => t.reset_state(),
         }
+    }
+
+    /// Download the four carried recurrences (SSM, K, V, angle) — the
+    /// sequential-path TBPTT handoff counterpart of
+    /// [`Self::optimizer_state`].
+    pub fn recurrent_state(&self) -> Result<Mamba3RecurrentStateBlob, String> {
+        let (stream, ssm, k, v, angle) = match &self.inner {
+            Trainer3Inner::F32(t) => (
+                &t.ctx.stream,
+                &t.ssm_states,
+                &t.k_states,
+                &t.v_states,
+                &t.angle_states,
+            ),
+            Trainer3Inner::Mixed(t) => (
+                &t.ctx.stream,
+                &t.ssm_states,
+                &t.k_states,
+                &t.v_states,
+                &t.angle_states,
+            ),
+        };
+        Ok(Mamba3RecurrentStateBlob {
+            ssm: ssm.to_cpu(stream)?,
+            k: k.to_cpu(stream)?,
+            v: v.to_cpu(stream)?,
+            angle: angle.to_cpu(stream)?,
+        })
+    }
+
+    /// Upload a previously exported recurrence. Errs on any length
+    /// mismatch — the blob belongs to a different shape.
+    pub fn load_recurrent_state(&mut self, blob: &Mamba3RecurrentStateBlob) -> Result<(), String> {
+        let (stream, ssm, k, v, angle) = match &mut self.inner {
+            Trainer3Inner::F32(t) => (
+                t.ctx.stream.clone(),
+                &mut t.ssm_states,
+                &mut t.k_states,
+                &mut t.v_states,
+                &mut t.angle_states,
+            ),
+            Trainer3Inner::Mixed(t) => (
+                t.ctx.stream.clone(),
+                &mut t.ssm_states,
+                &mut t.k_states,
+                &mut t.v_states,
+                &mut t.angle_states,
+            ),
+        };
+        if blob.ssm.len() != ssm.len()
+            || blob.k.len() != k.len()
+            || blob.v.len() != v.len()
+            || blob.angle.len() != angle.len()
+        {
+            return Err(format!(
+                "Mamba3 recurrent state mismatch: blob {}/{}/{}/{} vs state                  {}/{}/{}/{} — the blob belongs to a different shape",
+                blob.ssm.len(),
+                blob.k.len(),
+                blob.v.len(),
+                blob.angle.len(),
+                ssm.len(),
+                k.len(),
+                v.len(),
+                angle.len()
+            ));
+        }
+        ssm.upload(&stream, &blob.ssm)?;
+        k.upload(&stream, &blob.k)?;
+        v.upload(&stream, &blob.v)?;
+        angle.upload(&stream, &blob.angle)?;
+        Ok(())
     }
 
     /// Record the full training step into a CUDA Graph. Run at least one

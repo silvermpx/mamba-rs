@@ -52,7 +52,7 @@ pub struct M3Exec<'a> {
 // ---------------------------------------------------------------------------
 
 /// Collected Mamba-3 dimensions for GPU launches.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct GpuMamba3Dims {
     pub batch: usize,
     pub d_model: usize,

@@ -67,14 +67,18 @@ impl Devices {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum ReduceContract {
     /// The house fold: shard-owner ranks sum the W addends per element
-    /// in strictly ascending logical-rank order. Bit-identical across
+    /// in strictly ascending logical-rank order — bit-identical across
     /// runs regardless of transport, topology, library version, or
-    /// physical GPU permutation, for a fixed logical world size.
+    /// physical GPU permutation, for a fixed logical world size. The
+    /// emulated world implements it today; the transport-backed reducer
+    /// is not wired yet, so selecting this default in a live
+    /// multi-process world fails loudly instead of silently substituting
+    /// the library sum.
     #[default]
     FixedOrder,
-    /// Library all-reduce with a pinned algorithm/protocol environment.
+    /// Library all-reduce — the transport-backed tier that exists today.
     /// Run-to-run stable on a frozen box, but a CONFIG contract, not a
-    /// portability guarantee. Opt-in for bandwidth experiments.
+    /// portability guarantee: the library picks the association.
     NcclSum,
 }
 
@@ -90,9 +94,16 @@ pub enum Rendezvous {
 
 impl Default for Rendezvous {
     fn default() -> Self {
+        // The empty job id is a deliberate sentinel: the self-spawn
+        // supervisor fills in a fresh per-launch id (and tells the
+        // children through the environment), while attach() under an
+        // external launcher REFUSES it loudly — every rank derives its
+        // own default independently, so a process-local id like a PID
+        // would put each rank in a different rendezvous and hang the
+        // world.
         Rendezvous::File {
             dir: std::env::temp_dir().join("mamba-rs-rendezvous"),
-            job_id: format!("job-{}", std::process::id()),
+            job_id: String::new(),
         }
     }
 }

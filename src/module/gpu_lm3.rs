@@ -579,7 +579,7 @@ impl GpuMamba3LM {
 }
 
 fn upload_f32_as_dtype(
-    stream: &std::sync::Arc<cudarc::driver::CudaStream>,
+    stream: &Arc<cudarc::driver::CudaStream>,
     dst: &GpuByteBuffer,
     src: &[f32],
     dtype: WeightDtype,

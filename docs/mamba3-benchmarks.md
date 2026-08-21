@@ -64,11 +64,12 @@ One-pass prompt window through the chunked pipeline
 | + chunk-parallel angle accumulation | 89.6 |
 | + loop-swapped chunk state, head-packed blocks | **66.5** |
 
-## Large d_state capacity cost (0.6; fused decode step, d_model=256, 4 layers)
+## Large d_state capacity cost (0.6; Mamba-1 fused decode step, d_model=256, 4 layers)
 
-The per-thread state arrays are sized at JIT time from the config; past
-the register budget the compiler spills to local memory — correct and
-measurably slower:
+Measured on the MAMBA-1 fused decode step (the same JIT state-capacity
+mechanism covers every generation; a Mamba-3 twin of this table rides
+the release re-measure). Past the register budget the compiler spills
+to local memory — correct and measurably slower:
 
 | d_state | ms/step |
 |--------:|--------:|
@@ -113,7 +114,7 @@ Linear scaling to B=64; larger batches approach memory-bandwidth limits.
 |---|--------:|--------:|-------|
 | CPU Inference B=1 | **64.5 us** | 86.8 us | M3 faster — no conv1d, BLAS matvec |
 | GPU Inference B=1 (Graph) | 87 us | 79 us | Similar (M3 has 4 layers vs M1 3) |
-| GPU Training Fwd+Bwd | 1 784 us | 1 653 us | Near-parity since 0.4.2 (was 2 169 vs 1 640) |
+| GPU Training Fwd+Bwd (T=32, tiny shape) | 1 784 us | 1 653 us | retired micro-shape number, kept only for this cross-model comparison; production-scale numbers above |
 | CPU Training Fwd+Bwd | 3 635 us | 14 859 us | M3 **4.1× faster** — no conv1d backward |
 
 ## Key Differences from Mamba SSM
@@ -125,7 +126,7 @@ Linear scaling to B=64; larger batches approach memory-bandwidth limits.
 - **Multi-head B/C** with per-group BCNorm.
 - **4 persistent recurrent states** (SSM + K + V + angle) vs 2 in Mamba SSM
   (conv_state + ssm_state).
-- Implemented via **47 CUDA kernels** across 5 `.cu` files.
+- Implemented via NVRTC-compiled CUDA kernels across 5 `.cu` files.
 
 ## Optimizations
 

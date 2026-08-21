@@ -332,8 +332,12 @@ pub struct Mamba3GpuInferenceEngine {
     pub weights: GpuMamba3WeightsInf,
     /// Full CUDA execution context (stream + cuBLAS with its Graph-safe
     /// workspace + GEMM-tier flags). One context for step, prefill and the
-    /// lm-head GEMMs alike: the batch-invariant / tensor-core routing and
-    /// the flag belt all hang off it.
+    /// lm-head GEMMs alike. Flag scope: the handle-level math mode
+    /// (`disable_tf32`) governs every cuBLAS call made through this
+    /// context; the batch-invariant / bi-tensor-core flags route only the
+    /// dispatches that consult them (the training/eval paths in
+    /// `mamba_ssm::gpu::blas`) — this engine's projections and lm-head use
+    /// the ctx-free raw cuBLAS twins and stay on the plain cuBLAS tier.
     pub ctx: GpuCtx,
     pub cfg: Mamba3Config,
     pub batch: usize,

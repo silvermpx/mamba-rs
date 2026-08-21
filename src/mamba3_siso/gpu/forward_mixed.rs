@@ -1031,6 +1031,22 @@ pub fn gpu_forward_mamba3_backbone_mixed(
     let hd = dims.headdim;
     let na = dims.n_angles.max(1);
 
+    // The acts constructor sizes the sequential-scan tapes from its own
+    // use_parallel_scan flag; the launch branches on the dims flag. A
+    // mismatch means the sequential kernels would write past 1-element
+    // sentinels — refuse loudly instead.
+    if !dims.use_parallel_scan {
+        let need = dims.batch * (dims.seq_len + 1) * dims.d_inner * ds;
+        if acts.layers.first().is_some_and(|l| l.h_saved.len() < need) {
+            return Err(
+                "m3_mixed forward: dims request the sequential scan but the acts \
+                 were allocated for the chunked path (sentinel tapes) — construct \
+                 the acts with the same use_parallel_scan flag the forward runs with"
+                    .into(),
+            );
+        }
+    }
+
     if dims.use_parallel_scan {
         // Stateless window: the chunked kernels ignore entering SSM/K/V
         // state; zero the angle accumulator too so all four states behave

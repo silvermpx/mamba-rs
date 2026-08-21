@@ -50,11 +50,14 @@ Pure Rust + CUDA. Kernels compile at runtime via NVRTC.
   captured CUDA-graph twin replays bit-identically. The LM generate
   path switches to it automatically for long prompts.
 - **Deterministic data-parallel training (`dist`)** — one process per
-  GPU, one collective per optimizer step over the flat gradient arena,
-  folded in strictly ascending logical-rank order: bits independent of
-  transport, topology, library version, and physical GPU permutation.
-  Single-process emulation ships as the CI oracle; the `nccl` feature
-  adds the transport.
+  GPU, one collective per optimizer step over the flat gradient arena.
+  The default fixed-order contract (ascending logical-rank fold: bits
+  independent of transport, topology, library version, and physical GPU
+  permutation) is implemented and proven by the single-process emulated
+  oracle; its transport-backed reducer is still to land, so a live
+  multi-process world refuses it loudly. The `nccl` feature adds the
+  transport with the explicit `NcclSum` tier (run-to-run stable on a
+  frozen box).
 - **Bit-continuous resume** — optimizer state (Adam moments, step,
   update hyperparameters) and the carried recurrence export/import, so
   a resumed run lands bit-for-bit where the unbroken run would.
@@ -360,7 +363,7 @@ sequences, 24-layer shapes) live in the detailed docs:
 
 ## Testing
 
-52 test files, 360+ individual tests:
+73 integration test files plus in-module unit tests — 470 `#[test]` functions total:
 
 - Correctness: bit-parity WITHIN a numeric route (eager ↔ CUDA Graph,
   run ↔ run, save ↔ nosave prefill, CPU Single ↔ CPU Parallel); tolerance

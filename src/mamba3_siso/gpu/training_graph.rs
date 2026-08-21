@@ -132,7 +132,13 @@ impl GpuMamba3TrainingStepGraph {
         // Presize half-staging BEFORE capture (see M1 training_graph for the
         // CUDA_ERROR_ILLEGAL_ADDRESS rationale).
         ctx.presize_half_staging_for_train_m3(cfg, dims.batch, dims.seq_len, train_w.dtype)?;
-        ctx.presize_bi_upcast_scratch_for_train_m3(cfg, dims.batch, dims.seq_len, train_w.dtype)?;
+        ctx.presize_bi_upcast_scratch_for_train_m3(
+            cfg,
+            dims.batch,
+            dims.seq_len,
+            dims.mamba_input_dim,
+            train_w.dtype,
+        )?;
 
         let snap_input = mamba_input.cached_ptr();
         let snap_d_temporal = d_temporal.cached_ptr();

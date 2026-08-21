@@ -45,7 +45,8 @@ pub fn shard_plan(n: usize, world: usize) -> Vec<Shard> {
 /// summing per element in strictly ascending logical-rank order, then
 /// multiply by `1/world`. This host implementation IS the numeric
 /// contract — every transport-backed reducer must produce these exact
-/// bits (the GPU kernel mirrors the same per-element ascending fold).
+/// bits. Today the emulated world is the only implementation; the
+/// device reducer ships with the transport-backed fixed-order tier.
 pub fn reduce_mean_reference(addends: &[&[f32]], out: &mut [f32]) {
     let world = addends.len();
     assert!(world > 0, "need at least one addend");

@@ -95,6 +95,10 @@ impl Mamba3PrefillChunkScratch {
 pub struct Mamba3Prefill {
     pub tgt: GpuMamba3TargetScratch,
     chunk: Mamba3PrefillChunkScratch,
+    /// The shape every buffer above was sized for; `run` refuses any
+    /// other dims — a longer window would silently index past the
+    /// scratch allocations.
+    sized_for: GpuMamba3Dims,
 }
 
 /// Everything a prefill launch needs besides the executor itself.
@@ -147,6 +151,7 @@ impl Mamba3Prefill {
         Ok(Self {
             tgt: GpuMamba3TargetScratch::new(stream, dims)?,
             chunk: Mamba3PrefillChunkScratch::new(stream, dims)?,
+            sized_for: *dims,
         })
     }
 
@@ -170,6 +175,12 @@ impl Mamba3Prefill {
             identity_proj,
             carry_state,
         } = *run;
+        if *dims != self.sized_for {
+            return Err(format!(
+                "prefill executor was sized for {:?} but run was asked for {:?} —                  allocate a prefill for the shape you run",
+                self.sized_for, dims
+            ));
+        }
         let tgt = &mut self.tgt;
         let ck = &mut self.chunk;
         let bt = dims.bt();
@@ -663,6 +674,10 @@ pub struct Mamba3PrefillGraph {
     flags_at_capture: (bool, bool, bool),
     input_ptr: CUptr,
     ssm_ptr: CUptr,
+    k_ptr: CUptr,
+    v_ptr: CUptr,
+    angle_ptr: CUptr,
+    last_hidden_ptr: CUptr,
 }
 
 impl Mamba3PrefillGraph {
@@ -677,6 +692,10 @@ impl Mamba3PrefillGraph {
         let flags_at_capture = run.ctx.gemm_flags();
         let input_ptr = run.mamba_input.cached_ptr();
         let ssm_ptr = states.ssm.cached_ptr();
+        let k_ptr = states.k.cached_ptr();
+        let v_ptr = states.v.cached_ptr();
+        let angle_ptr = states.angle.cached_ptr();
+        let last_hidden_ptr = last_hidden.cached_ptr();
         let graph =
             crate::mamba_ssm::gpu::graph_capture::capture_into_graph(&run.ctx.stream, || {
                 prefill.run(run, states.reborrow(), last_hidden)
@@ -684,22 +703,30 @@ impl Mamba3PrefillGraph {
         graph
             .upload()
             .map_err(|e| format!("prefill graph upload: {e:?}"))?;
+        run.ctx.note_graph_capture();
         Ok(Self {
             graph,
             flags_at_capture,
             input_ptr,
             ssm_ptr,
+            k_ptr,
+            v_ptr,
+            angle_ptr,
+            last_hidden_ptr,
         })
     }
 
-    /// Replay the captured window. `mamba_input` and the state buffers must
-    /// be the SAME allocations the capture saw (the graph baked their
-    /// device pointers in).
+    /// Replay the captured window. `mamba_input` and ALL FOUR state
+    /// buffers must be the SAME allocations the capture saw (the graph
+    /// baked every device pointer in; a different buffer would leave
+    /// the graph writing the old allocation while the caller reads the
+    /// new one).
     pub fn replay(
         &self,
         ctx: &GpuCtx,
         mamba_input: &GpuBuffer,
         states: &GpuMamba3StateBufs<'_>,
+        last_hidden: &GpuBuffer,
     ) -> Result<(), String> {
         if ctx.gemm_flags() != self.flags_at_capture {
             return Err(format!(
@@ -710,7 +737,13 @@ impl Mamba3PrefillGraph {
                 ctx.gemm_flags()
             ));
         }
-        if mamba_input.cached_ptr() != self.input_ptr || states.ssm.cached_ptr() != self.ssm_ptr {
+        if mamba_input.cached_ptr() != self.input_ptr
+            || states.ssm.cached_ptr() != self.ssm_ptr
+            || states.k.cached_ptr() != self.k_ptr
+            || states.v.cached_ptr() != self.v_ptr
+            || states.angle.cached_ptr() != self.angle_ptr
+            || last_hidden.cached_ptr() != self.last_hidden_ptr
+        {
             return Err(
                 "prefill graph replay refused: input/state buffers differ from the \
                  captured allocations"

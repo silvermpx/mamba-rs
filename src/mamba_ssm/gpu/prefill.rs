@@ -261,7 +261,7 @@ pub fn gpu_forward_inference_prefill_pooled_sum_from_raw<W: MambaWeightsView>(
 /// - Bit-identity: a replay re-issues the exact captured kernel sequence
 ///   with the exact pointers — outputs are bit-identical to the eager
 ///   entry by construction (pinned by tests/gpu_pooled_prefill.rs).
-/// - G1 belt: the GEMM-tier flags are snapshotted at capture and asserted
+/// - the GEMM-tier flags are snapshotted at capture and asserted
 ///   at every launch — a mid-flight tier flip cannot silently replay
 ///   kernels from another numeric route.
 pub struct PrefillPooledGraph {

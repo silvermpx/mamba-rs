@@ -1,6 +1,6 @@
 //! Compile and register Mamba-3 SISO CUDA kernels.
 //!
-//! 47 kernels across 5 .cu files, compiled via NVRTC at runtime.
+//! The Mamba-3 kernel registry, compiled via NVRTC at runtime.
 //! Separate from Mamba SSM's `MambaKernels` — different pipeline, no conv1d.
 
 use crate::mamba_ssm::gpu::kernels::{HalfKernel, TypedKernel};
@@ -12,8 +12,11 @@ pub struct Mamba3Kernels {
     _module: Arc<CudaModule>,
 
     /// State-dimension capacity the kernels were compiled with (the
-    /// per-thread register-array size). Launch paths guard `d_state`
-    /// against it instead of a hardcoded 64.
+    /// per-thread register-array size). The engine and trainer
+    /// constructors derive it from the model config, so a mismatched
+    /// launch cannot be built through the public constructors; the M1
+    /// launch-path asserts additionally compare against it, and the
+    /// kernels carry their own capacity guards.
     pub state_cap: usize,
 
     // ── Sequential SSM (mamba3_ssd.cu) ──
@@ -71,8 +74,8 @@ pub struct Mamba3Kernels {
 
     // ── AdamW optimizer (adamw.cu) ──
     pub adamw_step_f32: CudaFunction,
-    /// CUDA-Graph-capturable variant: bias factors read from device buffer
-    ///.
+    /// CUDA-Graph-capturable variant: bias factors read from a device
+    /// buffer instead of scalar args.
     pub adamw_step_f32_capturable: CudaFunction,
 
     // ── Chunked parallel scan (mamba3_chunked.cu) ──
@@ -443,7 +446,10 @@ impl Mamba3Kernels {
         // device without the budget the attribute call fails here and
         // an oversized launch later fails loudly with its own error —
         // never silently.
-        if state_cap > 64 {
+        // Unconditional: the chunked-backward tiles exceed the 48 KB
+        // default from ordinary shapes too (e.g. d_state 64 with headdim
+        // 32 needs ~67 KB), not only at raised state capacities.
+        {
             use cudarc::driver::sys::CUfunction_attribute_enum as FnAttr;
             let budget: i32 = 99 * 1024;
             for f in [

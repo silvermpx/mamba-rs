@@ -4,10 +4,11 @@
 //! must match the single-process emulated-world oracle BIT FOR BIT.
 //! (NCCL hard-refuses two ranks on one device — "Duplicate GPU
 //! detected" — so this needs a genuinely multi-GPU box; on a single-GPU
-//! machine the test reports itself skipped. The whole path up to the
-//! communicator init — spawn, environment contract, rendezvous,
-//! unique-id exchange, version preflight — is exercised on one GPU by
-//! running it there and watching NCCL itself reject the duplicate.)
+//! machine the test reports itself skipped before spawning anything.
+//! (The path up to the communicator init — spawn, environment contract,
+//! rendezvous, unique-id exchange, version preflight — was exercised on
+//! a one-GPU box during development by letting NCCL itself reject the
+//! duplicate device; this test does not repeat that probe.)
 //! The bitwise claim is exact at world size 2: a two-addend sum has one
 //! association, and IEEE-754 addition is commutative, so the library
 //! collective cannot produce different bits than the house fold.

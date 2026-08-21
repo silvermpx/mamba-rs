@@ -273,7 +273,7 @@ pub fn sgemm_bi_forward(
     // batch lower bound relaxed 4 → 1. Kernel
     // sgemm_bi_nn_gemv has `if (row >= M) return;` predication (kernels/sgemm_bi.cu:2201)
     // so M<4 is safe — partial last block. Closes single-env eval gap
-    // (M=1 N=1 K=512 was hitting cuBLAS-fallback panic в gpu_eval_parity test).
+    // (M=1 N=1 K=512 was hitting cuBLAS-fallback panic in an eval-parity test).
     // Determinism preserved (kernel unchanged; same warp-shuffle butterfly).
     if n_out == 1 && batch >= 1 && n_in >= 32 {
         let m_i = batch as i32;
@@ -964,7 +964,7 @@ pub fn sgemm_bi_backward_dx(
     // iterates `for nIdx in [0, N) by NBK=16` (sgemm_bi.cu:2635), no upper
     // bound on N. Tile dims (BM=64, BN=32) fit any small batch; M/K_out
     // predication inside kernel handles partial last block.
-    // Determinism: kernel unchanged → bit-exact с N≤127 path.
+    // Determinism: kernel unchanged → bit-exact with the N<=127 path.
     // Production unaffected: training uses batch=128 (Big/Slim path).
     // Closes test_gpu_correctness M=4 K=32 N=128 cuBLAS-fallback panic.
     if batch < 32 && n_in >= 1 && n_out >= 128 {
@@ -999,8 +999,8 @@ pub fn sgemm_bi_backward_dx(
     // GEMV-N1 NT dispatch: dX[M,K] = dY[M,1] @ W^T[1,K] (outer product)
     // batch lower bound relaxed 4 → 1.
     // Kernel sgemm_bi_nt_gemv computes per-element dX[m,k] = alpha*dY[m]*W[k]
-    // с total = M*K total threads и `if (tid >= total) return;` predication
-    // (kernels/sgemm_bi.cu:2296) — safe для M<4. Closes single-env eval gap.
+    // with total = M*K threads and `if (tid >= total) return;` predication
+    // (kernels/sgemm_bi.cu:2296) — safe for M<4. Closes the single-env eval gap.
     if n_out == 1 && n_in >= 1 && batch >= 1 {
         let m_i = batch as i32;
         let k_i = n_in as i32;
@@ -1178,12 +1178,12 @@ pub fn sgemm_bi_backward_dx(
         }
     }
 
-    // Split-K NT-via-transpose dispatch для M<128 shapes (SALE/SimbaV2 w2 bwd_dx).
+    // Split-K NT-via-transpose dispatch for M<128 shapes (thin backward-dX projections).
     // Strategy: transpose W[K_out, N] → W_T[N, K_out], then dX = dY @ W_T via the
     // existing NN Split-K kernel. Per research 2026-04-19: 1.6-1.8× faster than
     // dedicated NT.
     //
-    // A.2 — generalised к support n_out%32 != 0 by folding the N-tail (residue
+    // A.2 — generalised to support n_out%32 != 0 by folding the N-tail (residue
     // after the largest 32-aligned prefix) into the reducer's `tail_cnt` arg.
     // The reducer (sgemm_bi.cu:2902) already supports tail folding: for each
     // (m, n) cell it appends `Σ_{k<tail_cnt} x_tail[m,k] * w_tail[k,n]` after
@@ -1201,7 +1201,7 @@ pub fn sgemm_bi_backward_dx(
     // Envelope: M ∈ [32, 1024], K_out ∈ [64, 4096], K_out % 4 == 0,
     // N ∈ [32, 2048], n_in % 32 == 0 (K-tail bwd_dx gate at line 897 covers
     // n_in%32 != 0 separately; combined K-tail + N-tail is rare and falls
-    // through к cuBLAS by design — punt unless production shows it).
+    // through to cuBLAS by design — punt unless production shows it).
     const SPLITK_NT_TRANSPOSE_CAP: usize = 1 << 22; // 4M f32 = transpose_scratch size
     let n_tail_nt = n_out % 32;
     let n_main_nt = n_out - n_tail_nt;
@@ -1250,7 +1250,7 @@ pub fn sgemm_bi_backward_dx(
         // Step 2: NN Split-K partial on the n_main (32-aligned) prefix.
         // partial = dY[M, n_main] @ W_T[n_main, K_out], reduction over n_main.
         // lda_i = n_out (full dY row stride) — partial reads only the first
-        // k_chunks*32 = n_main columns per row, leaving the tail для step 3.
+        // k_chunks*32 = n_main columns per row, leaving the tail for step 3.
         let m_i = batch as i32;
         let k_out_i = n_in as i32;
         let k_chunks = (n_main_nt / 32) as i32;
@@ -1283,7 +1283,7 @@ pub fn sgemm_bi_backward_dx(
         //   dX[m,k] = Σ_{c<k_chunks} partial[c][m,k]               (chunk sum, ascending c)
         //          + Σ_{i<tail_cnt} dY[m, n_main+i] · W_T[n_main+i, k]   (tail, ascending i)
         // FMA single-rounding inside reducer. Total reduction order: ascending
-        // n over [0, n_full) — bit-exact с CPU sgemm_nt ascending-n loop.
+        // n over [0, n_full) — bit-exact with the CPU sgemm_nt ascending-n loop.
         let alpha: f32 = 1.0;
         let null_bias: u64 = 0;
         let total = (batch * n_in) as u32;

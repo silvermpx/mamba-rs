@@ -43,9 +43,9 @@ pub struct GpuCtx {
     /// shape within a process). Ignored by the batch-invariant path, which
     /// never calls cuBLAS. Env: MAMBA_RS_FAST_GEMM.
     fast_gemm: std::cell::Cell<bool>,
-    /// Number of CUDA graphs captured on this context (G3 belt): the tier
-    /// setters warn when flipped after a capture - the captured kernels
-    /// cannot follow, and G1 will hard-assert at the next replay.
+    /// Number of CUDA graphs captured on this context: the tier
+    /// setters warn when flipped after a capture — the captured kernels
+    /// cannot follow, and the replay-time flag assert refuses to run.
     graphs_captured: std::cell::Cell<u64>,
     /// Grow-only f32 scratch triple for the batch-invariant typed-GEMM
     /// upcast fallback: typed shapes without a native typed bucket run as
@@ -250,6 +250,7 @@ impl GpuCtx {
         cfg: &crate::mamba3_siso::config::Mamba3Config,
         batch: usize,
         seq_len: usize,
+        input_dim: usize,
         dtype: WeightDtype,
     ) -> Result<(), String> {
         if matches!(dtype, WeightDtype::F32) || !self.batch_invariant() {
@@ -259,8 +260,11 @@ impl GpuCtx {
         let dm = cfg.d_model;
         let di = cfg.d_inner();
         let ip = cfg.in_proj_out_dim();
-        let max_dim = dm.max(ip).max(di);
-        let max_kn = (dm * ip).max(di * dm);
+        // input_dim covers the non-identity input projection's operands
+        // (X[m, input_dim] @ W[input_dim, d_model]); with the identity
+        // branch it equals d_model and changes nothing.
+        let max_dim = dm.max(ip).max(di).max(input_dim);
+        let max_kn = (dm * ip).max(di * dm).max(input_dim * dm);
         let elems = (m * max_dim).max(max_kn);
         self.with_bi_upcast_scratch((elems, elems, elems), |_, _, _| Ok(()))
     }
@@ -314,18 +318,20 @@ impl GpuCtx {
         self.fast_gemm.get()
     }
 
-    /// Snapshot of the three GEMM-tier flags (batch_invariant,
-    /// bi_tensor_cores, fast_gemm) — the numeric-route identity of every
-    /// GEMM this context launches. Graph captures snapshot it and replays
-    /// assert it (G1, GEMM-map audit 2026-08-01): a flag flipped after
-    /// capture cannot change the recorded kernels, so the flip would
-    /// otherwise be a silent no-op on the graph path and a live divergence
-    /// on any eager path sharing the context.
-    /// Record that a CUDA graph was captured on this context (G3 belt).
+    /// Record that a CUDA graph was captured on this context — the tier
+    /// setters warn when a flag flips afterwards, since the captured
+    /// kernels cannot follow the flip.
     pub(crate) fn note_graph_capture(&self) {
         self.graphs_captured.set(self.graphs_captured.get() + 1);
     }
 
+    /// Snapshot of the three GEMM-tier flags (batch_invariant,
+    /// bi_tensor_cores, fast_gemm) — the numeric-route identity of every
+    /// GEMM this context launches. Graph captures snapshot it and replays
+    /// assert it: a flag flipped after capture cannot change the recorded
+    /// kernels, so the flip would otherwise be a silent no-op on the
+    /// graph path and a live divergence on any eager path sharing the
+    /// context.
     pub fn gemm_flags(&self) -> (bool, bool, bool) {
         (
             self.batch_invariant.get(),

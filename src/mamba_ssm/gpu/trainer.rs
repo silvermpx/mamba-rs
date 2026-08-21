@@ -409,6 +409,11 @@ impl MambaTrainer {
     /// reducer sums this buffer across ranks between the window-closing
     /// `backward_step(accumulate_only = true)` and [`Self::apply_step`];
     /// single-process training never needs it.
+    ///
+    /// Contract: mutate the CONTENTS only (upload / in-place collective).
+    /// The per-tensor gradient views cache this allocation's device
+    /// pointer, so replacing or reallocating the buffer itself would
+    /// leave them dangling.
     pub fn grad_arena(&mut self) -> &mut GpuBuffer {
         match &mut self.inner {
             TrainerInner::F32(t) => &mut t.grads.flat,
@@ -699,7 +704,7 @@ pub(crate) struct MambaTrainerMixed {
     /// True between a `forward_split` and the `backward_split` consuming its
     /// saved activations (split-phase interlock).
     split_forward_pending: bool,
-    // G2 (GEMM-map audit 2026-08-01): the GEMM-tier flags at forward()
+    // the GEMM-tier flags at forward()
     // time; backward_step refuses on drift - a mid-cycle flip would pair
     // gradients with activations from a different numeric route.
     split_forward_flags: (bool, bool, bool),
@@ -744,7 +749,7 @@ pub(crate) struct MambaTrainerMixed {
     captured_f16_overflow_ptr: u64,
     captured_f16_grads_ptr: u64,
     captured_f16_dt_scaled_ptr: u64,
-    // G4 (GEMM-map audit 2026-08-01): the f16 graph presizes these two
+    // the f16 graph presizes these two
     // scratches but never asserted them at replay - the one graph without
     // the guard the bf16 graph already has. Plus the G1 flag snapshot.
     captured_f16_half_staging_ptr: u64,
@@ -1694,7 +1699,7 @@ pub(crate) struct MambaTrainerF32 {
     /// True between a `forward_split` and the `backward_split` consuming its
     /// saved activations (split-phase interlock).
     split_forward_pending: bool,
-    // G2 (GEMM-map audit 2026-08-01): the GEMM-tier flags at forward()
+    // the GEMM-tier flags at forward()
     // time; backward_step refuses on drift - a mid-cycle flip would pair
     // gradients with activations from a different numeric route.
     split_forward_flags: (bool, bool, bool),

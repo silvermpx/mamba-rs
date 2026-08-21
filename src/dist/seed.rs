@@ -20,8 +20,9 @@ pub struct SeedLaw {
 }
 
 /// One round of splitmix64 — the finalizer used for all derivations.
-/// Chosen because it is a bijective mix with full avalanche, so distinct
-/// (domain, seed, ...) tuples cannot collide by construction.
+/// A bijective mix with full avalanche; the composed derivation is not
+/// collision-free across tuples (no 64-bit hash is), it just makes
+/// collisions no more likely than random.
 fn splitmix64(mut z: u64) -> u64 {
     z = z.wrapping_add(0x9E37_79B9_7F4A_7C15);
     z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
@@ -30,8 +31,9 @@ fn splitmix64(mut z: u64) -> u64 {
 }
 
 /// Mix a domain tag and arguments into the master seed, guaranteeing a
-/// nonzero result (xorshift-family generators collapse on state 0, and
-/// that exact bug has shipped once already).
+/// nonzero result — xorshift-family generators collapse on state 0. The
+/// clamp maps a zero mix to a fixed constant, which is one deliberate
+/// extra collision in exchange for never seeding a dead generator.
 fn derive(seed: u64, domain: u64, a: u64, b: u64) -> u64 {
     let mut z = splitmix64(seed ^ splitmix64(domain));
     z = splitmix64(z ^ splitmix64(a));

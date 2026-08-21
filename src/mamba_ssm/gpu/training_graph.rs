@@ -184,7 +184,7 @@ pub struct GpuMambaTrainingStepGraph {
     // every bf16 bi GEMM without a native typed bucket (all Big/split-K
     // training shapes) reads/writes these buffers inside the captured body.
     captured_bi_upcast_ptrs: [u64; 3],
-    // G1 (GEMM-map audit 2026-08-01): the GEMM-tier flags at capture time.
+    // the GEMM-tier flags at capture time.
     // A post-capture flip cannot change the recorded kernels; replay
     // asserts the route identity instead of silently ignoring the flip.
     captured_gemm_flags: (bool, bool, bool),

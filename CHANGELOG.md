@@ -10,16 +10,20 @@ chunked kernels.
 
 - `dist` — deterministic data-parallel training. One process per GPU;
   gradients meet in one collective per optimizer step over the flat f32
-  arena. The default reduction folds the W addends per element in
-  strictly ascending logical-rank order, so the reduced bits are
+  arena. The default reduction CONTRACT folds the W addends per element
+  in strictly ascending logical-rank order, making the reduced bits
   independent of transport, delivery order, topology, library version,
-  and physical GPU permutation. Ships with the seed law (every random
-  decision derives from one master seed, never from a rank), a
-  supervisor/attach bootstrap (self-spawn, or torchrun/SLURM/OpenMPI
-  environment contracts), a file rendezvous, and `EmulatedWorld` — a
-  single-process oracle that runs the full sharded dataflow and is
-  asserted bit-for-bit against the straight-line reference and against
-  a live end-to-end two-replica training run.
+  and physical GPU permutation; the contract is implemented and proven
+  by the emulated oracle, and a live multi-process world refuses it
+  loudly until its transport-backed reducer lands (the explicit
+  `NcclSum` tier is the live path meanwhile). Ships with the seed law
+  (every random decision derives from one master seed, never from a
+  rank), a supervisor/attach bootstrap (self-spawn, or
+  torchrun/SLURM/OpenMPI environment contracts), a file rendezvous, and
+  `EmulatedWorld` — a single-process oracle that runs the full sharded
+  dataflow and is asserted bit-for-bit against the straight-line
+  reference and against an emulated end-to-end two-replica training
+  run.
 - `nccl` feature — the transport layer: a thin communicator over the
   pinned NCCL binding (byte movement plus the opt-in sum collective),
   rendezvous-based unique-id exchange, version preflight, fail-fast

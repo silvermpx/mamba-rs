@@ -23,8 +23,10 @@ impl ScanMode {
     /// Resolve the effective scan choice for a sequence length and state dim.
     ///
     /// `d_state > 64` ALWAYS takes the parallel path regardless of the
-    /// requested mode: the sequential CUDA kernels keep per-(b,d) state in
-    /// register arrays capped at 64 and would silently no-op beyond that.
+    /// requested mode. Historically the sequential kernels were hard-capped
+    /// at 64; they are capacity-sized and guarded now, but the route stays —
+    /// it is part of the numeric identity of existing runs, and the
+    /// parallel scan is the faster path at large state sizes anyway.
     pub fn use_parallel(self, seq_len: usize, d_state: usize) -> bool {
         if d_state > 64 {
             return true;

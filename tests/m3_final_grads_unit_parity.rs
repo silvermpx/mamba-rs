@@ -169,7 +169,10 @@ fn check_dqkv(dtype: WeightDtype) {
     ctx.stream.synchronize().unwrap();
 
     // Shared memory size: q_sm + k_sm + v_sm + do_sm + da_cs_sm + qk_sm + ssm_sm.
-    let smem_floats = CS * DS * 2 + CS * HD * 2 + CS * 2 + HD * DS;
+    // Must mirror the launch-site formula (two operand tiles, V/dO tiles,
+    // per-step lanes, da/qk lanes, and TWO head-state tiles for the
+    // warp-parallel decay-gradient section).
+    let smem_floats = CS * DS * 2 + CS * HD * 2 + CS * 4 + HD * DS * 2;
     let smem_bytes = (smem_floats * 4) as u32;
     let cfg = LaunchConfig {
         grid_dim: (NH as u32, B as u32, 1),

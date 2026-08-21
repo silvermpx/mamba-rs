@@ -3,8 +3,9 @@
 //! Three backings share one API. `Single` is the always-on no-op: world
 //! size 1, sharding is identity, reductions return immediately —
 //! downstream code compiles and runs unchanged with distribution off.
-//! `Process` is a rank in a multi-process world (file-based rendezvous
-//! today; the byte transport arrives with the communicator layer).
+//! `Process` is a rank in a multi-process world: file-based rendezvous,
+//! and — with the `nccl` feature — a live communicator for the
+//! transport-backed collectives that exist today.
 //! [`EmulatedWorld`] lives beside them for single-process oracle tests
 //! of the reduction contract.
 
@@ -30,6 +31,7 @@ enum ContextInner {
         world: usize,
         device: usize,
         seed: SeedLaw,
+        reduce: ReduceContract,
         barrier_dir: PathBuf,
         barrier_generation: std::cell::Cell<u64>,
         barrier_timeout: Duration,
@@ -54,6 +56,7 @@ impl DistContext {
         world: usize,
         device: usize,
         seed: u64,
+        reduce: ReduceContract,
         barrier_dir: PathBuf,
         barrier_timeout: Duration,
     ) -> Self {
@@ -63,6 +66,7 @@ impl DistContext {
                 world,
                 device,
                 seed: SeedLaw::new(seed),
+                reduce,
                 barrier_dir,
                 barrier_generation: std::cell::Cell::new(0),
                 barrier_timeout,
@@ -86,6 +90,14 @@ impl DistContext {
     /// optimizer tail stay with the trainer (sum then multiply by 1/W,
     /// exact for power-of-two worlds). Single-process worlds return
     /// immediately.
+    ///
+    /// Contract honesty: only the `NcclSum` tier is transport-backed
+    /// today. The default `FixedOrder` contract (the ascending-rank
+    /// house fold, proven by the emulated-world oracle) does not have
+    /// its device reducer wired to a transport yet, and selecting it in
+    /// a multi-process world fails LOUDLY here rather than silently
+    /// substituting the library sum with different association
+    /// guarantees.
     #[cfg(feature = "cuda")]
     pub fn all_reduce_grad_sum(
         &self,
@@ -94,6 +106,17 @@ impl DistContext {
     ) -> Result<(), DistError> {
         match &self.inner {
             ContextInner::Single { .. } => Ok(()),
+            ContextInner::Process {
+                reduce: ReduceContract::FixedOrder,
+                ..
+            } => Err(DistError::Transport(
+                "ReduceContract::FixedOrder is the numeric contract, but its \
+                 transport-backed reducer is not wired yet (it lands with the \
+                 multi-GPU validation). Opt into ReduceContract::NcclSum \
+                 explicitly to train over the library sum today — a run-to-run \
+                 config contract, not the fixed-order portability guarantee"
+                    .into(),
+            )),
             #[cfg(feature = "nccl")]
             ContextInner::Process { comm: Some(c), .. } => {
                 c.all_reduce_sum_f32(arena.cached_ptr(), arena.len(), stream)
@@ -135,6 +158,15 @@ impl DistContext {
         self.rank() == 0
     }
 
+    /// The reduction contract this world was configured with. Part of
+    /// the run's numeric identity (checkpoint sidecars record it).
+    pub fn reduce_contract(&self) -> ReduceContract {
+        match &self.inner {
+            ContextInner::Single { .. } => ReduceContract::default(),
+            ContextInner::Process { reduce, .. } => *reduce,
+        }
+    }
+
     /// The seed law all ranks share.
     pub fn seed_law(&self) -> SeedLaw {
         match &self.inner {
@@ -172,7 +204,17 @@ impl DistContext {
             } => {
                 let generation = barrier_generation.get();
                 barrier_generation.set(generation + 1);
-                file_barrier(barrier_dir, generation, *rank, *world, *barrier_timeout)
+                file_barrier(barrier_dir, generation, *rank, *world, *barrier_timeout)?;
+                // Keep at most two generations on disk. Once generation g
+                // completes, every rank has already returned from g-1 (a
+                // rank writes its g marker only after exiting the g-1
+                // wait loop), so g-2 is provably dead; rank 0 removes it
+                // best-effort — a failure leaks a directory, never blocks.
+                if *rank == 0 && generation >= 2 {
+                    let dead = barrier_dir.join(format!("gen-{}", generation - 2));
+                    let _ = std::fs::remove_dir_all(dead);
+                }
+                Ok(())
             }
         }
     }
@@ -185,7 +227,9 @@ impl DistContext {
             ContextInner::Process { .. } => {
                 let _ = xs;
                 Err(DistError::Transport(
-                    "cross-process reduction arrives with the communicator layer".into(),
+                    "host-buffer reduction is not wired to the communicator yet — it \
+                     rides the fixed-order transport tier"
+                        .into(),
                 ))
             }
         }
@@ -197,7 +241,9 @@ impl DistContext {
         match &self.inner {
             ContextInner::Single { .. } => Ok(flag),
             ContextInner::Process { .. } => Err(DistError::Transport(
-                "cross-process reduction arrives with the communicator layer".into(),
+                "the flag reduction is not wired to the communicator yet — it \
+                 rides the fixed-order transport tier"
+                    .into(),
             )),
         }
     }

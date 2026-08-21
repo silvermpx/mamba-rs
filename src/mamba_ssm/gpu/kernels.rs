@@ -51,8 +51,11 @@ pub struct MambaKernels {
     _module: Arc<CudaModule>,
 
     /// State-dimension capacity the kernels were compiled with (the
-    /// per-thread register-array size). Launch paths guard `d_state`
-    /// against it instead of a hardcoded 64.
+    /// per-thread register-array size). The engine and trainer
+    /// constructors derive it from the model config, so a mismatched
+    /// launch cannot be built through the public constructors; the M1
+    /// launch-path asserts additionally compare against it, and the
+    /// kernels carry their own capacity guards.
     pub state_cap: usize,
 
     // -- SSM recurrence --
