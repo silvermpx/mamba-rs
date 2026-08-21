@@ -182,6 +182,41 @@ impl Mamba3Trainer {
         }
     }
 
+    /// Download the full optimizer state (Adam moments, step counter,
+    /// update hyperparameters) for a bit-continuous resume. Checkpoints
+    /// that carry only weights silently re-warm Adam from zero on load —
+    /// the resumed run then provably diverges from the unbroken one.
+    pub fn optimizer_state(&self) -> Result<crate::mamba_ssm::gpu::adamw::AdamWStateBlob, String> {
+        match &self.inner {
+            Trainer3Inner::F32(t) => t.adam.export_state(&t.ctx.stream),
+            Trainer3Inner::Mixed(t) => t.adam.export_state(&t.ctx.stream),
+        }
+    }
+
+    /// Upload a previously exported optimizer state. Errs while a
+    /// captured graph exists — the decay coefficient and no-decay
+    /// grouping the blob adopts are baked by value into the captured
+    /// AdamW launches, so the load would silently not apply under
+    /// replay. Drop the graph first, load, then re-capture. The learning
+    /// rate is not part of the blob; re-apply the schedule afterwards.
+    pub fn load_optimizer_state(
+        &mut self,
+        blob: &crate::mamba_ssm::gpu::adamw::AdamWStateBlob,
+    ) -> Result<(), String> {
+        if self.has_graph() {
+            return Err(
+                "load_optimizer_state under a captured graph: the blob's decay \
+                 hyperparameters are baked by value into the captured AdamW launches — \
+                 drop_graph() first, then load, then re-capture"
+                    .into(),
+            );
+        }
+        match &mut self.inner {
+            Trainer3Inner::F32(t) => t.adam.import_state(&t.ctx.stream, blob),
+            Trainer3Inner::Mixed(t) => t.adam.import_state(&t.ctx.stream, blob),
+        }
+    }
+
     /// Toggle the reference-faithful AdamW no-decay parameter groups
     /// (dt bias / `d_param` / every norm scale get `weight_decay = 0`).
     /// Default OFF preserves the historical behavior bit-for-bit. Errs

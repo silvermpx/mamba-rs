@@ -99,6 +99,23 @@ pub struct AdamWParamPtrs {
     pub v: cudarc::driver::sys::CUdeviceptr,
 }
 
+/// CPU-side snapshot of the full AdamW state for a bit-continuous
+/// resume: without the moment buffers and step counter, a "resumed" run
+/// re-warms Adam from zero and provably diverges from the unbroken run.
+/// The learning rate is NOT part of the blob — it belongs to the
+/// caller's schedule (see [`GpuAdamW::export_state`]).
+#[derive(Clone, Debug, PartialEq)]
+pub struct AdamWStateBlob {
+    pub m: Vec<f32>,
+    pub v: Vec<f32>,
+    pub step: u64,
+    pub beta1: f32,
+    pub beta2: f32,
+    pub eps: f32,
+    pub weight_decay: f32,
+    pub reference_no_decay: bool,
+}
+
 /// f32 fused AdamW optimizer (matches `torch.optim.AdamW`).
 pub struct GpuAdamW {
     /// First moment (m) in f32, layout matches the flat grad arena.
@@ -200,6 +217,55 @@ impl GpuAdamW {
     /// full state-dict (download with `to_cpu()`).
     pub fn state(&self) -> (u64, f32) {
         (self.step, self.lr)
+    }
+
+    /// Download the full optimizer state for a bit-continuous resume:
+    /// the moment buffers, the step counter, and the hyperparameters
+    /// that change the update math. `lr` is deliberately NOT included —
+    /// the learning rate belongs to the caller's schedule, which
+    /// re-applies it after a load (the in-house trainers set it per
+    /// accumulation window anyway).
+    pub fn export_state(&self, stream: &Arc<CudaStream>) -> Result<AdamWStateBlob, String> {
+        Ok(AdamWStateBlob {
+            m: self.m.to_cpu(stream)?,
+            v: self.v.to_cpu(stream)?,
+            step: self.step,
+            beta1: self.beta1,
+            beta2: self.beta2,
+            eps: self.eps,
+            weight_decay: self.weight_decay,
+            reference_no_decay: self.reference_no_decay,
+        })
+    }
+
+    /// Upload a previously exported state, adopting its step counter and
+    /// update hyperparameters. Errs on a moment-length mismatch — that
+    /// means the blob belongs to a different parameterization and a
+    /// "resume" from it would be silent corruption, not a resume.
+    pub fn import_state(
+        &mut self,
+        stream: &Arc<CudaStream>,
+        blob: &AdamWStateBlob,
+    ) -> Result<(), String> {
+        if blob.m.len() != self.m.len() || blob.v.len() != self.v.len() {
+            return Err(format!(
+                "AdamW state mismatch: blob m/v = {}/{} elements, optimizer = {}/{} — \
+                 the blob belongs to a different parameterization",
+                blob.m.len(),
+                blob.v.len(),
+                self.m.len(),
+                self.v.len()
+            ));
+        }
+        self.m.upload(stream, &blob.m)?;
+        self.v.upload(stream, &blob.v)?;
+        self.step = blob.step;
+        self.beta1 = blob.beta1;
+        self.beta2 = blob.beta2;
+        self.eps = blob.eps;
+        self.weight_decay = blob.weight_decay;
+        self.reference_no_decay = blob.reference_no_decay;
+        Ok(())
     }
 
     /// Run one fused AdamW update on a single tensor. Caller supplies the
