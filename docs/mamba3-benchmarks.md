@@ -1,7 +1,8 @@
 # Mamba-3 SISO Benchmarks
 
 Hardware: Ada server — Intel Xeon Gold 5412U (48 threads) + NVIDIA RTX 6000 Ada
-Generation (48 GB), CUDA 13.2, Driver 595.45. Measured on mamba-rs 0.4.2.
+Generation (48 GB), CUDA 13.2, Driver 595.45. CPU tables measured on
+mamba-rs 0.4.2; sections marked 0.6 measured on the 0.6 development tree.
 
 > **Note**: all numbers below are against synthetic weights via
 > `Mamba3Weights::init` — no public Mamba-3 SISO checkpoints exist yet
@@ -31,17 +32,49 @@ CUDA Graph eliminates kernel launch overhead (~51 us saved per step).
 Synthetic default config (tiny model — numbers measure the step
 pipeline, not a real LLM). From `bench_bf16_vs_f32::bench_m3_bf16_vs_f32_synthetic`.
 
-## GPU Training (default config, B=1, T=32)
+## GPU Training — multi-chunk step (0.6; B=1, T=256, 24 layers, d_model=384)
 
-| | Time |
-|---|---|
-| Forward | 642 us |
-| Backward | 1 141 us |
-| Forward + Backward | 1 784 us |
+Production training runs the chunked parallel scan at multi-chunk
+sequence lengths; earlier editions of this table timed a T=32
+sequential configuration that production never runs, and those numbers
+are retired. Measured through the public trainer (`Mamba3Trainer::step`,
+full forward + backward + AdamW + sync), on a GPU shared with other
+load — treat the ratios as the claim:
 
-Backward 1 534 → 1 141 µs vs 0.4.1: the training GEMMs ride the
-tensor-core deterministic tier's new Tile64/BK=64 kernels
-([determinism-benchmarks.md](determinism-benchmarks.md)).
+| dtype | before the 0.6 kernel pass | after |
+|-------|---------------------------:|------:|
+| f32   | 424 ms/step | **126.6 ms/step** |
+| bf16  | 395 ms/step | **121.9 ms/step** |
+
+The pass: warp-parallel decay-gradient section in the dominant
+backward kernel with the entering state staged in shared memory, the
+shared causal Q·K tile in the intra-chunk output kernel, a loop-swapped
+chunk-state kernel, head-packed full-warp blocks, and the
+chunk-parallel angle accumulation.
+
+## GPU Prompt Prefill (0.6; T=4621, 24 layers, d_model=384, f32)
+
+One-pass prompt window through the chunked pipeline
+(`tests/m3_prefill_bench.rs`), same shared-box caveat:
+
+| stage | ms/prefill |
+|-------|-----------:|
+| before the 0.6 kernel pass | 384 |
+| + shared Q·K tile | 251 |
+| + chunk-parallel angle accumulation | 89.6 |
+| + loop-swapped chunk state, head-packed blocks | **66.5** |
+
+## Large d_state capacity cost (0.6; fused decode step, d_model=256, 4 layers)
+
+The per-thread state arrays are sized at JIT time from the config; past
+the register budget the compiler spills to local memory — correct and
+measurably slower:
+
+| d_state | ms/step |
+|--------:|--------:|
+| 64  | 0.289 |
+| 128 | 0.378 |
+| 256 | 1.498 |
 
 ## CPU Inference (T=1 step, B=1)
 

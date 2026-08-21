@@ -44,6 +44,24 @@ Pure Rust + CUDA. Kernels compile at runtime via NVRTC.
   the step path (prefill-then-decode). Serial mode is the deterministic
   reference; `PrefillMode::Parallel` parallelizes every phase and stays
   bit-equal. Both architectures.
+- **GPU prompt prefill (Mamba-3)** — one-pass prompt window through the
+  chunked pipeline, leaving all four recurrent states positioned for
+  decode; continued windows apply the trapezoidal boundary fold, and a
+  captured CUDA-graph twin replays bit-identically. The LM generate
+  path switches to it automatically for long prompts.
+- **Deterministic data-parallel training (`dist`)** — one process per
+  GPU, one collective per optimizer step over the flat gradient arena,
+  folded in strictly ascending logical-rank order: bits independent of
+  transport, topology, library version, and physical GPU permutation.
+  Single-process emulation ships as the CI oracle; the `nccl` feature
+  adds the transport.
+- **Bit-continuous resume** — optimizer state (Adam moments, step,
+  update hyperparameters) and the carried recurrence export/import, so
+  a resumed run lands bit-for-bit where the unbroken run would.
+- **Large state dimensions** — per-thread state arrays are sized at JIT
+  time from the config, up to the reference implementations' own
+  maximum of 256; every generation runs the same code path at any
+  supported `d_state`.
 - **HuggingFace loader** — safetensors, synthetic + real Mamba SSM
   checkpoints (130m / 370m / 1.4b / 2.8b validated).
 - **Standalone** — no framework dependency. MSRV 1.97.
@@ -58,6 +76,7 @@ Pure Rust + CUDA. Kernels compile at runtime via NVRTC.
 | `cuda` | GPU inference + training (NVRTC-compiled kernels) | needs the CUDA toolkit |
 | `hf` | safetensors/HF checkpoint loaders | LM checkpoints |
 | `cli` | `mamba-generate` binary (tokenizers + hf-hub) | text generation CLI |
+| `nccl` | data-parallel transport (pinned NCCL binding) | multi-GPU training |
 
 ## Use cases and API choice
 
@@ -330,11 +349,13 @@ contracts: [deterministic GEMM benchmarks](docs/determinism-benchmarks.md).
 | | Mamba SSM | Mamba-3 SISO |
 |---|---|---|
 | GPU inference B=1 (CUDA Graph) | **79 µs** | **87 µs** |
-| GPU training fwd+bwd (T=32)    | 1 653 µs | 1 784 µs |
+| GPU training fwd+bwd (T=32, tiny synthetic shape) | 1 653 µs | 1 784 µs |
 | CPU inference B=1              | 87 µs    | **65 µs** |
 | CPU training fwd+bwd (T=32)    | 14 859 µs | **3 635 µs** |
 
-Detailed tables: [Mamba SSM benchmarks](docs/mamba1-benchmarks.md),
+Production-scale Mamba-3 training and prefill tables (multi-chunk
+sequences, 24-layer shapes) live in the detailed docs:
+[Mamba SSM benchmarks](docs/mamba1-benchmarks.md),
 [Mamba-3 SISO benchmarks](docs/mamba3-benchmarks.md).
 
 ## Testing
@@ -377,6 +398,13 @@ cargo test --release --features "cuda hf" -- --include-ignored
 - [Deterministic GEMM benchmarks](docs/determinism-benchmarks.md) — tiers,
   contracts, full measurement tables (training step, tensor-core GEMM
   level, fallback tax), reproduction commands
+
+## Roadmap
+
+- Multi-GPU inference for models larger than one device (pipeline
+  sharding), complementing the data-parallel training that ships now.
+- The Mamba-2 generation, living beside Mamba-1 and Mamba-3 in this
+  crate with the same determinism and testing discipline.
 
 ## Citation
 

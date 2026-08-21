@@ -1,5 +1,111 @@
 # Changelog
 
+## 0.6.0 (unreleased)
+
+Deterministic data parallelism, the Mamba-3 prompt prefill, first-class
+large state dimensions, and a measured performance pass over the
+chunked kernels.
+
+### Added
+
+- `dist` — deterministic data-parallel training. One process per GPU;
+  gradients meet in one collective per optimizer step over the flat f32
+  arena. The default reduction folds the W addends per element in
+  strictly ascending logical-rank order, so the reduced bits are
+  independent of transport, delivery order, topology, library version,
+  and physical GPU permutation. Ships with the seed law (every random
+  decision derives from one master seed, never from a rank), a
+  supervisor/attach bootstrap (self-spawn, or torchrun/SLURM/OpenMPI
+  environment contracts), a file rendezvous, and `EmulatedWorld` — a
+  single-process oracle that runs the full sharded dataflow and is
+  asserted bit-for-bit against the straight-line reference and against
+  a live end-to-end two-replica training run.
+- `nccl` feature — the transport layer: a thin communicator over the
+  pinned NCCL binding (byte movement plus the opt-in sum collective),
+  rendezvous-based unique-id exchange, version preflight, fail-fast
+  shutdown semantics, and `backward_step_dist` on both trainer
+  families (world size one stays byte-identical to a plain step).
+- Optimizer state export/import on both trainers: Adam moments, step
+  counter, and update hyperparameters travel with the checkpoint, and
+  a resumed run continues bit-for-bit where the unbroken run would be
+  (contract-tested on f32 and bf16, with a control proving weights-only
+  resume diverges). The carried recurrence (conv + SSM state) exports
+  alongside for TBPTT window handoff.
+- `grad_arena` / `apply_step` seams: the applying backward splits into
+  gradient accumulation and the optimizer tail, bit-identical to the
+  fused call — the slot a distributed reducer drops into.
+- Mamba-3 one-pass prompt prefill: the whole prompt window through the
+  chunked pipeline in one pass, leaving all four recurrent states
+  positioned for decode. Continued windows apply the trapezoidal
+  boundary fold (the discretization's beta term reaches one step back
+  across the window seam). Comes with a captured CUDA-graph twin
+  (bitwise replay pinned), engine/backbone wrappers, and an LM
+  generate path that switches to prefill for long prompts. The
+  mixed-precision backbone prefills through its resident f32 weights —
+  decode states are f32 in both pipelines — and downcasts only the
+  final hidden.
+- Mamba-3 mixed-precision training closure: the plain SiLU-gate output
+  architecture gets its typed backward; the non-identity input
+  projection trains in mixed precision; sequential-scan tapes shrink
+  to sentinels on the chunked path instead of holding dead VRAM.
+- First-class large state dimensions on every kernel generation: the
+  per-thread state arrays are sized at JIT time from the model config
+  (64-step tiers up to 256, the reference implementations' own
+  maximum). Any reference-range `d_state` runs the same code path;
+  past the register budget the compiler spills — correct, measurably
+  slower, and measured. The chunked-backward's shared-memory need is
+  now validated by its actual formula (with an opt-in to the extended
+  budget) instead of a crude product bound.
+- Norm epsilon is a config value carried by checkpoints, applied by
+  every norm kernel — a checkpoint trained with a different epsilon is
+  a different model and loads as one.
+
+### Changed
+
+- The chunked intra-chunk output kernel computes the decayed causal
+  Q·K tile once per (chunk, head) in shared memory instead of once per
+  lane; the chunk-state kernel hoists its per-step exponential and V
+  load out of the state loop (bitwise-identical sums); both matmul-
+  shaped kernels pack two heads per block so the 16-lane head dimension
+  fills full warps.
+- The angle accumulation is chunk-parallel: per-chunk fp64 delta sums,
+  a short serial carry chain per lane, and a parallel re-walk with the
+  original per-step wrap. Deterministic by construction; a different
+  fp64 rounding route from the old single serial chain, invisible at
+  the f32 output, and covered by its own parity oracles.
+- The chunked-backward's decay-gradient section is warp-parallel per
+  output step (it was serial on one lane), with the entering state
+  staged in shared memory instead of per-element global re-reads. The
+  serial reverse-cumsum combine — the numeric contract — is unchanged.
+- Trainer construction derives `a_neg` with the same device kernel the
+  post-step refresh uses. The old CPU-side seed differed by ULPs from
+  the device exponential, which broke bit-continuous resume and made a
+  fresh trainer's first window numerically different from every later
+  one.
+- Oversized shapes are rejected loudly at construction: linear index
+  ranges are validated against 32-bit kernel arithmetic, and the
+  sequential-tape sizing rides an explicit constructor flag that must
+  match the scan mode the forward runs with.
+
+### Performance
+
+Measured on an RTX 6000 Ada shared with other load; the ratios are the
+claim and the absolute numbers will be re-measured on an idle box for
+the release.
+
+- Prompt prefill at a production shape (T=4621, 24 layers,
+  d_model=384): 384 ms before this cycle's kernel work, 66.5 ms after.
+- Multi-chunk training step (B=1, T=256, 24 layers, d_model=384):
+  f32 424 -> 127 ms, bf16 395 -> 122 ms.
+- Fused decode step across state capacities (d_model=256, 4 layers):
+  0.29 ms at d_state 64, 0.38 ms at 128, 1.50 ms at 256.
+
+### Next
+
+Multi-GPU inference for models larger than one device (pipeline
+sharding) and the Mamba-2 generation are the focus of the next
+releases.
+
 ## 0.5.3
 
 Serving-performance release. No change to any number the 0.5.2 paths
