@@ -121,11 +121,17 @@ impl DistContext {
             ContextInner::Process { comm: Some(c), .. } => {
                 c.all_reduce_sum_f32(arena.cached_ptr(), arena.len(), stream)
             }
-            ContextInner::Process { .. } => Err(DistError::Transport(
-                "no communicator attached to this rank (built without the nccl \
-                 feature, or bootstrap did not initialize one)"
-                    .into(),
-            )),
+            ContextInner::Process { .. } => {
+                // Without the nccl feature this arm is the only Process
+                // path and the operands go unused — bind them so the
+                // cuda-without-nccl build stays warning-free.
+                let _ = (&arena, &stream);
+                Err(DistError::Transport(
+                    "no communicator attached to this rank (built without the nccl \
+                     feature, or bootstrap did not initialize one)"
+                        .into(),
+                ))
+            }
         }
     }
 
