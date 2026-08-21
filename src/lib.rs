@@ -38,6 +38,7 @@
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub mod config;
+pub mod dist;
 #[cfg(feature = "hf")]
 pub mod hf;
 pub mod mamba3_siso;
