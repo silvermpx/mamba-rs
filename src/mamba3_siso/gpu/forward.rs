@@ -128,6 +128,8 @@ pub fn gpu_forward_mamba3_layer(
         builder.arg(&n_i);
         builder.arg(&ng_i);
         builder.arg(&ds_i);
+        let eps_g5: f32 = dims.rms_norm_eps;
+        builder.arg(&eps_g5);
         unsafe { builder.launch(cfg) }.map_err(|e| format!("bcnorm_fwd B F4a: {:?}", e))?;
     }
     // F4b: BCNorm C
@@ -149,6 +151,8 @@ pub fn gpu_forward_mamba3_layer(
         builder.arg(&n_i);
         builder.arg(&ng_i);
         builder.arg(&ds_i);
+        let eps_g5: f32 = dims.rms_norm_eps;
+        builder.arg(&eps_g5);
         unsafe { builder.launch(cfg) }.map_err(|e| format!("bcnorm_fwd C F4b: {:?}", e))?;
     }
     // F4c: Bias B
@@ -478,6 +482,8 @@ pub fn gpu_forward_mamba3_layer(
         builder.arg(&bt_i);
         builder.arg(&di_i);
         builder.arg(&hd_i);
+        let eps_g5: f32 = dims.rms_norm_eps;
+        builder.arg(&eps_g5);
         unsafe { builder.launch(grid) }.map_err(|e| format!("rmsnorm_gated_fwd m3 F7: {:?}", e))?;
     } else {
         let n = (bt * di) as i32;
@@ -739,6 +745,8 @@ pub fn gpu_forward_mamba3_target_burnin(
             builder.arg(&n_i);
             builder.arg(&ng_i);
             builder.arg(&ds_i);
+            let eps_g5: f32 = dims.rms_norm_eps;
+            builder.arg(&eps_g5);
             unsafe { builder.launch(cfg) }
                 .map_err(|e| format!("bcnorm_fwd B tgt L{l}: {:?}", e))?;
         }
@@ -760,6 +768,8 @@ pub fn gpu_forward_mamba3_target_burnin(
             builder.arg(&n_i);
             builder.arg(&ng_i);
             builder.arg(&ds_i);
+            let eps_g5: f32 = dims.rms_norm_eps;
+            builder.arg(&eps_g5);
             unsafe { builder.launch(cfg) }
                 .map_err(|e| format!("bcnorm_fwd C tgt L{l}: {:?}", e))?;
         }
@@ -916,6 +926,8 @@ pub fn gpu_forward_mamba3_target_burnin(
             builder.arg(&bt_i);
             builder.arg(&di_i);
             builder.arg(&hd_i);
+            let eps_g5: f32 = dims.rms_norm_eps;
+            builder.arg(&eps_g5);
             unsafe { builder.launch(grid) }
                 .map_err(|e| format!("rmsnorm_gated_fwd m3 tgt L{l}: {:?}", e))?;
         } else {

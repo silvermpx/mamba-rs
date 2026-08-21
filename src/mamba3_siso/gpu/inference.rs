@@ -635,6 +635,8 @@ impl Mamba3GpuInferenceEngine {
             builder.arg(&b_i);
             builder.arg(&ng_i);
             builder.arg(&ds_i);
+            let eps_g5: f32 = self.cfg.rms_norm_eps;
+            builder.arg(&eps_g5);
             unsafe { builder.launch(grid) }.map_err(|e| format!("F4a bcnorm B: {e:?}"))?;
         }
 
@@ -653,6 +655,8 @@ impl Mamba3GpuInferenceEngine {
             builder.arg(&b_i);
             builder.arg(&ng_i);
             builder.arg(&ds_i);
+            let eps_g5: f32 = self.cfg.rms_norm_eps;
+            builder.arg(&eps_g5);
             unsafe { builder.launch(grid) }.map_err(|e| format!("F4a bcnorm C: {e:?}"))?;
         }
 
@@ -801,6 +805,8 @@ impl Mamba3GpuInferenceEngine {
             builder.arg(&b_i);
             builder.arg(&di_i);
             builder.arg(&hd_i);
+            let eps_g5: f32 = self.cfg.rms_norm_eps;
+            builder.arg(&eps_g5);
             unsafe { builder.launch(grid) }.map_err(|e| format!("F7 rmsnorm_gated: {e:?}"))?;
         } else {
             let n = b * di;
@@ -1153,6 +1159,8 @@ impl Mamba3GpuInferenceMixed {
                 bld.arg(&b_i);
                 bld.arg(&ng_i);
                 bld.arg(&ds_i);
+                let eps_g5: f32 = engine.cfg.rms_norm_eps;
+                bld.arg(&eps_g5);
                 unsafe { bld.launch(grid) }.map_err(|e| format!("M3 F4a bcnorm B+C: {e:?}"))?;
             }
 
@@ -1319,6 +1327,8 @@ impl Mamba3GpuInferenceMixed {
                 bld.arg(&b_i);
                 bld.arg(&di_i);
                 bld.arg(&hd_i);
+                let eps_g5: f32 = engine.cfg.rms_norm_eps;
+                bld.arg(&eps_g5);
                 unsafe { bld.launch(grid) }.map_err(|e| format!("M3 F7 rmsnorm_gated: {e:?}"))?;
             } else {
                 let n = b * di;
