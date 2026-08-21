@@ -142,6 +142,15 @@ impl Mamba3Config {
                 self.rms_norm_eps
             ));
         }
+        if self.is_outproj_norm && self.d_inner() > 1024 {
+            return Err(format!(
+                "is_outproj_norm requires d_inner ({}) <= 1024: the \
+                 rmsnorm_gated kernels launch one thread per channel and \
+                 SILENTLY no-op past 1024 (P4, 0.6) — reject loudly here \
+                 until the kernels tile the channel dim",
+                self.d_inner()
+            ));
+        }
         Ok(())
     }
 
@@ -256,6 +265,28 @@ mod tests {
             }
             .train_use_parallel_scan()
         );
+    }
+
+    /// P4 (0.6): the rmsnorm_gated kernels silently no-op at d_inner > 1024
+    /// — the config now rejects that combination loudly. d_inner > 1024
+    /// WITHOUT the gated norm stays valid (those kernels never launch).
+    #[test]
+    fn test_gated_norm_d_inner_cap_rejected_loudly_p4() {
+        let big_gated = Mamba3Config {
+            d_model: 1024,
+            expand: 2,
+            headdim: 32,
+            is_outproj_norm: true,
+            ..Mamba3Config::default()
+        };
+        let err = big_gated.validate().unwrap_err();
+        assert!(err.contains("is_outproj_norm"), "{err}");
+
+        let big_silu = Mamba3Config {
+            is_outproj_norm: false,
+            ..big_gated
+        };
+        big_silu.validate().unwrap();
     }
 
     #[test]

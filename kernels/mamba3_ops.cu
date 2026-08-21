@@ -969,6 +969,8 @@ extern "C" __global__ void silu_gate_bwd(
     float silu_z = z_val * sigma;
     float d_out_val = d_out[i];
     d_y[i] = d_out_val * silu_z;
+    // P1 (0.6) parity pin: FACTORED silu-grad form, kept in lockstep with the
+    // CPU twin in src/mamba3_siso/cpu/backward.rs - change both or neither.
     d_z[i] = d_out_val * y[i] * sigma * (1.0f + z_val * (1.0f - sigma));
 }
 
@@ -1017,7 +1019,7 @@ extern "C" __global__ void rmsnorm_gated_forward(
         __syncthreads();
     }
 
-    float rstd = rsqrtf(shared_sum[group_id * group_size] / (float)group_size + RMS_EPS);
+    float rstd = 1.0f / sqrtf(shared_sum[group_id * group_size] / (float)group_size + RMS_EPS); // A9 (0.6): IEEE sqrtf + div, not the approximate MUFU.RSQ intrinsic - unifies the rstd form with every other norm in the tree.
     // Finite-guard (mirrors norms.cu RMSNorm fix): NaN/Inf in y would produce
     // rstd=NaN and cascade through the output gating into residual stream.
     if (!isfinite(rstd) || rstd > 1e20f) rstd = 1.0f;
@@ -1450,7 +1452,7 @@ extern "C" __global__ void rmsnorm_gated_forward_##SUFFIX(                      
         }                                                                       \
         __syncthreads();                                                        \
     }                                                                           \
-    float rstd = rsqrtf(shared_sum[group_id * group_size] / (float)group_size + RMS_EPS); \
+    float rstd = 1.0f / sqrtf(shared_sum[group_id * group_size] / (float)group_size + RMS_EPS); /* A9: IEEE form, see line 1020 */ \
     /* Finite-guard: match the f32 rmsnorm_gated_forward guard at line 982.    \
      * Without this, bf16 overflow upstream produces rstd=Inf/NaN and silently \
      * zeroes the entire gated output, cascading NaN through the rest of the   \
