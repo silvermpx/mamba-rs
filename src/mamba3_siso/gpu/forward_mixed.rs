@@ -136,6 +136,10 @@ impl GpuMamba3BackboneMixedActs {
     /// Allocate all save buffers. Must be called once per trainer instance;
     /// re-used forward-pass to forward-pass (zero alloc on hot path, CUDA
     /// Graph capture safe).
+    /// `use_parallel_scan` MUST match the flag the forward/backward run
+    /// with (`GpuMamba3Dims::use_parallel_scan`): it decides whether the
+    /// sequential-scan tapes get their full size or a 1-element sentinel,
+    /// and a mismatch means the sequential kernels write out of bounds.
     pub fn new(
         stream: &Arc<CudaStream>,
         cfg: &Mamba3Config,
@@ -143,6 +147,7 @@ impl GpuMamba3BackboneMixedActs {
         seq_len: usize,
         input_dim: usize,
         dtype: WeightDtype,
+        use_parallel_scan: bool,
     ) -> Result<Self, String> {
         let dm = cfg.d_model;
         let di = cfg.d_inner();
@@ -194,9 +199,28 @@ impl GpuMamba3BackboneMixedActs {
                     alpha: GpuBuffer::zeros(stream, bt * nh)?,
                     beta: GpuBuffer::zeros(stream, bt * nh)?,
                     gamma: GpuBuffer::zeros(stream, bt * nh)?,
-                    h_saved: GpuBuffer::zeros(stream, batch * (seq_len + 1) * di * ds)?,
-                    k_prev_saved: GpuBuffer::zeros(stream, bt * nh * ds)?,
-                    v_prev_saved: GpuBuffer::zeros(stream, bt * nh * hd)?,
+                    // Sequential-scan tapes, consumed only by the
+                    // sequential forward branch (the mixed backward
+                    // supports the chunked path only). On the chunked
+                    // path they shrink to 1-element sentinels — the h
+                    // tape alone is B*(T+1)*d_inner*d_state floats of
+                    // dead VRAM otherwise.
+                    h_saved: GpuBuffer::zeros(
+                        stream,
+                        if use_parallel_scan {
+                            1
+                        } else {
+                            batch * (seq_len + 1) * di * ds
+                        },
+                    )?,
+                    k_prev_saved: GpuBuffer::zeros(
+                        stream,
+                        if use_parallel_scan { 1 } else { bt * nh * ds },
+                    )?,
+                    v_prev_saved: GpuBuffer::zeros(
+                        stream,
+                        if use_parallel_scan { 1 } else { bt * nh * hd },
+                    )?,
                     y: DtypedBuf::zeros(stream, bt * di, dtype)?,
                     da_cumsum_saved: GpuBuffer::zeros(stream, da_cs_len)?,
                     k_scaled_saved: DtypedBuf::zeros(stream, bt * nh * ds, dtype)?,
@@ -286,7 +310,7 @@ pub fn gpu_forward_mamba3_layer_mixed(
     let na = dims.n_angles;
 
     // F1: rmsnorm_fwd_f32in_typed — f32 residual → typed post_norm, f32 rms_vals.
-    acts.residual.copy_from(temporal_f32, &ctx.stream)?;
+    acts.residual.copy_from_raw(temporal_f32, &ctx.stream)?;
     {
         let bt_i = bt as i32;
         let dm_i = dm as i32;
@@ -545,9 +569,9 @@ pub fn gpu_forward_mamba3_layer_mixed(
     }
 
     // Save alpha/beta/gamma into typed acts (f32 copy for backward).
-    acts.alpha.copy_from(alpha_scratch, &ctx.stream)?;
-    acts.beta.copy_from(beta_scratch, &ctx.stream)?;
-    acts.gamma.copy_from(gamma_scratch, &ctx.stream)?;
+    acts.alpha.copy_from_raw(alpha_scratch, &ctx.stream)?;
+    acts.beta.copy_from_raw(beta_scratch, &ctx.stream)?;
+    acts.gamma.copy_from_raw(gamma_scratch, &ctx.stream)?;
 
     // F6: SSM forward — sequential burnin OR chunked parallel scan.
     if dims.use_parallel_scan {
@@ -688,7 +712,7 @@ pub fn gpu_forward_mamba3_layer_mixed(
         // Save chunk_states → acts.chunk_states_saved BEFORE K5 reads them
         // (K5 reads as prev_states; saved version is what bwd needs).
         acts.chunk_states_saved
-            .copy_from(chunk_states_scratch, &ctx.stream)?;
+            .copy_from_raw(chunk_states_scratch, &ctx.stream)?;
 
         // K5: m3_chunk_scan_fwd_typed — typed y_out, x, q, K_scaled +
         // f32 qk_dot/da_cumsum/prev_states/D.
@@ -1025,11 +1049,66 @@ pub fn gpu_forward_mamba3_backbone_mixed(
             }
         }
     } else {
-        return Err(
-            "m3_mixed forward: non-identity input_proj not yet implemented — run \
-             with `cpu.input_proj_w.clear()` (identity branch)"
-                .into(),
-        );
+        // Non-identity input_proj — the trainable input-embedding path.
+        // Three launches, mirroring the Mamba-1 mixed pipeline: (1) cast
+        // the f32 input to the compute dtype, SAVED in acts (the backward
+        // dW consumes it); (2) typed GEMM with the f32 bias into the saved
+        // typed outputs; (3) upcast the outputs to seed the f32 residual
+        // stream (norm math and every residual carry stay f32).
+        let mid = dims.mamba_input_dim;
+        {
+            let n = (bt * mid) as i32;
+            let cast = match dtype {
+                WeightDtype::Bf16 => &m3k.cast_f32_to_bf16,
+                WeightDtype::F16 => &m3k.cast_f32_to_f16,
+                WeightDtype::F32 => {
+                    return Err("m3_mixed forward: unexpected f32 compute dtype".into());
+                }
+            };
+            let dst = acts.input_proj_inputs.cached_ptr();
+            let src = mamba_input.cached_ptr();
+            let mut bld = ctx.stream.launch_builder(cast);
+            bld.arg(&dst);
+            bld.arg(&src);
+            bld.arg(&n);
+            unsafe { bld.launch(grid_1d(bt * mid)) }
+                .map_err(|e| format!("m3_mixed input_proj input cast: {e:?}"))?;
+        }
+        gpu_gemm_typed_forward_raw(
+            ctx,
+            TypedPtr {
+                ptr: acts.input_proj_outputs.cached_ptr(),
+                dtype,
+            },
+            TypedPtr {
+                ptr: acts.input_proj_inputs.cached_ptr(),
+                dtype,
+            },
+            TypedPtr {
+                ptr: w.compute.input_proj_w.ptr(),
+                dtype,
+            },
+            Some(w.compute.input_proj_b.ptr()),
+            (bt, mid, dm),
+        )?;
+        {
+            let n = (bt * dm) as i32;
+            let cast = match dtype {
+                WeightDtype::Bf16 => &m3k.cast_bf16_to_f32,
+                WeightDtype::F16 => &m3k.cast_f16_to_f32,
+                WeightDtype::F32 => {
+                    return Err("m3_mixed forward: unexpected f32 compute dtype".into());
+                }
+            };
+            let dst = temporal_f32.cached_ptr();
+            let src = acts.input_proj_outputs.cached_ptr();
+            let mut bld = ctx.stream.launch_builder(cast);
+            bld.arg(&dst);
+            bld.arg(&src);
+            bld.arg(&n);
+            unsafe { bld.launch(grid_1d(bt * dm)) }
+                .map_err(|e| format!("m3_mixed input_proj residual upcast: {e:?}"))?;
+        }
     }
 
     // Mamba layers in forward order — per-layer offset into flat state buffers.
@@ -1064,7 +1143,7 @@ pub fn gpu_forward_mamba3_backbone_mixed(
     // norm_f — rmsnorm_fwd_f32in_typed: f32 residual (temporal) → f32 rms +
     // typed post-norm for subsequent LM head / loss. Save f32 pre-norm for
     // backward.
-    acts.norm_f_input.copy_from(temporal_f32, &ctx.stream)?;
+    acts.norm_f_input.copy_from_raw(temporal_f32, &ctx.stream)?;
     {
         let bt_i = bt as i32;
         let dm_i = dm as i32;

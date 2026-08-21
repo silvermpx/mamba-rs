@@ -103,9 +103,16 @@ fn build(ctx: &GpuCtx, dtype: WeightDtype, batch: usize, seq_len: usize) -> Setu
 
     let weights =
         GpuMamba3TrainMixedWeights::from_cpu(&ctx.stream, &cpu, &cfg, cfg.d_model, dtype).unwrap();
-    let acts =
-        GpuMamba3BackboneMixedActs::new(&ctx.stream, &cfg, batch, seq_len, cfg.d_model, dtype)
-            .unwrap();
+    let acts = GpuMamba3BackboneMixedActs::new(
+        &ctx.stream,
+        &cfg,
+        batch,
+        seq_len,
+        cfg.d_model,
+        dtype,
+        dims.use_parallel_scan,
+    )
+    .unwrap();
     let f32_scratch = GpuMamba3Scratch::new(&ctx.stream, &dims).unwrap();
     let mixed_scratch =
         GpuMamba3MixedScratch::new(&ctx.stream, &cfg, batch, seq_len, dtype).unwrap();

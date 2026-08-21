@@ -198,6 +198,7 @@ fn run_mixed(
         dims.seq_len,
         dims.mamba_input_dim,
         dtype,
+        dims.use_parallel_scan,
     )
     .unwrap();
     let mut scratch = GpuMamba3MixedScratch::new(&ctx.stream, cfg, b, dims.seq_len, dtype).unwrap();

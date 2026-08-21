@@ -361,26 +361,6 @@ impl Mamba3TrainerMixed {
         session: TrainSessionCfg,
         dtype: WeightDtype,
     ) -> Result<Self, String> {
-        // Fail at construction, not on the first step(): the mixed backward
-        // currently supports only the RMSNormGated output path and the
-        // identity-input_proj branch. The reference default
-        // (is_outproj_norm = false) would otherwise construct successfully
-        // — allocating every buffer and compiling 50+ kernels — and then
-        // error on step().
-        if !cfg.is_outproj_norm {
-            return Err("Mamba3TrainerMixed: the silu_gate output path \
-                 (is_outproj_norm = false) has no mixed-precision backward yet — \
-                 set cfg.is_outproj_norm = true or train with WeightDtype::F32"
-                .into());
-        }
-        if !cpu_weights.input_proj_w.is_empty() {
-            return Err(
-                "Mamba3TrainerMixed: non-identity input_proj is not yet supported in the \
-                 mixed-precision pipeline — clear input_proj_w/input_proj_b (identity \
-                 D2D branch) or train with WeightDtype::F32"
-                    .into(),
-            );
-        }
         cfg.validate()?;
         let TrainSessionCfg {
             input_dim,
@@ -422,8 +402,15 @@ impl Mamba3TrainerMixed {
         };
         dims.validate_index_budget()?;
 
-        let acts =
-            GpuMamba3BackboneMixedActs::new(&ctx.stream, &cfg, batch, seq_len, input_dim, dtype)?;
+        let acts = GpuMamba3BackboneMixedActs::new(
+            &ctx.stream,
+            &cfg,
+            batch,
+            seq_len,
+            input_dim,
+            dtype,
+            cfg.train_use_parallel_scan(),
+        )?;
         let f32_scratch = GpuMamba3Scratch::new(&ctx.stream, &dims)?;
         let mixed_scratch = GpuMamba3MixedScratch::new(&ctx.stream, &cfg, batch, seq_len, dtype)?;
 

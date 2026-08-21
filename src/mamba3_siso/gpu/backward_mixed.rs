@@ -127,11 +127,68 @@ pub fn gpu_backward_mamba3_backbone_mixed(
         )?;
     }
 
-    // input_proj bwd skipped when identity (production config).
+    // input_proj backward — identity leaves it untouched; non-identity
+    // computes dW/db only. The dX below the projection is deliberately
+    // discarded: the input is data, nothing trainable sits under it.
     if mamba_w.compute.input_proj_w.len_elems() > 0 {
-        return Err("m3_mixed bwd: non-identity input_proj bwd not yet wired — \
-             run with cpu.input_proj_w.clear() (identity branch)"
-            .into());
+        let mid = dims.mamba_input_dim;
+        // d_temporal now holds the f32 gradient w.r.t. the input_proj
+        // OUTPUT (every layer's dX has been folded back into it). Cast it
+        // to the compute dtype, reusing the saved typed OUTPUTS buffer —
+        // its forward value has no remaining consumer at this point.
+        let dy_ptr = acts.input_proj_outputs.cached_ptr();
+        {
+            let n = (bt * dm) as i32;
+            let cast = match dtype {
+                WeightDtype::Bf16 => &m3k.cast_f32_to_bf16,
+                WeightDtype::F16 => &m3k.cast_f32_to_f16,
+                WeightDtype::F32 => {
+                    return Err("m3_mixed backward: unexpected f32 compute dtype".into());
+                }
+            };
+            let src = d_temporal.cached_ptr();
+            let mut bld = ctx.stream.launch_builder(cast);
+            bld.arg(&dy_ptr);
+            bld.arg(&src);
+            bld.arg(&n);
+            unsafe { bld.launch(grid_1d(bt * dm)) }
+                .map_err(|e| format!("m3_mixed input_proj dY cast: {e:?}"))?;
+        }
+        // db: typed accumulating reduction of dY over (b, t) into the f32
+        // grad slice (deterministic — one block per bias index, no atomics).
+        {
+            let bt_i = bt as i32;
+            let dm_i = dm as i32;
+            let mut bld = ctx
+                .stream
+                .launch_builder(ctx.kernels.reduce_bias_typed.get(dtype));
+            let db = grads.input_proj_b.ptr();
+            bld.arg(&db);
+            bld.arg(&dy_ptr);
+            bld.arg(&bt_i);
+            bld.arg(&dm_i);
+            let threads = 256u32;
+            let cfg = LaunchConfig {
+                grid_dim: (dm as u32, 1, 1),
+                block_dim: (threads, 1, 1),
+                shared_mem_bytes: (threads as usize * std::mem::size_of::<f32>()) as u32,
+            };
+            unsafe { bld.launch(cfg) }
+                .map_err(|e| format!("m3_mixed reduce_bias input_proj: {e:?}"))?;
+        }
+        // dW: saved typed inputs^T @ dY, accumulated into the f32 grad slice.
+        gpu_sgemm_backward_dw_grad_typed(
+            ctx,
+            &grads.input_proj_w,
+            TypedPtr { ptr: dy_ptr, dtype },
+            TypedPtr {
+                ptr: acts.input_proj_inputs.cached_ptr(),
+                dtype,
+            },
+            bt,
+            mid,
+            dm,
+        )?;
     }
     Ok(())
 }
@@ -166,10 +223,20 @@ fn gpu_backward_mamba3_layer_mixed(
         lg,
     } = *layer;
     if !dims.use_parallel_scan {
-        return Err("m3_mixed bwd: sequential SSM bwd not yet supported".into());
-    }
-    if !dims.is_outproj_norm {
-        return Err("m3_mixed bwd: silu_gate (no norm) not yet supported".into());
+        // Deliberate non-goal, not a gap: a sequential mixed backward
+        // needs the full per-timestep h tape (B*(T+1)*d_inner*d_state
+        // floats — CHUNK_SIZE times the chunked tape), and the chunked
+        // path is bitwise-deterministic and faster at every measured T.
+        // Revisit only if one of these appears: (a) a model whose
+        // recurrence cannot be chunk-decomposed, (b) a debugging need
+        // for per-step gradient taps, (c) a VRAM regime where the
+        // chunked saves no longer fit but the sequential tape somehow
+        // would (it will not at current shapes).
+        return Err(
+            "m3_mixed bwd: sequential SSM bwd is unsupported by design; \
+             use the chunked parallel scan (ScanMode::Auto)"
+                .into(),
+        );
     }
 
     let bt = dims.bt();
@@ -223,18 +290,61 @@ fn gpu_backward_mamba3_layer_mixed(
     )?;
 
     // ----------------------------------------------------------------
-    // B7: RMSNormGated backward (Step 9c typed kernel).
+    // B7: gate backward — gated-RMSNorm or plain SiLU gate, matching
+    // the forward's output-stage choice.
     // ----------------------------------------------------------------
-    {
-        let nw_ptr = lw.norm_gate_weight.ptr();
-        let grid = LaunchConfig {
-            grid_dim: (bt as u32, 1, 1),
-            block_dim: (di as u32, 1, 1),
-            shared_mem_bytes: (di * std::mem::size_of::<f32>()) as u32,
-        };
+    if dims.is_outproj_norm {
+        {
+            let nw_ptr = lw.norm_gate_weight.ptr();
+            let grid = LaunchConfig {
+                grid_dim: (bt as u32, 1, 1),
+                block_dim: (di as u32, 1, 1),
+                shared_mem_bytes: (di * std::mem::size_of::<f32>()) as u32,
+            };
+            let mut builder = ctx
+                .stream
+                .launch_builder(m3k.rmsnorm_gated_bwd_typed.get(dtype));
+            let dyp = msc.d_y_typed.cached_ptr();
+            let dzp = msc.d_z_typed.cached_ptr();
+            let dgp = msc.d_gated_typed.cached_ptr();
+            let yp = acts.y.cached_ptr();
+            let zp = acts.z.cached_ptr();
+            builder.arg(&dyp);
+            builder.arg(&dzp);
+            builder.arg(sc.d_norm_gate_w.inner_mut()); // f32 master grad accumulator
+            builder.arg(&dgp);
+            builder.arg(&yp);
+            builder.arg(&zp);
+            builder.arg(&nw_ptr);
+            builder.arg(acts.gated_rms_vals.inner());
+            builder.arg(&bt_i);
+            builder.arg(&di_i);
+            builder.arg(&hd_i);
+            unsafe { builder.launch(grid) }
+                .map_err(|e| format!("rmsnorm_gated_bwd typed B7: {:?}", e))?;
+        }
+        // Reduce d_norm_gate_w → lg.norm_gate_weight
+        {
+            let n_i = di as i32;
+            let mut builder = ctx.stream.launch_builder(&m3k.colsum_accumulate);
+            let dst = lg.norm_gate_weight.ptr();
+            builder.arg(&dst);
+            builder.arg(sc.d_norm_gate_w.inner());
+            builder.arg(&bt_i);
+            builder.arg(&n_i);
+            unsafe { builder.launch(grid_1d(di)) }
+                .map_err(|e| format!("colsum d_norm_gate_w mixed: {:?}", e))?;
+        }
+    } else {
+        // Plain SiLU gate: no norm weight to accumulate; d_y and d_z
+        // come straight from the gate derivative. The kernel shares the
+        // f32 twin's factored d_silu form so all three precisions stay
+        // in lockstep with the CPU reference.
+        let n = bt * di;
+        let n_i = n as i32;
         let mut builder = ctx
             .stream
-            .launch_builder(m3k.rmsnorm_gated_bwd_typed.get(dtype));
+            .launch_builder(m3k.silu_gate_bwd_typed.get(dtype));
         let dyp = msc.d_y_typed.cached_ptr();
         let dzp = msc.d_z_typed.cached_ptr();
         let dgp = msc.d_gated_typed.cached_ptr();
@@ -242,29 +352,12 @@ fn gpu_backward_mamba3_layer_mixed(
         let zp = acts.z.cached_ptr();
         builder.arg(&dyp);
         builder.arg(&dzp);
-        builder.arg(sc.d_norm_gate_w.inner_mut()); // f32 master grad accumulator
         builder.arg(&dgp);
         builder.arg(&yp);
         builder.arg(&zp);
-        builder.arg(&nw_ptr);
-        builder.arg(acts.gated_rms_vals.inner());
-        builder.arg(&bt_i);
-        builder.arg(&di_i);
-        builder.arg(&hd_i);
-        unsafe { builder.launch(grid) }
-            .map_err(|e| format!("rmsnorm_gated_bwd typed B7: {:?}", e))?;
-    }
-    // Reduce d_norm_gate_w → lg.norm_gate_weight
-    {
-        let n_i = di as i32;
-        let mut builder = ctx.stream.launch_builder(&m3k.colsum_accumulate);
-        let dst = lg.norm_gate_weight.ptr();
-        builder.arg(&dst);
-        builder.arg(sc.d_norm_gate_w.inner());
-        builder.arg(&bt_i);
         builder.arg(&n_i);
-        unsafe { builder.launch(grid_1d(di)) }
-            .map_err(|e| format!("colsum d_norm_gate_w mixed: {:?}", e))?;
+        unsafe { builder.launch(grid_1d(n)) }
+            .map_err(|e| format!("silu_gate_bwd typed B7: {:?}", e))?;
     }
 
     // ----------------------------------------------------------------

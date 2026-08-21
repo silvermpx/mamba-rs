@@ -412,9 +412,35 @@ impl GpuMamba3LayerActs {
             alpha: GpuBuffer::zeros(stream, bt * nh)?,
             beta: GpuBuffer::zeros(stream, bt * nh)?,
             gamma: GpuBuffer::zeros(stream, bt * nh)?,
-            h_saved: GpuBuffer::zeros(stream, b * (t + 1) * di * ds)?,
-            k_prev_saved: GpuBuffer::zeros(stream, bt * nh * ds)?,
-            v_prev_saved: GpuBuffer::zeros(stream, bt * nh * hd)?,
+            // The three sequential-scan tapes are consumed only by the
+            // sequential forward/backward pair. On the chunked parallel
+            // path they are never read or written, so they shrink to a
+            // 1-element sentinel there — at large d_state the h tape
+            // alone is B*(T+1)*d_inner*d_state floats of dead VRAM.
+            h_saved: GpuBuffer::zeros(
+                stream,
+                if dims.use_parallel_scan {
+                    1
+                } else {
+                    b * (t + 1) * di * ds
+                },
+            )?,
+            k_prev_saved: GpuBuffer::zeros(
+                stream,
+                if dims.use_parallel_scan {
+                    1
+                } else {
+                    bt * nh * ds
+                },
+            )?,
+            v_prev_saved: GpuBuffer::zeros(
+                stream,
+                if dims.use_parallel_scan {
+                    1
+                } else {
+                    bt * nh * hd
+                },
+            )?,
             y: GpuBuffer::zeros(stream, bt * di)?,
             da_cumsum_saved: GpuBuffer::zeros(stream, b * nc * nh * cs)?,
             k_scaled_saved: GpuBuffer::zeros(stream, bt * nh * ds)?,

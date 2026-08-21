@@ -1419,6 +1419,31 @@ extern "C" __global__ void silu_gate_fwd_##SUFFIX(                              
 DEFINE_SILU_GATE_FWD(bf16, __nv_bfloat16, from_f_bf16)
 DEFINE_SILU_GATE_FWD(f16,  __half,        from_f_f16)
 
+/* Typed twins of silu_gate_bwd: same argument order and the SAME factored
+   d_silu form as the f32 kernel and the CPU twin (parity-pinned there) -
+   compute in f32, one RNE downcast at store. */
+#define DEFINE_SILU_GATE_BWD(SUFFIX, T_ACT, FROM_F)                             \
+extern "C" __global__ void silu_gate_bwd_##SUFFIX(                              \
+    T_ACT* __restrict__ d_y,                                                    \
+    T_ACT* __restrict__ d_z,                                                    \
+    const T_ACT* __restrict__ d_out,                                            \
+    const T_ACT* __restrict__ y,                                                \
+    const T_ACT* __restrict__ z,                                                \
+    int n                                                                       \
+) {                                                                             \
+    int i = blockIdx.x * blockDim.x + threadIdx.x;                              \
+    if (i >= n) return;                                                         \
+    float z_val = to_f(z[i]);                                                   \
+    float sigma = 1.0f / (1.0f + exp2f(-z_val * LOG2E));                        \
+    float silu_z = z_val * sigma;                                               \
+    float d_out_val = to_f(d_out[i]);                                           \
+    d_y[i] = FROM_F(d_out_val * silu_z);                                        \
+    d_z[i] = FROM_F(d_out_val * to_f(y[i]) * sigma * (1.0f + z_val * (1.0f - sigma))); \
+}
+
+DEFINE_SILU_GATE_BWD(bf16, __nv_bfloat16, from_f_bf16)
+DEFINE_SILU_GATE_BWD(f16,  __half,        from_f_f16)
+
 // ------- rmsnorm_gated_forward typed -------
 // y, z, out: T_ACT; weight, rms_vals: f32. Per-group RMSNorm * SiLU(z).
 #define DEFINE_RMSNORM_GATED_FWD(SUFFIX, T_ACT, FROM_F)                        \

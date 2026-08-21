@@ -272,15 +272,23 @@ pub fn mamba3_step(
     let dm = cfg.d_model;
     let input_dim = input.len();
 
-    // Input projection: [input_dim] → [d_model] (BLAS matvec + bias)
-    crate::ops::blas::matvec_forward(
-        &mut temporal[..dm],
-        &input[..input_dim],
-        &weights.input_proj_w,
-        Some(&weights.input_proj_b),
-        input_dim,
-        dm,
-    );
+    // Input projection: [input_dim] → [d_model] (BLAS matvec + bias).
+    // An empty weight means identity projection (HF M3 models feed the
+    // embedding straight in at d_model width) — plain copy, no bias,
+    // matching the GPU engine's identity branch.
+    if weights.input_proj_w.is_empty() {
+        debug_assert_eq!(input_dim, dm);
+        temporal[..dm].copy_from_slice(&input[..dm]);
+    } else {
+        crate::ops::blas::matvec_forward(
+            &mut temporal[..dm],
+            &input[..input_dim],
+            &weights.input_proj_w,
+            Some(&weights.input_proj_b),
+            input_dim,
+            dm,
+        );
+    }
 
     // Process each layer
     for (layer_idx, lw) in weights.layers.iter().enumerate() {

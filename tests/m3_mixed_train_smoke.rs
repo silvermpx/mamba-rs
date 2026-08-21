@@ -54,7 +54,16 @@ fn run_sync(dtype: WeightDtype) {
         GpuMamba3TrainMixedWeights::from_cpu(&ctx.stream, &cpu, &cfg, input_dim, dtype).unwrap();
 
     // Acts for a tiny shape (B=1, T=4).
-    let acts = GpuMamba3BackboneMixedActs::new(&ctx.stream, &cfg, 1, 4, input_dim, dtype).unwrap();
+    let acts = GpuMamba3BackboneMixedActs::new(
+        &ctx.stream,
+        &cfg,
+        1,
+        4,
+        input_dim,
+        dtype,
+        cfg.train_use_parallel_scan(),
+    )
+    .unwrap();
     assert_eq!(acts.layers.len(), cfg.n_layers);
     assert_eq!(acts.dtype, dtype);
 

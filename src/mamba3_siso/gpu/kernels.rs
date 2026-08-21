@@ -101,6 +101,9 @@ pub struct Mamba3Kernels {
     pub rope_fwd_typed: TypedKernel,
     /// Plain SiLU gate (no norm), half I/O.
     pub silu_gate_fwd_typed: TypedKernel,
+    /// SiLU-gate backward (typed twins share the f32 kernel's argument
+    /// order and factored d_silu form).
+    pub silu_gate_bwd_typed: TypedKernel,
     /// RMSNorm-gated output (half I/O, f32 weight/rms_vals).
     pub rmsnorm_gated_fwd_typed: TypedKernel,
     /// M3 SSM step — shared with training, already templated in mamba3_ssd.cu.
@@ -308,6 +311,11 @@ impl Mamba3Kernels {
                 f32: get("silu_gate_fwd")?,
                 bf16: get("silu_gate_fwd_bf16")?,
                 f16: get("silu_gate_fwd_f16")?,
+            },
+            silu_gate_bwd_typed: TypedKernel {
+                f32: get("silu_gate_bwd")?,
+                bf16: get("silu_gate_bwd_bf16")?,
+                f16: get("silu_gate_bwd_f16")?,
             },
             rmsnorm_gated_fwd_typed: TypedKernel {
                 f32: get("rmsnorm_gated_forward")?,

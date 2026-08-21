@@ -12,7 +12,8 @@
 //!   - `use_parallel_scan = true` (chunked SSM bwd via Steps 9b + 9d)
 //!   - `is_outproj_norm = true` (RMSNormGated via Step 9c)
 //!   - `n_angles > 0` (RoPE via Step 9a)
-//!   - `input_proj_w` identity (caller pre-clears in CPU weights)
+//!   - `input_proj_w` identity in the default pair (the dedicated
+//!     input_proj tests below run a live projection on both sides)
 
 #![cfg(feature = "cuda")]
 
@@ -244,6 +245,7 @@ fn run_mixed(
         dims.seq_len,
         dims.mamba_input_dim,
         dtype,
+        dims.use_parallel_scan,
     )
     .unwrap();
     let mut mixed_scratch =
@@ -328,8 +330,23 @@ fn check(dtype: WeightDtype, t: usize) {
 }
 
 fn check_cfg(cfg: Mamba3Config, dtype: WeightDtype, t: usize) {
-    let dims = dims_for(&cfg, 1, t);
     let (w_f32, w_mix) = build_weights(&cfg, 0xC0FFEE);
+    check_cfg_weights(cfg, dtype, t, &w_f32, &w_mix, true);
+}
+
+/// `skip_input_proj`: the default weight pair diverges on input_proj by
+/// construction (eye vs identity-branch), so its grads are skipped. When
+/// both sides share the SAME live projection, pass false and the
+/// input_proj dW/db parity is asserted too.
+fn check_cfg_weights(
+    cfg: Mamba3Config,
+    dtype: WeightDtype,
+    t: usize,
+    w_f32: &Mamba3Weights,
+    w_mix: &Mamba3Weights,
+    skip_input_proj: bool,
+) {
+    let dims = dims_for(&cfg, 1, t);
 
     let bt = dims.bt();
     let mamba_input = det_rand(bt * dims.mamba_input_dim, 0xB1);
@@ -344,8 +361,8 @@ fn check_cfg(cfg: Mamba3Config, dtype: WeightDtype, t: usize) {
         kernels: &m3k,
         dims: &dims,
     };
-    let (dt_ref, grads_ref) = run_f32(&exec, &w_f32, &cfg, &mamba_input, &d_temporal);
-    let (dt_typ, grads_typ) = run_mixed(&exec, &w_mix, &cfg, dtype, &mamba_input, &d_temporal);
+    let (dt_ref, grads_ref) = run_f32(&exec, w_f32, &cfg, &mamba_input, &d_temporal);
+    let (dt_typ, grads_typ) = run_mixed(&exec, w_mix, &cfg, dtype, &mamba_input, &d_temporal);
 
     assert_eq!(grads_ref.len(), grads_typ.len(), "grad arena sizes differ");
 
@@ -361,8 +378,7 @@ fn check_cfg(cfg: Mamba3Config, dtype: WeightDtype, t: usize) {
     let layout = grad_layout(&cfg, dims.mamba_input_dim);
     let mut off = 0usize;
     for (label, len) in layout {
-        // input_proj diverges by construction (eye vs identity-branch); skip.
-        let skip = label == "input_proj_w" || label == "input_proj_b";
+        let skip = skip_input_proj && (label == "input_proj_w" || label == "input_proj_b");
         if !skip {
             let r = &grads_ref[off..off + len];
             let t = &grads_typ[off..off + len];
@@ -444,4 +460,43 @@ fn m3_backward_mixed_parity_two_layers_bf16() {
         ..Mamba3Config::default()
     };
     check_cfg(cfg, WeightDtype::Bf16, 128);
+}
+
+/// Plain SiLU-gate output stage (no gated RMS norm) — exercises the
+/// silu backward branch of the mixed pipeline against the f32 oracle.
+/// norm_gate_weight grads are zero on both sides in this architecture
+/// (the weight exists but the forward never reads it).
+#[test]
+fn m3_backward_mixed_parity_silu_gate_bf16() {
+    let cfg = Mamba3Config {
+        is_outproj_norm: false,
+        ..cfg_for_step10()
+    };
+    check_cfg(cfg, WeightDtype::Bf16, 128);
+}
+
+#[test]
+fn m3_backward_mixed_parity_silu_gate_f16() {
+    let cfg = Mamba3Config {
+        is_outproj_norm: false,
+        ..cfg_for_step10()
+    };
+    check_cfg(cfg, WeightDtype::F16, 128);
+}
+
+/// Non-identity input_proj: both paths run the SAME live projection
+/// (random weights from init), and the input_proj dW/db are asserted
+/// against the f32 oracle — no skip.
+#[test]
+fn m3_backward_mixed_parity_input_proj_bf16() {
+    let cfg = cfg_for_step10();
+    let w = Mamba3Weights::init(&cfg, cfg.d_model, 0xC0FFEE);
+    check_cfg_weights(cfg, WeightDtype::Bf16, 128, &w, &w, false);
+}
+
+#[test]
+fn m3_backward_mixed_parity_input_proj_f16() {
+    let cfg = cfg_for_step10();
+    let w = Mamba3Weights::init(&cfg, cfg.d_model, 0xC0FFEE);
+    check_cfg_weights(cfg, WeightDtype::F16, 128, &w, &w, false);
 }
