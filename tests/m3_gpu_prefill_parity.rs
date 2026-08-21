@@ -208,6 +208,14 @@ fn assert_close(tag: &str, a: &[f32], b: &[f32], rel_tol: f32) {
 /// partial-tail and sub-chunk window lengths.
 #[test]
 fn gpu_prefill_matches_cpu_oracle() {
+    // CPU-vs-GPU is a tolerance comparison, not a bitwise contract, and
+    // the noise floor moves across GPU architectures (fma scheduling and
+    // math-intrinsic implementations differ): T=192 last_hidden passes
+    // the old 1e-3 pin on sm_89 (RTX 6000 Ada) but measures 1.32e-3 on sm_120
+    // (RTX 5090), cos 0.999999 both. 2e-3 keeps headroom over the
+    // measured floors while a real defect (e.g. a missing boundary
+    // fold) still fails by orders of magnitude.
+    const REL_TOL: f32 = 2e-3;
     let cfg = tiny_cfg();
     let w = identity_weights(&cfg, 7);
     let rig = rig();
@@ -220,7 +228,7 @@ fn gpu_prefill_matches_cpu_oracle() {
             &format!("last_hidden T={seq_len}"),
             &gpu_last,
             &cpu_last,
-            1e-3,
+            REL_TOL,
         );
         let (ssm, k, v, _angle) = states.download(&rig);
         let nl = cfg.n_layers;
@@ -233,19 +241,19 @@ fn gpu_prefill_matches_cpu_oracle() {
                 &format!("ssm_state T={seq_len} L{l}"),
                 &ssm[l * per_ssm..(l + 1) * per_ssm],
                 &ls.ssm_state,
-                1e-3,
+                REL_TOL,
             );
             assert_close(
                 &format!("k_state T={seq_len} L{l}"),
                 &k[l * per_k..(l + 1) * per_k],
                 &ls.k_state,
-                1e-3,
+                REL_TOL,
             );
             assert_close(
                 &format!("v_state T={seq_len} L{l}"),
                 &v[l * per_v..(l + 1) * per_v],
                 &ls.v_state,
-                1e-3,
+                REL_TOL,
             );
         }
     }
