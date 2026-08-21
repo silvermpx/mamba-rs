@@ -401,3 +401,76 @@ fn gpu_prefill_graph_replay_is_bitwise() {
         "replay must match the eager run bit-for-bit"
     );
 }
+
+/// Mixed-precision (bf16) backbone: prefill the prompt window, then decode
+/// several more tokens, and compare those continuation outputs against a
+/// twin backbone that stepped through the whole sequence token by token.
+/// The prefill runs through the resident f32 weights (states are f32 in
+/// both pipelines), so the continuation may differ from the all-typed run
+/// only by typed-step rounding of the prompt — bounded, not bitwise.
+#[test]
+fn gpu_prefill_mixed_backbone_handoff() {
+    use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
+    use mamba_rs::mamba3_siso::gpu::inference::GpuMamba3Backbone;
+
+    let cfg = tiny_cfg();
+    let w = identity_weights(&cfg, 77);
+    let t_prompt = 192usize;
+    let t_decode = 8usize;
+    let dm = cfg.d_model;
+    let prompt = det_input(t_prompt * dm, 0xA11CE);
+    let decode_inputs = det_input(t_decode * dm, 0xB0B);
+
+    // Reference: typed step loop over prompt + decode tokens.
+    let mut bb_steps =
+        GpuMamba3Backbone::new_with_dtype(0, &w, cfg.clone(), dm, 1, WeightDtype::Bf16).unwrap();
+    let mut out_ref = vec![0.0f32; dm];
+    let mut ref_outs = Vec::new();
+    for t in 0..t_prompt {
+        bb_steps
+            .step(&prompt[t * dm..(t + 1) * dm], &mut out_ref)
+            .unwrap();
+    }
+    for t in 0..t_decode {
+        bb_steps
+            .step(&decode_inputs[t * dm..(t + 1) * dm], &mut out_ref)
+            .unwrap();
+        ref_outs.push(out_ref.clone());
+    }
+
+    // Prefill lane: one-pass prompt, then the same decode tokens.
+    let mut bb_pre =
+        GpuMamba3Backbone::new_with_dtype(0, &w, cfg.clone(), dm, 1, WeightDtype::Bf16).unwrap();
+    let stream = bb_pre.stream().clone();
+    let mut gpu_prompt = GpuBuffer::zeros(&stream, t_prompt * dm).unwrap();
+    stream.synchronize().unwrap();
+    gpu_prompt.upload(&stream, &prompt).unwrap();
+    let mut prefill = bb_pre.alloc_prefill(t_prompt).unwrap();
+    bb_pre
+        .prefill_sequence(&mut prefill, &gpu_prompt, t_prompt, false)
+        .unwrap();
+    let mut out_pre = vec![0.0f32; dm];
+    for (t, ref_out) in ref_outs.iter().enumerate() {
+        bb_pre
+            .step(&decode_inputs[t * dm..(t + 1) * dm], &mut out_pre)
+            .unwrap();
+        // Looser than the f32 oracle bound: the reference lane rounded
+        // every prompt step through bf16 activations while the prefill
+        // lane ran the prompt at f32, so the two states differ by
+        // accumulated typed-step rounding.
+        let (mut dot, mut na, mut nb, mut num, mut den) = (0f64, 0f64, 0f64, 0f64, 0f64);
+        for (&x, &y) in ref_out.iter().zip(out_pre.iter()) {
+            dot += (x as f64) * (y as f64);
+            na += (x as f64) * (x as f64);
+            nb += (y as f64) * (y as f64);
+            num += ((x - y) as f64) * ((x - y) as f64);
+            den += (y as f64) * (y as f64);
+        }
+        let cos = dot / (na.sqrt() * nb.sqrt()).max(1e-30);
+        let rel = (num / den.max(1e-30)).sqrt();
+        assert!(
+            cos > 0.995 && rel < 5e-2,
+            "mixed handoff decode t={t}: cos={cos:.6} rel_l2={rel:.3e}"
+        );
+    }
+}

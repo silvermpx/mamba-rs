@@ -1764,19 +1764,20 @@ impl GpuMamba3Backbone {
         }
     }
 
-    /// Whether this backbone can run the one-pass chunked prompt prefill
-    /// (F32 engines; mixed engines ride the step loop for now).
+    /// Whether this backbone can run the one-pass chunked prompt prefill.
+    /// Both precision arms do: the mixed engine prefills through its
+    /// resident f32 weights (the persistent decode states are f32 in both
+    /// pipelines), then downcasts the final hidden into the typed decode
+    /// temporal.
     pub fn supports_prefill(&self) -> bool {
-        matches!(&self.engine, M3BackboneEngine::F32(_))
+        true
     }
 
     /// Allocate a one-pass prompt executor for a fixed prompt length.
     pub fn alloc_prefill(&self, seq_len: usize) -> Result<super::prefill::Mamba3Prefill, String> {
         match &self.engine {
             M3BackboneEngine::F32(e) => e.alloc_prefill(seq_len),
-            M3BackboneEngine::Mixed(_) => {
-                Err("M3 prefill: mixed backbone rides the step loop for now".to_string())
-            }
+            M3BackboneEngine::Mixed(e) => e.engine_ref().alloc_prefill(seq_len),
         }
     }
 
@@ -1800,7 +1801,55 @@ impl GpuMamba3Backbone {
                 carry_state,
                 &mut sc.temporal,
             ),
-            _ => Err("M3 prefill: mixed backbone rides the step loop for now".to_string()),
+            (M3BackboneEngine::Mixed(e), M3BackboneScratch::Mixed(sc)) => {
+                // Prefill through the resident f32 weights: the mixed
+                // wrapper keeps the full f32 engine alive for its pointer
+                // views, and the persistent SSM/K/V/angle states are f32
+                // in both pipelines, so decode continues from these states
+                // exactly as after typed steps (the prompt math simply ran
+                // at f32 precision).
+                let eng = e.engine_ref();
+                // The mixed decode requires an identity input projection
+                // (the LLM path), which also guarantees input_dim ==
+                // d_model — letting `gpu_input` (the f32 step-upload
+                // staging, idle during prefill) land the final hidden.
+                if eng.input_dim != eng.cfg.d_model {
+                    return Err("M3 mixed prefill requires the identity input projection \
+                         (input_dim == d_model), same as the mixed decode step"
+                        .into());
+                }
+                eng.prefill_sequence(
+                    prefill,
+                    mamba_input,
+                    seq_len,
+                    &mut self.state,
+                    carry_state,
+                    &mut sc.gpu_input,
+                )?;
+                // Downcast the final hidden into the typed decode temporal
+                // so the logits path continues exactly as after a step.
+                use cudarc::driver::PushKernelArg;
+                let ctx = &eng.ctx;
+                let n = eng.batch * eng.cfg.d_model;
+                let n_i = n as i32;
+                let cast = match sc.temporal.dtype() {
+                    WeightDtype::Bf16 => &ctx.kernels.cast_f32_to_bf16,
+                    WeightDtype::F16 => &ctx.kernels.cast_f32_to_f16,
+                    WeightDtype::F32 => {
+                        return Err("M3 mixed prefill: unexpected f32 scratch dtype".into());
+                    }
+                };
+                let dst = sc.temporal.cached_ptr();
+                let src = sc.gpu_input.cached_ptr();
+                let mut bld = ctx.stream.launch_builder(cast);
+                bld.arg(&dst);
+                bld.arg(&src);
+                bld.arg(&n_i);
+                unsafe { bld.launch(crate::mamba_ssm::gpu::launch::grid_1d(n)) }
+                    .map_err(|e| format!("M3 mixed prefill hidden downcast: {e:?}"))?;
+                Ok(())
+            }
+            _ => Err("M3 prefill: engine/scratch precision arms disagree".to_string()),
         }
     }
 
