@@ -50,7 +50,10 @@ pub struct Mamba3PrefillChunkScratch {
     /// State exiting the window per (b,h).
     final_states: GpuBuffer, // [B*nh*hd*ds]
     /// Entering SSM state incl. the trapezoidal boundary fold.
-    init_state: GpuBuffer, // [B*nh*hd*ds]
+    init_state: GpuBuffer,
+    /// fp64 staging for the chunk-parallel angle accumulation.
+    angle_chunk_sums: crate::mamba_ssm::gpu::buffers::GpuByteBuffer,
+    angle_chunk_carries: crate::mamba_ssm::gpu::buffers::GpuByteBuffer,
 }
 
 impl Mamba3PrefillChunkScratch {
@@ -74,6 +77,14 @@ impl Mamba3PrefillChunkScratch {
             chunk_states: GpuBuffer::zeros(stream, dims.batch * nc * nh * hd * ds)?,
             final_states: GpuBuffer::zeros(stream, dims.batch * nh * hd * ds)?,
             init_state: GpuBuffer::zeros(stream, dims.batch * nh * hd * ds)?,
+            angle_chunk_sums: crate::mamba_ssm::gpu::buffers::GpuByteBuffer::zeros(
+                stream,
+                dims.batch * nc * dims.nheads * dims.n_angles.max(1) * std::mem::size_of::<f64>(),
+            )?,
+            angle_chunk_carries: crate::mamba_ssm::gpu::buffers::GpuByteBuffer::zeros(
+                stream,
+                dims.batch * nc * dims.nheads * dims.n_angles.max(1) * std::mem::size_of::<f64>(),
+            )?,
         })
     }
 }
@@ -326,24 +337,21 @@ impl Mamba3Prefill {
             // RoPE angle accumulation continues from the persistent
             // accumulator (zeroed above for a stateless window).
             if na > 0 {
-                {
-                    let na_i = na as i32;
-                    let mut b = ctx.stream.launch_builder(&m3k.m3_angle_dt_fwd_seq);
-                    b.arg(tgt.angle_cumsum.inner_mut());
-                    b.arg(&a_ptr);
-                    b.arg(tgt.angles_raw.inner());
-                    b.arg(tgt.dt.inner());
-                    b.arg(&b_i);
-                    b.arg(&t_i);
-                    b.arg(&nh_i);
-                    b.arg(&na_i);
-                    let grid = cudarc::driver::LaunchConfig {
-                        grid_dim: (dims.batch as u32, (nh * na).div_ceil(256) as u32, 1),
-                        block_dim: (256.min((nh * na) as u32), 1, 1),
-                        shared_mem_bytes: 0,
-                    };
-                    unsafe { b.launch(grid) }.map_err(|e| format!("prefill angle L{l}: {e:?}"))?;
-                }
+                crate::mamba3_siso::gpu::forward::gpu_angle_chunked_fwd(
+                    ctx,
+                    m3k,
+                    &mut tgt.angle_cumsum,
+                    a_ptr,
+                    &tgt.angles_raw,
+                    &tgt.dt,
+                    &ck.angle_chunk_sums,
+                    &ck.angle_chunk_carries,
+                    dims.batch,
+                    dims.seq_len,
+                    nh,
+                    na,
+                )?;
+
                 {
                     let n_i = bt as i32;
                     let na_i = na as i32;

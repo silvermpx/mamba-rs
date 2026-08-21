@@ -6,7 +6,7 @@
 //! contain the launch-orchestration code.
 
 use super::kernels::Mamba3Kernels;
-use crate::mamba_ssm::gpu::buffers::GpuBuffer;
+use crate::mamba_ssm::gpu::buffers::{GpuBuffer, GpuByteBuffer};
 use crate::mamba_ssm::gpu::context::GpuCtx;
 use std::sync::Arc;
 
@@ -250,6 +250,11 @@ pub struct GpuMamba3Scratch {
     // Forward
     pub proj_flat: GpuBuffer, // [B*T*in_proj_dim]
     pub out_flat: GpuBuffer,  // [B*T*d_model]
+    /// fp64 staging for the chunk-parallel angle accumulation:
+    /// per-chunk raw delta sums and entering carries,
+    /// `[B * n_chunks * nh * n_angles]` doubles each.
+    pub angle_chunk_sums: GpuByteBuffer,
+    pub angle_chunk_carries: GpuByteBuffer,
 
     // Backward
     pub d_gated: GpuBuffer,       // [B*T*d_inner]
@@ -485,9 +490,13 @@ impl GpuMamba3Scratch {
         let hd = dims.headdim;
         let ip = dims.in_proj_dim;
         let b = dims.batch;
+        let angle_stage_bytes =
+            b * dims.n_chunks() * nh * dims.n_angles.max(1) * std::mem::size_of::<f64>();
         Ok(Self {
             proj_flat: GpuBuffer::zeros(stream, bt * ip)?,
             out_flat: GpuBuffer::zeros(stream, bt * dm)?,
+            angle_chunk_sums: GpuByteBuffer::zeros(stream, angle_stage_bytes)?,
+            angle_chunk_carries: GpuByteBuffer::zeros(stream, angle_stage_bytes)?,
             d_gated: GpuBuffer::zeros(stream, bt * di)?,
             d_y: GpuBuffer::zeros(stream, bt * di)?,
             d_z: GpuBuffer::zeros(stream, bt * di)?,

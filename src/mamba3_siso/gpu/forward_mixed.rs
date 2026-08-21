@@ -475,34 +475,23 @@ pub fn gpu_forward_mamba3_layer_mixed(
         unsafe { bld.launch(cfg) }.map_err(|e| format!("m3_mixed F4cd bias: {e:?}"))?;
     }
 
-    // F5: angle_dt sequential (f32 only — all args f32 per my acts layout).
+    // F5: angle accumulation (chunk-parallel, f32 args; see
+    // gpu_angle_chunked_fwd).
     if na > 0 {
-        let b_i = (bt / dims.seq_len) as i32;
-        let t_i = dims.seq_len as i32;
-        let nh_i = nh as i32;
-        let na_i = na as i32;
-        let mut bld = ctx.stream.launch_builder(&m3k.m3_angle_dt_fwd_seq);
-        let ac = acts.angle_cumsum.cached_ptr();
-        let ar = acts.angles_raw.cached_ptr();
-        let dt = acts.dt.cached_ptr();
-        bld.arg(&ac);
-        bld.arg(&angle_state);
-        bld.arg(&ar);
-        bld.arg(&dt);
-        bld.arg(&b_i);
-        bld.arg(&t_i);
-        bld.arg(&nh_i);
-        bld.arg(&na_i);
-        let grid = cudarc::driver::LaunchConfig {
-            grid_dim: (
-                (bt / dims.seq_len) as u32,
-                (nh * na).div_ceil(256) as u32,
-                1,
-            ),
-            block_dim: (256.min((nh * na) as u32), 1, 1),
-            shared_mem_bytes: 0,
-        };
-        unsafe { bld.launch(grid) }.map_err(|e| format!("m3_mixed F5 angle_dt: {e:?}"))?;
+        crate::mamba3_siso::gpu::forward::gpu_angle_chunked_fwd(
+            ctx,
+            m3k,
+            &mut acts.angle_cumsum,
+            angle_state,
+            &acts.angles_raw,
+            &acts.dt,
+            &scratch.angle_chunk_sums,
+            &scratch.angle_chunk_carries,
+            bt / dims.seq_len,
+            dims.seq_len,
+            nh,
+            na,
+        )?;
     }
 
     // F4e/f: rope_fwd_typed — typed B/C_biased + f32 angle_cumsum → typed k/q.
@@ -911,6 +900,10 @@ pub struct GpuMamba3MixedScratch {
     pub alpha: GpuBuffer,
     pub beta: GpuBuffer,
     pub gamma: GpuBuffer,
+    /// fp64 staging for the chunk-parallel angle accumulation
+    /// (`[B * n_chunks * nh * n_angles]` doubles each).
+    pub angle_chunk_sums: crate::mamba_ssm::gpu::buffers::GpuByteBuffer,
+    pub angle_chunk_carries: crate::mamba_ssm::gpu::buffers::GpuByteBuffer,
 
     // Step 10 — bwd-only typed staging buffers (activation grads on the
     // wire match activation storage dtype per AMP precision invariant).
@@ -989,6 +982,22 @@ impl GpuMamba3MixedScratch {
             da_cumsum: GpuBuffer::zeros(stream, batch * n_chunks_max * nh * CHUNK_SIZE)?,
             chunk_states: GpuBuffer::zeros(stream, batch * n_chunks_max * nh * hd * ds)?,
             final_states: GpuBuffer::zeros(stream, batch * nh * hd * ds)?,
+            angle_chunk_sums: crate::mamba_ssm::gpu::buffers::GpuByteBuffer::zeros(
+                stream,
+                batch
+                    * n_chunks_max
+                    * nh
+                    * cfg.num_rope_angles().max(1)
+                    * std::mem::size_of::<f64>(),
+            )?,
+            angle_chunk_carries: crate::mamba_ssm::gpu::buffers::GpuByteBuffer::zeros(
+                stream,
+                batch
+                    * n_chunks_max
+                    * nh
+                    * cfg.num_rope_angles().max(1)
+                    * std::mem::size_of::<f64>(),
+            )?,
             dtype,
         };
         stream

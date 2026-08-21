@@ -13,17 +13,114 @@
 //!
 //! For mixed-precision (bf16/f16) forward see [`super::forward_mixed`].
 
+use super::kernels::Mamba3Kernels;
 use super::state::{
-    GpuMamba3BackboneActs, GpuMamba3LayerActs, GpuMamba3Scratch, GpuMamba3StateBufs,
+    CHUNK_SIZE, GpuMamba3BackboneActs, GpuMamba3LayerActs, GpuMamba3Scratch, GpuMamba3StateBufs,
     GpuMamba3TargetScratch, M3Exec, Mamba3LayerPtrs,
 };
 use super::weights::{GpuMamba3LayerWeights, GpuMamba3Weights};
 use crate::mamba_ssm::gpu::blas::gpu_sgemm_forward_raw;
-use crate::mamba_ssm::gpu::buffers::GpuBuffer;
+use crate::mamba_ssm::gpu::buffers::{GpuBuffer, GpuByteBuffer};
+use crate::mamba_ssm::gpu::context::GpuCtx;
 use crate::mamba_ssm::gpu::launch::{grid_1d, grid_norm};
 use cudarc::driver::PushKernelArg;
 
 /// Mamba-3 SISO single-layer GPU forward (8-phase pipeline).
+/// Chunk-parallel angle accumulation: per-chunk fp64 delta sums, a
+/// serial carry chain per (batch, head, angle) seeded from the
+/// persistent angle state, then a per-chunk re-walk writing the f32
+/// cumsum and the exit state. Deterministic by construction (fixed
+/// association, one writer per cell, no atomics); replaces the
+/// sequential single-thread-per-lane kernel whose dependent fp64 chain
+/// dominates multi-chunk windows.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "flat launch-parameter pack \
+    shared by three call sites; a struct would be built and destructured \
+    at every launch for no reuse"
+)]
+pub(crate) fn gpu_angle_chunked_fwd(
+    ctx: &GpuCtx,
+    m3k: &Mamba3Kernels,
+    angle_cumsum: &mut GpuBuffer,
+    angle_state_ptr: cudarc::driver::sys::CUdeviceptr,
+    angles_raw: &GpuBuffer,
+    dt: &GpuBuffer,
+    sums: &GpuByteBuffer,
+    carries: &GpuByteBuffer,
+    batch: usize,
+    seq_len: usize,
+    nh: usize,
+    na: usize,
+) -> Result<(), String> {
+    use cudarc::driver::PushKernelArg;
+    let cs = CHUNK_SIZE;
+    let nc = seq_len.div_ceil(cs);
+    let b_i = batch as i32;
+    let t_i = seq_len as i32;
+    let nh_i = nh as i32;
+    let na_i = na as i32;
+    let cs_i = cs as i32;
+    let nc_i = nc as i32;
+    let lane_grid_y = (nh * na).div_ceil(256) as u32;
+    let lane_block = 256.min((nh * na) as u32);
+    let sums_ptr = sums.cached_ptr();
+    let carries_ptr = carries.cached_ptr();
+    {
+        let mut bld = ctx.stream.launch_builder(&m3k.m3_angle_chunk_sums);
+        bld.arg(&sums_ptr);
+        bld.arg(angles_raw.inner());
+        bld.arg(dt.inner());
+        bld.arg(&b_i);
+        bld.arg(&t_i);
+        bld.arg(&nh_i);
+        bld.arg(&na_i);
+        bld.arg(&cs_i);
+        let grid = cudarc::driver::LaunchConfig {
+            grid_dim: ((batch * nc) as u32, lane_grid_y, 1),
+            block_dim: (lane_block, 1, 1),
+            shared_mem_bytes: 0,
+        };
+        unsafe { bld.launch(grid) }.map_err(|e| format!("angle chunk sums: {e:?}"))?;
+    }
+    {
+        let mut bld = ctx.stream.launch_builder(&m3k.m3_angle_chunk_carries);
+        bld.arg(&carries_ptr);
+        bld.arg(&sums_ptr);
+        bld.arg(&angle_state_ptr);
+        bld.arg(&b_i);
+        bld.arg(&nc_i);
+        bld.arg(&nh_i);
+        bld.arg(&na_i);
+        let grid = cudarc::driver::LaunchConfig {
+            grid_dim: (batch as u32, lane_grid_y, 1),
+            block_dim: (lane_block, 1, 1),
+            shared_mem_bytes: 0,
+        };
+        unsafe { bld.launch(grid) }.map_err(|e| format!("angle chunk carries: {e:?}"))?;
+    }
+    {
+        let mut bld = ctx.stream.launch_builder(&m3k.m3_angle_chunk_apply);
+        bld.arg(angle_cumsum.inner_mut());
+        bld.arg(&angle_state_ptr);
+        bld.arg(&carries_ptr);
+        bld.arg(angles_raw.inner());
+        bld.arg(dt.inner());
+        bld.arg(&b_i);
+        bld.arg(&t_i);
+        bld.arg(&nh_i);
+        bld.arg(&na_i);
+        bld.arg(&cs_i);
+        let grid = cudarc::driver::LaunchConfig {
+            grid_dim: ((batch * nc) as u32, lane_grid_y, 1),
+            block_dim: (lane_block, 1, 1),
+            shared_mem_bytes: 0,
+        };
+        unsafe { bld.launch(grid) }.map_err(|e| format!("angle chunk apply: {e:?}"))?;
+    }
+    Ok(())
+}
+
 pub fn gpu_forward_mamba3_layer(
     exec: &M3Exec<'_>,
     temporal: &mut GpuBuffer,
@@ -192,32 +289,22 @@ pub fn gpu_forward_mamba3_layer(
             .map_err(|e| format!("bc_bias_add C F4d: {:?}", e))?;
     }
 
-    // F5: angle_dt sequential accumulation
+    // F5: angle accumulation (chunk-parallel; see gpu_angle_chunked_fwd)
     if na > 0 {
-        let b_i = (bt / dims.seq_len) as i32;
-        let t_i = dims.seq_len as i32;
-        let nh_i = nh as i32;
-        let na_i = na as i32;
-        let angle_st = layer_ptrs.angle_state;
-        let mut builder = ctx.stream.launch_builder(&m3k.m3_angle_dt_fwd_seq);
-        builder.arg(acts.angle_cumsum.inner_mut());
-        builder.arg(&angle_st);
-        builder.arg(acts.angles_raw.inner());
-        builder.arg(acts.dt.inner());
-        builder.arg(&b_i);
-        builder.arg(&t_i);
-        builder.arg(&nh_i);
-        builder.arg(&na_i);
-        let grid = cudarc::driver::LaunchConfig {
-            grid_dim: (
-                (bt / dims.seq_len) as u32,
-                (nh * na).div_ceil(256) as u32,
-                1,
-            ),
-            block_dim: (256.min((nh * na) as u32), 1, 1),
-            shared_mem_bytes: 0,
-        };
-        unsafe { builder.launch(grid) }.map_err(|e| format!("angle_dt_fwd_seq F5: {:?}", e))?;
+        gpu_angle_chunked_fwd(
+            ctx,
+            m3k,
+            &mut acts.angle_cumsum,
+            layer_ptrs.angle_state,
+            &acts.angles_raw,
+            &acts.dt,
+            &scratch.angle_chunk_sums,
+            &scratch.angle_chunk_carries,
+            bt / dims.seq_len,
+            dims.seq_len,
+            nh,
+            na,
+        )?;
     }
 
     // F4e+f: RoPE on B->K and C->Q

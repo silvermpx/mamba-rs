@@ -419,6 +419,7 @@ extern "C" __global__ void m3_chunk_scan_fwd(
     int chunk_end = chunk_start + chunk_size;
     if (chunk_end > T) chunk_end = T;
     int chunk_len = chunk_end - chunk_start;
+    if (chunk_size > 64) return;  // tile rows are sized for the fixed chunk of 64
 
     // dA_cumsum base for this (b, chunk, h)
     int cs_base = ((b * n_chunks + chunk) * nh + h) * chunk_size;
@@ -427,6 +428,34 @@ extern "C" __global__ void m3_chunk_scan_fwd(
     int state_base = ((b * n_chunks + chunk) * nh + h) * hd * ds + p * ds;
 
     float d_skip = D[h];
+
+    // The decayed causal attention tile decay(t,s) * (Q[t] . K_scaled[s])
+    // is identical for every lane p, so it is computed ONCE per
+    // (chunk, head) here instead of once per lane: rows are strided over
+    // the lanes, each row stages Q[t] in registers and dots it against
+    // the K rows below the diagonal. Every tile element is written by
+    // exactly one lane and every dot runs n ascending, so the arithmetic
+    // and its order match the per-lane original.
+    __shared__ float qk_tile[64 * 64];
+    for (int t_local = p; t_local < chunk_len; t_local += hd) {
+        int t = chunk_start + t_local;
+        float dA_t = dA_cumsum[cs_base + t_local];
+        int q_base = (b * T + t) * nh * ds + h * ds;
+        float q_reg[MAMBA_RS_STATE_CAP];
+        for (int n = 0; n < ds; n++) q_reg[n] = Q[q_base + n];
+        for (int s_local = 0; s_local < t_local; s_local++) {
+            int s = chunk_start + s_local;
+            float dA_s = dA_cumsum[cs_base + s_local];
+            float decay = FAST_EXP(fminf(dA_t - dA_s, 0.0f)); // Same float-noise safety net as the state-passing kernel above.
+            float qk_val = 0.0f;
+            int ks_base = (b * T + s) * nh * ds + h * ds;
+            for (int n = 0; n < ds; n++) {
+                qk_val += q_reg[n] * K_scaled[ks_base + n];
+            }
+            qk_tile[t_local * 64 + s_local] = decay * qk_val;
+        }
+    }
+    __syncthreads();
 
     for (int t_local = 0; t_local < chunk_len; t_local++) {
         int t = chunk_start + t_local;
@@ -441,24 +470,14 @@ extern "C" __global__ void m3_chunk_scan_fwd(
         }
         y_off *= state_decay;
 
-        // Y_diag: intra-chunk contribution from positions s <= t (strictly causal + diagonal)
-        // For s < t: exp(dA[t] - dA[s]) * Q[t] dot K_scaled[s] * V[s]
-        // For s == t: qk_dot handles the diagonal (gamma contribution)
+        // Y_diag: intra-chunk contribution from positions s <= t (strictly
+        // causal + diagonal). For s < t the decayed Q.K factor comes from
+        // the shared tile; s == t rides qk_dot (gamma contribution).
         float y_diag = 0.0f;
         for (int s_local = 0; s_local < t_local; s_local++) {
             int s = chunk_start + s_local;
-            float dA_s = dA_cumsum[cs_base + s_local];
-            float decay = FAST_EXP(fminf(dA_t - dA_s, 0.0f)); // Same float-noise safety net as the state-passing kernel above.
-
-            // Q[t] dot K_scaled[s] (in d_state dimension)
-            float qk_val = 0.0f;
-            int ks_base = (b * T + s) * nh * ds + h * ds;
-            for (int n = 0; n < ds; n++) {
-                qk_val += Q[q_base + n] * K_scaled[ks_base + n];
-            }
-
             float v_s = x[(b * T + s) * d_inner + h * hd + p];
-            y_diag += decay * qk_val * v_s;
+            y_diag += qk_tile[t_local * 64 + s_local] * v_s;
         }
 
         // D + qk_dot skip: (D[h] + qk_dot[t,h]) * V[t,h,p]
@@ -1256,9 +1275,30 @@ m3_chunk_scan_fwd_##SUFFIX(                                                   \
     int chunk_end = chunk_start + chunk_size;                                 \
     if (chunk_end > T) chunk_end = T;                                         \
     int chunk_len = chunk_end - chunk_start;                                  \
+    if (chunk_size > 64) return;                                              \
     int cs_base = ((b * n_chunks + chunk) * nh + h) * chunk_size;             \
     int state_base = ((b * n_chunks + chunk) * nh + h) * hd * ds + p * ds;    \
     float d_skip = D[h];                                                      \
+    __shared__ float qk_tile[64 * 64];                                        \
+    for (int t_local = p; t_local < chunk_len; t_local += hd) {               \
+        int t = chunk_start + t_local;                                        \
+        float dA_t = dA_cumsum[cs_base + t_local];                            \
+        int q_base = (b * T + t) * nh * ds + h * ds;                          \
+        float q_reg[MAMBA_RS_STATE_CAP];                                      \
+        for (int n = 0; n < ds; n++) q_reg[n] = to_f(Q[q_base + n]);          \
+        for (int s_local = 0; s_local < t_local; s_local++) {                 \
+            int s = chunk_start + s_local;                                    \
+            float dA_s = dA_cumsum[cs_base + s_local];                        \
+            float decay = FAST_EXP(fminf(dA_t - dA_s, 0.0f));                 \
+            float qk_val = 0.0f;                                              \
+            int ks_base = (b * T + s) * nh * ds + h * ds;                     \
+            for (int n = 0; n < ds; n++) {                                    \
+                qk_val += q_reg[n] * to_f(K_scaled[ks_base + n]);             \
+            }                                                                 \
+            qk_tile[t_local * 64 + s_local] = decay * qk_val;                 \
+        }                                                                     \
+    }                                                                         \
+    __syncthreads();                                                          \
     for (int t_local = 0; t_local < chunk_len; t_local++) {                   \
         int t = chunk_start + t_local;                                        \
         float dA_t = dA_cumsum[cs_base + t_local];                            \
@@ -1272,15 +1312,8 @@ m3_chunk_scan_fwd_##SUFFIX(                                                   \
         float y_diag = 0.0f;                                                  \
         for (int s_local = 0; s_local < t_local; s_local++) {                 \
             int s = chunk_start + s_local;                                    \
-            float dA_s = dA_cumsum[cs_base + s_local];                        \
-            float decay = FAST_EXP(fminf(dA_t - dA_s, 0.0f));                              \
-            float qk_val = 0.0f;                                              \
-            int ks_base = (b * T + s) * nh * ds + h * ds;                     \
-            for (int n = 0; n < ds; n++) {                                    \
-                qk_val += to_f(Q[q_base + n]) * to_f(K_scaled[ks_base + n]);  \
-            }                                                                 \
             float v_s = to_f(x[(b * T + s) * d_inner + h * hd + p]);          \
-            y_diag += decay * qk_val * v_s;                                   \
+            y_diag += qk_tile[t_local * 64 + s_local] * v_s;                  \
         }                                                                     \
         float x_t = to_f(x[(b * T + t) * d_inner + h * hd + p]);              \
         int th = (b * T + t) * nh + h;                                        \

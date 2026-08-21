@@ -430,6 +430,128 @@ extern "C" __global__ void m3_angle_dt_fwd_seq(
 }
 
 // ============================================================================
+// Chunked angle accumulation -- the parallel replacement for the
+// sequential kernel above on multi-chunk windows.
+// ============================================================================
+//
+// The sequential kernel runs ONE thread per (b, h, angle) through the
+// whole window: at production shapes that is a few hundred threads on a
+// hundred-SM GPU walking thousands of dependent fp64 adds with a
+// per-step fmod, and it dominates the prefill profile. The chunked
+// scheme keeps a deterministic fixed association -- every partial sum
+// is a serial left fold written by exactly one thread, no atomics --
+// while exposing (b, h, angle, chunk) parallelism:
+//
+//   pass 1: per-chunk raw delta sums (fp64, no wrap inside a chunk;
+//           deltas are a few radians each, so 64 of them stay well
+//           within exact fp64 range)
+//   pass 2: serial carry chain over the chunks per (b, h, angle),
+//           seeded from the persistent angle state, wrapped once per
+//           chunk boundary
+//   pass 3: per-chunk re-walk from the entering carry with the same
+//           per-step wrap the sequential kernel applies, writing the
+//           f32 cumsum and, from the last chunk, the exit state
+//
+// This is a different rounding route than the single serial chain (the
+// carries defer wrapping to chunk boundaries); the difference is a few
+// fp64 ulps, invisible at the f32 output precision. It is a numeric
+// route of its own and is validated by its own parity oracle.
+
+extern "C" __global__ void m3_angle_chunk_sums(
+    double* __restrict__ chunk_sums,      // [B * n_chunks * nh * n_angles]
+    const float* __restrict__ angles_raw, // [B*T * n_angles]
+    const float* __restrict__ dt_arr,     // [B*T * nh]
+    int B, int T, int nh, int n_angles, int chunk_size
+) {
+    int n_chunks = (T + chunk_size - 1) / chunk_size;
+    int bc = blockIdx.x;
+    int b = bc / n_chunks;
+    int chunk = bc % n_chunks;
+    if (b >= B) return;
+    int idx = blockIdx.y * blockDim.x + threadIdx.x;
+    int total_per_env = nh * n_angles;
+    if (idx >= total_per_env) return;
+    int h = idx / n_angles;
+    int a = idx % n_angles;
+
+    int t_start = chunk * chunk_size;
+    int t_end = t_start + chunk_size;
+    if (t_end > T) t_end = T;
+
+    double sum = 0.0;
+    for (int t = t_start; t < t_end; t++) {
+        int bt = b * T + t;
+        float raw = angles_raw[bt * n_angles + a];
+        float dt_val = dt_arr[bt * nh + h];
+        sum += (double)(tanhf(raw) * PI * dt_val);
+    }
+    chunk_sums[((b * n_chunks + chunk) * nh + h) * n_angles + a] = sum;
+}
+
+extern "C" __global__ void m3_angle_chunk_carries(
+    double* __restrict__ carries,          // [B * n_chunks * nh * n_angles]
+    const double* __restrict__ chunk_sums, // [B * n_chunks * nh * n_angles]
+    const float* __restrict__ angle_state, // [B * nh * n_angles]
+    int B, int n_chunks, int nh, int n_angles
+) {
+    int b = blockIdx.x;
+    if (b >= B) return;
+    int idx = blockIdx.y * blockDim.x + threadIdx.x;
+    int total_per_env = nh * n_angles;
+    if (idx >= total_per_env) return;
+
+    const double TWO_PI_64 = 6.283185307179586;
+    double state = (double)angle_state[b * total_per_env + idx];
+    for (int c = 0; c < n_chunks; c++) {
+        int base = ((b * n_chunks + c) * nh) * n_angles + idx;
+        carries[base] = state;
+        state += chunk_sums[base];
+        state = fmod(state, TWO_PI_64);
+        if (state < 0.0) state += TWO_PI_64;
+    }
+}
+
+extern "C" __global__ void m3_angle_chunk_apply(
+    float* __restrict__ angle_cumsum,     // [B*T * nh * n_angles]
+    float* __restrict__ angle_state,      // [B * nh * n_angles] -- exit state
+    const double* __restrict__ carries,   // [B * n_chunks * nh * n_angles]
+    const float* __restrict__ angles_raw, // [B*T * n_angles]
+    const float* __restrict__ dt_arr,     // [B*T * nh]
+    int B, int T, int nh, int n_angles, int chunk_size
+) {
+    int n_chunks = (T + chunk_size - 1) / chunk_size;
+    int bc = blockIdx.x;
+    int b = bc / n_chunks;
+    int chunk = bc % n_chunks;
+    if (b >= B) return;
+    int idx = blockIdx.y * blockDim.x + threadIdx.x;
+    int total_per_env = nh * n_angles;
+    if (idx >= total_per_env) return;
+    int h = idx / n_angles;
+    int a = idx % n_angles;
+
+    int t_start = chunk * chunk_size;
+    int t_end = t_start + chunk_size;
+    if (t_end > T) t_end = T;
+
+    const double TWO_PI_64 = 6.283185307179586;
+    double state = carries[((b * n_chunks + chunk) * nh + h) * n_angles + a];
+    for (int t = t_start; t < t_end; t++) {
+        int bt = b * T + t;
+        float raw = angles_raw[bt * n_angles + a];
+        float dt_val = dt_arr[bt * nh + h];
+        double delta = (double)(tanhf(raw) * PI * dt_val);
+        state += delta;
+        state = fmod(state, TWO_PI_64);
+        if (state < 0.0) state += TWO_PI_64;
+        angle_cumsum[bt * total_per_env + h * n_angles + a] = (float)state;
+    }
+    if (chunk == n_chunks - 1) {
+        angle_state[b * total_per_env + h * n_angles + a] = (float)state;
+    }
+}
+
+// ============================================================================
 // 6. angle_dt_bwd -- Reverse cumsum for angle gradients
 // ============================================================================
 //

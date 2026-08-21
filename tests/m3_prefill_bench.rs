@@ -1,0 +1,78 @@
+//! One-pass prompt prefill latency at a production-scale shape
+//! (T=4621, 24 layers, d_model=384 — a document-page classify serve
+//! shape). Run manually, release build:
+//!
+//! `cargo test --features cuda,hf,gemm-blas --release --test m3_prefill_bench -- --ignored --nocapture`
+
+#![cfg(feature = "cuda")]
+
+use std::time::Instant;
+
+use mamba_rs::mamba_ssm::gpu::buffers::GpuBuffer;
+use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
+use mamba_rs::mamba3_siso::config::Mamba3Config;
+use mamba_rs::mamba3_siso::gpu::inference::GpuMamba3Backbone;
+use mamba_rs::mamba3_siso::weights::Mamba3Weights;
+
+fn det(n: usize, seed: u32) -> Vec<f32> {
+    let mut s = seed;
+    (0..n)
+        .map(|_| {
+            s ^= s << 13;
+            s ^= s >> 17;
+            s ^= s << 5;
+            (s & 0xFFFF) as f32 / 65536.0 - 0.5
+        })
+        .collect()
+}
+
+#[test]
+#[ignore]
+fn m3_prefill_latency_at_serve_shape() {
+    let cfg = Mamba3Config {
+        d_model: 384,
+        d_state: 16,
+        expand: 2,
+        headdim: 16,
+        ngroups: 1,
+        n_layers: 24,
+        rope_fraction: 0.5,
+        a_floor: 1e-4,
+        is_outproj_norm: true,
+        ..Mamba3Config::default()
+    };
+    let t = 4621usize;
+    let dm = cfg.d_model;
+    let mut w = Mamba3Weights::init(&cfg, dm, 42);
+    w.input_proj_w.clear();
+    w.input_proj_b.clear();
+
+    let mut bb =
+        GpuMamba3Backbone::new_with_dtype(0, &w, cfg.clone(), dm, 1, WeightDtype::F32).unwrap();
+    let stream = bb.stream().clone();
+    let mut gpu_input = GpuBuffer::zeros(&stream, t * dm).unwrap();
+    stream.synchronize().unwrap();
+    gpu_input.upload(&stream, &det(t * dm, 0xA1)).unwrap();
+    let mut prefill = bb.alloc_prefill(t).unwrap();
+
+    for _ in 0..3 {
+        bb.prefill_sequence(&mut prefill, &gpu_input, t, false)
+            .unwrap();
+    }
+    stream.synchronize().unwrap();
+
+    let iters = 20usize;
+    let t0 = Instant::now();
+    for _ in 0..iters {
+        bb.prefill_sequence(&mut prefill, &gpu_input, t, false)
+            .unwrap();
+    }
+    stream.synchronize().unwrap();
+    let dt = t0.elapsed().as_secs_f64();
+    eprintln!(
+        "prefill T={t} layers={} dm={dm}: {:.2} ms/prefill ({:.1} prefills/s)",
+        cfg.n_layers,
+        1e3 * dt / iters as f64,
+        iters as f64 / dt
+    );
+}
