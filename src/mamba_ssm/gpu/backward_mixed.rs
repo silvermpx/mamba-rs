@@ -306,7 +306,7 @@ pub fn gpu_backward_mamba_layer_mixed(
         let di_i = di as i32;
         let ds_i = ds as i32;
         // Fused d_B + d_C reducer — typed in → f32 out. Parallel route
-        // reads the S2 T-major locals via the tmajor twin (same values,
+        // reads the T-major locals via the tmajor twin (same values,
         // same output layout).
         let reduce_bc = if dims.scan_mode.use_parallel(t, ds) {
             k.ssm_reduce_d_bc_tmajor_typed.get(dtype)

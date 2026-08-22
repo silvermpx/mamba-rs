@@ -273,7 +273,7 @@ extern "C" __global__ __launch_bounds__(128, 3) void ssm_parallel_scan_fwd(
     const float* __restrict__ a_neg,   // [d_inner * d_state]
     const float* __restrict__ D,       // [d_inner]
     int batch, int T, int d_inner, int d_state,
-    // S4 slim tape: [batch*d_inner*d_state*3*n_chunks] rows of
+    // Slim tape: [batch*d_inner*d_state*3*n_chunks] rows of
     // (run_a, run_b, h_entry) per chunk. No __restrict__: under slim
     // the launcher passes the SAME buffer for h_saved and run_tape and
     // the kernel touches exactly one of them per launch.
@@ -307,7 +307,7 @@ extern "C" __global__ __launch_bounds__(128, 3) void ssm_parallel_scan_fwd(
             run_tape[row + 1] = 0.0f;
             run_tape[row + 2] = h[h_base + n];
         } else {
-            /* S2 T-major tape: [b][d][n][t+1] — lane stride over t is one
+            /* T-major tape: [b][d][n][t+1] — lane stride over t is one
              * element, so warp stores/loads coalesce (the old [b][t][d][n]
              * layout put every lane in its own 32-byte sector). Layout is a
              * property of the PARALLEL route; the sequential kernels keep
@@ -421,7 +421,7 @@ extern "C" __global__ __launch_bounds__(128, 3) void ssm_parallel_scan_fwd(
             // Read inter-chunk running prefix for this state dimension
             float run_a = smem_run_a[n];
             float run_b = smem_run_b[n];
-            // S4 slim tape: record this chunk's entry prefix (chunk 0's
+            // Slim tape: record this chunk's entry prefix (chunk 0's
             // identity row was written above). Single writer.
             if (slim_tape && chunk > 0 && threadIdx.x == 0) {
                 int row =
@@ -769,7 +769,7 @@ ssm_parallel_scan_fwd_##SUFFIX(                                               \
     const float* __restrict__ a_neg,                                          \
     const float* __restrict__ D,                                              \
     int batch, int T, int d_inner, int d_state,                               \
-    /* S4 slim tape (no __restrict__: aliases h_saved under slim) */          \
+    /* Slim tape (no __restrict__: aliases h_saved under slim) */             \
     float* run_tape,                                                          \
     int slim_tape                                                             \
 ) {                                                                           \
@@ -800,7 +800,7 @@ ssm_parallel_scan_fwd_##SUFFIX(                                               \
             run_tape[row + 1] = 0.0f;                                         \
             run_tape[row + 2] = h[h_base + n];                                \
         } else {                                                              \
-            /* S2 T-major tape (see the plain fwd note). */                   \
+            /* T-major tape (see the plain fwd note). */                      \
             int hs_idx =                                                      \
                 ((bid * d_inner + did) * d_state + n) * (T + 1) + 0;          \
             h_saved[hs_idx] = h[h_base + n];                                  \
@@ -878,7 +878,7 @@ ssm_parallel_scan_fwd_##SUFFIX(                                               \
             }                                                                 \
             float run_a = smem_run_a[n];                                      \
             float run_b = smem_run_b[n];                                      \
-            /* S4 slim tape: chunk-entry prefix (single writer). */           \
+            /* Slim tape: chunk-entry prefix (single writer). */              \
             if (slim_tape && chunk > 0 && threadIdx.x == 0) {                 \
                 int row =                                                     \
                     ((bid * d_inner + did) * d_state + n) * 3 * n_chunks;     \
@@ -1177,7 +1177,7 @@ ssm_parallel_scan_bwd_##SUFFIX(                                               \
     float* __restrict__ d_D_local,        /* [B*di] f32 master */             \
     float* __restrict__ d_a_log_local,    /* [B*di*ds] f32 master */          \
     int batch, int T, int d_inner, int d_state,                               \
-    /* S4 slim tape: (run_a, run_b, h_entry) per (b,d,n,chunk).  */           \
+    /* Slim tape: (run_a, run_b, h_entry) per (b,d,n,chunk). */               \
     const float* run_tape,                                                    \
     int slim_tape                                                             \
 ) {                                                                           \
@@ -1201,7 +1201,7 @@ ssm_parallel_scan_bwd_##SUFFIX(                                               \
     float *smem_da_red  = smem + SMEM_DA_RED_OFF;                             \
     float *smem_chunk_first_a = smem + SMEM_CHUNK_FIRST_A_OFF;                \
     T_ACT *smem_stage   = (T_ACT *)(smem + SMEM_STAGE_OFF);                   \
-    /* S4 replay scratch (slim tape): the fwd-layout regions are              \
+    /* Replay scratch (slim tape): the fwd-layout regions are                 \
        unused in this kernel - smem_wa/wb feed the forward                    \
        block_inclusive_scan_ab, the RUN_A slot holds the exclusive            \
        prefix exchange (NTHREADS) plus the chunk-boundary H lane              \
@@ -1213,7 +1213,7 @@ ssm_parallel_scan_bwd_##SUFFIX(                                               \
     float *smem_fexch_b = smem + SMEM_RUN_B_OFF;                              \
     float *smem_hbound  = smem + SMEM_RUN_A_OFF + NTHREADS;                   \
     float D_d = D[did];                                                       \
-    /* S2 T-major tape: per-(b,d) row base; +n*(T+1) selects the state
+    /* T-major tape: per-(b,d) row base; +n*(T+1) selects the state
      * lane's contiguous t-run. */                                            \
     int hsave_row_bd = (bid * d_inner + did) * d_state;                       \
     /* Initialize inter-chunk reverse-scan postfix to identity (1, 0). The   \
@@ -1296,7 +1296,7 @@ ssm_parallel_scan_bwd_##SUFFIX(                                               \
             /* Exchange: each thread publishes its first da into smem so the  \
                left-neighbor thread can read it as its (NITEMS-1).a (the      \
                "next-step a" trick — Tri Dao reverse_scan). */                \
-            /* S4 slim-tape replay: reproduce the forward's h_t for           \
+            /* Slim-tape replay: reproduce the forward's h_t for              \
                this chunk BIT-exactly - the same thread-local scan,           \
                the same block_inclusive_scan_ab, the same compose             \
                chain ((comp o run) applied to h_0) on the same                \
@@ -1468,7 +1468,7 @@ ssm_parallel_scan_bwd_##SUFFIX(                                               \
             for (int i = 0; i < NITEMS; i++) {                                \
                 int t = chunk_start + threadIdx.x * NITEMS + i;               \
                 if (t >= T) continue;                                         \
-                /* S2 T-major: locals go [b][n][d][t] so this kernel's
+                /* T-major: locals go [b][n][d][t] so this kernel's
                  * lane-over-t stores and the tmajor reducer's
                  * lane-over-t reads both coalesce. */                        \
                 int btdn_typed = ((bid * d_state + n) * d_inner + did) * T    \

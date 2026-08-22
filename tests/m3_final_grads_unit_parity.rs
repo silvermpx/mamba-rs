@@ -172,13 +172,13 @@ fn check_dqkv(dtype: WeightDtype) {
     // Must mirror the launch-site formula (two operand tiles, V/dO tiles,
     // per-step lanes, da/qk lanes, and TWO head-state tiles for the
     // warp-parallel decay-gradient section).
-    // Includes the P1.7(4) strict-upper-triangle pair matrices plus the
-    // M3-KILL-2 decay triangle and the two per-step exp lanes.
+    // Includes the strict-upper-triangle pair matrices plus the
+    // decay triangle and the two per-step exp lanes.
     let smem_floats =
         CS * DS * 2 + CS * HD * 2 + CS * 4 + HD * DS * 2 + CS * (CS - 1) * 3 / 2 + CS * 2;
     let smem_bytes = (smem_floats * 4) as u32;
     let use_mats_i: i32 = 1;
-    // M3-KILL-1 contract: one head per block, blockDim.y = t-split lanes.
+    // t-split contract: one head per block, blockDim.y = t-split lanes.
     let cfg = LaunchConfig {
         grid_dim: (NH as u32, B as u32, 1),
         block_dim: (HD as u32, 16, 1),
@@ -747,7 +747,7 @@ fn m3_kernels_isolated_bench() {
     });
 
     // colsum_accumulate over dQ_pre (per layer the trainer runs two of
-    // these for dQ_bias/dK_bias) — the M3-KILL-3 cost question.
+    // these for dQ_bias/dK_bias) — the colsum-retirement cost question.
     let dqb = GpuBuffer::zeros(&ctx.stream, CNH * CDS).unwrap();
     ctx.stream.synchronize().unwrap();
     let cs_grid = LaunchConfig {

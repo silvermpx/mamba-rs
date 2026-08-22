@@ -163,7 +163,7 @@ pub fn sgemm_bi_forward(
 /// (lda >= K). Every bucket's kernel already takes lda and addresses A
 /// as `row * lda + col`, so a sub-matrix read is the same per-output
 /// ascending-K FMA chain as a gathered copy — bit-identical operands,
-/// gather kernel deleted at the call site (P1.4(5)).
+/// gather kernel deleted at the call site.
 #[allow(
     clippy::too_many_arguments,
     reason = "dispatcher-internal impl: the public wrappers keep the narrow signature; splitting a param struct here would be pure ceremony for two callers"

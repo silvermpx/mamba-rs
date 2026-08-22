@@ -578,7 +578,7 @@ extern "C" __global__ void m3_dqkv(
     int B, int T, int nh_total, int hd, int ds, int CS,
     int use_pair_mats  // 1 = smem holds the triangle pair matrices
 ) {
-    // M3-KILL-1 t-split: blockDim = (hd, T_SPLIT). One head per block;
+    // t-split: blockDim = (hd, T_SPLIT). One head per block;
     // threadIdx.y strides the per-timestep loops so the block carries
     // hd*T_SPLIT live lanes instead of one warp (the 32-thread blocks
     // ran ~2% occupancy and owned 73% of the M3 step). Every output
@@ -639,7 +639,7 @@ extern "C" __global__ void m3_dqkv(
     float* ssm2_sm   = ssm_sm + hd * ds; // [hd][ds]
     float* dm_rev_sm = ssm2_sm + hd * ds; // [CS]
     float* dm_vec_sm = dm_rev_sm + CS;    // [CS]
-    // P1.7(4): strict-upper-triangle pair matrices K[a].Q[b] and
+    // Strict-upper-triangle pair matrices K[a].Q[b] and
     // V[a].dO[b] (a < b), computed once per chunk instead of per
     // consumer lane (hd-fold recompute). Triangle packing keeps the
     // two-head tile under the ~99 KB consumer-GPU smem opt-in cap.
@@ -650,7 +650,7 @@ extern "C" __global__ void m3_dqkv(
     int tri_n = CS * (CS - 1) / 2;
     float* kq_mat  = dm_vec_sm + CS;      // [tri_n] (only if use_pair_mats)
     float* vdo_mat = kq_mat + tri_n;      // [tri_n]
-    // M3-KILL-2: decay triangle exp2((da[b]-da[a])*LOG2E) for a < b plus
+    // Decay triangle exp2((da[b]-da[a])*LOG2E) for a < b plus
     // per-step exp_fwd/exp_rev lanes — the consumers recomputed these
     // transcendentals inline (~7.4k exp2f per (b,h,chunk) lane).
     float* decay_mat  = vdo_mat + tri_n;   // [tri_n]
@@ -1137,7 +1137,7 @@ extern "C" __global__ void m3_dqktheta(
         // Forward RoPE on K_raw to get K_rot (for dScale computation)
         float k_rot[MAMBA_RS_STATE_CAP];
         int angle_base = ((b * T + gt) * nh + h) * n_angles;
-        // M3-KILL-7: each angle's cos/sin was computed three times
+        // Each angle's cos/sin was computed three times
         // (forward RoPE, inverse RoPE, dtheta) — hoist into registers.
         // cosf/sinf of the same input is deterministic, so every read
         // stays bit-identical to the inline forms.
@@ -1594,7 +1594,7 @@ DEFINE_M3_CHUNK_SCAN_FWD(f16,  __half,        from_f_f16)
 //   - m3_final_grads (combines f32 dADT + dDT + dDT_angle into final grads)
 // ============================================================================
 
-// No __launch_bounds__ pin: M3-KILL-1 launches (hd, T_SPLIT) blocks up to
+// No __launch_bounds__ pin: the t-split launch runs (hd, T_SPLIT) blocks
 // 512 threads; the 44 KB pair-mats tile bounds residency at <= 2 blocks/SM
 // regardless, and the f32 twin has always compiled unpinned.
 #define DEFINE_M3_DQKV(SUFFIX, T_ACT, FROM_F)                                 \
@@ -1618,8 +1618,8 @@ m3_dqkv_##SUFFIX(                                                             \
     int B, int T, int nh_total, int hd, int ds, int CS,                       \
     int use_pair_mats                                                         \
 ) {                                                                           \
-    /* P1.7(2) head-pack: two heads per block when nh is even (launcher   \
-     * picks blockDim.y); per-head lanes + smem slice fully private.     */  \
+    /* t-split: one head per block, blockDim.y lanes stride the               \
+     * per-timestep loops (see the f32 kernel's header note). */              \
     int h = blockIdx.x;                                                       \
     int b = blockIdx.y;                                                       \
     int p = threadIdx.x;                                                      \
@@ -1657,11 +1657,11 @@ m3_dqkv_##SUFFIX(                                                             \
     float* ssm2_sm   = ssm_sm + hd * ds;                                      \
     float* dm_rev_sm = ssm2_sm + hd * ds;                                     \
     float* dm_vec_sm = dm_rev_sm + CS;                                        \
-    /* P1.7(4): strict-upper-triangle pair matrices (a < b only) */          \
+    /* Strict-upper-triangle pair matrices (a < b only) */                    \
     int tri_n = CS * (CS - 1) / 2;                                            \
     float* kq_mat  = dm_vec_sm + CS;                                          \
     float* vdo_mat = kq_mat + tri_n;                                          \
-    /* M3-KILL-2: decay triangle + per-t exp2 lanes (pair-mats tier) */       \
+    /* Decay triangle + per-t exp2 lanes (pair-mats tier) */                  \
     float* decay_mat  = vdo_mat + tri_n;                                      \
     float* exp_fwd_sm = decay_mat + tri_n;                                    \
     float* exp_rev_sm = exp_fwd_sm + CS;                                      \
@@ -2020,7 +2020,7 @@ m3_dqktheta_##SUFFIX(                                                         \
     }                                                                         \
     float k_rot[MAMBA_RS_STATE_CAP];                                                          \
     int angle_base = ((b * T + gt) * nh + h) * n_angles;                      \
-    /* M3-KILL-7: hoist per-angle cos/sin (was computed 3x). */               \
+    /* Hoist per-angle cos/sin (was computed 3x). */                          \
     float cos_a[MAMBA_RS_STATE_CAP / 2], sin_a[MAMBA_RS_STATE_CAP / 2];       \
     for (int a = 0; a < n_angles && 2 * a + 1 < ds; a++) {                    \
         float theta = Angles[angle_base + a];                                 \

@@ -155,7 +155,7 @@ pub fn gpu_backward_mamba_layer(
         builder.arg(&t_i);
         builder.arg(&di_i);
         builder.arg(&ds_i);
-        // S4: the slim tape rides the h_saved buffer; the flag picks the
+        // The slim tape rides the h_saved buffer; the flag picks the
         // kernel's replay path. Sequential kernel keeps its signature.
         let tape_p = acts.h_saved.cached_ptr();
         let slim_i: i32 = i32::from(super::launch::scan_tape_slim());
@@ -182,7 +182,7 @@ pub fn gpu_backward_mamba_layer(
         let di_i = di as i32;
         let ds_i = ds as i32;
         // Fused d_B + d_C reduction. The PARALLEL route writes its
-        // locals T-major (S2 tape layout) and takes the tmajor twin;
+        // locals T-major (the parallel-route tape layout) and takes the tmajor twin;
         // the sequential route keeps the historical layout + reducer.
         // Values and output layout are identical either way.
         let reduce_bc = if dims.scan_mode.use_parallel(t, ds) {

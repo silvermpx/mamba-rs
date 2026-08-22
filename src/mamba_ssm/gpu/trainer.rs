@@ -810,7 +810,7 @@ pub(crate) struct MambaTrainerMixed {
     captured_f16_half_staging_ptr: u64,
     captured_f16_bi_upcast_ptrs: [u64; 3],
     captured_f16_gemm_flags: (bool, bool, bool),
-    // P1.6(1): pinned host staging for the per-step H2D uploads. The pin
+    // Pinned host staging for the per-step H2D uploads. The pin
     // turns the copies into true async DMA; the guard event serializes
     // staging-buffer reuse against the previous step's in-flight copy
     // (rewriting a pinned source mid-DMA is silent wrong input).
@@ -820,7 +820,7 @@ pub(crate) struct MambaTrainerMixed {
 }
 
 impl MambaTrainerMixed {
-    /// P1.6(1): upload through the pinned stage. Waits out the previous
+    /// Upload through the pinned stage. Waits out the previous
     /// step's DMA (guard event) before rewriting the staging buffer,
     /// then records the guard after the enqueue. `which`: 0 = input into
     /// mamba_input, 1 = d_temporal into d_temporal.
@@ -1830,7 +1830,7 @@ pub(crate) struct MambaTrainerF32 {
     clip_partials: GpuByteBuffer,
     /// Host mirror of the partials — pre-allocated (zero-alloc hot path).
     clip_partials_host: Vec<f64>,
-    // P1.6(1): pinned host staging + reuse guard (see the twin fields on
+    // Pinned host staging + reuse guard (see the twin fields on
     // MambaTrainerMixed for the interlock rationale).
     pin_input: super::buffers::PinnedHostBuf,
     pin_dtemp: super::buffers::PinnedHostBuf,
@@ -1838,7 +1838,7 @@ pub(crate) struct MambaTrainerF32 {
 }
 
 impl MambaTrainerF32 {
-    /// P1.6(1): upload through the pinned stage. Waits out the previous
+    /// Upload through the pinned stage. Waits out the previous
     /// step's DMA (guard event) before rewriting the staging buffer,
     /// then records the guard after the enqueue. `which`: 0 = input into
     /// mamba_input, 1 = d_temporal into d_temporal.

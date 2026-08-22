@@ -113,7 +113,7 @@ pub fn grid_norm(batch: usize, dim: usize) -> LaunchConfig {
 /// Shared memory: for block scan, running prefix, exchange, and coalesced staging.
 ///   Layout (floats): 2*NWARPS + 2*MAX_DSTATE + 2*NTHREADS + CHUNK_SIZE
 ///   = 2*4 + 2*256 + 2*128 + 1024 = 1800 floats = 7200 bytes.
-/// S4 slim h-tape switch: `MAMBA_RS_SCAN_TAPE=full` restores the
+/// Slim h-tape switch: `MAMBA_RS_SCAN_TAPE=full` restores the
 /// (T+1)-step `h_saved` tape on the parallel route (escape hatch for one
 /// release); the default `slim` keeps only per-chunk
 /// (run_a, run_b, h_entry) rows and the backward replays h bit-exactly

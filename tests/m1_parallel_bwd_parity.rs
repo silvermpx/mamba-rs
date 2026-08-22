@@ -312,7 +312,7 @@ fn run_par_typed(ctx: &GpuCtx, k: &MambaKernels, inp: &BwdInputs, dtype: WeightD
     bld.arg(&ti);
     bld.arg(&di_i);
     bld.arg(&ds_i);
-    // S4 args: this test feeds a handcrafted FULL h tape, so slim = 0
+    // Tape args: this test feeds a handcrafted FULL h tape, so slim = 0
     // (the tape pointer is unused on that path).
     let slim0: i32 = 0;
     bld.arg(&h);

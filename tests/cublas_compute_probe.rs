@@ -30,7 +30,7 @@
 //! mamba out_proj actually consumes). Real-checkpoint weights are a
 //! follow-up lane (needs the HF pull wired into this harness); the
 //! decision gate for ANY default flip additionally requires the
-//! end-to-end mamba-1.4b greedy-decode check via the P2.6 compute-type
+//! end-to-end mamba-1.4b greedy-decode check via the compute-type
 //! plumb, per the plan — this TSV alone never flips a default.
 //!
 //! Run (GPU box):

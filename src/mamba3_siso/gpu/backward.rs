@@ -314,7 +314,7 @@ pub fn gpu_backward_mamba3_layer(
             let legacy_floats = 2 * cs_u * ds + 2 * cs_u * hd + 4 * cs_u + 2 * hd * ds;
             let mats_floats = legacy_floats + cs_u * (cs_u - 1) * 3 / 2 + 2 * cs_u;
             // Consumer GPUs cap the per-block dynamic-smem opt-in near 99 KB.
-            // One head per block (M3-KILL-1): pair matrices when the tile
+            // One head per block: pair matrices when the tile
             // fits, legacy inline dots otherwise (bit-identical, slower).
             let cap_floats = 99 * 1024 / 4;
             let (per_head_floats, use_pair_mats): (usize, i32) = if mats_floats <= cap_floats {
@@ -330,7 +330,7 @@ pub fn gpu_backward_mamba3_layer(
                     smem
                 ));
             }
-            // M3-KILL-1 t-split: blockDim.y lanes stride the per-timestep
+            // t-split: blockDim.y lanes stride the per-timestep
             // loops. Fixed launch geometry (never data-shaped); any T_SPLIT
             // yields identical bits since each output keeps one owning lane
             // with the same inner order.
@@ -790,7 +790,7 @@ pub fn gpu_backward_mamba3_layer(
             builder.arg(&bt_i);
             builder.arg(&dm_i);
             // Shared-kernel ABI: rmsnorm_backward grew an `accumulate`
-            // arg (P1.4(6), M1 residual fold); the M3 sites keep the
+            // arg (M1 residual fold); the M3 sites keep the
             // plain-store behavior.
             let accumulate_dx: i32 = 0;
             builder.arg(&accumulate_dx);
@@ -868,7 +868,7 @@ pub fn gpu_backward_mamba3_backbone(
         builder.arg(&bt_i);
         builder.arg(&dm_i);
         // Shared-kernel ABI: rmsnorm_backward grew an `accumulate`
-        // arg (P1.4(6), M1 residual fold); the M3 sites keep the
+        // arg (M1 residual fold); the M3 sites keep the
         // plain-store behavior.
         let accumulate_dx: i32 = 0;
         builder.arg(&accumulate_dx);

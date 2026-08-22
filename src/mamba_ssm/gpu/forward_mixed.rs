@@ -43,11 +43,11 @@ pub struct GpuMambaLayerMixedActs {
     /// typed — gate branch after SiLU `[B*T*d_inner]`.
     pub gate_post_silu: DtypedBuf,
     /// f32 — conv1d state saved per step `[B*T*d_inner*d_conv]` (recurrent).
-    /// x branch after split `[B*T*d_inner]` typed — saved for the LEG-4
+    /// x branch after split `[B*T*d_inner]` typed — saved for the
     /// conv-window reconstruction in the backward (the per-timestep conv
     /// tape is gone; only the carry-in window below survives).
     pub x_branch: DtypedBuf,
-    /// LEG-4: carry-in window only, `[B*d_inner*d_conv]`.
+    /// Carry-in window only, `[B*d_inner*d_conv]`.
     pub conv_states: GpuBuffer,
     /// typed — pre-SiLU conv output `[B*T*d_inner]`.
     pub post_conv: DtypedBuf,

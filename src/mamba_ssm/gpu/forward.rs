@@ -107,11 +107,11 @@ pub struct GpuMambaLayerActs {
 
     // -- F3: split --
     /// x branch after split `[B*T*d_inner]` (saved: the conv backward
-    /// reconstructs its windows from it — LEG-4, the conv tape is gone).
+    /// reconstructs its windows from it — the conv tape is gone).
     pub x_branch: GpuBuffer,
 
     // -- F4a: Conv1d + SiLU --
-    /// LEG-4: only the CARRY-IN window per (b, d) survives as conv tape
+    /// Only the CARRY-IN window per (b, d) survives as conv tape
     /// `[B*d_inner*d_conv]`; later windows are reconstructed from
     /// x_branch in the backward.
     pub conv_states: GpuBuffer,
@@ -193,7 +193,7 @@ impl GpuMambaBackboneActs {
                     delta_raw: GpuBuffer::zeros(stream, bt * d_inner)?,
                     delta: GpuBuffer::zeros(stream, bt * d_inner)?,
                     // F4d: SSM — the full tape has T+1 entries; the
-                    // parallel route's slim tape (S4) keeps only the
+                    // parallel route's slim tape keeps only the
                     // per-chunk (run_a, run_b, h_entry) rows.
                     h_saved: GpuBuffer::zeros(
                         stream,

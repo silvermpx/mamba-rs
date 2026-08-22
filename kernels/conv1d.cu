@@ -558,7 +558,7 @@ extern "C" __global__ void conv1d_burnin_forward_tiled_##SUFFIX(              \
     if (t0 == 0) {                                                           \
         for (int k = 0; k < d_conv; k++) {                                   \
             win[k] = state[state_base + k];                                  \
-            /* LEG-4: the ONLY conv tape is the carry-in window — the      \
+            /* The ONLY conv tape is the carry-in window — the      \
              * backward reconstructs every later window from x_branch. */   \
             conv_states_saved[state_base + k] = win[k];                      \
         }                                                                    \
