@@ -54,8 +54,7 @@ fn det_sum_ranks_matches_host_fold_bitwise() {
         }
         let stacked = GpuBuffer::from_cpu(&stream, &stacked_host).expect("stacked");
         let mut out = GpuBuffer::zeros(&stream, len).expect("out");
-        kernel
-            .launch(out.cached_ptr(), stacked.cached_ptr(), world, len, &stream)
+        unsafe { kernel.launch(out.cached_ptr(), stacked.cached_ptr(), world, len, &stream) }
             .expect("launch");
         stream.synchronize().expect("sync");
         let got = out.to_cpu(&stream).expect("dtoh");
@@ -156,4 +155,40 @@ fn loopback_sum_scaled_matches_emulated_mean() {
     ew.all_reduce_mean(&mut host, None).expect("emulated mean");
     let want: Vec<u32> = host[0].iter().map(|x| x.to_bits()).collect();
     assert_eq!(scaled, want, "device sum x 1/W diverged from emulated mean");
+}
+
+#[test]
+fn loopback_handles_empty_shards_and_zero_length() {
+    let stream = stream();
+    let kernel = DetReduceKernel::compile(0).expect("kernel");
+    // n < world: the high ranks own EMPTY shards — the dataflow must
+    // still land the reference bits everywhere without touching the
+    // empty owners.
+    let n = 3usize;
+    let world = 5usize;
+    let addends: Vec<Vec<f32>> = (0..world).map(|r| det(n, 0xC00 + r as u32)).collect();
+    let refs: Vec<&[f32]> = addends.iter().map(|a| a.as_slice()).collect();
+    let mut want = vec![0.0f32; n];
+    reduce_sum_reference(&refs, &mut want);
+    let want_bits: Vec<u32> = want.iter().map(|x| x.to_bits()).collect();
+    let arenas: Vec<GpuBuffer> = addends
+        .iter()
+        .map(|a| GpuBuffer::from_cpu(&stream, a).expect("arena"))
+        .collect();
+    let mut w = LoopbackWorld::new(arenas);
+    w.run_round(&kernel, &stream).expect("round");
+    for (r, a) in w.arenas().iter().enumerate() {
+        let got: Vec<u32> = a
+            .to_cpu(&stream)
+            .expect("dtoh")
+            .iter()
+            .map(|x| x.to_bits())
+            .collect();
+        assert_eq!(got, want_bits, "rank {r} with empty shards diverged");
+    }
+
+    // len == 0 short-circuits before any pointer is touched — null
+    // pointers are fine BECAUSE the guard returns first (that is the
+    // property under test).
+    unsafe { kernel.launch(0, 0, 3, 0, &stream) }.expect("zero-length launch");
 }

@@ -1,205 +1,160 @@
 # Changelog
 
-## 0.6.1 (2026-08-22)
-
-The FixedOrder contract goes live, and the distributed hardening
-becomes real. Reviewed by a dedicated adversarial wave over the whole
-`dist` subsystem before release.
-
-### Added
-
-- Transport-backed fixed-order reducer (`dist::reducer`): peer copies
-  of a rank's arena shard arrive as PURE BYTE MOVEMENT (grouped NCCL
-  send/recv), the `det_sum_ranks` kernel folds the W addends per
-  element in strictly ascending source-rank order (one thread per
-  element, a serial chain — the association is program text), and the
-  reduced shards return as per-owner broadcasts. Selecting the default
-  `ReduceContract::FixedOrder` in a live world now RUNS instead of
-  refusing. Oracle-pinned on one GPU by a loopback harness that runs
-  the same kernel and slot-by-source-rank layout over device-to-device
-  copies: the device fold matches the host reference fold bit for bit,
-  the full dataflow lands identical bits in every rank arena across
-  uneven shard plans, delivery order cannot change the result, and
-  sum x 1/W reproduces the emulated world's mean exactly. Honest
-  scope: this path's own live multi-GPU first light is still pending
-  (the 0.6.0 live validation covered the `NcclSum` tier); the live
-  test now runs both contracts sequentially.
-- `all_reduce_host_f32` and `any()` are wired over the transport
-  (host heads ride the configured contract after a device round-trip;
-  flags ride the exactly-associative integer max) instead of erroring.
-- CI grows a `cuda,nccl` type-check leg so the live-DDP surface can
-  no longer bit-rot invisibly.
+## 0.6.2 (2026-08-22)
 
 ### Changed
 
-- Collective deadlines are now real, not enqueue-window theater: every
-  collective is guarded ENQUEUE THROUGH COMPLETION — the watchdog holds
-  the window open across the stream synchronize and aborts the
-  communicator on expiry, so a peer dying mid-run becomes a loud rank
-  error within `collective_timeout` instead of an eternal wait at the
-  next sync. (The completion sync also serializes all collectives on
-  the communicator in host program order and quiesces the reducer
-  scratch between uses.)
-- Watchdog fire/disarm is an atomic three-state hand-off: the deadline
-  action and the disarm race is decided by one compare-exchange, a
-  disarm that lost reports the fire (the guarded window fails even if
-  its own work appeared to succeed), and the park-based timer disarms
-  immediately instead of taxing every window with a sleep-step join.
+- `DetReduceKernel::launch` is `unsafe fn` with a documented safety
+  contract (it takes raw device pointers).
+- Reducer scratch allocation binds its CUDA context before allocating.
+- The rendezvous environment-contract constants (`ENV_RANK`,
+  `ENV_WORLD`, `ENV_DEVICE`, `ENV_RENDEZVOUS_DIR`, `ENV_JOB_ID`,
+  `ENV_SEED`) are re-exported from `dist`.
+
+### Fixed
+
+- The loopback harness synchronizes the stream on error paths before
+  scratch is freed.
+- A helper-thread panic under an init deadline is reported as a panic
+  instead of a timeout.
+- The reduce-contract match is exhaustive: adding a contract variant
+  fails compilation instead of falling into the no-communicator error.
+- `EmulatedWorld::reference_mean` validates arena count and lengths and
+  returns `Result`.
+- Bootstrap: a partially-set rendezvous environment override is
+  rejected; a child whose status query fails is killed and reaped;
+  builds without the `nccl` feature refuse to spawn a multi-process
+  world; `DistConfig::validate` rejects duplicate device ordinals.
+- The DDP mean scale rejects gradient arenas above the i32 kernel ABI
+  limit on both trainers.
+
+### Added
+
+- Tests: launcher environment parsing (torchrun/SLURM/OpenMPI), job-id
+  validation, `DistContext::shard`, `reference_mean` validation,
+  fold-tree sensitivity, and empty-shard / zero-length reduction paths.
+
+## 0.6.1 (2026-08-22)
+
+### Added
+
+- Transport-backed fixed-order reducer (`dist::reducer`): shard
+  exchange over NCCL send/recv/broadcast as byte movement, with the
+  per-element ascending-rank fold performed by the `det_sum_ranks`
+  kernel. `ReduceContract::FixedOrder` now runs on live multi-process
+  worlds. A single-GPU loopback harness pins the device fold against
+  the host reference bit for bit, including uneven shard plans and
+  delivery-order permutations; the live two-rank test covers both
+  contracts.
+- `all_reduce_host_f32` and `any()` run over the transport.
+- CI type-checks the `cuda,nccl` feature combination.
+
+### Changed
+
+- Collective deadlines cover enqueue through completion: the watchdog
+  spans the stream synchronize and aborts the communicator on expiry,
+  so a peer failure surfaces as an error within `collective_timeout`.
+- Watchdog fire/disarm is decided by a single compare-exchange; a
+  disarm that loses the race reports the fire, and the park-based timer
+  disarms immediately.
 - Communicator teardown is single-shot: an aborted communicator is
-  marked, and `shutdown`/`Drop` no longer double-abort or destroy a
-  freed handle; `shutdown` also stops chaining destroy after abort.
-- NCCL join budget is unified: the unique-id exchange and the library
-  init share ONE `init_timeout`, so the combined join can never exceed
-  the configured deadline.
-- Supervisor-spawned ranks die with a dead supervisor on Linux
-  (PDEATHSIG) — a crashed launcher can no longer orphan a half-world
-  that keeps training.
-- Bootstrap guards: an explicit `logical_world` that disagrees with an
-  external launcher's world is refused (a wrapper silently collapsing
-  W trained a different numeric identity before); job ids are validated
-  before they reach a path join or the supervisor's recursive purge;
-  the `MAMBA_RS_SEED` override now survives the world-size-1
-  short-circuit.
-- f16 multi-GPU training refuses early with a nameable reason (the
-  split accumulate/reduce/apply path cannot unscale f16 loss-scaled
-  gradients around the cross-rank reduce; bf16 and f32 ride DDP fully).
-- The reducer's stacked receive scratch is allocated uninitialized ON
-  PURPOSE (every slot is fully written before the fold reads any): a
-  driver memset would ride the legacy NULL stream, which the trainer's
-  NON_BLOCKING stream never orders against — the review wave caught the
-  hazard before any live run did. Scratch is cached per arena length
-  and never freed while in-flight work could reference it.
+  never re-aborted or destroyed, and `shutdown` no longer chains
+  destroy after abort.
+- The unique-id exchange and the NCCL init share one `init_timeout`.
+- Supervisor-spawned ranks receive PDEATHSIG on Linux and exit with a
+  dead supervisor.
+- Bootstrap rejects a `logical_world` that disagrees with the
+  launcher's world, validates job ids before path joins and purges, and
+  honors the `MAMBA_RS_SEED` override at world size 1.
+- f16 multi-GPU training is rejected at `backward_step_dist` (bf16 and
+  f32 are supported).
+- Reducer receive scratch is allocated uninitialized (every slot is
+  written before the fold reads it), cached per arena length, and never
+  freed while in-flight work may reference it.
 
 ## 0.6.0 (2026-08-22)
 
-Deterministic data parallelism, the Mamba-3 prompt prefill, first-class
-large state dimensions, and a measured performance pass over the
-chunked kernels.
+Deterministic data parallelism, Mamba-3 prompt prefill, first-class
+large state dimensions, and a performance pass over the chunked
+kernels.
 
 ### Added
 
-- `dist` — deterministic data-parallel training. One process per GPU;
-  gradients meet in one collective per optimizer step over the flat f32
-  arena. The default reduction CONTRACT folds the W addends per element
-  in strictly ascending logical-rank order, making the reduced bits
-  independent of transport, delivery order, topology, library version,
-  and physical GPU permutation; the contract is implemented and proven
-  by the emulated oracle, and a live multi-process world refuses it
-  loudly until its transport-backed reducer lands (the explicit
-  `NcclSum` tier is the live path meanwhile). Ships with the seed law
-  (every random decision derives from one master seed, never from a
-  rank), a supervisor/attach bootstrap (self-spawn, or
-  torchrun/SLURM/OpenMPI environment contracts), a file rendezvous, and
-  `EmulatedWorld` — a single-process oracle that runs the full sharded
-  dataflow and is asserted bit-for-bit against the straight-line
-  reference and against an emulated end-to-end two-replica training
-  run. Validated live on a 2x RTX 5090 box: the supervisor self-spawned
-  two ranks over a real `ncclAllReduce` (the `NcclSum` tier) and the
-  final weights of both ranks matched the emulated oracle bit for bit —
-  at world size 2 the sum has one association, so the library
-  collective provably cannot differ from the house fold. The reduction
-  composes with every per-rank compute mode (any GEMM tier, scan mode,
-  dtype) — it consumes finished gradients and never participates in how
-  they were computed; pinned by an emulated-world test that runs the
-  batch-invariant house tier end to end.
-- `nccl` feature — the transport layer: a thin communicator over the
-  pinned NCCL binding (byte movement plus the opt-in sum collective),
-  rendezvous-based unique-id exchange, version preflight, fail-fast
-  shutdown semantics, and `backward_step_dist` on both trainer
-  families (world size one stays byte-identical to a plain step).
+- `dist` — deterministic data-parallel training: one process per GPU,
+  one reduction per optimizer step over the flat f32 gradient arena.
+  The default `FixedOrder` contract folds the per-element addends in
+  ascending logical-rank order, making the reduced bits independent of
+  transport, delivery order, topology, and library version; the
+  `NcclSum` tier uses the library collective. Includes the seed law
+  (all randomness derives from one master seed, never from a rank), a
+  supervisor/attach bootstrap (self-spawn, torchrun, SLURM, OpenMPI),
+  file rendezvous, and `EmulatedWorld`, a single-process oracle
+  asserted bit-for-bit against the reference fold. Validated on two
+  RTX 5090s: both ranks' final weights match the emulated oracle bit
+  for bit. The reduction composes with every per-rank compute mode
+  (GEMM tier, scan mode, dtype).
+- `nccl` feature: a communicator over the pinned NCCL binding,
+  unique-id exchange through the rendezvous, version preflight,
+  fail-fast shutdown, and `backward_step_dist` on both trainer
+  families (world size 1 is byte-identical to a plain step).
 - Optimizer state export/import on both trainers: Adam moments, step
-  counter, and update hyperparameters travel with the checkpoint, and
-  a resumed run continues bit-for-bit where the unbroken run would be
-  (contract-tested on f32 and bf16, with a control proving weights-only
-  resume diverges). The carried recurrence (conv + SSM state) exports
-  alongside for TBPTT window handoff.
-- `grad_arena` / `apply_step` seams: the applying backward splits into
+  counter, and hyperparameters travel with the checkpoint; a resumed
+  run continues bit-for-bit. The carried recurrence exports alongside
+  for TBPTT window handoff.
+- `grad_arena` / `apply_step`: the applying backward splits into
   gradient accumulation and the optimizer tail, bit-identical to the
-  fused call — the slot a distributed reducer drops into.
-- Mamba-3 one-pass prompt prefill: the whole prompt window through the
-  chunked pipeline in one pass, leaving all four recurrent states
-  positioned for decode. Continued windows apply the trapezoidal
-  boundary fold (the discretization's beta term reaches one step back
-  across the window seam). Comes with a captured CUDA-graph twin
-  (bitwise replay pinned), engine/backbone wrappers, and an LM
-  generate path that switches to prefill for long prompts. The
-  mixed-precision backbone prefills through its resident f32 weights —
-  decode states are f32 in both pipelines — and downcasts only the
-  final hidden.
-- Mamba-3 mixed-precision training closure: the plain SiLU-gate output
-  architecture gets its typed backward; the non-identity input
-  projection trains in mixed precision; sequential-scan tapes shrink
-  to sentinels on the chunked path instead of holding dead VRAM.
-- First-class large state dimensions on every kernel generation: the
-  per-thread state arrays are sized at JIT time from the model config
-  (64-step tiers up to 256, the reference implementations' own
-  maximum). Any reference-range `d_state` runs the same code path;
-  past the register budget the compiler spills — correct, measurably
-  slower, and measured. The chunked-backward's shared-memory need is
-  now validated by its actual formula (with an opt-in to the extended
-  budget) instead of a crude product bound.
-- Norm epsilon is a config value carried by checkpoints, applied by
-  every norm kernel — a checkpoint trained with a different epsilon is
-  a different model and loads as one.
+  fused call.
+- Mamba-3 one-pass prompt prefill through the chunked pipeline, leaving
+  all recurrent states positioned for decode; continued windows apply
+  the trapezoidal boundary fold. Includes a CUDA-graph twin with
+  bitwise replay and automatic prefill in the LM generate path for long
+  prompts.
+- Mamba-3 mixed-precision training closure: typed backward for the
+  plain SiLU-gate output, mixed-precision training for non-identity
+  input projections, and sentinel-sized sequential tapes on the chunked
+  path.
+- Large state dimensions on every kernel generation: per-thread state
+  arrays are sized at JIT time from the model config, up to d_state
+  256. The chunked-backward shared-memory requirement is validated by
+  its exact formula.
+- `rms_norm_eps` is a config value carried by checkpoints and applied
+  by every norm kernel.
 
 ### Changed
 
-- The f32 Mamba-3 trainer refuses an empty input projection at
-  construction with a nameable error (pass an identity matrix for a
-  pass-through). The empty-means-identity convention is mixed-only;
-  the f32 backbone runs the projection GEMM unconditionally, and the
-  empty weight used to surface later as an uninterpretable
-  CUDA_ERROR_ILLEGAL_ADDRESS inside a kernel.
-- The CPU-vs-GPU prefill oracle tolerance is recalibrated for
-  cross-architecture noise (2e-3): the same code measures rel_l2
-  just under 1e-3 on sm_89 and 1.32e-3 on sm_120 at cos 0.999999 —
-  fma scheduling and math-intrinsic differences move the float noise
-  floor between GPU generations, while a real defect still fails by
-  orders of magnitude.
+- The f32 Mamba-3 trainer rejects an empty input projection at
+  construction; pass an identity matrix for a pass-through (the
+  empty-projection convention is mixed-precision only).
+- The CPU-vs-GPU prefill oracle tolerance is 2e-3 to cover the float
+  noise floor across GPU generations (sm_89 vs sm_120).
 - cudarc floor raised to 0.19.9: upstream gates CudaSlice/SyncOnDrop
-  teardown behind is_managing_stream_synchronization, so with per-slice
-  event tracking disabled (this crate's standing mode — the CUDA Graph
-  capture prerequisite) a drop can no longer issue a stream wait that
-  breaks an in-flight capture.
-- The chunked intra-chunk output kernel computes the decayed causal
-  Q·K tile once per (chunk, head) in shared memory instead of once per
-  lane; the chunk-state kernel hoists its per-step exponential and V
-  load out of the state loop (bitwise-identical sums); both matmul-
-  shaped kernels pack two heads per block so the 16-lane head dimension
-  fills full warps.
-- The angle accumulation is chunk-parallel: per-chunk fp64 delta sums,
-  a short serial carry chain per lane, and a parallel re-walk with the
-  original per-step wrap. Deterministic by construction; a different
-  fp64 rounding route from the old single serial chain, invisible at
-  the f32 output, and covered by its own parity oracles.
-- The chunked-backward's decay-gradient section is warp-parallel per
-  output step (it was serial on one lane), with the entering state
-  staged in shared memory instead of per-element global re-reads. The
-  serial reverse-cumsum combine — the numeric contract — is unchanged.
+  teardown behind is_managing_stream_synchronization, which protects
+  CUDA Graph capture from drop-time stream waits.
+- Chunked-kernel performance pass: a shared-memory Q·K tile per
+  (chunk, head), hoisted exponential and V load in the chunk-state
+  kernel, two heads per block, chunk-parallel angle accumulation, and a
+  warp-parallel decay-gradient section in the backward. The serial
+  reverse-cumsum combine is unchanged.
 - Trainer construction derives `a_neg` with the same device kernel the
-  post-step refresh uses. The old CPU-side seed differed by ULPs from
-  the device exponential, which broke bit-continuous resume and made a
-  fresh trainer's first window numerically different from every later
-  one.
-- Oversized shapes are rejected loudly at construction: linear index
-  ranges are validated against 32-bit kernel arithmetic, and the
-  sequential-tape sizing rides an explicit constructor flag that must
-  match the scan mode the forward runs with.
+  post-step refresh uses, fixing bit-continuous resume.
+- Oversized shapes are rejected at construction: linear index ranges
+  are validated against 32-bit kernel arithmetic, and sequential-tape
+  sizing is an explicit constructor flag matched to the scan mode.
 
 ### Performance
 
-Two measurement beds: the before/after ratios come from an RTX 6000
-Ada shared with other load; the release absolutes were re-measured on
-an idle RTX 5090 (CUDA 13.0, release build).
+Before/after ratios measured on an RTX 6000 Ada shared with other
+load; release absolutes measured on an idle RTX 5090 (CUDA 13.0,
+release build).
 
-- Prompt prefill at a production shape (T=4621, 24 layers,
-  d_model=384): 384 ms before this cycle's kernel work, 66.5 ms after
-  (shared Ada); 23.65 ms — 42.3 prefills/s — on the idle 5090.
+- Prompt prefill (T=4621, 24 layers, d_model=384): 384 ms before this
+  cycle, 66.5 ms after (shared Ada); 23.65 ms (42.3 prefills/s) on the
+  idle 5090.
 - Multi-chunk training step (B=1, T=256, 24 layers, d_model=384):
-  f32 424 -> 127 ms, bf16 395 -> 122 ms (shared Ada); f32 110.5,
+  f32 424 -> 127 ms, bf16 395 -> 122 ms (shared Ada); f32 110.5 ms,
   bf16 112.0 ms on the idle 5090.
-- Mamba-1 at the 130m-ish shape (B=2, T=64, 24 layers, d_model=768),
-  full step with AdamW, idle 5090: f32 28.5, bf16 44.5 ms.
+- Mamba-1 at the 130m-class shape (B=2, T=64, 24 layers, d_model=768),
+  full step with AdamW, idle 5090: f32 28.5 ms, bf16 44.5 ms.
 - Fused decode step across state capacities (Mamba-1, d_model=256,
   4 layers, Ada): 0.29 ms at d_state 64, 0.38 ms at 128, 1.50 ms
   at 256.

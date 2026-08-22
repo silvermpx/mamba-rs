@@ -68,6 +68,13 @@ fn parse_usize(k: &str, v: &str) -> Result<usize, DistError> {
 /// Returns `None` when no launcher set a rank — the caller is either a
 /// plain single-process run or the supervisor about to spawn one.
 fn env_rank() -> Result<Option<EnvRank>, DistError> {
+    env_rank_from(&read_env)
+}
+
+/// The parse body behind [`env_rank`], with the environment injected so
+/// the launcher-convention chains are unit-testable without racing the
+/// process environment.
+fn env_rank_from(read_env: &dyn Fn(&str) -> Option<String>) -> Result<Option<EnvRank>, DistError> {
     if let Some(r) = read_env(ENV_RANK) {
         let rank = parse_usize(ENV_RANK, &r)?;
         let world = match read_env(ENV_WORLD) {
@@ -239,7 +246,20 @@ fn rank_context(cfg: &DistConfig, er: EnvRank) -> Result<DistContext, DistError>
     // environment the supervisor set.
     let (dir, job) = match (read_env(ENV_RENDEZVOUS_DIR), read_env(ENV_JOB_ID)) {
         (Some(d), Some(j)) => (PathBuf::from(d), j),
-        _ => rendezvous_paths(&cfg.rendezvous),
+        (None, None) => rendezvous_paths(&cfg.rendezvous),
+        // A half-set override is an operator mistake — honoring the
+        // config pair instead would silently ignore a deliberate
+        // redirect and can split the world across two rendezvous.
+        (Some(_), None) => {
+            return Err(DistError::EnvContract(format!(
+                "{ENV_RENDEZVOUS_DIR} is set but {ENV_JOB_ID} is missing"
+            )));
+        }
+        (None, Some(_)) => {
+            return Err(DistError::EnvContract(format!(
+                "{ENV_JOB_ID} is set but {ENV_RENDEZVOUS_DIR} is missing"
+            )));
+        }
     };
     if job.is_empty() {
         return Err(DistError::Rendezvous(
@@ -336,6 +356,17 @@ pub fn bootstrap(cfg: DistConfig) -> Result<Bootstrap, DistError> {
             devices.len()
         )));
     }
+    // Transport preflight: a build without the nccl feature can spawn a
+    // whole world that only discovers at the FIRST gradient exchange
+    // that it cannot reduce — after every rank paid model upload and
+    // rendezvous. Refuse before spawning anything. (cfg! keeps the
+    // supervisor body live for the compiler on every feature shape.)
+    if cfg!(not(feature = "nccl")) {
+        return Err(DistError::Config(format!(
+            "a multi-process world (W={world}) needs the nccl feature — this \
+             build has no transport to reduce gradients over"
+        )));
+    }
 
     // Supervisor: re-execute this binary once per rank with the rank
     // contract in the child environment, inheriting argv (as OS strings —
@@ -412,9 +443,13 @@ pub fn bootstrap(cfg: DistConfig) -> Result<Bootstrap, DistError> {
                     }
                 }
                 Ok(None) => all_done = false,
-                Err(e) => {
+                Err(_) => {
+                    // The status is unknowable; kill and REAP this child
+                    // too (recording -1 and never waiting again would
+                    // leave a zombie for the supervisor's lifetime).
+                    let _ = child.kill();
+                    let _ = child.wait();
                     exit_codes[rank] = Some(-1);
-                    let _ = e;
                     fail_fast = true;
                 }
             }
@@ -466,6 +501,62 @@ mod tests {
         assert_eq!(get(ENV_RENDEZVOUS_DIR), "/tmp/rdzv");
         assert_eq!(get(ENV_JOB_ID), "j1");
         assert_eq!(get(ENV_SEED), "7");
+    }
+
+    #[test]
+    fn env_rank_parses_all_launcher_conventions() {
+        let of = |pairs: &[(&str, &str)]| {
+            let owned: Vec<(String, String)> = pairs
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect();
+            move |k: &str| -> Option<String> {
+                owned.iter().find(|(kk, _)| kk == k).map(|(_, v)| v.clone())
+            }
+        };
+        // Own contract wins and carries the device.
+        let er = env_rank_from(&of(&[("MAMBA_RS_RANK", "1"), ("MAMBA_RS_WORLD", "4")]))
+            .unwrap()
+            .unwrap();
+        assert_eq!((er.rank, er.world, er.device), (1, 4, 1));
+        // torchrun convention with LOCAL_RANK as the device.
+        let er = env_rank_from(&of(&[
+            ("RANK", "3"),
+            ("WORLD_SIZE", "4"),
+            ("LOCAL_RANK", "1"),
+        ]))
+        .unwrap()
+        .unwrap();
+        assert_eq!((er.rank, er.world, er.device), (3, 4, 1));
+        // SLURM.
+        let er = env_rank_from(&of(&[("SLURM_PROCID", "2"), ("SLURM_NTASKS", "8")]))
+            .unwrap()
+            .unwrap();
+        assert_eq!((er.rank, er.world, er.device), (2, 8, 2));
+        // OpenMPI.
+        let er = env_rank_from(&of(&[
+            ("OMPI_COMM_WORLD_RANK", "0"),
+            ("OMPI_COMM_WORLD_SIZE", "2"),
+            ("OMPI_COMM_WORLD_LOCAL_RANK", "0"),
+        ]))
+        .unwrap()
+        .unwrap();
+        assert_eq!((er.rank, er.world, er.device), (0, 2, 0));
+        // No launcher at all.
+        assert!(env_rank_from(&of(&[])).unwrap().is_none());
+        // Rank without world is a contract violation, not a fallback.
+        assert!(env_rank_from(&of(&[("MAMBA_RS_RANK", "1")])).is_err());
+        // Garbage numbers are named, not ignored.
+        assert!(env_rank_from(&of(&[("RANK", "x"), ("WORLD_SIZE", "2")])).is_err());
+    }
+
+    #[test]
+    fn job_id_validation_rejects_escapes() {
+        assert!(validate_job_id("run-42-fixedorder").is_ok());
+        assert!(validate_job_id("a/b").is_err());
+        assert!(validate_job_id("..").is_err());
+        assert!(validate_job_id("x..y").is_err());
+        assert!(validate_job_id("a\\b").is_err());
     }
 
     #[test]

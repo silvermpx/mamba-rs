@@ -1,13 +1,17 @@
-//! The seed law: every random decision in a data-parallel run derives
-//! from ONE user seed in a way that never depends on the rank.
+//! The seed law: the derivations a data-parallel training harness must
+//! draw ALL of its randomness through, so that no random decision ever
+//! depends on the rank. The crate provides the law; honoring it is a
+//! CALLER OBLIGATION — a harness that seeds anything outside these
+//! derivations forfeits world-size invariance.
 //!
-//! - Weight init is rank-identical (every rank derives the same stream).
-//! - The epoch order is a rank-identical global permutation; a rank
-//!   enters only as the strided slice `k % W == rank` taken AFTER the
-//!   global order is fixed.
-//! - Sample-level noise (augmentation) is keyed on the global sample
-//!   identity `(seed, epoch, global_index)` — never on the rank — so the
-//!   exact bytes seen at optimizer step k are world-size-invariant.
+//! - Weight init: derive from [`SeedLaw::init`] — rank-identical.
+//! - Epoch order: a rank-identical global permutation from
+//!   [`SeedLaw::epoch_order`]; a rank enters only as the strided slice
+//!   `k % W == rank` taken AFTER the global order is fixed
+//!   (`DistContext::shard`).
+//! - Sample-level noise (augmentation): key on the global sample
+//!   identity via [`SeedLaw::sample_noise`] — never on the rank — so
+//!   the exact bytes seen at optimizer step k are world-size-invariant.
 //!
 //! Per-rank RNG streams are deliberately absent: they are the standard
 //! way data-parallel training becomes irreproducible across world sizes.

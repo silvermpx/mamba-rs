@@ -41,7 +41,10 @@ mod seed;
 #[cfg(any(feature = "nccl", test))]
 mod watchdog;
 
-pub use bootstrap::{Bootstrap, SupervisorStatus, attach, bootstrap};
+pub use bootstrap::{
+    Bootstrap, ENV_DEVICE, ENV_JOB_ID, ENV_RANK, ENV_RENDEZVOUS_DIR, ENV_SEED, ENV_WORLD,
+    SupervisorStatus, attach, bootstrap,
+};
 #[cfg(feature = "nccl")]
 pub use comm::MambaComm;
 pub use config::{Devices, DistConfig, ReduceContract, Rendezvous};

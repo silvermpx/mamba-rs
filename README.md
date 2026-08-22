@@ -50,7 +50,9 @@ Pure Rust + CUDA. Kernels compile at runtime via NVRTC.
   captured CUDA-graph twin replays bit-identically. The LM generate
   path switches to it automatically for long prompts.
 - **Deterministic data-parallel training (`dist`)** — one process per
-  GPU, one collective per optimizer step over the flat gradient arena.
+  GPU, one reduction per optimizer step over the flat gradient arena
+  (the fixed-order tier implements it as a byte-only shard exchange
+  around its fold kernel; the library tier as one collective).
   The default fixed-order contract (ascending logical-rank fold: bits
   independent of transport, topology, library version, and physical GPU
   permutation) is implemented twice and cross-pinned: the emulated

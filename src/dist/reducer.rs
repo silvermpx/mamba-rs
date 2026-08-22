@@ -68,6 +68,11 @@ struct DeviceScratch {
 
 impl DeviceScratch {
     fn alloc(ctx: &Arc<cudarc::driver::CudaContext>, elems: usize) -> Result<Self, DistError> {
+        // cuMemAlloc allocates in the calling thread's CURRENT context —
+        // bind the handed one first so the scratch always lives where
+        // the kernel and the copies run.
+        ctx.bind_to_thread()
+            .map_err(|e| DistError::Transport(format!("bind ctx for scratch alloc: {e:?}")))?;
         let bytes = elems.max(1) * std::mem::size_of::<f32>();
         let mut ptr: cudarc::driver::sys::CUdeviceptr = 0;
         unsafe {
@@ -125,7 +130,14 @@ impl DetReduceKernel {
 
     /// Fold `world` stacked addends into `out` (`len` elements each),
     /// ascending slot order. Stream-ordered; no synchronization.
-    pub fn launch(
+    ///
+    /// # Safety
+    /// `out_ptr` must address at least `len` f32s and `stacked_ptr` at
+    /// least `world * len` f32s, both valid device allocations of the
+    /// context this kernel was compiled for, and both valid for the
+    /// whole stream-ordered lifetime of the launch. The regions must
+    /// not overlap.
+    pub unsafe fn launch(
         &self,
         out_ptr: cudarc::driver::sys::CUdeviceptr,
         stacked_ptr: cudarc::driver::sys::CUdeviceptr,
@@ -206,6 +218,12 @@ impl FixedOrderState {
 /// copies of my shard (byte movement), fold ascending on device,
 /// redistribute every owner's reduced shard (byte movement). In-place
 /// on `arena`; stream-ordered on `stream`.
+///
+/// Cross-rank contract: every rank must present the SAME `arena.len()`
+/// (guaranteed upstream by identical model shapes on every replica).
+/// NCCL does not validate p2p size agreement, so a length mismatch is
+/// a transport hang bounded only by the collective watchdog, not a
+/// nameable error.
 #[cfg(feature = "nccl")]
 pub(super) fn reduce_sum_fixed_order_nccl(
     comm: &super::comm::MambaComm,
@@ -262,13 +280,15 @@ pub(super) fn reduce_sum_fixed_order_nccl(
             my.len,
             stream,
         )?;
-        state.kernel.launch(
-            arena_base + my.start as u64 * f32_size,
-            stacked_base,
-            world,
-            my.len,
-            stream,
-        )?;
+        unsafe {
+            state.kernel.launch(
+                arena_base + my.start as u64 * f32_size,
+                stacked_base,
+                world,
+                my.len,
+                stream,
+            )
+        }?;
     }
     // Distribute: every owner's reduced shard reaches every rank as
     // byte movement (in-place broadcast rooted at the owner).
@@ -369,26 +389,34 @@ impl LoopbackWorld {
             } else {
                 (0..world).collect()
             };
-            for src in order {
-                copy_d2d(
-                    stacked.ptr + (src * my.len) as u64 * f32_size,
-                    self.arenas[src].cached_ptr() + my.start as u64 * f32_size,
-                    my.len,
-                    stream,
-                )?;
-            }
-            kernel.launch(
-                self.arenas[me].cached_ptr() + my.start as u64 * f32_size,
-                stacked.ptr,
-                world,
-                my.len,
-                stream,
-            )?;
-            // The async launch reads `stacked`; sync before its drop
-            // frees the allocation.
-            stream
+            // Enqueue copies + fold, then ALWAYS drain the stream before
+            // `stacked` drops — including on the error paths: an async
+            // copy already in flight would otherwise read freed memory.
+            let enqueue = || -> Result<(), DistError> {
+                for src in order {
+                    copy_d2d(
+                        stacked.ptr + (src * my.len) as u64 * f32_size,
+                        self.arenas[src].cached_ptr() + my.start as u64 * f32_size,
+                        my.len,
+                        stream,
+                    )?;
+                }
+                unsafe {
+                    kernel.launch(
+                        self.arenas[me].cached_ptr() + my.start as u64 * f32_size,
+                        stacked.ptr,
+                        world,
+                        my.len,
+                        stream,
+                    )
+                }
+            };
+            let enqueued = enqueue();
+            let synced = stream
                 .synchronize()
-                .map_err(|e| DistError::Transport(format!("loopback sync: {e:?}")))?;
+                .map_err(|e| DistError::Transport(format!("loopback sync: {e:?}")));
+            enqueued?;
+            synced?;
         }
 
         // Phase B: distribute every owner's reduced shard to all ranks.

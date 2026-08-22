@@ -37,13 +37,17 @@ pub(super) fn run_with_deadline<T: Send + 'static>(
             let _ = tx.send(f());
         })
         .map_err(|e| DistError::Transport(format!("{what}: helper thread spawn: {e}")))?;
-    rx.recv_timeout(deadline).map_err(|_| {
-        DistError::Transport(format!(
+    match rx.recv_timeout(deadline) {
+        Ok(v) => Ok(v),
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Err(DistError::Transport(format!(
             "{what} did not complete within {deadline:?} — failing fast \
              (the supervisor reaps the world; the blocked helper thread \
              is reclaimed by process exit)"
-        ))
-    })
+        ))),
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Err(DistError::Transport(format!(
+            "{what}: helper thread panicked before returning a result"
+        ))),
+    }
 }
 
 const ARMED: u8 = 0;

@@ -67,7 +67,11 @@ impl MambaComm {
     /// Rank 0 generates the unique id and publishes it at `path` via
     /// atomic rename; other ranks poll for it. The file lives in the
     /// job's rendezvous directory, so ranks of different jobs cannot
-    /// cross-connect.
+    /// cross-connect. Freshness rides the job id: the self-spawn
+    /// supervisor purges the job dir before spawning, but on the
+    /// `attach()` lane a REUSED job id can serve a stale id file to
+    /// ranks > 0 — external launchers must mint a per-launch-unique
+    /// job id (the same rule the `Rendezvous` docs state).
     pub fn exchange_unique_id(
         path: &Path,
         rank: usize,

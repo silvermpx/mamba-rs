@@ -1,4 +1,4 @@
-//! Coverage-gap closures identified in the v0.3.0 multi-agent audit.
+//! Coverage-gap closures identified in the v0.3.0 coverage audit.
 //!
 //! * `m1_trainer_parallel_scan_{f32,bf16,f16}` — M1 training through the full
 //!   `MambaTrainer` API with `ScanMode::Parallel` (T > 128). Previously only

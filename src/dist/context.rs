@@ -1,6 +1,6 @@
 //! Per-process handle on a data-parallel world.
 //!
-//! Three backings share one API. `Single` is the always-on no-op: world
+//! Two backings share one API. `Single` is the always-on no-op: world
 //! size 1, sharding is identity, reductions return immediately —
 //! downstream code compiles and runs unchanged with distribution off.
 //! `Process` is a rank in a multi-process world: file-based rendezvous,
@@ -158,14 +158,25 @@ impl DistContext {
                     .synchronize()
                     .map_err(|e| DistError::Transport(format!("reduce sync: {e:?}")))
             }),
+            // Deliberately NOT a catch-all over the contract: the two
+            // comm-bearing arms above enumerate every ReduceContract
+            // variant, so adding a third variant fails compilation here
+            // instead of silently landing in the no-comm error below.
+            #[cfg(feature = "nccl")]
+            ContextInner::Process { comm: None, .. } => Err(DistError::Transport(
+                "no communicator attached to this rank (bootstrap did not \
+                 initialize one)"
+                    .into(),
+            )),
+            #[cfg(not(feature = "nccl"))]
             ContextInner::Process { .. } => {
-                // Without the nccl feature this arm is the only Process
-                // path and the operands go unused — bind them so the
+                // Without the nccl feature this is the only Process path
+                // and the operands go unused — bind them so the
                 // cuda-without-nccl build stays warning-free.
                 let _ = (&arena, &stream);
                 Err(DistError::Transport(
                     "no communicator attached to this rank (built without the nccl \
-                     feature, or bootstrap did not initialize one)"
+                     feature)"
                         .into(),
                 ))
             }
@@ -297,6 +308,11 @@ impl DistContext {
     /// The reduction rides the configured contract — the fixed-order
     /// house reducer or the library sum — after a device round-trip
     /// (NCCL only moves device memory).
+    ///
+    /// Cross-rank contract: `xs.len()` must agree on every rank,
+    /// INCLUDING emptiness — a world where some ranks pass an empty
+    /// buffer and others do not desynchronizes the communicator (the
+    /// empty ranks skip the collective the rest are blocked in).
     pub fn all_reduce_host_f32(&self, xs: &mut [f32]) -> Result<(), DistError> {
         match &self.inner {
             ContextInner::Single { .. } => Ok(()),
@@ -543,10 +559,79 @@ impl EmulatedWorld {
 
     /// The straight-line reference: full-arena ascending fold, no
     /// sharding. The sharded dataflow above must match it bit-for-bit.
-    pub fn reference_mean(&self, arenas: &[Vec<f32>]) -> Vec<f32> {
+    /// Validates its inputs like [`Self::all_reduce_mean`] — an oracle
+    /// that silently mis-indexes on malformed input proves nothing.
+    pub fn reference_mean(&self, arenas: &[Vec<f32>]) -> Result<Vec<f32>, DistError> {
+        if arenas.len() != self.world {
+            return Err(DistError::Config(format!(
+                "expected {} rank arenas, got {}",
+                self.world,
+                arenas.len()
+            )));
+        }
+        let n = arenas[0].len();
+        for (r, a) in arenas.iter().enumerate() {
+            if a.len() != n {
+                return Err(DistError::Config(format!(
+                    "arena length mismatch: rank 0 has {n}, rank {r} has {}",
+                    a.len()
+                )));
+            }
+        }
         let views: Vec<&[f32]> = arenas.iter().map(|a| a.as_slice()).collect();
-        let mut out = vec![0.0f32; arenas[0].len()];
+        let mut out = vec![0.0f32; n];
         reduce_mean_reference(&views, &mut out);
-        out
+        Ok(out)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shard_is_the_strided_slice_law() {
+        let ctx0 = DistContext::process(
+            0,
+            3,
+            0,
+            7,
+            ReduceContract::default(),
+            std::env::temp_dir(),
+            Duration::from_secs(1),
+        );
+        let ctx2 = DistContext::process(
+            2,
+            3,
+            2,
+            7,
+            ReduceContract::default(),
+            std::env::temp_dir(),
+            Duration::from_secs(1),
+        );
+        let global: Vec<u32> = (0..10).collect();
+        let r0: Vec<u32> = ctx0.shard(&global).copied().collect();
+        let r2: Vec<u32> = ctx2.shard(&global).copied().collect();
+        assert_eq!(r0, vec![0, 3, 6, 9], "rank 0 takes k % 3 == 0");
+        assert_eq!(r2, vec![2, 5, 8], "rank 2 takes k % 3 == 2");
+        // Single-world context is the identity slice.
+        let s = DistContext::single(0, 7);
+        let all: Vec<u32> = s.shard(&global).copied().collect();
+        assert_eq!(all, global);
+    }
+
+    #[test]
+    fn reference_mean_validates_like_its_sibling() {
+        let ew = EmulatedWorld::new(2).unwrap();
+        assert!(
+            ew.reference_mean(&[vec![1.0]]).is_err(),
+            "wrong arena count"
+        );
+        assert!(
+            ew.reference_mean(&[vec![1.0], vec![1.0, 2.0]]).is_err(),
+            "length mismatch"
+        );
+        let out = ew.reference_mean(&[vec![2.0], vec![4.0]]).unwrap();
+        assert_eq!(out, vec![3.0]);
     }
 }

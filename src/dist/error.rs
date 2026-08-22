@@ -5,9 +5,12 @@ use std::fmt;
 /// Everything that can go wrong while setting up or running a
 /// data-parallel world. Variants carry enough context to act on: config
 /// errors are caller bugs, rendezvous/transport errors are environment
-/// problems, and `RankFailed` is the fail-fast signal that some peer
-/// died and the whole run must stop (a mid-run world-size change would
-/// re-partition the data fold and silently change the numbers).
+/// problems. `RankFailed` and `ReplicaDivergence` are RESERVED for the
+/// training-harness lanes (supervisor-side peer diagnostics and the
+/// replica-consistency probe) — no code in this crate produces them
+/// yet; today a dead peer surfaces as a `Transport` error from the
+/// aborted collective window and a non-zero rank exit the supervisor
+/// aggregates.
 #[non_exhaustive]
 #[derive(Debug)]
 pub enum DistError {

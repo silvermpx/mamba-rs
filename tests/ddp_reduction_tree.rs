@@ -2,6 +2,14 @@
 //! sharded owner fold (what a real transport-backed reducer executes)
 //! must produce bit-for-bit the straight-line ascending-rank reference,
 //! independent of world size, arena length, and delivery order.
+//!
+//! Scope note on the delivery-order oracles: immunity is provided BY
+//! CONSTRUCTION through slot-keyed placement (contributions land at
+//! slot = source rank; the fold consumes slots in fixed program-text
+//! order). The permutation tests therefore pin the mechanism — a mutant
+//! that placed contributions by ARRIVAL index would fail them — not a
+//! hypothetical reordering of the fold itself, which no code path can
+//! express.
 
 use mamba_rs::dist::EmulatedWorld;
 
@@ -33,7 +41,7 @@ fn sharded_fold_matches_reference_across_worlds_and_lengths() {
             let arenas: Vec<Vec<f32>> = (0..world)
                 .map(|r| det(n, 0x1000 + (world * 100 + r) as u32))
                 .collect();
-            let reference = ew.reference_mean(&arenas);
+            let reference = ew.reference_mean(&arenas).unwrap();
             let mut sharded = arenas.clone();
             ew.all_reduce_mean(&mut sharded, None).unwrap();
             for (r, arena) in sharded.iter().enumerate() {
@@ -96,4 +104,32 @@ fn two_rank_mean_of_identical_arenas_reproduces_input_bits() {
             "element {i}: two-rank mean of identical arenas must be exact"
         );
     }
+}
+
+#[test]
+fn same_addends_different_fold_tree_changes_bits() {
+    // The trainer-level W-route test necessarily changes the data
+    // schedule together with W; this pin isolates the FOLD TREE: the
+    // same four addends reduced flat at W=4 vs pairwise (two W=2 folds,
+    // then a W=2 fold of the halves, each with its own 1/W scale — the
+    // hierarchical shape a W=2 world reducing pre-averaged pairs would
+    // produce) must differ bitwise on order-sensitive values.
+    let n = 257usize;
+    let a: Vec<Vec<f32>> = (0..4).map(|r| det(n, 0xD00 + r as u32)).collect();
+
+    let ew4 = EmulatedWorld::new(4).unwrap();
+    let flat = ew4.reference_mean(&a).unwrap();
+
+    let ew2 = EmulatedWorld::new(2).unwrap();
+    let left = ew2.reference_mean(&a[0..2]).unwrap();
+    let right = ew2.reference_mean(&a[2..4]).unwrap();
+    let nested = ew2.reference_mean(&[left, right]).unwrap();
+
+    let flat_bits: Vec<u32> = flat.iter().map(|x| x.to_bits()).collect();
+    let nested_bits: Vec<u32> = nested.iter().map(|x| x.to_bits()).collect();
+    assert_ne!(
+        flat_bits, nested_bits,
+        "flat W=4 fold and nested W=2 folds unexpectedly agree — the \
+         adversarial inputs must be order-sensitive for this pin to hold"
+    );
 }

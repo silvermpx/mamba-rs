@@ -180,10 +180,17 @@ impl DistConfig {
     }
 
     pub fn validate(&self) -> Result<(), DistError> {
-        if let Devices::List(l) = &self.devices
-            && l.is_empty()
-        {
-            return Err(DistError::Config("empty device list".into()));
+        if let Devices::List(l) = &self.devices {
+            if l.is_empty() {
+                return Err(DistError::Config("empty device list".into()));
+            }
+            for (i, ord) in l.iter().enumerate() {
+                if l[..i].contains(ord) {
+                    return Err(DistError::Config(format!(
+                        "device ordinal {ord} repeats in the device list"
+                    )));
+                }
+            }
         }
         if let Devices::Count(0) = self.devices {
             return Err(DistError::Config("device count must be positive".into()));

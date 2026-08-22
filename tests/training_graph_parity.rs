@@ -423,7 +423,7 @@ fn training_graph_bf16_multi_replay_matches_eager() {
 }
 
 /// Reallocating `state.conv_states` between capture and replay must trip
-/// the conv-state assertion (regression coverage for round-3 finding —
+/// the conv-state assertion (regression coverage for an audit finding —
 /// before the fix this reallocation went silently undetected because only
 /// `state.ssm_states` was snapshotted).
 #[test]

@@ -279,6 +279,13 @@ impl Mamba3Trainer {
         // Mean = sum then multiply: for power-of-two worlds the scale
         // only moves exponents (exact); other sizes still get one
         // deterministic per-element rounding.
+        if self.grad_arena().len() > i32::MAX as usize {
+            return Err(format!(
+                "gradient arena has {} elements — beyond the i32 kernel ABI \
+                 of scale_grads; the mean scale would silently truncate",
+                self.grad_arena().len()
+            ));
+        }
         let inv_w = 1.0f32 / world as f32;
         match &mut self.inner {
             Trainer3Inner::F32(t) => scale_grads(&t.ctx, &mut t.grads.flat, inv_w)?,
