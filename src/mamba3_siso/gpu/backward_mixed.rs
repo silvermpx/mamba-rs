@@ -522,10 +522,20 @@ fn gpu_backward_mamba3_layer_mixed(
     // (caller does colsum_accumulate on dQ_pre/dK_pre scratch below).
     {
         let na_i = na as i32;
+        // Six [CS][ds] staging tiles (4 inputs + 2 outputs) for the
+        // coalesced I/O path; values identical, bits identical.
+        // Large-d_state tiles overflow the 48 KB no-opt-in dynamic
+        // limit — fall back to the direct-global path (staging = 0).
+        let dqkt_smem = 6 * cs_u * ds * 4;
+        let dqkt_staging: i32 = i32::from(dqkt_smem <= 48 * 1024);
         let cfg = LaunchConfig {
             grid_dim: ((dims.batch * nc) as u32, nh as u32, 1),
             block_dim: (cs_u as u32, 1, 1),
-            shared_mem_bytes: 0,
+            shared_mem_bytes: if dqkt_staging == 1 {
+                dqkt_smem as u32
+            } else {
+                0
+            },
         };
         let mut builder = ctx.stream.launch_builder(m3k.m3_dqktheta_typed.get(dtype));
         builder.arg(sc.d_c_pre_rope.inner_mut());
@@ -551,6 +561,7 @@ fn gpu_backward_mamba3_layer_mixed(
         builder.arg(&ds_i);
         builder.arg(&na_i);
         builder.arg(&cs);
+        builder.arg(&dqkt_staging);
         unsafe { builder.launch(cfg) }.map_err(|e| format!("m3_dqktheta_typed B6: {:?}", e))?;
     }
     // colsum dQ_pre / dK_pre → c_bias / b_bias (deterministic).

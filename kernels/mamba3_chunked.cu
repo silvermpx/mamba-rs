@@ -1064,7 +1064,8 @@ extern "C" __global__ void m3_dqktheta(
     const float* __restrict__ dQ_mid,   // [B*T*nh*ds] — from m3_dqkv
     const float* __restrict__ dK_mid,   // [B*T*nh*ds] — from m3_dqkv
     const float* __restrict__ dQK_dot,  // [B*T*nh] — from m3_dqkv
-    int B, int T, int nh, int ds, int n_angles, int CS
+    int B, int T, int nh, int ds, int n_angles, int CS,
+    int use_staging  // 1 = smem holds the six [CS][ds] I/O tiles
 ) {
     int n_chunks = (T + CS - 1) / CS;
     int bc = blockIdx.x;
@@ -1078,11 +1079,42 @@ extern "C" __global__ void m3_dqktheta(
 
     // Capacity guard for the q_pre/k_pre/dq_in register arrays. All
     // threads of the block read the same `ds` arg -> safe early return
-    // (no smem alloc reached, no syncthreads needed).
+    // (before any barrier, uniform across the block).
     if (ds > MAMBA_RS_STATE_CAP) return;
     if (b >= B || h >= nh) return;
 
     bool valid = (gt < T);
+
+    // Coalesced staging: the per-thread row loads/stores put adjacent
+    // threads nh*ds floats apart (one 32-byte sector each). Threads
+    // jointly stream the [CS][ds] tiles instead; every thread then
+    // reads ITS OWN row from shared memory — identical values, so the
+    // per-thread arithmetic (and bits) are unchanged.
+    extern __shared__ float dqkt_sm[];
+    float* q_sm     = dqkt_sm;
+    float* k_sm     = q_sm + CS * ds;
+    float* dqi_sm   = k_sm + CS * ds;
+    float* dki_sm   = dqi_sm + CS * ds;
+    float* out_q_sm = dki_sm + CS * ds;
+    float* out_k_sm = out_q_sm + CS * ds;
+    int t0 = chunk * CS;
+    int rows = min(CS, T - t0);
+    // Large-d_state tiles overflow the 48 KB no-opt-in dynamic-smem
+    // limit; the launcher then passes use_staging = 0 and every access
+    // falls back to the direct global form — identical values, only
+    // the coalescing win is lost.
+    if (use_staging) {
+        for (int i = t_local; i < rows * ds; i += CS) {
+            int tt = i / ds;
+            int nn = i % ds;
+            int gbase = ((b * T + t0 + tt) * nh + h) * ds + nn;
+            q_sm[i] = Q_raw[gbase];
+            k_sm[i] = K_raw[gbase];
+            dqi_sm[i] = dQ_mid[gbase];
+            dki_sm[i] = dK_mid[gbase];
+        }
+    }
+    __syncthreads();
 
     if (valid) {
         int base = ((b * T + gt) * nh + h) * ds;
@@ -1090,16 +1122,16 @@ extern "C" __global__ void m3_dqktheta(
         float gamma = Gamma_in[(b * T + gt) * nh + h];
         float dqk = dQK_dot[(b * T + gt) * nh + h];
 
-        // Load Q_raw + K_raw (pre-RoPE, post-bias)
+        // Load Q_raw + K_raw (pre-RoPE, post-bias) from the staged tiles
         float q_pre[MAMBA_RS_STATE_CAP], k_pre[MAMBA_RS_STATE_CAP]; // sized by the state capacity
         for (int n = 0; n < ds; n++) {
-            q_pre[n] = Q_raw[base + n];
-            k_pre[n] = K_raw[base + n];
+            q_pre[n] = use_staging ? q_sm[t_local * ds + n] : Q_raw[base + n];
+            k_pre[n] = use_staging ? k_sm[t_local * ds + n] : K_raw[base + n];
         }
         float dq_in[MAMBA_RS_STATE_CAP], dk_in[MAMBA_RS_STATE_CAP];
         for (int n = 0; n < ds; n++) {
-            dq_in[n] = dQ_mid[base + n];
-            dk_in[n] = dK_mid[base + n];
+            dq_in[n] = use_staging ? dqi_sm[t_local * ds + n] : dQ_mid[base + n];
+            dk_in[n] = use_staging ? dki_sm[t_local * ds + n] : dK_mid[base + n];
         }
 
         // Forward RoPE on K_raw to get K_rot (for dScale computation)
@@ -1158,12 +1190,19 @@ extern "C" __global__ void m3_dqktheta(
             dk_pre_out[n] += dqk_gamma * q_pre[n];
         }
 
-        // Store dQ_pre, dK_pre — these per-(b,t,h,n) scratch tensors are
-        // reduced to dQ_bias/dK_bias by the caller via colsum_accumulate
-        // (no atomicAdd here).
-        for (int n = 0; n < ds; n++) {
-            dQ_pre[base + n] = dq_pre_out[n];
-            dK_pre[base + n] = dk_pre_out[n];
+        // Stage dQ_pre, dK_pre rows; the cooperative store below writes
+        // them coalesced. (Caller reduces to dQ_bias/dK_bias via
+        // colsum_accumulate — no atomicAdd here.)
+        if (use_staging) {
+            for (int n = 0; n < ds; n++) {
+                out_q_sm[t_local * ds + n] = dq_pre_out[n];
+                out_k_sm[t_local * ds + n] = dk_pre_out[n];
+            }
+        } else {
+            for (int n = 0; n < ds; n++) {
+                dQ_pre[base + n] = dq_pre_out[n];
+                dK_pre[base + n] = dk_pre_out[n];
+            }
         }
 
         // dAngles_cumsum from rotary gradient
@@ -1180,6 +1219,16 @@ extern "C" __global__ void m3_dqktheta(
             float dtheta_k = dk_in[i0] * (-k_pre[i0] * sin_t - k_pre[i1] * cos_t)
                            + dk_in[i1] * (k_pre[i0] * cos_t - k_pre[i1] * sin_t);
             dAngles_cumsum[((b * T + gt) * nh + h) * n_angles + a] = dtheta_q + dtheta_k;
+        }
+    }
+    __syncthreads();
+    if (use_staging) {
+        for (int i = t_local; i < rows * ds; i += CS) {
+            int tt = i / ds;
+            int nn = i % ds;
+            int gbase = ((b * T + t0 + tt) * nh + h) * ds + nn;
+            dQ_pre[gbase] = out_q_sm[i];
+            dK_pre[gbase] = out_k_sm[i];
         }
     }
     // dQ_bias/dK_bias produced via colsum_accumulate on
@@ -1913,7 +1962,8 @@ m3_dqktheta_##SUFFIX(                                                         \
     const float* __restrict__ dQ_mid,                                         \
     const float* __restrict__ dK_mid,                                         \
     const float* __restrict__ dQK_dot,                                        \
-    int B, int T, int nh, int ds, int n_angles, int CS                        \
+    int B, int T, int nh, int ds, int n_angles, int CS,                       \
+    int use_staging                                                           \
 ) {                                                                           \
     int n_chunks = (T + CS - 1) / CS;                                         \
     int bc = blockIdx.x;                                                      \
@@ -1926,6 +1976,29 @@ m3_dqktheta_##SUFFIX(                                                         \
     if (ds > MAMBA_RS_STATE_CAP) return;                                                      \
     if (b >= B || h >= nh) return;                                            \
     bool valid = (gt < T);                                                    \
+    /* Coalesced staging (see f32 kernel): tiles first, then each */          \
+    /* thread reads its own row from smem - identical values.     */          \
+    extern __shared__ float dqkt_sm[];                                        \
+    float* q_sm     = dqkt_sm;                                                \
+    float* k_sm     = q_sm + CS * ds;                                         \
+    float* dqi_sm   = k_sm + CS * ds;                                         \
+    float* dki_sm   = dqi_sm + CS * ds;                                       \
+    float* out_q_sm = dki_sm + CS * ds;                                       \
+    float* out_k_sm = out_q_sm + CS * ds;                                     \
+    int t0 = chunk * CS;                                                      \
+    int rows = min(CS, T - t0);                                               \
+    if (use_staging) {                                                        \
+        for (int i = t_local; i < rows * ds; i += CS) {                       \
+            int tt = i / ds;                                                  \
+            int nn = i % ds;                                                  \
+            int gbase = ((b * T + t0 + tt) * nh + h) * ds + nn;               \
+            q_sm[i] = to_f(Q_raw[gbase]);                                     \
+            k_sm[i] = to_f(K_raw[gbase]);                                     \
+            dqi_sm[i] = dQ_mid[gbase];                                        \
+            dki_sm[i] = dK_mid[gbase];                                        \
+        }                                                                     \
+    }                                                                         \
+    __syncthreads();                                                          \
     if (valid) {                                                              \
     int base = ((b * T + gt) * nh + h) * ds;                                  \
     float scale = Scale_in[(b * T + gt) * nh + h];                            \
@@ -1933,13 +2006,17 @@ m3_dqktheta_##SUFFIX(                                                         \
     float dqk = dQK_dot[(b * T + gt) * nh + h];                               \
     float q_pre[MAMBA_RS_STATE_CAP], k_pre[MAMBA_RS_STATE_CAP];                                               \
     for (int n = 0; n < ds; n++) {                                            \
-        q_pre[n] = to_f(Q_raw[base + n]);                                     \
-        k_pre[n] = to_f(K_raw[base + n]);                                     \
+        q_pre[n] =                                                            \
+            use_staging ? q_sm[t_local * ds + n] : to_f(Q_raw[base + n]);     \
+        k_pre[n] =                                                            \
+            use_staging ? k_sm[t_local * ds + n] : to_f(K_raw[base + n]);     \
     }                                                                         \
     float dq_in[MAMBA_RS_STATE_CAP], dk_in[MAMBA_RS_STATE_CAP];                                               \
     for (int n = 0; n < ds; n++) {                                            \
-        dq_in[n] = dQ_mid[base + n];                                          \
-        dk_in[n] = dK_mid[base + n];                                          \
+        dq_in[n] =                                                            \
+            use_staging ? dqi_sm[t_local * ds + n] : dQ_mid[base + n];        \
+        dk_in[n] =                                                            \
+            use_staging ? dki_sm[t_local * ds + n] : dK_mid[base + n];        \
     }                                                                         \
     float k_rot[MAMBA_RS_STATE_CAP];                                                          \
     int angle_base = ((b * T + gt) * nh + h) * n_angles;                      \
@@ -1984,9 +2061,16 @@ m3_dqktheta_##SUFFIX(                                                         \
         dq_pre_out[n] += dqk_gamma * k_pre[n];                                \
         dk_pre_out[n] += dqk_gamma * q_pre[n];                                \
     }                                                                         \
-    for (int n = 0; n < ds; n++) {                                            \
-        dQ_pre[base + n] = dq_pre_out[n];                                     \
-        dK_pre[base + n] = dk_pre_out[n];                                     \
+    if (use_staging) {                                                        \
+        for (int n = 0; n < ds; n++) {                                        \
+            out_q_sm[t_local * ds + n] = dq_pre_out[n];                       \
+            out_k_sm[t_local * ds + n] = dk_pre_out[n];                       \
+        }                                                                     \
+    } else {                                                                  \
+        for (int n = 0; n < ds; n++) {                                        \
+            dQ_pre[base + n] = dq_pre_out[n];                                 \
+            dK_pre[base + n] = dk_pre_out[n];                                 \
+        }                                                                     \
     }                                                                         \
     for (int a = 0; a < n_angles && 2 * a + 1 < ds; a++) {                    \
         float cos_t = cos_a[a];                                               \
@@ -2002,6 +2086,16 @@ m3_dqktheta_##SUFFIX(                                                         \
             dtheta_q + dtheta_k;                                              \
     }                                                                         \
     } /* end if (valid) */                                                    \
+    __syncthreads();                                                          \
+    if (use_staging) {                                                        \
+        for (int i = t_local; i < rows * ds; i += CS) {                       \
+            int tt = i / ds;                                                  \
+            int nn = i % ds;                                                  \
+            int gbase = ((b * T + t0 + tt) * nh + h) * ds + nn;               \
+            dQ_pre[gbase] = out_q_sm[i];                                      \
+            dK_pre[gbase] = out_k_sm[i];                                      \
+        }                                                                     \
+    }                                                                         \
     /* dQ_bias/dK_bias produced via colsum_accumulate by caller.*/\
     (void)FROM_F;                                                             \
 }

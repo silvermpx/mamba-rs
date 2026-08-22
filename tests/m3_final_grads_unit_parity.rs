@@ -353,7 +353,7 @@ fn check_dqktheta(dtype: WeightDtype) {
     let cfg = LaunchConfig {
         grid_dim: ((B * N_CHUNKS) as u32, NH as u32, 1),
         block_dim: (CS as u32, 1, 1),
-        shared_mem_bytes: 0,
+        shared_mem_bytes: (6 * CS * DS * 4) as u32,
     };
     let (bi, ti, nhi, dsi, nai, csi) = (
         B as i32,
@@ -389,6 +389,8 @@ fn check_dqktheta(dtype: WeightDtype) {
     bld.arg(&dsi);
     bld.arg(&nai);
     bld.arg(&csi);
+    let staging_i: i32 = 1;
+    bld.arg(&staging_i);
     unsafe { bld.launch(cfg) }.unwrap();
     ctx.stream.synchronize().unwrap();
 
@@ -468,6 +470,7 @@ fn check_dqktheta(dtype: WeightDtype) {
     bld.arg(&dsi);
     bld.arg(&nai);
     bld.arg(&csi);
+    bld.arg(&staging_i);
     unsafe { bld.launch(cfg) }.unwrap();
     ctx.stream.synchronize().unwrap();
 
@@ -709,9 +712,10 @@ fn m3_kernels_isolated_bench() {
     let th_cfg = LaunchConfig {
         grid_dim: ((CB * n_chunks) as u32, CNH as u32, 1),
         block_dim: (CCS as u32, 1, 1),
-        shared_mem_bytes: 0,
+        shared_mem_bytes: (6 * CCS * CDS * 4) as u32,
     };
     let nai = CNA as i32;
+    let th_staging: i32 = 1;
     time_it("m3_dqktheta f32", &|| {
         let mut bld = ctx.stream.launch_builder(&m3k.m3_dqktheta);
         let args = [
@@ -738,6 +742,7 @@ fn m3_kernels_isolated_bench() {
         bld.arg(&dsi);
         bld.arg(&nai);
         bld.arg(&csi);
+        bld.arg(&th_staging);
         unsafe { bld.launch(th_cfg) }.unwrap();
     });
 
@@ -816,6 +821,117 @@ fn m3_kernels_isolated_bench() {
         bld.arg(&csi);
         unsafe { bld.launch(fwd_cfg) }.unwrap();
     });
+}
+
+// ─── m3_dqktheta output bit-hash (campaign shape) ─────────────────────
+//
+// Same role as m3_dqkv_output_hash: the bit gate for data-movement work
+// on m3_dqktheta (no run-digest instrument covers it).
+
+#[test]
+#[ignore]
+fn m3_dqktheta_output_hash() {
+    const CB: usize = 8;
+    const CT: usize = 1300;
+    const CNH: usize = 48;
+    const CDS: usize = 16;
+    const CCS: usize = 64;
+    const CNA: usize = 4;
+    let n_chunks = CT.div_ceil(CCS);
+
+    let dev = GpuDevice::new(0).unwrap();
+    let ctx = GpuCtx::new(&dev).unwrap();
+    let m3k =
+        Mamba3Kernels::compile_with_state_cap(ctx.stream.context(), "sm_89", CDS.max(16)).unwrap();
+
+    let n_q = CB * CT * CNH * CDS;
+    let n_th = CB * CT * CNH;
+    let n_ang = CB * CT * CNH * CNA;
+
+    let q_raw = upload_f32(&ctx, &det_rand(n_q, 0xB001));
+    let k_raw = upload_f32(&ctx, &det_rand(n_q, 0xB002));
+    let scale_buf = upload_f32(&ctx, &det_rand(n_th, 0xB003));
+    let gamma_buf = upload_f32(&ctx, &det_rand(n_th, 0xB004));
+    let angle_buf = upload_f32(&ctx, &det_rand(n_ang, 0xB005));
+    let dq_mid = upload_f32(&ctx, &det_rand(n_q, 0xB006));
+    let dk_mid = upload_f32(&ctx, &det_rand(n_q, 0xB007));
+    let dqk_buf = upload_f32(&ctx, &det_rand(n_th, 0xB008));
+
+    let dqpre = GpuBuffer::zeros(&ctx.stream, n_q).unwrap();
+    let dkpre = GpuBuffer::zeros(&ctx.stream, n_q).unwrap();
+    let dang = GpuBuffer::zeros(&ctx.stream, n_ang).unwrap();
+    let dscale = GpuBuffer::zeros(&ctx.stream, n_th).unwrap();
+    let dgamma = GpuBuffer::zeros(&ctx.stream, n_th).unwrap();
+    ctx.stream.synchronize().unwrap();
+
+    let cfg = LaunchConfig {
+        grid_dim: ((CB * n_chunks) as u32, CNH as u32, 1),
+        block_dim: (CCS as u32, 1, 1),
+        shared_mem_bytes: (6 * CCS * CDS * 4) as u32,
+    };
+    let (bi, ti, nhi, dsi, nai, csi) = (
+        CB as i32, CT as i32, CNH as i32, CDS as i32, CNA as i32, CCS as i32,
+    );
+    let mut bld = ctx.stream.launch_builder(&m3k.m3_dqktheta);
+    let args = [
+        dqpre.cached_ptr(),
+        dkpre.cached_ptr(),
+        dang.cached_ptr(),
+        dscale.cached_ptr(),
+        dgamma.cached_ptr(),
+        q_raw.cached_ptr(),
+        k_raw.cached_ptr(),
+        scale_buf.cached_ptr(),
+        gamma_buf.cached_ptr(),
+        angle_buf.cached_ptr(),
+        dq_mid.cached_ptr(),
+        dk_mid.cached_ptr(),
+        dqk_buf.cached_ptr(),
+    ];
+    for a in &args {
+        bld.arg(a);
+    }
+    bld.arg(&bi);
+    bld.arg(&ti);
+    bld.arg(&nhi);
+    bld.arg(&dsi);
+    bld.arg(&nai);
+    bld.arg(&csi);
+    let staging_i: i32 = 1;
+    bld.arg(&staging_i);
+    unsafe { bld.launch(cfg) }.unwrap();
+    ctx.stream.synchronize().unwrap();
+
+    let fnv = |v: &[f32]| -> u64 {
+        let mut h = 0xcbf29ce484222325u64;
+        for x in v {
+            for b in x.to_bits().to_le_bytes() {
+                h ^= b as u64;
+                h = h.wrapping_mul(0x100000001b3);
+            }
+        }
+        h
+    };
+    eprintln!(
+        "HASH dQ_pre  {:016x}",
+        fnv(&download_f32(&ctx, &dqpre, n_q))
+    );
+    eprintln!(
+        "HASH dK_pre  {:016x}",
+        fnv(&download_f32(&ctx, &dkpre, n_q))
+    );
+    eprintln!(
+        "HASH dAngles {:016x}",
+        fnv(&download_f32(&ctx, &dang, n_ang))
+    );
+    eprintln!(
+        "HASH dScale  {:016x}",
+        fnv(&download_f32(&ctx, &dscale, n_th))
+    );
+    eprintln!(
+        "HASH dGamma  {:016x}",
+        fnv(&download_f32(&ctx, &dgamma, n_th))
+    );
 }
 
 // ─── m3_dqkv output bit-hash (campaign shape) ──────────────────────────

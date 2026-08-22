@@ -66,6 +66,16 @@
   pair (3x SFU work per angle). Bit-identical (same functions, same
   inputs); campaign-neutral at d_state 16 (4 angles), the win scales
   with d_state.
+- `m3_dqktheta` I/O is staged through six [CS][ds] shared-memory tiles
+  (4 inputs, 2 outputs): the per-thread row loads/stores put adjacent
+  threads nh*ds floats apart — one 32-byte sector per access. Threads
+  now stream the tiles cooperatively and each reads/writes its own row
+  in smem; identical values, bit-identical outputs (new
+  `m3_dqktheta_output_hash` arm matches pre-change hashes). Configs
+  whose tile exceeds the 48 KB no-opt-in dynamic-smem limit (large
+  d_state) fall back to the direct-global path via a `use_staging`
+  launch flag. Isolated: 0.612 -> 0.270 ms/launch; M3 campaign bf16
+  graph 226.0 -> 221.5 ms/step.
 - M3-KILL-1, `m3_dqkv` t-split (both dtype copies): the kernel ran one
   32-thread warp per block behind an 88 KB two-head smem tile — one
   block per SM, ~2% occupancy, and 73% of the whole M3 training step
@@ -158,10 +168,11 @@
   rows in this file's history measured plain BI — the tier flag is
   MAMBA_RS_BI_TENSOR_CORES.
 - M3 campaign shape (bf16 graph): 636 -> 381 (dqkv pair matrices +
-  two-head packing) -> 362.1 (decay/exp staging) -> 226.0 ms/step
-  (t-split block widening). Isolated m3_dqkv: 11.0 -> 3.9 ms/launch;
-  remaining M3 ledger (x24-layer ms): dqkv 93, dqktheta 14.7,
-  colsum pair 6.4.
+  two-head packing) -> 362.1 (decay/exp staging) -> 226.0 (t-split
+  block widening) -> 221.5 ms/step (dqktheta coalesced staging).
+  Isolated m3_dqkv: 11.0 -> 3.9 ms/launch; remaining M3 ledger
+  (x24-layer ms): dqkv 93.4, chunk_scan_fwd 20.8, dqktheta 6.5,
+  colsum pair 6.4, chunk_state_fwd 4.3.
 
 ## 0.6.2 (2026-08-22)
 
