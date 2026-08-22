@@ -427,16 +427,28 @@ fn gpu_backward_mamba3_layer_mixed(
         // P1.7(2): pack two heads per block when nh is even — a 16-lane
         // head fills a full warp. Each head gets a private smem slice,
         // so per-head arithmetic (and bits) are unchanged.
-        let head_pack: u32 = if nh % 2 == 0 { 2 } else { 1 };
-        let per_head_floats =
-            2 * cs_u * ds + 2 * cs_u * hd + 4 * cs_u + 2 * hd * ds + cs_u * (cs_u - 1);
+        let legacy_floats = 2 * cs_u * ds + 2 * cs_u * hd + 4 * cs_u + 2 * hd * ds;
+        let mats_floats = legacy_floats + cs_u * (cs_u - 1);
+        // Consumer GPUs cap the per-block dynamic-smem opt-in near 99 KB.
+        // Prefer packed+matrices, then unpacked+matrices, then packed
+        // legacy, then unpacked legacy; the kernel's use_pair_mats=0 path
+        // computes the same dots inline (bit-identical, just slower).
+        let cap_floats = 99 * 1024 / 4;
+        let (head_pack, per_head_floats, use_pair_mats): (u32, usize, i32) =
+            if nh % 2 == 0 && 2 * mats_floats <= cap_floats {
+                (2, mats_floats, 1)
+            } else if mats_floats <= cap_floats {
+                (1, mats_floats, 1)
+            } else if nh % 2 == 0 && 2 * legacy_floats <= cap_floats {
+                (2, legacy_floats, 0)
+            } else {
+                (1, legacy_floats, 0)
+            };
         let smem = per_head_floats * head_pack as usize * 4;
-        // ~71 KB at CS=64 packed packed; loader carves out 160 KB per dqkv
-        // variant — fail loudly with the config named.
         if smem > 99 * 1024 {
             return Err(format!(
                 "m3_dqkv shared-memory tile {} B exceeds the 99 KB opt-in \
-                 (CS={cs_u} hd={hd} ds={ds} pack={head_pack}) — shrink the chunk size or state",
+                     (CS={cs_u} hd={hd} ds={ds}) even without the pair matrices",
                 smem
             ));
         }
@@ -471,6 +483,7 @@ fn gpu_backward_mamba3_layer_mixed(
         builder.arg(&hd_i);
         builder.arg(&ds_i);
         builder.arg(&cs);
+        builder.arg(&use_pair_mats);
         unsafe { builder.launch(cfg) }.map_err(|e| format!("m3_dqkv_typed B6: {:?}", e))?;
     }
     // Stage 2: reduce dD_partials[B, nh] → lg.d_param[nh] (accumulate=1).

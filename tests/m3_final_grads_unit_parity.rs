@@ -172,8 +172,10 @@ fn check_dqkv(dtype: WeightDtype) {
     // Must mirror the launch-site formula (two operand tiles, V/dO tiles,
     // per-step lanes, da/qk lanes, and TWO head-state tiles for the
     // warp-parallel decay-gradient section).
-    let smem_floats = CS * DS * 2 + CS * HD * 2 + CS * 4 + HD * DS * 2;
+    // Includes the P1.7(4) strict-upper-triangle pair matrices.
+    let smem_floats = CS * DS * 2 + CS * HD * 2 + CS * 4 + HD * DS * 2 + CS * (CS - 1);
     let smem_bytes = (smem_floats * 4) as u32;
+    let use_mats_i: i32 = 1;
     let cfg = LaunchConfig {
         grid_dim: (NH as u32, B as u32, 1),
         block_dim: (HD as u32, 1, 1),
@@ -211,6 +213,7 @@ fn check_dqkv(dtype: WeightDtype) {
     bld.arg(&hdi);
     bld.arg(&dsi);
     bld.arg(&csi);
+    bld.arg(&use_mats_i);
     unsafe { bld.launch(cfg) }.unwrap();
     ctx.stream.synchronize().unwrap();
 
@@ -262,6 +265,7 @@ fn check_dqkv(dtype: WeightDtype) {
     bld.arg(&hdi);
     bld.arg(&dsi);
     bld.arg(&csi);
+    bld.arg(&use_mats_i);
     unsafe { bld.launch(cfg) }.unwrap();
     ctx.stream.synchronize().unwrap();
 
