@@ -48,6 +48,19 @@
   matrix-inclusive tile would exceed the ~99 KB consumer smem opt-in
   (large d_state) fall back to the inline dots via a launch-time tier
   ladder, losing only the speedup, never the launch.
+- `m3_dqkv` pair-mats tier also stages the decay triangle
+  `exp2((dA[b]-dA[a])*LOG2E)` and the per-step `exp_fwd`/`exp_rev`
+  lanes in shared memory next to the pair matrices — the five decay
+  consumers and five exp consumers recomputed those transcendentals
+  inline per lane (~7.4k `exp2f` per (b,h,chunk) lane), and the
+  loop-invariant chunk-sum `exp2f` in the d_state update is hoisted.
+  Every staged value uses the consumer-exact expression, so reads are
+  bit-identical; the legacy tier keeps the inline forms. The in-kernel
+  packed-head slice stride is now tier-conditional, matching the
+  launcher's tile maths exactly on every tier (the old unconditional
+  stride overlapped slot 0's tail arrays once the tile grew). M3
+  campaign shape (B=8 T=1300 d_model 384, 24 layers, bf16 graph):
+  381.0 -> 362.1 ms/step.
 - The `sgemm_bi_forward` scalar dispatcher gained a strided-X entry
   (`sgemm_bi_forward_sub` with an explicit `lda`); the public wrapper
   delegates with `lda = K`, behavior unchanged.

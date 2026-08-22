@@ -172,8 +172,10 @@ fn check_dqkv(dtype: WeightDtype) {
     // Must mirror the launch-site formula (two operand tiles, V/dO tiles,
     // per-step lanes, da/qk lanes, and TWO head-state tiles for the
     // warp-parallel decay-gradient section).
-    // Includes the P1.7(4) strict-upper-triangle pair matrices.
-    let smem_floats = CS * DS * 2 + CS * HD * 2 + CS * 4 + HD * DS * 2 + CS * (CS - 1);
+    // Includes the P1.7(4) strict-upper-triangle pair matrices plus the
+    // M3-KILL-2 decay triangle and the two per-step exp lanes.
+    let smem_floats =
+        CS * DS * 2 + CS * HD * 2 + CS * 4 + HD * DS * 2 + CS * (CS - 1) * 3 / 2 + CS * 2;
     let smem_bytes = (smem_floats * 4) as u32;
     let use_mats_i: i32 = 1;
     let cfg = LaunchConfig {

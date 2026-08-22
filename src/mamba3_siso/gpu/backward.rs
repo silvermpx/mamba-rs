@@ -315,7 +315,7 @@ pub fn gpu_backward_mamba3_layer(
             // head fills a full warp. Each head gets a private smem slice,
             // so per-head arithmetic (and bits) are unchanged.
             let legacy_floats = 2 * cs_u * ds + 2 * cs_u * hd + 4 * cs_u + 2 * hd * ds;
-            let mats_floats = legacy_floats + cs_u * (cs_u - 1);
+            let mats_floats = legacy_floats + cs_u * (cs_u - 1) * 3 / 2 + 2 * cs_u;
             // Consumer GPUs cap the per-block dynamic-smem opt-in near 99 KB.
             // Prefer packed+matrices, then unpacked+matrices, then packed
             // legacy, then unpacked legacy; the kernel's use_pair_mats=0 path
