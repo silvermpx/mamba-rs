@@ -225,6 +225,10 @@ impl Mamba3Kernels {
             options: vec![
                 "--fmad=true".to_string(),
                 "--extra-device-vectorization".to_string(),
+                // Mirrors the M1 compiler: strip device assert() trap
+                // checks (none in the m3 sources today, but shared
+                // headers may grow them); asserts compute no values.
+                "-DNDEBUG".to_string(),
                 format!("-DMAMBA_RS_STATE_CAP={state_cap}"),
             ],
             include_paths: crate::mamba_ssm::gpu::kernels::cuda_include_paths(),
@@ -458,8 +462,8 @@ impl Mamba3Kernels {
         {
             use cudarc::driver::sys::CUfunction_attribute_enum as FnAttr;
             // 99 KB: consumer parts (sm_89/sm_120) cap the per-block opt-in
-            // near 99-100 KB; the triangle-packed pair matrices (P1.7(4))
-            // plus two-head packing (P1.7(2)) fit at ~71 KB for CS=64.
+            // near 99-100 KB; the triangle-packed pair matrices fit
+            // comfortably at CS=64 tile sizes.
             let budget: i32 = 99 * 1024;
             for f in [
                 &kernels.m3_dqkv,

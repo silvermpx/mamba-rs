@@ -70,7 +70,7 @@ pub struct MambaKernels {
     /// Fused dB+dC reduction `[B*T*d_state]` each, `=`-store (no memset
     /// precondition); .get(dtype) picks the input promotion variant.
     pub ssm_reduce_d_bc_typed: TypedKernel,
-    /// T-major twin for the PARALLEL route's [b][n][d][t] locals (S2 tape
+    /// T-major twin for the PARALLEL route's [b][n][d][t] locals (tape
     /// layout). Same ascending-d sum, same output values and layout.
     pub ssm_reduce_d_bc_tmajor_typed: TypedKernel,
     /// Reduce local SSM grads to dD `[d_inner]`.
@@ -478,7 +478,7 @@ pub fn state_capacity(d_state: usize) -> Result<usize, String> {
     // 16-granular: the cap sizes the per-thread state register arrays in
     // every scan kernel; a 64-floor at d_state=16 made them 4x oversized,
     // which is pure local-memory traffic once the runtime-bounded loops
-    // force the arrays out of registers (P1.1(3)). Callers with larger
+    // force the arrays out of registers. Callers with larger
     // states still get the exact padded fit.
     Ok(d_state.div_ceil(16) * 16)
 }
@@ -552,6 +552,12 @@ impl MambaKernels {
         let option_strings = vec![
             "--fmad=true".to_string(),
             "--extra-device-vectorization".to_string(),
+            // Device-side assert() compiles to a live trap check
+            // per call site (30 in sgemm_bi.cu alone, several inside the
+            // register-critical TC main loops). NDEBUG removes the checks;
+            // asserts compute no values, so outputs are bit-identical
+            // (digest-gated).
+            "-DNDEBUG".to_string(),
             format!("-DSGB_GROUP_M={group_m}"),
             format!("-DMAMBA_RS_STATE_CAP={state_cap}"),
         ];
