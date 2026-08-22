@@ -114,7 +114,16 @@ impl GpuMambaBackboneMixedActs {
                     rms_vals: GpuBuffer::zeros(stream, bt)?,
                     x_branch: DtypedBuf::zeros(stream, bt * d_inner, dtype)?,
                     conv_states: GpuBuffer::zeros(stream, batch * d_inner * d_conv)?,
-                    h_saved: GpuBuffer::zeros(stream, batch * (seq_len + 1) * d_inner * d_state)?,
+                    h_saved: GpuBuffer::zeros(
+                        stream,
+                        if dims.scan_mode.use_parallel(seq_len, d_state)
+                            && super::launch::scan_tape_slim()
+                        {
+                            super::launch::scan_tape_len(batch, seq_len, d_inner, d_state)
+                        } else {
+                            batch * (seq_len + 1) * d_inner * d_state
+                        },
+                    )?,
                     // typed — GEMM I/O / elementwise
                     post_norm: DtypedBuf::zeros(stream, bt * d_model, dtype)?,
                     gate_pre_silu: DtypedBuf::zeros(stream, bt * d_inner, dtype)?,
@@ -652,6 +661,9 @@ pub fn gpu_forward_mamba_backbone_mixed(
                 bld.arg(&t_i);
                 bld.arg(&di_i);
                 bld.arg(&ds_i);
+                let slim_i: i32 = i32::from(super::launch::scan_tape_slim());
+                bld.arg(&hs);
+                bld.arg(&slim_i);
                 unsafe {
                     bld.launch(super::launch::grid_parallel_scan_typed(
                         b,

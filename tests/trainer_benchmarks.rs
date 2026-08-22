@@ -539,19 +539,25 @@ fn bench_scan_kernels_isolated() {
         let ap = a_neg.cached_ptr();
         let ddp = dpar.cached_ptr();
         let hs = h_saved.cached_ptr();
+        // Arg order matches the kernel signature (h, y, h_saved, delta,
+        // u, B, C, a_neg, D, ...): the arm previously pushed h_saved
+        // ninth, which shifted every pointer after y by one slot.
+        let slim0: i32 = 0;
         bld.arg(&hp);
         bld.arg(&yp);
+        bld.arg(&hs);
         bld.arg(&dp);
         bld.arg(&up);
         bld.arg(&bp);
         bld.arg(&cp);
         bld.arg(&ap);
         bld.arg(&ddp);
-        bld.arg(&hs);
         bld.arg(&bi);
         bld.arg(&ti);
         bld.arg(&dii);
         bld.arg(&dsi);
+        bld.arg(&hs);
+        bld.arg(&slim0);
         unsafe { bld.launch(grid_parallel_scan_typed(b, di, 2)) }.unwrap();
     };
 
@@ -612,6 +618,9 @@ fn bench_scan_kernels_isolated() {
         bld.arg(&ti);
         bld.arg(&dii);
         bld.arg(&dsi);
+        let slim0: i32 = 0;
+        bld.arg(&hs);
+        bld.arg(&slim0);
         unsafe { bld.launch(grid_parallel_scan_bwd(b, di)) }.unwrap();
     };
     for _ in 0..3 {

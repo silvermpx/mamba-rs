@@ -192,8 +192,19 @@ impl GpuMambaBackboneActs {
                     xdbl: GpuBuffer::zeros(stream, bt * xdbl_dim)?,
                     delta_raw: GpuBuffer::zeros(stream, bt * d_inner)?,
                     delta: GpuBuffer::zeros(stream, bt * d_inner)?,
-                    // F4d: SSM — h_saved has T+1 entries
-                    h_saved: GpuBuffer::zeros(stream, batch * (seq_len + 1) * d_inner * d_state)?,
+                    // F4d: SSM — the full tape has T+1 entries; the
+                    // parallel route's slim tape (S4) keeps only the
+                    // per-chunk (run_a, run_b, h_entry) rows.
+                    h_saved: GpuBuffer::zeros(
+                        stream,
+                        if dims.scan_mode.use_parallel(seq_len, d_state)
+                            && super::launch::scan_tape_slim()
+                        {
+                            super::launch::scan_tape_len(batch, seq_len, d_inner, d_state)
+                        } else {
+                            batch * (seq_len + 1) * d_inner * d_state
+                        },
+                    )?,
                     y: GpuBuffer::zeros(stream, bt * d_inner)?,
                     // F4e: Gating
                     gated: GpuBuffer::zeros(stream, bt * d_inner)?,
@@ -580,6 +591,8 @@ pub fn gpu_forward_mamba_layer(
         if dims.scan_mode.use_parallel(t, ds) {
             // Parallel prefix scan: O(T / NTHREADS) per thread instead of O(T).
             // Grid: (batch, d_inner) — one block per (b, d) pair.
+            let tape_p = acts.h_saved.cached_ptr();
+            let slim_i: i32 = i32::from(super::launch::scan_tape_slim());
             let mut builder = ctx.stream.launch_builder(&ctx.kernels.ssm_parallel_fwd);
             builder.arg(&layer_ptrs.ssm_state);
             builder.arg(acts.y.inner_mut());
@@ -595,6 +608,8 @@ pub fn gpu_forward_mamba_layer(
             builder.arg(&t_i);
             builder.arg(&di_i);
             builder.arg(&ds_i);
+            builder.arg(&tape_p);
+            builder.arg(&slim_i);
             unsafe { builder.launch(grid_parallel_scan(b, di)) }
                 .map_err(|e| format!("ssm_parallel_fwd mamba: {:?}", e))?;
         } else {

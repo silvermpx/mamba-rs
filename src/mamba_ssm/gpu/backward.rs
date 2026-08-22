@@ -155,6 +155,14 @@ pub fn gpu_backward_mamba_layer(
         builder.arg(&t_i);
         builder.arg(&di_i);
         builder.arg(&ds_i);
+        // S4: the slim tape rides the h_saved buffer; the flag picks the
+        // kernel's replay path. Sequential kernel keeps its signature.
+        let tape_p = acts.h_saved.cached_ptr();
+        let slim_i: i32 = i32::from(super::launch::scan_tape_slim());
+        if use_parallel {
+            builder.arg(&tape_p);
+            builder.arg(&slim_i);
+        }
         let cfg = if use_parallel {
             super::launch::grid_parallel_scan_bwd(b, di)
         } else {

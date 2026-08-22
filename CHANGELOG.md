@@ -126,6 +126,25 @@
 
 ### Changed (campaign-shape program, second night wave)
 
+- S4, the h tape is gone on the parallel route: the forward saves only
+  per-chunk (run_a, run_b, h_entry) rows — 3 floats per (b, d, n,
+  chunk) instead of T+1 — and the backward replays h in-kernel with
+  the same thread-local scan, the same block_inclusive_scan_ab and the
+  same ((comp o run) applied to h_0) compose chain on the same inputs,
+  so every replayed h is bit-identical to the value the old tape
+  stored. The chunk-entry h (the backward's h_prev boundary read) is
+  saved verbatim, and the replay reuses the backward's already-loaded
+  delta/u/B and its da registers. All nine digest arms (three GEMM
+  tiers x T300/T1300/T2100) are bit-equal to the pre-S4 baseline in
+  BOTH modes; `MAMBA_RS_SCAN_TAPE=full` restores the full tape for one
+  release. Campaign shape: 261.9 -> 247.4 ms/step and -511.6 MB/layer
+  (-12.28 GB total) — a B=32 micro-batch now fits on the 32 GB card
+  (963.8 ms/step; the full tape OOMs on its first 511.6 MB alloc).
+- The `bench_scan_kernels_isolated` forward arm pushed `h_saved` ninth
+  instead of third, shifting every pointer after `y` by one slot — its
+  earlier "scan fwd" readings measured a kernel reading the wrong
+  buffers. Fixed with the S4 argument additions.
+
 - conv1d forward (all dtypes): the sliding window lived in GLOBAL
   memory (~7 dependent accesses per timestep, 1300 deep, 24-block
   grid). It now lives in registers with one carry-in/carry-out —
@@ -162,7 +181,7 @@
   43.9 -> 40.2; f16 49.1; parallel-scan T64 f32 18.4.
 - Campaign shape (d384 L24 B8 T1300, batch-invariant + tensor-core
   tier — the classify trainer's stamped route): 441.4 -> 261.9
-  ms/step (-41%). Split: fwd 134 -> 80, bwd+opt 309 -> 182. Isolated
+  ms/step (-41%), then 247.4 after S4 (-44% total). Split: fwd 134 -> 80, bwd+opt 309 -> 182. Isolated
   ledger after the wave: scan bwd 80, scan fwd 62, conv dw 13.4,
   reduce_d_BC 9.6 (x24-layer ms). Note: earlier "BI+TC" campaign
   rows in this file's history measured plain BI — the tier flag is

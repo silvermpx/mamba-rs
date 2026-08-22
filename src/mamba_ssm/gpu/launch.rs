@@ -113,6 +113,29 @@ pub fn grid_norm(batch: usize, dim: usize) -> LaunchConfig {
 /// Shared memory: for block scan, running prefix, exchange, and coalesced staging.
 ///   Layout (floats): 2*NWARPS + 2*MAX_DSTATE + 2*NTHREADS + CHUNK_SIZE
 ///   = 2*4 + 2*256 + 2*128 + 1024 = 1800 floats = 7200 bytes.
+/// S4 slim h-tape switch: `MAMBA_RS_SCAN_TAPE=full` restores the
+/// (T+1)-step `h_saved` tape on the parallel route (escape hatch for one
+/// release); the default `slim` keeps only per-chunk
+/// (run_a, run_b, h_entry) rows and the backward replays h bit-exactly
+/// in-kernel (same thread-local scan, same block scan, same compose
+/// chain on the same inputs).
+pub fn scan_tape_slim() -> bool {
+    static SLIM: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *SLIM.get_or_init(|| {
+        std::env::var("MAMBA_RS_SCAN_TAPE")
+            .map(|v| v != "full")
+            .unwrap_or(true)
+    })
+}
+
+/// Slim-tape length in floats: 3 entries per (b, d, n, chunk). The chunk
+/// count mirrors CHUNK_SIZE = NTHREADS * NITEMS = 1024 in
+/// mamba_ssm_parallel.cu.
+pub fn scan_tape_len(batch: usize, seq_len: usize, d_inner: usize, d_state: usize) -> usize {
+    let n_chunks = seq_len.div_ceil(1024);
+    batch * d_inner * d_state * 3 * n_chunks
+}
+
 pub fn grid_parallel_scan(batch: usize, d_inner: usize) -> LaunchConfig {
     assert!(
         d_inner <= 65535,

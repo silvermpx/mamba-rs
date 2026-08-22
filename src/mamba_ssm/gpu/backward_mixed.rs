@@ -264,6 +264,9 @@ pub fn gpu_backward_mamba_layer_mixed(
             bld.arg(&t_i);
             bld.arg(&di_i);
             bld.arg(&ds_i);
+            let slim_i: i32 = i32::from(super::launch::scan_tape_slim());
+            bld.arg(&h_p);
+            bld.arg(&slim_i);
             unsafe { bld.launch(super::launch::grid_parallel_scan_bwd(b, di)) }
                 .map_err(|e| format!("ssm_parallel_bwd_typed: {e:?}"))?;
         } else {
