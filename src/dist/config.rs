@@ -115,19 +115,22 @@ impl Default for Rendezvous {
 pub struct DistConfig {
     pub devices: Devices,
     /// The logical world size W — the numeric identity of the run. When
-    /// `None`, W equals the resolved device count. May exceed the
-    /// physical device count for replaying a larger-world run on fewer
-    /// GPUs (several logical ranks share a device, executed one at a
-    /// time; the bits are identical because the fold is keyed to
-    /// logical ranks, never devices).
+    /// `None`, W equals the resolved device count. The fold is keyed to
+    /// logical ranks, never devices, so replaying a larger-world run on
+    /// fewer GPUs is bit-exact BY CONTRACT — but that replay EXECUTION
+    /// mode is not wired yet and `bootstrap` refuses W > device count
+    /// loudly. Today W must equal the device count (or 1).
     pub logical_world: Option<usize>,
     pub rendezvous: Rendezvous,
     pub reduce: ReduceContract,
     pub seed: u64,
     /// Deadline for all ranks to arrive at the rendezvous.
     pub init_timeout: Duration,
-    /// Deadline for any single collective; a peer exceeding it is
-    /// treated as failed (fail-fast, never hang).
+    /// Deadline for one collective window, ENQUEUE THROUGH COMPLETION:
+    /// the watchdog holds the window open across the stream sync and
+    /// aborts the communicator on expiry, so a peer dying mid-run
+    /// becomes a loud rank error instead of an eternal wait. Also the
+    /// file-barrier deadline.
     pub collective_timeout: Duration,
 }
 

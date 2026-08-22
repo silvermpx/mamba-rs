@@ -1,5 +1,75 @@
 # Changelog
 
+## 0.6.1 (2026-08-22)
+
+The FixedOrder contract goes live, and the distributed hardening
+becomes real. Reviewed by a dedicated adversarial wave over the whole
+`dist` subsystem before release.
+
+### Added
+
+- Transport-backed fixed-order reducer (`dist::reducer`): peer copies
+  of a rank's arena shard arrive as PURE BYTE MOVEMENT (grouped NCCL
+  send/recv), the `det_sum_ranks` kernel folds the W addends per
+  element in strictly ascending source-rank order (one thread per
+  element, a serial chain — the association is program text), and the
+  reduced shards return as per-owner broadcasts. Selecting the default
+  `ReduceContract::FixedOrder` in a live world now RUNS instead of
+  refusing. Oracle-pinned on one GPU by a loopback harness that runs
+  the same kernel and slot-by-source-rank layout over device-to-device
+  copies: the device fold matches the host reference fold bit for bit,
+  the full dataflow lands identical bits in every rank arena across
+  uneven shard plans, delivery order cannot change the result, and
+  sum x 1/W reproduces the emulated world's mean exactly. Honest
+  scope: this path's own live multi-GPU first light is still pending
+  (the 0.6.0 live validation covered the `NcclSum` tier); the live
+  test now runs both contracts sequentially.
+- `all_reduce_host_f32` and `any()` are wired over the transport
+  (host heads ride the configured contract after a device round-trip;
+  flags ride the exactly-associative integer max) instead of erroring.
+- CI grows a `cuda,nccl` type-check leg so the live-DDP surface can
+  no longer bit-rot invisibly.
+
+### Changed
+
+- Collective deadlines are now real, not enqueue-window theater: every
+  collective is guarded ENQUEUE THROUGH COMPLETION — the watchdog holds
+  the window open across the stream synchronize and aborts the
+  communicator on expiry, so a peer dying mid-run becomes a loud rank
+  error within `collective_timeout` instead of an eternal wait at the
+  next sync. (The completion sync also serializes all collectives on
+  the communicator in host program order and quiesces the reducer
+  scratch between uses.)
+- Watchdog fire/disarm is an atomic three-state hand-off: the deadline
+  action and the disarm race is decided by one compare-exchange, a
+  disarm that lost reports the fire (the guarded window fails even if
+  its own work appeared to succeed), and the park-based timer disarms
+  immediately instead of taxing every window with a sleep-step join.
+- Communicator teardown is single-shot: an aborted communicator is
+  marked, and `shutdown`/`Drop` no longer double-abort or destroy a
+  freed handle; `shutdown` also stops chaining destroy after abort.
+- NCCL join budget is unified: the unique-id exchange and the library
+  init share ONE `init_timeout`, so the combined join can never exceed
+  the configured deadline.
+- Supervisor-spawned ranks die with a dead supervisor on Linux
+  (PDEATHSIG) — a crashed launcher can no longer orphan a half-world
+  that keeps training.
+- Bootstrap guards: an explicit `logical_world` that disagrees with an
+  external launcher's world is refused (a wrapper silently collapsing
+  W trained a different numeric identity before); job ids are validated
+  before they reach a path join or the supervisor's recursive purge;
+  the `MAMBA_RS_SEED` override now survives the world-size-1
+  short-circuit.
+- f16 multi-GPU training refuses early with a nameable reason (the
+  split accumulate/reduce/apply path cannot unscale f16 loss-scaled
+  gradients around the cross-rank reduce; bf16 and f32 ride DDP fully).
+- The reducer's stacked receive scratch is allocated uninitialized ON
+  PURPOSE (every slot is fully written before the fold reads any): a
+  driver memset would ride the legacy NULL stream, which the trainer's
+  NON_BLOCKING stream never orders against — the review wave caught the
+  hazard before any live run did. Scratch is cached per arena length
+  and never freed while in-flight work could reference it.
+
 ## 0.6.0 (2026-08-22)
 
 Deterministic data parallelism, the Mamba-3 prompt prefill, first-class

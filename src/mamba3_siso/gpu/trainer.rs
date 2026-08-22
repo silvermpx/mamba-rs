@@ -261,6 +261,14 @@ impl Mamba3Trainer {
             return self.backward_step(d_temporal, opts);
         }
         let clip = opts.clip_max_norm;
+        if self.dtype() == WeightDtype::F16 {
+            return Err("f16 multi-GPU training is not supported yet: the split \
+                 accumulate/reduce/apply path cannot unscale the f16 \
+                 loss-scaled gradients around the cross-rank reduce — \
+                 use bf16 or f32 for data-parallel training"
+                .into());
+        }
+
         let m = self.backward_step(
             d_temporal,
             BackwardOpts::default().with_accumulate_only(true),

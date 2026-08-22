@@ -53,14 +53,17 @@ Pure Rust + CUDA. Kernels compile at runtime via NVRTC.
   GPU, one collective per optimizer step over the flat gradient arena.
   The default fixed-order contract (ascending logical-rank fold: bits
   independent of transport, topology, library version, and physical GPU
-  permutation) is implemented and proven by the single-process emulated
-  oracle; its transport-backed reducer is still to land, so a live
-  multi-process world refuses it loudly. The `nccl` feature adds the
-  transport with the explicit `NcclSum` tier (run-to-run stable on a
-  frozen box) — validated live on two RTX 5090s: both ranks' final
-  weights matched the emulated oracle bit for bit (a two-addend sum
-  has one association, so the library collective cannot differ from
-  the house fold at world size 2).
+  permutation) is implemented twice and cross-pinned: the emulated
+  oracle proves the contract in one process, and the transport-backed
+  house reducer runs it live — peer addends move as pure bytes (NCCL
+  send/recv/broadcast, zero library arithmetic) and every float add
+  happens in the `det_sum_ranks` kernel in program-text order. The
+  `nccl` feature also carries the explicit `NcclSum` tier (library
+  collective; run-to-run stable on a frozen box) — live-validated on
+  two RTX 5090s bit-for-bit against the oracle. The FixedOrder
+  transport path is oracle-pinned on one GPU (same kernel, same slot
+  layout over a loopback byte mover); its own live multi-GPU first
+  light rides the next validation window.
 - **Bit-continuous resume** — optimizer state (Adam moments, step,
   update hyperparameters) and the carried recurrence export/import, so
   a resumed run lands bit-for-bit where the unbroken run would.

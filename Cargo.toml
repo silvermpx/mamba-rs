@@ -1,6 +1,6 @@
 [package]
 name = "mamba-rs"
-version = "0.6.0"
+version = "0.6.1"
 edition = "2024"
 rust-version = "1.97"
 authors = ["silvermpx"]
@@ -83,6 +83,11 @@ version = "1"
 optional = true
 features = ["blocking"]
 
+
+# PDEATHSIG on supervisor-spawned rank children: a dead supervisor must
+# not orphan a half-world that keeps training (dist bootstrap, Linux only).
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
 
 [dev-dependencies]
 tempfile = "3"

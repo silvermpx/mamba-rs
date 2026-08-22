@@ -1,8 +1,10 @@
 //! Deterministic data-parallel training.
 //!
 //! One process per GPU, one logical rank per process. Gradients meet in
-//! a single collective per optimizer step over the trainer's flat f32
-//! arena; the default reduction contract folds the W addends per
+//! one reduction per optimizer step over the trainer's flat f32
+//! arena (the fixed-order tier implements it as a byte-only shard
+//! exchange around its fold kernel; the library tier as one
+//! collective); the default reduction contract folds the W addends per
 //! element in strictly ascending logical-rank order, so the reduced
 //! bits are independent of transport, topology, library version, and
 //! physical GPU permutation — a run is bit-replayable for a fixed
@@ -34,6 +36,9 @@ mod fold;
 #[cfg(feature = "cuda")]
 pub mod reducer;
 mod seed;
+// Present in test builds so its pure-std unit tests always run; in
+// release shapes only the nccl feature consumes it.
+#[cfg(any(feature = "nccl", test))]
 mod watchdog;
 
 pub use bootstrap::{Bootstrap, SupervisorStatus, attach, bootstrap};

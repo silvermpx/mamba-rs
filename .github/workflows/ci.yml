@@ -137,6 +137,11 @@ jobs:
         with:
           key: cuda-check
       - run: cargo check --workspace --all-targets --features cuda
+      # The live-DDP surface (dist reducer, comm, watchdog wiring) only
+      # compiles with the nccl feature; without this leg it would bit-rot
+      # invisibly (cudarc's nccl bindings dlopen at runtime — no libnccl
+      # needed to type-check).
+      - run: cargo check --workspace --all-targets --features cuda,hf,gemm-blas,nccl
 
   publish-check:
     name: Publish dry-run

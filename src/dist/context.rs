@@ -89,7 +89,12 @@ impl DistContext {
     /// multi-process worlds when the transport feature is on).
     #[cfg(feature = "nccl")]
     pub(super) fn set_comm(&mut self, c: super::comm::MambaComm) {
-        if let ContextInner::Process { comm, .. } = &mut self.inner {
+        if let ContextInner::Process { comm, world, .. } = &mut self.inner {
+            debug_assert_eq!(
+                c.world(),
+                *world,
+                "communicator world diverges from the context world"
+            );
             *comm = Some(c);
         }
     }
@@ -127,7 +132,18 @@ impl DistContext {
             } => {
                 let st = self.fixed_order_state(*device)?;
                 c.with_watchdog("fixed-order-reduce", *barrier_timeout, || {
-                    super::reducer::reduce_sum_fixed_order_nccl(c, st, arena, stream)
+                    super::reducer::reduce_sum_fixed_order_nccl(c, st, arena, stream)?;
+                    // Completion INSIDE the guarded window: a peer dying
+                    // mid-run hangs this sync, the watchdog aborts the
+                    // communicator, the sync unblocks, and the window
+                    // reports the deadline — real fail-fast, not an
+                    // enqueue-only illusion. The sync also serializes
+                    // every collective on this communicator in host
+                    // program order (the NCCL single-comm requirement)
+                    // and quiesces the reducer scratch between uses.
+                    stream
+                        .synchronize()
+                        .map_err(|e| DistError::Transport(format!("reduce sync: {e:?}")))
                 })
             }
             #[cfg(feature = "nccl")]
@@ -137,7 +153,10 @@ impl DistContext {
                 barrier_timeout,
                 ..
             } => c.with_watchdog("nccl-sum", *barrier_timeout, || {
-                c.all_reduce_sum_f32(arena.cached_ptr(), arena.len(), stream)
+                c.all_reduce_sum_f32(arena.cached_ptr(), arena.len(), stream)?;
+                stream
+                    .synchronize()
+                    .map_err(|e| DistError::Transport(format!("reduce sync: {e:?}")))
             }),
             ContextInner::Process { .. } => {
                 // Without the nccl feature this arm is the only Process
@@ -203,7 +222,9 @@ impl DistContext {
     }
 
     /// The reduction contract this world was configured with. Part of
-    /// the run's numeric identity (checkpoint sidecars record it).
+    /// the run's numeric identity — training harnesses should stamp it
+    /// into their checkpoint sidecars alongside the GEMM tier and scan
+    /// mode (the classify trainer's refuse-on-drift pattern).
     pub fn reduce_contract(&self) -> ReduceContract {
         match &self.inner {
             ContextInner::Single { .. } => ReduceContract::default(),
@@ -223,6 +244,14 @@ impl DistContext {
     /// k goes to rank `k % W`. Taken AFTER the global permutation is
     /// fixed, so the sample set at any optimizer step is
     /// world-size-invariant.
+    ///
+    /// Collective-count warning: when the global length is not a
+    /// multiple of W, ranks receive UNEQUAL item counts — a training
+    /// loop that reduces once per item would desynchronize the world on
+    /// the tail (some ranks enter a collective the others never post).
+    /// Reduce once per optimizer STEP over a schedule derived from the
+    /// global length (every rank computes the same step count), or drop
+    /// the tail.
     pub fn shard<'a, T>(&self, global: &'a [T]) -> impl Iterator<Item = &'a T> + 'a {
         let world = self.world_size();
         let rank = self.rank();
@@ -288,22 +317,26 @@ impl DistContext {
                 let stream = gpu.context().default_stream();
                 let mut buf = crate::mamba_ssm::gpu::buffers::GpuBuffer::from_cpu(&stream, xs)
                     .map_err(|e| DistError::Transport(format!("host reduce stage: {e}")))?;
+                let sync = |tag: &str| {
+                    stream
+                        .synchronize()
+                        .map_err(move |e| DistError::Transport(format!("{tag} sync: {e:?}")))
+                };
                 match reduce {
                     ReduceContract::FixedOrder => {
                         let st = self.fixed_order_state(*device)?;
                         c.with_watchdog("host-fixed-order", *barrier_timeout, || {
-                            super::reducer::reduce_sum_fixed_order_nccl(c, st, &mut buf, &stream)
+                            super::reducer::reduce_sum_fixed_order_nccl(c, st, &mut buf, &stream)?;
+                            sync("host fixed-order reduce")
                         })?;
                     }
                     ReduceContract::NcclSum => {
                         c.with_watchdog("host-nccl-sum", *barrier_timeout, || {
-                            c.all_reduce_sum_f32(buf.cached_ptr(), buf.len(), &stream)
+                            c.all_reduce_sum_f32(buf.cached_ptr(), buf.len(), &stream)?;
+                            sync("host nccl-sum reduce")
                         })?;
                     }
                 }
-                stream
-                    .synchronize()
-                    .map_err(|e| DistError::Transport(format!("host reduce sync: {e:?}")))?;
                 let summed = buf
                     .to_cpu(&stream)
                     .map_err(|e| DistError::Transport(format!("host reduce readback: {e}")))?;
@@ -347,7 +380,10 @@ impl DistContext {
                     use cudarc::driver::DevicePtr;
                     let (ptr, _guard) = staged.device_ptr(&stream);
                     c.with_watchdog("flag-reduce", *barrier_timeout, || {
-                        c.all_reduce_max_i32(ptr, 1, &stream)
+                        c.all_reduce_max_i32(ptr, 1, &stream)?;
+                        stream
+                            .synchronize()
+                            .map_err(|e| DistError::Transport(format!("flag sync: {e:?}")))
                     })?;
                 }
                 let back: Vec<i32> = stream

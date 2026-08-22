@@ -54,7 +54,12 @@ extern "C" __global__ void det_sum_ranks(
 
 /// Plain synchronous device allocation (`cuMemAlloc`) — context-scoped,
 /// not stream-scoped, so scratch created here is valid on any stream of
-/// the context with no ordering hazard. Freed on drop.
+/// the context with no ordering hazard. Deliberately NOT zero-filled:
+/// a driver memset would ride the legacy NULL stream, which a
+/// NON_BLOCKING consumer stream never orders against (the exact hazard
+/// class gpu/context.rs and gpu/buffers.rs document), and the reducer
+/// fully writes every slot before the fold reads any — initialization
+/// would be a pure race liability. Freed on drop.
 struct DeviceScratch {
     ptr: cudarc::driver::sys::CUdeviceptr,
     /// Keeps the owning context retained for the allocation's lifetime.
@@ -62,7 +67,7 @@ struct DeviceScratch {
 }
 
 impl DeviceScratch {
-    fn zeroed(ctx: &Arc<cudarc::driver::CudaContext>, elems: usize) -> Result<Self, DistError> {
+    fn alloc(ctx: &Arc<cudarc::driver::CudaContext>, elems: usize) -> Result<Self, DistError> {
         let bytes = elems.max(1) * std::mem::size_of::<f32>();
         let mut ptr: cudarc::driver::sys::CUdeviceptr = 0;
         unsafe {
@@ -71,11 +76,6 @@ impl DeviceScratch {
                 return Err(DistError::Transport(format!(
                     "reducer scratch alloc ({bytes} B): {r:?}"
                 )));
-            }
-            let r = cudarc::driver::sys::cuMemsetD8_v2(ptr, 0, bytes);
-            if r != cudarc::driver::sys::CUresult::CUDA_SUCCESS {
-                let _ = cudarc::driver::sys::cuMemFree_v2(ptr);
-                return Err(DistError::Transport(format!("reducer scratch zero: {r:?}")));
             }
         }
         Ok(Self {
@@ -136,6 +136,11 @@ impl DetReduceKernel {
         if len == 0 {
             return Ok(());
         }
+        if len > i32::MAX as usize || world > i32::MAX as usize {
+            return Err(DistError::Transport(format!(
+                "det_sum_ranks: len {len} / world {world} exceed the i32 kernel ABI"
+            )));
+        }
         let world_i = world as i32;
         let len_i = len as i32;
         let cfg = cudarc::driver::LaunchConfig {
@@ -155,39 +160,40 @@ impl DetReduceKernel {
 }
 
 /// Per-context state for the transport-backed fixed-order reduction:
-/// the compiled kernel plus a stacked receive buffer sized for the
-/// current arena length (re-sized when the arena length changes).
+/// the compiled kernel plus stacked receive scratch per arena length.
+#[cfg(feature = "nccl")]
 pub(super) struct FixedOrderState {
     kernel: DetReduceKernel,
-    stacked: std::cell::RefCell<Option<(usize, DeviceScratch)>>,
+    /// One scratch per distinct arena length: the gradient lane and the
+    /// small host-head lane alternate lengths, and a keep-per-length
+    /// cache means an allocation is NEVER freed while a caller could
+    /// still hold work referencing it — no free-in-flight hazard by
+    /// construction (the set of distinct lengths is tiny in practice).
+    stacked: std::cell::RefCell<std::collections::HashMap<usize, DeviceScratch>>,
 }
 
+#[cfg(feature = "nccl")]
 impl FixedOrderState {
     pub(super) fn compile(ordinal: usize) -> Result<Self, DistError> {
         Ok(Self {
             kernel: DetReduceKernel::compile(ordinal)?,
-            stacked: std::cell::RefCell::new(None),
+            stacked: std::cell::RefCell::new(std::collections::HashMap::new()),
         })
     }
 
-    /// Stacked receive scratch for `world * my_len` elements, keyed on
-    /// the arena length so a shape change re-sizes it.
+    /// Stacked receive scratch for `world * my_len` elements, cached per
+    /// arena length.
     fn stacked_ptr(
         &self,
         arena_len: usize,
         world: usize,
         my_len: usize,
     ) -> Result<cudarc::driver::sys::CUdeviceptr, DistError> {
-        let mut slot = self.stacked.borrow_mut();
-        let rebuild = match slot.as_ref() {
-            Some((key, _)) => *key != arena_len,
-            None => true,
-        };
-        if rebuild {
-            let scratch = DeviceScratch::zeroed(&self.kernel.ctx, world * my_len)?;
-            *slot = Some((arena_len, scratch));
+        let mut map = self.stacked.borrow_mut();
+        if let std::collections::hash_map::Entry::Vacant(slot) = map.entry(arena_len) {
+            slot.insert(DeviceScratch::alloc(&self.kernel.ctx, world * my_len)?);
         }
-        let Some((_, scratch)) = slot.as_ref() else {
+        let Some(scratch) = map.get(&arena_len) else {
             return Err(DistError::Transport(
                 "reducer stacked scratch missing after allocation".into(),
             ));
@@ -357,7 +363,7 @@ impl LoopbackWorld {
             if my.len == 0 {
                 continue;
             }
-            let stacked = DeviceScratch::zeroed(&kernel.ctx, world * my.len)?;
+            let stacked = DeviceScratch::alloc(&kernel.ctx, world * my.len)?;
             let order: Vec<usize> = if self.reverse_delivery {
                 (0..world).rev().collect()
             } else {

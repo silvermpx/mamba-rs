@@ -26,6 +26,11 @@ pub struct MambaComm {
     comm: sys::ncclComm_t,
     rank: usize,
     world: usize,
+    /// Set (from any thread) the moment `ncclCommAbort` runs on this
+    /// handle. Abort FREES the communicator, so every later teardown
+    /// path (`shutdown`, `Drop`) must become a no-op — a second abort
+    /// or a destroy on the freed handle is a double free.
+    aborted: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// Keeps the rank's CUDA primary context retained for the
     /// communicator's whole lifetime — NCCL binds to the context that is
     /// current at init, and dropping it would release the device out
@@ -132,11 +137,21 @@ impl MambaComm {
         f: impl FnOnce() -> Result<R, DistError>,
     ) -> Result<R, DistError> {
         let comm_addr = self.comm as usize;
+        let aborted = self.aborted.clone();
         let wd = super::watchdog::Watchdog::arm(name, deadline, move || {
+            // Order matters: mark first, so a teardown racing the abort
+            // can never see an unmarked-but-freed handle.
+            aborted.store(true, std::sync::atomic::Ordering::Release);
             let _ = unsafe { result::comm_abort(comm_addr as sys::ncclComm_t) };
         })?;
         let out = f();
-        wd.disarm();
+        if wd.disarm() {
+            // The abort ran: whatever f() reported, the communicator is
+            // gone and the window is failed.
+            return Err(DistError::Transport(format!(
+                "{name}: collective window exceeded {deadline:?} — communicator aborted"
+            )));
+        }
         out
     }
 
@@ -171,6 +186,7 @@ impl MambaComm {
             comm,
             rank,
             world,
+            aborted: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             _cuda_ctx: cuda_ctx,
         })
     }
@@ -322,20 +338,29 @@ impl MambaComm {
     }
 
     /// Clean shutdown: finalize (collective) then destroy. Call on the
-    /// orderly exit path; Drop only aborts.
+    /// orderly exit path; Drop only aborts. Nulling the handle first
+    /// makes the subsequent Drop a no-op while the context Arc still
+    /// releases normally.
     pub fn shutdown(mut self) -> Result<(), DistError> {
         let comm = std::mem::replace(&mut self.comm, std::ptr::null_mut());
-        std::mem::forget(self);
+        if self.aborted.load(std::sync::atomic::Ordering::Acquire) {
+            // The watchdog already aborted (and thereby freed) the
+            // communicator; there is nothing left to finalize.
+            return Err(DistError::Transport(
+                "communicator was aborted by the collective watchdog —                  teardown already complete"
+                    .into(),
+            ));
+        }
         unsafe {
             if let Err(e) = result::comm_finalize(comm) {
-                // Do not leak the handle on a failed finalize: tear it
-                // down the abort way before reporting.
+                // Abort tears down and FREES the handle; no destroy may
+                // follow it.
                 let _ = result::comm_abort(comm);
-                let _ = result::comm_destroy(comm);
                 return Err(DistError::Transport(format!("NCCL finalize: {e:?}")));
             }
             if let Err(e) = result::comm_destroy(comm) {
-                let _ = result::comm_abort(comm);
+                // The failed destroy already consumed the handle; a
+                // follow-up abort would double-free it.
                 return Err(DistError::Transport(format!("NCCL destroy: {e:?}")));
             }
         }
@@ -345,9 +370,11 @@ impl MambaComm {
 
 impl Drop for MambaComm {
     fn drop(&mut self) {
-        if !self.comm.is_null() {
+        if !self.comm.is_null() && !self.aborted.load(std::sync::atomic::Ordering::Acquire) {
             // Fail-fast path: abort tears the communicator down without
-            // waiting for peers. Errors here are unreportable by
+            // waiting for peers. Skipped entirely when the watchdog
+            // already aborted — the handle is freed and a second abort
+            // would be a double free. Errors here are unreportable by
             // construction (we may be unwinding) and must never panic.
             let _ = unsafe { result::comm_abort(self.comm) };
         }

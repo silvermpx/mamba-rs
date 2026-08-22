@@ -1,20 +1,23 @@
 //! Live two-process NCCL data parallelism: the supervisor self-spawns
 //! two ranks on two GPUs, each trains the same model on its own
 //! micro-batches through `backward_step_dist`, and the final weights
-//! must match the single-process emulated-world oracle BIT FOR BIT.
-//! (NCCL hard-refuses two ranks on one device — "Duplicate GPU
-//! detected" — so this needs a genuinely multi-GPU box; on a single-GPU
-//! machine the test reports itself skipped before spawning anything.
-//! (The path up to the communicator init — spawn, environment contract,
-//! rendezvous, unique-id exchange, version preflight — was exercised on
-//! a one-GPU box during development by letting NCCL itself reject the
-//! duplicate device; this test does not repeat that probe.)
-//! The bitwise claim is exact at world size 2: a two-addend sum has one
-//! association, and IEEE-754 addition is commutative, so the library
-//! collective cannot produce different bits than the house fold.
+//! must match the single-process emulated-world oracle BIT FOR BIT —
+//! first over the `NcclSum` tier, then over the transport-backed
+//! `FixedOrder` house reducer, sequentially in ONE test fn (see the
+//! test body for why a sibling #[ignore] test would corrupt the
+//! child-side harness).
 //!
-//! Run manually (spawns processes, needs libnccl + a GPU):
-//! `cargo test --features cuda,hf,gemm-blas,nccl --test ddp_nccl_two_ranks -- --ignored --nocapture`
+//! Claim strength: for `NcclSum` the bitwise match is exact only at
+//! world size 2 (one association + IEEE-754 commutativity); for
+//! `FixedOrder` the house reducer must land the oracle bits at ANY
+//! world size by construction. NCCL hard-refuses two ranks on one
+//! device, so on a single-GPU machine the test reports itself skipped.
+//! Runbook: launch on HOMOGENEOUS GPUs — the oracle builds both
+//! replicas on device 0, so the comparison additionally assumes
+//! cross-device bit-identity of the per-rank backward (true same-arch).
+//!
+//! Run manually (spawns processes, needs libnccl + two same-arch GPUs):
+//! `cargo test --features cuda,hf,gemm-blas,nccl --test ddp_nccl_two_ranks -- --ignored --nocapture --test-threads=1`
 
 #![cfg(all(feature = "cuda", feature = "nccl"))]
 
@@ -146,54 +149,56 @@ fn digest_path(rank: usize) -> std::path::PathBuf {
 
 #[test]
 #[ignore]
-fn ddp_two_ranks_one_gpu_matches_emulated() {
-    // NcclSum tier: the bitwise oracle comparison is exact at world
-    // size 2 — the sum has ONE association and IEEE-754 addition is
-    // commutative, so the library collective cannot produce different
-    // bits than the house fold.
-    run_two_rank_e2e(mamba_rs::dist::ReduceContract::NcclSum, "ncclsum");
+fn ddp_two_ranks_live_matches_emulated_both_contracts() {
+    // ONE test on purpose: the supervisor re-executes this binary for
+    // each rank with argv inherited, so a second #[ignore] sibling
+    // would also run inside every child (double bootstrap, one rank
+    // joining a world twice) and the two supervisors would race
+    // process-global env. Sequential contracts inside one fn keep the
+    // child single-purpose: it reads the contract the supervisor
+    // published in ITS environment before spawning (children inherit
+    // it), does its rank work for that one world, and exits.
+    if std::env::var("MAMBA_RS_RANK").is_ok() {
+        // Child: one world, one contract, then exit before the harness
+        // could run anything else.
+        let (contract, tag) = contract_from_env();
+        run_two_rank_e2e(contract, tag);
+        unreachable!("the rank branch exits the process");
+    }
+    let n = cudarc::driver::CudaContext::device_count().unwrap_or(0);
+    if n < 2 {
+        eprintln!("SKIPPED: needs 2 GPUs (found {n}) — NCCL refuses duplicate devices");
+        return;
+    }
+    for (contract, tag) in [
+        (mamba_rs::dist::ReduceContract::NcclSum, "ncclsum"),
+        // FixedOrder: the transport-backed house reducer must land the
+        // exact oracle bits at ANY world size by construction.
+        (mamba_rs::dist::ReduceContract::FixedOrder, "fixedorder"),
+    ] {
+        // SAFETY: the supervisor is single-threaded here (no world is
+        // running between contracts); children inherit the variable
+        // through the spawn environment.
+        unsafe { std::env::set_var(ENV_TEST_CONTRACT, tag) };
+        run_two_rank_e2e(contract, tag);
+    }
 }
 
-#[test]
-#[ignore]
-fn ddp_two_ranks_fixed_order_matches_emulated() {
-    // FixedOrder tier: the transport-backed house reducer (byte-only
-    // shard exchange + the ascending det_sum_ranks fold) must land the
-    // exact oracle bits at ANY world size by construction; this pins
-    // the live path at W=2.
-    run_two_rank_e2e(mamba_rs::dist::ReduceContract::FixedOrder, "fixedorder");
-}
-
-/// Env override so the CHILD processes always run the SUPERVISOR's
-/// contract: the harness re-executes the whole test binary in children
-/// and enters the alphabetically-first matching test, which is not
-/// necessarily the test the supervisor is running.
+/// Contract hand-off to children: the supervisor publishes the tag in
+/// its own environment before spawning; children inherit it.
 const ENV_TEST_CONTRACT: &str = "MAMBA_RS_TEST_CONTRACT";
 
-fn run_two_rank_e2e(contract: mamba_rs::dist::ReduceContract, tag: &str) {
-    let is_child = std::env::var("MAMBA_RS_RANK").is_ok();
-    // Supervisor-side skip: children inherit the rank contract and never
-    // take this branch.
-    if !is_child {
-        let n = cudarc::driver::CudaContext::device_count().unwrap_or(0);
-        if n < 2 {
-            eprintln!("SKIPPED: needs 2 GPUs (found {n}) — NCCL refuses duplicate devices");
-            return;
-        }
-        // SAFETY: single-threaded at this point in the test process;
-        // children inherit the variable through the spawn environment.
-        unsafe { std::env::set_var(ENV_TEST_CONTRACT, tag) };
+fn contract_from_env() -> (mamba_rs::dist::ReduceContract, &'static str) {
+    match std::env::var(ENV_TEST_CONTRACT).as_deref() {
+        Ok("fixedorder") => (mamba_rs::dist::ReduceContract::FixedOrder, "fixedorder"),
+        _ => (mamba_rs::dist::ReduceContract::NcclSum, "ncclsum"),
     }
-    let (contract, tag) = if is_child {
-        match std::env::var(ENV_TEST_CONTRACT).as_deref() {
-            Ok("fixedorder") => (mamba_rs::dist::ReduceContract::FixedOrder, "fixedorder"),
-            _ => (mamba_rs::dist::ReduceContract::NcclSum, "ncclsum"),
-        }
-    } else {
-        (contract, tag)
-    };
+}
+
+fn run_two_rank_e2e(contract: mamba_rs::dist::ReduceContract, tag: &str) {
     let dir = std::env::temp_dir().join("mamba-rs-ddp2");
-    let job = format!("run-{}-{tag}", std::process::id());
+    let job = std::env::var("MAMBA_RS_JOB_ID")
+        .unwrap_or_else(|_| format!("run-{}-{tag}", std::process::id()));
     let dist_cfg = DistConfig::default()
         .with_devices(Devices::List(vec![0, 1]))
         .with_seed(7)

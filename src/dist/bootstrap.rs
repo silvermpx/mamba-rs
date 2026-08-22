@@ -136,6 +136,18 @@ fn env_rank() -> Result<Option<EnvRank>, DistError> {
     Ok(None)
 }
 
+/// A job id becomes a directory segment that is later joined and (on
+/// the supervisor) recursively DELETED — reject anything that could
+/// escape the rendezvous directory.
+fn validate_job_id(job: &str) -> Result<(), DistError> {
+    if job.contains('/') || job.contains('\\') || job.contains("..") {
+        return Err(DistError::Config(format!(
+            "job_id {job:?} must be a plain directory segment (no separators, no ..)"
+        )));
+    }
+    Ok(())
+}
+
 fn rendezvous_paths(r: &Rendezvous) -> (PathBuf, String) {
     match r {
         Rendezvous::File { dir, job_id } => (dir.clone(), job_id.clone()),
@@ -200,7 +212,28 @@ fn rank_context(cfg: &DistConfig, er: EnvRank) -> Result<DistContext, DistError>
         )));
     }
     if er.world == 1 {
-        return Ok(DistContext::single(er.device, cfg.seed));
+        // The seed override must survive the single-rank short-circuit —
+        // an external launcher that pinned MAMBA_RS_SEED expects it
+        // honored at any world size.
+        let seed = match read_env(ENV_SEED) {
+            Some(s) => s
+                .parse()
+                .map_err(|_| DistError::EnvContract(format!("{ENV_SEED}={s:?} is not a number")))?,
+            None => cfg.seed,
+        };
+        return Ok(DistContext::single(er.device, seed));
+    }
+    // An explicit logical_world that disagrees with the launcher's world
+    // is a config/launcher mismatch — refuse instead of silently
+    // training a different numeric identity.
+    if let Some(w) = cfg.logical_world
+        && w != er.world
+    {
+        return Err(DistError::EnvContract(format!(
+            "launcher world {} != configured logical_world {w} — a wrapper \
+             (srun/torchrun) probably split or collapsed the world",
+            er.world
+        )));
     }
     // Children may override the rendezvous location through the
     // environment the supervisor set.
@@ -223,6 +256,7 @@ fn rank_context(cfg: &DistConfig, er: EnvRank) -> Result<DistContext, DistError>
             .map_err(|_| DistError::EnvContract(format!("{ENV_SEED}={s:?} is not a number")))?,
         None => cfg.seed,
     };
+    validate_job_id(&job)?;
     let barrier_dir = dir.join(&job);
     std::fs::create_dir_all(&barrier_dir)
         .map_err(|e| DistError::Rendezvous(format!("create {}: {e}", barrier_dir.display())))?;
@@ -249,9 +283,16 @@ fn rank_context(cfg: &DistConfig, er: EnvRank) -> Result<DistContext, DistError>
         let cuda_ctx = cudarc::driver::CudaContext::new(er.device)
             .map_err(|e| DistError::Transport(format!("bind device {}: {e:?}", er.device)))?;
         let id_path = barrier_dir.join("nccl-id");
+        // One budget for the whole join: the id exchange spends part of
+        // init_timeout and the NCCL init gets the remainder, so the
+        // combined join can never exceed the configured deadline.
+        let join_start = std::time::Instant::now();
         let id = MambaComm::exchange_unique_id(&id_path, er.rank, cfg.init_timeout)?;
-        let comm =
-            MambaComm::init_with_deadline(id, er.rank, er.world, cuda_ctx, cfg.init_timeout)?;
+        let remaining = cfg
+            .init_timeout
+            .saturating_sub(join_start.elapsed())
+            .max(std::time::Duration::from_secs(1));
+        let comm = MambaComm::init_with_deadline(id, er.rank, er.world, cuda_ctx, remaining)?;
         ctx.set_comm(comm);
     }
     Ok(ctx)
@@ -312,6 +353,7 @@ pub fn bootstrap(cfg: DistConfig) -> Result<Bootstrap, DistError> {
     // ranks to a dead world. No rank exists yet, so purging is safe.
     {
         let (dir, job) = rendezvous_paths(&cfg.rendezvous);
+        validate_job_id(&job)?;
         let _ = std::fs::remove_dir_all(dir.join(job));
     }
     let exe =
@@ -323,6 +365,18 @@ pub fn bootstrap(cfg: DistConfig) -> Result<Bootstrap, DistError> {
         cmd.args(&args);
         for (k, v) in child_env(&cfg, rank, world, *device) {
             cmd.env(k, v);
+        }
+        // A dead supervisor must not orphan a half-world that keeps
+        // training: on Linux the kernel delivers SIGKILL to the child
+        // when the parent exits. (Other platforms ride the runbook rule:
+        // kill the process group.)
+        #[cfg(target_os = "linux")]
+        unsafe {
+            use std::os::unix::process::CommandExt;
+            cmd.pre_exec(|| {
+                libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL);
+                Ok(())
+            });
         }
         match cmd.spawn() {
             Ok(child) => children.push(child),
