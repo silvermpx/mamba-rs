@@ -363,7 +363,7 @@ pub struct MambaLayerPtrs {
 
 pub fn gpu_forward_mamba_layer(
     ctx: &GpuCtx,
-    temporal: &mut GpuBuffer,
+    stream_out: cudarc::driver::sys::CUdeviceptr,
     acts: &mut GpuMambaLayerActs,
     lw: &GpuMambaTrainLayerWeights,
     layer_ptrs: &MambaLayerPtrs,
@@ -381,10 +381,13 @@ pub fn gpu_forward_mamba_layer(
     let d_conv = dims.d_conv;
 
     // ===================================================================
-    // F1: RmsNorm — save residual, compute post_norm
+    // F1: RmsNorm — compute post_norm from this layer's residual slot
     // ===================================================================
-    // Save temporal → acts.residual before normalization
-    acts.residual.copy_from(temporal, &ctx.stream)?;
+    // The residual stream value already lives in acts.residual: the
+    // PREVIOUS layer's residual_add wrote it there directly (layer 0 is
+    // seeded by the driver). The old per-layer temporal→residual D2D
+    // copy is gone — same next-layer-residual plumbing the mixed lane
+    // ships (forward_mixed.rs).
 
     // rmsnorm_forward(y, rms_out, x, scale, batch, dim, eps)
     {
@@ -394,7 +397,7 @@ pub fn gpu_forward_mamba_layer(
         let mut builder = ctx.stream.launch_builder(&ctx.kernels.rmsnorm_fwd);
         builder.arg(acts.post_norm.inner_mut());
         builder.arg(acts.rms_vals.inner_mut());
-        builder.arg(temporal.inner());
+        builder.arg(acts.residual.inner());
         let nw_ptr = lw.norm_weight.cached_ptr();
         builder.arg(&nw_ptr);
         builder.arg(&batch_i);
@@ -633,12 +636,13 @@ pub fn gpu_forward_mamba_layer(
     )?;
 
     // ===================================================================
-    // F6: Residual add — temporal = residual + out_flat (fused, no memcpy)
+    // F6: Residual add — write the NEXT layer's residual slot (or
+    // norm_f_input for the last layer) directly, no temporal round trip
     // ===================================================================
     {
         let n = (bt * dm) as i32;
         let mut builder = ctx.stream.launch_builder(&ctx.kernels.residual_add);
-        builder.arg(temporal.inner_mut());
+        builder.arg(&stream_out);
         builder.arg(acts.residual.inner());
         builder.arg(scratch.out_flat.inner());
         builder.arg(&n);
@@ -735,6 +739,12 @@ pub fn gpu_forward_mamba_backbone(
     // Save output for backward
     acts.input_proj_outputs.copy_from(temporal, &ctx.stream)?;
 
+    // Seed the residual chain: layer 0's residual slot gets the
+    // input_proj output ONCE; from there every layer's residual_add
+    // writes the next layer's slot directly (mixed-lane plumbing —
+    // kills the per-layer temporal→residual copy).
+    acts.layers[0].residual.copy_from(temporal, &ctx.stream)?;
+
     // Mamba layers — per-layer offset into flat state buffers
     // Matches official Mamba pattern: single flat allocation, per-layer kernel invocation.
     // Same pattern as CPU train/forward.rs
@@ -754,9 +764,17 @@ pub fn gpu_forward_mamba_backbone(
             a_neg: aneg_base + (layer_idx * a_neg_per_layer) as u64 * f32_sz,
         };
 
+        let stream_out = if layer_idx + 1 < dims.n_layers {
+            acts.layers[layer_idx + 1].residual.cached_ptr()
+        } else {
+            acts.norm_f_input.cached_ptr()
+        };
+        // Split-borrow: the layer body needs &mut acts.layers[layer_idx]
+        // while stream_out points at a DIFFERENT slot (next layer /
+        // norm_f_input) — raw pointer, no aliasing of the borrowed acts.
         gpu_forward_mamba_layer(
             ctx,
-            temporal,
+            stream_out,
             &mut acts.layers[layer_idx],
             &mamba_w.layers[layer_idx],
             &layer_ptrs,
@@ -765,15 +783,16 @@ pub fn gpu_forward_mamba_backbone(
         // All kernels for this layer have been launched on stream
     }
 
-    // Final RmsNorm (norm_f) after all Mamba layers
+    // Final RmsNorm (norm_f) after all Mamba layers. The last layer's
+    // residual_add already wrote acts.norm_f_input (the backward's
+    // pre-norm save) — no copy needed; the normed output lands in
+    // `temporal`, which stays the driver's output buffer.
     {
         let bt_i = bt as i32;
         let dm_i = dims.d_model as i32;
         let eps: f32 = dims.rms_norm_eps;
-        // Save pre-norm input for backward
-        acts.norm_f_input.copy_from(temporal, &ctx.stream)?;
         let mut builder = ctx.stream.launch_builder(&ctx.kernels.rmsnorm_fwd);
-        builder.arg(temporal.inner_mut()); // normed output (in-place)
+        builder.arg(temporal.inner_mut()); // normed output
         builder.arg(acts.norm_f_rms.inner_mut()); // rms scalars (saved for backward)
         builder.arg(acts.norm_f_input.inner()); // input (saved copy)
         let nf_ptr = mamba_w.norm_f_weight.cached_ptr();
