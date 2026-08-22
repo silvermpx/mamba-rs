@@ -775,3 +775,85 @@ fn bench_bwd_kernels_isolated() {
     });
     let _ = bti;
 }
+
+/// S0 part 3: the four backward GEMM classes at exact campaign shapes,
+/// through the SAME typed BI wrappers the trainer uses (TC tier on/off
+/// via MAMBA_RS_BI_TENSOR_CORES).
+#[test]
+#[ignore]
+fn bench_bwd_gemms_isolated() {
+    use mamba_rs::mamba_ssm::gpu::blas::{
+        TypedPtr, bi_sgemm_backward_dw_typed, bi_sgemm_backward_dx_typed,
+    };
+    use mamba_rs::mamba_ssm::gpu::buffers::{DtypedBuf, GpuBuffer};
+    use mamba_rs::mamba_ssm::gpu::context::GpuCtx;
+    use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
+
+    let device = GpuDevice::new(0).unwrap();
+    let ctx = GpuCtx::new_with_state_cap(&device, 16).unwrap();
+    ctx.set_batch_invariant(true);
+    let dtype = WeightDtype::Bf16;
+    let bt = 8usize * 1300;
+
+    // (label, n_in, n_out) with batch = bt for each layer GEMM.
+    let shapes = [
+        ("in_proj", 384usize, 1536usize),
+        ("x_proj", 768, 80),
+        ("dt_proj", 24, 768),
+        ("out_proj", 768, 384),
+    ];
+    for (label, n_in, n_out) in shapes {
+        let dy = DtypedBuf::zeros(&ctx.stream, bt * n_out, dtype).unwrap();
+        let x = DtypedBuf::zeros(&ctx.stream, bt * n_in, dtype).unwrap();
+        let w = DtypedBuf::zeros(&ctx.stream, n_in * n_out, dtype).unwrap();
+        let dx = DtypedBuf::zeros(&ctx.stream, bt * n_in, dtype).unwrap();
+        let dw = GpuBuffer::zeros(&ctx.stream, n_in * n_out).unwrap();
+        let run = |ctx: &GpuCtx| {
+            bi_sgemm_backward_dw_typed(
+                ctx,
+                dw.cached_ptr(),
+                TypedPtr {
+                    ptr: dy.cached_ptr(),
+                    dtype,
+                },
+                TypedPtr {
+                    ptr: x.cached_ptr(),
+                    dtype,
+                },
+                (bt, n_in, n_out),
+            )
+            .unwrap();
+            bi_sgemm_backward_dx_typed(
+                ctx,
+                TypedPtr {
+                    ptr: dx.cached_ptr(),
+                    dtype,
+                },
+                TypedPtr {
+                    ptr: dy.cached_ptr(),
+                    dtype,
+                },
+                TypedPtr {
+                    ptr: w.cached_ptr(),
+                    dtype,
+                },
+                (bt, n_in, n_out),
+            )
+            .unwrap();
+        };
+        for _ in 0..3 {
+            run(&ctx);
+        }
+        ctx.stream.synchronize().unwrap();
+        let t0 = Instant::now();
+        for _ in 0..20 {
+            run(&ctx);
+        }
+        ctx.stream.synchronize().unwrap();
+        let ms = t0.elapsed().as_secs_f64() * 1e3 / 20.0;
+        eprintln!(
+            "gemm bwd {label}: {ms:.3} ms/layer (dW+dX, x24 = {:.1} ms)",
+            ms * 24.0
+        );
+    }
+}
