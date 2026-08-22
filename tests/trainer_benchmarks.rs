@@ -866,17 +866,22 @@ fn bench_bwd_gemms_isolated() {
             )
             .unwrap();
         };
+        // Tiny-kernel timing sits inside the GPU clock ramp with short
+        // windows: 3+20 iterations read up to 7x slower cold than warm.
+        // A ~1 s warm spin plus 200 timed iterations keeps readings
+        // stable across cold and warm invocations.
         let time_one = |f: &dyn Fn(&GpuCtx)| {
-            for _ in 0..3 {
+            let warm = Instant::now();
+            while warm.elapsed().as_secs_f64() < 1.0 {
                 f(&ctx);
+                ctx.stream.synchronize().unwrap();
             }
-            ctx.stream.synchronize().unwrap();
             let t0 = Instant::now();
-            for _ in 0..20 {
+            for _ in 0..200 {
                 f(&ctx);
             }
             ctx.stream.synchronize().unwrap();
-            t0.elapsed().as_secs_f64() * 1e3 / 20.0
+            t0.elapsed().as_secs_f64() * 1e3 / 200.0
         };
         let ms = time_one(&run);
         let ms_dw = time_one(&run_dw);

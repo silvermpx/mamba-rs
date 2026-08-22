@@ -5337,24 +5337,39 @@ void sgemm_bi_nn_tc_##SUFFIX(                                                  \
         }                                                                      \
         read_buf ^= 1;                                                         \
     }                                                                          \
-    _Pragma("unroll")                                                          \
-    for (int fm = 0; fm < 4; fm++) {                                           \
-        _Pragma("unroll")                                                      \
-        for (int fn = 0; fn < 4; fn++) {                                       \
-            int r0 = pid_m * TC_BM + warpM + fm * 16 + g;                      \
-            int c0 = pid_n * TC_BN + warpN + fn * 8 + 2 * t;                   \
-            _Pragma("unroll")                                                  \
-            for (int e = 0; e < 4; e++) {                                      \
-                int gr = r0 + (e >= 2 ? 8 : 0);                                \
-                int gc = c0 + (e & 1);                                         \
-                if (gr >= M || gc >= N) continue;                              \
-                float val = alpha * acc[fm][fn][e];                            \
-                if (beta != 0.0f)                                              \
-                    val += beta * to_f(C[(long long)gr * ldc + gc]);           \
-                C[(long long)gr * ldc + gc] = FROM_F(val);                     \
-            }                                                                  \
-        }                                                                      \
-    }                                                                          \
+    _Pragma("unroll")                                                         \
+    for (int fm = 0; fm < 4; fm++) {                                          \
+        _Pragma("unroll")                                                     \
+        for (int fn = 0; fn < 4; fn++) {                                      \
+            int r0 = pid_m * TC_BM + warpM + fm * 16 + g;                     \
+            int c0 = pid_n * TC_BN + warpN + fn * 8 + 2 * t;                  \
+            /* c0 is always even (warpN, fn*8, 2t all even), so when          \
+               ldc is even too the (c0, c0+1) pair is 4-byte aligned:         \
+               pack both RNE results into one 32-bit store (half the          \
+               store issue). Values identical to the scalar path. */          \
+            _Pragma("unroll")                                                 \
+            for (int half = 0; half < 2; half++) {                            \
+                int gr = r0 + (half ? 8 : 0);                                 \
+                if (gr >= M) continue;                                        \
+                float v0 = alpha * acc[fm][fn][2 * half];                     \
+                float v1 = alpha * acc[fm][fn][2 * half + 1];                 \
+                if (beta == 0.0f && (ldc & 1) == 0 && c0 + 1 < N) {           \
+                    T_ACT pair[2] = {FROM_F(v0), FROM_F(v1)};                 \
+                    *(unsigned *)&C[(long long)gr * ldc + c0] =               \
+                        *(const unsigned *)pair;                              \
+                } else {                                                      \
+                    for (int e = 0; e < 2; e++) {                             \
+                        int gc = c0 + e;                                      \
+                        if (gc >= N) continue;                                \
+                        float val = e ? v1 : v0;                              \
+                        if (beta != 0.0f)                                     \
+                            val += beta * to_f(C[(long long)gr * ldc + gc]);  \
+                        C[(long long)gr * ldc + gc] = FROM_F(val);            \
+                    }                                                         \
+                }                                                             \
+            }                                                                 \
+        }                                                                     \
+    }                                                                         \
 }
 
 DEFINE_SGEMM_BI_NN_TC(bf16, __nv_bfloat16, from_f_bf16, "bf16")
@@ -5548,22 +5563,36 @@ void sgemm_bi_tn_tc_##SUFFIX(                                                  \
         }                                                                      \
         read_buf ^= 1;                                                         \
     }                                                                          \
-    /* epilogue: f32 accumulate into dW */                                     \
-    _Pragma("unroll")                                                          \
-    for (int fm = 0; fm < 4; fm++) {                                           \
-        _Pragma("unroll")                                                      \
-        for (int fn = 0; fn < 4; fn++) {                                       \
-            int r0 = pid_m * TC_BM + warpM + fm * 16 + g;                      \
-            int c0 = pid_n * TC_BN + warpN + fn * 8 + 2 * t;                   \
-            _Pragma("unroll")                                                  \
-            for (int e = 0; e < 4; e++) {                                      \
-                int gr = r0 + (e >= 2 ? 8 : 0);                                \
-                int gc = c0 + (e & 1);                                         \
-                if (gr >= K_out || gc >= N) continue;                          \
-                C[(long long)gr * N + gc] += alpha * acc[fm][fn][e];           \
-            }                                                                  \
-        }                                                                      \
-    }                                                                          \
+    /* epilogue: f32 accumulate into dW; the even (c0, c0+1) pair is          \
+       8-byte aligned when N is even — one float2 read-modify-write           \
+       per pair (same adds, identical values). */                             \
+    _Pragma("unroll")                                                         \
+    for (int fm = 0; fm < 4; fm++) {                                          \
+        _Pragma("unroll")                                                     \
+        for (int fn = 0; fn < 4; fn++) {                                      \
+            int r0 = pid_m * TC_BM + warpM + fm * 16 + g;                     \
+            int c0 = pid_n * TC_BN + warpN + fn * 8 + 2 * t;                  \
+            _Pragma("unroll")                                                 \
+            for (int half = 0; half < 2; half++) {                            \
+                int gr = r0 + (half ? 8 : 0);                                 \
+                if (gr >= K_out) continue;                                    \
+                if ((N & 1) == 0 && c0 + 1 < N) {                             \
+                    float2 *dst = (float2 *)&C[(long long)gr * N + c0];       \
+                    float2 cur = *dst;                                        \
+                    cur.x += alpha * acc[fm][fn][2 * half];                   \
+                    cur.y += alpha * acc[fm][fn][2 * half + 1];               \
+                    *dst = cur;                                               \
+                } else {                                                      \
+                    for (int e = 0; e < 2; e++) {                             \
+                        int gc = c0 + e;                                      \
+                        if (gc >= N) continue;                                \
+                        C[(long long)gr * N + gc] +=                          \
+                            alpha * acc[fm][fn][2 * half + e];                \
+                    }                                                         \
+                }                                                             \
+            }                                                                 \
+        }                                                                     \
+    }                                                                         \
 }
 
 DEFINE_SGEMM_BI_TN_TC(bf16, __nv_bfloat16, from_f_bf16, "bf16")
@@ -5733,23 +5762,34 @@ void sgemm_bi_nt_tc_##SUFFIX(                                                  \
         }                                                                      \
         read_buf ^= 1;                                                         \
     }                                                                          \
-    /* epilogue: typed RNE overwrite of dX */                                  \
-    _Pragma("unroll")                                                          \
-    for (int fm = 0; fm < 4; fm++) {                                           \
-        _Pragma("unroll")                                                      \
-        for (int fn = 0; fn < 4; fn++) {                                       \
-            int r0 = pid_m * TC_BM + warpM + fm * 16 + g;                      \
-            int c0 = pid_n * TC_BN + warpN + fn * 8 + 2 * t;                   \
-            _Pragma("unroll")                                                  \
-            for (int e = 0; e < 4; e++) {                                      \
-                int gr = r0 + (e >= 2 ? 8 : 0);                                \
-                int gc = c0 + (e & 1);                                         \
-                if (gr >= M || gc >= K_out) continue;                          \
-                C[(long long)gr * K_out + gc] =                                \
-                    FROM_F(alpha * acc[fm][fn][e]);                            \
-            }                                                                  \
-        }                                                                      \
-    }                                                                          \
+    /* epilogue: typed RNE overwrite of dX; the even (c0, c0+1) pair          \
+       packs into one 32-bit store when K_out is even (see the NN             \
+       epilogue note). Values identical to the scalar path. */                \
+    _Pragma("unroll")                                                         \
+    for (int fm = 0; fm < 4; fm++) {                                          \
+        _Pragma("unroll")                                                     \
+        for (int fn = 0; fn < 4; fn++) {                                      \
+            int r0 = pid_m * TC_BM + warpM + fm * 16 + g;                     \
+            int c0 = pid_n * TC_BN + warpN + fn * 8 + 2 * t;                  \
+            _Pragma("unroll")                                                 \
+            for (int half = 0; half < 2; half++) {                            \
+                int gr = r0 + (half ? 8 : 0);                                 \
+                if (gr >= M) continue;                                        \
+                T_ACT pair[2] = {FROM_F(alpha * acc[fm][fn][2 * half]),       \
+                                 FROM_F(alpha * acc[fm][fn][2 * half + 1])};  \
+                if ((K_out & 1) == 0 && c0 + 1 < K_out) {                     \
+                    *(unsigned *)&C[(long long)gr * K_out + c0] =             \
+                        *(const unsigned *)pair;                              \
+                } else {                                                      \
+                    for (int e = 0; e < 2; e++) {                             \
+                        int gc = c0 + e;                                      \
+                        if (gc >= K_out) continue;                            \
+                        C[(long long)gr * K_out + gc] = pair[e];              \
+                    }                                                         \
+                }                                                             \
+            }                                                                 \
+        }                                                                     \
+    }                                                                         \
 }
 
 DEFINE_SGEMM_BI_NT_TC(bf16, __nv_bfloat16, from_f_bf16, "bf16")

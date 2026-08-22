@@ -140,6 +140,16 @@
   release. Campaign shape: 261.9 -> 247.4 ms/step and -511.6 MB/layer
   (-12.28 GB total) — a B=32 micro-batch now fits on the 32 GB card
   (963.8 ms/step; the full tape OOMs on its first 511.6 MB alloc).
+- Tensor-core epilogues (NN forward, NT dX, TN dW, 128-tile family)
+  store/accumulate the fragment's adjacent even-column pair with one
+  packed access (32-bit typed store, float2 read-modify-write for the
+  f32 dW accumulate) when the leading dimension is even; identical
+  values, digest-clean. Campaign-neutral at d_model 384 — the epilogue
+  was not a wall there; kept for the store-issue halving on
+  wider-output shapes. Measured backward-GEMM ledger at the campaign
+  shape (tensor-core tier, x24-layer ms): in_proj 4.9, x_proj 3.2,
+  out_proj 3.7 — and dt_proj 21.3 on the scalar tier (its dW output is
+  below the tensor-core gate), 64% of all backward-GEMM cost.
 - The `bench_scan_kernels_isolated` forward arm pushed `h_saved` ninth
   instead of third, shifting every pointer after `y` by one slot — its
   earlier "scan fwd" readings measured a kernel reading the wrong
