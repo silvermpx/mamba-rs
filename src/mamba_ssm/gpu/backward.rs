@@ -104,8 +104,8 @@ pub fn gpu_backward_mamba_layer(
             .map_err(|e| format!("gather_bc_cols bwd mamba: {:?}", e))?;
     }
 
-    // C6 fix: zero d_a_log_local before SSM backward (kernel uses += across T)
-    scratch.d_a_log_local.zero(&ctx.stream)?;
+    // (d_a_log_local zeroing removed: the kernel now writes the full
+    // domain from a register accumulator — `=` store, not `+=`.)
 
     // ssm_backward_local(h_saved, delta_saved, u_saved, B_saved, C_saved, a_neg, D,
     //   dy, d_delta, d_u, d_B_local, d_C_local, d_D_local, d_a_log_local,

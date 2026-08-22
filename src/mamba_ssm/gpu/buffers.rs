@@ -772,9 +772,13 @@ impl std::fmt::Debug for GpuBuffer {
 /// Usage contract: expose the buffer as ordinary slices and pass them to
 /// the normal [`GpuBuffer::upload`] / [`GpuBuffer::download`] — the CUDA
 /// driver detects the page-locked pointer and takes the true-DMA path
-/// (no pageable staging copy), while the safe wrapper's stream sync keeps
-/// the read-after-download contract exactly as before. Same calls, same
-/// bytes — the pin changes WHERE the copy engine reads, never a value.
+/// (no pageable staging copy). THE CALLER OWNS THE SYNC: `download` is
+/// an async enqueue (cuMemcpyDtoHAsync; the safe wrapper adds NO sync
+/// for plain slices), so the host may read the destination only after
+/// `stream.synchronize()`. Pageable destinations happen to block in
+/// the driver; pinned ones do not — never lean on that difference.
+/// Same calls, same bytes — the pin changes WHERE the copy engine
+/// reads, never a value.
 pub struct PinnedHostBuf {
     ptr: *mut f32,
     len: usize,

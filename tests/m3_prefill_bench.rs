@@ -127,7 +127,20 @@ fn m3_train_step_at_multichunk_shape() {
         }
         let dt = t0.elapsed().as_secs_f64();
         eprintln!(
-            "train step {dtype:?} B={batch} T={seq_len} layers={}: {:.2} ms/step",
+            "train step {dtype:?} B={batch} T={seq_len} layers={}: {:.2} ms/step (eager)",
+            cfg.n_layers,
+            1e3 * dt / iters as f64
+        );
+        // Graph lane too — the M1 table is graph-mode; an eager-only M3
+        // number was never comparable with it.
+        tr.capture_graph().unwrap();
+        let t1 = Instant::now();
+        for _ in 0..iters {
+            tr.step(&input, &d_temporal).unwrap();
+        }
+        let dt = t1.elapsed().as_secs_f64();
+        eprintln!(
+            "train step {dtype:?} B={batch} T={seq_len} layers={}: {:.2} ms/step (graph)",
             cfg.n_layers,
             1e3 * dt / iters as f64
         );

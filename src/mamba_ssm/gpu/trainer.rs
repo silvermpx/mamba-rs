@@ -90,22 +90,17 @@ fn recompute_a_neg_all(
     let n_i32 = per_layer as i32;
     for (li, mw) in master_layers.iter().enumerate() {
         let src = mw.a_log.cached_ptr();
-        // Write-1: backward-side a_neg_all
+        // Both a_neg mirrors (backward-side + forward-side state) from
+        // ONE kernel — same exp value stored twice, half the launches.
         let dst_a = a_neg_all.inner_at(li * per_layer);
-        let mut b1 = ctx.stream.launch_builder(&ctx.kernels.exp_negate);
+        let dst_s = state_a_neg_all.inner_at(li * per_layer);
+        let mut b1 = ctx.stream.launch_builder(&ctx.kernels.exp_negate2);
         b1.arg(&dst_a);
+        b1.arg(&dst_s);
         b1.arg(&src);
         b1.arg(&n_i32);
         unsafe { b1.launch(grid_1d(per_layer)) }
-            .map_err(|e| format!("exp_negate self.a_neg_all L{li}: {e:?}"))?;
-        // Write-2: forward-side state.a_neg_all (separate allocation today).
-        let dst_s = state_a_neg_all.inner_at(li * per_layer);
-        let mut b2 = ctx.stream.launch_builder(&ctx.kernels.exp_negate);
-        b2.arg(&dst_s);
-        b2.arg(&src);
-        b2.arg(&n_i32);
-        unsafe { b2.launch(grid_1d(per_layer)) }
-            .map_err(|e| format!("exp_negate state.a_neg_all L{li}: {e:?}"))?;
+            .map_err(|e| format!("exp_negate2 a_neg mirrors L{li}: {e:?}"))?;
     }
     Ok(())
 }
@@ -848,7 +843,12 @@ impl MambaTrainerMixed {
         let mamba_input = GpuBuffer::zeros(&ctx.stream, batch * seq_len * input_dim)?;
         let d_temporal = GpuBuffer::zeros(&ctx.stream, batch * seq_len * cfg.d_model)?;
         let temporal_f32 = GpuBuffer::zeros(&ctx.stream, batch * seq_len * cfg.d_model)?;
-        let grads = GpuMambaGrads::new(&ctx.stream, &cfg, input_dim)?;
+        let grads = GpuMambaGrads::new_sized(
+            &ctx.stream,
+            &cfg,
+            input_dim,
+            !cpu_weights.input_proj_w.is_empty(),
+        )?;
 
         let adam = GpuAdamW::new(&ctx.stream, grads.flat.len())?
             .with_lr(lr)
@@ -1110,11 +1110,15 @@ impl MambaTrainerMixed {
             unsafe { b.launch(grid_1d(self.temporal_f32.len())) }
                 .map_err(|e| format!("forward_split: temporal upcast: {e:?}"))?;
         }
+        // Sync AFTER the async D2H enqueue: cuMemcpyDtoHAsync into
+        // pageable memory happens to block in the driver, but the
+        // ordering contract must not lean on that — a pinned host
+        // buffer here would read stale bytes with the old order.
+        self.temporal_f32.download(&self.ctx.stream, temporal_out)?;
         self.ctx
             .stream
             .synchronize()
             .map_err(|e| format!("forward_split sync: {e:?}"))?;
-        self.temporal_f32.download(&self.ctx.stream, temporal_out)?;
         self.split_forward_pending = true;
         self.split_forward_flags = self.ctx.gemm_flags();
         Ok(())
@@ -1957,11 +1961,13 @@ impl MambaTrainerF32 {
         );
         self.mamba_input.upload(&self.ctx.stream, input)?;
         self.eager_forward()?;
+        // Sync AFTER the download enqueue — see the twin comment in
+        // the mixed split path.
+        self.temporal.download(&self.ctx.stream, temporal_out)?;
         self.ctx
             .stream
             .synchronize()
             .map_err(|e| format!("forward_split sync: {e:?}"))?;
-        self.temporal.download(&self.ctx.stream, temporal_out)?;
         self.split_forward_pending = true;
         self.split_forward_flags = self.ctx.gemm_flags();
         Ok(())

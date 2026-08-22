@@ -499,6 +499,23 @@ impl GpuMambaGrads {
         cfg: &MambaConfig,
         input_dim: usize,
     ) -> Result<Self, String> {
+        Self::new_sized(stream, cfg, input_dim, true)
+    }
+
+    /// Like [`Self::new`], but the input-projection slot is sized from
+    /// the ACTUAL master shape: the mixed identity convention (empty
+    /// input_proj) previously still paid a full `input_dim x d_model`
+    /// grad slot — zeroed every step and mirrored into m/v — for a
+    /// tensor that does not exist. NOTE: this changes the flat-arena
+    /// layout (and therefore the exported optimizer-state blob) for
+    /// identity-input_proj models; blobs written by earlier versions
+    /// refuse on length at import, loudly.
+    pub fn new_sized(
+        stream: &Arc<cudarc::driver::CudaStream>,
+        cfg: &MambaConfig,
+        input_dim: usize,
+        has_input_proj: bool,
+    ) -> Result<Self, String> {
         let dm = cfg.d_model;
         let di = cfg.d_inner();
         let ds = cfg.d_state;
@@ -506,9 +523,14 @@ impl GpuMambaGrads {
         let dr = cfg.dt_rank();
         let xd = cfg.xdbl_dim();
 
+        let (ipw_len, ipb_len) = if has_input_proj {
+            (input_dim * dm, dm)
+        } else {
+            (0, 0)
+        };
         let per_layer =
             dm + dm * 2 * di + di * dc + di + di * xd + dr * di + di + di * ds + di + di * dm;
-        let total = input_dim * dm + dm + cfg.n_layers * per_layer + dm;
+        let total = ipw_len + ipb_len + cfg.n_layers * per_layer + dm;
 
         let flat = GpuBuffer::zeros(stream, total)?;
         let base = flat.cached_ptr();
@@ -523,8 +545,8 @@ impl GpuMambaGrads {
             }};
         }
 
-        let input_proj_w = gs!(input_dim * dm);
-        let input_proj_b = gs!(dm);
+        let input_proj_w = gs!(ipw_len);
+        let input_proj_b = gs!(ipb_len);
 
         let mut layers = Vec::with_capacity(cfg.n_layers);
         for _ in 0..cfg.n_layers {

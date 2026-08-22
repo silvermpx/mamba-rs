@@ -55,7 +55,14 @@ where
     // the caller to see both — otherwise an `?`-shortcircuit on body_result
     // would silently drop a stream-corrupting end_capture failure.
     match (body_result, end_result) {
-        (Ok(()), Ok(Some(g))) => Ok(g),
+        (Ok(()), Ok(Some(g))) => {
+            // Pre-upload the instantiated graph so the FIRST replay does
+            // not pay the device-upload latency inside a timed region
+            // (the M3 inference engine already did this; the trainers
+            // inherited the un-uploaded variant).
+            g.upload().map_err(|e| format!("graph upload: {e:?}"))?;
+            Ok(g)
+        }
         (Ok(()), Ok(None)) => Err("end_capture returned no graph (empty body?)".to_string()),
         (Ok(()), Err(e)) => Err(format!("end_capture: {e:?}")),
         (Err(b), Ok(_)) => Err(format!("body: {b}")),

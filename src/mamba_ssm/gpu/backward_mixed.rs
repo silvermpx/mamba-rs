@@ -107,12 +107,13 @@ pub fn gpu_backward_mamba_layer_mixed(
     // d_next_res, typed). Since d_temporal holds d_next_res entering this
     // layer, we cast it to typed via `vec_add_inplace_typed` on a zeroed
     // typed destination (f32_src → typed_dst = 0 + f32).
-    scratch.temporal_typed.zero(&ctx.stream)?;
     {
+        // One cast kernel replaces the zero() + add-on-zero staging pair.
+        // vec_cast_zplus computes FROM_F(0.0f + src) — bit-identical to
+        // the old idiom including at src = -0.0 (which a bare cast would
+        // flip to -0.0 instead of today's +0.0).
         let n = (bt * dm) as i32;
-        let mut bld = ctx
-            .stream
-            .launch_builder(k.vec_add_inplace_typed.get(dtype));
+        let mut bld = ctx.stream.launch_builder(k.vec_cast_zplus_typed.get(dtype));
         let a = scratch.temporal_typed.cached_ptr();
         let b_p = d_temporal.cached_ptr();
         bld.arg(&a);
@@ -205,7 +206,7 @@ pub fn gpu_backward_mamba_layer_mixed(
     }
 
     // Zero T-length accumulator before SSM backward (kernel uses += over T).
-    scratch.d_a_log_local.zero(&ctx.stream)?;
+    // (d_a_log_local zeroing removed — full-domain register-acc store.)
 
     // SSM backward: parallel reverse-scan when T > PARALLEL_SCAN_THRESHOLD
     // or

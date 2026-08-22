@@ -119,6 +119,7 @@ pub struct MambaKernels {
     pub elementwise_mul: CudaFunction,
     /// Negate and exponentiate: `out[i] = -exp(a_log[i])`.
     pub exp_negate: CudaFunction,
+    pub exp_negate2: CudaFunction,
     /// Gather columns from a wide matrix into a contiguous buffer.
     pub gather_cols: CudaFunction,
     /// Gather B and C columns from xdbl output.
@@ -223,6 +224,7 @@ pub struct MambaKernels {
     /// or typed grad accumulator) and `b` is f32 (master bias). Used in mixed
     /// backward residual-add sequences where one operand is f32.
     pub vec_add_inplace_typed: TypedKernel,
+    pub vec_cast_zplus_typed: TypedKernel,
     /// Typed concat_halves — pure load/store with typed src/dst. Used by mixed
     /// backward to concat `d_x_branch` and `d_gate_pre` into `d_proj` before
     /// the in_proj dX backward.
@@ -654,6 +656,7 @@ impl MambaKernels {
             vec_add_inplace: get("vec_add_inplace")?,
             elementwise_mul: get("elementwise_mul")?,
             exp_negate: get("exp_negate")?,
+            exp_negate2: get("exp_negate2")?,
             gather_cols: get("gather_cols")?,
             gather_bc_cols: get("gather_bc_cols")?,
             scatter_add_cols: get("scatter_add_cols")?,
@@ -740,6 +743,7 @@ impl MambaKernels {
             softplus_bwd_typed: load_typed("softplus_backward")?,
             gather_last_timestep_typed: load_typed("gather_last_timestep")?,
             vec_add_inplace_typed: load_typed("vec_add_inplace")?,
+            vec_cast_zplus_typed: load_typed("vec_cast_zplus")?,
             concat_halves_typed: load_typed("concat_halves")?,
             scatter_add_cols_typed: load_typed("scatter_add_cols")?,
             reduce_bias_typed: load_typed("reduce_bias")?,

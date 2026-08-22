@@ -87,20 +87,16 @@ fn recompute_a_neg_captured(
     let n_i32 = per_layer as i32;
     for (li, mw) in master_layers.iter().enumerate() {
         let src = mw.a_log.cached_ptr();
+        // Two-destination refresh — twin of the eager path.
         let dst_a = a_neg_all.inner_at(li * per_layer);
-        let mut b1 = ctx.stream.launch_builder(&ctx.kernels.exp_negate);
+        let dst_s = state_a_neg_all.inner_at(li * per_layer);
+        let mut b1 = ctx.stream.launch_builder(&ctx.kernels.exp_negate2);
         b1.arg(&dst_a);
+        b1.arg(&dst_s);
         b1.arg(&src);
         b1.arg(&n_i32);
         unsafe { b1.launch(grid_1d(per_layer)) }
-            .map_err(|e| format!("exp_negate captured a_neg_all L{li}: {e:?}"))?;
-        let dst_s = state_a_neg_all.inner_at(li * per_layer);
-        let mut b2 = ctx.stream.launch_builder(&ctx.kernels.exp_negate);
-        b2.arg(&dst_s);
-        b2.arg(&src);
-        b2.arg(&n_i32);
-        unsafe { b2.launch(grid_1d(per_layer)) }
-            .map_err(|e| format!("exp_negate captured state.a_neg_all L{li}: {e:?}"))?;
+            .map_err(|e| format!("exp_negate2 captured a_neg mirrors L{li}: {e:?}"))?;
     }
     Ok(())
 }

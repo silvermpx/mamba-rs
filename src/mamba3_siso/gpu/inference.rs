@@ -404,7 +404,7 @@ impl Mamba3GpuInferenceEngine {
         let graph = crate::mamba_ssm::gpu::graph_capture::capture_into_graph(&stream, || {
             self.step_kernels(state, scratch)
         })?;
-        graph.upload().map_err(|e| format!("graph upload: {e:?}"))?;
+        // capture_into_graph pre-uploads the instantiated graph.
         self.graph = Some(graph);
         self.captured_state_ptr = snap_state;
         self.captured_scratch_ptr = snap_scratch;

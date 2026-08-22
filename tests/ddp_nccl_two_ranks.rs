@@ -28,8 +28,25 @@ use mamba_rs::mamba3_siso::config::Mamba3Config;
 use mamba_rs::mamba3_siso::gpu::trainer::Mamba3Trainer;
 use mamba_rs::mamba3_siso::weights::Mamba3Weights;
 
-const ROUNDS: usize = 3;
-const WORLD: usize = 2;
+/// Rounds and world size are env-tunable for multi-GPU validation:
+/// `MAMBA_RS_TEST_WORLD=4` runs the same oracle comparison at W=4 (the
+/// fold order becomes observable at W >= 3, where the ascending-rank
+/// association is not implied by commutativity), and
+/// `MAMBA_RS_TEST_ROUNDS=200` stretches the run for a kill drill. The
+/// supervisor publishes both to children through its environment.
+fn test_world() -> usize {
+    std::env::var("MAMBA_RS_TEST_WORLD")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(2)
+}
+
+fn test_rounds() -> usize {
+    std::env::var("MAMBA_RS_TEST_ROUNDS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(3)
+}
 
 fn cfg() -> Mamba3Config {
     Mamba3Config {
@@ -102,9 +119,10 @@ fn build_trainer(device: usize) -> Mamba3Trainer {
 }
 
 fn micro_inputs(round: usize, rank: usize, n: usize) -> (Vec<f32>, Vec<f32>) {
+    let world = test_world();
     (
-        det(n, 0x1000 + (round * WORLD + rank) as u32),
-        det(n, 0x2000 + (round * WORLD + rank) as u32),
+        det(n, 0x1000 + (round * world + rank) as u32),
+        det(n, 0x2000 + (round * world + rank) as u32),
     )
 }
 
@@ -113,11 +131,12 @@ fn micro_inputs(round: usize, rank: usize, n: usize) -> (Vec<f32>, Vec<f32>) {
 fn emulated_final_bits() -> Vec<u32> {
     let c = cfg();
     let n = 64 * c.d_model;
-    let ew = EmulatedWorld::new(WORLD).unwrap();
-    let mut ranks: Vec<Mamba3Trainer> = (0..WORLD).map(|_| build_trainer(0)).collect();
+    let world = test_world();
+    let ew = EmulatedWorld::new(world).unwrap();
+    let mut ranks: Vec<Mamba3Trainer> = (0..world).map(|_| build_trainer(0)).collect();
     let mut out = vec![0.0f32; n];
-    for round in 0..ROUNDS {
-        let mut arenas = Vec::with_capacity(WORLD);
+    for round in 0..test_rounds() {
+        let mut arenas = Vec::with_capacity(world);
         for (r, t) in ranks.iter_mut().enumerate() {
             let (input, d_temporal) = micro_inputs(round, r, n);
             t.forward(&input, &mut out).unwrap();
@@ -165,9 +184,10 @@ fn ddp_two_ranks_live_matches_emulated_both_contracts() {
         run_two_rank_e2e(contract, tag);
         unreachable!("the rank branch exits the process");
     }
+    let want = test_world() as i32;
     let n = cudarc::driver::CudaContext::device_count().unwrap_or(0);
-    if n < 2 {
-        eprintln!("SKIPPED: needs 2 GPUs (found {n}) — NCCL refuses duplicate devices");
+    if n < want {
+        eprintln!("SKIPPED: needs {want} GPUs (found {n}) — NCCL refuses duplicate devices");
         return;
     }
     for (contract, tag) in [
@@ -199,8 +219,18 @@ fn run_two_rank_e2e(contract: mamba_rs::dist::ReduceContract, tag: &str) {
     let dir = std::env::temp_dir().join("mamba-rs-ddp2");
     let job = std::env::var("MAMBA_RS_JOB_ID")
         .unwrap_or_else(|_| format!("run-{}-{tag}", std::process::id()));
-    let dist_cfg = DistConfig::default()
-        .with_devices(Devices::List(vec![0, 1]))
+    let world = test_world();
+    let mut base_cfg = DistConfig::default();
+    // Kill-drill knob: a short collective deadline makes a mid-run rank
+    // kill surface in seconds instead of the 300 s default.
+    if let Some(secs) = std::env::var("MAMBA_RS_TEST_COLLECTIVE_TIMEOUT")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+    {
+        base_cfg.collective_timeout = std::time::Duration::from_secs(secs);
+    }
+    let dist_cfg = base_cfg
+        .with_devices(Devices::List((0..world).collect()))
         .with_seed(7)
         .with_reduce(contract)
         .with_rendezvous(Rendezvous::File {
@@ -216,7 +246,7 @@ fn run_two_rank_e2e(contract: mamba_rs::dist::ReduceContract, tag: &str) {
             let n = 64 * cfg().d_model;
             let mut t = build_trainer(ctx.device_ordinal());
             let mut out = vec![0.0f32; n];
-            for round in 0..ROUNDS {
+            for round in 0..test_rounds() {
                 let (input, d_temporal) = micro_inputs(round, ctx.rank(), n);
                 t.forward(&input, &mut out).unwrap();
                 t.backward_step_dist(&d_temporal, BackwardOpts::default(), &ctx)
@@ -242,14 +272,28 @@ fn run_two_rank_e2e(contract: mamba_rs::dist::ReduceContract, tag: &str) {
                     .collect()
             };
             let r0 = read(0);
-            let r1 = read(1);
-            assert_eq!(r0, r1, "ranks diverged");
+            for rank in 1..world {
+                assert_eq!(r0, read(rank), "rank {rank} diverged from rank 0");
+            }
             let oracle = emulated_final_bits();
-            assert_eq!(
-                r0, oracle,
-                "live NCCL world diverged from the emulated oracle \
-                 (at world size 2 the sum has one association and must match bitwise)"
-            );
+            // The bitwise oracle claim holds for FixedOrder at ANY world
+            // size (the fold is the contract) and for any contract at
+            // W=2 (one association + commutativity). NcclSum at W>2 may
+            // legitimately differ: the library picks the association.
+            if tag == "fixedorder" || world == 2 {
+                assert_eq!(
+                    r0, oracle,
+                    "live NCCL world diverged from the emulated oracle \
+                     (contract {tag}, W={world})"
+                );
+            } else {
+                let same = r0 == oracle;
+                eprintln!(
+                    "NcclSum W={world}: replicas agree; oracle bits {} \
+                     (association is the library's choice at W>2)",
+                    if same { "match" } else { "differ" }
+                );
+            }
             let _ = std::fs::remove_dir_all(dir.join(&job));
         }
     }

@@ -513,7 +513,18 @@ extern "C" __global__ void ssm_backward_local(
 
     // d_h carries gradient backward through time
     float d_h[MAMBA_RS_STATE_CAP];
-    for (int n = 0; n < d_state; n++) d_h[n] = 0.0f;
+    // Register accumulator for d_a_log: the old global `+=` into
+    // d_a_log_local was ~T*d_state dependent global RMWs per thread in
+    // the hottest loop; same adds in the same (t,n) order, written once.
+    float d_a_acc[MAMBA_RS_STATE_CAP];
+    // Register carry for the BPTT state: in the reverse-T walk,
+    // h_curr(t) == h_prev(t+1) — carrying it halves h_saved reads.
+    float h_carry[MAMBA_RS_STATE_CAP];
+    for (int n = 0; n < d_state; n++) {
+        d_h[n] = 0.0f;
+        d_a_acc[n] = 0.0f;
+        h_carry[n] = h_saved[(b * (T + 1) + T) * d_inner * d_state + (d * d_state + n)];
+    }
 
     // Backward through time (reverse T)
     for (int t = T - 1; t >= 0; t--) {
@@ -533,9 +544,10 @@ extern "C" __global__ void ssm_backward_local(
         float d_delta_val = 0.0f;
 
         for (int n = 0; n < d_state; n++) {
-            // h_curr = state AFTER step t = h_saved at time index t+1
-            int h_idx = (b * (T + 1) + (t + 1)) * d_inner * d_state + (d * d_state + n);
-            float h_curr = h_saved[h_idx];
+            // h_curr = state AFTER step t (carried register: at t=T-1 it
+            // was seeded from h_saved[T]; afterwards it is last round's
+            // h_prev — identical value, one global load saved).
+            float h_curr = h_carry[n];
 
             // Opt B: exp2f instead of expf
             float da = exp2f(delta_d * a_local[n] * LOG2E);
@@ -560,17 +572,22 @@ extern "C" __global__ void ssm_backward_local(
             // d_B += d_h * delta * u (per-thread: indexed by b,t,d,n)
             d_B_local[btdn] = d_h[n] * delta_d * u_d;
 
-            // d_a_log += d_h * da * delta * a_dn * h_prev
-            d_a_log_local[(b * d_inner + d) * d_state + n] +=
-                d_h[n] * da * delta_d * a_local[n] * h_prev;
+            // d_a_log += d_h * da * delta * a_dn * h_prev (register acc)
+            d_a_acc[n] += d_h[n] * da * delta_d * a_local[n] * h_prev;
 
             // Propagate d_h backward through time: d_h_prev = da * d_h
             d_h[n] = da * d_h[n];
+            h_carry[n] = h_prev;
         }
 
         d_delta[bt_di] = d_delta_val;
         d_u[bt_di] = d_u_val;
     }
+
+    // One store per element replaces T global RMWs; full-domain write,
+    // so the per-layer zeroing of d_a_log_local is gone with it.
+    for (int n = 0; n < d_state; n++)
+        d_a_log_local[(b * d_inner + d) * d_state + n] = d_a_acc[n];
 
     d_D_local[b * d_inner + d] = local_d_D;
 }
@@ -620,9 +637,14 @@ extern "C" __global__ void ssm_backward_local_##SUFFIX(                         
     float local_d_D = 0.0f;                                                     \
     float a_local[MAMBA_RS_STATE_CAP];                                                          \
     float d_h[MAMBA_RS_STATE_CAP];                                                              \
+    float d_a_acc[MAMBA_RS_STATE_CAP];                                                          \
+    float h_carry[MAMBA_RS_STATE_CAP];                                                          \
     for (int n = 0; n < d_state; n++) {                                         \
         a_local[n] = a_neg[d * d_state + n];                                    \
         d_h[n] = 0.0f;                                                          \
+        d_a_acc[n] = 0.0f;                                                      \
+        h_carry[n] = h_saved[(b * (T + 1) + T) * d_inner * d_state              \
+                             + (d * d_state + n)];                              \
     }                                                                           \
                                                                                 \
     for (int t = T - 1; t >= 0; t--) {                                          \
@@ -637,11 +659,9 @@ extern "C" __global__ void ssm_backward_local_##SUFFIX(                         
         float d_delta_val = 0.0f;                                               \
                                                                                 \
         for (int n = 0; n < d_state; n++) {                                     \
-            int h_idx      = (b * (T + 1) + (t + 1)) * d_inner * d_state        \
-                             + (d * d_state + n);                               \
             int h_prev_idx = (b * (T + 1) + t)       * d_inner * d_state        \
                              + (d * d_state + n);                               \
-            float h_curr = h_saved[h_idx];                                      \
+            float h_curr = h_carry[n];                                          \
             float h_prev = h_saved[h_prev_idx];                                 \
             float B_n    = to_f(B_saved[bt_ds + n]);                            \
             float C_n    = to_f(C_saved[bt_ds + n]);                            \
@@ -655,15 +675,18 @@ extern "C" __global__ void ssm_backward_local_##SUFFIX(                         
             d_u_val     += d_h[n] * delta_d * B_n;                              \
             d_B_local[btdn] = FROM_F(d_h[n] * delta_d * u_d);                   \
                                                                                 \
-            d_a_log_local[(b * d_inner + d) * d_state + n] +=                   \
-                d_h[n] * da * delta_d * a_local[n] * h_prev;                    \
+            d_a_acc[n] += d_h[n] * da * delta_d * a_local[n] * h_prev;          \
                                                                                 \
             d_h[n] = da * d_h[n];                                               \
+            h_carry[n] = h_prev;                                                \
         }                                                                       \
                                                                                 \
         d_delta[bt_di] = FROM_F(d_delta_val);                                   \
         d_u[bt_di]     = FROM_F(d_u_val);                                       \
     }                                                                           \
+                                                                                \
+    for (int n = 0; n < d_state; n++)                                           \
+        d_a_log_local[(b * d_inner + d) * d_state + n] = d_a_acc[n];            \
                                                                                 \
     d_D_local[b * d_inner + d] = local_d_D;                                     \
 }

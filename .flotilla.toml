@@ -1,0 +1,2 @@
+schema = 1
+provision = ["brew:cargo-deny"]

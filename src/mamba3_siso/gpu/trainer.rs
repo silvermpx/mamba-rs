@@ -1120,11 +1120,13 @@ impl Mamba3TrainerMixed {
         );
         self.mamba_input.upload(&self.ctx.stream, input)?;
         self.eager_forward()?;
+        // Sync AFTER the download enqueue — the D2H is async by
+        // contract; only pageable-memory luck made the old order work.
+        self.temporal.download(&self.ctx.stream, temporal_out)?;
         self.ctx
             .stream
             .synchronize()
             .map_err(|e| format!("forward_split sync: {e:?}"))?;
-        self.temporal.download(&self.ctx.stream, temporal_out)?;
         self.split_forward_pending = true;
         Ok(())
     }

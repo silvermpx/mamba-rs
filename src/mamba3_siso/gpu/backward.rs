@@ -106,13 +106,17 @@ pub fn gpu_backward_mamba3_layer(
             .map_err(|e| format!("silu_gate_bwd m3 B7: {:?}", e))?;
     }
 
-    // B6: SSM backward.
-    scratch.d_k.zero(&ctx.stream)?;
-    scratch.d_q.zero(&ctx.stream)?;
+    // B6: SSM backward. The parallel branch re-zeros d_k/d_q itself
+    // (fill_scalar over d_x/d_k/d_q) and never touches d_d_local — zero
+    // only what each branch actually consumes.
     scratch.d_alpha.zero(&ctx.stream)?;
     scratch.d_beta.zero(&ctx.stream)?;
     scratch.d_gamma.zero(&ctx.stream)?;
-    scratch.d_d_local.zero(&ctx.stream)?;
+    if !dims.use_parallel_scan {
+        scratch.d_k.zero(&ctx.stream)?;
+        scratch.d_q.zero(&ctx.stream)?;
+        scratch.d_d_local.zero(&ctx.stream)?;
+    }
 
     if !dims.use_parallel_scan {
         let dp_ptr = lw.d_param.raw_ptr(&ctx.stream);
@@ -429,13 +433,9 @@ pub fn gpu_backward_mamba3_layer(
                 .map_err(|e| format!("colsum d_b_bias par: {:?}", e))?;
         }
 
-        scratch
-            .d_q
-            .copy_from_raw(&scratch.d_c_pre_rope, &ctx.stream)?;
-        scratch
-            .d_k
-            .copy_from_raw(&scratch.d_b_pre_rope, &ctx.stream)?;
-
+        // (dead identity round trip removed: d_q/d_k used to shuttle the
+        // pre_rope grads around m3_ddt_dtrap, whose argument list touches
+        // neither pair — consumers read d_b/c_pre_rope directly.)
         {
             let mut builder = ctx.stream.launch_builder(&m3k.m3_ddt_dtrap);
             builder.arg(scratch.d_gamma.inner_mut());
@@ -450,13 +450,6 @@ pub fn gpu_backward_mamba3_layer(
             unsafe { builder.launch(grid_1d(bt * nh)) }
                 .map_err(|e| format!("m3_ddt_dtrap B6 S3: {:?}", e))?;
         }
-
-        scratch
-            .d_b_pre_rope
-            .copy_from_raw(&scratch.d_k, &ctx.stream)?;
-        scratch
-            .d_c_pre_rope
-            .copy_from_raw(&scratch.d_q, &ctx.stream)?;
     }
 
     // B5a: angle_dt_bwd — no-atomics partials rule (no atomicAdd).

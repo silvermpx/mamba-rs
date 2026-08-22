@@ -78,7 +78,12 @@ impl GpuMambaTrainMixedWeights {
             sync_f32(ctx, &mw.conv1d_weight, &cw.conv1d_weight)?;
             sync_f32(ctx, &mw.conv1d_bias, &cw.conv1d_bias)?;
             sync_f32(ctx, &mw.dt_proj_b, &cw.dt_proj_b)?;
-            sync_f32(ctx, &mw.a_log, &cw.a_log)?;
+            // a_log compute copy has NO training-path reader: forward
+            // and backward ride a_neg_all, recomputed from the MASTER
+            // a_log every step (trainer refresh), and mixed inference
+            // builds its own weights from CPU. INVARIANT: if a future
+            // serve-from-trainer weight share ever reads the compute
+            // a_log, this sync must come back.
             sync_f32(ctx, &mw.d_param, &cw.d_param)?;
             // bulk (cast to dtype)
             sync_one(ctx, &mw.in_proj_w, &cw.in_proj_w, self.dtype)?;

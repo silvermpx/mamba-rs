@@ -145,6 +145,20 @@ extern "C" __global__ void exp_negate(
     y[i] = -exp2f(x[i] * 1.4426950408889634f);
 }
 
+// Two-destination exp_negate: the trainer refreshes BOTH a_neg mirrors
+// (backward-side and forward-side) from the same master a_log every
+// step — one kernel stores the same register twice instead of two
+// launches recomputing the same exp.
+extern "C" __global__ void exp_negate2(
+    float* y0, float* y1, const float* x, int n
+) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) return;
+    float v = -exp2f(x[i] * 1.4426950408889634f);
+    y0[i] = v;
+    y1[i] = v;
+}
+
 extern "C" __global__ void gather_cols(
     float* dst, const float* src,
     int batch, int src_stride, int dst_dim, int offset
@@ -460,6 +474,23 @@ extern "C" __global__ void vec_add_inplace_##SUFFIX(                          \
 DEFINE_VEC_ADD_INPLACE(f32,  float,         from_f_f32)
 DEFINE_VEC_ADD_INPLACE(bf16, __nv_bfloat16, from_f_bf16)
 DEFINE_VEC_ADD_INPLACE(f16,  __half,        from_f_f16)
+
+// Typed cast-from-f32 replacing the zero() + vec_add_inplace staging
+// idiom (dst = FROM_F(0 + src)). The `0.0f +` is DELIBERATE and must
+// stay: it reproduces today's add-on-zeroed-destination bits exactly —
+// a bare FROM_F(src[i]) differs at src = -0.0 (+0.0 vs -0.0).
+#define DEFINE_VEC_CAST_ZPLUS(SUFFIX, TY, FROM_F)                             \
+extern "C" __global__ void vec_cast_zplus_##SUFFIX(                           \
+    TY* dst, const float* src, int n                                          \
+) {                                                                           \
+    int i = blockIdx.x * blockDim.x + threadIdx.x;                            \
+    if (i >= n) return;                                                       \
+    dst[i] = FROM_F(0.0f + src[i]);                                           \
+}
+
+DEFINE_VEC_CAST_ZPLUS(f32,  float,         from_f_f32)
+DEFINE_VEC_CAST_ZPLUS(bf16, __nv_bfloat16, from_f_bf16)
+DEFINE_VEC_CAST_ZPLUS(f16,  __half,        from_f_f16)
 
 // Typed concat_halves — mirrors f32 `concat_halves` for the mixed backward
 // wiring where both `first_half` and `second_half` are typed gradient

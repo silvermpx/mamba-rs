@@ -314,15 +314,24 @@ fn training_graph_bf16_one_step_matches_eager() {
     let after_graph_capture = snapshot_master(&g, &ctx);
 
     assert_eq!(after_eager.len(), after_graph_capture.len());
-    let mut max_err = 0.0f32;
-    for (a, b) in after_eager.iter().zip(&after_graph_capture) {
-        let e = (a - b).abs();
-        if e > max_err {
-            max_err = e;
+    // BIT equality, not a tolerance: the captured graph replays the
+    // SAME kernels on the SAME buffers — any bit drift means the
+    // capture recorded different work, and a tolerance would let a
+    // real numerics change hide under the blanket.
+    let mut diverged = 0usize;
+    let mut first: Option<(usize, f32, f32)> = None;
+    for (i, (a, b)) in after_eager.iter().zip(&after_graph_capture).enumerate() {
+        if a.to_bits() != b.to_bits() {
+            diverged += 1;
+            if first.is_none() {
+                first = Some((i, *a, *b));
+            }
         }
     }
-    eprintln!("one-step eager-vs-graph max_err = {max_err:.3e}");
-    assert!(max_err < 1e-5, "one-step parity broke: max_err={max_err}");
+    assert!(
+        diverged == 0,
+        "one-step parity broke: {diverged} weights differ in bits; first at {first:?}"
+    );
 }
 
 #[test]
@@ -406,20 +415,23 @@ fn training_graph_bf16_multi_replay_matches_eager() {
     let after_graph = snapshot_master(&g, &ctx);
 
     assert_eq!(after_eager.len(), after_graph.len());
-    let mut max_err = 0.0f32;
-    let mut sum_sq_err = 0.0f64;
-    let mut sum_sq = 0.0f64;
-    for (a, b) in after_eager.iter().zip(&after_graph) {
-        let e = (a - b).abs();
-        if e > max_err {
-            max_err = e;
+    // BIT equality across N replays — the multi-step twin of the
+    // one-step gate above (same rationale).
+    let mut diverged = 0usize;
+    let mut first: Option<(usize, f32, f32)> = None;
+    for (i, (a, b)) in after_eager.iter().zip(&after_graph).enumerate() {
+        if a.to_bits() != b.to_bits() {
+            diverged += 1;
+            if first.is_none() {
+                first = Some((i, *a, *b));
+            }
         }
-        sum_sq_err += ((a - b) as f64).powi(2);
-        sum_sq += (*a as f64).powi(2);
     }
-    let rel = (sum_sq_err / sum_sq.max(1e-30)).sqrt();
-    eprintln!("{n_steps}-step eager-vs-graph: max_err={max_err:.3e}, rel_l2={rel:.3e}");
-    assert!(max_err < 5e-5, "multi-step parity broke: max_err={max_err}");
+    eprintln!("{n_steps}-step eager-vs-graph: {diverged} bit-diverged weights");
+    assert!(
+        diverged == 0,
+        "multi-step parity broke: {diverged} weights differ in bits; first at {first:?}"
+    );
 }
 
 /// Reallocating `state.conv_states` between capture and replay must trip

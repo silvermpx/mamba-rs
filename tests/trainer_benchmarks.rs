@@ -41,28 +41,36 @@ fn det(n: usize, seed: u32, scale: f32) -> Vec<f32> {
 // LM workload — Mamba-1 at 130m-ish shape, all 3 dtypes
 // ═══════════════════════════════════════════════════════════════════════
 
-fn lm_cfg() -> mamba_rs::config::MambaConfig {
+fn lm_cfg(scan_mode: mamba_rs::config::ScanMode) -> mamba_rs::config::MambaConfig {
     mamba_rs::config::MambaConfig {
         d_model: 768,
         n_layers: 24,
         d_state: 16,
         d_conv: 4,
         expand: 2,
-        scan_mode: mamba_rs::config::ScanMode::Sequential,
+        scan_mode,
         rms_norm_eps: 1e-5,
     }
 }
 
 fn run_lm_for_dtype(dtype: WeightDtype) -> Result<(), String> {
+    run_lm(dtype, mamba_rs::config::ScanMode::Sequential, 64, "")
+}
+
+fn run_lm(
+    dtype: WeightDtype,
+    scan_mode: mamba_rs::config::ScanMode,
+    seq_len: usize,
+    suffix: &str,
+) -> Result<(), String> {
     use mamba_rs::mamba_ssm::gpu::trainer::{MambaTrainer, TrainSessionCfg};
     use mamba_rs::weights::MambaWeights;
 
-    let cfg = lm_cfg();
+    let cfg = lm_cfg(scan_mode);
     let input_dim = cfg.d_model;
     let batch = 2;
-    let seq_len = 64;
     let n = batch * seq_len * input_dim;
-    let label = format!("{dtype:?}");
+    let label = format!("{dtype:?}{suffix}");
 
     let mut cpu = MambaWeights::init(&cfg, input_dim, 0xC0FFEE);
     if !matches!(dtype, WeightDtype::F32) {
@@ -87,13 +95,24 @@ fn run_lm_for_dtype(dtype: WeightDtype) -> Result<(), String> {
         },
         dtype,
     )?;
+    // Honest-f32 row: mamba-rs f32 GEMMs run TF32 by handle default
+    // while torch's "f32" is IEEE — opt into an IEEE row explicitly.
+    if std::env::var("MAMBA_RS_BENCH_IEEE_F32").as_deref() == Ok("1") {
+        trainer.ctx().disable_tf32();
+        eprintln!("note: MAMBA_RS_BENCH_IEEE_F32=1 — f32 GEMMs run IEEE (TF32 off)");
+    }
+
+    // Inputs are pre-generated OUTSIDE every timed region: the previous
+    // version ran a serial 98k-iteration host RNG + two Vec collects
+    // INSIDE both timers, polluting the eager/graph ratio.
+    let ring: Vec<(Vec<f32>, Vec<f32>)> = (0..4)
+        .map(|s| (det(n, 0xC0 + s as u32, 0.01), det(n, 0xD0 + s as u32, 0.01)))
+        .collect();
 
     // Warmup
     for s in 0..WARMUP {
-        trainer.step(
-            &det(n, 0xA0 + s as u32, 0.01),
-            &det(n, 0xB0 + s as u32, 0.01),
-        )?;
+        let (a, b) = &ring[s % ring.len()];
+        trainer.step(a, b)?;
     }
     trainer
         .ctx()
@@ -104,10 +123,8 @@ fn run_lm_for_dtype(dtype: WeightDtype) -> Result<(), String> {
     // Eager timing
     let t0 = Instant::now();
     for s in 0..STEPS_EAGER {
-        trainer.step(
-            &det(n, 0xC0 + s as u32, 0.01),
-            &det(n, 0xD0 + s as u32, 0.01),
-        )?;
+        let (a, b) = &ring[s % ring.len()];
+        trainer.step(a, b)?;
     }
     trainer
         .ctx()
@@ -121,10 +138,8 @@ fn run_lm_for_dtype(dtype: WeightDtype) -> Result<(), String> {
     assert!(trainer.has_graph());
     let t1 = Instant::now();
     for s in 0..STEPS_GRAPH {
-        let m = trainer.step(
-            &det(n, 0xE0 + s as u32, 0.01),
-            &det(n, 0xF0 + s as u32, 0.01),
-        )?;
+        let (a, b) = &ring[s % ring.len()];
+        let m = trainer.step(a, b)?;
         assert!(m.graph_replayed);
     }
     trainer
@@ -157,6 +172,47 @@ fn bench_lm_train_bf16() {
 #[ignore]
 fn bench_lm_train_f16() {
     run_lm_for_dtype(WeightDtype::F16).unwrap();
+}
+
+/// The parallel scan has NEVER been measured at this shape (Auto
+/// resolves Sequential below T=256) — first-ever A/B arm.
+#[test]
+#[ignore]
+fn bench_lm_train_f32_parallel_scan() {
+    run_lm(
+        WeightDtype::F32,
+        mamba_rs::config::ScanMode::Parallel,
+        64,
+        " par",
+    )
+    .unwrap();
+}
+
+#[test]
+#[ignore]
+fn bench_lm_train_bf16_parallel_scan() {
+    run_lm(
+        WeightDtype::Bf16,
+        mamba_rs::config::ScanMode::Parallel,
+        64,
+        " par",
+    )
+    .unwrap();
+}
+
+/// One point OFF the batch-invariant `batch >= 128` dispatch boundary
+/// (B2 x T64 lands exactly ON it): run under MAMBA_RS_BATCH_INVARIANT=1
+/// to see the small-M bucket family.
+#[test]
+#[ignore]
+fn bench_lm_train_f32_t60() {
+    run_lm(
+        WeightDtype::F32,
+        mamba_rs::config::ScanMode::Sequential,
+        60,
+        " t60",
+    )
+    .unwrap();
 }
 
 // ═══════════════════════════════════════════════════════════════════════
