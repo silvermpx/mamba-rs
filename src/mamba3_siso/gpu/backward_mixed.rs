@@ -429,27 +429,18 @@ fn gpu_backward_mamba3_layer_mixed(
         // Two chunk-by-state operand tiles, V/dO tiles, two per-step
         // lanes, the da/qk lanes, and TWO head-state tiles (true
         // states + d_state staging for the warp-parallel dADT).
-        // P1.7(2): pack two heads per block when nh is even — a 16-lane
-        // head fills a full warp. Each head gets a private smem slice,
-        // so per-head arithmetic (and bits) are unchanged.
         let legacy_floats = 2 * cs_u * ds + 2 * cs_u * hd + 4 * cs_u + 2 * hd * ds;
         let mats_floats = legacy_floats + cs_u * (cs_u - 1) * 3 / 2 + 2 * cs_u;
         // Consumer GPUs cap the per-block dynamic-smem opt-in near 99 KB.
-        // Prefer packed+matrices, then unpacked+matrices, then packed
-        // legacy, then unpacked legacy; the kernel's use_pair_mats=0 path
-        // computes the same dots inline (bit-identical, just slower).
+        // One head per block (M3-KILL-1): pair matrices when the tile
+        // fits, legacy inline dots otherwise (bit-identical, slower).
         let cap_floats = 99 * 1024 / 4;
-        let (head_pack, per_head_floats, use_pair_mats): (u32, usize, i32) =
-            if nh % 2 == 0 && 2 * mats_floats <= cap_floats {
-                (2, mats_floats, 1)
-            } else if mats_floats <= cap_floats {
-                (1, mats_floats, 1)
-            } else if nh % 2 == 0 && 2 * legacy_floats <= cap_floats {
-                (2, legacy_floats, 0)
-            } else {
-                (1, legacy_floats, 0)
-            };
-        let smem = per_head_floats * head_pack as usize * 4;
+        let (per_head_floats, use_pair_mats): (usize, i32) = if mats_floats <= cap_floats {
+            (mats_floats, 1)
+        } else {
+            (legacy_floats, 0)
+        };
+        let smem = per_head_floats * 4;
         if smem > 99 * 1024 {
             return Err(format!(
                 "m3_dqkv shared-memory tile {} B exceeds the 99 KB opt-in \
@@ -457,9 +448,14 @@ fn gpu_backward_mamba3_layer_mixed(
                 smem
             ));
         }
+        // M3-KILL-1 t-split: blockDim.y lanes stride the per-timestep
+        // loops. Fixed launch geometry (never data-shaped); any T_SPLIT
+        // yields identical bits since each output keeps one owning lane
+        // with the same inner order.
+        let t_split = 16.min(1024 / hd.max(1)).max(1) as u32;
         let cfg = LaunchConfig {
-            grid_dim: ((nh as u32).div_ceil(head_pack), dims.batch as u32, 1),
-            block_dim: (hd as u32, head_pack, 1),
+            grid_dim: (nh as u32, dims.batch as u32, 1),
+            block_dim: (hd as u32, t_split, 1),
             shared_mem_bytes: smem as u32,
         };
         let mut builder = ctx.stream.launch_builder(m3k.m3_dqkv_typed.get(dtype));

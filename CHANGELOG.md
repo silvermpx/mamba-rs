@@ -66,6 +66,24 @@
   pair (3x SFU work per angle). Bit-identical (same functions, same
   inputs); campaign-neutral at d_state 16 (4 angles), the win scales
   with d_state.
+- M3-KILL-1, `m3_dqkv` t-split (both dtype copies): the kernel ran one
+  32-thread warp per block behind an 88 KB two-head smem tile — one
+  block per SM, ~2% occupancy, and 73% of the whole M3 training step
+  by isolated measurement. Head packing is retired; blockDim becomes
+  (hd, T_SPLIT=16) with one head per block (44 KB tile, up to 2
+  blocks/SM), and every per-timestep loop strides its timesteps over
+  the T_SPLIT lanes. Each output element keeps exactly one owning lane
+  running the same inner-loop order, so outputs are bit-identical —
+  proven by an FNV bit-hash of all six outputs at the campaign shape
+  (new `m3_dqkv_output_hash` arm) matching the pre-change hashes
+  exactly. The one order-sensitive scalar (dD) is resummed from the
+  stored dQK lane in the historical t-ascending order on a single lane.
+  The warp-reduce mask names only the hd-lane segment (t-split slices
+  of one warp can run different trip counts — a whole-warp mask would
+  be UB), and the typed copies drop their stale `__launch_bounds__(32)`
+  pin. Isolated: 11.40 -> 4.02 ms/launch (f32), 10.97 -> 3.89 (bf16).
+  New `m3_kernels_isolated_bench` arm keeps the M3 kernel ledger
+  measurable without a profiler.
 - The `sgemm_bi_forward` scalar dispatcher gained a strided-X entry
   (`sgemm_bi_forward_sub` with an explicit `lda`); the public wrapper
   delegates with `lda = K`, behavior unchanged.
@@ -132,8 +150,11 @@
   reduce_d_BC 9.6 (x24-layer ms). Note: earlier "BI+TC" campaign
   rows in this file's history measured plain BI — the tier flag is
   MAMBA_RS_BI_TENSOR_CORES.
-- M3 campaign shape: 636 -> 373.5 ms/step (dqkv pair matrices +
-  two-head packing).
+- M3 campaign shape (bf16 graph): 636 -> 381 (dqkv pair matrices +
+  two-head packing) -> 362.1 (decay/exp staging) -> 226.0 ms/step
+  (t-split block widening). Isolated m3_dqkv: 11.0 -> 3.9 ms/launch;
+  remaining M3 ledger (x24-layer ms): dqkv 93, dqktheta 14.7,
+  colsum pair 6.4.
 
 ## 0.6.2 (2026-08-22)
 

@@ -578,27 +578,37 @@ extern "C" __global__ void m3_dqkv(
     int B, int T, int nh_total, int hd, int ds, int CS,
     int use_pair_mats  // 1 = smem holds the triangle pair matrices
 ) {
-    // P1.7(2) head-pack: blockDim = (hd, HEADS_PER_BLOCK). Two heads share
-    // one block so a 16-lane head fills a full warp instead of wasting
-    // half of it; each head's lanes and shared-memory slice are fully
-    // private, so per-head arithmetic (and bits) are unchanged.
-    int h = blockIdx.x * blockDim.y + threadIdx.y;
+    // M3-KILL-1 t-split: blockDim = (hd, T_SPLIT). One head per block;
+    // threadIdx.y strides the per-timestep loops so the block carries
+    // hd*T_SPLIT live lanes instead of one warp (the 32-thread blocks
+    // ran ~2% occupancy and owned 73% of the M3 step). Every output
+    // element keeps exactly one owning lane with the same inner-loop
+    // order as before, so outputs are bit-identical; only the lane->
+    // output assignment changed.
+    int h = blockIdx.x;
     int b = blockIdx.y;
     int p = threadIdx.x;
-    // The launcher packs two heads per block ONLY when nh is even, so
-    // every lane of a packed block owns a live head and no thread can
-    // return before a barrier (blockDim.x == hd always).
+    int ty = threadIdx.y;
+    int TS = blockDim.y;
+    int lane = p + hd * ty;
+    int nlanes = hd * TS;
     if (h >= nh_total || b >= B || p >= hd) return;
     if (ds > MAMBA_RS_STATE_CAP || CS > 64) return;
 
-    // Warp-reduce mask: with head-packing the warp holds
-    // hd * blockDim.y lanes; __shfl_down_sync width=hd keeps each head's
-    // 16-lane segment independent, the mask just has to cover every
-    // participating lane (hardcoded 0xFFFFFFFF on partial warps = UB per
-    // CUDA Programming Guide B.15.1).
-    unsigned lanes_in_warp = (unsigned)(hd * blockDim.y);
-    unsigned warp_mask =
-        (lanes_in_warp >= 32) ? 0xFFFFFFFFu : ((1u << lanes_in_warp) - 1u);
+    // Warp-reduce mask: with t-split lanes the ty slices of one warp can
+    // run DIFFERENT trip counts (chunk_len < TS or not a multiple), so a
+    // whole-warp mask would name lanes that are not executing the
+    // shuffle (UB per CUDA Programming Guide B.15.1). The mask names
+    // only this hd-lane segment; a segment shares one ty, hence one
+    // trip count, hence convergence.
+    unsigned warp_mask;
+    if (hd >= 32) {
+        warp_mask = 0xFFFFFFFFu;
+    } else {
+        unsigned lin = (unsigned)(threadIdx.y * blockDim.x + threadIdx.x);
+        unsigned seg_base = (lin & 31u) / (unsigned)hd * (unsigned)hd;
+        warp_mask = (((1u << hd) - 1u) << seg_base);
+    }
 
     int d_inner = nh_total * hd;
     int n_chunks = (T + CS - 1) / CS;
@@ -610,17 +620,10 @@ extern "C" __global__ void m3_dqkv(
     float d_state[MAMBA_RS_STATE_CAP]; // sized by the state capacity
     for (int n = 0; n < ds; n++) d_state[n] = 0.0f;
 
-    // Shared memory layout (dynamically sized), one private slice per
-    // packed head: slice = threadIdx.y * per_head_floats.
+    // Shared memory layout (dynamically sized): ONE head per block, so
+    // the whole dynamic allocation is this head's slice.
     extern __shared__ float smem_all[];
-    // Slice stride must equal the launcher's tier maths exactly: the
-    // pair-mats tier adds kq/vdo/decay triangles + the two exp lanes,
-    // the legacy tier is the bare tile (launcher passes legacy_floats).
-    int per_head_floats =
-        2 * CS * ds + 2 * CS * hd + 4 * CS + 2 * hd * ds;
-    if (use_pair_mats)
-        per_head_floats += (3 * CS * (CS - 1)) / 2 + 2 * CS;
-    float* smem = smem_all + threadIdx.y * per_head_floats;
+    float* smem = smem_all;
     // q_sm[CS][ds], k_sm[CS][ds], v_sm[CS][hd], do_sm[CS][hd]
     // da_cs_sm[CS], qk_dot_sm[CS], ssm_sm[hd][ds] (loaded cooperatively)
     float* q_sm    = smem;
@@ -660,46 +663,50 @@ extern "C" __global__ void m3_dqkv(
         int chunk_len = min(CS, T - chunk_start);
 
         // === Cooperative load tiles into shared memory ===
-        // V and dO: thread p loads element p of each timestep
-        for (int t = 0; t < chunk_len; t++) {
-            int gt = chunk_start + t;
-            v_sm[t * hd + p] = V_in[(b * T + gt) * d_inner + h * hd + p];
-            do_sm[t * hd + p] = dO[(b * T + gt) * d_inner + h * hd + p];
-        }
-        // Zero padding
-        for (int t = chunk_len; t < CS; t++) {
-            v_sm[t * hd + p] = 0.0f;
-            do_sm[t * hd + p] = 0.0f;
+        // V and dO: thread p loads element p, timesteps split over ty.
+        for (int t = ty; t < CS; t += TS) {
+            if (t < chunk_len) {
+                int gt = chunk_start + t;
+                v_sm[t * hd + p] = V_in[(b * T + gt) * d_inner + h * hd + p];
+                do_sm[t * hd + p] = dO[(b * T + gt) * d_inner + h * hd + p];
+            } else {
+                v_sm[t * hd + p] = 0.0f;
+                do_sm[t * hd + p] = 0.0f;
+            }
         }
         // Q and K: each thread loads ALL ds entries for indices n stride hd.
         // OLD bug: `if (p < ds)` only worked when ds <= hd; for ds > hd
         // (e.g. ds=16, hd=8) entries n=hd..ds-1 were left as garbage in
         // shared memory, corrupting every dot/dQK computation downstream.
         for (int n = p; n < ds; n += hd) {
-            for (int t = 0; t < chunk_len; t++) {
-                int gt = chunk_start + t;
-                q_sm[t * ds + n] = Q_rot[((b * T + gt) * nh_total + h) * ds + n];
-                k_sm[t * ds + n] = K_scaled[((b * T + gt) * nh_total + h) * ds + n];
-            }
-            for (int t = chunk_len; t < CS; t++) {
-                q_sm[t * ds + n] = 0.0f;
-                k_sm[t * ds + n] = 0.0f;
+            for (int t = ty; t < CS; t += TS) {
+                if (t < chunk_len) {
+                    int gt = chunk_start + t;
+                    q_sm[t * ds + n] = Q_rot[((b * T + gt) * nh_total + h) * ds + n];
+                    k_sm[t * ds + n] = K_scaled[((b * T + gt) * nh_total + h) * ds + n];
+                } else {
+                    q_sm[t * ds + n] = 0.0f;
+                    k_sm[t * ds + n] = 0.0f;
+                }
             }
         }
-        // da_cs and qk_dot: one thread loads
+        // da_cs and qk_dot: p==0 lanes load, timesteps split over ty.
         if (p == 0) {
-            for (int t = 0; t < chunk_len; t++) {
-                da_cs_sm[t] = DA_CS[((b * n_chunks + chunk_idx) * nh_total + h) * CS + t];
-                qk_sm[t] = QK_dot_in[(b * T + chunk_start + t) * nh_total + h];
-            }
-            for (int t = chunk_len; t < CS; t++) {
-                da_cs_sm[t] = 0.0f;
-                qk_sm[t] = 0.0f;
+            for (int t = ty; t < CS; t += TS) {
+                if (t < chunk_len) {
+                    da_cs_sm[t] = DA_CS[((b * n_chunks + chunk_idx) * nh_total + h) * CS + t];
+                    qk_sm[t] = QK_dot_in[(b * T + chunk_start + t) * nh_total + h];
+                } else {
+                    da_cs_sm[t] = 0.0f;
+                    qk_sm[t] = 0.0f;
+                }
             }
         }
-        // SSM_States: each thread loads its row (p) of [hd][ds]
-        for (int n = 0; n < ds; n++) {
-            ssm_sm[p * ds + n] = SSM_States[((b * n_chunks + chunk_idx) * nh_total + h) * hd * ds + p * ds + n];
+        // SSM_States: ty==0 threads load their row (p) of [hd][ds]
+        if (ty == 0) {
+            for (int n = 0; n < ds; n++) {
+                ssm_sm[p * ds + n] = SSM_States[((b * n_chunks + chunk_idx) * nh_total + h) * hd * ds + p * ds + n];
+            }
         }
         __syncthreads();
 
@@ -710,7 +717,7 @@ extern "C" __global__ void m3_dqkv(
             float cs_sum_pre =
                 DA_CS_SUM[(b * n_chunks + chunk_idx) * nh_total + h];
             for (int aa = 0; aa < CS - 1; aa++) {
-                for (int bb = aa + 1 + p; bb < CS; bb += hd) {
+                for (int bb = aa + 1 + lane; bb < CS; bb += nlanes) {
                     int idx = M3_TRI(aa, bb, CS);
                     float kq_acc = 0.0f;
                     for (int n = 0; n < ds; n++)
@@ -725,7 +732,7 @@ extern "C" __global__ void m3_dqkv(
                         exp2f((da_cs_sm[bb] - da_cs_sm[aa]) * LOG2E);
                 }
             }
-            for (int tt = p; tt < CS; tt += hd) {
+            for (int tt = lane; tt < CS; tt += nlanes) {
                 exp_fwd_sm[tt] = exp2f(da_cs_sm[tt] * LOG2E);
                 exp_rev_sm[tt] = exp2f((cs_sum_pre - da_cs_sm[tt]) * LOG2E);
             }
@@ -735,8 +742,8 @@ extern "C" __global__ void m3_dqkv(
         float da_cs_chunk_sum = DA_CS_SUM[(b * n_chunks + chunk_idx) * nh_total + h];
 
         // === Compute per-timestep outputs ===
-        // dV, dQK_dot, dD for each timestep
-        for (int t = 0; t < chunk_len; t++) {
+        // dV, dQK_dot for each timestep; timesteps split over ty.
+        for (int t = ty; t < chunk_len; t += TS) {
             int gt = chunk_start + t;
             float dA_t = da_cs_sm[t];
             float exp_rev_t = use_pair_mats
@@ -779,10 +786,17 @@ extern "C" __global__ void m3_dqkv(
                 dqk_val += __shfl_down_sync(warp_mask, dqk_val, off, hd);
             if (p == 0) {
                 dQK_dot_out[(b * T + gt) * nh_total + h] = dqk_val;
-                dD_acc += dqk_val;
             }
         }
         __syncthreads();
+        // dD: resum the freshly stored dQK lane in ascending t on ONE
+        // lane — the historical accumulation order (t ascending within
+        // the chunk, chunks in reverse). Summing per-ty partials would
+        // interleave that order and move bits.
+        if (p == 0 && ty == 0) {
+            for (int t = 0; t < chunk_len; t++)
+                dD_acc += dQK_dot_out[(b * T + chunk_start + t) * nh_total + h];
+        }
 
         // === dK_mid and dQ_mid ===
         // These need sum over hd (reduction across threads).
@@ -791,7 +805,7 @@ extern "C" __global__ void m3_dqkv(
         // n = p, p+hd, p+2*hd, ... (mirrors the cooperative Q/K load above;
         // the old `if (p < ds) { n = p; }` silently zeroed n >= hd).
         for (int n = p; n < ds; n += hd) {
-            for (int t = 0; t < chunk_len; t++) {
+            for (int t = ty; t < chunk_len; t += TS) {
                 int gt = chunk_start + t;
                 float dA_t = da_cs_sm[t];
 
@@ -864,15 +878,17 @@ extern "C" __global__ void m3_dqkv(
         __syncthreads();
 
         // === Store d_state to shared for inter-chunk dK_mid contribution ===
-        // Each thread writes its d_state[ds] to ssm_sm[p*ds + n]
-        for (int n = 0; n < ds; n++)
-            ssm_sm[p * ds + n] = d_state[n];
+        // Every ty lane replicates the same d_state bits; ty==0 writes.
+        if (ty == 0) {
+            for (int n = 0; n < ds; n++)
+                ssm_sm[p * ds + n] = d_state[n];
+        }
         __syncthreads();
 
         // Now fix dK_mid inter-chunk: sum_p(V[t,p] * d_state[p][n]) * exp_rev
         // Strided over state dims so ds > hd is fully covered (see dK/dQ_mid above).
         for (int n = p; n < ds; n += hd) {
-            for (int t = 0; t < chunk_len; t++) {
+            for (int t = ty; t < chunk_len; t += TS) {
                 float dk_inter = 0.0f;
                 float exp_rev_t = use_pair_mats
                     ? exp_rev_sm[t]
@@ -896,12 +912,12 @@ extern "C" __global__ void m3_dqkv(
         // tile is staged in shared memory once (ssm_sm already holds
         // d_state at this point), replacing the per-element global
         // re-reads of the old code.
-        for (int n = p; n < hd * ds; n += hd) {
+        for (int n = lane; n < hd * ds; n += nlanes) {
             ssm2_sm[n] =
                 SSM_States[((b * n_chunks + chunk_idx) * nh_total + h) * hd * ds + n];
         }
         __syncthreads();
-        for (int t = p; t < chunk_len; t += hd) {
+        for (int t = lane; t < chunk_len; t += nlanes) {
             float acc = 0.0f;
             // Below-diagonal: pairs (i, t) with i < t contribute +dAinv.
             for (int i = 0; i < t; i++) {
@@ -974,7 +990,7 @@ extern "C" __global__ void m3_dqkv(
                                  : exp2f((da_cs_chunk_sum - da_cs_sm[t]) * LOG2E));
         }
         __syncthreads();
-        if (p == 0) {
+        if (p == 0 && ty == 0) {
             // Scalar term + the serial reverse-cumsum combine (cheap,
             // and its order is the numeric contract).
             float dM_scalar = 0.0f;
@@ -1017,7 +1033,7 @@ extern "C" __global__ void m3_dqkv(
     }
 
     // Store dD per-(b,h) — caller reduces across B via reduce_sum_axis0.
-    if (p == 0) dD_partials[b * nh_total + h] = dD_acc;
+    if (p == 0 && ty == 0) dD_partials[b * nh_total + h] = dD_acc;
 }
 
 // ============================================================================
@@ -1529,11 +1545,11 @@ DEFINE_M3_CHUNK_SCAN_FWD(f16,  __half,        from_f_f16)
 //   - m3_final_grads (combines f32 dADT + dDT + dDT_angle into final grads)
 // ============================================================================
 
-// __launch_bounds__: hd ≤ 32 per config (block_dim=hd), pin to 4 blocks/SM
-// to keep the 64-element register arrays from spilling to local memory under
-// nvcc's heuristics.
+// No __launch_bounds__ pin: M3-KILL-1 launches (hd, T_SPLIT) blocks up to
+// 512 threads; the 44 KB pair-mats tile bounds residency at <= 2 blocks/SM
+// regardless, and the f32 twin has always compiled unpinned.
 #define DEFINE_M3_DQKV(SUFFIX, T_ACT, FROM_F)                                 \
-extern "C" __global__ __launch_bounds__(32, 4) void                           \
+extern "C" __global__ void                                                    \
 m3_dqkv_##SUFFIX(                                                             \
     float* __restrict__ dQ_mid,                                               \
     float* __restrict__ dK_mid,                                               \
@@ -1555,26 +1571,33 @@ m3_dqkv_##SUFFIX(                                                             \
 ) {                                                                           \
     /* P1.7(2) head-pack: two heads per block when nh is even (launcher   \
      * picks blockDim.y); per-head lanes + smem slice fully private.     */  \
-    int h = blockIdx.x * blockDim.y + threadIdx.y;                            \
+    int h = blockIdx.x;                                                       \
     int b = blockIdx.y;                                                       \
     int p = threadIdx.x;                                                      \
+    int ty = threadIdx.y;                                                     \
+    int TS = blockDim.y;                                                      \
+    int lane = p + hd * ty;                                                   \
+    int nlanes = hd * TS;                                                     \
     if (h >= nh_total || b >= B || p >= hd) return;                           \
     if (ds > MAMBA_RS_STATE_CAP || CS > 64) return;                           \
-    unsigned lanes_in_warp = (unsigned)(hd * blockDim.y);                     \
-    unsigned warp_mask =                                                      \
-        (lanes_in_warp >= 32) ? 0xFFFFFFFFu : ((1u << lanes_in_warp) - 1u);   \
+    /* Segment mask: ty slices of one warp can run different trip */          \
+    /* counts under t-split; name only this hd-lane segment.      */          \
+    unsigned warp_mask;                                                       \
+    if (hd >= 32) {                                                           \
+        warp_mask = 0xFFFFFFFFu;                                              \
+    } else {                                                                  \
+        unsigned lin = (unsigned)(threadIdx.y * blockDim.x + threadIdx.x);    \
+        unsigned seg_base = (lin & 31u) / (unsigned)hd * (unsigned)hd;        \
+        warp_mask = (((1u << hd) - 1u) << seg_base);                          \
+    }                                                                         \
     int d_inner = nh_total * hd;                                              \
     int n_chunks = (T + CS - 1) / CS;                                         \
     float D_val = D_param[h];                                                 \
     float dD_acc = 0.0f;                                                      \
     float d_state[MAMBA_RS_STATE_CAP];                                                        \
     for (int n = 0; n < ds; n++) d_state[n] = 0.0f;                           \
-    extern __shared__ float smem_all[];                                      \
-    int per_head_floats =                                                     \
-        2 * CS * ds + 2 * CS * hd + 4 * CS + 2 * hd * ds;                     \
-    if (use_pair_mats)                                                        \
-        per_head_floats += (3 * CS * (CS - 1)) / 2 + 2 * CS;                  \
-    float* smem = smem_all + threadIdx.y * per_head_floats;                   \
+    extern __shared__ float smem_all[];                                       \
+    float* smem = smem_all;                                                   \
     float* q_sm    = smem;                                                    \
     float* k_sm    = q_sm + CS * ds;                                          \
     float* v_sm    = k_sm + CS * ds;                                          \
@@ -1597,54 +1620,61 @@ m3_dqkv_##SUFFIX(                                                             \
         int chunk_idx = n_chunks - 1 - chunk_loop;                            \
         int chunk_start = chunk_idx * CS;                                     \
         int chunk_len = min(CS, T - chunk_start);                             \
-        for (int t = 0; t < chunk_len; t++) {                                 \
-            int gt = chunk_start + t;                                         \
-            v_sm[t * hd + p] = to_f(V_in[(b * T + gt) * d_inner + h * hd + p]);\
-            do_sm[t * hd + p] = to_f(dO[(b * T + gt) * d_inner + h * hd + p]);\
-        }                                                                     \
-        for (int t = chunk_len; t < CS; t++) {                                \
-            v_sm[t * hd + p] = 0.0f;                                          \
-            do_sm[t * hd + p] = 0.0f;                                         \
+        for (int t = ty; t < CS; t += TS) {                                   \
+            if (t < chunk_len) {                                              \
+                int gt = chunk_start + t;                                     \
+                v_sm[t * hd + p] =                                            \
+                    to_f(V_in[(b * T + gt) * d_inner + h * hd + p]);          \
+                do_sm[t * hd + p] =                                           \
+                    to_f(dO[(b * T + gt) * d_inner + h * hd + p]);            \
+            } else {                                                          \
+                v_sm[t * hd + p] = 0.0f;                                      \
+                do_sm[t * hd + p] = 0.0f;                                     \
+            }                                                                 \
         }                                                                     \
         /* Each thread loads ALL ds entries with stride hd. Old `p < ds`     \
          * filter only worked when ds <= hd; for ds > hd (e.g. ds=16, hd=8)  \
          * entries n=hd..ds-1 stayed garbage in shared memory.               */\
         for (int n = p; n < ds; n += hd) {                                    \
-            for (int t = 0; t < chunk_len; t++) {                             \
-                int gt = chunk_start + t;                                     \
-                q_sm[t * ds + n] = to_f(                                      \
-                    Q_rot[((b * T + gt) * nh_total + h) * ds + n]);           \
-                k_sm[t * ds + n] = to_f(                                      \
-                    K_scaled[((b * T + gt) * nh_total + h) * ds + n]);        \
-            }                                                                 \
-            for (int t = chunk_len; t < CS; t++) {                            \
-                q_sm[t * ds + n] = 0.0f;                                      \
-                k_sm[t * ds + n] = 0.0f;                                      \
+            for (int t = ty; t < CS; t += TS) {                               \
+                if (t < chunk_len) {                                          \
+                    int gt = chunk_start + t;                                 \
+                    q_sm[t * ds + n] = to_f(                                  \
+                        Q_rot[((b * T + gt) * nh_total + h) * ds + n]);       \
+                    k_sm[t * ds + n] = to_f(                                  \
+                        K_scaled[((b * T + gt) * nh_total + h) * ds + n]);    \
+                } else {                                                      \
+                    q_sm[t * ds + n] = 0.0f;                                  \
+                    k_sm[t * ds + n] = 0.0f;                                  \
+                }                                                             \
             }                                                                 \
         }                                                                     \
         if (p == 0) {                                                         \
-            for (int t = 0; t < chunk_len; t++) {                             \
-                da_cs_sm[t] = DA_CS[                                          \
-                    ((b * n_chunks + chunk_idx) * nh_total + h) * CS + t];    \
-                qk_sm[t] = QK_dot_in[                                         \
-                    (b * T + chunk_start + t) * nh_total + h];                \
-            }                                                                 \
-            for (int t = chunk_len; t < CS; t++) {                            \
-                da_cs_sm[t] = 0.0f;                                           \
-                qk_sm[t] = 0.0f;                                              \
+            for (int t = ty; t < CS; t += TS) {                               \
+                if (t < chunk_len) {                                          \
+                    da_cs_sm[t] = DA_CS[                                      \
+                        ((b * n_chunks + chunk_idx) * nh_total + h) * CS + t]; \
+                    qk_sm[t] = QK_dot_in[                                     \
+                        (b * T + chunk_start + t) * nh_total + h];            \
+                } else {                                                      \
+                    da_cs_sm[t] = 0.0f;                                       \
+                    qk_sm[t] = 0.0f;                                          \
+                }                                                             \
             }                                                                 \
         }                                                                     \
-        for (int n = 0; n < ds; n++) {                                        \
-            ssm_sm[p * ds + n] = SSM_States[                                  \
-                ((b * n_chunks + chunk_idx) * nh_total + h) * hd * ds         \
-                + p * ds + n];                                                \
+        if (ty == 0) {                                                        \
+            for (int n = 0; n < ds; n++) {                                    \
+                ssm_sm[p * ds + n] = SSM_States[                              \
+                    ((b * n_chunks + chunk_idx) * nh_total + h) * hd * ds     \
+                    + p * ds + n];                                            \
+            }                                                                 \
         }                                                                     \
         __syncthreads();                                                      \
         if (use_pair_mats) {                                                  \
         float cs_sum_pre = DA_CS_SUM[                                         \
             (b * n_chunks + chunk_idx) * nh_total + h];                       \
         for (int aa = 0; aa < CS - 1; aa++) {                                 \
-            for (int bb = aa + 1 + p; bb < CS; bb += hd) {                    \
+            for (int bb = aa + 1 + lane; bb < CS; bb += nlanes) {             \
                 int idx = M3_TRI(aa, bb, CS);                                 \
                 float kq_acc = 0.0f;                                          \
                 for (int n = 0; n < ds; n++)                                  \
@@ -1658,7 +1688,7 @@ m3_dqkv_##SUFFIX(                                                             \
                     exp2f((da_cs_sm[bb] - da_cs_sm[aa]) * LOG2E);             \
             }                                                                 \
         }                                                                     \
-        for (int tt = p; tt < CS; tt += hd) {                                 \
+        for (int tt = lane; tt < CS; tt += nlanes) {                          \
             exp_fwd_sm[tt] = exp2f(da_cs_sm[tt] * LOG2E);                     \
             exp_rev_sm[tt] =                                                  \
                 exp2f((cs_sum_pre - da_cs_sm[tt]) * LOG2E);                   \
@@ -1667,7 +1697,7 @@ m3_dqkv_##SUFFIX(                                                             \
         }                                                                     \
         float da_cs_chunk_sum = DA_CS_SUM[                                    \
             (b * n_chunks + chunk_idx) * nh_total + h];                       \
-        for (int t = 0; t < chunk_len; t++) {                                 \
+        for (int t = ty; t < chunk_len; t += TS) {                            \
             int gt = chunk_start + t;                                         \
             float dA_t = da_cs_sm[t];                                         \
             float exp_rev_t = use_pair_mats                                   \
@@ -1695,14 +1725,20 @@ m3_dqkv_##SUFFIX(                                                             \
             for (int off = hd / 2; off > 0; off >>= 1)                        \
                 dqk_val += __shfl_down_sync(warp_mask, dqk_val, off, hd);    \
             if (p == 0) {                                                     \
-                dQK_dot_out[(b * T + gt) * nh_total + h] = dqk_val;            \
-                dD_acc += dqk_val;                                            \
+                dQK_dot_out[(b * T + gt) * nh_total + h] = dqk_val;           \
             }                                                                 \
         }                                                                     \
         __syncthreads();                                                      \
+        /* dD: ordered resum of the stored dQK lane on ONE lane (the */       \
+        /* historical t-ascending accumulation order).              */        \
+        if (p == 0 && ty == 0) {                                              \
+            for (int t = 0; t < chunk_len; t++)                               \
+                dD_acc +=                                                     \
+                    dQK_dot_out[(b * T + chunk_start + t) * nh_total + h];    \
+        }                                                                     \
         /* strided over state dims: ds > hd fully covered (see f32 kernel) */ \
         for (int n = p; n < ds; n += hd) {                                    \
-            for (int t = 0; t < chunk_len; t++) {                             \
+            for (int t = ty; t < chunk_len; t += TS) {                        \
                 int gt = chunk_start + t;                                     \
                 float dA_t = da_cs_sm[t];                                     \
                 float dk_intra = 0.0f;                                        \
@@ -1738,11 +1774,13 @@ m3_dqkv_##SUFFIX(                                                             \
             }                                                                 \
         }                                                                     \
         __syncthreads();                                                      \
-        for (int n = 0; n < ds; n++)                                          \
-            ssm_sm[p * ds + n] = d_state[n];                                  \
+        if (ty == 0) {                                                        \
+            for (int n = 0; n < ds; n++)                                      \
+                ssm_sm[p * ds + n] = d_state[n];                              \
+        }                                                                     \
         __syncthreads();                                                      \
         for (int n = p; n < ds; n += hd) {                                    \
-            for (int t = 0; t < chunk_len; t++) {                             \
+            for (int t = ty; t < chunk_len; t += TS) {                        \
                 float dk_inter = 0.0f;                                        \
                 float exp_rev_t = use_pair_mats                               \
                     ? exp_rev_sm[t]                                           \
@@ -1755,12 +1793,12 @@ m3_dqkv_##SUFFIX(                                                             \
             }                                                                 \
         }                                                                     \
         __syncthreads();                                                      \
-        for (int n = p; n < hd * ds; n += hd) {                              \
+        for (int n = lane; n < hd * ds; n += nlanes) {                        \
             ssm2_sm[n] = SSM_States[                                          \
                 ((b * n_chunks + chunk_idx) * nh_total + h) * hd * ds + n];   \
         }                                                                     \
         __syncthreads();                                                      \
-        for (int t = p; t < chunk_len; t += hd) {                             \
+        for (int t = lane; t < chunk_len; t += nlanes) {                      \
             float acc = 0.0f;                                                 \
             for (int i = 0; i < t; i++) {                                     \
                 float vdo;                                                    \
@@ -1813,7 +1851,7 @@ m3_dqkv_##SUFFIX(                                                             \
                     : exp2f((da_cs_chunk_sum - da_cs_sm[t]) * LOG2E));        \
         }                                                                     \
         __syncthreads();                                                      \
-        if (p == 0) {                                                         \
+        if (p == 0 && ty == 0) {                                              \
             float dM_scalar = 0.0f;                                           \
             for (int pp = 0; pp < hd; pp++) {                                 \
                 for (int n = 0; n < ds; n++)                                  \
@@ -1847,7 +1885,7 @@ m3_dqkv_##SUFFIX(                                                             \
         __syncthreads();                                                      \
     }                                                                         \
     /* per-(b,h) store — caller reduces across B */              \
-    if (p == 0) dD_partials[b * nh_total + h] = dD_acc;                       \
+    if (p == 0 && ty == 0) dD_partials[b * nh_total + h] = dD_acc;            \
     (void)FROM_F;                                                             \
 }
 

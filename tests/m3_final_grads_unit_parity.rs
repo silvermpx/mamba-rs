@@ -178,9 +178,10 @@ fn check_dqkv(dtype: WeightDtype) {
         CS * DS * 2 + CS * HD * 2 + CS * 4 + HD * DS * 2 + CS * (CS - 1) * 3 / 2 + CS * 2;
     let smem_bytes = (smem_floats * 4) as u32;
     let use_mats_i: i32 = 1;
+    // M3-KILL-1 contract: one head per block, blockDim.y = t-split lanes.
     let cfg = LaunchConfig {
         grid_dim: (NH as u32, B as u32, 1),
-        block_dim: (HD as u32, 1, 1),
+        block_dim: (HD as u32, 16, 1),
         shared_mem_bytes: smem_bytes,
     };
 
@@ -521,4 +522,361 @@ fn m3_dqktheta_bf16() {
 #[test]
 fn m3_dqktheta_f16() {
     check_dqktheta(WeightDtype::F16);
+}
+
+// ─── isolated campaign-shape bench ─────────────────────────────────────
+//
+// Times m3_dqkv (production tier ladder), m3_dqktheta and one
+// colsum_accumulate standalone at the campaign shape (B=8 T=1300
+// d_model 384 -> nh=48 hd=16 ds=16 CS=64) so the M3 kernel ledger stays
+// measurable without a profiler on the vast box.
+//
+// Run: cargo test --release --features cuda --test m3_final_grads_unit_parity \
+//        m3_kernels_isolated_bench -- --ignored --nocapture
+
+#[test]
+#[ignore]
+fn m3_kernels_isolated_bench() {
+    use std::time::Instant;
+
+    const CB: usize = 8;
+    const CT: usize = 1300;
+    const CNH: usize = 48;
+    const CHD: usize = 16;
+    const CDS: usize = 16;
+    const CCS: usize = 64;
+    const CNA: usize = 4;
+    let n_chunks = CT.div_ceil(CCS);
+    let d_inner = CNH * CHD;
+    let layers = 24f64;
+
+    let dev = GpuDevice::new(0).unwrap();
+    let ctx = GpuCtx::new(&dev).unwrap();
+    let m3k = make_m3k(&ctx);
+
+    let n_q = CB * CT * CNH * CDS;
+    let n_v = CB * CT * d_inner;
+    let n_th = CB * CT * CNH;
+
+    let q_f32 = upload_f32(&ctx, &det_rand(n_q, 0xA001));
+    let ks_f32 = upload_f32(&ctx, &det_rand(n_q, 0xA002));
+    let v_f32 = upload_f32(&ctx, &det_rand(n_v, 0xA003));
+    let do_f32 = upload_f32(&ctx, &det_rand(n_v, 0xA004));
+    let dcs_buf = upload_f32(&ctx, &det_rand(CB * n_chunks * CNH * CCS, 0xA005));
+    let dcs_sum_buf = upload_f32(&ctx, &det_rand(CB * n_chunks * CNH, 0xA006));
+    let qk_buf = upload_f32(&ctx, &det_rand(n_th, 0xA007));
+    let ssm_buf = upload_f32(&ctx, &det_rand(CB * n_chunks * CNH * CHD * CDS, 0xA008));
+    let d_buf = upload_f32(&ctx, &det_rand(CNH, 0xA009));
+
+    let dq = GpuBuffer::zeros(&ctx.stream, n_q).unwrap();
+    let dk = GpuBuffer::zeros(&ctx.stream, n_q).unwrap();
+    let dv = GpuBuffer::zeros(&ctx.stream, n_v).unwrap();
+    let dadt = GpuBuffer::zeros(&ctx.stream, n_th).unwrap();
+    let dqk = GpuBuffer::zeros(&ctx.stream, n_th).unwrap();
+    let dd = GpuBuffer::zeros(&ctx.stream, CB * CNH).unwrap();
+    ctx.stream.synchronize().unwrap();
+
+    // Production tier ladder (mirrors backward.rs).
+    let legacy_floats = 2 * CCS * CDS + 2 * CCS * CHD + 4 * CCS + 2 * CHD * CDS;
+    let mats_floats = legacy_floats + CCS * (CCS - 1) * 3 / 2 + 2 * CCS;
+    let cap_floats = 99 * 1024 / 4;
+    let (per_head_floats, use_mats_i): (usize, i32) = if mats_floats <= cap_floats {
+        (mats_floats, 1)
+    } else {
+        (legacy_floats, 0)
+    };
+    let t_split = 16u32.min((1024 / CHD) as u32);
+    let cfg = LaunchConfig {
+        grid_dim: (CNH as u32, CB as u32, 1),
+        block_dim: (CHD as u32, t_split, 1),
+        shared_mem_bytes: (per_head_floats * 4) as u32,
+    };
+    eprintln!(
+        "tier: t_split={t_split} use_pair_mats={use_mats_i} smem={}B",
+        per_head_floats * 4
+    );
+
+    let (bi, ti, nhi, hdi, dsi, csi) = (
+        CB as i32, CT as i32, CNH as i32, CHD as i32, CDS as i32, CCS as i32,
+    );
+
+    let time_it = |label: &str, launch: &dyn Fn()| {
+        for _ in 0..3 {
+            launch();
+        }
+        ctx.stream.synchronize().unwrap();
+        let iters = 20;
+        let t0 = Instant::now();
+        for _ in 0..iters {
+            launch();
+        }
+        ctx.stream.synchronize().unwrap();
+        let ms = 1e3 * t0.elapsed().as_secs_f64() / iters as f64;
+        eprintln!(
+            "{label}: {ms:.3} ms/launch -> {:.1} ms/step(24L)",
+            ms * layers
+        );
+    };
+
+    // m3_dqkv f32
+    time_it("m3_dqkv f32", &|| {
+        let mut bld = ctx.stream.launch_builder(&m3k.m3_dqkv);
+        let args = [
+            dq.cached_ptr(),
+            dk.cached_ptr(),
+            dv.cached_ptr(),
+            dadt.cached_ptr(),
+            dqk.cached_ptr(),
+            dd.cached_ptr(),
+            q_f32.cached_ptr(),
+            ks_f32.cached_ptr(),
+            v_f32.cached_ptr(),
+            dcs_buf.cached_ptr(),
+            dcs_sum_buf.cached_ptr(),
+            qk_buf.cached_ptr(),
+            ssm_buf.cached_ptr(),
+            do_f32.cached_ptr(),
+            d_buf.cached_ptr(),
+        ];
+        for a in &args {
+            bld.arg(a);
+        }
+        bld.arg(&bi);
+        bld.arg(&ti);
+        bld.arg(&nhi);
+        bld.arg(&hdi);
+        bld.arg(&dsi);
+        bld.arg(&csi);
+        bld.arg(&use_mats_i);
+        unsafe { bld.launch(cfg) }.unwrap();
+    });
+
+    // m3_dqkv bf16 typed (campaign dtype)
+    let q_t = upload_typed(&ctx, &det_rand(n_q, 0xA001), WeightDtype::Bf16);
+    let ks_t = upload_typed(&ctx, &det_rand(n_q, 0xA002), WeightDtype::Bf16);
+    let v_t = upload_typed(&ctx, &det_rand(n_v, 0xA003), WeightDtype::Bf16);
+    let do_t = upload_typed(&ctx, &det_rand(n_v, 0xA004), WeightDtype::Bf16);
+    time_it("m3_dqkv bf16", &|| {
+        let mut bld = ctx
+            .stream
+            .launch_builder(m3k.m3_dqkv_typed.get(WeightDtype::Bf16));
+        let args = [
+            dq.cached_ptr(),
+            dk.cached_ptr(),
+            dv.cached_ptr(),
+            dadt.cached_ptr(),
+            dqk.cached_ptr(),
+            dd.cached_ptr(),
+            q_t.cached_ptr(),
+            ks_t.cached_ptr(),
+            v_t.cached_ptr(),
+            dcs_buf.cached_ptr(),
+            dcs_sum_buf.cached_ptr(),
+            qk_buf.cached_ptr(),
+            ssm_buf.cached_ptr(),
+            do_t.cached_ptr(),
+            d_buf.cached_ptr(),
+        ];
+        for a in &args {
+            bld.arg(a);
+        }
+        bld.arg(&bi);
+        bld.arg(&ti);
+        bld.arg(&nhi);
+        bld.arg(&hdi);
+        bld.arg(&dsi);
+        bld.arg(&csi);
+        bld.arg(&use_mats_i);
+        unsafe { bld.launch(cfg) }.unwrap();
+    });
+
+    // m3_dqktheta f32
+    let n_ang = CB * CT * CNH * CNA;
+    let scale_buf = upload_f32(&ctx, &det_rand(n_th, 0xA00A));
+    let gamma_buf = upload_f32(&ctx, &det_rand(n_th, 0xA00B));
+    let angle_buf = upload_f32(&ctx, &det_rand(n_ang, 0xA00C));
+    let dqk_dot_buf = upload_f32(&ctx, &det_rand(n_th, 0xA00D));
+    let dqpre = GpuBuffer::zeros(&ctx.stream, n_q).unwrap();
+    let dkpre = GpuBuffer::zeros(&ctx.stream, n_q).unwrap();
+    let dang = GpuBuffer::zeros(&ctx.stream, n_ang).unwrap();
+    let dscale = GpuBuffer::zeros(&ctx.stream, n_th).unwrap();
+    let dgamma = GpuBuffer::zeros(&ctx.stream, n_th).unwrap();
+    ctx.stream.synchronize().unwrap();
+    let th_cfg = LaunchConfig {
+        grid_dim: ((CB * n_chunks) as u32, CNH as u32, 1),
+        block_dim: (CCS as u32, 1, 1),
+        shared_mem_bytes: 0,
+    };
+    let nai = CNA as i32;
+    time_it("m3_dqktheta f32", &|| {
+        let mut bld = ctx.stream.launch_builder(&m3k.m3_dqktheta);
+        let args = [
+            dqpre.cached_ptr(),
+            dkpre.cached_ptr(),
+            dang.cached_ptr(),
+            dscale.cached_ptr(),
+            dgamma.cached_ptr(),
+            q_f32.cached_ptr(),
+            ks_f32.cached_ptr(),
+            scale_buf.cached_ptr(),
+            gamma_buf.cached_ptr(),
+            angle_buf.cached_ptr(),
+            dq.cached_ptr(),
+            dk.cached_ptr(),
+            dqk_dot_buf.cached_ptr(),
+        ];
+        for a in &args {
+            bld.arg(a);
+        }
+        bld.arg(&bi);
+        bld.arg(&ti);
+        bld.arg(&nhi);
+        bld.arg(&dsi);
+        bld.arg(&nai);
+        bld.arg(&csi);
+        unsafe { bld.launch(th_cfg) }.unwrap();
+    });
+
+    // colsum_accumulate over dQ_pre (per layer the trainer runs two of
+    // these for dQ_bias/dK_bias) — the M3-KILL-3 cost question.
+    let dqb = GpuBuffer::zeros(&ctx.stream, CNH * CDS).unwrap();
+    ctx.stream.synchronize().unwrap();
+    let cs_grid = LaunchConfig {
+        grid_dim: (((CNH * CDS) as u32).div_ceil(256), 1, 1),
+        block_dim: (256, 1, 1),
+        shared_mem_bytes: 0,
+    };
+    let rows = (CB * CT) as i32;
+    let cols = (CNH * CDS) as i32;
+    time_it("colsum_accumulate (1 of 2/layer)", &|| {
+        let mut bld = ctx.stream.launch_builder(&m3k.colsum_accumulate);
+        let dqb_p = dqb.cached_ptr();
+        bld.arg(&dqb_p);
+        bld.arg(dqpre.inner());
+        bld.arg(&rows);
+        bld.arg(&cols);
+        unsafe { bld.launch(cs_grid) }.unwrap();
+    });
+}
+
+// ─── m3_dqkv output bit-hash (campaign shape) ──────────────────────────
+//
+// Prints an FNV-1a hash of every m3_dqkv output at the campaign shape on
+// deterministic inputs. There is no M3 run-digest instrument, so this is
+// the bit gate for lane-redistribution work on this kernel: record the
+// hashes before a change, compare after.
+
+#[test]
+#[ignore]
+fn m3_dqkv_output_hash() {
+    const CB: usize = 8;
+    const CT: usize = 1300;
+    const CNH: usize = 48;
+    const CHD: usize = 16;
+    const CDS: usize = 16;
+    const CCS: usize = 64;
+    let n_chunks = CT.div_ceil(CCS);
+    let d_inner = CNH * CHD;
+
+    let dev = GpuDevice::new(0).unwrap();
+    let ctx = GpuCtx::new(&dev).unwrap();
+    let m3k = make_m3k(&ctx);
+
+    let n_q = CB * CT * CNH * CDS;
+    let n_v = CB * CT * d_inner;
+    let n_th = CB * CT * CNH;
+
+    let q_f32 = upload_f32(&ctx, &det_rand(n_q, 0xA001));
+    let ks_f32 = upload_f32(&ctx, &det_rand(n_q, 0xA002));
+    let v_f32 = upload_f32(&ctx, &det_rand(n_v, 0xA003));
+    let do_f32 = upload_f32(&ctx, &det_rand(n_v, 0xA004));
+    let dcs_buf = upload_f32(&ctx, &det_rand(CB * n_chunks * CNH * CCS, 0xA005));
+    let dcs_sum_buf = upload_f32(&ctx, &det_rand(CB * n_chunks * CNH, 0xA006));
+    let qk_buf = upload_f32(&ctx, &det_rand(n_th, 0xA007));
+    let ssm_buf = upload_f32(&ctx, &det_rand(CB * n_chunks * CNH * CHD * CDS, 0xA008));
+    let d_buf = upload_f32(&ctx, &det_rand(CNH, 0xA009));
+
+    let dq = GpuBuffer::zeros(&ctx.stream, n_q).unwrap();
+    let dk = GpuBuffer::zeros(&ctx.stream, n_q).unwrap();
+    let dv = GpuBuffer::zeros(&ctx.stream, n_v).unwrap();
+    let dadt = GpuBuffer::zeros(&ctx.stream, n_th).unwrap();
+    let dqk = GpuBuffer::zeros(&ctx.stream, n_th).unwrap();
+    let dd = GpuBuffer::zeros(&ctx.stream, CB * CNH).unwrap();
+    ctx.stream.synchronize().unwrap();
+
+    let legacy_floats = 2 * CCS * CDS + 2 * CCS * CHD + 4 * CCS + 2 * CHD * CDS;
+    let mats_floats = legacy_floats + CCS * (CCS - 1) * 3 / 2 + 2 * CCS;
+    let cap_floats = 99 * 1024 / 4;
+    let (per_head_floats, use_mats_i): (usize, i32) = if mats_floats <= cap_floats {
+        (mats_floats, 1)
+    } else {
+        (legacy_floats, 0)
+    };
+    let t_split = 16u32.min((1024 / CHD) as u32);
+    let cfg = LaunchConfig {
+        grid_dim: (CNH as u32, CB as u32, 1),
+        block_dim: (CHD as u32, t_split, 1),
+        shared_mem_bytes: (per_head_floats * 4) as u32,
+    };
+
+    let (bi, ti, nhi, hdi, dsi, csi) = (
+        CB as i32, CT as i32, CNH as i32, CHD as i32, CDS as i32, CCS as i32,
+    );
+    let mut bld = ctx.stream.launch_builder(&m3k.m3_dqkv);
+    let args = [
+        dq.cached_ptr(),
+        dk.cached_ptr(),
+        dv.cached_ptr(),
+        dadt.cached_ptr(),
+        dqk.cached_ptr(),
+        dd.cached_ptr(),
+        q_f32.cached_ptr(),
+        ks_f32.cached_ptr(),
+        v_f32.cached_ptr(),
+        dcs_buf.cached_ptr(),
+        dcs_sum_buf.cached_ptr(),
+        qk_buf.cached_ptr(),
+        ssm_buf.cached_ptr(),
+        do_f32.cached_ptr(),
+        d_buf.cached_ptr(),
+    ];
+    for a in &args {
+        bld.arg(a);
+    }
+    bld.arg(&bi);
+    bld.arg(&ti);
+    bld.arg(&nhi);
+    bld.arg(&hdi);
+    bld.arg(&dsi);
+    bld.arg(&csi);
+    bld.arg(&use_mats_i);
+    unsafe { bld.launch(cfg) }.unwrap();
+    ctx.stream.synchronize().unwrap();
+
+    let fnv = |v: &[f32]| -> u64 {
+        let mut h = 0xcbf29ce484222325u64;
+        for x in v {
+            for b in x.to_bits().to_le_bytes() {
+                h ^= b as u64;
+                h = h.wrapping_mul(0x100000001b3);
+            }
+        }
+        h
+    };
+    eprintln!(
+        "tier: t_split={t_split} use_pair_mats={use_mats_i} smem={}B",
+        per_head_floats * 4
+    );
+    eprintln!("HASH dQ_mid  {:016x}", fnv(&download_f32(&ctx, &dq, n_q)));
+    eprintln!("HASH dK_mid  {:016x}", fnv(&download_f32(&ctx, &dk, n_q)));
+    eprintln!("HASH dV      {:016x}", fnv(&download_f32(&ctx, &dv, n_v)));
+    eprintln!(
+        "HASH dADT    {:016x}",
+        fnv(&download_f32(&ctx, &dadt, n_th))
+    );
+    eprintln!("HASH dQK_dot {:016x}", fnv(&download_f32(&ctx, &dqk, n_th)));
+    eprintln!(
+        "HASH dD      {:016x}",
+        fnv(&download_f32(&ctx, &dd, CB * CNH))
+    );
 }
