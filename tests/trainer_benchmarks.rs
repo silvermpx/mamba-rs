@@ -850,18 +850,38 @@ fn bench_bwd_gemms_isolated() {
             )
             .unwrap();
         };
-        for _ in 0..3 {
-            run(&ctx);
-        }
-        ctx.stream.synchronize().unwrap();
-        let t0 = Instant::now();
-        for _ in 0..20 {
-            run(&ctx);
-        }
-        ctx.stream.synchronize().unwrap();
-        let ms = t0.elapsed().as_secs_f64() * 1e3 / 20.0;
+        let run_dw = |ctx: &GpuCtx| {
+            bi_sgemm_backward_dw_typed(
+                ctx,
+                dw.cached_ptr(),
+                TypedPtr {
+                    ptr: dy.cached_ptr(),
+                    dtype,
+                },
+                TypedPtr {
+                    ptr: x.cached_ptr(),
+                    dtype,
+                },
+                (bt, n_in, n_out),
+            )
+            .unwrap();
+        };
+        let time_one = |f: &dyn Fn(&GpuCtx)| {
+            for _ in 0..3 {
+                f(&ctx);
+            }
+            ctx.stream.synchronize().unwrap();
+            let t0 = Instant::now();
+            for _ in 0..20 {
+                f(&ctx);
+            }
+            ctx.stream.synchronize().unwrap();
+            t0.elapsed().as_secs_f64() * 1e3 / 20.0
+        };
+        let ms = time_one(&run);
+        let ms_dw = time_one(&run_dw);
         eprintln!(
-            "gemm bwd {label}: {ms:.3} ms/layer (dW+dX, x24 = {:.1} ms)",
+            "gemm bwd {label}: {ms:.3} ms/layer (dW+dX, x24 = {:.1} ms; dW alone {ms_dw:.3})",
             ms * 24.0
         );
     }
