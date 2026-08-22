@@ -581,10 +581,10 @@ fn gpu_backward_mamba3_layer_mixed(
             .map_err(|e| format!("colsum d_b_bias mixed: {:?}", e))?;
     }
 
-    // Copy dQ_pre/dK_pre into d_q/d_k for downstream consumption (matches
-    // f32 path semantics — d_q/d_k are the post-bias-removal grads).
-    sc.d_q.copy_from_raw(&sc.d_c_pre_rope, &ctx.stream)?;
-    sc.d_k.copy_from_raw(&sc.d_b_pre_rope, &ctx.stream)?;
+    // (M3-KILL-4: the d_q/d_k identity round trip is gone — m3_ddt_dtrap
+    // touches neither pair and every downstream consumer reads
+    // d_b/c_pre_rope directly; the f32 twin dropped its copy pair in the
+    // dead-work pass.)
 
     // S3: m3_ddt_dtrap (pure f32) — produces dDT, dTrap.
     {
@@ -602,9 +602,6 @@ fn gpu_backward_mamba3_layer_mixed(
             .map_err(|e| format!("m3_ddt_dtrap mixed: {:?}", e))?;
     }
 
-    // Re-copy d_b_pre_rope/d_c_pre_rope from d_k/d_q for B4 head→group reduce.
-    sc.d_b_pre_rope.copy_from_raw(&sc.d_k, &ctx.stream)?;
-    sc.d_c_pre_rope.copy_from_raw(&sc.d_q, &ctx.stream)?;
 
     // ----------------------------------------------------------------
     // B5a: angle_dt_bwd — no-atomics partials rule (pure f32, no atomicAdd).
