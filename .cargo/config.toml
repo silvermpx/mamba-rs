@@ -1,0 +1,12 @@
+# Serialize the test harness threads for this workspace.
+#
+# The GPU tests share one CUDA device and several of them capture CUDA
+# graphs. cudaFree (every trainer Drop) performs a device-wide implicit
+# synchronization, and CUDA documents that such operations invalidate any
+# stream capture in progress — so two tests running on different harness
+# threads can kill each other's capture (observed as
+# CUDA_ERROR_STREAM_CAPTURE_INVALIDATED mid-body, flaky by timing).
+# Production is unaffected: the DDP design runs one trainer per PROCESS.
+# Wall-clock cost is small — GPU work serializes at the device anyway.
+[env]
+RUST_TEST_THREADS = "1"

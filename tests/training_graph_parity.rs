@@ -11,7 +11,8 @@
 #![cfg(feature = "cuda")]
 
 use mamba_rs::config::MambaConfig;
-use mamba_rs::mamba_ssm::gpu::adamw::{AdamWBiasFactors, GpuAdamW, step_m1_capturable};
+use mamba_rs::mamba_ssm::gpu::adamw::{AdamWBiasFactors, GpuAdamW, step_multi};
+use mamba_rs::mamba_ssm::gpu::adamw::{AdamWMultiPlan, build_multi_plan, m1_specs_mixed};
 use mamba_rs::mamba_ssm::gpu::backward_mixed::gpu_backward_mamba_backbone_mixed;
 use mamba_rs::mamba_ssm::gpu::buffers::GpuBuffer;
 use mamba_rs::mamba_ssm::gpu::context::GpuCtx;
@@ -64,6 +65,7 @@ struct Setup {
     grads: GpuMambaGrads,
     adam: GpuAdamW,
     bias: AdamWBiasFactors,
+    multi_plan: AdamWMultiPlan,
 }
 
 fn build_setup(ctx: &GpuCtx, dtype: WeightDtype, batch: usize, seq_len: usize) -> Setup {
@@ -130,6 +132,15 @@ fn build_setup(ctx: &GpuCtx, dtype: WeightDtype, batch: usize, seq_len: usize) -
 
     ctx.stream.synchronize().unwrap();
 
+    let multi_plan = build_multi_plan(
+        &ctx.stream,
+        &adam,
+        grads.flat.cached_ptr(),
+        &m1_specs_mixed(&weights, &grads),
+        adam.reference_no_decay,
+        adam.weight_decay,
+    )
+    .unwrap();
     Setup {
         cfg,
         weights,
@@ -142,6 +153,7 @@ fn build_setup(ctx: &GpuCtx, dtype: WeightDtype, batch: usize, seq_len: usize) -
         grads,
         adam,
         bias,
+        multi_plan,
     }
 }
 
@@ -199,19 +211,21 @@ fn one_eager_step(setup: &mut Setup, ctx: &GpuCtx, input: &[f32], d_temp: &[f32]
         &mut setup.scratch,
     )
     .unwrap();
-    // Use the capturable kernel + device-buf bias factors in eager mode too,
-    // so eager and graph share a SINGLE kernel implementation. Otherwise
-    // the two adamw variants drift by ~1e-4 per step (different
-    // generated-PTX register pressure on bias factors).
+    // Use the SAME fused multi-tensor kernel + device-buf bias factors in
+    // eager mode, so eager and graph share a SINGLE kernel implementation
+    // AND the same fused typed-shadow write. The old per-tensor kernel
+    // updates only the master; since the sync pass was trimmed to the
+    // f32-stays-f32 tensors, an old-kernel eager twin would forward every
+    // step after the first on stale bulk shadows and diverge from the
+    // graph lane (the 8303-weight multi-replay break).
     let (_, bc1, bc2) = setup.adam.advance();
-    setup.bias.write(&ctx.stream, bc1, bc2).unwrap();
-    step_m1_capturable(
+    setup.bias.write(&ctx.stream, bc1, bc2, 1e-4).unwrap();
+    step_multi(
         ctx,
-        &ctx.kernels.adamw_step_f32_capturable,
+        ctx.kernels.adamw_step_multi.get(setup.weights.dtype),
+        &setup.multi_plan,
         &setup.adam,
         setup.bias.ptr(),
-        &mut setup.weights.master,
-        &setup.grads,
     )
     .unwrap();
     setup.weights.sync_master_to_compute(ctx).unwrap();
@@ -273,7 +287,7 @@ fn training_graph_bf16_one_step_matches_eager() {
     // Pre-compute step-1 bias factors and write to bias buffer (this is
     // what would normally happen via adam.advance() → bias.write()).
     let (_, bc1, bc2) = g.adam.advance();
-    g.bias.write(&ctx.stream, bc1, bc2).unwrap();
+    g.bias.write(&ctx.stream, bc1, bc2, 1e-4).unwrap();
 
     let graph = GpuMambaTrainingStepGraph::capture(
         &ctx,
@@ -282,6 +296,7 @@ fn training_graph_bf16_one_step_matches_eager() {
             train_w: &mut g.weights,
             adam: &g.adam,
             bias: &g.bias,
+            multi_plan: &g.multi_plan,
             grads: &mut g.grads,
             acts: &mut g.acts,
             scratch: &mut g.scratch,
@@ -367,7 +382,7 @@ fn training_graph_bf16_multi_replay_matches_eager() {
     reset_state(&mut g, &ctx);
     g.mamba_input.upload(&ctx.stream, &inputs[0]).unwrap();
     g.d_temporal.upload(&ctx.stream, &d_temps[0]).unwrap();
-    g.bias.write(&ctx.stream, 1.0, 1.0).unwrap(); // dummy; real values per replay
+    g.bias.write(&ctx.stream, 1.0, 1.0, 1e-4).unwrap(); // dummy; real values per replay
     let graph = GpuMambaTrainingStepGraph::capture(
         &ctx,
         &g.cfg,
@@ -375,6 +390,7 @@ fn training_graph_bf16_multi_replay_matches_eager() {
             train_w: &mut g.weights,
             adam: &g.adam,
             bias: &g.bias,
+            multi_plan: &g.multi_plan,
             grads: &mut g.grads,
             acts: &mut g.acts,
             scratch: &mut g.scratch,
@@ -394,7 +410,7 @@ fn training_graph_bf16_multi_replay_matches_eager() {
         g.mamba_input.upload(&ctx.stream, &inputs[s]).unwrap();
         g.d_temporal.upload(&ctx.stream, &d_temps[s]).unwrap();
         let (_, bc1, bc2) = g.adam.advance();
-        g.bias.write(&ctx.stream, bc1, bc2).unwrap();
+        g.bias.write(&ctx.stream, bc1, bc2, 1e-4).unwrap();
         graph
             .replay(
                 &ctx,
@@ -452,7 +468,7 @@ fn training_graph_panics_on_state_conv_mismatch() {
     g.mamba_input.upload(&ctx.stream, &det_input(n, 1)).unwrap();
     g.d_temporal.upload(&ctx.stream, &det_input(n, 2)).unwrap();
     let (_, bc1, bc2) = g.adam.advance();
-    g.bias.write(&ctx.stream, bc1, bc2).unwrap();
+    g.bias.write(&ctx.stream, bc1, bc2, 1e-4).unwrap();
 
     let graph = GpuMambaTrainingStepGraph::capture(
         &ctx,
@@ -461,6 +477,7 @@ fn training_graph_panics_on_state_conv_mismatch() {
             train_w: &mut g.weights,
             adam: &g.adam,
             bias: &g.bias,
+            multi_plan: &g.multi_plan,
             grads: &mut g.grads,
             acts: &mut g.acts,
             scratch: &mut g.scratch,
@@ -481,7 +498,7 @@ fn training_graph_panics_on_state_conv_mismatch() {
     let dc = cfg.d_conv;
     g.state.conv_states = GpuBuffer::zeros(&ctx.stream, nl * di * dc).unwrap();
     let (_, bc1, bc2) = g.adam.advance();
-    g.bias.write(&ctx.stream, bc1, bc2).unwrap();
+    g.bias.write(&ctx.stream, bc1, bc2, 1e-4).unwrap();
     graph
         .replay(
             &ctx,
@@ -515,7 +532,7 @@ fn training_graph_panics_on_pointer_mismatch() {
     g.mamba_input.upload(&ctx.stream, &det_input(n, 1)).unwrap();
     g.d_temporal.upload(&ctx.stream, &det_input(n, 2)).unwrap();
     let (_, bc1, bc2) = g.adam.advance();
-    g.bias.write(&ctx.stream, bc1, bc2).unwrap();
+    g.bias.write(&ctx.stream, bc1, bc2, 1e-4).unwrap();
 
     let graph = GpuMambaTrainingStepGraph::capture(
         &ctx,
@@ -524,6 +541,7 @@ fn training_graph_panics_on_pointer_mismatch() {
             train_w: &mut g.weights,
             adam: &g.adam,
             bias: &g.bias,
+            multi_plan: &g.multi_plan,
             grads: &mut g.grads,
             acts: &mut g.acts,
             scratch: &mut g.scratch,
@@ -540,7 +558,7 @@ fn training_graph_panics_on_pointer_mismatch() {
     // Reallocate mamba_input — different cached_ptr, must panic on replay.
     let new_input = GpuBuffer::zeros(&ctx.stream, n).unwrap();
     let (_, bc1, bc2) = g.adam.advance();
-    g.bias.write(&ctx.stream, bc1, bc2).unwrap();
+    g.bias.write(&ctx.stream, bc1, bc2, 1e-4).unwrap();
     graph
         .replay(
             &ctx,

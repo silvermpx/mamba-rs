@@ -27,7 +27,7 @@
 //!   - H2D upload of `mamba_input` (per-step input data)
 //!   - H2D upload of `d_temporal` (per-step loss gradient)
 //!   - H2D upload of `(bc1, bc2)` into [`AdamWBiasFactors`] — caller
-//!     calls `bias.write(stream, bc1, bc2)` BEFORE each replay, after
+//!     calls `bias.write(stream, bc1, bc2, lr)` BEFORE each replay, after
 //!     `adam.advance()` to bump the step counter.
 //!   - State management (zeroing or carrying recurrent state)
 //!
@@ -46,7 +46,7 @@
 
 use cudarc::driver::{CudaGraph, PushKernelArg};
 
-use crate::mamba_ssm::gpu::adamw::{AdamWBiasFactors, GpuAdamW, step_m1_capturable};
+use crate::mamba_ssm::gpu::adamw::{AdamWBiasFactors, AdamWMultiPlan, GpuAdamW, step_multi};
 use crate::mamba_ssm::gpu::backward::gpu_backward_mamba_backbone;
 use crate::mamba_ssm::gpu::backward_mixed::gpu_backward_mamba_backbone_mixed;
 use crate::mamba_ssm::gpu::buffers::GpuBuffer;
@@ -108,6 +108,8 @@ pub struct MambaMixedCapture<'a> {
     pub train_w: &'a mut GpuMambaTrainMixedWeights,
     pub adam: &'a GpuAdamW,
     pub bias: &'a AdamWBiasFactors,
+    /// Fused multi-tensor AdamW chunk table (built at construction).
+    pub multi_plan: &'a AdamWMultiPlan,
     pub grads: &'a mut GpuMambaGrads,
     pub acts: &'a mut GpuMambaBackboneMixedActs,
     pub scratch: &'a mut GpuMambaMixedTrainScratch,
@@ -218,6 +220,7 @@ impl GpuMambaTrainingStepGraph {
             train_w,
             adam,
             bias,
+            multi_plan,
             grads,
             acts,
             scratch,
@@ -290,14 +293,17 @@ impl GpuMambaTrainingStepGraph {
                 a_neg_all,
                 scratch,
             )?;
-            step_m1_capturable(
+            // ONE fused launch: every master tensor updated, the four
+            // bulk typed shadows written in the same kernel (the old
+            // per-tensor walk was 243 launches + a 4-cast/layer sync).
+            step_multi(
                 ctx,
-                &ctx.kernels.adamw_step_f32_capturable,
+                ctx.kernels.adamw_step_multi.get(train_w.dtype),
+                multi_plan,
                 adam,
                 bias.ptr(),
-                &mut train_w.master,
-                grads,
             )?;
+            // f32-stays-f32 tensors still ride the (trimmed) sync walk.
             train_w.sync_master_to_compute(ctx)?;
             // Recompute a_neg = -exp(a_log) into BOTH a_neg_all buffers
             // used by forward and backward. Without these launches baked
@@ -346,7 +352,7 @@ impl GpuMambaTrainingStepGraph {
     /// Replay the captured graph. Caller must have already:
     ///   1. Uploaded fresh `mamba_input` content
     ///   2. Computed loss + uploaded fresh `d_temporal`
-    ///   3. Called `adam.advance()` and `bias.write(stream, bc1, bc2)`
+    ///   3. Called `adam.advance()` and `bias.write(stream, bc1, bc2, lr)`
     ///      with the new step number's bias factors
     ///   4. Optionally zeroed `state` (or carried forward; user choice)
     ///
@@ -470,6 +476,8 @@ pub struct MambaF32Capture<'a> {
     pub weights: &'a mut GpuMambaTrainWeights,
     pub adam: &'a GpuAdamW,
     pub bias: &'a AdamWBiasFactors,
+    /// Fused multi-tensor AdamW chunk table (built at construction).
+    pub multi_plan: &'a AdamWMultiPlan,
     pub grads: &'a mut GpuMambaGrads,
     pub acts: &'a mut GpuMambaBackboneActs,
     pub scratch: &'a mut GpuMambaScratch,
@@ -551,6 +559,7 @@ impl GpuMambaF32TrainingStepGraph {
             weights,
             adam,
             bias,
+            multi_plan,
             grads,
             acts,
             scratch,
@@ -579,13 +588,14 @@ impl GpuMambaF32TrainingStepGraph {
             grads.zero(&ctx.stream)?;
             gpu_forward_mamba_backbone(ctx, temporal, acts, weights, mamba_input, state, scratch)?;
             gpu_backward_mamba_backbone(ctx, d_temporal, grads, acts, weights, a_neg_all, scratch)?;
-            crate::mamba_ssm::gpu::adamw::step_m1_capturable(
+            step_multi(
                 ctx,
-                &ctx.kernels.adamw_step_f32_capturable,
+                ctx.kernels
+                    .adamw_step_multi
+                    .get(crate::mamba_ssm::gpu::dtype::WeightDtype::F32),
+                multi_plan,
                 adam,
                 bias.ptr(),
-                weights,
-                grads,
             )?;
             // Recompute a_neg after AdamW — see mixed graph above for
             // rationale. Without this the f32 SSM runs on a stale A-matrix

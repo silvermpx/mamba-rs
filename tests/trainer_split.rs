@@ -552,10 +552,15 @@ fn set_lr_scales_first_step_delta() {
     assert!(b.set_lr(f32::NAN).is_err(), "NaN lr must be rejected");
 }
 
-/// set_lr under a captured graph errs (the lr is baked into the captured
-/// AdamW kernel); drop_graph unblocks it and steps fall back to eager.
+/// set_lr under a captured graph APPLIES on the next replay: the lr rides
+/// the 3-element device bias buffer ({bc1, bc2, lr}) re-uploaded before
+/// every step, so a warmup/cosine schedule works without dropping the
+/// graph (the old per-tensor kernels baked lr by value at capture and
+/// set_lr had to refuse; that refusal is lifted by the fused AdamW).
+/// Proof by effect: two trainers, identical seeds and steps, one raises
+/// lr 10x mid-graph — its post-step weight delta scales ~10x.
 #[test]
-fn set_lr_under_graph_errs_and_drop_graph_unblocks() {
+fn set_lr_under_graph_applies_on_next_replay() {
     let cfg = test_cfg();
     let input_dim = cfg.d_model;
     let (batch, seq_len) = (1usize, 4usize);
@@ -563,6 +568,52 @@ fn set_lr_under_graph_errs_and_drop_graph_unblocks() {
     let input = det(batch * seq_len * input_dim, 0xAA, 0.05);
     let d_temporal = det(batch * seq_len * cfg.d_model, 0xBB, 0.01);
 
+    let run = |lr_after_capture: Option<f32>| -> (Vec<f32>, Vec<f32>) {
+        let mut t = MambaTrainer::new_full(
+            0,
+            &w,
+            cfg,
+            session(batch, seq_len, input_dim),
+            WeightDtype::F32,
+        )
+        .expect("trainer");
+        t.step(&input, &d_temporal).expect("warmup");
+        t.capture_graph().expect("capture");
+        assert!(t.has_graph());
+        if let Some(lr) = lr_after_capture {
+            t.set_lr(lr).expect("set_lr under a captured graph must apply");
+            assert!((t.lr() - lr).abs() < 1e-12);
+        }
+        let before = t.snapshot_master().expect("pre");
+        let m = t.step(&input, &d_temporal).expect("graph step");
+        assert!(m.graph_replayed, "post-capture step must replay the graph");
+        let after = t.snapshot_master().expect("post");
+        (before.norm_f_weight, after.norm_f_weight)
+    };
+
+    // session() configures lr=1e-3 — raise 10x from THAT base, not an
+    // assumed constant (a matching literal would make ratio==1 vacuously).
+    let base_lr = session(batch, seq_len, input_dim).lr;
+    let (b0, a0) = run(None);
+    let (b1, a1) = run(Some(base_lr * 10.0));
+    let d0 = b0
+        .iter()
+        .zip(&a0)
+        .map(|(x, y)| (x - y).abs())
+        .fold(0f32, f32::max);
+    let d1 = b1
+        .iter()
+        .zip(&a1)
+        .map(|(x, y)| (x - y).abs())
+        .fold(0f32, f32::max);
+    assert!(d0 > 0.0, "baseline replay must move weights");
+    let ratio = f64::from(d1) / f64::from(d0);
+    assert!(
+        (5.0..15.0).contains(&ratio),
+        "set_lr(10x) under graph must scale the replayed step ~10x: got {ratio} ({d0} -> {d1})"
+    );
+
+    // drop_graph still falls back to eager.
     let mut t = MambaTrainer::new_full(
         0,
         &w,
@@ -573,19 +624,9 @@ fn set_lr_under_graph_errs_and_drop_graph_unblocks() {
     .expect("trainer");
     t.step(&input, &d_temporal).expect("warmup");
     t.capture_graph().expect("capture");
-    assert!(t.has_graph());
-    let m = t.step(&input, &d_temporal).expect("graph step");
-    assert!(m.graph_replayed);
-
-    assert!(
-        t.set_lr(5e-4).is_err(),
-        "set_lr under a captured graph must err"
-    );
-
     t.drop_graph();
     assert!(!t.has_graph());
     t.set_lr(5e-4).expect("set_lr after drop_graph");
-    assert!((t.lr() - 5e-4).abs() < 1e-9);
     let m2 = t.step(&input, &d_temporal).expect("eager step");
     assert!(
         !m2.graph_replayed,

@@ -7,7 +7,9 @@
 
 #![cfg(feature = "cuda")]
 
-use mamba_rs::mamba_ssm::gpu::adamw::{AdamWBiasFactors, GpuAdamW, step_m3_capturable};
+use mamba_rs::mamba_ssm::gpu::adamw::{
+    AdamWBiasFactors, GpuAdamW, build_multi_plan, m3_specs_mixed, step_multi,
+};
 use mamba_rs::mamba_ssm::gpu::buffers::GpuBuffer;
 use mamba_rs::mamba_ssm::gpu::context::GpuCtx;
 use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
@@ -92,6 +94,7 @@ struct Setup {
     grads: GpuMamba3Grads,
     adam: GpuAdamW,
     bias: AdamWBiasFactors,
+    multi_plan: mamba_rs::mamba_ssm::gpu::adamw::AdamWMultiPlan,
 }
 
 fn build(ctx: &GpuCtx, dtype: WeightDtype, batch: usize, seq_len: usize) -> Setup {
@@ -142,6 +145,15 @@ fn build(ctx: &GpuCtx, dtype: WeightDtype, batch: usize, seq_len: usize) -> Setu
 
     ctx.stream.synchronize().unwrap();
 
+    let multi_plan = build_multi_plan(
+        &ctx.stream,
+        &adam,
+        grads.flat.cached_ptr(),
+        &m3_specs_mixed(&weights, &grads),
+        adam.reference_no_decay,
+        adam.weight_decay,
+    )
+    .unwrap();
     Setup {
         dims,
         weights,
@@ -158,6 +170,7 @@ fn build(ctx: &GpuCtx, dtype: WeightDtype, batch: usize, seq_len: usize) -> Setu
         grads,
         adam,
         bias,
+        multi_plan,
     }
 }
 
@@ -223,14 +236,17 @@ fn one_eager_step(s: &mut Setup, ctx: &GpuCtx, m3k: &Mamba3Kernels, inp: &[f32],
     )
     .unwrap();
     let (_, bc1, bc2) = s.adam.advance();
-    s.bias.write(&ctx.stream, bc1, bc2).unwrap();
-    step_m3_capturable(
+    s.bias.write(&ctx.stream, bc1, bc2, 1e-4).unwrap();
+    // Same fused kernel as the captured body — the old per-tensor kernel
+    // updates only the master, and the trimmed sync no longer refreshes
+    // the bulk shadows, so an old-kernel eager twin diverges from the
+    // graph lane on every step after the first.
+    step_multi(
         ctx,
-        &m3k.adamw_step_f32_capturable,
+        m3k.adamw_step_multi.get(s.weights.dtype),
+        &s.multi_plan,
         &s.adam,
         s.bias.ptr(),
-        &mut s.weights.master,
-        &s.grads,
     )
     .unwrap();
     s.weights.sync_master_to_compute(ctx).unwrap();
@@ -258,7 +274,7 @@ fn m3_training_graph_bf16_one_step_matches_eager() {
     reset_state(&mut g, &ctx);
     g.mamba_input.upload(&ctx.stream, &inp).unwrap();
     g.d_temporal.upload(&ctx.stream, &dt).unwrap();
-    g.bias.write(&ctx.stream, 1.0, 1.0).unwrap();
+    g.bias.write(&ctx.stream, 1.0, 1.0, 1e-4).unwrap();
 
     let graph = GpuMamba3TrainingStepGraph::capture(
         &M3Exec {
@@ -271,6 +287,7 @@ fn m3_training_graph_bf16_one_step_matches_eager() {
             train_w: &mut g.weights,
             adam: &g.adam,
             bias: &g.bias,
+            multi_plan: &g.multi_plan,
             grads: &mut g.grads,
             acts: &mut g.acts,
             f32_scratch: &mut g.f32_scratch,
@@ -290,7 +307,7 @@ fn m3_training_graph_bf16_one_step_matches_eager() {
 
     // Capture only records — must replay to execute.
     let (_, bc1, bc2) = g.adam.advance();
-    g.bias.write(&ctx.stream, bc1, bc2).unwrap();
+    g.bias.write(&ctx.stream, bc1, bc2, 1e-4).unwrap();
     graph
         .replay(
             &ctx,
@@ -350,7 +367,7 @@ fn m3_training_graph_bf16_multi_replay_matches_eager() {
     reset_state(&mut g, &ctx);
     g.mamba_input.upload(&ctx.stream, &inputs[0]).unwrap();
     g.d_temporal.upload(&ctx.stream, &d_temps[0]).unwrap();
-    g.bias.write(&ctx.stream, 1.0, 1.0).unwrap();
+    g.bias.write(&ctx.stream, 1.0, 1.0, 1e-4).unwrap();
     let graph = GpuMamba3TrainingStepGraph::capture(
         &M3Exec {
             ctx: &ctx,
@@ -362,6 +379,7 @@ fn m3_training_graph_bf16_multi_replay_matches_eager() {
             train_w: &mut g.weights,
             adam: &g.adam,
             bias: &g.bias,
+            multi_plan: &g.multi_plan,
             grads: &mut g.grads,
             acts: &mut g.acts,
             f32_scratch: &mut g.f32_scratch,
@@ -384,7 +402,7 @@ fn m3_training_graph_bf16_multi_replay_matches_eager() {
         g.mamba_input.upload(&ctx.stream, &inputs[s]).unwrap();
         g.d_temporal.upload(&ctx.stream, &d_temps[s]).unwrap();
         let (_, bc1, bc2) = g.adam.advance();
-        g.bias.write(&ctx.stream, bc1, bc2).unwrap();
+        g.bias.write(&ctx.stream, bc1, bc2, 1e-4).unwrap();
         graph
             .replay(
                 &ctx,

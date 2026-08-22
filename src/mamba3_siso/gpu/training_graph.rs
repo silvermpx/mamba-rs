@@ -12,7 +12,7 @@
 
 use cudarc::driver::CudaGraph;
 
-use crate::mamba_ssm::gpu::adamw::{AdamWBiasFactors, GpuAdamW, step_m3_capturable};
+use crate::mamba_ssm::gpu::adamw::{AdamWBiasFactors, AdamWMultiPlan, GpuAdamW, step_multi};
 use crate::mamba_ssm::gpu::buffers::GpuBuffer;
 use crate::mamba_ssm::gpu::context::GpuCtx;
 use crate::mamba_ssm::gpu::dtype::WeightDtype;
@@ -31,6 +31,8 @@ pub struct Mamba3MixedCapture<'a> {
     pub train_w: &'a mut GpuMamba3TrainMixedWeights,
     pub adam: &'a GpuAdamW,
     pub bias: &'a AdamWBiasFactors,
+    /// Fused multi-tensor AdamW chunk table (built at construction).
+    pub multi_plan: &'a AdamWMultiPlan,
     pub grads: &'a mut GpuMamba3Grads,
     pub acts: &'a mut GpuMamba3BackboneMixedActs,
     pub f32_scratch: &'a mut GpuMamba3Scratch,
@@ -114,6 +116,7 @@ impl GpuMamba3TrainingStepGraph {
             train_w,
             adam,
             bias,
+            multi_plan,
             grads,
             acts,
             f32_scratch,
@@ -178,14 +181,14 @@ impl GpuMamba3TrainingStepGraph {
                 f32_scratch,
                 mixed_scratch,
             )?;
-            step_m3_capturable(
+            step_multi(
                 ctx,
-                &m3k.adamw_step_f32_capturable,
+                m3k.adamw_step_multi.get(train_w.dtype),
+                multi_plan,
                 adam,
                 bias.ptr(),
-                &mut train_w.master,
-                grads,
             )?;
+            // f32-stays-f32 tensors only (bulk shadows ride the fused kernel).
             train_w.sync_master_to_compute(ctx)?;
             Ok(())
         })?;
@@ -338,6 +341,8 @@ pub struct Mamba3F32Capture<'a> {
     pub weights: &'a mut GpuMamba3Weights,
     pub adam: &'a GpuAdamW,
     pub bias: &'a AdamWBiasFactors,
+    /// Fused multi-tensor AdamW chunk table (built at construction).
+    pub multi_plan: &'a AdamWMultiPlan,
     pub grads: &'a mut GpuMamba3Grads,
     pub acts: &'a mut GpuMamba3BackboneActs,
     pub scratch: &'a mut GpuMamba3Scratch,
@@ -400,6 +405,7 @@ impl GpuMamba3F32TrainingStepGraph {
             weights,
             adam,
             bias,
+            multi_plan,
             grads,
             acts,
             scratch,
@@ -434,13 +440,13 @@ impl GpuMamba3F32TrainingStepGraph {
                 scratch,
             )?;
             gpu_backward_mamba3_backbone(exec, d_temporal, acts, weights, grads, scratch)?;
-            step_m3_capturable(
+            step_multi(
                 ctx,
-                &m3k.adamw_step_f32_capturable,
+                m3k.adamw_step_multi
+                    .get(crate::mamba_ssm::gpu::dtype::WeightDtype::F32),
+                multi_plan,
                 adam,
                 bias.ptr(),
-                weights,
-                grads,
             )?;
             Ok(())
         })?;

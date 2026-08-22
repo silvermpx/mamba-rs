@@ -9,7 +9,10 @@
 
 use cudarc::driver::PushKernelArg;
 
-use crate::mamba_ssm::gpu::adamw::{AdamWBiasFactors, GpuAdamW, step_m3_capturable};
+use crate::mamba_ssm::gpu::adamw::{
+    AdamWBiasFactors, AdamWMultiPlan, GpuAdamW, build_multi_plan, m3_specs, m3_specs_mixed,
+    step_multi,
+};
 use crate::mamba_ssm::gpu::buffers::{GpuBuffer, GpuByteBuffer};
 use crate::mamba_ssm::gpu::context::GpuCtx;
 use crate::mamba_ssm::gpu::device::GpuDevice;
@@ -186,14 +189,10 @@ impl Mamba3Trainer {
         if !lr.is_finite() || lr <= 0.0 {
             return Err(format!("set_lr: invalid learning rate {lr}"));
         }
-        if self.has_graph() {
-            return Err(
-                "set_lr under a captured graph: the lr is baked by value into the \
-                 captured AdamW kernel and a field write would silently not apply — \
-                 drop_graph() first, then set_lr, then re-capture"
-                    .into(),
-            );
-        }
+        // lr rides the 3-element device bias buffer ({bc1, bc2, lr})
+        // and is re-uploaded before every step — a schedule now works
+        // under a captured graph (the old per-tensor kernels baked lr
+        // by value at capture; the fused kernel reads the buffer).
         match &mut self.inner {
             Trainer3Inner::F32(t) => t.adam.lr = lr,
             Trainer3Inner::Mixed(t) => t.adam.lr = lr,
@@ -239,8 +238,30 @@ impl Mamba3Trainer {
             );
         }
         match &mut self.inner {
-            Trainer3Inner::F32(t) => t.adam.import_state(&t.ctx.stream, blob),
-            Trainer3Inner::Mixed(t) => t.adam.import_state(&t.ctx.stream, blob),
+            Trainer3Inner::F32(t) => {
+                t.adam.import_state(&t.ctx.stream, blob)?;
+                t.multi_plan = build_multi_plan(
+                    &t.ctx.stream,
+                    &t.adam,
+                    t.grads.flat.cached_ptr(),
+                    &m3_specs(&t.weights, &t.grads),
+                    t.adam.reference_no_decay,
+                    t.adam.weight_decay,
+                )?;
+                Ok(())
+            }
+            Trainer3Inner::Mixed(t) => {
+                t.adam.import_state(&t.ctx.stream, blob)?;
+                t.multi_plan = build_multi_plan(
+                    &t.ctx.stream,
+                    &t.adam,
+                    t.grads.flat.cached_ptr(),
+                    &m3_specs_mixed(&t.weights, &t.grads),
+                    t.adam.reference_no_decay,
+                    t.adam.weight_decay,
+                )?;
+                Ok(())
+            }
         }
     }
 
@@ -363,8 +384,28 @@ impl Mamba3Trainer {
             );
         }
         match &mut self.inner {
-            Trainer3Inner::F32(t) => t.adam.reference_no_decay = on,
-            Trainer3Inner::Mixed(t) => t.adam.reference_no_decay = on,
+            Trainer3Inner::F32(t) => {
+                t.adam.reference_no_decay = on;
+                t.multi_plan = build_multi_plan(
+                    &t.ctx.stream,
+                    &t.adam,
+                    t.grads.flat.cached_ptr(),
+                    &m3_specs(&t.weights, &t.grads),
+                    t.adam.reference_no_decay,
+                    t.adam.weight_decay,
+                )?;
+            }
+            Trainer3Inner::Mixed(t) => {
+                t.adam.reference_no_decay = on;
+                t.multi_plan = build_multi_plan(
+                    &t.ctx.stream,
+                    &t.adam,
+                    t.grads.flat.cached_ptr(),
+                    &m3_specs_mixed(&t.weights, &t.grads),
+                    t.adam.reference_no_decay,
+                    t.adam.weight_decay,
+                )?;
+            }
         }
         Ok(())
     }
@@ -547,6 +588,7 @@ pub(crate) struct Mamba3TrainerMixed {
     pub grads: GpuMamba3Grads,
     pub adam: GpuAdamW,
     bias: AdamWBiasFactors,
+    multi_plan: AdamWMultiPlan,
 
     acts: GpuMamba3BackboneMixedActs,
     f32_scratch: GpuMamba3Scratch,
@@ -674,6 +716,14 @@ impl Mamba3TrainerMixed {
             .with_lr(lr)
             .with_weight_decay(weight_decay);
         let bias = AdamWBiasFactors::new(&ctx.stream)?;
+        let multi_plan = build_multi_plan(
+            &ctx.stream,
+            &adam,
+            grads.flat.cached_ptr(),
+            &m3_specs_mixed(&weights, &grads),
+            adam.reference_no_decay,
+            adam.weight_decay,
+        )?;
 
         let (scaler, overflow_flag, d_temporal_scaled, unscale_factor) =
             if matches!(dtype, WeightDtype::F16) {
@@ -702,6 +752,7 @@ impl Mamba3TrainerMixed {
             grads,
             adam,
             bias,
+            multi_plan,
             acts,
             f32_scratch,
             mixed_scratch,
@@ -749,7 +800,7 @@ impl Mamba3TrainerMixed {
         if matches!(self.dtype, WeightDtype::F16) {
             return self.capture_graph_f16();
         }
-        self.bias.write(&self.ctx.stream, 1.0, 1.0)?;
+        self.bias.write(&self.ctx.stream, 1.0, 1.0, self.adam.lr)?;
 
         let g = GpuMamba3TrainingStepGraph::capture(
             &M3Exec {
@@ -762,6 +813,7 @@ impl Mamba3TrainerMixed {
                 train_w: &mut self.weights,
                 adam: &self.adam,
                 bias: &self.bias,
+                multi_plan: &self.multi_plan,
                 grads: &mut self.grads,
                 acts: &mut self.acts,
                 f32_scratch: &mut self.f32_scratch,
@@ -805,7 +857,7 @@ impl Mamba3TrainerMixed {
         self.d_temporal.upload(&self.ctx.stream, d_temporal)?;
 
         let (step, bc1, bc2) = self.adam.advance();
-        self.bias.write(&self.ctx.stream, bc1, bc2)?;
+        self.bias.write(&self.ctx.stream, bc1, bc2, self.adam.lr)?;
 
         let replayed = if let Some(ref g) = self.graph {
             g.replay(
@@ -860,7 +912,7 @@ impl Mamba3TrainerMixed {
         }
         let prev_step = self.adam.step;
         let (next_step, bc1, bc2) = self.adam.advance();
-        self.bias.write(&self.ctx.stream, bc1, bc2)?;
+        self.bias.write(&self.ctx.stream, bc1, bc2, self.adam.lr)?;
 
         self.overflow_flag
             .as_mut()
@@ -955,7 +1007,7 @@ impl Mamba3TrainerMixed {
 
     /// Capture the M3 f16 training step (M3 mirror of the M1 capture).
     fn capture_graph_f16(&mut self) -> Result<(), String> {
-        self.bias.write(&self.ctx.stream, 1.0, 1.0)?;
+        self.bias.write(&self.ctx.stream, 1.0, 1.0, self.adam.lr)?;
         let init_unscale = 1.0 / self.scaler.as_ref().expect("f16 scaler").scale();
         self.unscale_factor
             .as_mut()
@@ -1079,14 +1131,15 @@ impl Mamba3TrainerMixed {
     /// kernel so graph and eager numerics stay bit-identical), then the
     /// master → compute sync.
     fn eager_optimize(&mut self) -> Result<(), String> {
-        step_m3_capturable(
+        step_multi(
             &self.ctx,
-            &self.m3k.adamw_step_f32_capturable,
+            self.m3k.adamw_step_multi.get(self.dtype),
+            &self.multi_plan,
             &self.adam,
             self.bias.ptr(),
-            &mut self.weights.master,
-            &self.grads,
         )?;
+        // Bulk typed shadows ride the fused kernel; the walk covers only
+        // the f32-stays-f32 tensors.
         self.weights.sync_master_to_compute(&self.ctx)
     }
 
@@ -1204,7 +1257,7 @@ impl Mamba3TrainerMixed {
             None => None,
         };
         let (step, bc1, bc2) = self.adam.advance();
-        self.bias.write(&self.ctx.stream, bc1, bc2)?;
+        self.bias.write(&self.ctx.stream, bc1, bc2, self.adam.lr)?;
         self.eager_optimize()?;
         self.grads_dirty = false;
         Ok(BackwardMetrics {
@@ -1245,7 +1298,7 @@ impl Mamba3TrainerMixed {
         }
         let prev_step = self.adam.step;
         let (next_step, bc1, bc2) = self.adam.advance();
-        self.bias.write(&self.ctx.stream, bc1, bc2)?;
+        self.bias.write(&self.ctx.stream, bc1, bc2, self.adam.lr)?;
         self.overflow_flag
             .as_mut()
             .expect("f16 overflow flag")
@@ -1378,6 +1431,7 @@ pub(crate) struct Mamba3TrainerF32 {
     pub grads: GpuMamba3Grads,
     pub adam: GpuAdamW,
     bias: AdamWBiasFactors,
+    multi_plan: AdamWMultiPlan,
     acts: GpuMamba3BackboneActs,
     scratch: GpuMamba3Scratch,
     temporal: GpuBuffer,
@@ -1467,6 +1521,14 @@ impl Mamba3TrainerF32 {
             .with_lr(lr)
             .with_weight_decay(weight_decay);
         let bias = AdamWBiasFactors::new(&ctx.stream)?;
+        let multi_plan = build_multi_plan(
+            &ctx.stream,
+            &adam,
+            grads.flat.cached_ptr(),
+            &m3_specs(&weights, &grads),
+            adam.reference_no_decay,
+            adam.weight_decay,
+        )?;
 
         ctx.stream
             .synchronize()
@@ -1483,6 +1545,7 @@ impl Mamba3TrainerF32 {
             grads,
             adam,
             bias,
+            multi_plan,
             acts,
             scratch,
             temporal,
@@ -1509,7 +1572,7 @@ impl Mamba3TrainerF32 {
     }
 
     pub fn capture_graph(&mut self) -> Result<(), String> {
-        self.bias.write(&self.ctx.stream, 1.0, 1.0)?;
+        self.bias.write(&self.ctx.stream, 1.0, 1.0, self.adam.lr)?;
         let g = GpuMamba3F32TrainingStepGraph::capture(
             &M3Exec {
                 ctx: &self.ctx,
@@ -1520,6 +1583,7 @@ impl Mamba3TrainerF32 {
                 weights: &mut self.weights,
                 adam: &self.adam,
                 bias: &self.bias,
+                multi_plan: &self.multi_plan,
                 grads: &mut self.grads,
                 acts: &mut self.acts,
                 scratch: &mut self.scratch,
@@ -1556,7 +1620,7 @@ impl Mamba3TrainerF32 {
         self.mamba_input.upload(&self.ctx.stream, input)?;
         self.d_temporal.upload(&self.ctx.stream, d_temporal)?;
         let (step, bc1, bc2) = self.adam.advance();
-        self.bias.write(&self.ctx.stream, bc1, bc2)?;
+        self.bias.write(&self.ctx.stream, bc1, bc2, self.adam.lr)?;
         let replayed = if let Some(ref g) = self.graph {
             g.replay(&Mamba3F32Replay {
                 weights: &self.weights,
@@ -1623,13 +1687,14 @@ impl Mamba3TrainerF32 {
 
     /// Eager optimizer tail: AdamW over the grad arena.
     fn eager_optimize(&mut self) -> Result<(), String> {
-        step_m3_capturable(
+        step_multi(
             &self.ctx,
-            &self.m3k.adamw_step_f32_capturable,
+            self.m3k
+                .adamw_step_multi
+                .get(crate::mamba_ssm::gpu::dtype::WeightDtype::F32),
+            &self.multi_plan,
             &self.adam,
             self.bias.ptr(),
-            &mut self.weights,
-            &self.grads,
         )
     }
 
@@ -1730,7 +1795,7 @@ impl Mamba3TrainerF32 {
             None => None,
         };
         let (step, bc1, bc2) = self.adam.advance();
-        self.bias.write(&self.ctx.stream, bc1, bc2)?;
+        self.bias.write(&self.ctx.stream, bc1, bc2, self.adam.lr)?;
         self.eager_optimize()?;
         self.grads_dirty = false;
         Ok(BackwardMetrics {

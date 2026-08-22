@@ -292,6 +292,9 @@ pub struct MambaKernels {
     /// CUDA-Graph-capturable variant: reads bias-correction factors from a
     /// 2-elem device buffer instead of scalar args.
     pub adamw_step_f32_capturable: CudaFunction,
+    /// Fused multi-tensor AdamW, one variant per shadow dtype (the f32
+    /// variant serves the no-shadow lane).
+    pub adamw_step_multi: TypedKernel,
 
     // -- Batch-invariant GEMM (bf16 cross-batch determinism fix) --
     /// Batch-invariant GEMM bf16×bf16→bf16. Tensor-Core inner GEMM via
@@ -706,6 +709,7 @@ impl MambaKernels {
             // AdamW
             adamw_step_f32: get("adamw_step_f32")?,
             adamw_step_f32_capturable: get("adamw_step_f32_capturable")?,
+            adamw_step_multi: load_typed("adamw_step_multi")?,
 
             // Batch-invariant GEMM
             gemm_bi_bf16_bf16: get("gemm_bi_bf16_bf16")?,

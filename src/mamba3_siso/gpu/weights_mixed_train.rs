@@ -18,12 +18,11 @@
 
 use std::sync::Arc;
 
-use cudarc::driver::{CudaStream, PushKernelArg};
+use cudarc::driver::CudaStream;
 
 use crate::mamba_ssm::gpu::buffers::{GpuBuffer, WeightSliceDyn};
 use crate::mamba_ssm::gpu::context::GpuCtx;
 use crate::mamba_ssm::gpu::dtype::WeightDtype;
-use crate::mamba_ssm::gpu::launch::grid_1d;
 use crate::mamba3_siso::config::Mamba3Config;
 use crate::mamba3_siso::gpu::weights::{GpuMamba3MixedWeights, GpuMamba3Weights};
 use crate::mamba3_siso::weights::Mamba3Weights;
@@ -61,13 +60,7 @@ impl GpuMamba3TrainMixedWeights {
     /// f32 mode = D2D copy. bf16/f16 = elementwise cast kernel.
     /// Must be called after every optimizer step, before the next forward.
     pub fn sync_master_to_compute(&self, ctx: &GpuCtx) -> Result<(), String> {
-        // input_proj — bulk
-        sync_one(
-            ctx,
-            &self.master.input_proj_w,
-            &self.compute.input_proj_w,
-            self.dtype,
-        )?;
+        // input_proj_w (bulk) rides the fused AdamW shadow write.
         // input_proj_b — f32 stays f32
         sync_f32(ctx, &self.master.input_proj_b, &self.compute.input_proj_b)?;
 
@@ -82,62 +75,12 @@ impl GpuMamba3TrainMixedWeights {
             sync_f32(ctx, &mw.d_param, &cw.d_param)?;
             sync_f32(ctx, &mw.norm_gate_weight, &cw.norm_gate_weight)?;
             // bulk (cast to dtype)
-            sync_one(ctx, &mw.in_proj_w, &cw.in_proj_w, self.dtype)?;
-            sync_one(ctx, &mw.out_proj_w, &cw.out_proj_w, self.dtype)?;
+            // in_proj_w / out_proj_w (bulk) ride the fused AdamW shadow write.
         }
 
         sync_f32(ctx, &self.master.norm_f_weight, &self.compute.norm_f_weight)?;
         Ok(())
     }
-}
-
-/// Cast a single f32 master `GpuBuffer` into the matching typed compute slice.
-fn sync_one(
-    ctx: &GpuCtx,
-    master: &GpuBuffer,
-    compute: &WeightSliceDyn,
-    dtype: WeightDtype,
-) -> Result<(), String> {
-    let n_elems = master.len();
-    debug_assert_eq!(n_elems, compute.len_elems());
-
-    // Empty master tensor (HF Mamba identity input_proj). Skipping avoids
-    // a degenerate 0-element kernel launch (CUDA_ERROR_INVALID_VALUE).
-    if n_elems == 0 {
-        return Ok(());
-    }
-
-    if matches!(dtype, WeightDtype::F32) {
-        let bytes = n_elems * 4;
-        let res = unsafe {
-            cudarc::driver::sys::cuMemcpyDtoDAsync_v2(
-                compute.ptr(),
-                master.cached_ptr(),
-                bytes,
-                ctx.stream.cu_stream(),
-            )
-        };
-        if res != cudarc::driver::sys::CUresult::CUDA_SUCCESS {
-            return Err(format!("sync_one f32 D2D failed: {res:?}"));
-        }
-        return Ok(());
-    }
-
-    let kernel = match dtype {
-        WeightDtype::Bf16 => &ctx.kernels.cast_f32_to_bf16,
-        WeightDtype::F16 => &ctx.kernels.cast_f32_to_f16,
-        WeightDtype::F32 => unreachable!(),
-    };
-    let n_i32 = n_elems as i32;
-    let dst_ptr = compute.ptr();
-    let src_ptr = master.cached_ptr();
-    let mut builder = ctx.stream.launch_builder(kernel);
-    builder.arg(&dst_ptr);
-    builder.arg(&src_ptr);
-    builder.arg(&n_i32);
-    unsafe { builder.launch(grid_1d(n_elems)) }
-        .map_err(|e| format!("sync_one cast_f32_to_{dtype:?}: {e:?}"))?;
-    Ok(())
 }
 
 /// f32 → f32 stream-ordered D2D copy (no dtype cast).

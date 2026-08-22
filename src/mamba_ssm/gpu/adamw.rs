@@ -67,20 +67,33 @@ impl AdamWBiasFactors {
     /// and the captured kernel would apply ONLY weight decay, no Adam
     /// step, on the first replay if `write()` was forgotten.
     pub fn new(stream: &Arc<CudaStream>) -> Result<Self, String> {
-        let buf = GpuBuffer::zeros(stream, 2)?;
+        let buf = GpuBuffer::zeros(stream, 3)?;
         let mut this = Self { buf };
-        this.write(stream, 1.0, 1.0)?;
+        this.write(stream, 1.0, 1.0, 1e-3)?;
         Ok(this)
     }
 
-    /// Write `(bc1, bc2)` for the upcoming step. Async H2D — the next
-    /// graph replay will see these values via the device pointer.
-    pub fn write(&mut self, stream: &Arc<CudaStream>, bc1: f32, bc2: f32) -> Result<(), String> {
+    /// Write `(bc1, bc2, lr)` for the upcoming step. Async H2D — the next
+    /// graph replay will see these values via the device pointer. The lr
+    /// rides the buffer so a warmup/cosine schedule works under a
+    /// captured graph (the legacy per-tensor kernels baked lr by value
+    /// at capture time).
+    pub fn write(
+        &mut self,
+        stream: &Arc<CudaStream>,
+        bc1: f32,
+        bc2: f32,
+        lr: f32,
+    ) -> Result<(), String> {
         debug_assert!(
             bc1.is_finite() && bc2.is_finite() && bc1 > 0.0 && bc2 > 0.0,
             "AdamWBiasFactors::write got non-finite or non-positive values: bc1={bc1} bc2={bc2}"
         );
-        self.buf.upload(stream, &[bc1, bc2])
+        debug_assert!(
+            lr.is_finite() && lr > 0.0,
+            "AdamWBiasFactors::write got invalid lr {lr}"
+        );
+        self.buf.upload(stream, &[bc1, bc2, lr])
     }
 
     pub fn ptr(&self) -> cudarc::driver::sys::CUdeviceptr {
@@ -710,4 +723,244 @@ mod cpu_state_tests {
         assert!(bc1 < 1.001, "bc1={bc1}");
         assert!(bc2 < 1.2, "bc2={bc2}");
     }
+}
+
+/// One tensor's coordinates for the fused multi-tensor AdamW step.
+#[derive(Clone, Copy, Debug)]
+pub struct AdamWTensorSpec {
+    /// f32 master weight base pointer.
+    pub weight: cudarc::driver::sys::CUdeviceptr,
+    /// Gradient slice base pointer (inside the flat arena).
+    pub grad: cudarc::driver::sys::CUdeviceptr,
+    /// Optional typed shadow to store `FROM_F(new_p)` into (0 = none).
+    pub out: cudarc::driver::sys::CUdeviceptr,
+    /// Element size of the shadow in bytes (2 = bf16/f16; ignored when
+    /// `out == 0`).
+    pub out_elt_bytes: usize,
+    pub len: usize,
+    /// Member of the reference no-decay group (a_log, D, dt bias, norm
+    /// scales) — decays only when `reference_no_decay` is off.
+    pub no_decay: bool,
+}
+
+/// Chunk table for `adamw_step_multi_*`: built ONCE at construction (the
+/// flat-arena layout is static for the life of a trainer) and replayed
+/// every step — 243 per-tensor launches become one kernel.
+pub struct AdamWMultiPlan {
+    table: crate::mamba_ssm::gpu::buffers::GpuByteBuffer,
+    n_chunks: usize,
+}
+
+/// Elements per chunk. 64k x 4B = 256 KB of f32 per block keeps the
+/// grid in the hundreds at 91M params while single-block tensors (the
+/// d_model-sized biases) still land whole.
+pub const ADAMW_MULTI_CHUNK: usize = 65_536;
+
+/// Build the device chunk table. `flat_base` is `grads.flat` base — the
+/// m/v slices mirror the grad offsets exactly (same arena layout).
+pub fn build_multi_plan(
+    stream: &Arc<CudaStream>,
+    adam: &GpuAdamW,
+    flat_base: cudarc::driver::sys::CUdeviceptr,
+    specs: &[AdamWTensorSpec],
+    reference_no_decay: bool,
+    weight_decay: f32,
+) -> Result<AdamWMultiPlan, String> {
+    let mut bytes: Vec<u8> = Vec::new();
+    let mut n_chunks = 0usize;
+    let m_base = adam.m.cached_ptr();
+    let v_base = adam.v.cached_ptr();
+    for spec in specs {
+        if spec.len == 0 {
+            // Empty master tensors (HF identity input_proj) hold no slot
+            // in the arena at all — no chunk, no phantom m/v stepping.
+            continue;
+        }
+        let off_bytes = spec.grad - flat_base;
+        debug_assert!(
+            (off_bytes / 4) as usize + spec.len <= adam.m.len(),
+            "adamw multi plan: m/v slice OOB"
+        );
+        let wd = if spec.no_decay && reference_no_decay {
+            0.0f32
+        } else {
+            weight_decay
+        };
+        let mut start = 0usize;
+        while start < spec.len {
+            let n = (spec.len - start).min(ADAMW_MULTI_CHUNK);
+            let b4 = (start * 4) as u64;
+            let entry: [u64; 6] = [
+                spec.weight + b4,
+                spec.grad + b4,
+                m_base + off_bytes + b4,
+                v_base + off_bytes + b4,
+                if spec.out == 0 {
+                    0
+                } else {
+                    spec.out + (start * spec.out_elt_bytes) as u64
+                },
+                (n as u64) | (u64::from(wd.to_bits()) << 32),
+            ];
+            for w in entry {
+                bytes.extend_from_slice(&w.to_le_bytes());
+            }
+            n_chunks += 1;
+            start += n;
+        }
+    }
+    if n_chunks == 0 {
+        return Err("adamw multi plan: no non-empty tensors".to_string());
+    }
+    let mut table = crate::mamba_ssm::gpu::buffers::GpuByteBuffer::zeros(stream, bytes.len())?;
+    table.upload_bytes(stream, &bytes)?;
+    Ok(AdamWMultiPlan { table, n_chunks })
+}
+
+/// Launch the fused step: one kernel over every chunk. `bias_factors_ptr`
+/// is the 3-element `[bc1, bc2, lr]` device buffer.
+pub fn step_multi(
+    ctx: &GpuCtx,
+    kernel: &CudaFunction,
+    plan: &AdamWMultiPlan,
+    adam: &GpuAdamW,
+    bias_factors_ptr: cudarc::driver::sys::CUdeviceptr,
+) -> Result<(), String> {
+    let table_ptr = plan.table.cached_ptr();
+    let cfg = cudarc::driver::LaunchConfig {
+        grid_dim: (plan.n_chunks as u32, 1, 1),
+        block_dim: (256, 1, 1),
+        shared_mem_bytes: 0,
+    };
+    let mut b = ctx.stream.launch_builder(kernel);
+    b.arg(&table_ptr);
+    b.arg(&adam.beta1);
+    b.arg(&adam.beta2);
+    b.arg(&adam.eps);
+    b.arg(&bias_factors_ptr);
+    unsafe { b.launch(cfg) }
+        .map(|_| ())
+        .map_err(|e| format!("adamw_step_multi: {e:?}"))
+}
+
+/// The M1 tensor walk in the EXACT `GpuMambaGrads::new` layout, f32 lane
+/// (no typed shadow — `out = 0`).
+pub fn m1_specs(
+    weights: &crate::mamba_ssm::gpu::weights::GpuMambaTrainWeights,
+    grads: &crate::mamba_ssm::gpu::weights::GpuMambaGrads,
+) -> Vec<AdamWTensorSpec> {
+    let f32_spec = |w: &GpuBuffer, g: &GradSlice, no_decay: bool| AdamWTensorSpec {
+        weight: w.cached_ptr(),
+        grad: g.ptr(),
+        out: 0,
+        out_elt_bytes: 0,
+        len: w.len(),
+        no_decay,
+    };
+    let mut specs = Vec::with_capacity(3 + 10 * weights.layers.len());
+    specs.push(f32_spec(&weights.input_proj_w, &grads.input_proj_w, false));
+    specs.push(f32_spec(&weights.input_proj_b, &grads.input_proj_b, false));
+    for (lw, lg) in weights.layers.iter().zip(&grads.layers) {
+        specs.push(f32_spec(&lw.norm_weight, &lg.norm_weight, true));
+        specs.push(f32_spec(&lw.in_proj_w, &lg.in_proj_w, false));
+        specs.push(f32_spec(&lw.conv1d_weight, &lg.conv1d_weight, false));
+        specs.push(f32_spec(&lw.conv1d_bias, &lg.conv1d_bias, false));
+        specs.push(f32_spec(&lw.x_proj_w, &lg.x_proj_w, false));
+        specs.push(f32_spec(&lw.dt_proj_w, &lg.dt_proj_w, false));
+        specs.push(f32_spec(&lw.dt_proj_b, &lg.dt_proj_b, true));
+        specs.push(f32_spec(&lw.a_log, &lg.a_log, true));
+        specs.push(f32_spec(&lw.d_param, &lg.d_param, true));
+        specs.push(f32_spec(&lw.out_proj_w, &lg.out_proj_w, false));
+    }
+    specs.push(f32_spec(&weights.norm_f_weight, &grads.norm_f_weight, true));
+    specs
+}
+
+/// Mixed-lane walk: identical order, and the four BULK weights carry
+/// their typed compute slot as the fused shadow — the optimizer stores
+/// `FROM_F(new_p)` in the same kernel, killing the per-step cast pass.
+pub fn m1_specs_mixed(
+    weights: &crate::mamba_ssm::gpu::weights_mixed_train::GpuMambaTrainMixedWeights,
+    grads: &crate::mamba_ssm::gpu::weights::GpuMambaGrads,
+) -> Vec<AdamWTensorSpec> {
+    let out_elt = match weights.dtype {
+        crate::mamba_ssm::gpu::dtype::WeightDtype::F32 => 4usize,
+        _ => 2usize,
+    };
+    let mut specs = m1_specs(&weights.master, grads);
+    // Positions in the walk: 0 input_proj_w (bulk), then per layer at
+    // base+1 in_proj_w, base+4 x_proj_w, base+5 dt_proj_w, base+9
+    // out_proj_w. Wire the shadows by walking the compute side in the
+    // same order instead of indexing arithmetic.
+    let mut wire = |idx: usize, slot: &crate::mamba_ssm::gpu::buffers::WeightSliceDyn| {
+        debug_assert_eq!(specs[idx].len, slot.len_elems());
+        specs[idx].out = slot.ptr();
+        specs[idx].out_elt_bytes = out_elt;
+    };
+    wire(0, &weights.compute.input_proj_w);
+    for (li, cw) in weights.compute.layers.iter().enumerate() {
+        let base = 2 + li * 10;
+        wire(base + 1, &cw.in_proj_w);
+        wire(base + 4, &cw.x_proj_w);
+        wire(base + 5, &cw.dt_proj_w);
+        wire(base + 9, &cw.out_proj_w);
+    }
+    specs
+}
+
+/// The M3 tensor walk in the `Mamba3Grads` layout, f32 lane.
+pub fn m3_specs(
+    weights: &crate::mamba3_siso::gpu::weights::GpuMamba3Weights,
+    grads: &crate::mamba3_siso::gpu::weights::GpuMamba3Grads,
+) -> Vec<AdamWTensorSpec> {
+    let f32_spec = |w: &GpuBuffer, g: &GradSlice, no_decay: bool| AdamWTensorSpec {
+        weight: w.cached_ptr(),
+        grad: g.ptr(),
+        out: 0,
+        out_elt_bytes: 0,
+        len: w.len(),
+        no_decay,
+    };
+    let mut specs = Vec::with_capacity(3 + 10 * weights.layers.len());
+    specs.push(f32_spec(&weights.input_proj_w, &grads.input_proj_w, false));
+    specs.push(f32_spec(&weights.input_proj_b, &grads.input_proj_b, false));
+    for (lw, lg) in weights.layers.iter().zip(&grads.layers) {
+        specs.push(f32_spec(&lw.norm_weight, &lg.norm_weight, true));
+        specs.push(f32_spec(&lw.in_proj_w, &lg.in_proj_w, false));
+        specs.push(f32_spec(&lw.dt_bias, &lg.dt_bias, true));
+        specs.push(f32_spec(&lw.b_norm_weight, &lg.b_norm_weight, true));
+        specs.push(f32_spec(&lw.c_norm_weight, &lg.c_norm_weight, true));
+        specs.push(f32_spec(&lw.b_bias, &lg.b_bias, false));
+        specs.push(f32_spec(&lw.c_bias, &lg.c_bias, false));
+        specs.push(f32_spec(&lw.d_param, &lg.d_param, true));
+        specs.push(f32_spec(&lw.norm_gate_weight, &lg.norm_gate_weight, true));
+        specs.push(f32_spec(&lw.out_proj_w, &lg.out_proj_w, false));
+    }
+    specs.push(f32_spec(&weights.norm_f_weight, &grads.norm_f_weight, true));
+    specs
+}
+
+/// M3 mixed-lane walk: in_proj_w / out_proj_w carry their typed compute
+/// shadows (the M3 bulk set), everything else stays f32-synced.
+pub fn m3_specs_mixed(
+    weights: &crate::mamba3_siso::gpu::weights_mixed_train::GpuMamba3TrainMixedWeights,
+    grads: &crate::mamba3_siso::gpu::weights::GpuMamba3Grads,
+) -> Vec<AdamWTensorSpec> {
+    let out_elt = match weights.dtype {
+        crate::mamba_ssm::gpu::dtype::WeightDtype::F32 => 4usize,
+        _ => 2usize,
+    };
+    let mut specs = m3_specs(&weights.master, grads);
+    let mut wire = |idx: usize, slot: &crate::mamba_ssm::gpu::buffers::WeightSliceDyn| {
+        debug_assert_eq!(specs[idx].len, slot.len_elems());
+        specs[idx].out = slot.ptr();
+        specs[idx].out_elt_bytes = out_elt;
+    };
+    wire(0, &weights.compute.input_proj_w);
+    for (li, cw) in weights.compute.layers.iter().enumerate() {
+        let base = 2 + li * 10;
+        wire(base + 1, &cw.in_proj_w);
+        wire(base + 9, &cw.out_proj_w);
+    }
+    specs
 }

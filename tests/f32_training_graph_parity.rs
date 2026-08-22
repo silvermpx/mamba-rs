@@ -9,7 +9,9 @@
 #![cfg(feature = "cuda")]
 
 use mamba_rs::config::MambaConfig;
-use mamba_rs::mamba_ssm::gpu::adamw::{AdamWBiasFactors, GpuAdamW, step_m1_capturable};
+use mamba_rs::mamba_ssm::gpu::adamw::{
+    AdamWBiasFactors, GpuAdamW, build_multi_plan, m1_specs, step_m1_capturable,
+};
 use mamba_rs::mamba_ssm::gpu::backward::gpu_backward_mamba_backbone;
 use mamba_rs::mamba_ssm::gpu::buffers::GpuBuffer;
 use mamba_rs::mamba_ssm::gpu::context::GpuCtx;
@@ -141,7 +143,7 @@ fn m1_f32_training_graph_matches_eager() {
     )
     .unwrap();
     let (_, bc1, bc2) = e_adam.advance();
-    e_bias.write(&ctx.stream, bc1, bc2).unwrap();
+    e_bias.write(&ctx.stream, bc1, bc2, 1e-4).unwrap();
     step_m1_capturable(
         &ctx,
         &ctx.kernels.adamw_step_f32_capturable,
@@ -178,7 +180,17 @@ fn m1_f32_training_graph_matches_eager() {
     let mut g_bias = AdamWBiasFactors::new(&ctx.stream).unwrap();
     g_input.upload(&ctx.stream, &inp).unwrap();
     g_dtemp.upload(&ctx.stream, &dt).unwrap();
-    g_bias.write(&ctx.stream, 1.0, 1.0).unwrap();
+    g_bias.write(&ctx.stream, 1.0, 1.0, 1e-4).unwrap();
+
+    let g_plan = build_multi_plan(
+        &ctx.stream,
+        &g_adam,
+        g_grads.flat.cached_ptr(),
+        &m1_specs(&g_w, &g_grads),
+        g_adam.reference_no_decay,
+        g_adam.weight_decay,
+    )
+    .unwrap();
 
     let graph = GpuMambaF32TrainingStepGraph::capture(
         &ctx,
@@ -187,6 +199,7 @@ fn m1_f32_training_graph_matches_eager() {
             weights: &mut g_w,
             adam: &g_adam,
             bias: &g_bias,
+            multi_plan: &g_plan,
             grads: &mut g_grads,
             acts: &mut g_acts,
             scratch: &mut g_scratch,
@@ -201,7 +214,7 @@ fn m1_f32_training_graph_matches_eager() {
     )
     .unwrap();
     let (_, bc1, bc2) = g_adam.advance();
-    g_bias.write(&ctx.stream, bc1, bc2).unwrap();
+    g_bias.write(&ctx.stream, bc1, bc2, 1e-4).unwrap();
     graph
         .replay(&MambaF32Replay {
             weights: &g_w,
@@ -236,7 +249,7 @@ fn m1_f32_training_graph_matches_eager() {
 
 #[test]
 fn m3_f32_training_graph_matches_eager() {
-    use mamba_rs::mamba_ssm::gpu::adamw::step_m3_capturable;
+    use mamba_rs::mamba_ssm::gpu::adamw::{m3_specs, step_m3_capturable};
     use mamba_rs::mamba3_siso::config::Mamba3Config;
     use mamba_rs::mamba3_siso::gpu::backward::gpu_backward_mamba3_backbone;
     use mamba_rs::mamba3_siso::gpu::forward::gpu_forward_mamba3_backbone;
@@ -382,7 +395,7 @@ fn m3_f32_training_graph_matches_eager() {
     )
     .unwrap();
     let (_, bc1, bc2) = e_adam.advance();
-    e_bias.write(&ctx.stream, bc1, bc2).unwrap();
+    e_bias.write(&ctx.stream, bc1, bc2, 1e-4).unwrap();
     step_m3_capturable(
         &ctx,
         &m3k.adamw_step_f32_capturable,
@@ -414,7 +427,16 @@ fn m3_f32_training_graph_matches_eager() {
     ) = make();
     g_mi.upload(&ctx.stream, &inp).unwrap();
     g_dtemp.upload(&ctx.stream, &dt).unwrap();
-    g_bias.write(&ctx.stream, 1.0, 1.0).unwrap();
+    g_bias.write(&ctx.stream, 1.0, 1.0, 1e-4).unwrap();
+    let g_plan3 = build_multi_plan(
+        &ctx.stream,
+        &g_adam,
+        g_grads.flat.cached_ptr(),
+        &m3_specs(&g_w, &g_grads),
+        g_adam.reference_no_decay,
+        g_adam.weight_decay,
+    )
+    .unwrap();
     let graph = GpuMamba3F32TrainingStepGraph::capture(
         &M3Exec {
             ctx: &ctx,
@@ -425,6 +447,7 @@ fn m3_f32_training_graph_matches_eager() {
             weights: &mut g_w,
             adam: &g_adam,
             bias: &g_bias,
+            multi_plan: &g_plan3,
             grads: &mut g_grads,
             acts: &mut g_acts,
             scratch: &mut g_scratch,
@@ -441,7 +464,7 @@ fn m3_f32_training_graph_matches_eager() {
     )
     .unwrap();
     let (_, bc1, bc2) = g_adam.advance();
-    g_bias.write(&ctx.stream, bc1, bc2).unwrap();
+    g_bias.write(&ctx.stream, bc1, bc2, 1e-4).unwrap();
     graph
         .replay(&Mamba3F32Replay {
             weights: &g_w,

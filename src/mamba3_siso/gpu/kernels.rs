@@ -77,6 +77,7 @@ pub struct Mamba3Kernels {
     /// CUDA-Graph-capturable variant: bias factors read from a device
     /// buffer instead of scalar args.
     pub adamw_step_f32_capturable: CudaFunction,
+    pub adamw_step_multi: TypedKernel,
 
     // ── Chunked parallel scan (mamba3_chunked.cu) ──
     pub m3_preprocess_chunks: CudaFunction,
@@ -294,6 +295,11 @@ impl Mamba3Kernels {
             // AdamW optimizer
             adamw_step_f32: get("adamw_step_f32")?,
             adamw_step_f32_capturable: get("adamw_step_f32_capturable")?,
+            adamw_step_multi: TypedKernel {
+                f32: get("adamw_step_multi_f32")?,
+                bf16: get("adamw_step_multi_bf16")?,
+                f16: get("adamw_step_multi_f16")?,
+            },
 
             // Chunked parallel scan
             m3_preprocess_chunks: get("m3_preprocess_chunks")?,
