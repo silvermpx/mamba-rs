@@ -311,22 +311,27 @@ pub fn gpu_backward_mamba3_layer(
             // Two chunk-by-state operand tiles, V/dO tiles, two per-step
             // lanes, the da/qk lanes, and TWO head-state tiles (true
             // states + d_state staging for the warp-parallel dADT).
-            let smem =
-                (2 * cs_u * ds + 2 * cs_u * hd + 4 * cs_u + 2 * hd * ds + 2 * cs_u * cs_u) * 4;
-            // The two CS x CS pair matrices (P1.7(4)) push the tile past
-            // the 48 KB static budget at CS=64; the loader opted every
-            // dqkv variant into the 99 KB carveout — fail loudly here
-            // instead of letting the launch die with a bare CUDA error.
+            // P1.7(2): pack two heads per block when nh is even — a 16-lane
+            // head fills a full warp. Each head gets a private smem slice,
+            // so per-head arithmetic (and bits) are unchanged.
+            let head_pack: u32 = if nh % 2 == 0 { 2 } else { 1 };
+            let per_head_floats =
+                2 * cs_u * ds + 2 * cs_u * hd + 4 * cs_u + 2 * hd * ds + cs_u * (cs_u - 1);
+            let smem = per_head_floats * head_pack as usize * 4;
+            // The CS x CS pair matrices (P1.7(4)) plus head packing push the
+            // tile to ~71 KB at CS=64 packed; the loader opted every dqkv variant
+            // into a 160 KB carveout — fail loudly here with the config
+            // named instead of letting the launch die with a bare CUDA error.
             if smem > 99 * 1024 {
                 return Err(format!(
                     "m3_dqkv shared-memory tile {} B exceeds the 99 KB opt-in \
-                     (CS={cs_u} hd={hd} ds={ds}) — shrink the chunk size or state",
+                     (CS={cs_u} hd={hd} ds={ds} pack={head_pack}) — shrink the chunk size or state",
                     smem
                 ));
             }
             let cfg = cudarc::driver::LaunchConfig {
-                grid_dim: (nh as u32, dims.batch as u32, 1),
-                block_dim: (hd as u32, 1, 1),
+                grid_dim: ((nh as u32).div_ceil(head_pack), dims.batch as u32, 1),
+                block_dim: (hd as u32, head_pack, 1),
                 shared_mem_bytes: smem as u32,
             };
             let mut builder = ctx.stream.launch_builder(&m3k.m3_dqkv);

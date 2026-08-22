@@ -457,6 +457,9 @@ impl Mamba3Kernels {
         // 32 needs ~67 KB), not only at raised state capacities.
         {
             use cudarc::driver::sys::CUfunction_attribute_enum as FnAttr;
+            // 99 KB: consumer parts (sm_89/sm_120) cap the per-block opt-in
+            // near 99-100 KB; the triangle-packed pair matrices (P1.7(4))
+            // plus two-head packing (P1.7(2)) fit at ~71 KB for CS=64.
             let budget: i32 = 99 * 1024;
             for f in [
                 &kernels.m3_dqkv,
