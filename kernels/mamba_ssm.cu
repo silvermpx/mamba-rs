@@ -734,6 +734,45 @@ DEFINE_SSM_REDUCE_D_BC_FUSED(f32,  float)
 DEFINE_SSM_REDUCE_D_BC_FUSED(bf16, __nv_bfloat16)
 DEFINE_SSM_REDUCE_D_BC_FUSED(f16,  __half)
 
+// T-major twin of ssm_reduce_d_BC_*: reads the PARALLEL route's
+// [b][n][d][t] locals (the S2 tape layout). Thread <-> (b, n, t) with t
+// innermost so warp reads coalesce; the inner d loop stays ASCENDING
+// with the same f32 sum and the same `= (0.0f + sum)` store, so every
+// output VALUE is bit-identical to the historical reducer. The output
+// layout ([b*T + t]*ds + n) is unchanged — downstream consumers never
+// see the tape layout.
+#define DEFINE_SSM_REDUCE_D_BC_TMAJOR(SUFFIX, TY)                              \
+extern "C" __global__ void ssm_reduce_d_BC_tmajor_##SUFFIX(                    \
+    float* d_B_out,           /* [batch * T * d_state] */                      \
+    float* d_C_out,           /* [batch * T * d_state] */                      \
+    const TY* d_B_local,      /* [batch * d_state * d_inner * T] */            \
+    const TY* d_C_local,      /* [batch * d_state * d_inner * T] */            \
+    int batch, int T, int d_inner, int d_state                                 \
+) {                                                                            \
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;                           \
+    int total = batch * T * d_state;                                           \
+    if (idx >= total) return;                                                  \
+    int t = idx % T;                                                           \
+    int rem = idx / T;                                                         \
+    int n = rem % d_state;                                                     \
+    int b = rem / d_state;                                                     \
+    int out_idx = (b * T + t) * d_state + n;                                   \
+    float sum_b = 0.0f;                                                        \
+    for (int d = 0; d < d_inner; d++) {                                        \
+        sum_b += to_f(d_B_local[((b * d_state + n) * d_inner + d) * T + t]);   \
+    }                                                                          \
+    d_B_out[out_idx] = 0.0f + sum_b;                                           \
+    float sum_c = 0.0f;                                                        \
+    for (int d = 0; d < d_inner; d++) {                                        \
+        sum_c += to_f(d_C_local[((b * d_state + n) * d_inner + d) * T + t]);   \
+    }                                                                          \
+    d_C_out[out_idx] = 0.0f + sum_c;                                           \
+}
+
+DEFINE_SSM_REDUCE_D_BC_TMAJOR(f32,  float)
+DEFINE_SSM_REDUCE_D_BC_TMAJOR(bf16, __nv_bfloat16)
+DEFINE_SSM_REDUCE_D_BC_TMAJOR(f16,  __half)
+
 // Reduce d_D: d_D_out[d] = sum_b(d_D_local[b * d_inner + d])
 extern "C" __global__ void ssm_reduce_d_D(
     float* d_D_out,           // [d_inner] accumulated

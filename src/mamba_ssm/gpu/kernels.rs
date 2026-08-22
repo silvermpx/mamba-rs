@@ -70,6 +70,9 @@ pub struct MambaKernels {
     /// Fused dB+dC reduction `[B*T*d_state]` each, `=`-store (no memset
     /// precondition); .get(dtype) picks the input promotion variant.
     pub ssm_reduce_d_bc_typed: TypedKernel,
+    /// T-major twin for the PARALLEL route's [b][n][d][t] locals (S2 tape
+    /// layout). Same ascending-d sum, same output values and layout.
+    pub ssm_reduce_d_bc_tmajor_typed: TypedKernel,
     /// Reduce local SSM grads to dD `[d_inner]`.
     pub ssm_reduce_d_d: CudaFunction,
     /// Reduce local SSM grads to d_a_log `[d_inner*d_state]`.
@@ -638,6 +641,11 @@ impl MambaKernels {
                 f32: get("ssm_reduce_d_BC_f32")?,
                 bf16: get("ssm_reduce_d_BC_bf16")?,
                 f16: get("ssm_reduce_d_BC_f16")?,
+            },
+            ssm_reduce_d_bc_tmajor_typed: TypedKernel {
+                f32: get("ssm_reduce_d_BC_tmajor_f32")?,
+                bf16: get("ssm_reduce_d_BC_tmajor_bf16")?,
+                f16: get("ssm_reduce_d_BC_tmajor_f16")?,
             },
             ssm_reduce_d_d: get("ssm_reduce_d_D")?,
             ssm_reduce_d_a_log: get("ssm_reduce_d_a_log")?,

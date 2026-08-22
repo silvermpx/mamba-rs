@@ -302,10 +302,15 @@ pub fn gpu_backward_mamba_layer_mixed(
         let t_i = t as i32;
         let di_i = di as i32;
         let ds_i = ds as i32;
-        // Fused d_B + d_C reducer — typed in → f32 out.
-        let mut bld = ctx
-            .stream
-            .launch_builder(k.ssm_reduce_d_bc_typed.get(dtype));
+        // Fused d_B + d_C reducer — typed in → f32 out. Parallel route
+        // reads the S2 T-major locals via the tmajor twin (same values,
+        // same output layout).
+        let reduce_bc = if dims.scan_mode.use_parallel(t, ds) {
+            k.ssm_reduce_d_bc_tmajor_typed.get(dtype)
+        } else {
+            k.ssm_reduce_d_bc_typed.get(dtype)
+        };
+        let mut bld = ctx.stream.launch_builder(reduce_bc);
         bld.arg(scratch.d_b_reduced.inner_mut());
         bld.arg(scratch.d_c_reduced.inner_mut());
         let src_b = scratch.d_b_local.cached_ptr();

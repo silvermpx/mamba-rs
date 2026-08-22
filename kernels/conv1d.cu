@@ -176,31 +176,36 @@ extern "C" __global__ void conv1d_burnin_forward(
     int d = idx % d_inner;
     int state_base = (b * d_inner + d) * d_conv;
 
+    // Register window (see the typed twin's note): same shifts, same
+    // values, no per-timestep global RMW chain.
+    float win[8];
+    if (d_conv > 8) return;
+    for (int k = 0; k < d_conv; k++) win[k] = state[state_base + k];
     for (int t = 0; t < T; t++) {
         int bt_di = (b * T + t) * d_inner + d;
 
-        // Shift register left + insert new value
         for (int k = 0; k < d_conv - 1; k++) {
-            state[state_base + k] = state[state_base + k + 1];
+            win[k] = win[k + 1];
         }
-        state[state_base + d_conv - 1] = x_branch[bt_di];
+        win[d_conv - 1] = x_branch[bt_di];
 
         // Save conv_state after shift (for backward)
         int cs_base = ((b * T + t) * d_inner + d) * d_conv;
         for (int k = 0; k < d_conv; k++) {
-            conv_states_out[cs_base + k] = state[state_base + k];
+            conv_states_out[cs_base + k] = win[k];
         }
 
         // Depthwise dot product
         float val = bias[d];
         for (int k = 0; k < d_conv; k++) {
-            val += state[state_base + k] * weight[d * d_conv + k];
+            val += win[k] * weight[d * d_conv + k];
         }
         post_conv_out[bt_di] = val;
 
         // Fused SiLU: u = val * sigmoid(val)
         u_out[bt_di] = val / (1.0f + exp2f(-val * 1.4426950408889634f));
     }
+    for (int k = 0; k < d_conv; k++) state[state_base + k] = win[k];
 }
 
 // Conv1d burnin forward NOSAVE variant (target network — no backward needed).
@@ -335,23 +340,31 @@ extern "C" __global__ void conv1d_burnin_forward_##SUFFIX(                   \
     int b = idx / d_inner;                                                   \
     int d = idx % d_inner;                                                   \
     int state_base = (b * d_inner + d) * d_conv;                             \
+    /* Register window: the sliding state used to round-trip through     \
+     * GLOBAL memory ~7 times per timestep (a 1300-deep dependent RMW    \
+     * chain on a 24-block grid). Same shifts, same values - the tape    \
+     * saves and every output are bit-identical. */                      \
+    float win[8];                                                        \
+    if (d_conv > 8) return;                                              \
+    for (int k = 0; k < d_conv; k++) win[k] = state[state_base + k];     \
     for (int t = 0; t < T_len; t++) {                                        \
         int bt_di = (b * T_len + t) * d_inner + d;                           \
         for (int k = 0; k < d_conv - 1; k++) {                               \
-            state[state_base + k] = state[state_base + k + 1];               \
+            win[k] = win[k + 1];                                             \
         }                                                                    \
-        state[state_base + d_conv - 1] = to_f(x_branch[bt_di]);              \
+        win[d_conv - 1] = to_f(x_branch[bt_di]);                             \
         for (int k = 0; k < d_conv; k++) {                                   \
             int save_idx = ((b * T_len + t) * d_inner + d) * d_conv + k;     \
-            conv_states_saved[save_idx] = state[state_base + k];             \
+            conv_states_saved[save_idx] = win[k];                            \
         }                                                                    \
         float val = bias[d];                                                 \
         for (int k = 0; k < d_conv; k++) {                                   \
-            val += state[state_base + k] * weight[d * d_conv + k];           \
+            val += win[k] * weight[d * d_conv + k];                          \
         }                                                                    \
         post_conv[bt_di] = FROM_F(val);                                      \
         u_out[bt_di] = FROM_F(val / (1.0f + exp2f(-val * 1.4426950408889634f))); \
     }                                                                        \
+    for (int k = 0; k < d_conv; k++) state[state_base + k] = win[k];         \
 }
 
 DEFINE_CONV1D_BURNIN(f32,  float,         from_f_f32)

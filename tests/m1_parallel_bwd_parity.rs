@@ -130,6 +130,43 @@ fn make_inputs(b: usize, t: usize, di: usize, ds: usize) -> BwdInputs {
     }
 }
 
+/// S2 T-major tape adapters: the parallel kernels read h_saved as
+/// [b][d][n][t+1] and write their dB/dC locals as [b][n][d][t]; the
+/// sequential reference keeps the historical layouts. Values are
+/// identical — these permutations let the two kernels share one logical
+/// input and one comparison space.
+fn h_to_tmajor(h: &[f32], b: usize, t: usize, di: usize, ds: usize) -> Vec<f32> {
+    let mut out = vec![0.0f32; h.len()];
+    for bb in 0..b {
+        for t1 in 0..=t {
+            for d in 0..di {
+                for n in 0..ds {
+                    let old = ((bb * (t + 1) + t1) * di + d) * ds + n;
+                    let new = ((bb * di + d) * ds + n) * (t + 1) + t1;
+                    out[new] = h[old];
+                }
+            }
+        }
+    }
+    out
+}
+
+fn locals_from_tmajor(x: &[f32], b: usize, t: usize, di: usize, ds: usize) -> Vec<f32> {
+    let mut out = vec![0.0f32; x.len()];
+    for bb in 0..b {
+        for t1 in 0..t {
+            for d in 0..di {
+                for n in 0..ds {
+                    let new = ((bb * ds + n) * di + d) * t + t1;
+                    let old = ((bb * t + t1) * di + d) * ds + n;
+                    out[old] = x[new];
+                }
+            }
+        }
+    }
+    out
+}
+
 fn run_seq_f32(ctx: &GpuCtx, k: &MambaKernels, inp: &BwdInputs) -> BwdOuts {
     let (b, t, di, ds) = (inp.b, inp.t, inp.di, inp.ds);
     let h_saved = upload_f32(ctx, &inp.h_saved);
@@ -213,7 +250,8 @@ fn run_seq_f32(ctx: &GpuCtx, k: &MambaKernels, inp: &BwdInputs) -> BwdOuts {
 
 fn run_par_typed(ctx: &GpuCtx, k: &MambaKernels, inp: &BwdInputs, dtype: WeightDtype) -> BwdOuts {
     let (b, t, di, ds) = (inp.b, inp.t, inp.di, inp.ds);
-    let h_saved = upload_f32(ctx, &inp.h_saved);
+    let h_tmajor = h_to_tmajor(&inp.h_saved, inp.b, inp.t, inp.di, inp.ds);
+    let h_saved = upload_f32(ctx, &h_tmajor);
     let delta = upload_typed(ctx, &inp.delta, dtype);
     let u = upload_typed(ctx, &inp.u, dtype);
     let b_buf = upload_typed(ctx, &inp.b_buf, dtype);
@@ -291,7 +329,10 @@ fn check_parity(b: usize, t: usize, di: usize, ds: usize, dtype: WeightDtype) {
     let (ctx, k) = make_ctx();
     let inp = make_inputs(b, t, di, ds);
     let (dd_seq, du_seq, dbl_seq, dcl_seq, ddd_seq, dal_seq) = run_seq_f32(&ctx, &k, &inp);
-    let (dd_par, du_par, dbl_par, dcl_par, ddd_par, dal_par) = run_par_typed(&ctx, &k, &inp, dtype);
+    let (dd_par, du_par, dbl_par_t, dcl_par_t, ddd_par, dal_par) =
+        run_par_typed(&ctx, &k, &inp, dtype);
+    let dbl_par = locals_from_tmajor(&dbl_par_t, b, t, di, ds);
+    let dcl_par = locals_from_tmajor(&dcl_par_t, b, t, di, ds);
 
     eprintln!("ssm_parallel_scan_bwd ({dtype:?}, B={b} T={t} di={di} ds={ds}):");
     let (cos_min, norm_tol) = match dtype {

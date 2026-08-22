@@ -293,7 +293,12 @@ extern "C" __global__ __launch_bounds__(128, 3) void ssm_parallel_scan_fwd(
 
     // Save initial SSM state at time index 0 (parallelized across threads)
     for (int n = threadIdx.x; n < d_state; n += NTHREADS) {
-        int hs_idx = (bid * (T + 1) + 0) * d_inner * d_state + did * d_state + n;
+        /* S2 T-major tape: [b][d][n][t+1] — lane stride over t is one
+         * element, so warp stores/loads coalesce (the old [b][t][d][n]
+         * layout put every lane in its own 32-byte sector). Layout is a
+         * property of the PARALLEL route; the sequential kernels keep
+         * the historical layout. */
+        int hs_idx = ((bid * d_inner + did) * d_state + n) * (T + 1) + 0;
         h_saved[hs_idx] = h[h_base + n];
     }
 
@@ -321,44 +326,19 @@ extern "C" __global__ __launch_bounds__(128, 3) void ssm_parallel_scan_fwd(
         // pattern to one pass per chunk. (m-8: the old text claimed
         // in-block coalescing, inverted.)
         // ================================================================
-        for (int s = threadIdx.x; s < CHUNK_SIZE; s += NTHREADS) {
-            int t = chunk_start + s;
-            if (t < T) {
-                smem_stage[s] = delta[(bid * T + t) * d_inner + did];
-            } else {
-                smem_stage[s] = 0.0f;
-            }
-        }
-        __syncthreads();
-
+        // Barrier diet (S2b): the staging round trip is value-neutral and
+        // its lane stride exceeded the 32-byte sector either way — direct
+        // loads drop the staging barriers with zero arithmetic change.
         float delta_vals[NITEMS];
-        #pragma unroll
-        for (int i = 0; i < NITEMS; i++) {
-            delta_vals[i] = smem_stage[threadIdx.x * NITEMS + i];
-        }
-        __syncthreads();
-
-        // ================================================================
-        // Coalesced u load via shared memory staging (same pattern).
-        // ================================================================
-        for (int s = threadIdx.x; s < CHUNK_SIZE; s += NTHREADS) {
-            int t = chunk_start + s;
-            if (t < T) {
-                smem_stage[s] = u[(bid * T + t) * d_inner + did];
-            } else {
-                smem_stage[s] = 0.0f;
-            }
-        }
-        __syncthreads();
-
         float u_vals[NITEMS];
         float delta_u_vals[NITEMS];
         #pragma unroll
         for (int i = 0; i < NITEMS; i++) {
-            u_vals[i] = smem_stage[threadIdx.x * NITEMS + i];
+            int t = chunk_start + threadIdx.x * NITEMS + i;
+            delta_vals[i] = (t < T) ? delta[(bid * T + t) * d_inner + did] : 0.0f;
+            u_vals[i] = (t < T) ? u[(bid * T + t) * d_inner + did] : 0.0f;
             delta_u_vals[i] = delta_vals[i] * u_vals[i];
         }
-        __syncthreads();
 
         // Initialize output accumulator: y = D * u
         float out_vals[NITEMS];
@@ -373,22 +353,8 @@ extern "C" __global__ __launch_bounds__(128, 3) void ssm_parallel_scan_fwd(
             // saving one FMUL per (t, d, n) triple.
             float a_dn = a_neg[did * d_state + n] * LOG2E;
 
-            // ============================================================
-            // Coalesced B load via shared memory staging.
-            // B layout: [batch, T, d_state] -- stride d_state between
-            // adjacent t, so we stage through smem for coalescing.
-            // ============================================================
-            for (int s = threadIdx.x; s < CHUNK_SIZE; s += NTHREADS) {
-                int t = chunk_start + s;
-                if (t < T) {
-                    smem_stage[s] = B[bid * T * d_state + t * d_state + n];
-                } else {
-                    smem_stage[s] = 0.0f;
-                }
-            }
-            __syncthreads();
-
-            // Build (da, db) pairs for this state dimension
+            // Build (da, db) pairs for this state dimension. B is read
+            // directly (barrier diet — see the delta/u note above).
             float thread_a[NITEMS];
             float thread_b[NITEMS];
 
@@ -398,7 +364,7 @@ extern "C" __global__ __launch_bounds__(128, 3) void ssm_parallel_scan_fwd(
                 if (t < T) {
                     // a_dn already has LOG2E folded in, so exp2f gives exp(delta*a)
                     float da = exp2f(delta_vals[i] * a_dn);
-                    float b_t = smem_stage[threadIdx.x * NITEMS + i];
+                    float b_t = B[bid * T * d_state + t * d_state + n];
                     thread_a[i] = da;
                     thread_b[i] = delta_u_vals[i] * b_t;
                     // No da saved: backward recomputes da from delta
@@ -408,7 +374,6 @@ extern "C" __global__ __launch_bounds__(128, 3) void ssm_parallel_scan_fwd(
                     thread_b[i] = 0.0f;
                 }
             }
-            __syncthreads();
 
             // Thread-local sequential scan of NITEMS (a, b) pairs
             #pragma unroll
@@ -462,22 +427,8 @@ extern "C" __global__ __launch_bounds__(128, 3) void ssm_parallel_scan_fwd(
                 smem_run_b[n] = block_a * run_b + block_b;
             }
 
-            // ============================================================
-            // Coalesced C load via shared memory staging.
-            // Same layout as B: [batch, T, d_state].
-            // ============================================================
-            __syncthreads();
-            for (int s = threadIdx.x; s < CHUNK_SIZE; s += NTHREADS) {
-                int t = chunk_start + s;
-                if (t < T) {
-                    smem_stage[s] = C[bid * T * d_state + t * d_state + n];
-                } else {
-                    smem_stage[s] = 0.0f;
-                }
-            }
-            __syncthreads();
-
             // Compute h[t] for each element and accumulate y[t] += h[t] * C[t,n]
+            // (C read directly — barrier diet, values unchanged)
             #pragma unroll
             for (int i = 0; i < NITEMS; i++) {
                 int t = chunk_start + threadIdx.x * NITEMS + i;
@@ -496,16 +447,15 @@ extern "C" __global__ __launch_bounds__(128, 3) void ssm_parallel_scan_fwd(
                     float h_t = final_a * h_0 + final_b;
 
                     // Save h for backward (at time index t+1)
-                    int hs_idx = (bid * (T + 1) + (t + 1)) * d_inner * d_state + did * d_state + n;
+                    int hs_idx =
+                        ((bid * d_inner + did) * d_state + n) * (T + 1) + (t + 1);
                     h_saved[hs_idx] = h_t;
 
-                    // Single-pass Y accumulation
-                    float c_t = smem_stage[threadIdx.x * NITEMS + i];
+                    // Single-pass Y accumulation (C read directly)
+                    float c_t = C[bid * T * d_state + t * d_state + n];
                     out_vals[i] += h_t * c_t;
                 }
             }
-
-            __syncthreads();
         } // end d_state loop
 
         // ================================================================
@@ -808,8 +758,8 @@ ssm_parallel_scan_fwd_##SUFFIX(                                               \
     float D_d = D[did];                                                       \
     int h_base = (bid * d_inner + did) * d_state;                             \
     for (int n = threadIdx.x; n < d_state; n += NTHREADS) {                   \
-        int hs_idx = (bid * (T + 1) + 0) * d_inner * d_state                  \
-                     + did * d_state + n;                                     \
+        /* S2 T-major tape (see the plain fwd note). */                       \
+        int hs_idx = ((bid * d_inner + did) * d_state + n) * (T + 1) + 0;     \
         h_saved[hs_idx] = h[h_base + n];                                      \
     }                                                                         \
     for (int n = threadIdx.x; n < d_state; n += NTHREADS) {                   \
@@ -820,36 +770,23 @@ ssm_parallel_scan_fwd_##SUFFIX(                                               \
     int n_chunks = (T + CHUNK_SIZE - 1) / CHUNK_SIZE;                         \
     for (int chunk = 0; chunk < n_chunks; chunk++) {                          \
         int chunk_start = chunk * CHUNK_SIZE;                                 \
-        for (int s = threadIdx.x; s < CHUNK_SIZE; s += NTHREADS) {            \
-            int t = chunk_start + s;                                          \
-            smem_stage[s] = (t < T)                                           \
-                ? delta[(bid * T + t) * d_inner + did]                        \
-                : FROM_F(0.0f);                                               \
-        }                                                                     \
-        __syncthreads();                                                      \
+        /* Barrier diet: the smem staging round trips for delta/u/B/C are     \
+         * value-neutral (same elements, same to_f) and their lane stride     \
+         * exceeded the 32-byte sector either way - direct loads drop the     \
+         * staging barriers with zero arithmetic change. y keeps its          \
+         * staging (the one genuinely coalescing store). */                   \
         float delta_vals[NITEMS];                                             \
-                                                             \
-        _Pragma("unroll")                                                      \
-        for (int i = 0; i < NITEMS; i++) {                                    \
-            delta_vals[i] = to_f(smem_stage[threadIdx.x * NITEMS + i]);       \
-        }                                                                     \
-        __syncthreads();                                                      \
-        for (int s = threadIdx.x; s < CHUNK_SIZE; s += NTHREADS) {            \
-            int t = chunk_start + s;                                          \
-            smem_stage[s] = (t < T)                                           \
-                ? u[(bid * T + t) * d_inner + did]                            \
-                : FROM_F(0.0f);                                               \
-        }                                                                     \
-        __syncthreads();                                                      \
         float u_vals[NITEMS];                                                 \
         float delta_u_vals[NITEMS];                                           \
-                                                             \
-        _Pragma("unroll")                                                      \
+        _Pragma("unroll")                                                     \
         for (int i = 0; i < NITEMS; i++) {                                    \
-            u_vals[i] = to_f(smem_stage[threadIdx.x * NITEMS + i]);           \
+            int t = chunk_start + threadIdx.x * NITEMS + i;                   \
+            delta_vals[i] =                                                   \
+                (t < T) ? to_f(delta[(bid * T + t) * d_inner + did]) : 0.0f;  \
+            u_vals[i] = (t < T) ? to_f(u[(bid * T + t) * d_inner + did])      \
+                                : 0.0f;                                       \
             delta_u_vals[i] = delta_vals[i] * u_vals[i];                      \
         }                                                                     \
-        __syncthreads();                                                      \
         float out_vals[NITEMS];                                               \
                                                              \
         _Pragma("unroll")                                                      \
@@ -858,22 +795,15 @@ ssm_parallel_scan_fwd_##SUFFIX(                                               \
         }                                                                     \
         for (int n = 0; n < d_state; n++) {                                   \
             float a_dn = a_neg[did * d_state + n] * LOG2E;                    \
-            for (int s = threadIdx.x; s < CHUNK_SIZE; s += NTHREADS) {        \
-                int t = chunk_start + s;                                      \
-                smem_stage[s] = (t < T)                                       \
-                    ? B[bid * T * d_state + t * d_state + n]                  \
-                    : FROM_F(0.0f);                                           \
-            }                                                                 \
-            __syncthreads();                                                  \
             float thread_a[NITEMS];                                           \
             float thread_b[NITEMS];                                           \
-                                                             \
-            _Pragma("unroll")                                                  \
+            _Pragma("unroll")                                                 \
             for (int i = 0; i < NITEMS; i++) {                                \
                 int t = chunk_start + threadIdx.x * NITEMS + i;               \
                 if (t < T) {                                                  \
                     float da = exp2f(delta_vals[i] * a_dn);                   \
-                    float b_t = to_f(smem_stage[threadIdx.x * NITEMS + i]);   \
+                    float b_t =                                               \
+                        to_f(B[bid * T * d_state + t * d_state + n]);         \
                     thread_a[i] = da;                                         \
                     thread_b[i] = delta_u_vals[i] * b_t;                      \
                 } else {                                                      \
@@ -881,7 +811,6 @@ ssm_parallel_scan_fwd_##SUFFIX(                                               \
                     thread_b[i] = 0.0f;                                       \
                 }                                                             \
             }                                                                 \
-            __syncthreads();                                                  \
                                                              \
             _Pragma("unroll")                                                  \
             for (int i = 1; i < NITEMS; i++) {                                \
@@ -916,13 +845,6 @@ ssm_parallel_scan_fwd_##SUFFIX(                                               \
                 smem_run_b[n] = block_a * run_b + block_b;                    \
             }                                                                 \
             __syncthreads();                                                  \
-            for (int s = threadIdx.x; s < CHUNK_SIZE; s += NTHREADS) {        \
-                int t = chunk_start + s;                                      \
-                smem_stage[s] = (t < T)                                       \
-                    ? C[bid * T * d_state + t * d_state + n]                  \
-                    : FROM_F(0.0f);                                           \
-            }                                                                 \
-            __syncthreads();                                                  \
                                                              \
             _Pragma("unroll")                                                  \
             for (int i = 0; i < NITEMS; i++) {                                \
@@ -933,14 +855,14 @@ ssm_parallel_scan_fwd_##SUFFIX(                                               \
                     float final_a = comp_a * run_a;                           \
                     float final_b = comp_a * run_b + comp_b;                  \
                     float h_t = final_a * h_0 + final_b;                      \
-                    int hs_idx = (bid * (T + 1) + (t + 1)) * d_inner * d_state\
-                                 + did * d_state + n;                         \
+                    int hs_idx = ((bid * d_inner + did) * d_state + n)        \
+                                 * (T + 1) + (t + 1);                         \
                     h_saved[hs_idx] = h_t;                                    \
-                    float c_t = to_f(smem_stage[threadIdx.x * NITEMS + i]);   \
+                    float c_t =                                               \
+                        to_f(C[bid * T * d_state + t * d_state + n]);         \
                     out_vals[i] += h_t * c_t;                                 \
                 }                                                             \
             }                                                                 \
-            __syncthreads();                                                  \
         }                                                                     \
                                                              \
         _Pragma("unroll")                                                      \
@@ -1218,7 +1140,9 @@ ssm_parallel_scan_bwd_##SUFFIX(                                               \
     float *smem_chunk_first_a = smem + SMEM_CHUNK_FIRST_A_OFF;                \
     T_ACT *smem_stage   = (T_ACT *)(smem + SMEM_STAGE_OFF);                   \
     float D_d = D[did];                                                       \
-    int hsave_base_b = bid * (T + 1) * d_inner * d_state;                     \
+    /* S2 T-major tape: per-(b,d) row base; +n*(T+1) selects the state
+     * lane's contiguous t-run. */                                            \
+    int hsave_row_bd = (bid * d_inner + did) * d_state;                       \
     /* Initialize inter-chunk reverse-scan postfix to identity (1, 0). The   \
        chunk_first_a buffer is set to 1.0 to act as `a_{t+1}=1` for the      \
        very-last timestep of the very-last chunk (no future). */              \
@@ -1233,48 +1157,21 @@ ssm_parallel_scan_bwd_##SUFFIX(                                               \
     for (int chunk_loop = 0; chunk_loop < n_chunks; chunk_loop++) {           \
         int chunk = n_chunks - 1 - chunk_loop;  /* walk REVERSE */            \
         int chunk_start = chunk * CHUNK_SIZE;                                 \
-        /* ---- Load typed delta into smem and upcast per-thread ---- */      \
-        for (int s = threadIdx.x; s < CHUNK_SIZE; s += NTHREADS) {            \
-            int t = chunk_start + s;                                          \
-            smem_stage[s] = (t < T)                                           \
-                ? delta[(bid * T + t) * d_inner + did]                        \
-                : FROM_F(0.0f);                                               \
-        }                                                                     \
-        __syncthreads();                                                      \
+        /* Barrier diet: delta/u/dy read directly (value-neutral; the         \
+         * staging's lane stride exceeded the 32-byte sector either way). */  \
         float delta_vals[NITEMS];                                             \
-        _Pragma("unroll")                                                      \
-        for (int i = 0; i < NITEMS; i++) {                                    \
-            delta_vals[i] = to_f(smem_stage[threadIdx.x * NITEMS + i]);       \
-        }                                                                     \
-        __syncthreads();                                                      \
-        /* ---- Load typed u ---- */                                          \
-        for (int s = threadIdx.x; s < CHUNK_SIZE; s += NTHREADS) {            \
-            int t = chunk_start + s;                                          \
-            smem_stage[s] = (t < T)                                           \
-                ? u[(bid * T + t) * d_inner + did]                            \
-                : FROM_F(0.0f);                                               \
-        }                                                                     \
-        __syncthreads();                                                      \
         float u_vals[NITEMS];                                                 \
-        _Pragma("unroll")                                                      \
-        for (int i = 0; i < NITEMS; i++) {                                    \
-            u_vals[i] = to_f(smem_stage[threadIdx.x * NITEMS + i]);           \
-        }                                                                     \
-        __syncthreads();                                                      \
-        /* ---- Load typed dy ---- */                                         \
-        for (int s = threadIdx.x; s < CHUNK_SIZE; s += NTHREADS) {            \
-            int t = chunk_start + s;                                          \
-            smem_stage[s] = (t < T)                                           \
-                ? dy[(bid * T + t) * d_inner + did]                           \
-                : FROM_F(0.0f);                                               \
-        }                                                                     \
-        __syncthreads();                                                      \
         float dy_vals[NITEMS];                                                \
-        _Pragma("unroll")                                                      \
+        _Pragma("unroll")                                                     \
         for (int i = 0; i < NITEMS; i++) {                                    \
-            dy_vals[i] = to_f(smem_stage[threadIdx.x * NITEMS + i]);          \
+            int t = chunk_start + threadIdx.x * NITEMS + i;                   \
+            delta_vals[i] =                                                   \
+                (t < T) ? to_f(delta[(bid * T + t) * d_inner + did]) : 0.0f;  \
+            u_vals[i] = (t < T) ? to_f(u[(bid * T + t) * d_inner + did])      \
+                                : 0.0f;                                       \
+            dy_vals[i] = (t < T) ? to_f(dy[(bid * T + t) * d_inner + did])    \
+                                 : 0.0f;                                      \
         }                                                                     \
-        __syncthreads();                                                      \
         /* ---- Per-t skip-path contributions accumulate in registers ---- */ \
         float d_u_acc[NITEMS];                                                \
         float d_delta_acc[NITEMS];                                            \
@@ -1293,34 +1190,22 @@ ssm_parallel_scan_bwd_##SUFFIX(                                               \
         for (int n = 0; n < d_state; n++) {                                   \
             float a_dn = a_neg[did * d_state + n];                            \
             float a_dn_log2 = a_dn * LOG2E;                                   \
-            /* Load typed B[chunk, n] */                                      \
-            for (int s = threadIdx.x; s < CHUNK_SIZE; s += NTHREADS) {        \
-                int t = chunk_start + s;                                      \
-                smem_stage[s] = (t < T)                                       \
-                    ? B_in[bid * T * d_state + t * d_state + n]               \
-                    : FROM_F(0.0f);                                           \
-            }                                                                 \
-            __syncthreads();                                                  \
             float b_vals[NITEMS];                                             \
-            _Pragma("unroll")                                                  \
+            _Pragma("unroll")                                                 \
             for (int i = 0; i < NITEMS; i++) {                                \
-                b_vals[i] = to_f(smem_stage[threadIdx.x * NITEMS + i]);       \
+                int t = chunk_start + threadIdx.x * NITEMS + i;               \
+                b_vals[i] = (t < T)                                           \
+                    ? to_f(B_in[bid * T * d_state + t * d_state + n])         \
+                    : 0.0f;                                                   \
             }                                                                 \
-            __syncthreads();                                                  \
-            /* Load typed C[chunk, n] */                                      \
-            for (int s = threadIdx.x; s < CHUNK_SIZE; s += NTHREADS) {        \
-                int t = chunk_start + s;                                      \
-                smem_stage[s] = (t < T)                                       \
-                    ? C_in[bid * T * d_state + t * d_state + n]               \
-                    : FROM_F(0.0f);                                           \
-            }                                                                 \
-            __syncthreads();                                                  \
             float c_vals[NITEMS];                                             \
-            _Pragma("unroll")                                                  \
+            _Pragma("unroll")                                                 \
             for (int i = 0; i < NITEMS; i++) {                                \
-                c_vals[i] = to_f(smem_stage[threadIdx.x * NITEMS + i]);       \
+                int t = chunk_start + threadIdx.x * NITEMS + i;               \
+                c_vals[i] = (t < T)                                           \
+                    ? to_f(C_in[bid * T * d_state + t * d_state + n])         \
+                    : 0.0f;                                                   \
             }                                                                 \
-            __syncthreads();                                                  \
             /* Per-i: da[i] = exp2(delta * a_neg), d_local[i] = dy * c */     \
             float da_vals[NITEMS];                                            \
             float d_local[NITEMS];                                            \
@@ -1446,14 +1331,14 @@ ssm_parallel_scan_bwd_##SUFFIX(                                               \
             for (int i = 0; i < NITEMS; i++) {                                \
                 int t = chunk_start + threadIdx.x * NITEMS + i;               \
                 if (t >= T) continue;                                         \
-                int btdn_typed = ((bid * T + t) * d_inner + did) * d_state    \
-                                 + n;                                         \
-                int h_curr_idx = hsave_base_b                                 \
-                    + (t + 1) * d_inner * d_state                             \
-                    + did * d_state + n;                                      \
-                int h_prev_idx = hsave_base_b                                 \
-                    + t * d_inner * d_state                                   \
-                    + did * d_state + n;                                      \
+                /* S2 T-major: locals go [b][n][d][t] so this kernel's
+                 * lane-over-t stores and the tmajor reducer's
+                 * lane-over-t reads both coalesce. */                        \
+                int btdn_typed = ((bid * d_state + n) * d_inner + did) * T    \
+                                 + t;                                         \
+                int h_row = (hsave_row_bd + n) * (T + 1);                     \
+                int h_curr_idx = h_row + (t + 1);                             \
+                int h_prev_idx = h_row + t;                                   \
                 float h_curr = h_saved[h_curr_idx];                           \
                 float h_prev = h_saved[h_prev_idx];                           \
                 float dh = dh_vals[i];                                        \

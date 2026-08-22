@@ -61,8 +61,15 @@ enum GemmTier {
 }
 
 fn run_once(steps: usize, tier: GemmTier) -> Vec<f32> {
+    run_once_at(steps, tier, PARALLEL_SCAN_THRESHOLD + 44)
+}
+
+/// Shape-parameterized twin: the historical digest shape (T=300) runs a
+/// SINGLE parallel-scan chunk, so the inter-chunk carry — exactly what
+/// the S2 tape work rewires — was outside the instrument. Multi-chunk
+/// arms pin it.
+fn run_once_at(steps: usize, tier: GemmTier, seq_len: usize) -> Vec<f32> {
     let (batch, input_dim) = (1usize, 48usize);
-    let seq_len = PARALLEL_SCAN_THRESHOLD + 44;
     let cfg = MambaConfig {
         d_model: 64,
         n_layers: 2,
@@ -172,5 +179,41 @@ fn print_run_digests() {
             }
         }
         println!("DIGEST {tier:?}: {h:016x} ({} weights)", w.len());
+    }
+}
+
+/// Multi-chunk (T=1300 -> 2 chunks) run-to-run bit identity on the
+/// batch-invariant tier — the campaign shape's chunk count.
+#[test]
+fn multichunk_run_to_run_bit_identical_bi() {
+    let a = run_once_at(3, GemmTier::BatchInvariant, 1300);
+    let b = run_once_at(3, GemmTier::BatchInvariant, 1300);
+    let diverged = a
+        .iter()
+        .zip(&b)
+        .filter(|(x, y)| x.to_bits() != y.to_bits())
+        .count();
+    assert_eq!(diverged, 0, "multichunk BI run-to-run diverged");
+}
+
+/// Digest printer for the multi-chunk shapes (2 and 3 chunks) — the A/B
+/// instrument for tape-layout work. Compare across BUILDS, not runs.
+#[test]
+#[ignore = "digest printer for cross-build A/B"]
+fn print_run_digests_multichunk() {
+    for (label, t) in [("T1300(2ch)", 1300usize), ("T2100(3ch)", 2100)] {
+        for tier in [
+            GemmTier::Cublas,
+            GemmTier::BatchInvariant,
+            GemmTier::BatchInvariantTc,
+        ] {
+            let w = run_once_at(3, tier, t);
+            let mut h: u64 = 0xcbf29ce484222325;
+            for v in &w {
+                h ^= u64::from(v.to_bits());
+                h = h.wrapping_mul(0x100000001b3);
+            }
+            println!("DIGEST-MC {label} {tier:?}: {h:016x} ({} weights)", w.len());
+        }
     }
 }

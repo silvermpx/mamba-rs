@@ -173,12 +173,20 @@ pub fn gpu_backward_mamba_layer(
         let t_i = t as i32;
         let di_i = di as i32;
         let ds_i = ds as i32;
-        // Fused d_B + d_C reduction
-        let mut builder = ctx.stream.launch_builder(
+        // Fused d_B + d_C reduction. The PARALLEL route writes its
+        // locals T-major (S2 tape layout) and takes the tmajor twin;
+        // the sequential route keeps the historical layout + reducer.
+        // Values and output layout are identical either way.
+        let reduce_bc = if dims.scan_mode.use_parallel(t, ds) {
+            ctx.kernels
+                .ssm_reduce_d_bc_tmajor_typed
+                .get(super::dtype::WeightDtype::F32)
+        } else {
             ctx.kernels
                 .ssm_reduce_d_bc_typed
-                .get(super::dtype::WeightDtype::F32),
-        );
+                .get(super::dtype::WeightDtype::F32)
+        };
+        let mut builder = ctx.stream.launch_builder(reduce_bc);
         builder.arg(scratch.d_b_reduced.inner_mut());
         builder.arg(scratch.d_c_reduced.inner_mut());
         builder.arg(scratch.d_b_local.inner());
