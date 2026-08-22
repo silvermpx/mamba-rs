@@ -1,5 +1,84 @@
 # Changelog
 
+## 0.6.3 (2026-08-22)
+
+### Fixed
+
+- The parallel reverse-scan backward accumulates its per-chunk `d_a`
+  partials into `d_a_log_local` with `+=`; the pre-launch zeroing
+  removed in 0.6.2's dead-work pass is restored on the parallel route
+  (the sequential kernel keeps its register-accumulator store and needs
+  no memset). Stale scratch poisoned the `a_log` gradients with NaN;
+  under f16 the loss scaler read the NaN as a permanent overflow,
+  halved the scale to 1.0 and skipped every optimizer step.
+- Graph-vs-eager parity tests drive the same fused optimizer kernel on
+  both lanes and pass the adam lr into the device bias buffer.
+
+### Changed
+
+- Fused multi-tensor AdamW: one descriptor-table kernel
+  (`adamw_step_multi_{f32,bf16,f16}`) replaces the per-tensor launch
+  walk; the typed compute shadows for the bulk weights are written by
+  the same kernel (`FROM_F(new_p)`, identical RNE bits to the old cast
+  pass), and `sync_master_to_compute` covers only the f32-stays-f32
+  tensors. Chunk plans rebuild on `set_reference_no_decay` /
+  `load_optimizer_state`; empty identity-`input_proj` slots produce no
+  chunk.
+- The learning rate is read device-side from the widened
+  `{bc1, bc2, lr}` bias buffer: `set_lr` now applies under a captured
+  graph (a warmup/cosine schedule no longer forfeits the graph lane).
+- Fused `ssm_reduce_d_BC_{f32,bf16,f16}` replaces the split dB/dC
+  reducers with a full-domain `= (0.0f + sum)` store (callers drop
+  their pre-zero memsets); `pack_xdbl_cols_{f32,bf16,f16}` assembles
+  `d_xdbl` in one kernel from the three sources that tile the row,
+  removing the zero + cast + scatter staging in both backward lanes.
+  All stores keep the `0.0f + x` form and are bit-identical to the old
+  chains (run digests equal on all three GEMM tiers).
+- The f32 forward residual chain writes the next layer's residual slot
+  (or `norm_f_input`) directly, mirroring the mixed lane — the
+  per-layer `temporal`->residual copy and the pre-`norm_f` copy are
+  gone (25 D2D memcpys per step).
+- `m3_dqkv` (the dominant M3 backward kernel, both dtype copies):
+  the chunk's K[a]·Q[b] and V[a]·dO[b] pair dots are staged in shared
+  memory once per chunk as strict-upper-triangle matrices instead of
+  being recomputed per lane (an hd-fold redundancy across four
+  sections), and two heads pack into one block when `nh` is even so a
+  16-lane head fills a full warp. Each element/lane keeps the same
+  ascending-index arithmetic — bit-identical outputs. Configs whose
+  matrix-inclusive tile would exceed the ~99 KB consumer smem opt-in
+  (large d_state) fall back to the inline dots via a launch-time tier
+  ladder, losing only the speedup, never the launch.
+- The `sgemm_bi_forward` scalar dispatcher gained a strided-X entry
+  (`sgemm_bi_forward_sub` with an explicit `lda`); the public wrapper
+  delegates with `lda = K`, behavior unchanged.
+- The workspace test harness runs single-threaded
+  (`RUST_TEST_THREADS=1` via `.cargo/config.toml`): `cudaFree` from a
+  sibling test's drop invalidates an in-flight stream capture
+  (documented CUDA hazard; production runs one trainer per process).
+
+### Added
+
+- `tests/cublas_compute_probe.rs` (`--ignored`): bf16/f32 GemmEx
+  accuracy probe across compute-type x math-mode cells against an
+  on-device fp64 reference, with a findings table in
+  `docs/determinism-benchmarks.md`. On CUDA 13 / sm_120 the
+  `COMPUTE_32F_PEDANTIC` pin keeps its justification (the 32F accuracy
+  gap persists and grows with K), `DISALLOW_REDUCED_PRECISION_REDUCTION`
+  has no effect on bf16 GemmEx, and `COMPUTE_32F_EMULATED_16BFX9`
+  matches true-fp32 accuracy at up to ~2x speed on f32 GEMMs.
+- Benchmarks: env-driven campaign-shape arm
+  (`bench_lm_train_campaign_shape`), split forward/backward attribution
+  arm, parallel-scan T64 arms, an IEEE-f32 row
+  (`MAMBA_RS_BENCH_IEEE_F32`), and env-shaped M3 train bench.
+
+### Performance (RTX 5090; B2 T64 d768 L24 graph lane unless noted)
+
+- LM train f32 28.3 -> 24.5 ms/step; bf16 43.9 -> 40.5; f16 49.1;
+  parallel-scan T64 f32 18.4.
+- Campaign shape (d384 L24 B8 T1300, batch-invariant bf16):
+  441 ms/step, unchanged by this release — the wall is
+  scan-intermediate materialization, tracked as the fused-scan lane.
+
 ## 0.6.2 (2026-08-22)
 
 ### Changed

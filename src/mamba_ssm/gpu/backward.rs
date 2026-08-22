@@ -174,13 +174,11 @@ pub fn gpu_backward_mamba_layer(
         let di_i = di as i32;
         let ds_i = ds as i32;
         // Fused d_B + d_C reduction
-        let mut builder = ctx
-            .stream
-            .launch_builder(
-                ctx.kernels
-                    .ssm_reduce_d_bc_typed
-                    .get(super::dtype::WeightDtype::F32),
-            );
+        let mut builder = ctx.stream.launch_builder(
+            ctx.kernels
+                .ssm_reduce_d_bc_typed
+                .get(super::dtype::WeightDtype::F32),
+        );
         builder.arg(scratch.d_b_reduced.inner_mut());
         builder.arg(scratch.d_c_reduced.inner_mut());
         builder.arg(scratch.d_b_local.inner());

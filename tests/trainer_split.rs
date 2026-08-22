@@ -581,7 +581,8 @@ fn set_lr_under_graph_applies_on_next_replay() {
         t.capture_graph().expect("capture");
         assert!(t.has_graph());
         if let Some(lr) = lr_after_capture {
-            t.set_lr(lr).expect("set_lr under a captured graph must apply");
+            t.set_lr(lr)
+                .expect("set_lr under a captured graph must apply");
             assert!((t.lr() - lr).abs() < 1e-12);
         }
         let before = t.snapshot_master().expect("pre");

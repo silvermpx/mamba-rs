@@ -76,15 +76,60 @@ struct Cell {
 }
 
 const CELLS: &[Cell] = &[
-    Cell { name: "V0_pedantic_default", bf16_inputs: true, compute: COMPUTE_32F_PEDANTIC, math: 0 },
-    Cell { name: "V1_pedantic_tf32", bf16_inputs: true, compute: COMPUTE_32F_PEDANTIC, math: TF32 },
-    Cell { name: "V2_32f_tf32", bf16_inputs: true, compute: COMPUTE_32F, math: TF32 },
-    Cell { name: "V3_32f_default", bf16_inputs: true, compute: COMPUTE_32F, math: 0 },
-    Cell { name: "V4_32f_tf32_disallow", bf16_inputs: true, compute: COMPUTE_32F, math: TF32 | DISALLOW_RPR },
-    Cell { name: "V5_32f_disallow", bf16_inputs: true, compute: COMPUTE_32F, math: DISALLOW_RPR },
-    Cell { name: "V6d_f32_default", bf16_inputs: false, compute: COMPUTE_32F, math: 0 },
-    Cell { name: "V6t_f32_tf32", bf16_inputs: false, compute: COMPUTE_32F, math: TF32 },
-    Cell { name: "V6e_f32_emulated_bf16x9", bf16_inputs: false, compute: COMPUTE_32F_EMULATED_16BFX9, math: 0 },
+    Cell {
+        name: "V0_pedantic_default",
+        bf16_inputs: true,
+        compute: COMPUTE_32F_PEDANTIC,
+        math: 0,
+    },
+    Cell {
+        name: "V1_pedantic_tf32",
+        bf16_inputs: true,
+        compute: COMPUTE_32F_PEDANTIC,
+        math: TF32,
+    },
+    Cell {
+        name: "V2_32f_tf32",
+        bf16_inputs: true,
+        compute: COMPUTE_32F,
+        math: TF32,
+    },
+    Cell {
+        name: "V3_32f_default",
+        bf16_inputs: true,
+        compute: COMPUTE_32F,
+        math: 0,
+    },
+    Cell {
+        name: "V4_32f_tf32_disallow",
+        bf16_inputs: true,
+        compute: COMPUTE_32F,
+        math: TF32 | DISALLOW_RPR,
+    },
+    Cell {
+        name: "V5_32f_disallow",
+        bf16_inputs: true,
+        compute: COMPUTE_32F,
+        math: DISALLOW_RPR,
+    },
+    Cell {
+        name: "V6d_f32_default",
+        bf16_inputs: false,
+        compute: COMPUTE_32F,
+        math: 0,
+    },
+    Cell {
+        name: "V6t_f32_tf32",
+        bf16_inputs: false,
+        compute: COMPUTE_32F,
+        math: TF32,
+    },
+    Cell {
+        name: "V6e_f32_emulated_bf16x9",
+        bf16_inputs: false,
+        compute: COMPUTE_32F_EMULATED_16BFX9,
+        math: 0,
+    },
 ];
 
 /// xorshift32 → Box-Muller standard normal, scaled.
@@ -123,7 +168,10 @@ fn bf16_to_f32(bits: u16) -> f32 {
     f32::from_bits((bits as u32) << 16)
 }
 
-#[allow(clippy::too_many_arguments, reason = "raw probe plumbing: one call site, mirrors the cublasGemmEx parameter list it wraps")]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "raw probe plumbing: one call site, mirrors the cublasGemmEx parameter list it wraps"
+)]
 unsafe fn gemm_row_major(
     handle: cb::cublasHandle_t,
     m: usize,
@@ -146,9 +194,15 @@ unsafe fn gemm_row_major(
     let alpha64: f64 = 1.0;
     let beta64: f64 = 0.0;
     let (alpha, beta): (*const c_void, *const c_void) = if f64_scalars {
-        (&alpha64 as *const f64 as *const c_void, &beta64 as *const f64 as *const c_void)
+        (
+            &alpha64 as *const f64 as *const c_void,
+            &beta64 as *const f64 as *const c_void,
+        )
     } else {
-        (&alpha32 as *const f32 as *const c_void, &beta32 as *const f32 as *const c_void)
+        (
+            &alpha32 as *const f32 as *const c_void,
+            &beta32 as *const f32 as *const c_void,
+        )
     };
     let st = unsafe {
         cb::cublasGemmEx(
@@ -190,7 +244,10 @@ struct ShapeBufs {
     c_f64: CudaSlice<f64>,
 }
 
-#[allow(clippy::too_many_arguments, reason = "probe-local helper: shape + handle + stream + bufs is the irreducible cell context")]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "probe-local helper: shape + handle + stream + bufs is the irreducible cell context"
+)]
 fn run_cell(
     stream: &Arc<CudaStream>,
     handle: cb::cublasHandle_t,
@@ -243,7 +300,7 @@ fn run_cell(
     let ms = t0.elapsed().as_secs_f64() * 1e3;
 
     let out: Vec<f32> = stream
-        .memcpy_dtov(&bufs.c_f32.slice(0..m * n))
+        .clone_dtoh(&bufs.c_f32.slice(0..m * n))
         .map_err(|e| format!("{e:?}"))?;
     let mut max_rel = 0f64;
     let mut sum_rel = 0f64;
@@ -280,7 +337,7 @@ fn run_cell(
             }
             stream.synchronize().map_err(|e| format!("{e:?}"))?;
             let rep: Vec<f32> = stream
-                .memcpy_dtov(&bufs.c_f32.slice(0..m * n))
+                .clone_dtoh(&bufs.c_f32.slice(0..m * n))
                 .map_err(|e| format!("{e:?}"))?;
             if rep.iter().map(|v| v.to_bits()).ne(first.iter().copied()) {
                 bits_stable = false;
@@ -294,8 +351,8 @@ fn run_cell(
 #[test]
 #[ignore = "GPU probe with a TSV artifact; run explicitly on the perf box"]
 fn cublas_compute_probe() {
-    let tsv_path = std::env::var("MAMBA_RS_PROBE_TSV")
-        .unwrap_or_else(|_| "/tmp/cublas_probe.tsv".to_string());
+    let tsv_path =
+        std::env::var("MAMBA_RS_PROBE_TSV").unwrap_or_else(|_| "/tmp/cublas_probe.tsv".to_string());
     let ctx = CudaContext::new(0).expect("cuda ctx");
     let stream = ctx.default_stream();
     let mut raw: cb::cublasHandle_t = std::ptr::null_mut();
@@ -349,7 +406,11 @@ fn cublas_compute_probe() {
     };
 
     let mut tsv = std::fs::File::create(&tsv_path).expect("tsv create");
-    writeln!(tsv, "family\tshape\tM\tK\tN\tcell\tmax_rel\tmean_rel\tmax_abs\tbits_stable\tms").unwrap();
+    writeln!(
+        tsv,
+        "family\tshape\tM\tK\tN\tcell\tmax_rel\tmean_rel\tmax_abs\tbits_stable\tms"
+    )
+    .unwrap();
 
     for family in ["normal", "silu"] {
         for &(m, k, n, tag) in &shapes {
@@ -359,11 +420,19 @@ fn cublas_compute_probe() {
             // the f32 lane measures compute error only, never input
             // quantization.
             let sigma = 1.0 / (k as f32).sqrt();
-            let mut rng = Rng(0x9E37_79B9 ^ (m as u32) ^ ((k as u32) << 8) ^ ((n as u32) << 16) ^ if family == "silu" { 0x5115 } else { 0 });
+            let mut rng = Rng(0x9E37_79B9
+                ^ (m as u32)
+                ^ ((k as u32) << 8)
+                ^ ((n as u32) << 16)
+                ^ if family == "silu" { 0x5115 } else { 0 });
             let a_host: Vec<u16> = (0..m * k)
                 .map(|_| {
                     let x = rng.normal(sigma);
-                    bf16_bits(if family == "silu" { silu(x * (k as f32).sqrt()) * sigma } else { x })
+                    bf16_bits(if family == "silu" {
+                        silu(x * (k as f32).sqrt()) * sigma
+                    } else {
+                        x
+                    })
                 })
                 .collect();
             let b_host: Vec<u16> = (0..k * n).map(|_| bf16_bits(rng.normal(sigma))).collect();
@@ -372,12 +441,24 @@ fn cublas_compute_probe() {
             let a64: Vec<f64> = a32.iter().map(|&x| f64::from(x)).collect();
             let b64: Vec<f64> = b32.iter().map(|&x| f64::from(x)).collect();
 
-            stream.memcpy_htod(&a_host, &mut bufs.a_bf16.slice_mut(0..m * k)).unwrap();
-            stream.memcpy_htod(&b_host, &mut bufs.b_bf16.slice_mut(0..k * n)).unwrap();
-            stream.memcpy_htod(&a32, &mut bufs.a_f32.slice_mut(0..m * k)).unwrap();
-            stream.memcpy_htod(&b32, &mut bufs.b_f32.slice_mut(0..k * n)).unwrap();
-            stream.memcpy_htod(&a64, &mut bufs.a_f64.slice_mut(0..m * k)).unwrap();
-            stream.memcpy_htod(&b64, &mut bufs.b_f64.slice_mut(0..k * n)).unwrap();
+            stream
+                .memcpy_htod(&a_host, &mut bufs.a_bf16.slice_mut(0..m * k))
+                .unwrap();
+            stream
+                .memcpy_htod(&b_host, &mut bufs.b_bf16.slice_mut(0..k * n))
+                .unwrap();
+            stream
+                .memcpy_htod(&a32, &mut bufs.a_f32.slice_mut(0..m * k))
+                .unwrap();
+            stream
+                .memcpy_htod(&b32, &mut bufs.b_f32.slice_mut(0..k * n))
+                .unwrap();
+            stream
+                .memcpy_htod(&a64, &mut bufs.a_f64.slice_mut(0..m * k))
+                .unwrap();
+            stream
+                .memcpy_htod(&b64, &mut bufs.b_f64.slice_mut(0..k * n))
+                .unwrap();
 
             // fp64 reference on-device (same bits, widened).
             unsafe {
@@ -399,7 +480,7 @@ fn cublas_compute_probe() {
                 .expect("f64 reference gemm");
             }
             stream.synchronize().unwrap();
-            let c_ref: Vec<f64> = stream.memcpy_dtov(&bufs.c_f64.slice(0..m * n)).unwrap();
+            let c_ref: Vec<f64> = stream.clone_dtoh(&bufs.c_f64.slice(0..m * n)).unwrap();
 
             let bit_repeats = if tag == "sweep" { 0 } else { 20 };
             for cell in CELLS {

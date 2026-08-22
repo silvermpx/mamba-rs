@@ -95,7 +95,15 @@ fn m3_train_step_at_multichunk_shape() {
         is_outproj_norm: true,
         ..Mamba3Config::default()
     };
-    let (batch, seq_len) = (1usize, 256usize);
+    // Shape rides env so the CAMPAIGN shape is measurable without a
+    // recompile (same knobs as the M1 campaign arm).
+    let get = |k: &str, d: usize| -> usize {
+        std::env::var(k)
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(d)
+    };
+    let (batch, seq_len) = (get("MAMBA_RS_BENCH_B", 1), get("MAMBA_RS_BENCH_T", 256));
     let n = batch * seq_len * cfg.d_model;
 
     for dtype in [WeightDtype::F32, WeightDtype::Bf16] {

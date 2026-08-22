@@ -442,9 +442,7 @@ pub fn gpu_backward_mamba_layer_mixed(
         let bt_i = bt as i32;
         let dt_i = dt_rank as i32;
         let ds_i = ds as i32;
-        let mut bld = ctx
-            .stream
-            .launch_builder(k.pack_xdbl_cols_typed.get(dtype));
+        let mut bld = ctx.stream.launch_builder(k.pack_xdbl_cols_typed.get(dtype));
         let dst = scratch.d_xdbl.cached_ptr();
         let dt_src = scratch.d_dt_input.cached_ptr();
         bld.arg(&dst);

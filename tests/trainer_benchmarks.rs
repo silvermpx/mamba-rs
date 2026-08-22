@@ -255,6 +255,94 @@ fn bench_lm_train_campaign_shape() {
     run_lm_shape(dtype, cfg, b, t, " campaign").unwrap();
 }
 
+/// Campaign-shape attribution: time forward() alone vs forward()+
+/// backward_step() pairs through the split API (always eager) and
+/// report the subtraction. Same env knobs as
+/// `bench_lm_train_campaign_shape`.
+#[test]
+#[ignore]
+fn bench_campaign_split_fwd_bwd() {
+    use mamba_rs::mamba_ssm::gpu::trainer::{BackwardOpts, MambaTrainer, TrainSessionCfg};
+    use mamba_rs::weights::MambaWeights;
+    let get = |k: &str, d: usize| -> usize {
+        std::env::var(k)
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(d)
+    };
+    let dm = get("MAMBA_RS_BENCH_DM", 384);
+    let layers = get("MAMBA_RS_BENCH_LAYERS", 24);
+    let b = get("MAMBA_RS_BENCH_B", 8);
+    let t = get("MAMBA_RS_BENCH_T", 1300);
+    let dtype = match std::env::var("MAMBA_RS_BENCH_DTYPE").as_deref() {
+        Ok("f32") => WeightDtype::F32,
+        Ok("f16") => WeightDtype::F16,
+        _ => WeightDtype::Bf16,
+    };
+    let cfg = mamba_rs::config::MambaConfig {
+        d_model: dm,
+        n_layers: layers,
+        d_state: 16,
+        d_conv: 4,
+        expand: 2,
+        scan_mode: mamba_rs::config::ScanMode::Auto,
+        rms_norm_eps: 1e-5,
+    };
+    let input_dim = dm;
+    let n = b * t * dm;
+    let mut cpu = MambaWeights::init(&cfg, input_dim, 0xC0FFEE);
+    if !matches!(dtype, WeightDtype::F32) {
+        cpu.input_proj_w.clear();
+        cpu.input_proj_b.clear();
+    }
+    for lw in cpu.layers.iter_mut() {
+        lw.a_neg = lw.a_log.iter().map(|&v| -v.exp()).collect();
+    }
+    let mut trainer = MambaTrainer::new_full(
+        0,
+        &cpu,
+        cfg,
+        TrainSessionCfg {
+            input_dim,
+            batch: b,
+            seq_len: t,
+            lr: 1e-7,
+            weight_decay: 0.0,
+        },
+        dtype,
+    )
+    .unwrap();
+    let inp = det(n, 0xA1, 0.01);
+    let dt = det(n, 0xB1, 0.01);
+    let mut out = vec![0f32; n];
+    for _ in 0..3 {
+        trainer.forward(&inp, &mut out).unwrap();
+        trainer.backward_step(&dt, BackwardOpts::default()).unwrap();
+    }
+    trainer.ctx().stream.synchronize().unwrap();
+    let reps = 10;
+    let t0 = Instant::now();
+    for _ in 0..reps {
+        trainer.forward(&inp, &mut out).unwrap();
+    }
+    trainer.ctx().stream.synchronize().unwrap();
+    let fwd_ms = t0.elapsed().as_secs_f64() * 1e3 / f64::from(reps);
+    // Leave no dangling saved-activation state: pair timing next.
+    trainer.backward_step(&dt, BackwardOpts::default()).unwrap();
+    trainer.ctx().stream.synchronize().unwrap();
+    let t1 = Instant::now();
+    for _ in 0..reps {
+        trainer.forward(&inp, &mut out).unwrap();
+        trainer.backward_step(&dt, BackwardOpts::default()).unwrap();
+    }
+    trainer.ctx().stream.synchronize().unwrap();
+    let pair_ms = t1.elapsed().as_secs_f64() * 1e3 / f64::from(reps);
+    eprintln!(
+        "campaign split dm={dm} L={layers} B={b} T={t} {dtype:?}: fwd={fwd_ms:.1} ms  bwd+opt={:.1} ms  pair={pair_ms:.1} ms",
+        pair_ms - fwd_ms
+    );
+}
+
 /// One point OFF the batch-invariant `batch >= 128` dispatch boundary
 /// (B2 x T64 lands exactly ON it): run under MAMBA_RS_BATCH_INVARIANT=1
 /// to see the small-M bucket family.

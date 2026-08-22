@@ -150,7 +150,37 @@ pub fn sgemm_bi_forward(
     bias_ptr: CUptr, // 0 = no bias
     dims: (usize, usize, usize),
 ) -> Result<(), String> {
+    let x_ptr = {
+        use cudarc::driver::DevicePtr;
+        let (ptr, _r) = x.inner().device_ptr(stream);
+        ptr
+    };
+    sgemm_bi_forward_sub(stream, kernels, y, x_ptr, dims.1, w_ptr, bias_ptr, dims)
+}
+
+/// [`sgemm_bi_forward`] over a STRIDED X operand: `x_ptr` is the first
+/// element of an [M, K] sub-matrix whose row stride is `lda` elements
+/// (lda >= K). Every bucket's kernel already takes lda and addresses A
+/// as `row * lda + col`, so a sub-matrix read is the same per-output
+/// ascending-K FMA chain as a gathered copy — bit-identical operands,
+/// gather kernel deleted at the call site (P1.4(5)).
+#[allow(
+    clippy::too_many_arguments,
+    reason = "dispatcher-internal impl: the public wrappers keep the narrow signature; splitting a param struct here would be pure ceremony for two callers"
+)]
+pub fn sgemm_bi_forward_sub(
+    stream: &Arc<cudarc::driver::CudaStream>,
+    kernels: &GpuKernels,
+    y: &mut GpuBuffer,
+    x_ptr: CUptr,
+    lda: usize,
+    w_ptr: CUptr,
+    bias_ptr: CUptr, // 0 = no bias
+    dims: (usize, usize, usize),
+) -> Result<(), String> {
     let (batch, n_in, n_out) = dims;
+    debug_assert!(lda >= n_in, "sgemm_bi_forward_sub: lda < K");
+    let lda_i = lda as i32;
     // Shape-A Ultra-Thin-M NN dispatch: batch ∈ [1, 31] (actor inference rollout).
     // Covers shapes that fall through Split-K (min 32) and Big/Slim (min 128).
     // Grid: (ceil(N/32), M, 1). smem = K*4 bytes ≤ 8 KB (K ≤ 2048) — within the
@@ -170,7 +200,7 @@ pub fn sgemm_bi_forward(
         };
         let mut builder = stream.launch_builder(&kernels.sgemm_nn_ultra_thin);
         builder.arg(y.inner_mut());
-        builder.arg(x.inner());
+        builder.arg(&x_ptr);
         builder.arg(&w_ptr);
         builder.arg(&bias_ptr);
         builder.arg(&alpha);
@@ -178,7 +208,7 @@ pub fn sgemm_bi_forward(
         builder.arg(&m_i);
         builder.arg(&n_i);
         builder.arg(&k_i);
-        builder.arg(&k_i); // lda
+        builder.arg(&lda_i); // lda
         builder.arg(&n_i); // ldb
         builder.arg(&n_i); // ldc
         unsafe { builder.launch(cfg) }
@@ -211,7 +241,7 @@ pub fn sgemm_bi_forward(
         };
         let mut builder = stream.launch_builder(&kernels.sgemm_nn_narrow_small);
         builder.arg(y.inner_mut());
-        builder.arg(x.inner());
+        builder.arg(&x_ptr);
         builder.arg(&w_ptr);
         builder.arg(&bias_ptr);
         builder.arg(&alpha);
@@ -219,7 +249,7 @@ pub fn sgemm_bi_forward(
         builder.arg(&m_i);
         builder.arg(&n_i);
         builder.arg(&k_i);
-        builder.arg(&k_i);
+        builder.arg(&lda_i);
         builder.arg(&n_i);
         builder.arg(&n_i);
         builder.arg(&post_op);
@@ -250,7 +280,7 @@ pub fn sgemm_bi_forward(
         };
         let mut builder = stream.launch_builder(&kernels.sgemm_nn_narrow);
         builder.arg(y.inner_mut());
-        builder.arg(x.inner());
+        builder.arg(&x_ptr);
         builder.arg(&w_ptr);
         builder.arg(&bias_ptr);
         builder.arg(&alpha);
@@ -258,7 +288,7 @@ pub fn sgemm_bi_forward(
         builder.arg(&m_i);
         builder.arg(&n_i);
         builder.arg(&k_i);
-        builder.arg(&k_i);
+        builder.arg(&lda_i);
         builder.arg(&n_i);
         builder.arg(&n_i);
         builder.arg(&post_op);
@@ -280,7 +310,6 @@ pub fn sgemm_bi_forward(
         let k_i = n_in as i32;
         let alpha: f32 = 1.0;
         let beta: f32 = 0.0;
-        let lda_i = n_in as i32;
         let ldy_i: i32 = 1;
         let cfg = cudarc::driver::LaunchConfig {
             grid_dim: ((batch as u32).div_ceil(4), 1, 1),
@@ -289,7 +318,7 @@ pub fn sgemm_bi_forward(
         };
         let mut builder = stream.launch_builder(&kernels.sgemm_nn_gemv);
         builder.arg(y.inner_mut());
-        builder.arg(x.inner());
+        builder.arg(&x_ptr);
         builder.arg(&w_ptr);
         builder.arg(&bias_ptr);
         builder.arg(&alpha);
@@ -335,7 +364,6 @@ pub fn sgemm_bi_forward(
             let m_i = batch as i32;
             let n_i = n_out as i32;
             let k_chunks = (k_main / 32) as i32;
-            let lda_i = n_in as i32; // actual stride (full K)
             let alpha: f32 = 1.0;
             let num_pid_m = (batch as u32).div_ceil(32);
             let num_pid_n = (n_out as u32).div_ceil(64);
@@ -352,7 +380,7 @@ pub fn sgemm_bi_forward(
             // Main Split-K partial on A columns [0..k_main), B rows [0..k_main).
             let mut pb = stream.launch_builder(&kernels.sgemm_nn_splitk32_partial);
             pb.arg(&partial_ptr);
-            pb.arg(x.inner());
+            pb.arg(&x_ptr);
             pb.arg(&w_ptr);
             pb.arg(&m_i);
             pb.arg(&n_i);
@@ -370,11 +398,9 @@ pub fn sgemm_bi_forward(
             };
             let zero_i32: i32 = 0;
             let tail_cnt_i = k_tail as i32;
-            use cudarc::driver::DevicePtr;
-            let (x_base_ptr, _r_x) = x.inner().device_ptr(stream);
-            let x_tail_ptr: u64 = x_base_ptr + (k_main as u64) * 4; // X[:, k_main]
+            let x_tail_ptr: u64 = x_ptr + (k_main as u64) * 4; // X[:, k_main]
             let w_tail_ptr: u64 = w_ptr + ((k_main * n_out) as u64) * 4; // W[k_main, :]
-            let x_tail_stride_i = n_in as i32; // stride between X[m, k_main] rows = K_full
+            let x_tail_stride_i = lda_i; // stride between X[m, k_main] rows = the A row stride
             let mut rb = stream.launch_builder(&kernels.sgemm_splitk_reduce);
             rb.arg(y.inner_mut());
             rb.arg(&partial_ptr);
@@ -433,10 +459,9 @@ pub fn sgemm_bi_forward(
             let (ptr, _r) = kernels.splitk_scratch_buf(stream)?.device_ptr(stream);
             ptr
         };
-        let lda_i = n_in as i32; // A row stride = full K (no tail in this branch)
         let mut pb = stream.launch_builder(&kernels.sgemm_nn_splitk32_partial);
         pb.arg(&partial_ptr);
-        pb.arg(x.inner());
+        pb.arg(&x_ptr);
         pb.arg(&w_ptr);
         pb.arg(&m_i);
         pb.arg(&n_i);
@@ -535,7 +560,6 @@ pub fn sgemm_bi_forward(
                 let m_i = batch as i32;
                 let n_i = n_out as i32;
                 let k_i = n_in as i32;
-                let lda_i = n_in as i32; // A is [M, K], row-major
                 let ldb_i = n_out as i32; // B is [K, N], row-major
                 let k_chunk_i = k_chunk as i32;
                 let alpha: f32 = 1.0;
@@ -553,7 +577,7 @@ pub fn sgemm_bi_forward(
                 };
                 let mut pb = stream.launch_builder(&kernels.sgemm_nn_splitk_slim_partial);
                 pb.arg(&partial_ptr);
-                pb.arg(x.inner());
+                pb.arg(&x_ptr);
                 pb.arg(&w_ptr);
                 pb.arg(&m_i);
                 pb.arg(&n_i);
@@ -630,7 +654,7 @@ pub fn sgemm_bi_forward(
         };
         let mut builder = stream.launch_builder(&kernels.sgemm_nn_narrow);
         builder.arg(y.inner_mut());
-        builder.arg(x.inner());
+        builder.arg(&x_ptr);
         builder.arg(&w_ptr);
         builder.arg(&bias_ptr);
         builder.arg(&alpha);
@@ -638,7 +662,7 @@ pub fn sgemm_bi_forward(
         builder.arg(&m_i);
         builder.arg(&n_i);
         builder.arg(&k_i);
-        builder.arg(&k_i);
+        builder.arg(&lda_i);
         builder.arg(&n_i);
         builder.arg(&n_i);
         builder.arg(&post_op);
@@ -682,7 +706,7 @@ pub fn sgemm_bi_forward(
         };
         let mut builder = stream.launch_builder(func);
         builder.arg(y.inner_mut());
-        builder.arg(x.inner());
+        builder.arg(&x_ptr);
         builder.arg(&w_ptr);
         builder.arg(&bias_ptr);
         builder.arg(&alpha);
@@ -690,7 +714,7 @@ pub fn sgemm_bi_forward(
         builder.arg(&m_i);
         builder.arg(&n_i);
         builder.arg(&k_i);
-        builder.arg(&k_i); // lda = n_in (A is [M, K])
+        builder.arg(&lda_i); // lda (A row stride; = K for contiguous X)
         builder.arg(&n_i); // ldb = n_out (B is [K, N])
         builder.arg(&n_i); // ldc = n_out (C is [M, N])
         unsafe { builder.launch(cfg) }.map_err(|e| {
