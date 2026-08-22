@@ -1089,10 +1089,19 @@ extern "C" __global__ void m3_dqktheta(
         // Forward RoPE on K_raw to get K_rot (for dScale computation)
         float k_rot[MAMBA_RS_STATE_CAP];
         int angle_base = ((b * T + gt) * nh + h) * n_angles;
+        // M3-KILL-7: each angle's cos/sin was computed three times
+        // (forward RoPE, inverse RoPE, dtheta) — hoist into registers.
+        // cosf/sinf of the same input is deterministic, so every read
+        // stays bit-identical to the inline forms.
+        float cos_a[MAMBA_RS_STATE_CAP / 2], sin_a[MAMBA_RS_STATE_CAP / 2];
         for (int a = 0; a < n_angles && 2 * a + 1 < ds; a++) {
             float theta = Angles[angle_base + a];
-            float cos_t = cosf(theta);
-            float sin_t = sinf(theta);
+            cos_a[a] = cosf(theta);
+            sin_a[a] = sinf(theta);
+        }
+        for (int a = 0; a < n_angles && 2 * a + 1 < ds; a++) {
+            float cos_t = cos_a[a];
+            float sin_t = sin_a[a];
             int i0 = 2 * a, i1 = 2 * a + 1;
             k_rot[i0] = k_pre[i0] * cos_t - k_pre[i1] * sin_t;
             k_rot[i1] = k_pre[i0] * sin_t + k_pre[i1] * cos_t;
@@ -1116,9 +1125,8 @@ extern "C" __global__ void m3_dqktheta(
         float dq_pre_out[MAMBA_RS_STATE_CAP], dk_pre_out[MAMBA_RS_STATE_CAP];
         for (int n = 0; n < ds; n++) { dq_pre_out[n] = dq_in[n]; dk_pre_out[n] = dk_in[n]; }
         for (int a = 0; a < n_angles && 2 * a + 1 < ds; a++) {
-            float theta = Angles[angle_base + a];
-            float cos_t = cosf(theta);
-            float sin_t = sinf(theta);
+            float cos_t = cos_a[a];
+            float sin_t = sin_a[a];
             int i0 = 2 * a, i1 = 2 * a + 1;
             // Inverse rotation: R^T = [[cos, sin], [-sin, cos]]
             dq_pre_out[i0] = dq_in[i0] * cos_t + dq_in[i1] * sin_t;
@@ -1145,9 +1153,8 @@ extern "C" __global__ void m3_dqktheta(
         // dAngles_cumsum from rotary gradient
         // dtheta = dQ_in * d(Q_rot)/d(theta) + dK_in_scaled * d(K_rot)/d(theta)
         for (int a = 0; a < n_angles && 2 * a + 1 < ds; a++) {
-            float theta = Angles[angle_base + a];
-            float cos_t = cosf(theta);
-            float sin_t = sinf(theta);
+            float cos_t = cos_a[a];
+            float sin_t = sin_a[a];
             int i0 = 2 * a, i1 = 2 * a + 1;
             // d(Q_rot)/dtheta: Q_rot[i0] = Q[i0]*cos - Q[i1]*sin
             //                  Q_rot[i1] = Q[i0]*sin + Q[i1]*cos
@@ -1898,10 +1905,16 @@ m3_dqktheta_##SUFFIX(                                                         \
     }                                                                         \
     float k_rot[MAMBA_RS_STATE_CAP];                                                          \
     int angle_base = ((b * T + gt) * nh + h) * n_angles;                      \
+    /* M3-KILL-7: hoist per-angle cos/sin (was computed 3x). */               \
+    float cos_a[MAMBA_RS_STATE_CAP / 2], sin_a[MAMBA_RS_STATE_CAP / 2];       \
     for (int a = 0; a < n_angles && 2 * a + 1 < ds; a++) {                    \
         float theta = Angles[angle_base + a];                                 \
-        float cos_t = cosf(theta);                                            \
-        float sin_t = sinf(theta);                                            \
+        cos_a[a] = cosf(theta);                                               \
+        sin_a[a] = sinf(theta);                                               \
+    }                                                                         \
+    for (int a = 0; a < n_angles && 2 * a + 1 < ds; a++) {                    \
+        float cos_t = cos_a[a];                                               \
+        float sin_t = sin_a[a];                                               \
         int i0 = 2 * a, i1 = 2 * a + 1;                                       \
         k_rot[i0] = k_pre[i0] * cos_t - k_pre[i1] * sin_t;                    \
         k_rot[i1] = k_pre[i0] * sin_t + k_pre[i1] * cos_t;                    \
@@ -1920,9 +1933,8 @@ m3_dqktheta_##SUFFIX(                                                         \
         dk_pre_out[n] = dk_in[n];                                             \
     }                                                                         \
     for (int a = 0; a < n_angles && 2 * a + 1 < ds; a++) {                    \
-        float theta = Angles[angle_base + a];                                 \
-        float cos_t = cosf(theta);                                            \
-        float sin_t = sinf(theta);                                            \
+        float cos_t = cos_a[a];                                               \
+        float sin_t = sin_a[a];                                               \
         int i0 = 2 * a, i1 = 2 * a + 1;                                       \
         dq_pre_out[i0] = dq_in[i0] * cos_t + dq_in[i1] * sin_t;               \
         dq_pre_out[i1] = -dq_in[i0] * sin_t + dq_in[i1] * cos_t;              \
@@ -1939,9 +1951,8 @@ m3_dqktheta_##SUFFIX(                                                         \
         dK_pre[base + n] = dk_pre_out[n];                                     \
     }                                                                         \
     for (int a = 0; a < n_angles && 2 * a + 1 < ds; a++) {                    \
-        float theta = Angles[angle_base + a];                                 \
-        float cos_t = cosf(theta);                                            \
-        float sin_t = sinf(theta);                                            \
+        float cos_t = cos_a[a];                                               \
+        float sin_t = sin_a[a];                                               \
         int i0 = 2 * a, i1 = 2 * a + 1;                                       \
         float dtheta_q = dq_in[i0]                                            \
             * (-q_pre[i0] * sin_t - q_pre[i1] * cos_t)                        \

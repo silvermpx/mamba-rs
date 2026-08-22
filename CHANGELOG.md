@@ -61,6 +61,11 @@
   stride overlapped slot 0's tail arrays once the tile grew). M3
   campaign shape (B=8 T=1300 d_model 384, 24 layers, bf16 graph):
   381.0 -> 362.1 ms/step.
+- `m3_dqktheta` hoists each angle's `cosf`/`sinf` into registers — the
+  forward-RoPE, inverse-RoPE and dtheta loops each recomputed the same
+  pair (3x SFU work per angle). Bit-identical (same functions, same
+  inputs); campaign-neutral at d_state 16 (4 angles), the win scales
+  with d_state.
 - The `sgemm_bi_forward` scalar dispatcher gained a strided-X entry
   (`sgemm_bi_forward_sub` with an explicit `lda`); the public wrapper
   delegates with `lda = K`, behavior unchanged.
