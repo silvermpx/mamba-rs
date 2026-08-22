@@ -153,3 +153,48 @@ design. The `--ignored` `print_run_digests` test emits an FNV-1a digest of
 the final weights per tier for A/B-ing two BUILDS across a kernel edit
 (used to prove the `_Pragma("unroll")` restoration bit-neutral on all
 three tiers).
+
+## CUDA-13 cuBLAS compute-mode probe — the pedantic pin re-examined (2026-08-22, RTX 5090, cuBLAS 13)
+
+`tests/cublas_compute_probe.rs` (`--ignored`, TSV artifact): bf16-input
+GemmEx cells V0-V5 (compute type x handle math-mode bits) and f32-input
+cells V6, each against an on-device fp64 reference computed from the SAME
+bf16-widened bits. 130 shape-family combos, 20-repeat bit-stability on
+the breaker/tied-head shapes. Headline rows (mean relative error / ms,
+`normal` family, steady-state timings):
+
+| shape | 32F_PEDANTIC (V0) | 32F any math (V2-V5) | f32 32F (V6d) | f32 EMULATED_16BFX9 (V6e) |
+|---|---|---|---|---|
+| M8 K16384 N2048 | 1.86e-6 / 0.33 | 6.42e-5 / 0.042 | 4.12e-6 / 0.18 | 4.12e-6 / 0.083 |
+| tied head M8 K2048 N50304 | 9.49e-7 / 0.32 | 8.91e-6 / 0.14 | 1.11e-6 / 0.37 | 1.11e-6 / 0.30 |
+| tied head M512 | 2.28e-6 / 3.1 | 1.51e-5 / 0.60 | 2.28e-6 / 1.6 | 2.28e-6 / 1.6 |
+
+Findings, in decision order:
+
+1. **`CUBLAS_MATH_DISALLOW_REDUCED_PRECISION_REDUCTION` is a dead end**:
+   V4/V5 match V2/V3 to the BIT in every metric on every shape — the
+   flag changes nothing for bf16-input GemmEx on this stack. The one-flag
+   rescue hypothesized from the 61325b3 signature is refuted.
+2. **The accuracy gap PEDANTIC vs 32F is real and persists on CUDA 13**
+   (~10-35x mean relative error, growing with K). The falsification
+   guard ("V2 clean everywhere => inconclusive") did NOT trigger. The
+   April pin keeps its justification; **no default flip.** Version
+   window: reproduced on cuBLAS 13 / sm_120, first observed on
+   cuBLAS 12.8 / sm_89.
+3. Handle math mode is inert under PEDANTIC (V1 == V0 bit-for-bit) —
+   confirms the device.rs claim.
+4. Every cell is run-to-run bit-stable (20 repeats) — determinism is not
+   what separates the modes; accumulation accuracy is.
+5. **`CUBLAS_COMPUTE_32F_EMULATED_16BFX9` (V6e) matches true-fp32
+   accuracy bit-for-bit in error profile at up to ~2x the speed** on
+   f32-input GEMMs. Recorded as the Class-B candidate for the f32
+   cuBLAS lane (new bit family, versioned re-route, owner decision) —
+   see the P2.6 lane.
+6. TF32 (V6t) is the worst accuracy option at scale (mean 1.9e-4 at
+   K=16384) — reaffirms keeping it opt-in only.
+
+Consequence for bf16 TRAINING speed: the cuBLAS default lane stays
+pinned PEDANTIC; the speed lever for bf16 training remains the
+batch-invariant SGEMM-BI tier (fp32 fixed-order accumulation, no cuBLAS)
+and its occupancy work. Full artifact: `cublas_probe_2026-08-22.tsv`
+(box `/tmp/cublas_probe.tsv`).
