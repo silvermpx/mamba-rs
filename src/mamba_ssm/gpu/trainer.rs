@@ -810,9 +810,40 @@ pub(crate) struct MambaTrainerMixed {
     captured_f16_half_staging_ptr: u64,
     captured_f16_bi_upcast_ptrs: [u64; 3],
     captured_f16_gemm_flags: (bool, bool, bool),
+    // P1.6(1): pinned host staging for the per-step H2D uploads. The pin
+    // turns the copies into true async DMA; the guard event serializes
+    // staging-buffer reuse against the previous step's in-flight copy
+    // (rewriting a pinned source mid-DMA is silent wrong input).
+    pin_input: super::buffers::PinnedHostBuf,
+    pin_dtemp: super::buffers::PinnedHostBuf,
+    upload_guard: cudarc::driver::CudaEvent,
 }
 
 impl MambaTrainerMixed {
+    /// P1.6(1): upload through the pinned stage. Waits out the previous
+    /// step's DMA (guard event) before rewriting the staging buffer,
+    /// then records the guard after the enqueue. `which`: 0 = input into
+    /// mamba_input, 1 = d_temporal into d_temporal.
+    fn staged_upload(&mut self, which: usize, data: &[f32]) -> Result<(), String> {
+        self.upload_guard
+            .synchronize()
+            .map_err(|e| format!("upload guard sync: {e:?}"))?;
+        let (pin, dst) = match which {
+            0 => (&mut self.pin_input, &mut self.mamba_input),
+            1 => (&mut self.pin_dtemp, &mut self.d_temporal),
+            // 2 = f16 lane: d_temporal into the pre-scale staging buffer.
+            _ => (
+                &mut self.pin_dtemp,
+                self.d_temporal_scaled.as_mut().expect("f16 dt_scaled"),
+            ),
+        };
+        pin.as_mut_slice()[..data.len()].copy_from_slice(data);
+        dst.upload(&self.ctx.stream, &pin.as_slice()[..data.len()])?;
+        self.upload_guard
+            .record(&self.ctx.stream)
+            .map_err(|e| format!("upload guard record: {e:?}"))
+    }
+
     fn new_full(
         gpu_ordinal: usize,
         cpu_weights: &MambaWeights,
@@ -931,6 +962,13 @@ impl MambaTrainerMixed {
 
         let clip_partials = alloc_partials(&ctx.stream)?;
 
+        let pin_input = super::buffers::PinnedHostBuf::zeroed(batch * seq_len * input_dim)?;
+        let pin_dtemp = super::buffers::PinnedHostBuf::zeroed(batch * seq_len * cfg.d_model)?;
+        let upload_guard = ctx
+            .stream
+            .context()
+            .new_event(None)
+            .map_err(|e| format!("upload guard event: {e:?}"))?;
         Ok(Self {
             ctx,
             cfg,
@@ -970,6 +1008,9 @@ impl MambaTrainerMixed {
             captured_f16_half_staging_ptr: 0,
             captured_f16_bi_upcast_ptrs: [0; 3],
             captured_f16_gemm_flags: (false, false, false),
+            pin_input,
+            pin_dtemp,
+            upload_guard,
         })
     }
 
@@ -1098,8 +1139,8 @@ impl MambaTrainerMixed {
         }
 
         // bf16 path: existing graph / eager dispatch.
-        self.mamba_input.upload(&self.ctx.stream, input)?;
-        self.d_temporal.upload(&self.ctx.stream, d_temporal)?;
+        self.staged_upload(0, input)?;
+        self.staged_upload(1, d_temporal)?;
         let (step, bc1, bc2) = self.adam.advance();
         self.bias.write(&self.ctx.stream, bc1, bc2, self.adam.lr)?;
 
@@ -1148,7 +1189,7 @@ impl MambaTrainerMixed {
             self.temporal_f32.len(),
             temporal_out.len(),
         );
-        self.mamba_input.upload(&self.ctx.stream, input)?;
+        self.staged_upload(0, input)?;
         self.eager_forward()?;
         {
             let dst = self.temporal_f32.cached_ptr();
@@ -1233,7 +1274,7 @@ impl MambaTrainerMixed {
             return Ok(m);
         }
 
-        self.d_temporal.upload(&self.ctx.stream, d_temporal)?;
+        self.staged_upload(1, d_temporal)?;
         if !self.grads_dirty {
             self.grads.zero(&self.ctx.stream)?;
         }
@@ -1308,9 +1349,9 @@ impl MambaTrainerMixed {
         clip_max_norm: Option<f32>,
     ) -> Result<BackwardMetrics, String> {
         let scale = self.scaler.as_ref().expect("f16 scaler").scale();
+        self.staged_upload(2, d_temporal)?;
         {
             let dt_scaled = self.d_temporal_scaled.as_mut().expect("f16 dt_scaled");
-            dt_scaled.upload(&self.ctx.stream, d_temporal)?;
             let n = d_temporal.len() as i32;
             let mut builder = self
                 .ctx
@@ -1390,10 +1431,10 @@ impl MambaTrainerMixed {
         // Upload input + d_temporal (always, both eager and graph paths),
         // then scale d_temporal on-device: the old path built a scaled
         // Vec<f32> on the host every step (B*T*d_model alloc + traversal).
-        self.mamba_input.upload(&self.ctx.stream, input)?;
+        self.staged_upload(0, input)?;
+        self.staged_upload(2, d_temporal)?;
         {
             let dt_scaled = self.d_temporal_scaled.as_mut().expect("f16 dt_scaled");
-            dt_scaled.upload(&self.ctx.stream, d_temporal)?;
             let n = d_temporal.len() as i32;
             let mut builder = self
                 .ctx
@@ -1789,9 +1830,34 @@ pub(crate) struct MambaTrainerF32 {
     clip_partials: GpuByteBuffer,
     /// Host mirror of the partials — pre-allocated (zero-alloc hot path).
     clip_partials_host: Vec<f64>,
+    // P1.6(1): pinned host staging + reuse guard (see the twin fields on
+    // MambaTrainerMixed for the interlock rationale).
+    pin_input: super::buffers::PinnedHostBuf,
+    pin_dtemp: super::buffers::PinnedHostBuf,
+    upload_guard: cudarc::driver::CudaEvent,
 }
 
 impl MambaTrainerF32 {
+    /// P1.6(1): upload through the pinned stage. Waits out the previous
+    /// step's DMA (guard event) before rewriting the staging buffer,
+    /// then records the guard after the enqueue. `which`: 0 = input into
+    /// mamba_input, 1 = d_temporal into d_temporal.
+    fn staged_upload(&mut self, which: usize, data: &[f32]) -> Result<(), String> {
+        self.upload_guard
+            .synchronize()
+            .map_err(|e| format!("upload guard sync: {e:?}"))?;
+        let (pin, dst) = if which == 0 {
+            (&mut self.pin_input, &mut self.mamba_input)
+        } else {
+            (&mut self.pin_dtemp, &mut self.d_temporal)
+        };
+        pin.as_mut_slice()[..data.len()].copy_from_slice(data);
+        dst.upload(&self.ctx.stream, &pin.as_slice()[..data.len()])?;
+        self.upload_guard
+            .record(&self.ctx.stream)
+            .map_err(|e| format!("upload guard record: {e:?}"))
+    }
+
     fn new_full(
         gpu_ordinal: usize,
         cpu_weights: &MambaWeights,
@@ -1880,6 +1946,13 @@ impl MambaTrainerF32 {
 
         let clip_partials = alloc_partials(&ctx.stream)?;
 
+        let pin_input = super::buffers::PinnedHostBuf::zeroed(batch * seq_len * input_dim)?;
+        let pin_dtemp = super::buffers::PinnedHostBuf::zeroed(batch * seq_len * cfg.d_model)?;
+        let upload_guard = ctx
+            .stream
+            .context()
+            .new_event(None)
+            .map_err(|e| format!("upload guard event: {e:?}"))?;
         Ok(Self {
             ctx,
             cfg,
@@ -1903,6 +1976,9 @@ impl MambaTrainerF32 {
             grads_dirty: false,
             clip_partials,
             clip_partials_host: vec![0.0; GRAD_CLIP_PARTIALS],
+            pin_input,
+            pin_dtemp,
+            upload_guard,
         })
     }
 
@@ -1972,8 +2048,8 @@ impl MambaTrainerF32 {
                     .into(),
             );
         }
-        self.mamba_input.upload(&self.ctx.stream, input)?;
-        self.d_temporal.upload(&self.ctx.stream, d_temporal)?;
+        self.staged_upload(0, input)?;
+        self.staged_upload(1, d_temporal)?;
 
         let (step, bc1, bc2) = self.adam.advance();
         self.bias.write(&self.ctx.stream, bc1, bc2, self.adam.lr)?;
@@ -2029,7 +2105,7 @@ impl MambaTrainerF32 {
             self.temporal.len(),
             temporal_out.len(),
         );
-        self.mamba_input.upload(&self.ctx.stream, input)?;
+        self.staged_upload(0, input)?;
         self.eager_forward()?;
         // Sync AFTER the download enqueue — see the twin comment in
         // the mixed split path.
@@ -2080,7 +2156,7 @@ impl MambaTrainerF32 {
             self.d_temporal.len(),
             d_temporal.len(),
         );
-        self.d_temporal.upload(&self.ctx.stream, d_temporal)?;
+        self.staged_upload(1, d_temporal)?;
         if !self.grads_dirty {
             self.grads.zero(&self.ctx.stream)?;
         }
