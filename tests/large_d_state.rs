@@ -85,11 +85,15 @@ fn m1_gpu_step_matches_cpu_at_d_state_256() {
 #[test]
 fn state_capacity_range() {
     use mamba_rs::mamba_ssm::gpu::kernels::state_capacity;
-    assert_eq!(state_capacity(8).unwrap(), 64);
+    // 16-granular since P1.1(3): the cap sizes per-thread register
+    // arrays; a 64-floor at small d_state was 4x local-memory waste.
+    assert_eq!(state_capacity(8).unwrap(), 16);
+    assert_eq!(state_capacity(16).unwrap(), 16);
+    assert_eq!(state_capacity(17).unwrap(), 32);
     assert_eq!(state_capacity(64).unwrap(), 64);
-    assert_eq!(state_capacity(65).unwrap(), 128);
+    assert_eq!(state_capacity(65).unwrap(), 80);
     assert_eq!(state_capacity(128).unwrap(), 128);
-    assert_eq!(state_capacity(200).unwrap(), 256);
+    assert_eq!(state_capacity(200).unwrap(), 208);
     assert_eq!(state_capacity(256).unwrap(), 256);
     assert!(state_capacity(0).is_err());
     assert!(state_capacity(257).is_err());
