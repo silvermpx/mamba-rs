@@ -205,8 +205,15 @@ pub fn gpu_backward_mamba_layer_mixed(
             .map_err(|e| format!("gather_bc_cols_typed bwd: {e:?}"))?;
     }
 
-    // Zero T-length accumulator before SSM backward (kernel uses += over T).
-    // (d_a_log_local zeroing removed — full-domain register-acc store.)
+    // d_a_log_local zeroing is route-dependent: the SEQUENTIAL kernel
+    // `=`-stores the full domain from a register accumulator (no zero
+    // needed), but the PARALLEL reverse-scan kernel `+=`-accumulates
+    // chunk partials into it across its T-chunk loop and REQUIRES a
+    // zeroed buffer — reading stale scratch here poisoned every f16
+    // gradient step (PERF-063 regression).
+    if dims.scan_mode.use_parallel(t, ds) {
+        scratch.d_a_log_local.zero(&ctx.stream)?;
+    }
 
     // SSM backward: parallel reverse-scan when T > PARALLEL_SCAN_THRESHOLD
     // or

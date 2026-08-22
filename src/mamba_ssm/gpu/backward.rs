@@ -104,8 +104,14 @@ pub fn gpu_backward_mamba_layer(
             .map_err(|e| format!("gather_bc_cols bwd mamba: {:?}", e))?;
     }
 
-    // (d_a_log_local zeroing removed: the kernel now writes the full
-    // domain from a register accumulator — `=` store, not `+=`.)
+    // d_a_log_local zeroing is route-dependent: the SEQUENTIAL kernel
+    // `=`-stores the full domain from a register accumulator (no zero
+    // needed), but the PARALLEL reverse-scan kernel `+=`-accumulates
+    // chunk partials into it across its T-chunk loop and REQUIRES a
+    // zeroed buffer (PERF-063 regression).
+    if dims.scan_mode.use_parallel(t, ds) {
+        scratch.d_a_log_local.zero(&ctx.stream)?;
+    }
 
     // ssm_backward_local(h_saved, delta_saved, u_saved, B_saved, C_saved, a_neg, D,
     //   dy, d_delta, d_u, d_B_local, d_C_local, d_D_local, d_a_log_local,
