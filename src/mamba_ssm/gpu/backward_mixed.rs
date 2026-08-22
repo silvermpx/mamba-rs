@@ -294,47 +294,30 @@ pub fn gpu_backward_mamba_layer_mixed(
         }
     }
 
-    // Reductions: zero f32 targets; typed → f32 for d_b/c, f32 → f32 for
-    // d_d/d_a_log.
-    scratch.d_b_reduced.zero(&ctx.stream)?;
-    scratch.d_c_reduced.zero(&ctx.stream)?;
+    // Reductions: the fused dB+dC kernel `=`-stores the full domain
+    // (0.0f + sum), so the f32 targets need no zeroing; typed → f32 for
+    // d_b/c, f32 → f32 for d_d/d_a_log.
     {
         let b_i = b as i32;
         let t_i = t as i32;
         let di_i = di as i32;
         let ds_i = ds as i32;
-        // d_B reducer — typed in → f32 out.
-        let reduce_db = match dtype {
-            WeightDtype::Bf16 => &k.ssm_reduce_d_b_bf16,
-            WeightDtype::F16 => &k.ssm_reduce_d_b_f16,
-            WeightDtype::F32 => &k.ssm_reduce_d_b,
-        };
-        let mut bld = ctx.stream.launch_builder(reduce_db);
+        // Fused d_B + d_C reducer — typed in → f32 out.
+        let mut bld = ctx
+            .stream
+            .launch_builder(k.ssm_reduce_d_bc_typed.get(dtype));
         bld.arg(scratch.d_b_reduced.inner_mut());
-        let src = scratch.d_b_local.cached_ptr();
-        bld.arg(&src);
-        bld.arg(&b_i);
-        bld.arg(&t_i);
-        bld.arg(&di_i);
-        bld.arg(&ds_i);
-        unsafe { bld.launch(grid_1d(bt * ds)) }
-            .map_err(|e| format!("ssm_reduce_d_b typed: {e:?}"))?;
-        // d_C reducer.
-        let reduce_dc = match dtype {
-            WeightDtype::Bf16 => &k.ssm_reduce_d_c_bf16,
-            WeightDtype::F16 => &k.ssm_reduce_d_c_f16,
-            WeightDtype::F32 => &k.ssm_reduce_d_c,
-        };
-        let mut bld = ctx.stream.launch_builder(reduce_dc);
         bld.arg(scratch.d_c_reduced.inner_mut());
-        let src = scratch.d_c_local.cached_ptr();
-        bld.arg(&src);
+        let src_b = scratch.d_b_local.cached_ptr();
+        bld.arg(&src_b);
+        let src_c = scratch.d_c_local.cached_ptr();
+        bld.arg(&src_c);
         bld.arg(&b_i);
         bld.arg(&t_i);
         bld.arg(&di_i);
         bld.arg(&ds_i);
         unsafe { bld.launch(grid_1d(bt * ds)) }
-            .map_err(|e| format!("ssm_reduce_d_c typed: {e:?}"))?;
+            .map_err(|e| format!("ssm_reduce_d_BC typed: {e:?}"))?;
         // d_D reducer — f32 in → f32 out.
         let mut bld = ctx.stream.launch_builder(&k.ssm_reduce_d_d);
         let p = d_lw.d_param.ptr();
@@ -355,67 +338,15 @@ pub fn gpu_backward_mamba_layer_mixed(
             .map_err(|e| format!("ssm_reduce_d_a_log: {e:?}"))?;
     }
 
-    // Assemble typed d_xdbl: zero, then scatter d_b/c_reduced (f32) into
-    // typed slots via typed staging (b_buf/c_buf). dt slot filled later by
-    // scatter of d_dt_input after the dt_proj backward (so zero the whole
-    // buffer once up-front).
-    scratch.d_xdbl.zero(&ctx.stream)?;
-    {
-        let n_bc = (bt * ds) as i32;
-        // Re-use b_buf as typed stage for d_b_reduced (typed = 0 + f32_src).
-        scratch.b_buf.zero(&ctx.stream)?;
-        let mut bld = ctx
-            .stream
-            .launch_builder(k.vec_add_inplace_typed.get(dtype));
-        let dst = scratch.b_buf.cached_ptr();
-        let src = scratch.d_b_reduced.cached_ptr();
-        bld.arg(&dst);
-        bld.arg(&src);
-        bld.arg(&n_bc);
-        unsafe { bld.launch(grid_1d(bt * ds)) }
-            .map_err(|e| format!("cast d_b_reduced→typed: {e:?}"))?;
-        scratch.c_buf.zero(&ctx.stream)?;
-        let mut bld = ctx
-            .stream
-            .launch_builder(k.vec_add_inplace_typed.get(dtype));
-        let dst = scratch.c_buf.cached_ptr();
-        let src = scratch.d_c_reduced.cached_ptr();
-        bld.arg(&dst);
-        bld.arg(&src);
-        bld.arg(&n_bc);
-        unsafe { bld.launch(grid_1d(bt * ds)) }
-            .map_err(|e| format!("cast d_c_reduced→typed: {e:?}"))?;
-        // Scatter typed b_buf → d_xdbl[:, dt_rank..dt_rank+ds].
-        let bt_i = bt as i32;
-        let xdbl_i = xdbl_dim as i32;
-        let ds_i = ds as i32;
-        let b_off = dt_rank as i32;
-        let c_off = (dt_rank + ds) as i32;
-        let mut bld = ctx
-            .stream
-            .launch_builder(k.scatter_add_cols_typed.get(dtype));
-        let dst = scratch.d_xdbl.cached_ptr();
-        let src = scratch.b_buf.cached_ptr();
-        bld.arg(&dst);
-        bld.arg(&src);
-        bld.arg(&bt_i);
-        bld.arg(&xdbl_i);
-        bld.arg(&ds_i);
-        bld.arg(&b_off);
-        unsafe { bld.launch(grid_1d(bt * ds)) }.map_err(|e| format!("scatter d_b typed: {e:?}"))?;
-        let mut bld = ctx
-            .stream
-            .launch_builder(k.scatter_add_cols_typed.get(dtype));
-        let dst = scratch.d_xdbl.cached_ptr();
-        let src = scratch.c_buf.cached_ptr();
-        bld.arg(&dst);
-        bld.arg(&src);
-        bld.arg(&bt_i);
-        bld.arg(&xdbl_i);
-        bld.arg(&ds_i);
-        bld.arg(&c_off);
-        unsafe { bld.launch(grid_1d(bt * ds)) }.map_err(|e| format!("scatter d_c typed: {e:?}"))?;
-    }
+    // d_xdbl assembly moved to ONE pack_xdbl_cols launch after the
+    // dt_proj backward below: the dt|B|C ranges exactly tile the row, so
+    // the old zero + b_buf/c_buf typed staging (2 memsets + 2 casts) +
+    // three scatter_adds collapse once all three sources (typed
+    // d_dt_input, f32 d_b/c_reduced) are ready. Nothing reads d_xdbl
+    // before the x_proj backward, and nothing overwrites the two reduce
+    // outputs in between; the pack's FROM_F(0.0f + v) store reproduces
+    // the old zero+cast+add bit behavior exactly (single round of the
+    // f32 sources equals the old cast-then-add-onto-zero double round).
 
     // ─── B4: softplus backward + dt_proj backward ────────────────────
     {
@@ -506,25 +437,25 @@ pub fn gpu_backward_mamba_layer_mixed(
         };
         unsafe { bld.launch(cfg) }.map_err(|e| format!("reduce_bias dt_proj: {e:?}"))?;
     }
-    // Scatter d_dt_input (typed) into d_xdbl[:, 0..dt_rank].
+    // One-kernel typed d_xdbl assembly: dt | B | C ranges tile the row.
     {
         let bt_i = bt as i32;
-        let xdbl_i = xdbl_dim as i32;
         let dt_i = dt_rank as i32;
-        let offset: i32 = 0;
+        let ds_i = ds as i32;
         let mut bld = ctx
             .stream
-            .launch_builder(k.scatter_add_cols_typed.get(dtype));
+            .launch_builder(k.pack_xdbl_cols_typed.get(dtype));
         let dst = scratch.d_xdbl.cached_ptr();
-        let src = scratch.d_dt_input.cached_ptr();
+        let dt_src = scratch.d_dt_input.cached_ptr();
         bld.arg(&dst);
-        bld.arg(&src);
+        bld.arg(&dt_src);
+        bld.arg(scratch.d_b_reduced.inner());
+        bld.arg(scratch.d_c_reduced.inner());
         bld.arg(&bt_i);
-        bld.arg(&xdbl_i);
         bld.arg(&dt_i);
-        bld.arg(&offset);
-        unsafe { bld.launch(grid_1d(bt * dt_rank)) }
-            .map_err(|e| format!("scatter dt typed bwd: {e:?}"))?;
+        bld.arg(&ds_i);
+        unsafe { bld.launch(grid_1d(bt * xdbl_dim)) }
+            .map_err(|e| format!("pack_xdbl_cols typed: {e:?}"))?;
     }
 
     // ─── B5: x_proj backward ─────────────────────────────────────────

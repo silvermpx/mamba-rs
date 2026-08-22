@@ -538,6 +538,45 @@ DEFINE_SCATTER_ADD_COLS(f32,  float,         from_f_f32)
 DEFINE_SCATTER_ADD_COLS(bf16, __nv_bfloat16, from_f_bf16)
 DEFINE_SCATTER_ADD_COLS(f16,  __half,        from_f_f16)
 
+// d_xdbl assembly in ONE kernel: the three column ranges [0..dt_rank),
+// [dt_rank..dt_rank+ds), [dt_rank+ds..dt_rank+2ds) exactly tile the
+// xdbl row, so the old zero + per-range scatter staging (f32 lane:
+// 1 memset + 3 scatter_add; mixed lane: 2 memsets + 2 casts + 3
+// scatter_add) collapses into a single full-domain store. The dt source
+// is already the compute dtype (d_dt_input), B/C sources are the f32
+// reduce outputs. Every store keeps the FROM_F(0.0f + x) form —
+// bit-identical to the old zero+add chains including the -0.0 class,
+// and identical to the old double-round (rounding an already-rounded
+// value is the identity).
+#define DEFINE_PACK_XDBL_COLS(SUFFIX, TY, FROM_F)                             \
+extern "C" __global__ void pack_xdbl_cols_##SUFFIX(                           \
+    TY* dst,               /* [batch * (dt_rank + 2*d_state)] */              \
+    const TY* dt_src,      /* [batch * dt_rank] */                            \
+    const float* b_src,    /* [batch * d_state] */                            \
+    const float* c_src,    /* [batch * d_state] */                            \
+    int batch, int dt_rank, int d_state                                      \
+) {                                                                           \
+    int w = dt_rank + 2 * d_state;                                            \
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;                          \
+    int total = batch * w;                                                    \
+    if (idx >= total) return;                                                 \
+    int b = idx / w;                                                          \
+    int c = idx % w;                                                          \
+    float v;                                                                  \
+    if (c < dt_rank) {                                                        \
+        v = to_f(dt_src[b * dt_rank + c]);                                    \
+    } else if (c < dt_rank + d_state) {                                       \
+        v = b_src[b * d_state + (c - dt_rank)];                               \
+    } else {                                                                  \
+        v = c_src[b * d_state + (c - dt_rank - d_state)];                     \
+    }                                                                         \
+    dst[idx] = FROM_F(0.0f + v);                                              \
+}
+
+DEFINE_PACK_XDBL_COLS(f32,  float,         from_f_f32)
+DEFINE_PACK_XDBL_COLS(bf16, __nv_bfloat16, from_f_bf16)
+DEFINE_PACK_XDBL_COLS(f16,  __half,        from_f_f16)
+
 // Typed bias reduction: `d_bias[i] += sum over (b, t) of dy[b, t, i]` where
 // `dy` is typed and `d_bias` is f32 master grad. Used by mixed dt_proj
 // backward to accumulate the bias gradient. One block per bias index i; one

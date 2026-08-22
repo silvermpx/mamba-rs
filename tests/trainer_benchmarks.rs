@@ -63,12 +63,20 @@ fn run_lm(
     seq_len: usize,
     suffix: &str,
 ) -> Result<(), String> {
+    run_lm_shape(dtype, lm_cfg(scan_mode), 2, seq_len, suffix)
+}
+
+fn run_lm_shape(
+    dtype: WeightDtype,
+    cfg: mamba_rs::config::MambaConfig,
+    batch: usize,
+    seq_len: usize,
+    suffix: &str,
+) -> Result<(), String> {
     use mamba_rs::mamba_ssm::gpu::trainer::{MambaTrainer, TrainSessionCfg};
     use mamba_rs::weights::MambaWeights;
 
-    let cfg = lm_cfg(scan_mode);
     let input_dim = cfg.d_model;
-    let batch = 2;
     let n = batch * seq_len * input_dim;
     let label = format!("{dtype:?}{suffix}");
 
@@ -198,6 +206,53 @@ fn bench_lm_train_bf16_parallel_scan() {
         " par",
     )
     .unwrap();
+}
+
+/// Free-shape bench arm for measuring the ACTUAL training shape instead
+/// of extrapolating from the B2xT64 microbench (the P0.4 honesty rule:
+/// the campaign wall is measured at the campaign shape). Every knob
+/// rides an env var so no recompile is needed per shape:
+///   MAMBA_RS_BENCH_DM (d_model, default 384)
+///   MAMBA_RS_BENCH_LAYERS (default 24)
+///   MAMBA_RS_BENCH_B (batch, default 8)
+///   MAMBA_RS_BENCH_T (seq_len, default 1300)
+///   MAMBA_RS_BENCH_DTYPE (f32|bf16|f16, default bf16)
+///   MAMBA_RS_BENCH_SCAN (auto|seq|par, default auto)
+/// Combine with MAMBA_RS_BATCH_INVARIANT=1 (+_TC=1) for the BI tiers.
+#[test]
+#[ignore]
+fn bench_lm_train_campaign_shape() {
+    let get = |k: &str, d: usize| -> usize {
+        std::env::var(k)
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(d)
+    };
+    let dm = get("MAMBA_RS_BENCH_DM", 384);
+    let layers = get("MAMBA_RS_BENCH_LAYERS", 24);
+    let b = get("MAMBA_RS_BENCH_B", 8);
+    let t = get("MAMBA_RS_BENCH_T", 1300);
+    let dtype = match std::env::var("MAMBA_RS_BENCH_DTYPE").as_deref() {
+        Ok("f32") => WeightDtype::F32,
+        Ok("f16") => WeightDtype::F16,
+        _ => WeightDtype::Bf16,
+    };
+    let scan = match std::env::var("MAMBA_RS_BENCH_SCAN").as_deref() {
+        Ok("seq") => mamba_rs::config::ScanMode::Sequential,
+        Ok("par") => mamba_rs::config::ScanMode::Parallel,
+        _ => mamba_rs::config::ScanMode::Auto,
+    };
+    let cfg = mamba_rs::config::MambaConfig {
+        d_model: dm,
+        n_layers: layers,
+        d_state: 16,
+        d_conv: 4,
+        expand: 2,
+        scan_mode: scan,
+        rms_norm_eps: 1e-5,
+    };
+    eprintln!("campaign shape: dm={dm} L={layers} B={b} T={t} {dtype:?} scan={scan:?}");
+    run_lm_shape(dtype, cfg, b, t, " campaign").unwrap();
 }
 
 /// One point OFF the batch-invariant `batch >= 128` dispatch boundary

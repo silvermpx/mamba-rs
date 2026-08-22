@@ -697,41 +697,42 @@ DEFINE_SSM_BACKWARD_LOCAL_BWD(f16,  __half,        from_f_f16)
 
 // Reduction kernels: sum per-sample gradients across batch dimension.
 
-// Reduce d_B across d_inner: d_B_out[b*T*ds + t*ds + n] = sum_d(d_B_local[...])
-extern "C" __global__ void ssm_reduce_d_B(
-    float* d_B_out,           // [batch * T * d_state] accumulated
-    const float* d_B_local,   // [batch * T * d_inner * d_state]
-    int batch, int T, int d_inner, int d_state
-) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    int total = batch * T * d_state;
-    if (idx >= total) return;
-    int bt = idx / d_state;
-    int n = idx % d_state;
-    float sum = 0.0f;
-    for (int d = 0; d < d_inner; d++) {
-        sum += d_B_local[(bt * d_inner + d) * d_state + n];
-    }
-    d_B_out[idx] += sum;
+// Fused d_B + d_C reduction across d_inner — one launch instead of two,
+// and a full-domain `= (0.0f + sum)` store instead of `+=` onto a
+// pre-zeroed buffer, which lets both callers drop their memsets. The two
+// inner loops are verbatim copies of the old split reducers (same
+// ascending-d order, f32 sums), so every output value is bit-identical
+// to the old zero+`+=` pair INCLUDING at sum == -0.0 (0.0f + -0.0f =
+// +0.0f — exactly what `+=`-on-zero produced; a bare `= sum` would
+// store -0.0 and flip the sign bit downstream).
+#define DEFINE_SSM_REDUCE_D_BC_FUSED(SUFFIX, TY)                               \
+extern "C" __global__ void ssm_reduce_d_BC_##SUFFIX(                           \
+    float* d_B_out,           /* [batch * T * d_state] */                      \
+    float* d_C_out,           /* [batch * T * d_state] */                      \
+    const TY* d_B_local,      /* [batch * T * d_inner * d_state] */            \
+    const TY* d_C_local,      /* [batch * T * d_inner * d_state] */            \
+    int batch, int T, int d_inner, int d_state                                 \
+) {                                                                            \
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;                           \
+    int total = batch * T * d_state;                                           \
+    if (idx >= total) return;                                                  \
+    int bt = idx / d_state;                                                    \
+    int n = idx % d_state;                                                     \
+    float sum_b = 0.0f;                                                        \
+    for (int d = 0; d < d_inner; d++) {                                        \
+        sum_b += to_f(d_B_local[(bt * d_inner + d) * d_state + n]);            \
+    }                                                                          \
+    d_B_out[idx] = 0.0f + sum_b;                                               \
+    float sum_c = 0.0f;                                                        \
+    for (int d = 0; d < d_inner; d++) {                                        \
+        sum_c += to_f(d_C_local[(bt * d_inner + d) * d_state + n]);            \
+    }                                                                          \
+    d_C_out[idx] = 0.0f + sum_c;                                               \
 }
 
-// Reduce d_C across d_inner (same pattern as d_B)
-extern "C" __global__ void ssm_reduce_d_C(
-    float* d_C_out,           // [batch * T * d_state] accumulated
-    const float* d_C_local,   // [batch * T * d_inner * d_state]
-    int batch, int T, int d_inner, int d_state
-) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    int total = batch * T * d_state;
-    if (idx >= total) return;
-    int bt = idx / d_state;
-    int n = idx % d_state;
-    float sum = 0.0f;
-    for (int d = 0; d < d_inner; d++) {
-        sum += d_C_local[(bt * d_inner + d) * d_state + n];
-    }
-    d_C_out[idx] += sum;
-}
+DEFINE_SSM_REDUCE_D_BC_FUSED(f32,  float)
+DEFINE_SSM_REDUCE_D_BC_FUSED(bf16, __nv_bfloat16)
+DEFINE_SSM_REDUCE_D_BC_FUSED(f16,  __half)
 
 // Reduce d_D: d_D_out[d] = sum_b(d_D_local[b * d_inner + d])
 extern "C" __global__ void ssm_reduce_d_D(
@@ -748,37 +749,12 @@ extern "C" __global__ void ssm_reduce_d_D(
     d_D_out[d] += sum;
 }
 
-// Typed reducers for d_B / d_C: when ssm_backward_local writes typed
-// (bf16/f16) per-thread d_B_local / d_C_local, the reducer must promote
-// each contribution to f32 in the inner sum loop. Output stays f32 master
-// (gradient buffer is f32 always per AMP convention; no precision loss
-// at write because dst is f32 += f32 sum).
-//
-// d_D and d_a_log reducers are NOT typed: their inputs are already f32
-// per the precision rules in DEFINE_SSM_BACKWARD_LOCAL_BWD (T-length
-// accumulators stay f32 regardless of activation dtype).
-#define DEFINE_SSM_REDUCE_D_BC_TYPED(SUFFIX, TY, KERNEL_NAME)                  \
-extern "C" __global__ void KERNEL_NAME##_##SUFFIX(                             \
-    float* dst_out,                                                            \
-    const TY* src_local,                                                       \
-    int batch, int T, int d_inner, int d_state                                 \
-) {                                                                            \
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;                           \
-    int total = batch * T * d_state;                                           \
-    if (idx >= total) return;                                                  \
-    int bt = idx / d_state;                                                    \
-    int n = idx % d_state;                                                     \
-    float sum = 0.0f;                                                          \
-    for (int d = 0; d < d_inner; d++) {                                        \
-        sum += to_f(src_local[(bt * d_inner + d) * d_state + n]);              \
-    }                                                                          \
-    dst_out[idx] += sum;                                                       \
-}
-
-DEFINE_SSM_REDUCE_D_BC_TYPED(bf16, __nv_bfloat16, ssm_reduce_d_B)
-DEFINE_SSM_REDUCE_D_BC_TYPED(f16,  __half,        ssm_reduce_d_B)
-DEFINE_SSM_REDUCE_D_BC_TYPED(bf16, __nv_bfloat16, ssm_reduce_d_C)
-DEFINE_SSM_REDUCE_D_BC_TYPED(f16,  __half,        ssm_reduce_d_C)
+// (The old split ssm_reduce_d_B / ssm_reduce_d_C kernels and their typed
+// twins are gone: the fused ssm_reduce_d_BC_* above covers all three
+// dtypes — the typed variants promote each contribution to f32 in the
+// inner loop, output stays the f32 master per the AMP convention.
+// d_D and d_a_log reducers stay untyped: their inputs are already f32
+// per the precision rules in DEFINE_SSM_BACKWARD_LOCAL_BWD.)
 
 // Reduce d_a_log: d_a_log_out[d*ds+n] = sum_b(d_a_log_local[b*di*ds + d*ds + n])
 extern "C" __global__ void ssm_reduce_d_a_log(

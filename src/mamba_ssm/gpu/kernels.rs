@@ -67,10 +67,9 @@ pub struct MambaKernels {
     pub ssm_burnin_fwd_nosave: CudaFunction,
     /// Per-(b,t,d,n) local SSM backward: dh, du, d_delta contributions.
     pub ssm_backward_local: CudaFunction,
-    /// Reduce local SSM grads to dB `[B*T*d_state]`.
-    pub ssm_reduce_d_b: CudaFunction,
-    /// Reduce local SSM grads to dC `[B*T*d_state]`.
-    pub ssm_reduce_d_c: CudaFunction,
+    /// Fused dB+dC reduction `[B*T*d_state]` each, `=`-store (no memset
+    /// precondition); .get(dtype) picks the input promotion variant.
+    pub ssm_reduce_d_bc_typed: TypedKernel,
     /// Reduce local SSM grads to dD `[d_inner]`.
     pub ssm_reduce_d_d: CudaFunction,
     /// Reduce local SSM grads to d_a_log `[d_inner*d_state]`.
@@ -184,13 +183,9 @@ pub struct MambaKernels {
     /// T-length accumulators). Matches DEFINE_SSM_BACKWARD_LOCAL_BWD macro
     /// in mamba_ssm.cu. Validated against state-spaces/mamba reference.
     pub ssm_backward_local_typed: TypedKernel,
-    /// Typed-input variant of `ssm_reduce_d_B` (output stays f32 master).
-    /// Used when ssm_backward_local writes typed d_B_local. Promote each
-    /// contribution to f32 in the inner sum, write f32 sum.
-    pub ssm_reduce_d_b_bf16: CudaFunction,
-    pub ssm_reduce_d_b_f16: CudaFunction,
-    pub ssm_reduce_d_c_bf16: CudaFunction,
-    pub ssm_reduce_d_c_f16: CudaFunction,
+    /// One-kernel d_xdbl assembly (dt|B|C ranges tile the row): dt source
+    /// typed, B/C sources f32 reduce outputs, FROM_F(0.0f + v) stores.
+    pub pack_xdbl_cols_typed: TypedKernel,
 
     // -- Typed inference kernels (f32/bf16/f16 variants) --
     pub silu_fwd_typed: TypedKernel,
@@ -634,8 +629,11 @@ impl MambaKernels {
             ssm_burnin_fwd: get("ssm_burnin_forward")?,
             ssm_burnin_fwd_nosave: get("ssm_burnin_forward_nosave")?,
             ssm_backward_local: get("ssm_backward_local")?,
-            ssm_reduce_d_b: get("ssm_reduce_d_B")?,
-            ssm_reduce_d_c: get("ssm_reduce_d_C")?,
+            ssm_reduce_d_bc_typed: TypedKernel {
+                f32: get("ssm_reduce_d_BC_f32")?,
+                bf16: get("ssm_reduce_d_BC_bf16")?,
+                f16: get("ssm_reduce_d_BC_f16")?,
+            },
             ssm_reduce_d_d: get("ssm_reduce_d_D")?,
             ssm_reduce_d_a_log: get("ssm_reduce_d_a_log")?,
             // conv1d
@@ -758,10 +756,11 @@ impl MambaKernels {
             conv1d_burnin_bwd_typed: load_typed("conv1d_burnin_backward")?,
             // ssm_backward_local typed + typed-input reducers
             ssm_backward_local_typed: load_typed("ssm_backward_local")?,
-            ssm_reduce_d_b_bf16: get("ssm_reduce_d_B_bf16")?,
-            ssm_reduce_d_b_f16: get("ssm_reduce_d_B_f16")?,
-            ssm_reduce_d_c_bf16: get("ssm_reduce_d_C_bf16")?,
-            ssm_reduce_d_c_f16: get("ssm_reduce_d_C_f16")?,
+            pack_xdbl_cols_typed: TypedKernel {
+                f32: get("pack_xdbl_cols_f32")?,
+                bf16: get("pack_xdbl_cols_bf16")?,
+                f16: get("pack_xdbl_cols_f16")?,
+            },
 
             // dual-dtype (half-only)
             rmsnorm_fwd_f32in_typed: load_half("rmsnorm_forward_f32in")?,

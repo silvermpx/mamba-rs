@@ -164,36 +164,33 @@ pub fn gpu_backward_mamba_layer(
             .map_err(|e| format!("ssm bwd (parallel={use_parallel}): {e:?}"))?;
     }
 
-    // Reductions: sum per-sample gradients across batch/d_inner
-    // CRITICAL: zero reduction targets — they held gathered B/C values from ssm_backward_local
-    // and reduction kernels use += accumulation (would add stale B/C values to gradients)
-    scratch.d_b_reduced.zero(&ctx.stream)?;
-    scratch.d_c_reduced.zero(&ctx.stream)?;
+    // Reductions: sum per-sample gradients across batch/d_inner.
+    // The fused dB+dC kernel `=`-stores the full domain (0.0f + sum),
+    // so the reduction targets need no zeroing even though they held
+    // gathered B/C values from the SSM backward — full overwrite.
     {
         let b_i = b as i32;
         let t_i = t as i32;
         let di_i = di as i32;
         let ds_i = ds as i32;
-        // d_B reduction
-        let mut builder = ctx.stream.launch_builder(&ctx.kernels.ssm_reduce_d_b);
+        // Fused d_B + d_C reduction
+        let mut builder = ctx
+            .stream
+            .launch_builder(
+                ctx.kernels
+                    .ssm_reduce_d_bc_typed
+                    .get(super::dtype::WeightDtype::F32),
+            );
         builder.arg(scratch.d_b_reduced.inner_mut());
-        builder.arg(scratch.d_b_local.inner());
-        builder.arg(&b_i);
-        builder.arg(&t_i);
-        builder.arg(&di_i);
-        builder.arg(&ds_i);
-        unsafe { builder.launch(grid_1d(bt * ds)) }
-            .map_err(|e| format!("ssm_reduce_d_B mamba: {:?}", e))?;
-        // d_C reduction
-        let mut builder = ctx.stream.launch_builder(&ctx.kernels.ssm_reduce_d_c);
         builder.arg(scratch.d_c_reduced.inner_mut());
+        builder.arg(scratch.d_b_local.inner());
         builder.arg(scratch.d_c_local.inner());
         builder.arg(&b_i);
         builder.arg(&t_i);
         builder.arg(&di_i);
         builder.arg(&ds_i);
         unsafe { builder.launch(grid_1d(bt * ds)) }
-            .map_err(|e| format!("ssm_reduce_d_C mamba: {:?}", e))?;
+            .map_err(|e| format!("ssm_reduce_d_BC mamba: {:?}", e))?;
         // d_D reduction
         let mut builder = ctx.stream.launch_builder(&ctx.kernels.ssm_reduce_d_d);
         let _p = d_lw.d_param.ptr();
@@ -215,36 +212,12 @@ pub fn gpu_backward_mamba_layer(
             .map_err(|e| format!("ssm_reduce_d_a_log mamba: {:?}", e))?;
     }
 
-    // Pack d_b_reduced, d_c_reduced into d_xdbl at the right offsets
-    // Zero d_xdbl first (dt portion will be filled by scatter_add_cols)
-    scratch.d_xdbl.zero(&ctx.stream)?;
-    {
-        let bt_i = bt as i32;
-        let xdbl_i = xdbl_dim as i32;
-        let ds_i = ds as i32;
-        let b_offset = dt_rank as i32;
-        let c_offset = (dt_rank + ds) as i32;
-        // Scatter d_B into d_xdbl at offset dt_rank
-        let mut builder = ctx.stream.launch_builder(&ctx.kernels.scatter_add_cols);
-        builder.arg(scratch.d_xdbl.inner_mut());
-        builder.arg(scratch.d_b_reduced.inner());
-        builder.arg(&bt_i);
-        builder.arg(&xdbl_i);
-        builder.arg(&ds_i);
-        builder.arg(&b_offset);
-        unsafe { builder.launch(grid_1d(bt * ds)) }
-            .map_err(|e| format!("scatter d_B mamba: {:?}", e))?;
-        // Scatter d_C into d_xdbl at offset dt_rank + d_state
-        let mut builder = ctx.stream.launch_builder(&ctx.kernels.scatter_add_cols);
-        builder.arg(scratch.d_xdbl.inner_mut());
-        builder.arg(scratch.d_c_reduced.inner());
-        builder.arg(&bt_i);
-        builder.arg(&xdbl_i);
-        builder.arg(&ds_i);
-        builder.arg(&c_offset);
-        unsafe { builder.launch(grid_1d(bt * ds)) }
-            .map_err(|e| format!("scatter d_C mamba: {:?}", e))?;
-    }
+    // d_xdbl assembly moved to ONE pack_xdbl_cols launch after the
+    // dt_proj backward below: the dt|B|C ranges exactly tile the row, so
+    // the old zero + three scatter_adds collapse once all three sources
+    // (d_dt_input, d_b_reduced, d_c_reduced) are ready. Nothing reads
+    // d_xdbl before the x_proj backward, and nothing overwrites the two
+    // reduce outputs in between.
 
     // ===================================================================
     // B4: Softplus backward + dt_proj backward
@@ -288,21 +261,25 @@ pub fn gpu_backward_mamba_layer(
         (bt, dt_rank, di),
     )?;
 
-    // Scatter-add d_dt_input into d_xdbl at offset 0
+    // One-kernel d_xdbl assembly: dt | B | C ranges tile the row.
     {
         let bt_i = bt as i32;
-        let xdbl_i = xdbl_dim as i32;
         let dt_i = dt_rank as i32;
-        let offset: i32 = 0;
-        let mut builder = ctx.stream.launch_builder(&ctx.kernels.scatter_add_cols);
+        let ds_i = ds as i32;
+        let mut builder = ctx.stream.launch_builder(
+            ctx.kernels
+                .pack_xdbl_cols_typed
+                .get(super::dtype::WeightDtype::F32),
+        );
         builder.arg(scratch.d_xdbl.inner_mut());
         builder.arg(scratch.d_dt_input.inner());
+        builder.arg(scratch.d_b_reduced.inner());
+        builder.arg(scratch.d_c_reduced.inner());
         builder.arg(&bt_i);
-        builder.arg(&xdbl_i);
         builder.arg(&dt_i);
-        builder.arg(&offset);
-        unsafe { builder.launch(grid_1d(bt * dt_rank)) }
-            .map_err(|e| format!("scatter dt bwd mamba: {:?}", e))?;
+        builder.arg(&ds_i);
+        unsafe { builder.launch(grid_1d(bt * xdbl_dim)) }
+            .map_err(|e| format!("pack_xdbl_cols mamba: {:?}", e))?;
     }
 
     // ===================================================================
