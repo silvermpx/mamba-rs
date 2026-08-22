@@ -609,6 +609,10 @@ extern "C" __global__ void m3_dqkv(
     float* ssm2_sm   = ssm_sm + hd * ds; // [hd][ds]
     float* dm_rev_sm = ssm2_sm + hd * ds; // [CS]
     float* dm_vec_sm = dm_rev_sm + CS;    // [CS]
+    // P1.7(4): CS x CS pair matrices K[a].Q[b] and V[a].dO[b], computed
+    // once per chunk instead of per consumer lane (hd-fold recompute).
+    float* kq_mat  = dm_vec_sm + CS;      // [CS*CS]
+    float* vdo_mat = kq_mat + CS * CS;    // [CS*CS]
 
     for (int chunk_loop = 0; chunk_loop < n_chunks; chunk_loop++) {
         int chunk_idx = n_chunks - 1 - chunk_loop;
@@ -659,6 +663,23 @@ extern "C" __global__ void m3_dqkv(
         }
         __syncthreads();
 
+        // Each (a,b) element is computed by exactly one thread with the
+        // same ascending-index dot the inline consumers used, so every
+        // reader sees a bit-identical value.
+        for (int idx = p; idx < CS * CS; idx += hd) {
+            int aa = idx / CS;
+            int bb = idx % CS;
+            float kq_acc = 0.0f;
+            for (int n = 0; n < ds; n++)
+                kq_acc += k_sm[aa * ds + n] * q_sm[bb * ds + n];
+            kq_mat[idx] = kq_acc;
+            float vdo_acc = 0.0f;
+            for (int pp = 0; pp < hd; pp++)
+                vdo_acc += v_sm[aa * hd + pp] * do_sm[bb * hd + pp];
+            vdo_mat[idx] = vdo_acc;
+        }
+        __syncthreads();
+
         float da_cs_chunk_sum = DA_CS_SUM[(b * n_chunks + chunk_idx) * nh_total + h];
 
         // === Compute per-timestep outputs ===
@@ -674,9 +695,7 @@ extern "C" __global__ void m3_dqkv(
             // P^T[t,s] = sum_n(K[t,n]*Q[s,n]) * exp(dA[s]-dA[t]) for s > t
             float dv_intra = 0.0f;
             for (int s = t + 1; s < chunk_len; s++) {
-                float kq = 0.0f;
-                for (int n = 0; n < ds; n++)
-                    kq += k_sm[t * ds + n] * q_sm[s * ds + n];
+                float kq = kq_mat[t * CS + s];
                 float decay = exp2f((da_cs_sm[s] - dA_t) * LOG2E);
                 dv_intra += kq * decay * do_sm[s * hd + p];
             }
@@ -732,9 +751,7 @@ extern "C" __global__ void m3_dqkv(
 
                 float dk_intra = 0.0f;
                 for (int s = t + 1; s < chunk_len; s++) {
-                    float vdo = 0.0f;
-                    for (int pp = 0; pp < hd; pp++)
-                        vdo += v_sm[t * hd + pp] * do_sm[s * hd + pp];
+                    float vdo = vdo_mat[t * CS + s];
                     float decay = exp2f((da_cs_sm[s] - dA_t) * LOG2E);
                     dk_intra += vdo * decay * q_sm[s * ds + n];
                 }
@@ -750,9 +767,7 @@ extern "C" __global__ void m3_dqkv(
                 // So: acc_dq[t,n] = sum_{s<t} sum_p(V[s,p]*dO[t,p]) * exp(dA[t]-dA[s]) * K[s,n]
                 float dq_intra = 0.0f;
                 for (int s = 0; s < t; s++) {
-                    float vdo = 0.0f;
-                    for (int pp = 0; pp < hd; pp++)
-                        vdo += v_sm[s * hd + pp] * do_sm[t * hd + pp];
+                    float vdo = vdo_mat[s * CS + t];
                     float decay = exp2f((dA_t - da_cs_sm[s]) * LOG2E);
                     dq_intra += vdo * decay * k_sm[s * ds + n];
                 }
@@ -807,24 +822,16 @@ extern "C" __global__ void m3_dqkv(
             float acc = 0.0f;
             // Below-diagonal: pairs (i, t) with i < t contribute +dAinv.
             for (int i = 0; i < t; i++) {
-                float vdo = 0.0f;
-                for (int pp = 0; pp < hd; pp++)
-                    vdo += v_sm[i * hd + pp] * do_sm[t * hd + pp];
+                float vdo = vdo_mat[i * CS + t];
                 float decay = exp2f((da_cs_sm[t] - da_cs_sm[i]) * LOG2E);
-                float kq = 0.0f;
-                for (int n = 0; n < ds; n++)
-                    kq += k_sm[i * ds + n] * q_sm[t * ds + n];
+                float kq = kq_mat[i * CS + t];
                 acc += vdo * decay * kq;
             }
             // Above-diagonal: pairs (t, j) with j > t contribute -dAinv.
             for (int j = t + 1; j < chunk_len; j++) {
-                float vdo = 0.0f;
-                for (int pp = 0; pp < hd; pp++)
-                    vdo += v_sm[t * hd + pp] * do_sm[j * hd + pp];
+                float vdo = vdo_mat[t * CS + j];
                 float decay = exp2f((da_cs_sm[j] - da_cs_sm[t]) * LOG2E);
-                float kq = 0.0f;
-                for (int n = 0; n < ds; n++)
-                    kq += k_sm[t * ds + n] * q_sm[j * ds + n];
+                float kq = kq_mat[t * CS + j];
                 acc -= vdo * decay * kq;
             }
             // Entering-state term: Q @ ssm_states^T dot dO * exp.
@@ -1439,6 +1446,9 @@ m3_dqkv_##SUFFIX(                                                             \
     float* ssm2_sm   = ssm_sm + hd * ds;                                      \
     float* dm_rev_sm = ssm2_sm + hd * ds;                                     \
     float* dm_vec_sm = dm_rev_sm + CS;                                        \
+    /* P1.7(4): CS x CS pair matrices, one compute per element */             \
+    float* kq_mat  = dm_vec_sm + CS;                                          \
+    float* vdo_mat = kq_mat + CS * CS;                                        \
     for (int chunk_loop = 0; chunk_loop < n_chunks; chunk_loop++) {           \
         int chunk_idx = n_chunks - 1 - chunk_loop;                            \
         int chunk_start = chunk_idx * CS;                                     \
@@ -1486,6 +1496,19 @@ m3_dqkv_##SUFFIX(                                                             \
                 + p * ds + n];                                                \
         }                                                                     \
         __syncthreads();                                                      \
+        for (int idx = p; idx < CS * CS; idx += hd) {                         \
+            int aa = idx / CS;                                                \
+            int bb = idx % CS;                                                \
+            float kq_acc = 0.0f;                                              \
+            for (int n = 0; n < ds; n++)                                      \
+                kq_acc += k_sm[aa * ds + n] * q_sm[bb * ds + n];              \
+            kq_mat[idx] = kq_acc;                                             \
+            float vdo_acc = 0.0f;                                             \
+            for (int pp = 0; pp < hd; pp++)                                   \
+                vdo_acc += v_sm[aa * hd + pp] * do_sm[bb * hd + pp];          \
+            vdo_mat[idx] = vdo_acc;                                           \
+        }                                                                     \
+        __syncthreads();                                                      \
         float da_cs_chunk_sum = DA_CS_SUM[                                    \
             (b * n_chunks + chunk_idx) * nh_total + h];                       \
         for (int t = 0; t < chunk_len; t++) {                                 \
@@ -1494,9 +1517,7 @@ m3_dqkv_##SUFFIX(                                                             \
             float exp_rev_t = exp2f((da_cs_chunk_sum - dA_t) * LOG2E);        \
             float dv_intra = 0.0f;                                            \
             for (int s = t + 1; s < chunk_len; s++) {                         \
-                float kq = 0.0f;                                              \
-                for (int n = 0; n < ds; n++)                                  \
-                    kq += k_sm[t * ds + n] * q_sm[s * ds + n];                \
+                float kq = kq_mat[t * CS + s];                                \
                 float decay = exp2f((da_cs_sm[s] - dA_t) * LOG2E);            \
                 dv_intra += kq * decay * do_sm[s * hd + p];                   \
             }                                                                 \
@@ -1523,18 +1544,14 @@ m3_dqkv_##SUFFIX(                                                             \
                 float dA_t = da_cs_sm[t];                                     \
                 float dk_intra = 0.0f;                                        \
                 for (int s = t + 1; s < chunk_len; s++) {                     \
-                    float vdo = 0.0f;                                         \
-                    for (int pp = 0; pp < hd; pp++)                           \
-                        vdo += v_sm[t * hd + pp] * do_sm[s * hd + pp];        \
+                    float vdo = vdo_mat[t * CS + s];                          \
                     float decay = exp2f((da_cs_sm[s] - dA_t) * LOG2E);        \
                     dk_intra += vdo * decay * q_sm[s * ds + n];               \
                 }                                                             \
                 dK_mid[((b * T + gt) * nh_total + h) * ds + n] = dk_intra;    \
                 float dq_intra = 0.0f;                                        \
                 for (int s = 0; s < t; s++) {                                 \
-                    float vdo = 0.0f;                                         \
-                    for (int pp = 0; pp < hd; pp++)                           \
-                        vdo += v_sm[s * hd + pp] * do_sm[t * hd + pp];        \
+                    float vdo = vdo_mat[s * CS + t];                          \
                     float decay = exp2f((dA_t - da_cs_sm[s]) * LOG2E);        \
                     dq_intra += vdo * decay * k_sm[s * ds + n];               \
                 }                                                             \
@@ -1571,23 +1588,15 @@ m3_dqkv_##SUFFIX(                                                             \
         for (int t = p; t < chunk_len; t += hd) {                             \
             float acc = 0.0f;                                                 \
             for (int i = 0; i < t; i++) {                                     \
-                float vdo = 0.0f;                                             \
-                for (int pp = 0; pp < hd; pp++)                               \
-                    vdo += v_sm[i * hd + pp] * do_sm[t * hd + pp];            \
+                float vdo = vdo_mat[i * CS + t];                              \
                 float decay = exp2f((da_cs_sm[t] - da_cs_sm[i]) * LOG2E);     \
-                float kq = 0.0f;                                              \
-                for (int n = 0; n < ds; n++)                                  \
-                    kq += k_sm[i * ds + n] * q_sm[t * ds + n];                \
+                float kq = kq_mat[i * CS + t];                                \
                 acc += vdo * decay * kq;                                      \
             }                                                                 \
             for (int j = t + 1; j < chunk_len; j++) {                         \
-                float vdo = 0.0f;                                             \
-                for (int pp = 0; pp < hd; pp++)                               \
-                    vdo += v_sm[t * hd + pp] * do_sm[j * hd + pp];            \
+                float vdo = vdo_mat[t * CS + j];                              \
                 float decay = exp2f((da_cs_sm[j] - da_cs_sm[t]) * LOG2E);     \
-                float kq = 0.0f;                                              \
-                for (int n = 0; n < ds; n++)                                  \
-                    kq += k_sm[t * ds + n] * q_sm[j * ds + n];                \
+                float kq = kq_mat[t * CS + j];                                \
                 acc -= vdo * decay * kq;                                      \
             }                                                                 \
             float qs_do = 0.0f;                                               \

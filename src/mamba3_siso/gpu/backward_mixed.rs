@@ -424,7 +424,19 @@ fn gpu_backward_mamba3_layer_mixed(
         // Two chunk-by-state operand tiles, V/dO tiles, two per-step
         // lanes, the da/qk lanes, and TWO head-state tiles (true
         // states + d_state staging for the warp-parallel dADT).
-        let smem = (2 * cs_u * ds + 2 * cs_u * hd + 4 * cs_u + 2 * hd * ds) * 4;
+        let smem =
+                (2 * cs_u * ds + 2 * cs_u * hd + 4 * cs_u + 2 * hd * ds + 2 * cs_u * cs_u) * 4;
+            // The two CS x CS pair matrices (P1.7(4)) push the tile past
+            // the 48 KB static budget at CS=64; the loader opted every
+            // dqkv variant into the 99 KB carveout — fail loudly here
+            // instead of letting the launch die with a bare CUDA error.
+            if smem > 99 * 1024 {
+                return Err(format!(
+                    "m3_dqkv shared-memory tile {} B exceeds the 99 KB opt-in \
+                     (CS={cs_u} hd={hd} ds={ds}) — shrink the chunk size or state",
+                    smem
+                ));
+            }
         let cfg = LaunchConfig {
             grid_dim: (nh as u32, dims.batch as u32, 1),
             block_dim: (hd as u32, 1, 1),
