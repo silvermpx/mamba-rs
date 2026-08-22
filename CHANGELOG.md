@@ -71,13 +71,51 @@
   arm, parallel-scan T64 arms, an IEEE-f32 row
   (`MAMBA_RS_BENCH_IEEE_F32`), and env-shaped M3 train bench.
 
-### Performance (RTX 5090; B2 T64 d768 L24 graph lane unless noted)
+### Changed (campaign-shape program, second night wave)
 
-- LM train f32 28.3 -> 24.5 ms/step; bf16 43.9 -> 40.5; f16 49.1;
-  parallel-scan T64 f32 18.4.
-- Campaign shape (d384 L24 B8 T1300, batch-invariant bf16):
-  441 ms/step, unchanged by this release — the wall is
-  scan-intermediate materialization, tracked as the fused-scan lane.
+- conv1d forward (all dtypes): the sliding window lived in GLOBAL
+  memory (~7 dependent accesses per timestep, 1300 deep, 24-block
+  grid). It now lives in registers with one carry-in/carry-out —
+  identical shifts and values. This single change was -28% of the
+  campaign step.
+- The conv pair is tiled over T (grid covers (b*d_inner) x T/128):
+  `conv1d_burnin_forward_tiled_*` seeds tile windows from x_branch
+  halo loads; `conv1d_bwd_dx_tiled_*` computes the anticausal 4-tap
+  FIR with tile-boundary carries seeded in the serial association
+  order. The dw/db pass is tap-split (one lane per (b, d, tap) plus a
+  bias lane), each lane keeping its exact descending-t add order.
+- LEG-4, the conv tape is gone: the forward saves only the carry-in
+  window `[B*d_inner*d_conv]`; the backward reconstructs every window
+  from the saved x_branch activation (now a layer act). Net -2.7 GB
+  VRAM at the campaign shape.
+- S2 tape layout: h_saved and the parallel backward's dB/dC locals go
+  t-innermost on the parallel route, with `ssm_reduce_d_BC_tmajor_*`
+  reducer twins (ascending-d sum and `0.0f + sum` store verbatim);
+  scan smem staging for delta/u/dy/B/C replaced by direct loads
+  (barrier diet). Both measured neutral at the campaign shape and
+  kept for coalescing correctness and the chunk-tape groundwork.
+- Multi-chunk digest arms (T=1300 / T=2100 across all three GEMM
+  tiers) — the inter-chunk carry was previously outside every digest
+  instrument — plus isolated per-kernel bench arms for the scan pair
+  and the backward suspects.
+- Digest-pin lessons recorded twice: an inlined product contracting
+  to one FFMA (conv bias lane) and a fused accumulate store (rmsnorm)
+  both move every digest; both are pinned with explicit __fmul_rn /
+  __fadd_rn to the historical rounding shapes.
+
+### Performance (RTX 5090)
+
+- B2 T64 d768 L24 graph lane: LM f32 28.3 -> 23.9 ms/step; bf16
+  43.9 -> 40.2; f16 49.1; parallel-scan T64 f32 18.4.
+- Campaign shape (d384 L24 B8 T1300, batch-invariant + tensor-core
+  tier — the classify trainer's stamped route): 441.4 -> 261.9
+  ms/step (-41%). Split: fwd 134 -> 80, bwd+opt 309 -> 182. Isolated
+  ledger after the wave: scan bwd 80, scan fwd 62, conv dw 13.4,
+  reduce_d_BC 9.6 (x24-layer ms). Note: earlier "BI+TC" campaign
+  rows in this file's history measured plain BI — the tier flag is
+  MAMBA_RS_BI_TENSOR_CORES.
+- M3 campaign shape: 636 -> 373.5 ms/step (dqkv pair matrices +
+  two-head packing).
 
 ## 0.6.2 (2026-08-22)
 
