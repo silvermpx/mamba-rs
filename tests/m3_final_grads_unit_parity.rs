@@ -552,7 +552,11 @@ fn m3_kernels_isolated_bench() {
 
     let dev = GpuDevice::new(0).unwrap();
     let ctx = GpuCtx::new(&dev).unwrap();
-    let m3k = make_m3k(&ctx);
+    // Production JIT injects the 16-granular state cap; the default-64
+    // helper would inflate the per-thread register arrays and overstate
+    // these kernels vs the real trainer.
+    let m3k =
+        Mamba3Kernels::compile_with_state_cap(ctx.stream.context(), "sm_89", CDS.max(16)).unwrap();
 
     let n_q = CB * CT * CNH * CDS;
     let n_v = CB * CT * d_inner;
@@ -757,6 +761,61 @@ fn m3_kernels_isolated_bench() {
         bld.arg(&cols);
         unsafe { bld.launch(cs_grid) }.unwrap();
     });
+
+    // Forward chunk kernels (bf16, production geometry): grid covers
+    // (b*chunk, head-pair), so occupancy is structurally different from
+    // the backward dqkv — measure, do not assume.
+    let cst_out = GpuBuffer::zeros(&ctx.stream, CB * n_chunks * CNH * CHD * CDS).unwrap();
+    let y_t = upload_typed(&ctx, &det_rand(n_v, 0xA010), WeightDtype::Bf16);
+    ctx.stream.synchronize().unwrap();
+    let fwd_cfg = LaunchConfig {
+        grid_dim: ((CB * n_chunks) as u32, (CNH as u32).div_ceil(2), 1),
+        block_dim: (CHD as u32, 2, 1),
+        shared_mem_bytes: 0,
+    };
+    time_it("m3_chunk_state_fwd bf16", &|| {
+        let mut bld = ctx
+            .stream
+            .launch_builder(m3k.m3_chunk_state_fwd_typed.get(WeightDtype::Bf16));
+        let xp = v_t.cached_ptr();
+        let ksp = ks_t.cached_ptr();
+        let cst_p = cst_out.cached_ptr();
+        bld.arg(&cst_p);
+        bld.arg(&xp);
+        bld.arg(&ksp);
+        bld.arg(dcs_buf.inner());
+        bld.arg(&bi);
+        bld.arg(&ti);
+        bld.arg(&nhi);
+        bld.arg(&hdi);
+        bld.arg(&dsi);
+        bld.arg(&csi);
+        unsafe { bld.launch(fwd_cfg) }.unwrap();
+    });
+    time_it("m3_chunk_scan_fwd bf16", &|| {
+        let mut bld = ctx
+            .stream
+            .launch_builder(m3k.m3_chunk_scan_fwd_typed.get(WeightDtype::Bf16));
+        let yp = y_t.cached_ptr();
+        let xp = v_t.cached_ptr();
+        let qp = q_t.cached_ptr();
+        let ksp = ks_t.cached_ptr();
+        bld.arg(&yp);
+        bld.arg(&xp);
+        bld.arg(&qp);
+        bld.arg(&ksp);
+        bld.arg(qk_buf.inner());
+        bld.arg(dcs_buf.inner());
+        bld.arg(ssm_buf.inner());
+        bld.arg(d_buf.inner());
+        bld.arg(&bi);
+        bld.arg(&ti);
+        bld.arg(&nhi);
+        bld.arg(&hdi);
+        bld.arg(&dsi);
+        bld.arg(&csi);
+        unsafe { bld.launch(fwd_cfg) }.unwrap();
+    });
 }
 
 // ─── m3_dqkv output bit-hash (campaign shape) ──────────────────────────
@@ -780,7 +839,11 @@ fn m3_dqkv_output_hash() {
 
     let dev = GpuDevice::new(0).unwrap();
     let ctx = GpuCtx::new(&dev).unwrap();
-    let m3k = make_m3k(&ctx);
+    // Production JIT injects the 16-granular state cap; the default-64
+    // helper would inflate the per-thread register arrays and overstate
+    // these kernels vs the real trainer.
+    let m3k =
+        Mamba3Kernels::compile_with_state_cap(ctx.stream.context(), "sm_89", CDS.max(16)).unwrap();
 
     let n_q = CB * CT * CNH * CDS;
     let n_v = CB * CT * d_inner;

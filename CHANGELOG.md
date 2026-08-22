@@ -106,6 +106,13 @@
   (`bench_lm_train_campaign_shape`), split forward/backward attribution
   arm, parallel-scan T64 arms, an IEEE-f32 row
   (`MAMBA_RS_BENCH_IEEE_F32`), and env-shaped M3 train bench.
+- M3 kernel instruments (`m3_final_grads_unit_parity`, `--ignored`):
+  `m3_kernels_isolated_bench` times m3_dqkv/m3_dqktheta/colsum and the
+  two forward chunk kernels standalone at the campaign shape (compiled
+  at the production state cap), and `m3_dqkv_output_hash` FNV-hashes
+  all six m3_dqkv outputs — the bit gate for lane-redistribution work
+  on a kernel no run-digest instrument covers. T_SPLIT sweep recorded:
+  8 -> 4.17, 16 -> 4.02, 32 -> 6.24 ms/launch (f32); 16 wins.
 
 ### Changed (campaign-shape program, second night wave)
 
