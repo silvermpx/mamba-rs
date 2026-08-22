@@ -570,7 +570,7 @@ pub fn gpu_backward_mamba_layer_mixed(
             bld.arg(&t_i);
             bld.arg(&di_i);
             bld.arg(&dc_i);
-            unsafe { bld.launch(grid_1d(b * di)) }
+            unsafe { bld.launch(grid_1d(b * di * (d_conv + 1))) }
                 .map_err(|e| format!("conv1d_bwd_dw_only mixed: {e:?}"))?;
         }
         // Stage 2a: reduce weight partials [B, di*d_conv] → d_lw.conv1d_weight.

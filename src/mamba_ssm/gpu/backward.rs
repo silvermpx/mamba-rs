@@ -364,7 +364,7 @@ pub fn gpu_backward_mamba_layer(
             builder.arg(&t_i);
             builder.arg(&di_i);
             builder.arg(&dc_i);
-            unsafe { builder.launch(grid_1d(b * di)) }
+            unsafe { builder.launch(grid_1d(b * di * (d_conv + 1))) }
                 .map_err(|e| format!("conv1d_bwd_dw_only mamba: {:?}", e))?;
         }
         // Stage 2a: reduce weight partials [B, d_inner*d_conv] → d_lw.conv1d_weight.

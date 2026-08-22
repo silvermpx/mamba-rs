@@ -674,54 +674,55 @@ extern "C" __global__ void conv1d_bwd_dw_only_##SUFFIX(                       \
     const float* __restrict__ conv_init, /* [B*di*d_conv] carry-in window */   \
     int batch, int T_, int d_inner, int d_conv                                 \
 ) {                                                                            \
+    /* Tap-split: thread role = (b, d, tap) with tap == d_conv meaning the  \
+     * bias lane. Each tap's accumulator was ALREADY independent in the     \
+     * fused kernel, and every lane keeps the same descending-t add order,  \
+     * so all sums are bit-identical - this is pure lane redistribution     \
+     * (24 -> ~120 blocks at the campaign shape).                        */ \
+    int lanes = d_conv + 1;                                                    \
     int idx = blockIdx.x * blockDim.x + threadIdx.x;                           \
-    int total = batch * d_inner;                                               \
+    int total = batch * d_inner * lanes;                                       \
     if (idx >= total) return;                                                  \
     if (d_conv > 8) return;                                                    \
-    int b = idx / d_inner;                                                     \
-    int d = idx % d_inner;                                                     \
+    int tap = idx % lanes;                                                     \
+    int bd = idx / lanes;                                                      \
+    int b = bd / d_inner;                                                      \
+    int d = bd % d_inner;                                                      \
     int init_base = (b * d_inner + d) * d_conv;                                \
-    float local_d_weight[8];                                                   \
-    for (int k = 0; k < d_conv; k++) local_d_weight[k] = 0.0f;                 \
-    float local_d_bias = 0.0f;                                                 \
-    /* LEG-4 window reconstruction: window@t[k] = x[t - (d_conv-1) + k],    \
-     * falling back to the carry-in for negative indices — the same values  \
-     * the forward's shift register held, so d_weight sums are unchanged.   \
-     * Walk descends; each step needs ONE new element on the left. */       \
-    float win[8];                                                              \
-    for (int k = 0; k < d_conv; k++) {                                         \
-        int tx = T_ - 1 - (d_conv - 1) + k;                                    \
-        /* negative tx: the forward window at t = T-1 still holds the       \
-         * carry-in at these slots; its index there is k + T (window@t[k]   \
-         * = init[k + 1 + t] while k + 1 + t <= d_conv - 1). */              \
-        win[k] = (tx >= 0)                                                     \
-            ? to_f(x_branch[(b * T_ + tx) * d_inner + d])                      \
-            : conv_init[init_base + k + T_];                                   \
+    if (tap == d_conv) {                                                       \
+        /* bias lane: descending-t sum of d_conv_out, order unchanged */       \
+        float local_d_bias = 0.0f;                                             \
+        for (int t = T_ - 1; t >= 0; t--) {                                    \
+            int bt_di = (b * T_ + t) * d_inner + d;                            \
+            float x = to_f(post_conv[bt_di]);                                  \
+            float sig = 1.0f / (1.0f + exp2f(-x * 1.4426950408889634f));       \
+            float silu_grad = sig * (1.0f + x * (1.0f - sig));                 \
+            /* __fmul_rn/__fadd_rn pin the fused kernel's two-rounding       \
+             * shape: there d_conv_out materialized (multi-use) before the  \
+             * bias add; an inlined product contracts to one FFMA and       \
+             * moves every digest. */                                        \
+            local_d_bias = __fadd_rn(                                          \
+                local_d_bias, __fmul_rn(to_f(d_u[bt_di]), silu_grad));         \
+        }                                                                      \
+        d_bias_partials[b * d_inner + d] = local_d_bias;                       \
+        return;                                                                \
     }                                                                          \
+    /* weight-tap lane: window element `tap` at time t is                    \
+     * x[t - (d_conv-1) + tap], carry-in fallback at the left edge. */        \
+    float local_dw = 0.0f;                                                     \
     for (int t = T_ - 1; t >= 0; t--) {                                        \
         int bt_di = (b * T_ + t) * d_inner + d;                                \
         float x = to_f(post_conv[bt_di]);                                      \
         float sig = 1.0f / (1.0f + exp2f(-x * 1.4426950408889634f));           \
         float silu_grad = sig * (1.0f + x * (1.0f - sig));                     \
         float d_conv_out = to_f(d_u[bt_di]) * silu_grad;                       \
-        for (int k = 0; k < d_conv; k++) {                                     \
-            local_d_weight[k] += d_conv_out * win[k];                          \
-        }                                                                      \
-        local_d_bias += d_conv_out;                                            \
-        /* shift right for t-1: new left element is x[t-d_conv] or the      \
-         * carry-in slot that the forward window held at that position. */  \
-        for (int k = d_conv - 1; k > 0; k--) win[k] = win[k - 1];              \
-        int tx = t - d_conv;                                                   \
-        win[0] = (tx >= 0)                                                     \
+        int tx = t - (d_conv - 1) + tap;                                       \
+        float wv = (tx >= 0)                                                   \
             ? to_f(x_branch[(b * T_ + tx) * d_inner + d])                      \
-            : ((t >= 1 && t <= d_conv - 1) ? conv_init[init_base + t]          \
-                                           : 0.0f);                            \
+            : conv_init[init_base + tap + t + 1];                              \
+        local_dw += d_conv_out * wv;                                           \
     }                                                                          \
-    int wp_base = (b * d_inner + d) * d_conv;                                  \
-    for (int k = 0; k < d_conv; k++) {                                         \
-        d_weight_partials[wp_base + k] = local_d_weight[k];                    \
-    }                                                                          \
-    d_bias_partials[b * d_inner + d] = local_d_bias;                           \
+    d_weight_partials[init_base + tap] = local_dw;                             \
 }
 
 DEFINE_CONV1D_BWD_DW_ONLY(f32,  float)
