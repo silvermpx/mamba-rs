@@ -105,8 +105,15 @@ pub struct GpuMambaLayerActs {
     /// Gate branch after SiLU `[B*T*d_inner]`.
     pub gate_post_silu: GpuBuffer,
 
+    // -- F3: split --
+    /// x branch after split `[B*T*d_inner]` (saved: the conv backward
+    /// reconstructs its windows from it — LEG-4, the conv tape is gone).
+    pub x_branch: GpuBuffer,
+
     // -- F4a: Conv1d + SiLU --
-    /// Conv1d state saved after each step `[B*T*d_inner*d_conv]`.
+    /// LEG-4: only the CARRY-IN window per (b, d) survives as conv tape
+    /// `[B*d_inner*d_conv]`; later windows are reconstructed from
+    /// x_branch in the backward.
     pub conv_states: GpuBuffer,
     /// Pre-SiLU conv output `[B*T*d_inner]`.
     pub post_conv: GpuBuffer,
@@ -177,7 +184,8 @@ impl GpuMambaBackboneActs {
                     gate_pre_silu: GpuBuffer::zeros(stream, bt * d_inner)?,
                     gate_post_silu: GpuBuffer::zeros(stream, bt * d_inner)?,
                     // F4a: Conv1d + SiLU
-                    conv_states: GpuBuffer::zeros(stream, bt * d_inner * d_conv)?,
+                    x_branch: GpuBuffer::zeros(stream, bt * d_inner)?,
+                    conv_states: GpuBuffer::zeros(stream, batch * d_inner * d_conv)?,
                     post_conv: GpuBuffer::zeros(stream, bt * d_inner)?,
                     u: GpuBuffer::zeros(stream, bt * d_inner)?,
                     // F4b-c: x_proj + dt_proj
@@ -425,7 +433,7 @@ pub fn gpu_forward_mamba_layer(
         let batch_i = bt as i32;
         let di_i = di as i32;
         let mut builder = ctx.stream.launch_builder(&ctx.kernels.split_gate_silu);
-        builder.arg(scratch.x_branch.inner_mut());
+        builder.arg(acts.x_branch.inner_mut());
         builder.arg(acts.gate_pre_silu.inner_mut());
         builder.arg(acts.gate_post_silu.inner_mut());
         builder.arg(scratch.proj_flat.inner());
@@ -445,12 +453,18 @@ pub fn gpu_forward_mamba_layer(
         let t_i = t as i32;
         let di_i = di as i32;
         let dc_i = d_conv as i32;
-        let mut builder = ctx.stream.launch_builder(&ctx.kernels.conv1d_burnin_fwd);
+        // Tiled twin (typed-f32 instantiation, note the typed arg order):
+        // grid (b*di, T tiles) instead of a 24-block serial walk.
+        let mut builder = ctx.stream.launch_builder(
+            ctx.kernels
+                .conv1d_burnin_fwd_tiled_typed
+                .get(super::dtype::WeightDtype::F32),
+        );
         builder.arg(acts.u.inner_mut());
-        builder.arg(acts.post_conv.inner_mut());
+        builder.arg(&layer_ptrs.conv_state); // state (raw ptr at layer offset)
         builder.arg(acts.conv_states.inner_mut());
-        builder.arg(&layer_ptrs.conv_state); // raw ptr at layer offset
-        builder.arg(scratch.x_branch.inner());
+        builder.arg(acts.post_conv.inner_mut());
+        builder.arg(acts.x_branch.inner());
         let cw_ptr = lw.conv1d_weight.cached_ptr();
         let cb_ptr = lw.conv1d_bias.cached_ptr();
         builder.arg(&cw_ptr);
@@ -459,8 +473,8 @@ pub fn gpu_forward_mamba_layer(
         builder.arg(&t_i);
         builder.arg(&di_i);
         builder.arg(&dc_i);
-        unsafe { builder.launch(grid_1d(b * di)) }
-            .map_err(|e| format!("conv1d_burnin_fwd mamba: {:?}", e))?;
+        unsafe { builder.launch(super::launch::grid_conv_tiled(b, di, t)) }
+            .map_err(|e| format!("conv1d_burnin_fwd_tiled mamba: {:?}", e))?;
     }
 
     // ===================================================================

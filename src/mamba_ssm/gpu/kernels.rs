@@ -173,6 +173,14 @@ pub struct MambaKernels {
     /// (Rule-B per-sample partials + reduce). Matches DEFINE_RMSNORM_BWD macro in
     /// norms.cu, follows NVIDIA Apex layer_norm pattern.
     pub rmsnorm_bwd_typed: TypedKernel,
+    /// Tiled conv1d forward (S-conv): grid (b*di blocks, T tiles); the
+    /// window seeds from x_branch halo — bit-identical to the serial walk.
+    pub conv1d_burnin_fwd_tiled_typed: TypedKernel,
+    /// Tiled d_x half of the conv backward (anticausal FIR, carry-seeded
+    /// at tile boundaries with the serial association order).
+    pub conv1d_bwd_dx_tiled_typed: TypedKernel,
+    /// dw/db-only half: historical descending-t accumulation, verbatim.
+    pub conv1d_bwd_dw_only_typed: TypedKernel,
     /// Typed dispatch for `conv1d_burnin_backward`. d_x_branch/d_u/post_conv
     /// typed; conv_states stays f32 (recurrent state); d_weight/d_bias
     /// accumulate via Rule-B partials + fixed-order reduce. Matches DEFINE_CONV1D_BURNIN_BWD
@@ -767,6 +775,9 @@ impl MambaKernels {
             gating_bwd_typed: load_typed("gating_backward")?,
             rmsnorm_bwd_typed: load_typed("rmsnorm_backward")?,
             conv1d_burnin_bwd_typed: load_typed("conv1d_burnin_backward")?,
+            conv1d_burnin_fwd_tiled_typed: load_typed("conv1d_burnin_forward_tiled")?,
+            conv1d_bwd_dx_tiled_typed: load_typed("conv1d_bwd_dx_tiled")?,
+            conv1d_bwd_dw_only_typed: load_typed("conv1d_bwd_dw_only")?,
             // ssm_backward_local typed + typed-input reducers
             ssm_backward_local_typed: load_typed("ssm_backward_local")?,
             pack_xdbl_cols_typed: TypedKernel {

@@ -43,6 +43,11 @@ pub struct GpuMambaLayerMixedActs {
     /// typed — gate branch after SiLU `[B*T*d_inner]`.
     pub gate_post_silu: DtypedBuf,
     /// f32 — conv1d state saved per step `[B*T*d_inner*d_conv]` (recurrent).
+    /// x branch after split `[B*T*d_inner]` typed — saved for the LEG-4
+    /// conv-window reconstruction in the backward (the per-timestep conv
+    /// tape is gone; only the carry-in window below survives).
+    pub x_branch: DtypedBuf,
+    /// LEG-4: carry-in window only, `[B*d_inner*d_conv]`.
     pub conv_states: GpuBuffer,
     /// typed — pre-SiLU conv output `[B*T*d_inner]`.
     pub post_conv: DtypedBuf,
@@ -107,7 +112,8 @@ impl GpuMambaBackboneMixedActs {
                     // f32 — recurrent / reduction
                     residual: GpuBuffer::zeros(stream, bt * d_model)?,
                     rms_vals: GpuBuffer::zeros(stream, bt)?,
-                    conv_states: GpuBuffer::zeros(stream, bt * d_inner * d_conv)?,
+                    x_branch: DtypedBuf::zeros(stream, bt * d_inner, dtype)?,
+                    conv_states: GpuBuffer::zeros(stream, batch * d_inner * d_conv)?,
                     h_saved: GpuBuffer::zeros(stream, batch * (seq_len + 1) * d_inner * d_state)?,
                     // typed — GEMM I/O / elementwise
                     post_norm: DtypedBuf::zeros(stream, bt * d_model, dtype)?,
@@ -159,8 +165,6 @@ pub struct GpuMambaMixedTrainScratch {
     // ── Forward scratch ───────────────────────────────────────────────
     /// in_proj output [B*T * 2*d_inner].
     pub proj_flat: DtypedBuf,
-    /// split's x branch [B*T * d_inner].
-    pub x_branch: DtypedBuf,
     /// dt gather buffer [B*T * dt_rank].
     pub dt_gather: DtypedBuf,
     /// B gather buffer [B*T * d_state].
@@ -245,7 +249,6 @@ impl GpuMambaMixedTrainScratch {
             dtype,
             // forward
             proj_flat: DtypedBuf::zeros(stream, bt * 2 * di, dtype)?,
-            x_branch: DtypedBuf::zeros(stream, bt * di, dtype)?,
             dt_gather: DtypedBuf::zeros(stream, bt * dims.dt_rank, dtype)?,
             b_buf: DtypedBuf::zeros(stream, bt * ds, dtype)?,
             c_buf: DtypedBuf::zeros(stream, bt * ds, dtype)?,
@@ -479,7 +482,7 @@ pub fn gpu_forward_mamba_backbone_mixed(
             let bt_i = bt as i32;
             let di_i = di as i32;
             let mut bld = ctx.stream.launch_builder(k.split_gate_silu_typed.get(dt));
-            let xb = scratch.x_branch.cached_ptr();
+            let xb = layer_acts.x_branch.cached_ptr();
             let gp = layer_acts.gate_pre_silu.cached_ptr();
             let gs = layer_acts.gate_post_silu.cached_ptr();
             let pf = scratch.proj_flat.cached_ptr();
@@ -505,16 +508,12 @@ pub fn gpu_forward_mamba_backbone_mixed(
             // ...)` which is a different order — previously plugging it into
             // the typed call path silently swapped `state` with `post_conv`,
             // corrupting the persistent conv state on every mixed f32 step.
-            let kernel = match dt {
-                WeightDtype::F32 => &k.conv1d_burnin_fwd_f32_typed,
-                WeightDtype::Bf16 => &k.conv1d_burnin_fwd_bf16,
-                WeightDtype::F16 => &k.conv1d_burnin_fwd_f16,
-            };
+            let kernel = k.conv1d_burnin_fwd_tiled_typed.get(dt);
             let mut bld = ctx.stream.launch_builder(kernel);
             let u = layer_acts.u.cached_ptr();
             let cs = layer_acts.conv_states.cached_ptr();
             let pc = layer_acts.post_conv.cached_ptr();
-            let xb = scratch.x_branch.cached_ptr();
+            let xb = layer_acts.x_branch.cached_ptr();
             bld.arg(&u);
             bld.arg(&conv_ptr); // state (f32, layer offset)
             bld.arg(&cs);
@@ -528,8 +527,8 @@ pub fn gpu_forward_mamba_backbone_mixed(
             bld.arg(&t_i);
             bld.arg(&di_i);
             bld.arg(&dc_i);
-            unsafe { bld.launch(grid_1d(b * di)) }
-                .map_err(|e| format!("conv1d_burnin_typed L{layer_idx}: {e:?}"))?;
+            unsafe { bld.launch(crate::mamba_ssm::gpu::launch::grid_conv_tiled(b, di, t)) }
+                .map_err(|e| format!("conv1d_burnin_tiled L{layer_idx}: {e:?}"))?;
         }
 
         // F4b: x_proj GEMM typed.

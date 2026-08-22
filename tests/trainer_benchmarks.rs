@@ -631,3 +631,147 @@ fn bench_scan_kernels_isolated() {
         bwd_ms * 24.0
     );
 }
+
+/// S0 part 2: the rest of the backward's suspects, isolated at the
+/// campaign shape (one layer each).
+#[test]
+#[ignore]
+fn bench_bwd_kernels_isolated() {
+    use cudarc::driver::PushKernelArg;
+    use mamba_rs::mamba_ssm::gpu::buffers::{DtypedBuf, GpuBuffer};
+    use mamba_rs::mamba_ssm::gpu::context::GpuCtx;
+    use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
+    use mamba_rs::mamba_ssm::gpu::launch::{grid_1d, grid_conv_tiled};
+
+    let (b, t, di, ds, dc) = (8usize, 1300usize, 768usize, 16usize, 4usize);
+    let bt = b * t;
+    let device = GpuDevice::new(0).unwrap();
+    let ctx = GpuCtx::new_with_state_cap(&device, 16).unwrap();
+    let k = &ctx.kernels;
+    let dtype = WeightDtype::Bf16;
+    let bi = b as i32;
+    let ti = t as i32;
+    let dii = di as i32;
+    let dsi = ds as i32;
+    let dci = dc as i32;
+    let bti = bt as i32;
+
+    let d_u = DtypedBuf::zeros(&ctx.stream, bt * di, dtype).unwrap();
+    let post_conv = DtypedBuf::zeros(&ctx.stream, bt * di, dtype).unwrap();
+    let x_branch = DtypedBuf::zeros(&ctx.stream, bt * di, dtype).unwrap();
+    let conv_init = GpuBuffer::zeros(&ctx.stream, b * di * dc).unwrap();
+    let weight = GpuBuffer::zeros(&ctx.stream, di * dc).unwrap();
+    let d_x_branch = DtypedBuf::zeros(&ctx.stream, bt * di, dtype).unwrap();
+    let wp = GpuBuffer::zeros(&ctx.stream, b * di * dc).unwrap();
+    let bp = GpuBuffer::zeros(&ctx.stream, b * di).unwrap();
+
+    let time_it = |label: &str, f: &dyn Fn()| {
+        for _ in 0..3 {
+            f();
+        }
+        ctx.stream.synchronize().unwrap();
+        let t0 = Instant::now();
+        for _ in 0..20 {
+            f();
+        }
+        ctx.stream.synchronize().unwrap();
+        let ms = t0.elapsed().as_secs_f64() * 1e3 / 20.0;
+        eprintln!(
+            "isolated {label}: {ms:.3} ms/layer (x24 = {:.1} ms)",
+            ms * 24.0
+        );
+    };
+
+    time_it("conv_dw_only", &|| {
+        let mut bld = ctx
+            .stream
+            .launch_builder(k.conv1d_bwd_dw_only_typed.get(dtype));
+        let wpp = wp.cached_ptr();
+        let bpp = bp.cached_ptr();
+        let dup = d_u.cached_ptr();
+        let pcp = post_conv.cached_ptr();
+        let xbp = x_branch.cached_ptr();
+        let cip = conv_init.cached_ptr();
+        bld.arg(&wpp);
+        bld.arg(&bpp);
+        bld.arg(&dup);
+        bld.arg(&pcp);
+        bld.arg(&xbp);
+        bld.arg(&cip);
+        bld.arg(&bi);
+        bld.arg(&ti);
+        bld.arg(&dii);
+        bld.arg(&dci);
+        unsafe { bld.launch(grid_1d(b * di)) }.unwrap();
+    });
+
+    time_it("conv_dx_tiled", &|| {
+        let mut bld = ctx
+            .stream
+            .launch_builder(k.conv1d_bwd_dx_tiled_typed.get(dtype));
+        let dxp = d_x_branch.cached_ptr();
+        let dup = d_u.cached_ptr();
+        let pcp = post_conv.cached_ptr();
+        let wpt = weight.cached_ptr();
+        bld.arg(&dxp);
+        bld.arg(&dup);
+        bld.arg(&pcp);
+        bld.arg(&wpt);
+        bld.arg(&bi);
+        bld.arg(&ti);
+        bld.arg(&dii);
+        bld.arg(&dci);
+        unsafe { bld.launch(grid_conv_tiled(b, di, t)) }.unwrap();
+    });
+
+    // gating backward
+    let d_gated = DtypedBuf::zeros(&ctx.stream, bt * di, dtype).unwrap();
+    let d_y = DtypedBuf::zeros(&ctx.stream, bt * di, dtype).unwrap();
+    let d_gate = DtypedBuf::zeros(&ctx.stream, bt * di, dtype).unwrap();
+    let yb = DtypedBuf::zeros(&ctx.stream, bt * di, dtype).unwrap();
+    let gp = DtypedBuf::zeros(&ctx.stream, bt * di, dtype).unwrap();
+    let gs = DtypedBuf::zeros(&ctx.stream, bt * di, dtype).unwrap();
+    time_it("gating_bwd", &|| {
+        let n = (bt * di) as i32;
+        let mut bld = ctx.stream.launch_builder(k.gating_bwd_typed.get(dtype));
+        let a1 = d_y.cached_ptr();
+        let a2 = d_gate.cached_ptr();
+        let a3 = d_gated.cached_ptr();
+        let a4 = yb.cached_ptr();
+        let a5 = gp.cached_ptr();
+        let a6 = gs.cached_ptr();
+        bld.arg(&a1);
+        bld.arg(&a2);
+        bld.arg(&a3);
+        bld.arg(&a4);
+        bld.arg(&a5);
+        bld.arg(&a6);
+        bld.arg(&n);
+        unsafe { bld.launch(grid_1d(bt * di)) }.unwrap();
+    });
+
+    // fused dB/dC reducer (tmajor)
+    let d_b_local = DtypedBuf::zeros(&ctx.stream, bt * di * ds, dtype).unwrap();
+    let d_c_local = DtypedBuf::zeros(&ctx.stream, bt * di * ds, dtype).unwrap();
+    let d_b_red = GpuBuffer::zeros(&ctx.stream, bt * ds).unwrap();
+    let d_c_red = GpuBuffer::zeros(&ctx.stream, bt * ds).unwrap();
+    time_it("reduce_d_BC_tmajor", &|| {
+        let mut bld = ctx
+            .stream
+            .launch_builder(k.ssm_reduce_d_bc_tmajor_typed.get(dtype));
+        let o1 = d_b_red.cached_ptr();
+        let o2 = d_c_red.cached_ptr();
+        let i1 = d_b_local.cached_ptr();
+        let i2 = d_c_local.cached_ptr();
+        bld.arg(&o1);
+        bld.arg(&o2);
+        bld.arg(&i1);
+        bld.arg(&i2);
+        bld.arg(&bi);
+        bld.arg(&ti);
+        bld.arg(&dii);
+        bld.arg(&dsi);
+        unsafe { bld.launch(grid_1d(bt * ds)) }.unwrap();
+    });
+    let _ = bti;
+}

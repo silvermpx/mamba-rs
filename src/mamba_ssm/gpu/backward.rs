@@ -331,23 +331,41 @@ pub fn gpu_backward_mamba_layer(
         let axis0_base = scratch.axis0_partials.cached_ptr();
         let wp_ptr = axis0_base;
         let bp_ptr = axis0_base + bias_offset_bytes;
-        // Stage 1: per-(b,d) partials.
+        // Stage 1 split (S-conv): the tiled d_x half fills the machine
+        // (bit-identical anticausal FIR with serial-order carry seeding);
+        // the dw/db half keeps its historical descending-t accumulation.
         {
-            let mut builder = ctx.stream.launch_builder(&ctx.kernels.conv1d_burnin_bwd);
+            let f32k = super::dtype::WeightDtype::F32;
+            let mut builder = ctx
+                .stream
+                .launch_builder(ctx.kernels.conv1d_bwd_dx_tiled_typed.get(f32k));
             builder.arg(scratch.d_x_branch.inner_mut());
-            builder.arg(&wp_ptr); // d_weight_partials
-            builder.arg(&bp_ptr); // d_bias_partials
             builder.arg(scratch.d_u.inner());
             builder.arg(acts.post_conv.inner());
-            builder.arg(acts.conv_states.inner());
             let cw_ptr = lw.conv1d_weight.cached_ptr();
             builder.arg(&cw_ptr);
             builder.arg(&b_i);
             builder.arg(&t_i);
             builder.arg(&di_i);
             builder.arg(&dc_i);
+            unsafe { builder.launch(super::launch::grid_conv_tiled(b, di, t)) }
+                .map_err(|e| format!("conv1d_bwd_dx_tiled mamba: {:?}", e))?;
+
+            let mut builder = ctx
+                .stream
+                .launch_builder(ctx.kernels.conv1d_bwd_dw_only_typed.get(f32k));
+            builder.arg(&wp_ptr); // d_weight_partials
+            builder.arg(&bp_ptr); // d_bias_partials
+            builder.arg(scratch.d_u.inner());
+            builder.arg(acts.post_conv.inner());
+            builder.arg(acts.x_branch.inner());
+            builder.arg(acts.conv_states.inner()); // carry-in window (conv_init)
+            builder.arg(&b_i);
+            builder.arg(&t_i);
+            builder.arg(&di_i);
+            builder.arg(&dc_i);
             unsafe { builder.launch(grid_1d(b * di)) }
-                .map_err(|e| format!("conv1d_burnin_bwd mamba partial: {:?}", e))?;
+                .map_err(|e| format!("conv1d_bwd_dw_only mamba: {:?}", e))?;
         }
         // Stage 2a: reduce weight partials [B, d_inner*d_conv] → d_lw.conv1d_weight.
         {

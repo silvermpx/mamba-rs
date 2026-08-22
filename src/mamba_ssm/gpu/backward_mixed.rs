@@ -535,29 +535,43 @@ pub fn gpu_backward_mamba_layer_mixed(
         let axis0_base = scratch.axis0_partials.cached_ptr();
         let wp_ptr = axis0_base;
         let bp_ptr = axis0_base + bias_offset_bytes;
-        // Stage 1: per-(b,d) partials.
+        // Stage 1 split (S-conv): tiled d_x + historical-order dw/db.
         {
-            let mut bld = ctx
-                .stream
-                .launch_builder(k.conv1d_burnin_bwd_typed.get(dtype));
             let dxb = scratch.d_x_branch.cached_ptr();
             let du = scratch.d_u.cached_ptr();
             let pc = acts.post_conv.cached_ptr();
             let cs = acts.conv_states.cached_ptr();
             let w = lw.conv1d_weight.ptr();
+            let mut bld = ctx
+                .stream
+                .launch_builder(k.conv1d_bwd_dx_tiled_typed.get(dtype));
             bld.arg(&dxb);
-            bld.arg(&wp_ptr); // d_weight_partials
-            bld.arg(&bp_ptr); // d_bias_partials
             bld.arg(&du);
             bld.arg(&pc);
-            bld.arg(&cs);
             bld.arg(&w);
             bld.arg(&b_i);
             bld.arg(&t_i);
             bld.arg(&di_i);
             bld.arg(&dc_i);
+            unsafe { bld.launch(crate::mamba_ssm::gpu::launch::grid_conv_tiled(b, di, t)) }
+                .map_err(|e| format!("conv1d_bwd_dx_tiled mixed: {e:?}"))?;
+
+            let mut bld = ctx
+                .stream
+                .launch_builder(k.conv1d_bwd_dw_only_typed.get(dtype));
+            bld.arg(&wp_ptr); // d_weight_partials
+            bld.arg(&bp_ptr); // d_bias_partials
+            bld.arg(&du);
+            bld.arg(&pc);
+            let xb = acts.x_branch.cached_ptr();
+            bld.arg(&xb);
+            bld.arg(&cs); // carry-in window (conv_init)
+            bld.arg(&b_i);
+            bld.arg(&t_i);
+            bld.arg(&di_i);
+            bld.arg(&dc_i);
             unsafe { bld.launch(grid_1d(b * di)) }
-                .map_err(|e| format!("conv1d_burnin_bwd_typed partial: {e:?}"))?;
+                .map_err(|e| format!("conv1d_bwd_dw_only mixed: {e:?}"))?;
         }
         // Stage 2a: reduce weight partials [B, di*d_conv] → d_lw.conv1d_weight.
         {

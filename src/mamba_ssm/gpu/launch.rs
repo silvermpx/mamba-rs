@@ -199,3 +199,20 @@ pub fn grid_parallel_scan_typed(
         shared_mem_bytes: (fixed_bytes + stage_bytes) as u32,
     }
 }
+
+/// Tiled conv1d grid: x covers (b * d_inner) threads at 256/block, y covers
+/// T in CONV1D_TILE_T=128 tiles. The serial per-(b,d) walk left 146 SMs
+/// idle at the campaign shape (24 blocks); tiling fills the machine while
+/// every output element keeps the identical 4-tap arithmetic.
+pub fn grid_conv_tiled(batch: usize, d_inner: usize, t: usize) -> LaunchConfig {
+    const TILE_T: usize = 128;
+    LaunchConfig {
+        grid_dim: (
+            ((batch * d_inner) as u32).div_ceil(256),
+            (t as u32).div_ceil(TILE_T as u32),
+            1,
+        ),
+        block_dim: (256, 1, 1),
+        shared_mem_bytes: 0,
+    }
+}
