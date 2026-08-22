@@ -422,8 +422,11 @@ pub fn gpu_backward_mamba_layer(
         let axis0_ptr = scratch.axis0_partials.cached_ptr();
         // Stage 1
         {
+            // dx = d_temporal with accumulate=1: the residual-path add
+            // (old separate vec_add_inplace) is folded into the store.
+            let accumulate_dx: i32 = 1;
             let mut builder = ctx.stream.launch_builder(&ctx.kernels.rmsnorm_bwd);
-            builder.arg(scratch.d_pre_norm.inner_mut());
+            builder.arg(d_temporal.inner_mut());
             builder.arg(&axis0_ptr); // d_scale_partials
             builder.arg(scratch.d_norm.inner());
             builder.arg(acts.residual.inner()); // x = input before norm
@@ -431,6 +434,7 @@ pub fn gpu_backward_mamba_layer(
             builder.arg(acts.rms_vals.inner());
             builder.arg(&bt_i);
             builder.arg(&dm_i);
+            builder.arg(&accumulate_dx);
             unsafe { builder.launch(grid_norm(bt, dm)) }
                 .map_err(|e| format!("rmsnorm_bwd mamba partial: {:?}", e))?;
         }
@@ -455,17 +459,7 @@ pub fn gpu_backward_mamba_layer(
         }
     }
 
-    // Residual: d_temporal = d_temporal + d_pre_norm
-    // d_temporal already has the upstream gradient. Add rmsnorm backward.
-    {
-        let n = (bt * dm) as i32;
-        let mut builder = ctx.stream.launch_builder(&ctx.kernels.vec_add_inplace);
-        builder.arg(d_temporal.inner_mut());
-        builder.arg(scratch.d_pre_norm.inner());
-        builder.arg(&n);
-        unsafe { builder.launch(grid_1d(bt * dm)) }
-            .map_err(|e| format!("vec_add residual bwd mamba: {:?}", e))?;
-    }
+    // (Residual add folded into the rmsnorm_bwd accumulate store above.)
 
     Ok(())
 }
@@ -501,16 +495,23 @@ pub fn gpu_backward_mamba_backbone(
         let axis0_ptr = scratch.axis0_partials.cached_ptr();
         // Stage 1
         {
+            // In-place: dx aliases dy (= d_temporal). Kernel-safe: the
+            // sum pass reads all dy before the barrier, and the write
+            // pass reads dy[off+i] before storing the same element.
+            // Kills the d_norm temp + the copy-back.
+            let dt_ptr = d_temporal.cached_ptr();
+            let accumulate_dx: i32 = 0;
             let mut builder = ctx.stream.launch_builder(&ctx.kernels.rmsnorm_bwd);
-            builder.arg(scratch.d_norm.inner_mut()); // dx (temp [B*T*d_model], will copy back)
+            builder.arg(&dt_ptr); // dx (in place)
             builder.arg(&axis0_ptr); // d_scale_partials
-            builder.arg(d_temporal.inner()); // dy (upstream gradient)
+            builder.arg(&dt_ptr); // dy (upstream gradient)
             builder.arg(acts.norm_f_input.inner()); // saved pre-norm input
             let nf_ptr = mamba_w.norm_f_weight.cached_ptr();
             builder.arg(&nf_ptr); // scale
             builder.arg(acts.norm_f_rms.inner()); // saved rms
             builder.arg(&bt_i);
             builder.arg(&dm_i);
+            builder.arg(&accumulate_dx);
             unsafe { builder.launch(grid_norm(bt, dims.d_model)) }
                 .map_err(|e| format!("rmsnorm_bwd norm_f partial: {:?}", e))?;
         }
@@ -533,8 +534,7 @@ pub fn gpu_backward_mamba_backbone(
             unsafe { builder.launch(cfg) }
                 .map_err(|e| format!("rmsnorm_bwd norm_f final: {:?}", e))?;
         }
-        // Copy dx back into d_temporal for downstream layer backward
-        d_temporal.copy_from(&scratch.d_norm, &ctx.stream)?;
+        // (dx written in place into d_temporal — no copy-back.)
     }
 
     // Mamba layers in reverse — per-layer a_neg offset

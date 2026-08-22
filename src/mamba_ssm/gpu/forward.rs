@@ -247,8 +247,6 @@ pub struct GpuMambaScratch {
     pub d_proj: GpuBuffer,
     /// Gradient of post-norm activations `[B*T*d_model]`.
     pub d_norm: GpuBuffer,
-    /// Gradient of pre-norm input `[B*T*d_model]`.
-    pub d_pre_norm: GpuBuffer,
     /// Backward dx output from dt_proj `[B*T*dt_rank]`.
     pub d_dt_input: GpuBuffer,
     /// Gathered dt portion of xdbl for dt_proj backward x_saved `[B*T*dt_rank]`.
@@ -319,7 +317,6 @@ impl GpuMambaScratch {
             d_x_branch: GpuBuffer::zeros(stream, bt * d_inner)?,
             d_proj: GpuBuffer::zeros(stream, bt * 2 * d_inner)?,
             d_norm: GpuBuffer::zeros(stream, bt * d_model)?,
-            d_pre_norm: GpuBuffer::zeros(stream, bt * d_model)?,
             d_dt_input: GpuBuffer::zeros(stream, bt * dt_rank)?,
             dt_xdbl_buf: GpuBuffer::zeros(stream, bt * dt_rank)?,
             // SSM backward per-thread buffers

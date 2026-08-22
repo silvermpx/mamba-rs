@@ -185,7 +185,8 @@ extern "C" __global__ void rmsnorm_backward(
     const float* __restrict__ x,
     const float* __restrict__ scale,
     const float* __restrict__ rms_saved,
-    int batch, int dim
+    int batch, int dim,
+    int accumulate  // 1: dx[i] += result (dx = residual grad accumulator)
 ) {
     int b = blockIdx.x;
     if (b >= batch) return;
@@ -227,7 +228,22 @@ extern "C" __global__ void rmsnorm_backward(
     for (int i = d; i < dim; i += blockDim.x) {
         float x_hat = x[off + i] * inv_rms;
         float dy_val = dy[off + i];
-        dx[off + i] = (scale[i] * dy_val - x_hat * mean_dy_y) * inv_rms;
+        float dx_val = (scale[i] * dy_val - x_hat * mean_dy_y) * inv_rms;
+        // accumulate=1 folds the old separate vec_add_inplace into this
+        // store: same two operands, same per-element order, one launch
+        // and one B*T*dm round trip fewer. dx may alias dy when
+        // accumulate=0 (norm_f in-place): the sum pass reads all dy
+        // before the barrier, and this pass reads dy[off+i] before
+        // storing the same element.
+        // __fadd_rn pins the two-rounding shape of the old
+        // store-then-vec_add pair: without it nvcc contracts the final
+        // `* inv_rms` into an FMA with the accumulator (one rounding)
+        // and every digest moves.
+        if (accumulate) {
+            dx[off + i] = __fadd_rn(dx[off + i], dx_val);
+        } else {
+            dx[off + i] = dx_val;
+        }
         // Rule B: per-sample per-dim partial (no atomic; reduced externally).
         d_scale_partials[off + i] = dy_val * x_hat;
     }
@@ -325,7 +341,8 @@ extern "C" __global__ void rmsnorm_backward_f32in_##SUFFIX(                    \
     const T* __restrict__ dy, const float* __restrict__ x,                     \
     const float* __restrict__ scale,                                           \
     const float* __restrict__ rms_saved,                                       \
-    int batch, int dim                                                         \
+    int batch, int dim,                                                        \
+    int accumulate                                                             \
 ) {                                                                            \
     int b = blockIdx.x;                                                        \
     if (b >= batch) return;                                                    \
@@ -357,7 +374,9 @@ extern "C" __global__ void rmsnorm_backward_f32in_##SUFFIX(                    \
     for (int i = d; i < dim; i += blockDim.x) {                                \
         float x_hat = x[off + i] * inv_rms;                                    \
         float dy_val = to_f(dy[off + i]);                                      \
-        dx[off + i] = (scale[i] * dy_val - x_hat * mean_dy_y) * inv_rms;       \
+        float dx_val = (scale[i] * dy_val - x_hat * mean_dy_y) * inv_rms; \
+        if (accumulate) { dx[off + i] = __fadd_rn(dx[off + i], dx_val); } \
+        else            { dx[off + i] = dx_val; }       \
         /* Rule B: per-sample per-dim partial (no atomic; reduced externally). */ \
         d_scale_partials[off + i] = dy_val * x_hat;                            \
     }                                                                          \

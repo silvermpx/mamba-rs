@@ -782,6 +782,11 @@ pub fn gpu_backward_mamba3_layer(
             builder.arg(acts.rms_vals.inner());
             builder.arg(&bt_i);
             builder.arg(&dm_i);
+            // Shared-kernel ABI: rmsnorm_backward grew an `accumulate`
+            // arg (P1.4(6), M1 residual fold); the M3 sites keep the
+            // plain-store behavior.
+            let accumulate_dx: i32 = 0;
+            builder.arg(&accumulate_dx);
             unsafe { builder.launch(grid_norm(bt, dm)) }
                 .map_err(|e| format!("rmsnorm_bwd m3 B1 stage1: {:?}", e))?;
         }
@@ -855,6 +860,11 @@ pub fn gpu_backward_mamba3_backbone(
         builder.arg(acts.norm_f_rms.inner());
         builder.arg(&bt_i);
         builder.arg(&dm_i);
+        // Shared-kernel ABI: rmsnorm_backward grew an `accumulate`
+        // arg (P1.4(6), M1 residual fold); the M3 sites keep the
+        // plain-store behavior.
+        let accumulate_dx: i32 = 0;
+        builder.arg(&accumulate_dx);
         unsafe { builder.launch(grid_norm(bt, dm)) }
             .map_err(|e| format!("rmsnorm_bwd norm_f m3 stage1: {:?}", e))?;
     }

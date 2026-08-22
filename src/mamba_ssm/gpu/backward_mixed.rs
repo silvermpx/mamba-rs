@@ -667,12 +667,14 @@ pub fn gpu_backward_mamba_layer_mixed(
         let axis0_ptr = scratch.axis0_partials.cached_ptr();
         // Stage 1
         {
+            // dx = d_temporal with accumulate=1 (residual add folded in).
             let mut bld = ctx.stream.launch_builder(rmsnorm_bwd);
-            let dx = scratch.d_pre_norm.cached_ptr();
+            let dx = d_temporal.cached_ptr();
             let dy = scratch.d_norm.cached_ptr();
             let x = acts.residual.cached_ptr();
             let sc = lw.norm_weight.ptr();
             let rms = acts.rms_vals.cached_ptr();
+            let accumulate_dx: i32 = 1;
             bld.arg(&dx);
             bld.arg(&axis0_ptr); // d_scale_partials
             bld.arg(&dy);
@@ -681,6 +683,7 @@ pub fn gpu_backward_mamba_layer_mixed(
             bld.arg(&rms);
             bld.arg(&bt_i);
             bld.arg(&dm_i);
+            bld.arg(&accumulate_dx);
             unsafe { bld.launch(grid_norm(bt, dm)) }
                 .map_err(|e| format!("rmsnorm_bwd_f32in_typed partial: {e:?}"))?;
         }
@@ -704,16 +707,7 @@ pub fn gpu_backward_mamba_layer_mixed(
                 .map_err(|e| format!("rmsnorm_bwd_f32in_typed final: {e:?}"))?;
         }
     }
-    // Residual: d_temporal (f32) += d_pre_norm (f32).
-    {
-        let n = (bt * dm) as i32;
-        let mut bld = ctx.stream.launch_builder(&k.vec_add_inplace);
-        bld.arg(d_temporal.inner_mut());
-        bld.arg(scratch.d_pre_norm.inner());
-        bld.arg(&n);
-        unsafe { bld.launch(grid_1d(bt * dm)) }
-            .map_err(|e| format!("vec_add residual bwd mixed: {e:?}"))?;
-    }
+    // (Residual add folded into the rmsnorm_bwd accumulate store above.)
 
     Ok(())
 }
@@ -751,16 +745,21 @@ pub fn gpu_backward_mamba_backbone_mixed(
         let axis0_ptr = scratch.axis0_partials.cached_ptr();
         // Stage 1
         {
+            // In-place: dx aliases dy (= d_temporal); accumulate=0. See
+            // the f32 twin for the alias-safety argument.
+            let dt_ptr = d_temporal.cached_ptr();
+            let accumulate_dx: i32 = 0;
             let mut bld = ctx.stream.launch_builder(&ctx.kernels.rmsnorm_bwd);
-            bld.arg(scratch.d_pre_norm.inner_mut());
+            bld.arg(&dt_ptr);
             bld.arg(&axis0_ptr); // d_scale_partials
-            bld.arg(d_temporal.inner());
+            bld.arg(&dt_ptr);
             bld.arg(acts.norm_f_input.inner());
             let nf = mamba_w.norm_f_weight.ptr();
             bld.arg(&nf);
             bld.arg(acts.norm_f_rms.inner());
             bld.arg(&bt_i);
             bld.arg(&dm_i);
+            bld.arg(&accumulate_dx);
             unsafe { bld.launch(grid_norm(bt, dims.d_model)) }
                 .map_err(|e| format!("rmsnorm_bwd norm_f mixed partial: {e:?}"))?;
         }
@@ -783,7 +782,7 @@ pub fn gpu_backward_mamba_backbone_mixed(
             unsafe { bld.launch(cfg) }
                 .map_err(|e| format!("rmsnorm_bwd norm_f mixed final: {e:?}"))?;
         }
-        d_temporal.copy_from(&scratch.d_pre_norm, &ctx.stream)?;
+        // (dx written in place into d_temporal — no copy-back.)
     }
 
     // Layers in reverse with per-layer a_neg offset.

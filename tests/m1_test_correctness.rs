@@ -1373,6 +1373,8 @@ mod gpu_tests {
             builder.arg(gpu_acts.norm_f_rms.inner());
             builder.arg(&bt_i);
             builder.arg(&dm_i);
+            let accumulate_dx: i32 = 0;
+            builder.arg(&accumulate_dx);
             unsafe { builder.launch(grid_norm(bt, dm)) }.unwrap();
             d_temporal_gpu
                 .copy_from(&gpu_scratch.d_norm, &ctx.stream)

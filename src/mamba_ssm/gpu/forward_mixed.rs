@@ -213,9 +213,6 @@ pub struct GpuMambaMixedTrainScratch {
     pub d_d_local: GpuBuffer,
     /// Per-sample d_a_log accumulator [B * d_inner * d_state].
     pub d_a_log_local: GpuBuffer,
-    /// rmsnorm bwd dx (f32 residual stream) [B*T * d_model] — accumulates
-    /// into outer `d_temporal` via `vec_add_inplace`.
-    pub d_pre_norm: GpuBuffer,
     /// Discarded dx for backbone input_proj backward [B*T * mamba_input_dim].
     pub d_input_proj_dx: GpuBuffer,
 
@@ -275,7 +272,6 @@ impl GpuMambaMixedTrainScratch {
             d_c_reduced: GpuBuffer::zeros(stream, bt * ds)?,
             d_d_local: GpuBuffer::zeros(stream, b * di)?,
             d_a_log_local: GpuBuffer::zeros(stream, b * di * ds)?,
-            d_pre_norm: GpuBuffer::zeros(stream, bt * dm)?,
             d_input_proj_dx: GpuBuffer::zeros(stream, bt * dims.mamba_input_dim)?,
             // Rule-B axis-0 partials scratch — sized to fit largest consumer.
             axis0_partials: GpuBuffer::zeros(
