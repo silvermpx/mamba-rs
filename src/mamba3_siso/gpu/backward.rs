@@ -330,13 +330,53 @@ pub fn gpu_backward_mamba3_layer(
                     smem
                 ));
             }
+            let nc = dims.n_chunks();
+            // Reverse d_state decomposition: per-chunk B terms, then the
+            // serial per-lane fold into each chunk's entering state.
+            {
+                let st_cfg = cudarc::driver::LaunchConfig {
+                    grid_dim: (nh as u32, dims.batch as u32, nc as u32),
+                    block_dim: (hd as u32, 4, 1),
+                    shared_mem_bytes: ((cs_u * ds + cs_u * hd + cs_u) * std::mem::size_of::<f32>())
+                        as u32,
+                };
+                let mut sb = ctx.stream.launch_builder(
+                    m3k.m3_dqkv_state_terms_typed
+                        .get(crate::mamba_ssm::gpu::dtype::WeightDtype::F32),
+                );
+                sb.arg(scratch.dstate_terms.inner_mut());
+                sb.arg(acts.q.inner());
+                sb.arg(scratch.da_cumsum.inner());
+                sb.arg(scratch.d_y.inner());
+                sb.arg(&b_i);
+                sb.arg(&t_i);
+                sb.arg(&nh_i);
+                sb.arg(&hd_i);
+                sb.arg(&ds_i);
+                sb.arg(&cs);
+                unsafe { sb.launch(st_cfg) }
+                    .map_err(|e| format!("m3_dqkv_state_terms: {:?}", e))?;
+
+                let nc_i = nc as i32;
+                let mut pb = ctx.stream.launch_builder(&m3k.m3_dstate_passing_bwd);
+                pb.arg(scratch.dstate_enter.inner_mut());
+                pb.arg(scratch.dstate_terms.inner());
+                pb.arg(scratch.da_cs_sum.inner());
+                pb.arg(&b_i);
+                pb.arg(&nh_i);
+                pb.arg(&hd_i);
+                pb.arg(&ds_i);
+                pb.arg(&nc_i);
+                unsafe { pb.launch(grid_1d(dims.batch * nh * hd * ds)) }
+                    .map_err(|e| format!("m3_dstate_passing_bwd: {:?}", e))?;
+            }
             // t-split: blockDim.y lanes stride the per-timestep
             // loops. Fixed launch geometry (never data-shaped); any T_SPLIT
             // yields identical bits since each output keeps one owning lane
-            // with the same inner order.
+            // with the same inner order. Chunks ride grid z.
             let t_split = 16.min(1024 / hd.max(1)).max(1) as u32;
             let cfg = cudarc::driver::LaunchConfig {
-                grid_dim: (nh as u32, dims.batch as u32, 1),
+                grid_dim: (nh as u32, dims.batch as u32, nc as u32),
                 block_dim: (hd as u32, t_split, 1),
                 shared_mem_bytes: smem as u32,
             };
@@ -357,6 +397,7 @@ pub fn gpu_backward_mamba3_layer(
             builder.arg(scratch.chunk_states.inner());
             builder.arg(scratch.d_y.inner());
             builder.arg(&dp_ptr);
+            builder.arg(scratch.dstate_enter.inner());
             builder.arg(&b_i);
             builder.arg(&t_i);
             builder.arg(&nh_i);
@@ -366,16 +407,19 @@ pub fn gpu_backward_mamba3_layer(
             builder.arg(&use_pair_mats);
             unsafe { builder.launch(cfg) }.map_err(|e| format!("m3_dqkv B6 S1: {:?}", e))?;
         }
-        // Stage 2: reduce dD_partials[B, nh] → lg.d_param[nh] (accumulate=1
-        // across layers; GpuMamba3Grads::zero runs once per training step).
+        // Stage 2: reduce dD_partials[B*nc, nh] → lg.d_param[nh]
+        // (accumulate=1 across layers; GpuMamba3Grads::zero runs once per
+        // training step).
         {
-            let block_dim = (dims.batch as u32).next_power_of_two().clamp(32, 256);
+            let rows = dims.batch * dims.n_chunks();
+            let rows_i = rows as i32;
+            let block_dim = (rows as u32).next_power_of_two().clamp(32, 256);
             let accumulate_i: i32 = 1;
             let d_dp_ptr = lg.d_param.ptr();
             let mut rb = ctx.stream.launch_builder(&m3k.reduce_sum_axis0);
             rb.arg(&d_dp_ptr);
             rb.arg(scratch.axis0_partials.inner());
-            rb.arg(&b_i);
+            rb.arg(&rows_i);
             rb.arg(&nh_i);
             rb.arg(&accumulate_i);
             let red_cfg = cudarc::driver::LaunchConfig {

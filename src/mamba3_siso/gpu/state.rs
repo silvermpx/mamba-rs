@@ -296,12 +296,17 @@ pub struct GpuMamba3Scratch {
     pub d_input_proj_dx: GpuBuffer, // [B*T*mamba_input_dim]
 
     // Chunked parallel scan buffers
-    pub da_cumsum: GpuBuffer,     // [B * n_chunks * nheads * chunk_size]
-    pub da_cs_sum: GpuBuffer,     // [B * nheads * n_chunks] -- per-chunk decay sum
-    pub chunk_states: GpuBuffer,  // [B * n_chunks * nheads * headdim * d_state]
-    pub final_states: GpuBuffer,  // [B * nheads * headdim * d_state]
-    pub d_da_cumsum: GpuBuffer,   // backward
-    pub d_prev_states: GpuBuffer, // backward
+    pub da_cumsum: GpuBuffer,    // [B * n_chunks * nheads * chunk_size]
+    pub da_cs_sum: GpuBuffer,    // [B * nheads * n_chunks] -- per-chunk decay sum
+    pub chunk_states: GpuBuffer, // [B * n_chunks * nheads * headdim * d_state]
+    pub final_states: GpuBuffer, // [B * nheads * headdim * d_state]
+    pub d_da_cumsum: GpuBuffer,  // backward
+    /// Per-chunk B terms of the reverse d_state recurrence
+    /// (m3_dqkv_state_terms output). [B * n_chunks * nh * hd * ds]
+    pub dstate_terms: GpuBuffer,
+    /// Entering d_state per chunk (m3_dstate_passing_bwd output).
+    /// [B * n_chunks * nh * hd * ds]
+    pub dstate_enter: GpuBuffer,
     // Parallel backward intermediate buffers (Steps 2-6)
     pub d_scale: GpuBuffer,     // [B * T * nh] -- dScale from dqktheta
     pub d_gamma_par: GpuBuffer, // [B * T * nh] -- dGamma from dqktheta
@@ -545,7 +550,11 @@ impl GpuMamba3Scratch {
                 let nc = dims.n_chunks();
                 GpuBuffer::zeros(stream, b * nc * nh * cs)?
             },
-            d_prev_states: {
+            dstate_terms: {
+                let nc = dims.n_chunks();
+                GpuBuffer::zeros(stream, b * nc * nh * hd * ds)?
+            },
+            dstate_enter: {
                 let nc = dims.n_chunks();
                 GpuBuffer::zeros(stream, b * nc * nh * hd * ds)?
             },
@@ -557,7 +566,7 @@ impl GpuMamba3Scratch {
                 let na = dims.n_angles.max(1);
                 let angle_dt_sz = 2 * nh * bt * na;
                 let rmsnorm_sz = bt * dm;
-                let d_d_sz = b * nh;
+                let d_d_sz = b * dims.n_chunks() * nh;
                 GpuBuffer::zeros(stream, angle_dt_sz.max(rmsnorm_sz).max(d_d_sz))?
             },
         })

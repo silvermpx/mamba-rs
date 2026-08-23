@@ -157,7 +157,7 @@ fn check_dqkv(dtype: WeightDtype) {
     let n_v = B * T * D_INNER;
     let n_th = B * T * NH;
     // dD output is per-(b,h) partials length B*NH.
-    let n_d = B * NH;
+    let n_d = B * N_CHUNKS * NH;
 
     // f32 oracle.
     let dq_ref = GpuBuffer::zeros(&ctx.stream, n_q).unwrap();
@@ -178,9 +178,12 @@ fn check_dqkv(dtype: WeightDtype) {
         CS * DS * 2 + CS * HD * 2 + CS * 4 + HD * DS * 2 + CS * (CS - 1) * 3 / 2 + CS * 2;
     let smem_bytes = (smem_floats * 4) as u32;
     let use_mats_i: i32 = 1;
-    // t-split contract: one head per block, blockDim.y = t-split lanes.
+    // t-split contract: one head per block, blockDim.y = t-split lanes;
+    // chunks ride grid z with the entering state supplied per chunk.
+    let enter = GpuBuffer::zeros(&ctx.stream, B * N_CHUNKS * NH * HD * DS).unwrap();
+    ctx.stream.synchronize().unwrap();
     let cfg = LaunchConfig {
-        grid_dim: (NH as u32, B as u32, 1),
+        grid_dim: (NH as u32, B as u32, N_CHUNKS as u32),
         block_dim: (HD as u32, 16, 1),
         shared_mem_bytes: smem_bytes,
     };
@@ -206,6 +209,7 @@ fn check_dqkv(dtype: WeightDtype) {
         ssm_buf.cached_ptr(),
         do_f32.cached_ptr(),
         d_buf.cached_ptr(),
+        enter.cached_ptr(),
     ];
     for a in &args {
         bld.arg(a);
@@ -258,6 +262,7 @@ fn check_dqkv(dtype: WeightDtype) {
         ssm_buf.cached_ptr(),
         do_t.cached_ptr(),
         d_buf.cached_ptr(),
+        enter.cached_ptr(),
     ];
     for a in &args {
         bld.arg(a);
@@ -580,7 +585,7 @@ fn m3_kernels_isolated_bench() {
     let dv = GpuBuffer::zeros(&ctx.stream, n_v).unwrap();
     let dadt = GpuBuffer::zeros(&ctx.stream, n_th).unwrap();
     let dqk = GpuBuffer::zeros(&ctx.stream, n_th).unwrap();
-    let dd = GpuBuffer::zeros(&ctx.stream, CB * CNH).unwrap();
+    let dd = GpuBuffer::zeros(&ctx.stream, CB * n_chunks * CNH).unwrap();
     ctx.stream.synchronize().unwrap();
 
     // Production tier ladder (mirrors backward.rs).
@@ -593,8 +598,10 @@ fn m3_kernels_isolated_bench() {
         (legacy_floats, 0)
     };
     let t_split = 16u32.min((1024 / CHD) as u32);
+    let enter = GpuBuffer::zeros(&ctx.stream, CB * n_chunks * CNH * CHD * CDS).unwrap();
+    ctx.stream.synchronize().unwrap();
     let cfg = LaunchConfig {
-        grid_dim: (CNH as u32, CB as u32, 1),
+        grid_dim: (CNH as u32, CB as u32, n_chunks as u32),
         block_dim: (CHD as u32, t_split, 1),
         shared_mem_bytes: (per_head_floats * 4) as u32,
     };
@@ -644,6 +651,7 @@ fn m3_kernels_isolated_bench() {
             ssm_buf.cached_ptr(),
             do_f32.cached_ptr(),
             d_buf.cached_ptr(),
+            enter.cached_ptr(),
         ];
         for a in &args {
             bld.arg(a);
@@ -683,6 +691,7 @@ fn m3_kernels_isolated_bench() {
             ssm_buf.cached_ptr(),
             do_t.cached_ptr(),
             d_buf.cached_ptr(),
+            enter.cached_ptr(),
         ];
         for a in &args {
             bld.arg(a);
@@ -980,7 +989,7 @@ fn m3_dqkv_output_hash() {
     let dv = GpuBuffer::zeros(&ctx.stream, n_v).unwrap();
     let dadt = GpuBuffer::zeros(&ctx.stream, n_th).unwrap();
     let dqk = GpuBuffer::zeros(&ctx.stream, n_th).unwrap();
-    let dd = GpuBuffer::zeros(&ctx.stream, CB * CNH).unwrap();
+    let dd = GpuBuffer::zeros(&ctx.stream, CB * n_chunks * CNH).unwrap();
     ctx.stream.synchronize().unwrap();
 
     let legacy_floats = 2 * CCS * CDS + 2 * CCS * CHD + 4 * CCS + 2 * CHD * CDS;
@@ -992,8 +1001,10 @@ fn m3_dqkv_output_hash() {
         (legacy_floats, 0)
     };
     let t_split = 16u32.min((1024 / CHD) as u32);
+    let enter = GpuBuffer::zeros(&ctx.stream, CB * n_chunks * CNH * CHD * CDS).unwrap();
+    ctx.stream.synchronize().unwrap();
     let cfg = LaunchConfig {
-        grid_dim: (CNH as u32, CB as u32, 1),
+        grid_dim: (CNH as u32, CB as u32, n_chunks as u32),
         block_dim: (CHD as u32, t_split, 1),
         shared_mem_bytes: (per_head_floats * 4) as u32,
     };
@@ -1018,6 +1029,7 @@ fn m3_dqkv_output_hash() {
         ssm_buf.cached_ptr(),
         do_f32.cached_ptr(),
         d_buf.cached_ptr(),
+        enter.cached_ptr(),
     ];
     for a in &args {
         bld.arg(a);
@@ -1056,6 +1068,6 @@ fn m3_dqkv_output_hash() {
     eprintln!("HASH dQK_dot {:016x}", fnv(&download_f32(&ctx, &dqk, n_th)));
     eprintln!(
         "HASH dD      {:016x}",
-        fnv(&download_f32(&ctx, &dd, CB * CNH))
+        fnv(&download_f32(&ctx, &dd, CB * n_chunks * CNH))
     );
 }

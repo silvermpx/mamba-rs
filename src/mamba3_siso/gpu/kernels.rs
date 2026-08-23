@@ -96,6 +96,12 @@ pub struct Mamba3Kernels {
     // m3_dqktheta path below.
     pub m3_extract_da_cs_sum: CudaFunction,
     pub m3_dqkv: CudaFunction,
+    /// Per-chunk B terms of the reverse d_state recurrence (f32/typed
+    /// activation reads; f32 output).
+    pub m3_dqkv_state_terms_typed: TypedKernel,
+    /// Serial per-(b,h,p,n) reverse fold producing each chunk's
+    /// entering d_state.
+    pub m3_dstate_passing_bwd: CudaFunction,
     pub m3_dqktheta: CudaFunction,
     pub m3_ddt_dtrap: CudaFunction,
     pub m3_final_grads: CudaFunction,
@@ -315,6 +321,12 @@ impl Mamba3Kernels {
             m3_chunk_scan_fwd: get("m3_chunk_scan_fwd")?,
             m3_extract_da_cs_sum: get("m3_extract_da_cs_sum")?,
             m3_dqkv: get("m3_dqkv")?,
+            m3_dqkv_state_terms_typed: TypedKernel {
+                f32: get("m3_dqkv_state_terms")?,
+                bf16: get("m3_dqkv_state_terms_bf16")?,
+                f16: get("m3_dqkv_state_terms_f16")?,
+            },
+            m3_dstate_passing_bwd: get("m3_dstate_passing_bwd")?,
             m3_dqktheta: get("m3_dqktheta")?,
             m3_ddt_dtrap: get("m3_ddt_dtrap")?,
             m3_final_grads: get("m3_final_grads")?,

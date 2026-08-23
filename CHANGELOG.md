@@ -61,6 +61,17 @@
   stride overlapped slot 0's tail arrays once the tile grew). M3
   campaign shape (B=8 T=1300 d_model 384, 24 layers, bf16 graph):
   381.0 -> 362.1 ms/step.
+- The chunked M3 backward runs its chunks in parallel: the reverse
+  d_state recurrence is decomposed into per-chunk terms
+  (`m3_dqkv_state_terms`), a serial per-(b, h, p, n) fold producing
+  each chunk's entering state (`m3_dstate_passing_bwd`), and `m3_dqkv`
+  itself drops its serial chunk loop — chunks ride grid z, mirroring
+  the forward's chunk_state/state_passing/chunk_scan structure. The
+  zero-seeded per-chunk term sums group differently than the fused
+  serial accumulate (same release-window family break; deterministic,
+  shape-pure). dD partials go per (b, chunk, h) with the ascending-row
+  reducer. Isolated m3_dqkv: 3.89 -> 1.94 ms/launch; M3 campaign
+  bf16 graph 219.6 -> 179.4 ms/step.
 - `m3_dqktheta` hoists each angle's `cosf`/`sinf` into registers — the
   forward-RoPE, inverse-RoPE and dtheta loops each recomputed the same
   pair (3x SFU work per angle). Bit-identical (same functions, same
