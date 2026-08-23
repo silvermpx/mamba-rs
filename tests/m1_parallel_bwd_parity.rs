@@ -454,6 +454,10 @@ fn h_from_tmajor(h_t: &[f32], b: usize, t: usize, di: usize, ds: usize) -> Vec<f
 }
 
 fn check_fold_slim_parity(b: usize, t: usize, di: usize, ds: usize, dtype: WeightDtype) {
+    check_fold_parity(b, t, di, ds, dtype, true)
+}
+
+fn check_fold_parity(b: usize, t: usize, di: usize, ds: usize, dtype: WeightDtype, slim: bool) {
     use mamba_rs::mamba_ssm::gpu::launch::{
         SCAN_BWD_DGROUP, grid_parallel_scan_bwd_fold, grid_parallel_scan_typed, scan_tape_len,
     };
@@ -466,7 +470,7 @@ fn check_fold_slim_parity(b: usize, t: usize, di: usize, ds: usize, dtype: Weigh
     let inp = make_inputs(b, t, di, ds);
 
     // Device forward, both tape modes, on the SAME inputs.
-    let h = GpuBuffer::zeros(&ctx.stream, b * di * ds).unwrap();
+    let mut h = GpuBuffer::zeros(&ctx.stream, b * di * ds).unwrap();
     let y = DtypedBuf::zeros(&ctx.stream, b * t * di, dtype).unwrap();
     let delta = upload_typed(&ctx, &inp.delta, dtype);
     let u = upload_typed(&ctx, &inp.u, dtype);
@@ -482,11 +486,10 @@ fn check_fold_slim_parity(b: usize, t: usize, di: usize, ds: usize, dtype: Weigh
     let ti = t as i32;
     let di_i = di as i32;
     let ds_i = ds as i32;
-    for (slim, tp) in [(0i32, h_saved.cached_ptr()), (1i32, tape.cached_ptr())] {
+    let run_fwd = |slim_i: i32, tp: u64, hp: u64| {
         let mut bld = ctx
             .stream
             .launch_builder(k.ssm_parallel_fwd_typed.get(dtype));
-        let hp = h.cached_ptr();
         let yp = y.cached_ptr();
         let hs = h_saved.cached_ptr();
         let dl = delta.cached_ptr();
@@ -509,14 +512,25 @@ fn check_fold_slim_parity(b: usize, t: usize, di: usize, ds: usize, dtype: Weigh
         bld.arg(&di_i);
         bld.arg(&ds_i);
         bld.arg(&tp);
-        bld.arg(&slim);
-        unsafe { bld.launch(grid_parallel_scan_typed(b, di, 2)) }.unwrap();
-    }
-    ctx.stream.synchronize().unwrap();
-
-    // Sequential reference on the DEVICE-COMPUTED h tape (the handcrafted
-    // random tape cannot judge a slim replay).
+        bld.arg(&slim_i);
+        unsafe { bld.launch(grid_parallel_scan_typed(b, di, dtype.size_bytes())) }.unwrap();
+        ctx.stream.synchronize().unwrap();
+    };
+    // Full-tape forward FIRST and the reference h captured BEFORE the
+    // slim forward runs - the slim pass clobbers h_saved, and a reference
+    // read after it judges the (correct) replay against corrupted h. That
+    // ordering bug in this very harness once read as a production defect.
+    run_fwd(0, h_saved.cached_ptr(), h.cached_ptr());
     let h_dev = download_f32(&ctx, &h_saved, b * (t + 1) * di * ds);
+    if slim {
+        // The forward leaves its final running state in `h`; a second
+        // pass starting from h_T encodes a shifted trajectory into the
+        // tape, and the replay then faithfully reproduces the WRONG h -
+        // exactly the harness defect this comment guards against.
+        h.zero(&ctx.stream).unwrap();
+        ctx.stream.synchronize().unwrap();
+        run_fwd(1, tape.cached_ptr(), h.cached_ptr());
+    }
     let mut inp_ref = make_inputs(b, t, di, ds);
     inp_ref.h_saved = h_from_tmajor(&h_dev, b, t, di, ds);
     let (dd_seq, du_seq, dbl_seq, dcl_seq, ddd_seq, dal_seq) = run_seq_f32(&ctx, &k, &inp_ref);
@@ -568,9 +582,10 @@ fn check_fold_slim_parity(b: usize, t: usize, di: usize, ds: usize, dtype: Weigh
         bld.arg(&ti);
         bld.arg(&di_i);
         bld.arg(&ds_i);
-        let slim1: i32 = 1;
-        bld.arg(&tp);
-        bld.arg(&slim1);
+        let slim_i: i32 = i32::from(slim);
+        let tape_arg = if slim { tp } else { hs };
+        bld.arg(&tape_arg);
+        bld.arg(&slim_i);
         unsafe { bld.launch(grid_parallel_scan_bwd_fold(b, di, dtype.size_bytes())) }.unwrap();
     }
     ctx.stream.synchronize().unwrap();
@@ -630,7 +645,209 @@ fn parity_fold_slim_f32() {
     check_fold_slim_parity(1, 2048, 4, 8, WeightDtype::F32);
 }
 
+// Bisection arms for the multi-chunk f32 divergence: a single chunk
+// isolates the chunk-boundary replay, and T=1300 matches the campaign
+// chunk count.
+#[test]
+fn parity_fold_slim_f32_single_chunk() {
+    check_fold_slim_parity(1, 512, 4, 8, WeightDtype::F32);
+}
+
+#[test]
+fn parity_fold_fulltape_f32_single_chunk() {
+    check_fold_parity(1, 512, 4, 8, WeightDtype::F32, false);
+}
+
+#[test]
+fn parity_fold_slim_f32_campaign_chunks() {
+    check_fold_slim_parity(1, 1300, 4, 8, WeightDtype::F32);
+}
+
 #[test]
 fn parity_fold_slim_bf16() {
     check_fold_slim_parity(2, 1300, 8, 16, WeightDtype::Bf16);
+}
+
+/// Diagnostic (manual): where exactly the fold's slim-replay d_C diverges
+/// from its own full-tape run — positions, not norms.
+#[test]
+#[ignore = "diagnostic printer"]
+fn diag_fold_slim_vs_full_positions() {
+    use mamba_rs::mamba_ssm::gpu::launch::SCAN_BWD_DGROUP;
+    let (b, t, di, ds) = (1usize, 512usize, 4usize, 8usize);
+    let dtype = WeightDtype::F32;
+    let g = SCAN_BWD_DGROUP;
+    let run = |slim: bool, fold: bool| -> Vec<f32> {
+        // Reuse the parity harness by rebuilding the rig each time (same
+        // seeds -> identical inputs), returning d_C at fold depth.
+        let (ctx, k) = make_ctx();
+        let inp = make_inputs(b, t, di, ds);
+        let h = GpuBuffer::zeros(&ctx.stream, b * di * ds).unwrap();
+        let y = DtypedBuf::zeros(&ctx.stream, b * t * di, dtype).unwrap();
+        let delta = upload_typed(&ctx, &inp.delta, dtype);
+        let u = upload_typed(&ctx, &inp.u, dtype);
+        let b_buf = upload_typed(&ctx, &bc_to_tmajor(&inp.b_buf, b, t, ds), dtype);
+        let c_buf = upload_typed(&ctx, &bc_to_tmajor(&inp.c_buf, b, t, ds), dtype);
+        let a_neg = upload_f32(&ctx, &inp.a_neg);
+        let d_param = upload_f32(&ctx, &inp.d_param);
+        let h_saved = GpuBuffer::zeros(&ctx.stream, b * (t + 1) * di * ds).unwrap();
+        let tape = GpuBuffer::zeros(
+            &ctx.stream,
+            mamba_rs::mamba_ssm::gpu::launch::scan_tape_len(b, t, di, ds),
+        )
+        .unwrap();
+        ctx.stream.synchronize().unwrap();
+        let bi = b as i32;
+        let ti = t as i32;
+        let di_i = di as i32;
+        let ds_i = ds as i32;
+        // ONE forward, matching the backward's tape mode - running both
+        // would let the second overwrite state the first arm depends on.
+        let fwd_modes: [(i32, u64); 1] = if slim {
+            [(1i32, tape.cached_ptr())]
+        } else {
+            [(0i32, h_saved.cached_ptr())]
+        };
+        for (sl, tp) in fwd_modes {
+            let mut bld = ctx
+                .stream
+                .launch_builder(k.ssm_parallel_fwd_typed.get(dtype));
+            let hp = h.cached_ptr();
+            let yp = y.cached_ptr();
+            let hs = h_saved.cached_ptr();
+            let dl = delta.cached_ptr();
+            let uu = u.cached_ptr();
+            let bbp = b_buf.cached_ptr();
+            let ccp = c_buf.cached_ptr();
+            let aa = a_neg.cached_ptr();
+            let dp = d_param.cached_ptr();
+            bld.arg(&hp);
+            bld.arg(&yp);
+            bld.arg(&hs);
+            bld.arg(&dl);
+            bld.arg(&uu);
+            bld.arg(&bbp);
+            bld.arg(&ccp);
+            bld.arg(&aa);
+            bld.arg(&dp);
+            bld.arg(&bi);
+            bld.arg(&ti);
+            bld.arg(&di_i);
+            bld.arg(&ds_i);
+            bld.arg(&tp);
+            bld.arg(&sl);
+            unsafe {
+                bld.launch(mamba_rs::mamba_ssm::gpu::launch::grid_parallel_scan_typed(
+                    b,
+                    di,
+                    dtype.size_bytes(),
+                ))
+            }
+            .unwrap();
+        }
+        let dy = upload_typed(&ctx, &inp.dy, dtype);
+        let d_delta = DtypedBuf::zeros(&ctx.stream, b * t * di, dtype).unwrap();
+        let d_u = DtypedBuf::zeros(&ctx.stream, b * t * di, dtype).unwrap();
+        let out_rows = if fold { di / g } else { di };
+        let d_b_fold = DtypedBuf::zeros(&ctx.stream, b * t * out_rows * ds, dtype).unwrap();
+        let d_c_fold = DtypedBuf::zeros(&ctx.stream, b * t * out_rows * ds, dtype).unwrap();
+        let d_d_local = GpuBuffer::zeros(&ctx.stream, b * di).unwrap();
+        let d_a_log_local = GpuBuffer::zeros(&ctx.stream, b * di * ds).unwrap();
+        ctx.stream.synchronize().unwrap();
+        let mut bld = ctx.stream.launch_builder(if fold {
+            k.ssm_parallel_bwd_fold_typed.get(dtype)
+        } else {
+            k.ssm_parallel_bwd_typed.get(dtype)
+        });
+        let hs = h_saved.cached_ptr();
+        let tp = tape.cached_ptr();
+        let dl = delta.cached_ptr();
+        let uu = u.cached_ptr();
+        let bbp = b_buf.cached_ptr();
+        let ccp = c_buf.cached_ptr();
+        let aa = a_neg.cached_ptr();
+        let dp = d_param.cached_ptr();
+        let dyp = dy.cached_ptr();
+        let ddl = d_delta.cached_ptr();
+        let dup = d_u.cached_ptr();
+        let dbl = d_b_fold.cached_ptr();
+        let dcl = d_c_fold.cached_ptr();
+        let ddd = d_d_local.cached_ptr();
+        let dal = d_a_log_local.cached_ptr();
+        bld.arg(&hs);
+        bld.arg(&dl);
+        bld.arg(&uu);
+        bld.arg(&bbp);
+        bld.arg(&ccp);
+        bld.arg(&aa);
+        bld.arg(&dp);
+        bld.arg(&dyp);
+        bld.arg(&ddl);
+        bld.arg(&dup);
+        bld.arg(&dbl);
+        bld.arg(&dcl);
+        bld.arg(&ddd);
+        bld.arg(&dal);
+        bld.arg(&bi);
+        bld.arg(&ti);
+        bld.arg(&di_i);
+        bld.arg(&ds_i);
+        let sl: i32 = i32::from(slim);
+        let tpa = if slim { tp } else { hs };
+        bld.arg(&tpa);
+        bld.arg(&sl);
+        let cfg = if fold {
+            mamba_rs::mamba_ssm::gpu::launch::grid_parallel_scan_bwd_fold(b, di, dtype.size_bytes())
+        } else {
+            grid_parallel_scan_bwd(b, di)
+        };
+        unsafe { bld.launch(cfg) }.unwrap();
+        ctx.stream.synchronize().unwrap();
+        download_typed(&ctx, &d_c_fold)
+    };
+    for (label, fold) in [("ungrouped", false), ("fold", true)] {
+        let full = run(false, fold);
+        let slim = run(true, fold);
+        let n_mis = full
+            .iter()
+            .zip(&slim)
+            .filter(|(a, b)| a.to_bits() != b.to_bits())
+            .count();
+        let max_err = full
+            .iter()
+            .zip(&slim)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0f32, f32::max);
+        eprintln!(
+            "ROUTE {label}: slim-vs-full d_C mismatched elems {n_mis}/{} max_abs {max_err:9.6}",
+            full.len()
+        );
+    }
+    let full = run(false, true);
+    let slim = run(true, true);
+    let groups = di / g;
+    let mut per_t = vec![0f32; t];
+    let mut worst: Vec<(f32, usize, usize, usize)> = Vec::new();
+    for n in 0..ds {
+        for gr in 0..groups {
+            for tt in 0..t {
+                let idx = ((n) * groups + gr) * t + tt;
+                let e = (full[idx] - slim[idx]).abs();
+                per_t[tt] += e;
+                worst.push((e, tt, n, gr));
+            }
+        }
+    }
+    worst.sort_by(|a, b| b.0.total_cmp(&a.0));
+    eprintln!("worst abs diffs (err, t, n, group):");
+    for w in &worst[..12] {
+        eprintln!("  {:9.5} t={} n={} g={}", w.0, w.1, w.2, w.3);
+    }
+    let t_nonzero: Vec<usize> = (0..t).filter(|&tt| per_t[tt] > 1e-6).collect();
+    eprintln!(
+        "t positions with error: {} of {t}; first {:?} last {:?}",
+        t_nonzero.len(),
+        &t_nonzero.iter().take(8).collect::<Vec<_>>(),
+        &t_nonzero.iter().rev().take(8).collect::<Vec<_>>()
+    );
 }
