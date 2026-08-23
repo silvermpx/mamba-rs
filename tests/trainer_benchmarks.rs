@@ -17,6 +17,8 @@
 
 #![cfg(feature = "cuda")]
 
+mod common;
+
 use std::time::Instant;
 
 use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
@@ -524,14 +526,33 @@ fn bench_scan_kernels_isolated() {
     let dtype = WeightDtype::Bf16;
 
     let bt = b * t;
+    let upload_typed = |data: &[f32]| -> DtypedBuf {
+        let buf = DtypedBuf::zeros(&ctx.stream, data.len(), dtype).unwrap();
+        ctx.stream.synchronize().unwrap();
+        buf.upload_f32(&ctx.stream, data).unwrap();
+        ctx.stream.synchronize().unwrap();
+        buf
+    };
+    let upload_f32 = |data: &[f32]| -> GpuBuffer {
+        let mut buf = GpuBuffer::zeros(&ctx.stream, data.len()).unwrap();
+        ctx.stream.synchronize().unwrap();
+        buf.upload(&ctx.stream, data).unwrap();
+        ctx.stream.synchronize().unwrap();
+        buf
+    };
     let h = GpuBuffer::zeros(&ctx.stream, b * di * ds).unwrap();
     let y = DtypedBuf::zeros(&ctx.stream, bt * di, dtype).unwrap();
-    let delta = DtypedBuf::zeros(&ctx.stream, bt * di, dtype).unwrap();
-    let u = DtypedBuf::zeros(&ctx.stream, bt * di, dtype).unwrap();
-    let bb = DtypedBuf::zeros(&ctx.stream, bt * ds, dtype).unwrap();
-    let cc = DtypedBuf::zeros(&ctx.stream, bt * ds, dtype).unwrap();
-    let a_neg = GpuBuffer::zeros(&ctx.stream, di * ds).unwrap();
-    let dpar = GpuBuffer::zeros(&ctx.stream, di).unwrap();
+    let delta = upload_typed(&det(bt * di, 11, 0.05));
+    let u = upload_typed(&det(bt * di, 12, 0.5));
+    let bb = upload_typed(&det(bt * ds, 13, 0.3));
+    let cc = upload_typed(&det(bt * ds, 14, 0.3));
+    let a_neg = upload_f32(
+        &det(di * ds, 15, 0.2)
+            .iter()
+            .map(|x| -x.abs())
+            .collect::<Vec<_>>(),
+    );
+    let dpar = upload_f32(&det(di, 16, 0.1));
     let h_saved = GpuBuffer::zeros(&ctx.stream, b * (t + 1) * di * ds).unwrap();
 
     let bi = b as i32;
@@ -616,7 +637,7 @@ fn bench_scan_kernels_isolated() {
         fwd(&ctx);
     }
     ctx.stream.synchronize().unwrap();
-    let reps = 20;
+    let reps: i32 = 20;
     let t0 = Instant::now();
     for _ in 0..reps {
         fwd(&ctx);
@@ -635,7 +656,7 @@ fn bench_scan_kernels_isolated() {
     let fwd_slim_ms = t0s.elapsed().as_secs_f64() * 1e3 / f64::from(reps);
 
     // bwd
-    let d_y = DtypedBuf::zeros(&ctx.stream, bt * di, dtype).unwrap();
+    let d_y = upload_typed(&det(bt * di, 17, 0.1));
     let d_delta = DtypedBuf::zeros(&ctx.stream, bt * di, dtype).unwrap();
     let d_u = DtypedBuf::zeros(&ctx.stream, bt * di, dtype).unwrap();
     let d_b_local = DtypedBuf::zeros(&ctx.stream, bt * di * ds, dtype).unwrap();
@@ -756,12 +777,75 @@ fn bench_scan_kernels_isolated() {
     ctx.stream.synchronize().unwrap();
     let bwd_slim_ms = t2.elapsed().as_secs_f64() * 1e3 / f64::from(reps);
 
+    // The PRODUCTION route: fold kernel (dB/dC folded to di/G rows) with
+    // the slim tape. The pre-0.6.4 ledger timed only the ungrouped
+    // kernel, which the trainer launches solely when d_inner is not
+    // divisible by the d-group - never at campaign shapes.
+    use mamba_rs::mamba_ssm::gpu::launch::{SCAN_BWD_DGROUP, grid_parallel_scan_bwd_fold};
+    let d_b_fold = DtypedBuf::zeros(&ctx.stream, bt * (di / SCAN_BWD_DGROUP) * ds, dtype).unwrap();
+    let d_c_fold = DtypedBuf::zeros(&ctx.stream, bt * (di / SCAN_BWD_DGROUP) * ds, dtype).unwrap();
+    ctx.stream.synchronize().unwrap();
+    let bwd_fold_slim = |ctx: &GpuCtx| {
+        let mut bld = ctx
+            .stream
+            .launch_builder(k.ssm_parallel_bwd_fold_typed.get(dtype));
+        let hs = h_saved.cached_ptr();
+        let tp = tape.cached_ptr();
+        let dp = delta.cached_ptr();
+        let up = u.cached_ptr();
+        let bp = bb.cached_ptr();
+        let cp = cc.cached_ptr();
+        let ap = a_neg.cached_ptr();
+        let ddp = dpar.cached_ptr();
+        let dyp = d_y.cached_ptr();
+        let ddel = d_delta.cached_ptr();
+        let dup = d_u.cached_ptr();
+        let dbl = d_b_fold.cached_ptr();
+        let dcl = d_c_fold.cached_ptr();
+        let ddl = d_d_local.cached_ptr();
+        let dal = d_a_log_local.cached_ptr();
+        bld.arg(&hs);
+        bld.arg(&dp);
+        bld.arg(&up);
+        bld.arg(&bp);
+        bld.arg(&cp);
+        bld.arg(&ap);
+        bld.arg(&ddp);
+        bld.arg(&dyp);
+        bld.arg(&ddel);
+        bld.arg(&dup);
+        bld.arg(&dbl);
+        bld.arg(&dcl);
+        bld.arg(&ddl);
+        bld.arg(&dal);
+        bld.arg(&bi);
+        bld.arg(&ti);
+        bld.arg(&dii);
+        bld.arg(&dsi);
+        let slim1: i32 = 1;
+        bld.arg(&tp);
+        bld.arg(&slim1);
+        unsafe { bld.launch(grid_parallel_scan_bwd_fold(b, di, dtype.size_bytes())) }.unwrap();
+    };
+    let bwd_fold_ms = common::bench::timed(&ctx, 20, || bwd_fold_slim(&ctx));
+
     eprintln!(
-        "scan isolated (B{b} T{t} di{di} ds{ds} {dtype:?}): fwd_full={fwd_ms:.3} (x24={:.1}) fwd_slim={fwd_slim_ms:.3} (x24={:.1}) bwd_full={bwd_ms:.3} (x24={:.1}) bwd_slim={bwd_slim_ms:.3} (x24={:.1})",
+        "{}",
+        common::bench::bench_stamp(
+            &device,
+            &ctx,
+            "B8 T1300 di768 ds16",
+            "fold G=4 slim",
+            di / SCAN_BWD_DGROUP
+        )
+    );
+    eprintln!(
+        "scan isolated (B{b} T{t} di{di} ds{ds} {dtype:?}): fwd_full={fwd_ms:.3} (x24={:.1}) fwd_slim={fwd_slim_ms:.3} (x24={:.1}) bwd_full={bwd_ms:.3} (x24={:.1}) bwd_slim={bwd_slim_ms:.3} (x24={:.1}) bwd_fold_slim={bwd_fold_ms:.3} (x24={:.1}, production)",
         fwd_ms * 24.0,
         fwd_slim_ms * 24.0,
         bwd_ms * 24.0,
-        bwd_slim_ms * 24.0
+        bwd_slim_ms * 24.0,
+        bwd_fold_ms * 24.0
     );
 }
 
@@ -890,12 +974,36 @@ fn bench_bwd_kernels_isolated() {
         unsafe { bld.launch(grid_1d(bt * di)) }.unwrap();
     });
 
-    // fused dB/dC reducer (tmajor)
+    // fused dB/dC reducer (tmajor) - BOTH depths: production reduces the
+    // FOLD output (di/G rows); the full-depth arm stays as the labelled
+    // legacy reference (the pre-0.6.4 ledger row was this one only).
+    use mamba_rs::mamba_ssm::gpu::launch::SCAN_BWD_DGROUP;
+    let reduce_di = (di / SCAN_BWD_DGROUP) as i32;
     let d_b_local = DtypedBuf::zeros(&ctx.stream, bt * di * ds, dtype).unwrap();
     let d_c_local = DtypedBuf::zeros(&ctx.stream, bt * di * ds, dtype).unwrap();
+    let d_b_fold = DtypedBuf::zeros(&ctx.stream, bt * (di / SCAN_BWD_DGROUP) * ds, dtype).unwrap();
+    let d_c_fold = DtypedBuf::zeros(&ctx.stream, bt * (di / SCAN_BWD_DGROUP) * ds, dtype).unwrap();
     let d_b_red = GpuBuffer::zeros(&ctx.stream, bt * ds).unwrap();
     let d_c_red = GpuBuffer::zeros(&ctx.stream, bt * ds).unwrap();
-    time_it("reduce_d_BC_tmajor", &|| {
+    time_it("reduce_d_BC_tmajor depth=192 (production)", &|| {
+        let mut bld = ctx
+            .stream
+            .launch_builder(k.ssm_reduce_d_bc_tmajor_typed.get(dtype));
+        let o1 = d_b_red.cached_ptr();
+        let o2 = d_c_red.cached_ptr();
+        let i1 = d_b_fold.cached_ptr();
+        let i2 = d_c_fold.cached_ptr();
+        bld.arg(&o1);
+        bld.arg(&o2);
+        bld.arg(&i1);
+        bld.arg(&i2);
+        bld.arg(&bi);
+        bld.arg(&ti);
+        bld.arg(&reduce_di);
+        bld.arg(&dsi);
+        unsafe { bld.launch(grid_1d(bt * ds)) }.unwrap();
+    });
+    time_it("reduce_d_BC_tmajor depth=768 (legacy)", &|| {
         let mut bld = ctx
             .stream
             .launch_builder(k.ssm_reduce_d_bc_tmajor_typed.get(dtype));
@@ -938,7 +1046,7 @@ fn bench_bwd_gemms_isolated() {
     // (label, n_in, n_out) with batch = bt for each layer GEMM.
     let shapes = [
         ("in_proj", 384usize, 1536usize),
-        ("x_proj", 768, 80),
+        ("x_proj", 768, 56),
         ("dt_proj", 24, 768),
         ("out_proj", 768, 384),
     ];

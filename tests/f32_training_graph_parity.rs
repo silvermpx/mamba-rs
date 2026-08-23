@@ -8,6 +8,8 @@
 
 #![cfg(feature = "cuda")]
 
+mod common;
+
 use mamba_rs::config::MambaConfig;
 use mamba_rs::mamba_ssm::gpu::adamw::{
     AdamWBiasFactors, GpuAdamW, build_multi_plan, m1_specs, step_m1_capturable,
@@ -277,7 +279,7 @@ fn m3_f32_training_graph_matches_eager() {
     };
     let dev = GpuDevice::new(0).unwrap();
     let ctx = GpuCtx::new(&dev).unwrap();
-    let m3k = Mamba3Kernels::compile(dev.context(), "sm_89").unwrap();
+    let m3k = Mamba3Kernels::compile(dev.context(), common::bench::arch0()).unwrap();
     let batch = 1;
     let seq_len = 64;
     let dm = cfg.d_model;

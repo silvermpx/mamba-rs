@@ -250,7 +250,7 @@ pub fn gpu_backward_mamba_layer_mixed(
         let da = scratch.d_a_log_local.cached_ptr();
 
         let use_fold = dims.scan_mode.use_parallel(t, ds)
-            && di % crate::mamba_ssm::gpu::launch::SCAN_BWD_DGROUP == 0;
+            && di.is_multiple_of(crate::mamba_ssm::gpu::launch::SCAN_BWD_DGROUP);
         if dims.scan_mode.use_parallel(t, ds) {
             // Parallel reverse-scan typed bwd (fold variant when the
             // d-group divides d_inner).
@@ -329,7 +329,8 @@ pub fn gpu_backward_mamba_layer_mixed(
         // reads the T-major locals via the tmajor twin (same values,
         // same output layout).
         let use_parallel = dims.scan_mode.use_parallel(t, ds);
-        let use_fold = use_parallel && di % crate::mamba_ssm::gpu::launch::SCAN_BWD_DGROUP == 0;
+        let use_fold =
+            use_parallel && di.is_multiple_of(crate::mamba_ssm::gpu::launch::SCAN_BWD_DGROUP);
         let reduce_bc = if use_parallel {
             k.ssm_reduce_d_bc_tmajor_typed.get(dtype)
         } else {

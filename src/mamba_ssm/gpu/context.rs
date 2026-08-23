@@ -43,6 +43,13 @@ pub struct GpuCtx {
     /// shape within a process). Ignored by the batch-invariant path, which
     /// never calls cuBLAS. Env: MAMBA_RS_FAST_GEMM.
     fast_gemm: std::cell::Cell<bool>,
+    /// TF32 SGEMM math is enabled at cublas creation; parity tests clear
+    /// it via [`Self::disable_tf32`]. Tracked so bench stamps can print
+    /// the full four-bit numeric route.
+    tf32: std::cell::Cell<bool>,
+    /// The state capacity the kernels were compiled with — part of the
+    /// numeric-route identity a bench stamp must carry.
+    state_cap: usize,
     /// Number of CUDA graphs captured on this context: the tier
     /// setters warn when flipped after a capture — the captured kernels
     /// cannot follow, and the replay-time flag assert refuses to run.
@@ -124,6 +131,8 @@ impl GpuCtx {
             batch_invariant: std::cell::Cell::new(batch_invariant),
             bi_tensor_cores: std::cell::Cell::new(bi_tensor_cores),
             fast_gemm: std::cell::Cell::new(fast_gemm),
+            tf32: std::cell::Cell::new(true),
+            state_cap,
             graphs_captured: std::cell::Cell::new(0),
             bi_upcast_scratch: [RefCell::new(None), RefCell::new(None), RefCell::new(None)],
         })
@@ -347,12 +356,23 @@ impl GpuCtx {
 
     /// Disable TF32 Tensor Cores — use full f32 SGEMM for parity tests.
     pub fn disable_tf32(&self) {
+        self.tf32.set(false);
         unsafe {
             cudarc::cublas::sys::cublasSetMathMode(
                 *self.blas.handle(),
                 cudarc::cublas::sys::cublasMath_t::CUBLAS_DEFAULT_MATH,
             );
         }
+    }
+
+    /// TF32 SGEMM math state (true until [`Self::disable_tf32`]).
+    pub fn tf32(&self) -> bool {
+        self.tf32.get()
+    }
+
+    /// The state capacity this context's kernels were compiled with.
+    pub fn state_cap(&self) -> usize {
+        self.state_cap
     }
 
     /// Pre-size the half-precision staging buffer for a known engine

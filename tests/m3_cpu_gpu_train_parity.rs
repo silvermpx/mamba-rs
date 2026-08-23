@@ -35,6 +35,8 @@
 
 #![cfg(feature = "cuda")]
 
+mod common;
+
 use mamba_rs::mamba_ssm::gpu::buffers::GpuBuffer;
 use mamba_rs::mamba_ssm::gpu::context::GpuCtx;
 use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
@@ -436,7 +438,7 @@ fn run_gpu(
     ctx.disable_tf32();
     let m3k = Mamba3Kernels::compile_with_state_cap(
         dev.context(),
-        "sm_89",
+        common::bench::arch0(),
         mamba_rs::mamba_ssm::gpu::kernels::state_capacity(scn.cfg.d_state).unwrap(),
     )
     .expect("Mamba3Kernels");

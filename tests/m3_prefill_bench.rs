@@ -128,11 +128,15 @@ fn m3_train_step_at_multichunk_shape() {
         for _ in 0..3 {
             tr.step(&input, &d_temporal).unwrap();
         }
+        tr.ctx().stream.synchronize().unwrap();
         let iters = 20usize;
         let t0 = Instant::now();
         for _ in 0..iters {
             tr.step(&input, &d_temporal).unwrap();
         }
+        // Without the sync both loops read host enqueue time, not the
+        // step wall — the device may still be several steps behind.
+        tr.ctx().stream.synchronize().unwrap();
         let dt = t0.elapsed().as_secs_f64();
         eprintln!(
             "train step {dtype:?} B={batch} T={seq_len} layers={}: {:.2} ms/step (eager)",
@@ -142,10 +146,15 @@ fn m3_train_step_at_multichunk_shape() {
         // Graph lane too — the M1 table is graph-mode; an eager-only M3
         // number was never comparable with it.
         tr.capture_graph().unwrap();
+        for _ in 0..5 {
+            tr.step(&input, &d_temporal).unwrap();
+        }
+        tr.ctx().stream.synchronize().unwrap();
         let t1 = Instant::now();
         for _ in 0..iters {
             tr.step(&input, &d_temporal).unwrap();
         }
+        tr.ctx().stream.synchronize().unwrap();
         let dt = t1.elapsed().as_secs_f64();
         eprintln!(
             "train step {dtype:?} B={batch} T={seq_len} layers={}: {:.2} ms/step (graph)",

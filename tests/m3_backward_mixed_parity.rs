@@ -17,6 +17,8 @@
 
 #![cfg(feature = "cuda")]
 
+mod common;
+
 use mamba_rs::mamba_ssm::gpu::buffers::GpuBuffer;
 use mamba_rs::mamba_ssm::gpu::context::GpuCtx;
 use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
@@ -354,7 +356,7 @@ fn check_cfg_weights(
 
     let dev = GpuDevice::new(0).unwrap();
     let ctx = GpuCtx::new(&dev).unwrap();
-    let m3k = Mamba3Kernels::compile(dev.context(), "sm_89").unwrap();
+    let m3k = Mamba3Kernels::compile(dev.context(), common::bench::arch0()).unwrap();
 
     let exec = M3Exec {
         ctx: &ctx,

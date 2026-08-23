@@ -15,6 +15,8 @@
 
 #![cfg(feature = "cuda")]
 
+mod common;
+
 use cudarc::driver::{LaunchConfig, PushKernelArg};
 use mamba_rs::mamba_ssm::gpu::buffers::{DtypedBuf, GpuBuffer};
 use mamba_rs::mamba_ssm::gpu::context::GpuCtx;
@@ -99,7 +101,7 @@ fn download_f32(ctx: &GpuCtx, buf: &GpuBuffer, n: usize) -> Vec<f32> {
 }
 
 fn make_m3k(ctx: &GpuCtx) -> Mamba3Kernels {
-    Mamba3Kernels::compile(ctx.stream.context(), "sm_89").unwrap()
+    Mamba3Kernels::compile(ctx.stream.context(), common::bench::arch0()).unwrap()
 }
 
 fn tolerances(dtype: WeightDtype) -> (f32, f32) {
@@ -563,8 +565,12 @@ fn m3_kernels_isolated_bench() {
     // Production JIT injects the 16-granular state cap; the default-64
     // helper would inflate the per-thread register arrays and overstate
     // these kernels vs the real trainer.
-    let m3k =
-        Mamba3Kernels::compile_with_state_cap(ctx.stream.context(), "sm_89", CDS.max(16)).unwrap();
+    let m3k = Mamba3Kernels::compile_with_state_cap(
+        ctx.stream.context(),
+        common::bench::arch0(),
+        CDS.max(16),
+    )
+    .unwrap();
 
     let n_q = CB * CT * CNH * CDS;
     let n_v = CB * CT * d_inner;
@@ -850,8 +856,12 @@ fn m3_dqktheta_output_hash() {
 
     let dev = GpuDevice::new(0).unwrap();
     let ctx = GpuCtx::new(&dev).unwrap();
-    let m3k =
-        Mamba3Kernels::compile_with_state_cap(ctx.stream.context(), "sm_89", CDS.max(16)).unwrap();
+    let m3k = Mamba3Kernels::compile_with_state_cap(
+        ctx.stream.context(),
+        common::bench::arch0(),
+        CDS.max(16),
+    )
+    .unwrap();
 
     let n_q = CB * CT * CNH * CDS;
     let n_th = CB * CT * CNH;
@@ -967,8 +977,12 @@ fn m3_dqkv_output_hash() {
     // Production JIT injects the 16-granular state cap; the default-64
     // helper would inflate the per-thread register arrays and overstate
     // these kernels vs the real trainer.
-    let m3k =
-        Mamba3Kernels::compile_with_state_cap(ctx.stream.context(), "sm_89", CDS.max(16)).unwrap();
+    let m3k = Mamba3Kernels::compile_with_state_cap(
+        ctx.stream.context(),
+        common::bench::arch0(),
+        CDS.max(16),
+    )
+    .unwrap();
 
     let n_q = CB * CT * CNH * CDS;
     let n_v = CB * CT * d_inner;

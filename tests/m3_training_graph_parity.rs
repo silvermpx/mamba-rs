@@ -7,6 +7,8 @@
 
 #![cfg(feature = "cuda")]
 
+mod common;
+
 use mamba_rs::mamba_ssm::gpu::adamw::{
     AdamWBiasFactors, GpuAdamW, build_multi_plan, m3_specs_mixed, step_multi,
 };
@@ -256,7 +258,7 @@ fn one_eager_step(s: &mut Setup, ctx: &GpuCtx, m3k: &Mamba3Kernels, inp: &[f32],
 fn m3_training_graph_bf16_one_step_matches_eager() {
     let dev = GpuDevice::new(0).unwrap();
     let ctx = GpuCtx::new(&dev).unwrap();
-    let m3k = Mamba3Kernels::compile(dev.context(), "sm_89").unwrap();
+    let m3k = Mamba3Kernels::compile(dev.context(), common::bench::arch0()).unwrap();
     let batch = 1;
     let seq_len = 64;
 
@@ -346,7 +348,7 @@ fn m3_training_graph_bf16_one_step_matches_eager() {
 fn m3_training_graph_bf16_multi_replay_matches_eager() {
     let dev = GpuDevice::new(0).unwrap();
     let ctx = GpuCtx::new(&dev).unwrap();
-    let m3k = Mamba3Kernels::compile(dev.context(), "sm_89").unwrap();
+    let m3k = Mamba3Kernels::compile(dev.context(), common::bench::arch0()).unwrap();
     let batch = 1;
     let seq_len = 64;
     let n_steps = 5;

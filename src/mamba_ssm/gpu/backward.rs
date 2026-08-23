@@ -140,7 +140,7 @@ pub fn gpu_backward_mamba_layer(
         let di_i = di as i32;
         let ds_i = ds as i32;
         let use_parallel = dims.scan_mode.use_parallel(t, ds);
-        let use_fold = use_parallel && di % super::launch::SCAN_BWD_DGROUP == 0;
+        let use_fold = use_parallel && di.is_multiple_of(super::launch::SCAN_BWD_DGROUP);
         let kernel = if use_fold {
             ctx.kernels
                 .ssm_parallel_bwd_fold_typed
@@ -205,7 +205,7 @@ pub fn gpu_backward_mamba_layer(
         // the sequential route keeps the historical layout + reducer.
         // Values and output layout are identical either way.
         let use_parallel = dims.scan_mode.use_parallel(t, ds);
-        let use_fold = use_parallel && di % super::launch::SCAN_BWD_DGROUP == 0;
+        let use_fold = use_parallel && di.is_multiple_of(super::launch::SCAN_BWD_DGROUP);
         let reduce_bc = if use_parallel {
             ctx.kernels
                 .ssm_reduce_d_bc_tmajor_typed

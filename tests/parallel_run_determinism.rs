@@ -13,6 +13,8 @@
 
 #![cfg(feature = "cuda")]
 
+mod common;
+
 use mamba_rs::config::{MambaConfig, ScanMode};
 use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
 use mamba_rs::mamba_ssm::gpu::forward::PARALLEL_SCAN_THRESHOLD;
@@ -163,21 +165,14 @@ fn gemm_tiers_are_distinct_numeric_routes() {
 #[test]
 #[ignore]
 fn print_run_digests() {
+    use common::bench::fnv1a_f32;
     for tier in [
         GemmTier::Cublas,
         GemmTier::BatchInvariant,
         GemmTier::BatchInvariantTc,
     ] {
         let w = run_once(4, tier);
-        // FNV-1a over the raw bits: order-sensitive, collision-safe enough
-        // for an A/B, and dependency-free.
-        let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-        for v in &w {
-            for b in v.to_bits().to_le_bytes() {
-                h ^= u64::from(b);
-                h = h.wrapping_mul(0x100_0000_01b3);
-            }
-        }
+        let h = fnv1a_f32(&w);
         println!("DIGEST {tier:?}: {h:016x} ({} weights)", w.len());
     }
 }
@@ -201,6 +196,7 @@ fn multichunk_run_to_run_bit_identical_bi() {
 #[test]
 #[ignore = "digest printer for cross-build A/B"]
 fn print_run_digests_multichunk() {
+    use common::bench::fnv1a_f32;
     for (label, t) in [("T1300(2ch)", 1300usize), ("T2100(3ch)", 2100)] {
         for tier in [
             GemmTier::Cublas,
@@ -208,11 +204,7 @@ fn print_run_digests_multichunk() {
             GemmTier::BatchInvariantTc,
         ] {
             let w = run_once_at(3, tier, t);
-            let mut h: u64 = 0xcbf29ce484222325;
-            for v in &w {
-                h ^= u64::from(v.to_bits());
-                h = h.wrapping_mul(0x100000001b3);
-            }
+            let h = fnv1a_f32(&w);
             println!("DIGEST-MC {label} {tier:?}: {h:016x} ({} weights)", w.len());
         }
     }
