@@ -188,7 +188,7 @@ Findings, in decision order:
 5. **`CUBLAS_COMPUTE_32F_EMULATED_16BFX9` (V6e) matches true-fp32
    accuracy bit-for-bit in error profile at up to ~2x the speed** on
    f32-input GEMMs. Recorded as the Class-B candidate for the f32
-   cuBLAS lane (new bit family, versioned re-route, owner decision) —
+   cuBLAS lane (new bit family, versioned re-route, pending decision) —
    see the P2.6 lane.
 6. TF32 (V6t) is the worst accuracy option at scale (mean 1.9e-4 at
    K=16384) — reaffirms keeping it opt-in only.

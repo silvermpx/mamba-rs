@@ -9,7 +9,7 @@ bug on this codebase; apply them in order.
 
 ## 1. Measure first — predictions about GPU walls are usually wrong
 
-- The research wave's top prediction (sector amplification from the
+- The pre-work analysis's top prediction (sector amplification from the
   scan tape layout) measured CAMPAIGN-NEUTRAL: L2 absorbed it. The two
   real walls (a conv sliding window living in global memory, a wrong
   env-var name silently disabling the tensor-core tier) were found only

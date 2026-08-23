@@ -102,7 +102,7 @@ sequential kernels cap per-thread state at 64). At the classifier shape
 (T=4621) the parallel scan is both ~5x faster and numerically preferable
 (~220x shorter rounding chains).
 
-GEMM tiers, per `GpuCtx` flags (see CLAUDE.md for coverage boundaries):
+GEMM tiers, per `GpuCtx` flags:
 - default: cuBLAS (TF32 for f32 sgemm, PEDANTIC f32-accumulate for typed);
 - `set_fast_gemm(true)`: typed GEMMs use non-PEDANTIC `CUBLAS_COMPUTE_32F`
   (tensor-core cuBLAS kernels; opt-in, unmeasured — see changelog);

@@ -124,7 +124,7 @@
   on a kernel no run-digest instrument covers. T_SPLIT sweep recorded:
   8 -> 4.17, 16 -> 4.02, 32 -> 6.24 ms/launch (f32); 16 wins.
 
-### Changed (campaign-shape program, second night wave)
+### Changed (campaign-shape program, second pass)
 
 - conv1d dw/db goes T-tiled: each (b, d, tap, tile) lane keeps the
   descending-t order within its tile and the ascending-row reducer
@@ -169,7 +169,7 @@
   scan kernels read it, so each (d, n) lane walks contiguous t-runs.
   The old [b][t][n] layout paid one 32-byte sector per 2-byte element
   and owned 61% of the forward scan kernel by constant-load ablation;
-  neither wave-proposed chunk geometry (256x8, 128x16) moved anything,
+  neither candidate chunk geometry (256x8, 128x16) moved anything,
   and the block scan and exp2f measured free. Pure permutation —
   identical values, all nine digest arms bit-equal. Isolated scan:
   fwd 2.646 -> 0.921 ms/layer, bwd 3.559 -> 2.227; campaign
@@ -242,12 +242,12 @@
   43.9 -> 40.2; f16 49.1; parallel-scan T64 f32 18.4.
 - Campaign shape (d384 L24 B8 T1300, batch-invariant + tensor-core
   tier — the classify trainer's stamped route): 441.4 -> 261.9
-  ms/step (night wave), then 155.4 after the day program (-65%
+  ms/step (first pass), then 155.4 after the second (-65%
   total: slim tape, NDEBUG, T-major B/C, split-M dW). The cuBLAS
   default lane sits at 169.0 at the same shape. Remaining ledger
   (x24-layer ms): scan fwd 22.1 / bwd 53.4, conv dw 13.4,
   backward GEMMs ~15, reduce_d_BC 9.6. Split: fwd 134 -> 80, bwd+opt 309 -> 182. Isolated
-  ledger after the wave: scan bwd 80, scan fwd 62, conv dw 13.4,
+  ledger after the first pass: scan bwd 80, scan fwd 62, conv dw 13.4,
   reduce_d_BC 9.6 (x24-layer ms). Note: earlier "BI+TC" campaign
   rows in this file's history measured plain BI — the tier flag is
   MAMBA_RS_BI_TENSOR_CORES.
