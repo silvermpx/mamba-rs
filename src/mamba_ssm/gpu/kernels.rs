@@ -283,6 +283,11 @@ pub struct MambaKernels {
     /// convention so the existing reduction kernels work unchanged.
     /// f32 / bf16 / f16 instantiations from one DEFINE_* macro.
     pub ssm_parallel_bwd_typed: TypedKernel,
+    /// d-group fold variant: each block folds SCAN_BWD_DGROUP d lanes'
+    /// dB/dC terms and writes one partial row per group. Used when
+    /// d_inner is divisible by the group size; f32 staging needs the
+    /// MAX_DYNAMIC_SHARED opt-in (~65 KB).
+    pub ssm_parallel_bwd_fold_typed: TypedKernel,
 
     // -- AMP loss scaler helpers --
     /// Scan an f32 grad buffer for inf/nan, atomicOr into device int.
@@ -729,6 +734,25 @@ impl MambaKernels {
                 f32: get("ssm_parallel_scan_bwd_f32")?,
                 bf16: get("ssm_parallel_scan_bwd_bf16")?,
                 f16: get("ssm_parallel_scan_bwd_f16")?,
+            },
+            ssm_parallel_bwd_fold_typed: {
+                let k = TypedKernel {
+                    f32: get("ssm_parallel_scan_bwd_fold_f32")?,
+                    bf16: get("ssm_parallel_scan_bwd_fold_bf16")?,
+                    f16: get("ssm_parallel_scan_bwd_fold_f16")?,
+                };
+                // The f32 delta/u/dy stage is ~49 KB on top of the ~16 KB
+                // f32 workspace — past the 48 KB static cap.
+                for f in [&k.f32, &k.bf16, &k.f16] {
+                    f.set_attribute(
+                        cudarc::driver::sys::CUfunction_attribute_enum::CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
+                        67_584,
+                    )
+                    .map_err(|e| {
+                        format!("set MAX_DYNAMIC_SHARED for scan_bwd_fold: {e:?}")
+                    })?;
+                }
+                k
             },
 
             // AMP loss scaler

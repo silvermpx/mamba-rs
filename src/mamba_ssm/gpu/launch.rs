@@ -171,6 +171,31 @@ pub fn grid_parallel_scan(batch: usize, d_inner: usize) -> LaunchConfig {
 /// = SMEM_TOTAL_FLOATS in mamba_ssm_parallel.cu). The typed kernels merely
 /// reinterpret the stage slots as T_ACT in place, so the byte size must
 /// always be the f32 layout size.
+/// d-group size of the fold backward — MUST mirror SCAN_BWD_DGROUP in
+/// mamba_ssm_parallel.cu.
+pub const SCAN_BWD_DGROUP: usize = 4;
+
+/// Launch config for the d-group fold backward: one block per
+/// (batch, d-group of SCAN_BWD_DGROUP lanes). Smem = the f32 workspace
+/// (warp scans, exchanges, per-group postfix/carry lanes, reduce and
+/// boundary tiles) plus the typed delta/u/dy stage.
+pub fn grid_parallel_scan_bwd_fold(
+    batch: usize,
+    d_inner: usize,
+    bytes_per_act: usize,
+) -> LaunchConfig {
+    const NWARPS: usize = SCAN_NTHREADS / 32;
+    const MAX_DSTATE: usize = 256;
+    let g = SCAN_BWD_DGROUP;
+    let f32_floats = 4 * NWARPS + 4 * SCAN_NTHREADS + 3 * g * MAX_DSTATE + 3 * SCAN_NTHREADS;
+    let stage_bytes = 3 * g * SCAN_CHUNK * bytes_per_act;
+    LaunchConfig {
+        grid_dim: (batch as u32, (d_inner / g) as u32, 1),
+        block_dim: (SCAN_NTHREADS as u32, 1, 1),
+        shared_mem_bytes: (f32_floats * std::mem::size_of::<f32>() + stage_bytes) as u32,
+    }
+}
+
 pub fn grid_parallel_scan_bwd(batch: usize, d_inner: usize) -> LaunchConfig {
     assert!(
         d_inner <= 65535,

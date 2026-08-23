@@ -143,6 +143,22 @@
   of smem+barrier rounds — identical pairing order, bit-identical
   sums, ~160 fewer barriers per block.
 - Campaign (bi+tc): 155.4 -> 142.6 ms/step with the conv dw tiling.
+- The parallel-scan backward folds dB/dC across d-groups in-kernel
+  (`ssm_parallel_scan_bwd_fold_*`, group size 4): the ungrouped kernel
+  materialized [B, ds, d_inner, T] locals whose stores alone were 57%
+  of the kernel by ablation, and the reducer read them all back. Each
+  block now owns four consecutive d lanes, folds their dB/dC terms in
+  ascending-d order in registers, and writes one partial row per
+  group - local-tensor traffic and the reducer's depth both drop 4x,
+  and B/C reads are shared across the group. The group fold is a
+  different dB/dC summation order on every tier (same release-window
+  family break; the partition is a pure function of d_inner). The
+  ungrouped kernel remains the path for d_inner not divisible by 4.
+  Final 0.6.3 digest baselines: T300 aa7de66a1d3b9c56 /
+  9e0dbf87666dcfc6 / 46ef33ac8c0a2616; T1300 31d84af8ee97c4a0 /
+  3b8de71cdd677eb8 / 85c5c30051938604; T2100 53003ceadbf3219e /
+  bde81eca3b8182c8 / ac8cd31a973be149 (Cublas / BI / BI-TC).
+  Campaign (bi+tc): 142.6 -> 131.5 ms/step.
 
 - BIT-FAMILY BREAK (batch-invariant lanes): the split-M TN partition
   drops its `n_in >= 128` floor, so small-K dW GEMMs against large

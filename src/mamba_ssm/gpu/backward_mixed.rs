@@ -249,14 +249,19 @@ pub fn gpu_backward_mamba_layer_mixed(
         let ddd = scratch.d_d_local.cached_ptr();
         let da = scratch.d_a_log_local.cached_ptr();
 
+        let use_fold = dims.scan_mode.use_parallel(t, ds)
+            && di % crate::mamba_ssm::gpu::launch::SCAN_BWD_DGROUP == 0;
         if dims.scan_mode.use_parallel(t, ds) {
-            // Parallel reverse-scan typed bwd.
+            // Parallel reverse-scan typed bwd (fold variant when the
+            // d-group divides d_inner).
             // Signature: h_saved, delta, u, B, C, a_neg, D, dy, d_delta,
             //   d_u, d_B_local, d_C_local, d_D_local, d_a_log_local,
             //   batch, T, d_inner, d_state.
-            let mut bld = ctx
-                .stream
-                .launch_builder(k.ssm_parallel_bwd_typed.get(dtype));
+            let mut bld = ctx.stream.launch_builder(if use_fold {
+                k.ssm_parallel_bwd_fold_typed.get(dtype)
+            } else {
+                k.ssm_parallel_bwd_typed.get(dtype)
+            });
             bld.arg(&h_p);
             bld.arg(&delta_p);
             bld.arg(&u_p);
@@ -278,8 +283,12 @@ pub fn gpu_backward_mamba_layer_mixed(
             let slim_i: i32 = i32::from(super::launch::scan_tape_slim());
             bld.arg(&h_p);
             bld.arg(&slim_i);
-            unsafe { bld.launch(super::launch::grid_parallel_scan_bwd(b, di)) }
-                .map_err(|e| format!("ssm_parallel_bwd_typed: {e:?}"))?;
+            let cfg = if use_fold {
+                super::launch::grid_parallel_scan_bwd_fold(b, di, dtype.size_bytes())
+            } else {
+                super::launch::grid_parallel_scan_bwd(b, di)
+            };
+            unsafe { bld.launch(cfg) }.map_err(|e| format!("ssm_parallel_bwd_typed: {e:?}"))?;
         } else {
             // Sequential typed bwd.
             let mut bld = ctx
@@ -319,10 +328,19 @@ pub fn gpu_backward_mamba_layer_mixed(
         // Fused d_B + d_C reducer — typed in → f32 out. Parallel route
         // reads the T-major locals via the tmajor twin (same values,
         // same output layout).
-        let reduce_bc = if dims.scan_mode.use_parallel(t, ds) {
+        let use_parallel = dims.scan_mode.use_parallel(t, ds);
+        let use_fold = use_parallel && di % crate::mamba_ssm::gpu::launch::SCAN_BWD_DGROUP == 0;
+        let reduce_bc = if use_parallel {
             k.ssm_reduce_d_bc_tmajor_typed.get(dtype)
         } else {
             k.ssm_reduce_d_bc_typed.get(dtype)
+        };
+        // Under the fold the locals hold one pre-summed row per d group,
+        // so the reducer's d depth is the group count.
+        let reduce_di_i = if use_fold {
+            (di / crate::mamba_ssm::gpu::launch::SCAN_BWD_DGROUP) as i32
+        } else {
+            di_i
         };
         let mut bld = ctx.stream.launch_builder(reduce_bc);
         bld.arg(scratch.d_b_reduced.inner_mut());
@@ -333,7 +351,7 @@ pub fn gpu_backward_mamba_layer_mixed(
         bld.arg(&src_c);
         bld.arg(&b_i);
         bld.arg(&t_i);
-        bld.arg(&di_i);
+        bld.arg(&reduce_di_i);
         bld.arg(&ds_i);
         unsafe { bld.launch(grid_1d(bt * ds)) }
             .map_err(|e| format!("ssm_reduce_d_BC typed: {e:?}"))?;

@@ -140,7 +140,12 @@ pub fn gpu_backward_mamba_layer(
         let di_i = di as i32;
         let ds_i = ds as i32;
         let use_parallel = dims.scan_mode.use_parallel(t, ds);
-        let kernel = if use_parallel {
+        let use_fold = use_parallel && di % super::launch::SCAN_BWD_DGROUP == 0;
+        let kernel = if use_fold {
+            ctx.kernels
+                .ssm_parallel_bwd_fold_typed
+                .get(super::dtype::WeightDtype::F32)
+        } else if use_parallel {
             ctx.kernels
                 .ssm_parallel_bwd_typed
                 .get(super::dtype::WeightDtype::F32)
@@ -175,7 +180,9 @@ pub fn gpu_backward_mamba_layer(
             builder.arg(&tape_p);
             builder.arg(&slim_i);
         }
-        let cfg = if use_parallel {
+        let cfg = if use_fold {
+            super::launch::grid_parallel_scan_bwd_fold(b, di, 4)
+        } else if use_parallel {
             super::launch::grid_parallel_scan_bwd(b, di)
         } else {
             grid_1d(b * di)
@@ -197,7 +204,9 @@ pub fn gpu_backward_mamba_layer(
         // locals T-major (the parallel-route tape layout) and takes the tmajor twin;
         // the sequential route keeps the historical layout + reducer.
         // Values and output layout are identical either way.
-        let reduce_bc = if dims.scan_mode.use_parallel(t, ds) {
+        let use_parallel = dims.scan_mode.use_parallel(t, ds);
+        let use_fold = use_parallel && di % super::launch::SCAN_BWD_DGROUP == 0;
+        let reduce_bc = if use_parallel {
             ctx.kernels
                 .ssm_reduce_d_bc_tmajor_typed
                 .get(super::dtype::WeightDtype::F32)
@@ -206,6 +215,13 @@ pub fn gpu_backward_mamba_layer(
                 .ssm_reduce_d_bc_typed
                 .get(super::dtype::WeightDtype::F32)
         };
+        // Under the fold the locals hold one pre-summed row per d group,
+        // so the reducer's d depth is the group count.
+        let reduce_di_i = if use_fold {
+            (di / super::launch::SCAN_BWD_DGROUP) as i32
+        } else {
+            di_i
+        };
         let mut builder = ctx.stream.launch_builder(reduce_bc);
         builder.arg(scratch.d_b_reduced.inner_mut());
         builder.arg(scratch.d_c_reduced.inner_mut());
@@ -213,7 +229,7 @@ pub fn gpu_backward_mamba_layer(
         builder.arg(scratch.d_c_local.inner());
         builder.arg(&b_i);
         builder.arg(&t_i);
-        builder.arg(&di_i);
+        builder.arg(&reduce_di_i);
         builder.arg(&ds_i);
         unsafe { builder.launch(grid_1d(bt * ds)) }
             .map_err(|e| format!("ssm_reduce_d_BC mamba: {:?}", e))?;

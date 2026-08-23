@@ -1579,6 +1579,423 @@ DEFINE_SSM_PARALLEL_SCAN_BWD(f32,  float,         from_f_f32)
 DEFINE_SSM_PARALLEL_SCAN_BWD(bf16, __nv_bfloat16, from_f_bf16)
 DEFINE_SSM_PARALLEL_SCAN_BWD(f16,  __half,        from_f_f16)
 
+// ============================================================================
+// Parallel reverse-scan backward, d-group fold variant.
+//
+// The plain kernel materializes d_B/d_C locals at [B, ds, di, T] - the
+// stores alone were 57% of the kernel by ablation, plus the reducer
+// reads it all back. This variant gives each block SCAN_BWD_DGROUP
+// consecutive d lanes: per (n, i) it folds the group's dB/dC terms in
+// ascending-d order into registers and writes ONE partial row per
+// group, shrinking the local tensors and the reducer's depth by
+// SCAN_BWD_DGROUP. B/C are read once per (n, chunk) per block, so
+// their traffic also drops by the group factor. The d-fold grouping
+// is a different dB/dC summation order than the ungrouped kernel
+// (deliberate; the partition is a pure function of d_inner). The
+// launcher uses this kernel only when d_inner % SCAN_BWD_DGROUP == 0;
+// the ungrouped kernel stays as the general-shape path.
+// ============================================================================
+#define SCAN_BWD_DGROUP 4
+
+#define DEFINE_SSM_PARALLEL_SCAN_BWD_FOLD(SUFFIX, T_ACT, FROM_F)              \
+extern "C" __global__ __launch_bounds__(NTHREADS, 3) void                     \
+ssm_parallel_scan_bwd_fold_##SUFFIX(                                          \
+    const float* __restrict__ h_saved,                                        \
+    const T_ACT* __restrict__ delta,                                          \
+    const T_ACT* __restrict__ u,                                              \
+    const T_ACT* __restrict__ B_in,                                           \
+    const T_ACT* __restrict__ C_in,                                           \
+    const float* __restrict__ a_neg,                                          \
+    const float* __restrict__ D,                                              \
+    const T_ACT* __restrict__ dy,                                             \
+    T_ACT* __restrict__ d_delta,                                              \
+    T_ACT* __restrict__ d_u,                                                  \
+    T_ACT* __restrict__ d_B_local, /* [B, ds, di/G, T] group partials */      \
+    T_ACT* __restrict__ d_C_local, /* [B, ds, di/G, T] group partials */      \
+    float* __restrict__ d_D_local,                                            \
+    float* __restrict__ d_a_log_local,                                        \
+    int batch, int T, int d_inner, int d_state,                               \
+    const float* run_tape,                                                    \
+    int slim_tape                                                             \
+) {                                                                           \
+    const int G = SCAN_BWD_DGROUP;                                            \
+    int bid = blockIdx.x;                                                     \
+    int gid = blockIdx.y; /* d group */                                       \
+    int did0 = gid * G;                                                       \
+    if (bid >= batch || did0 >= d_inner) return;                              \
+    if (d_state > MAX_DSTATE) return;                                         \
+    int n_groups = d_inner / G;                                               \
+    extern __shared__ float smem[];                                           \
+    /* Layout: rev warp scan (2*NWARPS), fwd-replay warp scan            \
+       (2*NWARPS), exch (2*NTHREADS), fexch (2*NTHREADS), post           \
+       (2*G*MAX_DSTATE), chunk_first_a (G*MAX_DSTATE), next_a            \
+       (NTHREADS), da_red (NTHREADS), hbound (NTHREADS), then the        \
+       typed delta/u/dy stage (3*G*CHUNK_SIZE T_ACT slots). */           \
+    float *smem_rev_wa = smem;                                                \
+    float *smem_rev_wb = smem_rev_wa + NWARPS;                                \
+    float *smem_fwd_wa = smem_rev_wb + NWARPS;                                \
+    float *smem_fwd_wb = smem_fwd_wa + NWARPS;                                \
+    float *smem_exch_a = smem_fwd_wb + NWARPS;                                \
+    float *smem_exch_b = smem_exch_a + NTHREADS;                              \
+    float *smem_fexch_a = smem_exch_b + NTHREADS;                             \
+    float *smem_fexch_b = smem_fexch_a + NTHREADS;                            \
+    float *smem_post_a = smem_fexch_b + NTHREADS;                             \
+    float *smem_post_b = smem_post_a + SCAN_BWD_DGROUP * MAX_DSTATE;          \
+    float *smem_chunk_first_a = smem_post_b + SCAN_BWD_DGROUP * MAX_DSTATE;   \
+    float *smem_next_a = smem_chunk_first_a + SCAN_BWD_DGROUP * MAX_DSTATE;   \
+    float *smem_da_red = smem_next_a + NTHREADS;                              \
+    float *smem_hbound = smem_da_red + NTHREADS;                              \
+    T_ACT *smem_dio = (T_ACT *)(smem_hbound + NTHREADS);                      \
+    T_ACT *stage_delta = smem_dio;                                            \
+    T_ACT *stage_u = stage_delta + SCAN_BWD_DGROUP * CHUNK_SIZE;              \
+    T_ACT *stage_dy = stage_u + SCAN_BWD_DGROUP * CHUNK_SIZE;                 \
+    unsigned warp_mask = 0xFFFFFFFFu;                                         \
+    for (int gg = 0; gg < G; gg++) {                                          \
+        for (int n = threadIdx.x; n < d_state; n += NTHREADS) {               \
+            smem_post_a[gg * MAX_DSTATE + n] = 1.0f;                          \
+            smem_post_b[gg * MAX_DSTATE + n] = 0.0f;                          \
+            smem_chunk_first_a[gg * MAX_DSTATE + n] = 1.0f;                   \
+        }                                                                     \
+    }                                                                         \
+    __syncthreads();                                                          \
+    float local_d_D[SCAN_BWD_DGROUP];                                         \
+    _Pragma("unroll")                                                         \
+    for (int gg = 0; gg < G; gg++) local_d_D[gg] = 0.0f;                      \
+    int n_chunks = (T + CHUNK_SIZE - 1) / CHUNK_SIZE;                         \
+    for (int chunk_loop = 0; chunk_loop < n_chunks; chunk_loop++) {           \
+        int chunk = n_chunks - 1 - chunk_loop;                                \
+        int chunk_start = chunk * CHUNK_SIZE;                                 \
+        /* Stage the group's delta/u/dy rows once per chunk. */               \
+        _Pragma("unroll")                                                     \
+        for (int gg = 0; gg < G; gg++) {                                      \
+            int did = did0 + gg;                                              \
+            for (int s = threadIdx.x; s < CHUNK_SIZE; s += NTHREADS) {        \
+                int t = chunk_start + s;                                      \
+                int gt = (bid * T + t) * d_inner + did;                       \
+                stage_delta[gg * CHUNK_SIZE + s] =                            \
+                    (t < T) ? delta[gt] : FROM_F(0.0f);                       \
+                stage_u[gg * CHUNK_SIZE + s] =                                \
+                    (t < T) ? u[gt] : FROM_F(0.0f);                           \
+                stage_dy[gg * CHUNK_SIZE + s] =                               \
+                    (t < T) ? dy[gt] : FROM_F(0.0f);                          \
+            }                                                                 \
+        }                                                                     \
+        __syncthreads();                                                      \
+        float d_u_acc[SCAN_BWD_DGROUP][NITEMS];                               \
+        float d_delta_acc[SCAN_BWD_DGROUP][NITEMS];                           \
+        _Pragma("unroll")                                                     \
+        for (int gg = 0; gg < G; gg++) {                                      \
+            _Pragma("unroll")                                                 \
+            for (int i = 0; i < NITEMS; i++) {                                \
+                int t = chunk_start + threadIdx.x * NITEMS + i;               \
+                float dyv = to_f(stage_dy[gg * CHUNK_SIZE +                   \
+                                          threadIdx.x * NITEMS + i]);         \
+                float uv = to_f(stage_u[gg * CHUNK_SIZE +                     \
+                                        threadIdx.x * NITEMS + i]);           \
+                if (t < T) {                                                  \
+                    local_d_D[gg] += dyv * uv;                                \
+                    d_u_acc[gg][i] = dyv * D[did0 + gg];                      \
+                } else {                                                      \
+                    d_u_acc[gg][i] = 0.0f;                                    \
+                }                                                             \
+                d_delta_acc[gg][i] = 0.0f;                                    \
+            }                                                                 \
+        }                                                                     \
+        for (int n = 0; n < d_state; n++) {                                   \
+            float b_vals[NITEMS];                                             \
+            _Pragma("unroll")                                                 \
+            for (int i = 0; i < NITEMS; i++) {                                \
+                int t = chunk_start + threadIdx.x * NITEMS + i;               \
+                b_vals[i] = (t < T)                                           \
+                    ? to_f(B_in[(bid * d_state + n) * T + t])                 \
+                    : 0.0f;                                                   \
+            }                                                                 \
+            float c_vals[NITEMS];                                             \
+            _Pragma("unroll")                                                 \
+            for (int i = 0; i < NITEMS; i++) {                                \
+                int t = chunk_start + threadIdx.x * NITEMS + i;               \
+                c_vals[i] = (t < T)                                           \
+                    ? to_f(C_in[(bid * d_state + n) * T + t])                 \
+                    : 0.0f;                                                   \
+            }                                                                 \
+            float acc_B[NITEMS];                                              \
+            float acc_C[NITEMS];                                              \
+            _Pragma("unroll")                                                 \
+            for (int i = 0; i < NITEMS; i++) {                                \
+                acc_B[i] = 0.0f;                                              \
+                acc_C[i] = 0.0f;                                              \
+            }                                                                 \
+            for (int gg = 0; gg < G; gg++) {                                  \
+                int did = did0 + gg;                                          \
+                float a_dn = a_neg[did * d_state + n];                        \
+                float a_dn_log2 = a_dn * LOG2E;                               \
+                float delta_vals[NITEMS];                                     \
+                float u_vals[NITEMS];                                         \
+                float dy_vals[NITEMS];                                        \
+                _Pragma("unroll")                                             \
+                for (int i = 0; i < NITEMS; i++) {                            \
+                    int s = threadIdx.x * NITEMS + i;                         \
+                    delta_vals[i] = to_f(stage_delta[gg * CHUNK_SIZE + s]);   \
+                    u_vals[i] = to_f(stage_u[gg * CHUNK_SIZE + s]);           \
+                    dy_vals[i] = to_f(stage_dy[gg * CHUNK_SIZE + s]);         \
+                }                                                             \
+                float da_vals[NITEMS];                                        \
+                float d_local[NITEMS];                                        \
+                _Pragma("unroll")                                             \
+                for (int i = 0; i < NITEMS; i++) {                            \
+                    int t = chunk_start + threadIdx.x * NITEMS + i;           \
+                    if (t < T) {                                              \
+                        da_vals[i] = exp2f(delta_vals[i] * a_dn_log2);        \
+                        d_local[i] = dy_vals[i] * c_vals[i];                  \
+                    } else {                                                  \
+                        da_vals[i] = 1.0f;                                    \
+                        d_local[i] = 0.0f;                                    \
+                    }                                                         \
+                }                                                             \
+                /* Slim-tape replay (see the ungrouped kernel). */            \
+                float H_vals[NITEMS];                                         \
+                float h_prev_boundary = 0.0f;                                 \
+                int hsave_row = (bid * d_inner + did) * d_state;              \
+                if (slim_tape) {                                              \
+                    int row = (hsave_row + n) * 3 * n_chunks;                 \
+                    float f_run_a = run_tape[row + 3 * chunk + 0];            \
+                    float f_run_b = run_tape[row + 3 * chunk + 1];            \
+                    float f_hentry = run_tape[row + 3 * chunk + 2];           \
+                    float f_h0 = run_tape[row + 2];                           \
+                    float fwd_a[NITEMS];                                      \
+                    float fwd_b[NITEMS];                                      \
+                    _Pragma("unroll")                                         \
+                    for (int i = 0; i < NITEMS; i++) {                        \
+                        int t = chunk_start + threadIdx.x * NITEMS + i;       \
+                        if (t < T) {                                          \
+                            fwd_a[i] = da_vals[i];                            \
+                            fwd_b[i] =                                        \
+                                (delta_vals[i] * u_vals[i]) * b_vals[i];      \
+                        } else {                                              \
+                            fwd_a[i] = 1.0f;                                  \
+                            fwd_b[i] = 0.0f;                                  \
+                        }                                                     \
+                    }                                                         \
+                    _Pragma("unroll")                                         \
+                    for (int i = 1; i < NITEMS; i++) {                        \
+                        fwd_b[i] = fwd_a[i] * fwd_b[i - 1] + fwd_b[i];        \
+                        fwd_a[i] = fwd_a[i] * fwd_a[i - 1];                   \
+                    }                                                         \
+                    float fscan_a = fwd_a[NITEMS - 1];                        \
+                    float fscan_b = fwd_b[NITEMS - 1];                        \
+                    __syncthreads();                                          \
+                    block_inclusive_scan_ab(                                  \
+                        fscan_a, fscan_b, smem_fwd_wa, smem_fwd_wb);          \
+                    __syncthreads();                                          \
+                    smem_fexch_a[threadIdx.x] = fscan_a;                      \
+                    smem_fexch_b[threadIdx.x] = fscan_b;                      \
+                    __syncthreads();                                          \
+                    float fexcl_a, fexcl_b;                                   \
+                    if (threadIdx.x == 0) {                                   \
+                        fexcl_a = 1.0f;                                       \
+                        fexcl_b = 0.0f;                                       \
+                    } else {                                                  \
+                        fexcl_a = smem_fexch_a[threadIdx.x - 1];              \
+                        fexcl_b = smem_fexch_b[threadIdx.x - 1];              \
+                    }                                                         \
+                    _Pragma("unroll")                                         \
+                    for (int i = 0; i < NITEMS; i++) {                        \
+                        float comp_a = fwd_a[i] * fexcl_a;                    \
+                        float comp_b = fwd_a[i] * fexcl_b + fwd_b[i];         \
+                        float final_a = comp_a * f_run_a;                     \
+                        float final_b = comp_a * f_run_b + comp_b;            \
+                        H_vals[i] = final_a * f_h0 + final_b;                 \
+                    }                                                         \
+                    smem_hbound[threadIdx.x] = H_vals[NITEMS - 1];            \
+                    __syncthreads();                                          \
+                    h_prev_boundary = (threadIdx.x == 0)                      \
+                        ? f_hentry                                            \
+                        : smem_hbound[threadIdx.x - 1];                       \
+                    __syncthreads();                                          \
+                }                                                             \
+                smem_next_a[threadIdx.x] = da_vals[0];                        \
+                __syncthreads();                                              \
+                float thread_a[NITEMS];                                       \
+                float thread_b[NITEMS];                                       \
+                for (int i = 0; i < NITEMS - 1; i++) {                        \
+                    thread_a[i] = da_vals[i + 1];                             \
+                    thread_b[i] = d_local[i];                                 \
+                }                                                             \
+                float boundary_next_a;                                        \
+                if ((int)threadIdx.x < NTHREADS - 1) {                        \
+                    boundary_next_a = smem_next_a[threadIdx.x + 1];           \
+                } else {                                                      \
+                    boundary_next_a =                                         \
+                        smem_chunk_first_a[gg * MAX_DSTATE + n];              \
+                }                                                             \
+                thread_a[NITEMS - 1] = boundary_next_a;                       \
+                thread_b[NITEMS - 1] = d_local[NITEMS - 1];                   \
+                __syncthreads();                                              \
+                _Pragma("unroll")                                             \
+                for (int i = 0; i < NITEMS; i++) {                            \
+                    int t = chunk_start + threadIdx.x * NITEMS + i;           \
+                    if (t >= T) {                                             \
+                        thread_a[i] = 1.0f;                                   \
+                        thread_b[i] = 0.0f;                                   \
+                    }                                                         \
+                }                                                             \
+                for (int i = NITEMS - 2; i >= 0; i--) {                       \
+                    thread_b[i] = thread_a[i] * thread_b[i + 1] +             \
+                                  thread_b[i];                                \
+                    thread_a[i] = thread_a[i] * thread_a[i + 1];              \
+                }                                                             \
+                float scan_a = thread_a[0];                                   \
+                float scan_b = thread_b[0];                                   \
+                block_inclusive_reverse_scan_ab(                              \
+                    scan_a, scan_b, smem_rev_wa, smem_rev_wb);                \
+                __syncthreads();                                              \
+                smem_exch_a[threadIdx.x] = scan_a;                            \
+                smem_exch_b[threadIdx.x] = scan_b;                            \
+                __syncthreads();                                              \
+                float next_a, next_b;                                         \
+                if ((int)threadIdx.x < NTHREADS - 1) {                        \
+                    next_a = smem_exch_a[threadIdx.x + 1];                    \
+                    next_b = smem_exch_b[threadIdx.x + 1];                    \
+                } else {                                                      \
+                    next_a = 1.0f;                                            \
+                    next_b = 0.0f;                                            \
+                }                                                             \
+                float run_a = smem_post_a[gg * MAX_DSTATE + n];               \
+                float run_b = smem_post_b[gg * MAX_DSTATE + n];               \
+                __syncthreads();                                              \
+                if (threadIdx.x == 0) {                                       \
+                    float chunk_a = scan_a;                                   \
+                    float chunk_b = scan_b;                                   \
+                    smem_post_a[gg * MAX_DSTATE + n] = chunk_a * run_a;       \
+                    smem_post_b[gg * MAX_DSTATE + n] =                        \
+                        chunk_a * run_b + chunk_b;                            \
+                }                                                             \
+                __syncthreads();                                              \
+                float post_a = next_a * run_a;                                \
+                float post_b = next_a * run_b + next_b;                       \
+                float d_a_acc = 0.0f;                                         \
+                _Pragma("unroll")                                             \
+                for (int i = 0; i < NITEMS; i++) {                            \
+                    int t = chunk_start + threadIdx.x * NITEMS + i;           \
+                    if (t >= T) continue;                                     \
+                    float dh = thread_a[i] * post_b + thread_b[i];            \
+                    float h_curr, h_prev;                                     \
+                    if (slim_tape) {                                          \
+                        h_curr = H_vals[i];                                   \
+                        h_prev =                                              \
+                            (i > 0) ? H_vals[i - 1] : h_prev_boundary;        \
+                    } else {                                                  \
+                        int h_row = (hsave_row + n) * (T + 1);                \
+                        h_curr = h_saved[h_row + (t + 1)];                    \
+                        h_prev = h_saved[h_row + t];                          \
+                    }                                                         \
+                    /* ascending-g fold replaces the per-d store */           \
+                    acc_C[i] += dy_vals[i] * h_curr;                          \
+                    acc_B[i] += dh * delta_vals[i] * u_vals[i];               \
+                    d_delta_acc[gg][i] += dh * (a_dn * da_vals[i] * h_prev    \
+                                                + u_vals[i] * b_vals[i]);     \
+                    d_u_acc[gg][i] += dh * delta_vals[i] * b_vals[i];         \
+                    d_a_acc += dh * da_vals[i] * delta_vals[i] * a_dn *       \
+                               h_prev;                                        \
+                }                                                             \
+                smem_da_red[threadIdx.x] = d_a_acc;                           \
+                __syncthreads();                                              \
+                for (int stride = NTHREADS / 2; stride >= 32; stride >>= 1) { \
+                    if ((int)threadIdx.x < stride) {                          \
+                        smem_da_red[threadIdx.x] +=                           \
+                            smem_da_red[threadIdx.x + stride];                \
+                    }                                                         \
+                    __syncthreads();                                          \
+                }                                                             \
+                float da_warp = 0.0f;                                         \
+                if (threadIdx.x < 32) {                                       \
+                    da_warp = smem_da_red[threadIdx.x];                       \
+                    for (int off = 16; off > 0; off >>= 1)                    \
+                        da_warp += __shfl_down_sync(warp_mask, da_warp,       \
+                                                    off);                     \
+                }                                                             \
+                if (threadIdx.x == 0) {                                       \
+                    d_a_log_local[(bid * d_inner + did) * d_state + n]        \
+                        += da_warp;                                           \
+                    smem_chunk_first_a[gg * MAX_DSTATE + n] =                 \
+                        smem_next_a[0];                                       \
+                }                                                             \
+                __syncthreads();                                              \
+            }                                                                 \
+            /* One partial row per (n, group): [b][n][group][t]. */           \
+            _Pragma("unroll")                                                 \
+            for (int i = 0; i < NITEMS; i++) {                                \
+                int t = chunk_start + threadIdx.x * NITEMS + i;               \
+                if (t >= T) continue;                                         \
+                int btgn = ((bid * d_state + n) * (d_inner / G) + gid) * T    \
+                           + t;                                               \
+                d_B_local[btgn] = FROM_F(acc_B[i]);                           \
+                d_C_local[btgn] = FROM_F(acc_C[i]);                           \
+            }                                                                 \
+        }                                                                     \
+        /* d_delta / d_u stores per group lane, staged like the           \
+           ungrouped kernel. */                                               \
+        _Pragma("unroll")                                                     \
+        for (int gg = 0; gg < G; gg++) {                                      \
+            int did = did0 + gg;                                              \
+            __syncthreads();                                                  \
+            _Pragma("unroll")                                                 \
+            for (int i = 0; i < NITEMS; i++) {                                \
+                stage_delta[threadIdx.x * NITEMS + i] =                       \
+                    FROM_F(d_delta_acc[gg][i]);                               \
+            }                                                                 \
+            __syncthreads();                                                  \
+            for (int s = threadIdx.x; s < CHUNK_SIZE; s += NTHREADS) {        \
+                int t = chunk_start + s;                                      \
+                if (t < T) {                                                  \
+                    d_delta[(bid * T + t) * d_inner + did] =                  \
+                        stage_delta[s];                                       \
+                }                                                             \
+            }                                                                 \
+            __syncthreads();                                                  \
+            _Pragma("unroll")                                                 \
+            for (int i = 0; i < NITEMS; i++) {                                \
+                stage_delta[threadIdx.x * NITEMS + i] =                       \
+                    FROM_F(d_u_acc[gg][i]);                                   \
+            }                                                                 \
+            __syncthreads();                                                  \
+            for (int s = threadIdx.x; s < CHUNK_SIZE; s += NTHREADS) {        \
+                int t = chunk_start + s;                                      \
+                if (t < T) {                                                  \
+                    d_u[(bid * T + t) * d_inner + did] = stage_delta[s];      \
+                }                                                             \
+            }                                                                 \
+        }                                                                     \
+        __syncthreads();                                                      \
+    }                                                                         \
+    _Pragma("unroll")                                                         \
+    for (int gg = 0; gg < G; gg++) {                                          \
+        smem_da_red[threadIdx.x] = local_d_D[gg];                             \
+        __syncthreads();                                                      \
+        for (int stride = NTHREADS / 2; stride >= 32; stride >>= 1) {         \
+            if ((int)threadIdx.x < stride) {                                  \
+                smem_da_red[threadIdx.x] +=                                   \
+                    smem_da_red[threadIdx.x + stride];                        \
+            }                                                                 \
+            __syncthreads();                                                  \
+        }                                                                     \
+        if (threadIdx.x < 32) {                                               \
+            float dd_warp = smem_da_red[threadIdx.x];                         \
+            for (int off = 16; off > 0; off >>= 1)                            \
+                dd_warp += __shfl_down_sync(warp_mask, dd_warp, off);         \
+            if (threadIdx.x == 0) {                                           \
+                d_D_local[bid * d_inner + did0 + gg] = dd_warp;               \
+            }                                                                 \
+        }                                                                     \
+        __syncthreads();                                                      \
+    }                                                                         \
+}
+
+DEFINE_SSM_PARALLEL_SCAN_BWD_FOLD(f32,  float,         from_f_f32)
+DEFINE_SSM_PARALLEL_SCAN_BWD_FOLD(bf16, __nv_bfloat16, from_f_bf16)
+DEFINE_SSM_PARALLEL_SCAN_BWD_FOLD(f16,  __half,        from_f_f16)
+
+
 // Clean up macros to avoid polluting subsequent translation units
 // (all .cu files are concatenated before NVRTC compilation)
 #undef NTHREADS
@@ -1608,3 +2025,5 @@ DEFINE_SSM_PARALLEL_SCAN_BWD(f16,  __half,        from_f_f16)
 #undef DEFINE_SSM_PARALLEL_SCAN_FWD
 #undef DEFINE_SSM_PARALLEL_SCAN_FWD_NOSAVE
 #undef DEFINE_SSM_PARALLEL_SCAN_BWD
+#undef DEFINE_SSM_PARALLEL_SCAN_BWD_FOLD
+#undef SCAN_BWD_DGROUP
