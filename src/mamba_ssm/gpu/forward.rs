@@ -563,11 +563,23 @@ pub fn gpu_forward_mamba_layer(
         let ds_i = ds as i32;
         let b_offset = dt_rank as i32;
         let c_offset = (dt_rank + ds) as i32;
-        let mut builder = ctx.stream.launch_builder(&ctx.kernels.gather_bc_cols);
+        // Parallel route gathers T-major so the scan's per-(d, n) lane
+        // reads contiguous t-runs; identical values either way.
+        let tmajor = dims.scan_mode.use_parallel(t, ds);
+        let kernel = if tmajor {
+            &ctx.kernels.gather_bc_cols_tmajor
+        } else {
+            &ctx.kernels.gather_bc_cols
+        };
+        let t_i = t as i32;
+        let mut builder = ctx.stream.launch_builder(kernel);
         builder.arg(scratch.d_b_reduced.inner_mut());
         builder.arg(scratch.d_c_reduced.inner_mut());
         builder.arg(acts.xdbl.inner());
         builder.arg(&bt_i);
+        if tmajor {
+            builder.arg(&t_i);
+        }
         builder.arg(&xdbl_i);
         builder.arg(&ds_i);
         builder.arg(&b_offset);
@@ -1007,12 +1019,22 @@ pub fn gpu_forward_mamba_target_burnin(
             let ds_i = ds as i32;
             let b_offset = dt_rank as i32;
             let c_offset = (dt_rank + ds) as i32;
-            // Fused gather B+C from xdbl (saves 1 kernel launch)
-            let mut builder = ctx.stream.launch_builder(&ctx.kernels.gather_bc_cols);
+            // Fused gather B+C from xdbl; T-major on the parallel route.
+            let tmajor = dims.scan_mode.use_parallel(t, ds);
+            let kernel = if tmajor {
+                &ctx.kernels.gather_bc_cols_tmajor
+            } else {
+                &ctx.kernels.gather_bc_cols
+            };
+            let t_i = t as i32;
+            let mut builder = ctx.stream.launch_builder(kernel);
             builder.arg(scratch.b_gathered.inner_mut());
             builder.arg(scratch.c_gathered.inner_mut());
             builder.arg(scratch.xdbl.inner());
             builder.arg(&bt_i);
+            if tmajor {
+                builder.arg(&t_i);
+            }
             builder.arg(&xdbl_i);
             builder.arg(&ds_i);
             builder.arg(&b_offset);

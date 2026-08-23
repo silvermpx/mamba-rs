@@ -492,11 +492,22 @@ fn prefill_body<W: MambaWeightsView>(
             let ds_i = ds as i32;
             let b_offset = dt_rank as i32;
             let c_offset = (dt_rank + ds) as i32;
-            let mut builder = ctx.stream.launch_builder(&ctx.kernels.gather_bc_cols);
+            // Parallel route gathers T-major (matches the scan kernels).
+            let tmajor = dims.scan_mode.use_parallel(t, ds);
+            let kernel = if tmajor {
+                &ctx.kernels.gather_bc_cols_tmajor
+            } else {
+                &ctx.kernels.gather_bc_cols
+            };
+            let t_i = t as i32;
+            let mut builder = ctx.stream.launch_builder(kernel);
             builder.arg(scratch.b_gathered.inner_mut());
             builder.arg(scratch.c_gathered.inner_mut());
             builder.arg(scratch.xdbl.inner());
             builder.arg(&bt_i);
+            if tmajor {
+                builder.arg(&t_i);
+            }
             builder.arg(&xdbl_i);
             builder.arg(&ds_i);
             builder.arg(&b_offset);
@@ -876,7 +887,15 @@ pub fn gpu_forward_inference_prefill_mixed<W: MambaWeightsView>(
             let ds_i = ds as i32;
             let b_offset = dt_rank as i32;
             let c_offset = (dt_rank + ds) as i32;
-            let mut bld = ctx.stream.launch_builder(k.gather_bc_cols_typed.get(dt));
+            // Parallel route gathers T-major (matches the scan kernels).
+            let tmajor = dims.scan_mode.use_parallel(t, ds);
+            let kernel = if tmajor {
+                k.gather_bc_cols_tmajor_typed.get(dt)
+            } else {
+                k.gather_bc_cols_typed.get(dt)
+            };
+            let tm_i = t as i32;
+            let mut bld = ctx.stream.launch_builder(kernel);
             let bb_ptr = scratch.b_gathered.cached_ptr();
             let cb_ptr = scratch.c_gathered.cached_ptr();
             let xdbl_ptr = scratch.xdbl.cached_ptr();
@@ -884,6 +903,9 @@ pub fn gpu_forward_inference_prefill_mixed<W: MambaWeightsView>(
             bld.arg(&cb_ptr);
             bld.arg(&xdbl_ptr);
             bld.arg(&bt_i);
+            if tmajor {
+                bld.arg(&tm_i);
+            }
             bld.arg(&xdbl_i);
             bld.arg(&ds_i);
             bld.arg(&b_offset);

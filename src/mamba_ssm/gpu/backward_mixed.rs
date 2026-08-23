@@ -189,7 +189,15 @@ pub fn gpu_backward_mamba_layer_mixed(
         let ds_i = ds as i32;
         let b_off = dt_rank as i32;
         let c_off = (dt_rank + ds) as i32;
-        let mut bld = ctx.stream.launch_builder(k.gather_bc_cols_typed.get(dtype));
+        // Parallel route gathers T-major (see the f32 twin note).
+        let tmajor = dims.scan_mode.use_parallel(t, ds);
+        let kernel = if tmajor {
+            k.gather_bc_cols_tmajor_typed.get(dtype)
+        } else {
+            k.gather_bc_cols_typed.get(dtype)
+        };
+        let t_i = t as i32;
+        let mut bld = ctx.stream.launch_builder(kernel);
         let bb = scratch.b_buf.cached_ptr();
         let cb = scratch.c_buf.cached_ptr();
         let xd = acts.xdbl.cached_ptr();
@@ -197,6 +205,9 @@ pub fn gpu_backward_mamba_layer_mixed(
         bld.arg(&cb);
         bld.arg(&xd);
         bld.arg(&bt_i);
+        if tmajor {
+            bld.arg(&t_i);
+        }
         bld.arg(&xdbl_i);
         bld.arg(&ds_i);
         bld.arg(&b_off);

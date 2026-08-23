@@ -248,14 +248,28 @@ fn run_seq_f32(ctx: &GpuCtx, k: &MambaKernels, inp: &BwdInputs) -> BwdOuts {
     )
 }
 
+/// [b][t][n] -> [b][n][t] for the parallel kernels' T-major B/C reads
+/// (the production gather writes this layout on the parallel route).
+fn bc_to_tmajor(src: &[f32], b: usize, t: usize, ds: usize) -> Vec<f32> {
+    let mut out = vec![0.0f32; src.len()];
+    for bb in 0..b {
+        for tt in 0..t {
+            for n in 0..ds {
+                out[(bb * ds + n) * t + tt] = src[(bb * t + tt) * ds + n];
+            }
+        }
+    }
+    out
+}
+
 fn run_par_typed(ctx: &GpuCtx, k: &MambaKernels, inp: &BwdInputs, dtype: WeightDtype) -> BwdOuts {
     let (b, t, di, ds) = (inp.b, inp.t, inp.di, inp.ds);
     let h_tmajor = h_to_tmajor(&inp.h_saved, inp.b, inp.t, inp.di, inp.ds);
     let h_saved = upload_f32(ctx, &h_tmajor);
     let delta = upload_typed(ctx, &inp.delta, dtype);
     let u = upload_typed(ctx, &inp.u, dtype);
-    let b_buf = upload_typed(ctx, &inp.b_buf, dtype);
-    let c_buf = upload_typed(ctx, &inp.c_buf, dtype);
+    let b_buf = upload_typed(ctx, &bc_to_tmajor(&inp.b_buf, b, t, ds), dtype);
+    let c_buf = upload_typed(ctx, &bc_to_tmajor(&inp.c_buf, b, t, ds), dtype);
     let a_neg = upload_f32(ctx, &inp.a_neg);
     let d_param = upload_f32(ctx, &inp.d_param);
     let dy = upload_typed(ctx, &inp.dy, dtype);

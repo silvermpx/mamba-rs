@@ -316,6 +316,26 @@ extern "C" __global__ void gather_bc_cols(
     dst_c[b * ds + d] = src[row + c_offset + d];
 }
 
+// T-major twin of gather_bc_cols: dst[b][n][t] instead of [b][t][n].
+// The parallel scan reads B/C per (d, n) lane over consecutive t; the
+// [t][n] layout paid one 32-byte sector per element (61% of the fwd
+// kernel by ablation). Pure permutation - identical values.
+extern "C" __global__ void gather_bc_cols_tmajor(
+    float* dst_b, float* dst_c, const float* src,
+    int bt_total, int T, int src_stride, int ds, int b_offset, int c_offset
+) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int total = bt_total * ds;
+    if (idx >= total) return;
+    int bt = idx / ds;
+    int d = idx % ds;
+    int b = bt / T;
+    int t = bt % T;
+    int row = bt * src_stride;
+    dst_b[(b * ds + d) * T + t] = src[row + b_offset + d];
+    dst_c[(b * ds + d) * T + t] = src[row + c_offset + d];
+}
+
 extern "C" __global__ void softplus_copy(
     float* dst, const float* src, int n
 ) {
@@ -424,6 +444,27 @@ extern "C" __global__ void gather_bc_cols_##SUFFIX(                           \
 DEFINE_GATHER_BC(f32,  float)
 DEFINE_GATHER_BC(bf16, __nv_bfloat16)
 DEFINE_GATHER_BC(f16,  __half)
+
+#define DEFINE_GATHER_BC_TMAJOR(SUFFIX, T_ACT)                                \
+extern "C" __global__ void gather_bc_cols_tmajor_##SUFFIX(                    \
+    T_ACT* dst_b, T_ACT* dst_c, const T_ACT* src,                             \
+    int bt_total, int T, int src_stride, int ds, int b_offset, int c_offset   \
+) {                                                                           \
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;                          \
+    int total = bt_total * ds;                                                \
+    if (idx >= total) return;                                                 \
+    int bt = idx / ds;                                                        \
+    int d = idx % ds;                                                         \
+    int b = bt / T;                                                           \
+    int t = bt % T;                                                           \
+    int row = bt * src_stride;                                                \
+    dst_b[(b * ds + d) * T + t] = src[row + b_offset + d];                    \
+    dst_c[(b * ds + d) * T + t] = src[row + c_offset + d];                    \
+}
+
+DEFINE_GATHER_BC_TMAJOR(f32,  float)
+DEFINE_GATHER_BC_TMAJOR(bf16, __nv_bfloat16)
+DEFINE_GATHER_BC_TMAJOR(f16,  __half)
 
 #define DEFINE_SPLIT_GATE_SILU(SUFFIX, T, FROM_F)                             \
 extern "C" __global__ void split_gate_silu_##SUFFIX(                          \

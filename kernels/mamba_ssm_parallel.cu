@@ -45,6 +45,13 @@
 #define NITEMS   8
 #define CHUNK_SIZE (NTHREADS * NITEMS)
 #define NWARPS   (NTHREADS / 32)
+// Resident-block pin scales with the block size (128 -> 3 keeps the
+// historical codegen envelope; 256 -> 2 keeps ~128 regs/thread).
+#if NTHREADS >= 256
+#define SCAN_MINB 2
+#else
+#define SCAN_MINB 3
+#endif
 
 // Must be >= actual d_state. Matches Tri Dao's MAX_DSTATE = 256.
 #define MAX_DSTATE 256
@@ -262,7 +269,7 @@ __device__ __forceinline__ void block_inclusive_scan_ab(
 // Grid: (batch, d_inner). Block: NTHREADS.
 // Shared memory: SMEM_TOTAL_FLOATS * sizeof(float).
 // ============================================================================
-extern "C" __global__ __launch_bounds__(128, 3) void ssm_parallel_scan_fwd(
+extern "C" __global__ __launch_bounds__(NTHREADS, SCAN_MINB) void ssm_parallel_scan_fwd(
     float* __restrict__ h,             // [batch * d_inner * d_state] SSM state (mutated)
     float* __restrict__ y_out,         // [batch * T * d_inner] output
     float* __restrict__ h_saved,       // [batch * (T+1) * d_inner * d_state] saved for backward
@@ -377,7 +384,7 @@ extern "C" __global__ __launch_bounds__(128, 3) void ssm_parallel_scan_fwd(
                 if (t < T) {
                     // a_dn already has LOG2E folded in, so exp2f gives exp(delta*a)
                     float da = exp2f(delta_vals[i] * a_dn);
-                    float b_t = B[bid * T * d_state + t * d_state + n];
+                    float b_t = B[(bid * d_state + n) * T + t];
                     thread_a[i] = da;
                     thread_b[i] = delta_u_vals[i] * b_t;
                     // No da saved: backward recomputes da from delta
@@ -484,7 +491,7 @@ extern "C" __global__ __launch_bounds__(128, 3) void ssm_parallel_scan_fwd(
                     }
 
                     // Single-pass Y accumulation (C read directly)
-                    float c_t = C[bid * T * d_state + t * d_state + n];
+                    float c_t = C[(bid * d_state + n) * T + t];
                     out_vals[i] += h_t * c_t;
                 }
             }
@@ -523,7 +530,7 @@ extern "C" __global__ __launch_bounds__(128, 3) void ssm_parallel_scan_fwd(
 // Same interface as ssm_burnin_forward_nosave.
 // Same parallel scan algorithm, skips the h_saved writes.
 // ============================================================================
-extern "C" __global__ __launch_bounds__(128, 3) void ssm_parallel_scan_fwd_nosave(
+extern "C" __global__ __launch_bounds__(NTHREADS, SCAN_MINB) void ssm_parallel_scan_fwd_nosave(
     float* __restrict__ h,             // [batch * d_inner * d_state] SSM state (mutated)
     float* __restrict__ y_out,         // [batch * T * d_inner] output
     const float* __restrict__ delta,   // [batch * T * d_inner]
@@ -622,7 +629,7 @@ extern "C" __global__ __launch_bounds__(128, 3) void ssm_parallel_scan_fwd_nosav
             for (int s = threadIdx.x; s < CHUNK_SIZE; s += NTHREADS) {
                 int t = chunk_start + s;
                 if (t < T) {
-                    smem_stage[s] = B[bid * T * d_state + t * d_state + n];
+                    smem_stage[s] = B[(bid * d_state + n) * T + t];
                 } else {
                     smem_stage[s] = 0.0f;
                 }
@@ -696,7 +703,7 @@ extern "C" __global__ __launch_bounds__(128, 3) void ssm_parallel_scan_fwd_nosav
             for (int s = threadIdx.x; s < CHUNK_SIZE; s += NTHREADS) {
                 int t = chunk_start + s;
                 if (t < T) {
-                    smem_stage[s] = C[bid * T * d_state + t * d_state + n];
+                    smem_stage[s] = C[(bid * d_state + n) * T + t];
                 } else {
                     smem_stage[s] = 0.0f;
                 }
@@ -757,7 +764,7 @@ extern "C" __global__ __launch_bounds__(128, 3) void ssm_parallel_scan_fwd_nosav
 // ============================================================================
 
 #define DEFINE_SSM_PARALLEL_SCAN_FWD(SUFFIX, T_ACT, FROM_F)                   \
-extern "C" __global__ __launch_bounds__(128, 4) void                          \
+extern "C" __global__ __launch_bounds__(NTHREADS, SCAN_MINB) void                          \
 ssm_parallel_scan_fwd_##SUFFIX(                                               \
     float* __restrict__ h,                                                    \
     T_ACT* __restrict__ y_out,                                                \
@@ -846,7 +853,7 @@ ssm_parallel_scan_fwd_##SUFFIX(                                               \
                 if (t < T) {                                                  \
                     float da = exp2f(delta_vals[i] * a_dn);                   \
                     float b_t =                                               \
-                        to_f(B[bid * T * d_state + t * d_state + n]);         \
+                        to_f(B[(bid * d_state + n) * T + t]);                 \
                     thread_a[i] = da;                                         \
                     thread_b[i] = delta_u_vals[i] * b_t;                      \
                 } else {                                                      \
@@ -918,7 +925,7 @@ ssm_parallel_scan_fwd_##SUFFIX(                                               \
                         h_saved[hs_idx] = h_t;                                \
                     }                                                         \
                     float c_t =                                               \
-                        to_f(C[bid * T * d_state + t * d_state + n]);         \
+                        to_f(C[(bid * d_state + n) * T + t]);                 \
                     out_vals[i] += h_t * c_t;                                 \
                 }                                                             \
             }                                                                 \
@@ -947,7 +954,7 @@ DEFINE_SSM_PARALLEL_SCAN_FWD(bf16, __nv_bfloat16, from_f_bf16)
 DEFINE_SSM_PARALLEL_SCAN_FWD(f16,  __half,        from_f_f16)
 
 #define DEFINE_SSM_PARALLEL_SCAN_FWD_NOSAVE(SUFFIX, T_ACT, FROM_F)            \
-extern "C" __global__ __launch_bounds__(128, 4) void                          \
+extern "C" __global__ __launch_bounds__(NTHREADS, SCAN_MINB) void                          \
 ssm_parallel_scan_fwd_nosave_##SUFFIX(                                        \
     float* __restrict__ h,                                                    \
     T_ACT* __restrict__ y_out,                                                \
@@ -1023,7 +1030,7 @@ ssm_parallel_scan_fwd_nosave_##SUFFIX(                                        \
             for (int s = threadIdx.x; s < CHUNK_SIZE; s += NTHREADS) {        \
                 int t = chunk_start + s;                                      \
                 smem_stage[s] = (t < T)                                       \
-                    ? B[bid * T * d_state + t * d_state + n]                  \
+                    ? B[(bid * d_state + n) * T + t]                          \
                     : FROM_F(0.0f);                                           \
             }                                                                 \
             __syncthreads();                                                  \
@@ -1081,7 +1088,7 @@ ssm_parallel_scan_fwd_nosave_##SUFFIX(                                        \
             for (int s = threadIdx.x; s < CHUNK_SIZE; s += NTHREADS) {        \
                 int t = chunk_start + s;                                      \
                 smem_stage[s] = (t < T)                                       \
-                    ? C[bid * T * d_state + t * d_state + n]                  \
+                    ? C[(bid * d_state + n) * T + t]                          \
                     : FROM_F(0.0f);                                           \
             }                                                                 \
             __syncthreads();                                                  \
@@ -1160,7 +1167,7 @@ DEFINE_SSM_PARALLEL_SCAN_FWD_NOSAVE(f16,  __half,        from_f_f16)
 // ============================================================================
 
 #define DEFINE_SSM_PARALLEL_SCAN_BWD(SUFFIX, T_ACT, FROM_F)                   \
-extern "C" __global__ __launch_bounds__(128, 3) void                          \
+extern "C" __global__ __launch_bounds__(NTHREADS, SCAN_MINB) void                          \
 ssm_parallel_scan_bwd_##SUFFIX(                                               \
     const float* __restrict__ h_saved,    /* [B*(T+1)*di*ds] */               \
     const T_ACT* __restrict__ delta,                                          \
@@ -1268,7 +1275,7 @@ ssm_parallel_scan_bwd_##SUFFIX(                                               \
             for (int i = 0; i < NITEMS; i++) {                                \
                 int t = chunk_start + threadIdx.x * NITEMS + i;               \
                 b_vals[i] = (t < T)                                           \
-                    ? to_f(B_in[bid * T * d_state + t * d_state + n])         \
+                    ? to_f(B_in[(bid * d_state + n) * T + t])                 \
                     : 0.0f;                                                   \
             }                                                                 \
             float c_vals[NITEMS];                                             \
@@ -1276,7 +1283,7 @@ ssm_parallel_scan_bwd_##SUFFIX(                                               \
             for (int i = 0; i < NITEMS; i++) {                                \
                 int t = chunk_start + threadIdx.x * NITEMS + i;               \
                 c_vals[i] = (t < T)                                           \
-                    ? to_f(C_in[bid * T * d_state + t * d_state + n])         \
+                    ? to_f(C_in[(bid * d_state + n) * T + t])                 \
                     : 0.0f;                                                   \
             }                                                                 \
             /* Per-i: da[i] = exp2(delta * a_neg), d_local[i] = dy * c */     \

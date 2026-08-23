@@ -126,6 +126,9 @@ pub struct MambaKernels {
     pub gather_cols: CudaFunction,
     /// Gather B and C columns from xdbl output.
     pub gather_bc_cols: CudaFunction,
+    /// T-major twin ([b][n][t] outputs) for the parallel-scan route —
+    /// the scan reads B/C per (d, n) lane over consecutive t.
+    pub gather_bc_cols_tmajor: CudaFunction,
     /// Scatter-add columns back into a wide matrix.
     pub scatter_add_cols: CudaFunction,
     /// Split in_proj output into x_branch and gate with SiLU on gate.
@@ -207,6 +210,8 @@ pub struct MambaKernels {
     pub residual_add_typed: TypedKernel,
     pub gather_cols_typed: TypedKernel,
     pub gather_bc_cols_typed: TypedKernel,
+    /// T-major twin of the typed gather (parallel-scan route).
+    pub gather_bc_cols_tmajor_typed: TypedKernel,
     pub split_gate_silu_typed: TypedKernel,
     pub softplus_copy_typed: TypedKernel,
     pub ssm_step_fwd_typed: TypedKernel,
@@ -687,6 +692,7 @@ impl MambaKernels {
             exp_negate2: get("exp_negate2")?,
             gather_cols: get("gather_cols")?,
             gather_bc_cols: get("gather_bc_cols")?,
+            gather_bc_cols_tmajor: get("gather_bc_cols_tmajor")?,
             scatter_add_cols: get("scatter_add_cols")?,
             split_gate_silu: get("split_gate_silu")?,
             gating_backward: get("gating_backward")?,
@@ -759,6 +765,7 @@ impl MambaKernels {
             residual_add_typed: load_typed("residual_add")?,
             gather_cols_typed: load_typed("gather_cols")?,
             gather_bc_cols_typed: load_typed("gather_bc_cols")?,
+            gather_bc_cols_tmajor_typed: load_typed("gather_bc_cols_tmajor")?,
             split_gate_silu_typed: load_typed("split_gate_silu")?,
             softplus_copy_typed: load_typed("softplus_copy")?,
             ssm_step_fwd_typed: load_typed("ssm_step_forward")?,

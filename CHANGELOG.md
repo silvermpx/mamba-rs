@@ -126,6 +126,19 @@
 
 ### Changed (campaign-shape program, second night wave)
 
+- T-major B/C for the parallel scan: the gather writes [b][n][t]
+  (route-picked `gather_bc_cols_tmajor` twins) and all five parallel
+  scan kernels read it, so each (d, n) lane walks contiguous t-runs.
+  The old [b][t][n] layout paid one 32-byte sector per 2-byte element
+  and owned 61% of the forward scan kernel by constant-load ablation;
+  neither wave-proposed chunk geometry (256x8, 128x16) moved anything,
+  and the block scan and exp2f measured free. Pure permutation —
+  identical values, all nine digest arms bit-equal. Isolated scan:
+  fwd 2.646 -> 0.921 ms/layer, bwd 3.559 -> 2.227; campaign
+  244.8 -> 169.3 ms/step (-31%). The scan launch geometry is also
+  single-sourced now (SCAN_NTHREADS/SCAN_NITEMS in launch.rs mirror
+  the kernel defines; resident-block pin scales with block size).
+
 - S4, the h tape is gone on the parallel route: the forward saves only
   per-chunk (run_a, run_b, h_entry) rows — 3 floats per (b, d, n,
   chunk) instead of T+1 — and the backward replays h in-kernel with

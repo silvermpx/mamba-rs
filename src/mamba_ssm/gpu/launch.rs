@@ -113,6 +113,14 @@ pub fn grid_norm(batch: usize, dim: usize) -> LaunchConfig {
 /// Shared memory: for block scan, running prefix, exchange, and coalesced staging.
 ///   Layout (floats): 2*NWARPS + 2*MAX_DSTATE + 2*NTHREADS + CHUNK_SIZE
 ///   = 2*4 + 2*256 + 2*128 + 1024 = 1800 floats = 7200 bytes.
+/// Parallel-scan launch geometry — MUST mirror NTHREADS/NITEMS in
+/// mamba_ssm_parallel.cu (block size, warp count, chunk length and the
+/// slim-tape chunk count all derive from these two numbers).
+pub const SCAN_NTHREADS: usize = 128;
+pub const SCAN_NITEMS: usize = 8;
+/// Timesteps per scan chunk.
+pub const SCAN_CHUNK: usize = SCAN_NTHREADS * SCAN_NITEMS;
+
 /// Slim h-tape switch: `MAMBA_RS_SCAN_TAPE=full` restores the
 /// (T+1)-step `h_saved` tape on the parallel route (escape hatch for one
 /// release); the default `slim` keeps only per-chunk
@@ -132,7 +140,7 @@ pub fn scan_tape_slim() -> bool {
 /// count mirrors CHUNK_SIZE = NTHREADS * NITEMS = 1024 in
 /// mamba_ssm_parallel.cu.
 pub fn scan_tape_len(batch: usize, seq_len: usize, d_inner: usize, d_state: usize) -> usize {
-    let n_chunks = seq_len.div_ceil(1024);
+    let n_chunks = seq_len.div_ceil(SCAN_CHUNK);
     batch * d_inner * d_state * 3 * n_chunks
 }
 
@@ -141,14 +149,12 @@ pub fn grid_parallel_scan(batch: usize, d_inner: usize) -> LaunchConfig {
         d_inner <= 65535,
         "grid_parallel_scan: d_inner {d_inner} exceeds CUDA grid.y limit 65535"
     );
-    const NTHREADS: u32 = 128;
-    const NWARPS: usize = NTHREADS as usize / 32;
+    const NWARPS: usize = SCAN_NTHREADS / 32;
     const MAX_DSTATE: usize = 256;
-    const CHUNK_SIZE: usize = NTHREADS as usize * 8; // NTHREADS * NITEMS
-    let smem_floats = 2 * NWARPS + 2 * MAX_DSTATE + 2 * NTHREADS as usize + CHUNK_SIZE;
+    let smem_floats = 2 * NWARPS + 2 * MAX_DSTATE + 2 * SCAN_NTHREADS + SCAN_CHUNK;
     LaunchConfig {
         grid_dim: (batch as u32, d_inner as u32, 1),
-        block_dim: (NTHREADS, 1, 1),
+        block_dim: (SCAN_NTHREADS as u32, 1, 1),
         shared_mem_bytes: (smem_floats * std::mem::size_of::<f32>()) as u32,
     }
 }
@@ -170,19 +176,17 @@ pub fn grid_parallel_scan_bwd(batch: usize, d_inner: usize) -> LaunchConfig {
         d_inner <= 65535,
         "grid_parallel_scan_bwd: d_inner {d_inner} exceeds CUDA grid.y limit 65535"
     );
-    const NTHREADS: u32 = 128;
-    const NWARPS: usize = NTHREADS as usize / 32;
+    const NWARPS: usize = SCAN_NTHREADS / 32;
     const MAX_DSTATE: usize = 256;
-    const CHUNK_SIZE: usize = NTHREADS as usize * 8;
     // SMEM_TOTAL_FLOATS (fwd layout incl. f32-sized stage) + bwd-extra
     // (reverse warp scan + postfix + next-A exchange + da-reduce +
     // chunk-first-A boundary). Must match SMEM_BWD_FLOATS in the kernel.
-    let fwd_total_floats = 2 * NWARPS + 2 * MAX_DSTATE + 2 * NTHREADS as usize + CHUNK_SIZE;
-    let bwd_extra_floats = 2 * NWARPS + 3 * MAX_DSTATE + 2 * NTHREADS as usize;
+    let fwd_total_floats = 2 * NWARPS + 2 * MAX_DSTATE + 2 * SCAN_NTHREADS + SCAN_CHUNK;
+    let bwd_extra_floats = 2 * NWARPS + 3 * MAX_DSTATE + 2 * SCAN_NTHREADS;
     let total_bytes = (fwd_total_floats + bwd_extra_floats) * std::mem::size_of::<f32>();
     LaunchConfig {
         grid_dim: (batch as u32, d_inner as u32, 1),
-        block_dim: (NTHREADS, 1, 1),
+        block_dim: (SCAN_NTHREADS as u32, 1, 1),
         shared_mem_bytes: total_bytes as u32,
     }
 }
@@ -208,17 +212,15 @@ pub fn grid_parallel_scan_typed(
         d_inner <= 65535,
         "grid_parallel_scan_typed: d_inner {d_inner} exceeds CUDA grid.y limit 65535"
     );
-    const NTHREADS: u32 = 128;
-    const NWARPS: usize = NTHREADS as usize / 32;
+    const NWARPS: usize = SCAN_NTHREADS / 32;
     const MAX_DSTATE: usize = 256;
-    const CHUNK_SIZE: usize = NTHREADS as usize * 8;
     // Fixed f32 region (block scan, running prefix, exchange).
-    let fixed_floats = 2 * NWARPS + 2 * MAX_DSTATE + 2 * NTHREADS as usize;
+    let fixed_floats = 2 * NWARPS + 2 * MAX_DSTATE + 2 * SCAN_NTHREADS;
     let fixed_bytes = fixed_floats * std::mem::size_of::<f32>();
-    let stage_bytes = CHUNK_SIZE * bytes_per_act;
+    let stage_bytes = SCAN_CHUNK * bytes_per_act;
     LaunchConfig {
         grid_dim: (batch as u32, d_inner as u32, 1),
-        block_dim: (NTHREADS, 1, 1),
+        block_dim: (SCAN_NTHREADS as u32, 1, 1),
         shared_mem_bytes: (fixed_bytes + stage_bytes) as u32,
     }
 }
