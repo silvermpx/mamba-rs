@@ -27,7 +27,13 @@ bug on this codebase; apply them in order.
 - Bench the exact env the production trainer stamps. The "BI+TC"
   campaign rows measured plain BI for a whole night because the flag
   name was wrong (`MAMBA_RS_BI_TENSOR_CORES`, not
-  `MAMBA_RS_BATCH_INVARIANT_TC`).
+  `MAMBA_RS_BATCH_INVARIANT_TC`) — and a day of follow-up readings
+  measured the cuBLAS lane because the tier rides TWO env flags
+  (`MAMBA_RS_BATCH_INVARIANT` plus the TC flag on top) and only one
+  was set. Same class hit the GEMM micro-bench twice in one day.
+  The cure is structural, not discipline: benches print their
+  RESOLVED tier in the reading itself (`tier=bi+tc`), so a missing
+  base flag is visible in every number it produces.
 
 ## 2. Occupancy: small blocks behind big smem tiles are the #1 GPU wall
 
