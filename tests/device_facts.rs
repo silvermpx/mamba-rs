@@ -40,7 +40,7 @@ fn device_and_kernel_facts() {
     let dtype = WeightDtype::Bf16;
     let m3k = Mamba3Kernels::compile(ctx.stream.context(), common::bench::arch0()).unwrap();
 
-    let fold_cfg = grid_parallel_scan_bwd_fold(b, di, dtype.size_bytes());
+    let fold_cfg = grid_parallel_scan_bwd_fold(b, di, 16, dtype.size_bytes());
     let plain_cfg = grid_parallel_scan_bwd(b, di);
     let facts: [(&str, &cudarc::driver::CudaFunction, u32, usize); 4] = [
         (

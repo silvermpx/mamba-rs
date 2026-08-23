@@ -106,7 +106,7 @@ fn m1_scan_bwd_output_hashes() {
         bld.arg(&dsi);
         bld.arg(&tape_ptr);
         bld.arg(&slim);
-        unsafe { bld.launch(grid_parallel_scan_typed(b, di, 2)) }.unwrap();
+        unsafe { bld.launch(grid_parallel_scan_typed(b, di, dtype.size_bytes())) }.unwrap();
     }
     ctx.stream.synchronize().unwrap();
     {
@@ -178,7 +178,7 @@ fn m1_scan_bwd_output_hashes() {
         bld.arg(&tape_arg);
         bld.arg(&slim);
         let cfg = if fold {
-            grid_parallel_scan_bwd_fold(b, di, dtype.size_bytes())
+            grid_parallel_scan_bwd_fold(b, di, ds, dtype.size_bytes())
         } else {
             grid_parallel_scan_bwd(b, di)
         };

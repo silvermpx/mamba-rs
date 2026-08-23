@@ -284,7 +284,7 @@ pub fn gpu_backward_mamba_layer_mixed(
             bld.arg(&h_p);
             bld.arg(&slim_i);
             let cfg = if use_fold {
-                super::launch::grid_parallel_scan_bwd_fold(b, di, dtype.size_bytes())
+                super::launch::grid_parallel_scan_bwd_fold(b, di, ds, dtype.size_bytes())
             } else {
                 super::launch::grid_parallel_scan_bwd(b, di)
             };

@@ -248,6 +248,18 @@ impl GpuMambaMixedTrainScratch {
         dtype: WeightDtype,
     ) -> Result<Self, String> {
         let bt = dims.batch * dims.seq_len;
+        // The fold backward writes dB/dC partials at di/G rows; only the
+        // non-fold routes (sequential scan, or d_inner not divisible by
+        // the d-group) need the full depth. Same predicate as the launcher.
+        let bc_rows = if dims.scan_mode.use_parallel(dims.seq_len, dims.d_state)
+            && dims
+                .d_inner
+                .is_multiple_of(crate::mamba_ssm::gpu::launch::SCAN_BWD_DGROUP)
+        {
+            dims.d_inner / crate::mamba_ssm::gpu::launch::SCAN_BWD_DGROUP
+        } else {
+            dims.d_inner
+        };
         let xdbl_dim = dims.dt_rank + 2 * dims.d_state;
         let di = dims.d_inner;
         let ds = dims.d_state;
@@ -267,8 +279,11 @@ impl GpuMambaMixedTrainScratch {
             d_gated: DtypedBuf::zeros(stream, bt * di, dtype)?,
             d_y: DtypedBuf::zeros(stream, bt * di, dtype)?,
             d_gate: DtypedBuf::zeros(stream, bt * di, dtype)?,
-            d_b_local: DtypedBuf::zeros(stream, bt * di * ds, dtype)?,
-            d_c_local: DtypedBuf::zeros(stream, bt * di * ds, dtype)?,
+            // The fold backward writes dB/dC partials at di/G rows; only
+            // the non-fold routes (d_inner not divisible by the d-group)
+            // need the full depth. Same predicate as the launcher.
+            d_b_local: DtypedBuf::zeros(stream, bt * bc_rows * ds, dtype)?,
+            d_c_local: DtypedBuf::zeros(stream, bt * bc_rows * ds, dtype)?,
             d_delta: DtypedBuf::zeros(stream, bt * di, dtype)?,
             d_u: DtypedBuf::zeros(stream, bt * di, dtype)?,
             d_u_xproj: DtypedBuf::zeros(stream, bt * di, dtype)?,

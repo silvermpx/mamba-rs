@@ -182,13 +182,16 @@ pub const SCAN_BWD_DGROUP: usize = 4;
 pub fn grid_parallel_scan_bwd_fold(
     batch: usize,
     d_inner: usize,
+    d_state: usize,
     bytes_per_act: usize,
 ) -> LaunchConfig {
     const NWARPS: usize = SCAN_NTHREADS / 32;
-    const MAX_DSTATE: usize = 256;
     let g = SCAN_BWD_DGROUP;
-    let f32_floats = 4 * NWARPS + 4 * SCAN_NTHREADS + 3 * g * MAX_DSTATE + 3 * SCAN_NTHREADS;
-    let stage_bytes = 3 * g * SCAN_CHUNK * bytes_per_act;
+    // Slot stride is the RUNTIME d_state (the kernel guard still bounds
+    // it by its compile-time capacity): at ds=16 this returns ~11.5 KB of
+    // smem per block vs the old 256-slot stride and lifts residency.
+    let f32_floats = 4 * NWARPS + 4 * SCAN_NTHREADS + 3 * g * d_state + 3 * SCAN_NTHREADS;
+    let stage_bytes = (3 * g + 1) * SCAN_CHUNK * bytes_per_act;
     LaunchConfig {
         grid_dim: (batch as u32, (d_inner / g) as u32, 1),
         block_dim: (SCAN_NTHREADS as u32, 1, 1),

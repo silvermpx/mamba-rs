@@ -316,6 +316,14 @@ impl GpuMambaScratch {
         let mamba_input_dim = dims.mamba_input_dim;
         let bt = batch * dims.seq_len;
         let xdbl_dim = dt_rank + 2 * d_state;
+        // Fold-depth dB/dC partials (see the mixed scratch note).
+        let bc_rows = if dims.scan_mode.use_parallel(dims.seq_len, d_state)
+            && d_inner.is_multiple_of(super::launch::SCAN_BWD_DGROUP)
+        {
+            d_inner / super::launch::SCAN_BWD_DGROUP
+        } else {
+            d_inner
+        };
 
         Ok(Self {
             dims: *dims,
@@ -339,8 +347,9 @@ impl GpuMambaScratch {
             d_dt_input: GpuBuffer::zeros(stream, bt * dt_rank)?,
             dt_xdbl_buf: GpuBuffer::zeros(stream, bt * dt_rank)?,
             // SSM backward per-thread buffers
-            d_b_local: GpuBuffer::zeros(stream, bt * d_inner * d_state)?,
-            d_c_local: GpuBuffer::zeros(stream, bt * d_inner * d_state)?,
+            // Fold-depth dB/dC partials (see the mixed scratch note).
+            d_b_local: GpuBuffer::zeros(stream, bt * bc_rows * d_state)?,
+            d_c_local: GpuBuffer::zeros(stream, bt * bc_rows * d_state)?,
             d_d_local: GpuBuffer::zeros(stream, batch * d_inner)?,
             d_a_log_local: GpuBuffer::zeros(stream, batch * d_inner * d_state)?,
             d_b_reduced: GpuBuffer::zeros(stream, bt * d_state)?,

@@ -586,7 +586,7 @@ fn check_fold_parity(b: usize, t: usize, di: usize, ds: usize, dtype: WeightDtyp
         let tape_arg = if slim { tp } else { hs };
         bld.arg(&tape_arg);
         bld.arg(&slim_i);
-        unsafe { bld.launch(grid_parallel_scan_bwd_fold(b, di, dtype.size_bytes())) }.unwrap();
+        unsafe { bld.launch(grid_parallel_scan_bwd_fold(b, di, ds, dtype.size_bytes())) }.unwrap();
     }
     ctx.stream.synchronize().unwrap();
 
@@ -797,7 +797,12 @@ fn diag_fold_slim_vs_full_positions() {
         bld.arg(&tpa);
         bld.arg(&sl);
         let cfg = if fold {
-            mamba_rs::mamba_ssm::gpu::launch::grid_parallel_scan_bwd_fold(b, di, dtype.size_bytes())
+            mamba_rs::mamba_ssm::gpu::launch::grid_parallel_scan_bwd_fold(
+                b,
+                di,
+                ds,
+                dtype.size_bytes(),
+            )
         } else {
             grid_parallel_scan_bwd(b, di)
         };

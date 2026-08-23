@@ -825,7 +825,7 @@ fn bench_scan_kernels_isolated() {
         let slim1: i32 = 1;
         bld.arg(&tp);
         bld.arg(&slim1);
-        unsafe { bld.launch(grid_parallel_scan_bwd_fold(b, di, dtype.size_bytes())) }.unwrap();
+        unsafe { bld.launch(grid_parallel_scan_bwd_fold(b, di, ds, dtype.size_bytes())) }.unwrap();
     };
     let bwd_fold_ms = common::bench::timed(&ctx, 20, || bwd_fold_slim(&ctx));
 

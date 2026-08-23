@@ -181,7 +181,7 @@ pub fn gpu_backward_mamba_layer(
             builder.arg(&slim_i);
         }
         let cfg = if use_fold {
-            super::launch::grid_parallel_scan_bwd_fold(b, di, 4)
+            super::launch::grid_parallel_scan_bwd_fold(b, di, ds, 4)
         } else if use_parallel {
             super::launch::grid_parallel_scan_bwd(b, di)
         } else {
