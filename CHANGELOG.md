@@ -224,7 +224,11 @@
   43.9 -> 40.2; f16 49.1; parallel-scan T64 f32 18.4.
 - Campaign shape (d384 L24 B8 T1300, batch-invariant + tensor-core
   tier — the classify trainer's stamped route): 441.4 -> 261.9
-  ms/step (-41%), then 247.4 after S4 (-44% total). Split: fwd 134 -> 80, bwd+opt 309 -> 182. Isolated
+  ms/step (night wave), then 155.4 after the day program (-65%
+  total: slim tape, NDEBUG, T-major B/C, split-M dW). The cuBLAS
+  default lane sits at 169.0 at the same shape. Remaining ledger
+  (x24-layer ms): scan fwd 22.1 / bwd 53.4, conv dw 13.4,
+  backward GEMMs ~15, reduce_d_BC 9.6. Split: fwd 134 -> 80, bwd+opt 309 -> 182. Isolated
   ledger after the wave: scan bwd 80, scan fwd 62, conv dw 13.4,
   reduce_d_BC 9.6 (x24-layer ms). Note: earlier "BI+TC" campaign
   rows in this file's history measured plain BI — the tier flag is
