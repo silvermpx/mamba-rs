@@ -573,6 +573,44 @@ fn bench_scan_kernels_isolated() {
         bld.arg(&slim0);
         unsafe { bld.launch(grid_parallel_scan_typed(b, di, 2)) }.unwrap();
     };
+    let fwd_tape = GpuBuffer::zeros(
+        &ctx.stream,
+        mamba_rs::mamba_ssm::gpu::launch::scan_tape_len(b, t, di, ds),
+    )
+    .unwrap();
+    ctx.stream.synchronize().unwrap();
+    let fwd_slim = |ctx: &GpuCtx| {
+        let mut bld = ctx
+            .stream
+            .launch_builder(k.ssm_parallel_fwd_typed.get(dtype));
+        let hp = h.cached_ptr();
+        let yp = y.cached_ptr();
+        let dp = delta.cached_ptr();
+        let up = u.cached_ptr();
+        let bp = bb.cached_ptr();
+        let cp = cc.cached_ptr();
+        let ap = a_neg.cached_ptr();
+        let ddp = dpar.cached_ptr();
+        let hs = h_saved.cached_ptr();
+        let tp = fwd_tape.cached_ptr();
+        let slim1: i32 = 1;
+        bld.arg(&hp);
+        bld.arg(&yp);
+        bld.arg(&hs);
+        bld.arg(&dp);
+        bld.arg(&up);
+        bld.arg(&bp);
+        bld.arg(&cp);
+        bld.arg(&ap);
+        bld.arg(&ddp);
+        bld.arg(&bi);
+        bld.arg(&ti);
+        bld.arg(&dii);
+        bld.arg(&dsi);
+        bld.arg(&tp);
+        bld.arg(&slim1);
+        unsafe { bld.launch(grid_parallel_scan_typed(b, di, 2)) }.unwrap();
+    };
 
     for _ in 0..3 {
         fwd(&ctx);
@@ -585,6 +623,16 @@ fn bench_scan_kernels_isolated() {
     }
     ctx.stream.synchronize().unwrap();
     let fwd_ms = t0.elapsed().as_secs_f64() * 1e3 / f64::from(reps);
+    for _ in 0..3 {
+        fwd_slim(&ctx);
+    }
+    ctx.stream.synchronize().unwrap();
+    let t0s = Instant::now();
+    for _ in 0..reps {
+        fwd_slim(&ctx);
+    }
+    ctx.stream.synchronize().unwrap();
+    let fwd_slim_ms = t0s.elapsed().as_secs_f64() * 1e3 / f64::from(reps);
 
     // bwd
     let d_y = DtypedBuf::zeros(&ctx.stream, bt * di, dtype).unwrap();
@@ -636,6 +684,56 @@ fn bench_scan_kernels_isolated() {
         bld.arg(&slim0);
         unsafe { bld.launch(grid_parallel_scan_bwd(b, di)) }.unwrap();
     };
+    // Production runs the slim tape (in-kernel h replay); time that
+    // variant too so the ledger reflects the real trainer path.
+    let tape = GpuBuffer::zeros(
+        &ctx.stream,
+        mamba_rs::mamba_ssm::gpu::launch::scan_tape_len(b, t, di, ds),
+    )
+    .unwrap();
+    ctx.stream.synchronize().unwrap();
+    let bwd_slim = |ctx: &GpuCtx| {
+        let mut bld = ctx
+            .stream
+            .launch_builder(k.ssm_parallel_bwd_typed.get(dtype));
+        let hs = h_saved.cached_ptr();
+        let tp = tape.cached_ptr();
+        let dp = delta.cached_ptr();
+        let up = u.cached_ptr();
+        let bp = bb.cached_ptr();
+        let cp = cc.cached_ptr();
+        let ap = a_neg.cached_ptr();
+        let ddp = dpar.cached_ptr();
+        let dyp = d_y.cached_ptr();
+        let ddel = d_delta.cached_ptr();
+        let dup = d_u.cached_ptr();
+        let dbl = d_b_local.cached_ptr();
+        let dcl = d_c_local.cached_ptr();
+        let ddl = d_d_local.cached_ptr();
+        let dal = d_a_log_local.cached_ptr();
+        bld.arg(&hs);
+        bld.arg(&dp);
+        bld.arg(&up);
+        bld.arg(&bp);
+        bld.arg(&cp);
+        bld.arg(&ap);
+        bld.arg(&ddp);
+        bld.arg(&dyp);
+        bld.arg(&ddel);
+        bld.arg(&dup);
+        bld.arg(&dbl);
+        bld.arg(&dcl);
+        bld.arg(&ddl);
+        bld.arg(&dal);
+        bld.arg(&bi);
+        bld.arg(&ti);
+        bld.arg(&dii);
+        bld.arg(&dsi);
+        let slim1: i32 = 1;
+        bld.arg(&tp);
+        bld.arg(&slim1);
+        unsafe { bld.launch(grid_parallel_scan_bwd(b, di)) }.unwrap();
+    };
     for _ in 0..3 {
         bwd(&ctx);
     }
@@ -647,10 +745,23 @@ fn bench_scan_kernels_isolated() {
     ctx.stream.synchronize().unwrap();
     let bwd_ms = t1.elapsed().as_secs_f64() * 1e3 / f64::from(reps);
 
+    for _ in 0..3 {
+        bwd_slim(&ctx);
+    }
+    ctx.stream.synchronize().unwrap();
+    let t2 = Instant::now();
+    for _ in 0..reps {
+        bwd_slim(&ctx);
+    }
+    ctx.stream.synchronize().unwrap();
+    let bwd_slim_ms = t2.elapsed().as_secs_f64() * 1e3 / f64::from(reps);
+
     eprintln!(
-        "scan isolated (B{b} T{t} di{di} ds{ds} {dtype:?}): fwd={fwd_ms:.3} ms/layer (x24={:.1}) bwd={bwd_ms:.3} ms/layer (x24={:.1})",
+        "scan isolated (B{b} T{t} di{di} ds{ds} {dtype:?}): fwd_full={fwd_ms:.3} (x24={:.1}) fwd_slim={fwd_slim_ms:.3} (x24={:.1}) bwd_full={bwd_ms:.3} (x24={:.1}) bwd_slim={bwd_slim_ms:.3} (x24={:.1})",
         fwd_ms * 24.0,
-        bwd_ms * 24.0
+        fwd_slim_ms * 24.0,
+        bwd_ms * 24.0,
+        bwd_slim_ms * 24.0
     );
 }
 
