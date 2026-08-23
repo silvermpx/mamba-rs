@@ -288,7 +288,10 @@ impl GpuMambaMixedTrainScratch {
             // Rule-B axis-0 partials scratch — sized to fit largest consumer.
             axis0_partials: GpuBuffer::zeros(
                 stream,
-                std::cmp::max(bt * dm, b * di * (dims.d_conv + 1)),
+                std::cmp::max(
+                    bt * dm,
+                    b * dims.seq_len.div_ceil(128) * di * (dims.d_conv + 1),
+                ),
             )?,
         };
         // Race-fix invariant (a950648): callers may immediately upload from

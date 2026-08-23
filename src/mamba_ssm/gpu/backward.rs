@@ -346,8 +346,10 @@ pub fn gpu_backward_mamba_layer(
         let t_i = t as i32;
         let di_i = di as i32;
         let dc_i = d_conv as i32;
-        let weight_partials_elems = b * di * d_conv;
+        let n_tiles = t.div_ceil(128);
+        let weight_partials_elems = b * n_tiles * di * d_conv;
         let bias_offset_bytes = (weight_partials_elems * std::mem::size_of::<f32>()) as u64;
+        let rows_i = (b * n_tiles) as i32;
         let axis0_base = scratch.axis0_partials.cached_ptr();
         let wp_ptr = axis0_base;
         let bp_ptr = axis0_base + bias_offset_bytes;
@@ -373,7 +375,7 @@ pub fn gpu_backward_mamba_layer(
 
             let mut builder = ctx
                 .stream
-                .launch_builder(ctx.kernels.conv1d_bwd_dw_only_typed.get(f32k));
+                .launch_builder(ctx.kernels.conv1d_bwd_dw_tiled_typed.get(f32k));
             builder.arg(&wp_ptr); // d_weight_partials
             builder.arg(&bp_ptr); // d_bias_partials
             builder.arg(scratch.d_u.inner());
@@ -384,8 +386,14 @@ pub fn gpu_backward_mamba_layer(
             builder.arg(&t_i);
             builder.arg(&di_i);
             builder.arg(&dc_i);
-            unsafe { builder.launch(grid_1d(b * di * (d_conv + 1))) }
-                .map_err(|e| format!("conv1d_bwd_dw_only mamba: {:?}", e))?;
+            let lanes = b * di * (d_conv + 1);
+            let dw_cfg = cudarc::driver::LaunchConfig {
+                grid_dim: (lanes.div_ceil(256) as u32, n_tiles as u32, 1),
+                block_dim: (256, 1, 1),
+                shared_mem_bytes: 0,
+            };
+            unsafe { builder.launch(dw_cfg) }
+                .map_err(|e| format!("conv1d_bwd_dw_tiled mamba: {:?}", e))?;
         }
         // Stage 2a: reduce weight partials [B, d_inner*d_conv] → d_lw.conv1d_weight.
         {
@@ -396,7 +404,7 @@ pub fn gpu_backward_mamba_layer(
             let mut builder = ctx.stream.launch_builder(&ctx.kernels.reduce_sum_axis0);
             builder.arg(&p);
             builder.arg(&wp_ptr);
-            builder.arg(&b_i);
+            builder.arg(&rows_i);
             builder.arg(&dim_w);
             builder.arg(&accumulate_i);
             let cfg = cudarc::driver::LaunchConfig {
@@ -415,7 +423,7 @@ pub fn gpu_backward_mamba_layer(
             let mut builder = ctx.stream.launch_builder(&ctx.kernels.reduce_sum_axis0);
             builder.arg(&p);
             builder.arg(&bp_ptr);
-            builder.arg(&b_i);
+            builder.arg(&rows_i);
             builder.arg(&di_i);
             builder.arg(&accumulate_i);
             let cfg = cudarc::driver::LaunchConfig {

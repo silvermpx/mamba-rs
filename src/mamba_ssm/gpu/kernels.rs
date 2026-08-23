@@ -183,7 +183,7 @@ pub struct MambaKernels {
     /// at tile boundaries with the serial association order).
     pub conv1d_bwd_dx_tiled_typed: TypedKernel,
     /// dw/db-only half: historical descending-t accumulation, verbatim.
-    pub conv1d_bwd_dw_only_typed: TypedKernel,
+    pub conv1d_bwd_dw_tiled_typed: TypedKernel,
     /// Typed dispatch for `conv1d_burnin_backward`. d_x_branch/d_u/post_conv
     /// typed; conv_states stays f32 (recurrent state); d_weight/d_bias
     /// accumulate via Rule-B partials + fixed-order reduce. Matches DEFINE_CONV1D_BURNIN_BWD
@@ -790,7 +790,7 @@ impl MambaKernels {
             conv1d_burnin_bwd_typed: load_typed("conv1d_burnin_backward")?,
             conv1d_burnin_fwd_tiled_typed: load_typed("conv1d_burnin_forward_tiled")?,
             conv1d_bwd_dx_tiled_typed: load_typed("conv1d_bwd_dx_tiled")?,
-            conv1d_bwd_dw_only_typed: load_typed("conv1d_bwd_dw_only")?,
+            conv1d_bwd_dw_tiled_typed: load_typed("conv1d_bwd_dw_tiled")?,
             // ssm_backward_local typed + typed-input reducers
             ssm_backward_local_typed: load_typed("ssm_backward_local")?,
             pack_xdbl_cols_typed: TypedKernel {

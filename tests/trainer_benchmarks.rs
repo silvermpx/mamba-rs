@@ -795,8 +795,9 @@ fn bench_bwd_kernels_isolated() {
     let conv_init = GpuBuffer::zeros(&ctx.stream, b * di * dc).unwrap();
     let weight = GpuBuffer::zeros(&ctx.stream, di * dc).unwrap();
     let d_x_branch = DtypedBuf::zeros(&ctx.stream, bt * di, dtype).unwrap();
-    let wp = GpuBuffer::zeros(&ctx.stream, b * di * dc).unwrap();
-    let bp = GpuBuffer::zeros(&ctx.stream, b * di).unwrap();
+    let n_tiles = t.div_ceil(128);
+    let wp = GpuBuffer::zeros(&ctx.stream, b * n_tiles * di * dc).unwrap();
+    let bp = GpuBuffer::zeros(&ctx.stream, b * n_tiles * di).unwrap();
 
     let time_it = |label: &str, f: &dyn Fn()| {
         for _ in 0..3 {
@@ -815,10 +816,10 @@ fn bench_bwd_kernels_isolated() {
         );
     };
 
-    time_it("conv_dw_only", &|| {
+    time_it("conv_dw_tiled", &|| {
         let mut bld = ctx
             .stream
-            .launch_builder(k.conv1d_bwd_dw_only_typed.get(dtype));
+            .launch_builder(k.conv1d_bwd_dw_tiled_typed.get(dtype));
         let wpp = wp.cached_ptr();
         let bpp = bp.cached_ptr();
         let dup = d_u.cached_ptr();
@@ -835,7 +836,13 @@ fn bench_bwd_kernels_isolated() {
         bld.arg(&ti);
         bld.arg(&dii);
         bld.arg(&dci);
-        unsafe { bld.launch(grid_1d(b * di)) }.unwrap();
+        let lanes = b * di * (dc + 1);
+        let cfg = cudarc::driver::LaunchConfig {
+            grid_dim: (lanes.div_ceil(256) as u32, n_tiles as u32, 1),
+            block_dim: (256, 1, 1),
+            shared_mem_bytes: 0,
+        };
+        unsafe { bld.launch(cfg) }.unwrap();
     });
 
     time_it("conv_dx_tiled", &|| {

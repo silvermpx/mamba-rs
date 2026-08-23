@@ -544,8 +544,10 @@ pub fn gpu_backward_mamba_layer_mixed(
         let t_i = t as i32;
         let di_i = di as i32;
         let dc_i = d_conv as i32;
-        let weight_partials_elems = b * di * d_conv;
+        let n_tiles = t.div_ceil(128);
+        let weight_partials_elems = b * n_tiles * di * d_conv;
         let bias_offset_bytes = (weight_partials_elems * std::mem::size_of::<f32>()) as u64;
+        let rows_i = (b * n_tiles) as i32;
         let axis0_base = scratch.axis0_partials.cached_ptr();
         let wp_ptr = axis0_base;
         let bp_ptr = axis0_base + bias_offset_bytes;
@@ -572,7 +574,7 @@ pub fn gpu_backward_mamba_layer_mixed(
 
             let mut bld = ctx
                 .stream
-                .launch_builder(k.conv1d_bwd_dw_only_typed.get(dtype));
+                .launch_builder(k.conv1d_bwd_dw_tiled_typed.get(dtype));
             bld.arg(&wp_ptr); // d_weight_partials
             bld.arg(&bp_ptr); // d_bias_partials
             bld.arg(&du);
@@ -584,8 +586,14 @@ pub fn gpu_backward_mamba_layer_mixed(
             bld.arg(&t_i);
             bld.arg(&di_i);
             bld.arg(&dc_i);
-            unsafe { bld.launch(grid_1d(b * di * (d_conv + 1))) }
-                .map_err(|e| format!("conv1d_bwd_dw_only mixed: {e:?}"))?;
+            let lanes = b * di * (d_conv + 1);
+            let dw_cfg = cudarc::driver::LaunchConfig {
+                grid_dim: (lanes.div_ceil(256) as u32, n_tiles as u32, 1),
+                block_dim: (256, 1, 1),
+                shared_mem_bytes: 0,
+            };
+            unsafe { bld.launch(dw_cfg) }
+                .map_err(|e| format!("conv1d_bwd_dw_tiled mixed: {e:?}"))?;
         }
         // Stage 2a: reduce weight partials [B, di*d_conv] → d_lw.conv1d_weight.
         {
@@ -596,7 +604,7 @@ pub fn gpu_backward_mamba_layer_mixed(
             let mut bld = ctx.stream.launch_builder(&ctx.kernels.reduce_sum_axis0);
             bld.arg(&p);
             bld.arg(&wp_ptr);
-            bld.arg(&b_i);
+            bld.arg(&rows_i);
             bld.arg(&dim_w);
             bld.arg(&accumulate_i);
             let cfg = cudarc::driver::LaunchConfig {
@@ -615,7 +623,7 @@ pub fn gpu_backward_mamba_layer_mixed(
             let mut bld = ctx.stream.launch_builder(&ctx.kernels.reduce_sum_axis0);
             bld.arg(&p);
             bld.arg(&bp_ptr);
-            bld.arg(&b_i);
+            bld.arg(&rows_i);
             bld.arg(&di_i);
             bld.arg(&accumulate_i);
             let cfg = cudarc::driver::LaunchConfig {

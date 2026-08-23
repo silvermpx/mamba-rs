@@ -1500,16 +1500,27 @@ ssm_parallel_scan_bwd_##SUFFIX(                                               \
             /* Block-reduce d_a_acc → thread 0 → += d_a_log_local */          \
             smem_da_red[threadIdx.x] = d_a_acc;                               \
             __syncthreads();                                                  \
-            for (int stride = NTHREADS / 2; stride > 0; stride >>= 1) {       \
+            /* Tree rounds down to a full warp in smem, then the same         \
+               pairing continues via shuffles: lane i still adds lane         \
+               i+off's value at each halving, so every partial sum is         \
+               bit-identical to the all-smem tree. */                         \
+            for (int stride = NTHREADS / 2; stride >= 32; stride >>= 1) {     \
                 if ((int)threadIdx.x < stride) {                              \
                     smem_da_red[threadIdx.x] += smem_da_red[threadIdx.x +     \
                                                             stride];          \
                 }                                                             \
                 __syncthreads();                                              \
             }                                                                 \
+            float da_warp = 0.0f;                                             \
+            if (threadIdx.x < 32) {                                           \
+                da_warp = smem_da_red[threadIdx.x];                           \
+                for (int off = 16; off > 0; off >>= 1)                        \
+                    da_warp += __shfl_down_sync(0xFFFFFFFFu, da_warp,         \
+                                                off);                         \
+            }                                                                 \
             if (threadIdx.x == 0) {                                           \
                 d_a_log_local[(bid * d_inner + did) * d_state + n]            \
-                    += smem_da_red[0];                                        \
+                    += da_warp;                                               \
                 /* Save THIS chunk's first thread's first da into the         \
                    chunk_first_a[n] slot — the EARLIER chunk (next iter)      \
                    will read this as its boundary `a_{t+1}` for the very-     \
@@ -1548,14 +1559,19 @@ ssm_parallel_scan_bwd_##SUFFIX(                                               \
        reduce within block first. */                                          \
     smem_da_red[threadIdx.x] = local_d_D;                                     \
     __syncthreads();                                                          \
-    for (int stride = NTHREADS / 2; stride > 0; stride >>= 1) {               \
+    for (int stride = NTHREADS / 2; stride >= 32; stride >>= 1) {             \
         if ((int)threadIdx.x < stride) {                                      \
             smem_da_red[threadIdx.x] += smem_da_red[threadIdx.x + stride];    \
         }                                                                     \
         __syncthreads();                                                      \
     }                                                                         \
-    if (threadIdx.x == 0) {                                                   \
-        d_D_local[bid * d_inner + did] = smem_da_red[0];                      \
+    if (threadIdx.x < 32) {                                                   \
+        float dd_warp = smem_da_red[threadIdx.x];                             \
+        for (int off = 16; off > 0; off >>= 1)                                \
+            dd_warp += __shfl_down_sync(0xFFFFFFFFu, dd_warp, off);           \
+        if (threadIdx.x == 0) {                                               \
+            d_D_local[bid * d_inner + did] = dd_warp;                         \
+        }                                                                     \
     }                                                                         \
 }
 

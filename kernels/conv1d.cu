@@ -661,70 +661,73 @@ DEFINE_CONV1D_BWD_DX_TILED(f32,  float,         from_f_f32)
 DEFINE_CONV1D_BWD_DX_TILED(bf16, __nv_bfloat16, from_f_bf16)
 DEFINE_CONV1D_BWD_DX_TILED(f16,  __half,        from_f_f16)
 
-// dw/db-only half: the historical descending-t accumulation, verbatim,
-// minus the d_x work (its carries fed only d_x). Rule-B contract with
-// the same reduce_sum_axis0 follow-up is unchanged.
-#define DEFINE_CONV1D_BWD_DW_ONLY(SUFFIX, TY)                                 \
-extern "C" __global__ void conv1d_bwd_dw_only_##SUFFIX(                       \
-    float* __restrict__ d_weight_partials,                                     \
-    float* __restrict__ d_bias_partials,                                       \
-    const TY* __restrict__ d_u,                                                \
-    const TY* __restrict__ post_conv,                                          \
-    const TY* __restrict__ x_branch,                                           \
-    const float* __restrict__ conv_init, /* [B*di*d_conv] carry-in window */   \
-    int batch, int T_, int d_inner, int d_conv                                 \
-) {                                                                            \
-    /* Tap-split: thread role = (b, d, tap) with tap == d_conv meaning the  \
-     * bias lane. Each tap's accumulator was ALREADY independent in the     \
-     * fused kernel, and every lane keeps the same descending-t add order,  \
-     * so all sums are bit-identical - this is pure lane redistribution     \
-     * (24 -> ~120 blocks at the campaign shape).                        */ \
-    int lanes = d_conv + 1;                                                    \
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;                           \
-    int total = batch * d_inner * lanes;                                       \
-    if (idx >= total) return;                                                  \
-    if (d_conv > 8) return;                                                    \
-    int tap = idx % lanes;                                                     \
-    int bd = idx / lanes;                                                      \
-    int b = bd / d_inner;                                                      \
-    int d = bd % d_inner;                                                      \
-    int init_base = (b * d_inner + d) * d_conv;                                \
-    if (tap == d_conv) {                                                       \
-        /* bias lane: descending-t sum of d_conv_out, order unchanged */       \
-        float local_d_bias = 0.0f;                                             \
-        for (int t = T_ - 1; t >= 0; t--) {                                    \
-            int bt_di = (b * T_ + t) * d_inner + d;                            \
-            float x = to_f(post_conv[bt_di]);                                  \
-            float sig = 1.0f / (1.0f + exp2f(-x * 1.4426950408889634f));       \
-            float silu_grad = sig * (1.0f + x * (1.0f - sig));                 \
-            /* __fmul_rn/__fadd_rn pin the fused kernel's two-rounding       \
-             * shape: there d_conv_out materialized (multi-use) before the  \
-             * bias add; an inlined product contracts to one FFMA and       \
-             * moves every digest. */                                        \
-            local_d_bias = __fadd_rn(                                          \
-                local_d_bias, __fmul_rn(to_f(d_u[bt_di]), silu_grad));         \
-        }                                                                      \
-        d_bias_partials[b * d_inner + d] = local_d_bias;                       \
-        return;                                                                \
-    }                                                                          \
-    /* weight-tap lane: window element `tap` at time t is                    \
-     * x[t - (d_conv-1) + tap], carry-in fallback at the left edge. */        \
-    float local_dw = 0.0f;                                                     \
-    for (int t = T_ - 1; t >= 0; t--) {                                        \
-        int bt_di = (b * T_ + t) * d_inner + d;                                \
-        float x = to_f(post_conv[bt_di]);                                      \
-        float sig = 1.0f / (1.0f + exp2f(-x * 1.4426950408889634f));           \
-        float silu_grad = sig * (1.0f + x * (1.0f - sig));                     \
-        float d_conv_out = to_f(d_u[bt_di]) * silu_grad;                       \
-        int tx = t - (d_conv - 1) + tap;                                       \
-        float wv = (tx >= 0)                                                   \
-            ? to_f(x_branch[(b * T_ + tx) * d_inner + d])                      \
-            : conv_init[init_base + tap + t + 1];                              \
-        local_dw += d_conv_out * wv;                                           \
-    }                                                                          \
-    d_weight_partials[init_base + tap] = local_dw;                             \
+// dw/db half, T-tiled: the single 1300-deep serial walk per lane was
+// the cost (strided loads with no latency overlap). Tiles multiply
+// the lane count by ceil(T / CONV1D_TILE_T).
+#define DEFINE_CONV1D_BWD_DW_TILED(SUFFIX, TY)                                \
+extern "C" __global__ void conv1d_bwd_dw_tiled_##SUFFIX(                      \
+    float* __restrict__ d_weight_partials, /* [B*n_tiles, di*d_conv] */       \
+    float* __restrict__ d_bias_partials,   /* [B*n_tiles, di] */              \
+    const TY* __restrict__ d_u,                                               \
+    const TY* __restrict__ post_conv,                                         \
+    const TY* __restrict__ x_branch,                                          \
+    const float* __restrict__ conv_init, /* [B*di*d_conv] carry-in */         \
+    int batch, int T_, int d_inner, int d_conv                                \
+) {                                                                           \
+    /* Tap-split lanes as before, plus a T tile per blockIdx.y: each          \
+     * (b, d, tap, tile) lane keeps the descending-t add order WITHIN         \
+     * its tile and writes one partial row; the ascending-row                 \
+     * reduce_sum_axis0 folds (b, tile) rows in a fixed order. The            \
+     * per-tile grouping is a different dW/db summation order than            \
+     * the single serial walk (same bit family as the split-M dW              \
+     * change; the partition is a pure function of T). */                     \
+    int lanes = d_conv + 1;                                                   \
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;                          \
+    int total = batch * d_inner * lanes;                                      \
+    if (idx >= total) return;                                                 \
+    if (d_conv > 8) return;                                                   \
+    int tap = idx % lanes;                                                    \
+    int bd = idx / lanes;                                                     \
+    int b = bd / d_inner;                                                     \
+    int d = bd % d_inner;                                                     \
+    int n_tiles = (T_ + CONV1D_TILE_T - 1) / CONV1D_TILE_T;                   \
+    int tile = blockIdx.y;                                                    \
+    int t0 = tile * CONV1D_TILE_T;                                            \
+    if (t0 >= T_) return;                                                     \
+    int t_end = min(t0 + CONV1D_TILE_T, T_);                                  \
+    int row = b * n_tiles + tile;                                             \
+    int init_base = (b * d_inner + d) * d_conv;                               \
+    if (tap == d_conv) {                                                      \
+        float local_d_bias = 0.0f;                                            \
+        for (int t = t_end - 1; t >= t0; t--) {                               \
+            int bt_di = (b * T_ + t) * d_inner + d;                           \
+            float x = to_f(post_conv[bt_di]);                                 \
+            float sig = 1.0f / (1.0f + exp2f(-x * 1.4426950408889634f));      \
+            float silu_grad = sig * (1.0f + x * (1.0f - sig));                \
+            /* explicit two-rounding shape (see the fused kernel note) */     \
+            local_d_bias = __fadd_rn(                                         \
+                local_d_bias, __fmul_rn(to_f(d_u[bt_di]), silu_grad));        \
+        }                                                                     \
+        d_bias_partials[row * d_inner + d] = local_d_bias;                    \
+        return;                                                               \
+    }                                                                         \
+    float local_dw = 0.0f;                                                    \
+    for (int t = t_end - 1; t >= t0; t--) {                                   \
+        int bt_di = (b * T_ + t) * d_inner + d;                               \
+        float x = to_f(post_conv[bt_di]);                                     \
+        float sig = 1.0f / (1.0f + exp2f(-x * 1.4426950408889634f));          \
+        float silu_grad = sig * (1.0f + x * (1.0f - sig));                    \
+        float d_conv_out = to_f(d_u[bt_di]) * silu_grad;                      \
+        int tx = t - (d_conv - 1) + tap;                                      \
+        float wv = (tx >= 0)                                                  \
+            ? to_f(x_branch[(b * T_ + tx) * d_inner + d])                     \
+            : conv_init[init_base + tap + t + 1];                             \
+        local_dw += d_conv_out * wv;                                          \
+    }                                                                         \
+    d_weight_partials[row * (d_inner * d_conv) + d * d_conv + tap] =          \
+        local_dw;                                                             \
 }
 
-DEFINE_CONV1D_BWD_DW_ONLY(f32,  float)
-DEFINE_CONV1D_BWD_DW_ONLY(bf16, __nv_bfloat16)
-DEFINE_CONV1D_BWD_DW_ONLY(f16,  __half)
+DEFINE_CONV1D_BWD_DW_TILED(f32,  float)
+DEFINE_CONV1D_BWD_DW_TILED(bf16, __nv_bfloat16)
+DEFINE_CONV1D_BWD_DW_TILED(f16,  __half)

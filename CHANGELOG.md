@@ -126,6 +126,24 @@
 
 ### Changed (campaign-shape program, second night wave)
 
+- conv1d dw/db goes T-tiled: each (b, d, tap, tile) lane keeps the
+  descending-t order within its tile and the ascending-row reducer
+  folds (b, tile) rows in a fixed order. The old single 1300-step
+  serial walk per lane was 13.4 x24-layer ms; tiled it is 2.6. The
+  new dW/db summation grouping applies on EVERY GEMM tier (the conv
+  kernels are shared; the tier routes only GEMMs), so all nine run
+  digests move — final 0.6.3 baselines: T300
+  Cublas 66f066ef7631a79c / BI 9bc88814dedb2bd7 / TC 03afb9d1506c101d;
+  T1300 a65976720310c7cb / 0ae205c65b6f08e8 / 637806799ed25e59;
+  T2100 31aa43dff5dc6022 / 4b6c5288d4826b7c / a7c2a91cef94d002.
+  Run-to-run determinism verified (two runs bit-equal on all arms);
+  full park 421/421; the M3 output hashes are unchanged.
+- The parallel-scan backward's per-n d_a reduce and the final d_D
+  reduce finish their last five halvings with warp shuffles instead
+  of smem+barrier rounds — identical pairing order, bit-identical
+  sums, ~160 fewer barriers per block.
+- Campaign (bi+tc): 155.4 -> 142.6 ms/step with the conv dw tiling.
+
 - BIT-FAMILY BREAK (batch-invariant lanes): the split-M TN partition
   drops its `n_in >= 128` floor, so small-K dW GEMMs against large
   batch reductions split across M instead of running a handful of
