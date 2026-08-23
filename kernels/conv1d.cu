@@ -301,6 +301,37 @@ extern "C" __global__ void conv1d_burnin_forward_nosave_##SUFFIX(           \
     int b = idx / d_inner;                                                  \
     int d = idx % d_inner;                                                  \
     int state_base = (b * d_inner + d) * d_conv;                            \
+    if (d_conv == 4) {                                                      \
+        /* Register shift window, same bit contract as the f32 twin:       \
+         * the k-ascending chain is unchanged term for term. */             \
+        float s0 = state[state_base];                                       \
+        float s1 = state[state_base + 1];                                   \
+        float s2 = state[state_base + 2];                                   \
+        float s3 = state[state_base + 3];                                   \
+        const float w0 = weight[d * 4];                                     \
+        const float w1 = weight[d * 4 + 1];                                 \
+        const float w2 = weight[d * 4 + 2];                                 \
+        const float w3 = weight[d * 4 + 3];                                 \
+        const float bd = bias[d];                                           \
+        for (int t = 0; t < T_len; t++) {                                   \
+            int bt_di = (b * T_len + t) * d_inner + d;                      \
+            s0 = s1;                                                        \
+            s1 = s2;                                                        \
+            s2 = s3;                                                        \
+            s3 = to_f(x_branch[bt_di]);                                     \
+            float val = bd;                                                 \
+            val += s0 * w0;                                                 \
+            val += s1 * w1;                                                 \
+            val += s2 * w2;                                                 \
+            val += s3 * w3;                                                 \
+            u_out[bt_di] = FROM_F(val / (1.0f + exp2f(-val * 1.4426950408889634f))); \
+        }                                                                   \
+        state[state_base] = s0;                                             \
+        state[state_base + 1] = s1;                                         \
+        state[state_base + 2] = s2;                                         \
+        state[state_base + 3] = s3;                                         \
+        return;                                                             \
+    }                                                                       \
     for (int t = 0; t < T_len; t++) {                                       \
         int bt_di = (b * T_len + t) * d_inner + d;                          \
         for (int k = 0; k < d_conv - 1; k++) {                              \
@@ -590,6 +621,57 @@ extern "C" __global__ void conv1d_burnin_forward_tiled_##SUFFIX(              \
 DEFINE_CONV1D_BURNIN_TILED(f32,  float,         from_f_f32)
 DEFINE_CONV1D_BURNIN_TILED(bf16, __nv_bfloat16, from_f_bf16)
 DEFINE_CONV1D_BURNIN_TILED(f16,  __half,        from_f_f16)
+
+// Nosave tiled twin for the inference prefill: same tile-0 state seeding,
+// same x_branch halo, same k-ascending FMA chain - bit-identical to the
+// serial nosave walk - but no conv tape and no post_conv (inference keeps
+// nothing). Only the tile containing t = T-1 writes the carry-out state,
+// so a continued prefill sees exactly the serial walk's final window.
+#define DEFINE_CONV1D_BURNIN_NOSAVE_TILED(SUFFIX, TY, FROM_F)                 \
+extern "C" __global__ void conv1d_burnin_forward_nosave_tiled_##SUFFIX(       \
+    TY* u_out, float* state,                                                 \
+    const TY* x_branch, const float* weight, const float* bias,              \
+    int batch, int T_len, int d_inner, int d_conv                            \
+) {                                                                          \
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;                         \
+    int total = batch * d_inner;                                             \
+    if (idx >= total) return;                                                \
+    if (d_conv > 8) return;                                                  \
+    int b = idx / d_inner;                                                   \
+    int d = idx % d_inner;                                                   \
+    int t0 = blockIdx.y * CONV1D_TILE_T;                                     \
+    if (t0 >= T_len) return;                                                 \
+    int t_end = min(t0 + CONV1D_TILE_T, T_len);                              \
+    int state_base = (b * d_inner + d) * d_conv;                             \
+    float win[8];                                                            \
+    if (t0 == 0) {                                                           \
+        for (int k = 0; k < d_conv; k++) {                                   \
+            win[k] = state[state_base + k];                                  \
+        }                                                                    \
+    } else {                                                                 \
+        for (int k = 0; k < d_conv; k++) {                                   \
+            int th = t0 - d_conv + k;                                        \
+            win[k] = to_f(x_branch[(b * T_len + th) * d_inner + d]);         \
+        }                                                                    \
+    }                                                                        \
+    for (int t = t0; t < t_end; t++) {                                       \
+        int bt_di = (b * T_len + t) * d_inner + d;                           \
+        for (int k = 0; k < d_conv - 1; k++) win[k] = win[k + 1];            \
+        win[d_conv - 1] = to_f(x_branch[bt_di]);                             \
+        float val = bias[d];                                                 \
+        for (int k = 0; k < d_conv; k++) {                                   \
+            val += win[k] * weight[d * d_conv + k];                          \
+        }                                                                    \
+        u_out[bt_di] = FROM_F(val / (1.0f + exp2f(-val * 1.4426950408889634f))); \
+    }                                                                        \
+    if (t_end == T_len) {                                                    \
+        for (int k = 0; k < d_conv; k++) state[state_base + k] = win[k];     \
+    }                                                                        \
+}
+
+DEFINE_CONV1D_BURNIN_NOSAVE_TILED(f32,  float,         from_f_f32)
+DEFINE_CONV1D_BURNIN_NOSAVE_TILED(bf16, __nv_bfloat16, from_f_bf16)
+DEFINE_CONV1D_BURNIN_NOSAVE_TILED(f16,  __half,        from_f_f16)
 
 // Tiled d_x half of the conv backward. d_x[t] is a 4-tap anticausal FIR
 // of d_conv_out; the reverse carry walk within a tile is seeded with the

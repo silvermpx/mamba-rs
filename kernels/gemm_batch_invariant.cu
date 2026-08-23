@@ -403,7 +403,12 @@ NAME(                                                                           
     /* (and its bits) never depends on the path taken.                   */ \
     {                                                                       \
         const int VEC = 16 / (int)sizeof(T_IO);                             \
-        if ((k * (int)sizeof(T_IO)) % 16 == 0) {                            \
+        if ((k * (int)sizeof(T_IO)) % 16 == 0 &&                            \
+            (lda * (int)sizeof(T_IO)) % 16 == 0) {                          \
+            /* Both gates matter: with lda != k a 16-byte-aligned K can  */ \
+            /* still start a_row off-alignment (row * lda), and the      */ \
+            /* uint4 reinterpret would fault. Misaligned rows take the   */ \
+            /* all-scalar fill; smem contents are identical either way.  */ \
             const int k_vec = k / VEC;                                      \
             const uint4* a_vec =                                            \
                 reinterpret_cast<const uint4*>(a_row);                      \

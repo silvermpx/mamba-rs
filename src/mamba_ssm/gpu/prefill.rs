@@ -422,7 +422,7 @@ fn prefill_body<W: MambaWeightsView>(
             let dc_i = d_conv as i32;
             let mut builder = ctx
                 .stream
-                .launch_builder(&ctx.kernels.conv1d_burnin_fwd_nosave);
+                .launch_builder(&ctx.kernels.conv1d_burnin_fwd_nosave_tiled);
             builder.arg(scratch.u.inner_mut());
             builder.arg(&conv_ptr); // INFERENCE STATE conv — persistent
             builder.arg(scratch.x_branch.inner());
@@ -434,8 +434,10 @@ fn prefill_body<W: MambaWeightsView>(
             builder.arg(&t_i);
             builder.arg(&di_i);
             builder.arg(&dc_i);
-            unsafe { builder.launch(grid_1d(b * di)) }
-                .map_err(|e| format!("conv1d_nosave prefill L{layer_idx}: {e:?}"))?;
+            // T-tiled: 3 blocks at B=1 became ~111 - the serial T=4621
+            // walk was the single largest prefill stage.
+            unsafe { builder.launch(super::launch::grid_conv_tiled(b, di, t)) }
+                .map_err(|e| format!("conv1d_nosave_tiled prefill L{layer_idx}: {e:?}"))?;
         }
 
         // F4b: x_proj GEMM [B*T, di] → [B*T, xdbl_dim]
@@ -796,7 +798,7 @@ pub fn gpu_forward_inference_prefill_mixed<W: MambaWeightsView>(
             let dc_i = d_conv as i32;
             let mut bld = ctx
                 .stream
-                .launch_builder(k.conv1d_burnin_nosave_typed.get(dt));
+                .launch_builder(k.conv1d_burnin_nosave_tiled_typed.get(dt));
             let u_ptr = scratch.u.cached_ptr();
             let xb_ptr = scratch.x_branch.cached_ptr();
             bld.arg(&u_ptr);
@@ -810,8 +812,8 @@ pub fn gpu_forward_inference_prefill_mixed<W: MambaWeightsView>(
             bld.arg(&t_i);
             bld.arg(&di_i);
             bld.arg(&dc_i);
-            unsafe { bld.launch(grid_1d(b * di)) }
-                .map_err(|e| format!("conv1d_nosave prefill L{layer_idx}: {e:?}"))?;
+            unsafe { bld.launch(super::launch::grid_conv_tiled(b, di, t)) }
+                .map_err(|e| format!("conv1d_nosave_tiled prefill L{layer_idx}: {e:?}"))?;
         }
 
         // F4b: x_proj GEMM typed.

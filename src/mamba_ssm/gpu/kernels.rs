@@ -87,6 +87,11 @@ pub struct MambaKernels {
     pub conv1d_burnin_fwd: CudaFunction,
     /// Multi-step conv1d forward without saves (target network).
     pub conv1d_burnin_fwd_nosave: CudaFunction,
+    /// Nosave tiled twin (inference prefill): tile-0 seeds from the
+    /// carry-in state, later tiles from the x_branch halo - bit-identical
+    /// to the serial nosave walk at two orders more parallelism.
+    pub conv1d_burnin_fwd_nosave_tiled: CudaFunction,
+    pub conv1d_burnin_nosave_tiled_typed: TypedKernel,
     /// Multi-step conv1d backward.
     pub conv1d_burnin_bwd: CudaFunction,
 
@@ -678,6 +683,8 @@ impl MambaKernels {
             conv1d_step_bwd: get("conv1d_step_backward")?,
             conv1d_burnin_fwd: get("conv1d_burnin_forward")?,
             conv1d_burnin_fwd_nosave: get("conv1d_burnin_forward_nosave")?,
+            conv1d_burnin_fwd_nosave_tiled: get("conv1d_burnin_forward_nosave_tiled_f32")?,
+            conv1d_burnin_nosave_tiled_typed: load_typed("conv1d_burnin_forward_nosave_tiled")?,
             conv1d_burnin_bwd: get("conv1d_burnin_backward")?,
             // activations
             silu_fwd: get("silu_forward")?,
