@@ -157,8 +157,21 @@ fn run_lm_shape(
         .map_err(|e| format!("sync: {e:?}"))?;
     let graph_ms = t1.elapsed().as_secs_f64() * 1000.0 / STEPS_GRAPH as f64;
 
+    // Self-describing measurement: the GEMM tier rides TWO env flags
+    // (MAMBA_RS_BATCH_INVARIANT and MAMBA_RS_BI_TENSOR_CORES on top of
+    // it); printing the resolved tier makes a missing base flag visible
+    // in the reading itself.
+    let tier = if trainer.ctx().batch_invariant() {
+        if trainer.ctx().bi_tensor_cores() {
+            "bi+tc"
+        } else {
+            "bi"
+        }
+    } else {
+        "cublas"
+    };
     eprintln!(
-        "LM {label:5}  eager={eager_ms:7.3} ms/step  graph={graph_ms:7.3} ms/step  speedup={:.2}x",
+        "LM {label:5} tier={tier}  eager={eager_ms:7.3} ms/step  graph={graph_ms:7.3} ms/step  speedup={:.2}x",
         eager_ms / graph_ms
     );
     Ok(())

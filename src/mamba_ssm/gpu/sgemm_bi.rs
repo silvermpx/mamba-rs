@@ -51,7 +51,13 @@ const SPLITM_TN_BK_ALIGN: u32 = 16;
 /// Returns `(m_chunk, f_final)` or `None` when the plain kernel is fine.
 #[inline]
 fn splitm_tn_partition(batch: usize, n_in: usize, n_out: usize) -> Option<(usize, usize)> {
-    if !(n_in >= 128 && n_out >= 128 && batch >= 256) {
+    // No n_in floor: the partial kernel predicates K_out < 128 exactly
+    // like the plain kernel, and a small-K dW against a large batch
+    // reduction underfills the grid without the split (K_out=24, N=768
+    // ran six CTAs). The split changes the dW summation order versus
+    // the plain kernel; run-to-run and per-shape determinism hold — the
+    // partition is a pure function of (batch, n_in, n_out).
+    if !(n_out >= 128 && batch >= 256) {
         return None;
     }
     let k_tiles = (n_in as u32).div_ceil(128);

@@ -126,6 +126,26 @@
 
 ### Changed (campaign-shape program, second night wave)
 
+- BIT-FAMILY BREAK (batch-invariant lanes): the split-M TN partition
+  drops its `n_in >= 128` floor, so small-K dW GEMMs against large
+  batch reductions split across M instead of running a handful of
+  CTAs (dt_proj dW: 6 -> 282 CTAs, 0.807 -> 0.064 ms/layer; the dt
+  pair 21.3 -> 3.5 x24-layer ms). The split changes the dW summation
+  order, so BatchInvariant/BatchInvariantTc run digests move to a new
+  family; run-to-run determinism verified (two runs bit-equal), the
+  partition stays a pure function of (batch, n_in, n_out), and the
+  cuBLAS-lane digests are untouched. New digest baselines: T300 BI
+  2b74dfbdb91ef0ec / TC 1feca6c2e341c873; T1300 BI 18f82bd55af98056 /
+  TC a1127230fa767171; T2100 BI 3a124f6158a5922c / TC 3da29b372bc98d93
+  (Cublas arms unchanged: d51f9412f5f09206 / 007082a9aa104f59 /
+  ba13a79fc04a7faa).
+- The campaign bench prints its resolved GEMM tier: the tier rides TWO
+  env flags (`MAMBA_RS_BATCH_INVARIANT` plus `MAMBA_RS_BI_TENSOR_CORES`
+  on top), and a reading taken with only the TC flag silently measures
+  the cuBLAS lane — several same-day readings did exactly that. With
+  the pair set, the batch-invariant tensor-core campaign is
+  155.4 ms/step (cuBLAS lane: 169.0).
+
 - T-major B/C for the parallel scan: the gather writes [b][n][t]
   (route-picked `gather_bc_cols_tmajor` twins) and all five parallel
   scan kernels read it, so each (d, n) lane walks contiguous t-runs.
