@@ -2,6 +2,16 @@
 
 ## 0.6.3 (2026-08-23)
 
+Performance release. Campaign-shape training (d_model 384, 24 layers,
+B=8, T=1300, bf16, batch-invariant + tensor-core tier, RTX 5090):
+Mamba-1 441.4 -> 131.5 ms/step, Mamba-3 636 -> 179.4 ms/step; the
+O(T) h tape is gone (-12.3 GB at that shape, a 4x larger micro-batch
+fits). Run-to-run bit determinism holds throughout; reductions that
+were deliberately regrouped form one bit family with baselines
+recorded below - checkpoints from earlier versions do not resume into
+0.6.3 training. Inference kernels and checkpoint formats are
+unchanged.
+
 ### Fixed
 
 - The parallel reverse-scan backward accumulates its per-chunk `d_a`

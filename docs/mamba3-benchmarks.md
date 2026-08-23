@@ -10,6 +10,15 @@ mamba-rs 0.4.2; sections marked 0.6 measured on the 0.6 development tree.
 > For end-to-end LLM inference benchmarks against production weights,
 > see [mamba1-benchmarks.md](mamba1-benchmarks.md).
 
+## Training step — campaign shape (0.6.3, rented 2x RTX 5090, CUDA 13.0)
+
+d_model 384, 24 layers, B=8, T=1300, bf16, graph lane: 636 -> 179.4
+ms/step (-72%) across the 0.6.3 program. The dominant backward kernel
+(m3_dqkv) went 11.4 -> 1.94 ms/launch via shared pair/decay matrices,
+t-split lane widening and the chunk-parallel backward decomposition
+(state terms + state passing + parallel chunks, mirroring the
+forward's three-phase structure).
+
 ## GPU Inference (T=1 step, default config: d_model=128, 4 layers, nheads=16, headdim=16)
 
 | Batch | No Graph | CUDA Graph |

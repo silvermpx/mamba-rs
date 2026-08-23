@@ -2,10 +2,11 @@
 
 Distilled from the 2026-08-22/23 program that took the campaign training
 step (d_model 384, 24 layers, B=8, T=1300, bf16, batch-invariant +
-tensor-core tier) from 441.4 to 247.4 ms/step (M1, -44%) and the M3 step
-from 636 to 221.5 ms/step (-65%) with every change bit-identical on all
-nine digest arms. Every rule below was paid for with a measurement or a
-bug on this codebase; apply them in order.
+tensor-core tier) from 441.4 to 131.5 ms/step (M1, -70%) and the M3 step
+from 636 to 179.4 ms/step (-72%). Most changes were bit-identical on all
+nine digest arms; the handful that regrouped reductions landed inside one
+deliberate bit-family window with re-recorded baselines. Every rule below was paid for with a measurement or a bug on
+this codebase; apply them in order.
 
 ## 1. Measure first — predictions about GPU walls are usually wrong
 

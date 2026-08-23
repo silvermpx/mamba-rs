@@ -12,6 +12,31 @@ than vLLM / Thinking Machines Lab's `batch_invariant` Triton kernel.
 Parallel prefill rides the deterministic GEMM tiers
 ([determinism-benchmarks.md](determinism-benchmarks.md)).
 
+## Training step — campaign shape (0.6.3, rented 2x RTX 5090, CUDA 13.0)
+
+d_model 384, 24 layers, B=8, T=1300, bf16, batch-invariant +
+tensor-core GEMM tier, graph lane. The 0.6.3 optimization program took
+this step from 441.4 to 131.5 ms/step (-70%) with run-to-run bit
+determinism preserved throughout (one deliberate bit-family break,
+baselines in the CHANGELOG). Peak-memory side: the h tape is gone
+(-12.3 GB at this shape), so a B=32 micro-batch fits a 32 GB card.
+
+| Stage | ms/step |
+|-------|--------:|
+| program start | 441.4 |
+| + conv register window, tape kills, tap-split | 261.9 |
+| + slim h tape (in-backward replay) | 247.4 |
+| + T-major B/C layout | ~169 |
+| + small-K dW split-M | 155.4 |
+| + T-tiled conv dw/db | 142.6 |
+| + d-group dB/dC fold | **131.5** |
+
+Isolated ledger at 131.5 (x24-layer ms): scan fwd 10.7 / bwd ~20 plus
+fold partials, backward GEMMs 15.4 (dt_proj 3.5), conv dw 2.6 / dx
+1.5, dB/dC reducer ~2.5. The torch reference (fused CUDA
+selective-scan, atomicAdd backward - no bit contract) sits at 61.4
+ms/step on the same shape.
+
 ## LLM Inference — state-spaces/mamba-*-hf (end-to-end, graph-captured)
 
 Production checkpoints loaded from HuggingFace, greedy decode, 100-token generation.

@@ -355,6 +355,13 @@ bit-identical tile families (128×128 and 64×64, shape-routed) cover
 everything from d128 RL models to LLM projections. Full tables and
 contracts: [deterministic GEMM benchmarks](docs/determinism-benchmarks.md).
 
+The 0.6.3 kernel program cut the deterministic training step 3.4×
+(d_model 384, 24 layers, B=8, T=1300, bf16, tensor-core tier:
+441 → 131.5 ms/step on an RTX 5090) and removed the O(T) scan tape
+(−12.3 GB at that shape) — stage-by-stage table in
+[Mamba SSM benchmarks](docs/mamba1-benchmarks.md) and the
+[CHANGELOG](CHANGELOG.md).
+
 ### Per-step latency (default config: d_model=128, 3 layers)
 
 | | Mamba SSM | Mamba-3 SISO |
