@@ -1122,7 +1122,9 @@ pub fn gpu_forward_mamba3_backbone_mixed(
         let stream_out = if l + 1 < dims.n_layers {
             acts.layers[l + 1].residual.cached_ptr()
         } else {
-            temporal_f32.cached_ptr()
+            // The LAST layer's residual_add lands in the pre-norm save the
+            // backward replays from; norm_f below writes the public output.
+            acts.norm_f_input.cached_ptr()
         };
         gpu_forward_mamba3_layer_mixed(
             exec,
@@ -1135,24 +1137,20 @@ pub fn gpu_forward_mamba3_backbone_mixed(
         )?;
     }
 
-    // norm_f — rmsnorm_fwd_f32in_typed: f32 residual (temporal) → f32 rms +
-    // typed post-norm for subsequent LM head / loss. Save f32 pre-norm for
-    // backward.
-    acts.norm_f_input.copy_from_raw(temporal_f32, &ctx.stream)?;
+    // norm_f — the f32 rmsnorm from the saved pre-norm residual into the
+    // caller's f32 temporal: the head consumes the POST-norm stream, the
+    // exact mirror of the f32 lane (norm_f_weight is f32 in the mixed
+    // arena). The backward's rmsnorm_bwd replays from norm_f_input +
+    // norm_f_rms saved here.
     {
         let bt_i = bt as i32;
         let dm_i = dm as i32;
         let eps: f32 = dims.rms_norm_eps;
-        let mut bld = ctx
-            .stream
-            .launch_builder(m3k.rmsnorm_fwd_f32in_typed.get(dtype));
-        // Output goes into a typed scratch — but we don't have one allocated
-        // here. For now we re-use out_flat (same size bt*d_model, typed).
-        let post = scratch.out_flat.cached_ptr();
+        let mut bld = ctx.stream.launch_builder(&m3k.rmsnorm_fwd);
         let rms = acts.norm_f_rms.cached_ptr();
         let x = acts.norm_f_input.cached_ptr();
         let nw = w.compute.norm_f_weight.ptr();
-        bld.arg(&post);
+        bld.arg(temporal_f32.inner_mut());
         bld.arg(&rms);
         bld.arg(&x);
         bld.arg(&nw);

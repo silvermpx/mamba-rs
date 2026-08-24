@@ -227,20 +227,19 @@ fn run_mixed(
     .unwrap();
     ctx.stream.synchronize().unwrap();
 
-    // `temporal_f32` holds the f32 residual stream AFTER the last residual
-    // add (final residual — NOT the post-norm_f output). That's the natural
-    // comparison surface: f32 backbone's final residual before norm_f is
-    // recorded as `acts.norm_f_input`. We'll compare final residuals.
+    // `temporal_f32` holds the POST-norm_f output — the public contract
+    // the classifier head consumes. Comparing this surface (not the
+    // pre-norm residual) is what catches a dropped final norm: the
+    // pre-norm buffers of the two lanes can agree while the head sees a
+    // completely different stream.
     let mut out = vec![0f32; bt * dims.d_model];
     temporal.download(&ctx.stream, &mut out).unwrap();
     out
 }
 
-/// f32-reference path: we need to stop BEFORE norm_f to compare against
-/// mixed's final residual. Re-run f32 without the final norm_f step. The
-/// simplest route is to grab `acts.norm_f_input` after f32 backbone, which
-/// is the pre-norm f32 residual.
-fn run_f32_pre_normf(
+/// f32-reference path returning the POST-norm_f `temporal` — the same
+/// public surface the mixed lane must produce.
+fn run_f32_post_normf(
     cpu: &Mamba3Weights,
     cfg: &Mamba3Config,
     dims: &GpuMamba3Dims,
@@ -303,10 +302,9 @@ fn run_f32_pre_normf(
     )
     .unwrap();
     ctx.stream.synchronize().unwrap();
-    // Return `acts.norm_f_input` — the pre-norm_f residual stream (matches
-    // mixed's final `temporal_f32` which stops before its own norm_f).
+    // Return the post-norm_f `temporal` — the public output surface.
     let mut out = vec![0f32; bt * dims.d_model];
-    acts.norm_f_input.download(&ctx.stream, &mut out).unwrap();
+    temporal.download(&ctx.stream, &mut out).unwrap();
     out
 }
 
@@ -316,7 +314,7 @@ fn check(dtype: WeightDtype) {
     let cpu = Mamba3Weights::init(&cfg, dims.mamba_input_dim, 0xBADF00D8);
     let input = det_rand(dims.bt() * dims.mamba_input_dim, 0xA1);
 
-    let ref_out = run_f32_pre_normf(&cpu, &cfg, &dims, &input);
+    let ref_out = run_f32_post_normf(&cpu, &cfg, &dims, &input);
     let _unused = run_f32(&cpu, &cfg, &dims, &input); // exercise full f32 path to smoke it
     let typ_out = run_mixed(&cpu, &cfg, &dims, dtype, &input);
 
@@ -345,4 +343,30 @@ fn m3_forward_mixed_parity_bf16() {
 #[test]
 fn m3_forward_mixed_parity_f16() {
     check(WeightDtype::F16);
+}
+
+/// The dropped-norm_f regression: the mixed forward's public output must
+/// be the POST-norm stream. With norm scales at ones every output row has
+/// RMS ~= 1 whatever the depth; the pre-norm residual of a deep stack
+/// drifts far from 1, so a dropped final norm fails this immediately
+/// (the defect shipped exactly that way: the head consumed the raw
+/// 24-layer residual while the backward applied the norm VJP).
+#[test]
+fn m3_forward_mixed_output_is_post_norm() {
+    let cfg = Mamba3Config {
+        n_layers: 8,
+        ..tiny_cfg()
+    };
+    let dims = dims_for(&cfg, 1, 4);
+    let cpu = Mamba3Weights::init(&cfg, dims.mamba_input_dim, 0xBADF00D8);
+    let input = det_rand(dims.bt() * dims.mamba_input_dim, 0xA1);
+    let out = run_mixed(&cpu, &cfg, &dims, WeightDtype::Bf16, &input);
+    for (r, row) in out.chunks(dims.d_model).enumerate() {
+        let rms = (row.iter().map(|v| v * v).sum::<f32>() / row.len() as f32).sqrt();
+        assert!(
+            (0.8..=1.25).contains(&rms),
+            "row {r}: output RMS {rms:.3} is not ~1 — the public surface is \
+             not the post-norm_f stream"
+        );
+    }
 }

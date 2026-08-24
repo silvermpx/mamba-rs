@@ -627,22 +627,24 @@ pub fn step_m3_capturable(
     grads: &crate::mamba3_siso::gpu::weights::GpuMamba3Grads,
 ) -> Result<(), String> {
     let flat_base = grads.flat.cached_ptr();
-    // M3 no-decay group (mirror of the M1 set's principle): dt bias, D and
-    // every norm scale. M3 has no fixed a_log (A is input-dependent); the
-    // B/C biases stay decayed (only the reference-named analogues are
-    // exempted). Active only when `adam.reference_no_decay`.
+    // M3 no-decay group (mirror of the M1 set's principle): dt bias, D,
+    // every norm scale AND every bias — the reference parameter grouping
+    // exempts all params named `*bias`, which covers input_proj_b and the
+    // all-ones B/C biases (decay would walk them out of the positive
+    // regime). M3 has no fixed a_log (A is input-dependent). Active only
+    // when `adam.reference_no_decay`.
     let mut pairs: Vec<(&GpuBuffer, &GradSlice, bool)> =
         Vec::with_capacity(3 + 10 * weights.layers.len());
     pairs.push((&weights.input_proj_w, &grads.input_proj_w, false));
-    pairs.push((&weights.input_proj_b, &grads.input_proj_b, false));
+    pairs.push((&weights.input_proj_b, &grads.input_proj_b, true));
     for (lw, lg) in weights.layers.iter().zip(&grads.layers) {
         pairs.push((&lw.norm_weight, &lg.norm_weight, true));
         pairs.push((&lw.in_proj_w, &lg.in_proj_w, false));
         pairs.push((&lw.dt_bias, &lg.dt_bias, true));
         pairs.push((&lw.b_norm_weight, &lg.b_norm_weight, true));
         pairs.push((&lw.c_norm_weight, &lg.c_norm_weight, true));
-        pairs.push((&lw.b_bias, &lg.b_bias, false));
-        pairs.push((&lw.c_bias, &lg.c_bias, false));
+        pairs.push((&lw.b_bias, &lg.b_bias, true));
+        pairs.push((&lw.c_bias, &lg.c_bias, true));
         pairs.push((&lw.d_param, &lg.d_param, true));
         pairs.push((&lw.norm_gate_weight, &lg.norm_gate_weight, true));
         pairs.push((&lw.out_proj_w, &lg.out_proj_w, false));
@@ -955,15 +957,19 @@ pub fn m3_specs(
     };
     let mut specs = Vec::with_capacity(3 + 10 * weights.layers.len());
     specs.push(f32_spec(&weights.input_proj_w, &grads.input_proj_w, false));
-    specs.push(f32_spec(&weights.input_proj_b, &grads.input_proj_b, false));
+    // Every bias is no-decay per the reference parameter grouping (the
+    // name rule in the official param_grouping catches input_proj_b and
+    // the all-ones B/C biases; decaying an all-ones bias walks it out of
+    // the positive regime the Mamba-3 ablation requires).
+    specs.push(f32_spec(&weights.input_proj_b, &grads.input_proj_b, true));
     for (lw, lg) in weights.layers.iter().zip(&grads.layers) {
         specs.push(f32_spec(&lw.norm_weight, &lg.norm_weight, true));
         specs.push(f32_spec(&lw.in_proj_w, &lg.in_proj_w, false));
         specs.push(f32_spec(&lw.dt_bias, &lg.dt_bias, true));
         specs.push(f32_spec(&lw.b_norm_weight, &lg.b_norm_weight, true));
         specs.push(f32_spec(&lw.c_norm_weight, &lg.c_norm_weight, true));
-        specs.push(f32_spec(&lw.b_bias, &lg.b_bias, false));
-        specs.push(f32_spec(&lw.c_bias, &lg.c_bias, false));
+        specs.push(f32_spec(&lw.b_bias, &lg.b_bias, true));
+        specs.push(f32_spec(&lw.c_bias, &lg.c_bias, true));
         specs.push(f32_spec(&lw.d_param, &lg.d_param, true));
         specs.push(f32_spec(&lw.norm_gate_weight, &lg.norm_gate_weight, true));
         specs.push(f32_spec(&lw.out_proj_w, &lg.out_proj_w, false));

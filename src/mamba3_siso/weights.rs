@@ -64,8 +64,14 @@ impl SimpleRng {
     }
 }
 
-fn kaiming_uniform(buf: &mut [f32], fan_in: usize, rng: &mut SimpleRng) {
-    let bound = (3.0 / fan_in as f64).sqrt() as f32;
+/// The reference Linear init: `nn.Linear`'s default `reset_parameters`
+/// is `kaiming_uniform_(a=sqrt(5))`, i.e. gain 1/sqrt(3) and bound
+/// 1/sqrt(fan_in) — NOT the gain-1 bound sqrt(3/fan_in). The official
+/// `_init_weights` never re-touches these projections, so the PyTorch
+/// default IS the shipped Mamba-3 init; our previous gain-1 bound gave
+/// every projection 3x the reference variance.
+fn linear_default_uniform(buf: &mut [f32], fan_in: usize, rng: &mut SimpleRng) {
+    let bound = (1.0 / fan_in as f64).sqrt() as f32;
     for v in buf.iter_mut() {
         *v = (rng.next_f32() * 2.0 - 1.0) * bound;
     }
@@ -115,7 +121,12 @@ impl Mamba3Weights {
 
     /// Initialize weights with Mamba-3 specific scheme.
     ///
-    /// - Linear layers: Kaiming uniform (fan_in)
+    /// - Linear layers: the PyTorch `nn.Linear` default uniform (the
+    ///   shipped reference init — see `linear_default_uniform`)
+    /// - out_proj additionally carries the GPT-2 prenorm-residual rescale
+    ///   (divide by sqrt(n_residuals_per_layer * n_layers); one residual
+    ///   per layer in this pure-Mamba stack) per the official
+    ///   `mixer_seq_simple.py` `_init_weights`
     /// - dt_bias: inverse softplus of log-uniform(0.001, 0.1)
     /// - D, norm weights: ones
     /// - B/C biases: ones (per state-spaces/mamba `mamba3.py`:
@@ -126,12 +137,16 @@ impl Mamba3Weights {
         let mut rng = SimpleRng::new(seed);
         let d = cfg.d_model;
         let di = cfg.d_inner();
+        let residual_rescale = 1.0 / (cfg.n_layers as f64).sqrt() as f32;
 
-        kaiming_uniform(&mut w.input_proj_w, input_dim, &mut rng);
+        linear_default_uniform(&mut w.input_proj_w, input_dim, &mut rng);
 
         for lw in &mut w.layers {
-            kaiming_uniform(&mut lw.in_proj_w, d, &mut rng);
-            kaiming_uniform(&mut lw.out_proj_w, di, &mut rng);
+            linear_default_uniform(&mut lw.in_proj_w, d, &mut rng);
+            linear_default_uniform(&mut lw.out_proj_w, di, &mut rng);
+            for v in &mut lw.out_proj_w {
+                *v *= residual_rescale;
+            }
 
             // dt_bias: inv_softplus(log-uniform(0.001, 0.1)), floored at
             // dt_init_floor per the reference init (state-spaces/mamba
