@@ -106,7 +106,7 @@ fn m1_scan_bwd_output_hashes() {
         bld.arg(&dsi);
         bld.arg(&tape_ptr);
         bld.arg(&slim);
-        unsafe { bld.launch(grid_parallel_scan_typed(b, di, dtype.size_bytes())) }.unwrap();
+        unsafe { bld.launch(grid_parallel_scan_typed(b, di, dtype.size_bytes(), ds)) }.unwrap();
     }
     ctx.stream.synchronize().unwrap();
     {

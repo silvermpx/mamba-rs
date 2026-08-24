@@ -88,7 +88,7 @@ pub fn gpu_forward_inference_prefill<W: MambaWeightsView>(
     // State is the persistent inference state — do NOT zero. We build on top.
     // Working temporal: start with the input embeddings for all T timesteps.
     scratch.out_flat.copy_from(ip_out_flat, &ctx.stream)?;
-    prefill_body(ctx, weights, a_neg_all, state, scratch)?;
+    prefill_body(ctx, weights, a_neg_all, state, scratch, None)?;
     emit_outputs(
         ctx,
         scratch,
@@ -118,8 +118,24 @@ pub fn gpu_forward_inference_prefill_full<W: MambaWeightsView>(
         a_neg_all,
     } = inputs;
     scratch.out_flat.copy_from(ip_out_flat, &ctx.stream)?;
-    prefill_body(ctx, weights, a_neg_all, state, scratch)?;
-    emit_outputs(ctx, scratch, outputs)
+    let PrefillOutputs {
+        last_temporal,
+        mut full_temporal,
+    } = outputs;
+    check_output_lens(scratch.dims, last_temporal, full_temporal.as_deref())?;
+    prefill_body(
+        ctx,
+        weights,
+        a_neg_all,
+        state,
+        scratch,
+        full_temporal.as_deref_mut(),
+    )?;
+    let src = match &full_temporal {
+        Some(full) => &**full,
+        None => &scratch.out_flat,
+    };
+    gather_last(ctx, src, last_temporal, scratch.dims)
 }
 
 /// Prefill from RAW (pre-projection) input: applies `input_proj` internally
@@ -166,8 +182,24 @@ pub fn gpu_forward_inference_prefill_from_raw<W: MambaWeightsView>(
         Some(weights.input_proj_b()),
         (bt, dims.mamba_input_dim, dims.d_model),
     )?;
-    prefill_body(ctx, weights, a_neg_all, state, scratch)?;
-    emit_outputs(ctx, scratch, outputs)
+    let PrefillOutputs {
+        last_temporal,
+        mut full_temporal,
+    } = outputs;
+    check_output_lens(scratch.dims, last_temporal, full_temporal.as_deref())?;
+    prefill_body(
+        ctx,
+        weights,
+        a_neg_all,
+        state,
+        scratch,
+        full_temporal.as_deref_mut(),
+    )?;
+    let src = match &full_temporal {
+        Some(full) => &**full,
+        None => &scratch.out_flat,
+    };
+    gather_last(ctx, src, last_temporal, scratch.dims)
 }
 
 /// Raw-input prefill emitting the COLUMN SUM of the post-`norm_f` temporal
@@ -231,7 +263,7 @@ pub fn gpu_forward_inference_prefill_pooled_sum_from_raw<W: MambaWeightsView>(
         Some(weights.input_proj_b()),
         (bt, dims.mamba_input_dim, dims.d_model),
     )?;
-    prefill_body(ctx, weights, a_neg_all, state, scratch)?;
+    prefill_body(ctx, weights, a_neg_all, state, scratch, None)?;
     // colsum_accumulate does `db[j] += sum` — zero the target first so the
     // result is exactly the sum over T.
     pooled_sum.zero(&ctx.stream)?;
@@ -334,6 +366,7 @@ fn prefill_body<W: MambaWeightsView>(
     a_neg_all: &GpuBuffer,
     state: &mut GpuInferenceState,
     scratch: &mut GpuMambaTargetScratch,
+    final_out: Option<&mut GpuBuffer>,
 ) -> Result<(), String> {
     let dims: GpuMambaDims = scratch.dims;
     let seq_len = dims.seq_len;
@@ -398,21 +431,10 @@ fn prefill_body<W: MambaWeightsView>(
             (bt, dm, 2 * di),
         )?;
 
-        // F3: split x + SiLU(gate) [B*T]
-        {
-            let bt_i = bt as i32;
-            let di_i = di as i32;
-            let gs_raw = scratch.gate_silu.cached_ptr();
-            let mut builder = ctx.stream.launch_builder(&ctx.kernels.split_gate_silu);
-            builder.arg(scratch.x_branch.inner_mut());
-            builder.arg(scratch.gate_silu.inner_mut());
-            builder.arg(&gs_raw);
-            builder.arg(scratch.proj_flat.inner());
-            builder.arg(&bt_i);
-            builder.arg(&di_i);
-            unsafe { builder.launch(grid_1d(bt * di)) }
-                .map_err(|e| format!("split_gate prefill L{layer_idx}: {e:?}"))?;
-        }
+        // F3 (split x + SiLU gate) is gone: the conv reads its lane
+        // strided from the in_proj output, and the scan fuses the gating
+        // into its y store - three kernels and two B*T*di round-trips
+        // replaced by two strided reads, bit-identically.
 
         // F4a: conv1d burnin nosave + fused SiLU [all T, parallel B*d_inner]
         {
@@ -425,7 +447,7 @@ fn prefill_body<W: MambaWeightsView>(
                 .launch_builder(&ctx.kernels.conv1d_burnin_fwd_nosave_tiled);
             builder.arg(scratch.u.inner_mut());
             builder.arg(&conv_ptr); // INFERENCE STATE conv — persistent
-            builder.arg(scratch.x_branch.inner());
+            builder.arg(scratch.proj_flat.inner());
             let cw = lw.conv1d_weight();
             let cb = lw.conv1d_bias();
             builder.arg(&cw);
@@ -434,6 +456,8 @@ fn prefill_body<W: MambaWeightsView>(
             builder.arg(&t_i);
             builder.arg(&di_i);
             builder.arg(&dc_i);
+            let xs_i = (2 * di) as i32;
+            builder.arg(&xs_i);
             // T-tiled: 3 blocks at B=1 became ~111 - the serial T=4621
             // walk was the single largest prefill stage.
             unsafe { builder.launch(super::launch::grid_conv_tiled(b, di, t)) }
@@ -495,39 +519,67 @@ fn prefill_body<W: MambaWeightsView>(
             let b_offset = dt_rank as i32;
             let c_offset = (dt_rank + ds) as i32;
             // Parallel route gathers T-major (matches the scan kernels).
+            // The staged tile writes t-contiguous instead of scattering one
+            // sector per element; identical bytes, so bit-free. Falls back
+            // to the untiled kernel past the 48 KB static smem budget.
             let tmajor = dims.scan_mode.use_parallel(t, ds);
-            let kernel = if tmajor {
-                &ctx.kernels.gather_bc_cols_tmajor
-            } else {
-                &ctx.kernels.gather_bc_cols
-            };
+            let tile_smem = 2 * ds * (super::launch::GBC_TILE_T + 1) * std::mem::size_of::<f32>();
             let t_i = t as i32;
-            let mut builder = ctx.stream.launch_builder(kernel);
-            builder.arg(scratch.b_gathered.inner_mut());
-            builder.arg(scratch.c_gathered.inner_mut());
-            builder.arg(scratch.xdbl.inner());
-            builder.arg(&bt_i);
-            if tmajor {
+            if tmajor && tile_smem <= 48 * 1024 {
+                let mut builder = ctx
+                    .stream
+                    .launch_builder(&ctx.kernels.gather_bc_cols_tmajor_tiled);
+                builder.arg(scratch.b_gathered.inner_mut());
+                builder.arg(scratch.c_gathered.inner_mut());
+                builder.arg(scratch.xdbl.inner());
                 builder.arg(&t_i);
-            }
-            builder.arg(&xdbl_i);
-            builder.arg(&ds_i);
-            builder.arg(&b_offset);
-            builder.arg(&c_offset);
-            unsafe { builder.launch(grid_1d(bt * ds)) }
+                builder.arg(&xdbl_i);
+                builder.arg(&ds_i);
+                builder.arg(&b_offset);
+                builder.arg(&c_offset);
+                unsafe {
+                    builder.launch(super::launch::grid_gather_bc_tiled(
+                        b,
+                        t,
+                        ds,
+                        std::mem::size_of::<f32>(),
+                    ))
+                }
                 .map_err(|e| format!("gather_bc prefill L{layer_idx}: {e:?}"))?;
+            } else {
+                let kernel = if tmajor {
+                    &ctx.kernels.gather_bc_cols_tmajor
+                } else {
+                    &ctx.kernels.gather_bc_cols
+                };
+                let mut builder = ctx.stream.launch_builder(kernel);
+                builder.arg(scratch.b_gathered.inner_mut());
+                builder.arg(scratch.c_gathered.inner_mut());
+                builder.arg(scratch.xdbl.inner());
+                builder.arg(&bt_i);
+                if tmajor {
+                    builder.arg(&t_i);
+                }
+                builder.arg(&xdbl_i);
+                builder.arg(&ds_i);
+                builder.arg(&b_offset);
+                builder.arg(&c_offset);
+                unsafe { builder.launch(grid_1d(bt * ds)) }
+                    .map_err(|e| format!("gather_bc prefill L{layer_idx}: {e:?}"))?;
+            }
         }
         {
             let b_i = b as i32;
             let t_i = t as i32;
             let di_i = di as i32;
             let ds_i = ds as i32;
+            let gate_stride = (2 * di) as i32;
             if dims.scan_mode.use_parallel(t, ds) {
                 let mut builder = ctx
                     .stream
                     .launch_builder(&ctx.kernels.ssm_parallel_fwd_nosave);
                 builder.arg(&ssm_ptr);
-                builder.arg(scratch.y.inner_mut());
+                builder.arg(scratch.gated.inner_mut());
                 builder.arg(scratch.delta.inner());
                 builder.arg(scratch.u.inner());
                 builder.arg(scratch.b_gathered.inner());
@@ -535,18 +587,20 @@ fn prefill_body<W: MambaWeightsView>(
                 builder.arg(&a_neg_ptr);
                 let dp = lw.d_param();
                 builder.arg(&dp);
+                builder.arg(scratch.proj_flat.inner());
+                builder.arg(&gate_stride);
                 builder.arg(&b_i);
                 builder.arg(&t_i);
                 builder.arg(&di_i);
                 builder.arg(&ds_i);
-                unsafe { builder.launch(grid_parallel_scan(b, di)) }
+                unsafe { builder.launch(grid_parallel_scan(b, di, ds)) }
                     .map_err(|e| format!("ssm_parallel prefill L{layer_idx}: {e:?}"))?;
             } else {
                 let mut builder = ctx
                     .stream
                     .launch_builder(&ctx.kernels.ssm_burnin_fwd_nosave);
                 builder.arg(&ssm_ptr);
-                builder.arg(scratch.y.inner_mut());
+                builder.arg(scratch.gated.inner_mut());
                 builder.arg(scratch.delta.inner());
                 builder.arg(scratch.u.inner());
                 builder.arg(scratch.b_gathered.inner());
@@ -554,6 +608,8 @@ fn prefill_body<W: MambaWeightsView>(
                 builder.arg(&a_neg_ptr);
                 let dp = lw.d_param();
                 builder.arg(&dp);
+                builder.arg(scratch.proj_flat.inner());
+                builder.arg(&gate_stride);
                 builder.arg(&b_i);
                 builder.arg(&t_i);
                 builder.arg(&di_i);
@@ -562,18 +618,8 @@ fn prefill_body<W: MambaWeightsView>(
                     .map_err(|e| format!("ssm_nosave prefill L{layer_idx}: {e:?}"))?;
             }
         }
-
-        // F4e: gating — y * gate_silu
-        {
-            let n = (bt * di) as i32;
-            let mut builder = ctx.stream.launch_builder(&ctx.kernels.elementwise_mul);
-            builder.arg(scratch.gated.inner_mut());
-            builder.arg(scratch.y.inner());
-            builder.arg(scratch.gate_silu.inner());
-            builder.arg(&n);
-            unsafe { builder.launch(grid_1d(bt * di)) }
-                .map_err(|e| format!("gating prefill L{layer_idx}: {e:?}"))?;
-        }
+        // Gating now happens inside the scan's y store (fused, one
+        // rounding, same SiLU) - the separate mul kernel is gone.
 
         // F5: out_proj GEMM [B*T, di] → [B*T, dm] — the block output lands
         // in `residual` (dead since F2 consumed the normed values).
@@ -611,7 +657,13 @@ fn prefill_body<W: MambaWeightsView>(
         let eps: f32 = dims.rms_norm_eps;
         scratch.residual.copy_from(&scratch.out_flat, &ctx.stream)?;
         let mut builder = ctx.stream.launch_builder(&ctx.kernels.rmsnorm_fwd);
-        builder.arg(scratch.out_flat.inner_mut());
+        // When the caller wants the all-T temporal, norm_f writes it
+        // directly instead of landing in out_flat and being copied out
+        // afterwards - same kernel, same inputs, other destination buffer.
+        match final_out {
+            Some(full) => builder.arg(full.inner_mut()),
+            None => builder.arg(scratch.out_flat.inner_mut()),
+        };
         builder.arg(scratch.rms_discard.inner_mut());
         builder.arg(scratch.residual.inner());
         let nfw = weights.norm_f_weight();
@@ -626,19 +678,14 @@ fn prefill_body<W: MambaWeightsView>(
     Ok(())
 }
 
-/// Deliver the prefill outputs from the finished body: the last-timestep
-/// gather (always) and the optional all-T copy of the post-norm_f temporal.
-fn emit_outputs(
-    ctx: &GpuCtx,
-    scratch: &GpuMambaTargetScratch,
-    outputs: PrefillOutputs<'_>,
+/// Validate the output buffer sizes before the body runs, so a bad request
+/// fails fast instead of after a full prefill.
+fn check_output_lens(
+    dims: GpuMambaDims,
+    last_temporal: &GpuBuffer,
+    full_temporal: Option<&GpuBuffer>,
 ) -> Result<(), String> {
-    let dims: GpuMambaDims = scratch.dims;
     let (b, t, dm) = (dims.batch, dims.seq_len, dims.d_model);
-    let PrefillOutputs {
-        last_temporal,
-        full_temporal,
-    } = outputs;
     if last_temporal.len() != b * dm {
         return Err(format!(
             "prefill outputs: last_temporal len {} != batch*d_model = {}",
@@ -646,22 +693,6 @@ fn emit_outputs(
             b * dm
         ));
     }
-
-    // Extract last timestep into last_temporal [B * dm]
-    {
-        let b_i = b as i32;
-        let t_i = t as i32;
-        let dm_i = dm as i32;
-        let mut builder = ctx.stream.launch_builder(&ctx.kernels.gather_last_timestep);
-        builder.arg(last_temporal.inner_mut());
-        builder.arg(scratch.out_flat.inner());
-        builder.arg(&b_i);
-        builder.arg(&t_i);
-        builder.arg(&dm_i);
-        unsafe { builder.launch(grid_1d(b * dm)) }
-            .map_err(|e| format!("gather_last prefill: {e:?}"))?;
-    }
-
     if let Some(full) = full_temporal {
         if full.len() != b * t * dm {
             return Err(format!(
@@ -670,9 +701,51 @@ fn emit_outputs(
                 b * t * dm
             ));
         }
+    }
+    Ok(())
+}
+
+/// Gather the last timestep of the post-norm_f temporal into `[B * dm]`.
+fn gather_last(
+    ctx: &GpuCtx,
+    src: &GpuBuffer,
+    last_temporal: &mut GpuBuffer,
+    dims: GpuMambaDims,
+) -> Result<(), String> {
+    let (b, t, dm) = (dims.batch, dims.seq_len, dims.d_model);
+    let b_i = b as i32;
+    let t_i = t as i32;
+    let dm_i = dm as i32;
+    let mut builder = ctx.stream.launch_builder(&ctx.kernels.gather_last_timestep);
+    builder.arg(last_temporal.inner_mut());
+    builder.arg(src.inner());
+    builder.arg(&b_i);
+    builder.arg(&t_i);
+    builder.arg(&dm_i);
+    unsafe { builder.launch(grid_1d(b * dm)) }
+        .map_err(|e| format!("gather_last prefill: {e:?}"))?;
+    Ok(())
+}
+
+/// Deliver the prefill outputs from the finished body: the last-timestep
+/// gather (always) and the optional all-T copy of the post-norm_f temporal.
+/// Kept for the plain (no-full) entry; the all-T entries write norm_f into
+/// the caller buffer inside the body and gather from it directly.
+fn emit_outputs(
+    ctx: &GpuCtx,
+    scratch: &GpuMambaTargetScratch,
+    outputs: PrefillOutputs<'_>,
+) -> Result<(), String> {
+    let dims: GpuMambaDims = scratch.dims;
+    let PrefillOutputs {
+        last_temporal,
+        full_temporal,
+    } = outputs;
+    check_output_lens(dims, last_temporal, full_temporal.as_deref())?;
+    gather_last(ctx, &scratch.out_flat, last_temporal, dims)?;
+    if let Some(full) = full_temporal {
         full.copy_from(&scratch.out_flat, &ctx.stream)?;
     }
-
     Ok(())
 }
 
@@ -772,23 +845,9 @@ pub fn gpu_forward_inference_prefill_mixed<W: MambaWeightsView>(
             (bt, dm, 2 * di),
         )?;
 
-        // F3: split_gate_silu typed.
-        {
-            let bt_i = bt as i32;
-            let di_i = di as i32;
-            let gs_raw = scratch.gate_silu.cached_ptr();
-            let mut bld = ctx.stream.launch_builder(k.split_gate_silu_typed.get(dt));
-            let xb_ptr = scratch.x_branch.cached_ptr();
-            let proj_ptr = scratch.proj_flat.cached_ptr();
-            bld.arg(&xb_ptr);
-            bld.arg(&gs_raw);
-            bld.arg(&gs_raw);
-            bld.arg(&proj_ptr);
-            bld.arg(&bt_i);
-            bld.arg(&di_i);
-            unsafe { bld.launch(grid_1d(bt * di)) }
-                .map_err(|e| format!("split_gate prefill L{layer_idx}: {e:?}"))?;
-        }
+        // F3 is fused away, same as the f32 chain: the conv reads the
+        // in_proj output strided, the scan gates its own y store with the
+        // round-trip emulation of the replaced typed chain.
 
         // F4a: conv1d burnin nosave typed (with fused SiLU).
         {
@@ -800,7 +859,7 @@ pub fn gpu_forward_inference_prefill_mixed<W: MambaWeightsView>(
                 .stream
                 .launch_builder(k.conv1d_burnin_nosave_tiled_typed.get(dt));
             let u_ptr = scratch.u.cached_ptr();
-            let xb_ptr = scratch.x_branch.cached_ptr();
+            let xb_ptr = scratch.proj_flat.cached_ptr();
             bld.arg(&u_ptr);
             bld.arg(&conv_ptr);
             bld.arg(&xb_ptr);
@@ -812,6 +871,8 @@ pub fn gpu_forward_inference_prefill_mixed<W: MambaWeightsView>(
             bld.arg(&t_i);
             bld.arg(&di_i);
             bld.arg(&dc_i);
+            let xs_i = (2 * di) as i32;
+            bld.arg(&xs_i);
             unsafe { bld.launch(super::launch::grid_conv_tiled(b, di, t)) }
                 .map_err(|e| format!("conv1d_nosave_tiled prefill L{layer_idx}: {e:?}"))?;
         }
@@ -889,38 +950,62 @@ pub fn gpu_forward_inference_prefill_mixed<W: MambaWeightsView>(
             let ds_i = ds as i32;
             let b_offset = dt_rank as i32;
             let c_offset = (dt_rank + ds) as i32;
-            // Parallel route gathers T-major (matches the scan kernels).
+            // Parallel route gathers T-major (matches the scan kernels);
+            // staged tile when it fits, same fallback rule as the f32 chain.
             let tmajor = dims.scan_mode.use_parallel(t, ds);
-            let kernel = if tmajor {
-                k.gather_bc_cols_tmajor_typed.get(dt)
-            } else {
-                k.gather_bc_cols_typed.get(dt)
-            };
+            let tile_smem = 2 * ds * (super::launch::GBC_TILE_T + 1) * dt.size_bytes();
             let tm_i = t as i32;
-            let mut bld = ctx.stream.launch_builder(kernel);
             let bb_ptr = scratch.b_gathered.cached_ptr();
             let cb_ptr = scratch.c_gathered.cached_ptr();
             let xdbl_ptr = scratch.xdbl.cached_ptr();
-            bld.arg(&bb_ptr);
-            bld.arg(&cb_ptr);
-            bld.arg(&xdbl_ptr);
-            bld.arg(&bt_i);
-            if tmajor {
+            if tmajor && tile_smem <= 48 * 1024 {
+                let mut bld = ctx
+                    .stream
+                    .launch_builder(k.gather_bc_cols_tmajor_tiled_typed.get(dt));
+                bld.arg(&bb_ptr);
+                bld.arg(&cb_ptr);
+                bld.arg(&xdbl_ptr);
                 bld.arg(&tm_i);
-            }
-            bld.arg(&xdbl_i);
-            bld.arg(&ds_i);
-            bld.arg(&b_offset);
-            bld.arg(&c_offset);
-            unsafe { bld.launch(grid_1d(bt * ds)) }
+                bld.arg(&xdbl_i);
+                bld.arg(&ds_i);
+                bld.arg(&b_offset);
+                bld.arg(&c_offset);
+                unsafe {
+                    bld.launch(super::launch::grid_gather_bc_tiled(
+                        b,
+                        t,
+                        ds,
+                        dt.size_bytes(),
+                    ))
+                }
                 .map_err(|e| format!("gather_bc prefill L{layer_idx}: {e:?}"))?;
+            } else {
+                let kernel = if tmajor {
+                    k.gather_bc_cols_tmajor_typed.get(dt)
+                } else {
+                    k.gather_bc_cols_typed.get(dt)
+                };
+                let mut bld = ctx.stream.launch_builder(kernel);
+                bld.arg(&bb_ptr);
+                bld.arg(&cb_ptr);
+                bld.arg(&xdbl_ptr);
+                bld.arg(&bt_i);
+                if tmajor {
+                    bld.arg(&tm_i);
+                }
+                bld.arg(&xdbl_i);
+                bld.arg(&ds_i);
+                bld.arg(&b_offset);
+                bld.arg(&c_offset);
+                unsafe { bld.launch(grid_1d(bt * ds)) }
+                    .map_err(|e| format!("gather_bc prefill L{layer_idx}: {e:?}"))?;
+            }
         }
         {
             let b_i = b as i32;
             let t_i = t as i32;
             let di_i = di as i32;
             let ds_i = ds as i32;
-            let y_ptr = scratch.y.cached_ptr();
             let delta_ptr = scratch.delta.cached_ptr();
             let u_ptr = scratch.u.cached_ptr();
             let bb_ptr = scratch.b_gathered.cached_ptr();
@@ -931,18 +1016,23 @@ pub fn gpu_forward_inference_prefill_mixed<W: MambaWeightsView>(
             // the typed parallel nosave kernel exists and mirrors the f32
             // route above; long prompts paid O(T) for nothing, and the
             // sequential kernel's silent d_state>64 return had no guard.
+            let gated_out_ptr = scratch.gated.cached_ptr();
+            let proj_ptr = scratch.proj_flat.cached_ptr();
+            let gate_stride = (2 * di) as i32;
             if dims.scan_mode.use_parallel(t, ds) {
                 let mut bld = ctx
                     .stream
                     .launch_builder(k.ssm_parallel_fwd_nosave_typed.get(dt));
                 bld.arg(&ssm_ptr);
-                bld.arg(&y_ptr);
+                bld.arg(&gated_out_ptr);
                 bld.arg(&delta_ptr);
                 bld.arg(&u_ptr);
                 bld.arg(&bb_ptr);
                 bld.arg(&cb_ptr);
                 bld.arg(&a_neg_ptr);
                 bld.arg(&dp);
+                bld.arg(&proj_ptr);
+                bld.arg(&gate_stride);
                 bld.arg(&b_i);
                 bld.arg(&t_i);
                 bld.arg(&di_i);
@@ -952,6 +1042,7 @@ pub fn gpu_forward_inference_prefill_mixed<W: MambaWeightsView>(
                         b,
                         di,
                         dt.size_bytes(),
+                        ds,
                     ))
                 }
                 .map_err(|e| format!("ssm_parallel_nosave prefill L{layer_idx}: {e:?}"))?;
@@ -964,13 +1055,15 @@ pub fn gpu_forward_inference_prefill_mixed<W: MambaWeightsView>(
                 );
                 let mut bld = ctx.stream.launch_builder(k.ssm_burnin_nosave_typed.get(dt));
                 bld.arg(&ssm_ptr);
-                bld.arg(&y_ptr);
+                bld.arg(&gated_out_ptr);
                 bld.arg(&delta_ptr);
                 bld.arg(&u_ptr);
                 bld.arg(&bb_ptr);
                 bld.arg(&cb_ptr);
                 bld.arg(&a_neg_ptr);
                 bld.arg(&dp);
+                bld.arg(&proj_ptr);
+                bld.arg(&gate_stride);
                 bld.arg(&b_i);
                 bld.arg(&t_i);
                 bld.arg(&di_i);
@@ -979,21 +1072,8 @@ pub fn gpu_forward_inference_prefill_mixed<W: MambaWeightsView>(
                     .map_err(|e| format!("ssm_nosave prefill L{layer_idx}: {e:?}"))?;
             }
         }
-
-        // F4e: gating — y * gate_silu (typed).
-        {
-            let n = (bt * di) as i32;
-            let mut bld = ctx.stream.launch_builder(k.elementwise_mul_typed.get(dt));
-            let gated_ptr = scratch.gated.cached_ptr();
-            let y_ptr = scratch.y.cached_ptr();
-            let gs_ptr = scratch.gate_silu.cached_ptr();
-            bld.arg(&gated_ptr);
-            bld.arg(&y_ptr);
-            bld.arg(&gs_ptr);
-            bld.arg(&n);
-            unsafe { bld.launch(grid_1d(bt * di)) }
-                .map_err(|e| format!("gating prefill L{layer_idx}: {e:?}"))?;
-        }
+        // Gating is fused into the scan store (typed round-trip
+        // emulation) - the separate typed mul is gone.
 
         // F5: out_proj GEMM typed.
         let (opw, opw_dt) = lw.out_proj_w();

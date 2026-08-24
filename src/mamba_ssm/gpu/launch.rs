@@ -144,14 +144,20 @@ pub fn scan_tape_len(batch: usize, seq_len: usize, d_inner: usize, d_state: usiz
     batch * d_inner * d_state * 3 * n_chunks
 }
 
-pub fn grid_parallel_scan(batch: usize, d_inner: usize) -> LaunchConfig {
+pub fn grid_parallel_scan(batch: usize, d_inner: usize, d_state: usize) -> LaunchConfig {
     assert!(
         d_inner <= 65535,
         "grid_parallel_scan: d_inner {d_inner} exceeds CUDA grid.y limit 65535"
     );
+    assert!(
+        d_state <= 256,
+        "grid_parallel_scan: d_state {d_state} exceeds the kernel MAX_DSTATE guard - \
+         the kernel would return without writing y"
+    );
     const NWARPS: usize = SCAN_NTHREADS / 32;
-    const MAX_DSTATE: usize = 256;
-    let smem_floats = 2 * NWARPS + 2 * MAX_DSTATE + 2 * SCAN_NTHREADS + SCAN_CHUNK;
+    // Runtime d_state: the kernel packs its run/exchange/stage regions at
+    // the actual d_state (address-only vs the padded MAX_DSTATE layout).
+    let smem_floats = 2 * NWARPS + 2 * d_state + 2 * SCAN_NTHREADS + SCAN_CHUNK;
     LaunchConfig {
         grid_dim: (batch as u32, d_inner as u32, 1),
         block_dim: (SCAN_NTHREADS as u32, 1, 1),
@@ -234,16 +240,22 @@ pub fn grid_parallel_scan_typed(
     batch: usize,
     d_inner: usize,
     bytes_per_act: usize,
+    d_state: usize,
 ) -> LaunchConfig {
     debug_assert!(bytes_per_act == 2 || bytes_per_act == 4);
     assert!(
         d_inner <= 65535,
         "grid_parallel_scan_typed: d_inner {d_inner} exceeds CUDA grid.y limit 65535"
     );
+    assert!(
+        d_state <= 256,
+        "grid_parallel_scan_typed: d_state {d_state} exceeds the kernel MAX_DSTATE guard - \
+         the kernel would return without writing y"
+    );
     const NWARPS: usize = SCAN_NTHREADS / 32;
-    const MAX_DSTATE: usize = 256;
-    // Fixed f32 region (block scan, running prefix, exchange).
-    let fixed_floats = 2 * NWARPS + 2 * MAX_DSTATE + 2 * SCAN_NTHREADS;
+    // Fixed f32 region (block scan, running prefix, exchange) at the
+    // actual d_state (address-only vs the padded MAX_DSTATE layout).
+    let fixed_floats = 2 * NWARPS + 2 * d_state + 2 * SCAN_NTHREADS;
     let fixed_bytes = fixed_floats * std::mem::size_of::<f32>();
     let stage_bytes = SCAN_CHUNK * bytes_per_act;
     LaunchConfig {
@@ -257,6 +269,26 @@ pub fn grid_parallel_scan_typed(
 /// T in CONV1D_TILE_T=128 tiles. The serial per-(b,d) walk left 146 SMs
 /// idle at the campaign shape (24 blocks); tiling fills the machine while
 /// every output element keeps the identical 4-tap arithmetic.
+/// Tile depth of `gather_bc_cols_tmajor_tiled` (must match GBC_TILE_T in
+/// elementwise.cu). One block per (t-tile, b); dynamic smem carries the
+/// B and C tiles at `[d_state][GBC_TILE_T + 1]` each (+1 pad kills bank
+/// conflicts on the transposed read).
+pub const GBC_TILE_T: usize = 32;
+
+/// Grid for the staged t-major B/C gather.
+pub fn grid_gather_bc_tiled(
+    batch: usize,
+    t: usize,
+    d_state: usize,
+    elem_bytes: usize,
+) -> LaunchConfig {
+    LaunchConfig {
+        grid_dim: ((t as u32).div_ceil(GBC_TILE_T as u32), batch as u32, 1),
+        block_dim: (256, 1, 1),
+        shared_mem_bytes: (2 * d_state * (GBC_TILE_T + 1) * elem_bytes) as u32,
+    }
+}
+
 pub fn grid_conv_tiled(batch: usize, d_inner: usize, t: usize) -> LaunchConfig {
     const TILE_T: usize = 128;
     LaunchConfig {

@@ -592,7 +592,7 @@ fn bench_scan_kernels_isolated() {
         bld.arg(&dsi);
         bld.arg(&hs);
         bld.arg(&slim0);
-        unsafe { bld.launch(grid_parallel_scan_typed(b, di, 2)) }.unwrap();
+        unsafe { bld.launch(grid_parallel_scan_typed(b, di, 2, ds)) }.unwrap();
     };
     let fwd_tape = GpuBuffer::zeros(
         &ctx.stream,
@@ -630,7 +630,7 @@ fn bench_scan_kernels_isolated() {
         bld.arg(&dsi);
         bld.arg(&tp);
         bld.arg(&slim1);
-        unsafe { bld.launch(grid_parallel_scan_typed(b, di, 2)) }.unwrap();
+        unsafe { bld.launch(grid_parallel_scan_typed(b, di, 2, ds)) }.unwrap();
     };
 
     for _ in 0..3 {

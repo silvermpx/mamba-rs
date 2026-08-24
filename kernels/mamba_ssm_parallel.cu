@@ -295,11 +295,15 @@ extern "C" __global__ __launch_bounds__(NTHREADS, SCAN_MINB) void ssm_parallel_s
     extern __shared__ float smem[];
     float *smem_wa     = smem + SMEM_WA_OFF;
     float *smem_wb     = smem + SMEM_WB_OFF;
-    float *smem_run_a  = smem + SMEM_RUN_A_OFF;
-    float *smem_run_b  = smem + SMEM_RUN_B_OFF;
-    float *smem_exch_a = smem + SMEM_EXCH_A_OFF;
-    float *smem_exch_b = smem + SMEM_EXCH_B_OFF;
-    float *smem_stage  = smem + SMEM_STAGE_OFF;
+    /* Runtime d_state stride: run/exchange/stage regions pack at the actual
+     * d_state instead of MAX_DSTATE (the launcher shrinks the allocation to
+     * match). Region ORDER and contents are unchanged, so every cell holds
+     * the same value as the padded layout - address-only. */
+    float *smem_run_a  = smem + 2 * NWARPS;
+    float *smem_run_b  = smem_run_a + d_state;
+    float *smem_exch_a = smem_run_b + d_state;
+    float *smem_exch_b = smem_exch_a + NTHREADS;
+    float *smem_stage  = smem_exch_b + NTHREADS;
 
     float D_d = D[did];
     int h_base = (bid * d_inner + did) * d_state;
@@ -539,6 +543,8 @@ extern "C" __global__ __launch_bounds__(NTHREADS, SCAN_MINB) void ssm_parallel_s
     const float* __restrict__ C,       // [batch * T * d_state]
     const float* __restrict__ a_neg,   // [d_inner * d_state]
     const float* __restrict__ D,       // [d_inner]
+    const float* __restrict__ proj_gate, // in_proj output when gating fuses
+    int gate_stride,                   // proj row stride; 0 = plain y store
     int batch, int T, int d_inner, int d_state
 ) {
     int bid = blockIdx.x;
@@ -549,11 +555,15 @@ extern "C" __global__ __launch_bounds__(NTHREADS, SCAN_MINB) void ssm_parallel_s
     extern __shared__ float smem[];
     float *smem_wa     = smem + SMEM_WA_OFF;
     float *smem_wb     = smem + SMEM_WB_OFF;
-    float *smem_run_a  = smem + SMEM_RUN_A_OFF;
-    float *smem_run_b  = smem + SMEM_RUN_B_OFF;
-    float *smem_exch_a = smem + SMEM_EXCH_A_OFF;
-    float *smem_exch_b = smem + SMEM_EXCH_B_OFF;
-    float *smem_stage  = smem + SMEM_STAGE_OFF;
+    /* Runtime d_state stride: run/exchange/stage regions pack at the actual
+     * d_state instead of MAX_DSTATE (the launcher shrinks the allocation to
+     * match). Region ORDER and contents are unchanged, so every cell holds
+     * the same value as the padded layout - address-only. */
+    float *smem_run_a  = smem + 2 * NWARPS;
+    float *smem_run_b  = smem_run_a + d_state;
+    float *smem_exch_a = smem_run_b + d_state;
+    float *smem_exch_b = smem_exch_a + NTHREADS;
+    float *smem_stage  = smem_exch_b + NTHREADS;
 
     float D_d = D[did];
     int h_base = (bid * d_inner + did) * d_state;
@@ -740,7 +750,17 @@ extern "C" __global__ __launch_bounds__(NTHREADS, SCAN_MINB) void ssm_parallel_s
         for (int s = threadIdx.x; s < CHUNK_SIZE; s += NTHREADS) {
             int t = chunk_start + s;
             if (t < T) {
-                y_out[(bid * T + t) * d_inner + did] = smem_stage[s];
+                float yv = smem_stage[s];
+                if (gate_stride > 0) {
+                    // Fused gating: the same one-rounding product the
+                    // separate elementwise mul performed, on the same
+                    // SiLU formula split_gate_silu used - bit-identical
+                    // to the three-kernel chain it replaces.
+                    float g = proj_gate[(bid * T + t) * gate_stride
+                                        + d_inner + did];
+                    yv *= g / (1.0f + exp2f(-g * 1.4426950408889634f));
+                }
+                y_out[(bid * T + t) * d_inner + did] = yv;
             }
         }
         __syncthreads();
@@ -787,16 +807,17 @@ ssm_parallel_scan_fwd_##SUFFIX(                                               \
     extern __shared__ float smem[];                                           \
     float *smem_wa     = smem + SMEM_WA_OFF;                                  \
     float *smem_wb     = smem + SMEM_WB_OFF;                                  \
-    float *smem_run_a  = smem + SMEM_RUN_A_OFF;                               \
-    float *smem_run_b  = smem + SMEM_RUN_B_OFF;                               \
-    float *smem_exch_a = smem + SMEM_EXCH_A_OFF;                              \
-    float *smem_exch_b = smem + SMEM_EXCH_B_OFF;                              \
+    /* Runtime d_state stride - see the f32 twin. */                          \
+    float *smem_run_a  = smem + 2 * NWARPS;                                   \
+    float *smem_run_b  = smem_run_a + d_state;                                \
+    float *smem_exch_a = smem_run_b + d_state;                                \
+    float *smem_exch_b = smem_exch_a + NTHREADS;                              \
     /* Typed smem stage: 2-byte slots reuse the f32 stage region. The         \
        typed launch helper only allocates CHUNK_SIZE * sizeof(T_ACT) bytes    \
        for this region (vs CHUNK_SIZE * 4 for the f32 path), saving 2 KB     \
        per block → enables an extra resident block on Ada. Load stores T_ACT directly; upcast happens only     \
        inside the compute loop via to_f(). */                                 \
-    T_ACT *smem_stage = (T_ACT *)(smem + SMEM_STAGE_OFF);                     \
+    T_ACT *smem_stage = (T_ACT *)(smem_exch_b + NTHREADS);                    \
     float D_d = D[did];                                                       \
     int h_base = (bid * d_inner + did) * d_state;                             \
     int n_chunks = (T + CHUNK_SIZE - 1) / CHUNK_SIZE;                         \
@@ -964,6 +985,8 @@ ssm_parallel_scan_fwd_nosave_##SUFFIX(                                        \
     const T_ACT* __restrict__ C,                                              \
     const float* __restrict__ a_neg,                                          \
     const float* __restrict__ D,                                              \
+    const T_ACT* __restrict__ proj_gate,                                      \
+    int gate_stride,                                                          \
     int batch, int T, int d_inner, int d_state                                \
 ) {                                                                           \
     int bid = blockIdx.x;                                                     \
@@ -973,12 +996,13 @@ ssm_parallel_scan_fwd_nosave_##SUFFIX(                                        \
     extern __shared__ float smem[];                                           \
     float *smem_wa     = smem + SMEM_WA_OFF;                                  \
     float *smem_wb     = smem + SMEM_WB_OFF;                                  \
-    float *smem_run_a  = smem + SMEM_RUN_A_OFF;                               \
-    float *smem_run_b  = smem + SMEM_RUN_B_OFF;                               \
-    float *smem_exch_a = smem + SMEM_EXCH_A_OFF;                              \
-    float *smem_exch_b = smem + SMEM_EXCH_B_OFF;                              \
+    /* Runtime d_state stride - see the f32 twin. */                          \
+    float *smem_run_a  = smem + 2 * NWARPS;                                   \
+    float *smem_run_b  = smem_run_a + d_state;                                \
+    float *smem_exch_a = smem_run_b + d_state;                                \
+    float *smem_exch_b = smem_exch_a + NTHREADS;                              \
     /* Typed smem stage: 2-byte slots vs 4-byte f32. */    \
-    T_ACT *smem_stage = (T_ACT *)(smem + SMEM_STAGE_OFF);                     \
+    T_ACT *smem_stage = (T_ACT *)(smem_exch_b + NTHREADS);                    \
     float D_d = D[did];                                                       \
     int h_base = (bid * d_inner + did) * d_state;                             \
     for (int n = threadIdx.x; n < d_state; n += NTHREADS) {                   \
@@ -1117,7 +1141,19 @@ ssm_parallel_scan_fwd_nosave_##SUFFIX(                                        \
         for (int s = threadIdx.x; s < CHUNK_SIZE; s += NTHREADS) {            \
             int t = chunk_start + s;                                          \
             if (t < T) {                                                      \
-                y_out[(bid * T + t) * d_inner + did] = smem_stage[s];         \
+                T_ACT ty = FROM_F(smem_stage[s]);                             \
+                if (gate_stride > 0) {                                        \
+                    /* Round-trip emulation of the replaced chain: the     \
+                     * baseline stored y typed, stored SiLU(gate) typed,   \
+                     * then multiplied the reloaded values with one final  \
+                     * rounding - reproduce each rounding in place.     */ \
+                    float g = to_f(proj_gate[(bid * T + t) * gate_stride    \
+                                             + d_inner + did]);              \
+                    T_ACT tg = FROM_F(                                       \
+                        g / (1.0f + exp2f(-g * 1.4426950408889634f)));       \
+                    ty = FROM_F(to_f(ty) * to_f(tg));                        \
+                }                                                             \
+                y_out[(bid * T + t) * d_inner + did] = ty;                    \
             }                                                                 \
         }                                                                     \
         __syncthreads();                                                      \

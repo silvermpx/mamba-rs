@@ -634,7 +634,7 @@ pub fn gpu_forward_mamba_layer(
             builder.arg(&ds_i);
             builder.arg(&tape_p);
             builder.arg(&slim_i);
-            unsafe { builder.launch(grid_parallel_scan(b, di)) }
+            unsafe { builder.launch(grid_parallel_scan(b, di, ds)) }
                 .map_err(|e| format!("ssm_parallel_fwd mamba: {:?}", e))?;
         } else {
             // Sequential kernel: each thread handles one (b, d) pair over all T steps.
@@ -1077,11 +1077,16 @@ pub fn gpu_forward_mamba_target_burnin(
                 builder.arg(&a_neg_ptr);
                 let dp_ptr = lw.d_param.cached_ptr();
                 builder.arg(&dp_ptr);
+                // Gate fusion is a prefill-chain feature; stride 0 disables it
+                // here and the pointer is never dereferenced.
+                let gate_stride = 0i32;
+                builder.arg(&dp_ptr);
+                builder.arg(&gate_stride);
                 builder.arg(&b_i);
                 builder.arg(&t_i);
                 builder.arg(&di_i);
                 builder.arg(&ds_i);
-                unsafe { builder.launch(grid_parallel_scan(b, di)) }
+                unsafe { builder.launch(grid_parallel_scan(b, di, ds)) }
                     .map_err(|e| format!("ssm_parallel_nosave target L{layer_idx}: {:?}", e))?;
             } else {
                 let mut builder = ctx
@@ -1096,6 +1101,9 @@ pub fn gpu_forward_mamba_target_burnin(
                 builder.arg(&a_neg_ptr);
                 let dp_ptr = lw.d_param.cached_ptr();
                 builder.arg(&dp_ptr);
+                let gate_stride = 0i32;
+                builder.arg(&dp_ptr);
+                builder.arg(&gate_stride);
                 builder.arg(&b_i);
                 builder.arg(&t_i);
                 builder.arg(&di_i);

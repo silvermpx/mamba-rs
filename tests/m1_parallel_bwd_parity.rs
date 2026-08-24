@@ -513,7 +513,7 @@ fn check_fold_parity(b: usize, t: usize, di: usize, ds: usize, dtype: WeightDtyp
         bld.arg(&ds_i);
         bld.arg(&tp);
         bld.arg(&slim_i);
-        unsafe { bld.launch(grid_parallel_scan_typed(b, di, dtype.size_bytes())) }.unwrap();
+        unsafe { bld.launch(grid_parallel_scan_typed(b, di, dtype.size_bytes(), ds)) }.unwrap();
         ctx.stream.synchronize().unwrap();
     };
     // Full-tape forward FIRST and the reference h captured BEFORE the
@@ -741,6 +741,7 @@ fn diag_fold_slim_vs_full_positions() {
                     b,
                     di,
                     dtype.size_bytes(),
+                    ds,
                 ))
             }
             .unwrap();

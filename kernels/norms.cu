@@ -12,6 +12,15 @@
 
 #include "_typed_prelude.cuh"
 
+// Register hold depth for the forward kernels: the first RMSN_HOLD strided
+// elements per thread stay in registers between the reduction pass and the
+// output write, removing the second global read of x whenever
+// dim <= RMSN_HOLD * blockDim.x (every shipped d_model). Sum order is
+// unchanged (k ascending == i ascending) and out-of-range slots contribute
+// +0.0f, which cannot alter the accumulator: it starts at +0.0f and only
+// ever adds squares, so it is never -0.0f.
+#define RMSN_HOLD 4
+
 __device__ __forceinline__ float warp_reduce_sum(float val) {
     for (int offset = 16; offset > 0; offset >>= 1)
         val += __shfl_down_sync(0xffffffff, val, offset);
@@ -32,8 +41,15 @@ extern "C" __global__ void rmsnorm_forward(
     int off = b * dim;
 
     // Strided accumulation: each thread sums multiple elements when dim > blockDim.x
+    float xh[RMSN_HOLD];
     float sum = 0.0f;
-    for (int i = d; i < dim; i += blockDim.x) {
+    #pragma unroll
+    for (int k = 0; k < RMSN_HOLD; ++k) {
+        int i = d + k * (int)blockDim.x;
+        xh[k] = (i < dim) ? x[off + i] : 0.0f;
+        sum += xh[k] * xh[k];
+    }
+    for (int i = d + RMSN_HOLD * (int)blockDim.x; i < dim; i += blockDim.x) {
         float val = x[off + i];
         sum += val * val;
     }
@@ -65,8 +81,14 @@ extern "C" __global__ void rmsnorm_forward(
     __syncthreads();
 
     float inv_rms = 1.0f / rms;
-    // Strided output write: each thread writes multiple elements when dim > blockDim.x
-    for (int i = d; i < dim; i += blockDim.x) {
+    // Strided output write from the register-held values; the tail loop
+    // re-reads x only past the hold depth.
+    #pragma unroll
+    for (int k = 0; k < RMSN_HOLD; ++k) {
+        int i = d + k * (int)blockDim.x;
+        if (i < dim) y[off + i] = xh[k] * inv_rms * scale[i];
+    }
+    for (int i = d + RMSN_HOLD * (int)blockDim.x; i < dim; i += blockDim.x) {
         y[off + i] = x[off + i] * inv_rms * scale[i];
     }
 }
@@ -83,8 +105,15 @@ extern "C" __global__ void rmsnorm_forward_##SUFFIX(                         \
     int d = threadIdx.x;                                                     \
     extern __shared__ float sdata[];                                         \
     int off = b * dim;                                                       \
+    float xh[RMSN_HOLD];                                                     \
     float sum = 0.0f;                                                        \
-    for (int i = d; i < dim; i += blockDim.x) {                              \
+    _Pragma("unroll")                                                        \
+    for (int k = 0; k < RMSN_HOLD; ++k) {                                    \
+        int i = d + k * (int)blockDim.x;                                     \
+        xh[k] = (i < dim) ? to_f(x[off + i]) : 0.0f;                         \
+        sum += xh[k] * xh[k];                                                \
+    }                                                                        \
+    for (int i = d + RMSN_HOLD * (int)blockDim.x; i < dim; i += blockDim.x) {\
         float v = to_f(x[off + i]);                                          \
         sum += v * v;                                                        \
     }                                                                        \
@@ -111,7 +140,12 @@ extern "C" __global__ void rmsnorm_forward_##SUFFIX(                         \
     if (d == 0) rms_out[b] = rms;                                            \
     __syncthreads();                                                         \
     float inv_rms = 1.0f / rms;                                              \
-    for (int i = d; i < dim; i += blockDim.x) {                              \
+    _Pragma("unroll")                                                        \
+    for (int k = 0; k < RMSN_HOLD; ++k) {                                    \
+        int i = d + k * (int)blockDim.x;                                     \
+        if (i < dim) y[off + i] = FROM_F(xh[k] * inv_rms * scale[i]);        \
+    }                                                                        \
+    for (int i = d + RMSN_HOLD * (int)blockDim.x; i < dim; i += blockDim.x) {\
         y[off + i] = FROM_F(to_f(x[off + i]) * inv_rms * scale[i]);          \
     }                                                                        \
 }
@@ -134,8 +168,15 @@ extern "C" __global__ void rmsnorm_forward_f32in_##SUFFIX(                   \
     int d = threadIdx.x;                                                     \
     extern __shared__ float sdata[];                                         \
     int off = b * dim;                                                       \
+    float xh[RMSN_HOLD];                                                     \
     float sum = 0.0f;                                                        \
-    for (int i = d; i < dim; i += blockDim.x) {                              \
+    _Pragma("unroll")                                                        \
+    for (int k = 0; k < RMSN_HOLD; ++k) {                                    \
+        int i = d + k * (int)blockDim.x;                                     \
+        xh[k] = (i < dim) ? x[off + i] : 0.0f;                               \
+        sum += xh[k] * xh[k];                                                \
+    }                                                                        \
+    for (int i = d + RMSN_HOLD * (int)blockDim.x; i < dim; i += blockDim.x) {\
         float v = x[off + i];                                                \
         sum += v * v;                                                        \
     }                                                                        \
@@ -162,7 +203,12 @@ extern "C" __global__ void rmsnorm_forward_f32in_##SUFFIX(                   \
     if (d == 0) rms_out[b] = rms;                                            \
     __syncthreads();                                                         \
     float inv_rms = 1.0f / rms;                                              \
-    for (int i = d; i < dim; i += blockDim.x) {                              \
+    _Pragma("unroll")                                                        \
+    for (int k = 0; k < RMSN_HOLD; ++k) {                                    \
+        int i = d + k * (int)blockDim.x;                                     \
+        if (i < dim) y[off + i] = FROM_F(xh[k] * inv_rms * scale[i]);        \
+    }                                                                        \
+    for (int i = d + RMSN_HOLD * (int)blockDim.x; i < dim; i += blockDim.x) {\
         y[off + i] = FROM_F(x[off + i] * inv_rms * scale[i]);                \
     }                                                                        \
 }

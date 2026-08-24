@@ -321,6 +321,8 @@ extern "C" __global__ void ssm_burnin_forward_nosave(
     const float* C,       // [batch * T * d_state]
     const float* a_neg,   // [d_inner * d_state]
     const float* D,       // [d_inner]
+    const float* proj_gate, // in_proj output when gating fuses
+    int gate_stride,      // proj row stride; 0 = plain y store
     int batch, int T, int d_inner, int d_state
 ) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -356,6 +358,12 @@ extern "C" __global__ void ssm_burnin_forward_nosave(
             y_d += h_local[n] * C[bt_ds + n];
         }
 
+        if (gate_stride > 0) {
+            // Fused gating - same one-rounding product and SiLU formula
+            // as the replaced split/mul chain.
+            float g = proj_gate[(b * T + t) * gate_stride + d_inner + d];
+            y_d *= g / (1.0f + exp2f(-g * 1.4426950408889634f));
+        }
         y_out[bt_di] = y_d;
     }
 
@@ -373,6 +381,8 @@ extern "C" __global__ void ssm_burnin_forward_nosave_##SUFFIX(             \
     const TY* delta, const TY* u,                                          \
     const TY* B, const TY* C,                                              \
     const float* a_neg, const float* D,                                    \
+    const TY* proj_gate,                                                   \
+    int gate_stride,                                                       \
     int batch, int T_len, int d_inner, int d_state                         \
 ) {                                                                        \
     int idx = blockIdx.x * blockDim.x + threadIdx.x;                       \
@@ -400,7 +410,16 @@ extern "C" __global__ void ssm_burnin_forward_nosave_##SUFFIX(             \
             h_local[n] = da * h_local[n] + delta_u_d * to_f(B[bt_ds + n]); \
             y_d += h_local[n] * to_f(C[bt_ds + n]);                        \
         }                                                                  \
-        y_out[bt_di] = FROM_F(y_d);                                        \
+        TY ty = FROM_F(y_d);                                               \
+        if (gate_stride > 0) {                                             \
+            /* Round-trip emulation of the replaced typed chain (see    \
+             * the parallel nosave twin). */                               \
+            float g = to_f(proj_gate[(b * T_len + t) * gate_stride         \
+                                     + d_inner + d]);                      \
+            TY tg = FROM_F(g / (1.0f + exp2f(-g * 1.4426950408889634f)));  \
+            ty = FROM_F(to_f(ty) * to_f(tg));                              \
+        }                                                                  \
+        y_out[bt_di] = ty;                                                 \
     }                                                                      \
     for (int n = 0; n < d_state; n++)                                      \
         h[h_base + n] = h_local[n];                                        \

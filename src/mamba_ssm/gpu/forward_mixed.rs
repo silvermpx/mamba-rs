@@ -698,6 +698,7 @@ pub fn gpu_forward_mamba_backbone_mixed(
                         b,
                         di,
                         dt.size_bytes(),
+                        ds,
                     ))
                 }
                 .map_err(|e| format!("ssm_parallel_fwd typed L{layer_idx}: {e:?}"))?;

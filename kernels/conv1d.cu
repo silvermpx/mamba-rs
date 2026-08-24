@@ -12,11 +12,11 @@
 // state[b, d, d_conv-1] = new_x[b, d]
 // out[b, d] = sum_k(state[b, d, k] * weight[d, k]) + bias[d]
 extern "C" __global__ void conv1d_step_forward(
-    float* out,         // [batch * d_inner]
-    float* state,       // [batch * d_inner * d_conv] mutated
-    const float* new_x, // [batch * d_inner]
-    const float* weight, // [d_inner * d_conv]
-    const float* bias,  // [d_inner]
+    float* __restrict__ out,          // [batch * d_inner]
+    float* __restrict__ state,        // [batch * d_inner * d_conv] mutated
+    const float* __restrict__ new_x,  // [batch * d_inner]
+    const float* __restrict__ weight, // [d_inner * d_conv]
+    const float* __restrict__ bias,   // [d_inner]
     int batch, int d_inner, int d_conv
 ) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -26,6 +26,32 @@ extern "C" __global__ void conv1d_step_forward(
     int b = idx / d_inner;
     int d = idx % d_inner;
     int state_base = (b * d_inner + d) * d_conv;
+
+    // Registerized d_conv == 4 fast path (the production value): the shift
+    // happens in registers and global memory sees one window load, one
+    // writeback and one output store - the generic path below pays three
+    // global read-modify-write shifts plus four reloads of what it just
+    // wrote, a read-after-write hazard the compiler cannot forward through.
+    // Value contract: the accumulation is the k-ascending chain of the
+    // generic loop, term for term; an f32 held in a register carries the
+    // exact bits a global round-trip would have returned.
+    if (d_conv == 4) {
+        float s0 = state[state_base + 1];
+        float s1 = state[state_base + 2];
+        float s2 = state[state_base + 3];
+        float s3 = new_x[idx];
+        state[state_base] = s0;
+        state[state_base + 1] = s1;
+        state[state_base + 2] = s2;
+        state[state_base + 3] = s3;
+        float sum = bias[d];
+        sum += s0 * weight[d * 4];
+        sum += s1 * weight[d * 4 + 1];
+        sum += s2 * weight[d * 4 + 2];
+        sum += s3 * weight[d * 4 + 3];
+        out[idx] = sum;
+        return;
+    }
 
     // Shift register left
     for (int k = 0; k < d_conv - 1; k++) {
@@ -46,11 +72,11 @@ extern "C" __global__ void conv1d_step_forward(
 // conv state/weight/bias stay f32.
 #define DEFINE_CONV1D_STEP_FWD(SUFFIX, T, FROM_F)                          \
 extern "C" __global__ void conv1d_step_forward_##SUFFIX(                    \
-    T* out,                                                                \
-    float* state,                                                          \
-    const T* new_x,                                                        \
-    const float* weight,                                                   \
-    const float* bias,                                                     \
+    T* __restrict__ out,                                                   \
+    float* __restrict__ state,                                             \
+    const T* __restrict__ new_x,                                           \
+    const float* __restrict__ weight,                                      \
+    const float* __restrict__ bias,                                        \
     int batch, int d_inner, int d_conv                                     \
 ) {                                                                        \
     int idx = blockIdx.x * blockDim.x + threadIdx.x;                       \
@@ -59,6 +85,24 @@ extern "C" __global__ void conv1d_step_forward_##SUFFIX(                    \
     int b = idx / d_inner;                                                 \
     int d = idx % d_inner;                                                 \
     int state_base = (b * d_inner + d) * d_conv;                           \
+    /* Registerized d_conv == 4 fast path - see the f32 twin. */           \
+    if (d_conv == 4) {                                                     \
+        float s0 = state[state_base + 1];                                  \
+        float s1 = state[state_base + 2];                                  \
+        float s2 = state[state_base + 3];                                  \
+        float s3 = to_f(new_x[idx]);                                       \
+        state[state_base] = s0;                                            \
+        state[state_base + 1] = s1;                                        \
+        state[state_base + 2] = s2;                                        \
+        state[state_base + 3] = s3;                                        \
+        float sum = bias[d];                                               \
+        sum += s0 * weight[d * 4];                                         \
+        sum += s1 * weight[d * 4 + 1];                                     \
+        sum += s2 * weight[d * 4 + 2];                                     \
+        sum += s3 * weight[d * 4 + 3];                                     \
+        out[idx] = FROM_F(sum);                                            \
+        return;                                                            \
+    }                                                                      \
     for (int k = 0; k < d_conv - 1; k++) {                                 \
         state[state_base + k] = state[state_base + k + 1];                 \
     }                                                                      \
@@ -84,11 +128,11 @@ DEFINE_CONV1D_STEP_FWD(f16,  __half,        from_f_f16)
 // backward gets its own activation save buffer — DO NOT fuse those.
 #define DEFINE_CONV1D_STEP_FWD_SILU(SUFFIX, T, FROM_F)                     \
 extern "C" __global__ void conv1d_step_forward_silu_##SUFFIX(               \
-    T* out,                                                                \
-    float* state,                                                          \
-    const T* new_x,                                                        \
-    const float* weight,                                                   \
-    const float* bias,                                                     \
+    T* __restrict__ out,                                                   \
+    float* __restrict__ state,                                             \
+    const T* __restrict__ new_x,                                           \
+    const float* __restrict__ weight,                                      \
+    const float* __restrict__ bias,                                        \
     int batch, int d_inner, int d_conv                                     \
 ) {                                                                        \
     int idx = blockIdx.x * blockDim.x + threadIdx.x;                       \
@@ -97,6 +141,25 @@ extern "C" __global__ void conv1d_step_forward_silu_##SUFFIX(               \
     int b = idx / d_inner;                                                 \
     int d = idx % d_inner;                                                 \
     int state_base = (b * d_inner + d) * d_conv;                           \
+    /* Registerized d_conv == 4 fast path - see the f32 twin. */           \
+    if (d_conv == 4) {                                                     \
+        float s0 = state[state_base + 1];                                  \
+        float s1 = state[state_base + 2];                                  \
+        float s2 = state[state_base + 3];                                  \
+        float s3 = to_f(new_x[idx]);                                       \
+        state[state_base] = s0;                                            \
+        state[state_base + 1] = s1;                                        \
+        state[state_base + 2] = s2;                                        \
+        state[state_base + 3] = s3;                                        \
+        float sum = bias[d];                                               \
+        sum += s0 * weight[d * 4];                                         \
+        sum += s1 * weight[d * 4 + 1];                                     \
+        sum += s2 * weight[d * 4 + 2];                                     \
+        sum += s3 * weight[d * 4 + 3];                                     \
+        float silu4 = sum / (1.0f + exp2f(-sum * LOG2E));                  \
+        out[idx] = FROM_F(silu4);                                          \
+        return;                                                            \
+    }                                                                      \
     for (int k = 0; k < d_conv - 1; k++) {                                 \
         state[state_base + k] = state[state_base + k + 1];                 \
     }                                                                      \
@@ -631,7 +694,9 @@ DEFINE_CONV1D_BURNIN_TILED(f16,  __half,        from_f_f16)
 extern "C" __global__ void conv1d_burnin_forward_nosave_tiled_##SUFFIX(       \
     TY* u_out, float* state,                                                 \
     const TY* x_branch, const float* weight, const float* bias,              \
-    int batch, int T_len, int d_inner, int d_conv                            \
+    int batch, int T_len, int d_inner, int d_conv,                           \
+    int x_stride /* row stride of x_branch; d_inner, or 2*d_inner when     \
+                    reading the in_proj output directly */                   \
 ) {                                                                          \
     int idx = blockIdx.x * blockDim.x + threadIdx.x;                         \
     int total = batch * d_inner;                                             \
@@ -651,13 +716,13 @@ extern "C" __global__ void conv1d_burnin_forward_nosave_tiled_##SUFFIX(       \
     } else {                                                                 \
         for (int k = 0; k < d_conv; k++) {                                   \
             int th = t0 - d_conv + k;                                        \
-            win[k] = to_f(x_branch[(b * T_len + th) * d_inner + d]);         \
+            win[k] = to_f(x_branch[(b * T_len + th) * x_stride + d]);         \
         }                                                                    \
     }                                                                        \
     for (int t = t0; t < t_end; t++) {                                       \
         int bt_di = (b * T_len + t) * d_inner + d;                           \
         for (int k = 0; k < d_conv - 1; k++) win[k] = win[k + 1];            \
-        win[d_conv - 1] = to_f(x_branch[bt_di]);                             \
+        win[d_conv - 1] = to_f(x_branch[(b * T_len + t) * x_stride + d]);    \
         float val = bias[d];                                                 \
         for (int k = 0; k < d_conv; k++) {                                   \
             val += win[k] * weight[d * d_conv + k];                          \
