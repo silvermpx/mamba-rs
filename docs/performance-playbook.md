@@ -129,3 +129,33 @@ this codebase; apply them in order.
   was the last place the old tile size survived.
 - Keep escape hatches for one release (`MAMBA_RS_SCAN_TAPE=full`) and
   verify BOTH modes against the same digest baseline.
+
+## 8. Lessons from the 0.6.4 inference wave
+
+- At B=1 the grid is the first suspect: the serve prefill launched its
+  conv at 3 blocks on a 170-SM GPU. T-tiling the nosave conv (with the
+  carry-in state seeding tile 0 and the last tile owning the carry-out)
+  was the single biggest win of the wave.
+- A launcher that reserves shared memory at a compile-time maximum
+  (MAX_DSTATE) instead of the runtime dimension quietly caps occupancy
+  on every shape smaller than the maximum. Address-only re-stride, the
+  cheapest class of change, moved the fold backward 2 -> 3 blocks/SM
+  and the serve another half millisecond.
+- Deleting launches is not automatically visible time: removing two
+  elementwise kernels per layer from a scan-dominated chain measured
+  ~0 at the serve shape. Keep such fusions when they are bit-identical
+  and simplify the chain, but book the win honestly as zero.
+- A macro body in an NVRTC source dies silently when one line loses its
+  backslash continuation: the kernel compiles up to that line and the
+  rest becomes top-level garbage the error log attributes far away.
+  Audit rule: after the first non-continued line of a #define, the next
+  line must not end with a backslash.
+- include_str! kernels mean scp-then-test is NOT enough - cargo must
+  rebuild for the new source to reach NVRTC. Check the test binary's
+  mtime against the source before trusting a green gate.
+- The bit gates earn their keep in hours: the 16-cell prefill hash
+  suite caught nothing all wave precisely because every edit was
+  designed against it - and the one time a whole test binary went red,
+  the failure pattern (every GPU test failing at context creation)
+  pointed at an NVRTC syntax error, not a numeric defect.
+

@@ -378,7 +378,7 @@ sequences, 24-layer shapes) live in the detailed docs:
 
 ## Testing
 
-73 integration test files plus in-module unit tests — 470 `#[test]` functions total:
+81 integration test files plus in-module unit tests — 513 `#[test]` functions total:
 
 - Correctness: bit-parity WITHIN a numeric route (eager ↔ CUDA Graph,
   run ↔ run, save ↔ nosave prefill, CPU Single ↔ CPU Parallel); tolerance
