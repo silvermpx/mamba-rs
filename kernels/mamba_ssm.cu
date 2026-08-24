@@ -244,7 +244,10 @@ extern "C" __global__ void ssm_burnin_forward(
     float* h,             // [batch * d_inner * d_state] hidden state (mutated through T steps)
     float* y_out,         // [batch * T * d_inner] output
     float* h_saved,       // [batch * (T+1) * d_inner * d_state] h BEFORE each step
-    const float* delta,   // [batch * T * d_inner]
+    // Pre-softplus dt: softplus is applied inline (same value the deleted
+    // copy pass stored) and the post-softplus save is written here.
+    const float* delta_raw, // [batch * T * d_inner]
+    float* delta_saved,     // [batch * T * d_inner]
     const float* u,       // [batch * T * d_inner]
     const float* B,       // [batch * T * d_state]
     const float* C,       // [batch * T * d_state]
@@ -279,7 +282,10 @@ extern "C" __global__ void ssm_burnin_forward(
         int bt_di = (b * T + t) * d_inner + d;
         int bt_ds = (b * T + t) * d_state;
 
-        float delta_d = delta[bt_di];
+        float raw = delta_raw[bt_di];
+        float delta_d =
+            (raw > 20.0f) ? raw : log1pf(exp2f(raw * 1.4426950408889634f));
+        delta_saved[bt_di] = delta_d;
         float u_d = u[bt_di];
         float delta_u_d = delta_d * u_d; // C2: hoisted
         float y_d = D[d] * u_d;
@@ -434,7 +440,7 @@ DEFINE_SSM_BURNIN_NOSAVE(f16,  __half,        from_f_f16)
 #define DEFINE_SSM_BURNIN(SUFFIX, TY, FROM_F)                               \
 extern "C" __global__ void ssm_burnin_forward_##SUFFIX(                     \
     float* h, TY* y_out, float* h_saved,                                    \
-    const TY* delta, const TY* u,                                           \
+    const TY* delta_raw, TY* delta_saved, const TY* u,                      \
     const TY* B, const TY* C,                                               \
     const float* a_neg, const float* D,                                     \
     int batch, int T_len, int d_inner, int d_state                          \
@@ -460,7 +466,12 @@ extern "C" __global__ void ssm_burnin_forward_##SUFFIX(                     \
     for (int t = 0; t < T_len; t++) {                                       \
         int bt_di = (b * T_len + t) * d_inner + d;                          \
         int bt_ds = (b * T_len + t) * d_state;                              \
-        float delta_d = to_f(delta[bt_di]);                                 \
+        float raw = to_f(delta_raw[bt_di]);                                 \
+        float sp = (raw > 20.0f)                                            \
+            ? raw : log1pf(exp2f(raw * 1.4426950408889634f));               \
+        TY spt = FROM_F(sp);                                                \
+        delta_saved[bt_di] = spt;                                           \
+        float delta_d = to_f(spt);                                          \
         float u_d = to_f(u[bt_di]);                                         \
         float delta_u_d = delta_d * u_d;                                    \
         float y_d = D[d] * u_d;                                             \

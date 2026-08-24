@@ -542,16 +542,9 @@ pub fn gpu_forward_mamba_layer(
         (bt, dt_rank, di),
     )?;
 
-    // Softplus: delta = softplus(delta_raw) — fused copy+softplus, no memcpy
-    {
-        let n = (bt * di) as i32;
-        let mut builder = ctx.stream.launch_builder(&ctx.kernels.softplus_copy);
-        builder.arg(acts.delta.inner_mut());
-        builder.arg(acts.delta_raw.inner());
-        builder.arg(&n);
-        unsafe { builder.launch(grid_1d(bt * di)) }
-            .map_err(|e| format!("softplus_copy mamba: {:?}", e))?;
-    }
+    // Softplus is fused into the scan kernels below: they read delta_raw,
+    // apply softplus inline (same value the deleted copy pass stored) and
+    // write the post-softplus save the backward replays from.
 
     // ===================================================================
     // F4d: SSM burnin forward
@@ -620,7 +613,8 @@ pub fn gpu_forward_mamba_layer(
             builder.arg(&layer_ptrs.ssm_state);
             builder.arg(acts.y.inner_mut());
             builder.arg(acts.h_saved.inner_mut());
-            builder.arg(acts.delta.inner());
+            builder.arg(acts.delta_raw.inner());
+            builder.arg(acts.delta.inner_mut());
             builder.arg(acts.u.inner());
             builder.arg(scratch.d_b_reduced.inner());
             builder.arg(scratch.d_c_reduced.inner());
@@ -641,7 +635,8 @@ pub fn gpu_forward_mamba_layer(
             builder.arg(&layer_ptrs.ssm_state);
             builder.arg(acts.y.inner_mut());
             builder.arg(acts.h_saved.inner_mut());
-            builder.arg(acts.delta.inner());
+            builder.arg(acts.delta_raw.inner());
+            builder.arg(acts.delta.inner_mut());
             builder.arg(acts.u.inner());
             builder.arg(scratch.d_b_reduced.inner());
             builder.arg(scratch.d_c_reduced.inner());

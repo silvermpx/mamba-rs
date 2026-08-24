@@ -273,7 +273,12 @@ extern "C" __global__ __launch_bounds__(NTHREADS, SCAN_MINB) void ssm_parallel_s
     float* __restrict__ h,             // [batch * d_inner * d_state] SSM state (mutated)
     float* __restrict__ y_out,         // [batch * T * d_inner] output
     float* __restrict__ h_saved,       // [batch * (T+1) * d_inner * d_state] saved for backward
-    const float* __restrict__ delta,   // [batch * T * d_inner]
+    // Pre-softplus dt: the kernel applies softplus inline (through the
+    // exact store rounding the deleted softplus_copy pass produced) and
+    // WRITES the post-softplus save the backward replays from - one
+    // launch and one full read pass fewer per layer.
+    const float* __restrict__ delta_raw, // [batch * T * d_inner]
+    float* __restrict__ delta_saved,     // [batch * T * d_inner]
     const float* __restrict__ u,       // [batch * T * d_inner]
     const float* __restrict__ B,       // [batch * T * d_state]
     const float* __restrict__ C,       // [batch * T * d_state]
@@ -359,7 +364,15 @@ extern "C" __global__ __launch_bounds__(NTHREADS, SCAN_MINB) void ssm_parallel_s
         #pragma unroll
         for (int i = 0; i < NITEMS; i++) {
             int t = chunk_start + threadIdx.x * NITEMS + i;
-            delta_vals[i] = (t < T) ? delta[(bid * T + t) * d_inner + did] : 0.0f;
+            if (t < T) {
+                float raw = delta_raw[(bid * T + t) * d_inner + did];
+                float sp = (raw > 20.0f) ? raw
+                                         : log1pf(exp2f(raw * 1.4426950408889634f));
+                delta_saved[(bid * T + t) * d_inner + did] = sp;
+                delta_vals[i] = sp;
+            } else {
+                delta_vals[i] = 0.0f;
+            }
             u_vals[i] = (t < T) ? u[(bid * T + t) * d_inner + did] : 0.0f;
             delta_u_vals[i] = delta_vals[i] * u_vals[i];
         }
@@ -789,7 +802,8 @@ ssm_parallel_scan_fwd_##SUFFIX(                                               \
     float* __restrict__ h,                                                    \
     T_ACT* __restrict__ y_out,                                                \
     float* __restrict__ h_saved,                                              \
-    const T_ACT* __restrict__ delta,                                          \
+    const T_ACT* __restrict__ delta_raw,                                      \
+    T_ACT* __restrict__ delta_saved,                                          \
     const T_ACT* __restrict__ u,                                              \
     const T_ACT* __restrict__ B,                                              \
     const T_ACT* __restrict__ C,                                              \
@@ -852,8 +866,20 @@ ssm_parallel_scan_fwd_##SUFFIX(                                               \
         _Pragma("unroll")                                                     \
         for (int i = 0; i < NITEMS; i++) {                                    \
             int t = chunk_start + threadIdx.x * NITEMS + i;                   \
-            delta_vals[i] =                                                   \
-                (t < T) ? to_f(delta[(bid * T + t) * d_inner + did]) : 0.0f;  \
+            if (t < T) {                                                      \
+                /* Inline softplus through the exact store rounding the    \
+                   deleted copy pass produced; the scan consumes the       \
+                   round-tripped value, bit-equal to reading the save. */  \
+                float raw = to_f(delta_raw[(bid * T + t) * d_inner + did]); \
+                float sp = (raw > 20.0f)                                    \
+                    ? raw                                                   \
+                    : log1pf(exp2f(raw * 1.4426950408889634f));             \
+                T_ACT spt = FROM_F(sp);                                     \
+                delta_saved[(bid * T + t) * d_inner + did] = spt;           \
+                delta_vals[i] = to_f(spt);                                  \
+            } else {                                                        \
+                delta_vals[i] = 0.0f;                                       \
+            }                                                               \
             u_vals[i] = (t < T) ? to_f(u[(bid * T + t) * d_inner + did])      \
                                 : 0.0f;                                       \
             delta_u_vals[i] = delta_vals[i] * u_vals[i];                      \

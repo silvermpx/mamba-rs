@@ -543,6 +543,7 @@ fn bench_scan_kernels_isolated() {
     let h = GpuBuffer::zeros(&ctx.stream, b * di * ds).unwrap();
     let y = DtypedBuf::zeros(&ctx.stream, bt * di, dtype).unwrap();
     let delta = upload_typed(&det(bt * di, 11, 0.05));
+    let delta_saved = DtypedBuf::zeros(&ctx.stream, bt * di, dtype).unwrap();
     let u = upload_typed(&det(bt * di, 12, 0.5));
     let bb = upload_typed(&det(bt * ds, 13, 0.3));
     let cc = upload_typed(&det(bt * ds, 14, 0.3));
@@ -567,6 +568,7 @@ fn bench_scan_kernels_isolated() {
         let hp = h.cached_ptr();
         let yp = y.cached_ptr();
         let dp = delta.cached_ptr();
+        let dsv = delta_saved.cached_ptr();
         let up = u.cached_ptr();
         let bp = bb.cached_ptr();
         let cp = cc.cached_ptr();
@@ -581,6 +583,7 @@ fn bench_scan_kernels_isolated() {
         bld.arg(&yp);
         bld.arg(&hs);
         bld.arg(&dp);
+        bld.arg(&dsv);
         bld.arg(&up);
         bld.arg(&bp);
         bld.arg(&cp);
@@ -607,6 +610,7 @@ fn bench_scan_kernels_isolated() {
         let hp = h.cached_ptr();
         let yp = y.cached_ptr();
         let dp = delta.cached_ptr();
+        let dsv = delta_saved.cached_ptr();
         let up = u.cached_ptr();
         let bp = bb.cached_ptr();
         let cp = cc.cached_ptr();
@@ -619,6 +623,7 @@ fn bench_scan_kernels_isolated() {
         bld.arg(&yp);
         bld.arg(&hs);
         bld.arg(&dp);
+        bld.arg(&dsv);
         bld.arg(&up);
         bld.arg(&bp);
         bld.arg(&cp);

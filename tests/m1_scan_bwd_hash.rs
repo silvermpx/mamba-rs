@@ -57,6 +57,7 @@ fn m1_scan_bwd_output_hashes() {
     let h = GpuBuffer::zeros(&ctx.stream, b * di * ds).unwrap();
     let y = DtypedBuf::zeros(&ctx.stream, bt * di, dtype).unwrap();
     let delta = upload_typed(&det(bt * di, 11, 0.05));
+    let delta_saved = DtypedBuf::zeros(&ctx.stream, bt * di, dtype).unwrap();
     let u = upload_typed(&det(bt * di, 12, 0.5));
     let bb = upload_typed(&det(bt * ds, 13, 0.3));
     let cc = upload_typed(&det(bt * ds, 14, 0.3));
@@ -85,7 +86,10 @@ fn m1_scan_bwd_output_hashes() {
         let hp = h.cached_ptr();
         let yp = y.cached_ptr();
         let hs = h_saved.cached_ptr();
+        // The fused forward reads the PRE-softplus dt and writes the
+        // post-softplus save itself; the backward replays from that save.
         let dp = delta.cached_ptr();
+        let dsv = delta_saved.cached_ptr();
         let up = u.cached_ptr();
         let bp = bb.cached_ptr();
         let cp = cc.cached_ptr();
@@ -95,6 +99,7 @@ fn m1_scan_bwd_output_hashes() {
         bld.arg(&yp);
         bld.arg(&hs);
         bld.arg(&dp);
+        bld.arg(&dsv);
         bld.arg(&up);
         bld.arg(&bp);
         bld.arg(&cp);
@@ -135,7 +140,7 @@ fn m1_scan_bwd_output_hashes() {
         });
         let hs = h_saved.cached_ptr();
         let tp = tape.cached_ptr();
-        let dp = delta.cached_ptr();
+        let dp = delta_saved.cached_ptr();
         let up = u.cached_ptr();
         let bp = bb.cached_ptr();
         let cp = cc.cached_ptr();

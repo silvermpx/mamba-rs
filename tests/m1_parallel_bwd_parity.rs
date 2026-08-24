@@ -473,6 +473,7 @@ fn check_fold_parity(b: usize, t: usize, di: usize, ds: usize, dtype: WeightDtyp
     let mut h = GpuBuffer::zeros(&ctx.stream, b * di * ds).unwrap();
     let y = DtypedBuf::zeros(&ctx.stream, b * t * di, dtype).unwrap();
     let delta = upload_typed(&ctx, &inp.delta, dtype);
+    let delta_saved = DtypedBuf::zeros(&ctx.stream, inp.delta.len(), dtype).unwrap();
     let u = upload_typed(&ctx, &inp.u, dtype);
     let b_buf = upload_typed(&ctx, &bc_to_tmajor(&inp.b_buf, b, t, ds), dtype);
     let c_buf = upload_typed(&ctx, &bc_to_tmajor(&inp.c_buf, b, t, ds), dtype);
@@ -493,6 +494,7 @@ fn check_fold_parity(b: usize, t: usize, di: usize, ds: usize, dtype: WeightDtyp
         let yp = y.cached_ptr();
         let hs = h_saved.cached_ptr();
         let dl = delta.cached_ptr();
+        let dsv = delta_saved.cached_ptr();
         let uu = u.cached_ptr();
         let bbp = b_buf.cached_ptr();
         let ccp = c_buf.cached_ptr();
@@ -502,6 +504,7 @@ fn check_fold_parity(b: usize, t: usize, di: usize, ds: usize, dtype: WeightDtyp
         bld.arg(&yp);
         bld.arg(&hs);
         bld.arg(&dl);
+        bld.arg(&dsv);
         bld.arg(&uu);
         bld.arg(&bbp);
         bld.arg(&ccp);
@@ -533,6 +536,10 @@ fn check_fold_parity(b: usize, t: usize, di: usize, ds: usize, dtype: WeightDtyp
     }
     let mut inp_ref = make_inputs(b, t, di, ds);
     inp_ref.h_saved = h_from_tmajor(&h_dev, b, t, di, ds);
+    // The fused forward consumed softplus(inp.delta) (round-tripped
+    // through the activation dtype) - the reference backward must see
+    // the SAME values, so it reads the save the forward just wrote.
+    inp_ref.delta = download_typed(&ctx, &delta_saved);
     let (dd_seq, du_seq, dbl_seq, dcl_seq, ddd_seq, dal_seq) = run_seq_f32(&ctx, &k, &inp_ref);
 
     // Fold backward on the slim tape.
@@ -551,7 +558,7 @@ fn check_fold_parity(b: usize, t: usize, di: usize, ds: usize, dtype: WeightDtyp
             .launch_builder(k.ssm_parallel_bwd_fold_typed.get(dtype));
         let hs = h_saved.cached_ptr();
         let tp = tape.cached_ptr();
-        let dl = delta.cached_ptr();
+        let dl = delta_saved.cached_ptr();
         let uu = u.cached_ptr();
         let bbp = b_buf.cached_ptr();
         let ccp = c_buf.cached_ptr();
@@ -685,6 +692,7 @@ fn diag_fold_slim_vs_full_positions() {
         let h = GpuBuffer::zeros(&ctx.stream, b * di * ds).unwrap();
         let y = DtypedBuf::zeros(&ctx.stream, b * t * di, dtype).unwrap();
         let delta = upload_typed(&ctx, &inp.delta, dtype);
+        let delta_saved = DtypedBuf::zeros(&ctx.stream, inp.delta.len(), dtype).unwrap();
         let u = upload_typed(&ctx, &inp.u, dtype);
         let b_buf = upload_typed(&ctx, &bc_to_tmajor(&inp.b_buf, b, t, ds), dtype);
         let c_buf = upload_typed(&ctx, &bc_to_tmajor(&inp.c_buf, b, t, ds), dtype);
@@ -716,6 +724,7 @@ fn diag_fold_slim_vs_full_positions() {
             let yp = y.cached_ptr();
             let hs = h_saved.cached_ptr();
             let dl = delta.cached_ptr();
+            let dsv = delta_saved.cached_ptr();
             let uu = u.cached_ptr();
             let bbp = b_buf.cached_ptr();
             let ccp = c_buf.cached_ptr();
@@ -725,6 +734,7 @@ fn diag_fold_slim_vs_full_positions() {
             bld.arg(&yp);
             bld.arg(&hs);
             bld.arg(&dl);
+            bld.arg(&dsv);
             bld.arg(&uu);
             bld.arg(&bbp);
             bld.arg(&ccp);
@@ -762,7 +772,7 @@ fn diag_fold_slim_vs_full_positions() {
         });
         let hs = h_saved.cached_ptr();
         let tp = tape.cached_ptr();
-        let dl = delta.cached_ptr();
+        let dl = delta_saved.cached_ptr();
         let uu = u.cached_ptr();
         let bbp = b_buf.cached_ptr();
         let ccp = c_buf.cached_ptr();

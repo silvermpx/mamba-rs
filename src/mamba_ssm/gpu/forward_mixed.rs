@@ -609,24 +609,10 @@ pub fn gpu_forward_mamba_backbone_mixed(
             Some(lw.dt_proj_b.ptr()),
             (bt, dt_rank, di),
         )?;
-        {
-            let dl = layer_acts.delta.cached_ptr();
-            let dr = layer_acts.delta_raw.cached_ptr();
-            let w = super::launch::vec8_width(dt.size_bytes());
-            let vec = super::launch::vec8_ok(bt * di, dt.size_bytes(), &[dl, dr]);
-            let (kern, count) = if vec {
-                (k.softplus_copy_v_typed.get(dt), bt * di / w)
-            } else {
-                (k.softplus_copy_typed.get(dt), bt * di)
-            };
-            let n = count as i32;
-            let mut bld = ctx.stream.launch_builder(kern);
-            bld.arg(&dl);
-            bld.arg(&dr);
-            bld.arg(&n);
-            unsafe { bld.launch(grid_1d(count)) }
-                .map_err(|e| format!("softplus_copy_typed L{layer_idx}: {e:?}"))?;
-        }
+        // Softplus is fused into the scan kernels below: they read
+        // delta_raw, apply softplus inline (through the exact store
+        // rounding the deleted copy pass produced) and write the
+        // post-softplus save the backward replays from.
 
         // F4d: gather_bc_cols_typed → b_buf, c_buf; ssm_burnin_forward typed.
         {
@@ -676,7 +662,8 @@ pub fn gpu_forward_mamba_backbone_mixed(
                 let mut bld = ctx.stream.launch_builder(kernel);
                 let y = layer_acts.y.cached_ptr();
                 let hs = layer_acts.h_saved.cached_ptr();
-                let dl = layer_acts.delta.cached_ptr();
+                let draw = layer_acts.delta_raw.cached_ptr();
+                let dsave = layer_acts.delta.cached_ptr();
                 let u = layer_acts.u.cached_ptr();
                 let bb = scratch.b_buf.cached_ptr();
                 let cb = scratch.c_buf.cached_ptr();
@@ -684,7 +671,8 @@ pub fn gpu_forward_mamba_backbone_mixed(
                 bld.arg(&ssm_ptr);
                 bld.arg(&y);
                 bld.arg(&hs);
-                bld.arg(&dl);
+                bld.arg(&draw);
+                bld.arg(&dsave);
                 bld.arg(&u);
                 bld.arg(&bb);
                 bld.arg(&cb);
@@ -721,7 +709,8 @@ pub fn gpu_forward_mamba_backbone_mixed(
                 let mut bld = ctx.stream.launch_builder(kernel);
                 let y = layer_acts.y.cached_ptr();
                 let hs = layer_acts.h_saved.cached_ptr();
-                let dl = layer_acts.delta.cached_ptr();
+                let draw = layer_acts.delta_raw.cached_ptr();
+                let dsave = layer_acts.delta.cached_ptr();
                 let u = layer_acts.u.cached_ptr();
                 let bb = scratch.b_buf.cached_ptr();
                 let cb = scratch.c_buf.cached_ptr();
@@ -729,7 +718,8 @@ pub fn gpu_forward_mamba_backbone_mixed(
                 bld.arg(&ssm_ptr);
                 bld.arg(&y);
                 bld.arg(&hs);
-                bld.arg(&dl);
+                bld.arg(&draw);
+                bld.arg(&dsave);
                 bld.arg(&u);
                 bld.arg(&bb);
                 bld.arg(&cb);
