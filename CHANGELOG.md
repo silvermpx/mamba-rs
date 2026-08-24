@@ -9,10 +9,12 @@ T=4621, f32, cuBLAS+TF32, RTX 5090): **29.34 -> 10.83 ms/page,
 34.1 -> 92.4 pages/s**.
 
 Training step, campaign shape (d_model 384, 24 layers, B=8, T=1300,
-bf16, graph lane, RTX 5090): Mamba-1 131.5 -> **115.8 ms/step** on the
+bf16, graph lane, RTX 5090): Mamba-1 131.5 -> **114.0 ms/step** on the
 batch-invariant + tensor-core tier and 169.0 -> **129.8 ms/step** on
-cuBLAS, with 383 MB less peak memory; Mamba-3 179.4 -> **165.7
-ms/step**. The Mamba-3 "before" is the 0.6.3 published figure; the same
+cuBLAS, with 766 MB less peak memory; Mamba-3 179.4 -> **165.7
+ms/step**. (The last training-epilogue items shipped after the rented
+5090 box closed; their bit gates re-ran on an RTX 6000 Ada and their
+ms/step contribution is small against the numbers above.) The Mamba-3 "before" is the 0.6.3 published figure; the same
 step re-measures at 184.6 ms on the 0.6.3 tree with this release's
 hardened timing harness (explicit syncs around the timed region), so
 the like-for-like delta is larger than the headline subtraction
@@ -46,7 +48,46 @@ digest. Full test park: 428 passed, 0 failed.
   had (key: source + arch + options + NVRTC version); the full NVRTC
   compile of seven sources per process boot is now a one-time cost.
 
-### Performance (RTX 5090)
+### Performance (RTX 5090; the training epilogue items re-gated on RTX 6000 Ada)
+
+- The gradient clip computes its coefficient on device: a single-thread
+  kernel folds the 512 f64 partials in the ascending order the host loop
+  used, and the scaling pass reads the coefficient from device memory -
+  the norm/scale pair now launches back to back instead of the GPU
+  idling through a sync, a download and a host fold between them. All
+  four trainer lanes use it.
+- SiLU(gate) is no longer materialized: the split writes x and the raw
+  gate, and the gating forward/backward recompute the activation from
+  the saved pre-SiLU value in the split kernel's exact form - one
+  [B*T*d_inner] activation freed per layer (383 MB at the campaign
+  shape). The in_proj backward's concat pass is gone: the gating
+  backward writes the gate half of d_proj and the conv dx pass writes
+  the x half, both in place.
+- Softplus is fused into the save-scan forwards (the kernels read the
+  raw dt, apply softplus through the deleted copy pass's exact store
+  rounding, and write the save the backward replays from) and its
+  derivative into the fold backward's epilogue (round-first: the
+  accumulator rounds exactly as the old store did, then the derivative
+  divides the reloaded value) - two launches and one full activation
+  read fewer per layer, per direction.
+- The fold backward's dA tail writes one partial row per chunk instead
+  of a global read-modify-write per (chunk, lane, state); a chunked
+  reducer folds the rows in the same order the accumulator did.
+- The mixed backward's per-layer f32-to-typed gradient cast survives
+  only on the first layer processed: the norm backward mirrors its dx
+  store into the typed buffer from the value already in a register.
+- The hot elementwise kernels (gating, multiply, softplus) gained
+  16-byte vectorized twins - one uint4 per operand per thread, same
+  per-element arithmetic in the same order - selected only when the
+  shape and every operand pointer allow it (the class measured
+  instruction-bound: a uint4 copy of the same bytes runs 2.6x the
+  scalar rate on sm_120).
+- Every AdamW compute shadow (typed bulk and f32-stays-f32 alike) is
+  written by the fused optimizer kernel in the same launch that updates
+  its master; the per-tensor copy walk after each step is a no-op seam
+  now. Chunks shrink 64k -> 8k elements, growing the grid from hundreds
+  of long serial blocks into thousands that fill the machine.
+
 
 - Prefill conv is T-tiled (the serial per-channel walk left the machine
   idle at B=1) and the `d_conv == 4` register fast path landed on the
