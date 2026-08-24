@@ -428,7 +428,7 @@ pub struct MambaKernels {
 /// NVRTC library version, part of the kernel-cache key (a toolkit upgrade
 /// must invalidate cached PTX). (0, 0) when the query itself fails — the
 /// cache then still keys on source + arch + options.
-fn nvrtc_version() -> (i32, i32) {
+pub(crate) fn nvrtc_version() -> (i32, i32) {
     let mut major: core::ffi::c_int = 0;
     let mut minor: core::ffi::c_int = 0;
     let rc = unsafe { cudarc::nvrtc::sys::nvrtcVersion(&mut major, &mut minor) };
@@ -443,7 +443,7 @@ fn nvrtc_version() -> (i32, i32) {
 /// `0`/`off` to disable); default is `$HOME/.cache/mamba-rs/kernels`,
 /// falling back to the system temp dir when HOME is absent (systemd units
 /// without a HOME — exactly the environment that motivated the cache).
-fn kernel_cache_dir() -> Option<std::path::PathBuf> {
+pub(crate) fn kernel_cache_dir() -> Option<std::path::PathBuf> {
     match std::env::var("MAMBA_RS_KERNEL_CACHE") {
         Ok(v) if matches!(v.trim(), "0" | "off" | "OFF") => None,
         Ok(v) if !v.trim().is_empty() => Some(std::path::PathBuf::from(v.trim())),
@@ -463,7 +463,7 @@ fn kernel_cache_dir() -> Option<std::path::PathBuf> {
 /// bases over the same bytes. Not cryptographic — the cache is a local,
 /// non-adversarial directory and a wrong hit requires colliding BOTH
 /// lanes; a corrupt entry fails loudly at module load and is deleted.
-fn cache_key(material: &str) -> String {
+pub(crate) fn cache_key(material: &str) -> String {
     let fnv = |seed: u64| -> u64 {
         let mut h = seed;
         for b in material.as_bytes() {

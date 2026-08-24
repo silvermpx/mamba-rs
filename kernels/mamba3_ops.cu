@@ -1407,6 +1407,7 @@ extern "C" __global__ void bcnorm_fwd_bc_##SUFFIX(                              
 
 DEFINE_BCNORM_FWD_BC(bf16, __nv_bfloat16, from_f_bf16)
 DEFINE_BCNORM_FWD_BC(f16,  __half,        from_f_f16)
+DEFINE_BCNORM_FWD_BC(f32,  float,         from_f_f32)
 
 // ------- bc_bias_add typed -------
 // B_normed: T_ACT in; B_biased: T_ACT out; bias f32.
@@ -1521,6 +1522,136 @@ extern "C" __global__ void rope_fwd_##SUFFIX(                                   
 
 DEFINE_ROPE_FWD(bf16, __nv_bfloat16, from_f_bf16)
 DEFINE_ROPE_FWD(f16,  __half,        from_f_f16)
+
+// ------- m3_bias_rope_fwd: bc_bias_add (B + C) + rope_fwd in ONE launch -------
+//
+// Replaces the F4c/F4d/F4ef launch triple. The biased tensors are still
+// materialized (the backward consumes them as saved activations); the
+// rotation then uses the register values instead of reloading them - an
+// f32 held in a register carries the exact bits the global round trip
+// returned, so K/Q match the three-launch chain bit for bit. With
+// n_angles == 0 every element passes through (K = B_biased, Q = C_biased),
+// which also replaces the two D2D copies of the old no-RoPE branch;
+// angle_cumsum is never dereferenced in that case.
+extern "C" __global__ void m3_bias_rope_fwd(
+    float* __restrict__ B_biased,           // [N * nh * ds]
+    float* __restrict__ C_biased,           // [N * nh * ds]
+    float* __restrict__ K_out,              // [N * nh * ds]
+    float* __restrict__ Q_out,              // [N * nh * ds]
+    const float* __restrict__ B_normed,     // [N * ng * ds]
+    const float* __restrict__ C_normed,     // [N * ng * ds]
+    const float* __restrict__ B_bias,       // [nh * ds]
+    const float* __restrict__ C_bias,       // [nh * ds]
+    const float* __restrict__ angle_cumsum, // [N * nh * n_angles]
+    int N, int nh, int ng, int ds, int n_angles
+) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int total = N * nh * ds;
+    if (idx >= total) return;
+    int nh_ds = nh * ds;
+    int sample = idx / nh_ds;
+    int rem = idx % nh_ds;
+    int h = rem / ds;
+    int n = rem % ds;
+    int heads_per_group = nh / ng;
+    int g = h / heads_per_group;
+    int src = sample * ng * ds + g * ds + n;
+    int bi = h * ds + n;
+    float b0 = B_normed[src] + B_bias[bi];
+    float c0 = C_normed[src] + C_bias[bi];
+    B_biased[idx] = b0;
+    C_biased[idx] = c0;
+    int rope_end = 2 * n_angles;
+    if (n >= rope_end) {
+        K_out[idx] = b0;
+        Q_out[idx] = c0;
+        return;
+    }
+    if ((n & 1) == 0) {
+        if (n + 1 >= ds) {
+            K_out[idx] = b0;
+            Q_out[idx] = c0;
+            return;
+        }
+        // The odd lane writes B/C_biased[idx + 1] itself; this lane only
+        // recomputes the same values for the rotation.
+        float b1 = B_normed[src + 1] + B_bias[bi + 1];
+        float c1 = C_normed[src + 1] + C_bias[bi + 1];
+        int a = n / 2;
+        int angle_idx = sample * nh * n_angles + h * n_angles + a;
+        float cos_a, sin_a;
+        sincosf(angle_cumsum[angle_idx], &sin_a, &cos_a);
+        K_out[idx] = cos_a * b0 - sin_a * b1;
+        K_out[idx + 1] = sin_a * b0 + cos_a * b1;
+        Q_out[idx] = cos_a * c0 - sin_a * c1;
+        Q_out[idx + 1] = sin_a * c0 + cos_a * c1;
+    }
+}
+
+/* Typed twin: the biased stores round through FROM_F exactly like
+ * bc_bias_add, and the rotation consumes the ROUND-TRIPPED values
+ * (to_f of the stored T_ACT) - the same values rope_fwd reloaded from
+ * global in the three-launch chain. */
+#define DEFINE_M3_BIAS_ROPE_FWD(SUFFIX, T_ACT, FROM_F)                         \
+extern "C" __global__ void m3_bias_rope_fwd_##SUFFIX(                           \
+    T_ACT* __restrict__ B_biased,                                               \
+    T_ACT* __restrict__ C_biased,                                               \
+    T_ACT* __restrict__ K_out,                                                  \
+    T_ACT* __restrict__ Q_out,                                                  \
+    const T_ACT* __restrict__ B_normed,                                         \
+    const T_ACT* __restrict__ C_normed,                                         \
+    const float* __restrict__ B_bias,                                           \
+    const float* __restrict__ C_bias,                                           \
+    const float* __restrict__ angle_cumsum,                                     \
+    int N, int nh, int ng, int ds, int n_angles                                 \
+) {                                                                             \
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;                            \
+    int total = N * nh * ds;                                                    \
+    if (idx >= total) return;                                                   \
+    int nh_ds = nh * ds;                                                        \
+    int sample = idx / nh_ds;                                                   \
+    int rem = idx % nh_ds;                                                      \
+    int h = rem / ds;                                                           \
+    int n = rem % ds;                                                           \
+    int heads_per_group = nh / ng;                                              \
+    int g = h / heads_per_group;                                                \
+    int src = sample * ng * ds + g * ds + n;                                    \
+    int bi = h * ds + n;                                                        \
+    T_ACT tb0 = FROM_F(to_f(B_normed[src]) + B_bias[bi]);                       \
+    T_ACT tc0 = FROM_F(to_f(C_normed[src]) + C_bias[bi]);                       \
+    B_biased[idx] = tb0;                                                        \
+    C_biased[idx] = tc0;                                                        \
+    int rope_end = 2 * n_angles;                                                \
+    if (n >= rope_end) {                                                        \
+        K_out[idx] = tb0;                                                       \
+        Q_out[idx] = tc0;                                                       \
+        return;                                                                 \
+    }                                                                           \
+    if ((n & 1) == 0) {                                                         \
+        if (n + 1 >= ds) {                                                      \
+            K_out[idx] = tb0;                                                   \
+            Q_out[idx] = tc0;                                                   \
+            return;                                                             \
+        }                                                                       \
+        T_ACT tb1 = FROM_F(to_f(B_normed[src + 1]) + B_bias[bi + 1]);           \
+        T_ACT tc1 = FROM_F(to_f(C_normed[src + 1]) + C_bias[bi + 1]);           \
+        float b0 = to_f(tb0);                                                   \
+        float b1 = to_f(tb1);                                                   \
+        float c0 = to_f(tc0);                                                   \
+        float c1 = to_f(tc1);                                                   \
+        int a = n / 2;                                                          \
+        int angle_idx = sample * nh * n_angles + h * n_angles + a;              \
+        float cos_a, sin_a;                                                     \
+        sincosf(angle_cumsum[angle_idx], &sin_a, &cos_a);                       \
+        K_out[idx] = FROM_F(cos_a * b0 - sin_a * b1);                           \
+        K_out[idx + 1] = FROM_F(sin_a * b0 + cos_a * b1);                       \
+        Q_out[idx] = FROM_F(cos_a * c0 - sin_a * c1);                           \
+        Q_out[idx + 1] = FROM_F(sin_a * c0 + cos_a * c1);                       \
+    }                                                                           \
+}
+
+DEFINE_M3_BIAS_ROPE_FWD(bf16, __nv_bfloat16, from_f_bf16)
+DEFINE_M3_BIAS_ROPE_FWD(f16,  __half,        from_f_f16)
 
 // ------- silu_gate_fwd typed -------
 // y, z, out: T_ACT. Simple elementwise.

@@ -45,6 +45,9 @@ pub struct Mamba3Kernels {
     pub angle_dt_bwd: CudaFunction,
     pub m3_angle_dt_bwd_seq: CudaFunction,
     pub rope_fwd: CudaFunction,
+    /// Fused bc_bias_add (B + C) + rope_fwd - one launch replaces the
+    /// F4c/F4d/F4ef triple; biased saves still materialize for backward.
+    pub m3_bias_rope_fwd: CudaFunction,
     pub rope_bwd: CudaFunction,
     pub m3_compute_abg: CudaFunction,
     pub m3_abg_bwd: CudaFunction,
@@ -118,12 +121,17 @@ pub struct Mamba3Kernels {
     pub bcnorm_fwd_typed: TypedKernel,
     /// Fused B+C variant of bcnorm_fwd_typed (2× grid via blockIdx.y).
     pub bcnorm_fwd_bc_typed: TypedKernel,
+    /// Fused B+C norm, f32 lane (the decode step merges its two bcnorm
+    /// launches through it).
+    pub bcnorm_fwd_bc_f32: CudaFunction,
     /// Per-head bias add, half I/O, f32 bias.
     pub bc_bias_add_typed: TypedKernel,
     /// Fused B+C variant of bc_bias_add_typed (2× grid via blockIdx.y).
     pub bc_bias_add_bc_typed: TypedKernel,
     /// RoPE rotation, half B/C, f32 angle_cumsum.
     pub rope_fwd_typed: TypedKernel,
+    /// Fused typed twin of bias + rope (round-trip contract preserved).
+    pub m3_bias_rope_fwd_typed: TypedKernel,
     /// Plain SiLU gate (no norm), half I/O.
     pub silu_gate_fwd_typed: TypedKernel,
     /// SiLU-gate backward (typed twins share the f32 kernel's argument
@@ -232,27 +240,68 @@ impl Mamba3Kernels {
             })
             .collect::<Vec<_>>()
             .join("\n");
+        let option_strings = vec![
+            "--fmad=true".to_string(),
+            "--extra-device-vectorization".to_string(),
+            // Mirrors the M1 compiler: strip device assert() trap
+            // checks (none in the m3 sources today, but shared
+            // headers may grow them); asserts compute no values.
+            "-DNDEBUG".to_string(),
+            format!("-DMAMBA_RS_STATE_CAP={state_cap}"),
+        ];
         let opts = cudarc::nvrtc::CompileOptions {
             arch: Some(arch),
-            options: vec![
-                "--fmad=true".to_string(),
-                "--extra-device-vectorization".to_string(),
-                // Mirrors the M1 compiler: strip device assert() trap
-                // checks (none in the m3 sources today, but shared
-                // headers may grow them); asserts compute no values.
-                "-DNDEBUG".to_string(),
-                format!("-DMAMBA_RS_STATE_CAP={state_cap}"),
-            ],
+            options: option_strings.clone(),
             include_paths: crate::mamba_ssm::gpu::kernels::cuda_include_paths(),
             ..Default::default()
         };
 
-        let ptx = cudarc::nvrtc::compile_ptx_with_opts(combined, opts)
-            .map_err(|e| format!("NVRTC M3 compile failed: {e:?}"))?;
+        // PTX disk cache with the M1 loader's key law (source blob + arch
+        // + options + NVRTC version): a hit skips the NVRTC half of the
+        // boot tax; identical PTX by construction. Any hit-path failure
+        // deletes the entry and falls through to a real compile; a
+        // failed compile is never cached. The M3 loader paid a full
+        // NVRTC compile of 7 sources on EVERY process boot before this.
+        let (nv_major, nv_minor) = crate::mamba_ssm::gpu::kernels::nvrtc_version();
+        let key = crate::mamba_ssm::gpu::kernels::cache_key(&format!(
+            "{combined}\u{1f}{arch}\u{1f}{option_strings:?}\u{1f}nvrtc{nv_major}.{nv_minor}"
+        ));
+        let cache_path = crate::mamba_ssm::gpu::kernels::kernel_cache_dir()
+            .map(|d| d.join(format!("mamba3-kernels-{key}.ptx")));
 
-        let module = ctx
-            .load_module(ptx)
-            .map_err(|e| format!("M3 module load failed: {e:?}"))?;
+        // Hit path loads the module directly; a torn or rotted entry is
+        // deleted and falls through to the real compile.
+        let mut module = None;
+        if let Some(path) = &cache_path
+            && let Ok(src) = std::fs::read_to_string(path)
+        {
+            match ctx.load_module(cudarc::nvrtc::Ptx::from_src(src)) {
+                Ok(m) => module = Some(m),
+                Err(_) => {
+                    let _ = std::fs::remove_file(path);
+                }
+            }
+        }
+        let module = match module {
+            Some(m) => m,
+            None => {
+                let ptx = cudarc::nvrtc::compile_ptx_with_opts(combined, opts)
+                    .map_err(|e| format!("NVRTC M3 compile failed: {e:?}"))?;
+                if let Some(path) = &cache_path
+                    && let Some(dir) = path.parent()
+                    && std::fs::create_dir_all(dir).is_ok()
+                {
+                    // Atomic publish: write-then-rename so a concurrent
+                    // boot never reads a torn entry; failures non-fatal.
+                    let tmp = path.with_extension(format!("tmp-{}", std::process::id()));
+                    if std::fs::write(&tmp, ptx.to_src()).is_ok() {
+                        let _ = std::fs::rename(&tmp, path);
+                    }
+                }
+                ctx.load_module(ptx)
+                    .map_err(|e| format!("M3 module load failed: {e:?}"))?
+            }
+        };
 
         let get = |name: &str| -> Result<CudaFunction, String> {
             module
@@ -285,6 +334,7 @@ impl Mamba3Kernels {
             angle_dt_bwd: get("angle_dt_bwd")?,
             m3_angle_dt_bwd_seq: get("m3_angle_dt_bwd_seq")?,
             rope_fwd: get("rope_fwd")?,
+            m3_bias_rope_fwd: get("m3_bias_rope_fwd")?,
             rope_bwd: get("rope_bwd")?,
             m3_compute_abg: get("m3_compute_abg")?,
             m3_abg_bwd: get("m3_abg_bwd")?,
@@ -350,12 +400,11 @@ impl Mamba3Kernels {
                 f16: get("bcnorm_fwd_f16")?,
             },
             bcnorm_fwd_bc_typed: TypedKernel {
-                // f32 fused variant not yet implemented; reuse bcnorm_fwd
-                // (callers select this only on bf16/f16 paths).
-                f32: get("bcnorm_fwd")?,
+                f32: get("bcnorm_fwd_bc_f32")?,
                 bf16: get("bcnorm_fwd_bc_bf16")?,
                 f16: get("bcnorm_fwd_bc_f16")?,
             },
+            bcnorm_fwd_bc_f32: get("bcnorm_fwd_bc_f32")?,
             bc_bias_add_typed: TypedKernel {
                 f32: get("bc_bias_add")?,
                 bf16: get("bc_bias_add_bf16")?,
@@ -370,6 +419,11 @@ impl Mamba3Kernels {
                 f32: get("rope_fwd")?,
                 bf16: get("rope_fwd_bf16")?,
                 f16: get("rope_fwd_f16")?,
+            },
+            m3_bias_rope_fwd_typed: TypedKernel {
+                f32: get("m3_bias_rope_fwd")?,
+                bf16: get("m3_bias_rope_fwd_bf16")?,
+                f16: get("m3_bias_rope_fwd_f16")?,
             },
             silu_gate_fwd_typed: TypedKernel {
                 f32: get("silu_gate_fwd")?,

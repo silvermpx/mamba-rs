@@ -254,43 +254,6 @@ pub fn gpu_forward_mamba3_layer(
         builder.arg(&eps_g5);
         unsafe { builder.launch(cfg) }.map_err(|e| format!("bcnorm_fwd C F4b: {:?}", e))?;
     }
-    // F4c: Bias B
-    {
-        let bb_ptr = lw.b_bias.raw_ptr(&ctx.stream);
-        let n_i = bt as i32;
-        let nh_i = nh as i32;
-        let ng_i = ng as i32;
-        let ds_i = ds as i32;
-        let mut builder = ctx.stream.launch_builder(&m3k.bc_bias_add);
-        builder.arg(acts.b_biased.inner_mut());
-        builder.arg(acts.b_normed.inner());
-        builder.arg(&bb_ptr);
-        builder.arg(&n_i);
-        builder.arg(&nh_i);
-        builder.arg(&ng_i);
-        builder.arg(&ds_i);
-        unsafe { builder.launch(grid_1d(bt * nh * ds)) }
-            .map_err(|e| format!("bc_bias_add B F4c: {:?}", e))?;
-    }
-    // F4d: Bias C
-    {
-        let cb_ptr = lw.c_bias.raw_ptr(&ctx.stream);
-        let n_i = bt as i32;
-        let nh_i = nh as i32;
-        let ng_i = ng as i32;
-        let ds_i = ds as i32;
-        let mut builder = ctx.stream.launch_builder(&m3k.bc_bias_add);
-        builder.arg(acts.c_biased.inner_mut());
-        builder.arg(acts.c_normed.inner());
-        builder.arg(&cb_ptr);
-        builder.arg(&n_i);
-        builder.arg(&nh_i);
-        builder.arg(&ng_i);
-        builder.arg(&ds_i);
-        unsafe { builder.launch(grid_1d(bt * nh * ds)) }
-            .map_err(|e| format!("bc_bias_add C F4d: {:?}", e))?;
-    }
-
     // F5: angle accumulation (chunk-parallel; see gpu_angle_chunked_fwd)
     if na > 0 {
         gpu_angle_chunked_fwd(
@@ -309,27 +272,34 @@ pub fn gpu_forward_mamba3_layer(
         )?;
     }
 
-    // F4e+f: RoPE on B->K and C->Q
-    if na > 0 {
+    // F4c-f fused: bias add (B + C) + RoPE in one launch. The biased
+    // tensors still materialize (backward saves); with n_angles == 0 the
+    // kernel passes through, replacing the old copy branch too.
+    {
+        let bb_ptr = lw.b_bias.raw_ptr(&ctx.stream);
+        let cb_ptr = lw.c_bias.raw_ptr(&ctx.stream);
         let n_i = bt as i32;
         let nh_i = nh as i32;
+        let ng_i = ng as i32;
         let ds_i = ds as i32;
         let na_i = na as i32;
-        let mut builder = ctx.stream.launch_builder(&m3k.rope_fwd);
+        let mut builder = ctx.stream.launch_builder(&m3k.m3_bias_rope_fwd);
+        builder.arg(acts.b_biased.inner_mut());
+        builder.arg(acts.c_biased.inner_mut());
         builder.arg(acts.k.inner_mut());
         builder.arg(acts.q.inner_mut());
-        builder.arg(acts.b_biased.inner());
-        builder.arg(acts.c_biased.inner());
+        builder.arg(acts.b_normed.inner());
+        builder.arg(acts.c_normed.inner());
+        builder.arg(&bb_ptr);
+        builder.arg(&cb_ptr);
         builder.arg(acts.angle_cumsum.inner());
         builder.arg(&n_i);
         builder.arg(&nh_i);
+        builder.arg(&ng_i);
         builder.arg(&ds_i);
         builder.arg(&na_i);
         unsafe { builder.launch(grid_1d(bt * nh * ds)) }
-            .map_err(|e| format!("rope_fwd F4ef: {:?}", e))?;
-    } else {
-        acts.k.copy_from_raw(&acts.b_biased, &ctx.stream)?;
-        acts.q.copy_from_raw(&acts.c_biased, &ctx.stream)?;
+            .map_err(|e| format!("m3_bias_rope_fwd F4: {:?}", e))?;
     }
 
     // F5b: alpha/beta/gamma

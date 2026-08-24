@@ -630,25 +630,11 @@ impl Mamba3GpuInferenceEngine {
         let v_off = layer_idx * state.v_per_layer();
         let a_off = layer_idx * state.angle_per_layer();
 
-        // Save residual before norm (avoids in-place aliasing)
-        {
-            let src = scratch.temporal.cached_ptr();
-            let dst = scratch.residual.cached_ptr();
-            let bytes = b * dm * std::mem::size_of::<f32>();
-            let result = unsafe {
-                cudarc::driver::sys::cuMemcpyDtoDAsync_v2(
-                    dst,
-                    src,
-                    bytes,
-                    self.ctx.stream.cu_stream(),
-                )
-            };
-            if result != cudarc::driver::sys::CUresult::CUDA_SUCCESS {
-                return Err(format!("D2D copy residual: {:?}", result));
-            }
-        }
-
-        // F1: RMSNorm (input=residual, output=post_norm — separate buffers)
+        // F1: RMSNorm reads the residual stream in place - the old
+        // pre-norm D2D save is gone: F8 now writes post_norm (dead by
+        // then) and F9 adds it into temporal, which still holds the
+        // pre-norm value. IEEE addition of the same two f32 values is
+        // commutative, so the swapped operand roles round identically.
         {
             let grid = crate::mamba_ssm::gpu::launch::grid_norm(b, dm);
             let eps: f32 = self.cfg.rms_norm_eps;
@@ -656,7 +642,7 @@ impl Mamba3GpuInferenceEngine {
             let mut builder = self.ctx.stream.launch_builder(&self.kernels.rmsnorm_fwd);
             builder.arg(scratch.post_norm.inner());
             builder.arg(scratch.rms_buf.inner());
-            builder.arg(scratch.residual.inner());
+            builder.arg(scratch.temporal.inner());
             builder.arg(&nw_ptr);
             builder.arg(&b_i);
             builder.arg(&dm_i);
@@ -704,74 +690,32 @@ impl Mamba3GpuInferenceEngine {
             unsafe { builder.launch(grid) }.map_err(|e| format!("F3 m3_split: {e:?}"))?;
         }
 
-        // F4a: BCNorm forward (B)
+        // F4a: BCNorm forward, B and C in one launch (grid.y selects the
+        // tensor; per-element math identical to two sequential calls).
         {
             let grid = cudarc::driver::LaunchConfig {
-                grid_dim: ((b * ng) as u32, 1, 1),
+                grid_dim: ((b * ng) as u32, 2, 1),
                 block_dim: (ds as u32, 1, 1),
                 shared_mem_bytes: (ds * 4) as u32,
             };
-            let mut builder = self.ctx.stream.launch_builder(&self.kernels.bcnorm_fwd);
+            let mut builder = self
+                .ctx
+                .stream
+                .launch_builder(&self.kernels.bcnorm_fwd_bc_f32);
             builder.arg(scratch.b_normed.inner());
-            builder.arg(scratch.b_rms.inner());
-            builder.arg(scratch.b_raw.inner());
-            builder.arg(lw.b_norm_weight.inner());
-            builder.arg(&b_i);
-            builder.arg(&ng_i);
-            builder.arg(&ds_i);
-            let eps_g5: f32 = self.cfg.rms_norm_eps;
-            builder.arg(&eps_g5);
-            unsafe { builder.launch(grid) }.map_err(|e| format!("F4a bcnorm B: {e:?}"))?;
-        }
-
-        // F4a: BCNorm forward (C)
-        {
-            let grid = cudarc::driver::LaunchConfig {
-                grid_dim: ((b * ng) as u32, 1, 1),
-                block_dim: (ds as u32, 1, 1),
-                shared_mem_bytes: (ds * 4) as u32,
-            };
-            let mut builder = self.ctx.stream.launch_builder(&self.kernels.bcnorm_fwd);
             builder.arg(scratch.c_normed.inner());
+            builder.arg(scratch.b_rms.inner());
             builder.arg(scratch.c_rms.inner());
+            builder.arg(scratch.b_raw.inner());
             builder.arg(scratch.c_raw.inner());
+            builder.arg(lw.b_norm_weight.inner());
             builder.arg(lw.c_norm_weight.inner());
             builder.arg(&b_i);
             builder.arg(&ng_i);
             builder.arg(&ds_i);
             let eps_g5: f32 = self.cfg.rms_norm_eps;
             builder.arg(&eps_g5);
-            unsafe { builder.launch(grid) }.map_err(|e| format!("F4a bcnorm C: {e:?}"))?;
-        }
-
-        // F4b: Bias add (B: group → head expansion)
-        {
-            let n = b * nh * ds;
-            let grid = crate::mamba_ssm::gpu::launch::grid_1d(n);
-            let mut builder = self.ctx.stream.launch_builder(&self.kernels.bc_bias_add);
-            builder.arg(scratch.b_biased.inner());
-            builder.arg(scratch.b_normed.inner());
-            builder.arg(lw.b_bias.inner());
-            builder.arg(&b_i);
-            builder.arg(&nh_i);
-            builder.arg(&ng_i);
-            builder.arg(&ds_i);
-            unsafe { builder.launch(grid) }.map_err(|e| format!("F4b bias B: {e:?}"))?;
-        }
-
-        // F4b: Bias add (C)
-        {
-            let n = b * nh * ds;
-            let grid = crate::mamba_ssm::gpu::launch::grid_1d(n);
-            let mut builder = self.ctx.stream.launch_builder(&self.kernels.bc_bias_add);
-            builder.arg(scratch.c_biased.inner());
-            builder.arg(scratch.c_normed.inner());
-            builder.arg(lw.c_bias.inner());
-            builder.arg(&b_i);
-            builder.arg(&nh_i);
-            builder.arg(&ng_i);
-            builder.arg(&ds_i);
-            unsafe { builder.launch(grid) }.map_err(|e| format!("F4b bias C: {e:?}"))?;
+            unsafe { builder.launch(grid) }.map_err(|e| format!("F4a bcnorm BC: {e:?}"))?;
         }
 
         // F4c: Angle accumulation + RoPE
@@ -796,40 +740,33 @@ impl Mamba3GpuInferenceEngine {
             builder.arg(&nh_i);
             builder.arg(&na_i);
             unsafe { builder.launch(grid) }.map_err(|e| format!("F4c angle_dt: {e:?}"))?;
+        }
 
-            // rope_fwd: rotate B and C pairs
+        // F4b-c fused: bias add (B + C) + RoPE in one launch (biased
+        // tensors materialize for the state writeback consumers;
+        // n_angles == 0 passes through, replacing the old copy branch).
+        {
             let n = b * nh * ds;
             let grid = crate::mamba_ssm::gpu::launch::grid_1d(n);
-            let mut builder = self.ctx.stream.launch_builder(&self.kernels.rope_fwd);
-            builder.arg(scratch.k_cur.inner());
-            builder.arg(scratch.q_cur.inner());
+            let mut builder = self
+                .ctx
+                .stream
+                .launch_builder(&self.kernels.m3_bias_rope_fwd);
             builder.arg(scratch.b_biased.inner());
             builder.arg(scratch.c_biased.inner());
+            builder.arg(scratch.k_cur.inner());
+            builder.arg(scratch.q_cur.inner());
+            builder.arg(scratch.b_normed.inner());
+            builder.arg(scratch.c_normed.inner());
+            builder.arg(lw.b_bias.inner());
+            builder.arg(lw.c_bias.inner());
             builder.arg(scratch.angle_cumsum.inner());
             builder.arg(&b_i);
             builder.arg(&nh_i);
+            builder.arg(&ng_i);
             builder.arg(&ds_i);
             builder.arg(&na_i);
-            unsafe { builder.launch(grid) }.map_err(|e| format!("F4c rope: {e:?}"))?;
-        } else {
-            // No RoPE — copy biased directly
-            {
-                let bytes = b * nh * ds * std::mem::size_of::<f32>();
-                unsafe {
-                    cudarc::driver::sys::cuMemcpyDtoDAsync_v2(
-                        scratch.k_cur.cached_ptr(),
-                        scratch.b_biased.cached_ptr(),
-                        bytes,
-                        self.ctx.stream.cu_stream(),
-                    );
-                    cudarc::driver::sys::cuMemcpyDtoDAsync_v2(
-                        scratch.q_cur.cached_ptr(),
-                        scratch.c_biased.cached_ptr(),
-                        bytes,
-                        self.ctx.stream.cu_stream(),
-                    );
-                }
-            }
+            unsafe { builder.launch(grid) }.map_err(|e| format!("F4bc bias_rope: {e:?}"))?;
         }
 
         // F5: Compute alpha/beta/gamma
@@ -908,10 +845,12 @@ impl Mamba3GpuInferenceEngine {
             unsafe { builder.launch(grid) }.map_err(|e| format!("F7 silu_gate: {e:?}"))?;
         }
 
-        // F8: out_proj SGEMM [batch, d_inner] → [batch, d_model]
+        // F8: out_proj SGEMM [batch, d_inner] → [batch, d_model] - lands
+        // in post_norm (dead since F2 consumed it), keeping the residual
+        // stream in temporal.
         sgemm_no_bias(
             &self.ctx.blas,
-            &scratch.temporal,
+            &scratch.post_norm,
             &scratch.gated,
             lw.out_proj_w.ptr(),
             b,
@@ -919,7 +858,7 @@ impl Mamba3GpuInferenceEngine {
             dm,
         )?;
 
-        // F9: Residual add
+        // F9: Residual add - temporal (pre-norm stream) += block output.
         {
             let n = b * dm;
             let n_i = n as i32;
@@ -929,7 +868,7 @@ impl Mamba3GpuInferenceEngine {
                 .stream
                 .launch_builder(&self.kernels.vec_add_inplace);
             builder.arg(scratch.temporal.inner());
-            builder.arg(scratch.residual.inner());
+            builder.arg(scratch.post_norm.inner());
             builder.arg(&n_i);
             unsafe { builder.launch(grid) }.map_err(|e| format!("F9 residual: {e:?}"))?;
         }
@@ -1260,38 +1199,6 @@ impl Mamba3GpuInferenceMixed {
                 unsafe { bld.launch(grid) }.map_err(|e| format!("M3 F4a bcnorm B+C: {e:?}"))?;
             }
 
-            // F4b: bc_bias_add typed — fused B+C in single launch.
-            {
-                let n = b * nh * ds;
-                let grid_1 = grid_1d(n);
-                let grid = cudarc::driver::LaunchConfig {
-                    grid_dim: (grid_1.grid_dim.0, 2, 1),
-                    block_dim: grid_1.block_dim,
-                    shared_mem_bytes: grid_1.shared_mem_bytes,
-                };
-                let bb_ptr = scratch.b_biased.cached_ptr();
-                let cb_ptr = scratch.c_biased.cached_ptr();
-                let bn_ptr = scratch.b_normed.cached_ptr();
-                let cn_ptr = scratch.c_normed.cached_ptr();
-                let bbi_ptr = lw.b_bias.ptr();
-                let cbi_ptr = lw.c_bias.ptr();
-                let mut bld = engine
-                    .ctx
-                    .stream
-                    .launch_builder(k.bc_bias_add_bc_typed.get(dt));
-                bld.arg(&bb_ptr);
-                bld.arg(&cb_ptr);
-                bld.arg(&bn_ptr);
-                bld.arg(&cn_ptr);
-                bld.arg(&bbi_ptr);
-                bld.arg(&cbi_ptr);
-                bld.arg(&b_i);
-                bld.arg(&nh_i);
-                bld.arg(&ng_i);
-                bld.arg(&ds_i);
-                unsafe { bld.launch(grid) }.map_err(|e| format!("M3 F4b bias B+C: {e:?}"))?;
-            }
-
             // F4c: Angle accumulation + RoPE.
             if na > 0 {
                 // angle_dt stays f32 (angles_raw f32 + dt f32, f64 accumulator internally).
@@ -1315,43 +1222,44 @@ impl Mamba3GpuInferenceMixed {
                 bld.arg(&nh_i);
                 bld.arg(&na_i);
                 unsafe { bld.launch(grid) }.map_err(|e| format!("M3 F4c angle_dt: {e:?}"))?;
+            }
 
-                // rope typed: half B/C, f32 angle_cumsum.
+            // F4b-c fused: typed bias add (B + C) + RoPE in one launch -
+            // the biased stores round through FROM_F and the rotation
+            // consumes the round-tripped values, exactly the replaced
+            // pair's contract; n_angles == 0 passes through (replacing
+            // the old copy branch).
+            {
                 let n = b * nh * ds;
                 let grid = grid_1d(n);
-                let mut bld = engine.ctx.stream.launch_builder(k.rope_fwd_typed.get(dt));
-                let kc_ptr = scratch.k_cur.cached_ptr();
-                let qc_ptr = scratch.q_cur.cached_ptr();
                 let bb_ptr = scratch.b_biased.cached_ptr();
                 let cb_ptr = scratch.c_biased.cached_ptr();
+                let kc_ptr = scratch.k_cur.cached_ptr();
+                let qc_ptr = scratch.q_cur.cached_ptr();
+                let bn_ptr = scratch.b_normed.cached_ptr();
+                let cn_ptr = scratch.c_normed.cached_ptr();
+                let bbi_ptr = lw.b_bias.ptr();
+                let cbi_ptr = lw.c_bias.ptr();
                 let ac_ptr = scratch.angle_cumsum.cached_ptr();
-                bld.arg(&kc_ptr);
-                bld.arg(&qc_ptr);
+                let mut bld = engine
+                    .ctx
+                    .stream
+                    .launch_builder(k.m3_bias_rope_fwd_typed.get(dt));
                 bld.arg(&bb_ptr);
                 bld.arg(&cb_ptr);
+                bld.arg(&kc_ptr);
+                bld.arg(&qc_ptr);
+                bld.arg(&bn_ptr);
+                bld.arg(&cn_ptr);
+                bld.arg(&bbi_ptr);
+                bld.arg(&cbi_ptr);
                 bld.arg(&ac_ptr);
                 bld.arg(&b_i);
                 bld.arg(&nh_i);
+                bld.arg(&ng_i);
                 bld.arg(&ds_i);
                 bld.arg(&na_i);
-                unsafe { bld.launch(grid) }.map_err(|e| format!("M3 F4c rope: {e:?}"))?;
-            } else {
-                // No RoPE: copy B_biased → k_cur and C_biased → q_cur (same dtype, bytes copy).
-                let bytes = b * nh * ds * dt.size_bytes();
-                unsafe {
-                    cudarc::driver::sys::cuMemcpyDtoDAsync_v2(
-                        scratch.k_cur.cached_ptr(),
-                        scratch.b_biased.cached_ptr(),
-                        bytes,
-                        engine.ctx.stream.cu_stream(),
-                    );
-                    cudarc::driver::sys::cuMemcpyDtoDAsync_v2(
-                        scratch.q_cur.cached_ptr(),
-                        scratch.c_biased.cached_ptr(),
-                        bytes,
-                        engine.ctx.stream.cu_stream(),
-                    );
-                }
+                unsafe { bld.launch(grid) }.map_err(|e| format!("M3 F4bc bias_rope: {e:?}"))?;
             }
 
             // F5: m3_compute_abg — stays f32 (pure coefficient kernel).

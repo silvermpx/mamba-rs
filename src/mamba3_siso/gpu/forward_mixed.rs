@@ -441,42 +441,6 @@ pub fn gpu_forward_mamba3_layer_mixed(
         unsafe { bld.launch(cfg) }.map_err(|e| format!("m3_mixed F4ab bcnorm_bc: {e:?}"))?;
     }
 
-    // F4c/d: bc_bias_add_bc_typed (fused B+C) — typed B/C_normed + f32
-    // B/C_bias → typed B/C_biased.
-    {
-        let n_i = bt as i32;
-        let nh_i = nh as i32;
-        let ng_i = ng as i32;
-        let ds_i = ds as i32;
-        let cfg = cudarc::driver::LaunchConfig {
-            grid_dim: ((bt * nh * ds).div_ceil(256) as u32, 2, 1),
-            block_dim: (256, 1, 1),
-            shared_mem_bytes: 0,
-        };
-        // Kernel signature (grouped): B_biased, C_biased, B_normed, C_normed,
-        // B_bias, C_bias.
-        let mut bld = ctx
-            .stream
-            .launch_builder(m3k.bc_bias_add_bc_typed.get(dtype));
-        let bb = acts.b_biased.cached_ptr();
-        let cb = acts.c_biased.cached_ptr();
-        let bn = acts.b_normed.cached_ptr();
-        let cn = acts.c_normed.cached_ptr();
-        let bb_p = w.b_bias.ptr();
-        let cb_p = w.c_bias.ptr();
-        bld.arg(&bb);
-        bld.arg(&cb);
-        bld.arg(&bn);
-        bld.arg(&cn);
-        bld.arg(&bb_p);
-        bld.arg(&cb_p);
-        bld.arg(&n_i);
-        bld.arg(&nh_i);
-        bld.arg(&ng_i);
-        bld.arg(&ds_i);
-        unsafe { bld.launch(cfg) }.map_err(|e| format!("m3_mixed F4cd bias: {e:?}"))?;
-    }
-
     // F5: angle accumulation (chunk-parallel, f32 args; see
     // gpu_angle_chunked_fwd).
     if na > 0 {
@@ -496,53 +460,45 @@ pub fn gpu_forward_mamba3_layer_mixed(
         )?;
     }
 
-    // F4e/f: rope_fwd_typed — typed B/C_biased + f32 angle_cumsum → typed k/q.
-    if na > 0 {
+    // F4c-f fused: typed bias add (B + C) + RoPE in one launch (the
+    // typed stores keep the exact round-trip contract of the replaced
+    // pair: biased rounds through FROM_F, the rotation consumes the
+    // round-tripped values). With n_angles == 0 the kernel passes
+    // through, replacing the old typed copy branch too.
+    {
         let n_i = bt as i32;
         let nh_i = nh as i32;
+        let ng_i = ng as i32;
         let ds_i = ds as i32;
         let na_i = na as i32;
-        let mut bld = ctx.stream.launch_builder(m3k.rope_fwd_typed.get(dtype));
-        let k = acts.k.cached_ptr();
-        let q = acts.q.cached_ptr();
+        let mut bld = ctx
+            .stream
+            .launch_builder(m3k.m3_bias_rope_fwd_typed.get(dtype));
         let bb = acts.b_biased.cached_ptr();
         let cb = acts.c_biased.cached_ptr();
+        let k = acts.k.cached_ptr();
+        let q = acts.q.cached_ptr();
+        let bn = acts.b_normed.cached_ptr();
+        let cn = acts.c_normed.cached_ptr();
+        let bb_p = w.b_bias.ptr();
+        let cb_p = w.c_bias.ptr();
         let ac = acts.angle_cumsum.cached_ptr();
-        bld.arg(&k);
-        bld.arg(&q);
         bld.arg(&bb);
         bld.arg(&cb);
+        bld.arg(&k);
+        bld.arg(&q);
+        bld.arg(&bn);
+        bld.arg(&cn);
+        bld.arg(&bb_p);
+        bld.arg(&cb_p);
         bld.arg(&ac);
         bld.arg(&n_i);
         bld.arg(&nh_i);
+        bld.arg(&ng_i);
         bld.arg(&ds_i);
         bld.arg(&na_i);
         unsafe { bld.launch(grid_1d(bt * nh * ds)) }
-            .map_err(|e| format!("m3_mixed F4ef rope: {e:?}"))?;
-    } else {
-        // na==0: k := b_biased, q := c_biased. Both typed, same dtype.
-        let bytes = bt * nh * ds * dtype.size_bytes();
-        let stream = ctx.stream.cu_stream();
-        unsafe {
-            let res = cudarc::driver::sys::cuMemcpyDtoDAsync_v2(
-                acts.k.cached_ptr(),
-                acts.b_biased.cached_ptr(),
-                bytes,
-                stream,
-            );
-            if res != cudarc::driver::sys::CUresult::CUDA_SUCCESS {
-                return Err(format!("m3_mixed F4ef k D2D copy: {res:?}"));
-            }
-            let res = cudarc::driver::sys::cuMemcpyDtoDAsync_v2(
-                acts.q.cached_ptr(),
-                acts.c_biased.cached_ptr(),
-                bytes,
-                stream,
-            );
-            if res != cudarc::driver::sys::CUresult::CUDA_SUCCESS {
-                return Err(format!("m3_mixed F4ef q D2D copy: {res:?}"));
-            }
-        }
+            .map_err(|e| format!("m3_mixed F4 bias_rope: {e:?}"))?;
     }
 
     // F5b: m3_compute_abg — all f32.

@@ -101,6 +101,24 @@ pub struct Mamba3Prefill {
     sized_for: GpuMamba3Dims,
 }
 
+/// Output request for [`Mamba3Prefill::run_full`] - the m3 serve surface.
+///
+/// `full_temporal`, when present, receives the post-`norm_f` temporal for
+/// ALL T positions (`[B * T * d_model]`) - the same buffer content the m3
+/// trainer forward emits, bit for bit. `pooled_sum`, when present,
+/// receives the COLUMN SUM over T (`[d_model]`, batch = 1 only): the
+/// on-device colsum walks ascending t accumulating pure f32 adds from
+/// 0.0, so `download / T` reproduces a CPU mean pool bit for bit while
+/// the transfer drops from the full temporal to 1.5 KB.
+pub struct Mamba3PrefillOutputs<'a> {
+    /// `[B * d_model]` - final-timestep post-norm hidden state.
+    pub last_hidden: &'a mut GpuBuffer,
+    /// `[B * T * d_model]` - optional post-norm_f output for every position.
+    pub full_temporal: Option<&'a mut GpuBuffer>,
+    /// `[d_model]` - optional column sum of the post-norm_f temporal.
+    pub pooled_sum: Option<&'a mut GpuBuffer>,
+}
+
 /// Everything a prefill launch needs besides the executor itself.
 pub struct Mamba3PrefillRun<'a> {
     pub ctx: &'a GpuCtx,
@@ -166,6 +184,31 @@ impl Mamba3Prefill {
         states: GpuMamba3StateBufs<'_>,
         last_hidden: &mut GpuBuffer,
     ) -> Result<(), String> {
+        self.run_full(
+            run,
+            states,
+            Mamba3PrefillOutputs {
+                last_hidden,
+                full_temporal: None,
+                pooled_sum: None,
+            },
+        )
+    }
+
+    /// [`Self::run`] with the all-T serve surface: identical kernel chain
+    /// plus the optional full post-norm_f temporal and the on-device
+    /// pooled column sum (see [`Mamba3PrefillOutputs`]).
+    pub fn run_full(
+        &mut self,
+        run: &Mamba3PrefillRun<'_>,
+        states: GpuMamba3StateBufs<'_>,
+        outputs: Mamba3PrefillOutputs<'_>,
+    ) -> Result<(), String> {
+        let Mamba3PrefillOutputs {
+            last_hidden,
+            full_temporal,
+            pooled_sum,
+        } = outputs;
         let Mamba3PrefillRun {
             ctx,
             kernels: m3k,
@@ -329,22 +372,6 @@ impl Mamba3Prefill {
                 unsafe { b.launch(cfg) }
                     .map_err(|e| format!("prefill bcnorm {tag} L{l}: {e:?}"))?;
             }
-            for (out, normed, bias, tag) in [
-                (&mut tgt.b_biased, &tgt.b_normed, lw.b_bias.ptr(), "B"),
-                (&mut tgt.c_biased, &tgt.c_normed, lw.c_bias.ptr(), "C"),
-            ] {
-                let n_i = bt as i32;
-                let mut b = ctx.stream.launch_builder(&m3k.bc_bias_add);
-                b.arg(out.inner_mut());
-                b.arg(normed.inner());
-                b.arg(&bias);
-                b.arg(&n_i);
-                b.arg(&nh_i);
-                b.arg(&ng_i);
-                b.arg(&ds_i);
-                unsafe { b.launch(grid_1d(bt * nh * ds)) }
-                    .map_err(|e| format!("prefill bc_bias {tag} L{l}: {e:?}"))?;
-            }
             // RoPE angle accumulation continues from the persistent
             // accumulator (zeroed above for a stateless window).
             if na > 0 {
@@ -362,26 +389,32 @@ impl Mamba3Prefill {
                     nh,
                     na,
                 )?;
-
-                {
-                    let n_i = bt as i32;
-                    let na_i = na as i32;
-                    let mut b = ctx.stream.launch_builder(&m3k.rope_fwd);
-                    b.arg(tgt.k.inner_mut());
-                    b.arg(tgt.q.inner_mut());
-                    b.arg(tgt.b_biased.inner());
-                    b.arg(tgt.c_biased.inner());
-                    b.arg(tgt.angle_cumsum.inner());
-                    b.arg(&n_i);
-                    b.arg(&nh_i);
-                    b.arg(&ds_i);
-                    b.arg(&na_i);
-                    unsafe { b.launch(grid_1d(bt * nh * ds)) }
-                        .map_err(|e| format!("prefill rope L{l}: {e:?}"))?;
-                }
-            } else {
-                tgt.k.copy_from_raw(&tgt.b_biased, &ctx.stream)?;
-                tgt.q.copy_from_raw(&tgt.c_biased, &ctx.stream)?;
+            }
+            // Fused bias add (B + C) + RoPE: one launch, biased tensors
+            // still materialize; n_angles == 0 passes through (replacing
+            // the old copy branch).
+            {
+                let n_i = bt as i32;
+                let na_i = na as i32;
+                let bb_p = lw.b_bias.ptr();
+                let cb_p = lw.c_bias.ptr();
+                let mut b = ctx.stream.launch_builder(&m3k.m3_bias_rope_fwd);
+                b.arg(tgt.b_biased.inner_mut());
+                b.arg(tgt.c_biased.inner_mut());
+                b.arg(tgt.k.inner_mut());
+                b.arg(tgt.q.inner_mut());
+                b.arg(tgt.b_normed.inner());
+                b.arg(tgt.c_normed.inner());
+                b.arg(&bb_p);
+                b.arg(&cb_p);
+                b.arg(tgt.angle_cumsum.inner());
+                b.arg(&n_i);
+                b.arg(&nh_i);
+                b.arg(&ng_i);
+                b.arg(&ds_i);
+                b.arg(&na_i);
+                unsafe { b.launch(grid_1d(bt * nh * ds)) }
+                    .map_err(|e| format!("prefill bias_rope L{l}: {e:?}"))?;
             }
             // Trapezoidal coefficients.
             {
@@ -661,6 +694,43 @@ impl Mamba3Prefill {
             let grid = grid_1d(dims.batch * dm);
             unsafe { b.launch(grid) }.map_err(|e| format!("prefill gather_last: {e:?}"))?;
         }
+        if let Some(full) = full_temporal {
+            if full.len() != bt * dm {
+                return Err(format!(
+                    "m3 prefill outputs: full_temporal len {} != batch*seq_len*d_model = {}",
+                    full.len(),
+                    bt * dm
+                ));
+            }
+            full.copy_from_raw(&tgt.temporal_work, &ctx.stream)?;
+        }
+        if let Some(pooled) = pooled_sum {
+            if dims.batch != 1 {
+                return Err(format!(
+                    "m3 prefill pooled_sum: batch {} unsupported - the column sum \
+                     would mix samples; pool per sample with batch = 1",
+                    dims.batch
+                ));
+            }
+            if pooled.len() != dm {
+                return Err(format!(
+                    "m3 prefill outputs: pooled_sum len {} != d_model = {dm}",
+                    pooled.len()
+                ));
+            }
+            // colsum_accumulate does db[j] += sum - zero first so the
+            // result is exactly the sum over T.
+            pooled.zero(&ctx.stream)?;
+            let rows = bt as i32;
+            let cols = dm as i32;
+            let mut b = ctx.stream.launch_builder(&m3k.colsum_accumulate);
+            b.arg(pooled.inner_mut());
+            b.arg(tgt.temporal_work.inner());
+            b.arg(&rows);
+            b.arg(&cols);
+            unsafe { b.launch(grid_1d(dm)) }
+                .map_err(|e| format!("m3 prefill pooled colsum: {e:?}"))?;
+        }
         Ok(())
     }
 }
@@ -755,5 +825,111 @@ impl Mamba3PrefillGraph {
         self.graph
             .launch()
             .map_err(|e| format!("prefill graph launch: {e:?}"))
+    }
+}
+
+/// A captured CUDA graph of one POOLED prefill window over fixed buffers -
+/// the m3 classify serve shape: state reset (carry_state = false zeroes
+/// inside the capture, so every replay starts a fresh page) + the full
+/// layer chain + norm_f + the on-device pooled column sum. Mirrors the M1
+/// `PrefillPooledGraph` contract: upload the next page into the SAME
+/// input buffer, replay, download the 1.5 KB pooled sum, divide by T on
+/// the host.
+pub struct Mamba3PrefillPooledGraph {
+    graph: cudarc::driver::CudaGraph,
+    flags_at_capture: (bool, bool, bool),
+    input_ptr: CUptr,
+    ssm_ptr: CUptr,
+    k_ptr: CUptr,
+    v_ptr: CUptr,
+    angle_ptr: CUptr,
+    pooled_ptr: CUptr,
+}
+
+impl Mamba3PrefillPooledGraph {
+    /// Capture the pooled window. `run.carry_state` must be `false` -
+    /// the state reset has to live INSIDE the graph for replays to score
+    /// independent pages.
+    pub fn capture(
+        prefill: &mut Mamba3Prefill,
+        run: &Mamba3PrefillRun<'_>,
+        mut states: GpuMamba3StateBufs<'_>,
+        last_hidden: &mut GpuBuffer,
+        pooled_sum: &mut GpuBuffer,
+    ) -> Result<Self, String> {
+        if run.carry_state {
+            return Err(
+                "m3 pooled prefill graph: carry_state must be false - the state \
+                 reset must be captured so each replay scores a fresh page"
+                    .to_string(),
+            );
+        }
+        let flags_at_capture = run.ctx.gemm_flags();
+        let input_ptr = run.mamba_input.cached_ptr();
+        let ssm_ptr = states.ssm.cached_ptr();
+        let k_ptr = states.k.cached_ptr();
+        let v_ptr = states.v.cached_ptr();
+        let angle_ptr = states.angle.cached_ptr();
+        let pooled_ptr = pooled_sum.cached_ptr();
+        let graph =
+            crate::mamba_ssm::gpu::graph_capture::capture_into_graph(&run.ctx.stream, || {
+                prefill.run_full(
+                    run,
+                    states.reborrow(),
+                    Mamba3PrefillOutputs {
+                        last_hidden,
+                        full_temporal: None,
+                        pooled_sum: Some(pooled_sum),
+                    },
+                )
+            })?;
+        graph
+            .upload()
+            .map_err(|e| format!("m3 pooled prefill graph upload: {e:?}"))?;
+        run.ctx.note_graph_capture();
+        Ok(Self {
+            graph,
+            flags_at_capture,
+            input_ptr,
+            ssm_ptr,
+            k_ptr,
+            v_ptr,
+            angle_ptr,
+            pooled_ptr,
+        })
+    }
+
+    /// Replay one page: same fixed buffers as capture, checked.
+    pub fn replay(
+        &self,
+        ctx: &GpuCtx,
+        mamba_input: &GpuBuffer,
+        states: &GpuMamba3StateBufs<'_>,
+        pooled_sum: &GpuBuffer,
+    ) -> Result<(), String> {
+        if ctx.gemm_flags() != self.flags_at_capture {
+            return Err(format!(
+                "m3 pooled prefill graph replay refused: GEMM-tier flags changed \
+                 since capture (captured {:?}, now {:?})",
+                self.flags_at_capture,
+                ctx.gemm_flags()
+            ));
+        }
+        if mamba_input.cached_ptr() != self.input_ptr
+            || states.ssm.cached_ptr() != self.ssm_ptr
+            || states.k.cached_ptr() != self.k_ptr
+            || states.v.cached_ptr() != self.v_ptr
+            || states.angle.cached_ptr() != self.angle_ptr
+            || pooled_sum.cached_ptr() != self.pooled_ptr
+        {
+            return Err(
+                "m3 pooled prefill graph replay refused: input/state/pooled buffers \
+                 differ from the captured allocations"
+                    .to_string(),
+            );
+        }
+        self.graph
+            .launch()
+            .map_err(|e| format!("m3 pooled prefill graph launch: {e:?}"))
     }
 }
