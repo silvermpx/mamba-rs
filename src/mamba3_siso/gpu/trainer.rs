@@ -310,7 +310,7 @@ impl Mamba3Trainer {
             Trainer3Inner::F32(t) => scale_grads(&t.ctx, &mut t.grads.flat, inv_w)?,
             Trainer3Inner::Mixed(t) => scale_grads(&t.ctx, &mut t.grads.flat, inv_w)?,
         }
-        self.apply_step(clip)
+        self.apply_step_with(clip, opts.step_skip_above)
     }
 
     /// Borrow the flat f32 gradient arena — the single contiguous buffer
@@ -338,6 +338,18 @@ impl Mamba3Trainer {
     /// Requires an open accumulation window. Not defined for f16 — the
     /// loss-scaler protocol owns that tail end to end.
     pub fn apply_step(&mut self, clip_max_norm: Option<f32>) -> Result<BackwardMetrics, String> {
+        self.apply_step_with(clip_max_norm, None)
+    }
+
+    /// [`Self::apply_step`] with the window-discarding spike skip: when
+    /// `step_skip_above` is `Some(t)` and the pre-clip norm exceeds `t`,
+    /// the optimizer step is skipped and the window discarded (see
+    /// [`BackwardOpts::step_skip_above`]).
+    pub fn apply_step_with(
+        &mut self,
+        clip_max_norm: Option<f32>,
+        step_skip_above: Option<f32>,
+    ) -> Result<BackwardMetrics, String> {
         if matches!(self.dtype(), WeightDtype::F16) {
             return Err(
                 "apply_step is not defined for f16: the loss-scaler protocol (overflow \
@@ -353,7 +365,7 @@ impl Mamba3Trainer {
                          backward_step(accumulate_only = true) first"
                         .into());
                 }
-                t.apply_step_inner(clip_max_norm)
+                t.apply_step_inner(clip_max_norm, step_skip_above)
             }
             Trainer3Inner::Mixed(t) => {
                 if !t.grads_dirty {
@@ -361,7 +373,7 @@ impl Mamba3Trainer {
                          backward_step(accumulate_only = true) first"
                         .into());
                 }
-                t.apply_step_inner(clip_max_norm)
+                t.apply_step_inner(clip_max_norm, step_skip_above)
             }
         }
     }
@@ -1243,7 +1255,7 @@ impl Mamba3TrainerMixed {
                 overflow_skipped: None,
             })
         } else {
-            self.apply_step_inner(opts.clip_max_norm)
+            self.apply_step_inner(opts.clip_max_norm, opts.step_skip_above)
         }
     }
 
@@ -1251,11 +1263,31 @@ impl Mamba3TrainerMixed {
     /// factors, fused AdamW over the accumulated gradient, window close.
     /// A separate seam so a gradient reducer can run between the last
     /// backward and the weight update.
-    fn apply_step_inner(&mut self, clip_max_norm: Option<f32>) -> Result<BackwardMetrics, String> {
+    fn apply_step_inner(
+        &mut self,
+        clip_max_norm: Option<f32>,
+        step_skip_above: Option<f32>,
+    ) -> Result<BackwardMetrics, String> {
         let grad_norm = match clip_max_norm {
             Some(c) => Some(self.apply_clip(c)?),
             None => None,
         };
+        // Spike skip: a window whose PRE-clip norm exceeds the threshold
+        // is discarded whole - no Adam advance, no weight update, arena
+        // re-zeroes on the next backward. One pathological window then
+        // costs one update instead of a poisoned optimizer state.
+        if let (Some(n), Some(thr)) = (grad_norm, step_skip_above)
+            && n > thr
+        {
+            self.grads_dirty = false;
+            return Ok(BackwardMetrics {
+                step: self.adam.step,
+                optimizer_stepped: false,
+                grad_norm,
+                loss_scale: None,
+                overflow_skipped: None,
+            });
+        }
         let (step, bc1, bc2) = self.adam.advance();
         self.bias.write(&self.ctx.stream, bc1, bc2, self.adam.lr)?;
         self.eager_optimize()?;
@@ -1784,7 +1816,7 @@ impl Mamba3TrainerF32 {
                 overflow_skipped: None,
             })
         } else {
-            self.apply_step_inner(opts.clip_max_norm)
+            self.apply_step_inner(opts.clip_max_norm, opts.step_skip_above)
         }
     }
 
@@ -1792,11 +1824,31 @@ impl Mamba3TrainerF32 {
     /// factors, fused AdamW over the accumulated gradient, window close.
     /// A separate seam so a gradient reducer can run between the last
     /// backward and the weight update.
-    fn apply_step_inner(&mut self, clip_max_norm: Option<f32>) -> Result<BackwardMetrics, String> {
+    fn apply_step_inner(
+        &mut self,
+        clip_max_norm: Option<f32>,
+        step_skip_above: Option<f32>,
+    ) -> Result<BackwardMetrics, String> {
         let grad_norm = match clip_max_norm {
             Some(c) => Some(self.apply_clip(c)?),
             None => None,
         };
+        // Spike skip: a window whose PRE-clip norm exceeds the threshold
+        // is discarded whole - no Adam advance, no weight update, arena
+        // re-zeroes on the next backward. One pathological window then
+        // costs one update instead of a poisoned optimizer state.
+        if let (Some(n), Some(thr)) = (grad_norm, step_skip_above)
+            && n > thr
+        {
+            self.grads_dirty = false;
+            return Ok(BackwardMetrics {
+                step: self.adam.step,
+                optimizer_stepped: false,
+                grad_norm,
+                loss_scale: None,
+                overflow_skipped: None,
+            });
+        }
         let (step, bc1, bc2) = self.adam.advance();
         self.bias.write(&self.ctx.stream, bc1, bc2, self.adam.lr)?;
         self.eager_optimize()?;
