@@ -232,7 +232,13 @@ extern "C" __global__ void rmsnorm_backward(
     const float* __restrict__ scale,
     const float* __restrict__ rms_saved,
     int batch, int dim,
-    int accumulate  // 1: dx[i] += result (dx = residual grad accumulator)
+    int accumulate, // 1: dx[i] += result (dx = residual grad accumulator)
+    // Optional mirror of the dx store for a consumer that would otherwise
+    // run a standalone `0.0f + dx` copy pass. nullptr to skip. The f32
+    // lane has no such consumer today and always passes nullptr; the
+    // parameter keeps the two rmsnorm backward ABIs identical so the one
+    // dispatch site can pick either kernel.
+    float* __restrict__ dx_typed
 ) {
     int b = blockIdx.x;
     if (b >= batch) return;
@@ -285,10 +291,10 @@ extern "C" __global__ void rmsnorm_backward(
         // store-then-vec_add pair: without it nvcc contracts the final
         // `* inv_rms` into an FMA with the accumulator (one rounding)
         // and every digest moves.
-        if (accumulate) {
-            dx[off + i] = __fadd_rn(dx[off + i], dx_val);
-        } else {
-            dx[off + i] = dx_val;
+        float dx_store = accumulate ? __fadd_rn(dx[off + i], dx_val) : dx_val;
+        dx[off + i] = dx_store;
+        if (dx_typed != nullptr) {
+            dx_typed[off + i] = 0.0f + dx_store;
         }
         // Rule B: per-sample per-dim partial (no atomic; reduced externally).
         d_scale_partials[off + i] = dy_val * x_hat;
@@ -381,14 +387,20 @@ DEFINE_RMSNORM_BWD(f16,  __half,        from_f_f16)
 // `reduce_sum_axis0(d_scale, partials, batch, dim, accumulate=1)`.
 //
 // No `__launch_bounds__` — see rationale on the f32 `rmsnorm_backward` above.
-#define DEFINE_RMSNORM_BWD_F32IN(SUFFIX, T)                                    \
+#define DEFINE_RMSNORM_BWD_F32IN(SUFFIX, T, FROM_F)                            \
 extern "C" __global__ void rmsnorm_backward_f32in_##SUFFIX(                    \
     float* __restrict__ dx, float* __restrict__ d_scale_partials,              \
     const T* __restrict__ dy, const float* __restrict__ x,                     \
     const float* __restrict__ scale,                                           \
     const float* __restrict__ rms_saved,                                       \
     int batch, int dim,                                                        \
-    int accumulate                                                             \
+    int accumulate,                                                            \
+    /* Optional typed mirror of the dx store: the next layer up consumed  \
+       dx through a standalone `FROM_F(0.0f + dx)` cast pass, which this   \
+       writes inline from the value already in a register. Same           \
+       expression on the same value - bit-identical - one launch and one  \
+       [B*T*d_model] round trip fewer per layer. Pass nullptr to skip. */  \
+    T* __restrict__ dx_typed                                                   \
 ) {                                                                            \
     int b = blockIdx.x;                                                        \
     if (b >= batch) return;                                                    \
@@ -421,12 +433,15 @@ extern "C" __global__ void rmsnorm_backward_f32in_##SUFFIX(                    \
         float x_hat = x[off + i] * inv_rms;                                    \
         float dy_val = to_f(dy[off + i]);                                      \
         float dx_val = (scale[i] * dy_val - x_hat * mean_dy_y) * inv_rms; \
-        if (accumulate) { dx[off + i] = __fadd_rn(dx[off + i], dx_val); } \
-        else            { dx[off + i] = dx_val; }       \
+        float dx_store = accumulate ? __fadd_rn(dx[off + i], dx_val) : dx_val; \
+        dx[off + i] = dx_store;                                                \
+        if (dx_typed != nullptr) {                                             \
+            dx_typed[off + i] = FROM_F(0.0f + dx_store);                       \
+        }                                                                      \
         /* Rule B: per-sample per-dim partial (no atomic; reduced externally). */ \
         d_scale_partials[off + i] = dy_val * x_hat;                            \
     }                                                                          \
 }
 
-DEFINE_RMSNORM_BWD_F32IN(bf16, __nv_bfloat16)
-DEFINE_RMSNORM_BWD_F32IN(f16,  __half)
+DEFINE_RMSNORM_BWD_F32IN(bf16, __nv_bfloat16, from_f_bf16)
+DEFINE_RMSNORM_BWD_F32IN(f16,  __half,        from_f_f16)

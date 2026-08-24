@@ -1375,6 +1375,9 @@ mod gpu_tests {
             builder.arg(&dm_i);
             let accumulate_dx: i32 = 0;
             builder.arg(&accumulate_dx);
+            // No typed mirror of the dx store in this arm.
+            let no_mirror: cudarc::driver::sys::CUdeviceptr = 0;
+            builder.arg(&no_mirror);
             unsafe { builder.launch(grid_norm(bt, dm)) }.unwrap();
             d_temporal_gpu
                 .copy_from(&gpu_scratch.d_norm, &ctx.stream)

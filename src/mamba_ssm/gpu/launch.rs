@@ -310,3 +310,23 @@ pub fn grid_conv_tiled(batch: usize, d_inner: usize, t: usize) -> LaunchConfig {
         shared_mem_bytes: 0,
     }
 }
+
+/// Elements per 16-byte vector for an activation dtype.
+pub fn vec8_width(elem_bytes: usize) -> usize {
+    16 / elem_bytes
+}
+
+/// Can the 16-byte vectorized elementwise twins run for this shape and
+/// these operands? Requires the element count to divide the vector width
+/// and EVERY operand base pointer to be 16-byte aligned - a misaligned
+/// `uint4` reinterpret faults. Buffer bases from the allocator are far
+/// more aligned than this, but sliced or offset pointers are not, so the
+/// check is per call site and the scalar kernel is always the fallback.
+pub fn vec8_ok(
+    n_elems: usize,
+    elem_bytes: usize,
+    ptrs: &[cudarc::driver::sys::CUdeviceptr],
+) -> bool {
+    let w = vec8_width(elem_bytes);
+    n_elems % w == 0 && ptrs.iter().all(|p| p % 16 == 0)
+}

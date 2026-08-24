@@ -91,6 +91,8 @@ pub fn gpu_backward_mamba3_backbone_mixed(
             // plain-store behavior.
             let accumulate_dx: i32 = 0;
             builder.arg(&accumulate_dx);
+            let no_mirror: cudarc::driver::sys::CUdeviceptr = 0;
+            builder.arg(&no_mirror);
             unsafe { builder.launch(grid_norm(bt, dm)) }
                 .map_err(|e| format!("rmsnorm_bwd norm_f m3 mixed stage1: {:?}", e))?;
         }
@@ -979,6 +981,8 @@ fn gpu_backward_mamba3_layer_mixed(
             // plain-store behavior.
             let accumulate_dx: i32 = 0;
             builder.arg(&accumulate_dx);
+            let no_mirror: cudarc::driver::sys::CUdeviceptr = 0;
+            builder.arg(&no_mirror);
             unsafe { builder.launch(grid_norm(bt, dm)) }
                 .map_err(|e| format!("rmsnorm_bwd m3 B1 mixed stage1: {:?}", e))?;
         }

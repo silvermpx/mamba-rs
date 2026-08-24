@@ -87,6 +87,13 @@ pub fn gpu_backward_mamba_layer_mixed(
     a_neg_ptr: cudarc::driver::sys::CUdeviceptr,
     scratch: &mut GpuMambaMixedTrainScratch,
     dtype: WeightDtype,
+    // `cast_d_temporal`: run the standalone f32 -> typed cast of the
+    // incoming gradient. Only the FIRST layer processed needs it - every
+    // later layer receives a gradient whose typed mirror the previous
+    // layer's norm backward already wrote inline.
+    // `mirror_dx`: emit that typed mirror for the layer below.
+    cast_d_temporal: bool,
+    mirror_dx: bool,
 ) -> Result<(), String> {
     let MixedLayerBwd { d_lw, acts, lw } = *layer;
     let dims = scratch.dims;
@@ -119,8 +126,12 @@ pub fn gpu_backward_mamba_layer_mixed(
         bld.arg(&a);
         bld.arg(&b_p);
         bld.arg(&n);
-        unsafe { bld.launch(grid_1d(bt * dm)) }
-            .map_err(|e| format!("cast d_temporal→typed: {e:?}"))?;
+        // Only the first layer processed needs this pass; below it the
+        // previous layer's norm backward already wrote the same value.
+        if cast_d_temporal {
+            unsafe { bld.launch(grid_1d(bt * dm)) }
+                .map_err(|e| format!("cast d_temporal→typed: {e:?}"))?;
+        }
     }
 
     // ─── B1: out_proj backward — typed dW + typed dX ─────────────────
@@ -739,6 +750,14 @@ pub fn gpu_backward_mamba_layer_mixed(
             bld.arg(&bt_i);
             bld.arg(&dm_i);
             bld.arg(&accumulate_dx);
+            // Typed mirror of the dx store for the layer below - saves
+            // that layer's standalone cast pass.
+            let mirror = if mirror_dx {
+                scratch.temporal_typed.cached_ptr()
+            } else {
+                0
+            };
+            bld.arg(&mirror);
             unsafe { bld.launch(grid_norm(bt, dm)) }
                 .map_err(|e| format!("rmsnorm_bwd_f32in_typed partial: {e:?}"))?;
         }
@@ -815,6 +834,9 @@ pub fn gpu_backward_mamba_backbone_mixed(
             bld.arg(&bt_i);
             bld.arg(&dm_i);
             bld.arg(&accumulate_dx);
+            // The f32 kernel has no typed consumer for this store.
+            let no_mirror: cudarc::driver::sys::CUdeviceptr = 0;
+            bld.arg(&no_mirror);
             unsafe { bld.launch(grid_norm(bt, dims.d_model)) }
                 .map_err(|e| format!("rmsnorm_bwd norm_f mixed partial: {e:?}"))?;
         }
@@ -856,6 +878,8 @@ pub fn gpu_backward_mamba_backbone_mixed(
             a_neg_ptr,
             scratch,
             dtype,
+            layer_idx + 1 == dims.n_layers,
+            layer_idx > 0,
         )?;
     }
 

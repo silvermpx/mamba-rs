@@ -507,6 +507,9 @@ pub fn gpu_backward_mamba_layer(
             builder.arg(&bt_i);
             builder.arg(&dm_i);
             builder.arg(&accumulate_dx);
+            // No typed consumer on the pure-f32 lane.
+            let no_mirror: cudarc::driver::sys::CUdeviceptr = 0;
+            builder.arg(&no_mirror);
             unsafe { builder.launch(grid_norm(bt, dm)) }
                 .map_err(|e| format!("rmsnorm_bwd mamba partial: {:?}", e))?;
         }
@@ -584,6 +587,8 @@ pub fn gpu_backward_mamba_backbone(
             builder.arg(&bt_i);
             builder.arg(&dm_i);
             builder.arg(&accumulate_dx);
+            let no_mirror: cudarc::driver::sys::CUdeviceptr = 0;
+            builder.arg(&no_mirror);
             unsafe { builder.launch(grid_norm(bt, dims.d_model)) }
                 .map_err(|e| format!("rmsnorm_bwd norm_f partial: {:?}", e))?;
         }

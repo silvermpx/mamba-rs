@@ -654,6 +654,91 @@ DEFINE_GATE_MUL_SILU(f32,  float,         from_f_f32)
 DEFINE_GATE_MUL_SILU(bf16, __nv_bfloat16, from_f_bf16)
 DEFINE_GATE_MUL_SILU(f16,  __half,        from_f_f16)
 
+// ---------------------------------------------------------------------------
+// 16-byte vectorized twins of the hot elementwise kernels.
+//
+// The class runs at the scalar-copy rate on sm_120 (~2.1 TB/s measured)
+// while a uint4-shaped copy of the same bytes reaches ~5.5 TB/s: the
+// kernels are instruction-bound on 2-byte accesses, not bandwidth-bound.
+// Each thread now moves ONE uint4 per operand - 8 bf16/f16 elements or 4
+// f32 - and performs the SAME per-element arithmetic in the SAME order,
+// so every output bit is unchanged. The launcher routes here only when
+// the element count divides the vector width and every operand pointer is
+// 16-byte aligned; otherwise the scalar kernel runs unchanged.
+// ---------------------------------------------------------------------------
+
+#define DEFINE_GATE_MUL_SILU_V(SUFFIX, T, FROM_F)                             \
+extern "C" __global__ void gate_mul_silu_v_##SUFFIX(                          \
+    T* __restrict__ gated, const T* __restrict__ y,                           \
+    const T* __restrict__ gate_pre, int n_vec                                 \
+) {                                                                           \
+    int i = blockIdx.x * blockDim.x + threadIdx.x;                            \
+    if (i >= n_vec) return;                                                   \
+    const int NPV = 16 / (int)sizeof(T);                                      \
+    uint4 yv = reinterpret_cast<const uint4*>(y)[i];                          \
+    uint4 gv = reinterpret_cast<const uint4*>(gate_pre)[i];                   \
+    uint4 ov;                                                                 \
+    const T* yp = reinterpret_cast<const T*>(&yv);                            \
+    const T* gp = reinterpret_cast<const T*>(&gv);                            \
+    T* op = reinterpret_cast<T*>(&ov);                                        \
+    for (int k = 0; k < NPV; k++) {                                           \
+        float g = to_f(gp[k]);                                                \
+        float sl = to_f(FROM_F(g / (1.0f + exp2f(-g * LOG2E))));              \
+        op[k] = FROM_F(to_f(yp[k]) * sl);                                     \
+    }                                                                         \
+    reinterpret_cast<uint4*>(gated)[i] = ov;                                  \
+}
+
+DEFINE_GATE_MUL_SILU_V(f32,  float,         from_f_f32)
+DEFINE_GATE_MUL_SILU_V(bf16, __nv_bfloat16, from_f_bf16)
+DEFINE_GATE_MUL_SILU_V(f16,  __half,        from_f_f16)
+
+#define DEFINE_ELEMENTWISE_MUL_V(SUFFIX, T, FROM_F)                           \
+extern "C" __global__ void elementwise_mul_v_##SUFFIX(                        \
+    T* __restrict__ y, const T* __restrict__ a,                               \
+    const T* __restrict__ b, int n_vec                                        \
+) {                                                                           \
+    int i = blockIdx.x * blockDim.x + threadIdx.x;                            \
+    if (i >= n_vec) return;                                                   \
+    const int NPV = 16 / (int)sizeof(T);                                      \
+    uint4 av = reinterpret_cast<const uint4*>(a)[i];                          \
+    uint4 bv = reinterpret_cast<const uint4*>(b)[i];                          \
+    uint4 ov;                                                                 \
+    const T* ap = reinterpret_cast<const T*>(&av);                            \
+    const T* bp = reinterpret_cast<const T*>(&bv);                            \
+    T* op = reinterpret_cast<T*>(&ov);                                        \
+    for (int k = 0; k < NPV; k++) {                                           \
+        op[k] = FROM_F(to_f(ap[k]) * to_f(bp[k]));                            \
+    }                                                                         \
+    reinterpret_cast<uint4*>(y)[i] = ov;                                      \
+}
+
+DEFINE_ELEMENTWISE_MUL_V(f32,  float,         from_f_f32)
+DEFINE_ELEMENTWISE_MUL_V(bf16, __nv_bfloat16, from_f_bf16)
+DEFINE_ELEMENTWISE_MUL_V(f16,  __half,        from_f_f16)
+
+#define DEFINE_SOFTPLUS_COPY_V(SUFFIX, T, FROM_F)                             \
+extern "C" __global__ void softplus_copy_v_##SUFFIX(                          \
+    T* __restrict__ dst, const T* __restrict__ src, int n_vec                 \
+) {                                                                           \
+    int i = blockIdx.x * blockDim.x + threadIdx.x;                            \
+    if (i >= n_vec) return;                                                   \
+    const int NPV = 16 / (int)sizeof(T);                                      \
+    uint4 sv = reinterpret_cast<const uint4*>(src)[i];                        \
+    uint4 ov;                                                                 \
+    const T* sp = reinterpret_cast<const T*>(&sv);                            \
+    T* op = reinterpret_cast<T*>(&ov);                                        \
+    for (int k = 0; k < NPV; k++) {                                           \
+        float x = to_f(sp[k]);                                                \
+        op[k] = FROM_F((x > 20.0f) ? x : log1pf(exp2f(x * LOG2E)));           \
+    }                                                                         \
+    reinterpret_cast<uint4*>(dst)[i] = ov;                                    \
+}
+
+DEFINE_SOFTPLUS_COPY_V(f32,  float,         from_f_f32)
+DEFINE_SOFTPLUS_COPY_V(bf16, __nv_bfloat16, from_f_bf16)
+DEFINE_SOFTPLUS_COPY_V(f16,  __half,        from_f_f16)
+
 #define DEFINE_SOFTPLUS_COPY(SUFFIX, T, FROM_F)                               \
 extern "C" __global__ void softplus_copy_##SUFFIX(                            \
     T* dst, const T* src, int n                                               \

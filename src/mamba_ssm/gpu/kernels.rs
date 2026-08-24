@@ -233,6 +233,13 @@ pub struct MambaKernels {
     pub split_gate_typed: TypedKernel,
     /// Typed gating forward recomputing SiLU(gate).
     pub gate_mul_silu_typed: TypedKernel,
+    /// 16-byte vectorized twins of the hot elementwise kernels: one uint4
+    /// per operand per thread, same per-element arithmetic in the same
+    /// order. Selected by [`vec8_ok`] when the shape and every operand
+    /// pointer allow it.
+    pub gate_mul_silu_v_typed: TypedKernel,
+    pub elementwise_mul_v_typed: TypedKernel,
+    pub softplus_copy_v_typed: TypedKernel,
     pub softplus_copy_typed: TypedKernel,
     pub ssm_step_fwd_typed: TypedKernel,
     /// SSM step with fused B/C gather from xdbl. Inference-only: replaces
@@ -840,6 +847,9 @@ impl MambaKernels {
             split_gate_silu_typed: load_typed("split_gate_silu")?,
             split_gate_typed: load_typed("split_gate")?,
             gate_mul_silu_typed: load_typed("gate_mul_silu")?,
+            gate_mul_silu_v_typed: load_typed("gate_mul_silu_v")?,
+            elementwise_mul_v_typed: load_typed("elementwise_mul_v")?,
+            softplus_copy_v_typed: load_typed("softplus_copy_v")?,
             softplus_copy_typed: load_typed("softplus_copy")?,
             ssm_step_fwd_typed: load_typed("ssm_step_forward")?,
             ssm_step_fwd_gather_typed: load_typed("ssm_step_forward_gather")?,

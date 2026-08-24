@@ -838,6 +838,8 @@ pub fn gpu_backward_mamba3_layer(
             // plain-store behavior.
             let accumulate_dx: i32 = 0;
             builder.arg(&accumulate_dx);
+            let no_mirror: cudarc::driver::sys::CUdeviceptr = 0;
+            builder.arg(&no_mirror);
             unsafe { builder.launch(grid_norm(bt, dm)) }
                 .map_err(|e| format!("rmsnorm_bwd m3 B1 stage1: {:?}", e))?;
         }
@@ -916,6 +918,8 @@ pub fn gpu_backward_mamba3_backbone(
         // plain-store behavior.
         let accumulate_dx: i32 = 0;
         builder.arg(&accumulate_dx);
+        let no_mirror: cudarc::driver::sys::CUdeviceptr = 0;
+        builder.arg(&no_mirror);
         unsafe { builder.launch(grid_norm(bt, dm)) }
             .map_err(|e| format!("rmsnorm_bwd norm_f m3 stage1: {:?}", e))?;
     }
