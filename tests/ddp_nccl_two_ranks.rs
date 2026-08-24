@@ -35,17 +35,25 @@ use mamba_rs::mamba3_siso::weights::Mamba3Weights;
 /// `MAMBA_RS_TEST_ROUNDS=200` stretches the run for a kill drill. The
 /// supervisor publishes both to children through its environment.
 fn test_world() -> usize {
-    std::env::var("MAMBA_RS_TEST_WORLD")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(2)
+    match std::env::var("MAMBA_RS_TEST_WORLD") {
+        Err(_) => 2,
+        // Strict: a typo must fail, not silently run W=2 - the one regime
+        // where the ascending-fold gate proves nothing - and report green.
+        Ok(v) => v
+            .trim()
+            .parse()
+            .unwrap_or_else(|e| panic!("MAMBA_RS_TEST_WORLD={v:?} did not parse: {e}")),
+    }
 }
 
 fn test_rounds() -> usize {
-    std::env::var("MAMBA_RS_TEST_ROUNDS")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(3)
+    match std::env::var("MAMBA_RS_TEST_ROUNDS") {
+        Err(_) => 3,
+        Ok(v) => v
+            .trim()
+            .parse()
+            .unwrap_or_else(|e| panic!("MAMBA_RS_TEST_ROUNDS={v:?} did not parse: {e}")),
+    }
 }
 
 fn cfg() -> Mamba3Config {
@@ -211,7 +219,11 @@ const ENV_TEST_CONTRACT: &str = "MAMBA_RS_TEST_CONTRACT";
 fn contract_from_env() -> (mamba_rs::dist::ReduceContract, &'static str) {
     match std::env::var(ENV_TEST_CONTRACT).as_deref() {
         Ok("fixedorder") => (mamba_rs::dist::ReduceContract::FixedOrder, "fixedorder"),
-        _ => (mamba_rs::dist::ReduceContract::NcclSum, "ncclsum"),
+        Ok("ncclsum") | Err(_) => (mamba_rs::dist::ReduceContract::NcclSum, "ncclsum"),
+        Ok(other) => panic!(
+            "MAMBA_RS_TEST_CONTRACT={other:?} is not a recognized contract \
+             (use fixedorder or ncclsum)"
+        ),
     }
 }
 

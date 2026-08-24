@@ -10,6 +10,18 @@ mamba-rs 0.4.2; sections marked 0.6 measured on the 0.6 development tree.
 > For end-to-end LLM inference benchmarks against production weights,
 > see [mamba1-benchmarks.md](mamba1-benchmarks.md).
 
+## Training step — campaign shape (0.6.4, rented 2x RTX 5090, CUDA 13.0)
+
+d_model 384, 24 layers, B=8, T=1300, bf16, graph lane: 179.4 -> 165.2
+ms/step in the 0.6.4 pass. The chunk-scan forward now runs one head per
+128-thread cooperative block with a triangle-packed decayed tile
+(replacing a 32-thread block behind 32 KB of static shared memory at
+5-6% occupancy), bias-add + RoPE fuse into one launch, and the
+per-layer residual round trip is gone - all bit-identical (the eleven
+gradient hash arms and every parity suite match 0.6.3). The Mamba-3
+serving surface (`run_full` + the pooled prefill graph) ships in 0.6.4;
+see the changelog.
+
 ## Training step — campaign shape (0.6.3, rented 2x RTX 5090, CUDA 13.0)
 
 d_model 384, 24 layers, B=8, T=1300, bf16, graph lane: 636 -> 179.4

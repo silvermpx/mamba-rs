@@ -1,5 +1,97 @@
 # Changelog
 
+## 0.6.4 (2026-08-24)
+
+Inference performance release. Prism-serve shape (d_model 384, 24
+layers, B=1, T=4621, f32, cuBLAS+TF32, RTX 5090): pooled prefill
+29.3 -> 10.8 ms/page (34 -> 92 pages/s). Campaign-shape training
+(d_model 384, 24 layers, B=8, T=1300, bf16, batch-invariant +
+tensor-core tier): Mamba-1 131.5 -> 116.0 ms/step (-383 MB peak),
+Mamba-3 179.4 -> 165.2 ms/step. Checkpoint formats, the public API and
+the training bit family are unchanged - the nine run digests and the
+eleven Mamba-3 gradient hash arms equal the 0.6.3 baselines, and every
+inference output is bit-identical to 0.6.3 (pinned by the new 16-cell
+prefill hash gate and the decode digest).
+
+### Added
+
+- Mamba-3 serving surface: `Mamba3Prefill::run_full` emits the all-T
+  post-`norm_f` temporal and an on-device pooled column sum
+  (ascending-t f32 adds; divide by T on the host reproduces a CPU mean
+  pool bit for bit while the per-page download drops to 1.5 KB), and
+  `Mamba3PrefillPooledGraph` replays the whole pooled window - state
+  reset included - as one CUDA graph over fixed buffers. A new parity
+  test pins the surface bitwise against the trainer forward temporal.
+- Bit gates for the inference lane: a 16-cell prefill serve hash suite
+  (three GEMM tiers, cold and carried conv state), a decode run digest,
+  and a per-kernel scan-backward hash set. Recorded once on 0.6.3;
+  any kernel edit that moves an inference bit now fails in seconds at
+  the exact kernel.
+- A state-capacity invariance arm for the sequential/step kernel
+  family: builds at `MAMBA_RS_STATE_CAP` 16/64/256 must produce
+  identical bits for the same `d_state`.
+- Mamba-3 kernels gained the PTX disk cache the Mamba-1 loader already
+  had (key: source + arch + options + NVRTC version); the full NVRTC
+  compile of seven sources per process boot is now a one-time cost.
+
+### Performance (RTX 5090)
+
+- Prefill conv is T-tiled (the serial per-channel walk left the machine
+  idle at B=1) and the `d_conv == 4` register fast path landed on the
+  typed nosave and decode step conv kernels.
+- The prefill chain drops `split_gate_silu` and the separate gating
+  multiply: the conv reads the in_proj output strided and the scan
+  fuses the gate into its y store, reproducing the replaced chain's
+  per-store roundings exactly.
+- The parallel-scan forward packs its shared-memory regions at the
+  runtime `d_state` instead of the compile-time maximum; the B/C
+  gathers for the scan stage through a padded shared-memory tile and
+  write t-contiguous runs; the rmsnorm forwards keep their first
+  strided elements in registers between the reduction and the write.
+- Mamba-1 scan backward (the production fold): runtime-`d_state` slot
+  stride (occupancy 2 -> 3 blocks/SM), packed 8-byte epilogue stores
+  and stage-in loads, staged striped dB/dC stores, and fold-depth
+  scratch sizing (-383 MB at the campaign shape).
+- Mamba-3 chunk-scan forward runs one head per 128-thread cooperative
+  block with a triangle-packed decayed tile and staged operands (the
+  old 32-thread block sat behind 32 KB of static shared memory at 5-6%
+  occupancy); wider `d_state` shapes keep the original kernel.
+- The Mamba-3 forward writes each layer's residual into the next
+  layer's slot directly (the per-layer temporal round trip is gone),
+  bias-add and RoPE fused into one launch on every lane, the decode
+  step merges its two BCNorm launches and drops its per-layer residual
+  copy.
+
+### Fixed
+
+- The GEMM-tier environment flags are parsed strictly: an unrecognized
+  value (`True`, `ON`, a stray space) now fails construction instead of
+  silently meaning "off", and `MAMBA_RS_BI_TENSOR_CORES` without
+  `MAMBA_RS_BATCH_INVARIANT` is rejected instead of being a silent
+  no-op. `MAMBA_RS_SCAN_TAPE` and the test-world knobs reject typos the
+  same way.
+- The two cuBLAS determinism guards in the backward GEMM dispatch are
+  hard asserts now - as `debug_assert!` they compiled out of every
+  release build, exactly where the condition they name would happen
+  silently. A mixed-dtype operand triple under the batch-invariant flag
+  fails loudly instead of silently taking cuBLAS (no `matvec_bi`
+  variant covers it).
+- The batch-invariant GEMM scratch buffers are presized before any
+  CUDA-graph capture; a first-use allocation on a capturing stream
+  became a graph memory node and cached a graph-owned address that
+  later eager launches would dereference.
+- The PTX cache key includes the resolved CUDA include paths (a box
+  with two toolkits could serve stale PTX), a failed cache publish no
+  longer leaks its temp file, and NVRTC compile errors print with real
+  newlines instead of one escaped blob.
+- `nvrtc_arch` maps compute capability (8, 7) to `sm_87` (Jetson AGX
+  Orin) instead of falling back to `sm_70`.
+- The bf16-only training-graph capture returns an error on a wrong
+  dtype instead of panicking inside a `Result`-returning function; the
+  safetensors save path documents its length invariant instead of a
+  bare unwrap.
+
+
 ## 0.6.3 (2026-08-23)
 
 Performance release. Campaign-shape training (d_model 384, 24 layers,

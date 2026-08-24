@@ -127,12 +127,21 @@ pub const SCAN_CHUNK: usize = SCAN_NTHREADS * SCAN_NITEMS;
 /// (run_a, run_b, h_entry) rows and the backward replays h bit-exactly
 /// in-kernel (same thread-local scan, same block scan, same compose
 /// chain on the same inputs).
+/// NOTE: OnceLock-memoized - an in-process A/B measures one mode twice;
+/// verifying both tape modes takes two separate process launches.
 pub fn scan_tape_slim() -> bool {
     static SLIM: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *SLIM.get_or_init(|| {
-        std::env::var("MAMBA_RS_SCAN_TAPE")
-            .map(|v| v != "full")
-            .unwrap_or(true)
+    *SLIM.get_or_init(|| match std::env::var("MAMBA_RS_SCAN_TAPE") {
+        Err(_) => true,
+        // Strict: a typo ("ful", "Full ") must fail loudly, not silently
+        // select the slim default and report green.
+        Ok(v) => match v.trim() {
+            "full" => false,
+            "slim" | "" => true,
+            other => {
+                panic!("MAMBA_RS_SCAN_TAPE={other:?} is not a recognized mode (use full or slim)")
+            }
+        },
     })
 }
 

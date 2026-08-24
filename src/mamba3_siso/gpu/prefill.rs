@@ -761,6 +761,7 @@ impl Mamba3PrefillGraph {
         mut states: GpuMamba3StateBufs<'_>,
         last_hidden: &mut GpuBuffer,
     ) -> Result<Self, String> {
+        run.ctx.presize_bi_scratch()?;
         let flags_at_capture = run.ctx.gemm_flags();
         let input_ptr = run.mamba_input.cached_ptr();
         let ssm_ptr = states.ssm.cached_ptr();
@@ -864,6 +865,7 @@ impl Mamba3PrefillPooledGraph {
                     .to_string(),
             );
         }
+        run.ctx.presize_bi_scratch()?;
         let flags_at_capture = run.ctx.gemm_flags();
         let input_ptr = run.mamba_input.cached_ptr();
         let ssm_ptr = states.ssm.cached_ptr();

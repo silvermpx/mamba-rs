@@ -263,8 +263,10 @@ impl Mamba3Kernels {
         // failed compile is never cached. The M3 loader paid a full
         // NVRTC compile of 7 sources on EVERY process boot before this.
         let (nv_major, nv_minor) = crate::mamba_ssm::gpu::kernels::nvrtc_version();
+        // include_paths participate in the key (two-toolkit boxes).
         let key = crate::mamba_ssm::gpu::kernels::cache_key(&format!(
-            "{combined}\u{1f}{arch}\u{1f}{option_strings:?}\u{1f}nvrtc{nv_major}.{nv_minor}"
+            "{combined}\u{1f}{arch}\u{1f}{option_strings:?}\u{1f}{:?}\u{1f}nvrtc{nv_major}.{nv_minor}",
+            opts.include_paths
         ));
         let cache_path = crate::mamba_ssm::gpu::kernels::kernel_cache_dir()
             .map(|d| d.join(format!("mamba3-kernels-{key}.ptx")));
@@ -285,8 +287,12 @@ impl Mamba3Kernels {
         let module = match module {
             Some(m) => m,
             None => {
-                let ptx = cudarc::nvrtc::compile_ptx_with_opts(combined, opts)
-                    .map_err(|e| format!("NVRTC M3 compile failed: {e:?}"))?;
+                let ptx = cudarc::nvrtc::compile_ptx_with_opts(combined, opts).map_err(|e| {
+                    format!(
+                        "NVRTC M3 compile failed: {}",
+                        format!("{e:?}").replace("\\n", "\n")
+                    )
+                })?;
                 if let Some(path) = &cache_path
                     && let Some(dir) = path.parent()
                     && std::fs::create_dir_all(dir).is_ok()
@@ -294,8 +300,10 @@ impl Mamba3Kernels {
                     // Atomic publish: write-then-rename so a concurrent
                     // boot never reads a torn entry; failures non-fatal.
                     let tmp = path.with_extension(format!("tmp-{}", std::process::id()));
-                    if std::fs::write(&tmp, ptx.to_src()).is_ok() {
-                        let _ = std::fs::rename(&tmp, path);
+                    if std::fs::write(&tmp, ptx.to_src()).is_ok()
+                        && std::fs::rename(&tmp, path).is_err()
+                    {
+                        let _ = std::fs::remove_file(&tmp);
                     }
                 }
                 ctx.load_module(ptx)

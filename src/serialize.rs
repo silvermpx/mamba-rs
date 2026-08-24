@@ -39,7 +39,10 @@ pub fn save(
     let view = |data: &[f32], shape: &[usize]| -> TensorView<'_> {
         let bytes =
             unsafe { std::slice::from_raw_parts(data.as_ptr() as *const u8, data.len() * 4) };
-        TensorView::new(safetensors::Dtype::F32, shape.to_vec(), bytes).unwrap()
+        TensorView::new(safetensors::Dtype::F32, shape.to_vec(), bytes).expect(
+            "tensor view: bytes are sized from data.len() and every call site \
+             passes a shape whose product equals data.len()",
+        )
     };
 
     // input_proj

@@ -590,8 +590,11 @@ impl MambaKernels {
         };
 
         let (nv_major, nv_minor) = nvrtc_version();
+        // include_paths participate in the key: a box with two CUDA
+        // toolkits must not serve stale PTX under an unchanged key.
         let key = cache_key(&format!(
-            "{combined}\u{1f}{arch}\u{1f}{option_strings:?}\u{1f}nvrtc{nv_major}.{nv_minor}"
+            "{combined}\u{1f}{arch}\u{1f}{option_strings:?}\u{1f}{:?}\u{1f}nvrtc{nv_major}.{nv_minor}",
+            opts.include_paths
         ));
         let cache_path = kernel_cache_dir().map(|d| d.join(format!("mamba-kernels-{key}.ptx")));
 
@@ -612,8 +615,15 @@ impl MambaKernels {
         let module = match module {
             Some(m) => m,
             None => {
-                let ptx = cudarc::nvrtc::compile_ptx_with_opts(combined, opts)
-                    .map_err(|e| format!("NVRTC compile failed: {e:?}"))?;
+                let ptx = cudarc::nvrtc::compile_ptx_with_opts(combined, opts).map_err(|e| {
+                    // Unescape the compiler log - a 40-error NVRTC
+                    // failure as one escaped single-line blob is
+                    // unreadable exactly when it matters most.
+                    format!(
+                        "NVRTC compile failed: {}",
+                        format!("{e:?}").replace("\\n", "\n")
+                    )
+                })?;
                 if let Some(path) = &cache_path
                     && let Some(dir) = path.parent()
                     && std::fs::create_dir_all(dir).is_ok()
@@ -622,8 +632,11 @@ impl MambaKernels {
                     // never reads a torn entry. Failures are non-fatal — the
                     // cache is an accelerator, never a correctness gate.
                     let tmp = path.with_extension(format!("tmp-{}", std::process::id()));
-                    if std::fs::write(&tmp, ptx.to_src()).is_ok() {
-                        let _ = std::fs::rename(&tmp, path);
+                    if std::fs::write(&tmp, ptx.to_src()).is_ok()
+                        && std::fs::rename(&tmp, path).is_err()
+                    {
+                        // A failed rename must not leak the tmp entry.
+                        let _ = std::fs::remove_file(&tmp);
                     }
                 }
                 ctx.load_module(ptx)

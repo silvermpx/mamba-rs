@@ -229,11 +229,21 @@ impl GpuMambaTrainingStepGraph {
             d_temporal,
             state,
         } = cap;
-        assert!(
-            matches!(train_w.dtype, WeightDtype::Bf16),
-            "bf16-only graph capture: f16 needs the in-graph overflow check (f16 needs in-graph overflow check)"
-        );
-        assert_eq!(acts.dtype, WeightDtype::Bf16);
+        // Result-returning capture must not panic on a caller mistake -
+        // surface the contract as an error.
+        if !matches!(train_w.dtype, WeightDtype::Bf16) {
+            return Err(format!(
+                "bf16-only graph capture: got {:?}; f16 needs the in-graph \
+                 overflow check",
+                train_w.dtype
+            ));
+        }
+        if acts.dtype != WeightDtype::Bf16 {
+            return Err(format!(
+                "bf16-only graph capture: acts dtype {:?} != Bf16",
+                acts.dtype
+            ));
+        }
 
         // CRITICAL: presize the half-precision staging buffer BEFORE capture
         // so `ensure_half_staging` inside the body is a no-op. Otherwise a

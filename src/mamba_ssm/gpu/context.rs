@@ -111,15 +111,38 @@ impl GpuCtx {
             .synchronize()
             .map_err(|e| format!("default-stream drain after kernel compile: {e:?}"))?;
         let (blas, ws) = device.create_cublas(&stream)?;
-        let batch_invariant = std::env::var("MAMBA_RS_BATCH_INVARIANT")
-            .ok()
-            .is_some_and(|v| matches!(v.as_str(), "1" | "true" | "yes" | "on"));
-        let bi_tensor_cores = std::env::var("MAMBA_RS_BI_TENSOR_CORES")
-            .ok()
-            .is_some_and(|v| matches!(v.as_str(), "1" | "true" | "yes" | "on"));
-        let fast_gemm = std::env::var("MAMBA_RS_FAST_GEMM")
-            .ok()
-            .is_some_and(|v| matches!(v.as_str(), "1" | "true" | "yes" | "on"));
+        // Strict flag parsing: an unrecognized value must FAIL, not
+        // silently mean off. "True" (Python str(True)), "ON", a stray
+        // trailing space - all previously read as false, indistinguishable
+        // from "not set", and a mis-set tier flag measures or serves a
+        // numeric route nobody asked for.
+        let tier_flag = |name: &str| -> Result<bool, String> {
+            match std::env::var(name) {
+                Err(_) => Ok(false),
+                Ok(v) => match v.trim().to_ascii_lowercase().as_str() {
+                    "1" | "true" | "yes" | "on" => Ok(true),
+                    "0" | "false" | "no" | "off" | "" => Ok(false),
+                    other => Err(format!(
+                        "{name}={other:?} is not a recognized flag value \
+                         (use 1/true/yes/on or 0/false/no/off)"
+                    )),
+                },
+            }
+        };
+        let batch_invariant = tier_flag("MAMBA_RS_BATCH_INVARIANT")?;
+        let bi_tensor_cores = tier_flag("MAMBA_RS_BI_TENSOR_CORES")?;
+        let fast_gemm = tier_flag("MAMBA_RS_FAST_GEMM")?;
+        // The TC tier flag is only read inside bi_sgemm_*_typed, which is
+        // reachable only under batch_invariant() - TC alone is a silent
+        // no-op that has already cost a day of follow-up readings.
+        if bi_tensor_cores && !batch_invariant {
+            return Err(
+                "MAMBA_RS_BI_TENSOR_CORES=1 without MAMBA_RS_BATCH_INVARIANT=1 is a \
+                 silent no-op: the tensor-core tier is reachable only under the \
+                 batch-invariant dispatch. Set both or neither."
+                    .to_string(),
+            );
+        }
         Ok(Self {
             stream,
             kernels,
@@ -373,6 +396,22 @@ impl GpuCtx {
     /// The state capacity this context's kernels were compiled with.
     pub fn state_cap(&self) -> usize {
         self.state_cap
+    }
+
+    /// Presize the batch-invariant GEMM scratch buffers (Split-K partials
+    /// + W-transpose staging) OUTSIDE any CUDA graph capture. cudarc's
+    /// alloc is cuMemAllocAsync where the device has memory pools, so a
+    /// first-use allocation on a CAPTURING stream becomes a graph memory
+    /// node - legal, silent, and the OnceLock then caches a graph-owned
+    /// VA that later eager launches dereference. Call before capturing
+    /// any graph that may run batch-invariant GEMMs; a no-op when the
+    /// buffers already exist or the flag is off.
+    pub fn presize_bi_scratch(&self) -> Result<(), String> {
+        if self.batch_invariant() {
+            self.kernels.splitk_scratch_buf(&self.stream)?;
+            self.kernels.transpose_scratch_buf(&self.stream)?;
+        }
+        Ok(())
     }
 
     /// Pre-size the half-precision staging buffer for a known engine

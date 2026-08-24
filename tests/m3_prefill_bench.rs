@@ -98,10 +98,15 @@ fn m3_train_step_at_multichunk_shape() {
     // Shape rides env so the CAMPAIGN shape is measurable without a
     // recompile (same knobs as the M1 campaign arm).
     let get = |k: &str, d: usize| -> usize {
-        std::env::var(k)
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(d)
+        match std::env::var(k) {
+            Err(_) => d,
+            // Strict: a typo in a shape knob must fail, not silently
+            // measure the default shape under the requested label.
+            Ok(v) => v
+                .trim()
+                .parse()
+                .unwrap_or_else(|e| panic!("{k}={v:?} did not parse: {e}")),
+        }
     };
     let (batch, seq_len) = (get("MAMBA_RS_BENCH_B", 1), get("MAMBA_RS_BENCH_T", 256));
     let n = batch * seq_len * cfg.d_model;

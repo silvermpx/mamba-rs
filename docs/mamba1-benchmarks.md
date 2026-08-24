@@ -3,16 +3,38 @@
 Hardware: Ada server — Intel Xeon Gold 5412U (48 threads) + NVIDIA RTX 6000 Ada
 Generation (48 GB), CUDA 13.2, Driver 595.45. Measured on mamba-rs 0.4.2.
 
-All decode numbers below are produced by **the batch-invariant matvec kernel**
-(`kernels/gemm_batch_invariant.cu`) — pure Rust + NVRTC, no Python or
-Triton dependency. The kernel guarantees bit-identical per-row output
-across batch sizes (KL ≈ 1e-11) and reaches ~86% of cuBLAS gemv
-throughput on M=1 decode while running ~6 percentage points faster
-than vLLM / Thinking Machines Lab's `batch_invariant` Triton kernel.
+The decode numbers below were measured with **the batch-invariant
+matvec kernel** (`kernels/gemm_batch_invariant.cu`) — pure Rust +
+NVRTC, no Python or Triton dependency. That kernel is OPT-IN
+(`ctx.set_batch_invariant(true)` / `MAMBA_RS_BATCH_INVARIANT=1`); the
+shipped decode default dispatches cuBLAS gemv. Under the flag it
+guarantees bit-identical per-row output across batch sizes
+(KL ≈ 1e-11) and reaches ~86% of cuBLAS gemv throughput on M=1 decode
+while running ~6 percentage points faster than vLLM / Thinking
+Machines Lab's `batch_invariant` Triton kernel.
 Parallel prefill rides the deterministic GEMM tiers
 ([determinism-benchmarks.md](determinism-benchmarks.md)).
 
-## Training step — campaign shape (0.6.3, rented 2x RTX 5090, CUDA 13.0)
+## Serving prefill — classifier page shape (0.6.4, RTX 5090, CUDA 13.0)
+
+Shape: B=1, T=4621, d_model=384, 24 layers, f32 weights, cuBLAS+TF32
+(the production serve tier); one page = one prefill + one 1.5 KB pooled
+download. Bit-identical outputs across the whole 0.6.3 -> 0.6.4 wave
+(16-cell prefill hash gate).
+
+| lane | 0.6.3 | 0.6.4 |
+|---|---|---|
+| pooled prefill, graph replay | 29.3 ms/page (34 pages/s) | **10.8 ms/page (92 pages/s)** |
+| pooled prefill, eager | - | 10.8 ms/page |
+| full-temporal prefill, eager | - | 11.5 ms/page |
+
+Main levers: T-tiled nosave conv (the serial per-channel walk left 146
+of 170 SMs idle at B=1), gating fused into the scan store, staged
+t-major B/C gathers, runtime-`d_state` scan smem, rmsnorm register
+hold. The remaining wall is the parallel scan itself plus the four
+forward GEMMs.
+
+## Training step — campaign shape (0.6.3/0.6.4, rented 2x RTX 5090, CUDA 13.0)
 
 d_model 384, 24 layers, B=8, T=1300, bf16, batch-invariant +
 tensor-core GEMM tier, graph lane. The 0.6.3 optimization program took
@@ -193,7 +215,7 @@ fast path for serious training batches.)
   no accuracy loss (15/15 greedy match on all four HF sizes).
 - **Bit-identical batch invariance** (KL ≈ 1e-11) on the same kernel
   used by both decode (M=1) and RL parallel envs (M=N) — strict cross-
-  batch reproducibility without an opt-in flag.
+  batch reproducibility behind the `MAMBA_RS_BATCH_INVARIANT` opt-in.
 - Long-context prefill 2.6× faster in 0.4.2 (parallel-prefill GEMMs on
   the deterministic tensor-core tier).
 - CUDA Graph capture saves ~45 µs/step launch overhead.

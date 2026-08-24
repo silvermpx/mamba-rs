@@ -310,6 +310,9 @@ impl PrefillPooledGraph {
         state: &mut GpuInferenceState,
         scratch: &mut GpuMambaTargetScratch,
     ) -> Result<Self, String> {
+        // Lazy BI scratch must exist BEFORE the capture (see
+        // GpuCtx::presize_bi_scratch).
+        ctx.presize_bi_scratch()?;
         let flags_at_capture = ctx.gemm_flags();
         let PrefillRawInputs {
             input_flat,

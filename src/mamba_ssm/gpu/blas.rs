@@ -279,7 +279,11 @@ pub fn gpu_sgemm_backward_dw_grad_typed(
         dy.dtype, x_saved.dtype,
         "cuBLAS GemmEx requires A.dtype == B.dtype"
     );
-    debug_assert!(
+    // Hard assert (not debug_assert): every bench and serving build is
+    // --release with no [profile] override, so a debug_assert here would
+    // let the exact condition it names happen silently in the build that
+    // claims determinism.
+    assert!(
         dy.dtype != WeightDtype::F32 || !ctx.batch_invariant(),
         "f32 TypedPtr under the batch-invariant flag would silently take \
          non-deterministic cuBLAS — use gpu_sgemm_backward_dw_grad instead"
@@ -346,7 +350,8 @@ pub fn gpu_gemm_ex_backward_dx_typed(
         dx.dtype, dy.dtype,
         "typed dX GEMM: dx.dtype must match dy/w for PEDANTIC path"
     );
-    debug_assert!(
+    // Hard assert - same determinism rationale as the dW twin above.
+    assert!(
         dx.dtype != WeightDtype::F32 || !ctx.batch_invariant(),
         "f32 TypedPtr under the batch-invariant flag would silently take \
          non-deterministic cuBLAS — use gpu_sgemm_backward_dx_raw instead"
@@ -1077,8 +1082,9 @@ pub fn gpu_gemm_typed_forward_raw(
     //     state each step and compounds to KL ~1e-3 (measured at b=1
     //     ultra-thin vs b=32 matvec on mamba-130m). matvec_bi is one
     //     reduction order for every M — that property is the contract.
-    // Mixed-dtype combos (e.g. f32 activations × half weights) also use
-    // matvec_bi — ALSO deterministic (never silent cuBLAS).
+    // Mixed a/b dtype combos have NO matvec_bi kernel (the a==b guard in
+    // pick_bi_matvec): under the batch-invariant contract they FAIL LOUD
+    // below instead of silently taking non-deterministic cuBLAS.
     if ctx.batch_invariant()
         && c.dtype != WeightDtype::F32
         && c.dtype == x.dtype
@@ -1109,6 +1115,18 @@ pub fn gpu_gemm_typed_forward_raw(
             },
             x.dtype,
         );
+    }
+
+    if ctx.batch_invariant() {
+        // No deterministic kernel covers this operand triple; falling
+        // through would silently run non-PEDANTIC cuBLAS in the build
+        // that claims determinism.
+        return Err(format!(
+            "batch-invariant GEMM: no deterministic kernel for operand dtypes \
+             a={:?} b={:?} c={:?} at m={batch} - mixed a/b dtypes have no \
+             matvec_bi variant",
+            x.dtype, w.dtype, c.dtype
+        ));
     }
 
     let beta = if let Some(b_ptr) = bias_ptr {
