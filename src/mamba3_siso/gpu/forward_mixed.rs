@@ -270,7 +270,7 @@ impl GpuMamba3BackboneMixedActs {
 /// `backward_mixed.rs`), so mixed TRAINING must run the chunked route.
 pub fn gpu_forward_mamba3_layer_mixed(
     exec: &M3Exec<'_>,
-    temporal_f32: &mut GpuBuffer,
+    stream_out: cudarc::driver::sys::CUdeviceptr,
     acts: &mut GpuMamba3LayerMixedActs,
     w: &crate::mamba3_siso::gpu::weights::GpuMamba3MixedLayerWeights,
     layer_ptrs: &Mamba3LayerPtrs,
@@ -309,8 +309,10 @@ pub fn gpu_forward_mamba3_layer_mixed(
     let ip = dims.in_proj_dim;
     let na = dims.n_angles;
 
-    // F1: rmsnorm_fwd_f32in_typed — f32 residual → typed post_norm, f32 rms_vals.
-    acts.residual.copy_from_raw(temporal_f32, &ctx.stream)?;
+    // F1: rmsnorm_fwd_f32in_typed - f32 residual -> typed post_norm, f32
+    // rms_vals. The residual stream already lives in acts.residual: the
+    // previous layer's residual_add wrote it there directly (layer 0 is
+    // seeded by the driver) - the per-layer temporal round trip is gone.
     {
         let bt_i = bt as i32;
         let dm_i = dm as i32;
@@ -706,14 +708,14 @@ pub fn gpu_forward_mamba3_layer_mixed(
         // K5: m3_chunk_scan_fwd_typed — typed y_out, x, q, K_scaled +
         // f32 qk_dot/da_cumsum/prev_states/D.
         {
-            let cfg = cudarc::driver::LaunchConfig {
-                grid_dim: ((dims.batch * nc) as u32, nh.div_ceil(2) as u32, 1),
-                block_dim: (hd as u32, 2, 1),
-                shared_mem_bytes: 0,
+            let (coop, cfg) =
+                super::kernels::chunk_scan_cfg(dims.batch, nc, nh, hd, ds, dims.chunk_size());
+            let kern = if coop {
+                m3k.m3_chunk_scan_fwd_coop_typed.get(dtype)
+            } else {
+                m3k.m3_chunk_scan_fwd_typed.get(dtype)
             };
-            let mut bld = ctx
-                .stream
-                .launch_builder(m3k.m3_chunk_scan_fwd_typed.get(dtype));
+            let mut bld = ctx.stream.launch_builder(kern);
             let yp = acts.y.cached_ptr();
             let xp = acts.x.cached_ptr();
             let qp = acts.q.cached_ptr();
@@ -877,7 +879,7 @@ pub fn gpu_forward_mamba3_layer_mixed(
         let mut bld = ctx
             .stream
             .launch_builder(m3k.residual_add_f32_typed.get(dtype));
-        let dst = temporal_f32.cached_ptr();
+        let dst = stream_out;
         let a = acts.residual.cached_ptr();
         let b = out_flat_scratch.cached_ptr();
         bld.arg(&dst);
@@ -1136,6 +1138,13 @@ pub fn gpu_forward_mamba3_backbone_mixed(
         }
     }
 
+    // Seed the residual chain: layer 0's slot gets the input_proj output
+    // once; from there every layer's residual_add writes the next slot
+    // (the LAST layer writes temporal_f32 back - the public contract).
+    acts.layers[0]
+        .residual
+        .copy_from_raw(temporal_f32, &ctx.stream)?;
+
     // Mamba layers in forward order — per-layer offset into flat state buffers.
     let f32_sz = std::mem::size_of::<f32>() as u64;
     let ssm_base = states.ssm.cached_ptr();
@@ -1154,9 +1163,14 @@ pub fn gpu_forward_mamba3_backbone_mixed(
             v_state: v_base + v_off as u64 * f32_sz,
             angle_state: a_base + a_off as u64 * f32_sz,
         };
+        let stream_out = if l + 1 < dims.n_layers {
+            acts.layers[l + 1].residual.cached_ptr()
+        } else {
+            temporal_f32.cached_ptr()
+        };
         gpu_forward_mamba3_layer_mixed(
             exec,
-            temporal_f32,
+            stream_out,
             &mut acts.layers[l],
             &w.compute.layers[l],
             &layer_ptrs,

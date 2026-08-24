@@ -123,7 +123,7 @@ pub(crate) fn gpu_angle_chunked_fwd(
 
 pub fn gpu_forward_mamba3_layer(
     exec: &M3Exec<'_>,
-    temporal: &mut GpuBuffer,
+    stream_out: cudarc::driver::sys::CUdeviceptr,
     acts: &mut GpuMamba3LayerActs,
     lw: &GpuMamba3LayerWeights,
     layer_ptrs: &Mamba3LayerPtrs,
@@ -144,13 +144,15 @@ pub fn gpu_forward_mamba3_layer(
     let ip = dims.in_proj_dim;
     let na = dims.n_angles;
 
-    // F1: RMSNorm
-    acts.residual.copy_from_raw(temporal, &ctx.stream)?;
+    // F1: RMSNorm - the residual stream already lives in acts.residual:
+    // the previous layer's residual_add wrote it there directly (layer 0
+    // is seeded by the driver). Same next-layer-residual plumbing as the
+    // M1 forward - the per-layer temporal round trip is gone.
     {
         let mut builder = ctx.stream.launch_builder(&m3k.rmsnorm_fwd);
         builder.arg(acts.post_norm.inner_mut());
         builder.arg(acts.rms_vals.inner_mut());
-        builder.arg(temporal.inner());
+        builder.arg(acts.residual.inner());
         let nw_ptr = lw.norm_weight.raw_ptr(&ctx.stream);
         builder.arg(&nw_ptr);
         let bt_i = bt as i32;
@@ -455,12 +457,14 @@ pub fn gpu_forward_mamba3_layer(
                 .map_err(|e| format!("m3_state_passing_fwd F6 K4: {:?}", e))?;
         }
         {
-            let cfg = cudarc::driver::LaunchConfig {
-                grid_dim: ((dims.batch * nc) as u32, nh.div_ceil(2) as u32, 1),
-                block_dim: (hd as u32, 2, 1),
-                shared_mem_bytes: 0,
+            let (coop, cfg) =
+                super::kernels::chunk_scan_cfg(dims.batch, nc, nh, hd, ds, dims.chunk_size());
+            let kern = if coop {
+                &m3k.m3_chunk_scan_fwd_coop
+            } else {
+                &m3k.m3_chunk_scan_fwd
             };
-            let mut builder = ctx.stream.launch_builder(&m3k.m3_chunk_scan_fwd);
+            let mut builder = ctx.stream.launch_builder(kern);
             builder.arg(acts.y.inner_mut());
             builder.arg(acts.x.inner());
             builder.arg(acts.q.inner());
@@ -597,9 +601,12 @@ pub fn gpu_forward_mamba3_layer(
         (bt, di, dm),
     )?;
     {
+        // Write the NEXT layer's residual slot (or norm_f_input for the
+        // last layer) directly - raw pointer, no aliasing of the
+        // borrowed acts.
         let ne = (bt * dm) as i32;
         let mut builder = ctx.stream.launch_builder(&m3k.residual_add);
-        builder.arg(temporal.inner_mut());
+        builder.arg(&stream_out);
         builder.arg(scratch.out_flat.inner());
         builder.arg(acts.residual.inner());
         builder.arg(&ne);
@@ -666,6 +673,11 @@ pub fn gpu_forward_mamba3_backbone(
     )?;
     acts.input_proj_outputs
         .copy_from_raw(temporal, &ctx.stream)?;
+    // Seed the residual chain: layer 0's slot gets the input_proj output
+    // once; from there every layer's residual_add writes the next slot.
+    acts.layers[0]
+        .residual
+        .copy_from_raw(temporal, &ctx.stream)?;
 
     let f32_sz = std::mem::size_of::<f32>() as u64;
     let ssm_base = states.ssm.raw_ptr(&ctx.stream);
@@ -684,9 +696,14 @@ pub fn gpu_forward_mamba3_backbone(
             v_state: v_base + v_off as u64 * f32_sz,
             angle_state: a_base + a_off as u64 * f32_sz,
         };
+        let stream_out = if l + 1 < dims.n_layers {
+            acts.layers[l + 1].residual.raw_ptr(&ctx.stream)
+        } else {
+            acts.norm_f_input.raw_ptr(&ctx.stream)
+        };
         gpu_forward_mamba3_layer(
             exec,
-            temporal,
+            stream_out,
             &mut acts.layers[l],
             &mamba_w.layers[l],
             &layer_ptrs,
@@ -694,7 +711,7 @@ pub fn gpu_forward_mamba3_backbone(
         )?;
     }
 
-    acts.norm_f_input.copy_from_raw(temporal, &ctx.stream)?;
+    // The last layer's residual_add already wrote acts.norm_f_input.
     {
         let nf_ptr = mamba_w.norm_f_weight.raw_ptr(&ctx.stream);
         let bt_i = bt as i32;

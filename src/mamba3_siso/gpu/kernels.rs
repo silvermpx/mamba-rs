@@ -91,6 +91,10 @@ pub struct Mamba3Kernels {
     pub m3_chunk_entering_state: CudaFunction,
     pub m3_writeback_parallel_states: CudaFunction,
     pub m3_chunk_scan_fwd: CudaFunction,
+    /// Cooperative-block twin: one head per 128-thread block, triangle
+    /// tile + staged operands in dynamic smem. Routed when the smem total
+    /// fits the 48 KB budget; bit-identical to the original.
+    pub m3_chunk_scan_fwd_coop: CudaFunction,
     // m3_chunk_scan_bwd, m3_state_passing_bwd, m3_chunk_state_bwd,
     // m3_cumsum_bwd removed — dead code replaced by monolithic m3_dqkv +
     // m3_dqktheta path below.
@@ -175,6 +179,8 @@ pub struct Mamba3Kernels {
     /// Intra-chunk output: typed y_out/x/Q/K_scaled; f32 qk_dot/dA_cumsum/
     /// prev_states/D.
     pub m3_chunk_scan_fwd_typed: TypedKernel,
+    /// Cooperative typed twin (see `m3_chunk_scan_fwd_coop`).
+    pub m3_chunk_scan_fwd_coop_typed: TypedKernel,
 
     /// Shared from M1: f32 residual → half post-norm (identical kernel, reused).
     pub rmsnorm_fwd_f32in_typed: HalfKernel,
@@ -319,6 +325,7 @@ impl Mamba3Kernels {
             m3_chunk_entering_state: get("m3_chunk_entering_state")?,
             m3_writeback_parallel_states: get("m3_writeback_parallel_states")?,
             m3_chunk_scan_fwd: get("m3_chunk_scan_fwd")?,
+            m3_chunk_scan_fwd_coop: get("m3_chunk_scan_fwd_coop")?,
             m3_extract_da_cs_sum: get("m3_extract_da_cs_sum")?,
             m3_dqkv: get("m3_dqkv")?,
             m3_dqkv_state_terms_typed: TypedKernel {
@@ -437,6 +444,11 @@ impl Mamba3Kernels {
                 bf16: get("m3_writeback_parallel_states_bf16")?,
                 f16: get("m3_writeback_parallel_states_f16")?,
             },
+            m3_chunk_scan_fwd_coop_typed: TypedKernel {
+                f32: get("m3_chunk_scan_fwd_coop")?,
+                bf16: get("m3_chunk_scan_fwd_coop_bf16")?,
+                f16: get("m3_chunk_scan_fwd_coop_f16")?,
+            },
             m3_chunk_scan_fwd_typed: TypedKernel {
                 f32: get("m3_chunk_scan_fwd")?,
                 bf16: get("m3_chunk_scan_fwd_bf16")?,
@@ -490,5 +502,45 @@ impl Mamba3Kernels {
             }
         }
         Ok(kernels)
+    }
+}
+
+/// Launch geometry for the chunk-scan forward: the cooperative kernel (one
+/// head per 128-thread block, triangle tile + staged operands in dynamic
+/// smem) whenever its smem total fits the 48 KB default budget; wider
+/// shapes keep the original two-head static-tile kernel. Returns
+/// `(use_coop, cfg)` - the argument list is identical for both kernels.
+pub(crate) fn chunk_scan_cfg(
+    batch: usize,
+    n_chunks: usize,
+    nh: usize,
+    hd: usize,
+    ds: usize,
+    chunk_size: usize,
+) -> (bool, cudarc::driver::LaunchConfig) {
+    let smem_floats = chunk_size * (chunk_size - 1) / 2
+        + 2 * chunk_size * ds
+        + chunk_size * hd
+        + hd * ds
+        + 2 * chunk_size;
+    let smem_bytes = smem_floats * std::mem::size_of::<f32>();
+    if chunk_size <= 64 && smem_bytes <= 48 * 1024 {
+        (
+            true,
+            cudarc::driver::LaunchConfig {
+                grid_dim: ((batch * n_chunks) as u32, nh as u32, 1),
+                block_dim: (128, 1, 1),
+                shared_mem_bytes: smem_bytes as u32,
+            },
+        )
+    } else {
+        (
+            false,
+            cudarc::driver::LaunchConfig {
+                grid_dim: ((batch * n_chunks) as u32, nh.div_ceil(2) as u32, 1),
+                block_dim: (hd as u32, 2, 1),
+                shared_mem_bytes: 0,
+            },
+        )
     }
 }

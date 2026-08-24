@@ -506,6 +506,135 @@ extern "C" __global__ void m3_chunk_scan_fwd(
 }
 
 // ============================================================================
+// 5b. m3_chunk_scan_fwd_coop -- cooperative-block twin of m3_chunk_scan_fwd
+// ============================================================================
+//
+// Same math, same per-element arithmetic order, other work distribution:
+// one HEAD per 128-thread block (the original packs two heads behind a
+// 32-thread block gated by 32 KB of STATIC smem - 5-6% occupancy), the
+// decayed causal tile is triangle-packed (only s < t exists), and Q, K,
+// V, dA, qk_dot and the entering state are staged through DYNAMIC shared
+// memory once per block. Every tile element is still produced by exactly
+// one thread with the n-ascending dot; every output y[t,p] is still one
+// thread's serial s-ascending chain - bit-identical by construction.
+//
+// Grid: (B * n_chunks, nh). Block: 128. Dynamic smem (floats):
+//   tri   chunk_size*(chunk_size-1)/2   (strict lower triangle, t-major rows)
+//   q     chunk_size * ds
+//   k     chunk_size * ds
+//   v     chunk_size * hd
+//   ps    hd * ds
+//   da    chunk_size
+//   qkd   chunk_size
+// The Rust launcher routes to this kernel only when that total fits the
+// 48 KB default budget; wider shapes keep the original kernel.
+extern "C" __global__ void m3_chunk_scan_fwd_coop(
+    float* __restrict__ y_out,
+    const float* __restrict__ x,
+    const float* __restrict__ Q,
+    const float* __restrict__ K_scaled,
+    const float* __restrict__ qk_dot,
+    const float* __restrict__ dA_cumsum,
+    const float* __restrict__ prev_states,
+    const float* __restrict__ D,
+    int batch, int T, int nh, int hd, int ds, int chunk_size
+) {
+    int d_inner = nh * hd;
+    int n_chunks = (T + chunk_size - 1) / chunk_size;
+    int bc = blockIdx.x;
+    int b = bc / n_chunks;
+    int chunk = bc % n_chunks;
+    int h = blockIdx.y;
+    if (chunk_size > 64) return;
+    if (ds > MAMBA_RS_STATE_CAP) return;
+
+    int chunk_start = chunk * chunk_size;
+    int chunk_end = chunk_start + chunk_size;
+    if (chunk_end > T) chunk_end = T;
+    int chunk_len = chunk_end - chunk_start;
+
+    int cs_base = ((b * n_chunks + chunk) * nh + h) * chunk_size;
+    int state_head = ((b * n_chunks + chunk) * nh + h) * hd * ds;
+
+    extern __shared__ float m3cs_sm[];
+    float* sm_tri = m3cs_sm;
+    float* sm_q   = sm_tri + chunk_size * (chunk_size - 1) / 2;
+    float* sm_k   = sm_q + chunk_size * ds;
+    float* sm_v   = sm_k + chunk_size * ds;
+    float* sm_ps  = sm_v + chunk_size * hd;
+    float* sm_da  = sm_ps + hd * ds;
+    float* sm_qkd = sm_da + chunk_size;
+
+    int tid = threadIdx.x;
+    int nt = blockDim.x;
+
+    // Stage: pure copies of exactly the values the original kernel reads.
+    for (int i = tid; i < chunk_len * ds; i += nt) {
+        int t_local = i / ds;
+        int n = i % ds;
+        int base = (b * T + chunk_start + t_local) * nh * ds + h * ds;
+        sm_q[t_local * ds + n] = Q[base + n];
+        sm_k[t_local * ds + n] = K_scaled[base + n];
+    }
+    for (int i = tid; i < chunk_len * hd; i += nt) {
+        int t_local = i / hd;
+        int pp = i % hd;
+        sm_v[t_local * hd + pp] =
+            x[(b * T + chunk_start + t_local) * d_inner + h * hd + pp];
+    }
+    for (int i = tid; i < hd * ds; i += nt) {
+        sm_ps[i] = prev_states[state_head + i];
+    }
+    for (int i = tid; i < chunk_len; i += nt) {
+        sm_da[i] = dA_cumsum[cs_base + i];
+        sm_qkd[i] = qk_dot[(b * T + chunk_start + i) * nh + h];
+    }
+    __syncthreads();
+
+    // Tile: one thread per (t, s) pair, n-ascending dot - the same chain
+    // the original ran per row, element for element.
+    int n_pairs = chunk_len * (chunk_len - 1) / 2;
+    for (int e = tid; e < n_pairs; e += nt) {
+        // Decode the row-major strict-lower-triangle index: row t holds
+        // t entries starting at t*(t-1)/2. The float sqrt gives the row
+        // up to rounding; the two guards pin it exactly.
+        int t_local = (int)((1.0f + sqrtf(1.0f + 8.0f * (float)e)) * 0.5f);
+        while (t_local * (t_local - 1) / 2 > e) t_local--;
+        while ((t_local + 1) * t_local / 2 <= e) t_local++;
+        int s_local = e - t_local * (t_local - 1) / 2;
+        float decay = FAST_EXP(fminf(sm_da[t_local] - sm_da[s_local], 0.0f));
+        float qk_val = 0.0f;
+        for (int n = 0; n < ds; n++) {
+            qk_val += sm_q[t_local * ds + n] * sm_k[s_local * ds + n];
+        }
+        sm_tri[e] = decay * qk_val;
+    }
+    __syncthreads();
+
+    float d_skip = D[h];
+    // Outputs: one thread per (t, p); the s-ascending y_diag chain and the
+    // n-ascending y_off dot are single serial folds, exactly as before.
+    for (int o = tid; o < chunk_len * hd; o += nt) {
+        int t_local = o / hd;
+        int p = o % hd;
+        float y_off = 0.0f;
+        float state_decay = FAST_EXP(sm_da[t_local]);
+        for (int n = 0; n < ds; n++) {
+            y_off += sm_q[t_local * ds + n] * sm_ps[p * ds + n];
+        }
+        y_off *= state_decay;
+        float y_diag = 0.0f;
+        int tri_row = t_local * (t_local - 1) / 2;
+        for (int s_local = 0; s_local < t_local; s_local++) {
+            y_diag += sm_tri[tri_row + s_local] * sm_v[s_local * hd + p];
+        }
+        float y_skip = (d_skip + sm_qkd[t_local]) * sm_v[t_local * hd + p];
+        y_out[(b * T + chunk_start + t_local) * d_inner + h * hd + p] =
+            y_diag + y_off + y_skip;
+    }
+}
+
+// ============================================================================
 // Sections 6-9 (m3_chunk_scan_bwd / m3_state_passing_bwd / m3_chunk_state_bwd
 // / m3_cumsum_bwd) removed with the monolithic-backward consolidation.
 //
@@ -1625,7 +1754,10 @@ DEFINE_M3_WRITEBACK_PARALLEL_STATES(bf16, __nv_bfloat16, from_f_bf16)
 DEFINE_M3_WRITEBACK_PARALLEL_STATES(f16,  __half,        from_f_f16)
 
 #define DEFINE_M3_CHUNK_SCAN_FWD(SUFFIX, T_ACT, FROM_F)                       \
-extern "C" __global__ __launch_bounds__(64, 2) void                           \
+/* No __launch_bounds__ pin: the old (64, 2) minimum-blocks hint was          \
+ * unreachable behind the 32 KB static tile (smem caps residency at 3)       \
+ * and only constrained the register allocator. */                           \
+extern "C" __global__ void                                                    \
 m3_chunk_scan_fwd_##SUFFIX(                                                   \
     T_ACT* __restrict__ y_out,                                                \
     const T_ACT* __restrict__ x,                                              \
@@ -1704,6 +1836,106 @@ m3_chunk_scan_fwd_##SUFFIX(                                                   \
 
 DEFINE_M3_CHUNK_SCAN_FWD(bf16, __nv_bfloat16, from_f_bf16)
 DEFINE_M3_CHUNK_SCAN_FWD(f16,  __half,        from_f_f16)
+
+/* Typed twin of m3_chunk_scan_fwd_coop (see the f32 kernel for the
+ * distribution + smem layout). Activations convert through to_f at the
+ * staging copy - the same conversion points the original kernel applies
+ * inline - and y stores through FROM_F. */
+#define DEFINE_M3_CHUNK_SCAN_FWD_COOP(SUFFIX, T_ACT, FROM_F)                  \
+extern "C" __global__ void m3_chunk_scan_fwd_coop_##SUFFIX(                   \
+    T_ACT* __restrict__ y_out,                                                \
+    const T_ACT* __restrict__ x,                                              \
+    const T_ACT* __restrict__ Q,                                              \
+    const T_ACT* __restrict__ K_scaled,                                       \
+    const float* __restrict__ qk_dot,                                         \
+    const float* __restrict__ dA_cumsum,                                      \
+    const float* __restrict__ prev_states,                                    \
+    const float* __restrict__ D,                                              \
+    int batch, int T, int nh, int hd, int ds, int chunk_size                  \
+) {                                                                           \
+    int d_inner = nh * hd;                                                    \
+    int n_chunks = (T + chunk_size - 1) / chunk_size;                         \
+    int bc = blockIdx.x;                                                      \
+    int b = bc / n_chunks;                                                    \
+    int chunk = bc % n_chunks;                                                \
+    int h = blockIdx.y;                                                       \
+    if (chunk_size > 64) return;                                              \
+    if (ds > MAMBA_RS_STATE_CAP) return;                                      \
+    int chunk_start = chunk * chunk_size;                                     \
+    int chunk_end = chunk_start + chunk_size;                                 \
+    if (chunk_end > T) chunk_end = T;                                         \
+    int chunk_len = chunk_end - chunk_start;                                  \
+    int cs_base = ((b * n_chunks + chunk) * nh + h) * chunk_size;             \
+    int state_head = ((b * n_chunks + chunk) * nh + h) * hd * ds;             \
+    extern __shared__ float m3cs_sm[];                                        \
+    float* sm_tri = m3cs_sm;                                                  \
+    float* sm_q   = sm_tri + chunk_size * (chunk_size - 1) / 2;               \
+    float* sm_k   = sm_q + chunk_size * ds;                                   \
+    float* sm_v   = sm_k + chunk_size * ds;                                   \
+    float* sm_ps  = sm_v + chunk_size * hd;                                   \
+    float* sm_da  = sm_ps + hd * ds;                                          \
+    float* sm_qkd = sm_da + chunk_size;                                       \
+    int tid = threadIdx.x;                                                    \
+    int nt = blockDim.x;                                                      \
+    for (int i = tid; i < chunk_len * ds; i += nt) {                          \
+        int t_local = i / ds;                                                 \
+        int n = i % ds;                                                       \
+        int base = (b * T + chunk_start + t_local) * nh * ds + h * ds;        \
+        sm_q[t_local * ds + n] = to_f(Q[base + n]);                           \
+        sm_k[t_local * ds + n] = to_f(K_scaled[base + n]);                    \
+    }                                                                         \
+    for (int i = tid; i < chunk_len * hd; i += nt) {                          \
+        int t_local = i / hd;                                                 \
+        int pp = i % hd;                                                      \
+        sm_v[t_local * hd + pp] =                                             \
+            to_f(x[(b * T + chunk_start + t_local) * d_inner + h * hd + pp]); \
+    }                                                                         \
+    for (int i = tid; i < hd * ds; i += nt) {                                 \
+        sm_ps[i] = prev_states[state_head + i];                               \
+    }                                                                         \
+    for (int i = tid; i < chunk_len; i += nt) {                               \
+        sm_da[i] = dA_cumsum[cs_base + i];                                    \
+        sm_qkd[i] = qk_dot[(b * T + chunk_start + i) * nh + h];               \
+    }                                                                         \
+    __syncthreads();                                                          \
+    int n_pairs = chunk_len * (chunk_len - 1) / 2;                            \
+    for (int e = tid; e < n_pairs; e += nt) {                                 \
+        int t_local = (int)((1.0f + sqrtf(1.0f + 8.0f * (float)e)) * 0.5f);   \
+        while (t_local * (t_local - 1) / 2 > e) t_local--;                    \
+        while ((t_local + 1) * t_local / 2 <= e) t_local++;                   \
+        int s_local = e - t_local * (t_local - 1) / 2;                        \
+        float decay = FAST_EXP(fminf(sm_da[t_local] - sm_da[s_local], 0.0f)); \
+        float qk_val = 0.0f;                                                  \
+        for (int n = 0; n < ds; n++) {                                        \
+            qk_val += sm_q[t_local * ds + n] * sm_k[s_local * ds + n];        \
+        }                                                                     \
+        sm_tri[e] = decay * qk_val;                                           \
+    }                                                                         \
+    __syncthreads();                                                          \
+    float d_skip = D[h];                                                      \
+    for (int o = tid; o < chunk_len * hd; o += nt) {                          \
+        int t_local = o / hd;                                                 \
+        int p = o % hd;                                                       \
+        float y_off = 0.0f;                                                   \
+        float state_decay = FAST_EXP(sm_da[t_local]);                         \
+        for (int n = 0; n < ds; n++) {                                        \
+            y_off += sm_q[t_local * ds + n] * sm_ps[p * ds + n];              \
+        }                                                                     \
+        y_off *= state_decay;                                                 \
+        float y_diag = 0.0f;                                                  \
+        int tri_row = t_local * (t_local - 1) / 2;                            \
+        for (int s_local = 0; s_local < t_local; s_local++) {                 \
+            y_diag += sm_tri[tri_row + s_local] * sm_v[s_local * hd + p];     \
+        }                                                                     \
+        float y_skip = (d_skip + sm_qkd[t_local]) * sm_v[t_local * hd + p];   \
+        float y_val = y_diag + y_off + y_skip;                                \
+        y_out[(b * T + chunk_start + t_local) * d_inner + h * hd + p] =       \
+            FROM_F(y_val);                                                    \
+    }                                                                         \
+}
+
+DEFINE_M3_CHUNK_SCAN_FWD_COOP(bf16, __nv_bfloat16, from_f_bf16)
+DEFINE_M3_CHUNK_SCAN_FWD_COOP(f16,  __half,        from_f_f16)
 
 // ============================================================================
 // Typed (bf16/f16) variants of the chunked parallel backward
