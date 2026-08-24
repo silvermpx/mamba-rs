@@ -1,5 +1,45 @@
 # Changelog
 
+## 0.6.5 (2026-08-24)
+
+Correctness release for the Mamba-3 mixed-precision training lane.
+Mamba-1 and the Mamba-3 f32 and serving lanes are unchanged bit for
+bit; only bf16/f16 Mamba-3 training outputs change, and they change
+because they were wrong.
+
+### Fixed
+
+- The Mamba-3 bf16/f16 training forward returned the last layer's raw
+  residual stream instead of the post-norm_f output: the computed final
+  RMSNorm went into an unread scratch buffer while the backward applied
+  the norm's VJP unconditionally, so the forward and backward described
+  two different networks and a classifier head consumed an unnormalized
+  deep residual. Training on this lane could not converge (a from-cold
+  classifier collapsed into constant-class predictions; the overfit
+  probe could not reach the loss floor). The mixed lane now mirrors the
+  f32 lane - the last layer lands in the pre-norm save and the f32
+  rmsnorm writes the caller's output buffer. The mixed-vs-f32 parity
+  test compared the pre-norm surfaces on both sides and could not see
+  the defect; it now compares the post-norm output, and a new
+  regression pins the per-row RMS of the mixed output at ~1.
+- Mamba-3 weight init follows the shipped reference: Linear projections
+  use the nn.Linear default bound 1/sqrt(fan_in) (the previous gain-1
+  bound carried 3x the reference variance) and out_proj additionally
+  divides by sqrt(n_layers), the GPT-2 prenorm residual rescale from
+  the official mixer.
+- The Mamba-3 reference no-decay group gains every bias (the input
+  projection bias and the all-ones B/C biases), matching the reference
+  parameter grouping; decayed B/C biases walk out of the positive
+  regime the Mamba-3 ablation requires.
+
+### Measurements and verification
+
+The from-cold overfit probe (16 pages, d384x24 bf16) now drives the
+loss to the entropy floor exactly (gap 0.0000; it previously stalled
+with a broken-wire gap of 17.3), and the Mamba-3 parity suite passes
+on the corrected post-norm surface. Mamba-1 digests and the Mamba-3
+f32/serving lanes are bit-identical to 0.6.4.
+
 ## 0.6.4 (2026-08-24)
 
 Inference performance release: a faster prefill serving chain, a
