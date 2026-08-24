@@ -20,7 +20,6 @@ use std::sync::Arc;
 
 use cudarc::driver::CudaStream;
 
-use crate::mamba_ssm::gpu::buffers::{GpuBuffer, WeightSliceDyn};
 use crate::mamba_ssm::gpu::context::GpuCtx;
 use crate::mamba_ssm::gpu::dtype::WeightDtype;
 use crate::mamba3_siso::config::Mamba3Config;
@@ -60,47 +59,15 @@ impl GpuMamba3TrainMixedWeights {
     /// f32 mode = D2D copy. bf16/f16 = elementwise cast kernel.
     /// Must be called after every optimizer step, before the next forward.
     pub fn sync_master_to_compute(&self, ctx: &GpuCtx) -> Result<(), String> {
-        // input_proj_w (bulk) rides the fused AdamW shadow write.
-        // input_proj_b — f32 stays f32
-        sync_f32(ctx, &self.master.input_proj_b, &self.compute.input_proj_b)?;
-
-        for (mw, cw) in self.master.layers.iter().zip(&self.compute.layers) {
-            // f32-stays-f32
-            sync_f32(ctx, &mw.norm_weight, &cw.norm_weight)?;
-            sync_f32(ctx, &mw.dt_bias, &cw.dt_bias)?;
-            sync_f32(ctx, &mw.b_norm_weight, &cw.b_norm_weight)?;
-            sync_f32(ctx, &mw.c_norm_weight, &cw.c_norm_weight)?;
-            sync_f32(ctx, &mw.b_bias, &cw.b_bias)?;
-            sync_f32(ctx, &mw.c_bias, &cw.c_bias)?;
-            sync_f32(ctx, &mw.d_param, &cw.d_param)?;
-            sync_f32(ctx, &mw.norm_gate_weight, &cw.norm_gate_weight)?;
-            // bulk (cast to dtype)
-            // in_proj_w / out_proj_w (bulk) ride the fused AdamW shadow write.
-        }
-
-        sync_f32(ctx, &self.master.norm_f_weight, &self.compute.norm_f_weight)?;
+        // Nothing to do: EVERY compute shadow - the typed bulk tensors and
+        // the f32-stays-f32 ones alike - is written by the fused AdamW
+        // kernel in the same launch that updates its master, so the
+        // per-tensor copy walk that used to live here is gone. `a_log`
+        // has no compute shadow at all (the forward and backward ride
+        // a_neg_all, recomputed from the master every step). Kept as a
+        // no-op seam: if a future weight sharing ever needs a shadow the
+        // optimizer does not write, it belongs here.
+        let _ = ctx;
         Ok(())
     }
-}
-
-/// f32 → f32 stream-ordered D2D copy (no dtype cast).
-fn sync_f32(ctx: &GpuCtx, master: &GpuBuffer, compute: &WeightSliceDyn) -> Result<(), String> {
-    let n_elems = master.len();
-    debug_assert_eq!(n_elems, compute.len_elems());
-    if n_elems == 0 {
-        return Ok(());
-    }
-    let bytes = n_elems * 4;
-    let res = unsafe {
-        cudarc::driver::sys::cuMemcpyDtoDAsync_v2(
-            compute.ptr(),
-            master.cached_ptr(),
-            bytes,
-            ctx.stream.cu_stream(),
-        )
-    };
-    if res != cudarc::driver::sys::CUresult::CUDA_SUCCESS {
-        return Err(format!("sync_f32 D2D failed: {res:?}"));
-    }
-    Ok(())
 }

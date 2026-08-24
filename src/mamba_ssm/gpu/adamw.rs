@@ -737,6 +737,10 @@ pub struct AdamWTensorSpec {
     /// Element size of the shadow in bytes (2 = bf16/f16; ignored when
     /// `out == 0`).
     pub out_elt_bytes: usize,
+    /// The shadow slot is f32 (a "f32 stays f32" tensor). The fused
+    /// kernel then writes it directly instead of the caller running a
+    /// per-tensor device-to-device copy after the step.
+    pub out_is_f32: bool,
     pub len: usize,
     /// Member of the reference no-decay group (a_log, D, dt bias, norm
     /// scales) — decays only when `reference_no_decay` is off.
@@ -751,10 +755,13 @@ pub struct AdamWMultiPlan {
     n_chunks: usize,
 }
 
-/// Elements per chunk. 64k x 4B = 256 KB of f32 per block keeps the
-/// grid in the hundreds at 91M params while single-block tensors (the
-/// d_model-sized biases) still land whole.
-pub const ADAMW_MULTI_CHUNK: usize = 65_536;
+/// Elements per chunk. 8k x 4B = 32 KB of f32 per block: at 256 threads
+/// that is 32 elements per thread instead of 256, and the grid grows from
+/// the hundreds into the thousands, so the machine fills instead of
+/// running a handful of long serial blocks alongside eight single-block
+/// tails. Chunking is a pure work split - AdamW is elementwise with no
+/// cross-element interaction, so the size never touches a single bit.
+pub const ADAMW_MULTI_CHUNK: usize = 8_192;
 
 /// Build the device chunk table. `flat_base` is `grads.flat` base — the
 /// m/v slices mirror the grad offsets exactly (same arena layout).
@@ -800,7 +807,8 @@ pub fn build_multi_plan(
                 } else {
                     spec.out + (start * spec.out_elt_bytes) as u64
                 },
-                (n as u64) | (u64::from(wd.to_bits()) << 32),
+                // Bit 31 tags an f32 shadow; the chunk length needs 17.
+                (n as u64) | (u64::from(spec.out_is_f32) << 31) | (u64::from(wd.to_bits()) << 32),
             ];
             for w in entry {
                 bytes.extend_from_slice(&w.to_le_bytes());
@@ -854,6 +862,7 @@ pub fn m1_specs(
         grad: g.ptr(),
         out: 0,
         out_elt_bytes: 0,
+        out_is_f32: false,
         len: w.len(),
         no_decay,
     };
@@ -905,6 +914,28 @@ pub fn m1_specs_mixed(
         wire(base + 5, &cw.dt_proj_w);
         wire(base + 9, &cw.out_proj_w);
     }
+    // The f32-stays-f32 shadows ride the same kernel: their compute copy
+    // is the new master value verbatim, so the fused step writes it and
+    // the per-tensor copy walk disappears. `a_log` is deliberately absent
+    // - its compute copy has no training-path reader (the forward and
+    // backward ride a_neg_all, recomputed from the master every step).
+    let last = specs.len() - 1;
+    let mut wire_f32 = |idx: usize, slot: &crate::mamba_ssm::gpu::buffers::WeightSliceDyn| {
+        debug_assert_eq!(specs[idx].len, slot.len_elems());
+        specs[idx].out = slot.ptr();
+        specs[idx].out_elt_bytes = 4;
+        specs[idx].out_is_f32 = true;
+    };
+    wire_f32(1, &weights.compute.input_proj_b);
+    for (li, cw) in weights.compute.layers.iter().enumerate() {
+        let base = 2 + li * 10;
+        wire_f32(base, &cw.norm_weight);
+        wire_f32(base + 2, &cw.conv1d_weight);
+        wire_f32(base + 3, &cw.conv1d_bias);
+        wire_f32(base + 6, &cw.dt_proj_b);
+        wire_f32(base + 8, &cw.d_param);
+    }
+    wire_f32(last, &weights.compute.norm_f_weight);
     specs
 }
 
@@ -918,6 +949,7 @@ pub fn m3_specs(
         grad: g.ptr(),
         out: 0,
         out_elt_bytes: 0,
+        out_is_f32: false,
         len: w.len(),
         no_decay,
     };
@@ -962,5 +994,26 @@ pub fn m3_specs_mixed(
         wire(base + 1, &cw.in_proj_w);
         wire(base + 9, &cw.out_proj_w);
     }
+    // f32-stays-f32 shadows ride the same kernel (see the M1 twin).
+    let last = specs.len() - 1;
+    let mut wire_f32 = |idx: usize, slot: &crate::mamba_ssm::gpu::buffers::WeightSliceDyn| {
+        debug_assert_eq!(specs[idx].len, slot.len_elems());
+        specs[idx].out = slot.ptr();
+        specs[idx].out_elt_bytes = 4;
+        specs[idx].out_is_f32 = true;
+    };
+    wire_f32(1, &weights.compute.input_proj_b);
+    for (li, cw) in weights.compute.layers.iter().enumerate() {
+        let base = 2 + li * 10;
+        wire_f32(base, &cw.norm_weight);
+        wire_f32(base + 2, &cw.dt_bias);
+        wire_f32(base + 3, &cw.b_norm_weight);
+        wire_f32(base + 4, &cw.c_norm_weight);
+        wire_f32(base + 5, &cw.b_bias);
+        wire_f32(base + 6, &cw.c_bias);
+        wire_f32(base + 7, &cw.d_param);
+        wire_f32(base + 8, &cw.norm_gate_weight);
+    }
+    wire_f32(last, &weights.compute.norm_f_weight);
     specs
 }

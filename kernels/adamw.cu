@@ -144,7 +144,11 @@ extern "C" __global__ void adamw_step_multi_##SUFFIX(                          \
     float* m          = (float*)c.m;                                           \
     float* v          = (float*)c.v;                                           \
     OUT_TY* out       = (OUT_TY*)c.out;                                        \
-    const int n = (int)(c.n_wd & 0xFFFFFFFFULL);                               \
+    /* Bit 31 of the packed length tags the shadow's dtype: f32-stays-f32 \
+       tensors (norms, conv weights/bias, dt bias, D) get their compute   \
+       copy written HERE instead of through a per-tensor D2D pass. */     \
+    const int n = (int)(c.n_wd & 0x7FFFFFFFULL);                               \
+    const bool out_is_f32 = ((c.n_wd >> 31) & 1ULL) != 0ULL;                   \
     const float weight_decay =                                                 \
         __uint_as_float((unsigned int)(c.n_wd >> 32));                         \
     const float one_minus_b1 = 1.f - beta1;                                    \
@@ -161,7 +165,10 @@ extern "C" __global__ void adamw_step_multi_##SUFFIX(                          \
         float v_hat = vi * bias_c2;                                            \
         float np = decay_factor * p - lr * m_hat / (sqrtf(v_hat) + eps);       \
         param[i] = np;                                                         \
-        if (out) out[i] = FROM_F(np);                                          \
+        if (out) {                                                             \
+            if (out_is_f32) { ((float*)out)[i] = np; }                         \
+            else            { out[i] = FROM_F(np); }                           \
+        }                                                                      \
     }                                                                          \
 }
 
