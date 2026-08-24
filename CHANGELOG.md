@@ -125,6 +125,23 @@ entry.
   safetensors save path documents its length invariant instead of a
   bare unwrap.
 
+### Measurements and verification
+
+Classifier serve page (B=1, T=4621, d_model 384, 24 layers, f32,
+cuBLAS+TF32): pooled prefill 29.3 -> 10.8 ms/page, full-temporal
+30.1 -> 11.5 ms/page. Campaign training step (B=8, T=1300, d_model
+384, 24 layers, bf16, graph lane): Mamba-1 131.5 -> 114.0 ms/step
+(batch-invariant + tensor-core tier) and 169.0 -> 129.8 on cuBLAS,
+peak memory down 766 MB; Mamba-3 179.4 -> 165.7 ms/step. Measured on
+an RTX 5090; the last training-epilogue items landed after that box
+retired and their bit gates re-ran on an RTX 6000 Ada, where the
+scalar-tier digests and the decode digest match the 5090 recordings
+bit for bit.
+
+Verification: nine run digests (twice each), the 16-cell prefill
+serve hash suite, the eleven Mamba-3 gradient hash arms, the decode
+digest and the per-kernel scan-backward hashes all equal their
+recorded baselines; full test suite 429 passed, 0 failed.
 
 ## 0.6.3 (2026-08-23)
 
