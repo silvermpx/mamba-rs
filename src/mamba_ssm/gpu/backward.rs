@@ -123,14 +123,10 @@ pub fn gpu_backward_mamba_layer(
             .map_err(|e| format!("gather_bc_cols bwd mamba: {:?}", e))?;
     }
 
-    // d_a_log_local zeroing is route-dependent: the SEQUENTIAL kernel
-    // `=`-stores the full domain from a register accumulator (no zero
-    // needed), but the PARALLEL reverse-scan kernel `+=`-accumulates
-    // chunk partials into it across its T-chunk loop and REQUIRES a
-    // zeroed buffer (PERF-063 regression).
-    if dims.scan_mode.use_parallel(t, ds) {
-        scratch.d_a_log_local.zero(&ctx.stream)?;
-    }
+    // No zeroing on either route now: the SEQUENTIAL kernel `=`-stores
+    // the full domain from a register accumulator, and the PARALLEL fold
+    // writes one partial SLOT per chunk (`=`, every slot covered) that
+    // the chunked reducer folds afterwards.
 
     // ssm_backward_local(h_saved, delta_saved, u_saved, B_saved, C_saved, a_neg, D,
     //   dy, d_delta, d_u, d_B_local, d_C_local, d_D_local, d_a_log_local,
@@ -169,7 +165,15 @@ pub fn gpu_backward_mamba_layer(
         let dp_ptr = lw.d_param.cached_ptr();
         builder.arg(&dp_ptr);
         builder.arg(scratch.d_y.inner()); // dy (from gating backward)
-        builder.arg(scratch.d_delta.inner_mut());
+        if use_fold {
+            // The fold's epilogue applies the softplus derivative inline
+            // (round-first) and emits the PRE-softplus dt gradient - the
+            // separate softplus backward launch is skipped on this route.
+            builder.arg(scratch.d_delta_raw.inner_mut());
+            builder.arg(acts.delta_raw.inner());
+        } else {
+            builder.arg(scratch.d_delta.inner_mut());
+        }
         builder.arg(scratch.d_u.inner_mut());
         builder.arg(scratch.d_b_local.inner_mut());
         builder.arg(scratch.d_c_local.inner_mut());
@@ -249,16 +253,35 @@ pub fn gpu_backward_mamba_layer(
         builder.arg(&di_i);
         unsafe { builder.launch(grid_1d(di)) }
             .map_err(|e| format!("ssm_reduce_d_D mamba: {:?}", e))?;
-        // d_a_log reduction
-        let mut builder = ctx.stream.launch_builder(&ctx.kernels.ssm_reduce_d_a_log);
+        // d_a_log reduction - the parallel fold hands over chunk-partial
+        // rows; the sequential kernel keeps the per-sample accumulator
+        // layout. The chunked reducer folds one sample's slots first and
+        // only then adds across the batch, reproducing the retired
+        // accumulate-then-reduce association exactly.
         let _p = d_lw.a_log.ptr();
-        builder.arg(&_p);
-        builder.arg(scratch.d_a_log_local.inner());
-        builder.arg(&b_i);
-        builder.arg(&di_i);
-        builder.arg(&ds_i);
-        unsafe { builder.launch(grid_1d(di * ds)) }
-            .map_err(|e| format!("ssm_reduce_d_a_log mamba: {:?}", e))?;
+        if dims.scan_mode.use_parallel(t, ds) {
+            let nc = t.div_ceil(super::launch::SCAN_CHUNK).max(1) as i32;
+            let mut builder = ctx
+                .stream
+                .launch_builder(&ctx.kernels.ssm_reduce_d_a_log_chunks);
+            builder.arg(&_p);
+            builder.arg(scratch.d_a_log_local.inner());
+            builder.arg(&b_i);
+            builder.arg(&nc);
+            builder.arg(&di_i);
+            builder.arg(&ds_i);
+            unsafe { builder.launch(grid_1d(di * ds)) }
+                .map_err(|e| format!("ssm_reduce_d_a_log_chunks mamba: {:?}", e))?;
+        } else {
+            let mut builder = ctx.stream.launch_builder(&ctx.kernels.ssm_reduce_d_a_log);
+            builder.arg(&_p);
+            builder.arg(scratch.d_a_log_local.inner());
+            builder.arg(&b_i);
+            builder.arg(&di_i);
+            builder.arg(&ds_i);
+            unsafe { builder.launch(grid_1d(di * ds)) }
+                .map_err(|e| format!("ssm_reduce_d_a_log mamba: {:?}", e))?;
+        }
     }
 
     // d_xdbl assembly moved to ONE pack_xdbl_cols launch after the
@@ -271,8 +294,9 @@ pub fn gpu_backward_mamba_layer(
     // ===================================================================
     // B4: Softplus backward + dt_proj backward
     // ===================================================================
-    // softplus_backward(dx, x_saved, dy, n)
-    {
+    // softplus_backward(dx, x_saved, dy, n) - only the non-fold routes
+    // need it; the fold epilogue already emitted d_delta_raw.
+    if !(dims.scan_mode.use_parallel(t, ds) && di.is_multiple_of(super::launch::SCAN_BWD_DGROUP)) {
         let n = (bt * di) as i32;
         let mut builder = ctx.stream.launch_builder(&ctx.kernels.softplus_bwd);
         builder.arg(scratch.d_delta_raw.inner_mut()); // dx output

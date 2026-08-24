@@ -667,7 +667,15 @@ fn bench_scan_kernels_isolated() {
     let d_b_local = DtypedBuf::zeros(&ctx.stream, bt * di * ds, dtype).unwrap();
     let d_c_local = DtypedBuf::zeros(&ctx.stream, bt * di * ds, dtype).unwrap();
     let d_d_local = GpuBuffer::zeros(&ctx.stream, b * di).unwrap();
-    let d_a_log_local = GpuBuffer::zeros(&ctx.stream, b * di * ds).unwrap();
+    let d_a_log_local = GpuBuffer::zeros(
+        &ctx.stream,
+        b * t
+            .div_ceil(mamba_rs::mamba_ssm::gpu::launch::SCAN_CHUNK)
+            .max(1)
+            * di
+            * ds,
+    )
+    .unwrap();
 
     let bwd = |ctx: &GpuCtx| {
         let mut bld = ctx
@@ -818,6 +826,8 @@ fn bench_scan_kernels_isolated() {
         bld.arg(&ddp);
         bld.arg(&dyp);
         bld.arg(&ddel);
+        // The fold takes the PRE-softplus dt right after its output slot.
+        bld.arg(&dp);
         bld.arg(&dup);
         bld.arg(&dbl);
         bld.arg(&dcl);

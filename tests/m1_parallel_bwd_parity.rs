@@ -550,7 +550,12 @@ fn check_fold_parity(b: usize, t: usize, di: usize, ds: usize, dtype: WeightDtyp
     let d_b_fold = DtypedBuf::zeros(&ctx.stream, b * t * (di / g) * ds, dtype).unwrap();
     let d_c_fold = DtypedBuf::zeros(&ctx.stream, b * t * (di / g) * ds, dtype).unwrap();
     let d_d_local = GpuBuffer::zeros(&ctx.stream, b * di).unwrap();
-    let d_a_log_local = GpuBuffer::zeros(&ctx.stream, b * di * ds).unwrap();
+    // The fold writes one partial ROW per chunk (walk order); the arm
+    // folds them on the host in the same order before comparing.
+    let nc_fold = t
+        .div_ceil(mamba_rs::mamba_ssm::gpu::launch::SCAN_CHUNK)
+        .max(1);
+    let d_a_log_local = GpuBuffer::zeros(&ctx.stream, b * nc_fold * di * ds).unwrap();
     ctx.stream.synchronize().unwrap();
     {
         let mut bld = ctx
@@ -580,6 +585,9 @@ fn check_fold_parity(b: usize, t: usize, di: usize, ds: usize, dtype: WeightDtyp
         bld.arg(&dp);
         bld.arg(&dyp);
         bld.arg(&ddl);
+        // The fold takes the PRE-softplus dt right after its output slot.
+        let raw_p = delta.cached_ptr();
+        bld.arg(&raw_p);
         bld.arg(&dup);
         bld.arg(&dbl);
         bld.arg(&dcl);
@@ -597,12 +605,26 @@ fn check_fold_parity(b: usize, t: usize, di: usize, ds: usize, dtype: WeightDtyp
     }
     ctx.stream.synchronize().unwrap();
 
+    // The fold emits the PRE-softplus dt gradient; mirror the retired
+    // softplus-backward chain onto the sequential reference (round the
+    // accumulator, then divide by 1 + exp(-raw)) before comparing.
     let dd_par = download_typed(&ctx, &d_delta);
     let du_par = download_typed(&ctx, &d_u);
     let dbl_par = locals_from_tmajor(&download_typed(&ctx, &d_b_fold), b, t, di / g, ds);
     let dcl_par = locals_from_tmajor(&download_typed(&ctx, &d_c_fold), b, t, di / g, ds);
     let ddd_par = download_f32(&ctx, &d_d_local, b * di);
-    let dal_par = download_f32(&ctx, &d_a_log_local, b * di * ds);
+    let dal_par = {
+        let raw = download_f32(&ctx, &d_a_log_local, b * nc_fold * di * ds);
+        let mut folded = vec![0.0f32; b * di * ds];
+        for bb2 in 0..b {
+            for c in 0..nc_fold {
+                for i in 0..di * ds {
+                    folded[bb2 * di * ds + i] += raw[(bb2 * nc_fold + c) * di * ds + i];
+                }
+            }
+        }
+        folded
+    };
 
     // Group-sum the reference dB/dC to the fold depth.
     let group_sum = |x: &[f32]| -> Vec<f32> {
@@ -627,7 +649,12 @@ fn check_fold_parity(b: usize, t: usize, di: usize, ds: usize, dtype: WeightDtyp
         WeightDtype::Bf16 => (0.99, 0.05),
         WeightDtype::F16 => (0.999, 0.02),
     };
-    assert_close("d_delta", &dd_seq, &dd_par, cos_min, norm_tol);
+    let dd_seq_raw: Vec<f32> = dd_seq
+        .iter()
+        .zip(inp.delta.iter())
+        .map(|(&dd, &raw)| dd / (1.0 + (-raw * std::f32::consts::LOG2_E).exp2()))
+        .collect();
+    assert_close("d_delta", &dd_seq_raw, &dd_par, cos_min, norm_tol);
     assert_close("d_u", &du_seq, &du_par, cos_min, norm_tol);
     assert_close(
         "d_B_fold",
@@ -763,7 +790,10 @@ fn diag_fold_slim_vs_full_positions() {
         let d_b_fold = DtypedBuf::zeros(&ctx.stream, b * t * out_rows * ds, dtype).unwrap();
         let d_c_fold = DtypedBuf::zeros(&ctx.stream, b * t * out_rows * ds, dtype).unwrap();
         let d_d_local = GpuBuffer::zeros(&ctx.stream, b * di).unwrap();
-        let d_a_log_local = GpuBuffer::zeros(&ctx.stream, b * di * ds).unwrap();
+        let nc_fold = t
+            .div_ceil(mamba_rs::mamba_ssm::gpu::launch::SCAN_CHUNK)
+            .max(1);
+        let d_a_log_local = GpuBuffer::zeros(&ctx.stream, b * nc_fold * di * ds).unwrap();
         ctx.stream.synchronize().unwrap();
         let mut bld = ctx.stream.launch_builder(if fold {
             k.ssm_parallel_bwd_fold_typed.get(dtype)
@@ -794,6 +824,9 @@ fn diag_fold_slim_vs_full_positions() {
         bld.arg(&dp);
         bld.arg(&dyp);
         bld.arg(&ddl);
+        // The fold takes the PRE-softplus dt right after its output slot.
+        let raw_p = delta.cached_ptr();
+        bld.arg(&raw_p);
         bld.arg(&dup);
         bld.arg(&dbl);
         bld.arg(&dcl);

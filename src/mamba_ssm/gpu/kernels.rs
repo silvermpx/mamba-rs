@@ -77,6 +77,8 @@ pub struct MambaKernels {
     pub ssm_reduce_d_d: CudaFunction,
     /// Reduce local SSM grads to d_a_log `[d_inner*d_state]`.
     pub ssm_reduce_d_a_log: CudaFunction,
+    /// Chunk-partial reducer for the fold backward's d_a_log slots.
+    pub ssm_reduce_d_a_log_chunks: CudaFunction,
 
     // -- Conv1d --
     /// Single-step depthwise conv1d forward with SiLU.
@@ -719,6 +721,7 @@ impl MambaKernels {
             },
             ssm_reduce_d_d: get("ssm_reduce_d_D")?,
             ssm_reduce_d_a_log: get("ssm_reduce_d_a_log")?,
+            ssm_reduce_d_a_log_chunks: get("ssm_reduce_d_a_log_chunks")?,
             // conv1d
             conv1d_step_fwd: get("conv1d_step_forward")?,
             conv1d_step_bwd: get("conv1d_step_backward")?,

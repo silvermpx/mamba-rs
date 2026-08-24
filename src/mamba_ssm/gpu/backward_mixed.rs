@@ -232,15 +232,10 @@ pub fn gpu_backward_mamba_layer_mixed(
             .map_err(|e| format!("gather_bc_cols_typed bwd: {e:?}"))?;
     }
 
-    // d_a_log_local zeroing is route-dependent: the SEQUENTIAL kernel
-    // `=`-stores the full domain from a register accumulator (no zero
-    // needed), but the PARALLEL reverse-scan kernel `+=`-accumulates
-    // chunk partials into it across its T-chunk loop and REQUIRES a
-    // zeroed buffer — reading stale scratch here poisoned every f16
-    // gradient step (PERF-063 regression).
-    if dims.scan_mode.use_parallel(t, ds) {
-        scratch.d_a_log_local.zero(&ctx.stream)?;
-    }
+    // No zeroing on either route now: the SEQUENTIAL kernel `=`-stores
+    // the full domain from a register accumulator, and the PARALLEL fold
+    // writes one partial SLOT per chunk (`=`, every slot covered) that
+    // the chunked reducer folds afterwards.
 
     // SSM backward: parallel reverse-scan when T > PARALLEL_SCAN_THRESHOLD
     // or
@@ -259,6 +254,8 @@ pub fn gpu_backward_mamba_layer_mixed(
         let dp = lw.d_param.ptr();
         let dy = scratch.d_y.cached_ptr();
         let dd = scratch.d_delta.cached_ptr();
+        let ddr = scratch.d_delta_raw.cached_ptr();
+        let raw_p = acts.delta_raw.cached_ptr();
         let du = scratch.d_u.cached_ptr();
         let dbl = scratch.d_b_local.cached_ptr();
         let dcl = scratch.d_c_local.cached_ptr();
@@ -286,7 +283,13 @@ pub fn gpu_backward_mamba_layer_mixed(
             bld.arg(&a_neg_ptr);
             bld.arg(&dp);
             bld.arg(&dy);
-            bld.arg(&dd);
+            if use_fold {
+                // Fold epilogue emits the PRE-softplus dt gradient inline.
+                bld.arg(&ddr);
+                bld.arg(&raw_p);
+            } else {
+                bld.arg(&dd);
+            }
             bld.arg(&du);
             bld.arg(&dbl);
             bld.arg(&dcl);
@@ -380,16 +383,32 @@ pub fn gpu_backward_mamba_layer_mixed(
         bld.arg(&b_i);
         bld.arg(&di_i);
         unsafe { bld.launch(grid_1d(di)) }.map_err(|e| format!("ssm_reduce_d_d: {e:?}"))?;
-        // d_a_log reducer — f32 in → f32 out.
-        let mut bld = ctx.stream.launch_builder(&k.ssm_reduce_d_a_log);
+        // d_a_log reducer - chunk-partial rows from the parallel fold,
+        // per-sample accumulator layout from the sequential kernel. The
+        // chunked reducer folds one sample's slots first, then adds
+        // across the batch (the retired accumulate-then-reduce order).
         let p = d_lw.a_log.ptr();
-        bld.arg(&p);
-        bld.arg(scratch.d_a_log_local.inner());
-        bld.arg(&b_i);
-        bld.arg(&di_i);
-        bld.arg(&ds_i);
-        unsafe { bld.launch(grid_1d(di * ds)) }
-            .map_err(|e| format!("ssm_reduce_d_a_log: {e:?}"))?;
+        if dims.scan_mode.use_parallel(t, ds) {
+            let nc = t.div_ceil(crate::mamba_ssm::gpu::launch::SCAN_CHUNK).max(1) as i32;
+            let mut bld = ctx.stream.launch_builder(&k.ssm_reduce_d_a_log_chunks);
+            bld.arg(&p);
+            bld.arg(scratch.d_a_log_local.inner());
+            bld.arg(&b_i);
+            bld.arg(&nc);
+            bld.arg(&di_i);
+            bld.arg(&ds_i);
+            unsafe { bld.launch(grid_1d(di * ds)) }
+                .map_err(|e| format!("ssm_reduce_d_a_log_chunks: {e:?}"))?;
+        } else {
+            let mut bld = ctx.stream.launch_builder(&k.ssm_reduce_d_a_log);
+            bld.arg(&p);
+            bld.arg(scratch.d_a_log_local.inner());
+            bld.arg(&b_i);
+            bld.arg(&di_i);
+            bld.arg(&ds_i);
+            unsafe { bld.launch(grid_1d(di * ds)) }
+                .map_err(|e| format!("ssm_reduce_d_a_log: {e:?}"))?;
+        }
     }
 
     // d_xdbl assembly moved to ONE pack_xdbl_cols launch after the
@@ -403,6 +422,10 @@ pub fn gpu_backward_mamba_layer_mixed(
     // f32 sources equals the old cast-then-add-onto-zero double round).
 
     // ─── B4: softplus backward + dt_proj backward ────────────────────
+    // Only the non-fold routes launch it; the fold epilogue already
+    // emitted d_delta_raw with the identical round-first chain.
+    if !(dims.scan_mode.use_parallel(t, ds)
+        && di.is_multiple_of(crate::mamba_ssm::gpu::launch::SCAN_BWD_DGROUP))
     {
         let n = (bt * di) as i32;
         let mut bld = ctx.stream.launch_builder(k.softplus_bwd_typed.get(dtype));

@@ -1670,7 +1670,13 @@ ssm_parallel_scan_bwd_fold_##SUFFIX(                                          \
     const float* __restrict__ a_neg,                                          \
     const float* __restrict__ D,                                              \
     const T_ACT* __restrict__ dy,                                             \
-    T_ACT* __restrict__ d_delta,                                              \
+    /* OUTPUT is the PRE-softplus dt gradient: the epilogue applies the   \
+       softplus derivative inline (round-FIRST - the accumulator is       \
+       rounded to the activation dtype exactly as the old d_delta store   \
+       did, and the derivative multiplies the reloaded value), so the     \
+       separate softplus backward launch is gone. */                      \
+    T_ACT* __restrict__ d_delta_raw_out,                                      \
+    const T_ACT* __restrict__ dt_raw,                                         \
     T_ACT* __restrict__ d_u,                                                  \
     T_ACT* __restrict__ d_B_local, /* [B, ds, di/G, T] group partials */      \
     T_ACT* __restrict__ d_C_local, /* [B, ds, di/G, T] group partials */      \
@@ -2005,8 +2011,16 @@ ssm_parallel_scan_bwd_fold_##SUFFIX(                                          \
                                                     off);                     \
                 }                                                             \
                 if (threadIdx.x == 0) {                                       \
-                    d_a_log_local[(bid * d_inner + did) * d_state + n]        \
-                        += da_warp;                                           \
+                    /* One partial SLOT per chunk instead of a global      \
+                       read-modify-write per (chunk, lane, n): slot order  \
+                       mirrors the walk (chunk_loop ascends = chunks       \
+                       DESCEND in time), and the chunked reducer folds     \
+                       the slots in exactly this order before adding       \
+                       across the batch - the same left-to-right chain     \
+                       the accumulator produced. */                        \
+                    d_a_log_local[((bid * n_chunks + chunk_loop)              \
+                                   * d_inner + did) * d_state + n]            \
+                        = da_warp;                                            \
                     smem_chunk_first_a[gg * d_state + n] =                 \
                         smem_next_a[0];                                       \
                 }                                                             \
@@ -2052,19 +2066,35 @@ ssm_parallel_scan_bwd_fold_##SUFFIX(                                          \
             if (t < T) {                                                      \
                 __align__(16) T_ACT pack_d[G];                                \
                 __align__(16) T_ACT pack_u[G];                                \
-                _Pragma("unroll")                                             \
-                for (int gg = 0; gg < G; gg++) {                              \
-                    pack_d[gg] = FROM_F(d_delta_acc[gg][i]);                  \
-                    pack_u[gg] = FROM_F(d_u_acc[gg][i]);                      \
-                }                                                             \
+                __align__(16) T_ACT pack_raw[G];                              \
                 int row = (bid * T + t) * d_inner + did0;                     \
                 if (sizeof(T_ACT) == 4) {                                     \
-                    *reinterpret_cast<uint4 *>(&d_delta[row]) =               \
+                    *reinterpret_cast<uint4 *>(pack_raw) =                    \
+                        *reinterpret_cast<const uint4 *>(&dt_raw[row]);       \
+                } else {                                                      \
+                    *reinterpret_cast<uint2 *>(pack_raw) =                    \
+                        *reinterpret_cast<const uint2 *>(&dt_raw[row]);       \
+                }                                                             \
+                _Pragma("unroll")                                             \
+                for (int gg = 0; gg < G; gg++) {                              \
+                    /* Round FIRST: the accumulator rounds to the         \
+                       activation dtype exactly as the old d_delta store  \
+                       did, then the softplus derivative divides the      \
+                       reloaded value - the retired kernel's chain,       \
+                       rounding for rounding. */                          \
+                    float dd = to_f(FROM_F(d_delta_acc[gg][i]));              \
+                    float xr = to_f(pack_raw[gg]);                            \
+                    pack_d[gg] = FROM_F(                                      \
+                        dd / (1.0f + exp2f(-xr * 1.4426950408889634f)));      \
+                    pack_u[gg] = FROM_F(d_u_acc[gg][i]);                      \
+                }                                                             \
+                if (sizeof(T_ACT) == 4) {                                     \
+                    *reinterpret_cast<uint4 *>(&d_delta_raw_out[row]) =      \
                         *reinterpret_cast<uint4 *>(pack_d);                   \
                     *reinterpret_cast<uint4 *>(&d_u[row]) =                   \
                         *reinterpret_cast<uint4 *>(pack_u);                   \
                 } else {                                                      \
-                    *reinterpret_cast<uint2 *>(&d_delta[row]) =               \
+                    *reinterpret_cast<uint2 *>(&d_delta_raw_out[row]) =      \
                         *reinterpret_cast<uint2 *>(pack_d);                   \
                     *reinterpret_cast<uint2 *>(&d_u[row]) =                   \
                         *reinterpret_cast<uint2 *>(pack_u);                   \

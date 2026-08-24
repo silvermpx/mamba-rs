@@ -296,7 +296,10 @@ impl GpuMambaMixedTrainScratch {
             d_b_reduced: GpuBuffer::zeros(stream, bt * ds)?,
             d_c_reduced: GpuBuffer::zeros(stream, bt * ds)?,
             d_d_local: GpuBuffer::zeros(stream, b * di)?,
-            d_a_log_local: GpuBuffer::zeros(stream, b * di * ds)?,
+            d_a_log_local: GpuBuffer::zeros(
+                stream,
+                b * dims.seq_len.div_ceil(super::launch::SCAN_CHUNK).max(1) * di * ds,
+            )?,
             d_input_proj_dx: GpuBuffer::zeros(stream, bt * dims.mamba_input_dim)?,
             // Rule-B axis-0 partials scratch — sized to fit largest consumer.
             axis0_partials: GpuBuffer::zeros(

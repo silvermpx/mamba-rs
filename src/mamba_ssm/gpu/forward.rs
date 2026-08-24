@@ -349,7 +349,13 @@ impl GpuMambaScratch {
             d_b_local: GpuBuffer::zeros(stream, bt * bc_rows * d_state)?,
             d_c_local: GpuBuffer::zeros(stream, bt * bc_rows * d_state)?,
             d_d_local: GpuBuffer::zeros(stream, batch * d_inner)?,
-            d_a_log_local: GpuBuffer::zeros(stream, batch * d_inner * d_state)?,
+            // The fold backward writes ONE partial row per chunk
+            // ([b * n_chunks, di * ds], walk order); the sequential
+            // route uses the first [b, di * ds] prefix as before.
+            d_a_log_local: GpuBuffer::zeros(
+                stream,
+                batch * dims.seq_len.div_ceil(super::launch::SCAN_CHUNK).max(1) * d_inner * d_state,
+            )?,
             d_b_reduced: GpuBuffer::zeros(stream, bt * d_state)?,
             d_c_reduced: GpuBuffer::zeros(stream, bt * d_state)?,
             // Discarded dx for input_proj backward

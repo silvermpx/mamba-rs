@@ -129,10 +129,20 @@ fn m1_scan_bwd_output_hashes() {
     let d_b_fold = DtypedBuf::zeros(&ctx.stream, bt * (di / SCAN_BWD_DGROUP) * ds, dtype).unwrap();
     let d_c_fold = DtypedBuf::zeros(&ctx.stream, bt * (di / SCAN_BWD_DGROUP) * ds, dtype).unwrap();
     let d_d_local = GpuBuffer::zeros(&ctx.stream, b * di).unwrap();
-    let d_a_log_local = GpuBuffer::zeros(&ctx.stream, b * di * ds).unwrap();
+    let nc_fold = t
+        .div_ceil(mamba_rs::mamba_ssm::gpu::launch::SCAN_CHUNK)
+        .max(1);
+    // Fold writes one partial row per chunk; hashed after a host fold in
+    // the same walk order (bit-equal to the retired accumulator).
+    let mut d_a_log_local = GpuBuffer::zeros(&ctx.stream, b * nc_fold * di * ds).unwrap();
     ctx.stream.synchronize().unwrap();
 
     for (route, fold) in [("fold_slim", true), ("ungrouped_full", false)] {
+        // Distinct layouts share this buffer across arms (fold writes
+        // chunk-slot rows with =, the ungrouped kernel accumulates the
+        // per-sample prefix with +=) - reset between arms.
+        d_a_log_local.zero(&ctx.stream).unwrap();
+        ctx.stream.synchronize().unwrap();
         let mut bld = ctx.stream.launch_builder(if fold {
             k.ssm_parallel_bwd_fold_typed.get(dtype)
         } else {
@@ -148,6 +158,7 @@ fn m1_scan_bwd_output_hashes() {
         let ddp = dpar.cached_ptr();
         let dyp = d_y.cached_ptr();
         let ddel = d_delta.cached_ptr();
+        let dp_raw = delta.cached_ptr();
         let dup = d_u.cached_ptr();
         let dbl = if fold {
             d_b_fold.cached_ptr()
@@ -170,6 +181,11 @@ fn m1_scan_bwd_output_hashes() {
         bld.arg(&ddp);
         bld.arg(&dyp);
         bld.arg(&ddel);
+        if fold {
+            // The fold takes the PRE-softplus dt right after its output
+            // slot (it emits the raw-dt gradient inline).
+            bld.arg(&dp_raw);
+        }
         bld.arg(&dup);
         bld.arg(&dbl);
         bld.arg(&dcl);
@@ -204,7 +220,7 @@ fn m1_scan_bwd_output_hashes() {
             &ctx,
             &[
                 ("d_D_local", &d_d_local, b * di),
-                ("d_a_log_local", &d_a_log_local, b * di * ds),
+                ("d_a_log_local", &d_a_log_local, b * nc_fold * di * ds),
             ],
         );
         // Typed (bf16) outputs hash through their raw f32 upcast download.

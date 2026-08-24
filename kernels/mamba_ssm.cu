@@ -826,6 +826,31 @@ extern "C" __global__ void ssm_reduce_d_D(
 // per the precision rules in DEFINE_SSM_BACKWARD_LOCAL_BWD.)
 
 // Reduce d_a_log: d_a_log_out[d*ds+n] = sum_b(d_a_log_local[b*di*ds + d*ds + n])
+// Chunk-partial variant for the fold backward: partials arrive as
+// [batch * n_chunks, d_inner * d_state] rows written in the walk order
+// (descending time). The inner fold runs the slots of one sample first
+// - reproducing the old per-sample accumulator chain - and only then
+// adds across the batch, exactly the association the accumulate-then-
+// reduce pair produced.
+extern "C" __global__ void ssm_reduce_d_a_log_chunks(
+    float* d_a_log_out,         // [d_inner * d_state] accumulated
+    const float* partials,      // [batch * n_chunks * d_inner * d_state]
+    int batch, int n_chunks, int d_inner, int d_state
+) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int total = d_inner * d_state;
+    if (idx >= total) return;
+    float sum = 0.0f;
+    for (int b = 0; b < batch; b++) {
+        float acc = 0.0f;
+        for (int c = 0; c < n_chunks; c++) {
+            acc += partials[(b * n_chunks + c) * total + idx];
+        }
+        sum += acc;
+    }
+    d_a_log_out[idx] += sum;
+}
+
 extern "C" __global__ void ssm_reduce_d_a_log(
     float* d_a_log_out,         // [d_inner * d_state] accumulated
     const float* d_a_log_local, // [batch * d_inner * d_state]
