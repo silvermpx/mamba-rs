@@ -336,6 +336,13 @@ pub struct MambaKernels {
     pub grad_clip_coef_f32: CudaFunction,
     /// `scale_grads_f32` with the factor read from device memory.
     pub scale_grads_dev_f32: CudaFunction,
+    /// Region twin of `grad_sumsq_partial_f32`: fixed-grid f64 partials
+    /// over a per-layer two-block region (a strided column stripe plus a
+    /// contiguous vector) of the flat arena.
+    pub grad_region_sumsq_partial_f32: CudaFunction,
+    /// Region twin of `scale_grads_dev_f32`: scales ONLY the described
+    /// region by the device-resident clip coefficient.
+    pub grad_region_scale_dev_f32: CudaFunction,
 
     // -- AdamW optimizer --
     /// Fused AdamW step on f32 master weights + f32 optimizer state.
@@ -816,6 +823,8 @@ impl MambaKernels {
             grad_sumsq_partial_f32: get("grad_sumsq_partial_f32")?,
             grad_clip_coef_f32: get("grad_clip_coef_f32")?,
             scale_grads_dev_f32: get("scale_grads_dev_f32")?,
+            grad_region_sumsq_partial_f32: get("grad_region_sumsq_partial_f32")?,
+            grad_region_scale_dev_f32: get("grad_region_scale_dev_f32")?,
 
             // AdamW
             adamw_step_f32: get("adamw_step_f32")?,

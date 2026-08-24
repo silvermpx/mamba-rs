@@ -195,6 +195,16 @@ pub struct BackwardOpts {
     /// fold; without it the option is ignored).
     /// [`BackwardMetrics::optimizer_stepped`] reports the skip.
     pub step_skip_above: Option<f32>,
+    /// `Some(c)`: before the global clip, clip the Mamba-3 CONTROL
+    /// channels (the dd_dt/dd_A/trap/angle columns of every layer's
+    /// in_proj gradient plus dt_bias) to their own max norm `c`. Those
+    /// 80-of-1648 columns carry the only gradients whose magnitude
+    /// scales with the sequence length; without a separate bound one
+    /// resonant page rescales the ENTIRE arena through the global clip
+    /// and starves the representational columns. Honored by the M3 f32
+    /// and mixed lanes; the M1 lanes ignore it (their dt path has no
+    /// such route).
+    pub control_clip_max_norm: Option<f32>,
 }
 
 impl BackwardOpts {
@@ -214,6 +224,14 @@ impl BackwardOpts {
     /// global norm exceeds `t`. See [`BackwardOpts::step_skip_above`].
     pub fn with_step_skip_above(mut self, t: f32) -> Self {
         self.step_skip_above = Some(t);
+        self
+    }
+
+    /// Clip the Mamba-3 control-channel gradients to their own max norm
+    /// before the global clip. See
+    /// [`BackwardOpts::control_clip_max_norm`].
+    pub fn with_control_clip_max_norm(mut self, c: f32) -> Self {
+        self.control_clip_max_norm = Some(c);
         self
     }
 }

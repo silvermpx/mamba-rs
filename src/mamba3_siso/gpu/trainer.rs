@@ -17,7 +17,9 @@ use crate::mamba_ssm::gpu::buffers::{GpuBuffer, GpuByteBuffer};
 use crate::mamba_ssm::gpu::context::GpuCtx;
 use crate::mamba_ssm::gpu::device::GpuDevice;
 use crate::mamba_ssm::gpu::dtype::WeightDtype;
-use crate::mamba_ssm::gpu::grad_clip::{alloc_partials, clip_grads_device, scale_grads};
+use crate::mamba_ssm::gpu::grad_clip::{
+    GradRegionGeom, alloc_partials, clip_grads_device, clip_region_device, scale_grads,
+};
 use crate::mamba_ssm::gpu::graph_capture::capture_into_graph;
 use crate::mamba_ssm::gpu::loss_scaler::{
     DynamicLossScaler, OverflowFlag, UnscaleFactor, check_inf_nan_gpu, scale_grads_skip_gpu,
@@ -310,7 +312,7 @@ impl Mamba3Trainer {
             Trainer3Inner::F32(t) => scale_grads(&t.ctx, &mut t.grads.flat, inv_w)?,
             Trainer3Inner::Mixed(t) => scale_grads(&t.ctx, &mut t.grads.flat, inv_w)?,
         }
-        self.apply_step_with(clip, opts.step_skip_above)
+        self.apply_step_full(clip, opts.step_skip_above, opts.control_clip_max_norm)
     }
 
     /// Borrow the flat f32 gradient arena — the single contiguous buffer
@@ -350,6 +352,17 @@ impl Mamba3Trainer {
         clip_max_norm: Option<f32>,
         step_skip_above: Option<f32>,
     ) -> Result<BackwardMetrics, String> {
+        self.apply_step_full(clip_max_norm, step_skip_above, None)
+    }
+
+    /// [`Self::apply_step_with`] plus the Mamba-3 control-channel clip
+    /// (see [`BackwardOpts::control_clip_max_norm`]).
+    pub fn apply_step_full(
+        &mut self,
+        clip_max_norm: Option<f32>,
+        step_skip_above: Option<f32>,
+        control_clip_max_norm: Option<f32>,
+    ) -> Result<BackwardMetrics, String> {
         if matches!(self.dtype(), WeightDtype::F16) {
             return Err(
                 "apply_step is not defined for f16: the loss-scaler protocol (overflow \
@@ -365,7 +378,7 @@ impl Mamba3Trainer {
                          backward_step(accumulate_only = true) first"
                         .into());
                 }
-                t.apply_step_inner(clip_max_norm, step_skip_above)
+                t.apply_step_inner(clip_max_norm, step_skip_above, control_clip_max_norm)
             }
             Trainer3Inner::Mixed(t) => {
                 if !t.grads_dirty {
@@ -373,7 +386,7 @@ impl Mamba3Trainer {
                          backward_step(accumulate_only = true) first"
                         .into());
                 }
-                t.apply_step_inner(clip_max_norm, step_skip_above)
+                t.apply_step_inner(clip_max_norm, step_skip_above, control_clip_max_norm)
             }
         }
     }
@@ -584,6 +597,34 @@ impl Mamba3Trainer {
         if let Trainer3Inner::Mixed(ref mut t) = self.inner {
             t.load_scaler_state(scale, growth_tracker);
         }
+    }
+}
+
+/// The CONTROL region of the M3 grad arena: the dd_dt/dd_A/trap/angle
+/// column stripe of every layer's in_proj gradient plus dt_bias — the
+/// only gradients whose magnitude scales with the sequence length. The
+/// stripe length is derived as `ip - (3*nh + na)` so B/C sizing changes
+/// cannot desync it from the split order.
+fn m3_control_region_geom(cfg: &Mamba3Config, input_dim: usize) -> GradRegionGeom {
+    let dm = cfg.d_model;
+    let di = cfg.d_inner();
+    let ds = cfg.d_state;
+    let nh = cfg.nheads();
+    let ip = cfg.in_proj_out_dim();
+    let na = cfg.num_rope_angles();
+    let ctrl_len = 3 * nh + na;
+    let ctrl0 = ip - ctrl_len;
+    let per_layer = dm + dm * ip + nh + ds + ds + nh * ds + nh * ds + nh + di + di * dm;
+    let layer0 = input_dim * dm + dm;
+    GradRegionGeom {
+        n_layers: cfg.n_layers as i32,
+        layer_stride: per_layer as i32,
+        a_off: (layer0 + dm + ctrl0) as i32,
+        a_rows: dm as i32,
+        a_cols: ctrl_len as i32,
+        a_row_stride: ip as i32,
+        b_off: (layer0 + dm + dm * ip) as i32,
+        b_len: nh as i32,
     }
 }
 
@@ -1255,7 +1296,11 @@ impl Mamba3TrainerMixed {
                 overflow_skipped: None,
             })
         } else {
-            self.apply_step_inner(opts.clip_max_norm, opts.step_skip_above)
+            self.apply_step_inner(
+                opts.clip_max_norm,
+                opts.step_skip_above,
+                opts.control_clip_max_norm,
+            )
         }
     }
 
@@ -1267,7 +1312,22 @@ impl Mamba3TrainerMixed {
         &mut self,
         clip_max_norm: Option<f32>,
         step_skip_above: Option<f32>,
+        control_clip_max_norm: Option<f32>,
     ) -> Result<BackwardMetrics, String> {
+        // Control-channel clip FIRST: the T-scaled dt/A/trap/angle
+        // gradients get their own bound so a resonant page cannot
+        // rescale the whole arena through the global clip below.
+        if let Some(cb) = control_clip_max_norm {
+            let geom = m3_control_region_geom(&self.cfg, self.dims.mamba_input_dim);
+            clip_region_device(
+                &self.ctx,
+                &mut self.grads.flat,
+                &mut self.clip_partials,
+                &mut self.clip_scratch,
+                geom,
+                cb,
+            )?;
+        }
         let grad_norm = match clip_max_norm {
             Some(c) => Some(self.apply_clip(c)?),
             None => None,
@@ -1816,7 +1876,11 @@ impl Mamba3TrainerF32 {
                 overflow_skipped: None,
             })
         } else {
-            self.apply_step_inner(opts.clip_max_norm, opts.step_skip_above)
+            self.apply_step_inner(
+                opts.clip_max_norm,
+                opts.step_skip_above,
+                opts.control_clip_max_norm,
+            )
         }
     }
 
@@ -1828,7 +1892,22 @@ impl Mamba3TrainerF32 {
         &mut self,
         clip_max_norm: Option<f32>,
         step_skip_above: Option<f32>,
+        control_clip_max_norm: Option<f32>,
     ) -> Result<BackwardMetrics, String> {
+        // Control-channel clip FIRST: the T-scaled dt/A/trap/angle
+        // gradients get their own bound so a resonant page cannot
+        // rescale the whole arena through the global clip below.
+        if let Some(cb) = control_clip_max_norm {
+            let geom = m3_control_region_geom(&self.cfg, self.dims.mamba_input_dim);
+            clip_region_device(
+                &self.ctx,
+                &mut self.grads.flat,
+                &mut self.clip_partials,
+                &mut self.clip_scratch,
+                geom,
+                cb,
+            )?;
+        }
         let grad_norm = match clip_max_norm {
             Some(c) => Some(self.apply_clip(c)?),
             None => None,

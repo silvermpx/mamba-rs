@@ -76,5 +76,82 @@ extern "C" __global__ void grad_clip_coef_f32(
     coef_out[0] = coef < 1.0 ? (float)coef : 1.0f;
 }
 
+// Two-block per-layer REGION variants of the pair above: block A is a
+// rows x cols stripe with a row stride (a column slice of a row-major
+// matrix), block B a contiguous vector; both repeat every layer_stride
+// elements for n_layers layers. The region norm rides the same fixed
+// geometry, f64 partials and ordered fold as the global one - the
+// region clip is part of the same determinism contract.
+
+extern "C" __global__ void grad_region_sumsq_partial_f32(
+    double* __restrict__ partials,
+    const float* __restrict__ g,
+    int n_layers, int layer_stride,
+    int a_off, int a_rows, int a_cols, int a_row_stride,
+    int b_off, int b_len
+) {
+    __shared__ double smem[GCLIP_THREADS];
+    const int per_layer = a_rows * a_cols + b_len;
+    const long long n = (long long)n_layers * per_layer;
+    double acc = 0.0;
+    const long long stride = (long long)GCLIP_BLOCKS * GCLIP_THREADS;
+    for (long long v = (long long)blockIdx.x * GCLIP_THREADS + threadIdx.x; v < n;
+         v += stride) {
+        int l = (int)(v / per_layer);
+        int r = (int)(v % per_layer);
+        int off;
+        if (r < a_rows * a_cols) {
+            int row = r / a_cols;
+            int col = r % a_cols;
+            off = l * layer_stride + a_off + row * a_row_stride + col;
+        } else {
+            off = l * layer_stride + b_off + (r - a_rows * a_cols);
+        }
+        double x = (double)g[off];
+        acc += x * x;
+    }
+    smem[threadIdx.x] = acc;
+    __syncthreads();
+    for (int s = GCLIP_THREADS / 2; s > 0; s >>= 1) {
+        if (threadIdx.x < s) {
+            smem[threadIdx.x] += smem[threadIdx.x + s];
+        }
+        __syncthreads();
+    }
+    if (threadIdx.x == 0) {
+        partials[blockIdx.x] = smem[0];
+    }
+}
+
+// Region scaling by the device-resident coefficient grad_clip_coef_f32
+// produced - same index mapping as the region sum, same
+// multiply-by-exactly-1.0 no-op contract when the gate did not fire.
+extern "C" __global__ void grad_region_scale_dev_f32(
+    float* __restrict__ g,
+    const float* __restrict__ coef,   // [1]
+    int n_layers, int layer_stride,
+    int a_off, int a_rows, int a_cols, int a_row_stride,
+    int b_off, int b_len
+) {
+    const float c = coef[0];
+    const int per_layer = a_rows * a_cols + b_len;
+    const long long n = (long long)n_layers * per_layer;
+    const long long stride = (long long)GCLIP_BLOCKS * GCLIP_THREADS;
+    for (long long v = (long long)blockIdx.x * GCLIP_THREADS + threadIdx.x; v < n;
+         v += stride) {
+        int l = (int)(v / per_layer);
+        int r = (int)(v % per_layer);
+        int off;
+        if (r < a_rows * a_cols) {
+            int row = r / a_cols;
+            int col = r % a_cols;
+            off = l * layer_stride + a_off + row * a_row_stride + col;
+        } else {
+            off = l * layer_stride + b_off + (r - a_rows * a_cols);
+        }
+        g[off] *= c;
+    }
+}
+
 #undef GCLIP_THREADS
 #undef GCLIP_BLOCKS

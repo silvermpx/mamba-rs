@@ -163,6 +163,114 @@ pub fn clip_grads_device(
     Ok(host[1])
 }
 
+/// Geometry of a per-layer two-block region of a flat grad arena:
+/// block A is an `a_rows x a_cols` stripe starting at `a_off` with row
+/// stride `a_row_stride` (a column slice of a row-major matrix), block
+/// B a contiguous `b_len` vector at `b_off`; both repeat every
+/// `layer_stride` elements for `n_layers` layers. Offsets are absolute
+/// arena element offsets for layer 0.
+#[derive(Clone, Copy, Debug)]
+pub struct GradRegionGeom {
+    pub n_layers: i32,
+    pub layer_stride: i32,
+    pub a_off: i32,
+    pub a_rows: i32,
+    pub a_cols: i32,
+    pub a_row_stride: i32,
+    pub b_off: i32,
+    pub b_len: i32,
+}
+
+/// Region twin of [`clip_grads_device`]: deterministic L2 norm over the
+/// described region, PyTorch clip coefficient against `max_norm`, and
+/// in-place scaling of ONLY that region — three back-to-back launches,
+/// one host download of the pre-clip region norm at the end. Same bit
+/// contract as the global clip (ordered f64 fold; coefficient exactly
+/// 1.0 is a bitwise no-op).
+pub fn clip_region_device(
+    ctx: &GpuCtx,
+    grads_flat: &mut GpuBuffer,
+    partials: &mut GpuByteBuffer,
+    scratch: &mut GpuBuffer,
+    geom: GradRegionGeom,
+    max_norm: f32,
+) -> Result<f32, String> {
+    assert_eq!(
+        partials.len_bytes(),
+        GRAD_CLIP_PARTIALS * std::mem::size_of::<f64>(),
+        "grad-clip partials buffer has the wrong size"
+    );
+    assert_eq!(
+        scratch.len(),
+        2,
+        "grad-clip scratch must hold exactly [coef, norm]"
+    );
+    let fixed = LaunchConfig {
+        grid_dim: (GRAD_CLIP_PARTIALS as u32, 1, 1),
+        block_dim: (GRAD_CLIP_THREADS, 1, 1),
+        shared_mem_bytes: 0,
+    };
+    // Stage 1: fixed-grid region sum of squares.
+    {
+        let dst = partials.cached_ptr();
+        let src = grads_flat.cached_ptr();
+        let mut b = ctx
+            .stream
+            .launch_builder(&ctx.kernels.grad_region_sumsq_partial_f32);
+        b.arg(&dst);
+        b.arg(&src);
+        b.arg(&geom.n_layers);
+        b.arg(&geom.layer_stride);
+        b.arg(&geom.a_off);
+        b.arg(&geom.a_rows);
+        b.arg(&geom.a_cols);
+        b.arg(&geom.a_row_stride);
+        b.arg(&geom.b_off);
+        b.arg(&geom.b_len);
+        unsafe { b.launch(fixed) }.map_err(|e| format!("grad_region_sumsq_partial_f32: {e:?}"))?;
+    }
+    // Stage 2: the SAME ordered fold as the global clip.
+    {
+        let coef_ptr = scratch.cached_ptr();
+        let norm_ptr = coef_ptr + std::mem::size_of::<f32>() as u64;
+        let part_ptr = partials.cached_ptr();
+        let np = GRAD_CLIP_PARTIALS as i32;
+        let mut b = ctx.stream.launch_builder(&ctx.kernels.grad_clip_coef_f32);
+        b.arg(&coef_ptr);
+        b.arg(&norm_ptr);
+        b.arg(&part_ptr);
+        b.arg(&np);
+        b.arg(&max_norm);
+        let cfg = LaunchConfig {
+            grid_dim: (1, 1, 1),
+            block_dim: (1, 1, 1),
+            shared_mem_bytes: 0,
+        };
+        unsafe { b.launch(cfg) }.map_err(|e| format!("grad_clip_coef_f32 (region): {e:?}"))?;
+    }
+    // Stage 3: scale ONLY the region by the device-resident coefficient.
+    {
+        let coef_ptr = scratch.cached_ptr();
+        let mut b = ctx
+            .stream
+            .launch_builder(&ctx.kernels.grad_region_scale_dev_f32);
+        b.arg(grads_flat.inner_mut());
+        b.arg(&coef_ptr);
+        b.arg(&geom.n_layers);
+        b.arg(&geom.layer_stride);
+        b.arg(&geom.a_off);
+        b.arg(&geom.a_rows);
+        b.arg(&geom.a_cols);
+        b.arg(&geom.a_row_stride);
+        b.arg(&geom.b_off);
+        b.arg(&geom.b_len);
+        unsafe { b.launch(fixed) }.map_err(|e| format!("grad_region_scale_dev_f32: {e:?}"))?;
+    }
+    let mut host = [0.0f32; 2];
+    scratch.download(&ctx.stream, &mut host)?;
+    Ok(host[1])
+}
+
 /// In-place multiply of the flat grad arena by `factor` (the clip
 /// coefficient). Reuses the AMP `scale_grads_f32` kernel.
 pub fn scale_grads(ctx: &GpuCtx, grads_flat: &mut GpuBuffer, factor: f32) -> Result<(), String> {

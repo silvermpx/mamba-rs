@@ -1,5 +1,46 @@
 # Changelog
 
+## 0.6.6 (2026-08-25)
+
+Training-stability release for small-batch Mamba-3 runs. No math or
+checkpoint-format changes: forward and backward outputs are bit-identical
+to 0.6.5; the additions are optimizer-tail policies, off by default.
+
+### Added
+
+- `BackwardOpts::step_skip_above`: on the applying call, a window whose
+  pre-clip global gradient norm exceeds the threshold is discarded whole -
+  no Adam advance, no weight update, the arena re-zeroes on the next
+  backward. Small-batch Mamba-3 training meets rare inputs whose
+  sequence-length-scaled dt-route gradients detonate (norms three orders
+  of magnitude above baseline); a huge-batch recipe averages such windows
+  away, a batch-2 recipe must be allowed to refuse them. Honored by the
+  f32 and mixed lanes of both backbones and the single-world dist path;
+  f16 keeps its own loss-scaler protocol.
+- `BackwardOpts::control_clip_max_norm` plus `clip_region_device`: an
+  optional separate clip for the Mamba-3 CONTROL channels (the
+  dd_dt/dd_A/trap/angle columns of every layer's in_proj gradient and
+  dt_bias) ahead of the global clip. Those columns carry the only
+  gradients that scale with the sequence length; without their own bound
+  one resonant input rescales the entire arena through the global clip
+  and starves the representational columns. The region fold rides the
+  same fixed-grid f64-partial ordered reduction as the global clip and
+  is covered by a unit that pins the region norm, the scaled region and
+  the untouched complement.
+- `Mamba3Trainer::apply_step_full` exposes both policies on the split
+  apply path used by gradient reducers.
+
+### Measurements and verification
+
+At the production classifier shape (d_model 384, 24 layers, bf16,
+T 4621, batch 2 x accum 8) cold Mamba-3 window gradient norms measure
+27-237 (median 78) against a Mamba-1 baseline near 1; a clip bound of
+1.0 rescaled every step by that norm and froze learning at the class
+prior, while a bound calibrated to the measured scale trains: val
+soft-CE 2.48 -> 1.86 over a 20-epoch probe with zero discarded
+windows. The full suite passes with the new region-clip unit; all
+prior digests are unchanged (the policies default off).
+
 ## 0.6.5 (2026-08-24)
 
 Correctness release for the Mamba-3 mixed-precision training lane.
