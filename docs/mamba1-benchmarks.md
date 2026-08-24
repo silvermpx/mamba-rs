@@ -19,14 +19,14 @@ Parallel prefill rides the deterministic GEMM tiers
 
 Shape: B=1, T=4621, d_model=384, 24 layers, f32 weights, cuBLAS+TF32
 (the production serve tier); one page = one prefill + one 1.5 KB pooled
-download. Bit-identical outputs across the whole 0.6.3 -> 0.6.4 wave
+download. Bit-identical outputs across 0.6.3 -> 0.6.4
 (16-cell prefill hash gate).
 
 | lane | 0.6.3 | 0.6.4 |
 |---|---|---|
-| pooled prefill, graph replay | 29.3 ms/page (34 pages/s) | **10.8 ms/page (92 pages/s)** |
-| pooled prefill, eager | - | 10.8 ms/page |
-| full-temporal prefill, eager | - | 11.5 ms/page |
+| pooled prefill, graph replay | 29.34 ms/page (34.1 pages/s) | **10.83 ms/page (92.4 pages/s)** |
+| pooled prefill, eager | 29.43 ms/page | 11.14 ms/page |
+| full-temporal prefill, eager | 30.10 ms/page | 11.53 ms/page |
 
 Main levers: T-tiled nosave conv (the serial per-channel walk left 146
 of 170 SMs idle at B=1), gating fused into the scan store, staged

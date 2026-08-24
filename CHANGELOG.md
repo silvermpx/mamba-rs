@@ -2,16 +2,28 @@
 
 ## 0.6.4 (2026-08-24)
 
-Inference performance release. Prism-serve shape (d_model 384, 24
-layers, B=1, T=4621, f32, cuBLAS+TF32, RTX 5090): pooled prefill
-29.3 -> 10.8 ms/page (34 -> 92 pages/s). Campaign-shape training
-(d_model 384, 24 layers, B=8, T=1300, bf16, batch-invariant +
-tensor-core tier): Mamba-1 131.5 -> 116.0 ms/step (-383 MB peak),
-Mamba-3 179.4 -> 165.2 ms/step. Checkpoint formats, the public API and
-the training bit family are unchanged - the nine run digests and the
-eleven Mamba-3 gradient hash arms equal the 0.6.3 baselines, and every
-inference output is bit-identical to 0.6.3 (pinned by the new 16-cell
-prefill hash gate and the decode digest).
+Inference performance release.
+
+Serving prefill, classifier page shape (d_model 384, 24 layers, B=1,
+T=4621, f32, cuBLAS+TF32, RTX 5090): **29.34 -> 10.83 ms/page,
+34.1 -> 92.4 pages/s**.
+
+Training step, campaign shape (d_model 384, 24 layers, B=8, T=1300,
+bf16, graph lane, RTX 5090): Mamba-1 131.5 -> **115.8 ms/step** on the
+batch-invariant + tensor-core tier and 169.0 -> **129.8 ms/step** on
+cuBLAS, with 383 MB less peak memory; Mamba-3 179.4 -> **165.7
+ms/step**. The Mamba-3 "before" is the 0.6.3 published figure; the same
+step re-measures at 184.6 ms on the 0.6.3 tree with this release's
+hardened timing harness (explicit syncs around the timed region), so
+the like-for-like delta is larger than the headline subtraction
+suggests.
+
+Checkpoint formats, the public API and the training bit family are
+unchanged: the nine run digests and the eleven Mamba-3 gradient hash
+arms equal their 0.6.3 baselines, and every inference output is
+bit-identical to 0.6.3 - pinned by a new 16-cell prefill hash gate
+(three GEMM tiers x cold and carried conv state) and a decode run
+digest. Full test park: 428 passed, 0 failed.
 
 ### Added
 
