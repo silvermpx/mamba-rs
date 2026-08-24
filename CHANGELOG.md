@@ -2,11 +2,11 @@
 
 ## 0.6.4 (2026-08-24)
 
-Faster inference and training, same bits everywhere. Checkpoint
-formats, the public API and the training bit family are unchanged:
-every run digest, gradient hash and inference output matches its
-0.6.3 baseline exactly. Measurement details are at the end of this
-entry.
+Inference performance release: a faster prefill serving chain, a
+Mamba-3 serving surface, and a training-step pass over both
+backbones. Checkpoint formats and the public API are unchanged;
+training and inference outputs match 0.6.3 on every recorded
+determinism baseline. Measurements are at the end of this entry.
 
 ### Added
 
