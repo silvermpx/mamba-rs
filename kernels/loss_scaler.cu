@@ -59,6 +59,24 @@ extern "C" __global__ void scale_grads_f32(
     }
 }
 
+// Device-scalar twin of `scale_grads_f32`: the factor is read from device
+// memory (the clip coefficient the norm kernel just wrote) instead of
+// being a launch argument, so the scaling pass can be enqueued without a
+// host round trip. Same grid, same element-to-thread mapping, same
+// multiply - bit-identical to passing the value by argument.
+extern "C" __global__ void scale_grads_dev_f32(
+    float* __restrict__ grads,
+    const float* __restrict__ scale,
+    int n
+) {
+    float s = scale[0];
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int stride = gridDim.x * blockDim.x;
+    for (int i = idx; i < n; i += stride) {
+        grads[i] *= s;
+    }
+}
+
 // CUDA-Graph-capturable variant of `scale_grads_f32` that conditionally
 // zeros the gradient based on an overflow flag from `check_inf_nan_f32`.
 //

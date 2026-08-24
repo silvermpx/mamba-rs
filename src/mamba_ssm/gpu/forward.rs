@@ -103,7 +103,6 @@ pub struct GpuMambaLayerActs {
     /// Gate branch before SiLU `[B*T*d_inner]`.
     pub gate_pre_silu: GpuBuffer,
     /// Gate branch after SiLU `[B*T*d_inner]`.
-    pub gate_post_silu: GpuBuffer,
 
     // -- F3: split --
     /// x branch after split `[B*T*d_inner]` (saved: the conv backward
@@ -182,7 +181,6 @@ impl GpuMambaBackboneActs {
                     post_norm: GpuBuffer::zeros(stream, bt * d_model)?,
                     // F3: Split + gate
                     gate_pre_silu: GpuBuffer::zeros(stream, bt * d_inner)?,
-                    gate_post_silu: GpuBuffer::zeros(stream, bt * d_inner)?,
                     // F4a: Conv1d + SiLU
                     x_branch: GpuBuffer::zeros(stream, bt * d_inner)?,
                     conv_states: GpuBuffer::zeros(stream, batch * d_inner * d_conv)?,
@@ -451,19 +449,20 @@ pub fn gpu_forward_mamba_layer(
     // ===================================================================
     // F3: Split x/gate + SiLU(gate)
     // ===================================================================
-    // split_gate_silu(x_branch, gate_pre_silu, gate_post_silu, proj, batch, d_inner)
+    // split_gate(x_branch, gate_pre_silu, proj, batch, d_inner) - the
+    // post-SiLU activation is no longer materialized; both consumers
+    // recompute it from gate_pre_silu (identical input, identical form).
     {
         let batch_i = bt as i32;
         let di_i = di as i32;
-        let mut builder = ctx.stream.launch_builder(&ctx.kernels.split_gate_silu);
+        let mut builder = ctx.stream.launch_builder(&ctx.kernels.split_gate);
         builder.arg(acts.x_branch.inner_mut());
         builder.arg(acts.gate_pre_silu.inner_mut());
-        builder.arg(acts.gate_post_silu.inner_mut());
         builder.arg(scratch.proj_flat.inner());
         builder.arg(&batch_i);
         builder.arg(&di_i);
         unsafe { builder.launch(grid_1d(bt * di)) }
-            .map_err(|e| format!("split_gate_silu mamba: {:?}", e))?;
+            .map_err(|e| format!("split_gate mamba: {:?}", e))?;
     }
 
     // ===================================================================
@@ -659,17 +658,17 @@ pub fn gpu_forward_mamba_layer(
     }
 
     // ===================================================================
-    // F4e: Gating — gated = y * gate_post_silu
+    // F4e: Gating — gated = y * SiLU(gate_pre), recomputed
     // ===================================================================
     {
         let n = (bt * di) as i32;
-        let mut builder = ctx.stream.launch_builder(&ctx.kernels.elementwise_mul);
+        let mut builder = ctx.stream.launch_builder(&ctx.kernels.gate_mul_silu);
         builder.arg(acts.gated.inner_mut());
         builder.arg(acts.y.inner());
-        builder.arg(acts.gate_post_silu.inner());
+        builder.arg(acts.gate_pre_silu.inner());
         builder.arg(&n);
         unsafe { builder.launch(grid_1d(bt * di)) }
-            .map_err(|e| format!("elementwise_mul gating mamba: {:?}", e))?;
+            .map_err(|e| format!("gate_mul_silu mamba: {:?}", e))?;
     }
 
     // ===================================================================

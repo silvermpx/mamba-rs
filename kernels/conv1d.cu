@@ -751,7 +751,12 @@ extern "C" __global__ void conv1d_bwd_dx_tiled_##SUFFIX(                      \
     const TY* __restrict__ d_u,                                               \
     const TY* __restrict__ post_conv,                                         \
     const float* __restrict__ weight,                                         \
-    int batch, int T_, int d_inner, int d_conv                                \
+    int batch, int T_, int d_inner, int d_conv,                               \
+    /* Row stride and column offset of the destination: the backward     \
+       writes the x half of d_proj [bt, 2*d_inner] in place, so the      \
+       separate concat pass is gone. Values and their order are          \
+       unchanged - only the store address moves. */                      \
+    int out_stride, int out_offset                                            \
 ) {                                                                           \
     int idx = blockIdx.x * blockDim.x + threadIdx.x;                          \
     int total = batch * d_inner;                                              \
@@ -800,7 +805,7 @@ extern "C" __global__ void conv1d_bwd_dx_tiled_##SUFFIX(                      \
             }                                                                  \
             carry[carry_len - 1] = d_conv_out * weight[d * d_conv];            \
         }                                                                      \
-        d_x_branch[bt_di] = FROM_F(dxb);                                       \
+        d_x_branch[(b * T_ + t) * out_stride + out_offset + d] = FROM_F(dxb);  \
     }                                                                          \
 }
 

@@ -65,17 +65,24 @@ pub fn gpu_backward_mamba_layer(
     // ===================================================================
     // B2: Gating backward
     // ===================================================================
-    // gating_backward(d_y, d_gate_pre, d_gated, y, gate_pre, gate_post, n)
+    // gating_backward(d_y, d_gate_pre, d_gated, y, gate_pre, n) - the
+    // post-SiLU activation is recomputed inside the kernel.
     {
         let n = (bt * di) as i32;
         let mut builder = ctx.stream.launch_builder(&ctx.kernels.gating_backward);
+        let di_i = di as i32;
+        let proj_stride = (2 * di) as i32;
+        let gate_off = di as i32;
         builder.arg(scratch.d_y.inner_mut());
-        builder.arg(scratch.d_gate.inner_mut());
+        // Writes the gate half of d_proj directly.
+        builder.arg(scratch.d_proj.inner_mut());
         builder.arg(scratch.d_gated.inner());
         builder.arg(acts.y.inner());
         builder.arg(acts.gate_pre_silu.inner());
-        builder.arg(acts.gate_post_silu.inner());
         builder.arg(&n);
+        builder.arg(&di_i);
+        builder.arg(&proj_stride);
+        builder.arg(&gate_off);
         unsafe { builder.launch(grid_1d(bt * di)) }
             .map_err(|e| format!("gating_backward mamba: {:?}", e))?;
     }
@@ -377,7 +384,9 @@ pub fn gpu_backward_mamba_layer(
             let mut builder = ctx
                 .stream
                 .launch_builder(ctx.kernels.conv1d_bwd_dx_tiled_typed.get(f32k));
-            builder.arg(scratch.d_x_branch.inner_mut());
+            // Writes the x half of d_proj directly (stride 2*d_inner,
+            // offset 0) - the concat pass is gone.
+            builder.arg(scratch.d_proj.inner_mut());
             builder.arg(scratch.d_u.inner());
             builder.arg(acts.post_conv.inner());
             let cw_ptr = lw.conv1d_weight.cached_ptr();
@@ -386,6 +395,10 @@ pub fn gpu_backward_mamba_layer(
             builder.arg(&t_i);
             builder.arg(&di_i);
             builder.arg(&dc_i);
+            let proj_stride = (2 * di) as i32;
+            let x_off = 0i32;
+            builder.arg(&proj_stride);
+            builder.arg(&x_off);
             unsafe { builder.launch(super::launch::grid_conv_tiled(b, di, t)) }
                 .map_err(|e| format!("conv1d_bwd_dx_tiled mamba: {:?}", e))?;
 
@@ -455,19 +468,8 @@ pub fn gpu_backward_mamba_layer(
     // ===================================================================
     // B7: Batch in_proj backward
     // ===================================================================
-    // Concat d_x_branch || d_gate -> d_proj
-    {
-        let bt_i = bt as i32;
-        let di_i = di as i32;
-        let mut builder = ctx.stream.launch_builder(&ctx.kernels.concat_halves);
-        builder.arg(scratch.d_proj.inner_mut());
-        builder.arg(scratch.d_x_branch.inner());
-        builder.arg(scratch.d_gate.inner());
-        builder.arg(&bt_i);
-        builder.arg(&di_i);
-        unsafe { builder.launch(grid_1d(bt * di)) }
-            .map_err(|e| format!("concat_halves bwd mamba: {:?}", e))?;
-    }
+    // d_proj is already complete: the gating backward wrote its gate
+    // half and the conv dx pass wrote its x half, both in place.
 
     gpu_sgemm_backward_grad_raw(
         ctx,

@@ -142,6 +142,11 @@ pub struct MambaKernels {
     pub scatter_add_cols: CudaFunction,
     /// Split in_proj output into x_branch and gate with SiLU on gate.
     pub split_gate_silu: CudaFunction,
+    /// Split in_proj output into x_branch and gate WITHOUT materializing
+    /// SiLU(gate) - the training path recomputes it at both consumers.
+    pub split_gate: CudaFunction,
+    /// Gating forward that recomputes SiLU(gate) from the saved pre-SiLU.
+    pub gate_mul_silu: CudaFunction,
     /// Backward through gating: `y = ssm_out * gate_silu`.
     pub gating_backward: CudaFunction,
     /// Concatenate two half-vectors into one (inverse of split).
@@ -224,6 +229,10 @@ pub struct MambaKernels {
     /// Staged-write twin of the typed t-major gather.
     pub gather_bc_cols_tmajor_tiled_typed: TypedKernel,
     pub split_gate_silu_typed: TypedKernel,
+    /// Typed split without the post-SiLU activation.
+    pub split_gate_typed: TypedKernel,
+    /// Typed gating forward recomputing SiLU(gate).
+    pub gate_mul_silu_typed: TypedKernel,
     pub softplus_copy_typed: TypedKernel,
     pub ssm_step_fwd_typed: TypedKernel,
     /// SSM step with fused B/C gather from xdbl. Inference-only: replaces
@@ -312,6 +321,12 @@ pub struct MambaKernels {
     /// reduction with f64 accumulators (kernels/grad_clip.cu). The host sums
     /// the fixed 512 partials in order; scaling reuses `scale_grads_f32`.
     pub grad_sumsq_partial_f32: CudaFunction,
+    /// Single-thread fold of the 512 partials into the PRE-clip norm and
+    /// the clip coefficient, on device - removes the host drain between
+    /// the norm and the scaling pass.
+    pub grad_clip_coef_f32: CudaFunction,
+    /// `scale_grads_f32` with the factor read from device memory.
+    pub scale_grads_dev_f32: CudaFunction,
 
     // -- AdamW optimizer --
     /// Fused AdamW step on f32 master weights + f32 optimizer state.
@@ -727,6 +742,8 @@ impl MambaKernels {
             gather_bc_cols_tmajor_tiled: get("gather_bc_cols_tmajor_tiled")?,
             scatter_add_cols: get("scatter_add_cols")?,
             split_gate_silu: get("split_gate_silu")?,
+            split_gate: get("split_gate")?,
+            gate_mul_silu: get("gate_mul_silu")?,
             gating_backward: get("gating_backward")?,
             concat_halves: get("concat_halves")?,
             residual_add: get("residual_add")?,
@@ -787,6 +804,8 @@ impl MambaKernels {
             scale_grads_f32: get("scale_grads_f32")?,
             scale_grads_skip_f32: get("scale_grads_skip_f32")?,
             grad_sumsq_partial_f32: get("grad_sumsq_partial_f32")?,
+            grad_clip_coef_f32: get("grad_clip_coef_f32")?,
+            scale_grads_dev_f32: get("scale_grads_dev_f32")?,
 
             // AdamW
             adamw_step_f32: get("adamw_step_f32")?,
@@ -819,6 +838,8 @@ impl MambaKernels {
             gather_bc_cols_tmajor_typed: load_typed("gather_bc_cols_tmajor")?,
             gather_bc_cols_tmajor_tiled_typed: load_typed("gather_bc_cols_tmajor_tiled")?,
             split_gate_silu_typed: load_typed("split_gate_silu")?,
+            split_gate_typed: load_typed("split_gate")?,
+            gate_mul_silu_typed: load_typed("gate_mul_silu")?,
             softplus_copy_typed: load_typed("softplus_copy")?,
             ssm_step_fwd_typed: load_typed("ssm_step_forward")?,
             ssm_step_fwd_gather_typed: load_typed("ssm_step_forward_gather")?,

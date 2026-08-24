@@ -165,18 +165,23 @@ pub fn gpu_backward_mamba_layer_mixed(
         let n = (bt * di) as i32;
         let mut bld = ctx.stream.launch_builder(k.gating_bwd_typed.get(dtype));
         let dy = scratch.d_y.cached_ptr();
-        let dg = scratch.d_gate.cached_ptr();
+        // Gate gradient lands directly in the d_proj gate half.
+        let dg = scratch.d_proj.cached_ptr();
         let dgin = scratch.d_gated.cached_ptr();
         let y = acts.y.cached_ptr();
         let gp = acts.gate_pre_silu.cached_ptr();
-        let gs = acts.gate_post_silu.cached_ptr();
         bld.arg(&dy);
         bld.arg(&dg);
         bld.arg(&dgin);
         bld.arg(&y);
         bld.arg(&gp);
-        bld.arg(&gs);
         bld.arg(&n);
+        let di_i = di as i32;
+        let proj_stride = (2 * di) as i32;
+        let gate_off = di as i32;
+        bld.arg(&di_i);
+        bld.arg(&proj_stride);
+        bld.arg(&gate_off);
         unsafe { bld.launch(grid_1d(bt * di)) }.map_err(|e| format!("gating_bwd_typed: {e:?}"))?;
     }
 
@@ -572,7 +577,8 @@ pub fn gpu_backward_mamba_layer_mixed(
         let bp_ptr = axis0_base + bias_offset_bytes;
         // Stage 1 split (S-conv): tiled d_x + historical-order dw/db.
         {
-            let dxb = scratch.d_x_branch.cached_ptr();
+            // Writes the x half of d_proj directly - concat pass gone.
+            let dxb = scratch.d_proj.cached_ptr();
             let du = scratch.d_u.cached_ptr();
             let pc = acts.post_conv.cached_ptr();
             let cs = acts.conv_states.cached_ptr();
@@ -588,6 +594,10 @@ pub fn gpu_backward_mamba_layer_mixed(
             bld.arg(&t_i);
             bld.arg(&di_i);
             bld.arg(&dc_i);
+            let proj_stride = (2 * di) as i32;
+            let x_off = 0i32;
+            bld.arg(&proj_stride);
+            bld.arg(&x_off);
             unsafe { bld.launch(crate::mamba_ssm::gpu::launch::grid_conv_tiled(b, di, t)) }
                 .map_err(|e| format!("conv1d_bwd_dx_tiled mixed: {e:?}"))?;
 
@@ -656,24 +666,9 @@ pub fn gpu_backward_mamba_layer_mixed(
     }
 
     // ─── B7: in_proj backward ────────────────────────────────────────
-    // Concat(d_x_branch, d_gate) → d_proj [bt, 2*di] — layout matches
-    // forward's split_gate_silu which reads proj[b, 0..di] for x_branch and
-    // proj[b, di..2*di] for gate.
-    {
-        let bt_i = bt as i32;
-        let di_i = di as i32;
-        let mut bld = ctx.stream.launch_builder(k.concat_halves_typed.get(dtype));
-        let dst = scratch.d_proj.cached_ptr();
-        let fh = scratch.d_x_branch.cached_ptr();
-        let sh = scratch.d_gate.cached_ptr();
-        bld.arg(&dst);
-        bld.arg(&fh);
-        bld.arg(&sh);
-        bld.arg(&bt_i);
-        bld.arg(&di_i);
-        unsafe { bld.launch(grid_1d(bt * di)) }
-            .map_err(|e| format!("concat_halves_typed bwd: {e:?}"))?;
-    }
+    // d_proj [bt, 2*di] is already complete: the gating backward wrote
+    // the gate half and the conv dx pass wrote the x half, both in the
+    // layout the forward split reads (x in [0..di), gate in [di..2di)).
     // in_proj dW — typed GemmEx.
     gpu_sgemm_backward_dw_grad_typed(
         ctx,

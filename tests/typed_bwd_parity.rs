@@ -261,19 +261,25 @@ fn assert_grad_close(
 
 // ─── gating_backward ────────────────────────────────────────────────
 
+/// The kernel recomputes SiLU(gate) from `gate_pre` and writes the gate
+/// gradient through a (row stride, column offset) pair - production
+/// passes the d_proj geometry; this arm keeps the contiguous layout by
+/// making the row the whole buffer.
 fn run_gating_bwd(
     ctx: &GpuCtx,
     n: usize,
     d_gated: &DtypedBuf,
     y: &DtypedBuf,
     gate_pre: &DtypedBuf,
-    gate_post: &DtypedBuf,
     dtype: WeightDtype,
 ) -> (DtypedBuf, DtypedBuf) {
     let d_y = DtypedBuf::zeros(&ctx.stream, n, dtype).unwrap();
     let d_gate_pre = DtypedBuf::zeros(&ctx.stream, n, dtype).unwrap();
     ctx.stream.synchronize().unwrap(); // race-fix: alloc_zeros before launch
     let n_i = n as i32;
+    let d_inner_i = n as i32;
+    let stride_i = n as i32;
+    let off_i = 0i32;
     let mut bld = ctx
         .stream
         .launch_builder(ctx.kernels.gating_bwd_typed.get(dtype));
@@ -282,14 +288,15 @@ fn run_gating_bwd(
     let dg_ptr = d_gated.cached_ptr();
     let y_ptr = y.cached_ptr();
     let gp_ptr = gate_pre.cached_ptr();
-    let gs_ptr = gate_post.cached_ptr();
     bld.arg(&dy_ptr);
     bld.arg(&dgp_ptr);
     bld.arg(&dg_ptr);
     bld.arg(&y_ptr);
     bld.arg(&gp_ptr);
-    bld.arg(&gs_ptr);
     bld.arg(&n_i);
+    bld.arg(&d_inner_i);
+    bld.arg(&stride_i);
+    bld.arg(&off_i);
     unsafe { bld.launch(grid_1d(n)) }.unwrap();
     ctx.stream.synchronize().unwrap();
     (d_y, d_gate_pre)
@@ -303,17 +310,12 @@ fn gating_bwd_bf16_matches_f32() {
     let d_gated_f = deterministic_random(n, 0xA1);
     let y_f = deterministic_random(n, 0xA2);
     let gate_pre_f = deterministic_random(n, 0xA3);
-    let gate_post_f: Vec<f32> = gate_pre_f
-        .iter()
-        .map(|&z| z * (1.0 / (1.0 + (-z).exp())))
-        .collect();
 
     // f32 oracle.
     let dg32 = upload_typed(&ctx.stream, &d_gated_f, WeightDtype::F32);
     let y32 = upload_typed(&ctx.stream, &y_f, WeightDtype::F32);
     let gp32 = upload_typed(&ctx.stream, &gate_pre_f, WeightDtype::F32);
-    let gs32 = upload_typed(&ctx.stream, &gate_post_f, WeightDtype::F32);
-    let (dy_ref, dgate_ref) = run_gating_bwd(&ctx, n, &dg32, &y32, &gp32, &gs32, WeightDtype::F32);
+    let (dy_ref, dgate_ref) = run_gating_bwd(&ctx, n, &dg32, &y32, &gp32, WeightDtype::F32);
     let dy_ref_v = download_typed(&ctx.stream, &dy_ref, WeightDtype::F32);
     let dgate_ref_v = download_typed(&ctx.stream, &dgate_ref, WeightDtype::F32);
 
@@ -321,9 +323,7 @@ fn gating_bwd_bf16_matches_f32() {
     let dg_bf = upload_typed(&ctx.stream, &d_gated_f, WeightDtype::Bf16);
     let y_bf = upload_typed(&ctx.stream, &y_f, WeightDtype::Bf16);
     let gp_bf = upload_typed(&ctx.stream, &gate_pre_f, WeightDtype::Bf16);
-    let gs_bf = upload_typed(&ctx.stream, &gate_post_f, WeightDtype::Bf16);
-    let (dy_bf, dgate_bf) =
-        run_gating_bwd(&ctx, n, &dg_bf, &y_bf, &gp_bf, &gs_bf, WeightDtype::Bf16);
+    let (dy_bf, dgate_bf) = run_gating_bwd(&ctx, n, &dg_bf, &y_bf, &gp_bf, WeightDtype::Bf16);
     let dy_bf_v = download_typed(&ctx.stream, &dy_bf, WeightDtype::Bf16);
     let dgate_bf_v = download_typed(&ctx.stream, &dgate_bf, WeightDtype::Bf16);
 
@@ -343,8 +343,7 @@ fn gating_bwd_bf16_matches_f32() {
     let dg_h = upload_typed(&ctx.stream, &d_gated_f, WeightDtype::F16);
     let y_h = upload_typed(&ctx.stream, &y_f, WeightDtype::F16);
     let gp_h = upload_typed(&ctx.stream, &gate_pre_f, WeightDtype::F16);
-    let gs_h = upload_typed(&ctx.stream, &gate_post_f, WeightDtype::F16);
-    let (dy_h, dgate_h) = run_gating_bwd(&ctx, n, &dg_h, &y_h, &gp_h, &gs_h, WeightDtype::F16);
+    let (dy_h, dgate_h) = run_gating_bwd(&ctx, n, &dg_h, &y_h, &gp_h, WeightDtype::F16);
     let dy_h_v = download_typed(&ctx.stream, &dy_h, WeightDtype::F16);
     let dgate_h_v = download_typed(&ctx.stream, &dgate_h, WeightDtype::F16);
 

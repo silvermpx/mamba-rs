@@ -17,9 +17,7 @@ use crate::mamba_ssm::gpu::buffers::{GpuBuffer, GpuByteBuffer};
 use crate::mamba_ssm::gpu::context::GpuCtx;
 use crate::mamba_ssm::gpu::device::GpuDevice;
 use crate::mamba_ssm::gpu::dtype::WeightDtype;
-use crate::mamba_ssm::gpu::grad_clip::{
-    GRAD_CLIP_PARTIALS, alloc_partials, global_grad_norm, scale_grads,
-};
+use crate::mamba_ssm::gpu::grad_clip::{alloc_partials, clip_grads_device, scale_grads};
 use crate::mamba_ssm::gpu::graph_capture::capture_into_graph;
 use crate::mamba_ssm::gpu::loss_scaler::{
     DynamicLossScaler, OverflowFlag, UnscaleFactor, check_inf_nan_gpu, scale_grads_skip_gpu,
@@ -613,7 +611,8 @@ pub(crate) struct Mamba3TrainerMixed {
     grads_dirty: bool,
     /// Fixed-size f64 partials for the deterministic global grad norm.
     clip_partials: GpuByteBuffer,
-    clip_partials_host: Vec<f64>,
+    /// `[coef, norm]` - the device-side clip fold's output.
+    clip_scratch: GpuBuffer,
 
     // f16 AMP loss scaler (None for bf16). See M1 trainer for the protocol.
     scaler: Option<DynamicLossScaler>,
@@ -741,6 +740,7 @@ impl Mamba3TrainerMixed {
             .map_err(|e| format!("sync: {e:?}"))?;
 
         let clip_partials = alloc_partials(&ctx.stream)?;
+        let clip_scratch = GpuBuffer::zeros(&ctx.stream, 2)?;
 
         Ok(Self {
             ctx,
@@ -767,7 +767,7 @@ impl Mamba3TrainerMixed {
             split_forward_pending: false,
             grads_dirty: false,
             clip_partials,
-            clip_partials_host: vec![0.0; GRAD_CLIP_PARTIALS],
+            clip_scratch,
             scaler,
             overflow_flag,
             d_temporal_scaled,
@@ -1352,22 +1352,23 @@ impl Mamba3TrainerMixed {
     /// Compute the deterministic global grad norm, apply the clip
     /// coefficient when needed, and return the PRE-clip norm.
     fn apply_clip(&mut self, max_norm: f32) -> Result<f32, String> {
-        let norm = global_grad_norm(
+        // Device-side fold: norm, coefficient and scaling are enqueued
+        // back to back, so the host blocks once with the whole sequence
+        // already in flight instead of draining the stream between the
+        // norm and the scale. Bit-identical to the host path.
+        let norm = clip_grads_device(
             &self.ctx,
-            &self.grads.flat,
+            &mut self.grads.flat,
             &mut self.clip_partials,
-            &mut self.clip_partials_host,
+            &mut self.clip_scratch,
+            max_norm,
         )?;
         if !norm.is_finite() {
             return Err(format!(
                 "clip_max_norm: non-finite global grad norm ({norm})"
             ));
         }
-        let coef = max_norm as f64 / (norm + 1e-6);
-        if coef < 1.0 {
-            scale_grads(&self.ctx, &mut self.grads.flat, coef as f32)?;
-        }
-        Ok(norm as f32)
+        Ok(norm)
     }
 
     /// Download master weights to CPU for checkpointing.
@@ -1450,7 +1451,8 @@ pub(crate) struct Mamba3TrainerF32 {
     grads_dirty: bool,
     /// Fixed-size f64 partials for the deterministic global grad norm.
     clip_partials: GpuByteBuffer,
-    clip_partials_host: Vec<f64>,
+    /// `[coef, norm]` - the device-side clip fold's output.
+    clip_scratch: GpuBuffer,
 }
 
 impl Mamba3TrainerF32 {
@@ -1535,6 +1537,7 @@ impl Mamba3TrainerF32 {
             .map_err(|e| format!("sync: {e:?}"))?;
 
         let clip_partials = alloc_partials(&ctx.stream)?;
+        let clip_scratch = GpuBuffer::zeros(&ctx.stream, 2)?;
 
         Ok(Self {
             ctx,
@@ -1559,7 +1562,7 @@ impl Mamba3TrainerF32 {
             split_forward_pending: false,
             grads_dirty: false,
             clip_partials,
-            clip_partials_host: vec![0.0; GRAD_CLIP_PARTIALS],
+            clip_scratch,
         })
     }
 
@@ -1810,22 +1813,23 @@ impl Mamba3TrainerF32 {
     /// Compute the deterministic global grad norm, apply the clip
     /// coefficient when needed, and return the PRE-clip norm.
     fn apply_clip(&mut self, max_norm: f32) -> Result<f32, String> {
-        let norm = global_grad_norm(
+        // Device-side fold: norm, coefficient and scaling are enqueued
+        // back to back, so the host blocks once with the whole sequence
+        // already in flight instead of draining the stream between the
+        // norm and the scale. Bit-identical to the host path.
+        let norm = clip_grads_device(
             &self.ctx,
-            &self.grads.flat,
+            &mut self.grads.flat,
             &mut self.clip_partials,
-            &mut self.clip_partials_host,
+            &mut self.clip_scratch,
+            max_norm,
         )?;
         if !norm.is_finite() {
             return Err(format!(
                 "clip_max_norm: non-finite global grad norm ({norm})"
             ));
         }
-        let coef = max_norm as f64 / (norm + 1e-6);
-        if coef < 1.0 {
-            scale_grads(&self.ctx, &mut self.grads.flat, coef as f32)?;
-        }
-        Ok(norm as f32)
+        Ok(norm)
     }
 
     pub fn snapshot_master(&self) -> Result<Mamba3Weights, String> {

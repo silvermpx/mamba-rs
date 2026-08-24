@@ -81,6 +81,88 @@ pub fn global_grad_norm(
     Ok(sum.sqrt())
 }
 
+/// Device-side clip: launches the sum-of-squares reduction, folds the
+/// partials into `(norm, coef)` on device, and scales the arena by that
+/// coefficient - three back-to-back launches with NO host round trip
+/// between them. Returns the PRE-clip norm, downloaded once at the end
+/// (the caller needs it for the metric and for the non-finite check);
+/// the difference from the old path is that the scaling pass is already
+/// enqueued when the host blocks, instead of the GPU idling through a
+/// sync, a 4 KB download and a 512-iteration host fold.
+///
+/// Bit contract: identical ordered f64 fold, identical sqrt, identical
+/// coefficient, identical element-to-thread mapping in the scaling pass;
+/// a coefficient of exactly 1.0 makes the pass a bitwise no-op, matching
+/// the old conditional skip.
+pub fn clip_grads_device(
+    ctx: &GpuCtx,
+    grads_flat: &mut GpuBuffer,
+    partials: &mut GpuByteBuffer,
+    scratch: &mut GpuBuffer,
+    max_norm: f32,
+) -> Result<f32, String> {
+    assert_eq!(
+        partials.len_bytes(),
+        GRAD_CLIP_PARTIALS * std::mem::size_of::<f64>(),
+        "grad-clip partials buffer has the wrong size"
+    );
+    assert_eq!(
+        scratch.len(),
+        2,
+        "grad-clip scratch must hold exactly [coef, norm]"
+    );
+    let n_elems = grads_flat.len();
+    let n = n_elems as i32;
+    // Stage 1: fixed-grid sum of squares (geometry is contractual).
+    {
+        let dst = partials.cached_ptr();
+        let src = grads_flat.cached_ptr();
+        let mut b = ctx
+            .stream
+            .launch_builder(&ctx.kernels.grad_sumsq_partial_f32);
+        b.arg(&dst);
+        b.arg(&src);
+        b.arg(&n);
+        let cfg = LaunchConfig {
+            grid_dim: (GRAD_CLIP_PARTIALS as u32, 1, 1),
+            block_dim: (GRAD_CLIP_THREADS, 1, 1),
+            shared_mem_bytes: 0,
+        };
+        unsafe { b.launch(cfg) }.map_err(|e| format!("grad_sumsq_partial_f32: {e:?}"))?;
+    }
+    // Stage 2: ordered fold -> (coef, norm), single thread.
+    {
+        let coef_ptr = scratch.cached_ptr();
+        let norm_ptr = coef_ptr + std::mem::size_of::<f32>() as u64;
+        let part_ptr = partials.cached_ptr();
+        let np = GRAD_CLIP_PARTIALS as i32;
+        let mut b = ctx.stream.launch_builder(&ctx.kernels.grad_clip_coef_f32);
+        b.arg(&coef_ptr);
+        b.arg(&norm_ptr);
+        b.arg(&part_ptr);
+        b.arg(&np);
+        b.arg(&max_norm);
+        let cfg = LaunchConfig {
+            grid_dim: (1, 1, 1),
+            block_dim: (1, 1, 1),
+            shared_mem_bytes: 0,
+        };
+        unsafe { b.launch(cfg) }.map_err(|e| format!("grad_clip_coef_f32: {e:?}"))?;
+    }
+    // Stage 3: scale by the device-resident coefficient.
+    {
+        let coef_ptr = scratch.cached_ptr();
+        let mut b = ctx.stream.launch_builder(&ctx.kernels.scale_grads_dev_f32);
+        b.arg(grads_flat.inner_mut());
+        b.arg(&coef_ptr);
+        b.arg(&n);
+        unsafe { b.launch(grid_1d(n_elems)) }.map_err(|e| format!("scale_grads_dev_f32: {e:?}"))?;
+    }
+    let mut host = [0.0f32; 2];
+    scratch.download(&ctx.stream, &mut host)?;
+    Ok(host[1])
+}
+
 /// In-place multiply of the flat grad arena by `factor` (the clip
 /// coefficient). Reuses the AMP `scale_grads_f32` kernel.
 pub fn scale_grads(ctx: &GpuCtx, grads_flat: &mut GpuBuffer, factor: f32) -> Result<(), String> {

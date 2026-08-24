@@ -43,5 +43,38 @@ extern "C" __global__ void grad_sumsq_partial_f32(
     }
 }
 
+// Device-side clip coefficient: folds the ordered f64 partial sum, the
+// sqrt and the PyTorch clip_grad_norm_ coefficient into ONE single-thread
+// kernel so the host never has to drain the stream between the norm and
+// the scaling pass. The fold MUST stay serial and ascending - it is the
+// same association the host loop performed, and the norm is part of the
+// determinism contract.
+//
+// Bit contract vs the host path: identical f64 adds in identical order,
+// IEEE sqrt, the same f64 divide and the same `coef < 1.0` gate. When the
+// gate does not fire the coefficient is exactly 1.0f and the scaling pass
+// is a bitwise no-op (x * 1.0f == x for every finite, infinite and NaN
+// bit pattern), so always scaling matches the old conditional skip.
+// A non-finite norm yields coef = 1.0 (NaN < 1.0 is false), leaving the
+// gradients untouched exactly as the host early-return did before the
+// caller raises the error.
+extern "C" __global__ void grad_clip_coef_f32(
+    float* __restrict__ coef_out,        // [1] clip coefficient
+    float* __restrict__ norm_out,        // [1] PRE-clip global L2 norm
+    const double* __restrict__ partials, // [GCLIP_BLOCKS]
+    int n_partials,
+    float max_norm
+) {
+    if (blockIdx.x != 0 || threadIdx.x != 0) return;
+    double sum = 0.0;
+    for (int i = 0; i < n_partials; i++) {
+        sum += partials[i];
+    }
+    double norm = sqrt(sum);
+    norm_out[0] = (float)norm;
+    double coef = (double)max_norm / (norm + 1e-6);
+    coef_out[0] = coef < 1.0 ? (float)coef : 1.0f;
+}
+
 #undef GCLIP_THREADS
 #undef GCLIP_BLOCKS

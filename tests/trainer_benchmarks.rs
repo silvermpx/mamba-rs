@@ -945,6 +945,12 @@ fn bench_bwd_kernels_isolated() {
         bld.arg(&ti);
         bld.arg(&dii);
         bld.arg(&dci);
+        // Contiguous destination for the isolated arm (production passes
+        // the d_proj geometry: stride 2*d_inner, offset 0).
+        let stride_i = dii;
+        let off_i = 0i32;
+        bld.arg(&stride_i);
+        bld.arg(&off_i);
         unsafe { bld.launch(grid_conv_tiled(b, di, t)) }.unwrap();
     });
 
@@ -954,7 +960,6 @@ fn bench_bwd_kernels_isolated() {
     let d_gate = DtypedBuf::zeros(&ctx.stream, bt * di, dtype).unwrap();
     let yb = DtypedBuf::zeros(&ctx.stream, bt * di, dtype).unwrap();
     let gp = DtypedBuf::zeros(&ctx.stream, bt * di, dtype).unwrap();
-    let gs = DtypedBuf::zeros(&ctx.stream, bt * di, dtype).unwrap();
     time_it("gating_bwd", &|| {
         let n = (bt * di) as i32;
         let mut bld = ctx.stream.launch_builder(k.gating_bwd_typed.get(dtype));
@@ -963,14 +968,19 @@ fn bench_bwd_kernels_isolated() {
         let a3 = d_gated.cached_ptr();
         let a4 = yb.cached_ptr();
         let a5 = gp.cached_ptr();
-        let a6 = gs.cached_ptr();
         bld.arg(&a1);
         bld.arg(&a2);
         bld.arg(&a3);
         bld.arg(&a4);
         bld.arg(&a5);
-        bld.arg(&a6);
         bld.arg(&n);
+        // Contiguous destination for the isolated arm (production passes
+        // the d_proj geometry: stride 2*d_inner, offset d_inner).
+        let dii2 = (bt * di) as i32;
+        let off_i = 0i32;
+        bld.arg(&dii2);
+        bld.arg(&dii2);
+        bld.arg(&off_i);
         unsafe { bld.launch(grid_1d(bt * di)) }.unwrap();
     });
 
