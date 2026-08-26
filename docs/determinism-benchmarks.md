@@ -57,14 +57,42 @@ deterministic tier on the same shape (0.4.2: BK=64 staging):
 | 4096, 1536, 3072 | 1131.8 → 352.8 (3.21×) | 1450.4 → 311.8 (4.65×) | 1212.7 → 301.5 (4.02×) |
 | 2048, 768, 512 | 112.7 → 17.6 (**6.40×**) | 138.4 → 24.8 (5.59×) | 93.6 → 26.7 (3.51×) |
 
-84.1 µs at M2048 K768 N3072 ≈ 115 TFLOPS bf16 (~32 % of Ada dense
-peak); the M4096 forward reaches ~144 TFLOPS in an isolated sweep
-(`step0` instrumentation: 83.7 µs / 267.8 µs on the two shapes). BK=64 staging (0.4.2)
-halves the per-CTA barrier/wait_group boundaries vs the 0.4.1 BK=32
-kernels and bought +8–11 % on top of the 0.4.1 numbers; deeper
-pipelining was measured FLAT and 2-CTA/SM occupancy is register-blocked
-(166 regs vs the 128 ceiling), so the remaining gap to cuBLAS-TC class
-(~210–230 TFLOPS) needs fragment-reuse restructuring, not staging depth.
+84.1 µs at M2048 K768 N3072 ≈ 115 TFLOPS bf16; the M4096 forward
+reaches ~144 TFLOPS in an isolated sweep (`step0` instrumentation:
+83.7 µs / 267.8 µs on the two shapes). BK=64 staging (0.4.2) halves the
+per-CTA barrier/wait_group boundaries vs the 0.4.1 BK=32 kernels and
+bought +8–11 % on top of the 0.4.1 numbers; deeper pipelining was
+measured FLAT.
+
+### The measured denominator (2026-08-26, `tests/gemm_denominator_probe.rs`)
+
+Every earlier "% of peak" claim in this section divided by unmeasured
+numbers; the probe replaced them with three measurements taken on the
+box itself:
+
+- **Tensor-pipe ceiling: 335.9 TFLOPS** bf16 with f32 accumulation
+  (null-memory mma.sync issue-rate kernel, register fragments only).
+  The f16-accumulate twin runs at 0.95x — f32 accumulation does NOT
+  halve tensor throughput on this part, so both earlier candidate
+  ceilings (a 182 TFLOPS halved-accumulate model and an unsourced
+  "cuBLAS-TC class ~210–230") are retired.
+- **cuBLAS tensor-core bf16, measured here for the first time**
+  (the crate's fast arm): 118–158 TFLOPS across six fat training
+  shapes — 35–47 % of the pipe.
+- **The deterministic Tile128 against it, event-timed on the same
+  shapes**: at parity (91–93 %) where K is large and the CTA grid
+  fills whole waves (M2048 K768 N3072: 133.6 vs 146.4; M4096 K1536
+  N3072: 148.0 vs 158.4), and 1.35–1.8x behind on the small-K and
+  wave-cliff shapes (M4096 K768 N3072: 80.8 vs 144.9; M2048 K1536
+  N1536: 80.9 vs 141.9; M2048 K2304 N768: 87.5 vs 118.0; M2048 K768
+  N2304: 82.7 vs 131.0).
+
+So the real, addressable gap is not a uniform kernel-quality deficit:
+it concentrates where the wave count cliffs (cuBLAS does not feel the
+cliff; a deterministic kernel without split-K must cure it with tile
+geometry) and where K is small (fewer slabs amortize less staging).
+Those two mechanisms — a constant-area fragment-reuse tile and
+wave-aware tile choice — are the program.
 
 ## Tile64 family — small/narrow shapes (bf16, µs)
 

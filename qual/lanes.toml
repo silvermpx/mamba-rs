@@ -41,6 +41,7 @@
 "gemm_bi_invariance_matrix" = "contract"
 "gemm_bi_tc" = "contract"
 "gemm_bi_typed_parity" = "contract"
+"gemm_denominator_probe" = "record"
 "gemm_ladder_sweep" = "record"
 "gpu_batch_test" = "record"
 "gpu_bench_all" = "record"
