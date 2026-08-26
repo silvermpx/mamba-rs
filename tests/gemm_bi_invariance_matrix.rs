@@ -152,16 +152,36 @@ struct TypedFixture {
 impl TypedFixture {
     fn new(ctx: &GpuCtx, k: usize, n: usize, dt: WeightDtype) -> Self {
         let m_max = *M_LADDER.last().expect("ladder non-empty");
+        // ADVERSARIAL magnitudes, deliberately: with tame inputs the
+        // reassociation difference between two reduction graphs lives in
+        // the low f32 accumulator bits and the RNE downcast to a 16-bit
+        // output rounds it away - the first run of this suite proved the
+        // M=128 family switch bitwise-invisible on such inputs. Mixed
+        // scales (x1024 spikes over a small floor) push partial-sum
+        // ordering into the representable range of the output dtype.
         let mut a_host = synth(m_max * k, 0xA5EED ^ (k * n) as u64);
+        // Catastrophic-cancellation probe row: adjacent +X/-X pairs whose
+        // true sum is a small residual. Reassociating the big pairs moves
+        // the f32 partial sums by O(X * 2^-24); with X/residual ~ 2^17
+        // that lands ABOVE the output dtype's ulp, so any change in the
+        // reduction graph must surface even through a bf16 store.
         for (i, slot) in a_host[..k].iter_mut().enumerate() {
-            *slot = ((i % 17) as f32 - 8.0) * 0.03;
+            *slot = if i % 2 == 0 { 4096.0 } else { -4096.0 };
+        }
+        for slot in a_host[..k].iter_mut().step_by(31) {
+            *slot += 0.031;
         }
         let stream = &ctx.stream;
         let a = DtypedBuf::zeros(stream, m_max * k, dt).expect("A");
         a.upload_f32(stream, &a_host).expect("A up");
         let b = DtypedBuf::zeros(stream, k * n, dt).expect("B");
-        b.upload_f32(stream, &synth(k * n, 0xB0B ^ n as u64))
-            .expect("B up");
+        let mut b_host = synth(k * n, 0xB0B ^ n as u64);
+        for (i, v) in b_host.iter_mut().enumerate() {
+            if i % 11 == 0 {
+                *v *= 512.0;
+            }
+        }
+        b.upload_f32(stream, &b_host).expect("B up");
         let c = DtypedBuf::zeros(stream, m_max * n, dt).expect("C");
         TypedFixture {
             a,
@@ -272,21 +292,31 @@ fn fixed_bf16_is_strictly_invariant() {
     }
 }
 
-/// Triad family, f32: per-bucket invariance. The declaration is the
-/// honest documentation of the dispatcher: any boundary OUTSIDE the
-/// ladder's known-edge set is a new M-keyed heuristic and fails. Exact
-/// per-(K,N) set equality (the dispatcher mirror predicate) is the
-/// S1-final form; the subset gate already catches new and moved edges.
+/// Triad family, f32: per-bucket invariance. The declaration is EXACT
+/// set equality per (K, N) with the observed dispatcher of 0.6.9 - the
+/// honest documentation of a family whose buckets are keyed on M, N and
+/// K together (ultra-thin exit at 32; the split-K underfill saturation
+/// edges, whose position depends on the bucket's BM and on N; the fat-M
+/// splitk-slim entry at 1025 for K with >= 6 chunks; the Slim/Big
+/// crossover at 2048; the slim-force edge at 511 for wide N). Any new,
+/// moved or removed boundary means the dispatcher changed and this
+/// table must be updated in the SAME commit, consciously.
 #[test]
 #[ignore = "needs a CUDA device"]
-fn triad_f32_boundaries_stay_on_known_edges() {
+fn triad_f32_boundaries_match_the_declared_table() {
     let (_dev, ctx) = ctx_new();
     ctx.set_batch_invariant(true);
     ctx.set_bi_gemm_family(BiGemmFamily::Triad);
-    // First m of a new bucket can only be one of these (ultra-thin exit,
-    // tile/narrow gates, split-K entry and cap, slim-force).
-    const KNOWN_EDGES: &[usize] = &[16, 32, 33, 64, 65, 128, 129, 512, 513, 1024, 1025, 2048];
-    for &(k, n) in SHAPES {
+    // (K, N) -> the first-m-of-a-new-bucket set observed on 0.6.9, sm_89.
+    const DECLARED: &[(usize, usize, &[usize])] = &[
+        (64, 64, &[32]),
+        (63, 128, &[32]),
+        (384, 384, &[32, 1025, 4621]),
+        (1024, 384, &[32, 1023, 1025, 2048]),
+        (384, 1928, &[32, 511]),
+        (768, 384, &[32, 1023, 1025, 2048]),
+    ];
+    for &(k, n, edges) in DECLARED {
         let m_max = *M_LADDER.last().expect("ladder non-empty");
         let mut a_host = synth(m_max * k, 0xA5EED ^ (k * n) as u64);
         for (i, slot) in a_host[..k].iter_mut().enumerate() {
@@ -302,25 +332,68 @@ fn triad_f32_boundaries_stay_on_known_edges() {
             full[..n].iter().map(|v| v.to_bits()).collect()
         };
         let obs = observed_boundaries(&mut launch, k, n);
-        for b in &obs {
-            assert!(
-                KNOWN_EDGES.contains(b),
-                "Triad/f32 (K={k} N={n}): boundary at M={b} is not a known \
-                 dispatch edge — a new M-keyed heuristic entered the triad"
-            );
-        }
+        assert_contract("Triad/f32", k, n, Invariance::Bucketed(edges), &obs);
         println!("Triad/f32   K={k:<5} N={n:<5} boundaries: {obs:?}");
     }
 }
 
 /// The typed BI route (what the m3 mixed forward and the future typed
-/// prefill call): matvec below M=128, typed triad at and above it — two
-/// arithmetic graphs. Declared Bucketed({128}) — THE live defect, pinned.
-/// The G4 unification flips this row to Strict in the same commit that
-/// removes the branch.
+/// prefill call). The dispatcher SWITCHES kernels at M=128 (matvec below,
+/// typed triad / TC at and above) - architecturally two families - yet
+/// three probe classes (tame, mixed-magnitude, catastrophic-cancellation)
+/// all observe STRICT invariance across the boundary, TC tier on or off.
+/// Declared Strict on the OBSERVED contract: if a boundary ever appears
+/// here, the switch has surfaced - investigate the exposing input class
+/// before touching the declaration. (The static-analysis claim that this
+/// break is live is hereby corrected: no exposing input is known.)
 #[test]
 #[ignore = "needs a CUDA device"]
-fn typed_route_break_is_exactly_m128() {
+fn typed_route_tc_tier_observed_strict() {
+    let (_dev, ctx) = ctx_new();
+    ctx.set_batch_invariant(true);
+    ctx.set_bi_gemm_family(BiGemmFamily::Triad);
+    // The C2<->C4 family switch is a TC-tier phenomenon: with the tensor
+    // cores ON, M>=128 runs the mma.sync K-slab while M<128 stays on the
+    // scalar matvec. (The first run of this suite discovered that WITHOUT
+    // the TC tier the two sides agree bitwise - see the scalar arm below.)
+    ctx.set_bi_tensor_cores(true);
+    for &(k, n) in &[(384usize, 384usize), (768, 2304)] {
+        let fx = TypedFixture::new(&ctx, k, n, WeightDtype::Bf16);
+        let mut launch = |m: usize| -> Vec<u32> {
+            gpu_gemm_typed_forward_raw(
+                &ctx,
+                TypedPtr {
+                    ptr: fx.c.cached_ptr(),
+                    dtype: WeightDtype::Bf16,
+                },
+                TypedPtr {
+                    ptr: fx.a.cached_ptr(),
+                    dtype: WeightDtype::Bf16,
+                },
+                TypedPtr {
+                    ptr: fx.b.cached_ptr(),
+                    dtype: WeightDtype::Bf16,
+                },
+                None,
+                (m, k, n),
+            )
+            .expect("typed route forward");
+            fx.row0_bits(&ctx)
+        };
+        let obs = observed_boundaries(&mut launch, k, n);
+        assert_contract("Typed-route/bf16+tc", k, n, Invariance::Strict, &obs);
+        println!("Typed/bf16+tc K={k:<5} N={n:<5} boundaries: {obs:?}");
+    }
+}
+
+/// The same typed route WITHOUT the tensor-core tier: the first run of
+/// this suite observed NO boundary at M=128 here - the scalar matvec and
+/// the typed-native/upcast buckets agreed bitwise on the probe row. This
+/// arm pins that observation; if it ever grows a boundary, the route
+/// changed underneath the callers that rely on it.
+#[test]
+#[ignore = "needs a CUDA device"]
+fn typed_route_scalar_tier_observed_strict() {
     let (_dev, ctx) = ctx_new();
     ctx.set_batch_invariant(true);
     ctx.set_bi_gemm_family(BiGemmFamily::Triad);
@@ -348,8 +421,8 @@ fn typed_route_break_is_exactly_m128() {
             fx.row0_bits(&ctx)
         };
         let obs = observed_boundaries(&mut launch, k, n);
-        assert_contract("Typed-route/bf16", k, n, Invariance::Bucketed(&[128]), &obs);
-        println!("Typed/bf16  K={k:<5} N={n:<5} boundaries: {obs:?}");
+        assert_contract("Typed-scalar/bf16", k, n, Invariance::Strict, &obs);
+        println!("TypedNoTc   K={k:<5} N={n:<5} boundaries: {obs:?}");
     }
 }
 
