@@ -9,6 +9,9 @@ use std::sync::Arc;
 
 /// All compiled Mamba-3 SISO CUDA kernels.
 pub struct Mamba3Kernels {
+    /// Identity of the compiled M3 module (NVRTC cache key); pinned by
+    /// the M3 graph guards.
+    pub module_identity: String,
     _module: Arc<CudaModule>,
 
     /// State-dimension capacity the kernels were compiled with (the
@@ -325,6 +328,7 @@ impl Mamba3Kernels {
         };
 
         let kernels = Self {
+            module_identity: key.clone(),
             state_cap,
             // Sequential SSM
             m3_step_fwd: get("m3_step_fwd")?,

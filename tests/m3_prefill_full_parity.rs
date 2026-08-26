@@ -211,6 +211,7 @@ fn m3_prefill_full_matches_trainer_forward() {
     graph
         .replay(
             &ctx,
+            &kernels,
             &gw,
             &gpu_input,
             &GpuMamba3StateBufs {

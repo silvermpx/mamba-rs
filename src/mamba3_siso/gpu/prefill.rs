@@ -1218,6 +1218,7 @@ impl Mamba3Prefill {
 /// replay the OLD kernels, which is a numeric-route swap the crate treats
 /// as a hard error.
 pub struct Mamba3PrefillGraph {
+    module_identity: String,
     graph: cudarc::driver::CudaGraph,
     flags_at_capture: crate::mamba_ssm::gpu::context::GemmRoute,
     input_ptr: CUptr,
@@ -1249,6 +1250,7 @@ impl Mamba3PrefillGraph {
         let last_hidden_ptr = last_hidden.cached_ptr();
         let weights_arenas = run.weights.arena_identity();
         let weights_dtype = run.weights.bulk_dtype();
+        let module_identity = run.kernels.module_identity.clone();
         let graph =
             crate::mamba_ssm::gpu::graph_capture::capture_into_graph(&run.ctx.stream, || {
                 prefill.run(run, states.reborrow(), last_hidden)
@@ -1268,6 +1270,7 @@ impl Mamba3PrefillGraph {
             last_hidden_ptr,
             weights_arenas,
             weights_dtype,
+            module_identity,
         })
     }
 
@@ -1279,11 +1282,19 @@ impl Mamba3PrefillGraph {
     pub fn replay(
         &self,
         ctx: &GpuCtx,
+        kernels: &Mamba3Kernels,
         weights: &dyn Mamba3WeightsView,
         mamba_input: &GpuBuffer,
         states: &GpuMamba3StateBufs<'_>,
         last_hidden: &GpuBuffer,
     ) -> Result<(), String> {
+        if kernels.module_identity != self.module_identity {
+            return Err(
+                "prefill graph replay refused: the kernels module differs from \
+                 the captured compile - the graph would run stale kernels"
+                    .to_string(),
+            );
+        }
         if weights.arena_identity() != self.weights_arenas
             || weights.bulk_dtype() != self.weights_dtype
         {
@@ -1330,6 +1341,7 @@ impl Mamba3PrefillGraph {
 /// input buffer, replay, download the 1.5 KB pooled sum, divide by T on
 /// the host.
 pub struct Mamba3PrefillPooledGraph {
+    module_identity: String,
     graph: cudarc::driver::CudaGraph,
     flags_at_capture: crate::mamba_ssm::gpu::context::GemmRoute,
     input_ptr: CUptr,
@@ -1370,6 +1382,7 @@ impl Mamba3PrefillPooledGraph {
         let pooled_ptr = pooled_sum.cached_ptr();
         let weights_arenas = run.weights.arena_identity();
         let weights_dtype = run.weights.bulk_dtype();
+        let module_identity = run.kernels.module_identity.clone();
         let graph =
             crate::mamba_ssm::gpu::graph_capture::capture_into_graph(&run.ctx.stream, || {
                 prefill.run_full(
@@ -1397,6 +1410,7 @@ impl Mamba3PrefillPooledGraph {
             pooled_ptr,
             weights_arenas,
             weights_dtype,
+            module_identity,
         })
     }
 
@@ -1404,11 +1418,19 @@ impl Mamba3PrefillPooledGraph {
     pub fn replay(
         &self,
         ctx: &GpuCtx,
+        kernels: &Mamba3Kernels,
         weights: &dyn Mamba3WeightsView,
         mamba_input: &GpuBuffer,
         states: &GpuMamba3StateBufs<'_>,
         pooled_sum: &GpuBuffer,
     ) -> Result<(), String> {
+        if kernels.module_identity != self.module_identity {
+            return Err(
+                "m3 pooled graph replay refused: the kernels module differs \
+                 from the captured compile"
+                    .to_string(),
+            );
+        }
         if weights.arena_identity() != self.weights_arenas
             || weights.bulk_dtype() != self.weights_dtype
         {

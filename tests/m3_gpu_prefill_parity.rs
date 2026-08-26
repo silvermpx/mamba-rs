@@ -397,7 +397,7 @@ fn gpu_prefill_graph_replay_is_bitwise() {
     let replay = |states: &mut GpuStates| {
         let bufs = states.bufs();
         graph
-            .replay(&rig.ctx, &gw, &gpu_input, &bufs, &last_hidden)
+            .replay(&rig.ctx, &rig.kernels, &gw, &gpu_input, &bufs, &last_hidden)
             .unwrap();
     };
     replay(&mut states);

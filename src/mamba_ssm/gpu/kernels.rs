@@ -48,6 +48,10 @@ impl HalfKernel {
 ///
 /// Kernels are compiled once via NVRTC at startup. Grouped by pipeline stage.
 pub struct MambaKernels {
+    /// Identity of the compiled module: the NVRTC cache key (source +
+    /// arch + options + toolchain). Graph guards pin it so a replay
+    /// cannot silently run kernels from a different compile.
+    pub module_identity: String,
     _module: Arc<CudaModule>,
 
     /// State-dimension capacity the kernels were compiled with (the
@@ -442,6 +446,12 @@ pub struct MambaKernels {
     /// Tensor-core NN forward (stage 5, `bi_tensor_cores` tier) — separate
     /// numeric contract (mma.sync f32 accumulate), static smem.
     pub sgemm_nn_tc_typed: HalfKernel,
+    /// The fixed family's inference ladder (kernels/gemm_bi_fixed.cu,
+    /// GBF namespace): bit-identical copies of the forward TC tiles,
+    /// owned by the inference kernel.
+    pub gemm_bi_nn_tc128_typed: HalfKernel,
+    pub gemm_bi_nn_tc64_typed: HalfKernel,
+    pub gemm_bi_nn_tc16_typed: HalfKernel,
     pub sgemm_tn_tc_typed: HalfKernel,
     pub sgemm_nt_tc_typed: HalfKernel,
     /// 64x64-tile TC twins (stage 5b): 128 threads / 4 warps per CTA,
@@ -713,6 +723,7 @@ impl MambaKernels {
         };
 
         Ok(Self {
+            module_identity: key.clone(),
             state_cap,
             // SSM
             ssm_step_fwd: get("ssm_step_forward")?,
@@ -985,6 +996,9 @@ impl MambaKernels {
             sgemm_nt_narrow_typed: load_half("sgemm_bi_nt_narrow")?,
             sgemm_nn_big_typed: load_half_dynsmem("sgemm_bi_nn_big", 34 * 1024)?,
             sgemm_nn_tc_typed: load_half_dynsmem("sgemm_bi_nn_tc", 75_776)?,
+            gemm_bi_nn_tc128_typed: load_half_dynsmem("gemm_bi_nn_tc128", 71_680)?,
+            gemm_bi_nn_tc64_typed: load_half("gemm_bi_nn_tc64")?,
+            gemm_bi_nn_tc16_typed: load_half("gemm_bi_nn_tc16")?,
             sgemm_tn_tc_typed: load_half_dynsmem("sgemm_bi_tn_tc", 75_776)?,
             sgemm_nt_tc_typed: load_half_dynsmem("sgemm_bi_nt_tc", 75_776)?,
             sgemm_nn_tc64_typed: load_half("sgemm_bi_nn_tc64")?,

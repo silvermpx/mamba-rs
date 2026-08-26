@@ -312,7 +312,7 @@ fn m3_pooled_page_bench_typed_vs_f32() {
         };
         for _ in 0..3 {
             graph
-                .replay(&ctx, view, &gpu_input, &states, &pooled)
+                .replay(&ctx, &kernels, view, &gpu_input, &states, &pooled)
                 .unwrap();
         }
         ctx.stream.synchronize().unwrap();
@@ -320,7 +320,7 @@ fn m3_pooled_page_bench_typed_vs_f32() {
         let t0 = Instant::now();
         for _ in 0..iters {
             graph
-                .replay(&ctx, view, &gpu_input, &states, &pooled)
+                .replay(&ctx, &kernels, view, &gpu_input, &states, &pooled)
                 .unwrap();
         }
         ctx.stream.synchronize().unwrap();

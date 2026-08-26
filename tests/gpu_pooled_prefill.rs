@@ -14,7 +14,7 @@ use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
 use mamba_rs::mamba_ssm::gpu::forward::GpuMambaDims;
 use mamba_rs::mamba_ssm::gpu::inference::GpuInferenceState;
 use mamba_rs::mamba_ssm::gpu::prefill::{
-    PrefillOutputs, PrefillRawInputs, gpu_forward_inference_prefill_from_raw,
+    PrefillOutputs, PrefillPooledGraph, PrefillRawInputs, gpu_forward_inference_prefill_from_raw,
     gpu_forward_inference_prefill_pooled_sum_from_raw,
 };
 use mamba_rs::mamba_ssm::gpu::weights::GpuMambaWeights;
@@ -186,7 +186,6 @@ fn pinned_staging_is_byte_transparent() {
 /// eager output bitwise, and 100 replays of the same page are all stable.
 #[test]
 fn pooled_graph_replays_bitwise() {
-    use mamba_rs::mamba_ssm::gpu::prefill::PrefillPooledGraph;
     let t = 333usize;
     let mut r = rig(t);
     let dm = r.dims.d_model;
@@ -221,7 +220,7 @@ fn pooled_graph_replays_bitwise() {
     )
     .expect("capture");
     for rep in 0..100 {
-        graph.launch(&r.ctx).expect("replay");
+        graph.launch(&r.ctx, &r.input, &pooled).expect("replay");
         let mut got = vec![0.0f32; dm];
         pooled.download(&r.ctx.stream, &mut got).unwrap();
         for (j, (a, b)) in eager.iter().zip(&got).enumerate() {
@@ -232,4 +231,91 @@ fn pooled_graph_replays_bitwise() {
             );
         }
     }
+}
+
+/// A captured pooled graph must refuse to replay after ANY numeric-route
+/// policy flip - the captured kernels belong to the route at capture.
+#[test]
+fn pooled_graph_refuses_route_drift() {
+    let mut r = rig(192);
+    let dm = r.dims.d_model;
+    let mut pooled = GpuBuffer::zeros(&r.ctx.stream, dm).unwrap();
+    let graph = PrefillPooledGraph::capture(
+        &r.ctx,
+        &mut pooled,
+        PrefillRawInputs {
+            input_flat: &r.input,
+            weights: &r.weights,
+            a_neg_all: &r.a_neg,
+        },
+        &mut r.state,
+        &mut r.scratch,
+    )
+    .expect("capture");
+
+    let flips: &[(&str, &dyn Fn(), &dyn Fn())] = &[
+        (
+            "batch_invariant",
+            &|| r.ctx.set_batch_invariant(!r.ctx.batch_invariant()),
+            &|| r.ctx.set_batch_invariant(!r.ctx.batch_invariant()),
+        ),
+        ("fast_gemm", &|| r.ctx.set_fast_gemm(true), &|| {
+            r.ctx.set_fast_gemm(false)
+        }),
+        (
+            "family",
+            &|| {
+                r.ctx
+                    .set_bi_gemm_family(mamba_rs::mamba_ssm::gpu::context::BiGemmFamily::Fixed)
+            },
+            &|| {
+                r.ctx
+                    .set_bi_gemm_family(mamba_rs::mamba_ssm::gpu::context::BiGemmFamily::Triad)
+            },
+        ),
+    ];
+    for (name, flip, restore) in flips {
+        flip();
+        let err = graph
+            .launch(&r.ctx, &r.input, &pooled)
+            .expect_err("route flip must refuse replay");
+        assert!(err.contains("GEMM flags"), "{name}: {err}");
+        restore();
+    }
+    // tf32 is part of the route too - and it is one-way on the handle,
+    // so it is the LAST flip (no restore possible).
+    r.ctx.disable_tf32();
+    let err = graph
+        .launch(&r.ctx, &r.input, &pooled)
+        .expect_err("tf32 flip must refuse replay");
+    assert!(err.contains("GEMM flags"), "tf32: {err}");
+}
+
+/// The buffer pins: replaying against a different pooled buffer must
+/// refuse (the graph writes the captured allocation, not the argument).
+#[test]
+fn pooled_graph_refuses_swapped_buffers() {
+    let mut r = rig(192);
+    let dm = r.dims.d_model;
+    let mut pooled = GpuBuffer::zeros(&r.ctx.stream, dm).unwrap();
+    let graph = PrefillPooledGraph::capture(
+        &r.ctx,
+        &mut pooled,
+        PrefillRawInputs {
+            input_flat: &r.input,
+            weights: &r.weights,
+            a_neg_all: &r.a_neg,
+        },
+        &mut r.state,
+        &mut r.scratch,
+    )
+    .expect("capture");
+    let other = GpuBuffer::zeros(&r.ctx.stream, dm).unwrap();
+    let err = graph
+        .launch(&r.ctx, &r.input, &other)
+        .expect_err("swapped pooled buffer must refuse");
+    assert!(err.contains("captured allocations"), "{err}");
+    graph
+        .launch(&r.ctx, &r.input, &pooled)
+        .expect("real buffers replay");
 }

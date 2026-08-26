@@ -299,6 +299,12 @@ pub fn gpu_forward_inference_prefill_pooled_sum_from_raw<W: MambaWeightsView>(
 pub struct PrefillPooledGraph {
     graph: cudarc::driver::CudaGraph,
     flags_at_capture: crate::mamba_ssm::gpu::context::GemmRoute,
+    // Buffer identity at capture: the graph baked these device pointers
+    // in, so a launch against reallocated buffers must refuse instead of
+    // silently writing the old allocations (the ABA class).
+    input_ptr: cudarc::driver::sys::CUdeviceptr,
+    pooled_ptr: cudarc::driver::sys::CUdeviceptr,
+    module_identity: String,
 }
 
 impl PrefillPooledGraph {
@@ -319,6 +325,9 @@ impl PrefillPooledGraph {
             weights,
             a_neg_all,
         } = inputs;
+        let input_ptr = input_flat.cached_ptr();
+        let pooled_ptr = pooled_sum.cached_ptr();
+        let module_identity = ctx.kernels.module_identity.clone();
         let graph = super::graph_capture::capture_into_graph(&ctx.stream, || {
             state.reset(&ctx.stream)?;
             gpu_forward_inference_prefill_pooled_sum_from_raw(
@@ -337,14 +346,24 @@ impl PrefillPooledGraph {
         Ok(Self {
             graph,
             flags_at_capture,
+            input_ptr,
+            pooled_ptr,
+            module_identity,
         })
     }
 
     /// Replay the captured page. The caller uploads the page into the
     /// capture-time `input_flat` buffer before, and downloads the
     /// capture-time `pooled_sum` buffer after (both transfers stay OUTSIDE
-    /// the graph).
-    pub fn launch(&self, ctx: &GpuCtx) -> Result<(), String> {
+    /// the graph). The buffers handed here must BE the captured
+    /// allocations - the graph launches into the captured pointers, so a
+    /// swapped buffer would be silently ignored.
+    pub fn launch(
+        &self,
+        ctx: &GpuCtx,
+        input_flat: &GpuBuffer,
+        pooled_sum: &GpuBuffer,
+    ) -> Result<(), String> {
         let now = ctx.gemm_route();
         if now != self.flags_at_capture {
             return Err(format!(
@@ -353,6 +372,16 @@ impl PrefillPooledGraph {
                  tier (G1)",
                 self.flags_at_capture
             ));
+        }
+        if ctx.kernels.module_identity != self.module_identity {
+            return Err("PrefillPooledGraph: the kernels module differs from the \
+                 captured compile - the graph would run stale kernels"
+                .to_string());
+        }
+        if input_flat.cached_ptr() != self.input_ptr || pooled_sum.cached_ptr() != self.pooled_ptr {
+            return Err("PrefillPooledGraph: input/pooled buffers differ from the \
+                 captured allocations - the graph would write the old ones"
+                .to_string());
         }
         self.graph
             .launch()

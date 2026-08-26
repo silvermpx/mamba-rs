@@ -41,7 +41,7 @@ pub enum BiGemmFamily {
 /// (`batch_invariant`, `bi_tensor_cores`, `fast_gemm`) plus the
 /// batch-invariant family. Capture guards snapshot this and refuse a
 /// replay whose live route differs.
-pub type GemmRoute = (bool, bool, bool, BiGemmFamily);
+pub type GemmRoute = (bool, bool, bool, bool, BiGemmFamily);
 
 /// GPU execution context — holds everything needed for kernel launches.
 ///
@@ -450,7 +450,10 @@ impl GpuCtx {
     /// must invalidate a captured graph exactly like a tier flip.
     pub fn gemm_route(&self) -> GemmRoute {
         let (bi, tc, fast) = self.gemm_flags();
-        (bi, tc, fast, self.bi_gemm_family.get())
+        // tf32 belongs to the route: disable_tf32() switches the cuBLAS
+        // math mode, which changes what a captured non-invariant graph
+        // would compute on replay.
+        (bi, tc, fast, self.tf32.get(), self.bi_gemm_family.get())
     }
 
     /// Returns `true` if the tensor-core bi tier is enabled.
