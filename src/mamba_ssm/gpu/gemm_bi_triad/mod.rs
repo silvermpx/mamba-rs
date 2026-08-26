@@ -42,12 +42,19 @@ pub(crate) mod modules;
 
 pub(super) use contract::GemmDims;
 pub use contract::{
-    SM90A_DYNAMIC_SHARED_BYTES, SM90A_STAGES, SM90A_TILE, SgemmFwdSubOperands, Sm90aForcedRoute,
+    SM90A_DYNAMIC_SHARED_BYTES, SM90A_STAGES, SM90A_TILE, SM100_KERNEL_SPECS,
+    SM100_TENSOR_MAP_REVISION, SM100_TUNING_REVISION, SgemmFwdSubOperands, Sm90aForcedRoute,
     Sm90aLaunchOperands, Sm90aMapRequest, Sm90aNumericContract, Sm90aOp, Sm90aPreparedTensorMaps,
-    Sm90aRouteIdentity, Sm90aShape, Sm90aTensorMap, Sm90aWarpgroupSchedule, TcFwdOperands,
-    validate_sm90a_map_request,
+    Sm90aRouteIdentity, Sm90aShape, Sm90aTensorMap, Sm90aWarpgroupSchedule, Sm100ForcedRoute,
+    Sm100KernelParams, Sm100KernelSpec, Sm100LaunchOperands, Sm100MapRequest, Sm100NumericContract,
+    Sm100Op, Sm100PhysicalRoute, Sm100PreparedLaunch, Sm100PreparedTensorMaps, Sm100RouteIdentity,
+    Sm100Schedule, Sm100Shape, Sm100Stages, Sm100TargetCandidate, Sm100TargetKind, Sm100TensorMap,
+    Sm100Tile, TcFwdOperands, validate_sm90a_map_request, validate_sm100_map_request,
 };
-pub use dispatch::{SM90A_AUTO_CELLS, TC64_PREFER_MAX_TILES128, TcTile, resolve_sm90a_forced};
+pub use dispatch::{
+    SM90A_AUTO_CELLS, SM100_AUTO_CELLS_CC100, SM100_AUTO_CELLS_CC103, TC64_PREFER_MAX_TILES128,
+    TcTile, resolve_sm90a_forced, resolve_sm100_forced, sm100_target_candidates,
+};
 pub use launch::*;
 #[doc(hidden)]
 pub use modules::GemmBiKernels;

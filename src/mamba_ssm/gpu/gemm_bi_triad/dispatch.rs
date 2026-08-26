@@ -1,9 +1,73 @@
 use super::super::dtype::WeightDtype;
 use super::super::kernels::MambaKernels as GpuKernels;
 use super::contract::{GemmDims, checked_mul3, checked_tile_grid, checked_usize};
-use super::contract::{Sm90aForcedRoute, Sm90aOp, Sm90aShape, Sm90aWarpgroupSchedule};
+use super::contract::{
+    Sm90aForcedRoute, Sm90aOp, Sm90aShape, Sm90aWarpgroupSchedule, Sm100ForcedRoute,
+    Sm100TargetCandidate, Sm100TargetKind,
+};
 
 pub const SM90A_AUTO_CELLS: &[Sm90aForcedRoute] = &[];
+pub const SM100_AUTO_CELLS_CC100: &[Sm100ForcedRoute] = &[];
+pub const SM100_AUTO_CELLS_CC103: &[Sm100ForcedRoute] = &[];
+
+const SM100_CC100_TARGETS: [Sm100TargetCandidate; 2] = [
+    Sm100TargetCandidate {
+        device_cc: (10, 0),
+        nvrtc_arch: "compute_100f",
+        ptx_target: "sm_100f",
+        kind: Sm100TargetKind::Family,
+    },
+    Sm100TargetCandidate {
+        device_cc: (10, 0),
+        nvrtc_arch: "compute_100a",
+        ptx_target: "sm_100a",
+        kind: Sm100TargetKind::Exact,
+    },
+];
+
+const SM100_CC103_TARGETS: [Sm100TargetCandidate; 2] = [
+    Sm100TargetCandidate {
+        device_cc: (10, 3),
+        nvrtc_arch: "compute_103f",
+        ptx_target: "sm_103f",
+        kind: Sm100TargetKind::Family,
+    },
+    Sm100TargetCandidate {
+        device_cc: (10, 3),
+        nvrtc_arch: "compute_103a",
+        ptx_target: "sm_103a",
+        kind: Sm100TargetKind::Exact,
+    },
+];
+
+pub fn sm100_target_candidates(cc: (i32, i32)) -> &'static [Sm100TargetCandidate] {
+    match cc {
+        (10, 0) => &SM100_CC100_TARGETS,
+        (10, 3) => &SM100_CC103_TARGETS,
+        _ => &[],
+    }
+}
+
+pub fn resolve_sm100_forced(
+    device_cc: (i32, i32),
+    module_target: Option<Sm100TargetCandidate>,
+    route: Sm100ForcedRoute,
+) -> Result<Option<Sm100ForcedRoute>, String> {
+    route.shape.validate(route.op)?;
+    if !matches!(route.dtype, WeightDtype::Bf16 | WeightDtype::F16) {
+        return Err("SM100 TCGEN supports bf16 and f16 operands only".into());
+    }
+    route.kernel_spec()?;
+    let Some(module_target) = module_target else {
+        return Ok(None);
+    };
+    if module_target.device_cc != device_cc
+        || !sm100_target_candidates(device_cc).contains(&module_target)
+    {
+        return Ok(None);
+    }
+    Ok(Some(route))
+}
 
 pub fn resolve_sm90a_forced(
     device_cc: (i32, i32),

@@ -24,6 +24,11 @@ pub(crate) struct CompiledModule {
     pub artifact_identity: ArtifactIdentity,
 }
 
+pub(crate) struct QualifiedSpecializedModule {
+    module: CompiledModule,
+    functions: HashMap<&'static str, CudaFunction>,
+}
+
 pub(crate) fn compile_module(request: CompileModuleRequest<'_>) -> Result<CompiledModule, String> {
     validate_module_target(request.module_kind, request.arch)?;
     let combined = compose_module_source(request.module_kind)?;
@@ -95,7 +100,7 @@ pub(crate) fn compile_module(request: CompileModuleRequest<'_>) -> Result<Compil
             crate::mamba_ssm::gpu::kernel_identity::read_cache(path, key, ArtifactKind::Ptx)
         && let Ok(src) =
             crate::mamba_ssm::gpu::kernel_identity::canonical_ptx_from_cache(hit.payload)
-        && validate_specialized_ptx(request.module_kind, &src).is_ok()
+        && validate_specialized_ptx(request.module_kind, request.arch, &src).is_ok()
         && let Ok(module) = request.ctx.load_module(cudarc::nvrtc::Ptx::from_src(src))
         && crate::mamba_ssm::gpu::kernel_identity::cache_hit_header_closure_is_current(
             combined.as_bytes(),
@@ -124,7 +129,7 @@ pub(crate) fn compile_module(request: CompileModuleRequest<'_>) -> Result<Compil
                 .ok_or_else(|| format!("{:?} NVRTC returned no PTX image", request.module_kind))?;
             let ptx_source =
                 crate::mamba_ssm::gpu::kernel_identity::canonical_ptx_image(ptx_image)?;
-            validate_specialized_ptx(request.module_kind, &ptx_source)?;
+            validate_specialized_ptx(request.module_kind, request.arch, &ptx_source)?;
             if !crate::mamba_ssm::gpu::kernel_identity::header_manifest_is_current(
                 combined.as_bytes(),
                 &include_paths,
@@ -192,19 +197,289 @@ pub(crate) fn compile_module(request: CompileModuleRequest<'_>) -> Result<Compil
     })
 }
 
+pub(crate) fn compile_sm100_optional(
+    ctx: &Arc<CudaContext>,
+    state_cap: usize,
+    device_cc: (i32, i32),
+) -> Option<QualifiedSpecializedModule> {
+    select_sm100_candidate(
+        super::dispatch::sm100_target_candidates(device_cc),
+        |candidate| probe_sm100_target(ctx, candidate),
+        |candidate| {
+            compile_module(CompileModuleRequest {
+                ctx,
+                arch: candidate.nvrtc_arch,
+                state_cap,
+                module_kind: ModuleKind::TriadSm100,
+            })
+        },
+        qualify_specialized_module,
+    )
+}
+
+fn select_sm100_candidate<T, U>(
+    candidates: &[super::contract::Sm100TargetCandidate],
+    mut probe: impl FnMut(super::contract::Sm100TargetCandidate) -> Result<(), String>,
+    mut compile: impl FnMut(super::contract::Sm100TargetCandidate) -> Result<T, String>,
+    mut qualify: impl FnMut(T) -> Result<U, String>,
+) -> Option<U> {
+    for &candidate in candidates {
+        if probe(candidate).is_err() {
+            continue;
+        }
+        let Ok(compiled) = compile(candidate) else {
+            continue;
+        };
+        if let Ok(qualified) = qualify(compiled) {
+            return Some(qualified);
+        }
+    }
+    None
+}
+
+const SM100_PROBE_SOURCE: &str = r#"
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 1000
+
+#if __CUDACC_VER_MAJOR__ >= 13
+struct alignas(128) CUtensorMap {
+#else
+struct alignas(64) CUtensorMap {
+#endif
+    unsigned long long opaque[16];
+};
+
+static_assert(sizeof(CUtensorMap) == 128, "unexpected tensor map ABI");
+
+static __device__ __forceinline__ unsigned smem_addr(const void* p) {
+    return static_cast<unsigned>(__cvta_generic_to_shared(p));
+}
+
+static __device__ __forceinline__ unsigned long long tcgen_desc(
+    const void* p, unsigned lbo, unsigned sbo) {
+    unsigned long long d =
+        (static_cast<unsigned long long>(smem_addr(p)) >> 4) & 0x3fffULL;
+    d |= static_cast<unsigned long long>(lbo & 0x3fffU) << 16;
+    d |= static_cast<unsigned long long>(sbo & 0x3fffU) << 32;
+    d |= 1ULL << 46;
+    d |= 2ULL << 61;
+    return d;
+}
+
+static __device__ __forceinline__ void wait_barrier(
+    unsigned bar, unsigned phase) {
+    unsigned ready;
+    do {
+        asm volatile(
+            "{ .reg .pred p; "
+            "mbarrier.try_wait.parity.acquire.cta.shared::cta.b64 "
+            "p, [%1], %2; "
+            "selp.b32 %0, 1, 0, p; }"
+            : "=r"(ready) : "r"(bar), "r"(phase) : "memory");
+    } while (!ready);
+}
+
+static __device__ __forceinline__ void issue_mma(
+    unsigned tmem, unsigned long long a, unsigned long long b,
+    unsigned idesc, unsigned accumulate) {
+    unsigned zero = 0;
+    asm volatile(
+        "{ .reg .pred p; setp.ne.b32 p, %8, 0; "
+        "tcgen05.mma.cta_group::1.kind::f16 [%0], %1, %2, %3, "
+        "{%4, %5, %6, %7}, p; }"
+        :: "r"(tmem), "l"(a), "l"(b), "r"(idesc),
+           "r"(zero), "r"(zero), "r"(zero), "r"(zero), "r"(accumulate)
+        : "memory");
+}
+
+extern "C" __global__ void tcgen05_probe(
+    unsigned* out,
+    const __grid_constant__ CUtensorMap map_a,
+    const __grid_constant__ CUtensorMap map_b) {
+    extern __shared__ __align__(1024) unsigned char smem[];
+    __shared__ unsigned tmem_base;
+    __shared__ __align__(8) unsigned long long barriers[2];
+
+    unsigned full = smem_addr(&barriers[0]);
+    unsigned done = smem_addr(&barriers[1]);
+    unsigned warp = threadIdx.x >> 5;
+
+    if (threadIdx.x == 0) {
+        asm volatile(
+            "mbarrier.init.shared::cta.b64 [%0], 1;"
+            :: "r"(full) : "memory");
+        asm volatile(
+            "mbarrier.init.shared::cta.b64 [%0], 1;"
+            :: "r"(done) : "memory");
+        asm volatile("fence.mbarrier_init.release.cluster;" ::: "memory");
+    }
+    __syncthreads();
+
+    if (warp == 0) {
+        unsigned dst = smem_addr(&tmem_base);
+        asm volatile(
+            "tcgen05.alloc.cta_group::1.sync.aligned.shared::cta.b32 "
+            "[%0], %1;"
+            :: "r"(dst), "r"(128U) : "memory");
+    }
+    __syncthreads();
+
+    unsigned values[8] = {
+        threadIdx.x, threadIdx.x + 1, threadIdx.x + 2, threadIdx.x + 3,
+        threadIdx.x + 4, threadIdx.x + 5, threadIdx.x + 6, threadIdx.x + 7,
+    };
+    asm volatile(
+        "tcgen05.st.sync.aligned.32x32b.x8.b32 [%0], "
+        "{%1, %2, %3, %4, %5, %6, %7, %8};"
+        :: "r"(tmem_base), "r"(values[0]), "r"(values[1]), "r"(values[2]),
+           "r"(values[3]), "r"(values[4]), "r"(values[5]), "r"(values[6]),
+           "r"(values[7]) : "memory");
+    asm volatile("tcgen05.wait::st.sync.aligned;" ::: "memory");
+    asm volatile("tcgen05.fence::before_thread_sync;" ::: "memory");
+    __syncthreads();
+
+    if (threadIdx.x == 0) {
+        unsigned dst = smem_addr(smem + 1024);
+        unsigned bar = full;
+        unsigned long long a_map =
+            reinterpret_cast<unsigned long long>(&map_a);
+        unsigned long long b_map =
+            reinterpret_cast<unsigned long long>(&map_b);
+        int x = 0;
+        int y = 0;
+        asm volatile(
+            "mbarrier.arrive.expect_tx.release.cta.shared::cta.b64 "
+            "_, [%0], 32768;"
+            :: "r"(bar) : "memory");
+        asm volatile(
+            "cp.async.bulk.tensor.2d.shared::cta.global.tile."
+            "mbarrier::complete_tx::bytes "
+            "[%0], [%1, {%2, %3}], [%4];"
+            :: "r"(dst), "l"(a_map), "r"(x), "r"(y), "r"(bar) : "memory");
+        asm volatile(
+            "cp.async.bulk.tensor.2d.shared::cta.global.tile."
+            "mbarrier::complete_tx::bytes "
+            "[%0], [%1, {%2, %3}], [%4];"
+            :: "r"(dst + 16384), "l"(b_map), "r"(x), "r"(y), "r"(bar)
+            : "memory");
+
+        wait_barrier(full, 0);
+        asm volatile("tcgen05.fence::after_thread_sync;" ::: "memory");
+
+        unsigned long long a_k = tcgen_desc(smem + 1024, 1, 64);
+        unsigned long long a_mn = tcgen_desc(smem + 1024, 512, 64);
+        unsigned long long b_k = tcgen_desc(smem + 17408, 1, 64);
+        unsigned long long b_mn64 = tcgen_desc(smem + 17408, 0, 64);
+        unsigned long long b_mn128 = tcgen_desc(smem + 17408, 512, 64);
+
+        issue_mma(tmem_base, a_k, b_k, 0x08100010U, 1);
+        issue_mma(tmem_base, a_k, b_mn64, 0x08110010U, 1);
+        issue_mma(tmem_base, a_mn, b_mn64, 0x08118010U, 1);
+        issue_mma(tmem_base, a_k, b_k, 0x08200010U, 1);
+        issue_mma(tmem_base, a_k, b_mn128, 0x08210010U, 1);
+        issue_mma(tmem_base, a_mn, b_mn128, 0x08218010U, 1);
+        issue_mma(tmem_base, a_k, b_k, 0x08100490U, 1);
+        issue_mma(tmem_base, a_k, b_mn64, 0x08110490U, 1);
+        issue_mma(tmem_base, a_mn, b_mn64, 0x08118490U, 1);
+        issue_mma(tmem_base, a_k, b_k, 0x08200490U, 1);
+        issue_mma(tmem_base, a_k, b_mn128, 0x08210490U, 1);
+        issue_mma(tmem_base, a_mn, b_mn128, 0x08218490U, 1);
+
+        asm volatile(
+            "tcgen05.commit.cta_group::1."
+            "mbarrier::arrive::one.shared::cluster.b64 [%0];"
+            :: "r"(done) : "memory");
+        wait_barrier(done, 0);
+        asm volatile("tcgen05.fence::before_thread_sync;" ::: "memory");
+    }
+    __syncthreads();
+
+    asm volatile("tcgen05.fence::after_thread_sync;" ::: "memory");
+    asm volatile(
+        "tcgen05.ld.sync.aligned.32x32b.x8.b32 "
+        "{%0, %1, %2, %3, %4, %5, %6, %7}, [%8];"
+        : "=r"(values[0]), "=r"(values[1]), "=r"(values[2]),
+          "=r"(values[3]), "=r"(values[4]), "=r"(values[5]),
+          "=r"(values[6]), "=r"(values[7])
+        : "r"(tmem_base) : "memory");
+    asm volatile("tcgen05.wait::ld.sync.aligned;" ::: "memory");
+    out[threadIdx.x] = values[0];
+    asm volatile("tcgen05.fence::before_thread_sync;" ::: "memory");
+    __syncthreads();
+
+    if (warp == 0) {
+        asm volatile(
+            "tcgen05.relinquish_alloc_permit.cta_group::1.sync.aligned;"
+            ::: "memory");
+        asm volatile(
+            "tcgen05.dealloc.cta_group::1.sync.aligned.b32 %0, %1;"
+            :: "r"(tmem_base), "r"(128U) : "memory");
+    }
+}
+
+#endif
+"#;
+
+fn probe_sm100_target(
+    ctx: &Arc<CudaContext>,
+    candidate: super::contract::Sm100TargetCandidate,
+) -> Result<(), String> {
+    let options = cudarc::nvrtc::CompileOptions {
+        arch: Some(candidate.nvrtc_arch),
+        options: vec!["--fmad=true".to_string(), "-DNDEBUG".to_string()],
+        ..Default::default()
+    };
+    let image =
+        cudarc::nvrtc::compile_ptx_with_opts(SM100_PROBE_SOURCE, options).map_err(|error| {
+            format!(
+                "TriadSm100 target probe {} failed: {}",
+                candidate.nvrtc_arch,
+                format!("{error:?}").replace("\\n", "\n")
+            )
+        })?;
+    let bytes = image
+        .as_bytes()
+        .ok_or_else(|| "TriadSm100 target probe returned no PTX image".to_string())?;
+    let ptx = crate::mamba_ssm::gpu::kernel_identity::canonical_ptx_image(bytes)?;
+    validate_sm100_probe_ptx(candidate.nvrtc_arch, &ptx)?;
+    let module = ctx
+        .load_module(cudarc::nvrtc::Ptx::from_src(ptx))
+        .map_err(|error| format!("TriadSm100 target probe load failed: {error:?}"))?;
+    module
+        .load_function("tcgen05_probe")
+        .map_err(|error| format!("TriadSm100 target probe symbol failed: {error:?}"))?;
+    Ok(())
+}
+
 fn validate_module_target(kind: ModuleKind, arch: &str) -> Result<(), String> {
     if kind == ModuleKind::TriadSm90a && arch != "sm_90a" {
         return Err(format!(
             "TriadSm90a requires exact target sm_90a, got {arch}"
         ));
     }
+    if kind == ModuleKind::TriadSm100 && sm100_target_for_arch(arch).is_none() {
+        return Err(format!(
+            "TriadSm100 requires compute_100f, compute_100a, compute_103f, or compute_103a, got {arch}"
+        ));
+    }
     Ok(())
 }
 
-fn validate_specialized_ptx(kind: ModuleKind, ptx: &str) -> Result<(), String> {
-    if kind != ModuleKind::TriadSm90a {
-        return Ok(());
+fn validate_specialized_ptx(kind: ModuleKind, arch: &str, ptx: &str) -> Result<(), String> {
+    match kind {
+        ModuleKind::TriadSm90a => validate_sm90a_ptx(ptx),
+        ModuleKind::TriadSm100 => validate_sm100_ptx(arch, ptx),
+        _ => Ok(()),
     }
+}
+
+fn ptx_target(ptx: &str) -> Result<&str, String> {
+    ptx.lines()
+        .find_map(|line| line.trim().strip_prefix(".target "))
+        .and_then(|target| target.split(',').next().map(str::trim))
+        .ok_or_else(|| "specialized PTX has no target directive".to_string())
+}
+
+fn validate_sm90a_ptx(ptx: &str) -> Result<(), String> {
     let target = ptx
         .lines()
         .find_map(|line| line.trim().strip_prefix(".target "))
@@ -243,6 +518,113 @@ fn validate_specialized_ptx(kind: ModuleKind, ptx: &str) -> Result<(), String> {
             || token.starts_with("red::")
     }) {
         return Err("TriadSm90a PTX contains a numeric atomic or reduction instruction".into());
+    }
+    Ok(())
+}
+
+fn sm100_target_for_arch(arch: &str) -> Option<super::contract::Sm100TargetCandidate> {
+    [(10, 0), (10, 3)]
+        .into_iter()
+        .flat_map(super::dispatch::sm100_target_candidates)
+        .copied()
+        .find(|target| target.nvrtc_arch == arch)
+}
+
+fn validate_sm100_ptx(arch: &str, ptx: &str) -> Result<(), String> {
+    let candidate = sm100_target_for_arch(arch)
+        .ok_or_else(|| format!("TriadSm100 has no target candidate for {arch}"))?;
+    let actual = ptx_target(ptx)?;
+    if actual != candidate.ptx_target {
+        return Err(format!(
+            "TriadSm100 PTX target is {actual}, expected {}",
+            candidate.ptx_target
+        ));
+    }
+    for spec in super::contract::SM100_KERNEL_SPECS {
+        let marker = format!(".entry {}(", spec.symbol);
+        if ptx.matches(&marker).count() != 1 {
+            return Err(format!(
+                "TriadSm100 PTX must contain one entry {}",
+                spec.symbol
+            ));
+        }
+    }
+    validate_sm100_feature_instructions(ptx)
+}
+
+fn validate_sm100_probe_ptx(arch: &str, ptx: &str) -> Result<(), String> {
+    let candidate = sm100_target_for_arch(arch)
+        .ok_or_else(|| format!("TriadSm100 has no target candidate for {arch}"))?;
+    let actual = ptx_target(ptx)?;
+    if actual != candidate.ptx_target {
+        return Err(format!(
+            "TriadSm100 probe PTX target is {actual}, expected {}",
+            candidate.ptx_target
+        ));
+    }
+    if ptx.matches(".entry tcgen05_probe(").count() != 1 {
+        return Err("TriadSm100 probe PTX must contain one entry tcgen05_probe".into());
+    }
+    validate_sm100_feature_instructions(ptx)
+}
+
+fn validate_sm100_feature_instructions(ptx: &str) -> Result<(), String> {
+    for instruction in [
+        "cp.async.bulk.tensor.2d.shared::cta.global.tile.mbarrier::complete_tx::bytes",
+        "mbarrier.arrive.expect_tx",
+        "mbarrier.try_wait.parity",
+        "tcgen05.alloc.cta_group::1",
+        "tcgen05.relinquish_alloc_permit.cta_group::1",
+        "tcgen05.dealloc.cta_group::1",
+        "tcgen05.mma.cta_group::1.kind::f16",
+        "tcgen05.commit.cta_group::1",
+        "tcgen05.fence::before_thread_sync",
+        "tcgen05.fence::after_thread_sync",
+        "tcgen05.ld.sync.aligned.32x32b.x8.b32",
+        "tcgen05.wait::ld.sync.aligned",
+        "tcgen05.st.sync.aligned.32x32b.x8.b32",
+        "tcgen05.wait::st.sync.aligned",
+    ] {
+        if !ptx.contains(instruction) {
+            return Err(format!("TriadSm100 PTX is missing {instruction}"));
+        }
+    }
+    if ptx.split_ascii_whitespace().any(|token| {
+        token.starts_with("atom.")
+            || token.starts_with("red.")
+            || token.starts_with("atom::")
+            || token.starts_with("red::")
+            || token.starts_with("tcgen05.ld.red")
+            || token.starts_with("wgmma.")
+            || token.contains("cta_group::2")
+            || token.contains("multicast")
+    }) {
+        return Err("TriadSm100 PTX contains a forbidden instruction family".into());
+    }
+    if ptx.split_ascii_whitespace().any(|token| {
+        token == "call"
+            || token.starts_with("call.")
+            || token == ".callprototype"
+            || token == ".calltargets"
+    }) {
+        return Err("TriadSm100 PTX contains a device call instruction".into());
+    }
+    for symbol in [
+        "cudaLaunchDevice",
+        "cudaGetParameterBuffer",
+        "cudaDeviceSynchronize",
+        "__cudaPushCallConfiguration",
+        "__cudaPopCallConfiguration",
+        "malloc",
+        "free",
+        "operator new",
+        "operator delete",
+    ] {
+        if ptx.contains(symbol) {
+            return Err(format!(
+                "TriadSm100 PTX contains forbidden device-runtime symbol {symbol}"
+            ));
+        }
     }
     Ok(())
 }
@@ -397,6 +779,18 @@ const SM90A_SOURCE_FRAGMENTS: &[SourceFragment] = &[
     },
 ];
 
+const SM100_SOURCE_FRAGMENTS: &[SourceFragment] = &[
+    TYPED_PRELUDE,
+    TRIAD_CONTRACT,
+    TRIAD_COMMON,
+    TRIAD_EPILOGUE,
+    SourceFragment {
+        logical_name: "kernels/gemm_bi_triad/sm100.cu",
+        source: include_str!("../../../../kernels/gemm_bi_triad/sm100.cu"),
+        allowed_quoted_includes: &[],
+    },
+];
+
 pub(super) const SCALAR_SYMBOLS: &[&str] = &[
     "sgemm_bi_nn",
     "sgemm_bi_tn",
@@ -484,6 +878,7 @@ fn module_fragments(kind: ModuleKind) -> Result<&'static [SourceFragment], Strin
         ModuleKind::TriadScalar => Ok(SCALAR_SOURCE_FRAGMENTS),
         ModuleKind::TriadSm80 => Ok(SM80_SOURCE_FRAGMENTS),
         ModuleKind::TriadSm90a => Ok(SM90A_SOURCE_FRAGMENTS),
+        ModuleKind::TriadSm100 => Ok(SM100_SOURCE_FRAGMENTS),
         _ => Err(format!("no source fragments for {kind:?}")),
     }
 }
@@ -714,16 +1109,38 @@ type Sm90aMapCacheKey = (
     super::contract::Sm90aShape,
 );
 type Sm90aMapCache = Mutex<HashMap<Sm90aMapCacheKey, super::contract::Sm90aPreparedTensorMaps>>;
+type Sm100MapCacheKey = (
+    [super::contract::Sm90aTensorMapKey; 2],
+    [super::contract::Sm90aAllocationIdentity; 2],
+    super::contract::Sm100TensorOrigins,
+    super::contract::Sm100Op,
+    u8,
+    super::contract::Sm100Tile,
+    super::contract::Sm100Shape,
+);
+type Sm100MapCache = Mutex<HashMap<Sm100MapCacheKey, super::contract::Sm100PreparedTensorMaps>>;
+
+pub(crate) fn qualify_specialized_module(
+    module: CompiledModule,
+) -> Result<QualifiedSpecializedModule, String> {
+    let functions = match module.artifact_identity.module_kind {
+        ModuleKind::TriadSm90a => load_sm90a_functions(&module),
+        ModuleKind::TriadSm100 => load_sm100_functions(&module),
+        kind => Err(format!("unsupported specialized triad module {kind:?}")),
+    }?;
+    Ok(QualifiedSpecializedModule { module, functions })
+}
 
 pub struct GemmBiKernels {
     _modules: CudaModuleAnchors,
     context_handle: usize,
     scalar_compiler_identity: CompilerIdentity,
     sm80_compiler_identity: CompilerIdentity,
-    sm90a_compiler_identity: Option<CompilerIdentity>,
+    specialized_compiler_identity: Option<CompilerIdentity>,
     artifact_set_identity: crate::mamba_ssm::gpu::kernel_identity::ArtifactSetIdentity,
-    sm90a_functions: HashMap<&'static str, CudaFunction>,
+    specialized_functions: HashMap<&'static str, CudaFunction>,
     sm90a_tensor_maps: Sm90aMapCache,
+    sm100_tensor_maps: Sm100MapCache,
 
     pub sgemm_nn: CudaFunction,
     pub sgemm_tn: CudaFunction,
@@ -779,20 +1196,15 @@ impl GemmBiKernels {
         fixed_artifact: ArtifactIdentity,
         scalar: CompiledModule,
         sm80: CompiledModule,
-        sm90a: Option<CompiledModule>,
+        specialized: Option<QualifiedSpecializedModule>,
     ) -> Result<Self, String> {
-        let sm90a = sm90a.and_then(|module| {
-            load_sm90a_functions(&module)
-                .ok()
-                .map(|functions| (module, functions))
-        });
         let mut artifacts = vec![
             fixed_artifact,
             scalar.artifact_identity,
             sm80.artifact_identity,
         ];
-        if let Some((module, _)) = sm90a.as_ref() {
-            artifacts.push(module.artifact_identity);
+        if let Some(specialized) = specialized.as_ref() {
+            artifacts.push(specialized.module.artifact_identity);
         }
         let artifact_set_identity =
             crate::mamba_ssm::gpu::kernel_identity::build_artifact_set(&artifacts)?;
@@ -823,13 +1235,13 @@ impl GemmBiKernels {
             34 * 1024,
         )?;
 
-        let sm90a_functions = sm90a
+        let specialized_functions = specialized
             .as_ref()
-            .map(|(_, functions)| functions.clone())
+            .map(|specialized| specialized.functions.clone())
             .unwrap_or_default();
         let mut anchors = vec![scalar.module.clone(), sm80.module.clone()];
-        if let Some((module, _)) = sm90a.as_ref() {
-            anchors.push(module.module.clone());
+        if let Some(specialized) = specialized.as_ref() {
+            anchors.push(specialized.module.module.clone());
         }
 
         Ok(Self {
@@ -837,10 +1249,13 @@ impl GemmBiKernels {
             context_handle,
             scalar_compiler_identity: scalar.compiler_identity,
             sm80_compiler_identity: sm80.compiler_identity,
-            sm90a_compiler_identity: sm90a.as_ref().map(|(module, _)| module.compiler_identity),
+            specialized_compiler_identity: specialized
+                .as_ref()
+                .map(|specialized| specialized.module.compiler_identity),
             artifact_set_identity,
-            sm90a_functions,
+            specialized_functions,
             sm90a_tensor_maps: Mutex::new(HashMap::new()),
+            sm100_tensor_maps: Mutex::new(HashMap::new()),
             sgemm_nn,
             sgemm_tn,
             sgemm_nt,
@@ -903,11 +1318,32 @@ impl GemmBiKernels {
     }
 
     pub fn sm90a_compiler_identity(&self) -> Option<CompilerIdentity> {
-        self.sm90a_compiler_identity
+        self.artifact_set_identity
+            .specialized
+            .filter(|artifact| artifact.module_kind == ModuleKind::TriadSm90a)
+            .and(self.specialized_compiler_identity)
+    }
+
+    pub fn sm100_compiler_identity(&self) -> Option<CompilerIdentity> {
+        self.artifact_set_identity
+            .specialized
+            .filter(|artifact| artifact.module_kind == ModuleKind::TriadSm100)
+            .and(self.specialized_compiler_identity)
+    }
+
+    pub fn sm100_target_candidate(&self) -> Option<super::contract::Sm100TargetCandidate> {
+        self.sm100_compiler_identity()
+            .and_then(|compiler| sm100_target_for_arch(compiler.target.as_str()))
     }
 
     pub fn has_sm90a_wgmma(&self) -> bool {
-        self.sm90a_functions.len() == SM90A_SYMBOLS.len()
+        self.sm90a_compiler_identity().is_some()
+            && self.specialized_functions.len() == SM90A_SYMBOLS.len()
+    }
+
+    pub fn has_sm100_tcgen(&self) -> bool {
+        self.sm100_compiler_identity().is_some()
+            && self.specialized_functions.len() == super::contract::SM100_KERNEL_SPECS.len()
     }
 
     pub(super) fn context_handle(&self) -> usize {
@@ -915,7 +1351,15 @@ impl GemmBiKernels {
     }
 
     pub(super) fn sm90a_function(&self, symbol: &str) -> Option<&CudaFunction> {
-        self.sm90a_functions.get(symbol)
+        self.has_sm90a_wgmma()
+            .then(|| self.specialized_functions.get(symbol))
+            .flatten()
+    }
+
+    pub(super) fn sm100_function(&self, symbol: &str) -> Option<&CudaFunction> {
+        self.has_sm100_tcgen()
+            .then(|| self.specialized_functions.get(symbol))
+            .flatten()
     }
 
     pub(super) fn prepare_sm90a_tensor_maps(
@@ -927,7 +1371,7 @@ impl GemmBiKernels {
         binding: super::contract::Sm90aMapBinding,
     ) -> Result<super::contract::Sm90aPreparedTensorMaps, String> {
         if binding.context_handle != self.context_handle
-            || Some(binding.compiler) != self.sm90a_compiler_identity
+            || Some(binding.compiler) != self.sm90a_compiler_identity()
             || Some(binding.artifact) != self.artifact_set_identity.specialized
         {
             return Err("SM90a tensor-map binding does not match its CUDA module context".into());
@@ -952,6 +1396,60 @@ impl GemmBiKernels {
             return Err("SM90a tensor-map cache miss during graph capture".into());
         }
         let maps = super::contract::encode_sm90a_tensor_maps(keys, request, binding, allocations)?;
+        cache.insert(cache_key, maps);
+        Ok(maps)
+    }
+
+    pub(super) fn prepare_sm100_tensor_maps(
+        &self,
+        request: super::contract::Sm100MapRequest,
+        keys: [super::contract::Sm90aTensorMapKey; 2],
+        allocations: [super::contract::Sm90aAllocationIdentity; 2],
+        origins: super::contract::Sm100TensorOrigins,
+        capturing: bool,
+        binding: super::contract::Sm100MapBinding,
+    ) -> Result<super::contract::Sm100PreparedTensorMaps, String> {
+        if binding.context_handle != self.context_handle
+            || Some(binding.compiler) != self.sm100_compiler_identity()
+            || Some(binding.artifact) != self.artifact_set_identity.specialized
+            || Some(binding.target) != self.sm100_target_candidate()
+        {
+            return Err("SM100 tensor-map binding does not match its CUDA module context".into());
+        }
+        let mut cache = self
+            .sm100_tensor_maps
+            .lock()
+            .map_err(|_| "SM100 tensor-map cache is poisoned".to_string())?;
+        let dtype = match request.dtype {
+            super::super::dtype::WeightDtype::F32 => 0,
+            super::super::dtype::WeightDtype::F16 => 1,
+            super::super::dtype::WeightDtype::Bf16 => 2,
+        };
+        let cache_key = (
+            keys,
+            allocations,
+            origins,
+            request.op,
+            dtype,
+            request.tile,
+            request.shape,
+        );
+        cache.retain(|(cached_keys, cached_allocations, _, _, _, _, _), _| {
+            *cached_keys != keys || *cached_allocations == allocations
+        });
+        if let Some(maps) = cache.get(&cache_key) {
+            return Ok(*maps);
+        }
+        if capturing {
+            return Err("SM100 tensor-map cache miss during graph capture".into());
+        }
+        let maps = super::contract::encode_sm100_tensor_maps(
+            keys,
+            request,
+            binding,
+            allocations,
+            origins,
+        )?;
         cache.insert(cache_key, maps);
         Ok(maps)
     }
@@ -1063,6 +1561,57 @@ fn load_sm90a_functions(
     Ok(functions)
 }
 
+fn load_sm100_functions(
+    module: &CompiledModule,
+) -> Result<HashMap<&'static str, CudaFunction>, String> {
+    if module.artifact_identity.module_kind != ModuleKind::TriadSm100
+        || sm100_target_for_arch(module.compiler_identity.target.as_str()).is_none()
+    {
+        return Err("specialized triad module is not a valid TriadSm100 target".into());
+    }
+    let mut functions = HashMap::new();
+    for spec in super::contract::SM100_KERNEL_SPECS {
+        let function = load_function(&module.module, ModuleKind::TriadSm100, spec.symbol)?;
+        let shared = i32::try_from(spec.dynamic_shared_bytes)
+            .map_err(|_| format!("{} shared memory exceeds i32::MAX", spec.symbol))?;
+        set_dynamic_shared(&function, spec.symbol, shared)?;
+        if function
+            .local_size_bytes()
+            .map_err(|error| format!("query {} local memory: {error:?}", spec.symbol))?
+            != 0
+        {
+            return Err(format!("{} spills to local memory", spec.symbol));
+        }
+        let threads = i32::try_from(spec.threads)
+            .map_err(|_| format!("{} thread count exceeds i32::MAX", spec.symbol))?;
+        if function
+            .max_threads_per_block()
+            .map_err(|error| format!("query {} max threads: {error:?}", spec.symbol))?
+            < threads
+        {
+            return Err(format!(
+                "{} cannot launch {} threads",
+                spec.symbol, spec.threads
+            ));
+        }
+        let occupancy = function
+            .occupancy_max_active_blocks_per_multiprocessor(
+                spec.threads,
+                spec.dynamic_shared_bytes as usize,
+                None,
+            )
+            .map_err(|error| format!("query {} occupancy: {error:?}", spec.symbol))?;
+        if occupancy < 1 {
+            return Err(format!("{} has zero launch occupancy", spec.symbol));
+        }
+        functions.insert(spec.symbol, function);
+    }
+    if functions.len() != super::contract::SM100_KERNEL_SPECS.len() {
+        return Err("TriadSm100 did not load its complete symbol inventory".into());
+    }
+    Ok(functions)
+}
+
 fn load_owned_half(
     base: &str,
     scalar: &Arc<CudaModule>,
@@ -1096,8 +1645,9 @@ mod tests {
 
     use super::{
         SCALAR_SYMBOLS as PRODUCTION_SCALAR_SYMBOLS, SM80_SYMBOLS as PRODUCTION_SM80_SYMBOLS,
-        SM90A_SYMBOLS, SourceFragment, compose_fragments, compose_module_source,
-        resolve_owned_symbol, validate_module_target,
+        SM90A_SYMBOLS, SM100_PROBE_SOURCE, SourceFragment, compose_fragments,
+        compose_module_source, resolve_owned_symbol, select_sm100_candidate,
+        validate_module_target, validate_sm100_probe_ptx, validate_sm100_ptx,
     };
 
     const FIXED_FRAGMENTS: &[&str] = &[
@@ -1142,6 +1692,14 @@ mod tests {
         "kernels/gemm_bi_triad/common.cuh",
         "kernels/gemm_bi_triad/epilogue.cuh",
         "kernels/gemm_bi_triad/sm90a.cu",
+    ];
+
+    const SM100_FRAGMENTS: &[&str] = &[
+        "kernels/_typed_prelude.cuh",
+        "kernels/gemm_bi_triad/contract.cuh",
+        "kernels/gemm_bi_triad/common.cuh",
+        "kernels/gemm_bi_triad/epilogue.cuh",
+        "kernels/gemm_bi_triad/sm100.cu",
     ];
 
     const SCALAR_SYMBOLS: &[&str] = &[
@@ -1229,6 +1787,7 @@ mod tests {
         assert_composition(ModuleKind::TriadScalar, SCALAR_FRAGMENTS);
         assert_composition(ModuleKind::TriadSm80, SM80_FRAGMENTS);
         assert_composition(ModuleKind::TriadSm90a, SM90A_FRAGMENTS);
+        assert_composition(ModuleKind::TriadSm100, SM100_FRAGMENTS);
 
         assert!(
             !std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -1340,9 +1899,19 @@ mod tests {
         assert_eq!(scalar.len(), 46);
         assert_eq!(sm80.len(), 14);
         assert_eq!(SM90A_SYMBOLS.len(), 12);
+        let sm90a: BTreeSet<_> = SM90A_SYMBOLS.iter().copied().collect();
+        let sm100: BTreeSet<_> = super::super::contract::SM100_KERNEL_SPECS
+            .iter()
+            .map(|spec| spec.symbol)
+            .collect();
+        assert_eq!(sm90a.len(), 12);
+        assert_eq!(sm100.len(), 72);
         assert!(scalar.is_disjoint(&sm80));
-        assert!(SM90A_SYMBOLS.iter().all(|symbol| !scalar.contains(symbol)));
-        assert!(SM90A_SYMBOLS.iter().all(|symbol| !sm80.contains(symbol)));
+        assert!(scalar.is_disjoint(&sm90a));
+        assert!(scalar.is_disjoint(&sm100));
+        assert!(sm80.is_disjoint(&sm90a));
+        assert!(sm80.is_disjoint(&sm100));
+        assert!(sm90a.is_disjoint(&sm100));
         assert_eq!(scalar.union(&sm80).count(), 60);
         assert!(
             scalar
@@ -1360,6 +1929,234 @@ mod tests {
             assert!(error.contains("exact target sm_90a"), "{error}");
         }
         validate_module_target(ModuleKind::TriadSm80, "sm_90a").unwrap();
+    }
+
+    #[test]
+    fn sm100_module_accepts_only_exact_feature_targets() {
+        for target in [
+            "compute_100f",
+            "compute_100a",
+            "compute_103f",
+            "compute_103a",
+        ] {
+            validate_module_target(ModuleKind::TriadSm100, target).unwrap();
+        }
+        for target in [
+            "compute_100",
+            "compute_103",
+            "sm_100a",
+            "sm_103a",
+            "compute_120f",
+        ] {
+            assert!(validate_module_target(ModuleKind::TriadSm100, target).is_err());
+        }
+    }
+
+    #[test]
+    fn sm100_probe_is_small_feature_complete_and_validated_fail_closed() {
+        assert!(SM100_PROBE_SOURCE.contains("tcgen05_probe"));
+        assert!(SM100_PROBE_SOURCE.contains("cp.async.bulk.tensor.2d"));
+        assert!(SM100_PROBE_SOURCE.contains("tcgen05.mma.cta_group::1.kind::f16"));
+        assert!(!SM100_PROBE_SOURCE.contains("sgemm_bi_nn_sm100"));
+
+        let instructions = [
+            "cp.async.bulk.tensor.2d.shared::cta.global.tile.mbarrier::complete_tx::bytes",
+            "mbarrier.arrive.expect_tx",
+            "mbarrier.try_wait.parity",
+            "tcgen05.alloc.cta_group::1",
+            "tcgen05.relinquish_alloc_permit.cta_group::1",
+            "tcgen05.dealloc.cta_group::1",
+            "tcgen05.mma.cta_group::1.kind::f16",
+            "tcgen05.commit.cta_group::1",
+            "tcgen05.fence::before_thread_sync",
+            "tcgen05.fence::after_thread_sync",
+            "tcgen05.ld.sync.aligned.32x32b.x8.b32",
+            "tcgen05.wait::ld.sync.aligned",
+            "tcgen05.st.sync.aligned.32x32b.x8.b32",
+            "tcgen05.wait::st.sync.aligned",
+        ];
+        let valid = format!(
+            ".version 9.0\n.target sm_100f\n.entry tcgen05_probe(\n{}\n",
+            instructions.join("\n")
+        );
+        validate_sm100_probe_ptx("compute_100f", &valid).unwrap();
+
+        assert!(validate_sm100_probe_ptx("compute_100a", &valid).is_err());
+        assert!(
+            validate_sm100_probe_ptx("compute_100f", &valid.replace("tcgen05_probe", "wrong"))
+                .is_err()
+        );
+        assert!(
+            validate_sm100_probe_ptx(
+                "compute_100f",
+                &valid.replace("tcgen05.wait::st.sync.aligned", "")
+            )
+            .is_err()
+        );
+        assert!(
+            validate_sm100_probe_ptx("compute_100f", &format!("{valid}\natom.global.add.f32"))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn sm100_probe_compiles_for_every_exact_feature_target() {
+        for (requested, emitted) in [
+            ("compute_100f", "sm_100f"),
+            ("compute_100a", "sm_100a"),
+            ("compute_103f", "sm_103f"),
+            ("compute_103a", "sm_103a"),
+        ] {
+            let options = cudarc::nvrtc::CompileOptions {
+                arch: Some(requested),
+                options: vec!["--fmad=true".to_string(), "-DNDEBUG".to_string()],
+                ..Default::default()
+            };
+            let image = cudarc::nvrtc::compile_ptx_with_opts(SM100_PROBE_SOURCE, options)
+                .unwrap_or_else(|error| panic!("SM100 probe failed for {requested}: {error}"));
+            let ptx = crate::mamba_ssm::gpu::kernel_identity::canonical_ptx_image(
+                image.as_bytes().expect("SM100 probe PTX image"),
+            )
+            .expect("SM100 probe PTX must be canonical UTF-8");
+            assert!(
+                ptx.lines()
+                    .any(|line| line.trim() == format!(".target {emitted}"))
+            );
+            validate_sm100_probe_ptx(requested, &ptx).unwrap();
+        }
+    }
+
+    #[test]
+    fn sm100_candidate_fallback_survives_family_probe_failure() {
+        let probes = std::cell::RefCell::new(Vec::new());
+        let compiles = std::cell::RefCell::new(Vec::new());
+        let qualified = std::cell::RefCell::new(Vec::new());
+        let selected = select_sm100_candidate(
+            super::super::dispatch::sm100_target_candidates((10, 0)),
+            |candidate| {
+                probes.borrow_mut().push(candidate.nvrtc_arch);
+                if candidate.kind == super::super::contract::Sm100TargetKind::Family {
+                    Err("injected family probe failure".into())
+                } else {
+                    Ok(())
+                }
+            },
+            |candidate| {
+                compiles.borrow_mut().push(candidate.nvrtc_arch);
+                Ok(candidate)
+            },
+            |candidate| {
+                qualified.borrow_mut().push(candidate.nvrtc_arch);
+                Ok(candidate)
+            },
+        )
+        .expect("exact candidate fallback");
+        assert_eq!(selected.nvrtc_arch, "compute_100a");
+        assert_eq!(*probes.borrow(), ["compute_100f", "compute_100a"]);
+        assert_eq!(*compiles.borrow(), ["compute_100a"]);
+        assert_eq!(*qualified.borrow(), ["compute_100a"]);
+    }
+
+    #[test]
+    fn sm100_candidate_fallback_survives_family_compile_failure() {
+        let compiles = std::cell::RefCell::new(Vec::new());
+        let qualified = std::cell::RefCell::new(Vec::new());
+        let selected = select_sm100_candidate(
+            super::super::dispatch::sm100_target_candidates((10, 0)),
+            |_| Ok(()),
+            |candidate| {
+                compiles.borrow_mut().push(candidate.nvrtc_arch);
+                if candidate.kind == super::super::contract::Sm100TargetKind::Family {
+                    Err("injected family compile failure".into())
+                } else {
+                    Ok(candidate)
+                }
+            },
+            |candidate| {
+                qualified.borrow_mut().push(candidate.nvrtc_arch);
+                Ok(candidate)
+            },
+        )
+        .expect("exact candidate fallback");
+        assert_eq!(selected.nvrtc_arch, "compute_100a");
+        assert_eq!(*compiles.borrow(), ["compute_100f", "compute_100a"]);
+        assert_eq!(*qualified.borrow(), ["compute_100a"]);
+    }
+
+    #[test]
+    fn sm100_candidate_fallback_survives_family_qualification_failure() {
+        let qualified = std::cell::RefCell::new(Vec::new());
+        let selected = select_sm100_candidate(
+            super::super::dispatch::sm100_target_candidates((10, 0)),
+            |_| Ok(()),
+            Ok,
+            |candidate| {
+                qualified.borrow_mut().push(candidate.nvrtc_arch);
+                if candidate.kind == super::super::contract::Sm100TargetKind::Family {
+                    Err("injected family qualification failure".into())
+                } else {
+                    Ok(candidate)
+                }
+            },
+        )
+        .expect("exact candidate fallback");
+        assert_eq!(selected.nvrtc_arch, "compute_100a");
+        assert_eq!(*qualified.borrow(), ["compute_100f", "compute_100a"]);
+    }
+
+    #[test]
+    fn sm100_production_ptx_validator_rejects_partial_or_mixed_artifacts() {
+        let instructions = [
+            "cp.async.bulk.tensor.2d.shared::cta.global.tile.mbarrier::complete_tx::bytes",
+            "mbarrier.arrive.expect_tx",
+            "mbarrier.try_wait.parity",
+            "tcgen05.alloc.cta_group::1",
+            "tcgen05.relinquish_alloc_permit.cta_group::1",
+            "tcgen05.dealloc.cta_group::1",
+            "tcgen05.mma.cta_group::1.kind::f16",
+            "tcgen05.commit.cta_group::1",
+            "tcgen05.fence::before_thread_sync",
+            "tcgen05.fence::after_thread_sync",
+            "tcgen05.ld.sync.aligned.32x32b.x8.b32",
+            "tcgen05.wait::ld.sync.aligned",
+            "tcgen05.st.sync.aligned.32x32b.x8.b32",
+            "tcgen05.wait::st.sync.aligned",
+        ];
+        let mut valid = ".version 9.0\n.target sm_100f\n".to_string();
+        for spec in super::super::contract::SM100_KERNEL_SPECS {
+            valid.push_str(&format!(".entry {}(\n", spec.symbol));
+        }
+        valid.push_str(&instructions.join("\n"));
+        validate_sm100_ptx("compute_100f", &valid).unwrap();
+
+        assert!(validate_sm100_ptx("compute_100a", &valid).is_err());
+        let first = super::super::contract::SM100_KERNEL_SPECS[0].symbol;
+        assert!(
+            validate_sm100_ptx(
+                "compute_100f",
+                &valid.replacen(&format!(".entry {first}("), ".entry missing(", 1),
+            )
+            .is_err()
+        );
+        assert!(
+            validate_sm100_ptx(
+                "compute_100f",
+                &format!("{valid}\nwgmma.fence.sync.aligned")
+            )
+            .is_err()
+        );
+        for forbidden in [
+            "call.uni (_), cudaLaunchDevice, ();",
+            ".callprototype ()_();",
+            ".extern .func malloc;",
+            ".extern .func free;",
+            ".extern .func cudaGetParameterBuffer;",
+        ] {
+            assert!(
+                validate_sm100_ptx("compute_100f", &format!("{valid}\n{forbidden}")).is_err(),
+                "validator accepted {forbidden}"
+            );
+        }
     }
 
     #[test]

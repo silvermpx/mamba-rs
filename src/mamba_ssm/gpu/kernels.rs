@@ -525,8 +525,9 @@ impl MambaKernels {
                 module_kind: super::kernel_identity::ModuleKind::TriadSm80,
             },
         )?;
-        let sm90a = if arch == "sm_90a" && ctx.compute_capability().ok() == Some((9, 0)) {
-            super::gemm_bi_triad::modules::compile_module(
+        let device_cc = ctx.compute_capability().ok();
+        let specialized = match (arch, device_cc) {
+            ("sm_90a", Some((9, 0))) => super::gemm_bi_triad::modules::compile_module(
                 super::gemm_bi_triad::modules::CompileModuleRequest {
                     ctx,
                     arch,
@@ -535,8 +536,13 @@ impl MambaKernels {
                 },
             )
             .ok()
-        } else {
-            None
+            .and_then(|module| {
+                super::gemm_bi_triad::modules::qualify_specialized_module(module).ok()
+            }),
+            ("sm_100a", Some(device_cc @ (10, 0))) | ("sm_103", Some(device_cc @ (10, 3))) => {
+                super::gemm_bi_triad::modules::compile_sm100_optional(ctx, state_cap, device_cc)
+            }
+            _ => None,
         };
         let compiler_identity = fixed.compiler_identity;
         let triad = GemmBiKernels::load(
@@ -544,7 +550,7 @@ impl MambaKernels {
             fixed.artifact_identity,
             scalar,
             sm80,
-            sm90a,
+            specialized,
         )?;
         let module = fixed.module;
 

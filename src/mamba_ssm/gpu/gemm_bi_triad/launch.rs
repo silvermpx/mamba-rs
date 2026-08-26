@@ -231,6 +231,300 @@ pub fn launch_sm90a_wgmma_forced(
         .map_err(|error| format!("launch {}: {error:?}", route.symbol()))
 }
 
+fn require_sm100_tensor_map_access(stream: &Arc<cudarc::driver::CudaStream>) -> Result<(), String> {
+    let supported = stream
+        .context()
+        .attribute(
+            cudarc::driver::sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_TENSOR_MAP_ACCESS_SUPPORTED,
+        )
+        .map_err(|error| format!("query CUDA tensor-map support: {error:?}"))?;
+    if supported == 0 {
+        return Err("SM100 TCGEN requires CUDA tensor-map access support".into());
+    }
+    Ok(())
+}
+
+fn sm100_map_binding(
+    stream: &Arc<cudarc::driver::CudaStream>,
+    kernels: &GpuKernels,
+) -> Result<Sm100MapBinding, String> {
+    require_sm100_tensor_map_access(stream)?;
+    let context_handle = stream.context().cu_ctx() as usize;
+    if context_handle != kernels.context_handle() {
+        return Err("SM100 stream and kernel module belong to different CUDA contexts".into());
+    }
+    let target = kernels
+        .sm100_target_candidate()
+        .ok_or_else(|| "SM100 target identity is unavailable".to_string())?;
+    let compiler = kernels
+        .sm100_compiler_identity()
+        .filter(|compiler| compiler.target.as_str() == target.nvrtc_arch)
+        .ok_or_else(|| "SM100 compiler identity is unavailable".to_string())?;
+    let artifact = kernels
+        .artifact_set_identity()
+        .specialized
+        .filter(|artifact| {
+            artifact.module_kind == crate::mamba_ssm::gpu::kernel_identity::ModuleKind::TriadSm100
+        })
+        .ok_or_else(|| "SM100 artifact identity is unavailable".to_string())?;
+    let (major, minor) = stream
+        .context()
+        .compute_capability()
+        .map_err(|error| format!("query CUDA compute capability: {error:?}"))?;
+    if (major, minor) != target.device_cc {
+        return Err("SM100 module target does not match the CUDA device minor".into());
+    }
+    let compute_capability = (
+        u32::try_from(major).map_err(|_| format!("negative CUDA CC major {major}"))?,
+        u32::try_from(minor).map_err(|_| format!("negative CUDA CC minor {minor}"))?,
+    );
+    let device = crate::mamba_ssm::gpu::kernel_identity::DeviceIdentity {
+        compute_capability,
+        target: crate::mamba_ssm::gpu::kernel_identity::CudaTarget::new(
+            crate::mamba_ssm::gpu::device::GpuDevice::resolve_nvrtc_target(compute_capability)?,
+        )?,
+        driver: crate::mamba_ssm::gpu::kernel_identity::query_driver_identity()?,
+    };
+    Ok(Sm100MapBinding {
+        context_handle,
+        artifact,
+        compiler,
+        device,
+        target,
+    })
+}
+
+pub fn prepare_sm100_tensor_maps(
+    stream: &Arc<cudarc::driver::CudaStream>,
+    kernels: &GpuKernels,
+    request: Sm100MapRequest,
+) -> Result<Sm100PreparedTensorMaps, String> {
+    stream
+        .context()
+        .bind_to_thread()
+        .map_err(|error| format!("bind CUDA context for SM100 tensor maps: {error:?}"))?;
+    if stream
+        .capture_status()
+        .map_err(|error| format!("query CUDA capture status: {error:?}"))?
+        != cudarc::driver::sys::CUstreamCaptureStatus::CU_STREAM_CAPTURE_STATUS_NONE
+    {
+        return Err("SM100 tensor maps must be prepared before graph capture".into());
+    }
+    let binding = sm100_map_binding(stream, kernels)?;
+    if !kernels.has_sm100_tcgen() {
+        return Err("SM100 tensor maps require a complete specialized module".into());
+    }
+    let plan = sm100_tensor_map_plan(request, binding.context_handle)?;
+    kernels.prepare_sm100_tensor_maps(
+        request,
+        plan.keys,
+        plan.allocations,
+        plan.origins,
+        false,
+        binding,
+    )
+}
+
+pub fn prepare_sm100_tcgen_forced(
+    stream: &Arc<cudarc::driver::CudaStream>,
+    kernels: &GpuKernels,
+    route: Sm100ForcedRoute,
+    maps: &Sm100PreparedTensorMaps,
+    operands: Sm100LaunchOperands,
+) -> Result<Sm100PreparedLaunch, String> {
+    stream
+        .context()
+        .bind_to_thread()
+        .map_err(|error| format!("bind CUDA context for SM100 preparation: {error:?}"))?;
+    if stream
+        .capture_status()
+        .map_err(|error| format!("query CUDA capture status: {error:?}"))?
+        != cudarc::driver::sys::CUstreamCaptureStatus::CU_STREAM_CAPTURE_STATUS_NONE
+    {
+        return Err("SM100 launch must be prepared before graph capture".into());
+    }
+    route.shape.validate(route.op)?;
+    let binding = sm100_map_binding(stream, kernels)?;
+    if !maps.matches_binding(binding) {
+        return Err(
+            "SM100 prepared tensor maps belong to a different CUDA context or module".into(),
+        );
+    }
+    maps.validate_live_allocations()?;
+    if maps.request.op != route.op
+        || maps.request.dtype != route.dtype
+        || maps.request.tile != route.physical.tile
+        || maps.request.shape != route.shape
+    {
+        return Err("SM100 tensor maps do not match the forced physical route".into());
+    }
+    if resolve_sm100_forced(binding.target.device_cc, Some(binding.target), route)? != Some(route) {
+        return Err("SM100 forced route is unavailable; use the resolved baseline".into());
+    }
+    validate_sm100_operands(route, operands)?;
+    let spec = route.kernel_spec()?;
+    let tensor_maps_digest = maps.identity_digest();
+    let resources = Sm100LaunchResourceSnapshot::query(route, operands, binding.context_handle)?;
+    let params = Sm100KernelParams {
+        a_x: maps.origins.a_x,
+        a_y: maps.origins.a_y,
+        b_x: maps.origins.b_x,
+        b_y: maps.origins.b_y,
+        alpha: operands.alpha,
+        beta: operands.beta,
+        m: checked_i32(route.shape.m, "M")?,
+        k: checked_i32(route.shape.k, "K")?,
+        n: checked_i32(route.shape.n, "N")?,
+        ldc: checked_i32(route.shape.ldc, "ldc")?,
+    };
+    let identity = Sm100RouteIdentity {
+        numeric_contract: Sm100NumericContract::Tcgen05F32V1,
+        op: route.op,
+        dtype: route.dtype,
+        physical: route.physical,
+        shape: route.shape,
+        symbol: spec.symbol,
+        module_kind: crate::mamba_ssm::gpu::kernel_identity::ModuleKind::TriadSm100,
+        target: binding.target,
+        artifact: binding.artifact,
+        compiler: binding.compiler,
+        device: binding.device,
+        tensor_map_revision: SM100_TENSOR_MAP_REVISION,
+        tensor_maps_digest,
+        resources_digest: resources.digest(route, operands, tensor_maps_digest),
+        tuning_revision: SM100_TUNING_REVISION,
+    };
+    Ok(Sm100PreparedLaunch {
+        route,
+        maps: *maps,
+        operands,
+        params,
+        identity,
+        resources,
+    })
+}
+
+fn validate_sm100_operands(
+    route: Sm100ForcedRoute,
+    operands: Sm100LaunchOperands,
+) -> Result<(), String> {
+    if operands.output_ptr == 0 {
+        return Err("SM100 output pointer must be non-null".into());
+    }
+    let output_alignment = if route.op == Sm100Op::Tn { 4 } else { 2 };
+    if !operands.output_ptr.is_multiple_of(output_alignment) {
+        return Err(format!(
+            "SM100 output pointer must be {output_alignment}-byte aligned"
+        ));
+    }
+    if operands.bias_ptr != 0 && !operands.bias_ptr.is_multiple_of(4) {
+        return Err("SM100 bias pointer must be 4-byte aligned".into());
+    }
+    match route.op {
+        Sm100Op::Nn if operands.bias_ptr != 0 && operands.alpha != 1.0 => {
+            Err("SM100 NN bias seeding requires alpha == 1.0".into())
+        }
+        Sm100Op::Tn if operands.bias_ptr != 0 || operands.beta != 1.0 => {
+            Err("SM100 TN requires no bias and beta == 1.0".into())
+        }
+        Sm100Op::Nt if operands.bias_ptr != 0 || operands.beta != 0.0 => {
+            Err("SM100 NT requires no bias and beta == 0.0".into())
+        }
+        _ => Ok(()),
+    }
+}
+
+fn validate_sm100_prepared_binding(
+    stream: &Arc<cudarc::driver::CudaStream>,
+    kernels: &GpuKernels,
+    prepared: &Sm100PreparedLaunch,
+) -> Result<(), String> {
+    if stream.context().cu_ctx() as usize != prepared.maps.binding.context_handle
+        || kernels.context_handle() != prepared.maps.binding.context_handle
+        || kernels.sm100_compiler_identity() != Some(prepared.identity.compiler)
+        || kernels.artifact_set_identity().specialized != Some(prepared.identity.artifact)
+        || kernels.sm100_target_candidate() != Some(prepared.identity.target)
+        || prepared.maps.binding.artifact != prepared.identity.artifact
+        || prepared.maps.binding.compiler != prepared.identity.compiler
+        || prepared.maps.binding.device != prepared.identity.device
+        || prepared.maps.binding.target != prepared.identity.target
+    {
+        return Err("SM100 prepared launch no longer matches its module context".into());
+    }
+    Ok(())
+}
+
+pub fn validate_sm100_graph_replay(
+    stream: &Arc<cudarc::driver::CudaStream>,
+    kernels: &GpuKernels,
+    prepared: &Sm100PreparedLaunch,
+) -> Result<(), String> {
+    stream
+        .context()
+        .bind_to_thread()
+        .map_err(|error| format!("bind CUDA context for SM100 replay guard: {error:?}"))?;
+    validate_sm100_prepared_binding(stream, kernels, prepared)?;
+    prepared.maps.validate_live_allocations()?;
+    let live = Sm100LaunchResourceSnapshot::query(
+        prepared.route,
+        prepared.operands,
+        prepared.maps.binding.context_handle,
+    )?;
+    if live != prepared.resources {
+        return Err("SM100 graph replay allocation identity changed since capture".into());
+    }
+    let digest = live.digest(
+        prepared.route,
+        prepared.operands,
+        prepared.maps.identity_digest(),
+    );
+    if digest != prepared.identity.resources_digest {
+        return Err("SM100 graph replay resource identity changed since capture".into());
+    }
+    Ok(())
+}
+
+pub fn launch_sm100_tcgen_prepared(
+    stream: &Arc<cudarc::driver::CudaStream>,
+    kernels: &GpuKernels,
+    prepared: &Sm100PreparedLaunch,
+) -> Result<Sm100RouteIdentity, String> {
+    validate_sm100_prepared_binding(stream, kernels, prepared)?;
+    let spec = prepared.route.kernel_spec()?;
+    if spec.symbol != prepared.identity.symbol {
+        return Err("SM100 prepared symbol no longer matches its physical route".into());
+    }
+    let function = kernels
+        .sm100_function(spec.symbol)
+        .ok_or_else(|| format!("SM100 kernel {} is unavailable", spec.symbol))?;
+    let (rows, columns) = match prepared.route.op {
+        Sm100Op::Nn => (prepared.route.shape.m, prepared.route.shape.n),
+        Sm100Op::Tn => (prepared.route.shape.k, prepared.route.shape.n),
+        Sm100Op::Nt => (prepared.route.shape.m, prepared.route.shape.k),
+    };
+    let rows = checked_u32(rows, "SM100 output rows")?;
+    let columns = checked_u32(columns, "SM100 output columns")?;
+    let grid = checked_grid_product(
+        rows.div_ceil(prepared.route.physical.tile.output_rows()),
+        columns.div_ceil(prepared.route.physical.tile.output_columns()),
+        1,
+    )?;
+    let config = cudarc::driver::LaunchConfig {
+        grid_dim: (grid, 1, 1),
+        block_dim: (spec.threads, 1, 1),
+        shared_mem_bytes: spec.dynamic_shared_bytes,
+    };
+    let mut builder = stream.launch_builder(function);
+    builder.arg(&prepared.operands.output_ptr);
+    builder.arg(&prepared.maps.a);
+    builder.arg(&prepared.maps.b);
+    builder.arg(&prepared.operands.bias_ptr);
+    builder.arg(&prepared.params);
+    unsafe { builder.launch(config) }
+        .map(|_| prepared.identity)
+        .map_err(|error| format!("launch {}: {error:?}", spec.symbol))
+}
+
 /// Batched linear forward on GPU: `Y[B,N] = X[B,K] @ W[K,N] + bias[N]`.
 ///
 /// cuBLAS computes: `Y^T[N,B] = W^T[N,K] @ X^T[K,B]` (column-major).

@@ -235,6 +235,11 @@ fn compiles_for_sm100a() {
 }
 
 #[test]
+fn compiles_for_sm103() {
+    compile_for("sm_103");
+}
+
+#[test]
 fn compiles_exact_sm100_family_triad_modules() {
     for (requested, emitted) in [
         ("compute_100f", "sm_100f"),
@@ -250,8 +255,10 @@ fn compiles_exact_sm100_family_triad_modules() {
         };
         let image = cudarc::nvrtc::compile_ptx_with_opts(sm100_blob(), opts)
             .unwrap_or_else(|error| panic!("TriadSm100 must compile for {requested}: {error}"));
-        let ptx = std::str::from_utf8(image.as_bytes().expect("SM100 PTX image"))
-            .expect("SM100 PTX must be UTF-8");
+        let ptx = mamba_rs::mamba_ssm::gpu::kernel_identity::canonical_ptx_image(
+            image.as_bytes().expect("SM100 PTX image"),
+        )
+        .expect("SM100 PTX must be canonical UTF-8");
         assert!(
             ptx.lines()
                 .any(|line| line.trim() == format!(".target {emitted}")),
@@ -262,6 +269,20 @@ fn compiles_exact_sm100_family_triad_modules() {
                 ptx.matches(&format!(".entry {symbol}(")).count(),
                 1,
                 "{requested} entry census for {symbol}"
+            );
+            let marker = format!(".entry {symbol}(");
+            let parameters = ptx
+                .split_once(&marker)
+                .and_then(|(_, tail)| tail.split_once("\n)").map(|(head, _)| head))
+                .unwrap_or_else(|| panic!("{requested} parameter list for {symbol}"));
+            assert_eq!(
+                parameters.matches(".param").count(),
+                5,
+                "{requested} ABI parameter count for {symbol}"
+            );
+            assert!(
+                parameters.contains(&format!(".param .align 4 .b8 {symbol}_param_4[40]")),
+                "{requested} 40-byte parameter bundle for {symbol}: {parameters}"
             );
         }
         for instruction in [
@@ -294,7 +315,7 @@ fn compiles_exact_sm100_family_triad_modules() {
                 || token.starts_with("atom::")
                 || token.starts_with("red::")
         }));
-        let assembly = assemble_sm100(ptx, emitted, true);
+        let assembly = assemble_sm100(&ptx, emitted, true);
         assert!(
             assembly.status.success(),
             "ptxas -g-tmem-access-check failed for {emitted}: {}",
@@ -314,14 +335,16 @@ fn ordinary_sm100_targets_fail_offline_tcgen_assembly() {
         };
         let image = cudarc::nvrtc::compile_ptx_with_opts(sm100_blob(), opts)
             .unwrap_or_else(|error| panic!("NVRTC ordinary-target probe failed: {error}"));
-        let ptx = std::str::from_utf8(image.as_bytes().expect("ordinary SM100 PTX image"))
-            .expect("ordinary SM100 PTX must be UTF-8");
+        let ptx = mamba_rs::mamba_ssm::gpu::kernel_identity::canonical_ptx_image(
+            image.as_bytes().expect("ordinary SM100 PTX image"),
+        )
+        .expect("ordinary SM100 PTX must be canonical UTF-8");
         assert!(
             ptx.lines()
                 .any(|line| line.trim() == format!(".target {emitted}")),
             "{requested} emitted an unexpected target"
         );
-        let assembly = assemble_sm100(ptx, emitted, false);
+        let assembly = assemble_sm100(&ptx, emitted, false);
         assert!(
             !assembly.status.success(),
             "ordinary target {emitted} illegally admitted TCGEN05"

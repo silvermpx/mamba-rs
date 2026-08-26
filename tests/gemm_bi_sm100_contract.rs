@@ -11,6 +11,18 @@ use mamba_rs::mamba_ssm::gpu::gemm_bi_triad::{
 };
 
 const SOURCE: &str = include_str!("../kernels/gemm_bi_triad/sm100.cu");
+const LAUNCH_SOURCE: &str = include_str!("../src/mamba_ssm/gpu/gemm_bi_triad/launch.rs");
+
+fn public_function_source(source: &str, name: &str) -> String {
+    let marker = format!("pub fn {name}(");
+    let start = source.find(&marker).expect("public function source");
+    let tail = &source[start..];
+    let end = tail[marker.len()..]
+        .find("\npub fn ")
+        .map(|offset| marker.len() + offset)
+        .unwrap_or(tail.len());
+    tail[..end].to_string()
+}
 
 fn expected_symbols() -> BTreeSet<String> {
     let mut symbols = BTreeSet::new();
@@ -35,7 +47,7 @@ fn source_declared_symbols() -> BTreeSet<String> {
         .lines()
         .filter_map(|line| {
             line.trim()
-                .strip_prefix("SM100_DEFINE(")?
+                .strip_prefix("SM100_DEFINE_KERNEL(")?
                 .split(',')
                 .next()
                 .map(|symbol| symbol.trim().to_string())
@@ -105,7 +117,7 @@ fn sm100_kernel_specs_cover_every_physical_route_once() {
                 for stages in [Sm100Stages::S2, Sm100Stages::S3, Sm100Stages::S4] {
                     for schedule in [Sm100Schedule::C4, Sm100Schedule::P8] {
                         let route = route(op, dtype, tile, stages, schedule);
-                        let spec = route.kernel_spec();
+                        let spec = route.kernel_spec().unwrap();
                         assert_eq!(spec.op, op);
                         assert_eq!(spec.dtype, dtype);
                         assert_eq!(spec.physical, route.physical);
@@ -187,14 +199,16 @@ fn sm100_source_freezes_tcgen_contract_and_forbidden_families() {
         "tcgen05.relinquish_alloc_permit.cta_group::1.sync.aligned",
         "tcgen05.dealloc.cta_group::1.sync.aligned.b32",
         "tcgen05.mma.cta_group::1.kind::f16",
-        "tcgen05.commit.cta_group::1.mbarrier::arrive::one.shared::cluster.b64",
+        "tcgen05.commit.cta_group::1.mbarrier::arrive::one.",
+        "shared::cluster.b64 [%0];",
         "tcgen05.fence::before_thread_sync",
         "tcgen05.fence::after_thread_sync",
         "tcgen05.ld.sync.aligned.32x32b.x8.b32",
         "tcgen05.wait::ld.sync.aligned",
         "tcgen05.st.sync.aligned.32x32b.x8.b32",
         "tcgen05.wait::st.sync.aligned",
-        "cp.async.bulk.tensor.2d.shared::cta.global.tile.mbarrier::complete_tx::bytes",
+        "cp.async.bulk.tensor.2d.shared::cta.global.tile.",
+        "mbarrier::complete_tx::bytes ",
         "mbarrier.arrive.expect_tx",
         "0x08100010",
         "0x08100490",
@@ -248,7 +262,7 @@ fn sm100_forced_selector_covers_72_routes_and_rejects_f32() {
                         )
                         .unwrap()
                         .unwrap();
-                        symbols.insert(resolved.kernel_spec().symbol.to_string());
+                        symbols.insert(resolved.kernel_spec().unwrap().symbol.to_string());
                     }
                 }
             }
@@ -359,7 +373,7 @@ fn sm100_target_resolution_never_crosses_minor_or_feature_domains() {
 }
 
 #[test]
-fn sm100_maps_use_driver_abi_and_sixteen_byte_bases() {
+fn sm100_maps_use_driver_abi_and_element_aligned_logical_pointers() {
     assert_eq!(
         std::mem::size_of::<Sm100TensorMap>(),
         std::mem::size_of::<cudarc::driver::sys::CUtensorMap>()
@@ -369,7 +383,7 @@ fn sm100_maps_use_driver_abi_and_sixteen_byte_bases() {
         std::mem::align_of::<cudarc::driver::sys::CUtensorMap>()
     );
     let shape = shape(Sm100Op::Nn);
-    for base in [0x1010_u64, 0x1020, 0x1040, 0x1080] {
+    for base in [0x1002_u64, 0x1008, 0x1010, 0x1020] {
         validate_sm100_map_request(Sm100MapRequest {
             op: Sm100Op::Nn,
             dtype: WeightDtype::Bf16,
@@ -384,12 +398,12 @@ fn sm100_maps_use_driver_abi_and_sixteen_byte_bases() {
         op: Sm100Op::Nn,
         dtype: WeightDtype::F16,
         tile: Sm100Tile::M128N128,
-        a_ptr: 0x1008,
+        a_ptr: 0x1001,
         b_ptr: 0x2000,
         shape,
     })
     .unwrap_err();
-    assert!(error.contains("16-byte aligned"), "{error}");
+    assert!(error.contains("element aligned"), "{error}");
 }
 
 #[test]
@@ -418,4 +432,95 @@ fn sm100_maps_reject_bad_strides_and_zero_shapes() {
         }
         assert!(validate_sm100_map_request(request).is_err());
     }
+}
+
+#[test]
+fn sm100_capture_launch_stays_prepared_and_side_effect_free() {
+    let launch = public_function_source(LAUNCH_SOURCE, "launch_sm100_tcgen_prepared");
+    assert_eq!(launch.matches("builder.arg(").count(), 5);
+    for forbidden in [
+        "compute_capability",
+        "capture_status",
+        "sm100_map_binding",
+        "allocation_identities",
+        "validate_live_allocations",
+        "tensor_map_keys",
+        "encode_sm100_tensor_maps",
+        "compile_sm100",
+        "probe_sm100",
+    ] {
+        assert!(
+            !launch.contains(forbidden),
+            "capture launch contains {forbidden}"
+        );
+    }
+
+    for name in ["prepare_sm100_tensor_maps", "prepare_sm100_tcgen_forced"] {
+        let prepare = public_function_source(LAUNCH_SOURCE, name);
+        let capture = prepare.find("capture_status").expect("capture guard");
+        let capability = prepare
+            .find("sm100_map_binding")
+            .expect("capability and target binding");
+        assert!(
+            capture < capability,
+            "{name} must reject capture before capability or allocation work"
+        );
+    }
+}
+
+#[test]
+fn sm100_cuda_abi_carries_coordinate_origins_to_every_tma_load() {
+    for required in [
+        "struct Sm100KernelParams {",
+        "static_assert(sizeof(Sm100KernelParams) == 40",
+        "static_assert(alignof(Sm100KernelParams) == 4",
+        "sizeof(((Sm100KernelParams*)0)->a_x) == 4",
+        "sizeof(((Sm100KernelParams*)0)->a_y) == 4",
+        "sizeof(((Sm100KernelParams*)0)->b_x) == 4",
+        "sizeof(((Sm100KernelParams*)0)->b_y) == 4",
+        "sizeof(((Sm100KernelParams*)0)->alpha) == 4",
+        "sizeof(((Sm100KernelParams*)0)->beta) == 4",
+        "sizeof(((Sm100KernelParams*)0)->m) == 4",
+        "sizeof(((Sm100KernelParams*)0)->k) == 4",
+        "sizeof(((Sm100KernelParams*)0)->n) == 4",
+        "sizeof(((Sm100KernelParams*)0)->ldc) == 4",
+        "const __grid_constant__ Sm100KernelParams params",
+        "int map_x = x + origin_x;",
+        "int map_y = y + origin_y;",
+    ] {
+        assert!(
+            SOURCE.contains(required),
+            "missing CUDA ABI contract: {required}"
+        );
+    }
+
+    assert_eq!(
+        SOURCE.matches("params.a_x, params.a_y").count(),
+        4,
+        "every A tensor-map load must carry the A coordinate origin"
+    );
+    assert_eq!(
+        SOURCE.matches("params.b_x, params.b_y").count(),
+        5,
+        "every B tensor-map load must carry the B coordinate origin"
+    );
+}
+
+#[test]
+fn sm100_cuda_tile_indices_are_i32_boundary_safe() {
+    for required in [
+        "unsigned column_tiles = 1U +",
+        "static_cast<unsigned>(output_columns) - 1U",
+        "unsigned output_row_value = (blockIdx.x / column_tiles) * 128U;",
+        "unsigned output_col_value =",
+        "(blockIdx.x % column_tiles) * static_cast<unsigned>(Columns);",
+        "int output_row = static_cast<int>(output_row_value);",
+        "int output_col = static_cast<int>(output_col_value);",
+    ] {
+        assert!(
+            SOURCE.contains(required),
+            "missing safe tile math: {required}"
+        );
+    }
+    assert!(!SOURCE.contains("(output_columns + Columns - 1) / Columns"));
 }
