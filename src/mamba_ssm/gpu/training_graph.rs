@@ -45,6 +45,7 @@
 //! 2.5, `torch/cuda/graphs.py` and `_multi_tensor_adamw`).
 
 use cudarc::driver::{CudaGraph, PushKernelArg};
+use std::sync::Arc;
 
 use crate::mamba_ssm::gpu::adamw::{AdamWBiasFactors, AdamWMultiPlan, GpuAdamW, step_multi};
 use crate::mamba_ssm::gpu::backward::gpu_backward_mamba_backbone;
@@ -136,8 +137,19 @@ pub struct MambaMixedReplay<'a> {
 }
 
 /// CUDA-Graph holder for a single Mamba SSM training step (bf16).
+///
+/// The raw driver graph stays private so replay cannot bypass the captured
+/// context, route, and pointer checks.
+///
+/// ```compile_fail
+/// # use mamba_rs::mamba_ssm::gpu::training_graph::GpuMambaTrainingStepGraph;
+/// # fn raw_launch(graph: &GpuMambaTrainingStepGraph) {
+/// let _ = &graph.graph;
+/// # }
+/// ```
 pub struct GpuMambaTrainingStepGraph {
-    pub graph: CudaGraph,
+    graph: CudaGraph,
+    ctx_resources: Arc<crate::mamba_ssm::gpu::context::GpuCtxResources>,
     pub batch: usize,
     pub seq_len: usize,
     pub dtype: WeightDtype,
@@ -184,6 +196,8 @@ pub struct GpuMambaTrainingStepGraph {
     captured_bi_upcast_ptrs: [u64; 3],
     // Complete GEMM route captured with the graph.
     captured_gemm_flags: crate::mamba_ssm::gpu::context::GemmRoute,
+    captured_ctx_token: u64,
+    captured_stream_token: usize,
 }
 
 impl GpuMambaTrainingStepGraph {
@@ -207,7 +221,13 @@ impl GpuMambaTrainingStepGraph {
     /// (or whatever step number you'll start replaying at). The captured
     /// AdamW reads from `bias`'s device pointer; CPU-side `adam.advance()`
     /// + `bias.write()` between replays drives the per-step values.
-    pub fn capture(
+    /// # Safety
+    ///
+    /// The context, stream, cuBLAS handle, module functions, multi-plan, and
+    /// every allocation or view used by the captured body must remain unchanged
+    /// until this holder is destroyed and every replay has completed. Replay
+    /// pointer checks diagnose drift but do not extend any CUDA lifetime.
+    pub unsafe fn capture(
         ctx: &GpuCtx,
         cfg: &crate::config::MambaConfig,
         cap: MambaMixedCapture<'_>,
@@ -262,7 +282,6 @@ impl GpuMambaTrainingStepGraph {
             input_dim,
             train_w.dtype,
         )?;
-
         // Snapshot pointers BEFORE capture so we can stash them after the
         // helper consumes the &mut borrows.
         let snap_input = mamba_input.cached_ptr();
@@ -282,55 +301,59 @@ impl GpuMambaTrainingStepGraph {
         let snap_half_staging = ctx.half_staging_ptr();
         let snap_bi_upcast = ctx.bi_upcast_scratch_ptrs();
 
-        let graph = capture_into_graph(&ctx.stream, || {
-            grads.zero(&ctx.stream)?;
-            gpu_forward_mamba_backbone_mixed(
-                ctx,
-                acts,
-                &train_w.compute,
-                mamba_input,
-                state,
-                scratch,
-            )?;
-            gpu_backward_mamba_backbone_mixed(
-                ctx,
-                d_temporal,
-                grads,
-                acts,
-                &train_w.compute,
-                a_neg_all,
-                scratch,
-            )?;
-            // ONE fused launch: every master tensor updated, the four
-            // bulk typed shadows written in the same kernel (the old
-            // per-tensor walk was 243 launches + a 4-cast/layer sync).
-            step_multi(
-                ctx,
-                ctx.kernels.adamw_step_multi.get(train_w.dtype),
-                multi_plan,
-                adam,
-                bias.ptr(),
-            )?;
-            // f32-stays-f32 tensors still ride the (trimmed) sync walk.
-            train_w.sync_master_to_compute(ctx)?;
-            // Recompute a_neg = -exp(a_log) into BOTH a_neg_all buffers
-            // used by forward and backward. Without these launches baked
-            // into the captured body the graph replays a stale A-matrix
-            // forever — a_log moves per AdamW step but the SSM kernel
-            // reads the initial a_neg values until re-capture.
-            recompute_a_neg_captured(
-                ctx,
-                &train_w.master.layers,
-                a_neg_all,
-                &state.a_neg_all,
-                cfg.d_inner(),
-                cfg.d_state,
-            )?;
-            Ok(())
-        })?;
+        ctx.freeze_graph_scratch();
+        let graph = unsafe {
+            capture_into_graph(&ctx.stream, || {
+                grads.zero(&ctx.stream)?;
+                gpu_forward_mamba_backbone_mixed(
+                    ctx,
+                    acts,
+                    &train_w.compute,
+                    mamba_input,
+                    state,
+                    scratch,
+                )?;
+                gpu_backward_mamba_backbone_mixed(
+                    ctx,
+                    d_temporal,
+                    grads,
+                    acts,
+                    &train_w.compute,
+                    a_neg_all,
+                    scratch,
+                )?;
+                // ONE fused launch: every master tensor updated, the four
+                // bulk typed shadows written in the same kernel (the old
+                // per-tensor walk was 243 launches + a 4-cast/layer sync).
+                step_multi(
+                    ctx,
+                    ctx.kernels.adamw_step_multi.get(train_w.dtype),
+                    multi_plan,
+                    adam,
+                    bias.ptr(),
+                )?;
+                // f32-stays-f32 tensors still ride the (trimmed) sync walk.
+                train_w.sync_master_to_compute(ctx)?;
+                // Recompute a_neg = -exp(a_log) into BOTH a_neg_all buffers
+                // used by forward and backward. Without these launches baked
+                // into the captured body the graph replays a stale A-matrix
+                // forever — a_log moves per AdamW step but the SSM kernel
+                // reads the initial a_neg values until re-capture.
+                recompute_a_neg_captured(
+                    ctx,
+                    &train_w.master.layers,
+                    a_neg_all,
+                    &state.a_neg_all,
+                    cfg.d_inner(),
+                    cfg.d_state,
+                )?;
+                Ok(())
+            })
+        }?;
 
         Ok(Self {
             graph,
+            ctx_resources: ctx.resource_anchor(),
             batch,
             seq_len,
             dtype: train_w.dtype,
@@ -354,6 +377,8 @@ impl GpuMambaTrainingStepGraph {
                 ctx.note_graph_capture();
                 ctx.gemm_route()
             },
+            captured_ctx_token: ctx.instance_token(),
+            captured_stream_token: ctx.stream_token(),
         })
     }
 
@@ -367,6 +392,17 @@ impl GpuMambaTrainingStepGraph {
     /// Asserts every captured pointer still matches the live buffer's
     /// `cached_ptr()` — any reallocation since capture is a panic.
     pub fn replay(&self, ctx: &GpuCtx, rp: &MambaMixedReplay<'_>) -> Result<(), String> {
+        if ctx.instance_token() != self.captured_ctx_token {
+            return Err(
+                "training_graph replay: GpuCtx differs from capture; re-capture instead".into(),
+            );
+        }
+        if ctx.stream_token() != self.captured_stream_token {
+            return Err(
+                "training_graph replay: GpuCtx stream differs from capture; re-capture instead"
+                    .into(),
+            );
+        }
         let MambaMixedReplay {
             train_w,
             adam,
@@ -471,6 +507,12 @@ impl GpuMambaTrainingStepGraph {
     }
 }
 
+impl Drop for GpuMambaTrainingStepGraph {
+    fn drop(&mut self) {
+        let _ = self.ctx_resources.stream.synchronize();
+    }
+}
+
 // ════════════════════════════════════════════════════════════════════════
 // f32 training step graph (no master/compute split, no half_staging).
 // ════════════════════════════════════════════════════════════════════════
@@ -516,8 +558,16 @@ pub struct MambaF32Replay<'a> {
 /// `grads.zero + forward + backward + AdamW`. There's no
 /// `sync_master_to_compute` because f32 training has no compute shadow —
 /// weights are read directly during the next step's forward.
+///
+/// ```compile_fail
+/// # use mamba_rs::mamba_ssm::gpu::training_graph::GpuMambaF32TrainingStepGraph;
+/// # fn raw_launch(graph: &GpuMambaF32TrainingStepGraph) {
+/// let _ = &graph.graph;
+/// # }
+/// ```
 pub struct GpuMambaF32TrainingStepGraph {
-    pub graph: CudaGraph,
+    graph: CudaGraph,
+    ctx_resources: Arc<crate::mamba_ssm::gpu::context::GpuCtxResources>,
     pub batch: usize,
     pub seq_len: usize,
 
@@ -539,6 +589,8 @@ pub struct GpuMambaF32TrainingStepGraph {
     captured_weights_norm_f_ptr: u64,
     // The trainer checks this route before replay.
     captured_gemm_flags: crate::mamba_ssm::gpu::context::GemmRoute,
+    captured_ctx_token: u64,
+    captured_stream_token: usize,
 }
 
 impl GpuMambaF32TrainingStepGraph {
@@ -551,7 +603,13 @@ impl GpuMambaF32TrainingStepGraph {
     /// warmup contract as the mixed variant: run one eager step before
     /// calling this so cuBLAS has selected its kernels and any lazy
     /// resources have settled.
-    pub fn capture(
+    /// # Safety
+    ///
+    /// The context, stream, cuBLAS handle, module functions, multi-plan, and
+    /// every allocation or view used by the captured body must remain unchanged
+    /// until this holder is destroyed and every replay has completed. Replay
+    /// pointer checks diagnose drift but do not extend any CUDA lifetime.
+    pub unsafe fn capture(
         ctx: &GpuCtx,
         cfg: &crate::config::MambaConfig,
         cap: MambaF32Capture<'_>,
@@ -587,35 +645,48 @@ impl GpuMambaF32TrainingStepGraph {
         let snap_norm_f = weights.norm_f_weight.cached_ptr();
 
         let cfg_local = *cfg;
-        let graph = capture_into_graph(&ctx.stream, || {
-            grads.zero(&ctx.stream)?;
-            gpu_forward_mamba_backbone(ctx, temporal, acts, weights, mamba_input, state, scratch)?;
-            gpu_backward_mamba_backbone(ctx, d_temporal, grads, acts, weights, a_neg_all, scratch)?;
-            step_multi(
-                ctx,
-                ctx.kernels
-                    .adamw_step_multi
-                    .get(crate::mamba_ssm::gpu::dtype::WeightDtype::F32),
-                multi_plan,
-                adam,
-                bias.ptr(),
-            )?;
-            // Recompute a_neg after AdamW — see mixed graph above for
-            // rationale. Without this the f32 SSM runs on a stale A-matrix
-            // across every replay.
-            recompute_a_neg_captured(
-                ctx,
-                &weights.layers,
-                a_neg_all,
-                &state.a_neg_all,
-                cfg_local.d_inner(),
-                cfg_local.d_state,
-            )?;
-            Ok(())
-        })?;
+        let graph = unsafe {
+            capture_into_graph(&ctx.stream, || {
+                grads.zero(&ctx.stream)?;
+                gpu_forward_mamba_backbone(
+                    ctx,
+                    temporal,
+                    acts,
+                    weights,
+                    mamba_input,
+                    state,
+                    scratch,
+                )?;
+                gpu_backward_mamba_backbone(
+                    ctx, d_temporal, grads, acts, weights, a_neg_all, scratch,
+                )?;
+                step_multi(
+                    ctx,
+                    ctx.kernels
+                        .adamw_step_multi
+                        .get(crate::mamba_ssm::gpu::dtype::WeightDtype::F32),
+                    multi_plan,
+                    adam,
+                    bias.ptr(),
+                )?;
+                // Recompute a_neg after AdamW — see mixed graph above for
+                // rationale. Without this the f32 SSM runs on a stale A-matrix
+                // across every replay.
+                recompute_a_neg_captured(
+                    ctx,
+                    &weights.layers,
+                    a_neg_all,
+                    &state.a_neg_all,
+                    cfg_local.d_inner(),
+                    cfg_local.d_state,
+                )?;
+                Ok(())
+            })
+        }?;
 
         Ok(Self {
             graph,
+            ctx_resources: ctx.resource_anchor(),
             batch,
             seq_len,
             captured_input_ptr: snap_input,
@@ -635,10 +706,24 @@ impl GpuMambaF32TrainingStepGraph {
                 ctx.note_graph_capture();
                 ctx.gemm_route()
             },
+            captured_ctx_token: ctx.instance_token(),
+            captured_stream_token: ctx.stream_token(),
         })
     }
 
     pub fn replay(&self, ctx: &GpuCtx, rp: &MambaF32Replay<'_>) -> Result<(), String> {
+        if ctx.instance_token() != self.captured_ctx_token {
+            return Err(
+                "f32 training_graph replay: GpuCtx differs from capture; re-capture instead".into(),
+            );
+        }
+        if ctx.stream_token() != self.captured_stream_token {
+            return Err(
+                "f32 training_graph replay: GpuCtx stream differs from capture; \
+                 re-capture instead"
+                    .into(),
+            );
+        }
         self.captured_gemm_flags
             .ensure_current(ctx.gemm_route(), "f32 training_graph replay")?;
         let MambaF32Replay {
@@ -720,5 +805,11 @@ impl GpuMambaF32TrainingStepGraph {
         self.graph
             .launch()
             .map_err(|e| format!("f32 training_graph launch: {e:?}"))
+    }
+}
+
+impl Drop for GpuMambaF32TrainingStepGraph {
+    fn drop(&mut self) {
+        let _ = self.ctx_resources.stream.synchronize();
     }
 }

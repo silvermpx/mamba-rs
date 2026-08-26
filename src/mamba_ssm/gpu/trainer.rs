@@ -461,14 +461,27 @@ impl MambaTrainer {
     /// `backward_step(accumulate_only = true)` and [`Self::apply_step`];
     /// single-process training never needs it.
     ///
-    /// Contract: mutate the CONTENTS only (upload / in-place collective).
-    /// The per-tensor gradient views cache this allocation's device
-    /// pointer, so replacing or reallocating the buffer itself would
-    /// leave them dangling.
-    pub fn grad_arena(&mut self) -> &mut GpuBuffer {
+    /// The allocation itself is intentionally read-only through this API:
+    /// per-tensor views and CUDA graphs retain its device address.
+    ///
+    /// ```compile_fail
+    /// use mamba_rs::mamba_ssm::gpu::{buffers::GpuBuffer, trainer::MambaTrainer};
+    /// fn replace_arena(trainer: &mut MambaTrainer, replacement: GpuBuffer) {
+    ///     let _ = std::mem::replace(trainer.grad_arena(), replacement);
+    /// }
+    /// ```
+    pub fn grad_arena(&self) -> &GpuBuffer {
+        match &self.inner {
+            TrainerInner::F32(t) => &t.grads.flat,
+            TrainerInner::Mixed(t) => &t.grads.flat,
+        }
+    }
+
+    /// Replace the gradient contents without replacing their allocation.
+    pub fn upload_grad_arena(&mut self, values: &[f32]) -> Result<(), String> {
         match &mut self.inner {
-            TrainerInner::F32(t) => &mut t.grads.flat,
-            TrainerInner::Mixed(t) => &mut t.grads.flat,
+            TrainerInner::F32(t) => t.grads.flat.upload(&t.ctx.stream, values),
+            TrainerInner::Mixed(t) => t.grads.flat.upload(&t.ctx.stream, values),
         }
     }
 
@@ -643,10 +656,14 @@ impl MambaTrainer {
     /// eagerly until re-captured.
     pub fn drop_graph(&mut self) {
         match &mut self.inner {
-            TrainerInner::F32(t) => t.graph = None,
+            TrainerInner::F32(t) => {
+                let _ = t.ctx.stream.synchronize();
+                drop(t.graph.take());
+            }
             TrainerInner::Mixed(t) => {
-                t.graph = None;
-                t.graph_f16 = None;
+                let _ = t.ctx.stream.synchronize();
+                drop(t.graph.take());
+                drop(t.graph_f16.take());
             }
         }
     }
@@ -858,6 +875,14 @@ pub(crate) struct MambaTrainerMixed {
     pin_input: super::buffers::PinnedHostBuf,
     pin_dtemp: super::buffers::PinnedHostBuf,
     upload_guard: cudarc::driver::CudaEvent,
+}
+
+impl Drop for MambaTrainerMixed {
+    fn drop(&mut self) {
+        let _ = self.ctx.stream.synchronize();
+        drop(self.graph.take());
+        drop(self.graph_f16.take());
+    }
 }
 
 impl MambaTrainerMixed {
@@ -1120,25 +1145,28 @@ impl MambaTrainerMixed {
         // overwritten per step by `step()`.
         self.bias.write(&self.ctx.stream, 1.0, 1.0, self.adam.lr)?;
 
-        let g = GpuMambaTrainingStepGraph::capture(
-            &self.ctx,
-            &self.cfg,
-            MambaMixedCapture {
-                train_w: &mut self.weights,
-                adam: &self.adam,
-                bias: &self.bias,
-                multi_plan: &self.multi_plan,
-                grads: &mut self.grads,
-                acts: &mut self.acts,
-                scratch: &mut self.scratch,
-                a_neg_all: &self.a_neg_all,
-                mamba_input: &self.mamba_input,
-                d_temporal: &mut self.d_temporal,
-                state: &mut self.state,
-            },
-            self.batch,
-            self.seq_len,
-        )?;
+        // The trainer owns every captured allocation and drops the graph first.
+        let g = unsafe {
+            GpuMambaTrainingStepGraph::capture(
+                &self.ctx,
+                &self.cfg,
+                MambaMixedCapture {
+                    train_w: &mut self.weights,
+                    adam: &self.adam,
+                    bias: &self.bias,
+                    multi_plan: &self.multi_plan,
+                    grads: &mut self.grads,
+                    acts: &mut self.acts,
+                    scratch: &mut self.scratch,
+                    a_neg_all: &self.a_neg_all,
+                    mamba_input: &self.mamba_input,
+                    d_temporal: &mut self.d_temporal,
+                    state: &mut self.state,
+                },
+                self.batch,
+                self.seq_len,
+            )
+        }?;
         self.graph = Some(g);
         Ok(())
     }
@@ -1684,7 +1712,6 @@ impl MambaTrainerMixed {
             input_dim,
             self.dtype,
         )?;
-
         // Snapshot every device pointer the captured kernels reference, so
         // step_f16 can assert pointer-stability on each replay (audit Step
         // audit finding: f16 graph was missing these guards).
@@ -1702,31 +1729,34 @@ impl MambaTrainerMixed {
         // scale_grads_skip + AdamW + sync_master_to_compute. Mirrors
         // `step_f16` eager path 1:1 so numerics match.
         let stream = self.ctx.stream.clone();
-        let g = capture_into_graph(&stream, || {
-            self.grads.zero(&self.ctx.stream)?;
-            self.eager_forward()?;
-            self.eager_backward(true)?;
-            check_inf_nan_gpu(
-                &self.ctx,
-                &self.ctx.kernels,
-                self.overflow_flag.as_mut().unwrap(),
-                &self.grads.flat,
-            )?;
-            scale_grads_skip_gpu(
-                &self.ctx,
-                &self.ctx.kernels,
-                self.overflow_flag.as_mut().unwrap(),
-                &mut self.grads.flat,
-                self.unscale_factor.as_ref().unwrap(),
-            )?;
-            // AdamW runs unconditionally in the captured body (branching
-            // mid-graph is unsupported); scale_grads_skip has already
-            // sanitized the arena on overflow. eager_optimize also recomputes
-            // a_neg after AdamW so each replay sees the updated A-matrix
-            // (same rationale as the eager and bf16-graph paths).
-            self.eager_optimize()?;
-            Ok(())
-        })?;
+        self.ctx.freeze_graph_scratch();
+        let g = unsafe {
+            capture_into_graph(&stream, || {
+                self.grads.zero(&self.ctx.stream)?;
+                self.eager_forward()?;
+                self.eager_backward(true)?;
+                check_inf_nan_gpu(
+                    &self.ctx,
+                    &self.ctx.kernels,
+                    self.overflow_flag.as_mut().unwrap(),
+                    &self.grads.flat,
+                )?;
+                scale_grads_skip_gpu(
+                    &self.ctx,
+                    &self.ctx.kernels,
+                    self.overflow_flag.as_mut().unwrap(),
+                    &mut self.grads.flat,
+                    self.unscale_factor.as_ref().unwrap(),
+                )?;
+                // AdamW runs unconditionally in the captured body (branching
+                // mid-graph is unsupported); scale_grads_skip has already
+                // sanitized the arena on overflow. eager_optimize also recomputes
+                // a_neg after AdamW so each replay sees the updated A-matrix
+                // (same rationale as the eager and bf16-graph paths).
+                self.eager_optimize()?;
+                Ok(())
+            })
+        }?;
         self.graph_f16 = Some(g);
         self.captured_f16_bias_ptr = snap_bias;
         self.captured_f16_unscale_ptr = snap_unscale;
@@ -1888,6 +1918,13 @@ pub(crate) struct MambaTrainerF32 {
     upload_guard: cudarc::driver::CudaEvent,
 }
 
+impl Drop for MambaTrainerF32 {
+    fn drop(&mut self) {
+        let _ = self.ctx.stream.synchronize();
+        drop(self.graph.take());
+    }
+}
+
 impl MambaTrainerF32 {
     /// Upload through the pinned stage. Waits out the previous
     /// step's DMA (guard event) before rewriting the staging buffer,
@@ -2042,26 +2079,29 @@ impl MambaTrainerF32 {
 
     pub fn capture_graph(&mut self) -> Result<(), String> {
         self.bias.write(&self.ctx.stream, 1.0, 1.0, self.adam.lr)?;
-        let g = GpuMambaF32TrainingStepGraph::capture(
-            &self.ctx,
-            &self.cfg,
-            MambaF32Capture {
-                weights: &mut self.weights,
-                adam: &self.adam,
-                bias: &self.bias,
-                multi_plan: &self.multi_plan,
-                grads: &mut self.grads,
-                acts: &mut self.acts,
-                scratch: &mut self.scratch,
-                a_neg_all: &self.a_neg_all,
-                temporal: &mut self.temporal,
-                mamba_input: &self.mamba_input,
-                d_temporal: &mut self.d_temporal,
-                state: &mut self.state,
-            },
-            self.batch,
-            self.seq_len,
-        )?;
+        // The trainer owns every captured allocation and drops the graph first.
+        let g = unsafe {
+            GpuMambaF32TrainingStepGraph::capture(
+                &self.ctx,
+                &self.cfg,
+                MambaF32Capture {
+                    weights: &mut self.weights,
+                    adam: &self.adam,
+                    bias: &self.bias,
+                    multi_plan: &self.multi_plan,
+                    grads: &mut self.grads,
+                    acts: &mut self.acts,
+                    scratch: &mut self.scratch,
+                    a_neg_all: &self.a_neg_all,
+                    temporal: &mut self.temporal,
+                    mamba_input: &self.mamba_input,
+                    d_temporal: &mut self.d_temporal,
+                    state: &mut self.state,
+                },
+                self.batch,
+                self.seq_len,
+            )
+        }?;
         self.graph = Some(g);
         Ok(())
     }

@@ -117,7 +117,7 @@ impl DistContext {
     #[cfg(feature = "cuda")]
     pub fn all_reduce_grad_sum(
         &self,
-        arena: &mut crate::mamba_ssm::gpu::buffers::GpuBuffer,
+        arena: &crate::mamba_ssm::gpu::buffers::GpuBuffer,
         stream: &cudarc::driver::CudaStream,
     ) -> Result<(), DistError> {
         match &self.inner {

@@ -9,6 +9,25 @@ use super::kernels::MambaKernels;
 use crate::config::MambaConfig;
 use std::cell::RefCell;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static NEXT_GPU_CTX_TOKEN: AtomicU64 = AtomicU64::new(1);
+
+fn m1_mixed_graph_max_dim(dims: &super::forward::GpuMambaDims) -> usize {
+    dims.d_model
+        .max(2 * dims.d_inner)
+        .max(dims.xdbl_dim)
+        .max(dims.mamba_input_dim)
+}
+
+fn next_gpu_ctx_token() -> Result<u64, String> {
+    NEXT_GPU_CTX_TOKEN
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |token| {
+            token.checked_add(1)
+        })
+        .map_err(|_| "GpuCtx instance token space exhausted".to_string())
+}
+
 /// Which batch-invariant GEMM family serves the forward while
 /// [`GpuCtx::batch_invariant`] is on. Both are deterministic; they are
 /// named for the STRUCTURE that produces their differing guarantee, not
@@ -47,16 +66,34 @@ pub type GemmRoute = GemmRouteIdentity;
 /// GPU execution context — holds everything needed for kernel launches.
 ///
 /// Created once at init, passed by reference to all GPU functions.
-pub struct GpuCtx {
+#[doc(hidden)]
+pub struct GpuCtxResources {
     pub stream: Arc<cudarc::driver::CudaStream>,
-    pub kernels: MambaKernels,
+    pub kernels: Arc<MambaKernels>,
     pub blas: cudarc::cublas::CudaBlas,
-    pub _blas_workspace: cudarc::driver::CudaSlice<u8>,
+    pub _blas_workspace: Arc<cudarc::driver::CudaSlice<u8>>,
     /// Reusable GPU byte staging buffer for f32→bf16/f16 activation downcast
     /// before mixed-precision GEMM. Grown lazily on first use.
     half_staging: RefCell<Option<cudarc::driver::CudaSlice<u8>>>,
     half_staging_ptr: RefCell<cudarc::driver::sys::CUdeviceptr>,
     half_staging_bytes: RefCell<usize>,
+    bi_upcast_scratch: [RefCell<Option<super::buffers::GpuBuffer>>; 3],
+}
+
+/// GPU execution context — holds everything needed for kernel launches.
+///
+/// Created once at init, passed by reference to all GPU functions. Its GPU
+/// resource core is immutable so a captured graph can retain the exact stream,
+/// modules, cuBLAS workspace, and lazy scratch allocations it recorded.
+///
+/// ```compile_fail
+/// # use mamba_rs::mamba_ssm::gpu::context::GpuCtx;
+/// # fn replace_stream(ctx: &mut GpuCtx, stream: std::sync::Arc<cudarc::driver::CudaStream>) {
+/// ctx.stream = stream;
+/// # }
+/// ```
+pub struct GpuCtx {
+    resources: Arc<GpuCtxResources>,
     /// Opt-in flag for the batch-invariant matvec path (`matvec_bi_*`).
     /// Default: `false` → cuBLAS gemv (faster, but M=1/M=N may differ at
     /// sub-ULP scale). Set via `set_batch_invariant(true)` or the
@@ -89,18 +126,24 @@ pub struct GpuCtx {
     /// The state capacity the kernels were compiled with — part of the
     /// numeric-route identity a bench stamp must carry.
     state_cap: usize,
+    instance_token: u64,
     device_identity: super::kernel_identity::DeviceIdentity,
     policy_hash: super::kernel_identity::Sha256Digest,
     /// Number of CUDA graphs captured on this context: the tier
     /// setters warn when flipped after a capture — the captured kernels
     /// cannot follow, and the replay-time flag assert refuses to run.
     graphs_captured: std::cell::Cell<u64>,
-    /// Grow-only f32 scratch triple for the batch-invariant typed-GEMM
-    /// upcast fallback: typed shapes without a native typed bucket run as
-    /// "upcast inputs → f32 sgemm_bi → RNE downcast output", bit-identical
-    /// to a native typed kernel by the stage-2 contract. Lazily grown on
-    /// first hit; steady-state training steps reuse without allocation.
-    bi_upcast_scratch: [RefCell<Option<super::buffers::GpuBuffer>>; 3],
+    /// Once a graph can observe the grow-only typed-GEMM scratch, its
+    /// allocation addresses are immutable for the rest of this context.
+    graph_scratch_frozen: std::cell::Cell<bool>,
+}
+
+impl std::ops::Deref for GpuCtx {
+    type Target = GpuCtxResources;
+
+    fn deref(&self) -> &Self::Target {
+        &self.resources
+    }
 }
 
 impl GpuCtx {
@@ -199,25 +242,50 @@ impl GpuCtx {
                     .to_string(),
             );
         }
+        let instance_token = next_gpu_ctx_token()?;
+        let kernels = Arc::new(kernels);
         Ok(Self {
-            stream,
-            kernels,
-            blas,
-            _blas_workspace: ws,
-            half_staging: RefCell::new(None),
-            half_staging_ptr: RefCell::new(0),
-            half_staging_bytes: RefCell::new(0),
+            resources: Arc::new(GpuCtxResources {
+                stream,
+                kernels,
+                blas,
+                _blas_workspace: Arc::new(ws),
+                half_staging: RefCell::new(None),
+                half_staging_ptr: RefCell::new(0),
+                half_staging_bytes: RefCell::new(0),
+                bi_upcast_scratch: [RefCell::new(None), RefCell::new(None), RefCell::new(None)],
+            }),
             batch_invariant: std::cell::Cell::new(batch_invariant),
             bi_tensor_cores: std::cell::Cell::new(bi_tensor_cores),
             bi_gemm_family: std::cell::Cell::new(bi_gemm_family),
             fast_gemm: std::cell::Cell::new(fast_gemm),
             tf32: std::cell::Cell::new(true),
             state_cap,
+            instance_token,
             device_identity: device.identity(),
             policy_hash: super::kernel_identity::legacy_sm80_policy_digest(),
             graphs_captured: std::cell::Cell::new(0),
-            bi_upcast_scratch: [RefCell::new(None), RefCell::new(None), RefCell::new(None)],
+            graph_scratch_frozen: std::cell::Cell::new(false),
         })
+    }
+
+    pub(crate) fn resource_anchor(&self) -> Arc<GpuCtxResources> {
+        self.resources.clone()
+    }
+
+    pub(crate) fn instance_token(&self) -> u64 {
+        self.instance_token
+    }
+
+    pub(crate) fn stream_token(&self) -> usize {
+        Arc::as_ptr(&self.stream) as usize
+    }
+
+    /// Freeze graph-visible staging allocations immediately before capture.
+    /// A failed capture deliberately leaves the context frozen: CUDA may have
+    /// observed the addresses before returning the error.
+    pub(crate) fn freeze_graph_scratch(&self) {
+        self.graph_scratch_frozen.set(true);
     }
 
     /// Run `f` with the three grow-only f32 scratch buffers used by the
@@ -234,6 +302,18 @@ impl GpuCtx {
         ) -> Result<R, String>,
     ) -> Result<R, String> {
         let sizes = [elems.0, elems.1, elems.2];
+        let needs_growth = self
+            .bi_upcast_scratch
+            .iter()
+            .zip(&sizes)
+            .any(|(cell, &need)| cell.borrow().as_ref().map_or(0, |b| b.len()) < need.max(1));
+        if needs_growth && self.graph_scratch_frozen.get() {
+            return Err(
+                "batch-invariant upcast scratch cannot grow after CUDA graph capture; \
+                 destroy the context or pre-size the largest shape before capture"
+                    .into(),
+            );
+        }
         for (cell, &need) in self.bi_upcast_scratch.iter().zip(&sizes) {
             let mut slot = cell.borrow_mut();
             let have = slot.as_ref().map_or(0, |b| b.len());
@@ -264,6 +344,20 @@ impl GpuCtx {
                 .map_or(0, |b| b.cached_ptr())
         };
         [p(0), p(1), p(2)]
+    }
+
+    pub(crate) fn ensure_graph_scratch_ptrs(
+        &self,
+        half_staging: cudarc::driver::sys::CUdeviceptr,
+        bi_upcast: [cudarc::driver::sys::CUdeviceptr; 3],
+        label: &str,
+    ) -> Result<(), String> {
+        if self.half_staging_ptr() != half_staging || self.bi_upcast_scratch_ptrs() != bi_upcast {
+            return Err(format!(
+                "{label}: graph-visible staging scratch changed since capture"
+            ));
+        }
+        Ok(())
     }
 
     /// Pre-size the batch-invariant typed-GEMM upcast scratch for a mixed
@@ -358,6 +452,52 @@ impl GpuCtx {
         let max_kn = (dm * ip).max(di * dm).max(input_dim * dm);
         let elems = (m * max_dim).max(max_kn);
         self.with_bi_upcast_scratch((elems, elems, elems), |_, _, _| Ok(()))
+    }
+
+    pub(crate) fn presize_mixed_graph_scratch_m1(
+        &self,
+        dims: &super::forward::GpuMambaDims,
+        dtype: WeightDtype,
+    ) -> Result<(), String> {
+        if matches!(dtype, WeightDtype::F32) {
+            return Ok(());
+        }
+        let max_dim = m1_mixed_graph_max_dim(dims);
+        self.ensure_half_staging(dims.bt() * max_dim * dtype.size_bytes())?;
+        if self.batch_invariant() {
+            let max_kn = (dims.d_model * 2 * dims.d_inner)
+                .max(dims.d_inner * dims.xdbl_dim)
+                .max(dims.dt_rank * dims.d_inner)
+                .max(dims.d_inner * dims.d_model)
+                .max(dims.mamba_input_dim * dims.d_model);
+            let elems = (dims.bt() * max_dim).max(max_kn);
+            self.with_bi_upcast_scratch((elems, elems, elems), |_, _, _| Ok(()))?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn presize_mixed_graph_scratch_m3(
+        &self,
+        dims: &crate::mamba3_siso::gpu::state::GpuMamba3Dims,
+        dtype: WeightDtype,
+    ) -> Result<(), String> {
+        if matches!(dtype, WeightDtype::F32) {
+            return Ok(());
+        }
+        let max_dim = dims
+            .d_model
+            .max(dims.d_inner)
+            .max(dims.in_proj_dim)
+            .max(dims.mamba_input_dim);
+        self.ensure_half_staging(dims.bt() * max_dim * dtype.size_bytes())?;
+        if self.batch_invariant() {
+            let max_kn = (dims.d_model * dims.in_proj_dim)
+                .max(dims.d_inner * dims.d_model)
+                .max(dims.mamba_input_dim * dims.d_model);
+            let elems = (dims.bt() * max_dim).max(max_kn);
+            self.with_bi_upcast_scratch((elems, elems, elems), |_, _, _| Ok(()))?;
+        }
+        Ok(())
     }
 
     /// Enable or disable the batch-invariant matvec path.
@@ -595,6 +735,13 @@ impl GpuCtx {
         if *cur >= bytes {
             return Ok(());
         }
+        if self.graph_scratch_frozen.get() {
+            return Err(
+                "half-precision staging cannot grow after CUDA graph capture; destroy the \
+                 context or pre-size the largest shape before capture"
+                    .into(),
+            );
+        }
         // Grow by at least the requested size, rounded up to a 4 KiB page —
         // no speculative doubling that wastes memory at the plateau (the old
         // `bytes.max(*cur * 2)` rule could leave us at 4× the actual need
@@ -618,5 +765,31 @@ impl GpuCtx {
 
     pub fn half_staging_ptr(&self) -> cudarc::driver::sys::CUdeviceptr {
         *self.half_staging_ptr.borrow()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::m1_mixed_graph_max_dim;
+    use crate::config::ScanMode;
+    use crate::mamba_ssm::gpu::forward::GpuMambaDims;
+
+    #[test]
+    fn mixed_graph_scratch_covers_the_two_inner_projection_output() {
+        let dims = GpuMambaDims {
+            batch: 1,
+            d_model: 64,
+            d_inner: 129,
+            d_state: 8,
+            d_conv: 4,
+            dt_rank: 4,
+            xdbl_dim: 20,
+            seq_len: 3,
+            mamba_input_dim: 17,
+            n_layers: 1,
+            scan_mode: ScanMode::Sequential,
+            rms_norm_eps: 1e-5,
+        };
+        assert_eq!(m1_mixed_graph_max_dim(&dims), 258);
     }
 }

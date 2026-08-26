@@ -256,21 +256,24 @@ fn typed_pooled_graph_replay_and_container_guard() {
     let mut pooled = GpuBuffer::zeros(&ctx.stream, dm).unwrap();
     let mut states = StateSet::zeros(&ctx, &cfg, 1);
 
-    let graph = Mamba3PrefillPooledGraph::capture(
-        &mut prefill,
-        &Mamba3PrefillRun {
-            ctx: &ctx,
-            kernels: &kernels,
-            dims: &dims,
-            weights: &mw,
-            mamba_input: &gpu_input,
-            identity_proj: false,
-            carry_state: false,
-        },
-        states.bufs(),
-        &mut last_hidden,
-        &mut pooled,
-    )
+    // Every captured allocation remains alive through graph destruction.
+    let graph = unsafe {
+        Mamba3PrefillPooledGraph::capture(
+            &mut prefill,
+            &Mamba3PrefillRun {
+                ctx: &ctx,
+                kernels: &kernels,
+                dims: &dims,
+                weights: &mw,
+                mamba_input: &gpu_input,
+                identity_proj: false,
+                carry_state: false,
+            },
+            states.bufs(),
+            &mut last_hidden,
+            &mut pooled,
+        )
+    }
     .unwrap();
 
     // Negative first: a replay against the OTHER container must refuse.

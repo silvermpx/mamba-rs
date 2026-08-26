@@ -185,29 +185,48 @@ fn m3_prefill_full_matches_trainer_forward() {
     assert_bitwise("pooled_sum vs ascending-t host fold", &pooled_h, &host_sum);
 
     // Graph replay: same buffers, next page - bit-equal to eager.
-    let graph = Mamba3PrefillPooledGraph::capture(
-        &mut prefill,
-        &Mamba3PrefillRun {
-            ctx: &ctx,
-            kernels: &kernels,
-            dims: &dims,
-            weights: &gw,
-            mamba_input: &gpu_input,
-            identity_proj: false,
-            carry_state: false,
-        },
-        GpuMamba3StateBufs {
-            ssm: &mut ssm,
-            k: &mut kst,
-            v: &mut vst,
-            angle: &mut ast,
-        },
-        &mut last_hidden,
-        &mut pooled,
-    )
+    // Every captured allocation remains alive through graph destruction.
+    let graph = unsafe {
+        Mamba3PrefillPooledGraph::capture(
+            &mut prefill,
+            &Mamba3PrefillRun {
+                ctx: &ctx,
+                kernels: &kernels,
+                dims: &dims,
+                weights: &gw,
+                mamba_input: &gpu_input,
+                identity_proj: false,
+                carry_state: false,
+            },
+            GpuMamba3StateBufs {
+                ssm: &mut ssm,
+                k: &mut kst,
+                v: &mut vst,
+                angle: &mut ast,
+            },
+            &mut last_hidden,
+            &mut pooled,
+        )
+    }
     .unwrap();
     let page2 = det_input(seq_len * input_dim, 78);
     gpu_input.upload(&ctx.stream, &page2).unwrap();
+    let other_ctx = GpuCtx::new(&device).unwrap();
+    let error = graph
+        .replay(
+            &other_ctx,
+            &gw,
+            &gpu_input,
+            &GpuMamba3StateBufs {
+                ssm: &mut ssm,
+                k: &mut kst,
+                v: &mut vst,
+                angle: &mut ast,
+            },
+            &pooled,
+        )
+        .expect_err("replay must reject a different GpuCtx");
+    assert!(error.contains("GpuCtx differs from capture"));
     graph
         .replay(
             &ctx,

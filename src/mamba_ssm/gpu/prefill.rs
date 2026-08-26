@@ -28,6 +28,38 @@ use super::inference::GpuInferenceState;
 use super::launch::{grid_1d, grid_norm, grid_parallel_scan};
 use super::weights::{MambaLayerWeightsView, MambaWeightsView};
 use cudarc::driver::PushKernelArg;
+use std::sync::Arc;
+
+fn layer_bulk_dtype<W: MambaWeightsView>(weights: &W) -> Result<WeightDtype, String> {
+    let mut half_dtype = None;
+    let mut observe = |name: &str, dtype: WeightDtype| -> Result<(), String> {
+        if dtype == WeightDtype::F32 {
+            return Ok(());
+        }
+        if let Some(first) = half_dtype
+            && dtype != first
+        {
+            return Err(format!(
+                "prefill graph {name} dtype {dtype:?} differs from bulk dtype {first:?}"
+            ));
+        }
+        half_dtype = Some(dtype);
+        Ok(())
+    };
+    observe("input_proj", weights.input_proj_w().1)?;
+    for layer_index in 0..weights.n_layers() {
+        let layer = weights.layer(layer_index);
+        for (name, dtype) in [
+            ("in_proj", layer.in_proj_w().1),
+            ("x_proj", layer.x_proj_w().1),
+            ("dt_proj", layer.dt_proj_w().1),
+            ("out_proj", layer.out_proj_w().1),
+        ] {
+            observe(&format!("layer {layer_index} {name}"), dtype)?;
+        }
+    }
+    Ok(half_dtype.unwrap_or(WeightDtype::F32))
+}
 
 /// Prefill a batched prompt sequence through the Mamba backbone in one call.
 ///
@@ -296,12 +328,24 @@ pub fn gpu_forward_inference_prefill_pooled_sum_from_raw<W: MambaWeightsView>(
 /// - the complete GEMM route is snapshotted and checked before launch.
 pub struct PrefillPooledGraph {
     graph: cudarc::driver::CudaGraph,
+    ctx_resources: Arc<crate::mamba_ssm::gpu::context::GpuCtxResources>,
     flags_at_capture: crate::mamba_ssm::gpu::context::GemmRoute,
+    captured_ctx_token: u64,
+    captured_stream_token: usize,
+    captured_half_staging_ptr: u64,
+    captured_bi_upcast_ptrs: [u64; 3],
+    guards_graph_scratch: bool,
 }
 
 impl PrefillPooledGraph {
     /// Capture the pooled prefill over the given fixed buffers.
-    pub fn capture<W: MambaWeightsView>(
+    /// # Safety
+    ///
+    /// The original context, stream, cuBLAS handle, kernel registry, weights,
+    /// inputs, state, scratch, and output allocations must remain unchanged
+    /// until this holder is destroyed and every replay has completed. Pointer
+    /// checks are diagnostics and do not extend any CUDA lifetime.
+    pub unsafe fn capture<W: MambaWeightsView>(
         ctx: &GpuCtx,
         pooled_sum: &mut GpuBuffer,
         inputs: PrefillRawInputs<'_, W>,
@@ -317,24 +361,37 @@ impl PrefillPooledGraph {
             weights,
             a_neg_all,
         } = inputs;
-        let graph = super::graph_capture::capture_into_graph(&ctx.stream, || {
-            state.reset(&ctx.stream)?;
-            gpu_forward_inference_prefill_pooled_sum_from_raw(
-                ctx,
-                pooled_sum,
-                PrefillRawInputs {
-                    input_flat,
-                    weights,
-                    a_neg_all,
-                },
-                state,
-                scratch,
-            )
-        })?;
+        let bulk_dtype = layer_bulk_dtype(weights)?;
+        ctx.presize_mixed_graph_scratch_m1(&scratch.dims, bulk_dtype)?;
+        if bulk_dtype != WeightDtype::F32 {
+            ctx.freeze_graph_scratch();
+        }
+        let graph = unsafe {
+            super::graph_capture::capture_into_graph(&ctx.stream, || {
+                state.reset(&ctx.stream)?;
+                gpu_forward_inference_prefill_pooled_sum_from_raw(
+                    ctx,
+                    pooled_sum,
+                    PrefillRawInputs {
+                        input_flat,
+                        weights,
+                        a_neg_all,
+                    },
+                    state,
+                    scratch,
+                )
+            })
+        }?;
         ctx.note_graph_capture();
         Ok(Self {
             graph,
+            ctx_resources: ctx.resource_anchor(),
             flags_at_capture,
+            captured_ctx_token: ctx.instance_token(),
+            captured_stream_token: ctx.stream_token(),
+            captured_half_staging_ptr: ctx.half_staging_ptr(),
+            captured_bi_upcast_ptrs: ctx.bi_upcast_scratch_ptrs(),
+            guards_graph_scratch: bulk_dtype != WeightDtype::F32,
         })
     }
 
@@ -343,6 +400,16 @@ impl PrefillPooledGraph {
     /// capture-time `pooled_sum` buffer after (both transfers stay OUTSIDE
     /// the graph).
     pub fn launch(&self, ctx: &GpuCtx) -> Result<(), String> {
+        if ctx.instance_token() != self.captured_ctx_token {
+            return Err(
+                "PrefillPooledGraph: GpuCtx differs from capture; re-capture instead".into(),
+            );
+        }
+        if ctx.stream_token() != self.captured_stream_token {
+            return Err(
+                "PrefillPooledGraph: GpuCtx stream differs from capture; re-capture instead".into(),
+            );
+        }
         let now = ctx.gemm_route();
         if now != self.flags_at_capture {
             return Err(format!(
@@ -352,9 +419,22 @@ impl PrefillPooledGraph {
                 self.flags_at_capture
             ));
         }
+        if self.guards_graph_scratch {
+            ctx.ensure_graph_scratch_ptrs(
+                self.captured_half_staging_ptr,
+                self.captured_bi_upcast_ptrs,
+                "PrefillPooledGraph replay",
+            )?;
+        }
         self.graph
             .launch()
             .map_err(|e| format!("PrefillPooledGraph launch: {e:?}"))
+    }
+}
+
+impl Drop for PrefillPooledGraph {
+    fn drop(&mut self) {
+        let _ = self.ctx_resources.stream.synchronize();
     }
 }
 

@@ -62,7 +62,8 @@ fn decode_run_digest() {
                     &mut scratch,
                 )
                 .unwrap();
-            engine.capture_graph(&mut state, &mut scratch).unwrap();
+            // State and scratch stay alive until the engine graph is cleared.
+            unsafe { engine.capture_graph(&mut state, &mut scratch) }.unwrap();
             // Reset the carried state so both modes hash the same run.
             state.reset(&engine.ctx().stream).unwrap();
         }

@@ -289,26 +289,46 @@ fn training_graph_bf16_one_step_matches_eager() {
     let (_, bc1, bc2) = g.adam.advance();
     g.bias.write(&ctx.stream, bc1, bc2, 1e-4).unwrap();
 
-    let graph = GpuMambaTrainingStepGraph::capture(
-        &ctx,
-        &g.cfg,
-        MambaMixedCapture {
-            train_w: &mut g.weights,
-            adam: &g.adam,
-            bias: &g.bias,
-            multi_plan: &g.multi_plan,
-            grads: &mut g.grads,
-            acts: &mut g.acts,
-            scratch: &mut g.scratch,
-            a_neg_all: &g.a_neg_all,
-            mamba_input: &g.mamba_input,
-            d_temporal: &mut g.d_temporal,
-            state: &mut g.state,
-        },
-        batch,
-        seq_len,
-    )
+    // All captured allocations outlive the graph in this scope.
+    let graph = unsafe {
+        GpuMambaTrainingStepGraph::capture(
+            &ctx,
+            &g.cfg,
+            MambaMixedCapture {
+                train_w: &mut g.weights,
+                adam: &g.adam,
+                bias: &g.bias,
+                multi_plan: &g.multi_plan,
+                grads: &mut g.grads,
+                acts: &mut g.acts,
+                scratch: &mut g.scratch,
+                a_neg_all: &g.a_neg_all,
+                mamba_input: &g.mamba_input,
+                d_temporal: &mut g.d_temporal,
+                state: &mut g.state,
+            },
+            batch,
+            seq_len,
+        )
+    }
     .unwrap();
+    let other_ctx = GpuCtx::new(&dev).unwrap();
+    let error = graph
+        .replay(
+            &other_ctx,
+            &MambaMixedReplay {
+                train_w: &g.weights,
+                adam: &g.adam,
+                bias: &g.bias,
+                grads: &g.grads,
+                a_neg_all: &g.a_neg_all,
+                mamba_input: &g.mamba_input,
+                d_temporal: &g.d_temporal,
+                state: &g.state,
+            },
+        )
+        .expect_err("replay must reject a different GpuCtx");
+    assert!(error.contains("GpuCtx differs from capture"));
     // cuStreamBeginCapture only RECORDS — must call replay() to execute.
     graph
         .replay(
@@ -383,25 +403,28 @@ fn training_graph_bf16_multi_replay_matches_eager() {
     g.mamba_input.upload(&ctx.stream, &inputs[0]).unwrap();
     g.d_temporal.upload(&ctx.stream, &d_temps[0]).unwrap();
     g.bias.write(&ctx.stream, 1.0, 1.0, 1e-4).unwrap(); // dummy; real values per replay
-    let graph = GpuMambaTrainingStepGraph::capture(
-        &ctx,
-        &g.cfg,
-        MambaMixedCapture {
-            train_w: &mut g.weights,
-            adam: &g.adam,
-            bias: &g.bias,
-            multi_plan: &g.multi_plan,
-            grads: &mut g.grads,
-            acts: &mut g.acts,
-            scratch: &mut g.scratch,
-            a_neg_all: &g.a_neg_all,
-            mamba_input: &g.mamba_input,
-            d_temporal: &mut g.d_temporal,
-            state: &mut g.state,
-        },
-        batch,
-        seq_len,
-    )
+    // All captured allocations outlive the graph in this scope.
+    let graph = unsafe {
+        GpuMambaTrainingStepGraph::capture(
+            &ctx,
+            &g.cfg,
+            MambaMixedCapture {
+                train_w: &mut g.weights,
+                adam: &g.adam,
+                bias: &g.bias,
+                multi_plan: &g.multi_plan,
+                grads: &mut g.grads,
+                acts: &mut g.acts,
+                scratch: &mut g.scratch,
+                a_neg_all: &g.a_neg_all,
+                mamba_input: &g.mamba_input,
+                d_temporal: &mut g.d_temporal,
+                state: &mut g.state,
+            },
+            batch,
+            seq_len,
+        )
+    }
     .unwrap();
 
     // Replay N times — each replay = one full training step.
@@ -470,25 +493,28 @@ fn training_graph_panics_on_state_conv_mismatch() {
     let (_, bc1, bc2) = g.adam.advance();
     g.bias.write(&ctx.stream, bc1, bc2, 1e-4).unwrap();
 
-    let graph = GpuMambaTrainingStepGraph::capture(
-        &ctx,
-        &g.cfg,
-        MambaMixedCapture {
-            train_w: &mut g.weights,
-            adam: &g.adam,
-            bias: &g.bias,
-            multi_plan: &g.multi_plan,
-            grads: &mut g.grads,
-            acts: &mut g.acts,
-            scratch: &mut g.scratch,
-            a_neg_all: &g.a_neg_all,
-            mamba_input: &g.mamba_input,
-            d_temporal: &mut g.d_temporal,
-            state: &mut g.state,
-        },
-        batch,
-        seq_len,
-    )
+    // All captured allocations outlive the graph in this scope.
+    let graph = unsafe {
+        GpuMambaTrainingStepGraph::capture(
+            &ctx,
+            &g.cfg,
+            MambaMixedCapture {
+                train_w: &mut g.weights,
+                adam: &g.adam,
+                bias: &g.bias,
+                multi_plan: &g.multi_plan,
+                grads: &mut g.grads,
+                acts: &mut g.acts,
+                scratch: &mut g.scratch,
+                a_neg_all: &g.a_neg_all,
+                mamba_input: &g.mamba_input,
+                d_temporal: &mut g.d_temporal,
+                state: &mut g.state,
+            },
+            batch,
+            seq_len,
+        )
+    }
     .unwrap();
 
     // Replace state.conv_states — different cached_ptr, replay must panic.
@@ -534,25 +560,28 @@ fn training_graph_panics_on_pointer_mismatch() {
     let (_, bc1, bc2) = g.adam.advance();
     g.bias.write(&ctx.stream, bc1, bc2, 1e-4).unwrap();
 
-    let graph = GpuMambaTrainingStepGraph::capture(
-        &ctx,
-        &g.cfg,
-        MambaMixedCapture {
-            train_w: &mut g.weights,
-            adam: &g.adam,
-            bias: &g.bias,
-            multi_plan: &g.multi_plan,
-            grads: &mut g.grads,
-            acts: &mut g.acts,
-            scratch: &mut g.scratch,
-            a_neg_all: &g.a_neg_all,
-            mamba_input: &g.mamba_input,
-            d_temporal: &mut g.d_temporal,
-            state: &mut g.state,
-        },
-        batch,
-        seq_len,
-    )
+    // All captured allocations outlive the graph in this scope.
+    let graph = unsafe {
+        GpuMambaTrainingStepGraph::capture(
+            &ctx,
+            &g.cfg,
+            MambaMixedCapture {
+                train_w: &mut g.weights,
+                adam: &g.adam,
+                bias: &g.bias,
+                multi_plan: &g.multi_plan,
+                grads: &mut g.grads,
+                acts: &mut g.acts,
+                scratch: &mut g.scratch,
+                a_neg_all: &g.a_neg_all,
+                mamba_input: &g.mamba_input,
+                d_temporal: &mut g.d_temporal,
+                state: &mut g.state,
+            },
+            batch,
+            seq_len,
+        )
+    }
     .unwrap();
 
     // Reallocate mamba_input — different cached_ptr, must panic on replay.

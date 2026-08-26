@@ -158,8 +158,7 @@ fn emulated_final_bits() -> Vec<u32> {
         }
         ew.all_reduce_mean(&mut arenas, None).unwrap();
         for (t, reduced) in ranks.iter_mut().zip(&arenas) {
-            let stream = t.ctx().stream.clone();
-            t.grad_arena().upload(&stream, reduced).unwrap();
+            t.upload_grad_arena(reduced).unwrap();
             t.apply_step(None).unwrap();
         }
     }

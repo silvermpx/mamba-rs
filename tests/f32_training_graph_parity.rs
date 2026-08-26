@@ -194,27 +194,48 @@ fn m1_f32_training_graph_matches_eager() {
     )
     .unwrap();
 
-    let graph = GpuMambaF32TrainingStepGraph::capture(
-        &ctx,
-        &cfg,
-        MambaF32Capture {
-            weights: &mut g_w,
-            adam: &g_adam,
-            bias: &g_bias,
-            multi_plan: &g_plan,
-            grads: &mut g_grads,
-            acts: &mut g_acts,
-            scratch: &mut g_scratch,
-            a_neg_all: &g_a_neg,
-            temporal: &mut g_temp,
-            mamba_input: &g_input,
-            d_temporal: &mut g_dtemp,
-            state: &mut g_state,
-        },
-        batch,
-        seq_len,
-    )
+    // All captured allocations outlive the graph in this scope.
+    let graph = unsafe {
+        GpuMambaF32TrainingStepGraph::capture(
+            &ctx,
+            &cfg,
+            MambaF32Capture {
+                weights: &mut g_w,
+                adam: &g_adam,
+                bias: &g_bias,
+                multi_plan: &g_plan,
+                grads: &mut g_grads,
+                acts: &mut g_acts,
+                scratch: &mut g_scratch,
+                a_neg_all: &g_a_neg,
+                temporal: &mut g_temp,
+                mamba_input: &g_input,
+                d_temporal: &mut g_dtemp,
+                state: &mut g_state,
+            },
+            batch,
+            seq_len,
+        )
+    }
     .unwrap();
+    let other_ctx = GpuCtx::new(&dev).unwrap();
+    let error = graph
+        .replay(
+            &other_ctx,
+            &MambaF32Replay {
+                weights: &g_w,
+                adam: &g_adam,
+                bias: &g_bias,
+                grads: &g_grads,
+                temporal: &g_temp,
+                a_neg_all: &g_a_neg,
+                mamba_input: &g_input,
+                d_temporal: &g_dtemp,
+                state: &g_state,
+            },
+        )
+        .expect_err("replay must reject a different GpuCtx");
+    assert!(error.contains("GpuCtx differs from capture"));
     let (_, bc1, bc2) = g_adam.advance();
     g_bias.write(&ctx.stream, bc1, bc2, 1e-4).unwrap();
     graph
@@ -461,32 +482,55 @@ fn m3_f32_training_graph_matches_eager() {
         g_adam.weight_decay,
     )
     .unwrap();
-    let graph = GpuMamba3F32TrainingStepGraph::capture(
-        &M3Exec {
-            ctx: &ctx,
-            kernels: &m3k,
-            dims: &dims,
-        },
-        Mamba3F32Capture {
-            weights: &mut g_w,
-            adam: &g_adam,
-            bias: &g_bias,
-            multi_plan: &g_plan3,
-            grads: &mut g_grads,
-            acts: &mut g_acts,
-            scratch: &mut g_scratch,
-            temporal: &mut g_temp,
-            mamba_input: &g_mi,
-            d_temporal: &mut g_dtemp,
-            states: GpuMamba3StateBufs {
-                ssm: &mut g_ssm,
-                k: &mut g_ks,
-                v: &mut g_vs,
-                angle: &mut g_ang,
+    // All captured allocations outlive the graph in this scope.
+    let graph = unsafe {
+        GpuMamba3F32TrainingStepGraph::capture(
+            &M3Exec {
+                ctx: &ctx,
+                kernels: &m3k,
+                dims: &dims,
             },
-        },
-    )
+            Mamba3F32Capture {
+                weights: &mut g_w,
+                adam: &g_adam,
+                bias: &g_bias,
+                multi_plan: &g_plan3,
+                grads: &mut g_grads,
+                acts: &mut g_acts,
+                scratch: &mut g_scratch,
+                temporal: &mut g_temp,
+                mamba_input: &g_mi,
+                d_temporal: &mut g_dtemp,
+                states: GpuMamba3StateBufs {
+                    ssm: &mut g_ssm,
+                    k: &mut g_ks,
+                    v: &mut g_vs,
+                    angle: &mut g_ang,
+                },
+            },
+        )
+    }
     .unwrap();
+    let other_ctx = GpuCtx::new(&dev).unwrap();
+    let error = graph
+        .replay(
+            &other_ctx,
+            &Mamba3F32Replay {
+                weights: &g_w,
+                adam: &g_adam,
+                bias: &g_bias,
+                grads: &g_grads,
+                temporal: &g_temp,
+                mamba_input: &g_mi,
+                d_temporal: &g_dtemp,
+                ssm_states: &g_ssm,
+                k_states: &g_ks,
+                v_states: &g_vs,
+                angle_states: &g_ang,
+            },
+        )
+        .expect_err("replay must reject a different GpuCtx");
+    assert!(error.contains("GpuCtx differs from capture"));
     let (_, bc1, bc2) = g_adam.advance();
     g_bias.write(&ctx.stream, bc1, bc2, 1e-4).unwrap();
     graph

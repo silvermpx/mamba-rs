@@ -321,14 +321,28 @@ impl Mamba3Trainer {
     /// `backward_step(accumulate_only = true)` and [`Self::apply_step`];
     /// single-process training never needs it.
     ///
-    /// Contract: mutate the CONTENTS only (upload / in-place collective).
-    /// The per-tensor gradient views cache this allocation's device
-    /// pointer, so replacing or reallocating the buffer itself would
-    /// leave them dangling.
-    pub fn grad_arena(&mut self) -> &mut GpuBuffer {
+    /// The allocation itself is intentionally read-only through this API:
+    /// per-tensor views and CUDA graphs retain its device address.
+    ///
+    /// ```compile_fail
+    /// use mamba_rs::mamba_ssm::gpu::buffers::GpuBuffer;
+    /// use mamba_rs::mamba3_siso::gpu::trainer::Mamba3Trainer;
+    /// fn replace_arena(trainer: &mut Mamba3Trainer, replacement: GpuBuffer) {
+    ///     let _ = std::mem::replace(trainer.grad_arena(), replacement);
+    /// }
+    /// ```
+    pub fn grad_arena(&self) -> &GpuBuffer {
+        match &self.inner {
+            Trainer3Inner::F32(t) => &t.grads.flat,
+            Trainer3Inner::Mixed(t) => &t.grads.flat,
+        }
+    }
+
+    /// Replace the gradient contents without replacing their allocation.
+    pub fn upload_grad_arena(&mut self, values: &[f32]) -> Result<(), String> {
         match &mut self.inner {
-            Trainer3Inner::F32(t) => &mut t.grads.flat,
-            Trainer3Inner::Mixed(t) => &mut t.grads.flat,
+            Trainer3Inner::F32(t) => t.grads.flat.upload(&t.ctx.stream, values),
+            Trainer3Inner::Mixed(t) => t.grads.flat.upload(&t.ctx.stream, values),
         }
     }
 
@@ -437,10 +451,14 @@ impl Mamba3Trainer {
     /// capture_graph` is expressible. Mirrors `MambaTrainer::drop_graph`.
     pub fn drop_graph(&mut self) {
         match &mut self.inner {
-            Trainer3Inner::F32(t) => t.graph = None,
+            Trainer3Inner::F32(t) => {
+                let _ = t.ctx.stream.synchronize();
+                drop(t.graph.take());
+            }
             Trainer3Inner::Mixed(t) => {
-                t.graph = None;
-                t.graph_f16 = None;
+                let _ = t.ctx.stream.synchronize();
+                drop(t.graph.take());
+                drop(t.graph_f16.take());
             }
         }
     }
@@ -693,6 +711,14 @@ pub(crate) struct Mamba3TrainerMixed {
     captured_f16_gemm_route: crate::mamba_ssm::gpu::context::GemmRoute,
 }
 
+impl Drop for Mamba3TrainerMixed {
+    fn drop(&mut self) {
+        let _ = self.ctx.stream.synchronize();
+        drop(self.graph.take());
+        drop(self.graph_f16.take());
+    }
+}
+
 impl Mamba3TrainerMixed {
     fn new_full(
         gpu_ordinal: usize,
@@ -870,33 +896,36 @@ impl Mamba3TrainerMixed {
         }
         self.bias.write(&self.ctx.stream, 1.0, 1.0, self.adam.lr)?;
 
-        let g = GpuMamba3TrainingStepGraph::capture(
-            &M3Exec {
-                ctx: &self.ctx,
-                kernels: &self.m3k,
-                dims: &self.dims,
-            },
-            &self.cfg,
-            Mamba3MixedCapture {
-                train_w: &mut self.weights,
-                adam: &self.adam,
-                bias: &self.bias,
-                multi_plan: &self.multi_plan,
-                grads: &mut self.grads,
-                acts: &mut self.acts,
-                f32_scratch: &mut self.f32_scratch,
-                mixed_scratch: &mut self.mixed_scratch,
-                temporal_f32: &mut self.temporal,
-                mamba_input: &self.mamba_input,
-                d_temporal: &mut self.d_temporal,
-                states: GpuMamba3StateBufs {
-                    ssm: &mut self.ssm_states,
-                    k: &mut self.k_states,
-                    v: &mut self.v_states,
-                    angle: &mut self.angle_states,
+        // The trainer owns every captured allocation and drops the graph first.
+        let g = unsafe {
+            GpuMamba3TrainingStepGraph::capture(
+                &M3Exec {
+                    ctx: &self.ctx,
+                    kernels: &self.m3k,
+                    dims: &self.dims,
                 },
-            },
-        )?;
+                &self.cfg,
+                Mamba3MixedCapture {
+                    train_w: &mut self.weights,
+                    adam: &self.adam,
+                    bias: &self.bias,
+                    multi_plan: &self.multi_plan,
+                    grads: &mut self.grads,
+                    acts: &mut self.acts,
+                    f32_scratch: &mut self.f32_scratch,
+                    mixed_scratch: &mut self.mixed_scratch,
+                    temporal_f32: &mut self.temporal,
+                    mamba_input: &self.mamba_input,
+                    d_temporal: &mut self.d_temporal,
+                    states: GpuMamba3StateBufs {
+                        ssm: &mut self.ssm_states,
+                        k: &mut self.k_states,
+                        v: &mut self.v_states,
+                        angle: &mut self.angle_states,
+                    },
+                },
+            )
+        }?;
         self.graph = Some(g);
         Ok(())
     }
@@ -1122,7 +1151,6 @@ impl Mamba3TrainerMixed {
             self.dims.mamba_input_dim,
             self.dtype,
         )?;
-
         // Snapshot every device buffer baked into the captured kernels.
         let snap_bias = self.bias.ptr();
         let snap_unscale = self.unscale_factor.as_ref().unwrap().ptr();
@@ -1140,26 +1168,29 @@ impl Mamba3TrainerMixed {
         // Capture body: mirrors the eager f16 path 1:1 (composed from the
         // shared eager phase bodies) so numerics match.
         let stream = self.ctx.stream.clone();
-        let g = capture_into_graph(&stream, || {
-            self.grads.zero(&self.ctx.stream)?;
-            self.eager_forward()?;
-            self.eager_backward(true)?;
-            check_inf_nan_gpu(
-                &self.ctx,
-                &self.ctx.kernels,
-                self.overflow_flag.as_mut().unwrap(),
-                &self.grads.flat,
-            )?;
-            scale_grads_skip_gpu(
-                &self.ctx,
-                &self.ctx.kernels,
-                self.overflow_flag.as_mut().unwrap(),
-                &mut self.grads.flat,
-                self.unscale_factor.as_ref().unwrap(),
-            )?;
-            self.eager_optimize()?;
-            Ok(())
-        })?;
+        self.ctx.freeze_graph_scratch();
+        let g = unsafe {
+            capture_into_graph(&stream, || {
+                self.grads.zero(&self.ctx.stream)?;
+                self.eager_forward()?;
+                self.eager_backward(true)?;
+                check_inf_nan_gpu(
+                    &self.ctx,
+                    &self.ctx.kernels,
+                    self.overflow_flag.as_mut().unwrap(),
+                    &self.grads.flat,
+                )?;
+                scale_grads_skip_gpu(
+                    &self.ctx,
+                    &self.ctx.kernels,
+                    self.overflow_flag.as_mut().unwrap(),
+                    &mut self.grads.flat,
+                    self.unscale_factor.as_ref().unwrap(),
+                )?;
+                self.eager_optimize()?;
+                Ok(())
+            })
+        }?;
         self.graph_f16 = Some(g);
         self.captured_f16_bias_ptr = snap_bias;
         self.captured_f16_unscale_ptr = snap_unscale;
@@ -1597,6 +1628,13 @@ pub(crate) struct Mamba3TrainerF32 {
     clip_scratch: GpuBuffer,
 }
 
+impl Drop for Mamba3TrainerF32 {
+    fn drop(&mut self) {
+        let _ = self.ctx.stream.synchronize();
+        drop(self.graph.take());
+    }
+}
+
 impl Mamba3TrainerF32 {
     fn new_full(
         gpu_ordinal: usize,
@@ -1719,31 +1757,34 @@ impl Mamba3TrainerF32 {
 
     pub fn capture_graph(&mut self) -> Result<(), String> {
         self.bias.write(&self.ctx.stream, 1.0, 1.0, self.adam.lr)?;
-        let g = GpuMamba3F32TrainingStepGraph::capture(
-            &M3Exec {
-                ctx: &self.ctx,
-                kernels: &self.m3k,
-                dims: &self.dims,
-            },
-            Mamba3F32Capture {
-                weights: &mut self.weights,
-                adam: &self.adam,
-                bias: &self.bias,
-                multi_plan: &self.multi_plan,
-                grads: &mut self.grads,
-                acts: &mut self.acts,
-                scratch: &mut self.scratch,
-                temporal: &mut self.temporal,
-                mamba_input: &self.mamba_input,
-                d_temporal: &mut self.d_temporal,
-                states: GpuMamba3StateBufs {
-                    ssm: &mut self.ssm_states,
-                    k: &mut self.k_states,
-                    v: &mut self.v_states,
-                    angle: &mut self.angle_states,
+        // The trainer owns every captured allocation and drops the graph first.
+        let g = unsafe {
+            GpuMamba3F32TrainingStepGraph::capture(
+                &M3Exec {
+                    ctx: &self.ctx,
+                    kernels: &self.m3k,
+                    dims: &self.dims,
                 },
-            },
-        )?;
+                Mamba3F32Capture {
+                    weights: &mut self.weights,
+                    adam: &self.adam,
+                    bias: &self.bias,
+                    multi_plan: &self.multi_plan,
+                    grads: &mut self.grads,
+                    acts: &mut self.acts,
+                    scratch: &mut self.scratch,
+                    temporal: &mut self.temporal,
+                    mamba_input: &self.mamba_input,
+                    d_temporal: &mut self.d_temporal,
+                    states: GpuMamba3StateBufs {
+                        ssm: &mut self.ssm_states,
+                        k: &mut self.k_states,
+                        v: &mut self.v_states,
+                        angle: &mut self.angle_states,
+                    },
+                },
+            )
+        }?;
         self.graph = Some(g);
         Ok(())
     }

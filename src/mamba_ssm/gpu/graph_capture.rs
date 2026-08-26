@@ -29,7 +29,14 @@ use cudarc::driver::{CudaGraph, CudaStream};
 ///
 /// Mirrors the pattern in `inference::GpuInferenceEngine::capture_graph`,
 /// extracted so it doesn't need to be reimplemented per pipeline.
-pub fn capture_into_graph<F>(stream: &Arc<CudaStream>, body: F) -> Result<CudaGraph, String>
+///
+/// # Safety
+///
+/// Every allocation, module, function, library handle, workspace, context,
+/// and stream observed by `body` must remain valid and at the same address
+/// until the returned graph is destroyed and all launches have completed.
+/// The caller must also synchronize before releasing any captured resource.
+pub unsafe fn capture_into_graph<F>(stream: &Arc<CudaStream>, body: F) -> Result<CudaGraph, String>
 where
     F: FnOnce() -> Result<(), String>,
 {
@@ -43,7 +50,7 @@ where
         )
         .map_err(|e| format!("begin_capture: {e:?}"))?;
 
-    let body_result = body();
+    let body_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(body));
 
     // ALWAYS end capture, even on body error — a stream stuck in capture
     // mode silently breaks every subsequent op.
@@ -54,6 +61,13 @@ where
     // Combine both error paths: if BOTH body and end_capture failed, we want
     // the caller to see both — otherwise an `?`-shortcircuit on body_result
     // would silently drop a stream-corrupting end_capture failure.
+    let body_result = match body_result {
+        Ok(result) => result,
+        Err(payload) => {
+            drop(end_result);
+            std::panic::resume_unwind(payload);
+        }
+    };
     match (body_result, end_result) {
         (Ok(()), Ok(Some(g))) => {
             // Pre-upload the instantiated graph so the FIRST replay does

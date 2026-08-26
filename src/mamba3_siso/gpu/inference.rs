@@ -356,6 +356,13 @@ pub struct Mamba3GpuInferenceEngine {
     captured_scratch_ptr: u64,
 }
 
+impl Drop for Mamba3GpuInferenceEngine {
+    fn drop(&mut self) {
+        let _ = self.ctx.stream.synchronize();
+        drop(self.graph.take());
+    }
+}
+
 impl Mamba3GpuInferenceEngine {
     /// Create inference engine: compile M3 kernels, upload weights to flat GPU buffer.
     pub fn new(
@@ -401,7 +408,13 @@ impl Mamba3GpuInferenceEngine {
     ///
     /// Call after at least one warmup `step()` to stabilize kernel launches.
     /// H2D/D2H transfers remain outside the graph.
-    pub fn capture_graph(
+    ///
+    /// # Safety
+    ///
+    /// `state`, `scratch`, and their views must remain unchanged until the
+    /// graph is cleared and all replays complete. The engine context, stream,
+    /// cuBLAS workspace, both module sets, functions, and weights must stay fixed.
+    pub unsafe fn capture_graph(
         &mut self,
         state: &mut Mamba3GpuInferenceState,
         scratch: &mut Mamba3GpuInferenceScratch,
@@ -411,9 +424,11 @@ impl Mamba3GpuInferenceEngine {
         let snap_scratch = scratch.gpu_input.cached_ptr();
         let snap_gemm_route = self.ctx.gemm_route();
         let stream = self.ctx.stream.clone();
-        let graph = crate::mamba_ssm::gpu::graph_capture::capture_into_graph(&stream, || {
-            self.step_kernels(state, scratch)
-        })?;
+        let graph = unsafe {
+            crate::mamba_ssm::gpu::graph_capture::capture_into_graph(&stream, || {
+                self.step_kernels(state, scratch)
+            })
+        }?;
         // capture_into_graph pre-uploads the instantiated graph.
         self.graph = Some(graph);
         self.captured_gemm_route = Some(snap_gemm_route);
@@ -981,9 +996,26 @@ pub struct Mamba3GpuInferenceMixed {
     captured_gemm_route: Option<crate::mamba_ssm::gpu::context::GemmRoute>,
     captured_state_ptr: u64,
     captured_scratch_ptr: u64,
+    captured_half_staging_ptr: u64,
+    captured_bi_upcast_ptrs: [u64; 3],
+}
+
+impl Drop for Mamba3GpuInferenceMixed {
+    fn drop(&mut self) {
+        let _ = self.engine.ctx.stream.synchronize();
+        drop(self.graph.take());
+    }
 }
 
 impl Mamba3GpuInferenceMixed {
+    fn ensure_graph_scratch(&self) -> Result<(), String> {
+        self.engine.ctx.ensure_graph_scratch_ptrs(
+            self.captured_half_staging_ptr,
+            self.captured_bi_upcast_ptrs,
+            "M3 mixed inference graph replay",
+        )
+    }
+
     pub fn new(
         device: &GpuDevice,
         cpu_weights: &Mamba3Weights,
@@ -1007,6 +1039,8 @@ impl Mamba3GpuInferenceMixed {
             captured_gemm_route: None,
             captured_state_ptr: 0,
             captured_scratch_ptr: 0,
+            captured_half_staging_ptr: 0,
+            captured_bi_upcast_ptrs: [0; 3],
         })
     }
 
@@ -1504,6 +1538,7 @@ impl Mamba3GpuInferenceMixed {
                     "M3 mixed inference graph replay: GEMM route changed since capture".into(),
                 );
             }
+            self.ensure_graph_scratch()?;
             assert_eq!(state.ssm_state.cached_ptr(), self.captured_state_ptr);
             assert_eq!(scratch.gpu_input.cached_ptr(), self.captured_scratch_ptr);
             g.launch()
@@ -1535,6 +1570,7 @@ impl Mamba3GpuInferenceMixed {
                     "M3 mixed inference graph replay: GEMM route changed since capture".into(),
                 );
             }
+            self.ensure_graph_scratch()?;
             assert_eq!(state.ssm_state.cached_ptr(), self.captured_state_ptr);
             assert_eq!(scratch.gpu_input.cached_ptr(), self.captured_scratch_ptr);
             g.launch()
@@ -1545,23 +1581,39 @@ impl Mamba3GpuInferenceMixed {
         }
     }
 
-    pub fn capture_graph_mixed_native(
+    /// # Safety
+    ///
+    /// `state`, `scratch`, and their views must remain unchanged until the
+    /// graph is cleared and all replays complete. The engine context, stream,
+    /// cuBLAS workspace, both module sets, functions, and weights must stay fixed.
+    pub unsafe fn capture_graph_mixed_native(
         &mut self,
         state: &mut Mamba3GpuInferenceState,
         scratch: &mut Mamba3GpuInferenceMixedScratch,
     ) -> Result<(), String> {
         self.engine.ctx.presize_bi_scratch()?;
+        self.engine.ctx.presize_mixed_graph_scratch_m3(
+            &self.engine.prefill_dims(1),
+            self.mixed_weights.bulk_dtype,
+        )?;
         let snap_state = state.ssm_state.cached_ptr();
         let snap_scratch = scratch.gpu_input.cached_ptr();
+        let snap_half_staging = self.engine.ctx.half_staging_ptr();
+        let snap_bi_upcast = self.engine.ctx.bi_upcast_scratch_ptrs();
         let snap_gemm_route = self.engine.ctx.gemm_route();
         let stream = self.engine.ctx.stream.clone();
-        let graph = crate::mamba_ssm::gpu::graph_capture::capture_into_graph(&stream, || {
-            self.step_kernels_mixed_native(state, scratch)
-        })?;
+        self.engine.ctx.freeze_graph_scratch();
+        let graph = unsafe {
+            crate::mamba_ssm::gpu::graph_capture::capture_into_graph(&stream, || {
+                self.step_kernels_mixed_native(state, scratch)
+            })
+        }?;
         self.graph = Some(graph);
         self.captured_gemm_route = Some(snap_gemm_route);
         self.captured_state_ptr = snap_state;
         self.captured_scratch_ptr = snap_scratch;
+        self.captured_half_staging_ptr = snap_half_staging;
+        self.captured_bi_upcast_ptrs = snap_bi_upcast;
         self.engine.ctx.note_graph_capture();
         Ok(())
     }
@@ -1726,10 +1778,12 @@ impl GpuMamba3Backbone {
         self.reset()?;
         match (&mut self.engine, &mut self.scratch) {
             (M3BackboneEngine::F32(e), M3BackboneScratch::F32(sc)) => {
-                e.capture_graph(&mut self.state, sc)
+                // This owner drops its graph before the owned state and scratch.
+                unsafe { e.capture_graph(&mut self.state, sc) }
             }
             (M3BackboneEngine::Mixed(e), M3BackboneScratch::Mixed(sc)) => {
-                e.capture_graph_mixed_native(&mut self.state, sc)
+                // This owner drops its graph before the owned state and scratch.
+                unsafe { e.capture_graph_mixed_native(&mut self.state, sc) }
             }
             _ => Err("M3 engine/scratch dtype mismatch".to_string()),
         }

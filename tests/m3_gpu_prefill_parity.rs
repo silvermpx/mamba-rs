@@ -391,9 +391,18 @@ fn gpu_prefill_graph_replay_is_bitwise() {
     let (eager_ssm, ..) = states.download(&rig);
 
     // Warmed-up capture, then two replays.
-    let graph =
+    // The rig and all captured buffers outlive the graph in this scope.
+    let graph = unsafe {
         Mamba3PrefillGraph::capture(&mut prefill, &run(false), states.bufs(), &mut last_hidden)
-            .unwrap();
+    }
+    .unwrap();
+    let other_device = GpuDevice::new(0).unwrap();
+    let other_ctx = GpuCtx::new(&other_device).unwrap();
+    let bufs = states.bufs();
+    let error = graph
+        .replay(&other_ctx, &gw, &gpu_input, &bufs, &last_hidden)
+        .expect_err("replay must reject a different GpuCtx");
+    assert!(error.contains("GpuCtx differs from capture"));
     let replay = |states: &mut GpuStates| {
         let bufs = states.bufs();
         graph

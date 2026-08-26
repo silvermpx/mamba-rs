@@ -4,13 +4,13 @@
 //! the same verified artifact format as the Mamba-1 registry.
 //! Separate from Mamba SSM's `MambaKernels` — different pipeline, no conv1d.
 
-use crate::mamba_ssm::gpu::kernels::{HalfKernel, TypedKernel};
-use cudarc::driver::{CudaContext, CudaFunction, CudaModule};
+use crate::mamba_ssm::gpu::kernels::{CudaModuleAnchors, HalfKernel, TypedKernel};
+use cudarc::driver::{CudaContext, CudaFunction};
 use std::sync::Arc;
 
 /// All compiled Mamba-3 SISO CUDA kernels.
 pub struct Mamba3Kernels {
-    _module: Arc<CudaModule>,
+    _modules: CudaModuleAnchors,
     compiler_identity: crate::mamba_ssm::gpu::kernel_identity::CompilerIdentity,
     artifact_identity: crate::mamba_ssm::gpu::kernel_identity::ArtifactIdentity,
 
@@ -245,7 +245,7 @@ impl Mamba3Kernels {
             include_str!("../../../kernels/adamw.cu"),
         ];
 
-        let combined: String = sources
+        let combined_body: String = sources
             .iter()
             .map(|s| {
                 s.lines()
@@ -255,7 +255,9 @@ impl Mamba3Kernels {
             })
             .collect::<Vec<_>>()
             .join("\n");
-        let option_strings = vec![
+        let combined = combined_body;
+        let (nv_major, nv_minor) = crate::mamba_ssm::gpu::kernels::nvrtc_version();
+        let mut option_strings = vec![
             "--fmad=true".to_string(),
             "--extra-device-vectorization".to_string(),
             // Mirrors the M1 compiler: strip device assert() trap
@@ -264,6 +266,12 @@ impl Mamba3Kernels {
             "-DNDEBUG".to_string(),
             format!("-DMAMBA_RS_STATE_CAP={state_cap}"),
         ];
+        option_strings.extend(
+            crate::mamba_ssm::gpu::kernel_identity::deterministic_nvrtc_options(
+                (nv_major, nv_minor),
+                "1295203121",
+            ),
+        );
         let include_paths = crate::mamba_ssm::gpu::kernels::cuda_include_paths();
         let opts = cudarc::nvrtc::CompileOptions {
             arch: Some(arch),
@@ -272,7 +280,6 @@ impl Mamba3Kernels {
             ..Default::default()
         };
 
-        let (nv_major, nv_minor) = crate::mamba_ssm::gpu::kernels::nvrtc_version();
         let nvrtc_library_domain = crate::mamba_ssm::gpu::kernel_identity::nvrtc_library_domain();
         let header_manifest = crate::mamba_ssm::gpu::kernel_identity::header_manifest(
             combined.as_bytes(),
@@ -322,6 +329,14 @@ impl Mamba3Kernels {
             && let Ok(source) =
                 crate::mamba_ssm::gpu::kernel_identity::canonical_ptx_from_cache(hit.payload)
             && let Ok(module) = ctx.load_module(cudarc::nvrtc::Ptx::from_src(source))
+            && crate::mamba_ssm::gpu::kernel_identity::cache_hit_header_closure_is_current(
+                combined.as_bytes(),
+                &include_paths,
+                &header_manifest,
+            )
+            && nvrtc_library_domain.as_deref().is_some_and(
+                crate::mamba_ssm::gpu::kernel_identity::nvrtc_library_domain_is_current,
+            )
         {
             loaded = Some((module, hit.artifact_digest));
         }
@@ -630,7 +645,7 @@ impl Mamba3Kernels {
                 f16: get("gather_last_timestep_f16")?,
             },
 
-            _module: module,
+            _modules: CudaModuleAnchors::new(vec![module]),
         };
 
         // The chunked-backward kernel's dynamic shared memory grows
@@ -663,6 +678,10 @@ impl Mamba3Kernels {
             }
         }
         Ok(kernels)
+    }
+
+    pub(crate) fn module_anchors(&self) -> CudaModuleAnchors {
+        self._modules.clone()
     }
 }
 

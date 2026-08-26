@@ -16,6 +16,16 @@
   absolute, no ancestor may be group- or other-writable, and the final
   directory and entries must be private to the effective user. Filesystem
   operations remain anchored to verified directory descriptors.
+- Public training and prefill graph holders now bind replay to the exact
+  `GpuCtx` that captured them. Raw training graph handles are private so
+  callers cannot bypass route, context, and pointer validation.
+- The stream, kernel registry, cuBLAS workspace, and graph-visible scratch in
+  `GpuCtx` now form one immutable resource core retained by captured graphs.
+  Low-level capture methods borrowing external allocations are `unsafe`; safe
+  trainer and inference owners synchronize and destroy graphs before resources.
+- `graph_capture::capture_into_graph` is now `unsafe`: external callers must
+  keep every captured resource alive and pointer-stable through graph teardown.
+  A panic in the capture body now ends stream capture before it resumes unwinding.
 
 ### Fixed
 
@@ -24,6 +34,15 @@
 - CUDA cache entries with wrong metadata, links, partial publication, stale
   identities, malformed envelopes, or ambiguous preprocessor dependencies
   are ignored and rebuilt instead of being trusted.
+- Cache reads reject FIFOs without blocking. Header manifests preserve the
+  lexical include context across symlinks, bind logical paths to canonical
+  targets, reject expanding symlink cycles, and fail closed when token pasting
+  can hide `__has_include` or `__has_include_next` across literal headers.
+- Persistent compilation is disabled when `__DATE__`, `__TIME__`, or an
+  `__has_include` operator can enter through direct use or token pasting across
+  source, headers, and NVRTC options.
+- NVRTC 12.9 and newer receives a stable per-module `--frandom-seed`; two
+  independent cold compiles must produce byte-identical canonical PTX.
 
 ## 0.6.8 (2026-08-26)
 

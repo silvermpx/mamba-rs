@@ -7,6 +7,19 @@ use super::dtype::WeightDtype;
 use cudarc::driver::{CudaContext, CudaFunction, CudaModule};
 use std::sync::Arc;
 
+#[derive(Clone)]
+pub(crate) struct CudaModuleAnchors {
+    _modules: Arc<[Arc<CudaModule>]>,
+}
+
+impl CudaModuleAnchors {
+    pub(crate) fn new(modules: Vec<Arc<CudaModule>>) -> Self {
+        Self {
+            _modules: modules.into(),
+        }
+    }
+}
+
 /// Dtype-indexed kernel holder for activation-touching kernels.
 pub struct TypedKernel {
     pub f32: CudaFunction,
@@ -48,7 +61,7 @@ impl HalfKernel {
 ///
 /// Kernels are compiled once via NVRTC at startup. Grouped by pipeline stage.
 pub struct MambaKernels {
-    _module: Arc<CudaModule>,
+    _modules: CudaModuleAnchors,
 
     compiler_identity: super::kernel_identity::CompilerIdentity,
     artifact_set_identity: super::kernel_identity::ArtifactSetIdentity,
@@ -561,7 +574,7 @@ impl MambaKernels {
         ];
 
         // Strip `#include "_typed_prelude.cuh"` lines (prelude is inlined above).
-        let combined: String = sources
+        let combined_body: String = sources
             .iter()
             .map(|s| {
                 s.lines()
@@ -571,6 +584,7 @@ impl MambaKernels {
             })
             .collect::<Vec<_>>()
             .join("\n");
+        let combined = combined_body;
         // No --use_fast_math: it flushes denormals to zero and replaces
         // exp/sqrt with approximate intrinsics (__expf/__rsqrtf), which
         // breaks gradient flow through SSM BPTT chains and RMSNorm.
@@ -583,7 +597,8 @@ impl MambaKernels {
             "sm_80" | "sm_86" | "sm_87" => 8,
             _ => 16,
         };
-        let option_strings = vec![
+        let (nv_major, nv_minor) = nvrtc_version();
+        let mut option_strings = vec![
             "--fmad=true".to_string(),
             "--extra-device-vectorization".to_string(),
             // Device-side assert() compiles to a live trap check
@@ -595,6 +610,10 @@ impl MambaKernels {
             format!("-DSGB_GROUP_M={group_m}"),
             format!("-DMAMBA_RS_STATE_CAP={state_cap}"),
         ];
+        option_strings.extend(super::kernel_identity::deterministic_nvrtc_options(
+            (nv_major, nv_minor),
+            "1295072049",
+        ));
         let include_paths = cuda_include_paths();
         let opts = cudarc::nvrtc::CompileOptions {
             arch: Some(arch),
@@ -603,7 +622,6 @@ impl MambaKernels {
             ..Default::default()
         };
 
-        let (nv_major, nv_minor) = nvrtc_version();
         let nvrtc_library_domain = super::kernel_identity::nvrtc_library_domain();
         let header_manifest =
             super::kernel_identity::header_manifest(combined.as_bytes(), &include_paths);
@@ -651,6 +669,14 @@ impl MambaKernels {
         {
             if let Ok(src) = super::kernel_identity::canonical_ptx_from_cache(hit.payload)
                 && let Ok(module) = ctx.load_module(cudarc::nvrtc::Ptx::from_src(src))
+                && super::kernel_identity::cache_hit_header_closure_is_current(
+                    combined.as_bytes(),
+                    &include_paths,
+                    &header_manifest,
+                )
+                && nvrtc_library_domain
+                    .as_deref()
+                    .is_some_and(super::kernel_identity::nvrtc_library_domain_is_current)
             {
                 loaded = Some((module, hit.artifact_digest));
             }
@@ -1053,7 +1079,7 @@ impl MambaKernels {
             sgemm_tn_big_typed: load_half_dynsmem("sgemm_bi_tn_big", 34 * 1024)?,
             sgemm_nt_big_typed: load_half_dynsmem("sgemm_bi_nt_big", 34 * 1024)?,
 
-            _module: module,
+            _modules: CudaModuleAnchors::new(vec![module]),
         })
     }
 

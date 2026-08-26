@@ -52,8 +52,8 @@ fn decode_graphs_reject_complete_route_drift() {
     let mut scratch = f32.alloc_scratch().expect("M1 f32 scratch");
     f32.step(&input, &mut output, &mut state, &mut scratch)
         .expect("M1 f32 warmup");
-    f32.capture_graph(&mut state, &mut scratch)
-        .expect("M1 f32 capture");
+    // State and scratch stay alive until the engine graph is cleared.
+    unsafe { f32.capture_graph(&mut state, &mut scratch) }.expect("M1 f32 capture");
     f32.ctx().set_fast_gemm(true);
     assert!(
         f32.step(&input, &mut output, &mut state, &mut scratch)
@@ -69,8 +69,8 @@ fn decode_graphs_reject_complete_route_drift() {
     mixed
         .step_mixed_native(&input, &mut output, &mut state, &mut scratch)
         .expect("M1 mixed warmup");
-    mixed
-        .capture_graph_mixed_native(&mut state, &mut scratch)
+    // State and scratch stay alive until the engine graph is cleared.
+    unsafe { mixed.capture_graph_mixed_native(&mut state, &mut scratch) }
         .expect("M1 mixed capture");
     mixed.ctx().set_fast_gemm(true);
     assert!(
@@ -91,8 +91,8 @@ fn decode_graphs_reject_complete_route_drift() {
     let mut scratch = f32.alloc_scratch().expect("M3 f32 scratch");
     f32.step(&input, &mut output, &mut state, &mut scratch)
         .expect("M3 f32 warmup");
-    f32.capture_graph(&mut state, &mut scratch)
-        .expect("M3 f32 capture");
+    // State and scratch stay alive until the engine graph is cleared.
+    unsafe { f32.capture_graph(&mut state, &mut scratch) }.expect("M3 f32 capture");
     f32.ctx().set_fast_gemm(true);
     assert!(
         f32.step(&input, &mut output, &mut state, &mut scratch)
@@ -108,8 +108,8 @@ fn decode_graphs_reject_complete_route_drift() {
     mixed
         .step_mixed_native(&input, &mut output, &mut state, &mut scratch)
         .expect("M3 mixed warmup");
-    mixed
-        .capture_graph_mixed_native(&mut state, &mut scratch)
+    // State and scratch stay alive until the engine graph is cleared.
+    unsafe { mixed.capture_graph_mixed_native(&mut state, &mut scratch) }
         .expect("M3 mixed capture");
     mixed.engine_ref().ctx().set_fast_gemm(true);
     assert!(

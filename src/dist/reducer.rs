@@ -228,7 +228,7 @@ impl FixedOrderState {
 pub(super) fn reduce_sum_fixed_order_nccl(
     comm: &super::comm::MambaComm,
     state: &FixedOrderState,
-    arena: &mut GpuBuffer,
+    arena: &GpuBuffer,
     stream: &cudarc::driver::CudaStream,
 ) -> Result<(), DistError> {
     let world = comm.world();

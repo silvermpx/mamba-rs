@@ -29,6 +29,18 @@ pub const COMPOSER_REVISION: u16 = 1;
 pub const COMPILER_REVISION: u16 = 2;
 pub const NUMERIC_ABI_REVISION: u16 = 1;
 pub const SCHEDULE_REVISION: u16 = 1;
+
+pub(crate) fn deterministic_nvrtc_options(
+    nvrtc_version: (i32, i32),
+    random_seed: &str,
+) -> Vec<String> {
+    let mut options = Vec::new();
+    if nvrtc_version >= (12, 9) {
+        options.push(format!("--frandom-seed={random_seed}"));
+    }
+    options
+}
+
 pub const POLICY_REVISION: u16 = 1;
 
 /// SHA-256 framing with explicit tags, presence, and byte lengths.
@@ -107,8 +119,45 @@ pub struct CompileKeyMaterial {
 impl CompileKeyMaterial {
     /// Returns no key when the filesystem header closure is not known.
     pub fn digest(&self) -> Option<Sha256Digest> {
-        self.header_manifest.as_ref()?;
+        let header_manifest = self.header_manifest.as_ref()?;
         self.nvrtc_library_domain.as_ref()?;
+        let source_text = normalized_preprocessor_text(&self.source)?;
+        let mut paste_analysis = header_manifest_analysis(header_manifest)?;
+        paste_analysis.observe(&source_text)?;
+        let mut volatile_analysis = PasteAnalysis::default();
+        volatile_analysis.observe(&source_text)?;
+        if contains_volatile_predefined_macro(&self.source)? {
+            return None;
+        }
+        let mut argv_text = Vec::with_capacity(self.argv.len());
+        for argument in &self.argv {
+            let argument_text = normalized_preprocessor_text(argument)?;
+            if contains_volatile_predefined_macro(argument)? {
+                return None;
+            }
+            paste_analysis.has_date_time_fragment |=
+                contains_date_time_fragment_in_text(&argument_text);
+            volatile_analysis.has_date_time_fragment |=
+                contains_date_time_fragment_in_text(&argument_text);
+            argv_text.push(argument_text);
+        }
+        paste_analysis.observe_argv_definitions(&argv_text)?;
+        volatile_analysis.observe_argv_definitions(&argv_text)?;
+        let conditional_paste = paste_analysis.conditional_uses_paste();
+        let conditional_has_include = paste_analysis.conditional_uses_has_include_fragment();
+        let volatile_paste = volatile_analysis.uses_paste_to_form_volatile();
+        let fragments_with_paste =
+            volatile_analysis.has_paste && volatile_analysis.has_date_time_fragment;
+        let manifest_fragments_with_paste =
+            paste_analysis.has_paste && paste_analysis.has_date_time_fragment;
+        if conditional_paste
+            || conditional_has_include
+            || volatile_paste
+            || fragments_with_paste
+            || manifest_fragments_with_paste
+        {
+            return None;
+        }
         Some(self.invocation_digest())
     }
 
@@ -235,7 +284,9 @@ pub(crate) fn canonical_ptx_from_cache(payload: Vec<u8>) -> Result<String, Strin
 
 #[cfg(target_os = "linux")]
 static CACHE_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+#[cfg(target_os = "linux")]
 const MAX_CACHE_ENTRY_BYTES: u64 = 64 * 1024 * 1024;
+#[cfg(target_os = "linux")]
 const CACHE_ENVELOPE_HEADER_BYTES: usize = 16 + 2 + 32 + 1 + 8 + 32;
 
 #[cfg(target_os = "linux")]
@@ -374,7 +425,7 @@ fn open_cache_entry_at(directory: &CacheDirectory, name: &std::ffi::CStr) -> Opt
         libc::openat(
             directory.fd.as_raw_fd(),
             name.as_ptr(),
-            libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            libc::O_RDONLY | libc::O_NONBLOCK | libc::O_NOFOLLOW | libc::O_CLOEXEC,
         )
     };
     if fd < 0 {
@@ -391,6 +442,7 @@ fn open_cache_entry_at(directory: &CacheDirectory, name: &std::ffi::CStr) -> Opt
         .then_some(file)
 }
 
+#[cfg(target_os = "linux")]
 fn cache_entry_len(payload_len: usize) -> Option<usize> {
     let encoded_len = CACHE_ENVELOPE_HEADER_BYTES.checked_add(payload_len)?;
     let encoded_len_u64 = u64::try_from(encoded_len).ok()?;
@@ -777,40 +829,99 @@ fn sha256_file(path: &Path) -> std::io::Result<Sha256Digest> {
 /// content hashes; unresolved angle names are bound by the separately required
 /// NVRTC builtins-library hash. Ambiguous forms disable persistent caching.
 pub(crate) fn header_manifest(source: &[u8], include_roots: &[String]) -> Option<Vec<u8>> {
-    let roots: Vec<PathBuf> = include_roots.iter().map(PathBuf::from).collect();
-    if roots.iter().any(|root| !root.is_absolute()) {
+    const MAX_HEADER_CONTEXTS: usize = 16 * 1024;
+
+    let roots: Vec<PathBuf> = include_roots
+        .iter()
+        .map(|root| {
+            let path = Path::new(root);
+            if path
+                .components()
+                .any(|component| matches!(component, std::path::Component::ParentDir))
+            {
+                return None;
+            }
+            lexical_normalize_absolute(path)
+        })
+        .collect::<Option<_>>()?;
+    let mut pending = Vec::new();
+    let mut records = BTreeMap::<Vec<u8>, (Vec<u8>, Sha256Digest)>::new();
+    let mut builtin_headers = BTreeSet::<Vec<u8>>::new();
+    let mut paste_analysis = PasteAnalysis::default();
+    let mut volatile_analysis = PasteAnalysis::default();
+    volatile_analysis.observe(&normalized_preprocessor_text(source)?)?;
+    collect_includes(
+        source,
+        None,
+        &roots,
+        &[],
+        &mut pending,
+        &mut builtin_headers,
+        &mut paste_analysis,
+    )?;
+    if pending.len() > MAX_HEADER_CONTEXTS {
         return None;
     }
-    let mut pending = Vec::new();
-    let mut records = BTreeMap::<Vec<u8>, Sha256Digest>::new();
-    let mut builtin_headers = BTreeSet::<Vec<u8>>::new();
-    collect_includes(source, None, &roots, &mut pending, &mut builtin_headers)?;
 
-    while let Some(path) = pending.pop() {
-        let canonical = std::fs::canonicalize(&path).ok()?;
-        let key = manifest_path_key(&canonical, &roots)?;
-        if records.contains_key(&key) {
+    let mut visited_contexts = 0usize;
+    while let Some(header) = pending.pop() {
+        visited_contexts = visited_contexts.checked_add(1)?;
+        if visited_contexts > MAX_HEADER_CONTEXTS {
+            return None;
+        }
+        let logical = lexical_normalize_absolute(&header.logical_path)?;
+        let canonical = std::fs::canonicalize(&logical).ok()?;
+        let logical_key = manifest_path_key(&logical, &roots)?;
+        if records.contains_key(&logical_key) {
             continue;
         }
+        if header.canonical_ancestry.contains(&canonical) {
+            return None;
+        }
         let bytes = std::fs::read(&canonical).ok()?;
-        records.insert(key, FramedSha256::bytes(&bytes));
+        let canonical_key = manifest_path_key(&canonical, &roots)?;
+        records.insert(logical_key, (canonical_key, FramedSha256::bytes(&bytes)));
+        let mut ancestry = header.canonical_ancestry;
+        ancestry.push(canonical);
         collect_includes(
             &bytes,
-            canonical.parent(),
+            logical.parent(),
             &roots,
+            &ancestry,
             &mut pending,
             &mut builtin_headers,
+            &mut paste_analysis,
         )?;
+        if records.len().checked_add(pending.len())? > MAX_HEADER_CONTEXTS {
+            return None;
+        }
+    }
+    let conditional_paste = paste_analysis.conditional_uses_paste();
+    let conditional_has_include = paste_analysis.conditional_uses_has_include_fragment();
+    let volatile_paste = volatile_analysis.uses_paste_to_form_volatile();
+    if conditional_paste
+        || conditional_has_include
+        || volatile_paste
+        || volatile_analysis.has_paste && volatile_analysis.has_date_time_fragment
+        || paste_analysis.has_paste && paste_analysis.has_date_time_fragment
+    {
+        return None;
     }
 
     let mut output = Vec::new();
+    output.extend_from_slice(b"MAMBA-HDR-MANIFEST-V3\0");
+    output.push(u8::from(paste_analysis.has_paste));
+    output.push(u8::from(paste_analysis.has_date_time_fragment));
+    let analysis_bytes = paste_analysis.encode();
+    append_manifest_field(&mut output, &analysis_bytes);
     output.extend_from_slice(&(builtin_headers.len() as u64).to_le_bytes());
     for name in builtin_headers {
         append_manifest_field(&mut output, &name);
     }
     output.extend_from_slice(&(records.len() as u64).to_le_bytes());
-    for (path, digest) in records {
+    for (path, (canonical, digest)) in records {
         append_manifest_field(&mut output, &path);
+        append_manifest_field(&mut output, &canonical);
         append_manifest_field(&mut output, &digest);
     }
     Some(output)
@@ -822,6 +933,16 @@ pub(crate) fn header_manifest_is_current(
     expected: &Option<Vec<u8>>,
 ) -> bool {
     header_manifest(source, include_roots) == *expected
+}
+
+/// Final cache-hit closure check. Call only after parsing/loading the cached
+/// artifact so this is the last filesystem observation before acceptance.
+pub(crate) fn cache_hit_header_closure_is_current(
+    source: &[u8],
+    include_roots: &[String],
+    expected: &Option<Vec<u8>>,
+) -> bool {
+    header_manifest_is_current(source, include_roots, expected)
 }
 
 fn append_manifest_field(output: &mut Vec<u8>, value: &[u8]) {
@@ -843,17 +964,48 @@ fn manifest_path_key(path: &Path, roots: &[PathBuf]) -> Option<Vec<u8>> {
     Some(key)
 }
 
+struct PendingHeader {
+    logical_path: PathBuf,
+    canonical_ancestry: Vec<PathBuf>,
+}
+
+fn lexical_normalize_absolute(path: &Path) -> Option<PathBuf> {
+    use std::path::Component;
+
+    if !path.is_absolute() {
+        return None;
+    }
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
+            Component::RootDir => normalized.push(component.as_os_str()),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !normalized.pop() {
+                    return None;
+                }
+            }
+            Component::Normal(value) => normalized.push(value),
+        }
+    }
+    Some(normalized)
+}
+
 fn collect_includes(
     source: &[u8],
     current_dir: Option<&Path>,
     roots: &[PathBuf],
-    pending: &mut Vec<PathBuf>,
+    canonical_ancestry: &[PathBuf],
+    pending: &mut Vec<PendingHeader>,
     builtin_headers: &mut BTreeSet<Vec<u8>>,
+    paste_analysis: &mut PasteAnalysis,
 ) -> Option<()> {
     let text = normalized_preprocessor_text(source)?;
-    if text.contains("__has_include") {
+    if contains_volatile_predefined_macro_in_text(&text) {
         return None;
     }
+    paste_analysis.observe(&text)?;
     for line in text.lines() {
         let Some(rest) = include_directive(line)? else {
             continue;
@@ -870,13 +1022,26 @@ fn collect_includes(
         if name.is_empty() || !trailing.trim().is_empty() {
             return None;
         }
+        if Path::new(name)
+            .components()
+            .any(|component| matches!(component, std::path::Component::ParentDir))
+        {
+            return None;
+        }
         let mut candidates = Vec::new();
         if quoted && let Some(dir) = current_dir {
             candidates.push(dir.join(name));
         }
         candidates.extend(roots.iter().map(|root| root.join(name)));
-        if let Some(path) = candidates.into_iter().find(|path| path.is_file()) {
-            pending.push(path);
+        if let Some(path) = candidates
+            .into_iter()
+            .filter_map(|path| lexical_normalize_absolute(&path))
+            .find(|path| path.is_file())
+        {
+            pending.push(PendingHeader {
+                logical_path: path,
+                canonical_ancestry: canonical_ancestry.to_vec(),
+            });
         } else if quoted {
             return None;
         } else if known_nvrtc_builtin_header(name) {
@@ -886,6 +1051,1220 @@ fn collect_includes(
         }
     }
     Some(())
+}
+
+#[derive(Clone, Default)]
+struct MacroAnalysis {
+    pasted: bool,
+    references: BTreeSet<String>,
+    has_include_fragment: bool,
+    object_alias: Option<String>,
+    alias_ambiguous: bool,
+    object_aliases: BTreeSet<String>,
+    object_barrier: bool,
+    object_complex: bool,
+    zero_arg_aliases: BTreeSet<String>,
+    paste_tokens: Vec<String>,
+    parameter_count: Option<usize>,
+    parameter_ambiguous: bool,
+    direct_sensitive_parameters: BTreeSet<usize>,
+    parameter_flows: Vec<ParameterFlow>,
+}
+
+#[derive(Clone, Default)]
+struct ParameterFlow {
+    callee: String,
+    arguments: Vec<ParameterSource>,
+}
+
+#[derive(Clone, Default)]
+struct ParameterSource {
+    parameters: BTreeSet<usize>,
+    tokens: BTreeSet<String>,
+    unknown: bool,
+}
+
+#[derive(Clone, Default)]
+struct ConditionalAnalysis {
+    identifiers: BTreeSet<String>,
+    has_include_fragment: bool,
+}
+
+#[derive(Clone, Default)]
+struct PasteAnalysis {
+    macros: BTreeMap<String, MacroAnalysis>,
+    conditionals: Vec<ConditionalAnalysis>,
+    direct_conditional_paste: bool,
+    has_paste: bool,
+    has_date_time_fragment: bool,
+    macro_calls: Vec<(String, Vec<String>)>,
+}
+
+impl PasteAnalysis {
+    fn observe(&mut self, text: &str) -> Option<()> {
+        self.has_paste |= contains_token_paste(text);
+        self.has_date_time_fragment |= contains_date_time_fragment_in_text(text);
+        for line in text.lines() {
+            let Some((directive, rest)) = preprocessor_directive(line) else {
+                self.macro_calls.extend(simple_macro_calls(line));
+                continue;
+            };
+            match directive {
+                "define" => {
+                    let (name, replacement, parameters) = macro_definition(rest)?;
+                    self.observe_macro(name, replacement, parameters.as_deref());
+                }
+                "undef" => {
+                    let name = rest.trim();
+                    if is_identifier(name) {
+                        self.macros
+                            .entry(name.to_owned())
+                            .or_default()
+                            .alias_ambiguous = true;
+                    }
+                }
+                "if" | "elif" => {
+                    self.macro_calls.extend(simple_macro_calls(rest));
+                    self.direct_conditional_paste |= rest.contains("##") || rest.contains("%:%:");
+                    self.conditionals.push(ConditionalAnalysis {
+                        identifiers: expanded_conditional_identifiers(rest),
+                        has_include_fragment: contains_has_include_fragment_in_text(rest),
+                    });
+                }
+                _ => {}
+            }
+        }
+        Some(())
+    }
+
+    fn observe_macro(&mut self, name: &str, replacement: &str, parameters: Option<&[String]>) {
+        let function_like = parameters.is_some();
+        let zero_arg = parameters.is_some_and(<[String]>::is_empty);
+        let entry = self.macros.entry(name.to_owned()).or_default();
+        entry.pasted |= contains_token_paste(replacement);
+        entry
+            .references
+            .extend(identifiers(replacement).map(str::to_owned));
+        entry.has_include_fragment |= contains_has_include_fragment_in_text(replacement);
+        let new_alias =
+            (!function_like && is_identifier(replacement)).then(|| replacement.to_owned());
+        if entry.object_alias.is_some() && entry.object_alias != new_alias {
+            entry.alias_ambiguous = true;
+        }
+        if new_alias.is_some() {
+            entry.object_alias = new_alias.clone();
+        }
+        if let Some(alias) = &new_alias {
+            entry.object_aliases.insert(alias.clone());
+        }
+        if !function_like && new_alias.is_none() {
+            if is_safe_paste_barrier(replacement) {
+                entry.object_barrier = true;
+            } else {
+                entry.object_complex = true;
+            }
+        }
+        if zero_arg && is_identifier(replacement) {
+            entry.zero_arg_aliases.insert(replacement.to_owned());
+        }
+        if let Some(parameters) = parameters {
+            if entry.parameter_count.is_some() && entry.parameter_count != Some(parameters.len()) {
+                entry.parameter_ambiguous = true;
+            }
+            entry.parameter_count = Some(
+                entry
+                    .parameter_count
+                    .map_or(parameters.len(), |count| count.max(parameters.len())),
+            );
+            for token in paste_chain_identifiers(replacement) {
+                if let Some(index) = parameters.iter().position(|parameter| parameter == &token) {
+                    entry.direct_sensitive_parameters.insert(index);
+                }
+            }
+            for (callee, arguments) in simple_macro_calls(replacement) {
+                let arguments = arguments
+                    .into_iter()
+                    .map(|argument| {
+                        let mut source = ParameterSource::default();
+                        let (complex, identifiers) = argument.strip_prefix('?').map_or(
+                            (false, vec![argument.as_str()]),
+                            |value| {
+                                (
+                                    true,
+                                    value.split(':').filter(|value| !value.is_empty()).collect(),
+                                )
+                            },
+                        );
+                        source.unknown = complex;
+                        for identifier in identifiers {
+                            if let Some(index) = parameters
+                                .iter()
+                                .position(|parameter| parameter == identifier)
+                            {
+                                source.parameters.insert(index);
+                            } else if identifier != "$" {
+                                source.tokens.insert(identifier.to_owned());
+                            }
+                        }
+                        source
+                    })
+                    .collect();
+                entry
+                    .parameter_flows
+                    .push(ParameterFlow { callee, arguments });
+            }
+        }
+        entry
+            .paste_tokens
+            .extend(paste_chain_identifiers(replacement));
+    }
+
+    fn observe_argv_definitions(&mut self, argv: &[String]) -> Option<()> {
+        let mut index = 0;
+        while index < argv.len() {
+            let argument = argv[index].as_str();
+            let definition = if argument == "-D" || argument == "--define-macro" {
+                index = index.checked_add(1)?;
+                Some(argv.get(index)?.as_str())
+            } else {
+                argument
+                    .strip_prefix("-D")
+                    .filter(|definition| !definition.is_empty())
+                    .or_else(|| argument.strip_prefix("--define-macro="))
+            };
+            if let Some(definition) = definition {
+                let (declarator, replacement) = definition
+                    .split_once('=')
+                    .map_or((definition, "1"), |(left, right)| (left, right));
+                let parsed = format!("{declarator} {replacement}");
+                let (name, replacement, parameters) = macro_definition(&parsed)?;
+                self.observe_macro(name, replacement, parameters.as_deref());
+                self.has_paste |= contains_token_paste(replacement);
+            }
+            index += 1;
+        }
+        Some(())
+    }
+
+    fn conditional_uses_paste(&self) -> bool {
+        let mut paste_capable: BTreeSet<String> = self
+            .macros
+            .iter()
+            .filter_map(|(name, analysis)| analysis.pasted.then_some(name.clone()))
+            .collect();
+        paste_capable.extend(
+            self.macros
+                .values()
+                .flat_map(|analysis| analysis.references.iter())
+                .filter(|name| is_builtin_paste_macro(name))
+                .cloned(),
+        );
+        loop {
+            let mut changed = false;
+            for (name, analysis) in &self.macros {
+                if !paste_capable.contains(name)
+                    && analysis
+                        .references
+                        .iter()
+                        .any(|reference| paste_capable.contains(reference))
+                {
+                    changed |= paste_capable.insert(name.clone());
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+
+        self.direct_conditional_paste
+            || self.conditionals.iter().any(|conditional| {
+                conditional
+                    .identifiers
+                    .iter()
+                    .any(|name| paste_capable.contains(name))
+            })
+    }
+
+    fn conditional_uses_has_include_fragment(&self) -> bool {
+        let mut fragment_capable: BTreeSet<String> = self
+            .macros
+            .iter()
+            .filter_map(|(name, analysis)| analysis.has_include_fragment.then_some(name.clone()))
+            .collect();
+        loop {
+            let mut changed = false;
+            for (name, analysis) in &self.macros {
+                if !fragment_capable.contains(name)
+                    && analysis
+                        .references
+                        .iter()
+                        .any(|reference| fragment_capable.contains(reference))
+                {
+                    changed |= fragment_capable.insert(name.clone());
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+        self.conditionals.iter().any(|conditional| {
+            conditional.has_include_fragment
+                || conditional
+                    .identifiers
+                    .iter()
+                    .any(|name| fragment_capable.contains(name))
+        })
+    }
+
+    fn uses_paste_to_form_volatile(&self) -> bool {
+        let mut paste_capable: BTreeSet<String> = self
+            .macros
+            .iter()
+            .filter_map(|(name, analysis)| analysis.pasted.then_some(name.clone()))
+            .collect();
+        paste_capable.extend(
+            self.macros
+                .values()
+                .flat_map(|analysis| analysis.references.iter())
+                .filter(|name| is_builtin_paste_macro(name))
+                .cloned(),
+        );
+        loop {
+            let mut changed = false;
+            for (name, analysis) in &self.macros {
+                if !paste_capable.contains(name)
+                    && analysis
+                        .references
+                        .iter()
+                        .any(|reference| paste_capable.contains(reference))
+                {
+                    changed |= paste_capable.insert(name.clone());
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+        let mut sensitive: BTreeMap<String, BTreeSet<usize>> = self
+            .macros
+            .iter()
+            .map(|(name, analysis)| {
+                let mut parameters = analysis.direct_sensitive_parameters.clone();
+                if analysis.parameter_ambiguous
+                    && let Some(count) = analysis.parameter_count
+                {
+                    parameters.extend(0..count);
+                }
+                (name.clone(), parameters)
+            })
+            .collect();
+        loop {
+            let snapshot = sensitive.clone();
+            let mut changed = false;
+            for (name, analysis) in &self.macros {
+                let Some(_) = analysis.parameter_count else {
+                    continue;
+                };
+                let entry = sensitive.entry(name.clone()).or_default();
+                for flow in &analysis.parameter_flows {
+                    let callee_parameters: BTreeSet<usize> = if is_builtin_paste_macro(&flow.callee)
+                    {
+                        (0..flow.arguments.len()).collect()
+                    } else {
+                        snapshot.get(&flow.callee).cloned().unwrap_or_default()
+                    };
+                    for index in callee_parameters {
+                        let Some(source) = flow.arguments.get(index) else {
+                            continue;
+                        };
+                        for parameter in &source.parameters {
+                            changed |= entry.insert(*parameter);
+                        }
+                    }
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+        for analysis in self.macros.values() {
+            for flow in &analysis.parameter_flows {
+                let callee_parameters: BTreeSet<usize> = if is_builtin_paste_macro(&flow.callee) {
+                    (0..flow.arguments.len()).collect()
+                } else {
+                    sensitive.get(&flow.callee).cloned().unwrap_or_default()
+                };
+                let mut slots = Vec::new();
+                for index in callee_parameters {
+                    let Some(source) = flow.arguments.get(index) else {
+                        continue;
+                    };
+                    if !source.parameters.is_empty() {
+                        continue;
+                    }
+                    for token in &source.tokens {
+                        let Some(candidates) = resolve_alias_candidates(&self.macros, token) else {
+                            return true;
+                        };
+                        slots.push(candidates.into_iter().collect());
+                    }
+                }
+                if let Some(callee) = self.macros.get(&flow.callee) {
+                    slots.extend(callee.paste_tokens.iter().cloned().map(|token| vec![token]));
+                }
+                if paste_slots_form_volatile(&slots) {
+                    return true;
+                }
+            }
+        }
+        let mut fixed_slots = BTreeMap::<String, Vec<Vec<String>>>::new();
+        for (name, analysis) in &self.macros {
+            let slots = fixed_slots.entry(name.clone()).or_default();
+            for flow in &analysis.parameter_flows {
+                let callee_parameters: BTreeSet<usize> = if is_builtin_paste_macro(&flow.callee) {
+                    (0..flow.arguments.len()).collect()
+                } else {
+                    sensitive.get(&flow.callee).cloned().unwrap_or_default()
+                };
+                for index in callee_parameters {
+                    let Some(source) = flow.arguments.get(index) else {
+                        continue;
+                    };
+                    for token in &source.tokens {
+                        let Some(candidates) = resolve_alias_candidates(&self.macros, token) else {
+                            return true;
+                        };
+                        slots.push(candidates.into_iter().collect());
+                    }
+                }
+            }
+        }
+        self.macro_calls.iter().any(|(name, arguments)| {
+            if !paste_capable.contains(name) && !is_builtin_paste_macro(name) {
+                return false;
+            }
+            let sensitive_arguments: BTreeSet<usize> = if is_builtin_paste_macro(name) {
+                (0..arguments.len()).collect()
+            } else if let Some(analysis) = self.macros.get(name) {
+                if analysis.parameter_count.is_none() {
+                    (0..arguments.len()).collect()
+                } else {
+                    sensitive.get(name).cloned().unwrap_or_default()
+                }
+            } else {
+                (0..arguments.len()).collect()
+            };
+            let mut slots = Vec::new();
+            for (index, argument) in arguments.iter().enumerate() {
+                if !sensitive_arguments.contains(&index) {
+                    continue;
+                }
+                if argument.is_empty() || argument == "$" {
+                    continue;
+                }
+                if argument.starts_with('?') {
+                    return true;
+                }
+                let Some(candidates) = resolve_alias_candidates(&self.macros, argument) else {
+                    return true;
+                };
+                slots.push(candidates.into_iter().collect());
+            }
+            if let Some(analysis) = self.macros.get(name) {
+                slots.extend(
+                    analysis
+                        .paste_tokens
+                        .iter()
+                        .cloned()
+                        .map(|token| vec![token]),
+                );
+            }
+            if let Some(fixed) = fixed_slots.get(name) {
+                slots.extend(fixed.iter().cloned());
+            }
+            paste_slots_form_volatile(&slots)
+        })
+    }
+
+    fn encode(&self) -> Vec<u8> {
+        let mut output = Vec::new();
+        output.push(u8::from(self.direct_conditional_paste));
+        output.extend_from_slice(&(self.macros.len() as u64).to_le_bytes());
+        for (name, analysis) in &self.macros {
+            append_manifest_field(&mut output, name.as_bytes());
+            output.push(u8::from(analysis.pasted));
+            output.push(u8::from(analysis.has_include_fragment));
+            output.push(u8::from(analysis.object_alias.is_some()));
+            if let Some(alias) = &analysis.object_alias {
+                append_manifest_field(&mut output, alias.as_bytes());
+            }
+            output.push(u8::from(analysis.alias_ambiguous));
+            output.extend_from_slice(&(analysis.object_aliases.len() as u64).to_le_bytes());
+            for alias in &analysis.object_aliases {
+                append_manifest_field(&mut output, alias.as_bytes());
+            }
+            output.push(u8::from(analysis.object_barrier));
+            output.push(u8::from(analysis.object_complex));
+            output.extend_from_slice(&(analysis.zero_arg_aliases.len() as u64).to_le_bytes());
+            for alias in &analysis.zero_arg_aliases {
+                append_manifest_field(&mut output, alias.as_bytes());
+            }
+            output.extend_from_slice(&(analysis.paste_tokens.len() as u64).to_le_bytes());
+            for token in &analysis.paste_tokens {
+                append_manifest_field(&mut output, token.as_bytes());
+            }
+            output.push(u8::from(analysis.parameter_count.is_some()));
+            if let Some(count) = analysis.parameter_count {
+                output.extend_from_slice(&(count as u64).to_le_bytes());
+            }
+            output.push(u8::from(analysis.parameter_ambiguous));
+            output.extend_from_slice(
+                &(analysis.direct_sensitive_parameters.len() as u64).to_le_bytes(),
+            );
+            for parameter in &analysis.direct_sensitive_parameters {
+                output.extend_from_slice(&(*parameter as u64).to_le_bytes());
+            }
+            output.extend_from_slice(&(analysis.parameter_flows.len() as u64).to_le_bytes());
+            for flow in &analysis.parameter_flows {
+                append_manifest_field(&mut output, flow.callee.as_bytes());
+                output.extend_from_slice(&(flow.arguments.len() as u64).to_le_bytes());
+                for source in &flow.arguments {
+                    output.push(u8::from(source.unknown));
+                    output.extend_from_slice(&(source.parameters.len() as u64).to_le_bytes());
+                    for parameter in &source.parameters {
+                        output.extend_from_slice(&(*parameter as u64).to_le_bytes());
+                    }
+                    output.extend_from_slice(&(source.tokens.len() as u64).to_le_bytes());
+                    for token in &source.tokens {
+                        append_manifest_field(&mut output, token.as_bytes());
+                    }
+                }
+            }
+            output.extend_from_slice(&(analysis.references.len() as u64).to_le_bytes());
+            for reference in &analysis.references {
+                append_manifest_field(&mut output, reference.as_bytes());
+            }
+        }
+        output.extend_from_slice(&(self.conditionals.len() as u64).to_le_bytes());
+        for conditional in &self.conditionals {
+            output.push(u8::from(conditional.has_include_fragment));
+            output.extend_from_slice(&(conditional.identifiers.len() as u64).to_le_bytes());
+            for identifier in &conditional.identifiers {
+                append_manifest_field(&mut output, identifier.as_bytes());
+            }
+        }
+        output.extend_from_slice(&(self.macro_calls.len() as u64).to_le_bytes());
+        for (name, arguments) in &self.macro_calls {
+            append_manifest_field(&mut output, name.as_bytes());
+            output.extend_from_slice(&(arguments.len() as u64).to_le_bytes());
+            for argument in arguments {
+                append_manifest_field(&mut output, argument.as_bytes());
+            }
+        }
+        output
+    }
+
+    fn decode(bytes: &[u8], has_paste: bool, has_date_time_fragment: bool) -> Option<Self> {
+        let mut cursor = ManifestCursor::new(bytes);
+        let direct_conditional_paste = cursor.byte()? != 0;
+        let macro_count = cursor.usize()?;
+        let mut macros = BTreeMap::new();
+        for _ in 0..macro_count {
+            let name = std::str::from_utf8(cursor.field()?).ok()?.to_owned();
+            if !is_identifier(&name) {
+                return None;
+            }
+            let pasted = cursor.byte()? != 0;
+            let has_include_fragment = cursor.byte()? != 0;
+            let object_alias = if cursor.byte()? != 0 {
+                let alias = std::str::from_utf8(cursor.field()?).ok()?.to_owned();
+                if !is_identifier(&alias) {
+                    return None;
+                }
+                Some(alias)
+            } else {
+                None
+            };
+            let alias_ambiguous = cursor.byte()? != 0;
+            let alias_count = cursor.usize()?;
+            let mut object_aliases = BTreeSet::new();
+            for _ in 0..alias_count {
+                let alias = std::str::from_utf8(cursor.field()?).ok()?.to_owned();
+                if !is_identifier(&alias) {
+                    return None;
+                }
+                object_aliases.insert(alias);
+            }
+            let object_barrier = cursor.byte()? != 0;
+            let object_complex = cursor.byte()? != 0;
+            let zero_arg_alias_count = cursor.usize()?;
+            let mut zero_arg_aliases = BTreeSet::new();
+            for _ in 0..zero_arg_alias_count {
+                let alias = std::str::from_utf8(cursor.field()?).ok()?.to_owned();
+                if !is_identifier(&alias) {
+                    return None;
+                }
+                zero_arg_aliases.insert(alias);
+            }
+            let paste_token_count = cursor.usize()?;
+            let mut paste_tokens = Vec::with_capacity(paste_token_count);
+            for _ in 0..paste_token_count {
+                let token = std::str::from_utf8(cursor.field()?).ok()?.to_owned();
+                if !is_identifier(&token) {
+                    return None;
+                }
+                paste_tokens.push(token);
+            }
+            let parameter_count = if cursor.byte()? != 0 {
+                Some(cursor.usize()?)
+            } else {
+                None
+            };
+            let parameter_ambiguous = cursor.byte()? != 0;
+            let direct_sensitive_count = cursor.usize()?;
+            let mut direct_sensitive_parameters = BTreeSet::new();
+            for _ in 0..direct_sensitive_count {
+                let parameter = cursor.usize()?;
+                if parameter_count.is_none_or(|count| parameter >= count) {
+                    return None;
+                }
+                direct_sensitive_parameters.insert(parameter);
+            }
+            let flow_count = cursor.usize()?;
+            let mut parameter_flows = Vec::with_capacity(flow_count);
+            for _ in 0..flow_count {
+                let callee = std::str::from_utf8(cursor.field()?).ok()?.to_owned();
+                if !is_identifier(&callee) {
+                    return None;
+                }
+                let argument_count = cursor.usize()?;
+                let mut arguments = Vec::with_capacity(argument_count);
+                for _ in 0..argument_count {
+                    let unknown = cursor.byte()? != 0;
+                    let source_count = cursor.usize()?;
+                    let mut parameters = BTreeSet::new();
+                    for _ in 0..source_count {
+                        let parameter = cursor.usize()?;
+                        if parameter_count.is_none_or(|count| parameter >= count) {
+                            return None;
+                        }
+                        parameters.insert(parameter);
+                    }
+                    let token_count = cursor.usize()?;
+                    let mut tokens = BTreeSet::new();
+                    for _ in 0..token_count {
+                        let token = std::str::from_utf8(cursor.field()?).ok()?.to_owned();
+                        if !is_identifier(&token)
+                            && !token.strip_prefix('@').is_some_and(is_identifier)
+                        {
+                            return None;
+                        }
+                        tokens.insert(token);
+                    }
+                    arguments.push(ParameterSource {
+                        parameters,
+                        tokens,
+                        unknown,
+                    });
+                }
+                parameter_flows.push(ParameterFlow { callee, arguments });
+            }
+            let reference_count = cursor.usize()?;
+            let mut references = BTreeSet::new();
+            for _ in 0..reference_count {
+                let reference = std::str::from_utf8(cursor.field()?).ok()?.to_owned();
+                if !is_identifier(&reference) {
+                    return None;
+                }
+                references.insert(reference);
+            }
+            macros.insert(
+                name,
+                MacroAnalysis {
+                    pasted,
+                    references,
+                    has_include_fragment,
+                    object_alias,
+                    alias_ambiguous,
+                    object_aliases,
+                    object_barrier,
+                    object_complex,
+                    zero_arg_aliases,
+                    paste_tokens,
+                    parameter_count,
+                    parameter_ambiguous,
+                    direct_sensitive_parameters,
+                    parameter_flows,
+                },
+            );
+        }
+        let conditional_count = cursor.usize()?;
+        let mut conditionals = Vec::with_capacity(conditional_count);
+        for _ in 0..conditional_count {
+            let has_include_fragment = cursor.byte()? != 0;
+            let identifier_count = cursor.usize()?;
+            let mut identifiers = BTreeSet::new();
+            for _ in 0..identifier_count {
+                let identifier = std::str::from_utf8(cursor.field()?).ok()?.to_owned();
+                if !is_identifier(&identifier) {
+                    return None;
+                }
+                identifiers.insert(identifier);
+            }
+            conditionals.push(ConditionalAnalysis {
+                identifiers,
+                has_include_fragment,
+            });
+        }
+        let call_count = cursor.usize()?;
+        let mut macro_calls = Vec::with_capacity(call_count);
+        for _ in 0..call_count {
+            let name = std::str::from_utf8(cursor.field()?).ok()?.to_owned();
+            if !is_identifier(&name) {
+                return None;
+            }
+            let argument_count = cursor.usize()?;
+            let mut arguments = Vec::with_capacity(argument_count);
+            for _ in 0..argument_count {
+                let argument = std::str::from_utf8(cursor.field()?).ok()?.to_owned();
+                let nested_zero_arg = argument.strip_prefix('@').is_some_and(is_identifier);
+                let complex_argument = argument.strip_prefix('?').is_some_and(|identifiers| {
+                    identifiers
+                        .split(':')
+                        .filter(|identifier| !identifier.is_empty())
+                        .all(is_identifier)
+                });
+                if argument != "$"
+                    && !argument.is_empty()
+                    && !is_identifier(&argument)
+                    && !nested_zero_arg
+                    && !complex_argument
+                {
+                    return None;
+                }
+                arguments.push(argument);
+            }
+            macro_calls.push((name, arguments));
+        }
+        cursor.is_empty().then_some(Self {
+            macros,
+            conditionals,
+            direct_conditional_paste,
+            has_paste,
+            has_date_time_fragment,
+            macro_calls,
+        })
+    }
+}
+
+fn resolve_alias_candidates(
+    macros: &BTreeMap<String, MacroAnalysis>,
+    token: &str,
+) -> Option<BTreeSet<String>> {
+    fn visit(
+        macros: &BTreeMap<String, MacroAnalysis>,
+        token: &str,
+        depth: usize,
+        active: &mut BTreeSet<String>,
+        output: &mut BTreeSet<String>,
+    ) -> Option<()> {
+        if depth == 0 || !active.insert(token.to_owned()) {
+            return None;
+        }
+        let (name, zero_arg) = token
+            .strip_prefix('@')
+            .map_or((token, false), |name| (name, true));
+        let analysis = macros.get(name);
+        if zero_arg || analysis.is_some_and(|analysis| analysis.object_complex) {
+            return None;
+        }
+        let aliases = analysis.map(|analysis| {
+            if zero_arg {
+                &analysis.zero_arg_aliases
+            } else {
+                &analysis.object_aliases
+            }
+        });
+        if let Some(aliases) = aliases
+            && !aliases.is_empty()
+        {
+            for alias in aliases {
+                visit(macros, alias, depth - 1, active, output)?;
+            }
+            if analysis.is_some_and(|analysis| analysis.alias_ambiguous) {
+                output.insert(name.to_owned());
+            }
+        } else if analysis.is_some_and(|analysis| analysis.object_barrier) {
+            // An empty, numeric, string, or character replacement cannot
+            // contribute identifier bytes to a pasted volatile name.
+        } else {
+            output.insert(token.to_owned());
+        }
+        active.remove(token);
+        Some(())
+    }
+
+    let mut output = BTreeSet::new();
+    visit(macros, token, 32, &mut BTreeSet::new(), &mut output)?;
+    Some(output)
+}
+
+fn paste_slots_form_volatile(slots: &[Vec<String>]) -> bool {
+    const TARGETS: [&str; 4] = [
+        "__DATE__",
+        "__TIME__",
+        "__has_include",
+        "__has_include_next",
+    ];
+    let slots: Vec<Vec<&str>> = slots
+        .iter()
+        .map(|slot| {
+            slot.iter()
+                .map(String::as_str)
+                .filter(|candidate| {
+                    !candidate.is_empty() && TARGETS.iter().any(|target| target.contains(candidate))
+                })
+                .collect()
+        })
+        .filter(|slot: &Vec<_>| !slot.is_empty())
+        .collect();
+
+    fn search(target: &str, offset: usize, slots: &[Vec<&str>], used: &mut [bool]) -> bool {
+        if offset == target.len() {
+            return true;
+        }
+        for (index, candidates) in slots.iter().enumerate() {
+            if used[index] {
+                continue;
+            }
+            for candidate in candidates {
+                if target[offset..].starts_with(candidate) {
+                    used[index] = true;
+                    if search(target, offset + candidate.len(), slots, used) {
+                        return true;
+                    }
+                    used[index] = false;
+                }
+            }
+        }
+        false
+    }
+
+    TARGETS
+        .iter()
+        .any(|target| search(target, 0, &slots, &mut vec![false; slots.len()]))
+}
+
+fn expanded_conditional_identifiers(expression: &str) -> BTreeSet<String> {
+    let tokens: Vec<_> = identifiers(expression).collect();
+    let mut expanded = BTreeSet::new();
+    let mut index = 0;
+    while index < tokens.len() {
+        if tokens[index] == "defined" {
+            index = index.saturating_add(2);
+        } else {
+            expanded.insert(tokens[index].to_owned());
+            index += 1;
+        }
+    }
+    expanded
+}
+
+fn macro_definition(rest: &str) -> Option<(&str, &str, Option<Vec<String>>)> {
+    let rest = rest.trim_start();
+    let name_len = rest
+        .find(|value: char| !(value.is_ascii_alphanumeric() || value == '_'))
+        .unwrap_or(rest.len());
+    let name = &rest[..name_len];
+    if name.is_empty() || !is_identifier(name) {
+        return None;
+    }
+    let after_name = &rest[name_len..];
+    if let Some(parameters) = after_name.strip_prefix('(') {
+        let close = parameters.find(')')?;
+        let parameters = parameters[..close].trim();
+        let parameters = if parameters.is_empty() {
+            Vec::new()
+        } else {
+            parameters
+                .split(',')
+                .map(|parameter| {
+                    let parameter = parameter.trim();
+                    if parameter == "..." {
+                        Some("__VA_ARGS__".to_owned())
+                    } else if is_identifier(parameter) {
+                        Some(parameter.to_owned())
+                    } else {
+                        parameter
+                            .strip_suffix("...")
+                            .filter(|name| is_identifier(name))
+                            .map(str::to_owned)
+                    }
+                })
+                .collect::<Option<Vec<_>>>()?
+        };
+        Some((name, after_name[close + 2..].trim_start(), Some(parameters)))
+    } else {
+        Some((name, after_name.trim_start(), None))
+    }
+}
+
+fn is_safe_paste_barrier(replacement: &str) -> bool {
+    let value = replacement.trim();
+    if value.is_empty() {
+        return true;
+    }
+    let bytes = value.as_bytes();
+    if matches!(bytes[0], b'"' | b'\'') {
+        let quote = bytes[0];
+        let mut index = 1;
+        while index < bytes.len() {
+            if bytes[index] == b'\\' {
+                index = index.saturating_add(2);
+            } else if bytes[index] == quote {
+                return index + 1 == bytes.len();
+            } else {
+                index += 1;
+            }
+        }
+        return false;
+    }
+    (bytes[0].is_ascii_digit() || bytes[0] == b'.' && bytes.get(1).is_some_and(u8::is_ascii_digit))
+        && bytes
+            .iter()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'\''))
+}
+
+fn is_identifier(value: &str) -> bool {
+    let mut bytes = value.bytes();
+    matches!(bytes.next(), Some(b'a'..=b'z' | b'A'..=b'Z' | b'_'))
+        && bytes.all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+}
+
+fn identifiers(mut value: &str) -> impl Iterator<Item = &str> {
+    std::iter::from_fn(move || {
+        loop {
+            let start = value.find(|byte: char| byte.is_ascii_alphabetic() || byte == '_')?;
+            value = &value[start..];
+            let end = value
+                .find(|byte: char| !(byte.is_ascii_alphanumeric() || byte == '_'))
+                .unwrap_or(value.len());
+            let identifier = &value[..end];
+            value = &value[end..];
+            return Some(identifier);
+        }
+    })
+}
+
+fn contains_volatile_predefined_macro(source: &[u8]) -> Option<bool> {
+    let text = normalized_preprocessor_text(source)?;
+    Some(contains_volatile_predefined_macro_in_text(&text))
+}
+
+struct ManifestCursor<'a> {
+    bytes: &'a [u8],
+    offset: usize,
+}
+
+impl<'a> ManifestCursor<'a> {
+    fn new(bytes: &'a [u8]) -> Self {
+        Self { bytes, offset: 0 }
+    }
+
+    fn byte(&mut self) -> Option<u8> {
+        let byte = *self.bytes.get(self.offset)?;
+        self.offset += 1;
+        Some(byte)
+    }
+
+    fn usize(&mut self) -> Option<usize> {
+        let end = self.offset.checked_add(8)?;
+        let value = u64::from_le_bytes(self.bytes.get(self.offset..end)?.try_into().ok()?);
+        self.offset = end;
+        usize::try_from(value).ok()
+    }
+
+    fn field(&mut self) -> Option<&'a [u8]> {
+        let len = self.usize()?;
+        let end = self.offset.checked_add(len)?;
+        let field = self.bytes.get(self.offset..end)?;
+        self.offset = end;
+        Some(field)
+    }
+
+    fn is_empty(&self) -> bool {
+        self.offset == self.bytes.len()
+    }
+}
+
+fn header_manifest_analysis(manifest: &[u8]) -> Option<PasteAnalysis> {
+    const PREFIX: &[u8] = b"MAMBA-HDR-MANIFEST-V3\0";
+    let Some(bytes) = manifest.strip_prefix(PREFIX) else {
+        return Some(PasteAnalysis::default());
+    };
+    let mut cursor = ManifestCursor::new(bytes);
+    let has_paste = cursor.byte()? != 0;
+    let has_date_time_fragment = cursor.byte()? != 0;
+    PasteAnalysis::decode(cursor.field()?, has_paste, has_date_time_fragment)
+}
+
+fn contains_token_paste(text: &str) -> bool {
+    text.contains("##") || text.contains("%:%:")
+}
+
+fn paste_chain_identifiers(text: &str) -> Vec<String> {
+    let bytes = text.as_bytes();
+    let mut tokens = Vec::new();
+    let mut offset = 0;
+    while offset < bytes.len() {
+        let hash = text[offset..].find("##").map(|index| (offset + index, 2));
+        let digraph = text[offset..].find("%:%:").map(|index| (offset + index, 4));
+        let Some((paste, width)) = (match (hash, digraph) {
+            (Some(left), Some(right)) => Some(if left.0 <= right.0 { left } else { right }),
+            (Some(found), None) | (None, Some(found)) => Some(found),
+            (None, None) => None,
+        }) else {
+            break;
+        };
+        let mut left = paste;
+        while left > 0 && bytes[left - 1].is_ascii_whitespace() {
+            left -= 1;
+        }
+        let left_end = left;
+        while left > 0 && (bytes[left - 1].is_ascii_alphanumeric() || bytes[left - 1] == b'_') {
+            left -= 1;
+        }
+        if left < left_end && is_identifier(&text[left..left_end]) {
+            tokens.push(text[left..left_end].to_owned());
+        }
+        let mut right = paste + width;
+        while right < bytes.len() && bytes[right].is_ascii_whitespace() {
+            right += 1;
+        }
+        let right_start = right;
+        while right < bytes.len() && (bytes[right].is_ascii_alphanumeric() || bytes[right] == b'_')
+        {
+            right += 1;
+        }
+        if right_start < right && is_identifier(&text[right_start..right]) {
+            tokens.push(text[right_start..right].to_owned());
+        }
+        offset = paste + width;
+    }
+    tokens
+}
+
+fn is_date_time_fragment(identifier: &[u8]) -> bool {
+    if identifier.len() < 3 {
+        return false;
+    }
+    [b"__DATE__".as_slice(), b"__TIME__".as_slice()]
+        .iter()
+        .any(|name| {
+            identifier != *name && (name.starts_with(identifier) || name.ends_with(identifier))
+        })
+}
+
+fn contains_date_time_fragment_in_text(text: &str) -> bool {
+    contains_identifier_in_text(text, is_date_time_fragment)
+}
+
+fn is_has_include_fragment(identifier: &[u8]) -> bool {
+    [
+        b"__has_include".as_slice(),
+        b"__has_include_next".as_slice(),
+    ]
+    .iter()
+    .any(|name| identifier != *name && (name.starts_with(identifier) || name.ends_with(identifier)))
+}
+
+fn contains_has_include_fragment_in_text(text: &str) -> bool {
+    contains_identifier_in_text(text, is_has_include_fragment)
+}
+
+fn contains_volatile_predefined_macro_in_text(text: &str) -> bool {
+    if contains_nv_builtin_volatile_paste(text) {
+        return true;
+    }
+    contains_identifier_in_text(text, |identifier| {
+        matches!(
+            identifier,
+            b"__DATE__" | b"__TIME__" | b"__has_include" | b"__has_include_next"
+        )
+    })
+}
+
+fn contains_nv_builtin_volatile_paste(text: &str) -> bool {
+    simple_macro_calls(text)
+        .iter()
+        .filter(|(name, _)| is_builtin_paste_macro(name))
+        .any(|(_, arguments)| {
+            let pasted = arguments.concat();
+            matches!(
+                pasted.as_str(),
+                "__DATE__" | "__TIME__" | "__has_include" | "__has_include_next"
+            )
+        })
+}
+
+fn is_builtin_paste_macro(name: &str) -> bool {
+    name.starts_with("_NV_PASTE") || name == "_NV_CONCAT_EVAL"
+}
+
+fn simple_macro_calls(text: &str) -> Vec<(String, Vec<String>)> {
+    let bytes = text.as_bytes();
+    let mut offset = 0;
+    let mut calls = Vec::new();
+    while offset < bytes.len() {
+        if bytes[offset] == b'"' || bytes[offset] == b'\'' {
+            let quote = bytes[offset];
+            offset += 1;
+            while offset < bytes.len() {
+                if bytes[offset] == b'\\' {
+                    offset = (offset + 2).min(bytes.len());
+                } else if bytes[offset] == quote {
+                    offset += 1;
+                    break;
+                } else {
+                    offset += 1;
+                }
+            }
+            continue;
+        }
+        if !(bytes[offset].is_ascii_alphabetic() || bytes[offset] == b'_') {
+            offset += 1;
+            continue;
+        }
+        let start = offset;
+        offset += 1;
+        while offset < bytes.len()
+            && (bytes[offset].is_ascii_alphanumeric() || bytes[offset] == b'_')
+        {
+            offset += 1;
+        }
+        let name_end = offset;
+        let mut open = name_end;
+        while bytes.get(open).is_some_and(u8::is_ascii_whitespace) {
+            open += 1;
+        }
+        if bytes.get(open) != Some(&b'(') {
+            continue;
+        }
+        let mut close = open + 1;
+        let mut depth = 1usize;
+        while close < bytes.len() && depth != 0 {
+            match bytes[close] {
+                b'(' => depth += 1,
+                b')' => depth -= 1,
+                _ => {}
+            }
+            close += 1;
+        }
+        if depth != 0 {
+            break;
+        }
+        let close = close - 1;
+        let mut arguments = Vec::new();
+        let mut argument_start = open + 1;
+        let mut argument_depth = 0usize;
+        let mut parts = Vec::new();
+        for index in open + 1..=close {
+            match bytes.get(index).copied() {
+                Some(b'(') => argument_depth += 1,
+                Some(b')') if argument_depth > 0 => argument_depth -= 1,
+                Some(b',') if argument_depth == 0 => {
+                    parts.push(&text[argument_start..index]);
+                    argument_start = index + 1;
+                }
+                None | Some(b')') if argument_depth == 0 => {
+                    parts.push(&text[argument_start..index]);
+                }
+                _ => {}
+            }
+        }
+        for argument in parts {
+            let argument = argument.trim();
+            if argument.is_empty() {
+                continue;
+            }
+            if is_identifier(argument) {
+                arguments.push(argument.to_owned());
+            } else if let Some(name) = zero_arg_macro_call(argument) {
+                arguments.push(format!("@{name}"));
+            } else if is_safe_paste_barrier(argument) {
+                arguments.push("$".to_owned());
+            } else {
+                let identifiers = identifiers(argument).collect::<Vec<_>>().join(":");
+                arguments.push(format!("?{identifiers}"));
+            }
+        }
+        calls.push((text[start..name_end].to_owned(), arguments));
+        // Continue inside the call as well, so a non-paste wrapper cannot
+        // hide a nested paste-capable invocation.
+        offset = open + 1;
+    }
+    calls
+}
+
+fn zero_arg_macro_call(argument: &str) -> Option<&str> {
+    let open = argument.find('(')?;
+    let name = argument[..open].trim_end();
+    (is_identifier(name) && argument[open + 1..].trim() == ")").then_some(name)
+}
+
+fn contains_identifier_in_text(
+    text: &str,
+    mut matches_identifier: impl FnMut(&[u8]) -> bool,
+) -> bool {
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum LexState {
+        Normal,
+        String,
+        Character,
+    }
+
+    let bytes = text.as_bytes();
+    let mut state = LexState::Normal;
+    let mut index = 0;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        match state {
+            LexState::Normal if byte == b'"' => {
+                state = LexState::String;
+                index += 1;
+            }
+            LexState::Normal if byte == b'\'' => {
+                state = LexState::Character;
+                index += 1;
+            }
+            LexState::Normal if byte.is_ascii_alphabetic() || byte == b'_' => {
+                let start = index;
+                index += 1;
+                while index < bytes.len()
+                    && (bytes[index].is_ascii_alphanumeric() || bytes[index] == b'_')
+                {
+                    index += 1;
+                }
+                if matches_identifier(&bytes[start..index]) {
+                    return true;
+                }
+            }
+            LexState::Normal => index += 1,
+            LexState::String | LexState::Character if byte == b'\\' => {
+                index = index.saturating_add(2);
+            }
+            LexState::String if byte == b'"' => {
+                state = LexState::Normal;
+                index += 1;
+            }
+            LexState::Character if byte == b'\'' => {
+                state = LexState::Normal;
+                index += 1;
+            }
+            LexState::String | LexState::Character => index += 1,
+        }
+    }
+    false
 }
 
 fn known_nvrtc_builtin_header(name: &str) -> bool {
@@ -1013,26 +2392,33 @@ fn normalized_preprocessor_text(source: &[u8]) -> Option<String> {
 }
 
 fn include_directive(line: &str) -> Option<Option<&str>> {
-    let line = line.trim_start();
-    let line = if let Some(line) = line.strip_prefix('#') {
-        line
-    } else if let Some(line) = line.strip_prefix("%:") {
-        line
-    } else {
+    let Some((directive, rest)) = preprocessor_directive(line) else {
         return Some(None);
     };
-    let line = line.trim_start();
-    let directive_end = line
-        .find(|value: char| !(value.is_ascii_alphanumeric() || value == '_'))
-        .unwrap_or(line.len());
-    let directive = &line[..directive_end];
     if directive == "import" || directive.starts_with("include") && directive != "include" {
         return None;
     }
     if directive != "include" {
         return Some(None);
     }
-    Some(Some(line[directive_end..].trim_start()))
+    Some(Some(rest))
+}
+
+fn preprocessor_directive(line: &str) -> Option<(&str, &str)> {
+    let line = line.trim_start();
+    let line = if let Some(line) = line.strip_prefix('#') {
+        line
+    } else if let Some(line) = line.strip_prefix("%:") {
+        line
+    } else {
+        return None;
+    };
+    let line = line.trim_start();
+    let directive_end = line
+        .find(|value: char| !(value.is_ascii_alphanumeric() || value == '_'))
+        .unwrap_or(line.len());
+    let directive = &line[..directive_end];
+    Some((directive, line[directive_end..].trim_start()))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -1283,6 +2669,7 @@ impl GemmRouteIdentity {
 #[cfg(test)]
 mod cache_and_header_tests {
     use super::*;
+    #[cfg(target_os = "linux")]
     use std::sync::{Arc, Barrier};
 
     #[cfg(target_os = "linux")]
@@ -1295,6 +2682,7 @@ mod cache_and_header_tests {
             .expect("trusted temporary directory")
     }
 
+    #[cfg(target_os = "linux")]
     fn key() -> Sha256Digest {
         [7; 32]
     }
@@ -1442,6 +2830,45 @@ mod cache_and_header_tests {
         assert!(read_cache(&path, key(), ArtifactKind::Ptx).is_none());
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn cache_rejects_a_private_fifo_without_blocking() {
+        use std::os::unix::ffi::OsStrExt;
+        use std::os::unix::fs::PermissionsExt;
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let root = trusted_tempdir();
+        let directory = root.path().join("cache");
+        prepare_private_cache_dir(&directory).unwrap();
+        let path = directory.join("entry.bin");
+        let c_path = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) }, 0);
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        let worker_path = path.clone();
+        let (tx, rx) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            tx.send(read_cache(&worker_path, key(), ArtifactKind::Ptx).is_none())
+                .unwrap();
+        });
+        let result = rx.recv_timeout(Duration::from_millis(250));
+        if result.is_err() {
+            let fd = unsafe {
+                libc::open(
+                    c_path.as_ptr(),
+                    libc::O_RDWR | libc::O_NONBLOCK | libc::O_CLOEXEC,
+                )
+            };
+            if fd >= 0 {
+                unsafe { libc::close(fd) };
+            }
+        }
+        worker.join().unwrap();
+        assert_eq!(result, Ok(true), "cache read blocked while opening a FIFO");
+    }
+
+    #[cfg(target_os = "linux")]
     #[test]
     fn cache_size_limit_includes_the_envelope_without_overflow() {
         let largest_payload = MAX_CACHE_ENTRY_BYTES as usize - CACHE_ENVELOPE_HEADER_BYTES;
@@ -1627,6 +3054,543 @@ mod cache_and_header_tests {
                 "ambiguous source was accepted: {source:?}"
             );
         }
+    }
+
+    #[test]
+    fn token_pasted_has_include_forms_disable_the_manifest() {
+        for source in [
+            b"#define JOIN(a, b) a ## b\n#if JOIN(__has_, include)(\"probe.h\")\n#endif".as_slice(),
+            b"#define JOIN(a, b) a ## b\n#if JOIN(__has_include_, next)(\"probe.h\")\n#endif",
+            b"#define JOIN(a, b) a %:%: b\n#if JOIN(__has_, include)(\"probe.h\")\n#endif",
+            b"#define JOIN(a, b) a ## b\n#if JOIN(__has_, include)(\"probe.h\")\n#endif\n#undef JOIN\n#define JOIN(a, b) 0",
+            b"#if _NV_PASTE5(_, _, has, _include, )(\"probe.h\")\n#endif",
+        ] {
+            assert!(
+                header_manifest(source, &[]).is_none(),
+                "token-pasted filesystem probe was accepted: {source:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn token_paste_state_crosses_literal_include_boundaries() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(
+            root.path().join("probe_logic.h"),
+            b"#if JOIN(__has_, include)(\"probe.h\")\n#endif",
+        )
+        .unwrap();
+        let include_root = root.path().to_string_lossy().into_owned();
+        let source = b"#define JOIN(a, b) a ## b\n#include \"probe_logic.h\"";
+        assert!(header_manifest(source, &[include_root]).is_none());
+    }
+
+    #[test]
+    fn token_paste_outside_a_conditional_remains_cacheable() {
+        let source =
+            b"#define NAME(a, b) a ## b\nextern \"C\" __global__ void NAME(kernel_, main)() {}";
+        assert!(header_manifest(source, &[]).is_some());
+
+        let defined_only = b"#define NAME(a, b) a ## b\n#if defined(NAME)\n#endif";
+        assert!(header_manifest(defined_only, &[]).is_some());
+    }
+
+    #[test]
+    fn volatile_predefined_macros_disable_the_manifest() {
+        for source in [
+            b"const char *built = __DATE__;".as_slice(),
+            b"#define BUILD_CLOCK __TIME__\nconst char *built = BUILD_CLOCK;",
+        ] {
+            assert!(header_manifest(source, &[]).is_none());
+        }
+
+        assert!(header_manifest(b"// __DATE__\nconst char *name = \"__TIME__\";", &[]).is_some());
+    }
+
+    #[test]
+    fn volatile_predefined_macros_in_headers_disable_the_manifest() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("build_stamp.h"), b"#define STAMP __TIME__").unwrap();
+        let include_root = root.path().to_string_lossy().into_owned();
+
+        assert!(
+            header_manifest(
+                b"#include \"build_stamp.h\"",
+                std::slice::from_ref(&include_root)
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn token_pasted_volatile_macros_disable_the_manifest() {
+        let source = b"#define CAT_(a, b) a ## b\n\
+#define CAT(a, b) CAT_(a, b)\n\
+const char *stamp = CAT(__TI, ME__);";
+        assert!(header_manifest(source, &[]).is_none());
+        assert!(
+            header_manifest(b"const char *stamp = _NV_PASTE5(_, _, TI, ME, __);", &[],).is_none(),
+            "NVRTC builtin paste macros make every DATE/TIME fragment volatile"
+        );
+        for source in [
+            b"const char *stamp = _NV_PASTE5(_, _, TIME, _, _);".as_slice(),
+            b"#define U _\n#define T TIME\nconst char *stamp = _NV_PASTE5(U,U,T,U,U);",
+            b"#define CAT8(a,b,c,d,e,f,g,h) a##b##c##d##e##f##g##h\nconst char *stamp = CAT8(_,_,T,I,M,E,_,_);",
+            b"#define WRAP(a,b,c,d,e) _NV_PASTE5(a,b,c,d,e)\nconst char *stamp = WRAP(_,_,TIME,_,_);",
+            b"#define A _\n#define T TIME\n#define P5(a,b,c,d,e) _NV_PASTE5(a,b,c,d,e)\nconst char *stamp = P5(A,A,T,A,A);",
+            b"#define A __TI\n#define B ME__\nconst char *stamp = _NV_CONCAT_EVAL(A,B);",
+            b"#define A() _\n#define T() TIME\n#define P5(a,b,c,d,e) _NV_PASTE5(a,b,c,d,e)\nconst char *stamp = P5(A(),A(),T(),A(),A());",
+            b"#define P(a,b) a##b\n#define A P(_,_)\n#define B P(T,I)\n#define C P(M,E)\n#define D P(_,_)\n#define P4_I(a,b,c,d) a##b##c##d\n#define P4(a,b,c,d) P4_I(a,b,c,d)\nconst char *stamp=P4(A,B,C,D);",
+            b"#define P(a,b) a##b\n#define P4_I(a,b,c,d) a##b##c##d\n#define P4(a,b,c,d) P4_I(a,b,c,d)\nconst char *stamp=P4(P(_,_),P(T,I),P(M,E),P(_,_));",
+            b"#define CAT8(a,b,c,d,e,f,g,h) a##b##c##d##e##f##g##h\n#define F() CAT8(_,_,T,I,M,E,_,_)\nconst char *stamp=F();",
+            b"#define P2_I(a,b) a##b\n#define P2(a,b) P2_I(a,b)\n#define P4_I(a,b,c,d) a##b##c##d\n#define P4(a,b,c,d) P4_I(a,b,c,d)\n#define F(x,y) P4(P2(_,_),P2(x,I),P2(y,E),P2(_,_))\nconst char *stamp=F(T,M);",
+            b"#define U _\n#define T TIME\nconst char *stamp = _NV_PASTE5(U,U,T,U,U);\n#undef U\n#define U X",
+            b"#define CAT8(a,b,c,d,e,f,g,h) a##b##c##d##e##f##g##h\n#define T X\n#undef T\nconst char *stamp=CAT8(_,_,T,I,M,E,_,_);",
+            b"#define CAT8(a,b,c,d,e,f,g,h) a##b##c##d##e##f##g##h\n#define OUTER(x) x\nconst char *stamp = OUTER(CAT8(_,_,T,I,M,E,_,_));",
+        ] {
+            assert!(
+                header_manifest(source, &[]).is_none(),
+                "paste-call argument composition was accepted: {source:?}"
+            );
+        }
+        let mut deep = String::new();
+        for index in 0..33 {
+            deep.push_str(&format!("#define A{index} A{}\n", index + 1));
+        }
+        deep.push_str("#define A33 _\n#define T TIME\n");
+        deep.push_str("const char *stamp = _NV_PASTE5(A0,A0,T,A0,A0);");
+        assert!(
+            header_manifest(deep.as_bytes(), &[]).is_none(),
+            "alias depth exhaustion must fail closed"
+        );
+    }
+
+    #[test]
+    fn numeric_paste_operands_round_trip_through_the_manifest() {
+        let source = b"#define INDEX(N) N ## 0\nextern \"C\" __global__ void kernel() {}";
+        let manifest = header_manifest(source, &[]).unwrap();
+        assert!(header_manifest_analysis(&manifest).is_some());
+        assert!(
+            CompileKeyMaterial {
+                source: source.to_vec(),
+                target: b"sm_80".to_vec(),
+                argv: vec![],
+                include_roots: vec![],
+                header_manifest: Some(manifest),
+                nvrtc_version: (13, 2),
+                nvrtc_library_domain: Some(b"runtime-and-builtins".to_vec()),
+                output_kind: ArtifactKind::Ptx,
+                composer_revision: COMPOSER_REVISION,
+                compiler_revision: COMPILER_REVISION,
+                numeric_abi_revision: NUMERIC_ABI_REVISION,
+                schedule_revision: SCHEDULE_REVISION,
+            }
+            .digest()
+            .is_some()
+        );
+    }
+
+    #[test]
+    fn deterministic_nvrtc_seed_is_version_gated() {
+        assert!(deterministic_nvrtc_options((12, 8), "17").is_empty());
+        assert_eq!(
+            deterministic_nvrtc_options((12, 9), "17"),
+            vec!["--frandom-seed=17"]
+        );
+        assert_eq!(
+            deterministic_nvrtc_options((13, 2), "29"),
+            vec!["--frandom-seed=29"]
+        );
+    }
+
+    #[test]
+    fn token_pasted_volatile_macros_in_headers_disable_the_manifest() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(
+            root.path().join("build_stamp.h"),
+            b"#define CAT_(a, b) a ## b\n\
+#define CAT(a, b) CAT_(a, b)\n\
+const char *stamp = CAT(__DA, TE__);",
+        )
+        .unwrap();
+        let include_root = root.path().to_string_lossy().into_owned();
+        assert!(
+            header_manifest(
+                b"#include \"build_stamp.h\"",
+                std::slice::from_ref(&include_root)
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn unrelated_token_paste_remains_cacheable() {
+        let source = b"#define CAT_(a, b) a ## b\n\
+#define CAT(a, b) CAT_(a, b)\n\
+extern \"C\" __global__ void CAT(kernel_, main)() {}";
+        assert!(header_manifest(source, &[]).is_some());
+    }
+
+    #[test]
+    fn literal_include_and_unrelated_token_paste_remain_cacheable() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("stable.h"), b"#define STABLE_VALUE 7").unwrap();
+        let include_root = root.path().to_string_lossy().into_owned();
+        let source = b"#include \"stable.h\"\n\
+#define SYMBOL(name) kernel_ ## name\n\
+extern \"C\" __global__ void SYMBOL(main)() {}";
+        assert!(
+            header_manifest(source, std::slice::from_ref(&include_root)).is_some(),
+            "the include directive keyword is not a __has_include fragment"
+        );
+    }
+
+    #[test]
+    fn cache_hit_revalidates_the_header_closure_after_lookup() {
+        let root = tempfile::tempdir().unwrap();
+        let header = root.path().join("mutable.h");
+        std::fs::write(&header, b"#define VALUE 1").unwrap();
+        let include_root = root.path().to_string_lossy().into_owned();
+        let source = b"#include \"mutable.h\"\nint value = VALUE;";
+        let lookup_manifest = header_manifest(source, std::slice::from_ref(&include_root));
+        assert!(lookup_manifest.is_some());
+
+        std::fs::write(&header, b"#define VALUE 2").unwrap();
+        assert!(
+            !cache_hit_header_closure_is_current(
+                source,
+                std::slice::from_ref(&include_root),
+                &lookup_manifest,
+            ),
+            "a hit keyed before header mutation must fall through to compilation"
+        );
+    }
+
+    #[test]
+    fn volatile_predefined_macros_in_compile_material_disable_persistent_keys() {
+        let material = |source: &[u8], argv: Vec<Vec<u8>>| CompileKeyMaterial {
+            source: source.to_vec(),
+            target: b"sm_89".to_vec(),
+            argv,
+            include_roots: vec![],
+            header_manifest: Some(vec![]),
+            nvrtc_version: (13, 2),
+            nvrtc_library_domain: Some(b"runtime-and-builtins".to_vec()),
+            output_kind: ArtifactKind::Ptx,
+            composer_revision: COMPOSER_REVISION,
+            compiler_revision: COMPILER_REVISION,
+            numeric_abi_revision: NUMERIC_ABI_REVISION,
+            schedule_revision: SCHEDULE_REVISION,
+        };
+
+        assert!(
+            material(b"int stamp = __DATE__[0];", vec![b"--fmad=true".to_vec()])
+                .digest()
+                .is_none()
+        );
+        assert!(
+            material(
+                b"extern \"C\" __global__ void stable() {}",
+                vec![b"-DNOW=__TIME__".to_vec()]
+            )
+            .digest()
+            .is_none()
+        );
+        assert!(
+            material(
+                b"extern \"C\" __global__ void stable() {}",
+                vec![b"-DNOW=steady".to_vec()]
+            )
+            .digest()
+            .is_some()
+        );
+        assert!(
+            material(
+                b"#define CAT(a, b) a ## b\nint stable;",
+                vec![b"-DPART=__TI".to_vec()]
+            )
+            .digest()
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn volatile_fragments_and_token_paste_combine_across_manifest_and_argv() {
+        let root = tempfile::tempdir().unwrap();
+        let include_root = root.path().to_string_lossy().into_owned();
+        let material = |manifest: Vec<u8>, argv: Vec<Vec<u8>>| CompileKeyMaterial {
+            source: b"extern \"C\" __global__ void stable() {}".to_vec(),
+            target: b"sm_89".to_vec(),
+            argv,
+            include_roots: vec![include_root.as_bytes().to_vec()],
+            header_manifest: Some(manifest),
+            nvrtc_version: (13, 2),
+            nvrtc_library_domain: Some(b"runtime-and-builtins".to_vec()),
+            output_kind: ArtifactKind::Ptx,
+            composer_revision: COMPOSER_REVISION,
+            compiler_revision: COMPILER_REVISION,
+            numeric_abi_revision: NUMERIC_ABI_REVISION,
+            schedule_revision: SCHEDULE_REVISION,
+        };
+
+        std::fs::write(
+            root.path().join("fragments.h"),
+            b"#define LEFT __TI\n#define RIGHT ME__",
+        )
+        .unwrap();
+        let fragments = header_manifest(
+            b"#include \"fragments.h\"",
+            std::slice::from_ref(&include_root),
+        )
+        .unwrap();
+        assert!(
+            material(fragments, vec![b"-DCAT(a,b)=a##b".to_vec()])
+                .digest()
+                .is_none()
+        );
+
+        std::fs::write(root.path().join("paste.h"), b"#define CAT(a,b) a ## b").unwrap();
+        let paste =
+            header_manifest(b"#include \"paste.h\"", std::slice::from_ref(&include_root)).unwrap();
+        assert!(
+            material(paste, vec![b"-DLEFT=__DA".to_vec()])
+                .digest()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn argv_has_include_alias_disables_persistent_keys() {
+        let root = tempfile::tempdir().unwrap();
+        let include_root = root.path().to_string_lossy().into_owned();
+        let digest = || {
+            CompileKeyMaterial {
+                source: b"#if CHECK\nint selected;\n#endif".to_vec(),
+                target: b"sm_89".to_vec(),
+                argv: vec![b"-DCHECK=__has_include(\"probe_optional.h\")".to_vec()],
+                include_roots: vec![include_root.as_bytes().to_vec()],
+                header_manifest: header_manifest(
+                    b"#if CHECK\nint selected;\n#endif",
+                    std::slice::from_ref(&include_root),
+                ),
+                nvrtc_version: (13, 2),
+                nvrtc_library_domain: Some(b"runtime-and-builtins".to_vec()),
+                output_kind: ArtifactKind::Ptx,
+                composer_revision: COMPOSER_REVISION,
+                compiler_revision: COMPILER_REVISION,
+                numeric_abi_revision: NUMERIC_ABI_REVISION,
+                schedule_revision: SCHEDULE_REVISION,
+            }
+            .digest()
+        };
+
+        assert!(digest().is_none());
+        std::fs::write(root.path().join("probe_optional.h"), b"#define PRESENT 1").unwrap();
+        assert!(digest().is_none());
+    }
+
+    #[test]
+    fn has_include_fragments_and_paste_combine_across_source_and_argv() {
+        let material = |source: &[u8], argv: Vec<Vec<u8>>| CompileKeyMaterial {
+            source: source.to_vec(),
+            target: b"sm_89".to_vec(),
+            argv,
+            include_roots: vec![],
+            header_manifest: header_manifest(source, &[]),
+            nvrtc_version: (13, 2),
+            nvrtc_library_domain: Some(b"runtime-and-builtins".to_vec()),
+            output_kind: ArtifactKind::Ptx,
+            composer_revision: COMPOSER_REVISION,
+            compiler_revision: COMPILER_REVISION,
+            numeric_abi_revision: NUMERIC_ABI_REVISION,
+            schedule_revision: SCHEDULE_REVISION,
+        };
+
+        assert!(
+            material(
+                b"#define LEFT __has_\n#if CAT(LEFT, include)(\"probe.h\")\n#endif",
+                vec![b"-DCAT(a,b)=a##b".to_vec()]
+            )
+            .digest()
+            .is_none()
+        );
+        assert!(
+            material(
+                b"#define CAT(a,b) a ## b\nint stable;",
+                vec![b"-DLEFT=__has_".to_vec()]
+            )
+            .digest()
+            .is_some(),
+            "an unused fragment is not a volatile operator"
+        );
+
+        assert!(
+            material(
+                b"#define CAT_(a,b) a ## b\n\
+#define CAT(a,b) CAT_(a,b)\n\
+#define A __has_\n\
+#define B include\n\
+#if H\nint selected;\n#endif",
+                vec![b"-DH=CAT(A,B)(\"probe.h\")".to_vec()]
+            )
+            .digest()
+            .is_none(),
+            "argv aliases must participate in the source/header macro graph"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn quoted_include_recurses_from_its_logical_symlink_parent() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let include = root.path().join("include");
+        let alias = include.join("alias");
+        let real = root.path().join("real");
+        std::fs::create_dir_all(&alias).unwrap();
+        std::fs::create_dir_all(&real).unwrap();
+        std::fs::write(real.join("header.h"), b"#include \"sibling.h\"").unwrap();
+        std::fs::write(real.join("sibling.h"), b"canonical sibling").unwrap();
+        let logical_sibling = alias.join("sibling.h");
+        std::fs::write(&logical_sibling, b"logical sibling a").unwrap();
+        symlink(real.join("header.h"), alias.join("header.h")).unwrap();
+
+        let include_root = include.to_string_lossy().into_owned();
+        let source = b"#include \"alias/header.h\"";
+        let manifest = header_manifest(source, std::slice::from_ref(&include_root));
+        assert!(manifest.is_some());
+        std::fs::write(logical_sibling, b"logical sibling b").unwrap();
+        assert!(!header_manifest_is_current(
+            source,
+            &[include_root],
+            &manifest
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn parent_dir_in_a_literal_include_disables_the_manifest() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let include = root.path().join("include");
+        let real = root.path().join("real");
+        let sub = real.join("sub");
+        std::fs::create_dir_all(&include).unwrap();
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(sub.join("header.h"), b"#include \"../dep.h\"").unwrap();
+        std::fs::write(real.join("dep.h"), b"compiler target").unwrap();
+        std::fs::write(include.join("dep.h"), b"lexical target").unwrap();
+        symlink(&sub, include.join("alias")).unwrap();
+
+        let include_root = include.to_string_lossy().into_owned();
+        assert!(
+            header_manifest(
+                b"#include \"alias/header.h\"",
+                std::slice::from_ref(&include_root)
+            )
+            .is_none()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn parent_dir_in_an_include_root_disables_the_manifest() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let include = root.path().join("include");
+        let real = root.path().join("real");
+        std::fs::create_dir_all(&include).unwrap();
+        std::fs::create_dir_all(real.join("sub")).unwrap();
+        symlink(real.join("sub"), include.join("alias")).unwrap();
+        let include_root = include.join("alias/..").to_string_lossy().into_owned();
+
+        assert!(header_manifest(b"", &[include_root]).is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn one_canonical_header_is_traversed_in_each_logical_context() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let include = root.path().join("include");
+        let left = include.join("left");
+        let right = include.join("right");
+        let real = root.path().join("real");
+        std::fs::create_dir_all(&left).unwrap();
+        std::fs::create_dir_all(&right).unwrap();
+        std::fs::create_dir_all(&real).unwrap();
+        let common = real.join("common.h");
+        std::fs::write(&common, b"#include \"sibling.h\"").unwrap();
+        std::fs::write(real.join("sibling.h"), b"canonical sibling").unwrap();
+        symlink(&common, left.join("header.h")).unwrap();
+        symlink(&common, right.join("header.h")).unwrap();
+        let left_sibling = left.join("sibling.h");
+        let right_sibling = right.join("sibling.h");
+        std::fs::write(&left_sibling, b"left a").unwrap();
+        std::fs::write(&right_sibling, b"right a").unwrap();
+
+        let include_root = include.to_string_lossy().into_owned();
+        let source = b"#include \"left/header.h\"\n#include \"right/header.h\"";
+        let manifest = header_manifest(source, std::slice::from_ref(&include_root));
+        assert!(manifest.is_some());
+        std::fs::write(&left_sibling, b"left b").unwrap();
+        assert!(!header_manifest_is_current(
+            source,
+            std::slice::from_ref(&include_root),
+            &manifest
+        ));
+
+        std::fs::write(&left_sibling, b"left a").unwrap();
+        let manifest = header_manifest(source, std::slice::from_ref(&include_root));
+        std::fs::write(&right_sibling, b"right b").unwrap();
+        assert!(!header_manifest_is_current(
+            source,
+            &[include_root],
+            &manifest
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_directory_symlink_include_cycle_disables_the_manifest() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let include = root.path().join("include");
+        std::fs::create_dir_all(&include).unwrap();
+        std::fs::write(include.join("header.h"), b"#include \"loop/header.h\"").unwrap();
+        symlink(&include, include.join("loop")).unwrap();
+
+        let include_root = include.to_string_lossy().into_owned();
+        assert!(
+            header_manifest(
+                b"#include \"header.h\"",
+                std::slice::from_ref(&include_root)
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn an_include_guarded_self_include_remains_cacheable() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(
+            root.path().join("header.h"),
+            b"#ifndef HEADER_H\n#define HEADER_H\n#include \"header.h\"\n#endif",
+        )
+        .unwrap();
+        let include_root = root.path().to_string_lossy().into_owned();
+        assert!(
+            header_manifest(
+                b"#include \"header.h\"",
+                std::slice::from_ref(&include_root)
+            )
+            .is_some()
+        );
     }
 
     #[test]

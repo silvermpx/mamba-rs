@@ -1,7 +1,5 @@
 #![cfg(feature = "cuda")]
 
-use std::any::Any;
-
 use mamba_rs::mamba_ssm::gpu::blas::{TypedPtr, gpu_gemm_typed_forward_raw};
 use mamba_rs::mamba_ssm::gpu::buffers::DtypedBuf;
 use mamba_rs::mamba_ssm::gpu::context::BiGemmFamily;
@@ -143,16 +141,6 @@ fn assert_graph_replay_deterministic(dtype: WeightDtype) {
     );
 }
 
-fn panic_message(payload: Box<dyn Any + Send>) -> String {
-    match payload.downcast::<String>() {
-        Ok(message) => *message,
-        Err(payload) => match payload.downcast::<&'static str>() {
-            Ok(message) => (*message).to_owned(),
-            Err(_) => "non-string panic payload".to_owned(),
-        },
-    }
-}
-
 fn assert_route_change_rejected(dtype: WeightDtype, expected_message: &str) {
     let (mut trainer, input, d_temporal) = captured_triad_trainer(dtype);
     trainer.ctx().set_batch_invariant(false);
@@ -260,26 +248,24 @@ fn m3_f16_training_graph_captures_with_presized_triad_scratch() {
 }
 
 #[test]
-fn m3_f16_training_graph_rejects_half_staging_reallocation() {
+fn m3_f16_training_graph_rejects_half_staging_growth_before_replay() {
     let (mut trainer, input, d_temporal) = captured_triad_trainer(WeightDtype::F16);
-    trainer
+    let error = trainer
         .ctx()
         .ensure_half_staging(8 * 1024 * 1024)
-        .expect("grow half staging");
-
-    let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        trainer.step(&input, &d_temporal)
-    }))
-    .expect_err("half staging relocation must panic before graph replay");
-    let message = panic_message(panic);
+        .expect_err("a captured graph freezes half staging");
     assert!(
-        message.contains("M3 f16 graph replay: half_staging pointer changed since capture"),
-        "unexpected panic message: {message}"
+        error.contains("half-precision staging cannot grow"),
+        "unexpected error: {error}"
     );
+    let metrics = trainer
+        .step(&input, &d_temporal)
+        .expect("the original graph remains replayable");
+    assert!(metrics.graph_replayed);
 }
 
 #[test]
-fn m3_f16_training_graph_rejects_bi_upcast_scratch_reallocation() {
+fn m3_f16_training_graph_rejects_bi_upcast_growth_before_replay() {
     let (mut trainer, input, d_temporal) = captured_triad_trainer(WeightDtype::F16);
     let (m, k, n) = (128, 257, 131);
     let gemm_input = DtypedBuf::zeros(&trainer.ctx().stream, m * k, WeightDtype::F16)
@@ -289,7 +275,7 @@ fn m3_f16_training_graph_rejects_bi_upcast_scratch_reallocation() {
     let output = DtypedBuf::zeros(&trainer.ctx().stream, m * n, WeightDtype::F16)
         .expect("allocate GEMM output");
 
-    gpu_gemm_typed_forward_raw(
+    let error = gpu_gemm_typed_forward_raw(
         trainer.ctx(),
         TypedPtr {
             ptr: output.cached_ptr(),
@@ -306,15 +292,13 @@ fn m3_f16_training_graph_rejects_bi_upcast_scratch_reallocation() {
         None,
         (128, 257, 131),
     )
-    .expect("grow triad upcast scratch");
-
-    let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        trainer.step(&input, &d_temporal)
-    }))
-    .expect_err("upcast scratch relocation must panic before graph replay");
-    let message = panic_message(panic);
+    .expect_err("a captured graph freezes BI upcast scratch");
     assert!(
-        message.contains("M3 f16 graph replay: bi_upcast_scratch pointer changed since capture"),
-        "unexpected panic message: {message}"
+        error.contains("batch-invariant upcast scratch cannot grow"),
+        "unexpected error: {error}"
     );
+    let metrics = trainer
+        .step(&input, &d_temporal)
+        .expect("the original graph remains replayable");
+    assert!(metrics.graph_replayed);
 }

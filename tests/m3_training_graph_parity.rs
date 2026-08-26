@@ -258,7 +258,7 @@ fn one_eager_step(s: &mut Setup, ctx: &GpuCtx, m3k: &Mamba3Kernels, inp: &[f32],
 fn m3_training_graph_bf16_one_step_matches_eager() {
     let dev = GpuDevice::new(0).unwrap();
     let ctx = GpuCtx::new(&dev).unwrap();
-    let m3k = Mamba3Kernels::compile(dev.context(), common::bench::arch0()).unwrap();
+    let mut m3k = Mamba3Kernels::compile(dev.context(), common::bench::arch0()).unwrap();
     let batch = 1;
     let seq_len = 64;
 
@@ -278,35 +278,63 @@ fn m3_training_graph_bf16_one_step_matches_eager() {
     g.d_temporal.upload(&ctx.stream, &dt).unwrap();
     g.bias.write(&ctx.stream, 1.0, 1.0, 1e-4).unwrap();
 
-    let graph = GpuMamba3TrainingStepGraph::capture(
-        &M3Exec {
-            ctx: &ctx,
-            kernels: &m3k,
-            dims: &g.dims,
-        },
-        &cfg_m3(),
-        Mamba3MixedCapture {
-            train_w: &mut g.weights,
-            adam: &g.adam,
-            bias: &g.bias,
-            multi_plan: &g.multi_plan,
-            grads: &mut g.grads,
-            acts: &mut g.acts,
-            f32_scratch: &mut g.f32_scratch,
-            mixed_scratch: &mut g.mixed_scratch,
-            temporal_f32: &mut g.temporal,
-            mamba_input: &g.mamba_input,
-            d_temporal: &mut g.d_temporal,
-            states: GpuMamba3StateBufs {
-                ssm: &mut g.ssm_states,
-                k: &mut g.k_states,
-                v: &mut g.v_states,
-                angle: &mut g.angle_states,
+    // All captured allocations outlive the graph in this scope.
+    let graph = unsafe {
+        GpuMamba3TrainingStepGraph::capture(
+            &M3Exec {
+                ctx: &ctx,
+                kernels: &m3k,
+                dims: &g.dims,
             },
-        },
-    )
+            &cfg_m3(),
+            Mamba3MixedCapture {
+                train_w: &mut g.weights,
+                adam: &g.adam,
+                bias: &g.bias,
+                multi_plan: &g.multi_plan,
+                grads: &mut g.grads,
+                acts: &mut g.acts,
+                f32_scratch: &mut g.f32_scratch,
+                mixed_scratch: &mut g.mixed_scratch,
+                temporal_f32: &mut g.temporal,
+                mamba_input: &g.mamba_input,
+                d_temporal: &mut g.d_temporal,
+                states: GpuMamba3StateBufs {
+                    ssm: &mut g.ssm_states,
+                    k: &mut g.k_states,
+                    v: &mut g.v_states,
+                    angle: &mut g.angle_states,
+                },
+            },
+        )
+    }
     .unwrap();
 
+    let other_ctx = GpuCtx::new(&dev).unwrap();
+    let error = graph
+        .replay(
+            &other_ctx,
+            &Mamba3MixedReplay {
+                train_w: &g.weights,
+                adam: &g.adam,
+                bias: &g.bias,
+                grads: &g.grads,
+                temporal_f32: &g.temporal,
+                mamba_input: &g.mamba_input,
+                d_temporal: &g.d_temporal,
+                ssm_states: &g.ssm_states,
+                k_states: &g.k_states,
+                v_states: &g.v_states,
+                angle_states: &g.angle_states,
+            },
+        )
+        .expect_err("replay must reject a different GpuCtx");
+    assert!(error.contains("GpuCtx differs from capture"));
+    let replacement_m3 =
+        Mamba3Kernels::compile_with_state_cap(dev.context(), common::bench::arch0(), m3k.state_cap)
+            .unwrap();
+    let captured_m3 = std::mem::replace(&mut m3k, replacement_m3);
+    drop(captured_m3);
     // Capture only records — must replay to execute.
     let (_, bc1, bc2) = g.adam.advance();
     g.bias.write(&ctx.stream, bc1, bc2, 1e-4).unwrap();
@@ -370,33 +398,36 @@ fn m3_training_graph_bf16_multi_replay_matches_eager() {
     g.mamba_input.upload(&ctx.stream, &inputs[0]).unwrap();
     g.d_temporal.upload(&ctx.stream, &d_temps[0]).unwrap();
     g.bias.write(&ctx.stream, 1.0, 1.0, 1e-4).unwrap();
-    let graph = GpuMamba3TrainingStepGraph::capture(
-        &M3Exec {
-            ctx: &ctx,
-            kernels: &m3k,
-            dims: &g.dims,
-        },
-        &cfg_m3(),
-        Mamba3MixedCapture {
-            train_w: &mut g.weights,
-            adam: &g.adam,
-            bias: &g.bias,
-            multi_plan: &g.multi_plan,
-            grads: &mut g.grads,
-            acts: &mut g.acts,
-            f32_scratch: &mut g.f32_scratch,
-            mixed_scratch: &mut g.mixed_scratch,
-            temporal_f32: &mut g.temporal,
-            mamba_input: &g.mamba_input,
-            d_temporal: &mut g.d_temporal,
-            states: GpuMamba3StateBufs {
-                ssm: &mut g.ssm_states,
-                k: &mut g.k_states,
-                v: &mut g.v_states,
-                angle: &mut g.angle_states,
+    // All captured allocations outlive the graph in this scope.
+    let graph = unsafe {
+        GpuMamba3TrainingStepGraph::capture(
+            &M3Exec {
+                ctx: &ctx,
+                kernels: &m3k,
+                dims: &g.dims,
             },
-        },
-    )
+            &cfg_m3(),
+            Mamba3MixedCapture {
+                train_w: &mut g.weights,
+                adam: &g.adam,
+                bias: &g.bias,
+                multi_plan: &g.multi_plan,
+                grads: &mut g.grads,
+                acts: &mut g.acts,
+                f32_scratch: &mut g.f32_scratch,
+                mixed_scratch: &mut g.mixed_scratch,
+                temporal_f32: &mut g.temporal,
+                mamba_input: &g.mamba_input,
+                d_temporal: &mut g.d_temporal,
+                states: GpuMamba3StateBufs {
+                    ssm: &mut g.ssm_states,
+                    k: &mut g.k_states,
+                    v: &mut g.v_states,
+                    angle: &mut g.angle_states,
+                },
+            },
+        )
+    }
     .unwrap();
 
     for s in 0..n_steps {

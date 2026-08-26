@@ -133,8 +133,7 @@ fn run_emulated_ddp_tier(
         ew.all_reduce_mean(&mut arenas, delivery.as_deref())
             .unwrap();
         for (t, reduced) in ranks.iter_mut().zip(&arenas) {
-            let stream = t.ctx().stream.clone();
-            t.grad_arena().upload(&stream, reduced).unwrap();
+            t.upload_grad_arena(reduced).unwrap();
             let m = t.apply_step(None).unwrap();
             assert!(m.optimizer_stepped);
         }

@@ -297,17 +297,20 @@ fn prefill_serve_headline() {
         common::bench::timed(ctx, 50, &mut run)
     };
 
-    let graph = PrefillPooledGraph::capture(
-        &r.ctx,
-        &mut pooled,
-        PrefillRawInputs {
-            input_flat: &r.input,
-            weights: &r.weights,
-            a_neg_all: &r.a_neg,
-        },
-        &mut r.state,
-        &mut r.scratch,
-    )
+    // The benchmark keeps every captured allocation alive through the graph.
+    let graph = unsafe {
+        PrefillPooledGraph::capture(
+            &r.ctx,
+            &mut pooled,
+            PrefillRawInputs {
+                input_flat: &r.input,
+                weights: &r.weights,
+                a_neg_all: &r.a_neg,
+            },
+            &mut r.state,
+            &mut r.scratch,
+        )
+    }
     .unwrap();
     let pooled_graph_ms = {
         let ctx = &r.ctx;

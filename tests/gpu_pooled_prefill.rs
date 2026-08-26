@@ -208,18 +208,27 @@ fn pooled_graph_replays_bitwise() {
     let mut eager = vec![0.0f32; dm];
     pooled.download(&r.ctx.stream, &mut eager).unwrap();
     // Capture (runs the body once as part of capture) then replay 100x.
-    let graph = PrefillPooledGraph::capture(
-        &r.ctx,
-        &mut pooled,
-        PrefillRawInputs {
-            input_flat: &r.input,
-            weights: &r.weights,
-            a_neg_all: &r.a_neg,
-        },
-        &mut r.state,
-        &mut r.scratch,
-    )
+    // The rig and pooled buffer outlive the graph in this scope.
+    let graph = unsafe {
+        PrefillPooledGraph::capture(
+            &r.ctx,
+            &mut pooled,
+            PrefillRawInputs {
+                input_flat: &r.input,
+                weights: &r.weights,
+                a_neg_all: &r.a_neg,
+            },
+            &mut r.state,
+            &mut r.scratch,
+        )
+    }
     .expect("capture");
+    let other_device = GpuDevice::new(0).unwrap();
+    let other_ctx = GpuCtx::new(&other_device).unwrap();
+    let error = graph
+        .launch(&other_ctx)
+        .expect_err("launch must reject a different GpuCtx");
+    assert!(error.contains("GpuCtx differs from capture"));
     for rep in 0..100 {
         graph.launch(&r.ctx).expect("replay");
         let mut got = vec![0.0f32; dm];

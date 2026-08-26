@@ -11,6 +11,7 @@
 //! pre-allocated, pointer-stability invariant enforced on replay.
 
 use cudarc::driver::CudaGraph;
+use std::sync::Arc;
 
 use crate::mamba_ssm::gpu::adamw::{AdamWBiasFactors, AdamWMultiPlan, GpuAdamW, step_multi};
 use crate::mamba_ssm::gpu::buffers::GpuBuffer;
@@ -63,8 +64,20 @@ pub struct Mamba3MixedReplay<'a> {
 }
 
 /// CUDA-Graph holder for a single Mamba-3 training step (bf16).
+///
+/// The raw driver graph stays private so replay cannot bypass the captured
+/// context, route, and pointer checks.
+///
+/// ```compile_fail
+/// # use mamba_rs::mamba3_siso::gpu::training_graph::GpuMamba3TrainingStepGraph;
+/// # fn raw_launch(graph: &GpuMamba3TrainingStepGraph) {
+/// let _ = &graph.graph;
+/// # }
+/// ```
 pub struct GpuMamba3TrainingStepGraph {
-    pub graph: CudaGraph,
+    graph: CudaGraph,
+    ctx_resources: Arc<crate::mamba_ssm::gpu::context::GpuCtxResources>,
+    _m3_modules: crate::mamba_ssm::gpu::kernels::CudaModuleAnchors,
     pub batch: usize,
     pub seq_len: usize,
     pub dtype: WeightDtype,
@@ -98,12 +111,20 @@ pub struct GpuMamba3TrainingStepGraph {
     // (see the M1 mixed graph) — M3 bf16 bi GEMMs route through it too.
     captured_bi_upcast_ptrs: [u64; 3],
     captured_gemm_route: GemmRoute,
+    captured_ctx_token: u64,
+    captured_stream_token: usize,
 }
 
 impl GpuMamba3TrainingStepGraph {
     /// See M1 [`crate::mamba_ssm::gpu::training_graph::GpuMambaTrainingStepGraph::capture`]
     /// for the warmup / caller-ordering contract — identical here.
-    pub fn capture(
+    /// # Safety
+    ///
+    /// The original executor, stream, cuBLAS handle, both kernel registries,
+    /// multi-plan, and every captured allocation or view must remain unchanged
+    /// until this holder is destroyed and every replay has completed. Replay
+    /// pointer checks diagnose drift but do not extend any CUDA lifetime.
+    pub unsafe fn capture(
         exec: &M3Exec<'_>,
         cfg: &crate::mamba3_siso::config::Mamba3Config,
         cap: Mamba3MixedCapture<'_>,
@@ -143,7 +164,6 @@ impl GpuMamba3TrainingStepGraph {
             dims.mamba_input_dim,
             train_w.dtype,
         )?;
-
         let snap_input = mamba_input.cached_ptr();
         let snap_d_temporal = d_temporal.cached_ptr();
         let snap_grads_flat = grads.flat.cached_ptr();
@@ -163,41 +183,46 @@ impl GpuMamba3TrainingStepGraph {
         let snap_bi_upcast = ctx.bi_upcast_scratch_ptrs();
         let snap_gemm_route = ctx.gemm_route();
 
-        let graph = capture_into_graph(&ctx.stream, || {
-            grads.zero(&ctx.stream)?;
-            gpu_forward_mamba3_backbone_mixed(
-                exec,
-                temporal_f32,
-                acts,
-                train_w,
-                mamba_input,
-                states.reborrow(),
-                mixed_scratch,
-            )?;
-            gpu_backward_mamba3_backbone_mixed(
-                exec,
-                d_temporal,
-                acts,
-                train_w,
-                grads,
-                f32_scratch,
-                mixed_scratch,
-            )?;
-            step_multi(
-                ctx,
-                m3k.adamw_step_multi.get(train_w.dtype),
-                multi_plan,
-                adam,
-                bias.ptr(),
-            )?;
-            // f32-stays-f32 tensors only (bulk shadows ride the fused kernel).
-            train_w.sync_master_to_compute(ctx)?;
-            Ok(())
-        })?;
+        ctx.freeze_graph_scratch();
+        let graph = unsafe {
+            capture_into_graph(&ctx.stream, || {
+                grads.zero(&ctx.stream)?;
+                gpu_forward_mamba3_backbone_mixed(
+                    exec,
+                    temporal_f32,
+                    acts,
+                    train_w,
+                    mamba_input,
+                    states.reborrow(),
+                    mixed_scratch,
+                )?;
+                gpu_backward_mamba3_backbone_mixed(
+                    exec,
+                    d_temporal,
+                    acts,
+                    train_w,
+                    grads,
+                    f32_scratch,
+                    mixed_scratch,
+                )?;
+                step_multi(
+                    ctx,
+                    m3k.adamw_step_multi.get(train_w.dtype),
+                    multi_plan,
+                    adam,
+                    bias.ptr(),
+                )?;
+                // f32-stays-f32 tensors only (bulk shadows ride the fused kernel).
+                train_w.sync_master_to_compute(ctx)?;
+                Ok(())
+            })
+        }?;
         ctx.note_graph_capture();
 
         Ok(Self {
             graph,
+            ctx_resources: ctx.resource_anchor(),
+            _m3_modules: m3k.module_anchors(),
             batch: dims.batch,
             seq_len: dims.seq_len,
             dtype: train_w.dtype,
@@ -219,10 +244,24 @@ impl GpuMamba3TrainingStepGraph {
             captured_half_staging_ptr: snap_half_staging,
             captured_bi_upcast_ptrs: snap_bi_upcast,
             captured_gemm_route: snap_gemm_route,
+            captured_ctx_token: ctx.instance_token(),
+            captured_stream_token: ctx.stream_token(),
         })
     }
 
     pub fn replay(&self, ctx: &GpuCtx, rp: &Mamba3MixedReplay<'_>) -> Result<(), String> {
+        if ctx.instance_token() != self.captured_ctx_token {
+            return Err(
+                "M3 training_graph replay: GpuCtx differs from capture; re-capture instead".into(),
+            );
+        }
+        if ctx.stream_token() != self.captured_stream_token {
+            return Err(
+                "M3 training_graph replay: GpuCtx stream differs from capture; \
+                 re-capture instead"
+                    .into(),
+            );
+        }
         let Mamba3MixedReplay {
             train_w,
             adam,
@@ -337,6 +376,12 @@ impl GpuMamba3TrainingStepGraph {
     }
 }
 
+impl Drop for GpuMamba3TrainingStepGraph {
+    fn drop(&mut self) {
+        let _ = self.ctx_resources.stream.synchronize();
+    }
+}
+
 // ════════════════════════════════════════════════════════════════════════
 // f32 M3 training step graph (no master/compute split, no half_staging).
 // ════════════════════════════════════════════════════════════════════════
@@ -384,8 +429,17 @@ pub struct Mamba3F32Replay<'a> {
 /// CUDA-Graph holder for a single Mamba-3 f32 training step. Captures
 /// `grads.zero + forward + backward + AdamW`. No `sync_master_to_compute`
 /// — f32 training has no compute shadow.
+///
+/// ```compile_fail
+/// # use mamba_rs::mamba3_siso::gpu::training_graph::GpuMamba3F32TrainingStepGraph;
+/// # fn raw_launch(graph: &GpuMamba3F32TrainingStepGraph) {
+/// let _ = &graph.graph;
+/// # }
+/// ```
 pub struct GpuMamba3F32TrainingStepGraph {
-    pub graph: CudaGraph,
+    graph: CudaGraph,
+    ctx_resources: Arc<crate::mamba_ssm::gpu::context::GpuCtxResources>,
+    _m3_modules: crate::mamba_ssm::gpu::kernels::CudaModuleAnchors,
     pub batch: usize,
     pub seq_len: usize,
 
@@ -404,10 +458,18 @@ pub struct GpuMamba3F32TrainingStepGraph {
     captured_weights_input_proj_w_ptr: u64,
     captured_weights_norm_f_ptr: u64,
     captured_gemm_route: GemmRoute,
+    captured_ctx_token: u64,
+    captured_stream_token: usize,
 }
 
 impl GpuMamba3F32TrainingStepGraph {
-    pub fn capture(exec: &M3Exec<'_>, cap: Mamba3F32Capture<'_>) -> Result<Self, String> {
+    /// # Safety
+    ///
+    /// The original executor, stream, cuBLAS handle, both kernel registries,
+    /// multi-plan, and every captured allocation or view must remain unchanged
+    /// until this holder is destroyed and every replay has completed. Replay
+    /// pointer checks diagnose drift but do not extend any CUDA lifetime.
+    pub unsafe fn capture(exec: &M3Exec<'_>, cap: Mamba3F32Capture<'_>) -> Result<Self, String> {
         let M3Exec {
             ctx,
             kernels: m3k,
@@ -441,32 +503,36 @@ impl GpuMamba3F32TrainingStepGraph {
         let snap_norm_f = weights.norm_f_weight.cached_ptr();
         let snap_gemm_route = ctx.gemm_route();
 
-        let graph = capture_into_graph(&ctx.stream, || {
-            grads.zero(&ctx.stream)?;
-            gpu_forward_mamba3_backbone(
-                exec,
-                temporal,
-                acts,
-                weights,
-                mamba_input,
-                states.reborrow(),
-                scratch,
-            )?;
-            gpu_backward_mamba3_backbone(exec, d_temporal, acts, weights, grads, scratch)?;
-            step_multi(
-                ctx,
-                m3k.adamw_step_multi
-                    .get(crate::mamba_ssm::gpu::dtype::WeightDtype::F32),
-                multi_plan,
-                adam,
-                bias.ptr(),
-            )?;
-            Ok(())
-        })?;
+        let graph = unsafe {
+            capture_into_graph(&ctx.stream, || {
+                grads.zero(&ctx.stream)?;
+                gpu_forward_mamba3_backbone(
+                    exec,
+                    temporal,
+                    acts,
+                    weights,
+                    mamba_input,
+                    states.reborrow(),
+                    scratch,
+                )?;
+                gpu_backward_mamba3_backbone(exec, d_temporal, acts, weights, grads, scratch)?;
+                step_multi(
+                    ctx,
+                    m3k.adamw_step_multi
+                        .get(crate::mamba_ssm::gpu::dtype::WeightDtype::F32),
+                    multi_plan,
+                    adam,
+                    bias.ptr(),
+                )?;
+                Ok(())
+            })
+        }?;
         ctx.note_graph_capture();
 
         Ok(Self {
             graph,
+            ctx_resources: ctx.resource_anchor(),
+            _m3_modules: m3k.module_anchors(),
             batch: dims.batch,
             seq_len: dims.seq_len,
             captured_input_ptr: snap_input,
@@ -483,10 +549,25 @@ impl GpuMamba3F32TrainingStepGraph {
             captured_weights_input_proj_w_ptr: snap_input_proj,
             captured_weights_norm_f_ptr: snap_norm_f,
             captured_gemm_route: snap_gemm_route,
+            captured_ctx_token: ctx.instance_token(),
+            captured_stream_token: ctx.stream_token(),
         })
     }
 
     pub fn replay(&self, ctx: &GpuCtx, rp: &Mamba3F32Replay<'_>) -> Result<(), String> {
+        if ctx.instance_token() != self.captured_ctx_token {
+            return Err(
+                "M3 f32 training_graph replay: GpuCtx differs from capture; re-capture instead"
+                    .into(),
+            );
+        }
+        if ctx.stream_token() != self.captured_stream_token {
+            return Err(
+                "M3 f32 training_graph replay: GpuCtx stream differs from capture; \
+                 re-capture instead"
+                    .into(),
+            );
+        }
         let Mamba3F32Replay {
             weights,
             adam,
@@ -575,5 +656,11 @@ impl GpuMamba3F32TrainingStepGraph {
         self.graph
             .launch()
             .map_err(|e| format!("M3 f32 training_graph launch: {e:?}"))
+    }
+}
+
+impl Drop for GpuMamba3F32TrainingStepGraph {
+    fn drop(&mut self) {
+        let _ = self.ctx_resources.stream.synchronize();
     }
 }

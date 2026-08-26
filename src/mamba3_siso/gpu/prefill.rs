@@ -1153,7 +1153,13 @@ impl Mamba3Prefill {
 /// requires the complete GEMM route captured with the graph.
 pub struct Mamba3PrefillGraph {
     graph: cudarc::driver::CudaGraph,
+    ctx_resources: Arc<crate::mamba_ssm::gpu::context::GpuCtxResources>,
+    _m3_modules: crate::mamba_ssm::gpu::kernels::CudaModuleAnchors,
     flags_at_capture: crate::mamba_ssm::gpu::context::GemmRoute,
+    captured_ctx_token: u64,
+    captured_stream_token: usize,
+    captured_half_staging_ptr: u64,
+    captured_bi_upcast_ptrs: [u64; 3],
     input_ptr: CUptr,
     ssm_ptr: CUptr,
     k_ptr: CUptr,
@@ -1167,13 +1173,21 @@ pub struct Mamba3PrefillGraph {
 impl Mamba3PrefillGraph {
     /// Capture the window over the given fixed input/state/output buffers.
     /// Upload fresh bytes into the SAME input buffer before each replay.
-    pub fn capture(
+    /// # Safety
+    ///
+    /// The original context, stream, cuBLAS handle, both kernel registries,
+    /// weights, input, state, scratch, and output allocations must remain
+    /// unchanged until this holder is destroyed and every replay has completed.
+    /// Pointer checks are diagnostics and do not extend any CUDA lifetime.
+    pub unsafe fn capture(
         prefill: &mut Mamba3Prefill,
         run: &Mamba3PrefillRun<'_>,
         mut states: GpuMamba3StateBufs<'_>,
         last_hidden: &mut GpuBuffer,
     ) -> Result<Self, String> {
         run.ctx.presize_bi_scratch()?;
+        run.ctx
+            .presize_mixed_graph_scratch_m3(run.dims, run.weights.bulk_dtype())?;
         let flags_at_capture = run.ctx.gemm_route();
         let input_ptr = run.mamba_input.cached_ptr();
         let ssm_ptr = states.ssm.cached_ptr();
@@ -1183,17 +1197,27 @@ impl Mamba3PrefillGraph {
         let last_hidden_ptr = last_hidden.cached_ptr();
         let weights_arenas = run.weights.arena_identity();
         let weights_dtype = run.weights.bulk_dtype();
-        let graph =
+        if weights_dtype != WeightDtype::F32 {
+            run.ctx.freeze_graph_scratch();
+        }
+        let graph = unsafe {
             crate::mamba_ssm::gpu::graph_capture::capture_into_graph(&run.ctx.stream, || {
                 prefill.run(run, states.reborrow(), last_hidden)
-            })?;
+            })
+        }?;
         graph
             .upload()
             .map_err(|e| format!("prefill graph upload: {e:?}"))?;
         run.ctx.note_graph_capture();
         Ok(Self {
             graph,
+            ctx_resources: run.ctx.resource_anchor(),
+            _m3_modules: run.kernels.module_anchors(),
             flags_at_capture,
+            captured_ctx_token: run.ctx.instance_token(),
+            captured_stream_token: run.ctx.stream_token(),
+            captured_half_staging_ptr: run.ctx.half_staging_ptr(),
+            captured_bi_upcast_ptrs: run.ctx.bi_upcast_scratch_ptrs(),
             input_ptr,
             ssm_ptr,
             k_ptr,
@@ -1218,6 +1242,19 @@ impl Mamba3PrefillGraph {
         states: &GpuMamba3StateBufs<'_>,
         last_hidden: &GpuBuffer,
     ) -> Result<(), String> {
+        if ctx.instance_token() != self.captured_ctx_token {
+            return Err(
+                "prefill graph replay refused: GpuCtx differs from capture; re-capture instead"
+                    .into(),
+            );
+        }
+        if ctx.stream_token() != self.captured_stream_token {
+            return Err(
+                "prefill graph replay refused: GpuCtx stream differs from capture; \
+                 re-capture instead"
+                    .into(),
+            );
+        }
         if weights.arena_identity() != self.weights_arenas
             || weights.bulk_dtype() != self.weights_dtype
         {
@@ -1235,6 +1272,13 @@ impl Mamba3PrefillGraph {
                 self.flags_at_capture,
                 ctx.gemm_route()
             ));
+        }
+        if self.weights_dtype != WeightDtype::F32 {
+            ctx.ensure_graph_scratch_ptrs(
+                self.captured_half_staging_ptr,
+                self.captured_bi_upcast_ptrs,
+                "prefill graph replay",
+            )?;
         }
         if mamba_input.cached_ptr() != self.input_ptr
             || states.ssm.cached_ptr() != self.ssm_ptr
@@ -1255,6 +1299,12 @@ impl Mamba3PrefillGraph {
     }
 }
 
+impl Drop for Mamba3PrefillGraph {
+    fn drop(&mut self) {
+        let _ = self.ctx_resources.stream.synchronize();
+    }
+}
+
 /// A captured CUDA graph of one POOLED prefill window over fixed buffers -
 /// the m3 classify serve shape: state reset (carry_state = false zeroes
 /// inside the capture, so every replay starts a fresh page) + the full
@@ -1264,7 +1314,13 @@ impl Mamba3PrefillGraph {
 /// the host.
 pub struct Mamba3PrefillPooledGraph {
     graph: cudarc::driver::CudaGraph,
+    ctx_resources: Arc<crate::mamba_ssm::gpu::context::GpuCtxResources>,
+    _m3_modules: crate::mamba_ssm::gpu::kernels::CudaModuleAnchors,
     flags_at_capture: crate::mamba_ssm::gpu::context::GemmRoute,
+    captured_ctx_token: u64,
+    captured_stream_token: usize,
+    captured_half_staging_ptr: u64,
+    captured_bi_upcast_ptrs: [u64; 3],
     input_ptr: CUptr,
     ssm_ptr: CUptr,
     k_ptr: CUptr,
@@ -1279,7 +1335,13 @@ impl Mamba3PrefillPooledGraph {
     /// Capture the pooled window. `run.carry_state` must be `false` -
     /// the state reset has to live INSIDE the graph for replays to score
     /// independent pages.
-    pub fn capture(
+    /// # Safety
+    ///
+    /// The original context, stream, cuBLAS handle, both kernel registries,
+    /// weights, input, state, scratch, last-hidden, and pooled allocations must
+    /// remain unchanged until this holder is destroyed and every replay has
+    /// completed. Pointer checks are diagnostics and do not extend lifetimes.
+    pub unsafe fn capture(
         prefill: &mut Mamba3Prefill,
         run: &Mamba3PrefillRun<'_>,
         mut states: GpuMamba3StateBufs<'_>,
@@ -1294,6 +1356,8 @@ impl Mamba3PrefillPooledGraph {
             );
         }
         run.ctx.presize_bi_scratch()?;
+        run.ctx
+            .presize_mixed_graph_scratch_m3(run.dims, run.weights.bulk_dtype())?;
         let flags_at_capture = run.ctx.gemm_route();
         let input_ptr = run.mamba_input.cached_ptr();
         let ssm_ptr = states.ssm.cached_ptr();
@@ -1303,7 +1367,10 @@ impl Mamba3PrefillPooledGraph {
         let pooled_ptr = pooled_sum.cached_ptr();
         let weights_arenas = run.weights.arena_identity();
         let weights_dtype = run.weights.bulk_dtype();
-        let graph =
+        if weights_dtype != WeightDtype::F32 {
+            run.ctx.freeze_graph_scratch();
+        }
+        let graph = unsafe {
             crate::mamba_ssm::gpu::graph_capture::capture_into_graph(&run.ctx.stream, || {
                 prefill.run_full(
                     run,
@@ -1314,14 +1381,21 @@ impl Mamba3PrefillPooledGraph {
                         pooled_sum: Some(pooled_sum),
                     },
                 )
-            })?;
+            })
+        }?;
         graph
             .upload()
             .map_err(|e| format!("m3 pooled prefill graph upload: {e:?}"))?;
         run.ctx.note_graph_capture();
         Ok(Self {
             graph,
+            ctx_resources: run.ctx.resource_anchor(),
+            _m3_modules: run.kernels.module_anchors(),
             flags_at_capture,
+            captured_ctx_token: run.ctx.instance_token(),
+            captured_stream_token: run.ctx.stream_token(),
+            captured_half_staging_ptr: run.ctx.half_staging_ptr(),
+            captured_bi_upcast_ptrs: run.ctx.bi_upcast_scratch_ptrs(),
             input_ptr,
             ssm_ptr,
             k_ptr,
@@ -1342,6 +1416,20 @@ impl Mamba3PrefillPooledGraph {
         states: &GpuMamba3StateBufs<'_>,
         pooled_sum: &GpuBuffer,
     ) -> Result<(), String> {
+        if ctx.instance_token() != self.captured_ctx_token {
+            return Err(
+                "m3 pooled prefill graph replay refused: GpuCtx differs from capture; \
+                 re-capture instead"
+                    .into(),
+            );
+        }
+        if ctx.stream_token() != self.captured_stream_token {
+            return Err(
+                "m3 pooled prefill graph replay refused: GpuCtx stream differs from capture; \
+                 re-capture instead"
+                    .into(),
+            );
+        }
         if weights.arena_identity() != self.weights_arenas
             || weights.bulk_dtype() != self.weights_dtype
         {
@@ -1359,6 +1447,13 @@ impl Mamba3PrefillPooledGraph {
                 ctx.gemm_route()
             ));
         }
+        if self.weights_dtype != WeightDtype::F32 {
+            ctx.ensure_graph_scratch_ptrs(
+                self.captured_half_staging_ptr,
+                self.captured_bi_upcast_ptrs,
+                "m3 pooled prefill graph replay",
+            )?;
+        }
         if mamba_input.cached_ptr() != self.input_ptr
             || states.ssm.cached_ptr() != self.ssm_ptr
             || states.k.cached_ptr() != self.k_ptr
@@ -1375,5 +1470,11 @@ impl Mamba3PrefillPooledGraph {
         self.graph
             .launch()
             .map_err(|e| format!("m3 pooled prefill graph launch: {e:?}"))
+    }
+}
+
+impl Drop for Mamba3PrefillPooledGraph {
+    fn drop(&mut self) {
+        let _ = self.ctx_resources.stream.synchronize();
     }
 }
