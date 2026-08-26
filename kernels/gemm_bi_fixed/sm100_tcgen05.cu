@@ -56,9 +56,12 @@ sm100_desc(const void* smem_ptr, unsigned lbo16, unsigned sbo16) {
         (unsigned long long)__cvta_generic_to_shared(smem_ptr);
     unsigned long long d = 0;
     d |= (addr >> 4) & 0x3FFFULL;
-    d |= 1ULL << 14; // descriptor version 1
     d |= ((unsigned long long)(lbo16 & 0x3FFF)) << 16;
     d |= ((unsigned long long)(sbo16 & 0x3FFF)) << 32;
+    /* Version sits ABOVE the stride field (bits 46-47), not in the
+     * low half - a version bit misplaced at bit 14 presents a
+     * Hopper-format descriptor to a tensor core expecting version 1. */
+    d |= 1ULL << 46; // descriptor version 1
     d |= 2ULL << 61; // 128-byte swizzle
     return d;
 }
@@ -197,6 +200,15 @@ void gemm_bi_nn_sm100_tcgen_c4_##SUFFIX(                                      \
         /* to the async proxy the tensor core reads through.            */    \
         asm volatile("fence.proxy.async.shared::cta;\n");                     \
         int rd = kt & (SM100_STAGES - 1);                                     \
+        /* The next stage's copies are issued BEFORE this slab's MMAs   */    \
+        /* so they overlap them. WAR-safe: buffer (kt+1)&1 was consumed */    \
+        /* by the MMAs of iteration kt-1, whose commit barrier every    */    \
+        /* thread has already waited on.                                */    \
+        if (kt + 1 < num_k_tiles) {                                           \
+            SM100_STAGE_ASYNC((kt + 1) & (SM100_STAGES - 1),                  \
+                              (kt + 1) * SM100_BK);                           \
+        }                                                                     \
+        asm volatile("cp.async.commit_group;\n");                            \
         if (tid == 0) {                                                       \
             const unsigned char* stage =                                      \
                 sm100_dynsmem + rd * SM100_STAGE_BYTES;                       \
@@ -233,11 +245,6 @@ void gemm_bi_nn_sm100_tcgen_c4_##SUFFIX(                                      \
             "@!p bra WAIT_%=;\n\t}"                                           \
             :: "r"(mbar), "r"((unsigned)(kt & 1)));                           \
         __syncthreads();                                                      \
-        if (kt + 1 < num_k_tiles) {                                           \
-            SM100_STAGE_ASYNC((kt + 1) & (SM100_STAGES - 1),                  \
-                              (kt + 1) * SM100_BK);                           \
-        }                                                                     \
-        asm volatile("cp.async.commit_group;\n");                            \
     }                                                                         \
     /* Epilogue: warp w reads TMEM lanes 32w..32w+31 (its own quarter), */    \
     /* eight columns per load; alpha through an explicit unfused        */    \

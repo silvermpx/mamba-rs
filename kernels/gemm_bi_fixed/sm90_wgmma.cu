@@ -84,13 +84,20 @@ sm90_desc(const void* smem_ptr, unsigned lbo16, unsigned sbo16) {
              _i += blockDim.x) {                                              \
             int _k = _i / (SM90_BN / 8);                                      \
             int _c = _i % (SM90_BN / 8);                                      \
+            /* B lives as two complete 64-column blocks 8192 bytes      */    \
+            /* apart - the layout the descriptor's leading offset       */    \
+            /* (512 x 16 B) and the ks*128 slab advance declare. A      */    \
+            /* row-interleaved stage here once contradicted them, which */    \
+            /* would have made the first hardware census read garbage.  */    \
+            int _h = _c >> 3;                                                 \
+            int _cc = _c & 7;                                                 \
             int _n = _c * 8;                                                  \
             int _gk = (bkIdx) + _k;                                           \
             int _gn = pid_n * SM90_BN + _n;                                   \
             int _valid = (_gk < K) ? (N - _gn) : 0;                           \
             int _bytes = _valid >= 8 ? 16 : (_valid > 0 ? _valid * 2 : 0);    \
-            unsigned _dst = _bs +                                             \
-                (unsigned)((_k * SM90_LDB + ((_c ^ (_k & 7)) * 8)) * 2);      \
+            unsigned _dst = _bs + (unsigned)(_h * 8192) +                     \
+                (unsigned)((_k * 64 + ((_cc ^ (_k & 7)) * 8)) * 2);           \
             const void* _src = (_bytes > 0)                                   \
                 ? (const void*)&B[(long long)_gk * ldb + _gn]                 \
                 : (const void*)B;                                             \
@@ -150,6 +157,15 @@ void gemm_bi_nn_sm90a_wgmma_wg1_##SUFFIX(                                     \
             As + rd * SM90_BM * SM90_LDA, 1, 64);                             \
         unsigned long long b_base = sm90_desc(                                \
             Bs + rd * SM90_BK * SM90_LDB, 512, 64);                           \
+        /* The next stage's copies are issued BEFORE this slab's wgmma  */    \
+        /* so they overlap it. WAR-safe: buffer (kt+1)&1 was consumed   */    \
+        /* by the wgmma of iteration kt-1, whose wait and barrier have  */    \
+        /* both passed.                                                 */    \
+        if (kt + 1 < num_k_tiles) {                                           \
+            SM90_STAGE_ASYNC((kt + 1) & (SM90_STAGES - 1),                    \
+                             (kt + 1) * SM90_BK);                             \
+        }                                                                     \
+        asm volatile("cp.async.commit_group;\n");                            \
         asm volatile("wgmma.fence.sync.aligned;\n");                          \
         _Pragma("unroll")                                                     \
         for (int ks = 0; ks < SM90_BK / 16; ks++) {                           \
@@ -186,11 +202,6 @@ void gemm_bi_nn_sm90a_wgmma_wg1_##SUFFIX(                                     \
         asm volatile("wgmma.commit_group.sync.aligned;\n");                   \
         asm volatile("wgmma.wait_group.sync.aligned 0;\n");                   \
         __syncthreads();                                                      \
-        if (kt + 1 < num_k_tiles) {                                           \
-            SM90_STAGE_ASYNC((kt + 1) & (SM90_STAGES - 1),                    \
-                             (kt + 1) * SM90_BK);                             \
-        }                                                                     \
-        asm volatile("cp.async.commit_group;\n");                            \
     }                                                                         \
     /* Epilogue: alpha through an explicit unfused multiply (target-  */      \
     /* independent bits), paired store on aligned even destinations,  */      \
