@@ -5,6 +5,232 @@ use super::dispatch::*;
 use cudarc::driver::PushKernelArg;
 use std::sync::Arc;
 
+fn require_sm90a_tensor_map_access(stream: &Arc<cudarc::driver::CudaStream>) -> Result<(), String> {
+    let supported = stream
+        .context()
+        .attribute(
+            cudarc::driver::sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_TENSOR_MAP_ACCESS_SUPPORTED,
+        )
+        .map_err(|error| format!("query CUDA tensor-map support: {error:?}"))?;
+    if supported == 0 {
+        return Err("SM90a WGMMA requires CUDA tensor-map access support".into());
+    }
+    Ok(())
+}
+
+fn sm90a_map_binding(
+    stream: &Arc<cudarc::driver::CudaStream>,
+    kernels: &GpuKernels,
+) -> Result<Sm90aMapBinding, String> {
+    require_sm90a_tensor_map_access(stream)?;
+    let context_handle = stream.context().cu_ctx() as usize;
+    if context_handle != kernels.context_handle() {
+        return Err("SM90a stream and kernel module belong to different CUDA contexts".into());
+    }
+    let compiler = kernels
+        .sm90a_compiler_identity()
+        .filter(|compiler| compiler.target.as_str() == "sm_90a")
+        .ok_or_else(|| "exact-sm_90a compiler identity is unavailable".to_string())?;
+    let artifact = kernels
+        .artifact_set_identity()
+        .specialized
+        .filter(|artifact| {
+            artifact.module_kind == crate::mamba_ssm::gpu::kernel_identity::ModuleKind::TriadSm90a
+        })
+        .ok_or_else(|| "exact-sm_90a artifact identity is unavailable".to_string())?;
+    Ok(Sm90aMapBinding {
+        context_handle,
+        artifact,
+        compiler,
+        device: sm90a_device_identity(stream)?,
+    })
+}
+
+fn sm90a_device_identity(
+    stream: &Arc<cudarc::driver::CudaStream>,
+) -> Result<crate::mamba_ssm::gpu::kernel_identity::DeviceIdentity, String> {
+    let (major, minor) = stream
+        .context()
+        .compute_capability()
+        .map_err(|error| format!("query CUDA compute capability: {error:?}"))?;
+    Ok(crate::mamba_ssm::gpu::kernel_identity::DeviceIdentity {
+        compute_capability: (
+            u32::try_from(major).map_err(|_| format!("negative CUDA CC major {major}"))?,
+            u32::try_from(minor).map_err(|_| format!("negative CUDA CC minor {minor}"))?,
+        ),
+        target: crate::mamba_ssm::gpu::kernel_identity::CudaTarget::new("sm_90a")?,
+        driver: crate::mamba_ssm::gpu::kernel_identity::query_driver_identity()?,
+    })
+}
+
+pub fn prepare_sm90a_tensor_maps(
+    stream: &Arc<cudarc::driver::CudaStream>,
+    kernels: &GpuKernels,
+    request: Sm90aMapRequest,
+) -> Result<Sm90aPreparedTensorMaps, String> {
+    stream
+        .context()
+        .bind_to_thread()
+        .map_err(|error| format!("bind CUDA context for tensor-map encoding: {error:?}"))?;
+    let binding = sm90a_map_binding(stream, kernels)?;
+    if stream.context().compute_capability().ok() != Some((9, 0)) || !kernels.has_sm90a_wgmma() {
+        return Err("SM90a tensor maps require a loaded exact-sm_90a module".into());
+    }
+    let keys = sm90a_tensor_map_keys(request)?;
+    let allocations = sm90a_allocation_identities(keys, binding.context_handle)?;
+    let capturing = stream
+        .capture_status()
+        .map_err(|error| format!("query CUDA capture status: {error:?}"))?
+        != cudarc::driver::sys::CUstreamCaptureStatus::CU_STREAM_CAPTURE_STATUS_NONE;
+    kernels.prepare_sm90a_tensor_maps(request, keys, allocations, capturing, binding)
+}
+
+fn sm90a_forced_identity(
+    stream: &Arc<cudarc::driver::CudaStream>,
+    kernels: &GpuKernels,
+    route: Sm90aForcedRoute,
+    maps: &Sm90aPreparedTensorMaps,
+    operands: Sm90aLaunchOperands,
+) -> Result<Sm90aRouteIdentity, String> {
+    stream
+        .context()
+        .bind_to_thread()
+        .map_err(|error| format!("bind CUDA context for SM90a launch: {error:?}"))?;
+    route.shape.validate(route.op)?;
+    let binding = sm90a_map_binding(stream, kernels)?;
+    if !maps.matches_binding(binding) {
+        return Err(
+            "SM90a prepared tensor maps belong to a different CUDA context or module".into(),
+        );
+    }
+    maps.validate_live_allocations()?;
+    if maps.request.op != route.op
+        || maps.request.dtype != route.dtype
+        || maps.request.shape != route.shape
+    {
+        return Err("SM90a prepared tensor maps do not match the forced route".into());
+    }
+    let resolved = resolve_sm90a_forced(
+        (
+            i32::try_from(binding.device.compute_capability.0)
+                .map_err(|_| "CUDA CC major exceeds i32::MAX".to_string())?,
+            i32::try_from(binding.device.compute_capability.1)
+                .map_err(|_| "CUDA CC minor exceeds i32::MAX".to_string())?,
+        ),
+        kernels.has_sm90a_wgmma(),
+        route.op,
+        route.dtype,
+        route.schedule,
+        route.shape,
+    )?;
+    if resolved != Some(route) {
+        return Err("SM90a forced route is unavailable; use the resolved baseline".into());
+    }
+    if operands.output_ptr == 0 {
+        return Err("SM90a output pointer must be non-null".into());
+    }
+    let output_alignment = if route.op == Sm90aOp::Tn { 4 } else { 2 };
+    if !operands.output_ptr.is_multiple_of(output_alignment) {
+        return Err(format!(
+            "SM90a output pointer must be {output_alignment}-byte aligned"
+        ));
+    }
+    if operands.bias_ptr != 0 && !operands.bias_ptr.is_multiple_of(4) {
+        return Err("SM90a bias pointer must be 4-byte aligned".into());
+    }
+    match route.op {
+        Sm90aOp::Nn => {}
+        Sm90aOp::Tn if operands.bias_ptr != 0 || operands.beta != 1.0 => {
+            return Err("SM90a TN requires no bias and beta == 1.0".into());
+        }
+        Sm90aOp::Nt if operands.bias_ptr != 0 || operands.beta != 0.0 => {
+            return Err("SM90a NT requires no bias and beta == 0.0".into());
+        }
+        _ => {}
+    }
+    let tensor_maps_digest = maps.identity_digest();
+    Ok(Sm90aRouteIdentity {
+        numeric_contract: Sm90aNumericContract::WgmmaV1,
+        op: route.op,
+        dtype: route.dtype,
+        schedule: route.schedule,
+        shape: route.shape,
+        tile: SM90A_TILE,
+        stages: SM90A_STAGES,
+        cluster: (1, 1, 1),
+        symbol: route.symbol(),
+        module_kind: crate::mamba_ssm::gpu::kernel_identity::ModuleKind::TriadSm90a,
+        exact_target: "sm_90a",
+        artifact: binding.artifact,
+        compiler: binding.compiler,
+        device: binding.device,
+        tensor_maps_digest,
+        resources_digest: sm90a_resources_digest(
+            route,
+            operands,
+            binding.context_handle,
+            tensor_maps_digest,
+        )?,
+        tuning_revision: 0,
+    })
+}
+
+pub fn validate_sm90a_graph_replay(
+    stream: &Arc<cudarc::driver::CudaStream>,
+    kernels: &GpuKernels,
+    route: Sm90aForcedRoute,
+    maps: &Sm90aPreparedTensorMaps,
+    operands: Sm90aLaunchOperands,
+    captured: Sm90aRouteIdentity,
+) -> Result<(), String> {
+    let live = sm90a_forced_identity(stream, kernels, route, maps, operands)?;
+    captured.ensure_current(live, "SM90a graph replay")
+}
+
+pub fn launch_sm90a_wgmma_forced(
+    stream: &Arc<cudarc::driver::CudaStream>,
+    kernels: &GpuKernels,
+    route: Sm90aForcedRoute,
+    maps: &Sm90aPreparedTensorMaps,
+    operands: Sm90aLaunchOperands,
+) -> Result<Sm90aRouteIdentity, String> {
+    let identity = sm90a_forced_identity(stream, kernels, route, maps, operands)?;
+    let function = kernels
+        .sm90a_function(route.symbol())
+        .ok_or_else(|| format!("SM90a kernel {} is unavailable", route.symbol()))?;
+    let (rows, columns) = match route.op {
+        Sm90aOp::Nn => (route.shape.m, route.shape.n),
+        Sm90aOp::Tn => (route.shape.k, route.shape.n),
+        Sm90aOp::Nt => (route.shape.m, route.shape.k),
+    };
+    let rows = checked_u32(rows, "SM90a output rows")?;
+    let columns = checked_u32(columns, "SM90a output columns")?;
+    let grid = checked_grid_product(rows.div_ceil(64), columns.div_ceil(128), 1)?;
+    let config = cudarc::driver::LaunchConfig {
+        grid_dim: (grid, 1, 1),
+        block_dim: (route.schedule.threads(), 1, 1),
+        shared_mem_bytes: SM90A_DYNAMIC_SHARED_BYTES,
+    };
+    let m = checked_i32(route.shape.m, "M")?;
+    let k = checked_i32(route.shape.k, "K")?;
+    let n = checked_i32(route.shape.n, "N")?;
+    let ldc = checked_i32(route.shape.ldc, "ldc")?;
+    let mut builder = stream.launch_builder(function);
+    builder.arg(&operands.output_ptr);
+    builder.arg(&maps.a);
+    builder.arg(&maps.b);
+    builder.arg(&operands.bias_ptr);
+    builder.arg(&operands.alpha);
+    builder.arg(&operands.beta);
+    builder.arg(&m);
+    builder.arg(&k);
+    builder.arg(&n);
+    builder.arg(&ldc);
+    unsafe { builder.launch(config) }
+        .map(|_| identity)
+        .map_err(|error| format!("launch {}: {error:?}", route.symbol()))
+}
+
 /// Batched linear forward on GPU: `Y[B,N] = X[B,K] @ W[K,N] + bias[N]`.
 ///
 /// cuBLAS computes: `Y^T[N,B] = W^T[N,K] @ X^T[K,B]` (column-major).

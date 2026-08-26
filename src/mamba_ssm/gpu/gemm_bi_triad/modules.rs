@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::{collections::HashMap, sync::Mutex};
 
 use cudarc::driver::{CudaContext, CudaFunction, CudaModule, CudaSlice, CudaStream};
 
@@ -24,6 +25,7 @@ pub(crate) struct CompiledModule {
 }
 
 pub(crate) fn compile_module(request: CompileModuleRequest<'_>) -> Result<CompiledModule, String> {
+    validate_module_target(request.module_kind, request.arch)?;
     let combined = compose_module_source(request.module_kind)?;
     let group_m = match request.arch {
         "sm_80" | "sm_86" | "sm_87" => 8,
@@ -93,6 +95,7 @@ pub(crate) fn compile_module(request: CompileModuleRequest<'_>) -> Result<Compil
             crate::mamba_ssm::gpu::kernel_identity::read_cache(path, key, ArtifactKind::Ptx)
         && let Ok(src) =
             crate::mamba_ssm::gpu::kernel_identity::canonical_ptx_from_cache(hit.payload)
+        && validate_specialized_ptx(request.module_kind, &src).is_ok()
         && let Ok(module) = request.ctx.load_module(cudarc::nvrtc::Ptx::from_src(src))
         && crate::mamba_ssm::gpu::kernel_identity::cache_hit_header_closure_is_current(
             combined.as_bytes(),
@@ -121,6 +124,7 @@ pub(crate) fn compile_module(request: CompileModuleRequest<'_>) -> Result<Compil
                 .ok_or_else(|| format!("{:?} NVRTC returned no PTX image", request.module_kind))?;
             let ptx_source =
                 crate::mamba_ssm::gpu::kernel_identity::canonical_ptx_image(ptx_image)?;
+            validate_specialized_ptx(request.module_kind, &ptx_source)?;
             if !crate::mamba_ssm::gpu::kernel_identity::header_manifest_is_current(
                 combined.as_bytes(),
                 &include_paths,
@@ -186,6 +190,61 @@ pub(crate) fn compile_module(request: CompileModuleRequest<'_>) -> Result<Compil
             artifact_digest,
         },
     })
+}
+
+fn validate_module_target(kind: ModuleKind, arch: &str) -> Result<(), String> {
+    if kind == ModuleKind::TriadSm90a && arch != "sm_90a" {
+        return Err(format!(
+            "TriadSm90a requires exact target sm_90a, got {arch}"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_specialized_ptx(kind: ModuleKind, ptx: &str) -> Result<(), String> {
+    if kind != ModuleKind::TriadSm90a {
+        return Ok(());
+    }
+    let target = ptx
+        .lines()
+        .find_map(|line| line.trim().strip_prefix(".target "))
+        .ok_or_else(|| "TriadSm90a PTX has no target directive".to_string())?;
+    if target.split(',').next().map(str::trim) != Some("sm_90a") {
+        return Err(format!(
+            "TriadSm90a PTX target is {target}, expected sm_90a"
+        ));
+    }
+    for &symbol in SM90A_SYMBOLS {
+        let marker = format!(".entry {symbol}(");
+        if ptx.matches(&marker).count() != 1 {
+            return Err(format!("TriadSm90a PTX must contain one entry {symbol}"));
+        }
+    }
+    for instruction in [
+        "cp.async.bulk.tensor.2d.shared::cta.global.tile.mbarrier::complete_tx::bytes",
+        "mbarrier.arrive.expect_tx",
+        "mbarrier.try_wait.parity",
+        "wgmma.mma_async.sync.aligned.m64n128k16.f32.bf16.bf16",
+        "wgmma.mma_async.sync.aligned.m64n128k16.f32.f16.f16",
+        "wgmma.fence.sync.aligned",
+        "wgmma.commit_group.sync.aligned",
+        "wgmma.wait_group.sync.aligned",
+        "setmaxnreg.dec.sync.aligned.u32",
+        "setmaxnreg.inc.sync.aligned.u32",
+    ] {
+        if !ptx.contains(instruction) {
+            return Err(format!("TriadSm90a PTX is missing {instruction}"));
+        }
+    }
+    if ptx.split_ascii_whitespace().any(|token| {
+        token.starts_with("atom.")
+            || token.starts_with("red.")
+            || token.starts_with("atom::")
+            || token.starts_with("red::")
+    }) {
+        return Err("TriadSm90a PTX contains a numeric atomic or reduction instruction".into());
+    }
+    Ok(())
 }
 
 struct SourceFragment {
@@ -326,6 +385,18 @@ const SM80_SOURCE_FRAGMENTS: &[SourceFragment] = &[
     },
 ];
 
+const SM90A_SOURCE_FRAGMENTS: &[SourceFragment] = &[
+    TYPED_PRELUDE,
+    TRIAD_CONTRACT,
+    TRIAD_COMMON,
+    TRIAD_EPILOGUE,
+    SourceFragment {
+        logical_name: "kernels/gemm_bi_triad/sm90a.cu",
+        source: include_str!("../../../../kernels/gemm_bi_triad/sm90a.cu"),
+        allowed_quoted_includes: &[],
+    },
+];
+
 pub(super) const SCALAR_SYMBOLS: &[&str] = &[
     "sgemm_bi_nn",
     "sgemm_bi_tn",
@@ -392,11 +463,27 @@ pub(super) const SM80_SYMBOLS: &[&str] = &[
     "sgemm_bi_nt_tc64_f16",
 ];
 
+pub const SM90A_SYMBOLS: &[&str] = &[
+    "sgemm_bi_nn_sm90a_wgmma_wg1_bf16",
+    "sgemm_bi_nn_sm90a_wgmma_wg1_f16",
+    "sgemm_bi_tn_sm90a_wgmma_wg1_bf16",
+    "sgemm_bi_tn_sm90a_wgmma_wg1_f16",
+    "sgemm_bi_nt_sm90a_wgmma_wg1_bf16",
+    "sgemm_bi_nt_sm90a_wgmma_wg1_f16",
+    "sgemm_bi_nn_sm90a_wgmma_wg2_bf16",
+    "sgemm_bi_nn_sm90a_wgmma_wg2_f16",
+    "sgemm_bi_tn_sm90a_wgmma_wg2_bf16",
+    "sgemm_bi_tn_sm90a_wgmma_wg2_f16",
+    "sgemm_bi_nt_sm90a_wgmma_wg2_bf16",
+    "sgemm_bi_nt_sm90a_wgmma_wg2_f16",
+];
+
 fn module_fragments(kind: ModuleKind) -> Result<&'static [SourceFragment], String> {
     match kind {
         ModuleKind::Fixed => Ok(FIXED_SOURCE_FRAGMENTS),
         ModuleKind::TriadScalar => Ok(SCALAR_SOURCE_FRAGMENTS),
         ModuleKind::TriadSm80 => Ok(SM80_SOURCE_FRAGMENTS),
+        ModuleKind::TriadSm90a => Ok(SM90A_SOURCE_FRAGMENTS),
         _ => Err(format!("no source fragments for {kind:?}")),
     }
 }
@@ -619,11 +706,24 @@ fn resolve_owned_symbol<T>(
 /// Scalar and Tensor Core handles remain in separate CUDA modules. Keeping the
 /// modules and their identities beside the handles makes a route impossible to
 /// outlive, or be replayed against, a different compiled artifact.
+type Sm90aMapCacheKey = (
+    [super::contract::Sm90aTensorMapKey; 2],
+    [super::contract::Sm90aAllocationIdentity; 2],
+    super::contract::Sm90aOp,
+    u8,
+    super::contract::Sm90aShape,
+);
+type Sm90aMapCache = Mutex<HashMap<Sm90aMapCacheKey, super::contract::Sm90aPreparedTensorMaps>>;
+
 pub struct GemmBiKernels {
     _modules: CudaModuleAnchors,
+    context_handle: usize,
     scalar_compiler_identity: CompilerIdentity,
     sm80_compiler_identity: CompilerIdentity,
+    sm90a_compiler_identity: Option<CompilerIdentity>,
     artifact_set_identity: crate::mamba_ssm::gpu::kernel_identity::ArtifactSetIdentity,
+    sm90a_functions: HashMap<&'static str, CudaFunction>,
+    sm90a_tensor_maps: Sm90aMapCache,
 
     pub sgemm_nn: CudaFunction,
     pub sgemm_tn: CudaFunction,
@@ -675,15 +775,27 @@ pub struct GemmBiKernels {
 
 impl GemmBiKernels {
     pub(crate) fn load(
+        context_handle: usize,
         fixed_artifact: ArtifactIdentity,
         scalar: CompiledModule,
         sm80: CompiledModule,
+        sm90a: Option<CompiledModule>,
     ) -> Result<Self, String> {
-        let artifact_set_identity = crate::mamba_ssm::gpu::kernel_identity::build_artifact_set(&[
+        let sm90a = sm90a.and_then(|module| {
+            load_sm90a_functions(&module)
+                .ok()
+                .map(|functions| (module, functions))
+        });
+        let mut artifacts = vec![
             fixed_artifact,
             scalar.artifact_identity,
             sm80.artifact_identity,
-        ])?;
+        ];
+        if let Some((module, _)) = sm90a.as_ref() {
+            artifacts.push(module.artifact_identity);
+        }
+        let artifact_set_identity =
+            crate::mamba_ssm::gpu::kernel_identity::build_artifact_set(&artifacts)?;
         let load = |name: &str| load_owned_function(name, &scalar.module, &sm80.module);
         let load_half = |base: &str| load_owned_half(base, &scalar.module, &sm80.module);
         let load_half_dynsmem = |base: &str, bytes: i32| {
@@ -711,11 +823,24 @@ impl GemmBiKernels {
             34 * 1024,
         )?;
 
+        let sm90a_functions = sm90a
+            .as_ref()
+            .map(|(_, functions)| functions.clone())
+            .unwrap_or_default();
+        let mut anchors = vec![scalar.module.clone(), sm80.module.clone()];
+        if let Some((module, _)) = sm90a.as_ref() {
+            anchors.push(module.module.clone());
+        }
+
         Ok(Self {
-            _modules: CudaModuleAnchors::new(vec![scalar.module.clone(), sm80.module.clone()]),
+            _modules: CudaModuleAnchors::new(anchors),
+            context_handle,
             scalar_compiler_identity: scalar.compiler_identity,
             sm80_compiler_identity: sm80.compiler_identity,
+            sm90a_compiler_identity: sm90a.as_ref().map(|(module, _)| module.compiler_identity),
             artifact_set_identity,
+            sm90a_functions,
+            sm90a_tensor_maps: Mutex::new(HashMap::new()),
             sgemm_nn,
             sgemm_tn,
             sgemm_nt,
@@ -777,6 +902,60 @@ impl GemmBiKernels {
         self.sm80_compiler_identity
     }
 
+    pub fn sm90a_compiler_identity(&self) -> Option<CompilerIdentity> {
+        self.sm90a_compiler_identity
+    }
+
+    pub fn has_sm90a_wgmma(&self) -> bool {
+        self.sm90a_functions.len() == SM90A_SYMBOLS.len()
+    }
+
+    pub(super) fn context_handle(&self) -> usize {
+        self.context_handle
+    }
+
+    pub(super) fn sm90a_function(&self, symbol: &str) -> Option<&CudaFunction> {
+        self.sm90a_functions.get(symbol)
+    }
+
+    pub(super) fn prepare_sm90a_tensor_maps(
+        &self,
+        request: super::contract::Sm90aMapRequest,
+        keys: [super::contract::Sm90aTensorMapKey; 2],
+        allocations: [super::contract::Sm90aAllocationIdentity; 2],
+        capturing: bool,
+        binding: super::contract::Sm90aMapBinding,
+    ) -> Result<super::contract::Sm90aPreparedTensorMaps, String> {
+        if binding.context_handle != self.context_handle
+            || Some(binding.compiler) != self.sm90a_compiler_identity
+            || Some(binding.artifact) != self.artifact_set_identity.specialized
+        {
+            return Err("SM90a tensor-map binding does not match its CUDA module context".into());
+        }
+        let mut cache = self
+            .sm90a_tensor_maps
+            .lock()
+            .map_err(|_| "SM90a tensor-map cache is poisoned".to_string())?;
+        let dtype = match request.dtype {
+            super::super::dtype::WeightDtype::F32 => 0,
+            super::super::dtype::WeightDtype::F16 => 1,
+            super::super::dtype::WeightDtype::Bf16 => 2,
+        };
+        let cache_key = (keys, allocations, request.op, dtype, request.shape);
+        cache.retain(|(cached_keys, cached_allocations, _, _, _), _| {
+            *cached_keys != keys || *cached_allocations == allocations
+        });
+        if let Some(maps) = cache.get(&cache_key) {
+            return Ok(*maps);
+        }
+        if capturing {
+            return Err("SM90a tensor-map cache miss during graph capture".into());
+        }
+        let maps = super::contract::encode_sm90a_tensor_maps(keys, request, binding, allocations)?;
+        cache.insert(cache_key, maps);
+        Ok(maps)
+    }
+
     pub fn splitk_scratch_buf(&self, stream: &Arc<CudaStream>) -> Result<&CudaSlice<f32>, String> {
         if self.splitk_scratch.get().is_none() {
             let buffer = stream
@@ -827,6 +1006,63 @@ fn load_function(
         .map_err(|error| format!("{kind:?} kernel {name} not found: {error:?}"))
 }
 
+fn load_sm90a_functions(
+    module: &CompiledModule,
+) -> Result<HashMap<&'static str, CudaFunction>, String> {
+    if module.artifact_identity.module_kind != ModuleKind::TriadSm90a
+        || module.compiler_identity.target.as_str() != "sm_90a"
+    {
+        return Err("specialized triad module is not exact-target TriadSm90a".into());
+    }
+    let mut functions = HashMap::new();
+    for &symbol in SM90A_SYMBOLS {
+        let function = load_function(&module.module, ModuleKind::TriadSm90a, symbol)?;
+        set_dynamic_shared(
+            &function,
+            symbol,
+            super::contract::SM90A_DYNAMIC_SHARED_BYTES as i32,
+        )?;
+        if function
+            .local_size_bytes()
+            .map_err(|error| format!("query {symbol} local memory: {error:?}"))?
+            != 0
+        {
+            return Err(format!("{symbol} spills to local memory"));
+        }
+        let wg2 = symbol.contains("_wg2_");
+        let threads = if wg2 { 256 } else { 128 };
+        if function
+            .max_threads_per_block()
+            .map_err(|error| format!("query {symbol} max threads: {error:?}"))?
+            < threads
+        {
+            return Err(format!("{symbol} cannot launch {threads} threads"));
+        }
+        let occupancy = function
+            .occupancy_max_active_blocks_per_multiprocessor(
+                threads as u32,
+                super::contract::SM90A_DYNAMIC_SHARED_BYTES as usize,
+                None,
+            )
+            .map_err(|error| format!("query {symbol} occupancy: {error:?}"))?;
+        if occupancy < if wg2 { 1 } else { 3 } {
+            return Err(format!(
+                "{symbol} occupancy {occupancy} misses its schedule gate"
+            ));
+        }
+        if !wg2
+            && function
+                .occupancy_available_dynamic_smem_per_block(3, 128)
+                .map_err(|error| format!("query {symbol} shared-memory capacity: {error:?}"))?
+                < super::contract::SM90A_DYNAMIC_SHARED_BYTES as usize
+        {
+            return Err(format!("{symbol} cannot sustain three 73984-byte CTAs"));
+        }
+        functions.insert(symbol, function);
+    }
+    Ok(functions)
+}
+
 fn load_owned_half(
     base: &str,
     scalar: &Arc<CudaModule>,
@@ -860,7 +1096,8 @@ mod tests {
 
     use super::{
         SCALAR_SYMBOLS as PRODUCTION_SCALAR_SYMBOLS, SM80_SYMBOLS as PRODUCTION_SM80_SYMBOLS,
-        SourceFragment, compose_fragments, compose_module_source, resolve_owned_symbol,
+        SM90A_SYMBOLS, SourceFragment, compose_fragments, compose_module_source,
+        resolve_owned_symbol, validate_module_target,
     };
 
     const FIXED_FRAGMENTS: &[&str] = &[
@@ -897,6 +1134,14 @@ mod tests {
         "kernels/gemm_bi_triad/epilogue.cuh",
         "kernels/gemm_bi_triad/mma16.cuh",
         "kernels/gemm_bi_triad/sm80.cu",
+    ];
+
+    const SM90A_FRAGMENTS: &[&str] = &[
+        "kernels/_typed_prelude.cuh",
+        "kernels/gemm_bi_triad/contract.cuh",
+        "kernels/gemm_bi_triad/common.cuh",
+        "kernels/gemm_bi_triad/epilogue.cuh",
+        "kernels/gemm_bi_triad/sm90a.cu",
     ];
 
     const SCALAR_SYMBOLS: &[&str] = &[
@@ -983,6 +1228,7 @@ mod tests {
         assert_composition(ModuleKind::Fixed, FIXED_FRAGMENTS);
         assert_composition(ModuleKind::TriadScalar, SCALAR_FRAGMENTS);
         assert_composition(ModuleKind::TriadSm80, SM80_FRAGMENTS);
+        assert_composition(ModuleKind::TriadSm90a, SM90A_FRAGMENTS);
 
         assert!(
             !std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -1093,7 +1339,10 @@ mod tests {
         let sm80: BTreeSet<_> = SM80_SYMBOLS.iter().copied().collect();
         assert_eq!(scalar.len(), 46);
         assert_eq!(sm80.len(), 14);
+        assert_eq!(SM90A_SYMBOLS.len(), 12);
         assert!(scalar.is_disjoint(&sm80));
+        assert!(SM90A_SYMBOLS.iter().all(|symbol| !scalar.contains(symbol)));
+        assert!(SM90A_SYMBOLS.iter().all(|symbol| !sm80.contains(symbol)));
         assert_eq!(scalar.union(&sm80).count(), 60);
         assert!(
             scalar
@@ -1101,6 +1350,16 @@ mod tests {
                 .copied()
                 .all(|name| { name.starts_with("sgemm_bi_") || name == "sgemm_transpose_f32_2d" })
         );
+    }
+
+    #[test]
+    fn sm90a_module_requires_the_exact_architecture_target() {
+        validate_module_target(ModuleKind::TriadSm90a, "sm_90a").unwrap();
+        for target in ["sm_80", "sm_89", "sm_90", "sm_100a", "sm_120"] {
+            let error = validate_module_target(ModuleKind::TriadSm90a, target).unwrap_err();
+            assert!(error.contains("exact target sm_90a"), "{error}");
+        }
+        validate_module_target(ModuleKind::TriadSm80, "sm_90a").unwrap();
     }
 
     #[test]

@@ -1,6 +1,32 @@
 use super::super::dtype::WeightDtype;
 use super::super::kernels::MambaKernels as GpuKernels;
 use super::contract::{GemmDims, checked_mul3, checked_tile_grid, checked_usize};
+use super::contract::{Sm90aForcedRoute, Sm90aOp, Sm90aShape, Sm90aWarpgroupSchedule};
+
+pub const SM90A_AUTO_CELLS: &[Sm90aForcedRoute] = &[];
+
+pub fn resolve_sm90a_forced(
+    device_cc: (i32, i32),
+    module_available: bool,
+    op: Sm90aOp,
+    dtype: WeightDtype,
+    schedule: Sm90aWarpgroupSchedule,
+    shape: Sm90aShape,
+) -> Result<Option<Sm90aForcedRoute>, String> {
+    shape.validate(op)?;
+    if !matches!(dtype, WeightDtype::Bf16 | WeightDtype::F16) {
+        return Err("SM90a WGMMA supports bf16 and f16 operands only".into());
+    }
+    if device_cc != (9, 0) || !module_available {
+        return Ok(None);
+    }
+    Ok(Some(Sm90aForcedRoute {
+        op,
+        dtype,
+        schedule,
+        shape,
+    }))
+}
 
 // ── Split-M TN partition heuristic (ported from SQV-RS blas_bi.rs) ──
 

@@ -41,8 +41,13 @@ mod launch;
 pub(crate) mod modules;
 
 pub(super) use contract::GemmDims;
-pub use contract::{SgemmFwdSubOperands, TcFwdOperands};
-pub use dispatch::{TC64_PREFER_MAX_TILES128, TcTile};
+pub use contract::{
+    SM90A_DYNAMIC_SHARED_BYTES, SM90A_STAGES, SM90A_TILE, SgemmFwdSubOperands, Sm90aForcedRoute,
+    Sm90aLaunchOperands, Sm90aMapRequest, Sm90aNumericContract, Sm90aOp, Sm90aPreparedTensorMaps,
+    Sm90aRouteIdentity, Sm90aShape, Sm90aTensorMap, Sm90aWarpgroupSchedule, TcFwdOperands,
+    validate_sm90a_map_request,
+};
+pub use dispatch::{SM90A_AUTO_CELLS, TC64_PREFER_MAX_TILES128, TcTile, resolve_sm90a_forced};
 pub use launch::*;
 #[doc(hidden)]
 pub use modules::GemmBiKernels;

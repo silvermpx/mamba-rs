@@ -525,8 +525,27 @@ impl MambaKernels {
                 module_kind: super::kernel_identity::ModuleKind::TriadSm80,
             },
         )?;
+        let sm90a = if arch == "sm_90a" && ctx.compute_capability().ok() == Some((9, 0)) {
+            super::gemm_bi_triad::modules::compile_module(
+                super::gemm_bi_triad::modules::CompileModuleRequest {
+                    ctx,
+                    arch,
+                    state_cap,
+                    module_kind: super::kernel_identity::ModuleKind::TriadSm90a,
+                },
+            )
+            .ok()
+        } else {
+            None
+        };
         let compiler_identity = fixed.compiler_identity;
-        let triad = GemmBiKernels::load(fixed.artifact_identity, scalar, sm80)?;
+        let triad = GemmBiKernels::load(
+            ctx.cu_ctx() as usize,
+            fixed.artifact_identity,
+            scalar,
+            sm80,
+            sm90a,
+        )?;
         let module = fixed.module;
 
         let get = |name: &str| -> Result<CudaFunction, String> {

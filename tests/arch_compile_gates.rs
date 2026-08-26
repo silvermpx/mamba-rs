@@ -65,6 +65,16 @@ fn sm80_blob() -> String {
     ])
 }
 
+fn sm90a_blob() -> String {
+    compose(&[
+        include_str!("../kernels/_typed_prelude.cuh"),
+        include_str!("../kernels/gemm_bi_triad/contract.cuh"),
+        include_str!("../kernels/gemm_bi_triad/common.cuh"),
+        include_str!("../kernels/gemm_bi_triad/epilogue.cuh"),
+        include_str!("../kernels/gemm_bi_triad/sm90a.cu"),
+    ])
+}
+
 fn compile_for(arch: &'static str) {
     let group_m = if matches!(arch, "sm_80" | "sm_86" | "sm_87") {
         8
@@ -107,6 +117,53 @@ fn compiles_for_sm89() {
 #[test]
 fn compiles_for_sm90a() {
     compile_for("sm_90a");
+
+    let opts = cudarc::nvrtc::CompileOptions {
+        arch: Some("sm_90a"),
+        options: vec!["--fmad=true".to_string(), "-DNDEBUG".to_string()],
+        include_paths: mamba_rs::mamba_ssm::gpu::kernels::cuda_include_paths(),
+        ..Default::default()
+    };
+    let image = cudarc::nvrtc::compile_ptx_with_opts(sm90a_blob(), opts)
+        .expect("TriadSm90a kernel module must compile for exact sm_90a");
+    let ptx = std::str::from_utf8(image.as_bytes().expect("SM90a PTX image"))
+        .expect("SM90a PTX must be UTF-8");
+    assert!(ptx.lines().any(|line| line.trim() == ".target sm_90a"));
+    for symbol in [
+        "sgemm_bi_nn_sm90a_wgmma_wg1_bf16",
+        "sgemm_bi_nn_sm90a_wgmma_wg1_f16",
+        "sgemm_bi_tn_sm90a_wgmma_wg1_bf16",
+        "sgemm_bi_tn_sm90a_wgmma_wg1_f16",
+        "sgemm_bi_nt_sm90a_wgmma_wg1_bf16",
+        "sgemm_bi_nt_sm90a_wgmma_wg1_f16",
+        "sgemm_bi_nn_sm90a_wgmma_wg2_bf16",
+        "sgemm_bi_nn_sm90a_wgmma_wg2_f16",
+        "sgemm_bi_tn_sm90a_wgmma_wg2_bf16",
+        "sgemm_bi_tn_sm90a_wgmma_wg2_f16",
+        "sgemm_bi_nt_sm90a_wgmma_wg2_bf16",
+        "sgemm_bi_nt_sm90a_wgmma_wg2_f16",
+    ] {
+        assert_eq!(ptx.matches(&format!(".entry {symbol}(")).count(), 1);
+    }
+    for instruction in [
+        "cp.async.bulk.tensor.2d.shared::cta.global.tile.mbarrier::complete_tx::bytes",
+        "mbarrier.arrive.expect_tx",
+        "wgmma.mma_async.sync.aligned.m64n128k16.f32.bf16.bf16",
+        "wgmma.mma_async.sync.aligned.m64n128k16.f32.f16.f16",
+        "wgmma.commit_group.sync.aligned",
+        "wgmma.wait_group.sync.aligned",
+        "setmaxnreg.dec.sync.aligned.u32",
+        "setmaxnreg.inc.sync.aligned.u32",
+    ] {
+        assert!(
+            ptx.contains(instruction),
+            "SM90a PTX is missing {instruction}"
+        );
+    }
+    assert!(
+        !ptx.split_ascii_whitespace()
+            .any(|token| token.starts_with("atom.") || token.starts_with("red."))
+    );
 }
 
 #[test]
