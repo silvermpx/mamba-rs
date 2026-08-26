@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.6.9 (2026-08-26)
+
+### Fixed
+
+- Build and release-pipeline fixes. No functional change: every route
+  returns bit-identical output to 0.6.8.
+
 ## 0.6.8 (2026-08-26)
 
 Batched prefill pooling, kernel-file naming, and a correctness gate for
