@@ -1013,11 +1013,10 @@ fn collect_includes(
         let (quoted, name, trailing) = if let Some(rest) = rest.strip_prefix('"') {
             let (name, trailing) = rest.split_once('"')?;
             (true, name, trailing)
-        } else if let Some(rest) = rest.strip_prefix('<') {
+        } else {
+            let rest = rest.strip_prefix('<')?;
             let (name, trailing) = rest.split_once('>')?;
             (false, name, trailing)
-        } else {
-            return None;
         };
         if name.is_empty() || !trailing.trim().is_empty() {
             return None;
@@ -1943,16 +1942,14 @@ fn is_identifier(value: &str) -> bool {
 
 fn identifiers(mut value: &str) -> impl Iterator<Item = &str> {
     std::iter::from_fn(move || {
-        loop {
-            let start = value.find(|byte: char| byte.is_ascii_alphabetic() || byte == '_')?;
-            value = &value[start..];
-            let end = value
-                .find(|byte: char| !(byte.is_ascii_alphanumeric() || byte == '_'))
-                .unwrap_or(value.len());
-            let identifier = &value[..end];
-            value = &value[end..];
-            return Some(identifier);
-        }
+        let start = value.find(|byte: char| byte.is_ascii_alphabetic() || byte == '_')?;
+        value = &value[start..];
+        let end = value
+            .find(|byte: char| !(byte.is_ascii_alphanumeric() || byte == '_'))
+            .unwrap_or(value.len());
+        let identifier = &value[..end];
+        value = &value[end..];
+        Some(identifier)
     })
 }
 
@@ -2408,10 +2405,8 @@ fn preprocessor_directive(line: &str) -> Option<(&str, &str)> {
     let line = line.trim_start();
     let line = if let Some(line) = line.strip_prefix('#') {
         line
-    } else if let Some(line) = line.strip_prefix("%:") {
-        line
     } else {
-        return None;
+        line.strip_prefix("%:")?
     };
     let line = line.trim_start();
     let directive_end = line
@@ -2991,13 +2986,25 @@ mod cache_and_header_tests {
     fn include_next_and_header_mutation_fail_the_closure_guard() {
         let root = tempfile::tempdir().unwrap();
         let include_root = root.path().to_string_lossy().into_owned();
-        assert!(header_manifest(b"#include_next <value.cuh>", &[include_root.clone()]).is_none());
-        assert!(header_manifest(b"#include_magic <value.cuh>", &[include_root.clone()]).is_none());
+        assert!(
+            header_manifest(
+                b"#include_next <value.cuh>",
+                std::slice::from_ref(&include_root)
+            )
+            .is_none()
+        );
+        assert!(
+            header_manifest(
+                b"#include_magic <value.cuh>",
+                std::slice::from_ref(&include_root)
+            )
+            .is_none()
+        );
 
         let header = root.path().join("value.cuh");
         std::fs::write(&header, b"first").unwrap();
         let source = b"#include \"value.cuh\"";
-        let manifest = header_manifest(source, &[include_root.clone()]);
+        let manifest = header_manifest(source, std::slice::from_ref(&include_root));
         assert!(manifest.is_some());
         std::fs::write(header, b"second").unwrap();
         assert!(!header_manifest_is_current(

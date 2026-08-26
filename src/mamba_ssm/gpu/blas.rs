@@ -1059,6 +1059,20 @@ pub fn gemm_bi_forward_raw(
     bias_ptr: Option<cudarc::driver::sys::CUdeviceptr>,
     dims: (usize, usize, usize),
 ) -> Result<(), String> {
+    super::gemm_bi_fixed::fixed_forward(ctx, c, x, w, bias_ptr, dims).map(|_| ())
+}
+
+/// The fixed family's LEGACY tile (64x64x32, strict, no buckets): the
+/// narrow-N fallback of the inference ladder and the whole f32 arm (the
+/// shipped serve route - its bits never move with ladder work).
+pub(crate) fn fixed_legacy_forward(
+    ctx: &GpuCtx,
+    c: TypedPtr,
+    x: TypedPtr,
+    w: TypedPtr,
+    bias_ptr: Option<cudarc::driver::sys::CUdeviceptr>,
+    dims: (usize, usize, usize),
+) -> Result<(), String> {
     let (batch, n_in, n_out) = dims;
     let Some(kernel) = pick_bi_gemm(ctx, x.dtype, w.dtype, c.dtype) else {
         return Err(format!(

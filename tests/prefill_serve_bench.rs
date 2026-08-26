@@ -315,7 +315,7 @@ fn prefill_serve_headline() {
     let pooled_graph_ms = {
         let ctx = &r.ctx;
         let mut run = || {
-            graph.launch(ctx).unwrap();
+            graph.launch(ctx, &r.input, &pooled).unwrap();
             pooled.download(&ctx.stream, &mut host_pooled).unwrap();
         };
         common::bench::timed(ctx, 50, &mut run)

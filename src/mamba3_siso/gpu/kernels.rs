@@ -13,6 +13,9 @@ pub struct Mamba3Kernels {
     _modules: CudaModuleAnchors,
     compiler_identity: crate::mamba_ssm::gpu::kernel_identity::CompilerIdentity,
     artifact_identity: crate::mamba_ssm::gpu::kernel_identity::ArtifactIdentity,
+    /// Identity of the compiled M3 module (NVRTC cache key); pinned by
+    /// the M3 graph guards.
+    pub module_identity: String,
 
     /// State-dimension capacity the kernels were compiled with (the
     /// per-thread register-array size). The engine and trainer
@@ -186,6 +189,11 @@ pub struct Mamba3Kernels {
     /// Per-chunk SSM state matmul (typed x, typed K_scaled, f32 dA_cumsum,
     /// f32 states_out — BPTT state MUST remain f32 per Tri Dao invariant).
     pub m3_chunk_state_fwd_typed: TypedKernel,
+    /// Fused preprocess + chunk_state (3b): one kernel computes K_scaled/
+    /// qk_dot/scale/gamma AND the chunk states, keeping K_scaled in smem
+    /// across the seam instead of round-tripping it through L2. Launched
+    /// only when `chunk_fused_cfg` returns Some; otherwise the pair runs.
+    pub m3_chunk_pre_state_fused_typed: TypedKernel,
     /// Persist final states to ssm_state/k_state/v_state (all f32 persistent
     /// buffers). Typed inputs k_flat/x_flat.
     pub m3_writeback_parallel_states_typed: TypedKernel,
@@ -421,6 +429,8 @@ impl Mamba3Kernels {
             compile_key: invocation_digest,
             artifact_digest,
         };
+        let module_identity =
+            crate::mamba_ssm::gpu::kernel_identity::digest_hex(&invocation_digest);
 
         let get = |name: &str| -> Result<CudaFunction, String> {
             module
@@ -429,6 +439,7 @@ impl Mamba3Kernels {
         };
 
         let kernels = Self {
+            module_identity,
             state_cap,
             compiler_identity,
             artifact_identity,
@@ -615,6 +626,11 @@ impl Mamba3Kernels {
                 bf16: get("m3_chunk_state_fwd_bf16")?,
                 f16: get("m3_chunk_state_fwd_f16")?,
             },
+            m3_chunk_pre_state_fused_typed: TypedKernel {
+                f32: get("m3_chunk_pre_state_fused")?,
+                bf16: get("m3_chunk_pre_state_fused_bf16")?,
+                f16: get("m3_chunk_pre_state_fused_f16")?,
+            },
             m3_writeback_parallel_states_typed: TypedKernel {
                 f32: get("m3_writeback_parallel_states")?,
                 bf16: get("m3_writeback_parallel_states_bf16")?,
@@ -690,7 +706,64 @@ impl Mamba3Kernels {
 /// smem) whenever its smem total fits the 48 KB default budget; wider
 /// shapes keep the original two-head static-tile kernel. Returns
 /// `(use_coop, cfg)` - the argument list is identical for both kernels.
-pub(crate) fn chunk_scan_cfg(
+/// Launch geometry for m3_chunk_state_fwd (single source - the kernel
+/// derives its thread layout from blockDim, so every call site MUST use
+/// this). Quad layout (hd, ds/4, heads_per_block) when ds % 4 == 0: one
+/// thread owns four ascending-t chains, 4x the resident warps of the
+/// legacy (hd, 2) layout - pure latency hiding, bit-identical work.
+pub fn chunk_state_cfg(
+    batch: usize,
+    n_chunks: usize,
+    nh: usize,
+    hd: usize,
+    ds: usize,
+    chunk_size: usize,
+) -> cudarc::driver::LaunchConfig {
+    // Quad layout: block (hd, ds/4, 2 heads) with the block's x/K/dA
+    // chunk slices staged in dynamic smem (the kernel is L2-bound; the
+    // staging collapses its redundant global reads). Legacy layout for
+    // shapes that don't fit the smem budget or an odd ds.
+    let heads = 2usize;
+    let smem_bytes = heads * (chunk_size * hd + chunk_size * ds + chunk_size) * 4;
+    if ds.is_multiple_of(4) && hd * (ds / 4) * heads <= 1024 && smem_bytes <= 48 * 1024 {
+        cudarc::driver::LaunchConfig {
+            grid_dim: ((batch * n_chunks) as u32, nh.div_ceil(heads) as u32, 1),
+            block_dim: (hd as u32, (ds / 4) as u32, heads as u32),
+            shared_mem_bytes: smem_bytes as u32,
+        }
+    } else {
+        cudarc::driver::LaunchConfig {
+            grid_dim: ((batch * n_chunks) as u32, nh.div_ceil(2) as u32, 1),
+            block_dim: (hd as u32, 2, 1),
+            shared_mem_bytes: 0,
+        }
+    }
+}
+
+/// Launch geometry for the FUSED preprocess+chunk_state kernel, or None
+/// when the shape must run the unfused pair (odd ds - phase B is float4;
+/// oversized smem; chunk_size beyond a block). Single source: the kernel
+/// derives everything from blockDim/args, every call site MUST use this.
+pub fn chunk_fused_cfg(
+    batch: usize,
+    n_chunks: usize,
+    nh: usize,
+    hd: usize,
+    ds: usize,
+    chunk_size: usize,
+) -> Option<cudarc::driver::LaunchConfig> {
+    let smem_bytes = (chunk_size * ds + chunk_size * hd + chunk_size) * 4;
+    if !ds.is_multiple_of(4) || chunk_size > 1024 || smem_bytes > 48 * 1024 {
+        return None;
+    }
+    Some(cudarc::driver::LaunchConfig {
+        grid_dim: ((batch * n_chunks) as u32, nh as u32, 1),
+        block_dim: (chunk_size as u32, 1, 1),
+        shared_mem_bytes: smem_bytes as u32,
+    })
+}
+
+pub fn chunk_scan_cfg(
     batch: usize,
     n_chunks: usize,
     nh: usize,
@@ -709,7 +782,7 @@ pub(crate) fn chunk_scan_cfg(
             true,
             cudarc::driver::LaunchConfig {
                 grid_dim: ((batch * n_chunks) as u32, nh as u32, 1),
-                block_dim: (128, 1, 1),
+                block_dim: (256, 1, 1),
                 shared_mem_bytes: smem_bytes as u32,
             },
         )

@@ -71,12 +71,17 @@ use cudarc::driver::PushKernelArg;
 // ---------------------------------------------------------------------------
 
 /// Per-layer bundle for the M1 mixed backward: the layer's master-grad
-/// slots, saved activations, and compute weights.
+/// slots, saved activations, compute weights, and gradient-flow schedule.
 #[derive(Clone, Copy)]
 pub struct MixedLayerBwd<'a> {
     pub d_lw: &'a GpuMambaLayerGrads,
     pub acts: &'a GpuMambaLayerMixedActs,
     pub lw: &'a GpuMambaMixedLayerWeights,
+    /// Run the standalone f32-to-typed cast for the incoming gradient.
+    /// Only the first layer processed in reverse needs it.
+    pub cast_d_temporal: bool,
+    /// Emit the typed gradient mirror consumed by the layer below.
+    pub mirror_dx: bool,
 }
 
 /// Per-layer mixed backward. Matches `gpu_backward_mamba_layer` step-by-step.
@@ -87,15 +92,14 @@ pub fn gpu_backward_mamba_layer_mixed(
     a_neg_ptr: cudarc::driver::sys::CUdeviceptr,
     scratch: &mut GpuMambaMixedTrainScratch,
     dtype: WeightDtype,
-    // `cast_d_temporal`: run the standalone f32 -> typed cast of the
-    // incoming gradient. Only the FIRST layer processed needs it - every
-    // later layer receives a gradient whose typed mirror the previous
-    // layer's norm backward already wrote inline.
-    // `mirror_dx`: emit that typed mirror for the layer below.
-    cast_d_temporal: bool,
-    mirror_dx: bool,
 ) -> Result<(), String> {
-    let MixedLayerBwd { d_lw, acts, lw } = *layer;
+    let MixedLayerBwd {
+        d_lw,
+        acts,
+        lw,
+        cast_d_temporal,
+        mirror_dx,
+    } = *layer;
     let dims = scratch.dims;
     let bt = dims.bt();
     let dm = dims.d_model;
@@ -897,12 +901,12 @@ pub fn gpu_backward_mamba_backbone_mixed(
                 d_lw: &d_mamba.layers[layer_idx],
                 acts: &acts.layers[layer_idx],
                 lw: &mamba_w.layers[layer_idx],
+                cast_d_temporal: layer_idx + 1 == dims.n_layers,
+                mirror_dx: layer_idx > 0,
             },
             a_neg_ptr,
             scratch,
             dtype,
-            layer_idx + 1 == dims.n_layers,
-            layer_idx > 0,
         )?;
     }
 

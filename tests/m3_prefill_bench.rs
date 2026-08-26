@@ -236,11 +236,11 @@ fn m3_pooled_page_bench_typed_vs_f32() {
             BiGemmFamily::Fixed,
         ),
         (
-            "bf16 ladder (serve route)",
+            "bf16 fixed (serve route)",
             WeightDtype::Bf16,
             true,
-            true,
-            BiGemmFamily::Triad,
+            false,
+            BiGemmFamily::Fixed,
         ),
         (
             "f32 cuBLAS (non-det ref)",
@@ -315,7 +315,7 @@ fn m3_pooled_page_bench_typed_vs_f32() {
         };
         for _ in 0..3 {
             graph
-                .replay(&ctx, view, &gpu_input, &states, &pooled)
+                .replay(&ctx, &kernels, view, &gpu_input, &states, &pooled)
                 .unwrap();
         }
         ctx.stream.synchronize().unwrap();
@@ -323,7 +323,7 @@ fn m3_pooled_page_bench_typed_vs_f32() {
         let t0 = Instant::now();
         for _ in 0..iters {
             graph
-                .replay(&ctx, view, &gpu_input, &states, &pooled)
+                .replay(&ctx, &kernels, view, &gpu_input, &states, &pooled)
                 .unwrap();
         }
         ctx.stream.synchronize().unwrap();

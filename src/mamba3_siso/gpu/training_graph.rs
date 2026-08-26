@@ -11,7 +11,7 @@
 //! pre-allocated, pointer-stability invariant enforced on replay.
 
 use cudarc::driver::CudaGraph;
-use std::sync::Arc;
+use std::rc::Rc;
 
 use crate::mamba_ssm::gpu::adamw::{AdamWBiasFactors, AdamWMultiPlan, GpuAdamW, step_multi};
 use crate::mamba_ssm::gpu::buffers::GpuBuffer;
@@ -76,7 +76,7 @@ pub struct Mamba3MixedReplay<'a> {
 /// ```
 pub struct GpuMamba3TrainingStepGraph {
     graph: CudaGraph,
-    ctx_resources: Arc<crate::mamba_ssm::gpu::context::GpuCtxResources>,
+    ctx_resources: Rc<crate::mamba_ssm::gpu::context::GpuCtxResources>,
     _m3_modules: crate::mamba_ssm::gpu::kernels::CudaModuleAnchors,
     pub batch: usize,
     pub seq_len: usize,
@@ -438,7 +438,7 @@ pub struct Mamba3F32Replay<'a> {
 /// ```
 pub struct GpuMamba3F32TrainingStepGraph {
     graph: CudaGraph,
-    ctx_resources: Arc<crate::mamba_ssm::gpu::context::GpuCtxResources>,
+    ctx_resources: Rc<crate::mamba_ssm::gpu::context::GpuCtxResources>,
     _m3_modules: crate::mamba_ssm::gpu::kernels::CudaModuleAnchors,
     pub batch: usize,
     pub seq_len: usize,

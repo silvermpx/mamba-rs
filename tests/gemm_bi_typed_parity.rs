@@ -728,13 +728,19 @@ impl F32Subview {
     }
 }
 
+fn tc_nn_operands(dtype: WeightDtype, c: u64, a: u64, b: u64) -> gemm_bi_triad::TcFwdOperands {
+    gemm_bi_triad::TcFwdOperands {
+        y: TypedPtr { ptr: c, dtype },
+        x: TypedPtr { ptr: a, dtype },
+        w: TypedPtr { ptr: b, dtype },
+        bias_ptr: 0,
+    }
+}
+
 fn launch_tc_nn(
     t: &Ctx,
     schedule: NnSchedule,
-    dtype: WeightDtype,
-    c: u64,
-    a: u64,
-    b: u64,
+    operands: &gemm_bi_triad::TcFwdOperands,
     dims: (usize, usize, usize),
     strides: (usize, usize, usize),
     beta: f32,
@@ -755,16 +761,15 @@ fn launch_tc_nn(
         block_dim: (threads, 1, 1),
         shared_mem_bytes,
     };
-    let bias = 0u64;
     let alpha = 1.0f32;
     let (m, n, k, lda, ldb, ldc) = (
         m as i32, n as i32, k as i32, lda as i32, ldb as i32, ldc as i32,
     );
-    let mut launch = t.ctx.stream.launch_builder(function.get(dtype));
-    launch.arg(&c);
-    launch.arg(&a);
-    launch.arg(&b);
-    launch.arg(&bias);
+    let mut launch = t.ctx.stream.launch_builder(function.get(operands.y.dtype));
+    launch.arg(&operands.y.ptr);
+    launch.arg(&operands.x.ptr);
+    launch.arg(&operands.w.ptr);
+    launch.arg(&operands.bias_ptr);
     launch.arg(&alpha);
     launch.arg(&beta);
     launch.arg(&m);
@@ -890,10 +895,7 @@ fn tc128_packed_epilogues_match_scalar_fallback_bytes() {
         launch_tc_nn(
             &t,
             NnSchedule::Tile128,
-            dtype,
-            nn_aligned.ptr(),
-            nn_a.ptr(),
-            nn_b.ptr(),
+            &tc_nn_operands(dtype, nn_aligned.ptr(), nn_a.ptr(), nn_b.ptr()),
             nn_dims,
             nn_strides,
             0.0,
@@ -909,10 +911,7 @@ fn tc128_packed_epilogues_match_scalar_fallback_bytes() {
                 launch_tc_nn(
                     &t,
                     NnSchedule::Tile128,
-                    dtype,
-                    nn_scalar.ptr(),
-                    nn_a.ptr(),
-                    nn_b.ptr(),
+                    &tc_nn_operands(dtype, nn_scalar.ptr(), nn_a.ptr(), nn_b.ptr()),
                     nn_dims,
                     (nn_strides.0, nn_strides.1, ldc),
                     0.0,
@@ -941,10 +940,7 @@ fn tc128_packed_epilogues_match_scalar_fallback_bytes() {
         launch_tc_nn(
             &t,
             NnSchedule::Tile128,
-            dtype,
-            nn_beta_aligned.ptr(),
-            nn_a.ptr(),
-            nn_b.ptr(),
+            &tc_nn_operands(dtype, nn_beta_aligned.ptr(), nn_a.ptr(), nn_b.ptr()),
             nn_dims,
             nn_strides,
             0.5,
@@ -965,10 +961,7 @@ fn tc128_packed_epilogues_match_scalar_fallback_bytes() {
             launch_tc_nn(
                 &t,
                 NnSchedule::Tile128,
-                dtype,
-                nn_beta_scalar.ptr(),
-                nn_a.ptr(),
-                nn_b.ptr(),
+                &tc_nn_operands(dtype, nn_beta_scalar.ptr(), nn_a.ptr(), nn_b.ptr()),
                 nn_dims,
                 nn_strides,
                 0.5,
@@ -1165,10 +1158,7 @@ fn tc_cp_async_misaligned_operands_match_scalar_stage_bytes() {
             launch_tc_nn(
                 &t,
                 schedule,
-                dtype,
-                c_reference.ptr(),
-                a_aligned.ptr(),
-                b_aligned.ptr(),
+                &tc_nn_operands(dtype, c_reference.ptr(), a_aligned.ptr(), b_aligned.ptr()),
                 dims,
                 strides,
                 0.0,
@@ -1182,8 +1172,15 @@ fn tc_cp_async_misaligned_operands_match_scalar_stage_bytes() {
                 let c = TypedSubview::new(&t, &zero, dims.0, dims.2, strides.2, 0, dtype);
                 for repeat in 0..TC_REPEATS {
                     c.upload_logical(&t, &zero);
-                    launch_tc_nn(&t, schedule, dtype, c.ptr(), a.ptr(), b.ptr(), dims, strides, 0.0)
-                        .unwrap_or_else(|error| panic!(
+                    launch_tc_nn(
+                        &t,
+                        schedule,
+                        &tc_nn_operands(dtype, c.ptr(), a.ptr(), b.ptr()),
+                        dims,
+                        strides,
+                        0.0,
+                    )
+                    .unwrap_or_else(|error| panic!(
                             "{dtype:?} {schedule:?} A+{a_offset} B+{b_offset} repeat={repeat}: {error}"
                         ));
                     assert_exact(

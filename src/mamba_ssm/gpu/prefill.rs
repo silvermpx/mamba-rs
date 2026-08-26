@@ -28,7 +28,7 @@ use super::inference::GpuInferenceState;
 use super::launch::{grid_1d, grid_norm, grid_parallel_scan};
 use super::weights::{MambaLayerWeightsView, MambaWeightsView};
 use cudarc::driver::PushKernelArg;
-use std::sync::Arc;
+use std::rc::Rc;
 
 fn layer_bulk_dtype<W: MambaWeightsView>(weights: &W) -> Result<WeightDtype, String> {
     let mut half_dtype = None;
@@ -328,13 +328,18 @@ pub fn gpu_forward_inference_prefill_pooled_sum_from_raw<W: MambaWeightsView>(
 /// - the complete GEMM route is snapshotted and checked before launch.
 pub struct PrefillPooledGraph {
     graph: cudarc::driver::CudaGraph,
-    ctx_resources: Arc<crate::mamba_ssm::gpu::context::GpuCtxResources>,
+    ctx_resources: Rc<crate::mamba_ssm::gpu::context::GpuCtxResources>,
     flags_at_capture: crate::mamba_ssm::gpu::context::GemmRoute,
     captured_ctx_token: u64,
     captured_stream_token: usize,
     captured_half_staging_ptr: u64,
     captured_bi_upcast_ptrs: [u64; 3],
     guards_graph_scratch: bool,
+    // Buffer identity at capture: the graph baked these device pointers
+    // in, so a launch against reallocated buffers must refuse instead of
+    // silently writing the old allocations (the ABA class).
+    input_ptr: cudarc::driver::sys::CUdeviceptr,
+    pooled_ptr: cudarc::driver::sys::CUdeviceptr,
 }
 
 impl PrefillPooledGraph {
@@ -361,6 +366,8 @@ impl PrefillPooledGraph {
             weights,
             a_neg_all,
         } = inputs;
+        let input_ptr = input_flat.cached_ptr();
+        let pooled_ptr = pooled_sum.cached_ptr();
         let bulk_dtype = layer_bulk_dtype(weights)?;
         ctx.presize_mixed_graph_scratch_m1(&scratch.dims, bulk_dtype)?;
         if bulk_dtype != WeightDtype::F32 {
@@ -392,14 +399,23 @@ impl PrefillPooledGraph {
             captured_half_staging_ptr: ctx.half_staging_ptr(),
             captured_bi_upcast_ptrs: ctx.bi_upcast_scratch_ptrs(),
             guards_graph_scratch: bulk_dtype != WeightDtype::F32,
+            input_ptr,
+            pooled_ptr,
         })
     }
 
     /// Replay the captured page. The caller uploads the page into the
     /// capture-time `input_flat` buffer before, and downloads the
     /// capture-time `pooled_sum` buffer after (both transfers stay OUTSIDE
-    /// the graph).
-    pub fn launch(&self, ctx: &GpuCtx) -> Result<(), String> {
+    /// the graph). The buffers handed here must be the captured allocations:
+    /// the graph launches into the captured pointers, so a swapped buffer
+    /// would otherwise be silently ignored.
+    pub fn launch(
+        &self,
+        ctx: &GpuCtx,
+        input_flat: &GpuBuffer,
+        pooled_sum: &GpuBuffer,
+    ) -> Result<(), String> {
         if ctx.instance_token() != self.captured_ctx_token {
             return Err(
                 "PrefillPooledGraph: GpuCtx differs from capture; re-capture instead".into(),
@@ -413,7 +429,7 @@ impl PrefillPooledGraph {
         let now = ctx.gemm_route();
         if now != self.flags_at_capture {
             return Err(format!(
-                "PrefillPooledGraph: GEMM route changed since capture \
+                "PrefillPooledGraph: GEMM flags changed as part of the complete route \
                  ({:?} -> {now:?}) — the captured kernels belong to the old \
                  route",
                 self.flags_at_capture
@@ -425,6 +441,11 @@ impl PrefillPooledGraph {
                 self.captured_bi_upcast_ptrs,
                 "PrefillPooledGraph replay",
             )?;
+        }
+        if input_flat.cached_ptr() != self.input_ptr || pooled_sum.cached_ptr() != self.pooled_ptr {
+            return Err("PrefillPooledGraph: input/pooled buffers differ from the \
+                 captured allocations - the graph would write the old ones"
+                .to_string());
         }
         self.graph
             .launch()
@@ -774,14 +795,14 @@ fn check_output_lens(
             b * dm
         ));
     }
-    if let Some(full) = full_temporal {
-        if full.len() != b * t * dm {
-            return Err(format!(
-                "prefill outputs: full_temporal len {} != batch*seq_len*d_model = {}",
-                full.len(),
-                b * t * dm
-            ));
-        }
+    if let Some(full) = full_temporal
+        && full.len() != b * t * dm
+    {
+        return Err(format!(
+            "prefill outputs: full_temporal len {} != batch*seq_len*d_model = {}",
+            full.len(),
+            b * t * dm
+        ));
     }
     Ok(())
 }

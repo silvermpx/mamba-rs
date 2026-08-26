@@ -8,6 +8,7 @@ use super::dtype::WeightDtype;
 use super::kernels::MambaKernels;
 use crate::config::MambaConfig;
 use std::cell::RefCell;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -93,7 +94,7 @@ pub struct GpuCtxResources {
 /// # }
 /// ```
 pub struct GpuCtx {
-    resources: Arc<GpuCtxResources>,
+    resources: Rc<GpuCtxResources>,
     /// Opt-in flag for the batch-invariant matvec path (`matvec_bi_*`).
     /// Default: `false` → cuBLAS gemv (faster, but M=1/M=N may differ at
     /// sub-ULP scale). Set via `set_batch_invariant(true)` or the
@@ -245,7 +246,7 @@ impl GpuCtx {
         let instance_token = next_gpu_ctx_token()?;
         let kernels = Arc::new(kernels);
         Ok(Self {
-            resources: Arc::new(GpuCtxResources {
+            resources: Rc::new(GpuCtxResources {
                 stream,
                 kernels,
                 blas,
@@ -269,7 +270,7 @@ impl GpuCtx {
         })
     }
 
-    pub(crate) fn resource_anchor(&self) -> Arc<GpuCtxResources> {
+    pub(crate) fn resource_anchor(&self) -> Rc<GpuCtxResources> {
         self.resources.clone()
     }
 
@@ -640,8 +641,8 @@ impl GpuCtx {
         self.state_cap
     }
 
-    /// Presize the batch-invariant GEMM scratch buffers (Split-K partials
-    /// + W-transpose staging) OUTSIDE any CUDA graph capture. cudarc's
+    /// Presize the batch-invariant GEMM scratch buffers, including Split-K
+    /// partials and W-transpose staging, OUTSIDE any CUDA graph capture. cudarc's
     /// alloc is cuMemAllocAsync where the device has memory pools, so a
     /// first-use allocation on a CAPTURING stream becomes a graph memory
     /// node - legal, silent, and the OnceLock then caches a graph-owned

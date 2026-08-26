@@ -278,7 +278,7 @@ fn typed_pooled_graph_replay_and_container_guard() {
 
     // Negative first: a replay against the OTHER container must refuse.
     let err = graph
-        .replay(&ctx, &fw, &gpu_input, &states.bufs(), &pooled)
+        .replay(&ctx, &kernels, &fw, &gpu_input, &states.bufs(), &pooled)
         .unwrap_err();
     assert!(
         err.contains("weights container"),
@@ -289,7 +289,7 @@ fn typed_pooled_graph_replay_and_container_guard() {
     let page2 = det_input(seq_len * input_dim, 6);
     gpu_input.upload(&ctx.stream, &page2).unwrap();
     graph
-        .replay(&ctx, &mw, &gpu_input, &states.bufs(), &pooled)
+        .replay(&ctx, &kernels, &mw, &gpu_input, &states.bufs(), &pooled)
         .unwrap();
     ctx.stream.synchronize().unwrap();
     let mut pooled_graph = vec![0.0f32; dm];

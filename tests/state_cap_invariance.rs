@@ -14,6 +14,8 @@ use mamba_rs::mamba_ssm::gpu::context::GpuCtx;
 use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
 use mamba_rs::mamba_ssm::gpu::launch::grid_1d;
 
+type SequentialFamilyOutputs = (Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>);
+
 fn det(n: usize, seed: u32, scale: f32) -> Vec<f32> {
     let mut s = seed;
     (0..n)
@@ -74,7 +76,7 @@ fn sequential_family_is_state_cap_invariant() {
     let sb = det(b * ds, 23, 0.5);
     let sc = det(b * ds, 24, 0.5);
 
-    let mut reference: Option<(Vec<f32>, Vec<f32>, Vec<f32>, Vec<f32>)> = None;
+    let mut reference: Option<SequentialFamilyOutputs> = None;
     for cap in [16usize, 64, 256] {
         let ctx = GpuCtx::new_with_state_cap(&device, cap).unwrap();
         let k = &ctx.kernels;

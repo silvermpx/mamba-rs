@@ -879,10 +879,10 @@ fn diag_fold_slim_vs_full_positions() {
     let mut worst: Vec<(f32, usize, usize, usize)> = Vec::new();
     for n in 0..ds {
         for gr in 0..groups {
-            for tt in 0..t {
+            for (tt, error_sum) in per_t.iter_mut().enumerate() {
                 let idx = ((n) * groups + gr) * t + tt;
                 let e = (full[idx] - slim[idx]).abs();
-                per_t[tt] += e;
+                *error_sum += e;
                 worst.push((e, tt, n, gr));
             }
         }
@@ -896,7 +896,7 @@ fn diag_fold_slim_vs_full_positions() {
     eprintln!(
         "t positions with error: {} of {t}; first {:?} last {:?}",
         t_nonzero.len(),
-        &t_nonzero.iter().take(8).collect::<Vec<_>>(),
-        &t_nonzero.iter().rev().take(8).collect::<Vec<_>>()
+        t_nonzero.iter().take(8).collect::<Vec<_>>(),
+        t_nonzero.iter().rev().take(8).collect::<Vec<_>>()
     );
 }

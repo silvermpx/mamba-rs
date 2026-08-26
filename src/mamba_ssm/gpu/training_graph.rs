@@ -45,7 +45,7 @@
 //! 2.5, `torch/cuda/graphs.py` and `_multi_tensor_adamw`).
 
 use cudarc::driver::{CudaGraph, PushKernelArg};
-use std::sync::Arc;
+use std::rc::Rc;
 
 use crate::mamba_ssm::gpu::adamw::{AdamWBiasFactors, AdamWMultiPlan, GpuAdamW, step_multi};
 use crate::mamba_ssm::gpu::backward::gpu_backward_mamba_backbone;
@@ -149,7 +149,7 @@ pub struct MambaMixedReplay<'a> {
 /// ```
 pub struct GpuMambaTrainingStepGraph {
     graph: CudaGraph,
-    ctx_resources: Arc<crate::mamba_ssm::gpu::context::GpuCtxResources>,
+    ctx_resources: Rc<crate::mamba_ssm::gpu::context::GpuCtxResources>,
     pub batch: usize,
     pub seq_len: usize,
     pub dtype: WeightDtype,
@@ -567,7 +567,7 @@ pub struct MambaF32Replay<'a> {
 /// ```
 pub struct GpuMambaF32TrainingStepGraph {
     graph: CudaGraph,
-    ctx_resources: Arc<crate::mamba_ssm::gpu::context::GpuCtxResources>,
+    ctx_resources: Rc<crate::mamba_ssm::gpu::context::GpuCtxResources>,
     pub batch: usize,
     pub seq_len: usize,
 

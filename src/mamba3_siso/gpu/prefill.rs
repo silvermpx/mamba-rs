@@ -31,6 +31,7 @@ use crate::mamba_ssm::gpu::context::GpuCtx;
 use crate::mamba_ssm::gpu::dtype::WeightDtype;
 use crate::mamba_ssm::gpu::launch::{grid_1d, grid_norm};
 use cudarc::driver::PushKernelArg;
+use std::rc::Rc;
 use std::sync::Arc;
 
 /// Chunk-pipeline intermediates the prefill needs beyond the no-save layer
@@ -673,53 +674,6 @@ impl Mamba3Prefill {
                     .map_err(|e| format!("prefill adt L{l}: {e:?}"))?;
             }
             {
-                let cfg = cudarc::driver::LaunchConfig {
-                    grid_dim: ((dims.batch * nc) as u32, nh as u32, 1),
-                    block_dim: (dims.chunk_size() as u32, 1, 1),
-                    shared_mem_bytes: 0,
-                };
-                if let Some(ts) = typed.as_deref_mut() {
-                    let ks = ts.k_scaled.cached_ptr();
-                    let kp = ts.k.cached_ptr();
-                    let qp = ts.q.cached_ptr();
-                    let mut b = ctx
-                        .stream
-                        .launch_builder(m3k.m3_preprocess_chunks_typed.get(dtype));
-                    b.arg(&ks);
-                    b.arg(ck.qk_dot.inner_mut());
-                    b.arg(ck.scale.inner_mut());
-                    b.arg(ck.gamma_pre.inner_mut());
-                    b.arg(&kp);
-                    b.arg(&qp);
-                    b.arg(tgt.dt.inner());
-                    b.arg(tgt.trap.inner());
-                    b.arg(&b_i);
-                    b.arg(&t_i);
-                    b.arg(&nh_i);
-                    b.arg(&ds_i);
-                    b.arg(&cs);
-                    unsafe { b.launch(cfg) }
-                        .map_err(|e| format!("prefill preprocess typed L{l}: {e:?}"))?;
-                } else {
-                    let mut b = ctx.stream.launch_builder(&m3k.m3_preprocess_chunks);
-                    b.arg(ck.k_scaled.inner_mut());
-                    b.arg(ck.qk_dot.inner_mut());
-                    b.arg(ck.scale.inner_mut());
-                    b.arg(ck.gamma_pre.inner_mut());
-                    b.arg(tgt.k.inner());
-                    b.arg(tgt.q.inner());
-                    b.arg(tgt.dt.inner());
-                    b.arg(tgt.trap.inner());
-                    b.arg(&b_i);
-                    b.arg(&t_i);
-                    b.arg(&nh_i);
-                    b.arg(&ds_i);
-                    b.arg(&cs);
-                    unsafe { b.launch(cfg) }
-                        .map_err(|e| format!("prefill preprocess L{l}: {e:?}"))?;
-                }
-            }
-            {
                 let block_x = nh.min(256) as u32;
                 let grid_z = nh.div_ceil(block_x as usize) as u32;
                 let cfg = cudarc::driver::LaunchConfig {
@@ -736,35 +690,30 @@ impl Mamba3Prefill {
                 b.arg(&cs);
                 unsafe { b.launch(cfg) }.map_err(|e| format!("prefill da_cumsum L{l}: {e:?}"))?;
             }
+            // Fused preprocess + chunk_state when the shape allows: K_scaled
+            // crosses the seam through shared memory instead of L2. The
+            // dA_cumsum launch moved ahead of it (it depends only on adt).
+            if let Some(fcfg) =
+                super::kernels::chunk_fused_cfg(dims.batch, nc, nh, hd, ds, dims.chunk_size())
             {
-                let cfg = cudarc::driver::LaunchConfig {
-                    grid_dim: ((dims.batch * nc) as u32, nh.div_ceil(2) as u32, 1),
-                    block_dim: (hd as u32, 2, 1),
-                    shared_mem_bytes: 0,
-                };
                 if let Some(ts) = typed.as_deref_mut() {
-                    let xp = ts.x.cached_ptr();
                     let ks = ts.k_scaled.cached_ptr();
+                    let kp = ts.k.cached_ptr();
+                    let qp = ts.q.cached_ptr();
+                    let xp = ts.x.cached_ptr();
                     let mut b = ctx
                         .stream
-                        .launch_builder(m3k.m3_chunk_state_fwd_typed.get(dtype));
-                    b.arg(ck.chunk_states.inner_mut());
-                    b.arg(&xp);
+                        .launch_builder(m3k.m3_chunk_pre_state_fused_typed.get(dtype));
                     b.arg(&ks);
-                    b.arg(ck.da_cumsum.inner());
-                    b.arg(&b_i);
-                    b.arg(&t_i);
-                    b.arg(&nh_i);
-                    b.arg(&hd_i);
-                    b.arg(&ds_i);
-                    b.arg(&cs);
-                    unsafe { b.launch(cfg) }
-                        .map_err(|e| format!("prefill chunk_state typed L{l}: {e:?}"))?;
-                } else {
-                    let mut b = ctx.stream.launch_builder(&m3k.m3_chunk_state_fwd);
+                    b.arg(ck.qk_dot.inner_mut());
+                    b.arg(ck.scale.inner_mut());
+                    b.arg(ck.gamma_pre.inner_mut());
                     b.arg(ck.chunk_states.inner_mut());
-                    b.arg(tgt.x.inner());
-                    b.arg(ck.k_scaled.inner());
+                    b.arg(&kp);
+                    b.arg(&qp);
+                    b.arg(tgt.dt.inner());
+                    b.arg(tgt.trap.inner());
+                    b.arg(&xp);
                     b.arg(ck.da_cumsum.inner());
                     b.arg(&b_i);
                     b.arg(&t_i);
@@ -772,8 +721,122 @@ impl Mamba3Prefill {
                     b.arg(&hd_i);
                     b.arg(&ds_i);
                     b.arg(&cs);
-                    unsafe { b.launch(cfg) }
-                        .map_err(|e| format!("prefill chunk_state L{l}: {e:?}"))?;
+                    unsafe { b.launch(fcfg) }
+                        .map_err(|e| format!("prefill fused pre+state typed L{l}: {e:?}"))?;
+                } else {
+                    let mut b = ctx
+                        .stream
+                        .launch_builder(&m3k.m3_chunk_pre_state_fused_typed.f32);
+                    b.arg(ck.k_scaled.inner_mut());
+                    b.arg(ck.qk_dot.inner_mut());
+                    b.arg(ck.scale.inner_mut());
+                    b.arg(ck.gamma_pre.inner_mut());
+                    b.arg(ck.chunk_states.inner_mut());
+                    b.arg(tgt.k.inner());
+                    b.arg(tgt.q.inner());
+                    b.arg(tgt.dt.inner());
+                    b.arg(tgt.trap.inner());
+                    b.arg(tgt.x.inner());
+                    b.arg(ck.da_cumsum.inner());
+                    b.arg(&b_i);
+                    b.arg(&t_i);
+                    b.arg(&nh_i);
+                    b.arg(&hd_i);
+                    b.arg(&ds_i);
+                    b.arg(&cs);
+                    unsafe { b.launch(fcfg) }
+                        .map_err(|e| format!("prefill fused pre+state L{l}: {e:?}"))?;
+                }
+            } else {
+                {
+                    let cfg = cudarc::driver::LaunchConfig {
+                        grid_dim: ((dims.batch * nc) as u32, nh as u32, 1),
+                        block_dim: (dims.chunk_size() as u32, 1, 1),
+                        shared_mem_bytes: 0,
+                    };
+                    if let Some(ts) = typed.as_deref_mut() {
+                        let ks = ts.k_scaled.cached_ptr();
+                        let kp = ts.k.cached_ptr();
+                        let qp = ts.q.cached_ptr();
+                        let mut b = ctx
+                            .stream
+                            .launch_builder(m3k.m3_preprocess_chunks_typed.get(dtype));
+                        b.arg(&ks);
+                        b.arg(ck.qk_dot.inner_mut());
+                        b.arg(ck.scale.inner_mut());
+                        b.arg(ck.gamma_pre.inner_mut());
+                        b.arg(&kp);
+                        b.arg(&qp);
+                        b.arg(tgt.dt.inner());
+                        b.arg(tgt.trap.inner());
+                        b.arg(&b_i);
+                        b.arg(&t_i);
+                        b.arg(&nh_i);
+                        b.arg(&ds_i);
+                        b.arg(&cs);
+                        unsafe { b.launch(cfg) }
+                            .map_err(|e| format!("prefill preprocess typed L{l}: {e:?}"))?;
+                    } else {
+                        let mut b = ctx.stream.launch_builder(&m3k.m3_preprocess_chunks);
+                        b.arg(ck.k_scaled.inner_mut());
+                        b.arg(ck.qk_dot.inner_mut());
+                        b.arg(ck.scale.inner_mut());
+                        b.arg(ck.gamma_pre.inner_mut());
+                        b.arg(tgt.k.inner());
+                        b.arg(tgt.q.inner());
+                        b.arg(tgt.dt.inner());
+                        b.arg(tgt.trap.inner());
+                        b.arg(&b_i);
+                        b.arg(&t_i);
+                        b.arg(&nh_i);
+                        b.arg(&ds_i);
+                        b.arg(&cs);
+                        unsafe { b.launch(cfg) }
+                            .map_err(|e| format!("prefill preprocess L{l}: {e:?}"))?;
+                    }
+                }
+                {
+                    let cfg = super::kernels::chunk_state_cfg(
+                        dims.batch,
+                        nc,
+                        nh,
+                        hd,
+                        ds,
+                        dims.chunk_size(),
+                    );
+                    if let Some(ts) = typed.as_deref_mut() {
+                        let xp = ts.x.cached_ptr();
+                        let ks = ts.k_scaled.cached_ptr();
+                        let mut b = ctx
+                            .stream
+                            .launch_builder(m3k.m3_chunk_state_fwd_typed.get(dtype));
+                        b.arg(ck.chunk_states.inner_mut());
+                        b.arg(&xp);
+                        b.arg(&ks);
+                        b.arg(ck.da_cumsum.inner());
+                        b.arg(&b_i);
+                        b.arg(&t_i);
+                        b.arg(&nh_i);
+                        b.arg(&hd_i);
+                        b.arg(&ds_i);
+                        b.arg(&cs);
+                        unsafe { b.launch(cfg) }
+                            .map_err(|e| format!("prefill chunk_state typed L{l}: {e:?}"))?;
+                    } else {
+                        let mut b = ctx.stream.launch_builder(&m3k.m3_chunk_state_fwd);
+                        b.arg(ck.chunk_states.inner_mut());
+                        b.arg(tgt.x.inner());
+                        b.arg(ck.k_scaled.inner());
+                        b.arg(ck.da_cumsum.inner());
+                        b.arg(&b_i);
+                        b.arg(&t_i);
+                        b.arg(&nh_i);
+                        b.arg(&hd_i);
+                        b.arg(&ds_i);
+                        b.arg(&cs);
+                        unsafe { b.launch(cfg) }
+                            .map_err(|e| format!("prefill chunk_state L{l}: {e:?}"))?;
+                    }
                 }
             }
             // Entering state: continued windows seed the inter-chunk scan
@@ -1152,8 +1215,9 @@ impl Mamba3Prefill {
 /// A captured CUDA graph of one prefill window over fixed buffers. Replay
 /// requires the complete GEMM route captured with the graph.
 pub struct Mamba3PrefillGraph {
+    module_identity: String,
     graph: cudarc::driver::CudaGraph,
-    ctx_resources: Arc<crate::mamba_ssm::gpu::context::GpuCtxResources>,
+    ctx_resources: Rc<crate::mamba_ssm::gpu::context::GpuCtxResources>,
     _m3_modules: crate::mamba_ssm::gpu::kernels::CudaModuleAnchors,
     flags_at_capture: crate::mamba_ssm::gpu::context::GemmRoute,
     captured_ctx_token: u64,
@@ -1197,6 +1261,7 @@ impl Mamba3PrefillGraph {
         let last_hidden_ptr = last_hidden.cached_ptr();
         let weights_arenas = run.weights.arena_identity();
         let weights_dtype = run.weights.bulk_dtype();
+        let module_identity = run.kernels.module_identity.clone();
         if weights_dtype != WeightDtype::F32 {
             run.ctx.freeze_graph_scratch();
         }
@@ -1226,6 +1291,7 @@ impl Mamba3PrefillGraph {
             last_hidden_ptr,
             weights_arenas,
             weights_dtype,
+            module_identity,
         })
     }
 
@@ -1237,6 +1303,7 @@ impl Mamba3PrefillGraph {
     pub fn replay(
         &self,
         ctx: &GpuCtx,
+        kernels: &Mamba3Kernels,
         weights: &dyn Mamba3WeightsView,
         mamba_input: &GpuBuffer,
         states: &GpuMamba3StateBufs<'_>,
@@ -1253,6 +1320,13 @@ impl Mamba3PrefillGraph {
                 "prefill graph replay refused: GpuCtx stream differs from capture; \
                  re-capture instead"
                     .into(),
+            );
+        }
+        if kernels.module_identity != self.module_identity {
+            return Err(
+                "prefill graph replay refused: the kernels module differs from \
+                 the captured compile - the graph would run stale kernels"
+                    .to_string(),
             );
         }
         if weights.arena_identity() != self.weights_arenas
@@ -1313,8 +1387,9 @@ impl Drop for Mamba3PrefillGraph {
 /// input buffer, replay, download the 1.5 KB pooled sum, divide by T on
 /// the host.
 pub struct Mamba3PrefillPooledGraph {
+    module_identity: String,
     graph: cudarc::driver::CudaGraph,
-    ctx_resources: Arc<crate::mamba_ssm::gpu::context::GpuCtxResources>,
+    ctx_resources: Rc<crate::mamba_ssm::gpu::context::GpuCtxResources>,
     _m3_modules: crate::mamba_ssm::gpu::kernels::CudaModuleAnchors,
     flags_at_capture: crate::mamba_ssm::gpu::context::GemmRoute,
     captured_ctx_token: u64,
@@ -1367,6 +1442,7 @@ impl Mamba3PrefillPooledGraph {
         let pooled_ptr = pooled_sum.cached_ptr();
         let weights_arenas = run.weights.arena_identity();
         let weights_dtype = run.weights.bulk_dtype();
+        let module_identity = run.kernels.module_identity.clone();
         if weights_dtype != WeightDtype::F32 {
             run.ctx.freeze_graph_scratch();
         }
@@ -1404,6 +1480,7 @@ impl Mamba3PrefillPooledGraph {
             pooled_ptr,
             weights_arenas,
             weights_dtype,
+            module_identity,
         })
     }
 
@@ -1411,6 +1488,7 @@ impl Mamba3PrefillPooledGraph {
     pub fn replay(
         &self,
         ctx: &GpuCtx,
+        kernels: &Mamba3Kernels,
         weights: &dyn Mamba3WeightsView,
         mamba_input: &GpuBuffer,
         states: &GpuMamba3StateBufs<'_>,
@@ -1428,6 +1506,13 @@ impl Mamba3PrefillPooledGraph {
                 "m3 pooled prefill graph replay refused: GpuCtx stream differs from capture; \
                  re-capture instead"
                     .into(),
+            );
+        }
+        if kernels.module_identity != self.module_identity {
+            return Err(
+                "m3 pooled graph replay refused: the kernels module differs \
+                  from the captured compile"
+                    .to_string(),
             );
         }
         if weights.arena_identity() != self.weights_arenas

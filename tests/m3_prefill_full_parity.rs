@@ -215,6 +215,7 @@ fn m3_prefill_full_matches_trainer_forward() {
     let error = graph
         .replay(
             &other_ctx,
+            &kernels,
             &gw,
             &gpu_input,
             &GpuMamba3StateBufs {
@@ -230,6 +231,7 @@ fn m3_prefill_full_matches_trainer_forward() {
     graph
         .replay(
             &ctx,
+            &kernels,
             &gw,
             &gpu_input,
             &GpuMamba3StateBufs {

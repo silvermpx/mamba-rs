@@ -400,13 +400,20 @@ fn gpu_prefill_graph_replay_is_bitwise() {
     let other_ctx = GpuCtx::new(&other_device).unwrap();
     let bufs = states.bufs();
     let error = graph
-        .replay(&other_ctx, &gw, &gpu_input, &bufs, &last_hidden)
+        .replay(
+            &other_ctx,
+            &rig.kernels,
+            &gw,
+            &gpu_input,
+            &bufs,
+            &last_hidden,
+        )
         .expect_err("replay must reject a different GpuCtx");
     assert!(error.contains("GpuCtx differs from capture"));
     let replay = |states: &mut GpuStates| {
         let bufs = states.bufs();
         graph
-            .replay(&rig.ctx, &gw, &gpu_input, &bufs, &last_hidden)
+            .replay(&rig.ctx, &rig.kernels, &gw, &gpu_input, &bufs, &last_hidden)
             .unwrap();
     };
     replay(&mut states);
