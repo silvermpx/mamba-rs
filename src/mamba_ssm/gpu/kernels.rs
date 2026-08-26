@@ -1,7 +1,7 @@
 //! Compile and register CUDA kernels for Mamba SSM.
 //!
-//! Uses NVRTC to compile .cu source to native CUBIN at runtime.
-//! No pre-built PTX or binaries required.
+//! Uses NVRTC to compile `.cu` source to PTX. The CUDA Driver JIT loads the
+//! PTX for the active device; no pre-built binary is required.
 
 use super::dtype::WeightDtype;
 use cudarc::driver::{CudaContext, CudaFunction, CudaModule};
@@ -476,24 +476,23 @@ pub(crate) fn nvrtc_version() -> (i32, i32) {
     }
 }
 
-/// Kernel-cache directory. `MAMBA_RS_KERNEL_CACHE` overrides (a path, or
-/// `0`/`off` to disable); default is `$HOME/.cache/mamba-rs/kernels`,
-/// falling back to the system temp dir when HOME is absent (systemd units
-/// without a HOME — exactly the environment that motivated the cache).
+/// Kernel-cache directory. `MAMBA_RS_KERNEL_CACHE` overrides with a path,
+/// or `0`/`off` disables it. An untrusted directory disables the cache.
 pub(crate) fn kernel_cache_dir() -> Option<std::path::PathBuf> {
-    match std::env::var("MAMBA_RS_KERNEL_CACHE") {
+    let path = match std::env::var("MAMBA_RS_KERNEL_CACHE") {
         Ok(v) if matches!(v.trim(), "0" | "off" | "OFF") => None,
         Ok(v) if !v.trim().is_empty() => Some(std::path::PathBuf::from(v.trim())),
         _ => {
             let base = std::env::var("XDG_CACHE_HOME")
                 .map(std::path::PathBuf::from)
                 .or_else(|_| {
-                    std::env::var("HOME").map(|h| std::path::PathBuf::from(h).join(".cache"))
+                    std::env::var("HOME").map(|home| std::path::PathBuf::from(home).join(".cache"))
                 })
-                .unwrap_or_else(|_| std::env::temp_dir());
+                .ok()?;
             Some(base.join("mamba-rs").join("kernels"))
         }
-    }
+    }?;
+    super::kernel_identity::prepare_private_cache_dir(&path)
 }
 
 /// 128-bit content key as hex: two FNV-1a-64 passes with distinct offset
@@ -672,8 +671,6 @@ impl MambaKernels {
                 && let Ok(module) = ctx.load_module(cudarc::nvrtc::Ptx::from_src(src))
             {
                 loaded = Some((module, hit.artifact_digest));
-            } else {
-                let _ = std::fs::remove_file(path);
             }
         }
         let (module, artifact_digest) = match loaded {
@@ -688,7 +685,20 @@ impl MambaKernels {
                         format!("{e:?}").replace("\\n", "\n")
                     )
                 })?;
-                let ptx_source = super::kernel_identity::canonical_ptx_from_string(ptx.to_src())?;
+                let ptx_image = ptx
+                    .as_bytes()
+                    .ok_or_else(|| "NVRTC returned PTX without a raw image".to_string())?;
+                let ptx_source = super::kernel_identity::canonical_ptx_image(ptx_image)?;
+                if !super::kernel_identity::header_manifest_is_current(
+                    combined.as_bytes(),
+                    &include_paths,
+                    &header_manifest,
+                ) {
+                    return Err(
+                        "CUDA headers changed during NVRTC compilation; retry initialization"
+                            .into(),
+                    );
+                }
                 let artifact_digest =
                     super::kernel_identity::FramedSha256::bytes(ptx_source.as_bytes());
                 if let (Some(path), Some(key)) = (&cache_path, cache_key) {

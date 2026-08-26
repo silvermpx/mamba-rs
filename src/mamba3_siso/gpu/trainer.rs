@@ -854,6 +854,7 @@ impl Mamba3TrainerMixed {
 
     /// Reset SSM / K / V / angle states to zero (keeps weights untouched).
     pub fn reset_state(&mut self) -> Result<(), String> {
+        self.split_forward_route = None;
         self.ssm_states.zero(&self.ctx.stream)?;
         self.k_states.zero(&self.ctx.stream)?;
         self.v_states.zero(&self.ctx.stream)?;
@@ -901,6 +902,8 @@ impl Mamba3TrainerMixed {
     }
 
     pub fn step(&mut self, input: &[f32], d_temporal: &[f32]) -> Result<StepMetrics, String> {
+        // Every fused attempt abandons a pending split tape, even when it is rejected.
+        self.split_forward_route = None;
         assert_eq!(input.len(), self.mamba_input.len(), "input shape mismatch");
         assert_eq!(
             d_temporal.len(),
@@ -915,8 +918,6 @@ impl Mamba3TrainerMixed {
                     .into(),
             );
         }
-        self.split_forward_route = None;
-
         if matches!(self.dtype, WeightDtype::F16) {
             return self.step_f16(input, d_temporal);
         }
@@ -1708,6 +1709,7 @@ impl Mamba3TrainerF32 {
     }
 
     pub fn reset_state(&mut self) -> Result<(), String> {
+        self.split_forward_route = None;
         self.ssm_states.zero(&self.ctx.stream)?;
         self.k_states.zero(&self.ctx.stream)?;
         self.v_states.zero(&self.ctx.stream)?;
@@ -1747,6 +1749,8 @@ impl Mamba3TrainerF32 {
     }
 
     pub fn step(&mut self, input: &[f32], d_temporal: &[f32]) -> Result<StepMetrics, String> {
+        // Every fused attempt abandons a pending split tape, even when it is rejected.
+        self.split_forward_route = None;
         assert_eq!(input.len(), self.mamba_input.len(), "input shape mismatch");
         assert_eq!(
             d_temporal.len(),
@@ -1761,7 +1765,6 @@ impl Mamba3TrainerF32 {
                     .into(),
             );
         }
-        self.split_forward_route = None;
         self.mamba_input.upload(&self.ctx.stream, input)?;
         self.d_temporal.upload(&self.ctx.stream, d_temporal)?;
         let (step, bc1, bc2) = self.adam.advance();

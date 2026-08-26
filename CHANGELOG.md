@@ -2,6 +2,13 @@
 
 ## 0.6.9 (2026-08-26)
 
+### Changed
+
+- `GpuCtx::gemm_route` now returns the complete numeric route, including
+  backend contracts, compiler and artifact identities, and the target
+  device. Callers that only need the three policy flags can continue to
+  use the unchanged `GpuCtx::gemm_flags` compatibility accessor.
+
 ### Fixed
 
 - Build and release-pipeline fixes. No functional change: every route

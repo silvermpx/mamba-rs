@@ -218,17 +218,20 @@ fn m1_f32_training_graph_matches_eager() {
     let (_, bc1, bc2) = g_adam.advance();
     g_bias.write(&ctx.stream, bc1, bc2, 1e-4).unwrap();
     graph
-        .replay(&MambaF32Replay {
-            weights: &g_w,
-            adam: &g_adam,
-            bias: &g_bias,
-            grads: &g_grads,
-            temporal: &g_temp,
-            a_neg_all: &g_a_neg,
-            mamba_input: &g_input,
-            d_temporal: &g_dtemp,
-            state: &g_state,
-        })
+        .replay(
+            &ctx,
+            &MambaF32Replay {
+                weights: &g_w,
+                adam: &g_adam,
+                bias: &g_bias,
+                grads: &g_grads,
+                temporal: &g_temp,
+                a_neg_all: &g_a_neg,
+                mamba_input: &g_input,
+                d_temporal: &g_dtemp,
+                state: &g_state,
+            },
+        )
         .unwrap();
     ctx.stream.synchronize().unwrap();
     let after_graph = g_w.norm_f_weight.to_cpu(&ctx.stream).unwrap();
@@ -247,6 +250,25 @@ fn m1_f32_training_graph_matches_eager() {
     eprintln!("M1 f32 graph: max_err norm_f={max_norm_f:.3e} in_proj={max_in_proj:.3e}");
     assert!(max_norm_f < 1e-5);
     assert!(max_in_proj < 1e-5);
+
+    ctx.set_fast_gemm(true);
+    let error = graph
+        .replay(
+            &ctx,
+            &MambaF32Replay {
+                weights: &g_w,
+                adam: &g_adam,
+                bias: &g_bias,
+                grads: &g_grads,
+                temporal: &g_temp,
+                a_neg_all: &g_a_neg,
+                mamba_input: &g_input,
+                d_temporal: &g_dtemp,
+                state: &g_state,
+            },
+        )
+        .expect_err("public replay must reject route drift");
+    assert!(error.starts_with("f32 training_graph replay: GEMM route changed"));
 }
 
 #[test]

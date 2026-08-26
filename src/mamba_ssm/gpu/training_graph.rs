@@ -638,7 +638,9 @@ impl GpuMambaF32TrainingStepGraph {
         })
     }
 
-    pub fn replay(&self, rp: &MambaF32Replay<'_>) -> Result<(), String> {
+    pub fn replay(&self, ctx: &GpuCtx, rp: &MambaF32Replay<'_>) -> Result<(), String> {
+        self.captured_gemm_flags
+            .ensure_current(ctx.gemm_route(), "f32 training_graph replay")?;
         let MambaF32Replay {
             weights,
             adam,

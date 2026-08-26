@@ -473,6 +473,91 @@ fn split_rejects_gemm_route_change_f32() {
     assert_split_route_change_rejected(WeightDtype::F32);
 }
 
+fn assert_reset_closes_split_lifecycle(dtype: WeightDtype) {
+    let cfg = test_cfg();
+    let input_dim = cfg.d_model;
+    let (batch, seq_len) = (1usize, 4usize);
+    let mut w = MambaWeights::init(&cfg, input_dim, 0xA11C_E003);
+    if !matches!(dtype, WeightDtype::F32) {
+        w.input_proj_w.clear();
+        w.input_proj_b.clear();
+    }
+    let mut trainer = MambaTrainer::new_full(0, &w, cfg, session(batch, seq_len, input_dim), dtype)
+        .expect("trainer");
+    let input = det(batch * seq_len * input_dim, 0xA3, 0.05);
+    let d_temporal = det(batch * seq_len * cfg.d_model, 0xB3, 0.01);
+    let mut output = vec![0.0; batch * seq_len * cfg.d_model];
+
+    trainer.forward(&input, &mut output).expect("split forward");
+    trainer.reset_state().expect("reset state");
+    let error = trainer
+        .backward_step(&d_temporal, BackwardOpts::default())
+        .expect_err("reset_state must discard saved split activations");
+    assert!(
+        error.starts_with("backward_step() without a pending forward()"),
+        "unexpected lifecycle error: {error}"
+    );
+}
+
+#[test]
+fn reset_closes_split_lifecycle_bf16() {
+    assert_reset_closes_split_lifecycle(WeightDtype::Bf16);
+}
+
+#[test]
+fn reset_closes_split_lifecycle_f32() {
+    assert_reset_closes_split_lifecycle(WeightDtype::F32);
+}
+
+fn assert_failed_fused_step_closes_split_lifecycle(dtype: WeightDtype) {
+    let cfg = test_cfg();
+    let input_dim = cfg.d_model;
+    let (batch, seq_len) = (1usize, 4usize);
+    let mut w = MambaWeights::init(&cfg, input_dim, 0xA11C_E004);
+    if !matches!(dtype, WeightDtype::F32) {
+        w.input_proj_w.clear();
+        w.input_proj_b.clear();
+    }
+    let mut trainer = MambaTrainer::new_full(0, &w, cfg, session(batch, seq_len, input_dim), dtype)
+        .expect("trainer");
+    let input = det(batch * seq_len * input_dim, 0xA4, 0.05);
+    let d_temporal = det(batch * seq_len * cfg.d_model, 0xB4, 0.01);
+    let mut output = vec![0.0; batch * seq_len * cfg.d_model];
+
+    trainer
+        .forward(&input, &mut output)
+        .expect("split forward 1");
+    trainer
+        .backward_step(
+            &d_temporal,
+            BackwardOpts::default().with_accumulate_only(true),
+        )
+        .expect("open accumulation window");
+    trainer
+        .forward(&input, &mut output)
+        .expect("split forward 2");
+    trainer
+        .step(&input, &d_temporal)
+        .expect_err("fused step must reject an open accumulation window");
+    let error = trainer
+        .backward_step(&d_temporal, BackwardOpts::default())
+        .expect_err("a failed fused step must discard saved split activations");
+    assert!(
+        error.starts_with("backward_step() without a pending forward()"),
+        "unexpected lifecycle error: {error}"
+    );
+}
+
+#[test]
+fn failed_fused_step_closes_split_lifecycle_bf16() {
+    assert_failed_fused_step_closes_split_lifecycle(WeightDtype::Bf16);
+}
+
+#[test]
+fn failed_fused_step_closes_split_lifecycle_f32() {
+    assert_failed_fused_step_closes_split_lifecycle(WeightDtype::F32);
+}
+
 /// f16 split: GradScaler protocol rides backward_step; accumulate_only errs.
 #[test]
 fn f16_split_scaler_protocol() {

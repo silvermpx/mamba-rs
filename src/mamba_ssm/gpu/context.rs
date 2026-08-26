@@ -448,34 +448,8 @@ impl GpuCtx {
             tf32: self.tf32.get(),
             bi_gemm_family: family,
         };
-        let (backend_set, numeric_contracts) = if !bi {
-            (GemmBackendSet::CUBLAS, NumericContractSet::CUBLAS_POLICY_V1)
-        } else {
-            match (family, tc) {
-                (BiGemmFamily::Triad, false) => (
-                    GemmBackendSet::TRIAD,
-                    NumericContractSet::TRIAD_SCALAR_FMA_V1,
-                ),
-                (BiGemmFamily::Triad, true) => (
-                    GemmBackendSet::TRIAD,
-                    NumericContractSet::TRIAD_SCALAR_FMA_V1
-                        .union(NumericContractSet::TRIAD_MMA_SYNC_V1),
-                ),
-                (BiGemmFamily::Fixed, false) => (
-                    GemmBackendSet::FIXED.union(GemmBackendSet::TRIAD),
-                    NumericContractSet::FIXED_SCALAR_FMA_V1
-                        .union(NumericContractSet::FIXED_MMA_SYNC_V1)
-                        .union(NumericContractSet::TRIAD_SCALAR_FMA_V1),
-                ),
-                (BiGemmFamily::Fixed, true) => (
-                    GemmBackendSet::FIXED.union(GemmBackendSet::TRIAD),
-                    NumericContractSet::FIXED_SCALAR_FMA_V1
-                        .union(NumericContractSet::FIXED_MMA_SYNC_V1)
-                        .union(NumericContractSet::TRIAD_SCALAR_FMA_V1)
-                        .union(NumericContractSet::TRIAD_MMA_SYNC_V1),
-                ),
-            }
-        };
+        let (backend_set, numeric_contracts) =
+            super::kernel_identity::route_backend_contract_sets(policy);
         GemmRouteIdentity {
             policy,
             backend_set,

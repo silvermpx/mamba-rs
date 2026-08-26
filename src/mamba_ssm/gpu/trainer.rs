@@ -1064,6 +1064,7 @@ impl MambaTrainerMixed {
     /// `a_neg_all` populated — it's a fixed function of the current
     /// weights and must survive resets.
     pub fn reset_state(&mut self) -> Result<(), String> {
+        self.split_forward_route = None;
         self.state.conv_states.zero(&self.ctx.stream)?;
         self.state.ssm_states.zero(&self.ctx.stream)?;
         Ok(())
@@ -1148,6 +1149,8 @@ impl MambaTrainerMixed {
     /// scaler (scale d_temporal → backward → check overflow → unscale +
     /// step OR skip + back off).
     pub fn step(&mut self, input: &[f32], d_temporal: &[f32]) -> Result<StepMetrics, String> {
+        // Every fused attempt abandons a pending split tape, even when it is rejected.
+        self.split_forward_route = None;
         assert_eq!(
             input.len(),
             self.mamba_input.len(),
@@ -1170,12 +1173,6 @@ impl MambaTrainerMixed {
                     .into(),
             );
         }
-        // a fused step overwrites the saved
-        // activations; a forward() left pending would otherwise let a later
-        // backward_step back-prop through this step's tape as if it were its
-        // own — invalidate the split half-cycle instead of guessing.
-        self.split_forward_route = None;
-
         if matches!(self.dtype, WeightDtype::F16) {
             return self.step_f16(input, d_temporal);
         }
@@ -2037,6 +2034,7 @@ impl MambaTrainerF32 {
     }
 
     pub fn reset_state(&mut self) -> Result<(), String> {
+        self.split_forward_route = None;
         self.state.conv_states.zero(&self.ctx.stream)?;
         self.state.ssm_states.zero(&self.ctx.stream)?;
         Ok(())
@@ -2080,6 +2078,8 @@ impl MambaTrainerF32 {
     }
 
     pub fn step(&mut self, input: &[f32], d_temporal: &[f32]) -> Result<StepMetrics, String> {
+        // Every fused attempt abandons a pending split tape, even when it is rejected.
+        self.split_forward_route = None;
         assert_eq!(
             input.len(),
             self.mamba_input.len(),
@@ -2102,7 +2102,6 @@ impl MambaTrainerF32 {
                     .into(),
             );
         }
-        self.split_forward_route = None;
         self.staged_upload(0, input)?;
         self.staged_upload(1, d_temporal)?;
 
@@ -2110,23 +2109,20 @@ impl MambaTrainerF32 {
         self.bias.write(&self.ctx.stream, bc1, bc2, self.adam.lr)?;
 
         let replayed = if let Some(ref g) = self.graph {
-            // G1 at the call site: replay() predates a ctx parameter.
-            assert_eq!(
-                self.ctx.gemm_route(),
-                g.captured_gemm_flags(),
-                "f32 graph replay: GEMM route changed since capture; re-capture"
-            );
-            g.replay(&MambaF32Replay {
-                weights: &self.weights,
-                adam: &self.adam,
-                bias: &self.bias,
-                grads: &self.grads,
-                temporal: &self.temporal,
-                a_neg_all: &self.a_neg_all,
-                mamba_input: &self.mamba_input,
-                d_temporal: &self.d_temporal,
-                state: &self.state,
-            })?;
+            g.replay(
+                &self.ctx,
+                &MambaF32Replay {
+                    weights: &self.weights,
+                    adam: &self.adam,
+                    bias: &self.bias,
+                    grads: &self.grads,
+                    temporal: &self.temporal,
+                    a_neg_all: &self.a_neg_all,
+                    mamba_input: &self.mamba_input,
+                    d_temporal: &self.d_temporal,
+                    state: &self.state,
+                },
+            )?;
             true
         } else {
             self.step_eager()?;

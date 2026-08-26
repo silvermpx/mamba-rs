@@ -5,7 +5,7 @@ use mamba_rs::mamba_ssm::gpu::kernel_identity::{
     ArtifactIdentity, ArtifactKind, BackendSet, CacheEnvelope, CompileKeyMaterial,
     CompilerIdentity, CudaTarget, DeviceIdentity, DriverIdentity, FramedSha256, GemmPolicy,
     GemmRouteIdentity, LegacySm80Policy, ModuleKind, NumericContractSet, PolicyDtype, PolicyOp,
-    build_artifact_set, canonical_ptx_image,
+    build_artifact_set, canonical_ptx_image, route_backend_contract_sets,
 };
 
 fn digest(seed: u8) -> [u8; 32] {
@@ -122,6 +122,50 @@ fn canonical_ptx_requires_one_terminal_nul() {
     assert!(canonical_ptx_image(b"ptx").is_err());
     assert!(canonical_ptx_image(b"pt\0x\0").is_err());
     assert!(canonical_ptx_image(&[0xff, 0]).is_err());
+}
+
+#[test]
+fn backend_contract_sets_match_reachable_dispatch_trees() {
+    let policy = |batch_invariant, bi_tensor_cores, bi_gemm_family| GemmPolicy {
+        batch_invariant,
+        bi_tensor_cores,
+        fast_gemm: false,
+        tf32: false,
+        bi_gemm_family,
+    };
+
+    let (backends, contracts) =
+        route_backend_contract_sets(policy(false, false, BiGemmFamily::Triad));
+    assert_eq!(backends, BackendSet::CUBLAS);
+    assert_eq!(contracts, NumericContractSet::CUBLAS_POLICY_V1);
+
+    for tc in [false, true] {
+        let (backends, contracts) =
+            route_backend_contract_sets(policy(true, tc, BiGemmFamily::Triad));
+        assert!(backends.contains(BackendSet::TRIAD));
+        assert!(backends.contains(BackendSet::FIXED));
+        assert!(contracts.contains(NumericContractSet::TRIAD_SCALAR_FMA_V1));
+        assert!(contracts.contains(NumericContractSet::FIXED_MATVEC_TREE_V1));
+        assert_eq!(
+            contracts.contains(NumericContractSet::TRIAD_MMA_SYNC_V1),
+            tc
+        );
+    }
+
+    for tc in [false, true] {
+        let (backends, contracts) =
+            route_backend_contract_sets(policy(true, tc, BiGemmFamily::Fixed));
+        assert!(backends.contains(BackendSet::TRIAD));
+        assert!(backends.contains(BackendSet::FIXED));
+        assert!(!contracts.contains(NumericContractSet::FIXED_MATVEC_TREE_V1));
+        assert!(contracts.contains(NumericContractSet::FIXED_SCALAR_FMA_V1));
+        assert!(contracts.contains(NumericContractSet::FIXED_MMA_SYNC_V1));
+        assert!(contracts.contains(NumericContractSet::TRIAD_SCALAR_FMA_V1));
+        assert_eq!(
+            contracts.contains(NumericContractSet::TRIAD_MMA_SYNC_V1),
+            tc
+        );
+    }
 }
 
 #[test]

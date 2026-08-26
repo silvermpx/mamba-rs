@@ -226,12 +226,6 @@ pub fn canonical_ptx_image(image: &[u8]) -> Result<String, String> {
     String::from_utf8(payload.to_vec()).map_err(|_| "PTX image is not UTF-8".into())
 }
 
-pub(crate) fn canonical_ptx_from_string(source: String) -> Result<String, String> {
-    let mut image = source.into_bytes();
-    image.push(0);
-    canonical_ptx_image(&image)
-}
-
 pub(crate) fn canonical_ptx_from_cache(payload: Vec<u8>) -> Result<String, String> {
     let mut image = payload;
     image.push(0);
@@ -239,20 +233,110 @@ pub(crate) fn canonical_ptx_from_cache(payload: Vec<u8>) -> Result<String, Strin
 }
 
 static CACHE_TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+const MAX_CACHE_ENTRY_BYTES: u64 = 64 * 1024 * 1024;
+
+#[cfg(unix)]
+unsafe extern "C" {
+    fn geteuid() -> u32;
+}
+
+#[cfg(unix)]
+fn effective_uid() -> u32 {
+    unsafe { geteuid() }
+}
+
+#[cfg(unix)]
+fn validate_private_cache_dir_for_uid(path: &Path, expected_uid: u32) -> bool {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    let Ok(metadata) = std::fs::symlink_metadata(path) else {
+        return false;
+    };
+    metadata.file_type().is_dir()
+        && !metadata.file_type().is_symlink()
+        && metadata.uid() == expected_uid
+        && metadata.permissions().mode() & 0o777 == 0o700
+}
+
+#[cfg(not(unix))]
+fn validate_private_cache_dir_for_uid(_path: &Path, _expected_uid: u32) -> bool {
+    false
+}
+
+#[cfg(unix)]
+pub(crate) fn prepare_private_cache_dir(path: &Path) -> Option<PathBuf> {
+    use std::os::unix::fs::DirBuilderExt;
+
+    if !path.exists() {
+        let mut builder = std::fs::DirBuilder::new();
+        builder.recursive(true).mode(0o700);
+        builder.create(path).ok()?;
+    }
+    validate_private_cache_dir_for_uid(path, effective_uid()).then(|| path.to_path_buf())
+}
+
+#[cfg(not(unix))]
+pub(crate) fn prepare_private_cache_dir(_path: &Path) -> Option<PathBuf> {
+    None
+}
+
+#[cfg(any(target_os = "linux", target_os = "android"))]
+const CACHE_O_NOFOLLOW: i32 = 0o400000;
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+const CACHE_O_NOFOLLOW: i32 = 0x100;
+
+#[cfg(any(
+    target_os = "linux",
+    target_os = "android",
+    target_os = "macos",
+    target_os = "ios"
+))]
+fn open_cache_entry(path: &Path) -> Option<std::fs::File> {
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+
+    let parent = path.parent()?;
+    if !validate_private_cache_dir_for_uid(parent, effective_uid()) {
+        return None;
+    }
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(CACHE_O_NOFOLLOW)
+        .open(path)
+        .ok()?;
+    let metadata = file.metadata().ok()?;
+    (metadata.file_type().is_file()
+        && metadata.uid() == effective_uid()
+        && metadata.len() <= MAX_CACHE_ENTRY_BYTES)
+        .then_some(file)
+}
+
+#[cfg(not(any(
+    target_os = "linux",
+    target_os = "android",
+    target_os = "macos",
+    target_os = "ios"
+)))]
+fn open_cache_entry(_path: &Path) -> Option<std::fs::File> {
+    None
+}
 
 pub(crate) fn read_cache(
     path: &Path,
     compile_key: Sha256Digest,
     artifact_kind: ArtifactKind,
 ) -> Option<CacheHit> {
-    let bytes = std::fs::read(path).ok()?;
-    match CacheEnvelope::decode(compile_key, artifact_kind, &bytes) {
-        Ok(hit) => Some(hit),
-        Err(_) => {
-            let _ = std::fs::remove_file(path);
-            None
-        }
+    let mut file = open_cache_entry(path)?;
+    let expected_len = file.metadata().ok()?.len();
+    let capacity = usize::try_from(expected_len).ok()?;
+    let mut bytes = Vec::with_capacity(capacity);
+    file.by_ref()
+        .take(MAX_CACHE_ENTRY_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    if bytes.len() as u64 != expected_len {
+        return None;
     }
+    CacheEnvelope::decode(compile_key, artifact_kind, &bytes).ok()
 }
 
 pub(crate) fn publish_cache(
@@ -264,10 +348,13 @@ pub(crate) fn publish_cache(
     let Some(parent) = path.parent() else {
         return;
     };
-    if std::fs::create_dir_all(parent).is_err() {
+    if prepare_private_cache_dir(parent).is_none() {
         return;
     }
     let encoded = CacheEnvelope::encode(compile_key, artifact_kind, payload);
+    if encoded.len() as u64 > MAX_CACHE_ENTRY_BYTES {
+        return;
+    }
     let stamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |value| value.as_nanos());
@@ -279,12 +366,22 @@ pub(crate) fn publish_cache(
         ".{file_name}.tmp-{}-{stamp:x}-{counter:x}",
         std::process::id()
     ));
-    let wrote = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&tmp)
-        .and_then(|mut file| std::io::Write::write_all(&mut file, &encoded))
-        .is_ok();
+    #[cfg(unix)]
+    let wrote = {
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&tmp)
+            .and_then(|mut file| {
+                std::io::Write::write_all(&mut file, &encoded)?;
+                file.sync_all()
+            })
+            .is_ok()
+    };
+    #[cfg(not(unix))]
+    let wrote = false;
     if wrote {
         let _ = std::fs::rename(&tmp, path);
     }
@@ -509,6 +606,14 @@ pub(crate) fn header_manifest(source: &[u8], include_roots: &[String]) -> Option
     Some(output)
 }
 
+pub(crate) fn header_manifest_is_current(
+    source: &[u8],
+    include_roots: &[String],
+    expected: &Option<Vec<u8>>,
+) -> bool {
+    header_manifest(source, include_roots) == *expected
+}
+
 fn append_manifest_field(output: &mut Vec<u8>, value: &[u8]) {
     output.extend_from_slice(&(value.len() as u64).to_le_bytes());
     output.extend_from_slice(value);
@@ -564,13 +669,17 @@ fn include_directive(line: &str) -> Option<Option<&str>> {
         return Some(None);
     };
     let line = line.trim_start();
-    let Some(rest) = line.strip_prefix("include") else {
-        return Some(None);
-    };
-    if rest.starts_with(|value: char| value.is_ascii_alphanumeric() || value == '_') {
+    let directive_end = line
+        .find(|value: char| value.is_ascii_whitespace())
+        .unwrap_or(line.len());
+    let directive = &line[..directive_end];
+    if directive.starts_with("include") && directive != "include" {
+        return None;
+    }
+    if directive != "include" {
         return Some(None);
     }
-    Some(Some(rest.trim_start()))
+    Some(Some(line[directive_end..].trim_start()))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -751,6 +860,7 @@ impl NumericContractSet {
     pub const TRIAD_MMA_SYNC_V1: Self = Self(1 << 2);
     pub const FIXED_SCALAR_FMA_V1: Self = Self(1 << 3);
     pub const FIXED_MMA_SYNC_V1: Self = Self(1 << 4);
+    pub const FIXED_MATVEC_TREE_V1: Self = Self(1 << 5);
 
     pub const fn union(self, other: Self) -> Self {
         Self(self.0 | other.0)
@@ -758,6 +868,37 @@ impl NumericContractSet {
 
     pub const fn contains(self, other: Self) -> bool {
         self.0 & other.0 == other.0
+    }
+}
+
+pub fn route_backend_contract_sets(policy: GemmPolicy) -> (BackendSet, NumericContractSet) {
+    if !policy.batch_invariant {
+        return (BackendSet::CUBLAS, NumericContractSet::CUBLAS_POLICY_V1);
+    }
+    match (policy.bi_gemm_family, policy.bi_tensor_cores) {
+        (BiGemmFamily::Triad, false) => (
+            BackendSet::TRIAD.union(BackendSet::FIXED),
+            NumericContractSet::TRIAD_SCALAR_FMA_V1.union(NumericContractSet::FIXED_MATVEC_TREE_V1),
+        ),
+        (BiGemmFamily::Triad, true) => (
+            BackendSet::TRIAD.union(BackendSet::FIXED),
+            NumericContractSet::TRIAD_SCALAR_FMA_V1
+                .union(NumericContractSet::TRIAD_MMA_SYNC_V1)
+                .union(NumericContractSet::FIXED_MATVEC_TREE_V1),
+        ),
+        (BiGemmFamily::Fixed, false) => (
+            BackendSet::FIXED.union(BackendSet::TRIAD),
+            NumericContractSet::FIXED_SCALAR_FMA_V1
+                .union(NumericContractSet::FIXED_MMA_SYNC_V1)
+                .union(NumericContractSet::TRIAD_SCALAR_FMA_V1),
+        ),
+        (BiGemmFamily::Fixed, true) => (
+            BackendSet::FIXED.union(BackendSet::TRIAD),
+            NumericContractSet::FIXED_SCALAR_FMA_V1
+                .union(NumericContractSet::FIXED_MMA_SYNC_V1)
+                .union(NumericContractSet::TRIAD_SCALAR_FMA_V1)
+                .union(NumericContractSet::TRIAD_MMA_SYNC_V1),
+        ),
     }
 }
 
@@ -783,5 +924,139 @@ impl GemmRouteIdentity {
                 "{prefix}: GEMM route changed since capture; re-capture before replay"
             ))
         }
+    }
+}
+
+#[cfg(test)]
+mod cache_and_header_tests {
+    use super::*;
+    use std::sync::{Arc, Barrier};
+
+    fn key() -> Sha256Digest {
+        [7; 32]
+    }
+
+    #[test]
+    fn private_cache_publish_and_read_round_trip() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join("cache");
+        prepare_private_cache_dir(&directory).expect("private cache directory");
+        let path = directory.join("entry.bin");
+        publish_cache(&path, key(), ArtifactKind::Ptx, b"payload");
+        let hit = read_cache(&path, key(), ArtifactKind::Ptx).expect("cache hit");
+        assert_eq!(hit.payload, b"payload");
+    }
+
+    #[test]
+    fn cache_rejects_truncation_trailing_bytes_and_oversize() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join("cache");
+        prepare_private_cache_dir(&directory).unwrap();
+        let path = directory.join("entry.bin");
+        let encoded = CacheEnvelope::encode(key(), ArtifactKind::Ptx, b"payload");
+
+        std::fs::write(&path, &encoded[..encoded.len() - 1]).unwrap();
+        assert!(read_cache(&path, key(), ArtifactKind::Ptx).is_none());
+
+        let mut trailing = encoded;
+        trailing.push(0);
+        std::fs::write(&path, trailing).unwrap();
+        assert!(read_cache(&path, key(), ArtifactKind::Ptx).is_none());
+
+        let file = std::fs::File::create(&path).unwrap();
+        file.set_len(MAX_CACHE_ENTRY_BYTES + 1).unwrap();
+        assert!(read_cache(&path, key(), ArtifactKind::Ptx).is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cache_rejects_symlinks_and_untrusted_directories() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
+
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join("cache");
+        prepare_private_cache_dir(&directory).unwrap();
+        let real = directory.join("real.bin");
+        let link = directory.join("link.bin");
+        std::fs::write(
+            &real,
+            CacheEnvelope::encode(key(), ArtifactKind::Ptx, b"payload"),
+        )
+        .unwrap();
+        symlink(&real, &link).unwrap();
+        assert!(read_cache(&link, key(), ArtifactKind::Ptx).is_none());
+
+        let uid = std::fs::metadata(&directory).unwrap().uid();
+        assert!(!validate_private_cache_dir_for_uid(
+            &directory,
+            uid.wrapping_add(1)
+        ));
+        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(!validate_private_cache_dir_for_uid(&directory, uid));
+    }
+
+    #[test]
+    fn concurrent_publication_never_exposes_partial_entries() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join("cache");
+        prepare_private_cache_dir(&directory).unwrap();
+        let path = Arc::new(directory.join("entry.bin"));
+        let barrier = Arc::new(Barrier::new(5));
+        let mut threads = Vec::new();
+        for index in 0..4u8 {
+            let path = path.clone();
+            let barrier = barrier.clone();
+            threads.push(std::thread::spawn(move || {
+                barrier.wait();
+                let payload = vec![index; 4096];
+                publish_cache(&path, key(), ArtifactKind::Ptx, &payload);
+            }));
+        }
+        barrier.wait();
+        for _ in 0..100 {
+            if let Some(hit) = read_cache(&path, key(), ArtifactKind::Ptx) {
+                assert_eq!(hit.payload.len(), 4096);
+                assert!(hit.payload.iter().all(|value| *value == hit.payload[0]));
+            }
+        }
+        for thread in threads {
+            thread.join().unwrap();
+        }
+        assert!(read_cache(&path, key(), ArtifactKind::Ptx).is_some());
+    }
+
+    #[test]
+    fn invalid_read_does_not_remove_a_replacement() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join("cache");
+        prepare_private_cache_dir(&directory).unwrap();
+        let path = directory.join("entry.bin");
+        std::fs::write(&path, b"bad").unwrap();
+        assert!(read_cache(&path, key(), ArtifactKind::Ptx).is_none());
+        publish_cache(&path, key(), ArtifactKind::Ptx, b"good");
+        assert_eq!(
+            read_cache(&path, key(), ArtifactKind::Ptx).unwrap().payload,
+            b"good"
+        );
+    }
+
+    #[test]
+    fn include_next_and_header_mutation_fail_the_closure_guard() {
+        let root = tempfile::tempdir().unwrap();
+        let include_root = root.path().to_string_lossy().into_owned();
+        assert!(header_manifest(b"#include_next <value.cuh>", &[include_root.clone()]).is_none());
+        assert!(header_manifest(b"#include_magic <value.cuh>", &[include_root.clone()]).is_none());
+
+        let header = root.path().join("value.cuh");
+        std::fs::write(&header, b"first").unwrap();
+        let source = b"#include \"value.cuh\"";
+        let manifest = header_manifest(source, &[include_root.clone()]);
+        assert!(manifest.is_some());
+        std::fs::write(header, b"second").unwrap();
+        assert!(!header_manifest_is_current(
+            source,
+            &[include_root],
+            &manifest
+        ));
     }
 }
