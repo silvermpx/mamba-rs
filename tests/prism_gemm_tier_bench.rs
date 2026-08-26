@@ -13,8 +13,8 @@
 use std::time::Instant;
 
 use mamba_rs::mamba_ssm::gpu::blas::gpu_sgemm_forward_raw;
-use mamba_rs::mamba_ssm::gpu::context::BiGemmFamily;
 use mamba_rs::mamba_ssm::gpu::buffers::GpuBuffer;
+use mamba_rs::mamba_ssm::gpu::context::BiGemmFamily;
 use mamba_rs::mamba_ssm::gpu::context::GpuCtx;
 use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
 
@@ -24,7 +24,9 @@ fn synth(n: usize, seed: u64) -> Vec<f32> {
     let mut s = seed;
     (0..n)
         .map(|_| {
-            s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            s = s
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             ((s >> 33) as u32 as f32 / u32::MAX as f32) * 0.2 - 0.1
         })
         .collect()

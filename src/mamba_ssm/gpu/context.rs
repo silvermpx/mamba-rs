@@ -37,7 +37,6 @@ pub enum BiGemmFamily {
     Fixed,
 }
 
-
 /// The full numeric-route identity of a GEMM: the three tier flags
 /// (`batch_invariant`, `bi_tensor_cores`, `fast_gemm`) plus the
 /// batch-invariant family. Capture guards snapshot this and refuse a

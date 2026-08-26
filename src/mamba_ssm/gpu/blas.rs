@@ -66,9 +66,18 @@ pub fn gpu_sgemm_forward_raw(
                 };
                 gemm_bi_forward_raw(
                     ctx,
-                    TypedPtr { ptr: y_ptr, dtype: WeightDtype::F32 },
-                    TypedPtr { ptr: x_ptr, dtype: WeightDtype::F32 },
-                    TypedPtr { ptr: w_ptr, dtype: WeightDtype::F32 },
+                    TypedPtr {
+                        ptr: y_ptr,
+                        dtype: WeightDtype::F32,
+                    },
+                    TypedPtr {
+                        ptr: x_ptr,
+                        dtype: WeightDtype::F32,
+                    },
+                    TypedPtr {
+                        ptr: w_ptr,
+                        dtype: WeightDtype::F32,
+                    },
                     bias_ptr,
                     (batch, n_in, n_out),
                 )
