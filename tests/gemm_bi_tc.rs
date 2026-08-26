@@ -12,6 +12,8 @@
 
 #![cfg(feature = "cuda")]
 
+mod common;
+
 use half::{bf16, f16};
 use mamba_rs::mamba_ssm::gpu::blas::TypedPtr;
 use mamba_rs::mamba_ssm::gpu::buffers::{DtypedBuf, GpuBuffer};
@@ -1105,13 +1107,16 @@ fn step0_tc_attrs_and_goldens() {
         }
     }
 
+    // Thin adapter over the shared byte-wise law. This printer once
+    // absorbed whole u32 words per element - a different hash whose
+    // recorded values are not comparable with any other printer in the
+    // tree; the printed golden hashes changed with the unification.
     fn fnv(bits: impl Iterator<Item = u32>) -> u64 {
-        let mut h = 0xcbf29ce484222325u64;
+        let mut d = common::digest::Digest::new();
         for b in bits {
-            h ^= b as u64;
-            h = h.wrapping_mul(0x100000001b3);
+            d.absorb_bytes(&b.to_le_bytes());
         }
-        h
+        d.finish()
     }
 
     println!("== golden hashes (fwd/dW/dX bits) ==");

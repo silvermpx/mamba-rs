@@ -66,14 +66,24 @@ fn decode_run_digest() {
             // Reset the carried state so both modes hash the same run.
             state.reset(&engine.ctx().stream).unwrap();
         }
-        let mut chained = 0u64;
+        // Sequential absorption, not an XOR fold: XOR is linear, so a
+        // pair of correlated step changes could cancel; a running FNV
+        // state makes cancellation impossible and the per-step lines
+        // say WHICH step moved when the chain does.
+        let mut chain = common::digest::Digest::new();
         for step_i in 0..16u32 {
             let input = det(batch * input_dim, 1000 + step_i, 0.1);
             engine
                 .step(&input, &mut out, &mut state, &mut scratch)
                 .unwrap();
-            chained ^= common::bench::fnv1a_f32(&out).rotate_left(step_i);
+            eprintln!(
+                "DECODE-DIGEST step={step_i} {:016x}",
+                common::bench::fnv1a_f32(&out)
+            );
+            chain.absorb_label("step");
+            chain.absorb_f32(&out);
         }
+        let chained = chain.finish();
         let mut conv_v = vec![0f32; cfg.n_layers * cfg.d_inner() * cfg.d_conv];
         let mut ssm_v = vec![0f32; cfg.n_layers * cfg.d_inner() * cfg.d_state];
         state

@@ -24,16 +24,8 @@ fn det(n: usize, seed: u64) -> Vec<f32> {
         .collect()
 }
 
-fn fnv(bits: &[f32]) -> u64 {
-    let mut h = 0xcbf29ce484222325u64;
-    for v in bits {
-        for b in v.to_bits().to_le_bytes() {
-            h ^= b as u64;
-            h = h.wrapping_mul(0x100000001b3);
-        }
-    }
-    h
-}
+mod common;
+use common::digest::fnv1a_f32 as fnv;
 
 #[test]
 #[ignore = "needs a CUDA device"]
