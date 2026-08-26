@@ -91,6 +91,28 @@ per output element (`tc64_and_tc128_bit_identical`). Narrow projections
 of every model size (x_proj N=80, dt_proj K≤96) ride tensor cores via
 Tile64 — that is why even d768/d1536 steps improved in 0.4.2.
 
+### Tile64 at the prefill shapes (2026-08-26, RTX 6000 Ada, min of 3 runs)
+
+The prefill routing question is settled by measurement: a wave-efficiency
+model predicted Tile64 could win the big serve projections (Tile128 sits
+at 4.17 waves / 0.834 wave efficiency on the widest one), and it does
+not — redundant B traffic and lower arithmetic intensity outweigh the
+tail wave everywhere at prefill M.
+
+| M, K, N | Tile128 | Tile64 | verdict |
+|---|---:|---:|---|
+| 4621, 384, 1928 | **56.8** | 75.2 | Tile128, 1.32x |
+| 4621, 768, 2304 | **109.1** | 132.9 | Tile128, 1.22x |
+| 4621, 1928, 384 | **53.4** | 60.4 | Tile128, 1.13x |
+| 2048, 768, 2304 | 63.3 | 64.6 | tie (sign flips between runs) |
+| 2048, 2304, 768 | **60.2** | 65.1 | Tile128, 1.08x |
+
+The shipped dispatcher already routes all five to Tile128 — correct.
+Any remaining tile-choice value lives in the small-M / small-grid band
+(the `2048, 256, 1024` row above where Tile64 measured 8.4 % faster
+under the 72-CTA threshold), and a threshold change there must ride the
+event-timed ABBA protocol, not these `Instant`-based readings.
+
 ## Scalar tier — typed Big / upcast-fallback cost (bf16, µs)
 
 `tests/gemm_bi_typed_parity.rs::bench_upcast_fallback_tax`. Big-routed
