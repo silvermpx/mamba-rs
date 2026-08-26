@@ -663,9 +663,8 @@ pub(crate) struct Mamba3TrainerMixed {
 
     graph: Option<GpuMamba3TrainingStepGraph>,
 
-    /// True between a `forward_split` and the `backward_split` consuming its
-    /// saved activations (the split-API staleness interlock).
-    split_forward_pending: bool,
+    /// Route that produced the saved split-forward activations.
+    split_forward_route: Option<crate::mamba_ssm::gpu::context::GemmRoute>,
     /// True while the grad arena holds accumulated (un-applied) gradients
     /// from `accumulate_only` backward calls — the next backward must NOT
     /// zero the arena.
@@ -829,7 +828,7 @@ impl Mamba3TrainerMixed {
             v_states,
             angle_states,
             graph: None,
-            split_forward_pending: false,
+            split_forward_route: None,
             grads_dirty: false,
             clip_partials,
             clip_scratch,
@@ -916,6 +915,7 @@ impl Mamba3TrainerMixed {
                     .into(),
             );
         }
+        self.split_forward_route = None;
 
         if matches!(self.dtype, WeightDtype::F16) {
             return self.step_f16(input, d_temporal);
@@ -1030,8 +1030,7 @@ impl Mamba3TrainerMixed {
             );
             if self.ctx.gemm_route() != self.captured_f16_gemm_route {
                 return Err("M3 f16 graph replay: GEMM route changed since capture \
-                     (batch_invariant, bi_tensor_cores, fast_gemm, bi_gemm_family) - \
-                     the captured kernels cannot follow a route change; re-capture instead"
+                     (policy, compiler, artifact, or device identity); re-capture instead"
                     .into());
             }
 
@@ -1257,6 +1256,7 @@ impl Mamba3TrainerMixed {
         input: &[f32],
         temporal_out: &mut [f32],
     ) -> Result<(), String> {
+        self.split_forward_route = None;
         assert_eq!(
             input.len(),
             self.mamba_input.len(),
@@ -1280,7 +1280,7 @@ impl Mamba3TrainerMixed {
             .stream
             .synchronize()
             .map_err(|e| format!("forward_split sync: {e:?}"))?;
-        self.split_forward_pending = true;
+        self.split_forward_route = Some(self.ctx.gemm_route());
         Ok(())
     }
 
@@ -1290,11 +1290,16 @@ impl Mamba3TrainerMixed {
         d_temporal: &[f32],
         opts: BackwardOpts,
     ) -> Result<BackwardMetrics, String> {
-        if !self.split_forward_pending {
+        let Some(forward_route) = self.split_forward_route.take() else {
             return Err(
                 "backward_step() without a pending forward() — the saved activations \
                  are stale or missing; call forward() first"
                     .into(),
+            );
+        };
+        if self.ctx.gemm_route() != forward_route {
+            return Err(
+                "M3 split backward: GEMM route changed since forward; run forward again".into(),
             );
         }
         if opts.clip_max_norm.is_some() && opts.accumulate_only {
@@ -1322,7 +1327,6 @@ impl Mamba3TrainerMixed {
                 );
             }
             let m = self.backward_split_f16(d_temporal, opts.clip_max_norm)?;
-            self.split_forward_pending = false;
             return Ok(m);
         }
 
@@ -1331,7 +1335,6 @@ impl Mamba3TrainerMixed {
             self.grads.zero(&self.ctx.stream)?;
         }
         self.eager_backward(false)?;
-        self.split_forward_pending = false;
 
         if opts.accumulate_only {
             self.grads_dirty = true;
@@ -1582,9 +1585,8 @@ pub(crate) struct Mamba3TrainerF32 {
     v_states: GpuBuffer,
     angle_states: GpuBuffer,
     graph: Option<GpuMamba3F32TrainingStepGraph>,
-    /// True between a `forward_split` and the `backward_split` consuming its
-    /// saved activations (the split-API staleness interlock).
-    split_forward_pending: bool,
+    /// Route that produced the saved split-forward activations.
+    split_forward_route: Option<crate::mamba_ssm::gpu::context::GemmRoute>,
     /// True while the grad arena holds accumulated (un-applied) gradients
     /// from `accumulate_only` backward calls.
     grads_dirty: bool,
@@ -1698,7 +1700,7 @@ impl Mamba3TrainerF32 {
             v_states,
             angle_states,
             graph: None,
-            split_forward_pending: false,
+            split_forward_route: None,
             grads_dirty: false,
             clip_partials,
             clip_scratch,
@@ -1759,6 +1761,7 @@ impl Mamba3TrainerF32 {
                     .into(),
             );
         }
+        self.split_forward_route = None;
         self.mamba_input.upload(&self.ctx.stream, input)?;
         self.d_temporal.upload(&self.ctx.stream, d_temporal)?;
         let (step, bc1, bc2) = self.adam.advance();
@@ -1856,6 +1859,7 @@ impl Mamba3TrainerF32 {
         input: &[f32],
         temporal_out: &mut [f32],
     ) -> Result<(), String> {
+        self.split_forward_route = None;
         assert_eq!(
             input.len(),
             self.mamba_input.len(),
@@ -1877,7 +1881,7 @@ impl Mamba3TrainerF32 {
             .synchronize()
             .map_err(|e| format!("forward_split sync: {e:?}"))?;
         self.temporal.download(&self.ctx.stream, temporal_out)?;
-        self.split_forward_pending = true;
+        self.split_forward_route = Some(self.ctx.gemm_route());
         Ok(())
     }
 
@@ -1887,11 +1891,16 @@ impl Mamba3TrainerF32 {
         d_temporal: &[f32],
         opts: BackwardOpts,
     ) -> Result<BackwardMetrics, String> {
-        if !self.split_forward_pending {
+        let Some(forward_route) = self.split_forward_route.take() else {
             return Err(
                 "backward_step() without a pending forward() — the saved activations \
                  are stale or missing; call forward() first"
                     .into(),
+            );
+        };
+        if self.ctx.gemm_route() != forward_route {
+            return Err(
+                "M3 split backward: GEMM route changed since forward; run forward again".into(),
             );
         }
         if opts.clip_max_norm.is_some() && opts.accumulate_only {
@@ -1914,7 +1923,6 @@ impl Mamba3TrainerF32 {
             self.grads.zero(&self.ctx.stream)?;
         }
         self.eager_backward()?;
-        self.split_forward_pending = false;
 
         if opts.accumulate_only {
             self.grads_dirty = true;

@@ -50,6 +50,9 @@ impl HalfKernel {
 pub struct MambaKernels {
     _module: Arc<CudaModule>,
 
+    compiler_identity: super::kernel_identity::CompilerIdentity,
+    artifact_set_identity: super::kernel_identity::ArtifactSetIdentity,
+
     /// State-dimension capacity the kernels were compiled with (the
     /// per-thread register-array size). The engine and trainer
     /// constructors derive it from the model config, so a mismatched
@@ -546,14 +549,9 @@ impl MambaKernels {
         Self::compile_with_state_cap(ctx, arch, 64)
     }
 
-    /// Compile all CUDA kernels from source (NVRTC), with a disk cache for
-    /// the emitted PTX: a cache hit skips the NVRTC
-    /// half of the boot tax entirely; the PTX->SASS half is the driver
-    /// JIT's own cache (CUDA_CACHE_PATH). Key = source blob + arch +
-    /// options + NVRTC version; identical PTX by construction, so a hit
-    /// cannot change a single emitted instruction. Any hit-path failure
-    /// deletes the entry and falls through to a real compile; a failed
-    /// compile is never cached.
+    /// Compile all CUDA kernels from source. Persistent PTX caching is used
+    /// only when the complete header and NVRTC library domains are known.
+    /// A bad cache entry is removed and compiled again.
     ///
     /// `state_cap` sizes the per-thread state register arrays (see
     /// [`state_capacity`]); it rides the compile options and therefore
@@ -616,40 +614,72 @@ impl MambaKernels {
             format!("-DSGB_GROUP_M={group_m}"),
             format!("-DMAMBA_RS_STATE_CAP={state_cap}"),
         ];
+        let include_paths = cuda_include_paths();
         let opts = cudarc::nvrtc::CompileOptions {
             arch: Some(arch),
             options: option_strings.clone(),
-            include_paths: cuda_include_paths(),
+            include_paths: include_paths.clone(),
             ..Default::default()
         };
 
         let (nv_major, nv_minor) = nvrtc_version();
-        // include_paths participate in the key: a box with two CUDA
-        // toolkits must not serve stale PTX under an unchanged key.
-        let key = cache_key(&format!(
-            "{combined}\u{1f}{arch}\u{1f}{option_strings:?}\u{1f}{:?}\u{1f}nvrtc{nv_major}.{nv_minor}",
-            opts.include_paths
-        ));
-        let cache_path = kernel_cache_dir().map(|d| d.join(format!("mamba-kernels-{key}.ptx")));
+        let nvrtc_library_domain = super::kernel_identity::nvrtc_library_domain();
+        let header_manifest =
+            super::kernel_identity::header_manifest(combined.as_bytes(), &include_paths);
+        let mut argv: Vec<Vec<u8>> = include_paths
+            .iter()
+            .map(|path| format!("--include-path={path}").into_bytes())
+            .collect();
+        argv.push(format!("--gpu-architecture={arch}").into_bytes());
+        argv.extend(option_strings.iter().map(|value| value.as_bytes().to_vec()));
+        let key_material = super::kernel_identity::CompileKeyMaterial {
+            source: combined.as_bytes().to_vec(),
+            target: arch.as_bytes().to_vec(),
+            argv,
+            include_roots: include_paths
+                .iter()
+                .map(|value| value.as_bytes().to_vec())
+                .collect(),
+            header_manifest: header_manifest.clone(),
+            nvrtc_version: (nv_major, nv_minor),
+            nvrtc_library_domain: nvrtc_library_domain.clone(),
+            output_kind: super::kernel_identity::ArtifactKind::Ptx,
+            composer_revision: super::kernel_identity::COMPOSER_REVISION,
+            compiler_revision: super::kernel_identity::COMPILER_REVISION,
+            numeric_abi_revision: super::kernel_identity::NUMERIC_ABI_REVISION,
+            schedule_revision: super::kernel_identity::SCHEDULE_REVISION,
+        };
+        let invocation_digest = key_material.invocation_digest();
+        let cache_key = key_material.digest();
+        let cache_path = cache_key.and_then(|key| {
+            kernel_cache_dir().map(|directory| {
+                directory.join(format!(
+                    "mamba-kernels-v1-{}.bin",
+                    super::kernel_identity::digest_hex(&key)
+                ))
+            })
+        });
 
-        // Cache hit: load the stored PTX. A module that fails to load from
-        // a cached entry (torn write, disk rot) invalidates it and falls
-        // through to the real compile.
-        let mut module = None;
-        if let Some(path) = &cache_path
-            && let Ok(src) = std::fs::read_to_string(path)
+        let mut loaded = None;
+        if let (Some(path), Some(key)) = (&cache_path, cache_key)
+            && let Some(hit) = super::kernel_identity::read_cache(
+                path,
+                key,
+                super::kernel_identity::ArtifactKind::Ptx,
+            )
         {
-            match ctx.load_module(cudarc::nvrtc::Ptx::from_src(src)) {
-                Ok(m) => module = Some(m),
-                Err(_) => {
-                    let _ = std::fs::remove_file(path);
-                }
+            if let Ok(src) = super::kernel_identity::canonical_ptx_from_cache(hit.payload)
+                && let Ok(module) = ctx.load_module(cudarc::nvrtc::Ptx::from_src(src))
+            {
+                loaded = Some((module, hit.artifact_digest));
+            } else {
+                let _ = std::fs::remove_file(path);
             }
         }
-        let module = match module {
-            Some(m) => m,
+        let (module, artifact_digest) = match loaded {
+            Some(value) => value,
             None => {
-                let ptx = cudarc::nvrtc::compile_ptx_with_opts(combined, opts).map_err(|e| {
+                let ptx = cudarc::nvrtc::compile_ptx_with_opts(&combined, opts).map_err(|e| {
                     // Unescape the compiler log - a 40-error NVRTC
                     // failure as one escaped single-line blob is
                     // unreadable exactly when it matters most.
@@ -658,25 +688,53 @@ impl MambaKernels {
                         format!("{e:?}").replace("\\n", "\n")
                     )
                 })?;
-                if let Some(path) = &cache_path
-                    && let Some(dir) = path.parent()
-                    && std::fs::create_dir_all(dir).is_ok()
-                {
-                    // Atomic publish: write-then-rename so a concurrent boot
-                    // never reads a torn entry. Failures are non-fatal — the
-                    // cache is an accelerator, never a correctness gate.
-                    let tmp = path.with_extension(format!("tmp-{}", std::process::id()));
-                    if std::fs::write(&tmp, ptx.to_src()).is_ok()
-                        && std::fs::rename(&tmp, path).is_err()
-                    {
-                        // A failed rename must not leak the tmp entry.
-                        let _ = std::fs::remove_file(&tmp);
-                    }
+                let ptx_source = super::kernel_identity::canonical_ptx_from_string(ptx.to_src())?;
+                let artifact_digest =
+                    super::kernel_identity::FramedSha256::bytes(ptx_source.as_bytes());
+                if let (Some(path), Some(key)) = (&cache_path, cache_key) {
+                    super::kernel_identity::publish_cache(
+                        path,
+                        key,
+                        super::kernel_identity::ArtifactKind::Ptx,
+                        ptx_source.as_bytes(),
+                    );
                 }
-                ctx.load_module(ptx)
-                    .map_err(|e| format!("Module load failed: {e:?}"))?
+                let module = ctx
+                    .load_module(cudarc::nvrtc::Ptx::from_src(ptx_source))
+                    .map_err(|e| format!("Module load failed: {e:?}"))?;
+                (module, artifact_digest)
             }
         };
+        let compiler_identity = super::kernel_identity::CompilerIdentity {
+            source_digest: super::kernel_identity::FramedSha256::bytes(combined.as_bytes()),
+            invocation_digest,
+            header_manifest_digest: super::kernel_identity::FramedSha256::new(
+                b"cuda-header-manifest.v1",
+            )
+            .optional(b"manifest", header_manifest.as_deref())
+            .finish(),
+            target: super::kernel_identity::CudaTarget::new(arch)?,
+            nvrtc_version: (nv_major, nv_minor),
+            nvrtc_library_domain: super::kernel_identity::FramedSha256::new(
+                b"nvrtc-library-domain.v1",
+            )
+            .optional(b"domain", nvrtc_library_domain.as_deref())
+            .finish(),
+            nvrtc_library_known: nvrtc_library_domain.is_some(),
+            output_kind: super::kernel_identity::ArtifactKind::Ptx,
+            composer_revision: super::kernel_identity::COMPOSER_REVISION,
+            compiler_revision: super::kernel_identity::COMPILER_REVISION,
+            numeric_abi_revision: super::kernel_identity::NUMERIC_ABI_REVISION,
+            schedule_revision: super::kernel_identity::SCHEDULE_REVISION,
+        };
+        let artifact_set_identity = super::kernel_identity::build_artifact_set(&[
+            super::kernel_identity::ArtifactIdentity {
+                module_kind: super::kernel_identity::ModuleKind::LegacyCombined,
+                artifact_kind: super::kernel_identity::ArtifactKind::Ptx,
+                compile_key: invocation_digest,
+                artifact_digest,
+            },
+        ])?;
 
         let get = |name: &str| -> Result<CudaFunction, String> {
             module
@@ -714,6 +772,8 @@ impl MambaKernels {
 
         Ok(Self {
             state_cap,
+            compiler_identity,
+            artifact_set_identity,
             // SSM
             ssm_step_fwd: get("ssm_step_forward")?,
             ssm_burnin_fwd: get("ssm_burnin_forward")?,
@@ -996,6 +1056,16 @@ impl MambaKernels {
 
             _module: module,
         })
+    }
+
+    /// Compiler invocation that produced the loaded legacy PTX.
+    pub fn compiler_identity(&self) -> super::kernel_identity::CompilerIdentity {
+        self.compiler_identity
+    }
+
+    /// Ordered artifact set available to deterministic GEMM dispatch.
+    pub fn artifact_set_identity(&self) -> super::kernel_identity::ArtifactSetIdentity {
+        self.artifact_set_identity
     }
 
     /// The Split-K/Split-M partial scratch (8M f32 = 32 MB), allocated on

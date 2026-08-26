@@ -182,9 +182,7 @@ pub struct GpuMambaTrainingStepGraph {
     // every bf16 bi GEMM without a native typed bucket (all Big/split-K
     // training shapes) reads/writes these buffers inside the captured body.
     captured_bi_upcast_ptrs: [u64; 3],
-    // the GEMM-tier flags at capture time.
-    // A post-capture flip cannot change the recorded kernels; replay
-    // asserts the route identity instead of silently ignoring the flip.
+    // Complete GEMM route captured with the graph.
     captured_gemm_flags: crate::mamba_ssm::gpu::context::GemmRoute,
 }
 
@@ -465,9 +463,7 @@ impl GpuMambaTrainingStepGraph {
         assert_eq!(
             ctx.gemm_route(),
             self.captured_gemm_flags,
-            "training_graph replay: GEMM-tier flags changed since capture \
-             (batch_invariant, bi_tensor_cores, fast_gemm) - the captured \
-             kernels cannot follow a flag flip; re-capture instead"
+            "training_graph replay: GEMM route changed since capture; re-capture instead"
         );
         self.graph
             .launch()
@@ -541,15 +537,12 @@ pub struct GpuMambaF32TrainingStepGraph {
     captured_a_neg_all_ptr: u64,
     captured_weights_input_proj_w_ptr: u64,
     captured_weights_norm_f_ptr: u64,
-    // G1: GEMM-tier flags at capture; replay() predates a ctx parameter, so
-    // the trainer asserts against this getter at its call site.
+    // The trainer checks this route before replay.
     captured_gemm_flags: crate::mamba_ssm::gpu::context::GemmRoute,
 }
 
 impl GpuMambaF32TrainingStepGraph {
-    /// GEMM-tier flags (batch_invariant, bi_tensor_cores, fast_gemm) at
-    /// capture time. Assert equality with `ctx.gemm_route()` before every
-    /// replay - the captured kernels cannot follow a post-capture flip.
+    /// Complete GEMM route captured with the graph.
     pub fn captured_gemm_flags(&self) -> crate::mamba_ssm::gpu::context::GemmRoute {
         self.captured_gemm_flags
     }

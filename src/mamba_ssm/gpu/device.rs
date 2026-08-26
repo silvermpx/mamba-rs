@@ -13,6 +13,7 @@ pub struct GpuDevice {
     /// Compute capability (major, minor). E.g., (9, 0) for Hopper/GH200.
     pub compute_capability: (u32, u32),
     nvrtc_target: &'static str,
+    identity: super::kernel_identity::DeviceIdentity,
 }
 
 impl GpuDevice {
@@ -23,11 +24,18 @@ impl GpuDevice {
 
         let cc = Self::query_compute_capability(ordinal)?;
         let nvrtc_target = Self::resolve_nvrtc_target(cc)?;
+        let target = super::kernel_identity::CudaTarget::new(nvrtc_target)?;
+        let driver = super::kernel_identity::query_driver_identity()?;
 
         Ok(Self {
             ctx,
             compute_capability: cc,
             nvrtc_target,
+            identity: super::kernel_identity::DeviceIdentity {
+                compute_capability: cc,
+                target,
+                driver,
+            },
         })
     }
 
@@ -100,6 +108,11 @@ impl GpuDevice {
     /// NVRTC target validated when the device was opened.
     pub fn nvrtc_target(&self) -> &'static str {
         self.nvrtc_target
+    }
+
+    /// Immutable device and driver domain used by graph route snapshots.
+    pub fn identity(&self) -> super::kernel_identity::DeviceIdentity {
+        self.identity
     }
 
     /// Get the default CUDA stream for this device.

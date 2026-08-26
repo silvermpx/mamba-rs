@@ -220,6 +220,47 @@ fn m3_split_interlock_and_accumulate_window() {
     t.step(&input, &d_temporal).expect("fused step after close");
 }
 
+fn assert_split_route_change_rejected(dtype: WeightDtype) {
+    let cfg = test_cfg();
+    let input_dim = cfg.d_model;
+    let (batch, seq_len) = (1usize, 4usize);
+    let mut w = Mamba3Weights::init(&cfg, input_dim, 0xA11C_E002);
+    if !matches!(dtype, WeightDtype::F32) {
+        w.input_proj_w.clear();
+        w.input_proj_b.clear();
+    }
+    let mut trainer =
+        Mamba3Trainer::new_full(0, &w, cfg, session(batch, seq_len, input_dim), dtype)
+            .expect("trainer");
+    let input = det(batch * seq_len * input_dim, 0xA2, 0.05);
+    let d_temporal = det(batch * seq_len * cfg.d_model, 0xB2, 0.01);
+    let mut output = vec![0.0; batch * seq_len * cfg.d_model];
+
+    trainer.forward(&input, &mut output).expect("split forward");
+    trainer.ctx().set_fast_gemm(true);
+    let error = trainer
+        .backward_step(&d_temporal, BackwardOpts::default())
+        .expect_err("route drift must reject saved activations");
+    assert!(
+        error.starts_with("M3 split backward: GEMM route changed since forward"),
+        "unexpected route error: {error}"
+    );
+    let second = trainer
+        .backward_step(&d_temporal, BackwardOpts::default())
+        .expect_err("a rejected backward must close the split lifecycle");
+    assert!(second.starts_with("backward_step() without a pending forward()"));
+}
+
+#[test]
+fn m3_split_rejects_gemm_route_change_bf16() {
+    assert_split_route_change_rejected(WeightDtype::Bf16);
+}
+
+#[test]
+fn m3_split_rejects_gemm_route_change_f32() {
+    assert_split_route_change_rejected(WeightDtype::F32);
+}
+
 /// f16 split: GradScaler protocol rides backward_step; accumulate_only errs.
 #[test]
 fn m3_f16_split_scaler_protocol() {
@@ -253,7 +294,13 @@ fn m3_f16_split_scaler_protocol() {
         .is_err(),
         "f16 + accumulate_only must be rejected"
     );
-    // The rejected call must not have consumed the pending forward.
+    assert!(
+        t.backward_step(&d_temporal, BackwardOpts::default())
+            .is_err(),
+        "a rejected backward must close the pending lifecycle"
+    );
+    t.forward(&input, &mut out)
+        .expect("forward after rejection");
     let m = t
         .backward_step(&d_temporal, BackwardOpts::default().with_clip_max_norm(1.0))
         .expect("f16 backward");

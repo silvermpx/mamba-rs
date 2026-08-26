@@ -1149,12 +1149,8 @@ impl Mamba3Prefill {
     }
 }
 
-/// A captured CUDA graph of one prefill window over FIXED buffers: replay
-/// re-runs the whole window at graph-launch cost. The GEMM-tier flags are
-/// snapshotted at capture and asserted at replay — flipping the
-/// batch-invariant / tensor-core routing after capture would silently
-/// replay the OLD kernels, which is a numeric-route swap the crate treats
-/// as a hard error.
+/// A captured CUDA graph of one prefill window over fixed buffers. Replay
+/// requires the complete GEMM route captured with the graph.
 pub struct Mamba3PrefillGraph {
     graph: cudarc::driver::CudaGraph,
     flags_at_capture: crate::mamba_ssm::gpu::context::GemmRoute,
@@ -1234,9 +1230,8 @@ impl Mamba3PrefillGraph {
         }
         if ctx.gemm_route() != self.flags_at_capture {
             return Err(format!(
-                "prefill graph replay refused: GEMM-tier flags changed since capture \
-                 (captured {:?}, now {:?}) — a replay would silently run the old \
-                 numeric route",
+                "prefill graph replay refused: GEMM route changed since capture \
+                 (captured {:?}, now {:?})",
                 self.flags_at_capture,
                 ctx.gemm_route()
             ));
@@ -1358,7 +1353,7 @@ impl Mamba3PrefillPooledGraph {
         }
         if ctx.gemm_route() != self.flags_at_capture {
             return Err(format!(
-                "m3 pooled prefill graph replay refused: GEMM-tier flags changed \
+                "m3 pooled prefill graph replay refused: GEMM route changed \
                  since capture (captured {:?}, now {:?})",
                 self.flags_at_capture,
                 ctx.gemm_route()

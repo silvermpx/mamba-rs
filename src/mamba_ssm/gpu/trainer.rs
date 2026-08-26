@@ -801,13 +801,8 @@ pub(crate) struct MambaTrainerMixed {
     /// full-size Vec per call — so `forward_split` upcasts into this
     /// pre-allocated buffer and downloads from it.
     temporal_f32: GpuBuffer,
-    /// True between a `forward_split` and the `backward_split` consuming its
-    /// saved activations (split-phase interlock).
-    split_forward_pending: bool,
-    // the GEMM-tier flags at forward()
-    // time; backward_step refuses on drift - a mid-cycle flip would pair
-    // gradients with activations from a different numeric route.
-    split_forward_flags: crate::mamba_ssm::gpu::context::GemmRoute,
+    /// Route that produced the saved split-forward activations.
+    split_forward_route: Option<crate::mamba_ssm::gpu::context::GemmRoute>,
     /// True while an `accumulate_only` backward window is open: the next
     /// backward must NOT zero the arena, and the fused `step()` must refuse
     /// to run (its body zeroes the arena and would silently discard the
@@ -1016,6 +1011,7 @@ impl MambaTrainerMixed {
             .context()
             .new_event(None)
             .map_err(|e| format!("upload guard event: {e:?}"))?;
+        let initial_gemm_route = ctx.gemm_route();
         Ok(Self {
             ctx,
             cfg,
@@ -1034,13 +1030,7 @@ impl MambaTrainerMixed {
             mamba_input,
             d_temporal,
             temporal_f32,
-            split_forward_pending: false,
-            split_forward_flags: (
-                false,
-                false,
-                false,
-                crate::mamba_ssm::gpu::context::BiGemmFamily::Triad,
-            ),
+            split_forward_route: None,
             grads_dirty: false,
             clip_partials,
             clip_scratch,
@@ -1059,12 +1049,7 @@ impl MambaTrainerMixed {
             captured_f16_dt_scaled_ptr: 0,
             captured_f16_half_staging_ptr: 0,
             captured_f16_bi_upcast_ptrs: [0; 3],
-            captured_f16_gemm_flags: (
-                false,
-                false,
-                false,
-                crate::mamba_ssm::gpu::context::BiGemmFamily::Triad,
-            ),
+            captured_f16_gemm_flags: initial_gemm_route,
             pin_input,
             pin_dtemp,
             upload_guard,
@@ -1189,7 +1174,7 @@ impl MambaTrainerMixed {
         // activations; a forward() left pending would otherwise let a later
         // backward_step back-prop through this step's tape as if it were its
         // own — invalidate the split half-cycle instead of guessing.
-        self.split_forward_pending = false;
+        self.split_forward_route = None;
 
         if matches!(self.dtype, WeightDtype::F16) {
             return self.step_f16(input, d_temporal);
@@ -1232,6 +1217,7 @@ impl MambaTrainerMixed {
         input: &[f32],
         temporal_out: &mut [f32],
     ) -> Result<(), String> {
+        self.split_forward_route = None;
         assert_eq!(
             input.len(),
             self.mamba_input.len(),
@@ -1275,8 +1261,7 @@ impl MambaTrainerMixed {
             .stream
             .synchronize()
             .map_err(|e| format!("forward_split sync: {e:?}"))?;
-        self.split_forward_pending = true;
-        self.split_forward_flags = self.ctx.gemm_route();
+        self.split_forward_route = Some(self.ctx.gemm_route());
         Ok(())
     }
 
@@ -1286,19 +1271,17 @@ impl MambaTrainerMixed {
         d_temporal: &[f32],
         opts: BackwardOpts,
     ) -> Result<BackwardMetrics, String> {
-        if !self.split_forward_pending {
+        let Some(forward_route) = self.split_forward_route.take() else {
             return Err(
                 "backward_step() without a pending forward() — the saved activations \
                  are stale or missing; call forward() first"
                     .into(),
             );
-        }
-        if self.split_forward_flags != self.ctx.gemm_route() {
+        };
+        if forward_route != self.ctx.gemm_route() {
             return Err(format!(
-                "backward_step(): GEMM-tier flags changed since forward() \
-                 ({:?} -> {:?}) — gradients would pair with activations from \
-                 a different numeric route; restore the flags or re-run forward()",
-                self.split_forward_flags,
+                "backward_step(): GEMM route changed since forward() \
+                 ({forward_route:?} -> {:?}); re-run forward()",
                 self.ctx.gemm_route()
             ));
         }
@@ -1327,7 +1310,6 @@ impl MambaTrainerMixed {
                 );
             }
             let m = self.backward_split_f16(d_temporal, opts.clip_max_norm)?;
-            self.split_forward_pending = false;
             return Ok(m);
         }
 
@@ -1336,7 +1318,6 @@ impl MambaTrainerMixed {
             self.grads.zero(&self.ctx.stream)?;
         }
         self.eager_backward(false)?;
-        self.split_forward_pending = false;
 
         if opts.accumulate_only {
             self.grads_dirty = true;
@@ -1590,8 +1571,7 @@ impl MambaTrainerMixed {
             assert_eq!(
                 self.ctx.gemm_route(),
                 self.captured_f16_gemm_flags,
-                "f16 graph replay: GEMM-tier flags changed since capture - \
-                 the captured kernels cannot follow a flag flip; re-capture"
+                "f16 graph replay: GEMM route changed since capture; re-capture"
             );
 
             // Graph replay: forward + backward + check_inf_nan +
@@ -1894,13 +1874,8 @@ pub(crate) struct MambaTrainerF32 {
     mamba_input: GpuBuffer,
     d_temporal: GpuBuffer,
     graph: Option<GpuMambaF32TrainingStepGraph>,
-    /// True between a `forward_split` and the `backward_split` consuming its
-    /// saved activations (split-phase interlock).
-    split_forward_pending: bool,
-    // the GEMM-tier flags at forward()
-    // time; backward_step refuses on drift - a mid-cycle flip would pair
-    // gradients with activations from a different numeric route.
-    split_forward_flags: crate::mamba_ssm::gpu::context::GemmRoute,
+    /// Route that produced the saved split-forward activations.
+    split_forward_route: Option<crate::mamba_ssm::gpu::context::GemmRoute>,
     /// True while an `accumulate_only` backward window is open (see the
     /// same-named field on `MambaTrainerMixed`).
     grads_dirty: bool,
@@ -2051,13 +2026,7 @@ impl MambaTrainerF32 {
             mamba_input,
             d_temporal,
             graph: None,
-            split_forward_pending: false,
-            split_forward_flags: (
-                false,
-                false,
-                false,
-                crate::mamba_ssm::gpu::context::BiGemmFamily::Triad,
-            ),
+            split_forward_route: None,
             grads_dirty: false,
             clip_partials,
             clip_scratch,
@@ -2133,6 +2102,7 @@ impl MambaTrainerF32 {
                     .into(),
             );
         }
+        self.split_forward_route = None;
         self.staged_upload(0, input)?;
         self.staged_upload(1, d_temporal)?;
 
@@ -2144,8 +2114,7 @@ impl MambaTrainerF32 {
             assert_eq!(
                 self.ctx.gemm_route(),
                 g.captured_gemm_flags(),
-                "f32 graph replay: GEMM-tier flags changed since capture - \
-                 the captured kernels cannot follow a flag flip; re-capture"
+                "f32 graph replay: GEMM route changed since capture; re-capture"
             );
             g.replay(&MambaF32Replay {
                 weights: &self.weights,
@@ -2176,6 +2145,7 @@ impl MambaTrainerF32 {
         input: &[f32],
         temporal_out: &mut [f32],
     ) -> Result<(), String> {
+        self.split_forward_route = None;
         assert_eq!(
             input.len(),
             self.mamba_input.len(),
@@ -2199,8 +2169,7 @@ impl MambaTrainerF32 {
             .stream
             .synchronize()
             .map_err(|e| format!("forward_split sync: {e:?}"))?;
-        self.split_forward_pending = true;
-        self.split_forward_flags = self.ctx.gemm_route();
+        self.split_forward_route = Some(self.ctx.gemm_route());
         Ok(())
     }
 
@@ -2210,19 +2179,17 @@ impl MambaTrainerF32 {
         d_temporal: &[f32],
         opts: BackwardOpts,
     ) -> Result<BackwardMetrics, String> {
-        if !self.split_forward_pending {
+        let Some(forward_route) = self.split_forward_route.take() else {
             return Err(
                 "backward_step() without a pending forward() — the saved activations \
                  are stale or missing; call forward() first"
                     .into(),
             );
-        }
-        if self.split_forward_flags != self.ctx.gemm_route() {
+        };
+        if forward_route != self.ctx.gemm_route() {
             return Err(format!(
-                "backward_step(): GEMM-tier flags changed since forward() \
-                 ({:?} -> {:?}) — gradients would pair with activations from \
-                 a different numeric route; restore the flags or re-run forward()",
-                self.split_forward_flags,
+                "backward_step(): GEMM route changed since forward() \
+                 ({forward_route:?} -> {:?}); re-run forward()",
                 self.ctx.gemm_route()
             ));
         }
@@ -2246,7 +2213,6 @@ impl MambaTrainerF32 {
             self.grads.zero(&self.ctx.stream)?;
         }
         self.eager_backward()?;
-        self.split_forward_pending = false;
 
         if opts.accumulate_only {
             self.grads_dirty = true;

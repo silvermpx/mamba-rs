@@ -327,8 +327,7 @@ impl GpuMamba3TrainingStepGraph {
         if ctx.gemm_route() != self.captured_gemm_route {
             return Err(
                 "M3 training_graph replay: GEMM route changed since capture \
-                 (batch_invariant, bi_tensor_cores, fast_gemm, bi_gemm_family) - \
-                 the captured kernels cannot follow a route change; re-capture instead"
+                 (policy, compiler, artifact, or device identity); re-capture instead"
                     .into(),
             );
         }
@@ -569,8 +568,7 @@ impl GpuMamba3F32TrainingStepGraph {
         if ctx.gemm_route() != self.captured_gemm_route {
             return Err(
                 "M3 f32 training_graph replay: GEMM route changed since capture \
-                 (batch_invariant, bi_tensor_cores, fast_gemm, bi_gemm_family) - \
-                 the captured kernels cannot follow a route change; re-capture instead"
+                 (policy, compiler, artifact, or device identity); re-capture instead"
                     .into(),
             );
         }

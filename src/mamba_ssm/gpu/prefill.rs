@@ -293,9 +293,7 @@ pub fn gpu_forward_inference_prefill_pooled_sum_from_raw<W: MambaWeightsView>(
 /// - Bit-identity: a replay re-issues the exact captured kernel sequence
 ///   with the exact pointers — outputs are bit-identical to the eager
 ///   entry by construction (pinned by tests/gpu_pooled_prefill.rs).
-/// - the GEMM-tier flags are snapshotted at capture and asserted
-///   at every launch — a mid-flight tier flip cannot silently replay
-///   kernels from another numeric route.
+/// - the complete GEMM route is snapshotted and checked before launch.
 pub struct PrefillPooledGraph {
     graph: cudarc::driver::CudaGraph,
     flags_at_capture: crate::mamba_ssm::gpu::context::GemmRoute,
@@ -348,9 +346,9 @@ impl PrefillPooledGraph {
         let now = ctx.gemm_route();
         if now != self.flags_at_capture {
             return Err(format!(
-                "PrefillPooledGraph: GEMM flags changed since capture \
+                "PrefillPooledGraph: GEMM route changed since capture \
                  ({:?} -> {now:?}) — the captured kernels belong to the old \
-                 tier (G1)",
+                 route",
                 self.flags_at_capture
             ));
         }

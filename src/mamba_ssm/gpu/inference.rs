@@ -244,6 +244,7 @@ pub struct GpuMambaInference {
     /// `gpu_input` → `temporal` directly. Mirrors CPU `mamba_step_no_proj`.
     pub(super) identity_proj: bool,
     graph: Option<cudarc::driver::CudaGraph>,
+    captured_gemm_route: Option<crate::mamba_ssm::gpu::context::GemmRoute>,
     /// Raw pointers captured during graph capture for runtime validation.
     captured_state_ptr: u64,
     captured_scratch_ptr: u64,
@@ -293,6 +294,7 @@ impl GpuMambaInference {
             batch,
             identity_proj,
             graph: None,
+            captured_gemm_route: None,
             captured_state_ptr: 0,
             captured_scratch_ptr: 0,
         })
@@ -310,15 +312,19 @@ impl GpuMambaInference {
         state: &mut GpuInferenceState,
         scratch: &mut GpuInferenceScratch,
     ) -> Result<(), String> {
+        self.ctx.presize_bi_scratch()?;
         let snap_state = state.conv.cached_ptr();
         let snap_scratch = scratch.gpu_input.cached_ptr();
+        let snap_gemm_route = self.ctx.gemm_route();
         let stream = self.ctx.stream.clone();
         let graph = crate::mamba_ssm::gpu::graph_capture::capture_into_graph(&stream, || {
             self.step_kernels(state, scratch)
         })?;
         self.graph = Some(graph);
+        self.captured_gemm_route = Some(snap_gemm_route);
         self.captured_state_ptr = snap_state;
         self.captured_scratch_ptr = snap_scratch;
+        self.ctx.note_graph_capture();
         Ok(())
     }
 
@@ -360,6 +366,9 @@ impl GpuMambaInference {
 
         // Run GPU kernel pipeline (graph replay or individual launches)
         if let Some(ref g) = self.graph {
+            if self.captured_gemm_route != Some(self.ctx.gemm_route()) {
+                return Err("inference graph replay: GEMM route changed since capture".into());
+            }
             assert_eq!(
                 state.conv.cached_ptr(),
                 self.captured_state_ptr,
@@ -394,6 +403,9 @@ impl GpuMambaInference {
     ) -> Result<(), String> {
         scratch.gpu_input.upload(&self.ctx.stream, input)?;
         if let Some(ref g) = self.graph {
+            if self.captured_gemm_route != Some(self.ctx.gemm_route()) {
+                return Err("inference graph replay: GEMM route changed since capture".into());
+            }
             assert_eq!(state.conv.cached_ptr(), self.captured_state_ptr);
             assert_eq!(scratch.gpu_input.cached_ptr(), self.captured_scratch_ptr);
             g.launch().map_err(|e| format!("graph launch: {e:?}"))?;
@@ -797,6 +809,7 @@ pub struct GpuMambaInferenceMixed {
     mixed_weights: GpuMambaMixedWeights,
     a_neg_all: GpuBuffer,
     graph: Option<cudarc::driver::CudaGraph>,
+    captured_gemm_route: Option<crate::mamba_ssm::gpu::context::GemmRoute>,
     captured_state_ptr: u64,
     captured_scratch_ptr: u64,
 }
@@ -854,6 +867,7 @@ impl GpuMambaInferenceMixed {
             mixed_weights,
             a_neg_all,
             graph: None,
+            captured_gemm_route: None,
             captured_state_ptr: 0,
             captured_scratch_ptr: 0,
         })
@@ -868,6 +882,11 @@ impl GpuMambaInferenceMixed {
     ) -> Result<(), String> {
         scratch.gpu_input.upload(&self.engine.ctx.stream, input)?;
         if let Some(ref g) = self.graph {
+            if self.captured_gemm_route != Some(self.engine.ctx.gemm_route()) {
+                return Err(
+                    "mixed inference graph replay: GEMM route changed since capture".into(),
+                );
+            }
             assert_eq!(state.conv.cached_ptr(), self.captured_state_ptr);
             assert_eq!(scratch.gpu_input.cached_ptr(), self.captured_scratch_ptr);
             g.launch()
@@ -892,6 +911,11 @@ impl GpuMambaInferenceMixed {
     ) -> Result<(), String> {
         scratch.gpu_input.upload(&self.engine.ctx.stream, input)?;
         if let Some(ref g) = self.graph {
+            if self.captured_gemm_route != Some(self.engine.ctx.gemm_route()) {
+                return Err(
+                    "mixed inference graph replay: GEMM route changed since capture".into(),
+                );
+            }
             assert_eq!(state.conv.cached_ptr(), self.captured_state_ptr);
             assert_eq!(scratch.gpu_input.cached_ptr(), self.captured_scratch_ptr);
             g.launch()
@@ -1296,6 +1320,11 @@ impl GpuMambaInferenceMixed {
     ) -> Result<(), String> {
         scratch.gpu_input.upload(&self.engine.ctx.stream, input)?;
         if let Some(ref g) = self.graph {
+            if self.captured_gemm_route != Some(self.engine.ctx.gemm_route()) {
+                return Err(
+                    "mixed inference graph replay: GEMM route changed since capture".into(),
+                );
+            }
             assert_eq!(state.conv.cached_ptr(), self.captured_state_ptr);
             assert_eq!(scratch.gpu_input.cached_ptr(), self.captured_scratch_ptr);
             g.launch()
@@ -1323,6 +1352,11 @@ impl GpuMambaInferenceMixed {
     ) -> Result<(), String> {
         scratch.gpu_input.upload(&self.engine.ctx.stream, input)?;
         if let Some(ref g) = self.graph {
+            if self.captured_gemm_route != Some(self.engine.ctx.gemm_route()) {
+                return Err(
+                    "mixed inference graph replay: GEMM route changed since capture".into(),
+                );
+            }
             assert_eq!(state.conv.cached_ptr(), self.captured_state_ptr);
             assert_eq!(scratch.gpu_input.cached_ptr(), self.captured_scratch_ptr);
             g.launch()
@@ -1350,15 +1384,19 @@ impl GpuMambaInferenceMixed {
         state: &mut GpuInferenceState,
         scratch: &mut GpuInferenceMixedScratch,
     ) -> Result<(), String> {
+        self.engine.ctx.presize_bi_scratch()?;
         let snap_state = state.conv.cached_ptr();
         let snap_scratch = scratch.gpu_input.cached_ptr();
+        let snap_gemm_route = self.engine.ctx.gemm_route();
         let stream = self.engine.ctx.stream.clone();
         let graph = crate::mamba_ssm::gpu::graph_capture::capture_into_graph(&stream, || {
             self.step_kernels_mixed_native(state, scratch)
         })?;
         self.graph = Some(graph);
+        self.captured_gemm_route = Some(snap_gemm_route);
         self.captured_state_ptr = snap_state;
         self.captured_scratch_ptr = snap_scratch;
+        self.engine.ctx.note_graph_capture();
         Ok(())
     }
 
@@ -1367,15 +1405,19 @@ impl GpuMambaInferenceMixed {
         state: &mut GpuInferenceState,
         scratch: &mut GpuInferenceScratch,
     ) -> Result<(), String> {
+        self.engine.ctx.presize_bi_scratch()?;
         let snap_state = state.conv.cached_ptr();
         let snap_scratch = scratch.gpu_input.cached_ptr();
+        let snap_gemm_route = self.engine.ctx.gemm_route();
         let stream = self.engine.ctx.stream.clone();
         let graph = crate::mamba_ssm::gpu::graph_capture::capture_into_graph(&stream, || {
             self.step_kernels_mixed(state, scratch)
         })?;
         self.graph = Some(graph);
+        self.captured_gemm_route = Some(snap_gemm_route);
         self.captured_state_ptr = snap_state;
         self.captured_scratch_ptr = snap_scratch;
+        self.engine.ctx.note_graph_capture();
         Ok(())
     }
 

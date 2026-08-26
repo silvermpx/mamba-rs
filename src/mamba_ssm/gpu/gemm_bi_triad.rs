@@ -2145,11 +2145,13 @@ pub enum TcTile {
 /// Prefer the smaller tile while a 128x128 launch has too few independent
 /// CTAs. Both tile families issue the same ascending MMA reduction for an
 /// output element, so this changes occupancy without changing its bits.
-pub const TC64_PREFER_MAX_TILES128: u32 = 72;
+pub const TC64_PREFER_MAX_TILES128: u32 =
+    super::kernel_identity::LegacySm80Policy::current().tile128_prefer_min_tiles;
 
 /// Choose between the square tiles once both output axes reach one Tile64.
 fn tc_pick_tile_large(rows: usize, cols: usize) -> Option<TcTile> {
-    if rows >= 128 && cols >= 128 {
+    let policy = super::kernel_identity::LegacySm80Policy::current();
+    if rows >= policy.large_tile_min && cols >= policy.large_tile_min {
         let tiles128 = u32::try_from(rows)
             .ok()?
             .div_ceil(128)
@@ -2159,7 +2161,7 @@ fn tc_pick_tile_large(rows: usize, cols: usize) -> Option<TcTile> {
         }
         return Some(TcTile::Tile64);
     }
-    if rows >= 64 && cols >= 64 {
+    if rows >= policy.square_tile_min && cols >= policy.square_tile_min {
         return Some(TcTile::Tile64);
     }
     None
@@ -2169,94 +2171,61 @@ fn tc_pick_tile_large(rows: usize, cols: usize) -> Option<TcTile> {
 /// Its per-element MMA order matches the square tiles, so crossing this
 /// scheduling boundary preserves the forward numeric contract.
 fn tc_pick_tile_forward(rows: usize, cols: usize) -> Option<TcTile> {
-    if cols < 32 {
+    let policy = super::kernel_identity::LegacySm80Policy::current();
+    if cols < policy.forward_min_columns {
         return None;
     }
-    if rows <= 64 || cols < 64 {
+    if rows <= policy.forward_thin_max_rows
+        || (policy.forward_thin_below_square_columns && cols < policy.square_tile_min)
+    {
         return Some(TcTile::Thin16);
     }
     tc_pick_tile_large(rows, cols)
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum TcBackwardOp {
-    Dw,
-    Dx,
-}
-
-#[derive(Clone, Copy)]
-struct TcBackwardCell {
-    op: TcBackwardOp,
-    dtype: WeightDtype,
-    dims: (usize, usize, usize),
-}
-
-const fn tc_backward_cell(
-    op: TcBackwardOp,
-    dtype: WeightDtype,
-    dims: (usize, usize, usize),
-) -> TcBackwardCell {
-    TcBackwardCell { op, dtype, dims }
-}
-
-/// Automatic tail admission is keyed by the complete GEMM. The reduction
-/// length stays in the key because it can change the incumbent schedule.
-const TC64_BACKWARD_CELLS: [TcBackwardCell; 18] = [
-    tc_backward_cell(TcBackwardOp::Dw, WeightDtype::Bf16, (1024, 8, 256)),
-    tc_backward_cell(TcBackwardOp::Dw, WeightDtype::Bf16, (2048, 16, 512)),
-    tc_backward_cell(TcBackwardOp::Dw, WeightDtype::Bf16, (2048, 48, 1536)),
-    tc_backward_cell(TcBackwardOp::Dw, WeightDtype::Bf16, (1024, 256, 40)),
-    tc_backward_cell(TcBackwardOp::Dw, WeightDtype::Bf16, (2048, 512, 48)),
-    tc_backward_cell(TcBackwardOp::Dx, WeightDtype::Bf16, (1024, 8, 256)),
-    tc_backward_cell(TcBackwardOp::Dx, WeightDtype::Bf16, (2048, 16, 512)),
-    tc_backward_cell(TcBackwardOp::Dx, WeightDtype::Bf16, (2048, 48, 1536)),
-    tc_backward_cell(TcBackwardOp::Dx, WeightDtype::Bf16, (32, 256, 1024)),
-    tc_backward_cell(TcBackwardOp::Dw, WeightDtype::F16, (1024, 8, 256)),
-    tc_backward_cell(TcBackwardOp::Dw, WeightDtype::F16, (2048, 16, 512)),
-    tc_backward_cell(TcBackwardOp::Dw, WeightDtype::F16, (2048, 48, 1536)),
-    tc_backward_cell(TcBackwardOp::Dw, WeightDtype::F16, (1024, 256, 40)),
-    tc_backward_cell(TcBackwardOp::Dw, WeightDtype::F16, (2048, 512, 48)),
-    tc_backward_cell(TcBackwardOp::Dx, WeightDtype::F16, (1024, 8, 256)),
-    tc_backward_cell(TcBackwardOp::Dx, WeightDtype::F16, (2048, 16, 512)),
-    tc_backward_cell(TcBackwardOp::Dx, WeightDtype::F16, (2048, 48, 1536)),
-    tc_backward_cell(TcBackwardOp::Dx, WeightDtype::F16, (32, 256, 1024)),
-];
-
 /// Tile64 predicates both output tails, but two short axes would waste the
 /// whole square tile and remain on the scalar fallback.
 fn tc_pick_tile_backward_bridge(rows: usize, cols: usize) -> Option<TcTile> {
-    if rows == 0 || cols == 0 {
+    let policy = super::kernel_identity::LegacySm80Policy::current();
+    if policy.reject_zero_axes && (rows == 0 || cols == 0) {
         return None;
     }
-    if rows >= 64 && cols >= 64 {
+    if rows >= policy.square_tile_min && cols >= policy.square_tile_min {
         return tc_pick_tile_large(rows, cols);
     }
-    if rows >= 64 || cols >= 64 {
+    if policy.backward_one_axis_tile64
+        && (rows >= policy.square_tile_min || cols >= policy.square_tile_min)
+    {
         return Some(TcTile::Tile64);
     }
-    None
+    (!policy.backward_two_small_fallback).then_some(TcTile::Tile64)
 }
 
 /// Large shapes keep the existing square-tile policy. A one-axis tail is
 /// selected automatically only when its full operation is frozen above.
 fn tc_pick_tile_backward(
-    op: TcBackwardOp,
+    op: super::kernel_identity::PolicyOp,
     dtype: WeightDtype,
     dims: (usize, usize, usize),
 ) -> Option<TcTile> {
     let (batch, n_in, n_out) = dims;
     let (rows, cols) = match op {
-        TcBackwardOp::Dw => (n_in, n_out),
-        TcBackwardOp::Dx => (batch, n_in),
+        super::kernel_identity::PolicyOp::Dw => (n_in, n_out),
+        super::kernel_identity::PolicyOp::Dx => (batch, n_in),
     };
     let tile = tc_pick_tile_backward_bridge(rows, cols)?;
-    if rows >= 64 && cols >= 64 {
+    let policy = super::kernel_identity::LegacySm80Policy::current();
+    if rows >= policy.square_tile_min && cols >= policy.square_tile_min {
         return Some(tile);
     }
 
-    TC64_BACKWARD_CELLS
-        .iter()
-        .any(|cell| cell.op == op && cell.dtype == dtype && cell.dims == dims)
+    let dtype = match dtype {
+        WeightDtype::F32 => super::kernel_identity::PolicyDtype::F32,
+        WeightDtype::F16 => super::kernel_identity::PolicyDtype::F16,
+        WeightDtype::Bf16 => super::kernel_identity::PolicyDtype::Bf16,
+    };
+    super::kernel_identity::LegacySm80Policy::current()
+        .admits(op, dtype, dims)
         .then_some(tile)
 }
 
@@ -2412,7 +2381,7 @@ pub fn sgemm_bi_backward_dw_tc(
     let (batch, n_in, n_out) = checked_dims.tuple();
     // Tile geometry keys on (K_out, N). Tail admission also keeps the
     // reduction length in its frozen performance key.
-    let tile = tc_pick_tile_backward(TcBackwardOp::Dw, dy.dtype, dims).ok_or_else(|| {
+    let tile = tc_pick_tile_backward(super::kernel_identity::PolicyOp::Dw, dy.dtype, dims).ok_or_else(|| {
         format!(
             "UNCOVERED sgemm_bi_backward_dw_tc: shape M={batch} K={n_in} N={n_out} outside the automatic TC route"
         )
@@ -2478,7 +2447,7 @@ pub fn sgemm_bi_backward_dx_tc(
 ) -> Result<TcTile, String> {
     let checked_dims = GemmDims::nt(dims)?;
     let (batch, n_in, n_out) = checked_dims.tuple();
-    let tile = tc_pick_tile_backward(TcBackwardOp::Dx, dx.dtype, dims).ok_or_else(|| {
+    let tile = tc_pick_tile_backward(super::kernel_identity::PolicyOp::Dx, dx.dtype, dims).ok_or_else(|| {
         format!(
             "UNCOVERED sgemm_bi_backward_dx_tc: shape M={batch} K={n_in} N={n_out} outside the automatic TC route"
         )

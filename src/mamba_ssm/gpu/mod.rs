@@ -23,6 +23,7 @@ pub mod gemm_bi_triad;
 pub mod grad_clip;
 pub mod graph_capture;
 pub mod inference;
+pub mod kernel_identity;
 pub mod kernels;
 pub mod launch;
 pub mod loss_scaler;

@@ -15,7 +15,7 @@ use std::sync::Arc;
 /// for a role (either can serve a forward) and not for a tensor-core
 /// tier (both instantiate on Tensor Cores for bf16/f16 and on CUDA cores
 /// for f32).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
 pub enum BiGemmFamily {
     /// The multi-tile dispatcher (kernels/gemm_bi_triad.cu) - the default.
     /// Carries the full triad (NN + TN + NT), so it is the only family
@@ -37,11 +37,12 @@ pub enum BiGemmFamily {
     Fixed,
 }
 
-/// The full numeric-route identity of a GEMM: the three tier flags
-/// (`batch_invariant`, `bi_tensor_cores`, `fast_gemm`) plus the
-/// batch-invariant family. Capture guards snapshot this and refuse a
-/// replay whose live route differs.
-pub type GemmRoute = (bool, bool, bool, BiGemmFamily);
+pub use super::kernel_identity::{
+    BackendSet as GemmBackendSet, GemmPolicy, GemmRouteIdentity, NumericContractSet,
+};
+
+/// Complete policy, compiler, artifact, and device identity pinned by graphs.
+pub type GemmRoute = GemmRouteIdentity;
 
 /// GPU execution context — holds everything needed for kernel launches.
 ///
@@ -88,6 +89,8 @@ pub struct GpuCtx {
     /// The state capacity the kernels were compiled with — part of the
     /// numeric-route identity a bench stamp must carry.
     state_cap: usize,
+    device_identity: super::kernel_identity::DeviceIdentity,
+    policy_hash: super::kernel_identity::Sha256Digest,
     /// Number of CUDA graphs captured on this context: the tier
     /// setters warn when flipped after a capture — the captured kernels
     /// cannot follow, and the replay-time flag assert refuses to run.
@@ -210,6 +213,8 @@ impl GpuCtx {
             fast_gemm: std::cell::Cell::new(fast_gemm),
             tf32: std::cell::Cell::new(true),
             state_cap,
+            device_identity: device.identity(),
+            policy_hash: super::kernel_identity::legacy_sm80_policy_digest(),
             graphs_captured: std::cell::Cell::new(0),
             bi_upcast_scratch: [RefCell::new(None), RefCell::new(None), RefCell::new(None)],
         })
@@ -362,8 +367,7 @@ impl GpuCtx {
     pub fn set_batch_invariant(&self, on: bool) {
         if self.graphs_captured.get() > 0 {
             eprintln!(
-                "mamba-rs WARNING: GEMM-tier flag flipped after a graph capture; \
-                 captured kernels keep the old tier and replay will assert (G1)"
+                "mamba-rs WARNING: GEMM route changed after graph capture; replay will reject it"
             );
         }
         self.batch_invariant.set(on);
@@ -380,8 +384,7 @@ impl GpuCtx {
     pub fn set_bi_gemm_family(&self, family: BiGemmFamily) {
         if self.graphs_captured.get() > 0 {
             eprintln!(
-                "mamba-rs WARNING: GEMM-tier flag flipped after a graph capture; \
-                 captured kernels keep the old tier and replay will assert (G1)"
+                "mamba-rs WARNING: GEMM route changed after graph capture; replay will reject it"
             );
         }
         self.bi_gemm_family.set(family);
@@ -398,8 +401,7 @@ impl GpuCtx {
     pub fn set_bi_tensor_cores(&self, on: bool) {
         if self.graphs_captured.get() > 0 {
             eprintln!(
-                "mamba-rs WARNING: GEMM-tier flag flipped after a graph capture; \
-                 captured kernels keep the old tier and replay will assert (G1)"
+                "mamba-rs WARNING: GEMM route changed after graph capture; replay will reject it"
             );
         }
         self.bi_tensor_cores.set(on);
@@ -410,8 +412,7 @@ impl GpuCtx {
     pub fn set_fast_gemm(&self, on: bool) {
         if self.graphs_captured.get() > 0 {
             eprintln!(
-                "mamba-rs WARNING: GEMM-tier flag flipped after a graph capture; \
-                 captured kernels keep the old tier and replay will assert (G1)"
+                "mamba-rs WARNING: GEMM route changed after graph capture; replay will reject it"
             );
         }
         self.fast_gemm.set(on);
@@ -422,20 +423,12 @@ impl GpuCtx {
         self.fast_gemm.get()
     }
 
-    /// Record that a CUDA graph was captured on this context — the tier
-    /// setters warn when a flag flips afterwards, since the captured
-    /// kernels cannot follow the flip.
+    /// Record that a CUDA graph was captured on this context.
     pub(crate) fn note_graph_capture(&self) {
         self.graphs_captured.set(self.graphs_captured.get() + 1);
     }
 
-    /// Snapshot of the three GEMM-tier flags (batch_invariant,
-    /// bi_tensor_cores, fast_gemm) — the numeric-route identity of every
-    /// GEMM this context launches. Graph captures snapshot it and replays
-    /// assert it: a flag flipped after capture cannot change the recorded
-    /// kernels, so the flip would otherwise be a silent no-op on the
-    /// graph path and a live divergence on any eager path sharing the
-    /// context.
+    /// The three runtime controls used by legacy callers.
     pub fn gemm_flags(&self) -> (bool, bool, bool) {
         (
             self.batch_invariant.get(),
@@ -444,13 +437,57 @@ impl GpuCtx {
         )
     }
 
-    /// The FULL numeric-route identity: the three tier flags plus the
-    /// deterministic family. Capture guards compare this, not
-    /// [`Self::gemm_flags`] - a family flip changes which kernel runs and
-    /// must invalidate a captured graph exactly like a tier flip.
+    /// Complete route identity used by eager launches and graph guards.
     pub fn gemm_route(&self) -> GemmRoute {
         let (bi, tc, fast) = self.gemm_flags();
-        (bi, tc, fast, self.bi_gemm_family.get())
+        let family = self.bi_gemm_family.get();
+        let policy = GemmPolicy {
+            batch_invariant: bi,
+            bi_tensor_cores: tc,
+            fast_gemm: fast,
+            tf32: self.tf32.get(),
+            bi_gemm_family: family,
+        };
+        let (backend_set, numeric_contracts) = if !bi {
+            (GemmBackendSet::CUBLAS, NumericContractSet::CUBLAS_POLICY_V1)
+        } else {
+            match (family, tc) {
+                (BiGemmFamily::Triad, false) => (
+                    GemmBackendSet::TRIAD,
+                    NumericContractSet::TRIAD_SCALAR_FMA_V1,
+                ),
+                (BiGemmFamily::Triad, true) => (
+                    GemmBackendSet::TRIAD,
+                    NumericContractSet::TRIAD_SCALAR_FMA_V1
+                        .union(NumericContractSet::TRIAD_MMA_SYNC_V1),
+                ),
+                (BiGemmFamily::Fixed, false) => (
+                    GemmBackendSet::FIXED.union(GemmBackendSet::TRIAD),
+                    NumericContractSet::FIXED_SCALAR_FMA_V1
+                        .union(NumericContractSet::FIXED_MMA_SYNC_V1)
+                        .union(NumericContractSet::TRIAD_SCALAR_FMA_V1),
+                ),
+                (BiGemmFamily::Fixed, true) => (
+                    GemmBackendSet::FIXED.union(GemmBackendSet::TRIAD),
+                    NumericContractSet::FIXED_SCALAR_FMA_V1
+                        .union(NumericContractSet::FIXED_MMA_SYNC_V1)
+                        .union(NumericContractSet::TRIAD_SCALAR_FMA_V1)
+                        .union(NumericContractSet::TRIAD_MMA_SYNC_V1),
+                ),
+            }
+        };
+        GemmRouteIdentity {
+            policy,
+            backend_set,
+            numeric_contracts,
+            compiler: self.kernels.compiler_identity(),
+            artifacts: self.kernels.artifact_set_identity(),
+            policy_revision: super::kernel_identity::POLICY_REVISION,
+            policy_hash: self.policy_hash,
+            device: self.device_identity,
+            state_capacity: u32::try_from(self.state_cap)
+                .expect("validated state capacity fits in u32"),
+        }
     }
 
     /// Returns `true` if the tensor-core bi tier is enabled.
@@ -460,13 +497,23 @@ impl GpuCtx {
 
     /// Disable TF32 Tensor Cores — use full f32 SGEMM for parity tests.
     pub fn disable_tf32(&self) {
-        self.tf32.set(false);
-        unsafe {
+        if self.graphs_captured.get() > 0 {
+            eprintln!(
+                "mamba-rs WARNING: GEMM route changed after graph capture; replay will reject it"
+            );
+        }
+        let status = unsafe {
             cudarc::cublas::sys::cublasSetMathMode(
                 *self.blas.handle(),
                 cudarc::cublas::sys::cublasMath_t::CUBLAS_DEFAULT_MATH,
-            );
-        }
+            )
+        };
+        assert_eq!(
+            status,
+            cudarc::cublas::sys::cublasStatus_t::CUBLAS_STATUS_SUCCESS,
+            "cublasSetMathMode default math failed"
+        );
+        self.tf32.set(false);
     }
 
     /// TF32 SGEMM math state (true until [`Self::disable_tf32`]).
