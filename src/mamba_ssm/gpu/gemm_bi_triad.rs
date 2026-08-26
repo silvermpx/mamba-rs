@@ -1768,8 +1768,8 @@ pub enum TcTile {
     Tile64,
     /// 16x32 CTA tile, 128 threads / 4 warps, 4-stage cp.async
     /// (`sgemm_bi_nn_tc16_*`) - the decode rung of the ladder. NN
-    /// forward only; not yet in `tc_pick_tile` (G4 lands the ladder
-    /// selector).
+    /// forward only; picked by `tc_pick_tile_forward` for the small-M
+    /// and narrow-N bands.
     Thin16,
 }
 
@@ -1803,6 +1803,28 @@ fn tc_pick_tile(rows: usize, cols: usize) -> Option<TcTile> {
         return Some(TcTile::Tile64);
     }
     None
+}
+
+/// Forward-only ladder pick: adds the Thin16 decode rung below the
+/// Tile64/Tile128 gates, which closes the TC tier over EVERY M at
+/// `cols >= 32` (the Thin16 column floor). An M-keyed pick is legal
+/// scheduling here because all three tiles are bit-identical per output
+/// element (`census_thin16_vs_tile64` + `tc64_and_tc128_bit_identical`) -
+/// the pick can never change bits. Threshold from the clean sm_89
+/// measurement (`thin_rung_decode_bench`): Thin16 wins through M=64 on
+/// both bench shapes (7.9 vs 9.9 us at 768x2304, 10.8 vs 17.5 at
+/// 1536x1536) and first loses at M=96 on the wide-N shape - the
+/// crossover is shape-dependent (the G7 autotable's refinement), 64 is
+/// the measured-safe end. Forward NN only - the TN/NT entries have no
+/// Thin16 twin and keep `tc_pick_tile`.
+fn tc_pick_tile_forward(rows: usize, cols: usize) -> Option<TcTile> {
+    if cols < 32 {
+        return None;
+    }
+    if rows <= 64 || cols < 64 {
+        return Some(TcTile::Thin16);
+    }
+    tc_pick_tile(rows, cols)
 }
 
 impl TcTile {
@@ -1863,9 +1885,9 @@ pub struct TcFwdOperands {
 /// SEPARATE numeric contract from the scalar triad (TC reduction tree, not
 /// the ascending-K FMA chain) — deterministic and batch-invariant across
 /// ALL M (each element's full K-reduction lives in one warp, independent of
-/// grid shape; the Tile64/Tile128 twins are bit-identical per element).
-/// Covers M >= 64 && N >= 64 && K >= 1; Err otherwise. Returns the tile
-/// variant that actually launched.
+/// grid shape; the Thin16/Tile64/Tile128 rungs are bit-identical per
+/// element). Covers every M at N >= 32 (the Thin16 column floor), K >= 1;
+/// Err otherwise. Returns the tile variant that actually launched.
 pub fn sgemm_bi_forward_tc(
     stream: &Arc<cudarc::driver::CudaStream>,
     kernels: &GpuKernels,
@@ -1876,7 +1898,7 @@ pub fn sgemm_bi_forward_tc(
     dims: (usize, usize, usize),
 ) -> Result<TcTile, String> {
     let (batch, _n_in, n_out) = dims;
-    let tile = tc_pick_tile(batch, n_out).ok_or_else(|| {
+    let tile = tc_pick_tile_forward(batch, n_out).ok_or_else(|| {
         let (batch, n_in, n_out) = dims;
         format!(
             "UNCOVERED sgemm_bi_forward_tc: shape M={batch} K={n_in} N={n_out} below the TC tile gate"

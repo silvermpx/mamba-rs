@@ -170,7 +170,10 @@ fn census_thin16_vs_tile64() {
     let dev = GpuDevice::new(0).expect("cuda device");
     let ctx = GpuCtx::new(&dev).expect("ctx");
 
-    // Decode-class shapes plus tails and one prefill-class control.
+    // Decode-class shapes plus tails and one prefill-class control; the
+    // last two pin the exact ladder-gate floors tc_pick_tile_forward now
+    // exposes (K below one slab at the N=32 column floor, and the
+    // rows >= 64 && cols < 64 arm).
     let shapes: &[(usize, usize, usize)] = &[
         (1, 768, 2560),
         (4, 1536, 768),
@@ -179,12 +182,25 @@ fn census_thin16_vs_tile64() {
         (32, 384, 384),
         (129, 384, 1928),
         (128, 383, 383),
+        (5, 63, 32),
+        (300, 768, 40),
     ];
 
     for &(m, k, n) in shapes {
+        // The magnitude-heterogeneous probe from census_matvec_vs_thin16:
+        // byte-identity attested on a tame input is not attestation (the
+        // matvec lesson) - the probe must be the exposing one.
+        let mut a_host = synth(m * k, 0xA11CE ^ m as u64);
+        for (i, v) in a_host.iter_mut().enumerate() {
+            match i % 4 {
+                0 => *v = 4096.0,
+                1 => *v = -4096.0,
+                2 => *v *= 512.0,
+                _ => {}
+            }
+        }
         let a = DtypedBuf::zeros(&ctx.stream, m * k, WeightDtype::Bf16).expect("A");
-        a.upload_f32(&ctx.stream, &synth(m * k, 0xA11CE ^ m as u64))
-            .expect("A up");
+        a.upload_f32(&ctx.stream, &a_host).expect("A up");
         let w = DtypedBuf::zeros(&ctx.stream, k * n, WeightDtype::Bf16).expect("W");
         w.upload_f32(&ctx.stream, &synth(k * n, 0xB0B ^ n as u64))
             .expect("W up");

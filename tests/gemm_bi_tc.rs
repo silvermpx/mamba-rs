@@ -707,16 +707,25 @@ fn tc_route_gate_boundary_sweep() {
         r
     };
 
-    // Below the 64 gate -> honest UNCOVERED (blas.rs scalar fallback).
-    for (m, n) in [(63usize, 64usize), (64, 63), (63, 4096), (4096, 63)] {
+    // Below the Thin16 column floor -> honest UNCOVERED (blas.rs matvec
+    // fallback). Since the G4 ladder, N is the only uncovered axis.
+    for (m, n) in [(1usize, 31usize), (63, 31), (4096, 31)] {
         let err = route(m, n).unwrap_err();
         assert!(
             err.starts_with("UNCOVERED"),
             "M{m} N{n}: expected UNCOVERED prefix, got: {err}"
         );
     }
-    // [64, 128) band -> Tile64.
-    assert_eq!(route(64, 64).unwrap(), TcTile::Tile64);
+    // The Thin16 rung: every M at N in [32, 64), and M <= 64 at any
+    // covered N (the measured Thin16/Tile64 crossover, bit-free pick).
+    assert_eq!(route(63, 64).unwrap(), TcTile::Thin16);
+    assert_eq!(route(64, 63).unwrap(), TcTile::Thin16);
+    assert_eq!(route(63, 4096).unwrap(), TcTile::Thin16);
+    assert_eq!(route(4096, 63).unwrap(), TcTile::Thin16);
+    assert_eq!(route(64, 64).unwrap(), TcTile::Thin16);
+    assert_eq!(route(1, 32).unwrap(), TcTile::Thin16);
+    // (64, 128) band -> Tile64.
+    assert_eq!(route(65, 65).unwrap(), TcTile::Tile64);
     assert_eq!(route(127, 127).unwrap(), TcTile::Tile64);
     assert_eq!(route(127, 4096).unwrap(), TcTile::Tile64);
     assert_eq!(route(4096, 127).unwrap(), TcTile::Tile64);

@@ -14,10 +14,10 @@
 //! fail; removing a boundary legitimately (the G4 unification) requires
 //! updating the contract row in the same commit.
 //!
-//! The typed route's declared boundary {128} is the LIVE defect this
-//! encodes: `blas.rs` switches matvec -> typed-sgemm at M=128, two
-//! different reduction graphs. This suite documents it today and becomes
-//! its regression gate when the unification removes it.
+//! The typed route's M=128 matvec/TC break was the live defect the first
+//! recording of this suite encoded; the G4 ladder removed it from the TC
+//! tier (that arm is Strict now), and the scalar tier's bucket table
+//! keeps the remaining edges pinned.
 //!
 //! No absolute bits are captured — the suite asserts relations only, so
 //! it stays green across a legitimate arithmetic re-golden (that is
@@ -348,19 +348,21 @@ fn triad_f32_boundaries_match_the_declared_table() {
 }
 
 /// The typed BI route (what the m3 mixed forward and the future typed
-/// prefill call). The dispatcher SWITCHES kernels at M=128 (matvec below,
-/// typed triad / TC at and above) - two arithmetic families, and the
-/// boundary IS observable: under the 128-row prefix comparison with the
-/// magnitude-heterogeneous probe, the bits change at M=128.
+/// prefill call) with the TC tier ON: STRICT across all M. The G4 ladder
+/// (tc_pick_tile_forward) closed the tensor-core tier over every M at
+/// N >= 32 - Thin16 below the Tile64 band, all rungs bit-identical per
+/// element - so the old matvec/TC family break at M=128 is GONE from
+/// this tier (this declaration went Bucketed[128] -> Strict in the same
+/// commit as the dispatcher change, as the contract law requires).
 ///
-/// Chronicle, because this arm flip-flopped once: the first recording
-/// declared STRICT on a row-0-only comparison with cancellation-symmetric
-/// probes (adjacent +x/-x pairs sum exactly in ANY contiguous ascending
-/// K-partition, and row 0 alone samples ~0.1% of the output) - a probe
-/// too weak to see the switch. The defect census (gemm_bi_contract_census)
-/// exposed it with the i%4 magnitude pattern; this matrix now compares the
-/// full common prefix and agrees with the census. The static analysis that
-/// called this break live was RIGHT.
+/// Chronicle, because this arm flip-flopped once before G4: the first
+/// recording declared STRICT on a row-0-only comparison with
+/// cancellation-symmetric probes (adjacent +x/-x pairs sum exactly in ANY
+/// contiguous ascending K-partition, and row 0 alone samples ~0.1% of
+/// the output) - a probe too weak to see the then-live switch. The defect
+/// census (gemm_bi_contract_census) exposed it with the i%4 magnitude
+/// pattern; the matrix gained the full-prefix comparison, observed the
+/// M=128 edge, and G4 then removed the edge for real.
 #[test]
 #[ignore = "needs a CUDA device"]
 fn typed_route_tc_tier_boundaries_match_the_declared_table() {
@@ -372,11 +374,7 @@ fn typed_route_tc_tier_boundaries_match_the_declared_table() {
     // scalar matvec. (The first run of this suite discovered that WITHOUT
     // the TC tier the two sides agree bitwise - see the scalar arm below.)
     ctx.set_bi_tensor_cores(true);
-    // Declared per (K, N): the matvec -> TC K-slab family switch at 128.
-    // Re-record (do not hand-edit) if the dispatcher thresholds move.
-    let declared: &[(usize, usize, &[usize])] =
-        &[(384, 384, &[128usize] as &[usize]), (768, 2304, &[128])];
-    for &(k, n, edges) in declared {
+    for &(k, n) in &[(384usize, 384usize), (768, 2304)] {
         let fx = TypedFixture::new(&ctx, k, n, WeightDtype::Bf16);
         let mut launch = |m: usize| -> Vec<u32> {
             gpu_gemm_typed_forward_raw(
@@ -400,13 +398,7 @@ fn typed_route_tc_tier_boundaries_match_the_declared_table() {
             fx.prefix_bits(&ctx, m)
         };
         let obs = observed_boundaries(&mut launch, k, n);
-        assert_contract(
-            "Typed-route/bf16+tc",
-            k,
-            n,
-            Invariance::Bucketed(edges),
-            &obs,
-        );
+        assert_contract("Typed-route/bf16+tc", k, n, Invariance::Strict, &obs);
         println!("Typed/bf16+tc K={k:<5} N={n:<5} boundaries: {obs:?}");
     }
 }

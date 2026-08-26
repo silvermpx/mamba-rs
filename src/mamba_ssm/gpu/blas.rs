@@ -1165,18 +1165,22 @@ pub fn gpu_gemm_typed_forward_raw(
     // Enable via `ctx.set_batch_invariant(true)` or the
     // `MAMBA_RS_BATCH_INVARIANT=1` environment variable.
     // Typed sgemm_bi , homogeneous bf16/f16 operand triples only.
-    // Routing by M:
-    //   - M >= 128 (training prefill scale): full-coverage entry — native
-    //     typed buckets, else upcast → f32 sgemm_bi (Big/narrow cover all
-    //     M >= 128, N >= 2) → RNE downcast. Bit-identical by contract,
-    //     and the Big-tile kernels beat matvec by a wide margin here.
-    //   - M < 128 (decode / small-batch inference): fall through to
-    //     matvec_bi below. Inference batch-parity asserts STRICT all-M
-    //     bit-invariance of decode logits (KL ~1e-12 across batch sizes);
-    //     any M-dependent bucket choice here quantizes through the bf16
-    //     state each step and compounds to KL ~1e-3 (measured at b=1
-    //     ultra-thin vs b=32 matvec on mamba-130m). matvec_bi is one
-    //     reduction order for every M — that property is the contract.
+    // Routing:
+    //   - TC tier ON, N >= 32: the forward tile ladder
+    //     (Thin16/Tile64/Tile128 — bit-identical per output element)
+    //     covers EVERY M, so one arithmetic family serves decode and
+    //     prefill alike and a row's bits never depend on M. This removes
+    //     the old matvec/TC family break at M=128 (the invariance-matrix
+    //     bucket edge) at a measured M=1 cost of ~1.4-1.9x vs matvec
+    //     (thin_rung_decode_bench); from M=4 the ladder is FASTER.
+    //   - scalar tier (TC off), M >= 128: full-coverage typed entry —
+    //     native typed buckets, else upcast → f32 sgemm_bi → RNE
+    //     downcast. Bit-identical by contract.
+    //   - scalar tier M < 128, and N < 32 on either tier: matvec_bi
+    //     below — one reduction order for every M within its band.
+    // Inference batch-parity asserts STRICT all-M bit-invariance of
+    // decode logits (KL ~1e-12 across batch sizes); both the ladder and
+    // matvec hold it — each is one reduction order for every M it serves.
     // Mixed a/b dtype combos have NO matvec_bi kernel (the a==b guard in
     // pick_bi_matvec): under the batch-invariant contract they FAIL LOUD
     // below instead of silently taking non-deterministic cuBLAS.
@@ -1187,14 +1191,12 @@ pub fn gpu_gemm_typed_forward_raw(
         return gemm_bi_forward_raw(ctx, c, x, w, bias_ptr, dims);
     }
 
-    if ctx.batch_invariant()
-        && c.dtype != WeightDtype::F32
-        && c.dtype == x.dtype
-        && x.dtype == w.dtype
-        && batch >= 128
-        && n_out >= 2
-    {
-        return bi_sgemm_forward_typed(ctx, c, x, w, bias_ptr.unwrap_or(0), dims);
+    let homogeneous_half = c.dtype != WeightDtype::F32 && c.dtype == x.dtype && x.dtype == w.dtype;
+    if ctx.batch_invariant() && homogeneous_half && n_out >= 2 {
+        let tc_ladder = ctx.bi_tensor_cores() && n_out >= 32;
+        if tc_ladder || batch >= 128 {
+            return bi_sgemm_forward_typed(ctx, c, x, w, bias_ptr.unwrap_or(0), dims);
+        }
     }
 
     if ctx.batch_invariant()

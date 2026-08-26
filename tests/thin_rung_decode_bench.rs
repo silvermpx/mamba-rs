@@ -46,6 +46,16 @@ fn thin16_vs_matvec_decode() {
         (4, 768, 2560),
         (16, 768, 2304),
         (32, 1536, 1536),
+        // The Thin16/Tile64 crossover band - the ladder selector's
+        // threshold is pinned from these rows, not from theory.
+        (48, 768, 2304),
+        (64, 768, 2304),
+        (96, 768, 2304),
+        (128, 768, 2304),
+        (256, 768, 2304),
+        (48, 1536, 1536),
+        (64, 1536, 1536),
+        (128, 1536, 1536),
     ];
 
     println!(
@@ -61,7 +71,9 @@ fn thin16_vs_matvec_decode() {
             .expect("W up");
         let c = DtypedBuf::zeros(&ctx.stream, m * n, WeightDtype::Bf16).expect("C");
 
-        // matvec_bi through the public typed route (m < 128 => matvec).
+        // matvec_bi through the public typed route - the SCALAR tier
+        // (this ctx never enables the TC tier), where m < 128 still
+        // routes to matvec after G4.
         let mv = |c: &DtypedBuf| {
             gpu_gemm_typed_forward_raw(
                 &ctx,
