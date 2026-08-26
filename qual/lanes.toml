@@ -88,6 +88,7 @@
 "matvec_probe" = "record"
 "memory_footprint" = "record"
 "mixed_prefill_parity" = "gate"
+"msrv_single_source" = "host"
 "optimizer_resume_bitwise" = "gate"
 "parallel_run_determinism" = "contract"
 "prefill" = "contract"
