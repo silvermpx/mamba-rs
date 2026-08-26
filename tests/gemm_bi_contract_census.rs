@@ -19,7 +19,7 @@
 #![cfg(feature = "cuda")]
 
 use mamba_rs::mamba_ssm::gpu::blas::{TypedPtr, gemm_bi_forward_raw};
-use mamba_rs::mamba_ssm::gpu::buffers::DtypedBuf;
+use mamba_rs::mamba_ssm::gpu::buffers::{DtypedBuf, GpuBuffer};
 use mamba_rs::mamba_ssm::gpu::context::{BiGemmFamily, GpuCtx};
 use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
 use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
@@ -246,6 +246,114 @@ fn census_thin16_vs_tile64() {
             "Thin16 diverged from Tile64 at {m}x{k}x{n} - the rung is NOT \
              bit-identical and may not join the ladder"
         );
+    }
+}
+
+#[test]
+#[ignore = "needs a CUDA device"]
+fn census_backward_tile64_tail_contract() {
+    use mamba_rs::mamba_ssm::gpu::gemm_bi_triad::{
+        TcTile, sgemm_bi_backward_dw_tc_with_tile, sgemm_bi_backward_dx_tc_with_tile,
+    };
+
+    let dev = GpuDevice::new(0).expect("cuda device");
+    let ctx = GpuCtx::new(&dev).expect("ctx");
+    let shapes = [
+        (1024usize, 8usize, 256usize),
+        (2048, 16, 512),
+        (2048, 48, 1536),
+        (1024, 256, 40),
+        (2048, 512, 48),
+        (32, 256, 1024),
+    ];
+
+    for dtype in [WeightDtype::Bf16, WeightDtype::F16] {
+        for &(m, k, n) in &shapes {
+            let x = DtypedBuf::zeros(&ctx.stream, m * k, dtype).expect("X");
+            x.upload_f32(&ctx.stream, &synth(m * k, 0x1100 ^ m as u64))
+                .expect("X upload");
+            let dy = DtypedBuf::zeros(&ctx.stream, m * n, dtype).expect("dY");
+            dy.upload_f32(&ctx.stream, &synth(m * n, 0x2200 ^ n as u64))
+                .expect("dY upload");
+            let w = DtypedBuf::zeros(&ctx.stream, k * n, dtype).expect("W");
+            w.upload_f32(&ctx.stream, &synth(k * n, 0x3300 ^ k as u64))
+                .expect("W upload");
+
+            let initial = synth(k * n, 0x4400 ^ (k * n) as u64);
+            let mut dw64 = GpuBuffer::zeros(&ctx.stream, k * n).expect("dW64");
+            let mut dw128 = GpuBuffer::zeros(&ctx.stream, k * n).expect("dW128");
+            dw64.upload(&ctx.stream, &initial).expect("dW64 upload");
+            dw128.upload(&ctx.stream, &initial).expect("dW128 upload");
+            for (output, tile) in [(&dw64, TcTile::Tile64), (&dw128, TcTile::Tile128)] {
+                sgemm_bi_backward_dw_tc_with_tile(
+                    &ctx.stream,
+                    &ctx.kernels,
+                    output.cached_ptr(),
+                    TypedPtr {
+                        ptr: dy.cached_ptr(),
+                        dtype,
+                    },
+                    TypedPtr {
+                        ptr: x.cached_ptr(),
+                        dtype,
+                    },
+                    (m, k, n),
+                    tile,
+                )
+                .expect("TN launch");
+            }
+            ctx.stream.synchronize().expect("TN sync");
+            assert_eq!(
+                dw64.to_cpu(&ctx.stream)
+                    .expect("dW64 download")
+                    .into_iter()
+                    .map(f32::to_bits)
+                    .collect::<Vec<_>>(),
+                dw128
+                    .to_cpu(&ctx.stream)
+                    .expect("dW128 download")
+                    .into_iter()
+                    .map(f32::to_bits)
+                    .collect::<Vec<_>>(),
+                "{dtype:?} TN tile contract changed at M{m} K{k} N{n}"
+            );
+
+            let sentinel = vec![3.0f32; m * k];
+            let dx64 = DtypedBuf::zeros(&ctx.stream, m * k, dtype).expect("dX64");
+            let dx128 = DtypedBuf::zeros(&ctx.stream, m * k, dtype).expect("dX128");
+            dx64.upload_f32(&ctx.stream, &sentinel)
+                .expect("dX64 upload");
+            dx128
+                .upload_f32(&ctx.stream, &sentinel)
+                .expect("dX128 upload");
+            for (output, tile) in [(&dx64, TcTile::Tile64), (&dx128, TcTile::Tile128)] {
+                sgemm_bi_backward_dx_tc_with_tile(
+                    &ctx.stream,
+                    &ctx.kernels,
+                    TypedPtr {
+                        ptr: output.cached_ptr(),
+                        dtype,
+                    },
+                    TypedPtr {
+                        ptr: dy.cached_ptr(),
+                        dtype,
+                    },
+                    TypedPtr {
+                        ptr: w.cached_ptr(),
+                        dtype,
+                    },
+                    (m, k, n),
+                    tile,
+                )
+                .expect("NT launch");
+            }
+            ctx.stream.synchronize().expect("NT sync");
+            assert_eq!(
+                bits(&dx64, m * k, &ctx),
+                bits(&dx128, m * k, &ctx),
+                "{dtype:?} NT tile contract changed at M{m} K{k} N{n}"
+            );
+        }
     }
 }
 

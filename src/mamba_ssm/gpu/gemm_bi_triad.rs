@@ -2142,25 +2142,13 @@ pub enum TcTile {
     Thin16,
 }
 
-/// Underfill threshold for the TC tile picker: when BOTH output dims pass
-/// the 128 gate but the 128-tile grid has fewer than this many CTAs, route
-/// to the 64x64-tile twins instead (4x the CTAs at the same total FLOPs —
-/// a 142-SM Ada is mostly idle on e.g. the d128 in_proj dW's 4-CTA grid).
-///
-/// SAFE under the strict all-M invariance contract because the 64- and
-/// 128-tile TC kernels are BIT-IDENTICAL per output element (same BK=64
-/// reduction slabs, same ascending mma chain, same tail zero-fill —
-/// asserted by `tc64_and_tc128_bit_identical` in tests/gemm_bi_tc.rs), so
-/// an M-dependent tile pick never changes output bits. 72 keeps every
-/// GEMM of the d768/d1536 trainer benches on Tile128 (their smallest TC
-/// grid is dW out_proj at 12*6 = 72 tiles) while d128/d256 grids (2..=128
-/// tiles) route to Tile64; the GEMM-level crossover measured on Ada is
-/// well above 72, so this is the conservative end.
+/// Prefer the smaller tile while a 128x128 launch has too few independent
+/// CTAs. Both tile families issue the same ascending MMA reduction for an
+/// output element, so this changes occupancy without changing its bits.
 pub const TC64_PREFER_MAX_TILES128: u32 = 72;
 
-/// Pick the TC tile for a pair of OUTPUT dims (rows, cols). `None` = shape
-/// below the TC gates (caller returns the `UNCOVERED` error).
-fn tc_pick_tile(rows: usize, cols: usize) -> Option<TcTile> {
+/// Choose between the square tiles once both output axes reach one Tile64.
+fn tc_pick_tile_large(rows: usize, cols: usize) -> Option<TcTile> {
     if rows >= 128 && cols >= 128 {
         let tiles128 = u32::try_from(rows)
             .ok()?
@@ -2177,18 +2165,9 @@ fn tc_pick_tile(rows: usize, cols: usize) -> Option<TcTile> {
     None
 }
 
-/// Forward-only ladder pick: adds the Thin16 decode rung below the
-/// Tile64/Tile128 gates, which closes the TC tier over EVERY M at
-/// `cols >= 32` (the Thin16 column floor). An M-keyed pick is legal
-/// scheduling here because all three tiles are bit-identical per output
-/// element (`census_thin16_vs_tile64` + `tc64_and_tc128_bit_identical`) -
-/// the pick can never change bits. Threshold from the clean sm_89
-/// measurement (`thin_rung_decode_bench`): Thin16 wins through M=64 on
-/// both bench shapes (7.9 vs 9.9 us at 768x2304, 10.8 vs 17.5 at
-/// 1536x1536) and first loses at M=96 on the wide-N shape - the
-/// crossover is shape-dependent (the G7 autotable's refinement), 64 is
-/// the measured-safe end. Forward NN only - the TN/NT entries have no
-/// Thin16 twin and keep `tc_pick_tile`.
+/// The forward thin tile covers the narrow rows or columns below Tile64.
+/// Its per-element MMA order matches the square tiles, so crossing this
+/// scheduling boundary preserves the forward numeric contract.
 fn tc_pick_tile_forward(rows: usize, cols: usize) -> Option<TcTile> {
     if cols < 32 {
         return None;
@@ -2196,7 +2175,89 @@ fn tc_pick_tile_forward(rows: usize, cols: usize) -> Option<TcTile> {
     if rows <= 64 || cols < 64 {
         return Some(TcTile::Thin16);
     }
-    tc_pick_tile(rows, cols)
+    tc_pick_tile_large(rows, cols)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TcBackwardOp {
+    Dw,
+    Dx,
+}
+
+#[derive(Clone, Copy)]
+struct TcBackwardCell {
+    op: TcBackwardOp,
+    dtype: WeightDtype,
+    dims: (usize, usize, usize),
+}
+
+const fn tc_backward_cell(
+    op: TcBackwardOp,
+    dtype: WeightDtype,
+    dims: (usize, usize, usize),
+) -> TcBackwardCell {
+    TcBackwardCell { op, dtype, dims }
+}
+
+/// Automatic tail admission is keyed by the complete GEMM. The reduction
+/// length stays in the key because it can change the incumbent schedule.
+const TC64_BACKWARD_CELLS: [TcBackwardCell; 18] = [
+    tc_backward_cell(TcBackwardOp::Dw, WeightDtype::Bf16, (1024, 8, 256)),
+    tc_backward_cell(TcBackwardOp::Dw, WeightDtype::Bf16, (2048, 16, 512)),
+    tc_backward_cell(TcBackwardOp::Dw, WeightDtype::Bf16, (2048, 48, 1536)),
+    tc_backward_cell(TcBackwardOp::Dw, WeightDtype::Bf16, (1024, 256, 40)),
+    tc_backward_cell(TcBackwardOp::Dw, WeightDtype::Bf16, (2048, 512, 48)),
+    tc_backward_cell(TcBackwardOp::Dx, WeightDtype::Bf16, (1024, 8, 256)),
+    tc_backward_cell(TcBackwardOp::Dx, WeightDtype::Bf16, (2048, 16, 512)),
+    tc_backward_cell(TcBackwardOp::Dx, WeightDtype::Bf16, (2048, 48, 1536)),
+    tc_backward_cell(TcBackwardOp::Dx, WeightDtype::Bf16, (32, 256, 1024)),
+    tc_backward_cell(TcBackwardOp::Dw, WeightDtype::F16, (1024, 8, 256)),
+    tc_backward_cell(TcBackwardOp::Dw, WeightDtype::F16, (2048, 16, 512)),
+    tc_backward_cell(TcBackwardOp::Dw, WeightDtype::F16, (2048, 48, 1536)),
+    tc_backward_cell(TcBackwardOp::Dw, WeightDtype::F16, (1024, 256, 40)),
+    tc_backward_cell(TcBackwardOp::Dw, WeightDtype::F16, (2048, 512, 48)),
+    tc_backward_cell(TcBackwardOp::Dx, WeightDtype::F16, (1024, 8, 256)),
+    tc_backward_cell(TcBackwardOp::Dx, WeightDtype::F16, (2048, 16, 512)),
+    tc_backward_cell(TcBackwardOp::Dx, WeightDtype::F16, (2048, 48, 1536)),
+    tc_backward_cell(TcBackwardOp::Dx, WeightDtype::F16, (32, 256, 1024)),
+];
+
+/// Tile64 predicates both output tails, but two short axes would waste the
+/// whole square tile and remain on the scalar fallback.
+fn tc_pick_tile_backward_bridge(rows: usize, cols: usize) -> Option<TcTile> {
+    if rows == 0 || cols == 0 {
+        return None;
+    }
+    if rows >= 64 && cols >= 64 {
+        return tc_pick_tile_large(rows, cols);
+    }
+    if rows >= 64 || cols >= 64 {
+        return Some(TcTile::Tile64);
+    }
+    None
+}
+
+/// Large shapes keep the existing square-tile policy. A one-axis tail is
+/// selected automatically only when its full operation is frozen above.
+fn tc_pick_tile_backward(
+    op: TcBackwardOp,
+    dtype: WeightDtype,
+    dims: (usize, usize, usize),
+) -> Option<TcTile> {
+    let (batch, n_in, n_out) = dims;
+    let (rows, cols) = match op {
+        TcBackwardOp::Dw => (n_in, n_out),
+        TcBackwardOp::Dx => (batch, n_in),
+    };
+    let tile = tc_pick_tile_backward_bridge(rows, cols)?;
+    if rows >= 64 && cols >= 64 {
+        return Some(tile);
+    }
+
+    TC64_BACKWARD_CELLS
+        .iter()
+        .any(|cell| cell.op == op && cell.dtype == dtype && cell.dims == dims)
+        .then_some(tile)
 }
 
 impl TcTile {
@@ -2337,8 +2398,8 @@ pub fn sgemm_bi_forward_tc_with_tile(
 
 /// Tensor-core TN dW (stage 5): `dW[K,N] += X^T @ dY` via mma.sync with f32
 /// accumulate straight into the f32 master gradient. Same TC contract as
-/// [`sgemm_bi_forward_tc`]. Covers K_out >= 64 && N >= 64. Returns the tile
-/// variant that actually launched.
+/// [`sgemm_bi_forward_tc`]. Large outputs keep the square-tile policy;
+/// qualified one-axis tails use Tile64. Returns the tile that launched.
 pub fn sgemm_bi_backward_dw_tc(
     stream: &Arc<cudarc::driver::CudaStream>,
     kernels: &GpuKernels,
@@ -2349,11 +2410,11 @@ pub fn sgemm_bi_backward_dw_tc(
 ) -> Result<TcTile, String> {
     let checked_dims = GemmDims::tn(dims)?;
     let (batch, n_in, n_out) = checked_dims.tuple();
-    // Tile pick keys on the OUTPUT dims (K_out, N) only — never on the
-    // reduction dim (batch), so the dW reduction order is shape-keyed.
-    let tile = tc_pick_tile(n_in, n_out).ok_or_else(|| {
+    // Tile geometry keys on (K_out, N). Tail admission also keeps the
+    // reduction length in its frozen performance key.
+    let tile = tc_pick_tile_backward(TcBackwardOp::Dw, dy.dtype, dims).ok_or_else(|| {
         format!(
-            "UNCOVERED sgemm_bi_backward_dw_tc: shape M={batch} K={n_in} N={n_out} below the TC tile gate"
+            "UNCOVERED sgemm_bi_backward_dw_tc: shape M={batch} K={n_in} N={n_out} outside the automatic TC route"
         )
     })?;
     sgemm_bi_backward_dw_tc_with_tile(stream, kernels, dw_ptr, dy, x_saved, dims, tile)?;
@@ -2406,7 +2467,7 @@ pub fn sgemm_bi_backward_dw_tc_with_tile(
 
 /// Tensor-core NT dX (stage 5): `dX[M,K] = dY @ W^T` via mma.sync, typed RNE
 /// overwrite. Same TC contract as [`sgemm_bi_forward_tc`]. Covers
-/// M >= 64 && K_out >= 64. Returns the tile variant that actually launched.
+/// large outputs plus qualified one-axis tails. Returns the tile that launched.
 pub fn sgemm_bi_backward_dx_tc(
     stream: &Arc<cudarc::driver::CudaStream>,
     kernels: &GpuKernels,
@@ -2417,9 +2478,9 @@ pub fn sgemm_bi_backward_dx_tc(
 ) -> Result<TcTile, String> {
     let checked_dims = GemmDims::nt(dims)?;
     let (batch, n_in, n_out) = checked_dims.tuple();
-    let tile = tc_pick_tile(batch, n_in).ok_or_else(|| {
+    let tile = tc_pick_tile_backward(TcBackwardOp::Dx, dx.dtype, dims).ok_or_else(|| {
         format!(
-            "UNCOVERED sgemm_bi_backward_dx_tc: shape M={batch} K={n_in} N={n_out} below the TC tile gate"
+            "UNCOVERED sgemm_bi_backward_dx_tc: shape M={batch} K={n_in} N={n_out} outside the automatic TC route"
         )
     })?;
     sgemm_bi_backward_dx_tc_with_tile(stream, kernels, dx, dy, w, dims, tile)?;

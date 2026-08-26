@@ -303,12 +303,40 @@ fn tc_backward_matches_f32_reference_loosely() {
 
 #[test]
 fn tc_mixed_training_is_bit_identical_across_runs() {
-    // End-to-end: bf16 mixed trainer with BOTH flags on. The TC contract
-    // is different bits than the scalar tier, but it must still be
-    // bit-identical across fresh runs (incl. CUDA Graph capture/replay).
     use mamba_rs::config::{MambaConfig, ScanMode};
     use mamba_rs::mamba_ssm::gpu::trainer::{MambaTrainer, TrainSessionCfg};
     use mamba_rs::weights::MambaWeights;
+
+    fn digest(values: &[f32]) -> u64 {
+        let mut hash = 0xcbf2_9ce4_8422_2325u64;
+        for value in values {
+            for byte in value.to_bits().to_le_bytes() {
+                hash ^= u64::from(byte);
+                hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+            }
+        }
+        hash
+    }
+
+    fn master_digest(weights: &MambaWeights) -> u64 {
+        let mut values = Vec::new();
+        values.extend_from_slice(&weights.input_proj_w);
+        values.extend_from_slice(&weights.input_proj_b);
+        for layer in &weights.layers {
+            values.extend_from_slice(&layer.norm_weight);
+            values.extend_from_slice(&layer.in_proj_w);
+            values.extend_from_slice(&layer.conv1d_weight);
+            values.extend_from_slice(&layer.conv1d_bias);
+            values.extend_from_slice(&layer.x_proj_w);
+            values.extend_from_slice(&layer.dt_proj_w);
+            values.extend_from_slice(&layer.dt_proj_b);
+            values.extend_from_slice(&layer.a_log);
+            values.extend_from_slice(&layer.d_param);
+            values.extend_from_slice(&layer.out_proj_w);
+        }
+        values.extend_from_slice(&weights.norm_f_weight);
+        digest(&values)
+    }
 
     let cfg = MambaConfig {
         d_model: 128,
@@ -319,7 +347,7 @@ fn tc_mixed_training_is_bit_identical_across_runs() {
         scan_mode: ScanMode::Auto,
         rms_norm_eps: 1e-5,
     };
-    let run = || -> Vec<f32> {
+    let run = || -> (Vec<(u64, u64)>, u64) {
         let mut cpu = MambaWeights::init(&cfg, cfg.d_model, 0xDE7E_4213);
         cpu.input_proj_w.clear();
         cpu.input_proj_b.clear();
@@ -329,7 +357,7 @@ fn tc_mixed_training_is_bit_identical_across_runs() {
         let session = TrainSessionCfg {
             input_dim: cfg.d_model,
             batch: 4,
-            seq_len: 64,
+            seq_len: 256,
             lr: 1e-3,
             weight_decay: 0.0,
         };
@@ -337,29 +365,31 @@ fn tc_mixed_training_is_bit_identical_across_runs() {
             MambaTrainer::new_full(0, &cpu, cfg, session, WeightDtype::Bf16).expect("trainer");
         tr.ctx().set_batch_invariant(true);
         tr.ctx().set_bi_tensor_cores(true);
-        let n = 4 * 64 * cfg.d_model;
-        for s in 0..5 {
-            tr.step(&det(n, 0x11 + s as u32, 1.0), &det(n, 0x77 + s as u32, 0.1))
-                .expect("step");
+        let n = 4 * 256 * cfg.d_model;
+        tr.step(&det(n, 0x11, 1.0), &det(n, 0x77, 0.1))
+            .expect("warmup");
+        tr.capture_graph().expect("capture");
+        assert!(tr.has_graph());
+
+        let mut replay_digests = Vec::new();
+        for s in 0..2 {
+            let metrics = tr
+                .step(&det(n, 0x12 + s, 1.0), &det(n, 0x78 + s, 0.1))
+                .expect("graph replay");
+            assert!(metrics.graph_replayed);
+            let stream = tr.ctx().stream.clone();
+            let gradients = tr.grad_arena().to_cpu(&stream).expect("gradients");
+            let master = tr.snapshot_master().expect("snapshot");
+            replay_digests.push((digest(&gradients), master_digest(&master)));
         }
-        let w = tr.snapshot_master().expect("snapshot");
-        let mut out = Vec::new();
-        for l in &w.layers {
-            out.extend_from_slice(&l.in_proj_w);
-            out.extend_from_slice(&l.out_proj_w);
-        }
-        out
+        let final_master = master_digest(&tr.snapshot_master().expect("snapshot"));
+        (replay_digests, final_master)
     };
     let a = run();
     let b = run();
-    let diffs = a
-        .iter()
-        .zip(&b)
-        .filter(|(x, y)| x.to_bits() != y.to_bits())
-        .count();
     assert_eq!(
-        diffs, 0,
-        "TC mixed training must be bit-identical across runs"
+        a, b,
+        "TC graph gradient or master digest changed across runs"
     );
 }
 
@@ -538,6 +568,463 @@ fn tc64_and_tc128_bit_identical() {
                     "{dt:?} dX M{m} K{k} N{n}: Tile64/Tile128 bit drift at {i}"
                 );
             }
+        }
+    }
+}
+
+#[test]
+fn tc64_backward_tail_contract_is_exact() {
+    use gemm_bi_triad::TcTile;
+
+    let t = Ctx::new();
+    let axes = [1usize, 7, 8, 15, 16, 31, 32, 40, 48, 49, 63, 64, 65];
+    let reductions = [1usize, 17, 63, 64, 65, 100, 129];
+
+    for dt in [WeightDtype::Bf16, WeightDtype::F16] {
+        for (case, &axis) in axes.iter().enumerate() {
+            for (rows, cols) in [(axis, 65usize), (65usize, axis)] {
+                let reduction = reductions[case % reductions.len()];
+
+                let x = t.typed_buf(
+                    &quantize(&det(reduction * rows, 0x1100 + case as u32, 0.5), dt),
+                    dt,
+                );
+                let dy = t.typed_buf(
+                    &quantize(&det(reduction * cols, 0x2200 + case as u32, 0.25), dt),
+                    dt,
+                );
+                let initial = det(rows * cols, 0x3300 + case as u32, 0.125);
+                let mut dw_results = Vec::new();
+                for tile in [TcTile::Tile64, TcTile::Tile128] {
+                    let dw = t.f32_buf(&initial);
+                    gemm_bi_triad::sgemm_bi_backward_dw_tc_with_tile(
+                        &t.ctx.stream,
+                        &t.ctx.kernels,
+                        dw.cached_ptr(),
+                        TypedPtr {
+                            ptr: dy.cached_ptr(),
+                            dtype: dt,
+                        },
+                        TypedPtr {
+                            ptr: x.cached_ptr(),
+                            dtype: dt,
+                        },
+                        (reduction, rows, cols),
+                        tile,
+                    )
+                    .unwrap();
+                    t.ctx.stream.synchronize().unwrap();
+                    dw_results.push(dw.to_cpu(&t.ctx.stream).unwrap());
+                }
+                assert_eq!(
+                    dw_results[0]
+                        .iter()
+                        .map(|value| value.to_bits())
+                        .collect::<Vec<_>>(),
+                    dw_results[1]
+                        .iter()
+                        .map(|value| value.to_bits())
+                        .collect::<Vec<_>>(),
+                    "{dt:?} TN Tile64/Tile128 mismatch at M{reduction} K{rows} N{cols}"
+                );
+                assert!(
+                    dw_results[0]
+                        .iter()
+                        .zip(&initial)
+                        .any(|(after, before)| after.to_bits() != before.to_bits()),
+                    "{dt:?} TN did not accumulate at M{reduction} K{rows} N{cols}"
+                );
+                let dw_zero = GpuBuffer::zeros(&t.ctx.stream, rows * cols).unwrap();
+                gemm_bi_triad::sgemm_bi_backward_dw_tc_with_tile(
+                    &t.ctx.stream,
+                    &t.ctx.kernels,
+                    dw_zero.cached_ptr(),
+                    TypedPtr {
+                        ptr: dy.cached_ptr(),
+                        dtype: dt,
+                    },
+                    TypedPtr {
+                        ptr: x.cached_ptr(),
+                        dtype: dt,
+                    },
+                    (reduction, rows, cols),
+                    TcTile::Tile64,
+                )
+                .unwrap();
+                t.ctx.stream.synchronize().unwrap();
+                let product = dw_zero.to_cpu(&t.ctx.stream).unwrap();
+                assert_eq!(
+                    dw_results[0]
+                        .iter()
+                        .map(|value| value.to_bits())
+                        .collect::<Vec<_>>(),
+                    product
+                        .iter()
+                        .zip(&initial)
+                        .map(|(value, old)| (value + old).to_bits())
+                        .collect::<Vec<_>>(),
+                    "{dt:?} TN did not preserve the incoming dW at M{reduction} K{rows} N{cols}"
+                );
+
+                let nt_dy = t.typed_buf(
+                    &quantize(&det(rows * reduction, 0x4400 + case as u32, 0.25), dt),
+                    dt,
+                );
+                let w = t.typed_buf(
+                    &quantize(&det(cols * reduction, 0x5500 + case as u32, 0.5), dt),
+                    dt,
+                );
+                let sentinel = quantize(&vec![3.25f32; rows * cols], dt);
+                let mut dx_results = Vec::new();
+                for tile in [TcTile::Tile64, TcTile::Tile128] {
+                    let dx = t.typed_buf(&sentinel, dt);
+                    gemm_bi_triad::sgemm_bi_backward_dx_tc_with_tile(
+                        &t.ctx.stream,
+                        &t.ctx.kernels,
+                        TypedPtr {
+                            ptr: dx.cached_ptr(),
+                            dtype: dt,
+                        },
+                        TypedPtr {
+                            ptr: nt_dy.cached_ptr(),
+                            dtype: dt,
+                        },
+                        TypedPtr {
+                            ptr: w.cached_ptr(),
+                            dtype: dt,
+                        },
+                        (rows, cols, reduction),
+                        tile,
+                    )
+                    .unwrap();
+                    t.ctx.stream.synchronize().unwrap();
+                    let mut result = vec![0.0f32; rows * cols];
+                    dx.download_f32(&t.ctx.stream, &mut result).unwrap();
+                    dx_results.push(result);
+                }
+                assert_eq!(
+                    dx_results[0]
+                        .iter()
+                        .map(|value| value.to_bits())
+                        .collect::<Vec<_>>(),
+                    dx_results[1]
+                        .iter()
+                        .map(|value| value.to_bits())
+                        .collect::<Vec<_>>(),
+                    "{dt:?} NT Tile64/Tile128 mismatch at M{rows} K{cols} N{reduction}"
+                );
+                assert!(
+                    dx_results[0]
+                        .iter()
+                        .zip(&sentinel)
+                        .any(|(after, before)| after.to_bits() != before.to_bits()),
+                    "{dt:?} NT did not overwrite at M{rows} K{cols} N{reduction}"
+                );
+                let dx_zero = DtypedBuf::zeros(&t.ctx.stream, rows * cols, dt).unwrap();
+                gemm_bi_triad::sgemm_bi_backward_dx_tc_with_tile(
+                    &t.ctx.stream,
+                    &t.ctx.kernels,
+                    TypedPtr {
+                        ptr: dx_zero.cached_ptr(),
+                        dtype: dt,
+                    },
+                    TypedPtr {
+                        ptr: nt_dy.cached_ptr(),
+                        dtype: dt,
+                    },
+                    TypedPtr {
+                        ptr: w.cached_ptr(),
+                        dtype: dt,
+                    },
+                    (rows, cols, reduction),
+                    TcTile::Tile64,
+                )
+                .unwrap();
+                t.ctx.stream.synchronize().unwrap();
+                let mut from_zero = vec![0.0f32; rows * cols];
+                dx_zero.download_f32(&t.ctx.stream, &mut from_zero).unwrap();
+                assert_eq!(
+                    dx_results[0]
+                        .iter()
+                        .map(|value| value.to_bits())
+                        .collect::<Vec<_>>(),
+                    from_zero
+                        .iter()
+                        .map(|value| value.to_bits())
+                        .collect::<Vec<_>>(),
+                    "{dt:?} NT retained the incoming output at M{rows} K{cols} N{reduction}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn tc64_backward_tail_repeats_are_bit_stable() {
+    use gemm_bi_triad::TcTile;
+
+    let t = Ctx::new();
+    for dt in [WeightDtype::Bf16, WeightDtype::F16] {
+        let (m, k, n) = (129usize, 49usize, 65usize);
+        let x = t.typed_buf(&quantize(&det(m * k, 0x6100, 0.5), dt), dt);
+        let dy = t.typed_buf(&quantize(&det(m * n, 0x6200, 0.25), dt), dt);
+        let initial = det(k * n, 0x6300, 0.125);
+        let mut reference = None;
+        for _ in 0..20 {
+            let dw = t.f32_buf(&initial);
+            gemm_bi_triad::sgemm_bi_backward_dw_tc_with_tile(
+                &t.ctx.stream,
+                &t.ctx.kernels,
+                dw.cached_ptr(),
+                TypedPtr {
+                    ptr: dy.cached_ptr(),
+                    dtype: dt,
+                },
+                TypedPtr {
+                    ptr: x.cached_ptr(),
+                    dtype: dt,
+                },
+                (m, k, n),
+                TcTile::Tile64,
+            )
+            .unwrap();
+            t.ctx.stream.synchronize().unwrap();
+            let bits = dw
+                .to_cpu(&t.ctx.stream)
+                .unwrap()
+                .into_iter()
+                .map(f32::to_bits)
+                .collect::<Vec<_>>();
+            if let Some(expected) = &reference {
+                assert_eq!(
+                    &bits, expected,
+                    "{dt:?} TN changed across repeated launches"
+                );
+            } else {
+                reference = Some(bits);
+            }
+        }
+
+        let nt_dy = t.typed_buf(&quantize(&det(m * n, 0x6400, 0.25), dt), dt);
+        let w = t.typed_buf(&quantize(&det(k * n, 0x6500, 0.5), dt), dt);
+        let sentinel = quantize(&vec![-2.5f32; m * k], dt);
+        let mut reference = None;
+        for _ in 0..20 {
+            let dx = t.typed_buf(&sentinel, dt);
+            gemm_bi_triad::sgemm_bi_backward_dx_tc_with_tile(
+                &t.ctx.stream,
+                &t.ctx.kernels,
+                TypedPtr {
+                    ptr: dx.cached_ptr(),
+                    dtype: dt,
+                },
+                TypedPtr {
+                    ptr: nt_dy.cached_ptr(),
+                    dtype: dt,
+                },
+                TypedPtr {
+                    ptr: w.cached_ptr(),
+                    dtype: dt,
+                },
+                (m, k, n),
+                TcTile::Tile64,
+            )
+            .unwrap();
+            t.ctx.stream.synchronize().unwrap();
+            let mut result = vec![0.0f32; m * k];
+            dx.download_f32(&t.ctx.stream, &mut result).unwrap();
+            let bits = result.into_iter().map(f32::to_bits).collect::<Vec<_>>();
+            if let Some(expected) = &reference {
+                assert_eq!(
+                    &bits, expected,
+                    "{dt:?} NT changed across repeated launches"
+                );
+            } else {
+                reference = Some(bits);
+            }
+        }
+    }
+}
+
+#[test]
+fn tc64_backward_qualified_routes_match_the_forced_kernel() {
+    use gemm_bi_triad::TcTile;
+
+    let t = Ctx::new();
+    let tn_shapes = [
+        (1024usize, 8usize, 256usize),
+        (2048, 16, 512),
+        (2048, 48, 1536),
+        (1024, 256, 40),
+        (2048, 512, 48),
+    ];
+    let nt_shapes = [
+        (1024usize, 8usize, 256usize),
+        (2048, 16, 512),
+        (2048, 48, 1536),
+        (32, 256, 1024),
+    ];
+
+    t.ctx.set_batch_invariant(true);
+    t.ctx.set_bi_tensor_cores(true);
+    for dt in [WeightDtype::Bf16, WeightDtype::F16] {
+        for (case, &(m, k, n)) in tn_shapes.iter().enumerate() {
+            let x = t.typed_buf(&quantize(&det(m * k, 0x7100 + case as u32, 0.5), dt), dt);
+            let dy = t.typed_buf(&quantize(&det(m * n, 0x7200 + case as u32, 0.25), dt), dt);
+            let initial = det(k * n, 0x7300 + case as u32, 0.125);
+            let forced = t.f32_buf(&initial);
+            let automatic = t.f32_buf(&initial);
+            let resolved = t.f32_buf(&initial);
+            let dyp = TypedPtr {
+                ptr: dy.cached_ptr(),
+                dtype: dt,
+            };
+            let xp = TypedPtr {
+                ptr: x.cached_ptr(),
+                dtype: dt,
+            };
+            gemm_bi_triad::sgemm_bi_backward_dw_tc_with_tile(
+                &t.ctx.stream,
+                &t.ctx.kernels,
+                forced.cached_ptr(),
+                dyp,
+                xp,
+                (m, k, n),
+                TcTile::Tile64,
+            )
+            .unwrap();
+            let tile = gemm_bi_triad::sgemm_bi_backward_dw_tc(
+                &t.ctx.stream,
+                &t.ctx.kernels,
+                automatic.cached_ptr(),
+                dyp,
+                xp,
+                (m, k, n),
+            )
+            .unwrap();
+            assert_eq!(tile, TcTile::Tile64, "{dt:?} TN route at M{m} K{k} N{n}");
+            mamba_rs::mamba_ssm::gpu::blas::bi_sgemm_backward_dw_typed(
+                &t.ctx,
+                resolved.cached_ptr(),
+                dyp,
+                xp,
+                (m, k, n),
+            )
+            .unwrap();
+            t.ctx.stream.synchronize().unwrap();
+            let forced_bits = forced
+                .to_cpu(&t.ctx.stream)
+                .unwrap()
+                .into_iter()
+                .map(f32::to_bits)
+                .collect::<Vec<_>>();
+            assert_eq!(
+                forced_bits,
+                automatic
+                    .to_cpu(&t.ctx.stream)
+                    .unwrap()
+                    .into_iter()
+                    .map(f32::to_bits)
+                    .collect::<Vec<_>>(),
+                "{dt:?} TN automatic route differs from forced Tile64 at M{m} K{k} N{n}"
+            );
+            assert_eq!(
+                forced_bits,
+                resolved
+                    .to_cpu(&t.ctx.stream)
+                    .unwrap()
+                    .into_iter()
+                    .map(f32::to_bits)
+                    .collect::<Vec<_>>(),
+                "{dt:?} TN resolved path differs from forced Tile64 at M{m} K{k} N{n}"
+            );
+        }
+
+        for (case, &(m, k, n)) in nt_shapes.iter().enumerate() {
+            let dy = t.typed_buf(&quantize(&det(m * n, 0x7400 + case as u32, 0.25), dt), dt);
+            let w = t.typed_buf(&quantize(&det(k * n, 0x7500 + case as u32, 0.5), dt), dt);
+            let sentinel = quantize(&vec![1.75f32; m * k], dt);
+            let forced = t.typed_buf(&sentinel, dt);
+            let automatic = t.typed_buf(&sentinel, dt);
+            let resolved = t.typed_buf(&sentinel, dt);
+            let dyp = TypedPtr {
+                ptr: dy.cached_ptr(),
+                dtype: dt,
+            };
+            let wp = TypedPtr {
+                ptr: w.cached_ptr(),
+                dtype: dt,
+            };
+            gemm_bi_triad::sgemm_bi_backward_dx_tc_with_tile(
+                &t.ctx.stream,
+                &t.ctx.kernels,
+                TypedPtr {
+                    ptr: forced.cached_ptr(),
+                    dtype: dt,
+                },
+                dyp,
+                wp,
+                (m, k, n),
+                TcTile::Tile64,
+            )
+            .unwrap();
+            let tile = gemm_bi_triad::sgemm_bi_backward_dx_tc(
+                &t.ctx.stream,
+                &t.ctx.kernels,
+                TypedPtr {
+                    ptr: automatic.cached_ptr(),
+                    dtype: dt,
+                },
+                dyp,
+                wp,
+                (m, k, n),
+            )
+            .unwrap();
+            assert_eq!(tile, TcTile::Tile64, "{dt:?} NT route at M{m} K{k} N{n}");
+            mamba_rs::mamba_ssm::gpu::blas::bi_sgemm_backward_dx_typed(
+                &t.ctx,
+                TypedPtr {
+                    ptr: resolved.cached_ptr(),
+                    dtype: dt,
+                },
+                dyp,
+                wp,
+                (m, k, n),
+            )
+            .unwrap();
+            t.ctx.stream.synchronize().unwrap();
+            let mut forced_host = vec![0.0f32; m * k];
+            let mut automatic_host = vec![0.0f32; m * k];
+            let mut resolved_host = vec![0.0f32; m * k];
+            forced
+                .download_f32(&t.ctx.stream, &mut forced_host)
+                .unwrap();
+            automatic
+                .download_f32(&t.ctx.stream, &mut automatic_host)
+                .unwrap();
+            resolved
+                .download_f32(&t.ctx.stream, &mut resolved_host)
+                .unwrap();
+            let forced_bits = forced_host
+                .into_iter()
+                .map(f32::to_bits)
+                .collect::<Vec<_>>();
+            assert_eq!(
+                forced_bits,
+                automatic_host
+                    .into_iter()
+                    .map(f32::to_bits)
+                    .collect::<Vec<_>>(),
+                "{dt:?} NT automatic route differs from forced Tile64 at M{m} K{k} N{n}"
+            );
+            assert_eq!(
+                forced_bits,
+                resolved_host
+                    .into_iter()
+                    .map(f32::to_bits)
+                    .collect::<Vec<_>>(),
+                "{dt:?} NT resolved path differs from forced Tile64 at M{m} K{k} N{n}"
+            );
         }
     }
 }
@@ -763,6 +1250,7 @@ fn tc_route_gate_boundary_sweep() {
         r
     };
     assert!(dw_route(63, 512).unwrap_err().starts_with("UNCOVERED"));
+    assert!(dw_route(63, 63).unwrap_err().starts_with("UNCOVERED"));
     assert_eq!(dw_route(64, 64).unwrap(), TcTile::Tile64);
     assert_eq!(dw_route(128, 512).unwrap(), TcTile::Tile64); // d128 in_proj dW
     assert_eq!(dw_route(128, n_wide).unwrap(), TcTile::Tile128);
@@ -796,6 +1284,7 @@ fn tc_route_gate_boundary_sweep() {
         r
     };
     assert!(dx_route(63, 512).unwrap_err().starts_with("UNCOVERED"));
+    assert!(dx_route(63, 63).unwrap_err().starts_with("UNCOVERED"));
     assert_eq!(dx_route(64, 64).unwrap(), TcTile::Tile64);
     assert_eq!(dx_route(1024, 128).unwrap(), TcTile::Tile64); // d128 in_proj dX
     assert_eq!(dx_route(9216, 128), Ok(TcTile::Tile128));
