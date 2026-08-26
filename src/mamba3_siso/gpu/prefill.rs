@@ -737,11 +737,8 @@ impl Mamba3Prefill {
                 unsafe { b.launch(cfg) }.map_err(|e| format!("prefill da_cumsum L{l}: {e:?}"))?;
             }
             {
-                let cfg = cudarc::driver::LaunchConfig {
-                    grid_dim: ((dims.batch * nc) as u32, nh.div_ceil(2) as u32, 1),
-                    block_dim: (hd as u32, 2, 1),
-                    shared_mem_bytes: 0,
-                };
+                let cfg =
+                    super::kernels::chunk_state_cfg(dims.batch, nc, nh, hd, ds, dims.chunk_size());
                 if let Some(ts) = typed.as_deref_mut() {
                     let xp = ts.x.cached_ptr();
                     let ks = ts.k_scaled.cached_ptr();

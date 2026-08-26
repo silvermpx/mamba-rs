@@ -602,11 +602,8 @@ pub fn gpu_forward_mamba3_layer_mixed(
         // f32 chunk_states (chunk_states_scratch, will be in-place
         // mutated by K4).
         {
-            let cfg = cudarc::driver::LaunchConfig {
-                grid_dim: ((dims.batch * nc) as u32, nh.div_ceil(2) as u32, 1),
-                block_dim: (hd as u32, 2, 1),
-                shared_mem_bytes: 0,
-            };
+            let cfg =
+                super::kernels::chunk_state_cfg(dims.batch, nc, nh, hd, ds, dims.chunk_size());
             let mut bld = ctx
                 .stream
                 .launch_builder(m3k.m3_chunk_state_fwd_typed.get(dtype));

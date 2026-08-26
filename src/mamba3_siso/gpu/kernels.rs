@@ -575,7 +575,41 @@ impl Mamba3Kernels {
 /// smem) whenever its smem total fits the 48 KB default budget; wider
 /// shapes keep the original two-head static-tile kernel. Returns
 /// `(use_coop, cfg)` - the argument list is identical for both kernels.
-pub(crate) fn chunk_scan_cfg(
+/// Launch geometry for m3_chunk_state_fwd (single source - the kernel
+/// derives its thread layout from blockDim, so every call site MUST use
+/// this). Quad layout (hd, ds/4, heads_per_block) when ds % 4 == 0: one
+/// thread owns four ascending-t chains, 4x the resident warps of the
+/// legacy (hd, 2) layout - pure latency hiding, bit-identical work.
+pub fn chunk_state_cfg(
+    batch: usize,
+    n_chunks: usize,
+    nh: usize,
+    hd: usize,
+    ds: usize,
+    chunk_size: usize,
+) -> cudarc::driver::LaunchConfig {
+    // Quad layout: block (hd, ds/4, 2 heads) with the block's x/K/dA
+    // chunk slices staged in dynamic smem (the kernel is L2-bound; the
+    // staging collapses its redundant global reads). Legacy layout for
+    // shapes that don't fit the smem budget or an odd ds.
+    let heads = 2usize;
+    let smem_bytes = heads * (chunk_size * hd + chunk_size * ds + chunk_size) * 4;
+    if ds % 4 == 0 && hd * (ds / 4) * heads <= 1024 && smem_bytes <= 48 * 1024 {
+        cudarc::driver::LaunchConfig {
+            grid_dim: ((batch * n_chunks) as u32, nh.div_ceil(heads) as u32, 1),
+            block_dim: (hd as u32, (ds / 4) as u32, heads as u32),
+            shared_mem_bytes: smem_bytes as u32,
+        }
+    } else {
+        cudarc::driver::LaunchConfig {
+            grid_dim: ((batch * n_chunks) as u32, nh.div_ceil(2) as u32, 1),
+            block_dim: (hd as u32, 2, 1),
+            shared_mem_bytes: 0,
+        }
+    }
+}
+
+pub fn chunk_scan_cfg(
     batch: usize,
     n_chunks: usize,
     nh: usize,
@@ -594,7 +628,7 @@ pub(crate) fn chunk_scan_cfg(
             true,
             cudarc::driver::LaunchConfig {
                 grid_dim: ((batch * n_chunks) as u32, nh as u32, 1),
-                block_dim: (128, 1, 1),
+                block_dim: (256, 1, 1),
                 shared_mem_bytes: smem_bytes as u32,
             },
         )
