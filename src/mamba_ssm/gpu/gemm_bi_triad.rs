@@ -42,6 +42,217 @@ use std::sync::Arc;
 
 type CUptr = cudarc::driver::sys::CUdeviceptr;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct GemmDims {
+    pub m: usize,
+    pub k: usize,
+    pub n: usize,
+    pub lda: i32,
+    pub ldb: i32,
+    pub ldc: i32,
+    pub m_i32: i32,
+    pub k_i32: i32,
+    pub n_i32: i32,
+    pub mk: usize,
+    pub mn: usize,
+    pub kn: usize,
+    m_u32: u32,
+    k_u32: u32,
+    n_u32: u32,
+    mk_u32: u32,
+    mn_u32: u32,
+    kn_u32: u32,
+}
+
+impl GemmDims {
+    pub(super) fn checked(
+        m: usize,
+        k: usize,
+        n: usize,
+        lda: usize,
+        ldb: usize,
+        ldc: usize,
+    ) -> Result<Self, String> {
+        Self::checked_storage(m, k, n, [lda, ldb, ldc], [k, n, n], [m, k, m])
+    }
+
+    pub(super) fn nn(dims: (usize, usize, usize), lda: usize) -> Result<Self, String> {
+        Self::checked(dims.0, dims.1, dims.2, lda, dims.2, dims.2)
+    }
+
+    pub(super) fn tn(dims: (usize, usize, usize)) -> Result<Self, String> {
+        Self::checked_storage(
+            dims.0,
+            dims.1,
+            dims.2,
+            [dims.1, dims.2, dims.2],
+            [dims.1, dims.2, dims.2],
+            [dims.0, dims.0, dims.1],
+        )
+    }
+
+    pub(super) fn nt(dims: (usize, usize, usize)) -> Result<Self, String> {
+        Self::checked_storage(
+            dims.0,
+            dims.1,
+            dims.2,
+            [dims.2, dims.2, dims.1],
+            [dims.2, dims.2, dims.1],
+            [dims.0, dims.1, dims.0],
+        )
+    }
+
+    fn checked_storage(
+        m: usize,
+        k: usize,
+        n: usize,
+        strides: [usize; 3],
+        widths: [usize; 3],
+        row_counts: [usize; 3],
+    ) -> Result<Self, String> {
+        let product = |lhs: usize, rhs: usize, name: &str| {
+            lhs.checked_mul(rhs).ok_or_else(|| {
+                invalid_gemm_dimensions(format!("{name} overflows usize ({lhs} * {rhs})"))
+            })
+        };
+        let mk = product(m, k, "M*K")?;
+        let mn = product(m, n, "M*N")?;
+        let kn = product(k, n, "K*N")?;
+
+        if m == 0 || k == 0 || n == 0 {
+            return Err(invalid_gemm_dimensions(format!(
+                "axes must be positive, got M={m} K={k} N={n}"
+            )));
+        }
+
+        let axis_i32 = |value: usize, name: &str| {
+            i32::try_from(value)
+                .map_err(|_| invalid_gemm_dimensions(format!("{name}={value} exceeds i32::MAX")))
+        };
+        let m_i32 = axis_i32(m, "M")?;
+        let k_i32 = axis_i32(k, "K")?;
+        let n_i32 = axis_i32(n, "N")?;
+        for (value, name) in [(mk, "M*K"), (mn, "M*N"), (kn, "K*N")] {
+            axis_i32(value, name)?;
+        }
+
+        let [lda, ldb, ldc] = strides;
+        let [lda_min, ldb_min, ldc_min] = widths;
+        let [a_rows, b_rows, c_rows] = row_counts;
+        for (value, minimum, name) in [
+            (lda, lda_min, "lda"),
+            (ldb, ldb_min, "ldb"),
+            (ldc, ldc_min, "ldc"),
+        ] {
+            if value == 0 || value < minimum {
+                return Err(invalid_gemm_dimensions(format!(
+                    "{name}={value} is smaller than the physical width {minimum}"
+                )));
+            }
+        }
+        let lda = axis_i32(lda, "lda")?;
+        let ldb = axis_i32(ldb, "ldb")?;
+        let ldc = axis_i32(ldc, "ldc")?;
+
+        for (rows, stride, width, name) in [
+            (a_rows, strides[0], widths[0], "A storage"),
+            (b_rows, strides[1], widths[1], "B storage"),
+            (c_rows, strides[2], widths[2], "C storage"),
+        ] {
+            let span = rows
+                .checked_sub(1)
+                .and_then(|last_row| last_row.checked_mul(stride))
+                .and_then(|offset| offset.checked_add(width))
+                .ok_or_else(|| invalid_gemm_dimensions(format!("{name} span overflows usize")))?;
+            axis_i32(span, name)?;
+        }
+
+        let to_u32 = |value: usize, name: &str| {
+            u32::try_from(value)
+                .map_err(|_| invalid_gemm_dimensions(format!("{name}={value} exceeds u32::MAX")))
+        };
+        Ok(Self {
+            m,
+            k,
+            n,
+            lda,
+            ldb,
+            ldc,
+            m_i32,
+            k_i32,
+            n_i32,
+            mk,
+            mn,
+            kn,
+            m_u32: to_u32(m, "M")?,
+            k_u32: to_u32(k, "K")?,
+            n_u32: to_u32(n, "N")?,
+            mk_u32: to_u32(mk, "M*K")?,
+            mn_u32: to_u32(mn, "M*N")?,
+            kn_u32: to_u32(kn, "K*N")?,
+        })
+    }
+
+    fn tuple(self) -> (usize, usize, usize) {
+        (self.m, self.k, self.n)
+    }
+}
+
+fn invalid_gemm_dimensions(reason: impl std::fmt::Display) -> String {
+    format!("invalid GEMM dimensions: {reason}")
+}
+
+fn checked_u32(value: usize, name: &str) -> Result<u32, String> {
+    u32::try_from(value)
+        .map_err(|_| invalid_gemm_dimensions(format!("{name}={value} exceeds u32::MAX")))
+}
+
+fn checked_i32(value: usize, name: &str) -> Result<i32, String> {
+    i32::try_from(value)
+        .map_err(|_| invalid_gemm_dimensions(format!("{name}={value} exceeds i32::MAX")))
+}
+
+fn checked_usize(value: u32, name: &str) -> Result<usize, String> {
+    usize::try_from(value)
+        .map_err(|_| invalid_gemm_dimensions(format!("{name}={value} exceeds usize::MAX")))
+}
+
+fn checked_tile_grid(rows: u32, row_tile: u32, cols: u32, col_tile: u32) -> Result<u32, String> {
+    rows.div_ceil(row_tile)
+        .checked_mul(cols.div_ceil(col_tile))
+        .ok_or_else(|| invalid_gemm_dimensions("tile grid overflows u32"))
+}
+
+fn checked_grid_product(lhs: u32, rhs: u32, depth: u32) -> Result<u32, String> {
+    lhs.checked_mul(rhs)
+        .and_then(|value| value.checked_mul(depth))
+        .ok_or_else(|| invalid_gemm_dimensions("launch grid overflows u32"))
+}
+
+fn checked_u32_product(lhs: u32, rhs: u32, name: &str) -> Result<u32, String> {
+    lhs.checked_mul(rhs)
+        .ok_or_else(|| invalid_gemm_dimensions(format!("{name} overflows u32")))
+}
+
+fn checked_mul3(lhs: usize, middle: usize, rhs: usize, name: &str) -> Result<usize, String> {
+    lhs.checked_mul(middle)
+        .and_then(|value| value.checked_mul(rhs))
+        .ok_or_else(|| invalid_gemm_dimensions(format!("{name} overflows usize")))
+}
+
+fn checked_byte_offset(elements: usize, element_bytes: usize, name: &str) -> Result<u64, String> {
+    let bytes = elements
+        .checked_mul(element_bytes)
+        .ok_or_else(|| invalid_gemm_dimensions(format!("{name} byte offset overflows usize")))?;
+    u64::try_from(bytes)
+        .map_err(|_| invalid_gemm_dimensions(format!("{name} byte offset exceeds u64::MAX")))
+}
+
+fn checked_ptr_add(base: u64, offset: u64, name: &str) -> Result<u64, String> {
+    base.checked_add(offset)
+        .ok_or_else(|| invalid_gemm_dimensions(format!("{name} pointer offset overflows u64")))
+}
+
 // ── Split-M TN partition heuristic (ported from SQV-RS blas_bi.rs) ──
 
 /// Target CTA count factor for the split-M TN partition: aim to fill the
@@ -67,22 +278,30 @@ fn splitm_tn_partition(batch: usize, n_in: usize, n_out: usize) -> Option<(usize
     if !(n_out >= 128 && batch >= 256) {
         return None;
     }
-    let k_tiles = (n_in as u32).div_ceil(128);
-    let n_tiles = (n_out as u32).div_ceil(128);
-    let base_blocks = k_tiles * n_tiles;
+    let batch_u32 = u32::try_from(batch).ok()?;
+    let k_tiles = u32::try_from(n_in).ok()?.div_ceil(128);
+    let n_tiles = u32::try_from(n_out).ok()?.div_ceil(128);
+    let base_blocks = k_tiles.checked_mul(n_tiles)?;
     if base_blocks == 0 || base_blocks >= SPLITM_TN_TARGET_GRID_FACTOR {
         return None;
     }
     let f_grid = SPLITM_TN_TARGET_GRID_FACTOR.div_ceil(base_blocks);
-    let f_scratch_cap = (SPLITM_TN_SCRATCH_CAP / (n_in * n_out)) as u32;
+    let output_elements = n_in.checked_mul(n_out)?;
+    let f_scratch_cap = u32::try_from(SPLITM_TN_SCRATCH_CAP / output_elements).ok()?;
     let f = f_grid.min(f_scratch_cap).max(1);
-    let m_chunk_raw = (batch as u32).div_ceil(f);
-    let m_chunk = (m_chunk_raw + SPLITM_TN_BK_ALIGN - 1) & !(SPLITM_TN_BK_ALIGN - 1);
-    let f_final = (batch as u32).div_ceil(m_chunk);
-    if f_final < 2 || (f_final as usize) * n_in * n_out > SPLITM_TN_SCRATCH_CAP {
+    let m_chunk_raw = batch_u32.div_ceil(f);
+    let m_chunk = m_chunk_raw.checked_add(SPLITM_TN_BK_ALIGN - 1)? & !(SPLITM_TN_BK_ALIGN - 1);
+    let f_final = batch_u32.div_ceil(m_chunk);
+    let scratch_elements = usize::try_from(f_final)
+        .ok()?
+        .checked_mul(output_elements)?;
+    if f_final < 2 || scratch_elements > SPLITM_TN_SCRATCH_CAP {
         return None;
     }
-    Some((m_chunk as usize, f_final as usize))
+    Some((
+        usize::try_from(m_chunk).ok()?,
+        usize::try_from(f_final).ok()?,
+    ))
 }
 
 /// Minimum N (output cols) before the dispatcher switches from Slim-N tiles
@@ -163,6 +382,7 @@ pub fn sgemm_bi_forward(
     bias_ptr: CUptr, // 0 = no bias
     dims: (usize, usize, usize),
 ) -> Result<(), String> {
+    GemmDims::nn(dims, dims.1)?;
     let x_ptr = {
         use cudarc::driver::DevicePtr;
         let (ptr, _r) = x.inner().device_ptr(stream);
@@ -191,9 +411,9 @@ pub fn sgemm_bi_forward_sub(
     bias_ptr: CUptr, // 0 = no bias
     dims: (usize, usize, usize),
 ) -> Result<(), String> {
-    let (batch, n_in, n_out) = dims;
-    debug_assert!(lda >= n_in, "sgemm_bi_forward_sub: lda < K");
-    let lda_i = lda as i32;
+    let checked_dims = GemmDims::nn(dims, lda)?;
+    let (batch, n_in, n_out) = checked_dims.tuple();
+    let lda_i = checked_dims.lda;
     // Shape-A Ultra-Thin-M NN dispatch: batch ∈ [1, 31] (actor inference rollout).
     // Covers shapes that fall through Split-K (min 32) and Big/Slim (min 128).
     // Grid: (ceil(N/32), M, 1). smem = K*4 bytes ≤ 8 KB (K ≤ 2048) — within the
@@ -201,15 +421,19 @@ pub fn sgemm_bi_forward_sub(
     // Non-mod-32 N handled by kernel's `col < N` predication (tail tile partial).
     // K up to 2048 covers SimbaV2 w2 forward (K=2048 N=512 when batch < 32).
     if (1..32).contains(&batch) && (32..=2048).contains(&n_in) && n_out >= 32 {
-        let m_i = batch as i32;
-        let n_i = n_out as i32;
-        let k_i = n_in as i32;
+        let m_i = checked_dims.m_i32;
+        let n_i = checked_dims.n_i32;
+        let k_i = checked_dims.k_i32;
         let alpha: f32 = 1.0;
         let beta: f32 = 0.0;
         let cfg = cudarc::driver::LaunchConfig {
-            grid_dim: ((n_out as u32).div_ceil(32), batch as u32, 1),
+            grid_dim: (checked_dims.n_u32.div_ceil(32), checked_dims.m_u32, 1),
             block_dim: (256, 1, 1),
-            shared_mem_bytes: (n_in * std::mem::size_of::<f32>()) as u32,
+            shared_mem_bytes: checked_u32_product(
+                checked_dims.k_u32,
+                checked_u32(std::mem::size_of::<f32>(), "f32 byte width")?,
+                "ultra-thin shared memory",
+            )?,
         };
         let mut builder = stream.launch_builder(&kernels.sgemm_nn_ultra_thin);
         builder.arg(y.inner_mut());
@@ -239,16 +463,16 @@ pub fn sgemm_bi_forward_sub(
     // downstream drift; CPU mirror (narrow_nn_sgemm_nn in blas_bi.rs) is
     // tile-agnostic and matches both GPU variants.
     if (2..=127).contains(&n_out) && (1..=64).contains(&batch) && n_in >= 1 {
-        let m_i = batch as i32;
-        let n_i = n_out as i32;
-        let k_i = n_in as i32;
+        let m_i = checked_dims.m_i32;
+        let n_i = checked_dims.n_i32;
+        let k_i = checked_dims.k_i32;
         let alpha: f32 = 1.0;
         let beta: f32 = 0.0;
         let post_op: i32 = 0;
-        let num_pid_m = (batch as u32).div_ceil(16);
-        let num_pid_n = (n_out as u32).div_ceil(16);
+        let num_pid_m = checked_dims.m_u32.div_ceil(16);
+        let num_pid_n = checked_dims.n_u32.div_ceil(16);
         let cfg = cudarc::driver::LaunchConfig {
-            grid_dim: (num_pid_m * num_pid_n, 1, 1),
+            grid_dim: (checked_grid_product(num_pid_m, num_pid_n, 1)?, 1, 1),
             block_dim: (64, 1, 1),
             shared_mem_bytes: 0,
         };
@@ -278,16 +502,16 @@ pub fn sgemm_bi_forward_sub(
     // Covers test-config shapes (M=32, K=32..64, N=32..64) that otherwise fall
     // to cuBLAS (non-deterministic, violates zero-cuBLAS contract).
     if (2..=127).contains(&n_out) && batch >= 1 && n_in >= 1 {
-        let m_i = batch as i32;
-        let n_i = n_out as i32;
-        let k_i = n_in as i32;
+        let m_i = checked_dims.m_i32;
+        let n_i = checked_dims.n_i32;
+        let k_i = checked_dims.k_i32;
         let alpha: f32 = 1.0;
         let beta: f32 = 0.0;
         let post_op: i32 = 0;
-        let num_pid_m = (batch as u32).div_ceil(64);
-        let num_pid_n = (n_out as u32).div_ceil(32);
+        let num_pid_m = checked_dims.m_u32.div_ceil(64);
+        let num_pid_n = checked_dims.n_u32.div_ceil(32);
         let cfg = cudarc::driver::LaunchConfig {
-            grid_dim: (num_pid_m * num_pid_n, 1, 1),
+            grid_dim: (checked_grid_product(num_pid_m, num_pid_n, 1)?, 1, 1),
             block_dim: (128, 1, 1),
             shared_mem_bytes: 0,
         };
@@ -319,13 +543,13 @@ pub fn sgemm_bi_forward_sub(
     // (M=1 N=1 K=512 was hitting cuBLAS-fallback panic in an eval-parity test).
     // Determinism preserved (kernel unchanged; same warp-shuffle butterfly).
     if n_out == 1 && batch >= 1 && n_in >= 32 {
-        let m_i = batch as i32;
-        let k_i = n_in as i32;
+        let m_i = checked_dims.m_i32;
+        let k_i = checked_dims.k_i32;
         let alpha: f32 = 1.0;
         let beta: f32 = 0.0;
         let ldy_i: i32 = 1;
         let cfg = cudarc::driver::LaunchConfig {
-            grid_dim: ((batch as u32).div_ceil(4), 1, 1),
+            grid_dim: (checked_dims.m_u32.div_ceil(4), 1, 1),
             block_dim: (128, 1, 1),
             shared_mem_bytes: 0,
         };
@@ -361,7 +585,8 @@ pub fn sgemm_bi_forward_sub(
     // tile count of Slim NN's BM=128 — proportionally less SM headroom needed.
     // Replaces the implicit "batch≤1024" guard with an explicit M_tiles*N_tiles
     // check that doesn't rely on cap-relax envelope.
-    let plain_slim_blocks_nn_ktail = (batch as u32).div_ceil(128) * (n_out as u32).div_ceil(64);
+    let plain_slim_blocks_nn_ktail =
+        checked_tile_grid(checked_dims.m_u32, 128, checked_dims.n_u32, 64)?;
     let underfill_nn_ktail = plain_slim_blocks_nn_ktail < NUM_SMS;
     if (32..=1024).contains(&batch)
         && (64..=2048).contains(&n_out)
@@ -372,16 +597,24 @@ pub fn sgemm_bi_forward_sub(
     {
         let k_tail = n_in % 32;
         let k_main = n_in - k_tail;
-        let partial_size = (k_main / 32) * batch * n_out;
+        let partial_size = checked_mul3(k_main / 32, batch, n_out, "NN K-tail scratch")?;
         if k_main >= 32 && partial_size <= SPLITK_SCRATCH_CAP {
-            let m_i = batch as i32;
-            let n_i = n_out as i32;
-            let k_chunks = (k_main / 32) as i32;
+            let m_i = checked_dims.m_i32;
+            let n_i = checked_dims.n_i32;
+            let k_chunks = checked_i32(k_main / 32, "NN K-tail chunks")?;
             let alpha: f32 = 1.0;
-            let num_pid_m = (batch as u32).div_ceil(32);
-            let num_pid_n = (n_out as u32).div_ceil(64);
+            let num_pid_m = checked_dims.m_u32.div_ceil(32);
+            let num_pid_n = checked_dims.n_u32.div_ceil(64);
             let partial_cfg = cudarc::driver::LaunchConfig {
-                grid_dim: (num_pid_m * num_pid_n * k_chunks as u32, 1, 1),
+                grid_dim: (
+                    checked_grid_product(
+                        num_pid_m,
+                        num_pid_n,
+                        checked_u32(k_main / 32, "NN K-tail chunks")?,
+                    )?,
+                    1,
+                    1,
+                ),
                 block_dim: (128, 1, 1),
                 shared_mem_bytes: 0,
             };
@@ -403,16 +636,30 @@ pub fn sgemm_bi_forward_sub(
                 .map_err(|e| format!("sgemm_bi_nn_splitk32_partial (K-tail main): {:?}", e))?;
 
             // Tail fold via reducer: tail_cnt iterations of X[m, K_main+k] · W[K_main+k, n].
-            let total = (batch * n_out) as u32;
+            let total = checked_dims.mn_u32;
             let reduce_cfg = cudarc::driver::LaunchConfig {
                 grid_dim: (total.div_ceil(256), 1, 1),
                 block_dim: (256, 1, 1),
                 shared_mem_bytes: 0,
             };
             let zero_i32: i32 = 0;
-            let tail_cnt_i = k_tail as i32;
-            let x_tail_ptr: u64 = x_ptr + (k_main as u64) * 4; // X[:, k_main]
-            let w_tail_ptr: u64 = w_ptr + ((k_main * n_out) as u64) * 4; // W[k_main, :]
+            let tail_cnt_i = checked_i32(k_tail, "NN K-tail count")?;
+            let x_tail_ptr = checked_ptr_add(
+                x_ptr,
+                checked_byte_offset(k_main, std::mem::size_of::<f32>(), "X tail")?,
+                "X tail",
+            )?;
+            let w_tail_ptr = checked_ptr_add(
+                w_ptr,
+                checked_byte_offset(
+                    k_main.checked_mul(n_out).ok_or_else(|| {
+                        invalid_gemm_dimensions("W tail element offset overflows usize")
+                    })?,
+                    std::mem::size_of::<f32>(),
+                    "W tail",
+                )?,
+                "W tail",
+            )?;
             let x_tail_stride_i = lda_i; // stride between X[m, k_main] rows = the A row stride
             let mut rb = stream.launch_builder(&kernels.sgemm_splitk_reduce);
             rb.arg(y.inner_mut());
@@ -442,8 +689,9 @@ pub fn sgemm_bi_forward_sub(
     // and partial_size = K_CHUNKS*M*N ≤ 2M floats (scratch capacity).
     //
     // Phase C-1.5bo: same Slim NN underfill guard as K-tail variant above.
-    let partial_size = (n_in / 32) * batch * n_out;
-    let plain_slim_blocks_nn_main = (batch as u32).div_ceil(128) * (n_out as u32).div_ceil(64);
+    let partial_size = checked_mul3(n_in / 32, batch, n_out, "NN split-K scratch")?;
+    let plain_slim_blocks_nn_main =
+        checked_tile_grid(checked_dims.m_u32, 128, checked_dims.n_u32, 64)?;
     let underfill_nn_main = plain_slim_blocks_nn_main < NUM_SMS;
     if (32..=1024).contains(&batch)
         && (64..=2048).contains(&n_out)
@@ -453,16 +701,24 @@ pub fn sgemm_bi_forward_sub(
         && partial_size <= SPLITK_SCRATCH_CAP
         && underfill_nn_main
     {
-        let m_i = batch as i32;
-        let n_i = n_out as i32;
-        let k_chunks = (n_in / 32) as i32;
+        let m_i = checked_dims.m_i32;
+        let n_i = checked_dims.n_i32;
+        let k_chunks = checked_i32(n_in / 32, "NN split-K chunks")?;
         let alpha: f32 = 1.0;
 
         // Partial kernel launch: grid = M_tiles × N_tiles × K_CHUNKS
-        let num_pid_m = (batch as u32).div_ceil(32);
-        let num_pid_n = (n_out as u32).div_ceil(64);
+        let num_pid_m = checked_dims.m_u32.div_ceil(32);
+        let num_pid_n = checked_dims.n_u32.div_ceil(64);
         let partial_cfg = cudarc::driver::LaunchConfig {
-            grid_dim: (num_pid_m * num_pid_n * k_chunks as u32, 1, 1),
+            grid_dim: (
+                checked_grid_product(
+                    num_pid_m,
+                    num_pid_n,
+                    checked_u32(n_in / 32, "NN split-K chunks")?,
+                )?,
+                1,
+                1,
+            ),
             block_dim: (128, 1, 1),
             shared_mem_bytes: 0,
         };
@@ -484,7 +740,7 @@ pub fn sgemm_bi_forward_sub(
             .map_err(|e| format!("sgemm_bi_nn_splitk32_partial: {:?}", e))?;
 
         // Reduce kernel launch: grid covers M*N outputs, 256 threads/block.
-        let total = (batch * n_out) as u32;
+        let total = checked_dims.mn_u32;
         let reduce_cfg = cudarc::driver::LaunchConfig {
             grid_dim: (total.div_ceil(256), 1, 1),
             block_dim: (256, 1, 1),
@@ -544,7 +800,7 @@ pub fn sgemm_bi_forward_sub(
         && n_in.is_multiple_of(32)
     {
         // F is a pure function of K. Same K → same F, always.
-        let f_final = (n_in as u32).div_ceil(SPLITK_SLIM_K_CHUNK);
+        let f_final = checked_dims.k_u32.div_ceil(SPLITK_SLIM_K_CHUNK);
         // F ≥ 6 (K ≥ 384). Ncu profiles:
         //   - SALE L1 (M=4224 K=128 N=128, F=2): reducer 35% of time → moved
         //     out of splitk_slim in a prior commit (F≥4 gate).
@@ -562,19 +818,29 @@ pub fn sgemm_bi_forward_sub(
         // After this gate raise, shapes with K < 384 fall to the regular
         // Slim NN dispatch below (single kernel, no reducer overhead).
         // CPU mirror gate at blas_bi.rs:136-139 mirrors this exact threshold.
-        if f_final >= 6 && (f_final as usize) * batch * n_out <= SPLITK_SCRATCH_CAP {
+        if f_final >= 6
+            && checked_mul3(
+                checked_usize(f_final, "NN slim split-K chunks")?,
+                batch,
+                n_out,
+                "NN slim split-K scratch",
+            )? <= SPLITK_SCRATCH_CAP
+        {
             // Wave-fill heuristic: skip if Slim grid is already well-filled
             // (perf guard only, not correctness — F is batch-invariant above).
-            let m_tiles = (batch as u32).div_ceil(128);
-            let n_tiles = (n_out as u32).div_ceil(64);
-            let base_blocks = m_tiles * n_tiles;
+            let m_tiles = checked_dims.m_u32.div_ceil(128);
+            let n_tiles = checked_dims.n_u32.div_ceil(64);
+            let base_blocks = checked_grid_product(m_tiles, n_tiles, 1)?;
             if base_blocks > 0 && base_blocks < 3 * NUM_SMS {
                 let k_chunk = SPLITK_SLIM_K_CHUNK;
-                let m_i = batch as i32;
-                let n_i = n_out as i32;
-                let k_i = n_in as i32;
-                let ldb_i = n_out as i32; // B is [K, N], row-major
-                let k_chunk_i = k_chunk as i32;
+                let m_i = checked_dims.m_i32;
+                let n_i = checked_dims.n_i32;
+                let k_i = checked_dims.k_i32;
+                let ldb_i = checked_dims.n_i32; // B is [K, N], row-major
+                let k_chunk_i = checked_i32(
+                    checked_usize(k_chunk, "NN slim split-K chunk")?,
+                    "NN slim split-K chunk",
+                )?;
                 let alpha: f32 = 1.0;
 
                 let partial_ptr = {
@@ -601,7 +867,7 @@ pub fn sgemm_bi_forward_sub(
                 unsafe { pb.launch(partial_cfg) }
                     .map_err(|e| format!("sgemm_bi_nn_splitk_slim_partial: {:?}", e))?;
 
-                let total = (batch * n_out) as u32;
+                let total = checked_dims.mn_u32;
                 let reduce_cfg = cudarc::driver::LaunchConfig {
                     grid_dim: (total.div_ceil(256), 1, 1),
                     block_dim: (256, 1, 1),
@@ -609,7 +875,10 @@ pub fn sgemm_bi_forward_sub(
                 };
                 let null_tail: u64 = 0;
                 let zero_i32_local: i32 = 0;
-                let f_i = f_final as i32;
+                let f_i = checked_i32(
+                    checked_usize(f_final, "NN slim split-K chunks")?,
+                    "NN slim split-K chunks",
+                )?;
                 let mut rb = stream.launch_builder(&kernels.sgemm_splitk_reduce);
                 rb.arg(y.inner_mut());
                 rb.arg(&partial_ptr);
@@ -652,16 +921,16 @@ pub fn sgemm_bi_forward_sub(
     // acceptable for shapes that no specialized branch handles. Specialized
     // branches above always take priority via gate ordering.
     if batch < 128 && n_out >= 128 && n_in >= 1 {
-        let m_i = batch as i32;
-        let n_i = n_out as i32;
-        let k_i = n_in as i32;
+        let m_i = checked_dims.m_i32;
+        let n_i = checked_dims.n_i32;
+        let k_i = checked_dims.k_i32;
         let alpha: f32 = 1.0;
         let beta: f32 = 0.0;
         let post_op: i32 = 0;
-        let num_pid_m = (batch as u32).div_ceil(64);
-        let num_pid_n = (n_out as u32).div_ceil(32);
+        let num_pid_m = checked_dims.m_u32.div_ceil(64);
+        let num_pid_n = checked_dims.n_u32.div_ceil(32);
         let cfg = cudarc::driver::LaunchConfig {
-            grid_dim: (num_pid_m * num_pid_n, 1, 1),
+            grid_dim: (checked_grid_product(num_pid_m, num_pid_n, 1)?, 1, 1),
             block_dim: (128, 1, 1),
             shared_mem_bytes: 0,
         };
@@ -690,9 +959,9 @@ pub fn sgemm_bi_forward_sub(
     // K<BK: kernel's scalar bounds check zero-fills smem for dotIdx≥K; wastes a few FMAs
     // but correct (handles Mamba-1 dt_proj K=4,8). dropped `n_in >= 16` guard.
     if batch >= SGEMM_CUSTOM_MIN && n_out >= SGEMM_CUSTOM_MIN && n_in >= 1 {
-        let m_i = batch as i32;
-        let n_i = n_out as i32;
-        let k_i = n_in as i32;
+        let m_i = checked_dims.m_i32;
+        let n_i = checked_dims.n_i32;
+        let k_i = checked_dims.k_i32;
         let alpha: f32 = 1.0;
         let beta: f32 = 0.0;
         let (func, bn) = dispatch_slim_or_big(
@@ -711,7 +980,7 @@ pub fn sgemm_bi_forward_sub(
         // 2026-05-13 — Stage-4 persistent-CTA cap removed. Kernel body is now
         // data-parallel (one tile per CTA), so grid_dim == total_tiles. See
         // gemm_bi_triad.cu for the kernel-side unwrap rationale.
-        let total_tiles = (batch as u32).div_ceil(128) * (n_out as u32).div_ceil(bn);
+        let total_tiles = checked_tile_grid(checked_dims.m_u32, 128, checked_dims.n_u32, bn)?;
         let cfg = cudarc::driver::LaunchConfig {
             grid_dim: (total_tiles, 1, 1),
             block_dim: (threads, 1, 1),
@@ -767,16 +1036,17 @@ pub fn sgemm_bi_backward_dw(
     x_saved: &GpuBuffer,
     dims: (usize, usize, usize),
 ) -> Result<(), String> {
-    let (batch, n_in, n_out) = dims;
+    let checked_dims = GemmDims::tn(dims)?;
+    let (batch, n_in, n_out) = checked_dims.tuple();
     // GEMV-N1 TN dispatch: dW[K,1] += X^T[K,M] @ dY[M,1]
     if n_out == 1 && n_in >= 4 && batch >= 32 {
-        let m_i = batch as i32;
-        let k_i = n_in as i32;
+        let m_i = checked_dims.m_i32;
+        let k_i = checked_dims.k_i32;
         let alpha: f32 = 1.0;
-        let lda_i = n_in as i32;
+        let lda_i = checked_dims.k_i32;
         let ldy_i: i32 = 1;
         let cfg = cudarc::driver::LaunchConfig {
-            grid_dim: ((n_in as u32).div_ceil(4), 1, 1),
+            grid_dim: (checked_dims.k_u32.div_ceil(4), 1, 1),
             block_dim: (128, 1, 1),
             shared_mem_bytes: 0,
         };
@@ -803,14 +1073,14 @@ pub fn sgemm_bi_backward_dw(
     // Relaxed to n_in>=1, batch>=1 covers test shapes (M=32, K=32..64, N=32..64)
     // that otherwise fall to cuBLAS (zero-cuBLAS contract violation).
     if (2..=127).contains(&n_out) && n_in >= 1 && batch >= 1 {
-        let m_i = batch as i32;
-        let k_i = n_in as i32;
-        let n_i = n_out as i32;
+        let m_i = checked_dims.m_i32;
+        let k_i = checked_dims.k_i32;
+        let n_i = checked_dims.n_i32;
         let alpha: f32 = 1.0;
-        let num_pid_m = (n_in as u32).div_ceil(64);
-        let num_pid_n = (n_out as u32).div_ceil(32);
+        let num_pid_m = checked_dims.k_u32.div_ceil(64);
+        let num_pid_n = checked_dims.n_u32.div_ceil(32);
         let cfg = cudarc::driver::LaunchConfig {
-            grid_dim: (num_pid_m * num_pid_n, 1, 1),
+            grid_dim: (checked_grid_product(num_pid_m, num_pid_n, 1)?, 1, 1),
             block_dim: (128, 1, 1),
             shared_mem_bytes: 0,
         };
@@ -839,14 +1109,14 @@ pub fn sgemm_bi_backward_dw(
     // Backward_dw is intentionally NOT batch-invariant (sums over M) but
     // for each fixed batch the (m_chunk, f_final) is deterministic.
     if let Some((m_chunk, f_final)) = splitm_tn_partition(batch, n_in, n_out) {
-        let base_blocks = (n_in as u32).div_ceil(128) * (n_out as u32).div_ceil(128);
-        let m_i = batch as i32;
-        let k_i = n_in as i32;
-        let n_i = n_out as i32;
-        let m_chunk_i = m_chunk as i32;
+        let base_blocks = checked_tile_grid(checked_dims.k_u32, 128, checked_dims.n_u32, 128)?;
+        let m_i = checked_dims.m_i32;
+        let k_i = checked_dims.k_i32;
+        let n_i = checked_dims.n_i32;
+        let m_chunk_i = checked_i32(m_chunk, "TN split-M chunk")?;
         let alpha: f32 = 1.0;
-        let f_i = f_final as i32;
-        let f_final_u32 = f_final as u32;
+        let f_i = checked_i32(f_final, "TN split-M partitions")?;
+        let f_final_u32 = checked_u32(f_final, "TN split-M partitions")?;
 
         let partial_ptr = {
             use cudarc::driver::DevicePtr;
@@ -870,7 +1140,7 @@ pub fn sgemm_bi_backward_dw(
         unsafe { pb.launch(partial_cfg) }
             .map_err(|e| format!("sgemm_bi_tn_splitm_partial: {:?}", e))?;
 
-        let total = (n_in * n_out) as u32;
+        let total = checked_dims.kn_u32;
         let reduce_cfg = cudarc::driver::LaunchConfig {
             grid_dim: (total.div_ceil(256), 1, 1),
             block_dim: (256, 1, 1),
@@ -893,9 +1163,9 @@ pub fn sgemm_bi_backward_dw(
     // Dropped `n_in >= 128` — kernel grid handles K_out<128 correctly;
     // covers Mamba-1 dt_proj backward (K_out=8).
     if n_in >= 1 && n_out >= SGEMM_CUSTOM_MIN {
-        let m_i = batch as i32;
-        let k_i = n_in as i32;
-        let n_i = n_out as i32;
+        let m_i = checked_dims.m_i32;
+        let k_i = checked_dims.k_i32;
+        let n_i = checked_dims.n_i32;
         let alpha: f32 = 1.0;
         let (func, bn) = dispatch_slim_or_big(
             kernels,
@@ -911,7 +1181,7 @@ pub fn sgemm_bi_backward_dw(
         let smem_bytes: u32 = if slim { 0 } else { 34 * 1024 };
         // 2026-05-13 — data-parallel launch (no persistent-CTA cap). See
         // gpu_sgemm_forward note and gemm_bi_triad.cu for the kernel-side unwrap.
-        let total_tiles = (n_in as u32).div_ceil(128) * (n_out as u32).div_ceil(bn);
+        let total_tiles = checked_tile_grid(checked_dims.k_u32, 128, checked_dims.n_u32, bn)?;
         let cfg = cudarc::driver::LaunchConfig {
             grid_dim: (total_tiles, 1, 1),
             block_dim: (threads, 1, 1),
@@ -961,7 +1231,8 @@ pub fn sgemm_bi_backward_dx(
     w_ptr: CUptr,
     dims: (usize, usize, usize),
 ) -> Result<(), String> {
-    let (batch, n_in, n_out) = dims;
+    let checked_dims = GemmDims::nt(dims)?;
+    let (batch, n_in, n_out) = checked_dims.tuple();
     // Narrow-N NT dispatch: N∈[2..127] (critic qhead + gap-fill for
     // N∈[49..127] where slim/big kernels (N>=128) don't apply).
     // T3.3 (2026-05-01): comment fixed — gate was relaxed to N≥2 in Stage 4
@@ -970,14 +1241,14 @@ pub fn sgemm_bi_backward_dx(
     // Relaxed to n_in>=1, batch>=1 covers test-config (M=32, K=32..64, N=32..64)
     // that otherwise falls to cuBLAS (zero-cuBLAS contract violation).
     if (2..=127).contains(&n_out) && n_in >= 1 && batch >= 1 {
-        let m_i = batch as i32;
-        let n_i = n_out as i32;
-        let k_i = n_in as i32;
+        let m_i = checked_dims.m_i32;
+        let n_i = checked_dims.n_i32;
+        let k_i = checked_dims.k_i32;
         let alpha: f32 = 1.0;
-        let num_pid_m = (batch as u32).div_ceil(64);
-        let num_pid_n = (n_in as u32).div_ceil(32);
+        let num_pid_m = checked_dims.m_u32.div_ceil(64);
+        let num_pid_n = checked_dims.k_u32.div_ceil(32);
         let cfg = cudarc::driver::LaunchConfig {
-            grid_dim: (num_pid_m * num_pid_n, 1, 1),
+            grid_dim: (checked_grid_product(num_pid_m, num_pid_n, 1)?, 1, 1),
             block_dim: (128, 1, 1),
             shared_mem_bytes: 0,
         };
@@ -1005,14 +1276,14 @@ pub fn sgemm_bi_backward_dx(
     // Production unaffected: training uses batch=128 (Big/Slim path).
     // Closes test_gpu_correctness M=4 K=32 N=128 cuBLAS-fallback panic.
     if batch < 32 && n_in >= 1 && n_out >= 128 {
-        let m_i = batch as i32;
-        let n_i = n_out as i32;
-        let k_i = n_in as i32;
+        let m_i = checked_dims.m_i32;
+        let n_i = checked_dims.n_i32;
+        let k_i = checked_dims.k_i32;
         let alpha: f32 = 1.0;
-        let num_pid_m = (batch as u32).div_ceil(64);
-        let num_pid_n = (n_in as u32).div_ceil(32);
+        let num_pid_m = checked_dims.m_u32.div_ceil(64);
+        let num_pid_n = checked_dims.k_u32.div_ceil(32);
         let cfg = cudarc::driver::LaunchConfig {
-            grid_dim: (num_pid_m * num_pid_n, 1, 1),
+            grid_dim: (checked_grid_product(num_pid_m, num_pid_n, 1)?, 1, 1),
             block_dim: (128, 1, 1),
             shared_mem_bytes: 0,
         };
@@ -1039,12 +1310,12 @@ pub fn sgemm_bi_backward_dx(
     // with total = M*K threads and `if (tid >= total) return;` predication
     // (kernels/gemm_bi_triad.cu:2296) — safe for M<4. Closes the single-env eval gap.
     if n_out == 1 && n_in >= 1 && batch >= 1 {
-        let m_i = batch as i32;
-        let k_i = n_in as i32;
+        let m_i = checked_dims.m_i32;
+        let k_i = checked_dims.k_i32;
         let alpha: f32 = 1.0;
-        let ldx_i = n_in as i32;
+        let ldx_i = checked_dims.k_i32;
         let ldy_i: i32 = 1;
-        let total = (batch * n_in) as u32;
+        let total = checked_dims.mk_u32;
         let block = 256u32;
         let cfg = cudarc::driver::LaunchConfig {
             grid_dim: (total.div_ceil(block), 1, 1),
@@ -1078,7 +1349,8 @@ pub fn sgemm_bi_backward_dx(
     // NUM_SMS, Slim NT already saturates; Split-K transpose + partial + reducer
     // adds DRAM round-trips for no occupancy benefit. Threshold 1*NUM_SMS
     // matches forward NN guards (same Slim BM=128 vs Thin-M BM=32 geometry).
-    let plain_slim_blocks_nt_ktail = (batch as u32).div_ceil(128) * (n_in as u32).div_ceil(64);
+    let plain_slim_blocks_nt_ktail =
+        checked_tile_grid(checked_dims.m_u32, 128, checked_dims.k_u32, 64)?;
     let underfill_nt_ktail = plain_slim_blocks_nt_ktail < NUM_SMS;
     if (32..=1024).contains(&batch)
         && (64..=4096).contains(&n_in)
@@ -1090,8 +1362,11 @@ pub fn sgemm_bi_backward_dx(
     {
         let k_tail_cnt = n_in % 32;
         let k_main = n_in - k_tail_cnt;
-        let w_size_main = k_main * n_out;
-        let partial_size_main = (n_out / 32) * batch * k_main;
+        let w_size_main = k_main.checked_mul(n_out).ok_or_else(|| {
+            invalid_gemm_dimensions("NT K-tail transpose scratch overflows usize")
+        })?;
+        let partial_size_main =
+            checked_mul3(n_out / 32, batch, k_main, "NT K-tail split-K scratch")?;
         // F-KTAIL-CAP-PARITY (2026-05-17): w_size cap = SPLITK_NT_TRANSPOSE_CAP
         // (the GPU transpose_scratch capacity), partial cap = SPLITK_SCRATCH_CAP
         // (the GPU splitk_scratch capacity). Earlier hardcoded `1<<23` partial
@@ -1106,10 +1381,10 @@ pub fn sgemm_bi_backward_dx(
             && partial_size_main <= SPLITK_SCRATCH_CAP
         {
             // Step 1: transpose W[0..k_main, :] → W_T[N, k_main] into scratch.
-            let rows_i = k_main as i32;
-            let cols_i = n_out as i32;
-            let t_grid_x = (n_out as u32).div_ceil(32);
-            let t_grid_y = (k_main as u32).div_ceil(32);
+            let rows_i = checked_i32(k_main, "NT K-tail rows")?;
+            let cols_i = checked_dims.n_i32;
+            let t_grid_x = checked_dims.n_u32.div_ceil(32);
+            let t_grid_y = checked_u32(k_main, "NT K-tail rows")?.div_ceil(32);
             let t_cfg = cudarc::driver::LaunchConfig {
                 grid_dim: (t_grid_x, t_grid_y, 1),
                 block_dim: (32, 32, 1),
@@ -1129,14 +1404,22 @@ pub fn sgemm_bi_backward_dx(
                 .map_err(|e| format!("sgemm_transpose_f32_2d (K-tail): {:?}", e))?;
 
             // Step 2: Split-K NN partial — A=dY, B=W_T, output [M, k_main].
-            let m_i = batch as i32;
-            let k_main_i = k_main as i32;
-            let k_chunks = (n_out / 32) as i32;
-            let lda_dy_i = n_out as i32;
-            let num_pid_m = (batch as u32).div_ceil(32);
-            let num_pid_n = (k_main as u32).div_ceil(64);
+            let m_i = checked_dims.m_i32;
+            let k_main_i = checked_i32(k_main, "NT K-tail columns")?;
+            let k_chunks = checked_i32(n_out / 32, "NT K-tail chunks")?;
+            let lda_dy_i = checked_dims.n_i32;
+            let num_pid_m = checked_dims.m_u32.div_ceil(32);
+            let num_pid_n = checked_u32(k_main, "NT K-tail columns")?.div_ceil(64);
             let partial_cfg = cudarc::driver::LaunchConfig {
-                grid_dim: (num_pid_m * num_pid_n * k_chunks as u32, 1, 1),
+                grid_dim: (
+                    checked_grid_product(
+                        num_pid_m,
+                        num_pid_n,
+                        checked_u32(n_out / 32, "NT K-tail chunks")?,
+                    )?,
+                    1,
+                    1,
+                ),
                 block_dim: (128, 1, 1),
                 shared_mem_bytes: 0,
             };
@@ -1161,8 +1444,13 @@ pub fn sgemm_bi_backward_dx(
             let alpha: f32 = 1.0;
             let null_bias: u64 = 0;
             let zero_i32: i32 = 0;
-            let out_stride_i = n_in as i32;
-            let total_main = (batch * k_main) as u32;
+            let out_stride_i = checked_dims.k_i32;
+            let total_main = checked_u32(
+                batch.checked_mul(k_main).ok_or_else(|| {
+                    invalid_gemm_dimensions("NT K-tail output total overflows usize")
+                })?,
+                "NT K-tail output total",
+            )?;
             let reduce_cfg = cudarc::driver::LaunchConfig {
                 grid_dim: (total_main.div_ceil(256), 1, 1),
                 block_dim: (256, 1, 1),
@@ -1189,17 +1477,24 @@ pub fn sgemm_bi_backward_dx(
             // one gemv; tail_cnt ≤ 31 so total overhead is bounded. Sequential
             // (not parallel) to keep kernel launches small and deterministic.
             let w_base_ptr = w_ptr;
-            let n_i = n_out as i32;
+            let n_i = checked_dims.n_i32;
             let block = 128u32;
             let tail_cfg = cudarc::driver::LaunchConfig {
-                grid_dim: ((batch as u32).div_ceil(block), 1, 1),
+                grid_dim: (checked_dims.m_u32.div_ceil(block), 1, 1),
                 block_dim: (block, 1, 1),
                 shared_mem_bytes: 0,
             };
             for k in 0..k_tail_cnt {
                 let k_tail_col = k_main + k;
-                let w_tail_row_ptr: u64 = w_base_ptr + (k_tail_col * n_out) as u64 * 4;
-                let col_idx_i = k_tail_col as i32;
+                let row_elements = k_tail_col
+                    .checked_mul(n_out)
+                    .ok_or_else(|| invalid_gemm_dimensions("W tail row offset overflows usize"))?;
+                let w_tail_row_ptr = checked_ptr_add(
+                    w_base_ptr,
+                    checked_byte_offset(row_elements, std::mem::size_of::<f32>(), "W tail row")?,
+                    "W tail row",
+                )?;
+                let col_idx_i = checked_i32(k_tail_col, "NT K-tail column")?;
                 let mut gb = stream.launch_builder(&kernels.sgemm_dx_col_gemv);
                 gb.arg(dx.inner_mut());
                 gb.arg(dy.inner());
@@ -1242,14 +1537,15 @@ pub fn sgemm_bi_backward_dx(
     const SPLITK_NT_TRANSPOSE_CAP: usize = 1 << 22; // 4M f32 = transpose_scratch size
     let n_tail_nt = n_out % 32;
     let n_main_nt = n_out - n_tail_nt;
-    let w_size_nt = n_in * n_out;
+    let w_size_nt = checked_dims.kn;
     let partial_size_nt = if n_main_nt > 0 {
-        (n_main_nt / 32) * batch * n_in
+        checked_mul3(n_main_nt / 32, batch, n_in, "NT split-K scratch")?
     } else {
         0
     };
     // Phase C-1.5bo: same Slim NT-via-T underfill guard as K-tail variant above.
-    let plain_slim_blocks_nt_main = (batch as u32).div_ceil(128) * (n_in as u32).div_ceil(64);
+    let plain_slim_blocks_nt_main =
+        checked_tile_grid(checked_dims.m_u32, 128, checked_dims.k_u32, 64)?;
     let underfill_nt_main = plain_slim_blocks_nt_main < NUM_SMS;
     if (32..=1024).contains(&batch)
         && (64..=4096).contains(&n_in)
@@ -1263,10 +1559,10 @@ pub fn sgemm_bi_backward_dx(
     {
         // Step 1: transpose full W[n_in=K_out, n_out=N] → W_T[N, K_out] into
         // scratch (full width, including the tail rows W_T[n_main..n_out, :]).
-        let rows_i = n_in as i32;
-        let cols_i = n_out as i32;
-        let t_grid_x = (n_out as u32).div_ceil(32);
-        let t_grid_y = (n_in as u32).div_ceil(32);
+        let rows_i = checked_dims.k_i32;
+        let cols_i = checked_dims.n_i32;
+        let t_grid_x = checked_dims.n_u32.div_ceil(32);
+        let t_grid_y = checked_dims.k_u32.div_ceil(32);
         let t_cfg = cudarc::driver::LaunchConfig {
             grid_dim: (t_grid_x, t_grid_y, 1),
             block_dim: (32, 32, 1),
@@ -1288,14 +1584,22 @@ pub fn sgemm_bi_backward_dx(
         // partial = dY[M, n_main] @ W_T[n_main, K_out], reduction over n_main.
         // lda_i = n_out (full dY row stride) — partial reads only the first
         // k_chunks*32 = n_main columns per row, leaving the tail for step 3.
-        let m_i = batch as i32;
-        let k_out_i = n_in as i32;
-        let k_chunks = (n_main_nt / 32) as i32;
+        let m_i = checked_dims.m_i32;
+        let k_out_i = checked_dims.k_i32;
+        let k_chunks = checked_i32(n_main_nt / 32, "NT split-K chunks")?;
 
-        let num_pid_m = (batch as u32).div_ceil(32);
-        let num_pid_n = (n_in as u32).div_ceil(64);
+        let num_pid_m = checked_dims.m_u32.div_ceil(32);
+        let num_pid_n = checked_dims.k_u32.div_ceil(64);
         let partial_cfg = cudarc::driver::LaunchConfig {
-            grid_dim: (num_pid_m * num_pid_n * k_chunks as u32, 1, 1),
+            grid_dim: (
+                checked_grid_product(
+                    num_pid_m,
+                    num_pid_n,
+                    checked_u32(n_main_nt / 32, "NT split-K chunks")?,
+                )?,
+                1,
+                1,
+            ),
             block_dim: (128, 1, 1),
             shared_mem_bytes: 0,
         };
@@ -1304,7 +1608,7 @@ pub fn sgemm_bi_backward_dx(
             let (ptr, _r) = kernels.splitk_scratch_buf(stream)?.device_ptr(stream);
             ptr
         };
-        let lda_i = n_out as i32; // dY row stride = N_full (NOT n_main)
+        let lda_i = checked_dims.n_i32; // dY row stride = N_full (NOT n_main)
         let mut pb = stream.launch_builder(&kernels.sgemm_nn_splitk32_partial);
         pb.arg(&partial_ptr);
         pb.arg(dy.inner());
@@ -1323,22 +1627,33 @@ pub fn sgemm_bi_backward_dx(
         // n over [0, n_full) — bit-exact with the CPU sgemm_nt ascending-n loop.
         let alpha: f32 = 1.0;
         let null_bias: u64 = 0;
-        let total = (batch * n_in) as u32;
+        let total = checked_dims.mk_u32;
         let reduce_cfg = cudarc::driver::LaunchConfig {
             grid_dim: (total.div_ceil(256), 1, 1),
             block_dim: (256, 1, 1),
             shared_mem_bytes: 0,
         };
         let zero_i32: i32 = 0;
-        let tail_cnt_i = n_tail_nt as i32;
-        let dy_tail_stride_i = n_out as i32; // dY row stride
+        let tail_cnt_i = checked_i32(n_tail_nt, "NT reduction tail")?;
+        let dy_tail_stride_i = checked_dims.n_i32; // dY row stride
         // x_tail_ptr = dY[:, n_main] (offset n_main floats into base).
         // w_tail_ptr = W_T[n_main, :] (offset n_main * n_in floats into W_T base).
         let (dy_tail_ptr, wt_tail_ptr): (u64, u64) = if n_tail_nt > 0 {
             use cudarc::driver::DevicePtr;
             let (dy_base, _r_dy) = dy.inner().device_ptr(stream);
-            let dyp = dy_base + (n_main_nt as u64) * 4;
-            let wtp = w_t_ptr + (n_main_nt as u64 * n_in as u64) * 4;
+            let dyp = checked_ptr_add(
+                dy_base,
+                checked_byte_offset(n_main_nt, std::mem::size_of::<f32>(), "dY tail")?,
+                "dY tail",
+            )?;
+            let wt_elements = n_main_nt.checked_mul(n_in).ok_or_else(|| {
+                invalid_gemm_dimensions("transposed W tail offset overflows usize")
+            })?;
+            let wtp = checked_ptr_add(
+                w_t_ptr,
+                checked_byte_offset(wt_elements, std::mem::size_of::<f32>(), "transposed W tail")?,
+                "transposed W tail",
+            )?;
             (dyp, wtp)
         } else {
             (0, 0)
@@ -1383,22 +1698,29 @@ pub fn sgemm_bi_backward_dx(
         && (128..=SGEMM_SLIM_NT_NIN_MAX).contains(&n_in)
         && n_out >= SLIM_NT_K_CHUNK as usize
         && n_out.is_multiple_of(32)
-        && (n_in * n_out) <= SPLITK_NT_TRANSPOSE_CAP
+        && checked_dims.kn <= SPLITK_NT_TRANSPOSE_CAP
     {
         // F depends only on N (reduction axis of transposed problem).
-        let f_final = (n_out as u32).div_ceil(SLIM_NT_K_CHUNK);
-        if f_final >= 2 && (f_final as usize) * batch * n_in <= SPLITK_SCRATCH_CAP {
+        let f_final = checked_dims.n_u32.div_ceil(SLIM_NT_K_CHUNK);
+        if f_final >= 2
+            && checked_mul3(
+                checked_usize(f_final, "NT slim split-K chunks")?,
+                batch,
+                n_in,
+                "NT slim split-K scratch",
+            )? <= SPLITK_SCRATCH_CAP
+        {
             // Perf heuristic: fire only if plain Slim NT grid underfills.
-            let m_tiles = (batch as u32).div_ceil(128);
-            let k_out_tiles = (n_in as u32).div_ceil(64);
-            let base_blocks = m_tiles * k_out_tiles;
+            let m_tiles = checked_dims.m_u32.div_ceil(128);
+            let k_out_tiles = checked_dims.k_u32.div_ceil(64);
+            let base_blocks = checked_grid_product(m_tiles, k_out_tiles, 1)?;
             if base_blocks > 0 && base_blocks < 3 * NUM_SMS {
                 let k_chunk = SLIM_NT_K_CHUNK;
                 // Step 1: transpose W[n_in=K_out, n_out=N] → W_T[N, K_out] into scratch.
-                let rows_i = n_in as i32;
-                let cols_i = n_out as i32;
-                let t_grid_x = (n_out as u32).div_ceil(32);
-                let t_grid_y = (n_in as u32).div_ceil(32);
+                let rows_i = checked_dims.k_i32;
+                let cols_i = checked_dims.n_i32;
+                let t_grid_x = checked_dims.n_u32.div_ceil(32);
+                let t_grid_y = checked_dims.k_u32.div_ceil(32);
                 let t_cfg = cudarc::driver::LaunchConfig {
                     grid_dim: (t_grid_x, t_grid_y, 1),
                     block_dim: (32, 32, 1),
@@ -1418,12 +1740,15 @@ pub fn sgemm_bi_backward_dx(
                     .map_err(|e| format!("sgemm_transpose_f32_2d (slim NT): {:?}", e))?;
 
                 // Step 2: Slim Split-K NN partial on (dY, W_T) with K_chunk split.
-                let m_i = batch as i32;
-                let k_out_i = n_in as i32; // NN's "N" = K_out
-                let k_full_i = n_out as i32; // NN's "K" = n_out (reduction axis)
-                let lda_i = n_out as i32; // dY stride = n_out
-                let ldb_i = n_in as i32; // W_T stride = K_out
-                let k_chunk_i = k_chunk as i32;
+                let m_i = checked_dims.m_i32;
+                let k_out_i = checked_dims.k_i32; // NN's "N" = K_out
+                let k_full_i = checked_dims.n_i32; // NN's "K" = n_out (reduction axis)
+                let lda_i = checked_dims.n_i32; // dY stride = n_out
+                let ldb_i = checked_dims.k_i32; // W_T stride = K_out
+                let k_chunk_i = checked_i32(
+                    checked_usize(k_chunk, "NT slim split-K chunk")?,
+                    "NT slim split-K chunk",
+                )?;
 
                 let partial_ptr = {
                     use cudarc::driver::DevicePtr;
@@ -1454,8 +1779,11 @@ pub fn sgemm_bi_backward_dx(
                 let null_bias: u64 = 0;
                 let null_tail: u64 = 0;
                 let zero_i32_nt: i32 = 0;
-                let f_i = f_final as i32;
-                let total = (batch * n_in) as u32;
+                let f_i = checked_i32(
+                    checked_usize(f_final, "NT slim split-K chunks")?,
+                    "NT slim split-K chunks",
+                )?;
+                let total = checked_dims.mk_u32;
                 let reduce_cfg = cudarc::driver::LaunchConfig {
                     grid_dim: (total.div_ceil(256), 1, 1),
                     block_dim: (256, 1, 1),
@@ -1498,14 +1826,14 @@ pub fn sgemm_bi_backward_dx(
     // Perf: ~50% tile fill at boundary (batch padded to BM=64) — acceptable
     // for a gap-fill vs cuBLAS panic / non-determinism.
     if (32..128).contains(&batch) && n_in >= 1 && n_out >= 128 {
-        let m_i = batch as i32;
-        let n_i = n_out as i32;
-        let k_i = n_in as i32;
+        let m_i = checked_dims.m_i32;
+        let n_i = checked_dims.n_i32;
+        let k_i = checked_dims.k_i32;
         let alpha: f32 = 1.0;
-        let num_pid_m = (batch as u32).div_ceil(64);
-        let num_pid_n = (n_in as u32).div_ceil(32);
+        let num_pid_m = checked_dims.m_u32.div_ceil(64);
+        let num_pid_n = checked_dims.k_u32.div_ceil(32);
         let cfg = cudarc::driver::LaunchConfig {
-            grid_dim: (num_pid_m * num_pid_n, 1, 1),
+            grid_dim: (checked_grid_product(num_pid_m, num_pid_n, 1)?, 1, 1),
             block_dim: (128, 1, 1),
             shared_mem_bytes: 0,
         };
@@ -1527,9 +1855,9 @@ pub fn sgemm_bi_backward_dx(
     // scalar K-fallback for non-%4 K_out.
     // Dropped `n_in >= 128` — covers Mamba-1 dt_proj backward_dx (K_out=8).
     if batch >= SGEMM_CUSTOM_MIN && n_in >= 1 {
-        let m_i = batch as i32;
-        let n_i = n_out as i32;
-        let k_i = n_in as i32;
+        let m_i = checked_dims.m_i32;
+        let n_i = checked_dims.n_i32;
+        let k_i = checked_dims.k_i32;
         let alpha: f32 = 1.0;
         // NT output leading dim = n_in (K_out); M-aware fan-out by batch.
         let (func, bn) = dispatch_slim_or_big(
@@ -1546,7 +1874,7 @@ pub fn sgemm_bi_backward_dx(
         let smem_bytes: u32 = if slim { 0 } else { 34 * 1024 };
         // 2026-05-13 — data-parallel launch (no persistent-CTA cap). See
         // gpu_sgemm_forward note and gemm_bi_triad.cu for the kernel-side unwrap.
-        let total_tiles = (batch as u32).div_ceil(128) * (n_in as u32).div_ceil(bn);
+        let total_tiles = checked_tile_grid(checked_dims.m_u32, 128, checked_dims.k_u32, bn)?;
         let cfg = cudarc::driver::LaunchConfig {
             grid_dim: (total_tiles, 1, 1),
             block_dim: (threads, 1, 1),
@@ -1602,6 +1930,9 @@ use super::dtype::WeightDtype;
 /// NN forward: mirrors `sgemm_bi_forward` (gemv, ultra-thin, narrow tiers,
 /// split-K thin-M K-tail/main, split-K slim, gap-fill, then big/slim).
 pub(super) fn nn_routes_to_big(batch: usize, n_in: usize, n_out: usize) -> bool {
+    let Ok(dims) = GemmDims::nn((batch, n_in, n_out), n_in) else {
+        return false;
+    };
     if n_out == 1 {
         return false; // gemv (or panic tail) — never Big
     }
@@ -1611,7 +1942,9 @@ pub(super) fn nn_routes_to_big(batch: usize, n_in: usize, n_out: usize) -> bool 
     if (2..=127).contains(&n_out) {
         return false; // narrow tiers
     }
-    let plain_slim_blocks = (batch as u32).div_ceil(128) * (n_out as u32).div_ceil(64);
+    let Ok(plain_slim_blocks) = checked_tile_grid(dims.m_u32, 128, dims.n_u32, 64) else {
+        return false;
+    };
     let underfill = plain_slim_blocks < NUM_SMS;
     // split-K thin-M K-tail
     if (32..=1024).contains(&batch)
@@ -1622,7 +1955,10 @@ pub(super) fn nn_routes_to_big(batch: usize, n_in: usize, n_out: usize) -> bool 
         && underfill
     {
         let k_main = n_in - n_in % 32;
-        if k_main >= 32 && (k_main / 32) * batch * n_out <= SPLITK_SCRATCH_CAP {
+        if k_main >= 32
+            && checked_mul3(k_main / 32, batch, n_out, "NN route scratch")
+                .is_ok_and(|elements| elements <= SPLITK_SCRATCH_CAP)
+        {
             return false;
         }
     }
@@ -1632,7 +1968,8 @@ pub(super) fn nn_routes_to_big(batch: usize, n_in: usize, n_out: usize) -> bool 
         && n_out.is_multiple_of(4)
         && n_in >= 32
         && n_in.is_multiple_of(32)
-        && (n_in / 32) * batch * n_out <= SPLITK_SCRATCH_CAP
+        && checked_mul3(n_in / 32, batch, n_out, "NN route scratch")
+            .is_ok_and(|elements| elements <= SPLITK_SCRATCH_CAP)
         && underfill
     {
         return false;
@@ -1643,9 +1980,18 @@ pub(super) fn nn_routes_to_big(batch: usize, n_in: usize, n_out: usize) -> bool 
         && n_in >= 64
         && n_in.is_multiple_of(32)
     {
-        let f_final = (n_in as u32).div_ceil(64);
-        if f_final >= 6 && (f_final as usize) * batch * n_out <= SPLITK_SCRATCH_CAP {
-            let base_blocks = (batch as u32).div_ceil(128) * (n_out as u32).div_ceil(64);
+        let f_final = dims.k_u32.div_ceil(64);
+        if f_final >= 6
+            && checked_mul3(
+                checked_usize(f_final, "NN route chunks").unwrap_or(usize::MAX),
+                batch,
+                n_out,
+                "NN route scratch",
+            )
+            .is_ok_and(|elements| elements <= SPLITK_SCRATCH_CAP)
+        {
+            let base_blocks =
+                checked_tile_grid(dims.m_u32, 128, dims.n_u32, 64).unwrap_or(u32::MAX);
             if base_blocks > 0 && base_blocks < 3 * NUM_SMS {
                 return false;
             }
@@ -1664,6 +2010,9 @@ pub(super) fn nn_routes_to_big(batch: usize, n_in: usize, n_out: usize) -> bool 
 /// TN dW: mirrors `sgemm_bi_backward_dw` (gemv, narrow, split-M, big/slim
 /// keyed on output rows = `n_in`).
 pub(super) fn tn_routes_to_big(batch: usize, n_in: usize, n_out: usize) -> bool {
+    if GemmDims::tn((batch, n_in, n_out)).is_err() {
+        return false;
+    }
     if n_out == 1 || (2..=127).contains(&n_out) {
         return false; // gemv / narrow
     }
@@ -1680,6 +2029,9 @@ pub(super) fn tn_routes_to_big(batch: usize, n_in: usize, n_out: usize) -> bool 
 /// NT dX: mirrors `sgemm_bi_backward_dx` (narrow, col-gemv, gemv, split-N
 /// K-tail/main, split-N slim, gap-fill, big/slim keyed on (`batch`, `n_in`)).
 pub(super) fn nt_routes_to_big(batch: usize, n_in: usize, n_out: usize) -> bool {
+    let Ok(dims) = GemmDims::nt((batch, n_in, n_out)) else {
+        return false;
+    };
     if (2..=127).contains(&n_out) {
         return false; // NT narrow (small reduction N)
     }
@@ -1690,7 +2042,9 @@ pub(super) fn nt_routes_to_big(batch: usize, n_in: usize, n_out: usize) -> bool 
         return false; // NT gemv
     }
     const SPLITK_NT_TRANSPOSE_CAP: usize = 1 << 22;
-    let plain_slim_blocks = (batch as u32).div_ceil(128) * (n_in as u32).div_ceil(64);
+    let Ok(plain_slim_blocks) = checked_tile_grid(dims.m_u32, 128, dims.k_u32, 64) else {
+        return false;
+    };
     let underfill = plain_slim_blocks < NUM_SMS;
     // split-N K-tail
     if (32..=1024).contains(&batch)
@@ -1703,8 +2057,11 @@ pub(super) fn nt_routes_to_big(batch: usize, n_in: usize, n_out: usize) -> bool 
     {
         let k_main = n_in - n_in % 32;
         if k_main >= 32
-            && k_main * n_out <= SPLITK_NT_TRANSPOSE_CAP
-            && (n_out / 32) * batch * k_main <= SPLITK_SCRATCH_CAP
+            && k_main
+                .checked_mul(n_out)
+                .is_some_and(|elements| elements <= SPLITK_NT_TRANSPOSE_CAP)
+            && checked_mul3(n_out / 32, batch, k_main, "NT route scratch")
+                .is_ok_and(|elements| elements <= SPLITK_SCRATCH_CAP)
         {
             return false;
         }
@@ -1717,8 +2074,9 @@ pub(super) fn nt_routes_to_big(batch: usize, n_in: usize, n_out: usize) -> bool 
         && n_in.is_multiple_of(32)
         && (32..=2048).contains(&n_out)
         && n_main >= 32
-        && n_in * n_out <= SPLITK_NT_TRANSPOSE_CAP
-        && (n_main / 32) * batch * n_in <= SPLITK_SCRATCH_CAP
+        && dims.kn <= SPLITK_NT_TRANSPOSE_CAP
+        && checked_mul3(n_main / 32, batch, n_in, "NT route scratch")
+            .is_ok_and(|elements| elements <= SPLITK_SCRATCH_CAP)
         && underfill
     {
         return false;
@@ -1728,11 +2086,20 @@ pub(super) fn nt_routes_to_big(batch: usize, n_in: usize, n_out: usize) -> bool 
         && (128..=SGEMM_SLIM_NT_NIN_MAX).contains(&n_in)
         && n_out >= 64
         && n_out.is_multiple_of(32)
-        && n_in * n_out <= SPLITK_NT_TRANSPOSE_CAP
+        && dims.kn <= SPLITK_NT_TRANSPOSE_CAP
     {
-        let f_final = (n_out as u32).div_ceil(64);
-        if f_final >= 2 && (f_final as usize) * batch * n_in <= SPLITK_SCRATCH_CAP {
-            let base_blocks = (batch as u32).div_ceil(128) * (n_in as u32).div_ceil(64);
+        let f_final = dims.n_u32.div_ceil(64);
+        if f_final >= 2
+            && checked_mul3(
+                checked_usize(f_final, "NT route chunks").unwrap_or(usize::MAX),
+                batch,
+                n_in,
+                "NT route scratch",
+            )
+            .is_ok_and(|elements| elements <= SPLITK_SCRATCH_CAP)
+        {
+            let base_blocks =
+                checked_tile_grid(dims.m_u32, 128, dims.k_u32, 64).unwrap_or(u32::MAX);
             if base_blocks > 0 && base_blocks < 3 * NUM_SMS {
                 return false;
             }
@@ -1793,7 +2160,10 @@ pub const TC64_PREFER_MAX_TILES128: u32 = 72;
 /// below the TC gates (caller returns the `UNCOVERED` error).
 fn tc_pick_tile(rows: usize, cols: usize) -> Option<TcTile> {
     if rows >= 128 && cols >= 128 {
-        let tiles128 = (rows as u32).div_ceil(128) * (cols as u32).div_ceil(128);
+        let tiles128 = u32::try_from(rows)
+            .ok()?
+            .div_ceil(128)
+            .checked_mul(u32::try_from(cols).ok()?.div_ceil(128))?;
         if tiles128 >= TC64_PREFER_MAX_TILES128 {
             return Some(TcTile::Tile128);
         }
@@ -1857,17 +2227,22 @@ impl TcTile {
         rows: usize,
         cols: usize,
         dyn_bytes128: u32,
-    ) -> cudarc::driver::LaunchConfig {
+    ) -> Result<cudarc::driver::LaunchConfig, String> {
         let (bm, bn) = self.extents();
-        let total_tiles = (rows as u32).div_ceil(bm) * (cols as u32).div_ceil(bn);
-        cudarc::driver::LaunchConfig {
+        let total_tiles = checked_tile_grid(
+            checked_u32(rows, "tile rows")?,
+            bm,
+            checked_u32(cols, "tile columns")?,
+            bn,
+        )?;
+        Ok(cudarc::driver::LaunchConfig {
             grid_dim: (total_tiles, 1, 1),
             block_dim: (self.block_dim(), 1, 1),
             shared_mem_bytes: match self {
                 TcTile::Tile128 => dyn_bytes128,
                 TcTile::Tile64 | TcTile::Thin16 => 0,
             },
-        }
+        })
     }
 }
 
@@ -1897,7 +2272,8 @@ pub fn sgemm_bi_forward_tc(
     bias_ptr: CUptr,
     dims: (usize, usize, usize),
 ) -> Result<TcTile, String> {
-    let (batch, _n_in, n_out) = dims;
+    let checked_dims = GemmDims::nn(dims, dims.1)?;
+    let (batch, _n_in, n_out) = checked_dims.tuple();
     let tile = tc_pick_tile_forward(batch, n_out).ok_or_else(|| {
         let (batch, n_in, n_out) = dims;
         format!(
@@ -1921,7 +2297,8 @@ pub fn sgemm_bi_forward_tc_with_tile(
     dims: (usize, usize, usize),
     tile: TcTile,
 ) -> Result<(), String> {
-    let (batch, n_in, n_out) = dims;
+    let checked_dims = GemmDims::nn(dims, dims.1)?;
+    let (batch, _n_in, n_out) = checked_dims.tuple();
     require_half(ops.y.dtype, "output")?;
     if ops.x.dtype != ops.y.dtype || ops.w.dtype != ops.y.dtype {
         return Err("sgemm_bi_forward_tc: mixed dtypes not supported".into());
@@ -1929,10 +2306,10 @@ pub fn sgemm_bi_forward_tc_with_tile(
     let dt = ops.y.dtype;
     let alpha: f32 = 1.0;
     let beta: f32 = 0.0;
-    let m_i = batch as i32;
-    let n_i = n_out as i32;
-    let k_i = n_in as i32;
-    let cfg = tile.launch_cfg(batch, n_out, 71_680);
+    let m_i = checked_dims.m_i32;
+    let n_i = checked_dims.n_i32;
+    let k_i = checked_dims.k_i32;
+    let cfg = tile.launch_cfg(batch, n_out, 71_680)?;
     let func = match tile {
         TcTile::Tile128 => kernels.sgemm_nn_tc_typed.get(dt),
         TcTile::Tile64 => kernels.sgemm_nn_tc64_typed.get(dt),
@@ -1967,7 +2344,8 @@ pub fn sgemm_bi_backward_dw_tc(
     x_saved: TypedPtr,
     dims: (usize, usize, usize),
 ) -> Result<TcTile, String> {
-    let (batch, n_in, n_out) = dims;
+    let checked_dims = GemmDims::tn(dims)?;
+    let (batch, n_in, n_out) = checked_dims.tuple();
     // Tile pick keys on the OUTPUT dims (K_out, N) only — never on the
     // reduction dim (batch), so the dW reduction order is shape-keyed.
     let tile = tc_pick_tile(n_in, n_out).ok_or_else(|| {
@@ -1989,17 +2367,18 @@ pub fn sgemm_bi_backward_dw_tc_with_tile(
     dims: (usize, usize, usize),
     tile: TcTile,
 ) -> Result<(), String> {
-    let (batch, n_in, n_out) = dims;
+    let checked_dims = GemmDims::tn(dims)?;
+    let (_batch, n_in, n_out) = checked_dims.tuple();
     require_half(dy.dtype, "dY")?;
     if dy.dtype != x_saved.dtype {
         return Err("sgemm_bi_backward_dw_tc: mixed dtypes not supported".into());
     }
     let dt = dy.dtype;
     let alpha: f32 = 1.0;
-    let m_red_i = batch as i32;
-    let k_out_i = n_in as i32;
-    let n_i = n_out as i32;
-    let cfg = tile.launch_cfg(n_in, n_out, 69_632);
+    let m_red_i = checked_dims.m_i32;
+    let k_out_i = checked_dims.k_i32;
+    let n_i = checked_dims.n_i32;
+    let cfg = tile.launch_cfg(n_in, n_out, 69_632)?;
     let func = match tile {
         TcTile::Tile128 => kernels.sgemm_tn_tc_typed.get(dt),
         TcTile::Tile64 => kernels.sgemm_tn_tc64_typed.get(dt),
@@ -2033,7 +2412,8 @@ pub fn sgemm_bi_backward_dx_tc(
     w: TypedPtr,
     dims: (usize, usize, usize),
 ) -> Result<TcTile, String> {
-    let (batch, n_in, n_out) = dims;
+    let checked_dims = GemmDims::nt(dims)?;
+    let (batch, n_in, n_out) = checked_dims.tuple();
     let tile = tc_pick_tile(batch, n_in).ok_or_else(|| {
         format!(
             "UNCOVERED sgemm_bi_backward_dx_tc: shape M={batch} K={n_in} N={n_out} below the TC tile gate"
@@ -2053,17 +2433,18 @@ pub fn sgemm_bi_backward_dx_tc_with_tile(
     dims: (usize, usize, usize),
     tile: TcTile,
 ) -> Result<(), String> {
-    let (batch, n_in, n_out) = dims;
+    let checked_dims = GemmDims::nt(dims)?;
+    let (batch, n_in, _n_out) = checked_dims.tuple();
     require_half(dx.dtype, "dX")?;
     if dx.dtype != dy.dtype || dy.dtype != w.dtype {
         return Err("sgemm_bi_backward_dx_tc: mixed dtypes not supported".into());
     }
     let dt = dx.dtype;
     let alpha: f32 = 1.0;
-    let m_i = batch as i32;
-    let n_i = n_out as i32;
-    let k_out_i = n_in as i32;
-    let cfg = tile.launch_cfg(batch, n_in, 73_728);
+    let m_i = checked_dims.m_i32;
+    let n_i = checked_dims.n_i32;
+    let k_out_i = checked_dims.k_i32;
+    let cfg = tile.launch_cfg(batch, n_in, 73_728)?;
     let func = match tile {
         TcTile::Tile128 => kernels.sgemm_nt_tc_typed.get(dt),
         TcTile::Tile64 => kernels.sgemm_nt_tc64_typed.get(dt),
@@ -2093,7 +2474,8 @@ pub fn sgemm_bi_forward_typed(
     bias_ptr: CUptr, // f32, 0 = none
     dims: (usize, usize, usize),
 ) -> Result<(), String> {
-    let (batch, n_in, n_out) = dims;
+    let checked_dims = GemmDims::nn(dims, dims.1)?;
+    let (batch, n_in, n_out) = checked_dims.tuple();
     require_half(y.dtype, "output")?;
     if x.dtype != y.dtype || w.dtype != y.dtype {
         return Err("sgemm_bi_forward_typed: mixed dtypes not supported".into());
@@ -2101,16 +2483,16 @@ pub fn sgemm_bi_forward_typed(
     let dt = y.dtype;
     let alpha: f32 = 1.0;
     let beta: f32 = 0.0;
-    let m_i = batch as i32;
-    let n_i = n_out as i32;
-    let k_i = n_in as i32;
+    let m_i = checked_dims.m_i32;
+    let n_i = checked_dims.n_i32;
+    let k_i = checked_dims.k_i32;
 
     // GEMV N=1.
     if n_out == 1 && batch >= 1 && n_in >= 32 {
-        let lda_i = n_in as i32;
+        let lda_i = checked_dims.k_i32;
         let ldy_i: i32 = 1;
         let cfg = cudarc::driver::LaunchConfig {
-            grid_dim: ((batch as u32).div_ceil(4), 1, 1),
+            grid_dim: (checked_dims.m_u32.div_ceil(4), 1, 1),
             block_dim: (128, 1, 1),
             shared_mem_bytes: 0,
         };
@@ -2132,9 +2514,13 @@ pub fn sgemm_bi_forward_typed(
     // Ultra-thin M (1..32).
     if (1..32).contains(&batch) && (32..=2048).contains(&n_in) && n_out >= 32 {
         let cfg = cudarc::driver::LaunchConfig {
-            grid_dim: ((n_out as u32).div_ceil(32), batch as u32, 1),
+            grid_dim: (checked_dims.n_u32.div_ceil(32), checked_dims.m_u32, 1),
             block_dim: (256, 1, 1),
-            shared_mem_bytes: (n_in * std::mem::size_of::<f32>()) as u32,
+            shared_mem_bytes: checked_u32_product(
+                checked_dims.k_u32,
+                checked_u32(std::mem::size_of::<f32>(), "f32 byte width")?,
+                "typed ultra-thin shared memory",
+            )?,
         };
         let mut b = stream.launch_builder(kernels.sgemm_nn_ultra_thin_typed.get(dt));
         b.arg(&y.ptr);
@@ -2159,13 +2545,13 @@ pub fn sgemm_bi_forward_typed(
         let small = batch <= 64;
         let (grid, block, func) = if small {
             (
-                (batch as u32).div_ceil(16) * (n_out as u32).div_ceil(16),
+                checked_tile_grid(checked_dims.m_u32, 16, checked_dims.n_u32, 16)?,
                 64u32,
                 kernels.sgemm_nn_narrow_small_typed.get(dt),
             )
         } else {
             (
-                (batch as u32).div_ceil(64) * (n_out as u32).div_ceil(32),
+                checked_tile_grid(checked_dims.m_u32, 64, checked_dims.n_u32, 32)?,
                 128u32,
                 kernels.sgemm_nn_narrow_typed.get(dt),
             )
@@ -2196,7 +2582,7 @@ pub fn sgemm_bi_forward_typed(
     // Big NN (stage 3): native typed twin of `sgemm_bi_nn`, fired exactly
     // where the f32 cascade would run Big (predicate-mirrored gates).
     if nn_routes_to_big(batch, n_in, n_out) {
-        let total_tiles = (batch as u32).div_ceil(128) * (n_out as u32).div_ceil(128);
+        let total_tiles = checked_tile_grid(checked_dims.m_u32, 128, checked_dims.n_u32, 128)?;
         let cfg = cudarc::driver::LaunchConfig {
             grid_dim: (total_tiles, 1, 1),
             block_dim: (256, 1, 1),
@@ -2235,7 +2621,8 @@ pub fn sgemm_bi_backward_dw_typed(
     x_saved: TypedPtr,
     dims: (usize, usize, usize),
 ) -> Result<(), String> {
-    let (batch, n_in, n_out) = dims;
+    let checked_dims = GemmDims::tn(dims)?;
+    let (batch, n_in, n_out) = checked_dims.tuple();
     require_half(dy.dtype, "dY")?;
     if x_saved.dtype != dy.dtype {
         return Err("sgemm_bi_backward_dw_typed: mixed dtypes not supported".into());
@@ -2245,12 +2632,12 @@ pub fn sgemm_bi_backward_dw_typed(
 
     // GEMV N=1.
     if n_out == 1 && n_in >= 4 && batch >= 32 {
-        let m_i = batch as i32;
-        let k_i = n_in as i32;
-        let lda_i = n_in as i32;
+        let m_i = checked_dims.m_i32;
+        let k_i = checked_dims.k_i32;
+        let lda_i = checked_dims.k_i32;
         let ldy_i: i32 = 1;
         let cfg = cudarc::driver::LaunchConfig {
-            grid_dim: ((n_in as u32).div_ceil(4), 1, 1),
+            grid_dim: (checked_dims.k_u32.div_ceil(4), 1, 1),
             block_dim: (128, 1, 1),
             shared_mem_bytes: 0,
         };
@@ -2269,12 +2656,12 @@ pub fn sgemm_bi_backward_dw_typed(
 
     // Narrow N (2..=127).
     if (2..=127).contains(&n_out) && batch >= 1 && n_in >= 1 {
-        let m_red_i = batch as i32;
-        let k_out_i = n_in as i32;
-        let n_i = n_out as i32;
+        let m_red_i = checked_dims.m_i32;
+        let k_out_i = checked_dims.k_i32;
+        let n_i = checked_dims.n_i32;
         let cfg = cudarc::driver::LaunchConfig {
             grid_dim: (
-                (n_in as u32).div_ceil(64) * (n_out as u32).div_ceil(32),
+                checked_tile_grid(checked_dims.k_u32, 64, checked_dims.n_u32, 32)?,
                 1,
                 1,
             ),
@@ -2296,10 +2683,10 @@ pub fn sgemm_bi_backward_dw_typed(
     // Big TN (stage 3): native typed twin of `sgemm_bi_tn`. dW stays f32 +=.
     if tn_routes_to_big(batch, n_in, n_out) {
         let alpha: f32 = 1.0;
-        let m_red_i = batch as i32;
-        let k_out_i = n_in as i32;
-        let n_i = n_out as i32;
-        let total_tiles = (n_in as u32).div_ceil(128) * (n_out as u32).div_ceil(128);
+        let m_red_i = checked_dims.m_i32;
+        let k_out_i = checked_dims.k_i32;
+        let n_i = checked_dims.n_i32;
+        let total_tiles = checked_tile_grid(checked_dims.k_u32, 128, checked_dims.n_u32, 128)?;
         let cfg = cudarc::driver::LaunchConfig {
             grid_dim: (total_tiles, 1, 1),
             block_dim: (256, 1, 1),
@@ -2332,7 +2719,8 @@ pub fn sgemm_bi_backward_dx_typed(
     w: TypedPtr,
     dims: (usize, usize, usize),
 ) -> Result<(), String> {
-    let (batch, n_in, n_out) = dims;
+    let checked_dims = GemmDims::nt(dims)?;
+    let (batch, n_in, n_out) = checked_dims.tuple();
     require_half(dx.dtype, "dX")?;
     if dy.dtype != dx.dtype || w.dtype != dx.dtype {
         return Err("sgemm_bi_backward_dx_typed: mixed dtypes not supported".into());
@@ -2342,11 +2730,11 @@ pub fn sgemm_bi_backward_dx_typed(
 
     // GEMV N=1 (outer product).
     if n_out == 1 && batch >= 1 && n_in >= 1 {
-        let m_i = batch as i32;
-        let k_i = n_in as i32;
-        let ldx_i = n_in as i32;
+        let m_i = checked_dims.m_i32;
+        let k_i = checked_dims.k_i32;
+        let ldx_i = checked_dims.k_i32;
         let ldy_i: i32 = 1;
-        let total = (batch * n_in) as u32;
+        let total = checked_dims.mk_u32;
         let cfg = cudarc::driver::LaunchConfig {
             grid_dim: (total.div_ceil(256), 1, 1),
             block_dim: (256, 1, 1),
@@ -2367,12 +2755,12 @@ pub fn sgemm_bi_backward_dx_typed(
 
     // Narrow reduction N (2..=127).
     if (2..=127).contains(&n_out) && batch >= 1 && n_in >= 1 {
-        let m_i = batch as i32;
-        let n_i = n_out as i32;
-        let k_out_i = n_in as i32;
+        let m_i = checked_dims.m_i32;
+        let n_i = checked_dims.n_i32;
+        let k_out_i = checked_dims.k_i32;
         let cfg = cudarc::driver::LaunchConfig {
             grid_dim: (
-                (batch as u32).div_ceil(64) * (n_in as u32).div_ceil(32),
+                checked_tile_grid(checked_dims.m_u32, 64, checked_dims.k_u32, 32)?,
                 1,
                 1,
             ),
@@ -2394,10 +2782,10 @@ pub fn sgemm_bi_backward_dx_typed(
     // Big NT (stage 3): native typed twin of `sgemm_bi_nt` (typed dX overwrite).
     if nt_routes_to_big(batch, n_in, n_out) {
         let alpha: f32 = 1.0;
-        let m_i = batch as i32;
-        let n_i = n_out as i32;
-        let k_out_i = n_in as i32;
-        let total_tiles = (batch as u32).div_ceil(128) * (n_in as u32).div_ceil(128);
+        let m_i = checked_dims.m_i32;
+        let n_i = checked_dims.n_i32;
+        let k_out_i = checked_dims.k_i32;
+        let total_tiles = checked_tile_grid(checked_dims.m_u32, 128, checked_dims.k_u32, 128)?;
         let cfg = cudarc::driver::LaunchConfig {
             grid_dim: (total_tiles, 1, 1),
             block_dim: (256, 1, 1),
@@ -2419,4 +2807,117 @@ pub fn sgemm_bi_backward_dx_typed(
         "UNCOVERED sgemm_bi_backward_dx_typed: split-N/Slim buckets are upcast-fallback territory — \
          shape M={batch} K={n_in} N={n_out}."
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{GemmDims, checked_grid_product, checked_u32};
+
+    fn assert_invalid_error(error: String) {
+        assert!(error.starts_with("invalid GEMM dimensions"), "{error}");
+        assert!(!error.starts_with("UNCOVERED"), "{error}");
+    }
+
+    fn assert_invalid(result: Result<GemmDims, String>) {
+        assert_invalid_error(result.expect_err("dimensions must be rejected"));
+    }
+
+    #[test]
+    fn gemm_dims_reject_zero_axes() {
+        for dims in [(0, 1, 1), (1, 0, 1), (1, 1, 0)] {
+            assert_invalid(GemmDims::nn(dims, dims.1.max(1)));
+        }
+    }
+
+    #[test]
+    fn gemm_dims_accept_i32_max_boundary() {
+        let limit = i32::MAX as usize;
+        let dims = GemmDims::checked(limit, 1, 1, 1, 1, 1).unwrap();
+
+        assert_eq!(dims.m_i32, i32::MAX);
+        assert_eq!(dims.mk, limit);
+        assert_eq!(dims.mn, limit);
+        assert_eq!(dims.kn, 1);
+    }
+
+    #[test]
+    fn gemm_dims_reject_axis_above_i32_max() {
+        let too_large = i32::MAX as usize + 1;
+        assert_invalid(GemmDims::checked(too_large, 1, 1, 1, 1, 1));
+    }
+
+    #[test]
+    fn gemm_dims_reject_product_overflow() {
+        assert_invalid(GemmDims::checked(usize::MAX, 2, 1, 2, 1, 1));
+    }
+
+    #[test]
+    fn gemm_dims_reject_device_total_overflow() {
+        let limit = i32::MAX as usize;
+        assert_invalid(GemmDims::checked(limit, 2, 1, 2, 1, 1));
+    }
+
+    #[test]
+    fn gemm_dims_reject_grid_conversion_overflow() {
+        assert_invalid_error(
+            checked_u32(u32::MAX as usize + 1, "grid axis")
+                .expect_err("an oversized grid axis must be rejected"),
+        );
+        assert_invalid_error(
+            checked_grid_product(u32::MAX, 2, 1)
+                .expect_err("an overflowing grid product must be rejected"),
+        );
+    }
+
+    #[test]
+    fn gemm_dims_reject_bad_nn_strides() {
+        for strides in [(2, 5, 5), (3, 4, 5), (3, 5, 4), (0, 5, 5)] {
+            assert_invalid(GemmDims::checked(
+                2,
+                strides.0.max(3),
+                5,
+                strides.0,
+                strides.1,
+                strides.2,
+            ));
+        }
+        assert_invalid(GemmDims::checked(2, 1, 1, i32::MAX as usize, 1, 1));
+        assert_invalid(GemmDims::checked(1, 1, 1, i32::MAX as usize + 1, 1, 1));
+    }
+
+    #[test]
+    fn gemm_dims_preserve_tn_storage_strides() {
+        let dims = GemmDims::tn((2, 3, 5)).unwrap();
+        assert_eq!((dims.lda, dims.ldb, dims.ldc), (3, 5, 5));
+    }
+
+    #[test]
+    fn gemm_dims_reject_bad_tn_strides() {
+        assert_invalid(GemmDims::checked_storage(
+            2,
+            3,
+            5,
+            [2, 5, 5],
+            [3, 5, 5],
+            [2, 2, 3],
+        ));
+    }
+
+    #[test]
+    fn gemm_dims_preserve_nt_storage_strides() {
+        let dims = GemmDims::nt((2, 3, 5)).unwrap();
+        assert_eq!((dims.lda, dims.ldb, dims.ldc), (5, 5, 3));
+    }
+
+    #[test]
+    fn gemm_dims_reject_bad_nt_strides() {
+        assert_invalid(GemmDims::checked_storage(
+            2,
+            3,
+            5,
+            [4, 5, 3],
+            [5, 5, 3],
+            [2, 3, 2],
+        ));
+    }
 }

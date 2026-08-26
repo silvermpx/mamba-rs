@@ -12,6 +12,7 @@ pub struct GpuDevice {
     ctx: Arc<cudarc::driver::CudaContext>,
     /// Compute capability (major, minor). E.g., (9, 0) for Hopper/GH200.
     pub compute_capability: (u32, u32),
+    nvrtc_target: &'static str,
 }
 
 impl GpuDevice {
@@ -21,10 +22,12 @@ impl GpuDevice {
             .map_err(|e| format!("CUDA device {} init failed: {:?}", ordinal, e))?;
 
         let cc = Self::query_compute_capability(ordinal)?;
+        let nvrtc_target = Self::resolve_nvrtc_target(cc)?;
 
         Ok(Self {
             ctx,
             compute_capability: cc,
+            nvrtc_target,
         })
     }
 
@@ -34,7 +37,8 @@ impl GpuDevice {
         let mut major: i32 = 0;
         let mut minor: i32 = 0;
         unsafe {
-            let dev = ordinal as i32;
+            let dev = i32::try_from(ordinal)
+                .map_err(|_| format!("CUDA device ordinal {ordinal} exceeds i32::MAX"))?;
             let r1 = sys::cuDeviceGetAttribute(
                 &mut major,
                 sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR,
@@ -56,46 +60,46 @@ impl GpuDevice {
                 ));
             }
         }
-        Ok((major as u32, minor as u32))
+        let major = u32::try_from(major)
+            .map_err(|_| format!("CUDA device {ordinal} returned negative CC major {major}"))?;
+        let minor = u32::try_from(minor)
+            .map_err(|_| format!("CUDA device {ordinal} returned negative CC minor {minor}"))?;
+        Ok((major, minor))
     }
 
-    /// Get the NVRTC real-architecture target string for this GPU.
-    ///
-    /// Returns `sm_XX` (real architecture). NOTE (doc correction, 0.6): the
-    /// compile path is `compile_ptx_with_opts` → `nvrtcGetPTX` — NVRTC still
-    /// emits PTX and the driver still JIT-compiles it; nothing here produces
-    /// a CUBIN. Targeting the REAL arch pins the emitted PTX ISA to what the
-    /// local device/driver pair accepts, which is what avoids
-    /// CUDA_ERROR_UNSUPPORTED_PTX_VERSION (e.g., CUDA 12.8 NVRTC + driver
-    /// 590). A true CUBIN path (`nvrtcGetCUBIN`) is deliberately out of
-    /// scope — runtime JIT is THE delivery so every architecture the
-    /// installed toolkit supports works without crate rebuilds.
-    ///
-    /// Trade-off: PTX for a real arch target IS forward-compatible - a
-    /// newer driver JIT-compiles it for a newer GPU - but the emitted
-    /// code cannot use features of architectures newer than the target,
-    /// so we detect the exact GPU at init and compile for it.
-    pub fn nvrtc_arch(cc: (u32, u32)) -> &'static str {
-        match cc {
-            (12, _) => "sm_120", // Blackwell consumer (RTX 5090, RTX 5080, RTX 5070)
-            (10, _) => "sm_100", // Blackwell datacenter (B100, B200, GB200)
-            (9, _) => "sm_90",   // Hopper (H100, H200, GH200)
-            (8, 9) => "sm_89",   // Ada Lovelace (RTX 4090, RTX 4080, RTX 6000 Ada)
-            (8, 7) => "sm_87",   // Ampere embedded (Jetson AGX Orin)
-            (8, 6) => "sm_86",   // Ampere consumer (RTX 3090, RTX 3080, RTX 3070)
-            (8, 0) => "sm_80",   // Ampere datacenter (A100, A30)
-            (7, 5) => "sm_75",   // Turing (RTX 2080, RTX 2070, T4)
-            (7, 0) => "sm_70",   // Volta (V100, Titan V)
-            (6, 1) => "sm_61",   // Pascal consumer (GTX 1080, GTX 1070)
-            (6, 0) => "sm_60",   // Pascal datacenter (P100)
+    /// Resolve the NVRTC target without silently lowering the device family.
+    pub fn resolve_nvrtc_target(cc: (u32, u32)) -> Result<&'static str, String> {
+        let target = match cc {
+            (8, 0) => "sm_80",
+            (8, 6) => "sm_86",
+            (8, 7) => "sm_87",
+            (8, 9) => "sm_89",
+            (9, 0) => "sm_90",
+            (10, 0) => "sm_100",
+            (10, 3) => "sm_103",
+            (12, 0) => "sm_120",
+            (12, 1) => "sm_121",
+            (major, _) if major > 12 => "compute_120",
             _ => {
-                if cc.0 > 12 {
-                    "sm_120" // Future architectures — use latest known
-                } else {
-                    "sm_70" // Ancient GPUs — Volta fallback
-                }
+                return Err(format!(
+                    "unsupported CUDA compute capability {}.{}; deterministic GPU kernels require SM80 or newer with a known target",
+                    cc.0, cc.1
+                ));
             }
-        }
+        };
+        Ok(target)
+    }
+
+    /// Compatibility wrapper for callers that already validated `cc`.
+    /// Production compilation uses the target stored by [`Self::new`].
+    pub fn nvrtc_arch(cc: (u32, u32)) -> &'static str {
+        Self::resolve_nvrtc_target(cc)
+            .expect("GpuDevice::nvrtc_arch requires a target validated by GpuDevice::new")
+    }
+
+    /// NVRTC target validated when the device was opened.
+    pub fn nvrtc_target(&self) -> &'static str {
+        self.nvrtc_target
     }
 
     /// Get the default CUDA stream for this device.
@@ -164,5 +168,48 @@ impl GpuDevice {
         }
 
         Ok((blas, workspace))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::GpuDevice;
+
+    #[test]
+    fn nvrtc_target_accepts_supported_sm80_plus() {
+        let cases = [
+            ((8, 0), "sm_80"),
+            ((8, 6), "sm_86"),
+            ((8, 7), "sm_87"),
+            ((8, 9), "sm_89"),
+            ((9, 0), "sm_90"),
+            ((10, 0), "sm_100"),
+            ((10, 3), "sm_103"),
+            ((12, 0), "sm_120"),
+            ((12, 1), "sm_121"),
+        ];
+
+        for (cc, expected) in cases {
+            assert_eq!(GpuDevice::resolve_nvrtc_target(cc), Ok(expected));
+        }
+    }
+
+    #[test]
+    fn nvrtc_target_uses_virtual_arch_for_future_major() {
+        assert_eq!(GpuDevice::resolve_nvrtc_target((13, 0)), Ok("compute_120"));
+    }
+
+    #[test]
+    fn nvrtc_target_rejects_cc_below_80() {
+        for cc in [(6, 0), (7, 0), (7, 5)] {
+            assert!(GpuDevice::resolve_nvrtc_target(cc).is_err());
+        }
+    }
+
+    #[test]
+    fn nvrtc_target_rejects_unknown_known_family_minor() {
+        for cc in [(8, 1), (9, 1), (10, 1), (12, 2)] {
+            assert!(GpuDevice::resolve_nvrtc_target(cc).is_err());
+        }
     }
 }

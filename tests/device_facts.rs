@@ -28,7 +28,7 @@ fn device_and_kernel_facts() {
     let dev_attr = |a: DevAttr| cuda.attribute(a).unwrap_or(-1);
     eprintln!(
         "DEVICE arch={} sm_count={} smem/SM={} smem/block-optin={} regs/SM={} l2={}",
-        GpuDevice::nvrtc_arch(device.compute_capability),
+        device.nvrtc_target(),
         dev_attr(DevAttr::CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT),
         dev_attr(DevAttr::CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_MULTIPROCESSOR),
         dev_attr(DevAttr::CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK_OPTIN),

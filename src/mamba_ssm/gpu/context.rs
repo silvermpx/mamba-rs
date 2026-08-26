@@ -137,7 +137,7 @@ impl GpuCtx {
             device.context().disable_event_tracking();
         }
         let stream = device.fork_stream()?;
-        let arch = GpuDevice::nvrtc_arch(device.compute_capability);
+        let arch = device.nvrtc_target();
         let kernels = MambaKernels::compile_with_state_cap(device.context(), arch, state_cap)?;
         // The splitk/transpose scratch buffers inside `kernels` were
         // alloc_zeros'd on the DEFAULT stream; `ctx.stream` is NON_BLOCKING

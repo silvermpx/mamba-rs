@@ -435,7 +435,8 @@ fn bi_upcast_to_f32(
         WeightDtype::F16 => &ctx.kernels.cast_f16_to_f32,
         WeightDtype::F32 => return Err("bi_upcast_to_f32: src is already f32".into()),
     };
-    let n_i = n as i32;
+    let n_i = i32::try_from(n)
+        .map_err(|_| format!("invalid GEMM dimensions: element count {n} exceeds i32::MAX"))?;
     let src_ptr = src.ptr;
     let mut b = ctx.stream.launch_builder(kernel);
     b.arg(&dst_ptr);
@@ -459,7 +460,8 @@ fn bi_downcast_from_f32(
         WeightDtype::F16 => &ctx.kernels.cast_f32_to_f16,
         WeightDtype::F32 => return Err("bi_downcast_from_f32: dst is already f32".into()),
     };
-    let n_i = n as i32;
+    let n_i = i32::try_from(n)
+        .map_err(|_| format!("invalid GEMM dimensions: element count {n} exceeds i32::MAX"))?;
     let dst_ptr = dst.ptr;
     let mut b = ctx.stream.launch_builder(kernel);
     b.arg(&dst_ptr);
@@ -485,6 +487,7 @@ pub fn bi_sgemm_forward_typed(
     bias_ptr: cudarc::driver::sys::CUdeviceptr,
     dims: (usize, usize, usize),
 ) -> Result<(), String> {
+    let checked_dims = super::gemm_bi_triad::GemmDims::nn(dims, dims.1)?;
     // Stage 5 tensor-core tier: opt-in, SEPARATE numeric contract (see
     // `sgemm_bi_forward_tc`). Tried first so big shapes get the TC speed;
     // shapes below its gate fall through to the scalar buckets.
@@ -520,21 +523,23 @@ pub fn bi_sgemm_forward_typed(
         Err(e) if e.starts_with("UNCOVERED") => {}
         Err(e) => return Err(e),
     }
-    let (m, k, n) = dims;
-    ctx.with_bi_upcast_scratch((m * k, k * n, m * n), |xs, ws, ys| {
-        bi_upcast_to_f32(ctx, x, xs.cached_ptr(), m * k)?;
-        bi_upcast_to_f32(ctx, w, ws.cached_ptr(), k * n)?;
-        super::gemm_bi_triad::sgemm_bi_forward(
-            &ctx.stream,
-            &ctx.kernels,
-            ys,
-            xs,
-            ws.cached_ptr(),
-            bias_ptr,
-            dims,
-        )?;
-        bi_downcast_from_f32(ctx, y, ys.cached_ptr(), m * n)
-    })
+    ctx.with_bi_upcast_scratch(
+        (checked_dims.mk, checked_dims.kn, checked_dims.mn),
+        |xs, ws, ys| {
+            bi_upcast_to_f32(ctx, x, xs.cached_ptr(), checked_dims.mk)?;
+            bi_upcast_to_f32(ctx, w, ws.cached_ptr(), checked_dims.kn)?;
+            super::gemm_bi_triad::sgemm_bi_forward(
+                &ctx.stream,
+                &ctx.kernels,
+                ys,
+                xs,
+                ws.cached_ptr(),
+                bias_ptr,
+                dims,
+            )?;
+            bi_downcast_from_f32(ctx, y, ys.cached_ptr(), checked_dims.mn)
+        },
+    )
 }
 
 /// Batch-invariant typed dW backward with FULL shape coverage:
@@ -549,6 +554,7 @@ pub fn bi_sgemm_backward_dw_typed(
     x_saved: TypedPtr,
     dims: (usize, usize, usize),
 ) -> Result<(), String> {
+    let checked_dims = super::gemm_bi_triad::GemmDims::tn(dims)?;
     if ctx.bi_tensor_cores() {
         match super::gemm_bi_triad::sgemm_bi_backward_dw_tc(
             &ctx.stream,
@@ -575,10 +581,9 @@ pub fn bi_sgemm_backward_dw_typed(
         Err(e) if e.starts_with("UNCOVERED") => {}
         Err(e) => return Err(e),
     }
-    let (m, k, n) = dims;
-    ctx.with_bi_upcast_scratch((m * n, m * k, 0), |dys, xs, _| {
-        bi_upcast_to_f32(ctx, dy, dys.cached_ptr(), m * n)?;
-        bi_upcast_to_f32(ctx, x_saved, xs.cached_ptr(), m * k)?;
+    ctx.with_bi_upcast_scratch((checked_dims.mn, checked_dims.mk, 0), |dys, xs, _| {
+        bi_upcast_to_f32(ctx, dy, dys.cached_ptr(), checked_dims.mn)?;
+        bi_upcast_to_f32(ctx, x_saved, xs.cached_ptr(), checked_dims.mk)?;
         super::gemm_bi_triad::sgemm_bi_backward_dw(&ctx.stream, &ctx.kernels, dw_ptr, dys, xs, dims)
     })
 }
@@ -594,6 +599,7 @@ pub fn bi_sgemm_backward_dx_typed(
     w: TypedPtr,
     dims: (usize, usize, usize),
 ) -> Result<(), String> {
+    let checked_dims = super::gemm_bi_triad::GemmDims::nt(dims)?;
     if ctx.bi_tensor_cores() {
         match super::gemm_bi_triad::sgemm_bi_backward_dx_tc(
             &ctx.stream,
@@ -620,20 +626,22 @@ pub fn bi_sgemm_backward_dx_typed(
         Err(e) if e.starts_with("UNCOVERED") => {}
         Err(e) => return Err(e),
     }
-    let (m, k, n) = dims;
-    ctx.with_bi_upcast_scratch((m * n, k * n, m * k), |dys, ws, dxs| {
-        bi_upcast_to_f32(ctx, dy, dys.cached_ptr(), m * n)?;
-        bi_upcast_to_f32(ctx, w, ws.cached_ptr(), k * n)?;
-        super::gemm_bi_triad::sgemm_bi_backward_dx(
-            &ctx.stream,
-            &ctx.kernels,
-            dxs,
-            dys,
-            ws.cached_ptr(),
-            dims,
-        )?;
-        bi_downcast_from_f32(ctx, dx, dxs.cached_ptr(), m * k)
-    })
+    ctx.with_bi_upcast_scratch(
+        (checked_dims.mn, checked_dims.kn, checked_dims.mk),
+        |dys, ws, dxs| {
+            bi_upcast_to_f32(ctx, dy, dys.cached_ptr(), checked_dims.mn)?;
+            bi_upcast_to_f32(ctx, w, ws.cached_ptr(), checked_dims.kn)?;
+            super::gemm_bi_triad::sgemm_bi_backward_dx(
+                &ctx.stream,
+                &ctx.kernels,
+                dxs,
+                dys,
+                ws.cached_ptr(),
+                dims,
+            )?;
+            bi_downcast_from_f32(ctx, dx, dxs.cached_ptr(), checked_dims.mk)
+        },
+    )
 }
 
 /// Full backward: dW (accumulated), dX (overwritten), db (accumulated).
