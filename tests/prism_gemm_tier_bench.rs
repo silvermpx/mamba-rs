@@ -36,8 +36,6 @@ fn synth(n: usize, seed: u64) -> Vec<f32> {
 #[ignore = "needs a CUDA device"]
 fn prism_shapes_cublas_vs_sgemm_bi_vs_gemm_bi() {
     let dev = GpuDevice::new(0).expect("cuda device");
-    let ctx = GpuCtx::new(&dev).expect("ctx");
-    let stream = ctx.stream.clone();
 
     // The three projections of one m3 classify layer at d_model=384,
     // expand=2 (d_inner=768), plus the input projection from the 32x32
@@ -52,6 +50,12 @@ fn prism_shapes_cublas_vs_sgemm_bi_vs_gemm_bi() {
 
     for &(label, k, n) in shapes {
         for pages in [1usize, 4] {
+            // Fresh ctx per cell: disable_tf32 is one-way on a handle, so
+            // reusing the ctx would silently turn every later "TF32" arm
+            // into a second f32 arm (the exact mislabeling the first run
+            // of this bench shipped).
+            let ctx = GpuCtx::new(&dev).expect("ctx");
+            let stream = ctx.stream.clone();
             let m = t_page * pages;
             let x = GpuBuffer::from_cpu(&stream, &synth(m * k, 0xA11CE)).expect("x");
             let w = GpuBuffer::from_cpu(&stream, &synth(k * n, 0xB0B)).expect("w");
