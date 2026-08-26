@@ -1,6 +1,7 @@
 //! Compile and register Mamba-3 SISO CUDA kernels.
 //!
-//! The Mamba-3 kernel registry, compiled via NVRTC at runtime.
+//! The Mamba-3 kernel registry, compiled via NVRTC at runtime and cached in
+//! the same verified artifact format as the Mamba-1 registry.
 //! Separate from Mamba SSM's `MambaKernels` — different pipeline, no conv1d.
 
 use crate::mamba_ssm::gpu::kernels::{HalfKernel, TypedKernel};
@@ -10,6 +11,8 @@ use std::sync::Arc;
 /// All compiled Mamba-3 SISO CUDA kernels.
 pub struct Mamba3Kernels {
     _module: Arc<CudaModule>,
+    compiler_identity: crate::mamba_ssm::gpu::kernel_identity::CompilerIdentity,
+    artifact_identity: crate::mamba_ssm::gpu::kernel_identity::ArtifactIdentity,
 
     /// State-dimension capacity the kernels were compiled with (the
     /// per-thread register-array size). The engine and trainer
@@ -201,6 +204,16 @@ pub struct Mamba3Kernels {
 }
 
 impl Mamba3Kernels {
+    #[doc(hidden)]
+    pub fn compiler_identity(&self) -> crate::mamba_ssm::gpu::kernel_identity::CompilerIdentity {
+        self.compiler_identity
+    }
+
+    #[doc(hidden)]
+    pub fn artifact_identity(&self) -> crate::mamba_ssm::gpu::kernel_identity::ArtifactIdentity {
+        self.artifact_identity
+    }
+
     /// Compile all 47 Mamba-3 CUDA kernels from source. Takes ~100-200ms.
     /// Compile with the default state capacity of 64. Models with a
     /// larger `d_state` use [`Self::compile_with_state_cap`].
@@ -251,66 +264,147 @@ impl Mamba3Kernels {
             "-DNDEBUG".to_string(),
             format!("-DMAMBA_RS_STATE_CAP={state_cap}"),
         ];
+        let include_paths = crate::mamba_ssm::gpu::kernels::cuda_include_paths();
         let opts = cudarc::nvrtc::CompileOptions {
             arch: Some(arch),
             options: option_strings.clone(),
-            include_paths: crate::mamba_ssm::gpu::kernels::cuda_include_paths(),
+            include_paths: include_paths.clone(),
             ..Default::default()
         };
 
-        // PTX disk cache with the M1 loader's key law (source blob + arch
-        // + options + NVRTC version): a hit skips the NVRTC half of the
-        // boot tax; identical PTX by construction. Any hit-path failure
-        // deletes the entry and falls through to a real compile; a
-        // failed compile is never cached. The M3 loader paid a full
-        // NVRTC compile of 7 sources on EVERY process boot before this.
         let (nv_major, nv_minor) = crate::mamba_ssm::gpu::kernels::nvrtc_version();
-        // include_paths participate in the key (two-toolkit boxes).
-        let key = crate::mamba_ssm::gpu::kernels::cache_key(&format!(
-            "{combined}\u{1f}{arch}\u{1f}{option_strings:?}\u{1f}{:?}\u{1f}nvrtc{nv_major}.{nv_minor}",
-            opts.include_paths
-        ));
-        let cache_path = crate::mamba_ssm::gpu::kernels::kernel_cache_dir()
-            .map(|d| d.join(format!("mamba3-kernels-{key}.ptx")));
+        let nvrtc_library_domain = crate::mamba_ssm::gpu::kernel_identity::nvrtc_library_domain();
+        let header_manifest = crate::mamba_ssm::gpu::kernel_identity::header_manifest(
+            combined.as_bytes(),
+            &include_paths,
+        );
+        let mut argv: Vec<Vec<u8>> = include_paths
+            .iter()
+            .map(|path| format!("--include-path={path}").into_bytes())
+            .collect();
+        argv.push(format!("--gpu-architecture={arch}").into_bytes());
+        argv.extend(option_strings.iter().map(|value| value.as_bytes().to_vec()));
+        let key_material = crate::mamba_ssm::gpu::kernel_identity::CompileKeyMaterial {
+            source: combined.as_bytes().to_vec(),
+            target: arch.as_bytes().to_vec(),
+            argv,
+            include_roots: include_paths
+                .iter()
+                .map(|path| path.as_bytes().to_vec())
+                .collect(),
+            header_manifest: header_manifest.clone(),
+            nvrtc_version: (nv_major, nv_minor),
+            nvrtc_library_domain: nvrtc_library_domain.clone(),
+            output_kind: crate::mamba_ssm::gpu::kernel_identity::ArtifactKind::Ptx,
+            composer_revision: crate::mamba_ssm::gpu::kernel_identity::COMPOSER_REVISION,
+            compiler_revision: crate::mamba_ssm::gpu::kernel_identity::COMPILER_REVISION,
+            numeric_abi_revision: crate::mamba_ssm::gpu::kernel_identity::NUMERIC_ABI_REVISION,
+            schedule_revision: crate::mamba_ssm::gpu::kernel_identity::SCHEDULE_REVISION,
+        };
+        let invocation_digest = key_material.invocation_digest();
+        let cache_key = key_material.digest();
+        let cache_path = cache_key.and_then(|key| {
+            crate::mamba_ssm::gpu::kernels::kernel_cache_dir().map(|directory| {
+                directory.join(format!(
+                    "mamba3-kernels-v2-{}.bin",
+                    crate::mamba_ssm::gpu::kernel_identity::digest_hex(&key)
+                ))
+            })
+        });
 
-        // Hit path loads the module directly; a torn or rotted entry is
-        // deleted and falls through to the real compile.
-        let mut module = None;
-        if let Some(path) = &cache_path
-            && let Ok(src) = std::fs::read_to_string(path)
+        let mut loaded = None;
+        if let (Some(path), Some(key)) = (&cache_path, cache_key)
+            && let Some(hit) = crate::mamba_ssm::gpu::kernel_identity::read_cache(
+                path,
+                key,
+                crate::mamba_ssm::gpu::kernel_identity::ArtifactKind::Ptx,
+            )
+            && let Ok(source) =
+                crate::mamba_ssm::gpu::kernel_identity::canonical_ptx_from_cache(hit.payload)
+            && let Ok(module) = ctx.load_module(cudarc::nvrtc::Ptx::from_src(source))
         {
-            match ctx.load_module(cudarc::nvrtc::Ptx::from_src(src)) {
-                Ok(m) => module = Some(m),
-                Err(_) => {
-                    let _ = std::fs::remove_file(path);
-                }
-            }
+            loaded = Some((module, hit.artifact_digest));
         }
-        let module = match module {
-            Some(m) => m,
+        let (module, artifact_digest) = match loaded {
+            Some(value) => value,
             None => {
-                let ptx = cudarc::nvrtc::compile_ptx_with_opts(combined, opts).map_err(|e| {
+                let ptx = cudarc::nvrtc::compile_ptx_with_opts(&combined, opts).map_err(|e| {
                     format!(
                         "NVRTC M3 compile failed: {}",
                         format!("{e:?}").replace("\\n", "\n")
                     )
                 })?;
-                if let Some(path) = &cache_path
-                    && let Some(dir) = path.parent()
-                    && std::fs::create_dir_all(dir).is_ok()
-                {
-                    // Atomic publish: write-then-rename so a concurrent
-                    // boot never reads a torn entry; failures non-fatal.
-                    let tmp = path.with_extension(format!("tmp-{}", std::process::id()));
-                    if std::fs::write(&tmp, ptx.to_src()).is_ok()
-                        && std::fs::rename(&tmp, path).is_err()
-                    {
-                        let _ = std::fs::remove_file(&tmp);
-                    }
+                let ptx_image = ptx
+                    .as_bytes()
+                    .ok_or_else(|| "NVRTC returned M3 PTX without a raw image".to_string())?;
+                let ptx_source =
+                    crate::mamba_ssm::gpu::kernel_identity::canonical_ptx_image(ptx_image)?;
+                if !crate::mamba_ssm::gpu::kernel_identity::header_manifest_is_current(
+                    combined.as_bytes(),
+                    &include_paths,
+                    &header_manifest,
+                ) {
+                    return Err(
+                        "CUDA headers changed during M3 NVRTC compilation; retry initialization"
+                            .into(),
+                    );
                 }
-                ctx.load_module(ptx)
-                    .map_err(|e| format!("M3 module load failed: {e:?}"))?
+                if let Some(domain) = nvrtc_library_domain.as_deref()
+                    && !crate::mamba_ssm::gpu::kernel_identity::nvrtc_library_domain_is_current(
+                        domain,
+                    )
+                {
+                    return Err(
+                        "NVRTC libraries changed during M3 compilation; retry initialization"
+                            .into(),
+                    );
+                }
+                let artifact_digest = crate::mamba_ssm::gpu::kernel_identity::FramedSha256::bytes(
+                    ptx_source.as_bytes(),
+                );
+                if let (Some(path), Some(key)) = (&cache_path, cache_key) {
+                    crate::mamba_ssm::gpu::kernel_identity::publish_cache(
+                        path,
+                        key,
+                        crate::mamba_ssm::gpu::kernel_identity::ArtifactKind::Ptx,
+                        ptx_source.as_bytes(),
+                    );
+                }
+                let module = ctx
+                    .load_module(cudarc::nvrtc::Ptx::from_src(ptx_source))
+                    .map_err(|e| format!("M3 module load failed: {e:?}"))?;
+                (module, artifact_digest)
             }
+        };
+        let compiler_identity = crate::mamba_ssm::gpu::kernel_identity::CompilerIdentity {
+            source_digest: crate::mamba_ssm::gpu::kernel_identity::FramedSha256::bytes(
+                combined.as_bytes(),
+            ),
+            invocation_digest,
+            header_manifest_digest: crate::mamba_ssm::gpu::kernel_identity::FramedSha256::new(
+                b"cuda-header-manifest.v1",
+            )
+            .optional(b"manifest", header_manifest.as_deref())
+            .finish(),
+            target: crate::mamba_ssm::gpu::kernel_identity::CudaTarget::new(arch)?,
+            nvrtc_version: (nv_major, nv_minor),
+            nvrtc_library_domain: crate::mamba_ssm::gpu::kernel_identity::FramedSha256::new(
+                b"nvrtc-library-set-identity.v2",
+            )
+            .optional(b"domain", nvrtc_library_domain.as_deref())
+            .finish(),
+            nvrtc_library_known: nvrtc_library_domain.is_some(),
+            output_kind: crate::mamba_ssm::gpu::kernel_identity::ArtifactKind::Ptx,
+            composer_revision: crate::mamba_ssm::gpu::kernel_identity::COMPOSER_REVISION,
+            compiler_revision: crate::mamba_ssm::gpu::kernel_identity::COMPILER_REVISION,
+            numeric_abi_revision: crate::mamba_ssm::gpu::kernel_identity::NUMERIC_ABI_REVISION,
+            schedule_revision: crate::mamba_ssm::gpu::kernel_identity::SCHEDULE_REVISION,
+        };
+        let artifact_identity = crate::mamba_ssm::gpu::kernel_identity::ArtifactIdentity {
+            module_kind: crate::mamba_ssm::gpu::kernel_identity::ModuleKind::Mamba3Combined,
+            artifact_kind: crate::mamba_ssm::gpu::kernel_identity::ArtifactKind::Ptx,
+            compile_key: invocation_digest,
+            artifact_digest,
         };
 
         let get = |name: &str| -> Result<CudaFunction, String> {
@@ -321,6 +415,8 @@ impl Mamba3Kernels {
 
         let kernels = Self {
             state_cap,
+            compiler_identity,
+            artifact_identity,
             // Sequential SSM
             m3_step_fwd: get("m3_step_fwd")?,
             m3_burnin_fwd: get("m3_burnin_fwd")?,

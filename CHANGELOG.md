@@ -8,11 +8,22 @@
   backend contracts, compiler and artifact identities, and the target
   device. Callers that only need the three policy flags can continue to
   use the unchanged `GpuCtx::gemm_flags` compatibility accessor.
+- Persistent CUDA artifacts now require an exact compile identity: source,
+  options, target, literal header closure, and the ordered runtime/builtins
+  NVRTC library pair. Mamba-3 uses the same SHA-256 envelope and validation
+  path as Mamba-1; legacy raw Mamba-3 cache files are ignored.
+- The persistent kernel cache is enabled on Linux only. Its path must be
+  absolute, no ancestor may be group- or other-writable, and the final
+  directory and entries must be private to the effective user. Filesystem
+  operations remain anchored to verified directory descriptors.
 
 ### Fixed
 
 - Build and release-pipeline fixes. No functional change: every route
   returns bit-identical output to 0.6.8.
+- CUDA cache entries with wrong metadata, links, partial publication, stale
+  identities, malformed envelopes, or ambiguous preprocessor dependencies
+  are ignored and rebuilt instead of being trusted.
 
 ## 0.6.8 (2026-08-26)
 

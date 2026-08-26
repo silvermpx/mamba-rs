@@ -602,7 +602,8 @@ fn f16_split_scaler_protocol() {
         .backward_step(&d_temporal, BackwardOpts::default())
         .expect("f16 backward");
     assert!(m.loss_scale.is_some());
-    assert!(m.overflow_skipped.is_some());
+    assert_eq!(m.overflow_skipped, Some(false));
+    assert!(m.optimizer_stepped);
 }
 
 fn flat_weights(s: &MambaWeights) -> Vec<f32> {

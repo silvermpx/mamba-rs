@@ -462,9 +462,9 @@ pub struct MambaKernels {
     pub sgemm_nt_big_typed: HalfKernel,
 }
 
-/// NVRTC library version, part of the kernel-cache key (a toolkit upgrade
-/// must invalidate cached PTX). (0, 0) when the query itself fails — the
-/// cache then still keys on source + arch + options.
+/// NVRTC library version, part of the kernel-cache key. `(0, 0)` means the
+/// query failed; persistent caching still requires exact runtime and builtins
+/// library hashes.
 pub(crate) fn nvrtc_version() -> (i32, i32) {
     let mut major: core::ffi::c_int = 0;
     let mut minor: core::ffi::c_int = 0;
@@ -476,8 +476,10 @@ pub(crate) fn nvrtc_version() -> (i32, i32) {
     }
 }
 
-/// Kernel-cache directory. `MAMBA_RS_KERNEL_CACHE` overrides with a path,
-/// or `0`/`off` disables it. An untrusted directory disables the cache.
+/// Linux kernel-cache directory. `MAMBA_RS_KERNEL_CACHE` overrides with an
+/// absolute path, or `0`/`off` disables it. Relative paths, symlinked
+/// components, writable ancestors, and non-private final directories disable
+/// persistent caching. Other platforms currently leave it disabled.
 pub(crate) fn kernel_cache_dir() -> Option<std::path::PathBuf> {
     let path = match std::env::var("MAMBA_RS_KERNEL_CACHE") {
         Ok(v) if matches!(v.trim(), "0" | "off" | "OFF") => None,
@@ -493,26 +495,6 @@ pub(crate) fn kernel_cache_dir() -> Option<std::path::PathBuf> {
         }
     }?;
     super::kernel_identity::prepare_private_cache_dir(&path)
-}
-
-/// 128-bit content key as hex: two FNV-1a-64 passes with distinct offset
-/// bases over the same bytes. Not cryptographic — the cache is a local,
-/// non-adversarial directory and a wrong hit requires colliding BOTH
-/// lanes; a corrupt entry fails loudly at module load and is deleted.
-pub(crate) fn cache_key(material: &str) -> String {
-    let fnv = |seed: u64| -> u64 {
-        let mut h = seed;
-        for b in material.as_bytes() {
-            h ^= u64::from(*b);
-            h = h.wrapping_mul(0x0000_0100_0000_01b3);
-        }
-        h
-    };
-    format!(
-        "{:016x}{:016x}",
-        fnv(0xcbf2_9ce4_8422_2325),
-        fnv(0x6c62_272e_07bb_0142)
-    )
 }
 
 /// Round a model's `d_state` up to the register-array capacity the
@@ -549,8 +531,8 @@ impl MambaKernels {
     }
 
     /// Compile all CUDA kernels from source. Persistent PTX caching is used
-    /// only when the complete header and NVRTC library domains are known.
-    /// A bad cache entry is removed and compiled again.
+    /// only when the complete header and NVRTC toolchain domains are known.
+    /// An invalid entry is ignored and compilation proceeds normally.
     ///
     /// `state_cap` sizes the per-thread state register arrays (see
     /// [`state_capacity`]); it rides the compile options and therefore
@@ -699,6 +681,13 @@ impl MambaKernels {
                             .into(),
                     );
                 }
+                if let Some(domain) = nvrtc_library_domain.as_deref()
+                    && !super::kernel_identity::nvrtc_library_domain_is_current(domain)
+                {
+                    return Err(
+                        "NVRTC libraries changed during compilation; retry initialization".into(),
+                    );
+                }
                 let artifact_digest =
                     super::kernel_identity::FramedSha256::bytes(ptx_source.as_bytes());
                 if let (Some(path), Some(key)) = (&cache_path, cache_key) {
@@ -726,7 +715,7 @@ impl MambaKernels {
             target: super::kernel_identity::CudaTarget::new(arch)?,
             nvrtc_version: (nv_major, nv_minor),
             nvrtc_library_domain: super::kernel_identity::FramedSha256::new(
-                b"nvrtc-library-domain.v1",
+                b"nvrtc-library-set-identity.v2",
             )
             .optional(b"domain", nvrtc_library_domain.as_deref())
             .finish(),
