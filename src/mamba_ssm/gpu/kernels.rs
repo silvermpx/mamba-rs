@@ -452,6 +452,10 @@ pub struct MambaKernels {
     pub gemm_bi_nn_tc128_typed: HalfKernel,
     pub gemm_bi_nn_tc64_typed: HalfKernel,
     pub gemm_bi_nn_tc16_typed: HalfKernel,
+    /// The Hopper wgmma rung (compiled only for sm_90a; the dispatcher
+    /// never routes here until the rung is hardware-qualified - the
+    /// forced census entry is its only caller).
+    pub gemm_bi_nn_sm90_typed: Option<HalfKernel>,
     pub sgemm_tn_tc_typed: HalfKernel,
     pub sgemm_nt_tc_typed: HalfKernel,
     /// 64x64-tile TC twins (stage 5b): 128 threads / 4 warps per CTA,
@@ -587,7 +591,12 @@ impl MambaKernels {
             include_str!("../../../kernels/loss_scaler.cu"),
             include_str!("../../../kernels/grad_clip.cu"),
             include_str!("../../../kernels/adamw.cu"),
-            include_str!("../../../kernels/gemm_bi_fixed.cu"),
+            include_str!("../../../kernels/gemm_bi_fixed/common.cuh"),
+            include_str!("../../../kernels/gemm_bi_fixed/ffma.cuh"),
+            include_str!("../../../kernels/gemm_bi_fixed/wmma_legacy.cuh"),
+            include_str!("../../../kernels/gemm_bi_fixed/matvec.cuh"),
+            include_str!("../../../kernels/gemm_bi_fixed/mma16.cuh"),
+            include_str!("../../../kernels/gemm_bi_fixed/sm90_wgmma.cuh"),
             include_str!("../../../kernels/gemm_bi_triad.cu"),
         ];
 
@@ -999,6 +1008,11 @@ impl MambaKernels {
             gemm_bi_nn_tc128_typed: load_half_dynsmem("gemm_bi_nn_tc128", 71_680)?,
             gemm_bi_nn_tc64_typed: load_half("gemm_bi_nn_tc64")?,
             gemm_bi_nn_tc16_typed: load_half("gemm_bi_nn_tc16")?,
+            gemm_bi_nn_sm90_typed: if arch == "sm_90a" {
+                Some(load_half_dynsmem("gemm_bi_nn_sm90a_wgmma_wg1", 49_152)?)
+            } else {
+                None
+            },
             sgemm_tn_tc_typed: load_half_dynsmem("sgemm_bi_tn_tc", 75_776)?,
             sgemm_nt_tc_typed: load_half_dynsmem("sgemm_bi_nt_tc", 75_776)?,
             sgemm_nn_tc64_typed: load_half("sgemm_bi_nn_tc64")?,
@@ -1052,7 +1066,7 @@ impl MambaKernels {
 
 /// Discover CUDA include directory (for cuda_fp16.h, cuda_bf16.h).
 /// Checks CUDA_HOME, CUDA_PATH, CUDA_ROOT, then standard install paths.
-pub(crate) fn cuda_include_paths() -> Vec<String> {
+pub fn cuda_include_paths() -> Vec<String> {
     let mut candidates: Vec<String> = Vec::new();
     for var in ["CUDA_HOME", "CUDA_PATH", "CUDA_ROOT"] {
         if let Ok(p) = std::env::var(var) {

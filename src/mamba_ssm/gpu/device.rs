@@ -77,17 +77,17 @@ impl GpuDevice {
     /// so we detect the exact GPU at init and compile for it.
     pub fn nvrtc_arch(cc: (u32, u32)) -> &'static str {
         match cc {
-            (12, _) => "sm_120", // Blackwell consumer (RTX 5090, RTX 5080, RTX 5070)
-            (10, _) => "sm_100", // Blackwell datacenter (B100, B200, GB200)
-            (9, _) => "sm_90",   // Hopper (H100, H200, GH200)
-            (8, 9) => "sm_89",   // Ada Lovelace (RTX 4090, RTX 4080, RTX 6000 Ada)
-            (8, 7) => "sm_87",   // Ampere embedded (Jetson AGX Orin)
-            (8, 6) => "sm_86",   // Ampere consumer (RTX 3090, RTX 3080, RTX 3070)
-            (8, 0) => "sm_80",   // Ampere datacenter (A100, A30)
-            (7, 5) => "sm_75",   // Turing (RTX 2080, RTX 2070, T4)
-            (7, 0) => "sm_70",   // Volta (V100, Titan V)
-            (6, 1) => "sm_61",   // Pascal consumer (GTX 1080, GTX 1070)
-            (6, 0) => "sm_60",   // Pascal datacenter (P100)
+            (12, _) => "sm_120",  // Blackwell consumer (RTX 5090, RTX 5080, RTX 5070)
+            (10, _) => "sm_100a", // Blackwell datacenter (B100, B200, GB200)
+            (9, _) => "sm_90a",   // Hopper (H100, H200, GH200)
+            (8, 9) => "sm_89",    // Ada Lovelace (RTX 4090, RTX 4080, RTX 6000 Ada)
+            (8, 7) => "sm_87",    // Ampere embedded (Jetson AGX Orin)
+            (8, 6) => "sm_86",    // Ampere consumer (RTX 3090, RTX 3080, RTX 3070)
+            (8, 0) => "sm_80",    // Ampere datacenter (A100, A30)
+            (7, 5) => "sm_75",    // Turing (RTX 2080, RTX 2070, T4)
+            (7, 0) => "sm_70",    // Volta (V100, Titan V)
+            (6, 1) => "sm_61",    // Pascal consumer (GTX 1080, GTX 1070)
+            (6, 0) => "sm_60",    // Pascal datacenter (P100)
             _ => {
                 if cc.0 > 12 {
                     "sm_120" // Future architectures — use latest known

@@ -236,11 +236,11 @@ fn m3_pooled_page_bench_typed_vs_f32() {
             BiGemmFamily::Fixed,
         ),
         (
-            "bf16 ladder (serve route)",
+            "bf16 fixed (serve route)",
             WeightDtype::Bf16,
             true,
-            true,
-            BiGemmFamily::Triad,
+            false,
+            BiGemmFamily::Fixed,
         ),
         (
             "f32 cuBLAS (non-det ref)",
