@@ -141,11 +141,9 @@ pub fn fixed_forward(
         k: n_in as i32,
     };
     let homogeneous_half = c.dtype != WeightDtype::F32 && c.dtype == x.dtype && x.dtype == w.dtype;
-    if homogeneous_half {
-        if let Some(tile) = fixed_pick_tile(batch, n_out) {
-            launch_ladder(ctx, tile, c.dtype, &args)?;
-            return Ok(tile);
-        }
+    if homogeneous_half && let Some(tile) = fixed_pick_tile(batch, n_out) {
+        launch_ladder(ctx, tile, c.dtype, &args)?;
+        return Ok(tile);
     }
     // Narrow-N half triples and every f32/mixed triple: the legacy
     // fixed-tile kernel (64x64x32, strict, no buckets) covers all M/N.

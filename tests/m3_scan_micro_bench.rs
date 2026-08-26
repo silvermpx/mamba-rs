@@ -304,7 +304,6 @@ fn coeff_chain_time_and_hash() {
     let ds = 16usize;
     let ng = 1usize;
     let na = 4usize;
-    let dm = 384usize;
     let di = nh * hd;
     let ip = 2 * di + 2 * ng * ds + 3 * nh + na;
     let bt = batch * t;
@@ -365,7 +364,6 @@ fn coeff_chain_time_and_hash() {
     let beta = GpuBuffer::zeros(st, bt * nh).unwrap();
     let gamma = GpuBuffer::zeros(st, bt * nh).unwrap();
 
-    let (b_i, t_i) = (batch as i32, t as i32);
     let (di_i, ng_i, ds_i, nh_i, na_i) = (di as i32, ng as i32, ds as i32, nh as i32, na as i32);
     let a_floor: f32 = 1e-4;
     let eps: f32 = 1e-5;

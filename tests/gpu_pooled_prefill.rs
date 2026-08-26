@@ -253,7 +253,8 @@ fn pooled_graph_refuses_route_drift() {
     )
     .expect("capture");
 
-    let flips: &[(&str, &dyn Fn(), &dyn Fn())] = &[
+    type Flip<'a> = (&'a str, &'a dyn Fn(), &'a dyn Fn());
+    let flips: &[Flip<'_>] = &[
         (
             "batch_invariant",
             &|| r.ctx.set_batch_invariant(!r.ctx.batch_invariant()),

@@ -725,14 +725,14 @@ fn check_output_lens(
             b * dm
         ));
     }
-    if let Some(full) = full_temporal {
-        if full.len() != b * t * dm {
-            return Err(format!(
-                "prefill outputs: full_temporal len {} != batch*seq_len*d_model = {}",
-                full.len(),
-                b * t * dm
-            ));
-        }
+    if let Some(full) = full_temporal
+        && full.len() != b * t * dm
+    {
+        return Err(format!(
+            "prefill outputs: full_temporal len {} != batch*seq_len*d_model = {}",
+            full.len(),
+            b * t * dm
+        ));
     }
     Ok(())
 }

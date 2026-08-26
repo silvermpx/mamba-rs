@@ -328,5 +328,5 @@ pub fn vec8_ok(
     ptrs: &[cudarc::driver::sys::CUdeviceptr],
 ) -> bool {
     let w = vec8_width(elem_bytes);
-    n_elems % w == 0 && ptrs.iter().all(|p| p % 16 == 0)
+    n_elems.is_multiple_of(w) && ptrs.iter().all(|p| p % 16 == 0)
 }

@@ -606,7 +606,7 @@ pub fn chunk_state_cfg(
     // shapes that don't fit the smem budget or an odd ds.
     let heads = 2usize;
     let smem_bytes = heads * (chunk_size * hd + chunk_size * ds + chunk_size) * 4;
-    if ds % 4 == 0 && hd * (ds / 4) * heads <= 1024 && smem_bytes <= 48 * 1024 {
+    if ds.is_multiple_of(4) && hd * (ds / 4) * heads <= 1024 && smem_bytes <= 48 * 1024 {
         cudarc::driver::LaunchConfig {
             grid_dim: ((batch * n_chunks) as u32, nh.div_ceil(heads) as u32, 1),
             block_dim: (hd as u32, (ds / 4) as u32, heads as u32),
@@ -634,7 +634,7 @@ pub fn chunk_fused_cfg(
     chunk_size: usize,
 ) -> Option<cudarc::driver::LaunchConfig> {
     let smem_bytes = (chunk_size * (ds + 4) + chunk_size * hd + chunk_size) * 4;
-    if ds % 4 != 0 || chunk_size > 1024 || smem_bytes > 48 * 1024 {
+    if !ds.is_multiple_of(4) || chunk_size > 1024 || smem_bytes > 48 * 1024 {
         return None;
     }
     Some(cudarc::driver::LaunchConfig {

@@ -1253,7 +1253,7 @@ impl Mamba3GpuInferenceMixed {
                 bld.arg(&ds_i);
                 let eps_g5: f32 = engine.cfg.rms_norm_eps;
                 bld.arg(&eps_g5);
-                let src_stride = (ng_i as i32) * ds_i;
+                let src_stride = ng_i * ds_i;
                 bld.arg(&src_stride);
                 unsafe { bld.launch(grid) }.map_err(|e| format!("M3 F4a bcnorm B+C: {e:?}"))?;
             }

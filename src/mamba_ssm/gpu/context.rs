@@ -483,7 +483,7 @@ impl GpuCtx {
     }
 
     /// Presize the batch-invariant GEMM scratch buffers (Split-K partials
-    /// + W-transpose staging) OUTSIDE any CUDA graph capture. cudarc's
+    /// plus W-transpose staging) OUTSIDE any CUDA graph capture. cudarc's
     /// alloc is cuMemAllocAsync where the device has memory pools, so a
     /// first-use allocation on a CAPTURING stream becomes a graph memory
     /// node - legal, silent, and the OnceLock then caches a graph-owned
