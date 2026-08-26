@@ -284,6 +284,53 @@ fn scan_trio_time_and_hash() {
         fnv(&host),
         "typed coop scan diverged from the plain coop kernel"
     );
+
+    // The inter-chunk prefix scan mutates its states buffer in place, so
+    // the hash arm runs once on a fresh copy of the pair's chunk_states;
+    // the timing loop then reuses the (already transformed) buffer -
+    // values drift there but the address pattern is identical.
+    let states_sp = GpuBuffer::from_cpu(st, &cst_h).unwrap();
+    let final_states = GpuBuffer::zeros(st, batch * nh * hd * ds).unwrap();
+    let state_passing = || {
+        let dim = hd * ds;
+        let block_x = dim.min(256) as u32;
+        let cfg = cudarc::driver::LaunchConfig {
+            grid_dim: (
+                batch as u32,
+                nh as u32,
+                dim.div_ceil(block_x as usize) as u32,
+            ),
+            block_dim: (block_x, 1, 1),
+            shared_mem_bytes: 0,
+        };
+        let nc_i = nc as i32;
+        let init_states_null: u64 = 0;
+        let mut b = ctx.stream.launch_builder(&m3k.m3_state_passing_fwd);
+        b.arg(states_sp.inner());
+        b.arg(final_states.inner());
+        b.arg(da_cumsum.inner());
+        b.arg(&init_states_null);
+        b.arg(&b_i);
+        b.arg(&nc_i);
+        b.arg(&nh_i);
+        b.arg(&hd_i);
+        b.arg(&ds_i);
+        b.arg(&cs_i);
+        b.arg(&t_i);
+        unsafe { b.launch(cfg) }.unwrap();
+    };
+    state_passing();
+    ctx.stream.synchronize().unwrap();
+    let mut sp_h = vec![0.0f32; batch * nc * nh * hd * ds];
+    states_sp.download(st, &mut sp_h).unwrap();
+    let mut fs_h = vec![0.0f32; batch * nh * hd * ds];
+    final_states.download(st, &mut fs_h).unwrap();
+    println!(
+        "STATE_PASSING HASH entering={:016x} final={:016x}",
+        fnv(&sp_h),
+        fnv(&fs_h)
+    );
+    println!("state_pass  {:8.1} us", time(&state_passing));
 }
 
 /// The coefficient chain at the serve shape: split -> bcnorm -> angle

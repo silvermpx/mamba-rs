@@ -574,24 +574,43 @@ extern "C" __global__ void m3_state_passing_fwd(
     // entering state the scan seeds from it instead of zero.
     float state = init_states ? init_states[b * nh * dim + h * dim + pd] : 0.0f;
 
+    // The recurrence is serial in `state`, but the loads are not: each
+    // iteration issues the NEXT chunk's contribution and decay before
+    // touching the dependent chain, so the per-chunk memory latency
+    // pipelines behind the FMA chain instead of serializing on it. The
+    // arithmetic and its order are untouched. Every location read here
+    // is either read-only in this kernel or read strictly before this
+    // thread's own write to it, and threads never share locations, so
+    // the non-coherent load path is safe.
+    int state_idx = b * n_chunks * nh * dim + h * dim + pd;
+    int cs_idx = b * n_chunks * nh + h;
+    float contrib = __ldg(&states[state_idx]);
+    int chunk_end_0 = chunk_size > T ? T : chunk_size;
+    float decay = FAST_EXP(__ldg(&dA_cumsum[cs_idx * chunk_size + chunk_end_0 - 1]));
+
     for (int c = 0; c < n_chunks; c++) {
-        int state_idx = (b * n_chunks + c) * nh * dim + h * dim + pd;
-        float new_contribution = states[state_idx];
+        float next_contrib = 0.0f;
+        float next_decay = 0.0f;
+        if (c + 1 < n_chunks) {
+            next_contrib = __ldg(&states[state_idx + nh * dim]);
+            int chunk_start_n = (c + 1) * chunk_size;
+            int chunk_end_n = chunk_start_n + chunk_size;
+            if (chunk_end_n > T) chunk_end_n = T;
+            int last_elem_n = chunk_end_n - chunk_start_n - 1;
+            next_decay = FAST_EXP(
+                __ldg(&dA_cumsum[(cs_idx + nh) * chunk_size + last_elem_n]));
+        }
 
         // Write prev_state (state ENTERING this chunk) BEFORE updating
         states[state_idx] = state;
 
-        // dA at end of this chunk (handle partial last chunk)
-        int cs_idx = (b * n_chunks + c) * nh + h;
-        int chunk_start_c = c * chunk_size;
-        int chunk_end_c = chunk_start_c + chunk_size;
-        if (chunk_end_c > T) chunk_end_c = T;
-        int last_elem = chunk_end_c - chunk_start_c - 1;
-        float dA_end = dA_cumsum[cs_idx * chunk_size + last_elem];
-        float decay = FAST_EXP(dA_end);
-
         // Update: state after this chunk = decay * prev_state + chunk_contribution
-        state = decay * state + new_contribution;
+        state = decay * state + contrib;
+
+        contrib = next_contrib;
+        decay = next_decay;
+        state_idx += nh * dim;
+        cs_idx += nh;
     }
 
     // Store final state (state after all chunks)
