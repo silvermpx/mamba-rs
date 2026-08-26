@@ -3,12 +3,15 @@ use super::super::kernels::MambaKernels as GpuKernels;
 use super::contract::{GemmDims, checked_mul3, checked_tile_grid, checked_usize};
 use super::contract::{
     Sm90aForcedRoute, Sm90aOp, Sm90aShape, Sm90aWarpgroupSchedule, Sm100ForcedRoute,
-    Sm100TargetCandidate, Sm100TargetKind,
+    Sm100TargetCandidate, Sm100TargetKind, Sm120ForcedRoute, Sm120TargetCandidate,
 };
+use crate::mamba_ssm::gpu::kernel_identity::DeviceCaps;
 
 pub const SM90A_AUTO_CELLS: &[Sm90aForcedRoute] = &[];
 pub const SM100_AUTO_CELLS_CC100: &[Sm100ForcedRoute] = &[];
 pub const SM100_AUTO_CELLS_CC103: &[Sm100ForcedRoute] = &[];
+pub const SM120_AUTO_CELLS_CC120: &[Sm120ForcedRoute] = &[];
+pub const SM120_AUTO_CELLS_CC121: &[Sm120ForcedRoute] = &[];
 
 const SM100_CC100_TARGETS: [Sm100TargetCandidate; 2] = [
     Sm100TargetCandidate {
@@ -46,6 +49,76 @@ pub fn sm100_target_candidates(cc: (i32, i32)) -> &'static [Sm100TargetCandidate
         (10, 3) => &SM100_CC103_TARGETS,
         _ => &[],
     }
+}
+
+const SM120_CC120_TARGETS: [Sm120TargetCandidate; 1] = [Sm120TargetCandidate {
+    device_cc: (12, 0),
+    nvrtc_arch: "compute_120",
+    ptx_target: "sm_120",
+}];
+
+const SM120_CC121_FALLBACK_TARGETS: [Sm120TargetCandidate; 1] = [Sm120TargetCandidate {
+    device_cc: (12, 1),
+    nvrtc_arch: "compute_120",
+    ptx_target: "sm_120",
+}];
+
+const SM120_CC121_TARGETS: [Sm120TargetCandidate; 2] = [
+    Sm120TargetCandidate {
+        device_cc: (12, 1),
+        nvrtc_arch: "compute_121",
+        ptx_target: "sm_121",
+    },
+    Sm120TargetCandidate {
+        device_cc: (12, 1),
+        nvrtc_arch: "compute_120",
+        ptx_target: "sm_120",
+    },
+];
+
+pub fn sm120_target_candidates(
+    cc: (i32, i32),
+    nvrtc: (i32, i32),
+) -> &'static [Sm120TargetCandidate] {
+    match (cc, nvrtc) {
+        ((12, 0), version) if version >= (12, 8) => &SM120_CC120_TARGETS,
+        ((12, 1), version) if version >= (12, 9) => &SM120_CC121_TARGETS,
+        ((12, 1), version) if version >= (12, 8) => &SM120_CC121_FALLBACK_TARGETS,
+        _ => &[],
+    }
+}
+
+pub fn resolve_sm120_forced(
+    caps: DeviceCaps,
+    module_target: Option<Sm120TargetCandidate>,
+    route: Sm120ForcedRoute,
+) -> Result<Option<Sm120ForcedRoute>, String> {
+    route.shape.validate(route.op)?;
+    if !matches!(route.dtype, WeightDtype::Bf16 | WeightDtype::F16) {
+        return Err("SM120 TMA supports bf16 and f16 operands only".into());
+    }
+    let spec = route.kernel_spec()?;
+    let Some(module_target) = module_target else {
+        return Ok(None);
+    };
+    let device_cc = (
+        i32::try_from(caps.compute_capability.0)
+            .map_err(|_| "SM120 device CC major exceeds i32::MAX".to_string())?,
+        i32::try_from(caps.compute_capability.1)
+            .map_err(|_| "SM120 device CC minor exceeds i32::MAX".to_string())?,
+    );
+    let accepted = caps
+        .accepted_target
+        .map(|target| target.as_str().to_owned());
+    if module_target.device_cc != device_cc
+        || !sm120_target_candidates(device_cc, caps.nvrtc_version).contains(&module_target)
+        || accepted.as_deref() != Some(module_target.nvrtc_arch)
+        || !caps.tensor_map_access
+        || caps.optin_shared_bytes < spec.dynamic_shared_bytes
+    {
+        return Ok(None);
+    }
+    Ok(Some(route))
 }
 
 pub fn resolve_sm100_forced(
@@ -499,4 +572,41 @@ pub(super) fn tc_pick_tile_backward(
     super::super::kernel_identity::LegacySm80Policy::current()
         .admits(op, dtype, dims)
         .then_some(tile)
+}
+
+#[cfg(test)]
+mod sm120_tests {
+    use super::{SM120_AUTO_CELLS_CC120, SM120_AUTO_CELLS_CC121, sm120_target_candidates};
+
+    fn targets(cc: (i32, i32), nvrtc: (i32, i32)) -> Vec<(&'static str, &'static str)> {
+        sm120_target_candidates(cc, nvrtc)
+            .iter()
+            .map(|candidate| (candidate.nvrtc_arch, candidate.ptx_target))
+            .collect()
+    }
+
+    #[test]
+    fn sm120_auto_tables_stay_empty_until_each_device_minor_is_qualified() {
+        assert!(SM120_AUTO_CELLS_CC120.is_empty());
+        assert!(SM120_AUTO_CELLS_CC121.is_empty());
+    }
+
+    #[test]
+    fn sm120_candidates_follow_toolkit_support_and_generic_compatibility() {
+        assert!(targets((12, 0), (12, 7)).is_empty());
+        assert!(targets((12, 1), (12, 7)).is_empty());
+        assert!(targets((11, 0), (13, 2)).is_empty());
+        assert!(targets((12, 2), (13, 2)).is_empty());
+
+        assert_eq!(targets((12, 0), (12, 8)), [("compute_120", "sm_120")]);
+        assert_eq!(targets((12, 1), (12, 8)), [("compute_120", "sm_120")]);
+        assert_eq!(
+            targets((12, 1), (12, 9)),
+            [("compute_121", "sm_121"), ("compute_120", "sm_120")]
+        );
+        assert_eq!(
+            targets((12, 1), (13, 2)),
+            [("compute_121", "sm_121"), ("compute_120", "sm_120")]
+        );
+    }
 }

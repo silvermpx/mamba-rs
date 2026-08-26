@@ -129,6 +129,7 @@ pub struct GpuCtx {
     state_cap: usize,
     instance_token: u64,
     device_identity: super::kernel_identity::DeviceIdentity,
+    device_caps: super::kernel_identity::DeviceCaps,
     policy_hash: super::kernel_identity::Sha256Digest,
     /// Number of CUDA graphs captured on this context: the tier
     /// setters warn when flipped after a capture — the captured kernels
@@ -244,6 +245,30 @@ impl GpuCtx {
             );
         }
         let instance_token = next_gpu_ctx_token()?;
+        let compiler = kernels.compiler_identity();
+        let optin_shared_bytes = device
+            .context()
+            .attribute(
+                cudarc::driver::sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK_OPTIN,
+            )
+            .map_err(|error| format!("query opt-in shared memory: {error:?}"))?;
+        let tensor_map_access = device
+            .context()
+            .attribute(
+                cudarc::driver::sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_TENSOR_MAP_ACCESS_SUPPORTED,
+            )
+            .map_err(|error| format!("query tensor-map support: {error:?}"))?
+            != 0;
+        let device_caps = super::kernel_identity::DeviceCaps {
+            compute_capability: device.compute_capability,
+            nvrtc_version: compiler.nvrtc_version,
+            accepted_target: kernels
+                .specialized_compiler_identity()
+                .map(|identity| identity.target),
+            optin_shared_bytes: u32::try_from(optin_shared_bytes)
+                .map_err(|_| format!("negative opt-in shared memory {optin_shared_bytes}"))?,
+            tensor_map_access,
+        };
         let kernels = Arc::new(kernels);
         Ok(Self {
             resources: Rc::new(GpuCtxResources {
@@ -264,6 +289,7 @@ impl GpuCtx {
             state_cap,
             instance_token,
             device_identity: device.identity(),
+            device_caps,
             policy_hash: super::kernel_identity::legacy_sm80_policy_digest(),
             graphs_captured: std::cell::Cell::new(0),
             graph_scratch_frozen: std::cell::Cell::new(false),
@@ -600,6 +626,9 @@ impl GpuCtx {
             policy_revision: super::kernel_identity::POLICY_REVISION,
             policy_hash: self.policy_hash,
             device: self.device_identity,
+            device_caps: self.device_caps,
+            tuning_table_revision: 0,
+            schedule_set_revision: super::kernel_identity::SCHEDULE_REVISION,
             state_capacity: u32::try_from(self.state_cap)
                 .expect("validated state capacity fits in u32"),
         }

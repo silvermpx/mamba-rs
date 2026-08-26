@@ -43,17 +43,23 @@ pub(crate) mod modules;
 pub(super) use contract::GemmDims;
 pub use contract::{
     SM90A_DYNAMIC_SHARED_BYTES, SM90A_STAGES, SM90A_TILE, SM100_KERNEL_SPECS,
-    SM100_TENSOR_MAP_REVISION, SM100_TUNING_REVISION, SgemmFwdSubOperands, Sm90aForcedRoute,
+    SM100_TENSOR_MAP_REVISION, SM100_TUNING_REVISION, SM120_KERNEL_SPECS, SM120_SCHEDULE_REVISION,
+    SM120_TENSOR_MAP_REVISION, SM120_TUNING_REVISION, SgemmFwdSubOperands, Sm90aForcedRoute,
     Sm90aLaunchOperands, Sm90aMapRequest, Sm90aNumericContract, Sm90aOp, Sm90aPreparedTensorMaps,
     Sm90aRouteIdentity, Sm90aShape, Sm90aTensorMap, Sm90aWarpgroupSchedule, Sm100ForcedRoute,
     Sm100KernelParams, Sm100KernelSpec, Sm100LaunchOperands, Sm100MapRequest, Sm100NumericContract,
     Sm100Op, Sm100PhysicalRoute, Sm100PreparedLaunch, Sm100PreparedTensorMaps, Sm100RouteIdentity,
     Sm100Schedule, Sm100Shape, Sm100Stages, Sm100TargetCandidate, Sm100TargetKind, Sm100TensorMap,
-    Sm100Tile, TcFwdOperands, validate_sm90a_map_request, validate_sm100_map_request,
+    Sm100Tile, Sm120Bk, Sm120ForcedRoute, Sm120KernelParams, Sm120KernelResources, Sm120KernelSpec,
+    Sm120LaunchOperands, Sm120MapRequest, Sm120NumericContract, Sm120Op, Sm120PhysicalRoute,
+    Sm120PreparedLaunch, Sm120PreparedTensorMaps, Sm120RouteIdentity, Sm120Shape, Sm120Stages,
+    Sm120TargetCandidate, Sm120TensorMap, Sm120Tile, TcFwdOperands, validate_sm90a_map_request,
+    validate_sm100_map_request, validate_sm120_map_request,
 };
 pub use dispatch::{
-    SM90A_AUTO_CELLS, SM100_AUTO_CELLS_CC100, SM100_AUTO_CELLS_CC103, TC64_PREFER_MAX_TILES128,
-    TcTile, resolve_sm90a_forced, resolve_sm100_forced, sm100_target_candidates,
+    SM90A_AUTO_CELLS, SM100_AUTO_CELLS_CC100, SM100_AUTO_CELLS_CC103, SM120_AUTO_CELLS_CC120,
+    SM120_AUTO_CELLS_CC121, TC64_PREFER_MAX_TILES128, TcTile, resolve_sm90a_forced,
+    resolve_sm100_forced, resolve_sm120_forced, sm100_target_candidates, sm120_target_candidates,
 };
 pub use launch::*;
 #[doc(hidden)]

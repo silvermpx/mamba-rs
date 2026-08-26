@@ -1,7 +1,9 @@
 use super::super::blas::TypedPtr;
 use super::super::dtype::WeightDtype;
 use crate::mamba_ssm::gpu::kernel_identity::{
-    ArtifactIdentity, CompilerIdentity, DeviceIdentity, FramedSha256, ModuleKind, Sha256Digest,
+    ArtifactIdentity, CompilerIdentity, DeviceIdentity, FramedSha256, ModuleKind,
+    PhysicalGemmBackend, PolicyDtype, ResolvedGemmLaunchSet, ResolvedGemmOp, ResolvedGemmRoute,
+    ResolvedNumericContract, Sha256Digest,
 };
 use cudarc::driver::{DeviceRepr, sys};
 
@@ -2285,11 +2287,1047 @@ pub struct SgemmFwdSubOperands {
     pub bias_ptr: CUptr,
 }
 
+pub const SM120_TENSOR_MAP_REVISION: u16 = 1;
+pub const SM120_TUNING_REVISION: u16 = 0;
+pub const SM120_SCHEDULE_REVISION: u16 = 1;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Sm120Op {
+    Nn,
+    Tn,
+    Nt,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Sm120Tile {
+    M64N64,
+    M128N64,
+    M64N128,
+    M128N128,
+}
+
+impl Sm120Tile {
+    pub const fn output_rows(self) -> u32 {
+        match self {
+            Self::M64N64 | Self::M64N128 => 64,
+            Self::M128N64 | Self::M128N128 => 128,
+        }
+    }
+
+    pub const fn output_columns(self) -> u32 {
+        match self {
+            Self::M64N64 | Self::M128N64 => 64,
+            Self::M64N128 | Self::M128N128 => 128,
+        }
+    }
+
+    pub const fn compute_warps(self) -> u32 {
+        self.output_rows() / 32 * (self.output_columns() / 32)
+    }
+
+    pub const fn threads(self) -> u32 {
+        self.compute_warps() * 32
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Sm120Bk {
+    Bk32,
+    Bk64,
+}
+
+impl Sm120Bk {
+    pub const fn elements(self) -> u32 {
+        match self {
+            Self::Bk32 => 32,
+            Self::Bk64 => 64,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Sm120Stages {
+    S2,
+    S3,
+}
+
+impl Sm120Stages {
+    pub const fn count(self) -> u8 {
+        match self {
+            Self::S2 => 2,
+            Self::S3 => 3,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Sm120PhysicalRoute {
+    pub tile: Sm120Tile,
+    pub bk: Sm120Bk,
+    pub stages: Sm120Stages,
+}
+
+impl Sm120PhysicalRoute {
+    pub const fn dynamic_shared_bytes(self) -> u32 {
+        let payload =
+            (self.tile.output_rows() + self.tile.output_columns()) * self.bk.elements() * 2;
+        payload * self.stages.count() as u32 + 128
+    }
+
+    pub const fn expected_transaction_bytes(self) -> u32 {
+        (self.tile.output_rows() + self.tile.output_columns()) * self.bk.elements() * 2
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Sm120Shape {
+    pub m: usize,
+    pub k: usize,
+    pub n: usize,
+    pub lda: usize,
+    pub ldb: usize,
+    pub ldc: usize,
+}
+
+impl Sm120Shape {
+    pub fn contiguous(op: Sm120Op, dims: (usize, usize, usize)) -> Self {
+        let (m, k, n) = dims;
+        match op {
+            Sm120Op::Nn | Sm120Op::Tn => Self {
+                m,
+                k,
+                n,
+                lda: k,
+                ldb: n,
+                ldc: n,
+            },
+            Sm120Op::Nt => Self {
+                m,
+                k,
+                n,
+                lda: n,
+                ldb: n,
+                ldc: k,
+            },
+        }
+    }
+
+    pub fn validate(self, op: Sm120Op) -> Result<(), String> {
+        for (value, name) in [(self.m, "M"), (self.k, "K"), (self.n, "N")] {
+            if value == 0 {
+                return Err(invalid_gemm_dimensions(format!("{name} must be positive")));
+            }
+            checked_i32(value, name)?;
+        }
+        let (a_width, b_width, c_width) = match op {
+            Sm120Op::Nn | Sm120Op::Tn => (self.k, self.n, self.n),
+            Sm120Op::Nt => (self.n, self.n, self.k),
+        };
+        for (stride, width, name) in [
+            (self.lda, a_width, "lda"),
+            (self.ldb, b_width, "ldb"),
+            (self.ldc, c_width, "ldc"),
+        ] {
+            if stride < width {
+                return Err(invalid_gemm_dimensions(format!(
+                    "{name}={stride} is smaller than the physical width {width}"
+                )));
+            }
+            checked_i32(stride, name)?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Sm120ForcedRoute {
+    pub op: Sm120Op,
+    pub dtype: WeightDtype,
+    pub physical: Sm120PhysicalRoute,
+    pub shape: Sm120Shape,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Sm120TargetCandidate {
+    pub device_cc: (i32, i32),
+    pub nvrtc_arch: &'static str,
+    pub ptx_target: &'static str,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Sm120KernelSpec {
+    pub op: Sm120Op,
+    pub dtype: WeightDtype,
+    pub physical: Sm120PhysicalRoute,
+    pub symbol: &'static str,
+    pub threads: u32,
+    pub dynamic_shared_bytes: u32,
+    pub empty_barrier_arrivals: u32,
+    pub full_barrier_arrivals: u32,
+    pub cluster: (u8, u8, u8),
+    pub warp_tile: (u32, u32),
+    pub expected_transaction_bytes: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Sm120KernelResources {
+    pub threads: u32,
+    pub dynamic_shared_bytes: u32,
+    pub max_threads_per_block: u32,
+    pub local_bytes: u32,
+    pub spill_store_bytes: u32,
+    pub spill_load_bytes: u32,
+    pub registers_per_thread: u32,
+    pub active_blocks_per_sm: u32,
+}
+
+macro_rules! sm120_spec {
+    ($op:expr, $dtype:expr, $tile:expr, $bk:expr, $stages:expr, $symbol:expr) => {{
+        let physical = Sm120PhysicalRoute {
+            tile: $tile,
+            bk: $bk,
+            stages: $stages,
+        };
+        Sm120KernelSpec {
+            op: $op,
+            dtype: $dtype,
+            physical,
+            symbol: $symbol,
+            threads: physical.tile.threads(),
+            dynamic_shared_bytes: physical.dynamic_shared_bytes(),
+            empty_barrier_arrivals: physical.tile.threads(),
+            full_barrier_arrivals: 1,
+            cluster: (1, 1, 1),
+            warp_tile: (32, 32),
+            expected_transaction_bytes: physical.expected_transaction_bytes(),
+        }
+    }};
+}
+
+macro_rules! sm120_specs {
+    ($(($op:expr, $op_name:literal, $tile:expr, $tile_name:literal)),+ $(,)?) => {
+        [$(
+            sm120_spec!($op, WeightDtype::Bf16, $tile, Sm120Bk::Bk32, Sm120Stages::S2,
+                concat!("sgemm_bi_", $op_name, "_sm120_tma_", $tile_name, "_bk32_s2_bf16")),
+            sm120_spec!($op, WeightDtype::F16, $tile, Sm120Bk::Bk32, Sm120Stages::S2,
+                concat!("sgemm_bi_", $op_name, "_sm120_tma_", $tile_name, "_bk32_s2_f16")),
+            sm120_spec!($op, WeightDtype::Bf16, $tile, Sm120Bk::Bk32, Sm120Stages::S3,
+                concat!("sgemm_bi_", $op_name, "_sm120_tma_", $tile_name, "_bk32_s3_bf16")),
+            sm120_spec!($op, WeightDtype::F16, $tile, Sm120Bk::Bk32, Sm120Stages::S3,
+                concat!("sgemm_bi_", $op_name, "_sm120_tma_", $tile_name, "_bk32_s3_f16")),
+            sm120_spec!($op, WeightDtype::Bf16, $tile, Sm120Bk::Bk64, Sm120Stages::S2,
+                concat!("sgemm_bi_", $op_name, "_sm120_tma_", $tile_name, "_bk64_s2_bf16")),
+            sm120_spec!($op, WeightDtype::F16, $tile, Sm120Bk::Bk64, Sm120Stages::S2,
+                concat!("sgemm_bi_", $op_name, "_sm120_tma_", $tile_name, "_bk64_s2_f16")),
+            sm120_spec!($op, WeightDtype::Bf16, $tile, Sm120Bk::Bk64, Sm120Stages::S3,
+                concat!("sgemm_bi_", $op_name, "_sm120_tma_", $tile_name, "_bk64_s3_bf16")),
+            sm120_spec!($op, WeightDtype::F16, $tile, Sm120Bk::Bk64, Sm120Stages::S3,
+                concat!("sgemm_bi_", $op_name, "_sm120_tma_", $tile_name, "_bk64_s3_f16")),
+        )+]
+    };
+}
+
+pub const SM120_KERNEL_SPECS: [Sm120KernelSpec; 96] = sm120_specs!(
+    (Sm120Op::Nn, "nn", Sm120Tile::M64N64, "64x64"),
+    (Sm120Op::Nn, "nn", Sm120Tile::M128N64, "128x64"),
+    (Sm120Op::Nn, "nn", Sm120Tile::M64N128, "64x128"),
+    (Sm120Op::Nn, "nn", Sm120Tile::M128N128, "128x128"),
+    (Sm120Op::Tn, "tn", Sm120Tile::M64N64, "64x64"),
+    (Sm120Op::Tn, "tn", Sm120Tile::M128N64, "128x64"),
+    (Sm120Op::Tn, "tn", Sm120Tile::M64N128, "64x128"),
+    (Sm120Op::Tn, "tn", Sm120Tile::M128N128, "128x128"),
+    (Sm120Op::Nt, "nt", Sm120Tile::M64N64, "64x64"),
+    (Sm120Op::Nt, "nt", Sm120Tile::M128N64, "128x64"),
+    (Sm120Op::Nt, "nt", Sm120Tile::M64N128, "64x128"),
+    (Sm120Op::Nt, "nt", Sm120Tile::M128N128, "128x128"),
+);
+
+impl Sm120ForcedRoute {
+    pub fn kernel_spec(self) -> Result<&'static Sm120KernelSpec, String> {
+        SM120_KERNEL_SPECS
+            .iter()
+            .find(|spec| {
+                spec.op == self.op && spec.dtype == self.dtype && spec.physical == self.physical
+            })
+            .ok_or_else(|| "no SM120 TMA kernel matches the forced route".to_string())
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Sm120NumericContract {
+    TmaMma16F32V1,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Sm120RouteIdentity {
+    pub numeric_contract: Sm120NumericContract,
+    pub op: Sm120Op,
+    pub dtype: WeightDtype,
+    pub physical: Sm120PhysicalRoute,
+    pub shape: Sm120Shape,
+    pub symbol: &'static str,
+    pub module_kind: ModuleKind,
+    pub target: Sm120TargetCandidate,
+    pub artifact: ArtifactIdentity,
+    pub compiler: CompilerIdentity,
+    pub device: DeviceIdentity,
+    pub device_caps: crate::mamba_ssm::gpu::kernel_identity::DeviceCaps,
+    pub tensor_map_revision: u16,
+    pub tensor_maps_digest: Sha256Digest,
+    pub resources_digest: Sha256Digest,
+    pub tuning_revision: u16,
+    pub schedule_revision: u16,
+}
+
+impl Sm120RouteIdentity {
+    pub fn ensure_current(self, live: Self, prefix: &str) -> Result<(), String> {
+        if self == live {
+            Ok(())
+        } else {
+            Err(format!(
+                "{prefix}: SM120 route changed since preparation; re-capture before replay"
+            ))
+        }
+    }
+
+    pub fn resolved_route(self) -> Result<ResolvedGemmRoute, String> {
+        let route = Sm120ForcedRoute {
+            op: self.op,
+            dtype: self.dtype,
+            physical: self.physical,
+            shape: self.shape,
+        };
+        route.shape.validate(route.op)?;
+        let spec = route.kernel_spec()?;
+        if self.symbol != spec.symbol {
+            return Err("SM120 identity symbol does not match its physical route".into());
+        }
+        if self.module_kind != ModuleKind::TriadSm120
+            || self.artifact.module_kind != ModuleKind::TriadSm120
+        {
+            return Err("SM120 identity does not name the SM120 TRIAD module".into());
+        }
+        if self.compiler.target.as_str() != self.target.nvrtc_arch
+            || self.device.target.as_str() != self.target.ptx_target
+        {
+            return Err("SM120 identity target transaction is inconsistent".into());
+        }
+        let device_cc = (
+            u32::try_from(self.target.device_cc.0)
+                .map_err(|_| "SM120 target has a negative CC major".to_string())?,
+            u32::try_from(self.target.device_cc.1)
+                .map_err(|_| "SM120 target has a negative CC minor".to_string())?,
+        );
+        if self.device.compute_capability != device_cc
+            || self.device_caps.compute_capability != device_cc
+            || self.device_caps.nvrtc_version != self.compiler.nvrtc_version
+            || self.device_caps.accepted_target != Some(self.compiler.target)
+            || !self.device_caps.tensor_map_access
+            || self.device_caps.optin_shared_bytes < spec.dynamic_shared_bytes
+        {
+            return Err("SM120 identity device capabilities are inconsistent".into());
+        }
+        let op = match self.op {
+            Sm120Op::Nn => ResolvedGemmOp::Nn,
+            Sm120Op::Tn => ResolvedGemmOp::Tn,
+            Sm120Op::Nt => ResolvedGemmOp::Nt,
+        };
+        let dtype = match self.dtype {
+            WeightDtype::F16 => PolicyDtype::F16,
+            WeightDtype::Bf16 => PolicyDtype::Bf16,
+            WeightDtype::F32 => return Err("SM120 TMA route requires f16 or bf16".into()),
+        };
+        Ok(ResolvedGemmRoute {
+            op,
+            dtype,
+            backend: PhysicalGemmBackend::Sm120TmaMma16V1,
+            numeric_contract: ResolvedNumericContract::MmaSyncF32V1,
+            symbol: self.symbol,
+            module_kind: self.module_kind,
+            target: self.compiler.target,
+            artifact: self.artifact,
+            compiler: self.compiler,
+            device: self.device,
+            device_caps: self.device_caps,
+            shape: (self.shape.m, self.shape.k, self.shape.n),
+            strides: (self.shape.lda, self.shape.ldb, self.shape.ldc),
+            tile: (
+                self.physical.tile.output_rows(),
+                self.physical.tile.output_columns(),
+            ),
+            bk: self.physical.bk.elements(),
+            stages: self.physical.stages.count(),
+            threads: spec.threads,
+            tensor_map_revision: self.tensor_map_revision,
+            tensor_maps_digest: self.tensor_maps_digest,
+            resources_digest: self.resources_digest,
+            tuning_table_revision: self.tuning_revision,
+            schedule_revision: self.schedule_revision,
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Sm120MapRequest {
+    pub op: Sm120Op,
+    pub dtype: WeightDtype,
+    pub tile: Sm120Tile,
+    pub bk: Sm120Bk,
+    pub a_ptr: CUptr,
+    pub b_ptr: CUptr,
+    pub shape: Sm120Shape,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Sm120LaunchOperands {
+    pub output_ptr: CUptr,
+    pub bias_ptr: CUptr,
+    pub alpha: f32,
+    pub beta: f32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Sm120KernelParams {
+    pub a_x: i32,
+    pub a_y: i32,
+    pub b_x: i32,
+    pub b_y: i32,
+    pub alpha: f32,
+    pub beta: f32,
+    pub m: i32,
+    pub k: i32,
+    pub n: i32,
+    pub ldc: i32,
+}
+
+unsafe impl DeviceRepr for Sm120KernelParams {}
+
+const _: () = {
+    assert!(std::mem::size_of::<Sm120KernelParams>() == 40);
+    assert!(std::mem::align_of::<Sm120KernelParams>() == 4);
+};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum Sm120Swizzle {
+    Bytes64,
+    Bytes128,
+}
+
+impl Sm120Swizzle {
+    const fn from_bk(bk: Sm120Bk) -> Self {
+        match bk {
+            Sm120Bk::Bk32 => Self::Bytes64,
+            Sm120Bk::Bk64 => Self::Bytes128,
+        }
+    }
+
+    const fn bytes(self) -> u32 {
+        match self {
+            Self::Bytes64 => 64,
+            Self::Bytes128 => 128,
+        }
+    }
+
+    const fn driver(self) -> sys::CUtensorMapSwizzle {
+        match self {
+            Self::Bytes64 => sys::CUtensorMapSwizzle::CU_TENSOR_MAP_SWIZZLE_64B,
+            Self::Bytes128 => sys::CUtensorMapSwizzle::CU_TENSOR_MAP_SWIZZLE_128B,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(super) struct Sm120TensorMapKey {
+    base: CUptr,
+    global_dimensions: [u64; 2],
+    outer_byte_stride: u64,
+    box_dimensions: [u32; 2],
+    swizzle: Sm120Swizzle,
+}
+
+impl Sm120TensorMapKey {
+    fn validate(self) -> Result<(), String> {
+        if self.base == 0 || !self.base.is_multiple_of(128) {
+            return Err(
+                "SM120 swizzled tensor-map base must be non-null and 128-byte aligned".into(),
+            );
+        }
+        if self.global_dimensions.contains(&0) {
+            return Err("SM120 tensor-map dimensions must be positive".into());
+        }
+        if self.outer_byte_stride == 0
+            || !self.outer_byte_stride.is_multiple_of(16)
+            || self.outer_byte_stride >= (1_u64 << 40)
+        {
+            return Err(
+                "SM120 tensor-map outer byte stride must be a positive multiple of 16 below 2^40"
+                    .into(),
+            );
+        }
+        let row_bytes = self.global_dimensions[0]
+            .checked_mul(2)
+            .ok_or_else(|| "SM120 tensor-map row width overflows u64".to_string())?;
+        if self.outer_byte_stride < row_bytes {
+            return Err("SM120 tensor-map outer stride is smaller than its inner dimension".into());
+        }
+        if self.box_dimensions.contains(&0) || self.box_dimensions.iter().any(|&dim| dim > 256) {
+            return Err("SM120 tensor-map box dimensions must be in 1..=256".into());
+        }
+        let inner_bytes = self.box_dimensions[0]
+            .checked_mul(2)
+            .ok_or_else(|| "SM120 tensor-map box width overflows u32".to_string())?;
+        if inner_bytes != self.swizzle.bytes() {
+            return Err(format!(
+                "SM120 tensor-map inner box span must equal its {}-byte swizzle",
+                self.swizzle.bytes()
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[repr(transparent)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Sm120TensorMap(sys::CUtensorMap);
+
+unsafe impl DeviceRepr for Sm120TensorMap {}
+
+const _: () = {
+    assert!(std::mem::size_of::<Sm120TensorMap>() == std::mem::size_of::<sys::CUtensorMap>());
+    assert!(std::mem::align_of::<Sm120TensorMap>() == std::mem::align_of::<sys::CUtensorMap>());
+};
+
+impl Sm120TensorMap {
+    fn encode(key: Sm120TensorMapKey) -> Result<Self, String> {
+        key.validate()?;
+        let mut raw = std::mem::MaybeUninit::<sys::CUtensorMap>::zeroed();
+        let element_strides = [1_u32, 1_u32];
+        let global_strides = [key.outer_byte_stride];
+        unsafe {
+            sys::cuTensorMapEncodeTiled(
+                raw.as_mut_ptr(),
+                sys::CUtensorMapDataType::CU_TENSOR_MAP_DATA_TYPE_UINT16,
+                2,
+                key.base as usize as *mut std::ffi::c_void,
+                key.global_dimensions.as_ptr(),
+                global_strides.as_ptr(),
+                key.box_dimensions.as_ptr(),
+                element_strides.as_ptr(),
+                sys::CUtensorMapInterleave::CU_TENSOR_MAP_INTERLEAVE_NONE,
+                key.swizzle.driver(),
+                sys::CUtensorMapL2promotion::CU_TENSOR_MAP_L2_PROMOTION_NONE,
+                sys::CUtensorMapFloatOOBfill::CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE,
+            )
+            .result()
+            .map_err(|error| format!("SM120 cuTensorMapEncodeTiled failed: {error:?}"))?;
+            Ok(Self(raw.assume_init()))
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(super) struct Sm120TensorOrigins {
+    pub a_x: i32,
+    pub a_y: i32,
+    pub b_x: i32,
+    pub b_y: i32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct Sm120MapBinding {
+    pub context_handle: usize,
+    pub artifact: ArtifactIdentity,
+    pub compiler: CompilerIdentity,
+    pub device: DeviceIdentity,
+    pub device_caps: crate::mamba_ssm::gpu::kernel_identity::DeviceCaps,
+    pub target: Sm120TargetCandidate,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Sm120PreparedTensorMaps {
+    pub(super) a: Sm120TensorMap,
+    pub(super) b: Sm120TensorMap,
+    pub(super) keys: [Sm120TensorMapKey; 2],
+    pub(super) request: Sm120MapRequest,
+    pub(super) binding: Sm120MapBinding,
+    pub(super) allocations: [Sm90aAllocationIdentity; 2],
+    pub(super) origins: Sm120TensorOrigins,
+}
+
+impl Sm120PreparedTensorMaps {
+    pub fn identity_digest(&self) -> Sha256Digest {
+        let op = match self.request.op {
+            Sm120Op::Nn => 0,
+            Sm120Op::Tn => 1,
+            Sm120Op::Nt => 2,
+        };
+        let mut digest = FramedSha256::new(b"sm120-tensor-map-pair.v1")
+            .required(b"op", &[op])
+            .required(b"dtype", &[dtype_tag(self.request.dtype)])
+            .required(b"tile-m", &self.request.tile.output_rows().to_le_bytes())
+            .required(b"tile-n", &self.request.tile.output_columns().to_le_bytes())
+            .required(b"bk", &self.request.bk.elements().to_le_bytes())
+            .required(
+                b"tensor-map-revision",
+                &SM120_TENSOR_MAP_REVISION.to_le_bytes(),
+            )
+            .required(b"a-origin-x", &self.origins.a_x.to_le_bytes())
+            .required(b"a-origin-y", &self.origins.a_y.to_le_bytes())
+            .required(b"b-origin-x", &self.origins.b_x.to_le_bytes())
+            .required(b"b-origin-y", &self.origins.b_y.to_le_bytes());
+        for key in self.keys {
+            digest = digest
+                .required(b"base", &key.base.to_le_bytes())
+                .required(b"global-0", &key.global_dimensions[0].to_le_bytes())
+                .required(b"global-1", &key.global_dimensions[1].to_le_bytes())
+                .required(b"outer-stride", &key.outer_byte_stride.to_le_bytes())
+                .required(b"box-0", &key.box_dimensions[0].to_le_bytes())
+                .required(b"box-1", &key.box_dimensions[1].to_le_bytes())
+                .required(b"swizzle", &key.swizzle.bytes().to_le_bytes());
+        }
+        for (index, map) in [self.a, self.b].into_iter().enumerate() {
+            let bytes = unsafe {
+                std::slice::from_raw_parts(
+                    std::ptr::from_ref(&map.0).cast::<u8>(),
+                    std::mem::size_of::<sys::CUtensorMap>(),
+                )
+            };
+            digest = digest
+                .required(b"descriptor-index", &(index as u64).to_le_bytes())
+                .required(b"encoded-descriptor", bytes);
+        }
+        for allocation in self.allocations {
+            digest = allocation.append_digest(digest);
+        }
+        digest.finish()
+    }
+
+    pub(super) fn matches_binding(&self, binding: Sm120MapBinding) -> bool {
+        self.binding == binding
+    }
+
+    pub(super) fn validate_live_allocations(&self) -> Result<(), String> {
+        let plan = sm120_tensor_map_plan(self.request, self.binding.context_handle)?;
+        if plan.keys != self.keys
+            || plan.allocations != self.allocations
+            || plan.origins != self.origins
+        {
+            return Err(
+                "SM120 input allocation or tensor-map origin changed since preparation".into(),
+            );
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy)]
+struct Sm120OperandLayout {
+    pointer: CUptr,
+    stride: usize,
+    width: usize,
+    rows: usize,
+    issued_coordinate_max: [usize; 2],
+    box_dimensions: [u32; 2],
+    swizzle: Sm120Swizzle,
+    name: &'static str,
+}
+
+fn sm120_operand_layouts(request: Sm120MapRequest) -> [Sm120OperandLayout; 2] {
+    let shape = request.shape;
+    let tile_m = request.tile.output_rows() as usize;
+    let tile_n = request.tile.output_columns() as usize;
+    let bk = request.bk.elements() as usize;
+    let swizzle = Sm120Swizzle::from_bk(request.bk);
+    let last_tile = |extent: usize, tile: usize| extent.saturating_sub(1) / tile * tile;
+    let output_rows = if request.op == Sm120Op::Tn {
+        shape.k
+    } else {
+        shape.m
+    };
+    let output_columns = if request.op == Sm120Op::Nt {
+        shape.k
+    } else {
+        shape.n
+    };
+    let reduction = match request.op {
+        Sm120Op::Nn => shape.k,
+        Sm120Op::Tn => shape.m,
+        Sm120Op::Nt => shape.n,
+    };
+    let last_output_row = last_tile(output_rows, tile_m);
+    let last_output_column = last_tile(output_columns, tile_n);
+    let last_reduction = last_tile(reduction, bk);
+    match request.op {
+        Sm120Op::Nn => [
+            Sm120OperandLayout {
+                pointer: request.a_ptr,
+                stride: shape.lda,
+                width: shape.k,
+                rows: shape.m,
+                issued_coordinate_max: [last_reduction, last_output_row],
+                box_dimensions: [request.bk.elements(), request.tile.output_rows()],
+                swizzle,
+                name: "A",
+            },
+            Sm120OperandLayout {
+                pointer: request.b_ptr,
+                stride: shape.ldb,
+                width: shape.n,
+                rows: shape.k,
+                issued_coordinate_max: [last_output_column + tile_n - bk, last_reduction],
+                box_dimensions: [request.bk.elements(), request.bk.elements()],
+                swizzle,
+                name: "B",
+            },
+        ],
+        Sm120Op::Tn => [
+            Sm120OperandLayout {
+                pointer: request.a_ptr,
+                stride: shape.lda,
+                width: shape.k,
+                rows: shape.m,
+                issued_coordinate_max: [last_output_row + tile_m - bk, last_reduction],
+                box_dimensions: [request.bk.elements(), request.bk.elements()],
+                swizzle,
+                name: "A",
+            },
+            Sm120OperandLayout {
+                pointer: request.b_ptr,
+                stride: shape.ldb,
+                width: shape.n,
+                rows: shape.m,
+                issued_coordinate_max: [last_output_column + tile_n - bk, last_reduction],
+                box_dimensions: [request.bk.elements(), request.bk.elements()],
+                swizzle,
+                name: "B",
+            },
+        ],
+        Sm120Op::Nt => [
+            Sm120OperandLayout {
+                pointer: request.a_ptr,
+                stride: shape.lda,
+                width: shape.n,
+                rows: shape.m,
+                issued_coordinate_max: [last_reduction, last_output_row],
+                box_dimensions: [request.bk.elements(), request.tile.output_rows()],
+                swizzle,
+                name: "A",
+            },
+            Sm120OperandLayout {
+                pointer: request.b_ptr,
+                stride: shape.ldb,
+                width: shape.n,
+                rows: shape.k,
+                issued_coordinate_max: [last_reduction, last_output_column],
+                box_dimensions: [request.bk.elements(), request.tile.output_columns()],
+                swizzle,
+                name: "B",
+            },
+        ],
+    }
+}
+
+fn validate_sm120_issued_coordinates(
+    layout: Sm120OperandLayout,
+    origin: (u64, u64),
+) -> Result<(), String> {
+    for (axis, origin, issued) in [
+        ("x", origin.0, layout.issued_coordinate_max[0]),
+        ("y", origin.1, layout.issued_coordinate_max[1]),
+    ] {
+        let issued = u64::try_from(issued).map_err(|_| {
+            format!(
+                "SM120 {} issued {axis} coordinate exceeds u64::MAX",
+                layout.name
+            )
+        })?;
+        let coordinate = origin.checked_add(issued).ok_or_else(|| {
+            format!(
+                "SM120 {} issued {axis} coordinate overflows u64",
+                layout.name
+            )
+        })?;
+        i32::try_from(coordinate).map_err(|_| {
+            format!(
+                "SM120 {} issued {axis} coordinate exceeds i32::MAX after applying the subview origin",
+                layout.name
+            )
+        })?;
+    }
+    Ok(())
+}
+
+fn validate_sm120_request(request: Sm120MapRequest) -> Result<(), String> {
+    request.shape.validate(request.op)?;
+    if !matches!(request.dtype, WeightDtype::Bf16 | WeightDtype::F16) {
+        return Err("SM120 TMA tensor maps require bf16 or f16 operands".into());
+    }
+    for layout in sm120_operand_layouts(request) {
+        if layout.pointer == 0 || !layout.pointer.is_multiple_of(2) {
+            return Err(format!(
+                "SM120 {} logical pointer must be non-null and element aligned",
+                layout.name
+            ));
+        }
+        let stride_bytes = layout
+            .stride
+            .checked_mul(2)
+            .ok_or_else(|| format!("SM120 {} byte stride overflows usize", layout.name))?;
+        if !stride_bytes.is_multiple_of(16) {
+            return Err(format!(
+                "SM120 {} byte stride must be a multiple of 16",
+                layout.name
+            ));
+        }
+    }
+    Ok(())
+}
+
+pub fn validate_sm120_map_request(request: Sm120MapRequest) -> Result<(), String> {
+    validate_sm120_request(request)
+}
+
+pub(super) struct Sm120TensorMapPlan {
+    pub keys: [Sm120TensorMapKey; 2],
+    pub allocations: [Sm90aAllocationIdentity; 2],
+    pub origins: Sm120TensorOrigins,
+}
+
+fn sm120_subview_plan(
+    layout: Sm120OperandLayout,
+    context_handle: usize,
+) -> Result<(Sm120TensorMapKey, Sm90aAllocationIdentity, (i32, i32)), String> {
+    let initial =
+        Sm90aAllocationIdentity::query(layout.pointer, 2, context_handle, "SM120", layout.name)?;
+    if !initial.offset_bytes.is_multiple_of(2) {
+        return Err(format!(
+            "SM120 {} subview offset is not element aligned",
+            layout.name
+        ));
+    }
+    let stride = u64::try_from(layout.stride)
+        .map_err(|_| format!("SM120 {} stride exceeds u64::MAX", layout.name))?;
+    let element_offset = initial.offset_bytes / 2;
+    let origin_x = element_offset % stride;
+    let origin_y = element_offset / stride;
+    let width = u64::try_from(layout.width)
+        .map_err(|_| format!("SM120 {} width exceeds u64::MAX", layout.name))?;
+    let rows = u64::try_from(layout.rows)
+        .map_err(|_| format!("SM120 {} rows exceeds u64::MAX", layout.name))?;
+    let logical_end_x = origin_x
+        .checked_add(width)
+        .ok_or_else(|| format!("SM120 {} column origin overflows u64", layout.name))?;
+    if logical_end_x > stride {
+        return Err(format!(
+            "SM120 {} subview row wraps across its declared stride",
+            layout.name
+        ));
+    }
+    let logical_end_y = origin_y
+        .checked_add(rows)
+        .ok_or_else(|| format!("SM120 {} row origin overflows u64", layout.name))?;
+    let origin = (
+        i32::try_from(origin_x)
+            .map_err(|_| format!("SM120 {} column origin exceeds i32::MAX", layout.name))?,
+        i32::try_from(origin_y)
+            .map_err(|_| format!("SM120 {} row origin exceeds i32::MAX", layout.name))?,
+    );
+    i32::try_from(logical_end_x)
+        .map_err(|_| format!("SM120 {} global width exceeds i32::MAX", layout.name))?;
+    i32::try_from(logical_end_y)
+        .map_err(|_| format!("SM120 {} global rows exceed i32::MAX", layout.name))?;
+    validate_sm120_issued_coordinates(layout, (origin_x, origin_y))?;
+    let required_bytes = matrix_span_bytes(
+        layout.rows,
+        layout.width,
+        layout.stride,
+        2,
+        &format!("SM120 {} subview", layout.name),
+    )?;
+    let allocation = Sm90aAllocationIdentity::query(
+        layout.pointer,
+        required_bytes,
+        context_handle,
+        "SM120",
+        layout.name,
+    )?;
+    if allocation.allocation_base != initial.allocation_base
+        || allocation.allocation_bytes != initial.allocation_bytes
+        || allocation.offset_bytes != initial.offset_bytes
+        || allocation.buffer_id != initial.buffer_id
+    {
+        return Err(format!(
+            "SM120 {} allocation identity changed during tensor-map preparation",
+            layout.name
+        ));
+    }
+    let key = Sm120TensorMapKey {
+        base: allocation.allocation_base,
+        global_dimensions: [logical_end_x, logical_end_y],
+        outer_byte_stride: stride
+            .checked_mul(2)
+            .ok_or_else(|| format!("SM120 {} byte stride overflows u64", layout.name))?,
+        box_dimensions: layout.box_dimensions,
+        swizzle: layout.swizzle,
+    };
+    key.validate()?;
+    Ok((key, allocation, origin))
+}
+
+pub(super) fn sm120_tensor_map_plan(
+    request: Sm120MapRequest,
+    context_handle: usize,
+) -> Result<Sm120TensorMapPlan, String> {
+    validate_sm120_request(request)?;
+    let layouts = sm120_operand_layouts(request);
+    let (a_key, a_allocation, (a_x, a_y)) = sm120_subview_plan(layouts[0], context_handle)?;
+    let (b_key, b_allocation, (b_x, b_y)) = sm120_subview_plan(layouts[1], context_handle)?;
+    Ok(Sm120TensorMapPlan {
+        keys: [a_key, b_key],
+        allocations: [a_allocation, b_allocation],
+        origins: Sm120TensorOrigins { a_x, a_y, b_x, b_y },
+    })
+}
+
+pub(super) fn encode_sm120_tensor_maps(
+    keys: [Sm120TensorMapKey; 2],
+    request: Sm120MapRequest,
+    binding: Sm120MapBinding,
+    allocations: [Sm90aAllocationIdentity; 2],
+    origins: Sm120TensorOrigins,
+) -> Result<Sm120PreparedTensorMaps, String> {
+    Ok(Sm120PreparedTensorMaps {
+        a: Sm120TensorMap::encode(keys[0])?,
+        b: Sm120TensorMap::encode(keys[1])?,
+        keys,
+        request,
+        binding,
+        allocations,
+        origins,
+    })
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct Sm120LaunchResourceSnapshot {
+    output: Sm90aAllocationIdentity,
+    bias: Option<Sm90aAllocationIdentity>,
+}
+
+impl Sm120LaunchResourceSnapshot {
+    pub(super) fn query(
+        route: Sm120ForcedRoute,
+        operands: Sm120LaunchOperands,
+        context_handle: usize,
+    ) -> Result<Self, String> {
+        let (rows, columns, element_bytes) = sm120_output_layout(route);
+        let output_bytes = matrix_span_bytes(
+            rows,
+            columns,
+            route.shape.ldc,
+            element_bytes,
+            "SM120 output",
+        )?;
+        let output = Sm90aAllocationIdentity::query(
+            operands.output_ptr,
+            output_bytes,
+            context_handle,
+            "SM120",
+            "output",
+        )?;
+        let bias = if operands.bias_ptr == 0 {
+            None
+        } else {
+            let bytes = u64::try_from(columns)
+                .ok()
+                .and_then(|columns| columns.checked_mul(4))
+                .ok_or_else(|| "SM120 bias allocation span overflows u64".to_string())?;
+            Some(Sm90aAllocationIdentity::query(
+                operands.bias_ptr,
+                bytes,
+                context_handle,
+                "SM120",
+                "bias",
+            )?)
+        };
+        Ok(Self { output, bias })
+    }
+
+    pub(super) fn digest(
+        self,
+        route: Sm120ForcedRoute,
+        operands: Sm120LaunchOperands,
+        tensor_maps_digest: Sha256Digest,
+    ) -> Sha256Digest {
+        let mut digest = self
+            .output
+            .append_digest(FramedSha256::new(b"sm120-launch-resources.v1"))
+            .required(b"tensor-maps", &tensor_maps_digest)
+            .required(b"m", &(route.shape.m as u64).to_le_bytes())
+            .required(b"k", &(route.shape.k as u64).to_le_bytes())
+            .required(b"n", &(route.shape.n as u64).to_le_bytes())
+            .required(b"lda", &(route.shape.lda as u64).to_le_bytes())
+            .required(b"ldb", &(route.shape.ldb as u64).to_le_bytes())
+            .required(b"ldc", &(route.shape.ldc as u64).to_le_bytes())
+            .required(b"tile-m", &route.physical.tile.output_rows().to_le_bytes())
+            .required(
+                b"tile-n",
+                &route.physical.tile.output_columns().to_le_bytes(),
+            )
+            .required(b"bk", &route.physical.bk.elements().to_le_bytes())
+            .required(b"stages", &[route.physical.stages.count()])
+            .required(b"output-pointer", &operands.output_ptr.to_le_bytes())
+            .required(b"bias-pointer", &operands.bias_ptr.to_le_bytes())
+            .required(b"alpha", &operands.alpha.to_bits().to_le_bytes())
+            .required(b"beta", &operands.beta.to_bits().to_le_bytes());
+        if let Some(bias) = self.bias {
+            digest = bias.append_digest(digest);
+        }
+        digest.finish()
+    }
+}
+
+fn sm120_output_layout(route: Sm120ForcedRoute) -> (usize, usize, u64) {
+    match route.op {
+        Sm120Op::Nn => (route.shape.m, route.shape.n, 2),
+        Sm120Op::Tn => (route.shape.k, route.shape.n, 4),
+        Sm120Op::Nt => (route.shape.m, route.shape.k, 2),
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Sm120PreparedLaunch {
+    pub(super) stream_handle: usize,
+    pub(super) route: Sm120ForcedRoute,
+    pub(super) maps: Sm120PreparedTensorMaps,
+    pub(super) operands: Sm120LaunchOperands,
+    pub(super) params: Sm120KernelParams,
+    pub(super) identity: Sm120RouteIdentity,
+    pub(super) resolved_launch_set: ResolvedGemmLaunchSet,
+    pub(super) resources: Sm120LaunchResourceSnapshot,
+    pub(super) kernel_resources: Sm120KernelResources,
+}
+
+impl Sm120PreparedLaunch {
+    pub fn identity(&self) -> Sm120RouteIdentity {
+        self.identity
+    }
+
+    pub fn resources(&self) -> Sm120KernelResources {
+        self.kernel_resources
+    }
+
+    pub fn resolved_launch_set(&self) -> ResolvedGemmLaunchSet {
+        self.resolved_launch_set
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        GemmDims, Sm90aMapRequest, Sm90aOp, Sm90aShape, Sm100MapRequest, Sm100Op, Sm100Shape,
-        Sm100Tile, checked_grid_product, checked_u32, sm90a_tensor_map_keys, sm100_operand_layouts,
+        GemmDims, SM120_KERNEL_SPECS, Sm90aMapRequest, Sm90aOp, Sm90aShape, Sm100MapRequest,
+        Sm100Op, Sm100Shape, Sm100Tile, Sm120Bk, Sm120Op, Sm120Stages, Sm120Tile,
+        checked_grid_product, checked_u32, sm90a_tensor_map_keys, sm100_operand_layouts,
         sm100_tensor_map_keys, validate_bias_preseed, validate_sm100_issued_coordinates,
     };
     use crate::mamba_ssm::gpu::dtype::WeightDtype;
@@ -2513,6 +3551,185 @@ mod tests {
 
         let nn = sm100_operand_layouts(sm100_request(Sm100Op::Nn, Sm100Tile::M128N128));
         assert_eq!(nn[1].issued_coordinate_max[0], 192);
+    }
+
+    #[test]
+    fn sm120_inventory_covers_all_ninety_six_physical_routes_once() {
+        assert_eq!(SM120_KERNEL_SPECS.len(), 96);
+        let mut symbols = std::collections::BTreeSet::new();
+        for spec in SM120_KERNEL_SPECS {
+            assert!(symbols.insert(spec.symbol), "duplicate {}", spec.symbol);
+            assert!(spec.symbol.starts_with("sgemm_bi_"), "{}", spec.symbol);
+        }
+
+        for op in [Sm120Op::Nn, Sm120Op::Tn, Sm120Op::Nt] {
+            for dtype in [WeightDtype::F16, WeightDtype::Bf16] {
+                for tile in [
+                    Sm120Tile::M64N64,
+                    Sm120Tile::M128N64,
+                    Sm120Tile::M64N128,
+                    Sm120Tile::M128N128,
+                ] {
+                    for bk in [Sm120Bk::Bk32, Sm120Bk::Bk64] {
+                        for stages in [Sm120Stages::S2, Sm120Stages::S3] {
+                            assert_eq!(
+                                SM120_KERNEL_SPECS
+                                    .iter()
+                                    .filter(|spec| {
+                                        spec.op == op
+                                            && spec.dtype == dtype
+                                            && spec.physical.tile == tile
+                                            && spec.physical.bk == bk
+                                            && spec.physical.stages == stages
+                                    })
+                                    .count(),
+                                1,
+                                "missing or duplicate {op:?}/{dtype:?}/{tile:?}/{bk:?}/{stages:?}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            SM120_KERNEL_SPECS
+                .iter()
+                .all(|spec| spec.dtype != WeightDtype::F32)
+        );
+    }
+
+    #[test]
+    fn sm120_physical_metadata_matches_literal_resource_contract() {
+        let expected = [
+            (
+                Sm120Tile::M64N64,
+                Sm120Bk::Bk32,
+                Sm120Stages::S2,
+                128,
+                16_512,
+            ),
+            (
+                Sm120Tile::M64N64,
+                Sm120Bk::Bk32,
+                Sm120Stages::S3,
+                128,
+                24_704,
+            ),
+            (
+                Sm120Tile::M64N64,
+                Sm120Bk::Bk64,
+                Sm120Stages::S2,
+                128,
+                32_896,
+            ),
+            (
+                Sm120Tile::M64N64,
+                Sm120Bk::Bk64,
+                Sm120Stages::S3,
+                128,
+                49_280,
+            ),
+            (
+                Sm120Tile::M128N64,
+                Sm120Bk::Bk32,
+                Sm120Stages::S2,
+                256,
+                24_704,
+            ),
+            (
+                Sm120Tile::M128N64,
+                Sm120Bk::Bk32,
+                Sm120Stages::S3,
+                256,
+                36_992,
+            ),
+            (
+                Sm120Tile::M128N64,
+                Sm120Bk::Bk64,
+                Sm120Stages::S2,
+                256,
+                49_280,
+            ),
+            (
+                Sm120Tile::M128N64,
+                Sm120Bk::Bk64,
+                Sm120Stages::S3,
+                256,
+                73_856,
+            ),
+            (
+                Sm120Tile::M64N128,
+                Sm120Bk::Bk32,
+                Sm120Stages::S2,
+                256,
+                24_704,
+            ),
+            (
+                Sm120Tile::M64N128,
+                Sm120Bk::Bk32,
+                Sm120Stages::S3,
+                256,
+                36_992,
+            ),
+            (
+                Sm120Tile::M64N128,
+                Sm120Bk::Bk64,
+                Sm120Stages::S2,
+                256,
+                49_280,
+            ),
+            (
+                Sm120Tile::M64N128,
+                Sm120Bk::Bk64,
+                Sm120Stages::S3,
+                256,
+                73_856,
+            ),
+            (
+                Sm120Tile::M128N128,
+                Sm120Bk::Bk32,
+                Sm120Stages::S2,
+                512,
+                32_896,
+            ),
+            (
+                Sm120Tile::M128N128,
+                Sm120Bk::Bk32,
+                Sm120Stages::S3,
+                512,
+                49_280,
+            ),
+            (
+                Sm120Tile::M128N128,
+                Sm120Bk::Bk64,
+                Sm120Stages::S2,
+                512,
+                65_664,
+            ),
+            (
+                Sm120Tile::M128N128,
+                Sm120Bk::Bk64,
+                Sm120Stages::S3,
+                512,
+                98_432,
+            ),
+        ];
+
+        for (tile, bk, stages, threads, shared) in expected {
+            let matching: Vec<_> = SM120_KERNEL_SPECS
+                .iter()
+                .filter(|spec| {
+                    spec.physical.tile == tile
+                        && spec.physical.bk == bk
+                        && spec.physical.stages == stages
+                })
+                .collect();
+            assert_eq!(matching.len(), 6, "{tile:?}/{bk:?}/{stages:?}");
+            for spec in matching {
+                assert_eq!(spec.threads, threads, "{}", spec.symbol);
+                assert_eq!(spec.dynamic_shared_bytes, shared, "{}", spec.symbol);
+            }
+        }
     }
 
     #[test]

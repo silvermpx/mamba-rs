@@ -1,11 +1,19 @@
 #![cfg(feature = "cuda")]
 
 use mamba_rs::mamba_ssm::gpu::context::BiGemmFamily;
+use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
+use mamba_rs::mamba_ssm::gpu::gemm_bi_triad::{
+    SM120_SCHEDULE_REVISION, SM120_TENSOR_MAP_REVISION, SM120_TUNING_REVISION, Sm120Bk,
+    Sm120NumericContract, Sm120Op, Sm120PhysicalRoute, Sm120RouteIdentity, Sm120Shape, Sm120Stages,
+    Sm120TargetCandidate, Sm120Tile,
+};
 use mamba_rs::mamba_ssm::gpu::kernel_identity::{
     ArtifactIdentity, ArtifactKind, BackendSet, CacheEnvelope, CompileKeyMaterial,
-    CompilerIdentity, CudaTarget, DeviceIdentity, DriverIdentity, FramedSha256, GemmPolicy,
-    GemmRouteIdentity, LegacySm80Policy, ModuleKind, NumericContractSet, PolicyDtype, PolicyOp,
-    build_artifact_set, canonical_ptx_image, route_backend_contract_sets,
+    CompilerIdentity, CudaTarget, DeviceCaps, DeviceIdentity, DriverIdentity, FramedSha256,
+    GemmPolicy, GemmRouteIdentity, LegacySm80Policy, ModuleKind, NumericContractSet,
+    PhysicalGemmBackend, PolicyDtype, PolicyOp, ResolvedGemmLaunchSet, ResolvedGemmOp,
+    ResolvedGemmRoute, ResolvedNumericContract, build_artifact_set, build_resolved_gemm_launch_set,
+    canonical_ptx_image, route_backend_contract_sets,
 };
 
 fn digest(seed: u8) -> [u8; 32] {
@@ -327,6 +335,15 @@ fn route() -> GemmRouteIdentity {
                 build_digest: digest(8),
             },
         },
+        device_caps: DeviceCaps {
+            compute_capability: (8, 9),
+            nvrtc_version: (13, 2),
+            accepted_target: None,
+            optin_shared_bytes: 101_376,
+            tensor_map_access: false,
+        },
+        tuning_table_revision: 0,
+        schedule_set_revision: 1,
         state_capacity: 64,
     }
 }
@@ -460,6 +477,27 @@ fn route_guard_rejects_every_policy_artifact_and_device_field() {
     value.device.driver.build_digest[0] ^= 1;
     changed.push(value);
     let mut value = captured;
+    value.device_caps.compute_capability.1 += 1;
+    changed.push(value);
+    let mut value = captured;
+    value.device_caps.nvrtc_version.1 += 1;
+    changed.push(value);
+    let mut value = captured;
+    value.device_caps.accepted_target = Some(CudaTarget::new("compute_120").unwrap());
+    changed.push(value);
+    let mut value = captured;
+    value.device_caps.optin_shared_bytes -= 1;
+    changed.push(value);
+    let mut value = captured;
+    value.device_caps.tensor_map_access = true;
+    changed.push(value);
+    let mut value = captured;
+    value.tuning_table_revision += 1;
+    changed.push(value);
+    let mut value = captured;
+    value.schedule_set_revision += 1;
+    changed.push(value);
+    let mut value = captured;
     value.state_capacity += 1;
     changed.push(value);
 
@@ -470,3 +508,256 @@ fn route_guard_rejects_every_policy_artifact_and_device_field() {
         assert!(error.starts_with("graph replay"));
     }
 }
+
+fn sm120_route_identity() -> Sm120RouteIdentity {
+    let compiler = CompilerIdentity {
+        source_digest: digest(31),
+        invocation_digest: digest(32),
+        header_manifest_digest: digest(33),
+        target: CudaTarget::new("compute_121").unwrap(),
+        nvrtc_version: (13, 2),
+        nvrtc_library_domain: digest(34),
+        nvrtc_library_known: true,
+        output_kind: ArtifactKind::Ptx,
+        composer_revision: 1,
+        compiler_revision: 2,
+        numeric_abi_revision: 1,
+        schedule_revision: 3,
+    };
+    let driver = DriverIdentity {
+        api_version: 13_200,
+        build_sources: 1,
+        build_digest: digest(35),
+    };
+    Sm120RouteIdentity {
+        numeric_contract: Sm120NumericContract::TmaMma16F32V1,
+        op: Sm120Op::Nn,
+        dtype: WeightDtype::Bf16,
+        physical: Sm120PhysicalRoute {
+            tile: Sm120Tile::M128N64,
+            bk: Sm120Bk::Bk64,
+            stages: Sm120Stages::S3,
+        },
+        shape: Sm120Shape {
+            m: 257,
+            k: 193,
+            n: 129,
+            lda: 208,
+            ldb: 144,
+            ldc: 144,
+        },
+        symbol: "sgemm_bi_nn_sm120_tma_128x64_bk64_s3_bf16",
+        module_kind: ModuleKind::TriadSm120,
+        target: Sm120TargetCandidate {
+            device_cc: (12, 1),
+            nvrtc_arch: "compute_121",
+            ptx_target: "sm_121",
+        },
+        artifact: artifact(ModuleKind::TriadSm120, 36),
+        compiler,
+        device: DeviceIdentity {
+            compute_capability: (12, 1),
+            target: CudaTarget::new("sm_121").unwrap(),
+            driver,
+        },
+        device_caps: DeviceCaps {
+            compute_capability: (12, 1),
+            nvrtc_version: (13, 2),
+            accepted_target: Some(CudaTarget::new("compute_121").unwrap()),
+            optin_shared_bytes: 101_376,
+            tensor_map_access: true,
+        },
+        tensor_map_revision: SM120_TENSOR_MAP_REVISION,
+        tensor_maps_digest: digest(39),
+        resources_digest: digest(40),
+        tuning_revision: SM120_TUNING_REVISION,
+        schedule_revision: SM120_SCHEDULE_REVISION,
+    }
+}
+
+fn resolved_sm120_route() -> ResolvedGemmRoute {
+    sm120_route_identity().resolved_route().unwrap()
+}
+
+#[test]
+fn sm120_route_identity_resolves_the_exact_production_route() {
+    let resolved = sm120_route_identity().resolved_route().unwrap();
+    assert_eq!(resolved.op, ResolvedGemmOp::Nn);
+    assert_eq!(resolved.dtype, PolicyDtype::Bf16);
+    assert_eq!(resolved.backend, PhysicalGemmBackend::Sm120TmaMma16V1);
+    assert_eq!(
+        resolved.numeric_contract,
+        ResolvedNumericContract::MmaSyncF32V1
+    );
+    assert_eq!(resolved.shape, (257, 193, 129));
+    assert_eq!(resolved.strides, (208, 144, 144));
+    assert_eq!(resolved.tile, (128, 64));
+    assert_eq!(
+        (resolved.bk, resolved.stages, resolved.threads),
+        (64, 3, 256)
+    );
+}
+
+#[test]
+fn sm120_route_identity_conversion_rejects_incoherent_inputs() {
+    let baseline = sm120_route_identity();
+    let mut wrong_symbol = baseline;
+    wrong_symbol.symbol = "sgemm_bi_nn_sm120_tma_64x64_bk32_s2_bf16";
+    let mut wrong_target = baseline;
+    wrong_target.device_caps.accepted_target = Some(CudaTarget::new("compute_120").unwrap());
+    let mut unsupported_dtype = baseline;
+    unsupported_dtype.dtype = WeightDtype::F32;
+    let mut insufficient_shared = baseline;
+    insufficient_shared.device_caps.optin_shared_bytes = 0;
+
+    for identity in [
+        wrong_symbol,
+        wrong_target,
+        unsupported_dtype,
+        insufficient_shared,
+    ] {
+        assert!(identity.resolved_route().is_err());
+    }
+}
+
+#[test]
+fn resolved_launch_set_is_ordered_and_covers_every_physical_identity_field() {
+    let first = resolved_sm120_route();
+    let mut second = first;
+    second.op = ResolvedGemmOp::Tn;
+    second.symbol = "sgemm_bi_tn_sm120_tma_64x128_bk32_s2_f16";
+    second.dtype = PolicyDtype::F16;
+    second.shape = (509, 65, 257);
+    second.strides = (80, 272, 272);
+    second.tile = (64, 128);
+    second.bk = 32;
+    second.stages = 2;
+
+    let ordered = build_resolved_gemm_launch_set(&[first, second]).unwrap();
+    assert_eq!(ordered.launch_count, 2);
+    assert_ne!(
+        ordered,
+        build_resolved_gemm_launch_set(&[second, first]).unwrap()
+    );
+    assert_ne!(
+        ordered,
+        build_resolved_gemm_launch_set(&[first, first]).unwrap()
+    );
+
+    let mut mutations = Vec::new();
+    let mut value = first;
+    value.op = ResolvedGemmOp::Nt;
+    mutations.push(value);
+    let mut value = first;
+    value.dtype = PolicyDtype::F16;
+    mutations.push(value);
+    let mut value = first;
+    value.backend = PhysicalGemmBackend::Sm80Mma16V1;
+    mutations.push(value);
+    let mut value = first;
+    value.numeric_contract = ResolvedNumericContract::ScalarFmaV1;
+    mutations.push(value);
+    let mut value = first;
+    value.symbol = "sgemm_bi_nn_tc_bf16";
+    mutations.push(value);
+    let mut value = first;
+    value.module_kind = ModuleKind::TriadSm80;
+    mutations.push(value);
+    let mut value = first;
+    value.target = CudaTarget::new("compute_120").unwrap();
+    mutations.push(value);
+    let mut value = first;
+    value.artifact.artifact_digest[0] ^= 1;
+    mutations.push(value);
+    let mut value = first;
+    value.compiler.invocation_digest[0] ^= 1;
+    mutations.push(value);
+    let mut value = first;
+    value.device.compute_capability.1 = 0;
+    mutations.push(value);
+    let mut value = first;
+    value.device.driver.build_digest[0] ^= 1;
+    mutations.push(value);
+    let mut value = first;
+    value.device_caps.nvrtc_version.1 -= 1;
+    mutations.push(value);
+    let mut value = first;
+    value.device_caps.accepted_target = Some(CudaTarget::new("compute_120").unwrap());
+    mutations.push(value);
+    let mut value = first;
+    value.device_caps.optin_shared_bytes -= 1;
+    mutations.push(value);
+    let mut value = first;
+    value.device_caps.tensor_map_access = false;
+    mutations.push(value);
+    let mut value = first;
+    value.shape.0 += 1;
+    mutations.push(value);
+    let mut value = first;
+    value.strides.1 += 1;
+    mutations.push(value);
+    let mut value = first;
+    value.tile.1 = 128;
+    mutations.push(value);
+    let mut value = first;
+    value.bk = 32;
+    mutations.push(value);
+    let mut value = first;
+    value.stages = 2;
+    mutations.push(value);
+    let mut value = first;
+    value.threads = 512;
+    mutations.push(value);
+    let mut value = first;
+    value.tensor_map_revision += 1;
+    mutations.push(value);
+    let mut value = first;
+    value.tensor_maps_digest[0] ^= 1;
+    mutations.push(value);
+    let mut value = first;
+    value.resources_digest[0] ^= 1;
+    mutations.push(value);
+    let mut value = first;
+    value.tuning_table_revision += 1;
+    mutations.push(value);
+    let mut value = first;
+    value.schedule_revision += 1;
+    mutations.push(value);
+
+    let baseline = build_resolved_gemm_launch_set(&[first]).unwrap();
+    for mutation in mutations {
+        assert_ne!(
+            build_resolved_gemm_launch_set(&[mutation]).unwrap(),
+            baseline
+        );
+    }
+}
+
+#[test]
+fn resolved_launch_guard_fails_closed_on_order_count_or_device_drift() {
+    let first = resolved_sm120_route();
+    let mut second = first;
+    second.op = ResolvedGemmOp::Tn;
+    let captured = build_resolved_gemm_launch_set(&[first, second]).unwrap();
+    captured
+        .ensure_current(captured, "SM120 graph replay")
+        .unwrap();
+
+    for live in [
+        build_resolved_gemm_launch_set(&[second, first]).unwrap(),
+        build_resolved_gemm_launch_set(&[first]).unwrap(),
+        {
+            let mut changed = second;
+            changed.device.compute_capability = (12, 0);
+            build_resolved_gemm_launch_set(&[first, changed]).unwrap()
+        },
+    ] {
+        let error = captured
+            .ensure_current(live, "SM120 graph replay")
+            .expect_err("resolved launch drift must reject replay");
+        assert!(error.starts_with("SM120 graph replay"), "{error}");
+    }
+}
+
+const _: fn(&[ResolvedGemmRoute]) -> Result<ResolvedGemmLaunchSet, String> =
+    build_resolved_gemm_launch_set;

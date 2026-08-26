@@ -27,6 +27,16 @@ pub(crate) struct CompiledModule {
 pub(crate) struct QualifiedSpecializedModule {
     module: CompiledModule,
     functions: HashMap<&'static str, CudaFunction>,
+    sm120_target: Option<super::contract::Sm120TargetCandidate>,
+    sm120_device_caps: Option<crate::mamba_ssm::gpu::kernel_identity::DeviceCaps>,
+    sm120_resources: HashMap<&'static str, super::contract::Sm120KernelResources>,
+}
+
+pub(crate) struct Sm120ArtifactSet {
+    pub fixed: CompiledModule,
+    pub scalar: CompiledModule,
+    pub sm80: CompiledModule,
+    pub specialized: Option<QualifiedSpecializedModule>,
 }
 
 pub(crate) fn compile_module(request: CompileModuleRequest<'_>) -> Result<CompiledModule, String> {
@@ -232,6 +242,197 @@ fn select_sm100_candidate<T, U>(
         };
         if let Ok(qualified) = qualify(compiled) {
             return Some(qualified);
+        }
+    }
+    None
+}
+
+pub(crate) fn compile_sm120_artifact_set(
+    ctx: &Arc<CudaContext>,
+    state_cap: usize,
+    device_cc: (i32, i32),
+    nvrtc: (i32, i32),
+) -> Option<Sm120ArtifactSet> {
+    let candidates = super::dispatch::sm120_target_candidates(device_cc, nvrtc);
+    let mut baseline = None;
+    for &candidate in candidates {
+        let specialized = compile_module(CompileModuleRequest {
+            ctx,
+            arch: candidate.nvrtc_arch,
+            state_cap,
+            module_kind: ModuleKind::TriadSm120,
+        })
+        .and_then(|module| {
+            if module.compiler_identity.target.as_str() != candidate.nvrtc_arch {
+                return Err("SM120 artifact transaction mixed CUDA targets".into());
+            }
+            qualify_specialized_module(module)
+        });
+        let Ok((fixed, scalar, sm80)) = compile_sm120_baseline(ctx, state_cap, candidate) else {
+            continue;
+        };
+        if let Ok(mut specialized) = specialized {
+            let complete = crate::mamba_ssm::gpu::kernel_identity::build_artifact_set(&[
+                fixed.artifact_identity,
+                scalar.artifact_identity,
+                sm80.artifact_identity,
+                specialized.module.artifact_identity,
+            ]);
+            let caps = query_sm120_device_caps(ctx, candidate, nvrtc);
+            let resources = snapshot_sm120_resources(&specialized.functions);
+            if let (Ok(_), Ok(caps), Ok(resources)) = (complete, caps, resources) {
+                specialized.sm120_target = Some(candidate);
+                specialized.sm120_device_caps = Some(caps);
+                specialized.sm120_resources = resources;
+                return Some(Sm120ArtifactSet {
+                    fixed,
+                    scalar,
+                    sm80,
+                    specialized: Some(specialized),
+                });
+            }
+        }
+        if baseline.is_none() {
+            baseline = Some(Sm120ArtifactSet {
+                fixed,
+                scalar,
+                sm80,
+                specialized: None,
+            });
+        }
+    }
+    baseline
+}
+
+fn compile_sm120_baseline(
+    ctx: &Arc<CudaContext>,
+    state_cap: usize,
+    candidate: super::contract::Sm120TargetCandidate,
+) -> Result<(CompiledModule, CompiledModule, CompiledModule), String> {
+    let compile = |module_kind| {
+        compile_module(CompileModuleRequest {
+            ctx,
+            arch: candidate.nvrtc_arch,
+            state_cap,
+            module_kind,
+        })
+    };
+    let fixed = compile(ModuleKind::Fixed)?;
+    let scalar = compile(ModuleKind::TriadScalar)?;
+    let sm80 = compile(ModuleKind::TriadSm80)?;
+    for module in [&fixed, &scalar, &sm80] {
+        if module.compiler_identity.target.as_str() != candidate.nvrtc_arch {
+            return Err("SM120 baseline artifact transaction mixed CUDA targets".into());
+        }
+    }
+    crate::mamba_ssm::gpu::kernel_identity::build_artifact_set(&[
+        fixed.artifact_identity,
+        scalar.artifact_identity,
+        sm80.artifact_identity,
+    ])?;
+    Ok((fixed, scalar, sm80))
+}
+
+fn query_sm120_device_caps(
+    ctx: &Arc<CudaContext>,
+    candidate: super::contract::Sm120TargetCandidate,
+    nvrtc: (i32, i32),
+) -> Result<crate::mamba_ssm::gpu::kernel_identity::DeviceCaps, String> {
+    let (major, minor) = ctx
+        .compute_capability()
+        .map_err(|error| format!("query SM120 compute capability: {error:?}"))?;
+    if (major, minor) != candidate.device_cc {
+        return Err("SM120 candidate does not match the CUDA device minor".into());
+    }
+    let optin_shared = ctx
+        .attribute(
+            cudarc::driver::sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK_OPTIN,
+        )
+        .map_err(|error| format!("query SM120 opt-in shared memory: {error:?}"))?;
+    let tensor_map_access = ctx
+        .attribute(
+            cudarc::driver::sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_TENSOR_MAP_ACCESS_SUPPORTED,
+        )
+        .map_err(|error| format!("query SM120 tensor-map support: {error:?}"))?
+        != 0;
+    Ok(crate::mamba_ssm::gpu::kernel_identity::DeviceCaps {
+        compute_capability: (
+            u32::try_from(major).map_err(|_| format!("negative CUDA CC major {major}"))?,
+            u32::try_from(minor).map_err(|_| format!("negative CUDA CC minor {minor}"))?,
+        ),
+        nvrtc_version: nvrtc,
+        accepted_target: Some(crate::mamba_ssm::gpu::kernel_identity::CudaTarget::new(
+            candidate.nvrtc_arch,
+        )?),
+        optin_shared_bytes: u32::try_from(optin_shared)
+            .map_err(|_| format!("negative SM120 opt-in shared memory {optin_shared}"))?,
+        tensor_map_access,
+    })
+}
+
+fn snapshot_sm120_resources(
+    functions: &HashMap<&'static str, CudaFunction>,
+) -> Result<HashMap<&'static str, super::contract::Sm120KernelResources>, String> {
+    let mut resources = HashMap::new();
+    for spec in super::contract::SM120_KERNEL_SPECS {
+        let function = functions
+            .get(spec.symbol)
+            .ok_or_else(|| format!("SM120 resource census is missing {}", spec.symbol))?;
+        let max_threads_per_block = u32::try_from(
+            function
+                .max_threads_per_block()
+                .map_err(|error| format!("query {} max threads: {error:?}", spec.symbol))?,
+        )
+        .map_err(|_| format!("{} reports a negative max thread count", spec.symbol))?;
+        let local_bytes = u32::try_from(
+            function
+                .local_size_bytes()
+                .map_err(|error| format!("query {} local memory: {error:?}", spec.symbol))?,
+        )
+        .map_err(|_| format!("{} reports negative local memory", spec.symbol))?;
+        let registers_per_thread = u32::try_from(
+            function
+                .num_regs()
+                .map_err(|error| format!("query {} registers: {error:?}", spec.symbol))?,
+        )
+        .map_err(|_| format!("{} reports a negative register count", spec.symbol))?;
+        let active_blocks_per_sm = function
+            .occupancy_max_active_blocks_per_multiprocessor(
+                spec.threads,
+                spec.dynamic_shared_bytes as usize,
+                None,
+            )
+            .map_err(|error| format!("query {} occupancy: {error:?}", spec.symbol))?;
+        resources.insert(
+            spec.symbol,
+            super::contract::Sm120KernelResources {
+                threads: spec.threads,
+                dynamic_shared_bytes: spec.dynamic_shared_bytes,
+                max_threads_per_block,
+                local_bytes,
+                spill_store_bytes: 0,
+                spill_load_bytes: 0,
+                registers_per_thread,
+                active_blocks_per_sm,
+            },
+        );
+    }
+    Ok(resources)
+}
+
+#[cfg(test)]
+fn select_sm120_candidate<T>(
+    candidates: &[super::contract::Sm120TargetCandidate],
+    mut resolve: impl FnMut(
+        super::contract::Sm120TargetCandidate,
+    ) -> Result<(super::contract::Sm120TargetCandidate, T), String>,
+) -> Option<(super::contract::Sm120TargetCandidate, T)> {
+    for &candidate in candidates {
+        let Ok((resolved, value)) = resolve(candidate) else {
+            continue;
+        };
+        if resolved == candidate {
+            return Some((resolved, value));
         }
     }
     None
@@ -461,6 +662,11 @@ fn validate_module_target(kind: ModuleKind, arch: &str) -> Result<(), String> {
             "TriadSm100 requires compute_100f, compute_100a, compute_103f, or compute_103a, got {arch}"
         ));
     }
+    if kind == ModuleKind::TriadSm120 && !matches!(arch, "compute_120" | "compute_121") {
+        return Err(format!(
+            "TriadSm120 requires generic target compute_120 or compute_121, got {arch}"
+        ));
+    }
     Ok(())
 }
 
@@ -468,6 +674,7 @@ fn validate_specialized_ptx(kind: ModuleKind, arch: &str, ptx: &str) -> Result<(
     match kind {
         ModuleKind::TriadSm90a => validate_sm90a_ptx(ptx),
         ModuleKind::TriadSm100 => validate_sm100_ptx(arch, ptx),
+        ModuleKind::TriadSm120 => validate_sm120_ptx(arch, ptx),
         _ => Ok(()),
     }
 }
@@ -624,6 +831,86 @@ fn validate_sm100_feature_instructions(ptx: &str) -> Result<(), String> {
             return Err(format!(
                 "TriadSm100 PTX contains forbidden device-runtime symbol {symbol}"
             ));
+        }
+    }
+    Ok(())
+}
+
+fn sm120_ptx_target(arch: &str) -> Option<&'static str> {
+    match arch {
+        "compute_120" => Some("sm_120"),
+        "compute_121" => Some("sm_121"),
+        _ => None,
+    }
+}
+
+fn validate_sm120_ptx(arch: &str, ptx: &str) -> Result<(), String> {
+    let expected = sm120_ptx_target(arch)
+        .ok_or_else(|| format!("TriadSm120 has no generic target candidate for {arch}"))?;
+    let actual = ptx_target(ptx)?;
+    if actual != expected {
+        return Err(format!(
+            "TriadSm120 PTX target is {actual}, expected {expected}"
+        ));
+    }
+    for spec in super::contract::SM120_KERNEL_SPECS {
+        let marker = format!(".entry {}(", spec.symbol);
+        if ptx.matches(&marker).count() != 1 {
+            return Err(format!(
+                "TriadSm120 PTX must contain one entry {}",
+                spec.symbol
+            ));
+        }
+    }
+    for instruction in [
+        "cp.async.bulk.tensor.2d.shared::cta.global.tile.mbarrier::complete_tx::bytes",
+        "mbarrier.arrive.expect_tx",
+        "mbarrier.try_wait.parity",
+        "ldmatrix.sync.aligned.m8n8.x4.shared.b16",
+        "mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32",
+        "mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32",
+    ] {
+        if !ptx.contains(instruction) {
+            return Err(format!("TriadSm120 PTX is missing {instruction}"));
+        }
+    }
+    if ptx.split_ascii_whitespace().any(|token| {
+        token.starts_with("atom.")
+            || token.starts_with("atom::")
+            || token.starts_with("red.")
+            || token.starts_with("red::")
+            || token.starts_with("redux.")
+            || token.starts_with("tcgen05.")
+            || token.starts_with("wgmma.")
+            || token.starts_with("setmaxnreg.")
+            || token.contains("multicast")
+            || token.contains("cta_group::2")
+            || token.contains("shared::cluster")
+            || token.starts_with("multimem.")
+    }) {
+        return Err("TriadSm120 PTX contains a forbidden instruction family".into());
+    }
+    if ptx.split_ascii_whitespace().any(|token| {
+        token == "call"
+            || token.starts_with("call.")
+            || token == ".callprototype"
+            || token == ".calltargets"
+    }) {
+        return Err("TriadSm120 PTX contains a device call instruction".into());
+    }
+    for symbol in [
+        "cudaLaunchDevice",
+        "cudaGetParameterBuffer",
+        "cudaDeviceSynchronize",
+        "__cudaPushCallConfiguration",
+        "__cudaPopCallConfiguration",
+        "malloc",
+        "free",
+        "operator new",
+        "operator delete",
+    ] {
+        if ptx.contains(symbol) {
+            return Err(format!("TriadSm120 PTX contains forbidden symbol {symbol}"));
         }
     }
     Ok(())
@@ -791,6 +1078,23 @@ const SM100_SOURCE_FRAGMENTS: &[SourceFragment] = &[
     },
 ];
 
+const SM120_SOURCE_FRAGMENTS: &[SourceFragment] = &[
+    TYPED_PRELUDE,
+    TRIAD_CONTRACT,
+    TRIAD_COMMON,
+    TRIAD_EPILOGUE,
+    SourceFragment {
+        logical_name: "kernels/gemm_bi_triad/mma16.cuh",
+        source: include_str!("../../../../kernels/gemm_bi_triad/mma16.cuh"),
+        allowed_quoted_includes: &[],
+    },
+    SourceFragment {
+        logical_name: "kernels/gemm_bi_triad/sm120.cu",
+        source: include_str!("../../../../kernels/gemm_bi_triad/sm120.cu"),
+        allowed_quoted_includes: &[],
+    },
+];
+
 pub(super) const SCALAR_SYMBOLS: &[&str] = &[
     "sgemm_bi_nn",
     "sgemm_bi_tn",
@@ -879,6 +1183,7 @@ fn module_fragments(kind: ModuleKind) -> Result<&'static [SourceFragment], Strin
         ModuleKind::TriadSm80 => Ok(SM80_SOURCE_FRAGMENTS),
         ModuleKind::TriadSm90a => Ok(SM90A_SOURCE_FRAGMENTS),
         ModuleKind::TriadSm100 => Ok(SM100_SOURCE_FRAGMENTS),
+        ModuleKind::TriadSm120 => Ok(SM120_SOURCE_FRAGMENTS),
         _ => Err(format!("no source fragments for {kind:?}")),
     }
 }
@@ -1119,6 +1424,17 @@ type Sm100MapCacheKey = (
     super::contract::Sm100Shape,
 );
 type Sm100MapCache = Mutex<HashMap<Sm100MapCacheKey, super::contract::Sm100PreparedTensorMaps>>;
+type Sm120MapCacheKey = (
+    [super::contract::Sm120TensorMapKey; 2],
+    [super::contract::Sm90aAllocationIdentity; 2],
+    super::contract::Sm120TensorOrigins,
+    super::contract::Sm120Op,
+    u8,
+    super::contract::Sm120Tile,
+    super::contract::Sm120Bk,
+    super::contract::Sm120Shape,
+);
+type Sm120MapCache = Mutex<HashMap<Sm120MapCacheKey, super::contract::Sm120PreparedTensorMaps>>;
 
 pub(crate) fn qualify_specialized_module(
     module: CompiledModule,
@@ -1126,9 +1442,16 @@ pub(crate) fn qualify_specialized_module(
     let functions = match module.artifact_identity.module_kind {
         ModuleKind::TriadSm90a => load_sm90a_functions(&module),
         ModuleKind::TriadSm100 => load_sm100_functions(&module),
+        ModuleKind::TriadSm120 => load_sm120_functions(&module),
         kind => Err(format!("unsupported specialized triad module {kind:?}")),
     }?;
-    Ok(QualifiedSpecializedModule { module, functions })
+    Ok(QualifiedSpecializedModule {
+        module,
+        functions,
+        sm120_target: None,
+        sm120_device_caps: None,
+        sm120_resources: HashMap::new(),
+    })
 }
 
 pub struct GemmBiKernels {
@@ -1139,8 +1462,12 @@ pub struct GemmBiKernels {
     specialized_compiler_identity: Option<CompilerIdentity>,
     artifact_set_identity: crate::mamba_ssm::gpu::kernel_identity::ArtifactSetIdentity,
     specialized_functions: HashMap<&'static str, CudaFunction>,
+    sm120_target: Option<super::contract::Sm120TargetCandidate>,
+    sm120_device_caps: Option<crate::mamba_ssm::gpu::kernel_identity::DeviceCaps>,
+    sm120_resources: HashMap<&'static str, super::contract::Sm120KernelResources>,
     sm90a_tensor_maps: Sm90aMapCache,
     sm100_tensor_maps: Sm100MapCache,
+    sm120_tensor_maps: Sm120MapCache,
 
     pub sgemm_nn: CudaFunction,
     pub sgemm_tn: CudaFunction,
@@ -1239,6 +1566,16 @@ impl GemmBiKernels {
             .as_ref()
             .map(|specialized| specialized.functions.clone())
             .unwrap_or_default();
+        let sm120_target = specialized
+            .as_ref()
+            .and_then(|specialized| specialized.sm120_target);
+        let sm120_device_caps = specialized
+            .as_ref()
+            .and_then(|specialized| specialized.sm120_device_caps);
+        let sm120_resources = specialized
+            .as_ref()
+            .map(|specialized| specialized.sm120_resources.clone())
+            .unwrap_or_default();
         let mut anchors = vec![scalar.module.clone(), sm80.module.clone()];
         if let Some(specialized) = specialized.as_ref() {
             anchors.push(specialized.module.module.clone());
@@ -1254,8 +1591,12 @@ impl GemmBiKernels {
                 .map(|specialized| specialized.module.compiler_identity),
             artifact_set_identity,
             specialized_functions,
+            sm120_target,
+            sm120_device_caps,
+            sm120_resources,
             sm90a_tensor_maps: Mutex::new(HashMap::new()),
             sm100_tensor_maps: Mutex::new(HashMap::new()),
+            sm120_tensor_maps: Mutex::new(HashMap::new()),
             sgemm_nn,
             sgemm_tn,
             sgemm_nt,
@@ -1336,6 +1677,21 @@ impl GemmBiKernels {
             .and_then(|compiler| sm100_target_for_arch(compiler.target.as_str()))
     }
 
+    pub fn sm120_compiler_identity(&self) -> Option<CompilerIdentity> {
+        self.artifact_set_identity
+            .specialized
+            .filter(|artifact| artifact.module_kind == ModuleKind::TriadSm120)
+            .and(self.specialized_compiler_identity)
+    }
+
+    pub fn sm120_target_candidate(&self) -> Option<super::contract::Sm120TargetCandidate> {
+        self.sm120_target
+    }
+
+    pub fn sm120_device_caps(&self) -> Option<crate::mamba_ssm::gpu::kernel_identity::DeviceCaps> {
+        self.sm120_device_caps
+    }
+
     pub fn has_sm90a_wgmma(&self) -> bool {
         self.sm90a_compiler_identity().is_some()
             && self.specialized_functions.len() == SM90A_SYMBOLS.len()
@@ -1344,6 +1700,14 @@ impl GemmBiKernels {
     pub fn has_sm100_tcgen(&self) -> bool {
         self.sm100_compiler_identity().is_some()
             && self.specialized_functions.len() == super::contract::SM100_KERNEL_SPECS.len()
+    }
+
+    pub fn has_sm120_tma_mma16(&self) -> bool {
+        self.sm120_compiler_identity().is_some()
+            && self.specialized_functions.len() == super::contract::SM120_KERNEL_SPECS.len()
+            && self.sm120_target.is_some()
+            && self.sm120_device_caps.is_some()
+            && self.sm120_resources.len() == super::contract::SM120_KERNEL_SPECS.len()
     }
 
     pub(super) fn context_handle(&self) -> usize {
@@ -1359,6 +1723,21 @@ impl GemmBiKernels {
     pub(super) fn sm100_function(&self, symbol: &str) -> Option<&CudaFunction> {
         self.has_sm100_tcgen()
             .then(|| self.specialized_functions.get(symbol))
+            .flatten()
+    }
+
+    pub(super) fn sm120_function(&self, symbol: &str) -> Option<&CudaFunction> {
+        self.has_sm120_tma_mma16()
+            .then(|| self.specialized_functions.get(symbol))
+            .flatten()
+    }
+
+    pub(super) fn sm120_kernel_resources(
+        &self,
+        symbol: &str,
+    ) -> Option<super::contract::Sm120KernelResources> {
+        self.has_sm120_tma_mma16()
+            .then(|| self.sm120_resources.get(symbol).copied())
             .flatten()
     }
 
@@ -1444,6 +1823,61 @@ impl GemmBiKernels {
             return Err("SM100 tensor-map cache miss during graph capture".into());
         }
         let maps = super::contract::encode_sm100_tensor_maps(
+            keys,
+            request,
+            binding,
+            allocations,
+            origins,
+        )?;
+        cache.insert(cache_key, maps);
+        Ok(maps)
+    }
+
+    pub(super) fn prepare_sm120_tensor_maps(
+        &self,
+        request: super::contract::Sm120MapRequest,
+        keys: [super::contract::Sm120TensorMapKey; 2],
+        allocations: [super::contract::Sm90aAllocationIdentity; 2],
+        origins: super::contract::Sm120TensorOrigins,
+        capturing: bool,
+        binding: super::contract::Sm120MapBinding,
+    ) -> Result<super::contract::Sm120PreparedTensorMaps, String> {
+        if binding.context_handle != self.context_handle
+            || Some(binding.compiler) != self.sm120_compiler_identity()
+            || Some(binding.artifact) != self.artifact_set_identity.specialized
+            || binding.target.nvrtc_arch != binding.compiler.target.as_str()
+        {
+            return Err("SM120 tensor-map binding does not match its CUDA module context".into());
+        }
+        let mut cache = self
+            .sm120_tensor_maps
+            .lock()
+            .map_err(|_| "SM120 tensor-map cache is poisoned".to_string())?;
+        let dtype = match request.dtype {
+            super::super::dtype::WeightDtype::F32 => 0,
+            super::super::dtype::WeightDtype::F16 => 1,
+            super::super::dtype::WeightDtype::Bf16 => 2,
+        };
+        let cache_key = (
+            keys,
+            allocations,
+            origins,
+            request.op,
+            dtype,
+            request.tile,
+            request.bk,
+            request.shape,
+        );
+        cache.retain(|(cached_keys, cached_allocations, ..), _| {
+            *cached_keys != keys || *cached_allocations == allocations
+        });
+        if let Some(maps) = cache.get(&cache_key) {
+            return Ok(*maps);
+        }
+        if capturing {
+            return Err("SM120 tensor-map cache miss during graph capture".into());
+        }
+        let maps = super::contract::encode_sm120_tensor_maps(
             keys,
             request,
             binding,
@@ -1612,6 +2046,57 @@ fn load_sm100_functions(
     Ok(functions)
 }
 
+fn load_sm120_functions(
+    module: &CompiledModule,
+) -> Result<HashMap<&'static str, CudaFunction>, String> {
+    if module.artifact_identity.module_kind != ModuleKind::TriadSm120
+        || sm120_ptx_target(module.compiler_identity.target.as_str()).is_none()
+    {
+        return Err("specialized triad module is not a valid TriadSm120 target".into());
+    }
+    let mut functions = HashMap::new();
+    for spec in super::contract::SM120_KERNEL_SPECS {
+        let function = load_function(&module.module, ModuleKind::TriadSm120, spec.symbol)?;
+        let shared = i32::try_from(spec.dynamic_shared_bytes)
+            .map_err(|_| format!("{} shared memory exceeds i32::MAX", spec.symbol))?;
+        set_dynamic_shared(&function, spec.symbol, shared)?;
+        if function
+            .local_size_bytes()
+            .map_err(|error| format!("query {} local memory: {error:?}", spec.symbol))?
+            != 0
+        {
+            return Err(format!("{} spills to local memory", spec.symbol));
+        }
+        let threads = i32::try_from(spec.threads)
+            .map_err(|_| format!("{} thread count exceeds i32::MAX", spec.symbol))?;
+        if function
+            .max_threads_per_block()
+            .map_err(|error| format!("query {} max threads: {error:?}", spec.symbol))?
+            < threads
+        {
+            return Err(format!(
+                "{} cannot launch {} threads",
+                spec.symbol, spec.threads
+            ));
+        }
+        let occupancy = function
+            .occupancy_max_active_blocks_per_multiprocessor(
+                spec.threads,
+                spec.dynamic_shared_bytes as usize,
+                None,
+            )
+            .map_err(|error| format!("query {} occupancy: {error:?}", spec.symbol))?;
+        if occupancy < 1 {
+            return Err(format!("{} has zero launch occupancy", spec.symbol));
+        }
+        functions.insert(spec.symbol, function);
+    }
+    if functions.len() != super::contract::SM120_KERNEL_SPECS.len() {
+        return Err("TriadSm120 did not load its complete symbol inventory".into());
+    }
+    Ok(functions)
+}
+
 fn load_owned_half(
     base: &str,
     scalar: &Arc<CudaModule>,
@@ -1647,7 +2132,8 @@ mod tests {
         SCALAR_SYMBOLS as PRODUCTION_SCALAR_SYMBOLS, SM80_SYMBOLS as PRODUCTION_SM80_SYMBOLS,
         SM90A_SYMBOLS, SM100_PROBE_SOURCE, SourceFragment, compose_fragments,
         compose_module_source, resolve_owned_symbol, select_sm100_candidate,
-        validate_module_target, validate_sm100_probe_ptx, validate_sm100_ptx,
+        select_sm120_candidate, validate_module_target, validate_sm100_probe_ptx,
+        validate_sm100_ptx, validate_sm120_ptx,
     };
 
     const FIXED_FRAGMENTS: &[&str] = &[
@@ -1700,6 +2186,15 @@ mod tests {
         "kernels/gemm_bi_triad/common.cuh",
         "kernels/gemm_bi_triad/epilogue.cuh",
         "kernels/gemm_bi_triad/sm100.cu",
+    ];
+
+    const SM120_FRAGMENTS: &[&str] = &[
+        "kernels/_typed_prelude.cuh",
+        "kernels/gemm_bi_triad/contract.cuh",
+        "kernels/gemm_bi_triad/common.cuh",
+        "kernels/gemm_bi_triad/epilogue.cuh",
+        "kernels/gemm_bi_triad/mma16.cuh",
+        "kernels/gemm_bi_triad/sm120.cu",
     ];
 
     const SCALAR_SYMBOLS: &[&str] = &[
@@ -1788,6 +2283,7 @@ mod tests {
         assert_composition(ModuleKind::TriadSm80, SM80_FRAGMENTS);
         assert_composition(ModuleKind::TriadSm90a, SM90A_FRAGMENTS);
         assert_composition(ModuleKind::TriadSm100, SM100_FRAGMENTS);
+        assert_composition(ModuleKind::TriadSm120, SM120_FRAGMENTS);
 
         assert!(
             !std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -2102,6 +2598,92 @@ mod tests {
         .expect("exact candidate fallback");
         assert_eq!(selected.nvrtc_arch, "compute_100a");
         assert_eq!(*qualified.borrow(), ["compute_100f", "compute_100a"]);
+    }
+
+    #[test]
+    fn sm120_cc121_resolution_rejects_a_mixed_target_artifact_transaction() {
+        let candidates = super::super::dispatch::sm120_target_candidates((12, 1), (13, 2));
+        let attempts = std::cell::RefCell::new(Vec::new());
+        let selected = select_sm120_candidate(candidates, |requested| {
+            attempts.borrow_mut().push(requested.nvrtc_arch);
+            if requested.nvrtc_arch == "compute_121" {
+                let wrong = super::super::dispatch::sm120_target_candidates((12, 1), (12, 8))[0];
+                Ok((wrong, "mixed artifact set"))
+            } else {
+                Ok((requested, "same-target artifact set"))
+            }
+        })
+        .expect("compute_120 same-target transaction");
+
+        assert_eq!(selected.0.nvrtc_arch, "compute_120");
+        assert_eq!(selected.1, "same-target artifact set");
+        assert_eq!(*attempts.borrow(), ["compute_121", "compute_120"]);
+    }
+
+    #[test]
+    fn sm120_module_accepts_only_generic_targets() {
+        for target in ["compute_120", "compute_121"] {
+            validate_module_target(ModuleKind::TriadSm120, target).unwrap();
+        }
+        for target in [
+            "sm_120",
+            "sm_121",
+            "sm_120a",
+            "sm_120f",
+            "sm_121a",
+            "sm_121f",
+            "compute_120a",
+            "compute_120f",
+            "compute_121a",
+            "compute_121f",
+        ] {
+            assert!(
+                validate_module_target(ModuleKind::TriadSm120, target).is_err(),
+                "TriadSm120 accepted {target}"
+            );
+        }
+    }
+
+    #[test]
+    fn sm120_ptx_validation_is_complete_and_fail_closed() {
+        let mut valid = ".version 9.0\n.target sm_121\n".to_string();
+        for spec in super::super::contract::SM120_KERNEL_SPECS {
+            valid.push_str(&format!(".entry {}(\n", spec.symbol));
+        }
+        valid.push_str(
+            "cp.async.bulk.tensor.2d.shared::cta.global.tile.mbarrier::complete_tx::bytes\n\
+             mbarrier.arrive.expect_tx\n\
+             mbarrier.try_wait.parity\n\
+             ldmatrix.sync.aligned.m8n8.x4.shared.b16\n\
+             mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32\n\
+             mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32\n",
+        );
+
+        validate_sm120_ptx("compute_121", &valid).unwrap();
+        assert!(validate_sm120_ptx("compute_120", &valid).is_err());
+        let first = super::super::contract::SM120_KERNEL_SPECS[0].symbol;
+        assert!(
+            validate_sm120_ptx(
+                "compute_121",
+                &valid.replacen(&format!(".entry {first}("), ".entry missing(", 1),
+            )
+            .is_err()
+        );
+        for forbidden in [
+            "atom.global.add.f32",
+            "red.global.add.f32",
+            "tcgen05.mma.cta_group::1.kind::f16",
+            "wgmma.mma_async.sync.aligned",
+            "setmaxnreg.inc.sync.aligned.u32",
+            "cp.async.bulk.tensor.2d.shared::cluster.global.tile.multicast",
+            "call.uni (_), cudaLaunchDevice, ();",
+            ".extern .func malloc;",
+        ] {
+            assert!(
+                validate_sm120_ptx("compute_121", &format!("{valid}\n{forbidden}")).is_err(),
+                "validator accepted {forbidden}"
+            );
+        }
     }
 
     #[test]

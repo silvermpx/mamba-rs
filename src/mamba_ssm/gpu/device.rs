@@ -23,8 +23,8 @@ impl GpuDevice {
             .map_err(|e| format!("CUDA device {} init failed: {:?}", ordinal, e))?;
 
         let cc = Self::query_compute_capability(ordinal)?;
-        let nvrtc_target = Self::resolve_nvrtc_target(cc)?;
-        let target = super::kernel_identity::CudaTarget::new(nvrtc_target)?;
+        let nvrtc_target = Self::resolve_nvrtc_target_for_nvrtc(cc, Self::query_nvrtc_version()?)?;
+        let target = super::kernel_identity::CudaTarget::new(Self::resolve_nvrtc_target(cc)?)?;
         let driver = super::kernel_identity::query_driver_identity()?;
 
         Ok(Self {
@@ -96,6 +96,32 @@ impl GpuDevice {
             }
         };
         Ok(target)
+    }
+
+    fn query_nvrtc_version() -> Result<(i32, i32), String> {
+        let mut major = 0;
+        let mut minor = 0;
+        let result = unsafe { cudarc::nvrtc::sys::nvrtcVersion(&mut major, &mut minor) };
+        if result != cudarc::nvrtc::sys::nvrtcResult::NVRTC_SUCCESS {
+            return Err(format!("nvrtcVersion failed: {result:?}"));
+        }
+        Ok((major, minor))
+    }
+
+    fn resolve_nvrtc_target_for_nvrtc(
+        cc: (u32, u32),
+        nvrtc_version: (i32, i32),
+    ) -> Result<&'static str, String> {
+        match cc {
+            (12, 0) if nvrtc_version >= (12, 8) => Ok("compute_120"),
+            (12, 1) if nvrtc_version >= (12, 9) => Ok("compute_121"),
+            (12, 1) if nvrtc_version >= (12, 8) => Ok("compute_120"),
+            (12, 0 | 1) => Err(format!(
+                "CUDA {}.{} cannot compile compute capability {}.{}; SM120 needs CUDA 12.8 and SM121 needs CUDA 12.9 for its native generic target",
+                nvrtc_version.0, nvrtc_version.1, cc.0, cc.1
+            )),
+            _ => Self::resolve_nvrtc_target(cc),
+        }
     }
 
     /// Compatibility wrapper for callers that already validated `cc`.
@@ -210,6 +236,27 @@ mod tests {
     #[test]
     fn nvrtc_target_uses_virtual_arch_for_future_major() {
         assert_eq!(GpuDevice::resolve_nvrtc_target((13, 0)), Ok("compute_120"));
+    }
+
+    #[test]
+    fn sm120_targets_follow_the_installed_nvrtc_floor() {
+        assert!(GpuDevice::resolve_nvrtc_target_for_nvrtc((12, 0), (12, 7)).is_err());
+        assert_eq!(
+            GpuDevice::resolve_nvrtc_target_for_nvrtc((12, 0), (12, 8)),
+            Ok("compute_120")
+        );
+        assert_eq!(
+            GpuDevice::resolve_nvrtc_target_for_nvrtc((12, 1), (12, 8)),
+            Ok("compute_120")
+        );
+        assert_eq!(
+            GpuDevice::resolve_nvrtc_target_for_nvrtc((12, 1), (12, 9)),
+            Ok("compute_121")
+        );
+        assert_eq!(
+            GpuDevice::resolve_nvrtc_target_for_nvrtc((12, 1), (13, 2)),
+            Ok("compute_121")
+        );
     }
 
     #[test]

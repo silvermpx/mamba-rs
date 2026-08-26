@@ -697,6 +697,15 @@ pub struct DeviceIdentity {
     pub driver: DriverIdentity,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct DeviceCaps {
+    pub compute_capability: (u32, u32),
+    pub nvrtc_version: (i32, i32),
+    pub accepted_target: Option<CudaTarget>,
+    pub optin_shared_bytes: u32,
+    pub tensor_map_access: bool,
+}
+
 pub(crate) fn query_driver_identity() -> Result<DriverIdentity, String> {
     static IDENTITY: OnceLock<Result<DriverIdentity, String>> = OnceLock::new();
     IDENTITY.get_or_init(query_driver_identity_uncached).clone()
@@ -2668,6 +2677,9 @@ pub struct GemmRouteIdentity {
     pub policy_revision: u16,
     pub policy_hash: Sha256Digest,
     pub device: DeviceIdentity,
+    pub device_caps: DeviceCaps,
+    pub tuning_table_revision: u16,
+    pub schedule_set_revision: u16,
     pub state_capacity: u32,
 }
 
@@ -2681,6 +2693,224 @@ impl GemmRouteIdentity {
             ))
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[repr(u8)]
+pub enum ResolvedGemmOp {
+    Nn = 1,
+    Tn = 2,
+    Nt = 3,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[repr(u8)]
+pub enum PhysicalGemmBackend {
+    Sm80Mma16V1 = 1,
+    Sm90aWgmmaV1 = 2,
+    Sm100Tcgen05V1 = 3,
+    Sm120TmaMma16V1 = 4,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[repr(u8)]
+pub enum ResolvedNumericContract {
+    ScalarFmaV1 = 1,
+    MmaSyncF32V1 = 2,
+    WgmmaF32V1 = 3,
+    Tcgen05F32V1 = 4,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct ResolvedGemmRoute {
+    pub op: ResolvedGemmOp,
+    pub dtype: PolicyDtype,
+    pub backend: PhysicalGemmBackend,
+    pub numeric_contract: ResolvedNumericContract,
+    pub symbol: &'static str,
+    pub module_kind: ModuleKind,
+    pub target: CudaTarget,
+    pub artifact: ArtifactIdentity,
+    pub compiler: CompilerIdentity,
+    pub device: DeviceIdentity,
+    pub device_caps: DeviceCaps,
+    pub shape: (usize, usize, usize),
+    pub strides: (usize, usize, usize),
+    pub tile: (u32, u32),
+    pub bk: u32,
+    pub stages: u8,
+    pub threads: u32,
+    pub tensor_map_revision: u16,
+    pub tensor_maps_digest: Sha256Digest,
+    pub resources_digest: Sha256Digest,
+    pub tuning_table_revision: u16,
+    pub schedule_revision: u16,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct ResolvedGemmLaunchSet {
+    pub launch_count: u32,
+    pub ordered_digest: Sha256Digest,
+}
+
+impl ResolvedGemmLaunchSet {
+    pub fn ensure_current(self, live: Self, prefix: &str) -> Result<(), String> {
+        if self == live {
+            Ok(())
+        } else {
+            Err(format!(
+                "{prefix}: resolved GEMM launch set changed since capture; re-capture before replay"
+            ))
+        }
+    }
+}
+
+pub fn build_resolved_gemm_launch_set(
+    routes: &[ResolvedGemmRoute],
+) -> Result<ResolvedGemmLaunchSet, String> {
+    if routes.is_empty() {
+        return Err("resolved GEMM launch set must not be empty".into());
+    }
+    let launch_count = u32::try_from(routes.len())
+        .map_err(|_| "resolved GEMM launch count exceeds u32::MAX".to_string())?;
+    let mut digest = FramedSha256::new(b"resolved-gemm-launch-set.v1")
+        .required(b"launch-count", &launch_count.to_le_bytes());
+    for (index, route) in routes.iter().enumerate() {
+        digest = append_resolved_gemm_route(digest, index, route);
+    }
+    Ok(ResolvedGemmLaunchSet {
+        launch_count,
+        ordered_digest: digest.finish(),
+    })
+}
+
+fn append_resolved_gemm_route(
+    digest: FramedSha256,
+    index: usize,
+    route: &ResolvedGemmRoute,
+) -> FramedSha256 {
+    let accepted_target = route
+        .device_caps
+        .accepted_target
+        .map(|target| target.as_str().as_bytes().to_vec());
+    digest
+        .required(b"route-index", &(index as u64).to_le_bytes())
+        .required(b"op", &[route.op as u8])
+        .required(b"dtype", &[route.dtype as u8])
+        .required(b"backend", &[route.backend as u8])
+        .required(b"numeric-contract", &[route.numeric_contract as u8])
+        .required(b"symbol", route.symbol.as_bytes())
+        .required(b"module-kind", &[route.module_kind as u8])
+        .required(b"target", route.target.as_str().as_bytes())
+        .required(b"artifact-module", &[route.artifact.module_kind as u8])
+        .required(b"artifact-kind", &[route.artifact.artifact_kind as u8])
+        .required(b"compile-key", &route.artifact.compile_key)
+        .required(b"artifact-digest", &route.artifact.artifact_digest)
+        .required(b"source-digest", &route.compiler.source_digest)
+        .required(b"invocation-digest", &route.compiler.invocation_digest)
+        .required(
+            b"header-manifest-digest",
+            &route.compiler.header_manifest_digest,
+        )
+        .required(
+            b"compiler-target",
+            route.compiler.target.as_str().as_bytes(),
+        )
+        .required(
+            b"nvrtc-major",
+            &route.compiler.nvrtc_version.0.to_le_bytes(),
+        )
+        .required(
+            b"nvrtc-minor",
+            &route.compiler.nvrtc_version.1.to_le_bytes(),
+        )
+        .required(b"nvrtc-domain", &route.compiler.nvrtc_library_domain)
+        .required(
+            b"nvrtc-domain-known",
+            &[u8::from(route.compiler.nvrtc_library_known)],
+        )
+        .required(b"compiler-output-kind", &[route.compiler.output_kind as u8])
+        .required(
+            b"composer-revision",
+            &route.compiler.composer_revision.to_le_bytes(),
+        )
+        .required(
+            b"compiler-revision",
+            &route.compiler.compiler_revision.to_le_bytes(),
+        )
+        .required(
+            b"numeric-abi-revision",
+            &route.compiler.numeric_abi_revision.to_le_bytes(),
+        )
+        .required(
+            b"compiler-schedule-revision",
+            &route.compiler.schedule_revision.to_le_bytes(),
+        )
+        .required(
+            b"device-cc-major",
+            &route.device.compute_capability.0.to_le_bytes(),
+        )
+        .required(
+            b"device-cc-minor",
+            &route.device.compute_capability.1.to_le_bytes(),
+        )
+        .required(b"device-target", route.device.target.as_str().as_bytes())
+        .required(
+            b"driver-api-version",
+            &route.device.driver.api_version.to_le_bytes(),
+        )
+        .required(
+            b"driver-build-sources",
+            &[route.device.driver.build_sources],
+        )
+        .required(b"driver-build-digest", &route.device.driver.build_digest)
+        .required(
+            b"caps-cc-major",
+            &route.device_caps.compute_capability.0.to_le_bytes(),
+        )
+        .required(
+            b"caps-cc-minor",
+            &route.device_caps.compute_capability.1.to_le_bytes(),
+        )
+        .required(
+            b"caps-nvrtc-major",
+            &route.device_caps.nvrtc_version.0.to_le_bytes(),
+        )
+        .required(
+            b"caps-nvrtc-minor",
+            &route.device_caps.nvrtc_version.1.to_le_bytes(),
+        )
+        .optional(b"caps-accepted-target", accepted_target.as_deref())
+        .required(
+            b"caps-optin-shared-bytes",
+            &route.device_caps.optin_shared_bytes.to_le_bytes(),
+        )
+        .required(
+            b"caps-tensor-map-access",
+            &[u8::from(route.device_caps.tensor_map_access)],
+        )
+        .required(b"shape-m", &(route.shape.0 as u64).to_le_bytes())
+        .required(b"shape-k", &(route.shape.1 as u64).to_le_bytes())
+        .required(b"shape-n", &(route.shape.2 as u64).to_le_bytes())
+        .required(b"stride-a", &(route.strides.0 as u64).to_le_bytes())
+        .required(b"stride-b", &(route.strides.1 as u64).to_le_bytes())
+        .required(b"stride-c", &(route.strides.2 as u64).to_le_bytes())
+        .required(b"tile-m", &route.tile.0.to_le_bytes())
+        .required(b"tile-n", &route.tile.1.to_le_bytes())
+        .required(b"bk", &route.bk.to_le_bytes())
+        .required(b"stages", &[route.stages])
+        .required(b"threads", &route.threads.to_le_bytes())
+        .required(
+            b"tensor-map-revision",
+            &route.tensor_map_revision.to_le_bytes(),
+        )
+        .required(b"tensor-maps-digest", &route.tensor_maps_digest)
+        .required(b"resources-digest", &route.resources_digest)
+        .required(
+            b"tuning-table-revision",
+            &route.tuning_table_revision.to_le_bytes(),
+        )
+        .required(b"schedule-revision", &route.schedule_revision.to_le_bytes())
 }
 
 #[cfg(test)]

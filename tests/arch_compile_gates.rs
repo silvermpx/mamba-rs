@@ -85,6 +85,16 @@ fn sm100_blob() -> String {
     ])
 }
 
+fn sm120_blob() -> String {
+    compose(&[
+        include_str!("../kernels/_typed_prelude.cuh"),
+        include_str!("../kernels/gemm_bi_triad/contract.cuh"),
+        include_str!("../kernels/gemm_bi_triad/common.cuh"),
+        include_str!("../kernels/gemm_bi_triad/epilogue.cuh"),
+        include_str!("../kernels/gemm_bi_triad/sm120.cu"),
+    ])
+}
+
 fn sm100_symbols() -> Vec<String> {
     let mut symbols = Vec::new();
     for op in ["nn", "tn", "nt"] {
@@ -101,6 +111,36 @@ fn sm100_symbols() -> Vec<String> {
         }
     }
     symbols
+}
+
+fn sm120_symbols() -> Vec<String> {
+    let mut symbols = Vec::new();
+    for op in ["nn", "tn", "nt"] {
+        for tile in ["64x64", "128x64", "64x128", "128x128"] {
+            for bk in ["bk32", "bk64"] {
+                for stages in ["s2", "s3"] {
+                    for dtype in ["bf16", "f16"] {
+                        symbols.push(format!(
+                            "sgemm_bi_{op}_sm120_tma_{tile}_{bk}_{stages}_{dtype}"
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    symbols
+}
+
+fn nvrtc_version() -> (i32, i32) {
+    let mut major = 0;
+    let mut minor = 0;
+    let result = unsafe { cudarc::nvrtc::sys::nvrtcVersion(&mut major, &mut minor) };
+    assert_eq!(
+        result,
+        cudarc::nvrtc::sys::nvrtcResult::NVRTC_SUCCESS,
+        "query NVRTC version"
+    );
+    (major, minor)
 }
 
 fn ptxas() -> std::path::PathBuf {
@@ -136,6 +176,78 @@ fn assemble_sm100(ptx: &str, target: &str, checker: bool) -> std::process::Outpu
         .arg(&output)
         .output()
         .expect("run ptxas for SM100")
+}
+
+fn assemble_sm120(ptx: &str, target: &str) -> std::process::Output {
+    let directory = tempfile::tempdir().expect("SM120 ptxas tempdir");
+    let input = directory.path().join("triad-sm120.ptx");
+    let output = directory.path().join("triad-sm120.cubin");
+    std::fs::write(&input, ptx).expect("write SM120 PTX");
+    std::process::Command::new(ptxas())
+        .arg(format!("-arch={target}"))
+        .arg("-v")
+        .arg(&input)
+        .arg("-o")
+        .arg(&output)
+        .output()
+        .expect("run ptxas for SM120")
+}
+
+fn ptx_entry<'a>(ptx: &'a str, symbol: &str) -> &'a str {
+    let marker = format!(".entry {symbol}(");
+    let start = ptx
+        .find(&marker)
+        .unwrap_or_else(|| panic!("missing PTX entry {symbol}"));
+    let tail = &ptx[start..];
+    let end = tail[marker.len()..]
+        .find("\n.visible .entry ")
+        .map(|offset| marker.len() + offset)
+        .unwrap_or(tail.len());
+    &tail[..end]
+}
+
+fn ptx_parameters<'a>(entry: &'a str, symbol: &str) -> &'a str {
+    let marker = format!(".entry {symbol}(");
+    entry
+        .split_once(&marker)
+        .and_then(|(_, tail)| tail.split_once("\n)").map(|(parameters, _)| parameters))
+        .unwrap_or_else(|| panic!("parameter list for {symbol}"))
+}
+
+fn has_exact_maxntid(entry: &str, threads: u32) -> bool {
+    let canonical = format!(".maxntid {threads}");
+    let explicit = format!(".maxntid {threads}, 1, 1");
+    entry
+        .lines()
+        .map(str::trim)
+        .any(|line| line == canonical || line == explicit)
+}
+
+fn metric_before(line: &str, marker: &str) -> Option<u64> {
+    let prefix = line.split_once(marker)?.0;
+    prefix.split_ascii_whitespace().last()?.parse().ok()
+}
+
+fn contains_opcode_prefix(source: &str, prefix: &str) -> bool {
+    source.match_indices(prefix).any(|(offset, _)| {
+        source[..offset].chars().next_back().is_none_or(|previous| {
+            !previous.is_ascii_alphanumeric() && !matches!(previous, '_' | '.')
+        })
+    })
+}
+
+fn assert_zero_local_resources(report: &str, target: &str) {
+    for line in report.lines() {
+        for marker in [
+            " bytes stack frame",
+            " bytes spill stores",
+            " bytes spill loads",
+        ] {
+            if let Some(value) = metric_before(line, marker) {
+                assert_eq!(value, 0, "{target} uses local resources: {line}");
+            }
+        }
+    }
 }
 
 fn compile_for(arch: &'static str) {
@@ -355,4 +467,176 @@ fn ordinary_sm100_targets_fail_offline_tcgen_assembly() {
 #[test]
 fn compiles_for_sm120() {
     compile_for("sm_120");
+}
+
+#[test]
+fn compiles_for_sm121_when_the_active_nvrtc_supports_it() {
+    if nvrtc_version() >= (12, 9) {
+        compile_for("sm_121");
+    }
+}
+
+#[test]
+fn compiles_generic_sm120_triad_modules_with_exact_ptx_contract() {
+    let version = nvrtc_version();
+    let mut targets = vec![("compute_120", "sm_120")];
+    if version >= (12, 9) {
+        targets.push(("compute_121", "sm_121"));
+    }
+    for (requested, emitted) in targets {
+        let opts = cudarc::nvrtc::CompileOptions {
+            arch: Some(requested),
+            options: vec![
+                "--fmad=true".to_string(),
+                "--extra-device-vectorization".to_string(),
+                "-DNDEBUG".to_string(),
+            ],
+            include_paths: mamba_rs::mamba_ssm::gpu::kernels::cuda_include_paths(),
+            ..Default::default()
+        };
+        let image = cudarc::nvrtc::compile_ptx_with_opts(sm120_blob(), opts)
+            .unwrap_or_else(|error| panic!("TriadSm120 must compile for {requested}: {error}"));
+        let ptx = mamba_rs::mamba_ssm::gpu::kernel_identity::canonical_ptx_image(
+            image.as_bytes().expect("SM120 PTX image"),
+        )
+        .expect("SM120 PTX must be canonical UTF-8");
+        assert!(
+            ptx.lines()
+                .any(|line| line.trim() == format!(".target {emitted}")),
+            "{requested} emitted the wrong PTX target"
+        );
+        assert!(!ptx.contains(".target sm_120a"));
+        assert!(!ptx.contains(".target sm_120f"));
+        assert!(!ptx.contains(".target sm_121a"));
+        assert!(!ptx.contains(".target sm_121f"));
+
+        let map_alignment = if version.0 >= 13 { 128 } else { 64 };
+        for symbol in sm120_symbols() {
+            let entry = ptx_entry(&ptx, &symbol);
+            let parameters = ptx_parameters(entry, &symbol);
+            assert_eq!(
+                parameters.matches(".param").count(),
+                5,
+                "{requested} ABI parameter count for {symbol}"
+            );
+            assert_eq!(
+                parameters
+                    .matches(&format!(".param .align {map_alignment} .b8"))
+                    .count(),
+                2,
+                "{requested} tensor-map ABI for {symbol}: {parameters}"
+            );
+            assert_eq!(
+                parameters.matches("[128]").count(),
+                2,
+                "{requested} tensor-map sizes for {symbol}: {parameters}"
+            );
+            assert!(
+                parameters.contains(&format!(".param .align 4 .b8 {symbol}_param_4[40]")),
+                "{requested} 40-byte parameter bundle for {symbol}: {parameters}"
+            );
+
+            let threads = if symbol.contains("_64x64_") {
+                128
+            } else if symbol.contains("_128x128_") {
+                512
+            } else {
+                256
+            };
+            assert!(
+                has_exact_maxntid(entry, threads),
+                "{requested} launch bounds for {symbol}"
+            );
+
+            for required in [
+                "cp.async.bulk.tensor.2d.shared::cta.global.tile.mbarrier::complete_tx::bytes",
+                "mbarrier.init.shared::cta.b64",
+                "fence.mbarrier_init.release.cluster",
+                "mbarrier.arrive.expect_tx.release.cta.shared::cta.b64",
+                "mbarrier.try_wait.parity.acquire.cta.shared::cta.b64",
+                "mbarrier.arrive.release.cta.shared::cta.b64",
+            ] {
+                assert!(
+                    entry.contains(required),
+                    "{requested}/{symbol} is missing {required}"
+                );
+            }
+
+            let dtype = if symbol.ends_with("_bf16") {
+                "bf16"
+            } else {
+                "f16"
+            };
+            let mma = format!("mma.sync.aligned.m16n8k16.row.col.f32.{dtype}.{dtype}.f32");
+            let (mma_count, a_loads, b_loads) = if symbol.contains("_bk32_") {
+                (16, 4, 8)
+            } else {
+                (32, 8, 16)
+            };
+            assert_eq!(
+                entry.matches(&mma).count(),
+                mma_count,
+                "{requested} MMA census for {symbol}"
+            );
+            let a_instruction = if symbol.contains("_tn_") {
+                "ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16"
+            } else {
+                "ldmatrix.sync.aligned.m8n8.x4.shared.b16"
+            };
+            let b_instruction = if symbol.contains("_nt_") {
+                "ldmatrix.sync.aligned.m8n8.x2.shared.b16"
+            } else {
+                "ldmatrix.sync.aligned.m8n8.x2.trans.shared.b16"
+            };
+            assert_eq!(
+                entry.matches(a_instruction).count(),
+                a_loads,
+                "{requested} A ldmatrix census for {symbol}"
+            );
+            assert_eq!(
+                entry.matches(b_instruction).count(),
+                b_loads,
+                "{requested} B ldmatrix census for {symbol}"
+            );
+            assert!(!entry.contains("call.uni"), "device call in {symbol}");
+        }
+
+        for forbidden in [
+            "tcgen05",
+            "tmem",
+            "wgmma.",
+            "setmaxnreg",
+            "multicast",
+            "shared::cluster",
+            "cta_group::2",
+            "multimem",
+            "mapa",
+            "clusterlaunchcontrol",
+            "griddepcontrol",
+            ".callprototype",
+        ] {
+            assert!(!ptx.contains(forbidden), "{requested} contains {forbidden}");
+        }
+        for forbidden_opcode in ["atom.", "red.", "redux."] {
+            assert!(
+                !contains_opcode_prefix(&ptx, forbidden_opcode),
+                "{requested} contains opcode {forbidden_opcode}"
+            );
+        }
+
+        let assembly = assemble_sm120(&ptx, emitted);
+        assert!(
+            assembly.status.success(),
+            "ptxas failed for {emitted}: {}",
+            String::from_utf8_lossy(&assembly.stderr)
+        );
+        let report = String::from_utf8_lossy(&assembly.stderr);
+        assert_zero_local_resources(&report, emitted);
+        for symbol in sm120_symbols() {
+            assert!(
+                report.contains(&symbol),
+                "{emitted} ptxas resource report omitted {symbol}"
+            );
+        }
+    }
 }

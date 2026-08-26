@@ -501,48 +501,51 @@ impl MambaKernels {
         arch: &'static str,
         state_cap: usize,
     ) -> Result<Self, String> {
-        let fixed = super::gemm_bi_triad::modules::compile_module(
-            super::gemm_bi_triad::modules::CompileModuleRequest {
-                ctx,
-                arch,
-                state_cap,
-                module_kind: super::kernel_identity::ModuleKind::Fixed,
-            },
-        )?;
-        let scalar = super::gemm_bi_triad::modules::compile_module(
-            super::gemm_bi_triad::modules::CompileModuleRequest {
-                ctx,
-                arch,
-                state_cap,
-                module_kind: super::kernel_identity::ModuleKind::TriadScalar,
-            },
-        )?;
-        let sm80 = super::gemm_bi_triad::modules::compile_module(
-            super::gemm_bi_triad::modules::CompileModuleRequest {
-                ctx,
-                arch,
-                state_cap,
-                module_kind: super::kernel_identity::ModuleKind::TriadSm80,
-            },
-        )?;
         let device_cc = ctx.compute_capability().ok();
-        let specialized = match (arch, device_cc) {
-            ("sm_90a", Some((9, 0))) => super::gemm_bi_triad::modules::compile_module(
+        let sm120_artifacts = match device_cc {
+            Some(device_cc @ ((12, 0) | (12, 1))) => {
+                super::gemm_bi_triad::modules::compile_sm120_artifact_set(
+                    ctx,
+                    state_cap,
+                    device_cc,
+                    nvrtc_version(),
+                )
+            }
+            _ => None,
+        };
+        let compile = |module_kind| {
+            super::gemm_bi_triad::modules::compile_module(
                 super::gemm_bi_triad::modules::CompileModuleRequest {
                     ctx,
                     arch,
                     state_cap,
-                    module_kind: super::kernel_identity::ModuleKind::TriadSm90a,
+                    module_kind,
                 },
             )
-            .ok()
-            .and_then(|module| {
-                super::gemm_bi_triad::modules::qualify_specialized_module(module).ok()
-            }),
-            ("sm_100a", Some(device_cc @ (10, 0))) | ("sm_103", Some(device_cc @ (10, 3))) => {
-                super::gemm_bi_triad::modules::compile_sm100_optional(ctx, state_cap, device_cc)
-            }
-            _ => None,
+        };
+        let (fixed, scalar, sm80, specialized) = if let Some(artifacts) = sm120_artifacts {
+            (
+                artifacts.fixed,
+                artifacts.scalar,
+                artifacts.sm80,
+                artifacts.specialized,
+            )
+        } else {
+            let fixed = compile(super::kernel_identity::ModuleKind::Fixed)?;
+            let scalar = compile(super::kernel_identity::ModuleKind::TriadScalar)?;
+            let sm80 = compile(super::kernel_identity::ModuleKind::TriadSm80)?;
+            let specialized = match (arch, device_cc) {
+                ("sm_90a", Some((9, 0))) => compile(super::kernel_identity::ModuleKind::TriadSm90a)
+                    .ok()
+                    .and_then(|module| {
+                        super::gemm_bi_triad::modules::qualify_specialized_module(module).ok()
+                    }),
+                ("sm_100a", Some(device_cc @ (10, 0))) | ("sm_103", Some(device_cc @ (10, 3))) => {
+                    super::gemm_bi_triad::modules::compile_sm100_optional(ctx, state_cap, device_cc)
+                }
+                _ => None,
+            };
+            (fixed, scalar, sm80, specialized)
         };
         let compiler_identity = fixed.compiler_identity;
         let triad = GemmBiKernels::load(
@@ -798,6 +801,15 @@ impl MambaKernels {
     /// embedded [`GemmBiKernels`] aggregate.
     pub fn compiler_identity(&self) -> super::kernel_identity::CompilerIdentity {
         self.compiler_identity
+    }
+
+    pub(crate) fn specialized_compiler_identity(
+        &self,
+    ) -> Option<super::kernel_identity::CompilerIdentity> {
+        self.triad
+            .sm120_compiler_identity()
+            .or_else(|| self.triad.sm100_compiler_identity())
+            .or_else(|| self.triad.sm90a_compiler_identity())
     }
 
     /// Ordered artifact set available to deterministic GEMM dispatch.
