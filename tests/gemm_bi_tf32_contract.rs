@@ -2886,6 +2886,14 @@ fn contains_opcode_prefix(source: &str, prefix: &str) -> bool {
     })
 }
 
+fn contains_float_mad_opcode(source: &str) -> bool {
+    source.lines().any(|line| {
+        ptx_instruction(line).is_some_and(|(opcode, _)| {
+            opcode.starts_with("mad.") && opcode.split('.').any(|part| part == "f32")
+        })
+    })
+}
+
 fn tf32_rna_finite_normal(bits: u32) -> u32 {
     let exponent = bits & 0x7f80_0000;
     assert!(exponent != 0 && exponent != 0x7f80_0000);
@@ -3863,7 +3871,6 @@ fn compiled_tf32_ptx_exports_exact_five_parameter_abis() {
                 "fma.rm",
                 "fma.rp",
                 "fma.rn.ftz",
-                "mad.",
             ] {
                 let present = if matches!(forbidden, "atom." | "red." | "atom::" | "red::") {
                     contains_opcode_prefix(entry, forbidden)
@@ -3875,6 +3882,10 @@ fn compiled_tf32_ptx_exports_exact_five_parameter_abis() {
                     "{label} {symbol} compiled forbidden PTX {forbidden}"
                 );
             }
+            assert!(
+                !contains_float_mad_opcode(entry),
+                "{label} {symbol} compiled forbidden floating-point mad"
+            );
             if symbol.contains("_nn_") {
                 assert!(
                     entry.contains("mul.rn.f32") && entry.contains("fma.rn.f32"),
@@ -5112,6 +5123,8 @@ fn k0_cfg_checker_propagates_values_and_rejects_bad_zero_subgraphs() {
         "red.global.add.u32 [%r1], %r2;",
         "red."
     ));
+    assert!(!contains_float_mad_opcode("mad.lo.s32 %r1, %r2, %r3, %r4;"));
+    assert!(contains_float_mad_opcode("mad.rn.f32 %f1, %f2, %f3, %f4;"));
     let symbol = "sgemm_bi_nn_sm100_tcgen_tf32_v1_m128n64_bk32_s2_c4";
     let valid = format!(
         r#"
