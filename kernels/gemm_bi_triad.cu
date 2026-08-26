@@ -6051,6 +6051,232 @@ void sgemm_bi_nn_tc64_##SUFFIX(                                                \
 DEFINE_SGEMM_BI_NN_TC64(bf16, __nv_bfloat16, from_f_bf16, "bf16")
 DEFINE_SGEMM_BI_NN_TC64(f16,  __half,        from_f_f16,  "f16")
 
+// ── Thin16 rung (R0 of the 0.6.10 ladder): 16x32x64, 4 warps, 4-stage ──
+//
+// The decode/thin-M rung of the bit-identical tile ladder. Same
+// arithmetic contract as TC64/TC128 (ascending m16n8k16 K-slabs, f32
+// accumulators, bias pre-seeded, single RNE downcast) - the census gate
+// asserts byte-identity against Tile64. What differs is SCHEDULING: a
+// 16-row tile stops wasting 3/4 of the MMA work at M<=16, BN=32 raises
+// the CTA count at small M (decode needs CTAs for memory-level
+// parallelism, not tile area), and a 4-deep cp.async pipeline keeps
+// enough bytes in flight to approach the DRAM floor where a 2-stage
+// pipeline stalls on latency.
+//
+// Pipeline bookkeeping: every iteration commits EXACTLY one group -
+// a real stage or an empty commit once the K range is exhausted - so
+// the in-flight count is uniform and `wait_group STAGES-2` always
+// waits for precisely the stage the mainloop is about to read. Without
+// the empty commits a short K (fewer tiles than stages) would make
+// wait_group return before the data landed.
+//
+// RULE (0.4.0 lesson): every constant below is section-local (SGB_TC16_*).
+#define SGB_TC16_BM 16
+#define SGB_TC16_BN 32
+#define SGB_TC16_BK 64
+#define SGB_TC16_THREADS 128
+#define SGB_TC16_STAGES 4
+#define SGB_TC16_LDA (SGB_TC16_BK + 8) /* 72 halves = 144 B rows */
+#define SGB_TC16_LDB (SGB_TC16_BN + 8) /* 40 halves = 80 B rows, 20 words == 4 mod 8 */
+
+#define SGB_TC16_STAGE_ASYNC(buf, bkIdx)                                      \
+    do {                                                                      \
+        unsigned _as =                                                        \
+            As_sbase + (unsigned)((buf) * SGB_TC16_BM * SGB_TC16_LDA * 2);    \
+        unsigned _bs =                                                        \
+            Bs_sbase + (unsigned)((buf) * SGB_TC16_BK * SGB_TC16_LDB * 2);    \
+        for (int _i = threadIdx.x; _i < SGB_TC16_BM * (SGB_TC16_BK / 8);      \
+             _i += SGB_TC16_THREADS) {                                        \
+            int _m = _i / (SGB_TC16_BK / 8);                                  \
+            int _k = (_i % (SGB_TC16_BK / 8)) * 8;                            \
+            int _gr = pid_m * SGB_TC16_BM + _m;                               \
+            int _gc = (bkIdx) + _k;                                           \
+            int _valid = (_gr < M) ? (K - _gc) : 0;                           \
+            int _bytes = _valid >= 8 ? 16 : (_valid > 0 ? _valid * 2 : 0);    \
+            unsigned _dst = _as + (unsigned)((_m * SGB_TC16_LDA + _k) * 2);   \
+            const void* _src = &A[(long long)_gr * lda + _gc];               \
+            asm volatile("cp.async.ca.shared.global [%0], [%1], 16, %2;\n"    \
+                         :: "r"(_dst), "l"(_src), "r"(_bytes));               \
+        }                                                                     \
+        for (int _i = threadIdx.x; _i < SGB_TC16_BK * (SGB_TC16_BN / 8);      \
+             _i += SGB_TC16_THREADS) {                                        \
+            int _k = _i / (SGB_TC16_BN / 8);                                  \
+            int _n = (_i % (SGB_TC16_BN / 8)) * 8;                            \
+            int _gk = (bkIdx) + _k;                                           \
+            int _gn = pid_n * SGB_TC16_BN + _n;                               \
+            int _valid = (_gk < K) ? (N - _gn) : 0;                           \
+            int _bytes = _valid >= 8 ? 16 : (_valid > 0 ? _valid * 2 : 0);    \
+            unsigned _dst = _bs + (unsigned)((_k * SGB_TC16_LDB + _n) * 2);   \
+            const void* _src = &B[(long long)_gk * ldb + _gn];               \
+            asm volatile("cp.async.ca.shared.global [%0], [%1], 16, %2;\n"    \
+                         :: "r"(_dst), "l"(_src), "r"(_bytes));               \
+        }                                                                     \
+        asm volatile("cp.async.commit_group;\n");                            \
+    } while (0)
+
+#define SGB_TC16_STAGE_SCALAR(buf, bkIdx, TT, FF)                             \
+    do {                                                                      \
+        TT* _Asw = &As[buf][0][0];                                            \
+        TT* _Bsw = &Bs[buf][0][0];                                            \
+        for (int _i = threadIdx.x; _i < SGB_TC16_BM * SGB_TC16_BK;            \
+             _i += SGB_TC16_THREADS) {                                        \
+            int _m = _i / SGB_TC16_BK;                                        \
+            int _k = _i % SGB_TC16_BK;                                        \
+            int _gr = pid_m * SGB_TC16_BM + _m;                               \
+            int _gc = (bkIdx) + _k;                                           \
+            _Asw[_m * SGB_TC16_LDA + _k] = (_gr < M && _gc < K)               \
+                                               ? A[(long long)_gr * lda + _gc]\
+                                               : FF(0.0f);                    \
+        }                                                                     \
+        for (int _i = threadIdx.x; _i < SGB_TC16_BK * SGB_TC16_BN;            \
+             _i += SGB_TC16_THREADS) {                                        \
+            int _k = _i / SGB_TC16_BN;                                        \
+            int _n = _i % SGB_TC16_BN;                                        \
+            int _gk = (bkIdx) + _k;                                           \
+            int _gn = pid_n * SGB_TC16_BN + _n;                               \
+            _Bsw[_k * SGB_TC16_LDB + _n] = (_gk < K && _gn < N)               \
+                                               ? B[(long long)_gk * ldb + _gn]\
+                                               : FF(0.0f);                    \
+        }                                                                     \
+    } while (0)
+
+#define DEFINE_SGEMM_BI_NN_TC16(SUFFIX, T_ACT, FROM_F, MMA_T)                  \
+extern "C" __global__ __launch_bounds__(SGB_TC16_THREADS, 3)                   \
+void sgemm_bi_nn_tc16_##SUFFIX(                                                \
+    T_ACT* __restrict__ C,                                                     \
+    const T_ACT* __restrict__ A,                                               \
+    const T_ACT* __restrict__ B,                                               \
+    const float* __restrict__ bias,                                            \
+    float alpha, float beta,                                                   \
+    int M, int N, int K,                                                       \
+    int lda, int ldb, int ldc                                                  \
+) {                                                                            \
+    assert(alpha == 1.0f || bias == nullptr);                                  \
+    __shared__ __align__(16)                                                   \
+        T_ACT As[SGB_TC16_STAGES][SGB_TC16_BM][SGB_TC16_LDA];                  \
+    __shared__ __align__(16)                                                   \
+        T_ACT Bs[SGB_TC16_STAGES][SGB_TC16_BK][SGB_TC16_LDB];                  \
+    int num_pid_n = (N + SGB_TC16_BN - 1) / SGB_TC16_BN;                       \
+    int pid_m = blockIdx.x / num_pid_n;                                        \
+    int pid_n = blockIdx.x % num_pid_n;                                        \
+    int warp = threadIdx.x / 32;                                               \
+    int lane = threadIdx.x % 32;                                               \
+    int warpN = warp * 8;                                                      \
+    int g = lane >> 2;                                                         \
+    int t = lane & 3;                                                          \
+    int lm_r = lane & 7;                                                       \
+    int lm_q = lane >> 3;                                                      \
+    int lm_row_off = (lm_q & 1) ? 8 : 0;                                       \
+    int lm_col_off = (lm_q & 2) ? 8 : 0;                                       \
+    int lmb_row_off = (lm_q & 1) ? 8 : 0;                                      \
+    unsigned As_sbase = (unsigned)__cvta_generic_to_shared(&As[0][0][0]);      \
+    unsigned Bs_sbase = (unsigned)__cvta_generic_to_shared(&Bs[0][0][0]);      \
+    bool fast_stage = ((lda & 7) == 0) && ((ldb & 7) == 0);                    \
+    float acc[4];                                                              \
+    {                                                                          \
+        float b0 = 0.0f, b1 = 0.0f;                                            \
+        if (bias != nullptr) {                                                 \
+            int c0 = pid_n * SGB_TC16_BN + warpN + 2 * t;                      \
+            b0 = (c0 < N) ? bias[c0] : 0.0f;                                   \
+            b1 = (c0 + 1 < N) ? bias[c0 + 1] : 0.0f;                           \
+        }                                                                      \
+        acc[0] = b0;                                                           \
+        acc[1] = b1;                                                           \
+        acc[2] = b0;                                                           \
+        acc[3] = b1;                                                           \
+    }                                                                          \
+    int num_k_tiles = (K + SGB_TC16_BK - 1) / SGB_TC16_BK;                     \
+    /* Prologue: STAGES-1 commit groups, real or empty - uniform count. */    \
+    for (int p = 0; p < SGB_TC16_STAGES - 1; p++) {                            \
+        if (p < num_k_tiles) {                                                 \
+            if (fast_stage) {                                                  \
+                SGB_TC16_STAGE_ASYNC(p, p * SGB_TC16_BK);                      \
+            } else {                                                           \
+                SGB_TC16_STAGE_SCALAR(p, p * SGB_TC16_BK, T_ACT, FROM_F);      \
+                asm volatile("cp.async.commit_group;\n");                     \
+            }                                                                  \
+        } else {                                                               \
+            asm volatile("cp.async.commit_group;\n");                         \
+        }                                                                      \
+    }                                                                          \
+    for (int kt = 0; kt < num_k_tiles; kt++) {                                 \
+        asm volatile("cp.async.wait_group %0;\n"                              \
+                     :: "n"(SGB_TC16_STAGES - 2));                             \
+        __syncthreads();                                                       \
+        int next = kt + SGB_TC16_STAGES - 1;                                   \
+        if (next < num_k_tiles) {                                              \
+            int wbuf = next % SGB_TC16_STAGES;                                 \
+            if (fast_stage) {                                                  \
+                SGB_TC16_STAGE_ASYNC(wbuf, next * SGB_TC16_BK);                \
+            } else {                                                           \
+                SGB_TC16_STAGE_SCALAR(wbuf, next * SGB_TC16_BK, T_ACT,         \
+                                      FROM_F);                                 \
+                asm volatile("cp.async.commit_group;\n");                     \
+            }                                                                  \
+        } else {                                                               \
+            asm volatile("cp.async.commit_group;\n");                         \
+        }                                                                      \
+        int rbuf = kt % SGB_TC16_STAGES;                                       \
+        unsigned As_rd =                                                       \
+            As_sbase + (unsigned)(rbuf * SGB_TC16_BM * SGB_TC16_LDA * 2);      \
+        unsigned Bs_rd =                                                       \
+            Bs_sbase + (unsigned)(rbuf * SGB_TC16_BK * SGB_TC16_LDB * 2);      \
+        _Pragma("unroll")                                                      \
+        for (int ks = 0; ks < (SGB_TC16_BK / 16); ks++) {                      \
+            int k0 = ks * 16;                                                  \
+            unsigned a_frag[4];                                                \
+            unsigned b_frag[2];                                                \
+            {                                                                  \
+                int row = lm_row_off + lm_r;                                   \
+                unsigned addr = As_rd +                                        \
+                    (unsigned)((row * SGB_TC16_LDA + k0 + lm_col_off) * 2);    \
+                asm volatile(                                                  \
+                    "ldmatrix.sync.aligned.m8n8.x4.shared.b16 "                \
+                    "{%0,%1,%2,%3}, [%4];\n"                                  \
+                    : "=r"(a_frag[0]), "=r"(a_frag[1]),                        \
+                      "=r"(a_frag[2]), "=r"(a_frag[3])                         \
+                    : "r"(addr));                                              \
+            }                                                                  \
+            {                                                                  \
+                int row = k0 + lmb_row_off + lm_r;                             \
+                unsigned addr = Bs_rd +                                        \
+                    (unsigned)((row * SGB_TC16_LDB + warpN) * 2);              \
+                asm volatile(                                                  \
+                    "ldmatrix.sync.aligned.m8n8.x2.trans.shared.b16 "          \
+                    "{%0,%1}, [%2];\n"                                        \
+                    : "=r"(b_frag[0]), "=r"(b_frag[1])                         \
+                    : "r"(addr));                                              \
+            }                                                                  \
+            asm volatile(                                                      \
+                "mma.sync.aligned.m16n8k16.row.col.f32." MMA_T "."             \
+                MMA_T ".f32 "                                                  \
+                "{%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, "                      \
+                "{%0,%1,%2,%3};\n"                                            \
+                : "+f"(acc[0]), "+f"(acc[1]), "+f"(acc[2]), "+f"(acc[3])       \
+                : "r"(a_frag[0]), "r"(a_frag[1]),                              \
+                  "r"(a_frag[2]), "r"(a_frag[3]),                              \
+                  "r"(b_frag[0]), "r"(b_frag[1]));                             \
+        }                                                                      \
+    }                                                                          \
+    {                                                                          \
+        int r0 = pid_m * SGB_TC16_BM + g;                                      \
+        int c0 = pid_n * SGB_TC16_BN + warpN + 2 * t;                          \
+        _Pragma("unroll")                                                      \
+        for (int e = 0; e < 4; e++) {                                          \
+            int gr = r0 + (e >= 2 ? 8 : 0);                                    \
+            int gc = c0 + (e & 1);                                             \
+            if (gr >= M || gc >= N) continue;                                  \
+            float val = alpha * acc[e];                                        \
+            if (beta != 0.0f)                                                  \
+                val += beta * to_f(C[(long long)gr * ldc + gc]);               \
+            C[(long long)gr * ldc + gc] = FROM_F(val);                         \
+        }                                                                      \
+    }                                                                          \
+}
+
+DEFINE_SGEMM_BI_NN_TC16(bf16, __nv_bfloat16, from_f_bf16, "bf16")
+DEFINE_SGEMM_BI_NN_TC16(f16,  __half,        from_f_f16,  "f16")
+
 // TN (dW) staging: Xs[m_local][k_out chunk], dYs[m_local][n chunk]; both
 // rows are the M-reduction dim (SGB_TC64_BK rows per tile, 64-wide rows).
 #define SGB_TC64_STAGE_TN_ASYNC(buf, mIdx)                                    \

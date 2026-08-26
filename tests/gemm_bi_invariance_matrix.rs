@@ -65,21 +65,34 @@ fn synth(n: usize, seed: u64) -> Vec<f32> {
 }
 
 /// One family under test: launches the prefix `A[0..m]` and returns the
-/// PROBE ROW's output bits (row 0 — the row whose vector never changes).
+/// bits of the first `min(m, CMP_ROWS) * n` outputs. Comparing the whole
+/// common prefix, not just row 0, is what gives the walk its
+/// sensitivity: a family switch that differs on ~0.1% of elements is
+/// near-invisible to a single row (the first version of this suite
+/// missed a real switch exactly that way) and unmissable over 128 rows.
 type LaunchFn<'a> = dyn FnMut(usize) -> Vec<u32> + 'a;
 
+const CMP_ROWS: usize = 128;
+
 /// Walk the ladder, return the observed boundary set: every ladder m at
-/// which the probe row's bits differ from the previous ladder m.
+/// which the common-prefix bits differ from the previous ladder m. The
+/// prefix rows are the SAME input rows in both launches (one fixed A,
+/// prefix launches), so per the L2 law their bits must not move.
 fn observed_boundaries(launch: &mut LaunchFn<'_>, k: usize, n: usize) -> Vec<usize> {
     let mut prev: Option<Vec<u32>> = None;
     let mut bounds = Vec::new();
     for &m in M_LADDER {
         let bits = launch(m);
-        assert_eq!(bits.len(), n, "probe row width at m={m} k={k}");
-        if let Some(p) = &prev
-            && *p != bits
-        {
-            bounds.push(m);
+        assert_eq!(
+            bits.len(),
+            m.min(CMP_ROWS) * n,
+            "prefix size at m={m} k={k}"
+        );
+        if let Some(p) = &prev {
+            let common = p.len().min(bits.len());
+            if p[..common] != bits[..common] {
+                bounds.push(m);
+            }
         }
         prev = Some(bits);
     }
@@ -110,7 +123,6 @@ struct Fixture {
     a: GpuBuffer,
     b: GpuBuffer,
     c: GpuBuffer,
-    k: usize,
     n: usize,
 }
 
@@ -127,14 +139,16 @@ impl Fixture {
             a: GpuBuffer::from_cpu(stream, &a_host).expect("A"),
             b: GpuBuffer::from_cpu(stream, &synth(k * n, 0xB0B ^ n as u64)).expect("B"),
             c: GpuBuffer::zeros(stream, m_max * n).expect("C"),
-            k,
             n,
         }
     }
 
-    fn row0_bits(&self, ctx: &GpuCtx) -> Vec<u32> {
+    fn prefix_bits(&self, ctx: &GpuCtx, m: usize) -> Vec<u32> {
         let full = self.c.to_cpu(&ctx.stream).expect("C D2H");
-        full[..self.n].iter().map(|v| v.to_bits()).collect()
+        full[..m.min(CMP_ROWS) * self.n]
+            .iter()
+            .map(|v| v.to_bits())
+            .collect()
     }
 }
 
@@ -145,60 +159,53 @@ struct TypedFixture {
     b: DtypedBuf,
     c: DtypedBuf,
     c_elems: usize,
-    k: usize,
     n: usize,
 }
 
 impl TypedFixture {
     fn new(ctx: &GpuCtx, k: usize, n: usize, dt: WeightDtype) -> Self {
         let m_max = *M_LADDER.last().expect("ladder non-empty");
-        // ADVERSARIAL magnitudes, deliberately: with tame inputs the
-        // reassociation difference between two reduction graphs lives in
-        // the low f32 accumulator bits and the RNE downcast to a 16-bit
-        // output rounds it away - the first run of this suite proved the
-        // M=128 family switch bitwise-invisible on such inputs. Mixed
-        // scales (x1024 spikes over a small floor) push partial-sum
-        // ordering into the representable range of the output dtype.
+        // The EXPOSING probe (established by census_matvec_vs_thin16):
+        // +-4096 at stride 4 with x512 spikes between them. Adjacent-pair
+        // cancellation is useless here - contiguous-ascending partitions
+        // cancel the pairs exactly in every association - so the pattern
+        // interleaves signs and magnitudes at co-prime strides instead.
+        // This is what turned the matvec/TC family difference from
+        // invisible to 0.1-0.3% of elements.
         let mut a_host = synth(m_max * k, 0xA5EED ^ (k * n) as u64);
-        // Catastrophic-cancellation probe row: adjacent +X/-X pairs whose
-        // true sum is a small residual. Reassociating the big pairs moves
-        // the f32 partial sums by O(X * 2^-24); with X/residual ~ 2^17
-        // that lands ABOVE the output dtype's ulp, so any change in the
-        // reduction graph must surface even through a bf16 store.
-        for (i, slot) in a_host[..k].iter_mut().enumerate() {
-            *slot = if i % 2 == 0 { 4096.0 } else { -4096.0 };
-        }
-        for slot in a_host[..k].iter_mut().step_by(31) {
-            *slot += 0.031;
+        for (i, v) in a_host.iter_mut().enumerate() {
+            match i % 4 {
+                0 => *v = 4096.0,
+                1 => *v = -4096.0,
+                2 => *v *= 512.0,
+                _ => {}
+            }
         }
         let stream = &ctx.stream;
         let a = DtypedBuf::zeros(stream, m_max * k, dt).expect("A");
         a.upload_f32(stream, &a_host).expect("A up");
         let b = DtypedBuf::zeros(stream, k * n, dt).expect("B");
-        let mut b_host = synth(k * n, 0xB0B ^ n as u64);
-        for (i, v) in b_host.iter_mut().enumerate() {
-            if i % 11 == 0 {
-                *v *= 512.0;
-            }
-        }
-        b.upload_f32(stream, &b_host).expect("B up");
+        b.upload_f32(stream, &synth(k * n, 0xB0B ^ n as u64))
+            .expect("B up");
         let c = DtypedBuf::zeros(stream, m_max * n, dt).expect("C");
         TypedFixture {
             a,
             b,
             c,
             c_elems: m_max * n,
-            k,
             n,
         }
     }
 
-    fn row0_bits(&self, ctx: &GpuCtx) -> Vec<u32> {
+    fn prefix_bits(&self, ctx: &GpuCtx, m: usize) -> Vec<u32> {
         // download_f32 widens losslessly and injectively: equal f32 bits
         // <=> equal 16-bit bits. This IS the raw-byte compare.
         let mut full = vec![0.0f32; self.c_elems];
         self.c.download_f32(&ctx.stream, &mut full).expect("C D2H");
-        full[..self.n].iter().map(|v| v.to_bits()).collect()
+        full[..m.min(CMP_ROWS) * self.n]
+            .iter()
+            .map(|v| v.to_bits())
+            .collect()
     }
 }
 
@@ -247,7 +254,7 @@ fn fixed_f32_is_strictly_invariant() {
                 (m, k, n),
             )
             .expect("fixed f32 forward");
-            fx.row0_bits(&ctx)
+            fx.prefix_bits(&ctx, m)
         };
         let obs = observed_boundaries(&mut launch, k, n);
         assert_contract("Fixed/f32", k, n, Invariance::Strict, &obs);
@@ -284,7 +291,7 @@ fn fixed_bf16_is_strictly_invariant() {
                 (m, k, n),
             )
             .expect("fixed bf16 forward");
-            fx.row0_bits(&ctx)
+            fx.prefix_bits(&ctx, m)
         };
         let obs = observed_boundaries(&mut launch, k, n);
         assert_contract("Fixed/bf16", k, n, Invariance::Strict, &obs);
@@ -329,7 +336,10 @@ fn triad_f32_boundaries_match_the_declared_table() {
             gpu_sgemm_forward_raw(&ctx, &mut c, &a, b.raw_ptr(&ctx.stream), None, (m, k, n))
                 .expect("triad f32 forward");
             let full = c.to_cpu(&ctx.stream).expect("C D2H");
-            full[..n].iter().map(|v| v.to_bits()).collect()
+            full[..m.min(CMP_ROWS) * n]
+                .iter()
+                .map(|v| v.to_bits())
+                .collect()
         };
         let obs = observed_boundaries(&mut launch, k, n);
         assert_contract("Triad/f32", k, n, Invariance::Bucketed(edges), &obs);
@@ -339,16 +349,21 @@ fn triad_f32_boundaries_match_the_declared_table() {
 
 /// The typed BI route (what the m3 mixed forward and the future typed
 /// prefill call). The dispatcher SWITCHES kernels at M=128 (matvec below,
-/// typed triad / TC at and above) - architecturally two families - yet
-/// three probe classes (tame, mixed-magnitude, catastrophic-cancellation)
-/// all observe STRICT invariance across the boundary, TC tier on or off.
-/// Declared Strict on the OBSERVED contract: if a boundary ever appears
-/// here, the switch has surfaced - investigate the exposing input class
-/// before touching the declaration. (The static-analysis claim that this
-/// break is live is hereby corrected: no exposing input is known.)
+/// typed triad / TC at and above) - two arithmetic families, and the
+/// boundary IS observable: under the 128-row prefix comparison with the
+/// magnitude-heterogeneous probe, the bits change at M=128.
+///
+/// Chronicle, because this arm flip-flopped once: the first recording
+/// declared STRICT on a row-0-only comparison with cancellation-symmetric
+/// probes (adjacent +x/-x pairs sum exactly in ANY contiguous ascending
+/// K-partition, and row 0 alone samples ~0.1% of the output) - a probe
+/// too weak to see the switch. The defect census (gemm_bi_contract_census)
+/// exposed it with the i%4 magnitude pattern; this matrix now compares the
+/// full common prefix and agrees with the census. The static analysis that
+/// called this break live was RIGHT.
 #[test]
 #[ignore = "needs a CUDA device"]
-fn typed_route_tc_tier_observed_strict() {
+fn typed_route_tc_tier_boundaries_match_the_declared_table() {
     let (_dev, ctx) = ctx_new();
     ctx.set_batch_invariant(true);
     ctx.set_bi_gemm_family(BiGemmFamily::Triad);
@@ -357,7 +372,11 @@ fn typed_route_tc_tier_observed_strict() {
     // scalar matvec. (The first run of this suite discovered that WITHOUT
     // the TC tier the two sides agree bitwise - see the scalar arm below.)
     ctx.set_bi_tensor_cores(true);
-    for &(k, n) in &[(384usize, 384usize), (768, 2304)] {
+    // Declared per (K, N): the matvec -> TC K-slab family switch at 128.
+    // Re-record (do not hand-edit) if the dispatcher thresholds move.
+    let declared: &[(usize, usize, &[usize])] =
+        &[(384, 384, &[128usize] as &[usize]), (768, 2304, &[128])];
+    for &(k, n, edges) in declared {
         let fx = TypedFixture::new(&ctx, k, n, WeightDtype::Bf16);
         let mut launch = |m: usize| -> Vec<u32> {
             gpu_gemm_typed_forward_raw(
@@ -378,26 +397,38 @@ fn typed_route_tc_tier_observed_strict() {
                 (m, k, n),
             )
             .expect("typed route forward");
-            fx.row0_bits(&ctx)
+            fx.prefix_bits(&ctx, m)
         };
         let obs = observed_boundaries(&mut launch, k, n);
-        assert_contract("Typed-route/bf16+tc", k, n, Invariance::Strict, &obs);
+        assert_contract(
+            "Typed-route/bf16+tc",
+            k,
+            n,
+            Invariance::Bucketed(edges),
+            &obs,
+        );
         println!("Typed/bf16+tc K={k:<5} N={n:<5} boundaries: {obs:?}");
     }
 }
 
-/// The same typed route WITHOUT the tensor-core tier: the first run of
-/// this suite observed NO boundary at M=128 here - the scalar matvec and
-/// the typed-native/upcast buckets agreed bitwise on the probe row. This
-/// arm pins that observation; if it ever grows a boundary, the route
-/// changed underneath the callers that rely on it.
+/// The same typed route WITHOUT the tensor-core tier. The scalar tier is
+/// bucketed too: matvec below 128, the typed scalar tile at and above it,
+/// and the tile's split-K engagement adds its own edges at large M. (The
+/// first recording declared this arm STRICT off the same weak row-0
+/// comparison as the TC arm - see the chronicle there.)
 #[test]
 #[ignore = "needs a CUDA device"]
-fn typed_route_scalar_tier_observed_strict() {
+fn typed_route_scalar_tier_boundaries_match_the_declared_table() {
     let (_dev, ctx) = ctx_new();
     ctx.set_batch_invariant(true);
     ctx.set_bi_gemm_family(BiGemmFamily::Triad);
-    for &(k, n) in &[(384usize, 384usize), (768, 2304)] {
+    // Declared per (K, N); recorded on ada (sm_89) under the 128-row
+    // prefix comparison. Re-record (do not hand-edit) on change.
+    let declared: &[(usize, usize, &[usize])] = &[
+        (384, 384, &[128usize, 1025, 4621] as &[usize]),
+        (768, 2304, &[128]),
+    ];
+    for &(k, n, edges) in declared {
         let fx = TypedFixture::new(&ctx, k, n, WeightDtype::Bf16);
         let mut launch = |m: usize| -> Vec<u32> {
             gpu_gemm_typed_forward_raw(
@@ -418,10 +449,10 @@ fn typed_route_scalar_tier_observed_strict() {
                 (m, k, n),
             )
             .expect("typed route forward");
-            fx.row0_bits(&ctx)
+            fx.prefix_bits(&ctx, m)
         };
         let obs = observed_boundaries(&mut launch, k, n);
-        assert_contract("Typed-scalar/bf16", k, n, Invariance::Strict, &obs);
+        assert_contract("Typed-scalar/bf16", k, n, Invariance::Bucketed(edges), &obs);
         println!("TypedNoTc   K={k:<5} N={n:<5} boundaries: {obs:?}");
     }
 }

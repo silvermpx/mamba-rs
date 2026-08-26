@@ -450,6 +450,9 @@ pub struct MambaKernels {
     /// 128-tile grid would underfill the GPU and for shapes with an output
     /// dim in [64, 128).
     pub sgemm_nn_tc64_typed: HalfKernel,
+    /// Thin16 rung (16x32x64, 4 warps, 4-stage) - the decode end of the
+    /// bit-identical TC tile ladder.
+    pub sgemm_nn_tc16_typed: HalfKernel,
     pub sgemm_tn_tc64_typed: HalfKernel,
     pub sgemm_nt_tc64_typed: HalfKernel,
     pub sgemm_tn_big_typed: HalfKernel,
@@ -985,6 +988,7 @@ impl MambaKernels {
             sgemm_tn_tc_typed: load_half_dynsmem("sgemm_bi_tn_tc", 75_776)?,
             sgemm_nt_tc_typed: load_half_dynsmem("sgemm_bi_nt_tc", 75_776)?,
             sgemm_nn_tc64_typed: load_half("sgemm_bi_nn_tc64")?,
+            sgemm_nn_tc16_typed: load_half("sgemm_bi_nn_tc16")?,
             sgemm_tn_tc64_typed: load_half("sgemm_bi_tn_tc64")?,
             sgemm_nt_tc64_typed: load_half("sgemm_bi_nt_tc64")?,
             sgemm_tn_big_typed: load_half_dynsmem("sgemm_bi_tn_big", 34 * 1024)?,

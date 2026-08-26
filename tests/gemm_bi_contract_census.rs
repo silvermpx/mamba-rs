@@ -156,3 +156,182 @@ fn census_wmma_vs_mma_sync() {
         "WMMA and mma.sync diverged - the golden-free retirement no longer holds"
     );
 }
+
+/// G3 ladder-legality gate: the Thin16 rung must be byte-identical to
+/// Tile64 on every shape - same arithmetic contract, different schedule.
+/// This is the license that makes an M-indexed rung selection legal.
+#[test]
+#[ignore = "needs a CUDA device"]
+fn census_thin16_vs_tile64() {
+    use mamba_rs::mamba_ssm::gpu::gemm_bi_triad::{
+        TcFwdOperands, TcTile, sgemm_bi_forward_tc_with_tile,
+    };
+
+    let dev = GpuDevice::new(0).expect("cuda device");
+    let ctx = GpuCtx::new(&dev).expect("ctx");
+
+    // Decode-class shapes plus tails and one prefill-class control.
+    let shapes: &[(usize, usize, usize)] = &[
+        (1, 768, 2560),
+        (4, 1536, 768),
+        (16, 768, 2304),
+        (17, 65, 33),
+        (32, 384, 384),
+        (129, 384, 1928),
+        (128, 383, 383),
+    ];
+
+    for &(m, k, n) in shapes {
+        let a = DtypedBuf::zeros(&ctx.stream, m * k, WeightDtype::Bf16).expect("A");
+        a.upload_f32(&ctx.stream, &synth(m * k, 0xA11CE ^ m as u64))
+            .expect("A up");
+        let w = DtypedBuf::zeros(&ctx.stream, k * n, WeightDtype::Bf16).expect("W");
+        w.upload_f32(&ctx.stream, &synth(k * n, 0xB0B ^ n as u64))
+            .expect("W up");
+        let c16 = DtypedBuf::zeros(&ctx.stream, m * n, WeightDtype::Bf16).expect("C16");
+        let c64 = DtypedBuf::zeros(&ctx.stream, m * n, WeightDtype::Bf16).expect("C64");
+
+        let run = |c: &DtypedBuf, tile: TcTile| {
+            sgemm_bi_forward_tc_with_tile(
+                &ctx.stream,
+                &ctx.kernels,
+                &TcFwdOperands {
+                    y: TypedPtr {
+                        ptr: c.cached_ptr(),
+                        dtype: WeightDtype::Bf16,
+                    },
+                    x: TypedPtr {
+                        ptr: a.cached_ptr(),
+                        dtype: WeightDtype::Bf16,
+                    },
+                    w: TypedPtr {
+                        ptr: w.cached_ptr(),
+                        dtype: WeightDtype::Bf16,
+                    },
+                    bias_ptr: 0,
+                },
+                (m, k, n),
+                tile,
+            )
+            .expect("tc launch");
+        };
+        run(&c16, TcTile::Thin16);
+        run(&c64, TcTile::Tile64);
+        let b16 = bits(&c16, m * n, &ctx);
+        let b64 = bits(&c64, m * n, &ctx);
+        let diff = b16.iter().zip(&b64).filter(|(x, y)| x != y).count();
+        println!(
+            "{m:>4}x{k:<5}x{n:<5} Thin16 == Tile64: {} (diff {diff}/{})",
+            diff == 0,
+            m * n
+        );
+        assert_eq!(
+            diff, 0,
+            "Thin16 diverged from Tile64 at {m}x{k}x{n} - the rung is NOT \
+             bit-identical and may not join the ladder"
+        );
+    }
+}
+
+/// The decisive census for the decode ladder: is matvec_bi bit-identical
+/// to the TC chain? If yes, matvec and the TC rungs are ONE arithmetic
+/// contract and an M-keyed pick between them is legal scheduling; if no,
+/// matvec at small M is a documented bucketed exception.
+#[test]
+#[ignore = "needs a CUDA device"]
+fn census_matvec_vs_thin16() {
+    use mamba_rs::mamba_ssm::gpu::blas::gpu_gemm_typed_forward_raw;
+    use mamba_rs::mamba_ssm::gpu::gemm_bi_triad::{
+        TcFwdOperands, TcTile, sgemm_bi_forward_tc_with_tile,
+    };
+
+    let dev = GpuDevice::new(0).expect("cuda device");
+    let ctx = GpuCtx::new(&dev).expect("ctx");
+    ctx.set_batch_invariant(true);
+    ctx.set_bi_gemm_family(BiGemmFamily::Fixed);
+    // Force matvec through the typed route: the Fixed check is first, so
+    // flip family to Triad only for the matvec launch below.
+
+    let shapes: &[(usize, usize, usize)] = &[
+        (1, 768, 2560),
+        (1, 1536, 768),
+        (3, 65, 33),
+        (16, 768, 2304),
+        (32, 384, 384),
+    ];
+
+    let mut all_equal = true;
+    for &(m, k, n) in shapes {
+        // Adversarial + cancellation mix, the strongest probes we have.
+        let mut a_host = synth(m * k, 0xA11CE ^ m as u64);
+        for (i, v) in a_host.iter_mut().enumerate() {
+            match i % 4 {
+                0 => *v = 4096.0,
+                1 => *v = -4096.0,
+                2 => *v *= 512.0,
+                _ => {}
+            }
+        }
+        let a = DtypedBuf::zeros(&ctx.stream, m * k, WeightDtype::Bf16).expect("A");
+        a.upload_f32(&ctx.stream, &a_host).expect("A up");
+        let w = DtypedBuf::zeros(&ctx.stream, k * n, WeightDtype::Bf16).expect("W");
+        w.upload_f32(&ctx.stream, &synth(k * n, 0xB0B ^ n as u64))
+            .expect("W up");
+        let c_mv = DtypedBuf::zeros(&ctx.stream, m * n, WeightDtype::Bf16).expect("Cm");
+        let c_tc = DtypedBuf::zeros(&ctx.stream, m * n, WeightDtype::Bf16).expect("Ct");
+
+        ctx.set_bi_gemm_family(BiGemmFamily::Triad);
+        gpu_gemm_typed_forward_raw(
+            &ctx,
+            TypedPtr {
+                ptr: c_mv.cached_ptr(),
+                dtype: WeightDtype::Bf16,
+            },
+            TypedPtr {
+                ptr: a.cached_ptr(),
+                dtype: WeightDtype::Bf16,
+            },
+            TypedPtr {
+                ptr: w.cached_ptr(),
+                dtype: WeightDtype::Bf16,
+            },
+            None,
+            (m, k, n),
+        )
+        .expect("matvec route");
+
+        sgemm_bi_forward_tc_with_tile(
+            &ctx.stream,
+            &ctx.kernels,
+            &TcFwdOperands {
+                y: TypedPtr {
+                    ptr: c_tc.cached_ptr(),
+                    dtype: WeightDtype::Bf16,
+                },
+                x: TypedPtr {
+                    ptr: a.cached_ptr(),
+                    dtype: WeightDtype::Bf16,
+                },
+                w: TypedPtr {
+                    ptr: w.cached_ptr(),
+                    dtype: WeightDtype::Bf16,
+                },
+                bias_ptr: 0,
+            },
+            (m, k, n),
+            TcTile::Thin16,
+        )
+        .expect("thin16 launch");
+
+        let bm = bits(&c_mv, m * n, &ctx);
+        let bt = bits(&c_tc, m * n, &ctx);
+        let diff = bm.iter().zip(&bt).filter(|(x, y)| x != y).count();
+        let equal = diff == 0;
+        all_equal &= equal;
+        println!(
+            "{m:>4}x{k:<5}x{n:<5} matvec == Thin16: {equal} (diff {diff}/{})",
+            m * n
+        );
+    }
+    println!("CENSUS VERDICT: matvec bit-identical to the TC chain: {all_equal}");
+}

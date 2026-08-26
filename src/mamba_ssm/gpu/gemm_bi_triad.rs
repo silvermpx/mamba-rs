@@ -1766,6 +1766,11 @@ pub enum TcTile {
     Tile128,
     /// 64x64 CTA tile, 128 threads / 4 warps (`sgemm_bi_*_tc64_*`).
     Tile64,
+    /// 16x32 CTA tile, 128 threads / 4 warps, 4-stage cp.async
+    /// (`sgemm_bi_nn_tc16_*`) - the decode rung of the ladder. NN
+    /// forward only; not yet in `tc_pick_tile` (G4 lands the ladder
+    /// selector).
+    Thin16,
 }
 
 /// Underfill threshold for the TC tile picker: when BOTH output dims pass
@@ -1802,10 +1807,12 @@ fn tc_pick_tile(rows: usize, cols: usize) -> Option<TcTile> {
 
 impl TcTile {
     /// CTA tile edge in output elements.
-    fn edge(self) -> u32 {
+    /// Output-tile extents `(bm, bn)` - the ladder is not square.
+    fn extents(self) -> (u32, u32) {
         match self {
-            TcTile::Tile128 => 128,
-            TcTile::Tile64 => 64,
+            TcTile::Tile128 => (128, 128),
+            TcTile::Tile64 => (64, 64),
+            TcTile::Thin16 => (16, 32),
         }
     }
 
@@ -1813,7 +1820,7 @@ impl TcTile {
     fn block_dim(self) -> u32 {
         match self {
             TcTile::Tile128 => 256,
-            TcTile::Tile64 => 128,
+            TcTile::Tile64 | TcTile::Thin16 => 128,
         }
     }
 
@@ -1829,14 +1836,14 @@ impl TcTile {
         cols: usize,
         dyn_bytes128: u32,
     ) -> cudarc::driver::LaunchConfig {
-        let e = self.edge();
-        let total_tiles = (rows as u32).div_ceil(e) * (cols as u32).div_ceil(e);
+        let (bm, bn) = self.extents();
+        let total_tiles = (rows as u32).div_ceil(bm) * (cols as u32).div_ceil(bn);
         cudarc::driver::LaunchConfig {
             grid_dim: (total_tiles, 1, 1),
             block_dim: (self.block_dim(), 1, 1),
             shared_mem_bytes: match self {
                 TcTile::Tile128 => dyn_bytes128,
-                TcTile::Tile64 => 0,
+                TcTile::Tile64 | TcTile::Thin16 => 0,
             },
         }
     }
@@ -1907,6 +1914,7 @@ pub fn sgemm_bi_forward_tc_with_tile(
     let func = match tile {
         TcTile::Tile128 => kernels.sgemm_nn_tc_typed.get(dt),
         TcTile::Tile64 => kernels.sgemm_nn_tc64_typed.get(dt),
+        TcTile::Thin16 => kernels.sgemm_nn_tc16_typed.get(dt),
     };
     let mut b = stream.launch_builder(func);
     b.arg(&ops.y.ptr);
@@ -1973,6 +1981,12 @@ pub fn sgemm_bi_backward_dw_tc_with_tile(
     let func = match tile {
         TcTile::Tile128 => kernels.sgemm_tn_tc_typed.get(dt),
         TcTile::Tile64 => kernels.sgemm_tn_tc64_typed.get(dt),
+        // The thin rung is NN-forward-only by design: a backward runs at
+        // training M where the big tiles win, and dW/dX carry their own
+        // operand layouts. Refuse loudly rather than mis-launch.
+        TcTile::Thin16 => {
+            return Err("Thin16 is an NN-forward rung; the TN dW path has no thin tile".into());
+        }
     };
     let mut b = stream.launch_builder(func);
     b.arg(&dw_ptr);
@@ -2031,6 +2045,9 @@ pub fn sgemm_bi_backward_dx_tc_with_tile(
     let func = match tile {
         TcTile::Tile128 => kernels.sgemm_nt_tc_typed.get(dt),
         TcTile::Tile64 => kernels.sgemm_nt_tc64_typed.get(dt),
+        TcTile::Thin16 => {
+            return Err("Thin16 is an NN-forward rung; the NT dX path has no thin tile".into());
+        }
     };
     let mut b = stream.launch_builder(func);
     b.arg(&dx.ptr);
