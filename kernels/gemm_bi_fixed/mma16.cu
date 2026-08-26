@@ -79,7 +79,7 @@
             const void* _src = (_bytes > 0)                                   \
                 ? (const void*)&A[(long long)_gr * lda + _gc]                 \
                 : (const void*)A;                                             \
-            asm volatile("cp.async.ca.shared.global [%0], [%1], 16, %2;\n"    \
+            asm volatile("cp.async.cg.shared.global [%0], [%1], 16, %2;\n"    \
                          :: "r"(_dst), "l"(_src), "r"(_bytes));               \
         }                                                                     \
         for (int _i = threadIdx.x; _i < GBF128_BK * (GBF128_BN / 8); _i += 256) {     \
@@ -94,7 +94,7 @@
             const void* _src = (_bytes > 0)                                   \
                 ? (const void*)&B[(long long)_gk * ldb + _gn]                 \
                 : (const void*)B;                                             \
-            asm volatile("cp.async.ca.shared.global [%0], [%1], 16, %2;\n"    \
+            asm volatile("cp.async.cg.shared.global [%0], [%1], 16, %2;\n"    \
                          :: "r"(_dst), "l"(_src), "r"(_bytes));               \
         }                                                                     \
         asm volatile("cp.async.commit_group;\n");                            \
@@ -344,7 +344,7 @@ DEFINE_GEMM_BI_NN_TC128(f16,  __half,        from_f_f16,  "f16")
             const void* _src = (_bytes > 0)                                   \
                 ? (const void*)&A[(long long)_gr * lda + _gc]                 \
                 : (const void*)A;                                             \
-            asm volatile("cp.async.ca.shared.global [%0], [%1], 16, %2;\n"    \
+            asm volatile("cp.async.cg.shared.global [%0], [%1], 16, %2;\n"    \
                          :: "r"(_dst), "l"(_src), "r"(_bytes));               \
         }                                                                     \
         for (int _i = threadIdx.x; _i < GBF64_BK * (GBF64_BN / 8);      \
@@ -359,7 +359,7 @@ DEFINE_GEMM_BI_NN_TC128(f16,  __half,        from_f_f16,  "f16")
             const void* _src = (_bytes > 0)                                   \
                 ? (const void*)&B[(long long)_gk * ldb + _gn]                 \
                 : (const void*)B;                                             \
-            asm volatile("cp.async.ca.shared.global [%0], [%1], 16, %2;\n"    \
+            asm volatile("cp.async.cg.shared.global [%0], [%1], 16, %2;\n"    \
                          :: "r"(_dst), "l"(_src), "r"(_bytes));               \
         }                                                                     \
         asm volatile("cp.async.commit_group;\n");                            \
@@ -579,7 +579,7 @@ DEFINE_GEMM_BI_NN_TC64(f16,  __half,        from_f_f16,  "f16")
             const void* _src = (_bytes > 0)                                   \
                 ? (const void*)&A[(long long)_gr * lda + _gc]                 \
                 : (const void*)A;                                             \
-            asm volatile("cp.async.ca.shared.global [%0], [%1], 16, %2;\n"    \
+            asm volatile("cp.async.cg.shared.global [%0], [%1], 16, %2;\n"    \
                          :: "r"(_dst), "l"(_src), "r"(_bytes));               \
         }                                                                     \
         for (int _i = threadIdx.x; _i < GBF16_BK * (GBF16_BN / 8);      \
@@ -594,7 +594,7 @@ DEFINE_GEMM_BI_NN_TC64(f16,  __half,        from_f_f16,  "f16")
             const void* _src = (_bytes > 0)                                   \
                 ? (const void*)&B[(long long)_gk * ldb + _gn]                 \
                 : (const void*)B;                                             \
-            asm volatile("cp.async.ca.shared.global [%0], [%1], 16, %2;\n"    \
+            asm volatile("cp.async.cg.shared.global [%0], [%1], 16, %2;\n"    \
                          :: "r"(_dst), "l"(_src), "r"(_bytes));               \
         }                                                                     \
         asm volatile("cp.async.commit_group;\n");                            \
