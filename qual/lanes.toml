@@ -28,6 +28,7 @@
 "ddp_nccl_two_ranks" = "record"
 "ddp_reduction_tree" = "gate"
 "decode_digest" = "contract"
+"determinism_source_gates" = "host"
 "device_facts" = "record"
 "epilogue_bench" = "record"
 "extreme_edge_coverage" = "contract"

@@ -10,33 +10,9 @@
 //! needs no GPU: it reads the sources and rejects any multiplication
 //! spelled outside an intrinsic.
 
-use std::path::Path;
+mod common;
 
-fn strip_comments(line: &str) -> String {
-    let line = match line.find("//") {
-        Some(i) => &line[..i],
-        None => line,
-    };
-    // Kernel macros carry per-line /* ... */ comments; drop their bodies.
-    let mut out = String::new();
-    let mut rest = line;
-    loop {
-        match rest.find("/*") {
-            None => {
-                out.push_str(rest);
-                break;
-            }
-            Some(i) => {
-                out.push_str(&rest[..i]);
-                match rest[i..].find("*/") {
-                    Some(j) => rest = &rest[i + j + 2..],
-                    None => break,
-                }
-            }
-        }
-    }
-    out
-}
+use std::path::Path;
 
 #[test]
 fn fixed_family_epilogues_spell_alpha_and_beta_through_intrinsics() {
@@ -51,8 +27,8 @@ fn fixed_family_epilogues_spell_alpha_and_beta_through_intrinsics() {
             continue;
         }
         let text = std::fs::read_to_string(&path).expect("kernel source");
-        for (i, raw) in text.lines().enumerate() {
-            let line = strip_comments(raw);
+        let stripped = common::source_scan::strip_comments_lines(&text);
+        for (i, (raw, line)) in text.lines().zip(&stripped).enumerate() {
             for var in ["alpha", "beta"] {
                 let mut from = 0;
                 while let Some(pos) = line[from..].find(var) {
