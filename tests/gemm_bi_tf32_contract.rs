@@ -1967,13 +1967,13 @@ fn sass_line_instructions<'a>(entry: &'a str, symbol: &str) -> Vec<SassInstructi
         let Some((offset, predicate, mnemonic, operands)) = sass_instruction(line) else {
             continue;
         };
-        let (file, source_line) = location
-            .as_ref()
-            .unwrap_or_else(|| panic!("{symbol} SASS offset {offset:x} has no line information"));
         assert!(
             offsets.insert(offset),
             "{symbol} duplicate SASS instruction offset {offset:x}"
         );
+        let Some((file, source_line)) = location.as_ref() else {
+            continue;
+        };
         instructions.push(SassInstruction {
             offset,
             predicate,
@@ -5199,6 +5199,20 @@ DONE:
         })
         .is_err()
     );
+}
+
+#[test]
+fn sass_line_parser_skips_the_unmapped_compiler_prologue() {
+    let entry = r#"
+        /*0000*/ MOV R1, c[0x0][0x28] ;
+        //## File "mamba_tf32_k0_guard", line 1001
+        /*0010*/ ISETP.EQ.AND P0, PT, R2, RZ, PT ;
+    "#;
+    let instructions = sass_line_instructions(entry, "self-oracle");
+    assert_eq!(instructions.len(), 1);
+    assert_eq!(instructions[0].offset, 0x10);
+    assert_eq!(instructions[0].file, "mamba_tf32_k0_guard");
+    assert_eq!(instructions[0].line, 1001);
 }
 
 #[test]
