@@ -5210,6 +5210,13 @@ __device__ __forceinline__ void sgb_accumulate_float2_or_scalar(
     }
 }
 
+template <typename T>
+__device__ __forceinline__ T* sgb_output_start_if_valid(
+    T* base, long long row_offset, int column, int extent) {
+    if (column >= extent) return nullptr;
+    return base + row_offset + column;
+}
+
 __device__ __forceinline__ int sgb_cp_async_valid_elems(
     bool row_valid, int extent, int start) {
     if (!row_valid || start >= extent) return 0;
@@ -5428,9 +5435,11 @@ void sgemm_bi_nn_tc_##SUFFIX(                                                  \
             for (int half = 0; half < 2; half++) {                            \
                 int gr = r0 + (half ? 8 : 0);                                 \
                 if (gr >= M) continue;                                        \
+                T_ACT* dst = sgb_output_start_if_valid(                        \
+                    C, (long long)gr * ldc, c0, N);                            \
+                if (dst == nullptr) continue;                                 \
                 float v0 = alpha * acc[fm][fn][2 * half];                     \
                 float v1 = alpha * acc[fm][fn][2 * half + 1];                 \
-                T_ACT* dst = &C[(long long)gr * ldc + c0];                    \
                 if (beta == 0.0f && packed_epilogue && c0 + 1 < N &&         \
                     sgb_is_aligned_4(dst)) {                                   \
                     sgb_store_pair_rne(dst, v0, v1);                           \
@@ -5655,7 +5664,9 @@ void sgemm_bi_tn_tc_##SUFFIX(                                                  \
             for (int half = 0; half < 2; half++) {                            \
                 int gr = r0 + (half ? 8 : 0);                                 \
                 if (gr >= K_out) continue;                                    \
-                float* dst = &C[(long long)gr * N + c0];                      \
+                float* dst = sgb_output_start_if_valid(                        \
+                    C, (long long)gr * N, c0, N);                              \
+                if (dst == nullptr) continue;                                 \
                 if (c0 + 1 < N) {                                             \
                     float x = alpha * acc[fm][fn][2 * half];                   \
                     float y = alpha * acc[fm][fn][2 * half + 1];               \
@@ -5854,9 +5865,11 @@ void sgemm_bi_nt_tc_##SUFFIX(                                                  \
             for (int half = 0; half < 2; half++) {                            \
                 int gr = r0 + (half ? 8 : 0);                                 \
                 if (gr >= M) continue;                                        \
+                T_ACT* dst = sgb_output_start_if_valid(                        \
+                    C, (long long)gr * K_out, c0, K_out);                      \
+                if (dst == nullptr) continue;                                 \
                 float v0 = alpha * acc[fm][fn][2 * half];                     \
                 float v1 = alpha * acc[fm][fn][2 * half + 1];                 \
-                T_ACT* dst = &C[(long long)gr * K_out + c0];                  \
                 if (packed_epilogue && c0 + 1 < K_out &&                     \
                     sgb_is_aligned_4(dst)) {                                   \
                     sgb_store_pair_rne(dst, v0, v1);                           \

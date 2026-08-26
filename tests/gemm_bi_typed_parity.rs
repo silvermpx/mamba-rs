@@ -1088,6 +1088,66 @@ fn tc128_packed_epilogues_match_scalar_fallback_bytes() {
 }
 
 #[test]
+fn tc128_tn_odd_width_output_subviews_match_exactly() {
+    let t = Ctx::new();
+    let dims = (65usize, 128usize, 129usize);
+
+    for dtype in [WeightDtype::Bf16, WeightDtype::F16] {
+        let a = TypedSubview::new(
+            &t,
+            &det(dims.0 * dims.1, 823, 0.5),
+            dims.0,
+            dims.1,
+            dims.1,
+            0,
+            dtype,
+        );
+        let b = TypedSubview::new(
+            &t,
+            &det(dims.0 * dims.2, 824, 0.5),
+            dims.0,
+            dims.2,
+            dims.2,
+            0,
+            dtype,
+        );
+        let initial = det(dims.1 * dims.2, 825, 0.125);
+        let mut aligned = F32Subview::new(&t, &initial, dims.1, dims.2, dims.2, 0);
+        let mut shifted = F32Subview::new(&t, &initial, dims.1, dims.2, dims.2, 1);
+
+        for repeat in 0..TC_REPEATS {
+            aligned.upload_logical(&t, &initial);
+            shifted.upload_logical(&t, &initial);
+            launch_tc_tn(
+                &t,
+                BackwardSchedule::Tile128,
+                dtype,
+                aligned.ptr(),
+                a.ptr(),
+                b.ptr(),
+                dims,
+            )
+            .unwrap_or_else(|error| panic!("{dtype:?} odd-N aligned repeat={repeat}: {error}"));
+            launch_tc_tn(
+                &t,
+                BackwardSchedule::Tile128,
+                dtype,
+                shifted.ptr(),
+                a.ptr(),
+                b.ptr(),
+                dims,
+            )
+            .unwrap_or_else(|error| panic!("{dtype:?} odd-N shifted repeat={repeat}: {error}"));
+            assert_exact(
+                &format!("{dtype:?} TN odd-N shifted repeat={repeat}"),
+                &shifted.logical_bits(&t),
+                &aligned.logical_bits(&t),
+            );
+        }
+    }
+}
+
+#[test]
 fn tc_cp_async_misaligned_operands_match_scalar_stage_bytes() {
     let t = Ctx::new();
     for dtype in [WeightDtype::Bf16, WeightDtype::F16] {
@@ -1246,4 +1306,44 @@ fn tc_source_centralizes_async_copy_and_avoids_type_punned_stores() {
     );
     assert!(!tc_source.contains("*(unsigned *)&C"));
     assert!(!tc_source.contains("float2 *dst"));
+}
+
+#[test]
+fn tc128_output_pointer_formation_is_column_guarded() {
+    let source = include_str!("../kernels/gemm_bi_triad.cu");
+    let tc_source = source
+        .split_once("#define TC_BM")
+        .expect("tensor-core section marker")
+        .1;
+    let tc128_source = tc_source
+        .split_once("Stage 5b: 64x64-tile tensor-core twins")
+        .expect("Tile64 section marker")
+        .0;
+
+    assert_eq!(
+        tc128_source.matches("sgb_output_start_if_valid(").count(),
+        4,
+        "the helper definition and all three TC128 epilogues must use the guarded output start"
+    );
+    assert!(
+        !tc128_source.contains("= &C["),
+        "TC128 epilogues must not form output pointers before validating c0"
+    );
+    let helper = tc128_source
+        .split_once("T* sgb_output_start_if_valid(")
+        .expect("guarded output helper")
+        .1
+        .split_once("__device__ __forceinline__ int sgb_cp_async_valid_elems")
+        .expect("next device helper")
+        .0;
+    let guard = helper
+        .find("if (column >= extent) return nullptr;")
+        .expect("column guard");
+    let pointer = helper
+        .find("return base + row_offset + column;")
+        .expect("output pointer expression");
+    assert!(
+        guard < pointer,
+        "the column guard must precede pointer formation"
+    );
 }
