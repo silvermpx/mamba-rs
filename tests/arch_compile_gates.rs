@@ -75,6 +75,69 @@ fn sm90a_blob() -> String {
     ])
 }
 
+fn sm100_blob() -> String {
+    compose(&[
+        include_str!("../kernels/_typed_prelude.cuh"),
+        include_str!("../kernels/gemm_bi_triad/contract.cuh"),
+        include_str!("../kernels/gemm_bi_triad/common.cuh"),
+        include_str!("../kernels/gemm_bi_triad/epilogue.cuh"),
+        include_str!("../kernels/gemm_bi_triad/sm100.cu"),
+    ])
+}
+
+fn sm100_symbols() -> Vec<String> {
+    let mut symbols = Vec::new();
+    for op in ["nn", "tn", "nt"] {
+        for tile in ["m128n64", "m128n128"] {
+            for stages in ["s2", "s3", "s4"] {
+                for schedule in ["c4", "p8"] {
+                    for dtype in ["bf16", "f16"] {
+                        symbols.push(format!(
+                            "sgemm_bi_{op}_sm100_tcgen_{tile}_bk64_{stages}_{schedule}_{dtype}"
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    symbols
+}
+
+fn ptxas() -> std::path::PathBuf {
+    for variable in ["CUDA_HOME", "CUDA_PATH", "CUDA_ROOT"] {
+        if let Some(path) = std::env::var_os(variable) {
+            let candidate = std::path::PathBuf::from(path).join("bin/ptxas");
+            if candidate.is_file() {
+                return candidate;
+            }
+        }
+    }
+    let standard = std::path::PathBuf::from("/usr/local/cuda/bin/ptxas");
+    if standard.is_file() {
+        standard
+    } else {
+        "ptxas".into()
+    }
+}
+
+fn assemble_sm100(ptx: &str, target: &str, checker: bool) -> std::process::Output {
+    let directory = tempfile::tempdir().expect("SM100 ptxas tempdir");
+    let input = directory.path().join("triad-sm100.ptx");
+    let output = directory.path().join("triad-sm100.cubin");
+    std::fs::write(&input, ptx).expect("write SM100 PTX");
+    let mut command = std::process::Command::new(ptxas());
+    command.arg(format!("-arch={target}"));
+    if checker {
+        command.arg("-g-tmem-access-check");
+    }
+    command
+        .arg(&input)
+        .arg("-o")
+        .arg(&output)
+        .output()
+        .expect("run ptxas for SM100")
+}
+
 fn compile_for(arch: &'static str) {
     let group_m = if matches!(arch, "sm_80" | "sm_86" | "sm_87") {
         8
@@ -169,6 +232,101 @@ fn compiles_for_sm90a() {
 #[test]
 fn compiles_for_sm100a() {
     compile_for("sm_100a");
+}
+
+#[test]
+fn compiles_exact_sm100_family_triad_modules() {
+    for (requested, emitted) in [
+        ("compute_100f", "sm_100f"),
+        ("compute_100a", "sm_100a"),
+        ("compute_103f", "sm_103f"),
+        ("compute_103a", "sm_103a"),
+    ] {
+        let opts = cudarc::nvrtc::CompileOptions {
+            arch: Some(requested),
+            options: vec!["--fmad=true".to_string(), "-DNDEBUG".to_string()],
+            include_paths: mamba_rs::mamba_ssm::gpu::kernels::cuda_include_paths(),
+            ..Default::default()
+        };
+        let image = cudarc::nvrtc::compile_ptx_with_opts(sm100_blob(), opts)
+            .unwrap_or_else(|error| panic!("TriadSm100 must compile for {requested}: {error}"));
+        let ptx = std::str::from_utf8(image.as_bytes().expect("SM100 PTX image"))
+            .expect("SM100 PTX must be UTF-8");
+        assert!(
+            ptx.lines()
+                .any(|line| line.trim() == format!(".target {emitted}")),
+            "{requested} emitted the wrong PTX target"
+        );
+        for symbol in sm100_symbols() {
+            assert_eq!(
+                ptx.matches(&format!(".entry {symbol}(")).count(),
+                1,
+                "{requested} entry census for {symbol}"
+            );
+        }
+        for instruction in [
+            "cp.async.bulk.tensor.2d.shared::cta.global.tile.mbarrier::complete_tx::bytes",
+            "mbarrier.arrive.expect_tx",
+            "tcgen05.alloc.cta_group::1",
+            "tcgen05.relinquish_alloc_permit.cta_group::1",
+            "tcgen05.dealloc.cta_group::1",
+            "tcgen05.mma.cta_group::1.kind::f16",
+            "tcgen05.commit.cta_group::1.mbarrier::arrive::one",
+            "tcgen05.fence::before_thread_sync",
+            "tcgen05.fence::after_thread_sync",
+            "tcgen05.ld.sync.aligned.32x32b.x8.b32",
+            "tcgen05.wait::ld.sync.aligned",
+            "tcgen05.st.sync.aligned.32x32b.x8.b32",
+            "tcgen05.wait::st.sync.aligned",
+        ] {
+            assert!(
+                ptx.contains(instruction),
+                "{requested} is missing {instruction}"
+            );
+        }
+        assert!(!ptx.contains("cta_group::2"));
+        assert!(!ptx.contains("tcgen05.ld.red"));
+        assert!(!ptx.contains("wgmma."));
+        assert!(!ptx.contains("multicast"));
+        assert!(!ptx.split_ascii_whitespace().any(|token| {
+            token.starts_with("atom.")
+                || token.starts_with("red.")
+                || token.starts_with("atom::")
+                || token.starts_with("red::")
+        }));
+        let assembly = assemble_sm100(ptx, emitted, true);
+        assert!(
+            assembly.status.success(),
+            "ptxas -g-tmem-access-check failed for {emitted}: {}",
+            String::from_utf8_lossy(&assembly.stderr)
+        );
+    }
+}
+
+#[test]
+fn ordinary_sm100_targets_fail_offline_tcgen_assembly() {
+    for (requested, emitted) in [("compute_100", "sm_100"), ("compute_103", "sm_103")] {
+        let opts = cudarc::nvrtc::CompileOptions {
+            arch: Some(requested),
+            options: vec!["--fmad=true".to_string(), "-DNDEBUG".to_string()],
+            include_paths: mamba_rs::mamba_ssm::gpu::kernels::cuda_include_paths(),
+            ..Default::default()
+        };
+        let image = cudarc::nvrtc::compile_ptx_with_opts(sm100_blob(), opts)
+            .unwrap_or_else(|error| panic!("NVRTC ordinary-target probe failed: {error}"));
+        let ptx = std::str::from_utf8(image.as_bytes().expect("ordinary SM100 PTX image"))
+            .expect("ordinary SM100 PTX must be UTF-8");
+        assert!(
+            ptx.lines()
+                .any(|line| line.trim() == format!(".target {emitted}")),
+            "{requested} emitted an unexpected target"
+        );
+        let assembly = assemble_sm100(ptx, emitted, false);
+        assert!(
+            !assembly.status.success(),
+            "ordinary target {emitted} illegally admitted TCGEN05"
+        );
+    }
 }
 
 #[test]
