@@ -57,6 +57,47 @@ pub enum BiGemmFamily {
     Fixed,
 }
 
+/// Numeric policy for deterministic batch-invariant f32 GEMMs.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[repr(u8)]
+pub enum F32TriadPolicy {
+    /// Preserve the scalar `__fmaf_rn` reduction contract.
+    #[default]
+    ExactScalarFmaV1 = 0,
+    /// Permit only frozen and qualified deterministic TF32 routes.
+    AllowDeterministicTf32V1 = 1,
+}
+
+impl F32TriadPolicy {
+    /// Parse the strict public environment spelling for this policy.
+    pub fn parse_env_value(value: &str) -> Result<Self, String> {
+        match value.trim_ascii() {
+            "exact" => Ok(Self::ExactScalarFmaV1),
+            "tf32" => Ok(Self::AllowDeterministicTf32V1),
+            _ => Err(format!(
+                "MAMBA_RS_BI_F32_POLICY={value:?} is not a recognized f32 triad policy \
+                 (use exact or tf32)"
+            )),
+        }
+    }
+}
+
+fn f32_triad_policy_from_result(
+    value: Result<String, std::env::VarError>,
+) -> Result<F32TriadPolicy, String> {
+    match value {
+        Ok(value) => F32TriadPolicy::parse_env_value(&value),
+        Err(std::env::VarError::NotPresent) => Ok(F32TriadPolicy::ExactScalarFmaV1),
+        Err(std::env::VarError::NotUnicode(value)) => Err(format!(
+            "MAMBA_RS_BI_F32_POLICY={value:?} is not valid Unicode (use exact or tf32)"
+        )),
+    }
+}
+
+fn f32_triad_policy_from_env() -> Result<F32TriadPolicy, String> {
+    f32_triad_policy_from_result(std::env::var("MAMBA_RS_BI_F32_POLICY"))
+}
+
 pub use super::kernel_identity::{
     BackendSet as GemmBackendSet, GemmPolicy, GemmRouteIdentity, NumericContractSet,
 };
@@ -120,10 +161,12 @@ pub struct GpuCtx {
     /// shape within a process). Ignored by the batch-invariant path, which
     /// never calls cuBLAS. Env: MAMBA_RS_FAST_GEMM.
     fast_gemm: std::cell::Cell<bool>,
-    /// TF32 SGEMM math is enabled at cublas creation; parity tests clear
-    /// it via [`Self::disable_tf32`]. Tracked so bench stamps can print
-    /// the full four-bit numeric route.
-    tf32: std::cell::Cell<bool>,
+    /// TF32 SGEMM math is enabled at cuBLAS creation; parity tests clear
+    /// it via [`Self::disable_tf32`]. This state is independent from the
+    /// deterministic f32 Triad policy.
+    cublas_tf32: std::cell::Cell<bool>,
+    /// Explicit numeric policy for deterministic batch-invariant f32 GEMMs.
+    f32_triad_policy: std::cell::Cell<F32TriadPolicy>,
     /// The state capacity the kernels were compiled with — part of the
     /// numeric-route identity a bench stamp must carry.
     state_cap: usize,
@@ -218,6 +261,7 @@ impl GpuCtx {
         let batch_invariant = tier_flag("MAMBA_RS_BATCH_INVARIANT")?;
         let bi_tensor_cores = tier_flag("MAMBA_RS_BI_TENSOR_CORES")?;
         let fast_gemm = tier_flag("MAMBA_RS_FAST_GEMM")?;
+        let f32_triad_policy = f32_triad_policy_from_env()?;
         // Same strict-parse law as the tier flags: an unrecognized value
         // fails rather than silently meaning the default family.
         let bi_gemm_family = match std::env::var("MAMBA_RS_BI_GEMM_FAMILY") {
@@ -285,7 +329,8 @@ impl GpuCtx {
             bi_tensor_cores: std::cell::Cell::new(bi_tensor_cores),
             bi_gemm_family: std::cell::Cell::new(bi_gemm_family),
             fast_gemm: std::cell::Cell::new(fast_gemm),
-            tf32: std::cell::Cell::new(true),
+            cublas_tf32: std::cell::Cell::new(true),
+            f32_triad_policy: std::cell::Cell::new(f32_triad_policy),
             state_cap,
             instance_token,
             device_identity: device.identity(),
@@ -612,7 +657,8 @@ impl GpuCtx {
             batch_invariant: bi,
             bi_tensor_cores: tc,
             fast_gemm: fast,
-            tf32: self.tf32.get(),
+            cublas_tf32: self.cublas_tf32.get(),
+            f32_triad_policy: self.f32_triad_policy.get(),
             bi_gemm_family: family,
         };
         let (backend_set, numeric_contracts) =
@@ -627,7 +673,7 @@ impl GpuCtx {
             policy_hash: self.policy_hash,
             device: self.device_identity,
             device_caps: self.device_caps,
-            tuning_table_revision: 0,
+            tuning_table_revision: super::kernel_identity::TUNING_TABLE_REVISION,
             schedule_set_revision: super::kernel_identity::SCHEDULE_REVISION,
             state_capacity: u32::try_from(self.state_cap)
                 .expect("validated state capacity fits in u32"),
@@ -639,7 +685,22 @@ impl GpuCtx {
         self.bi_tensor_cores.get()
     }
 
-    /// Disable TF32 Tensor Cores — use full f32 SGEMM for parity tests.
+    /// Select the deterministic numeric policy used by f32 Triad GEMMs.
+    pub fn set_f32_triad_policy(&self, policy: F32TriadPolicy) {
+        if self.graphs_captured.get() > 0 {
+            eprintln!(
+                "mamba-rs WARNING: GEMM route changed after graph capture; replay will reject it"
+            );
+        }
+        self.f32_triad_policy.set(policy);
+    }
+
+    /// Return the deterministic numeric policy used by f32 Triad GEMMs.
+    pub fn f32_triad_policy(&self) -> F32TriadPolicy {
+        self.f32_triad_policy.get()
+    }
+
+    /// Disable cuBLAS TF32 math without changing the deterministic Triad policy.
     pub fn disable_tf32(&self) {
         if self.graphs_captured.get() > 0 {
             eprintln!(
@@ -657,12 +718,12 @@ impl GpuCtx {
             cudarc::cublas::sys::cublasStatus_t::CUBLAS_STATUS_SUCCESS,
             "cublasSetMathMode default math failed"
         );
-        self.tf32.set(false);
+        self.cublas_tf32.set(false);
     }
 
-    /// TF32 SGEMM math state (true until [`Self::disable_tf32`]).
+    /// cuBLAS TF32 SGEMM state (true until [`Self::disable_tf32`]).
     pub fn tf32(&self) -> bool {
-        self.tf32.get()
+        self.cublas_tf32.get()
     }
 
     /// The state capacity this context's kernels were compiled with.
@@ -800,9 +861,11 @@ impl GpuCtx {
 
 #[cfg(test)]
 mod tests {
-    use super::m1_mixed_graph_max_dim;
+    use super::{F32TriadPolicy, f32_triad_policy_from_result, m1_mixed_graph_max_dim};
     use crate::config::ScanMode;
     use crate::mamba_ssm::gpu::forward::GpuMambaDims;
+    #[cfg(unix)]
+    use std::ffi::OsString;
 
     #[test]
     fn mixed_graph_scratch_covers_the_two_inner_projection_output() {
@@ -821,5 +884,26 @@ mod tests {
             rms_norm_eps: 1e-5,
         };
         assert_eq!(m1_mixed_graph_max_dim(&dims), 258);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn f32_triad_policy_environment_is_strict_and_defaults_to_exact() {
+        use std::os::unix::ffi::OsStringExt as _;
+
+        assert_eq!(
+            f32_triad_policy_from_result(Err(std::env::VarError::NotPresent)).unwrap(),
+            F32TriadPolicy::ExactScalarFmaV1
+        );
+        assert_eq!(
+            f32_triad_policy_from_result(Ok("tf32".into())).unwrap(),
+            F32TriadPolicy::AllowDeterministicTf32V1
+        );
+        let error = f32_triad_policy_from_result(Err(std::env::VarError::NotUnicode(
+            OsString::from_vec(vec![b't', b'f', 0xff, b'3', b'2']),
+        )))
+        .expect_err("non-Unicode policy must fail");
+        assert!(error.contains("MAMBA_RS_BI_F32_POLICY"), "{error}");
+        assert!(error.contains("exact") && error.contains("tf32"), "{error}");
     }
 }

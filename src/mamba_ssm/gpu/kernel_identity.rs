@@ -8,7 +8,7 @@ use std::sync::OnceLock;
 #[cfg(target_os = "linux")]
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use super::context::BiGemmFamily;
+use super::context::{BiGemmFamily, F32TriadPolicy};
 
 pub type Sha256Digest = [u8; 32];
 
@@ -27,8 +27,15 @@ const CACHE_FORMAT_VERSION: u16 = 1;
 
 pub const COMPOSER_REVISION: u16 = 1;
 pub const COMPILER_REVISION: u16 = 2;
-pub const NUMERIC_ABI_REVISION: u16 = 1;
-pub const SCHEDULE_REVISION: u16 = 1;
+pub const NUMERIC_ABI_REVISION: u16 = 2;
+pub const TUNING_TABLE_REVISION: u16 = 1;
+pub const SCHEDULE_REVISION: u16 = 2;
+
+const NUMERIC_CONTRACT_DOMAIN: &[u8] = b"mamba-rs.resolved-numeric-contract.v2";
+const ARTIFACT_DIGEST_DOMAIN: &[u8] = b"mamba-rs.artifact-digest.v1";
+const COMPILER_TARGET_DOMAIN: &[u8] = b"mamba-rs.compiler-target.v1";
+const DRIVER_BUILD_DIGEST_DOMAIN: &[u8] = b"mamba-rs.driver-build-digest.v1";
+const LAUNCH_COUNT_DOMAIN: &[u8] = b"mamba-rs.resolved-launch-count.v1";
 
 pub(crate) fn deterministic_nvrtc_options(
     nvrtc_version: (i32, i32),
@@ -2595,7 +2602,8 @@ pub struct GemmPolicy {
     pub batch_invariant: bool,
     pub bi_tensor_cores: bool,
     pub fast_gemm: bool,
-    pub tf32: bool,
+    pub cublas_tf32: bool,
+    pub f32_triad_policy: F32TriadPolicy,
     pub bi_gemm_family: BiGemmFamily,
 }
 
@@ -2626,6 +2634,7 @@ impl NumericContractSet {
     pub const FIXED_SCALAR_FMA_V1: Self = Self(1 << 3);
     pub const FIXED_MMA_SYNC_V1: Self = Self(1 << 4);
     pub const FIXED_MATVEC_TREE_V1: Self = Self(1 << 5);
+    pub const TRIAD_DETERMINISTIC_TF32_V1: Self = Self(1 << 6);
 
     pub const fn union(self, other: Self) -> Self {
         Self(self.0 | other.0)
@@ -2640,7 +2649,7 @@ pub fn route_backend_contract_sets(policy: GemmPolicy) -> (BackendSet, NumericCo
     if !policy.batch_invariant {
         return (BackendSet::CUBLAS, NumericContractSet::CUBLAS_POLICY_V1);
     }
-    match (policy.bi_gemm_family, policy.bi_tensor_cores) {
+    let (backends, contracts) = match (policy.bi_gemm_family, policy.bi_tensor_cores) {
         (BiGemmFamily::Triad, false) => (
             BackendSet::TRIAD.union(BackendSet::FIXED),
             NumericContractSet::TRIAD_SCALAR_FMA_V1.union(NumericContractSet::FIXED_MATVEC_TREE_V1),
@@ -2664,7 +2673,15 @@ pub fn route_backend_contract_sets(policy: GemmPolicy) -> (BackendSet, NumericCo
                 .union(NumericContractSet::TRIAD_SCALAR_FMA_V1)
                 .union(NumericContractSet::TRIAD_MMA_SYNC_V1),
         ),
-    }
+    };
+    let contracts = if policy.bi_gemm_family == BiGemmFamily::Triad
+        && policy.f32_triad_policy == F32TriadPolicy::AllowDeterministicTf32V1
+    {
+        contracts.union(NumericContractSet::TRIAD_DETERMINISTIC_TF32_V1)
+    } else {
+        contracts
+    };
+    (backends, contracts)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -2710,6 +2727,10 @@ pub enum PhysicalGemmBackend {
     Sm90aWgmmaV1 = 2,
     Sm100Tcgen05V1 = 3,
     Sm120TmaMma16V1 = 4,
+    MmaTf32RnaV1 = 5,
+    Sm90aWgmmaTf32TmaV1 = 6,
+    Sm100Tcgen05Tf32TmaV1 = 7,
+    Sm120TmaMmaTf32RnaV1 = 8,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -2719,6 +2740,35 @@ pub enum ResolvedNumericContract {
     MmaSyncF32V1 = 2,
     WgmmaF32V1 = 3,
     Tcgen05F32V1 = 4,
+    MmaTf32RnaV1 = 5,
+    Sm90aWgmmaTf32TmaV1 = 6,
+    Sm100Tcgen05Tf32TmaV1 = 7,
+    Sm120TmaMmaTf32RnaV1 = 8,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[repr(u8)]
+pub enum ResolvedInstructionFamily {
+    ScalarFma = 1,
+    MmaSync = 2,
+    Wgmma = 3,
+    Tcgen05 = 4,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct ResolvedInstructionShape {
+    pub m: u16,
+    pub n: u16,
+    pub k: u16,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[repr(u8)]
+pub enum ResolvedOperandConversion {
+    None = 0,
+    RegisterCvtRnaTf32F32V1 = 1,
+    TensorMapTfloat32V1 = 2,
+    TensorMapUint32ThenCvtRnaTf32F32V1 = 3,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -2727,6 +2777,9 @@ pub struct ResolvedGemmRoute {
     pub dtype: PolicyDtype,
     pub backend: PhysicalGemmBackend,
     pub numeric_contract: ResolvedNumericContract,
+    pub instruction_family: ResolvedInstructionFamily,
+    pub instruction_shape: ResolvedInstructionShape,
+    pub operand_conversion: ResolvedOperandConversion,
     pub symbol: &'static str,
     pub module_kind: ModuleKind,
     pub target: CudaTarget,
@@ -2765,23 +2818,76 @@ impl ResolvedGemmLaunchSet {
     }
 }
 
+pub struct ResolvedGemmLaunchSetBuilder {
+    expected_launch_count: u32,
+    pushed_launch_count: u32,
+    digest: Option<FramedSha256>,
+}
+
+impl ResolvedGemmLaunchSetBuilder {
+    pub fn new(expected_launch_count: usize) -> Result<Self, String> {
+        if expected_launch_count == 0 {
+            return Err("resolved GEMM launch set must not be empty".into());
+        }
+        let expected_launch_count = u32::try_from(expected_launch_count)
+            .map_err(|_| "resolved GEMM launch count exceeds u32::MAX".to_string())?;
+        let digest = FramedSha256::new(b"resolved-gemm-launch-set.v1")
+            .required(b"launch-count-domain", LAUNCH_COUNT_DOMAIN)
+            .required(b"launch-count", &expected_launch_count.to_le_bytes());
+        Ok(Self {
+            expected_launch_count,
+            pushed_launch_count: 0,
+            digest: Some(digest),
+        })
+    }
+
+    pub fn push(&mut self, route: &ResolvedGemmRoute) -> Result<(), String> {
+        if self.pushed_launch_count == self.expected_launch_count {
+            return Err(format!(
+                "resolved GEMM launch set exceeds its declared count {}",
+                self.expected_launch_count
+            ));
+        }
+        let digest = self
+            .digest
+            .take()
+            .ok_or_else(|| "resolved GEMM launch-set builder is already finished".to_string())?;
+        self.digest = Some(append_resolved_gemm_route(
+            digest,
+            usize::try_from(self.pushed_launch_count)
+                .expect("u32 launch index always fits in usize"),
+            route,
+        ));
+        self.pushed_launch_count += 1;
+        Ok(())
+    }
+
+    pub fn finish(mut self) -> Result<ResolvedGemmLaunchSet, String> {
+        if self.pushed_launch_count != self.expected_launch_count {
+            return Err(format!(
+                "resolved GEMM launch set expected {} launches but recorded {}",
+                self.expected_launch_count, self.pushed_launch_count
+            ));
+        }
+        let digest = self
+            .digest
+            .take()
+            .ok_or_else(|| "resolved GEMM launch-set builder is already finished".to_string())?;
+        Ok(ResolvedGemmLaunchSet {
+            launch_count: self.pushed_launch_count,
+            ordered_digest: digest.finish(),
+        })
+    }
+}
+
 pub fn build_resolved_gemm_launch_set(
     routes: &[ResolvedGemmRoute],
 ) -> Result<ResolvedGemmLaunchSet, String> {
-    if routes.is_empty() {
-        return Err("resolved GEMM launch set must not be empty".into());
+    let mut builder = ResolvedGemmLaunchSetBuilder::new(routes.len())?;
+    for route in routes {
+        builder.push(route)?;
     }
-    let launch_count = u32::try_from(routes.len())
-        .map_err(|_| "resolved GEMM launch count exceeds u32::MAX".to_string())?;
-    let mut digest = FramedSha256::new(b"resolved-gemm-launch-set.v1")
-        .required(b"launch-count", &launch_count.to_le_bytes());
-    for (index, route) in routes.iter().enumerate() {
-        digest = append_resolved_gemm_route(digest, index, route);
-    }
-    Ok(ResolvedGemmLaunchSet {
-        launch_count,
-        ordered_digest: digest.finish(),
-    })
+    builder.finish()
 }
 
 fn append_resolved_gemm_route(
@@ -2798,13 +2904,29 @@ fn append_resolved_gemm_route(
         .required(b"op", &[route.op as u8])
         .required(b"dtype", &[route.dtype as u8])
         .required(b"backend", &[route.backend as u8])
+        .required(b"numeric-contract-domain", NUMERIC_CONTRACT_DOMAIN)
         .required(b"numeric-contract", &[route.numeric_contract as u8])
+        .required(b"instruction-family", &[route.instruction_family as u8])
+        .required(
+            b"instruction-shape-m",
+            &route.instruction_shape.m.to_le_bytes(),
+        )
+        .required(
+            b"instruction-shape-n",
+            &route.instruction_shape.n.to_le_bytes(),
+        )
+        .required(
+            b"instruction-shape-k",
+            &route.instruction_shape.k.to_le_bytes(),
+        )
+        .required(b"operand-conversion", &[route.operand_conversion as u8])
         .required(b"symbol", route.symbol.as_bytes())
         .required(b"module-kind", &[route.module_kind as u8])
         .required(b"target", route.target.as_str().as_bytes())
         .required(b"artifact-module", &[route.artifact.module_kind as u8])
         .required(b"artifact-kind", &[route.artifact.artifact_kind as u8])
         .required(b"compile-key", &route.artifact.compile_key)
+        .required(b"artifact-digest-domain", ARTIFACT_DIGEST_DOMAIN)
         .required(b"artifact-digest", &route.artifact.artifact_digest)
         .required(b"source-digest", &route.compiler.source_digest)
         .required(b"invocation-digest", &route.compiler.invocation_digest)
@@ -2812,6 +2934,7 @@ fn append_resolved_gemm_route(
             b"header-manifest-digest",
             &route.compiler.header_manifest_digest,
         )
+        .required(b"compiler-target-domain", COMPILER_TARGET_DOMAIN)
         .required(
             b"compiler-target",
             route.compiler.target.as_str().as_bytes(),
@@ -2863,6 +2986,7 @@ fn append_resolved_gemm_route(
             b"driver-build-sources",
             &[route.device.driver.build_sources],
         )
+        .required(b"driver-build-digest-domain", DRIVER_BUILD_DIGEST_DOMAIN)
         .required(b"driver-build-digest", &route.device.driver.build_digest)
         .required(
             b"caps-cc-major",

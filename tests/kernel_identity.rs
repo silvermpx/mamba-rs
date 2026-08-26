@@ -1,6 +1,6 @@
 #![cfg(feature = "cuda")]
 
-use mamba_rs::mamba_ssm::gpu::context::BiGemmFamily;
+use mamba_rs::mamba_ssm::gpu::context::{BiGemmFamily, F32TriadPolicy};
 use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
 use mamba_rs::mamba_ssm::gpu::gemm_bi_triad::{
     SM120_SCHEDULE_REVISION, SM120_TENSOR_MAP_REVISION, SM120_TUNING_REVISION, Sm120Bk,
@@ -10,9 +10,11 @@ use mamba_rs::mamba_ssm::gpu::gemm_bi_triad::{
 use mamba_rs::mamba_ssm::gpu::kernel_identity::{
     ArtifactIdentity, ArtifactKind, BackendSet, CacheEnvelope, CompileKeyMaterial,
     CompilerIdentity, CudaTarget, DeviceCaps, DeviceIdentity, DriverIdentity, FramedSha256,
-    GemmPolicy, GemmRouteIdentity, LegacySm80Policy, ModuleKind, NumericContractSet,
-    PhysicalGemmBackend, PolicyDtype, PolicyOp, ResolvedGemmLaunchSet, ResolvedGemmOp,
-    ResolvedGemmRoute, ResolvedNumericContract, build_artifact_set, build_resolved_gemm_launch_set,
+    GemmPolicy, GemmRouteIdentity, LegacySm80Policy, ModuleKind, NUMERIC_ABI_REVISION,
+    NumericContractSet, PhysicalGemmBackend, PolicyDtype, PolicyOp, ResolvedGemmLaunchSet,
+    ResolvedGemmLaunchSetBuilder, ResolvedGemmOp, ResolvedGemmRoute, ResolvedInstructionFamily,
+    ResolvedInstructionShape, ResolvedNumericContract, ResolvedOperandConversion,
+    SCHEDULE_REVISION, TUNING_TABLE_REVISION, build_artifact_set, build_resolved_gemm_launch_set,
     canonical_ptx_image, route_backend_contract_sets,
 };
 
@@ -36,8 +38,8 @@ fn compile_material() -> CompileKeyMaterial {
         output_kind: ArtifactKind::Ptx,
         composer_revision: 1,
         compiler_revision: 1,
-        numeric_abi_revision: 1,
-        schedule_revision: 1,
+        numeric_abi_revision: NUMERIC_ABI_REVISION,
+        schedule_revision: SCHEDULE_REVISION,
     }
 }
 
@@ -50,6 +52,41 @@ fn module_kind_discriminants_are_stable() {
     assert_eq!(ModuleKind::TriadSm100 as u8, 5);
     assert_eq!(ModuleKind::TriadSm120 as u8, 6);
     assert_eq!(ModuleKind::Mamba3Combined as u8, 7);
+}
+
+#[test]
+fn f32_triad_policy_parser_accepts_only_the_versioned_public_spellings() {
+    assert_eq!(
+        F32TriadPolicy::parse_env_value("exact").unwrap(),
+        F32TriadPolicy::ExactScalarFmaV1
+    );
+    assert_eq!(
+        F32TriadPolicy::parse_env_value(" \t\ntf32\r ").unwrap(),
+        F32TriadPolicy::AllowDeterministicTf32V1
+    );
+    assert_eq!(F32TriadPolicy::default(), F32TriadPolicy::ExactScalarFmaV1);
+    assert_eq!(F32TriadPolicy::ExactScalarFmaV1 as u8, 0);
+    assert_eq!(F32TriadPolicy::AllowDeterministicTf32V1 as u8, 1);
+
+    for rejected in [
+        "",
+        "EXACT",
+        "TF32",
+        "1",
+        "on",
+        "true",
+        "yes",
+        "off",
+        "false",
+        "other",
+        "\u{a0}exact",
+    ] {
+        let error = F32TriadPolicy::parse_env_value(rejected)
+            .expect_err("unsupported policy spelling must fail closed");
+        assert!(error.contains("MAMBA_RS_BI_F32_POLICY"), "{error}");
+        assert!(error.contains(&format!("{rejected:?}")), "{error}");
+        assert!(error.contains("exact") && error.contains("tf32"), "{error}");
+    }
 }
 
 #[test]
@@ -155,7 +192,8 @@ fn backend_contract_sets_match_reachable_dispatch_trees() {
         batch_invariant,
         bi_tensor_cores,
         fast_gemm: false,
-        tf32: false,
+        cublas_tf32: false,
+        f32_triad_policy: F32TriadPolicy::ExactScalarFmaV1,
         bi_gemm_family,
     };
 
@@ -191,6 +229,38 @@ fn backend_contract_sets_match_reachable_dispatch_trees() {
             tc
         );
     }
+}
+
+#[test]
+fn gemm_policy_keeps_cublas_and_deterministic_triad_tf32_independent() {
+    let policy = |cublas_tf32, f32_triad_policy| GemmPolicy {
+        batch_invariant: true,
+        bi_tensor_cores: false,
+        fast_gemm: false,
+        cublas_tf32,
+        f32_triad_policy,
+        bi_gemm_family: BiGemmFamily::Triad,
+    };
+
+    let exact = policy(true, F32TriadPolicy::ExactScalarFmaV1);
+    let allow = policy(false, F32TriadPolicy::AllowDeterministicTf32V1);
+    assert!(exact.cublas_tf32);
+    assert_eq!(exact.f32_triad_policy, F32TriadPolicy::ExactScalarFmaV1);
+    assert!(!allow.cublas_tf32);
+    assert_eq!(
+        allow.f32_triad_policy,
+        F32TriadPolicy::AllowDeterministicTf32V1
+    );
+
+    let (_, exact_contracts) = route_backend_contract_sets(exact);
+    let (_, allow_contracts) = route_backend_contract_sets(allow);
+    assert!(!exact_contracts.contains(NumericContractSet::TRIAD_DETERMINISTIC_TF32_V1));
+    assert!(allow_contracts.contains(NumericContractSet::TRIAD_DETERMINISTIC_TF32_V1));
+
+    let mut fixed_allow = allow;
+    fixed_allow.bi_gemm_family = BiGemmFamily::Fixed;
+    let (_, fixed_contracts) = route_backend_contract_sets(fixed_allow);
+    assert!(!fixed_contracts.contains(NumericContractSet::TRIAD_DETERMINISTIC_TF32_V1));
 }
 
 #[test]
@@ -302,8 +372,8 @@ fn route() -> GemmRouteIdentity {
         output_kind: ArtifactKind::Ptx,
         composer_revision: 1,
         compiler_revision: 1,
-        numeric_abi_revision: 1,
-        schedule_revision: 1,
+        numeric_abi_revision: NUMERIC_ABI_REVISION,
+        schedule_revision: SCHEDULE_REVISION,
     };
     let artifacts = build_artifact_set(&[
         artifact(ModuleKind::Fixed, 5),
@@ -316,7 +386,8 @@ fn route() -> GemmRouteIdentity {
             batch_invariant: true,
             bi_tensor_cores: true,
             fast_gemm: false,
-            tf32: false,
+            cublas_tf32: false,
+            f32_triad_policy: F32TriadPolicy::ExactScalarFmaV1,
             bi_gemm_family: BiGemmFamily::Triad,
         },
         backend_set: BackendSet::TRIAD,
@@ -342,8 +413,8 @@ fn route() -> GemmRouteIdentity {
             optin_shared_bytes: 101_376,
             tensor_map_access: false,
         },
-        tuning_table_revision: 0,
-        schedule_set_revision: 1,
+        tuning_table_revision: TUNING_TABLE_REVISION,
+        schedule_set_revision: SCHEDULE_REVISION,
         state_capacity: 64,
     }
 }
@@ -363,7 +434,10 @@ fn route_guard_rejects_every_policy_artifact_and_device_field() {
     value.policy.fast_gemm = true;
     changed.push(value);
     let mut value = captured;
-    value.policy.tf32 = true;
+    value.policy.cublas_tf32 = true;
+    changed.push(value);
+    let mut value = captured;
+    value.policy.f32_triad_policy = F32TriadPolicy::AllowDeterministicTf32V1;
     changed.push(value);
     let mut value = captured;
     value.policy.bi_gemm_family = BiGemmFamily::Fixed;
@@ -521,8 +595,8 @@ fn sm120_route_identity() -> Sm120RouteIdentity {
         output_kind: ArtifactKind::Ptx,
         composer_revision: 1,
         compiler_revision: 2,
-        numeric_abi_revision: 1,
-        schedule_revision: 3,
+        numeric_abi_revision: NUMERIC_ABI_REVISION,
+        schedule_revision: SCHEDULE_REVISION,
     };
     let driver = DriverIdentity {
         api_version: 13_200,
@@ -589,12 +663,44 @@ fn sm120_route_identity_resolves_the_exact_production_route() {
         resolved.numeric_contract,
         ResolvedNumericContract::MmaSyncF32V1
     );
+    assert_eq!(
+        resolved.instruction_family,
+        ResolvedInstructionFamily::MmaSync
+    );
+    assert_eq!(
+        resolved.instruction_shape,
+        ResolvedInstructionShape { m: 16, n: 8, k: 16 }
+    );
+    assert_eq!(resolved.operand_conversion, ResolvedOperandConversion::None);
     assert_eq!(resolved.shape, (257, 193, 129));
     assert_eq!(resolved.strides, (208, 144, 144));
     assert_eq!(resolved.tile, (128, 64));
     assert_eq!(
         (resolved.bk, resolved.stages, resolved.threads),
         (64, 3, 256)
+    );
+}
+
+#[test]
+fn deterministic_tf32_identity_variants_have_stable_distinct_discriminants() {
+    assert_eq!(PhysicalGemmBackend::MmaTf32RnaV1 as u8, 5);
+    assert_eq!(PhysicalGemmBackend::Sm90aWgmmaTf32TmaV1 as u8, 6);
+    assert_eq!(PhysicalGemmBackend::Sm100Tcgen05Tf32TmaV1 as u8, 7);
+    assert_eq!(PhysicalGemmBackend::Sm120TmaMmaTf32RnaV1 as u8, 8);
+    assert_eq!(ResolvedNumericContract::MmaTf32RnaV1 as u8, 5);
+    assert_eq!(ResolvedNumericContract::Sm90aWgmmaTf32TmaV1 as u8, 6);
+    assert_eq!(ResolvedNumericContract::Sm100Tcgen05Tf32TmaV1 as u8, 7);
+    assert_eq!(ResolvedNumericContract::Sm120TmaMmaTf32RnaV1 as u8, 8);
+    assert_eq!(ResolvedInstructionFamily::ScalarFma as u8, 1);
+    assert_eq!(ResolvedInstructionFamily::MmaSync as u8, 2);
+    assert_eq!(ResolvedInstructionFamily::Wgmma as u8, 3);
+    assert_eq!(ResolvedInstructionFamily::Tcgen05 as u8, 4);
+    assert_eq!(ResolvedOperandConversion::None as u8, 0);
+    assert_eq!(ResolvedOperandConversion::RegisterCvtRnaTf32F32V1 as u8, 1);
+    assert_eq!(ResolvedOperandConversion::TensorMapTfloat32V1 as u8, 2);
+    assert_eq!(
+        ResolvedOperandConversion::TensorMapUint32ThenCvtRnaTf32F32V1 as u8,
+        3
     );
 }
 
@@ -656,6 +762,15 @@ fn resolved_launch_set_is_ordered_and_covers_every_physical_identity_field() {
     mutations.push(value);
     let mut value = first;
     value.numeric_contract = ResolvedNumericContract::ScalarFmaV1;
+    mutations.push(value);
+    let mut value = first;
+    value.instruction_family = ResolvedInstructionFamily::Wgmma;
+    mutations.push(value);
+    let mut value = first;
+    value.instruction_shape.k = 8;
+    mutations.push(value);
+    let mut value = first;
+    value.operand_conversion = ResolvedOperandConversion::TensorMapTfloat32V1;
     mutations.push(value);
     let mut value = first;
     value.symbol = "sgemm_bi_nn_tc_bf16";
@@ -731,6 +846,28 @@ fn resolved_launch_set_is_ordered_and_covers_every_physical_identity_field() {
             baseline
         );
     }
+}
+
+#[test]
+fn streaming_launch_set_builder_matches_slice_builder_and_fails_closed() {
+    let first = resolved_sm120_route();
+    let mut second = first;
+    second.op = ResolvedGemmOp::Tn;
+    second.symbol = "sgemm_bi_tn_sm120_tma_128x64_bk64_s3_bf16";
+
+    let expected = build_resolved_gemm_launch_set(&[first, second]).unwrap();
+    let mut builder = ResolvedGemmLaunchSetBuilder::new(2).unwrap();
+    builder.push(&first).unwrap();
+    builder.push(&second).unwrap();
+    assert_eq!(builder.finish().unwrap(), expected);
+
+    assert!(ResolvedGemmLaunchSetBuilder::new(0).is_err());
+    let mut incomplete = ResolvedGemmLaunchSetBuilder::new(2).unwrap();
+    incomplete.push(&first).unwrap();
+    assert!(incomplete.finish().is_err());
+    let mut overflow = ResolvedGemmLaunchSetBuilder::new(1).unwrap();
+    overflow.push(&first).unwrap();
+    assert!(overflow.push(&second).is_err());
 }
 
 #[test]
