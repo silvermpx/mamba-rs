@@ -187,6 +187,116 @@ fn tcw64_resources() {
     }
 }
 
+/// Promotion grid for the wide rung: every candidate point measured
+/// with four alternating rounds per arm; a point is a WIN only when
+/// the wide rung is at least three percent ahead in every round pair
+/// and both arms are tight (p-spread inside 15 percent), a LOSS
+/// symmetrically, and everything else a TIE - the promotion rule's
+/// band is drawn from this table, never the other way round.
+#[test]
+#[ignore = "record-lane instrument (GPU, quiet card)"]
+fn tcwn64_promotion_grid() {
+    let dev = GpuDevice::new(0).expect("cuda device");
+    let ctx = GpuCtx::new(&dev).expect("ctx");
+    let st = &ctx.stream;
+    let cuda = st.context();
+    let dt = WeightDtype::Bf16;
+    let mk_ev = || {
+        cuda.new_event(Some(CUevent_flags::CU_EVENT_DEFAULT))
+            .expect("event")
+    };
+    let ms_grid = [2048usize, 3072, 4096, 6144];
+    let ks_grid = [768usize, 1536];
+    let ns_grid = [1536usize, 2304, 3072];
+    let mut wins = Vec::new();
+    for m in ms_grid {
+        for k in ks_grid {
+            for n in ns_grid {
+                let a = DtypedBuf::zeros(st, m * k, dt).unwrap();
+                a.upload_f32(st, &det(m * k, 7)).unwrap();
+                let b = DtypedBuf::zeros(st, k * n, dt).unwrap();
+                b.upload_f32(st, &det(k * n, 9)).unwrap();
+                let c = DtypedBuf::zeros(st, m * n, dt).unwrap();
+                let one = |rung: &Rung<'_>| -> f64 {
+                    for _ in 0..8 {
+                        launch_tile(&ctx, rung, &c, &a, &b, 0, (m, k, n));
+                    }
+                    st.synchronize().unwrap();
+                    let s_ev = mk_ev();
+                    let e_ev = mk_ev();
+                    s_ev.record(st).unwrap();
+                    for _ in 0..25 {
+                        launch_tile(&ctx, rung, &c, &a, &b, 0, (m, k, n));
+                    }
+                    e_ev.record(st).unwrap();
+                    st.synchronize().unwrap();
+                    f64::from(s_ev.elapsed_ms(&e_ev).unwrap()) * 1000.0 / 25.0
+                };
+                let r128 = Rung {
+                    kern: ctx.kernels.gemm_bi_nn_tc128_typed.get(dt),
+                    tile: (128, 128),
+                    smem: 71_680,
+                    threads: 256,
+                };
+                let rwn = Rung {
+                    kern: ctx.kernels.gemm_bi_nn_tcwn64_typed.get(dt),
+                    tile: (128, 256),
+                    smem: 98_304,
+                    threads: 256,
+                };
+                let mut t128 = Vec::new();
+                let mut twn = Vec::new();
+                for round in 0..4 {
+                    if round % 2 == 0 {
+                        t128.push(one(&r128));
+                        twn.push(one(&rwn));
+                    } else {
+                        twn.push(one(&rwn));
+                        t128.push(one(&r128));
+                    }
+                }
+                let spread = |v: &[f64]| {
+                    v.iter().cloned().fold(0.0f64, f64::max)
+                        / v.iter().cloned().fold(f64::MAX, f64::min)
+                };
+                let tight = spread(&t128) <= 1.15 && spread(&twn) <= 1.15;
+                let all_win = t128.iter().zip(&twn).all(|(a, b)| (a - b) / a >= 0.03);
+                let all_loss = t128.iter().zip(&twn).all(|(a, b)| (b - a) / a >= 0.03);
+                let p50 = |v: &[f64]| {
+                    let mut s = v.to_vec();
+                    s.sort_by(f64::total_cmp);
+                    s[s.len() / 2]
+                };
+                let verdict = if !tight {
+                    "UNSTABLE"
+                } else if all_win {
+                    "WIN"
+                } else if all_loss {
+                    "LOSS"
+                } else {
+                    "tie"
+                };
+                println!(
+                    "M{m:<5} K{k:<5} N{n:<5}: tc128 {:7.1}us  tcwn64 {:7.1}us  {:+5.1}%  {verdict}",
+                    p50(&t128),
+                    p50(&twn),
+                    (p50(&t128) / p50(&twn) - 1.0) * 100.0
+                );
+                common::evidence::record(
+                    "tcw64_census",
+                    "promotion",
+                    &format!("M{m}K{k}N{n}"),
+                    verdict,
+                );
+                if verdict == "WIN" {
+                    wins.push((m, k, n));
+                }
+            }
+        }
+    }
+    println!("WIN points: {wins:?}");
+}
+
 /// Event-timed comparison at the fat shapes, alternating groups.
 #[test]
 #[ignore = "record-lane instrument (GPU, quiet card)"]

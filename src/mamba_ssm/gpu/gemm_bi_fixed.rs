@@ -30,6 +30,9 @@ type CUptr = cudarc::driver::sys::CUdeviceptr;
 pub enum FixedTile {
     /// 128x128 CTA, 256 threads, 2-stage cp.async, dynamic smem 71 680 B.
     Tc128,
+    /// 128x256 CTA, 256 threads, 64x64 warp tiles (fragment reuse),
+    /// XOR-swizzled dynamic smem 98 304 B. Bit-identical to Tc128.
+    TcWn64,
     /// 64x64 CTA, 128 threads, static smem.
     Tc64,
     /// 16x32 thin/decode rung, 128 threads, 4-stage cp.async.
@@ -43,9 +46,21 @@ pub enum FixedTile {
 /// The rungs are bit-identical, so the pick can never change bits.
 const TC64_PREFER_MAX_TILES128: u32 = 72;
 
+/// Frozen per-architecture wave anchor for the wide-rung pick below.
+/// A scheduling key over bit-identical rungs, never an arithmetic one;
+/// the same frozen-cell law as the scalar tier's split anchor.
+const LADDER_NUM_SMS: u32 = 142;
+
+fn wave_eff(tiles: u32) -> f64 {
+    let waves = tiles.div_ceil(LADDER_NUM_SMS);
+    f64::from(tiles) / f64::from(waves * LADDER_NUM_SMS)
+}
+
 /// Shape-keyed pick for the bf16/f16 inference ladder. `None` = below
 /// the ladder's N floor (the caller routes to the legacy tile).
-fn fixed_pick_tile(rows: usize, cols: usize) -> Option<FixedTile> {
+/// The reduction depth `k` keys only the wide fragment-reuse rung - a
+/// legal key like every other, since the rungs are bit-identical.
+fn fixed_pick_tile(rows: usize, cols: usize, k: usize) -> Option<FixedTile> {
     if cols < 32 {
         return None;
     }
@@ -55,6 +70,20 @@ fn fixed_pick_tile(rows: usize, cols: usize) -> Option<FixedTile> {
     if rows >= 128 && cols >= 128 {
         let tiles128 = (rows as u32).div_ceil(128) * (cols as u32).div_ceil(128);
         if tiles128 >= TC64_PREFER_MAX_TILES128 {
+            // The wide 128x256 rung wins its census band by pure wave
+            // arithmetic: its half-count grid must hold the 128-tile's
+            // wave efficiency (the fragment-reuse bonus is then a free
+            // 7-12 percent), and it collapses whenever its grid lands
+            // just past a wave boundary. The K/N edge excises the one
+            // deep-K cell the equal-efficiency rule mispredicts. Every
+            // condition is drawn from the 24-point promotion grid in
+            // the census, not from a model.
+            if cols >= 1536 && (k <= 768 || cols <= 2304) {
+                let tiles_wn = (rows as u32).div_ceil(128) * (cols as u32).div_ceil(256);
+                if wave_eff(tiles_wn) >= wave_eff(tiles128) {
+                    return Some(FixedTile::TcWn64);
+                }
+            }
             return Some(FixedTile::Tc128);
         }
     }
@@ -64,6 +93,7 @@ fn fixed_pick_tile(rows: usize, cols: usize) -> Option<FixedTile> {
 fn ladder_cfg(tile: FixedTile, rows: usize, cols: usize) -> cudarc::driver::LaunchConfig {
     let (bm, bn, threads, dyn_bytes) = match tile {
         FixedTile::Tc128 => (128u32, 128u32, 256u32, 71_680u32),
+        FixedTile::TcWn64 => (128, 256, 256, 98_304),
         FixedTile::Tc64 => (64, 64, 128, 0),
         FixedTile::Tc16 => (16, 32, 128, 0),
         FixedTile::Legacy => unreachable!("legacy tile has its own launcher"),
@@ -95,6 +125,7 @@ fn launch_ladder(
 ) -> Result<(), String> {
     let func = match tile {
         FixedTile::Tc128 => ctx.kernels.gemm_bi_nn_tc128_typed.get(dt),
+        FixedTile::TcWn64 => ctx.kernels.gemm_bi_nn_tcwn64_typed.get(dt),
         FixedTile::Tc64 => ctx.kernels.gemm_bi_nn_tc64_typed.get(dt),
         FixedTile::Tc16 => ctx.kernels.gemm_bi_nn_tc16_typed.get(dt),
         FixedTile::Legacy => unreachable!("legacy tile has its own launcher"),
@@ -141,7 +172,7 @@ pub fn fixed_forward(
         k: n_in as i32,
     };
     let homogeneous_half = c.dtype != WeightDtype::F32 && c.dtype == x.dtype && x.dtype == w.dtype;
-    if homogeneous_half && let Some(tile) = fixed_pick_tile(batch, n_out) {
+    if homogeneous_half && let Some(tile) = fixed_pick_tile(batch, n_out, n_in) {
         launch_ladder(ctx, tile, c.dtype, &args)?;
         return Ok(tile);
     }
