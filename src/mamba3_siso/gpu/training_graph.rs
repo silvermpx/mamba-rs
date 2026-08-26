@@ -14,7 +14,7 @@ use cudarc::driver::CudaGraph;
 
 use crate::mamba_ssm::gpu::adamw::{AdamWBiasFactors, AdamWMultiPlan, GpuAdamW, step_multi};
 use crate::mamba_ssm::gpu::buffers::GpuBuffer;
-use crate::mamba_ssm::gpu::context::GpuCtx;
+use crate::mamba_ssm::gpu::context::{GemmRoute, GpuCtx};
 use crate::mamba_ssm::gpu::dtype::WeightDtype;
 use crate::mamba_ssm::gpu::graph_capture::capture_into_graph;
 use crate::mamba3_siso::gpu::backward_mixed::gpu_backward_mamba3_backbone_mixed;
@@ -97,6 +97,7 @@ pub struct GpuMamba3TrainingStepGraph {
     // Same guard for the batch-invariant typed-GEMM upcast scratch triple
     // (see the M1 mixed graph) — M3 bf16 bi GEMMs route through it too.
     captured_bi_upcast_ptrs: [u64; 3],
+    captured_gemm_route: GemmRoute,
 }
 
 impl GpuMamba3TrainingStepGraph {
@@ -160,6 +161,7 @@ impl GpuMamba3TrainingStepGraph {
         let snap_compute_norm_f = train_w.compute.norm_f_weight.ptr();
         let snap_half_staging = ctx.half_staging_ptr();
         let snap_bi_upcast = ctx.bi_upcast_scratch_ptrs();
+        let snap_gemm_route = ctx.gemm_route();
 
         let graph = capture_into_graph(&ctx.stream, || {
             grads.zero(&ctx.stream)?;
@@ -192,6 +194,7 @@ impl GpuMamba3TrainingStepGraph {
             train_w.sync_master_to_compute(ctx)?;
             Ok(())
         })?;
+        ctx.note_graph_capture();
 
         Ok(Self {
             graph,
@@ -215,6 +218,7 @@ impl GpuMamba3TrainingStepGraph {
             captured_compute_norm_f_ptr: snap_compute_norm_f,
             captured_half_staging_ptr: snap_half_staging,
             captured_bi_upcast_ptrs: snap_bi_upcast,
+            captured_gemm_route: snap_gemm_route,
         })
     }
 
@@ -320,6 +324,13 @@ impl GpuMamba3TrainingStepGraph {
              capture (a larger typed bi GEMM regrew the scratch after this \
              graph was captured — re-capture or presize for the larger shape)"
         );
+        assert_eq!(
+            ctx.gemm_route(),
+            self.captured_gemm_route,
+            "M3 training_graph replay: GEMM route changed since capture \
+             (batch_invariant, bi_tensor_cores, fast_gemm, bi_gemm_family) - \
+             the captured kernels cannot follow a route change; re-capture instead"
+        );
         self.graph
             .launch()
             .map_err(|e| format!("M3 training_graph launch: {e:?}"))
@@ -392,6 +403,7 @@ pub struct GpuMamba3F32TrainingStepGraph {
     captured_temporal_ptr: u64,
     captured_weights_input_proj_w_ptr: u64,
     captured_weights_norm_f_ptr: u64,
+    captured_gemm_route: GemmRoute,
 }
 
 impl GpuMamba3F32TrainingStepGraph {
@@ -427,6 +439,7 @@ impl GpuMamba3F32TrainingStepGraph {
         let snap_temporal = temporal.cached_ptr();
         let snap_input_proj = weights.input_proj_w.cached_ptr();
         let snap_norm_f = weights.norm_f_weight.cached_ptr();
+        let snap_gemm_route = ctx.gemm_route();
 
         let graph = capture_into_graph(&ctx.stream, || {
             grads.zero(&ctx.stream)?;
@@ -450,6 +463,7 @@ impl GpuMamba3F32TrainingStepGraph {
             )?;
             Ok(())
         })?;
+        ctx.note_graph_capture();
 
         Ok(Self {
             graph,
@@ -468,10 +482,11 @@ impl GpuMamba3F32TrainingStepGraph {
             captured_temporal_ptr: snap_temporal,
             captured_weights_input_proj_w_ptr: snap_input_proj,
             captured_weights_norm_f_ptr: snap_norm_f,
+            captured_gemm_route: snap_gemm_route,
         })
     }
 
-    pub fn replay(&self, rp: &Mamba3F32Replay<'_>) -> Result<(), String> {
+    pub fn replay(&self, ctx: &GpuCtx, rp: &Mamba3F32Replay<'_>) -> Result<(), String> {
         let Mamba3F32Replay {
             weights,
             adam,
@@ -549,6 +564,13 @@ impl GpuMamba3F32TrainingStepGraph {
             weights.norm_f_weight.cached_ptr(),
             self.captured_weights_norm_f_ptr,
             "norm_f_weight"
+        );
+        assert_eq!(
+            ctx.gemm_route(),
+            self.captured_gemm_route,
+            "M3 f32 training_graph replay: GEMM route changed since capture \
+             (batch_invariant, bi_tensor_cores, fast_gemm, bi_gemm_family) - \
+             the captured kernels cannot follow a route change; re-capture instead"
         );
         self.graph
             .launch()

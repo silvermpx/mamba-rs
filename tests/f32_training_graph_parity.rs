@@ -468,19 +468,22 @@ fn m3_f32_training_graph_matches_eager() {
     let (_, bc1, bc2) = g_adam.advance();
     g_bias.write(&ctx.stream, bc1, bc2, 1e-4).unwrap();
     graph
-        .replay(&Mamba3F32Replay {
-            weights: &g_w,
-            adam: &g_adam,
-            bias: &g_bias,
-            grads: &g_grads,
-            temporal: &g_temp,
-            mamba_input: &g_mi,
-            d_temporal: &g_dtemp,
-            ssm_states: &g_ssm,
-            k_states: &g_ks,
-            v_states: &g_vs,
-            angle_states: &g_ang,
-        })
+        .replay(
+            &ctx,
+            &Mamba3F32Replay {
+                weights: &g_w,
+                adam: &g_adam,
+                bias: &g_bias,
+                grads: &g_grads,
+                temporal: &g_temp,
+                mamba_input: &g_mi,
+                d_temporal: &g_dtemp,
+                ssm_states: &g_ssm,
+                k_states: &g_ks,
+                v_states: &g_vs,
+                angle_states: &g_ang,
+            },
+        )
         .unwrap();
     ctx.stream.synchronize().unwrap();
     let after_graph = g_w.norm_f_weight.to_cpu(&ctx.stream).unwrap();

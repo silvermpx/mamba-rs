@@ -681,6 +681,9 @@ pub(crate) struct Mamba3TrainerMixed {
     captured_f16_overflow_ptr: u64,
     captured_f16_grads_ptr: u64,
     captured_f16_dt_scaled_ptr: u64,
+    captured_f16_half_staging_ptr: u64,
+    captured_f16_bi_upcast_ptrs: [u64; 3],
+    captured_f16_gemm_route: crate::mamba_ssm::gpu::context::GemmRoute,
 }
 
 impl Mamba3TrainerMixed {
@@ -794,6 +797,7 @@ impl Mamba3TrainerMixed {
 
         let clip_partials = alloc_partials(&ctx.stream)?;
         let clip_scratch = GpuBuffer::zeros(&ctx.stream, 2)?;
+        let initial_gemm_route = ctx.gemm_route();
 
         Ok(Self {
             ctx,
@@ -831,6 +835,9 @@ impl Mamba3TrainerMixed {
             captured_f16_overflow_ptr: 0,
             captured_f16_grads_ptr: 0,
             captured_f16_dt_scaled_ptr: 0,
+            captured_f16_half_staging_ptr: 0,
+            captured_f16_bi_upcast_ptrs: [0; 3],
+            captured_f16_gemm_route: initial_gemm_route,
         })
     }
 
@@ -1001,6 +1008,25 @@ impl Mamba3TrainerMixed {
                 self.captured_f16_dt_scaled_ptr,
                 "M3 f16 graph replay: d_temporal_scaled pointer changed since capture"
             );
+            assert_eq!(
+                self.ctx.half_staging_ptr(),
+                self.captured_f16_half_staging_ptr,
+                "M3 f16 graph replay: half_staging pointer changed since capture \
+                 (lazy grow after capture - re-capture or pre-size the larger shape)"
+            );
+            assert_eq!(
+                self.ctx.bi_upcast_scratch_ptrs(),
+                self.captured_f16_bi_upcast_ptrs,
+                "M3 f16 graph replay: bi_upcast_scratch pointer changed since capture \
+                 (a larger typed triad GEMM grew the scratch - re-capture or pre-size the larger shape)"
+            );
+            assert_eq!(
+                self.ctx.gemm_route(),
+                self.captured_f16_gemm_route,
+                "M3 f16 graph replay: GEMM route changed since capture \
+                 (batch_invariant, bi_tensor_cores, fast_gemm, bi_gemm_family) - \
+                 the captured kernels cannot follow a route change; re-capture instead"
+            );
 
             g.launch()
                 .map_err(|e| format!("M3 f16 graph launch: {e:?}"))?;
@@ -1082,6 +1108,13 @@ impl Mamba3TrainerMixed {
             self.dims.seq_len,
             self.dtype,
         )?;
+        self.ctx.presize_bi_upcast_scratch_for_train_m3(
+            &self.cfg,
+            self.dims.batch,
+            self.dims.seq_len,
+            self.dims.mamba_input_dim,
+            self.dtype,
+        )?;
 
         // Snapshot every device buffer baked into the captured kernels.
         let snap_bias = self.bias.ptr();
@@ -1093,6 +1126,9 @@ impl Mamba3TrainerMixed {
             .stable_ptr(&self.ctx.stream);
         let snap_grads = self.grads.flat.cached_ptr();
         let snap_dt_scaled = self.d_temporal_scaled.as_ref().unwrap().cached_ptr();
+        let snap_half_staging = self.ctx.half_staging_ptr();
+        let snap_bi_upcast = self.ctx.bi_upcast_scratch_ptrs();
+        let snap_gemm_route = self.ctx.gemm_route();
 
         // Capture body: mirrors the eager f16 path 1:1 (composed from the
         // shared eager phase bodies) so numerics match.
@@ -1123,6 +1159,10 @@ impl Mamba3TrainerMixed {
         self.captured_f16_overflow_ptr = snap_overflow;
         self.captured_f16_grads_ptr = snap_grads;
         self.captured_f16_dt_scaled_ptr = snap_dt_scaled;
+        self.captured_f16_half_staging_ptr = snap_half_staging;
+        self.captured_f16_bi_upcast_ptrs = snap_bi_upcast;
+        self.captured_f16_gemm_route = snap_gemm_route;
+        self.ctx.note_graph_capture();
         Ok(())
     }
 
@@ -1717,19 +1757,22 @@ impl Mamba3TrainerF32 {
         let (step, bc1, bc2) = self.adam.advance();
         self.bias.write(&self.ctx.stream, bc1, bc2, self.adam.lr)?;
         let replayed = if let Some(ref g) = self.graph {
-            g.replay(&Mamba3F32Replay {
-                weights: &self.weights,
-                adam: &self.adam,
-                bias: &self.bias,
-                grads: &self.grads,
-                temporal: &self.temporal,
-                mamba_input: &self.mamba_input,
-                d_temporal: &self.d_temporal,
-                ssm_states: &self.ssm_states,
-                k_states: &self.k_states,
-                v_states: &self.v_states,
-                angle_states: &self.angle_states,
-            })?;
+            g.replay(
+                &self.ctx,
+                &Mamba3F32Replay {
+                    weights: &self.weights,
+                    adam: &self.adam,
+                    bias: &self.bias,
+                    grads: &self.grads,
+                    temporal: &self.temporal,
+                    mamba_input: &self.mamba_input,
+                    d_temporal: &self.d_temporal,
+                    ssm_states: &self.ssm_states,
+                    k_states: &self.k_states,
+                    v_states: &self.v_states,
+                    angle_states: &self.angle_states,
+                },
+            )?;
             true
         } else {
             self.step_eager()?;
