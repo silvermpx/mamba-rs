@@ -8,7 +8,58 @@ on:
 permissions: {}
 
 jobs:
-  # Wait for CI to pass first
+  # HARD GATE: publication requires the real ci.yml run on THIS commit to
+  # be green. Re-running a subset of CI here is not a gate - it is a
+  # second, weaker opinion that drifts: 0.6.8 published carrying a lint
+  # error because this job checked less than ci.yml did (no cuda leg).
+  # This job asserts the actual CI verdict instead, and fails closed when
+  # there is no CI run for the commit at all (a tag on an unpushed
+  # commit, a tag on a branch CI does not cover).
+  require-green-ci:
+    name: Require green CI on this commit
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+    steps:
+      - name: Await and assert the ci.yml verdict
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SHA: ${{ github.sha }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          deadline=$(( SECONDS + 3600 ))
+          while :; do
+            runs=$(gh api \
+              "repos/$REPO/actions/workflows/ci.yml/runs?head_sha=$SHA&per_page=100" \
+              --jq '[.workflow_runs[] | {status, conclusion}]')
+            total=$(echo "$runs" | jq 'length')
+            if [ "$total" -gt 0 ]; then
+              bad=$(echo "$runs" | jq '[.[] | select(.conclusion != null
+                    and .conclusion != "success" and .conclusion != "skipped")] | length')
+              if [ "$bad" -gt 0 ]; then
+                echo "::error::CI on $SHA is NOT green - refusing to publish."
+                echo "$runs" | jq .
+                exit 1
+              fi
+              pending=$(echo "$runs" | jq '[.[] | select(.status != "completed")] | length')
+              if [ "$pending" -eq 0 ]; then
+                echo "CI on $SHA is green ($total run(s))."
+                exit 0
+              fi
+              echo "CI still running on $SHA ($pending of $total pending)..."
+            else
+              echo "No ci.yml run for $SHA yet..."
+            fi
+            if [ "$SECONDS" -ge "$deadline" ]; then
+              echo "::error::No green CI for $SHA within the wait window - refusing to publish."
+              exit 1
+            fi
+            sleep 30
+          done
+
+  # A fast second opinion so an obviously broken tag fails in a minute
+  # rather than after the CI wait. NOT the gate - `require-green-ci` is.
   ci-check:
     name: Verify CI
     runs-on: ubuntu-latest
@@ -22,24 +73,12 @@ jobs:
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test
-      # The cuda-gated code is a large part of the crate and does not
-      # compile under the checks above. Without these two lines a tag can
-      # publish what ci.yml rejects - which is exactly how 0.6.8 shipped
-      # with a lint error CI caught only after the crate was on crates.io.
-      # Keep in lockstep with the `cuda` / `all-features` jobs in ci.yml.
-      - name: Install CUDA toolkit (nvcc only, no driver)
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq nvidia-cuda-toolkit
-          nvcc --version
-      - run: cargo check --workspace --all-targets --features cuda
-      - run: cargo check --workspace --all-targets --features cuda,hf,gemm-blas,nccl
       - uses: EmbarkStudios/cargo-deny-action@v2
 
   publish:
     name: Publish to crates.io
     runs-on: ubuntu-latest
-    needs: ci-check
+    needs: [require-green-ci, ci-check]
     permissions:
       contents: write
     steps:
