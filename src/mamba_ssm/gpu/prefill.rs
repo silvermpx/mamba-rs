@@ -9,7 +9,7 @@
 //! Mirrors `gpu_forward_mamba_target_burnin` but uses the inference-path
 //! flat `GpuMambaWeights` (not training `GpuMambaTrainWeights`).
 //!
-//! Serving entries (0.5.1): `gpu_forward_inference_prefill_full` exposes the
+//! Serving entries: `gpu_forward_inference_prefill_full` exposes the
 //! post-norm_f temporal for ALL T positions, and
 //! `gpu_forward_inference_prefill_from_raw` additionally applies the input
 //! projection internally with the exact training-forward SGEMM call — both

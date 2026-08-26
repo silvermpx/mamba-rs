@@ -184,7 +184,7 @@ fn print_run_digests() {
 }
 
 /// Multi-chunk (T=1300 -> 2 chunks) run-to-run bit identity on the
-/// batch-invariant tier — the campaign shape's chunk count.
+/// batch-invariant tier — the production shape's chunk count.
 #[test]
 fn multichunk_run_to_run_bit_identical_bi() {
     let a = run_once_at(3, GemmTier::BatchInvariant, 1300);

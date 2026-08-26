@@ -102,7 +102,8 @@ where
 
 /// Reusable prefill scratch. `ensure` re-allocates only when the dims
 /// fingerprint changes — zero allocation on the serving hot path once
-/// warmed (keyed on the FULL dims, the `parallel.rs` OOB lesson).
+/// warmed. Keyed on the FULL dims so a shape change can never reuse a
+/// smaller cached buffer out of bounds.
 pub struct PrefillScratch {
     fingerprint: (usize, usize, usize, usize, usize, usize, usize),
     post_norm: Vec<f32>,

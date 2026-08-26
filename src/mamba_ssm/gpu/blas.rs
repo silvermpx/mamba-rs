@@ -986,9 +986,9 @@ struct BiGemmArgs {
     k: i32,
 }
 
-// Retained for v0.4.0: the WMMA GEMM path is registered in MambaKernels
-// Reachable since 0.6.7 through gemm_bi_forward_raw (the Fixed family's
-// entry and the f32 dispatch arm).
+// The WMMA GEMM path stays registered in MambaKernels and is reachable
+// through gemm_bi_forward_raw (the Fixed family's entry and the f32
+// dispatch arm).
 fn launch_bi_gemm(
     ctx: &GpuCtx,
     kernel: &cudarc::driver::CudaFunction,
@@ -1168,9 +1168,9 @@ pub fn gpu_gemm_typed_forward_raw(
     //           and prefill workloads).
     //
     // The `gemm_bi_*` WMMA kernels are registered but not in the default
-    // path — they hit ~30% of cuBLAS throughput in their current form,
-    // pending the v0.4.0 persistent+cp.async+stream-K rewrite. Keep
-    // the reference alive for the compiler.
+    // path — they hit ~30% of cuBLAS throughput in this form; the
+    // fixed-tile family is the fast deterministic path. Keep the
+    // reference alive for the compiler.
     let _ = pick_bi_gemm(ctx, x.dtype, w.dtype, c.dtype);
 
     // The matvec kernel handles any M ≥ 1 via a 2D grid (CTA per

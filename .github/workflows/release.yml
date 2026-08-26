@@ -10,8 +10,9 @@ permissions: {}
 jobs:
   # HARD GATE: publication requires the real ci.yml run on THIS commit to
   # be green. Re-running a subset of CI here is not a gate - it is a
-  # second, weaker opinion that drifts: 0.6.8 published carrying a lint
-  # error because this job checked less than ci.yml did (no cuda leg).
+  # second, weaker opinion that drifts - a release once shipped carrying
+  # a lint error because a subset job checked less than ci.yml (no cuda
+  # leg).
   # This job asserts the actual CI verdict instead, and fails closed when
   # there is no CI run for the commit at all (a tag on an unpushed
   # commit, a tag on a branch CI does not cover).

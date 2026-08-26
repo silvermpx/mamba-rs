@@ -852,7 +852,7 @@ pub(crate) struct MambaTrainerMixed {
     captured_f16_dt_scaled_ptr: u64,
     // the f16 graph presizes these two
     // scratches but never asserted them at replay - the one graph without
-    // the guard the bf16 graph already has. Plus the G1 flag snapshot.
+    // the guard the bf16 graph already has. Plus the flag snapshot.
     captured_f16_half_staging_ptr: u64,
     captured_f16_bi_upcast_ptrs: [u64; 3],
     captured_f16_gemm_flags: crate::mamba_ssm::gpu::context::GemmRoute,

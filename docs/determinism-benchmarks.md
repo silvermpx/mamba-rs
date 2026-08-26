@@ -1,4 +1,4 @@
-# Deterministic GEMM Benchmarks (0.6.7)
+# Deterministic GEMM Benchmarks
 
 All numbers: RTX 6000 Ada (sm_89, 142 SMs), CUDA 13.2, driver 595.45,
 `--release`, `--test-threads=1`, quiet GPU. The GEMM layer is shared by
@@ -10,8 +10,8 @@ Mamba SSM and Mamba-3 SISO — these results apply to both architectures.
 |---|---|---|
 | (off) | cuBLAS | f32 → TF32 tensor cores; bf16/f16 → GemmEx `COMPUTE_32F_PEDANTIC` (CUDA cores, f32 accumulate). Run-to-run stable on one machine, NOT batch-invariant, no stability across cuBLAS versions. |
 | `MAMBA_RS_BATCH_INVARIANT=1` | scalar deterministic | custom fixed-reduction-order kernels. Training bit-identical across runs on every dtype; inference decode strictly all-M invariant via `matvec_bi` (KL ≈ 1e-12). bf16/f16 outputs are bit-identical to "upcast → f32 kernel → RNE downcast". Which family serves the forward is selectable — see the row below. |
-| + `MAMBA_RS_BI_GEMM_FAMILY=triad\|fixed` | family selector | `triad` (`kernels/gemm_bi_triad.cu`, default): the multi-tile dispatcher, all three operand layouts, per-bucket batch invariance (same dispatch bucket → row 0 bit-identical across M). `fixed` (`kernels/gemm_bi_fixed.cu`): one 64×64×32 tile, `SPLIT_K=1`, forward-only, batch-invariant BY CONSTRUCTION (no buckets exist to cross). A backward requires `triad`. The family is part of `ctx.gemm_route()`, so a flip after a CUDA-graph capture is refused at replay. |
-| + `MAMBA_RS_BI_TENSOR_CORES=1` | tensor-core deterministic | `mma.sync.m16n8k16`, f32 accumulators, no atomics/splits. OWN numeric contract (TC reduction tree ≠ scalar FMA chain) — but runs are bit-identical to each other (incl. CUDA Graph capture/replay) and the forward is STRICTLY batch-invariant across all M. Two kernel families — 128×128 tiles (256 thr, dynamic smem) and 64×64 tiles (128 thr, static smem) — that are BIT-IDENTICAL per output element (same ascending BK=64 reduction slabs, same mma chain, same tail zero-fill), so the shape-only tile routing never changes output bits. |
+| + `MAMBA_RS_BI_GEMM_FAMILY=triad\|fixed` | family selector | `triad` (`kernels/gemm_bi_triad.cu`, default): the multi-tile dispatcher, all three operand layouts, per-bucket batch invariance (same dispatch bucket → row 0 bit-identical across M). `fixed` (`kernels/gemm_bi_fixed/`): the forward serving family — a ladder of bit-identical tiles (16-row thin, 64, 128, wide 128×256) with `SPLIT_K=1` everywhere, batch-invariant BY CONSTRUCTION (every rung produces the same bits per element, so tile choice is pure scheduling and no bucket exists to cross); on Hopper/Blackwell it routes to per-architecture rungs (`wgmma`, `tcgen05`) that form their own bit families, behind a first-use self-check. A backward requires `triad`. The family is part of `ctx.gemm_route()`, so a flip after a CUDA-graph capture is refused at replay. |
+| + `MAMBA_RS_BI_TENSOR_CORES=1` | tensor-core deterministic | `mma.sync.m16n8k16`, f32 accumulators, no atomics/splits. OWN numeric contract (TC reduction tree ≠ scalar FMA chain) — but runs are bit-identical to each other (incl. CUDA Graph capture/replay) and the forward is STRICTLY batch-invariant across all M. The tile ladder — 16-row thin, 64×64, 128×128 and wide 128×256 — is BIT-IDENTICAL per output element (same ascending BK=64 reduction slabs, same mma chain, same tail zero-fill), so the shape-only tile routing never changes output bits. |
 
 Accuracy cross-checks: bf16 scalar-tier training trajectory vs cuBLAS
 PEDANTIC cosine 0.999999976 (5 steps); f32 vs TF32 0.999999996. TC tier
@@ -38,7 +38,7 @@ TC dW (f32 accumulate) cos 1.000000000.
 | d1536 ×2L, B=4 T=256 | f16  | 16.761 | 19.740 (1.18×) | **12.818 (0.76×)** |
 
 Ratios are vs the cuBLAS baseline of the same dtype. Bold = deterministic
-training FASTER than cuBLAS. Since 0.4.2 (Tile64 family + BK=64 staging)
+training FASTER than cuBLAS. With the Tile64 family and BK=64 staging
 the TC tier is at-or-near parity even on the smallest models (d128 bf16
 1.04×, d256 bf16 1.01×) and 16–30 % faster than cuBLAS from d768 up; at
 d1536 the bf16 TC step (12.49 ms) also beats the f32 TF32 baseline
@@ -49,7 +49,7 @@ non-GEMM kernels dominating those steps.
 ## Tensor-core tier — GEMM level (bf16, µs)
 
 `tests/gemm_bi_tc.rs::bench_tc_vs_scalar_paths`, vs the scalar
-deterministic tier on the same shape (0.4.2: BK=64 staging):
+deterministic tier on the same shape (BK=64 staging):
 
 | shape (M, K, N) | fwd scalar → TC | dW scalar → TC | dX scalar → TC |
 |---|---:|---:|---:|
@@ -59,23 +59,20 @@ deterministic tier on the same shape (0.4.2: BK=64 staging):
 
 84.1 µs at M2048 K768 N3072 ≈ 115 TFLOPS bf16; the M4096 forward
 reaches ~144 TFLOPS in an isolated sweep (`step0` instrumentation:
-83.7 µs / 267.8 µs on the two shapes). BK=64 staging (0.4.2) halves the
-per-CTA barrier/wait_group boundaries vs the 0.4.1 BK=32 kernels and
-bought +8–11 % on top of the 0.4.1 numbers; deeper pipelining was
-measured FLAT.
+83.7 µs / 267.8 µs on the two shapes). BK=64 staging halves the per-CTA
+barrier/wait_group boundaries vs BK=32 and bought +8–11 %; deeper
+pipelining was measured FLAT.
 
-### The measured denominator (2026-08-26, `tests/gemm_denominator_probe.rs`)
+### The measured denominator (`tests/gemm_denominator_probe.rs`)
 
-Every earlier "% of peak" claim in this section divided by unmeasured
-numbers; the probe replaced them with three measurements taken on the
-box itself:
+Every "% of peak" figure here divides by numbers measured on the box
+itself, not by spec-sheet estimates:
 
 - **Tensor-pipe ceiling: 335.9 TFLOPS** bf16 with f32 accumulation
   (null-memory mma.sync issue-rate kernel, register fragments only).
-  The f16-accumulate twin runs at 0.95x — f32 accumulation does NOT
-  halve tensor throughput on this part, so both earlier candidate
-  ceilings (a 182 TFLOPS halved-accumulate model and an unsourced
-  "cuBLAS-TC class ~210–230") are retired.
+  The f16-accumulate twin runs at 0.95x — on this part f32
+  accumulation does NOT halve tensor throughput, so a halved-accumulate
+  ceiling model would be wrong here.
 - **cuBLAS tensor-core bf16, measured here for the first time**
   (the crate's fast arm): 118–158 TFLOPS across six fat training
   shapes — 35–47 % of the pipe.
@@ -94,7 +91,7 @@ geometry) and where K is small (fewer slabs amortize less staging).
 Those two mechanisms — a constant-area fragment-reuse tile and
 wave-aware tile choice — are the program.
 
-**Correction and closure (same day).** The probe's "deterministic
+**Family staging and the wide rung.** The probe's "deterministic
 Tile128" arm drove the training family's forced entry; the inference
 family's twin — byte-identical, differently staged — measures well
 ahead of it on several fat shapes (M4096 K768 N3072: 141.9 µs /
@@ -112,7 +109,7 @@ narrow-N and cliff shapes keep the 128-tile.
 ## Tile64 family — small/narrow shapes (bf16, µs)
 
 `tests/gemm_bi_tc.rs::bench_tc64_vs_tc128_small_shapes`. The 64×64-tile
-twins (0.4.2) quadruple the CTA count on grids that underfill the GPU at
+twins quadruple the CTA count on grids that underfill the GPU at
 128×128, and cover the 64..127 output-dim band the 128 gate excluded:
 
 | shape (M, K, N) | op | Tile128 | Tile64 | scalar bi |
@@ -132,9 +129,9 @@ Dispatch (`tc_pick_tile`): 128-tiles when the grid has ≥ 72 CTAs,
 all-M invariance contract because the two families are bit-identical
 per output element (`tc64_and_tc128_bit_identical`). Narrow projections
 of every model size (x_proj N=80, dt_proj K≤96) ride tensor cores via
-Tile64 — that is why even d768/d1536 steps improved in 0.4.2.
+Tile64 — that is why even d768/d1536 steps improved when it landed.
 
-### Correction (2026-08-26): the apparent Tile64 win above was a timing artifact
+### Event timing corrects the wall-clock table
 
 The wall-clock rows in the table above bracket each launch with a host
 sync, folding launch and synchronization overhead into every reading -
@@ -158,7 +155,7 @@ edit (the rungs are bit-identical per element), but it is promoted only
 on a sweep of the family it routes, under the alternating-group
 protocol; the evidence here was read on the forced triad rungs.
 
-### Tile64 at the prefill shapes (2026-08-26, RTX 6000 Ada, min of 3 runs)
+### Tile64 at the prefill shapes (RTX 6000 Ada, min of 3 runs)
 
 The prefill routing question is settled by measurement: a wave-efficiency
 model predicted Tile64 could win the big serve projections (Tile128 sits
@@ -218,14 +215,14 @@ cargo test --features cuda --release --test gemm_bi_typed_parity \
 ```
 
 Contract tests (non-ignored, run in the default suite): bit-identity of
-training across runs (`sgemm_bi_determinism.rs`), typed bit-parity vs the
+training across runs (`gemm_bi_determinism.rs`), typed bit-parity vs the
 f32 triad incl. a 60-shape dispatch-gate boundary sweep
-(`sgemm_bi_typed_parity.rs`), TC determinism / strict all-M invariance /
+(`gemm_bi_typed_parity.rs`), TC determinism / strict all-M invariance /
 accuracy / cross-tile bit-identity / gate boundary sweep / launch-reality
-geometry (`sgemm_bi_tc.rs`), cross-batch inference parity
+geometry (`gemm_bi_tc.rs`), cross-batch inference parity
 (`hf_batch_parity.rs`, `extreme_edge_coverage.rs`).
 
-## Run-to-run bit determinism across GEMM tiers (2026-08-01, RTX 5090)
+## Run-to-run bit determinism across GEMM tiers (RTX 5090)
 
 `tests/parallel_run_determinism.rs`: two identical 4-step training runs in
 the parallel-scan regime (T > threshold, bf16), master weights compared
@@ -260,7 +257,7 @@ new goldens, and a route-identity entry. The tensor-core ladder is immune
 by construction: it has no split-K and its tile picker keys only on
 output dimensions between bit-identical kernels.
 
-## CUDA-13 cuBLAS compute-mode probe — the pedantic pin re-examined (2026-08-22, RTX 5090, cuBLAS 13)
+## CUDA-13 cuBLAS compute-mode probe — the pedantic pin re-examined (RTX 5090, cuBLAS 13)
 
 `tests/cublas_compute_probe.rs` (`--ignored`, TSV artifact): bf16-input
 GemmEx cells V0-V5 (compute type x handle math-mode bits) and f32-input
@@ -279,12 +276,11 @@ Findings, in decision order:
 
 1. **`CUBLAS_MATH_DISALLOW_REDUCED_PRECISION_REDUCTION` is a dead end**:
    V4/V5 match V2/V3 to the BIT in every metric on every shape — the
-   flag changes nothing for bf16-input GemmEx on this stack. The one-flag
-   rescue hypothesized from the 61325b3 signature is refuted.
+   flag changes nothing for bf16-input GemmEx on this stack.
 2. **The accuracy gap PEDANTIC vs 32F is real and persists on CUDA 13**
    (~10-35x mean relative error, growing with K). The falsification
    guard ("V2 clean everywhere => inconclusive") did NOT trigger. The
-   April pin keeps its justification; **no default flip.** Version
+   pedantic pin keeps its justification; **no default flip.** Version
    window: reproduced on cuBLAS 13 / sm_120, first observed on
    cuBLAS 12.8 / sm_89.
 3. Handle math mode is inert under PEDANTIC (V1 == V0 bit-for-bit) —
@@ -293,21 +289,20 @@ Findings, in decision order:
    what separates the modes; accumulation accuracy is.
 5. **`CUBLAS_COMPUTE_32F_EMULATED_16BFX9` (V6e) matches true-fp32
    accuracy bit-for-bit in error profile at up to ~2x the speed** on
-   f32-input GEMMs. Recorded as the Class-B candidate for the f32
-   cuBLAS lane (new bit family, versioned re-route, pending decision) —
-   see the P2.6 lane.
+   f32-input GEMMs. A candidate for the f32 cuBLAS
+   lane (a new bit family, so it would need a versioned re-route; not
+   adopted).
 6. TF32 (V6t) is the worst accuracy option at scale (mean 1.9e-4 at
    K=16384) — reaffirms keeping it opt-in only.
 
 Consequence for bf16 TRAINING speed: the cuBLAS default lane stays
 pinned PEDANTIC; the speed lever for bf16 training remains the
 batch-invariant SGEMM-BI tier (fp32 fixed-order accumulation, no cuBLAS)
-and its occupancy work. Full artifact: `cublas_probe_2026-08-22.tsv`
-(box `/tmp/cublas_probe.tsv`).
+and its occupancy work.
 
 ## Family comparison at a prefill shape (f32)
 
-`tests/prism_gemm_tier_bench.rs::prism_shapes_cublas_vs_sgemm_bi_vs_gemm_bi`
+`tests/classifier_gemm_tier_bench.rs::classifier_shapes_cublas_vs_sgemm_bi_vs_gemm_bi`
 
 Vision-classifier projections, f32, M = 4621 rows per page (a batched row
 shows whether a dispatch bucket boundary is ever crossed). RTX 6000 Ada.
@@ -327,6 +322,10 @@ by the same 1.0e-4–1.8e-4 (they agree with each other more closely than
 either agrees with cuBLAS), and reruns are bit-identical.
 
 These are isolated GEMM timings. End to end on the same model the
-deterministic route costs +30% per page (18.6 → 24.2 ms), because the
-scan, not the projections, dominates that architecture — the ratio a
-caller should plan against is the end-to-end one, not the GEMM one.
+deterministic f32 route costs +30% per page (18.6 → 24.2 ms), because
+the scan, not the projections, dominates that architecture — the ratio
+a caller should plan against is the end-to-end one, not the GEMM one.
+With the tensor-core ladder the bf16 deterministic page removes that
+tax entirely: 10.9 ms/page against the 11.8 ms non-deterministic
+cuBLAS f32 page and 20.0 ms for the deterministic f32 route
+(`tests/m3_prefill_bench.rs`, pooled-graph replay, RTX 6000 Ada).

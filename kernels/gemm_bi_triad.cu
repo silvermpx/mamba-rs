@@ -138,7 +138,7 @@ void sgemm_bi_nn(
     // pattern instead. Assert in debug builds only to avoid runtime cost
     // in production.
     assert(alpha == 1.0f || bias == nullptr);
-    // T1 v2: 2-stage cp.async pipeline (CUTLASS multistage SM80 pattern).
+    // 2-stage cp.async pipeline (CUTLASS multistage SM80 pattern).
     // Dynamic smem layout: As[K_PIPE][BK*(BM+SMEM_A_PAD)] || Bs[K_PIPE][BK*(BN+SMEM_B_PAD)].
     // Per-block smem = K_PIPE * (A_STAGE + B_STAGE) * 4B = 2 * (2112 + 2112) * 4 = 33 KB.
     // Requires cuFuncSetAttribute(MAX_DYNAMIC_SHARED_SIZE_BYTES, 33*1024) — caller-side.
@@ -183,7 +183,7 @@ void sgemm_bi_nn(
     unsigned As_base = __cvta_generic_to_shared(As_buf);
     unsigned Bs_base = __cvta_generic_to_shared(Bs_buf);
 
-    // 2026-05-12 STAGE-4: persistent CTA loop. Grid_dim ≤ total_tiles; each
+    // A persistent CTA loop was tried: Grid_dim ≤ total_tiles; each
     // block walks `tile_id = blockIdx.x, blockIdx.x + gridDim.x, ...`.
     // Determinism preserved: per-tile body is paste-identical to single-tile;
     // tile→block assignment is monotonic stride → tile_id → C[pid_m,pid_n]
@@ -191,14 +191,14 @@ void sgemm_bi_nn(
     // CUDA Graph compat: grid_dim captured once, stays fixed across replays.
     // Portability: invariant across batch_size / hyperparams / GPU SM count
     // (host passes `grid_dim = min(total_tiles, N_SMs * blocks_per_SM)`).
-    // 2026-05-13 — Stage-4 persistent CTA unwrapped. `int tile_id = blockIdx.x;`
+    // One CTA per output tile: `int tile_id = blockIdx.x;`
     // matches the canonical data-parallel SGEMM (siboehm Kernel 10, CUTLASS
     // Heuristic when total_tiles ≈ sm_count). In our shape regime (total_tiles
     // ≤ 16, sm_count = 80..200 across Ampere/Ada/Hopper/Blackwell) persistent
     // CTA was pure register tax: ptxas held tile_id as a loop-carried induction
     // var, pushing 3 Big kernels to the 128-reg cap of __launch_bounds__(256,2)
     // for +1.0% wall (bisect-confirmed). Constant init lets ptxas SSA-rename
-    // tile_id → blockIdx.x at usage points, restoring pre-Stage-4 register
+    // tile_id → blockIdx.x at usage points, restoring the flat register
     // schedule. Bit-exact: same FMA chain, same per-tile output, same launch
     // semantics (one CTA per output tile via gridDim = total_tiles).
     int tile_id = blockIdx.x;
@@ -257,7 +257,7 @@ void sgemm_bi_nn(
     // bkIdx is the K-offset of the tile being loaded. Uses 4-operand cp.async
     // for OOB zero-fill — branch-free, bit-exact, no scalar-store hole.
     #define ISSUE_TILE(stage, bkIdx) do {                                                 \
-        /* 2026-05-12 STAGE-3 (NN A coalesce reorder): 32 lanes split as 2 M-rows ×       \
+        /* A-coalesce reorder: 32 lanes split as 2 M-rows ×       \
          * BK=16 K-cols, 1 lane = 1 float (4B cp.async). 2 cache lines/warp instr,        \
          * 50% util vs prior 12.5% (8 rows × 16B/row scatter). Same cp.async count,       \
          * same dest As[K][M] layout → bit-exact preserved. 16B cp.async blocked by       \
@@ -388,7 +388,7 @@ void sgemm_bi_nn(
                     for (int resIdxM = 0; resIdxM < TM; ++resIdxM) {
                         #pragma unroll
                         for (int resIdxN = 0; resIdxN < TN; ++resIdxN) {
-                            // F-NT-FMA pin (2026-05-08): explicit __fmaf_rn for bit-exact
+                            // FMA pin: explicit __fmaf_rn for bit-exact
                             // match with CPU `_mm256_fmadd_ps`.
                             int idx = (wSubRowIdx * TM + resIdxM) * (WNITER * TN)
                                       + wSubColIdx * TN + resIdxN;
@@ -490,7 +490,7 @@ void sgemm_bi_tn(
     float alpha,
     int M_red, int K_out, int N
 ) {
-    // T1 v2: 2-stage cp.async pipeline (CUTLASS multistage SM80).
+    // 2-stage cp.async pipeline (CUTLASS multistage SM80).
     constexpr int K_PIPE = 2;
     extern __shared__ __align__(16) float smem[];
     constexpr int A_STAGE = BK * (BM + SMEM_A_PAD);
@@ -521,15 +521,14 @@ void sgemm_bi_tn(
     unsigned As_base = __cvta_generic_to_shared(As_buf);
     unsigned Bs_base = __cvta_generic_to_shared(Bs_buf);
 
-    // 2026-05-12 STAGE-4: persistent CTA loop (see sgemm_bi_nn for rationale).
-    // 2026-05-13 — Stage-4 persistent CTA unwrapped. `int tile_id = blockIdx.x;`
+    // One CTA per output tile: `int tile_id = blockIdx.x;`
     // matches the canonical data-parallel SGEMM (siboehm Kernel 10, CUTLASS
     // Heuristic when total_tiles ≈ sm_count). In our shape regime (total_tiles
     // ≤ 16, sm_count = 80..200 across Ampere/Ada/Hopper/Blackwell) persistent
     // CTA was pure register tax: ptxas held tile_id as a loop-carried induction
     // var, pushing 3 Big kernels to the 128-reg cap of __launch_bounds__(256,2)
     // for +1.0% wall (bisect-confirmed). Constant init lets ptxas SSA-rename
-    // tile_id → blockIdx.x at usage points, restoring pre-Stage-4 register
+    // tile_id → blockIdx.x at usage points, restoring the flat register
     // schedule. Bit-exact: same FMA chain, same per-tile output, same launch
     // semantics (one CTA per output tile via gridDim = total_tiles).
     int tile_id = blockIdx.x;
@@ -547,7 +546,7 @@ void sgemm_bi_tn(
     // ISSUE_TILE_TN(stage, mIdx) — issue one A+B tile for M-reduction position mIdx.
     // 4-operand cp.async zero-fills OOB bytes (PTX 9.7.8.22) — branch-free + bit-exact.
     //
-    // 2026-05-12 STAGE-1 (Gemini #1 coalesce): A-load now uses warp-cooperative
+    // Coalesced A-load: uses warp-cooperative
     // contiguous-row reads — each warp loads `BK / (NUM_THREADS / WARPSIZE) = 2`
     // X-rows fully (32 lanes × 4 floats = 128-float row = 1 full cache line at
     // 100% utilization). Replaces the prior pattern where each warp at fixed _i
@@ -667,7 +666,7 @@ void sgemm_bi_tn(
                     for (int i = 0; i < TN; ++i)
                         regN_next[wSubColIdx * TN + i] = Bs_rd[(dotIdx + 1) * (BN + SMEM_B_PAD) + warpCol * WN + wSubColIdx * WSUBN + threadColInWarp * TN + i];
             }
-            // F-NT-FMA pin (2026-05-08): explicit __fmaf_rn for bit-exact
+            // FMA pin: explicit __fmaf_rn for bit-exact
             // match with CPU `_mm256_fmadd_ps`. sgemm_bi_tn (TN GEMM, K-pipelined).
             #pragma unroll
             for (int wSubRowIdx = 0; wSubRowIdx < WMITER; ++wSubRowIdx)
@@ -784,7 +783,7 @@ void sgemm_bi_tn_splitm_partial(
     unsigned As_base = __cvta_generic_to_shared(As);
     unsigned Bs_base = __cvta_generic_to_shared(Bs);
 
-    // 2026-05-12 STAGE-1 coalesce (mirrors sgemm_bi_tn ISSUE_TILE_TN A-loader).
+    // Coalesced A-load (mirrors sgemm_bi_tn ISSUE_TILE_TN A-loader).
     constexpr int WARPS_SM = NUM_THREADS / WARPSIZE;
     constexpr int ROWS_PER_WARP_SM = BK / WARPS_SM;
     static_assert(BK % WARPS_SM == 0, "BK must be divisible by warp count");
@@ -792,15 +791,15 @@ void sgemm_bi_tn_splitm_partial(
     int _warp = threadIdx.x / WARPSIZE;
     int _lane = threadIdx.x % WARPSIZE;
 
-    // 2026-05-12 STAGE-4: persistent CTA loop. fc/m_begin/m_end stay kernel-scoped.
-    // 2026-05-13 — Stage-4 persistent CTA unwrapped. `int tile_id = blockIdx.x;`
+    // A persistent CTA loop was tried: fc/m_begin/m_end stay kernel-scoped.
+    // One CTA per output tile: `int tile_id = blockIdx.x;`
     // matches the canonical data-parallel SGEMM (siboehm Kernel 10, CUTLASS
     // Heuristic when total_tiles ≈ sm_count). In our shape regime (total_tiles
     // ≤ 16, sm_count = 80..200 across Ampere/Ada/Hopper/Blackwell) persistent
     // CTA was pure register tax: ptxas held tile_id as a loop-carried induction
     // var, pushing 3 Big kernels to the 128-reg cap of __launch_bounds__(256,2)
     // for +1.0% wall (bisect-confirmed). Constant init lets ptxas SSA-rename
-    // tile_id → blockIdx.x at usage points, restoring pre-Stage-4 register
+    // tile_id → blockIdx.x at usage points, restoring the flat register
     // schedule. Bit-exact: same FMA chain, same per-tile output, same launch
     // semantics (one CTA per output tile via gridDim = total_tiles).
     int tile_id = blockIdx.x;
@@ -867,7 +866,7 @@ void sgemm_bi_tn_splitm_partial(
             for (int wSubColIdx = 0; wSubColIdx < WNITER; ++wSubColIdx)
                 for (int i = 0; i < TN; ++i)
                     regN[wSubColIdx * TN + i] = Bs[dotIdx * (BN + SMEM_B_PAD) + warpCol * WN + wSubColIdx * WSUBN + threadColInWarp * TN + i];
-            // F-NT-FMA pin (2026-05-08): explicit __fmaf_rn for bit-exact
+            // FMA pin: explicit __fmaf_rn for bit-exact
             // match with CPU `_mm256_fmadd_ps`. Same fix class as F-09a
             // (RoPE backward FMA pin).
             for (int wSubRowIdx = 0; wSubRowIdx < WMITER; ++wSubRowIdx)
@@ -1023,15 +1022,15 @@ void sgemm_bi_nn_splitk_big_partial(
     unsigned As_base = __cvta_generic_to_shared(As_buf);
     unsigned Bs_base = __cvta_generic_to_shared(Bs_buf);
 
-    // 2026-05-12 STAGE-4: persistent CTA loop. fc/k_begin/k_end stay kernel-scoped.
-    // 2026-05-13 — Stage-4 persistent CTA unwrapped. `int tile_id = blockIdx.x;`
+    // A persistent CTA loop was tried: fc/k_begin/k_end stay kernel-scoped.
+    // One CTA per output tile: `int tile_id = blockIdx.x;`
     // matches the canonical data-parallel SGEMM (siboehm Kernel 10, CUTLASS
     // Heuristic when total_tiles ≈ sm_count). In our shape regime (total_tiles
     // ≤ 16, sm_count = 80..200 across Ampere/Ada/Hopper/Blackwell) persistent
     // CTA was pure register tax: ptxas held tile_id as a loop-carried induction
     // var, pushing 3 Big kernels to the 128-reg cap of __launch_bounds__(256,2)
     // for +1.0% wall (bisect-confirmed). Constant init lets ptxas SSA-rename
-    // tile_id → blockIdx.x at usage points, restoring pre-Stage-4 register
+    // tile_id → blockIdx.x at usage points, restoring the flat register
     // schedule. Bit-exact: same FMA chain, same per-tile output, same launch
     // semantics (one CTA per output tile via gridDim = total_tiles).
     int tile_id = blockIdx.x;
@@ -1048,7 +1047,7 @@ void sgemm_bi_nn_splitk_big_partial(
     // zero-fill). Per-block K range [k_begin, k_end) is enforced by the tile
     // loop; cp.async still zero-fills any lane that reads k >= K.
     #define ISSUE_TILE_SK(stage, bkIdx) do {                                              \
-        /* 2026-05-12 STAGE-3 coalesce (mirrors big NN ISSUE_TILE A-load). */             \
+        /* Coalesced A-load (mirrors big NN ISSUE_TILE A-load). */             \
         {                                                                                 \
             constexpr int WARPS_SK = NUM_THREADS / WARPSIZE;                              \
             constexpr int M_ROWS_PER_WARP_INST_SK = WARPSIZE / BK;                        \
@@ -1166,7 +1165,7 @@ void sgemm_bi_nn_splitk_big_partial(
                     for (int resIdxM = 0; resIdxM < TM; ++resIdxM) {
                         #pragma unroll
                         for (int resIdxN = 0; resIdxN < TN; ++resIdxN) {
-                            // F-NT-FMA pin (2026-05-08): explicit __fmaf_rn for bit-exact
+                            // FMA pin: explicit __fmaf_rn for bit-exact
                             // match with CPU `_mm256_fmadd_ps`.
                             int idx = (wSubRowIdx * TM + resIdxM) * (WNITER * TN)
                                       + wSubColIdx * TN + resIdxN;
@@ -1249,7 +1248,7 @@ void sgemm_bi_nt(
     float alpha,
     int M, int N, int K_out
 ) {
-    // T1 v2: 2-stage cp.async pipeline.
+    // 2-stage cp.async pipeline.
     constexpr int K_PIPE = 2;
     extern __shared__ __align__(16) float smem[];
     constexpr int A_STAGE = BK * (BM + SMEM_A_PAD);
@@ -1280,15 +1279,14 @@ void sgemm_bi_nt(
     unsigned As_base = __cvta_generic_to_shared(As_buf);
     unsigned Bs_base = __cvta_generic_to_shared(Bs_buf);
 
-    // 2026-05-12 STAGE-4: persistent CTA loop (see sgemm_bi_nn for rationale).
-    // 2026-05-13 — Stage-4 persistent CTA unwrapped. `int tile_id = blockIdx.x;`
+    // One CTA per output tile: `int tile_id = blockIdx.x;`
     // matches the canonical data-parallel SGEMM (siboehm Kernel 10, CUTLASS
     // Heuristic when total_tiles ≈ sm_count). In our shape regime (total_tiles
     // ≤ 16, sm_count = 80..200 across Ampere/Ada/Hopper/Blackwell) persistent
     // CTA was pure register tax: ptxas held tile_id as a loop-carried induction
     // var, pushing 3 Big kernels to the 128-reg cap of __launch_bounds__(256,2)
     // for +1.0% wall (bisect-confirmed). Constant init lets ptxas SSA-rename
-    // tile_id → blockIdx.x at usage points, restoring pre-Stage-4 register
+    // tile_id → blockIdx.x at usage points, restoring the flat register
     // schedule. Bit-exact: same FMA chain, same per-tile output, same launch
     // semantics (one CTA per output tile via gridDim = total_tiles).
     int tile_id = blockIdx.x;
@@ -1305,7 +1303,7 @@ void sgemm_bi_nt(
 
     // ISSUE_TILE_NT(stage, nIdx) — issue one A+B tile for N-reduction position nIdx.
     //
-    // 2026-05-12 STAGE-2 (Gemini #1/coalesce for NT): A-load now uses warp-cooperative
+    // Coalesced A-load for NT: warp-cooperative
     // contiguous-row reads. NT tile geometry differs from TN: here BK=16 is the
     // N-axis (reduction dim) of dY[M,N] and BM=128 is the M-axis (samples).
     // dY[m, n] is row-major → for fixed m varying n is contiguous.
@@ -1317,7 +1315,7 @@ void sgemm_bi_nt(
     // Net gain: **4× cache line utilization** at SAME 8 cp.async/thread count.
     //
     // We do NOT use 16B cp.async here — BK=16 < 32 lanes/row makes a full-warp
-    // contiguous N-stripe impossible without layout swap (Gemini #2, deferred).
+    // contiguous N-stripe impossible without a layout swap (deferred).
     //
     // Bit-exact: destination As[n_local][m_local] cells receive identical bytes.
     // FMA loop unchanged.
@@ -1415,7 +1413,7 @@ void sgemm_bi_nt(
                     for (int i = 0; i < TN; ++i)
                         regN_next[wSubColIdx * TN + i] = Bs_rd[(dotIdx + 1) * (BN + SMEM_B_PAD) + warpCol * WN + wSubColIdx * WSUBN + threadColInWarp * TN + i];
             }
-            // F-NT-FMA pin (2026-05-08): explicit __fmaf_rn for bit-exact
+            // FMA pin: explicit __fmaf_rn for bit-exact
             // match with CPU `_mm256_fmadd_ps`. sgemm_bi_nt (NT GEMM, K-pipelined).
             #pragma unroll
             for (int wSubRowIdx = 0; wSubRowIdx < WMITER; ++wSubRowIdx)
@@ -1545,7 +1543,7 @@ void sgemm_bi_nt_splitn_big_partial(
     // but N-bound is `N` (global) for cp.async zero-fill. Per-block N range
     // [n_begin, n_end) is enforced by tile loop.
     #define ISSUE_TILE_NT_SN(stage, nIdx) do {                                            \
-        /* 2026-05-12 STAGE-2 coalesce (mirrors big NT ISSUE_TILE_NT A-load). */          \
+        /* Coalesced A-load (mirrors big NT ISSUE_TILE_NT A-load). */          \
         {                                                                                 \
             constexpr int WARPS_NTSN = NUM_THREADS / WARPSIZE;                            \
             constexpr int M_ROWS_PER_WARP_INST_NTSN = WARPSIZE / BK;                      \
@@ -1596,15 +1594,15 @@ void sgemm_bi_nt_splitn_big_partial(
 
     int num_k_tiles = (n_end - n_begin + BK - 1) / BK;
 
-    // 2026-05-12 STAGE-4: persistent CTA loop. fc/n_begin/n_end stay kernel-scoped.
-    // 2026-05-13 — Stage-4 persistent CTA unwrapped. `int tile_id = blockIdx.x;`
+    // A persistent CTA loop was tried: fc/n_begin/n_end stay kernel-scoped.
+    // One CTA per output tile: `int tile_id = blockIdx.x;`
     // matches the canonical data-parallel SGEMM (siboehm Kernel 10, CUTLASS
     // Heuristic when total_tiles ≈ sm_count). In our shape regime (total_tiles
     // ≤ 16, sm_count = 80..200 across Ampere/Ada/Hopper/Blackwell) persistent
     // CTA was pure register tax: ptxas held tile_id as a loop-carried induction
     // var, pushing 3 Big kernels to the 128-reg cap of __launch_bounds__(256,2)
     // for +1.0% wall (bisect-confirmed). Constant init lets ptxas SSA-rename
-    // tile_id → blockIdx.x at usage points, restoring pre-Stage-4 register
+    // tile_id → blockIdx.x at usage points, restoring the flat register
     // schedule. Bit-exact: same FMA chain, same per-tile output, same launch
     // semantics (one CTA per output tile via gridDim = total_tiles).
     int tile_id = blockIdx.x;
@@ -1659,7 +1657,7 @@ void sgemm_bi_nt_splitn_big_partial(
                     for (int i = 0; i < TN; ++i)
                         regN_next[wSubColIdx * TN + i] = Bs_rd[(dotIdx + 1) * (BN + SMEM_B_PAD) + warpCol * WN + wSubColIdx * WSUBN + threadColInWarp * TN + i];
             }
-            // F-NT-FMA pin (2026-05-08): explicit __fmaf_rn for bit-exact
+            // FMA pin: explicit __fmaf_rn for bit-exact
             // match with CPU `_mm256_fmadd_ps`. sgemm_bi_nt_splitn_big_partial.
             #pragma unroll
             for (int wSubRowIdx = 0; wSubRowIdx < WMITER; ++wSubRowIdx)
@@ -1818,7 +1816,7 @@ void sgemm_bi_nn_slim(
     unsigned As_base = __cvta_generic_to_shared(As);
     unsigned Bs_base = __cvta_generic_to_shared(Bs);
 
-    // 2026-05-12 STAGE-3 slim NN A coalesce (mirrors big NN ISSUE_TILE A-load).
+    // Slim NN A coalesce (mirrors big NN ISSUE_TILE A-load).
     constexpr int WARPS_NNSLIM = NUM_THREADS / WARPSIZE;
     constexpr int M_ROWS_PER_WARP_INST_NNSLIM = WARPSIZE / BK;
     constexpr int M_ROWS_PER_WARP_NNSLIM = BM / WARPS_NNSLIM;
@@ -1831,15 +1829,14 @@ void sgemm_bi_nn_slim(
     int _m_in_warp_nn = (M_ROWS_PER_WARP_INST_NNSLIM > 0) ? (_lane / BK) : 0;
     int _k_local_lane = _lane % BK;
 
-    // 2026-05-12 STAGE-4: persistent CTA loop for slim NN.
-    // 2026-05-13 — Stage-4 persistent CTA unwrapped. `int tile_id = blockIdx.x;`
+    // One CTA per output tile: `int tile_id = blockIdx.x;`
     // matches the canonical data-parallel SGEMM (siboehm Kernel 10, CUTLASS
     // Heuristic when total_tiles ≈ sm_count). In our shape regime (total_tiles
     // ≤ 16, sm_count = 80..200 across Ampere/Ada/Hopper/Blackwell) persistent
     // CTA was pure register tax: ptxas held tile_id as a loop-carried induction
     // var, pushing 3 Big kernels to the 128-reg cap of __launch_bounds__(256,2)
     // for +1.0% wall (bisect-confirmed). Constant init lets ptxas SSA-rename
-    // tile_id → blockIdx.x at usage points, restoring pre-Stage-4 register
+    // tile_id → blockIdx.x at usage points, restoring the flat register
     // schedule. Bit-exact: same FMA chain, same per-tile output, same launch
     // semantics (one CTA per output tile via gridDim = total_tiles).
     int tile_id = blockIdx.x;
@@ -1946,7 +1943,7 @@ void sgemm_bi_nn_slim(
                 for (int wSubColIdx = 0; wSubColIdx < WNITER; ++wSubColIdx) {
                     for (int resIdxM = 0; resIdxM < TM; ++resIdxM) {
                         for (int resIdxN = 0; resIdxN < TN; ++resIdxN) {
-                            // F-NT-FMA pin (2026-05-08): explicit __fmaf_rn for bit-exact
+                            // FMA pin: explicit __fmaf_rn for bit-exact
                             // match with CPU `_mm256_fmadd_ps`.
                             int idx = (wSubRowIdx * TM + resIdxM) * (WNITER * TN)
                                       + wSubColIdx * TN + resIdxN;
@@ -2084,7 +2081,7 @@ void sgemm_bi_nn_splitk_slim_partial(
     unsigned As_base = __cvta_generic_to_shared(As);
     unsigned Bs_base = __cvta_generic_to_shared(Bs);
 
-    // 2026-05-12 STAGE-3 slim NN splitk A coalesce.
+    // Slim NN splitk A coalesce.
     constexpr int WARPS_NNSKP = NUM_THREADS / WARPSIZE;
     constexpr int M_ROWS_PER_WARP_INST_NNSKP = WARPSIZE / BK;
     constexpr int M_ROWS_PER_WARP_NNSKP = BM / WARPS_NNSKP;
@@ -2097,15 +2094,15 @@ void sgemm_bi_nn_splitk_slim_partial(
     int _m_in_warp_nnsk = _lane / BK;
     int _k_local_lane = _lane % BK;
 
-    // 2026-05-12 STAGE-4: persistent CTA loop. fc/k_begin/k_end stay kernel-scoped.
-    // 2026-05-13 — Stage-4 persistent CTA unwrapped. `int tile_id = blockIdx.x;`
+    // A persistent CTA loop was tried: fc/k_begin/k_end stay kernel-scoped.
+    // One CTA per output tile: `int tile_id = blockIdx.x;`
     // matches the canonical data-parallel SGEMM (siboehm Kernel 10, CUTLASS
     // Heuristic when total_tiles ≈ sm_count). In our shape regime (total_tiles
     // ≤ 16, sm_count = 80..200 across Ampere/Ada/Hopper/Blackwell) persistent
     // CTA was pure register tax: ptxas held tile_id as a loop-carried induction
     // var, pushing 3 Big kernels to the 128-reg cap of __launch_bounds__(256,2)
     // for +1.0% wall (bisect-confirmed). Constant init lets ptxas SSA-rename
-    // tile_id → blockIdx.x at usage points, restoring pre-Stage-4 register
+    // tile_id → blockIdx.x at usage points, restoring the flat register
     // schedule. Bit-exact: same FMA chain, same per-tile output, same launch
     // semantics (one CTA per output tile via gridDim = total_tiles).
     int tile_id = blockIdx.x;
@@ -2180,7 +2177,7 @@ void sgemm_bi_nn_splitk_slim_partial(
                 for (int wSubColIdx = 0; wSubColIdx < WNITER; ++wSubColIdx) {
                     for (int resIdxM = 0; resIdxM < TM; ++resIdxM) {
                         for (int resIdxN = 0; resIdxN < TN; ++resIdxN) {
-                            // F-NT-FMA pin (2026-05-08): explicit __fmaf_rn for bit-exact
+                            // FMA pin: explicit __fmaf_rn for bit-exact
                             // match with CPU `_mm256_fmadd_ps`.
                             int idx = (wSubRowIdx * TM + resIdxM) * (WNITER * TN)
                                       + wSubColIdx * TN + resIdxN;
@@ -2283,15 +2280,14 @@ void sgemm_bi_tn_slim(
     float regM[WMITER * TM] = {0.0f};
     float regN[WNITER * TN] = {0.0f};
 
-    // 2026-05-12 STAGE-4: persistent CTA loop for slim TN.
-    // 2026-05-13 — Stage-4 persistent CTA unwrapped. `int tile_id = blockIdx.x;`
+    // One CTA per output tile: `int tile_id = blockIdx.x;`
     // matches the canonical data-parallel SGEMM (siboehm Kernel 10, CUTLASS
     // Heuristic when total_tiles ≈ sm_count). In our shape regime (total_tiles
     // ≤ 16, sm_count = 80..200 across Ampere/Ada/Hopper/Blackwell) persistent
     // CTA was pure register tax: ptxas held tile_id as a loop-carried induction
     // var, pushing 3 Big kernels to the 128-reg cap of __launch_bounds__(256,2)
     // for +1.0% wall (bisect-confirmed). Constant init lets ptxas SSA-rename
-    // tile_id → blockIdx.x at usage points, restoring pre-Stage-4 register
+    // tile_id → blockIdx.x at usage points, restoring the flat register
     // schedule. Bit-exact: same FMA chain, same per-tile output, same launch
     // semantics (one CTA per output tile via gridDim = total_tiles).
     int tile_id = blockIdx.x;
@@ -2315,7 +2311,7 @@ void sgemm_bi_tn_slim(
     unsigned As_base = __cvta_generic_to_shared(As);
     unsigned Bs_base = __cvta_generic_to_shared(Bs);
 
-    // 2026-05-12 STAGE-1 slim TN A coalesce (mirrors big TN ISSUE_TILE_TN).
+    // Slim TN A coalesce (mirrors big TN ISSUE_TILE_TN).
     constexpr int WARPS_TNSLIM = NUM_THREADS / WARPSIZE;
     constexpr int ROWS_PER_WARP_TNSLIM = BK / WARPS_TNSLIM;
     static_assert(BK % WARPS_TNSLIM == 0, "BK divisible by warps (slim TN)");
@@ -2381,7 +2377,7 @@ void sgemm_bi_tn_slim(
             for (int wSubColIdx = 0; wSubColIdx < WNITER; ++wSubColIdx)
                 for (int i = 0; i < TN; ++i)
                     regN[wSubColIdx * TN + i] = Bs[dotIdx * (BN + SMEM_B_PAD) + warpCol * WN + wSubColIdx * WSUBN + threadColInWarp * TN + i];
-            // F-NT-FMA pin (2026-05-08): explicit __fmaf_rn for bit-exact
+            // FMA pin: explicit __fmaf_rn for bit-exact
             // match with CPU `_mm256_fmadd_ps`. Same fix class as F-09a
             // (RoPE backward FMA pin).
             for (int wSubRowIdx = 0; wSubRowIdx < WMITER; ++wSubRowIdx)
@@ -2472,15 +2468,14 @@ void sgemm_bi_nt_slim(
     float regM[WMITER * TM] = {0.0f};
     float regN[WNITER * TN] = {0.0f};
 
-    // 2026-05-12 STAGE-4: persistent CTA loop for slim NT.
-    // 2026-05-13 — Stage-4 persistent CTA unwrapped. `int tile_id = blockIdx.x;`
+    // One CTA per output tile: `int tile_id = blockIdx.x;`
     // matches the canonical data-parallel SGEMM (siboehm Kernel 10, CUTLASS
     // Heuristic when total_tiles ≈ sm_count). In our shape regime (total_tiles
     // ≤ 16, sm_count = 80..200 across Ampere/Ada/Hopper/Blackwell) persistent
     // CTA was pure register tax: ptxas held tile_id as a loop-carried induction
     // var, pushing 3 Big kernels to the 128-reg cap of __launch_bounds__(256,2)
     // for +1.0% wall (bisect-confirmed). Constant init lets ptxas SSA-rename
-    // tile_id → blockIdx.x at usage points, restoring pre-Stage-4 register
+    // tile_id → blockIdx.x at usage points, restoring the flat register
     // schedule. Bit-exact: same FMA chain, same per-tile output, same launch
     // semantics (one CTA per output tile via gridDim = total_tiles).
     int tile_id = blockIdx.x;
@@ -2499,7 +2494,7 @@ void sgemm_bi_nt_slim(
     unsigned As_base = __cvta_generic_to_shared(As);
     unsigned Bs_base = __cvta_generic_to_shared(Bs);
 
-    // 2026-05-12 STAGE-2 slim NT A coalesce.
+    // Slim NT A coalesce.
     constexpr int WARPS_NTSLIM = NUM_THREADS / WARPSIZE;
     constexpr int M_ROWS_PER_WARP_INST_NTSL = WARPSIZE / BK;
     constexpr int M_ROWS_PER_WARP_NTSL = BM / WARPS_NTSLIM;
@@ -2560,7 +2555,7 @@ void sgemm_bi_nt_slim(
             for (int wSubColIdx = 0; wSubColIdx < WNITER; ++wSubColIdx)
                 for (int i = 0; i < TN; ++i)
                     regN[wSubColIdx * TN + i] = Bs[dotIdx * (BN + SMEM_B_PAD) + warpCol * WN + wSubColIdx * WSUBN + threadColInWarp * TN + i];
-            // F-NT-FMA pin (2026-05-08): explicit __fmaf_rn for bit-exact
+            // FMA pin: explicit __fmaf_rn for bit-exact
             // match with CPU `_mm256_fmadd_ps`. Same fix class as F-09a
             // (RoPE backward FMA pin).
             for (int wSubRowIdx = 0; wSubRowIdx < WMITER; ++wSubRowIdx)
@@ -2614,7 +2609,7 @@ void sgemm_bi_nt_slim(
 }
 
 // Slim geometry ends here — undef everything so no later-appended section
-// can silently inherit BM=128/BN=64/BK=32 (the 0.4.0 geometry-leak class).
+// can silently inherit BM=128/BN=64/BK=32 through ambient defines.
 // Every section below defines its own prefixed macros and undefs them.
 #undef BM
 #undef BN
@@ -2689,7 +2684,7 @@ void sgemm_bi_nn_ultra_thin(
     if (col < N) {
         // Per-thread accumulation in fixed k-order. Deterministic per output.
         // F-GEMV-FMA pin: explicit __fmaf_rn matches
-        // F-NT-FMA pattern from 22 sibling kernels (2026-05-08 sweep). Under
+        // FMA pattern shared with the sibling kernels. Under
         // current --fmad=true ptxas contracts to identical FFMA SASS; this
         // pin hardens against future ptxas / NVRTC toolchain choosing to
         // un-fuse under register pressure or contraction-mode change. Per
@@ -2931,15 +2926,14 @@ void sgemm_bi_nn_narrow(
     unsigned As_base = __cvta_generic_to_shared(As);
     unsigned Bs_base = __cvta_generic_to_shared(Bs);
 
-    // 2026-05-12 STAGE-4: persistent CTA loop for nn_narrow.
-    // 2026-05-13 — Stage-4 persistent CTA unwrapped. `int tile_id = blockIdx.x;`
+    // One CTA per output tile: `int tile_id = blockIdx.x;`
     // matches the canonical data-parallel SGEMM (siboehm Kernel 10, CUTLASS
     // Heuristic when total_tiles ≈ sm_count). In our shape regime (total_tiles
     // ≤ 16, sm_count = 80..200 across Ampere/Ada/Hopper/Blackwell) persistent
     // CTA was pure register tax: ptxas held tile_id as a loop-carried induction
     // var, pushing 3 Big kernels to the 128-reg cap of __launch_bounds__(256,2)
     // for +1.0% wall (bisect-confirmed). Constant init lets ptxas SSA-rename
-    // tile_id → blockIdx.x at usage points, restoring pre-Stage-4 register
+    // tile_id → blockIdx.x at usage points, restoring the flat register
     // schedule. Bit-exact: same FMA chain, same per-tile output, same launch
     // semantics (one CTA per output tile via gridDim = total_tiles).
     int tile_id = blockIdx.x;
@@ -2954,7 +2948,7 @@ void sgemm_bi_nn_narrow(
         const float* B_block = B + pid_n * NBN;
         float* C_warp = C + (pid_m * NBM + warpRow * NWM) * ldc + pid_n * NBN + warpCol * NWN;
 
-        // 2026-05-13 bias-bit-exact fix: pre-seed threadResults with bias[g_col]
+        // Bias-bit-exact: pre-seed threadResults with bias[g_col]
         // BEFORE the K-loop so the FMA chain matches CPU's `y = bias; y += x*w`
         // order. Prior version initialized to 0 and added bias as a final
         // epilogue op (`val = alpha*sum + bias`), producing a different f32
@@ -2981,7 +2975,7 @@ void sgemm_bi_nn_narrow(
         }
 
     for (int bkIdx = 0; bkIdx < K; bkIdx += NBK) {
-        // 2026-05-12 STAGE-3 narrow NN coalesce: 4 warps × 8 instr/warp at 50%
+        // Narrow NN coalesce: 4 warps × 8 instr/warp at 50%
         // cache util (vs 12.5% legacy). NBM=64, NBK=16. M_ROWS_PER_WARP_INST=2.
         {
             constexpr int WARPS_NN_NARROW = NNUM_THREADS / WARPSIZE;            // 4
@@ -3042,7 +3036,7 @@ void sgemm_bi_nn_narrow(
             for (int i = 0; i < NTN; ++i) {
                 regN[i] = Bs[dotIdx * (NBN + SMEM_B_PAD) + warpCol * NWN + threadColInWarp * NTN + i];
             }
-            // F-NT-FMA pin (2026-05-08): explicit __fmaf_rn for bit-exact
+            // FMA pin: explicit __fmaf_rn for bit-exact
             // match with CPU `_mm256_fmadd_ps`. sgemm_bi_nn_narrow.
             for (int resIdxM = 0; resIdxM < NTM; ++resIdxM) {
                 for (int resIdxN = 0; resIdxN < NTN; ++resIdxN) {
@@ -3059,8 +3053,8 @@ void sgemm_bi_nn_narrow(
     }
 
     // Epilogue: write with alpha, beta. Bias is ABSORBED into threadResults
-    // pre-K-loop init above to match CPU FMA-chain order (bias-bit-exact fix
-    // 2026-05-13). DO NOT re-add bias here.
+    // pre-K-loop init above to match CPU FMA-chain order (bias-bit-exact).
+    // DO NOT re-add bias here.
     // Scalar N-fallback for non-%4 N (e.g. N=25).
     for (int resIdxM = 0; resIdxM < NTM; ++resIdxM) {
         int g_row = pid_m * NBM + warpRow * NWM + threadRowInWarp * NTM + resIdxM;
@@ -3358,19 +3352,18 @@ void sgemm_bi_tn_narrow(
     float regM[NTM] = {0.0f};
     float regN[NTN] = {0.0f};
 
-    // 2026-05-12 STAGE-1 narrow TN coalesce: convert A-loader from direct
+    // Narrow TN coalesce: convert A-loader from direct
     // global reads to cp.async with warp-cooperative contiguous loads.
     unsigned As_base = __cvta_generic_to_shared(As);
 
-    // 2026-05-12 STAGE-4: persistent CTA loop for tn_narrow.
-    // 2026-05-13 — Stage-4 persistent CTA unwrapped. `int tile_id = blockIdx.x;`
+    // One CTA per output tile: `int tile_id = blockIdx.x;`
     // matches the canonical data-parallel SGEMM (siboehm Kernel 10, CUTLASS
     // Heuristic when total_tiles ≈ sm_count). In our shape regime (total_tiles
     // ≤ 16, sm_count = 80..200 across Ampere/Ada/Hopper/Blackwell) persistent
     // CTA was pure register tax: ptxas held tile_id as a loop-carried induction
     // var, pushing 3 Big kernels to the 128-reg cap of __launch_bounds__(256,2)
     // for +1.0% wall (bisect-confirmed). Constant init lets ptxas SSA-rename
-    // tile_id → blockIdx.x at usage points, restoring pre-Stage-4 register
+    // tile_id → blockIdx.x at usage points, restoring the flat register
     // schedule. Bit-exact: same FMA chain, same per-tile output, same launch
     // semantics (one CTA per output tile via gridDim = total_tiles).
     int tile_id = blockIdx.x;
@@ -3386,7 +3379,7 @@ void sgemm_bi_tn_narrow(
         float* C_warp = C + (pid_m * NBM + warpRow * NWM) * N + pid_n * NBN + warpCol * NWN;
 
     for (int mIdx = 0; mIdx < M_red; mIdx += NBK) {
-        // 2026-05-12 STAGE-1 narrow TN A-loader: cp.async coalesced (16B/lane).
+        // Narrow TN A-loader: cp.async coalesced (16B/lane).
         // 4 warps × 16 lanes per row × 2 rows per inst × 2 inst/warp = 4 NBK rows × 4 = 16 NBK rows ✓
         // Source X[m_red, k_out..+3] contig in K_out. Dest As[m_red][k_out..+3] contig in inner.
         // As layout = [NBK outer × NBM inner], 100% cache line util.
@@ -3460,7 +3453,7 @@ void sgemm_bi_tn_narrow(
             }
             for (int rm = 0; rm < NTM; ++rm) {
                 for (int rn = 0; rn < NTN; ++rn) {
-                    // F-NT-FMA pin (2026-05-08): explicit __fmaf_rn for
+                    // FMA pin: explicit __fmaf_rn for
                     // bit-exact match with CPU `_mm256_fmadd_ps`. nvcc may
                     // emit FMUL+FADD (two roundings) for `+= a*b` depending
                     // on compile flags; explicit FMA forces single-rounding.
@@ -3501,7 +3494,7 @@ void sgemm_bi_tn_narrow(
 // axis into F chunks, each handled by an independent block — same wave-fill
 // strategy as the regular Split-M TN at sgemm_bi_tn_splitm_partial.
 //
-// Bit-exact contract (CLAUDE.md §5.2):
+// Bit-exact contract:
 //   - F (split factor) is shape-keyed: caller computes F = div_ceil(2*NUM_SMS,
 //     base_blocks) capped by scratch budget → identical F on every call with
 //     same (M, K_out, N) → identical reduction tree.
@@ -3553,15 +3546,14 @@ void sgemm_bi_tn_narrow_splitm_partial(
     float regM[NTM] = {0.0f};
     float regN[NTN] = {0.0f};
 
-    // 2026-05-12 STAGE-4: persistent CTA loop for tn_narrow_splitm_partial.
-    // 2026-05-13 — Stage-4 persistent CTA unwrapped. `int tile_id = blockIdx.x;`
+    // One CTA per output tile: `int tile_id = blockIdx.x;`
     // matches the canonical data-parallel SGEMM (siboehm Kernel 10, CUTLASS
     // Heuristic when total_tiles ≈ sm_count). In our shape regime (total_tiles
     // ≤ 16, sm_count = 80..200 across Ampere/Ada/Hopper/Blackwell) persistent
     // CTA was pure register tax: ptxas held tile_id as a loop-carried induction
     // var, pushing 3 Big kernels to the 128-reg cap of __launch_bounds__(256,2)
     // for +1.0% wall (bisect-confirmed). Constant init lets ptxas SSA-rename
-    // tile_id → blockIdx.x at usage points, restoring pre-Stage-4 register
+    // tile_id → blockIdx.x at usage points, restoring the flat register
     // schedule. Bit-exact: same FMA chain, same per-tile output, same launch
     // semantics (one CTA per output tile via gridDim = total_tiles).
     int tile_id = blockIdx.x;
@@ -3580,7 +3572,7 @@ void sgemm_bi_tn_narrow_splitm_partial(
     unsigned Bs_base = __cvta_generic_to_shared(Bs);
 
     for (int mIdx = m_begin; mIdx < m_end; mIdx += NBK) {
-        // 2026-05-12 STAGE-1 narrow TN splitm coalesce: 4 warps × 16 lanes per row
+        // Narrow TN splitm coalesce: 4 warps × 16 lanes per row
         // × 2 rows per warp inst at 100% cache line util (vs 12.5% legacy).
         // NBM=64 K_out cols, NBK=16 M_red rows. Source X[m_red, k_out..+3] contig.
         {
@@ -3740,15 +3732,14 @@ void sgemm_bi_nt_narrow(
     float regM[NTM] = {0.0f};
     float regN[NTN] = {0.0f};
 
-    // 2026-05-12 STAGE-4: persistent CTA loop for nt_narrow.
-    // 2026-05-13 — Stage-4 persistent CTA unwrapped. `int tile_id = blockIdx.x;`
+    // One CTA per output tile: `int tile_id = blockIdx.x;`
     // matches the canonical data-parallel SGEMM (siboehm Kernel 10, CUTLASS
     // Heuristic when total_tiles ≈ sm_count). In our shape regime (total_tiles
     // ≤ 16, sm_count = 80..200 across Ampere/Ada/Hopper/Blackwell) persistent
     // CTA was pure register tax: ptxas held tile_id as a loop-carried induction
     // var, pushing 3 Big kernels to the 128-reg cap of __launch_bounds__(256,2)
     // for +1.0% wall (bisect-confirmed). Constant init lets ptxas SSA-rename
-    // tile_id → blockIdx.x at usage points, restoring pre-Stage-4 register
+    // tile_id → blockIdx.x at usage points, restoring the flat register
     // schedule. Bit-exact: same FMA chain, same per-tile output, same launch
     // semantics (one CTA per output tile via gridDim = total_tiles).
     int tile_id = blockIdx.x;
@@ -3762,7 +3753,7 @@ void sgemm_bi_nt_narrow(
         int pid_n = (tile_id % num_pid_in_group) / group_size_m;
 
     for (int nIdx = 0; nIdx < N; nIdx += NBK) {
-        // 2026-05-12 STAGE-2 narrow NT coalesce: 4 warps × 8 instr/warp × 2 rows.
+        // Narrow NT coalesce: 4 warps × 8 instr/warp × 2 rows.
         // M_ROWS_PER_WARP_INST = WARPSIZE/NBK = 2. Cache util 50% (vs 12.5% legacy).
         // Each lane: 1 float dY[g_m, g_n] → As[n_local][m_local].
         {
@@ -3829,7 +3820,7 @@ void sgemm_bi_nt_narrow(
             }
             for (int rm = 0; rm < NTM; ++rm) {
                 for (int rn = 0; rn < NTN; ++rn) {
-                    // F-NT-FMA pin (2026-05-08): explicit __fmaf_rn for
+                    // FMA pin: explicit __fmaf_rn for
                     // bit-exact match with CPU `_mm256_fmadd_ps`. nvcc may
                     // emit FMUL+FADD (two roundings) for `+= a*b` depending
                     // on compile flags; explicit FMA forces single-rounding.
@@ -3946,12 +3937,11 @@ void sgemm_bi_nn_splitk32_partial(
     float regM[2][STM] = {{0.0f}};
     float regN[2][STN] = {{0.0f}};
 
-    // 2026-05-12 STAGE-4: persistent CTA loop for splitk32_partial.
     // Grid is K_CHUNKS × total_mn (joint blockIdx.x). Persistent loop iterates
     // tile_id over BOTH K-chunk and (pid_m, pid_n) — pid_k / pid_mn / pid_m / pid_n
     // all derive from tile_id per iteration. Each (pid_k, pid_m, pid_n) tile is
     // independent — partial slot is unique → no race.
-    // 2026-05-13 — Stage-4 persistent CTA unwrapped (see sgemm_bi_nn). splitk32
+    // One CTA per output tile (see sgemm_bi_nn). splitk32
     // case uses total_blocks = K_CHUNKS * total_mn since it iterates across
     // K-chunks too. Bit-exact: each (pid_k, pid_m, pid_n) tile is still
     // independent and gets its own CTA via gridDim = K_CHUNKS * total_mn.
@@ -4032,7 +4022,7 @@ void sgemm_bi_nn_splitk32_partial(
                 regN[nxt][i] = Bs[next_k * (SBN + SMEM_B_PAD) + warpCol * SWN + threadColInWarp * STN + i];
         }
         // FMA consumes current buffer — bit-exact: same rm-major, rn-minor order.
-        // F-NT-FMA pin (2026-05-08): explicit __fmaf_rn for bit-exact match
+        // FMA pin: explicit __fmaf_rn for bit-exact match
         // with CPU `_mm256_fmadd_ps`. sgemm_bi_nn_splitk32_partial.
         #pragma unroll
         for (int rm = 0; rm < STM; ++rm) {
@@ -5117,7 +5107,7 @@ DEFINE_SGEMM_BI_NT_BIG_T(bf16, __nv_bfloat16, from_f_bf16)
 DEFINE_SGEMM_BI_NT_BIG_T(f16,  __half,        from_f_f16)
 
 // ============================================================================
-// Stage 5: tensor-core deterministic NN forward (bi_tensor_cores tier).
+// Tensor-core deterministic NN forward (bi_tensor_cores tier).
 // ============================================================================
 // mma.sync.aligned.m16n8k16 with f32 accumulators. SEPARATE numeric contract
 // from the scalar triad (TC reduction tree, not the ascending-K FMA chain) —
@@ -5141,7 +5131,7 @@ DEFINE_SGEMM_BI_NT_BIG_T(f16,  __half,        from_f_f16)
 //     (kernels.rs); launch passes the exact per-kernel byte count.
 //     BK=64 halves the wait_group/__syncthreads boundary count per CTA
 //     vs BK=32 (the measured per-boundary cost dominated the gap to
-//     cuBLAS-TC; see internal/tc-bk64-blueprint.md).
+//     cuBLAS-TC).
 //
 // Geometry: CTA 256 threads = 8 warps as 2x4; BM=BN=128 BK=64; warp tile
 // 64x32 = 4 m-frags(16) x 4 n-frags(8); bias pre-seeded into the f32
@@ -5387,7 +5377,7 @@ DEFINE_SGEMM_BI_NN_TC(bf16, __nv_bfloat16, from_f_bf16, "bf16")
 DEFINE_SGEMM_BI_NN_TC(f16,  __half,        from_f_f16,  "f16")
 
 // ============================================================================
-// Stage 5 TC backward twins: TN dW and NT dX (bi_tensor_cores tier).
+// Tensor-core backward twins: TN dW and NT dX (bi_tensor_cores tier).
 // ============================================================================
 // Same numeric contract class as sgemm_bi_nn_tc_*: deterministic (fixed
 // reduction order, fixed fragment/tile assignment, no atomics, no split),
@@ -5807,7 +5797,7 @@ DEFINE_SGEMM_BI_NT_TC(bf16, __nv_bfloat16, from_f_bf16, "bf16")
 DEFINE_SGEMM_BI_NT_TC(f16,  __half,        from_f_f16,  "f16")
 
 // ============================================================================
-// Stage 5b: 64x64-tile tensor-core twins (bi_tensor_cores tier, small shapes).
+// 64x64-tile tensor-core twins (bi_tensor_cores tier, small shapes).
 // ============================================================================
 // Same numeric contract class as the 128-tile TC kernels above — and one
 // property stronger: BIT-IDENTICAL to them per output element. All three
@@ -5834,7 +5824,9 @@ DEFINE_SGEMM_BI_NT_TC(f16,  __half,        from_f_f16,  "f16")
 // (e.g. d128 in_proj dW = 4 CTAs on a 142-SM Ada); quartering the tile
 // quadruples the CTA count at the same total FLOPs.
 //
-// RULE (0.4.0 lesson): every constant below is section-local (SGB_TC64_*).
+// RULE: every constant below is section-local (SGB_TC64_*) - ambient
+// geometry defines leaking across sections of a single translation unit
+// have produced wrong-tile launches before.
 // NEVER reference TC_BM/TC_BN/TC_BK/TC_LDA/TC_LDB or any other ambient
 // define from earlier sections inside this section.
 
@@ -6051,11 +6043,11 @@ void sgemm_bi_nn_tc64_##SUFFIX(                                                \
 DEFINE_SGEMM_BI_NN_TC64(bf16, __nv_bfloat16, from_f_bf16, "bf16")
 DEFINE_SGEMM_BI_NN_TC64(f16,  __half,        from_f_f16,  "f16")
 
-// ── Thin16 rung (R0 of the 0.6.10 ladder): 16x32x64, 4 warps, 4-stage ──
+// ── Thin16 rung of the tile ladder: 16x32x64, 4 warps, 4-stage ──
 //
 // The decode/thin-M rung of the bit-identical tile ladder. Same
 // arithmetic contract as TC64/TC128 (ascending m16n8k16 K-slabs, f32
-// accumulators, bias pre-seeded, single RNE downcast) - the census gate
+// accumulators, bias pre-seeded, single RNE downcast) - the test suite
 // asserts byte-identity against Tile64. What differs is SCHEDULING: a
 // 16-row tile stops wasting 3/4 of the MMA work at M<=16, BN=32 raises
 // the CTA count at small M (decode needs CTAs for memory-level
@@ -6070,7 +6062,8 @@ DEFINE_SGEMM_BI_NN_TC64(f16,  __half,        from_f_f16,  "f16")
 // the empty commits a short K (fewer tiles than stages) would make
 // wait_group return before the data landed.
 //
-// RULE (0.4.0 lesson): every constant below is section-local (SGB_TC16_*).
+// RULE: every constant below is section-local (SGB_TC16_*); never read
+// ambient geometry defines from earlier sections.
 #define SGB_TC16_BM 16
 #define SGB_TC16_BN 32
 #define SGB_TC16_BK 64

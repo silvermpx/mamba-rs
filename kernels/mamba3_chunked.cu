@@ -1982,8 +1982,8 @@ extern "C" __global__ void m3_final_grads(
 // are T_ACT in storage. All math + state remain f32 (BPTT states, dA_cumsum,
 // prev_states, ssm/k/v persistent state, DT/trap_sig/qk_dot/scale/gamma/D).
 //
-// The following kernels stay f32-only and are NOT typed (per validation
-// agents — O(T) compounding scan state mandates float for numerical safety):
+// The following kernels stay f32-only and are NOT typed: their O(T)
+// compounding scan state mandates float for numerical safety:
 //   - m3_dA_cumsum  (prefix-sum scan)
 //   - m3_state_passing_fwd  (inter-chunk prefix recurrence)
 // ============================================================================

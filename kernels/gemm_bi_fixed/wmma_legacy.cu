@@ -12,7 +12,7 @@ NAME(                                                                           
     __shared__ T_IO smem_a[BLOCK_M * BLOCK_K];                                  \
     __shared__ T_IO smem_b[BLOCK_K * BLOCK_N];                                  \
                                                                                 \
-    /* GROUP_M swizzle for L2 locality (vLLM recipe). */                        \
+    /* GROUP_M swizzle for L2 locality. */                        \
     int num_pid_m = (m + BLOCK_M - 1) / BLOCK_M;                                \
     int num_pid_n = (n + BLOCK_N - 1) / BLOCK_N;                                \
     int num_pid_in_group = GROUP_M * num_pid_n;                                 \

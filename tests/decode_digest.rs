@@ -1,5 +1,5 @@
-//! Decode-lane bit gate. The step (autoregressive) path had only
-//! KL-tolerance coverage before 0.6.4 — tolerance cannot distinguish a
+//! Decode-lane bit gate. KL-tolerance coverage alone is not enough for
+//! the step (autoregressive) path — tolerance cannot distinguish a
 //! bit-identical fusion from lucky rounding. This records FNV hashes of
 //! 16 chained decode steps (output after every step + the carried conv
 //! and SSM state at the end) on synthetic weights, per tier and graph

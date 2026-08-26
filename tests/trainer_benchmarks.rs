@@ -224,8 +224,8 @@ fn bench_lm_train_bf16_parallel_scan() {
 }
 
 /// Free-shape bench arm for measuring the ACTUAL training shape instead
-/// of extrapolating from the B2xT64 microbench (the P0.4 honesty rule:
-/// the campaign wall is measured at the campaign shape). Every knob
+/// of extrapolating from the B2xT64 microbench (the production wall is
+/// measured at the production shape). Every knob
 /// rides an env var so no recompile is needed per shape:
 ///   MAMBA_RS_BENCH_DM (d_model, default 384)
 ///   MAMBA_RS_BENCH_LAYERS (default 24)
@@ -236,7 +236,7 @@ fn bench_lm_train_bf16_parallel_scan() {
 /// Combine with MAMBA_RS_BATCH_INVARIANT=1 (+_TC=1) for the BI tiers.
 #[test]
 #[ignore]
-fn bench_lm_train_campaign_shape() {
+fn bench_lm_train_production_shape() {
     let get = |k: &str, d: usize| -> usize {
         std::env::var(k)
             .ok()
@@ -266,17 +266,17 @@ fn bench_lm_train_campaign_shape() {
         scan_mode: scan,
         rms_norm_eps: 1e-5,
     };
-    eprintln!("campaign shape: dm={dm} L={layers} B={b} T={t} {dtype:?} scan={scan:?}");
-    run_lm_shape(dtype, cfg, b, t, " campaign").unwrap();
+    eprintln!("production shape: dm={dm} L={layers} B={b} T={t} {dtype:?} scan={scan:?}");
+    run_lm_shape(dtype, cfg, b, t, " production").unwrap();
 }
 
-/// Campaign-shape attribution: time forward() alone vs forward()+
+/// Production-shape attribution: time forward() alone vs forward()+
 /// backward_step() pairs through the split API (always eager) and
 /// report the subtraction. Same env knobs as
-/// `bench_lm_train_campaign_shape`.
+/// `bench_lm_train_production_shape`.
 #[test]
 #[ignore]
-fn bench_campaign_split_fwd_bwd() {
+fn bench_production_split_fwd_bwd() {
     use mamba_rs::mamba_ssm::gpu::trainer::{BackwardOpts, MambaTrainer, TrainSessionCfg};
     use mamba_rs::weights::MambaWeights;
     let get = |k: &str, d: usize| -> usize {
@@ -353,7 +353,7 @@ fn bench_campaign_split_fwd_bwd() {
     trainer.ctx().stream.synchronize().unwrap();
     let pair_ms = t1.elapsed().as_secs_f64() * 1e3 / f64::from(reps);
     eprintln!(
-        "campaign split dm={dm} L={layers} B={b} T={t} {dtype:?}: fwd={fwd_ms:.1} ms  bwd+opt={:.1} ms  pair={pair_ms:.1} ms",
+        "production split dm={dm} L={layers} B={b} T={t} {dtype:?}: fwd={fwd_ms:.1} ms  bwd+opt={:.1} ms  pair={pair_ms:.1} ms",
         pair_ms - fwd_ms
     );
 }
@@ -505,8 +505,8 @@ fn bench_rl_train_f16() {
     run_rl_for_dtype(WeightDtype::F16).unwrap();
 }
 
-/// S0 instrument: time the parallel-scan kernels IN ISOLATION at the
-/// campaign shape (one layer). Attributes the campaign wall at kernel
+/// Isolation instrument: time the parallel-scan kernels alone at the
+/// production shape (one layer). Attributes the production wall at kernel
 /// granularity — every prior fix that "should" have moved the 441 ms
 /// step left it untouched, so nothing else gets built before this
 /// number exists.
@@ -793,7 +793,7 @@ fn bench_scan_kernels_isolated() {
     // The PRODUCTION route: fold kernel (dB/dC folded to di/G rows) with
     // the slim tape. The pre-0.6.4 ledger timed only the ungrouped
     // kernel, which the trainer launches solely when d_inner is not
-    // divisible by the d-group - never at campaign shapes.
+    // divisible by the d-group - never at production shapes.
     use mamba_rs::mamba_ssm::gpu::launch::{SCAN_BWD_DGROUP, grid_parallel_scan_bwd_fold};
     let d_b_fold = DtypedBuf::zeros(&ctx.stream, bt * (di / SCAN_BWD_DGROUP) * ds, dtype).unwrap();
     let d_c_fold = DtypedBuf::zeros(&ctx.stream, bt * (di / SCAN_BWD_DGROUP) * ds, dtype).unwrap();
@@ -864,8 +864,8 @@ fn bench_scan_kernels_isolated() {
     );
 }
 
-/// S0 part 2: the rest of the backward's suspects, isolated at the
-/// campaign shape (one layer each).
+/// The rest of the backward's suspects, isolated at the
+/// production shape (one layer each).
 #[test]
 #[ignore]
 fn bench_bwd_kernels_isolated() {
@@ -1049,7 +1049,7 @@ fn bench_bwd_kernels_isolated() {
     let _ = bti;
 }
 
-/// S0 part 3: the four backward GEMM classes at exact campaign shapes,
+/// The four backward GEMM classes at exact production shapes,
 /// through the SAME typed BI wrappers the trainer uses (TC tier on/off
 /// via MAMBA_RS_BI_TENSOR_CORES).
 #[test]

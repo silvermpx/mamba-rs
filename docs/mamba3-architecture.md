@@ -91,7 +91,7 @@ Applied as 2D rotation pairs to B and C before SSM recurrence.
 - `v_state`: `[nheads, headdim]` — previous x
 - `angle_state`: `[nheads, num_rope_angles]` — cumulative RoPE angles
 
-All four carry through `forward_mamba3_backbone_prefill` (0.5.0 —
+All four carry through `forward_mamba3_backbone_prefill` (the
 full-sequence batched-SGEMM CPU forward, no activation tape) exactly as
 through `mamba3_step`, so prefill-then-decode is seamless.
 
@@ -134,7 +134,7 @@ The chunked parallel scan is stateless BY CONSTRUCTION: chunk 0 always
 starts from a zero SSM state, the `initial_states` plumbing of the
 reference SSD implementation is not implemented, and the state written
 back by `m3_writeback_parallel_states` is consumed by nothing today.
-Consequences a consumer must respect (scan-audit 2026-08-01, M-I):
+Consequences a consumer must respect:
 
 - `reset_state()` before a chunked training window is a no-op by design —
   the window never sees a nonzero incoming state either way.

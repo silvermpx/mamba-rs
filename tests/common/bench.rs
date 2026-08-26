@@ -3,10 +3,10 @@
 //!
 //! Every bench arm prints ONE stamp naming the full numeric route it
 //! measured — tier (all four GEMM bits), kernel route, reduce depth,
-//! state capacity, NVRTC arch, shape, build. The 0.6.3 wave lost half a
-//! day to readings taken on the wrong tier and shipped two ledger rows
-//! measured on kernels production never launches; the stamp is the
-//! structural cure: a number without its stamp is not a reading.
+//! state capacity, NVRTC arch, shape, build. Readings taken on the wrong
+//! tier — on kernels production never launches — have burned whole
+//! sessions; the stamp is the structural cure: a number without its
+//! stamp is not a reading.
 
 use mamba_rs::mamba_ssm::gpu::buffers::GpuBuffer;
 use mamba_rs::mamba_ssm::gpu::context::GpuCtx;

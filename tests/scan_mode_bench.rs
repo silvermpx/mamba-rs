@@ -1,5 +1,5 @@
 //! Manual (--ignored): full training-step pace, Sequential vs Auto scan,
-//! at the Prism classifier shape (d384x24, T=4621, input_dim=1024, B=1,
+//! at the vision-classifier shape (d384x24, T=4621, input_dim=1024, B=1,
 //! bf16 — the production trainer dtype). B=1 so the bench fits BESIDE a
 //! live B=2 training run on one card (~9.6 GiB vs ~14 GiB headroom); the
 //! seq/parallel RATIO transfers to B=2.

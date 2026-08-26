@@ -714,12 +714,12 @@ pub fn sgemm_bi_forward_sub(
         let slim = bn == 64;
         // Opt1: Big uses 256 threads/block for TLP; Slim stays 128.
         let threads = if slim { 128u32 } else { 256u32 };
-        // T1 v2: Big NN uses dynamic smem (2-stage cp.async). 33 KB needed.
+        // Big NN uses dynamic smem (2-stage cp.async). 33 KB needed.
         // Slim still uses static smem (single-stage). Set shared_mem_bytes only for Big.
         let smem_bytes: u32 = if slim { 0 } else { 34 * 1024 };
-        // 2026-05-13 — Stage-4 persistent-CTA cap removed. Kernel body is now
-        // data-parallel (one tile per CTA), so grid_dim == total_tiles. See
-        // gemm_bi_triad.cu for the kernel-side unwrap rationale.
+        // No persistent-CTA cap: the kernel body is data-parallel (one tile
+        // per CTA), so grid_dim == total_tiles. See gemm_bi_triad.cu for
+        // the kernel-side rationale.
         let total_tiles = (batch as u32).div_ceil(128) * (n_out as u32).div_ceil(bn);
         let cfg = cudarc::driver::LaunchConfig {
             grid_dim: (total_tiles, 1, 1),
@@ -805,8 +805,6 @@ pub fn sgemm_bi_backward_dw(
 
     // Narrow-N TN dispatch: N∈[2..127] (critic qhead + gap-fill for
     // N∈[49..127] where slim/big kernels (N>=128) don't apply).
-    // T3.3 (2026-05-01): comment fixed — gate was relaxed to N≥2 in Stage 4
-    // shape coverage; the stale `9..127` text predated that change.
     // Kernel has `if (g_row >= K_out) continue;` and N-tile predication via
     // `div_ceil(N, 32)` blocks → safe for any n_in and any N.
     // Relaxed to n_in>=1, batch>=1 covers test shapes (M=32, K=32..64, N=32..64)
@@ -839,7 +837,7 @@ pub fn sgemm_bi_backward_dw(
     // Split-M TN dispatch: M-axis split for underfilled Big TN grids.
     // CUTLASS parallel-split + deterministic ascending-fc reducer.
     //
-    // F-SPLITM-TN-CONST (2026-05-17): partitioning math hoisted to
+    // Partitioning math is hoisted to
     // `blas_bi::splitm_tn_partition` so CPU mirror computes identical
     // (m_chunk, f_final). Replaces former `2*NUM_SMS`-dependent heuristic
     // (which made bit-exactness depend on GPU model) with a portable
@@ -916,10 +914,10 @@ pub fn sgemm_bi_backward_dw(
         let slim = bn == 64;
         // Opt1: Big uses 256 threads/block; Slim stays 128.
         let threads = if slim { 128u32 } else { 256u32 };
-        // T1 v2: Big TN uses dynamic smem for 2-stage cp.async (34 KB); Slim stays static.
+        // Big TN uses dynamic smem for 2-stage cp.async (34 KB); Slim stays static.
         let smem_bytes: u32 = if slim { 0 } else { 34 * 1024 };
-        // 2026-05-13 — data-parallel launch (no persistent-CTA cap). See
-        // gpu_sgemm_forward note and gemm_bi_triad.cu for the kernel-side unwrap.
+        // Data-parallel launch (no persistent-CTA cap). See the
+        // gpu_sgemm_forward note and gemm_bi_triad.cu for the rationale.
         let total_tiles = (n_in as u32).div_ceil(128) * (n_out as u32).div_ceil(bn);
         let cfg = cudarc::driver::LaunchConfig {
             grid_dim: (total_tiles, 1, 1),
@@ -973,8 +971,6 @@ pub fn sgemm_bi_backward_dx(
     let (batch, n_in, n_out) = dims;
     // Narrow-N NT dispatch: N∈[2..127] (critic qhead + gap-fill for
     // N∈[49..127] where slim/big kernels (N>=128) don't apply).
-    // T3.3 (2026-05-01): comment fixed — gate was relaxed to N≥2 in Stage 4
-    // shape coverage; the stale `9..127` text predated that change.
     // Kernel has `if (g_row >= M) continue;` M-predication → safe for any batch.
     // Relaxed to n_in>=1, batch>=1 covers test-config (M=32, K=32..64, N=32..64)
     // that otherwise falls to cuBLAS (zero-cuBLAS contract violation).
@@ -1101,7 +1097,7 @@ pub fn sgemm_bi_backward_dx(
         let k_main = n_in - k_tail_cnt;
         let w_size_main = k_main * n_out;
         let partial_size_main = (n_out / 32) * batch * k_main;
-        // F-KTAIL-CAP-PARITY (2026-05-17): w_size cap = SPLITK_NT_TRANSPOSE_CAP
+        // w_size cap = SPLITK_NT_TRANSPOSE_CAP
         // (the GPU transpose_scratch capacity), partial cap = SPLITK_SCRATCH_CAP
         // (the GPU splitk_scratch capacity). Earlier hardcoded `1<<23` partial
         // cap was tighter than the underlying scratch (1<<23) and caused k_tail
@@ -1226,8 +1222,8 @@ pub fn sgemm_bi_backward_dx(
 
     // Split-K NT-via-transpose dispatch for M<128 shapes (thin backward-dX projections).
     // Strategy: transpose W[K_out, N] → W_T[N, K_out], then dX = dY @ W_T via the
-    // existing NN Split-K kernel. Per research 2026-04-19: 1.6-1.8× faster than
-    // dedicated NT.
+    // existing NN Split-K kernel. Measured 1.6-1.8× faster than a
+    // dedicated NT kernel.
     //
     // A.2 — generalised to support n_out%32 != 0 by folding the N-tail (residue
     // after the largest 32-aligned prefix) into the reducer's `tail_cnt` arg.
@@ -1551,10 +1547,10 @@ pub fn sgemm_bi_backward_dx(
         let slim = bn == 64;
         // Opt1: Big uses 256 threads/block; Slim stays 128.
         let threads = if slim { 128u32 } else { 256u32 };
-        // T1 v2: Big NT uses dynamic smem for 2-stage cp.async (34 KB).
+        // Big NT uses dynamic smem for 2-stage cp.async (34 KB).
         let smem_bytes: u32 = if slim { 0 } else { 34 * 1024 };
-        // 2026-05-13 — data-parallel launch (no persistent-CTA cap). See
-        // gpu_sgemm_forward note and gemm_bi_triad.cu for the kernel-side unwrap.
+        // Data-parallel launch (no persistent-CTA cap). See the
+        // gpu_sgemm_forward note and gemm_bi_triad.cu for the rationale.
         let total_tiles = (batch as u32).div_ceil(128) * (n_in as u32).div_ceil(bn);
         let cfg = cudarc::driver::LaunchConfig {
             grid_dim: (total_tiles, 1, 1),
@@ -1767,8 +1763,8 @@ fn require_half(dt: WeightDtype, what: &str) -> Result<(), String> {
 }
 
 /// Which tensor-core tile variant a TC entry point launched. Returned on
-/// success so callers and tests can assert launch reality (0.4.0 lesson:
-/// a kernel that silently never fires must be impossible to miss).
+/// success so callers and tests can assert launch reality — a kernel
+/// that silently never fires must be impossible to miss.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TcTile {
     /// 128x128 CTA tile, 256 threads / 8 warps (`sgemm_bi_*_tc_*`).
@@ -1823,7 +1819,7 @@ fn tc_pick_tile(rows: usize, cols: usize) -> Option<TcTile> {
 /// measurement (`thin_rung_decode_bench`): Thin16 wins through M=64 on
 /// both bench shapes (7.9 vs 9.9 us at 768x2304, 10.8 vs 17.5 at
 /// 1536x1536) and first loses at M=96 on the wide-N shape - the
-/// crossover is shape-dependent (the G7 autotable's refinement), 64 is
+/// crossover is shape-dependent (refined by the dispatch autotable), 64 is
 /// the measured-safe end. Forward NN only - the TN/NT entries have no
 /// Thin16 twin and keep `tc_pick_tile`.
 fn tc_pick_tile_forward(rows: usize, cols: usize) -> Option<TcTile> {

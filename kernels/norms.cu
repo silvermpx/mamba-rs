@@ -5,7 +5,8 @@
 // Strided loop handles dim > blockDim.x (e.g., dim=2048 with 1024 threads).
 //
 // Forward templated over activation dtype. Reduction always in f32 for
-// numerical stability (per CLAUDE.md §5.7 and bf16 mantissa precision).
+// numerical stability - a bf16 mantissa is too short to accumulate a
+// row-length sum of squares without visible drift.
 // Scale weight stays f32 — it's a model parameter, not an activation.
 //
 // Reference: Zhang & Sennrich (2019), "Root Mean Square Layer Normalization"

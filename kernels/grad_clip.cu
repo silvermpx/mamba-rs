@@ -9,8 +9,8 @@
 // regression). The actual clip scaling reuses the existing scale_grads_f32
 // elementwise kernel.
 //
-// Section-local geometry constants, #undef'd at end of section (the 0.4.0
-// ambient-defines lesson: kernel sections must own their geometry).
+// Section-local geometry constants, #undef'd at end of section: kernel
+// sections must own their geometry, never inherit ambient defines.
 
 #define GCLIP_THREADS 256
 #define GCLIP_BLOCKS 512

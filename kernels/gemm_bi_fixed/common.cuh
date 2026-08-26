@@ -21,10 +21,9 @@
 // fixing the tile + Split-K=1 + f32 accumulator is sufficient for
 // batch invariance even with Tensor Cores enabled.
 //
-// Recipe matches vLLM `batch_invariant.bmm_kernel_persistent` and
-// Thinking Machines Lab `batch_invariant_ops` (both Triton; the inner
-// `tl.dot` lowers to `mma.sync` in PTX). Here transliterated to plain
-// CUDA via the WMMA C++ API — mamba-rs has no Python/Triton dep.
+// The recipe is the standard batch-invariant GEMM shape — one fixed
+// tile, grouped launch order, no split-K — written in plain CUDA via
+// the WMMA C++ API (no Python/Triton dependency).
 //
 //   BLOCK_M = 64, BLOCK_N = 64, BLOCK_K = 32
 //   GROUP_M = 8     (L2 swizzle)

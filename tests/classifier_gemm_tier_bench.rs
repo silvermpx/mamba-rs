@@ -1,4 +1,4 @@
-//! Prism serve shapes: cuBLAS vs `sgemm_bi` (training triad, f32) vs
+//! Vision-classifier serve shapes: cuBLAS vs `sgemm_bi` (training triad, f32) vs
 //! `gemm_bi` (the WMMA batch-invariant GEMM) — latency and cross-kernel
 //! drift at the exact GEMMs the m3 classify prefill runs.
 //!
@@ -6,7 +6,7 @@
 //! rows show whether a bucket boundary is ever crossed.
 //!
 //! Run on the GPU box:
-//!   cargo test --release --features cuda --test prism_gemm_tier_bench \
+//!   cargo test --release --features cuda --test classifier_gemm_tier_bench \
 //!     -- --ignored --nocapture --test-threads=1
 #![cfg(feature = "cuda")]
 
@@ -34,7 +34,7 @@ fn synth(n: usize, seed: u64) -> Vec<f32> {
 
 #[test]
 #[ignore = "needs a CUDA device"]
-fn prism_shapes_cublas_vs_sgemm_bi_vs_gemm_bi() {
+fn classifier_shapes_cublas_vs_sgemm_bi_vs_gemm_bi() {
     let dev = GpuDevice::new(0).expect("cuda device");
 
     // The three projections of one m3 classify layer at d_model=384,

@@ -113,7 +113,7 @@ jobs:
       - run: cargo test --workspace
 
   cuda-check:
-    # C-1 (GEMM-map audit 2026-08-01): every GPU/tier test file is
+    # Every GPU/tier test file is
     # cfg(feature = "cuda"), so the featureless legs compile ~50 test files
     # to nothing — the whole GEMM suite could bit-rot invisibly. Hosted
     # runners have no GPU, but type-checking only needs rustc + nvcc

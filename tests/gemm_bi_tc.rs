@@ -710,7 +710,7 @@ fn tc_route_gate_boundary_sweep() {
     };
 
     // Below the Thin16 column floor -> honest UNCOVERED (blas.rs matvec
-    // fallback). Since the G4 ladder, N is the only uncovered axis.
+    // fallback). Since the ladder unification, N is the only uncovered axis.
     for (m, n) in [(1usize, 31usize), (63, 31), (4096, 31)] {
         let err = route(m, n).unwrap_err();
         assert!(
@@ -1073,10 +1073,10 @@ fn bench_tc_vs_scalar_paths() {
     }
 }
 
-/// Step-0 instrumentation for the BK=64 squeeze (internal/tc-bk64-blueprint.md):
-/// function attributes (regs / spills / static smem), bit-level golden hashes
+/// Baseline instrumentation for TC-kernel optimization work: function
+/// attributes (regs / spills / static smem), bit-level golden hashes
 /// of the full TC triad on the contract shapes, and baseline fwd timings.
-/// Run before and after each blueprint step; goldens must not move on steps
+/// Run before and after each optimization step; goldens must not move on steps
 /// that promise bit-identity (swizzle, dynsmem, BK=64 on K%64 ∉ (0,32] shapes).
 #[test]
 #[ignore]

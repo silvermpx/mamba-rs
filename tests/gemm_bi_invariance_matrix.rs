@@ -1,7 +1,6 @@
-//! S1 — THE cross-M bitwise invariance matrix (0.6.10 program, report
-//! §7.2 turned into a gate).
+//! The cross-M bitwise invariance matrix.
 //!
-//! The law under test (docs-to-be invariance contract, L2): the bits of
+//! The law under test: the bits of
 //! output row `r` depend only on `A[r, :]`, the whole `B` operand and the
 //! plan — never on `M`, never on `r`, never on which other rows shared
 //! the launch.
@@ -11,11 +10,11 @@
 //! derives the OBSERVED boundary set (the ladder values where the probe
 //! row's bits change) and asserts it against the declaration. A new
 //! M-keyed heuristic, a moved bucket edge, or a silently removed one all
-//! fail; removing a boundary legitimately (the G4 unification) requires
+//! fail; removing a boundary legitimately (a ladder unification) requires
 //! updating the contract row in the same commit.
 //!
 //! The typed route's M=128 matvec/TC break was the live defect the first
-//! recording of this suite encoded; the G4 ladder removed it from the TC
+//! recording of this suite encoded; the tile ladder removed it from the TC
 //! tier (that arm is Strict now), and the scalar tier's bucket table
 //! keeps the remaining edges pinned.
 //!
@@ -40,7 +39,7 @@ use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
 
 /// The reduced M ladder: every entry sits on (or adjacent to) a known
 /// dispatch edge — matvec row-block 4, FRAG_M 16, ultra-thin 32, tile 64,
-/// THE typed break 128, slim-force 512, split-K cap 1024, the prism page.
+/// THE typed break 128, slim-force 512, split-K cap 1024, the serve page.
 const M_LADDER: &[usize] = &[
     1, 2, 4, 8, 15, 16, 17, 31, 32, 33, 63, 64, 65, 127, 128, 129, 511, 512, 513, 1023, 1024, 1025,
     2048, 4621,
@@ -343,7 +342,7 @@ fn fixed_bf16_is_strictly_invariant() {
 }
 
 /// Triad family, f32: per-bucket invariance. The declaration is EXACT
-/// set equality per (K, N) with the observed dispatcher of 0.6.9 - the
+/// set equality per (K, N) with the current dispatcher - the
 /// honest documentation of a family whose buckets are keyed on M, N and
 /// K together (ultra-thin exit at 32; the split-K underfill saturation
 /// edges, whose position depends on the bucket's BM and on N; the fat-M

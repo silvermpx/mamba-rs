@@ -36,7 +36,7 @@
 //     (kernels.rs); launch passes the exact per-kernel byte count.
 //     BK=64 halves the wait_group/__syncthreads boundary count per CTA
 //     vs BK=32 (the measured per-boundary cost dominated the gap to
-//     cuBLAS-TC; see internal/tc-bk64-blueprint.md).
+//     cuBLAS-TC).
 //
 // Geometry: CTA 256 threads = 8 warps as 2x4; BM=BN=128 BK=64; warp tile
 // 64x32 = 4 m-frags(16) x 4 n-frags(8); bias pre-seeded into the f32

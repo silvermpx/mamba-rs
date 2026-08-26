@@ -31,10 +31,12 @@ Pure Rust + CUDA. Kernels compile at runtime via NVRTC.
   default) is the multi-tile dispatcher: it carries all three operand
   layouts, so it is the only family that can serve a backward, and its
   invariance holds across every M inside one dispatch bucket. `Fixed`
-  (`kernels/gemm_bi_fixed.cu`) is one 64×64×32 tile with
-  `SPLIT_K=1`, forward-only, batch-invariant BY CONSTRUCTION — the
-  K-reduction for `C[i,j]` reads only `A[i,:]` and `B[:,j]`, so no bucket
-  boundary exists to cross. The family is part of the numeric route
+  (`kernels/gemm_bi_fixed/`) is the forward serving family: a ladder of
+  bit-identical tiles (16-row thin, 64, 128, and a wide 128×256
+  fragment-reuse tile) with `SPLIT_K=1` everywhere, batch-invariant BY
+  CONSTRUCTION — the K-reduction for `C[i,j]` reads only `A[i,:]` and
+  `B[:,j]`, every rung produces the same bits per element, so tile choice
+  is pure scheduling and no bucket boundary exists to cross. The family is part of the numeric route
   (`ctx.gemm_route()`) and a flip after a CUDA-graph capture is refused at
   replay like any tier flip.
 - **Tensor-core deterministic tier (opt-in)** — `MAMBA_RS_BI_TENSOR_CORES=1`
@@ -43,6 +45,11 @@ Pure Rust + CUDA. Kernels compile at runtime via NVRTC.
   deterministic (own numeric contract), at-or-near cuBLAS parity even on
   d128/d256 models and **faster than cuBLAS** from d_model ≥ 768
   (0.70× of PEDANTIC per step at d1536 bf16).
+- **Per-architecture tensor-core rungs** — on Hopper (`wgmma`) and
+  Blackwell (`tcgen05`) the deterministic forward ladder routes to native
+  per-architecture kernels, each a bit family of its own, guarded by a
+  first-use numeric self-check that falls back to the portable ladder
+  (and can be disabled with `MAMBA_RS_ARCH_RUNG=off`).
 - **Bring-your-own-loss training split** — `trainer.forward()` returns the
   full `batch * seq_len * d_model` post-norm_f temporal output on the host;
   compute ANY loss gradient in plain Rust and feed it to
@@ -351,17 +358,16 @@ ctx.set_bi_gemm_family(BiGemmFamily::Fixed);         // or ::Triad (default)
 |---|---|---|
 | layouts | NN + TN + NT | NN only |
 | invariance | across M inside one dispatch bucket | by construction, no buckets |
-| structure | shape-routed tiles (ultra-thin, narrow-N, GEMV, split-K, Slim/Big) | one 64×64×32 tile, `SPLIT_K=1` |
+| structure | shape-routed tiles (ultra-thin, narrow-N, GEMV, split-K, Slim/Big) | bit-identical tile ladder (thin 16, 64, 128, wide 128×256), `SPLIT_K=1` |
 | dtypes | f32 / bf16 / f16, CUDA cores and Tensor Cores | f32 / bf16 / f16; Tensor Cores for bf16/f16, CUDA-core FMA tile for f32 |
 
-A backward requires `Triad`. For a forward-only workload the two are
-close in cost: at a vision-classifier prefill shape (f32, M = 4621 per
-page) measured on an RTX 6000 Ada, both run 2.7–4.6× a cuBLAS f32
-baseline at the GEMM level, with `Fixed` ahead on two of three
-projections and `Triad` ahead on the third; end to end the whole page
-costs +30% against cuBLAS, because the scan, not the GEMMs, dominates
-that model. Both families differ from cuBLAS by the same 1.0e-4–1.8e-4,
-and reruns are bit-identical.
+A backward requires `Triad`. For a forward-only serve workload the
+tensor-core ladder makes `Fixed` the fast route: at a vision-classifier
+prefill shape (M = 4621 rows per page, RTX 6000 Ada) the deterministic
+bf16 page runs 10.9 ms end to end — ahead of the 11.8 ms
+non-deterministic cuBLAS f32 baseline and 1.8× the 20.0 ms deterministic
+f32 route. Both families differ from cuBLAS f32 by the same
+1.0e-4–1.8e-4 envelope, and reruns are bit-identical.
 
 ### Deterministic training — cost per step (RTX 6000 Ada, `MambaTrainer`)
 
@@ -370,7 +376,7 @@ runs on custom fixed-reduction-order kernels: two runs with the same
 seed/inputs produce bit-identical weights, on every dtype. The optional
 tensor-core tier keeps full determinism under its own numeric contract
 (mma.sync f32 accumulation instead of the scalar FMA chain) and turns the
-determinism overhead into a speedUP on LLM-sized models:
+determinism overhead into a speedup on LLM-sized models:
 
 | model | dtype | cuBLAS baseline | deterministic (scalar) | deterministic + TC |
 |---|---|---:|---:|---:|
@@ -385,12 +391,15 @@ trainer.ctx().set_bi_tensor_cores(true);   // + tensor-core tier (own contract)
 ```
 
 GEMM-level tensor-core speedups vs the scalar deterministic tier: forward
-3.2–6.4×, dW 4.0–5.6×, dX 3.5–5.1× (bf16, M=2048-class shapes). Two
-bit-identical tile families (128×128 and 64×64, shape-routed) cover
-everything from d128 RL models to LLM projections. Full tables and
+3.2–6.4×, dW 4.0–5.6×, dX 3.5–5.1× (bf16, M=2048-class shapes). At fat
+training shapes the wide fragment-reuse tile carries the deterministic
+ladder to parity with cuBLAS's tensor-core path (143.5 vs 144.9 TFLOPS
+bf16 at 4096×768×3072) and +12% over the square tile just past a wave
+boundary. Bit-identical tiles, shape-routed, cover everything from d128
+RL models to LLM projections. Full tables and
 contracts: [deterministic GEMM benchmarks](docs/determinism-benchmarks.md).
 
-The 0.6.3 kernel program cut the deterministic training step 3.4×
+A dedicated kernel-optimization pass cut the deterministic training step 3.4×
 (d_model 384, 24 layers, B=8, T=1300, bf16, tensor-core tier:
 441 → 131.5 ms/step on an RTX 5090) and removed the O(T) scan tape
 (−12.3 GB at that shape) — stage-by-stage table in
@@ -413,7 +422,7 @@ sequences, 24-layer shapes) live in the detailed docs:
 
 ## Testing
 
-81 integration test files plus in-module unit tests — 513 `#[test]` functions total:
+102 integration test files plus in-module unit tests — 568 `#[test]` functions total:
 
 - Correctness: bit-parity WITHIN a numeric route (eager ↔ CUDA Graph,
   run ↔ run, save ↔ nosave prefill, CPU Single ↔ CPU Parallel); tolerance
@@ -456,6 +465,8 @@ cargo test --release --features "cuda hf" -- --include-ignored
 
 - Multi-GPU inference for models larger than one device (pipeline
   sharding), complementing the data-parallel training that ships now.
+- Reduced-precision tiers (fp8 / int8) under the same bit-discipline
+  as the existing f32 / bf16 / f16 paths.
 - The Mamba-2 generation, living beside Mamba-1 and Mamba-3 in this
   crate with the same determinism and testing discipline.
 

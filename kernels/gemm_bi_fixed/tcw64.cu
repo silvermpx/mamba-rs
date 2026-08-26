@@ -23,8 +23,8 @@
 // one warp must keep its sub-partition's tensor pipe fed, and that
 // works only if the next step's operands are already in flight.
 //
-// The rung joins the dispatch ladder only after its on-box census
-// proves the per-element byte identity and a measured win.
+// A rung joins the dispatch ladder only after an on-box census proves
+// per-element byte identity and a measured win.
 
 #define GBFW64_BM 128
 #define GBFW64_BN 128
@@ -312,7 +312,8 @@ DEFINE_GEMM_BI_NN_TCW64(f16,  __half,        from_f_f16,  "f16")
 // fragment-reuse arithmetic and restores 8 warps per SM by widening the
 // CTA to 128x256 (98,304 B of staged operands - inside the opt-in cap
 // only because the swizzle is pad-free). It trades wave granularity
-// for it, so its census verdict is expected to split by shape.
+// for it, so its wins split by shape - the dispatch rule admits it
+// only where the measured grid showed a win.
 // Same numeric contract, same per-element mma chain: bit-identical to
 // the 128-tile by the same argument, and censused the same way.
 #define GBFWN64_BM 128

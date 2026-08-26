@@ -1,5 +1,5 @@
 //! Micro-instrument for the three SSM chunk kernels that dominate the
-//! prism page (chunk_scan_fwd_coop / preprocess_chunks / chunk_state_fwd):
+//! classifier page (chunk_scan_fwd_coop / preprocess_chunks / chunk_state_fwd):
 //! per-kernel wall time at the serve shape plus an FNV hash of the output
 //! bits, so a scheduling/occupancy change can prove itself bit-preserving
 //! against a pre-change run of this same test.
@@ -30,7 +30,7 @@ use common::digest::fnv1a_f32 as fnv;
 #[test]
 #[ignore = "needs a CUDA device"]
 fn scan_trio_time_and_hash() {
-    // Prism serve shape.
+    // Vision-classifier serve shape.
     let batch = 1usize;
     let t = 4621usize;
     let nh = 48usize;

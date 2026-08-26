@@ -96,7 +96,7 @@
 "prefill" = "contract"
 "prefill_m3" = "contract"
 "prefill_serve_bench" = "contract"
-"prism_gemm_tier_bench" = "record"
+"classifier_gemm_tier_bench" = "record"
 "qual_lane_census" = "host"
 "rl_llm_bench" = "record"
 "rmsnorm_bf16_768" = "gate"
