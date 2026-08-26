@@ -94,6 +94,21 @@ geometry) and where K is small (fewer slabs amortize less staging).
 Those two mechanisms — a constant-area fragment-reuse tile and
 wave-aware tile choice — are the program.
 
+**Correction and closure (same day).** The probe's "deterministic
+Tile128" arm drove the training family's forced entry; the inference
+family's twin — byte-identical, differently staged — measures well
+ahead of it on several fat shapes (M4096 K768 N3072: 141.9 µs /
+136.6 TFLOPS against the training tile's 239 µs), so part of the gap
+above was one family's staging, not the contract's price. The
+fragment-reuse program then closed most of the rest: the 128x256
+wide rung (warp tile 64x64, byte-identical to the 128-tile, censused
+over a 24-point promotion grid) wins its wave-arithmetic band by
+7-12 %, reaching 143.5 TFLOPS at (4096,768,3072) — parity with the
+measured cuBLAS tensor-core rate on that shape — and 132.9 at the
+(2048,1536,1536) wave-cliff cell against cuBLAS's 141.9. The
+dispatcher routes to it only where the grid holds wave efficiency;
+narrow-N and cliff shapes keep the 128-tile.
+
 ## Tile64 family — small/narrow shapes (bf16, µs)
 
 `tests/gemm_bi_tc.rs::bench_tc64_vs_tc128_small_shapes`. The 64×64-tile
