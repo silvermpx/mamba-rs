@@ -5,11 +5,15 @@
 // ascending 64-wide slabs, each slab issued as four ascending
 // wgmma.mma_async.m64n128k16 steps into the same f32 accumulators. The
 // K-slab order, the tail zero-fill and the single RNE downcast at the
-// store mirror the sm_89 ladder's contract; whether the bits EQUAL the
-// mma.sync ladder on the same inputs is a hardware question (Hopper's
-// tensor core sums sixteen products per internal block where Ada sums
-// eight), answered by the forced-entry census on a real sm_90a part
-// before any dispatch cell may route here.
+// store mirror the sm_89 ladder's contract. Bias does NOT: it joins in
+// the epilogue (after alpha, before beta) rather than pre-seeding the
+// accumulators, because the first wgmma group then runs with
+// scale-d = 0 and ptxas stops serializing it against a register init
+// chain. This is the rung's own numeric contract either way: whether
+// its bits EQUAL the mma.sync ladder on the same inputs is a hardware
+// question (Hopper's tensor core sums sixteen products per internal
+// block where Ada sums eight), answered by the forced-entry census on
+// a real sm_90a part before any dispatch cell may route here.
 //
 // Operands stage through cp.async into shared memory laid out in the
 // 128-byte swizzle the wgmma descriptors declare: the 16-byte chunk at
@@ -121,14 +125,16 @@ void gemm_bi_nn_sm90a_wgmma_wg1_##SUFFIX(                                     \
     int q = wg_tid & 3;                                                       \
     int row8 = (wg_tid >> 2) & 7;                                             \
     int warp = wg_tid >> 5;                                                   \
+    /* No accumulator pre-seed: the first wgmma group runs with          */   \
+    /* scale-d = 0, which zeroes D regardless of register contents and   */   \
+    /* frees ptxas from serializing the first group against an init      */   \
+    /* chain. Bias joins in the epilogue - after alpha, before beta -    */   \
+    /* which is this rung's own contract (the census decides its family  */   \
+    /* membership either way; Hopper's wider internal reduce already     */   \
+    /* makes bit-equality with the mma.sync ladder a hardware question). */   \
     _Pragma("unroll")                                                         \
     for (int r = 0; r < 64; r++) {                                            \
-        /* Bias pre-seed at the accumulator's output column, exactly    */    \
-        /* like the sm_89 ladder (alpha must be 1.0 with bias).         */    \
-        int pair = r & 1;                                                     \
-        int n_group = r >> 2;                                                 \
-        int col = pid_n * SM90_BN + 2 * q + pair + 8 * n_group;               \
-        acc[r] = (bias != nullptr && col < N) ? bias[col] : 0.0f;             \
+        acc[r] = 0.0f;                                                        \
     }                                                                         \
     int num_k_tiles = (K + SM90_BK - 1) / SM90_BK;                            \
     SM90_STAGE_ASYNC(0, 0);                                                   \
@@ -149,13 +155,16 @@ void gemm_bi_nn_sm90a_wgmma_wg1_##SUFFIX(                                     \
         for (int ks = 0; ks < SM90_BK / 16; ks++) {                           \
             unsigned long long da = a_base + (unsigned long long)(ks * 2);    \
             unsigned long long db = b_base + (unsigned long long)(ks * 128);  \
+            unsigned scale_d = (kt == 0 && ks == 0) ? 0u : 1u;                \
             asm volatile(                                                     \
+                "{.reg .pred p;\n\t"                                          \
+                "setp.ne.b32 p, %66, 0;\n\t"                                  \
                 "wgmma.mma_async.sync.aligned.m64n128k16.f32." WG_T "." WG_T  \
                 " {%0,%1,%2,%3,%4,%5,%6,%7,%8,%9,%10,%11,%12,%13,%14,%15,"    \
                 "%16,%17,%18,%19,%20,%21,%22,%23,%24,%25,%26,%27,%28,%29,"    \
                 "%30,%31,%32,%33,%34,%35,%36,%37,%38,%39,%40,%41,%42,%43,"    \
                 "%44,%45,%46,%47,%48,%49,%50,%51,%52,%53,%54,%55,%56,%57,"    \
-                "%58,%59,%60,%61,%62,%63}, %64, %65, 1, 1, 1, 0, 1;\n"        \
+                "%58,%59,%60,%61,%62,%63}, %64, %65, p, 1, 1, 0, 1;}\n"       \
                 : "+f"(acc[0]), "+f"(acc[1]), "+f"(acc[2]), "+f"(acc[3]),     \
                   "+f"(acc[4]), "+f"(acc[5]), "+f"(acc[6]), "+f"(acc[7]),     \
                   "+f"(acc[8]), "+f"(acc[9]), "+f"(acc[10]), "+f"(acc[11]),   \
@@ -172,7 +181,7 @@ void gemm_bi_nn_sm90a_wgmma_wg1_##SUFFIX(                                     \
                   "+f"(acc[52]), "+f"(acc[53]), "+f"(acc[54]), "+f"(acc[55]), \
                   "+f"(acc[56]), "+f"(acc[57]), "+f"(acc[58]), "+f"(acc[59]), \
                   "+f"(acc[60]), "+f"(acc[61]), "+f"(acc[62]), "+f"(acc[63])  \
-                : "l"(da), "l"(db));                                          \
+                : "l"(da), "l"(db), "r"(scale_d));                            \
         }                                                                     \
         asm volatile("wgmma.commit_group.sync.aligned;\n");                   \
         asm volatile("wgmma.wait_group.sync.aligned 0;\n");                   \
@@ -195,6 +204,10 @@ void gemm_bi_nn_sm90a_wgmma_wg1_##SUFFIX(                                     \
         if (row >= M) continue;                                               \
         float v0 = __fmul_rn(alpha, acc[r]);                                  \
         float v1 = __fmul_rn(alpha, acc[r + 1]);                              \
+        if (bias != nullptr) {                                                \
+            if (col < N) v0 = __fadd_rn(v0, bias[col]);                       \
+            if (col + 1 < N) v1 = __fadd_rn(v1, bias[col + 1]);               \
+        }                                                                     \
         T_ACT* dst = (col < N) ? &C[(long long)row * ldc + col] : (T_ACT*)0;  \
         bool packed = beta == 0.0f && (ldc & 1) == 0 && col + 1 < N &&        \
                       ((reinterpret_cast<unsigned long long>(dst) & 3u)       \
