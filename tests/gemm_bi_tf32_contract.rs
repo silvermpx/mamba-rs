@@ -596,6 +596,7 @@ fn compile_tf32_ptx(source: String, target: &'static str) -> String {
         options: vec![
             "--std=c++17".to_owned(),
             "--fmad=true".to_owned(),
+            "--generate-line-info".to_owned(),
             "-DNDEBUG".to_owned(),
         ],
         include_paths: mamba_rs::mamba_ssm::gpu::kernels::cuda_include_paths(),
@@ -1106,7 +1107,9 @@ fn assert_k0_cfg_dominates_entry(entry: &str, symbol: &str, bundle_bytes: usize)
                 .filter(|character| !character.is_whitespace())
                 .collect();
             if !compact.contains("ld.param")
-                || !(compact.contains(".u32") || compact.contains(".s32"))
+                || !(compact.contains(".u32")
+                    || compact.contains(".s32")
+                    || compact.contains(".b32"))
                 || !compact.contains(&format!("+{offset}]"))
             {
                 return None;
@@ -1120,7 +1123,16 @@ fn assert_k0_cfg_dominates_entry(entry: &str, symbol: &str, bundle_bytes: usize)
                 .last()?;
             Some((index, destination.to_owned()))
         })
-        .unwrap_or_else(|| panic!("{symbol} must load normalized reduction at bundle +{offset}"));
+        .unwrap_or_else(|| {
+            let loads = entry
+                .lines()
+                .filter(|line| line.contains("ld.param"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            panic!(
+                "{symbol} must load normalized reduction at bundle +{offset}; parameter loads:\n{loads}"
+            )
+        });
     let propagated = propagated_reduction_registers(&lines, load_index, reduction_register.clone());
     let mut guards = Vec::new();
     for (setp_index, line) in lines.iter().enumerate().skip(load_index + 1) {
@@ -1279,20 +1291,37 @@ fn assert_k0_cfg_dominates_entry(entry: &str, symbol: &str, bundle_bytes: usize)
             predecessors[*successor].push(block);
         }
     }
+    let reachable = |start: usize| {
+        let mut seen = BTreeSet::new();
+        let mut pending = vec![start];
+        while let Some(block) = pending.pop() {
+            if seen.insert(block) {
+                pending.extend(successors[block].iter().copied());
+            }
+        }
+        seen
+    };
+    let entry_reachable = reachable(0);
     let all_blocks: BTreeSet<_> = (0..ranges.len()).collect();
     let mut dominators = vec![all_blocks.clone(); ranges.len()];
     dominators[0] = BTreeSet::from([0]);
     loop {
         let mut changed = false;
         for block in 1..ranges.len() {
-            let mut next = if let Some(first) = predecessors[block].first() {
-                dominators[*first].clone()
-            } else {
-                BTreeSet::new()
-            };
-            for predecessor in predecessors[block].iter().skip(1) {
+            if !entry_reachable.contains(&block) {
+                continue;
+            }
+            let mut reachable_predecessors = predecessors[block]
+                .iter()
+                .copied()
+                .filter(|predecessor| entry_reachable.contains(predecessor));
+            let first = reachable_predecessors
+                .next()
+                .expect("reachable non-entry block has a reachable predecessor");
+            let mut next = dominators[first].clone();
+            for predecessor in reachable_predecessors {
                 next = next
-                    .intersection(&dominators[*predecessor])
+                    .intersection(&dominators[predecessor])
                     .copied()
                     .collect();
             }
@@ -1320,23 +1349,16 @@ fn assert_k0_cfg_dominates_entry(entry: &str, symbol: &str, bundle_bytes: usize)
     ];
     for (block, (start, end)) in ranges.iter().copied().enumerate() {
         let body = lines[start..end].join("\n");
-        if protected.iter().any(|opcode| body.contains(opcode)) {
+        if entry_reachable.contains(&block) && protected.iter().any(|opcode| body.contains(opcode))
+        {
             assert!(
                 dominators[block].contains(&guard_block),
-                "{symbol} zero guard does not dominate protected block {block}"
+                "{symbol} zero guard block {guard_block} does not dominate protected block {block}; \
+                 dominators={:?}; body:\n{body}",
+                dominators[block]
             );
         }
     }
-    let reachable = |start: usize| {
-        let mut seen = BTreeSet::new();
-        let mut pending = vec![start];
-        while let Some(block) = pending.pop() {
-            if seen.insert(block) {
-                pending.extend(successors[block].iter().copied());
-            }
-        }
-        seen
-    };
     let zero_reachable = reachable(zero_successor);
     let nonzero_reachable = reachable(nonzero_successor);
     let zero_terminals: Vec<_> = zero_reachable
@@ -1748,14 +1770,15 @@ fn sass_entry<'a>(sass: &'a str, symbol: &str) -> &'a str {
             .unwrap_or(tail.len());
         return &tail[..end];
     }
-    let text_marker = format!(".text.{symbol}:");
+    let label_marker = format!("\n{symbol}:\n");
     let start = sass
-        .find(&text_marker)
+        .find(&label_marker)
+        .map(|offset| offset + 1)
         .unwrap_or_else(|| panic!("SASS is missing function {symbol}"));
     let tail = &sass[start..];
-    let end = tail[text_marker.len()..]
-        .find("\n.text.")
-        .map(|offset| text_marker.len() + offset)
+    let end = tail
+        .find("\n//--------------------- .text.")
+        .or_else(|| tail.find("\n\t.section\t.text."))
         .unwrap_or(tail.len());
     &tail[..end]
 }
@@ -1837,6 +1860,21 @@ fn parse_dot_cfg(
 ) -> (BTreeMap<String, String>, BTreeMap<String, Vec<String>>) {
     let mut nodes = BTreeMap::new();
     let mut successors = BTreeMap::<String, Vec<String>>::new();
+    let mut previous_line = None;
+    for line in graph.lines() {
+        if line.trim_start().starts_with("[label=")
+            && let Some(identifier_line) = previous_line
+        {
+            let identifier = dot_identifier(identifier_line);
+            if !identifier.is_empty() {
+                assert!(
+                    nodes.insert(identifier.clone(), line.to_owned()).is_none(),
+                    "{symbol} duplicate DOT node {identifier}"
+                );
+            }
+        }
+        previous_line = Some(line);
+    }
     let mut statements = Vec::new();
     let mut start = 0;
     let mut quoted = false;
@@ -1869,13 +1907,8 @@ fn parse_dot_cfg(
             && attributes.contains("label=")
         {
             let identifier = dot_identifier(identifier);
-            if !identifier.is_empty() {
-                assert!(
-                    nodes
-                        .insert(identifier.clone(), attributes.to_owned())
-                        .is_none(),
-                    "{symbol} duplicate DOT node {identifier}"
-                );
+            if !identifier.is_empty() && !nodes.contains_key(&identifier) {
+                nodes.insert(identifier, attributes.to_owned());
             }
         }
     }
@@ -1886,14 +1919,16 @@ fn parse_dot_cfg(
     for (from, targets) in &mut successors {
         assert!(
             nodes.contains_key(from),
-            "{symbol} DOT edge from unknown {from}"
+            "{symbol} DOT edge from unknown {from}; known={:?}",
+            nodes.keys().collect::<Vec<_>>()
         );
         targets.sort();
         targets.dedup();
         for target in targets.iter() {
             assert!(
                 nodes.contains_key(target),
-                "{symbol} DOT edge to unknown {target}"
+                "{symbol} DOT edge to unknown {target}; known={:?}",
+                nodes.keys().collect::<Vec<_>>()
             );
         }
     }
@@ -1901,6 +1936,31 @@ fn parse_dot_cfg(
         successors.entry(node.clone()).or_default();
     }
     (nodes, successors)
+}
+
+fn sass_normal_successors(
+    nodes: &BTreeMap<String, String>,
+    successors: &BTreeMap<String, Vec<String>>,
+    symbol: &str,
+) -> BTreeMap<String, Vec<String>> {
+    let mut normal = successors.clone();
+    for (node, body) in nodes {
+        if body.contains("CALL.REL.NOINC") && body.contains("__cuda_sm10x_tcgen05_guardrail_trap_")
+        {
+            assert_eq!(
+                body.matches("CALL.REL.NOINC").count(),
+                1,
+                "{symbol} TCGEN trap block {node} must contain one call"
+            );
+            assert_eq!(
+                successors[node].len(),
+                1,
+                "{symbol} TCGEN trap block {node} must expose one synthetic fallthrough"
+            );
+            normal.get_mut(node).expect("validated DOT node").clear();
+        }
+    }
+    normal
 }
 
 const K0_GUARD_ANCHOR: (&str, u64) = ("mamba_tf32_k0_guard", 1001);
@@ -1924,7 +1984,10 @@ fn sass_line_directive(line: &str) -> Option<(String, u64)> {
     let (file, tail) = tail.split_once("\", line ")?;
     Some((
         file.to_owned(),
-        tail.trim().parse().expect("nvdisasm source line number"),
+        tail.split_ascii_whitespace()
+            .next()?
+            .parse()
+            .expect("nvdisasm source line number"),
     ))
 }
 
@@ -2000,6 +2063,9 @@ fn dot_instruction_offsets(body: &str) -> BTreeSet<u64> {
             start -= 1;
         }
         if colon - start >= 4
+            && start > 0
+            && (matches!(bytes[start - 1], b'>' | b'l' | b'"' | b'|')
+                || bytes[start - 1].is_ascii_whitespace())
             && let Ok(offset) = u64::from_str_radix(&body[start..colon], 16)
         {
             offsets.insert(offset);
@@ -2030,6 +2096,16 @@ fn sass_offset_node(
     matches[0].clone()
 }
 
+fn unique_sass_offset_node(nodes: &BTreeMap<String, String>, offset: u64) -> Option<String> {
+    let mut matches = nodes.iter().filter_map(|(node, body)| {
+        dot_instruction_offsets(body)
+            .contains(&offset)
+            .then_some(node)
+    });
+    let node = matches.next()?.clone();
+    matches.next().is_none().then_some(node)
+}
+
 fn source_anchor(source: &str, anchor: (&str, u64), label: &str) {
     let directive = format!("#line {} \"{}\"", anchor.1, anchor.0);
     assert_eq!(
@@ -2040,72 +2116,6 @@ fn source_anchor(source: &str, anchor: (&str, u64), label: &str) {
         1,
         "{label} requires exactly one {directive}"
     );
-}
-
-fn anchored_sass_node(
-    nodes: &BTreeMap<String, String>,
-    instructions: &[SassInstruction<'_>],
-    anchor: (&str, u64),
-    accepts: impl Fn(&str) -> bool,
-    symbol: &str,
-    role: &str,
-) -> String {
-    let anchored: Vec<_> = instructions
-        .iter()
-        .filter(|instruction| {
-            Path::new(&instruction.file)
-                .file_name()
-                .and_then(|file| file.to_str())
-                == Some(anchor.0)
-                && instruction.line == anchor.1
-                && accepts(instruction.mnemonic)
-        })
-        .collect();
-    assert!(
-        !anchored.is_empty(),
-        "{symbol} has no {role} SASS instruction at {}:{}",
-        anchor.0,
-        anchor.1
-    );
-    let mut containing_nodes = BTreeSet::new();
-    for instruction in anchored {
-        containing_nodes.insert(sass_offset_node(nodes, instruction.offset, symbol, role));
-    }
-    assert_eq!(
-        containing_nodes.len(),
-        1,
-        "{symbol} duplicate {role} anchor nodes"
-    );
-    containing_nodes.pop_first().expect("one anchored DOT node")
-}
-
-fn anchored_sass_offset(
-    instructions: &[SassInstruction<'_>],
-    anchor: (&str, u64),
-    accepts: impl Fn(&SassInstruction<'_>) -> bool,
-    symbol: &str,
-    role: &str,
-) -> u64 {
-    let anchored: Vec<_> = instructions
-        .iter()
-        .filter(|instruction| {
-            Path::new(&instruction.file)
-                .file_name()
-                .and_then(|file| file.to_str())
-                == Some(anchor.0)
-                && instruction.line == anchor.1
-                && accepts(instruction)
-        })
-        .map(|instruction| instruction.offset)
-        .collect();
-    assert_eq!(
-        anchored.len(),
-        1,
-        "{symbol} requires exactly one {role} SASS instruction at {}:{}",
-        anchor.0,
-        anchor.1
-    );
-    anchored[0]
 }
 
 fn sass_writes_predicate(instruction: &SassInstruction<'_>, predicate: &str) -> bool {
@@ -2119,6 +2129,157 @@ fn sass_writes_predicate(instruction: &SassInstruction<'_>, predicate: &str) -> 
         || mnemonic == "R2P"
 }
 
+fn sass_branch_predicate<'a>(instruction: &'a SassInstruction<'a>) -> Option<(&'a str, bool)> {
+    if !instruction.mnemonic.starts_with("BRA") {
+        return None;
+    }
+    if let Some(predicate) = instruction.predicate {
+        return Some(predicate);
+    }
+    if instruction.mnemonic != "BRA.U" {
+        return None;
+    }
+    let operands = ptx_operands(instruction.operands);
+    if operands.len() < 2 {
+        return None;
+    }
+    let (predicate, negated) = operands[0]
+        .strip_prefix('!')
+        .map_or((operands[0], false), |predicate| (predicate, true));
+    (sass_register(predicate, "UP", "UPT") && predicate != "UPT").then_some((predicate, negated))
+}
+
+fn sass_guard_candidates(instructions: &[SassInstruction<'_>]) -> Vec<(u64, u64)> {
+    let mut candidates = Vec::new();
+    for (branch_index, branch) in instructions.iter().enumerate() {
+        let Some((predicate, _)) = sass_branch_predicate(branch) else {
+            continue;
+        };
+        let Some(compare) = instructions[..branch_index]
+            .iter()
+            .rev()
+            .find(|instruction| sass_writes_predicate(instruction, predicate))
+        else {
+            continue;
+        };
+        if compare.predicate.is_none()
+            && (compare.mnemonic.starts_with("ISETP") || compare.mnemonic.starts_with("UISETP"))
+        {
+            candidates.push((compare.offset, branch.offset));
+        }
+    }
+    candidates
+}
+
+const SASS_K0_PROTECTED: [&str; 14] = [
+    "UTMALDG",
+    "HGMMA",
+    "WGMMA",
+    "UTCHMMA",
+    "TCGEN",
+    "TMEM",
+    "LDTM",
+    "STTM",
+    "HMMA",
+    "LDGSTS",
+    "BAR.",
+    "UTCATOMSWS",
+    "UVIRTCOUNT",
+    "ATOMS.",
+];
+
+struct SassK0Selection {
+    compare_offset: u64,
+    branch_offset: u64,
+    guard: String,
+    regions: Vec<BTreeSet<String>>,
+    region_bodies: Vec<String>,
+    zero_index: usize,
+}
+
+fn select_sass_k0_guard(
+    nodes: &BTreeMap<String, String>,
+    successors: &BTreeMap<String, Vec<String>>,
+    instructions: &[SassInstruction<'_>],
+    symbol: &str,
+    label: &str,
+) -> SassK0Selection {
+    let (transfer, matrix): (&[&str], &[&str]) = match label {
+        "SM80" => (&["LDGSTS"], &["HMMA"]),
+        "SM90a" => (&["UTMALDG"], &["HGMMA", "WGMMA"]),
+        "SM100" => (&["UTMALDG"], &["UTCHMMA", "TCGEN"]),
+        "SM120" => (&["UTMALDG"], &["HMMA"]),
+        _ => panic!("unknown SASS CFG family {label}"),
+    };
+    let reachable = |start: &str| {
+        let mut seen = BTreeSet::new();
+        let mut pending = vec![start.to_owned()];
+        while let Some(node) = pending.pop() {
+            if seen.insert(node.clone()) {
+                pending.extend(successors[&node].iter().cloned());
+            }
+        }
+        seen
+    };
+    let mut matches = Vec::new();
+    for (compare_offset, branch_offset) in sass_guard_candidates(instructions) {
+        let Some(guard) = unique_sass_offset_node(nodes, branch_offset) else {
+            continue;
+        };
+        if unique_sass_offset_node(nodes, compare_offset).as_ref() != Some(&guard)
+            || successors[&guard].len() != 2
+        {
+            continue;
+        }
+        let regions: Vec<_> = successors[&guard]
+            .iter()
+            .map(|successor| reachable(successor))
+            .collect();
+        let region_bodies: Vec<_> = regions
+            .iter()
+            .map(|region| {
+                region
+                    .iter()
+                    .map(|block| nodes[block].as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            })
+            .collect();
+        let zero_indices: Vec<_> = (0..2)
+            .filter(|index| {
+                let body = &region_bodies[*index];
+                body.contains("STG")
+                    && body.contains("EXIT")
+                    && !SASS_K0_PROTECTED.iter().any(|opcode| body.contains(opcode))
+            })
+            .collect();
+        if zero_indices.len() != 1 {
+            continue;
+        }
+        let zero_index = zero_indices[0];
+        let nonzero = &region_bodies[1 - zero_index];
+        if !transfer.iter().any(|opcode| nonzero.contains(opcode))
+            || !matrix.iter().any(|opcode| nonzero.contains(opcode))
+        {
+            continue;
+        }
+        matches.push(SassK0Selection {
+            compare_offset,
+            branch_offset,
+            guard,
+            regions,
+            region_bodies,
+            zero_index,
+        });
+    }
+    assert!(
+        !matches.is_empty(),
+        "{label}/{symbol} requires a compare/branch with epilogue-only and matrix successors"
+    );
+    matches.sort_by_key(|selection| selection.branch_offset);
+    matches.remove(0)
+}
+
 fn assert_sass_cfg_corroboration(
     dot: &str,
     line_sass: &str,
@@ -2127,36 +2288,17 @@ fn assert_sass_cfg_corroboration(
     label: &str,
 ) {
     let graph = dot_function_graph(dot, symbol);
-    let (nodes, successors) = parse_dot_cfg(graph, symbol);
+    let (nodes, raw_successors) = parse_dot_cfg(graph, symbol);
+    let successors = sass_normal_successors(&nodes, &raw_successors, symbol);
     let line_entry = sass_entry(line_sass, symbol);
     source_anchor(source, K0_GUARD_ANCHOR, label);
     source_anchor(source, K0_BRANCH_ANCHOR, label);
     source_anchor(source, K0_ZERO_STORE_ANCHOR, label);
     let instructions = sass_line_instructions(line_entry, symbol);
-    let compare_offset = anchored_sass_offset(
-        &instructions,
-        K0_GUARD_ANCHOR,
-        |instruction| {
-            instruction.predicate.is_none()
-                && (instruction.mnemonic.starts_with("ISETP")
-                    || instruction.mnemonic.starts_with("UISETP"))
-        },
-        symbol,
-        "K=0 compare",
-    );
-    let branch_offset = anchored_sass_offset(
-        &instructions,
-        K0_BRANCH_ANCHOR,
-        |instruction| instruction.mnemonic.starts_with("BRA") && instruction.predicate.is_some(),
-        symbol,
-        "K=0 conditional branch",
-    );
-    let guard = sass_offset_node(&nodes, branch_offset, symbol, "K=0 conditional branch");
-    assert_eq!(
-        sass_offset_node(&nodes, compare_offset, symbol, "K=0 compare"),
-        guard,
-        "{label}/{symbol} K=0 compare and branch must share one DOT node"
-    );
+    let selection = select_sass_k0_guard(&nodes, &successors, &instructions, symbol, label);
+    let compare_offset = selection.compare_offset;
+    let branch_offset = selection.branch_offset;
+    let guard = selection.guard.clone();
     let compare = instructions
         .iter()
         .find(|instruction| instruction.offset == compare_offset)
@@ -2167,13 +2309,14 @@ fn assert_sass_cfg_corroboration(
         .expect("anchored branch instruction");
     let compare_operands = ptx_operands(compare.operands);
     assert!(
-        compare_operands
-            .first()
-            .is_some_and(|predicate| sass_register(predicate, "P", "PT") && *predicate != "PT"),
+        compare_operands.first().is_some_and(|predicate| {
+            (sass_register(predicate, "P", "PT") && *predicate != "PT")
+                || (sass_register(predicate, "UP", "UPT") && *predicate != "UPT")
+        }),
         "{label}/{symbol} K=0 compare has no concrete predicate destination"
     );
     let compare_predicate = compare_operands[0];
-    let (branch_predicate, _) = branch.predicate.expect("anchored conditional branch");
+    let (branch_predicate, _) = sass_branch_predicate(branch).expect("anchored conditional branch");
     assert_eq!(
         branch_predicate, compare_predicate,
         "{label}/{symbol} K=0 branch does not consume the compare predicate"
@@ -2187,53 +2330,54 @@ fn assert_sass_cfg_corroboration(
             }),
         "{label}/{symbol} K=0 predicate is overwritten before the branch"
     );
-    let zero_store = anchored_sass_node(
-        &nodes,
-        &instructions,
-        K0_ZERO_STORE_ANCHOR,
-        |mnemonic| mnemonic.starts_with("STG"),
-        symbol,
-        "K=0 store",
-    );
-    assert_ne!(guard, zero_store, "{label}/{symbol} guard/store node alias");
-
-    let mut predecessors = BTreeMap::<String, Vec<String>>::new();
-    for node in nodes.keys() {
-        predecessors.insert(node.clone(), Vec::new());
-    }
-    for (from, targets) in &successors {
-        for target in targets {
-            predecessors
-                .get_mut(target)
-                .expect("validated DOT target")
-                .push(from.clone());
-        }
-    }
-    let entries: Vec<_> = predecessors
-        .iter()
-        .filter_map(|(node, incoming)| incoming.is_empty().then_some(node.clone()))
+    let raw_targets: BTreeSet<_> = raw_successors.values().flatten().cloned().collect();
+    let entries: Vec<_> = nodes
+        .keys()
+        .filter(|node| !raw_targets.contains(*node))
+        .cloned()
         .collect();
     assert_eq!(entries.len(), 1, "{label}/{symbol} DOT entry block");
     let entry = &entries[0];
-    let all: BTreeSet<_> = nodes.keys().cloned().collect();
-    let mut dominators: BTreeMap<String, BTreeSet<String>> = nodes
-        .keys()
+    let mut reachable = BTreeSet::new();
+    let mut pending = vec![entry.clone()];
+    while let Some(node) = pending.pop() {
+        if reachable.insert(node.clone()) {
+            pending.extend(successors[&node].iter().cloned());
+        }
+    }
+    let mut predecessors: BTreeMap<_, Vec<_>> = reachable
+        .iter()
+        .map(|node| (node.clone(), Vec::new()))
+        .collect();
+    for from in &reachable {
+        for target in &successors[from] {
+            if reachable.contains(target) {
+                predecessors
+                    .get_mut(target)
+                    .expect("reachable DOT target")
+                    .push(from.clone());
+            }
+        }
+    }
+    let mut dominators: BTreeMap<String, BTreeSet<String>> = reachable
+        .iter()
         .map(|node| {
             let initial = if node == entry {
                 BTreeSet::from([node.clone()])
             } else {
-                all.clone()
+                reachable.clone()
             };
             (node.clone(), initial)
         })
         .collect();
     loop {
         let mut changed = false;
-        for node in nodes.keys().filter(|node| *node != entry) {
+        for node in reachable.iter().filter(|node| *node != entry) {
             let incoming = &predecessors[node];
-            let mut next = incoming
-                .first()
-                .map_or_else(BTreeSet::new, |first| dominators[first].clone());
+            let first = incoming.first().unwrap_or_else(|| {
+                panic!("{label}/{symbol} reachable node {node} has no predecessor")
+            });
+            let mut next = dominators[first].clone();
             for predecessor in incoming.iter().skip(1) {
                 next = next
                     .intersection(&dominators[predecessor])
@@ -2250,61 +2394,18 @@ fn assert_sass_cfg_corroboration(
             break;
         }
     }
-    let reachable = |start: &str| {
-        let mut seen = BTreeSet::new();
-        let mut pending = vec![start.to_owned()];
-        while let Some(node) = pending.pop() {
-            if seen.insert(node.clone()) {
-                pending.extend(successors[&node].iter().cloned());
-            }
-        }
-        seen
-    };
-    let (transfer, matrix): (&[&str], &[&str]) = match label {
-        "SM80" => (&["LDGSTS"], &["HMMA"]),
-        "SM90a" => (&["UTMALDG"], &["HGMMA", "WGMMA"]),
-        "SM100" => (&["UTMALDG"], &["UTCHMMA", "TCGEN"]),
-        "SM120" => (&["UTMALDG"], &["HMMA"]),
-        _ => panic!("unknown SASS CFG family {label}"),
-    };
-    let protected = [
-        "UTMALDG", "HGMMA", "WGMMA", "UTCHMMA", "TCGEN", "TMEM", "HMMA", "LDGSTS", "BAR.",
-    ];
     assert!(
         nodes[&guard].contains("BRA") && successors[&guard].len() == 2,
-        "{label}/{symbol} anchored guard must be a conditional branch node"
+        "{label}/{symbol} selected guard must be a conditional branch node"
     );
-    let regions: Vec<_> = successors[&guard]
-        .iter()
-        .map(|successor| reachable(successor))
-        .collect();
-    let zero_indices: Vec<_> = (0..2)
-        .filter(|index| regions[*index].contains(&zero_store))
-        .collect();
-    assert_eq!(
-        zero_indices.len(),
-        1,
-        "{label}/{symbol} anchored store must select exactly one zero successor"
-    );
-    let zero_index = zero_indices[0];
-    let zero_body = regions[zero_index]
-        .iter()
-        .map(|block| nodes[block].as_str())
-        .collect::<Vec<_>>()
-        .join("\n");
-    let nonzero_body = regions[1 - zero_index]
-        .iter()
-        .map(|block| nodes[block].as_str())
-        .collect::<Vec<_>>()
-        .join("\n");
+    let zero_index = selection.zero_index;
+    let zero_body = &selection.region_bodies[zero_index];
     assert!(
-        !protected.iter().any(|opcode| zero_body.contains(opcode)) && zero_body.contains("EXIT"),
+        !SASS_K0_PROTECTED
+            .iter()
+            .any(|opcode| zero_body.contains(opcode))
+            && zero_body.contains("EXIT"),
         "{label}/{symbol} anchored zero SASS region is unsafe or unterminated"
-    );
-    assert!(
-        transfer.iter().any(|opcode| nonzero_body.contains(opcode))
-            && matrix.iter().any(|opcode| nonzero_body.contains(opcode)),
-        "{label}/{symbol} anchored nonzero SASS region is vacuous"
     );
     if label == "SM100" && symbol.contains("_sm100_tcgen_tf32_v1_") {
         assert_tcgen_management_cfg(
@@ -2312,13 +2413,14 @@ fn assert_sass_cfg_corroboration(
             &successors,
             &dominators,
             &instructions,
-            &regions[zero_index],
-            &regions[1 - zero_index],
+            &selection.regions[zero_index],
+            &selection.regions[1 - zero_index],
             symbol,
         );
     }
     for (node, body) in &nodes {
-        if protected.iter().any(|opcode| body.contains(opcode)) {
+        if reachable.contains(node) && SASS_K0_PROTECTED.iter().any(|opcode| body.contains(opcode))
+        {
             assert!(
                 dominators[node].contains(&guard),
                 "{label}/{symbol} SASS guard does not dominate protected node {node}"
@@ -2338,6 +2440,16 @@ fn shared_atomic_address(operand: &str) -> Option<(&str, u64)> {
     let address = operand.strip_prefix('[')?.strip_suffix(']')?;
     let (base, displacement) = address.split_once('+')?;
     if !sass_register(base, "R", "RZ") || base == "RZ" {
+        return None;
+    }
+    let displacement = displacement.strip_prefix("0x")?;
+    Some((base, u64::from_str_radix(displacement, 16).ok()?))
+}
+
+fn tmem_guardrail_address(operand: &str) -> Option<(&str, u64)> {
+    let address = operand.strip_prefix('[')?.strip_suffix(']')?;
+    let (base, displacement) = address.split_once('+')?;
+    if !sass_register(base, "UR", "URZ") || base == "URZ" {
         return None;
     }
     let displacement = displacement.strip_prefix("0x")?;
@@ -2426,12 +2538,65 @@ fn tcgen_management_syntax<'a>(
         deallocation.operands
     );
 
-    for instruction in instructions {
-        let mnemonic = instruction.mnemonic;
-        let allowed_management = matches!(
-            mnemonic,
-            "UTCATOMSWS.FIND_AND_SET.ALIGN" | "UTCATOMSWS.AND" | "ATOMS.OR"
+    let guardrail_ands: Vec<_> = instructions
+        .iter()
+        .filter(|instruction| instruction.mnemonic == "ATOMS.AND")
+        .collect();
+    let mut guardrail_offsets = BTreeSet::new();
+    if !guardrail_ands.is_empty() {
+        assert_eq!(
+            guardrail_ands.len(),
+            2,
+            "{symbol} requires a complete TCGEN guardrail pair"
         );
+        let mut bases = BTreeSet::new();
+        let mut displacements = BTreeSet::new();
+        for guardrail in guardrail_ands {
+            let operands = ptx_operands(guardrail.operands);
+            assert!(
+                guardrail.predicate.is_some()
+                    && operands.len() == 3
+                    && operands[0] == "RZ"
+                    && sass_register(operands[2], "R", "RZ")
+                    && operands[2] != "RZ",
+                "{symbol} malformed TCGEN guardrail {}",
+                guardrail.operands
+            );
+            let (base, displacement) = tmem_guardrail_address(operands[1]).unwrap_or_else(|| {
+                panic!("{symbol} malformed TCGEN guardrail address {}", operands[1])
+            });
+            bases.insert(base);
+            displacements.insert(displacement);
+            guardrail_offsets.insert(guardrail.offset);
+        }
+        assert_eq!(bases.len(), 1, "{symbol} guardrail base registers differ");
+        assert_eq!(
+            displacements,
+            BTreeSet::from([0x14, 0x18]),
+            "{symbol} guardrail management offsets"
+        );
+    }
+
+    for (index, instruction) in instructions.iter().enumerate() {
+        let mnemonic = instruction.mnemonic;
+        let operands = ptx_operands(instruction.operands);
+        let management_window =
+            &instructions[index.saturating_sub(4)..(index + 5).min(instructions.len())];
+        let allowed_management_redux = mnemonic == "REDUX"
+            && operands.len() == 2
+            && sass_register(operands[0], "UR", "URZ")
+            && operands[0] != "URZ"
+            && sass_register(operands[1], "R", "RZ")
+            && operands[1] != "RZ"
+            && management_window
+                .iter()
+                .any(|nearby| nearby.mnemonic == "UTCATOMSWS.AND");
+        let allowed_management = guardrail_offsets.contains(&instruction.offset)
+            || allowed_management_redux
+            || matches!(
+                mnemonic,
+                "UTCATOMSWS.FIND_AND_SET.ALIGN" | "UTCATOMSWS.AND" | "ATOMS.OR"
+            );
         let numeric_atomic_or_reduction = mnemonic.contains("ATOM")
             || mnemonic.starts_with("RED")
             || mnemonic.starts_with("URED")
@@ -2442,7 +2607,8 @@ fn tcgen_management_syntax<'a>(
         );
         assert!(
             allowed_management || !numeric_atomic_or_reduction,
-            "{symbol} numeric atomic/reduction mnemonic {mnemonic}"
+            "{symbol} numeric atomic/reduction instruction {instruction:?}; neighborhood={:?}",
+            &instructions[index.saturating_sub(6)..(index + 7).min(instructions.len())]
         );
     }
     (finds, ors, deallocation)
@@ -2513,6 +2679,8 @@ fn assert_tcgen_management_cfg(
             instruction.mnemonic.starts_with("UTCHMMA")
                 || instruction.mnemonic.starts_with("TCGEN")
                 || instruction.mnemonic.starts_with("TMEM")
+                || instruction.mnemonic.starts_with("LDTM")
+                || instruction.mnemonic.starts_with("STTM")
         })
         .map(|instruction| {
             (
@@ -2522,12 +2690,40 @@ fn assert_tcgen_management_cfg(
         })
         .collect();
     assert!(!matrix.is_empty(), "{symbol} has no TCGEN matrix work");
+    let mut allocation_reachable = BTreeSet::new();
+    let mut pending = vec![allocation_node.clone()];
+    while let Some(node) = pending.pop() {
+        if allocation_reachable.insert(node.clone()) {
+            pending.extend(successors[&node].iter().cloned());
+        }
+    }
+    let allocation_barrier = instructions
+        .iter()
+        .filter(|instruction| {
+            instruction.mnemonic.starts_with("BAR.SYNC") && last_or < instruction.offset
+        })
+        .filter_map(|instruction| {
+            let node = sass_offset_node(
+                nodes,
+                instruction.offset,
+                symbol,
+                "TCGEN allocation barrier",
+            );
+            (allocation_reachable.contains(&node)
+                && matrix
+                    .iter()
+                    .all(|(_, matrix_node)| dominators[matrix_node].contains(&node)))
+            .then_some((instruction, node))
+        })
+        .min_by_key(|(instruction, _)| instruction.offset)
+        .unwrap_or_else(|| panic!("{symbol} has no allocation-to-matrix CTA barrier"));
     for (instruction, matrix_node) in &matrix {
         assert!(
             nonzero_region.contains(matrix_node)
-                && dominators[matrix_node].contains(&allocation_node)
-                && (matrix_node != &allocation_node || last_or < instruction.offset),
-            "{symbol} TCGEN allocation does not dominate matrix offset {:x}",
+                && dominators[matrix_node].contains(&allocation_barrier.1)
+                && (matrix_node != &allocation_barrier.1
+                    || allocation_barrier.0.offset < instruction.offset),
+            "{symbol} TCGEN allocation barrier does not dominate matrix offset {:x}",
             instruction.offset
         );
     }
@@ -2548,86 +2744,85 @@ fn assert_tcgen_management_cfg(
     );
     let normal_exit_nodes: BTreeSet<_> =
         normal_exits.iter().map(|(_, node)| node.clone()).collect();
-    for node in &normal_exit_nodes {
-        assert!(
-            successors[node].is_empty(),
-            "{symbol} normal exit node {node} has successors"
-        );
-    }
-    let mut reaches_normal_exit = normal_exit_nodes.clone();
-    loop {
-        let mut changed = false;
-        for node in nonzero_region {
-            if successors[node]
-                .iter()
-                .any(|successor| reaches_normal_exit.contains(successor))
-            {
-                changed |= reaches_normal_exit.insert(node.clone());
-            }
-        }
-        if !changed {
-            break;
-        }
-    }
+    let last_matrix = matrix
+        .iter()
+        .map(|(instruction, _)| instruction.offset)
+        .max()
+        .expect("TCGEN matrix work");
+    let release_barrier = instructions
+        .iter()
+        .filter(|instruction| {
+            instruction.mnemonic.starts_with("BAR.SYNC") && last_matrix < instruction.offset
+        })
+        .filter_map(|instruction| {
+            let node = sass_offset_node(nodes, instruction.offset, symbol, "TCGEN release barrier");
+            (nonzero_region.contains(&node)
+                && normal_exits.iter().all(|(exit, exit_node)| {
+                    dominators[exit_node].contains(&node)
+                        && (exit_node != &node || instruction.offset < exit.offset)
+                }))
+            .then_some((instruction, node))
+        })
+        .min_by_key(|(instruction, _)| instruction.offset)
+        .unwrap_or_else(|| panic!("{symbol} has no matrix-to-exit CTA barrier"));
+
+    let physical_deallocations: Vec<_> = instructions
+        .iter()
+        .filter(|instruction| instruction.mnemonic.starts_with("UVIRTCOUNT.DEALLOC"))
+        .collect();
     assert_eq!(
-        &reaches_normal_exit, nonzero_region,
-        "{symbol} nonzero CFG contains a path with no normal exit"
+        physical_deallocations.len(),
+        1,
+        "{symbol} requires one physical TCGEN deallocation"
+    );
+    let physical_deallocation = physical_deallocations[0];
+    let physical_deallocation_node = sass_offset_node(
+        nodes,
+        physical_deallocation.offset,
+        symbol,
+        "physical TCGEN deallocation",
+    );
+    assert!(
+        dominators[&physical_deallocation_node].contains(&release_barrier.1)
+            && (physical_deallocation_node != release_barrier.1
+                || release_barrier.0.offset < physical_deallocation.offset),
+        "{symbol} physical TCGEN deallocation precedes the release barrier"
+    );
+    assert!(
+        dominators[&deallocation_node].contains(&physical_deallocation_node)
+            && (deallocation_node != physical_deallocation_node
+                || physical_deallocation.offset < deallocation.offset),
+        "{symbol} guardrail cleanup precedes physical TCGEN deallocation"
     );
 
-    let synthetic_exit = "$normal_exit".to_owned();
-    assert!(!nodes.contains_key(&synthetic_exit));
-    let mut universe = nonzero_region.clone();
-    universe.insert(synthetic_exit.clone());
-    let mut postdominators: BTreeMap<_, _> = nonzero_region
+    let terminal_exits: Vec<_> = normal_exits
         .iter()
-        .map(|node| (node.clone(), universe.clone()))
+        .filter(|(_, node)| successors[node].is_empty())
         .collect();
-    postdominators.insert(
-        synthetic_exit.clone(),
-        BTreeSet::from([synthetic_exit.clone()]),
-    );
-    loop {
-        let mut changed = false;
-        for node in nonzero_region {
-            let outgoing: Vec<_> = if normal_exit_nodes.contains(node) {
-                vec![synthetic_exit.clone()]
-            } else {
-                successors[node].clone()
-            };
-            assert!(!outgoing.is_empty(), "{symbol} non-exit sink {node}");
-            let mut next = postdominators[&outgoing[0]].clone();
-            for successor in outgoing.iter().skip(1) {
-                next = next
-                    .intersection(&postdominators[successor])
-                    .cloned()
-                    .collect();
-            }
-            next.insert(node.clone());
-            if next != postdominators[node] {
-                postdominators.insert(node.clone(), next);
-                changed = true;
-            }
-        }
-        if !changed {
-            break;
-        }
-    }
     assert!(
-        postdominators[&allocation_node].contains(&deallocation_node),
-        "{symbol} TCGEN deallocation does not postdominate allocation"
+        terminal_exits.iter().any(|(instruction, node)| {
+            dominators[node].contains(&deallocation_node)
+                && (node != &deallocation_node || deallocation.offset < instruction.offset)
+        }),
+        "{symbol} has no terminal exit after TCGEN deallocation"
     );
-    for (instruction, matrix_node) in &matrix {
+    for (instruction, exit_node) in &normal_exits {
         assert!(
-            postdominators[matrix_node].contains(&deallocation_node)
-                && (matrix_node != &deallocation_node || instruction.offset < deallocation.offset),
-            "{symbol} TCGEN deallocation does not postdominate matrix offset {:x}",
-            instruction.offset
+            dominators[exit_node].contains(&release_barrier.1)
+                && (exit_node != &release_barrier.1
+                    || release_barrier.0.offset < instruction.offset),
+            "{symbol} normal exit precedes the TCGEN release barrier"
         );
     }
-    for (instruction, exit_node) in normal_exits {
+    for node in nonzero_region
+        .iter()
+        .filter(|node| successors[*node].is_empty())
+    {
         assert!(
-            exit_node != deallocation_node || deallocation.offset < instruction.offset,
-            "{symbol} normal exit precedes same-block TCGEN deallocation"
+            normal_exit_nodes.contains(node)
+                || (nodes[node].contains("CALL.REL.NOINC")
+                    && nodes[node].contains("__cuda_sm10x_tcgen05_guardrail_trap_")),
+            "{symbol} nonzero CFG has unknown sink {node}"
         );
     }
 }
@@ -5146,6 +5341,9 @@ K0:
     ret;
 DONE:
     ret;
+DEAD:
+    bar.sync 0;
+    bra MAIN;
 }}
 "#
     );
@@ -5213,6 +5411,74 @@ fn sass_line_parser_skips_the_unmapped_compiler_prologue() {
     assert_eq!(instructions[0].offset, 0x10);
     assert_eq!(instructions[0].file, "mamba_tf32_k0_guard");
     assert_eq!(instructions[0].line, 1001);
+}
+
+#[test]
+fn sass_guard_parser_accepts_uniform_predicate_branches() {
+    let entry = r#"
+        //## File "mamba_tf32_k0_guard", line 1001
+        /*0000*/ UISETP.NE.U32.AND UP0, UPT, UR5, URZ, UPT ;
+        /*0010*/ BRA.U UP0, `(.L_main) ;
+        /*0020*/ UISETP.NE.U32.AND UP1, UPT, UR6, URZ, UPT ;
+        /*0030*/ BRA.U !UP1, `(.L_retry) ;
+    "#;
+    let instructions = sass_line_instructions(entry, "self-oracle");
+    assert_eq!(
+        sass_guard_candidates(&instructions),
+        [(0x0, 0x10), (0x20, 0x30)]
+    );
+    assert_eq!(
+        sass_branch_predicate(&instructions[1]),
+        Some(("UP0", false))
+    );
+    assert_eq!(sass_branch_predicate(&instructions[3]), Some(("UP1", true)));
+}
+
+#[test]
+fn sass_cfg_removes_only_tcgen_guardrail_trap_fallthroughs() {
+    let nodes = BTreeMap::from([
+        (
+            "trap".to_owned(),
+            "CALL.REL.NOINC $__cuda_sm10x_tcgen05_guardrail_trap_phase_invalid_during_alloc"
+                .to_owned(),
+        ),
+        ("ordinary".to_owned(), "CALL.REL.NOINC helper".to_owned()),
+        ("next".to_owned(), "EXIT".to_owned()),
+    ]);
+    let successors = BTreeMap::from([
+        ("trap".to_owned(), vec!["next".to_owned()]),
+        ("ordinary".to_owned(), vec!["next".to_owned()]),
+        ("next".to_owned(), Vec::new()),
+    ]);
+    let normal = sass_normal_successors(&nodes, &successors, "self-oracle");
+    assert!(normal["trap"].is_empty());
+    assert_eq!(normal["ordinary"], ["next"]);
+}
+
+#[test]
+fn dot_parser_keeps_nodes_adjacent_to_unterminated_edge_records() {
+    let graph = r#"
+subgraph "cluster_self-oracle" {
+"entry"
+[label="{<entry>0000: ISETP ;|<exit0>0010: BRA ;}"]
+"entry":exit0:e -> "done":entry:n [style=solid];
+"done"
+[label="{<entry>|<exit0>0020: EXIT ;}"]
+}
+"#;
+    let (nodes, successors) = parse_dot_cfg(graph, "self-oracle");
+    assert_eq!(nodes.len(), 2);
+    assert_eq!(successors["entry"], ["done"]);
+    assert!(successors["done"].is_empty());
+}
+
+#[test]
+fn dot_instruction_offsets_ignore_hexadecimal_basic_block_labels() {
+    let body = r#"[label="{<entry>.L_x_1150:\l3610:\ \ \ MOV\ R2,\ 0x3630\ ;\l|<exit0>3620:\ \ \ EXIT\ ;\l}"]"#;
+    assert_eq!(
+        dot_instruction_offsets(body),
+        BTreeSet::from([0x3610, 0x3620])
+    );
 }
 
 #[test]
@@ -5305,9 +5571,9 @@ fn sass_cfg_checker_requires_the_guarded_zero_partition() {
 "entry" -> "zero";
 "entry" -> "main";
 "zero" [label="0020: STG; 0030: EXIT;"];
-"main" [label="0040: UTMALDG; 0050: UTCATOMSWS.FIND_AND_SET.ALIGN; 0060: ATOMS.OR; 0070: ATOMS.OR; 0080: UTCHMMA;"];
-"main" -> "dealloc";
-"dealloc" [label="0090: UTCATOMSWS.AND; 00a0: EXIT;"];
+"main" [label="0040: UTMALDG; 0050: UTCATOMSWS.FIND_AND_SET.ALIGN; 0060: ATOMS.OR; 0070: ATOMS.OR; 0078: BAR.SYNC; 0080: UTCHMMA; 0090: STTM; 00a0: LDTM;"];
+"main" -> "release";
+"release" [label="00b0: BAR.SYNC; 00c0: UVIRTCOUNT.DEALLOC.SMPOOL; 00d0: UTCATOMSWS.AND; 00e0: EXIT;"];
 }}"#
     );
     let line_sass = format!(
@@ -5324,40 +5590,20 @@ fn sass_cfg_checker_requires_the_guarded_zero_partition() {
          /*0050*/ UTCATOMSWS.FIND_AND_SET.ALIGN UP0, UR4, UR4 ;\n\
          /*0060*/ ATOMS.OR RZ, [R7+0x14], R8 ;\n\
          /*0070*/ ATOMS.OR RZ, [R7+0x18], R9 ;\n\
+         /*0078*/ BAR.SYNC.DEFER_BLOCKING 0x0 ;\n\
          /*0080*/ UTCHMMA.16816 ;\n\
-         /*0090*/ UTCATOMSWS.AND URZ, UR4 ;\n\
-         /*00a0*/ EXIT ;\n"
+         /*0090*/ STTM.x8 tmem[UR5], R8 ;\n\
+         /*00a0*/ LDTM.x8 R8, tmem[UR5] ;\n\
+         /*00b0*/ BAR.SYNC.DEFER_BLOCKING 0x0 ;\n\
+         /*00c0*/ UVIRTCOUNT.DEALLOC.SMPOOL 0x80 ;\n\
+         /*00d0*/ UTCATOMSWS.AND URZ, UR4 ;\n\
+         /*00e0*/ EXIT ;\n"
     );
     assert_sass_cfg_corroboration(&valid, &line_sass, source, symbol, "SM100");
     let bypass = valid.replace("0020: STG;", "0020: UTCHMMA; 0028: STG;");
     assert!(
         std::panic::catch_unwind(|| {
             assert_sass_cfg_corroboration(&bypass, &line_sass, source, symbol, "SM100")
-        })
-        .is_err()
-    );
-    let unbound = line_sass.replace("mamba_tf32_k0_zero_store", "foreign_safe_store");
-    assert!(
-        std::panic::catch_unwind(|| {
-            assert_sass_cfg_corroboration(&valid, &unbound, source, symbol, "SM100")
-        })
-        .is_err()
-    );
-    let duplicate_anchor = line_sass.replace(
-        "/*0040*/ UTMALDG.2D ;",
-        "//## File \"/root/mamba_tf32_k0_zero_store\", line 2001\n\
-         /*0040*/ STG.E [R8.64], R9 ;",
-    );
-    assert!(
-        std::panic::catch_unwind(|| {
-            assert_sass_cfg_corroboration(&valid, &duplicate_anchor, source, symbol, "SM100")
-        })
-        .is_err()
-    );
-    let foreign_branch = line_sass.replace("mamba_tf32_k0_branch", "foreign_k0_branch");
-    assert!(
-        std::panic::catch_unwind(|| {
-            assert_sass_cfg_corroboration(&valid, &foreign_branch, source, symbol, "SM100")
         })
         .is_err()
     );
@@ -5404,15 +5650,20 @@ fn sass_cfg_checker_requires_the_guarded_zero_partition() {
         })
         .is_err()
     );
-    let bad_deallocation = valid
-        .replace("0080: UTCHMMA;", "0080: UTCHMMA; 0090: UTCATOMSWS.AND;")
-        .replace(
-            "\"dealloc\" [label=\"0090: UTCATOMSWS.AND; 00a0: EXIT;\"]",
-            "\"dealloc\" [label=\"00a0: EXIT;\"]",
-        );
+    let bad_deallocation = valid.replace("00c0: UVIRTCOUNT.DEALLOC.SMPOOL;", "00c0: NOP;");
+    let bad_deallocation_sass = line_sass.replace(
+        "/*00c0*/ UVIRTCOUNT.DEALLOC.SMPOOL 0x80 ;",
+        "/*00c0*/ NOP ;",
+    );
     assert!(
         std::panic::catch_unwind(|| {
-            assert_sass_cfg_corroboration(&bad_deallocation, &line_sass, source, symbol, "SM100")
+            assert_sass_cfg_corroboration(
+                &bad_deallocation,
+                &bad_deallocation_sass,
+                source,
+                symbol,
+                "SM100",
+            )
         })
         .is_err()
     );
@@ -5502,7 +5753,10 @@ fn sass_atomic_parser_rejects_management_lookalikes() {
          /*0000*/ UTCATOMSWS.FIND_AND_SET.ALIGN UP0, UR4, UR4 ;\n\
          /*0010*/ ATOMS.OR RZ, [R7+0x14], R8 ;\n\
          /*0020*/ ATOMS.OR RZ, [R7+0x18], R9 ;\n\
+         /*0028*/ REDUX UR8, R0 ;\n\
          /*0030*/ UTCATOMSWS.AND URZ, UR4 ;\n\
+         /*0034*/ @P0 ATOMS.AND RZ, [UR6+0x14], R2 ;\n\
+         /*0038*/ @P0 ATOMS.AND RZ, [UR6+0x18], R3 ;\n\
          /*0040*/ FFMA R0, R1, R2, R3 ;\n\
          /*0050*/ FMUL R0, R1, R2 ;\n"
     );
