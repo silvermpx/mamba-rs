@@ -207,7 +207,7 @@ void gemm_bi_nn_sm90a_wgmma_wg1_##SUFFIX(                                     \
                 if (gc >= N) continue;                                        \
                 float val = e ? v1 : v0;                                      \
                 if (beta != 0.0f)                                             \
-                    val += beta * to_f(C[(long long)row * ldc + gc]);         \
+                    val = __fmaf_rn(beta, to_f(C[(long long)row * ldc + gc]), val);         \
                 C[(long long)row * ldc + gc] = FROM_F(val);                   \
             }                                                                 \
         }                                                                     \

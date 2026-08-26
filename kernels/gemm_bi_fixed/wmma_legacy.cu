@@ -116,9 +116,10 @@ NAME(                                                                           
         int r = row0 + local_r;                                                 \
         int col = col0 + local_c;                                               \
         if (r >= m || col >= n) continue;                                       \
-        float val = alpha * smem_acc[local_r * BLOCK_N + local_c];              \
-        if (bias != nullptr) val += bias[col];                                  \
-        if (beta != 0.0f) val += beta * to_f(c[r * ldc + col]);                 \
+        /* Pinned epilogue arithmetic - see the matvec note. */          \
+        float val = __fmul_rn(alpha, smem_acc[local_r * BLOCK_N + local_c]);    \
+        if (bias != nullptr) val = __fadd_rn(val, bias[col]);                   \
+        if (beta != 0.0f) val = __fmaf_rn(beta, to_f(c[r * ldc + col]), val);   \
         c[r * ldc + col] = FROM_F_OUT(val);                                     \
     }                                                                           \
 }

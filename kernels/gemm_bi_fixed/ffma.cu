@@ -86,9 +86,10 @@ NAME(                                                                           
         for (int j = 0; j < 4; j++) {                                           \
             int col = col_base + j;                                             \
             if (col >= n) continue;                                             \
-            float val = __fmul_rn(alpha, acc[i][j]);                                      \
-            if (bias != nullptr) val += bias[col];                              \
-            if (beta != 0.0f) val += beta * to_f(c[r * ldc + col]);             \
+            float val = __fmul_rn(alpha, acc[i][j]);                    \
+            if (bias != nullptr) val = __fadd_rn(val, bias[col]);       \
+            if (beta != 0.0f)                                           \
+                val = __fmaf_rn(beta, to_f(c[r * ldc + col]), val);     \
             c[r * ldc + col] = FROM_F_OUT(val);                                 \
         }                                                                       \
     }                                                                           \

@@ -179,9 +179,12 @@ NAME(                                                                           
         float s0123 = s01 + s23;                                                \
         float s4567 = s45 + s67;                                                \
         float sum = s0123 + s4567;                                              \
-        float val = alpha * sum;                                                \
-        if (bias != nullptr) val += bias[col];                                  \
-        if (beta != 0.0f) val += beta * to_f(c_row[col]);                       \
+        /* Every step through an explicit intrinsic: bare mul/add    */\
+        /* chains here are contraction bait, and a per-target fma     */\
+        /* decision would make the epilogue bits arch-dependent.      */\
+        float val = __fmul_rn(alpha, sum);                                      \
+        if (bias != nullptr) val = __fadd_rn(val, bias[col]);                   \
+        if (beta != 0.0f) val = __fmaf_rn(beta, to_f(c_row[col]), val);         \
         c_row[col] = FROM_F_OUT(val);                                           \
     }                                                                           \
 }

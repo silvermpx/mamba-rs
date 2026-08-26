@@ -276,8 +276,9 @@ void gemm_bi_nn_sm100_tcgen_c4_##SUFFIX(                                      \
                         if (gc >= N) continue;                                \
                         float val = e ? v1 : v0;                              \
                         if (beta != 0.0f)                                     \
-                            val += beta *                                     \
-                                   to_f(C[(long long)row * ldc + gc]);        \
+                            val = __fmaf_rn(                                  \
+                                beta,                                         \
+                                to_f(C[(long long)row * ldc + gc]), val);     \
                         C[(long long)row * ldc + gc] = FROM_F(val);           \
                     }                                                         \
                 }                                                             \

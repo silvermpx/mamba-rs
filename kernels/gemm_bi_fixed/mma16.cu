@@ -279,7 +279,7 @@ void gemm_bi_nn_tc128_##SUFFIX(                                                 
                         if (gc >= N) continue;                                \
                         float val = e ? v1 : v0;                              \
                         if (beta != 0.0f)                                     \
-                            val += beta * to_f(C[(long long)gr * ldc + gc]);  \
+                            val = __fmaf_rn(beta, to_f(C[(long long)gr * ldc + gc]), val);  \
                         C[(long long)gr * ldc + gc] = FROM_F(val);            \
                     }                                                         \
                 }                                                             \
@@ -525,7 +525,7 @@ void gemm_bi_nn_tc64_##SUFFIX(                                                \
                 if (gr >= M || gc >= N) continue;                              \
                 float val = __fmul_rn(alpha, acc[fm][fn][e]);                            \
                 if (beta != 0.0f)                                              \
-                    val += beta * to_f(C[(long long)gr * ldc + gc]);           \
+                    val = __fmaf_rn(beta, to_f(C[(long long)gr * ldc + gc]), val);           \
                 C[(long long)gr * ldc + gc] = FROM_F(val);                     \
             }                                                                  \
         }                                                                      \
@@ -755,7 +755,7 @@ void gemm_bi_nn_tc16_##SUFFIX(                                                \
             if (gr >= M || gc >= N) continue;                                  \
             float val = __fmul_rn(alpha, acc[e]);                                        \
             if (beta != 0.0f)                                                  \
-                val += beta * to_f(C[(long long)gr * ldc + gc]);               \
+                val = __fmaf_rn(beta, to_f(C[(long long)gr * ldc + gc]), val);               \
             C[(long long)gr * ldc + gc] = FROM_F(val);                         \
         }                                                                      \
     }                                                                          \
