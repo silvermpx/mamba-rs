@@ -911,7 +911,9 @@ impl MambaTrainerMixed {
 
         let device = GpuDevice::new(gpu_ordinal)?;
         let state_cap = crate::mamba_ssm::gpu::kernels::state_capacity(cfg.d_state)?;
-        let ctx = GpuCtx::new_with_state_cap(&device, state_cap)?;
+        // Trainer entry point: the documented tier selection is the
+        // MAMBA_RS_* environment (the benches' contract).
+        let ctx = GpuCtx::new_from_env_with_state_cap(&device, state_cap)?;
 
         let weights = GpuMambaTrainMixedWeights::from_cpu(&ctx.stream, cpu_weights, &cfg, dtype)?;
 
@@ -1954,7 +1956,9 @@ impl MambaTrainerF32 {
         } = session;
         let device = GpuDevice::new(gpu_ordinal)?;
         let state_cap = crate::mamba_ssm::gpu::kernels::state_capacity(cfg.d_state)?;
-        let ctx = GpuCtx::new_with_state_cap(&device, state_cap)?;
+        // Trainer entry point: the documented tier selection is the
+        // MAMBA_RS_* environment (the benches' contract).
+        let ctx = GpuCtx::new_from_env_with_state_cap(&device, state_cap)?;
 
         let weights = GpuMambaTrainWeights::from_cpu(&ctx.stream, cpu_weights)?;
 

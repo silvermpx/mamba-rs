@@ -108,6 +108,85 @@ impl GpuCtx {
         Self::new_with_state_cap(device, 64)
     }
 
+    /// Create a context whose numeric route comes from the MAMBA_RS_*
+    /// environment variables (strict-parsed: an unrecognized value
+    /// fails rather than silently meaning off). `new` itself never
+    /// reads the environment: a library that changes numeric routes on
+    /// ambient state forces every embedder to defensively re-pin the
+    /// route after construction - which is exactly what the serve
+    /// integration had to do.
+    pub fn new_from_env(device: &GpuDevice) -> Result<Self, String> {
+        let ctx = Self::new(device)?;
+        Self::apply_env_route(&ctx)?;
+        Ok(ctx)
+    }
+
+    /// [`Self::new_from_env`] with an explicit kernel state capacity.
+    pub fn new_from_env_with_state_cap(
+        device: &GpuDevice,
+        state_cap: usize,
+    ) -> Result<Self, String> {
+        let ctx = Self::new_with_state_cap(device, state_cap)?;
+        Self::apply_env_route(&ctx)?;
+        Ok(ctx)
+    }
+
+    fn apply_env_route(ctx: &Self) -> Result<(), String> {
+        // Strict flag parsing: an unrecognized value must FAIL, not
+        // silently mean off. "True" (Python str(True)), "ON", a stray
+        // trailing space - all previously read as false,
+        // indistinguishable from "not set", and a mis-set tier flag
+        // measures or serves a numeric route nobody asked for.
+        let tier_flag = |name: &str| -> Result<bool, String> {
+            match std::env::var(name) {
+                Err(_) => Ok(false),
+                Ok(v) => match v.trim().to_ascii_lowercase().as_str() {
+                    "1" | "true" | "yes" | "on" => Ok(true),
+                    "0" | "false" | "no" | "off" | "" => Ok(false),
+                    other => Err(format!(
+                        "{name}={other:?} is not a recognized flag value \
+                         (use 1/true/yes/on or 0/false/no/off)"
+                    )),
+                },
+            }
+        };
+        let batch_invariant = tier_flag("MAMBA_RS_BATCH_INVARIANT")?;
+        let bi_tensor_cores = tier_flag("MAMBA_RS_BI_TENSOR_CORES")?;
+        let fast_gemm = tier_flag("MAMBA_RS_FAST_GEMM")?;
+        // Same strict-parse law: an unrecognized value fails rather
+        // than silently meaning the default family.
+        let family = match std::env::var("MAMBA_RS_BI_GEMM_FAMILY") {
+            Err(_) => BiGemmFamily::Triad,
+            Ok(v) => match v.trim().to_ascii_lowercase().as_str() {
+                "" | "triad" | "sgemm_bi" => BiGemmFamily::Triad,
+                "fixed" | "gemm_bi" => BiGemmFamily::Fixed,
+                other => {
+                    return Err(format!(
+                        "MAMBA_RS_BI_GEMM_FAMILY={other:?} is not a recognized family \
+                         (use fixed or triad)"
+                    ));
+                }
+            },
+        };
+        // The TC tier flag is only read inside bi_sgemm_*_typed, which
+        // is reachable only under batch_invariant() - TC alone is a
+        // silent no-op that has already cost a day of follow-up
+        // readings.
+        if bi_tensor_cores && !batch_invariant {
+            return Err(
+                "MAMBA_RS_BI_TENSOR_CORES=1 without MAMBA_RS_BATCH_INVARIANT=1 is a \
+                 silent no-op: the tensor-core tier is reachable only under the \
+                 batch-invariant dispatch. Set both or neither."
+                    .to_string(),
+            );
+        }
+        ctx.set_batch_invariant(batch_invariant);
+        ctx.set_bi_tensor_cores(bi_tensor_cores);
+        ctx.set_fast_gemm(fast_gemm);
+        ctx.set_bi_gemm_family(family);
+        Ok(())
+    }
+
     /// Create a GPU context whose kernels are compiled with the given
     /// state capacity (see
     /// [`crate::mamba_ssm::gpu::kernels::state_capacity`]).
@@ -149,53 +228,9 @@ impl GpuCtx {
             .synchronize()
             .map_err(|e| format!("default-stream drain after kernel compile: {e:?}"))?;
         let (blas, ws) = device.create_cublas(&stream)?;
-        // Strict flag parsing: an unrecognized value must FAIL, not
-        // silently mean off. "True" (Python str(True)), "ON", a stray
-        // trailing space - all previously read as false, indistinguishable
-        // from "not set", and a mis-set tier flag measures or serves a
-        // numeric route nobody asked for.
-        let tier_flag = |name: &str| -> Result<bool, String> {
-            match std::env::var(name) {
-                Err(_) => Ok(false),
-                Ok(v) => match v.trim().to_ascii_lowercase().as_str() {
-                    "1" | "true" | "yes" | "on" => Ok(true),
-                    "0" | "false" | "no" | "off" | "" => Ok(false),
-                    other => Err(format!(
-                        "{name}={other:?} is not a recognized flag value \
-                         (use 1/true/yes/on or 0/false/no/off)"
-                    )),
-                },
-            }
-        };
-        let batch_invariant = tier_flag("MAMBA_RS_BATCH_INVARIANT")?;
-        let bi_tensor_cores = tier_flag("MAMBA_RS_BI_TENSOR_CORES")?;
-        let fast_gemm = tier_flag("MAMBA_RS_FAST_GEMM")?;
-        // Same strict-parse law as the tier flags: an unrecognized value
-        // fails rather than silently meaning the default family.
-        let bi_gemm_family = match std::env::var("MAMBA_RS_BI_GEMM_FAMILY") {
-            Err(_) => BiGemmFamily::Triad,
-            Ok(v) => match v.trim().to_ascii_lowercase().as_str() {
-                "" | "triad" | "sgemm_bi" => BiGemmFamily::Triad,
-                "fixed" | "gemm_bi" => BiGemmFamily::Fixed,
-                other => {
-                    return Err(format!(
-                        "MAMBA_RS_BI_GEMM_FAMILY={other:?} is not a recognized family \
-                         (use fixed or triad)"
-                    ));
-                }
-            },
-        };
-        // The TC tier flag is only read inside bi_sgemm_*_typed, which is
-        // reachable only under batch_invariant() - TC alone is a silent
-        // no-op that has already cost a day of follow-up readings.
-        if bi_tensor_cores && !batch_invariant {
-            return Err(
-                "MAMBA_RS_BI_TENSOR_CORES=1 without MAMBA_RS_BATCH_INVARIANT=1 is a \
-                 silent no-op: the tensor-core tier is reachable only under the \
-                 batch-invariant dispatch. Set both or neither."
-                    .to_string(),
-            );
-        }
+        // The route defaults to the plain cuBLAS tier. Construction
+        // never consults the environment: ambient state must not move a
+        // numeric route (use new_from_env or the setters to choose one).
         Ok(Self {
             stream,
             kernels,
@@ -204,10 +239,10 @@ impl GpuCtx {
             half_staging: RefCell::new(None),
             half_staging_ptr: RefCell::new(0),
             half_staging_bytes: RefCell::new(0),
-            batch_invariant: std::cell::Cell::new(batch_invariant),
-            bi_tensor_cores: std::cell::Cell::new(bi_tensor_cores),
-            bi_gemm_family: std::cell::Cell::new(bi_gemm_family),
-            fast_gemm: std::cell::Cell::new(fast_gemm),
+            batch_invariant: std::cell::Cell::new(false),
+            bi_tensor_cores: std::cell::Cell::new(false),
+            bi_gemm_family: std::cell::Cell::new(BiGemmFamily::Triad),
+            fast_gemm: std::cell::Cell::new(false),
             tf32: std::cell::Cell::new(true),
             state_cap,
             graphs_captured: std::cell::Cell::new(0),
