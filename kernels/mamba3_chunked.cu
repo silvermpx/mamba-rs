@@ -108,8 +108,8 @@ extern "C" __global__ void m3_preprocess_chunks(
     float scale_val = shifted_gamma + gamma_val;
 
     // Store scale and gamma
-    scale_out[th] = scale_val;
-    gamma_out[th] = gamma_val;
+    if (scale_out) scale_out[th] = scale_val;
+    if (gamma_out) gamma_out[th] = gamma_val;
 
     // Compute qk_dot = sum_n(Q[t,h,n] * K[t,h,n]) * gamma. Each thread
     // owns one contiguous (t, h) row; the wide path issues float4 loads
@@ -422,8 +422,8 @@ extern "C" __global__ void m3_chunk_pre_state_fused(
             shifted_gamma = dt_next * (1.0f - trap_next);
         }
         float scale_val = shifted_gamma + gamma_val;
-        scale_out[th] = scale_val;
-        gamma_out[th] = gamma_val;
+        if (scale_out) scale_out[th] = scale_val;
+        if (gamma_out) gamma_out[th] = gamma_val;
         int kq_base = (b * T + t) * nh * ds + h * ds;
         float dot = 0.0f;
         if (ds % 4 == 0) {
@@ -1996,8 +1996,8 @@ m3_preprocess_chunks_##SUFFIX(                                                \
         shifted_gamma = dt_next * (1.0f - trap_next);                         \
     }                                                                         \
     float scale_val = shifted_gamma + gamma_val;                              \
-    scale_out[th] = scale_val;                                                \
-    gamma_out[th] = gamma_val;                                                \
+    if (scale_out) scale_out[th] = scale_val;                                 \
+    if (gamma_out) gamma_out[th] = gamma_val;                                 \
     int kq_base = (b * T + t) * nh * ds + h * ds;                             \
     float dot = 0.0f;                                                         \
     /* Wide path: one uint4 = 8 typed elements per load/store (the rows  */   \
@@ -2202,8 +2202,8 @@ extern "C" __global__ void m3_chunk_pre_state_fused_##SUFFIX(                 \
             shifted_gamma = dt_next * (1.0f - trap_next);                     \
         }                                                                     \
         float scale_val = shifted_gamma + gamma_val;                          \
-        scale_out[th] = scale_val;                                            \
-        gamma_out[th] = gamma_val;                                            \
+        if (scale_out) scale_out[th] = scale_val;                             \
+        if (gamma_out) gamma_out[th] = gamma_val;                             \
         int kq_base = (b * T + t) * nh * ds + h * ds;                         \
         float dot = 0.0f;                                                     \
         if (ds % 8 == 0) {                                                    \

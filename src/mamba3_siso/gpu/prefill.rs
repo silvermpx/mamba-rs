@@ -266,6 +266,10 @@ impl Mamba3Prefill {
             ));
         }
         let dtype = self.dtype;
+        // The serve prefill has no backward: the trainer's raw-activation
+        // saves (dd/trap raws, biased tensors, scale/gamma copies) take a
+        // null pointer and the kernels skip those stores.
+        const NULL_DEV: CUptr = 0;
         let tgt = &mut self.tgt;
         let ck = &mut self.chunk;
         let mut typed = self.typed.as_mut();
@@ -465,9 +469,9 @@ impl Mamba3Prefill {
                     b.arg(tgt.a_val.inner_mut());
                     b.arg(tgt.trap.inner_mut());
                     b.arg(tgt.angles_raw.inner_mut());
-                    b.arg(tgt.dd_dt_raw.inner_mut());
-                    b.arg(tgt.dd_a_raw.inner_mut());
-                    b.arg(tgt.trap_raw.inner_mut());
+                    b.arg(&NULL_DEV);
+                    b.arg(&NULL_DEV);
+                    b.arg(&NULL_DEV);
                     b.arg(&proj);
                     b.arg(&db);
                     b.arg(&dims.a_floor);
@@ -489,9 +493,9 @@ impl Mamba3Prefill {
                     b.arg(tgt.a_val.inner_mut());
                     b.arg(tgt.trap.inner_mut());
                     b.arg(tgt.angles_raw.inner_mut());
-                    b.arg(tgt.dd_dt_raw.inner_mut());
-                    b.arg(tgt.dd_a_raw.inner_mut());
-                    b.arg(tgt.trap_raw.inner_mut());
+                    b.arg(&NULL_DEV);
+                    b.arg(&NULL_DEV);
+                    b.arg(&NULL_DEV);
                     b.arg(tgt.proj_flat.inner());
                     b.arg(&db);
                     b.arg(&dims.a_floor);
@@ -602,8 +606,8 @@ impl Mamba3Prefill {
                 let bb_p = lw.b_bias;
                 let cb_p = lw.c_bias;
                 if let Some(ts) = typed.as_deref_mut() {
-                    let bb = ts.b_biased.cached_ptr();
-                    let cb = ts.c_biased.cached_ptr();
+                    let bb: CUptr = 0;
+                    let cb: CUptr = 0;
                     let k = ts.k.cached_ptr();
                     let q = ts.q.cached_ptr();
                     let bn = ts.b_normed.cached_ptr();
@@ -629,8 +633,8 @@ impl Mamba3Prefill {
                         .map_err(|e| format!("prefill bias_rope typed L{l}: {e:?}"))?;
                 } else {
                     let mut b = ctx.stream.launch_builder(&m3k.m3_bias_rope_fwd);
-                    b.arg(tgt.b_biased.inner_mut());
-                    b.arg(tgt.c_biased.inner_mut());
+                    b.arg(&NULL_DEV);
+                    b.arg(&NULL_DEV);
                     b.arg(tgt.k.inner_mut());
                     b.arg(tgt.q.inner_mut());
                     b.arg(tgt.b_normed.inner());
@@ -646,20 +650,6 @@ impl Mamba3Prefill {
                     unsafe { b.launch(grid_1d(bt * nh * ds)) }
                         .map_err(|e| format!("prefill bias_rope L{l}: {e:?}"))?;
                 }
-            }
-            // Trapezoidal coefficients.
-            {
-                let n_total = (bt * nh) as i32;
-                let mut b = ctx.stream.launch_builder(&m3k.m3_compute_abg);
-                b.arg(tgt.alpha.inner_mut());
-                b.arg(tgt.beta.inner_mut());
-                b.arg(tgt.gamma.inner_mut());
-                b.arg(tgt.dt.inner());
-                b.arg(tgt.a_val.inner());
-                b.arg(tgt.trap.inner());
-                b.arg(&n_total);
-                unsafe { b.launch(grid_1d(bt * nh)) }
-                    .map_err(|e| format!("prefill abg L{l}: {e:?}"))?;
             }
             // Chunked SSD pipeline (the training forward's F6, tape-free).
             {
@@ -705,8 +695,8 @@ impl Mamba3Prefill {
                         .launch_builder(m3k.m3_chunk_pre_state_fused_typed.get(dtype));
                     b.arg(&ks);
                     b.arg(ck.qk_dot.inner_mut());
-                    b.arg(ck.scale.inner_mut());
-                    b.arg(ck.gamma_pre.inner_mut());
+                    b.arg(&NULL_DEV);
+                    b.arg(&NULL_DEV);
                     b.arg(ck.chunk_states.inner_mut());
                     b.arg(&kp);
                     b.arg(&qp);
@@ -728,8 +718,8 @@ impl Mamba3Prefill {
                         .launch_builder(&m3k.m3_chunk_pre_state_fused_typed.f32);
                     b.arg(ck.k_scaled.inner_mut());
                     b.arg(ck.qk_dot.inner_mut());
-                    b.arg(ck.scale.inner_mut());
-                    b.arg(ck.gamma_pre.inner_mut());
+                    b.arg(&NULL_DEV);
+                    b.arg(&NULL_DEV);
                     b.arg(ck.chunk_states.inner_mut());
                     b.arg(tgt.k.inner());
                     b.arg(tgt.q.inner());
@@ -762,8 +752,8 @@ impl Mamba3Prefill {
                             .launch_builder(m3k.m3_preprocess_chunks_typed.get(dtype));
                         b.arg(&ks);
                         b.arg(ck.qk_dot.inner_mut());
-                        b.arg(ck.scale.inner_mut());
-                        b.arg(ck.gamma_pre.inner_mut());
+                        b.arg(&NULL_DEV);
+                        b.arg(&NULL_DEV);
                         b.arg(&kp);
                         b.arg(&qp);
                         b.arg(tgt.dt.inner());
@@ -779,8 +769,8 @@ impl Mamba3Prefill {
                         let mut b = ctx.stream.launch_builder(&m3k.m3_preprocess_chunks);
                         b.arg(ck.k_scaled.inner_mut());
                         b.arg(ck.qk_dot.inner_mut());
-                        b.arg(ck.scale.inner_mut());
-                        b.arg(ck.gamma_pre.inner_mut());
+                        b.arg(&NULL_DEV);
+                        b.arg(&NULL_DEV);
                         b.arg(tgt.k.inner());
                         b.arg(tgt.q.inner());
                         b.arg(tgt.dt.inner());

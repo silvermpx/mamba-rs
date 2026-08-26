@@ -43,7 +43,6 @@ pub struct Mamba3Kernels {
     /// kernel on multi-chunk windows (its serial fp64 chain dominates
     /// the prefill profile at production shapes).
     pub m3_angle_chunk_sums: CudaFunction,
-    pub m3_angle_chunk_carries: CudaFunction,
     pub m3_angle_chunk_apply: CudaFunction,
     pub angle_dt_bwd: CudaFunction,
     pub m3_angle_dt_bwd_seq: CudaFunction,
@@ -348,7 +347,6 @@ impl Mamba3Kernels {
             m3_angle_dt_fwd_batch: get("m3_angle_dt_fwd_batch")?,
             m3_angle_dt_fwd_seq: get("m3_angle_dt_fwd_seq")?,
             m3_angle_chunk_sums: get("m3_angle_chunk_sums")?,
-            m3_angle_chunk_carries: get("m3_angle_chunk_carries")?,
             m3_angle_chunk_apply: get("m3_angle_chunk_apply")?,
             angle_dt_bwd: get("angle_dt_bwd")?,
             m3_angle_dt_bwd_seq: get("m3_angle_dt_bwd_seq")?,
