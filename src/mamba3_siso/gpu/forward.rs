@@ -339,29 +339,6 @@ pub fn gpu_forward_mamba3_layer(
                 .map_err(|e| format!("adt compute F6: {:?}", e))?;
         }
         {
-            let cfg = cudarc::driver::LaunchConfig {
-                grid_dim: ((dims.batch * nc) as u32, nh as u32, 1),
-                block_dim: (dims.chunk_size() as u32, 1, 1),
-                shared_mem_bytes: 0,
-            };
-            let mut builder = ctx.stream.launch_builder(&m3k.m3_preprocess_chunks);
-            builder.arg(scratch.d_q.inner_mut());
-            builder.arg(scratch.d_beta.inner_mut());
-            builder.arg(scratch.d_gamma.inner_mut());
-            builder.arg(scratch.d_dd_dt.inner_mut());
-            builder.arg(acts.k.inner());
-            builder.arg(acts.q.inner());
-            builder.arg(acts.dt.inner());
-            builder.arg(acts.trap.inner());
-            builder.arg(&b_i);
-            builder.arg(&t_i);
-            builder.arg(&nh_i);
-            builder.arg(&ds_i);
-            builder.arg(&cs);
-            unsafe { builder.launch(cfg) }
-                .map_err(|e| format!("m3_preprocess_chunks F6 K1: {:?}", e))?;
-        }
-        {
             let block_x = nh.min(256) as u32;
             let grid_z = nh.div_ceil(block_x as usize) as u32;
             let cfg = cudarc::driver::LaunchConfig {
@@ -378,13 +355,24 @@ pub fn gpu_forward_mamba3_layer(
             builder.arg(&cs);
             unsafe { builder.launch(cfg) }.map_err(|e| format!("m3_dA_cumsum F6 K2: {:?}", e))?;
         }
+        // K1+K3 fused (preprocess + chunk_state) when the shape allows;
+        // K2 (dA_cumsum) moved ahead - it depends only on adt.
+        if let Some(fcfg) =
+            super::kernels::chunk_fused_cfg(dims.batch, nc, nh, hd, ds, dims.chunk_size())
         {
-            let cfg =
-                super::kernels::chunk_state_cfg(dims.batch, nc, nh, hd, ds, dims.chunk_size());
-            let mut builder = ctx.stream.launch_builder(&m3k.m3_chunk_state_fwd);
+            let mut builder = ctx
+                .stream
+                .launch_builder(&m3k.m3_chunk_pre_state_fused_typed.f32);
+            builder.arg(scratch.d_q.inner_mut());
+            builder.arg(scratch.d_beta.inner_mut());
+            builder.arg(scratch.d_gamma.inner_mut());
+            builder.arg(scratch.d_dd_dt.inner_mut());
             builder.arg(scratch.chunk_states.inner_mut());
+            builder.arg(acts.k.inner());
+            builder.arg(acts.q.inner());
+            builder.arg(acts.dt.inner());
+            builder.arg(acts.trap.inner());
             builder.arg(acts.x.inner());
-            builder.arg(scratch.d_q.inner());
             builder.arg(scratch.da_cumsum.inner());
             builder.arg(&b_i);
             builder.arg(&t_i);
@@ -392,8 +380,49 @@ pub fn gpu_forward_mamba3_layer(
             builder.arg(&hd_i);
             builder.arg(&ds_i);
             builder.arg(&cs);
-            unsafe { builder.launch(cfg) }
-                .map_err(|e| format!("m3_chunk_state_fwd F6 K3: {:?}", e))?;
+            unsafe { builder.launch(fcfg) }
+                .map_err(|e| format!("m3 F6 fused pre+state: {:?}", e))?;
+        } else {
+            {
+                let cfg = cudarc::driver::LaunchConfig {
+                    grid_dim: ((dims.batch * nc) as u32, nh as u32, 1),
+                    block_dim: (dims.chunk_size() as u32, 1, 1),
+                    shared_mem_bytes: 0,
+                };
+                let mut builder = ctx.stream.launch_builder(&m3k.m3_preprocess_chunks);
+                builder.arg(scratch.d_q.inner_mut());
+                builder.arg(scratch.d_beta.inner_mut());
+                builder.arg(scratch.d_gamma.inner_mut());
+                builder.arg(scratch.d_dd_dt.inner_mut());
+                builder.arg(acts.k.inner());
+                builder.arg(acts.q.inner());
+                builder.arg(acts.dt.inner());
+                builder.arg(acts.trap.inner());
+                builder.arg(&b_i);
+                builder.arg(&t_i);
+                builder.arg(&nh_i);
+                builder.arg(&ds_i);
+                builder.arg(&cs);
+                unsafe { builder.launch(cfg) }
+                    .map_err(|e| format!("m3_preprocess_chunks F6 K1: {:?}", e))?;
+            }
+            {
+                let cfg =
+                    super::kernels::chunk_state_cfg(dims.batch, nc, nh, hd, ds, dims.chunk_size());
+                let mut builder = ctx.stream.launch_builder(&m3k.m3_chunk_state_fwd);
+                builder.arg(scratch.chunk_states.inner_mut());
+                builder.arg(acts.x.inner());
+                builder.arg(scratch.d_q.inner());
+                builder.arg(scratch.da_cumsum.inner());
+                builder.arg(&b_i);
+                builder.arg(&t_i);
+                builder.arg(&nh_i);
+                builder.arg(&hd_i);
+                builder.arg(&ds_i);
+                builder.arg(&cs);
+                unsafe { builder.launch(cfg) }
+                    .map_err(|e| format!("m3_chunk_state_fwd F6 K3: {:?}", e))?;
+            }
         }
         {
             let dim = hd * ds;

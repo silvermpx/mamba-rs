@@ -183,6 +183,11 @@ pub struct Mamba3Kernels {
     /// Per-chunk SSM state matmul (typed x, typed K_scaled, f32 dA_cumsum,
     /// f32 states_out — BPTT state MUST remain f32 per Tri Dao invariant).
     pub m3_chunk_state_fwd_typed: TypedKernel,
+    /// Fused preprocess + chunk_state (3b): one kernel computes K_scaled/
+    /// qk_dot/scale/gamma AND the chunk states, keeping K_scaled in smem
+    /// across the seam instead of round-tripping it through L2. Launched
+    /// only when `chunk_fused_cfg` returns Some; otherwise the pair runs.
+    pub m3_chunk_pre_state_fused_typed: TypedKernel,
     /// Persist final states to ssm_state/k_state/v_state (all f32 persistent
     /// buffers). Typed inputs k_flat/x_flat.
     pub m3_writeback_parallel_states_typed: TypedKernel,
@@ -504,6 +509,11 @@ impl Mamba3Kernels {
                 bf16: get("m3_chunk_state_fwd_bf16")?,
                 f16: get("m3_chunk_state_fwd_f16")?,
             },
+            m3_chunk_pre_state_fused_typed: TypedKernel {
+                f32: get("m3_chunk_pre_state_fused")?,
+                bf16: get("m3_chunk_pre_state_fused_bf16")?,
+                f16: get("m3_chunk_pre_state_fused_f16")?,
+            },
             m3_writeback_parallel_states_typed: TypedKernel {
                 f32: get("m3_writeback_parallel_states")?,
                 bf16: get("m3_writeback_parallel_states_bf16")?,
@@ -607,6 +617,29 @@ pub fn chunk_state_cfg(
             shared_mem_bytes: 0,
         }
     }
+}
+
+/// Launch geometry for the FUSED preprocess+chunk_state kernel, or None
+/// when the shape must run the unfused pair (odd ds - phase B is float4;
+/// oversized smem; chunk_size beyond a block). Single source: the kernel
+/// derives everything from blockDim/args, every call site MUST use this.
+pub fn chunk_fused_cfg(
+    batch: usize,
+    n_chunks: usize,
+    nh: usize,
+    hd: usize,
+    ds: usize,
+    chunk_size: usize,
+) -> Option<cudarc::driver::LaunchConfig> {
+    let smem_bytes = (chunk_size * ds + chunk_size * hd + chunk_size) * 4;
+    if ds % 4 != 0 || chunk_size > 1024 || smem_bytes > 48 * 1024 {
+        return None;
+    }
+    Some(cudarc::driver::LaunchConfig {
+        grid_dim: ((batch * n_chunks) as u32, nh as u32, 1),
+        block_dim: (chunk_size as u32, 1, 1),
+        shared_mem_bytes: smem_bytes as u32,
+    })
 }
 
 pub fn chunk_scan_cfg(

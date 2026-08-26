@@ -109,8 +109,8 @@ fn scan_trio_time_and_hash() {
         b.arg(qk_dot.inner());
         b.arg(scale.inner());
         b.arg(gamma.inner());
-        b.arg(q.inner());
         b.arg(k.inner());
+        b.arg(q.inner());
         b.arg(dt_b.inner());
         b.arg(trap.inner());
         b.arg(&b_i);
@@ -193,4 +193,57 @@ fn scan_trio_time_and_hash() {
     println!("preprocess  {:8.1} us", time(&preprocess));
     println!("chunk_state {:8.1} us", time(&chunk_state));
     println!("scan_coop   {:8.1} us", time(&scan));
+
+    // The fused kernel must reproduce the pair's outputs BIT-EXACTLY:
+    // zero the outputs, run fused once, re-hash.
+    // Fresh zero buffers for the fused arm: a silent no-op cannot pass
+    // by inheriting the pair's results.
+    let k_scaled_f = GpuBuffer::zeros(st, batch * t * nh * ds).unwrap();
+    let qk_dot_f = GpuBuffer::zeros(st, batch * t * nh).unwrap();
+    let scale_f = GpuBuffer::zeros(st, batch * t * nh).unwrap();
+    let gamma_f = GpuBuffer::zeros(st, batch * t * nh).unwrap();
+    let chunk_states_f = GpuBuffer::zeros(st, batch * nc * nh * hd * ds).unwrap();
+    let fused = || {
+        let fcfg = mamba_rs::mamba3_siso::gpu::kernels::chunk_fused_cfg(batch, nc, nh, hd, ds, cs)
+            .expect("serve shape must fit the fused kernel");
+        let mut b = ctx
+            .stream
+            .launch_builder(&m3k.m3_chunk_pre_state_fused_typed.f32);
+        b.arg(k_scaled_f.inner());
+        b.arg(qk_dot_f.inner());
+        b.arg(scale_f.inner());
+        b.arg(gamma_f.inner());
+        b.arg(chunk_states_f.inner());
+        b.arg(k.inner());
+        b.arg(q.inner());
+        b.arg(dt_b.inner());
+        b.arg(trap.inner());
+        b.arg(x.inner());
+        b.arg(da_cumsum.inner());
+        b.arg(&b_i);
+        b.arg(&t_i);
+        b.arg(&nh_i);
+        b.arg(&hd_i);
+        b.arg(&ds_i);
+        b.arg(&cs_i);
+        unsafe { b.launch(fcfg) }.unwrap();
+    };
+    fused();
+    ctx.stream.synchronize().unwrap();
+    let mut ks_f = vec![0.0f32; batch * t * nh * ds];
+    k_scaled_f.download(st, &mut ks_f).unwrap();
+    let mut cst_f = vec![0.0f32; batch * nc * nh * hd * ds];
+    chunk_states_f.download(st, &mut cst_f).unwrap();
+    println!(
+        "FUSED HASH k_scaled={:016x} chunk_states={:016x}",
+        fnv(&ks_f),
+        fnv(&cst_f)
+    );
+    assert_eq!(fnv(&ks_f), fnv(&ks_h), "fused k_scaled diverged from pair");
+    assert_eq!(
+        fnv(&cst_f),
+        fnv(&cst_h),
+        "fused chunk_states diverged from pair"
+    );
+    println!("fused       {:8.1} us", time(&fused));
 }
