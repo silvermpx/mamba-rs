@@ -60,6 +60,8 @@ pub struct Mamba3Kernels {
     pub rmsnorm_fwd: CudaFunction,
     pub rmsnorm_bwd: CudaFunction,
     pub colsum_accumulate: CudaFunction,
+    /// Segmented column sum - the batched pooled route.
+    pub colsum_segments: CudaFunction,
     /// Deterministic axis-0 reduction — finalises Rule-B per-sample partials
     /// into f32 master-grad slots. Replaces atomicAdd accumulators used in
     /// M3 backward (dD from m3_dqkv, d_angles_raw/d_dt_angle from
@@ -355,6 +357,7 @@ impl Mamba3Kernels {
             rmsnorm_fwd: get("rmsnorm_forward")?,
             rmsnorm_bwd: get("rmsnorm_backward")?,
             colsum_accumulate: get("colsum_accumulate")?,
+            colsum_segments: get("colsum_segments")?,
             reduce_sum_axis0: get("reduce_sum_axis0")?,
             vec_add_inplace: get("vec_add_inplace")?,
             elementwise_mul: get("elementwise_mul")?,

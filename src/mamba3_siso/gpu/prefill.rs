@@ -106,16 +106,19 @@ pub struct Mamba3Prefill {
 /// `full_temporal`, when present, receives the post-`norm_f` temporal for
 /// ALL T positions (`[B * T * d_model]`) - the same buffer content the m3
 /// trainer forward emits, bit for bit. `pooled_sum`, when present,
-/// receives the COLUMN SUM over T (`[d_model]`, batch = 1 only): the
+/// receives the per-sample COLUMN SUM over T (`[B * d_model]`): the
 /// on-device colsum walks ascending t accumulating pure f32 adds from
 /// 0.0, so `download / T` reproduces a CPU mean pool bit for bit while
-/// the transfer drops from the full temporal to 1.5 KB.
+/// the transfer drops from the full temporal to 1.5 KB per sample. At
+/// `B > 1` each sample sums over its own rows in that same order, so a
+/// sample's row does not depend on its batch neighbours.
 pub struct Mamba3PrefillOutputs<'a> {
     /// `[B * d_model]` - final-timestep post-norm hidden state.
     pub last_hidden: &'a mut GpuBuffer,
     /// `[B * T * d_model]` - optional post-norm_f output for every position.
     pub full_temporal: Option<&'a mut GpuBuffer>,
-    /// `[d_model]` - optional column sum of the post-norm_f temporal.
+    /// `[B * d_model]` - optional per-sample column sum of the
+    /// post-norm_f temporal.
     pub pooled_sum: Option<&'a mut GpuBuffer>,
 }
 
@@ -705,31 +708,48 @@ impl Mamba3Prefill {
             full.copy_from_raw(&tgt.temporal_work, &ctx.stream)?;
         }
         if let Some(pooled) = pooled_sum {
-            if dims.batch != 1 {
+            if pooled.len() != dims.batch * dm {
                 return Err(format!(
-                    "m3 prefill pooled_sum: batch {} unsupported - the column sum \
-                     would mix samples; pool per sample with batch = 1",
-                    dims.batch
+                    "m3 prefill outputs: pooled_sum len {} != batch*d_model = {}",
+                    pooled.len(),
+                    dims.batch * dm
                 ));
             }
-            if pooled.len() != dm {
-                return Err(format!(
-                    "m3 prefill outputs: pooled_sum len {} != d_model = {dm}",
-                    pooled.len()
-                ));
-            }
-            // colsum_accumulate does db[j] += sum - zero first so the
-            // result is exactly the sum over T.
-            pooled.zero(&ctx.stream)?;
-            let rows = bt as i32;
             let cols = dm as i32;
-            let mut b = ctx.stream.launch_builder(&m3k.colsum_accumulate);
-            b.arg(pooled.inner_mut());
-            b.arg(tgt.temporal_work.inner());
-            b.arg(&rows);
-            b.arg(&cols);
-            unsafe { b.launch(grid_1d(dm)) }
-                .map_err(|e| format!("m3 prefill pooled colsum: {e:?}"))?;
+            if dims.batch == 1 {
+                // colsum_accumulate does db[j] += sum - zero first so the
+                // result is exactly the sum over T.
+                pooled.zero(&ctx.stream)?;
+                let rows = bt as i32;
+                let mut b = ctx.stream.launch_builder(&m3k.colsum_accumulate);
+                b.arg(pooled.inner_mut());
+                b.arg(tgt.temporal_work.inner());
+                b.arg(&rows);
+                b.arg(&cols);
+                unsafe { b.launch(grid_1d(dm)) }
+                    .map_err(|e| format!("m3 prefill pooled colsum: {e:?}"))?;
+            } else {
+                // Segmented: each sample sums over its OWN seq_len rows,
+                // in the same ascending-t f32 order the batch=1 kernel
+                // uses, so a sample's pooled row is bit-identical whether
+                // it rode alone or inside a batch.
+                let segments = dims.batch as i32;
+                let seg_len = dims.seq_len as i32;
+                const BLOCK: u32 = 256;
+                let cfg = cudarc::driver::LaunchConfig {
+                    grid_dim: ((dm as u32).div_ceil(BLOCK), dims.batch as u32, 1),
+                    block_dim: (BLOCK, 1, 1),
+                    shared_mem_bytes: 0,
+                };
+                let mut b = ctx.stream.launch_builder(&m3k.colsum_segments);
+                b.arg(pooled.inner_mut());
+                b.arg(tgt.temporal_work.inner());
+                b.arg(&segments);
+                b.arg(&seg_len);
+                b.arg(&cols);
+                unsafe { b.launch(cfg) }
+                    .map_err(|e| format!("m3 prefill pooled colsum (batched): {e:?}"))?;
+            }
         }
         Ok(())
     }

@@ -23,7 +23,7 @@ use mamba_rs::mamba_ssm::gpu::buffers::{DtypedBuf, GpuBuffer};
 use mamba_rs::mamba_ssm::gpu::context::GpuCtx;
 use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
 use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
-use mamba_rs::mamba_ssm::gpu::sgemm_bi;
+use mamba_rs::mamba_ssm::gpu::gemm_bi_triad;
 
 fn det(n: usize, seed: u32, scale: f32) -> Vec<f32> {
     let mut s = seed;
@@ -117,7 +117,7 @@ fn check_forward(
     let b32 = t.f32_buf(&bias);
     let mut y32 = GpuBuffer::zeros(&t.ctx.stream, m * n).unwrap();
     let bias_ptr = if with_bias { b32.cached_ptr() } else { 0 };
-    sgemm_bi::sgemm_bi_forward(
+    gemm_bi_triad::sgemm_bi_forward(
         &t.ctx.stream,
         &t.ctx.kernels,
         &mut y32,
@@ -151,7 +151,7 @@ fn check_forward(
     if full {
         bi_sgemm_forward_typed(&t.ctx, ytp, xtp, wtp, bias_ptr, (m, k, n)).unwrap();
     } else {
-        sgemm_bi::sgemm_bi_forward_typed(
+        gemm_bi_triad::sgemm_bi_forward_typed(
             &t.ctx.stream,
             &t.ctx.kernels,
             ytp,
@@ -179,7 +179,7 @@ fn check_dw(t: &Ctx, dt: WeightDtype, dims: (usize, usize, usize), full: bool) {
     let x32 = t.f32_buf(&qx);
     let dy32 = t.f32_buf(&qdy);
     let dw32 = GpuBuffer::zeros(&t.ctx.stream, k * n).unwrap();
-    sgemm_bi::sgemm_bi_backward_dw(
+    gemm_bi_triad::sgemm_bi_backward_dw(
         &t.ctx.stream,
         &t.ctx.kernels,
         dw32.cached_ptr(),
@@ -207,7 +207,7 @@ fn check_dw(t: &Ctx, dt: WeightDtype, dims: (usize, usize, usize), full: bool) {
     if full {
         bi_sgemm_backward_dw_typed(&t.ctx, dwt.cached_ptr(), dytp, xtp, (m, k, n)).unwrap();
     } else {
-        sgemm_bi::sgemm_bi_backward_dw_typed(
+        gemm_bi_triad::sgemm_bi_backward_dw_typed(
             &t.ctx.stream,
             &t.ctx.kernels,
             dwt.cached_ptr(),
@@ -233,7 +233,7 @@ fn check_dx(t: &Ctx, dt: WeightDtype, dims: (usize, usize, usize), full: bool) {
     let dy32 = t.f32_buf(&qdy);
     let w32 = t.f32_buf(&qw);
     let mut dx32 = GpuBuffer::zeros(&t.ctx.stream, m * k).unwrap();
-    sgemm_bi::sgemm_bi_backward_dx(
+    gemm_bi_triad::sgemm_bi_backward_dx(
         &t.ctx.stream,
         &t.ctx.kernels,
         &mut dx32,
@@ -265,7 +265,7 @@ fn check_dx(t: &Ctx, dt: WeightDtype, dims: (usize, usize, usize), full: bool) {
     if full {
         bi_sgemm_backward_dx_typed(&t.ctx, dxtp, dytp, wtp, (m, k, n)).unwrap();
     } else {
-        sgemm_bi::sgemm_bi_backward_dx_typed(
+        gemm_bi_triad::sgemm_bi_backward_dx_typed(
             &t.ctx.stream,
             &t.ctx.kernels,
             dxtp,
@@ -401,7 +401,7 @@ fn bench_upcast_fallback_tax() {
         let iters = 50;
         // Bare f32 kernel (operands already f32).
         for _ in 0..3 {
-            sgemm_bi::sgemm_bi_forward(
+            gemm_bi_triad::sgemm_bi_forward(
                 &t.ctx.stream,
                 &t.ctx.kernels,
                 &mut y32,
@@ -415,7 +415,7 @@ fn bench_upcast_fallback_tax() {
         t.ctx.stream.synchronize().unwrap();
         let t0 = Instant::now();
         for _ in 0..iters {
-            sgemm_bi::sgemm_bi_forward(
+            gemm_bi_triad::sgemm_bi_forward(
                 &t.ctx.stream,
                 &t.ctx.kernels,
                 &mut y32,

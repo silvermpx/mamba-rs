@@ -18,7 +18,7 @@ use mamba_rs::mamba_ssm::gpu::buffers::{DtypedBuf, GpuBuffer};
 use mamba_rs::mamba_ssm::gpu::context::GpuCtx;
 use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
 use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
-use mamba_rs::mamba_ssm::gpu::sgemm_bi;
+use mamba_rs::mamba_ssm::gpu::gemm_bi_triad;
 
 fn det(n: usize, seed: u32, scale: f32) -> Vec<f32> {
     let mut s = seed;
@@ -77,7 +77,7 @@ fn run_tc(
     let xt = t.typed_buf(qx, dt);
     let wt = t.typed_buf(qw, dt);
     let yt = DtypedBuf::zeros(&t.ctx.stream, m * n, dt).unwrap();
-    sgemm_bi::sgemm_bi_forward_tc(
+    gemm_bi_triad::sgemm_bi_forward_tc(
         &t.ctx.stream,
         &t.ctx.kernels,
         TypedPtr {
@@ -133,7 +133,7 @@ fn tc_forward_matches_f32_reference_loosely() {
             let x32 = t.f32_buf(&qx);
             let w32 = t.f32_buf(&qw);
             let mut y32 = GpuBuffer::zeros(&t.ctx.stream, m * n).unwrap();
-            sgemm_bi::sgemm_bi_forward(
+            gemm_bi_triad::sgemm_bi_forward(
                 &t.ctx.stream,
                 &t.ctx.kernels,
                 &mut y32,
@@ -220,7 +220,7 @@ fn tc_backward_matches_f32_reference_loosely() {
             let x32 = t.f32_buf(&qx);
             let dy32 = t.f32_buf(&qdy);
             let dw_ref = GpuBuffer::zeros(&t.ctx.stream, k * n).unwrap();
-            sgemm_bi::sgemm_bi_backward_dw(
+            gemm_bi_triad::sgemm_bi_backward_dw(
                 &t.ctx.stream,
                 &t.ctx.kernels,
                 dw_ref.cached_ptr(),
@@ -235,7 +235,7 @@ fn tc_backward_matches_f32_reference_loosely() {
             let xt = t.typed_buf(&qx, dt);
             let dyt = t.typed_buf(&qdy, dt);
             let dw_tc = GpuBuffer::zeros(&t.ctx.stream, k * n).unwrap();
-            sgemm_bi::sgemm_bi_backward_dw_tc(
+            gemm_bi_triad::sgemm_bi_backward_dw_tc(
                 &t.ctx.stream,
                 &t.ctx.kernels,
                 dw_tc.cached_ptr(),
@@ -259,7 +259,7 @@ fn tc_backward_matches_f32_reference_loosely() {
             // --- dX: typed output vs f32 reference ---
             let w32 = t.f32_buf(&qw);
             let mut dx_ref = GpuBuffer::zeros(&t.ctx.stream, m * k).unwrap();
-            sgemm_bi::sgemm_bi_backward_dx(
+            gemm_bi_triad::sgemm_bi_backward_dx(
                 &t.ctx.stream,
                 &t.ctx.kernels,
                 &mut dx_ref,
@@ -273,7 +273,7 @@ fn tc_backward_matches_f32_reference_loosely() {
 
             let wt = t.typed_buf(&qw, dt);
             let dxt = DtypedBuf::zeros(&t.ctx.stream, m * k, dt).unwrap();
-            sgemm_bi::sgemm_bi_backward_dx_tc(
+            gemm_bi_triad::sgemm_bi_backward_dx_tc(
                 &t.ctx.stream,
                 &t.ctx.kernels,
                 TypedPtr {
@@ -372,14 +372,14 @@ fn run_tc_tile(
     dt: WeightDtype,
     dims: (usize, usize, usize),
     data: (&[f32], &[f32], Option<&GpuBuffer>),
-    tile: sgemm_bi::TcTile,
+    tile: gemm_bi_triad::TcTile,
 ) -> Vec<f32> {
     let (m, _k, n) = dims;
     let (qx, qw, bias) = data;
     let xt = t.typed_buf(qx, dt);
     let wt = t.typed_buf(qw, dt);
     let yt = DtypedBuf::zeros(&t.ctx.stream, m * n, dt).unwrap();
-    let ops = sgemm_bi::TcFwdOperands {
+    let ops = gemm_bi_triad::TcFwdOperands {
         y: TypedPtr {
             ptr: yt.cached_ptr(),
             dtype: dt,
@@ -394,7 +394,7 @@ fn run_tc_tile(
         },
         bias_ptr: bias.map_or(0, |b| b.cached_ptr()),
     };
-    sgemm_bi::sgemm_bi_forward_tc_with_tile(&t.ctx.stream, &t.ctx.kernels, &ops, dims, tile)
+    gemm_bi_triad::sgemm_bi_forward_tc_with_tile(&t.ctx.stream, &t.ctx.kernels, &ops, dims, tile)
         .unwrap();
     t.ctx.stream.synchronize().unwrap();
     let mut out = vec![0.0f32; m * n];
@@ -443,7 +443,7 @@ fn tc64_kernel_geometry_is_128_threads() {
 /// all-M invariance contract.
 #[test]
 fn tc64_and_tc128_bit_identical() {
-    use sgemm_bi::TcTile;
+    use gemm_bi_triad::TcTile;
     let t = Ctx::new();
     for dt in [WeightDtype::Bf16, WeightDtype::F16] {
         for (m, k, n) in [
@@ -483,7 +483,7 @@ fn tc64_and_tc128_bit_identical() {
             let mut dw_bits = Vec::new();
             for tile in [TcTile::Tile64, TcTile::Tile128] {
                 let dw = GpuBuffer::zeros(&t.ctx.stream, k * n).unwrap();
-                sgemm_bi::sgemm_bi_backward_dw_tc_with_tile(
+                gemm_bi_triad::sgemm_bi_backward_dw_tc_with_tile(
                     &t.ctx.stream,
                     &t.ctx.kernels,
                     dw.cached_ptr(),
@@ -513,7 +513,7 @@ fn tc64_and_tc128_bit_identical() {
             let mut dx_bits = Vec::new();
             for tile in [TcTile::Tile64, TcTile::Tile128] {
                 let dxt = DtypedBuf::zeros(&t.ctx.stream, m * k, dt).unwrap();
-                sgemm_bi::sgemm_bi_backward_dx_tc_with_tile(
+                gemm_bi_triad::sgemm_bi_backward_dx_tc_with_tile(
                     &t.ctx.stream,
                     &t.ctx.kernels,
                     TypedPtr {
@@ -564,7 +564,7 @@ fn tc64_forward_and_backward_match_f32_reference_small_shapes() {
             let x32 = t.f32_buf(&qx);
             let w32 = t.f32_buf(&qw);
             let mut y32 = GpuBuffer::zeros(&t.ctx.stream, m * n).unwrap();
-            sgemm_bi::sgemm_bi_forward(
+            gemm_bi_triad::sgemm_bi_forward(
                 &t.ctx.stream,
                 &t.ctx.kernels,
                 &mut y32,
@@ -589,7 +589,7 @@ fn tc64_forward_and_backward_match_f32_reference_small_shapes() {
             let qdy = quantize(&det(m * n, 55, 0.5), dt);
             let dy32 = t.f32_buf(&qdy);
             let dw_ref = GpuBuffer::zeros(&t.ctx.stream, k * n).unwrap();
-            sgemm_bi::sgemm_bi_backward_dw(
+            gemm_bi_triad::sgemm_bi_backward_dw(
                 &t.ctx.stream,
                 &t.ctx.kernels,
                 dw_ref.cached_ptr(),
@@ -599,7 +599,7 @@ fn tc64_forward_and_backward_match_f32_reference_small_shapes() {
             )
             .unwrap();
             let mut dx_ref = GpuBuffer::zeros(&t.ctx.stream, m * k).unwrap();
-            sgemm_bi::sgemm_bi_backward_dx(
+            gemm_bi_triad::sgemm_bi_backward_dx(
                 &t.ctx.stream,
                 &t.ctx.kernels,
                 &mut dx_ref,
@@ -622,7 +622,7 @@ fn tc64_forward_and_backward_match_f32_reference_small_shapes() {
             // dW gate keys on (K_out, N) = (k, n).
             if k >= 64 && n >= 64 {
                 let dw_tc = GpuBuffer::zeros(&t.ctx.stream, k * n).unwrap();
-                sgemm_bi::sgemm_bi_backward_dw_tc(
+                gemm_bi_triad::sgemm_bi_backward_dw_tc(
                     &t.ctx.stream,
                     &t.ctx.kernels,
                     dw_tc.cached_ptr(),
@@ -642,7 +642,7 @@ fn tc64_forward_and_backward_match_f32_reference_small_shapes() {
             }
             // dX gate keys on (M, K_out) = (m, k).
             let dxt = DtypedBuf::zeros(&t.ctx.stream, m * k, dt).unwrap();
-            sgemm_bi::sgemm_bi_backward_dx_tc(
+            gemm_bi_triad::sgemm_bi_backward_dx_tc(
                 &t.ctx.stream,
                 &t.ctx.kernels,
                 TypedPtr {
@@ -672,7 +672,7 @@ fn tc64_forward_and_backward_match_f32_reference_small_shapes() {
 /// exact `UNCOVERED`-prefixed Err the blas.rs fallback chain keys on.
 #[test]
 fn tc_route_gate_boundary_sweep() {
-    use sgemm_bi::{TC64_PREFER_MAX_TILES128, TcTile};
+    use gemm_bi_triad::{TC64_PREFER_MAX_TILES128, TcTile};
     let t = Ctx::new();
     let dt = WeightDtype::Bf16;
     let k = 64usize;
@@ -685,7 +685,7 @@ fn tc_route_gate_boundary_sweep() {
         let xt = t.typed_buf(&qx, dt);
         let wt = t.typed_buf(&qw, dt);
         let yt = DtypedBuf::zeros(&t.ctx.stream, m * n, dt).unwrap();
-        let r = sgemm_bi::sgemm_bi_forward_tc(
+        let r = gemm_bi_triad::sgemm_bi_forward_tc(
             &t.ctx.stream,
             &t.ctx.kernels,
             TypedPtr {
@@ -736,7 +736,7 @@ fn tc_route_gate_boundary_sweep() {
         let xt = t.typed_buf(&qx, dt);
         let dyt = t.typed_buf(&qdy, dt);
         let dw = GpuBuffer::zeros(&t.ctx.stream, kk * n).unwrap();
-        let r = sgemm_bi::sgemm_bi_backward_dw_tc(
+        let r = gemm_bi_triad::sgemm_bi_backward_dw_tc(
             &t.ctx.stream,
             &t.ctx.kernels,
             dw.cached_ptr(),
@@ -766,7 +766,7 @@ fn tc_route_gate_boundary_sweep() {
         let dyt = t.typed_buf(&qdy, dt);
         let wt = t.typed_buf(&qw, dt);
         let dxt = DtypedBuf::zeros(&t.ctx.stream, m * kk, dt).unwrap();
-        let r = sgemm_bi::sgemm_bi_backward_dx_tc(
+        let r = gemm_bi_triad::sgemm_bi_backward_dx_tc(
             &t.ctx.stream,
             &t.ctx.kernels,
             TypedPtr {
@@ -838,7 +838,7 @@ fn tc64_forward_strict_all_m_invariance_and_determinism() {
 #[test]
 #[ignore] // wall-clock benchmark — run explicitly on a quiet GPU
 fn bench_tc64_vs_tc128_small_shapes() {
-    use sgemm_bi::TcTile;
+    use gemm_bi_triad::TcTile;
     use std::time::Instant;
     let t = Ctx::new();
     let dt = WeightDtype::Bf16;
@@ -885,7 +885,7 @@ fn bench_tc64_vs_tc128_small_shapes() {
         };
 
         eprintln!("[{label}] M{m} K{k} N{n}");
-        let ops = sgemm_bi::TcFwdOperands {
+        let ops = gemm_bi_triad::TcFwdOperands {
             y: ytp,
             x: xtp,
             w: wtp,
@@ -893,7 +893,7 @@ fn bench_tc64_vs_tc128_small_shapes() {
         };
         for tile in [TcTile::Tile64, TcTile::Tile128] {
             time_path(&format!("fwd {tile:?}"), &|| {
-                sgemm_bi::sgemm_bi_forward_tc_with_tile(
+                gemm_bi_triad::sgemm_bi_forward_tc_with_tile(
                     &t.ctx.stream,
                     &t.ctx.kernels,
                     &ops,
@@ -905,7 +905,7 @@ fn bench_tc64_vs_tc128_small_shapes() {
         }
         for tile in [TcTile::Tile64, TcTile::Tile128] {
             time_path(&format!("dW {tile:?}"), &|| {
-                sgemm_bi::sgemm_bi_backward_dw_tc_with_tile(
+                gemm_bi_triad::sgemm_bi_backward_dw_tc_with_tile(
                     &t.ctx.stream,
                     &t.ctx.kernels,
                     dw.cached_ptr(),
@@ -919,7 +919,7 @@ fn bench_tc64_vs_tc128_small_shapes() {
         }
         for tile in [TcTile::Tile64, TcTile::Tile128] {
             time_path(&format!("dX {tile:?}"), &|| {
-                sgemm_bi::sgemm_bi_backward_dx_tc_with_tile(
+                gemm_bi_triad::sgemm_bi_backward_dx_tc_with_tile(
                     &t.ctx.stream,
                     &t.ctx.kernels,
                     dxtp,
@@ -1000,7 +1000,7 @@ fn bench_tc_vs_scalar_paths() {
             bi_sgemm_forward_typed(&t.ctx, ytp, xtp, wtp, 0, (m, k, n)).unwrap();
         });
         let tc = time_path("tensor-core bi", &|| {
-            sgemm_bi::sgemm_bi_forward_tc(
+            gemm_bi_triad::sgemm_bi_forward_tc(
                 &t.ctx.stream,
                 &t.ctx.kernels,
                 ytp,
@@ -1033,7 +1033,7 @@ fn bench_tc_vs_scalar_paths() {
             bi_sgemm_backward_dw_typed(&t.ctx, dw.cached_ptr(), dytp, xtp, (m, k, n)).unwrap();
         });
         let dw_tc = time_path("dW tensor-core", &|| {
-            sgemm_bi::sgemm_bi_backward_dw_tc(
+            gemm_bi_triad::sgemm_bi_backward_dw_tc(
                 &t.ctx.stream,
                 &t.ctx.kernels,
                 dw.cached_ptr(),
@@ -1048,7 +1048,7 @@ fn bench_tc_vs_scalar_paths() {
             bi_sgemm_backward_dx_typed(&t.ctx, dxtp, dytp, wtp, (m, k, n)).unwrap();
         });
         let dx_tc = time_path("dX tensor-core", &|| {
-            sgemm_bi::sgemm_bi_backward_dx_tc(
+            gemm_bi_triad::sgemm_bi_backward_dx_tc(
                 &t.ctx.stream,
                 &t.ctx.kernels,
                 dxtp,
@@ -1126,7 +1126,7 @@ fn step0_tc_attrs_and_goldens() {
             let wt = t.typed_buf(&qw, dt);
 
             let dw = GpuBuffer::zeros(&t.ctx.stream, k_ * n).unwrap();
-            sgemm_bi::sgemm_bi_backward_dw_tc(
+            gemm_bi_triad::sgemm_bi_backward_dw_tc(
                 &t.ctx.stream,
                 &t.ctx.kernels,
                 dw.cached_ptr(),
@@ -1142,7 +1142,7 @@ fn step0_tc_attrs_and_goldens() {
             )
             .unwrap();
             let dxt = DtypedBuf::zeros(&t.ctx.stream, m * k_, dt).unwrap();
-            sgemm_bi::sgemm_bi_backward_dx_tc(
+            gemm_bi_triad::sgemm_bi_backward_dx_tc(
                 &t.ctx.stream,
                 &t.ctx.kernels,
                 TypedPtr {
@@ -1182,7 +1182,7 @@ fn step0_tc_attrs_and_goldens() {
         let wt = t.typed_buf(&qw, WeightDtype::Bf16);
         let yt = DtypedBuf::zeros(&t.ctx.stream, m * n, WeightDtype::Bf16).unwrap();
         let run = || {
-            sgemm_bi::sgemm_bi_forward_tc(
+            gemm_bi_triad::sgemm_bi_forward_tc(
                 &t.ctx.stream,
                 &t.ctx.kernels,
                 TypedPtr {

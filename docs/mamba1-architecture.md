@@ -109,8 +109,8 @@ GEMM tiers, per `GpuCtx` flags:
 - `set_batch_invariant(true)`: forward/dW/dX and the typed decode matvec on
   custom fixed-order kernels (deterministic, batch-invariant);
 - `set_bi_gemm_family(..)`: which family serves the forward under that flag
-  — `Triad` (`sgemm_bi.cu`, default; all three layouts, per-bucket
-  invariance) or `Fixed` (`gemm_batch_invariant.cu`; forward-only, one
+  — `Triad` (`gemm_bi_triad.cu`, default; all three layouts, per-bucket
+  invariance) or `Fixed` (`gemm_bi_fixed.cu`; forward-only, one
   64x64x32 tile, invariant by construction);
 - + `set_bi_tensor_cores(true)`: the mma.sync tier of the same contract.
 

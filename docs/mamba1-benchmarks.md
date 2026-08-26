@@ -4,7 +4,7 @@ Hardware: Ada server — Intel Xeon Gold 5412U (48 threads) + NVIDIA RTX 6000 Ad
 Generation (48 GB), CUDA 13.2, Driver 595.45. Measured on mamba-rs 0.4.2.
 
 The decode numbers below were measured with **the batch-invariant
-matvec kernel** (`kernels/gemm_batch_invariant.cu`) — pure Rust +
+matvec kernel** (`kernels/gemm_bi_fixed.cu`) — pure Rust +
 NVRTC, no Python or Triton dependency. That kernel is OPT-IN
 (`ctx.set_batch_invariant(true)` / `MAMBA_RS_BATCH_INVARIANT=1`); the
 shipped decode default dispatches cuBLAS gemv. Under the flag it

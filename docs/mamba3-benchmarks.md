@@ -178,10 +178,15 @@ cargo test --release --features "cuda hf" --test rl_llm_bench \
     rl_ -- --ignored --nocapture
 ```
 
-## Deterministic training GEMM (0.4.2)
+## Deterministic GEMM (0.6.8)
 
-The Mamba-3 trainer shares the deterministic GEMM layer with Mamba SSM:
-both opt-in tiers (`MAMBA_RS_BATCH_INVARIANT`, `MAMBA_RS_BI_TENSOR_CORES`)
-apply, with the same contracts and CUDA-Graph guards
-(`presize_bi_upcast_scratch_for_train_m3`). Measurement tables:
+Mamba-3 shares the deterministic GEMM layer with Mamba SSM on BOTH
+sides: the trainer forward/backward and the inference prefill all route
+through the context-carrying dispatcher, so the opt-in tiers
+(`MAMBA_RS_BATCH_INVARIANT`, `MAMBA_RS_BI_TENSOR_CORES`) and the family
+selector (`MAMBA_RS_BI_GEMM_FAMILY=triad|fixed`) apply to inference
+exactly as they do to training, with the same contracts and CUDA-Graph
+guards (`presize_bi_upcast_scratch_for_train_m3`; the capture identity
+is `ctx.gemm_route()`, which carries the family). Measurement tables,
+including a family comparison at a prefill shape:
 [determinism-benchmarks.md](determinism-benchmarks.md).

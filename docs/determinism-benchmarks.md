@@ -10,7 +10,7 @@ Mamba SSM and Mamba-3 SISO — these results apply to both architectures.
 |---|---|---|
 | (off) | cuBLAS | f32 → TF32 tensor cores; bf16/f16 → GemmEx `COMPUTE_32F_PEDANTIC` (CUDA cores, f32 accumulate). Run-to-run stable on one machine, NOT batch-invariant, no stability across cuBLAS versions. |
 | `MAMBA_RS_BATCH_INVARIANT=1` | scalar deterministic | custom fixed-reduction-order kernels. Training bit-identical across runs on every dtype; inference decode strictly all-M invariant via `matvec_bi` (KL ≈ 1e-12). bf16/f16 outputs are bit-identical to "upcast → f32 kernel → RNE downcast". Which family serves the forward is selectable — see the row below. |
-| + `MAMBA_RS_BI_GEMM_FAMILY=triad\|fixed` | family selector | `triad` (`kernels/sgemm_bi.cu`, default): the multi-tile dispatcher, all three operand layouts, per-bucket batch invariance (same dispatch bucket → row 0 bit-identical across M). `fixed` (`kernels/gemm_batch_invariant.cu`): one 64×64×32 tile, `SPLIT_K=1`, forward-only, batch-invariant BY CONSTRUCTION (no buckets exist to cross). A backward requires `triad`. The family is part of `ctx.gemm_route()`, so a flip after a CUDA-graph capture is refused at replay. |
+| + `MAMBA_RS_BI_GEMM_FAMILY=triad\|fixed` | family selector | `triad` (`kernels/gemm_bi_triad.cu`, default): the multi-tile dispatcher, all three operand layouts, per-bucket batch invariance (same dispatch bucket → row 0 bit-identical across M). `fixed` (`kernels/gemm_bi_fixed.cu`): one 64×64×32 tile, `SPLIT_K=1`, forward-only, batch-invariant BY CONSTRUCTION (no buckets exist to cross). A backward requires `triad`. The family is part of `ctx.gemm_route()`, so a flip after a CUDA-graph capture is refused at replay. |
 | + `MAMBA_RS_BI_TENSOR_CORES=1` | tensor-core deterministic | `mma.sync.m16n8k16`, f32 accumulators, no atomics/splits. OWN numeric contract (TC reduction tree ≠ scalar FMA chain) — but runs are bit-identical to each other (incl. CUDA Graph capture/replay) and the forward is STRICTLY batch-invariant across all M. Two kernel families — 128×128 tiles (256 thr, dynamic smem) and 64×64 tiles (128 thr, static smem) — that are BIT-IDENTICAL per output element (same ascending BK=64 reduction slabs, same mma chain, same tail zero-fill), so the shape-only tile routing never changes output bits. |
 
 Accuracy cross-checks: bf16 scalar-tier training trajectory vs cuBLAS
@@ -20,7 +20,7 @@ TC dW (f32 accumulate) cos 1.000000000.
 
 ## Training step cost (`MambaTrainer`, ms/step)
 
-`tests/sgemm_bi_determinism.rs::bench_sgemm_bi_vs_tf32`
+`tests/gemm_bi_determinism.rs::bench_sgemm_bi_vs_tf32`
 
 | model | dtype | cuBLAS baseline | scalar deterministic | + tensor cores |
 |---|---|---:|---:|---:|
@@ -48,7 +48,7 @@ non-GEMM kernels dominating those steps.
 
 ## Tensor-core tier — GEMM level (bf16, µs)
 
-`tests/sgemm_bi_tc.rs::bench_tc_vs_scalar_paths`, vs the scalar
+`tests/gemm_bi_tc.rs::bench_tc_vs_scalar_paths`, vs the scalar
 deterministic tier on the same shape (0.4.2: BK=64 staging):
 
 | shape (M, K, N) | fwd scalar → TC | dW scalar → TC | dX scalar → TC |
@@ -68,7 +68,7 @@ pipelining was measured FLAT and 2-CTA/SM occupancy is register-blocked
 
 ## Tile64 family — small/narrow shapes (bf16, µs)
 
-`tests/sgemm_bi_tc.rs::bench_tc64_vs_tc128_small_shapes`. The 64×64-tile
+`tests/gemm_bi_tc.rs::bench_tc64_vs_tc128_small_shapes`. The 64×64-tile
 twins (0.4.2) quadruple the CTA count on grids that underfill the GPU at
 128×128, and cover the 64..127 output-dim band the 128 gate excluded:
 
@@ -93,7 +93,7 @@ Tile64 — that is why even d768/d1536 steps improved in 0.4.2.
 
 ## Scalar tier — typed Big / upcast-fallback cost (bf16, µs)
 
-`tests/sgemm_bi_typed_parity.rs::bench_upcast_fallback_tax`. Big-routed
+`tests/gemm_bi_typed_parity.rs::bench_upcast_fallback_tax`. Big-routed
 shapes run the native typed kernel; split-K/Slim shapes run "upcast →
 f32 kernel → RNE downcast" (bit-identical by contract):
 

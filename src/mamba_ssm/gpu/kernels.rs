@@ -384,7 +384,7 @@ pub struct MambaKernels {
     pub matvec_bi_f32_f32: CudaFunction,
 
     // -- sgemm_bi: deterministic batch-invariant f32 training SGEMM triad --
-    // (kernels/sgemm_bi.cu, ported from SQV-RS; siboehm warptiling + shape
+    // (kernels/gemm_bi_triad.cu, ported from SQV-RS; siboehm warptiling + shape
     // dispatcher). Used by gpu/sgemm_bi.rs when ctx.batch_invariant() is on.
     // Big NN/TN/NT use 2-stage cp.async with 33 KB dynamic smem — loader
     // opts into the sm_80+ carveout per CUfunction.
@@ -574,8 +574,8 @@ impl MambaKernels {
             include_str!("../../../kernels/loss_scaler.cu"),
             include_str!("../../../kernels/grad_clip.cu"),
             include_str!("../../../kernels/adamw.cu"),
-            include_str!("../../../kernels/gemm_batch_invariant.cu"),
-            include_str!("../../../kernels/sgemm_bi.cu"),
+            include_str!("../../../kernels/gemm_bi_fixed.cu"),
+            include_str!("../../../kernels/gemm_bi_triad.cu"),
         ];
 
         // Strip `#include "_typed_prelude.cuh"` lines (prelude is inlined above).
@@ -605,7 +605,7 @@ impl MambaKernels {
             "--fmad=true".to_string(),
             "--extra-device-vectorization".to_string(),
             // Device-side assert() compiles to a live trap check
-            // per call site (30 in sgemm_bi.cu alone, several inside the
+            // per call site (30 in gemm_bi_triad.cu alone, several inside the
             // register-critical TC main loops). NDEBUG removes the checks;
             // asserts compute no values, so outputs are bit-identical
             // (digest-gated).

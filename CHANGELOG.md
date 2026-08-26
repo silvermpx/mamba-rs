@@ -1,5 +1,36 @@
 # Changelog
 
+## 0.6.8 (2026-08-26)
+
+Batched prefill pooling, kernel-file naming, and a correctness gate for
+the fixed-tile family. No numeric change: every existing route returns
+bit-identical output.
+
+### Added
+
+- `Mamba3PrefillOutputs::pooled_sum` accepts `batch > 1` and receives
+  `[B * d_model]`. Each sample is summed over its own `seq_len` rows in
+  the ascending-t f32 order the single-sample path already used, so a
+  sample's pooled row is bit-identical whether it rode alone or inside a
+  batch. Previously the pooled route refused any batch above one, which
+  left a batched prefill with only the full-temporal download.
+- `gemm_bi_fixed_correctness`: the fixed-tile family against a CPU
+  reference across tile tails. The family had no direct test while it
+  sat off every dispatch path.
+
+### Changed
+
+- Kernel files carry the names the API uses: `sgemm_bi.cu` ->
+  `gemm_bi_triad.cu`, `gemm_batch_invariant.cu` -> `gemm_bi_fixed.cu`,
+  and the Rust module `gpu::sgemm_bi` -> `gpu::gemm_bi_triad`. The
+  `sgemm` prefix was BLAS notation for single precision and had not
+  described the coverage since the typed and Tensor-Core sections
+  landed.
+
+### Fixed
+
+- Documentation fixes.
+
 ## 0.6.7 (2026-08-26)
 
 Makes the second batch-invariant GEMM family reachable and puts the
@@ -12,10 +43,10 @@ are bit-identical to 0.6.6 unless a caller selects otherwise.
 - `GpuCtx::set_bi_gemm_family` / `bi_gemm_family` and
   `MAMBA_RS_BI_GEMM_FAMILY=triad|fixed`: which batch-invariant family
   serves the forward while `batch_invariant` is on. `Triad`
-  (`kernels/sgemm_bi.cu`, the default) is the multi-tile dispatcher -
+  (`kernels/gemm_bi_triad.cu`, the default) is the multi-tile dispatcher -
   it carries all three operand layouts, so it is the only family that
   can serve a backward, and its invariance holds across every M inside
-  one dispatch bucket. `Fixed` (`kernels/gemm_batch_invariant.cu`) is
+  one dispatch bucket. `Fixed` (`kernels/gemm_bi_fixed.cu`) is
   one 64x64x32 tile with `SPLIT_K=1`, forward-only, batch-invariant by
   construction: the K-reduction for `C[i,j]` reads only `A[i,:]` and
   `B[:,j]`, so no bucket boundary exists to cross. The fixed-tile
@@ -38,7 +69,7 @@ are bit-identical to 0.6.6 unless a caller selects otherwise.
   training forward both pass `GpuCtx` and both follow the flag. The
   scope note now names what actually opts out - the tied LM heads and
   the no-context `*_blas` twins, which take no context.
-- The `sgemm_bi.cu` header described the file as f32-first. The file
+- The `gemm_bi_triad.cu` header described the file as f32-first. The file
   has carried f32, bf16 and f16, on CUDA cores and Tensor Cores, since
   the typed and TC sections landed; the `S` in the name is historical
   BLAS notation and no longer describes the coverage.
@@ -46,17 +77,11 @@ are bit-identical to 0.6.6 unless a caller selects otherwise.
 ### Measurements and verification
 
 At a vision-classifier prefill shape (f32, M = 4621 rows per page,
-RTX 6000 Ada) the two families are close: against a cuBLAS f32
-baseline, `fixed` runs 4.13x / 2.79x / 3.88x on input_proj / in_proj /
-out_proj and `triad` runs 4.61x / 2.80x / 4.46x; on a 4-page batched
-row `triad` takes the wide-N in_proj (2.71x vs 3.36x) and `fixed`
-keeps the other two. Both differ from cuBLAS by the same
-1.0e-4 - 1.8e-4 and agree with each other more closely than either
-agrees with cuBLAS; reruns are bit-identical in both. End to end on
-that model the deterministic route costs +30% per page (18.6 ->
-24.2 ms), the scan rather than the projections dominating. The three
-determinism suites (`sgemm_bi_determinism`, `sgemm_bi_tc`,
-`sgemm_bi_typed_parity`) pass unchanged.
+RTX 6000 Ada) the two families run within a few percent of each other,
+`fixed` ahead on the narrow-N projections and `triad` on the wide-N one;
+both differ from cuBLAS by 1.0e-4 - 1.8e-4 and agree more closely with
+each other than either does with cuBLAS. Reruns are bit-identical in
+both. The full cuda suite passes.
 
 ## 0.6.6 (2026-08-25)
 
@@ -1064,7 +1089,7 @@ Bug-fix release for the deterministic GEMM engine. No API changes.
 ### Fixed: native typed Big kernels never actually ran
 
 The bf16/f16 Big NN/TN/NT kernels introduced in 0.4.0 compiled with the
-WRONG tile geometry: `kernels/sgemm_bi.cu` redefines `BM/BN/BK/NUM_THREADS`
+WRONG tile geometry: `kernels/gemm_bi_triad.cu` redefines `BM/BN/BK/NUM_THREADS`
 for the Slim section partway through the file and leaves them redefined,
 so the typed Big kernels (appended at the end) silently picked up Slim
 constants — 128-thread launch bounds and 32-deep K tiles against a
@@ -1114,7 +1139,7 @@ cuBLAS on LLM-sized models. Validated on RTX 6000 Ada, CUDA 13.2:
 
 With `MAMBA_RS_BATCH_INVARIANT=1` / `ctx.set_batch_invariant(true)`,
 every training GEMM (NN forward, TN dW, NT dX) routes through custom
-deterministic kernels in `kernels/sgemm_bi.cu` — two runs with the same
+deterministic kernels in `kernels/gemm_bi_triad.cu` — two runs with the same
 seed/inputs produce bit-identical weights on every dtype.
 
 - f32 triad: bucketed dispatch (GEMV, ultra-thin, narrow, split-K32,
@@ -1124,7 +1149,7 @@ seed/inputs produce bit-identical weights on every dtype.
   f32 twin's exact FMA chain and ONE RNE downcast at store; shapes
   without a native bucket run "upcast → f32 kernel → RNE downcast" —
   bit-identical to a native typed kernel by contract
-  (tests/sgemm_bi_typed_parity.rs, incl. a 60-shape gate-boundary sweep).
+  (tests/gemm_bi_typed_parity.rs, incl. a 60-shape gate-boundary sweep).
 - Native typed Big NN/TN/NT kernels fire exactly where the f32 cascade
   picks Big (predicate-mirrored gates) and eliminate the Big-shape upcast
   scratch (~0.5 GB at 2.8b mixed).
@@ -1266,7 +1291,7 @@ plus the corresponding `GpuMambaLM` / `GpuMamba3LM` LM wrappers.
 
 ### Batch-invariant matvec (the headline change)
 
-Custom CUDA kernel in `kernels/gemm_batch_invariant.cu`. Output is
+Custom CUDA kernel in `kernels/gemm_bi_fixed.cu`. Output is
 bit-identical across batch sizes (KL ≈ 1e-11), against cuBLAS's
 `cublasGemmEx` which drifts to KL ≈ 1e-3 between M=1 and M=N because
 it picks a different split-K / tile / algo per M.

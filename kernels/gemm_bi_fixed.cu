@@ -1,5 +1,5 @@
 // Batch-invariant bf16/f16/f32 GEMM — the single FIXED-TILE family
-// (BiGemmFamily::Fixed). Forward-only NN; the triad in sgemm_bi.cu
+// (BiGemmFamily::Fixed). Forward-only NN; the triad in gemm_bi_triad.cu
 // carries the backward layouts.
 //
 // Problem: cuBLAS `cublasGemmEx` selects different algorithms per M
@@ -79,6 +79,17 @@ __device__ __forceinline__ float zero_f32() { return 0.0f; }
 // the f32→f32 instantiation we keep the original CUDA-core inner loop.
 // f32 inference was never the regression source (cuBLAS f32 path was also
 // CUDA cores) so this path is unchanged in performance vs prior commit.
+// --- f32 path: emulate Tensor Core via per-element FMA ------------------
+// Tensor Cores on Ada do NOT accept f32 inputs (only bf16/f16/tf32). For
+// the f32->f32 instantiation we keep the CUDA-core inner loop - the same
+// hardware path cuBLAS takes for f32.
+//
+// The 64x64x32 tile with 256 threads and 4x4 outputs each is a measured
+// optimum for narrow-N inference projections; wider tiles, fewer threads
+// and a transposed-A layout were all measured slower at those shapes.
+// The launcher's block/thread constants MUST equal the ones here - a
+// launch that disagrees fills part of the tile and returns plausible
+// garbage. `gemm_bi_fixed_correctness` is the gate.
 #define DEFINE_GEMM_BI_FFMA(NAME, T_IO, T_OUT, FROM_F_OUT, ZERO_IO)             \
 extern "C" __global__ __launch_bounds__(THREADS, 2) void                        \
 NAME(                                                                           \

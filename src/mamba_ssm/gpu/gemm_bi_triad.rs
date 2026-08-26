@@ -5,7 +5,7 @@
 //! `sgemm` in the module and kernel names is historical BLAS notation
 //! (S = single precision) that no longer describes the coverage.
 //!
-//! Ported from SQV-RS `sqv_uaac` (`blas_gpu.rs` + `kernels/sgemm_bi.cu`,
+//! Ported from SQV-RS `sqv_uaac` (`blas_gpu.rs` + `kernels/gemm_bi_triad.cu`,
 //! siboehm warptiling lineage). Three entry points used when
 //! `ctx.batch_invariant()` is enabled:
 //!
@@ -314,7 +314,7 @@ pub fn sgemm_bi_forward_sub(
     // 4 rows/block, warp-shuffle K-reduction, deterministic batch-invariant.
     //
     // batch lower bound relaxed 4 → 1. Kernel
-    // sgemm_bi_nn_gemv has `if (row >= M) return;` predication (kernels/sgemm_bi.cu:2201)
+    // sgemm_bi_nn_gemv has `if (row >= M) return;` predication (kernels/gemm_bi_triad.cu:2201)
     // so M<4 is safe — partial last block. Closes single-env eval gap
     // (M=1 N=1 K=512 was hitting cuBLAS-fallback panic in an eval-parity test).
     // Determinism preserved (kernel unchanged; same warp-shuffle butterfly).
@@ -710,7 +710,7 @@ pub fn sgemm_bi_forward_sub(
         let smem_bytes: u32 = if slim { 0 } else { 34 * 1024 };
         // 2026-05-13 — Stage-4 persistent-CTA cap removed. Kernel body is now
         // data-parallel (one tile per CTA), so grid_dim == total_tiles. See
-        // sgemm_bi.cu for the kernel-side unwrap rationale.
+        // gemm_bi_triad.cu for the kernel-side unwrap rationale.
         let total_tiles = (batch as u32).div_ceil(128) * (n_out as u32).div_ceil(bn);
         let cfg = cudarc::driver::LaunchConfig {
             grid_dim: (total_tiles, 1, 1),
@@ -910,7 +910,7 @@ pub fn sgemm_bi_backward_dw(
         // T1 v2: Big TN uses dynamic smem for 2-stage cp.async (34 KB); Slim stays static.
         let smem_bytes: u32 = if slim { 0 } else { 34 * 1024 };
         // 2026-05-13 — data-parallel launch (no persistent-CTA cap). See
-        // gpu_sgemm_forward note and sgemm_bi.cu for the kernel-side unwrap.
+        // gpu_sgemm_forward note and gemm_bi_triad.cu for the kernel-side unwrap.
         let total_tiles = (n_in as u32).div_ceil(128) * (n_out as u32).div_ceil(bn);
         let cfg = cudarc::driver::LaunchConfig {
             grid_dim: (total_tiles, 1, 1),
@@ -998,7 +998,7 @@ pub fn sgemm_bi_backward_dx(
     // Gap: batch ∈ [1, 31], N >= 128 — Narrow NT capped at N=127, Split-K
     // NT-via-T requires batch >= 32, Big/Slim NT requires batch >= 128.
     // Solution: reuse sgemm_nt_narrow kernel — N is reduction-axis, kernel
-    // iterates `for nIdx in [0, N) by NBK=16` (sgemm_bi.cu:2635), no upper
+    // iterates `for nIdx in [0, N) by NBK=16` (gemm_bi_triad.cu:2635), no upper
     // bound on N. Tile dims (BM=64, BN=32) fit any small batch; M/K_out
     // predication inside kernel handles partial last block.
     // Determinism: kernel unchanged → bit-exact with the N<=127 path.
@@ -1037,7 +1037,7 @@ pub fn sgemm_bi_backward_dx(
     // batch lower bound relaxed 4 → 1.
     // Kernel sgemm_bi_nt_gemv computes per-element dX[m,k] = alpha*dY[m]*W[k]
     // with total = M*K threads and `if (tid >= total) return;` predication
-    // (kernels/sgemm_bi.cu:2296) — safe for M<4. Closes the single-env eval gap.
+    // (kernels/gemm_bi_triad.cu:2296) — safe for M<4. Closes the single-env eval gap.
     if n_out == 1 && n_in >= 1 && batch >= 1 {
         let m_i = batch as i32;
         let k_i = n_in as i32;
@@ -1222,7 +1222,7 @@ pub fn sgemm_bi_backward_dx(
     //
     // A.2 — generalised to support n_out%32 != 0 by folding the N-tail (residue
     // after the largest 32-aligned prefix) into the reducer's `tail_cnt` arg.
-    // The reducer (sgemm_bi.cu:2902) already supports tail folding: for each
+    // The reducer (gemm_bi_triad.cu:2902) already supports tail folding: for each
     // (m, n) cell it appends `Σ_{k<tail_cnt} x_tail[m,k] * w_tail[k,n]` after
     // the K_CHUNKS partial reduce. For NT-via-T post-transpose the tail is along
     // the reduction axis (= original n_out), so:
@@ -1545,7 +1545,7 @@ pub fn sgemm_bi_backward_dx(
         // T1 v2: Big NT uses dynamic smem for 2-stage cp.async (34 KB).
         let smem_bytes: u32 = if slim { 0 } else { 34 * 1024 };
         // 2026-05-13 — data-parallel launch (no persistent-CTA cap). See
-        // gpu_sgemm_forward note and sgemm_bi.cu for the kernel-side unwrap.
+        // gpu_sgemm_forward note and gemm_bi_triad.cu for the kernel-side unwrap.
         let total_tiles = (batch as u32).div_ceil(128) * (n_in as u32).div_ceil(bn);
         let cfg = cudarc::driver::LaunchConfig {
             grid_dim: (total_tiles, 1, 1),
@@ -1596,7 +1596,7 @@ use super::dtype::WeightDtype;
 // slim/big split picks Big. The typed dispatch uses these so a native typed
 // Big kernel fires exactly where the f32 reference runs the same FMA chain;
 // any drift between a predicate and the real cascade shows up as a bit
-// mismatch in tests/sgemm_bi_typed_parity.rs.
+// mismatch in tests/gemm_bi_typed_parity.rs.
 // ---------------------------------------------------------------------------
 
 /// NN forward: mirrors `sgemm_bi_forward` (gemv, ultra-thin, narrow tiers,
@@ -1776,7 +1776,7 @@ pub enum TcTile {
 /// SAFE under the strict all-M invariance contract because the 64- and
 /// 128-tile TC kernels are BIT-IDENTICAL per output element (same BK=64
 /// reduction slabs, same ascending mma chain, same tail zero-fill —
-/// asserted by `tc64_and_tc128_bit_identical` in tests/sgemm_bi_tc.rs), so
+/// asserted by `tc64_and_tc128_bit_identical` in tests/gemm_bi_tc.rs), so
 /// an M-dependent tile pick never changes output bits. 72 keeps every
 /// GEMM of the d768/d1536 trainer benches on Tile128 (their smallest TC
 /// grid is dW out_proj at 12*6 = 72 tiles) while d128/d256 grids (2..=128

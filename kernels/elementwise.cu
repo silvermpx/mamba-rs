@@ -80,6 +80,30 @@ extern "C" __global__ void colsum_accumulate(
     db[j] += sum;
 }
 
+// Segmented column sum: out[s][j] = sum_t src[s][t][j].
+//
+// The batched twin of colsum_accumulate for the prefill's pooled route:
+// each segment (sample) is summed over its OWN seg_len rows, so samples
+// never mix. Per column the accumulation is the identical contract to
+// the batch=1 path - ascending t, pure f32 adds seeded at 0.0 - so a
+// sample's output is bit-identical whether it rode alone or inside a
+// batch. Grid: (ceil(n_out / block), segments).
+extern "C" __global__ void colsum_segments(
+    float* __restrict__ out,         // [segments * n_out]
+    const float* __restrict__ src,   // [segments * seg_len * n_out]
+    int segments, int seg_len, int n_out
+) {
+    int j = blockIdx.x * blockDim.x + threadIdx.x;
+    int s = blockIdx.y;
+    if (j >= n_out || s >= segments) return;
+    const float* base = src + (size_t)s * (size_t)seg_len * (size_t)n_out;
+    float sum = 0.0f;
+    for (int t = 0; t < seg_len; t++) {
+        sum += base[(size_t)t * (size_t)n_out + j];
+    }
+    out[(size_t)s * (size_t)n_out + j] = sum;
+}
+
 // Generic 2D reduce-along-axis-0: out[d] = sum_b(partials[b * dim + d]).
 // Used as the stage-2 finalizer after Rule-B per-sample partials writes,
 // replacing atomicAdd accumulators with a deterministic tree reduction.

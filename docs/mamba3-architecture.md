@@ -95,6 +95,12 @@ All four carry through `forward_mamba3_backbone_prefill` (0.5.0 —
 full-sequence batched-SGEMM CPU forward, no activation tape) exactly as
 through `mamba3_step`, so prefill-then-decode is seamless.
 
+GEMM routes: the M3 forward - trainer and inference prefill alike -
+calls the context-carrying dispatcher, so `set_batch_invariant` and
+`set_bi_gemm_family` steer it. The prefill's pooled output is
+per-sample (`[B * d_model]`), each sample summed over its own rows, so
+batching a prefill does not move a sample's bits.
+
 ## Weight Layout
 
 | Weight | Shape | Bias |

@@ -17,7 +17,7 @@ use std::sync::Arc;
 /// for f32).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum BiGemmFamily {
-    /// The multi-tile dispatcher (kernels/sgemm_bi.cu) - the default.
+    /// The multi-tile dispatcher (kernels/gemm_bi_triad.cu) - the default.
     /// Carries the full triad (NN + TN + NT), so it is the only family
     /// that can serve a backward, and it is the fastest deterministic
     /// path. It picks a kernel by shape (ultra-thin M<32, narrow-N,
@@ -26,7 +26,7 @@ pub enum BiGemmFamily {
     /// reduction association deterministically.
     #[default]
     Triad,
-    /// The single fixed tile (kernels/gemm_batch_invariant.cu):
+    /// The single fixed tile (kernels/gemm_bi_fixed.cu):
     /// forward-only NN, batch-invariant BY CONSTRUCTION. One 64x64x32
     /// tile, SPLIT_K=1, and a K-reduction for `C[i,j]` that reads only
     /// `A[i,:]` and `B[:,j]` - there are no buckets to cross, so the

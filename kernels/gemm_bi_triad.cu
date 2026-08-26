@@ -5818,7 +5818,7 @@ DEFINE_SGEMM_BI_NT_TC(f16,  __half,        from_f_f16,  "f16")
 // sees the exact same mma chain regardless of which tile size the
 // dispatcher picked. That bit-match is what makes the underfill-aware
 // Tile64/Tile128 routing in gpu/sgemm_bi.rs legal under the strict all-M
-// invariance contract (tests/sgemm_bi_tc.rs asserts the cross-tile
+// invariance contract (tests/gemm_bi_tc.rs asserts the cross-tile
 // bit-identity directly). Do NOT change the slab width, the ks order, or
 // the tail zero-fill here without changing the 128-tile kernels in
 // lockstep.

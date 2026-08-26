@@ -42,7 +42,7 @@ pub fn gpu_sgemm_forward_raw(
         return match ctx.bi_gemm_family() {
             // The triad dispatcher; bias is fused into its kernels (no
             // separate broadcast launch).
-            super::context::BiGemmFamily::Triad => super::sgemm_bi::sgemm_bi_forward(
+            super::context::BiGemmFamily::Triad => super::gemm_bi_triad::sgemm_bi_forward(
                 &ctx.stream,
                 &ctx.kernels,
                 y,
@@ -196,7 +196,7 @@ pub fn gpu_sgemm_backward_dx_raw(
     n_out: usize,
 ) -> Result<(), String> {
     if ctx.batch_invariant() {
-        return super::sgemm_bi::sgemm_bi_backward_dx(
+        return super::gemm_bi_triad::sgemm_bi_backward_dx(
             &ctx.stream,
             &ctx.kernels,
             dx,
@@ -246,7 +246,7 @@ pub fn gpu_sgemm_backward_dw_grad(
     n_out: usize,
 ) -> Result<(), String> {
     if ctx.batch_invariant() {
-        return super::sgemm_bi::sgemm_bi_backward_dw(
+        return super::gemm_bi_triad::sgemm_bi_backward_dw(
             &ctx.stream,
             &ctx.kernels,
             dw.ptr(),
@@ -489,7 +489,7 @@ pub fn bi_sgemm_forward_typed(
     // `sgemm_bi_forward_tc`). Tried first so big shapes get the TC speed;
     // shapes below its gate fall through to the scalar buckets.
     if ctx.bi_tensor_cores() {
-        match super::sgemm_bi::sgemm_bi_forward_tc(
+        match super::gemm_bi_triad::sgemm_bi_forward_tc(
             &ctx.stream,
             &ctx.kernels,
             y,
@@ -505,7 +505,7 @@ pub fn bi_sgemm_forward_typed(
             Err(e) => return Err(e),
         }
     }
-    match super::sgemm_bi::sgemm_bi_forward_typed(
+    match super::gemm_bi_triad::sgemm_bi_forward_typed(
         &ctx.stream,
         &ctx.kernels,
         y,
@@ -524,7 +524,7 @@ pub fn bi_sgemm_forward_typed(
     ctx.with_bi_upcast_scratch((m * k, k * n, m * n), |xs, ws, ys| {
         bi_upcast_to_f32(ctx, x, xs.cached_ptr(), m * k)?;
         bi_upcast_to_f32(ctx, w, ws.cached_ptr(), k * n)?;
-        super::sgemm_bi::sgemm_bi_forward(
+        super::gemm_bi_triad::sgemm_bi_forward(
             &ctx.stream,
             &ctx.kernels,
             ys,
@@ -550,7 +550,7 @@ pub fn bi_sgemm_backward_dw_typed(
     dims: (usize, usize, usize),
 ) -> Result<(), String> {
     if ctx.bi_tensor_cores() {
-        match super::sgemm_bi::sgemm_bi_backward_dw_tc(
+        match super::gemm_bi_triad::sgemm_bi_backward_dw_tc(
             &ctx.stream,
             &ctx.kernels,
             dw_ptr,
@@ -563,7 +563,7 @@ pub fn bi_sgemm_backward_dw_typed(
             Err(e) => return Err(e),
         }
     }
-    match super::sgemm_bi::sgemm_bi_backward_dw_typed(
+    match super::gemm_bi_triad::sgemm_bi_backward_dw_typed(
         &ctx.stream,
         &ctx.kernels,
         dw_ptr,
@@ -579,7 +579,7 @@ pub fn bi_sgemm_backward_dw_typed(
     ctx.with_bi_upcast_scratch((m * n, m * k, 0), |dys, xs, _| {
         bi_upcast_to_f32(ctx, dy, dys.cached_ptr(), m * n)?;
         bi_upcast_to_f32(ctx, x_saved, xs.cached_ptr(), m * k)?;
-        super::sgemm_bi::sgemm_bi_backward_dw(&ctx.stream, &ctx.kernels, dw_ptr, dys, xs, dims)
+        super::gemm_bi_triad::sgemm_bi_backward_dw(&ctx.stream, &ctx.kernels, dw_ptr, dys, xs, dims)
     })
 }
 
@@ -595,13 +595,27 @@ pub fn bi_sgemm_backward_dx_typed(
     dims: (usize, usize, usize),
 ) -> Result<(), String> {
     if ctx.bi_tensor_cores() {
-        match super::sgemm_bi::sgemm_bi_backward_dx_tc(&ctx.stream, &ctx.kernels, dx, dy, w, dims) {
+        match super::gemm_bi_triad::sgemm_bi_backward_dx_tc(
+            &ctx.stream,
+            &ctx.kernels,
+            dx,
+            dy,
+            w,
+            dims,
+        ) {
             Ok(_tile) => return Ok(()),
             Err(e) if e.starts_with("UNCOVERED") => {}
             Err(e) => return Err(e),
         }
     }
-    match super::sgemm_bi::sgemm_bi_backward_dx_typed(&ctx.stream, &ctx.kernels, dx, dy, w, dims) {
+    match super::gemm_bi_triad::sgemm_bi_backward_dx_typed(
+        &ctx.stream,
+        &ctx.kernels,
+        dx,
+        dy,
+        w,
+        dims,
+    ) {
         Ok(()) => return Ok(()),
         Err(e) if e.starts_with("UNCOVERED") => {}
         Err(e) => return Err(e),
@@ -610,7 +624,7 @@ pub fn bi_sgemm_backward_dx_typed(
     ctx.with_bi_upcast_scratch((m * n, k * n, m * k), |dys, ws, dxs| {
         bi_upcast_to_f32(ctx, dy, dys.cached_ptr(), m * n)?;
         bi_upcast_to_f32(ctx, w, ws.cached_ptr(), k * n)?;
-        super::sgemm_bi::sgemm_bi_backward_dx(
+        super::gemm_bi_triad::sgemm_bi_backward_dx(
             &ctx.stream,
             &ctx.kernels,
             dxs,
@@ -982,16 +996,26 @@ fn launch_bi_gemm(
     ctx: &GpuCtx,
     kernel: &cudarc::driver::CudaFunction,
     args: BiGemmArgs,
+    io_dtype: WeightDtype,
 ) -> Result<(), String> {
+    // Tile geometry per instantiation in kernels/gemm_bi_fixed.cu: the
+    // Tensor-Core path (bf16/f16) keeps 64x64; the f32 CUDA-core path is
+    // register-blocked over 128x128. A mismatch here would launch the
+    // wrong grid and silently drop output tiles.
+    // MUST equal the kernel's own constants in kernels/gemm_bi_fixed.cu.
+    // A launch that disagrees fills part of the tile and returns
+    // plausible garbage - measured: a 64-thread launch of this
+    // 256-thread tile ran 2.3x "faster" and was wrong everywhere.
     const BLOCK_M: i32 = 64;
     const BLOCK_N: i32 = 64;
     const THREADS: u32 = 256;
-    let num_pid_m = (args.m + BLOCK_M - 1) / BLOCK_M;
-    let num_pid_n = (args.n + BLOCK_N - 1) / BLOCK_N;
+    let (block_m, block_n, threads) = (BLOCK_M, BLOCK_N, THREADS);
+    let num_pid_m = (args.m + block_m - 1) / block_m;
+    let num_pid_n = (args.n + block_n - 1) / block_n;
     let grid = (num_pid_m as u32) * (num_pid_n as u32);
     let cfg = cudarc::driver::LaunchConfig {
         grid_dim: (grid, 1, 1),
-        block_dim: (THREADS, 1, 1),
+        block_dim: (threads, 1, 1),
         shared_mem_bytes: 0,
     };
     let lda = args.k;
@@ -1015,7 +1039,7 @@ fn launch_bi_gemm(
 }
 
 /// Direct entry to the WMMA batch-invariant GEMM
-/// (`kernels/gemm_batch_invariant.cu`, `gemm_bi_*`): fixed 64x64x32 tile,
+/// (`kernels/gemm_bi_fixed.cu`, `gemm_bi_*`): fixed 64x64x32 tile,
 /// SPLIT_K=1, f32 accumulators — batch-invariant BY CONSTRUCTION, with no
 /// dispatch buckets at all (unlike `sgemm_bi`, whose invariance holds
 /// within an M bucket). Forward-only NN, f32/bf16/f16.
@@ -1054,6 +1078,7 @@ pub fn gemm_bi_forward_raw(
             n: n_out as i32,
             k: n_in as i32,
         },
+        x.dtype,
     )
 }
 
@@ -1084,7 +1109,7 @@ fn launch_bi_matvec(
     args: BiGemmArgs,
     io_dtype: WeightDtype,
 ) -> Result<(), String> {
-    // Must match kernel constants in kernels/gemm_batch_invariant.cu:
+    // Must match kernel constants in kernels/gemm_bi_fixed.cu:
     //   BLOCK_N_MV = 32, WARPS_PER_BLOCK = 8, THREADS_PER_BLOCK = 256
     // Grid is 2D: (ceil(N / BLOCK_N_MV), M) — one CTA per (m_row, col_chunk).
     const BLOCK_N_MV: i32 = 32;
