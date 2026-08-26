@@ -106,6 +106,7 @@
 "sm90_wgmma_census" = "record"
 "stability_stress" = "contract"
 "state_cap_invariance" = "gate"
+"tcw64_census" = "contract"
 "thin_rung_decode_bench" = "record"
 "trainer_benchmarks" = "record"
 "trainer_smoke" = "gate"

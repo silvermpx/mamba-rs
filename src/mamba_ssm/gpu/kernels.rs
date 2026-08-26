@@ -455,6 +455,13 @@ pub struct MambaKernels {
     /// The Hopper wgmma rung (compiled only for sm_90a; the dispatcher
     /// never routes here until the rung is hardware-qualified - the
     /// forced census entry is its only caller).
+    /// The fragment-reuse 128x128 rung (warp tile 64x64). Dispatch
+    /// admits it only after its on-box census proves per-element byte
+    /// identity with the 128-tile and a measured win.
+    pub gemm_bi_nn_tcw64_typed: HalfKernel,
+    /// The same warp tile at CTA 128x256 with eight warps (the
+    /// occupancy-restoring sibling; same census law).
+    pub gemm_bi_nn_tcwn64_typed: HalfKernel,
     pub gemm_bi_nn_sm90_typed: Option<HalfKernel>,
     /// The datacenter-Blackwell tcgen05 rung (compiled only for the CC
     /// 10.x family targets; the dispatcher never routes here until the
@@ -601,6 +608,7 @@ impl MambaKernels {
             include_str!("../../../kernels/gemm_bi_fixed/wmma_legacy.cu"),
             include_str!("../../../kernels/gemm_bi_fixed/matvec.cu"),
             include_str!("../../../kernels/gemm_bi_fixed/mma16.cu"),
+            include_str!("../../../kernels/gemm_bi_fixed/tcw64.cu"),
             include_str!("../../../kernels/gemm_bi_fixed/sm90_wgmma.cu"),
             include_str!("../../../kernels/gemm_bi_fixed/sm100_tcgen05.cu"),
             include_str!("../../../kernels/gemm_bi_triad.cu"),
@@ -1014,6 +1022,8 @@ impl MambaKernels {
             gemm_bi_nn_tc128_typed: load_half_dynsmem("gemm_bi_nn_tc128", 71_680)?,
             gemm_bi_nn_tc64_typed: load_half("gemm_bi_nn_tc64")?,
             gemm_bi_nn_tc16_typed: load_half("gemm_bi_nn_tc16")?,
+            gemm_bi_nn_tcw64_typed: load_half_dynsmem("gemm_bi_nn_tcw64", 65_536)?,
+            gemm_bi_nn_tcwn64_typed: load_half_dynsmem("gemm_bi_nn_tcwn64", 98_304)?,
             gemm_bi_nn_sm90_typed: if arch == "sm_90a" {
                 Some(load_half_dynsmem("gemm_bi_nn_sm90a_wgmma_wg1", 49_152)?)
             } else {

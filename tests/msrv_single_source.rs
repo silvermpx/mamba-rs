@@ -1,6 +1,6 @@
 //! The minimum supported Rust version has one source of truth: the
 //! `rust-version` field in Cargo.toml. Every other place that spells it
-//! - the CI toolchain pins, the release workflow, the README - must
+//! (the CI toolchain pins, the release workflow, the README) must
 //! agree, or the published claim silently drifts from what is tested.
 
 use std::path::Path;
