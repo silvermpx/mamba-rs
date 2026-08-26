@@ -996,7 +996,6 @@ fn launch_bi_gemm(
     ctx: &GpuCtx,
     kernel: &cudarc::driver::CudaFunction,
     args: BiGemmArgs,
-    io_dtype: WeightDtype,
 ) -> Result<(), String> {
     // Tile geometry per instantiation in kernels/gemm_bi_fixed.cu: the
     // Tensor-Core path (bf16/f16) keeps 64x64; the f32 CUDA-core path is
@@ -1009,13 +1008,12 @@ fn launch_bi_gemm(
     const BLOCK_M: i32 = 64;
     const BLOCK_N: i32 = 64;
     const THREADS: u32 = 256;
-    let (block_m, block_n, threads) = (BLOCK_M, BLOCK_N, THREADS);
-    let num_pid_m = (args.m + block_m - 1) / block_m;
-    let num_pid_n = (args.n + block_n - 1) / block_n;
+    let num_pid_m = (args.m + BLOCK_M - 1) / BLOCK_M;
+    let num_pid_n = (args.n + BLOCK_N - 1) / BLOCK_N;
     let grid = (num_pid_m as u32) * (num_pid_n as u32);
     let cfg = cudarc::driver::LaunchConfig {
         grid_dim: (grid, 1, 1),
-        block_dim: (threads, 1, 1),
+        block_dim: (THREADS, 1, 1),
         shared_mem_bytes: 0,
     };
     let lda = args.k;
@@ -1078,7 +1076,6 @@ pub fn gemm_bi_forward_raw(
             n: n_out as i32,
             k: n_in as i32,
         },
-        x.dtype,
     )
 }
 
