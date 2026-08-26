@@ -416,3 +416,110 @@ impl GpuMamba3Grads {
         self.flat.zero(stream)
     }
 }
+
+// ═══ Weights view — one prefill surface over both containers ═══
+
+/// Raw device pointers for one layer's weights, as the prefill consumes
+/// them. Every norm/bias/param tensor is f32 in BOTH containers; only
+/// `in_proj_w` / `out_proj_w` follow the container's bulk dtype.
+pub struct Mamba3LayerWeightPtrs {
+    pub norm_weight: u64,
+    pub in_proj_w: u64,
+    pub dt_bias: u64,
+    pub b_norm_weight: u64,
+    pub c_norm_weight: u64,
+    pub b_bias: u64,
+    pub c_bias: u64,
+    pub d_param: u64,
+    pub norm_gate_weight: u64,
+    pub out_proj_w: u64,
+}
+
+/// The prefill's weight surface, implemented by the f32 inference
+/// container and the mixed (typed-bulk) container alike. The prefill
+/// branches its GEMM/kernel dtypes on `bulk_dtype()`; the pointer
+/// layout is identical either way (same split, same per-layer tensors).
+/// House precedent: the M1 prefill's `MambaWeightsView`.
+pub trait Mamba3WeightsView {
+    /// Dtype of the bulk projection weights (`F32` for the flat f32
+    /// container).
+    fn bulk_dtype(&self) -> WeightDtype;
+    /// `(w_ptr, b_ptr)` of the input projection; validity of the pointers
+    /// when the checkpoint has an identity projection is the caller's
+    /// `identity_proj` contract, same as today.
+    fn input_proj(&self) -> (u64, u64);
+    fn n_layers(&self) -> usize;
+    fn layer(&self, l: usize) -> Mamba3LayerWeightPtrs;
+    fn norm_f(&self) -> u64;
+    /// Identity of the underlying device allocations, for the CUDA-graph
+    /// replay guards: a captured graph baked every weight pointer in, so
+    /// a replay against a different container (or dtype) must refuse
+    /// instead of silently running the captured weights.
+    fn arena_identity(&self) -> (u64, u64);
+}
+
+impl Mamba3WeightsView for GpuMamba3WeightsInf {
+    fn bulk_dtype(&self) -> WeightDtype {
+        WeightDtype::F32
+    }
+    fn arena_identity(&self) -> (u64, u64) {
+        (self.flat.cached_ptr(), 0)
+    }
+    fn input_proj(&self) -> (u64, u64) {
+        (self.input_proj_w.ptr(), self.input_proj_b.ptr())
+    }
+    fn n_layers(&self) -> usize {
+        self.layers.len()
+    }
+    fn layer(&self, l: usize) -> Mamba3LayerWeightPtrs {
+        let lw = &self.layers[l];
+        Mamba3LayerWeightPtrs {
+            norm_weight: lw.norm_weight.ptr(),
+            in_proj_w: lw.in_proj_w.ptr(),
+            dt_bias: lw.dt_bias.ptr(),
+            b_norm_weight: lw.b_norm_weight.ptr(),
+            c_norm_weight: lw.c_norm_weight.ptr(),
+            b_bias: lw.b_bias.ptr(),
+            c_bias: lw.c_bias.ptr(),
+            d_param: lw.d_param.ptr(),
+            norm_gate_weight: lw.norm_gate_weight.ptr(),
+            out_proj_w: lw.out_proj_w.ptr(),
+        }
+    }
+    fn norm_f(&self) -> u64 {
+        self.norm_f_weight.ptr()
+    }
+}
+
+impl Mamba3WeightsView for GpuMamba3MixedWeights {
+    fn bulk_dtype(&self) -> WeightDtype {
+        self.bulk_dtype
+    }
+    fn arena_identity(&self) -> (u64, u64) {
+        (self.bulk_arena.cached_ptr(), self.f32_arena.cached_ptr())
+    }
+    fn input_proj(&self) -> (u64, u64) {
+        (self.input_proj_w.ptr(), self.input_proj_b.ptr())
+    }
+    fn n_layers(&self) -> usize {
+        self.layers.len()
+    }
+    fn layer(&self, l: usize) -> Mamba3LayerWeightPtrs {
+        let lw = &self.layers[l];
+        Mamba3LayerWeightPtrs {
+            norm_weight: lw.norm_weight.ptr(),
+            in_proj_w: lw.in_proj_w.ptr(),
+            dt_bias: lw.dt_bias.ptr(),
+            b_norm_weight: lw.b_norm_weight.ptr(),
+            c_norm_weight: lw.c_norm_weight.ptr(),
+            b_bias: lw.b_bias.ptr(),
+            c_bias: lw.c_bias.ptr(),
+            d_param: lw.d_param.ptr(),
+            norm_gate_weight: lw.norm_gate_weight.ptr(),
+            out_proj_w: lw.out_proj_w.ptr(),
+        }
+    }
+    fn norm_f(&self) -> u64 {
+        self.norm_f_weight.ptr()
+    }
+}

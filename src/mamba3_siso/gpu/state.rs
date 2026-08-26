@@ -631,3 +631,70 @@ impl GpuMamba3TargetScratch {
         })
     }
 }
+
+/// Typed twins for the prefill's per-layer activation path (the bf16/f16
+/// serve lane). Mirrors the trainer's `GpuMamba3LayerMixedActs` dtype map
+/// exactly: what the trainer keeps typed is typed here, what it keeps f32
+/// (dt/a_val/trap/angles/rms/residual/states and everything from `norm_f`
+/// on) stays in the f32 `GpuMamba3TargetScratch`, untouched. A SEPARATE
+/// struct on purpose: `GpuMamba3TargetScratch` is shared with the no-save
+/// f32 forward and must not grow dtype branches.
+pub struct Mamba3PrefillTypedScratch {
+    pub dtype: crate::mamba_ssm::gpu::dtype::WeightDtype,
+    /// Typed staging of `mamba_input` for the non-identity input_proj
+    /// (cast_f32_to_* before the typed GEMM).
+    pub input_cast: crate::mamba_ssm::gpu::buffers::DtypedBuf, // [B*T*input_dim]
+    pub post_norm: crate::mamba_ssm::gpu::buffers::DtypedBuf, // [B*T*d_model]
+    pub proj_flat: crate::mamba_ssm::gpu::buffers::DtypedBuf, // [B*T*in_proj_dim]
+    pub z: crate::mamba_ssm::gpu::buffers::DtypedBuf,         // [B*T*d_inner]
+    pub x: crate::mamba_ssm::gpu::buffers::DtypedBuf,         // [B*T*d_inner]
+    pub b_raw: crate::mamba_ssm::gpu::buffers::DtypedBuf,     // [B*T*ng*ds]
+    pub c_raw: crate::mamba_ssm::gpu::buffers::DtypedBuf,     // [B*T*ng*ds]
+    pub b_normed: crate::mamba_ssm::gpu::buffers::DtypedBuf,  // [B*T*ng*ds]
+    pub c_normed: crate::mamba_ssm::gpu::buffers::DtypedBuf,  // [B*T*ng*ds]
+    pub b_biased: crate::mamba_ssm::gpu::buffers::DtypedBuf,  // [B*T*nh*ds]
+    pub c_biased: crate::mamba_ssm::gpu::buffers::DtypedBuf,  // [B*T*nh*ds]
+    pub k: crate::mamba_ssm::gpu::buffers::DtypedBuf,         // [B*T*nh*ds]
+    pub q: crate::mamba_ssm::gpu::buffers::DtypedBuf,         // [B*T*nh*ds]
+    pub k_scaled: crate::mamba_ssm::gpu::buffers::DtypedBuf,  // [B*T*nh*ds]
+    pub y: crate::mamba_ssm::gpu::buffers::DtypedBuf,         // [B*T*d_inner]
+    pub gated: crate::mamba_ssm::gpu::buffers::DtypedBuf,     // [B*T*d_inner]
+    pub out_flat: crate::mamba_ssm::gpu::buffers::DtypedBuf,  // [B*T*d_model]
+}
+
+impl Mamba3PrefillTypedScratch {
+    pub fn new(
+        stream: &Arc<cudarc::driver::CudaStream>,
+        dims: &GpuMamba3Dims,
+        dtype: crate::mamba_ssm::gpu::dtype::WeightDtype,
+    ) -> Result<Self, String> {
+        use crate::mamba_ssm::gpu::buffers::DtypedBuf;
+        let bt = dims.bt();
+        let dm = dims.d_model;
+        let di = dims.d_inner;
+        let ds = dims.d_state;
+        let nh = dims.nheads;
+        let ng = dims.ngroups;
+        let ip = dims.in_proj_dim;
+        Ok(Self {
+            dtype,
+            input_cast: DtypedBuf::zeros(stream, bt * dims.mamba_input_dim, dtype)?,
+            post_norm: DtypedBuf::zeros(stream, bt * dm, dtype)?,
+            proj_flat: DtypedBuf::zeros(stream, bt * ip, dtype)?,
+            z: DtypedBuf::zeros(stream, bt * di, dtype)?,
+            x: DtypedBuf::zeros(stream, bt * di, dtype)?,
+            b_raw: DtypedBuf::zeros(stream, bt * ng * ds, dtype)?,
+            c_raw: DtypedBuf::zeros(stream, bt * ng * ds, dtype)?,
+            b_normed: DtypedBuf::zeros(stream, bt * ng * ds, dtype)?,
+            c_normed: DtypedBuf::zeros(stream, bt * ng * ds, dtype)?,
+            b_biased: DtypedBuf::zeros(stream, bt * nh * ds, dtype)?,
+            c_biased: DtypedBuf::zeros(stream, bt * nh * ds, dtype)?,
+            k: DtypedBuf::zeros(stream, bt * nh * ds, dtype)?,
+            q: DtypedBuf::zeros(stream, bt * nh * ds, dtype)?,
+            k_scaled: DtypedBuf::zeros(stream, bt * nh * ds, dtype)?,
+            y: DtypedBuf::zeros(stream, bt * di, dtype)?,
+            gated: DtypedBuf::zeros(stream, bt * di, dtype)?,
+            out_flat: DtypedBuf::zeros(stream, bt * dm, dtype)?,
+        })
+    }
+}

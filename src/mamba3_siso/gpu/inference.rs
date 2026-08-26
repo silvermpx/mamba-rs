@@ -224,8 +224,13 @@ use crate::mamba_ssm::gpu::dtype::WeightDtype;
 
 pub struct Mamba3GpuInferenceMixedScratch {
     pub gpu_input: GpuBuffer, // f32 — CPU upload staging (seeds f32 residual)
-    pub temporal: DtypedBuf,  // bf16/f16 — post-norm branch + final lm_head input
-    pub residual: GpuBuffer,  // f32 — cross-layer accumulator (HF residual_in_fp32)
+    /// f32 `[batch * d_model]` landing for the typed prefill's final
+    /// hidden (downcast into `temporal` after the window) — a dedicated
+    /// buffer so non-identity input projections (input_dim != d_model)
+    /// prefill too.
+    pub prefill_hidden: GpuBuffer,
+    pub temporal: DtypedBuf, // bf16/f16 — post-norm branch + final lm_head input
+    pub residual: GpuBuffer, // f32 — cross-layer accumulator (HF residual_in_fp32)
     pub proj: DtypedBuf,
     pub z: DtypedBuf,
     pub x: DtypedBuf,
@@ -280,6 +285,7 @@ impl Mamba3GpuInferenceMixedScratch {
         let na = cfg.num_rope_angles().max(1);
         Ok(Self {
             gpu_input: GpuBuffer::zeros(stream, batch * input_dim)?,
+            prefill_hidden: GpuBuffer::zeros(stream, batch * dm)?,
             temporal: DtypedBuf::zeros(stream, batch * dm, dtype)?,
             residual: GpuBuffer::zeros(stream, batch * dm)?,
             proj: DtypedBuf::zeros(stream, batch * ip, dtype)?,
@@ -1016,6 +1022,55 @@ impl Mamba3GpuInferenceMixed {
         &self.engine
     }
 
+    /// The typed weights container (for prefill runs / graph guards).
+    pub fn mixed_weights(&self) -> &GpuMamba3MixedWeights {
+        &self.mixed_weights
+    }
+
+    /// Allocate a TYPED one-pass prompt executor for a fixed prompt
+    /// length: the prefill runs the trainer's bf16/f16 kernel chain
+    /// against `mixed_weights`.
+    pub fn alloc_prefill(&self, seq_len: usize) -> Result<super::prefill::Mamba3Prefill, String> {
+        super::prefill::Mamba3Prefill::new_with_dtype(
+            &self.engine.ctx.stream,
+            &self.engine.prefill_dims(seq_len),
+            self.mixed_weights.bulk_dtype,
+        )
+    }
+
+    /// One-pass typed prompt window straight into the persistent decode
+    /// state (which is f32 in both pipelines). `last_hidden`
+    /// (`[batch * d_model]`, f32) receives the final post-norm hidden.
+    pub fn prefill_sequence(
+        &self,
+        prefill: &mut super::prefill::Mamba3Prefill,
+        mamba_input: &GpuBuffer,
+        seq_len: usize,
+        state: &mut Mamba3GpuInferenceState,
+        carry_state: bool,
+        last_hidden: &mut GpuBuffer,
+    ) -> Result<(), String> {
+        let dims = self.engine.prefill_dims(seq_len);
+        prefill.run(
+            &super::prefill::Mamba3PrefillRun {
+                ctx: &self.engine.ctx,
+                kernels: &self.engine.kernels,
+                dims: &dims,
+                weights: &self.mixed_weights,
+                mamba_input,
+                identity_proj: self.engine.identity_proj,
+                carry_state,
+            },
+            super::state::GpuMamba3StateBufs {
+                ssm: &mut state.ssm_state,
+                k: &mut state.k_state,
+                v: &mut state.v_state,
+                angle: &mut state.angle_state,
+            },
+            last_hidden,
+        )
+    }
+
     pub fn has_graph(&self) -> bool {
         self.graph.is_some()
     }
@@ -1681,10 +1736,10 @@ impl GpuMamba3Backbone {
     }
 
     /// Whether this backbone can run the one-pass chunked prompt prefill.
-    /// Both precision arms do: the mixed engine prefills through its
-    /// resident f32 weights (the persistent decode states are f32 in both
-    /// pipelines), then downcasts the final hidden into the typed decode
-    /// temporal.
+    /// Both precision arms do: the mixed engine runs the TYPED prefill
+    /// against its bf16/f16 weights (the trainer's kernel chain; the
+    /// persistent decode states are f32 in both pipelines), then downcasts
+    /// the final hidden into the typed decode temporal.
     pub fn supports_prefill(&self) -> bool {
         true
     }
@@ -1693,7 +1748,7 @@ impl GpuMamba3Backbone {
     pub fn alloc_prefill(&self, seq_len: usize) -> Result<super::prefill::Mamba3Prefill, String> {
         match &self.engine {
             M3BackboneEngine::F32(e) => e.alloc_prefill(seq_len),
-            M3BackboneEngine::Mixed(e) => e.engine_ref().alloc_prefill(seq_len),
+            M3BackboneEngine::Mixed(e) => e.alloc_prefill(seq_len),
         }
     }
 
@@ -1718,33 +1773,25 @@ impl GpuMamba3Backbone {
                 &mut sc.temporal,
             ),
             (M3BackboneEngine::Mixed(e), M3BackboneScratch::Mixed(sc)) => {
-                // Prefill through the resident f32 weights: the mixed
-                // wrapper keeps the full f32 engine alive for its pointer
-                // views, and the persistent SSM/K/V/angle states are f32
-                // in both pipelines, so decode continues from these states
-                // exactly as after typed steps (the prompt math simply ran
-                // at f32 precision).
-                let eng = e.engine_ref();
-                // The mixed decode requires an identity input projection
-                // (the LLM path), which also guarantees input_dim ==
-                // d_model — letting `gpu_input` (the f32 step-upload
-                // staging, idle during prefill) land the final hidden.
-                if eng.input_dim != eng.cfg.d_model {
-                    return Err("M3 mixed prefill requires the identity input projection \
-                         (input_dim == d_model), same as the mixed decode step"
-                        .into());
-                }
-                eng.prefill_sequence(
+                // The TYPED prefill against the mixed weights (bf16/f16
+                // GEMMs on the batch-invariant TC route, coefficients
+                // f32 - the trainer's exact chain). The persistent
+                // SSM/K/V/angle states are f32 in both pipelines, so
+                // decode continues from them exactly as after typed
+                // steps. Non-identity input projections work too - the
+                // typed prefill casts the input itself.
+                e.prefill_sequence(
                     prefill,
                     mamba_input,
                     seq_len,
                     &mut self.state,
                     carry_state,
-                    &mut sc.gpu_input,
+                    &mut sc.prefill_hidden,
                 )?;
                 // Downcast the final hidden into the typed decode temporal
                 // so the logits path continues exactly as after a step.
                 use cudarc::driver::PushKernelArg;
+                let eng = e.engine_ref();
                 let ctx = &eng.ctx;
                 let n = eng.batch * eng.cfg.d_model;
                 let n_i = n as i32;
@@ -1756,7 +1803,7 @@ impl GpuMamba3Backbone {
                     }
                 };
                 let dst = sc.temporal.cached_ptr();
-                let src = sc.gpu_input.cached_ptr();
+                let src = sc.prefill_hidden.cached_ptr();
                 let mut bld = ctx.stream.launch_builder(cast);
                 bld.arg(&dst);
                 bld.arg(&src);
