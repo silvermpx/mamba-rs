@@ -7,8 +7,8 @@
 
 use std::time::Instant;
 
-use mamba_rs::mamba_ssm::gpu::blas::{TypedPtr, gpu_gemm_typed_forward_raw};
-use mamba_rs::mamba_ssm::gpu::buffers::DtypedBuf;
+use mamba_rs::mamba_ssm::gpu::blas::{TypedPtr, gpu_gemm_typed_forward_raw, gpu_sgemm_forward_raw};
+use mamba_rs::mamba_ssm::gpu::buffers::{DtypedBuf, GpuBuffer};
 use mamba_rs::mamba_ssm::gpu::context::{BiGemmFamily, GpuCtx};
 use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
 use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
@@ -136,6 +136,144 @@ fn thin16_vs_matvec_decode() {
         println!(
             "{m:>4} {k:>5} {n:>5} | {t_mv:>10.2} {t_16:>10.2} {t_64:>10.2} | {:.2}x",
             t_16 / t_mv
+        );
+    }
+}
+
+/// G5 measurement: the Tile128 rung at prefill-class bf16 shapes (page
+/// rows x model dims). Forced-tile timings so the 3-stage swizzled NN
+/// pipeline is measured directly against the Tile64 twin.
+#[test]
+#[ignore = "needs a CUDA device"]
+fn tile128_prefill_bench() {
+    let dev = GpuDevice::new(0).expect("cuda device");
+    let ctx = GpuCtx::new(&dev).expect("ctx");
+    ctx.set_batch_invariant(true);
+    ctx.set_bi_gemm_family(BiGemmFamily::Triad);
+
+    let shapes: &[(usize, usize, usize)] = &[
+        (4621, 384, 1928),
+        (4621, 768, 2304),
+        (4621, 1928, 384),
+        (2048, 768, 2304),
+        (2048, 2304, 768),
+    ];
+
+    println!(
+        "{:>5} {:>5} {:>5} | {:>11} {:>11}",
+        "m", "k", "n", "tile128 us", "tile64 us"
+    );
+    for &(m, k, n) in shapes {
+        let a = DtypedBuf::zeros(&ctx.stream, m * k, WeightDtype::Bf16).expect("A");
+        a.upload_f32(&ctx.stream, &synth(m * k, 0xA11CE))
+            .expect("A up");
+        let w = DtypedBuf::zeros(&ctx.stream, k * n, WeightDtype::Bf16).expect("W");
+        w.upload_f32(&ctx.stream, &synth(k * n, 0xB0B))
+            .expect("W up");
+        let c = DtypedBuf::zeros(&ctx.stream, m * n, WeightDtype::Bf16).expect("C");
+
+        let tc = |tile: TcTile| {
+            sgemm_bi_forward_tc_with_tile(
+                &ctx.stream,
+                &ctx.kernels,
+                &TcFwdOperands {
+                    y: TypedPtr {
+                        ptr: c.cached_ptr(),
+                        dtype: WeightDtype::Bf16,
+                    },
+                    x: TypedPtr {
+                        ptr: a.cached_ptr(),
+                        dtype: WeightDtype::Bf16,
+                    },
+                    w: TypedPtr {
+                        ptr: w.cached_ptr(),
+                        dtype: WeightDtype::Bf16,
+                    },
+                    bias_ptr: 0,
+                },
+                (m, k, n),
+                tile,
+            )
+            .expect("tc launch");
+        };
+        let time = |tile: TcTile| -> f64 {
+            tc(tile);
+            ctx.stream.synchronize().expect("sync");
+            let t0 = Instant::now();
+            for _ in 0..ITERS {
+                tc(tile);
+            }
+            ctx.stream.synchronize().expect("sync");
+            t0.elapsed().as_secs_f64() * 1e6 / ITERS as f64
+        };
+        let t128 = time(TcTile::Tile128);
+        let t64 = time(TcTile::Tile64);
+
+        // cuBLAS arms on the same shapes: PEDANTIC bf16 (the deterministic
+        // baseline everyone ships) and fast-TC bf16 + TF32 f32 (the
+        // non-deterministic speed ceilings).
+        let cublas_bf16 = |fast: bool| -> f64 {
+            ctx.set_batch_invariant(false);
+            ctx.set_fast_gemm(fast);
+            let run = || {
+                gpu_gemm_typed_forward_raw(
+                    &ctx,
+                    TypedPtr {
+                        ptr: c.cached_ptr(),
+                        dtype: WeightDtype::Bf16,
+                    },
+                    TypedPtr {
+                        ptr: a.cached_ptr(),
+                        dtype: WeightDtype::Bf16,
+                    },
+                    TypedPtr {
+                        ptr: w.cached_ptr(),
+                        dtype: WeightDtype::Bf16,
+                    },
+                    None,
+                    (m, k, n),
+                )
+                .expect("cublas route");
+            };
+            run();
+            ctx.stream.synchronize().expect("sync");
+            let t0 = Instant::now();
+            for _ in 0..ITERS {
+                run();
+            }
+            ctx.stream.synchronize().expect("sync");
+            ctx.set_fast_gemm(false);
+            ctx.set_batch_invariant(true);
+            t0.elapsed().as_secs_f64() * 1e6 / ITERS as f64
+        };
+        let t_ped = cublas_bf16(false);
+        let t_fast = cublas_bf16(true);
+
+        // TF32: f32 operands through the non-invariant f32 route (TF32
+        // math mode is the ctx default on this handle).
+        let af = GpuBuffer::from_cpu(&ctx.stream, &synth(m * k, 0xA11CE)).expect("Af");
+        let wf = GpuBuffer::from_cpu(&ctx.stream, &synth(k * n, 0xB0B)).expect("Wf");
+        let mut cf = GpuBuffer::zeros(&ctx.stream, m * n).expect("Cf");
+        let t_tf32 = {
+            ctx.set_batch_invariant(false);
+            let mut run = || {
+                gpu_sgemm_forward_raw(&ctx, &mut cf, &af, wf.raw_ptr(&ctx.stream), None, (m, k, n))
+                    .expect("tf32 route");
+            };
+            run();
+            ctx.stream.synchronize().expect("sync");
+            let t0 = Instant::now();
+            for _ in 0..ITERS {
+                run();
+            }
+            ctx.stream.synchronize().expect("sync");
+            ctx.set_batch_invariant(true);
+            t0.elapsed().as_secs_f64() * 1e6 / ITERS as f64
+        };
+        println!(
+            "{m:>5} {k:>5} {n:>5} | {t128:>11.2} {t64:>11.2} | ped {t_ped:>9.2} fast {t_fast:>9.2} tf32 {t_tf32:>9.2} | ours/ped {:.2}x ours/tf32 {:.2}x",
+            t128 / t_ped,
+            t128 / t_tf32
         );
     }
 }
