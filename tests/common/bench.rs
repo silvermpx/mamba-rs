@@ -84,6 +84,8 @@ pub fn hash_outputs(ctx: &GpuCtx, bufs: &[(&str, &GpuBuffer, usize)]) {
         let mut v = vec![0f32; *n];
         buf.download(&ctx.stream, &mut v).unwrap();
         ctx.stream.synchronize().unwrap();
-        eprintln!("HASH {name} {:016x}", fnv1a_f32(&v));
+        let h = fnv1a_f32(&v);
+        eprintln!("HASH {name} {h:016x}");
+        super::evidence::record_digest("hash_outputs", "", name, h);
     }
 }

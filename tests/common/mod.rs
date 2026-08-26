@@ -6,3 +6,4 @@
 
 pub mod bench;
 pub mod digest;
+pub mod evidence;

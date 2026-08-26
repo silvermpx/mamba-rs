@@ -28,6 +28,8 @@
 //!     -- --ignored --nocapture --test-threads=1
 #![cfg(feature = "cuda")]
 
+mod common;
+
 use mamba_rs::mamba_ssm::gpu::blas::{
     TypedPtr, gemm_bi_forward_raw, gpu_gemm_typed_forward_raw, gpu_sgemm_forward_raw,
 };
@@ -100,6 +102,16 @@ fn observed_boundaries(launch: &mut LaunchFn<'_>, k: usize, n: usize) -> Vec<usi
 }
 
 fn assert_contract(family: &str, k: usize, n: usize, declared: Invariance, observed: &[usize]) {
+    common::evidence::record(
+        "gemm_bi_invariance_matrix",
+        family,
+        &format!("K{k}N{n}"),
+        &observed
+            .iter()
+            .map(|m| m.to_string())
+            .collect::<Vec<_>>()
+            .join(","),
+    );
     match declared {
         Invariance::Strict => assert!(
             observed.is_empty(),

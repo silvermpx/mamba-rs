@@ -170,6 +170,14 @@ fn scan_trio_time_and_hash() {
         fnv(&ks_h),
         fnv(&cst_h)
     );
+    common::evidence::record_digest("m3_scan_micro_bench", "scan_trio", "y", fnv(&host));
+    common::evidence::record_digest("m3_scan_micro_bench", "scan_trio", "k_scaled", fnv(&ks_h));
+    common::evidence::record_digest(
+        "m3_scan_micro_bench",
+        "scan_trio",
+        "chunk_states",
+        fnv(&cst_h),
+    );
 
     let iters = 100usize;
     let time = |f: &dyn Fn()| -> f64 {
@@ -322,6 +330,13 @@ fn scan_trio_time_and_hash() {
         fnv(&sp_h),
         fnv(&fs_h)
     );
+    common::evidence::record_digest(
+        "m3_scan_micro_bench",
+        "state_passing",
+        "entering",
+        fnv(&sp_h),
+    );
+    common::evidence::record_digest("m3_scan_micro_bench", "state_passing", "final", fnv(&fs_h));
     println!("state_pass  {:8.1} us", time(&state_passing));
 }
 

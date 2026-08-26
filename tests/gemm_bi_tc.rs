@@ -1178,13 +1178,13 @@ fn step0_tc_attrs_and_goldens() {
             let dwh = dw.to_cpu(&t.ctx.stream).unwrap();
             let mut dxh = vec![0.0f32; m * k_];
             dxt.download_f32(&t.ctx.stream, &mut dxh).unwrap();
-            println!(
-                "[{:?} M{m} K{k_} N{n}] fwd={:016x} dW={:016x} dX={:016x}",
-                dt,
-                h_fwd,
-                fnv(dwh.iter().map(|v| v.to_bits())),
-                fnv(dxh.iter().map(|v| v.to_bits())),
-            );
+            let h_dw = fnv(dwh.iter().map(|v| v.to_bits()));
+            let h_dx = fnv(dxh.iter().map(|v| v.to_bits()));
+            println!("[{dt:?} M{m} K{k_} N{n}] fwd={h_fwd:016x} dW={h_dw:016x} dX={h_dx:016x}");
+            let cell = format!("{dt:?}.M{m}K{k_}N{n}");
+            common::evidence::record_digest("gemm_bi_tc", "goldens.fwd", &cell, h_fwd);
+            common::evidence::record_digest("gemm_bi_tc", "goldens.dW", &cell, h_dw);
+            common::evidence::record_digest("gemm_bi_tc", "goldens.dX", &cell, h_dx);
         }
     }
 

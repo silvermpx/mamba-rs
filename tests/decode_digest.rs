@@ -95,11 +95,15 @@ fn decode_run_digest() {
             .download(&engine.ctx().stream, &mut ssm_v)
             .unwrap();
         engine.ctx().stream.synchronize().unwrap();
+        let h_conv = common::bench::fnv1a_f32(&conv_v);
+        let h_ssm = common::bench::fnv1a_f32(&ssm_v);
         eprintln!(
             "DECODE-DIGEST graph={graph} steps=16 d384 L24: out_chain={chained:016x} \
-             conv={:016x} ssm={:016x}",
-            common::bench::fnv1a_f32(&conv_v),
-            common::bench::fnv1a_f32(&ssm_v)
+             conv={h_conv:016x} ssm={h_ssm:016x}"
         );
+        let arm = if graph { "graph" } else { "eager" };
+        common::evidence::record_digest("decode_digest", arm, "out_chain", chained);
+        common::evidence::record_digest("decode_digest", arm, "conv", h_conv);
+        common::evidence::record_digest("decode_digest", arm, "ssm", h_ssm);
     }
 }
