@@ -1,4 +1,4 @@
-# Deterministic GEMM Benchmarks (0.4.2)
+# Deterministic GEMM Benchmarks (0.6.7)
 
 All numbers: RTX 6000 Ada (sm_89, 142 SMs), CUDA 13.2, driver 595.45,
 `--release`, `--test-threads=1`, quiet GPU. The GEMM layer is shared by
@@ -9,7 +9,8 @@ Mamba SSM and Mamba-3 SISO — these results apply to both architectures.
 | flag | tier | contract |
 |---|---|---|
 | (off) | cuBLAS | f32 → TF32 tensor cores; bf16/f16 → GemmEx `COMPUTE_32F_PEDANTIC` (CUDA cores, f32 accumulate). Run-to-run stable on one machine, NOT batch-invariant, no stability across cuBLAS versions. |
-| `MAMBA_RS_BATCH_INVARIANT=1` | scalar deterministic | custom fixed-reduction-order kernels (`kernels/sgemm_bi.cu`). Training bit-identical across runs on every dtype; per-bucket batch invariance (same dispatch bucket → row 0 bit-identical across M); inference decode strictly all-M invariant via `matvec_bi` (KL ≈ 1e-12). bf16/f16 outputs are bit-identical to "upcast → f32 kernel → RNE downcast". |
+| `MAMBA_RS_BATCH_INVARIANT=1` | scalar deterministic | custom fixed-reduction-order kernels. Training bit-identical across runs on every dtype; inference decode strictly all-M invariant via `matvec_bi` (KL ≈ 1e-12). bf16/f16 outputs are bit-identical to "upcast → f32 kernel → RNE downcast". Which family serves the forward is selectable — see the row below. |
+| + `MAMBA_RS_BI_GEMM_FAMILY=triad\|fixed` | family selector | `triad` (`kernels/sgemm_bi.cu`, default): the multi-tile dispatcher, all three operand layouts, per-bucket batch invariance (same dispatch bucket → row 0 bit-identical across M). `fixed` (`kernels/gemm_batch_invariant.cu`): one 64×64×32 tile, `SPLIT_K=1`, forward-only, batch-invariant BY CONSTRUCTION (no buckets exist to cross). A backward requires `triad`. The family is part of `ctx.gemm_route()`, so a flip after a CUDA-graph capture is refused at replay. |
 | + `MAMBA_RS_BI_TENSOR_CORES=1` | tensor-core deterministic | `mma.sync.m16n8k16`, f32 accumulators, no atomics/splits. OWN numeric contract (TC reduction tree ≠ scalar FMA chain) — but runs are bit-identical to each other (incl. CUDA Graph capture/replay) and the forward is STRICTLY batch-invariant across all M. Two kernel families — 128×128 tiles (256 thr, dynamic smem) and 64×64 tiles (128 thr, static smem) — that are BIT-IDENTICAL per output element (same ascending BK=64 reduction slabs, same mma chain, same tail zero-fill), so the shape-only tile routing never changes output bits. |
 
 Accuracy cross-checks: bf16 scalar-tier training trajectory vs cuBLAS
@@ -198,3 +199,29 @@ pinned PEDANTIC; the speed lever for bf16 training remains the
 batch-invariant SGEMM-BI tier (fp32 fixed-order accumulation, no cuBLAS)
 and its occupancy work. Full artifact: `cublas_probe_2026-08-22.tsv`
 (box `/tmp/cublas_probe.tsv`).
+
+## Family comparison at a prefill shape (f32)
+
+`tests/prism_gemm_tier_bench.rs::prism_shapes_cublas_vs_sgemm_bi_vs_gemm_bi`
+
+Vision-classifier projections, f32, M = 4621 rows per page (a batched row
+shows whether a dispatch bucket boundary is ever crossed). RTX 6000 Ada.
+
+| GEMM | M | cuBLAS | `triad` | `fixed` |
+|---|---:|---:|---:|---:|
+| input_proj K=1024 N=384 | 4 621 | 34.1 µs | 157.3 µs (4.61×) | 140.9 µs (4.13×) |
+| input_proj K=1024 N=384 | 18 484 | 152.7 µs | 520.0 µs (3.41×) | 509.0 µs (3.33×) |
+| in_proj K=384 N=1928 | 4 621 | 78.4 µs | 219.4 µs (2.80×) | 218.6 µs (2.79×) |
+| in_proj K=384 N=1928 | 18 484 | 287.8 µs | 780.8 µs (2.71×) | 967.9 µs (3.36×) |
+| out_proj K=768 N=384 | 4 621 | 26.8 µs | 119.6 µs (4.46×) | 103.9 µs (3.88×) |
+| out_proj K=768 N=384 | 18 484 | 104.3 µs | 387.0 µs (3.71×) | 335.4 µs (3.22×) |
+
+The two families are close: `fixed` leads on input_proj and out_proj,
+`triad` on the wide-N in_proj at the batched row. Both differ from cuBLAS
+by the same 1.0e-4–1.8e-4 (they agree with each other more closely than
+either agrees with cuBLAS), and reruns are bit-identical.
+
+These are isolated GEMM timings. End to end on the same model the
+deterministic route costs +30% per page (18.6 → 24.2 ms), because the
+scan, not the projections, dominates that architecture — the ratio a
+caller should plan against is the end-to-end one, not the GEMM one.

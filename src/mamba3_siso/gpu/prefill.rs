@@ -743,7 +743,7 @@ impl Mamba3Prefill {
 /// as a hard error.
 pub struct Mamba3PrefillGraph {
     graph: cudarc::driver::CudaGraph,
-    flags_at_capture: (bool, bool, bool),
+    flags_at_capture: crate::mamba_ssm::gpu::context::GemmRoute,
     input_ptr: CUptr,
     ssm_ptr: CUptr,
     k_ptr: CUptr,
@@ -762,7 +762,7 @@ impl Mamba3PrefillGraph {
         last_hidden: &mut GpuBuffer,
     ) -> Result<Self, String> {
         run.ctx.presize_bi_scratch()?;
-        let flags_at_capture = run.ctx.gemm_flags();
+        let flags_at_capture = run.ctx.gemm_route();
         let input_ptr = run.mamba_input.cached_ptr();
         let ssm_ptr = states.ssm.cached_ptr();
         let k_ptr = states.k.cached_ptr();
@@ -801,13 +801,13 @@ impl Mamba3PrefillGraph {
         states: &GpuMamba3StateBufs<'_>,
         last_hidden: &GpuBuffer,
     ) -> Result<(), String> {
-        if ctx.gemm_flags() != self.flags_at_capture {
+        if ctx.gemm_route() != self.flags_at_capture {
             return Err(format!(
                 "prefill graph replay refused: GEMM-tier flags changed since capture \
                  (captured {:?}, now {:?}) — a replay would silently run the old \
                  numeric route",
                 self.flags_at_capture,
-                ctx.gemm_flags()
+                ctx.gemm_route()
             ));
         }
         if mamba_input.cached_ptr() != self.input_ptr
@@ -838,7 +838,7 @@ impl Mamba3PrefillGraph {
 /// the host.
 pub struct Mamba3PrefillPooledGraph {
     graph: cudarc::driver::CudaGraph,
-    flags_at_capture: (bool, bool, bool),
+    flags_at_capture: crate::mamba_ssm::gpu::context::GemmRoute,
     input_ptr: CUptr,
     ssm_ptr: CUptr,
     k_ptr: CUptr,
@@ -866,7 +866,7 @@ impl Mamba3PrefillPooledGraph {
             );
         }
         run.ctx.presize_bi_scratch()?;
-        let flags_at_capture = run.ctx.gemm_flags();
+        let flags_at_capture = run.ctx.gemm_route();
         let input_ptr = run.mamba_input.cached_ptr();
         let ssm_ptr = states.ssm.cached_ptr();
         let k_ptr = states.k.cached_ptr();
@@ -909,12 +909,12 @@ impl Mamba3PrefillPooledGraph {
         states: &GpuMamba3StateBufs<'_>,
         pooled_sum: &GpuBuffer,
     ) -> Result<(), String> {
-        if ctx.gemm_flags() != self.flags_at_capture {
+        if ctx.gemm_route() != self.flags_at_capture {
             return Err(format!(
                 "m3 pooled prefill graph replay refused: GEMM-tier flags changed \
                  since capture (captured {:?}, now {:?})",
                 self.flags_at_capture,
-                ctx.gemm_flags()
+                ctx.gemm_route()
             ));
         }
         if mamba_input.cached_ptr() != self.input_ptr

@@ -1,4 +1,6 @@
-// Batch-invariant bf16/f16/f32 GEMM for Mamba inference + training.
+// Batch-invariant bf16/f16/f32 GEMM — the single FIXED-TILE family
+// (BiGemmFamily::Fixed). Forward-only NN; the triad in sgemm_bi.cu
+// carries the backward layouts.
 //
 // Problem: cuBLAS `cublasGemmEx` selects different algorithms per M
 // (split-K, tile shape, reduction order). `Y = X @ W` at M=1 vs M=20

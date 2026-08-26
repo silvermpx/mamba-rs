@@ -185,7 +185,7 @@ pub struct GpuMambaTrainingStepGraph {
     // the GEMM-tier flags at capture time.
     // A post-capture flip cannot change the recorded kernels; replay
     // asserts the route identity instead of silently ignoring the flip.
-    captured_gemm_flags: (bool, bool, bool),
+    captured_gemm_flags: crate::mamba_ssm::gpu::context::GemmRoute,
 }
 
 impl GpuMambaTrainingStepGraph {
@@ -354,7 +354,7 @@ impl GpuMambaTrainingStepGraph {
             captured_bi_upcast_ptrs: snap_bi_upcast,
             captured_gemm_flags: {
                 ctx.note_graph_capture();
-                ctx.gemm_flags()
+                ctx.gemm_route()
             },
         })
     }
@@ -463,7 +463,7 @@ impl GpuMambaTrainingStepGraph {
              graph was captured — re-capture or presize for the larger shape)"
         );
         assert_eq!(
-            ctx.gemm_flags(),
+            ctx.gemm_route(),
             self.captured_gemm_flags,
             "training_graph replay: GEMM-tier flags changed since capture \
              (batch_invariant, bi_tensor_cores, fast_gemm) - the captured \
@@ -543,14 +543,14 @@ pub struct GpuMambaF32TrainingStepGraph {
     captured_weights_norm_f_ptr: u64,
     // G1: GEMM-tier flags at capture; replay() predates a ctx parameter, so
     // the trainer asserts against this getter at its call site.
-    captured_gemm_flags: (bool, bool, bool),
+    captured_gemm_flags: crate::mamba_ssm::gpu::context::GemmRoute,
 }
 
 impl GpuMambaF32TrainingStepGraph {
     /// GEMM-tier flags (batch_invariant, bi_tensor_cores, fast_gemm) at
-    /// capture time. Assert equality with `ctx.gemm_flags()` before every
+    /// capture time. Assert equality with `ctx.gemm_route()` before every
     /// replay - the captured kernels cannot follow a post-capture flip.
-    pub fn captured_gemm_flags(&self) -> (bool, bool, bool) {
+    pub fn captured_gemm_flags(&self) -> crate::mamba_ssm::gpu::context::GemmRoute {
         self.captured_gemm_flags
     }
 
@@ -640,7 +640,7 @@ impl GpuMambaF32TrainingStepGraph {
             captured_weights_norm_f_ptr: snap_norm_f,
             captured_gemm_flags: {
                 ctx.note_graph_capture();
-                ctx.gemm_flags()
+                ctx.gemm_route()
             },
         })
     }

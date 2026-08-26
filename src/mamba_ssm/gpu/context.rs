@@ -9,6 +9,40 @@ use super::kernels::MambaKernels;
 use crate::config::MambaConfig;
 use std::cell::RefCell;
 use std::sync::Arc;
+/// Which batch-invariant GEMM family serves the forward while
+/// [`GpuCtx::batch_invariant`] is on. Both are deterministic; they are
+/// named for the STRUCTURE that produces their differing guarantee, not
+/// for a role (either can serve a forward) and not for a tensor-core
+/// tier (both instantiate on Tensor Cores for bf16/f16 and on CUDA cores
+/// for f32).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum BiGemmFamily {
+    /// The multi-tile dispatcher (kernels/sgemm_bi.cu) - the default.
+    /// Carries the full triad (NN + TN + NT), so it is the only family
+    /// that can serve a backward, and it is the fastest deterministic
+    /// path. It picks a kernel by shape (ultra-thin M<32, narrow-N,
+    /// GEMV, split-K M<=1024, Slim/Big above), so its invariance holds
+    /// across every M INSIDE one bucket; crossing a boundary changes the
+    /// reduction association deterministically.
+    #[default]
+    Triad,
+    /// The single fixed tile (kernels/gemm_batch_invariant.cu):
+    /// forward-only NN, batch-invariant BY CONSTRUCTION. One 64x64x32
+    /// tile, SPLIT_K=1, and a K-reduction for `C[i,j]` that reads only
+    /// `A[i,:]` and `B[:,j]` - there are no buckets to cross, so the
+    /// output cannot depend on how many rows share the launch. bf16/f16
+    /// instantiate on Tensor Cores; f32 runs the CUDA-core FMA tile (Ada
+    /// Tensor Cores accept no f32 operands), the same hardware path
+    /// cuBLAS takes for f32.
+    Fixed,
+}
+
+
+/// The full numeric-route identity of a GEMM: the three tier flags
+/// (`batch_invariant`, `bi_tensor_cores`, `fast_gemm`) plus the
+/// batch-invariant family. Capture guards snapshot this and refuse a
+/// replay whose live route differs.
+pub type GemmRoute = (bool, bool, bool, BiGemmFamily);
 
 /// GPU execution context — holds everything needed for kernel launches.
 ///
@@ -36,6 +70,11 @@ pub struct GpuCtx {
     /// batch-invariant across all M. Effective only together with
     /// `batch_invariant`. Env: MAMBA_RS_BI_TENSOR_CORES.
     bi_tensor_cores: std::cell::Cell<bool>,
+    /// Which deterministic family serves the forward while
+    /// `batch_invariant` is on. Env: MAMBA_RS_BI_GEMM_FAMILY
+    /// (`warptile` | `wmma`). Part of the numeric route, so it rides
+    /// [`GpuCtx::gemm_route`] into every capture identity.
+    bi_gemm_family: std::cell::Cell<BiGemmFamily>,
     /// Opt-in non-PEDANTIC cuBLAS compute for the typed (bf16/f16) GEMMs:
     /// `CUBLAS_COMPUTE_32F` lets cuBLAS pick BMMA/HMMA tensor-core kernels
     /// with f32 accumulate. SEPARATE numeric contract from the PEDANTIC
@@ -132,6 +171,21 @@ impl GpuCtx {
         let batch_invariant = tier_flag("MAMBA_RS_BATCH_INVARIANT")?;
         let bi_tensor_cores = tier_flag("MAMBA_RS_BI_TENSOR_CORES")?;
         let fast_gemm = tier_flag("MAMBA_RS_FAST_GEMM")?;
+        // Same strict-parse law as the tier flags: an unrecognized value
+        // fails rather than silently meaning the default family.
+        let bi_gemm_family = match std::env::var("MAMBA_RS_BI_GEMM_FAMILY") {
+            Err(_) => BiGemmFamily::Triad,
+            Ok(v) => match v.trim().to_ascii_lowercase().as_str() {
+                "" | "triad" | "sgemm_bi" => BiGemmFamily::Triad,
+                "fixed" | "gemm_bi" => BiGemmFamily::Fixed,
+                other => {
+                    return Err(format!(
+                        "MAMBA_RS_BI_GEMM_FAMILY={other:?} is not a recognized family \
+                         (use fixed or triad)"
+                    ));
+                }
+            },
+        };
         // The TC tier flag is only read inside bi_sgemm_*_typed, which is
         // reachable only under batch_invariant() - TC alone is a silent
         // no-op that has already cost a day of follow-up readings.
@@ -153,6 +207,7 @@ impl GpuCtx {
             half_staging_bytes: RefCell::new(0),
             batch_invariant: std::cell::Cell::new(batch_invariant),
             bi_tensor_cores: std::cell::Cell::new(bi_tensor_cores),
+            bi_gemm_family: std::cell::Cell::new(bi_gemm_family),
             fast_gemm: std::cell::Cell::new(fast_gemm),
             tf32: std::cell::Cell::new(true),
             state_cap,
@@ -320,6 +375,24 @@ impl GpuCtx {
         self.batch_invariant.get()
     }
 
+    /// Choose which deterministic GEMM family serves the forward while
+    /// `batch_invariant` is on (see [`BiGemmFamily`]). No effect while
+    /// `batch_invariant` is off - cuBLAS serves.
+    pub fn set_bi_gemm_family(&self, family: BiGemmFamily) {
+        if self.graphs_captured.get() > 0 {
+            eprintln!(
+                "mamba-rs WARNING: GEMM-tier flag flipped after a graph capture; \
+                 captured kernels keep the old tier and replay will assert (G1)"
+            );
+        }
+        self.bi_gemm_family.set(family);
+    }
+
+    /// The deterministic family currently selected.
+    pub fn bi_gemm_family(&self) -> BiGemmFamily {
+        self.bi_gemm_family.get()
+    }
+
     /// Enable or disable the tensor-core tier of the batch-invariant typed
     /// GEMMs (stage 5). Different numeric contract than the scalar triad —
     /// deterministic and batch-invariant, but not bit-equal to it.
@@ -370,6 +443,15 @@ impl GpuCtx {
             self.bi_tensor_cores.get(),
             self.fast_gemm.get(),
         )
+    }
+
+    /// The FULL numeric-route identity: the three tier flags plus the
+    /// deterministic family. Capture guards compare this, not
+    /// [`Self::gemm_flags`] - a family flip changes which kernel runs and
+    /// must invalidate a captured graph exactly like a tier flip.
+    pub fn gemm_route(&self) -> GemmRoute {
+        let (bi, tc, fast) = self.gemm_flags();
+        (bi, tc, fast, self.bi_gemm_family.get())
     }
 
     /// Returns `true` if the tensor-core bi tier is enabled.

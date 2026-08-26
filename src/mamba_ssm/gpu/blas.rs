@@ -37,18 +37,43 @@ pub fn gpu_sgemm_forward_raw(
 ) -> Result<(), String> {
     let (batch, n_in, n_out) = dims;
 
-    // Opt-in deterministic path: the batch-invariant SGEMM dispatcher
-    // (bias is fused into its kernels — no separate broadcast launch).
+    // Opt-in deterministic path, family-selected (`set_bi_gemm_family`).
     if ctx.batch_invariant() {
-        return super::sgemm_bi::sgemm_bi_forward(
-            &ctx.stream,
-            &ctx.kernels,
-            y,
-            x,
-            w_ptr,
-            bias_ptr.unwrap_or(0),
-            (batch, n_in, n_out),
-        );
+        return match ctx.bi_gemm_family() {
+            // The triad dispatcher; bias is fused into its kernels (no
+            // separate broadcast launch).
+            super::context::BiGemmFamily::Triad => super::sgemm_bi::sgemm_bi_forward(
+                &ctx.stream,
+                &ctx.kernels,
+                y,
+                x,
+                w_ptr,
+                bias_ptr.unwrap_or(0),
+                (batch, n_in, n_out),
+            ),
+            // Fixed-tile, invariant by construction. f32 operands take the
+            // CUDA-core FMA instantiation.
+            super::context::BiGemmFamily::Fixed => {
+                let y_ptr = {
+                    use cudarc::driver::DevicePtr;
+                    let (p, _r) = y.inner().device_ptr(&ctx.stream);
+                    p
+                };
+                let x_ptr = {
+                    use cudarc::driver::DevicePtr;
+                    let (p, _r) = x.inner().device_ptr(&ctx.stream);
+                    p
+                };
+                gemm_bi_forward_raw(
+                    ctx,
+                    TypedPtr { ptr: y_ptr, dtype: WeightDtype::F32 },
+                    TypedPtr { ptr: x_ptr, dtype: WeightDtype::F32 },
+                    TypedPtr { ptr: w_ptr, dtype: WeightDtype::F32 },
+                    bias_ptr,
+                    (batch, n_in, n_out),
+                )
+            }
+        };
     }
 
     let beta = if let Some(b_ptr) = bias_ptr {
@@ -980,6 +1005,49 @@ fn launch_bi_gemm(
     Ok(())
 }
 
+/// Direct entry to the WMMA batch-invariant GEMM
+/// (`kernels/gemm_batch_invariant.cu`, `gemm_bi_*`): fixed 64x64x32 tile,
+/// SPLIT_K=1, f32 accumulators — batch-invariant BY CONSTRUCTION, with no
+/// dispatch buckets at all (unlike `sgemm_bi`, whose invariance holds
+/// within an M bucket). Forward-only NN, f32/bf16/f16.
+///
+/// Deliberately NOT on any default dispatch path (see the note in
+/// `gpu_gemm_typed_forward_raw`); this entry exists so the kernel can be
+/// BENCHMARKED and selected explicitly by a caller that wants the
+/// strongest invariance, rather than being reachable only through the
+/// compiler-liveness `let _ = pick_bi_gemm(..)`.
+pub fn gemm_bi_forward_raw(
+    ctx: &GpuCtx,
+    c: TypedPtr,
+    x: TypedPtr,
+    w: TypedPtr,
+    bias_ptr: Option<cudarc::driver::sys::CUdeviceptr>,
+    dims: (usize, usize, usize),
+) -> Result<(), String> {
+    let (batch, n_in, n_out) = dims;
+    let Some(kernel) = pick_bi_gemm(ctx, x.dtype, w.dtype, c.dtype) else {
+        return Err(format!(
+            "gemm_bi: no kernel for operand dtypes a={:?} b={:?} c={:?}",
+            x.dtype, w.dtype, c.dtype
+        ));
+    };
+    launch_bi_gemm(
+        ctx,
+        kernel,
+        BiGemmArgs {
+            c: c.ptr,
+            a: x.ptr,
+            b: w.ptr,
+            bias: bias_ptr.unwrap_or(0),
+            alpha: 1.0,
+            beta: 0.0,
+            m: batch as i32,
+            n: n_out as i32,
+            k: n_in as i32,
+        },
+    )
+}
+
 /// Pick the M=1 matvec kernel — much faster than gemm_bi at M=1 because
 /// the GEMM tile wastes 98% of smem bandwidth on zero-padding at M=1.
 fn pick_bi_matvec(
@@ -1085,6 +1153,13 @@ pub fn gpu_gemm_typed_forward_raw(
     // Mixed a/b dtype combos have NO matvec_bi kernel (the a==b guard in
     // pick_bi_matvec): under the batch-invariant contract they FAIL LOUD
     // below instead of silently taking non-deterministic cuBLAS.
+    // Family selector: the fixed-tile family serves the typed forward
+    // whole (its Tensor-Core instantiation covers bf16/f16), so it is
+    // tried before the triad's buckets.
+    if ctx.batch_invariant() && ctx.bi_gemm_family() == super::context::BiGemmFamily::Fixed {
+        return gemm_bi_forward_raw(ctx, c, x, w, bias_ptr, dims);
+    }
+
     if ctx.batch_invariant()
         && c.dtype != WeightDtype::F32
         && c.dtype == x.dtype

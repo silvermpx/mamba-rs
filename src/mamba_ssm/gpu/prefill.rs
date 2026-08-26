@@ -298,7 +298,7 @@ pub fn gpu_forward_inference_prefill_pooled_sum_from_raw<W: MambaWeightsView>(
 ///   kernels from another numeric route.
 pub struct PrefillPooledGraph {
     graph: cudarc::driver::CudaGraph,
-    flags_at_capture: (bool, bool, bool),
+    flags_at_capture: crate::mamba_ssm::gpu::context::GemmRoute,
 }
 
 impl PrefillPooledGraph {
@@ -313,7 +313,7 @@ impl PrefillPooledGraph {
         // Lazy BI scratch must exist BEFORE the capture (see
         // GpuCtx::presize_bi_scratch).
         ctx.presize_bi_scratch()?;
-        let flags_at_capture = ctx.gemm_flags();
+        let flags_at_capture = ctx.gemm_route();
         let PrefillRawInputs {
             input_flat,
             weights,
@@ -345,7 +345,7 @@ impl PrefillPooledGraph {
     /// capture-time `pooled_sum` buffer after (both transfers stay OUTSIDE
     /// the graph).
     pub fn launch(&self, ctx: &GpuCtx) -> Result<(), String> {
-        let now = ctx.gemm_flags();
+        let now = ctx.gemm_route();
         if now != self.flags_at_capture {
             return Err(format!(
                 "PrefillPooledGraph: GEMM flags changed since capture \

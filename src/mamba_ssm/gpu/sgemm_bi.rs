@@ -1,4 +1,9 @@
-//! Deterministic batch-invariant SGEMM dispatcher (training triad).
+//! Deterministic batch-invariant GEMM dispatcher — the TRIAD family
+//! (`BiGemmFamily::Triad`).
+//!
+//! Covers f32, bf16 and f16, on CUDA cores and on Tensor Cores; the
+//! `sgemm` in the module and kernel names is historical BLAS notation
+//! (S = single precision) that no longer describes the coverage.
 //!
 //! Ported from SQV-RS `sqv_uaac` (`blas_gpu.rs` + `kernels/sgemm_bi.cu`,
 //! siboehm warptiling lineage). Three entry points used when
@@ -8,11 +13,13 @@
 //!   - [`sgemm_bi_backward_dw`]  TN: `dW += X^T @ dY` (accumulated)
 //!   - [`sgemm_bi_backward_dx`]  NT: `dX = dY @ W^T`
 //!
-//! Dtypes: the f32 triad is the base; the typed (bf16/f16) entry points
-//! further down route homogeneous typed operand triples through the
-//! typed kernel variants — typed I/O, f32 accumulation, dW/bias always
-//! f32 — bit-identical to upcasting the inputs and running the f32
-//! kernels.
+//! Dtypes: the f32 entry points are the base contract; the typed
+//! (bf16/f16) entry points further down route homogeneous typed operand
+//! triples through the typed kernel variants — typed I/O, f32
+//! accumulation, dW/bias always f32 — bit-identical to upcasting the
+//! inputs and running the f32 kernels. The `*_tc` entry points are a
+//! separate numeric contract (mma.sync accumulation): deterministic and
+//! batch-invariant, not bit-equal to the scalar variants.
 //!
 //! Every shape routes through a fixed-tile custom kernel (Big / Slim /
 //! narrow / GEMV / split-K with deterministic tree reduce) — never cuBLAS.

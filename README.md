@@ -17,14 +17,26 @@ Pure Rust + CUDA. Kernels compile at runtime via NVRTC.
   Compute stays f32 (upcast-in-kernel, f32 accumulators) regardless of
   storage dtype.
 - **Deterministic inference & training (opt-in)** — `MAMBA_RS_BATCH_INVARIANT=1`
-  / `ctx.set_batch_invariant(true)` routes the TRAINING GEMM triads
-  (forward, dW, dX) and the M<128 typed decode matvec through custom
-  deterministic kernels (`kernels/sgemm_bi.cu`, `gemm_batch_invariant.cu`):
+  / `ctx.set_batch_invariant(true)` routes the forward, dW and dX GEMMs and
+  the M<128 typed decode matvec through custom deterministic kernels:
   inference logits are bit-identical across batch sizes (KL ≈ 1e-11), and
   f32 / bf16 / f16 training is bit-identical across runs. Default path is
-  cuBLAS for maximum throughput. Scope note: the tied LM heads, the
-  no-context `*_blas` twins and the M3 engine stay on cuBLAS regardless of
-  the flag — see "numeric routes" in the architecture docs.
+  cuBLAS for maximum throughput. Scope note: the tied LM heads and the
+  no-context `*_blas` twins take no context and stay on cuBLAS regardless
+  of the flag; every path that carries a `GpuCtx` — including the M3
+  engine, prefill and inference alike — follows it.
+- **Two batch-invariant families, selectable** — `ctx.set_bi_gemm_family()`
+  / `MAMBA_RS_BI_GEMM_FAMILY=triad|fixed` picks which family serves the
+  forward while the flag above is on. `Triad` (`kernels/sgemm_bi.cu`,
+  default) is the multi-tile dispatcher: it carries all three operand
+  layouts, so it is the only family that can serve a backward, and its
+  invariance holds across every M inside one dispatch bucket. `Fixed`
+  (`kernels/gemm_batch_invariant.cu`) is one 64×64×32 tile with
+  `SPLIT_K=1`, forward-only, batch-invariant BY CONSTRUCTION — the
+  K-reduction for `C[i,j]` reads only `A[i,:]` and `B[:,j]`, so no bucket
+  boundary exists to cross. The family is part of the numeric route
+  (`ctx.gemm_route()`) and a flip after a CUDA-graph capture is refused at
+  replay like any tier flip.
 - **Tensor-core deterministic tier (opt-in)** — `MAMBA_RS_BI_TENSOR_CORES=1`
   / `ctx.set_bi_tensor_cores(true)` on top of the flag above swaps the
   training GEMM triad for mma.sync tensor-core kernels: still fully
@@ -327,6 +339,29 @@ batch-invariant path keeps `b=1` ≡ `b=N` per slot (KL ≈ 1e-11).
 Enable the batch-invariant path when cross-batch bit-identity matters
 (KL ≈ 1e-11 between `b=1` and `b=N` per slot): set
 `MAMBA_RS_BATCH_INVARIANT=1` or call `ctx.set_batch_invariant(true)`.
+
+### Choosing a batch-invariant family
+
+```rust
+ctx.set_batch_invariant(true);                       // deterministic forward
+ctx.set_bi_gemm_family(BiGemmFamily::Fixed);         // or ::Triad (default)
+```
+
+| | `Triad` (`sgemm_bi.cu`) | `Fixed` (`gemm_batch_invariant.cu`) |
+|---|---|---|
+| layouts | NN + TN + NT | NN only |
+| invariance | across M inside one dispatch bucket | by construction, no buckets |
+| structure | shape-routed tiles (ultra-thin, narrow-N, GEMV, split-K, Slim/Big) | one 64×64×32 tile, `SPLIT_K=1` |
+| dtypes | f32 / bf16 / f16, CUDA cores and Tensor Cores | f32 / bf16 / f16; Tensor Cores for bf16/f16, CUDA-core FMA tile for f32 |
+
+A backward requires `Triad`. For a forward-only workload the two are
+close in cost: at a vision-classifier prefill shape (f32, M = 4621 per
+page) measured on an RTX 6000 Ada, both run 2.7–4.6× a cuBLAS f32
+baseline at the GEMM level, with `Fixed` ahead on two of three
+projections and `Triad` ahead on the third; end to end the whole page
+costs +30% against cuBLAS, because the scan, not the GEMMs, dominates
+that model. Both families differ from cuBLAS by the same 1.0e-4–1.8e-4,
+and reruns are bit-identical.
 
 ### Deterministic training — cost per step (RTX 6000 Ada, `MambaTrainer`)
 

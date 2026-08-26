@@ -1,13 +1,24 @@
-// Batch-invariant deterministic SGEMM — training kernels.
+// Batch-invariant deterministic GEMM — the multi-tile triad.
+//
+// The SGEMM in the file name is historical BLAS notation (S = single
+// precision) and no longer describes the coverage: this file carries
+// f32, bf16 and f16, on CUDA cores and on Tensor Cores. It is named for
+// its STRUCTURE elsewhere in the API — the triad, i.e. the family that
+// carries all three operand layouts and therefore the only one that can
+// serve a backward. (See BiGemmFamily::Triad.)
 //
 // Based on siboehm's warptiling kernel (93.7% cuBLAS on A6000).
 // Adapted for NVRTC compilation (no templates, no includes).
 //
-// Dtypes: f32 is the base contract; bf16/f16 variants (typed section at
-// the end of this file) share the same kernel structure with typed I/O
-// and f32 accumulation throughout — a typed kernel is bit-identical to
-// upcasting its inputs and running the f32 kernel. dW and bias stay f32
-// in every dtype (master-gradient invariant).
+// Dtypes: the f32 kernels are the base contract; the bf16/f16 variants
+// (typed section at the end of this file) share the same kernel
+// structure with typed I/O and f32 accumulation throughout — a typed
+// kernel is bit-identical to upcasting its inputs and running the f32
+// kernel. The Tensor-Core variants further down are a SEPARATE numeric
+// contract (mma.sync accumulation, not the scalar __fmaf_rn chain):
+// deterministic and batch-invariant, but not bit-equal to the scalar
+// triad. dW and bias stay f32 in every dtype (master-gradient
+// invariant).
 //
 // Three operand layouts for training:
 //   NN (forward):     C[M,N]  = alpha * A[M,K] @ B[K,N] + beta*C + bias

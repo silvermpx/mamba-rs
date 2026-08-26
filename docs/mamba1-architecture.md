@@ -106,10 +106,15 @@ GEMM tiers, per `GpuCtx` flags:
 - default: cuBLAS (TF32 for f32 sgemm, PEDANTIC f32-accumulate for typed);
 - `set_fast_gemm(true)`: typed GEMMs use non-PEDANTIC `CUBLAS_COMPUTE_32F`
   (tensor-core cuBLAS kernels; opt-in, unmeasured — see changelog);
-- `set_batch_invariant(true)`: training triads + typed decode matvec on
+- `set_batch_invariant(true)`: forward/dW/dX and the typed decode matvec on
   custom fixed-order kernels (deterministic, batch-invariant);
+- `set_bi_gemm_family(..)`: which family serves the forward under that flag
+  — `Triad` (`sgemm_bi.cu`, default; all three layouts, per-bucket
+  invariance) or `Fixed` (`gemm_batch_invariant.cu`; forward-only, one
+  64x64x32 tile, invariant by construction);
 - + `set_bi_tensor_cores(true)`: the mma.sync tier of the same contract.
 
-Graph captures snapshot the flags and replays assert them; the split
-forward/backward cycle refuses a mid-cycle flip. Checkpoint provenance:
+Graph captures snapshot the full route (`ctx.gemm_route()` — the three
+flags plus the family) and replays assert it; the split forward/backward
+cycle refuses a mid-cycle flip. Checkpoint provenance:
 `serialize` carries `scan_mode` + `rms_norm_eps` from 0.5.2.

@@ -1,5 +1,63 @@
 # Changelog
 
+## 0.6.7 (2026-08-26)
+
+Makes the second batch-invariant GEMM family reachable and puts the
+choice in the public API. No default behaviour change: the default
+family is the one that already served, so forward and backward outputs
+are bit-identical to 0.6.6 unless a caller selects otherwise.
+
+### Added
+
+- `GpuCtx::set_bi_gemm_family` / `bi_gemm_family` and
+  `MAMBA_RS_BI_GEMM_FAMILY=triad|fixed`: which batch-invariant family
+  serves the forward while `batch_invariant` is on. `Triad`
+  (`kernels/sgemm_bi.cu`, the default) is the multi-tile dispatcher -
+  it carries all three operand layouts, so it is the only family that
+  can serve a backward, and its invariance holds across every M inside
+  one dispatch bucket. `Fixed` (`kernels/gemm_batch_invariant.cu`) is
+  one 64x64x32 tile with `SPLIT_K=1`, forward-only, batch-invariant by
+  construction: the K-reduction for `C[i,j]` reads only `A[i,:]` and
+  `B[:,j]`, so no bucket boundary exists to cross. The fixed-tile
+  kernels were compiled and registered but had no dispatch entry -
+  every flag combination reached the triad or cuBLAS.
+- `GpuCtx::gemm_route`: the full numeric-route identity (the three tier
+  flags plus the family). CUDA-graph capture guards in both backbones,
+  both prefills and the split forward/backward cycle now compare this
+  instead of `gemm_flags`, so a family flip after a capture is refused
+  at replay exactly like a tier flip. `gemm_flags` keeps its shape and
+  meaning for callers that assert on the tier flags alone.
+- `blas::gemm_bi_forward_raw`: a direct entry to the fixed-tile family
+  for benchmarks and for callers that select it explicitly.
+
+### Fixed
+
+- The README stated that the M3 engine stays on cuBLAS regardless of
+  the batch-invariant flag. That has not been true since the M3 GEMMs
+  moved onto the context-carrying dispatcher: the M3 prefill and
+  training forward both pass `GpuCtx` and both follow the flag. The
+  scope note now names what actually opts out - the tied LM heads and
+  the no-context `*_blas` twins, which take no context.
+- The `sgemm_bi.cu` header described the file as f32-first. The file
+  has carried f32, bf16 and f16, on CUDA cores and Tensor Cores, since
+  the typed and TC sections landed; the `S` in the name is historical
+  BLAS notation and no longer describes the coverage.
+
+### Measurements and verification
+
+At a vision-classifier prefill shape (f32, M = 4621 rows per page,
+RTX 6000 Ada) the two families are close: against a cuBLAS f32
+baseline, `fixed` runs 4.13x / 2.79x / 3.88x on input_proj / in_proj /
+out_proj and `triad` runs 4.61x / 2.80x / 4.46x; on a 4-page batched
+row `triad` takes the wide-N in_proj (2.71x vs 3.36x) and `fixed`
+keeps the other two. Both differ from cuBLAS by the same
+1.0e-4 - 1.8e-4 and agree with each other more closely than either
+agrees with cuBLAS; reruns are bit-identical in both. End to end on
+that model the deterministic route costs +30% per page (18.6 ->
+24.2 ms), the scan rather than the projections dominating. The three
+determinism suites (`sgemm_bi_determinism`, `sgemm_bi_tc`,
+`sgemm_bi_typed_parity`) pass unchanged.
+
 ## 0.6.6 (2026-08-25)
 
 Training-stability release for small-batch Mamba-3 runs. No math or
