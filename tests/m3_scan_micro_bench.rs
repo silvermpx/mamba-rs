@@ -246,6 +246,44 @@ fn scan_trio_time_and_hash() {
         "fused chunk_states diverged from pair"
     );
     println!("fused       {:8.1} us", time(&fused));
+
+    // The typed scan macro instantiates an f32 variant with identity
+    // conversions, so its output must match the plain coop kernel
+    // bit-for-bit. This arm gates the shared macro body: an indexing or
+    // layout slip in the typed twin shows up here even when every
+    // bf16 parity test only measures within tolerance.
+    let y_t = GpuBuffer::zeros(st, batch * t * d_inner).unwrap();
+    let scan_typed = || {
+        let (coop, cfg) = chunk_scan_cfg(batch, nc, nh, hd, ds, cs);
+        assert!(coop, "serve shape must ride the coop kernel");
+        let mut b = ctx
+            .stream
+            .launch_builder(&m3k.m3_chunk_scan_fwd_coop_typed.f32);
+        b.arg(y_t.inner());
+        b.arg(x.inner());
+        b.arg(q.inner());
+        b.arg(k_scaled.inner());
+        b.arg(qk_dot.inner());
+        b.arg(da_cumsum.inner());
+        b.arg(prev_states.inner());
+        b.arg(d_param.inner());
+        b.arg(&b_i);
+        b.arg(&t_i);
+        b.arg(&nh_i);
+        b.arg(&hd_i);
+        b.arg(&ds_i);
+        b.arg(&cs_i);
+        unsafe { b.launch(cfg) }.unwrap();
+    };
+    scan_typed();
+    ctx.stream.synchronize().unwrap();
+    let mut yt_h = vec![0.0f32; batch * t * d_inner];
+    y_t.download(st, &mut yt_h).unwrap();
+    assert_eq!(
+        fnv(&yt_h),
+        fnv(&host),
+        "typed coop scan diverged from the plain coop kernel"
+    );
 }
 
 /// The coefficient chain at the serve shape: split -> bcnorm -> angle

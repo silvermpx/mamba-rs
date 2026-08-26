@@ -633,7 +633,7 @@ pub fn chunk_fused_cfg(
     ds: usize,
     chunk_size: usize,
 ) -> Option<cudarc::driver::LaunchConfig> {
-    let smem_bytes = (chunk_size * ds + chunk_size * hd + chunk_size) * 4;
+    let smem_bytes = (chunk_size * (ds + 4) + chunk_size * hd + chunk_size) * 4;
     if ds % 4 != 0 || chunk_size > 1024 || smem_bytes > 48 * 1024 {
         return None;
     }
@@ -652,10 +652,13 @@ pub fn chunk_scan_cfg(
     ds: usize,
     chunk_size: usize,
 ) -> (bool, cudarc::driver::LaunchConfig) {
+    // q/k/ps rows are padded to ds + 4 floats (bank-conflict freedom);
+    // the kernel derives the same stride from ds, so this formula and the
+    // kernel's layout move together or not at all.
     let smem_floats = chunk_size * (chunk_size - 1) / 2
-        + 2 * chunk_size * ds
+        + 2 * chunk_size * (ds + 4)
         + chunk_size * hd
-        + hd * ds
+        + hd * (ds + 4)
         + 2 * chunk_size;
     let smem_bytes = smem_floats * std::mem::size_of::<f32>();
     if chunk_size <= 64 && smem_bytes <= 48 * 1024 {
