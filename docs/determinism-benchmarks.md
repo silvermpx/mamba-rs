@@ -104,6 +104,17 @@ Tile128 - correctly. The decode-band Thin16 verdicts survive event
 timing with wider margins than first recorded (M=64: 9.2 vs 11.3 us at
 768x2304, 12.3 vs 18.4 us at 1536x1536).
 
+The open decode-band question is also settled: the Thin16 crossover's
+responsible axis is N, not K. At M=128, Thin16 beats Tile64 at every
+probed K (768/1536/2560) while N <= 1536 (margins 13-35 percent), and
+loses at N >= 2304 for every K; on (1536, 1536) the M crossover sits
+between 128 and 160. The shipped rows <= 64 rule therefore leaves a
+banded win on the table for M in (64, 128] at N <= 1536 - the
+d1536-class projection band. A threshold change is a scheduling-only
+edit (the rungs are bit-identical per element), but it is promoted only
+on a sweep of the family it routes, under the alternating-group
+protocol; the evidence here was read on the forced triad rungs.
+
 ### Tile64 at the prefill shapes (2026-08-26, RTX 6000 Ada, min of 3 runs)
 
 The prefill routing question is settled by measurement: a wave-efficiency
