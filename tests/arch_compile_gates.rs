@@ -22,12 +22,12 @@ fn m1_blob() -> String {
         include_str!("../kernels/grad_clip.cu"),
         include_str!("../kernels/adamw.cu"),
         include_str!("../kernels/gemm_bi_fixed/common.cuh"),
-        include_str!("../kernels/gemm_bi_fixed/ffma.cuh"),
-        include_str!("../kernels/gemm_bi_fixed/wmma_legacy.cuh"),
-        include_str!("../kernels/gemm_bi_fixed/matvec.cuh"),
-        include_str!("../kernels/gemm_bi_fixed/mma16.cuh"),
-        include_str!("../kernels/gemm_bi_fixed/sm90_wgmma.cuh"),
-        include_str!("../kernels/gemm_bi_fixed/sm100_tcgen05.cuh"),
+        include_str!("../kernels/gemm_bi_fixed/ffma.cu"),
+        include_str!("../kernels/gemm_bi_fixed/wmma_legacy.cu"),
+        include_str!("../kernels/gemm_bi_fixed/matvec.cu"),
+        include_str!("../kernels/gemm_bi_fixed/mma16.cu"),
+        include_str!("../kernels/gemm_bi_fixed/sm90_wgmma.cu"),
+        include_str!("../kernels/gemm_bi_fixed/sm100_tcgen05.cu"),
         include_str!("../kernels/gemm_bi_triad.cu"),
     ]
     .iter()
