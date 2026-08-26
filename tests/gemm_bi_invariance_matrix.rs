@@ -227,6 +227,11 @@ fn ctx_new() -> (GpuDevice, GpuCtx) {
     (dev, ctx)
 }
 
+/// One bucketed contract row: (K, N, the first m of each new bucket).
+type ContractRow<'a> = (usize, usize, &'a [usize]);
+/// Bucketed contract tables keyed by architecture target.
+type ArchTables<'a> = [(&'a str, &'a [ContractRow<'a>])];
+
 /// Bucketed contract rows are per-architecture data: the split gates
 /// key on the frozen SM-count cell and on tile geometry, so an edge
 /// set observed on one arch is not a claim about another. A box whose
@@ -236,9 +241,9 @@ fn ctx_new() -> (GpuDevice, GpuCtx) {
 /// asserted on every box.
 fn arch_rows<'a>(
     dev: &GpuDevice,
-    tables: &'a [(&'a str, &'a [(usize, usize, &'a [usize])])],
+    tables: &'a ArchTables<'a>,
     family: &str,
-) -> Option<&'a [(usize, usize, &'a [usize])]> {
+) -> Option<&'a [ContractRow<'a>]> {
     let arch = GpuDevice::nvrtc_arch(dev.compute_capability);
     match tables.iter().find(|(a, _)| *a == arch) {
         Some((_, rows)) => Some(rows),
@@ -353,7 +358,7 @@ fn triad_f32_boundaries_match_the_declared_table() {
     ctx.set_batch_invariant(true);
     ctx.set_bi_gemm_family(BiGemmFamily::Triad);
     // (K, N) -> the first-m-of-a-new-bucket set, one table per arch.
-    const DECLARED: &[(&str, &[(usize, usize, &[usize])])] = &[(
+    const DECLARED: &ArchTables<'static> = &[(
         "sm_89",
         &[
             (64, 64, &[32]),
@@ -460,7 +465,7 @@ fn typed_route_scalar_tier_boundaries_match_the_declared_table() {
     ctx.set_bi_gemm_family(BiGemmFamily::Triad);
     // Declared per (K, N) under the 128-row prefix comparison, one
     // table per arch. Re-record (do not hand-edit) on change.
-    const DECLARED: &[(&str, &[(usize, usize, &[usize])])] = &[(
+    const DECLARED: &ArchTables<'static> = &[(
         "sm_89",
         &[
             (384, 384, &[128usize, 1025, 4621] as &[usize]),
