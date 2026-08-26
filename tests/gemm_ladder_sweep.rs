@@ -466,7 +466,35 @@ fn gemm_ladder_sweep() {
     let dev = GpuDevice::new(0).expect("cuda device");
     let ctx = GpuCtx::new(&dev).expect("ctx");
     let mut sweep = sweep_new(&dev, &ctx);
-    let full = std::env::var("MAMBA_RS_SWEEP").is_ok_and(|v| v == "full");
+    let scope = std::env::var("MAMBA_RS_SWEEP").unwrap_or_default();
+
+    // Targeted cells: MAMBA_RS_SWEEP=cell:K,N,M[;K,N,M...] measures and
+    // records exactly those forward cells, no assertions - the record
+    // lane's probe mode.
+    if let Some(list) = scope.strip_prefix("cell:") {
+        for spec in list.split(';') {
+            let p: Vec<usize> = spec
+                .split(',')
+                .map(|v| v.trim().parse().expect("K,N,M"))
+                .collect();
+            assert_eq!(p.len(), 3, "cell spec is K,N,M");
+            let rows = sweep.run_cell(WeightDtype::Bf16, Op::NnFwd, p[2], p[0], p[1]);
+            for (t, s) in &rows {
+                println!(
+                    "cell K{} N{} M{}: {} p50={:.2}us p95={:.2}us groups={:?}",
+                    p[0],
+                    p[1],
+                    p[2],
+                    rung_name(*t),
+                    s.p50_us,
+                    s.p95_us,
+                    s.group_p50s
+                );
+            }
+        }
+        return;
+    }
+    let full = scope == "full";
 
     if full {
         let ks = [64, 128, 256, 384, 512, 768, 1024, 1536, 2304, 2560, 4096];
