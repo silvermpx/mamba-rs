@@ -15,6 +15,7 @@
 
 #![cfg(feature = "cuda")]
 
+use cudarc::driver::PushKernelArg;
 use half::{bf16, f16};
 use mamba_rs::mamba_ssm::gpu::blas::{
     TypedPtr, bi_sgemm_backward_dw_typed, bi_sgemm_backward_dx_typed, bi_sgemm_forward_typed,
@@ -24,6 +25,7 @@ use mamba_rs::mamba_ssm::gpu::context::GpuCtx;
 use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
 use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
 use mamba_rs::mamba_ssm::gpu::gemm_bi_triad;
+use std::mem::size_of;
 
 fn det(n: usize, seed: u32, scale: f32) -> Vec<f32> {
     let mut s = seed;
@@ -553,4 +555,695 @@ fn typed_classifier_input_proj_shapes_bit_match() {
         check_forward(&t, dt, (4, 200, 32), true, true);
         check_dw(&t, dt, (4, 200, 32), true);
     }
+}
+
+const TC_REPEATS: usize = 20;
+const GUARD: f32 = -7.0;
+
+fn assert_exact<T: Copy + std::fmt::Debug + Eq>(label: &str, got: &[T], want: &[T]) {
+    assert_eq!(got.len(), want.len(), "{label}: length");
+    for (index, (&got, &want)) in got.iter().zip(want).enumerate() {
+        assert_eq!(got, want, "{label}: mismatch at element {index}");
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum NnSchedule {
+    Tile128,
+    Tile64,
+    Thin16,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum BackwardSchedule {
+    Tile128,
+    Tile64,
+}
+
+struct TypedSubview {
+    storage: DtypedBuf,
+    offset: usize,
+    rows: usize,
+    cols: usize,
+    stride: usize,
+    dtype: WeightDtype,
+}
+
+impl TypedSubview {
+    fn new(
+        t: &Ctx,
+        logical: &[f32],
+        rows: usize,
+        cols: usize,
+        stride: usize,
+        offset: usize,
+        dtype: WeightDtype,
+    ) -> Self {
+        assert_eq!(logical.len(), rows * cols);
+        assert!(stride >= cols);
+        let mut host = vec![GUARD; offset + rows * stride + 8];
+        for row in 0..rows {
+            host[offset + row * stride..offset + row * stride + cols]
+                .copy_from_slice(&logical[row * cols..(row + 1) * cols]);
+        }
+        Self {
+            storage: t.typed_buf(&host, dtype),
+            offset,
+            rows,
+            cols,
+            stride,
+            dtype,
+        }
+    }
+
+    fn ptr(&self) -> u64 {
+        self.storage.cached_ptr() + (self.offset * self.dtype.size_bytes()) as u64
+    }
+
+    fn upload_logical(&self, t: &Ctx, logical: &[f32]) {
+        assert_eq!(logical.len(), self.rows * self.cols);
+        let mut host = vec![GUARD; self.offset + self.rows * self.stride + 8];
+        for row in 0..self.rows {
+            host[self.offset + row * self.stride..self.offset + row * self.stride + self.cols]
+                .copy_from_slice(&logical[row * self.cols..(row + 1) * self.cols]);
+        }
+        self.storage.upload_f32(&t.ctx.stream, &host).unwrap();
+    }
+
+    fn logical_bits(&self, t: &Ctx) -> Vec<u16> {
+        let mut host = vec![0.0; self.storage.len_elems()];
+        self.storage.download_f32(&t.ctx.stream, &mut host).unwrap();
+        let bits = |value: f32| match self.dtype {
+            WeightDtype::Bf16 => bf16::from_f32(value).to_bits(),
+            WeightDtype::F16 => f16::from_f32(value).to_bits(),
+            WeightDtype::F32 => unreachable!("TC typed output must be 16-bit"),
+        };
+        let guard = bits(GUARD);
+        let mut logical = Vec::with_capacity(self.rows * self.cols);
+        for (index, &value) in host.iter().enumerate() {
+            let in_row = index
+                .checked_sub(self.offset)
+                .map(|i| (i / self.stride, i % self.stride));
+            if let Some((row, col)) =
+                in_row.filter(|(row, col)| *row < self.rows && *col < self.cols)
+            {
+                logical.push(bits(value));
+                assert_eq!(logical.len(), row * self.cols + col + 1);
+            } else {
+                assert_eq!(bits(value), guard, "typed guard changed at element {index}");
+            }
+        }
+        logical
+    }
+}
+
+struct F32Subview {
+    storage: GpuBuffer,
+    offset: usize,
+    rows: usize,
+    cols: usize,
+    stride: usize,
+}
+
+impl F32Subview {
+    fn new(
+        t: &Ctx,
+        logical: &[f32],
+        rows: usize,
+        cols: usize,
+        stride: usize,
+        offset: usize,
+    ) -> Self {
+        assert_eq!(logical.len(), rows * cols);
+        assert!(stride >= cols);
+        let mut host = vec![GUARD; offset + rows * stride + 8];
+        for row in 0..rows {
+            host[offset + row * stride..offset + row * stride + cols]
+                .copy_from_slice(&logical[row * cols..(row + 1) * cols]);
+        }
+        Self {
+            storage: t.f32_buf(&host),
+            offset,
+            rows,
+            cols,
+            stride,
+        }
+    }
+
+    fn ptr(&self) -> u64 {
+        self.storage.cached_ptr() + (self.offset * size_of::<f32>()) as u64
+    }
+
+    fn upload_logical(&mut self, t: &Ctx, logical: &[f32]) {
+        assert_eq!(logical.len(), self.rows * self.cols);
+        let mut host = vec![GUARD; self.offset + self.rows * self.stride + 8];
+        for row in 0..self.rows {
+            host[self.offset + row * self.stride..self.offset + row * self.stride + self.cols]
+                .copy_from_slice(&logical[row * self.cols..(row + 1) * self.cols]);
+        }
+        self.storage.upload(&t.ctx.stream, &host).unwrap();
+    }
+
+    fn logical_bits(&self, t: &Ctx) -> Vec<u32> {
+        let host = self.storage.to_cpu(&t.ctx.stream).unwrap();
+        let mut logical = Vec::with_capacity(self.rows * self.cols);
+        for (index, &value) in host.iter().enumerate() {
+            let in_row = index
+                .checked_sub(self.offset)
+                .map(|i| (i / self.stride, i % self.stride));
+            if let Some((row, col)) =
+                in_row.filter(|(row, col)| *row < self.rows && *col < self.cols)
+            {
+                logical.push(value.to_bits());
+                assert_eq!(logical.len(), row * self.cols + col + 1);
+            } else {
+                assert_eq!(
+                    value.to_bits(),
+                    GUARD.to_bits(),
+                    "f32 guard changed at element {index}"
+                );
+            }
+        }
+        logical
+    }
+}
+
+fn launch_tc_nn(
+    t: &Ctx,
+    schedule: NnSchedule,
+    dtype: WeightDtype,
+    c: u64,
+    a: u64,
+    b: u64,
+    dims: (usize, usize, usize),
+    strides: (usize, usize, usize),
+    beta: f32,
+) -> Result<(), String> {
+    let (m, k, n) = dims;
+    let (lda, ldb, ldc) = strides;
+    let (function, bm, bn, threads, shared_mem_bytes) = match schedule {
+        NnSchedule::Tile128 => (&t.ctx.kernels.sgemm_nn_tc_typed, 128, 128, 256, 71_680),
+        NnSchedule::Tile64 => (&t.ctx.kernels.sgemm_nn_tc64_typed, 64, 64, 128, 0),
+        NnSchedule::Thin16 => (&t.ctx.kernels.sgemm_nn_tc16_typed, 16, 32, 128, 0),
+    };
+    let cfg = cudarc::driver::LaunchConfig {
+        grid_dim: (
+            m.div_ceil(bm).checked_mul(n.div_ceil(bn)).unwrap() as u32,
+            1,
+            1,
+        ),
+        block_dim: (threads, 1, 1),
+        shared_mem_bytes,
+    };
+    let bias = 0u64;
+    let alpha = 1.0f32;
+    let (m, n, k, lda, ldb, ldc) = (
+        m as i32, n as i32, k as i32, lda as i32, ldb as i32, ldc as i32,
+    );
+    let mut launch = t.ctx.stream.launch_builder(function.get(dtype));
+    launch.arg(&c);
+    launch.arg(&a);
+    launch.arg(&b);
+    launch.arg(&bias);
+    launch.arg(&alpha);
+    launch.arg(&beta);
+    launch.arg(&m);
+    launch.arg(&n);
+    launch.arg(&k);
+    launch.arg(&lda);
+    launch.arg(&ldb);
+    launch.arg(&ldc);
+    unsafe { launch.launch(cfg) }.map_err(|error| format!("{schedule:?} NN launch: {error:?}"))?;
+    t.ctx
+        .stream
+        .synchronize()
+        .map_err(|error| format!("{schedule:?} NN synchronize: {error:?}"))
+}
+
+fn launch_tc_tn(
+    t: &Ctx,
+    schedule: BackwardSchedule,
+    dtype: WeightDtype,
+    c: u64,
+    a: u64,
+    b: u64,
+    dims: (usize, usize, usize),
+) -> Result<(), String> {
+    let (m, k, n) = dims;
+    let (function, edge, threads, shared_mem_bytes) = match schedule {
+        BackwardSchedule::Tile128 => (&t.ctx.kernels.sgemm_tn_tc_typed, 128, 256, 69_632),
+        BackwardSchedule::Tile64 => (&t.ctx.kernels.sgemm_tn_tc64_typed, 64, 128, 0),
+    };
+    let cfg = cudarc::driver::LaunchConfig {
+        grid_dim: (
+            k.div_ceil(edge).checked_mul(n.div_ceil(edge)).unwrap() as u32,
+            1,
+            1,
+        ),
+        block_dim: (threads, 1, 1),
+        shared_mem_bytes,
+    };
+    let alpha = 1.0f32;
+    let (m, k, n) = (m as i32, k as i32, n as i32);
+    let mut launch = t.ctx.stream.launch_builder(function.get(dtype));
+    launch.arg(&c);
+    launch.arg(&a);
+    launch.arg(&b);
+    launch.arg(&alpha);
+    launch.arg(&m);
+    launch.arg(&k);
+    launch.arg(&n);
+    unsafe { launch.launch(cfg) }.map_err(|error| format!("{schedule:?} TN launch: {error:?}"))?;
+    t.ctx
+        .stream
+        .synchronize()
+        .map_err(|error| format!("{schedule:?} TN synchronize: {error:?}"))
+}
+
+fn launch_tc_nt(
+    t: &Ctx,
+    schedule: BackwardSchedule,
+    dtype: WeightDtype,
+    c: u64,
+    a: u64,
+    b: u64,
+    dims: (usize, usize, usize),
+) -> Result<(), String> {
+    let (m, k, n) = dims;
+    let (function, edge, threads, shared_mem_bytes) = match schedule {
+        BackwardSchedule::Tile128 => (&t.ctx.kernels.sgemm_nt_tc_typed, 128, 256, 73_728),
+        BackwardSchedule::Tile64 => (&t.ctx.kernels.sgemm_nt_tc64_typed, 64, 128, 0),
+    };
+    let cfg = cudarc::driver::LaunchConfig {
+        grid_dim: (
+            m.div_ceil(edge).checked_mul(k.div_ceil(edge)).unwrap() as u32,
+            1,
+            1,
+        ),
+        block_dim: (threads, 1, 1),
+        shared_mem_bytes,
+    };
+    let alpha = 1.0f32;
+    let (m, n, k) = (m as i32, n as i32, k as i32);
+    let mut launch = t.ctx.stream.launch_builder(function.get(dtype));
+    launch.arg(&c);
+    launch.arg(&a);
+    launch.arg(&b);
+    launch.arg(&alpha);
+    launch.arg(&m);
+    launch.arg(&n);
+    launch.arg(&k);
+    unsafe { launch.launch(cfg) }.map_err(|error| format!("{schedule:?} NT launch: {error:?}"))?;
+    t.ctx
+        .stream
+        .synchronize()
+        .map_err(|error| format!("{schedule:?} NT synchronize: {error:?}"))
+}
+
+#[test]
+fn tc128_packed_epilogues_match_scalar_fallback_bytes() {
+    let t = Ctx::new();
+    for dtype in [WeightDtype::Bf16, WeightDtype::F16] {
+        let nn_dims = (129usize, 65usize, 129usize);
+        let nn_strides = (72usize, 136usize, 130usize);
+        let nn_a = TypedSubview::new(
+            &t,
+            &det(nn_dims.0 * nn_dims.1, 801, 0.5),
+            nn_dims.0,
+            nn_dims.1,
+            nn_strides.0,
+            0,
+            dtype,
+        );
+        let nn_b = TypedSubview::new(
+            &t,
+            &det(nn_dims.1 * nn_dims.2, 802, 0.5),
+            nn_dims.1,
+            nn_dims.2,
+            nn_strides.1,
+            0,
+            dtype,
+        );
+        let zero_nn = vec![0.0; nn_dims.0 * nn_dims.2];
+        let nn_aligned =
+            TypedSubview::new(&t, &zero_nn, nn_dims.0, nn_dims.2, nn_strides.2, 0, dtype);
+        launch_tc_nn(
+            &t,
+            NnSchedule::Tile128,
+            dtype,
+            nn_aligned.ptr(),
+            nn_a.ptr(),
+            nn_b.ptr(),
+            nn_dims,
+            nn_strides,
+            0.0,
+        )
+        .unwrap();
+        let nn_want = nn_aligned.logical_bits(&t);
+
+        for (offset, ldc) in [(1usize, 130usize), (0, 131)] {
+            let nn_scalar =
+                TypedSubview::new(&t, &zero_nn, nn_dims.0, nn_dims.2, ldc, offset, dtype);
+            for repeat in 0..TC_REPEATS {
+                nn_scalar.upload_logical(&t, &zero_nn);
+                launch_tc_nn(
+                    &t,
+                    NnSchedule::Tile128,
+                    dtype,
+                    nn_scalar.ptr(),
+                    nn_a.ptr(),
+                    nn_b.ptr(),
+                    nn_dims,
+                    (nn_strides.0, nn_strides.1, ldc),
+                    0.0,
+                )
+                .unwrap_or_else(|error| {
+                    panic!("{dtype:?} NN offset={offset} ldc={ldc} repeat={repeat}: {error}")
+                });
+                assert_exact(
+                    &format!("{dtype:?} NN offset={offset} ldc={ldc} repeat={repeat}"),
+                    &nn_scalar.logical_bits(&t),
+                    &nn_want,
+                );
+            }
+        }
+
+        let nn_initial = det(nn_dims.0 * nn_dims.2, 803, 0.125);
+        let nn_beta_aligned = TypedSubview::new(
+            &t,
+            &nn_initial,
+            nn_dims.0,
+            nn_dims.2,
+            nn_strides.2,
+            0,
+            dtype,
+        );
+        launch_tc_nn(
+            &t,
+            NnSchedule::Tile128,
+            dtype,
+            nn_beta_aligned.ptr(),
+            nn_a.ptr(),
+            nn_b.ptr(),
+            nn_dims,
+            nn_strides,
+            0.5,
+        )
+        .unwrap();
+        let nn_beta_want = nn_beta_aligned.logical_bits(&t);
+        let nn_beta_scalar = TypedSubview::new(
+            &t,
+            &nn_initial,
+            nn_dims.0,
+            nn_dims.2,
+            nn_strides.2,
+            1,
+            dtype,
+        );
+        for repeat in 0..TC_REPEATS {
+            nn_beta_scalar.upload_logical(&t, &nn_initial);
+            launch_tc_nn(
+                &t,
+                NnSchedule::Tile128,
+                dtype,
+                nn_beta_scalar.ptr(),
+                nn_a.ptr(),
+                nn_b.ptr(),
+                nn_dims,
+                nn_strides,
+                0.5,
+            )
+            .unwrap_or_else(|error| panic!("{dtype:?} NN beta repeat={repeat}: {error}"));
+            assert_exact(
+                &format!("{dtype:?} NN beta offset=1 repeat={repeat}"),
+                &nn_beta_scalar.logical_bits(&t),
+                &nn_beta_want,
+            );
+        }
+
+        let tn_dims = (65usize, 128usize, 128usize);
+        let tn_a = TypedSubview::new(
+            &t,
+            &det(tn_dims.0 * tn_dims.1, 811, 0.5),
+            tn_dims.0,
+            tn_dims.1,
+            tn_dims.1,
+            0,
+            dtype,
+        );
+        let tn_b = TypedSubview::new(
+            &t,
+            &det(tn_dims.0 * tn_dims.2, 812, 0.5),
+            tn_dims.0,
+            tn_dims.2,
+            tn_dims.2,
+            0,
+            dtype,
+        );
+        let tn_initial = det(tn_dims.1 * tn_dims.2, 813, 0.125);
+        let tn_aligned = F32Subview::new(&t, &tn_initial, tn_dims.1, tn_dims.2, tn_dims.2, 0);
+        launch_tc_tn(
+            &t,
+            BackwardSchedule::Tile128,
+            dtype,
+            tn_aligned.ptr(),
+            tn_a.ptr(),
+            tn_b.ptr(),
+            tn_dims,
+        )
+        .unwrap();
+        let tn_want = tn_aligned.logical_bits(&t);
+        let mut tn_scalar = F32Subview::new(&t, &tn_initial, tn_dims.1, tn_dims.2, tn_dims.2, 1);
+        for repeat in 0..TC_REPEATS {
+            tn_scalar.upload_logical(&t, &tn_initial);
+            launch_tc_tn(
+                &t,
+                BackwardSchedule::Tile128,
+                dtype,
+                tn_scalar.ptr(),
+                tn_a.ptr(),
+                tn_b.ptr(),
+                tn_dims,
+            )
+            .unwrap_or_else(|error| panic!("{dtype:?} TN offset=1 repeat={repeat}: {error}"));
+            assert_exact(
+                &format!("{dtype:?} TN offset=1 repeat={repeat}"),
+                &tn_scalar.logical_bits(&t),
+                &tn_want,
+            );
+        }
+
+        let nt_dims = (129usize, 128usize, 72usize);
+        let nt_a = TypedSubview::new(
+            &t,
+            &det(nt_dims.0 * nt_dims.2, 821, 0.5),
+            nt_dims.0,
+            nt_dims.2,
+            nt_dims.2,
+            0,
+            dtype,
+        );
+        let nt_b = TypedSubview::new(
+            &t,
+            &det(nt_dims.1 * nt_dims.2, 822, 0.5),
+            nt_dims.1,
+            nt_dims.2,
+            nt_dims.2,
+            0,
+            dtype,
+        );
+        let zero_nt = vec![0.0; nt_dims.0 * nt_dims.1];
+        let nt_aligned = TypedSubview::new(&t, &zero_nt, nt_dims.0, nt_dims.1, nt_dims.1, 0, dtype);
+        launch_tc_nt(
+            &t,
+            BackwardSchedule::Tile128,
+            dtype,
+            nt_aligned.ptr(),
+            nt_a.ptr(),
+            nt_b.ptr(),
+            nt_dims,
+        )
+        .unwrap();
+        let nt_want = nt_aligned.logical_bits(&t);
+        let nt_scalar = TypedSubview::new(&t, &zero_nt, nt_dims.0, nt_dims.1, nt_dims.1, 1, dtype);
+        for repeat in 0..TC_REPEATS {
+            nt_scalar.upload_logical(&t, &zero_nt);
+            launch_tc_nt(
+                &t,
+                BackwardSchedule::Tile128,
+                dtype,
+                nt_scalar.ptr(),
+                nt_a.ptr(),
+                nt_b.ptr(),
+                nt_dims,
+            )
+            .unwrap_or_else(|error| panic!("{dtype:?} NT offset=1 repeat={repeat}: {error}"));
+            assert_exact(
+                &format!("{dtype:?} NT offset=1 repeat={repeat}"),
+                &nt_scalar.logical_bits(&t),
+                &nt_want,
+            );
+        }
+    }
+}
+
+#[test]
+fn tc_cp_async_misaligned_operands_match_scalar_stage_bytes() {
+    let t = Ctx::new();
+    for dtype in [WeightDtype::Bf16, WeightDtype::F16] {
+        for schedule in [NnSchedule::Tile128, NnSchedule::Tile64, NnSchedule::Thin16] {
+            let (dims, strides) = match schedule {
+                NnSchedule::Tile128 | NnSchedule::Tile64 => ((129, 65, 129), (72, 136, 130)),
+                NnSchedule::Thin16 => ((17, 9, 33), (16, 40, 34)),
+            };
+            let a_data = det(dims.0 * dims.1, 831, 0.5);
+            let b_data = det(dims.1 * dims.2, 832, 0.5);
+            let zero = vec![0.0; dims.0 * dims.2];
+            let a_aligned = TypedSubview::new(&t, &a_data, dims.0, dims.1, strides.0, 0, dtype);
+            let b_aligned = TypedSubview::new(&t, &b_data, dims.1, dims.2, strides.1, 0, dtype);
+            let c_reference = TypedSubview::new(&t, &zero, dims.0, dims.2, strides.2, 0, dtype);
+            launch_tc_nn(
+                &t,
+                schedule,
+                dtype,
+                c_reference.ptr(),
+                a_aligned.ptr(),
+                b_aligned.ptr(),
+                dims,
+                strides,
+                0.0,
+            )
+            .unwrap();
+            let want = c_reference.logical_bits(&t);
+
+            for (a_offset, b_offset) in [(1usize, 0usize), (0, 1)] {
+                let a = TypedSubview::new(&t, &a_data, dims.0, dims.1, strides.0, a_offset, dtype);
+                let b = TypedSubview::new(&t, &b_data, dims.1, dims.2, strides.1, b_offset, dtype);
+                let c = TypedSubview::new(&t, &zero, dims.0, dims.2, strides.2, 0, dtype);
+                for repeat in 0..TC_REPEATS {
+                    c.upload_logical(&t, &zero);
+                    launch_tc_nn(&t, schedule, dtype, c.ptr(), a.ptr(), b.ptr(), dims, strides, 0.0)
+                        .unwrap_or_else(|error| panic!(
+                            "{dtype:?} {schedule:?} A+{a_offset} B+{b_offset} repeat={repeat}: {error}"
+                        ));
+                    assert_exact(
+                        &format!(
+                            "{dtype:?} {schedule:?} A+{a_offset} B+{b_offset} repeat={repeat}"
+                        ),
+                        &c.logical_bits(&t),
+                        &want,
+                    );
+                }
+            }
+        }
+
+        let tn_dims = (65usize, 128usize, 128usize);
+        let tn_a_data = det(tn_dims.0 * tn_dims.1, 841, 0.5);
+        let tn_b_data = det(tn_dims.0 * tn_dims.2, 842, 0.5);
+        let tn_initial = det(tn_dims.1 * tn_dims.2, 843, 0.125);
+        for schedule in [BackwardSchedule::Tile128, BackwardSchedule::Tile64] {
+            let a_aligned =
+                TypedSubview::new(&t, &tn_a_data, tn_dims.0, tn_dims.1, tn_dims.1, 0, dtype);
+            let b_aligned =
+                TypedSubview::new(&t, &tn_b_data, tn_dims.0, tn_dims.2, tn_dims.2, 0, dtype);
+            let reference = F32Subview::new(&t, &tn_initial, tn_dims.1, tn_dims.2, tn_dims.2, 0);
+            launch_tc_tn(
+                &t,
+                schedule,
+                dtype,
+                reference.ptr(),
+                a_aligned.ptr(),
+                b_aligned.ptr(),
+                tn_dims,
+            )
+            .unwrap();
+            let want = reference.logical_bits(&t);
+            for (a_offset, b_offset) in [(1usize, 0usize), (0, 1)] {
+                let a = TypedSubview::new(
+                    &t, &tn_a_data, tn_dims.0, tn_dims.1, tn_dims.1, a_offset, dtype,
+                );
+                let b = TypedSubview::new(
+                    &t, &tn_b_data, tn_dims.0, tn_dims.2, tn_dims.2, b_offset, dtype,
+                );
+                let mut c = F32Subview::new(&t, &tn_initial, tn_dims.1, tn_dims.2, tn_dims.2, 0);
+                for repeat in 0..TC_REPEATS {
+                    c.upload_logical(&t, &tn_initial);
+                    launch_tc_tn(&t, schedule, dtype, c.ptr(), a.ptr(), b.ptr(), tn_dims)
+                        .unwrap_or_else(|error| panic!(
+                            "{dtype:?} {schedule:?} TN A+{a_offset} B+{b_offset} repeat={repeat}: {error}"
+                        ));
+                    assert_exact(
+                        &format!(
+                            "{dtype:?} {schedule:?} TN A+{a_offset} B+{b_offset} repeat={repeat}"
+                        ),
+                        &c.logical_bits(&t),
+                        &want,
+                    );
+                }
+            }
+        }
+
+        let nt_dims = (129usize, 129usize, 72usize);
+        let nt_a_data = det(nt_dims.0 * nt_dims.2, 851, 0.5);
+        let nt_b_data = det(nt_dims.1 * nt_dims.2, 852, 0.5);
+        let zero = vec![0.0; nt_dims.0 * nt_dims.1];
+        for schedule in [BackwardSchedule::Tile128, BackwardSchedule::Tile64] {
+            let a_aligned =
+                TypedSubview::new(&t, &nt_a_data, nt_dims.0, nt_dims.2, nt_dims.2, 0, dtype);
+            let b_aligned =
+                TypedSubview::new(&t, &nt_b_data, nt_dims.1, nt_dims.2, nt_dims.2, 0, dtype);
+            let reference = TypedSubview::new(&t, &zero, nt_dims.0, nt_dims.1, nt_dims.1, 0, dtype);
+            launch_tc_nt(
+                &t,
+                schedule,
+                dtype,
+                reference.ptr(),
+                a_aligned.ptr(),
+                b_aligned.ptr(),
+                nt_dims,
+            )
+            .unwrap();
+            let want = reference.logical_bits(&t);
+            for (a_offset, b_offset) in [(1usize, 0usize), (0, 1)] {
+                let a = TypedSubview::new(
+                    &t, &nt_a_data, nt_dims.0, nt_dims.2, nt_dims.2, a_offset, dtype,
+                );
+                let b = TypedSubview::new(
+                    &t, &nt_b_data, nt_dims.1, nt_dims.2, nt_dims.2, b_offset, dtype,
+                );
+                let c = TypedSubview::new(&t, &zero, nt_dims.0, nt_dims.1, nt_dims.1, 0, dtype);
+                for repeat in 0..TC_REPEATS {
+                    c.upload_logical(&t, &zero);
+                    launch_tc_nt(&t, schedule, dtype, c.ptr(), a.ptr(), b.ptr(), nt_dims)
+                        .unwrap_or_else(|error| panic!(
+                            "{dtype:?} {schedule:?} NT A+{a_offset} B+{b_offset} repeat={repeat}: {error}"
+                        ));
+                    assert_exact(
+                        &format!(
+                            "{dtype:?} {schedule:?} NT A+{a_offset} B+{b_offset} repeat={repeat}"
+                        ),
+                        &c.logical_bits(&t),
+                        &want,
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn tc_source_centralizes_async_copy_and_avoids_type_punned_stores() {
+    let source = include_str!("../kernels/gemm_bi_triad.cu");
+    let tc_source = source
+        .split_once("#define TC_BM")
+        .expect("tensor-core section marker")
+        .1;
+
+    assert_eq!(
+        tc_source.matches("cp.async.ca.shared.global").count(),
+        1,
+        "tensor-core async copies must go through sgb_cp_async_16_zfill"
+    );
+    assert!(!tc_source.contains("*(unsigned *)&C"));
+    assert!(!tc_source.contains("float2 *dst"));
 }

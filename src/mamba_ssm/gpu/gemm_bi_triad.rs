@@ -253,6 +253,15 @@ fn checked_ptr_add(base: u64, offset: u64, name: &str) -> Result<u64, String> {
         .ok_or_else(|| invalid_gemm_dimensions(format!("{name} pointer offset overflows u64")))
 }
 
+fn validate_bias_preseed(alpha: f32, bias_ptr: CUptr, route: &str) -> Result<(), String> {
+    if bias_ptr != 0 && alpha != 1.0 {
+        return Err(format!(
+            "{route}: bias pre-seeding requires alpha == 1.0, got {alpha}"
+        ));
+    }
+    Ok(())
+}
+
 // ── Split-M TN partition heuristic (ported from SQV-RS blas_bi.rs) ──
 
 /// Target CTA count factor for the split-M TN partition: aim to fill the
@@ -414,6 +423,8 @@ pub fn sgemm_bi_forward_sub(
     let checked_dims = GemmDims::nn(dims, lda)?;
     let (batch, n_in, n_out) = checked_dims.tuple();
     let lda_i = checked_dims.lda;
+    let alpha: f32 = 1.0;
+    validate_bias_preseed(alpha, bias_ptr, "sgemm_bi_forward_sub")?;
     // Shape-A Ultra-Thin-M NN dispatch: batch ∈ [1, 31] (actor inference rollout).
     // Covers shapes that fall through Split-K (min 32) and Big/Slim (min 128).
     // Grid: (ceil(N/32), M, 1). smem = K*4 bytes ≤ 8 KB (K ≤ 2048) — within the
@@ -424,7 +435,6 @@ pub fn sgemm_bi_forward_sub(
         let m_i = checked_dims.m_i32;
         let n_i = checked_dims.n_i32;
         let k_i = checked_dims.k_i32;
-        let alpha: f32 = 1.0;
         let beta: f32 = 0.0;
         let cfg = cudarc::driver::LaunchConfig {
             grid_dim: (checked_dims.n_u32.div_ceil(32), checked_dims.m_u32, 1),
@@ -466,7 +476,6 @@ pub fn sgemm_bi_forward_sub(
         let m_i = checked_dims.m_i32;
         let n_i = checked_dims.n_i32;
         let k_i = checked_dims.k_i32;
-        let alpha: f32 = 1.0;
         let beta: f32 = 0.0;
         let post_op: i32 = 0;
         let num_pid_m = checked_dims.m_u32.div_ceil(16);
@@ -505,7 +514,6 @@ pub fn sgemm_bi_forward_sub(
         let m_i = checked_dims.m_i32;
         let n_i = checked_dims.n_i32;
         let k_i = checked_dims.k_i32;
-        let alpha: f32 = 1.0;
         let beta: f32 = 0.0;
         let post_op: i32 = 0;
         let num_pid_m = checked_dims.m_u32.div_ceil(64);
@@ -545,7 +553,6 @@ pub fn sgemm_bi_forward_sub(
     if n_out == 1 && batch >= 1 && n_in >= 32 {
         let m_i = checked_dims.m_i32;
         let k_i = checked_dims.k_i32;
-        let alpha: f32 = 1.0;
         let beta: f32 = 0.0;
         let ldy_i: i32 = 1;
         let cfg = cudarc::driver::LaunchConfig {
@@ -602,7 +609,6 @@ pub fn sgemm_bi_forward_sub(
             let m_i = checked_dims.m_i32;
             let n_i = checked_dims.n_i32;
             let k_chunks = checked_i32(k_main / 32, "NN K-tail chunks")?;
-            let alpha: f32 = 1.0;
             let num_pid_m = checked_dims.m_u32.div_ceil(32);
             let num_pid_n = checked_dims.n_u32.div_ceil(64);
             let partial_cfg = cudarc::driver::LaunchConfig {
@@ -704,7 +710,6 @@ pub fn sgemm_bi_forward_sub(
         let m_i = checked_dims.m_i32;
         let n_i = checked_dims.n_i32;
         let k_chunks = checked_i32(n_in / 32, "NN split-K chunks")?;
-        let alpha: f32 = 1.0;
 
         // Partial kernel launch: grid = M_tiles × N_tiles × K_CHUNKS
         let num_pid_m = checked_dims.m_u32.div_ceil(32);
@@ -841,7 +846,6 @@ pub fn sgemm_bi_forward_sub(
                     checked_usize(k_chunk, "NN slim split-K chunk")?,
                     "NN slim split-K chunk",
                 )?;
-                let alpha: f32 = 1.0;
 
                 let partial_ptr = {
                     use cudarc::driver::DevicePtr;
@@ -924,7 +928,6 @@ pub fn sgemm_bi_forward_sub(
         let m_i = checked_dims.m_i32;
         let n_i = checked_dims.n_i32;
         let k_i = checked_dims.k_i32;
-        let alpha: f32 = 1.0;
         let beta: f32 = 0.0;
         let post_op: i32 = 0;
         let num_pid_m = checked_dims.m_u32.div_ceil(64);
@@ -962,7 +965,6 @@ pub fn sgemm_bi_forward_sub(
         let m_i = checked_dims.m_i32;
         let n_i = checked_dims.n_i32;
         let k_i = checked_dims.k_i32;
-        let alpha: f32 = 1.0;
         let beta: f32 = 0.0;
         let (func, bn) = dispatch_slim_or_big(
             kernels,
@@ -2306,6 +2308,7 @@ pub fn sgemm_bi_forward_tc_with_tile(
     let dt = ops.y.dtype;
     let alpha: f32 = 1.0;
     let beta: f32 = 0.0;
+    validate_bias_preseed(alpha, ops.bias_ptr, "sgemm_bi_forward_tc")?;
     let m_i = checked_dims.m_i32;
     let n_i = checked_dims.n_i32;
     let k_i = checked_dims.k_i32;
@@ -2483,6 +2486,7 @@ pub fn sgemm_bi_forward_typed(
     let dt = y.dtype;
     let alpha: f32 = 1.0;
     let beta: f32 = 0.0;
+    validate_bias_preseed(alpha, bias_ptr, "sgemm_bi_forward_typed")?;
     let m_i = checked_dims.m_i32;
     let n_i = checked_dims.n_i32;
     let k_i = checked_dims.k_i32;
@@ -2811,7 +2815,7 @@ pub fn sgemm_bi_backward_dx_typed(
 
 #[cfg(test)]
 mod tests {
-    use super::{GemmDims, checked_grid_product, checked_u32};
+    use super::{GemmDims, checked_grid_product, checked_u32, validate_bias_preseed};
 
     fn assert_invalid_error(error: String) {
         assert!(error.starts_with("invalid GEMM dimensions"), "{error}");
@@ -2919,5 +2923,14 @@ mod tests {
             [5, 5, 3],
             [2, 3, 2],
         ));
+    }
+
+    #[test]
+    fn bias_preseed_rejects_non_identity_alpha() {
+        let error = validate_bias_preseed(0.5, 1, "triad-test")
+            .expect_err("bias pre-seeding must reject alpha != 1");
+        assert!(error.contains("alpha == 1.0"), "{error}");
+        validate_bias_preseed(0.5, 0, "triad-test").unwrap();
+        validate_bias_preseed(1.0, 1, "triad-test").unwrap();
     }
 }

@@ -5165,8 +5165,74 @@ DEFINE_SGEMM_BI_NT_BIG_T(f16,  __half,        from_f_f16)
 #define TC_LDA (TC_BK + TC_PAD_A)
 #define TC_LDB (TC_BN + TC_PAD_B)
 
+__device__ __forceinline__ bool sgb_is_aligned_4(const void* ptr) {
+    return ((unsigned long long)ptr & 3ULL) == 0;
+}
+
+__device__ __forceinline__ bool sgb_is_aligned_8(const void* ptr) {
+    return ((unsigned long long)ptr & 7ULL) == 0;
+}
+
+__device__ __forceinline__ bool sgb_is_aligned_16(const void* ptr) {
+    return ((unsigned long long)ptr & 15ULL) == 0;
+}
+
+__device__ __forceinline__ void sgb_store_pair_rne(
+    __half* dst, float x, float y) {
+    *reinterpret_cast<__half2*>(dst) = __floats2half2_rn(x, y);
+}
+
+__device__ __forceinline__ void sgb_store_pair_rne(
+    __nv_bfloat16* dst, float x, float y) {
+    *reinterpret_cast<__nv_bfloat162*>(dst) = __floats2bfloat162_rn(x, y);
+}
+
+__device__ __forceinline__ void sgb_accumulate_float2_or_scalar(
+    float* dst, float x, float y, bool packed) {
+    float current_x;
+    float current_y;
+    if (packed) {
+        float2 current = *reinterpret_cast<const float2*>(dst);
+        current_x = current.x;
+        current_y = current.y;
+    } else {
+        current_x = dst[0];
+        current_y = dst[1];
+    }
+    current_x += x;
+    current_y += y;
+    if (packed) {
+        float2 result = {current_x, current_y};
+        *reinterpret_cast<float2*>(dst) = result;
+    } else {
+        dst[0] = current_x;
+        dst[1] = current_y;
+    }
+}
+
+__device__ __forceinline__ int sgb_cp_async_valid_elems(
+    bool row_valid, int extent, int start) {
+    if (!row_valid || start >= extent) return 0;
+    int remaining = extent - start;
+    return remaining < 8 ? remaining : 8;
+}
+
+template <typename T>
+__device__ __forceinline__ const T* sgb_cp_async_source(
+    const T* base, long long valid_offset, int valid_bytes) {
+    // PTX ignores the source for a zero-byte lane, but C++ still requires
+    // the address expression itself to remain inside the allocation.
+    return valid_bytes == 0 ? base : base + valid_offset;
+}
+
+__device__ __forceinline__ void sgb_cp_async_16_zfill(
+    unsigned shared_dst, const void* global_src, int valid_bytes) {
+    asm volatile("cp.async.ca.shared.global [%0], [%1], 16, %2;\n"
+                 :: "r"(shared_dst), "l"(global_src), "r"(valid_bytes));
+}
+
 // Issue one A+B tile into smem stage `buf` via 16B cp.async with zero-fill
-// (fast path; requires lda%8==0 && ldb%8==0, checked by caller-side branch).
+// (fast path; the caller proves 16-byte operand bases and row starts).
 // A: 128 rows x 8 chunks; B: 64 rows x 16 chunks; 2048 cp.async / 256 thr.
 #define SGB_TC_STAGE_ASYNC(buf, bkIdx)                                        \
     do {                                                                      \
@@ -5178,12 +5244,12 @@ DEFINE_SGEMM_BI_NT_BIG_T(f16,  __half,        from_f_f16)
             int _k = _c * 8;                                                  \
             int _gr = pid_m * TC_BM + _m;                                     \
             int _gc = (bkIdx) + _k;                                           \
-            int _valid = (_gr < M) ? (K - _gc) : 0;                           \
-            int _bytes = _valid >= 8 ? 16 : (_valid > 0 ? _valid * 2 : 0);    \
+            int _elems = sgb_cp_async_valid_elems(_gr < M, K, _gc);           \
+            int _bytes = _elems * 2;                                          \
             unsigned _dst = _as + (unsigned)((_m * TC_LDA + _k) * 2);         \
-            const void* _src = &A[(long long)_gr * lda + _gc];               \
-            asm volatile("cp.async.ca.shared.global [%0], [%1], 16, %2;\n"    \
-                         :: "r"(_dst), "l"(_src), "r"(_bytes));               \
+            long long _offset = _bytes == 0 ? 0 : (long long)_gr * lda + _gc; \
+            const void* _src = sgb_cp_async_source(A, _offset, _bytes);        \
+            sgb_cp_async_16_zfill(_dst, _src, _bytes);                         \
         }                                                                     \
         for (int _i = threadIdx.x; _i < TC_BK * (TC_BN / 8); _i += 256) {     \
             int _k = _i / (TC_BN / 8);                                        \
@@ -5191,12 +5257,12 @@ DEFINE_SGEMM_BI_NT_BIG_T(f16,  __half,        from_f_f16)
             int _n = _c * 8;                                                  \
             int _gk = (bkIdx) + _k;                                           \
             int _gn = pid_n * TC_BN + _n;                                     \
-            int _valid = (_gk < K) ? (N - _gn) : 0;                           \
-            int _bytes = _valid >= 8 ? 16 : (_valid > 0 ? _valid * 2 : 0);    \
+            int _elems = sgb_cp_async_valid_elems(_gk < K, N, _gn);           \
+            int _bytes = _elems * 2;                                          \
             unsigned _dst = _bs + (unsigned)((_k * TC_LDB + _n) * 2);         \
-            const void* _src = &B[(long long)_gk * ldb + _gn];               \
-            asm volatile("cp.async.ca.shared.global [%0], [%1], 16, %2;\n"    \
-                         :: "r"(_dst), "l"(_src), "r"(_bytes));               \
+            long long _offset = _bytes == 0 ? 0 : (long long)_gk * ldb + _gn; \
+            const void* _src = sgb_cp_async_source(B, _offset, _bytes);        \
+            sgb_cp_async_16_zfill(_dst, _src, _bytes);                         \
         }                                                                     \
         asm volatile("cp.async.commit_group;\n");                            \
     } while (0)
@@ -5261,7 +5327,9 @@ void sgemm_bi_nn_tc_##SUFFIX(                                                  \
     int lmb_row_off = (lm_q & 1) ? 8 : 0;                                      \
     unsigned As_sbase = (unsigned)__cvta_generic_to_shared(&As[0][0][0]);      \
     unsigned Bs_sbase = (unsigned)__cvta_generic_to_shared(&Bs[0][0][0]);      \
-    bool fast_stage = ((lda & 7) == 0) && ((ldb & 7) == 0);                    \
+    bool fast_stage = sgb_is_aligned_16(A) && sgb_is_aligned_16(B) &&         \
+                      ((lda & 7) == 0) && ((ldb & 7) == 0);                    \
+    bool packed_epilogue = sgb_is_aligned_4(C) && ((ldc & 1) == 0);           \
     float acc[4][4][4];                                                        \
     _Pragma("unroll")                                                          \
     for (int fm = 0; fm < 4; fm++) {                                           \
@@ -5354,20 +5422,18 @@ void sgemm_bi_nn_tc_##SUFFIX(                                                  \
         for (int fn = 0; fn < 4; fn++) {                                      \
             int r0 = pid_m * TC_BM + warpM + fm * 16 + g;                     \
             int c0 = pid_n * TC_BN + warpN + fn * 8 + 2 * t;                  \
-            /* c0 is always even (warpN, fn*8, 2t all even), so when          \
-               ldc is even too the (c0, c0+1) pair is 4-byte aligned:         \
-               pack both RNE results into one 32-bit store (half the          \
-               store issue). Values identical to the scalar path. */          \
+            /* c0 is even. A 4-byte base and even ldc keep every row pair      \
+               aligned; subviews and odd strides use the same scalar RNE. */   \
             _Pragma("unroll")                                                 \
             for (int half = 0; half < 2; half++) {                            \
                 int gr = r0 + (half ? 8 : 0);                                 \
                 if (gr >= M) continue;                                        \
                 float v0 = alpha * acc[fm][fn][2 * half];                     \
                 float v1 = alpha * acc[fm][fn][2 * half + 1];                 \
-                if (beta == 0.0f && (ldc & 1) == 0 && c0 + 1 < N) {           \
-                    T_ACT pair[2] = {FROM_F(v0), FROM_F(v1)};                 \
-                    *(unsigned *)&C[(long long)gr * ldc + c0] =               \
-                        *(const unsigned *)pair;                              \
+                T_ACT* dst = &C[(long long)gr * ldc + c0];                    \
+                if (beta == 0.0f && packed_epilogue && c0 + 1 < N &&         \
+                    sgb_is_aligned_4(dst)) {                                   \
+                    sgb_store_pair_rne(dst, v0, v1);                           \
                 } else {                                                      \
                     for (int e = 0; e < 2; e++) {                             \
                         int gc = c0 + e;                                      \
@@ -5375,7 +5441,7 @@ void sgemm_bi_nn_tc_##SUFFIX(                                                  \
                         float val = e ? v1 : v0;                              \
                         if (beta != 0.0f)                                     \
                             val += beta * to_f(C[(long long)gr * ldc + gc]);  \
-                        C[(long long)gr * ldc + gc] = FROM_F(val);            \
+                        dst[e] = FROM_F(val);                                  \
                     }                                                         \
                 }                                                             \
             }                                                                 \
@@ -5418,24 +5484,25 @@ DEFINE_SGEMM_BI_NN_TC(f16,  __half,        from_f_f16,  "f16")
             int _c = (_i % (TC_BM / 8)) * 8;                                  \
             int _gm = (mIdx) + _r;                                            \
             int _gk = pid_m * TC_BM + _c;                                     \
-            int _valid = (_gm < M_red) ? (K_out - _gk) : 0;                   \
-            int _bytes = _valid >= 8 ? 16 : (_valid > 0 ? _valid * 2 : 0);    \
+            int _elems = sgb_cp_async_valid_elems(_gm < M_red, K_out, _gk);   \
+            int _bytes = _elems * 2;                                          \
             unsigned _dst = _xs + (unsigned)((_r * TC_LDB + _c) * 2);         \
-            const void* _src = &A[(long long)_gm * K_out + _gk];             \
-            asm volatile("cp.async.ca.shared.global [%0], [%1], 16, %2;\n"    \
-                         :: "r"(_dst), "l"(_src), "r"(_bytes));               \
+            long long _offset =                                                \
+                _bytes == 0 ? 0 : (long long)_gm * K_out + _gk;               \
+            const void* _src = sgb_cp_async_source(A, _offset, _bytes);        \
+            sgb_cp_async_16_zfill(_dst, _src, _bytes);                         \
         }                                                                     \
         for (int _i = threadIdx.x; _i < TC_BK * (TC_BN / 8); _i += 256) {     \
             int _r = _i / (TC_BN / 8);                                        \
             int _c = (_i % (TC_BN / 8)) * 8;                                  \
             int _gm = (mIdx) + _r;                                            \
             int _gn = pid_n * TC_BN + _c;                                     \
-            int _valid = (_gm < M_red) ? (N - _gn) : 0;                       \
-            int _bytes = _valid >= 8 ? 16 : (_valid > 0 ? _valid * 2 : 0);    \
+            int _elems = sgb_cp_async_valid_elems(_gm < M_red, N, _gn);       \
+            int _bytes = _elems * 2;                                          \
             unsigned _dst = _ys + (unsigned)((_r * TC_LDB + _c) * 2);         \
-            const void* _src = &B[(long long)_gm * N + _gn];                 \
-            asm volatile("cp.async.ca.shared.global [%0], [%1], 16, %2;\n"    \
-                         :: "r"(_dst), "l"(_src), "r"(_bytes));               \
+            long long _offset = _bytes == 0 ? 0 : (long long)_gm * N + _gn;   \
+            const void* _src = sgb_cp_async_source(B, _offset, _bytes);        \
+            sgb_cp_async_16_zfill(_dst, _src, _bytes);                         \
         }                                                                     \
         asm volatile("cp.async.commit_group;\n");                            \
     } while (0)
@@ -5496,7 +5563,9 @@ void sgemm_bi_tn_tc_##SUFFIX(                                                  \
     int lm_brow_off = (lm_q & 1) ? 8 : 0;                                      \
     unsigned Xs_sbase = (unsigned)__cvta_generic_to_shared(&Xs[0][0][0]);      \
     unsigned Ys_sbase = (unsigned)__cvta_generic_to_shared(&Ys[0][0][0]);      \
-    bool fast_stage = ((K_out & 7) == 0) && ((N & 7) == 0);                    \
+    bool fast_stage = sgb_is_aligned_16(A) && sgb_is_aligned_16(B) &&         \
+                      ((K_out & 7) == 0) && ((N & 7) == 0);                    \
+    bool packed_epilogue = sgb_is_aligned_8(C) && ((N & 1) == 0);             \
     float acc[4][4][4];                                                        \
     _Pragma("unroll")                                                          \
     for (int fm = 0; fm < 4; fm++)                                             \
@@ -5574,9 +5643,8 @@ void sgemm_bi_tn_tc_##SUFFIX(                                                  \
         }                                                                      \
         read_buf ^= 1;                                                         \
     }                                                                          \
-    /* epilogue: f32 accumulate into dW; the even (c0, c0+1) pair is          \
-       8-byte aligned when N is even — one float2 read-modify-write           \
-       per pair (same adds, identical values). */                             \
+    /* A float2 RMW needs an 8-byte base and even N; otherwise both values     \
+       take the same per-element load, multiply, add and scalar store. */      \
     _Pragma("unroll")                                                         \
     for (int fm = 0; fm < 4; fm++) {                                          \
         _Pragma("unroll")                                                     \
@@ -5587,18 +5655,17 @@ void sgemm_bi_tn_tc_##SUFFIX(                                                  \
             for (int half = 0; half < 2; half++) {                            \
                 int gr = r0 + (half ? 8 : 0);                                 \
                 if (gr >= K_out) continue;                                    \
-                if ((N & 1) == 0 && c0 + 1 < N) {                             \
-                    float2 *dst = (float2 *)&C[(long long)gr * N + c0];       \
-                    float2 cur = *dst;                                        \
-                    cur.x += alpha * acc[fm][fn][2 * half];                   \
-                    cur.y += alpha * acc[fm][fn][2 * half + 1];               \
-                    *dst = cur;                                               \
+                float* dst = &C[(long long)gr * N + c0];                      \
+                if (c0 + 1 < N) {                                             \
+                    float x = alpha * acc[fm][fn][2 * half];                   \
+                    float y = alpha * acc[fm][fn][2 * half + 1];               \
+                    bool packed = packed_epilogue && sgb_is_aligned_8(dst);    \
+                    sgb_accumulate_float2_or_scalar(dst, x, y, packed);        \
                 } else {                                                      \
                     for (int e = 0; e < 2; e++) {                             \
                         int gc = c0 + e;                                      \
                         if (gc >= N) continue;                                \
-                        C[(long long)gr * N + gc] +=                          \
-                            alpha * acc[fm][fn][2 * half + e];                \
+                        dst[e] += alpha * acc[fm][fn][2 * half + e];          \
                     }                                                         \
                 }                                                             \
             }                                                                 \
@@ -5620,24 +5687,24 @@ DEFINE_SGEMM_BI_TN_TC(f16,  __half,        from_f_f16,  "f16")
             int _c = (_i % (TC_BK / 8)) * 8;                                  \
             int _gm = pid_m * TC_BM + _m;                                     \
             int _gn = (nIdx) + _c;                                            \
-            int _valid = (_gm < M) ? (N - _gn) : 0;                           \
-            int _bytes = _valid >= 8 ? 16 : (_valid > 0 ? _valid * 2 : 0);    \
+            int _elems = sgb_cp_async_valid_elems(_gm < M, N, _gn);           \
+            int _bytes = _elems * 2;                                          \
             unsigned _dst = _ys + (unsigned)((_m * TC_LDA + _c) * 2);         \
-            const void* _src = &A[(long long)_gm * N + _gn];                 \
-            asm volatile("cp.async.ca.shared.global [%0], [%1], 16, %2;\n"    \
-                         :: "r"(_dst), "l"(_src), "r"(_bytes));               \
+            long long _offset = _bytes == 0 ? 0 : (long long)_gm * N + _gn;   \
+            const void* _src = sgb_cp_async_source(A, _offset, _bytes);        \
+            sgb_cp_async_16_zfill(_dst, _src, _bytes);                         \
         }                                                                     \
         for (int _i = threadIdx.x; _i < TC_BN * (TC_BK / 8); _i += 256) {     \
             int _k = _i / (TC_BK / 8);                                        \
             int _c = (_i % (TC_BK / 8)) * 8;                                  \
             int _gk = pid_n * TC_BN + _k;                                     \
             int _gn = (nIdx) + _c;                                            \
-            int _valid = (_gk < K_out) ? (N - _gn) : 0;                       \
-            int _bytes = _valid >= 8 ? 16 : (_valid > 0 ? _valid * 2 : 0);    \
+            int _elems = sgb_cp_async_valid_elems(_gk < K_out, N, _gn);       \
+            int _bytes = _elems * 2;                                          \
             unsigned _dst = _ws + (unsigned)((_k * TC_LDA + _c) * 2);         \
-            const void* _src = &B[(long long)_gk * N + _gn];                 \
-            asm volatile("cp.async.ca.shared.global [%0], [%1], 16, %2;\n"    \
-                         :: "r"(_dst), "l"(_src), "r"(_bytes));               \
+            long long _offset = _bytes == 0 ? 0 : (long long)_gk * N + _gn;   \
+            const void* _src = sgb_cp_async_source(B, _offset, _bytes);        \
+            sgb_cp_async_16_zfill(_dst, _src, _bytes);                         \
         }                                                                     \
         asm volatile("cp.async.commit_group;\n");                            \
     } while (0)
@@ -5696,7 +5763,9 @@ void sgemm_bi_nt_tc_##SUFFIX(                                                  \
     int lmb_col_off = (lm_q & 1) ? 8 : 0;                                      \
     unsigned Ys_sbase = (unsigned)__cvta_generic_to_shared(&Ys[0][0][0]);      \
     unsigned Ws_sbase = (unsigned)__cvta_generic_to_shared(&Ws[0][0][0]);      \
-    bool fast_stage = ((N & 7) == 0);                                          \
+    bool fast_stage = sgb_is_aligned_16(A) && sgb_is_aligned_16(B) &&         \
+                      ((N & 7) == 0);                                          \
+    bool packed_epilogue = sgb_is_aligned_4(C) && ((K_out & 1) == 0);         \
     float acc[4][4][4];                                                        \
     _Pragma("unroll")                                                          \
     for (int fm = 0; fm < 4; fm++)                                             \
@@ -5773,9 +5842,8 @@ void sgemm_bi_nt_tc_##SUFFIX(                                                  \
         }                                                                      \
         read_buf ^= 1;                                                         \
     }                                                                          \
-    /* epilogue: typed RNE overwrite of dX; the even (c0, c0+1) pair          \
-       packs into one 32-bit store when K_out is even (see the NN             \
-       epilogue note). Values identical to the scalar path. */                \
+    /* A 4-byte base and even K_out keep each RNE pair aligned. A half-offset  \
+       subview or tail uses identical scalar conversions. */                  \
     _Pragma("unroll")                                                         \
     for (int fm = 0; fm < 4; fm++) {                                          \
         _Pragma("unroll")                                                     \
@@ -5786,16 +5854,17 @@ void sgemm_bi_nt_tc_##SUFFIX(                                                  \
             for (int half = 0; half < 2; half++) {                            \
                 int gr = r0 + (half ? 8 : 0);                                 \
                 if (gr >= M) continue;                                        \
-                T_ACT pair[2] = {FROM_F(alpha * acc[fm][fn][2 * half]),       \
-                                 FROM_F(alpha * acc[fm][fn][2 * half + 1])};  \
-                if ((K_out & 1) == 0 && c0 + 1 < K_out) {                     \
-                    *(unsigned *)&C[(long long)gr * K_out + c0] =             \
-                        *(const unsigned *)pair;                              \
+                float v0 = alpha * acc[fm][fn][2 * half];                     \
+                float v1 = alpha * acc[fm][fn][2 * half + 1];                 \
+                T_ACT* dst = &C[(long long)gr * K_out + c0];                  \
+                if (packed_epilogue && c0 + 1 < K_out &&                     \
+                    sgb_is_aligned_4(dst)) {                                   \
+                    sgb_store_pair_rne(dst, v0, v1);                           \
                 } else {                                                      \
                     for (int e = 0; e < 2; e++) {                             \
                         int gc = c0 + e;                                      \
                         if (gc >= K_out) continue;                            \
-                        C[(long long)gr * K_out + gc] = pair[e];              \
+                        dst[e] = FROM_F(e ? v1 : v0);                          \
                     }                                                         \
                 }                                                             \
             }                                                                 \
@@ -5859,12 +5928,12 @@ DEFINE_SGEMM_BI_NT_TC(f16,  __half,        from_f_f16,  "f16")
             int _k = (_i % (SGB_TC64_BK / 8)) * 8;                            \
             int _gr = pid_m * SGB_TC64_BM + _m;                               \
             int _gc = (bkIdx) + _k;                                           \
-            int _valid = (_gr < M) ? (K - _gc) : 0;                           \
-            int _bytes = _valid >= 8 ? 16 : (_valid > 0 ? _valid * 2 : 0);    \
+            int _elems = sgb_cp_async_valid_elems(_gr < M, K, _gc);           \
+            int _bytes = _elems * 2;                                          \
             unsigned _dst = _as + (unsigned)((_m * SGB_TC64_LDA + _k) * 2);   \
-            const void* _src = &A[(long long)_gr * lda + _gc];               \
-            asm volatile("cp.async.ca.shared.global [%0], [%1], 16, %2;\n"    \
-                         :: "r"(_dst), "l"(_src), "r"(_bytes));               \
+            long long _offset = _bytes == 0 ? 0 : (long long)_gr * lda + _gc; \
+            const void* _src = sgb_cp_async_source(A, _offset, _bytes);        \
+            sgb_cp_async_16_zfill(_dst, _src, _bytes);                         \
         }                                                                     \
         for (int _i = threadIdx.x; _i < SGB_TC64_BK * (SGB_TC64_BN / 8);      \
              _i += SGB_TC64_THREADS) {                                        \
@@ -5872,12 +5941,12 @@ DEFINE_SGEMM_BI_NT_TC(f16,  __half,        from_f_f16,  "f16")
             int _n = (_i % (SGB_TC64_BN / 8)) * 8;                            \
             int _gk = (bkIdx) + _k;                                           \
             int _gn = pid_n * SGB_TC64_BN + _n;                               \
-            int _valid = (_gk < K) ? (N - _gn) : 0;                           \
-            int _bytes = _valid >= 8 ? 16 : (_valid > 0 ? _valid * 2 : 0);    \
+            int _elems = sgb_cp_async_valid_elems(_gk < K, N, _gn);           \
+            int _bytes = _elems * 2;                                          \
             unsigned _dst = _bs + (unsigned)((_k * SGB_TC64_LDB + _n) * 2);   \
-            const void* _src = &B[(long long)_gk * ldb + _gn];               \
-            asm volatile("cp.async.ca.shared.global [%0], [%1], 16, %2;\n"    \
-                         :: "r"(_dst), "l"(_src), "r"(_bytes));               \
+            long long _offset = _bytes == 0 ? 0 : (long long)_gk * ldb + _gn; \
+            const void* _src = sgb_cp_async_source(B, _offset, _bytes);        \
+            sgb_cp_async_16_zfill(_dst, _src, _bytes);                         \
         }                                                                     \
         asm volatile("cp.async.commit_group;\n");                            \
     } while (0)
@@ -5939,7 +6008,8 @@ void sgemm_bi_nn_tc64_##SUFFIX(                                                \
     int lmb_row_off = (lm_q & 1) ? 8 : 0;                                      \
     unsigned As_sbase = (unsigned)__cvta_generic_to_shared(&As[0][0][0]);      \
     unsigned Bs_sbase = (unsigned)__cvta_generic_to_shared(&Bs[0][0][0]);      \
-    bool fast_stage = ((lda & 7) == 0) && ((ldb & 7) == 0);                    \
+    bool fast_stage = sgb_is_aligned_16(A) && sgb_is_aligned_16(B) &&         \
+                      ((lda & 7) == 0) && ((ldb & 7) == 0);                    \
     float acc[2][4][4];                                                        \
     _Pragma("unroll")                                                          \
     for (int fm = 0; fm < 2; fm++) {                                           \
@@ -6091,12 +6161,12 @@ DEFINE_SGEMM_BI_NN_TC64(f16,  __half,        from_f_f16,  "f16")
             int _k = (_i % (SGB_TC16_BK / 8)) * 8;                            \
             int _gr = pid_m * SGB_TC16_BM + _m;                               \
             int _gc = (bkIdx) + _k;                                           \
-            int _valid = (_gr < M) ? (K - _gc) : 0;                           \
-            int _bytes = _valid >= 8 ? 16 : (_valid > 0 ? _valid * 2 : 0);    \
+            int _elems = sgb_cp_async_valid_elems(_gr < M, K, _gc);           \
+            int _bytes = _elems * 2;                                          \
             unsigned _dst = _as + (unsigned)((_m * SGB_TC16_LDA + _k) * 2);   \
-            const void* _src = &A[(long long)_gr * lda + _gc];               \
-            asm volatile("cp.async.ca.shared.global [%0], [%1], 16, %2;\n"    \
-                         :: "r"(_dst), "l"(_src), "r"(_bytes));               \
+            long long _offset = _bytes == 0 ? 0 : (long long)_gr * lda + _gc; \
+            const void* _src = sgb_cp_async_source(A, _offset, _bytes);        \
+            sgb_cp_async_16_zfill(_dst, _src, _bytes);                         \
         }                                                                     \
         for (int _i = threadIdx.x; _i < SGB_TC16_BK * (SGB_TC16_BN / 8);      \
              _i += SGB_TC16_THREADS) {                                        \
@@ -6104,12 +6174,12 @@ DEFINE_SGEMM_BI_NN_TC64(f16,  __half,        from_f_f16,  "f16")
             int _n = (_i % (SGB_TC16_BN / 8)) * 8;                            \
             int _gk = (bkIdx) + _k;                                           \
             int _gn = pid_n * SGB_TC16_BN + _n;                               \
-            int _valid = (_gk < K) ? (N - _gn) : 0;                           \
-            int _bytes = _valid >= 8 ? 16 : (_valid > 0 ? _valid * 2 : 0);    \
+            int _elems = sgb_cp_async_valid_elems(_gk < K, N, _gn);           \
+            int _bytes = _elems * 2;                                          \
             unsigned _dst = _bs + (unsigned)((_k * SGB_TC16_LDB + _n) * 2);   \
-            const void* _src = &B[(long long)_gk * ldb + _gn];               \
-            asm volatile("cp.async.ca.shared.global [%0], [%1], 16, %2;\n"    \
-                         :: "r"(_dst), "l"(_src), "r"(_bytes));               \
+            long long _offset = _bytes == 0 ? 0 : (long long)_gk * ldb + _gn; \
+            const void* _src = sgb_cp_async_source(B, _offset, _bytes);        \
+            sgb_cp_async_16_zfill(_dst, _src, _bytes);                         \
         }                                                                     \
         asm volatile("cp.async.commit_group;\n");                            \
     } while (0)
@@ -6171,7 +6241,8 @@ void sgemm_bi_nn_tc16_##SUFFIX(                                                \
     int lmb_row_off = (lm_q & 1) ? 8 : 0;                                      \
     unsigned As_sbase = (unsigned)__cvta_generic_to_shared(&As[0][0][0]);      \
     unsigned Bs_sbase = (unsigned)__cvta_generic_to_shared(&Bs[0][0][0]);      \
-    bool fast_stage = ((lda & 7) == 0) && ((ldb & 7) == 0);                    \
+    bool fast_stage = sgb_is_aligned_16(A) && sgb_is_aligned_16(B) &&         \
+                      ((lda & 7) == 0) && ((ldb & 7) == 0);                    \
     float acc[4];                                                              \
     {                                                                          \
         float b0 = 0.0f, b1 = 0.0f;                                            \
@@ -6291,12 +6362,13 @@ DEFINE_SGEMM_BI_NN_TC16(f16,  __half,        from_f_f16,  "f16")
             int _c = (_i % (SGB_TC64_BM / 8)) * 8;                            \
             int _gm = (mIdx) + _r;                                            \
             int _gk = pid_m * SGB_TC64_BM + _c;                               \
-            int _valid = (_gm < M_red) ? (K_out - _gk) : 0;                   \
-            int _bytes = _valid >= 8 ? 16 : (_valid > 0 ? _valid * 2 : 0);    \
+            int _elems = sgb_cp_async_valid_elems(_gm < M_red, K_out, _gk);   \
+            int _bytes = _elems * 2;                                          \
             unsigned _dst = _xs + (unsigned)((_r * SGB_TC64_LDB + _c) * 2);   \
-            const void* _src = &A[(long long)_gm * K_out + _gk];             \
-            asm volatile("cp.async.ca.shared.global [%0], [%1], 16, %2;\n"    \
-                         :: "r"(_dst), "l"(_src), "r"(_bytes));               \
+            long long _offset =                                                \
+                _bytes == 0 ? 0 : (long long)_gm * K_out + _gk;               \
+            const void* _src = sgb_cp_async_source(A, _offset, _bytes);        \
+            sgb_cp_async_16_zfill(_dst, _src, _bytes);                         \
         }                                                                     \
         for (int _i = threadIdx.x; _i < SGB_TC64_BK * (SGB_TC64_BN / 8);      \
              _i += SGB_TC64_THREADS) {                                        \
@@ -6304,12 +6376,12 @@ DEFINE_SGEMM_BI_NN_TC16(f16,  __half,        from_f_f16,  "f16")
             int _c = (_i % (SGB_TC64_BN / 8)) * 8;                            \
             int _gm = (mIdx) + _r;                                            \
             int _gn = pid_n * SGB_TC64_BN + _c;                               \
-            int _valid = (_gm < M_red) ? (N - _gn) : 0;                       \
-            int _bytes = _valid >= 8 ? 16 : (_valid > 0 ? _valid * 2 : 0);    \
+            int _elems = sgb_cp_async_valid_elems(_gm < M_red, N, _gn);       \
+            int _bytes = _elems * 2;                                          \
             unsigned _dst = _ys + (unsigned)((_r * SGB_TC64_LDB + _c) * 2);   \
-            const void* _src = &B[(long long)_gm * N + _gn];                 \
-            asm volatile("cp.async.ca.shared.global [%0], [%1], 16, %2;\n"    \
-                         :: "r"(_dst), "l"(_src), "r"(_bytes));               \
+            long long _offset = _bytes == 0 ? 0 : (long long)_gm * N + _gn;   \
+            const void* _src = sgb_cp_async_source(B, _offset, _bytes);        \
+            sgb_cp_async_16_zfill(_dst, _src, _bytes);                         \
         }                                                                     \
         asm volatile("cp.async.commit_group;\n");                            \
     } while (0)
@@ -6369,7 +6441,8 @@ void sgemm_bi_tn_tc64_##SUFFIX(                                                \
     int lm_brow_off = (lm_q & 1) ? 8 : 0;                                      \
     unsigned Xs_sbase = (unsigned)__cvta_generic_to_shared(&Xs[0][0][0]);      \
     unsigned Ys_sbase = (unsigned)__cvta_generic_to_shared(&Ys[0][0][0]);      \
-    bool fast_stage = ((K_out & 7) == 0) && ((N & 7) == 0);                    \
+    bool fast_stage = sgb_is_aligned_16(A) && sgb_is_aligned_16(B) &&         \
+                      ((K_out & 7) == 0) && ((N & 7) == 0);                    \
     float acc[2][4][4];                                                        \
     _Pragma("unroll")                                                          \
     for (int fm = 0; fm < 2; fm++)                                             \
@@ -6484,12 +6557,12 @@ DEFINE_SGEMM_BI_TN_TC64(f16,  __half,        from_f_f16,  "f16")
             int _c = (_i % (SGB_TC64_BK / 8)) * 8;                            \
             int _gm = pid_m * SGB_TC64_BM + _m;                               \
             int _gn = (nIdx) + _c;                                            \
-            int _valid = (_gm < M) ? (N - _gn) : 0;                           \
-            int _bytes = _valid >= 8 ? 16 : (_valid > 0 ? _valid * 2 : 0);    \
+            int _elems = sgb_cp_async_valid_elems(_gm < M, N, _gn);           \
+            int _bytes = _elems * 2;                                          \
             unsigned _dst = _ys + (unsigned)((_m * SGB_TC64_LDA + _c) * 2);   \
-            const void* _src = &A[(long long)_gm * N + _gn];                 \
-            asm volatile("cp.async.ca.shared.global [%0], [%1], 16, %2;\n"    \
-                         :: "r"(_dst), "l"(_src), "r"(_bytes));               \
+            long long _offset = _bytes == 0 ? 0 : (long long)_gm * N + _gn;   \
+            const void* _src = sgb_cp_async_source(A, _offset, _bytes);        \
+            sgb_cp_async_16_zfill(_dst, _src, _bytes);                         \
         }                                                                     \
         for (int _i = threadIdx.x; _i < SGB_TC64_BN * (SGB_TC64_BK / 8);      \
              _i += SGB_TC64_THREADS) {                                        \
@@ -6497,12 +6570,12 @@ DEFINE_SGEMM_BI_TN_TC64(f16,  __half,        from_f_f16,  "f16")
             int _c = (_i % (SGB_TC64_BK / 8)) * 8;                            \
             int _gk = pid_n * SGB_TC64_BN + _k;                               \
             int _gn = (nIdx) + _c;                                            \
-            int _valid = (_gk < K_out) ? (N - _gn) : 0;                       \
-            int _bytes = _valid >= 8 ? 16 : (_valid > 0 ? _valid * 2 : 0);    \
+            int _elems = sgb_cp_async_valid_elems(_gk < K_out, N, _gn);       \
+            int _bytes = _elems * 2;                                          \
             unsigned _dst = _ws + (unsigned)((_k * SGB_TC64_LDA + _c) * 2);   \
-            const void* _src = &B[(long long)_gk * N + _gn];                 \
-            asm volatile("cp.async.ca.shared.global [%0], [%1], 16, %2;\n"    \
-                         :: "r"(_dst), "l"(_src), "r"(_bytes));               \
+            long long _offset = _bytes == 0 ? 0 : (long long)_gk * N + _gn;   \
+            const void* _src = sgb_cp_async_source(B, _offset, _bytes);        \
+            sgb_cp_async_16_zfill(_dst, _src, _bytes);                         \
         }                                                                     \
         asm volatile("cp.async.commit_group;\n");                            \
     } while (0)
@@ -6560,7 +6633,8 @@ void sgemm_bi_nt_tc64_##SUFFIX(                                                \
     int lmb_col_off = (lm_q & 1) ? 8 : 0;                                      \
     unsigned Ys_sbase = (unsigned)__cvta_generic_to_shared(&Ys[0][0][0]);      \
     unsigned Ws_sbase = (unsigned)__cvta_generic_to_shared(&Ws[0][0][0]);      \
-    bool fast_stage = ((N & 7) == 0);                                          \
+    bool fast_stage = sgb_is_aligned_16(A) && sgb_is_aligned_16(B) &&         \
+                      ((N & 7) == 0);                                          \
     float acc[2][4][4];                                                        \
     _Pragma("unroll")                                                          \
     for (int fm = 0; fm < 2; fm++)                                             \
