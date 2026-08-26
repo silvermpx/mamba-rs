@@ -468,20 +468,25 @@ fn gemm_ladder_sweep() {
     let mut sweep = sweep_new(&dev, &ctx);
     let scope = std::env::var("MAMBA_RS_SWEEP").unwrap_or_default();
 
-    // Targeted cells: MAMBA_RS_SWEEP=cell:K,N,M[;K,N,M...] measures and
-    // records exactly those forward cells, no assertions - the record
-    // lane's probe mode.
+    // Targeted cells: MAMBA_RS_SWEEP=cell:[op,]K,N,M[;...] measures and
+    // records exactly those cells, no assertions - the record lane's
+    // probe mode. op is nn (default), dw or dx.
     if let Some(list) = scope.strip_prefix("cell:") {
         for spec in list.split(';') {
-            let p: Vec<usize> = spec
-                .split(',')
-                .map(|v| v.trim().parse().expect("K,N,M"))
-                .collect();
-            assert_eq!(p.len(), 3, "cell spec is K,N,M");
-            let rows = sweep.run_cell(WeightDtype::Bf16, Op::NnFwd, p[2], p[0], p[1]);
+            let parts: Vec<&str> = spec.split(',').map(str::trim).collect();
+            let (op, dims) = match parts[0] {
+                "nn" => (Op::NnFwd, &parts[1..]),
+                "dw" => (Op::TnDw, &parts[1..]),
+                "dx" => (Op::NtDx, &parts[1..]),
+                _ => (Op::NnFwd, &parts[..]),
+            };
+            let p: Vec<usize> = dims.iter().map(|v| v.parse().expect("K,N,M")).collect();
+            assert_eq!(p.len(), 3, "cell spec is [op,]K,N,M");
+            let rows = sweep.run_cell(WeightDtype::Bf16, op, p[2], p[0], p[1]);
             for (t, s) in &rows {
                 println!(
-                    "cell K{} N{} M{}: {} p50={:.2}us p95={:.2}us groups={:?}",
+                    "cell {} K{} N{} M{}: {} p50={:.2}us p95={:.2}us groups={:?}",
+                    op.name(),
                     p[0],
                     p[1],
                     p[2],
