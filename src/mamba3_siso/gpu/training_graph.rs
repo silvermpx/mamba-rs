@@ -324,13 +324,14 @@ impl GpuMamba3TrainingStepGraph {
              capture (a larger typed bi GEMM regrew the scratch after this \
              graph was captured — re-capture or presize for the larger shape)"
         );
-        assert_eq!(
-            ctx.gemm_route(),
-            self.captured_gemm_route,
-            "M3 training_graph replay: GEMM route changed since capture \
-             (batch_invariant, bi_tensor_cores, fast_gemm, bi_gemm_family) - \
-             the captured kernels cannot follow a route change; re-capture instead"
-        );
+        if ctx.gemm_route() != self.captured_gemm_route {
+            return Err(
+                "M3 training_graph replay: GEMM route changed since capture \
+                 (batch_invariant, bi_tensor_cores, fast_gemm, bi_gemm_family) - \
+                 the captured kernels cannot follow a route change; re-capture instead"
+                    .into(),
+            );
+        }
         self.graph
             .launch()
             .map_err(|e| format!("M3 training_graph launch: {e:?}"))
@@ -565,13 +566,14 @@ impl GpuMamba3F32TrainingStepGraph {
             self.captured_weights_norm_f_ptr,
             "norm_f_weight"
         );
-        assert_eq!(
-            ctx.gemm_route(),
-            self.captured_gemm_route,
-            "M3 f32 training_graph replay: GEMM route changed since capture \
-             (batch_invariant, bi_tensor_cores, fast_gemm, bi_gemm_family) - \
-             the captured kernels cannot follow a route change; re-capture instead"
-        );
+        if ctx.gemm_route() != self.captured_gemm_route {
+            return Err(
+                "M3 f32 training_graph replay: GEMM route changed since capture \
+                 (batch_invariant, bi_tensor_cores, fast_gemm, bi_gemm_family) - \
+                 the captured kernels cannot follow a route change; re-capture instead"
+                    .into(),
+            );
+        }
         self.graph
             .launch()
             .map_err(|e| format!("M3 f32 training_graph launch: {e:?}"))

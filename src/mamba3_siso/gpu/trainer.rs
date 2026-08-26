@@ -1020,13 +1020,12 @@ impl Mamba3TrainerMixed {
                 "M3 f16 graph replay: bi_upcast_scratch pointer changed since capture \
                  (a larger typed triad GEMM grew the scratch - re-capture or pre-size the larger shape)"
             );
-            assert_eq!(
-                self.ctx.gemm_route(),
-                self.captured_f16_gemm_route,
-                "M3 f16 graph replay: GEMM route changed since capture \
-                 (batch_invariant, bi_tensor_cores, fast_gemm, bi_gemm_family) - \
-                 the captured kernels cannot follow a route change; re-capture instead"
-            );
+            if self.ctx.gemm_route() != self.captured_f16_gemm_route {
+                return Err("M3 f16 graph replay: GEMM route changed since capture \
+                     (batch_invariant, bi_tensor_cores, fast_gemm, bi_gemm_family) - \
+                     the captured kernels cannot follow a route change; re-capture instead"
+                    .into());
+            }
 
             g.launch()
                 .map_err(|e| format!("M3 f16 graph launch: {e:?}"))?;
