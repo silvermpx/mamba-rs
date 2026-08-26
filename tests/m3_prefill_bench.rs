@@ -168,3 +168,167 @@ fn m3_train_step_at_multichunk_shape() {
         );
     }
 }
+
+/// The G8 page measurement: pooled-graph replay latency per page at the
+/// prism serve shape (non-identity 1024->384 input projection, T=4621),
+/// across the three numeric routes that matter: today's deterministic
+/// f32 serve (Fixed family), the typed bf16 lane on the batch-invariant
+/// tensor-core ladder, and non-deterministic cuBLAS f32 as the speed
+/// reference.
+#[test]
+#[ignore]
+fn m3_pooled_page_bench_typed_vs_f32() {
+    use mamba_rs::mamba_ssm::gpu::context::{BiGemmFamily, GpuCtx};
+    use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
+    use mamba_rs::mamba3_siso::gpu::kernels::Mamba3Kernels;
+    use mamba_rs::mamba3_siso::gpu::prefill::{
+        Mamba3Prefill, Mamba3PrefillPooledGraph, Mamba3PrefillRun,
+    };
+    use mamba_rs::mamba3_siso::gpu::state::{GpuMamba3Dims, GpuMamba3StateBufs};
+    use mamba_rs::mamba3_siso::gpu::weights::{
+        GpuMamba3MixedWeights, GpuMamba3WeightsInf, Mamba3WeightsView,
+    };
+
+    let cfg = Mamba3Config {
+        d_model: 384,
+        d_state: 16,
+        expand: 2,
+        headdim: 16,
+        ngroups: 1,
+        n_layers: 24,
+        rope_fraction: 0.5,
+        a_floor: 1e-4,
+        is_outproj_norm: true,
+        ..Mamba3Config::default()
+    };
+    let input_dim = 1024usize;
+    let t = 4621usize;
+    let dm = cfg.d_model;
+    let w = Mamba3Weights::init(&cfg, input_dim, 42);
+    let input = det(t * input_dim, 0xA1);
+
+    let dims = GpuMamba3Dims {
+        batch: 1,
+        d_model: dm,
+        d_inner: cfg.d_inner(),
+        d_state: cfg.d_state,
+        nheads: cfg.nheads(),
+        headdim: cfg.headdim,
+        ngroups: cfg.ngroups,
+        in_proj_dim: cfg.in_proj_out_dim(),
+        seq_len: t,
+        mamba_input_dim: input_dim,
+        n_layers: cfg.n_layers,
+        n_angles: cfg.num_rope_angles(),
+        a_floor: cfg.a_floor,
+        is_outproj_norm: cfg.is_outproj_norm,
+        rms_norm_eps: cfg.rms_norm_eps,
+        use_parallel_scan: true,
+    };
+
+    // (label, dtype, batch_invariant, tc, family)
+    let arms: &[(&str, WeightDtype, bool, bool, BiGemmFamily)] = &[
+        (
+            "f32 fixed (serve today)",
+            WeightDtype::F32,
+            true,
+            false,
+            BiGemmFamily::Fixed,
+        ),
+        (
+            "bf16 ladder (serve route)",
+            WeightDtype::Bf16,
+            true,
+            true,
+            BiGemmFamily::Triad,
+        ),
+        (
+            "f32 cuBLAS (non-det ref)",
+            WeightDtype::F32,
+            false,
+            false,
+            BiGemmFamily::Triad,
+        ),
+    ];
+
+    for &(label, dtype, bi, tc, family) in arms {
+        let device = GpuDevice::new(0).expect("cuda device");
+        let ctx = GpuCtx::new(&device).expect("ctx");
+        ctx.set_batch_invariant(bi);
+        ctx.set_bi_gemm_family(family);
+        if tc {
+            ctx.set_bi_tensor_cores(true);
+        }
+        let arch = GpuDevice::nvrtc_arch(device.compute_capability);
+        let kernels = Mamba3Kernels::compile(device.context(), arch).expect("m3 kernels");
+        let fw;
+        let mw;
+        let view: &dyn Mamba3WeightsView = if dtype == WeightDtype::F32 {
+            fw = GpuMamba3WeightsInf::from_cpu(&ctx.stream, &w, input_dim).unwrap();
+            &fw
+        } else {
+            mw = GpuMamba3MixedWeights::from_cpu(&ctx.stream, &w, dtype).unwrap();
+            &mw
+        };
+        let gpu_input = GpuBuffer::from_cpu(&ctx.stream, &input).unwrap();
+        let mut prefill = Mamba3Prefill::new_with_dtype(&ctx.stream, &dims, dtype).unwrap();
+        let mut last_hidden = GpuBuffer::zeros(&ctx.stream, dm).unwrap();
+        let mut pooled = GpuBuffer::zeros(&ctx.stream, dm).unwrap();
+        let nl = cfg.n_layers;
+        let nh = cfg.nheads();
+        let mut ssm = GpuBuffer::zeros(&ctx.stream, nl * nh * cfg.headdim * cfg.d_state).unwrap();
+        let mut kst = GpuBuffer::zeros(&ctx.stream, nl * nh * cfg.d_state).unwrap();
+        let mut vst = GpuBuffer::zeros(&ctx.stream, nl * nh * cfg.headdim).unwrap();
+        let mut ast =
+            GpuBuffer::zeros(&ctx.stream, nl * nh * cfg.num_rope_angles().max(1)).unwrap();
+
+        let graph = Mamba3PrefillPooledGraph::capture(
+            &mut prefill,
+            &Mamba3PrefillRun {
+                ctx: &ctx,
+                kernels: &kernels,
+                dims: &dims,
+                weights: view,
+                mamba_input: &gpu_input,
+                identity_proj: false,
+                carry_state: false,
+            },
+            GpuMamba3StateBufs {
+                ssm: &mut ssm,
+                k: &mut kst,
+                v: &mut vst,
+                angle: &mut ast,
+            },
+            &mut last_hidden,
+            &mut pooled,
+        )
+        .unwrap();
+
+        let states = GpuMamba3StateBufs {
+            ssm: &mut ssm,
+            k: &mut kst,
+            v: &mut vst,
+            angle: &mut ast,
+        };
+        for _ in 0..3 {
+            graph
+                .replay(&ctx, view, &gpu_input, &states, &pooled)
+                .unwrap();
+        }
+        ctx.stream.synchronize().unwrap();
+        let iters = 40usize;
+        let t0 = Instant::now();
+        for _ in 0..iters {
+            graph
+                .replay(&ctx, view, &gpu_input, &states, &pooled)
+                .unwrap();
+        }
+        ctx.stream.synchronize().unwrap();
+        let dt = t0.elapsed().as_secs_f64();
+        eprintln!(
+            "{label:>28}: {:.2} ms/page ({:.1} pages/s)",
+            1e3 * dt / iters as f64,
+            iters as f64 / dt
+        );
+    }
+}
