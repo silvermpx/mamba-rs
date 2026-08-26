@@ -1557,3 +1557,500 @@ SGB_DEFINE_SGEMM_BI_NT_TC64(f16,  __half,        from_f_f16,  "f16")
 #undef SGB_TC64_STAGE_TN_ASYNC
 #undef SGB_TC64_STAGE_TN_SCALAR
 #undef SGB_TC64_THREADS
+
+// Deterministic TF32 uses a private F32 pipeline. The 16-bit paths above have
+// different fragment, staging, and rounding contracts.
+struct Sm80Tf32KernelParams {
+    float alpha;
+    float beta;
+    int m;
+    int k;
+    int n;
+    int lda;
+    int ldb;
+    int ldc;
+};
+
+static_assert(sizeof(Sm80Tf32KernelParams) == 32, "TF32 parameter ABI drift");
+static_assert(alignof(Sm80Tf32KernelParams) == 4, "TF32 parameter alignment drift");
+#if !defined(__CUDACC_RTC__)
+static_assert(offsetof(Sm80Tf32KernelParams, alpha) == 0, "alpha offset");
+static_assert(offsetof(Sm80Tf32KernelParams, beta) == 4, "beta offset");
+static_assert(offsetof(Sm80Tf32KernelParams, m) == 8, "m offset");
+static_assert(offsetof(Sm80Tf32KernelParams, k) == 12, "k offset");
+static_assert(offsetof(Sm80Tf32KernelParams, n) == 16, "n offset");
+static_assert(offsetof(Sm80Tf32KernelParams, lda) == 20, "lda offset");
+static_assert(offsetof(Sm80Tf32KernelParams, ldb) == 24, "ldb offset");
+static_assert(offsetof(Sm80Tf32KernelParams, ldc) == 28, "ldc offset");
+#endif
+
+enum SgbTf32Op { SgbTf32Nn, SgbTf32Tn, SgbTf32Nt };
+
+template <int BM, int BN, int Stages>
+struct __align__(16) SgbTf32Storage {
+    static constexpr int bk32 = 32;
+    static constexpr int AStride = 36;
+    static constexpr int BStride = BN == 64 ? 72 : 40;
+    float a[Stages][BM][AStride];
+    float b[Stages][bk32][BStride];
+};
+
+static_assert(sizeof(SgbTf32Storage<128, 64, 2>) == 55296, "M128N64 s2 storage");
+static_assert(sizeof(SgbTf32Storage<128, 64, 3>) == 82944, "M128N64 s3 storage");
+static_assert(sizeof(SgbTf32Storage<64, 64, 2>) == 36864, "M64N64 s2 storage");
+static_assert(sizeof(SgbTf32Storage<64, 64, 3>) == 55296, "M64N64 s3 storage");
+static_assert(sizeof(SgbTf32Storage<16, 32, 4>) == 29696, "M16N32 s4 storage");
+
+struct SgbTf32Problem {
+    float* output;
+    const float* a;
+    const float* b;
+    const float* bias;
+    Sm80Tf32KernelParams params;
+    int tile_row;
+    int tile_column;
+};
+
+__device__ __forceinline__ unsigned sgb_tf32_rna(float value) {
+    unsigned result;
+    asm("cvt.rna.tf32.f32 %0, %1;" : "=r"(result) : "f"(value));
+    return result;
+}
+
+__device__ __forceinline__ void sgb_tf32_mma_m16n8k8(
+    float (&d)[4], const unsigned (&a)[4], const unsigned (&b)[2]) {
+    asm volatile(
+        "mma.sync.aligned.m16n8k8.row.col.f32.tf32.tf32.f32 "
+        "{%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3};\n"
+        : "+f"(d[0]), "+f"(d[1]), "+f"(d[2]), "+f"(d[3])
+        : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]),
+          "r"(b[0]), "r"(b[1]));
+}
+
+template <SgbTf32Op Op>
+__device__ __forceinline__ int sgb_tf32_rows(const Sm80Tf32KernelParams& p) {
+    return Op == SgbTf32Tn ? p.k : p.m;
+}
+
+template <SgbTf32Op Op>
+__device__ __forceinline__ int sgb_tf32_columns(const Sm80Tf32KernelParams& p) {
+    return Op == SgbTf32Nt ? p.k : p.n;
+}
+
+template <SgbTf32Op Op>
+__device__ __forceinline__ int sgb_tf32_reduction(const Sm80Tf32KernelParams& p) {
+    return Op == SgbTf32Nn ? p.k : (Op == SgbTf32Tn ? p.m : p.n);
+}
+
+template <SgbTf32Op Op>
+__device__ __forceinline__ float sgb_tf32_read_a(
+    const SgbTf32Problem& problem, int row, int reduction) {
+    if constexpr (Op == SgbTf32Tn) {
+        return problem.a[(long long)reduction * problem.params.lda + row];
+    }
+    return problem.a[(long long)row * problem.params.lda + reduction];
+}
+
+template <SgbTf32Op Op>
+__device__ __forceinline__ float sgb_tf32_read_b(
+    const SgbTf32Problem& problem, int reduction, int column) {
+    if constexpr (Op == SgbTf32Nt) {
+        return problem.b[(long long)column * problem.params.ldb + reduction];
+    }
+    return problem.b[(long long)reduction * problem.params.ldb + column];
+}
+
+template <SgbTf32Op Op, int BM, int BN, int Stages>
+__device__ __forceinline__ void sgb_tf32_stage_scalar(
+    SgbTf32Storage<BM, BN, Stages>* storage, int stage,
+    const SgbTf32Problem& problem, int reduction_base) {
+    int rows = sgb_tf32_rows<Op>(problem.params);
+    int columns = sgb_tf32_columns<Op>(problem.params);
+    for (int linear = (int)threadIdx.x; linear < BM * 32; linear += (int)blockDim.x) {
+        int row = linear >> 5;
+        int reduction = linear & 31;
+        int global_row = problem.tile_row + row;
+        int global_reduction = reduction_base + reduction;
+        float value = 0.0f;
+        if (global_row < rows && global_reduction < sgb_tf32_reduction<Op>(problem.params)) {
+            value = sgb_tf32_read_a<Op>(problem, global_row, global_reduction);
+        }
+        storage->a[stage][row][reduction] = value;
+    }
+    for (int linear = (int)threadIdx.x; linear < 32 * BN; linear += (int)blockDim.x) {
+        int reduction = linear / BN;
+        int column = linear - reduction * BN;
+        int global_reduction = reduction_base + reduction;
+        int global_column = problem.tile_column + column;
+        float value = 0.0f;
+        if (global_column < columns && global_reduction < sgb_tf32_reduction<Op>(problem.params)) {
+            value = sgb_tf32_read_b<Op>(problem, global_reduction, global_column);
+        }
+        storage->b[stage][reduction][column] = value;
+    }
+}
+
+__device__ __forceinline__ void sgb_tf32_cp_async_4_zfill(
+    unsigned shared_dst, const void* global_src, int valid_bytes) {
+    asm volatile("cp.async.ca.shared.global [%0], [%1], 4, %2;\n"
+                 :: "r"(shared_dst), "l"(global_src), "r"(valid_bytes));
+}
+
+template <SgbTf32Op Op, int BM, int BN, int Stages>
+__device__ __forceinline__ void sgb_tf32_stage_async(
+    SgbTf32Storage<BM, BN, Stages>* storage, int stage,
+    const SgbTf32Problem& problem, int reduction_base) {
+    int rows = sgb_tf32_rows<Op>(problem.params);
+    int columns = sgb_tf32_columns<Op>(problem.params);
+    int reduction_extent = sgb_tf32_reduction<Op>(problem.params);
+
+    if constexpr (Op == SgbTf32Tn) {
+        for (int linear = (int)threadIdx.x; linear < BM * 32; linear += (int)blockDim.x) {
+            int row = linear >> 5;
+            int reduction = linear & 31;
+            int global_row = problem.tile_row + row;
+            int global_reduction = reduction_base + reduction;
+            int _bytes = global_row < rows && global_reduction < reduction_extent ? 4 : 0;
+            long long valid_offset = (long long)global_reduction * problem.params.lda + global_row;
+            long long safe_offset = _bytes == 0 ? 0 : valid_offset;
+            unsigned dst = (unsigned)__cvta_generic_to_shared(&storage->a[stage][row][reduction]);
+            sgb_tf32_cp_async_4_zfill(dst, problem.a + safe_offset, _bytes);
+        }
+    } else {
+        for (int linear = (int)threadIdx.x; linear < BM * 8; linear += (int)blockDim.x) {
+            int row = linear >> 3;
+            int reduction = (linear & 7) * 4;
+            int global_row = problem.tile_row + row;
+            int global_reduction = reduction_base + reduction;
+            int valid = global_row < rows ? reduction_extent - global_reduction : 0;
+            valid = valid < 0 ? 0 : (valid > 4 ? 4 : valid);
+            int _bytes = valid * 4;
+            long long valid_offset = (long long)global_row * problem.params.lda + global_reduction;
+            long long safe_offset = _bytes == 0 ? 0 : valid_offset;
+            unsigned dst = (unsigned)__cvta_generic_to_shared(&storage->a[stage][row][reduction]);
+            sgb_cp_async_16_zfill(dst, problem.a + safe_offset, _bytes);
+        }
+    }
+
+    if constexpr (Op == SgbTf32Nt) {
+        for (int linear = (int)threadIdx.x; linear < 32 * BN; linear += (int)blockDim.x) {
+            int reduction = linear / BN;
+            int column = linear - reduction * BN;
+            int global_reduction = reduction_base + reduction;
+            int global_column = problem.tile_column + column;
+            int _bytes = global_column < columns && global_reduction < reduction_extent ? 4 : 0;
+            long long valid_offset = (long long)global_column * problem.params.ldb + global_reduction;
+            long long safe_offset = _bytes == 0 ? 0 : valid_offset;
+            unsigned dst = (unsigned)__cvta_generic_to_shared(&storage->b[stage][reduction][column]);
+            sgb_tf32_cp_async_4_zfill(dst, problem.b + safe_offset, _bytes);
+        }
+    } else {
+        for (int linear = (int)threadIdx.x; linear < 32 * (BN / 4); linear += (int)blockDim.x) {
+            int reduction = linear / (BN / 4);
+            int column = (linear - reduction * (BN / 4)) * 4;
+            int global_reduction = reduction_base + reduction;
+            int global_column = problem.tile_column + column;
+            int valid = global_reduction < reduction_extent ? columns - global_column : 0;
+            valid = valid < 0 ? 0 : (valid > 4 ? 4 : valid);
+            int _bytes = valid * 4;
+            long long valid_offset = (long long)global_reduction * problem.params.ldb + global_column;
+            long long safe_offset = _bytes == 0 ? 0 : valid_offset;
+            unsigned dst = (unsigned)__cvta_generic_to_shared(&storage->b[stage][reduction][column]);
+            sgb_cp_async_16_zfill(dst, problem.b + safe_offset, _bytes);
+        }
+    }
+    asm volatile("cp.async.commit_group;\n" ::);
+}
+
+template <SgbTf32Op Op>
+__device__ __forceinline__ float sgb_tf32_epilogue(
+    float accumulator, float old_output, const float* bias, int column,
+    const Sm80Tf32KernelParams& params) {
+    if constexpr (Op == SgbTf32Nn) {
+        (void)bias;
+        (void)column;
+        float value = params.alpha == 1.0f
+            ? accumulator
+            : __fmul_rn(params.alpha, accumulator);
+        return __fmaf_rn(params.beta, old_output, value);
+    } else if constexpr (Op == SgbTf32Tn) {
+        (void)bias;
+        (void)column;
+        return __fmaf_rn(params.alpha, accumulator, old_output);
+    } else {
+        (void)old_output;
+        (void)bias;
+        (void)column;
+        return params.alpha == 1.0f
+            ? accumulator
+            : __fmul_rn(params.alpha, accumulator);
+    }
+}
+
+template <SgbTf32Op Op>
+__device__ __forceinline__ void sgb_tf32_store(
+    float* output, int row, int column, float accumulator,
+    const float* bias, const Sm80Tf32KernelParams& params) {
+    int rows = sgb_tf32_rows<Op>(params);
+    int columns = sgb_tf32_columns<Op>(params);
+    if (row >= rows || column >= columns) return;
+    float* destination = output + (long long)row * params.ldc + column;
+    float old_output = Op == SgbTf32Nt ? 0.0f : *destination;
+    float value = sgb_tf32_epilogue<Op>(accumulator, old_output, bias, column, params);
+#line 2001 "mamba_tf32_k0_zero_store"
+    *destination = value;
+#line 1560 "sm80.cu"
+}
+
+template <SgbTf32Op Op, int BM, int BN>
+__device__ __forceinline__ void sgb_tf32_zero_reduction_epilogue(
+    float* output, const float* bias, const Sm80Tf32KernelParams& params) {
+    (void)&sgb_tf32_epilogue<Op>;
+    int rows = sgb_tf32_rows<Op>(params);
+    int columns = sgb_tf32_columns<Op>(params);
+    int tile_row = (int)blockIdx.x / ((columns + BN - 1) / BN) * BM;
+    int tile_column = (int)blockIdx.x % ((columns + BN - 1) / BN) * BN;
+    for (int linear = (int)threadIdx.x; linear < BM * BN; linear += (int)blockDim.x) {
+        int row = tile_row + linear / BN;
+        int column = tile_column + linear % BN;
+        if (row < rows && column < columns) {
+            float accumulator = Op == SgbTf32Nn && bias != nullptr ? bias[column] : 0.0f;
+            sgb_tf32_store<Op>(output, row, column, accumulator, bias, params);
+        }
+    }
+}
+
+template <SgbTf32Op Op>
+__device__ __forceinline__ bool sgb_tf32_can_stage_async(
+    const float* a, const float* b, const Sm80Tf32KernelParams& params) {
+    bool a_aligned = true;
+    bool b_aligned = true;
+    if constexpr (Op != SgbTf32Tn) {
+        a_aligned = sgb_is_aligned_16(a) && (params.lda & 3) == 0;
+    }
+    if constexpr (Op != SgbTf32Nt) {
+        b_aligned = sgb_is_aligned_16(b) && (params.ldb & 3) == 0;
+    }
+    return a_aligned && b_aligned;
+}
+
+template <int BM, int BN, int Stages, int MAtoms, int NAtoms>
+__device__ __forceinline__ void sgb_tf32_compute_stage(
+    SgbTf32Storage<BM, BN, Stages>* storage, int stage,
+    int warp_m, int warp_n, int group, int thread,
+    float (&accumulators)[MAtoms][NAtoms][4]) {
+    const int k_offsets[4] = {0, 8, 16, 24};
+#pragma unroll
+    for (int issue = 0; issue < 4; ++issue) {
+        int k8 = k_offsets[issue];
+        unsigned a_fragments[MAtoms][4];
+        unsigned b_fragments[NAtoms][2];
+#pragma unroll
+        for (int m_atom = 0; m_atom < MAtoms; ++m_atom) {
+            int row = warp_m + m_atom * 16 + group;
+            a_fragments[m_atom][0] =
+                sgb_tf32_rna(storage->a[stage][row][k8 + thread]);
+            a_fragments[m_atom][1] =
+                sgb_tf32_rna(storage->a[stage][row + 8][k8 + thread]);
+            a_fragments[m_atom][2] =
+                sgb_tf32_rna(storage->a[stage][row][k8 + thread + 4]);
+            a_fragments[m_atom][3] =
+                sgb_tf32_rna(storage->a[stage][row + 8][k8 + thread + 4]);
+        }
+#pragma unroll
+        for (int n_atom = 0; n_atom < NAtoms; ++n_atom) {
+            int column = warp_n + n_atom * 8 + group;
+            b_fragments[n_atom][0] =
+                sgb_tf32_rna(storage->b[stage][k8 + thread][column]);
+            b_fragments[n_atom][1] =
+                sgb_tf32_rna(storage->b[stage][k8 + thread + 4][column]);
+        }
+#pragma unroll
+        for (int m_atom = 0; m_atom < MAtoms; ++m_atom) {
+#pragma unroll
+            for (int n_atom = 0; n_atom < NAtoms; ++n_atom) {
+                sgb_tf32_mma_m16n8k8(
+                    accumulators[m_atom][n_atom],
+                    a_fragments[m_atom], b_fragments[n_atom]);
+            }
+        }
+    }
+}
+
+template <SgbTf32Op Op, int BM, int BN, int Stages>
+__device__ __forceinline__ void sgb_tf32_kernel(
+    float* output, const float* a, const float* b, const float* bias,
+    Sm80Tf32KernelParams params) {
+    constexpr int MAtoms = BM == 128 ? 4 : (BM == 64 ? 2 : 1);
+    constexpr int NAtoms = BM == 16 ? 1 : 4;
+    int columns = sgb_tf32_columns<Op>(params);
+    int column_tiles = (columns + BN - 1) / BN;
+    SgbTf32Problem problem = {
+        output, a, b, bias, params,
+        (int)blockIdx.x / column_tiles * BM,
+        (int)blockIdx.x % column_tiles * BN,
+    };
+    extern __shared__ __align__(16) unsigned char sgb_tf32_shared[];
+    auto* storage = reinterpret_cast<SgbTf32Storage<BM, BN, Stages>*>(sgb_tf32_shared);
+
+    int warp = (int)threadIdx.x >> 5;
+    int lane = (int)threadIdx.x & 31;
+    bool compute = BM != 128 || warp < 4;
+    int warp_m = BM == 128 ? (warp >> 1) * 64
+        : (BM == 64 ? (warp >> 1) * 32 : 0);
+    int warp_n = BM == 16 ? warp * 8 : (warp & 1) * 32;
+    int group = lane >> 2;
+    int thread = lane & 3;
+    float accumulators[MAtoms][NAtoms][4];
+
+#pragma unroll
+    for (int m_atom = 0; m_atom < MAtoms; ++m_atom) {
+#pragma unroll
+        for (int n_atom = 0; n_atom < NAtoms; ++n_atom) {
+#pragma unroll
+            for (int element = 0; element < 4; ++element) {
+                int row = problem.tile_row + warp_m + m_atom * 16
+                    + group + (element >= 2 ? 8 : 0);
+                int column = problem.tile_column + warp_n + n_atom * 8
+                    + 2 * thread + (element & 1);
+                float seed = 0.0f;
+                if constexpr (Op == SgbTf32Nn) {
+                    if (compute && row < params.m && column < params.n && bias != nullptr) {
+                        seed = bias[column];
+                    }
+                }
+                accumulators[m_atom][n_atom][element] = seed;
+            }
+        }
+    }
+
+    unsigned tile_count =
+        (static_cast<unsigned>(sgb_tf32_reduction<Op>(params)) + 31U) / 32U;
+    bool fast_stage = sgb_tf32_can_stage_async<Op>(a, b, params);
+    if (fast_stage) {
+#pragma unroll
+        for (unsigned tile = 0; tile < Stages - 1; ++tile) {
+            if (tile < tile_count) {
+                sgb_tf32_stage_async<Op>(
+                    storage, static_cast<int>(tile), problem,
+                    static_cast<int>(tile * 32U));
+            } else {
+                asm volatile("cp.async.commit_group;\n" ::);
+            }
+        }
+        for (unsigned tile = 0; tile < tile_count; ++tile) {
+            asm volatile("cp.async.wait_group %0;\n" :: "n"(Stages - 2));
+            __syncthreads();
+            unsigned next = tile + Stages - 1;
+            if (next < tile_count) {
+                sgb_tf32_stage_async<Op>(
+                    storage, static_cast<int>(next % Stages), problem,
+                    static_cast<int>(next * 32U));
+            } else {
+                asm volatile("cp.async.commit_group;\n" ::);
+            }
+            if (compute) {
+                sgb_tf32_compute_stage<BM, BN, Stages, MAtoms, NAtoms>(
+                    storage, static_cast<int>(tile % Stages),
+                    warp_m, warp_n, group, thread, accumulators);
+            }
+            __syncthreads();
+        }
+    } else {
+        for (unsigned tile = 0; tile < tile_count; ++tile) {
+            int stage = static_cast<int>(tile % Stages);
+            sgb_tf32_stage_scalar<Op>(
+                storage, stage, problem, static_cast<int>(tile * 32U));
+            __syncthreads();
+            if (compute) {
+                sgb_tf32_compute_stage<BM, BN, Stages, MAtoms, NAtoms>(
+                    storage, stage, warp_m, warp_n,
+                    group, thread, accumulators);
+            }
+            __syncthreads();
+        }
+    }
+
+    if (compute) {
+#pragma unroll
+        for (int m_atom = 0; m_atom < MAtoms; ++m_atom) {
+#pragma unroll
+            for (int n_atom = 0; n_atom < NAtoms; ++n_atom) {
+#pragma unroll
+                for (int element = 0; element < 4; ++element) {
+                    int row = problem.tile_row + warp_m + m_atom * 16
+                        + group + (element >= 2 ? 8 : 0);
+                    int column = problem.tile_column + warp_n + n_atom * 8
+                        + 2 * thread + (element & 1);
+                    sgb_tf32_store<Op>(output, row, column,
+                        accumulators[m_atom][n_atom][element], bias, params);
+                }
+            }
+        }
+    }
+}
+
+template <SgbTf32Op Op, int BM, int BN, int Stages>
+__device__ __forceinline__ void sgb_tf32_entry(
+    float* output, const float* a, const float* b, const float* bias,
+    Sm80Tf32KernelParams params) {
+    int reduction = sgb_tf32_reduction<Op>(params);
+#line 1001 "mamba_tf32_k0_guard"
+    bool zero_reduction = reduction == 0;
+#line 1002 "mamba_tf32_k0_branch"
+    if (zero_reduction) {
+        sgb_tf32_zero_reduction_epilogue<Op, BM, BN>(output, bias, params);
+        return;
+    }
+#line 1750 "sm80.cu"
+    sgb_tf32_kernel<Op, BM, BN, Stages>(output, a, b, bias, params);
+}
+
+#define SGB_TF32_DEFINE_KERNEL(NAME, OP, BM, BN, STAGES, THREADS, MIN_BLOCKS) \
+extern "C" __global__ __launch_bounds__(THREADS, MIN_BLOCKS) void NAME(       \
+    float* output, const float* a, const float* b, const float* bias,          \
+    Sm80Tf32KernelParams params) {                                             \
+    sgb_tf32_entry<OP, BM, BN, STAGES>(output, a, b, bias, params);            \
+}
+
+SGB_TF32_DEFINE_KERNEL(sgemm_bi_nn_sm80_mma_tf32_v1_m128n64_bk32_s2, SgbTf32Nn, 128, 64, 2, 256, 1)
+SGB_TF32_DEFINE_KERNEL(sgemm_bi_nn_sm80_mma_tf32_v1_m128n64_bk32_s3, SgbTf32Nn, 128, 64, 3, 256, 1)
+SGB_TF32_DEFINE_KERNEL(sgemm_bi_nn_sm80_mma_tf32_v1_m64n64_bk32_s2, SgbTf32Nn, 64, 64, 2, 128, 1)
+SGB_TF32_DEFINE_KERNEL(sgemm_bi_nn_sm80_mma_tf32_v1_m64n64_bk32_s3, SgbTf32Nn, 64, 64, 3, 128, 1)
+SGB_TF32_DEFINE_KERNEL(sgemm_bi_nn_sm80_mma_tf32_v1_m16n32_bk32_s4, SgbTf32Nn, 16, 32, 4, 128, 3)
+SGB_TF32_DEFINE_KERNEL(sgemm_bi_tn_sm80_mma_tf32_v1_m128n64_bk32_s2, SgbTf32Tn, 128, 64, 2, 256, 1)
+SGB_TF32_DEFINE_KERNEL(sgemm_bi_tn_sm80_mma_tf32_v1_m128n64_bk32_s3, SgbTf32Tn, 128, 64, 3, 256, 1)
+SGB_TF32_DEFINE_KERNEL(sgemm_bi_tn_sm80_mma_tf32_v1_m64n64_bk32_s2, SgbTf32Tn, 64, 64, 2, 128, 1)
+SGB_TF32_DEFINE_KERNEL(sgemm_bi_tn_sm80_mma_tf32_v1_m64n64_bk32_s3, SgbTf32Tn, 64, 64, 3, 128, 1)
+SGB_TF32_DEFINE_KERNEL(sgemm_bi_tn_sm80_mma_tf32_v1_m16n32_bk32_s4, SgbTf32Tn, 16, 32, 4, 128, 3)
+SGB_TF32_DEFINE_KERNEL(sgemm_bi_nt_sm80_mma_tf32_v1_m128n64_bk32_s2, SgbTf32Nt, 128, 64, 2, 256, 1)
+SGB_TF32_DEFINE_KERNEL(sgemm_bi_nt_sm80_mma_tf32_v1_m128n64_bk32_s3, SgbTf32Nt, 128, 64, 3, 256, 1)
+SGB_TF32_DEFINE_KERNEL(sgemm_bi_nt_sm80_mma_tf32_v1_m64n64_bk32_s2, SgbTf32Nt, 64, 64, 2, 128, 1)
+SGB_TF32_DEFINE_KERNEL(sgemm_bi_nt_sm80_mma_tf32_v1_m64n64_bk32_s3, SgbTf32Nt, 64, 64, 3, 128, 1)
+SGB_TF32_DEFINE_KERNEL(sgemm_bi_nt_sm80_mma_tf32_v1_m16n32_bk32_s4, SgbTf32Nt, 16, 32, 4, 128, 3)
+
+template <typename A, typename B> struct SgbTf32SameType { static constexpr bool value = false; };
+template <typename A> struct SgbTf32SameType<A, A> { static constexpr bool value = true; };
+using SgbTf32KernelSignature = void (*)(
+    float*, const float*, const float*, const float*, Sm80Tf32KernelParams);
+#define TF32_ASSERT_KERNEL_SIGNATURE(NAME) \
+    static_assert(SgbTf32SameType<decltype(&NAME), SgbTf32KernelSignature>::value, "TF32 kernel signature")
+
+TF32_ASSERT_KERNEL_SIGNATURE(sgemm_bi_nn_sm80_mma_tf32_v1_m128n64_bk32_s2);
+TF32_ASSERT_KERNEL_SIGNATURE(sgemm_bi_nn_sm80_mma_tf32_v1_m128n64_bk32_s3);
+TF32_ASSERT_KERNEL_SIGNATURE(sgemm_bi_nn_sm80_mma_tf32_v1_m64n64_bk32_s2);
+TF32_ASSERT_KERNEL_SIGNATURE(sgemm_bi_nn_sm80_mma_tf32_v1_m64n64_bk32_s3);
+TF32_ASSERT_KERNEL_SIGNATURE(sgemm_bi_nn_sm80_mma_tf32_v1_m16n32_bk32_s4);
+TF32_ASSERT_KERNEL_SIGNATURE(sgemm_bi_tn_sm80_mma_tf32_v1_m128n64_bk32_s2);
+TF32_ASSERT_KERNEL_SIGNATURE(sgemm_bi_tn_sm80_mma_tf32_v1_m128n64_bk32_s3);
+TF32_ASSERT_KERNEL_SIGNATURE(sgemm_bi_tn_sm80_mma_tf32_v1_m64n64_bk32_s2);
+TF32_ASSERT_KERNEL_SIGNATURE(sgemm_bi_tn_sm80_mma_tf32_v1_m64n64_bk32_s3);
+TF32_ASSERT_KERNEL_SIGNATURE(sgemm_bi_tn_sm80_mma_tf32_v1_m16n32_bk32_s4);
+TF32_ASSERT_KERNEL_SIGNATURE(sgemm_bi_nt_sm80_mma_tf32_v1_m128n64_bk32_s2);
+TF32_ASSERT_KERNEL_SIGNATURE(sgemm_bi_nt_sm80_mma_tf32_v1_m128n64_bk32_s3);
+TF32_ASSERT_KERNEL_SIGNATURE(sgemm_bi_nt_sm80_mma_tf32_v1_m64n64_bk32_s2);
+TF32_ASSERT_KERNEL_SIGNATURE(sgemm_bi_nt_sm80_mma_tf32_v1_m64n64_bk32_s3);
+TF32_ASSERT_KERNEL_SIGNATURE(sgemm_bi_nt_sm80_mma_tf32_v1_m16n32_bk32_s4);
+
+#undef TF32_ASSERT_KERNEL_SIGNATURE
+#undef SGB_TF32_DEFINE_KERNEL

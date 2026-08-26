@@ -1,5 +1,5 @@
 #if defined(__CUDA_ARCH__) && \
-    (__CUDA_ARCH__ == 1000 || __CUDA_ARCH__ == 1030)
+    (__CUDA_ARCH__ == 1000 || __CUDA_ARCH__ == 1030 || __CUDA_ARCH__ == 1100)
 
 #if __CUDACC_VER_MAJOR__ >= 13
 struct alignas(128) CUtensorMap {
@@ -53,6 +53,18 @@ static_assert(sizeof(((Sm100KernelParams*)0)->n) == 4,
               "SM100 N size changed");
 static_assert(sizeof(((Sm100KernelParams*)0)->ldc) == 4,
               "SM100 output stride size changed");
+#if !defined(__CUDACC_RTC__)
+static_assert(offsetof(Sm100KernelParams, a_x) == 0, "a_x offset");
+static_assert(offsetof(Sm100KernelParams, a_y) == 4, "a_y offset");
+static_assert(offsetof(Sm100KernelParams, b_x) == 8, "b_x offset");
+static_assert(offsetof(Sm100KernelParams, b_y) == 12, "b_y offset");
+static_assert(offsetof(Sm100KernelParams, alpha) == 16, "alpha offset");
+static_assert(offsetof(Sm100KernelParams, beta) == 20, "beta offset");
+static_assert(offsetof(Sm100KernelParams, m) == 24, "m offset");
+static_assert(offsetof(Sm100KernelParams, k) == 28, "k offset");
+static_assert(offsetof(Sm100KernelParams, n) == 32, "n offset");
+static_assert(offsetof(Sm100KernelParams, ldc) == 36, "ldc offset");
+#endif
 
 enum Sm100Op {
     Sm100Nn = 0,
@@ -768,5 +780,416 @@ SM100_DEFINE_KERNEL(sgemm_bi_nt_sm100_tcgen_m128n128_bk64_s4_p8_bf16, __nv_bfloa
 SM100_DEFINE_KERNEL(sgemm_bi_nt_sm100_tcgen_m128n128_bk64_s4_p8_f16, __half, Sm100Nt, 128, 4, true, 256)
 
 #undef SM100_DEFINE_KERNEL
+
+template <int Op, int Columns>
+static __host__ __device__ constexpr unsigned sm100_tf32_instruction_descriptor() {
+    static_assert(Columns == 64 || Columns == 128,
+                  "unsupported TF32 instruction width");
+    if constexpr (Columns == 64) {
+        if constexpr (Op == Sm100Nt) return 0x08100910;
+        if constexpr (Op == Sm100Nn) return 0x08110910;
+        return 0x08118910;
+    } else {
+        if constexpr (Op == Sm100Nt) return 0x08200910;
+        if constexpr (Op == Sm100Nn) return 0x08210910;
+        return 0x08218910;
+    }
+}
+
+static_assert(sm100_tf32_instruction_descriptor<Sm100Nt, 64>() == 0x08100910);
+static_assert(sm100_tf32_instruction_descriptor<Sm100Nn, 64>() == 0x08110910);
+static_assert(sm100_tf32_instruction_descriptor<Sm100Tn, 64>() == 0x08118910);
+static_assert(sm100_tf32_instruction_descriptor<Sm100Nt, 128>() == 0x08200910);
+static_assert(sm100_tf32_instruction_descriptor<Sm100Nn, 128>() == 0x08210910);
+static_assert(sm100_tf32_instruction_descriptor<Sm100Tn, 128>() == 0x08218910);
+
+template <int Op>
+static __device__ __forceinline__ int sm100_tf32_rows(
+    const Sm100KernelParams& params) {
+    return Op == Sm100Tn ? params.k : params.m;
+}
+
+template <int Op>
+static __device__ __forceinline__ int sm100_tf32_columns(
+    const Sm100KernelParams& params) {
+    return Op == Sm100Nt ? params.k : params.n;
+}
+
+template <int Op>
+static __device__ __forceinline__ int sm100_tf32_reduction(
+    const Sm100KernelParams& params) {
+    return Op == Sm100Nn ? params.k : (Op == Sm100Tn ? params.m : params.n);
+}
+
+template <int Op>
+static __device__ __forceinline__ float sm100_tf32_epilogue(
+    float accumulator, float old_output, const float* bias, int column,
+    const Sm100KernelParams& params) {
+    if constexpr (Op == Sm100Nn) {
+        (void)bias;
+        (void)column;
+        float value = params.alpha == 1.0f
+            ? accumulator
+            : __fmul_rn(params.alpha, accumulator);
+        return __fmaf_rn(params.beta, old_output, value);
+    } else if constexpr (Op == Sm100Tn) {
+        (void)bias;
+        (void)column;
+        return __fmaf_rn(params.alpha, accumulator, old_output);
+    } else {
+        (void)old_output;
+        (void)bias;
+        (void)column;
+        return params.alpha == 1.0f
+            ? accumulator
+            : __fmul_rn(params.alpha, accumulator);
+    }
+}
+
+template <int Op>
+static __device__ __forceinline__ void sm100_tf32_store(
+    void* output, int row, int column, float accumulator, const float* bias,
+    const Sm100KernelParams& params) {
+    if (row >= sm100_tf32_rows<Op>(params) ||
+        column >= sm100_tf32_columns<Op>(params)) return;
+    float* destination = static_cast<float*>(output) +
+        static_cast<long long>(row) * params.ldc + column;
+    float old_output = Op == Sm100Nt ? 0.0f : *destination;
+    float value = sm100_tf32_epilogue<Op>(
+        accumulator, old_output, bias, column, params);
+#line 2001 "mamba_tf32_k0_zero_store"
+    *destination = value;
+#line 800 "sm100.cu"
+}
+
+template <int Op, int Columns, bool ProducerSchedule>
+static __device__ __forceinline__ void sm100_tf32_zero_reduction_epilogue(
+    void* output, const float* bias, const Sm100KernelParams& params) {
+    (void)&sm100_tf32_epilogue<Op>;
+    int columns = sm100_tf32_columns<Op>(params);
+    int column_tiles = (columns + Columns - 1) / Columns;
+    int output_row = (int)blockIdx.x / column_tiles * 128;
+    int output_column = (int)blockIdx.x % column_tiles * Columns;
+    int group = ProducerSchedule ? (int)threadIdx.x >> 7 : 0;
+    int group_count = ProducerSchedule ? 2 : 1;
+    int lane_in_group = (int)threadIdx.x & 127;
+    for (int chunk = group; chunk < Columns / 8; chunk += group_count) {
+        int base = chunk * 8;
+        for (int linear = lane_in_group; linear < 128 * 8; linear += 128) {
+            int row = output_row + linear / 8;
+            int column = output_column + base + linear % 8;
+            if (row < sm100_tf32_rows<Op>(params) && column < columns) {
+                float accumulator =
+                    Op == Sm100Nn && bias != nullptr ? bias[column] : 0.0f;
+                sm100_tf32_store<Op>(
+                    output, row, column, accumulator, bias, params);
+            }
+        }
+    }
+}
+
+struct Sm100Tf32StageContext {
+    const CUtensorMap* a_map;
+    const CUtensorMap* b_map;
+    const Sm100KernelParams* params;
+    unsigned shared;
+    unsigned full_base;
+    int output_row;
+    int output_column;
+};
+
+template <int Op, int Columns, int Stages>
+static __device__ __forceinline__ void sm100_tf32_produce_stage(
+    const Sm100Tf32StageContext& context, int tile) {
+    constexpr int stage_bytes = Sm100Storage<Columns, Stages>::stage_bytes;
+    constexpr int plane_bytes = 4096;
+    unsigned stage_index = (unsigned)(tile % Stages);
+    unsigned stage = context.shared + stage_index * stage_bytes;
+    unsigned a_destination = stage;
+    unsigned b_destination = stage + 16384;
+    unsigned long long a_descriptor =
+        reinterpret_cast<unsigned long long>(context.a_map);
+    unsigned long long b_descriptor =
+        reinterpret_cast<unsigned long long>(context.b_map);
+    const Sm100KernelParams& params = *context.params;
+    unsigned full_barrier = context.full_base + stage_index * 8;
+    int reduction = tile * 32;
+    sm100_expect_transaction(full_barrier, stage_bytes);
+    if constexpr (Op == Sm100Nn) {
+        sm100_tma_copy(a_destination, a_descriptor, reduction, context.output_row,
+            params.a_x, params.a_y, full_barrier);
+#pragma unroll
+        for (int plane = 0; plane < Columns / 32; ++plane) {
+            sm100_tma_copy(b_destination + plane * plane_bytes, b_descriptor,
+                context.output_column + plane * 32, reduction,
+                params.b_x, params.b_y, full_barrier);
+        }
+    } else if constexpr (Op == Sm100Tn) {
+#pragma unroll
+        for (int plane = 0; plane < 4; ++plane) {
+            sm100_tma_copy(a_destination + plane * plane_bytes, a_descriptor,
+                context.output_row + plane * 32, reduction,
+                params.a_x, params.a_y, full_barrier);
+        }
+#pragma unroll
+        for (int plane = 0; plane < Columns / 32; ++plane) {
+            sm100_tma_copy(b_destination + plane * plane_bytes, b_descriptor,
+                context.output_column + plane * 32, reduction,
+                params.b_x, params.b_y, full_barrier);
+        }
+    } else {
+        sm100_tma_copy(a_destination, a_descriptor, reduction, context.output_row,
+            params.a_x, params.a_y, full_barrier);
+        sm100_tma_copy(b_destination, b_descriptor, reduction, context.output_column,
+            params.b_x, params.b_y, full_barrier);
+    }
+}
+
+template <int Op, int Columns>
+static __device__ __forceinline__ void sm100_tf32_tcgen05_k8(
+    unsigned accumulator, unsigned long long a, unsigned long long b,
+    int enable_input_d) {
+    unsigned zero = 0;
+    unsigned instruction = sm100_tf32_instruction_descriptor<Op, Columns>();
+    asm volatile(
+        "{ .reg .pred p; setp.ne.b32 p, %4, 0; "
+        "tcgen05.mma.cta_group::1.kind::tf32 "
+        "[%0], %1, %2, %3, {%5, %6, %7, %8}, p; }"
+        :: "r"(accumulator), "l"(a), "l"(b), "r"(instruction),
+           "r"(enable_input_d), "r"(zero), "r"(zero), "r"(zero),
+           "r"(zero)
+        : "memory");
+}
+
+template <int Op, int Columns, int Stages>
+static __device__ __forceinline__ void sm100_tf32_issue_bk32(
+    unsigned accumulator, unsigned char* storage, int tile,
+    int& enable_input_d) {
+    unsigned char* stage = storage +
+        (tile % Stages) * Sm100Storage<Columns, Stages>::stage_bytes;
+    unsigned long long a = Op == Sm100Tn
+        ? sm100_desc(stage, 256, 64)
+        : sm100_desc(stage, 1, 64);
+    unsigned long long b = Op == Sm100Nt
+        ? sm100_desc(stage + 16384, 1, 64)
+        : sm100_desc(stage + 16384, Columns == 64 ? 0 : 256, 64);
+    const int k_offsets[4] = {0, 8, 16, 24};
+#pragma unroll
+    for (int issue = 0; issue < 4; ++issue) {
+        int k8 = k_offsets[issue];
+        unsigned a_step = Op == Sm100Tn ? 64U : 2U;
+        unsigned b_step = Op == Sm100Nt ? 2U : 64U;
+        sm100_tf32_tcgen05_k8<Op, Columns>(
+            accumulator, a + (k8 / 8) * a_step,
+            b + (k8 / 8) * b_step, enable_input_d);
+        enable_input_d = 1;
+    }
+}
+
+template <int Op, int Columns, bool ProducerSchedule>
+static __device__ __forceinline__ void sm100_tf32_tmem_epilogue(
+    void* output, unsigned accumulator, const float* bias,
+    const Sm100KernelParams& params, int output_row, int output_column) {
+    int warp_in_group = ((int)threadIdx.x >> 5) & 3;
+    int lane = (int)threadIdx.x & 31;
+    int row = output_row + warp_in_group * 32 + lane;
+    int begin = ProducerSchedule ? (int)threadIdx.x >> 7 : 0;
+    int stride = ProducerSchedule ? 2 : 1;
+    unsigned warp_accumulator = sm100_warp_accumulator(accumulator);
+    sm100_tcgen_after();
+    for (int chunk = begin; chunk < Columns / 8; chunk += stride) {
+        unsigned words[8];
+        sm100_tmem_load8(warp_accumulator + chunk * 8, words);
+        sm100_tmem_wait_load();
+#pragma unroll
+        for (int element = 0; element < 8; ++element) {
+            int column = output_column + chunk * 8 + element;
+            sm100_tf32_store<Op>(output, row, column,
+                __uint_as_float(words[element]), bias, params);
+        }
+    }
+    sm100_tcgen_before();
+}
+
+template <int Op, int Columns, int Stages, bool ProducerSchedule>
+static __device__ __forceinline__ void sm100_tf32_kernel(
+    void* output, const CUtensorMap& a_map, const CUtensorMap& b_map,
+    const float* bias, const Sm100KernelParams& params) {
+    extern __shared__ __align__(1024) unsigned char storage[];
+    constexpr int payload_bytes = Sm100Storage<Columns, Stages>::payload_bytes;
+    unsigned shared = static_cast<unsigned>(__cvta_generic_to_shared(storage));
+    unsigned full_base = shared + payload_bytes;
+    unsigned empty_base = full_base + Stages * 8;
+    unsigned pointer_address = empty_base + Stages * 8;
+    int warp = (int)threadIdx.x >> 5;
+    int columns = sm100_tf32_columns<Op>(params);
+    int column_tiles = (columns + Columns - 1) / Columns;
+    int output_row = (int)blockIdx.x / column_tiles * 128;
+    int output_column = (int)blockIdx.x % column_tiles * Columns;
+    int tile_count = (sm100_tf32_reduction<Op>(params) + 31) / 32;
+    const Sm100Tf32StageContext stage_context = {
+        &a_map, &b_map, &params, shared, full_base, output_row, output_column};
+
+    if (warp == 0) sm100_tmem_alloc(pointer_address, Columns);
+    if (threadIdx.x == 0) {
+        for (int stage = 0; stage < Stages; ++stage) {
+            sm100_init_barrier(full_base + stage * 8);
+            sm100_init_barrier(empty_base + stage * 8);
+        }
+        asm volatile("fence.mbarrier_init.release.cluster;" ::: "memory");
+    }
+    __syncthreads();
+    unsigned accumulator =
+        *reinterpret_cast<unsigned*>(storage + payload_bytes + 16 * Stages);
+    int enable_input_d = 0;
+    if constexpr (Op == Sm100Nn) {
+        if (bias != nullptr) {
+            sm100_seed_bias<Columns, ProducerSchedule>(
+                accumulator, bias, output_column, columns);
+            enable_input_d = 1;
+        }
+    }
+    __syncthreads();
+
+    for (int tile = 0; tile < tile_count; ++tile) {
+        int stage = tile % Stages;
+        unsigned phase = (unsigned)(tile / Stages) & 1U;
+        if (threadIdx.x == 0) {
+            sm100_tf32_produce_stage<Op, Columns, Stages>(
+                stage_context, tile);
+        }
+        if (warp == 0) {
+            sm100_wait_barrier(full_base + stage * 8, phase);
+            if ((threadIdx.x & 31) == 0) {
+                sm100_tcgen_after();
+                sm100_tf32_issue_bk32<Op, Columns, Stages>(
+                    accumulator, storage, tile, enable_input_d);
+                sm100_tcgen_commit(empty_base + stage * 8);
+            }
+            sm100_wait_barrier(empty_base + stage * 8, phase);
+        }
+        __syncthreads();
+    }
+
+    sm100_tf32_tmem_epilogue<Op, Columns, ProducerSchedule>(
+        output, accumulator, bias, params, output_row, output_column);
+    __syncthreads();
+    if (warp == 0) {
+        sm100_tcgen_after();
+        sm100_tmem_relinquish();
+        sm100_tmem_dealloc(accumulator, Columns);
+    }
+}
+
+template <int Op, int Columns, int Stages, bool ProducerSchedule>
+static __device__ __forceinline__ void sm100_tf32_entry(
+    void* output, const CUtensorMap& a_map, const CUtensorMap& b_map,
+    const float* bias, const Sm100KernelParams& params) {
+    int reduction = sm100_tf32_reduction<Op>(params);
+#line 1001 "mamba_tf32_k0_guard"
+    bool zero_reduction = reduction == 0;
+#line 1002 "mamba_tf32_k0_branch"
+    if (zero_reduction) {
+        sm100_tf32_zero_reduction_epilogue<Op, Columns, ProducerSchedule>(
+            output, bias, params);
+        return;
+    }
+#line 1120 "sm100.cu"
+    sm100_tf32_kernel<Op, Columns, Stages, ProducerSchedule>(
+        output, a_map, b_map, bias, params);
+}
+
+#define SM100_DEFINE_TF32_KERNEL(NAME, OP, COLUMNS, STAGES, PRODUCER, THREADS) \
+extern "C" __global__ __launch_bounds__(THREADS) void NAME(                  \
+    void* output, const __grid_constant__ CUtensorMap a_map,                   \
+    const __grid_constant__ CUtensorMap b_map, const float* bias,              \
+    const __grid_constant__ Sm100KernelParams params) {                        \
+    sm100_tf32_entry<OP, COLUMNS, STAGES, PRODUCER>(                           \
+        output, a_map, b_map, bias, params);                                   \
+}
+
+SM100_DEFINE_TF32_KERNEL(sgemm_bi_nn_sm100_tcgen_tf32_v1_m128n64_bk32_s2_c4, Sm100Nn, 64, 2, false, 128)
+SM100_DEFINE_TF32_KERNEL(sgemm_bi_nn_sm100_tcgen_tf32_v1_m128n64_bk32_s2_p8, Sm100Nn, 64, 2, true, 256)
+SM100_DEFINE_TF32_KERNEL(sgemm_bi_nn_sm100_tcgen_tf32_v1_m128n64_bk32_s3_c4, Sm100Nn, 64, 3, false, 128)
+SM100_DEFINE_TF32_KERNEL(sgemm_bi_nn_sm100_tcgen_tf32_v1_m128n64_bk32_s3_p8, Sm100Nn, 64, 3, true, 256)
+SM100_DEFINE_TF32_KERNEL(sgemm_bi_nn_sm100_tcgen_tf32_v1_m128n64_bk32_s4_c4, Sm100Nn, 64, 4, false, 128)
+SM100_DEFINE_TF32_KERNEL(sgemm_bi_nn_sm100_tcgen_tf32_v1_m128n64_bk32_s4_p8, Sm100Nn, 64, 4, true, 256)
+SM100_DEFINE_TF32_KERNEL(sgemm_bi_nn_sm100_tcgen_tf32_v1_m128n128_bk32_s2_c4, Sm100Nn, 128, 2, false, 128)
+SM100_DEFINE_TF32_KERNEL(sgemm_bi_nn_sm100_tcgen_tf32_v1_m128n128_bk32_s2_p8, Sm100Nn, 128, 2, true, 256)
+SM100_DEFINE_TF32_KERNEL(sgemm_bi_nn_sm100_tcgen_tf32_v1_m128n128_bk32_s3_c4, Sm100Nn, 128, 3, false, 128)
+SM100_DEFINE_TF32_KERNEL(sgemm_bi_nn_sm100_tcgen_tf32_v1_m128n128_bk32_s3_p8, Sm100Nn, 128, 3, true, 256)
+SM100_DEFINE_TF32_KERNEL(sgemm_bi_nn_sm100_tcgen_tf32_v1_m128n128_bk32_s4_c4, Sm100Nn, 128, 4, false, 128)
+SM100_DEFINE_TF32_KERNEL(sgemm_bi_nn_sm100_tcgen_tf32_v1_m128n128_bk32_s4_p8, Sm100Nn, 128, 4, true, 256)
+SM100_DEFINE_TF32_KERNEL(sgemm_bi_tn_sm100_tcgen_tf32_v1_m128n64_bk32_s2_c4, Sm100Tn, 64, 2, false, 128)
+SM100_DEFINE_TF32_KERNEL(sgemm_bi_tn_sm100_tcgen_tf32_v1_m128n64_bk32_s2_p8, Sm100Tn, 64, 2, true, 256)
+SM100_DEFINE_TF32_KERNEL(sgemm_bi_tn_sm100_tcgen_tf32_v1_m128n64_bk32_s3_c4, Sm100Tn, 64, 3, false, 128)
+SM100_DEFINE_TF32_KERNEL(sgemm_bi_tn_sm100_tcgen_tf32_v1_m128n64_bk32_s3_p8, Sm100Tn, 64, 3, true, 256)
+SM100_DEFINE_TF32_KERNEL(sgemm_bi_tn_sm100_tcgen_tf32_v1_m128n64_bk32_s4_c4, Sm100Tn, 64, 4, false, 128)
+SM100_DEFINE_TF32_KERNEL(sgemm_bi_tn_sm100_tcgen_tf32_v1_m128n64_bk32_s4_p8, Sm100Tn, 64, 4, true, 256)
+SM100_DEFINE_TF32_KERNEL(sgemm_bi_tn_sm100_tcgen_tf32_v1_m128n128_bk32_s2_c4, Sm100Tn, 128, 2, false, 128)
+SM100_DEFINE_TF32_KERNEL(sgemm_bi_tn_sm100_tcgen_tf32_v1_m128n128_bk32_s2_p8, Sm100Tn, 128, 2, true, 256)
+SM100_DEFINE_TF32_KERNEL(sgemm_bi_tn_sm100_tcgen_tf32_v1_m128n128_bk32_s3_c4, Sm100Tn, 128, 3, false, 128)
+SM100_DEFINE_TF32_KERNEL(sgemm_bi_tn_sm100_tcgen_tf32_v1_m128n128_bk32_s3_p8, Sm100Tn, 128, 3, true, 256)
+SM100_DEFINE_TF32_KERNEL(sgemm_bi_tn_sm100_tcgen_tf32_v1_m128n128_bk32_s4_c4, Sm100Tn, 128, 4, false, 128)
+SM100_DEFINE_TF32_KERNEL(sgemm_bi_tn_sm100_tcgen_tf32_v1_m128n128_bk32_s4_p8, Sm100Tn, 128, 4, true, 256)
+SM100_DEFINE_TF32_KERNEL(sgemm_bi_nt_sm100_tcgen_tf32_v1_m128n64_bk32_s2_c4, Sm100Nt, 64, 2, false, 128)
+SM100_DEFINE_TF32_KERNEL(sgemm_bi_nt_sm100_tcgen_tf32_v1_m128n64_bk32_s2_p8, Sm100Nt, 64, 2, true, 256)
+SM100_DEFINE_TF32_KERNEL(sgemm_bi_nt_sm100_tcgen_tf32_v1_m128n64_bk32_s3_c4, Sm100Nt, 64, 3, false, 128)
+SM100_DEFINE_TF32_KERNEL(sgemm_bi_nt_sm100_tcgen_tf32_v1_m128n64_bk32_s3_p8, Sm100Nt, 64, 3, true, 256)
+SM100_DEFINE_TF32_KERNEL(sgemm_bi_nt_sm100_tcgen_tf32_v1_m128n64_bk32_s4_c4, Sm100Nt, 64, 4, false, 128)
+SM100_DEFINE_TF32_KERNEL(sgemm_bi_nt_sm100_tcgen_tf32_v1_m128n64_bk32_s4_p8, Sm100Nt, 64, 4, true, 256)
+SM100_DEFINE_TF32_KERNEL(sgemm_bi_nt_sm100_tcgen_tf32_v1_m128n128_bk32_s2_c4, Sm100Nt, 128, 2, false, 128)
+SM100_DEFINE_TF32_KERNEL(sgemm_bi_nt_sm100_tcgen_tf32_v1_m128n128_bk32_s2_p8, Sm100Nt, 128, 2, true, 256)
+SM100_DEFINE_TF32_KERNEL(sgemm_bi_nt_sm100_tcgen_tf32_v1_m128n128_bk32_s3_c4, Sm100Nt, 128, 3, false, 128)
+SM100_DEFINE_TF32_KERNEL(sgemm_bi_nt_sm100_tcgen_tf32_v1_m128n128_bk32_s3_p8, Sm100Nt, 128, 3, true, 256)
+SM100_DEFINE_TF32_KERNEL(sgemm_bi_nt_sm100_tcgen_tf32_v1_m128n128_bk32_s4_c4, Sm100Nt, 128, 4, false, 128)
+SM100_DEFINE_TF32_KERNEL(sgemm_bi_nt_sm100_tcgen_tf32_v1_m128n128_bk32_s4_p8, Sm100Nt, 128, 4, true, 256)
+
+template <typename A, typename B> struct Sm100Tf32SameType { static constexpr bool value = false; };
+template <typename A> struct Sm100Tf32SameType<A, A> { static constexpr bool value = true; };
+using Sm100Tf32KernelSignature = void (*)(
+    void*, CUtensorMap, CUtensorMap, const float*, Sm100KernelParams);
+#define TF32_ASSERT_KERNEL_SIGNATURE(NAME) \
+    static_assert(Sm100Tf32SameType<decltype(&NAME), Sm100Tf32KernelSignature>::value, "TF32 kernel signature")
+
+TF32_ASSERT_KERNEL_SIGNATURE(sgemm_bi_nn_sm100_tcgen_tf32_v1_m128n64_bk32_s2_c4);
+TF32_ASSERT_KERNEL_SIGNATURE(sgemm_bi_nn_sm100_tcgen_tf32_v1_m128n64_bk32_s2_p8);
+TF32_ASSERT_KERNEL_SIGNATURE(sgemm_bi_nn_sm100_tcgen_tf32_v1_m128n64_bk32_s3_c4);
+TF32_ASSERT_KERNEL_SIGNATURE(sgemm_bi_nn_sm100_tcgen_tf32_v1_m128n64_bk32_s3_p8);
+TF32_ASSERT_KERNEL_SIGNATURE(sgemm_bi_nn_sm100_tcgen_tf32_v1_m128n64_bk32_s4_c4);
+TF32_ASSERT_KERNEL_SIGNATURE(sgemm_bi_nn_sm100_tcgen_tf32_v1_m128n64_bk32_s4_p8);
+TF32_ASSERT_KERNEL_SIGNATURE(sgemm_bi_nn_sm100_tcgen_tf32_v1_m128n128_bk32_s2_c4);
+TF32_ASSERT_KERNEL_SIGNATURE(sgemm_bi_nn_sm100_tcgen_tf32_v1_m128n128_bk32_s2_p8);
+TF32_ASSERT_KERNEL_SIGNATURE(sgemm_bi_nn_sm100_tcgen_tf32_v1_m128n128_bk32_s3_c4);
+TF32_ASSERT_KERNEL_SIGNATURE(sgemm_bi_nn_sm100_tcgen_tf32_v1_m128n128_bk32_s3_p8);
+TF32_ASSERT_KERNEL_SIGNATURE(sgemm_bi_nn_sm100_tcgen_tf32_v1_m128n128_bk32_s4_c4);
+TF32_ASSERT_KERNEL_SIGNATURE(sgemm_bi_nn_sm100_tcgen_tf32_v1_m128n128_bk32_s4_p8);
+TF32_ASSERT_KERNEL_SIGNATURE(sgemm_bi_tn_sm100_tcgen_tf32_v1_m128n64_bk32_s2_c4);
+TF32_ASSERT_KERNEL_SIGNATURE(sgemm_bi_tn_sm100_tcgen_tf32_v1_m128n64_bk32_s2_p8);
+TF32_ASSERT_KERNEL_SIGNATURE(sgemm_bi_tn_sm100_tcgen_tf32_v1_m128n64_bk32_s3_c4);
+TF32_ASSERT_KERNEL_SIGNATURE(sgemm_bi_tn_sm100_tcgen_tf32_v1_m128n64_bk32_s3_p8);
+TF32_ASSERT_KERNEL_SIGNATURE(sgemm_bi_tn_sm100_tcgen_tf32_v1_m128n64_bk32_s4_c4);
+TF32_ASSERT_KERNEL_SIGNATURE(sgemm_bi_tn_sm100_tcgen_tf32_v1_m128n64_bk32_s4_p8);
+TF32_ASSERT_KERNEL_SIGNATURE(sgemm_bi_tn_sm100_tcgen_tf32_v1_m128n128_bk32_s2_c4);
+TF32_ASSERT_KERNEL_SIGNATURE(sgemm_bi_tn_sm100_tcgen_tf32_v1_m128n128_bk32_s2_p8);
+TF32_ASSERT_KERNEL_SIGNATURE(sgemm_bi_tn_sm100_tcgen_tf32_v1_m128n128_bk32_s3_c4);
+TF32_ASSERT_KERNEL_SIGNATURE(sgemm_bi_tn_sm100_tcgen_tf32_v1_m128n128_bk32_s3_p8);
+TF32_ASSERT_KERNEL_SIGNATURE(sgemm_bi_tn_sm100_tcgen_tf32_v1_m128n128_bk32_s4_c4);
+TF32_ASSERT_KERNEL_SIGNATURE(sgemm_bi_tn_sm100_tcgen_tf32_v1_m128n128_bk32_s4_p8);
+TF32_ASSERT_KERNEL_SIGNATURE(sgemm_bi_nt_sm100_tcgen_tf32_v1_m128n64_bk32_s2_c4);
+TF32_ASSERT_KERNEL_SIGNATURE(sgemm_bi_nt_sm100_tcgen_tf32_v1_m128n64_bk32_s2_p8);
+TF32_ASSERT_KERNEL_SIGNATURE(sgemm_bi_nt_sm100_tcgen_tf32_v1_m128n64_bk32_s3_c4);
+TF32_ASSERT_KERNEL_SIGNATURE(sgemm_bi_nt_sm100_tcgen_tf32_v1_m128n64_bk32_s3_p8);
+TF32_ASSERT_KERNEL_SIGNATURE(sgemm_bi_nt_sm100_tcgen_tf32_v1_m128n64_bk32_s4_c4);
+TF32_ASSERT_KERNEL_SIGNATURE(sgemm_bi_nt_sm100_tcgen_tf32_v1_m128n64_bk32_s4_p8);
+TF32_ASSERT_KERNEL_SIGNATURE(sgemm_bi_nt_sm100_tcgen_tf32_v1_m128n128_bk32_s2_c4);
+TF32_ASSERT_KERNEL_SIGNATURE(sgemm_bi_nt_sm100_tcgen_tf32_v1_m128n128_bk32_s2_p8);
+TF32_ASSERT_KERNEL_SIGNATURE(sgemm_bi_nt_sm100_tcgen_tf32_v1_m128n128_bk32_s3_c4);
+TF32_ASSERT_KERNEL_SIGNATURE(sgemm_bi_nt_sm100_tcgen_tf32_v1_m128n128_bk32_s3_p8);
+TF32_ASSERT_KERNEL_SIGNATURE(sgemm_bi_nt_sm100_tcgen_tf32_v1_m128n128_bk32_s4_c4);
+TF32_ASSERT_KERNEL_SIGNATURE(sgemm_bi_nt_sm100_tcgen_tf32_v1_m128n128_bk32_s4_p8);
+
+#undef TF32_ASSERT_KERNEL_SIGNATURE
+#undef SM100_DEFINE_TF32_KERNEL
 
 #endif
