@@ -1700,10 +1700,8 @@ fn assert_per_entry_zero_resources(report: &str, symbols: &BTreeSet<String>, lab
                 .or_default()
                 .push((stack, stores, loads));
         }
-        if let (Some(registers), Some(shared)) = (
-            metric_after(line, "Used ", " registers"),
-            metric_before(line, " bytes smem"),
-        ) {
+        if let Some(registers) = metric_after(line, "Used ", " registers") {
+            let shared = metric_before(line, " bytes smem").unwrap_or(0);
             usage
                 .entry(symbol.clone())
                 .or_default()
@@ -5534,6 +5532,11 @@ fn resource_parser_rejects_duplicate_records_and_cap_overruns() {
          ptxas info : Used 64 registers, 1024 bytes smem\n"
     );
     assert_per_entry_zero_resources(&ptxas, &symbols, "self-oracle");
+    let dynamic_shared = ptxas.replace(
+        "Used 64 registers, 1024 bytes smem",
+        "Used 64 registers, used 1 barriers, 416 bytes cmem[0]",
+    );
+    assert_per_entry_zero_resources(&dynamic_shared, &symbols, "self-oracle");
     let duplicate = format!("{ptxas}ptxas info : Function properties for {symbol}\n");
     assert!(
         std::panic::catch_unwind(|| {
