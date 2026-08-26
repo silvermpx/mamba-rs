@@ -175,7 +175,13 @@ fn bench_m3_dtype(
     let d = cfg.d_model;
 
     let t_build = Instant::now();
-    let weights = Mamba3Weights::init(&cfg, d, 0xB00B);
+    let mut weights = Mamba3Weights::init(&cfg, d, 0xB00B);
+    if dtype != mamba_rs::mamba_ssm::gpu::dtype::WeightDtype::F32 {
+        // The mixed-precision pipeline requires an identity input_proj
+        // (same clearing the determinism bench does for its bf16 leg).
+        weights.input_proj_w.clear();
+        weights.input_proj_b.clear();
+    }
     let mut embed = vec![0.0f32; vocab_size * d];
     let mut seed: u64 = 0xBEEF;
     for v in embed.iter_mut() {
