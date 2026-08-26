@@ -1187,11 +1187,9 @@ fn assert_k0_cfg_dominates_entry(entry: &str, symbol: &str, bundle_bytes: usize)
     let zero_takes_branch = branch_when_predicate == zero_when_predicate;
 
     let is_terminator = |line: &str| {
-        line.contains(" bra ")
-            || line.trim_start().starts_with("bra ")
-            || ["ret;", "exit;", "trap;"]
-                .iter()
-                .any(|term| line.contains(term))
+        ptx_instruction(line).is_some_and(|(opcode, _)| {
+            opcode.starts_with("bra") || matches!(opcode, "ret" | "exit" | "trap")
+        })
     };
     assert!(
         !lines.iter().any(|line| line.contains("call")),
@@ -1246,10 +1244,12 @@ fn assert_k0_cfg_dominates_entry(entry: &str, symbol: &str, bundle_bytes: usize)
         {
             continue;
         }
-        if last.contains("bra") {
-            let target = last
-                .split_once("bra")
-                .map(|(_, tail)| tail.trim().trim_end_matches(';'))
+        if let Some((opcode, operands)) = ptx_instruction(last)
+            && opcode.starts_with("bra")
+        {
+            let target = operands
+                .split_ascii_whitespace()
+                .last()
                 .unwrap_or_else(|| panic!("{symbol} indirect branch: {last}"));
             let target_block = *label_blocks
                 .get(target)
@@ -5117,7 +5117,7 @@ fn k0_cfg_checker_propagates_values_and_rejects_bad_zero_subgraphs() {
 MAIN:
     cp.async.bulk.tensor.2d.shared::cta.global.tile [%r4], [%r5];
     tcgen05.mma.cta_group::1.kind::tf32 [%r6], %r7, %r8, %r9;
-    bra DONE;
+    bra.uni DONE;
 K0:
     mul.rn.f32 %f1, %f2, %f3;
     fma.rn.f32 %f4, %f1, %f5, %f6;
