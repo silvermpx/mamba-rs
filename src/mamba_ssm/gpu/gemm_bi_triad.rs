@@ -117,10 +117,19 @@ const SGEMM_M_SLIM_FORCE: usize = 512;
 /// All Split-K dispatch gates (NN fwd, NT bwd_dx, Split-M TN bwd_dw) read this.
 pub(super) const SPLITK_SCRATCH_CAP: usize = 1 << 23;
 
-/// SM count for dispatch wave-fill heuristics. Calibrated for Ada RTX 6000 (142 SMs).
-/// Over-shoot on smaller GPUs (A100=108) is correctness-safe — Split-K gates fire
-/// slightly more aggressively. TODO: query `CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT`
-/// at init for true per-GPU tuning; for now a single source-of-truth constant.
+/// SM count for dispatch wave-fill heuristics, frozen at the Ada RTX
+/// 6000 value. This is a bit-family key, not a tuning knob: the split
+/// gates it feeds change the reduction order, so its value is part of
+/// the numeric route identity. It must NEVER become a device query
+/// (`CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT`): two boards behind the
+/// same sm_XX target ship different SM counts (RTX 5090 = 170, RTX
+/// 5080 = 84; B200 = 148, floorswept parts fewer), so a queried value
+/// silently turns the per-architecture bit guarantee into a per-SKU
+/// one that nobody can state or test. Over-shoot on smaller GPUs is
+/// correctness-safe — the split gates just fire a little more
+/// aggressively. If another architecture ever needs its own wave-fill
+/// value, add a frozen per-arch table cell that participates in route
+/// identity and the goldens; never a runtime query.
 pub(super) const NUM_SMS: u32 = 142;
 
 /// Pick (kernel function, BN tile size) with M-aware wave-quantization fix.
@@ -2419,4 +2428,21 @@ pub fn sgemm_bi_backward_dx_typed(
         "UNCOVERED sgemm_bi_backward_dx_typed: split-N/Slim buckets are upcast-fallback territory — \
          shape M={batch} K={n_in} N={n_out}."
     ))
+}
+
+#[cfg(test)]
+mod split_gate_identity {
+    use super::{NUM_SMS, SPLITM_TN_TARGET_GRID_FACTOR};
+
+    /// Tripwire for the frozen wave-fill cell. The behavioral suites
+    /// cannot catch a device-queried SM count on the calibration board
+    /// itself (the query returns the frozen value there), so the pin is
+    /// structural: the constant keeps its frozen value and the split-M
+    /// grid factor stays derived from it. Moving either is a bit-family
+    /// change that needs new goldens, not a tuning tweak.
+    #[test]
+    fn wave_fill_cell_is_frozen() {
+        assert_eq!(NUM_SMS, 142);
+        assert_eq!(SPLITM_TN_TARGET_GRID_FACTOR, 2 * NUM_SMS);
+    }
 }

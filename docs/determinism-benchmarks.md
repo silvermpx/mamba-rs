@@ -155,6 +155,22 @@ the final weights per tier for A/B-ing two BUILDS across a kernel edit
 (used to prove the `_Pragma("unroll")` restoration bit-neutral on all
 three tiers).
 
+## The frozen SM-count cell is a bit-family key
+
+The scalar tier's split-K and split-M gates key on a frozen constant
+(`NUM_SMS = 142`, the Ada RTX 6000 SM count) rather than a device query.
+A split changes the reduction order, so the gate thresholds are part of
+the numeric route identity: querying the real SM count at init would make
+two boards behind the same `sm_XX` target (RTX 5090 with 170 SMs, RTX
+5080 with 84; B200 with 148, floorswept parts with fewer) produce
+different bits for the same shape — a per-SKU bit family that no
+guarantee can state or test. The constant therefore stays a frozen table
+cell, pinned by a tripwire test next to its definition; a future
+architecture that needs its own wave-fill value gets its own frozen cell,
+new goldens, and a route-identity entry. The tensor-core ladder is immune
+by construction: it has no split-K and its tile picker keys only on
+output dimensions between bit-identical kernels.
+
 ## CUDA-13 cuBLAS compute-mode probe — the pedantic pin re-examined (2026-08-22, RTX 5090, cuBLAS 13)
 
 `tests/cublas_compute_probe.rs` (`--ignored`, TSV artifact): bf16-input
