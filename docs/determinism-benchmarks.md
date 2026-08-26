@@ -91,6 +91,19 @@ per output element (`tc64_and_tc128_bit_identical`). Narrow projections
 of every model size (x_proj N=80, dt_proj K≤96) ride tensor cores via
 Tile64 — that is why even d768/d1536 steps improved in 0.4.2.
 
+### Correction (2026-08-26): the apparent Tile64 win above was a timing artifact
+
+The wall-clock rows in the table above bracket each launch with a host
+sync, folding launch and synchronization overhead into every reading -
+a first-order error at these kernel durations. Re-measured with CUDA
+events in alternating groups (`tests/gemm_ladder_sweep.rs`), the
+`2048, 256, 1024` forward shape reads Tile128 14.6 us vs Tile64 18.6 us:
+Tile128 ahead by over 20 percent, where the wall-clock table showed it
+behind by 8. The dispatcher's 72-CTA threshold routes that shape to
+Tile128 - correctly. The decode-band Thin16 verdicts survive event
+timing with wider margins than first recorded (M=64: 9.2 vs 11.3 us at
+768x2304, 12.3 vs 18.4 us at 1536x1536).
+
 ### Tile64 at the prefill shapes (2026-08-26, RTX 6000 Ada, min of 3 runs)
 
 The prefill routing question is settled by measurement: a wave-efficiency
