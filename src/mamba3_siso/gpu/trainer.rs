@@ -580,6 +580,14 @@ impl Mamba3Trainer {
         }
     }
 
+    /// Download the most recent f32 temporal output without changing trainer state.
+    pub fn last_temporal(&self) -> Result<Vec<f32>, String> {
+        match &self.inner {
+            Trainer3Inner::F32(t) => t.temporal.to_cpu(&t.ctx.stream),
+            Trainer3Inner::Mixed(t) => t.temporal.to_cpu(&t.ctx.stream),
+        }
+    }
+
     /// Serialize the dynamic loss scaler state for checkpoint resume.
     /// Returns `Some((scale, growth_tracker))` only for f16 training where
     /// the scaler is active; `None` for bf16 / f32. Mirrors

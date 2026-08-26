@@ -105,9 +105,10 @@ fn captured_triad_trainer(dtype: WeightDtype) -> (Mamba3Trainer, Vec<f32>, Vec<f
     (trainer, input, d_temporal)
 }
 
-fn graph_replay_digests(dtype: WeightDtype) -> (u64, u64) {
+fn graph_replay_digests(dtype: WeightDtype) -> (Vec<(u64, u64)>, u64) {
     let (mut trainer, input, d_temporal) = captured_triad_trainer(dtype);
     let replay_gradient: Vec<f32> = d_temporal.iter().map(|value| value * 1e-4).collect();
+    let mut replay_digests = Vec::with_capacity(2);
     for _ in 0..2 {
         let metrics = trainer
             .step(&input, &replay_gradient)
@@ -120,15 +121,17 @@ fn graph_replay_digests(dtype: WeightDtype) -> (u64, u64) {
                 "deterministic f16 replay must apply the optimizer step"
             );
         }
+        let output = trainer.last_temporal().expect("download temporal output");
+        let stream = trainer.ctx().stream.clone();
+        let gradients = trainer
+            .grad_arena()
+            .to_cpu(&stream)
+            .expect("download gradients");
+        replay_digests.push((digest_f32(&output), digest_f32(&gradients)));
     }
 
     let weight_digest = digest_weights(&trainer.snapshot_master().expect("snapshot weights"));
-    let stream = trainer.ctx().stream.clone();
-    let gradients = trainer
-        .grad_arena()
-        .to_cpu(&stream)
-        .expect("download gradients");
-    (weight_digest, digest_f32(&gradients))
+    (replay_digests, weight_digest)
 }
 
 fn assert_graph_replay_deterministic(dtype: WeightDtype) {
@@ -136,7 +139,7 @@ fn assert_graph_replay_deterministic(dtype: WeightDtype) {
     let second = graph_replay_digests(dtype);
     assert_eq!(
         first, second,
-        "{dtype:?} graph replay weight and gradient digests diverged"
+        "{dtype:?} graph replay output, gradient, or weight digests diverged"
     );
 }
 
