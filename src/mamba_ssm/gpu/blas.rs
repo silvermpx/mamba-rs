@@ -997,14 +997,13 @@ fn launch_bi_gemm(
     kernel: &cudarc::driver::CudaFunction,
     args: BiGemmArgs,
 ) -> Result<(), String> {
-    // Tile geometry per instantiation in kernels/gemm_bi_fixed.cu: the
-    // Tensor-Core path (bf16/f16) keeps 64x64; the f32 CUDA-core path is
-    // register-blocked over 128x128. A mismatch here would launch the
-    // wrong grid and silently drop output tiles.
-    // MUST equal the kernel's own constants in kernels/gemm_bi_fixed.cu.
-    // A launch that disagrees fills part of the tile and returns
-    // plausible garbage - measured: a 64-thread launch of this
-    // 256-thread tile ran 2.3x "faster" and was wrong everywhere.
+    // MUST equal the kernel's own constants in kernels/gemm_bi_fixed.cu
+    // (both the TC and the f32 FFMA instantiations use the same 64x64
+    // tile with 256 threads). A launch that disagrees fills part of the
+    // tile and returns plausible garbage - measured: a 64-thread launch
+    // of this 256-thread tile ran 2.3x "faster" and was wrong everywhere.
+    // Static smem only - shared_mem_bytes stays 0 here; the dynamic
+    // K-buffer belongs to launch_bi_matvec alone.
     const BLOCK_M: i32 = 64;
     const BLOCK_N: i32 = 64;
     const THREADS: u32 = 256;
