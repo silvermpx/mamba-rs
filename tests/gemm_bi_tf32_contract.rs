@@ -3865,8 +3865,13 @@ fn compiled_tf32_ptx_exports_exact_five_parameter_abis() {
                 "fma.rn.ftz",
                 "mad.",
             ] {
+                let present = if matches!(forbidden, "atom." | "red." | "atom::" | "red::") {
+                    contains_opcode_prefix(entry, forbidden)
+                } else {
+                    entry.contains(forbidden)
+                };
                 assert!(
-                    !entry.contains(forbidden),
+                    !present,
                     "{label} {symbol} compiled forbidden PTX {forbidden}"
                 );
             }
@@ -5102,6 +5107,11 @@ fn graph_launch_scanner_rejects_a_bypass_beside_a_guarded_call() {
 
 #[test]
 fn k0_cfg_checker_propagates_values_and_rejects_bad_zero_subgraphs() {
+    assert!(!contains_opcode_prefix("ld.shared.f32 %f1, [%r1];", "red."));
+    assert!(contains_opcode_prefix(
+        "red.global.add.u32 [%r1], %r2;",
+        "red."
+    ));
     let symbol = "sgemm_bi_nn_sm100_tcgen_tf32_v1_m128n64_bk32_s2_c4";
     let valid = format!(
         r#"
