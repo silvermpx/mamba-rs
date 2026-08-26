@@ -1,13 +1,824 @@
 use super::super::blas::TypedPtr;
 use super::super::dtype::WeightDtype;
 use crate::mamba_ssm::gpu::kernel_identity::{
-    ArtifactIdentity, CompilerIdentity, DeviceIdentity, FramedSha256, ModuleKind,
-    PhysicalGemmBackend, PolicyDtype, ResolvedGemmLaunchSet, ResolvedGemmOp, ResolvedGemmRoute,
-    ResolvedNumericContract, Sha256Digest,
+    ArtifactIdentity, CompilerIdentity, CudaTarget, DeviceCaps, DeviceIdentity, FramedSha256,
+    ModuleKind, PhysicalGemmBackend, PolicyDtype, ResolvedGemmLaunchSet, ResolvedGemmOp,
+    ResolvedGemmRoute, ResolvedInstructionFamily, ResolvedInstructionShape,
+    ResolvedNumericContract, ResolvedOperandConversion, SCHEDULE_REVISION, Sha256Digest,
+    TUNING_TABLE_REVISION,
 };
 use cudarc::driver::{DeviceRepr, sys};
 
-pub(super) type CUptr = cudarc::driver::sys::CUdeviceptr;
+pub type CUptr = cudarc::driver::sys::CUdeviceptr;
+
+pub const F32_TF32_TUNING_REVISION: u16 = TUNING_TABLE_REVISION;
+pub const TF32_TENSOR_MAP_REVISION: u16 = 1;
+pub const TF32_SCHEDULE_REVISION: u16 = SCHEDULE_REVISION;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct F32TriadShape {
+    pub m: usize,
+    pub k: usize,
+    pub n: usize,
+    pub lda: usize,
+    pub ldb: usize,
+    pub ldc: usize,
+}
+
+impl F32TriadShape {
+    pub fn contiguous(op: ResolvedGemmOp, dims: (usize, usize, usize)) -> Self {
+        let (m, k, n) = dims;
+        match op {
+            ResolvedGemmOp::Nn | ResolvedGemmOp::Tn => Self {
+                m,
+                k,
+                n,
+                lda: k,
+                ldb: n,
+                ldc: n,
+            },
+            ResolvedGemmOp::Nt => Self {
+                m,
+                k,
+                n,
+                lda: n,
+                ldb: n,
+                ldc: k,
+            },
+        }
+    }
+
+    pub const fn output_rows(self, op: ResolvedGemmOp) -> usize {
+        match op {
+            ResolvedGemmOp::Nn | ResolvedGemmOp::Nt => self.m,
+            ResolvedGemmOp::Tn => self.k,
+        }
+    }
+
+    pub const fn output_columns(self, op: ResolvedGemmOp) -> usize {
+        match op {
+            ResolvedGemmOp::Nn | ResolvedGemmOp::Tn => self.n,
+            ResolvedGemmOp::Nt => self.k,
+        }
+    }
+
+    pub const fn reduction(self, op: ResolvedGemmOp) -> usize {
+        match op {
+            ResolvedGemmOp::Nn => self.k,
+            ResolvedGemmOp::Tn => self.m,
+            ResolvedGemmOp::Nt => self.n,
+        }
+    }
+
+    pub fn validate(self, op: ResolvedGemmOp) -> Result<(), String> {
+        let output_rows = self.output_rows(op);
+        let output_columns = self.output_columns(op);
+        if output_rows == 0 || output_columns == 0 {
+            return Err(invalid_gemm_dimensions(format!(
+                "output axes must be positive, got rows={output_rows} columns={output_columns}"
+            )));
+        }
+        for (value, name) in [(self.m, "M"), (self.k, "K"), (self.n, "N")] {
+            checked_i32(value, name)?;
+        }
+        for (lhs, rhs, name) in [
+            (self.m, self.k, "M*K"),
+            (self.m, self.n, "M*N"),
+            (self.k, self.n, "K*N"),
+        ] {
+            let product = lhs.checked_mul(rhs).ok_or_else(|| {
+                invalid_gemm_dimensions(format!("{name} overflows usize ({lhs} * {rhs})"))
+            })?;
+            checked_i32(product, name)?;
+        }
+        let (widths, rows) = match op {
+            ResolvedGemmOp::Nn => ([self.k, self.n, self.n], [self.m, self.k, self.m]),
+            ResolvedGemmOp::Tn => ([self.k, self.n, self.n], [self.m, self.m, self.k]),
+            ResolvedGemmOp::Nt => ([self.n, self.n, self.k], [self.m, self.k, self.m]),
+        };
+        for ((stride, width, rows), name) in [
+            ((self.lda, widths[0], rows[0]), "lda"),
+            ((self.ldb, widths[1], rows[1]), "ldb"),
+            ((self.ldc, widths[2], rows[2]), "ldc"),
+        ] {
+            if stride < width {
+                return Err(invalid_gemm_dimensions(format!(
+                    "{name}={stride} is smaller than the physical width {width}"
+                )));
+            }
+            checked_i32(stride, name)?;
+            if rows != 0 && width != 0 {
+                let span = (rows - 1)
+                    .checked_mul(stride)
+                    .and_then(|offset| offset.checked_add(width))
+                    .ok_or_else(|| {
+                        invalid_gemm_dimensions(format!("{name} storage span overflows usize"))
+                    })?;
+                checked_i32(span, &format!("{name} storage"))?;
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct F32TriadRequest {
+    pub op: ResolvedGemmOp,
+    pub shape: F32TriadShape,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct F32TriadOperands {
+    pub output: CUptr,
+    pub a: CUptr,
+    pub b: CUptr,
+    pub bias: Option<CUptr>,
+    pub alpha: f32,
+    pub beta: f32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Tf32PortableTile {
+    M128N64,
+    M64N64,
+    M16N32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Tf32PortableStages {
+    S2,
+    S3,
+    S4,
+}
+
+impl Tf32PortableStages {
+    pub const fn count(self) -> u8 {
+        match self {
+            Self::S2 => 2,
+            Self::S3 => 3,
+            Self::S4 => 4,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Tf32PortableRoute {
+    pub tile: Tf32PortableTile,
+    pub stages: Tf32PortableStages,
+}
+
+impl Tf32PortableRoute {
+    pub fn validate(self) -> Result<(), String> {
+        if matches!(
+            (self.tile, self.stages),
+            (
+                Tf32PortableTile::M128N64 | Tf32PortableTile::M64N64,
+                Tf32PortableStages::S2 | Tf32PortableStages::S3
+            ) | (Tf32PortableTile::M16N32, Tf32PortableStages::S4)
+        ) {
+            Ok(())
+        } else {
+            Err(format!("illegal portable TF32 route {self:?}"))
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Tf32Sm90aRoute {
+    pub schedule: Sm90aWarpgroupSchedule,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Tf32Sm100Route {
+    pub tile: Sm100Tile,
+    pub stages: Sm100Stages,
+    pub schedule: Sm100Schedule,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Tf32Sm120Tile {
+    M128N64,
+    M64N128,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Tf32Sm120Route {
+    pub tile: Tf32Sm120Tile,
+    pub stages: Sm120Stages,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Tf32PhysicalRoute {
+    MmaTf32RnaV1(Tf32PortableRoute),
+    Sm90aWgmmaTf32TmaV1(Tf32Sm90aRoute),
+    Sm100Tcgen05Tf32TmaV1(Tf32Sm100Route),
+    Sm120TmaMmaTf32RnaV1(Tf32Sm120Route),
+}
+
+impl Tf32PhysicalRoute {
+    pub const fn module_kind(self) -> ModuleKind {
+        match self {
+            Self::MmaTf32RnaV1(_) => ModuleKind::TriadSm80,
+            Self::Sm90aWgmmaTf32TmaV1(_) => ModuleKind::TriadSm90a,
+            Self::Sm100Tcgen05Tf32TmaV1(_) => ModuleKind::TriadSm100,
+            Self::Sm120TmaMmaTf32RnaV1(_) => ModuleKind::TriadSm120,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum F32TriadSelection {
+    ScalarFmaV1,
+    Tf32(Tf32PhysicalRoute),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Tf32QualifiedModule {
+    pub module_kind: ModuleKind,
+    pub target: CudaTarget,
+    pub artifact: ArtifactIdentity,
+    pub compiler: CompilerIdentity,
+    pub device: DeviceIdentity,
+    pub device_caps: DeviceCaps,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct F32TriadAvailability {
+    pub portable: Option<Tf32QualifiedModule>,
+    pub specialized: Option<Tf32QualifiedModule>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Tf32KernelSpec {
+    pub op: ResolvedGemmOp,
+    pub route: Tf32PhysicalRoute,
+    pub symbol: &'static str,
+    pub module_kind: ModuleKind,
+    pub instruction_family: ResolvedInstructionFamily,
+    pub instruction_shape: ResolvedInstructionShape,
+    pub operand_conversion: ResolvedOperandConversion,
+    pub tile: (u32, u32),
+    pub bk: u32,
+    pub stages: u8,
+    pub threads: u32,
+    pub dynamic_shared_bytes: u32,
+    pub tensor_map_revision: u16,
+    pub schedule_revision: u16,
+}
+
+macro_rules! portable_tf32_specs {
+    ($op:expr, $op_name:literal) => {
+        [
+            Tf32KernelSpec {
+                op: $op,
+                route: Tf32PhysicalRoute::MmaTf32RnaV1(Tf32PortableRoute {
+                    tile: Tf32PortableTile::M128N64,
+                    stages: Tf32PortableStages::S2,
+                }),
+                symbol: concat!("sgemm_bi_", $op_name, "_sm80_mma_tf32_v1_m128n64_bk32_s2"),
+                module_kind: ModuleKind::TriadSm80,
+                instruction_family: ResolvedInstructionFamily::MmaSync,
+                instruction_shape: ResolvedInstructionShape { m: 16, n: 8, k: 8 },
+                operand_conversion: ResolvedOperandConversion::RegisterCvtRnaTf32F32V1,
+                tile: (128, 64),
+                bk: 32,
+                stages: 2,
+                threads: 256,
+                dynamic_shared_bytes: 55_296,
+                tensor_map_revision: 0,
+                schedule_revision: TF32_SCHEDULE_REVISION,
+            },
+            Tf32KernelSpec {
+                op: $op,
+                route: Tf32PhysicalRoute::MmaTf32RnaV1(Tf32PortableRoute {
+                    tile: Tf32PortableTile::M128N64,
+                    stages: Tf32PortableStages::S3,
+                }),
+                symbol: concat!("sgemm_bi_", $op_name, "_sm80_mma_tf32_v1_m128n64_bk32_s3"),
+                module_kind: ModuleKind::TriadSm80,
+                instruction_family: ResolvedInstructionFamily::MmaSync,
+                instruction_shape: ResolvedInstructionShape { m: 16, n: 8, k: 8 },
+                operand_conversion: ResolvedOperandConversion::RegisterCvtRnaTf32F32V1,
+                tile: (128, 64),
+                bk: 32,
+                stages: 3,
+                threads: 256,
+                dynamic_shared_bytes: 82_944,
+                tensor_map_revision: 0,
+                schedule_revision: TF32_SCHEDULE_REVISION,
+            },
+            Tf32KernelSpec {
+                op: $op,
+                route: Tf32PhysicalRoute::MmaTf32RnaV1(Tf32PortableRoute {
+                    tile: Tf32PortableTile::M64N64,
+                    stages: Tf32PortableStages::S2,
+                }),
+                symbol: concat!("sgemm_bi_", $op_name, "_sm80_mma_tf32_v1_m64n64_bk32_s2"),
+                module_kind: ModuleKind::TriadSm80,
+                instruction_family: ResolvedInstructionFamily::MmaSync,
+                instruction_shape: ResolvedInstructionShape { m: 16, n: 8, k: 8 },
+                operand_conversion: ResolvedOperandConversion::RegisterCvtRnaTf32F32V1,
+                tile: (64, 64),
+                bk: 32,
+                stages: 2,
+                threads: 128,
+                dynamic_shared_bytes: 36_864,
+                tensor_map_revision: 0,
+                schedule_revision: TF32_SCHEDULE_REVISION,
+            },
+            Tf32KernelSpec {
+                op: $op,
+                route: Tf32PhysicalRoute::MmaTf32RnaV1(Tf32PortableRoute {
+                    tile: Tf32PortableTile::M64N64,
+                    stages: Tf32PortableStages::S3,
+                }),
+                symbol: concat!("sgemm_bi_", $op_name, "_sm80_mma_tf32_v1_m64n64_bk32_s3"),
+                module_kind: ModuleKind::TriadSm80,
+                instruction_family: ResolvedInstructionFamily::MmaSync,
+                instruction_shape: ResolvedInstructionShape { m: 16, n: 8, k: 8 },
+                operand_conversion: ResolvedOperandConversion::RegisterCvtRnaTf32F32V1,
+                tile: (64, 64),
+                bk: 32,
+                stages: 3,
+                threads: 128,
+                dynamic_shared_bytes: 55_296,
+                tensor_map_revision: 0,
+                schedule_revision: TF32_SCHEDULE_REVISION,
+            },
+            Tf32KernelSpec {
+                op: $op,
+                route: Tf32PhysicalRoute::MmaTf32RnaV1(Tf32PortableRoute {
+                    tile: Tf32PortableTile::M16N32,
+                    stages: Tf32PortableStages::S4,
+                }),
+                symbol: concat!("sgemm_bi_", $op_name, "_sm80_mma_tf32_v1_m16n32_bk32_s4"),
+                module_kind: ModuleKind::TriadSm80,
+                instruction_family: ResolvedInstructionFamily::MmaSync,
+                instruction_shape: ResolvedInstructionShape { m: 16, n: 8, k: 8 },
+                operand_conversion: ResolvedOperandConversion::RegisterCvtRnaTf32F32V1,
+                tile: (16, 32),
+                bk: 32,
+                stages: 4,
+                threads: 128,
+                dynamic_shared_bytes: 29_696,
+                tensor_map_revision: 0,
+                schedule_revision: TF32_SCHEDULE_REVISION,
+            },
+        ]
+    };
+}
+
+macro_rules! sm90a_tf32_specs {
+    ($op:expr, $op_name:literal) => {
+        [
+            Tf32KernelSpec {
+                op: $op,
+                route: Tf32PhysicalRoute::Sm90aWgmmaTf32TmaV1(Tf32Sm90aRoute {
+                    schedule: Sm90aWarpgroupSchedule::Wg1,
+                }),
+                symbol: concat!(
+                    "sgemm_bi_",
+                    $op_name,
+                    "_sm90a_wgmma_tf32_v1_m64n128_bk32_s3_wg1"
+                ),
+                module_kind: ModuleKind::TriadSm90a,
+                instruction_family: ResolvedInstructionFamily::Wgmma,
+                instruction_shape: ResolvedInstructionShape {
+                    m: 64,
+                    n: 128,
+                    k: 8,
+                },
+                operand_conversion: ResolvedOperandConversion::TensorMapTfloat32V1,
+                tile: (64, 128),
+                bk: 32,
+                stages: 3,
+                threads: 128,
+                dynamic_shared_bytes: 73_984,
+                tensor_map_revision: TF32_TENSOR_MAP_REVISION,
+                schedule_revision: TF32_SCHEDULE_REVISION,
+            },
+            Tf32KernelSpec {
+                op: $op,
+                route: Tf32PhysicalRoute::Sm90aWgmmaTf32TmaV1(Tf32Sm90aRoute {
+                    schedule: Sm90aWarpgroupSchedule::Wg2,
+                }),
+                symbol: concat!(
+                    "sgemm_bi_",
+                    $op_name,
+                    "_sm90a_wgmma_tf32_v1_m64n128_bk32_s3_wg2"
+                ),
+                module_kind: ModuleKind::TriadSm90a,
+                instruction_family: ResolvedInstructionFamily::Wgmma,
+                instruction_shape: ResolvedInstructionShape {
+                    m: 64,
+                    n: 128,
+                    k: 8,
+                },
+                operand_conversion: ResolvedOperandConversion::TensorMapTfloat32V1,
+                tile: (64, 128),
+                bk: 32,
+                stages: 3,
+                threads: 256,
+                dynamic_shared_bytes: 73_984,
+                tensor_map_revision: TF32_TENSOR_MAP_REVISION,
+                schedule_revision: TF32_SCHEDULE_REVISION,
+            },
+        ]
+    };
+}
+
+macro_rules! sm100_tf32_spec {
+    ($op:expr, $op_name:literal, $tile:expr, $n:literal, $stage:expr, $s:literal, $schedule:expr, $schedule_name:literal, $threads:literal, $shared:literal) => {
+        Tf32KernelSpec {
+            op: $op,
+            route: Tf32PhysicalRoute::Sm100Tcgen05Tf32TmaV1(Tf32Sm100Route {
+                tile: $tile,
+                stages: $stage,
+                schedule: $schedule,
+            }),
+            symbol: concat!(
+                "sgemm_bi_",
+                $op_name,
+                "_sm100_tcgen_tf32_v1_m128n",
+                $n,
+                "_bk32_s",
+                $s,
+                "_",
+                $schedule_name
+            ),
+            module_kind: ModuleKind::TriadSm100,
+            instruction_family: ResolvedInstructionFamily::Tcgen05,
+            instruction_shape: ResolvedInstructionShape {
+                m: 128,
+                n: $n,
+                k: 8,
+            },
+            operand_conversion: ResolvedOperandConversion::TensorMapTfloat32V1,
+            tile: (128, $n),
+            bk: 32,
+            stages: $s,
+            threads: $threads,
+            dynamic_shared_bytes: $shared,
+            tensor_map_revision: TF32_TENSOR_MAP_REVISION,
+            schedule_revision: TF32_SCHEDULE_REVISION,
+        }
+    };
+}
+
+macro_rules! sm100_tf32_specs {
+    ($op:expr, $op_name:literal) => {
+        [
+            sm100_tf32_spec!(
+                $op,
+                $op_name,
+                Sm100Tile::M128N64,
+                64,
+                Sm100Stages::S2,
+                2,
+                Sm100Schedule::C4,
+                "c4",
+                128,
+                49_408
+            ),
+            sm100_tf32_spec!(
+                $op,
+                $op_name,
+                Sm100Tile::M128N64,
+                64,
+                Sm100Stages::S2,
+                2,
+                Sm100Schedule::P8,
+                "p8",
+                256,
+                49_408
+            ),
+            sm100_tf32_spec!(
+                $op,
+                $op_name,
+                Sm100Tile::M128N64,
+                64,
+                Sm100Stages::S3,
+                3,
+                Sm100Schedule::C4,
+                "c4",
+                128,
+                73_984
+            ),
+            sm100_tf32_spec!(
+                $op,
+                $op_name,
+                Sm100Tile::M128N64,
+                64,
+                Sm100Stages::S3,
+                3,
+                Sm100Schedule::P8,
+                "p8",
+                256,
+                73_984
+            ),
+            sm100_tf32_spec!(
+                $op,
+                $op_name,
+                Sm100Tile::M128N64,
+                64,
+                Sm100Stages::S4,
+                4,
+                Sm100Schedule::C4,
+                "c4",
+                128,
+                98_560
+            ),
+            sm100_tf32_spec!(
+                $op,
+                $op_name,
+                Sm100Tile::M128N64,
+                64,
+                Sm100Stages::S4,
+                4,
+                Sm100Schedule::P8,
+                "p8",
+                256,
+                98_560
+            ),
+            sm100_tf32_spec!(
+                $op,
+                $op_name,
+                Sm100Tile::M128N128,
+                128,
+                Sm100Stages::S2,
+                2,
+                Sm100Schedule::C4,
+                "c4",
+                128,
+                65_792
+            ),
+            sm100_tf32_spec!(
+                $op,
+                $op_name,
+                Sm100Tile::M128N128,
+                128,
+                Sm100Stages::S2,
+                2,
+                Sm100Schedule::P8,
+                "p8",
+                256,
+                65_792
+            ),
+            sm100_tf32_spec!(
+                $op,
+                $op_name,
+                Sm100Tile::M128N128,
+                128,
+                Sm100Stages::S3,
+                3,
+                Sm100Schedule::C4,
+                "c4",
+                128,
+                98_560
+            ),
+            sm100_tf32_spec!(
+                $op,
+                $op_name,
+                Sm100Tile::M128N128,
+                128,
+                Sm100Stages::S3,
+                3,
+                Sm100Schedule::P8,
+                "p8",
+                256,
+                98_560
+            ),
+            sm100_tf32_spec!(
+                $op,
+                $op_name,
+                Sm100Tile::M128N128,
+                128,
+                Sm100Stages::S4,
+                4,
+                Sm100Schedule::C4,
+                "c4",
+                128,
+                131_328
+            ),
+            sm100_tf32_spec!(
+                $op,
+                $op_name,
+                Sm100Tile::M128N128,
+                128,
+                Sm100Stages::S4,
+                4,
+                Sm100Schedule::P8,
+                "p8",
+                256,
+                131_328
+            ),
+        ]
+    };
+}
+
+macro_rules! sm120_tf32_spec {
+    ($op:expr, $op_name:literal, $tile:expr, $tile_name:literal, $stage:expr, $s:literal, $shared:literal) => {
+        Tf32KernelSpec {
+            op: $op,
+            route: Tf32PhysicalRoute::Sm120TmaMmaTf32RnaV1(Tf32Sm120Route {
+                tile: $tile,
+                stages: $stage,
+            }),
+            symbol: concat!(
+                "sgemm_bi_",
+                $op_name,
+                "_sm120_tma_mma_tf32_v1_",
+                $tile_name,
+                "_bk32_s",
+                $s
+            ),
+            module_kind: ModuleKind::TriadSm120,
+            instruction_family: ResolvedInstructionFamily::MmaSync,
+            instruction_shape: ResolvedInstructionShape { m: 16, n: 8, k: 8 },
+            operand_conversion: ResolvedOperandConversion::TensorMapUint32ThenCvtRnaTf32F32V1,
+            tile: match $tile {
+                Tf32Sm120Tile::M128N64 => (128, 64),
+                Tf32Sm120Tile::M64N128 => (64, 128),
+            },
+            bk: 32,
+            stages: $s,
+            threads: 256,
+            dynamic_shared_bytes: $shared,
+            tensor_map_revision: TF32_TENSOR_MAP_REVISION,
+            schedule_revision: TF32_SCHEDULE_REVISION,
+        }
+    };
+}
+
+macro_rules! sm120_tf32_specs {
+    ($op:expr, $op_name:literal) => {
+        [
+            sm120_tf32_spec!(
+                $op,
+                $op_name,
+                Tf32Sm120Tile::M128N64,
+                "m128n64",
+                Sm120Stages::S2,
+                2,
+                49_280
+            ),
+            sm120_tf32_spec!(
+                $op,
+                $op_name,
+                Tf32Sm120Tile::M128N64,
+                "m128n64",
+                Sm120Stages::S3,
+                3,
+                73_856
+            ),
+            sm120_tf32_spec!(
+                $op,
+                $op_name,
+                Tf32Sm120Tile::M64N128,
+                "m64n128",
+                Sm120Stages::S2,
+                2,
+                49_280
+            ),
+            sm120_tf32_spec!(
+                $op,
+                $op_name,
+                Tf32Sm120Tile::M64N128,
+                "m64n128",
+                Sm120Stages::S3,
+                3,
+                73_856
+            ),
+        ]
+    };
+}
+
+const SM80_TF32_NN: [Tf32KernelSpec; 5] = portable_tf32_specs!(ResolvedGemmOp::Nn, "nn");
+const SM80_TF32_TN: [Tf32KernelSpec; 5] = portable_tf32_specs!(ResolvedGemmOp::Tn, "tn");
+const SM80_TF32_NT: [Tf32KernelSpec; 5] = portable_tf32_specs!(ResolvedGemmOp::Nt, "nt");
+pub const SM80_TF32_ROUTE_SPECS: [Tf32KernelSpec; 15] = [
+    SM80_TF32_NN[0],
+    SM80_TF32_NN[1],
+    SM80_TF32_NN[2],
+    SM80_TF32_NN[3],
+    SM80_TF32_NN[4],
+    SM80_TF32_TN[0],
+    SM80_TF32_TN[1],
+    SM80_TF32_TN[2],
+    SM80_TF32_TN[3],
+    SM80_TF32_TN[4],
+    SM80_TF32_NT[0],
+    SM80_TF32_NT[1],
+    SM80_TF32_NT[2],
+    SM80_TF32_NT[3],
+    SM80_TF32_NT[4],
+];
+
+const SM90A_TF32_NN: [Tf32KernelSpec; 2] = sm90a_tf32_specs!(ResolvedGemmOp::Nn, "nn");
+const SM90A_TF32_TN: [Tf32KernelSpec; 2] = sm90a_tf32_specs!(ResolvedGemmOp::Tn, "tn");
+const SM90A_TF32_NT: [Tf32KernelSpec; 2] = sm90a_tf32_specs!(ResolvedGemmOp::Nt, "nt");
+pub const SM90A_TF32_ROUTE_SPECS: [Tf32KernelSpec; 6] = [
+    SM90A_TF32_NN[0],
+    SM90A_TF32_NN[1],
+    SM90A_TF32_TN[0],
+    SM90A_TF32_TN[1],
+    SM90A_TF32_NT[0],
+    SM90A_TF32_NT[1],
+];
+
+const SM100_TF32_NN: [Tf32KernelSpec; 12] = sm100_tf32_specs!(ResolvedGemmOp::Nn, "nn");
+const SM100_TF32_TN: [Tf32KernelSpec; 12] = sm100_tf32_specs!(ResolvedGemmOp::Tn, "tn");
+const SM100_TF32_NT: [Tf32KernelSpec; 12] = sm100_tf32_specs!(ResolvedGemmOp::Nt, "nt");
+pub const SM100_TF32_ROUTE_SPECS: [Tf32KernelSpec; 36] = [
+    SM100_TF32_NN[0],
+    SM100_TF32_NN[1],
+    SM100_TF32_NN[2],
+    SM100_TF32_NN[3],
+    SM100_TF32_NN[4],
+    SM100_TF32_NN[5],
+    SM100_TF32_NN[6],
+    SM100_TF32_NN[7],
+    SM100_TF32_NN[8],
+    SM100_TF32_NN[9],
+    SM100_TF32_NN[10],
+    SM100_TF32_NN[11],
+    SM100_TF32_TN[0],
+    SM100_TF32_TN[1],
+    SM100_TF32_TN[2],
+    SM100_TF32_TN[3],
+    SM100_TF32_TN[4],
+    SM100_TF32_TN[5],
+    SM100_TF32_TN[6],
+    SM100_TF32_TN[7],
+    SM100_TF32_TN[8],
+    SM100_TF32_TN[9],
+    SM100_TF32_TN[10],
+    SM100_TF32_TN[11],
+    SM100_TF32_NT[0],
+    SM100_TF32_NT[1],
+    SM100_TF32_NT[2],
+    SM100_TF32_NT[3],
+    SM100_TF32_NT[4],
+    SM100_TF32_NT[5],
+    SM100_TF32_NT[6],
+    SM100_TF32_NT[7],
+    SM100_TF32_NT[8],
+    SM100_TF32_NT[9],
+    SM100_TF32_NT[10],
+    SM100_TF32_NT[11],
+];
+
+const SM120_TF32_NN: [Tf32KernelSpec; 4] = sm120_tf32_specs!(ResolvedGemmOp::Nn, "nn");
+const SM120_TF32_TN: [Tf32KernelSpec; 4] = sm120_tf32_specs!(ResolvedGemmOp::Tn, "tn");
+const SM120_TF32_NT: [Tf32KernelSpec; 4] = sm120_tf32_specs!(ResolvedGemmOp::Nt, "nt");
+pub const SM120_TF32_ROUTE_SPECS: [Tf32KernelSpec; 12] = [
+    SM120_TF32_NN[0],
+    SM120_TF32_NN[1],
+    SM120_TF32_NN[2],
+    SM120_TF32_NN[3],
+    SM120_TF32_TN[0],
+    SM120_TF32_TN[1],
+    SM120_TF32_TN[2],
+    SM120_TF32_TN[3],
+    SM120_TF32_NT[0],
+    SM120_TF32_NT[1],
+    SM120_TF32_NT[2],
+    SM120_TF32_NT[3],
+];
+
+pub fn tf32_route_specs(module_kind: ModuleKind) -> &'static [Tf32KernelSpec] {
+    match module_kind {
+        ModuleKind::TriadSm80 => &SM80_TF32_ROUTE_SPECS,
+        ModuleKind::TriadSm90a => &SM90A_TF32_ROUTE_SPECS,
+        ModuleKind::TriadSm100 => &SM100_TF32_ROUTE_SPECS,
+        ModuleKind::TriadSm120 => &SM120_TF32_ROUTE_SPECS,
+        ModuleKind::Fixed | ModuleKind::TriadScalar | ModuleKind::Mamba3Combined => &[],
+    }
+}
+
+pub fn tf32_module_symbols(module_kind: ModuleKind) -> impl ExactSizeIterator<Item = &'static str> {
+    tf32_route_specs(module_kind).iter().map(|spec| spec.symbol)
+}
+
+pub fn tf32_kernel_spec(
+    op: ResolvedGemmOp,
+    route: Tf32PhysicalRoute,
+) -> Result<&'static Tf32KernelSpec, String> {
+    if let Tf32PhysicalRoute::MmaTf32RnaV1(portable) = route {
+        portable.validate()?;
+    }
+    let mut matches = tf32_route_specs(route.module_kind())
+        .iter()
+        .filter(|spec| spec.op == op && spec.route == route);
+    let Some(spec) = matches.next() else {
+        return Err(format!("no TF32 kernel matches {op:?}/{route:?}"));
+    };
+    if matches.next().is_some() {
+        Err(format!("duplicate TF32 kernels match {op:?}/{route:?}"))
+    } else {
+        Ok(spec)
+    }
+}
 
 pub const SM90A_DYNAMIC_SHARED_BYTES: u32 = 73_984;
 pub const SM90A_TILE: (u32, u32, u32) = (64, 128, 64);
@@ -2642,6 +3453,9 @@ impl Sm120RouteIdentity {
             dtype,
             backend: PhysicalGemmBackend::Sm120TmaMma16V1,
             numeric_contract: ResolvedNumericContract::MmaSyncF32V1,
+            instruction_family: ResolvedInstructionFamily::MmaSync,
+            instruction_shape: ResolvedInstructionShape { m: 16, n: 8, k: 16 },
+            operand_conversion: ResolvedOperandConversion::None,
             symbol: self.symbol,
             module_kind: self.module_kind,
             target: self.compiler.target,
@@ -3325,12 +4139,135 @@ impl Sm120PreparedLaunch {
 #[cfg(test)]
 mod tests {
     use super::{
-        GemmDims, SM120_KERNEL_SPECS, Sm90aMapRequest, Sm90aOp, Sm90aShape, Sm100MapRequest,
-        Sm100Op, Sm100Shape, Sm100Tile, Sm120Bk, Sm120Op, Sm120Stages, Sm120Tile,
+        F32TriadShape, GemmDims, SM120_KERNEL_SPECS, Sm90aMapRequest, Sm90aOp, Sm90aShape,
+        Sm100MapRequest, Sm100Op, Sm100Shape, Sm100Tile, Sm120Bk, Sm120Op, Sm120Stages, Sm120Tile,
         checked_grid_product, checked_u32, sm90a_tensor_map_keys, sm100_operand_layouts,
-        sm100_tensor_map_keys, validate_bias_preseed, validate_sm100_issued_coordinates,
+        sm100_tensor_map_keys, tf32_kernel_spec, tf32_route_specs, validate_bias_preseed,
+        validate_sm100_issued_coordinates,
     };
     use crate::mamba_ssm::gpu::dtype::WeightDtype;
+    use crate::mamba_ssm::gpu::kernel_identity::{
+        ModuleKind, ResolvedGemmOp, ResolvedInstructionFamily, ResolvedInstructionShape,
+        ResolvedOperandConversion,
+    };
+
+    #[test]
+    fn f32_zero_reduction_validation_is_op_normalized() {
+        let cases = [
+            (
+                ResolvedGemmOp::Nn,
+                F32TriadShape::contiguous(ResolvedGemmOp::Nn, (3, 0, 5)),
+            ),
+            (
+                ResolvedGemmOp::Tn,
+                F32TriadShape::contiguous(ResolvedGemmOp::Tn, (0, 3, 5)),
+            ),
+            (
+                ResolvedGemmOp::Nt,
+                F32TriadShape::contiguous(ResolvedGemmOp::Nt, (3, 5, 0)),
+            ),
+        ];
+        for (op, shape) in cases {
+            shape.validate(op).unwrap();
+            assert_eq!(shape.reduction(op), 0);
+            assert_eq!(shape.output_rows(op), 3);
+            assert_eq!(shape.output_columns(op), 5);
+        }
+
+        for (op, dims) in [
+            (ResolvedGemmOp::Nn, (0, 1, 1)),
+            (ResolvedGemmOp::Nn, (1, 1, 0)),
+            (ResolvedGemmOp::Tn, (1, 0, 1)),
+            (ResolvedGemmOp::Tn, (1, 1, 0)),
+            (ResolvedGemmOp::Nt, (0, 1, 1)),
+            (ResolvedGemmOp::Nt, (1, 0, 1)),
+        ] {
+            assert!(F32TriadShape::contiguous(op, dims).validate(op).is_err());
+        }
+    }
+
+    #[test]
+    fn f32_shape_rejects_bad_strides_and_i32_overflow() {
+        let mut nn = F32TriadShape::contiguous(ResolvedGemmOp::Nn, (7, 11, 13));
+        nn.lda = 10;
+        assert!(nn.validate(ResolvedGemmOp::Nn).is_err());
+
+        let mut tn = F32TriadShape::contiguous(ResolvedGemmOp::Tn, (7, 11, 13));
+        tn.ldc = 12;
+        assert!(tn.validate(ResolvedGemmOp::Tn).is_err());
+
+        let mut nt = F32TriadShape::contiguous(ResolvedGemmOp::Nt, (7, 11, 13));
+        nt.ldc = 10;
+        assert!(nt.validate(ResolvedGemmOp::Nt).is_err());
+
+        let too_large = i32::MAX as usize + 1;
+        let oversized = F32TriadShape::contiguous(ResolvedGemmOp::Nn, (too_large, 0, 1));
+        assert!(oversized.validate(ResolvedGemmOp::Nn).is_err());
+    }
+
+    #[test]
+    fn tf32_route_spec_inventories_are_exact_and_unique() {
+        let expected = [
+            (ModuleKind::TriadSm80, 15),
+            (ModuleKind::TriadSm90a, 6),
+            (ModuleKind::TriadSm100, 36),
+            (ModuleKind::TriadSm120, 12),
+        ];
+        let mut all_symbols = std::collections::BTreeSet::new();
+        for (module_kind, count) in expected {
+            let specs = tf32_route_specs(module_kind);
+            assert_eq!(specs.len(), count, "{module_kind:?}");
+            for op in [ResolvedGemmOp::Nn, ResolvedGemmOp::Tn, ResolvedGemmOp::Nt] {
+                assert_eq!(
+                    specs.iter().filter(|spec| spec.op == op).count(),
+                    count / 3,
+                    "{module_kind:?}/{op:?}"
+                );
+            }
+            for spec in specs {
+                assert_eq!(spec.module_kind, module_kind);
+                assert_eq!(tf32_kernel_spec(spec.op, spec.route).unwrap(), spec);
+                match spec.route {
+                    super::Tf32PhysicalRoute::MmaTf32RnaV1(_)
+                    | super::Tf32PhysicalRoute::Sm120TmaMmaTf32RnaV1(_) => {
+                        assert_eq!(spec.instruction_family, ResolvedInstructionFamily::MmaSync);
+                        assert_eq!(
+                            spec.instruction_shape,
+                            ResolvedInstructionShape { m: 16, n: 8, k: 8 }
+                        );
+                    }
+                    super::Tf32PhysicalRoute::Sm90aWgmmaTf32TmaV1(_) => {
+                        assert_eq!(spec.instruction_family, ResolvedInstructionFamily::Wgmma);
+                        assert_eq!(
+                            spec.instruction_shape,
+                            ResolvedInstructionShape {
+                                m: 64,
+                                n: 128,
+                                k: 8,
+                            }
+                        );
+                    }
+                    super::Tf32PhysicalRoute::Sm100Tcgen05Tf32TmaV1(_) => {
+                        assert_eq!(spec.instruction_family, ResolvedInstructionFamily::Tcgen05);
+                        assert_eq!(spec.instruction_shape.k, 8);
+                        assert_eq!(
+                            (
+                                u32::from(spec.instruction_shape.m),
+                                u32::from(spec.instruction_shape.n)
+                            ),
+                            spec.tile
+                        );
+                    }
+                }
+                assert_ne!(spec.operand_conversion, ResolvedOperandConversion::None);
+                assert!(all_symbols.insert(spec.symbol), "duplicate {}", spec.symbol);
+            }
+        }
+        assert_eq!(all_symbols.len(), 69);
+        assert!(tf32_route_specs(ModuleKind::Fixed).is_empty());
+        assert!(tf32_route_specs(ModuleKind::TriadScalar).is_empty());
+        assert!(tf32_route_specs(ModuleKind::Mamba3Combined).is_empty());
+    }
 
     fn sm90a_request(op: Sm90aOp) -> Sm90aMapRequest {
         Sm90aMapRequest {

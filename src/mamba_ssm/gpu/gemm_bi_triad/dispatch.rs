@@ -1,11 +1,206 @@
 use super::super::dtype::WeightDtype;
 use super::super::kernels::MambaKernels as GpuKernels;
-use super::contract::{GemmDims, checked_mul3, checked_tile_grid, checked_usize};
-use super::contract::{
-    Sm90aForcedRoute, Sm90aOp, Sm90aShape, Sm90aWarpgroupSchedule, Sm100ForcedRoute,
-    Sm100TargetCandidate, Sm100TargetKind, Sm120ForcedRoute, Sm120TargetCandidate,
+use super::super::{
+    context::F32TriadPolicy,
+    kernel_identity::{
+        COMPILER_REVISION, COMPOSER_REVISION, ModuleKind, NUMERIC_ABI_REVISION, SCHEDULE_REVISION,
+    },
 };
+use super::contract::{
+    F32_TF32_TUNING_REVISION, F32TriadAvailability, F32TriadRequest, F32TriadSelection,
+    Sm90aForcedRoute, Sm90aOp, Sm90aShape, Sm90aWarpgroupSchedule, Sm100ForcedRoute,
+    Sm100TargetCandidate, Sm100TargetKind, Sm120ForcedRoute, Sm120TargetCandidate, Tf32KernelSpec,
+    Tf32PhysicalRoute, Tf32QualifiedModule, tf32_kernel_spec,
+};
+use super::contract::{GemmDims, checked_mul3, checked_tile_grid, checked_usize};
 use crate::mamba_ssm::gpu::kernel_identity::DeviceCaps;
+
+#[derive(Clone, Copy)]
+struct Tf32ShapeBucket {
+    output_rows: (usize, usize),
+    output_columns: (usize, usize),
+    reduction: (usize, usize),
+}
+
+impl Tf32ShapeBucket {
+    fn contains(self, request: F32TriadRequest) -> bool {
+        let rows = request.shape.output_rows(request.op);
+        let columns = request.shape.output_columns(request.op);
+        let reduction = request.shape.reduction(request.op);
+        (self.output_rows.0..=self.output_rows.1).contains(&rows)
+            && (self.output_columns.0..=self.output_columns.1).contains(&columns)
+            && (self.reduction.0..=self.reduction.1).contains(&reduction)
+    }
+}
+
+#[derive(Clone, Copy)]
+struct Tf32AutoCell {
+    op: crate::mamba_ssm::gpu::kernel_identity::ResolvedGemmOp,
+    shape_bucket: Tf32ShapeBucket,
+    target: &'static str,
+    route: Tf32PhysicalRoute,
+    tuning_revision: u16,
+}
+
+const SM89_TF32_AUTO_CELLS: &[Tf32AutoCell] = &[];
+
+fn measured_tf32_route(
+    request: F32TriadRequest,
+    availability: F32TriadAvailability,
+    tuning_revision: u16,
+) -> Option<Tf32PhysicalRoute> {
+    let portable = availability.portable?;
+    if portable.device.compute_capability != (8, 9) || portable.module_kind != ModuleKind::TriadSm80
+    {
+        return None;
+    }
+    SM89_TF32_AUTO_CELLS
+        .iter()
+        .find(|cell| {
+            cell.tuning_revision == tuning_revision
+                && cell.op == request.op
+                && cell.target == portable.target.as_str()
+                && cell.shape_bucket.contains(request)
+        })
+        .map(|cell| cell.route)
+}
+
+pub fn resolve_f32_triad_auto(
+    policy: F32TriadPolicy,
+    request: F32TriadRequest,
+    availability: F32TriadAvailability,
+) -> Result<F32TriadSelection, String> {
+    request.shape.validate(request.op)?;
+    match policy {
+        F32TriadPolicy::ExactScalarFmaV1 => Ok(F32TriadSelection::ScalarFmaV1),
+        F32TriadPolicy::AllowDeterministicTf32V1 => {
+            if availability.portable.is_none() && availability.specialized.is_none() {
+                return Ok(F32TriadSelection::ScalarFmaV1);
+            }
+            let Some(route) = measured_tf32_route(request, availability, F32_TF32_TUNING_REVISION)
+            else {
+                return Ok(F32TriadSelection::ScalarFmaV1);
+            };
+            match resolve_tf32_forced(request, availability, route) {
+                Ok(route) => Ok(F32TriadSelection::Tf32(route)),
+                Err(_) => Ok(F32TriadSelection::ScalarFmaV1),
+            }
+        }
+    }
+}
+
+pub fn resolve_tf32_forced(
+    request: F32TriadRequest,
+    availability: F32TriadAvailability,
+    route: Tf32PhysicalRoute,
+) -> Result<Tf32PhysicalRoute, String> {
+    request.shape.validate(request.op)?;
+    let spec = tf32_kernel_spec(request.op, route)?;
+    let binding = match route {
+        Tf32PhysicalRoute::MmaTf32RnaV1(_) => availability.portable,
+        Tf32PhysicalRoute::Sm90aWgmmaTf32TmaV1(_)
+        | Tf32PhysicalRoute::Sm100Tcgen05Tf32TmaV1(_)
+        | Tf32PhysicalRoute::Sm120TmaMmaTf32RnaV1(_) => availability.specialized,
+    }
+    .ok_or_else(|| format!("forced TF32 route {route:?} has no qualified module"))?;
+    ensure_tf32_binding(binding, spec, route)?;
+    Ok(route)
+}
+
+fn ensure_tf32_binding(
+    binding: Tf32QualifiedModule,
+    spec: &Tf32KernelSpec,
+    route: Tf32PhysicalRoute,
+) -> Result<(), String> {
+    if binding.module_kind != spec.module_kind
+        || binding.module_kind != route.module_kind()
+        || binding.artifact.module_kind != binding.module_kind
+    {
+        return Err(format!(
+            "forced TF32 route {route:?} has the wrong module identity"
+        ));
+    }
+    if binding.target != binding.compiler.target
+        || binding.device_caps.accepted_target != Some(binding.target)
+        || binding.compiler.output_kind != binding.artifact.artifact_kind
+        || binding.artifact.compile_key != binding.compiler.invocation_digest
+        || binding.compiler.composer_revision != COMPOSER_REVISION
+        || binding.compiler.compiler_revision != COMPILER_REVISION
+        || binding.compiler.numeric_abi_revision != NUMERIC_ABI_REVISION
+        || binding.compiler.schedule_revision != SCHEDULE_REVISION
+    {
+        return Err(format!(
+            "forced TF32 route {route:?} has an inconsistent compiler or artifact identity"
+        ));
+    }
+    if binding.device.compute_capability != binding.device_caps.compute_capability
+        || binding.compiler.nvrtc_version != binding.device_caps.nvrtc_version
+    {
+        return Err(format!(
+            "forced TF32 route {route:?} has an inconsistent device identity"
+        ));
+    }
+    if !target_admits_route(binding, route) {
+        return Err(format!(
+            "forced TF32 route {route:?} is not admitted by target {}",
+            binding.target.as_str()
+        ));
+    }
+    if !matches!(route, Tf32PhysicalRoute::MmaTf32RnaV1(_))
+        && !binding.device_caps.tensor_map_access
+    {
+        return Err(format!(
+            "forced TF32 route {route:?} requires tensor-map access"
+        ));
+    }
+    if binding.device_caps.optin_shared_bytes < spec.dynamic_shared_bytes {
+        return Err(format!(
+            "forced TF32 route {route:?} needs {} shared bytes, device admits {}",
+            spec.dynamic_shared_bytes, binding.device_caps.optin_shared_bytes
+        ));
+    }
+    Ok(())
+}
+
+fn target_admits_route(binding: Tf32QualifiedModule, route: Tf32PhysicalRoute) -> bool {
+    let cc = binding.device.compute_capability;
+    let target = binding.target.as_str();
+    let device_target = binding.device.target.as_str();
+    match route {
+        Tf32PhysicalRoute::MmaTf32RnaV1(_) => matches!(
+            (cc, target, device_target),
+            ((8, 0), "sm_80", "sm_80")
+                | ((8, 6), "sm_86", "sm_86")
+                | ((8, 7), "sm_87", "sm_87")
+                | ((8, 9), "sm_89", "sm_89")
+                | ((9, 0), "sm_90a", "sm_90a")
+                | ((10, 0), "sm_100a", "sm_100a")
+                | ((10, 3), "sm_103", "sm_103")
+                | ((11, 0), "sm_110", "sm_110")
+                | ((12, 0), "compute_120", "sm_120")
+                | ((12, 1), "compute_121", "sm_121")
+                | ((12, 1), "compute_120", "sm_120")
+        ),
+        Tf32PhysicalRoute::Sm90aWgmmaTf32TmaV1(_) => {
+            (cc, target, device_target) == ((9, 0), "sm_90a", "sm_90a")
+        }
+        Tf32PhysicalRoute::Sm100Tcgen05Tf32TmaV1(_) => matches!(
+            (cc, target, device_target),
+            ((10, 0), "compute_100f", "sm_100f")
+                | ((10, 0), "compute_100a", "sm_100a")
+                | ((10, 3), "compute_103f", "sm_103f")
+                | ((10, 3), "compute_103a", "sm_103a")
+                | ((11, 0), "compute_110f", "sm_110f")
+                | ((11, 0), "compute_110a", "sm_110a")
+        ),
+        Tf32PhysicalRoute::Sm120TmaMmaTf32RnaV1(_) => matches!(
+            (cc, target, device_target),
+            ((12, 0), "compute_120", "sm_120")
+                | ((12, 1), "compute_121", "sm_121")
+                | ((12, 1), "compute_120", "sm_120")
+        ),
+    }
+}
 
 pub const SM90A_AUTO_CELLS: &[Sm90aForcedRoute] = &[];
 pub const SM100_AUTO_CELLS_CC100: &[Sm100ForcedRoute] = &[];
@@ -254,8 +449,8 @@ pub(super) const SPLITK_SCRATCH_CAP: usize = 1 << 23;
 
 /// SM count for dispatch wave-fill heuristics. Calibrated for Ada RTX 6000 (142 SMs).
 /// Over-shoot on smaller GPUs (A100=108) is correctness-safe — Split-K gates fire
-/// slightly more aggressively. TODO: query `CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT`
-/// at init for true per-GPU tuning; for now a single source-of-truth constant.
+/// slightly more aggressively. Keep this as the single source of truth for the
+/// current frozen dispatch table.
 pub(super) const NUM_SMS: u32 = 142;
 
 /// Pick (kernel function, BN tile size) with M-aware wave-quantization fix.
@@ -607,6 +802,369 @@ mod sm120_tests {
         assert_eq!(
             targets((12, 1), (13, 2)),
             [("compute_121", "sm_121"), ("compute_120", "sm_120")]
+        );
+    }
+}
+
+#[cfg(test)]
+mod tf32_tests {
+    use super::{resolve_f32_triad_auto, resolve_tf32_forced};
+    use crate::mamba_ssm::gpu::context::F32TriadPolicy;
+    use crate::mamba_ssm::gpu::gemm_bi_triad::contract::{
+        F32TriadAvailability, F32TriadRequest, F32TriadSelection, F32TriadShape, Tf32PhysicalRoute,
+        Tf32PortableRoute, Tf32PortableStages, Tf32PortableTile, Tf32QualifiedModule,
+        Tf32Sm90aRoute, Tf32Sm100Route, Tf32Sm120Route, Tf32Sm120Tile,
+    };
+    use crate::mamba_ssm::gpu::gemm_bi_triad::{
+        Sm90aWarpgroupSchedule, Sm100Schedule, Sm100Stages, Sm100Tile, Sm120Stages,
+    };
+    use crate::mamba_ssm::gpu::kernel_identity::{
+        ArtifactIdentity, ArtifactKind, COMPILER_REVISION, COMPOSER_REVISION, CompilerIdentity,
+        CudaTarget, DeviceCaps, DeviceIdentity, DriverIdentity, ModuleKind, NUMERIC_ABI_REVISION,
+        ResolvedGemmOp, SCHEDULE_REVISION,
+    };
+
+    fn qualified_module(
+        module_kind: ModuleKind,
+        target_name: &str,
+        device_target_name: &str,
+        compute_capability: (u32, u32),
+        tensor_map_access: bool,
+        optin_shared_bytes: u32,
+    ) -> Tf32QualifiedModule {
+        let target = CudaTarget::new(target_name).unwrap();
+        let device_target = CudaTarget::new(device_target_name).unwrap();
+        let nvrtc_version = (13, 2);
+        Tf32QualifiedModule {
+            module_kind,
+            target,
+            artifact: ArtifactIdentity {
+                module_kind,
+                artifact_kind: ArtifactKind::Ptx,
+                compile_key: [4; 32],
+                artifact_digest: [2; 32],
+            },
+            compiler: CompilerIdentity {
+                source_digest: [3; 32],
+                invocation_digest: [4; 32],
+                header_manifest_digest: [5; 32],
+                target,
+                nvrtc_version,
+                nvrtc_library_domain: [6; 32],
+                nvrtc_library_known: true,
+                output_kind: ArtifactKind::Ptx,
+                composer_revision: COMPOSER_REVISION,
+                compiler_revision: COMPILER_REVISION,
+                numeric_abi_revision: NUMERIC_ABI_REVISION,
+                schedule_revision: SCHEDULE_REVISION,
+            },
+            device: DeviceIdentity {
+                compute_capability,
+                target: device_target,
+                driver: DriverIdentity {
+                    api_version: 13_020,
+                    build_sources: 1,
+                    build_digest: [7; 32],
+                },
+            },
+            device_caps: DeviceCaps {
+                compute_capability,
+                nvrtc_version,
+                accepted_target: Some(target),
+                optin_shared_bytes,
+                tensor_map_access,
+            },
+        }
+    }
+
+    fn request(op: ResolvedGemmOp) -> F32TriadRequest {
+        F32TriadRequest {
+            op,
+            shape: F32TriadShape::contiguous(op, (128, 256, 128)),
+        }
+    }
+
+    #[test]
+    fn exact_and_unmeasured_auto_resolution_stay_scalar() {
+        let portable = qualified_module(
+            ModuleKind::TriadSm80,
+            "sm_89",
+            "sm_89",
+            (8, 9),
+            false,
+            99_000,
+        );
+        for op in [ResolvedGemmOp::Nn, ResolvedGemmOp::Tn, ResolvedGemmOp::Nt] {
+            for availability in [
+                F32TriadAvailability::default(),
+                F32TriadAvailability {
+                    portable: Some(portable),
+                    specialized: None,
+                },
+            ] {
+                assert_eq!(
+                    resolve_f32_triad_auto(
+                        F32TriadPolicy::ExactScalarFmaV1,
+                        request(op),
+                        availability,
+                    )
+                    .unwrap(),
+                    F32TriadSelection::ScalarFmaV1
+                );
+                assert_eq!(
+                    resolve_f32_triad_auto(
+                        F32TriadPolicy::AllowDeterministicTf32V1,
+                        request(op),
+                        availability,
+                    )
+                    .unwrap(),
+                    F32TriadSelection::ScalarFmaV1
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn forced_resolution_accepts_each_exact_qualified_family() {
+        let cases = [
+            (
+                Tf32PhysicalRoute::MmaTf32RnaV1(Tf32PortableRoute {
+                    tile: Tf32PortableTile::M16N32,
+                    stages: Tf32PortableStages::S4,
+                }),
+                F32TriadAvailability {
+                    portable: Some(qualified_module(
+                        ModuleKind::TriadSm80,
+                        "sm_89",
+                        "sm_89",
+                        (8, 9),
+                        false,
+                        29_696,
+                    )),
+                    specialized: None,
+                },
+            ),
+            (
+                Tf32PhysicalRoute::Sm90aWgmmaTf32TmaV1(Tf32Sm90aRoute {
+                    schedule: Sm90aWarpgroupSchedule::Wg2,
+                }),
+                F32TriadAvailability {
+                    portable: None,
+                    specialized: Some(qualified_module(
+                        ModuleKind::TriadSm90a,
+                        "sm_90a",
+                        "sm_90a",
+                        (9, 0),
+                        true,
+                        73_984,
+                    )),
+                },
+            ),
+            (
+                Tf32PhysicalRoute::Sm100Tcgen05Tf32TmaV1(Tf32Sm100Route {
+                    tile: Sm100Tile::M128N128,
+                    stages: Sm100Stages::S4,
+                    schedule: Sm100Schedule::P8,
+                }),
+                F32TriadAvailability {
+                    portable: None,
+                    specialized: Some(qualified_module(
+                        ModuleKind::TriadSm100,
+                        "compute_100a",
+                        "sm_100a",
+                        (10, 0),
+                        true,
+                        131_328,
+                    )),
+                },
+            ),
+            (
+                Tf32PhysicalRoute::Sm120TmaMmaTf32RnaV1(Tf32Sm120Route {
+                    tile: Tf32Sm120Tile::M64N128,
+                    stages: Sm120Stages::S3,
+                }),
+                F32TriadAvailability {
+                    portable: None,
+                    specialized: Some(qualified_module(
+                        ModuleKind::TriadSm120,
+                        "compute_120",
+                        "sm_120",
+                        (12, 0),
+                        true,
+                        73_856,
+                    )),
+                },
+            ),
+        ];
+        for (route, availability) in cases {
+            assert_eq!(
+                resolve_tf32_forced(request(ResolvedGemmOp::Nn), availability, route).unwrap(),
+                route
+            );
+        }
+    }
+
+    #[test]
+    fn portable_sm110_accepts_the_generic_target_transaction() {
+        let route = Tf32PhysicalRoute::MmaTf32RnaV1(Tf32PortableRoute {
+            tile: Tf32PortableTile::M16N32,
+            stages: Tf32PortableStages::S4,
+        });
+        let availability = F32TriadAvailability {
+            portable: Some(qualified_module(
+                ModuleKind::TriadSm80,
+                "sm_110",
+                "sm_110",
+                (11, 0),
+                false,
+                29_696,
+            )),
+            specialized: None,
+        };
+
+        assert_eq!(
+            resolve_tf32_forced(request(ResolvedGemmOp::Nn), availability, route).unwrap(),
+            route
+        );
+    }
+
+    #[test]
+    fn specialized_sm110_accepts_only_feature_target_transactions() {
+        let route = Tf32PhysicalRoute::Sm100Tcgen05Tf32TmaV1(Tf32Sm100Route {
+            tile: Sm100Tile::M128N64,
+            stages: Sm100Stages::S2,
+            schedule: Sm100Schedule::C4,
+        });
+        for (compiler_target, device_target) in
+            [("compute_110f", "sm_110f"), ("compute_110a", "sm_110a")]
+        {
+            let availability = F32TriadAvailability {
+                portable: None,
+                specialized: Some(qualified_module(
+                    ModuleKind::TriadSm100,
+                    compiler_target,
+                    device_target,
+                    (11, 0),
+                    true,
+                    49_408,
+                )),
+            };
+            assert_eq!(
+                resolve_tf32_forced(request(ResolvedGemmOp::Nn), availability, route).unwrap(),
+                route
+            );
+        }
+
+        let generic = F32TriadAvailability {
+            portable: None,
+            specialized: Some(qualified_module(
+                ModuleKind::TriadSm100,
+                "sm_110",
+                "sm_110",
+                (11, 0),
+                true,
+                49_408,
+            )),
+        };
+        assert!(resolve_tf32_forced(request(ResolvedGemmOp::Nn), generic, route).is_err());
+    }
+
+    #[test]
+    fn forced_resolution_rejects_incoherent_or_unavailable_bindings() {
+        let route = Tf32PhysicalRoute::Sm100Tcgen05Tf32TmaV1(Tf32Sm100Route {
+            tile: Sm100Tile::M128N128,
+            stages: Sm100Stages::S4,
+            schedule: Sm100Schedule::C4,
+        });
+        let valid = qualified_module(
+            ModuleKind::TriadSm100,
+            "compute_100a",
+            "sm_100a",
+            (10, 0),
+            true,
+            131_328,
+        );
+        assert!(
+            resolve_tf32_forced(
+                request(ResolvedGemmOp::Nn),
+                F32TriadAvailability::default(),
+                route
+            )
+            .is_err()
+        );
+        for invalid in [
+            Tf32QualifiedModule {
+                module_kind: ModuleKind::TriadSm90a,
+                ..valid
+            },
+            Tf32QualifiedModule {
+                target: CudaTarget::new("compute_103a").unwrap(),
+                ..valid
+            },
+            Tf32QualifiedModule {
+                device: DeviceIdentity {
+                    compute_capability: (10, 3),
+                    ..valid.device
+                },
+                ..valid
+            },
+            Tf32QualifiedModule {
+                device_caps: DeviceCaps {
+                    tensor_map_access: false,
+                    ..valid.device_caps
+                },
+                ..valid
+            },
+            Tf32QualifiedModule {
+                device_caps: DeviceCaps {
+                    optin_shared_bytes: 131_327,
+                    ..valid.device_caps
+                },
+                ..valid
+            },
+            Tf32QualifiedModule {
+                compiler: CompilerIdentity {
+                    numeric_abi_revision: 0,
+                    ..valid.compiler
+                },
+                ..valid
+            },
+        ] {
+            assert!(
+                resolve_tf32_forced(
+                    request(ResolvedGemmOp::Nn),
+                    F32TriadAvailability {
+                        portable: None,
+                        specialized: Some(invalid),
+                    },
+                    route,
+                )
+                .is_err(),
+                "accepted {invalid:?}"
+            );
+        }
+
+        let illegal = Tf32PhysicalRoute::MmaTf32RnaV1(Tf32PortableRoute {
+            tile: Tf32PortableTile::M16N32,
+            stages: Tf32PortableStages::S2,
+        });
+        assert!(
+            resolve_tf32_forced(
+                request(ResolvedGemmOp::Nn),
+                F32TriadAvailability {
+                    portable: Some(qualified_module(
+                        ModuleKind::TriadSm80,
+                        "sm_89",
+                        "sm_89",
+                        (8, 9),
+                        false,
+                        99_000,
+                    )),
+                    specialized: None,
+                },
+                illegal,
+            )
+            .is_err()
         );
     }
 }
