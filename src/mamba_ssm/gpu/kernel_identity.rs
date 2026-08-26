@@ -102,6 +102,7 @@ impl ArtifactKind {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CompileKeyMaterial {
+    pub module_kind: ModuleKind,
     pub source: Vec<u8>,
     pub target: Vec<u8>,
     pub argv: Vec<Vec<u8>>,
@@ -163,6 +164,7 @@ impl CompileKeyMaterial {
 
     pub fn invocation_digest(&self) -> Sha256Digest {
         let mut hash = FramedSha256::new(b"cuda-compile-key.v1")
+            .required(b"module-kind", &[self.module_kind as u8])
             .required(b"source", &self.source)
             .required(b"target", &self.target)
             .required(b"output-kind", &[self.output_kind as u8])
@@ -589,14 +591,13 @@ impl CudaTarget {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[repr(u8)]
 pub enum ModuleKind {
-    LegacyCombined = 1,
+    Fixed = 1,
     TriadScalar = 2,
     TriadSm80 = 3,
     TriadSm90a = 4,
     TriadSm100 = 5,
     TriadSm120 = 6,
-    // Value 7 is reserved for the baseline triad module identity.
-    Mamba3Combined = 8,
+    Mamba3Combined = 7,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -611,14 +612,36 @@ pub struct ArtifactIdentity {
 pub struct ArtifactSetIdentity {
     pub module_count: u8,
     pub ordered_digest: Sha256Digest,
-    pub legacy_combined: ArtifactIdentity,
+    pub fixed: ArtifactIdentity,
+    pub triad_scalar: ArtifactIdentity,
+    pub triad_sm80: ArtifactIdentity,
+    pub specialized: Option<ArtifactIdentity>,
 }
 
 pub fn build_artifact_set(artifacts: &[ArtifactIdentity]) -> Result<ArtifactSetIdentity, String> {
+    if !(3..=4).contains(&artifacts.len()) {
+        return Err("artifact set must contain fixed, scalar triad, SM80 triad, and at most one specialized triad module".into());
+    }
+    if artifacts[0].module_kind != ModuleKind::Fixed
+        || artifacts[1].module_kind != ModuleKind::TriadScalar
+        || artifacts[2].module_kind != ModuleKind::TriadSm80
+    {
+        return Err(
+            "artifact set must start with Fixed, TriadScalar, and TriadSm80 in order".into(),
+        );
+    }
+    let specialized = artifacts.get(3).copied();
+    if let Some(artifact) = specialized
+        && !matches!(
+            artifact.module_kind,
+            ModuleKind::TriadSm90a | ModuleKind::TriadSm100 | ModuleKind::TriadSm120
+        )
+    {
+        return Err("fourth artifact must be a supported specialized triad module".into());
+    }
     let module_count = u8::try_from(artifacts.len())
         .map_err(|_| "artifact set contains more than 255 modules".to_string())?;
     let mut kinds = BTreeSet::new();
-    let mut legacy = None;
     let mut hash =
         FramedSha256::new(b"cuda-artifact-set.v1").required(b"module-count", &[module_count]);
     for artifact in artifacts {
@@ -627,9 +650,6 @@ pub fn build_artifact_set(artifacts: &[ArtifactIdentity]) -> Result<ArtifactSetI
                 "artifact set contains duplicate module kind {:?}",
                 artifact.module_kind
             ));
-        }
-        if artifact.module_kind == ModuleKind::LegacyCombined {
-            legacy = Some(*artifact);
         }
         hash = hash
             .required(b"module-kind", &[artifact.module_kind as u8])
@@ -640,8 +660,10 @@ pub fn build_artifact_set(artifacts: &[ArtifactIdentity]) -> Result<ArtifactSetI
     Ok(ArtifactSetIdentity {
         module_count,
         ordered_digest: hash.finish(),
-        legacy_combined: legacy
-            .ok_or_else(|| "artifact set has no legacy combined module".to_string())?,
+        fixed: artifacts[0],
+        triad_scalar: artifacts[1],
+        triad_sm80: artifacts[2],
+        specialized,
     })
 }
 
@@ -2900,6 +2922,7 @@ mod cache_and_header_tests {
 
         let key_for = |domain: Vec<u8>| {
             CompileKeyMaterial {
+                module_kind: ModuleKind::Fixed,
                 source: b"source".to_vec(),
                 target: b"sm_89".to_vec(),
                 argv: vec![b"--gpu-architecture=sm_89".to_vec()],
@@ -3179,6 +3202,7 @@ const char *stamp = CAT(__TI, ME__);";
         assert!(header_manifest_analysis(&manifest).is_some());
         assert!(
             CompileKeyMaterial {
+                module_kind: ModuleKind::Fixed,
                 source: source.to_vec(),
                 target: b"sm_80".to_vec(),
                 argv: vec![],
@@ -3276,6 +3300,7 @@ extern \"C\" __global__ void SYMBOL(main)() {}";
     #[test]
     fn volatile_predefined_macros_in_compile_material_disable_persistent_keys() {
         let material = |source: &[u8], argv: Vec<Vec<u8>>| CompileKeyMaterial {
+            module_kind: ModuleKind::Fixed,
             source: source.to_vec(),
             target: b"sm_89".to_vec(),
             argv,
@@ -3326,6 +3351,7 @@ extern \"C\" __global__ void SYMBOL(main)() {}";
         let root = tempfile::tempdir().unwrap();
         let include_root = root.path().to_string_lossy().into_owned();
         let material = |manifest: Vec<u8>, argv: Vec<Vec<u8>>| CompileKeyMaterial {
+            module_kind: ModuleKind::Fixed,
             source: b"extern \"C\" __global__ void stable() {}".to_vec(),
             target: b"sm_89".to_vec(),
             argv,
@@ -3372,6 +3398,7 @@ extern \"C\" __global__ void SYMBOL(main)() {}";
         let include_root = root.path().to_string_lossy().into_owned();
         let digest = || {
             CompileKeyMaterial {
+                module_kind: ModuleKind::Fixed,
                 source: b"#if CHECK\nint selected;\n#endif".to_vec(),
                 target: b"sm_89".to_vec(),
                 argv: vec![b"-DCHECK=__has_include(\"probe_optional.h\")".to_vec()],
@@ -3399,6 +3426,7 @@ extern \"C\" __global__ void SYMBOL(main)() {}";
     #[test]
     fn has_include_fragments_and_paste_combine_across_source_and_argv() {
         let material = |source: &[u8], argv: Vec<Vec<u8>>| CompileKeyMaterial {
+            module_kind: ModuleKind::Fixed,
             source: source.to_vec(),
             target: b"sm_89".to_vec(),
             argv,

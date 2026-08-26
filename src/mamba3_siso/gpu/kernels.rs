@@ -300,6 +300,7 @@ impl Mamba3Kernels {
         argv.push(format!("--gpu-architecture={arch}").into_bytes());
         argv.extend(option_strings.iter().map(|value| value.as_bytes().to_vec()));
         let key_material = crate::mamba_ssm::gpu::kernel_identity::CompileKeyMaterial {
+            module_kind: crate::mamba_ssm::gpu::kernel_identity::ModuleKind::Mamba3Combined,
             source: combined.as_bytes().to_vec(),
             target: arch.as_bytes().to_vec(),
             argv,

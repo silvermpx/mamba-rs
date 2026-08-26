@@ -1,371 +1,9 @@
-//! Deterministic batch-invariant GEMM dispatcher — the TRIAD family
-//! (`BiGemmFamily::Triad`).
-//!
-//! Covers f32, bf16 and f16, on CUDA cores and on Tensor Cores; the
-//! `sgemm` in the module and kernel names is historical BLAS notation
-//! (S = single precision) that no longer describes the coverage.
-//!
-//! Ported from SQV-RS `sqv_uaac` (`blas_gpu.rs` + `kernels/gemm_bi_triad.cu`,
-//! siboehm warptiling lineage). Three entry points used when
-//! `ctx.batch_invariant()` is enabled:
-//!
-//!   - [`sgemm_bi_forward`]      NN: `Y = X @ W + bias`
-//!   - [`sgemm_bi_backward_dw`]  TN: `dW += X^T @ dY` (accumulated)
-//!   - [`sgemm_bi_backward_dx`]  NT: `dX = dY @ W^T`
-//!
-//! Dtypes: the f32 entry points are the base contract; the typed
-//! (bf16/f16) entry points further down route homogeneous typed operand
-//! triples through the typed kernel variants — typed I/O, f32
-//! accumulation, dW/bias always f32 — bit-identical to upcasting the
-//! inputs and running the f32 kernels. The `*_tc` entry points are a
-//! separate numeric contract (mma.sync accumulation): deterministic and
-//! batch-invariant, not bit-equal to the scalar variants.
-//!
-//! Every shape routes through a fixed-tile custom kernel (Big / Slim /
-//! narrow / GEMV / split-K with deterministic tree reduce) — never cuBLAS.
-//! Guarantees, in decreasing strength:
-//!   - bit-identical across RUNS for a fixed shape (always);
-//!   - bit-identical across BATCH SIZES that route to the same dispatch
-//!     bucket (the per-cell K order is fixed within a bucket; crossing a
-//!     bucket boundary — e.g. ultra-thin M<32 vs split-K M>=32 — changes
-//!     the reduction association deterministically);
-//!   - full f32 accumulation precision (no TF32 mantissa truncation).
-//!
-//! Unsupported shapes return `Err` (instead of SQV's panic): callers should
-//! disable the batch-invariant flag for such configs rather than silently
-//! falling back to non-deterministic cuBLAS.
-
-use super::buffers::GpuBuffer;
-use super::kernels::MambaKernels as GpuKernels;
+use super::super::buffers::GpuBuffer;
+use super::super::kernels::MambaKernels as GpuKernels;
+use super::contract::*;
+use super::dispatch::*;
 use cudarc::driver::PushKernelArg;
 use std::sync::Arc;
-
-type CUptr = cudarc::driver::sys::CUdeviceptr;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) struct GemmDims {
-    pub m: usize,
-    pub k: usize,
-    pub n: usize,
-    pub lda: i32,
-    pub ldb: i32,
-    pub ldc: i32,
-    pub m_i32: i32,
-    pub k_i32: i32,
-    pub n_i32: i32,
-    pub mk: usize,
-    pub mn: usize,
-    pub kn: usize,
-    m_u32: u32,
-    k_u32: u32,
-    n_u32: u32,
-    mk_u32: u32,
-    mn_u32: u32,
-    kn_u32: u32,
-}
-
-impl GemmDims {
-    pub(super) fn checked(
-        m: usize,
-        k: usize,
-        n: usize,
-        lda: usize,
-        ldb: usize,
-        ldc: usize,
-    ) -> Result<Self, String> {
-        Self::checked_storage(m, k, n, [lda, ldb, ldc], [k, n, n], [m, k, m])
-    }
-
-    pub(super) fn nn(dims: (usize, usize, usize), lda: usize) -> Result<Self, String> {
-        Self::checked(dims.0, dims.1, dims.2, lda, dims.2, dims.2)
-    }
-
-    pub(super) fn tn(dims: (usize, usize, usize)) -> Result<Self, String> {
-        Self::checked_storage(
-            dims.0,
-            dims.1,
-            dims.2,
-            [dims.1, dims.2, dims.2],
-            [dims.1, dims.2, dims.2],
-            [dims.0, dims.0, dims.1],
-        )
-    }
-
-    pub(super) fn nt(dims: (usize, usize, usize)) -> Result<Self, String> {
-        Self::checked_storage(
-            dims.0,
-            dims.1,
-            dims.2,
-            [dims.2, dims.2, dims.1],
-            [dims.2, dims.2, dims.1],
-            [dims.0, dims.1, dims.0],
-        )
-    }
-
-    fn checked_storage(
-        m: usize,
-        k: usize,
-        n: usize,
-        strides: [usize; 3],
-        widths: [usize; 3],
-        row_counts: [usize; 3],
-    ) -> Result<Self, String> {
-        let product = |lhs: usize, rhs: usize, name: &str| {
-            lhs.checked_mul(rhs).ok_or_else(|| {
-                invalid_gemm_dimensions(format!("{name} overflows usize ({lhs} * {rhs})"))
-            })
-        };
-        let mk = product(m, k, "M*K")?;
-        let mn = product(m, n, "M*N")?;
-        let kn = product(k, n, "K*N")?;
-
-        if m == 0 || k == 0 || n == 0 {
-            return Err(invalid_gemm_dimensions(format!(
-                "axes must be positive, got M={m} K={k} N={n}"
-            )));
-        }
-
-        let axis_i32 = |value: usize, name: &str| {
-            i32::try_from(value)
-                .map_err(|_| invalid_gemm_dimensions(format!("{name}={value} exceeds i32::MAX")))
-        };
-        let m_i32 = axis_i32(m, "M")?;
-        let k_i32 = axis_i32(k, "K")?;
-        let n_i32 = axis_i32(n, "N")?;
-        for (value, name) in [(mk, "M*K"), (mn, "M*N"), (kn, "K*N")] {
-            axis_i32(value, name)?;
-        }
-
-        let [lda, ldb, ldc] = strides;
-        let [lda_min, ldb_min, ldc_min] = widths;
-        let [a_rows, b_rows, c_rows] = row_counts;
-        for (value, minimum, name) in [
-            (lda, lda_min, "lda"),
-            (ldb, ldb_min, "ldb"),
-            (ldc, ldc_min, "ldc"),
-        ] {
-            if value == 0 || value < minimum {
-                return Err(invalid_gemm_dimensions(format!(
-                    "{name}={value} is smaller than the physical width {minimum}"
-                )));
-            }
-        }
-        let lda = axis_i32(lda, "lda")?;
-        let ldb = axis_i32(ldb, "ldb")?;
-        let ldc = axis_i32(ldc, "ldc")?;
-
-        for (rows, stride, width, name) in [
-            (a_rows, strides[0], widths[0], "A storage"),
-            (b_rows, strides[1], widths[1], "B storage"),
-            (c_rows, strides[2], widths[2], "C storage"),
-        ] {
-            let span = rows
-                .checked_sub(1)
-                .and_then(|last_row| last_row.checked_mul(stride))
-                .and_then(|offset| offset.checked_add(width))
-                .ok_or_else(|| invalid_gemm_dimensions(format!("{name} span overflows usize")))?;
-            axis_i32(span, name)?;
-        }
-
-        let to_u32 = |value: usize, name: &str| {
-            u32::try_from(value)
-                .map_err(|_| invalid_gemm_dimensions(format!("{name}={value} exceeds u32::MAX")))
-        };
-        Ok(Self {
-            m,
-            k,
-            n,
-            lda,
-            ldb,
-            ldc,
-            m_i32,
-            k_i32,
-            n_i32,
-            mk,
-            mn,
-            kn,
-            m_u32: to_u32(m, "M")?,
-            k_u32: to_u32(k, "K")?,
-            n_u32: to_u32(n, "N")?,
-            mk_u32: to_u32(mk, "M*K")?,
-            mn_u32: to_u32(mn, "M*N")?,
-            kn_u32: to_u32(kn, "K*N")?,
-        })
-    }
-
-    fn tuple(self) -> (usize, usize, usize) {
-        (self.m, self.k, self.n)
-    }
-}
-
-fn invalid_gemm_dimensions(reason: impl std::fmt::Display) -> String {
-    format!("invalid GEMM dimensions: {reason}")
-}
-
-fn checked_u32(value: usize, name: &str) -> Result<u32, String> {
-    u32::try_from(value)
-        .map_err(|_| invalid_gemm_dimensions(format!("{name}={value} exceeds u32::MAX")))
-}
-
-fn checked_i32(value: usize, name: &str) -> Result<i32, String> {
-    i32::try_from(value)
-        .map_err(|_| invalid_gemm_dimensions(format!("{name}={value} exceeds i32::MAX")))
-}
-
-fn checked_usize(value: u32, name: &str) -> Result<usize, String> {
-    usize::try_from(value)
-        .map_err(|_| invalid_gemm_dimensions(format!("{name}={value} exceeds usize::MAX")))
-}
-
-fn checked_tile_grid(rows: u32, row_tile: u32, cols: u32, col_tile: u32) -> Result<u32, String> {
-    rows.div_ceil(row_tile)
-        .checked_mul(cols.div_ceil(col_tile))
-        .ok_or_else(|| invalid_gemm_dimensions("tile grid overflows u32"))
-}
-
-fn checked_grid_product(lhs: u32, rhs: u32, depth: u32) -> Result<u32, String> {
-    lhs.checked_mul(rhs)
-        .and_then(|value| value.checked_mul(depth))
-        .ok_or_else(|| invalid_gemm_dimensions("launch grid overflows u32"))
-}
-
-fn checked_u32_product(lhs: u32, rhs: u32, name: &str) -> Result<u32, String> {
-    lhs.checked_mul(rhs)
-        .ok_or_else(|| invalid_gemm_dimensions(format!("{name} overflows u32")))
-}
-
-fn checked_mul3(lhs: usize, middle: usize, rhs: usize, name: &str) -> Result<usize, String> {
-    lhs.checked_mul(middle)
-        .and_then(|value| value.checked_mul(rhs))
-        .ok_or_else(|| invalid_gemm_dimensions(format!("{name} overflows usize")))
-}
-
-fn checked_byte_offset(elements: usize, element_bytes: usize, name: &str) -> Result<u64, String> {
-    let bytes = elements
-        .checked_mul(element_bytes)
-        .ok_or_else(|| invalid_gemm_dimensions(format!("{name} byte offset overflows usize")))?;
-    u64::try_from(bytes)
-        .map_err(|_| invalid_gemm_dimensions(format!("{name} byte offset exceeds u64::MAX")))
-}
-
-fn checked_ptr_add(base: u64, offset: u64, name: &str) -> Result<u64, String> {
-    base.checked_add(offset)
-        .ok_or_else(|| invalid_gemm_dimensions(format!("{name} pointer offset overflows u64")))
-}
-
-fn validate_bias_preseed(alpha: f32, bias_ptr: CUptr, route: &str) -> Result<(), String> {
-    if bias_ptr != 0 && alpha != 1.0 {
-        return Err(format!(
-            "{route}: bias pre-seeding requires alpha == 1.0, got {alpha}"
-        ));
-    }
-    Ok(())
-}
-
-// ── Split-M TN partition heuristic (ported from SQV-RS blas_bi.rs) ──
-
-/// Target CTA count factor for the split-M TN partition: aim to fill the
-/// GPU with at least this many blocks when the base (K-tile × N-tile) grid
-/// underfills it.
-const SPLITM_TN_TARGET_GRID_FACTOR: u32 = 284;
-/// Scratch cap for split-M partials, in f32 elements. Must not exceed the
-/// `splitk_scratch` allocation in kernels.rs.
-const SPLITM_TN_SCRATCH_CAP: usize = 1 << 23;
-/// m_chunk alignment (BK of the TN tile).
-const SPLITM_TN_BK_ALIGN: u32 = 16;
-
-/// Decide the split-M factor for the TN (dW) kernel on underfilled grids.
-/// Returns `(m_chunk, f_final)` or `None` when the plain kernel is fine.
-#[inline]
-fn splitm_tn_partition(batch: usize, n_in: usize, n_out: usize) -> Option<(usize, usize)> {
-    // No n_in floor: the partial kernel predicates K_out < 128 exactly
-    // like the plain kernel, and a small-K dW against a large batch
-    // reduction underfills the grid without the split (K_out=24, N=768
-    // ran six CTAs). The split changes the dW summation order versus
-    // the plain kernel; run-to-run and per-shape determinism hold — the
-    // partition is a pure function of (batch, n_in, n_out).
-    if !(n_out >= 128 && batch >= 256) {
-        return None;
-    }
-    let batch_u32 = u32::try_from(batch).ok()?;
-    let k_tiles = u32::try_from(n_in).ok()?.div_ceil(128);
-    let n_tiles = u32::try_from(n_out).ok()?.div_ceil(128);
-    let base_blocks = k_tiles.checked_mul(n_tiles)?;
-    if base_blocks == 0 || base_blocks >= SPLITM_TN_TARGET_GRID_FACTOR {
-        return None;
-    }
-    let f_grid = SPLITM_TN_TARGET_GRID_FACTOR.div_ceil(base_blocks);
-    let output_elements = n_in.checked_mul(n_out)?;
-    let f_scratch_cap = u32::try_from(SPLITM_TN_SCRATCH_CAP / output_elements).ok()?;
-    let f = f_grid.min(f_scratch_cap).max(1);
-    let m_chunk_raw = batch_u32.div_ceil(f);
-    let m_chunk = m_chunk_raw.checked_add(SPLITM_TN_BK_ALIGN - 1)? & !(SPLITM_TN_BK_ALIGN - 1);
-    let f_final = batch_u32.div_ceil(m_chunk);
-    let scratch_elements = usize::try_from(f_final)
-        .ok()?
-        .checked_mul(output_elements)?;
-    if f_final < 2 || scratch_elements > SPLITM_TN_SCRATCH_CAP {
-        return None;
-    }
-    Some((
-        usize::try_from(m_chunk).ok()?,
-        usize::try_from(f_final).ok()?,
-    ))
-}
-
-/// Minimum N (output cols) before the dispatcher switches from Slim-N tiles
-/// to Big-N tiles. Below this, Slim-N (BN=64) packs better; above it Big-N
-/// (BN=128) wins on wave occupancy. Historic name (`SGEMM_CUSTOM_MIN`) is a
-/// leftover from when the threshold gated a cuBLAS fallback — the fallback
-/// is gone (zero-cuBLAS contract), the constant remains as a tile-pick
-/// boundary only.
-const SGEMM_CUSTOM_MIN: usize = 128;
-
-/// Boundary between Slim-N and Big tile variants (by output N dimension).
-const SGEMM_SLIM_MAX: usize = 512;
-
-/// v6.5 Phase C-1.5av: separate Slim Split-K NT-via-T n_in cap for backward dx.
-/// The forward Slim NN path uses N as output dim → SGEMM_SLIM_MAX=512 bounds
-/// wave-fill correctness there. But NT-via-T backward dx reads n_in (input dim
-/// of original forward), and the kernel itself tiles arbitrary n_in via N-axis
-/// tiling — the 512 cap is conservative, not load-bearing. v6.5 multi-step
-/// critic_in_proj has n_in = critic_in = d_model + action_dim + 2*emb = 641
-/// at default config. Bumping to 768 lets this shape hit Slim Split-K NT-via-T
-/// with F=4 K-tile partials (576 blocks vs plain Big NT 144 blocks).
-/// Determinism preserved: F is shape-keyed (function of n_out, not batch).
-const SGEMM_SLIM_NT_NIN_MAX: usize = 768;
-
-/// M threshold below which we force Slim-N even for N ≥ 129 (wave underfill protection).
-/// At M < 512, Big tile BM=128 gives ≤4 M-blocks; adding N-blocks via Slim's BN=64 (vs Big's BN=128)
-/// doubles grid to reduce wave underfill on Ada's 142 SMs. Only matters when N ≥ 129 (otherwise slim already chosen).
-const SGEMM_M_SLIM_FORCE: usize = 512;
-
-/// Single source of truth for Split-K/M scratch buffer cap, in f32 elements.
-/// Must match `splitk_scratch` allocation in `kernels.rs` (1 << 23 = 8M f32 = 32 MB).
-/// All Split-K dispatch gates (NN fwd, NT bwd_dx, Split-M TN bwd_dw) read this.
-pub(super) const SPLITK_SCRATCH_CAP: usize = 1 << 23;
-
-/// SM count for dispatch wave-fill heuristics. Calibrated for Ada RTX 6000 (142 SMs).
-/// Over-shoot on smaller GPUs (A100=108) is correctness-safe — Split-K gates fire
-/// slightly more aggressively. TODO: query `CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT`
-/// at init for true per-GPU tuning; for now a single source-of-truth constant.
-pub(super) const NUM_SMS: u32 = 142;
-
-/// Pick (kernel function, BN tile size) with M-aware wave-quantization fix.
-/// Slim-N for narrow output, or for small M with wide N.
-/// Later buckets extend this dispatcher with narrow / GEMV / small-K buckets.
-fn dispatch_slim_or_big<'k>(
-    _kernels: &'k GpuKernels,
-    m: usize,
-    n_out: usize,
-    func_slim: &'k cudarc::driver::CudaFunction,
-    func_big: &'k cudarc::driver::CudaFunction,
-) -> (&'k cudarc::driver::CudaFunction, u32) {
-    let slim = n_out <= SGEMM_SLIM_MAX || (m < SGEMM_M_SLIM_FORCE && n_out >= SGEMM_CUSTOM_MIN);
-    let func = if slim { func_slim } else { func_big };
-    let bn: u32 = if slim { 64 } else { 128 };
-    (func, bn)
-}
 
 /// Batched linear forward on GPU: `Y[B,N] = X[B,K] @ W[K,N] + bias[N]`.
 ///
@@ -397,7 +35,13 @@ pub fn sgemm_bi_forward(
         let (ptr, _r) = x.inner().device_ptr(stream);
         ptr
     };
-    sgemm_bi_forward_sub(stream, kernels, y, x_ptr, dims.1, w_ptr, bias_ptr, dims)
+    let operands = SgemmFwdSubOperands {
+        x_ptr,
+        lda: dims.1,
+        w_ptr,
+        bias_ptr,
+    };
+    sgemm_bi_forward_sub(stream, kernels, y, &operands, dims)
 }
 
 /// [`sgemm_bi_forward`] over a STRIDED X operand: `x_ptr` is the first
@@ -406,20 +50,19 @@ pub fn sgemm_bi_forward(
 /// as `row * lda + col`, so a sub-matrix read is the same per-output
 /// ascending-K FMA chain as a gathered copy — bit-identical operands,
 /// gather kernel deleted at the call site.
-#[allow(
-    clippy::too_many_arguments,
-    reason = "dispatcher-internal impl: the public wrappers keep the narrow signature; splitting a param struct here would be pure ceremony for two callers"
-)]
 pub fn sgemm_bi_forward_sub(
     stream: &Arc<cudarc::driver::CudaStream>,
     kernels: &GpuKernels,
     y: &mut GpuBuffer,
-    x_ptr: CUptr,
-    lda: usize,
-    w_ptr: CUptr,
-    bias_ptr: CUptr, // 0 = no bias
+    operands: &SgemmFwdSubOperands,
     dims: (usize, usize, usize),
 ) -> Result<(), String> {
+    let SgemmFwdSubOperands {
+        x_ptr,
+        lda,
+        w_ptr,
+        bias_ptr,
+    } = *operands;
     let checked_dims = GemmDims::nn(dims, lda)?;
     let (batch, n_in, n_out) = checked_dims.tuple();
     let lda_i = checked_dims.lda;
@@ -546,7 +189,7 @@ pub fn sgemm_bi_forward_sub(
     // 4 rows/block, warp-shuffle K-reduction, deterministic batch-invariant.
     //
     // batch lower bound relaxed 4 → 1. Kernel
-    // sgemm_bi_nn_gemv has `if (row >= M) return;` predication (kernels/gemm_bi_triad.cu:2201)
+    // sgemm_bi_nn_gemv has `if (row >= M) return;` predication in scalar.cu.
     // so M<4 is safe — partial last block. Closes single-env eval gap
     // (M=1 N=1 K=512 was hitting cuBLAS-fallback panic in an eval-parity test).
     // Determinism preserved (kernel unchanged; same warp-shuffle butterfly).
@@ -822,7 +465,7 @@ pub fn sgemm_bi_forward_sub(
         //
         // After this gate raise, shapes with K < 384 fall to the regular
         // Slim NN dispatch below (single kernel, no reducer overhead).
-        // CPU mirror gate at blas_bi.rs:136-139 mirrors this exact threshold.
+        // The CPU mirror uses this same underfill threshold.
         if f_final >= 6
             && checked_mul3(
                 checked_usize(f_final, "NN slim split-K chunks")?,
@@ -976,12 +619,11 @@ pub fn sgemm_bi_forward_sub(
         let slim = bn == 64;
         // Opt1: Big uses 256 threads/block for TLP; Slim stays 128.
         let threads = if slim { 128u32 } else { 256u32 };
-        // T1 v2: Big NN uses dynamic smem (2-stage cp.async). 33 KB needed.
+        // Big NN uses dynamic smem for its 2-stage cp.async pipeline.
         // Slim still uses static smem (single-stage). Set shared_mem_bytes only for Big.
         let smem_bytes: u32 = if slim { 0 } else { 34 * 1024 };
-        // 2026-05-13 — Stage-4 persistent-CTA cap removed. Kernel body is now
-        // data-parallel (one tile per CTA), so grid_dim == total_tiles. See
-        // gemm_bi_triad.cu for the kernel-side unwrap rationale.
+        // The kernel is data-parallel, one tile per CTA, so the grid covers
+        // every output tile without a persistent-CTA cap.
         let total_tiles = checked_tile_grid(checked_dims.m_u32, 128, checked_dims.n_u32, bn)?;
         let cfg = cudarc::driver::LaunchConfig {
             grid_dim: (total_tiles, 1, 1),
@@ -1011,7 +653,7 @@ pub fn sgemm_bi_forward_sub(
         return Ok(());
     }
 
-    // T2.11: zero-cuBLAS contract — all training paths must route through
+    // The zero-cuBLAS contract requires every training path to route through
     // custom deterministic kernels. A reachable cuBLAS fallback breaks
     // CPU↔GPU parity and is non-deterministic. Panic loudly so missing
     // dispatch coverage is caught at first hit, not as a silent training
@@ -1068,8 +710,7 @@ pub fn sgemm_bi_backward_dw(
 
     // Narrow-N TN dispatch: N∈[2..127] (critic qhead + gap-fill for
     // N∈[49..127] where slim/big kernels (N>=128) don't apply).
-    // T3.3 (2026-05-01): comment fixed — gate was relaxed to N≥2 in Stage 4
-    // shape coverage; the stale `9..127` text predated that change.
+    // The gate starts at N=2; N=1 is handled by the GEMV route above.
     // Kernel has `if (g_row >= K_out) continue;` and N-tile predication via
     // `div_ceil(N, 32)` blocks → safe for any n_in and any N.
     // Relaxed to n_in>=1, batch>=1 covers test shapes (M=32, K=32..64, N=32..64)
@@ -1102,9 +743,8 @@ pub fn sgemm_bi_backward_dw(
     // Split-M TN dispatch: M-axis split for underfilled Big TN grids.
     // CUTLASS parallel-split + deterministic ascending-fc reducer.
     //
-    // F-SPLITM-TN-CONST (2026-05-17): partitioning math hoisted to
-    // `blas_bi::splitm_tn_partition` so CPU mirror computes identical
-    // (m_chunk, f_final). Replaces former `2*NUM_SMS`-dependent heuristic
+    // Shared partitioning math keeps the CPU mirror on the identical
+    // (m_chunk, f_final). The fixed target replaces an SM-count-dependent heuristic
     // (which made bit-exactness depend on GPU model) with a portable
     // `SPLITM_TN_TARGET_GRID_FACTOR = 284` (= historical Ada NUM_SMS=142×2).
     // Run-to-run bit-exact AND CPU↔GPU bit-exact at every batch ≥ 256.
@@ -1179,10 +819,9 @@ pub fn sgemm_bi_backward_dw(
         let slim = bn == 64;
         // Opt1: Big uses 256 threads/block; Slim stays 128.
         let threads = if slim { 128u32 } else { 256u32 };
-        // T1 v2: Big TN uses dynamic smem for 2-stage cp.async (34 KB); Slim stays static.
+        // Big TN uses dynamic smem for 2-stage cp.async; Slim stays static.
         let smem_bytes: u32 = if slim { 0 } else { 34 * 1024 };
-        // 2026-05-13 — data-parallel launch (no persistent-CTA cap). See
-        // gpu_sgemm_forward note and gemm_bi_triad.cu for the kernel-side unwrap.
+        // The data-parallel grid launches one CTA per output tile.
         let total_tiles = checked_tile_grid(checked_dims.k_u32, 128, checked_dims.n_u32, bn)?;
         let cfg = cudarc::driver::LaunchConfig {
             grid_dim: (total_tiles, 1, 1),
@@ -1207,7 +846,7 @@ pub fn sgemm_bi_backward_dw(
         return Ok(());
     }
 
-    // T2.11: zero-cuBLAS contract — see gpu_sgemm_forward.
+    // The zero-cuBLAS contract has no fallback beyond this point.
     panic!(
         "gpu_sgemm_backward_dw: cuBLAS fallback hit (shape M={batch} K={n_in} N={n_out}). \
          The zero-cuBLAS contract requires every shape to route through a custom \
@@ -1237,8 +876,7 @@ pub fn sgemm_bi_backward_dx(
     let (batch, n_in, n_out) = checked_dims.tuple();
     // Narrow-N NT dispatch: N∈[2..127] (critic qhead + gap-fill for
     // N∈[49..127] where slim/big kernels (N>=128) don't apply).
-    // T3.3 (2026-05-01): comment fixed — gate was relaxed to N≥2 in Stage 4
-    // shape coverage; the stale `9..127` text predated that change.
+    // The gate starts at N=2; N=1 is handled by the column-GEMV route.
     // Kernel has `if (g_row >= M) continue;` M-predication → safe for any batch.
     // Relaxed to n_in>=1, batch>=1 covers test-config (M=32, K=32..64, N=32..64)
     // that otherwise falls to cuBLAS (zero-cuBLAS contract violation).
@@ -1271,7 +909,7 @@ pub fn sgemm_bi_backward_dx(
     // Gap: batch ∈ [1, 31], N >= 128 — Narrow NT capped at N=127, Split-K
     // NT-via-T requires batch >= 32, Big/Slim NT requires batch >= 128.
     // Solution: reuse sgemm_nt_narrow kernel — N is reduction-axis, kernel
-    // iterates `for nIdx in [0, N) by NBK=16` (gemm_bi_triad.cu:2635), no upper
+    // iterates `for nIdx in [0, N) by NBK=16` in scalar.cu, with no upper
     // bound on N. Tile dims (BM=64, BN=32) fit any small batch; M/K_out
     // predication inside kernel handles partial last block.
     // Determinism: kernel unchanged → bit-exact with the N<=127 path.
@@ -1310,7 +948,7 @@ pub fn sgemm_bi_backward_dx(
     // batch lower bound relaxed 4 → 1.
     // Kernel sgemm_bi_nt_gemv computes per-element dX[m,k] = alpha*dY[m]*W[k]
     // with total = M*K threads and `if (tid >= total) return;` predication
-    // (kernels/gemm_bi_triad.cu:2296) — safe for M<4. Closes the single-env eval gap.
+    // in scalar.cu — safe for M<4. Closes the single-env eval gap.
     if n_out == 1 && n_in >= 1 && batch >= 1 {
         let m_i = checked_dims.m_i32;
         let k_i = checked_dims.k_i32;
@@ -1369,8 +1007,7 @@ pub fn sgemm_bi_backward_dx(
         })?;
         let partial_size_main =
             checked_mul3(n_out / 32, batch, k_main, "NT K-tail split-K scratch")?;
-        // F-KTAIL-CAP-PARITY (2026-05-17): w_size cap = SPLITK_NT_TRANSPOSE_CAP
-        // (the GPU transpose_scratch capacity), partial cap = SPLITK_SCRATCH_CAP
+        // The W cap matches transpose_scratch and the partial cap matches splitk_scratch.
         // (the GPU splitk_scratch capacity). Earlier hardcoded `1<<23` partial
         // cap was tighter than the underlying scratch (1<<23) and caused k_tail
         // to fall through at batch=1024 (partial=10.5M > 8M cap) while CPU has
@@ -1514,12 +1151,12 @@ pub fn sgemm_bi_backward_dx(
 
     // Split-K NT-via-transpose dispatch for M<128 shapes (thin backward-dX projections).
     // Strategy: transpose W[K_out, N] → W_T[N, K_out], then dX = dY @ W_T via the
-    // existing NN Split-K kernel. Per research 2026-04-19: 1.6-1.8× faster than
-    // dedicated NT.
+    // existing NN Split-K kernel. This route is faster than dedicated NT for
+    // the underfilled thin shapes it admits.
     //
     // A.2 — generalised to support n_out%32 != 0 by folding the N-tail (residue
     // after the largest 32-aligned prefix) into the reducer's `tail_cnt` arg.
-    // The reducer (gemm_bi_triad.cu:2902) already supports tail folding: for each
+    // The reducer in scalar.cu already supports tail folding: for each
     // (m, n) cell it appends `Σ_{k<tail_cnt} x_tail[m,k] * w_tail[k,n]` after
     // the K_CHUNKS partial reduce. For NT-via-T post-transpose the tail is along
     // the reduction axis (= original n_out), so:
@@ -1533,7 +1170,7 @@ pub fn sgemm_bi_backward_dx(
     // with full custom-kernel coverage and no cuBLAS fallback.
     //
     // Envelope: M ∈ [32, 1024], K_out ∈ [64, 4096], K_out % 4 == 0,
-    // N ∈ [32, 2048], n_in % 32 == 0 (K-tail bwd_dx gate at line 897 covers
+    // N ∈ [32, 2048], n_in % 32 == 0 (the K-tail bwd_dx route above covers
     // n_in%32 != 0 separately; combined K-tail + N-tail is rare and falls
     // through to cuBLAS by design — punt unless production shows it).
     const SPLITK_NT_TRANSPOSE_CAP: usize = 1 << 22; // 4M f32 = transpose_scratch size
@@ -1872,10 +1509,9 @@ pub fn sgemm_bi_backward_dx(
         let slim = bn == 64;
         // Opt1: Big uses 256 threads/block; Slim stays 128.
         let threads = if slim { 128u32 } else { 256u32 };
-        // T1 v2: Big NT uses dynamic smem for 2-stage cp.async (34 KB).
+        // Big NT uses dynamic smem for its 2-stage cp.async pipeline.
         let smem_bytes: u32 = if slim { 0 } else { 34 * 1024 };
-        // 2026-05-13 — data-parallel launch (no persistent-CTA cap). See
-        // gpu_sgemm_forward note and gemm_bi_triad.cu for the kernel-side unwrap.
+        // The data-parallel grid launches one CTA per output tile.
         let total_tiles = checked_tile_grid(checked_dims.m_u32, 128, checked_dims.k_u32, bn)?;
         let cfg = cudarc::driver::LaunchConfig {
             grid_dim: (total_tiles, 1, 1),
@@ -1900,7 +1536,7 @@ pub fn sgemm_bi_backward_dx(
         return Ok(());
     }
 
-    // T2.11: zero-cuBLAS contract — see gpu_sgemm_forward.
+    // The zero-cuBLAS contract has no fallback beyond this point.
     panic!(
         "gpu_sgemm_backward_dx: cuBLAS fallback hit (shape M={batch} K={n_in} N={n_out}). \
          The zero-cuBLAS contract requires every shape to route through a custom \
@@ -1913,210 +1549,13 @@ pub fn sgemm_bi_backward_dx(
 // ============================================================================
 // Same bucket geometry and launch configs as the f32 dispatcher above; the
 // typed kernels are bit-identical to "upcast inputs to f32, run the f32
-// kernel". Buckets not yet covered (Big/Slim/split-K — stage 3) return Err:
+// kernel". Buckets not covered by native typed kernels return Err:
 // callers must not silently fall back to non-deterministic cuBLAS.
 
-use super::blas::TypedPtr;
-use super::dtype::WeightDtype;
+use super::super::blas::TypedPtr;
+use super::super::dtype::WeightDtype;
 
-// ---------------------------------------------------------------------------
-// f32-cascade routing predicates (stage 3). Each returns true iff the f32
-// dispatcher would run the BIG kernel (BN=128, 2-stage 33 KB smem) for this
-// shape — i.e. NO earlier bucket in the cascade claims it AND the final
-// slim/big split picks Big. The typed dispatch uses these so a native typed
-// Big kernel fires exactly where the f32 reference runs the same FMA chain;
-// any drift between a predicate and the real cascade shows up as a bit
-// mismatch in tests/gemm_bi_typed_parity.rs.
-// ---------------------------------------------------------------------------
-
-/// NN forward: mirrors `sgemm_bi_forward` (gemv, ultra-thin, narrow tiers,
-/// split-K thin-M K-tail/main, split-K slim, gap-fill, then big/slim).
-pub(super) fn nn_routes_to_big(batch: usize, n_in: usize, n_out: usize) -> bool {
-    let Ok(dims) = GemmDims::nn((batch, n_in, n_out), n_in) else {
-        return false;
-    };
-    if n_out == 1 {
-        return false; // gemv (or panic tail) — never Big
-    }
-    if (1..32).contains(&batch) && (32..=2048).contains(&n_in) && n_out >= 32 {
-        return false; // ultra-thin
-    }
-    if (2..=127).contains(&n_out) {
-        return false; // narrow tiers
-    }
-    let Ok(plain_slim_blocks) = checked_tile_grid(dims.m_u32, 128, dims.n_u32, 64) else {
-        return false;
-    };
-    let underfill = plain_slim_blocks < NUM_SMS;
-    // split-K thin-M K-tail
-    if (32..=1024).contains(&batch)
-        && (64..=2048).contains(&n_out)
-        && n_out.is_multiple_of(4)
-        && n_in >= 33
-        && !n_in.is_multiple_of(32)
-        && underfill
-    {
-        let k_main = n_in - n_in % 32;
-        if k_main >= 32
-            && checked_mul3(k_main / 32, batch, n_out, "NN route scratch")
-                .is_ok_and(|elements| elements <= SPLITK_SCRATCH_CAP)
-        {
-            return false;
-        }
-    }
-    // split-K thin-M main
-    if (32..=1024).contains(&batch)
-        && (64..=2048).contains(&n_out)
-        && n_out.is_multiple_of(4)
-        && n_in >= 32
-        && n_in.is_multiple_of(32)
-        && checked_mul3(n_in / 32, batch, n_out, "NN route scratch")
-            .is_ok_and(|elements| elements <= SPLITK_SCRATCH_CAP)
-        && underfill
-    {
-        return false;
-    }
-    // split-K slim
-    if batch > 1024
-        && (128..=SGEMM_SLIM_MAX).contains(&n_out)
-        && n_in >= 64
-        && n_in.is_multiple_of(32)
-    {
-        let f_final = dims.k_u32.div_ceil(64);
-        if f_final >= 6
-            && checked_mul3(
-                checked_usize(f_final, "NN route chunks").unwrap_or(usize::MAX),
-                batch,
-                n_out,
-                "NN route scratch",
-            )
-            .is_ok_and(|elements| elements <= SPLITK_SCRATCH_CAP)
-        {
-            let base_blocks =
-                checked_tile_grid(dims.m_u32, 128, dims.n_u32, 64).unwrap_or(u32::MAX);
-            if base_blocks > 0 && base_blocks < 3 * NUM_SMS {
-                return false;
-            }
-        }
-    }
-    if batch < 128 {
-        return false; // gap-fill territory
-    }
-    if !(batch >= SGEMM_CUSTOM_MIN && n_out >= SGEMM_CUSTOM_MIN) {
-        return false;
-    }
-    let slim = n_out <= SGEMM_SLIM_MAX || (batch < SGEMM_M_SLIM_FORCE && n_out >= SGEMM_CUSTOM_MIN);
-    !slim
-}
-
-/// TN dW: mirrors `sgemm_bi_backward_dw` (gemv, narrow, split-M, big/slim
-/// keyed on output rows = `n_in`).
-pub(super) fn tn_routes_to_big(batch: usize, n_in: usize, n_out: usize) -> bool {
-    if GemmDims::tn((batch, n_in, n_out)).is_err() {
-        return false;
-    }
-    if n_out == 1 || (2..=127).contains(&n_out) {
-        return false; // gemv / narrow
-    }
-    if splitm_tn_partition(batch, n_in, n_out).is_some() {
-        return false;
-    }
-    if !(n_in >= 1 && n_out >= SGEMM_CUSTOM_MIN) {
-        return false;
-    }
-    let slim = n_out <= SGEMM_SLIM_MAX || (n_in < SGEMM_M_SLIM_FORCE && n_out >= SGEMM_CUSTOM_MIN);
-    !slim
-}
-
-/// NT dX: mirrors `sgemm_bi_backward_dx` (narrow, col-gemv, gemv, split-N
-/// K-tail/main, split-N slim, gap-fill, big/slim keyed on (`batch`, `n_in`)).
-pub(super) fn nt_routes_to_big(batch: usize, n_in: usize, n_out: usize) -> bool {
-    let Ok(dims) = GemmDims::nt((batch, n_in, n_out)) else {
-        return false;
-    };
-    if (2..=127).contains(&n_out) {
-        return false; // NT narrow (small reduction N)
-    }
-    if batch < 32 && n_out >= 128 {
-        return false; // dx_col_gemv
-    }
-    if n_out == 1 {
-        return false; // NT gemv
-    }
-    const SPLITK_NT_TRANSPOSE_CAP: usize = 1 << 22;
-    let Ok(plain_slim_blocks) = checked_tile_grid(dims.m_u32, 128, dims.k_u32, 64) else {
-        return false;
-    };
-    let underfill = plain_slim_blocks < NUM_SMS;
-    // split-N K-tail
-    if (32..=1024).contains(&batch)
-        && (64..=4096).contains(&n_in)
-        && n_in >= 33
-        && !n_in.is_multiple_of(32)
-        && (32..=2048).contains(&n_out)
-        && n_out.is_multiple_of(32)
-        && underfill
-    {
-        let k_main = n_in - n_in % 32;
-        if k_main >= 32
-            && k_main
-                .checked_mul(n_out)
-                .is_some_and(|elements| elements <= SPLITK_NT_TRANSPOSE_CAP)
-            && checked_mul3(n_out / 32, batch, k_main, "NT route scratch")
-                .is_ok_and(|elements| elements <= SPLITK_SCRATCH_CAP)
-        {
-            return false;
-        }
-    }
-    // split-N main
-    let n_main = n_out - n_out % 32;
-    if (32..=1024).contains(&batch)
-        && (64..=4096).contains(&n_in)
-        && n_in.is_multiple_of(4)
-        && n_in.is_multiple_of(32)
-        && (32..=2048).contains(&n_out)
-        && n_main >= 32
-        && dims.kn <= SPLITK_NT_TRANSPOSE_CAP
-        && checked_mul3(n_main / 32, batch, n_in, "NT route scratch")
-            .is_ok_and(|elements| elements <= SPLITK_SCRATCH_CAP)
-        && underfill
-    {
-        return false;
-    }
-    // split-N slim
-    if batch > 1024
-        && (128..=SGEMM_SLIM_NT_NIN_MAX).contains(&n_in)
-        && n_out >= 64
-        && n_out.is_multiple_of(32)
-        && dims.kn <= SPLITK_NT_TRANSPOSE_CAP
-    {
-        let f_final = dims.n_u32.div_ceil(64);
-        if f_final >= 2
-            && checked_mul3(
-                checked_usize(f_final, "NT route chunks").unwrap_or(usize::MAX),
-                batch,
-                n_in,
-                "NT route scratch",
-            )
-            .is_ok_and(|elements| elements <= SPLITK_SCRATCH_CAP)
-        {
-            let base_blocks =
-                checked_tile_grid(dims.m_u32, 128, dims.k_u32, 64).unwrap_or(u32::MAX);
-            if base_blocks > 0 && base_blocks < 3 * NUM_SMS {
-                return false;
-            }
-        }
-    }
-    if (32..128).contains(&batch) {
-        return false; // gap-fill NT
-    }
-    if !(batch >= SGEMM_CUSTOM_MIN && n_in >= 1) {
-        return false;
-    }
-    let slim = n_in <= SGEMM_SLIM_MAX || (batch < SGEMM_M_SLIM_FORCE && n_in >= SGEMM_CUSTOM_MIN);
-    !slim
-}
-
+/// Typed launchers accept only the homogeneous bf16/f16 contracts.
 fn require_half(dt: WeightDtype, what: &str) -> Result<(), String> {
     if dt == WeightDtype::F32 {
         return Err(format!(
@@ -2125,110 +1564,6 @@ fn require_half(dt: WeightDtype, what: &str) -> Result<(), String> {
     }
     Ok(())
 }
-
-/// Which tensor-core tile variant a TC entry point launched. Returned on
-/// success so callers and tests can assert launch reality (0.4.0 lesson:
-/// a kernel that silently never fires must be impossible to miss).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TcTile {
-    /// 128x128 CTA tile, 256 threads / 8 warps (`sgemm_bi_*_tc_*`).
-    Tile128,
-    /// 64x64 CTA tile, 128 threads / 4 warps (`sgemm_bi_*_tc64_*`).
-    Tile64,
-    /// 16x32 CTA tile, 128 threads / 4 warps, 4-stage cp.async
-    /// (`sgemm_bi_nn_tc16_*`) - the decode rung of the ladder. NN
-    /// forward only; picked by `tc_pick_tile_forward` for the small-M
-    /// and narrow-N bands.
-    Thin16,
-}
-
-/// Prefer the smaller tile while a 128x128 launch has too few independent
-/// CTAs. Both tile families issue the same ascending MMA reduction for an
-/// output element, so this changes occupancy without changing its bits.
-pub const TC64_PREFER_MAX_TILES128: u32 =
-    super::kernel_identity::LegacySm80Policy::current().tile128_prefer_min_tiles;
-
-/// Choose between the square tiles once both output axes reach one Tile64.
-fn tc_pick_tile_large(rows: usize, cols: usize) -> Option<TcTile> {
-    let policy = super::kernel_identity::LegacySm80Policy::current();
-    if rows >= policy.large_tile_min && cols >= policy.large_tile_min {
-        let tiles128 = u32::try_from(rows)
-            .ok()?
-            .div_ceil(128)
-            .checked_mul(u32::try_from(cols).ok()?.div_ceil(128))?;
-        if tiles128 >= TC64_PREFER_MAX_TILES128 {
-            return Some(TcTile::Tile128);
-        }
-        return Some(TcTile::Tile64);
-    }
-    if rows >= policy.square_tile_min && cols >= policy.square_tile_min {
-        return Some(TcTile::Tile64);
-    }
-    None
-}
-
-/// The forward thin tile covers the narrow rows or columns below Tile64.
-/// Its per-element MMA order matches the square tiles, so crossing this
-/// scheduling boundary preserves the forward numeric contract.
-fn tc_pick_tile_forward(rows: usize, cols: usize) -> Option<TcTile> {
-    let policy = super::kernel_identity::LegacySm80Policy::current();
-    if cols < policy.forward_min_columns {
-        return None;
-    }
-    if rows <= policy.forward_thin_max_rows
-        || (policy.forward_thin_below_square_columns && cols < policy.square_tile_min)
-    {
-        return Some(TcTile::Thin16);
-    }
-    tc_pick_tile_large(rows, cols)
-}
-
-/// Tile64 predicates both output tails, but two short axes would waste the
-/// whole square tile and remain on the scalar fallback.
-fn tc_pick_tile_backward_bridge(rows: usize, cols: usize) -> Option<TcTile> {
-    let policy = super::kernel_identity::LegacySm80Policy::current();
-    if policy.reject_zero_axes && (rows == 0 || cols == 0) {
-        return None;
-    }
-    if rows >= policy.square_tile_min && cols >= policy.square_tile_min {
-        return tc_pick_tile_large(rows, cols);
-    }
-    if policy.backward_one_axis_tile64
-        && (rows >= policy.square_tile_min || cols >= policy.square_tile_min)
-    {
-        return Some(TcTile::Tile64);
-    }
-    (!policy.backward_two_small_fallback).then_some(TcTile::Tile64)
-}
-
-/// Large shapes keep the existing square-tile policy. A one-axis tail is
-/// selected automatically only when its full operation is frozen above.
-fn tc_pick_tile_backward(
-    op: super::kernel_identity::PolicyOp,
-    dtype: WeightDtype,
-    dims: (usize, usize, usize),
-) -> Option<TcTile> {
-    let (batch, n_in, n_out) = dims;
-    let (rows, cols) = match op {
-        super::kernel_identity::PolicyOp::Dw => (n_in, n_out),
-        super::kernel_identity::PolicyOp::Dx => (batch, n_in),
-    };
-    let tile = tc_pick_tile_backward_bridge(rows, cols)?;
-    let policy = super::kernel_identity::LegacySm80Policy::current();
-    if rows >= policy.square_tile_min && cols >= policy.square_tile_min {
-        return Some(tile);
-    }
-
-    let dtype = match dtype {
-        WeightDtype::F32 => super::kernel_identity::PolicyDtype::F32,
-        WeightDtype::F16 => super::kernel_identity::PolicyDtype::F16,
-        WeightDtype::Bf16 => super::kernel_identity::PolicyDtype::Bf16,
-    };
-    super::kernel_identity::LegacySm80Policy::current()
-        .admits(op, dtype, dims)
-        .then_some(tile)
-}
-
 impl TcTile {
     /// CTA tile edge in output elements.
     /// Output-tile extents `(bm, bn)` - the ladder is not square.
@@ -2253,7 +1588,7 @@ impl TcTile {
     /// BK=64 staging exceeds the 48 KB static cap, so the 128-tile family
     /// uses `extern __shared__`; per-op: NN 71 680, TN 69 632, NT 73 728 —
     /// must stay <= the MAX_DYNAMIC_SHARED opt-in set at load,
-    /// kernels.rs). The Tile64 family stays on static smem (36 864 B).
+    /// modules.rs). The Tile64 family stays on static smem (36 864 B).
     fn launch_cfg(
         self,
         rows: usize,
@@ -2278,16 +1613,7 @@ impl TcTile {
     }
 }
 
-/// Operand bundle for the TC NN forward (`Y = X @ W + bias`).
-pub struct TcFwdOperands {
-    pub y: TypedPtr,
-    pub x: TypedPtr,
-    pub w: TypedPtr,
-    /// f32 bias pointer, 0 = none.
-    pub bias_ptr: CUptr,
-}
-
-/// Tensor-core NN forward (stage 5, `bi_tensor_cores` tier):
+/// Tensor-core NN forward (`bi_tensor_cores` tier):
 /// `Y = X @ W + bias` via mma.sync.m16n8k16 with f32 accumulation.
 /// SEPARATE numeric contract from the scalar triad (TC reduction tree, not
 /// the ascending-K FMA chain) — deterministic and batch-invariant across
@@ -2365,7 +1691,7 @@ pub fn sgemm_bi_forward_tc_with_tile(
     Ok(())
 }
 
-/// Tensor-core TN dW (stage 5): `dW[K,N] += X^T @ dY` via mma.sync with f32
+/// Tensor-core TN dW: `dW[K,N] += X^T @ dY` via mma.sync with f32
 /// accumulate straight into the f32 master gradient. Same TC contract as
 /// [`sgemm_bi_forward_tc`]. Large outputs keep the square-tile policy;
 /// qualified one-axis tails use Tile64. Returns the tile that launched.
@@ -2381,7 +1707,7 @@ pub fn sgemm_bi_backward_dw_tc(
     let (batch, n_in, n_out) = checked_dims.tuple();
     // Tile geometry keys on (K_out, N). Tail admission also keeps the
     // reduction length in its frozen performance key.
-    let tile = tc_pick_tile_backward(super::kernel_identity::PolicyOp::Dw, dy.dtype, dims).ok_or_else(|| {
+    let tile = tc_pick_tile_backward(super::super::kernel_identity::PolicyOp::Dw, dy.dtype, dims).ok_or_else(|| {
         format!(
             "UNCOVERED sgemm_bi_backward_dw_tc: shape M={batch} K={n_in} N={n_out} outside the automatic TC route"
         )
@@ -2434,7 +1760,7 @@ pub fn sgemm_bi_backward_dw_tc_with_tile(
     Ok(())
 }
 
-/// Tensor-core NT dX (stage 5): `dX[M,K] = dY @ W^T` via mma.sync, typed RNE
+/// Tensor-core NT dX: `dX[M,K] = dY @ W^T` via mma.sync, typed RNE
 /// overwrite. Same TC contract as [`sgemm_bi_forward_tc`]. Covers
 /// large outputs plus qualified one-axis tails. Returns the tile that launched.
 pub fn sgemm_bi_backward_dx_tc(
@@ -2447,7 +1773,7 @@ pub fn sgemm_bi_backward_dx_tc(
 ) -> Result<TcTile, String> {
     let checked_dims = GemmDims::nt(dims)?;
     let (batch, n_in, n_out) = checked_dims.tuple();
-    let tile = tc_pick_tile_backward(super::kernel_identity::PolicyOp::Dx, dx.dtype, dims).ok_or_else(|| {
+    let tile = tc_pick_tile_backward(super::super::kernel_identity::PolicyOp::Dx, dx.dtype, dims).ok_or_else(|| {
         format!(
             "UNCOVERED sgemm_bi_backward_dx_tc: shape M={batch} K={n_in} N={n_out} outside the automatic TC route"
         )
@@ -2613,7 +1939,7 @@ pub fn sgemm_bi_forward_typed(
         return Ok(());
     }
 
-    // Big NN (stage 3): native typed twin of `sgemm_bi_nn`, fired exactly
+    // Native typed Big NN fires exactly
     // where the f32 cascade would run Big (predicate-mirrored gates).
     if nn_routes_to_big(batch, n_in, n_out) {
         let total_tiles = checked_tile_grid(checked_dims.m_u32, 128, checked_dims.n_u32, 128)?;
@@ -2714,7 +2040,7 @@ pub fn sgemm_bi_backward_dw_typed(
         return Ok(());
     }
 
-    // Big TN (stage 3): native typed twin of `sgemm_bi_tn`. dW stays f32 +=.
+    // Native typed Big TN keeps dW in f32 with += accumulation.
     if tn_routes_to_big(batch, n_in, n_out) {
         let alpha: f32 = 1.0;
         let m_red_i = checked_dims.m_i32;
@@ -2813,7 +2139,7 @@ pub fn sgemm_bi_backward_dx_typed(
         return Ok(());
     }
 
-    // Big NT (stage 3): native typed twin of `sgemm_bi_nt` (typed dX overwrite).
+    // Native typed Big NT overwrites the typed dX output.
     if nt_routes_to_big(batch, n_in, n_out) {
         let alpha: f32 = 1.0;
         let m_i = checked_dims.m_i32;
@@ -2841,126 +2167,4 @@ pub fn sgemm_bi_backward_dx_typed(
         "UNCOVERED sgemm_bi_backward_dx_typed: split-N/Slim buckets are upcast-fallback territory — \
          shape M={batch} K={n_in} N={n_out}."
     ))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{GemmDims, checked_grid_product, checked_u32, validate_bias_preseed};
-
-    fn assert_invalid_error(error: String) {
-        assert!(error.starts_with("invalid GEMM dimensions"), "{error}");
-        assert!(!error.starts_with("UNCOVERED"), "{error}");
-    }
-
-    fn assert_invalid(result: Result<GemmDims, String>) {
-        assert_invalid_error(result.expect_err("dimensions must be rejected"));
-    }
-
-    #[test]
-    fn gemm_dims_reject_zero_axes() {
-        for dims in [(0, 1, 1), (1, 0, 1), (1, 1, 0)] {
-            assert_invalid(GemmDims::nn(dims, dims.1.max(1)));
-        }
-    }
-
-    #[test]
-    fn gemm_dims_accept_i32_max_boundary() {
-        let limit = i32::MAX as usize;
-        let dims = GemmDims::checked(limit, 1, 1, 1, 1, 1).unwrap();
-
-        assert_eq!(dims.m_i32, i32::MAX);
-        assert_eq!(dims.mk, limit);
-        assert_eq!(dims.mn, limit);
-        assert_eq!(dims.kn, 1);
-    }
-
-    #[test]
-    fn gemm_dims_reject_axis_above_i32_max() {
-        let too_large = i32::MAX as usize + 1;
-        assert_invalid(GemmDims::checked(too_large, 1, 1, 1, 1, 1));
-    }
-
-    #[test]
-    fn gemm_dims_reject_product_overflow() {
-        assert_invalid(GemmDims::checked(usize::MAX, 2, 1, 2, 1, 1));
-    }
-
-    #[test]
-    fn gemm_dims_reject_device_total_overflow() {
-        let limit = i32::MAX as usize;
-        assert_invalid(GemmDims::checked(limit, 2, 1, 2, 1, 1));
-    }
-
-    #[test]
-    fn gemm_dims_reject_grid_conversion_overflow() {
-        assert_invalid_error(
-            checked_u32(u32::MAX as usize + 1, "grid axis")
-                .expect_err("an oversized grid axis must be rejected"),
-        );
-        assert_invalid_error(
-            checked_grid_product(u32::MAX, 2, 1)
-                .expect_err("an overflowing grid product must be rejected"),
-        );
-    }
-
-    #[test]
-    fn gemm_dims_reject_bad_nn_strides() {
-        for strides in [(2, 5, 5), (3, 4, 5), (3, 5, 4), (0, 5, 5)] {
-            assert_invalid(GemmDims::checked(
-                2,
-                strides.0.max(3),
-                5,
-                strides.0,
-                strides.1,
-                strides.2,
-            ));
-        }
-        assert_invalid(GemmDims::checked(2, 1, 1, i32::MAX as usize, 1, 1));
-        assert_invalid(GemmDims::checked(1, 1, 1, i32::MAX as usize + 1, 1, 1));
-    }
-
-    #[test]
-    fn gemm_dims_preserve_tn_storage_strides() {
-        let dims = GemmDims::tn((2, 3, 5)).unwrap();
-        assert_eq!((dims.lda, dims.ldb, dims.ldc), (3, 5, 5));
-    }
-
-    #[test]
-    fn gemm_dims_reject_bad_tn_strides() {
-        assert_invalid(GemmDims::checked_storage(
-            2,
-            3,
-            5,
-            [2, 5, 5],
-            [3, 5, 5],
-            [2, 2, 3],
-        ));
-    }
-
-    #[test]
-    fn gemm_dims_preserve_nt_storage_strides() {
-        let dims = GemmDims::nt((2, 3, 5)).unwrap();
-        assert_eq!((dims.lda, dims.ldb, dims.ldc), (5, 5, 3));
-    }
-
-    #[test]
-    fn gemm_dims_reject_bad_nt_strides() {
-        assert_invalid(GemmDims::checked_storage(
-            2,
-            3,
-            5,
-            [4, 5, 3],
-            [5, 5, 3],
-            [2, 3, 2],
-        ));
-    }
-
-    #[test]
-    fn bias_preseed_rejects_non_identity_alpha() {
-        let error = validate_bias_preseed(0.5, 1, "triad-test")
-            .expect_err("bias pre-seeding must reject alpha != 1");
-        assert!(error.contains("alpha == 1.0"), "{error}");
-        validate_bias_preseed(0.5, 0, "triad-test").unwrap();
-        validate_bias_preseed(1.0, 1, "triad-test").unwrap();
-    }
 }

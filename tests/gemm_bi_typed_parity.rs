@@ -1290,11 +1290,15 @@ fn tc_cp_async_misaligned_operands_match_scalar_stage_bytes() {
 
 #[test]
 fn tc_source_centralizes_async_copy_and_avoids_type_punned_stores() {
-    let source = include_str!("../kernels/gemm_bi_triad.cu");
-    let tc_source = source
-        .split_once("#define TC_BM")
-        .expect("tensor-core section marker")
-        .1;
+    let source = [
+        include_str!("../kernels/gemm_bi_triad/contract.cuh"),
+        include_str!("../kernels/gemm_bi_triad/common.cuh"),
+        include_str!("../kernels/gemm_bi_triad/epilogue.cuh"),
+        include_str!("../kernels/gemm_bi_triad/mma16.cuh"),
+        include_str!("../kernels/gemm_bi_triad/sm80.cu"),
+    ]
+    .concat();
+    let tc_source = source.as_str();
 
     assert_eq!(
         tc_source.matches("cp.async.ca.shared.global").count(),
@@ -1307,14 +1311,17 @@ fn tc_source_centralizes_async_copy_and_avoids_type_punned_stores() {
 
 #[test]
 fn tc128_output_pointer_formation_is_column_guarded() {
-    let source = include_str!("../kernels/gemm_bi_triad.cu");
-    let tc_source = source
-        .split_once("#define TC_BM")
-        .expect("tensor-core section marker")
-        .1;
-    let tc128_source = tc_source
-        .split_once("Stage 5b: 64x64-tile tensor-core twins")
-        .expect("Tile64 section marker")
+    let source = [
+        include_str!("../kernels/gemm_bi_triad/contract.cuh"),
+        include_str!("../kernels/gemm_bi_triad/common.cuh"),
+        include_str!("../kernels/gemm_bi_triad/epilogue.cuh"),
+        include_str!("../kernels/gemm_bi_triad/mma16.cuh"),
+        include_str!("../kernels/gemm_bi_triad/sm80.cu"),
+    ]
+    .concat();
+    let tc128_source = source
+        .split_once("#define SGB_TC64_BM")
+        .expect("Tile64 macro boundary")
         .0;
 
     assert_eq!(

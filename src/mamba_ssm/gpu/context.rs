@@ -37,7 +37,7 @@ fn next_gpu_ctx_token() -> Result<u64, String> {
 /// for f32).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
 pub enum BiGemmFamily {
-    /// The multi-tile dispatcher (kernels/gemm_bi_triad.cu) - the default.
+    /// The multi-tile dispatcher (`kernels/gemm_bi_triad/`) - the default.
     /// Carries the full triad (NN + TN + NT), so it is the only family
     /// that can serve a backward, and it is the fastest deterministic
     /// path. It picks a kernel by shape (ultra-thin M<32, narrow-N,

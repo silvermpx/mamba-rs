@@ -9,8 +9,22 @@
 //! architecture's dispatch cells are enabled.
 #![cfg(feature = "cuda")]
 
-fn m1_blob() -> String {
-    [
+fn compose(fragments: &[&str]) -> String {
+    fragments
+        .iter()
+        .map(|source| {
+            source
+                .lines()
+                .filter(|line| !line.trim().starts_with("#include \"_typed_prelude.cuh\""))
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn fixed_blob() -> String {
+    compose(&[
         include_str!("../kernels/_typed_prelude.cuh"),
         include_str!("../kernels/mamba_ssm.cu"),
         include_str!("../kernels/mamba_ssm_parallel.cu"),
@@ -27,34 +41,56 @@ fn m1_blob() -> String {
         include_str!("../kernels/gemm_bi_fixed/matvec.cuh"),
         include_str!("../kernels/gemm_bi_fixed/mma16.cuh"),
         include_str!("../kernels/gemm_bi_fixed/sm90_wgmma.cuh"),
-        include_str!("../kernels/gemm_bi_triad.cu"),
-    ]
-    .iter()
-    .map(|s| {
-        s.lines()
-            .filter(|l| !l.trim().starts_with("#include \"_typed_prelude.cuh\""))
-            .collect::<Vec<_>>()
-            .join("\n")
-    })
-    .collect::<Vec<_>>()
-    .join("\n")
+    ])
+}
+
+fn scalar_blob() -> String {
+    compose(&[
+        include_str!("../kernels/_typed_prelude.cuh"),
+        include_str!("../kernels/gemm_bi_triad/contract.cuh"),
+        include_str!("../kernels/gemm_bi_triad/common.cuh"),
+        include_str!("../kernels/gemm_bi_triad/epilogue.cuh"),
+        include_str!("../kernels/gemm_bi_triad/scalar.cu"),
+    ])
+}
+
+fn sm80_blob() -> String {
+    compose(&[
+        include_str!("../kernels/_typed_prelude.cuh"),
+        include_str!("../kernels/gemm_bi_triad/contract.cuh"),
+        include_str!("../kernels/gemm_bi_triad/common.cuh"),
+        include_str!("../kernels/gemm_bi_triad/epilogue.cuh"),
+        include_str!("../kernels/gemm_bi_triad/mma16.cuh"),
+        include_str!("../kernels/gemm_bi_triad/sm80.cu"),
+    ])
 }
 
 fn compile_for(arch: &'static str) {
-    let src = m1_blob();
-    let opts = cudarc::nvrtc::CompileOptions {
-        arch: Some(arch),
-        options: vec![
-            "--fmad=true".to_string(),
-            "-DNDEBUG".to_string(),
-            "-DSGB_GROUP_M=16".to_string(),
-            "-DMAMBA_RS_STATE_CAP=256".to_string(),
-        ],
-        include_paths: mamba_rs::mamba_ssm::gpu::kernels::cuda_include_paths(),
-        ..Default::default()
+    let group_m = if matches!(arch, "sm_80" | "sm_86" | "sm_87") {
+        8
+    } else {
+        16
     };
-    if let Err(e) = cudarc::nvrtc::compile_ptx_with_opts(src, opts) {
-        panic!("kernel blob does not compile for {arch}: {e}");
+    for (kind, source) in [
+        ("Fixed", fixed_blob()),
+        ("TriadScalar", scalar_blob()),
+        ("TriadSm80", sm80_blob()),
+    ] {
+        let opts = cudarc::nvrtc::CompileOptions {
+            arch: Some(arch),
+            options: vec![
+                "--fmad=true".to_string(),
+                "--extra-device-vectorization".to_string(),
+                "-DNDEBUG".to_string(),
+                format!("-DSGB_GROUP_M={group_m}"),
+                "-DMAMBA_RS_STATE_CAP=256".to_string(),
+            ],
+            include_paths: mamba_rs::mamba_ssm::gpu::kernels::cuda_include_paths(),
+            ..Default::default()
+        };
+        if let Err(error) = cudarc::nvrtc::compile_ptx_with_opts(source, opts) {
+            panic!("{kind} kernel module does not compile for {arch}: {error}");
+        }
     }
 }
 

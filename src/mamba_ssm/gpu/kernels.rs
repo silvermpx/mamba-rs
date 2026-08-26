@@ -4,7 +4,9 @@
 //! PTX for the active device; no pre-built binary is required.
 
 use super::dtype::WeightDtype;
+use super::gemm_bi_triad::GemmBiKernels;
 use cudarc::driver::{CudaContext, CudaFunction, CudaModule};
+use std::ops::Deref;
 use std::sync::Arc;
 
 #[derive(Clone)]
@@ -64,7 +66,7 @@ pub struct MambaKernels {
     _modules: CudaModuleAnchors,
 
     compiler_identity: super::kernel_identity::CompilerIdentity,
-    artifact_set_identity: super::kernel_identity::ArtifactSetIdentity,
+    triad: GemmBiKernels,
 
     /// State-dimension capacity the kernels were compiled with (the
     /// per-thread register-array size). The engine and trainer
@@ -399,65 +401,6 @@ pub struct MambaKernels {
     pub matvec_bi_f16_f32: CudaFunction,
     pub matvec_bi_f32_f32: CudaFunction,
 
-    // -- sgemm_bi: deterministic batch-invariant f32 training SGEMM triad --
-    // (kernels/gemm_bi_triad.cu, ported from SQV-RS; siboehm warptiling + shape
-    // dispatcher). Used by gpu/sgemm_bi.rs when ctx.batch_invariant() is on.
-    // Big NN/TN/NT use 2-stage cp.async with 33 KB dynamic smem — loader
-    // opts into the sm_80+ carveout per CUfunction.
-    pub sgemm_nn: CudaFunction,
-    pub sgemm_tn: CudaFunction,
-    pub sgemm_nt: CudaFunction,
-    pub sgemm_nn_slim: CudaFunction,
-    pub sgemm_tn_slim: CudaFunction,
-    pub sgemm_nt_slim: CudaFunction,
-    pub sgemm_nn_ultra_thin: CudaFunction,
-    pub sgemm_nn_gemv: CudaFunction,
-    pub sgemm_tn_gemv: CudaFunction,
-    pub sgemm_nt_gemv: CudaFunction,
-    pub sgemm_nn_narrow: CudaFunction,
-    pub sgemm_nn_narrow_small: CudaFunction,
-    pub sgemm_tn_narrow: CudaFunction,
-    pub sgemm_tn_narrow_splitm_partial: CudaFunction,
-    pub sgemm_nt_narrow: CudaFunction,
-    pub sgemm_nn_splitk32_partial: CudaFunction,
-    pub sgemm_splitk_reduce: CudaFunction,
-    pub sgemm_tn_splitm_partial: CudaFunction,
-    pub sgemm_splitm_reduce: CudaFunction,
-    pub sgemm_nn_splitk_big_partial: CudaFunction,
-    pub sgemm_nt_splitn_big_partial: CudaFunction,
-    pub sgemm_nn_splitk_slim_partial: CudaFunction,
-    pub sgemm_transpose_f32_2d: CudaFunction,
-    pub sgemm_dx_col_gemv: CudaFunction,
-    /// Split-K/Split-M partial scratch for the sgemm_bi dispatcher:
-    /// 8M f32 = 32 MB. The dispatcher asserts chunk*M*N fits before launch.
-    /// LAZY: only the batch-invariant tier reads it, and
-    /// inference-only consumers never enable that tier — the eager alloc
-    /// held 32 MB of dead VRAM on every serve boot. Access via
-    /// [`MambaKernels::splitk_scratch_buf`].
-    pub splitk_scratch: std::sync::OnceLock<cudarc::driver::CudaSlice<f32>>,
-    /// W-transpose staging for the bwd_dx wide path: 4M f32 = 16 MB.
-    /// Lazy for the same reason; access via
-    /// [`MambaKernels::transpose_scratch_buf`].
-    pub transpose_scratch: std::sync::OnceLock<cudarc::driver::CudaSlice<f32>>,
-
-    // -- sgemm_bi typed (bf16/f16) variants — typed sync-load buckets.
-    // X/W/Y/dY/dX typed, dW + bias f32, f32 accumulation throughout; each
-    // kernel is bit-identical to "upcast inputs to f32, run the f32 twin".
-    pub sgemm_nn_gemv_typed: HalfKernel,
-    pub sgemm_tn_gemv_typed: HalfKernel,
-    pub sgemm_nt_gemv_typed: HalfKernel,
-    pub sgemm_nn_ultra_thin_typed: HalfKernel,
-    pub sgemm_nn_narrow_typed: HalfKernel,
-    pub sgemm_nn_narrow_small_typed: HalfKernel,
-    pub sgemm_tn_narrow_typed: HalfKernel,
-    pub sgemm_nt_narrow_typed: HalfKernel,
-    /// Typed Big NN/TN/NT (stage 3): bf16/f16 twins of the f32 Big kernels
-    /// with sync staging + f32 smem. Dynamic smem 33 KB — the 34 KB
-    /// MAX_DYNAMIC_SHARED attribute is set at load like the f32 Bigs.
-    pub sgemm_nn_big_typed: HalfKernel,
-    /// Tensor-core NN forward (stage 5, `bi_tensor_cores` tier) — separate
-    /// numeric contract (mma.sync f32 accumulate), static smem.
-    pub sgemm_nn_tc_typed: HalfKernel,
     /// The fixed family's inference ladder (kernels/gemm_bi_fixed.cu,
     /// GBF namespace): bit-identical copies of the forward TC tiles,
     /// owned by the inference kernel.
@@ -468,21 +411,14 @@ pub struct MambaKernels {
     /// never routes here until the rung is hardware-qualified - the
     /// forced census entry is its only caller).
     pub gemm_bi_nn_sm90_typed: Option<HalfKernel>,
-    pub sgemm_tn_tc_typed: HalfKernel,
-    pub sgemm_nt_tc_typed: HalfKernel,
-    /// 64x64-tile TC twins (stage 5b): 128 threads / 4 warps per CTA,
-    /// bit-identical per element to the 128-tile TC kernels (same 32-wide
-    /// reduction slabs, same mma chain). Used by the dispatcher when the
-    /// 128-tile grid would underfill the GPU and for shapes with an output
-    /// dim in [64, 128).
-    pub sgemm_nn_tc64_typed: HalfKernel,
-    /// Thin16 rung (16x32x64, 4 warps, 4-stage) - the decode end of the
-    /// bit-identical TC tile ladder.
-    pub sgemm_nn_tc16_typed: HalfKernel,
-    pub sgemm_tn_tc64_typed: HalfKernel,
-    pub sgemm_nt_tc64_typed: HalfKernel,
-    pub sgemm_tn_big_typed: HalfKernel,
-    pub sgemm_nt_big_typed: HalfKernel,
+}
+
+impl Deref for MambaKernels {
+    type Target = GemmBiKernels;
+
+    fn deref(&self) -> &Self::Target {
+        &self.triad
+    }
 }
 
 /// NVRTC library version, part of the kernel-cache key. `(0, 0)` means the
@@ -565,214 +501,33 @@ impl MambaKernels {
         arch: &'static str,
         state_cap: usize,
     ) -> Result<Self, String> {
-        // Prelude is inlined first so templated kernels can use to_f / from_f_*
-        // helpers without needing NVRTC to resolve #include "_typed_prelude.cuh"
-        // (NVRTC compiles a single combined source blob, no filesystem search).
-        let sources = [
-            include_str!("../../../kernels/_typed_prelude.cuh"),
-            include_str!("../../../kernels/mamba_ssm.cu"),
-            include_str!("../../../kernels/mamba_ssm_parallel.cu"),
-            include_str!("../../../kernels/conv1d.cu"),
-            include_str!("../../../kernels/activations.cu"),
-            include_str!("../../../kernels/norms.cu"),
-            include_str!("../../../kernels/elementwise.cu"),
-            include_str!("../../../kernels/loss_scaler.cu"),
-            include_str!("../../../kernels/grad_clip.cu"),
-            include_str!("../../../kernels/adamw.cu"),
-            include_str!("../../../kernels/gemm_bi_fixed/common.cuh"),
-            include_str!("../../../kernels/gemm_bi_fixed/ffma.cuh"),
-            include_str!("../../../kernels/gemm_bi_fixed/wmma_legacy.cuh"),
-            include_str!("../../../kernels/gemm_bi_fixed/matvec.cuh"),
-            include_str!("../../../kernels/gemm_bi_fixed/mma16.cuh"),
-            include_str!("../../../kernels/gemm_bi_fixed/sm90_wgmma.cuh"),
-            include_str!("../../../kernels/gemm_bi_triad.cu"),
-        ];
-
-        // Strip `#include "_typed_prelude.cuh"` lines (prelude is inlined above).
-        let combined_body: String = sources
-            .iter()
-            .map(|s| {
-                s.lines()
-                    .filter(|l| !l.trim().starts_with("#include \"_typed_prelude.cuh\""))
-                    .collect::<Vec<_>>()
-                    .join("\n")
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-        let combined = combined_body;
-        // No --use_fast_math: it flushes denormals to zero and replaces
-        // exp/sqrt with approximate intrinsics (__expf/__rsqrtf), which
-        // breaks gradient flow through SSM BPTT chains and RMSNorm.
-        // --fmad=true enables fused multiply-add (safe, precise).
-        // SGB_GROUP_M: L2-swizzle row-group size for the sgemm_bi tile walker.
-        // sm_80/sm_86 prefer 8 (smaller L2 working set); sm_89+ (Ada 96 MB L2,
-        // Hopper, Blackwell) prefer 16. Bit-exact across values — only the
-        // CTA emission order changes, never a C[m,n] reduction order.
-        let group_m: usize = match arch {
-            "sm_80" | "sm_86" | "sm_87" => 8,
-            _ => 16,
-        };
-        let (nv_major, nv_minor) = nvrtc_version();
-        let mut option_strings = vec![
-            "--fmad=true".to_string(),
-            "--extra-device-vectorization".to_string(),
-            // Device-side assert() compiles to a live trap check
-            // per call site (30 in gemm_bi_triad.cu alone, several inside the
-            // register-critical TC main loops). NDEBUG removes the checks;
-            // asserts compute no values, so outputs are bit-identical
-            // (digest-gated).
-            "-DNDEBUG".to_string(),
-            format!("-DSGB_GROUP_M={group_m}"),
-            format!("-DMAMBA_RS_STATE_CAP={state_cap}"),
-        ];
-        option_strings.extend(super::kernel_identity::deterministic_nvrtc_options(
-            (nv_major, nv_minor),
-            "1295072049",
-        ));
-        let include_paths = cuda_include_paths();
-        let opts = cudarc::nvrtc::CompileOptions {
-            arch: Some(arch),
-            options: option_strings.clone(),
-            include_paths: include_paths.clone(),
-            ..Default::default()
-        };
-
-        let nvrtc_library_domain = super::kernel_identity::nvrtc_library_domain();
-        let header_manifest =
-            super::kernel_identity::header_manifest(combined.as_bytes(), &include_paths);
-        let mut argv: Vec<Vec<u8>> = include_paths
-            .iter()
-            .map(|path| format!("--include-path={path}").into_bytes())
-            .collect();
-        argv.push(format!("--gpu-architecture={arch}").into_bytes());
-        argv.extend(option_strings.iter().map(|value| value.as_bytes().to_vec()));
-        let key_material = super::kernel_identity::CompileKeyMaterial {
-            source: combined.as_bytes().to_vec(),
-            target: arch.as_bytes().to_vec(),
-            argv,
-            include_roots: include_paths
-                .iter()
-                .map(|value| value.as_bytes().to_vec())
-                .collect(),
-            header_manifest: header_manifest.clone(),
-            nvrtc_version: (nv_major, nv_minor),
-            nvrtc_library_domain: nvrtc_library_domain.clone(),
-            output_kind: super::kernel_identity::ArtifactKind::Ptx,
-            composer_revision: super::kernel_identity::COMPOSER_REVISION,
-            compiler_revision: super::kernel_identity::COMPILER_REVISION,
-            numeric_abi_revision: super::kernel_identity::NUMERIC_ABI_REVISION,
-            schedule_revision: super::kernel_identity::SCHEDULE_REVISION,
-        };
-        let invocation_digest = key_material.invocation_digest();
-        let cache_key = key_material.digest();
-        let cache_path = cache_key.and_then(|key| {
-            kernel_cache_dir().map(|directory| {
-                directory.join(format!(
-                    "mamba-kernels-v1-{}.bin",
-                    super::kernel_identity::digest_hex(&key)
-                ))
-            })
-        });
-
-        let mut loaded = None;
-        if let (Some(path), Some(key)) = (&cache_path, cache_key)
-            && let Some(hit) = super::kernel_identity::read_cache(
-                path,
-                key,
-                super::kernel_identity::ArtifactKind::Ptx,
-            )
-            && let Ok(src) = super::kernel_identity::canonical_ptx_from_cache(hit.payload)
-            && let Ok(module) = ctx.load_module(cudarc::nvrtc::Ptx::from_src(src))
-            && super::kernel_identity::cache_hit_header_closure_is_current(
-                combined.as_bytes(),
-                &include_paths,
-                &header_manifest,
-            )
-            && nvrtc_library_domain
-                .as_deref()
-                .is_some_and(super::kernel_identity::nvrtc_library_domain_is_current)
-        {
-            loaded = Some((module, hit.artifact_digest));
-        }
-        let (module, artifact_digest) = match loaded {
-            Some(value) => value,
-            None => {
-                let ptx = cudarc::nvrtc::compile_ptx_with_opts(&combined, opts).map_err(|e| {
-                    // Unescape the compiler log - a 40-error NVRTC
-                    // failure as one escaped single-line blob is
-                    // unreadable exactly when it matters most.
-                    format!(
-                        "NVRTC compile failed: {}",
-                        format!("{e:?}").replace("\\n", "\n")
-                    )
-                })?;
-                let ptx_image = ptx
-                    .as_bytes()
-                    .ok_or_else(|| "NVRTC returned PTX without a raw image".to_string())?;
-                let ptx_source = super::kernel_identity::canonical_ptx_image(ptx_image)?;
-                if !super::kernel_identity::header_manifest_is_current(
-                    combined.as_bytes(),
-                    &include_paths,
-                    &header_manifest,
-                ) {
-                    return Err(
-                        "CUDA headers changed during NVRTC compilation; retry initialization"
-                            .into(),
-                    );
-                }
-                if let Some(domain) = nvrtc_library_domain.as_deref()
-                    && !super::kernel_identity::nvrtc_library_domain_is_current(domain)
-                {
-                    return Err(
-                        "NVRTC libraries changed during compilation; retry initialization".into(),
-                    );
-                }
-                let artifact_digest =
-                    super::kernel_identity::FramedSha256::bytes(ptx_source.as_bytes());
-                if let (Some(path), Some(key)) = (&cache_path, cache_key) {
-                    super::kernel_identity::publish_cache(
-                        path,
-                        key,
-                        super::kernel_identity::ArtifactKind::Ptx,
-                        ptx_source.as_bytes(),
-                    );
-                }
-                let module = ctx
-                    .load_module(cudarc::nvrtc::Ptx::from_src(ptx_source))
-                    .map_err(|e| format!("Module load failed: {e:?}"))?;
-                (module, artifact_digest)
-            }
-        };
-        let compiler_identity = super::kernel_identity::CompilerIdentity {
-            source_digest: super::kernel_identity::FramedSha256::bytes(combined.as_bytes()),
-            invocation_digest,
-            header_manifest_digest: super::kernel_identity::FramedSha256::new(
-                b"cuda-header-manifest.v1",
-            )
-            .optional(b"manifest", header_manifest.as_deref())
-            .finish(),
-            target: super::kernel_identity::CudaTarget::new(arch)?,
-            nvrtc_version: (nv_major, nv_minor),
-            nvrtc_library_domain: super::kernel_identity::FramedSha256::new(
-                b"nvrtc-library-set-identity.v2",
-            )
-            .optional(b"domain", nvrtc_library_domain.as_deref())
-            .finish(),
-            nvrtc_library_known: nvrtc_library_domain.is_some(),
-            output_kind: super::kernel_identity::ArtifactKind::Ptx,
-            composer_revision: super::kernel_identity::COMPOSER_REVISION,
-            compiler_revision: super::kernel_identity::COMPILER_REVISION,
-            numeric_abi_revision: super::kernel_identity::NUMERIC_ABI_REVISION,
-            schedule_revision: super::kernel_identity::SCHEDULE_REVISION,
-        };
-        let artifact_set_identity = super::kernel_identity::build_artifact_set(&[
-            super::kernel_identity::ArtifactIdentity {
-                module_kind: super::kernel_identity::ModuleKind::LegacyCombined,
-                artifact_kind: super::kernel_identity::ArtifactKind::Ptx,
-                compile_key: invocation_digest,
-                artifact_digest,
+        let fixed = super::gemm_bi_triad::modules::compile_module(
+            super::gemm_bi_triad::modules::CompileModuleRequest {
+                ctx,
+                arch,
+                state_cap,
+                module_kind: super::kernel_identity::ModuleKind::Fixed,
             },
-        ])?;
+        )?;
+        let scalar = super::gemm_bi_triad::modules::compile_module(
+            super::gemm_bi_triad::modules::CompileModuleRequest {
+                ctx,
+                arch,
+                state_cap,
+                module_kind: super::kernel_identity::ModuleKind::TriadScalar,
+            },
+        )?;
+        let sm80 = super::gemm_bi_triad::modules::compile_module(
+            super::gemm_bi_triad::modules::CompileModuleRequest {
+                ctx,
+                arch,
+                state_cap,
+                module_kind: super::kernel_identity::ModuleKind::TriadSm80,
+            },
+        )?;
+        let compiler_identity = fixed.compiler_identity;
+        let triad = GemmBiKernels::load(fixed.artifact_identity, scalar, sm80)?;
+        let module = fixed.module;
 
         let get = |name: &str| -> Result<CudaFunction, String> {
             module
@@ -811,7 +566,7 @@ impl MambaKernels {
         Ok(Self {
             state_cap,
             compiler_identity,
-            artifact_set_identity,
+            triad,
             // SSM
             ssm_step_fwd: get("ssm_step_forward")?,
             ssm_burnin_fwd: get("ssm_burnin_forward")?,
@@ -1000,89 +755,6 @@ impl MambaKernels {
             rmsnorm_bwd_f32in_typed: load_half("rmsnorm_backward_f32in")?,
             residual_add_f32_typed: load_half("residual_add_f32")?,
 
-            // -- sgemm_bi triad --
-            sgemm_nn: {
-                let f = get("sgemm_bi_nn")?;
-                // Big NN: 2-stage cp.async, 33 KB dynamic smem (> 48 KB
-                // static cap). Opt into the sm_80+ carveout per function.
-                f.set_attribute(
-                    cudarc::driver::sys::CUfunction_attribute_enum::CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
-                    34 * 1024,
-                )
-                .map_err(|e| format!("set MAX_DYNAMIC_SHARED for sgemm_nn: {e:?}"))?;
-                f
-            },
-            sgemm_tn: {
-                let f = get("sgemm_bi_tn")?;
-                f.set_attribute(
-                    cudarc::driver::sys::CUfunction_attribute_enum::CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
-                    34 * 1024,
-                )
-                .map_err(|e| format!("set MAX_DYNAMIC_SHARED for sgemm_tn: {e:?}"))?;
-                f
-            },
-            sgemm_nt: {
-                let f = get("sgemm_bi_nt")?;
-                f.set_attribute(
-                    cudarc::driver::sys::CUfunction_attribute_enum::CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
-                    34 * 1024,
-                )
-                .map_err(|e| format!("set MAX_DYNAMIC_SHARED for sgemm_nt: {e:?}"))?;
-                f
-            },
-            sgemm_nn_slim: get("sgemm_bi_nn_slim")?,
-            sgemm_tn_slim: get("sgemm_bi_tn_slim")?,
-            sgemm_nt_slim: get("sgemm_bi_nt_slim")?,
-            sgemm_nn_ultra_thin: get("sgemm_bi_nn_ultra_thin")?,
-            sgemm_nn_gemv: get("sgemm_bi_nn_gemv")?,
-            sgemm_tn_gemv: get("sgemm_bi_tn_gemv")?,
-            sgemm_nt_gemv: get("sgemm_bi_nt_gemv")?,
-            sgemm_nn_narrow: get("sgemm_bi_nn_narrow")?,
-            sgemm_nn_narrow_small: get("sgemm_bi_nn_narrow_small")?,
-            sgemm_tn_narrow: get("sgemm_bi_tn_narrow")?,
-            sgemm_tn_narrow_splitm_partial: get("sgemm_bi_tn_narrow_splitm_partial")?,
-            sgemm_nt_narrow: get("sgemm_bi_nt_narrow")?,
-            sgemm_nn_splitk32_partial: get("sgemm_bi_nn_splitk32_partial")?,
-            sgemm_splitk_reduce: get("sgemm_bi_splitk_reduce")?,
-            sgemm_tn_splitm_partial: get("sgemm_bi_tn_splitm_partial")?,
-            sgemm_splitm_reduce: get("sgemm_bi_splitm_reduce")?,
-            sgemm_nn_splitk_big_partial: {
-                let f = get("sgemm_bi_nn_splitk_big_partial")?;
-                f.set_attribute(
-                    cudarc::driver::sys::CUfunction_attribute_enum::CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
-                    34 * 1024,
-                )
-                .map_err(|e| {
-                    format!("set MAX_DYNAMIC_SHARED for sgemm_nn_splitk_big_partial: {e:?}")
-                })?;
-                f
-            },
-            sgemm_nt_splitn_big_partial: {
-                let f = get("sgemm_bi_nt_splitn_big_partial")?;
-                f.set_attribute(
-                    cudarc::driver::sys::CUfunction_attribute_enum::CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
-                    34 * 1024,
-                )
-                .map_err(|e| {
-                    format!("set MAX_DYNAMIC_SHARED for sgemm_nt_splitn_big_partial: {e:?}")
-                })?;
-                f
-            },
-            sgemm_nn_splitk_slim_partial: get("sgemm_bi_nn_splitk_slim_partial")?,
-            sgemm_transpose_f32_2d: get("sgemm_transpose_f32_2d")?,
-            sgemm_dx_col_gemv: get("sgemm_bi_dx_col_gemv")?,
-            splitk_scratch: std::sync::OnceLock::new(),
-            transpose_scratch: std::sync::OnceLock::new(),
-            sgemm_nn_gemv_typed: load_half("sgemm_bi_nn_gemv")?,
-            sgemm_tn_gemv_typed: load_half("sgemm_bi_tn_gemv")?,
-            sgemm_nt_gemv_typed: load_half("sgemm_bi_nt_gemv")?,
-            sgemm_nn_ultra_thin_typed: load_half("sgemm_bi_nn_ultra_thin")?,
-            sgemm_nn_narrow_typed: load_half("sgemm_bi_nn_narrow")?,
-            sgemm_nn_narrow_small_typed: load_half("sgemm_bi_nn_narrow_small")?,
-            sgemm_tn_narrow_typed: load_half("sgemm_bi_tn_narrow")?,
-            sgemm_nt_narrow_typed: load_half("sgemm_bi_nt_narrow")?,
-            sgemm_nn_big_typed: load_half_dynsmem("sgemm_bi_nn_big", 34 * 1024)?,
-            sgemm_nn_tc_typed: load_half_dynsmem("sgemm_bi_nn_tc", 75_776)?,
             gemm_bi_nn_tc128_typed: load_half_dynsmem("gemm_bi_nn_tc128", 71_680)?,
             gemm_bi_nn_tc64_typed: load_half("gemm_bi_nn_tc64")?,
             gemm_bi_nn_tc16_typed: load_half("gemm_bi_nn_tc16")?,
@@ -1091,27 +763,21 @@ impl MambaKernels {
             } else {
                 None
             },
-            sgemm_tn_tc_typed: load_half_dynsmem("sgemm_bi_tn_tc", 75_776)?,
-            sgemm_nt_tc_typed: load_half_dynsmem("sgemm_bi_nt_tc", 75_776)?,
-            sgemm_nn_tc64_typed: load_half("sgemm_bi_nn_tc64")?,
-            sgemm_nn_tc16_typed: load_half("sgemm_bi_nn_tc16")?,
-            sgemm_tn_tc64_typed: load_half("sgemm_bi_tn_tc64")?,
-            sgemm_nt_tc64_typed: load_half("sgemm_bi_nt_tc64")?,
-            sgemm_tn_big_typed: load_half_dynsmem("sgemm_bi_tn_big", 34 * 1024)?,
-            sgemm_nt_big_typed: load_half_dynsmem("sgemm_bi_nt_big", 34 * 1024)?,
-
             _modules: CudaModuleAnchors::new(vec![module]),
         })
     }
 
-    /// Compiler invocation that produced the loaded legacy PTX.
+    /// Compiler invocation that produced the loaded Fixed module.
+    ///
+    /// Scalar and SM80 triad compiler identities are exposed through the
+    /// embedded [`GemmBiKernels`] aggregate.
     pub fn compiler_identity(&self) -> super::kernel_identity::CompilerIdentity {
         self.compiler_identity
     }
 
     /// Ordered artifact set available to deterministic GEMM dispatch.
     pub fn artifact_set_identity(&self) -> super::kernel_identity::ArtifactSetIdentity {
-        self.artifact_set_identity
+        self.triad.artifact_set_identity()
     }
 
     /// The Split-K/Split-M partial scratch (8M f32 = 32 MB), allocated on
@@ -1122,16 +788,7 @@ impl MambaKernels {
         &self,
         stream: &Arc<cudarc::driver::CudaStream>,
     ) -> Result<&cudarc::driver::CudaSlice<f32>, String> {
-        if self.splitk_scratch.get().is_none() {
-            let buf = stream
-                .alloc_zeros::<f32>(1 << 23)
-                .map_err(|e| format!("splitk_scratch alloc: {e:?}"))?;
-            // A concurrent racer's set loses and drops its buffer — safe.
-            let _ = self.splitk_scratch.set(buf);
-        }
-        self.splitk_scratch
-            .get()
-            .ok_or_else(|| "splitk_scratch cell empty after init".to_string())
+        self.triad.splitk_scratch_buf(stream)
     }
 
     /// The W-transpose staging scratch (4M f32 = 16 MB), allocated on
@@ -1140,15 +797,7 @@ impl MambaKernels {
         &self,
         stream: &Arc<cudarc::driver::CudaStream>,
     ) -> Result<&cudarc::driver::CudaSlice<f32>, String> {
-        if self.transpose_scratch.get().is_none() {
-            let buf = stream
-                .alloc_zeros::<f32>(1 << 22)
-                .map_err(|e| format!("transpose_scratch alloc: {e:?}"))?;
-            let _ = self.transpose_scratch.set(buf);
-        }
-        self.transpose_scratch
-            .get()
-            .ok_or_else(|| "transpose_scratch cell empty after init".to_string())
+        self.triad.transpose_scratch_buf(stream)
     }
 }
 

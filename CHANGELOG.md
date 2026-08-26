@@ -4,6 +4,9 @@
 
 ### Changed
 
+- The deterministic training GEMM triad now compiles as disjoint scalar and
+  SM80 modules under `kernels/gemm_bi_triad/`. The obsolete root monolith was
+  removed; module ownership and cache identity now fail closed per artifact.
 - `GpuCtx::gemm_route` now returns the complete numeric route, including
   backend contracts, compiler and artifact identities, and the target
   device. Callers that only need the three policy flags can continue to

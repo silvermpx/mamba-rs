@@ -14,6 +14,7 @@ fn digest(seed: u8) -> [u8; 32] {
 
 fn compile_material() -> CompileKeyMaterial {
     CompileKeyMaterial {
+        module_kind: ModuleKind::Fixed,
         source: b"source".to_vec(),
         target: b"sm_89".to_vec(),
         argv: vec![
@@ -30,6 +31,17 @@ fn compile_material() -> CompileKeyMaterial {
         numeric_abi_revision: 1,
         schedule_revision: 1,
     }
+}
+
+#[test]
+fn module_kind_discriminants_are_stable() {
+    assert_eq!(ModuleKind::Fixed as u8, 1);
+    assert_eq!(ModuleKind::TriadScalar as u8, 2);
+    assert_eq!(ModuleKind::TriadSm80 as u8, 3);
+    assert_eq!(ModuleKind::TriadSm90a as u8, 4);
+    assert_eq!(ModuleKind::TriadSm100 as u8, 5);
+    assert_eq!(ModuleKind::TriadSm120 as u8, 6);
+    assert_eq!(ModuleKind::Mamba3Combined as u8, 7);
 }
 
 #[test]
@@ -63,8 +75,12 @@ fn framed_sha256_has_unambiguous_boundaries() {
 fn compile_key_covers_every_invocation_field() {
     let base = compile_material();
     let expected = base.digest().expect("complete key material");
+    let expected_invocation = base.invocation_digest();
     let mut mutations = Vec::new();
 
+    let mut value = base.clone();
+    value.module_kind = ModuleKind::TriadScalar;
+    mutations.push(value);
     let mut value = base.clone();
     value.source.push(b'!');
     mutations.push(value);
@@ -107,6 +123,7 @@ fn compile_key_covers_every_invocation_field() {
 
     for mutation in mutations {
         assert_ne!(mutation.digest().unwrap(), expected);
+        assert_ne!(mutation.invocation_digest(), expected_invocation);
     }
     let mut incomplete = base;
     incomplete.header_manifest = None;
@@ -195,12 +212,32 @@ fn artifact(kind: ModuleKind, seed: u8) -> ArtifactIdentity {
 
 #[test]
 fn artifact_set_is_ordered_and_rejects_duplicate_module_kinds() {
-    let legacy = artifact(ModuleKind::LegacyCombined, 1);
+    let fixed = artifact(ModuleKind::Fixed, 1);
     let scalar = artifact(ModuleKind::TriadScalar, 3);
-    let first = build_artifact_set(&[legacy, scalar]).unwrap();
-    let second = build_artifact_set(&[scalar, legacy]).unwrap();
-    assert_ne!(first.ordered_digest, second.ordered_digest);
-    assert!(build_artifact_set(&[legacy, legacy]).is_err());
+    let sm80 = artifact(ModuleKind::TriadSm80, 5);
+    let first = build_artifact_set(&[fixed, scalar, sm80]).unwrap();
+    assert_eq!(first.module_count, 3);
+    assert_eq!(first.fixed, fixed);
+    assert_eq!(first.triad_scalar, scalar);
+    assert_eq!(first.triad_sm80, sm80);
+    assert_eq!(first.specialized, None);
+    assert!(build_artifact_set(&[scalar, fixed, sm80]).is_err());
+    assert!(build_artifact_set(&[fixed, scalar]).is_err());
+    assert!(build_artifact_set(&[fixed, fixed]).is_err());
+    let sm90a = artifact(ModuleKind::TriadSm90a, 7);
+    let specialized = build_artifact_set(&[fixed, scalar, sm80, sm90a]).unwrap();
+    assert_eq!(specialized.module_count, 4);
+    assert_eq!(specialized.specialized, Some(sm90a));
+    assert!(
+        build_artifact_set(&[
+            fixed,
+            scalar,
+            sm80,
+            sm90a,
+            artifact(ModuleKind::TriadSm100, 9),
+        ])
+        .is_err()
+    );
 }
 
 #[test]
@@ -260,7 +297,12 @@ fn route() -> GemmRouteIdentity {
         numeric_abi_revision: 1,
         schedule_revision: 1,
     };
-    let artifacts = build_artifact_set(&[artifact(ModuleKind::LegacyCombined, 5)]).unwrap();
+    let artifacts = build_artifact_set(&[
+        artifact(ModuleKind::Fixed, 5),
+        artifact(ModuleKind::TriadScalar, 7),
+        artifact(ModuleKind::TriadSm80, 9),
+    ])
+    .unwrap();
     GemmRouteIdentity {
         policy: GemmPolicy {
             batch_invariant: true,
@@ -358,16 +400,43 @@ fn route_guard_rejects_every_policy_artifact_and_device_field() {
     value.artifacts.ordered_digest[0] ^= 1;
     changed.push(value);
     let mut value = captured;
-    value.artifacts.legacy_combined.module_kind = ModuleKind::TriadScalar;
+    value.artifacts.fixed.module_kind = ModuleKind::TriadScalar;
     changed.push(value);
     let mut value = captured;
-    value.artifacts.legacy_combined.artifact_kind = ArtifactKind::Cubin;
+    value.artifacts.fixed.artifact_kind = ArtifactKind::Cubin;
     changed.push(value);
     let mut value = captured;
-    value.artifacts.legacy_combined.compile_key[0] ^= 1;
+    value.artifacts.fixed.compile_key[0] ^= 1;
     changed.push(value);
     let mut value = captured;
-    value.artifacts.legacy_combined.artifact_digest[0] ^= 1;
+    value.artifacts.fixed.artifact_digest[0] ^= 1;
+    changed.push(value);
+    let mut value = captured;
+    value.artifacts.triad_scalar.module_kind = ModuleKind::TriadSm80;
+    changed.push(value);
+    let mut value = captured;
+    value.artifacts.triad_scalar.artifact_kind = ArtifactKind::Cubin;
+    changed.push(value);
+    let mut value = captured;
+    value.artifacts.triad_scalar.compile_key[0] ^= 1;
+    changed.push(value);
+    let mut value = captured;
+    value.artifacts.triad_scalar.artifact_digest[0] ^= 1;
+    changed.push(value);
+    let mut value = captured;
+    value.artifacts.triad_sm80.module_kind = ModuleKind::TriadScalar;
+    changed.push(value);
+    let mut value = captured;
+    value.artifacts.triad_sm80.artifact_kind = ArtifactKind::Cubin;
+    changed.push(value);
+    let mut value = captured;
+    value.artifacts.triad_sm80.compile_key[0] ^= 1;
+    changed.push(value);
+    let mut value = captured;
+    value.artifacts.triad_sm80.artifact_digest[0] ^= 1;
+    changed.push(value);
+    let mut value = captured;
+    value.artifacts.specialized = Some(artifact(ModuleKind::TriadSm90a, 11));
     changed.push(value);
     let mut value = captured;
     value.policy_revision += 1;

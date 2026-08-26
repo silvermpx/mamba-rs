@@ -27,7 +27,7 @@ Pure Rust + CUDA. Kernels compile at runtime via NVRTC.
   engine, prefill and inference alike — follows it.
 - **Two batch-invariant families, selectable** — `ctx.set_bi_gemm_family()`
   / `MAMBA_RS_BI_GEMM_FAMILY=triad|fixed` picks which family serves the
-  forward while the flag above is on. `Triad` (`kernels/gemm_bi_triad.cu`,
+  forward while the flag above is on. `Triad` (`kernels/gemm_bi_triad/`,
   default) is the multi-tile dispatcher: it carries all three operand
   layouts, so it is the only family that can serve a backward, and its
   invariance holds across every M inside one dispatch bucket. `Fixed`
@@ -347,7 +347,7 @@ ctx.set_batch_invariant(true);                       // deterministic forward
 ctx.set_bi_gemm_family(BiGemmFamily::Fixed);         // or ::Triad (default)
 ```
 
-| | `Triad` (`gemm_bi_triad.cu`) | `Fixed` (`gemm_bi_fixed.cu`) |
+| | `Triad` (`gemm_bi_triad/`) | `Fixed` (`gemm_bi_fixed.cu`) |
 |---|---|---|
 | layouts | NN + TN + NT | NN only |
 | invariance | across M inside one dispatch bucket | by construction, no buckets |
