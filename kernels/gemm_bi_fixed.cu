@@ -43,7 +43,10 @@
 // Launch (unchanged — host dispatcher in src/mamba_ssm/gpu/blas.rs):
 //   grid  = ((M/BLOCK_M) * (N/BLOCK_N), 1, 1)  flat — swizzled in-kernel
 //   block = (256, 1, 1)
-//   smem  = (BLOCK_M*BLOCK_K + BLOCK_K*BLOCK_N) * sizeof(T_IO) = 8 KB
+//   smem  = 0 dynamic (all buffers are static __shared__; the TC tile
+//           holds 24 KB static - smem_a 4K + smem_b 4K + smem_acc 16K -
+//           and the f32 FFMA tile 16 KB). The dynamic K-buffer belongs
+//           to matvec_bi_* alone.
 
 #include "_typed_prelude.cuh"
 #include <mma.h>
@@ -529,3 +532,23 @@ DEFINE_MATVEC_BI(matvec_bi_f16_f16,   __half,        __half,        from_f_f16)
 DEFINE_MATVEC_BI(matvec_bi_bf16_f32,  __nv_bfloat16, float,         from_f_f32)
 DEFINE_MATVEC_BI(matvec_bi_f16_f32,   __half,        float,         from_f_f32)
 DEFINE_MATVEC_BI(matvec_bi_f32_f32,   float,         float,         from_f_f32)
+
+// Ambient-define hygiene: this file is concatenated BEFORE gemm_bi_triad.cu
+// in the single NVRTC blob (kernels.rs). Leaking tile macros downstream is
+// the 0.4.0 incident class (typed Big kernels compiled with Slim constants,
+// never launched, every test green). Undefine everything tile-local.
+#undef BLOCK_M
+#undef BLOCK_N
+#undef BLOCK_K
+#undef GROUP_M
+#undef THREADS
+#undef WARPS_PER_CTA
+#undef WARPS_M
+#undef WARPS_N
+#undef FRAG_M
+#undef FRAG_N
+#undef FRAG_K
+#undef WARP_FRAGS_N
+#undef BLOCK_N_MV
+#undef WARPS_PER_BLOCK
+#undef THREADS_PER_BLOCK

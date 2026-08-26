@@ -112,19 +112,19 @@ GEMM. With the TC tier on, none of this is on the bf16/f16 hot path.
 
 ```sh
 # training step, all 3 dtypes × {cuBLAS, scalar bi, +TC}:
-cargo test --features cuda --release --test sgemm_bi_determinism \
+cargo test --features cuda --release --test gemm_bi_determinism \
   bench_sgemm_bi_vs_tf32 -- --ignored --nocapture --test-threads=1
 
 # TC vs scalar at GEMM level (fwd/dW/dX):
-cargo test --features cuda --release --test sgemm_bi_tc \
+cargo test --features cuda --release --test gemm_bi_tc \
   bench_tc_vs_scalar_paths -- --ignored --nocapture --test-threads=1
 
 # Tile64 vs Tile128 on small/narrow shapes:
-cargo test --features cuda --release --test sgemm_bi_tc \
+cargo test --features cuda --release --test gemm_bi_tc \
   bench_tc64_vs_tc128_small_shapes -- --ignored --nocapture --test-threads=1
 
 # typed upcast-fallback tax:
-cargo test --features cuda --release --test sgemm_bi_typed_parity \
+cargo test --features cuda --release --test gemm_bi_typed_parity \
   bench_upcast_fallback_tax -- --ignored --nocapture --test-threads=1
 ```
 

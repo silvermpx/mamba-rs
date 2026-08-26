@@ -62,10 +62,12 @@ mod hf {
     }
 
     pub fn find_model_dir(name: &str) -> Option<PathBuf> {
-        for base in [
-            "/root/.cache/huggingface/hub",
-            "/home/silvermpx/.cache/huggingface/hub",
-        ] {
+        // HOME-derived first; literal fallbacks kept for the known boxes.
+        let home_hub = format!(
+            "{}/.cache/huggingface/hub",
+            std::env::var("HOME").unwrap_or_default()
+        );
+        for base in [home_hub.as_str(), "/root/.cache/huggingface/hub"] {
             let cache = std::path::Path::new(base);
             if !cache.exists() {
                 continue;

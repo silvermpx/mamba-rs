@@ -48,22 +48,27 @@ fn probe_one(m: usize, k: usize, n: usize) {
 }
 
 #[test]
+#[ignore = "needs a CUDA device"]
 fn bi_matvec_k20() {
     probe_one(4, 20, 32);
 }
 #[test]
+#[ignore = "needs a CUDA device"]
 fn bi_matvec_k200() {
     probe_one(4, 200, 32);
 }
 #[test]
+#[ignore = "needs a CUDA device"]
 fn bi_matvec_k192() {
     probe_one(4, 192, 32);
 }
 #[test]
+#[ignore = "needs a CUDA device"]
 fn bi_matvec_k64() {
     probe_one(4, 64, 32);
 }
 #[test]
+#[ignore = "needs a CUDA device"]
 fn bi_matvec_k768() {
     probe_one(4, 768, 32);
 }

@@ -33,8 +33,14 @@ use mamba_rs::module::sample::SampleParams;
 
 fn find_model_dir(name: &str) -> Option<PathBuf> {
     for base in [
+        // HOME-derived first; literal fallbacks kept for the known boxes.
+        &format!(
+            "{}/.cache/huggingface/hub",
+            std::env::var("HF_HOME_PARENT")
+                .or_else(|_| std::env::var("HOME"))
+                .unwrap_or_default()
+        ),
         "/root/.cache/huggingface/hub",
-        "/home/silvermpx/.cache/huggingface/hub",
     ] {
         let cache = std::path::Path::new(base);
         if !cache.exists() {

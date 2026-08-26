@@ -78,7 +78,10 @@ fn prism_shapes_cublas_vs_sgemm_bi_vs_gemm_bi() {
             };
 
             println!("{label}  M={m} ({pages} page(s))");
-            let (us_cublas, y_cublas) = timed("cuBLAS", false, BiGemmFamily::Triad);
+            let (us_cublas, y_cublas) = timed("cuBLAS-TF32", false, BiGemmFamily::Triad);
+            ctx.disable_tf32();
+            let (us_cublas_f32, _y_cublas_f32) = timed("cuBLAS-f32", false, BiGemmFamily::Triad);
+            let _ = us_cublas_f32;
             let (us_triad, y_triad) = timed("bi:triad", true, BiGemmFamily::Triad);
             let (us_fixed, y_fixed) = timed("bi:fixed", true, BiGemmFamily::Fixed);
             ctx.set_batch_invariant(false);
