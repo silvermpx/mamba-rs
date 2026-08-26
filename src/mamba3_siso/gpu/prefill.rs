@@ -43,10 +43,6 @@ pub struct Mamba3PrefillChunkScratch {
     k_scaled: GpuBuffer, // [B*T*nh*ds]
     /// Per-step qk_dot lane (chunk preprocess output).
     qk_dot: GpuBuffer, // [B*T*nh]
-    /// Per-step scale lane (chunk preprocess output).
-    scale: GpuBuffer, // [B*T*nh]
-    /// Per-step gamma lane (chunk preprocess output).
-    gamma_pre: GpuBuffer, // [B*T*nh]
     /// Intra-chunk cumulative decay.
     da_cumsum: GpuBuffer, // [B*n_chunks*nh*chunk_size]
     /// Chunk contributions, then (in-place) entering states per chunk.
@@ -75,8 +71,6 @@ impl Mamba3PrefillChunkScratch {
             d_alpha: GpuBuffer::zeros(stream, bt * nh)?,
             k_scaled: GpuBuffer::zeros(stream, bt * nh * ds)?,
             qk_dot: GpuBuffer::zeros(stream, bt * nh)?,
-            scale: GpuBuffer::zeros(stream, bt * nh)?,
-            gamma_pre: GpuBuffer::zeros(stream, bt * nh)?,
             da_cumsum: GpuBuffer::zeros(stream, dims.batch * nc * nh * cs)?,
             chunk_states: GpuBuffer::zeros(stream, dims.batch * nc * nh * hd * ds)?,
             final_states: GpuBuffer::zeros(stream, dims.batch * nh * hd * ds)?,
@@ -455,10 +449,10 @@ impl Mamba3Prefill {
                 let na_i = na as i32;
                 let db = lw.dt_bias;
                 if let Some(ts) = typed.as_deref_mut() {
-                    let z = ts.z.cached_ptr();
+                    let z: CUptr = 0;
                     let x = ts.x.cached_ptr();
-                    let br = ts.b_raw.cached_ptr();
-                    let cr = ts.c_raw.cached_ptr();
+                    let br: CUptr = 0;
+                    let cr: CUptr = 0;
                     let proj = ts.proj_flat.cached_ptr();
                     let mut b = ctx.stream.launch_builder(m3k.m3_split_typed.get(dtype));
                     b.arg(&z);
@@ -521,8 +515,11 @@ impl Mamba3Prefill {
                 let eps: f32 = dims.rms_norm_eps;
                 let bn = ts.b_normed.cached_ptr();
                 let cn = ts.c_normed.cached_ptr();
-                let br = ts.b_raw.cached_ptr();
-                let cr = ts.c_raw.cached_ptr();
+                // B and C live inside the projection at fixed column
+                // offsets - read them in place instead of copying.
+                let elt = dtype.size_bytes() as u64;
+                let br = ts.proj_flat.cached_ptr() + (2 * di) as u64 * elt;
+                let cr = ts.proj_flat.cached_ptr() + (2 * di + ng * ds) as u64 * elt;
                 let bnw = lw.b_norm_weight;
                 let cnw = lw.c_norm_weight;
                 let mut b = ctx
@@ -540,6 +537,8 @@ impl Mamba3Prefill {
                 b.arg(&ng_i);
                 b.arg(&ds_i);
                 b.arg(&eps);
+                let src_stride = ip as i32;
+                b.arg(&src_stride);
                 unsafe { b.launch(cfg) }
                     .map_err(|e| format!("prefill bcnorm typed L{l}: {e:?}"))?;
             } else {
@@ -1007,7 +1006,9 @@ impl Mamba3Prefill {
                 if let Some(ts) = typed.as_deref_mut() {
                     let g = ts.gated.cached_ptr();
                     let y = ts.y.cached_ptr();
-                    let z = ts.z.cached_ptr();
+                    // z is the projection's first column block - read it
+                    // in place with the projection's row stride.
+                    let z = ts.proj_flat.cached_ptr();
                     let mut b = ctx
                         .stream
                         .launch_builder(m3k.rmsnorm_gated_fwd_typed.get(dtype));
@@ -1020,6 +1021,8 @@ impl Mamba3Prefill {
                     b.arg(&di_i);
                     b.arg(&hd_i);
                     b.arg(&eps);
+                    let z_stride = ip as i32;
+                    b.arg(&z_stride);
                     unsafe { b.launch(grid) }
                         .map_err(|e| format!("prefill gated typed L{l}: {e:?}"))?;
                 } else {
@@ -1039,7 +1042,7 @@ impl Mamba3Prefill {
                 let n = (bt * di) as i32;
                 let g = ts.gated.cached_ptr();
                 let y = ts.y.cached_ptr();
-                let z = ts.z.cached_ptr();
+                let z = ts.proj_flat.cached_ptr();
                 let mut b = ctx
                     .stream
                     .launch_builder(m3k.silu_gate_fwd_typed.get(dtype));
@@ -1047,6 +1050,10 @@ impl Mamba3Prefill {
                 b.arg(&y);
                 b.arg(&z);
                 b.arg(&n);
+                let di_i2 = di as i32;
+                let z_stride = ip as i32;
+                b.arg(&di_i2);
+                b.arg(&z_stride);
                 unsafe { b.launch(grid_1d(bt * di)) }
                     .map_err(|e| format!("prefill silu typed L{l}: {e:?}"))?;
             } else {

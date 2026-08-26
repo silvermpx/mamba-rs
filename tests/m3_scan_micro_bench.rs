@@ -391,6 +391,8 @@ fn coeff_chain_time_and_hash() {
         b.arg(&ng_i);
         b.arg(&ds_i);
         b.arg(&eps);
+        let src_stride = (ng * ds) as i32;
+        b.arg(&src_stride);
         unsafe { b.launch(cfg) }.unwrap();
     };
     let angle_out = std::cell::RefCell::new(GpuBuffer::zeros(st, bt * nh * na).unwrap());

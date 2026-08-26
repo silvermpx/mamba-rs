@@ -646,14 +646,9 @@ pub struct Mamba3PrefillTypedScratch {
     pub input_cast: crate::mamba_ssm::gpu::buffers::DtypedBuf, // [B*T*input_dim]
     pub post_norm: crate::mamba_ssm::gpu::buffers::DtypedBuf, // [B*T*d_model]
     pub proj_flat: crate::mamba_ssm::gpu::buffers::DtypedBuf, // [B*T*in_proj_dim]
-    pub z: crate::mamba_ssm::gpu::buffers::DtypedBuf,         // [B*T*d_inner]
     pub x: crate::mamba_ssm::gpu::buffers::DtypedBuf,         // [B*T*d_inner]
-    pub b_raw: crate::mamba_ssm::gpu::buffers::DtypedBuf,     // [B*T*ng*ds]
-    pub c_raw: crate::mamba_ssm::gpu::buffers::DtypedBuf,     // [B*T*ng*ds]
     pub b_normed: crate::mamba_ssm::gpu::buffers::DtypedBuf,  // [B*T*ng*ds]
     pub c_normed: crate::mamba_ssm::gpu::buffers::DtypedBuf,  // [B*T*ng*ds]
-    pub b_biased: crate::mamba_ssm::gpu::buffers::DtypedBuf,  // [B*T*nh*ds]
-    pub c_biased: crate::mamba_ssm::gpu::buffers::DtypedBuf,  // [B*T*nh*ds]
     pub k: crate::mamba_ssm::gpu::buffers::DtypedBuf,         // [B*T*nh*ds]
     pub q: crate::mamba_ssm::gpu::buffers::DtypedBuf,         // [B*T*nh*ds]
     pub k_scaled: crate::mamba_ssm::gpu::buffers::DtypedBuf,  // [B*T*nh*ds]
@@ -681,14 +676,9 @@ impl Mamba3PrefillTypedScratch {
             input_cast: DtypedBuf::zeros(stream, bt * dims.mamba_input_dim, dtype)?,
             post_norm: DtypedBuf::zeros(stream, bt * dm, dtype)?,
             proj_flat: DtypedBuf::zeros(stream, bt * ip, dtype)?,
-            z: DtypedBuf::zeros(stream, bt * di, dtype)?,
             x: DtypedBuf::zeros(stream, bt * di, dtype)?,
-            b_raw: DtypedBuf::zeros(stream, bt * ng * ds, dtype)?,
-            c_raw: DtypedBuf::zeros(stream, bt * ng * ds, dtype)?,
             b_normed: DtypedBuf::zeros(stream, bt * ng * ds, dtype)?,
             c_normed: DtypedBuf::zeros(stream, bt * ng * ds, dtype)?,
-            b_biased: DtypedBuf::zeros(stream, bt * nh * ds, dtype)?,
-            c_biased: DtypedBuf::zeros(stream, bt * nh * ds, dtype)?,
             k: DtypedBuf::zeros(stream, bt * nh * ds, dtype)?,
             q: DtypedBuf::zeros(stream, bt * nh * ds, dtype)?,
             k_scaled: DtypedBuf::zeros(stream, bt * nh * ds, dtype)?,
