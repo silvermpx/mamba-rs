@@ -456,6 +456,11 @@ pub struct MambaKernels {
     /// never routes here until the rung is hardware-qualified - the
     /// forced census entry is its only caller).
     pub gemm_bi_nn_sm90_typed: Option<HalfKernel>,
+    /// The datacenter-Blackwell tcgen05 rung (compiled only for the CC
+    /// 10.x family targets; the dispatcher never routes here until the
+    /// rung is hardware-qualified - the forced census entry is its only
+    /// caller).
+    pub gemm_bi_nn_sm100_typed: Option<HalfKernel>,
     pub sgemm_tn_tc_typed: HalfKernel,
     pub sgemm_nt_tc_typed: HalfKernel,
     /// 64x64-tile TC twins (stage 5b): 128 threads / 4 warps per CTA,
@@ -597,6 +602,7 @@ impl MambaKernels {
             include_str!("../../../kernels/gemm_bi_fixed/matvec.cuh"),
             include_str!("../../../kernels/gemm_bi_fixed/mma16.cuh"),
             include_str!("../../../kernels/gemm_bi_fixed/sm90_wgmma.cuh"),
+            include_str!("../../../kernels/gemm_bi_fixed/sm100_tcgen05.cuh"),
             include_str!("../../../kernels/gemm_bi_triad.cu"),
         ];
 
@@ -1010,6 +1016,11 @@ impl MambaKernels {
             gemm_bi_nn_tc16_typed: load_half("gemm_bi_nn_tc16")?,
             gemm_bi_nn_sm90_typed: if arch == "sm_90a" {
                 Some(load_half_dynsmem("gemm_bi_nn_sm90a_wgmma_wg1", 49_152)?)
+            } else {
+                None
+            },
+            gemm_bi_nn_sm100_typed: if arch == "sm_100a" || arch == "sm_103a" {
+                Some(load_half_dynsmem("gemm_bi_nn_sm100_tcgen_c4", 65_536)?)
             } else {
                 None
             },
