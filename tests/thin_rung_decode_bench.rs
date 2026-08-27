@@ -1,4 +1,4 @@
-//! G3 measurement: the Thin16 rung against matvec_bi and Tile64 at
+//! The Thin16 rung against matvec_bi and Tile64 at
 //! decode shapes. The rung only earns its place if it beats matvec on
 //! the wall clock - the prediction (deep cp.async supplies the
 //! memory-level parallelism a register-capped scalar CTA cannot) is not
@@ -73,7 +73,7 @@ fn thin16_vs_matvec_decode() {
 
         // matvec_bi through the public typed route - the SCALAR tier
         // (this ctx never enables the TC tier), where m < 128 still
-        // routes to matvec after G4.
+        // routes to matvec.
         let mv = |c: &DtypedBuf| {
             gpu_gemm_typed_forward_raw(
                 &ctx,
