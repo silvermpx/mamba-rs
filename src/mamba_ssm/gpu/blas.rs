@@ -994,15 +994,15 @@ struct BiGemmArgs {
     k: i32,
 }
 
-// Retained for v0.4.0: the WMMA GEMM path is registered in MambaKernels
-// Reachable since 0.6.7 through gemm_bi_forward_raw (the Fixed family's
-// entry and the f32 dispatch arm).
+// The WMMA GEMM path stays registered in MambaKernels and is reachable
+// through gemm_bi_forward_raw (the Fixed family's entry and the f32
+// dispatch arm).
 fn launch_bi_gemm(
     ctx: &GpuCtx,
     kernel: &cudarc::driver::CudaFunction,
     args: BiGemmArgs,
 ) -> Result<(), String> {
-    // MUST equal the kernel's own constants in kernels/gemm_bi_fixed.cu
+    // MUST equal the legacy kernel's constants in kernels/gemm_bi_fixed/
     // (both the TC and the f32 FFMA instantiations use the same 64x64
     // tile with 256 threads). A launch that disagrees fills part of the
     // tile and returns plausible garbage - measured: a 64-thread launch
@@ -1040,17 +1040,10 @@ fn launch_bi_gemm(
     Ok(())
 }
 
-/// Direct entry to the WMMA batch-invariant GEMM
-/// (`kernels/gemm_bi_fixed.cu`, `gemm_bi_*`): fixed 64x64x32 tile,
-/// SPLIT_K=1, f32 accumulators — batch-invariant BY CONSTRUCTION, with no
-/// dispatch buckets at all (unlike `sgemm_bi`, whose invariance holds
-/// within an M bucket). Forward-only NN, f32/bf16/f16.
-///
-/// Deliberately NOT on any default dispatch path (see the note in
-/// `gpu_gemm_typed_forward_raw`); this entry exists so the kernel can be
-/// BENCHMARKED and selected explicitly by a caller that wants the
-/// strongest invariance, rather than being reachable only through the
-/// compiler-liveness `let _ = pick_bi_gemm(..)`.
+/// Direct entry to the Fixed batch-invariant GEMM ladder
+/// (`kernels/gemm_bi_fixed/`, `gemm_bi_*`). Every rung uses `SPLIT_K=1`
+/// and preserves its architecture-specific bit family across scheduling
+/// choices. Forward-only NN, f32/bf16/f16.
 pub fn gemm_bi_forward_raw(
     ctx: &GpuCtx,
     c: TypedPtr,
@@ -1124,7 +1117,7 @@ fn launch_bi_matvec(
     args: BiGemmArgs,
     io_dtype: WeightDtype,
 ) -> Result<(), String> {
-    // Must match kernel constants in kernels/gemm_bi_fixed.cu:
+    // Must match kernel constants in kernels/gemm_bi_fixed/:
     //   BLOCK_N_MV = 32, WARPS_PER_BLOCK = 8, THREADS_PER_BLOCK = 256
     // Grid is 2D: (ceil(N / BLOCK_N_MV), M) — one CTA per (m_row, col_chunk).
     const BLOCK_N_MV: i32 = 32;
@@ -1176,9 +1169,9 @@ pub fn gpu_gemm_typed_forward_raw(
     //           and prefill workloads).
     //
     // The `gemm_bi_*` WMMA kernels are registered but not in the default
-    // path — they hit ~30% of cuBLAS throughput in their current form,
-    // pending the v0.4.0 persistent+cp.async+stream-K rewrite. Keep
-    // the reference alive for the compiler.
+    // path — they hit ~30% of cuBLAS throughput in this form; the
+    // fixed-tile family is the fast deterministic path. Keep the
+    // reference alive for the compiler.
     let _ = pick_bi_gemm(ctx, x.dtype, w.dtype, c.dtype);
 
     // The matvec kernel handles any M ≥ 1 via a 2D grid (CTA per

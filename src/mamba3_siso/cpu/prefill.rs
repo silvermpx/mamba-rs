@@ -7,7 +7,7 @@
 //! recurrent SSM/K/V/angle states carried in AND out so `mamba3_step`
 //! continues seamlessly (prefill-then-decode).
 //!
-//! Layout doctrine (the measured M1 lesson): the head-sequential F5 phase
+//! Layout doctrine: the head-sequential F5 phase
 //! reads ONLY head-major/channel-major buffers — `x_cm [di * T]` plus the
 //! head-scalar columns (`dd_a`/`dd_dt`/`trap` as `[nh * T]`) are pulled out
 //! of the interleaved `[T, in_proj_dim]` projection with cache-blocked

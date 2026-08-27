@@ -1,6 +1,6 @@
 //! The inference serve gate: absolute bit hashes + the headline ms/page
-//! at the production serve shape (single page, prism geometry). Before
-//! 0.6.4 every prefill test was RELATIVE (prefill vs training forward) —
+//! at the production serve shape (single vision-classifier page). A
+//! RELATIVE prefill test (prefill vs training forward) is not enough —
 //! a shared-kernel regression moved both sides and stayed green; these
 //! hashes are absolute, recorded once per good build.
 //!
@@ -24,9 +24,9 @@ use mamba_rs::mamba_ssm::gpu::prefill::{
 use mamba_rs::mamba_ssm::gpu::weights::GpuMambaWeights;
 use mamba_rs::weights::MambaWeights;
 
-/// Prism serve geometry. Mirrors wellwon_classify::patchify (T_TOTAL,
-/// INPUT_DIM) — printed in every stamp so a drift is visible at the
-/// consumer when the patchifier changes.
+/// Vision-classifier serve geometry (T_TOTAL, INPUT_DIM) — printed in
+/// every stamp so a drift is visible at the consumer when the upstream
+/// patchifier changes.
 const SERVE_T: usize = 4621;
 const SERVE_INPUT_DIM: usize = 1024;
 

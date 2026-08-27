@@ -36,11 +36,13 @@ fn fixed_blob() -> String {
         include_str!("../kernels/grad_clip.cu"),
         include_str!("../kernels/adamw.cu"),
         include_str!("../kernels/gemm_bi_fixed/common.cuh"),
-        include_str!("../kernels/gemm_bi_fixed/ffma.cuh"),
-        include_str!("../kernels/gemm_bi_fixed/wmma_legacy.cuh"),
-        include_str!("../kernels/gemm_bi_fixed/matvec.cuh"),
-        include_str!("../kernels/gemm_bi_fixed/mma16.cuh"),
-        include_str!("../kernels/gemm_bi_fixed/sm90_wgmma.cuh"),
+        include_str!("../kernels/gemm_bi_fixed/ffma.cu"),
+        include_str!("../kernels/gemm_bi_fixed/wmma_legacy.cu"),
+        include_str!("../kernels/gemm_bi_fixed/matvec.cu"),
+        include_str!("../kernels/gemm_bi_fixed/mma16.cu"),
+        include_str!("../kernels/gemm_bi_fixed/tcw64.cu"),
+        include_str!("../kernels/gemm_bi_fixed/sm90_wgmma.cu"),
+        include_str!("../kernels/gemm_bi_fixed/sm100_tcgen05.cu"),
     ])
 }
 
@@ -143,21 +145,59 @@ fn nvrtc_version() -> (i32, i32) {
     (major, minor)
 }
 
-fn ptxas() -> std::path::PathBuf {
+fn ptxas_path() -> Option<std::path::PathBuf> {
+    let mut candidates = Vec::new();
+    if let Ok(entries) = std::fs::read_dir("/usr/local") {
+        for entry in entries.flatten() {
+            let candidate = entry.path().join("bin/ptxas");
+            if candidate.is_file() {
+                candidates.push(candidate);
+            }
+        }
+    }
     for variable in ["CUDA_HOME", "CUDA_PATH", "CUDA_ROOT"] {
         if let Some(path) = std::env::var_os(variable) {
             let candidate = std::path::PathBuf::from(path).join("bin/ptxas");
             if candidate.is_file() {
-                return candidate;
+                candidates.push(candidate);
             }
         }
     }
-    let standard = std::path::PathBuf::from("/usr/local/cuda/bin/ptxas");
-    if standard.is_file() {
-        standard
-    } else {
-        "ptxas".into()
+    if let Ok(output) = std::process::Command::new("which").arg("ptxas").output() {
+        let candidate = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+        if !candidate.is_empty() {
+            candidates.push(candidate.into());
+        }
     }
+    let release = |path: &std::path::PathBuf| -> (u32, u32) {
+        let Ok(output) = std::process::Command::new(path).arg("--version").output() else {
+            return (0, 0);
+        };
+        let text = String::from_utf8_lossy(&output.stdout);
+        let Some(position) = text.find("release ") else {
+            return (0, 0);
+        };
+        let version: String = text[position + "release ".len()..]
+            .chars()
+            .take_while(|character| character.is_ascii_digit() || *character == '.')
+            .collect();
+        let mut components = version.split('.');
+        (
+            components
+                .next()
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(0),
+            components
+                .next()
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(0),
+        )
+    };
+    candidates.into_iter().max_by_key(release)
+}
+
+fn ptxas() -> std::path::PathBuf {
+    ptxas_path().unwrap_or_else(|| "ptxas".into())
 }
 
 fn assemble_sm100(ptx: &str, target: &str, checker: bool) -> std::process::Output {
@@ -250,33 +290,46 @@ fn assert_zero_local_resources(report: &str, target: &str) {
     }
 }
 
-fn compile_for(arch: &'static str) {
+fn compile_module_for(kind: &str, source: String, arch: &'static str) -> String {
     let group_m = if matches!(arch, "sm_80" | "sm_86" | "sm_87") {
         8
     } else {
         16
     };
-    for (kind, source) in [
+    let opts = cudarc::nvrtc::CompileOptions {
+        arch: Some(arch),
+        options: vec![
+            "--fmad=true".to_string(),
+            "--extra-device-vectorization".to_string(),
+            "-DNDEBUG".to_string(),
+            format!("-DSGB_GROUP_M={group_m}"),
+            "-DMAMBA_RS_STATE_CAP=256".to_string(),
+        ],
+        include_paths: mamba_rs::mamba_ssm::gpu::kernels::cuda_include_paths(),
+        ..Default::default()
+    };
+    match cudarc::nvrtc::compile_ptx_with_opts(source, opts) {
+        Ok(ptx) => ptx.to_src(),
+        Err(error) => panic!("{kind} kernel module does not compile for {arch}: {error}"),
+    }
+}
+
+fn module_sources() -> [(&'static str, String); 3] {
+    [
         ("Fixed", fixed_blob()),
         ("TriadScalar", scalar_blob()),
         ("TriadSm80", sm80_blob()),
-    ] {
-        let opts = cudarc::nvrtc::CompileOptions {
-            arch: Some(arch),
-            options: vec![
-                "--fmad=true".to_string(),
-                "--extra-device-vectorization".to_string(),
-                "-DNDEBUG".to_string(),
-                format!("-DSGB_GROUP_M={group_m}"),
-                "-DMAMBA_RS_STATE_CAP=256".to_string(),
-            ],
-            include_paths: mamba_rs::mamba_ssm::gpu::kernels::cuda_include_paths(),
-            ..Default::default()
-        };
-        if let Err(error) = cudarc::nvrtc::compile_ptx_with_opts(source, opts) {
-            panic!("{kind} kernel module does not compile for {arch}: {error}");
-        }
+    ]
+}
+
+fn compile_for(arch: &'static str) {
+    for (kind, source) in module_sources() {
+        compile_module_for(kind, source, arch);
     }
+}
+
+fn compile_fixed_for(arch: &'static str) -> String {
+    compile_module_for("Fixed", fixed_blob(), arch)
 }
 
 #[test]
@@ -347,8 +400,62 @@ fn compiles_for_sm100a() {
 }
 
 #[test]
-fn compiles_for_sm103() {
-    compile_for("sm_103");
+fn compiles_for_sm103a() {
+    compile_for("sm_103a");
+}
+
+#[test]
+fn family_targets_assemble_under_ptxas() {
+    let Some(ptxas) = ptxas_path() else {
+        println!("no ptxas on this box; assembly gate skipped (NVRTC gates still ran)");
+        return;
+    };
+    for arch in ["sm_89", "sm_90a", "sm_100a", "sm_103a", "sm_120"] {
+        for (kind, source) in module_sources() {
+            let ptx = compile_module_for(kind, source, arch);
+            let directory = tempfile::tempdir().expect("architecture-gate ptxas tempdir");
+            let input = directory.path().join(format!("{kind}-{arch}.ptx"));
+            let output = directory.path().join(format!("{kind}-{arch}.cubin"));
+            std::fs::write(&input, ptx).expect("write architecture-gate PTX");
+            let assembly = std::process::Command::new(&ptxas)
+                .arg(format!("-arch={arch}"))
+                .arg(&input)
+                .arg("-o")
+                .arg(&output)
+                .output()
+                .expect("run ptxas");
+            let stderr = String::from_utf8_lossy(&assembly.stderr);
+            if !assembly.status.success() && stderr.contains("Unsupported .version") {
+                println!(
+                    "ptxas predates the loaded NVRTC PTX version; assembly gate skipped ({})",
+                    stderr.lines().next().unwrap_or("")
+                );
+                return;
+            }
+            assert!(
+                assembly.status.success(),
+                "ptxas rejected the {kind} module for {arch}:\n{stderr}"
+            );
+        }
+    }
+}
+
+#[test]
+fn fixed_tcgen05_only_in_blackwell_family_ptx() {
+    for arch in ["sm_100a", "sm_103a"] {
+        let ptx = compile_fixed_for(arch);
+        assert!(
+            ptx.contains("tcgen05.mma") && ptx.contains("tcgen05.alloc"),
+            "{arch} Fixed PTX lost the tcgen05 rung"
+        );
+    }
+    for arch in ["sm_80", "sm_89", "sm_90a", "sm_120"] {
+        let ptx = compile_fixed_for(arch);
+        assert!(
+            !ptx.contains("tcgen05"),
+            "{arch} Fixed PTX must not contain tcgen05 instructions"
+        );
+    }
 }
 
 #[test]

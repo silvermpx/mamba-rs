@@ -623,7 +623,7 @@ DEFINE_CONV1D_BURNIN_BWD(f16,  __half,        from_f_f16)
 
 // ============================================================================
 // Tiled conv1d (S-conv phase): the burnin kernels above run ONE thread per
-// (b, d) with a T-long serial loop — 24 blocks at the campaign shape, 146
+// (b, d) with a T-long serial loop — 24 blocks at the production shape, 146
 // idle SMs. The window only reaches d_conv-1 = 3 steps back, so the t-range
 // tiles perfectly: tile 0 seeds from the carry-in state, tiles k>0 seed
 // their window from x_branch halo loads — the SAME values the serial walk

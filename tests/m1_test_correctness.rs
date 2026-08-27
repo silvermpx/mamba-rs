@@ -529,7 +529,7 @@ fn test_finite_diff_dt_proj_bias() {
         (analytical_grad - numerical_grad).abs()
     };
 
-    // 0.15 (2026-06-12, was 0.10): f32 central finite differences carry
+    // 0.15: f32 central finite differences carry
     // ~10% truncation+roundoff error on this loss surface, and platform
     // libm ULP spread (Windows ucrt exp/ln vs glibc/macOS) shifts the
     // numerical estimate across the old margin — Windows CI measured

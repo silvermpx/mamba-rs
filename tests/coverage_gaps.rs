@@ -1,4 +1,5 @@
-//! Coverage-gap closures identified in the v0.3.0 coverage audit.
+//! Coverage-gap closures: trainer paths the unit parity tests never
+//! exercised end-to-end.
 //!
 //! * `m1_trainer_parallel_scan_{f32,bf16,f16}` — M1 training through the full
 //!   `MambaTrainer` API with `ScanMode::Parallel` (T > 128). Previously only

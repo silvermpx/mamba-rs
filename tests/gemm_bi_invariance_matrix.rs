@@ -1,7 +1,6 @@
-//! S1 — THE cross-M bitwise invariance matrix (0.6.10 program, report
-//! §7.2 turned into a gate).
+//! The cross-M bitwise invariance matrix.
 //!
-//! The law under test (docs-to-be invariance contract, L2): the bits of
+//! The law under test: the bits of
 //! output row `r` depend only on `A[r, :]`, the whole `B` operand and the
 //! plan — never on `M`, never on `r`, never on which other rows shared
 //! the launch.
@@ -11,11 +10,11 @@
 //! derives the OBSERVED boundary set (the ladder values where the probe
 //! row's bits change) and asserts it against the declaration. A new
 //! M-keyed heuristic, a moved bucket edge, or a silently removed one all
-//! fail; removing a boundary legitimately (the G4 unification) requires
+//! fail; removing a boundary legitimately (a ladder unification) requires
 //! updating the contract row in the same commit.
 //!
 //! The typed route's M=128 matvec/TC break was the live defect the first
-//! recording of this suite encoded; the G4 ladder removed it from the TC
+//! recording of this suite encoded; the tile ladder removed it from the TC
 //! tier (that arm is Strict now), and the scalar tier's bucket table
 //! keeps the remaining edges pinned.
 //!
@@ -28,6 +27,8 @@
 //!     -- --ignored --nocapture --test-threads=1
 #![cfg(feature = "cuda")]
 
+mod common;
+
 use mamba_rs::mamba_ssm::gpu::blas::{
     TypedPtr, gemm_bi_forward_raw, gpu_gemm_typed_forward_raw, gpu_sgemm_forward_raw,
 };
@@ -38,7 +39,7 @@ use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
 
 /// The reduced M ladder: every entry sits on (or adjacent to) a known
 /// dispatch edge — matvec row-block 4, FRAG_M 16, ultra-thin 32, tile 64,
-/// THE typed break 128, slim-force 512, split-K cap 1024, the prism page.
+/// THE typed break 128, slim-force 512, split-K cap 1024, the serve page.
 const M_LADDER: &[usize] = &[
     1, 2, 4, 8, 15, 16, 17, 31, 32, 33, 63, 64, 65, 127, 128, 129, 511, 512, 513, 1023, 1024, 1025,
     2048, 4621,
@@ -100,6 +101,16 @@ fn observed_boundaries(launch: &mut LaunchFn<'_>, k: usize, n: usize) -> Vec<usi
 }
 
 fn assert_contract(family: &str, k: usize, n: usize, declared: Invariance, observed: &[usize]) {
+    common::evidence::record(
+        "gemm_bi_invariance_matrix",
+        family,
+        &format!("K{k}N{n}"),
+        &observed
+            .iter()
+            .map(|m| m.to_string())
+            .collect::<Vec<_>>()
+            .join(","),
+    );
     match declared {
         Invariance::Strict => assert!(
             observed.is_empty(),
@@ -215,6 +226,37 @@ fn ctx_new() -> (GpuDevice, GpuCtx) {
     (dev, ctx)
 }
 
+/// One bucketed contract row: (K, N, the first m of each new bucket).
+type ContractRow<'a> = (usize, usize, &'a [usize]);
+/// Bucketed contract tables keyed by architecture target.
+type ArchTables<'a> = [(&'a str, &'a [ContractRow<'a>])];
+
+/// Bucketed contract rows are per-architecture data: the split gates
+/// key on the frozen SM-count cell and on tile geometry, so an edge
+/// set observed on one arch is not a claim about another. A box whose
+/// arch has no recorded table skips loudly - record a table there
+/// before trusting the bucketed family on it. Strict declarations
+/// carry no table: "no boundary anywhere" is arch-independent and is
+/// asserted on every box.
+fn arch_rows<'a>(
+    dev: &GpuDevice,
+    tables: &'a ArchTables<'a>,
+    family: &str,
+) -> Option<&'a [ContractRow<'a>]> {
+    let arch = GpuDevice::nvrtc_arch(dev.compute_capability);
+    match tables.iter().find(|(a, _)| *a == arch) {
+        Some((_, rows)) => Some(rows),
+        None => {
+            println!(
+                "{family}: no bucketed contract recorded for {arch}; \
+                 run the boundary observer on this box and add its \
+                 table before trusting the family here"
+            );
+            None
+        }
+    }
+}
+
 const SHAPES: &[(usize, usize)] = &[
     (64, 64),
     (63, 128),
@@ -300,7 +342,7 @@ fn fixed_bf16_is_strictly_invariant() {
 }
 
 /// Triad family, f32: per-bucket invariance. The declaration is EXACT
-/// set equality per (K, N) with the observed dispatcher of 0.6.9 - the
+/// set equality per (K, N) with the current dispatcher - the
 /// honest documentation of a family whose buckets are keyed on M, N and
 /// K together (ultra-thin exit at 32; the split-K underfill saturation
 /// edges, whose position depends on the bucket's BM and on N; the fat-M
@@ -311,19 +353,25 @@ fn fixed_bf16_is_strictly_invariant() {
 #[test]
 #[ignore = "needs a CUDA device"]
 fn triad_f32_boundaries_match_the_declared_table() {
-    let (_dev, ctx) = ctx_new();
+    let (dev, ctx) = ctx_new();
     ctx.set_batch_invariant(true);
     ctx.set_bi_gemm_family(BiGemmFamily::Triad);
-    // (K, N) -> the first-m-of-a-new-bucket set observed on 0.6.9, sm_89.
-    const DECLARED: &[(usize, usize, &[usize])] = &[
-        (64, 64, &[32]),
-        (63, 128, &[32]),
-        (384, 384, &[32, 1025, 4621]),
-        (1024, 384, &[32, 1023, 1025, 2048]),
-        (384, 1928, &[32, 511]),
-        (768, 384, &[32, 1023, 1025, 2048]),
-    ];
-    for &(k, n, edges) in DECLARED {
+    // (K, N) -> the first-m-of-a-new-bucket set, one table per arch.
+    const DECLARED: &ArchTables<'static> = &[(
+        "sm_89",
+        &[
+            (64, 64, &[32]),
+            (63, 128, &[32]),
+            (384, 384, &[32, 1025, 4621]),
+            (1024, 384, &[32, 1023, 1025, 2048]),
+            (384, 1928, &[32, 511]),
+            (768, 384, &[32, 1023, 1025, 2048]),
+        ],
+    )];
+    let Some(rows) = arch_rows(&dev, DECLARED, "Triad/f32") else {
+        return;
+    };
+    for &(k, n, edges) in rows {
         let m_max = *M_LADDER.last().expect("ladder non-empty");
         let mut a_host = synth(m_max * k, 0xA5EED ^ (k * n) as u64);
         for (i, slot) in a_host[..k].iter_mut().enumerate() {
@@ -411,16 +459,22 @@ fn typed_route_tc_tier_boundaries_match_the_declared_table() {
 #[test]
 #[ignore = "needs a CUDA device"]
 fn typed_route_scalar_tier_boundaries_match_the_declared_table() {
-    let (_dev, ctx) = ctx_new();
+    let (dev, ctx) = ctx_new();
     ctx.set_batch_invariant(true);
     ctx.set_bi_gemm_family(BiGemmFamily::Triad);
-    // Declared per (K, N); recorded on ada (sm_89) under the 128-row
-    // prefix comparison. Re-record (do not hand-edit) on change.
-    let declared: &[(usize, usize, &[usize])] = &[
-        (384, 384, &[128usize, 1025, 4621] as &[usize]),
-        (768, 2304, &[128]),
-    ];
-    for &(k, n, edges) in declared {
+    // Declared per (K, N) under the 128-row prefix comparison, one
+    // table per arch. Re-record (do not hand-edit) on change.
+    const DECLARED: &ArchTables<'static> = &[(
+        "sm_89",
+        &[
+            (384, 384, &[128usize, 1025, 4621] as &[usize]),
+            (768, 2304, &[128]),
+        ],
+    )];
+    let Some(rows) = arch_rows(&dev, DECLARED, "Typed-scalar/bf16") else {
+        return;
+    };
+    for &(k, n, edges) in rows {
         let fx = TypedFixture::new(&ctx, k, n, WeightDtype::Bf16);
         let mut launch = |m: usize| -> Vec<u32> {
             gpu_gemm_typed_forward_raw(

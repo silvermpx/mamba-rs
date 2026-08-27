@@ -1,6 +1,5 @@
-//! Bit gate for the M1 parallel scan backward — the PRODUCTION fold
-//! kernel had zero per-kernel hash coverage before 0.6.4 (whole-trainer
-//! digests only). Record once on a good build; any later kernel edit that
+//! Bit gate for the M1 parallel scan backward — whole-trainer digests
+//! alone give the PRODUCTION fold kernel no per-kernel hash coverage. Record once on a good build; any later kernel edit that
 //! moves a bit shows up here in seconds, at the exact kernel.
 //!
 //!   cargo test --release --features cuda --test m1_scan_bwd_hash -- --ignored --nocapture

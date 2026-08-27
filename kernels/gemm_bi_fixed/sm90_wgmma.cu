@@ -5,11 +5,15 @@
 // ascending 64-wide slabs, each slab issued as four ascending
 // wgmma.mma_async.m64n128k16 steps into the same f32 accumulators. The
 // K-slab order, the tail zero-fill and the single RNE downcast at the
-// store mirror the sm_89 ladder's contract; whether the bits EQUAL the
-// mma.sync ladder on the same inputs is a hardware question (Hopper's
-// tensor core sums sixteen products per internal block where Ada sums
-// eight), answered by the forced-entry census on a real sm_90a part
-// before any dispatch cell may route here.
+// store mirror the sm_89 ladder's contract. Bias does NOT: it joins in
+// the epilogue (after alpha, before beta) rather than pre-seeding the
+// accumulators, because the first wgmma group then runs with
+// scale-d = 0 and ptxas stops serializing it against a register init
+// chain. This is the rung's own numeric contract either way: whether
+// its bits EQUAL the mma.sync ladder on the same inputs is a hardware
+// question (Hopper's tensor core sums sixteen products per internal
+// block where Ada sums eight), answered by the forced-entry census on
+// a real sm_90a part before any dispatch cell may route here.
 //
 // Operands stage through cp.async into shared memory laid out in the
 // 128-byte swizzle the wgmma descriptors declare: the 16-byte chunk at
@@ -80,13 +84,20 @@ sm90_desc(const void* smem_ptr, unsigned lbo16, unsigned sbo16) {
              _i += blockDim.x) {                                              \
             int _k = _i / (SM90_BN / 8);                                      \
             int _c = _i % (SM90_BN / 8);                                      \
+            /* B lives as two complete 64-column blocks 8192 bytes      */    \
+            /* apart - the layout the descriptor's leading offset       */    \
+            /* (512 x 16 B) and the ks*128 slab advance declare. A      */    \
+            /* row-interleaved stage here once contradicted them, which */    \
+            /* would have made the first hardware census read garbage.  */    \
+            int _h = _c >> 3;                                                 \
+            int _cc = _c & 7;                                                 \
             int _n = _c * 8;                                                  \
             int _gk = (bkIdx) + _k;                                           \
             int _gn = pid_n * SM90_BN + _n;                                   \
             int _valid = (_gk < K) ? (N - _gn) : 0;                           \
             int _bytes = _valid >= 8 ? 16 : (_valid > 0 ? _valid * 2 : 0);    \
-            unsigned _dst = _bs +                                             \
-                (unsigned)((_k * SM90_LDB + ((_c ^ (_k & 7)) * 8)) * 2);      \
+            unsigned _dst = _bs + (unsigned)(_h * 8192) +                     \
+                (unsigned)((_k * 64 + ((_cc ^ (_k & 7)) * 8)) * 2);           \
             const void* _src = (_bytes > 0)                                   \
                 ? (const void*)&B[(long long)_gk * ldb + _gn]                 \
                 : (const void*)B;                                             \
@@ -121,14 +132,16 @@ void gemm_bi_nn_sm90a_wgmma_wg1_##SUFFIX(                                     \
     int q = wg_tid & 3;                                                       \
     int row8 = (wg_tid >> 2) & 7;                                             \
     int warp = wg_tid >> 5;                                                   \
+    /* No accumulator pre-seed: the first wgmma group runs with          */   \
+    /* scale-d = 0, which zeroes D regardless of register contents and   */   \
+    /* frees ptxas from serializing the first group against an init      */   \
+    /* chain. Bias joins in the epilogue - after alpha, before beta -    */   \
+    /* which is this rung's own contract (the census decides its family  */   \
+    /* membership either way; Hopper's wider internal reduce already     */   \
+    /* makes bit-equality with the mma.sync ladder a hardware question). */   \
     _Pragma("unroll")                                                         \
     for (int r = 0; r < 64; r++) {                                            \
-        /* Bias pre-seed at the accumulator's output column, exactly    */    \
-        /* like the sm_89 ladder (alpha must be 1.0 with bias).         */    \
-        int pair = r & 1;                                                     \
-        int n_group = r >> 2;                                                 \
-        int col = pid_n * SM90_BN + 2 * q + pair + 8 * n_group;               \
-        acc[r] = (bias != nullptr && col < N) ? bias[col] : 0.0f;             \
+        acc[r] = 0.0f;                                                        \
     }                                                                         \
     int num_k_tiles = (K + SM90_BK - 1) / SM90_BK;                            \
     SM90_STAGE_ASYNC(0, 0);                                                   \
@@ -144,18 +157,30 @@ void gemm_bi_nn_sm90a_wgmma_wg1_##SUFFIX(                                     \
             As + rd * SM90_BM * SM90_LDA, 1, 64);                             \
         unsigned long long b_base = sm90_desc(                                \
             Bs + rd * SM90_BK * SM90_LDB, 512, 64);                           \
+        /* The next stage's copies are issued BEFORE this slab's wgmma  */    \
+        /* so they overlap it. WAR-safe: buffer (kt+1)&1 was consumed   */    \
+        /* by the wgmma of iteration kt-1, whose wait and barrier have  */    \
+        /* both passed.                                                 */    \
+        if (kt + 1 < num_k_tiles) {                                           \
+            SM90_STAGE_ASYNC((kt + 1) & (SM90_STAGES - 1),                    \
+                             (kt + 1) * SM90_BK);                             \
+        }                                                                     \
+        asm volatile("cp.async.commit_group;\n");                            \
         asm volatile("wgmma.fence.sync.aligned;\n");                          \
         _Pragma("unroll")                                                     \
         for (int ks = 0; ks < SM90_BK / 16; ks++) {                           \
             unsigned long long da = a_base + (unsigned long long)(ks * 2);    \
             unsigned long long db = b_base + (unsigned long long)(ks * 128);  \
+            unsigned scale_d = (kt == 0 && ks == 0) ? 0u : 1u;                \
             asm volatile(                                                     \
+                "{.reg .pred p;\n\t"                                          \
+                "setp.ne.b32 p, %66, 0;\n\t"                                  \
                 "wgmma.mma_async.sync.aligned.m64n128k16.f32." WG_T "." WG_T  \
                 " {%0,%1,%2,%3,%4,%5,%6,%7,%8,%9,%10,%11,%12,%13,%14,%15,"    \
                 "%16,%17,%18,%19,%20,%21,%22,%23,%24,%25,%26,%27,%28,%29,"    \
                 "%30,%31,%32,%33,%34,%35,%36,%37,%38,%39,%40,%41,%42,%43,"    \
                 "%44,%45,%46,%47,%48,%49,%50,%51,%52,%53,%54,%55,%56,%57,"    \
-                "%58,%59,%60,%61,%62,%63}, %64, %65, 1, 1, 1, 0, 1;\n"        \
+                "%58,%59,%60,%61,%62,%63}, %64, %65, p, 1, 1, 0, 1;}\n"       \
                 : "+f"(acc[0]), "+f"(acc[1]), "+f"(acc[2]), "+f"(acc[3]),     \
                   "+f"(acc[4]), "+f"(acc[5]), "+f"(acc[6]), "+f"(acc[7]),     \
                   "+f"(acc[8]), "+f"(acc[9]), "+f"(acc[10]), "+f"(acc[11]),   \
@@ -172,16 +197,11 @@ void gemm_bi_nn_sm90a_wgmma_wg1_##SUFFIX(                                     \
                   "+f"(acc[52]), "+f"(acc[53]), "+f"(acc[54]), "+f"(acc[55]), \
                   "+f"(acc[56]), "+f"(acc[57]), "+f"(acc[58]), "+f"(acc[59]), \
                   "+f"(acc[60]), "+f"(acc[61]), "+f"(acc[62]), "+f"(acc[63])  \
-                : "l"(da), "l"(db));                                          \
+                : "l"(da), "l"(db), "r"(scale_d));                            \
         }                                                                     \
         asm volatile("wgmma.commit_group.sync.aligned;\n");                   \
         asm volatile("wgmma.wait_group.sync.aligned 0;\n");                   \
         __syncthreads();                                                      \
-        if (kt + 1 < num_k_tiles) {                                           \
-            SM90_STAGE_ASYNC((kt + 1) & (SM90_STAGES - 1),                    \
-                             (kt + 1) * SM90_BK);                             \
-        }                                                                     \
-        asm volatile("cp.async.commit_group;\n");                            \
     }                                                                         \
     /* Epilogue: alpha through an explicit unfused multiply (target-  */      \
     /* independent bits), paired store on aligned even destinations,  */      \
@@ -195,6 +215,10 @@ void gemm_bi_nn_sm90a_wgmma_wg1_##SUFFIX(                                     \
         if (row >= M) continue;                                               \
         float v0 = __fmul_rn(alpha, acc[r]);                                  \
         float v1 = __fmul_rn(alpha, acc[r + 1]);                              \
+        if (bias != nullptr) {                                                \
+            if (col < N) v0 = __fadd_rn(v0, bias[col]);                       \
+            if (col + 1 < N) v1 = __fadd_rn(v1, bias[col + 1]);               \
+        }                                                                     \
         T_ACT* dst = (col < N) ? &C[(long long)row * ldc + col] : (T_ACT*)0;  \
         bool packed = beta == 0.0f && (ldc & 1) == 0 && col + 1 < N &&        \
                       ((reinterpret_cast<unsigned long long>(dst) & 3u)       \
@@ -207,7 +231,7 @@ void gemm_bi_nn_sm90a_wgmma_wg1_##SUFFIX(                                     \
                 if (gc >= N) continue;                                        \
                 float val = e ? v1 : v0;                                      \
                 if (beta != 0.0f)                                             \
-                    val += beta * to_f(C[(long long)row * ldc + gc]);         \
+                    val = __fmaf_rn(beta, to_f(C[(long long)row * ldc + gc]), val);         \
                 C[(long long)row * ldc + gc] = FROM_F(val);                   \
             }                                                                 \
         }                                                                     \

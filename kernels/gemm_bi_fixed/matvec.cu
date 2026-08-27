@@ -133,17 +133,17 @@ NAME(                                                                           
             float a2 = a23.x, a3 = a23.y;                                       \
             float a4 = a45.x, a5 = a45.y;                                       \
             float a6 = a67.x, a7 = a67.y;                                       \
-            /* __ldcs streaming loads bypass L1, leaving the cache to A   */  \
-            /* (reused across decode steps); B is read once per token and */  \
-            /* gains nothing from caching.                                */  \
-            float b0 = to_f(__ldcs(&b[(kk    ) * ldb + col]));                  \
-            float b1 = to_f(__ldcs(&b[(kk + 1) * ldb + col]));                  \
-            float b2 = to_f(__ldcs(&b[(kk + 2) * ldb + col]));                  \
-            float b3 = to_f(__ldcs(&b[(kk + 3) * ldb + col]));                  \
-            float b4 = to_f(__ldcs(&b[(kk + 4) * ldb + col]));                  \
-            float b5 = to_f(__ldcs(&b[(kk + 5) * ldb + col]));                  \
-            float b6 = to_f(__ldcs(&b[(kk + 6) * ldb + col]));                  \
-            float b7 = to_f(__ldcs(&b[(kk + 7) * ldb + col]));                  \
+            /* Plain cached loads: an evict-first hint here once looked   */  \
+            /* free at M = 1 and cost the reuse every M >= 2 row depends  */  \
+            /* on, since the grid re-reads B once per output row.         */  \
+            float b0 = to_f(b[(kk    ) * ldb + col]);                  \
+            float b1 = to_f(b[(kk + 1) * ldb + col]);                  \
+            float b2 = to_f(b[(kk + 2) * ldb + col]);                  \
+            float b3 = to_f(b[(kk + 3) * ldb + col]);                  \
+            float b4 = to_f(b[(kk + 4) * ldb + col]);                  \
+            float b5 = to_f(b[(kk + 5) * ldb + col]);                  \
+            float b6 = to_f(b[(kk + 6) * ldb + col]);                  \
+            float b7 = to_f(b[(kk + 7) * ldb + col]);                  \
             acc = fmaf(a0, b0, acc);                                            \
             acc = fmaf(a1, b1, acc);                                            \
             acc = fmaf(a2, b2, acc);                                            \
@@ -179,9 +179,12 @@ NAME(                                                                           
         float s0123 = s01 + s23;                                                \
         float s4567 = s45 + s67;                                                \
         float sum = s0123 + s4567;                                              \
-        float val = alpha * sum;                                                \
-        if (bias != nullptr) val += bias[col];                                  \
-        if (beta != 0.0f) val += beta * to_f(c_row[col]);                       \
+        /* Every step through an explicit intrinsic: bare mul/add    */\
+        /* chains here are contraction bait, and a per-target fma     */\
+        /* decision would make the epilogue bits arch-dependent.      */\
+        float val = __fmul_rn(alpha, sum);                                      \
+        if (bias != nullptr) val = __fadd_rn(val, bias[col]);                   \
+        if (beta != 0.0f) val = __fmaf_rn(beta, to_f(c_row[col]), val);         \
         c_row[col] = FROM_F_OUT(val);                                           \
     }                                                                           \
 }

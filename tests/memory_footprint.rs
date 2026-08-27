@@ -30,8 +30,8 @@ fn classifier_shape_memory_footprint() {
         d_state: 16,
         d_conv: 4,
         expand: 2,
-        // Auto = the production classifier route since the 2026-08-01
-        // scan audit (parallel at this T); footprint must match what ships.
+        // Auto = the production classifier route (parallel at this T);
+        // footprint must match what ships.
         scan_mode: mamba_rs::config::ScanMode::Auto,
         rms_norm_eps: 1e-5,
     };

@@ -13,11 +13,14 @@ keywords = ["mamba", "ssm", "deep-learning", "cuda", "state-space-model"]
 categories = ["science", "mathematics"]
 readme = "README.md"
 
-# docs.rs builds have no CUDA toolkit -- render the CPU-side API surface
-# (hf loaders, BLAS-backed GEMM, the CLI types). The cuda feature's docs
-# render locally; doc(cfg) badge plumbing is a planned follow-up.
+# docs.rs builds have no CUDA toolkit. An explicit cudarc version
+# feature skips its nvcc probe and uses pregenerated bindings, so the
+# whole CUDA surface - the determinism story included - renders there
+# instead of staying invisible behind the feature gate. The pinned
+# bindings version only shapes the docs build; runtime linking stays
+# dynamic and version-probed.
 [package.metadata.docs.rs]
-features = ["hf", "gemm-blas", "cli"]
+features = ["cuda", "hf", "gemm-blas", "cli", "cudarc/cuda-12080"]
 rustdoc-args = ["--cfg", "docsrs"]
 
 [[bin]]

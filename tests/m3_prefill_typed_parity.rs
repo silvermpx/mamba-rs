@@ -1,10 +1,9 @@
-//! The TYPED (bf16/f16) m3 prefill acceptance gate - the G8 lane of the
-//! 0.6.10 program.
+//! The TYPED (bf16/f16) m3 prefill acceptance gate.
 //!
 //! T1: the typed prefill's post-norm_f temporal must equal the MIXED
 //!     trainer forward's temporal BIT FOR BIT (the prefill mirrors
-//!     `forward_mixed` launch for launch; the prism checkpoint was
-//!     trained through that exact chain).
+//!     `forward_mixed` launch for launch; production classifier
+//!     checkpoints are trained through that exact chain).
 //! T2: the pooled column sum stays a pure-f32 ascending-t fold in the
 //!     typed lane too (a bf16 accumulator over thousands of rows would
 //!     saturate its mantissa - this pins the f32 colsum invariant).
@@ -126,7 +125,7 @@ impl StateSet {
 }
 
 /// T1 + T2 + T3, per typed dtype, with a NON-identity input projection
-/// (input_dim != d_model - the prism shape class; the typed prefill casts
+/// (input_dim != d_model - the classifier shape class; the typed prefill casts
 /// the input itself).
 #[test]
 fn typed_prefill_matches_mixed_trainer_forward() {
@@ -139,7 +138,7 @@ fn typed_prefill_matches_mixed_trainer_forward() {
         let input = det_input(seq_len * input_dim, 77);
 
         // MIXED trainer-forward reference temporal: the exact numeric
-        // chain the prism checkpoint was optimized against.
+        // chain a production classifier checkpoint trains through.
         let mut trainer = Mamba3Trainer::new_full(
             0,
             &w,
@@ -322,7 +321,7 @@ fn typed_pooled_graph_replay_and_container_guard() {
 
 /// L2 on the serve route: a page's pooled row is bit-identical alone
 /// (B=1) and inside a batch (B=2), under batch_invariant + tensor cores -
-/// the strict all-M contract the G4 ladder established.
+/// the strict all-M contract the tile ladder established.
 #[test]
 fn typed_pooled_batch_invariance_on_the_serve_route() {
     let dtype = WeightDtype::Bf16;

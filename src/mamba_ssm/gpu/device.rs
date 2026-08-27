@@ -84,7 +84,8 @@ impl GpuDevice {
             (8, 9) => "sm_89",
             (9, 0) => "sm_90a",
             (10, 0) => "sm_100a",
-            (10, 3) => "sm_103",
+            (10, 3) => "sm_103a",
+            (11, 0) => "sm_110",
             (12, 0) => "sm_120",
             (12, 1) => "sm_121",
             (major, _) if major > 12 => "compute_120",
@@ -223,7 +224,8 @@ mod tests {
             ((8, 9), "sm_89"),
             ((9, 0), "sm_90a"),
             ((10, 0), "sm_100a"),
-            ((10, 3), "sm_103"),
+            ((10, 3), "sm_103a"),
+            ((11, 0), "sm_110"),
             ((12, 0), "sm_120"),
             ((12, 1), "sm_121"),
         ];
@@ -268,7 +270,7 @@ mod tests {
 
     #[test]
     fn nvrtc_target_rejects_unknown_known_family_minor() {
-        for cc in [(8, 1), (9, 1), (10, 1), (12, 2)] {
+        for cc in [(8, 1), (9, 1), (10, 1), (11, 1), (12, 2)] {
             assert!(GpuDevice::resolve_nvrtc_target(cc).is_err());
         }
     }

@@ -95,8 +95,8 @@ fn m3_train_step_at_multichunk_shape() {
         is_outproj_norm: true,
         ..Mamba3Config::default()
     };
-    // Shape rides env so the CAMPAIGN shape is measurable without a
-    // recompile (same knobs as the M1 campaign arm).
+    // Shape rides env so the PRODUCTION shape is measurable without a
+    // recompile (same knobs as the M1 free-shape arm).
     let get = |k: &str, d: usize| -> usize {
         match std::env::var(k) {
             Err(_) => d,
@@ -169,8 +169,8 @@ fn m3_train_step_at_multichunk_shape() {
     }
 }
 
-/// The G8 page measurement: pooled-graph replay latency per page at the
-/// prism serve shape (non-identity 1024->384 input projection, T=4621),
+/// Page measurement: pooled-graph replay latency per page at the
+/// classifier serve shape (non-identity 1024->384 input projection, T=4621),
 /// across the three numeric routes that matter: today's deterministic
 /// f32 serve (Fixed family), the typed bf16 lane on the batch-invariant
 /// tensor-core ladder, and non-deterministic cuBLAS f32 as the speed

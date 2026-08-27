@@ -46,7 +46,6 @@ pub struct Mamba3Kernels {
     /// kernel on multi-chunk windows (its serial fp64 chain dominates
     /// the prefill profile at production shapes).
     pub m3_angle_chunk_sums: CudaFunction,
-    pub m3_angle_chunk_carries: CudaFunction,
     pub m3_angle_chunk_apply: CudaFunction,
     pub angle_dt_bwd: CudaFunction,
     pub m3_angle_dt_bwd_seq: CudaFunction,
@@ -462,7 +461,6 @@ impl Mamba3Kernels {
             m3_angle_dt_fwd_batch: get("m3_angle_dt_fwd_batch")?,
             m3_angle_dt_fwd_seq: get("m3_angle_dt_fwd_seq")?,
             m3_angle_chunk_sums: get("m3_angle_chunk_sums")?,
-            m3_angle_chunk_carries: get("m3_angle_chunk_carries")?,
             m3_angle_chunk_apply: get("m3_angle_chunk_apply")?,
             angle_dt_bwd: get("angle_dt_bwd")?,
             m3_angle_dt_bwd_seq: get("m3_angle_dt_bwd_seq")?,
@@ -753,7 +751,7 @@ pub fn chunk_fused_cfg(
     ds: usize,
     chunk_size: usize,
 ) -> Option<cudarc::driver::LaunchConfig> {
-    let smem_bytes = (chunk_size * ds + chunk_size * hd + chunk_size) * 4;
+    let smem_bytes = (chunk_size * (ds + 4) + chunk_size * hd + chunk_size) * 4;
     if !ds.is_multiple_of(4) || chunk_size > 1024 || smem_bytes > 48 * 1024 {
         return None;
     }
@@ -772,10 +770,12 @@ pub fn chunk_scan_cfg(
     ds: usize,
     chunk_size: usize,
 ) -> (bool, cudarc::driver::LaunchConfig) {
+    // q/k/ps rows are padded to ds + 4 floats to avoid bank conflicts.
+    // Keep this host formula in lockstep with the kernel's layout.
     let smem_floats = chunk_size * (chunk_size - 1) / 2
-        + 2 * chunk_size * ds
+        + 2 * chunk_size * (ds + 4)
         + chunk_size * hd
-        + hd * ds
+        + hd * (ds + 4)
         + 2 * chunk_size;
     let smem_bytes = smem_floats * std::mem::size_of::<f32>();
     if chunk_size <= 64 && smem_bytes <= 48 * 1024 {

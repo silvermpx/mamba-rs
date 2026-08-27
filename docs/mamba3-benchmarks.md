@@ -1,8 +1,8 @@
 # Mamba-3 SISO Benchmarks
 
 Hardware: Ada server — Intel Xeon Gold 5412U (48 threads) + NVIDIA RTX 6000 Ada
-Generation (48 GB), CUDA 13.2, Driver 595.45. CPU tables measured on
-mamba-rs 0.4.2; sections marked 0.6 measured on the 0.6 development tree.
+Generation (48 GB), CUDA 13.2, Driver 595.45. GPU training-step
+sections were measured on 2x RTX 5090 (CUDA 13.0) as marked.
 
 > **Note**: all numbers below are against synthetic weights via
 > `Mamba3Weights::init` — no public Mamba-3 SISO checkpoints exist yet
@@ -10,22 +10,22 @@ mamba-rs 0.4.2; sections marked 0.6 measured on the 0.6 development tree.
 > For end-to-end LLM inference benchmarks against production weights,
 > see [mamba1-benchmarks.md](mamba1-benchmarks.md).
 
-## Training step — campaign shape (0.6.4, rented 2x RTX 5090, CUDA 13.0)
+## Training step — production shape (2x RTX 5090, CUDA 13.0)
 
 d_model 384, 24 layers, B=8, T=1300, bf16, graph lane: 179.4 -> 165.2
-ms/step in the 0.6.4 pass. The chunk-scan forward now runs one head per
+ms/step in the latest optimization pass. The chunk-scan forward now runs one head per
 128-thread cooperative block with a triangle-packed decayed tile
 (replacing a 32-thread block behind 32 KB of static shared memory at
 5-6% occupancy), bias-add + RoPE fuse into one launch, and the
 per-layer residual round trip is gone - all bit-identical (the eleven
-gradient hash arms and every parity suite match 0.6.3). The Mamba-3
-serving surface (`run_full` + the pooled prefill graph) ships in 0.6.4;
-see the changelog.
+gradient hash arms and every parity suite match the prior release).
+The Mamba-3 serving surface is `run_full` plus the pooled prefill
+graph; see the changelog.
 
-## Training step — campaign shape (0.6.3, rented 2x RTX 5090, CUDA 13.0)
+## Training step — the prior optimization pass (2x RTX 5090, CUDA 13.0)
 
 d_model 384, 24 layers, B=8, T=1300, bf16, graph lane: 636 -> 179.4
-ms/step (-72%) across the 0.6.3 program. The dominant backward kernel
+ms/step (-72%) across that pass. The dominant backward kernel
 (m3_dqkv) went 11.4 -> 1.94 ms/launch via shared pair/decay matrices,
 t-split lane widening and the chunk-parallel backward decomposition
 (state terms + state passing + parallel chunks, mirroring the
@@ -178,7 +178,7 @@ cargo test --release --features "cuda hf" --test rl_llm_bench \
     rl_ -- --ignored --nocapture
 ```
 
-## Deterministic GEMM (0.6.8)
+## Deterministic GEMM
 
 Mamba-3 shares the deterministic GEMM layer with Mamba SSM on BOTH
 sides: the trainer forward/backward and the inference prefill all route

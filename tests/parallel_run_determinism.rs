@@ -174,11 +174,17 @@ fn print_run_digests() {
         let w = run_once(4, tier);
         let h = fnv1a_f32(&w);
         println!("DIGEST {tier:?}: {h:016x} ({} weights)", w.len());
+        common::evidence::record_digest(
+            "parallel_run_determinism",
+            "run_digests",
+            &format!("{tier:?}"),
+            h,
+        );
     }
 }
 
 /// Multi-chunk (T=1300 -> 2 chunks) run-to-run bit identity on the
-/// batch-invariant tier — the campaign shape's chunk count.
+/// batch-invariant tier — the production shape's chunk count.
 #[test]
 fn multichunk_run_to_run_bit_identical_bi() {
     let a = run_once_at(3, GemmTier::BatchInvariant, 1300);
@@ -206,6 +212,12 @@ fn print_run_digests_multichunk() {
             let w = run_once_at(3, tier, t);
             let h = fnv1a_f32(&w);
             println!("DIGEST-MC {label} {tier:?}: {h:016x} ({} weights)", w.len());
+            common::evidence::record_digest(
+                "parallel_run_determinism",
+                "run_digests_multichunk",
+                &format!("{label}.{tier:?}"),
+                h,
+            );
         }
     }
 }

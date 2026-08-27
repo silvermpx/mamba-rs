@@ -741,7 +741,9 @@ impl Mamba3TrainerMixed {
         );
 
         let device = GpuDevice::new(gpu_ordinal)?;
-        let ctx = GpuCtx::new(&device)?;
+        // Trainer entry point: the documented tier selection is the
+        // MAMBA_RS_* environment (the benches' contract).
+        let ctx = GpuCtx::new_from_env(&device)?;
         let arch = GpuDevice::nvrtc_arch(device.compute_capability);
         let m3k = Mamba3Kernels::compile_with_state_cap(
             device.context(),
@@ -1650,7 +1652,9 @@ impl Mamba3TrainerF32 {
             weight_decay,
         } = session;
         let device = GpuDevice::new(gpu_ordinal)?;
-        let ctx = GpuCtx::new(&device)?;
+        // Trainer entry point: the documented tier selection is the
+        // MAMBA_RS_* environment (the benches' contract).
+        let ctx = GpuCtx::new_from_env(&device)?;
         let arch = GpuDevice::nvrtc_arch(device.compute_capability);
         let m3k = Mamba3Kernels::compile_with_state_cap(
             device.context(),

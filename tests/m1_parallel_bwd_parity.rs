@@ -428,9 +428,9 @@ fn parity_three_chunks_postfix_regression_bf16() {
 }
 
 // ---------------------------------------------------------------------
-// Production-route parity: fold kernel + slim tape. The pre-0.6.4 file
-// drove only the ungrouped kernel with a handcrafted full tape — the
-// route the trainer never takes at campaign shapes. Here the parallel
+// Production-route parity: fold kernel + slim tape. Earlier versions of
+// this file drove only the ungrouped kernel with a handcrafted full
+// tape — a route the trainer never takes at production shapes. Here the parallel
 // forward produces the REAL h tape (full for the reference, slim for the
 // device replay), the fold backward consumes it, and the sequential
 // reference judges every output — dB/dC compared at the fold depth by
@@ -680,7 +680,7 @@ fn parity_fold_slim_f32() {
 }
 
 // Bisection arms for the multi-chunk f32 divergence: a single chunk
-// isolates the chunk-boundary replay, and T=1300 matches the campaign
+// isolates the chunk-boundary replay, and T=1300 matches the production
 // chunk count.
 #[test]
 fn parity_fold_slim_f32_single_chunk() {
@@ -693,7 +693,7 @@ fn parity_fold_fulltape_f32_single_chunk() {
 }
 
 #[test]
-fn parity_fold_slim_f32_campaign_chunks() {
+fn parity_fold_slim_f32_production_chunks() {
     check_fold_slim_parity(1, 1300, 4, 8, WeightDtype::F32);
 }
 

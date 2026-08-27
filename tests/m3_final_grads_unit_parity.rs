@@ -534,10 +534,10 @@ fn m3_dqktheta_f16() {
     check_dqktheta(WeightDtype::F16);
 }
 
-// ─── isolated campaign-shape bench ─────────────────────────────────────
+// ─── isolated production-shape bench ─────────────────────────────────────
 //
 // Times m3_dqkv (production tier ladder), m3_dqktheta and one
-// colsum_accumulate standalone at the campaign shape (B=8 T=1300
+// colsum_accumulate standalone at the production shape (B=8 T=1300
 // d_model 384 -> nh=48 hd=16 ds=16 CS=64) so the M3 kernel ledger stays
 // measurable without a profiler on the vast box.
 //
@@ -672,7 +672,7 @@ fn m3_kernels_isolated_bench() {
         unsafe { bld.launch(cfg) }.unwrap();
     });
 
-    // m3_dqkv bf16 typed (campaign dtype)
+    // m3_dqkv bf16 typed (production dtype)
     let q_t = upload_typed(&ctx, &det_rand(n_q, 0xA001), WeightDtype::Bf16);
     let ks_t = upload_typed(&ctx, &det_rand(n_q, 0xA002), WeightDtype::Bf16);
     let v_t = upload_typed(&ctx, &det_rand(n_v, 0xA003), WeightDtype::Bf16);
@@ -838,7 +838,7 @@ fn m3_kernels_isolated_bench() {
     });
 }
 
-// ─── m3_dqktheta output bit-hash (campaign shape) ─────────────────────
+// ─── m3_dqktheta output bit-hash (production shape) ─────────────────────
 //
 // Same role as m3_dqkv_output_hash: the bit gate for data-movement work
 // on m3_dqktheta (no run-digest instrument covers it).
@@ -953,9 +953,9 @@ fn m3_dqktheta_output_hash() {
     );
 }
 
-// ─── m3_dqkv output bit-hash (campaign shape) ──────────────────────────
+// ─── m3_dqkv output bit-hash (production shape) ──────────────────────────
 //
-// Prints an FNV-1a hash of every m3_dqkv output at the campaign shape on
+// Prints an FNV-1a hash of every m3_dqkv output at the production shape on
 // deterministic inputs. There is no M3 run-digest instrument, so this is
 // the bit gate for lane-redistribution work on this kernel: record the
 // hashes before a change, compare after.

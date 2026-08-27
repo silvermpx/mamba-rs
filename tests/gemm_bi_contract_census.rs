@@ -1,13 +1,13 @@
-//! G1 of the 0.6.10 program — the contract census.
+//! The WMMA / mma.sync arithmetic-contract census.
 //!
 //! Question 1: is the WMMA m16n16k16 tile (the Fixed family's bf16/f16
-//! path, `gemm_bi_fixed.cu`) bit-identical to the inline
+//! path, `kernels/gemm_bi_fixed/`) bit-identical to the inline
 //! `mma.sync.m16n8k16` K-slab (the triad's TC tier)? `wmma::mma_sync` on
 //! an m16n16k16 fragment lowers to a pair of m16n8k16 covering the full
 //! k=16, so per element the chain MAY already be the same ascending
 //! sequence — in which case retiring the WMMA path is golden-free.
 //!
-//! Census of 2026-08-26 (sm_89): bit-identical on EVERY shape, tails and
+//! Measured on sm_89: bit-identical on EVERY shape, tails and
 //! the 8.9M-element production shape included - pinned as an assertion.
 //! wmma::mma_sync on m16n16k16 lowers to the same ascending m16n8k16
 //! pair the TC tier issues explicitly; the two paths are one arithmetic
@@ -145,7 +145,7 @@ fn census_wmma_vs_mma_sync() {
         );
     }
     println!("CENSUS VERDICT: WMMA bit-identical to mma.sync on all shapes: {all_equal}");
-    // PINNED (census of 2026-08-26, sm_89): the two paths are ONE
+    // PINNED (measured on sm_89): the two paths are ONE
     // arithmetic contract - wmma::mma_sync on m16n16k16 lowers to the
     // same ascending m16n8k16 pair the TC tier issues explicitly, so per
     // element the reduction chain is identical. Retiring the WMMA macro

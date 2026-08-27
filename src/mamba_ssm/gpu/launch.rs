@@ -276,7 +276,7 @@ pub fn grid_parallel_scan_typed(
 
 /// Tiled conv1d grid: x covers (b * d_inner) threads at 256/block, y covers
 /// T in CONV1D_TILE_T=128 tiles. The serial per-(b,d) walk left 146 SMs
-/// idle at the campaign shape (24 blocks); tiling fills the machine while
+/// idle at the production shape (24 blocks); tiling fills the machine while
 /// every output element keeps the identical 4-tap arithmetic.
 /// Tile depth of `gather_bc_cols_tmajor_tiled` (must match GBC_TILE_T in
 /// elementwise.cu). One block per (t-tile, b); dynamic smem carries the

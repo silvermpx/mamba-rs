@@ -108,8 +108,8 @@ extern "C" __global__ void m3_preprocess_chunks(
     float scale_val = shifted_gamma + gamma_val;
 
     // Store scale and gamma
-    scale_out[th] = scale_val;
-    gamma_out[th] = gamma_val;
+    if (scale_out) scale_out[th] = scale_val;
+    if (gamma_out) gamma_out[th] = gamma_val;
 
     // Compute qk_dot = sum_n(Q[t,h,n] * K[t,h,n]) * gamma. Each thread
     // owns one contiguous (t, h) row; the wide path issues float4 loads
@@ -399,8 +399,9 @@ extern "C" __global__ void m3_chunk_pre_state_fused(
     int chunk_len = chunk_end - chunk_start;
 
     extern __shared__ float m3f_sm[];
-    float* sm_k = m3f_sm;                       // [chunk_size][ds]
-    float* sm_x = sm_k + chunk_size * ds;       // [chunk_size][hd]
+    int k_ld = ds + 4; /* padded rows - see the coop kernel's bank note */
+    float* sm_k = m3f_sm;                       // [chunk_size][k_ld]
+    float* sm_x = sm_k + chunk_size * k_ld;     // [chunk_size][hd]
     float* sm_da = sm_x + chunk_size * hd;      // [chunk_size]
 
     int tid = threadIdx.x;
@@ -422,15 +423,15 @@ extern "C" __global__ void m3_chunk_pre_state_fused(
             shifted_gamma = dt_next * (1.0f - trap_next);
         }
         float scale_val = shifted_gamma + gamma_val;
-        scale_out[th] = scale_val;
-        gamma_out[th] = gamma_val;
+        if (scale_out) scale_out[th] = scale_val;
+        if (gamma_out) gamma_out[th] = gamma_val;
         int kq_base = (b * T + t) * nh * ds + h * ds;
         float dot = 0.0f;
         if (ds % 4 == 0) {
             const float4* q4 = reinterpret_cast<const float4*>(Q + kq_base);
             const float4* k4 = reinterpret_cast<const float4*>(K + kq_base);
             float4* ks4 = reinterpret_cast<float4*>(K_scaled + kq_base);
-            float4* sk4 = reinterpret_cast<float4*>(sm_k + t_local * ds);
+            float4* sk4 = reinterpret_cast<float4*>(sm_k + t_local * k_ld);
             for (int n4 = 0; n4 < ds / 4; n4++) {
                 float4 qv = q4[n4];
                 float4 kv = k4[n4];
@@ -453,7 +454,7 @@ extern "C" __global__ void m3_chunk_pre_state_fused(
             for (int n = 0; n < ds; n++) {
                 float ks = K[kq_base + n] * scale_val;
                 K_scaled[kq_base + n] = ks;
-                sm_k[t_local * ds + n] = ks;
+                sm_k[t_local * k_ld + n] = ks;
             }
         }
         qk_dot[th] = dot * gamma_val;
@@ -479,7 +480,7 @@ extern "C" __global__ void m3_chunk_pre_state_fused(
         for (int t_local = 0; t_local < chunk_len; t_local++) {
             float decay = FAST_EXP(fminf(dA_end - sm_da[t_local], 0.0f));
             float v_t = sm_x[t_local * hd + p];
-            const float4* k4 = reinterpret_cast<const float4*>(sm_k + t_local * ds);
+            const float4* k4 = reinterpret_cast<const float4*>(sm_k + t_local * k_ld);
             float4 kv = k4[nq];
             acc0 += decay * kv.x * v_t;
             acc1 += decay * kv.y * v_t;
@@ -573,24 +574,43 @@ extern "C" __global__ void m3_state_passing_fwd(
     // entering state the scan seeds from it instead of zero.
     float state = init_states ? init_states[b * nh * dim + h * dim + pd] : 0.0f;
 
+    // The recurrence is serial in `state`, but the loads are not: each
+    // iteration issues the NEXT chunk's contribution and decay before
+    // touching the dependent chain, so the per-chunk memory latency
+    // pipelines behind the FMA chain instead of serializing on it. The
+    // arithmetic and its order are untouched. Every location read here
+    // is either read-only in this kernel or read strictly before this
+    // thread's own write to it, and threads never share locations, so
+    // the non-coherent load path is safe.
+    int state_idx = b * n_chunks * nh * dim + h * dim + pd;
+    int cs_idx = b * n_chunks * nh + h;
+    float contrib = __ldg(&states[state_idx]);
+    int chunk_end_0 = chunk_size > T ? T : chunk_size;
+    float decay = FAST_EXP(__ldg(&dA_cumsum[cs_idx * chunk_size + chunk_end_0 - 1]));
+
     for (int c = 0; c < n_chunks; c++) {
-        int state_idx = (b * n_chunks + c) * nh * dim + h * dim + pd;
-        float new_contribution = states[state_idx];
+        float next_contrib = 0.0f;
+        float next_decay = 0.0f;
+        if (c + 1 < n_chunks) {
+            next_contrib = __ldg(&states[state_idx + nh * dim]);
+            int chunk_start_n = (c + 1) * chunk_size;
+            int chunk_end_n = chunk_start_n + chunk_size;
+            if (chunk_end_n > T) chunk_end_n = T;
+            int last_elem_n = chunk_end_n - chunk_start_n - 1;
+            next_decay = FAST_EXP(
+                __ldg(&dA_cumsum[(cs_idx + nh) * chunk_size + last_elem_n]));
+        }
 
         // Write prev_state (state ENTERING this chunk) BEFORE updating
         states[state_idx] = state;
 
-        // dA at end of this chunk (handle partial last chunk)
-        int cs_idx = (b * n_chunks + c) * nh + h;
-        int chunk_start_c = c * chunk_size;
-        int chunk_end_c = chunk_start_c + chunk_size;
-        if (chunk_end_c > T) chunk_end_c = T;
-        int last_elem = chunk_end_c - chunk_start_c - 1;
-        float dA_end = dA_cumsum[cs_idx * chunk_size + last_elem];
-        float decay = FAST_EXP(dA_end);
-
         // Update: state after this chunk = decay * prev_state + chunk_contribution
-        state = decay * state + new_contribution;
+        state = decay * state + contrib;
+
+        contrib = next_contrib;
+        decay = next_decay;
+        state_idx += nh * dim;
+        cs_idx += nh;
     }
 
     // Store final state (state after all chunks)
@@ -826,12 +846,18 @@ extern "C" __global__ void m3_chunk_scan_fwd_coop(
     int state_head = ((b * n_chunks + chunk) * nh + h) * hd * ds;
 
     extern __shared__ float m3cs_sm[];
+    /* Rows padded to ds+4 floats (80 B, still 16-byte aligned): at
+     * ds = 16 an unpadded 64 B stride lands 8 consecutive lanes on the
+     * same 8 banks (a 4-way conflict on the hottest loop); 80 B walks
+     * all 32 banks. Address-only - the values and their order do not
+     * move. */
+    int qk_ld = ds + 4;
     float* sm_tri = m3cs_sm;
     float* sm_q   = sm_tri + chunk_size * (chunk_size - 1) / 2;
-    float* sm_k   = sm_q + chunk_size * ds;
-    float* sm_v   = sm_k + chunk_size * ds;
+    float* sm_k   = sm_q + chunk_size * qk_ld;
+    float* sm_v   = sm_k + chunk_size * qk_ld;
     float* sm_ps  = sm_v + chunk_size * hd;
-    float* sm_da  = sm_ps + hd * ds;
+    float* sm_da  = sm_ps + hd * qk_ld;
     float* sm_qkd = sm_da + chunk_size;
 
     int tid = threadIdx.x;
@@ -842,8 +868,8 @@ extern "C" __global__ void m3_chunk_scan_fwd_coop(
         int t_local = i / ds;
         int n = i % ds;
         int base = (b * T + chunk_start + t_local) * nh * ds + h * ds;
-        sm_q[t_local * ds + n] = Q[base + n];
-        sm_k[t_local * ds + n] = K_scaled[base + n];
+        sm_q[t_local * qk_ld + n] = Q[base + n];
+        sm_k[t_local * qk_ld + n] = K_scaled[base + n];
     }
     for (int i = tid; i < chunk_len * hd; i += nt) {
         int t_local = i / hd;
@@ -852,7 +878,7 @@ extern "C" __global__ void m3_chunk_scan_fwd_coop(
             x[(b * T + chunk_start + t_local) * d_inner + h * hd + pp];
     }
     for (int i = tid; i < hd * ds; i += nt) {
-        sm_ps[i] = prev_states[state_head + i];
+        sm_ps[(i / ds) * qk_ld + (i % ds)] = prev_states[state_head + i];
     }
     for (int i = tid; i < chunk_len; i += nt) {
         sm_da[i] = dA_cumsum[cs_base + i];
@@ -882,8 +908,8 @@ extern "C" __global__ void m3_chunk_scan_fwd_coop(
         float decay = FAST_EXP(fminf(sm_da[t_local] - sm_da[s_local], 0.0f));
         float qk_val = 0.0f;
         if (wide) {
-            const float4* q4 = reinterpret_cast<const float4*>(sm_q + t_local * ds);
-            const float4* k4 = reinterpret_cast<const float4*>(sm_k + s_local * ds);
+            const float4* q4 = reinterpret_cast<const float4*>(sm_q + t_local * qk_ld);
+            const float4* k4 = reinterpret_cast<const float4*>(sm_k + s_local * qk_ld);
             for (int n4 = 0; n4 < ds / 4; n4++) {
                 float4 qv = q4[n4];
                 float4 kv = k4[n4];
@@ -894,7 +920,7 @@ extern "C" __global__ void m3_chunk_scan_fwd_coop(
             }
         } else {
             for (int n = 0; n < ds; n++) {
-                qk_val += sm_q[t_local * ds + n] * sm_k[s_local * ds + n];
+                qk_val += sm_q[t_local * qk_ld + n] * sm_k[s_local * qk_ld + n];
             }
         }
         sm_tri[e] = decay * qk_val;
@@ -914,14 +940,14 @@ extern "C" __global__ void m3_chunk_scan_fwd_coop(
             int t_local = o / quads;
             int p0 = (o % quads) * 4;
             float state_decay = FAST_EXP(sm_da[t_local]);
-            const float4* q4 = reinterpret_cast<const float4*>(sm_q + t_local * ds);
+            const float4* q4 = reinterpret_cast<const float4*>(sm_q + t_local * qk_ld);
             float acc0 = 0.0f, acc1 = 0.0f, acc2 = 0.0f, acc3 = 0.0f;
             for (int n4 = 0; n4 < ds / 4; n4++) {
                 float4 qv = q4[n4];
-                const float4* ps0 = reinterpret_cast<const float4*>(sm_ps + (p0 + 0) * ds);
-                const float4* ps1 = reinterpret_cast<const float4*>(sm_ps + (p0 + 1) * ds);
-                const float4* ps2 = reinterpret_cast<const float4*>(sm_ps + (p0 + 2) * ds);
-                const float4* ps3 = reinterpret_cast<const float4*>(sm_ps + (p0 + 3) * ds);
+                const float4* ps0 = reinterpret_cast<const float4*>(sm_ps + (p0 + 0) * qk_ld);
+                const float4* ps1 = reinterpret_cast<const float4*>(sm_ps + (p0 + 1) * qk_ld);
+                const float4* ps2 = reinterpret_cast<const float4*>(sm_ps + (p0 + 2) * qk_ld);
+                const float4* ps3 = reinterpret_cast<const float4*>(sm_ps + (p0 + 3) * qk_ld);
                 float4 a = ps0[n4];
                 float4 bb = ps1[n4];
                 float4 c = ps2[n4];
@@ -962,7 +988,7 @@ extern "C" __global__ void m3_chunk_scan_fwd_coop(
             float y_off = 0.0f;
             float state_decay = FAST_EXP(sm_da[t_local]);
             for (int n = 0; n < ds; n++) {
-                y_off += sm_q[t_local * ds + n] * sm_ps[p * ds + n];
+                y_off += sm_q[t_local * qk_ld + n] * sm_ps[p * qk_ld + n];
             }
             y_off *= state_decay;
             float y_diag = 0.0f;
@@ -1956,8 +1982,8 @@ extern "C" __global__ void m3_final_grads(
 // are T_ACT in storage. All math + state remain f32 (BPTT states, dA_cumsum,
 // prev_states, ssm/k/v persistent state, DT/trap_sig/qk_dot/scale/gamma/D).
 //
-// The following kernels stay f32-only and are NOT typed (per validation
-// agents — O(T) compounding scan state mandates float for numerical safety):
+// The following kernels stay f32-only and are NOT typed: their O(T)
+// compounding scan state mandates float for numerical safety:
 //   - m3_dA_cumsum  (prefix-sum scan)
 //   - m3_state_passing_fwd  (inter-chunk prefix recurrence)
 // ============================================================================
@@ -1996,8 +2022,8 @@ m3_preprocess_chunks_##SUFFIX(                                                \
         shifted_gamma = dt_next * (1.0f - trap_next);                         \
     }                                                                         \
     float scale_val = shifted_gamma + gamma_val;                              \
-    scale_out[th] = scale_val;                                                \
-    gamma_out[th] = gamma_val;                                                \
+    if (scale_out) scale_out[th] = scale_val;                                 \
+    if (gamma_out) gamma_out[th] = gamma_val;                                 \
     int kq_base = (b * T + t) * nh * ds + h * ds;                             \
     float dot = 0.0f;                                                         \
     /* Wide path: one uint4 = 8 typed elements per load/store (the rows  */   \
@@ -2183,8 +2209,9 @@ extern "C" __global__ void m3_chunk_pre_state_fused_##SUFFIX(                 \
     if (chunk_end > T) chunk_end = T;                                         \
     int chunk_len = chunk_end - chunk_start;                                  \
     extern __shared__ float m3f_sm[];                                         \
+    int k_ld = ds + 4;                                                        \
     float* sm_k = m3f_sm;                                                     \
-    float* sm_x = sm_k + chunk_size * ds;                                     \
+    float* sm_x = sm_k + chunk_size * k_ld;                                   \
     float* sm_da = sm_x + chunk_size * hd;                                    \
     int tid = threadIdx.x;                                                    \
     int nt = blockDim.x;                                                      \
@@ -2202,8 +2229,8 @@ extern "C" __global__ void m3_chunk_pre_state_fused_##SUFFIX(                 \
             shifted_gamma = dt_next * (1.0f - trap_next);                     \
         }                                                                     \
         float scale_val = shifted_gamma + gamma_val;                          \
-        scale_out[th] = scale_val;                                            \
-        gamma_out[th] = gamma_val;                                            \
+        if (scale_out) scale_out[th] = scale_val;                             \
+        if (gamma_out) gamma_out[th] = gamma_val;                             \
         int kq_base = (b * T + t) * nh * ds + h * ds;                         \
         float dot = 0.0f;                                                     \
         if (ds % 8 == 0) {                                                    \
@@ -2217,7 +2244,7 @@ extern "C" __global__ void m3_chunk_pre_state_fused_##SUFFIX(                 \
                 for (int j = 0; j < 8; j++) {                                 \
                     T_ACT r = FROM_F(to_f(kk.e[j]) * scale_val);              \
                     ss.e[j] = r;                                              \
-                    sm_k[t_local * ds + n8 * 8 + j] = to_f(r);                \
+                    sm_k[t_local * k_ld + n8 * 8 + j] = to_f(r);                \
                 }                                                             \
                 *reinterpret_cast<uint4*>(K_scaled + kq_base + n8 * 8) =      \
                     ss.u;                                                     \
@@ -2229,7 +2256,7 @@ extern "C" __global__ void m3_chunk_pre_state_fused_##SUFFIX(                 \
             for (int n = 0; n < ds; n++) {                                    \
                 T_ACT r = FROM_F(to_f(K[kq_base + n]) * scale_val);           \
                 K_scaled[kq_base + n] = r;                                    \
-                sm_k[t_local * ds + n] = to_f(r);                             \
+                sm_k[t_local * k_ld + n] = to_f(r);                             \
             }                                                                 \
         }                                                                     \
         qk_dot[th] = dot * gamma_val;                                         \
@@ -2254,7 +2281,7 @@ extern "C" __global__ void m3_chunk_pre_state_fused_##SUFFIX(                 \
             float decay = FAST_EXP(fminf(dA_end - sm_da[t_local], 0.0f));     \
             float v_t = sm_x[t_local * hd + p];                               \
             const float4* k4 =                                                \
-                reinterpret_cast<const float4*>(sm_k + t_local * ds);         \
+                reinterpret_cast<const float4*>(sm_k + t_local * k_ld);       \
             float4 kv = k4[nq];                                               \
             acc0 += decay * kv.x * v_t;                                       \
             acc1 += decay * kv.y * v_t;                                       \
@@ -2429,12 +2456,14 @@ extern "C" __global__ void m3_chunk_scan_fwd_coop_##SUFFIX(                   \
     int cs_base = ((b * n_chunks + chunk) * nh + h) * chunk_size;             \
     int state_head = ((b * n_chunks + chunk) * nh + h) * hd * ds;             \
     extern __shared__ float m3cs_sm[];                                        \
+    /* Rows padded to ds+4 floats - see the f32 twin's bank note. */          \
+    int qk_ld = ds + 4;                                                       \
     float* sm_tri = m3cs_sm;                                                  \
     float* sm_q   = sm_tri + chunk_size * (chunk_size - 1) / 2;               \
-    float* sm_k   = sm_q + chunk_size * ds;                                   \
-    float* sm_v   = sm_k + chunk_size * ds;                                   \
+    float* sm_k   = sm_q + chunk_size * qk_ld;                                \
+    float* sm_v   = sm_k + chunk_size * qk_ld;                                \
     float* sm_ps  = sm_v + chunk_size * hd;                                   \
-    float* sm_da  = sm_ps + hd * ds;                                          \
+    float* sm_da  = sm_ps + hd * qk_ld;                                       \
     float* sm_qkd = sm_da + chunk_size;                                       \
     int tid = threadIdx.x;                                                    \
     int nt = blockDim.x;                                                      \
@@ -2442,8 +2471,8 @@ extern "C" __global__ void m3_chunk_scan_fwd_coop_##SUFFIX(                   \
         int t_local = i / ds;                                                 \
         int n = i % ds;                                                       \
         int base = (b * T + chunk_start + t_local) * nh * ds + h * ds;        \
-        sm_q[t_local * ds + n] = to_f(Q[base + n]);                           \
-        sm_k[t_local * ds + n] = to_f(K_scaled[base + n]);                    \
+        sm_q[t_local * qk_ld + n] = to_f(Q[base + n]);                           \
+        sm_k[t_local * qk_ld + n] = to_f(K_scaled[base + n]);                    \
     }                                                                         \
     for (int i = tid; i < chunk_len * hd; i += nt) {                          \
         int t_local = i / hd;                                                 \
@@ -2452,7 +2481,7 @@ extern "C" __global__ void m3_chunk_scan_fwd_coop_##SUFFIX(                   \
             to_f(x[(b * T + chunk_start + t_local) * d_inner + h * hd + pp]); \
     }                                                                         \
     for (int i = tid; i < hd * ds; i += nt) {                                 \
-        sm_ps[i] = prev_states[state_head + i];                               \
+        sm_ps[(i / ds) * qk_ld + (i % ds)] = prev_states[state_head + i];                               \
     }                                                                         \
     for (int i = tid; i < chunk_len; i += nt) {                               \
         sm_da[i] = dA_cumsum[cs_base + i];                                    \
@@ -2472,9 +2501,9 @@ extern "C" __global__ void m3_chunk_scan_fwd_coop_##SUFFIX(                   \
         float qk_val = 0.0f;                                                  \
         if (wide) {                                                           \
             const float4* q4 =                                                \
-                reinterpret_cast<const float4*>(sm_q + t_local * ds);         \
+                reinterpret_cast<const float4*>(sm_q + t_local * qk_ld);         \
             const float4* k4 =                                                \
-                reinterpret_cast<const float4*>(sm_k + s_local * ds);         \
+                reinterpret_cast<const float4*>(sm_k + s_local * qk_ld);         \
             for (int n4 = 0; n4 < ds / 4; n4++) {                             \
                 float4 qv = q4[n4];                                           \
                 float4 kv = k4[n4];                                           \
@@ -2485,7 +2514,7 @@ extern "C" __global__ void m3_chunk_scan_fwd_coop_##SUFFIX(                   \
             }                                                                 \
         } else {                                                              \
             for (int n = 0; n < ds; n++) {                                    \
-                qk_val += sm_q[t_local * ds + n] * sm_k[s_local * ds + n];    \
+                qk_val += sm_q[t_local * qk_ld + n] * sm_k[s_local * qk_ld + n];    \
             }                                                                 \
         }                                                                     \
         sm_tri[e] = decay * qk_val;                                           \
@@ -2499,18 +2528,18 @@ extern "C" __global__ void m3_chunk_scan_fwd_coop_##SUFFIX(                   \
             int p0 = (o % quads) * 4;                                         \
             float state_decay = FAST_EXP(sm_da[t_local]);                     \
             const float4* q4 =                                                \
-                reinterpret_cast<const float4*>(sm_q + t_local * ds);         \
+                reinterpret_cast<const float4*>(sm_q + t_local * qk_ld);         \
             float acc0 = 0.0f, acc1 = 0.0f, acc2 = 0.0f, acc3 = 0.0f;         \
             for (int n4 = 0; n4 < ds / 4; n4++) {                             \
                 float4 qv = q4[n4];                                           \
                 const float4* ps0 =                                           \
-                    reinterpret_cast<const float4*>(sm_ps + (p0 + 0) * ds);   \
+                    reinterpret_cast<const float4*>(sm_ps + (p0 + 0) * qk_ld); \
                 const float4* ps1 =                                           \
-                    reinterpret_cast<const float4*>(sm_ps + (p0 + 1) * ds);   \
+                    reinterpret_cast<const float4*>(sm_ps + (p0 + 1) * qk_ld); \
                 const float4* ps2 =                                           \
-                    reinterpret_cast<const float4*>(sm_ps + (p0 + 2) * ds);   \
+                    reinterpret_cast<const float4*>(sm_ps + (p0 + 2) * qk_ld); \
                 const float4* ps3 =                                           \
-                    reinterpret_cast<const float4*>(sm_ps + (p0 + 3) * ds);   \
+                    reinterpret_cast<const float4*>(sm_ps + (p0 + 3) * qk_ld); \
                 float4 a = ps0[n4];                                           \
                 float4 bb = ps1[n4];                                          \
                 float4 c = ps2[n4];                                           \
@@ -2564,7 +2593,7 @@ extern "C" __global__ void m3_chunk_scan_fwd_coop_##SUFFIX(                   \
             float y_off = 0.0f;                                               \
             float state_decay = FAST_EXP(sm_da[t_local]);                     \
             for (int n = 0; n < ds; n++) {                                    \
-                y_off += sm_q[t_local * ds + n] * sm_ps[p * ds + n];          \
+                y_off += sm_q[t_local * qk_ld + n] * sm_ps[p * qk_ld + n];          \
             }                                                                 \
             y_off *= state_decay;                                             \
             float y_diag = 0.0f;                                              \

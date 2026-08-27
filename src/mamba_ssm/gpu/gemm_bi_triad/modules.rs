@@ -981,28 +981,38 @@ const FIXED_SOURCE_FRAGMENTS: &[SourceFragment] = &[
         allowed_quoted_includes: &["_typed_prelude.cuh"],
     },
     SourceFragment {
-        logical_name: "kernels/gemm_bi_fixed/ffma.cuh",
-        source: include_str!("../../../../kernels/gemm_bi_fixed/ffma.cuh"),
+        logical_name: "kernels/gemm_bi_fixed/ffma.cu",
+        source: include_str!("../../../../kernels/gemm_bi_fixed/ffma.cu"),
         allowed_quoted_includes: &[],
     },
     SourceFragment {
-        logical_name: "kernels/gemm_bi_fixed/wmma_legacy.cuh",
-        source: include_str!("../../../../kernels/gemm_bi_fixed/wmma_legacy.cuh"),
+        logical_name: "kernels/gemm_bi_fixed/wmma_legacy.cu",
+        source: include_str!("../../../../kernels/gemm_bi_fixed/wmma_legacy.cu"),
         allowed_quoted_includes: &[],
     },
     SourceFragment {
-        logical_name: "kernels/gemm_bi_fixed/matvec.cuh",
-        source: include_str!("../../../../kernels/gemm_bi_fixed/matvec.cuh"),
+        logical_name: "kernels/gemm_bi_fixed/matvec.cu",
+        source: include_str!("../../../../kernels/gemm_bi_fixed/matvec.cu"),
         allowed_quoted_includes: &[],
     },
     SourceFragment {
-        logical_name: "kernels/gemm_bi_fixed/mma16.cuh",
-        source: include_str!("../../../../kernels/gemm_bi_fixed/mma16.cuh"),
+        logical_name: "kernels/gemm_bi_fixed/mma16.cu",
+        source: include_str!("../../../../kernels/gemm_bi_fixed/mma16.cu"),
         allowed_quoted_includes: &[],
     },
     SourceFragment {
-        logical_name: "kernels/gemm_bi_fixed/sm90_wgmma.cuh",
-        source: include_str!("../../../../kernels/gemm_bi_fixed/sm90_wgmma.cuh"),
+        logical_name: "kernels/gemm_bi_fixed/tcw64.cu",
+        source: include_str!("../../../../kernels/gemm_bi_fixed/tcw64.cu"),
+        allowed_quoted_includes: &[],
+    },
+    SourceFragment {
+        logical_name: "kernels/gemm_bi_fixed/sm90_wgmma.cu",
+        source: include_str!("../../../../kernels/gemm_bi_fixed/sm90_wgmma.cu"),
+        allowed_quoted_includes: &[],
+    },
+    SourceFragment {
+        logical_name: "kernels/gemm_bi_fixed/sm100_tcgen05.cu",
+        source: include_str!("../../../../kernels/gemm_bi_fixed/sm100_tcgen05.cu"),
         allowed_quoted_includes: &[],
     },
 ];
@@ -2148,11 +2158,13 @@ mod tests {
         "kernels/grad_clip.cu",
         "kernels/adamw.cu",
         "kernels/gemm_bi_fixed/common.cuh",
-        "kernels/gemm_bi_fixed/ffma.cuh",
-        "kernels/gemm_bi_fixed/wmma_legacy.cuh",
-        "kernels/gemm_bi_fixed/matvec.cuh",
-        "kernels/gemm_bi_fixed/mma16.cuh",
-        "kernels/gemm_bi_fixed/sm90_wgmma.cuh",
+        "kernels/gemm_bi_fixed/ffma.cu",
+        "kernels/gemm_bi_fixed/wmma_legacy.cu",
+        "kernels/gemm_bi_fixed/matvec.cu",
+        "kernels/gemm_bi_fixed/mma16.cu",
+        "kernels/gemm_bi_fixed/tcw64.cu",
+        "kernels/gemm_bi_fixed/sm90_wgmma.cu",
+        "kernels/gemm_bi_fixed/sm100_tcgen05.cu",
     ];
 
     const SCALAR_FRAGMENTS: &[&str] = &[

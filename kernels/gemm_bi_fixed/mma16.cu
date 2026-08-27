@@ -36,7 +36,7 @@
 //     (kernels.rs); launch passes the exact per-kernel byte count.
 //     BK=64 halves the wait_group/__syncthreads boundary count per CTA
 //     vs BK=32 (the measured per-boundary cost dominated the gap to
-//     cuBLAS-TC; see internal/tc-bk64-blueprint.md).
+//     cuBLAS-TC).
 //
 // Geometry: CTA 256 threads = 8 warps as 2x4; BM=BN=128 BK=64; warp tile
 // 64x32 = 4 m-frags(16) x 4 n-frags(8); bias pre-seeded into the f32
@@ -79,7 +79,7 @@
             const void* _src = (_bytes > 0)                                   \
                 ? (const void*)&A[(long long)_gr * lda + _gc]                 \
                 : (const void*)A;                                             \
-            asm volatile("cp.async.ca.shared.global [%0], [%1], 16, %2;\n"    \
+            asm volatile("cp.async.cg.shared.global [%0], [%1], 16, %2;\n"    \
                          :: "r"(_dst), "l"(_src), "r"(_bytes));               \
         }                                                                     \
         for (int _i = threadIdx.x; _i < GBF128_BK * (GBF128_BN / 8); _i += 256) {     \
@@ -94,7 +94,7 @@
             const void* _src = (_bytes > 0)                                   \
                 ? (const void*)&B[(long long)_gk * ldb + _gn]                 \
                 : (const void*)B;                                             \
-            asm volatile("cp.async.ca.shared.global [%0], [%1], 16, %2;\n"    \
+            asm volatile("cp.async.cg.shared.global [%0], [%1], 16, %2;\n"    \
                          :: "r"(_dst), "l"(_src), "r"(_bytes));               \
         }                                                                     \
         asm volatile("cp.async.commit_group;\n");                            \
@@ -279,7 +279,7 @@ void gemm_bi_nn_tc128_##SUFFIX(                                                 
                         if (gc >= N) continue;                                \
                         float val = e ? v1 : v0;                              \
                         if (beta != 0.0f)                                     \
-                            val += beta * to_f(C[(long long)gr * ldc + gc]);  \
+                            val = __fmaf_rn(beta, to_f(C[(long long)gr * ldc + gc]), val);  \
                         C[(long long)gr * ldc + gc] = FROM_F(val);            \
                     }                                                         \
                 }                                                             \
@@ -344,7 +344,7 @@ DEFINE_GEMM_BI_NN_TC128(f16,  __half,        from_f_f16,  "f16")
             const void* _src = (_bytes > 0)                                   \
                 ? (const void*)&A[(long long)_gr * lda + _gc]                 \
                 : (const void*)A;                                             \
-            asm volatile("cp.async.ca.shared.global [%0], [%1], 16, %2;\n"    \
+            asm volatile("cp.async.cg.shared.global [%0], [%1], 16, %2;\n"    \
                          :: "r"(_dst), "l"(_src), "r"(_bytes));               \
         }                                                                     \
         for (int _i = threadIdx.x; _i < GBF64_BK * (GBF64_BN / 8);      \
@@ -359,7 +359,7 @@ DEFINE_GEMM_BI_NN_TC128(f16,  __half,        from_f_f16,  "f16")
             const void* _src = (_bytes > 0)                                   \
                 ? (const void*)&B[(long long)_gk * ldb + _gn]                 \
                 : (const void*)B;                                             \
-            asm volatile("cp.async.ca.shared.global [%0], [%1], 16, %2;\n"    \
+            asm volatile("cp.async.cg.shared.global [%0], [%1], 16, %2;\n"    \
                          :: "r"(_dst), "l"(_src), "r"(_bytes));               \
         }                                                                     \
         asm volatile("cp.async.commit_group;\n");                            \
@@ -525,7 +525,7 @@ void gemm_bi_nn_tc64_##SUFFIX(                                                \
                 if (gr >= M || gc >= N) continue;                              \
                 float val = __fmul_rn(alpha, acc[fm][fn][e]);                            \
                 if (beta != 0.0f)                                              \
-                    val += beta * to_f(C[(long long)gr * ldc + gc]);           \
+                    val = __fmaf_rn(beta, to_f(C[(long long)gr * ldc + gc]), val);           \
                 C[(long long)gr * ldc + gc] = FROM_F(val);                     \
             }                                                                  \
         }                                                                      \
@@ -579,7 +579,7 @@ DEFINE_GEMM_BI_NN_TC64(f16,  __half,        from_f_f16,  "f16")
             const void* _src = (_bytes > 0)                                   \
                 ? (const void*)&A[(long long)_gr * lda + _gc]                 \
                 : (const void*)A;                                             \
-            asm volatile("cp.async.ca.shared.global [%0], [%1], 16, %2;\n"    \
+            asm volatile("cp.async.cg.shared.global [%0], [%1], 16, %2;\n"    \
                          :: "r"(_dst), "l"(_src), "r"(_bytes));               \
         }                                                                     \
         for (int _i = threadIdx.x; _i < GBF16_BK * (GBF16_BN / 8);      \
@@ -594,7 +594,7 @@ DEFINE_GEMM_BI_NN_TC64(f16,  __half,        from_f_f16,  "f16")
             const void* _src = (_bytes > 0)                                   \
                 ? (const void*)&B[(long long)_gk * ldb + _gn]                 \
                 : (const void*)B;                                             \
-            asm volatile("cp.async.ca.shared.global [%0], [%1], 16, %2;\n"    \
+            asm volatile("cp.async.cg.shared.global [%0], [%1], 16, %2;\n"    \
                          :: "r"(_dst), "l"(_src), "r"(_bytes));               \
         }                                                                     \
         asm volatile("cp.async.commit_group;\n");                            \
@@ -755,7 +755,7 @@ void gemm_bi_nn_tc16_##SUFFIX(                                                \
             if (gr >= M || gc >= N) continue;                                  \
             float val = __fmul_rn(alpha, acc[e]);                                        \
             if (beta != 0.0f)                                                  \
-                val += beta * to_f(C[(long long)gr * ldc + gc]);               \
+                val = __fmaf_rn(beta, to_f(C[(long long)gr * ldc + gc]), val);               \
             C[(long long)gr * ldc + gc] = FROM_F(val);                         \
         }                                                                      \
     }                                                                          \

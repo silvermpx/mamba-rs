@@ -39,7 +39,7 @@ use cudarc::driver::PushKernelArg;
     shared by three call sites; a struct would be built and destructured \
     at every launch for no reuse"
 )]
-pub(crate) fn gpu_angle_chunked_fwd(
+pub fn gpu_angle_chunked_fwd(
     ctx: &GpuCtx,
     m3k: &Mamba3Kernels,
     angle_cumsum: &mut GpuBuffer,
@@ -61,11 +61,27 @@ pub(crate) fn gpu_angle_chunked_fwd(
     let nh_i = nh as i32;
     let na_i = na as i32;
     let cs_i = cs as i32;
-    let nc_i = nc as i32;
     let lane_grid_y = (nh * na).div_ceil(256) as u32;
     let lane_block = 256.min((nh * na) as u32);
     let sums_ptr = sums.cached_ptr();
-    let carries_ptr = carries.cached_ptr();
+    // The carries buffer is repurposed as the ENTRY-STATE SNAPSHOT: the
+    // apply kernel folds the per-chunk carry chain inline (bit-identical
+    // ascending walk over the same stored doubles), and it reads the
+    // entering state from this copy because the last chunk's block
+    // writes the exit state into angle_state concurrently.
+    let snapshot_ptr = carries.cached_ptr();
+    let snap_bytes = batch * nh * na * std::mem::size_of::<f32>();
+    let rc = unsafe {
+        cudarc::driver::sys::cuMemcpyDtoDAsync_v2(
+            snapshot_ptr,
+            angle_state_ptr,
+            snap_bytes,
+            ctx.stream.cu_stream(),
+        )
+    };
+    if rc != cudarc::driver::sys::CUresult::CUDA_SUCCESS {
+        return Err(format!("angle entry-state snapshot: {rc:?}"));
+    }
     {
         let mut bld = ctx.stream.launch_builder(&m3k.m3_angle_chunk_sums);
         bld.arg(&sums_ptr);
@@ -84,26 +100,11 @@ pub(crate) fn gpu_angle_chunked_fwd(
         unsafe { bld.launch(grid) }.map_err(|e| format!("angle chunk sums: {e:?}"))?;
     }
     {
-        let mut bld = ctx.stream.launch_builder(&m3k.m3_angle_chunk_carries);
-        bld.arg(&carries_ptr);
-        bld.arg(&sums_ptr);
-        bld.arg(&angle_state_ptr);
-        bld.arg(&b_i);
-        bld.arg(&nc_i);
-        bld.arg(&nh_i);
-        bld.arg(&na_i);
-        let grid = cudarc::driver::LaunchConfig {
-            grid_dim: (batch as u32, lane_grid_y, 1),
-            block_dim: (lane_block, 1, 1),
-            shared_mem_bytes: 0,
-        };
-        unsafe { bld.launch(grid) }.map_err(|e| format!("angle chunk carries: {e:?}"))?;
-    }
-    {
         let mut bld = ctx.stream.launch_builder(&m3k.m3_angle_chunk_apply);
         bld.arg(angle_cumsum.inner_mut());
         bld.arg(&angle_state_ptr);
-        bld.arg(&carries_ptr);
+        bld.arg(&snapshot_ptr);
+        bld.arg(&sums_ptr);
         bld.arg(angles_raw.inner());
         bld.arg(dt.inner());
         bld.arg(&b_i);
@@ -428,12 +429,12 @@ pub fn gpu_forward_mamba3_layer(
             let dim = hd * ds;
             let block_x = dim.min(256) as u32;
             let grid_z = dim.div_ceil(block_x as usize) as u32;
-            let nc_i = nc as i32;
             let cfg = cudarc::driver::LaunchConfig {
                 grid_dim: (dims.batch as u32, nh as u32, grid_z),
                 block_dim: (block_x, 1, 1),
                 shared_mem_bytes: 0,
             };
+            let nc_i = nc as i32;
             let mut builder = ctx.stream.launch_builder(&m3k.m3_state_passing_fwd);
             builder.arg(scratch.chunk_states.inner_mut());
             builder.arg(scratch.final_states.inner_mut());

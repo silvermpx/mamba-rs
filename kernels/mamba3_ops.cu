@@ -102,22 +102,23 @@ extern "C" __global__ void m3_split(
     int off6 = off5 + nh;              // end of trap
 
     if (col < off0) {
-        // z: pass-through
-        z[sample * di + col] = val;
+        // z: pass-through (nullable: the serve prefill reads z inside
+        // the projection in place and skips this copy)
+        if (z) z[sample * di + col] = val;
     } else if (col < off1) {
         // x: pass-through
         x[sample * di + (col - off0)] = val;
     } else if (col < off2) {
-        // B_raw: pass-through
-        B_raw[sample * ng_ds + (col - off1)] = val;
+        // B_raw: pass-through (nullable, as z)
+        if (B_raw) B_raw[sample * ng_ds + (col - off1)] = val;
     } else if (col < off3) {
-        // C_raw: pass-through
-        C_raw[sample * ng_ds + (col - off2)] = val;
+        // C_raw: pass-through (nullable, as z)
+        if (C_raw) C_raw[sample * ng_ds + (col - off2)] = val;
     } else if (col < off4) {
         // dd_dt: save raw, apply softplus(dd_dt + dt_bias)
         int h = col - off3;
         int dt_idx = sample * nh + h;
-        dd_dt_raw[dt_idx] = val;
+        if (dd_dt_raw) dd_dt_raw[dt_idx] = val;
         float biased = val + dt_bias[h];
         dt[dt_idx] = (biased > 20.0f) ? biased : log1pf(FAST_EXP(biased));
     } else if (col < off5) {
@@ -125,14 +126,14 @@ extern "C" __global__ void m3_split(
         // (reference: state-spaces/mamba mamba3.py `heavy_tail_activation`)
         int h = col - off4;
         int a_idx = sample * nh + h;
-        dd_a_raw[a_idx] = val;
+        if (dd_a_raw) dd_a_raw[a_idx] = val;
         float a = -m3_heavy_tail(val);
         a_val[a_idx] = fminf(a, -a_floor);
     } else if (col < off6) {
         // trap: save raw, apply sigmoid
         int h = col - off5;
         int t_idx = sample * nh + h;
-        trap_raw[t_idx] = val;
+        if (trap_raw) trap_raw[t_idx] = val;
         trap[t_idx] = 1.0f / (1.0f + FAST_EXP(-val));
     } else {
         // angles: pass-through
@@ -488,35 +489,32 @@ extern "C" __global__ void m3_angle_chunk_sums(
     chunk_sums[((b * n_chunks + chunk) * nh + h) * n_angles + a] = sum;
 }
 
-extern "C" __global__ void m3_angle_chunk_carries(
-    double* __restrict__ carries,          // [B * n_chunks * nh * n_angles]
-    const double* __restrict__ chunk_sums, // [B * n_chunks * nh * n_angles]
-    const float* __restrict__ angle_state, // [B * nh * n_angles]
-    int B, int n_chunks, int nh, int n_angles
-) {
-    int b = blockIdx.x;
-    if (b >= B) return;
-    int idx = blockIdx.y * blockDim.x + threadIdx.x;
-    int total_per_env = nh * n_angles;
-    if (idx >= total_per_env) return;
-
+/* The wrap into [0, 2*pi). CUDA's fmod is exact (0 ulp), so for a state
+ * already in [0, 2*TWO_PI) the answer is either the state itself or one
+ * exact subtraction (Sterbenz: TWO_PI <= x < 2*TWO_PI keeps x - TWO_PI
+ * exact). That covers every hot iteration - deltas are bounded well
+ * below 2*pi - and the general fmod stays as the fallback, so the
+ * result is bit-identical to calling fmod every time while removing a
+ * multi-instruction fp64 library routine from the densest fp64 loop in
+ * the page. */
+static __device__ __forceinline__ double m3_angle_wrap(double state) {
     const double TWO_PI_64 = 6.283185307179586;
-    double state = (double)angle_state[b * total_per_env + idx];
-    for (int c = 0; c < n_chunks; c++) {
-        int base = ((b * n_chunks + c) * nh) * n_angles + idx;
-        carries[base] = state;
-        state += chunk_sums[base];
-        state = fmod(state, TWO_PI_64);
-        if (state < 0.0) state += TWO_PI_64;
+    if (state >= 0.0 && state < 2.0 * TWO_PI_64) {
+        if (state >= TWO_PI_64) state -= TWO_PI_64;
+        return state;
     }
+    state = fmod(state, TWO_PI_64);
+    if (state < 0.0) state += TWO_PI_64;
+    return state;
 }
 
 extern "C" __global__ void m3_angle_chunk_apply(
-    float* __restrict__ angle_cumsum,     // [B*T * nh * n_angles]
-    float* __restrict__ angle_state,      // [B * nh * n_angles] -- exit state
-    const double* __restrict__ carries,   // [B * n_chunks * nh * n_angles]
-    const float* __restrict__ angles_raw, // [B*T * n_angles]
-    const float* __restrict__ dt_arr,     // [B*T * nh]
+    float* __restrict__ angle_cumsum,      // [B*T * nh * n_angles]
+    float* __restrict__ angle_state,       // [B * nh * n_angles] -- exit state
+    const float* __restrict__ entry_state, // [B * nh * n_angles] -- snapshot
+    const double* __restrict__ chunk_sums, // [B * n_chunks * nh * n_angles]
+    const float* __restrict__ angles_raw,  // [B*T * n_angles]
+    const float* __restrict__ dt_arr,      // [B*T * nh]
     int B, int T, int nh, int n_angles, int chunk_size
 ) {
     int n_chunks = (T + chunk_size - 1) / chunk_size;
@@ -534,16 +532,49 @@ extern "C" __global__ void m3_angle_chunk_apply(
     int t_end = t_start + chunk_size;
     if (t_end > T) t_end = T;
 
-    const double TWO_PI_64 = 6.283185307179586;
-    double state = carries[((b * n_chunks + chunk) * nh + h) * n_angles + a];
+    // The entering carry for this chunk, folded inline: the same
+    // ascending walk over the same stored doubles the dedicated carry
+    // kernel used to run, so the value is bit-identical - and the whole
+    // GPU no longer waits on one 192-thread block to serialize it. The
+    // entry state comes from a snapshot because the last chunk's block
+    // writes the exit state into angle_state concurrently.
+    double state = (double)entry_state[b * total_per_env + idx];
+    {
+        /* Eight independent loads in flight per step: the adds stay a
+         * serial chain (same order, same bits) but the loads no longer
+         * serialize on it. */
+        long long stride = (long long)nh * n_angles;
+        const double* base = chunk_sums + (long long)b * n_chunks * stride + idx;
+        int c = 0;
+        for (; c + 8 <= chunk; c += 8) {
+            double s0 = base[(long long)(c + 0) * stride];
+            double s1 = base[(long long)(c + 1) * stride];
+            double s2 = base[(long long)(c + 2) * stride];
+            double s3 = base[(long long)(c + 3) * stride];
+            double s4 = base[(long long)(c + 4) * stride];
+            double s5 = base[(long long)(c + 5) * stride];
+            double s6 = base[(long long)(c + 6) * stride];
+            double s7 = base[(long long)(c + 7) * stride];
+            state = m3_angle_wrap(state + s0);
+            state = m3_angle_wrap(state + s1);
+            state = m3_angle_wrap(state + s2);
+            state = m3_angle_wrap(state + s3);
+            state = m3_angle_wrap(state + s4);
+            state = m3_angle_wrap(state + s5);
+            state = m3_angle_wrap(state + s6);
+            state = m3_angle_wrap(state + s7);
+        }
+        for (; c < chunk; c++) {
+            state = m3_angle_wrap(state + base[(long long)c * stride]);
+        }
+    }
     for (int t = t_start; t < t_end; t++) {
         int bt = b * T + t;
         float raw = angles_raw[bt * n_angles + a];
         float dt_val = dt_arr[bt * nh + h];
         double delta = (double)(tanhf(raw) * PI * dt_val);
         state += delta;
-        state = fmod(state, TWO_PI_64);
-        if (state < 0.0) state += TWO_PI_64;
+        state = m3_angle_wrap(state);
         angle_cumsum[bt * total_per_env + h * n_angles + a] = (float)state;
     }
     if (chunk == n_chunks - 1) {
@@ -1278,29 +1309,29 @@ extern "C" __global__ void m3_split_##SUFFIX(                                  \
     int off5 = off4 + nh;                                                       \
     int off6 = off5 + nh;                                                       \
     if (col < off0) {                                                           \
-        z[sample * di + col] = FROM_F(val);                                     \
+        if (z) z[sample * di + col] = FROM_F(val);                                     \
     } else if (col < off1) {                                                    \
         x[sample * di + (col - off0)] = FROM_F(val);                            \
     } else if (col < off2) {                                                    \
-        B_raw[sample * ng_ds + (col - off1)] = FROM_F(val);                     \
+        if (B_raw) B_raw[sample * ng_ds + (col - off1)] = FROM_F(val);          \
     } else if (col < off3) {                                                    \
-        C_raw[sample * ng_ds + (col - off2)] = FROM_F(val);                     \
+        if (C_raw) C_raw[sample * ng_ds + (col - off2)] = FROM_F(val);          \
     } else if (col < off4) {                                                    \
         int h = col - off3;                                                     \
         int dt_idx = sample * nh + h;                                           \
-        dd_dt_raw[dt_idx] = val;                                                \
+        if (dd_dt_raw) dd_dt_raw[dt_idx] = val;                                 \
         float biased = val + dt_bias[h];                                        \
         dt[dt_idx] = (biased > 20.0f) ? biased : log1pf(FAST_EXP(biased)); \
     } else if (col < off5) {                                                    \
         int h = col - off4;                                                     \
         int a_idx = sample * nh + h;                                            \
-        dd_a_raw[a_idx] = val;                                                  \
+        if (dd_a_raw) dd_a_raw[a_idx] = val;                                    \
         float a = -m3_heavy_tail(val);                                          \
         a_val[a_idx] = fminf(a, -a_floor);                                      \
     } else if (col < off6) {                                                    \
         int h = col - off5;                                                     \
         int t_idx = sample * nh + h;                                            \
-        trap_raw[t_idx] = val;                                                  \
+        if (trap_raw) trap_raw[t_idx] = val;                                    \
         trap[t_idx] = 1.0f / (1.0f + FAST_EXP(-val));                           \
     } else {                                                                    \
         int a = col - off6;                                                     \
@@ -1371,9 +1402,11 @@ extern "C" __global__ void bcnorm_fwd_bc_##SUFFIX(                              
     const float* __restrict__ B_weight,                                         \
     const float* __restrict__ C_weight,                                         \
     int N, int ng, int ds,                                                      \
-    float eps /* config-driven eps */                                           \
+    float eps, /* config-driven eps */                                          \
+    int src_stride /* row stride of B_raw/C_raw; ng*ds when dense, the    */    \
+                   /* projection row width when reading proj in place     */    \
 ) {                                                                             \
-    /* gridDim.y == 2: 0 → B path, 1 → C path */                                \
+    /* gridDim.y == 2: 0 -> B path, 1 -> C path */                              \
     int which = blockIdx.y;                                                     \
     int block_id = blockIdx.x;                                                  \
     if (block_id >= N * ng) return;                                             \
@@ -1384,7 +1417,9 @@ extern "C" __global__ void bcnorm_fwd_bc_##SUFFIX(                              
     float* rms_out = (which == 0) ? B_rms : C_rms;                              \
     const float* weight = (which == 0) ? B_weight : C_weight;                   \
     int base = block_id * ds;                                                   \
-    float val = to_f(raw[base + d]);                                            \
+    long long src = (long long)(block_id / ng) * src_stride                     \
+                    + (long long)(block_id % ng) * ds;                          \
+    float val = to_f(raw[src + d]);                                             \
     extern __shared__ float sdata[];                                            \
     sdata[d] = val * val;                                                       \
     __syncthreads();                                                            \
@@ -1559,8 +1594,8 @@ extern "C" __global__ void m3_bias_rope_fwd(
     int bi = h * ds + n;
     float b0 = B_normed[src] + B_bias[bi];
     float c0 = C_normed[src] + C_bias[bi];
-    B_biased[idx] = b0;
-    C_biased[idx] = c0;
+    if (B_biased) B_biased[idx] = b0;
+    if (C_biased) C_biased[idx] = c0;
     int rope_end = 2 * n_angles;
     if (n >= rope_end) {
         K_out[idx] = b0;
@@ -1619,8 +1654,8 @@ extern "C" __global__ void m3_bias_rope_fwd_##SUFFIX(                           
     int bi = h * ds + n;                                                        \
     T_ACT tb0 = FROM_F(to_f(B_normed[src]) + B_bias[bi]);                       \
     T_ACT tc0 = FROM_F(to_f(C_normed[src]) + C_bias[bi]);                       \
-    B_biased[idx] = tb0;                                                        \
-    C_biased[idx] = tc0;                                                        \
+    if (B_biased) B_biased[idx] = tb0;                                          \
+    if (C_biased) C_biased[idx] = tc0;                                          \
     int rope_end = 2 * n_angles;                                                \
     if (n >= rope_end) {                                                        \
         K_out[idx] = tb0;                                                       \
@@ -1660,11 +1695,15 @@ extern "C" __global__ void silu_gate_fwd_##SUFFIX(                              
     T_ACT* __restrict__ out,                                                    \
     const T_ACT* __restrict__ y,                                                \
     const T_ACT* __restrict__ z,                                                \
-    int n                                                                       \
+    int n,                                                                      \
+    int d_inner,                                                                \
+    int z_stride /* row stride of z: d_inner when dense, the projection   */    \
+                 /* row width when the gate reads z inside proj in place  */    \
 ) {                                                                             \
     int i = blockIdx.x * blockDim.x + threadIdx.x;                              \
     if (i >= n) return;                                                         \
-    float z_val = to_f(z[i]);                                                   \
+    long long zi = (long long)(i / d_inner) * z_stride + (i % d_inner);         \
+    float z_val = to_f(z[zi]);                                                  \
     float silu_z = z_val / (1.0f + exp2f(-z_val * LOG2E));                      \
     out[i] = FROM_F(to_f(y[i]) * silu_z);                                       \
 }
@@ -1707,7 +1746,8 @@ extern "C" __global__ void rmsnorm_gated_forward_##SUFFIX(                      
     const T_ACT* __restrict__ z,                                                \
     const float* __restrict__ weight,                                           \
     int N, int d_inner, int group_size,                                         \
-    float eps /* config-driven eps */                                           \
+    float eps, /* config-driven eps */                                          \
+    int z_stride /* row stride of z (d_inner when dense) */                     \
 ) {                                                                             \
     if (d_inner > 1024) return;                                                 \
     int sample = blockIdx.x;                                                    \
@@ -1740,7 +1780,7 @@ extern "C" __global__ void rmsnorm_gated_forward_##SUFFIX(                      
     if (!isfinite(rstd) || rstd > 1e20f) rstd = 1.0f;                           \
     if (local_id == 0) rms_vals[sample * n_groups + group_id] = rstd;           \
     __syncthreads();                                                            \
-    float z_val = to_f(z[base + d]);                                            \
+    float z_val = to_f(z[(long long)sample * z_stride + d]);                    \
     float silu_z = z_val / (1.0f + FAST_EXP(-z_val));                           \
     out[base + d] = FROM_F(y_val * rstd * weight[d] * silu_z);                  \
 }

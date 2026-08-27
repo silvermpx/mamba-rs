@@ -30,7 +30,7 @@ fn m1_gpu_benchmark() {
 
     println!();
     println!("=============================================================");
-    println!("mamba-rs v0.1.2 — Full Benchmark");
+    println!("mamba-rs — Full Benchmark");
     println!("=============================================================");
     println!(
         "Config: d_model={}, layers={}, d_inner={}, d_state={}, params={}",

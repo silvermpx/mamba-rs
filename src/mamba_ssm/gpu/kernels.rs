@@ -401,16 +401,23 @@ pub struct MambaKernels {
     pub matvec_bi_f16_f32: CudaFunction,
     pub matvec_bi_f32_f32: CudaFunction,
 
-    /// The fixed family's inference ladder (kernels/gemm_bi_fixed.cu,
+    /// The fixed family's inference ladder (`kernels/gemm_bi_fixed/`,
     /// GBF namespace): bit-identical copies of the forward TC tiles,
     /// owned by the inference kernel.
     pub gemm_bi_nn_tc128_typed: HalfKernel,
     pub gemm_bi_nn_tc64_typed: HalfKernel,
     pub gemm_bi_nn_tc16_typed: HalfKernel,
+    /// Fragment-reuse 128x128 rung with 64x64 warp tiles.
+    pub gemm_bi_nn_tcw64_typed: HalfKernel,
+    /// Wide 128x256 sibling of the fragment-reuse rung.
+    pub gemm_bi_nn_tcwn64_typed: HalfKernel,
     /// The Hopper wgmma rung (compiled only for sm_90a; the dispatcher
     /// never routes here until the rung is hardware-qualified - the
     /// forced census entry is its only caller).
     pub gemm_bi_nn_sm90_typed: Option<HalfKernel>,
+    /// Datacenter-Blackwell tcgen05 rung, available only on admitted
+    /// architecture-family targets.
+    pub gemm_bi_nn_sm100_typed: Option<HalfKernel>,
 }
 
 impl Deref for MambaKernels {
@@ -540,7 +547,7 @@ impl MambaKernels {
                     .and_then(|module| {
                         super::gemm_bi_triad::modules::qualify_specialized_module(module).ok()
                     }),
-                ("sm_100a", Some(device_cc @ (10, 0))) | ("sm_103", Some(device_cc @ (10, 3))) => {
+                ("sm_100a", Some(device_cc @ (10, 0))) | ("sm_103a", Some(device_cc @ (10, 3))) => {
                     super::gemm_bi_triad::modules::compile_sm100_optional(ctx, state_cap, device_cc)
                 }
                 _ => None,
@@ -786,8 +793,15 @@ impl MambaKernels {
             gemm_bi_nn_tc128_typed: load_half_dynsmem("gemm_bi_nn_tc128", 71_680)?,
             gemm_bi_nn_tc64_typed: load_half("gemm_bi_nn_tc64")?,
             gemm_bi_nn_tc16_typed: load_half("gemm_bi_nn_tc16")?,
+            gemm_bi_nn_tcw64_typed: load_half_dynsmem("gemm_bi_nn_tcw64", 65_536)?,
+            gemm_bi_nn_tcwn64_typed: load_half_dynsmem("gemm_bi_nn_tcwn64", 98_304)?,
             gemm_bi_nn_sm90_typed: if arch == "sm_90a" {
                 Some(load_half_dynsmem("gemm_bi_nn_sm90a_wgmma_wg1", 49_152)?)
+            } else {
+                None
+            },
+            gemm_bi_nn_sm100_typed: if arch == "sm_100a" || arch == "sm_103a" {
+                Some(load_half_dynsmem("gemm_bi_nn_sm100_tcgen_c4", 65_536)?)
             } else {
                 None
             },

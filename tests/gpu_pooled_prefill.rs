@@ -1,4 +1,4 @@
-//! 0.5.3 E-surface oracle: the on-device pooled-sum prefill must reproduce
+//! Pooled-prefill oracle: the on-device pooled-sum prefill must reproduce
 //! the full-temporal download + host column-sum BIT-FOR-BIT (the kernel
 //! walks ascending t accumulating pure f32 adds from 0.0 — the same
 //! reduction order as a per-column host loop), and the pinned staging

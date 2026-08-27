@@ -77,6 +77,8 @@ pub struct MixedLayerBwd<'a> {
     pub d_lw: &'a GpuMambaLayerGrads,
     pub acts: &'a GpuMambaLayerMixedActs,
     pub lw: &'a GpuMambaMixedLayerWeights,
+    /// Device pointer to this layer's precomputed negated A.
+    pub a_neg_ptr: cudarc::driver::sys::CUdeviceptr,
     /// Run the standalone f32-to-typed cast for the incoming gradient.
     /// Only the first layer processed in reverse needs it.
     pub cast_d_temporal: bool,
@@ -89,7 +91,6 @@ pub fn gpu_backward_mamba_layer_mixed(
     ctx: &GpuCtx,
     d_temporal: &mut GpuBuffer,
     layer: &MixedLayerBwd<'_>,
-    a_neg_ptr: cudarc::driver::sys::CUdeviceptr,
     scratch: &mut GpuMambaMixedTrainScratch,
     dtype: WeightDtype,
 ) -> Result<(), String> {
@@ -97,6 +98,7 @@ pub fn gpu_backward_mamba_layer_mixed(
         d_lw,
         acts,
         lw,
+        a_neg_ptr,
         cast_d_temporal,
         mirror_dx,
     } = *layer;
@@ -901,10 +903,10 @@ pub fn gpu_backward_mamba_backbone_mixed(
                 d_lw: &d_mamba.layers[layer_idx],
                 acts: &acts.layers[layer_idx],
                 lw: &mamba_w.layers[layer_idx],
+                a_neg_ptr,
                 cast_d_temporal: layer_idx + 1 == dims.n_layers,
                 mirror_dx: layer_idx > 0,
             },
-            a_neg_ptr,
             scratch,
             dtype,
         )?;

@@ -1,7 +1,7 @@
-# Performance playbook — lessons from the 0.6.3 campaign program
+# Performance playbook
 
-Distilled from the 2026-08-22/23 program that took the campaign training
-step (d_model 384, 24 layers, B=8, T=1300, bf16, batch-invariant +
+Distilled from the kernel-optimization work that took the production
+training step (d_model 384, 24 layers, B=8, T=1300, bf16, batch-invariant +
 tensor-core tier) from 441.4 to 131.5 ms/step (M1, -70%) and the M3 step
 from 636 to 179.4 ms/step (-72%). Most changes were bit-identical on all
 nine digest arms; the handful that regrouped reductions landed inside one
@@ -16,17 +16,18 @@ this codebase; apply them in order.
   env-var name silently disabling the tensor-core tier) were found only
   by isolated kernel benches and env auditing. Build the bench arm
   BEFORE the optimization: an `--ignored` test that launches the kernel
-  standalone at the campaign shape, 3 warmup + 20 timed iterations.
+  standalone at the production shape, 3 warmup + 20 timed iterations.
 - Keep a per-kernel ledger in ms/step terms (per-launch ms x layers).
   Rank by it, not by how suspicious the code looks. The biggest M3 item
   (m3_dqkv at 73% of the whole step) was invisible until timed alone.
-- When a profiler is unavailable (vast.ai blocks ncu, no nsys), the
+- When a profiler is unavailable (a rented box that blocks ncu, no
+  nsys), the
   isolated-bench harness is a full substitute for time attribution.
 - Compile bench kernels at the PRODUCTION state cap / flags. A
   default-64 cap where production injects 16 can overstate
   register-array kernels.
 - Bench the exact env the production trainer stamps. The "BI+TC"
-  campaign rows measured plain BI for a whole night because the flag
+  rows once measured plain BI for a whole night because the flag
   name was wrong (`MAMBA_RS_BI_TENSOR_CORES`, not
   `MAMBA_RS_BATCH_INVARIANT_TC`) — and a day of follow-up readings
   measured the cuBLAS lane because the tier rides TWO env flags
@@ -77,12 +78,12 @@ this codebase; apply them in order.
   values and bits unchanged.
 - Global-memory shift registers are the extreme case: the conv1d
   window lived in global memory (~7 dependent accesses per timestep);
-  registerizing it alone was -28% of the whole campaign step.
+  registerizing it alone was -28% of the whole training step.
 
 ## 5. Over-materialization: tape what is small, replay what is cheap
 
 - The scan h tape stored T+1 states per (b,d,n): 12.28 GB at the
-  campaign shape, written once and read twice. S4 keeps only per-chunk
+  production shape, written once and read twice. The slim tape keeps only per-chunk
   (run_a, run_b, h_entry) rows (3 floats per chunk) and REPLAYS h in
   the backward with the same thread-local scan, the same block scan
   helper and the same compose chain on the same inputs — bit-identical
@@ -100,9 +101,9 @@ this codebase; apply them in order.
 ## 6. Bit-discipline instruments — build them before the change
 
 - If a kernel has no run-digest coverage, add an output-hash arm
-  first: FNV-1a over every output buffer at the campaign shape on
+  first: FNV-1a over every output buffer at the production shape on
   deterministic inputs, record the hashes, compare after. This is what
-  proved KILL-1/KILL-2/staging bit-clean and what makes lane
+  proved the tape removals and the staging bit-clean and what makes lane
   redistribution reviewable at all.
 - Digest gates run on EVERY GEMM tier and EVERY chunk-count shape
   (single-chunk + multichunk): the inter-chunk carry was uninstrumented
@@ -115,7 +116,7 @@ this codebase; apply them in order.
   name non-executing lanes once trip counts diverge (segment-local
   masks).
 
-## 7. Process rules that saved the night
+## 7. Process rules
 
 - Phase-batch: write the whole change, gate once (parity + digests +
   bench), fix red as one batch, commit green. Per-edit compile loops
@@ -130,7 +131,7 @@ this codebase; apply them in order.
 - Keep escape hatches for one release (`MAMBA_RS_SCAN_TAPE=full`) and
   verify BOTH modes against the same digest baseline.
 
-## 8. Lessons from the 0.6.4 inference wave
+## 8. Lessons from the inference pass
 
 - At B=1 the grid is the first suspect: the serve prefill launched its
   conv at 3 blocks on a 170-SM GPU. T-tiling the nosave conv (with the

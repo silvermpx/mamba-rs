@@ -175,7 +175,7 @@ fn target_admits_route(binding: Tf32QualifiedModule, route: Tf32PhysicalRoute) -
                 | ((8, 9), "sm_89", "sm_89")
                 | ((9, 0), "sm_90a", "sm_90a")
                 | ((10, 0), "sm_100a", "sm_100a")
-                | ((10, 3), "sm_103", "sm_103")
+                | ((10, 3), "sm_103a", "sm_103a")
                 | ((11, 0), "sm_110", "sm_110")
                 | ((12, 0), "compute_120", "sm_120")
                 | ((12, 1), "compute_121", "sm_121")

@@ -1,5 +1,5 @@
 //! The bridge census between the two kernels: the FIXED inference
-//! ladder (kernels/gemm_bi_fixed.cu, GBF namespace) must stay
+//! ladder (`kernels/gemm_bi_fixed/`, GBF namespace) must stay
 //! byte-identical to the triad forward tiles it was copied from at the
 //! split point. This suite is permanent - it is what makes the
 //! two-kernel split safe: any arithmetic drift between the inference

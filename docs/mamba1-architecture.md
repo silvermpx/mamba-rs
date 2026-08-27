@@ -61,7 +61,7 @@ mamba_block_step(hidden, layer_weights, state, scratch, cfg);
 // Level 3: Full backbone — input_proj + N blocks + norm_f
 mamba_step(input, output, weights, states, scratch, cfg, input_dim);
 
-// Full-sequence variant of level 3 (0.5.0): one batched-SGEMM pass over
+// Full-sequence variant of level 3: one batched-SGEMM pass over
 // T positions instead of T step dispatches; state carries in AND out so
 // mamba_step continues from it (prefill-then-decode).
 forward_mamba_backbone_prefill(out, input, weights, state, scratch, dims);
@@ -110,11 +110,11 @@ GEMM tiers, per `GpuCtx` flags:
   custom fixed-order kernels (deterministic, batch-invariant);
 - `set_bi_gemm_family(..)`: which family serves the forward under that flag
   — `Triad` (`gemm_bi_triad/`, default; all three layouts, per-bucket
-  invariance) or `Fixed` (`gemm_bi_fixed.cu`; forward-only, one
-  64x64x32 tile, invariant by construction);
+  invariance) or `Fixed` (`gemm_bi_fixed/`; forward-only, a bit-identical
+  tile ladder with `SPLIT_K=1`, invariant by construction);
 - + `set_bi_tensor_cores(true)`: the mma.sync tier of the same contract.
 
 Graph captures snapshot the full route (`ctx.gemm_route()` — the three
 flags plus the family) and replays assert it; the split forward/backward
 cycle refuses a mid-cycle flip. Checkpoint provenance:
-`serialize` carries `scan_mode` + `rms_norm_eps` from 0.5.2.
+`serialize` carries `scan_mode` + `rms_norm_eps` in the checkpoint.

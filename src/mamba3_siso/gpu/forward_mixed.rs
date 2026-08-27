@@ -438,6 +438,8 @@ pub fn gpu_forward_mamba3_layer_mixed(
         bld.arg(&ds_i);
         let eps_g5: f32 = dims.rms_norm_eps;
         bld.arg(&eps_g5);
+        let src_stride = (ng * ds) as i32;
+        bld.arg(&src_stride);
         unsafe { bld.launch(cfg) }.map_err(|e| format!("m3_mixed F4ab bcnorm_bc: {e:?}"))?;
     }
 
@@ -826,6 +828,8 @@ pub fn gpu_forward_mamba3_layer_mixed(
         bld.arg(&hd_i);
         let eps_g5: f32 = dims.rms_norm_eps;
         bld.arg(&eps_g5);
+        let z_stride = di as i32;
+        bld.arg(&z_stride);
         unsafe { bld.launch(grid) }.map_err(|e| format!("m3_mixed F7 rmsnorm_gated: {e:?}"))?;
     } else {
         let n = (bt * di) as i32;
@@ -839,6 +843,9 @@ pub fn gpu_forward_mamba3_layer_mixed(
         bld.arg(&y);
         bld.arg(&z);
         bld.arg(&n);
+        let di_i = di as i32;
+        bld.arg(&di_i);
+        bld.arg(&di_i);
         unsafe { bld.launch(grid_1d(bt * di)) }
             .map_err(|e| format!("m3_mixed F7 silu_gate: {e:?}"))?;
     }

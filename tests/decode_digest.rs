@@ -1,5 +1,5 @@
-//! Decode-lane bit gate. The step (autoregressive) path had only
-//! KL-tolerance coverage before 0.6.4 — tolerance cannot distinguish a
+//! Decode-lane bit gate. KL-tolerance coverage alone is not enough for
+//! the step (autoregressive) path — tolerance cannot distinguish a
 //! bit-identical fusion from lucky rounding. This records FNV hashes of
 //! 16 chained decode steps (output after every step + the carried conv
 //! and SSM state at the end) on synthetic weights, per tier and graph
@@ -67,14 +67,24 @@ fn decode_run_digest() {
             // Reset the carried state so both modes hash the same run.
             state.reset(&engine.ctx().stream).unwrap();
         }
-        let mut chained = 0u64;
+        // Sequential absorption, not an XOR fold: XOR is linear, so a
+        // pair of correlated step changes could cancel; a running FNV
+        // state makes cancellation impossible and the per-step lines
+        // say WHICH step moved when the chain does.
+        let mut chain = common::digest::Digest::new();
         for step_i in 0..16u32 {
             let input = det(batch * input_dim, 1000 + step_i, 0.1);
             engine
                 .step(&input, &mut out, &mut state, &mut scratch)
                 .unwrap();
-            chained ^= common::bench::fnv1a_f32(&out).rotate_left(step_i);
+            eprintln!(
+                "DECODE-DIGEST step={step_i} {:016x}",
+                common::bench::fnv1a_f32(&out)
+            );
+            chain.absorb_label("step");
+            chain.absorb_f32(&out);
         }
+        let chained = chain.finish();
         let mut conv_v = vec![0f32; cfg.n_layers * cfg.d_inner() * cfg.d_conv];
         let mut ssm_v = vec![0f32; cfg.n_layers * cfg.d_inner() * cfg.d_state];
         state
@@ -86,11 +96,15 @@ fn decode_run_digest() {
             .download(&engine.ctx().stream, &mut ssm_v)
             .unwrap();
         engine.ctx().stream.synchronize().unwrap();
+        let h_conv = common::bench::fnv1a_f32(&conv_v);
+        let h_ssm = common::bench::fnv1a_f32(&ssm_v);
         eprintln!(
             "DECODE-DIGEST graph={graph} steps=16 d384 L24: out_chain={chained:016x} \
-             conv={:016x} ssm={:016x}",
-            common::bench::fnv1a_f32(&conv_v),
-            common::bench::fnv1a_f32(&ssm_v)
+             conv={h_conv:016x} ssm={h_ssm:016x}"
         );
+        let arm = if graph { "graph" } else { "eager" };
+        common::evidence::record_digest("decode_digest", arm, "out_chain", chained);
+        common::evidence::record_digest("decode_digest", arm, "conv", h_conv);
+        common::evidence::record_digest("decode_digest", arm, "ssm", h_ssm);
     }
 }

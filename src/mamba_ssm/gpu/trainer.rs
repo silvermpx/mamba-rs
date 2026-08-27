@@ -864,7 +864,7 @@ pub(crate) struct MambaTrainerMixed {
     captured_f16_dt_scaled_ptr: u64,
     // the f16 graph presizes these two
     // scratches but never asserted them at replay - the one graph without
-    // the guard the bf16 graph already has. Plus the G1 flag snapshot.
+    // the guard the bf16 graph already has. Plus the flag snapshot.
     captured_f16_half_staging_ptr: u64,
     captured_f16_bi_upcast_ptrs: [u64; 3],
     captured_f16_gemm_flags: crate::mamba_ssm::gpu::context::GemmRoute,
@@ -931,7 +931,9 @@ impl MambaTrainerMixed {
 
         let device = GpuDevice::new(gpu_ordinal)?;
         let state_cap = crate::mamba_ssm::gpu::kernels::state_capacity(cfg.d_state)?;
-        let ctx = GpuCtx::new_with_state_cap(&device, state_cap)?;
+        // Trainer entry point: the documented tier selection is the
+        // MAMBA_RS_* environment (the benches' contract).
+        let ctx = GpuCtx::new_from_env_with_state_cap(&device, state_cap)?;
 
         let weights = GpuMambaTrainMixedWeights::from_cpu(&ctx.stream, cpu_weights, &cfg, dtype)?;
 
@@ -1961,7 +1963,9 @@ impl MambaTrainerF32 {
         } = session;
         let device = GpuDevice::new(gpu_ordinal)?;
         let state_cap = crate::mamba_ssm::gpu::kernels::state_capacity(cfg.d_state)?;
-        let ctx = GpuCtx::new_with_state_cap(&device, state_cap)?;
+        // Trainer entry point: the documented tier selection is the
+        // MAMBA_RS_* environment (the benches' contract).
+        let ctx = GpuCtx::new_from_env_with_state_cap(&device, state_cap)?;
 
         let weights = GpuMambaTrainWeights::from_cpu(&ctx.stream, cpu_weights)?;
 

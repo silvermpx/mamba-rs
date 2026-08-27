@@ -12,6 +12,8 @@
 
 #![cfg(feature = "cuda")]
 
+mod common;
+
 use half::{bf16, f16};
 use mamba_rs::mamba_ssm::gpu::blas::TypedPtr;
 use mamba_rs::mamba_ssm::gpu::buffers::{DtypedBuf, GpuBuffer};
@@ -1195,7 +1197,7 @@ fn tc_route_gate_boundary_sweep() {
     };
 
     // Below the Thin16 column floor -> honest UNCOVERED (blas.rs matvec
-    // fallback). Since the G4 ladder, N is the only uncovered axis.
+    // fallback). Since the ladder unification, N is the only uncovered axis.
     for (m, n) in [(1usize, 31usize), (63, 31), (4096, 31)] {
         let err = route(m, n).unwrap_err();
         assert!(
@@ -1560,10 +1562,10 @@ fn bench_tc_vs_scalar_paths() {
     }
 }
 
-/// Step-0 instrumentation for the BK=64 squeeze (internal/tc-bk64-blueprint.md):
-/// function attributes (regs / spills / static smem), bit-level golden hashes
+/// Baseline instrumentation for TC-kernel optimization work: function
+/// attributes (regs / spills / static smem), bit-level golden hashes
 /// of the full TC triad on the contract shapes, and baseline fwd timings.
-/// Run before and after each blueprint step; goldens must not move on steps
+/// Run before and after each optimization step; goldens must not move on steps
 /// that promise bit-identity (swizzle, dynsmem, BK=64 on K%64 ∉ (0,32] shapes).
 #[test]
 #[ignore]
@@ -1594,13 +1596,16 @@ fn step0_tc_attrs_and_goldens() {
         }
     }
 
+    // Thin adapter over the shared byte-wise law. This printer once
+    // absorbed whole u32 words per element - a different hash whose
+    // recorded values are not comparable with any other printer in the
+    // tree; the printed golden hashes changed with the unification.
     fn fnv(bits: impl Iterator<Item = u32>) -> u64 {
-        let mut h = 0xcbf29ce484222325u64;
+        let mut d = common::digest::Digest::new();
         for b in bits {
-            h ^= b as u64;
-            h = h.wrapping_mul(0x100000001b3);
+            d.absorb_bytes(&b.to_le_bytes());
         }
-        h
+        d.finish()
     }
 
     println!("== golden hashes (fwd/dW/dX bits) ==");
@@ -1662,13 +1667,13 @@ fn step0_tc_attrs_and_goldens() {
             let dwh = dw.to_cpu(&t.ctx.stream).unwrap();
             let mut dxh = vec![0.0f32; m * k_];
             dxt.download_f32(&t.ctx.stream, &mut dxh).unwrap();
-            println!(
-                "[{:?} M{m} K{k_} N{n}] fwd={:016x} dW={:016x} dX={:016x}",
-                dt,
-                h_fwd,
-                fnv(dwh.iter().map(|v| v.to_bits())),
-                fnv(dxh.iter().map(|v| v.to_bits())),
-            );
+            let h_dw = fnv(dwh.iter().map(|v| v.to_bits()));
+            let h_dx = fnv(dxh.iter().map(|v| v.to_bits()));
+            println!("[{dt:?} M{m} K{k_} N{n}] fwd={h_fwd:016x} dW={h_dw:016x} dX={h_dx:016x}");
+            let cell = format!("{dt:?}.M{m}K{k_}N{n}");
+            common::evidence::record_digest("gemm_bi_tc", "goldens.fwd", &cell, h_fwd);
+            common::evidence::record_digest("gemm_bi_tc", "goldens.dW", &cell, h_dw);
+            common::evidence::record_digest("gemm_bi_tc", "goldens.dX", &cell, h_dx);
         }
     }
 

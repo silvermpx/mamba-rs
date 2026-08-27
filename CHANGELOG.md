@@ -251,7 +251,7 @@ determinism baseline. Measurements are at the end of this entry.
 - SiLU(gate) is no longer materialized: the split writes x and the raw
   gate, and the gating forward/backward recompute the activation from
   the saved pre-SiLU value in the split kernel's exact form - one
-  [B*T*d_inner] activation freed per layer (383 MB at the campaign
+  [B*T*d_inner] activation freed per layer (383 MB at the production
   shape). The in_proj backward's concat pass is gone: the gating
   backward writes the gate half of d_proj and the conv dx pass writes
   the x half, both in place.
@@ -296,7 +296,7 @@ determinism baseline. Measurements are at the end of this entry.
 - Mamba-1 scan backward (the production fold): runtime-`d_state` slot
   stride (occupancy 2 -> 3 blocks/SM), packed 8-byte epilogue stores
   and stage-in loads, staged striped dB/dC stores, and fold-depth
-  scratch sizing (-383 MB at the campaign shape).
+  scratch sizing (-383 MB at the production shape).
 - Mamba-3 chunk-scan forward runs one head per 128-thread cooperative
   block with a triangle-packed decayed tile and staged operands (the
   old 32-thread block sat behind 32 KB of static shared memory at 5-6%
@@ -340,7 +340,7 @@ determinism baseline. Measurements are at the end of this entry.
 
 Classifier serve page (B=1, T=4621, d_model 384, 24 layers, f32,
 cuBLAS+TF32): pooled prefill 29.3 -> 10.8 ms/page, full-temporal
-30.1 -> 11.5 ms/page. Campaign training step (B=8, T=1300, d_model
+30.1 -> 11.5 ms/page. Production training step (B=8, T=1300, d_model
 384, 24 layers, bf16, graph lane): Mamba-1 131.5 -> 114.0 ms/step
 (batch-invariant + tensor-core tier) and 169.0 -> 129.8 on cuBLAS,
 peak memory down 766 MB; Mamba-3 179.4 -> 165.7 ms/step. Measured on
@@ -356,7 +356,7 @@ recorded baselines; full test suite 429 passed, 0 failed.
 
 ## 0.6.3 (2026-08-23)
 
-Performance release. Campaign-shape training (d_model 384, 24 layers,
+Performance release. Production-shape training (d_model 384, 24 layers,
 B=8, T=1300, bf16, batch-invariant + tensor-core tier, RTX 5090):
 Mamba-1 441.4 -> 131.5 ms/step, Mamba-3 636 -> 179.4 ms/step; the
 O(T) h tape is gone (-12.3 GB at that shape, a 4x larger micro-batch
@@ -423,7 +423,7 @@ unchanged.
   packed-head slice stride is now tier-conditional, matching the
   launcher's tile maths exactly on every tier (the old unconditional
   stride overlapped slot 0's tail arrays once the tile grew). M3
-  campaign shape (B=8 T=1300 d_model 384, 24 layers, bf16 graph):
+  production shape (B=8 T=1300 d_model 384, 24 layers, bf16 graph):
   381.0 -> 362.1 ms/step.
 - The chunked M3 backward runs its chunks in parallel: the reverse
   d_state recurrence is decomposed into per-chunk terms
@@ -434,12 +434,12 @@ unchanged.
   zero-seeded per-chunk term sums group differently than the fused
   serial accumulate (same release-window family break; deterministic,
   shape-pure). dD partials go per (b, chunk, h) with the ascending-row
-  reducer. Isolated m3_dqkv: 3.89 -> 1.94 ms/launch; M3 campaign
+  reducer. Isolated m3_dqkv: 3.89 -> 1.94 ms/launch; M3 production step
   bf16 graph 219.6 -> 179.4 ms/step.
 - `m3_dqktheta` hoists each angle's `cosf`/`sinf` into registers — the
   forward-RoPE, inverse-RoPE and dtheta loops each recomputed the same
   pair (3x SFU work per angle). Bit-identical (same functions, same
-  inputs); campaign-neutral at d_state 16 (4 angles), the win scales
+  inputs); production-neutral at d_state 16 (4 angles), the win scales
   with d_state.
 - `m3_dqktheta` I/O is staged through six [CS][ds] shared-memory tiles
   (4 inputs, 2 outputs): the per-thread row loads/stores put adjacent
@@ -449,7 +449,7 @@ unchanged.
   `m3_dqktheta_output_hash` arm matches pre-change hashes). Configs
   whose tile exceeds the 48 KB no-opt-in dynamic-smem limit (large
   d_state) fall back to the direct-global path via a `use_staging`
-  launch flag. Isolated: 0.612 -> 0.270 ms/launch; M3 campaign bf16
+  launch flag. Isolated: 0.612 -> 0.270 ms/launch; M3 production step bf16
   graph 226.0 -> 221.5 ms/step.
 - M3-KILL-1, `m3_dqkv` t-split (both dtype copies): the kernel ran one
   32-thread warp per block behind an 88 KB two-head smem tile — one
@@ -459,7 +459,7 @@ unchanged.
   blocks/SM), and every per-timestep loop strides its timesteps over
   the T_SPLIT lanes. Each output element keeps exactly one owning lane
   running the same inner-loop order, so outputs are bit-identical —
-  proven by an FNV bit-hash of all six outputs at the campaign shape
+  proven by an FNV bit-hash of all six outputs at the production shape
   (new `m3_dqkv_output_hash` arm) matching the pre-change hashes
   exactly. The one order-sensitive scalar (dD) is resummed from the
   stored dQK lane in the historical t-ascending order on a single lane.
@@ -487,19 +487,19 @@ unchanged.
   gap persists and grows with K), `DISALLOW_REDUCED_PRECISION_REDUCTION`
   has no effect on bf16 GemmEx, and `COMPUTE_32F_EMULATED_16BFX9`
   matches true-fp32 accuracy at up to ~2x speed on f32 GEMMs.
-- Benchmarks: env-driven campaign-shape arm
-  (`bench_lm_train_campaign_shape`), split forward/backward attribution
+- Benchmarks: env-driven production-shape arm
+  (`bench_lm_train_production_shape`), split forward/backward attribution
   arm, parallel-scan T64 arms, an IEEE-f32 row
   (`MAMBA_RS_BENCH_IEEE_F32`), and env-shaped M3 train bench.
 - M3 kernel instruments (`m3_final_grads_unit_parity`, `--ignored`):
   `m3_kernels_isolated_bench` times m3_dqkv/m3_dqktheta/colsum and the
-  two forward chunk kernels standalone at the campaign shape (compiled
+  two forward chunk kernels standalone at the production shape (compiled
   at the production state cap), and `m3_dqkv_output_hash` FNV-hashes
   all six m3_dqkv outputs — the bit gate for lane-redistribution work
   on a kernel no run-digest instrument covers. T_SPLIT sweep recorded:
   8 -> 4.17, 16 -> 4.02, 32 -> 6.24 ms/launch (f32); 16 wins.
 
-### Changed (campaign-shape program, second pass)
+### Changed (production-shape program, second pass)
 
 - conv1d dw/db goes T-tiled: each (b, d, tap, tile) lane keeps the
   descending-t order within its tile and the ascending-row reducer
@@ -517,7 +517,7 @@ unchanged.
   reduce finish their last five halvings with warp shuffles instead
   of smem+barrier rounds — identical pairing order, bit-identical
   sums, ~160 fewer barriers per block.
-- Campaign (bi+tc): 155.4 -> 142.6 ms/step with the conv dw tiling.
+- Production shape (bi+tc): 155.4 -> 142.6 ms/step with the conv dw tiling.
 - The parallel-scan backward folds dB/dC across d-groups in-kernel
   (`ssm_parallel_scan_bwd_fold_*`, group size 4): the ungrouped kernel
   materialized [B, ds, d_inner, T] locals whose stores alone were 57%
@@ -533,7 +533,7 @@ unchanged.
   9e0dbf87666dcfc6 / 46ef33ac8c0a2616; T1300 31d84af8ee97c4a0 /
   3b8de71cdd677eb8 / 85c5c30051938604; T2100 53003ceadbf3219e /
   bde81eca3b8182c8 / ac8cd31a973be149 (Cublas / BI / BI-TC).
-  Campaign (bi+tc): 142.6 -> 131.5 ms/step.
+  Production shape (bi+tc): 142.6 -> 131.5 ms/step.
 
 - BIT-FAMILY BREAK (batch-invariant lanes): the split-M TN partition
   drops its `n_in >= 128` floor, so small-K dW GEMMs against large
@@ -548,11 +548,11 @@ unchanged.
   TC a1127230fa767171; T2100 BI 3a124f6158a5922c / TC 3da29b372bc98d93
   (Cublas arms unchanged: d51f9412f5f09206 / 007082a9aa104f59 /
   ba13a79fc04a7faa).
-- The campaign bench prints its resolved GEMM tier: the tier rides TWO
+- The production bench prints its resolved GEMM tier: the tier rides TWO
   env flags (`MAMBA_RS_BATCH_INVARIANT` plus `MAMBA_RS_BI_TENSOR_CORES`
   on top), and a reading taken with only the TC flag silently measures
   the cuBLAS lane — several same-day readings did exactly that. With
-  the pair set, the batch-invariant tensor-core campaign is
+  the pair set, the batch-invariant tensor-core measurement is
   155.4 ms/step (cuBLAS lane: 169.0).
 
 - T-major B/C for the parallel scan: the gather writes [b][n][t]
@@ -563,7 +563,7 @@ unchanged.
   neither candidate chunk geometry (256x8, 128x16) moved anything,
   and the block scan and exp2f measured free. Pure permutation —
   identical values, all nine digest arms bit-equal. Isolated scan:
-  fwd 2.646 -> 0.921 ms/layer, bwd 3.559 -> 2.227; campaign
+  fwd 2.646 -> 0.921 ms/layer, bwd 3.559 -> 2.227; production
   244.8 -> 169.3 ms/step (-31%). The scan launch geometry is also
   single-sourced now (SCAN_NTHREADS/SCAN_NITEMS in launch.rs mirror
   the kernel defines; resident-block pin scales with block size).
@@ -579,16 +579,16 @@ unchanged.
   delta/u/B and its da registers. All nine digest arms (three GEMM
   tiers x T300/T1300/T2100) are bit-equal to the pre-S4 baseline in
   BOTH modes; `MAMBA_RS_SCAN_TAPE=full` restores the full tape for one
-  release. Campaign shape: 261.9 -> 247.4 ms/step and -511.6 MB/layer
+  release. Production shape: 261.9 -> 247.4 ms/step and -511.6 MB/layer
   (-12.28 GB total) — a B=32 micro-batch now fits on the 32 GB card
   (963.8 ms/step; the full tape OOMs on its first 511.6 MB alloc).
 - Tensor-core epilogues (NN forward, NT dX, TN dW, 128-tile family)
   store/accumulate the fragment's adjacent even-column pair with one
   packed access (32-bit typed store, float2 read-modify-write for the
   f32 dW accumulate) when the leading dimension is even; identical
-  values, digest-clean. Campaign-neutral at d_model 384 — the epilogue
+  values, digest-clean. Production-neutral at d_model 384 — the epilogue
   was not a wall there; kept for the store-issue halving on
-  wider-output shapes. Measured backward-GEMM ledger at the campaign
+  wider-output shapes. Measured backward-GEMM ledger at the production
   shape (tensor-core tier, x24-layer ms): in_proj 4.9, x_proj 3.2,
   out_proj 3.7 — and dt_proj 21.3 on the scalar tier (its dW output is
   below the tensor-core gate), 64% of all backward-GEMM cost.
@@ -601,7 +601,7 @@ unchanged.
   memory (~7 dependent accesses per timestep, 1300 deep, 24-block
   grid). It now lives in registers with one carry-in/carry-out —
   identical shifts and values. This single change was -28% of the
-  campaign step.
+  production step.
 - The conv pair is tiled over T (grid covers (b*d_inner) x T/128):
   `conv1d_burnin_forward_tiled_*` seeds tile windows from x_branch
   halo loads; `conv1d_bwd_dx_tiled_*` computes the anticausal 4-tap
@@ -611,12 +611,12 @@ unchanged.
 - LEG-4, the conv tape is gone: the forward saves only the carry-in
   window `[B*d_inner*d_conv]`; the backward reconstructs every window
   from the saved x_branch activation (now a layer act). Net -2.7 GB
-  VRAM at the campaign shape.
+  VRAM at the production shape.
 - S2 tape layout: h_saved and the parallel backward's dB/dC locals go
   t-innermost on the parallel route, with `ssm_reduce_d_BC_tmajor_*`
   reducer twins (ascending-d sum and `0.0f + sum` store verbatim);
   scan smem staging for delta/u/dy/B/C replaced by direct loads
-  (barrier diet). Both measured neutral at the campaign shape and
+  (barrier diet). Both measured neutral at the production shape and
   kept for coalescing correctness and the chunk-tape groundwork.
 - Multi-chunk digest arms (T=1300 / T=2100 across all three GEMM
   tiers) — the inter-chunk carry was previously outside every digest
@@ -631,7 +631,7 @@ unchanged.
 
 - B2 T64 d768 L24 graph lane: LM f32 28.3 -> 23.9 ms/step; bf16
   43.9 -> 40.2; f16 49.1; parallel-scan T64 f32 18.4.
-- Campaign shape (d384 L24 B8 T1300, batch-invariant + tensor-core
+- Production shape (d384 L24 B8 T1300, batch-invariant + tensor-core
   tier — the classify trainer's stamped route): 441.4 -> 261.9
   ms/step (first pass), then 155.4 after the second (-65%
   total: slim tape, NDEBUG, T-major B/C, split-M dW). The cuBLAS
@@ -639,10 +639,10 @@ unchanged.
   (x24-layer ms): scan fwd 22.1 / bwd 53.4, conv dw 13.4,
   backward GEMMs ~15, reduce_d_BC 9.6. Split: fwd 134 -> 80, bwd+opt 309 -> 182. Isolated
   ledger after the first pass: scan bwd 80, scan fwd 62, conv dw 13.4,
-  reduce_d_BC 9.6 (x24-layer ms). Note: earlier "BI+TC" campaign
+  reduce_d_BC 9.6 (x24-layer ms). Note: earlier "BI+TC" production
   rows in this file's history measured plain BI — the tier flag is
   MAMBA_RS_BI_TENSOR_CORES.
-- M3 campaign shape (bf16 graph): 636 -> 381 (dqkv pair matrices +
+- M3 production shape (bf16 graph): 636 -> 381 (dqkv pair matrices +
   two-head packing) -> 362.1 (decay/exp staging) -> 226.0 (t-split
   block widening) -> 221.5 ms/step (dqktheta coalesced staging).
   Isolated m3_dqkv: 11.0 -> 3.9 ms/launch; remaining M3 ledger

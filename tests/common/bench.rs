@@ -3,10 +3,10 @@
 //!
 //! Every bench arm prints ONE stamp naming the full numeric route it
 //! measured — tier (all four GEMM bits), kernel route, reduce depth,
-//! state capacity, NVRTC arch, shape, build. The 0.6.3 wave lost half a
-//! day to readings taken on the wrong tier and shipped two ledger rows
-//! measured on kernels production never launches; the stamp is the
-//! structural cure: a number without its stamp is not a reading.
+//! state capacity, NVRTC arch, shape, build. Readings taken on the wrong
+//! tier — on kernels production never launches — have burned whole
+//! sessions; the stamp is the structural cure: a number without its
+//! stamp is not a reading.
 
 use mamba_rs::mamba_ssm::gpu::buffers::GpuBuffer;
 use mamba_rs::mamba_ssm::gpu::context::GpuCtx;
@@ -72,19 +72,9 @@ pub fn timed(ctx: &GpuCtx, iters: usize, mut f: impl FnMut()) -> f64 {
     t0.elapsed().as_secs_f64() * 1e3 / iters.max(1) as f64
 }
 
-/// FNV-1a over an f32 slice, byte-wise little-endian — THE one digest
-/// primitive every printer shares (two hash laws under one prefix are
-/// incomparable numbers).
-pub fn fnv1a_f32(v: &[f32]) -> u64 {
-    let mut h = 0xcbf29ce484222325u64;
-    for x in v {
-        for b in x.to_bits().to_le_bytes() {
-            h ^= u64::from(b);
-            h = h.wrapping_mul(0x100000001b3);
-        }
-    }
-    h
-}
+/// The digest law lives in `common::digest`; re-exported here because
+/// every bench printer reaches for it alongside the timing helpers.
+pub use super::digest::fnv1a_f32;
 
 /// Print one `HASH <name> <hex>` line per buffer (f32 elements, `n`
 /// leading elements each). The bit gate for kernels without digest
@@ -94,6 +84,8 @@ pub fn hash_outputs(ctx: &GpuCtx, bufs: &[(&str, &GpuBuffer, usize)]) {
         let mut v = vec![0f32; *n];
         buf.download(&ctx.stream, &mut v).unwrap();
         ctx.stream.synchronize().unwrap();
-        eprintln!("HASH {name} {:016x}", fnv1a_f32(&v));
+        let h = fnv1a_f32(&v);
+        eprintln!("HASH {name} {h:016x}");
+        super::evidence::record_digest("hash_outputs", "", name, h);
     }
 }

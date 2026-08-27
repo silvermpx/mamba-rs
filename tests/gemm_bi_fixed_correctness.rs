@@ -1,5 +1,5 @@
 //! Correctness of the FIXED-tile batch-invariant GEMM
-//! (`kernels/gemm_bi_fixed.cu`, `BiGemmFamily::Fixed`) against a CPU
+//! (`kernels/gemm_bi_fixed/`, `BiGemmFamily::Fixed`) against a CPU
 //! reference, across shapes that exercise the tile tails.
 //!
 //! The family had no direct test while it sat off every dispatch path;

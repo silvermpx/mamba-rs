@@ -421,7 +421,7 @@ fn assert_identity(prepared: &Sm100PreparedLaunch, route: Sm100ForcedRoute) {
     );
     let global_target = match identity.device.compute_capability {
         (10, 0) => "sm_100a",
-        (10, 3) => "sm_103",
+        (10, 3) => "sm_103a",
         cc => panic!("unexpected SM100 device identity {cc:?}"),
     };
     assert_eq!(identity.device.target.as_str(), global_target);

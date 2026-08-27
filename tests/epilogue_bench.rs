@@ -1,4 +1,4 @@
-//! Epilogue-class measurement instruments at the campaign shape:
+//! Epilogue-class measurement instruments at the production shape:
 //!
 //! - `m1_bandwidth_ceiling`: what a bare bt*d_inner bf16 copy costs in
 //!   scalar / uint2 / uint4 shapes. This one reading prices the whole
@@ -119,8 +119,8 @@ extern "C" __global__ void copy_uint4(uint4* dst4, const uint4* src4, int n4) {
     }
 }
 
-/// M-0: the epilogue kernels the campaign step actually launches, each
-/// timed alone at the campaign shape (bf16 typed variants where the
+/// M-0: the epilogue kernels the production step actually launches, each
+/// timed alone at the production shape (bf16 typed variants where the
 /// mixed lane uses them).
 #[test]
 #[ignore = "measurement instrument"]
