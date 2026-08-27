@@ -53,13 +53,13 @@ deterministic tier on the same shape (BK=64 staging):
 
 | shape (M, K, N) | fwd scalar → TC | dW scalar → TC | dX scalar → TC |
 |---|---:|---:|---:|
-| 2048, 768, 3072 | 293.2 → 84.1 (**3.49×**) | 400.2 → 101.5 (**3.95×**) | 424.6 → 83.6 (**5.08×**) |
-| 4096, 1536, 3072 | 1131.8 → 352.8 (3.21×) | 1450.4 → 311.8 (4.65×) | 1212.7 → 301.5 (4.02×) |
-| 2048, 768, 512 | 112.7 → 17.6 (**6.40×**) | 138.4 → 24.8 (5.59×) | 93.6 → 26.7 (3.51×) |
+| 2048, 768, 3072 | 295.0 → 64.9 (**4.55×**) | 392.6 → 98.7 (3.98×) | 410.9 → 75.7 (**5.43×**) |
+| 4096, 1536, 3072 | 1046.4 → 280.1 (3.74×) | 1375.1 → 306.0 (4.49×) | 1170.4 → 262.2 (4.46×) |
+| 2048, 768, 512 | 106.3 → 16.9 (**6.29×**) | 128.6 → 22.9 (**5.61×**) | 86.9 → 18.1 (4.80×) |
 
-84.1 µs at M2048 K768 N3072 ≈ 115 TFLOPS bf16; the M4096 forward
-reaches ~144 TFLOPS in an isolated sweep (`step0` instrumentation:
-83.7 µs / 267.8 µs on the two shapes). BK=64 staging halves the per-CTA
+Alternating paired runs, minimum of the rounds per arm.
+
+64.9 µs at M2048 K768 N3072 ≈ 149 TFLOPS bf16. BK=64 staging halves the per-CTA
 barrier/wait_group boundaries vs BK=32 and bought +8–11 %; deeper
 pipelining was measured FLAT.
 

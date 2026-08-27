@@ -391,7 +391,7 @@ trainer.ctx().set_bi_tensor_cores(true);   // + tensor-core tier (own contract)
 ```
 
 GEMM-level tensor-core speedups vs the scalar deterministic tier: forward
-3.2–6.4×, dW 4.0–5.6×, dX 3.5–5.1× (bf16, M=2048-class shapes). At fat
+3.7–6.3×, dW 4.0–5.6×, dX 4.5–5.4× (bf16, M=2048-class shapes). At fat
 training shapes the wide fragment-reuse tile carries the deterministic
 ladder to parity with cuBLAS's tensor-core path (143.5 vs 144.9 TFLOPS
 bf16 at 4096×768×3072) and +12% over the square tile just past a wave
