@@ -62,6 +62,9 @@ struct CandidateSpec {
     /// that many resident at once.
     grid: u32,
     block: (u32, u32, u32),
+    /// Rows and columns of the tile one warp owns; every thread keeps
+    /// `warp_tile.0 * warp_tile.1 / 32` accumulators.
+    warp_tile: (u32, u32),
     dynamic_shared_bytes: u32,
     minimum_occupancy: u32,
     maximum_registers: u32,
@@ -74,6 +77,7 @@ const fn dynamic_shared_bytes(tile: (u32, u32), stages: u32) -> u32 {
 const fn spec(
     symbol: &'static str,
     tile: (u32, u32),
+    warp_tile: (u32, u32),
     stages: u32,
     grid: u32,
     minimum_occupancy: u32,
@@ -83,7 +87,8 @@ const fn spec(
         tile,
         stages,
         grid,
-        block: (tile.0 * tile.1 / 32, 1, 1),
+        block: ((tile.0 / warp_tile.0) * (tile.1 / warp_tile.1) * 32, 1, 1),
+        warp_tile,
         dynamic_shared_bytes: dynamic_shared_bytes(tile, stages),
         minimum_occupancy,
         // Two resident CTAs share the 64K-register file, one has it alone;
@@ -92,70 +97,101 @@ const fn spec(
     }
 }
 
+impl CandidateSpec {
+    const fn accumulators_per_thread(self) -> u32 {
+        self.warp_tile.0 * self.warp_tile.1 / 32
+    }
+}
+
 // The first two entries keep the first design as the yardstick; the rest
 // are the continuous-pipeline design at the same grids.
 // The production stream-K kernel runs as a candidate too, so the promoted
 // build is measured in the same harness as the experiments.
-const CANDIDATES: [CandidateSpec; 9] = [
+const CANDIDATES: [CandidateSpec; 11] = [
     spec(
-        "gemm_bi_tn_sm120_tma_mma_tf32_v1_m64n128_bk32_s3_pair_streamk",
-        (64, 128),
+        "gemm_bi_tn_sm120_tma_mma_tf32_v1_m128n128_bk32_s3_pair_exp_streamk_wide",
+        (128, 128),
+        (32, 64),
         3,
         170,
         1,
     ),
     spec(
-        "gemm_bi_tn_sm120_tma_mma_tf32_v1_m64n128_bk32_s4_pair_exp_streamk_v1",
+        "gemm_bi_tn_sm120_tma_mma_tf32_v1_m128n128_bk32_s2_pair_exp_streamk_wide",
+        (128, 128),
+        (32, 64),
+        2,
+        170,
+        1,
+    ),
+    spec(
+        "gemm_bi_tn_sm120_tma_mma_tf32_v1_m64n128_bk32_s3_pair_streamk",
         (64, 128),
+        (32, 32),
+        3,
+        170,
+        1,
+    ),
+    spec(
+        "gemm_bi_tn_sm120_tma_mma_tf32_v1_m64n128_bk32_s4_pair_exp_streamk_drained",
+        (64, 128),
+        (32, 32),
         4,
         170,
         1,
     ),
     spec(
-        "gemm_bi_tn_sm120_tma_mma_tf32_v1_m64n128_bk32_s3_pair_exp_streamk_v2",
+        "gemm_bi_tn_sm120_tma_mma_tf32_v1_m64n128_bk32_s3_pair_exp_streamk_flowing",
         (64, 128),
+        (32, 32),
         3,
         96,
         1,
     ),
     spec(
-        "gemm_bi_tn_sm120_tma_mma_tf32_v1_m64n128_bk32_s3_pair_exp_streamk_v2",
+        "gemm_bi_tn_sm120_tma_mma_tf32_v1_m64n128_bk32_s3_pair_exp_streamk_flowing",
         (64, 128),
+        (32, 32),
         3,
         128,
         1,
     ),
     spec(
-        "gemm_bi_tn_sm120_tma_mma_tf32_v1_m64n128_bk32_s2_pair_exp_streamk_v1",
+        "gemm_bi_tn_sm120_tma_mma_tf32_v1_m64n128_bk32_s2_pair_exp_streamk_drained",
         (64, 128),
+        (32, 32),
         2,
         340,
         2,
     ),
     spec(
-        "gemm_bi_tn_sm120_tma_mma_tf32_v1_m64n128_bk32_s4_pair_exp_streamk_v2",
+        "gemm_bi_tn_sm120_tma_mma_tf32_v1_m64n128_bk32_s4_pair_exp_streamk_flowing",
         (64, 128),
+        (32, 32),
         4,
         170,
         1,
     ),
     spec(
-        "gemm_bi_tn_sm120_tma_mma_tf32_v1_m64n128_bk32_s3_pair_exp_streamk_v2",
+        "gemm_bi_tn_sm120_tma_mma_tf32_v1_m64n128_bk32_s3_pair_exp_streamk_flowing",
         (64, 128),
+        (32, 32),
         3,
         170,
         1,
     ),
     spec(
-        "gemm_bi_tn_sm120_tma_mma_tf32_v1_m64n128_bk32_s2_pair_exp_streamk_v2",
+        "gemm_bi_tn_sm120_tma_mma_tf32_v1_m64n128_bk32_s2_pair_exp_streamk_flowing",
         (64, 128),
+        (32, 32),
         2,
         170,
         2,
     ),
     spec(
-        "gemm_bi_tn_sm120_tma_mma_tf32_v1_m64n128_bk32_s2_pair_exp_streamk_v2",
+        "gemm_bi_tn_sm120_tma_mma_tf32_v1_m64n128_bk32_s2_pair_exp_streamk_flowing",
         (64, 128),
+        (32, 32),
         2,
         340,
         2,
@@ -163,7 +199,7 @@ const CANDIDATES: [CandidateSpec; 9] = [
 ];
 
 const fn production_spec() -> CandidateSpec {
-    spec(PRODUCTION_SYMBOL, (64, 128), 4, 0, 1)
+    spec(PRODUCTION_SYMBOL, (64, 128), (32, 32), 4, 0, 1)
 }
 
 fn tn_tiles(dims: (usize, usize, usize), tile: (u32, u32)) -> Result<u32, String> {
@@ -198,7 +234,17 @@ fn validate_spec(spec: CandidateSpec) -> Result<(), String> {
             spec.symbol, spec.minimum_occupancy
         ));
     }
-    if spec.block != (rows * columns / 32, 1, 1) {
+    let (warp_rows, warp_columns) = spec.warp_tile;
+    if warp_rows == 0
+        || warp_columns == 0
+        || !rows.is_multiple_of(warp_rows)
+        || !columns.is_multiple_of(warp_columns)
+        || !warp_rows.is_multiple_of(16)
+        || !warp_columns.is_multiple_of(8)
+    {
+        return Err(format!("{} warp tile does not tile the block", spec.symbol));
+    }
+    if spec.block != ((rows / warp_rows) * (columns / warp_columns) * 32, 1, 1) {
         return Err(format!(
             "{} block does not match its warp tiling",
             spec.symbol
@@ -224,8 +270,9 @@ fn validate_spec(spec: CandidateSpec) -> Result<(), String> {
 
 fn validate_candidate_symbol(spec: CandidateSpec) -> Result<(), String> {
     if !spec.symbol.starts_with("gemm_bi_tn_sm120_tma_mma_tf32_v1_")
-        || !(spec.symbol.ends_with("_exp_streamk_v1")
-            || spec.symbol.ends_with("_exp_streamk_v2")
+        || !(spec.symbol.ends_with("_exp_streamk_drained")
+            || spec.symbol.ends_with("_exp_streamk_flowing")
+            || spec.symbol.ends_with("_exp_streamk_wide")
             || spec.symbol.ends_with("_pair_streamk"))
     {
         return Err(format!(
@@ -473,15 +520,21 @@ fn candidates_are_test_only_and_match_the_storage_formula() {
     assert!(validate_candidate_symbol(production).is_err());
     assert_eq!(
         CUDA_SOURCE
-            .matches("SM120_DEFINE_TF32_TN_EXP_STREAMK_KERNEL(\n")
+            .matches("SM120_DEFINE_TF32_TN_EXP_STREAMK_DRAINED_KERNEL(\n")
             .count(),
         3
     );
     assert_eq!(
         CUDA_SOURCE
-            .matches("SM120_DEFINE_TF32_TN_EXP_STREAMK_V2_KERNEL(\n")
+            .matches("SM120_DEFINE_TF32_TN_EXP_STREAMK_FLOWING_KERNEL(\n")
             .count(),
         3
+    );
+    assert_eq!(
+        CUDA_SOURCE
+            .matches("SM120_DEFINE_TF32_TN_EXP_STREAMK_WIDE_KERNEL(\n")
+            .count(),
+        2
     );
     let mut identities: Vec<(&str, u32)> = CANDIDATES
         .iter()
@@ -1277,7 +1330,7 @@ mod cuda_tournament {
         {
             return Err("fixture geometry or allocation length mismatch".into());
         }
-        let slab = (spec.block.0 as usize) * 32;
+        let slab = (spec.block.0 as usize) * (spec.accumulators_per_thread() as usize);
         let slots = (spec.grid.max(1) as usize) * 2;
         let partial_len = slab
             .checked_mul(slots)
