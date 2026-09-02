@@ -3607,6 +3607,7 @@ fn expected_sm120_symbols() -> BTreeSet<String> {
         symbols.insert(format!("gemm_bi_{op}_sm120_tma_mma_tf32_v1_m64n64_bk32_s2"));
     }
     symbols.insert("gemm_bi_tn_sm120_tma_mma_tf32_v1_m64n128_bk32_s4_pair".to_string());
+    symbols.insert("gemm_bi_nn_sm120_tma_mma_tf32_v1_m80n32_bk64_s2".to_string());
     symbols
 }
 
@@ -4033,7 +4034,7 @@ fn exact_policy_never_selects_tf32_and_allow_policy_falls_back_to_scalar() {
         ),
         (
             "pub struct Tf32Sm120Route",
-            &["tile: Tf32Sm120Tile", "stages: Sm120Stages"][..],
+            &["tile: Tf32Sm120Tile", "stages: Tf32Sm120Stages"][..],
         ),
     ] {
         assert_contains_all(braced_scope_after(CONTRACT_SOURCE, marker), fields, marker);
@@ -4107,8 +4108,14 @@ fn graph_identity_rejects_policy_and_physical_route_drift_before_launch() {
     let route_snapshot = braced_scope_after(CONTEXT_SOURCE, "pub fn gemm_route(&self)");
     assert_contains_all(
         route_snapshot,
-        &["cublas_tf32", "f32_triad_policy", "GemmRouteIdentity"],
+        &["self.gemm_policy()", "GemmRouteIdentity"],
         "context graph route snapshot",
+    );
+    let policy_snapshot = braced_scope_after(CONTEXT_SOURCE, "pub fn gemm_policy(&self)");
+    assert_contains_all(
+        policy_snapshot,
+        &["cublas_tf32", "f32_triad_policy", "bi_gemm_family"],
+        "context graph policy snapshot",
     );
     assert_contains_all(
         TRAINING_GRAPH_SOURCE,
@@ -8258,7 +8265,7 @@ fn tf32_sources_export_the_exact_planned_symbol_inventories() {
             "gemm_bi_",
             "_sm120_tma_mma_tf32_v1_",
             expected_sm120_symbols(),
-            16,
+            17,
         ),
     ];
 
@@ -8293,7 +8300,7 @@ fn rust_contract_and_module_loader_own_the_same_exact_tf32_inventories() {
             "18",
             "6",
             "36",
-            "16",
+            "17",
         ],
         "direct contract/module/CUDA inventory behavior",
     );
@@ -9607,7 +9614,7 @@ fn zero_reduction_device_branch_dominates_every_descriptor_use() {
         .chain(expected_sm100_symbols())
         .chain(expected_sm120_symbols())
         .collect();
-    assert_eq!(specialized.len(), 57, "canonical specialized K=0 census");
+    assert_eq!(specialized.len(), 59, "canonical specialized K=0 census");
     for (label, source) in [
         ("SM80", SM80_SOURCE),
         ("SM90a", SM90A_SOURCE),

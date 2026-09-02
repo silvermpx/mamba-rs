@@ -1465,9 +1465,19 @@ fn tc_source_centralizes_async_copy_and_avoids_type_punned_stores() {
         0,
         "portable TF32 staging must not retain the scalar-width async path"
     );
+    // The narrow-stride TF32 staging path issues four 4-byte copies from
+    // one named helper; nothing else in the portable TF32 source may carry
+    // the scalar-width opcode.
+    assert_eq!(
+        tf32_sm80
+            .matches("void gemm_bi_tf32_cp_async_4x4_zfill(")
+            .count(),
+        1,
+        "portable TF32 staging must own exactly one narrow-stride helper"
+    );
     assert_eq!(
         tf32_sm80.matches("cp.async.ca.shared.global").count(),
-        0,
+        1,
         "portable TF32 staging must use only the named 16-byte helper"
     );
     let tf32_copy_helper =
@@ -1482,10 +1492,23 @@ fn tc_source_centralizes_async_copy_and_avoids_type_punned_stores() {
     assert!(tf32_copy_helper.contains("if constexpr (BM == 16)"));
     assert!(tf32_copy_helper.contains("gemm_bi_cp_async_16_zfill("));
     assert!(tf32_copy_helper.contains("gemm_bi_cp_async_16_zfill_l2("));
-    let tf32_wide_copies = tf32_stage
-        .matches("gemm_bi_tf32_cp_async_16_zfill<BM>(")
-        .count();
+    // The staging loop routes every copy through the stride-aware wrapper,
+    // which picks the 16-byte helper or the narrow 4x4 helper per call.
+    let tf32_wide_copies = tf32_stage.matches("gemm_bi_tf32_cp_async_zfill<").count();
     assert_eq!(tf32_wide_copies, 4);
+    let tf32_wrapper = cuda_braced_scope_after(tf32_sm80, "void gemm_bi_tf32_cp_async_zfill(");
+    assert_eq!(
+        tf32_wrapper
+            .matches("gemm_bi_tf32_cp_async_16_zfill<BM>(")
+            .count(),
+        2
+    );
+    assert_eq!(
+        tf32_wrapper
+            .matches("gemm_bi_tf32_cp_async_4x4_zfill(")
+            .count(),
+        2
+    );
     let tf32_copies = tf32_wide_copies;
     assert_eq!(
         tf32_copies,
@@ -1510,16 +1533,21 @@ fn tc_source_centralizes_async_copy_and_avoids_type_punned_stores() {
     }
     for line in tf32_stage
         .lines()
-        .filter(|line| line.contains("gemm_bi_tf32_cp_async_16_zfill<BM>("))
+        .filter(|line| line.contains("gemm_bi_tf32_cp_async_zfill<"))
     {
         assert!(
             line.contains("dst, src, _bytes"),
             "TF32 async-copy call bypasses its selected source: {line}"
         );
     }
+    let tf32_narrow_helper =
+        cuda_braced_scope_after(tf32_sm80, "void gemm_bi_tf32_cp_async_4x4_zfill(");
     assert_eq!(
         source.matches("cp.async.ca.shared.global").count(),
-        typed_helper.matches("cp.async.ca.shared.global").count(),
+        typed_helper.matches("cp.async.ca.shared.global").count()
+            + tf32_narrow_helper
+                .matches("cp.async.ca.shared.global")
+                .count(),
         "only the named helpers may own cache-all cp.async opcodes"
     );
     assert_eq!(

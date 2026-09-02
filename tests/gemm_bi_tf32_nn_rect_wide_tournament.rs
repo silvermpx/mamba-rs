@@ -651,8 +651,8 @@ fn production_sources_own_every_candidate_and_a_bounded_abi() {
     let contract = include_str!("../src/mamba_ssm/gpu/gemm_bi_triad/contract.rs");
     for literal in [
         "ResolvedGemmOp::Nn => [",
-        "box_dimensions: [spec.bk, spec.tile.0]",
-        "box_dimensions: [spec.bk, spec.bk]",
+        "box_dimensions: [spec.map_bk, spec.tile.0]",
+        "box_dimensions: [spec.map_bk, spec.map_bk]",
         "Tf32PhysicalRoute::Sm120TmaMmaTf32RnaV1(_) => Tf32TensorMapFormat::Uint32V1",
     ] {
         assert!(
