@@ -566,21 +566,27 @@ fn sm90a_tf32_tma_calls_bind_every_prepared_subview_origin() {
 
 #[test]
 fn tf32_positive_ceil_divisions_use_subtract_before_addition() {
-    for (name, source, column_divisor) in [
+    for (name, source, column_divisor, column_sites, reduction_sites) in [
         (
             "SM90a",
             include_str!("../kernels/gemm_bi_triad/sm90a.cu"),
             "128",
+            2,
+            1,
         ),
         (
             "SM100",
             include_str!("../kernels/gemm_bi_triad/sm100.cu"),
             "Columns",
+            2,
+            1,
         ),
         (
             "SM120",
             include_str!("../kernels/gemm_bi_triad/sm120.cu"),
             "N",
+            3,
+            2,
         ),
     ] {
         let compact: String = source
@@ -590,12 +596,12 @@ fn tf32_positive_ceil_divisions_use_subtract_before_addition() {
         let safe_columns = format!("1+(columns-1)/{column_divisor}");
         assert_eq!(
             compact.matches(&safe_columns).count(),
-            2,
+            column_sites,
             "{name} TF32 output tiling must avoid overflowing positive columns"
         );
         assert_eq!(
             compact.matches("1+(reduction-1)/32").count(),
-            1,
+            reduction_sites,
             "{name} TF32 reduction tiling must avoid overflowing a positive reduction"
         );
     }
@@ -3615,7 +3621,7 @@ fn compiles_generic_sm120_triad_modules_with_exact_ptx_contract() {
             &ptx,
             emitted,
             &expected,
-            112,
+            113,
         )
         .unwrap();
 

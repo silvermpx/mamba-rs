@@ -39,7 +39,11 @@ fn production_source_is_an_isolated_one_owner_exact_kernel() {
         .split_once(") {")
         .expect("production parameter list");
     assert!(parameters.matches(',').count() + 1 <= 7);
-    assert_eq!(source.matches("threadResults[idx] = __fmaf_rn(").count(), 1);
+    // The fragment now also owns the prism twin of this schedule; nothing
+    // else may join it without being named here.
+    assert_eq!(source.matches("threadResults[idx] = __fmaf_rn(").count(), 2);
+    assert_eq!(source.matches("extern \"C\" __global__").count(), 2);
+    assert!(source.contains("void gemm_bi_nn_prism_m64n64_bk16_s2_v1("));
     let normalized = source.split_whitespace().collect::<Vec<_>>().join(" ");
     let mut ascending = normalized.as_str();
     for token in [

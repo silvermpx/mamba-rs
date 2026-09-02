@@ -1600,7 +1600,7 @@ fn qualification_plan_is_exact() {
             .iter()
             .filter(|spec| spec.op == ResolvedGemmOp::Nn)
             .count(),
-        5
+        6
     );
     assert_eq!(
         tf32_route_specs(ModuleKind::TriadSm120)
@@ -1616,7 +1616,7 @@ fn qualification_plan_is_exact() {
             .count(),
         5
     );
-    assert_eq!(candidates(ResolvedGemmOp::Nn).len(), 13);
+    assert_eq!(candidates(ResolvedGemmOp::Nn).len(), 14);
     assert_eq!(candidates(ResolvedGemmOp::Tn).len(), 12);
     assert_eq!(candidates(ResolvedGemmOp::Nt).len(), 15);
     assert_eq!(DISCOVERY_WINDOWS, 21);
@@ -1755,9 +1755,9 @@ fn split_candidate_inventory_is_exact_and_operation_scoped() {
 #[test]
 fn split_candidates_that_exceed_the_fixed_workspace_are_not_timed() {
     assert!(DISPATCH_SOURCE.contains("pub(super) const SPLITK_SCRATCH_CAP: usize = 1 << 23;"));
-    assert_eq!(candidates_for_cell(CELLS[0]).len(), 13);
-    assert_eq!(candidates_for_cell(CELLS[9]).len(), 12);
-    assert_eq!(candidates_for_cell(CELLS[14]).len(), 12);
+    assert_eq!(candidates_for_cell(CELLS[0]).len(), 14);
+    assert_eq!(candidates_for_cell(CELLS[9]).len(), 13);
+    assert_eq!(candidates_for_cell(CELLS[14]).len(), 13);
     assert_eq!(candidates_for_cell(CELLS[17]).len(), 11);
     assert_eq!(candidates_for_cell(CELLS[2]).len(), 8);
     assert_eq!(candidates_for_cell(CELLS[3]).len(), 8);
@@ -1867,22 +1867,22 @@ fn cell_artifact_schema_has_exact_candidate_and_stat_counts() {
 
     assert!(json.starts_with(&format!("{{\"schema\":\"{SCHEMA}\"")));
     assert!(json_delimiters_are_balanced(&json));
-    assert_eq!(json.matches("\"symbol\":").count(), 14);
-    assert_eq!(json.matches("\"discovery\":").count(), 13);
-    assert_eq!(json.matches("\"final\":").count(), 13);
-    assert_eq!(json.matches("\"order_stats\":").count(), 13);
-    assert_eq!(json.matches("\"raw_samples\":").count(), 13);
-    assert_eq!(json.matches("\"qualification_identity\":").count(), 13);
+    assert_eq!(json.matches("\"symbol\":").count(), 15);
+    assert_eq!(json.matches("\"discovery\":").count(), 14);
+    assert_eq!(json.matches("\"final\":").count(), 14);
+    assert_eq!(json.matches("\"order_stats\":").count(), 14);
+    assert_eq!(json.matches("\"raw_samples\":").count(), 14);
+    assert_eq!(json.matches("\"qualification_identity\":").count(), 14);
     assert_eq!(json.matches("\"specialized_identity\":").count(), 1);
-    assert_eq!(json.matches("\"iterations\":").count(), 13);
-    assert_eq!(json.matches("\"ab\":").count(), 104);
-    assert_eq!(json.matches("\"ba\":").count(), 104);
-    assert_eq!(json.matches("\"scalar_us\":").count(), 104);
-    assert_eq!(json.matches("\"candidate_us\":").count(), 104);
-    assert_eq!(json.matches("\"speedup\":").count(), 104);
+    assert_eq!(json.matches("\"iterations\":").count(), 14);
+    assert_eq!(json.matches("\"ab\":").count(), 112);
+    assert_eq!(json.matches("\"ba\":").count(), 112);
+    assert_eq!(json.matches("\"scalar_us\":").count(), 112);
+    assert_eq!(json.matches("\"candidate_us\":").count(), 112);
+    assert_eq!(json.matches("\"speedup\":").count(), 112);
     assert!(json.contains("{\"scalar_us\":4,\"candidate_us\":2,\"speedup\":2}"));
-    assert_eq!(json.matches("_median_speedup\"").count(), 52);
-    assert_eq!(json.matches("_p05_speedup\"").count(), 26);
+    assert_eq!(json.matches("_median_speedup\"").count(), 56);
+    assert_eq!(json.matches("_p05_speedup\"").count(), 28);
     assert!(json.contains("\"dims\":[64,384,1536]"));
     assert!(json.contains("\"epilogue\":{\"alpha\":1,\"beta\":0,\"bias\":true}"));
     assert!(json.contains(
