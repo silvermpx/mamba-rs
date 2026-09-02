@@ -52,7 +52,7 @@
 "gemm_bi_scalar_nn_splitk_m32n128_experiment" = "record"
 "gemm_bi_scalar_nn_splitk_m32n64_exactshape_tournament" = "record"
 "gemm_bi_scalar_nn_splitk_m64n64_tournament" = "record"
-"gemm_bi_scalar_nn_wide_microtile_experiment" = "record"
+"gemm_bi_scalar_wide_microtile_experiment" = "record"
 "gemm_bi_scalar_nt_d128_out_m64n64_tournament" = "record"
 "gemm_bi_scalar_nt_d768_out_m64n64_tournament" = "record"
 "gemm_bi_scalar_nt_d768_transpose_tournament" = "record"
