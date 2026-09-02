@@ -80,6 +80,7 @@
 "gemm_bi_tf32_splitk4_qualification" = "record"
 "gemm_bi_tf32_tn_panel8_tournament" = "record"
 "gemm_bi_tf32_tn_splitm_tournament" = "record"
+"gemm_bi_tf32_tn_streamk_tournament" = "record"
 "gemm_bi_tf32_tn_underfill_tournament" = "record"
 "gemm_bi_tn_d128_fused_contract_tournament" = "record"
 "gemm_bi_tn_narrow_partition_tournament" = "record"
