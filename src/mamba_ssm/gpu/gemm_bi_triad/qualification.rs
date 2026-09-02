@@ -3931,9 +3931,9 @@ fn validate_driver_jit_resource_inventory(
         }
     }
     if matches!(config.exact_cc, (12, 0 | 1)) {
-        if (sm120_routes, sm120_zero_routes) != (17, 17) {
+        if (sm120_routes, sm120_zero_routes) != (18, 18) {
             return Err(format!(
-                "SM120 Driver JIT inventory is {sm120_routes} routes with {sm120_zero_routes} zero-byte routes; expected 17/17"
+                "SM120 Driver JIT inventory is {sm120_routes} routes with {sm120_zero_routes} zero-byte routes; expected 18/18"
             ));
         }
     } else if sm120_routes != 0 || sm120_zero_routes != 0 {
@@ -4830,8 +4830,8 @@ mod tests {
             ((10, 0), 54),
             ((10, 3), 54),
             ((11, 0), 54),
-            ((12, 0), 35),
-            ((12, 1), 35),
+            ((12, 0), 36),
+            ((12, 1), 36),
         ] {
             assert_eq!(route_specs(cc).expect("supported CC").len(), count);
         }
@@ -5096,7 +5096,7 @@ mod tests {
     fn sm120_driver_jit_inventory_requires_all_routes_to_be_zero() {
         let config = Tf32QualificationConfig {
             exact_cc: (12, 0),
-            expected_routes: 35,
+            expected_routes: 36,
             repeat: 1,
             suite: Tf32QualificationSuite::Sanitizer,
         };
@@ -5115,7 +5115,7 @@ mod tests {
                 .iter()
                 .filter(|spec| spec.module_kind == ModuleKind::TriadSm120)
                 .count(),
-            17
+            18
         );
 
         let rejected = evidence

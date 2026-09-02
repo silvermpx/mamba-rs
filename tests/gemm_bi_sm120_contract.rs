@@ -697,7 +697,7 @@ fn sm120_source_freezes_tma_swizzle_and_pipeline_contract() {
         "ldmatrix.sync.aligned.m8n8.x4.shared.b16",
         "red."
     ));
-    assert_eq!(SOURCE.matches("sm120_sync_warp();").count(), 9);
+    assert_eq!(SOURCE.matches("sm120_sync_warp();").count(), 11);
 }
 
 #[test]

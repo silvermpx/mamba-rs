@@ -17,6 +17,7 @@
 mod common;
 
 const CUDA_SOURCE: &str = include_str!("gemm_bi_tf32_tn_streamk_tournament.cu");
+const PRODUCTION_SOURCE: &str = include_str!("../kernels/gemm_bi_triad/sm120.cu");
 const PRODUCTION_SYMBOL: &str = "gemm_bi_tn_sm120_tma_mma_tf32_v1_m64n128_bk32_s4_pair";
 const PRODUCTION_TUNING_TABLE_REVISION: u16 = 36;
 const SCREENING_WINDOWS: usize = 21;
@@ -93,7 +94,16 @@ const fn spec(
 
 // The first two entries keep the first design as the yardstick; the rest
 // are the continuous-pipeline design at the same grids.
-const CANDIDATES: [CandidateSpec; 8] = [
+// The production stream-K kernel runs as a candidate too, so the promoted
+// build is measured in the same harness as the experiments.
+const CANDIDATES: [CandidateSpec; 9] = [
+    spec(
+        "gemm_bi_tn_sm120_tma_mma_tf32_v1_m64n128_bk32_s3_pair_streamk",
+        (64, 128),
+        3,
+        170,
+        1,
+    ),
     spec(
         "gemm_bi_tn_sm120_tma_mma_tf32_v1_m64n128_bk32_s4_pair_exp_streamk_v1",
         (64, 128),
@@ -214,7 +224,9 @@ fn validate_spec(spec: CandidateSpec) -> Result<(), String> {
 
 fn validate_candidate_symbol(spec: CandidateSpec) -> Result<(), String> {
     if !spec.symbol.starts_with("gemm_bi_tn_sm120_tma_mma_tf32_v1_")
-        || !(spec.symbol.ends_with("_exp_streamk_v1") || spec.symbol.ends_with("_exp_streamk_v2"))
+        || !(spec.symbol.ends_with("_exp_streamk_v1")
+            || spec.symbol.ends_with("_exp_streamk_v2")
+            || spec.symbol.ends_with("_pair_streamk"))
     {
         return Err(format!(
             "{} is not a test-only TN stream-K candidate",
@@ -222,10 +234,10 @@ fn validate_candidate_symbol(spec: CandidateSpec) -> Result<(), String> {
         ));
     }
     let definition = format!(
-        "{}, {}, {}, {})",
+        "{}, {}, {}, {}",
         spec.symbol, spec.tile.0, spec.tile.1, spec.stages
     );
-    if !CUDA_SOURCE.contains(&definition) {
+    if !CUDA_SOURCE.contains(&definition) && !PRODUCTION_SOURCE.contains(&definition) {
         return Err(format!(
             "{} is not defined with its geometry by the tournament source",
             spec.symbol
@@ -461,13 +473,13 @@ fn candidates_are_test_only_and_match_the_storage_formula() {
     assert!(validate_candidate_symbol(production).is_err());
     assert_eq!(
         CUDA_SOURCE
-            .matches("SM120_DEFINE_TF32_TN_STREAMK_KERNEL(\n")
+            .matches("SM120_DEFINE_TF32_TN_EXP_STREAMK_KERNEL(\n")
             .count(),
         3
     );
     assert_eq!(
         CUDA_SOURCE
-            .matches("SM120_DEFINE_TF32_TN_STREAMK_V2_KERNEL(\n")
+            .matches("SM120_DEFINE_TF32_TN_EXP_STREAMK_V2_KERNEL(\n")
             .count(),
         3
     );
@@ -591,7 +603,12 @@ mod cuda_tournament {
             .f32_triad_availability()
             .specialized
             .ok_or_else(|| {
-                "the stream-K tournament requires the specialized TF32 module".to_string()
+                format!(
+                    "the stream-K tournament requires the specialized TF32 module: {}",
+                    ctx.kernels
+                        .specialized_tf32_rejection()
+                        .unwrap_or("no rejection recorded")
+                )
             })?;
         let artifact = specialized.artifact;
         let compiler = specialized.compiler;
@@ -741,7 +758,7 @@ mod cuda_tournament {
             "-DNDEBUG".to_owned(),
         ];
         if trace {
-            options.push("-DSM120_STREAMK_TRACE=1".to_owned());
+            options.push("-DSM120_EXP_STREAMK_TRACE=1".to_owned());
         }
         let options = cudarc::nvrtc::CompileOptions {
             arch: Some("compute_120"),
@@ -1945,7 +1962,11 @@ mod cuda_tournament {
         units_last: u64,
     }
 
-    fn read_traces(runtime: &Runtime, fixture: &Fixture, grid: u32) -> Result<Vec<CtaTrace>, String> {
+    fn read_traces(
+        runtime: &Runtime,
+        fixture: &Fixture,
+        grid: u32,
+    ) -> Result<Vec<CtaTrace>, String> {
         let bits = fixture.partial.bits(&runtime.stream)?;
         let words = trace_words(grid);
         if bits.len() < words {
@@ -1975,7 +1996,7 @@ mod cuda_tournament {
             .collect())
     }
 
-    fn median_us(values: &mut Vec<f64>) -> f64 {
+    fn median_us(values: &mut [f64]) -> f64 {
         if values.is_empty() {
             return f64::NAN;
         }
@@ -1985,10 +2006,23 @@ mod cuda_tournament {
 
     fn report_trace(cell: Cell, spec: CandidateSpec, traces: &[CtaTrace]) {
         let origin = traces.iter().map(|t| t.entry).min().unwrap_or(0);
-        let span = traces.iter().map(|t| t.exit).max().unwrap_or(0).saturating_sub(origin);
-        let skew = traces.iter().map(|t| t.entry).max().unwrap_or(0).saturating_sub(origin);
+        let span = traces
+            .iter()
+            .map(|t| t.exit)
+            .max()
+            .unwrap_or(0)
+            .saturating_sub(origin);
+        let skew = traces
+            .iter()
+            .map(|t| t.entry)
+            .max()
+            .unwrap_or(0)
+            .saturating_sub(origin);
         let delta = |a: u64, b: u64| a.saturating_sub(b) as f64;
-        let mut prologue: Vec<f64> = traces.iter().map(|t| delta(t.first_begin, t.entry)).collect();
+        let mut prologue: Vec<f64> = traces
+            .iter()
+            .map(|t| delta(t.first_begin, t.entry))
+            .collect();
         let mut first_rate: Vec<f64> = traces
             .iter()
             .filter(|t| t.units_first > 0)
@@ -2014,7 +2048,11 @@ mod cuda_tournament {
             .map(|t| delta(t.exit, t.last_end.max(t.fixup_end)))
             .collect();
         let mut busy: Vec<f64> = traces.iter().map(|t| delta(t.exit, t.entry)).collect();
-        let busy_max = traces.iter().map(|t| t.exit.saturating_sub(t.entry)).max().unwrap_or(0);
+        let busy_max = traces
+            .iter()
+            .map(|t| t.exit.saturating_sub(t.entry))
+            .max()
+            .unwrap_or(0);
         let mut histogram = [0_usize; 4];
         for trace in traces {
             histogram[(trace.segments as usize).min(3)] += 1;
@@ -2041,7 +2079,13 @@ mod cuda_tournament {
             })
             .collect();
         let busy_p90 = slowest[slowest.len() / 10].0 as f64 / 1_000.0;
-        eprintln!("{LABEL} stragglers cell={} candidate={} grid={} busy_p90_us={busy_p90:.2} {}", cell.label, spec.symbol, spec.grid, stragglers.join(" "));
+        eprintln!(
+            "{LABEL} stragglers cell={} candidate={} grid={} busy_p90_us={busy_p90:.2} {}",
+            cell.label,
+            spec.symbol,
+            spec.grid,
+            stragglers.join(" ")
+        );
         eprintln!(
             "{LABEL} trace cell={} candidate={} grid={} span_us={:.2} entry_skew_us={:.2} busy_p50_us={:.2} busy_max_us={:.2} prologue_us={:.2} first_ns_per_unit={:.1} last_ns_per_unit={:.1} segment_gap_us={:.2} fixup_us={:.2} owners={owners} tail_us={:.2} segments_1_2_3={}/{}/{}",
             cell.label,

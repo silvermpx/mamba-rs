@@ -324,29 +324,32 @@ const SM120_TF32_QUALIFICATION_IDENTITY: Tf32AutoQualificationIdentity =
         optin_shared_bytes: 101_376,
         tensor_map_access: true,
         compile_key: [
-            107, 167, 105, 85, 0, 72, 8, 10, 52, 213, 112, 164, 127, 232, 8, 149, 122, 125, 217, 25, 244, 44, 69, 53, 254, 34, 88, 154, 46, 71, 182, 162,
+            230, 40, 84, 73, 153, 230, 12, 64, 140, 106, 10, 254, 141, 254, 217, 240, 113, 110, 40,
+            196, 58, 246, 61, 88, 30, 29, 176, 90, 12, 41, 189, 44,
         ],
         artifact_digest: [
-            162, 190, 40, 186, 151, 113, 196, 176, 64, 140, 131, 94, 127, 69, 196, 228, 185, 69,
-            163, 252, 132, 74, 6, 30, 110, 134, 18, 171, 76, 242, 182, 25,
+            152, 214, 12, 99, 106, 203, 225, 58, 51, 14, 184, 139, 62, 249, 170, 55, 150, 108, 153,
+            124, 126, 217, 206, 240, 30, 139, 155, 42, 209, 91, 151, 146,
         ],
         source_digest: [
-            36, 109, 46, 53, 235, 5, 156, 214, 150, 236, 116, 50, 93, 74, 34, 51, 18, 250, 96, 95,
-            232, 79, 245, 143, 23, 246, 99, 141, 153, 184, 24, 44,
+            31, 11, 33, 141, 232, 151, 110, 170, 101, 248, 95, 92, 226, 33, 244, 119, 120, 15, 243,
+            154, 202, 109, 145, 86, 44, 231, 74, 138, 2, 233, 162, 44,
         ],
         invocation_digest: [
-            107, 167, 105, 85, 0, 72, 8, 10, 52, 213, 112, 164, 127, 232, 8, 149, 122, 125, 217, 25, 244, 44, 69, 53, 254, 34, 88, 154, 46, 71, 182, 162,
+            230, 40, 84, 73, 153, 230, 12, 64, 140, 106, 10, 254, 141, 254, 217, 240, 113, 110, 40,
+            196, 58, 246, 61, 88, 30, 29, 176, 90, 12, 41, 189, 44,
         ],
         header_manifest_digest: [
-            67, 191, 64, 100, 1, 191, 236, 254, 153, 179, 107, 219, 56, 225, 124, 120, 1, 215, 0,
-            78, 82, 246, 209, 126, 32, 200, 17, 147, 81, 67, 125, 231,
+            237, 164, 204, 234, 133, 175, 152, 53, 113, 149, 152, 89, 52, 194, 151, 53, 153, 238,
+            11, 55, 117, 90, 218, 123, 105, 12, 58, 86, 27, 230, 83, 49,
         ],
         nvrtc_library_domain: [
             14, 13, 195, 250, 169, 151, 174, 150, 68, 46, 246, 47, 252, 2, 100, 13, 54, 26, 92, 80,
             224, 180, 229, 223, 42, 5, 188, 9, 134, 254, 98, 65,
         ],
         driver_build_digest: [
-            198, 167, 186, 45, 24, 253, 128, 109, 152, 54, 59, 29, 126, 209, 127, 60, 52, 112, 16, 227, 178, 168, 2, 40, 61, 220, 25, 31, 187, 87, 122, 188,
+            198, 167, 186, 45, 24, 253, 128, 109, 152, 54, 59, 29, 126, 209, 127, 60, 52, 112, 16,
+            227, 178, 168, 2, 40, 61, 220, 25, 31, 187, 87, 122, 188,
         ],
     };
 
@@ -643,6 +646,30 @@ const SM89_TF32_EVIDENCE_CELLS: &[Tf32AutoCell] = &[
     ),
 ];
 
+const fn sm120_tf32_streamk_cell(
+    op: crate::mamba_ssm::gpu::kernel_identity::ResolvedGemmOp,
+    output_rows: usize,
+    output_columns: usize,
+    reduction: usize,
+    stages: super::contract::Tf32Sm120Stages,
+    operand_gate: Tf32AutoOperandGate,
+) -> Tf32AutoCell {
+    Tf32AutoCell {
+        op,
+        shape: Tf32ExactShape {
+            output_rows,
+            output_columns,
+            reduction,
+        },
+        route: Tf32PhysicalRoute::Sm120TmaMmaTf32RnaStreamKV1(super::contract::Tf32Sm120Route {
+            tile: super::contract::Tf32Sm120Tile::M64N128,
+            stages,
+        }),
+        tuning_revision: SM120_TF32_QUALIFIED_TUNING_REVISION,
+        operand_gate,
+    }
+}
+
 const fn sm120_tf32_cell(
     op: crate::mamba_ssm::gpu::kernel_identity::ResolvedGemmOp,
     output_rows: usize,
@@ -878,13 +905,12 @@ const SM120_TF32_EVIDENCE_CELLS: &[Tf32AutoCell] = &[
         super::contract::Tf32Sm120Stages::S2,
         RequiresNoBiasAndVectorAlignmentEvidence,
     ),
-    sm120_tf32_cell(
+    sm120_tf32_streamk_cell(
         Tn,
         768,
         3072,
         2048,
-        super::contract::Tf32Sm120Tile::M64N128,
-        super::contract::Tf32Sm120Stages::S4,
+        super::contract::Tf32Sm120Stages::S3,
         RequiresVectorAlignmentEvidence,
     ),
     sm120_tf32_cell(
@@ -905,13 +931,12 @@ const SM120_TF32_EVIDENCE_CELLS: &[Tf32AutoCell] = &[
         super::contract::Tf32Sm120Stages::S2,
         RequiresNoBiasAndVectorAlignmentEvidence,
     ),
-    sm120_tf32_cell(
+    sm120_tf32_streamk_cell(
         Tn,
         1536,
         768,
         2048,
-        super::contract::Tf32Sm120Tile::M64N128,
-        super::contract::Tf32Sm120Stages::S4,
+        super::contract::Tf32Sm120Stages::S3,
         RequiresVectorAlignmentEvidence,
     ),
     sm120_tf32_cell(
@@ -932,13 +957,12 @@ const SM120_TF32_EVIDENCE_CELLS: &[Tf32AutoCell] = &[
         super::contract::Tf32Sm120Stages::S2,
         RequiresNoBiasAndVectorAlignmentEvidence,
     ),
-    sm120_tf32_cell(
+    sm120_tf32_streamk_cell(
         Tn,
         384,
         1928,
         4621,
-        super::contract::Tf32Sm120Tile::M64N128,
-        super::contract::Tf32Sm120Stages::S4,
+        super::contract::Tf32Sm120Stages::S3,
         RequiresVectorAlignmentEvidence,
     ),
     sm120_tf32_cell(
@@ -1095,7 +1119,8 @@ pub fn resolve_tf32_forced(
         | Tf32PhysicalRoute::MmaTf32RnaSplitK8V1(_) => availability.portable,
         Tf32PhysicalRoute::Sm90aWgmmaTf32TmaV1(_)
         | Tf32PhysicalRoute::Sm100Tcgen05Tf32TmaV1(_)
-        | Tf32PhysicalRoute::Sm120TmaMmaTf32RnaV1(_) => availability.specialized,
+        | Tf32PhysicalRoute::Sm120TmaMmaTf32RnaV1(_)
+        | Tf32PhysicalRoute::Sm120TmaMmaTf32RnaStreamKV1(_) => availability.specialized,
     }
     .ok_or_else(|| format!("forced TF32 route {route:?} has no qualified module"))?;
     ensure_tf32_binding_contract(binding, module_kind, dynamic_shared_bytes, route)?;
@@ -1198,7 +1223,8 @@ fn target_admits_route(binding: Tf32QualifiedModule, route: Tf32PhysicalRoute) -
                 | ((11, 0), "compute_110f", "sm_110f")
                 | ((11, 0), "compute_110a", "sm_110a")
         ),
-        Tf32PhysicalRoute::Sm120TmaMmaTf32RnaV1(_) => matches!(
+        Tf32PhysicalRoute::Sm120TmaMmaTf32RnaV1(_)
+        | Tf32PhysicalRoute::Sm120TmaMmaTf32RnaStreamKV1(_) => matches!(
             (cc, target, device_target),
             ((12, 0), "compute_120", "sm_120")
                 | ((12, 1), "compute_121", "sm_121")
@@ -5702,21 +5728,33 @@ mod tf32_tests {
         ]
     }
 
-    type Sm120RouteManifestEntry = (
-        ResolvedGemmOp,
-        usize,
-        usize,
-        usize,
-        Tf32Sm120Tile,
-        Tf32Sm120Stages,
-    );
+    #[derive(Clone, Copy, Debug)]
+    enum Sm120ManifestRoute {
+        Tiled(Tf32Sm120Tile, Tf32Sm120Stages),
+        StreamK(Tf32Sm120Tile, Tf32Sm120Stages),
+    }
+
+    impl Sm120ManifestRoute {
+        fn route(self) -> Tf32PhysicalRoute {
+            match self {
+                Self::Tiled(tile, stages) => {
+                    Tf32PhysicalRoute::Sm120TmaMmaTf32RnaV1(Tf32Sm120Route { tile, stages })
+                }
+                Self::StreamK(tile, stages) => {
+                    Tf32PhysicalRoute::Sm120TmaMmaTf32RnaStreamKV1(Tf32Sm120Route { tile, stages })
+                }
+            }
+        }
+    }
+
+    type Sm120RouteManifestEntry = (ResolvedGemmOp, usize, usize, usize, Sm120ManifestRoute);
 
     fn assert_sm120_route_manifest<const N: usize>(
         cells: &[super::Tf32AutoCell],
         expected: [Sm120RouteManifestEntry; N],
     ) {
         assert_eq!(cells.len(), expected.len());
-        for (cell, (op, rows, columns, reduction, tile, stages)) in cells.iter().zip(expected) {
+        for (cell, (op, rows, columns, reduction, route)) in cells.iter().zip(expected) {
             assert_eq!(cell.op, op);
             assert_eq!(
                 cell.shape,
@@ -5726,10 +5764,7 @@ mod tf32_tests {
                     reduction,
                 }
             );
-            assert_eq!(
-                cell.route,
-                Tf32PhysicalRoute::Sm120TmaMmaTf32RnaV1(Tf32Sm120Route { tile, stages })
-            );
+            assert_eq!(cell.route, route.route());
         }
     }
 
@@ -5810,72 +5845,63 @@ mod tf32_tests {
                     2048,
                     3072,
                     768,
-                    Tf32Sm120Tile::M64N128,
-                    Tf32Sm120Stages::S2,
+                    Sm120ManifestRoute::Tiled(Tf32Sm120Tile::M64N128, Tf32Sm120Stages::S2),
                 ),
                 (
                     ResolvedGemmOp::Tn,
                     768,
                     3072,
                     2048,
-                    Tf32Sm120Tile::M64N128,
-                    Tf32Sm120Stages::S2,
+                    Sm120ManifestRoute::Tiled(Tf32Sm120Tile::M64N128, Tf32Sm120Stages::S2),
                 ),
                 (
                     ResolvedGemmOp::Nt,
                     2048,
                     768,
                     3072,
-                    Tf32Sm120Tile::M64N64,
-                    Tf32Sm120Stages::S2,
+                    Sm120ManifestRoute::Tiled(Tf32Sm120Tile::M64N64, Tf32Sm120Stages::S2),
                 ),
                 (
                     ResolvedGemmOp::Nn,
                     2048,
                     768,
                     1536,
-                    Tf32Sm120Tile::M64N64,
-                    Tf32Sm120Stages::S2,
+                    Sm120ManifestRoute::Tiled(Tf32Sm120Tile::M64N64, Tf32Sm120Stages::S2),
                 ),
                 (
                     ResolvedGemmOp::Tn,
                     1536,
                     768,
                     2048,
-                    Tf32Sm120Tile::M64N128,
-                    Tf32Sm120Stages::S4,
+                    Sm120ManifestRoute::Tiled(Tf32Sm120Tile::M64N128, Tf32Sm120Stages::S4),
                 ),
                 (
                     ResolvedGemmOp::Nt,
                     2048,
                     1536,
                     768,
-                    Tf32Sm120Tile::M64N64,
-                    Tf32Sm120Stages::S2,
+                    Sm120ManifestRoute::Tiled(Tf32Sm120Tile::M64N64, Tf32Sm120Stages::S2),
                 ),
                 (
                     ResolvedGemmOp::Nn,
                     4621,
                     1928,
                     384,
-                    Tf32Sm120Tile::M128N64,
-                    Tf32Sm120Stages::S2,
+                    Sm120ManifestRoute::Tiled(Tf32Sm120Tile::M128N64, Tf32Sm120Stages::S2),
                 ),
                 (
                     ResolvedGemmOp::Tn,
                     384,
                     1928,
                     4621,
-                    Tf32Sm120Tile::M64N128,
-                    Tf32Sm120Stages::S4,
+                    Sm120ManifestRoute::Tiled(Tf32Sm120Tile::M64N128, Tf32Sm120Stages::S4),
                 ),
                 (
                     ResolvedGemmOp::Nt,
                     4621,
                     384,
                     1928,
-                    Tf32Sm120Tile::M64N64,
-                    Tf32Sm120Stages::S2,
+                    Sm120ManifestRoute::Tiled(Tf32Sm120Tile::M64N64, Tf32Sm120Stages::S2),
                 ),
             ],
         );
@@ -5997,72 +6023,63 @@ mod tf32_tests {
                     2048,
                     3072,
                     768,
-                    Tf32Sm120Tile::M128N64,
-                    Tf32Sm120Stages::S2,
+                    Sm120ManifestRoute::Tiled(Tf32Sm120Tile::M128N64, Tf32Sm120Stages::S2),
                 ),
                 (
                     ResolvedGemmOp::Tn,
                     768,
                     3072,
                     2048,
-                    Tf32Sm120Tile::M128N64,
-                    Tf32Sm120Stages::S2,
+                    Sm120ManifestRoute::Tiled(Tf32Sm120Tile::M128N64, Tf32Sm120Stages::S2),
                 ),
                 (
                     ResolvedGemmOp::Nt,
                     2048,
                     768,
                     3072,
-                    Tf32Sm120Tile::M64N64,
-                    Tf32Sm120Stages::S2,
+                    Sm120ManifestRoute::Tiled(Tf32Sm120Tile::M64N64, Tf32Sm120Stages::S2),
                 ),
                 (
                     ResolvedGemmOp::Nn,
                     2048,
                     768,
                     1536,
-                    Tf32Sm120Tile::M64N64,
-                    Tf32Sm120Stages::S2,
+                    Sm120ManifestRoute::Tiled(Tf32Sm120Tile::M64N64, Tf32Sm120Stages::S2),
                 ),
                 (
                     ResolvedGemmOp::Tn,
                     1536,
                     768,
                     2048,
-                    Tf32Sm120Tile::M128N64,
-                    Tf32Sm120Stages::S2,
+                    Sm120ManifestRoute::Tiled(Tf32Sm120Tile::M128N64, Tf32Sm120Stages::S2),
                 ),
                 (
                     ResolvedGemmOp::Nt,
                     2048,
                     1536,
                     768,
-                    Tf32Sm120Tile::M64N64,
-                    Tf32Sm120Stages::S2,
+                    Sm120ManifestRoute::Tiled(Tf32Sm120Tile::M64N64, Tf32Sm120Stages::S2),
                 ),
                 (
                     ResolvedGemmOp::Nn,
                     4621,
                     1928,
                     384,
-                    Tf32Sm120Tile::M64N64,
-                    Tf32Sm120Stages::S2,
+                    Sm120ManifestRoute::Tiled(Tf32Sm120Tile::M64N64, Tf32Sm120Stages::S2),
                 ),
                 (
                     ResolvedGemmOp::Tn,
                     384,
                     1928,
                     4621,
-                    Tf32Sm120Tile::M128N64,
-                    Tf32Sm120Stages::S2,
+                    Sm120ManifestRoute::Tiled(Tf32Sm120Tile::M128N64, Tf32Sm120Stages::S2),
                 ),
                 (
                     ResolvedGemmOp::Nt,
                     4621,
                     384,
                     1928,
-                    Tf32Sm120Tile::M64N64,
-                    Tf32Sm120Stages::S2,
+                    Sm120ManifestRoute::Tiled(Tf32Sm120Tile::M64N64, Tf32Sm120Stages::S2),
                 ),
             ],
         );
@@ -6267,80 +6284,70 @@ mod tf32_tests {
                     512,
                     768,
                     3072,
-                    Tf32Sm120Tile::M80N32Bk64,
-                    Tf32Sm120Stages::S2,
+                    Sm120ManifestRoute::Tiled(Tf32Sm120Tile::M80N32Bk64, Tf32Sm120Stages::S2),
                 ),
                 (
                     ResolvedGemmOp::Nn,
                     2048,
                     3072,
                     768,
-                    Tf32Sm120Tile::M64N128,
-                    Tf32Sm120Stages::S2,
+                    Sm120ManifestRoute::Tiled(Tf32Sm120Tile::M64N128, Tf32Sm120Stages::S2),
                 ),
                 (
                     ResolvedGemmOp::Tn,
                     768,
                     3072,
                     2048,
-                    Tf32Sm120Tile::M64N128,
-                    Tf32Sm120Stages::S4,
+                    Sm120ManifestRoute::StreamK(Tf32Sm120Tile::M64N128, Tf32Sm120Stages::S3),
                 ),
                 (
                     ResolvedGemmOp::Nt,
                     2048,
                     768,
                     3072,
-                    Tf32Sm120Tile::M64N64,
-                    Tf32Sm120Stages::S2,
+                    Sm120ManifestRoute::Tiled(Tf32Sm120Tile::M64N64, Tf32Sm120Stages::S2),
                 ),
                 (
                     ResolvedGemmOp::Nn,
                     2048,
                     768,
                     1536,
-                    Tf32Sm120Tile::M64N64,
-                    Tf32Sm120Stages::S2,
+                    Sm120ManifestRoute::Tiled(Tf32Sm120Tile::M64N64, Tf32Sm120Stages::S2),
                 ),
                 (
                     ResolvedGemmOp::Tn,
                     1536,
                     768,
                     2048,
-                    Tf32Sm120Tile::M64N128,
-                    Tf32Sm120Stages::S4,
+                    Sm120ManifestRoute::StreamK(Tf32Sm120Tile::M64N128, Tf32Sm120Stages::S3),
                 ),
                 (
                     ResolvedGemmOp::Nt,
                     2048,
                     1536,
                     768,
-                    Tf32Sm120Tile::M64N64,
-                    Tf32Sm120Stages::S2,
+                    Sm120ManifestRoute::Tiled(Tf32Sm120Tile::M64N64, Tf32Sm120Stages::S2),
                 ),
                 (
                     ResolvedGemmOp::Nn,
                     4621,
                     1928,
                     384,
-                    Tf32Sm120Tile::M128N64,
-                    Tf32Sm120Stages::S2,
+                    Sm120ManifestRoute::Tiled(Tf32Sm120Tile::M128N64, Tf32Sm120Stages::S2),
                 ),
                 (
                     ResolvedGemmOp::Tn,
                     384,
                     1928,
                     4621,
-                    Tf32Sm120Tile::M64N128,
-                    Tf32Sm120Stages::S4,
+                    Sm120ManifestRoute::StreamK(Tf32Sm120Tile::M64N128, Tf32Sm120Stages::S3),
                 ),
                 (
                     ResolvedGemmOp::Nt,
                     4621,
                     384,
                     1928,
-                    Tf32Sm120Tile::M64N64,
-                    Tf32Sm120Stages::S2,
+                    Sm120ManifestRoute::Tiled(Tf32Sm120Tile::M64N64, Tf32Sm120Stages::S2),
                 ),
             ],
         );
@@ -6348,8 +6355,8 @@ mod tf32_tests {
 
     #[test]
     fn tf32_tn_underfill_qualification_uses_current_tuning_revision() {
-        assert_eq!(TUNING_TABLE_REVISION, 36);
-        assert_eq!(F32_TF32_TUNING_REVISION, 36);
+        assert_eq!(TUNING_TABLE_REVISION, 37);
+        assert_eq!(F32_TF32_TUNING_REVISION, 37);
     }
 
     #[test]
@@ -6760,10 +6767,12 @@ mod tf32_tests {
         );
         assert_eq!(
             measured_tf32_cell(request, operands, F32_TF32_TUNING_REVISION, cuda_13_2.cells,),
-            Some(Tf32PhysicalRoute::Sm120TmaMmaTf32RnaV1(Tf32Sm120Route {
-                tile: Tf32Sm120Tile::M64N128,
-                stages: Tf32Sm120Stages::S4,
-            },)),
+            Some(Tf32PhysicalRoute::Sm120TmaMmaTf32RnaStreamKV1(
+                Tf32Sm120Route {
+                    tile: Tf32Sm120Tile::M64N128,
+                    stages: Tf32Sm120Stages::S3,
+                },
+            )),
         );
 
         assert_eq!(
@@ -6800,10 +6809,12 @@ mod tf32_tests {
                 sm120_availability_for(cuda_13_2.identity),
             )
             .unwrap(),
-            F32TriadSelection::Tf32(Tf32PhysicalRoute::Sm120TmaMmaTf32RnaV1(Tf32Sm120Route {
-                tile: Tf32Sm120Tile::M64N128,
-                stages: Tf32Sm120Stages::S4,
-            },)),
+            F32TriadSelection::Tf32(Tf32PhysicalRoute::Sm120TmaMmaTf32RnaStreamKV1(
+                Tf32Sm120Route {
+                    tile: Tf32Sm120Tile::M64N128,
+                    stages: Tf32Sm120Stages::S3,
+                },
+            )),
         );
 
         for source in [cuda_12_8, cuda_13_0, cuda_13_2] {
@@ -6922,80 +6933,70 @@ mod tf32_tests {
                 512,
                 768,
                 3072,
-                Tf32Sm120Tile::M80N32Bk64,
-                Tf32Sm120Stages::S2,
+                Sm120ManifestRoute::Tiled(Tf32Sm120Tile::M80N32Bk64, Tf32Sm120Stages::S2),
             ),
             (
                 ResolvedGemmOp::Nn,
                 2048,
                 3072,
                 768,
-                Tf32Sm120Tile::M64N128,
-                Tf32Sm120Stages::S2,
+                Sm120ManifestRoute::Tiled(Tf32Sm120Tile::M64N128, Tf32Sm120Stages::S2),
             ),
             (
                 ResolvedGemmOp::Tn,
                 768,
                 3072,
                 2048,
-                Tf32Sm120Tile::M64N128,
-                Tf32Sm120Stages::S4,
+                Sm120ManifestRoute::StreamK(Tf32Sm120Tile::M64N128, Tf32Sm120Stages::S3),
             ),
             (
                 ResolvedGemmOp::Nt,
                 2048,
                 768,
                 3072,
-                Tf32Sm120Tile::M64N64,
-                Tf32Sm120Stages::S2,
+                Sm120ManifestRoute::Tiled(Tf32Sm120Tile::M64N64, Tf32Sm120Stages::S2),
             ),
             (
                 ResolvedGemmOp::Nn,
                 2048,
                 768,
                 1536,
-                Tf32Sm120Tile::M64N64,
-                Tf32Sm120Stages::S2,
+                Sm120ManifestRoute::Tiled(Tf32Sm120Tile::M64N64, Tf32Sm120Stages::S2),
             ),
             (
                 ResolvedGemmOp::Tn,
                 1536,
                 768,
                 2048,
-                Tf32Sm120Tile::M64N128,
-                Tf32Sm120Stages::S4,
+                Sm120ManifestRoute::StreamK(Tf32Sm120Tile::M64N128, Tf32Sm120Stages::S3),
             ),
             (
                 ResolvedGemmOp::Nt,
                 2048,
                 1536,
                 768,
-                Tf32Sm120Tile::M64N64,
-                Tf32Sm120Stages::S2,
+                Sm120ManifestRoute::Tiled(Tf32Sm120Tile::M64N64, Tf32Sm120Stages::S2),
             ),
             (
                 ResolvedGemmOp::Nn,
                 4621,
                 1928,
                 384,
-                Tf32Sm120Tile::M128N64,
-                Tf32Sm120Stages::S2,
+                Sm120ManifestRoute::Tiled(Tf32Sm120Tile::M128N64, Tf32Sm120Stages::S2),
             ),
             (
                 ResolvedGemmOp::Tn,
                 384,
                 1928,
                 4621,
-                Tf32Sm120Tile::M64N128,
-                Tf32Sm120Stages::S4,
+                Sm120ManifestRoute::StreamK(Tf32Sm120Tile::M64N128, Tf32Sm120Stages::S3),
             ),
             (
                 ResolvedGemmOp::Nt,
                 4621,
                 384,
                 1928,
-                Tf32Sm120Tile::M64N64,
-                Tf32Sm120Stages::S2,
+                Sm120ManifestRoute::Tiled(Tf32Sm120Tile::M64N64, Tf32Sm120Stages::S2),
             ),
         ];
         assert_eq!(
@@ -7005,7 +7006,7 @@ mod tf32_tests {
                 stages: Tf32PortableStages::S4,
             })
         );
-        for (cell, (op, rows, columns, reduction, tile, stages)) in
+        for (cell, (op, rows, columns, reduction, route)) in
             SM120_TF32_EVIDENCE_CELLS[1..].iter().zip(expected)
         {
             assert_eq!(cell.op, op);
@@ -7017,10 +7018,7 @@ mod tf32_tests {
                     reduction,
                 }
             );
-            assert_eq!(
-                cell.route,
-                Tf32PhysicalRoute::Sm120TmaMmaTf32RnaV1(Tf32Sm120Route { tile, stages })
-            );
+            assert_eq!(cell.route, route.route());
         }
         for cohort in SM120_TF32_EVIDENCE_COHORTS {
             let mut exact_availability = sm120_availability_for(cohort.identity);
@@ -7280,23 +7278,23 @@ mod tf32_tests {
         assert!(identity.tensor_map_access);
         assert_eq!(
             digest_hex(&identity.compile_key),
-            "6ba769550048080a34d570a47fe808957a7dd919f42c4535fe22589a2e47b6a2"
+            "e628544999e60c408c6a0afe8dfed9f0716e28c43af63d581e1db05a0c29bd2c"
         );
         assert_eq!(
             digest_hex(&identity.artifact_digest),
-            "a2be28ba9771c4b0408c835e7f45c4e4b945a3fc844a061e6e8612ab4cf2b619"
+            "98d60c636acbe13a330eb88b3ef9aa37966c997c7ed9cef01e8b9b2ad15b9792"
         );
         assert_eq!(
             digest_hex(&identity.source_digest),
-            "246d2e35eb059cd696ec74325d4a223312fa605fe84ff58f17f6638d99b8182c"
+            "1f0b218de8976eaa65f85f5ce221f477780ff39aca6d91562ce74a8a02e9a22c"
         );
         assert_eq!(
             digest_hex(&identity.invocation_digest),
-            "6ba769550048080a34d570a47fe808957a7dd919f42c4535fe22589a2e47b6a2"
+            "e628544999e60c408c6a0afe8dfed9f0716e28c43af63d581e1db05a0c29bd2c"
         );
         assert_eq!(
             digest_hex(&identity.header_manifest_digest),
-            "43bf406401bfecfe99b36bdb38e17c7801d7004e52f6d17e20c8119351437de7"
+            "eda4ccea85af98357195985934c2973599ee0b37755ada7b690c3a561be65331"
         );
         assert_eq!(
             digest_hex(&identity.nvrtc_library_domain),

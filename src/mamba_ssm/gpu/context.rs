@@ -1044,7 +1044,8 @@ impl GpuCtx {
             }
             ResolvedNumericContract::MmaTf32RnaSplitK2V1
             | ResolvedNumericContract::MmaTf32RnaSplitK4V1
-            | ResolvedNumericContract::MmaTf32RnaSplitK8V1 => {
+            | ResolvedNumericContract::MmaTf32RnaSplitK8V1
+            | ResolvedNumericContract::Sm120TmaMmaTf32RnaStreamKV1 => {
                 NumericContractSet::TRIAD_DETERMINISTIC_TF32_SPLIT_K_V1
             }
         };
@@ -1053,26 +1054,27 @@ impl GpuCtx {
                 "{label}: captured Triad numeric contract is unavailable under the live GEMM policy"
             ));
         }
-        let expected_module =
-            match route.backend {
-                PhysicalGemmBackend::ScalarFmaV1
-                | PhysicalGemmBackend::ScalarFmaSplitKPartialV1
-                | PhysicalGemmBackend::ScalarFmaSplitKF32ReduceV1
-                | PhysicalGemmBackend::ScalarFmaTnNarrowSplitMPartialV1
-                | PhysicalGemmBackend::ScalarFmaTnSplitMF64ReduceV1 => ModuleKind::TriadScalar,
-                PhysicalGemmBackend::Sm80Mma16V1
-                | PhysicalGemmBackend::MmaTf32RnaV1
-                | PhysicalGemmBackend::MmaTf32RnaSplitK2V1
-                | PhysicalGemmBackend::MmaTf32RnaSplitK4V1
-                | PhysicalGemmBackend::MmaTf32RnaSplitK8V1 => ModuleKind::TriadSm80,
-                PhysicalGemmBackend::Sm90aWgmmaV1 | PhysicalGemmBackend::Sm90aWgmmaTf32TmaV1 => {
-                    ModuleKind::TriadSm90a
-                }
-                PhysicalGemmBackend::Sm100Tcgen05V1
-                | PhysicalGemmBackend::Sm100Tcgen05Tf32TmaV1 => ModuleKind::TriadSm100,
-                PhysicalGemmBackend::Sm120TmaMma16V1
-                | PhysicalGemmBackend::Sm120TmaMmaTf32RnaV1 => ModuleKind::TriadSm120,
-            };
+        let expected_module = match route.backend {
+            PhysicalGemmBackend::ScalarFmaV1
+            | PhysicalGemmBackend::ScalarFmaSplitKPartialV1
+            | PhysicalGemmBackend::ScalarFmaSplitKF32ReduceV1
+            | PhysicalGemmBackend::ScalarFmaTnNarrowSplitMPartialV1
+            | PhysicalGemmBackend::ScalarFmaTnSplitMF64ReduceV1 => ModuleKind::TriadScalar,
+            PhysicalGemmBackend::Sm80Mma16V1
+            | PhysicalGemmBackend::MmaTf32RnaV1
+            | PhysicalGemmBackend::MmaTf32RnaSplitK2V1
+            | PhysicalGemmBackend::MmaTf32RnaSplitK4V1
+            | PhysicalGemmBackend::MmaTf32RnaSplitK8V1 => ModuleKind::TriadSm80,
+            PhysicalGemmBackend::Sm90aWgmmaV1 | PhysicalGemmBackend::Sm90aWgmmaTf32TmaV1 => {
+                ModuleKind::TriadSm90a
+            }
+            PhysicalGemmBackend::Sm100Tcgen05V1 | PhysicalGemmBackend::Sm100Tcgen05Tf32TmaV1 => {
+                ModuleKind::TriadSm100
+            }
+            PhysicalGemmBackend::Sm120TmaMma16V1
+            | PhysicalGemmBackend::Sm120TmaMmaTf32RnaV1
+            | PhysicalGemmBackend::Sm120TmaMmaTf32RnaStreamKV1 => ModuleKind::TriadSm120,
+        };
         if route.module_kind != expected_module || route.artifact.module_kind != expected_module {
             return Err(format!(
                 "{label}: captured physical backend no longer matches its module binding"
@@ -1087,6 +1089,7 @@ impl GpuCtx {
                 | super::kernel_identity::ResolvedNumericContract::Sm90aWgmmaTf32TmaV1
                 | super::kernel_identity::ResolvedNumericContract::Sm100Tcgen05Tf32TmaV1
                 | super::kernel_identity::ResolvedNumericContract::Sm120TmaMmaTf32RnaV1
+                | super::kernel_identity::ResolvedNumericContract::Sm120TmaMmaTf32RnaStreamKV1
                 | super::kernel_identity::ResolvedNumericContract::ZeroReductionEpilogueF32V1
         ) && route.module_kind != ModuleKind::TriadScalar;
         if uses_qualified_tf32_module {
@@ -1133,6 +1136,7 @@ impl GpuCtx {
                 | super::kernel_identity::ResolvedNumericContract::Sm90aWgmmaTf32TmaV1
                 | super::kernel_identity::ResolvedNumericContract::Sm100Tcgen05Tf32TmaV1
                 | super::kernel_identity::ResolvedNumericContract::Sm120TmaMmaTf32RnaV1
+                | super::kernel_identity::ResolvedNumericContract::Sm120TmaMmaTf32RnaStreamKV1
         );
         if tf32_numeric
             && (route.dtype != PolicyDtype::F32

@@ -275,7 +275,8 @@ where
 {
     if request.shape.reduction(request.op) == 0 {
         let format = match route {
-            Tf32PhysicalRoute::Sm120TmaMmaTf32RnaV1(_) => Tf32TensorMapFormat::Uint32V1,
+            Tf32PhysicalRoute::Sm120TmaMmaTf32RnaV1(_)
+            | Tf32PhysicalRoute::Sm120TmaMmaTf32RnaStreamKV1(_) => Tf32TensorMapFormat::Uint32V1,
             _ => Tf32TensorMapFormat::Tfloat32V1,
         };
         return Ok(F32PreparedTensorMaps::zero_reduction(
@@ -379,6 +380,85 @@ struct Tf32RawLaunch<'a> {
     zero_reduction: bool,
     symbol: &'static str,
     observation: Option<PhysicalLaunchObservation>,
+    /// The slab and flag buffers of a stream-K route; a single-CTA
+    /// qualification probe deals whole tiles only and passes none.
+    streamk: Option<Tf32StreamKWorkspace>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct Tf32StreamKWorkspace {
+    // Context-owned buffers shared with the split-K launches; the recorded
+    // stream gate keeps every use on one ordered CUDA stream.
+    partial: CUptr,
+    flags: CUptr,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct Tf32StreamKLaunchPlan {
+    grid: u32,
+    partial_elements: usize,
+    flag_elements: usize,
+}
+
+/// The persistent grid of a stream-K launch and the workspace it needs. The
+/// kernel waits on lower CTAs, so the grid is one CTA per multiprocessor,
+/// which the device keeps resident together; the dealing of units depends on
+/// the grid, so the same device gives the same bits.
+fn tf32_streamk_launch_plan(
+    request: F32TriadRequest,
+    spec: &Tf32KernelSpec,
+    multiprocessor_count: u32,
+) -> Result<Tf32StreamKLaunchPlan, String> {
+    request.shape.validate(request.op)?;
+    if request.op != spec.op {
+        return Err(format!(
+            "stream-K TF32 specification {:?} does not match {:?}",
+            spec.op, request.op
+        ));
+    }
+    if multiprocessor_count == 0 {
+        return Err("stream-K TF32 launch requires at least one multiprocessor".into());
+    }
+    let rows = request.shape.output_rows(request.op);
+    let columns = request.shape.output_columns(request.op);
+    let tiles = rows
+        .div_ceil(spec.tile.0 as usize)
+        .checked_mul(columns.div_ceil(spec.tile.1 as usize))
+        .ok_or_else(|| invalid_gemm_dimensions("stream-K TF32 tile count overflows usize"))?;
+    let k_tiles = request
+        .shape
+        .reduction(request.op)
+        .div_ceil(spec.bk as usize)
+        .max(1);
+    let units = tiles
+        .checked_mul(k_tiles)
+        .ok_or_else(|| invalid_gemm_dimensions("stream-K TF32 unit count overflows usize"))?;
+    if units > i32::MAX as usize {
+        return Err(invalid_gemm_dimensions(
+            "stream-K TF32 unit count exceeds the kernel's 32-bit range",
+        ));
+    }
+    let grid = multiprocessor_count;
+    let partial_elements = (grid as usize)
+        .checked_mul(SM120_TF32_STREAMK_SLOTS_PER_CTA)
+        .and_then(|slots| slots.checked_mul(SM120_TF32_STREAMK_SLAB_FLOATS))
+        .ok_or_else(|| invalid_gemm_dimensions("stream-K TF32 slab extent overflows usize"))?;
+    if partial_elements > SPLITK_SCRATCH_CAP {
+        return Err(invalid_gemm_dimensions(
+            "stream-K TF32 slabs exceed the fixed workspace",
+        ));
+    }
+    let flag_elements = (grid as usize) * SM120_TF32_STREAMK_SLOTS_PER_CTA;
+    if flag_elements > TF32_SPLITK_COUNTER_CAP {
+        return Err(invalid_gemm_dimensions(
+            "stream-K TF32 flags exceed the fixed counter workspace",
+        ));
+    }
+    Ok(Tf32StreamKLaunchPlan {
+        grid,
+        partial_elements,
+        flag_elements,
+    })
 }
 
 enum PreparedF32Kind {
@@ -399,6 +479,14 @@ enum PreparedF32Kind {
         params: Sm80Tf32KernelParams,
         plan: Tf32SplitKLaunchPlan,
         workspace: Tf32SplitKWorkspace,
+    },
+    Tf32StreamK {
+        route: Tf32PhysicalRoute,
+        maps: F32PreparedTensorMaps,
+        params: PreparedTf32Params,
+        config: cudarc::driver::LaunchConfig,
+        plan: Tf32StreamKLaunchPlan,
+        workspace: Tf32StreamKWorkspace,
     },
 }
 
@@ -429,6 +517,7 @@ impl PreparedF32TriadLaunch {
             PreparedF32Kind::ScalarZero { .. }
                 | PreparedF32Kind::Tf32 { .. }
                 | PreparedF32Kind::Tf32SplitK { .. }
+                | PreparedF32Kind::Tf32StreamK { .. }
         )
     }
 
@@ -2314,7 +2403,8 @@ fn tf32_params(
                 ldc,
             })
         }
-        Tf32PhysicalRoute::Sm120TmaMmaTf32RnaV1(_) => {
+        Tf32PhysicalRoute::Sm120TmaMmaTf32RnaV1(_)
+        | Tf32PhysicalRoute::Sm120TmaMmaTf32RnaStreamKV1(_) => {
             PreparedTf32Params::Sm120(Sm120KernelParams {
                 a_x: origins.a_x,
                 a_y: origins.a_y,
@@ -2566,6 +2656,16 @@ fn tf32_resolved_route(
             PhysicalGemmBackend::Sm120TmaMmaTf32RnaV1,
             ResolvedNumericContract::Sm120TmaMmaTf32RnaV1,
         ),
+        Tf32PhysicalRoute::Sm120TmaMmaTf32RnaStreamKV1(_) => (
+            PhysicalGemmBackend::Sm120TmaMmaTf32RnaStreamKV1,
+            ResolvedNumericContract::Sm120TmaMmaTf32RnaStreamKV1,
+        ),
+    };
+    let ownership = match spec.route {
+        Tf32PhysicalRoute::Sm120TmaMmaTf32RnaStreamKV1(_) => {
+            ResolvedOutputOwnership::OwnerCtaPerOutputTileStreamKFixedOrderV1
+        }
+        _ => ResolvedOutputOwnership::OneCtaPerOutputTileV1,
     };
     ResolvedGemmRoute {
         op: request.op,
@@ -2591,7 +2691,7 @@ fn tf32_resolved_route(
         } else {
             spec.operand_conversion
         },
-        ownership: ResolvedOutputOwnership::OneCtaPerOutputTileV1,
+        ownership,
         symbol: spec.symbol,
         module_kind: spec.module_kind,
         target: binding.qualified.target,
@@ -2912,6 +3012,9 @@ fn prepare_tf32_f32(
     ) {
         return prepare_tf32_splitk_f32(ctx, request, operands, output_resources, route);
     }
+    if matches!(route, Tf32PhysicalRoute::Sm120TmaMmaTf32RnaStreamKV1(_)) {
+        return prepare_tf32_streamk_f32(ctx, request, operands, output_resources, route);
+    }
     let spec = tf32_kernel_spec(request.op, route)?;
     let binding = f32_map_binding(ctx, route)?;
     let allocation_domain = binding.allocation_domain;
@@ -2927,7 +3030,10 @@ fn prepare_tf32_f32(
             Some(route),
             Some(binding),
             match route {
-                Tf32PhysicalRoute::Sm120TmaMmaTf32RnaV1(_) => Tf32TensorMapFormat::Uint32V1,
+                Tf32PhysicalRoute::Sm120TmaMmaTf32RnaV1(_)
+                | Tf32PhysicalRoute::Sm120TmaMmaTf32RnaStreamKV1(_) => {
+                    Tf32TensorMapFormat::Uint32V1
+                }
                 _ => Tf32TensorMapFormat::Tfloat32V1,
             },
         ))
@@ -2992,6 +3098,82 @@ fn prepare_tf32_f32(
             maps,
             params: tf32_params(request, operands, origins, route)?,
             config,
+        },
+    })
+}
+
+fn prepare_tf32_streamk_f32(
+    ctx: &GpuCtx,
+    request: F32TriadRequest,
+    operands: F32TriadOperands,
+    output_resources: F32LaunchResourceSnapshot,
+    route: Tf32PhysicalRoute,
+) -> Result<PreparedF32TriadLaunch, String> {
+    use cudarc::driver::DevicePtr;
+
+    let spec = tf32_kernel_spec(request.op, route)?;
+    if request.shape.reduction(request.op) == 0 {
+        return Err("stream-K TF32 route requires a nonzero reduction".into());
+    }
+    let plan = tf32_streamk_launch_plan(request, spec, ctx.kernels.multiprocessor_count())?;
+    let binding = f32_map_binding(ctx, route)?;
+    let allocation_domain = binding.allocation_domain;
+    let resources = output_resources.with_inputs(request, operands, allocation_domain)?;
+    let scratch_buffer = ctx.kernels.splitk_scratch_buf(&ctx.stream)?;
+    let (partial, _) = scratch_buffer.device_ptr(&ctx.stream);
+    let flag_buffer = ctx
+        .kernels
+        .triad_kernels()
+        .tf32_splitk_counter_buf(&ctx.stream)?;
+    let (flags, _) = flag_buffer.device_ptr(&ctx.stream);
+    let resources = resources.with_scratch(
+        Some((partial, (SPLITK_SCRATCH_CAP as u64) * 4)),
+        None,
+        Some((flags, (TF32_SPLITK_COUNTER_CAP as u64) * 4)),
+        allocation_domain,
+    )?;
+    let maps = prepare_specialized_tf32_maps(ctx, request, operands, route, binding)?;
+    let origins = maps.origins();
+    let maps_digest = maps.identity_digest();
+    let resources_digest = resources.digest(request, operands, maps_digest);
+    let config = cudarc::driver::LaunchConfig {
+        grid_dim: (plan.grid, 1, 1),
+        block_dim: (spec.threads, 1, 1),
+        shared_mem_bytes: spec.dynamic_shared_bytes,
+    };
+    let arguments_digest =
+        tf32_kernel_arguments_digest(request, operands, spec.symbol, maps_digest);
+    let resolved = tf32_resolved_route(
+        request,
+        spec,
+        binding,
+        Tf32LaunchDigests {
+            maps: maps_digest,
+            resources: resources_digest,
+            arguments: arguments_digest,
+        },
+        false,
+        config,
+    );
+    let routes = vec![resolved].into_boxed_slice();
+    let resolved_launch_set = build_resolved_gemm_launch_set(&routes)?;
+    let managed_epoch = resources.managed_epoch();
+    Ok(PreparedF32TriadLaunch {
+        context_token: ctx.instance_token(),
+        stream_token: ctx.stream_token(),
+        request,
+        operands,
+        resources,
+        managed_epoch,
+        routes,
+        resolved_launch_set,
+        kind: PreparedF32Kind::Tf32StreamK {
+            route,
+            maps,
+            params: tf32_params(request, operands, origins, route)?,
+            config,
+            plan,
+            workspace: Tf32StreamKWorkspace { partial, flags },
         },
     })
 }
@@ -3792,6 +3974,29 @@ pub(in crate::mamba_ssm::gpu) fn prepare_prepared_f32_direct_graph_sequence<
         PreparedF32Kind::Tf32SplitK { .. } => {
             return Err("prepared TF32 split-K graph sequence was not expanded".into());
         }
+        PreparedF32Kind::Tf32StreamK {
+            maps,
+            params,
+            workspace,
+            ..
+        } => {
+            let PreparedTf32Params::Sm120(params) = params else {
+                return Err("prepared TF32 stream-K route and parameter ABI disagree".into());
+            };
+            let maps = maps.maps();
+            arguments.push(output)?;
+            arguments.push(workspace.partial)?;
+            arguments.push(workspace.flags)?;
+            arguments.push(maps[0])?;
+            arguments.push(maps[1])?;
+            arguments.push(bias)?;
+            arguments.push(*params)?;
+            ctx.kernels
+                .triad_kernels()
+                .tf32_function(route.symbol)
+                .ok_or_else(|| format!("qualified TF32 symbol {} is unavailable", route.symbol))?
+                .clone()
+        }
     };
     Ok(PreparedTriadPhysicalGraphSequence {
         launches: vec![PreparedTriadPhysicalGraphLaunch {
@@ -4327,6 +4532,16 @@ fn validate_prepared_f32_triad(
             f32_map_binding(ctx, *route)?;
             validate_tf32_splitk_prepared_layout(prepared, *route, *plan)?;
         }
+        PreparedF32Kind::Tf32StreamK {
+            route, maps, plan, ..
+        } => {
+            maps.validate_live_allocations()?;
+            let binding = f32_map_binding(ctx, *route)?;
+            if !maps.matches_binding(binding) {
+                return Err("prepared TF32 tensor-map binding changed before launch".into());
+            }
+            validate_tf32_streamk_prepared_layout(ctx, prepared, *route, *plan)?;
+        }
     }
     let mut live = ResolvedGemmLaunchSetBuilder::new(prepared.routes.len())?;
     for route in &prepared.routes {
@@ -4343,6 +4558,36 @@ pub(in crate::mamba_ssm::gpu) fn validate_prepared_f32_triad_for_timing(
     prepared: &PreparedF32TriadLaunch,
 ) -> Result<(), String> {
     validate_prepared_f32_triad(ctx, prepared)
+}
+
+fn validate_tf32_streamk_prepared_layout(
+    ctx: &GpuCtx,
+    prepared: &PreparedF32TriadLaunch,
+    route: Tf32PhysicalRoute,
+    plan: Tf32StreamKLaunchPlan,
+) -> Result<(), String> {
+    let spec = tf32_kernel_spec(prepared.request.op, route)?;
+    let [resolved] = prepared.routes.as_ref() else {
+        return Err("prepared TF32 stream-K launch requires exactly one route".into());
+    };
+    if resolved.symbol != spec.symbol {
+        return Err("prepared TF32 stream-K route changed".into());
+    }
+    let expected =
+        tf32_streamk_launch_plan(prepared.request, spec, ctx.kernels.multiprocessor_count())?;
+    if expected.grid != plan.grid
+        || expected.partial_elements != plan.partial_elements
+        || expected.flag_elements != plan.flag_elements
+    {
+        return Err("prepared TF32 stream-K launch plan changed".into());
+    }
+    if resolved.launch.grid_dim != (plan.grid, 1, 1)
+        || resolved.launch.block_dim != (spec.threads, 1, 1)
+        || resolved.launch.shared_mem_bytes != spec.dynamic_shared_bytes
+    {
+        return Err("prepared TF32 stream-K launch configuration changed".into());
+    }
+    Ok(())
 }
 
 fn validate_tf32_splitk_prepared_layout(
@@ -4539,13 +4784,37 @@ unsafe fn enqueue_tf32_raw<O: PhysicalLaunchObserver>(
             }
             .map_err(|error| error.with_driver_context(format_args!("{}", launch.symbol)))
         }
-        (Tf32PhysicalRoute::Sm120TmaMmaTf32RnaV1(_), PreparedTf32Params::Sm120(params)) => {
+        (
+            Tf32PhysicalRoute::Sm120TmaMmaTf32RnaV1(_)
+            | Tf32PhysicalRoute::Sm120TmaMmaTf32RnaStreamKV1(_),
+            PreparedTf32Params::Sm120(params),
+        ) => {
             let maps = launch
                 .maps
                 .ok_or_else(|| "SM120 TF32 launch has no tensor maps".to_string())?
                 .maps();
+            // The stream-K kernel takes its slab and flag buffers ahead of the
+            // tensor maps; a workspace-less launch is the single-CTA
+            // qualification probe, which deals whole tiles only.
+            let streamk = matches!(
+                launch.route,
+                Tf32PhysicalRoute::Sm120TmaMmaTf32RnaStreamKV1(_)
+            );
+            if streamk && launch.streamk.is_none() && launch.config.grid_dim != (1, 1, 1) {
+                return Err(
+                    "SM120 TF32 stream-K launch without a workspace must be one CTA".into(),
+                );
+            }
+            let workspace = launch.streamk.unwrap_or(Tf32StreamKWorkspace {
+                partial: 0,
+                flags: 0,
+            });
             let mut builder = stream.launch_builder(function);
             builder.arg(&output);
+            if streamk {
+                builder.arg(&workspace.partial);
+                builder.arg(&workspace.flags);
+            }
             builder.arg(&maps[0]);
             builder.arg(&maps[1]);
             builder.arg(&bias);
@@ -4596,6 +4865,7 @@ pub(super) unsafe fn enqueue_tf32_qualification_probe(
                 zero_reduction: request.shape.reduction(request.op) == 0,
                 symbol: spec.symbol,
                 observation: None,
+                streamk: None,
             },
             &mut observer,
         )
@@ -4650,12 +4920,8 @@ pub(in crate::mamba_ssm::gpu) unsafe fn enqueue_validated_prepared_f32_triad(
             let mut observer = NoPhysicalObserver;
             unsafe { enqueue_scalar_zero_f32(ctx, prepared, params, *config, &mut observer, None) }
         }
-        PreparedF32Kind::Tf32 {
-            route,
-            maps,
-            params,
-            config,
-        } => {
+        PreparedF32Kind::Tf32 { .. } | PreparedF32Kind::Tf32StreamK { .. } => {
+            let (route, maps, params, config, streamk) = tf32_prepared_kernel_parts(prepared)?;
             ctx.record_resolved_gemm_route(prepared.routes[0])?;
             let mut observer = NoPhysicalObserver;
             unsafe {
@@ -4664,13 +4930,15 @@ pub(in crate::mamba_ssm::gpu) unsafe fn enqueue_validated_prepared_f32_triad(
                     prepared,
                     Tf32RawLaunch {
                         operands: prepared.operands,
-                        route: *route,
-                        maps: maps.as_ref(),
-                        params: *params,
+                        route,
+                        maps,
+                        params,
                         config: *config,
-                        zero_reduction: prepared.request.shape.reduction(prepared.request.op) == 0,
+                        zero_reduction: streamk.is_none()
+                            && prepared.request.shape.reduction(prepared.request.op) == 0,
                         symbol: prepared.routes[0].symbol,
                         observation: None,
+                        streamk,
                     },
                     &mut observer,
                 )
@@ -4695,6 +4963,39 @@ pub(in crate::mamba_ssm::gpu) unsafe fn enqueue_validated_prepared_f32_triad(
                 )
             }
         }
+    }
+}
+
+/// The parts of a prepared tiled or stream-K TF32 launch that its raw launch
+/// package is built from: the route, its tensor maps, the kernel parameters,
+/// the frozen launch configuration, and the stream-K workspace if any.
+type Tf32PreparedKernelParts<'a> = (
+    Tf32PhysicalRoute,
+    Option<&'a F32PreparedTensorMaps>,
+    PreparedTf32Params,
+    &'a cudarc::driver::LaunchConfig,
+    Option<Tf32StreamKWorkspace>,
+);
+
+fn tf32_prepared_kernel_parts(
+    prepared: &PreparedF32TriadLaunch,
+) -> Result<Tf32PreparedKernelParts<'_>, String> {
+    match &prepared.kind {
+        PreparedF32Kind::Tf32 {
+            route,
+            maps,
+            params,
+            config,
+        } => Ok((*route, maps.as_ref(), *params, config, None)),
+        PreparedF32Kind::Tf32StreamK {
+            route,
+            maps,
+            params,
+            config,
+            workspace,
+            ..
+        } => Ok((*route, Some(maps), *params, config, Some(*workspace))),
+        _ => Err("prepared launch is not a TF32 kernel launch".into()),
     }
 }
 
@@ -4746,12 +5047,8 @@ where
                 )
             }
         }
-        PreparedF32Kind::Tf32 {
-            route,
-            maps,
-            params,
-            config,
-        } => {
+        PreparedF32Kind::Tf32 { .. } | PreparedF32Kind::Tf32StreamK { .. } => {
+            let (route, maps, params, config, streamk) = tf32_prepared_kernel_parts(prepared)?;
             let resolved = prepared.routes[0];
             let physical = physical_prepared_f32_route(prepared, resolved);
             ctx.record_resolved_gemm_route(resolved)?;
@@ -4761,17 +5058,19 @@ where
                     prepared,
                     Tf32RawLaunch {
                         operands: prepared.operands,
-                        route: *route,
-                        maps: maps.as_ref(),
-                        params: *params,
+                        route,
+                        maps,
+                        params,
                         config: *config,
-                        zero_reduction: prepared.request.shape.reduction(prepared.request.op) == 0,
+                        zero_reduction: streamk.is_none()
+                            && prepared.request.shape.reduction(prepared.request.op) == 0,
                         symbol: resolved.symbol,
                         observation: Some(PhysicalLaunchObservation::gemm(
                             logical_dtype,
                             None,
                             physical,
                         )),
+                        streamk,
                     },
                     observer,
                 )
@@ -12187,7 +12486,7 @@ mod prepared_f32_launch_tests {
         assert_eq!(resolved.tensor_maps_digest, [0; 32]);
         assert_eq!(resolved.resources_digest, [2; 32]);
         assert_eq!(resolved.launch.arguments_digest, [3; 32]);
-        assert_eq!(resolved.tuning_table_revision, 36);
+        assert_eq!(resolved.tuning_table_revision, 37);
 
         let eager = build_resolved_gemm_launch_set(&[resolved]).unwrap();
         let graph = build_resolved_gemm_launch_set(&[resolved]).unwrap();
@@ -12254,7 +12553,7 @@ mod prepared_f32_launch_tests {
         assert_eq!(resolved.tensor_maps_digest, [1; 32]);
         assert_eq!(resolved.resources_digest, [2; 32]);
         assert_eq!(resolved.launch.arguments_digest, [3; 32]);
-        assert_eq!(resolved.tuning_table_revision, 36);
+        assert_eq!(resolved.tuning_table_revision, 37);
 
         let launch_set = build_resolved_gemm_launch_set(&[resolved]).unwrap();
         assert_eq!(launch_set.launch_count, 1);

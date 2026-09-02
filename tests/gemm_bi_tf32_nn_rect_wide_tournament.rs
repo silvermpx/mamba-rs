@@ -653,7 +653,7 @@ fn production_sources_own_every_candidate_and_a_bounded_abi() {
         "ResolvedGemmOp::Nn => [",
         "box_dimensions: [spec.map_bk, spec.tile.0]",
         "box_dimensions: [spec.map_bk, spec.map_bk]",
-        "Tf32PhysicalRoute::Sm120TmaMmaTf32RnaV1(_) => Tf32TensorMapFormat::Uint32V1",
+        "| Tf32PhysicalRoute::Sm120TmaMmaTf32RnaStreamKV1(_) => Tf32TensorMapFormat::Uint32V1",
     ] {
         assert!(
             contract.contains(literal),

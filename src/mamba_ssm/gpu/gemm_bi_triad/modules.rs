@@ -287,6 +287,26 @@ fn driver_proc_address(symbol: &str, cuda_version: i32) -> Result<*mut c_void, S
 }
 
 const TF32_DRIVER_PARAMETER_COUNT: usize = 5;
+/// The stream-K kernel takes its slab and flag buffers ahead of the tensor
+/// maps: output, slabs, flags, two maps, bias, parameters.
+const TF32_STREAMK_DRIVER_PARAMETER_COUNT: usize = 7;
+
+fn tf32_driver_parameter_count(module_kind: ModuleKind, symbol: &str) -> usize {
+    let streamk = super::contract::tf32_route_specs(module_kind)
+        .iter()
+        .any(|spec| {
+            spec.symbol == symbol
+                && matches!(
+                    spec.route,
+                    super::contract::Tf32PhysicalRoute::Sm120TmaMmaTf32RnaStreamKV1(_)
+                )
+        });
+    if streamk {
+        TF32_STREAMK_DRIVER_PARAMETER_COUNT
+    } else {
+        TF32_DRIVER_PARAMETER_COUNT
+    }
+}
 
 fn query_driver_parameter_abi(
     label: &str,
@@ -320,11 +340,14 @@ fn query_driver_parameter_abi(
         .map_err(|error| format!("{label}: {error}"))
 }
 
+/// The Driver ABI of one TF32 route symbol: the tiled routes expose the
+/// five-parameter contract, the stream-K route the seven-parameter one.
 fn query_tf32_driver_parameter_abi(
     label: &str,
+    parameter_count: usize,
     get_parameter_info: impl FnMut(usize, &mut usize, &mut usize) -> cudarc::driver::sys::CUresult,
 ) -> Result<Tf32DriverAbi, String> {
-    query_driver_parameter_abi(label, TF32_DRIVER_PARAMETER_COUNT, get_parameter_info)
+    query_driver_parameter_abi(label, parameter_count, get_parameter_info)
 }
 
 fn census_tf32_driver_abi(
@@ -353,9 +376,11 @@ fn census_tf32_driver_abi(
         let function = unsafe { cudarc::driver::result::module::get_function(module.raw(), name) }
             .map_err(|error| format!("load {module_kind:?}/{symbol} for Driver ABI: {error:?}"))?;
         let label = format!("{module_kind:?}/{symbol}");
-        let abi = query_tf32_driver_parameter_abi(&label, |index, offset, size| unsafe {
-            get_parameter_info(function, index, offset, size)
-        })?;
+        let abi = query_tf32_driver_parameter_abi(
+            &label,
+            tf32_driver_parameter_count(module_kind, symbol),
+            |index, offset, size| unsafe { get_parameter_info(function, index, offset, size) },
+        )?;
         if census.insert(symbol, abi).is_some() {
             return Err(format!(
                 "{module_kind:?} Driver ABI census contains duplicate symbol {symbol}"
@@ -447,6 +472,8 @@ pub(crate) struct CompiledModule {
     pub compiler_identity: CompilerIdentity,
     pub artifact_identity: ArtifactIdentity,
     tf32_qualified: bool,
+    /// The first step that kept the module's TF32 routes from qualifying.
+    tf32_qualification_error: Option<String>,
     tf32_driver_abi: BTreeMap<&'static str, Tf32DriverAbi>,
 }
 
@@ -563,14 +590,18 @@ pub(crate) fn compile_module(request: CompileModuleRequest<'_>) -> Result<Compil
             .is_some_and(crate::mamba_ssm::gpu::kernel_identity::nvrtc_library_domain_is_current)
     {
         let census = census_all_tf32_driver_abi(request.ctx, request.module_kind, &src);
-        let tf32_driver_abi = census.unwrap_or_default();
         let validation = validate_tf32_specialization(request.module_kind, &src);
-        let tf32_qualified =
-            validation.is_ok() && complete_tf32_driver_abi(request.module_kind, &tf32_driver_abi);
-        loaded = Some((module, hit.artifact_digest, tf32_qualified, tf32_driver_abi));
+        let (tf32_driver_abi, tf32_qualification_error) =
+            tf32_qualification_verdict(request.module_kind, census, validation);
+        loaded = Some((
+            module,
+            hit.artifact_digest,
+            tf32_qualification_error,
+            tf32_driver_abi,
+        ));
     }
 
-    let (module, artifact_digest, tf32_qualified, tf32_driver_abi) = match loaded {
+    let (module, artifact_digest, tf32_qualification_error, tf32_driver_abi) = match loaded {
         Some(value) => value,
         None => {
             let ptx = cudarc::nvrtc::compile_ptx_with_opts(&combined, opts).map_err(|error| {
@@ -587,10 +618,9 @@ pub(crate) fn compile_module(request: CompileModuleRequest<'_>) -> Result<Compil
                 crate::mamba_ssm::gpu::kernel_identity::canonical_ptx_image(ptx_image)?;
             validate_module_ptx(request.module_kind, request.arch, &ptx_source)?;
             let census = census_all_tf32_driver_abi(request.ctx, request.module_kind, &ptx_source);
-            let tf32_driver_abi = census.unwrap_or_default();
             let validation = validate_tf32_specialization(request.module_kind, &ptx_source);
-            let tf32_qualified = validation.is_ok()
-                && complete_tf32_driver_abi(request.module_kind, &tf32_driver_abi);
+            let (tf32_driver_abi, tf32_qualification_error) =
+                tf32_qualification_verdict(request.module_kind, census, validation);
             if !crate::mamba_ssm::gpu::kernel_identity::header_manifest_is_current(
                 combined.as_bytes(),
                 &include_paths,
@@ -624,7 +654,12 @@ pub(crate) fn compile_module(request: CompileModuleRequest<'_>) -> Result<Compil
                 .map_err(|error| {
                     format!("{:?} module load failed: {error:?}", request.module_kind)
                 })?;
-            (module, artifact_digest, tf32_qualified, tf32_driver_abi)
+            (
+                module,
+                artifact_digest,
+                tf32_qualification_error,
+                tf32_driver_abi,
+            )
         }
     };
 
@@ -655,9 +690,29 @@ pub(crate) fn compile_module(request: CompileModuleRequest<'_>) -> Result<Compil
             compile_key: invocation_digest,
             artifact_digest,
         },
-        tf32_qualified,
+        tf32_qualified: tf32_qualification_error.is_none(),
+        tf32_qualification_error,
         tf32_driver_abi,
     })
+}
+
+/// The TF32 routes of a module qualify when the specialization validates
+/// and the Driver ABI census covers every production symbol; otherwise the
+/// first failing step is kept as the reason.
+fn tf32_qualification_verdict(
+    module_kind: ModuleKind,
+    census: Result<BTreeMap<&'static str, Tf32DriverAbi>, String>,
+    validation: Result<(), String>,
+) -> (BTreeMap<&'static str, Tf32DriverAbi>, Option<String>) {
+    let (tf32_driver_abi, census_error) = match census {
+        Ok(census) => (census, None),
+        Err(error) => (BTreeMap::new(), Some(error)),
+    };
+    let error = validation.err().or(census_error).or_else(|| {
+        (!complete_tf32_driver_abi(module_kind, &tf32_driver_abi))
+            .then(|| format!("{module_kind:?} TF32 Driver ABI census is incomplete"))
+    });
+    (tf32_driver_abi, error)
 }
 
 pub(crate) fn compile_sm100_optional(
@@ -2334,12 +2389,6 @@ fn validate_tf32_parameter_abi(
             .map(str::trim)
             .filter(|line| line.starts_with(".param "))
             .collect();
-        if declarations.len() != 5 {
-            return Err(format!(
-                "{} must have five ABI parameters",
-                kernel_spec.symbol
-            ));
-        }
         let bundle_size = if module_kind == ModuleKind::TriadSm80 {
             32
         } else {
@@ -2349,6 +2398,40 @@ fn validate_tf32_parameter_abi(
         let is_bundle =
             |line: &str| line.starts_with(bundle) && line.contains(&format!("[{bundle_size}]"));
         let is_u64 = |line: &str| line.starts_with(".param .u64 ");
+        let map = format!(".param .align {map_alignment} .b8 ");
+        let is_map = |line: &str| line.starts_with(&map) && line.contains("[128]");
+        if matches!(
+            kernel_spec.route,
+            super::contract::Tf32PhysicalRoute::Sm120TmaMmaTf32RnaStreamKV1(_)
+        ) {
+            // Output, slabs, flags, two tensor maps, bias, parameter bundle.
+            if declarations.len() != 7 {
+                return Err(format!(
+                    "{} must have seven ABI parameters",
+                    kernel_spec.symbol
+                ));
+            }
+            if !is_u64(declarations[0])
+                || !is_u64(declarations[1])
+                || !is_u64(declarations[2])
+                || !is_map(declarations[3])
+                || !is_map(declarations[4])
+                || !is_u64(declarations[5])
+                || !is_bundle(declarations[6])
+            {
+                return Err(format!(
+                    "{} has the wrong stream-K tensor-map ABI",
+                    kernel_spec.symbol
+                ));
+            }
+            continue;
+        }
+        if declarations.len() != 5 {
+            return Err(format!(
+                "{} must have five ABI parameters",
+                kernel_spec.symbol
+            ));
+        }
         if !is_bundle(declarations[4]) {
             return Err(format!(
                 "{} has the wrong parameter bundle ABI",
@@ -2362,19 +2445,15 @@ fn validate_tf32_parameter_abi(
                     kernel_spec.symbol
                 ));
             }
-        } else {
-            let map = format!(".param .align {map_alignment} .b8 ");
-            let is_map = |line: &str| line.starts_with(&map) && line.contains("[128]");
-            if !is_u64(declarations[0])
-                || !is_map(declarations[1])
-                || !is_map(declarations[2])
-                || !is_u64(declarations[3])
-            {
-                return Err(format!(
-                    "{} has the wrong tensor-map ABI",
-                    kernel_spec.symbol
-                ));
-            }
+        } else if !is_u64(declarations[0])
+            || !is_map(declarations[1])
+            || !is_map(declarations[2])
+            || !is_u64(declarations[3])
+        {
+            return Err(format!(
+                "{} has the wrong tensor-map ABI",
+                kernel_spec.symbol
+            ));
         }
     }
     Ok(())
@@ -3003,7 +3082,7 @@ fn validate_sm120_ptx(arch: &str, ptx: &str) -> Result<(), String> {
         .map(|spec| spec.symbol)
         .collect();
     expected.extend(super::contract::tf32_module_symbols(ModuleKind::TriadSm120));
-    let parsed = validate_exact_ptx_exports("TriadSm120", 113, &expected, ptx)?;
+    let parsed = validate_exact_ptx_exports("TriadSm120", 114, &expected, ptx)?;
     validate_sm120_entry_features(&parsed)?;
     let ptx = strip_ptx_comments(ptx)?;
     if ptx_has_unquoted_token(&ptx, |token| {
@@ -3763,7 +3842,7 @@ pub(crate) fn qualify_specialized_module(
             Err(error) => (HashMap::new(), Some(error)),
         }
     } else {
-        (HashMap::new(), None)
+        (HashMap::new(), module.tf32_qualification_error.clone())
     };
     Ok(QualifiedSpecializedModule {
         module,
@@ -3925,6 +4004,7 @@ impl GemmBiKernels {
                 }
             }
         } else {
+            portable_tf32_rejection = sm80.tf32_qualification_error.clone();
             (HashMap::new(), None)
         };
         let tf32_splitk_functions =
@@ -4143,6 +4223,12 @@ impl GemmBiKernels {
 
     pub fn f32_triad_availability(&self) -> super::contract::F32TriadAvailability {
         self.f32_triad_availability
+    }
+
+    /// Why the specialized TF32 module (SM90a/SM100/SM120) is not bound, if
+    /// it is not: the first qualification step that rejected it.
+    pub(crate) fn specialized_tf32_rejection(&self) -> Option<&str> {
+        self.specialized_tf32_rejection.as_deref()
     }
 
     pub(crate) fn tf32_qualification_rejection(
@@ -4689,6 +4775,9 @@ fn tf32_register_cap(module_kind: ModuleKind, symbol: &str) -> Result<u32, Strin
         ModuleKind::TriadSm90a if symbol.ends_with("_wg1") => Ok(168),
         ModuleKind::TriadSm90a if symbol.ends_with("_wg2") => Ok(128),
         ModuleKind::TriadSm120 if symbol == SM120_TAG33_SYMBOL => Ok(80),
+        // The stream-K kernel keeps one CTA per multiprocessor by design and
+        // spends the register file on its pipeline state and boundary code.
+        ModuleKind::TriadSm120 if symbol.ends_with("_pair_streamk") => Ok(240),
         ModuleKind::TriadSm100 | ModuleKind::TriadSm120 => Ok(128),
         _ => Err(format!(
             "no TF32 register gate for {module_kind:?}/{symbol}"
@@ -5371,10 +5460,10 @@ mod tests {
     use super::{
         SCALAR_GROUP_M_MACRO, SCALAR_SYMBOLS as PRODUCTION_SCALAR_SYMBOLS,
         SM80_SYMBOLS as PRODUCTION_SM80_SYMBOLS, SM90A_SYMBOLS, SM100_PROBE_SOURCE, SourceFragment,
-        Tf32DriverAbi, Tf32DriverJitLocalMemoryFacts, compose_fragments, compose_module_source,
-        merge_tf32_driver_abi, parse_ptx, portable_target_for_device, ptx_entry,
-        qualified_ptx_target, qualified_scalar_resource_environment,
-        qualify_tf32_conversion_artifact, query_driver_parameter_abi,
+        TF32_DRIVER_PARAMETER_COUNT, Tf32DriverAbi, Tf32DriverJitLocalMemoryFacts,
+        compose_fragments, compose_module_source, merge_tf32_driver_abi, parse_ptx,
+        portable_target_for_device, ptx_entry, qualified_ptx_target,
+        qualified_scalar_resource_environment, qualify_tf32_conversion_artifact,
         query_tf32_driver_parameter_abi, resolve_owned_symbol, retain_forced_only_functions,
         retain_tf32_candidate, scalar_group_m_option, select_sm100_candidate,
         select_sm120_candidate, sm100_target_candidates, tf32_register_cap,
@@ -5746,6 +5835,12 @@ mod tests {
                 ptx.push_str(".param .align 4 .b8 bundle[32]\n) {}\n");
             } else {
                 ptx.push_str(".param .u64 output,\n");
+                if matches!(
+                    kernel_spec.route,
+                    super::super::contract::Tf32PhysicalRoute::Sm120TmaMmaTf32RnaStreamKV1(_)
+                ) {
+                    ptx.push_str(".param .u64 partial,\n.param .u64 flags,\n");
+                }
                 ptx.push_str(&format!(
                     ".param .align {map_alignment} .b8 a_map[128],\n\
                      .param .align {map_alignment} .b8 b_map[128],\n"
@@ -6487,7 +6582,7 @@ mod tests {
         let expected_count = match module_kind {
             ModuleKind::TriadSm90a => 18,
             ModuleKind::TriadSm100 => 108,
-            ModuleKind::TriadSm120 => 113,
+            ModuleKind::TriadSm120 => 114,
             _ => unreachable!(),
         };
         assert_eq!(symbols.len(), expected_count);
@@ -7149,7 +7244,7 @@ mod tests {
             (ModuleKind::TriadSm80, 18),
             (ModuleKind::TriadSm90a, 6),
             (ModuleKind::TriadSm100, 36),
-            (ModuleKind::TriadSm120, 17),
+            (ModuleKind::TriadSm120, 18),
         ] {
             let kernel_specs = super::super::contract::tf32_route_specs(module_kind);
             let symbols: BTreeSet<_> =
@@ -7287,16 +7382,20 @@ mod tests {
 
         let layout = [(0, 8), (8, 8), (16, 8), (24, 8), (32, 32)];
         let mut queried = Vec::new();
-        let abi = query_tf32_driver_parameter_abi("TriadSm80/test", |index, offset, size| {
-            queried.push(index);
-            if let Some((value_offset, value_size)) = layout.get(index).copied() {
-                *offset = value_offset;
-                *size = value_size;
-                CUresult::CUDA_SUCCESS
-            } else {
-                CUresult::CUDA_ERROR_INVALID_VALUE
-            }
-        })
+        let abi = query_tf32_driver_parameter_abi(
+            "TriadSm80/test",
+            TF32_DRIVER_PARAMETER_COUNT,
+            |index, offset, size| {
+                queried.push(index);
+                if let Some((value_offset, value_size)) = layout.get(index).copied() {
+                    *offset = value_offset;
+                    *size = value_size;
+                    CUresult::CUDA_SUCCESS
+                } else {
+                    CUresult::CUDA_ERROR_INVALID_VALUE
+                }
+            },
+        )
         .expect("five live parameters followed by the terminal probe");
         assert_eq!(queried, [0, 1, 2, 3, 4, 5]);
         assert_eq!(
@@ -7308,16 +7407,17 @@ mod tests {
         );
 
         let split_layout = [(0, 8), (8, 8), (16, 8), (24, 8), (32, 8), (40, 8), (48, 32)];
-        let split = query_driver_parameter_abi("TriadSm80/split-K", 7, |index, offset, size| {
-            if let Some((value_offset, value_size)) = split_layout.get(index).copied() {
-                *offset = value_offset;
-                *size = value_size;
-                CUresult::CUDA_SUCCESS
-            } else {
-                CUresult::CUDA_ERROR_INVALID_VALUE
-            }
-        })
-        .expect("seven live split-K parameters followed by the terminal probe");
+        let split =
+            query_tf32_driver_parameter_abi("TriadSm80/split-K", 7, |index, offset, size| {
+                if let Some((value_offset, value_size)) = split_layout.get(index).copied() {
+                    *offset = value_offset;
+                    *size = value_size;
+                    CUresult::CUDA_SUCCESS
+                } else {
+                    CUresult::CUDA_ERROR_INVALID_VALUE
+                }
+            })
+            .expect("seven live split-K parameters followed by the terminal probe");
         assert_eq!(split.parameter_count(), 7);
         assert_eq!(
             split
@@ -7329,8 +7429,10 @@ mod tests {
         );
 
         let mut queried = Vec::new();
-        let missing =
-            query_tf32_driver_parameter_abi("TriadSm80/missing", |index, offset, size| {
+        let missing = query_tf32_driver_parameter_abi(
+            "TriadSm80/missing",
+            TF32_DRIVER_PARAMETER_COUNT,
+            |index, offset, size| {
                 queried.push(index);
                 *offset = index * 8;
                 *size = 8;
@@ -7339,21 +7441,28 @@ mod tests {
                 } else {
                     CUresult::CUDA_SUCCESS
                 }
-            })
-            .expect_err("a required parameter may not terminate the ABI");
+            },
+        )
+        .expect_err("a required parameter may not terminate the ABI");
         assert_eq!(queried, [0, 1, 2, 3]);
         assert!(missing.contains("TriadSm80/missing[3]"));
 
-        let extra = query_tf32_driver_parameter_abi("TriadSm80/extra", |index, offset, size| {
-            *offset = index * 8;
-            *size = 8;
-            CUresult::CUDA_SUCCESS
-        })
+        let extra = query_tf32_driver_parameter_abi(
+            "TriadSm80/extra",
+            TF32_DRIVER_PARAMETER_COUNT,
+            |index, offset, size| {
+                *offset = index * 8;
+                *size = 8;
+                CUresult::CUDA_SUCCESS
+            },
+        )
         .expect_err("a sixth live parameter must fail the ABI census");
         assert!(extra.contains("more than 5 Driver ABI parameters"));
 
-        let sentinel =
-            query_tf32_driver_parameter_abi("TriadSm80/sentinel", |index, offset, size| {
+        let sentinel = query_tf32_driver_parameter_abi(
+            "TriadSm80/sentinel",
+            TF32_DRIVER_PARAMETER_COUNT,
+            |index, offset, size| {
                 *offset = index * 8;
                 *size = 8;
                 if index == 5 {
@@ -7361,8 +7470,9 @@ mod tests {
                 } else {
                     CUresult::CUDA_SUCCESS
                 }
-            })
-            .expect_err("a non-terminal Driver error must not be accepted");
+            },
+        )
+        .expect_err("a non-terminal Driver error must not be accepted");
         assert!(sentinel.contains("TriadSm80/sentinel[5] sentinel"));
     }
 

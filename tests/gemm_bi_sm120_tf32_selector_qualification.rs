@@ -652,9 +652,26 @@ impl Candidate {
         )
     }
 
+    /// Stream-K deals the reduction across CTAs and folds it in a fixed order:
+    /// deterministic and replay-stable, but its own family of bits.
+    const fn is_stream_k(self) -> bool {
+        matches!(
+            self.route,
+            Tf32PhysicalRoute::Sm120TmaMmaTf32RnaStreamKV1(_)
+        )
+    }
+
+    /// Whether the candidate must reproduce the portable reference bit for bit;
+    /// the split families are held to the accuracy gate instead.
+    const fn shares_reference_bits(self) -> bool {
+        !self.is_split_k() && !self.is_stream_k()
+    }
+
     const fn numeric_family(self) -> &'static str {
         if self.is_split_k() {
             "tf32_split_k_fixed_reducer"
+        } else if self.is_stream_k() {
+            "tf32_sm120_stream_k_fixed_order"
         } else if matches!(self.module, ModuleKind::TriadSm120) {
             "tf32_sm120_tma_direct"
         } else {
@@ -1339,7 +1356,7 @@ fn run_cell(device: &GpuDevice, cell: Cell, quiet: &QuietGpu) -> Result<CellResu
             &mut candidate,
             &candidate_ctx,
             &reference_bits,
-            !spec.is_split_k(),
+            spec.shares_reference_bits(),
         )
         .map_err(|error| format!("{} {} bit gate: {error}", cell.id, spec.symbol))?;
         for path in [Path::Eager, Path::Graph] {
@@ -1395,7 +1412,7 @@ fn run_cell(device: &GpuDevice, cell: Cell, quiet: &QuietGpu) -> Result<CellResu
             &mut candidate,
             &candidate_ctx,
             &reference_bits,
-            !spec.is_split_k(),
+            spec.shares_reference_bits(),
         )
         .map_err(|error| format!("{} {} final bit gate: {error}", cell.id, spec.symbol))?;
         let scalar_final = eager_graph_bits(&mut scalar_gate, &scalar_ctx)?;
@@ -1607,7 +1624,7 @@ fn qualification_plan_is_exact() {
             .iter()
             .filter(|spec| spec.op == ResolvedGemmOp::Tn)
             .count(),
-        6
+        7
     );
     assert_eq!(
         tf32_route_specs(ModuleKind::TriadSm120)
@@ -1617,7 +1634,7 @@ fn qualification_plan_is_exact() {
         5
     );
     assert_eq!(candidates(ResolvedGemmOp::Nn).len(), 14);
-    assert_eq!(candidates(ResolvedGemmOp::Tn).len(), 12);
+    assert_eq!(candidates(ResolvedGemmOp::Tn).len(), 13);
     assert_eq!(candidates(ResolvedGemmOp::Nt).len(), 15);
     assert_eq!(DISCOVERY_WINDOWS, 21);
     assert_eq!(FINAL_WINDOWS, 101);

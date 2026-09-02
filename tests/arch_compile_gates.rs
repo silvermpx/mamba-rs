@@ -585,8 +585,8 @@ fn tf32_positive_ceil_divisions_use_subtract_before_addition() {
             "SM120",
             include_str!("../kernels/gemm_bi_triad/sm120.cu"),
             "N",
+            5,
             3,
-            2,
         ),
     ] {
         let compact: String = source
@@ -636,6 +636,7 @@ fn sm120_tf32_symbols() -> Vec<String> {
         symbols.push(format!("gemm_bi_{op}_sm120_tma_mma_tf32_v1_m64n64_bk32_s2"));
     }
     symbols.push("gemm_bi_tn_sm120_tma_mma_tf32_v1_m64n128_bk32_s4_pair".to_string());
+    symbols.push("gemm_bi_tn_sm120_tma_mma_tf32_v1_m64n128_bk32_s3_pair_streamk".to_string());
     symbols.push("gemm_bi_nn_sm120_tma_mma_tf32_v1_m80n32_bk64_s2".to_string());
     symbols
 }
@@ -3621,7 +3622,7 @@ fn compiles_generic_sm120_triad_modules_with_exact_ptx_contract() {
             &ptx,
             emitted,
             &expected,
-            113,
+            114,
         )
         .unwrap();
 
@@ -3739,7 +3740,7 @@ fn compiles_generic_sm120_triad_modules_with_exact_ptx_contract() {
             );
             assert!(!entry.contains("call.uni"), "device call in {symbol}");
         }
-        assert_eq!(sm120_tf32_symbols().len(), 17);
+        assert_eq!(sm120_tf32_symbols().len(), 18);
         for symbol in sm120_tf32_symbols() {
             let entry = parsed.entry(&symbol);
             assert_compile_gate_entry_tokens(
@@ -3763,7 +3764,14 @@ fn compiles_generic_sm120_triad_modules_with_exact_ptx_contract() {
                 "{requested}/{symbol} is missing st.global opcode"
             );
             let parameters = ptx_parameters(&entry.text, &symbol);
-            assert_eq!(parameters.matches(".param").count(), 5);
+            // The stream-K kernel carries its slab and flag buffers ahead of
+            // the tensor maps; every other route keeps the five-argument ABI.
+            let expected_parameters = if symbol.ends_with("_pair_streamk") {
+                7
+            } else {
+                5
+            };
+            assert_eq!(parameters.matches(".param").count(), expected_parameters);
             assert_eq!(
                 parameters
                     .matches(&format!(".param .align {map_alignment} .b8"))

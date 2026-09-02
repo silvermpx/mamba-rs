@@ -8671,9 +8671,9 @@ fn sm120_tf32_hot_suite_totals_follow_the_exact_route_inventory() {
 
     assert_eq!(shapes, 5);
     assert_eq!(routes(ResolvedGemmOp::Nn), 6);
-    assert_eq!(routes(ResolvedGemmOp::Tn), 6);
+    assert_eq!(routes(ResolvedGemmOp::Tn), 7);
     assert_eq!(routes(ResolvedGemmOp::Nt), 5);
-    assert_eq!(shapes * routes(ResolvedGemmOp::Tn), 30);
+    assert_eq!(shapes * routes(ResolvedGemmOp::Tn), 35);
     assert_eq!(
         shapes * (routes(ResolvedGemmOp::Nn) + routes(ResolvedGemmOp::Nt)),
         55

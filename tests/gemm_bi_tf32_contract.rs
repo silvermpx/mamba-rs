@@ -1274,6 +1274,16 @@ fn expected_ptx_parameters(
             parameter(3, "u64", 8, None),
             parameter(4, "b8", 32, Some(4)),
         ]
+    } else if symbol.contains("_streamk") {
+        vec![
+            parameter(0, "u64", 8, None),
+            parameter(1, "u64", 8, None),
+            parameter(2, "u64", 8, None),
+            parameter(3, "b8", 128, Some(tensor_map_alignment)),
+            parameter(4, "b8", 128, Some(tensor_map_alignment)),
+            parameter(5, "u64", 8, None),
+            parameter(6, "b8", 40, Some(4)),
+        ]
     } else {
         vec![
             parameter(0, "u64", 8, None),
@@ -2020,6 +2030,13 @@ fn metric_after(line: &str, marker: &str, suffix: &str) -> Option<u64> {
 }
 
 fn tf32_resource_caps(symbol: &str) -> (u64, u64) {
+    if symbol.ends_with("_s3_pair_streamk") {
+        // One resident CTA per multiprocessor owns the whole register file.
+        return (255, 73_856);
+    }
+    if symbol.contains("_m80n32_bk64_s2") {
+        return (128, 57_472);
+    }
     if symbol.contains("_sm80_") {
         let stage = if symbol.contains("_s2") {
             2
@@ -3607,6 +3624,7 @@ fn expected_sm120_symbols() -> BTreeSet<String> {
         symbols.insert(format!("gemm_bi_{op}_sm120_tma_mma_tf32_v1_m64n64_bk32_s2"));
     }
     symbols.insert("gemm_bi_tn_sm120_tma_mma_tf32_v1_m64n128_bk32_s4_pair".to_string());
+    symbols.insert("gemm_bi_tn_sm120_tma_mma_tf32_v1_m64n128_bk32_s3_pair_streamk".to_string());
     symbols.insert("gemm_bi_nn_sm120_tma_mma_tf32_v1_m80n32_bk64_s2".to_string());
     symbols
 }
@@ -8265,7 +8283,7 @@ fn tf32_sources_export_the_exact_planned_symbol_inventories() {
             "gemm_bi_",
             "_sm120_tma_mma_tf32_v1_",
             expected_sm120_symbols(),
-            17,
+            18,
         ),
     ];
 
@@ -8300,7 +8318,6 @@ fn rust_contract_and_module_loader_own_the_same_exact_tf32_inventories() {
             "18",
             "6",
             "36",
-            "17",
         ],
         "direct contract/module/CUDA inventory behavior",
     );
@@ -9614,7 +9631,7 @@ fn zero_reduction_device_branch_dominates_every_descriptor_use() {
         .chain(expected_sm100_symbols())
         .chain(expected_sm120_symbols())
         .collect();
-    assert_eq!(specialized.len(), 59, "canonical specialized K=0 census");
+    assert_eq!(specialized.len(), 60, "canonical specialized K=0 census");
     for (label, source) in [
         ("SM80", SM80_SOURCE),
         ("SM90a", SM90A_SOURCE),
@@ -10229,7 +10246,7 @@ fn release_target_entry_matrix_nvrtc_ptxas_pipeline() {
         }
         checked_entries += expected.len();
     }
-    assert_eq!(checked_entries, 252);
+    assert_eq!(checked_entries, 258);
     assert_eq!(checked_entries, release_entry_target_count());
 }
 
@@ -10711,9 +10728,11 @@ fn driver_abi_lookup_oracle_rejects_dead_correct_and_live_wrong_calls() {
     );
     assert!(validate_cuda12_driver_abi_lookup_contract(&live_wrong).is_err());
 
-    let direct_downstream = r#"let abi = query_tf32_driver_parameter_abi(&label, |index, offset, size| unsafe {
-            get_parameter_info(function, index, offset, size)
-        })?;"#;
+    let direct_downstream = r#"let abi = query_tf32_driver_parameter_abi(
+            &label,
+            tf32_driver_parameter_count(module_kind, symbol),
+            |index, offset, size| unsafe { get_parameter_info(function, index, offset, size) },
+        )?;"#;
     let dead_downstream = canonical.replace(
         direct_downstream,
         &format!(
@@ -11402,6 +11421,10 @@ fn resource_caps_match_the_frozen_cuda_map() {
         (
             "gemm_bi_tn_sm120_tma_mma_tf32_v1_m64n128_bk32_s4_pair",
             (128, 98_432),
+        ),
+        (
+            "gemm_bi_tn_sm120_tma_mma_tf32_v1_m64n128_bk32_s3_pair_streamk",
+            (255, 73_856),
         ),
     ] {
         assert_eq!(tf32_resource_caps(symbol), expected, "{symbol}");
@@ -12757,22 +12780,23 @@ fn validate_cuda12_driver_abi_lookup_contract(source: &str) -> Result<(), String
             ) -> cudarc::driver::sys::CUresult;
 
             let module = DriverModule::load(ctx, ptx)?;
-            let get_parameter_info: GetParamInfo = unsafe {
-                std::mem::transmute(driver_proc_address("cuFuncGetParamInfo", 12_040)?)
-            };
+            let get_parameter_info: GetParamInfo =
+                unsafe { std::mem::transmute(driver_proc_address("cuFuncGetParamInfo", 12_040)?) };
             let mut census = BTreeMap::new();
             for symbol in symbols {
-                let name = CString::new(symbol).expect("static symbol");
-                let function = unsafe {
-                    cudarc::driver::result::module::get_function(module.raw(), name)
-                }
-                .map_err(|error| format!("load symbol: {error:?}"))?;
-                let label = format!("module/symbol");
-                let abi = query_tf32_driver_parameter_abi(&label, |index, offset, size| unsafe {
-                    get_parameter_info(function, index, offset, size)
-                })?;
+                let name = CString::new(symbol).expect("static TF32 symbol");
+                let function = unsafe { cudarc::driver::result::module::get_function(module.raw(), name) }
+                    .map_err(|error| format!("load {module_kind:?}/{symbol} for Driver ABI: {error:?}"))?;
+                let label = format!("{module_kind:?}/{symbol}");
+                let abi = query_tf32_driver_parameter_abi(
+                    &label,
+                    tf32_driver_parameter_count(module_kind, symbol),
+                    |index, offset, size| unsafe { get_parameter_info(function, index, offset, size) },
+                )?;
                 if census.insert(symbol, abi).is_some() {
-                    return Err(format!("duplicate symbol"));
+                    return Err(format!(
+                        "{module_kind:?} Driver ABI census contains duplicate symbol {symbol}"
+                    ));
                 }
             }
             module.unload()?;
@@ -12829,20 +12853,22 @@ fn validate_cuda12_driver_abi_lookup_contract(source: &str) -> Result<(), String
     };
     let symbol_loop = braced_scope_at(census, *symbol_loop_offset, "for symbol in symbols");
     let expected_symbol_loop = r#"
-        for symbol in symbols {
-            let name = CString::new(symbol).expect("static symbol");
-            let function = unsafe {
-                cudarc::driver::result::module::get_function(module.raw(), name)
+            for symbol in symbols {
+                let name = CString::new(symbol).expect("static TF32 symbol");
+                let function = unsafe { cudarc::driver::result::module::get_function(module.raw(), name) }
+                    .map_err(|error| format!("load {module_kind:?}/{symbol} for Driver ABI: {error:?}"))?;
+                let label = format!("{module_kind:?}/{symbol}");
+                let abi = query_tf32_driver_parameter_abi(
+                    &label,
+                    tf32_driver_parameter_count(module_kind, symbol),
+                    |index, offset, size| unsafe { get_parameter_info(function, index, offset, size) },
+                )?;
+                if census.insert(symbol, abi).is_some() {
+                    return Err(format!(
+                        "{module_kind:?} Driver ABI census contains duplicate symbol {symbol}"
+                    ));
+                }
             }
-            .map_err(|error| format!("load symbol: {error:?}"))?;
-            let label = format!("module/symbol");
-            let abi = query_tf32_driver_parameter_abi(&label, |index, offset, size| unsafe {
-                get_parameter_info(function, index, offset, size)
-            })?;
-            if census.insert(symbol, abi).is_some() {
-                return Err(format!("duplicate symbol"));
-            }
-        }
     "#;
     if compact_code(&source_mask(symbol_loop)) != compact_code(&source_mask(expected_symbol_loop)) {
         return Err("Driver ABI symbol loop must bind every live query directly to census".into());
@@ -12857,9 +12883,11 @@ fn validate_cuda12_driver_abi_lookup_contract(source: &str) -> Result<(), String
     };
     let downstream = statement_at(symbol_loop, *downstream_offset);
     let expected_downstream = r#"
-        let abi = query_tf32_driver_parameter_abi(&label, |index, offset, size| unsafe {
-            get_parameter_info(function, index, offset, size)
-        })?;
+        let abi = query_tf32_driver_parameter_abi(
+                    &label,
+                    tf32_driver_parameter_count(module_kind, symbol),
+                    |index, offset, size| unsafe { get_parameter_info(function, index, offset, size) },
+                )?;
     "#;
     if compact_code(&source_mask(downstream)) != compact_code(&source_mask(expected_downstream)) {
         return Err("Driver ABI query must directly invoke the resolved function pointer".into());
@@ -12920,13 +12948,10 @@ fn validate_cuda12_driver_abi_lookup_contract(source: &str) -> Result<(), String
     let expected_tf32_wrapper = r#"
         fn query_tf32_driver_parameter_abi(
             label: &str,
-            get_parameter_info: impl FnMut(
-                usize,
-                &mut usize,
-                &mut usize
-            ) -> cudarc::driver::sys::CUresult,
+            parameter_count: usize,
+            get_parameter_info: impl FnMut(usize, &mut usize, &mut usize) -> cudarc::driver::sys::CUresult,
         ) -> Result<Tf32DriverAbi, String> {
-            query_driver_parameter_abi(label, TF32_DRIVER_PARAMETER_COUNT, get_parameter_info)
+            query_driver_parameter_abi(label, parameter_count, get_parameter_info)
         }
     "#;
     if compact_code(&source_mask(tf32_wrapper)) != compact_code(&source_mask(expected_tf32_wrapper))

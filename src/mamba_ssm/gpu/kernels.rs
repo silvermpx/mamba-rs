@@ -1001,6 +1001,11 @@ impl MambaKernels {
         self.triad.f32_triad_availability()
     }
 
+    /// The reason the specialized TF32 module is not bound, when it is not.
+    pub fn specialized_tf32_rejection(&self) -> Option<&str> {
+        self.triad.specialized_tf32_rejection()
+    }
+
     pub fn triad_scalar_compiler_identity(&self) -> super::kernel_identity::CompilerIdentity {
         self.triad.scalar_compiler_identity()
     }

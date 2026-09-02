@@ -729,6 +729,18 @@ pub(super) fn append_tf32_route_digest(
                 .required(b"tile", &[tile])
                 .required(b"stages", &[route.stages.count()])
         }
+        Tf32PhysicalRoute::Sm120TmaMmaTf32RnaStreamKV1(route) => {
+            let tile = match route.tile {
+                Tf32Sm120Tile::M128N64 => 1,
+                Tf32Sm120Tile::M64N128 => 2,
+                Tf32Sm120Tile::M64N64 => 3,
+                Tf32Sm120Tile::M80N32Bk64 => 4,
+            };
+            digest
+                .required(b"route-family", &[8])
+                .required(b"tile", &[tile])
+                .required(b"stages", &[route.stages.count()])
+        }
     }
 }
 
@@ -1009,7 +1021,8 @@ pub(super) fn tf32_tensor_map_plan(
         Tf32PhysicalRoute::Sm90aWgmmaTf32TmaV1(_) | Tf32PhysicalRoute::Sm100Tcgen05Tf32TmaV1(_) => {
             Tf32TensorMapFormat::Tfloat32V1
         }
-        Tf32PhysicalRoute::Sm120TmaMmaTf32RnaV1(_) => Tf32TensorMapFormat::Uint32V1,
+        Tf32PhysicalRoute::Sm120TmaMmaTf32RnaV1(_)
+        | Tf32PhysicalRoute::Sm120TmaMmaTf32RnaStreamKV1(_) => Tf32TensorMapFormat::Uint32V1,
         Tf32PhysicalRoute::MmaTf32RnaV1(_)
         | Tf32PhysicalRoute::MmaTf32RnaSplitK2V1(_)
         | Tf32PhysicalRoute::MmaTf32RnaSplitK4V1(_)
@@ -1410,6 +1423,7 @@ pub enum Tf32PhysicalRoute {
     Sm90aWgmmaTf32TmaV1(Tf32Sm90aRoute),
     Sm100Tcgen05Tf32TmaV1(Tf32Sm100Route),
     Sm120TmaMmaTf32RnaV1(Tf32Sm120Route),
+    Sm120TmaMmaTf32RnaStreamKV1(Tf32Sm120Route),
 }
 
 impl Tf32PhysicalRoute {
@@ -1421,7 +1435,9 @@ impl Tf32PhysicalRoute {
             | Self::MmaTf32RnaSplitK8V1(_) => ModuleKind::TriadSm80,
             Self::Sm90aWgmmaTf32TmaV1(_) => ModuleKind::TriadSm90a,
             Self::Sm100Tcgen05Tf32TmaV1(_) => ModuleKind::TriadSm100,
-            Self::Sm120TmaMmaTf32RnaV1(_) => ModuleKind::TriadSm120,
+            Self::Sm120TmaMmaTf32RnaV1(_) | Self::Sm120TmaMmaTf32RnaStreamKV1(_) => {
+                ModuleKind::TriadSm120
+            }
         }
     }
 }
@@ -2281,7 +2297,34 @@ const SM120_TF32_NN_M80N32_BK64_S2: Tf32KernelSpec = Tf32KernelSpec {
     schedule_revision: TF32_SCHEDULE_REVISION,
 };
 
-pub const SM120_TF32_ROUTE_SPECS: [Tf32KernelSpec; 17] = [
+/// Fragment-order slab floats per CTA slot and slots per CTA of the stream-K
+/// workspace: every thread of the 256 keeps 32 accumulators, and a CTA never
+/// publishes more than one slab per tile it does not own.
+pub const SM120_TF32_STREAMK_SLAB_FLOATS: usize = 256 * 32;
+pub const SM120_TF32_STREAMK_SLOTS_PER_CTA: usize = 2;
+
+const SM120_TF32_TN_M64N128_S3_PAIR_STREAMK: Tf32KernelSpec = Tf32KernelSpec {
+    op: ResolvedGemmOp::Tn,
+    route: Tf32PhysicalRoute::Sm120TmaMmaTf32RnaStreamKV1(Tf32Sm120Route {
+        tile: Tf32Sm120Tile::M64N128,
+        stages: Tf32Sm120Stages::S3,
+    }),
+    symbol: "gemm_bi_tn_sm120_tma_mma_tf32_v1_m64n128_bk32_s3_pair_streamk",
+    module_kind: ModuleKind::TriadSm120,
+    instruction_family: ResolvedInstructionFamily::MmaSync,
+    instruction_shape: ResolvedInstructionShape { m: 16, n: 8, k: 8 },
+    operand_conversion: ResolvedOperandConversion::TensorMapUint32ThenCvtRnaTf32F32V1,
+    tile: (64, 128),
+    bk: 32,
+    map_bk: 32,
+    stages: 3,
+    threads: 256,
+    dynamic_shared_bytes: 73_856,
+    tensor_map_revision: TF32_TENSOR_MAP_REVISION,
+    schedule_revision: TF32_SCHEDULE_REVISION,
+};
+
+pub const SM120_TF32_ROUTE_SPECS: [Tf32KernelSpec; 18] = [
     SM120_TF32_NN[0],
     SM120_TF32_NN[1],
     SM120_TF32_NN[2],
@@ -2294,6 +2337,7 @@ pub const SM120_TF32_ROUTE_SPECS: [Tf32KernelSpec; 17] = [
     SM120_TF32_TN[3],
     SM120_TF32_TN[4],
     SM120_TF32_TN_M64N128_S4_PAIR,
+    SM120_TF32_TN_M64N128_S3_PAIR_STREAMK,
     SM120_TF32_NT[0],
     SM120_TF32_NT[1],
     SM120_TF32_NT[2],
@@ -6086,7 +6130,7 @@ mod tests {
             (ModuleKind::TriadSm80, 18, [6, 6, 6]),
             (ModuleKind::TriadSm90a, 6, [2, 2, 2]),
             (ModuleKind::TriadSm100, 36, [12, 12, 12]),
-            (ModuleKind::TriadSm120, 17, [6, 6, 5]),
+            (ModuleKind::TriadSm120, 18, [6, 7, 5]),
         ];
         let expected_total = expected.iter().map(|(_, count, _)| count).sum::<usize>();
         let mut all_symbols = std::collections::BTreeSet::new();
@@ -6111,7 +6155,8 @@ mod tests {
                     | super::Tf32PhysicalRoute::MmaTf32RnaSplitK2V1(_)
                     | super::Tf32PhysicalRoute::MmaTf32RnaSplitK4V1(_)
                     | super::Tf32PhysicalRoute::MmaTf32RnaSplitK8V1(_)
-                    | super::Tf32PhysicalRoute::Sm120TmaMmaTf32RnaV1(_) => {
+                    | super::Tf32PhysicalRoute::Sm120TmaMmaTf32RnaV1(_)
+                    | super::Tf32PhysicalRoute::Sm120TmaMmaTf32RnaStreamKV1(_) => {
                         assert_eq!(spec.instruction_family, ResolvedInstructionFamily::MmaSync);
                         assert_eq!(
                             spec.instruction_shape,

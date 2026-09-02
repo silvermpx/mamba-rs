@@ -30,7 +30,7 @@ const CACHE_FORMAT_VERSION: u16 = 1;
 pub const COMPOSER_REVISION: u16 = 1;
 pub const COMPILER_REVISION: u16 = 2;
 pub const NUMERIC_ABI_REVISION: u16 = 5;
-pub const TUNING_TABLE_REVISION: u16 = 36;
+pub const TUNING_TABLE_REVISION: u16 = 37;
 pub const SCHEDULE_REVISION: u16 = 8;
 
 const NUMERIC_CONTRACT_DOMAIN: &[u8] = b"mamba-rs.resolved-numeric-contract.v2";
@@ -2844,6 +2844,7 @@ pub enum PhysicalGemmBackend {
     MmaTf32RnaSplitK8V1 = 16,
     ScalarFmaSplitKPartialV1 = 17,
     ScalarFmaSplitKF32ReduceV1 = 18,
+    Sm120TmaMmaTf32RnaStreamKV1 = 19,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -2866,6 +2867,7 @@ pub enum ResolvedNumericContract {
     MmaTf32RnaSplitK8V1 = 15,
     ScalarFmaSplitKPartialV1 = 16,
     ScalarFmaSplitKF32ReduceV1 = 17,
+    Sm120TmaMmaTf32RnaStreamKV1 = 18,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -2903,6 +2905,7 @@ pub enum ResolvedOutputOwnership {
     LastCtaPerOutputTileFixedSplitK8ReduceV1 = 8,
     OneCtaPerOutputTilePerSplitKPartitionV1 = 9,
     OneThreadPerOutputElementFixedSplitKReduceV1 = 10,
+    OwnerCtaPerOutputTileStreamKFixedOrderV1 = 11,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -5458,9 +5461,9 @@ mod cache_and_header_tests {
     use std::sync::{Arc, Barrier};
 
     #[test]
-    fn tag36_changes_only_the_tuning_table_revision() {
+    fn tag37_changes_only_the_tuning_table_revision() {
         assert_eq!(NUMERIC_ABI_REVISION, 5);
-        assert_eq!(TUNING_TABLE_REVISION, 36);
+        assert_eq!(TUNING_TABLE_REVISION, 37);
     }
 
     #[test]

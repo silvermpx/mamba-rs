@@ -33,16 +33,16 @@
 #if defined(__CUDA_ARCH__) && \
     (__CUDA_ARCH__ == 1200 || __CUDA_ARCH__ == 1210)
 
-static constexpr int SM120_STREAMK_ACCUMULATORS = 32;
+static constexpr int SM120_EXP_STREAMK_ACCUMULATORS = 32;
 
-struct Sm120StreamKRange {
+struct Sm120ExpStreamKRange {
     long long first;
     long long last;
 };
 
 // Units [first, last) of CTA `cta`: the first `remainder` CTAs take one unit
 // more, so every CTA differs from any other by at most one unit.
-static __device__ __forceinline__ Sm120StreamKRange sm120_streamk_range(
+static __device__ __forceinline__ Sm120ExpStreamKRange sm120_exp_streamk_range(
     long long units, int grid, int cta) {
     long long base = units / grid;
     long long remainder = units % grid;
@@ -52,7 +52,7 @@ static __device__ __forceinline__ Sm120StreamKRange sm120_streamk_range(
 }
 
 // The CTA whose range contains `unit`: the inverse of the dealing formula.
-static __device__ __forceinline__ int sm120_streamk_cta_of(
+static __device__ __forceinline__ int sm120_exp_streamk_cta_of(
     long long units, int grid, long long unit) {
     long long base = units / grid;
     long long remainder = units % grid;
@@ -64,12 +64,12 @@ static __device__ __forceinline__ int sm120_streamk_cta_of(
 // The timing trace is compiled in only when the harness asks for it: a
 // %globaltimer read costs well over half a microsecond, so a traced kernel
 // is not the kernel being timed.
-#ifndef SM120_STREAMK_TRACE
-#define SM120_STREAMK_TRACE 0
+#ifndef SM120_EXP_STREAMK_TRACE
+#define SM120_EXP_STREAMK_TRACE 0
 #endif
 
-static __device__ __forceinline__ unsigned long long sm120_streamk_now() {
-#if SM120_STREAMK_TRACE
+static __device__ __forceinline__ unsigned long long sm120_exp_streamk_now() {
+#if SM120_EXP_STREAMK_TRACE
     unsigned long long now;
     asm volatile("mov.u64 %0, %%globaltimer;" : "=l"(now));
     return now;
@@ -78,10 +78,10 @@ static __device__ __forceinline__ unsigned long long sm120_streamk_now() {
 #endif
 }
 
-static __device__ __forceinline__ void sm120_streamk_store_slab(
+static __device__ __forceinline__ void sm120_exp_streamk_store_slab(
     float* slab, const float (&accumulator)[2][4][4]) {
     float4* destination = reinterpret_cast<float4*>(
-        slab + (long long)threadIdx.x * SM120_STREAMK_ACCUMULATORS);
+        slab + (long long)threadIdx.x * SM120_EXP_STREAMK_ACCUMULATORS);
 #pragma unroll
     for (int m_atom = 0; m_atom < 2; ++m_atom) {
 #pragma unroll
@@ -97,10 +97,10 @@ static __device__ __forceinline__ void sm120_streamk_store_slab(
     }
 }
 
-static __device__ __forceinline__ void sm120_streamk_add_slab(
+static __device__ __forceinline__ void sm120_exp_streamk_add_slab(
     const float* slab, float (&accumulator)[2][4][4], bool first) {
     const float4* source = reinterpret_cast<const float4*>(
-        slab + (long long)threadIdx.x * SM120_STREAMK_ACCUMULATORS);
+        slab + (long long)threadIdx.x * SM120_EXP_STREAMK_ACCUMULATORS);
 #pragma unroll
     for (int m_atom = 0; m_atom < 2; ++m_atom) {
 #pragma unroll
@@ -128,23 +128,23 @@ static __device__ __forceinline__ void sm120_streamk_add_slab(
     }
 }
 
-static __device__ __forceinline__ void sm120_streamk_raise(unsigned* flag) {
+static __device__ __forceinline__ void sm120_exp_streamk_raise(unsigned* flag) {
     asm volatile("st.release.gpu.global.u32 [%0], %1;\n" :: "l"(flag), "r"(1U) : "memory");
 }
 
-static __device__ __forceinline__ void sm120_streamk_await(const unsigned* flag) {
+static __device__ __forceinline__ void sm120_exp_streamk_await(const unsigned* flag) {
     unsigned value;
     do {
         asm volatile("ld.acquire.gpu.global.u32 %0, [%1];\n" : "=r"(value) : "l"(flag) : "memory");
     } while (value == 0U);
 }
 
-static __device__ __forceinline__ void sm120_streamk_clear(unsigned* flag) {
+static __device__ __forceinline__ void sm120_exp_streamk_clear(unsigned* flag) {
     asm volatile("st.relaxed.gpu.global.u32 [%0], %1;\n" :: "l"(flag), "r"(0U) : "memory");
 }
 
 template <int M, int N, int Stages>
-static __device__ __forceinline__ void sm120_tf32_tn_streamk_produce_stage(
+static __device__ __forceinline__ void sm120_tf32_tn_exp_streamk_produce_stage(
     const Sm120Tf32StageContext& context, int local_tile, int absolute_tile) {
     constexpr int plane_bytes = 4096;
     constexpr int stage_bytes = Sm120Tf32Storage<M, N, Stages>::stage_bytes;
@@ -177,7 +177,7 @@ static __device__ __forceinline__ void sm120_tf32_tn_streamk_produce_stage(
 // The production mainloop over one contiguous K-tile range of one tile,
 // starting from zeroed accumulators. Barriers are re-armed per segment.
 template <int M, int N, int Stages>
-static __device__ __forceinline__ void sm120_tf32_tn_streamk_segment(
+static __device__ __forceinline__ void sm120_tf32_tn_exp_streamk_segment(
     unsigned char* storage, unsigned payload, unsigned full_base,
     unsigned empty_base, const Sm120Tf32StageContext& stage_context,
     int tile_begin, int tile_count, int warp_m, int warp_n,
@@ -210,13 +210,13 @@ static __device__ __forceinline__ void sm120_tf32_tn_streamk_segment(
 #pragma unroll
         for (int tile = 0; tile < Stages; ++tile) {
             if (tile < tile_count) {
-                sm120_tf32_tn_streamk_produce_stage<M, N, Stages>(
+                sm120_tf32_tn_exp_streamk_produce_stage<M, N, Stages>(
                     stage_context, tile, tile_begin + tile);
             }
         }
     }
     if constexpr (Stages == 2) sm120_sync_warp();
-    mainloop_begin = sm120_streamk_now();
+    mainloop_begin = sm120_exp_streamk_now();
     for (int tile = 0; tile < tile_count; ++tile) {
         int stage = tile % Stages;
         unsigned generation = (unsigned)(tile / Stages);
@@ -230,7 +230,7 @@ static __device__ __forceinline__ void sm120_tf32_tn_streamk_segment(
             int refill = tile + Stages;
             if (refill < tile_count) {
                 sm120_wait_barrier(empty_base + stage * 8, generation & 1U);
-                sm120_tf32_tn_streamk_produce_stage<M, N, Stages>(
+                sm120_tf32_tn_exp_streamk_produce_stage<M, N, Stages>(
                     stage_context, refill, tile_begin + refill);
             }
         }
@@ -239,11 +239,11 @@ static __device__ __forceinline__ void sm120_tf32_tn_streamk_segment(
     // Every warp has consumed its last stage before the storage is reused by
     // the next segment or the CTA leaves.
     __syncthreads();
-    mainloop_end = sm120_streamk_now();
+    mainloop_end = sm120_exp_streamk_now();
 }
 
 template <int M, int N>
-static __device__ __forceinline__ void sm120_tf32_tn_streamk_epilogue(
+static __device__ __forceinline__ void sm120_tf32_tn_exp_streamk_epilogue(
     void* output, int rows, int columns, int output_row, int output_column,
     int warp_m, int warp_n, const float* bias, const Sm120KernelParams& params,
     const float (&accumulator)[2][4][4]) {
@@ -274,13 +274,13 @@ static __device__ __forceinline__ void sm120_tf32_tn_streamk_epilogue(
 }
 
 template <int M, int N, int Stages>
-static __device__ __forceinline__ void sm120_tf32_tn_streamk_pair_kernel(
+static __device__ __forceinline__ void sm120_tf32_tn_exp_streamk_pair_kernel(
     void* output, float* partial, unsigned* flags,
     const CUtensorMap& a_map, const CUtensorMap& b_map,
     const float* bias, const Sm120KernelParams& params) {
     constexpr int Op = Sm120Tn;
     constexpr int threads = Sm120Tf32Storage<M, N, Stages>::threads;
-    constexpr long long slab_floats = (long long)threads * SM120_STREAMK_ACCUMULATORS;
+    constexpr long long slab_floats = (long long)threads * SM120_EXP_STREAMK_ACCUMULATORS;
     assert(params.alpha == 1.0f || bias == nullptr);
     extern __shared__ __align__(1024) unsigned char storage[];
     constexpr int stage_bytes = Sm120Tf32Storage<M, N, Stages>::stage_bytes;
@@ -298,14 +298,14 @@ static __device__ __forceinline__ void sm120_tf32_tn_streamk_pair_kernel(
     long long units = tiles * k_tiles;
     int grid = (int)gridDim.x;
     int cta = (int)blockIdx.x;
-    Sm120StreamKRange mine = sm120_streamk_range(units, grid, cta);
+    Sm120ExpStreamKRange mine = sm120_exp_streamk_range(units, grid, cta);
     int warp = (int)threadIdx.x >> 5;
     constexpr int warp_columns = N / 32;
     int warp_m = (warp / warp_columns) * 32;
     int warp_n = (warp % warp_columns) * 32;
     float accumulator[2][4][4];
     long long first_tile = mine.first / k_tiles;
-    unsigned long long t_entry = sm120_streamk_now();
+    unsigned long long t_entry = sm120_exp_streamk_now();
     unsigned long long t_first_begin = 0, t_first_end = 0;
     unsigned long long t_last_begin = 0, t_last_end = 0, t_fixup_end = 0;
     int segments = 0, units_first = 0, units_last = 0;
@@ -318,7 +318,7 @@ static __device__ __forceinline__ void sm120_tf32_tn_streamk_pair_kernel(
         int output_column = (int)(tile % column_tiles) * N;
         const Sm120Tf32StageContext stage_context = {
             &a_map, &b_map, &params, payload, full_base, output_row, output_column};
-        sm120_tf32_tn_streamk_segment<M, N, Stages>(
+        sm120_tf32_tn_exp_streamk_segment<M, N, Stages>(
             storage, payload, full_base, empty_base, stage_context,
             k_begin, k_end - k_begin, warp_m, warp_n, accumulator,
             t_last_begin, t_last_end);
@@ -332,7 +332,7 @@ static __device__ __forceinline__ void sm120_tf32_tn_streamk_pair_kernel(
         bool covers_start = k_begin == 0;
         bool covers_end = k_end == (int)k_tiles;
         if (covers_start && covers_end) {
-            sm120_tf32_tn_streamk_epilogue<M, N>(
+            sm120_tf32_tn_exp_streamk_epilogue<M, N>(
                 output, rows, columns, output_row, output_column,
                 warp_m, warp_n, bias, params, accumulator);
         } else if (!covers_end) {
@@ -340,11 +340,11 @@ static __device__ __forceinline__ void sm120_tf32_tn_streamk_pair_kernel(
             // when it is my last tile after an earlier one.
             int slot = tile == first_tile ? 0 : 1;
             float* slab = partial + ((long long)cta * 2 + slot) * slab_floats;
-            sm120_streamk_store_slab(slab, accumulator);
+            sm120_exp_streamk_store_slab(slab, accumulator);
             __threadfence();
             __syncthreads();
             if (threadIdx.x == 0) {
-                sm120_streamk_raise(flags + (long long)cta * 2 + slot);
+                sm120_exp_streamk_raise(flags + (long long)cta * 2 + slot);
             }
         } else {
             // The owner: combine every lower contributor in ascending CTA
@@ -360,26 +360,26 @@ static __device__ __forceinline__ void sm120_tf32_tn_streamk_pair_kernel(
                     }
                 }
             }
-            int first_cta = sm120_streamk_cta_of(units, grid, tile * k_tiles);
+            int first_cta = sm120_exp_streamk_cta_of(units, grid, tile * k_tiles);
             bool first = true;
             for (int source = first_cta; source < cta; ++source) {
-                Sm120StreamKRange theirs = sm120_streamk_range(units, grid, source);
+                Sm120ExpStreamKRange theirs = sm120_exp_streamk_range(units, grid, source);
                 int slot = tile == theirs.first / k_tiles ? 0 : 1;
                 unsigned* flag = flags + (long long)source * 2 + slot;
                 if (threadIdx.x == 0) {
-                    sm120_streamk_await(flag);
+                    sm120_exp_streamk_await(flag);
                 }
                 __syncthreads();
-                sm120_streamk_add_slab(
+                sm120_exp_streamk_add_slab(
                     partial + ((long long)source * 2 + slot) * slab_floats,
                     accumulator, first);
                 first = false;
                 __syncthreads();
                 if (threadIdx.x == 0) {
-                    sm120_streamk_clear(flag);
+                    sm120_exp_streamk_clear(flag);
                 }
             }
-            t_fixup_end = sm120_streamk_now();
+            t_fixup_end = sm120_exp_streamk_now();
 #pragma unroll
             for (int m_atom = 0; m_atom < 2; ++m_atom) {
 #pragma unroll
@@ -392,13 +392,13 @@ static __device__ __forceinline__ void sm120_tf32_tn_streamk_pair_kernel(
                     }
                 }
             }
-            sm120_tf32_tn_streamk_epilogue<M, N>(
+            sm120_tf32_tn_exp_streamk_epilogue<M, N>(
                 output, rows, columns, output_row, output_column,
                 warp_m, warp_n, bias, params, accumulator);
         }
         unit -= k_end - k_begin;
     }
-    if (SM120_STREAMK_TRACE && threadIdx.x == 0) {
+    if (SM120_EXP_STREAMK_TRACE && threadIdx.x == 0) {
         unsigned long long* trace = reinterpret_cast<unsigned long long*>(
             partial + (long long)grid * 2 * slab_floats) + (long long)cta * 8;
         trace[0] = t_entry;
@@ -407,7 +407,7 @@ static __device__ __forceinline__ void sm120_tf32_tn_streamk_pair_kernel(
         trace[3] = t_last_begin;
         trace[4] = t_last_end;
         trace[5] = t_fixup_end;
-        trace[6] = sm120_streamk_now();
+        trace[6] = sm120_exp_streamk_now();
         trace[7] = ((unsigned long long)segments << 48)
             | ((unsigned long long)units_first << 24)
             | (unsigned long long)units_last;
@@ -416,7 +416,7 @@ static __device__ __forceinline__ void sm120_tf32_tn_streamk_pair_kernel(
 
 // The persistent grid walks every tile of an empty reduction.
 template <int M, int N>
-static __device__ __forceinline__ void sm120_tf32_tn_streamk_zero_reduction(
+static __device__ __forceinline__ void sm120_tf32_tn_exp_streamk_zero_reduction(
     void* output, const float* bias, const Sm120KernelParams& params) {
     int columns = sm120_tf32_columns<Sm120Tn>(params);
     int rows = sm120_tf32_rows<Sm120Tn>(params);
@@ -437,29 +437,29 @@ static __device__ __forceinline__ void sm120_tf32_tn_streamk_zero_reduction(
 }
 
 template <int M, int N, int Stages>
-static __device__ __forceinline__ void sm120_tf32_tn_streamk_pair_entry(
+static __device__ __forceinline__ void sm120_tf32_tn_exp_streamk_pair_entry(
     void* output, float* partial, unsigned* flags,
     const CUtensorMap& a_map, const CUtensorMap& b_map,
     const float* bias, const Sm120KernelParams& params) {
     if (sm120_tf32_reduction<Sm120Tn>(params) == 0) {
-        sm120_tf32_tn_streamk_zero_reduction<M, N>(output, bias, params);
+        sm120_tf32_tn_exp_streamk_zero_reduction<M, N>(output, bias, params);
         return;
     }
-    sm120_tf32_tn_streamk_pair_kernel<M, N, Stages>(
+    sm120_tf32_tn_exp_streamk_pair_kernel<M, N, Stages>(
         output, partial, flags, a_map, b_map, bias, params);
 }
 
 // A cursor over one CTA's stage sequence: the segments of its range from the
 // end, each ascending in k. `unit` is the absolute unit of the current stage.
-struct Sm120StreamKCursor {
+struct Sm120ExpStreamKCursor {
     int unit;
     int segment_begin;
     int segment_end;
     int tile;
 };
 
-static __device__ __forceinline__ void sm120_streamk_cursor_open(
-    Sm120StreamKCursor& cursor, int range_first, int range_end, int k_tiles) {
+static __device__ __forceinline__ void sm120_exp_streamk_cursor_open(
+    Sm120ExpStreamKCursor& cursor, int range_first, int range_end, int k_tiles) {
     cursor.tile = (range_end - 1) / k_tiles;
     cursor.segment_begin = max(cursor.tile * k_tiles, range_first);
     cursor.segment_end = range_end;
@@ -467,8 +467,8 @@ static __device__ __forceinline__ void sm120_streamk_cursor_open(
 }
 
 // Steps to the next stage of the sequence; false once the range is spent.
-static __device__ __forceinline__ bool sm120_streamk_cursor_advance(
-    Sm120StreamKCursor& cursor, int range_first, int k_tiles) {
+static __device__ __forceinline__ bool sm120_exp_streamk_cursor_advance(
+    Sm120ExpStreamKCursor& cursor, int range_first, int k_tiles) {
     if (cursor.unit + 1 < cursor.segment_end) {
         ++cursor.unit;
         return true;
@@ -476,11 +476,11 @@ static __device__ __forceinline__ bool sm120_streamk_cursor_advance(
     if (cursor.segment_begin == range_first) {
         return false;
     }
-    sm120_streamk_cursor_open(cursor, range_first, cursor.segment_begin, k_tiles);
+    sm120_exp_streamk_cursor_open(cursor, range_first, cursor.segment_begin, k_tiles);
     return true;
 }
 
-static __device__ __forceinline__ void sm120_streamk_zero(
+static __device__ __forceinline__ void sm120_exp_streamk_zero(
     float (&accumulator)[2][4][4]) {
 #pragma unroll
     for (int m_atom = 0; m_atom < 2; ++m_atom) {
@@ -499,15 +499,15 @@ static __device__ __forceinline__ void sm120_streamk_zero(
 // same operation order as the first design. Every slab is read through
 // ordinary cache-global loads so the compiler issues the eight loads of one
 // slab together instead of one behind the other.
-static __device__ __forceinline__ void sm120_streamk_fold_slabs(
+static __device__ __forceinline__ void sm120_exp_streamk_fold_slabs(
     const float* partial, long long slab_floats, long long units, int grid,
     int first_cta, int cta, int tile, int k_tiles,
     float (&accumulator)[2][4][4]) {
-    const long long lane_offset = (long long)threadIdx.x * SM120_STREAMK_ACCUMULATORS;
+    const long long lane_offset = (long long)threadIdx.x * SM120_EXP_STREAMK_ACCUMULATORS;
     float sum[2][4][4];
     bool first = true;
     for (int source = first_cta; source < cta; ++source) {
-        Sm120StreamKRange theirs = sm120_streamk_range(units, grid, source);
+        Sm120ExpStreamKRange theirs = sm120_exp_streamk_range(units, grid, source);
         int slot = tile == (int)(theirs.first / k_tiles) ? 0 : 1;
         const float4* slab = reinterpret_cast<const float4*>(
             partial + ((long long)source * 2 + slot) * slab_floats + lane_offset);
@@ -554,11 +554,11 @@ static __device__ __forceinline__ void sm120_streamk_fold_slabs(
 
 // The register-lean fold for a kernel that keeps two CTAs resident: one
 // fragment atom at a time, the source loop inside, four temporaries.
-static __device__ __forceinline__ void sm120_streamk_fold_slabs_lean(
+static __device__ __forceinline__ void sm120_exp_streamk_fold_slabs_lean(
     const float* partial, long long slab_floats, long long units, int grid,
     int first_cta, int cta, int tile, int k_tiles,
     float (&accumulator)[2][4][4]) {
-    const long long lane_offset = (long long)threadIdx.x * SM120_STREAMK_ACCUMULATORS;
+    const long long lane_offset = (long long)threadIdx.x * SM120_EXP_STREAMK_ACCUMULATORS;
 #pragma unroll
     for (int m_atom = 0; m_atom < 2; ++m_atom) {
 #pragma unroll
@@ -566,7 +566,7 @@ static __device__ __forceinline__ void sm120_streamk_fold_slabs_lean(
             float4 sum = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
             bool first = true;
             for (int source = first_cta; source < cta; ++source) {
-                Sm120StreamKRange theirs = sm120_streamk_range(units, grid, source);
+                Sm120ExpStreamKRange theirs = sm120_exp_streamk_range(units, grid, source);
                 int slot = tile == (int)(theirs.first / k_tiles) ? 0 : 1;
                 const float4* slab = reinterpret_cast<const float4*>(
                     partial + ((long long)source * 2 + slot) * slab_floats + lane_offset);
@@ -593,7 +593,7 @@ static __device__ __forceinline__ void sm120_streamk_fold_slabs_lean(
 // write: a full tile reads its sixteen pairs in one burst rather than one
 // read-modify-write at a time.
 template <int M, int N>
-static __device__ __forceinline__ void sm120_tf32_tn_streamk_epilogue_burst(
+static __device__ __forceinline__ void sm120_tf32_tn_exp_streamk_epilogue_burst(
     void* output, int rows, int columns, int output_row, int output_column,
     int warp_m, int warp_n, const float* bias, const Sm120KernelParams& params,
     const float (&accumulator)[2][4][4]) {
@@ -605,7 +605,7 @@ static __device__ __forceinline__ void sm120_tf32_tn_streamk_epilogue_burst(
         && (reinterpret_cast<unsigned long long>(output) & 7ULL) == 0ULL
         && (params.ldc & 1) == 0;
     if (!full_tile) {
-        sm120_tf32_tn_streamk_epilogue<M, N>(
+        sm120_tf32_tn_exp_streamk_epilogue<M, N>(
             output, rows, columns, output_row, output_column,
             warp_m, warp_n, bias, params, accumulator);
         return;
@@ -647,7 +647,7 @@ static __device__ __forceinline__ void sm120_tf32_tn_streamk_epilogue_burst(
 }
 
 // Launch-constant state of the continuous pipeline.
-struct Sm120StreamKFlow {
+struct Sm120ExpStreamKFlow {
     const CUtensorMap* a_map;
     const CUtensorMap* b_map;
     const Sm120KernelParams* params;
@@ -661,12 +661,12 @@ struct Sm120StreamKFlow {
 };
 
 template <int M, int N, int Stages>
-static __device__ __forceinline__ void sm120_streamk_flow_produce(
-    const Sm120StreamKFlow& flow, const Sm120StreamKCursor& cursor, int step) {
+static __device__ __forceinline__ void sm120_exp_streamk_flow_produce(
+    const Sm120ExpStreamKFlow& flow, const Sm120ExpStreamKCursor& cursor, int step) {
     const Sm120Tf32StageContext context = {
         flow.a_map, flow.b_map, flow.params, flow.payload, flow.full_base,
         (cursor.tile / flow.column_tiles) * M, (cursor.tile % flow.column_tiles) * N};
-    sm120_tf32_tn_streamk_produce_stage<M, N, Stages>(
+    sm120_tf32_tn_exp_streamk_produce_stage<M, N, Stages>(
         context, step, cursor.unit - cursor.tile * flow.k_tiles);
 }
 
@@ -676,16 +676,16 @@ static __device__ __forceinline__ void sm120_streamk_flow_produce(
 // refills with whatever the cursor holds next, which may already belong to
 // the segment after this one.
 template <int M, int N, int Stages>
-static __device__ __forceinline__ void sm120_tf32_tn_streamk_flow_segment(
-    unsigned char* storage, const Sm120StreamKFlow& flow,
-    Sm120StreamKCursor& producer, int step_base, int tile_count,
+static __device__ __forceinline__ void sm120_tf32_tn_exp_streamk_flow_segment(
+    unsigned char* storage, const Sm120ExpStreamKFlow& flow,
+    Sm120ExpStreamKCursor& producer, int step_base, int tile_count,
     int warp_m, int warp_n, float (&accumulator)[2][4][4],
     unsigned long long* trace, bool first_segment) {
     int warp = (int)threadIdx.x >> 5;
     int lane = (int)threadIdx.x & 31;
-    sm120_streamk_zero(accumulator);
-    if (SM120_STREAMK_TRACE && threadIdx.x == 0) {
-        unsigned long long now = sm120_streamk_now();
+    sm120_exp_streamk_zero(accumulator);
+    if (SM120_EXP_STREAMK_TRACE && threadIdx.x == 0) {
+        unsigned long long now = sm120_exp_streamk_now();
         if (first_segment) trace[1] = now;
         trace[3] = now;
     }
@@ -703,14 +703,14 @@ static __device__ __forceinline__ void sm120_tf32_tn_streamk_flow_segment(
             int refill = step + Stages;
             if (refill < flow.total) {
                 sm120_wait_barrier(flow.empty_base + stage * 8, generation & 1U);
-                sm120_streamk_flow_produce<M, N, Stages>(flow, producer, refill);
-                sm120_streamk_cursor_advance(producer, flow.range_first, flow.k_tiles);
+                sm120_exp_streamk_flow_produce<M, N, Stages>(flow, producer, refill);
+                sm120_exp_streamk_cursor_advance(producer, flow.range_first, flow.k_tiles);
             }
         }
         if constexpr (Stages == 2) sm120_sync_warp();
     }
-    if (SM120_STREAMK_TRACE && threadIdx.x == 0) {
-        unsigned long long now = sm120_streamk_now();
+    if (SM120_EXP_STREAMK_TRACE && threadIdx.x == 0) {
+        unsigned long long now = sm120_exp_streamk_now();
         if (first_segment) trace[2] = now;
         trace[4] = now;
     }
@@ -727,14 +727,14 @@ static __device__ __forceinline__ void sm120_tf32_tn_streamk_flow_segment(
 // burst epilogue); a kernel that must keep two CTAs resident cannot afford
 // those registers and takes the lean fold and the pair-by-pair store.
 template <int M, int N, int Stages, bool Wide>
-static __device__ __forceinline__ void sm120_tf32_tn_streamk_v2_kernel(
+static __device__ __forceinline__ void sm120_tf32_tn_exp_streamk_v2_kernel(
     void* output, float* partial, unsigned* flags,
     const CUtensorMap& a_map, const CUtensorMap& b_map,
     const float* bias, const Sm120KernelParams& params) {
     constexpr int Op = Sm120Tn;
     constexpr int threads = Sm120Tf32Storage<M, N, Stages>::threads;
     constexpr int warps = threads / 32;
-    constexpr long long slab_floats = (long long)threads * SM120_STREAMK_ACCUMULATORS;
+    constexpr long long slab_floats = (long long)threads * SM120_EXP_STREAMK_ACCUMULATORS;
     assert(params.alpha == 1.0f || bias == nullptr);
     extern __shared__ __align__(1024) unsigned char storage[];
     constexpr int stage_bytes = Sm120Tf32Storage<M, N, Stages>::stage_bytes;
@@ -751,11 +751,11 @@ static __device__ __forceinline__ void sm120_tf32_tn_streamk_v2_kernel(
     long long units = (long long)row_tiles * column_tiles * k_tiles;
     int grid = (int)gridDim.x;
     int cta = (int)blockIdx.x;
-    Sm120StreamKRange mine = sm120_streamk_range(units, grid, cta);
+    Sm120ExpStreamKRange mine = sm120_exp_streamk_range(units, grid, cta);
     int range_first = (int)mine.first;
     int range_end = (int)mine.last;
     int first_tile = range_first / k_tiles;
-    const Sm120StreamKFlow flow = {
+    const Sm120ExpStreamKFlow flow = {
         &a_map, &b_map, &params, payload, full_base, empty_base,
         column_tiles, k_tiles, range_first, range_end - range_first};
     int warp = (int)threadIdx.x >> 5;
@@ -768,8 +768,8 @@ static __device__ __forceinline__ void sm120_tf32_tn_streamk_v2_kernel(
         partial + (long long)grid * 2 * slab_floats) + (long long)cta * 8;
     int segments = 0, units_first = 0, units_last = 0;
 
-    if (SM120_STREAMK_TRACE && threadIdx.x == 0) {
-        trace[0] = sm120_streamk_now();
+    if (SM120_EXP_STREAMK_TRACE && threadIdx.x == 0) {
+        trace[0] = sm120_exp_streamk_now();
         trace[5] = 0;
     }
     if (threadIdx.x == 0) {
@@ -782,14 +782,14 @@ static __device__ __forceinline__ void sm120_tf32_tn_streamk_v2_kernel(
     }
     __syncthreads();
 
-    Sm120StreamKCursor producer;
-    sm120_streamk_cursor_open(producer, range_first, range_end, k_tiles);
+    Sm120ExpStreamKCursor producer;
+    sm120_exp_streamk_cursor_open(producer, range_first, range_end, k_tiles);
     if (warp == 0 && lane == 0) {
 #pragma unroll
         for (int step = 0; step < Stages; ++step) {
             if (step < flow.total) {
-                sm120_streamk_flow_produce<M, N, Stages>(flow, producer, step);
-                sm120_streamk_cursor_advance(producer, range_first, k_tiles);
+                sm120_exp_streamk_flow_produce<M, N, Stages>(flow, producer, step);
+                sm120_exp_streamk_cursor_advance(producer, range_first, k_tiles);
             }
         }
     }
@@ -802,7 +802,7 @@ static __device__ __forceinline__ void sm120_tf32_tn_streamk_v2_kernel(
         int k_begin = max(0, k_end - (unit - range_first));
         int output_row = (tile / column_tiles) * M;
         int output_column = (tile % column_tiles) * N;
-        sm120_tf32_tn_streamk_flow_segment<M, N, Stages>(
+        sm120_tf32_tn_exp_streamk_flow_segment<M, N, Stages>(
             storage, flow, producer, step_base, k_end - k_begin,
             warp_m, warp_n, accumulator, trace, segments == 0);
         step_base += k_end - k_begin;
@@ -815,64 +815,64 @@ static __device__ __forceinline__ void sm120_tf32_tn_streamk_v2_kernel(
         bool covers_end = k_end == k_tiles;
         if (covers_start && covers_end) {
             if constexpr (Wide) {
-                sm120_tf32_tn_streamk_epilogue_burst<M, N>(
+                sm120_tf32_tn_exp_streamk_epilogue_burst<M, N>(
                     output, rows, columns, output_row, output_column,
                     warp_m, warp_n, bias, params, accumulator);
             } else {
-                sm120_tf32_tn_streamk_epilogue<M, N>(
+                sm120_tf32_tn_exp_streamk_epilogue<M, N>(
                     output, rows, columns, output_row, output_column,
                     warp_m, warp_n, bias, params, accumulator);
             }
         } else if (!covers_end) {
             int slot = tile == first_tile ? 0 : 1;
-            sm120_streamk_store_slab(
+            sm120_exp_streamk_store_slab(
                 partial + ((long long)cta * 2 + slot) * slab_floats, accumulator);
             __syncthreads();
             if (threadIdx.x == 0) {
                 __threadfence();
-                sm120_streamk_raise(flags + (long long)cta * 2 + slot);
+                sm120_exp_streamk_raise(flags + (long long)cta * 2 + slot);
             }
         } else {
-            int first_cta = sm120_streamk_cta_of(units, grid, (long long)tile * k_tiles);
+            int first_cta = sm120_exp_streamk_cta_of(units, grid, (long long)tile * k_tiles);
             int sources = cta - first_cta;
             for (int index = (int)threadIdx.x; index < sources; index += threads) {
                 int source = first_cta + index;
-                Sm120StreamKRange theirs = sm120_streamk_range(units, grid, source);
+                Sm120ExpStreamKRange theirs = sm120_exp_streamk_range(units, grid, source);
                 int slot = tile == (int)(theirs.first / k_tiles) ? 0 : 1;
-                sm120_streamk_await(flags + (long long)source * 2 + slot);
+                sm120_exp_streamk_await(flags + (long long)source * 2 + slot);
             }
             __syncthreads();
             if constexpr (Wide) {
-                sm120_streamk_fold_slabs(
+                sm120_exp_streamk_fold_slabs(
                     partial, slab_floats, units, grid, first_cta, cta, tile, k_tiles,
                     accumulator);
             } else {
-                sm120_streamk_fold_slabs_lean(
+                sm120_exp_streamk_fold_slabs_lean(
                     partial, slab_floats, units, grid, first_cta, cta, tile, k_tiles,
                     accumulator);
             }
             __syncthreads();
             for (int index = (int)threadIdx.x; index < sources; index += threads) {
                 int source = first_cta + index;
-                Sm120StreamKRange theirs = sm120_streamk_range(units, grid, source);
+                Sm120ExpStreamKRange theirs = sm120_exp_streamk_range(units, grid, source);
                 int slot = tile == (int)(theirs.first / k_tiles) ? 0 : 1;
-                sm120_streamk_clear(flags + (long long)source * 2 + slot);
+                sm120_exp_streamk_clear(flags + (long long)source * 2 + slot);
             }
-            if (SM120_STREAMK_TRACE && threadIdx.x == 0) trace[5] = sm120_streamk_now();
+            if (SM120_EXP_STREAMK_TRACE && threadIdx.x == 0) trace[5] = sm120_exp_streamk_now();
             if constexpr (Wide) {
-                sm120_tf32_tn_streamk_epilogue_burst<M, N>(
+                sm120_tf32_tn_exp_streamk_epilogue_burst<M, N>(
                     output, rows, columns, output_row, output_column,
                     warp_m, warp_n, bias, params, accumulator);
             } else {
-                sm120_tf32_tn_streamk_epilogue<M, N>(
+                sm120_tf32_tn_exp_streamk_epilogue<M, N>(
                     output, rows, columns, output_row, output_column,
                     warp_m, warp_n, bias, params, accumulator);
             }
         }
         unit -= k_end - k_begin;
     }
-    if (SM120_STREAMK_TRACE && threadIdx.x == 0) {
-        trace[6] = sm120_streamk_now();
+    if (SM120_EXP_STREAMK_TRACE && threadIdx.x == 0) {
+        trace[6] = sm120_exp_streamk_now();
         trace[7] = ((unsigned long long)segments << 48)
             | ((unsigned long long)units_first << 24)
             | (unsigned long long)units_last;
@@ -880,50 +880,50 @@ static __device__ __forceinline__ void sm120_tf32_tn_streamk_v2_kernel(
 }
 
 template <int M, int N, int Stages, bool Wide>
-static __device__ __forceinline__ void sm120_tf32_tn_streamk_v2_entry(
+static __device__ __forceinline__ void sm120_tf32_tn_exp_streamk_v2_entry(
     void* output, float* partial, unsigned* flags,
     const CUtensorMap& a_map, const CUtensorMap& b_map,
     const float* bias, const Sm120KernelParams& params) {
     if (sm120_tf32_reduction<Sm120Tn>(params) == 0) {
-        sm120_tf32_tn_streamk_zero_reduction<M, N>(output, bias, params);
+        sm120_tf32_tn_exp_streamk_zero_reduction<M, N>(output, bias, params);
         return;
     }
-    sm120_tf32_tn_streamk_v2_kernel<M, N, Stages, Wide>(
+    sm120_tf32_tn_exp_streamk_v2_kernel<M, N, Stages, Wide>(
         output, partial, flags, a_map, b_map, bias, params);
 }
 
-#define SM120_DEFINE_TF32_TN_STREAMK_KERNEL(NAME, M, N, STAGES)              \
+#define SM120_DEFINE_TF32_TN_EXP_STREAMK_KERNEL(NAME, M, N, STAGES)              \
 extern "C" __global__ __launch_bounds__((M * N) / 32) void NAME(            \
     void* output, float* partial, unsigned* flags,                             \
     const __grid_constant__ CUtensorMap a_map,                                 \
     const __grid_constant__ CUtensorMap b_map, const float* bias,              \
     const __grid_constant__ Sm120KernelParams params) {                        \
-    sm120_tf32_tn_streamk_pair_entry<M, N, STAGES>(                            \
+    sm120_tf32_tn_exp_streamk_pair_entry<M, N, STAGES>(                            \
         output, partial, flags, a_map, b_map, bias, params);                   \
 }
 
-SM120_DEFINE_TF32_TN_STREAMK_KERNEL(
+SM120_DEFINE_TF32_TN_EXP_STREAMK_KERNEL(
     gemm_bi_tn_sm120_tma_mma_tf32_v1_m64n128_bk32_s4_pair_exp_streamk_v1, 64, 128, 4)
-SM120_DEFINE_TF32_TN_STREAMK_KERNEL(
+SM120_DEFINE_TF32_TN_EXP_STREAMK_KERNEL(
     gemm_bi_tn_sm120_tma_mma_tf32_v1_m64n128_bk32_s3_pair_exp_streamk_v1, 64, 128, 3)
-SM120_DEFINE_TF32_TN_STREAMK_KERNEL(
+SM120_DEFINE_TF32_TN_EXP_STREAMK_KERNEL(
     gemm_bi_tn_sm120_tma_mma_tf32_v1_m64n128_bk32_s2_pair_exp_streamk_v1, 64, 128, 2)
 
-#define SM120_DEFINE_TF32_TN_STREAMK_V2_KERNEL(NAME, M, N, STAGES, BLOCKS)   \
+#define SM120_DEFINE_TF32_TN_EXP_STREAMK_V2_KERNEL(NAME, M, N, STAGES, BLOCKS)   \
 extern "C" __global__ __launch_bounds__((M * N) / 32, BLOCKS) void NAME(    \
     void* output, float* partial, unsigned* flags,                             \
     const __grid_constant__ CUtensorMap a_map,                                 \
     const __grid_constant__ CUtensorMap b_map, const float* bias,              \
     const __grid_constant__ Sm120KernelParams params) {                        \
-    sm120_tf32_tn_streamk_v2_entry<M, N, STAGES, (BLOCKS) == 1>(               \
+    sm120_tf32_tn_exp_streamk_v2_entry<M, N, STAGES, (BLOCKS) == 1>(               \
         output, partial, flags, a_map, b_map, bias, params);                   \
 }
 
-SM120_DEFINE_TF32_TN_STREAMK_V2_KERNEL(
+SM120_DEFINE_TF32_TN_EXP_STREAMK_V2_KERNEL(
     gemm_bi_tn_sm120_tma_mma_tf32_v1_m64n128_bk32_s4_pair_exp_streamk_v2, 64, 128, 4, 1)
-SM120_DEFINE_TF32_TN_STREAMK_V2_KERNEL(
+SM120_DEFINE_TF32_TN_EXP_STREAMK_V2_KERNEL(
     gemm_bi_tn_sm120_tma_mma_tf32_v1_m64n128_bk32_s3_pair_exp_streamk_v2, 64, 128, 3, 1)
-SM120_DEFINE_TF32_TN_STREAMK_V2_KERNEL(
+SM120_DEFINE_TF32_TN_EXP_STREAMK_V2_KERNEL(
     gemm_bi_tn_sm120_tma_mma_tf32_v1_m64n128_bk32_s2_pair_exp_streamk_v2, 64, 128, 2, 2)
 
 #endif
