@@ -5,6 +5,13 @@
 
 use super::device::GpuDevice;
 use super::dtype::WeightDtype;
+use super::gemm_bi_triad::{F32PreparedLaunchCache, Sm120PreparedLaunchCache};
+use super::kernel_identity::{
+    ArtifactIdentity, BackendSet, CapturedGemmGraphPlan, CompilerIdentity, ModuleKind,
+    PhysicalGemmBackend, PolicyDtype, PreparedGemmCaptureManifest, RecordedGemmTrace,
+    ResolvedGemmLaunchSet, ResolvedGemmRoute, ResolvedNumericContract,
+    build_resolved_gemm_launch_set,
+};
 use super::kernels::MambaKernels;
 use crate::config::MambaConfig;
 use std::cell::RefCell;
@@ -54,6 +61,48 @@ pub enum BiGemmFamily {
     Fixed,
 }
 
+fn bi_gemm_family_from_result(
+    value: Result<String, std::env::VarError>,
+) -> Result<BiGemmFamily, String> {
+    match value {
+        Ok(value) => match value.trim() {
+            "" => Ok(BiGemmFamily::Triad),
+            value if value.eq_ignore_ascii_case("triad") => Ok(BiGemmFamily::Triad),
+            value if value.eq_ignore_ascii_case("fixed") => Ok(BiGemmFamily::Fixed),
+            value => Err(format!(
+                "MAMBA_RS_BI_GEMM_FAMILY={value:?} is not a recognized family; \
+                 only fixed or triad are accepted"
+            )),
+        },
+        Err(std::env::VarError::NotPresent) => Ok(BiGemmFamily::Triad),
+        Err(std::env::VarError::NotUnicode(value)) => Err(format!(
+            "MAMBA_RS_BI_GEMM_FAMILY={value:?} is not valid Unicode; \
+             only fixed or triad are accepted"
+        )),
+    }
+}
+
+fn tier_flag_from_result(
+    name: &str,
+    value: Result<String, std::env::VarError>,
+) -> Result<bool, String> {
+    match value {
+        Ok(value) => match value.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "yes" | "on" => Ok(true),
+            "0" | "false" | "no" | "off" | "" => Ok(false),
+            other => Err(format!(
+                "{name}={other:?} is not a recognized flag value \
+                 (use 1/true/yes/on or 0/false/no/off)"
+            )),
+        },
+        Err(std::env::VarError::NotPresent) => Ok(false),
+        Err(std::env::VarError::NotUnicode(value)) => Err(format!(
+            "{name}={value:?} is not valid Unicode \
+             (use 1/true/yes/on or 0/false/no/off)"
+        )),
+    }
+}
+
 /// Numeric policy for deterministic batch-invariant f32 GEMMs.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 #[repr(u8)]
@@ -61,7 +110,10 @@ pub enum F32TriadPolicy {
     /// Preserve the scalar `__fmaf_rn` reduction contract.
     #[default]
     ExactScalarFmaV1 = 0,
-    /// Permit only frozen and qualified deterministic TF32 routes.
+    /// Permit frozen and qualified deterministic TF32 routes.
+    ///
+    /// This is permission, not a forced backend. Unsupported or unmeasured
+    /// cells keep the exact scalar FMA contract.
     AllowDeterministicTf32V1 = 1,
 }
 
@@ -102,6 +154,99 @@ pub use super::kernel_identity::{
 /// Complete policy, compiler, artifact, and device identity pinned by graphs.
 pub type GemmRoute = GemmRouteIdentity;
 
+struct GemmRouteRecorder {
+    context: GemmRouteIdentity,
+    mode: GemmRouteRecorderMode,
+    routes: Vec<ResolvedGemmRoute>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum GemmRouteRecorderMode {
+    /// Runs outside CUDA capture, so route storage and prepared launch caches
+    /// may grow while the eager body resolves its exact physical inventory.
+    GrowableEager,
+    /// Storage was reserved before CUDA capture and may not grow inside it.
+    FixedCapture { route_capacity: u32 },
+}
+
+pub(crate) struct GemmRouteRecordingGuard<'a> {
+    ctx: &'a GpuCtx,
+}
+
+impl GemmRouteRecordingGuard<'_> {
+    #[cfg(test)]
+    pub(crate) fn finish(self) -> Result<CapturedGemmGraphPlan, String> {
+        let recorder = self.ctx.take_gemm_route_recording()?;
+        if recorder.routes.is_empty() {
+            return Err("captured GEMM graph plan must not be empty".into());
+        }
+        recorder
+            .context
+            .ensure_current(self.ctx.gemm_route(), "GEMM graph capture")?;
+        let launches = build_resolved_gemm_launch_set(&recorder.routes)?;
+        let routes = recorder.routes.into_boxed_slice();
+        Ok(CapturedGemmGraphPlan::new(
+            recorder.context,
+            launches,
+            routes,
+        ))
+    }
+
+    pub(crate) fn finish_trace(self) -> Result<RecordedGemmTrace, String> {
+        let recorder = self.ctx.take_gemm_route_recording()?;
+        if recorder.mode != GemmRouteRecorderMode::GrowableEager {
+            return Err("fixed GEMM capture recording cannot produce an eager trace".into());
+        }
+        recorder
+            .context
+            .ensure_current(self.ctx.gemm_route(), "eager GEMM route recording")?;
+        RecordedGemmTrace::from_routes(recorder.context, recorder.routes)
+    }
+
+    pub(crate) fn finish_against_manifest(
+        self,
+        manifest: &PreparedGemmCaptureManifest,
+    ) -> Result<Option<CapturedGemmGraphPlan>, String> {
+        let recorder = self.ctx.take_gemm_route_recording()?;
+        let GemmRouteRecorderMode::FixedCapture { route_capacity } = recorder.mode else {
+            return Err("growable eager GEMM recording cannot finish a CUDA capture".into());
+        };
+        let route_capacity =
+            usize::try_from(route_capacity).expect("u32 GEMM route capacity always fits in usize");
+        manifest.validate_capture_request(self.ctx.gemm_route(), route_capacity)?;
+        recorder
+            .context
+            .ensure_current(self.ctx.gemm_route(), "GEMM graph capture")?;
+        let launches = resolved_gemm_launches(&recorder.routes)?;
+        manifest.validate_capture_result(recorder.context, launches)?;
+        let Some(launches) = launches else {
+            return Ok(None);
+        };
+        let routes = recorder.routes.into_boxed_slice();
+        Ok(Some(CapturedGemmGraphPlan::new(
+            recorder.context,
+            launches,
+            routes,
+        )))
+    }
+}
+
+fn resolved_gemm_launches(
+    routes: &[ResolvedGemmRoute],
+) -> Result<Option<ResolvedGemmLaunchSet>, String> {
+    if routes.is_empty() {
+        Ok(None)
+    } else {
+        build_resolved_gemm_launch_set(routes).map(Some)
+    }
+}
+
+impl Drop for GemmRouteRecordingGuard<'_> {
+    fn drop(&mut self) {
+        self.ctx.clear_gemm_route_recording();
+    }
+}
+
 /// GPU execution context — holds everything needed for kernel launches.
 ///
 /// Created once at init, passed by reference to all GPU functions.
@@ -133,22 +278,26 @@ pub struct GpuCtxResources {
 /// ```
 pub struct GpuCtx {
     resources: Rc<GpuCtxResources>,
-    /// Opt-in flag for the batch-invariant matvec path (`matvec_bi_*`).
-    /// Default: `false` → cuBLAS gemv (faster, but M=1/M=N may differ at
-    /// sub-ULP scale). Set via `set_batch_invariant(true)` or the
-    /// `MAMBA_RS_BATCH_INVARIANT=1` environment variable when strict
-    /// cross-batch bit-identity is required.
+    gemm_route_recorder: RefCell<Option<GemmRouteRecorder>>,
+    f32_prepared_launches: RefCell<F32PreparedLaunchCache>,
+    sm120_prepared_launches: RefCell<Sm120PreparedLaunchCache>,
+    pub(crate) fixed_tf32_maps: RefCell<super::gemm_bi_fixed::FixedTf32MapCache>,
+    pub(crate) fixed_half_maps: RefCell<super::gemm_bi_fixed::FixedHalfMapCache>,
+    /// Opt-in flag for deterministic batch-invariant GEMM dispatch.
+    /// Default: `false` uses cuBLAS. Set via `set_batch_invariant(true)` or
+    /// `MAMBA_RS_BATCH_INVARIANT=1`; each selected family documents the
+    /// shape range over which its arithmetic route remains invariant.
     batch_invariant: std::cell::Cell<bool>,
-    /// Opt-in tensor-core tier for the batch-invariant typed GEMMs
-    /// (stage 5). SEPARATE numeric contract: mma.sync f32 accumulation
+    /// Opt-in tensor-core tier for the batch-invariant typed GEMMs.
+    /// SEPARATE numeric contract: mma.sync f32 accumulation
     /// differs from the scalar __fmaf_rn chain, so outputs do not bit-match
     /// the scalar triad — but the TC kernels are fully deterministic and
-    /// batch-invariant across all M. Effective only together with
-    /// `batch_invariant`. Env: MAMBA_RS_BI_TENSOR_CORES.
+    /// batch-invariant for their admitted shapes. Effective only together
+    /// with `batch_invariant`. Env: MAMBA_RS_BI_TENSOR_CORES.
     bi_tensor_cores: std::cell::Cell<bool>,
     /// Which deterministic family serves the forward while
     /// `batch_invariant` is on. Env: MAMBA_RS_BI_GEMM_FAMILY
-    /// (`warptile` | `wmma`). Part of the numeric route, so it rides
+    /// (`triad` | `fixed`). Part of the numeric route, so it rides
     /// [`GpuCtx::gemm_route`] into every capture identity.
     bi_gemm_family: std::cell::Cell<BiGemmFamily>,
     /// Opt-in non-PEDANTIC cuBLAS compute for the typed (bf16/f16) GEMMs:
@@ -188,10 +337,29 @@ impl std::ops::Deref for GpuCtx {
     }
 }
 
+fn validate_multiprocessor_identity(
+    device_multiprocessor_count: u32,
+    kernel_multiprocessor_count: u32,
+) -> Result<(), String> {
+    if device_multiprocessor_count == 0 || kernel_multiprocessor_count == 0 {
+        return Err("CUDA topology requires a nonzero multiprocessor count".into());
+    }
+    if device_multiprocessor_count != kernel_multiprocessor_count {
+        return Err(format!(
+            "CUDA topology changed while loading kernels: device identity has {device_multiprocessor_count} multiprocessors but loaded kernels observed {kernel_multiprocessor_count}"
+        ));
+    }
+    Ok(())
+}
+
 impl GpuCtx {
-    /// Create a GPU context: compile kernels, init cuBLAS with TF32.
-    /// Kernels get the default state capacity of 64; models with a
-    /// larger `d_state` use [`Self::new_with_state_cap`].
+    /// Create a GPU context, compile its kernels, and initialize cuBLAS.
+    ///
+    /// The deterministic f32 Triad policy starts in exact scalar mode.
+    /// cuBLAS TF32 state is separate. This constructor ignores route
+    /// environment variables; use [`Self::new_from_env`] to opt into them.
+    /// Kernels get the default state capacity of 64; models with a larger
+    /// `d_state` use [`Self::new_with_state_cap`].
     pub fn new(device: &GpuDevice) -> Result<Self, String> {
         Self::new_with_state_cap(device, 64)
     }
@@ -217,36 +385,18 @@ impl GpuCtx {
     }
 
     fn apply_env_route(ctx: &Self) -> Result<(), String> {
-        let tier_flag = |name: &str| -> Result<bool, String> {
-            match std::env::var(name) {
-                Err(_) => Ok(false),
-                Ok(value) => match value.trim().to_ascii_lowercase().as_str() {
-                    "1" | "true" | "yes" | "on" => Ok(true),
-                    "0" | "false" | "no" | "off" | "" => Ok(false),
-                    other => Err(format!(
-                        "{name}={other:?} is not a recognized flag value \
-                         (use 1/true/yes/on or 0/false/no/off)"
-                    )),
-                },
-            }
-        };
-        let batch_invariant = tier_flag("MAMBA_RS_BATCH_INVARIANT")?;
-        let bi_tensor_cores = tier_flag("MAMBA_RS_BI_TENSOR_CORES")?;
-        let fast_gemm = tier_flag("MAMBA_RS_FAST_GEMM")?;
+        let batch_invariant = tier_flag_from_result(
+            "MAMBA_RS_BATCH_INVARIANT",
+            std::env::var("MAMBA_RS_BATCH_INVARIANT"),
+        )?;
+        let bi_tensor_cores = tier_flag_from_result(
+            "MAMBA_RS_BI_TENSOR_CORES",
+            std::env::var("MAMBA_RS_BI_TENSOR_CORES"),
+        )?;
+        let fast_gemm =
+            tier_flag_from_result("MAMBA_RS_FAST_GEMM", std::env::var("MAMBA_RS_FAST_GEMM"))?;
         let f32_triad_policy = f32_triad_policy_from_env()?;
-        let bi_gemm_family = match std::env::var("MAMBA_RS_BI_GEMM_FAMILY") {
-            Err(_) => BiGemmFamily::Triad,
-            Ok(value) => match value.trim().to_ascii_lowercase().as_str() {
-                "" | "triad" | "sgemm_bi" => BiGemmFamily::Triad,
-                "fixed" | "gemm_bi" => BiGemmFamily::Fixed,
-                other => {
-                    return Err(format!(
-                        "MAMBA_RS_BI_GEMM_FAMILY={other:?} is not a recognized family \
-                         (use fixed or triad)"
-                    ));
-                }
-            },
-        };
+        let bi_gemm_family = bi_gemm_family_from_result(std::env::var("MAMBA_RS_BI_GEMM_FAMILY"))?;
         if bi_tensor_cores && !batch_invariant {
             return Err(
                 "MAMBA_RS_BI_TENSOR_CORES=1 without MAMBA_RS_BATCH_INVARIANT=1 is a \
@@ -294,6 +444,11 @@ impl GpuCtx {
         let stream = device.fork_stream()?;
         let arch = device.nvrtc_target();
         let kernels = MambaKernels::compile_with_state_cap(device.context(), arch, state_cap)?;
+        let device_identity = device.identity();
+        validate_multiprocessor_identity(
+            device_identity.multiprocessor_count,
+            kernels.multiprocessor_count(),
+        )?;
         // The splitk/transpose scratch buffers inside `kernels` were
         // alloc_zeros'd on the DEFAULT stream; `ctx.stream` is NON_BLOCKING
         // and never orders against it. Drain once here so first use on
@@ -319,8 +474,8 @@ impl GpuCtx {
             .attribute(
                 cudarc::driver::sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_TENSOR_MAP_ACCESS_SUPPORTED,
             )
-            .map_err(|error| format!("query tensor-map support: {error:?}"))?
-            != 0;
+            .map(|value| value != 0)
+            .unwrap_or(false);
         let device_caps = super::kernel_identity::DeviceCaps {
             compute_capability: device.compute_capability,
             nvrtc_version: compiler.nvrtc_version,
@@ -343,6 +498,11 @@ impl GpuCtx {
                 half_staging_bytes: RefCell::new(0),
                 bi_upcast_scratch: [RefCell::new(None), RefCell::new(None), RefCell::new(None)],
             }),
+            gemm_route_recorder: RefCell::new(None),
+            f32_prepared_launches: RefCell::new(F32PreparedLaunchCache::default()),
+            sm120_prepared_launches: RefCell::new(Sm120PreparedLaunchCache::default()),
+            fixed_tf32_maps: RefCell::new(super::gemm_bi_fixed::FixedTf32MapCache::default()),
+            fixed_half_maps: RefCell::new(super::gemm_bi_fixed::FixedHalfMapCache::default()),
             batch_invariant: std::cell::Cell::new(false),
             bi_tensor_cores: std::cell::Cell::new(false),
             bi_gemm_family: std::cell::Cell::new(BiGemmFamily::Triad),
@@ -351,9 +511,11 @@ impl GpuCtx {
             f32_triad_policy: std::cell::Cell::new(F32TriadPolicy::ExactScalarFmaV1),
             state_cap,
             instance_token,
-            device_identity: device.identity(),
+            device_identity,
             device_caps,
-            policy_hash: super::kernel_identity::legacy_sm80_policy_digest(),
+            policy_hash: super::kernel_identity::gemm_dispatch_policy_digest(
+                device_identity.multiprocessor_count,
+            ),
             graphs_captured: std::cell::Cell::new(0),
             graph_scratch_frozen: std::cell::Cell::new(false),
         })
@@ -590,10 +752,12 @@ impl GpuCtx {
         Ok(())
     }
 
-    /// Enable or disable the batch-invariant matvec path.
-    /// When `true`, dispatches to the custom `matvec_bi_*` kernel which
-    /// produces bit-identical logits regardless of batch size. When `false`
-    /// (default), uses cuBLAS gemv for maximum throughput.
+    /// Enable or disable deterministic batch-invariant GEMM dispatch.
+    ///
+    /// When enabled, eligible NN/TN/NT operations use the selected
+    /// [`BiGemmFamily`] and typed decode may use `matvec_bi_*`. Each family
+    /// documents the shape range over which it preserves one arithmetic
+    /// route. When disabled (the default), GEMMs use cuBLAS.
     pub fn set_batch_invariant(&self, on: bool) {
         if self.graphs_captured.get() > 0 {
             eprintln!(
@@ -603,7 +767,7 @@ impl GpuCtx {
         self.batch_invariant.set(on);
     }
 
-    /// Returns `true` if the batch-invariant matvec path is enabled.
+    /// Returns `true` if deterministic batch-invariant GEMM dispatch is enabled.
     pub fn batch_invariant(&self) -> bool {
         self.batch_invariant.get()
     }
@@ -625,9 +789,17 @@ impl GpuCtx {
         self.bi_gemm_family.get()
     }
 
-    /// Enable or disable the tensor-core tier of the batch-invariant typed
-    /// GEMMs (stage 5). Different numeric contract than the scalar triad —
-    /// deterministic and batch-invariant, but not bit-equal to it.
+    /// Enable or disable the fast typed tier of batch-invariant GEMMs.
+    ///
+    /// This flag has no effect unless [`Self::batch_invariant`] is `true`.
+    /// Most admitted shapes use the separate tensor-core numeric contract;
+    /// disabling the tier keeps the scalar route. On SM89,
+    /// automatic BF16/F16 NN with N=128 keeps exact scalar FMA for
+    /// `NnSplitKThinTail` at K>=511 and `NnSplitKThin` at K>=1024. Forced tile
+    /// requests are unchanged. On CC12.0, only the measured 18-cell BF16/F16
+    /// table selects the route-sealed SM120 MMA contract; CC12.1 and non-cells
+    /// decline to the portable ladder. The frozen dispatch identity records the
+    /// selected numeric contract.
     pub fn set_bi_tensor_cores(&self, on: bool) {
         if self.graphs_captured.get() > 0 {
             eprintln!(
@@ -658,7 +830,10 @@ impl GpuCtx {
         self.graphs_captured.set(self.graphs_captured.get() + 1);
     }
 
-    /// The three runtime controls used by legacy callers.
+    /// Compact view of the three boolean GEMM controls.
+    ///
+    /// Use [`Self::gemm_route`] when complete policy, artifact, compiler, and
+    /// device identity is required.
     pub fn gemm_flags(&self) -> (bool, bool, bool) {
         (
             self.batch_invariant.get(),
@@ -667,18 +842,363 @@ impl GpuCtx {
         )
     }
 
+    pub(crate) fn begin_gemm_route_recording(
+        &self,
+        capacity: usize,
+    ) -> Result<GemmRouteRecordingGuard<'_>, String> {
+        let mut active = self
+            .gemm_route_recorder
+            .try_borrow_mut()
+            .map_err(|_| "GEMM route recorder is already borrowed".to_string())?;
+        if active.is_some() {
+            return Err("nested GEMM route recording is not supported".into());
+        }
+        let route_capacity = u32::try_from(capacity)
+            .map_err(|_| "GEMM route recording capacity exceeds u32::MAX".to_string())?;
+        let mut routes = Vec::new();
+        routes
+            .try_reserve_exact(capacity)
+            .map_err(|error| format!("reserve GEMM route recording capacity: {error}"))?;
+        let recorder = GemmRouteRecorder {
+            context: self.gemm_route(),
+            mode: GemmRouteRecorderMode::FixedCapture { route_capacity },
+            routes,
+        };
+        *active = Some(recorder);
+        Ok(GemmRouteRecordingGuard { ctx: self })
+    }
+
+    fn begin_eager_gemm_route_recording(&self) -> Result<GemmRouteRecordingGuard<'_>, String> {
+        let mut active = self
+            .gemm_route_recorder
+            .try_borrow_mut()
+            .map_err(|_| "GEMM route recorder is already borrowed".to_string())?;
+        if active.is_some() {
+            return Err("nested GEMM route recording is not supported".into());
+        }
+        *active = Some(GemmRouteRecorder {
+            context: self.gemm_route(),
+            mode: GemmRouteRecorderMode::GrowableEager,
+            routes: Vec::new(),
+        });
+        Ok(GemmRouteRecordingGuard { ctx: self })
+    }
+
+    /// Executes one ordinary eager body and records the exact ordered physical
+    /// GEMM routes it launches.
+    ///
+    /// This diagnostic API runs outside CUDA Graph capture, so lazy launch
+    /// preparation and cache allocation remain legal. The body really enqueues
+    /// its kernels once; callers must not include this recording pass in timing
+    /// samples or treat it as graph capture.
+    pub fn record_eager_gemm_trace<F>(&self, body: F) -> Result<RecordedGemmTrace, String>
+    where
+        F: FnOnce() -> Result<(), String>,
+    {
+        let recording = self.begin_eager_gemm_route_recording()?;
+        body()?;
+        recording.finish_trace()
+    }
+
+    /// Run one ordinary eager body and return its capture manifest.
+    pub fn record_eager_gemm_manifest<F>(
+        &self,
+        body: F,
+    ) -> Result<PreparedGemmCaptureManifest, String>
+    where
+        F: FnOnce() -> Result<(), String>,
+    {
+        self.record_eager_gemm_trace(body)
+            .map(|trace| trace.manifest())
+    }
+
+    pub(crate) fn with_f32_prepared_launches<T>(
+        &self,
+        access: impl FnOnce(&mut F32PreparedLaunchCache) -> Result<T, String>,
+    ) -> Result<T, String> {
+        let mut launches = self
+            .f32_prepared_launches
+            .try_borrow_mut()
+            .map_err(|_| "prepared f32 Triad cache is already borrowed".to_string())?;
+        access(&mut launches)
+    }
+
+    pub(crate) fn with_sm120_prepared_launches<T>(
+        &self,
+        access: impl FnOnce(&mut Sm120PreparedLaunchCache) -> Result<T, String>,
+    ) -> Result<T, String> {
+        let mut launches = self
+            .sm120_prepared_launches
+            .try_borrow_mut()
+            .map_err(|_| "prepared SM120 TMA cache is already borrowed".to_string())?;
+        access(&mut launches)
+    }
+
+    pub(crate) fn record_resolved_gemm_route(
+        &self,
+        route: ResolvedGemmRoute,
+    ) -> Result<(), String> {
+        let mut active = self
+            .gemm_route_recorder
+            .try_borrow_mut()
+            .map_err(|_| "GEMM route recorder is already borrowed".to_string())?;
+        let Some(recorder) = active.as_mut() else {
+            return Ok(());
+        };
+        if let GemmRouteRecorderMode::FixedCapture { route_capacity } = recorder.mode {
+            let route_count = u32::try_from(recorder.routes.len())
+                .expect("fixed GEMM route count is bounded by u32 capacity");
+            if route_count >= route_capacity {
+                return Err(format!(
+                    "GEMM route recording exceeded its capacity {route_capacity}"
+                ));
+            }
+        }
+        recorder.routes.push(route);
+        Ok(())
+    }
+
+    fn take_gemm_route_recording(&self) -> Result<GemmRouteRecorder, String> {
+        self.gemm_route_recorder
+            .try_borrow_mut()
+            .map_err(|_| "GEMM route recorder is already borrowed".to_string())?
+            .take()
+            .ok_or_else(|| "GEMM route recorder is not active".to_string())
+    }
+
+    fn clear_gemm_route_recording(&self) {
+        if let Ok(mut active) = self.gemm_route_recorder.try_borrow_mut() {
+            *active = None;
+        }
+    }
+
+    fn live_gemm_module_binding(
+        &self,
+        module_kind: ModuleKind,
+    ) -> Option<(ArtifactIdentity, CompilerIdentity)> {
+        let artifacts = self.kernels.artifact_set_identity();
+        match module_kind {
+            ModuleKind::Fixed => Some((artifacts.fixed, self.kernels.compiler_identity())),
+            ModuleKind::TriadScalar => Some((
+                artifacts.triad_scalar,
+                self.kernels.triad_scalar_compiler_identity(),
+            )),
+            ModuleKind::TriadSm80 => Some((
+                self.kernels.artifact_set_identity().triad_sm80,
+                self.kernels.triad_sm80_compiler_identity(),
+            )),
+            ModuleKind::TriadSm90a | ModuleKind::TriadSm100 | ModuleKind::TriadSm120 => self
+                .kernels
+                .artifact_set_identity()
+                .specialized
+                .filter(|artifact| artifact.module_kind == module_kind)
+                .zip(self.kernels.specialized_compiler_identity()),
+            ModuleKind::Mamba3Combined => None,
+        }
+    }
+
+    fn live_qualified_tf32_binding(
+        &self,
+        module_kind: ModuleKind,
+    ) -> Option<super::gemm_bi_triad::Tf32QualifiedModule> {
+        let availability = self.kernels.f32_triad_availability();
+        match module_kind {
+            ModuleKind::TriadSm80 => availability.portable,
+            ModuleKind::TriadSm90a | ModuleKind::TriadSm100 | ModuleKind::TriadSm120 => {
+                availability.specialized
+            }
+            _ => None,
+        }
+        .filter(|binding| binding.module_kind == module_kind)
+    }
+
+    pub(crate) fn validate_resolved_gemm_route(
+        &self,
+        route: &ResolvedGemmRoute,
+        label: &str,
+    ) -> Result<(), String> {
+        let context = self.gemm_route();
+        if !context.policy.batch_invariant || !context.backend_set.contains(BackendSet::TRIAD) {
+            return Err(format!(
+                "{label}: captured Triad backend is unavailable under the live GEMM policy"
+            ));
+        }
+        let required_contract = match route.numeric_contract {
+            ResolvedNumericContract::ScalarFmaV1
+            | ResolvedNumericContract::ScalarFmaSplitKPartialV1
+            | ResolvedNumericContract::ScalarFmaSplitKF32ReduceV1
+            | ResolvedNumericContract::ScalarFmaTnNarrowSplitMPartialV1
+            | ResolvedNumericContract::ScalarFmaTnNarrowSplitMF64ReduceV1
+            | ResolvedNumericContract::ScalarFmaTnSplitMF64ReduceV1
+            | ResolvedNumericContract::ZeroReductionEpilogueF32V1 => {
+                NumericContractSet::TRIAD_SCALAR_FMA_V1
+            }
+            ResolvedNumericContract::MmaSyncF32V1
+            | ResolvedNumericContract::WgmmaF32V1
+            | ResolvedNumericContract::Tcgen05F32V1 => NumericContractSet::TRIAD_MMA_SYNC_V1,
+            ResolvedNumericContract::MmaTf32RnaV1
+            | ResolvedNumericContract::Sm90aWgmmaTf32TmaV1
+            | ResolvedNumericContract::Sm100Tcgen05Tf32TmaV1
+            | ResolvedNumericContract::Sm120TmaMmaTf32RnaV1 => {
+                NumericContractSet::TRIAD_DETERMINISTIC_TF32_V1
+            }
+            ResolvedNumericContract::MmaTf32RnaSplitK2V1
+            | ResolvedNumericContract::MmaTf32RnaSplitK4V1
+            | ResolvedNumericContract::MmaTf32RnaSplitK8V1 => {
+                NumericContractSet::TRIAD_DETERMINISTIC_TF32_SPLIT_K_V1
+            }
+        };
+        if !context.numeric_contracts.contains(required_contract) {
+            return Err(format!(
+                "{label}: captured Triad numeric contract is unavailable under the live GEMM policy"
+            ));
+        }
+        let expected_module =
+            match route.backend {
+                PhysicalGemmBackend::ScalarFmaV1
+                | PhysicalGemmBackend::ScalarFmaSplitKPartialV1
+                | PhysicalGemmBackend::ScalarFmaSplitKF32ReduceV1
+                | PhysicalGemmBackend::ScalarFmaTnNarrowSplitMPartialV1
+                | PhysicalGemmBackend::ScalarFmaTnSplitMF64ReduceV1 => ModuleKind::TriadScalar,
+                PhysicalGemmBackend::Sm80Mma16V1
+                | PhysicalGemmBackend::MmaTf32RnaV1
+                | PhysicalGemmBackend::MmaTf32RnaSplitK2V1
+                | PhysicalGemmBackend::MmaTf32RnaSplitK4V1
+                | PhysicalGemmBackend::MmaTf32RnaSplitK8V1 => ModuleKind::TriadSm80,
+                PhysicalGemmBackend::Sm90aWgmmaV1 | PhysicalGemmBackend::Sm90aWgmmaTf32TmaV1 => {
+                    ModuleKind::TriadSm90a
+                }
+                PhysicalGemmBackend::Sm100Tcgen05V1
+                | PhysicalGemmBackend::Sm100Tcgen05Tf32TmaV1 => ModuleKind::TriadSm100,
+                PhysicalGemmBackend::Sm120TmaMma16V1
+                | PhysicalGemmBackend::Sm120TmaMmaTf32RnaV1 => ModuleKind::TriadSm120,
+            };
+        if route.module_kind != expected_module || route.artifact.module_kind != expected_module {
+            return Err(format!(
+                "{label}: captured physical backend no longer matches its module binding"
+            ));
+        }
+        let uses_qualified_tf32_module = matches!(
+            route.numeric_contract,
+            super::kernel_identity::ResolvedNumericContract::MmaTf32RnaV1
+                | super::kernel_identity::ResolvedNumericContract::MmaTf32RnaSplitK2V1
+                | super::kernel_identity::ResolvedNumericContract::MmaTf32RnaSplitK4V1
+                | super::kernel_identity::ResolvedNumericContract::MmaTf32RnaSplitK8V1
+                | super::kernel_identity::ResolvedNumericContract::Sm90aWgmmaTf32TmaV1
+                | super::kernel_identity::ResolvedNumericContract::Sm100Tcgen05Tf32TmaV1
+                | super::kernel_identity::ResolvedNumericContract::Sm120TmaMmaTf32RnaV1
+                | super::kernel_identity::ResolvedNumericContract::ZeroReductionEpilogueF32V1
+        ) && route.module_kind != ModuleKind::TriadScalar;
+        if uses_qualified_tf32_module {
+            let binding = self
+                .live_qualified_tf32_binding(route.module_kind)
+                .ok_or_else(|| format!("{label}: captured qualified TF32 module is not loaded"))?;
+            if route.artifact != binding.artifact
+                || route.compiler != binding.compiler
+                || route.target != binding.target
+                || route.device != binding.device
+                || route.device_caps != binding.device_caps
+            {
+                return Err(format!(
+                    "{label}: captured GEMM route no longer matches its qualified TF32 binding"
+                ));
+            }
+        } else {
+            let (artifact, compiler) = self
+                .live_gemm_module_binding(route.module_kind)
+                .ok_or_else(|| format!("{label}: captured GEMM module is not loaded"))?;
+            if route.artifact != artifact
+                || route.compiler != compiler
+                || route.target != compiler.target
+                || route.device != context.device
+                || route.device_caps != context.device_caps
+            {
+                return Err(format!(
+                    "{label}: captured GEMM route no longer matches its live module binding"
+                ));
+            }
+        }
+        if route.tuning_table_revision != context.tuning_table_revision
+            || route.schedule_revision
+                != expected_route_schedule_revision(route.backend, context.schedule_set_revision)
+        {
+            return Err(format!("{label}: captured GEMM route revision is stale"));
+        }
+        let tf32_numeric = matches!(
+            route.numeric_contract,
+            super::kernel_identity::ResolvedNumericContract::MmaTf32RnaV1
+                | super::kernel_identity::ResolvedNumericContract::MmaTf32RnaSplitK2V1
+                | super::kernel_identity::ResolvedNumericContract::MmaTf32RnaSplitK4V1
+                | super::kernel_identity::ResolvedNumericContract::MmaTf32RnaSplitK8V1
+                | super::kernel_identity::ResolvedNumericContract::Sm90aWgmmaTf32TmaV1
+                | super::kernel_identity::ResolvedNumericContract::Sm100Tcgen05Tf32TmaV1
+                | super::kernel_identity::ResolvedNumericContract::Sm120TmaMmaTf32RnaV1
+        );
+        if tf32_numeric
+            && (route.dtype != PolicyDtype::F32
+                || self.f32_triad_policy() != F32TriadPolicy::AllowDeterministicTf32V1)
+        {
+            return Err(format!(
+                "{label}: captured deterministic TF32 route is disabled by the live policy"
+            ));
+        }
+        if route.dtype == PolicyDtype::F32
+            && !tf32_numeric
+            && route.numeric_contract
+                != super::kernel_identity::ResolvedNumericContract::ZeroReductionEpilogueF32V1
+            && !scalar_backend_supports_logical_f32(route.backend)
+        {
+            return Err(format!(
+                "{label}: captured logical-f32 route has an incompatible physical backend"
+            ));
+        }
+        if route.numeric_contract
+            == super::kernel_identity::ResolvedNumericContract::ZeroReductionEpilogueF32V1
+            && (route.dtype != PolicyDtype::F32
+                || route.instruction_family
+                    != super::kernel_identity::ResolvedInstructionFamily::ScalarFma
+                || route.instruction_shape
+                    != super::kernel_identity::ResolvedInstructionShape { m: 1, n: 1, k: 1 }
+                || route.operand_conversion
+                    != super::kernel_identity::ResolvedOperandConversion::None
+                || match route.op {
+                    super::kernel_identity::ResolvedGemmOp::Nn => route.shape.1 != 0,
+                    super::kernel_identity::ResolvedGemmOp::Tn => route.shape.0 != 0,
+                    super::kernel_identity::ResolvedGemmOp::Nt => route.shape.2 != 0,
+                })
+        {
+            return Err(format!(
+                "{label}: captured zero-reduction epilogue identity is inconsistent"
+            ));
+        }
+        if route.dtype != PolicyDtype::F32
+            && route.backend != PhysicalGemmBackend::ScalarFmaV1
+            && !self.bi_tensor_cores()
+        {
+            return Err(format!(
+                "{label}: captured typed Tensor Core route is disabled by the live policy"
+            ));
+        }
+        Ok(())
+    }
+
     /// Complete route identity used by eager launches and graph guards.
-    pub fn gemm_route(&self) -> GemmRoute {
+    pub fn gemm_policy(&self) -> GemmPolicy {
         let (bi, tc, fast) = self.gemm_flags();
         let family = self.bi_gemm_family.get();
-        let policy = GemmPolicy {
+        GemmPolicy {
             batch_invariant: bi,
             bi_tensor_cores: tc,
             fast_gemm: fast,
             cublas_tf32: self.cublas_tf32.get(),
             f32_triad_policy: self.f32_triad_policy.get(),
             bi_gemm_family: family,
-        };
+        }
+    }
+
+    /// Complete route identity used by eager launches and graph guards.
+    pub fn gemm_route(&self) -> GemmRoute {
+        let policy = self.gemm_policy();
         let (backend_set, numeric_contracts) =
             super::kernel_identity::route_backend_contract_sets(policy);
         GemmRouteIdentity {
@@ -698,7 +1218,10 @@ impl GpuCtx {
         }
     }
 
-    /// Returns `true` if the tensor-core bi tier is enabled.
+    /// Returns the requested tensor-core tier flag.
+    ///
+    /// The flag affects dispatch only while [`Self::batch_invariant`] is
+    /// `true`; use [`Self::gemm_route`] for the complete effective identity.
     pub fn bi_tensor_cores(&self) -> bool {
         self.bi_tensor_cores.get()
     }
@@ -739,7 +1262,10 @@ impl GpuCtx {
         self.cublas_tf32.set(false);
     }
 
-    /// cuBLAS TF32 SGEMM state (true until [`Self::disable_tf32`]).
+    /// Return the cuBLAS TF32 SGEMM state.
+    ///
+    /// This is independent of [`Self::f32_triad_policy`]: enabling cuBLAS
+    /// TF32 does not opt deterministic Triad GEMMs into their TF32 route.
     pub fn tf32(&self) -> bool {
         self.cublas_tf32.get()
     }
@@ -747,6 +1273,10 @@ impl GpuCtx {
     /// The state capacity this context's kernels were compiled with.
     pub fn state_cap(&self) -> usize {
         self.state_cap
+    }
+
+    pub(in crate::mamba_ssm::gpu) fn compute_capability(&self) -> (u32, u32) {
+        self.device_identity.compute_capability
     }
 
     /// Presize the batch-invariant GEMM scratch buffers, including Split-K
@@ -877,11 +1407,35 @@ impl GpuCtx {
     }
 }
 
+fn expected_route_schedule_revision(backend: PhysicalGemmBackend, generic: u16) -> u16 {
+    if backend == PhysicalGemmBackend::Sm120TmaMma16V1 {
+        super::gemm_bi_triad::SM120_SCHEDULE_REVISION
+    } else {
+        generic
+    }
+}
+
+const fn scalar_backend_supports_logical_f32(backend: PhysicalGemmBackend) -> bool {
+    matches!(
+        backend,
+        PhysicalGemmBackend::ScalarFmaV1
+            | PhysicalGemmBackend::ScalarFmaSplitKPartialV1
+            | PhysicalGemmBackend::ScalarFmaSplitKF32ReduceV1
+            | PhysicalGemmBackend::ScalarFmaTnNarrowSplitMPartialV1
+            | PhysicalGemmBackend::ScalarFmaTnSplitMF64ReduceV1
+    )
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{F32TriadPolicy, f32_triad_policy_from_result, m1_mixed_graph_max_dim};
+    use super::{
+        BiGemmFamily, F32TriadPolicy, bi_gemm_family_from_result, expected_route_schedule_revision,
+        f32_triad_policy_from_result, m1_mixed_graph_max_dim, scalar_backend_supports_logical_f32,
+        tier_flag_from_result, validate_multiprocessor_identity,
+    };
     use crate::config::ScanMode;
     use crate::mamba_ssm::gpu::forward::GpuMambaDims;
+    use crate::mamba_ssm::gpu::kernel_identity::{PhysicalGemmBackend, SCHEDULE_REVISION};
     #[cfg(unix)]
     use std::ffi::OsString;
 
@@ -904,6 +1458,54 @@ mod tests {
         assert_eq!(m1_mixed_graph_max_dim(&dims), 258);
     }
 
+    #[test]
+    fn device_and_loaded_kernel_multiprocessor_counts_must_match() {
+        assert!(validate_multiprocessor_identity(142, 142).is_ok());
+        for counts in [(0, 142), (142, 0), (108, 142)] {
+            let error = validate_multiprocessor_identity(counts.0, counts.1)
+                .expect_err("incoherent CUDA topology must be rejected");
+            assert!(error.contains("multiprocessor"), "{error}");
+        }
+    }
+
+    #[test]
+    fn sm120_mma16_graph_routes_use_their_sealed_schedule_revision() {
+        assert_eq!(
+            expected_route_schedule_revision(
+                PhysicalGemmBackend::Sm120TmaMma16V1,
+                SCHEDULE_REVISION,
+            ),
+            super::super::gemm_bi_triad::SM120_SCHEDULE_REVISION
+        );
+        assert_eq!(
+            expected_route_schedule_revision(
+                PhysicalGemmBackend::Sm120TmaMmaTf32RnaV1,
+                SCHEDULE_REVISION,
+            ),
+            SCHEDULE_REVISION
+        );
+    }
+
+    #[test]
+    fn logical_f32_accepts_only_scalar_triad_backends() {
+        for backend in [
+            PhysicalGemmBackend::ScalarFmaV1,
+            PhysicalGemmBackend::ScalarFmaSplitKPartialV1,
+            PhysicalGemmBackend::ScalarFmaSplitKF32ReduceV1,
+            PhysicalGemmBackend::ScalarFmaTnNarrowSplitMPartialV1,
+            PhysicalGemmBackend::ScalarFmaTnSplitMF64ReduceV1,
+        ] {
+            assert!(scalar_backend_supports_logical_f32(backend), "{backend:?}");
+        }
+        for backend in [
+            PhysicalGemmBackend::Sm80Mma16V1,
+            PhysicalGemmBackend::MmaTf32RnaV1,
+            PhysicalGemmBackend::Sm120TmaMma16V1,
+        ] {
+            assert!(!scalar_backend_supports_logical_f32(backend), "{backend:?}");
+        }
+    }
+
     #[cfg(unix)]
     #[test]
     fn f32_triad_policy_environment_is_strict_and_defaults_to_exact() {
@@ -923,5 +1525,74 @@ mod tests {
         .expect_err("non-Unicode policy must fail");
         assert!(error.contains("MAMBA_RS_BI_F32_POLICY"), "{error}");
         assert!(error.contains("exact") && error.contains("tf32"), "{error}");
+    }
+
+    #[test]
+    fn tier_flag_environment_is_strict_and_fail_closed() {
+        assert!(!tier_flag_from_result("TEST_FLAG", Err(std::env::VarError::NotPresent)).unwrap());
+        for value in ["1", " true ", "YES", "on"] {
+            assert!(tier_flag_from_result("TEST_FLAG", Ok(value.into())).unwrap());
+        }
+        for value in ["0", " false ", "NO", "off", ""] {
+            assert!(!tier_flag_from_result("TEST_FLAG", Ok(value.into())).unwrap());
+        }
+        let error = tier_flag_from_result("TEST_FLAG", Ok("enabled".into()))
+            .expect_err("unknown flag values must fail");
+        assert!(error.contains("TEST_FLAG"), "{error}");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStringExt as _;
+
+            let error = tier_flag_from_result(
+                "TEST_FLAG",
+                Err(std::env::VarError::NotUnicode(OsString::from_vec(vec![
+                    b't', b'r', 0xff, b'u', b'e',
+                ]))),
+            )
+            .expect_err("non-Unicode flag values must fail");
+            assert!(error.contains("TEST_FLAG"), "{error}");
+            assert!(error.contains("not valid Unicode"), "{error}");
+        }
+    }
+
+    #[test]
+    fn bi_gemm_family_environment_accepts_only_semantic_family_names() {
+        assert_eq!(
+            bi_gemm_family_from_result(Err(std::env::VarError::NotPresent)).unwrap(),
+            BiGemmFamily::Triad
+        );
+        for value in ["", " \t\n", "triad", "  TrIaD\t"] {
+            assert_eq!(
+                bi_gemm_family_from_result(Ok(value.into())).unwrap(),
+                BiGemmFamily::Triad,
+                "{value:?}"
+            );
+        }
+        for value in ["fixed", "\nFiXeD "] {
+            assert_eq!(
+                bi_gemm_family_from_result(Ok(value.into())).unwrap(),
+                BiGemmFamily::Fixed,
+                "{value:?}"
+            );
+        }
+        for value in ["gemm_bi", "batch_invariant", "warptile", "wmma", "other"] {
+            let error = bi_gemm_family_from_result(Ok(value.into()))
+                .expect_err("legacy and unknown family names must fail");
+            assert!(error.contains("MAMBA_RS_BI_GEMM_FAMILY"), "{error}");
+            assert!(error.contains("only fixed or triad"), "{error}");
+        }
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStringExt as _;
+
+            let error = bi_gemm_family_from_result(Err(std::env::VarError::NotUnicode(
+                OsString::from_vec(vec![b't', b'r', 0xff, b'i', b'a', b'd']),
+            )))
+            .expect_err("non-Unicode family names must fail");
+            assert!(error.contains("MAMBA_RS_BI_GEMM_FAMILY"), "{error}");
+            assert!(error.contains("only fixed or triad"), "{error}");
+        }
     }
 }

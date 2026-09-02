@@ -28,11 +28,17 @@ name = "mamba-generate"
 path = "src/bin/generate.rs"
 required-features = ["cli"]
 
+[[bin]]
+name = "gemm-bi-tf32-qualification"
+path = "src/bin/gemm_bi_tf32_qualification.rs"
+required-features = ["cuda"]
+
 [features]
 default = []
 # half + bytemuck are needed by the cuda buffers (DtypedBuf bf16/f16 cast
 # helpers); they must be in scope for `cargo build --features cuda` alone.
 cuda = ["cudarc", "dep:half", "dep:bytemuck", "dep:sha2"]
+cuda-cublaslt-qualification = ["cuda", "cudarc/cublaslt"]
 # Distributed data-parallel over NCCL. The cudarc NCCL binding is pinned
 # to one wire version explicitly; the crate-and-libnccl pair must move
 # together (the same discipline as any native-library pair).
@@ -99,10 +105,23 @@ libc = "0.2"
 [dev-dependencies]
 tempfile = "3"
 
+[target.'cfg(unix)'.dev-dependencies]
+libc = "0.2"
+
 [dependencies.cudarc]
 # 0.19.9 floor: SyncOnDrop teardown gated behind is_managing_stream_
 # synchronization (PR 591) — the correct-drop story for our disabled
 # per-slice event tracking (the CUDA Graph capture prerequisite).
 version = "0.19.9"
 optional = true
-features = ["driver", "cublas", "nvrtc", "cuda-version-from-build-system"]
+default-features = false
+features = [
+    "std",
+    "cublas",
+    "curand",
+    "driver",
+    "runtime",
+    "nvrtc",
+    "fallback-dynamic-loading",
+    "cuda-version-from-build-system",
+]

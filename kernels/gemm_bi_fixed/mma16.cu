@@ -125,10 +125,10 @@
         }                                                                     \
     } while (0)
 
-#define DEFINE_GEMM_BI_NN_TC128(SUFFIX, T_ACT, FROM_F, MMA_T)                    \
+#define DEFINE_GEMM_BI_NN_TC128(SUFFIX, T_ACT, T_OUT, FROM_ACT, FROM_OUT, MMA_T) \
 extern "C" __global__ __launch_bounds__(256, 1)                                \
 void gemm_bi_nn_tc128_##SUFFIX(                                                  \
-    T_ACT* __restrict__ C,                                                     \
+    T_OUT* __restrict__ C,                                                     \
     const T_ACT* __restrict__ A,                                               \
     const T_ACT* __restrict__ B,                                               \
     const float* __restrict__ bias,                                            \
@@ -183,7 +183,7 @@ void gemm_bi_nn_tc128_##SUFFIX(                                                 
     if (fast_stage) {                                                          \
         GBF128_STAGE_ASYNC(0, 0);                                              \
     } else {                                                                   \
-        GBF128_STAGE_SCALAR(0, 0, T_ACT, FROM_F);                              \
+        GBF128_STAGE_SCALAR(0, 0, T_ACT, FROM_ACT);                            \
     }                                                                          \
     int read_buf = 0;                                                          \
     for (int kt = 0; kt < num_k_tiles; kt++) {                                 \
@@ -196,13 +196,13 @@ void gemm_bi_nn_tc128_##SUFFIX(                                                 
                 GBF128_STAGE_ASYNC(read_buf ^ 1, (kt + 1) * GBF128_BK);            \
             } else {                                                           \
                 GBF128_STAGE_SCALAR(read_buf ^ 1, (kt + 1) * GBF128_BK, T_ACT,     \
-                                    FROM_F);                                   \
+                                    FROM_ACT);                                 \
             }                                                                  \
         }                                                                      \
         unsigned As_rd = As_sbase + (unsigned)(read_buf * GBF128_BM * GBF128_LDA * 2); \
         unsigned Bs_rd = Bs_sbase + (unsigned)(read_buf * GBF128_BK * GBF128_LDB * 2); \
         _Pragma("unroll")                                                      \
-        for (int ks = 0; ks < (GBF128_BK / 16); ks++) {                            \
+        for (int ks = 0; ks < (GBF128_BK / 16); ks++) {                        \
             int k0 = ks * 16;                                                  \
             unsigned a_frag[4][4];                                             \
             unsigned b_frag[4][2];                                             \
@@ -210,7 +210,7 @@ void gemm_bi_nn_tc128_##SUFFIX(                                                 
             for (int fm = 0; fm < 4; fm++) {                                   \
                 int row = warpM + fm * 16 + lm_row_off + lm_r;                 \
                 unsigned addr = As_rd +                                        \
-                    (unsigned)((row * GBF128_LDA + k0 + lm_col_off) * 2);          \
+                    (unsigned)((row * GBF128_LDA + k0 + lm_col_off) * 2);       \
                 asm volatile(                                                  \
                     "ldmatrix.sync.aligned.m8n8.x4.shared.b16 "                \
                     "{%0,%1,%2,%3}, [%4];\n"                                   \
@@ -222,7 +222,7 @@ void gemm_bi_nn_tc128_##SUFFIX(                                                 
             for (int fn = 0; fn < 4; fn++) {                                   \
                 int row = k0 + lmb_row_off + lm_r;                             \
                 unsigned addr = Bs_rd +                                        \
-                    (unsigned)((row * GBF128_LDB + warpN + fn * 8) * 2);           \
+                    (unsigned)((row * GBF128_LDB + warpN + fn * 8) * 2);        \
                 asm volatile(                                                  \
                     "ldmatrix.sync.aligned.m8n8.x2.trans.shared.b16 "          \
                     "{%0,%1}, [%2];\n"                                         \
@@ -267,10 +267,11 @@ void gemm_bi_nn_tc128_##SUFFIX(                                                 
                 /* make the epilogue bits architecture-dependent.       */ \
                 float v0 = __fmul_rn(alpha, acc[fm][fn][2 * half]);                     \
                 float v1 = __fmul_rn(alpha, acc[fm][fn][2 * half + 1]);                 \
-                T_ACT* _dst = (c0 < N)                                        \
+                T_OUT* _dst = (c0 < N)                                        \
                     ? &C[(long long)gr * ldc + c0]                            \
-                    : (T_ACT*)0;                                              \
-                if (beta == 0.0f && (ldc & 1) == 0 && c0 + 1 < N &&           \
+                    : (T_OUT*)0;                                              \
+                if (sizeof(T_OUT) == 2 && beta == 0.0f && (ldc & 1) == 0 &&   \
+                    c0 + 1 < N &&                                              \
                     gbf_aligned4(_dst)) {                                     \
                     gbf_store_pair_rne(_dst, v0, v1);                         \
                 } else {                                                      \
@@ -280,7 +281,7 @@ void gemm_bi_nn_tc128_##SUFFIX(                                                 
                         float val = e ? v1 : v0;                              \
                         if (beta != 0.0f)                                     \
                             val = __fmaf_rn(beta, to_f(C[(long long)gr * ldc + gc]), val);  \
-                        C[(long long)gr * ldc + gc] = FROM_F(val);            \
+                        C[(long long)gr * ldc + gc] = FROM_OUT(val);          \
                     }                                                         \
                 }                                                             \
             }                                                                 \
@@ -288,8 +289,10 @@ void gemm_bi_nn_tc128_##SUFFIX(                                                 
     }                                                                         \
 }
 
-DEFINE_GEMM_BI_NN_TC128(bf16, __nv_bfloat16, from_f_bf16, "bf16")
-DEFINE_GEMM_BI_NN_TC128(f16,  __half,        from_f_f16,  "f16")
+DEFINE_GEMM_BI_NN_TC128(bf16, __nv_bfloat16, __nv_bfloat16, from_f_bf16, from_f_bf16, "bf16")
+DEFINE_GEMM_BI_NN_TC128(f16,  __half,        __half,        from_f_f16,  from_f_f16,  "f16")
+DEFINE_GEMM_BI_NN_TC128(f32out_bf16, __nv_bfloat16, float, from_f_bf16, from_f_f32, "bf16")
+DEFINE_GEMM_BI_NN_TC128(f32out_f16,  __half,        float, from_f_f16,  from_f_f32, "f16")
 
 // ============================================================================
 // GBF64: the 64x64 tensor-core tile.
@@ -392,10 +395,10 @@ DEFINE_GEMM_BI_NN_TC128(f16,  __half,        from_f_f16,  "f16")
         }                                                                     \
     } while (0)
 
-#define DEFINE_GEMM_BI_NN_TC64(SUFFIX, T_ACT, FROM_F, MMA_T)                  \
+#define DEFINE_GEMM_BI_NN_TC64(SUFFIX, T_ACT, T_OUT, FROM_ACT, FROM_OUT, MMA_T) \
 extern "C" __global__ __launch_bounds__(GBF64_THREADS, 1)                   \
 void gemm_bi_nn_tc64_##SUFFIX(                                                \
-    T_ACT* __restrict__ C,                                                     \
+    T_OUT* __restrict__ C,                                                     \
     const T_ACT* __restrict__ A,                                               \
     const T_ACT* __restrict__ B,                                               \
     const float* __restrict__ bias,                                            \
@@ -445,7 +448,7 @@ void gemm_bi_nn_tc64_##SUFFIX(                                                \
     if (fast_stage) {                                                          \
         GBF64_STAGE_ASYNC(0, 0);                                            \
     } else {                                                                   \
-        GBF64_STAGE_SCALAR(0, 0, T_ACT, FROM_F);                            \
+        GBF64_STAGE_SCALAR(0, 0, T_ACT, FROM_ACT);                          \
     }                                                                          \
     int read_buf = 0;                                                          \
     for (int kt = 0; kt < num_k_tiles; kt++) {                                 \
@@ -458,7 +461,7 @@ void gemm_bi_nn_tc64_##SUFFIX(                                                \
                 GBF64_STAGE_ASYNC(read_buf ^ 1, (kt + 1) * GBF64_BK);    \
             } else {                                                           \
                 GBF64_STAGE_SCALAR(read_buf ^ 1, (kt + 1) * GBF64_BK,    \
-                                      T_ACT, FROM_F);                          \
+                                      T_ACT, FROM_ACT);                        \
             }                                                                  \
         }                                                                      \
         unsigned As_rd =                                                       \
@@ -519,21 +522,36 @@ void gemm_bi_nn_tc64_##SUFFIX(                                                \
             int r0 = pid_m * GBF64_BM + warpM + fm * 16 + g;                \
             int c0 = pid_n * GBF64_BN + warpN + fn * 8 + 2 * t;             \
             _Pragma("unroll")                                                  \
-            for (int e = 0; e < 4; e++) {                                      \
-                int gr = r0 + (e >= 2 ? 8 : 0);                                \
-                int gc = c0 + (e & 1);                                         \
-                if (gr >= M || gc >= N) continue;                              \
-                float val = __fmul_rn(alpha, acc[fm][fn][e]);                            \
-                if (beta != 0.0f)                                              \
-                    val = __fmaf_rn(beta, to_f(C[(long long)gr * ldc + gc]), val);           \
-                C[(long long)gr * ldc + gc] = FROM_F(val);                     \
+            for (int half = 0; half < 2; half++) {                             \
+                int gr = r0 + (half ? 8 : 0);                                  \
+                if (gr >= M) continue;                                         \
+                float v0 = __fmul_rn(alpha, acc[fm][fn][2 * half]);             \
+                float v1 = __fmul_rn(alpha, acc[fm][fn][2 * half + 1]);         \
+                T_OUT* dst = (c0 < N)                                          \
+                    ? &C[(long long)gr * ldc + c0]                             \
+                    : (T_OUT*)0;                                               \
+                if (beta == 0.0f && (ldc & 1) == 0 && c0 + 1 < N &&            \
+                    gbf_aligned4(dst)) {                                       \
+                    gbf_store_pair_rne(dst, v0, v1);                           \
+                } else {                                                       \
+                    for (int e = 0; e < 2; e++) {                              \
+                        int gc = c0 + e;                                       \
+                        if (gc >= N) continue;                                 \
+                        float val = e ? v1 : v0;                               \
+                        if (beta != 0.0f)                                      \
+                            val = __fmaf_rn(beta, to_f(C[(long long)gr * ldc + gc]), val); \
+                        C[(long long)gr * ldc + gc] = FROM_OUT(val);           \
+                    }                                                          \
+                }                                                              \
             }                                                                  \
         }                                                                      \
     }                                                                          \
 }
 
-DEFINE_GEMM_BI_NN_TC64(bf16, __nv_bfloat16, from_f_bf16, "bf16")
-DEFINE_GEMM_BI_NN_TC64(f16,  __half,        from_f_f16,  "f16")
+DEFINE_GEMM_BI_NN_TC64(bf16, __nv_bfloat16, __nv_bfloat16, from_f_bf16, from_f_bf16, "bf16")
+DEFINE_GEMM_BI_NN_TC64(f16,  __half,        __half,        from_f_f16,  from_f_f16,  "f16")
+DEFINE_GEMM_BI_NN_TC64(f32out_bf16, __nv_bfloat16, float, from_f_bf16, from_f_f32, "bf16")
+DEFINE_GEMM_BI_NN_TC64(f32out_f16,  __half,        float, from_f_f16,  from_f_f32, "f16")
 // ── GBF16: the 16x32 thin tile (decode and narrow-N shapes) ──
 //
 // Same arithmetic contract as GBF64/GBF128 (ascending m16n8k16 K-slabs,
@@ -558,39 +576,44 @@ DEFINE_GEMM_BI_NN_TC64(f16,  __half,        from_f_f16,  "f16")
 #define GBF16_BK 64
 #define GBF16_THREADS 128
 #define GBF16_STAGES 4
-#define GBF16_LDA (GBF16_BK + 8) /* 72 halves = 144 B rows */
-#define GBF16_LDB (GBF16_BN + 8) /* 40 halves = 80 B rows, 20 words == 4 mod 8 */
+#define GBF16_ACH (GBF16_BK / 8)
+#define GBF16_BCH (GBF16_BN / 8)
+#define GBF16_A_STAGE_BYTES (GBF16_BM * GBF16_ACH * 16)
+#define GBF16_B_STAGE_BYTES (GBF16_BK * GBF16_BCH * 16)
+#define GBF16_SLOT(row, chunk, chunks) (((row) * (chunks) + (chunk)) ^ ((row) & 7))
 
 #define GBF16_STAGE_ASYNC(buf, bkIdx)                                      \
     do {                                                                      \
-        unsigned _as =                                                        \
-            As_sbase + (unsigned)((buf) * GBF16_BM * GBF16_LDA * 2);    \
-        unsigned _bs =                                                        \
-            Bs_sbase + (unsigned)((buf) * GBF16_BK * GBF16_LDB * 2);    \
-        for (int _i = threadIdx.x; _i < GBF16_BM * (GBF16_BK / 8);      \
+        unsigned _as = As_sbase + (unsigned)((buf) * GBF16_A_STAGE_BYTES);    \
+        unsigned _bs = Bs_sbase + (unsigned)((buf) * GBF16_B_STAGE_BYTES);    \
+        for (int _i = threadIdx.x; _i < GBF16_BM * GBF16_ACH;                 \
              _i += GBF16_THREADS) {                                        \
-            int _m = _i / (GBF16_BK / 8);                                  \
-            int _k = (_i % (GBF16_BK / 8)) * 8;                            \
+            int _m = _i / GBF16_ACH;                                         \
+            int _c = _i % GBF16_ACH;                                         \
+            int _k = _c * 8;                                                 \
             int _gr = pid_m * GBF16_BM + _m;                               \
             int _gc = (bkIdx) + _k;                                           \
             int _valid = (_gr < M) ? (K - _gc) : 0;                           \
             int _bytes = _valid >= 8 ? 16 : (_valid > 0 ? _valid * 2 : 0);    \
-            unsigned _dst = _as + (unsigned)((_m * GBF16_LDA + _k) * 2);   \
+            unsigned _dst = _as +                                            \
+                (unsigned)(GBF16_SLOT(_m, _c, GBF16_ACH) << 4);              \
             const void* _src = (_bytes > 0)                                   \
                 ? (const void*)&A[(long long)_gr * lda + _gc]                 \
                 : (const void*)A;                                             \
             asm volatile("cp.async.cg.shared.global [%0], [%1], 16, %2;\n"    \
                          :: "r"(_dst), "l"(_src), "r"(_bytes));               \
         }                                                                     \
-        for (int _i = threadIdx.x; _i < GBF16_BK * (GBF16_BN / 8);      \
+        for (int _i = threadIdx.x; _i < GBF16_BK * GBF16_BCH;                 \
              _i += GBF16_THREADS) {                                        \
-            int _k = _i / (GBF16_BN / 8);                                  \
-            int _n = (_i % (GBF16_BN / 8)) * 8;                            \
+            int _k = _i / GBF16_BCH;                                         \
+            int _c = _i % GBF16_BCH;                                         \
+            int _n = _c * 8;                                                 \
             int _gk = (bkIdx) + _k;                                           \
             int _gn = pid_n * GBF16_BN + _n;                               \
             int _valid = (_gk < K) ? (N - _gn) : 0;                           \
             int _bytes = _valid >= 8 ? 16 : (_valid > 0 ? _valid * 2 : 0);    \
-            unsigned _dst = _bs + (unsigned)((_k * GBF16_LDB + _n) * 2);   \
+            unsigned _dst = _bs +                                            \
+                (unsigned)(GBF16_SLOT(_k, _c, GBF16_BCH) << 4);              \
             const void* _src = (_bytes > 0)                                   \
                 ? (const void*)&B[(long long)_gk * ldb + _gn]                 \
                 : (const void*)B;                                             \
@@ -602,17 +625,19 @@ DEFINE_GEMM_BI_NN_TC64(f16,  __half,        from_f_f16,  "f16")
 
 #define GBF16_STAGE_SCALAR(buf, bkIdx, TT, FF)                             \
     do {                                                                      \
-        TT* _Asw = &As[buf][0][0];                                            \
-        TT* _Bsw = &Bs[buf][0][0];                                            \
+        unsigned char* _Asw = As_bytes + (buf) * GBF16_A_STAGE_BYTES;         \
+        unsigned char* _Bsw = Bs_bytes + (buf) * GBF16_B_STAGE_BYTES;         \
         for (int _i = threadIdx.x; _i < GBF16_BM * GBF16_BK;            \
              _i += GBF16_THREADS) {                                        \
             int _m = _i / GBF16_BK;                                        \
             int _k = _i % GBF16_BK;                                        \
             int _gr = pid_m * GBF16_BM + _m;                               \
             int _gc = (bkIdx) + _k;                                           \
-            _Asw[_m * GBF16_LDA + _k] = (_gr < M && _gc < K)               \
-                                               ? A[(long long)_gr * lda + _gc]\
-                                               : FF(0.0f);                    \
+            *reinterpret_cast<TT*>(                                           \
+                _Asw + (GBF16_SLOT(_m, _k >> 3, GBF16_ACH) << 4) +            \
+                (_k & 7) * 2) = (_gr < M && _gc < K)                          \
+                                      ? A[(long long)_gr * lda + _gc]         \
+                                      : FF(0.0f);                             \
         }                                                                     \
         for (int _i = threadIdx.x; _i < GBF16_BK * GBF16_BN;            \
              _i += GBF16_THREADS) {                                        \
@@ -620,16 +645,18 @@ DEFINE_GEMM_BI_NN_TC64(f16,  __half,        from_f_f16,  "f16")
             int _n = _i % GBF16_BN;                                        \
             int _gk = (bkIdx) + _k;                                           \
             int _gn = pid_n * GBF16_BN + _n;                               \
-            _Bsw[_k * GBF16_LDB + _n] = (_gk < K && _gn < N)               \
-                                               ? B[(long long)_gk * ldb + _gn]\
-                                               : FF(0.0f);                    \
+            *reinterpret_cast<TT*>(                                           \
+                _Bsw + (GBF16_SLOT(_k, _n >> 3, GBF16_BCH) << 4) +            \
+                (_n & 7) * 2) = (_gk < K && _gn < N)                          \
+                                      ? B[(long long)_gk * ldb + _gn]         \
+                                      : FF(0.0f);                             \
         }                                                                     \
     } while (0)
 
-#define DEFINE_GEMM_BI_NN_TC16(SUFFIX, T_ACT, FROM_F, MMA_T)                  \
+#define DEFINE_GEMM_BI_NN_TC16(SUFFIX, T_ACT, T_OUT, FROM_ACT, FROM_OUT, MMA_T) \
 extern "C" __global__ __launch_bounds__(GBF16_THREADS, 3)                   \
 void gemm_bi_nn_tc16_##SUFFIX(                                                \
-    T_ACT* __restrict__ C,                                                     \
+    T_OUT* __restrict__ C,                                                     \
     const T_ACT* __restrict__ A,                                               \
     const T_ACT* __restrict__ B,                                               \
     const float* __restrict__ bias,                                            \
@@ -638,10 +665,10 @@ void gemm_bi_nn_tc16_##SUFFIX(                                                \
     int lda, int ldb, int ldc                                                  \
 ) {                                                                            \
     assert(alpha == 1.0f || bias == nullptr);                                  \
-    __shared__ __align__(16)                                                   \
-        T_ACT As[GBF16_STAGES][GBF16_BM][GBF16_LDA];                  \
-    __shared__ __align__(16)                                                   \
-        T_ACT Bs[GBF16_STAGES][GBF16_BK][GBF16_LDB];                  \
+    __shared__ __align__(16) unsigned char gbf16_smem[                        \
+        GBF16_STAGES * (GBF16_A_STAGE_BYTES + GBF16_B_STAGE_BYTES)];          \
+    unsigned char* As_bytes = gbf16_smem;                                     \
+    unsigned char* Bs_bytes = gbf16_smem + GBF16_STAGES * GBF16_A_STAGE_BYTES;\
     int num_pid_n = (N + GBF16_BN - 1) / GBF16_BN;                       \
     int pid_m = blockIdx.x / num_pid_n;                                        \
     int pid_n = blockIdx.x % num_pid_n;                                        \
@@ -655,8 +682,8 @@ void gemm_bi_nn_tc16_##SUFFIX(                                                \
     int lm_row_off = (lm_q & 1) ? 8 : 0;                                       \
     int lm_col_off = (lm_q & 2) ? 8 : 0;                                       \
     int lmb_row_off = (lm_q & 1) ? 8 : 0;                                      \
-    unsigned As_sbase = (unsigned)__cvta_generic_to_shared(&As[0][0][0]);      \
-    unsigned Bs_sbase = (unsigned)__cvta_generic_to_shared(&Bs[0][0][0]);      \
+    unsigned As_sbase = (unsigned)__cvta_generic_to_shared(As_bytes);          \
+    unsigned Bs_sbase = (unsigned)__cvta_generic_to_shared(Bs_bytes);          \
     bool fast_stage = ((lda & 7) == 0) && ((ldb & 7) == 0) &&                  \
                       gbf_aligned16(A) && gbf_aligned16(B);                    \
     float acc[4];                                                              \
@@ -679,7 +706,7 @@ void gemm_bi_nn_tc16_##SUFFIX(                                                \
             if (fast_stage) {                                                  \
                 GBF16_STAGE_ASYNC(p, p * GBF16_BK);                      \
             } else {                                                           \
-                GBF16_STAGE_SCALAR(p, p * GBF16_BK, T_ACT, FROM_F);      \
+                GBF16_STAGE_SCALAR(p, p * GBF16_BK, T_ACT, FROM_ACT);    \
                 asm volatile("cp.async.commit_group;\n");                     \
             }                                                                  \
         } else {                                                               \
@@ -697,17 +724,15 @@ void gemm_bi_nn_tc16_##SUFFIX(                                                \
                 GBF16_STAGE_ASYNC(wbuf, next * GBF16_BK);                \
             } else {                                                           \
                 GBF16_STAGE_SCALAR(wbuf, next * GBF16_BK, T_ACT,         \
-                                      FROM_F);                                 \
+                                      FROM_ACT);                               \
                 asm volatile("cp.async.commit_group;\n");                     \
             }                                                                  \
         } else {                                                               \
             asm volatile("cp.async.commit_group;\n");                         \
         }                                                                      \
         int rbuf = kt % GBF16_STAGES;                                       \
-        unsigned As_rd =                                                       \
-            As_sbase + (unsigned)(rbuf * GBF16_BM * GBF16_LDA * 2);      \
-        unsigned Bs_rd =                                                       \
-            Bs_sbase + (unsigned)(rbuf * GBF16_BK * GBF16_LDB * 2);      \
+        unsigned As_rd = As_sbase + (unsigned)(rbuf * GBF16_A_STAGE_BYTES);    \
+        unsigned Bs_rd = Bs_sbase + (unsigned)(rbuf * GBF16_B_STAGE_BYTES);    \
         _Pragma("unroll")                                                      \
         for (int ks = 0; ks < (GBF16_BK / 16); ks++) {                      \
             int k0 = ks * 16;                                                  \
@@ -715,8 +740,9 @@ void gemm_bi_nn_tc16_##SUFFIX(                                                \
             unsigned b_frag[2];                                                \
             {                                                                  \
                 int row = lm_row_off + lm_r;                                   \
-                unsigned addr = As_rd +                                        \
-                    (unsigned)((row * GBF16_LDA + k0 + lm_col_off) * 2);    \
+                int chunk = (k0 + lm_col_off) >> 3;                           \
+                unsigned addr = As_rd +                                       \
+                    (unsigned)(GBF16_SLOT(row, chunk, GBF16_ACH) << 4);        \
                 asm volatile(                                                  \
                     "ldmatrix.sync.aligned.m8n8.x4.shared.b16 "                \
                     "{%0,%1,%2,%3}, [%4];\n"                                  \
@@ -726,8 +752,9 @@ void gemm_bi_nn_tc16_##SUFFIX(                                                \
             }                                                                  \
             {                                                                  \
                 int row = k0 + lmb_row_off + lm_r;                             \
-                unsigned addr = Bs_rd +                                        \
-                    (unsigned)((row * GBF16_LDB + warpN) * 2);              \
+                int chunk = warpN >> 3;                                       \
+                unsigned addr = Bs_rd +                                       \
+                    (unsigned)(GBF16_SLOT(row, chunk, GBF16_BCH) << 4);        \
                 asm volatile(                                                  \
                     "ldmatrix.sync.aligned.m8n8.x2.trans.shared.b16 "          \
                     "{%0,%1}, [%2];\n"                                        \
@@ -749,20 +776,35 @@ void gemm_bi_nn_tc16_##SUFFIX(                                                \
         int r0 = pid_m * GBF16_BM + g;                                      \
         int c0 = pid_n * GBF16_BN + warpN + 2 * t;                          \
         _Pragma("unroll")                                                      \
-        for (int e = 0; e < 4; e++) {                                          \
-            int gr = r0 + (e >= 2 ? 8 : 0);                                    \
-            int gc = c0 + (e & 1);                                             \
-            if (gr >= M || gc >= N) continue;                                  \
-            float val = __fmul_rn(alpha, acc[e]);                                        \
-            if (beta != 0.0f)                                                  \
-                val = __fmaf_rn(beta, to_f(C[(long long)gr * ldc + gc]), val);               \
-            C[(long long)gr * ldc + gc] = FROM_F(val);                         \
+        for (int half = 0; half < 2; half++) {                                 \
+            int gr = r0 + (half ? 8 : 0);                                      \
+            if (gr >= M) continue;                                             \
+            float v0 = __fmul_rn(alpha, acc[2 * half]);                        \
+            float v1 = __fmul_rn(alpha, acc[2 * half + 1]);                    \
+            T_OUT* dst = (c0 < N)                                              \
+                ? &C[(long long)gr * ldc + c0]                                 \
+                : (T_OUT*)0;                                                   \
+            if (beta == 0.0f && (ldc & 1) == 0 && c0 + 1 < N &&                \
+                gbf_aligned4(dst)) {                                           \
+                gbf_store_pair_rne(dst, v0, v1);                               \
+            } else {                                                           \
+                for (int e = 0; e < 2; e++) {                                  \
+                    int gc = c0 + e;                                           \
+                    if (gc >= N) continue;                                     \
+                    float val = e ? v1 : v0;                                   \
+                    if (beta != 0.0f)                                          \
+                        val = __fmaf_rn(beta, to_f(C[(long long)gr * ldc + gc]), val); \
+                    C[(long long)gr * ldc + gc] = FROM_OUT(val);               \
+                }                                                              \
+            }                                                                  \
         }                                                                      \
     }                                                                          \
 }
 
-DEFINE_GEMM_BI_NN_TC16(bf16, __nv_bfloat16, from_f_bf16, "bf16")
-DEFINE_GEMM_BI_NN_TC16(f16,  __half,        from_f_f16,  "f16")
+DEFINE_GEMM_BI_NN_TC16(bf16, __nv_bfloat16, __nv_bfloat16, from_f_bf16, from_f_bf16, "bf16")
+DEFINE_GEMM_BI_NN_TC16(f16,  __half,        __half,        from_f_f16,  from_f_f16,  "f16")
+DEFINE_GEMM_BI_NN_TC16(f32out_bf16, __nv_bfloat16, float, from_f_bf16, from_f_f32, "bf16")
+DEFINE_GEMM_BI_NN_TC16(f32out_f16,  __half,        float, from_f_f16,  from_f_f32, "f16")
 
 // GBF hygiene: everything section-local above is undefined so nothing can
 // leak into gemm_bi_triad.cu, which concatenates AFTER this file.
@@ -790,8 +832,11 @@ DEFINE_GEMM_BI_NN_TC16(f16,  __half,        from_f_f16,  "f16")
 #undef GBF16_BK
 #undef GBF16_THREADS
 #undef GBF16_STAGES
-#undef GBF16_LDA
-#undef GBF16_LDB
+#undef GBF16_ACH
+#undef GBF16_BCH
+#undef GBF16_A_STAGE_BYTES
+#undef GBF16_B_STAGE_BYTES
+#undef GBF16_SLOT
 #undef GBF16_STAGE_ASYNC
 #undef GBF16_STAGE_SCALAR
 #undef DEFINE_GEMM_BI_NN_TC16

@@ -59,6 +59,36 @@ impl HalfKernel {
     }
 }
 
+/// Standalone deterministic TF32 NN-forward tiles owned by the inference
+/// module. No training layout is compiled into this holder.
+pub struct FixedTf32Kernels {
+    pub m128n64_s2: CudaFunction,
+    pub m128n64_s3: CudaFunction,
+    pub m64n64_s2: CudaFunction,
+    pub m64n64_s3: CudaFunction,
+    pub m16n32_s4: CudaFunction,
+}
+
+/// SM120 TMA TF32 NN-forward tiles owned by the inference module.
+pub struct FixedSm120Tf32Kernels {
+    pub m128n64_s2: CudaFunction,
+    pub m128n64_s3: CudaFunction,
+    pub m64n128_s2: CudaFunction,
+    pub m64n128_s3: CudaFunction,
+    pub m64n64_s2_producer_warp: CudaFunction,
+    pub m64n64_s2: CudaFunction,
+    pub(crate) m64n64_s2_pair_store: CudaFunction,
+}
+
+/// Qualified SM120 TMA half-precision NN-forward tiles.
+pub struct FixedSm120HalfKernels {
+    pub m64n64_bk64_s2: HalfKernel,
+    pub m64n128_bk64_s2: HalfKernel,
+    pub m128n64_bk32_s3: HalfKernel,
+    pub m128n128_bk32_s2: HalfKernel,
+    pub m128n128_bk32_s3: HalfKernel,
+}
+
 /// All compiled CUDA kernels needed for Mamba forward/backward.
 ///
 /// Kernels are compiled once via NVRTC at startup. Grouped by pipeline stage.
@@ -88,7 +118,7 @@ pub struct MambaKernels {
     /// Fused dB+dC reduction `[B*T*d_state]` each, `=`-store (no memset
     /// precondition); .get(dtype) picks the input promotion variant.
     pub ssm_reduce_d_bc_typed: TypedKernel,
-    /// T-major twin for the PARALLEL route's [b][n][d][t] locals (tape
+    /// T-major twin for the PARALLEL route's `[b][n][d][t]` locals (tape
     /// layout). Same ascending-d sum, same output values and layout.
     pub ssm_reduce_d_bc_tmajor_typed: TypedKernel,
     /// Reduce local SSM grads to dD `[d_inner]`.
@@ -151,7 +181,7 @@ pub struct MambaKernels {
     pub gather_cols: CudaFunction,
     /// Gather B and C columns from xdbl output.
     pub gather_bc_cols: CudaFunction,
-    /// T-major twin ([b][n][t] outputs) for the parallel-scan route —
+    /// T-major twin (`[b][n][t]` outputs) for the parallel-scan route —
     /// the scan reads B/C per (d, n) lane over consecutive t.
     pub gather_bc_cols_tmajor: CudaFunction,
     /// Staged-write twin of the t-major gather: smem transpose tile, writes
@@ -255,7 +285,7 @@ pub struct MambaKernels {
     pub gate_mul_silu_typed: TypedKernel,
     /// 16-byte vectorized twins of the hot elementwise kernels: one uint4
     /// per operand per thread, same per-element arithmetic in the same
-    /// order. Selected by [`vec8_ok`] when the shape and every operand
+    /// order. Selected by `vec8_ok` when the shape and every operand
     /// pointer allow it.
     pub gate_mul_silu_v_typed: TypedKernel,
     pub elementwise_mul_v_typed: TypedKernel,
@@ -384,9 +414,20 @@ pub struct MambaKernels {
     pub gemm_bi_bf16_f32: CudaFunction,
     /// Batch-invariant GEMM f16×f16→f32. Tensor Cores via WMMA.
     pub gemm_bi_f16_f32: CudaFunction,
-    /// Batch-invariant GEMM f32×f32→f32. CUDA-core path (Tensor Cores
-    /// require fp16/bf16/tf32 inputs; tf32 would lose 13 mantissa bits).
+    /// Former exact-f32 CUDA-core route retained as the qualification oracle.
     pub gemm_bi_f32_f32: CudaFunction,
+    /// Portable exact-f32 64x64 two-stage route and AUTO fallback.
+    pub gemm_bi_f32_f32_s2: CudaFunction,
+    /// Exact-f32 64x128 route for the measured A/B AUTO points and forced tests.
+    pub gemm_bi_f32_f32_n128_s2: CudaFunction,
+    /// Deterministic TF32 NN-forward tile ladder owned by Fixed/inference.
+    pub gemm_bi_nn_tf32: FixedTf32Kernels,
+    /// SM120 TMA counterpart of the deterministic inference TF32 ladder.
+    pub gemm_bi_nn_tf32_sm120: Option<FixedSm120Tf32Kernels>,
+    /// SM120 TMA BF16/F16 inference candidates.
+    pub gemm_bi_nn_half_sm120: Option<FixedSm120HalfKernels>,
+    /// SM120 TMA BF16/F16-input, F32-output inference candidates.
+    pub gemm_bi_nn_half_sm120_f32out: Option<FixedSm120HalfKernels>,
 
     // -- Batch-invariant matvec (M=1 specialization) --
     /// Specialized M=1 matvec. The GEMM kernels above waste 98% of smem
@@ -405,6 +446,10 @@ pub struct MambaKernels {
     /// GBF namespace): bit-identical copies of the forward TC tiles,
     /// owned by the inference kernel.
     pub gemm_bi_nn_tc128_typed: HalfKernel,
+    /// Portable ladder variants retaining the tensor-core accumulator in f32 at store.
+    pub gemm_bi_nn_tc128_f32out: HalfKernel,
+    pub gemm_bi_nn_tc64_f32out: HalfKernel,
+    pub gemm_bi_nn_tc16_f32out: HalfKernel,
     pub gemm_bi_nn_tc64_typed: HalfKernel,
     pub gemm_bi_nn_tc16_typed: HalfKernel,
     /// Fragment-reuse 128x128 rung with 64x64 warp tiles.
@@ -550,18 +595,15 @@ impl MambaKernels {
                 ("sm_100a", Some(device_cc @ (10, 0))) | ("sm_103a", Some(device_cc @ (10, 3))) => {
                     super::gemm_bi_triad::modules::compile_sm100_optional(ctx, state_cap, device_cc)
                 }
+                ("sm_110", Some(device_cc @ (11, 0))) => {
+                    super::gemm_bi_triad::modules::compile_sm100_optional(ctx, state_cap, device_cc)
+                }
                 _ => None,
             };
             (fixed, scalar, sm80, specialized)
         };
         let compiler_identity = fixed.compiler_identity;
-        let triad = GemmBiKernels::load(
-            ctx.cu_ctx() as usize,
-            fixed.artifact_identity,
-            scalar,
-            sm80,
-            specialized,
-        )?;
+        let triad = GemmBiKernels::load(ctx, fixed.artifact_identity, scalar, sm80, specialized)?;
         let module = fixed.module;
 
         let get = |name: &str| -> Result<CudaFunction, String> {
@@ -596,6 +638,44 @@ impl MambaKernels {
                 .map_err(|e| format!("set MAX_DYNAMIC_SHARED for {base}: {e:?}"))?;
             }
             Ok(k)
+        };
+        let load_sm120_half = |suffix: &str| -> Result<FixedSm120HalfKernels, String> {
+            let kernels = FixedSm120HalfKernels {
+                m64n64_bk64_s2: load_half(&format!("gemm_bi_nn_sm120_tma_64x64_bk64_s2{suffix}"))?,
+                m64n128_bk64_s2: load_half(&format!(
+                    "gemm_bi_nn_sm120_tma_64x128_bk64_s2{suffix}"
+                ))?,
+                m128n64_bk32_s3: load_half(&format!(
+                    "gemm_bi_nn_sm120_tma_128x64_bk32_s3{suffix}"
+                ))?,
+                m128n128_bk32_s2: load_half(&format!(
+                    "gemm_bi_nn_sm120_tma_128x128_bk32_s2{suffix}"
+                ))?,
+                m128n128_bk32_s3: load_half(&format!(
+                    "gemm_bi_nn_sm120_tma_128x128_bk32_s3{suffix}"
+                ))?,
+            };
+            for (tile, bytes) in [
+                (&kernels.m64n64_bk64_s2, 32_896),
+                (&kernels.m64n128_bk64_s2, 49_280),
+                (&kernels.m128n64_bk32_s3, 36_992),
+                (&kernels.m128n128_bk32_s2, 32_896),
+                (&kernels.m128n128_bk32_s3, 49_280),
+            ] {
+                for function in [&tile.bf16, &tile.f16] {
+                    function
+                        .set_attribute(
+                            cudarc::driver::sys::CUfunction_attribute_enum::CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
+                            bytes,
+                        )
+                        .map_err(|error| {
+                            format!(
+                                "set MAX_DYNAMIC_SHARED for Fixed SM120 half{suffix}: {error:?}"
+                            )
+                        })?;
+                }
+            }
+            Ok(kernels)
         };
 
         Ok(Self {
@@ -728,6 +808,89 @@ impl MambaKernels {
             gemm_bi_bf16_f32: get("gemm_bi_bf16_f32")?,
             gemm_bi_f16_f32: get("gemm_bi_f16_f32")?,
             gemm_bi_f32_f32: get("gemm_bi_f32_f32")?,
+            gemm_bi_f32_f32_s2: get("gemm_bi_f32_f32_s2")?,
+            gemm_bi_f32_f32_n128_s2: get("gemm_bi_f32_f32_n128_s2")?,
+            gemm_bi_nn_tf32: {
+                let kernels = FixedTf32Kernels {
+                    m128n64_s2: get("gemm_bi_nn_tf32_v1_m128n64_bk32_s2")?,
+                    m128n64_s3: get("gemm_bi_nn_tf32_v1_m128n64_bk32_s3")?,
+                    m64n64_s2: get("gemm_bi_nn_tf32_v1_m64n64_bk32_s2")?,
+                    m64n64_s3: get("gemm_bi_nn_tf32_v1_m64n64_bk32_s3")?,
+                    m16n32_s4: get("gemm_bi_nn_tf32_v1_m16n32_bk32_s4")?,
+                };
+                for (function, bytes) in [
+                    (&kernels.m128n64_s2, 55_296),
+                    (&kernels.m128n64_s3, 82_944),
+                    (&kernels.m64n64_s2, 32_768),
+                    (&kernels.m64n64_s3, 55_296),
+                    (&kernels.m16n32_s4, 29_696),
+                ] {
+                    function
+                        .set_attribute(
+                            cudarc::driver::sys::CUfunction_attribute_enum::CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
+                            bytes,
+                        )
+                        .map_err(|error| {
+                            format!("set MAX_DYNAMIC_SHARED for Fixed TF32: {error:?}")
+                        })?;
+                }
+                kernels
+            },
+            gemm_bi_nn_tf32_sm120: if matches!(
+                arch,
+                "sm_120" | "sm_121" | "compute_120" | "compute_121"
+            ) {
+                let kernels = FixedSm120Tf32Kernels {
+                    m128n64_s2: get("gemm_bi_nn_sm120_tma_tf32_v1_m128n64_bk32_s2")?,
+                    m128n64_s3: get("gemm_bi_nn_sm120_tma_tf32_v1_m128n64_bk32_s3")?,
+                    m64n128_s2: get("gemm_bi_nn_sm120_tma_tf32_v1_m64n128_bk32_s2")?,
+                    m64n128_s3: get("gemm_bi_nn_sm120_tma_tf32_v1_m64n128_bk32_s3")?,
+                    m64n64_s2_producer_warp: get(
+                        "gemm_bi_nn_sm120_tma_tf32_v1_m64n64_bk32_s2_producer_warp",
+                    )?,
+                    m64n64_s2: get("gemm_bi_nn_sm120_tma_tf32_v1_m64n64_bk32_s2")?,
+                    m64n64_s2_pair_store: get(
+                        "gemm_bi_nn_sm120_tma_tf32_v1_m64n64_bk32_s2_pair_store",
+                    )?,
+                };
+                for (function, bytes) in [
+                    (&kernels.m128n64_s2, 49_280),
+                    (&kernels.m128n64_s3, 73_856),
+                    (&kernels.m64n128_s2, 49_280),
+                    (&kernels.m64n128_s3, 73_856),
+                    (&kernels.m64n64_s2_producer_warp, 32_896),
+                    (&kernels.m64n64_s2, 32_896),
+                    (&kernels.m64n64_s2_pair_store, 32_896),
+                ] {
+                    function
+                        .set_attribute(
+                            cudarc::driver::sys::CUfunction_attribute_enum::CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
+                            bytes,
+                        )
+                        .map_err(|error| {
+                            format!("set MAX_DYNAMIC_SHARED for Fixed SM120 TF32: {error:?}")
+                        })?;
+                }
+                Some(kernels)
+            } else {
+                None
+            },
+            gemm_bi_nn_half_sm120: if matches!(
+                arch,
+                "sm_120" | "sm_121" | "compute_120" | "compute_121"
+            ) {
+                Some(load_sm120_half("")?)
+            } else {
+                None
+            },
+            gemm_bi_nn_half_sm120_f32out: if matches!(
+                arch,
+                "sm_120" | "sm_121" | "compute_120" | "compute_121"
+            ) {
+                Some(load_sm120_half("_f32out")?)
+            } else {
+                None
+            },
 
             // Batch-invariant matvec (M=1 specialization)
             matvec_bi_bf16_bf16: get("matvec_bi_bf16_bf16")?,
@@ -791,6 +954,9 @@ impl MambaKernels {
             residual_add_f32_typed: load_half("residual_add_f32")?,
 
             gemm_bi_nn_tc128_typed: load_half_dynsmem("gemm_bi_nn_tc128", 71_680)?,
+            gemm_bi_nn_tc128_f32out: load_half_dynsmem("gemm_bi_nn_tc128_f32out", 71_680)?,
+            gemm_bi_nn_tc64_f32out: load_half("gemm_bi_nn_tc64_f32out")?,
+            gemm_bi_nn_tc16_f32out: load_half("gemm_bi_nn_tc16_f32out")?,
             gemm_bi_nn_tc64_typed: load_half("gemm_bi_nn_tc64")?,
             gemm_bi_nn_tc16_typed: load_half("gemm_bi_nn_tc16")?,
             gemm_bi_nn_tcw64_typed: load_half_dynsmem("gemm_bi_nn_tcw64", 65_536)?,
@@ -831,6 +997,30 @@ impl MambaKernels {
         self.triad.artifact_set_identity()
     }
 
+    pub fn f32_triad_availability(&self) -> super::gemm_bi_triad::F32TriadAvailability {
+        self.triad.f32_triad_availability()
+    }
+
+    pub fn triad_scalar_compiler_identity(&self) -> super::kernel_identity::CompilerIdentity {
+        self.triad.scalar_compiler_identity()
+    }
+
+    pub(crate) fn triad_scalar_compute_capability(&self) -> (u32, u32) {
+        self.triad.compute_capability()
+    }
+
+    pub(crate) fn triad_sm80_compiler_identity(&self) -> super::kernel_identity::CompilerIdentity {
+        self.triad.sm80_compiler_identity()
+    }
+
+    pub(crate) fn tf32_function(&self, symbol: &str) -> Option<&CudaFunction> {
+        self.triad.tf32_function(symbol)
+    }
+
+    pub(crate) fn triad_kernels(&self) -> &GemmBiKernels {
+        &self.triad
+    }
+
     /// The Split-K/Split-M partial scratch (8M f32 = 32 MB), allocated on
     /// first batch-invariant use. Zero-initialized like the old eager
     /// alloc; the partial kernels overwrite their region before the
@@ -842,7 +1032,7 @@ impl MambaKernels {
         self.triad.splitk_scratch_buf(stream)
     }
 
-    /// The W-transpose staging scratch (4M f32 = 16 MB), allocated on
+    /// The W-transpose staging scratch (4,718,592 f32 = 18 MiB), allocated on
     /// first batch-invariant bwd_dx wide-path use.
     pub fn transpose_scratch_buf(
         &self,

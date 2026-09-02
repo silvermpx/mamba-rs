@@ -27,7 +27,7 @@ use mamba_rs::mamba_ssm::gpu::context::GpuCtx;
 use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
 use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
 use mamba_rs::mamba_ssm::gpu::gemm_bi_triad::{
-    TcFwdOperands, TcTile, sgemm_bi_forward_tc_with_tile,
+    TcFwdOperands, TcTile, gemm_bi_forward_tc_with_tile,
 };
 
 const RATE_SRC: &str = r#"
@@ -197,7 +197,8 @@ fn denominator_probe() {
             "mma_rate",
             name,
             &format!("{tflops:.1}"),
-        );
+        )
+        .expect("acceptance evidence");
         rates.push((name, tflops));
     }
     let f32acc = rates[0].1.max(rates[1].1);
@@ -256,7 +257,7 @@ fn denominator_probe() {
             best
         };
         let t128 = time_us(&|| {
-            sgemm_bi_forward_tc_with_tile(
+            gemm_bi_forward_tc_with_tile(
                 st,
                 &ctx.kernels,
                 &TcFwdOperands {
@@ -297,7 +298,8 @@ fn denominator_probe() {
                 arm,
                 &format!("M{m}K{k}N{n}"),
                 &format!("{:.1}", tf(t)),
-            );
+            )
+            .expect("acceptance evidence");
         }
     }
 }

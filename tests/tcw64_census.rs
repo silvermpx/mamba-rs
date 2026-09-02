@@ -287,7 +287,8 @@ fn tcwn64_promotion_grid() {
                     "promotion",
                     &format!("M{m}K{k}N{n}"),
                     verdict,
-                );
+                )
+                .expect("acceptance evidence");
                 if verdict == "WIN" {
                     wins.push((m, k, n));
                 }

@@ -32,6 +32,8 @@ static_assert(sizeof(Sm100KernelParams) == 40,
               "SM100 kernel parameter size changed");
 static_assert(alignof(Sm100KernelParams) == 4,
               "SM100 kernel parameter alignment changed");
+static_assert(__is_standard_layout(Sm100KernelParams),
+              "SM100 kernel parameters must remain standard layout");
 // Ten ordered 4-byte fields in 40 bytes leave no internal or tail padding.
 static_assert(sizeof(((Sm100KernelParams*)0)->a_x) == 4,
               "SM100 A x origin size changed");
@@ -53,19 +55,6 @@ static_assert(sizeof(((Sm100KernelParams*)0)->n) == 4,
               "SM100 N size changed");
 static_assert(sizeof(((Sm100KernelParams*)0)->ldc) == 4,
               "SM100 output stride size changed");
-#if !defined(__CUDACC_RTC__)
-static_assert(offsetof(Sm100KernelParams, a_x) == 0, "a_x offset");
-static_assert(offsetof(Sm100KernelParams, a_y) == 4, "a_y offset");
-static_assert(offsetof(Sm100KernelParams, b_x) == 8, "b_x offset");
-static_assert(offsetof(Sm100KernelParams, b_y) == 12, "b_y offset");
-static_assert(offsetof(Sm100KernelParams, alpha) == 16, "alpha offset");
-static_assert(offsetof(Sm100KernelParams, beta) == 20, "beta offset");
-static_assert(offsetof(Sm100KernelParams, m) == 24, "m offset");
-static_assert(offsetof(Sm100KernelParams, k) == 28, "k offset");
-static_assert(offsetof(Sm100KernelParams, n) == 32, "n offset");
-static_assert(offsetof(Sm100KernelParams, ldc) == 36, "ldc offset");
-#endif
-
 enum Sm100Op {
     Sm100Nn = 0,
     Sm100Tn = 1,
@@ -450,7 +439,7 @@ static __device__ __forceinline__ void sm100_store_pair(
             v1 = __fmaf_rn(beta, to_f(destination[1]), v1);
         }
         if ((reinterpret_cast<unsigned long long>(destination) & 3ULL) == 0) {
-            sgb_store_pair_rne(destination, v0, v1);
+            gemm_bi_store_pair_rne(destination, v0, v1);
         } else {
             destination[0] = sm100_from_float<T>(v0);
             destination[1] = sm100_from_float<T>(v1);
@@ -704,80 +693,80 @@ void NAME(void* output, const __grid_constant__ CUtensorMap a_map,             \
         output, a_map, b_map, bias, params);                                   \
 }
 
-SM100_DEFINE_KERNEL(sgemm_bi_nn_sm100_tcgen_m128n64_bk64_s2_c4_bf16, __nv_bfloat16, Sm100Nn, 64, 2, false, 128)
-SM100_DEFINE_KERNEL(sgemm_bi_nn_sm100_tcgen_m128n64_bk64_s2_c4_f16, __half, Sm100Nn, 64, 2, false, 128)
-SM100_DEFINE_KERNEL(sgemm_bi_nn_sm100_tcgen_m128n64_bk64_s2_p8_bf16, __nv_bfloat16, Sm100Nn, 64, 2, true, 256)
-SM100_DEFINE_KERNEL(sgemm_bi_nn_sm100_tcgen_m128n64_bk64_s2_p8_f16, __half, Sm100Nn, 64, 2, true, 256)
-SM100_DEFINE_KERNEL(sgemm_bi_nn_sm100_tcgen_m128n64_bk64_s3_c4_bf16, __nv_bfloat16, Sm100Nn, 64, 3, false, 128)
-SM100_DEFINE_KERNEL(sgemm_bi_nn_sm100_tcgen_m128n64_bk64_s3_c4_f16, __half, Sm100Nn, 64, 3, false, 128)
-SM100_DEFINE_KERNEL(sgemm_bi_nn_sm100_tcgen_m128n64_bk64_s3_p8_bf16, __nv_bfloat16, Sm100Nn, 64, 3, true, 256)
-SM100_DEFINE_KERNEL(sgemm_bi_nn_sm100_tcgen_m128n64_bk64_s3_p8_f16, __half, Sm100Nn, 64, 3, true, 256)
-SM100_DEFINE_KERNEL(sgemm_bi_nn_sm100_tcgen_m128n64_bk64_s4_c4_bf16, __nv_bfloat16, Sm100Nn, 64, 4, false, 128)
-SM100_DEFINE_KERNEL(sgemm_bi_nn_sm100_tcgen_m128n64_bk64_s4_c4_f16, __half, Sm100Nn, 64, 4, false, 128)
-SM100_DEFINE_KERNEL(sgemm_bi_nn_sm100_tcgen_m128n64_bk64_s4_p8_bf16, __nv_bfloat16, Sm100Nn, 64, 4, true, 256)
-SM100_DEFINE_KERNEL(sgemm_bi_nn_sm100_tcgen_m128n64_bk64_s4_p8_f16, __half, Sm100Nn, 64, 4, true, 256)
-SM100_DEFINE_KERNEL(sgemm_bi_nn_sm100_tcgen_m128n128_bk64_s2_c4_bf16, __nv_bfloat16, Sm100Nn, 128, 2, false, 128)
-SM100_DEFINE_KERNEL(sgemm_bi_nn_sm100_tcgen_m128n128_bk64_s2_c4_f16, __half, Sm100Nn, 128, 2, false, 128)
-SM100_DEFINE_KERNEL(sgemm_bi_nn_sm100_tcgen_m128n128_bk64_s2_p8_bf16, __nv_bfloat16, Sm100Nn, 128, 2, true, 256)
-SM100_DEFINE_KERNEL(sgemm_bi_nn_sm100_tcgen_m128n128_bk64_s2_p8_f16, __half, Sm100Nn, 128, 2, true, 256)
-SM100_DEFINE_KERNEL(sgemm_bi_nn_sm100_tcgen_m128n128_bk64_s3_c4_bf16, __nv_bfloat16, Sm100Nn, 128, 3, false, 128)
-SM100_DEFINE_KERNEL(sgemm_bi_nn_sm100_tcgen_m128n128_bk64_s3_c4_f16, __half, Sm100Nn, 128, 3, false, 128)
-SM100_DEFINE_KERNEL(sgemm_bi_nn_sm100_tcgen_m128n128_bk64_s3_p8_bf16, __nv_bfloat16, Sm100Nn, 128, 3, true, 256)
-SM100_DEFINE_KERNEL(sgemm_bi_nn_sm100_tcgen_m128n128_bk64_s3_p8_f16, __half, Sm100Nn, 128, 3, true, 256)
-SM100_DEFINE_KERNEL(sgemm_bi_nn_sm100_tcgen_m128n128_bk64_s4_c4_bf16, __nv_bfloat16, Sm100Nn, 128, 4, false, 128)
-SM100_DEFINE_KERNEL(sgemm_bi_nn_sm100_tcgen_m128n128_bk64_s4_c4_f16, __half, Sm100Nn, 128, 4, false, 128)
-SM100_DEFINE_KERNEL(sgemm_bi_nn_sm100_tcgen_m128n128_bk64_s4_p8_bf16, __nv_bfloat16, Sm100Nn, 128, 4, true, 256)
-SM100_DEFINE_KERNEL(sgemm_bi_nn_sm100_tcgen_m128n128_bk64_s4_p8_f16, __half, Sm100Nn, 128, 4, true, 256)
+SM100_DEFINE_KERNEL(gemm_bi_nn_sm100_tcgen_m128n64_bk64_s2_c4_bf16, __nv_bfloat16, Sm100Nn, 64, 2, false, 128)
+SM100_DEFINE_KERNEL(gemm_bi_nn_sm100_tcgen_m128n64_bk64_s2_c4_f16, __half, Sm100Nn, 64, 2, false, 128)
+SM100_DEFINE_KERNEL(gemm_bi_nn_sm100_tcgen_m128n64_bk64_s2_p8_bf16, __nv_bfloat16, Sm100Nn, 64, 2, true, 256)
+SM100_DEFINE_KERNEL(gemm_bi_nn_sm100_tcgen_m128n64_bk64_s2_p8_f16, __half, Sm100Nn, 64, 2, true, 256)
+SM100_DEFINE_KERNEL(gemm_bi_nn_sm100_tcgen_m128n64_bk64_s3_c4_bf16, __nv_bfloat16, Sm100Nn, 64, 3, false, 128)
+SM100_DEFINE_KERNEL(gemm_bi_nn_sm100_tcgen_m128n64_bk64_s3_c4_f16, __half, Sm100Nn, 64, 3, false, 128)
+SM100_DEFINE_KERNEL(gemm_bi_nn_sm100_tcgen_m128n64_bk64_s3_p8_bf16, __nv_bfloat16, Sm100Nn, 64, 3, true, 256)
+SM100_DEFINE_KERNEL(gemm_bi_nn_sm100_tcgen_m128n64_bk64_s3_p8_f16, __half, Sm100Nn, 64, 3, true, 256)
+SM100_DEFINE_KERNEL(gemm_bi_nn_sm100_tcgen_m128n64_bk64_s4_c4_bf16, __nv_bfloat16, Sm100Nn, 64, 4, false, 128)
+SM100_DEFINE_KERNEL(gemm_bi_nn_sm100_tcgen_m128n64_bk64_s4_c4_f16, __half, Sm100Nn, 64, 4, false, 128)
+SM100_DEFINE_KERNEL(gemm_bi_nn_sm100_tcgen_m128n64_bk64_s4_p8_bf16, __nv_bfloat16, Sm100Nn, 64, 4, true, 256)
+SM100_DEFINE_KERNEL(gemm_bi_nn_sm100_tcgen_m128n64_bk64_s4_p8_f16, __half, Sm100Nn, 64, 4, true, 256)
+SM100_DEFINE_KERNEL(gemm_bi_nn_sm100_tcgen_m128n128_bk64_s2_c4_bf16, __nv_bfloat16, Sm100Nn, 128, 2, false, 128)
+SM100_DEFINE_KERNEL(gemm_bi_nn_sm100_tcgen_m128n128_bk64_s2_c4_f16, __half, Sm100Nn, 128, 2, false, 128)
+SM100_DEFINE_KERNEL(gemm_bi_nn_sm100_tcgen_m128n128_bk64_s2_p8_bf16, __nv_bfloat16, Sm100Nn, 128, 2, true, 256)
+SM100_DEFINE_KERNEL(gemm_bi_nn_sm100_tcgen_m128n128_bk64_s2_p8_f16, __half, Sm100Nn, 128, 2, true, 256)
+SM100_DEFINE_KERNEL(gemm_bi_nn_sm100_tcgen_m128n128_bk64_s3_c4_bf16, __nv_bfloat16, Sm100Nn, 128, 3, false, 128)
+SM100_DEFINE_KERNEL(gemm_bi_nn_sm100_tcgen_m128n128_bk64_s3_c4_f16, __half, Sm100Nn, 128, 3, false, 128)
+SM100_DEFINE_KERNEL(gemm_bi_nn_sm100_tcgen_m128n128_bk64_s3_p8_bf16, __nv_bfloat16, Sm100Nn, 128, 3, true, 256)
+SM100_DEFINE_KERNEL(gemm_bi_nn_sm100_tcgen_m128n128_bk64_s3_p8_f16, __half, Sm100Nn, 128, 3, true, 256)
+SM100_DEFINE_KERNEL(gemm_bi_nn_sm100_tcgen_m128n128_bk64_s4_c4_bf16, __nv_bfloat16, Sm100Nn, 128, 4, false, 128)
+SM100_DEFINE_KERNEL(gemm_bi_nn_sm100_tcgen_m128n128_bk64_s4_c4_f16, __half, Sm100Nn, 128, 4, false, 128)
+SM100_DEFINE_KERNEL(gemm_bi_nn_sm100_tcgen_m128n128_bk64_s4_p8_bf16, __nv_bfloat16, Sm100Nn, 128, 4, true, 256)
+SM100_DEFINE_KERNEL(gemm_bi_nn_sm100_tcgen_m128n128_bk64_s4_p8_f16, __half, Sm100Nn, 128, 4, true, 256)
 
-SM100_DEFINE_KERNEL(sgemm_bi_tn_sm100_tcgen_m128n64_bk64_s2_c4_bf16, __nv_bfloat16, Sm100Tn, 64, 2, false, 128)
-SM100_DEFINE_KERNEL(sgemm_bi_tn_sm100_tcgen_m128n64_bk64_s2_c4_f16, __half, Sm100Tn, 64, 2, false, 128)
-SM100_DEFINE_KERNEL(sgemm_bi_tn_sm100_tcgen_m128n64_bk64_s2_p8_bf16, __nv_bfloat16, Sm100Tn, 64, 2, true, 256)
-SM100_DEFINE_KERNEL(sgemm_bi_tn_sm100_tcgen_m128n64_bk64_s2_p8_f16, __half, Sm100Tn, 64, 2, true, 256)
-SM100_DEFINE_KERNEL(sgemm_bi_tn_sm100_tcgen_m128n64_bk64_s3_c4_bf16, __nv_bfloat16, Sm100Tn, 64, 3, false, 128)
-SM100_DEFINE_KERNEL(sgemm_bi_tn_sm100_tcgen_m128n64_bk64_s3_c4_f16, __half, Sm100Tn, 64, 3, false, 128)
-SM100_DEFINE_KERNEL(sgemm_bi_tn_sm100_tcgen_m128n64_bk64_s3_p8_bf16, __nv_bfloat16, Sm100Tn, 64, 3, true, 256)
-SM100_DEFINE_KERNEL(sgemm_bi_tn_sm100_tcgen_m128n64_bk64_s3_p8_f16, __half, Sm100Tn, 64, 3, true, 256)
-SM100_DEFINE_KERNEL(sgemm_bi_tn_sm100_tcgen_m128n64_bk64_s4_c4_bf16, __nv_bfloat16, Sm100Tn, 64, 4, false, 128)
-SM100_DEFINE_KERNEL(sgemm_bi_tn_sm100_tcgen_m128n64_bk64_s4_c4_f16, __half, Sm100Tn, 64, 4, false, 128)
-SM100_DEFINE_KERNEL(sgemm_bi_tn_sm100_tcgen_m128n64_bk64_s4_p8_bf16, __nv_bfloat16, Sm100Tn, 64, 4, true, 256)
-SM100_DEFINE_KERNEL(sgemm_bi_tn_sm100_tcgen_m128n64_bk64_s4_p8_f16, __half, Sm100Tn, 64, 4, true, 256)
-SM100_DEFINE_KERNEL(sgemm_bi_tn_sm100_tcgen_m128n128_bk64_s2_c4_bf16, __nv_bfloat16, Sm100Tn, 128, 2, false, 128)
-SM100_DEFINE_KERNEL(sgemm_bi_tn_sm100_tcgen_m128n128_bk64_s2_c4_f16, __half, Sm100Tn, 128, 2, false, 128)
-SM100_DEFINE_KERNEL(sgemm_bi_tn_sm100_tcgen_m128n128_bk64_s2_p8_bf16, __nv_bfloat16, Sm100Tn, 128, 2, true, 256)
-SM100_DEFINE_KERNEL(sgemm_bi_tn_sm100_tcgen_m128n128_bk64_s2_p8_f16, __half, Sm100Tn, 128, 2, true, 256)
-SM100_DEFINE_KERNEL(sgemm_bi_tn_sm100_tcgen_m128n128_bk64_s3_c4_bf16, __nv_bfloat16, Sm100Tn, 128, 3, false, 128)
-SM100_DEFINE_KERNEL(sgemm_bi_tn_sm100_tcgen_m128n128_bk64_s3_c4_f16, __half, Sm100Tn, 128, 3, false, 128)
-SM100_DEFINE_KERNEL(sgemm_bi_tn_sm100_tcgen_m128n128_bk64_s3_p8_bf16, __nv_bfloat16, Sm100Tn, 128, 3, true, 256)
-SM100_DEFINE_KERNEL(sgemm_bi_tn_sm100_tcgen_m128n128_bk64_s3_p8_f16, __half, Sm100Tn, 128, 3, true, 256)
-SM100_DEFINE_KERNEL(sgemm_bi_tn_sm100_tcgen_m128n128_bk64_s4_c4_bf16, __nv_bfloat16, Sm100Tn, 128, 4, false, 128)
-SM100_DEFINE_KERNEL(sgemm_bi_tn_sm100_tcgen_m128n128_bk64_s4_c4_f16, __half, Sm100Tn, 128, 4, false, 128)
-SM100_DEFINE_KERNEL(sgemm_bi_tn_sm100_tcgen_m128n128_bk64_s4_p8_bf16, __nv_bfloat16, Sm100Tn, 128, 4, true, 256)
-SM100_DEFINE_KERNEL(sgemm_bi_tn_sm100_tcgen_m128n128_bk64_s4_p8_f16, __half, Sm100Tn, 128, 4, true, 256)
+SM100_DEFINE_KERNEL(gemm_bi_tn_sm100_tcgen_m128n64_bk64_s2_c4_bf16, __nv_bfloat16, Sm100Tn, 64, 2, false, 128)
+SM100_DEFINE_KERNEL(gemm_bi_tn_sm100_tcgen_m128n64_bk64_s2_c4_f16, __half, Sm100Tn, 64, 2, false, 128)
+SM100_DEFINE_KERNEL(gemm_bi_tn_sm100_tcgen_m128n64_bk64_s2_p8_bf16, __nv_bfloat16, Sm100Tn, 64, 2, true, 256)
+SM100_DEFINE_KERNEL(gemm_bi_tn_sm100_tcgen_m128n64_bk64_s2_p8_f16, __half, Sm100Tn, 64, 2, true, 256)
+SM100_DEFINE_KERNEL(gemm_bi_tn_sm100_tcgen_m128n64_bk64_s3_c4_bf16, __nv_bfloat16, Sm100Tn, 64, 3, false, 128)
+SM100_DEFINE_KERNEL(gemm_bi_tn_sm100_tcgen_m128n64_bk64_s3_c4_f16, __half, Sm100Tn, 64, 3, false, 128)
+SM100_DEFINE_KERNEL(gemm_bi_tn_sm100_tcgen_m128n64_bk64_s3_p8_bf16, __nv_bfloat16, Sm100Tn, 64, 3, true, 256)
+SM100_DEFINE_KERNEL(gemm_bi_tn_sm100_tcgen_m128n64_bk64_s3_p8_f16, __half, Sm100Tn, 64, 3, true, 256)
+SM100_DEFINE_KERNEL(gemm_bi_tn_sm100_tcgen_m128n64_bk64_s4_c4_bf16, __nv_bfloat16, Sm100Tn, 64, 4, false, 128)
+SM100_DEFINE_KERNEL(gemm_bi_tn_sm100_tcgen_m128n64_bk64_s4_c4_f16, __half, Sm100Tn, 64, 4, false, 128)
+SM100_DEFINE_KERNEL(gemm_bi_tn_sm100_tcgen_m128n64_bk64_s4_p8_bf16, __nv_bfloat16, Sm100Tn, 64, 4, true, 256)
+SM100_DEFINE_KERNEL(gemm_bi_tn_sm100_tcgen_m128n64_bk64_s4_p8_f16, __half, Sm100Tn, 64, 4, true, 256)
+SM100_DEFINE_KERNEL(gemm_bi_tn_sm100_tcgen_m128n128_bk64_s2_c4_bf16, __nv_bfloat16, Sm100Tn, 128, 2, false, 128)
+SM100_DEFINE_KERNEL(gemm_bi_tn_sm100_tcgen_m128n128_bk64_s2_c4_f16, __half, Sm100Tn, 128, 2, false, 128)
+SM100_DEFINE_KERNEL(gemm_bi_tn_sm100_tcgen_m128n128_bk64_s2_p8_bf16, __nv_bfloat16, Sm100Tn, 128, 2, true, 256)
+SM100_DEFINE_KERNEL(gemm_bi_tn_sm100_tcgen_m128n128_bk64_s2_p8_f16, __half, Sm100Tn, 128, 2, true, 256)
+SM100_DEFINE_KERNEL(gemm_bi_tn_sm100_tcgen_m128n128_bk64_s3_c4_bf16, __nv_bfloat16, Sm100Tn, 128, 3, false, 128)
+SM100_DEFINE_KERNEL(gemm_bi_tn_sm100_tcgen_m128n128_bk64_s3_c4_f16, __half, Sm100Tn, 128, 3, false, 128)
+SM100_DEFINE_KERNEL(gemm_bi_tn_sm100_tcgen_m128n128_bk64_s3_p8_bf16, __nv_bfloat16, Sm100Tn, 128, 3, true, 256)
+SM100_DEFINE_KERNEL(gemm_bi_tn_sm100_tcgen_m128n128_bk64_s3_p8_f16, __half, Sm100Tn, 128, 3, true, 256)
+SM100_DEFINE_KERNEL(gemm_bi_tn_sm100_tcgen_m128n128_bk64_s4_c4_bf16, __nv_bfloat16, Sm100Tn, 128, 4, false, 128)
+SM100_DEFINE_KERNEL(gemm_bi_tn_sm100_tcgen_m128n128_bk64_s4_c4_f16, __half, Sm100Tn, 128, 4, false, 128)
+SM100_DEFINE_KERNEL(gemm_bi_tn_sm100_tcgen_m128n128_bk64_s4_p8_bf16, __nv_bfloat16, Sm100Tn, 128, 4, true, 256)
+SM100_DEFINE_KERNEL(gemm_bi_tn_sm100_tcgen_m128n128_bk64_s4_p8_f16, __half, Sm100Tn, 128, 4, true, 256)
 
-SM100_DEFINE_KERNEL(sgemm_bi_nt_sm100_tcgen_m128n64_bk64_s2_c4_bf16, __nv_bfloat16, Sm100Nt, 64, 2, false, 128)
-SM100_DEFINE_KERNEL(sgemm_bi_nt_sm100_tcgen_m128n64_bk64_s2_c4_f16, __half, Sm100Nt, 64, 2, false, 128)
-SM100_DEFINE_KERNEL(sgemm_bi_nt_sm100_tcgen_m128n64_bk64_s2_p8_bf16, __nv_bfloat16, Sm100Nt, 64, 2, true, 256)
-SM100_DEFINE_KERNEL(sgemm_bi_nt_sm100_tcgen_m128n64_bk64_s2_p8_f16, __half, Sm100Nt, 64, 2, true, 256)
-SM100_DEFINE_KERNEL(sgemm_bi_nt_sm100_tcgen_m128n64_bk64_s3_c4_bf16, __nv_bfloat16, Sm100Nt, 64, 3, false, 128)
-SM100_DEFINE_KERNEL(sgemm_bi_nt_sm100_tcgen_m128n64_bk64_s3_c4_f16, __half, Sm100Nt, 64, 3, false, 128)
-SM100_DEFINE_KERNEL(sgemm_bi_nt_sm100_tcgen_m128n64_bk64_s3_p8_bf16, __nv_bfloat16, Sm100Nt, 64, 3, true, 256)
-SM100_DEFINE_KERNEL(sgemm_bi_nt_sm100_tcgen_m128n64_bk64_s3_p8_f16, __half, Sm100Nt, 64, 3, true, 256)
-SM100_DEFINE_KERNEL(sgemm_bi_nt_sm100_tcgen_m128n64_bk64_s4_c4_bf16, __nv_bfloat16, Sm100Nt, 64, 4, false, 128)
-SM100_DEFINE_KERNEL(sgemm_bi_nt_sm100_tcgen_m128n64_bk64_s4_c4_f16, __half, Sm100Nt, 64, 4, false, 128)
-SM100_DEFINE_KERNEL(sgemm_bi_nt_sm100_tcgen_m128n64_bk64_s4_p8_bf16, __nv_bfloat16, Sm100Nt, 64, 4, true, 256)
-SM100_DEFINE_KERNEL(sgemm_bi_nt_sm100_tcgen_m128n64_bk64_s4_p8_f16, __half, Sm100Nt, 64, 4, true, 256)
-SM100_DEFINE_KERNEL(sgemm_bi_nt_sm100_tcgen_m128n128_bk64_s2_c4_bf16, __nv_bfloat16, Sm100Nt, 128, 2, false, 128)
-SM100_DEFINE_KERNEL(sgemm_bi_nt_sm100_tcgen_m128n128_bk64_s2_c4_f16, __half, Sm100Nt, 128, 2, false, 128)
-SM100_DEFINE_KERNEL(sgemm_bi_nt_sm100_tcgen_m128n128_bk64_s2_p8_bf16, __nv_bfloat16, Sm100Nt, 128, 2, true, 256)
-SM100_DEFINE_KERNEL(sgemm_bi_nt_sm100_tcgen_m128n128_bk64_s2_p8_f16, __half, Sm100Nt, 128, 2, true, 256)
-SM100_DEFINE_KERNEL(sgemm_bi_nt_sm100_tcgen_m128n128_bk64_s3_c4_bf16, __nv_bfloat16, Sm100Nt, 128, 3, false, 128)
-SM100_DEFINE_KERNEL(sgemm_bi_nt_sm100_tcgen_m128n128_bk64_s3_c4_f16, __half, Sm100Nt, 128, 3, false, 128)
-SM100_DEFINE_KERNEL(sgemm_bi_nt_sm100_tcgen_m128n128_bk64_s3_p8_bf16, __nv_bfloat16, Sm100Nt, 128, 3, true, 256)
-SM100_DEFINE_KERNEL(sgemm_bi_nt_sm100_tcgen_m128n128_bk64_s3_p8_f16, __half, Sm100Nt, 128, 3, true, 256)
-SM100_DEFINE_KERNEL(sgemm_bi_nt_sm100_tcgen_m128n128_bk64_s4_c4_bf16, __nv_bfloat16, Sm100Nt, 128, 4, false, 128)
-SM100_DEFINE_KERNEL(sgemm_bi_nt_sm100_tcgen_m128n128_bk64_s4_c4_f16, __half, Sm100Nt, 128, 4, false, 128)
-SM100_DEFINE_KERNEL(sgemm_bi_nt_sm100_tcgen_m128n128_bk64_s4_p8_bf16, __nv_bfloat16, Sm100Nt, 128, 4, true, 256)
-SM100_DEFINE_KERNEL(sgemm_bi_nt_sm100_tcgen_m128n128_bk64_s4_p8_f16, __half, Sm100Nt, 128, 4, true, 256)
+SM100_DEFINE_KERNEL(gemm_bi_nt_sm100_tcgen_m128n64_bk64_s2_c4_bf16, __nv_bfloat16, Sm100Nt, 64, 2, false, 128)
+SM100_DEFINE_KERNEL(gemm_bi_nt_sm100_tcgen_m128n64_bk64_s2_c4_f16, __half, Sm100Nt, 64, 2, false, 128)
+SM100_DEFINE_KERNEL(gemm_bi_nt_sm100_tcgen_m128n64_bk64_s2_p8_bf16, __nv_bfloat16, Sm100Nt, 64, 2, true, 256)
+SM100_DEFINE_KERNEL(gemm_bi_nt_sm100_tcgen_m128n64_bk64_s2_p8_f16, __half, Sm100Nt, 64, 2, true, 256)
+SM100_DEFINE_KERNEL(gemm_bi_nt_sm100_tcgen_m128n64_bk64_s3_c4_bf16, __nv_bfloat16, Sm100Nt, 64, 3, false, 128)
+SM100_DEFINE_KERNEL(gemm_bi_nt_sm100_tcgen_m128n64_bk64_s3_c4_f16, __half, Sm100Nt, 64, 3, false, 128)
+SM100_DEFINE_KERNEL(gemm_bi_nt_sm100_tcgen_m128n64_bk64_s3_p8_bf16, __nv_bfloat16, Sm100Nt, 64, 3, true, 256)
+SM100_DEFINE_KERNEL(gemm_bi_nt_sm100_tcgen_m128n64_bk64_s3_p8_f16, __half, Sm100Nt, 64, 3, true, 256)
+SM100_DEFINE_KERNEL(gemm_bi_nt_sm100_tcgen_m128n64_bk64_s4_c4_bf16, __nv_bfloat16, Sm100Nt, 64, 4, false, 128)
+SM100_DEFINE_KERNEL(gemm_bi_nt_sm100_tcgen_m128n64_bk64_s4_c4_f16, __half, Sm100Nt, 64, 4, false, 128)
+SM100_DEFINE_KERNEL(gemm_bi_nt_sm100_tcgen_m128n64_bk64_s4_p8_bf16, __nv_bfloat16, Sm100Nt, 64, 4, true, 256)
+SM100_DEFINE_KERNEL(gemm_bi_nt_sm100_tcgen_m128n64_bk64_s4_p8_f16, __half, Sm100Nt, 64, 4, true, 256)
+SM100_DEFINE_KERNEL(gemm_bi_nt_sm100_tcgen_m128n128_bk64_s2_c4_bf16, __nv_bfloat16, Sm100Nt, 128, 2, false, 128)
+SM100_DEFINE_KERNEL(gemm_bi_nt_sm100_tcgen_m128n128_bk64_s2_c4_f16, __half, Sm100Nt, 128, 2, false, 128)
+SM100_DEFINE_KERNEL(gemm_bi_nt_sm100_tcgen_m128n128_bk64_s2_p8_bf16, __nv_bfloat16, Sm100Nt, 128, 2, true, 256)
+SM100_DEFINE_KERNEL(gemm_bi_nt_sm100_tcgen_m128n128_bk64_s2_p8_f16, __half, Sm100Nt, 128, 2, true, 256)
+SM100_DEFINE_KERNEL(gemm_bi_nt_sm100_tcgen_m128n128_bk64_s3_c4_bf16, __nv_bfloat16, Sm100Nt, 128, 3, false, 128)
+SM100_DEFINE_KERNEL(gemm_bi_nt_sm100_tcgen_m128n128_bk64_s3_c4_f16, __half, Sm100Nt, 128, 3, false, 128)
+SM100_DEFINE_KERNEL(gemm_bi_nt_sm100_tcgen_m128n128_bk64_s3_p8_bf16, __nv_bfloat16, Sm100Nt, 128, 3, true, 256)
+SM100_DEFINE_KERNEL(gemm_bi_nt_sm100_tcgen_m128n128_bk64_s3_p8_f16, __half, Sm100Nt, 128, 3, true, 256)
+SM100_DEFINE_KERNEL(gemm_bi_nt_sm100_tcgen_m128n128_bk64_s4_c4_bf16, __nv_bfloat16, Sm100Nt, 128, 4, false, 128)
+SM100_DEFINE_KERNEL(gemm_bi_nt_sm100_tcgen_m128n128_bk64_s4_c4_f16, __half, Sm100Nt, 128, 4, false, 128)
+SM100_DEFINE_KERNEL(gemm_bi_nt_sm100_tcgen_m128n128_bk64_s4_p8_bf16, __nv_bfloat16, Sm100Nt, 128, 4, true, 256)
+SM100_DEFINE_KERNEL(gemm_bi_nt_sm100_tcgen_m128n128_bk64_s4_p8_f16, __half, Sm100Nt, 128, 4, true, 256)
 
 #undef SM100_DEFINE_KERNEL
 
@@ -831,6 +820,7 @@ static __device__ __forceinline__ float sm100_tf32_epilogue(
         float value = params.alpha == 1.0f
             ? accumulator
             : __fmul_rn(params.alpha, accumulator);
+        if (params.beta == 0.0f) return value;
         return __fmaf_rn(params.beta, old_output, value);
     } else if constexpr (Op == Sm100Tn) {
         (void)bias;
@@ -854,7 +844,12 @@ static __device__ __forceinline__ void sm100_tf32_store(
         column >= sm100_tf32_columns<Op>(params)) return;
     float* destination = static_cast<float*>(output) +
         static_cast<long long>(row) * params.ldc + column;
-    float old_output = Op == Sm100Nt ? 0.0f : *destination;
+    float old_output = 0.0f;
+    if constexpr (Op == Sm100Tn) {
+        old_output = *destination;
+    } else if constexpr (Op == Sm100Nn) {
+        if (params.beta != 0.0f) old_output = *destination;
+    }
     float value = sm100_tf32_epilogue<Op>(
         accumulator, old_output, bias, column, params);
 #line 2001 "mamba_tf32_k0_zero_store"
@@ -867,7 +862,7 @@ static __device__ __forceinline__ void sm100_tf32_zero_reduction_epilogue(
     void* output, const float* bias, const Sm100KernelParams& params) {
     (void)&sm100_tf32_epilogue<Op>;
     int columns = sm100_tf32_columns<Op>(params);
-    int column_tiles = (columns + Columns - 1) / Columns;
+    int column_tiles = 1 + (columns - 1) / Columns;
     int output_row = (int)blockIdx.x / column_tiles * 128;
     int output_column = (int)blockIdx.x % column_tiles * Columns;
     int group = ProducerSchedule ? (int)threadIdx.x >> 7 : 0;
@@ -1023,10 +1018,11 @@ static __device__ __forceinline__ void sm100_tf32_kernel(
     unsigned pointer_address = empty_base + Stages * 8;
     int warp = (int)threadIdx.x >> 5;
     int columns = sm100_tf32_columns<Op>(params);
-    int column_tiles = (columns + Columns - 1) / Columns;
+    int column_tiles = 1 + (columns - 1) / Columns;
     int output_row = (int)blockIdx.x / column_tiles * 128;
     int output_column = (int)blockIdx.x % column_tiles * Columns;
-    int tile_count = (sm100_tf32_reduction<Op>(params) + 31) / 32;
+    int reduction = sm100_tf32_reduction<Op>(params);
+    int tile_count = 1 + (reduction - 1) / 32;
     const Sm100Tf32StageContext stage_context = {
         &a_map, &b_map, &params, shared, full_base, output_row, output_column};
 
@@ -1108,42 +1104,42 @@ extern "C" __global__ __launch_bounds__(THREADS) void NAME(                  \
         output, a_map, b_map, bias, params);                                   \
 }
 
-SM100_DEFINE_TF32_KERNEL(sgemm_bi_nn_sm100_tcgen_tf32_v1_m128n64_bk32_s2_c4, Sm100Nn, 64, 2, false, 128)
-SM100_DEFINE_TF32_KERNEL(sgemm_bi_nn_sm100_tcgen_tf32_v1_m128n64_bk32_s2_p8, Sm100Nn, 64, 2, true, 256)
-SM100_DEFINE_TF32_KERNEL(sgemm_bi_nn_sm100_tcgen_tf32_v1_m128n64_bk32_s3_c4, Sm100Nn, 64, 3, false, 128)
-SM100_DEFINE_TF32_KERNEL(sgemm_bi_nn_sm100_tcgen_tf32_v1_m128n64_bk32_s3_p8, Sm100Nn, 64, 3, true, 256)
-SM100_DEFINE_TF32_KERNEL(sgemm_bi_nn_sm100_tcgen_tf32_v1_m128n64_bk32_s4_c4, Sm100Nn, 64, 4, false, 128)
-SM100_DEFINE_TF32_KERNEL(sgemm_bi_nn_sm100_tcgen_tf32_v1_m128n64_bk32_s4_p8, Sm100Nn, 64, 4, true, 256)
-SM100_DEFINE_TF32_KERNEL(sgemm_bi_nn_sm100_tcgen_tf32_v1_m128n128_bk32_s2_c4, Sm100Nn, 128, 2, false, 128)
-SM100_DEFINE_TF32_KERNEL(sgemm_bi_nn_sm100_tcgen_tf32_v1_m128n128_bk32_s2_p8, Sm100Nn, 128, 2, true, 256)
-SM100_DEFINE_TF32_KERNEL(sgemm_bi_nn_sm100_tcgen_tf32_v1_m128n128_bk32_s3_c4, Sm100Nn, 128, 3, false, 128)
-SM100_DEFINE_TF32_KERNEL(sgemm_bi_nn_sm100_tcgen_tf32_v1_m128n128_bk32_s3_p8, Sm100Nn, 128, 3, true, 256)
-SM100_DEFINE_TF32_KERNEL(sgemm_bi_nn_sm100_tcgen_tf32_v1_m128n128_bk32_s4_c4, Sm100Nn, 128, 4, false, 128)
-SM100_DEFINE_TF32_KERNEL(sgemm_bi_nn_sm100_tcgen_tf32_v1_m128n128_bk32_s4_p8, Sm100Nn, 128, 4, true, 256)
-SM100_DEFINE_TF32_KERNEL(sgemm_bi_tn_sm100_tcgen_tf32_v1_m128n64_bk32_s2_c4, Sm100Tn, 64, 2, false, 128)
-SM100_DEFINE_TF32_KERNEL(sgemm_bi_tn_sm100_tcgen_tf32_v1_m128n64_bk32_s2_p8, Sm100Tn, 64, 2, true, 256)
-SM100_DEFINE_TF32_KERNEL(sgemm_bi_tn_sm100_tcgen_tf32_v1_m128n64_bk32_s3_c4, Sm100Tn, 64, 3, false, 128)
-SM100_DEFINE_TF32_KERNEL(sgemm_bi_tn_sm100_tcgen_tf32_v1_m128n64_bk32_s3_p8, Sm100Tn, 64, 3, true, 256)
-SM100_DEFINE_TF32_KERNEL(sgemm_bi_tn_sm100_tcgen_tf32_v1_m128n64_bk32_s4_c4, Sm100Tn, 64, 4, false, 128)
-SM100_DEFINE_TF32_KERNEL(sgemm_bi_tn_sm100_tcgen_tf32_v1_m128n64_bk32_s4_p8, Sm100Tn, 64, 4, true, 256)
-SM100_DEFINE_TF32_KERNEL(sgemm_bi_tn_sm100_tcgen_tf32_v1_m128n128_bk32_s2_c4, Sm100Tn, 128, 2, false, 128)
-SM100_DEFINE_TF32_KERNEL(sgemm_bi_tn_sm100_tcgen_tf32_v1_m128n128_bk32_s2_p8, Sm100Tn, 128, 2, true, 256)
-SM100_DEFINE_TF32_KERNEL(sgemm_bi_tn_sm100_tcgen_tf32_v1_m128n128_bk32_s3_c4, Sm100Tn, 128, 3, false, 128)
-SM100_DEFINE_TF32_KERNEL(sgemm_bi_tn_sm100_tcgen_tf32_v1_m128n128_bk32_s3_p8, Sm100Tn, 128, 3, true, 256)
-SM100_DEFINE_TF32_KERNEL(sgemm_bi_tn_sm100_tcgen_tf32_v1_m128n128_bk32_s4_c4, Sm100Tn, 128, 4, false, 128)
-SM100_DEFINE_TF32_KERNEL(sgemm_bi_tn_sm100_tcgen_tf32_v1_m128n128_bk32_s4_p8, Sm100Tn, 128, 4, true, 256)
-SM100_DEFINE_TF32_KERNEL(sgemm_bi_nt_sm100_tcgen_tf32_v1_m128n64_bk32_s2_c4, Sm100Nt, 64, 2, false, 128)
-SM100_DEFINE_TF32_KERNEL(sgemm_bi_nt_sm100_tcgen_tf32_v1_m128n64_bk32_s2_p8, Sm100Nt, 64, 2, true, 256)
-SM100_DEFINE_TF32_KERNEL(sgemm_bi_nt_sm100_tcgen_tf32_v1_m128n64_bk32_s3_c4, Sm100Nt, 64, 3, false, 128)
-SM100_DEFINE_TF32_KERNEL(sgemm_bi_nt_sm100_tcgen_tf32_v1_m128n64_bk32_s3_p8, Sm100Nt, 64, 3, true, 256)
-SM100_DEFINE_TF32_KERNEL(sgemm_bi_nt_sm100_tcgen_tf32_v1_m128n64_bk32_s4_c4, Sm100Nt, 64, 4, false, 128)
-SM100_DEFINE_TF32_KERNEL(sgemm_bi_nt_sm100_tcgen_tf32_v1_m128n64_bk32_s4_p8, Sm100Nt, 64, 4, true, 256)
-SM100_DEFINE_TF32_KERNEL(sgemm_bi_nt_sm100_tcgen_tf32_v1_m128n128_bk32_s2_c4, Sm100Nt, 128, 2, false, 128)
-SM100_DEFINE_TF32_KERNEL(sgemm_bi_nt_sm100_tcgen_tf32_v1_m128n128_bk32_s2_p8, Sm100Nt, 128, 2, true, 256)
-SM100_DEFINE_TF32_KERNEL(sgemm_bi_nt_sm100_tcgen_tf32_v1_m128n128_bk32_s3_c4, Sm100Nt, 128, 3, false, 128)
-SM100_DEFINE_TF32_KERNEL(sgemm_bi_nt_sm100_tcgen_tf32_v1_m128n128_bk32_s3_p8, Sm100Nt, 128, 3, true, 256)
-SM100_DEFINE_TF32_KERNEL(sgemm_bi_nt_sm100_tcgen_tf32_v1_m128n128_bk32_s4_c4, Sm100Nt, 128, 4, false, 128)
-SM100_DEFINE_TF32_KERNEL(sgemm_bi_nt_sm100_tcgen_tf32_v1_m128n128_bk32_s4_p8, Sm100Nt, 128, 4, true, 256)
+SM100_DEFINE_TF32_KERNEL(gemm_bi_nn_sm100_tcgen_tf32_v1_m128n64_bk32_s2_c4, Sm100Nn, 64, 2, false, 128)
+SM100_DEFINE_TF32_KERNEL(gemm_bi_nn_sm100_tcgen_tf32_v1_m128n64_bk32_s2_p8, Sm100Nn, 64, 2, true, 256)
+SM100_DEFINE_TF32_KERNEL(gemm_bi_nn_sm100_tcgen_tf32_v1_m128n64_bk32_s3_c4, Sm100Nn, 64, 3, false, 128)
+SM100_DEFINE_TF32_KERNEL(gemm_bi_nn_sm100_tcgen_tf32_v1_m128n64_bk32_s3_p8, Sm100Nn, 64, 3, true, 256)
+SM100_DEFINE_TF32_KERNEL(gemm_bi_nn_sm100_tcgen_tf32_v1_m128n64_bk32_s4_c4, Sm100Nn, 64, 4, false, 128)
+SM100_DEFINE_TF32_KERNEL(gemm_bi_nn_sm100_tcgen_tf32_v1_m128n64_bk32_s4_p8, Sm100Nn, 64, 4, true, 256)
+SM100_DEFINE_TF32_KERNEL(gemm_bi_nn_sm100_tcgen_tf32_v1_m128n128_bk32_s2_c4, Sm100Nn, 128, 2, false, 128)
+SM100_DEFINE_TF32_KERNEL(gemm_bi_nn_sm100_tcgen_tf32_v1_m128n128_bk32_s2_p8, Sm100Nn, 128, 2, true, 256)
+SM100_DEFINE_TF32_KERNEL(gemm_bi_nn_sm100_tcgen_tf32_v1_m128n128_bk32_s3_c4, Sm100Nn, 128, 3, false, 128)
+SM100_DEFINE_TF32_KERNEL(gemm_bi_nn_sm100_tcgen_tf32_v1_m128n128_bk32_s3_p8, Sm100Nn, 128, 3, true, 256)
+SM100_DEFINE_TF32_KERNEL(gemm_bi_nn_sm100_tcgen_tf32_v1_m128n128_bk32_s4_c4, Sm100Nn, 128, 4, false, 128)
+SM100_DEFINE_TF32_KERNEL(gemm_bi_nn_sm100_tcgen_tf32_v1_m128n128_bk32_s4_p8, Sm100Nn, 128, 4, true, 256)
+SM100_DEFINE_TF32_KERNEL(gemm_bi_tn_sm100_tcgen_tf32_v1_m128n64_bk32_s2_c4, Sm100Tn, 64, 2, false, 128)
+SM100_DEFINE_TF32_KERNEL(gemm_bi_tn_sm100_tcgen_tf32_v1_m128n64_bk32_s2_p8, Sm100Tn, 64, 2, true, 256)
+SM100_DEFINE_TF32_KERNEL(gemm_bi_tn_sm100_tcgen_tf32_v1_m128n64_bk32_s3_c4, Sm100Tn, 64, 3, false, 128)
+SM100_DEFINE_TF32_KERNEL(gemm_bi_tn_sm100_tcgen_tf32_v1_m128n64_bk32_s3_p8, Sm100Tn, 64, 3, true, 256)
+SM100_DEFINE_TF32_KERNEL(gemm_bi_tn_sm100_tcgen_tf32_v1_m128n64_bk32_s4_c4, Sm100Tn, 64, 4, false, 128)
+SM100_DEFINE_TF32_KERNEL(gemm_bi_tn_sm100_tcgen_tf32_v1_m128n64_bk32_s4_p8, Sm100Tn, 64, 4, true, 256)
+SM100_DEFINE_TF32_KERNEL(gemm_bi_tn_sm100_tcgen_tf32_v1_m128n128_bk32_s2_c4, Sm100Tn, 128, 2, false, 128)
+SM100_DEFINE_TF32_KERNEL(gemm_bi_tn_sm100_tcgen_tf32_v1_m128n128_bk32_s2_p8, Sm100Tn, 128, 2, true, 256)
+SM100_DEFINE_TF32_KERNEL(gemm_bi_tn_sm100_tcgen_tf32_v1_m128n128_bk32_s3_c4, Sm100Tn, 128, 3, false, 128)
+SM100_DEFINE_TF32_KERNEL(gemm_bi_tn_sm100_tcgen_tf32_v1_m128n128_bk32_s3_p8, Sm100Tn, 128, 3, true, 256)
+SM100_DEFINE_TF32_KERNEL(gemm_bi_tn_sm100_tcgen_tf32_v1_m128n128_bk32_s4_c4, Sm100Tn, 128, 4, false, 128)
+SM100_DEFINE_TF32_KERNEL(gemm_bi_tn_sm100_tcgen_tf32_v1_m128n128_bk32_s4_p8, Sm100Tn, 128, 4, true, 256)
+SM100_DEFINE_TF32_KERNEL(gemm_bi_nt_sm100_tcgen_tf32_v1_m128n64_bk32_s2_c4, Sm100Nt, 64, 2, false, 128)
+SM100_DEFINE_TF32_KERNEL(gemm_bi_nt_sm100_tcgen_tf32_v1_m128n64_bk32_s2_p8, Sm100Nt, 64, 2, true, 256)
+SM100_DEFINE_TF32_KERNEL(gemm_bi_nt_sm100_tcgen_tf32_v1_m128n64_bk32_s3_c4, Sm100Nt, 64, 3, false, 128)
+SM100_DEFINE_TF32_KERNEL(gemm_bi_nt_sm100_tcgen_tf32_v1_m128n64_bk32_s3_p8, Sm100Nt, 64, 3, true, 256)
+SM100_DEFINE_TF32_KERNEL(gemm_bi_nt_sm100_tcgen_tf32_v1_m128n64_bk32_s4_c4, Sm100Nt, 64, 4, false, 128)
+SM100_DEFINE_TF32_KERNEL(gemm_bi_nt_sm100_tcgen_tf32_v1_m128n64_bk32_s4_p8, Sm100Nt, 64, 4, true, 256)
+SM100_DEFINE_TF32_KERNEL(gemm_bi_nt_sm100_tcgen_tf32_v1_m128n128_bk32_s2_c4, Sm100Nt, 128, 2, false, 128)
+SM100_DEFINE_TF32_KERNEL(gemm_bi_nt_sm100_tcgen_tf32_v1_m128n128_bk32_s2_p8, Sm100Nt, 128, 2, true, 256)
+SM100_DEFINE_TF32_KERNEL(gemm_bi_nt_sm100_tcgen_tf32_v1_m128n128_bk32_s3_c4, Sm100Nt, 128, 3, false, 128)
+SM100_DEFINE_TF32_KERNEL(gemm_bi_nt_sm100_tcgen_tf32_v1_m128n128_bk32_s3_p8, Sm100Nt, 128, 3, true, 256)
+SM100_DEFINE_TF32_KERNEL(gemm_bi_nt_sm100_tcgen_tf32_v1_m128n128_bk32_s4_c4, Sm100Nt, 128, 4, false, 128)
+SM100_DEFINE_TF32_KERNEL(gemm_bi_nt_sm100_tcgen_tf32_v1_m128n128_bk32_s4_p8, Sm100Nt, 128, 4, true, 256)
 
 template <typename A, typename B> struct Sm100Tf32SameType { static constexpr bool value = false; };
 template <typename A> struct Sm100Tf32SameType<A, A> { static constexpr bool value = true; };
@@ -1152,42 +1148,42 @@ using Sm100Tf32KernelSignature = void (*)(
 #define TF32_ASSERT_KERNEL_SIGNATURE(NAME) \
     static_assert(Sm100Tf32SameType<decltype(&NAME), Sm100Tf32KernelSignature>::value, "TF32 kernel signature")
 
-TF32_ASSERT_KERNEL_SIGNATURE(sgemm_bi_nn_sm100_tcgen_tf32_v1_m128n64_bk32_s2_c4);
-TF32_ASSERT_KERNEL_SIGNATURE(sgemm_bi_nn_sm100_tcgen_tf32_v1_m128n64_bk32_s2_p8);
-TF32_ASSERT_KERNEL_SIGNATURE(sgemm_bi_nn_sm100_tcgen_tf32_v1_m128n64_bk32_s3_c4);
-TF32_ASSERT_KERNEL_SIGNATURE(sgemm_bi_nn_sm100_tcgen_tf32_v1_m128n64_bk32_s3_p8);
-TF32_ASSERT_KERNEL_SIGNATURE(sgemm_bi_nn_sm100_tcgen_tf32_v1_m128n64_bk32_s4_c4);
-TF32_ASSERT_KERNEL_SIGNATURE(sgemm_bi_nn_sm100_tcgen_tf32_v1_m128n64_bk32_s4_p8);
-TF32_ASSERT_KERNEL_SIGNATURE(sgemm_bi_nn_sm100_tcgen_tf32_v1_m128n128_bk32_s2_c4);
-TF32_ASSERT_KERNEL_SIGNATURE(sgemm_bi_nn_sm100_tcgen_tf32_v1_m128n128_bk32_s2_p8);
-TF32_ASSERT_KERNEL_SIGNATURE(sgemm_bi_nn_sm100_tcgen_tf32_v1_m128n128_bk32_s3_c4);
-TF32_ASSERT_KERNEL_SIGNATURE(sgemm_bi_nn_sm100_tcgen_tf32_v1_m128n128_bk32_s3_p8);
-TF32_ASSERT_KERNEL_SIGNATURE(sgemm_bi_nn_sm100_tcgen_tf32_v1_m128n128_bk32_s4_c4);
-TF32_ASSERT_KERNEL_SIGNATURE(sgemm_bi_nn_sm100_tcgen_tf32_v1_m128n128_bk32_s4_p8);
-TF32_ASSERT_KERNEL_SIGNATURE(sgemm_bi_tn_sm100_tcgen_tf32_v1_m128n64_bk32_s2_c4);
-TF32_ASSERT_KERNEL_SIGNATURE(sgemm_bi_tn_sm100_tcgen_tf32_v1_m128n64_bk32_s2_p8);
-TF32_ASSERT_KERNEL_SIGNATURE(sgemm_bi_tn_sm100_tcgen_tf32_v1_m128n64_bk32_s3_c4);
-TF32_ASSERT_KERNEL_SIGNATURE(sgemm_bi_tn_sm100_tcgen_tf32_v1_m128n64_bk32_s3_p8);
-TF32_ASSERT_KERNEL_SIGNATURE(sgemm_bi_tn_sm100_tcgen_tf32_v1_m128n64_bk32_s4_c4);
-TF32_ASSERT_KERNEL_SIGNATURE(sgemm_bi_tn_sm100_tcgen_tf32_v1_m128n64_bk32_s4_p8);
-TF32_ASSERT_KERNEL_SIGNATURE(sgemm_bi_tn_sm100_tcgen_tf32_v1_m128n128_bk32_s2_c4);
-TF32_ASSERT_KERNEL_SIGNATURE(sgemm_bi_tn_sm100_tcgen_tf32_v1_m128n128_bk32_s2_p8);
-TF32_ASSERT_KERNEL_SIGNATURE(sgemm_bi_tn_sm100_tcgen_tf32_v1_m128n128_bk32_s3_c4);
-TF32_ASSERT_KERNEL_SIGNATURE(sgemm_bi_tn_sm100_tcgen_tf32_v1_m128n128_bk32_s3_p8);
-TF32_ASSERT_KERNEL_SIGNATURE(sgemm_bi_tn_sm100_tcgen_tf32_v1_m128n128_bk32_s4_c4);
-TF32_ASSERT_KERNEL_SIGNATURE(sgemm_bi_tn_sm100_tcgen_tf32_v1_m128n128_bk32_s4_p8);
-TF32_ASSERT_KERNEL_SIGNATURE(sgemm_bi_nt_sm100_tcgen_tf32_v1_m128n64_bk32_s2_c4);
-TF32_ASSERT_KERNEL_SIGNATURE(sgemm_bi_nt_sm100_tcgen_tf32_v1_m128n64_bk32_s2_p8);
-TF32_ASSERT_KERNEL_SIGNATURE(sgemm_bi_nt_sm100_tcgen_tf32_v1_m128n64_bk32_s3_c4);
-TF32_ASSERT_KERNEL_SIGNATURE(sgemm_bi_nt_sm100_tcgen_tf32_v1_m128n64_bk32_s3_p8);
-TF32_ASSERT_KERNEL_SIGNATURE(sgemm_bi_nt_sm100_tcgen_tf32_v1_m128n64_bk32_s4_c4);
-TF32_ASSERT_KERNEL_SIGNATURE(sgemm_bi_nt_sm100_tcgen_tf32_v1_m128n64_bk32_s4_p8);
-TF32_ASSERT_KERNEL_SIGNATURE(sgemm_bi_nt_sm100_tcgen_tf32_v1_m128n128_bk32_s2_c4);
-TF32_ASSERT_KERNEL_SIGNATURE(sgemm_bi_nt_sm100_tcgen_tf32_v1_m128n128_bk32_s2_p8);
-TF32_ASSERT_KERNEL_SIGNATURE(sgemm_bi_nt_sm100_tcgen_tf32_v1_m128n128_bk32_s3_c4);
-TF32_ASSERT_KERNEL_SIGNATURE(sgemm_bi_nt_sm100_tcgen_tf32_v1_m128n128_bk32_s3_p8);
-TF32_ASSERT_KERNEL_SIGNATURE(sgemm_bi_nt_sm100_tcgen_tf32_v1_m128n128_bk32_s4_c4);
-TF32_ASSERT_KERNEL_SIGNATURE(sgemm_bi_nt_sm100_tcgen_tf32_v1_m128n128_bk32_s4_p8);
+TF32_ASSERT_KERNEL_SIGNATURE(gemm_bi_nn_sm100_tcgen_tf32_v1_m128n64_bk32_s2_c4);
+TF32_ASSERT_KERNEL_SIGNATURE(gemm_bi_nn_sm100_tcgen_tf32_v1_m128n64_bk32_s2_p8);
+TF32_ASSERT_KERNEL_SIGNATURE(gemm_bi_nn_sm100_tcgen_tf32_v1_m128n64_bk32_s3_c4);
+TF32_ASSERT_KERNEL_SIGNATURE(gemm_bi_nn_sm100_tcgen_tf32_v1_m128n64_bk32_s3_p8);
+TF32_ASSERT_KERNEL_SIGNATURE(gemm_bi_nn_sm100_tcgen_tf32_v1_m128n64_bk32_s4_c4);
+TF32_ASSERT_KERNEL_SIGNATURE(gemm_bi_nn_sm100_tcgen_tf32_v1_m128n64_bk32_s4_p8);
+TF32_ASSERT_KERNEL_SIGNATURE(gemm_bi_nn_sm100_tcgen_tf32_v1_m128n128_bk32_s2_c4);
+TF32_ASSERT_KERNEL_SIGNATURE(gemm_bi_nn_sm100_tcgen_tf32_v1_m128n128_bk32_s2_p8);
+TF32_ASSERT_KERNEL_SIGNATURE(gemm_bi_nn_sm100_tcgen_tf32_v1_m128n128_bk32_s3_c4);
+TF32_ASSERT_KERNEL_SIGNATURE(gemm_bi_nn_sm100_tcgen_tf32_v1_m128n128_bk32_s3_p8);
+TF32_ASSERT_KERNEL_SIGNATURE(gemm_bi_nn_sm100_tcgen_tf32_v1_m128n128_bk32_s4_c4);
+TF32_ASSERT_KERNEL_SIGNATURE(gemm_bi_nn_sm100_tcgen_tf32_v1_m128n128_bk32_s4_p8);
+TF32_ASSERT_KERNEL_SIGNATURE(gemm_bi_tn_sm100_tcgen_tf32_v1_m128n64_bk32_s2_c4);
+TF32_ASSERT_KERNEL_SIGNATURE(gemm_bi_tn_sm100_tcgen_tf32_v1_m128n64_bk32_s2_p8);
+TF32_ASSERT_KERNEL_SIGNATURE(gemm_bi_tn_sm100_tcgen_tf32_v1_m128n64_bk32_s3_c4);
+TF32_ASSERT_KERNEL_SIGNATURE(gemm_bi_tn_sm100_tcgen_tf32_v1_m128n64_bk32_s3_p8);
+TF32_ASSERT_KERNEL_SIGNATURE(gemm_bi_tn_sm100_tcgen_tf32_v1_m128n64_bk32_s4_c4);
+TF32_ASSERT_KERNEL_SIGNATURE(gemm_bi_tn_sm100_tcgen_tf32_v1_m128n64_bk32_s4_p8);
+TF32_ASSERT_KERNEL_SIGNATURE(gemm_bi_tn_sm100_tcgen_tf32_v1_m128n128_bk32_s2_c4);
+TF32_ASSERT_KERNEL_SIGNATURE(gemm_bi_tn_sm100_tcgen_tf32_v1_m128n128_bk32_s2_p8);
+TF32_ASSERT_KERNEL_SIGNATURE(gemm_bi_tn_sm100_tcgen_tf32_v1_m128n128_bk32_s3_c4);
+TF32_ASSERT_KERNEL_SIGNATURE(gemm_bi_tn_sm100_tcgen_tf32_v1_m128n128_bk32_s3_p8);
+TF32_ASSERT_KERNEL_SIGNATURE(gemm_bi_tn_sm100_tcgen_tf32_v1_m128n128_bk32_s4_c4);
+TF32_ASSERT_KERNEL_SIGNATURE(gemm_bi_tn_sm100_tcgen_tf32_v1_m128n128_bk32_s4_p8);
+TF32_ASSERT_KERNEL_SIGNATURE(gemm_bi_nt_sm100_tcgen_tf32_v1_m128n64_bk32_s2_c4);
+TF32_ASSERT_KERNEL_SIGNATURE(gemm_bi_nt_sm100_tcgen_tf32_v1_m128n64_bk32_s2_p8);
+TF32_ASSERT_KERNEL_SIGNATURE(gemm_bi_nt_sm100_tcgen_tf32_v1_m128n64_bk32_s3_c4);
+TF32_ASSERT_KERNEL_SIGNATURE(gemm_bi_nt_sm100_tcgen_tf32_v1_m128n64_bk32_s3_p8);
+TF32_ASSERT_KERNEL_SIGNATURE(gemm_bi_nt_sm100_tcgen_tf32_v1_m128n64_bk32_s4_c4);
+TF32_ASSERT_KERNEL_SIGNATURE(gemm_bi_nt_sm100_tcgen_tf32_v1_m128n64_bk32_s4_p8);
+TF32_ASSERT_KERNEL_SIGNATURE(gemm_bi_nt_sm100_tcgen_tf32_v1_m128n128_bk32_s2_c4);
+TF32_ASSERT_KERNEL_SIGNATURE(gemm_bi_nt_sm100_tcgen_tf32_v1_m128n128_bk32_s2_p8);
+TF32_ASSERT_KERNEL_SIGNATURE(gemm_bi_nt_sm100_tcgen_tf32_v1_m128n128_bk32_s3_c4);
+TF32_ASSERT_KERNEL_SIGNATURE(gemm_bi_nt_sm100_tcgen_tf32_v1_m128n128_bk32_s3_p8);
+TF32_ASSERT_KERNEL_SIGNATURE(gemm_bi_nt_sm100_tcgen_tf32_v1_m128n128_bk32_s4_c4);
+TF32_ASSERT_KERNEL_SIGNATURE(gemm_bi_nt_sm100_tcgen_tf32_v1_m128n128_bk32_s4_p8);
 
 #undef TF32_ASSERT_KERNEL_SIGNATURE
 #undef SM100_DEFINE_TF32_KERNEL

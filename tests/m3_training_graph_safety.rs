@@ -2,7 +2,7 @@
 
 use mamba_rs::mamba_ssm::gpu::blas::{TypedPtr, gpu_gemm_typed_forward_raw};
 use mamba_rs::mamba_ssm::gpu::buffers::DtypedBuf;
-use mamba_rs::mamba_ssm::gpu::context::BiGemmFamily;
+use mamba_rs::mamba_ssm::gpu::context::{BiGemmFamily, F32TriadPolicy};
 use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
 use mamba_rs::mamba3_siso::config::Mamba3Config;
 use mamba_rs::mamba3_siso::gpu::trainer::{Mamba3Trainer, TrainSessionCfg};
@@ -90,13 +90,16 @@ fn captured_triad_trainer(dtype: WeightDtype) -> (Mamba3Trainer, Vec<f32>, Vec<f
     )
     .expect("construct Mamba3 trainer");
 
-    trainer
-        .step(&input, &d_temporal)
-        .expect("eager warmup step");
     trainer.ctx().set_batch_invariant(true);
     trainer.ctx().set_bi_gemm_family(BiGemmFamily::Triad);
     trainer.ctx().set_bi_tensor_cores(false);
     trainer.ctx().set_fast_gemm(false);
+    trainer
+        .ctx()
+        .set_f32_triad_policy(F32TriadPolicy::ExactScalarFmaV1);
+    trainer
+        .step(&input, &d_temporal)
+        .expect("eager warmup step");
     trainer
         .capture_graph()
         .expect("capture triad training graph");
@@ -197,8 +200,7 @@ fn m3_f32_training_graph_replays_deterministically() {
 }
 
 #[test]
-#[ignore = "needs a cold CUDA graph capture"]
-fn m3_f16_training_graph_captures_cold_triad_fallback() {
+fn m3_f16_first_triad_step_prepares_cache_before_graph_scratch() {
     let cfg = tiny_cfg();
     let batch = 2;
     let seq_len = 64;
@@ -227,15 +229,22 @@ fn m3_f16_training_graph_captures_cold_triad_fallback() {
     trainer.ctx().set_bi_gemm_family(BiGemmFamily::Triad);
     trainer.ctx().set_bi_tensor_cores(false);
     trainer.ctx().set_fast_gemm(false);
-    // B*T=128 enters the scalar typed fallback while tensor cores are disabled.
     trainer
-        .capture_graph()
-        .expect("capture cold f16 triad graph");
+        .ctx()
+        .set_f32_triad_policy(F32TriadPolicy::ExactScalarFmaV1);
+    // B*T=128 enters the scalar typed fallback while tensor cores are disabled.
+    let warmup = trainer
+        .step(&input, &d_temporal)
+        .expect("warm up f16 triad graph resources");
+    assert!(!warmup.graph_replayed);
+    assert_eq!(trainer.ctx().half_staging_ptr(), 0);
+    trainer.reset_state().expect("reset state after warmup");
+    trainer.capture_graph().expect("capture f16 triad graph");
     assert_ne!(trainer.ctx().half_staging_ptr(), 0);
     let metrics = trainer
         .step(&input, &d_temporal)
-        .expect("replay cold f16 triad graph");
-    assert!(metrics.graph_replayed, "cold graph must replay");
+        .expect("replay f16 triad graph");
+    assert!(metrics.graph_replayed, "presized graph must replay");
 }
 
 #[test]

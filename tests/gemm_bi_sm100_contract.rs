@@ -32,7 +32,7 @@ fn expected_symbols() -> BTreeSet<String> {
                 for schedule in ["c4", "p8"] {
                     for dtype in ["bf16", "f16"] {
                         symbols.insert(format!(
-                            "sgemm_bi_{op}_sm100_tcgen_{tile}_bk64_{stages}_{schedule}_{dtype}"
+                            "gemm_bi_{op}_sm100_tcgen_{tile}_bk64_{stages}_{schedule}_{dtype}"
                         ));
                     }
                 }
@@ -496,12 +496,12 @@ fn sm100_cuda_abi_carries_coordinate_origins_to_every_tma_load() {
 
     assert_eq!(
         SOURCE.matches("params.a_x, params.a_y").count(),
-        4,
+        7,
         "every A tensor-map load must carry the A coordinate origin"
     );
     assert_eq!(
         SOURCE.matches("params.b_x, params.b_y").count(),
-        5,
+        8,
         "every B tensor-map load must carry the B coordinate origin"
     );
 }

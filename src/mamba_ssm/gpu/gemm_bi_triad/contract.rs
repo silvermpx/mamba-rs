@@ -1,19 +1,104 @@
 use super::super::blas::TypedPtr;
+use super::super::buffers::{ManagedAllocationEpochStamp, managed_allocation_epoch_for_ranges};
 use super::super::dtype::WeightDtype;
 use crate::mamba_ssm::gpu::kernel_identity::{
     ArtifactIdentity, CompilerIdentity, CudaTarget, DeviceCaps, DeviceIdentity, FramedSha256,
     ModuleKind, PhysicalGemmBackend, PolicyDtype, ResolvedGemmLaunchSet, ResolvedGemmOp,
-    ResolvedGemmRoute, ResolvedInstructionFamily, ResolvedInstructionShape,
-    ResolvedNumericContract, ResolvedOperandConversion, SCHEDULE_REVISION, Sha256Digest,
-    TUNING_TABLE_REVISION,
+    ResolvedGemmRoute, ResolvedInstructionFamily, ResolvedInstructionShape, ResolvedKernelLaunch,
+    ResolvedNumericContract, ResolvedOperandConversion, ResolvedOutputOwnership, SCHEDULE_REVISION,
+    Sha256Digest, TUNING_TABLE_REVISION,
 };
-use cudarc::driver::{DeviceRepr, sys};
+use cudarc::driver::{CudaContext, DeviceRepr, sys};
+#[cfg(test)]
+use std::sync::atomic::{AtomicU64, Ordering};
+
+#[cfg(test)]
+static ALLOCATION_IDENTITY_QUERY_COUNT: AtomicU64 = AtomicU64::new(0);
+
+#[cfg(test)]
+pub(super) fn reset_allocation_identity_query_count() {
+    ALLOCATION_IDENTITY_QUERY_COUNT.store(0, Ordering::Release);
+}
+
+#[cfg(test)]
+pub(super) fn allocation_identity_query_count() -> u64 {
+    ALLOCATION_IDENTITY_QUERY_COUNT.load(Ordering::Acquire)
+}
 
 pub type CUptr = cudarc::driver::sys::CUdeviceptr;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(super) struct AllocationDomain {
+    pub(super) context_handle: usize,
+    pub(super) device_ordinal: i32,
+}
+
+impl AllocationDomain {
+    pub(super) fn from_context(context: &CudaContext) -> Result<Self, String> {
+        let context_handle = context.cu_ctx() as usize;
+        if context_handle == 0 {
+            return Err("CUDA allocation domain requires a non-null context".into());
+        }
+        let device_ordinal = i32::try_from(context.ordinal())
+            .map_err(|_| "CUDA device ordinal exceeds i32::MAX".to_string())?;
+        Ok(Self {
+            context_handle,
+            device_ordinal,
+        })
+    }
+}
+
+fn validate_allocation_domain(
+    expected: AllocationDomain,
+    associated_context: Option<usize>,
+    actual_device_ordinal: i32,
+    backend: &str,
+    name: &str,
+) -> Result<(), String> {
+    if associated_context.is_some_and(|context| context != expected.context_handle) {
+        return Err(format!(
+            "{backend} {name} allocation belongs to a different CUDA context"
+        ));
+    }
+    if actual_device_ordinal != expected.device_ordinal {
+        return Err(format!(
+            "{backend} {name} allocation belongs to CUDA device {actual_device_ordinal}, expected CUDA device {}",
+            expected.device_ordinal
+        ));
+    }
+    Ok(())
+}
 
 pub const F32_TF32_TUNING_REVISION: u16 = TUNING_TABLE_REVISION;
 pub const TF32_TENSOR_MAP_REVISION: u16 = 1;
 pub const TF32_SCHEDULE_REVISION: u16 = SCHEDULE_REVISION;
+pub const TF32_PORTABLE_SCHEDULE_REVISION: u16 = SCHEDULE_REVISION;
+pub const ZERO_REDUCTION_MAP_REVISION: u16 = 1;
+pub const ZERO_REDUCTION_DIGEST_DOMAIN: &[u8] = b"tf32-zero-reduction-maps.v1";
+pub const SCALAR_BIG_NT_DYNAMIC_SHARED_BYTES: u32 = 33_376;
+pub const SCALAR_NN_M64N64_DYNAMIC_SHARED_BYTES: u32 = 17_408;
+pub const SCALAR_NN_M32N64_SPLITK32_THREADS: u32 = 128;
+pub const SCALAR_NN_M32N64_SPLITK32_DYNAMIC_SHARED_BYTES: u32 = 0;
+pub const SCALAR_NN_M32N64_SPLITK32_STATIC_SHARED_BYTES: usize = 13_312;
+pub const SCALAR_NN_M32N64_SPLITK32_REGISTER_CAP: i32 = 64;
+pub const SCALAR_NN_M32N64_SPLITK32_MIN_ACTIVE_BLOCKS: u32 = 4;
+pub const SCALAR_NT_M2N16_THREADS: u32 = 64;
+pub const SCALAR_NT_M2N16_DYNAMIC_SHARED_BYTES: u32 = 17_984;
+pub const SCALAR_NT_M2N16_STATIC_SHARED_BYTES: usize = 0;
+pub const SCALAR_NT_M2N16_REGISTER_CAP: i32 = 112;
+pub const SCALAR_NT_M2N16_MIN_ACTIVE_BLOCKS: u32 = 4;
+pub const SCALAR_TN_M16N16_THREADS: u32 = 64;
+pub const SCALAR_TN_M16N16_DYNAMIC_SHARED_BYTES: u32 = 4_096;
+pub const SCALAR_TN_M16N16_STATIC_SHARED_BYTES: usize = 0;
+pub const SCALAR_TN_M16N16_REGISTER_CAP: i32 = 112;
+pub const SCALAR_TN_M16N16_MIN_ACTIVE_BLOCKS: u32 = 8;
+pub const SCALAR_GENERIC_TRANSPOSE_ROUTE_CAP_ELEMENTS: usize = 1 << 22;
+pub const SCALAR_TRANSPOSE_SCRATCH_CAP_ELEMENTS: usize = 4_718_592;
+pub const SCALAR_NT_D768_TRANSPOSE_THREADS: u32 = 512;
+pub const SCALAR_NT_D768_TRANSPOSE_STATIC_SHARED_BYTES: usize = 4_224;
+pub const SCALAR_NT_D768_TRANSPOSE_DYNAMIC_SHARED_BYTES: usize = 0;
+pub const SCALAR_NT_D768_TRANSPOSE_REGISTER_CAP: i32 = 28;
+pub const SCALAR_NT_D768_TRANSPOSE_MIN_ACTIVE_BLOCKS: u32 = 2;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct F32TriadShape {
@@ -138,10 +223,1099 @@ pub struct F32TriadOperands {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[repr(u8)]
+pub enum Tf32TensorMapFormat {
+    Tfloat32V1 = 1,
+    Uint32V1 = 2,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Tf32TensorMapKey {
+    base: CUptr,
+    global_dimensions: [u64; 2],
+    outer_byte_stride: u64,
+    box_dimensions: [u32; 2],
+    format: Tf32TensorMapFormat,
+}
+
+impl Tf32TensorMapKey {
+    fn validate(self) -> Result<(), String> {
+        if self.base == 0 || !self.base.is_multiple_of(16) {
+            return Err("TF32 tensor-map base must be non-null and 16-byte aligned".into());
+        }
+        if self.global_dimensions.contains(&0) {
+            return Err("TF32 tensor-map dimensions must be positive".into());
+        }
+        if self.outer_byte_stride == 0
+            || !self.outer_byte_stride.is_multiple_of(16)
+            || self.outer_byte_stride >= (1_u64 << 40)
+        {
+            return Err(
+                "TF32 tensor-map outer byte stride must be a positive multiple of 16 below 2^40"
+                    .into(),
+            );
+        }
+        let row_bytes = self.global_dimensions[0]
+            .checked_mul(4)
+            .ok_or_else(|| "TF32 tensor-map row width overflows u64".to_string())?;
+        if self.outer_byte_stride < row_bytes {
+            return Err("TF32 tensor-map outer stride is smaller than its inner dimension".into());
+        }
+        if self.box_dimensions[0] != 32
+            || self.box_dimensions[1] == 0
+            || self.box_dimensions[1] > 256
+        {
+            return Err("TF32 SW128 box dimensions must be [32, 1..=256]".into());
+        }
+        Ok(())
+    }
+}
+
+#[repr(transparent)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Tf32TensorMap(sys::CUtensorMap);
+
+unsafe impl DeviceRepr for Tf32TensorMap {}
+
+const _: () = {
+    assert!(std::mem::size_of::<Tf32TensorMap>() == std::mem::size_of::<sys::CUtensorMap>());
+    assert!(std::mem::align_of::<Tf32TensorMap>() == std::mem::align_of::<sys::CUtensorMap>());
+};
+
+impl Tf32TensorMap {
+    fn encode(key: Tf32TensorMapKey) -> Result<Self, String> {
+        key.validate()?;
+        let data_type = match key.format {
+            Tf32TensorMapFormat::Tfloat32V1 => {
+                sys::CUtensorMapDataType::CU_TENSOR_MAP_DATA_TYPE_TFLOAT32
+            }
+            Tf32TensorMapFormat::Uint32V1 => {
+                sys::CUtensorMapDataType::CU_TENSOR_MAP_DATA_TYPE_UINT32
+            }
+        };
+        let mut raw = std::mem::MaybeUninit::<sys::CUtensorMap>::zeroed();
+        let element_strides = [1_u32, 1_u32];
+        let global_strides = [key.outer_byte_stride];
+        unsafe {
+            sys::cuTensorMapEncodeTiled(
+                raw.as_mut_ptr(),
+                data_type,
+                2,
+                key.base as usize as *mut std::ffi::c_void,
+                key.global_dimensions.as_ptr(),
+                global_strides.as_ptr(),
+                key.box_dimensions.as_ptr(),
+                element_strides.as_ptr(),
+                sys::CUtensorMapInterleave::CU_TENSOR_MAP_INTERLEAVE_NONE,
+                sys::CUtensorMapSwizzle::CU_TENSOR_MAP_SWIZZLE_128B,
+                sys::CUtensorMapL2promotion::CU_TENSOR_MAP_L2_PROMOTION_NONE,
+                sys::CUtensorMapFloatOOBfill::CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE,
+            )
+            .result()
+            .map_err(|error| format!("TF32 cuTensorMapEncodeTiled failed: {error:?}"))?;
+            Ok(Self(raw.assume_init()))
+        }
+    }
+
+    fn is_zero(self) -> bool {
+        unsafe {
+            std::slice::from_raw_parts(
+                std::ptr::from_ref(&self.0).cast::<u8>(),
+                std::mem::size_of::<sys::CUtensorMap>(),
+            )
+        }
+        .iter()
+        .all(|&byte| byte == 0)
+    }
+}
+
+pub fn zeroed_tensor_map_sentinel() -> Tf32TensorMap {
+    let raw = unsafe { std::mem::MaybeUninit::<sys::CUtensorMap>::zeroed().assume_init() };
+    Tf32TensorMap(raw)
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct Tf32TensorOrigins {
+    pub a_x: i32,
+    pub a_y: i32,
+    pub b_x: i32,
+    pub b_y: i32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Tf32MapBinding {
+    pub(super) allocation_domain: AllocationDomain,
+    pub qualified: Tf32QualifiedModule,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct F32EncodedTensorMaps {
+    a: Tf32TensorMap,
+    b: Tf32TensorMap,
+    keys: [Tf32TensorMapKey; 2],
+    request: F32TriadRequest,
+    route: Tf32PhysicalRoute,
+    binding: Tf32MapBinding,
+    allocations: [Sm90aAllocationIdentity; 2],
+    origins: Tf32TensorOrigins,
+    format: Tf32TensorMapFormat,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct F32ZeroReductionTensorMaps {
+    a: Tf32TensorMap,
+    b: Tf32TensorMap,
+    request: F32TriadRequest,
+    route: Option<Tf32PhysicalRoute>,
+    binding: Option<Tf32MapBinding>,
+    format: Tf32TensorMapFormat,
+    revision: u16,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum F32PreparedTensorMaps {
+    EncodedV1 {
+        data: Box<F32EncodedTensorMaps>,
+    },
+    ZeroReductionV1 {
+        data: Box<F32ZeroReductionTensorMaps>,
+    },
+}
+
+impl F32PreparedTensorMaps {
+    pub(super) fn zero_reduction(
+        request: F32TriadRequest,
+        route: Option<Tf32PhysicalRoute>,
+        binding: Option<Tf32MapBinding>,
+        format: Tf32TensorMapFormat,
+    ) -> Self {
+        Self::ZeroReductionV1 {
+            data: Box::new(F32ZeroReductionTensorMaps {
+                a: zeroed_tensor_map_sentinel(),
+                b: zeroed_tensor_map_sentinel(),
+                request,
+                route,
+                binding,
+                format,
+                revision: ZERO_REDUCTION_MAP_REVISION,
+            }),
+        }
+    }
+
+    pub fn maps(&self) -> [Tf32TensorMap; 2] {
+        match self {
+            Self::EncodedV1 { data } => [data.a, data.b],
+            Self::ZeroReductionV1 { data } => [data.a, data.b],
+        }
+    }
+
+    pub fn origins(&self) -> Tf32TensorOrigins {
+        match self {
+            Self::EncodedV1 { data } => data.origins,
+            Self::ZeroReductionV1 { .. } => Tf32TensorOrigins::default(),
+        }
+    }
+
+    pub fn request(&self) -> F32TriadRequest {
+        match self {
+            Self::EncodedV1 { data } => data.request,
+            Self::ZeroReductionV1 { data } => data.request,
+        }
+    }
+
+    pub fn binding(&self) -> Option<Tf32MapBinding> {
+        match self {
+            Self::EncodedV1 { data } => Some(data.binding),
+            Self::ZeroReductionV1 { data } => data.binding,
+        }
+    }
+
+    fn identity_digest_header(&self, domain: &[u8]) -> FramedSha256 {
+        let request = self.request();
+        FramedSha256::new(domain)
+            .required(b"op", &[self.request().op as u8])
+            .required(b"m", &(request.shape.m as u64).to_le_bytes())
+            .required(b"k", &(request.shape.k as u64).to_le_bytes())
+            .required(b"n", &(request.shape.n as u64).to_le_bytes())
+            .required(b"lda", &(request.shape.lda as u64).to_le_bytes())
+            .required(b"ldb", &(request.shape.ldb as u64).to_le_bytes())
+            .required(b"ldc", &(request.shape.ldc as u64).to_le_bytes())
+            .required(
+                b"output-rows",
+                &(request.shape.output_rows(request.op) as u64).to_le_bytes(),
+            )
+            .required(
+                b"output-columns",
+                &(request.shape.output_columns(request.op) as u64).to_le_bytes(),
+            )
+            .required(
+                b"reduction",
+                &(request.shape.reduction(request.op) as u64).to_le_bytes(),
+            )
+    }
+
+    pub fn identity_digest(&self) -> Sha256Digest {
+        let digest = self.identity_digest_header(b"tf32-tensor-map-pair.v1");
+        match self {
+            Self::EncodedV1 { data } => append_tf32_encoded_map_identity(
+                digest,
+                Tf32EncodedMapIdentity {
+                    revision: TF32_TENSOR_MAP_REVISION,
+                    maps: [data.a, data.b],
+                    keys: data.keys,
+                    allocations: data.allocations,
+                    origins: data.origins,
+                    format: data.format,
+                    route: data.route,
+                },
+            )
+            .finish(),
+            Self::ZeroReductionV1 { data } => {
+                let digest = digest
+                    .required(b"mode", ZERO_REDUCTION_DIGEST_DOMAIN)
+                    .required(b"revision", &data.revision.to_le_bytes())
+                    .required(b"format", &[data.format as u8]);
+                let digest = match data.route {
+                    Some(route) => append_tf32_route_digest(digest, route),
+                    None => digest.required(b"executor-family", b"scalar-fma-v1"),
+                };
+                digest
+                    .required(
+                        b"tensor-map-size",
+                        &(std::mem::size_of::<sys::CUtensorMap>() as u64).to_le_bytes(),
+                    )
+                    .required(
+                        b"tensor-map-align",
+                        &(std::mem::align_of::<sys::CUtensorMap>() as u64).to_le_bytes(),
+                    )
+                    .finish()
+            }
+        }
+    }
+
+    pub(super) fn physical_identity_digest(&self) -> Sha256Digest {
+        match self {
+            Self::EncodedV1 { data } => append_tf32_encoded_map_physical_identity(
+                self.identity_digest_header(b"tf32-tensor-map-pair-physical.v1"),
+                Tf32EncodedMapIdentity {
+                    revision: TF32_TENSOR_MAP_REVISION,
+                    maps: [data.a, data.b],
+                    keys: data.keys,
+                    allocations: data.allocations,
+                    origins: data.origins,
+                    format: data.format,
+                    route: data.route,
+                },
+            )
+            .finish(),
+            Self::ZeroReductionV1 { .. } => self.identity_digest(),
+        }
+    }
+
+    pub fn matches_binding(&self, binding: Tf32MapBinding) -> bool {
+        self.binding() == Some(binding)
+    }
+
+    pub fn validate_live_allocations(&self) -> Result<(), String> {
+        match self {
+            Self::EncodedV1 { data } => {
+                for (index, allocation) in data.allocations.into_iter().enumerate() {
+                    let name = if index == 0 { "A" } else { "B" };
+                    if allocation.requery("TF32", name)? != allocation {
+                        return Err(
+                            "TF32 input allocation identity changed since tensor-map preparation"
+                                .into(),
+                        );
+                    }
+                }
+                Ok(())
+            }
+            Self::ZeroReductionV1 { data } => {
+                if data.revision != ZERO_REDUCTION_MAP_REVISION
+                    || data.request.shape.reduction(data.request.op) != 0
+                    || !data.a.is_zero()
+                    || !data.b.is_zero()
+                {
+                    return Err("TF32 zero-reduction tensor-map sentinel changed".into());
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct Tf32EncodedMapIdentity {
+    revision: u16,
+    maps: [Tf32TensorMap; 2],
+    keys: [Tf32TensorMapKey; 2],
+    allocations: [Sm90aAllocationIdentity; 2],
+    origins: Tf32TensorOrigins,
+    format: Tf32TensorMapFormat,
+    route: Tf32PhysicalRoute,
+}
+
+fn append_tf32_encoded_map_identity(
+    digest: FramedSha256,
+    identity: Tf32EncodedMapIdentity,
+) -> FramedSha256 {
+    let mut digest = append_tf32_route_digest(
+        digest
+            .required(b"mode", b"encoded-v1")
+            .required(b"tensor-map-revision", &identity.revision.to_le_bytes())
+            .required(b"format", &[identity.format as u8])
+            .required(b"a-x", &identity.origins.a_x.to_le_bytes())
+            .required(b"a-y", &identity.origins.a_y.to_le_bytes())
+            .required(b"b-x", &identity.origins.b_x.to_le_bytes())
+            .required(b"b-y", &identity.origins.b_y.to_le_bytes())
+            .required(
+                b"tensor-map-size",
+                &(std::mem::size_of::<sys::CUtensorMap>() as u64).to_le_bytes(),
+            )
+            .required(
+                b"tensor-map-align",
+                &(std::mem::align_of::<sys::CUtensorMap>() as u64).to_le_bytes(),
+            ),
+        identity.route,
+    );
+    for index in 0..2 {
+        let key = identity.keys[index];
+        let map = identity.maps[index];
+        let map_bytes = unsafe {
+            std::slice::from_raw_parts(
+                std::ptr::from_ref(&map.0).cast::<u8>(),
+                std::mem::size_of::<sys::CUtensorMap>(),
+            )
+        };
+        digest = digest
+            .required(b"map-index", &(index as u64).to_le_bytes())
+            .required(b"key-index", &(index as u64).to_le_bytes())
+            .required(b"key-format", &[key.format as u8])
+            .required(b"base", &key.base.to_le_bytes())
+            .required(b"global-0", &key.global_dimensions[0].to_le_bytes())
+            .required(b"global-1", &key.global_dimensions[1].to_le_bytes())
+            .required(b"outer-stride", &key.outer_byte_stride.to_le_bytes())
+            .required(b"box-0", &key.box_dimensions[0].to_le_bytes())
+            .required(b"box-1", &key.box_dimensions[1].to_le_bytes())
+            .required(b"allocation-index", &(index as u64).to_le_bytes());
+        digest = identity.allocations[index]
+            .append_digest(digest)
+            .required(b"descriptor-index", &(index as u64).to_le_bytes())
+            .required(b"encoded-descriptor", map_bytes);
+    }
+    digest
+}
+
+fn append_tf32_encoded_map_physical_identity(
+    digest: FramedSha256,
+    identity: Tf32EncodedMapIdentity,
+) -> FramedSha256 {
+    let mut digest = append_tf32_route_digest(
+        digest
+            .required(b"mode", b"encoded-physical-v1")
+            .required(b"tensor-map-revision", &identity.revision.to_le_bytes())
+            .required(b"format", &[identity.format as u8])
+            .required(b"a-x", &identity.origins.a_x.to_le_bytes())
+            .required(b"a-y", &identity.origins.a_y.to_le_bytes())
+            .required(b"b-x", &identity.origins.b_x.to_le_bytes())
+            .required(b"b-y", &identity.origins.b_y.to_le_bytes())
+            .required(
+                b"tensor-map-size",
+                &(std::mem::size_of::<sys::CUtensorMap>() as u64).to_le_bytes(),
+            )
+            .required(
+                b"tensor-map-align",
+                &(std::mem::align_of::<sys::CUtensorMap>() as u64).to_le_bytes(),
+            ),
+        identity.route,
+    );
+    for index in 0..2 {
+        let key = identity.keys[index];
+        digest = digest
+            .required(b"map-index", &(index as u64).to_le_bytes())
+            .required(b"key-index", &(index as u64).to_le_bytes())
+            .required(b"key-format", &[key.format as u8])
+            .required(b"global-0", &key.global_dimensions[0].to_le_bytes())
+            .required(b"global-1", &key.global_dimensions[1].to_le_bytes())
+            .required(b"outer-stride", &key.outer_byte_stride.to_le_bytes())
+            .required(b"box-0", &key.box_dimensions[0].to_le_bytes())
+            .required(b"box-1", &key.box_dimensions[1].to_le_bytes())
+            .required(b"allocation-index", &(index as u64).to_le_bytes())
+            .required(
+                b"physical-allocation",
+                &identity.allocations[index].physical_digest(),
+            );
+    }
+    digest
+}
+
+pub(super) fn append_tf32_route_digest(
+    digest: FramedSha256,
+    route: Tf32PhysicalRoute,
+) -> FramedSha256 {
+    match route {
+        Tf32PhysicalRoute::MmaTf32RnaV1(route) => {
+            let tile = match route.tile {
+                Tf32PortableTile::M128N64 => 1,
+                Tf32PortableTile::M64N64 => 2,
+                Tf32PortableTile::M16N32 => 3,
+                Tf32PortableTile::M16N16 => 4,
+                Tf32PortableTile::M32N32 => 5,
+            };
+            digest
+                .required(b"route-family", &[1])
+                .required(b"tile", &[tile])
+                .required(b"stages", &[route.stages.count()])
+        }
+        Tf32PhysicalRoute::MmaTf32RnaSplitK4V1(route) => {
+            let tile = match route.tile {
+                Tf32PortableTile::M128N64 => 1,
+                Tf32PortableTile::M64N64 => 2,
+                Tf32PortableTile::M16N32 => 3,
+                Tf32PortableTile::M16N16 => 4,
+                Tf32PortableTile::M32N32 => 5,
+            };
+            digest
+                .required(b"route-family", &[5])
+                .required(b"tile", &[tile])
+                .required(b"stages", &[route.stages.count()])
+                .required(b"partitions", &[4])
+        }
+        Tf32PhysicalRoute::MmaTf32RnaSplitK2V1(route) => {
+            let tile = match route.tile {
+                Tf32PortableTile::M128N64 => 1,
+                Tf32PortableTile::M64N64 => 2,
+                Tf32PortableTile::M16N32 => 3,
+                Tf32PortableTile::M16N16 => 4,
+                Tf32PortableTile::M32N32 => 5,
+            };
+            digest
+                .required(b"route-family", &[6])
+                .required(b"tile", &[tile])
+                .required(b"stages", &[route.stages.count()])
+                .required(b"partitions", &[2])
+        }
+        Tf32PhysicalRoute::MmaTf32RnaSplitK8V1(route) => {
+            let tile = match route.tile {
+                Tf32PortableTile::M128N64 => 1,
+                Tf32PortableTile::M64N64 => 2,
+                Tf32PortableTile::M16N32 => 3,
+                Tf32PortableTile::M16N16 => 4,
+                Tf32PortableTile::M32N32 => 5,
+            };
+            digest
+                .required(b"route-family", &[7])
+                .required(b"tile", &[tile])
+                .required(b"stages", &[route.stages.count()])
+                .required(b"partitions", &[8])
+        }
+        Tf32PhysicalRoute::Sm90aWgmmaTf32TmaV1(route) => digest
+            .required(b"route-family", &[2])
+            .required(b"schedule-threads", &route.schedule.threads().to_le_bytes()),
+        Tf32PhysicalRoute::Sm100Tcgen05Tf32TmaV1(route) => digest
+            .required(b"route-family", &[3])
+            .required(b"tile-columns", &route.tile.output_columns().to_le_bytes())
+            .required(b"stages", &[route.stages.count()])
+            .required(b"schedule-threads", &route.schedule.threads().to_le_bytes()),
+        Tf32PhysicalRoute::Sm120TmaMmaTf32RnaV1(route) => {
+            let tile = match route.tile {
+                Tf32Sm120Tile::M128N64 => 1,
+                Tf32Sm120Tile::M64N128 => 2,
+                Tf32Sm120Tile::M64N64 => 3,
+                Tf32Sm120Tile::M80N32Bk64 => 4,
+            };
+            digest
+                .required(b"route-family", &[4])
+                .required(b"tile", &[tile])
+                .required(b"stages", &[route.stages.count()])
+        }
+    }
+}
+
+pub(super) struct Tf32TensorMapPlan {
+    pub keys: [Tf32TensorMapKey; 2],
+    pub allocations: [Sm90aAllocationIdentity; 2],
+    pub origins: Tf32TensorOrigins,
+    pub format: Tf32TensorMapFormat,
+}
+
+#[derive(Clone, Copy)]
+struct Tf32OperandLayout {
+    pointer: CUptr,
+    stride: usize,
+    width: usize,
+    rows: usize,
+    issued_coordinate_max: [usize; 2],
+    box_dimensions: [u32; 2],
+    name: &'static str,
+}
+
+fn tf32_last_tile_start(extent: usize, tile: usize, name: &str) -> Result<usize, String> {
+    if tile == 0 {
+        return Err(format!("TF32 {name} tile extent must be positive"));
+    }
+    let last = extent
+        .checked_sub(1)
+        .ok_or_else(|| format!("TF32 {name} logical extent must be positive"))?;
+    (last / tile)
+        .checked_mul(tile)
+        .ok_or_else(|| format!("TF32 {name} last tile start overflows usize"))
+}
+
+fn tf32_tail_plane_start(
+    extent: usize,
+    tile: usize,
+    plane: usize,
+    name: &str,
+) -> Result<usize, String> {
+    let tail_offset = tile
+        .checked_sub(plane)
+        .ok_or_else(|| format!("TF32 {name} tile is smaller than its issue plane"))?;
+    tf32_last_tile_start(extent, tile, name)?
+        .checked_add(tail_offset)
+        .ok_or_else(|| format!("TF32 {name} tail-plane start overflows usize"))
+}
+
+fn tf32_operand_layouts(
+    request: F32TriadRequest,
+    operands: F32TriadOperands,
+    route: Tf32PhysicalRoute,
+) -> Result<[Tf32OperandLayout; 2], String> {
+    request.shape.validate(request.op)?;
+    if request.shape.reduction(request.op) == 0 {
+        return Err("zero-reduction TF32 routes use the mapless sentinel".into());
+    }
+    if matches!(route, Tf32PhysicalRoute::MmaTf32RnaV1(_)) {
+        return Err("portable TF32 does not use tensor maps".into());
+    }
+    let spec = tf32_kernel_spec(request.op, route)?;
+    if spec.map_bk != 32 || !spec.bk.is_multiple_of(spec.map_bk) {
+        return Err(format!(
+            "unsupported TF32 logical/map BK={}/{}",
+            spec.bk, spec.map_bk
+        ));
+    }
+    let shape = request.shape;
+    let tile_rows =
+        usize::try_from(spec.tile.0).map_err(|_| "TF32 tile rows exceed usize::MAX".to_string())?;
+    let tile_columns = usize::try_from(spec.tile.1)
+        .map_err(|_| "TF32 tile columns exceed usize::MAX".to_string())?;
+    let reduction_tile = usize::try_from(spec.map_bk)
+        .map_err(|_| "TF32 reduction tile exceeds usize::MAX".to_string())?;
+    let layouts = match request.op {
+        ResolvedGemmOp::Nn => [
+            Tf32OperandLayout {
+                pointer: operands.a,
+                stride: shape.lda,
+                width: shape.k,
+                rows: shape.m,
+                issued_coordinate_max: [
+                    tf32_last_tile_start(shape.k, reduction_tile, "NN A reduction")?,
+                    tf32_last_tile_start(shape.m, tile_rows, "NN A rows")?,
+                ],
+                box_dimensions: [spec.map_bk, spec.tile.0],
+                name: "A",
+            },
+            Tf32OperandLayout {
+                pointer: operands.b,
+                stride: shape.ldb,
+                width: shape.n,
+                rows: shape.k,
+                issued_coordinate_max: [
+                    tf32_tail_plane_start(shape.n, tile_columns, reduction_tile, "NN B columns")?,
+                    tf32_last_tile_start(shape.k, reduction_tile, "NN B reduction")?,
+                ],
+                box_dimensions: [spec.map_bk, spec.map_bk],
+                name: "B",
+            },
+        ],
+        ResolvedGemmOp::Tn => [
+            Tf32OperandLayout {
+                pointer: operands.a,
+                stride: shape.lda,
+                width: shape.k,
+                rows: shape.m,
+                issued_coordinate_max: [
+                    tf32_tail_plane_start(shape.k, tile_rows, reduction_tile, "TN A columns")?,
+                    tf32_last_tile_start(shape.m, reduction_tile, "TN A reduction")?,
+                ],
+                box_dimensions: [spec.map_bk, spec.map_bk],
+                name: "A",
+            },
+            Tf32OperandLayout {
+                pointer: operands.b,
+                stride: shape.ldb,
+                width: shape.n,
+                rows: shape.m,
+                issued_coordinate_max: [
+                    tf32_tail_plane_start(shape.n, tile_columns, reduction_tile, "TN B columns")?,
+                    tf32_last_tile_start(shape.m, reduction_tile, "TN B reduction")?,
+                ],
+                box_dimensions: [spec.map_bk, spec.map_bk],
+                name: "B",
+            },
+        ],
+        ResolvedGemmOp::Nt => [
+            Tf32OperandLayout {
+                pointer: operands.a,
+                stride: shape.lda,
+                width: shape.n,
+                rows: shape.m,
+                issued_coordinate_max: [
+                    tf32_last_tile_start(shape.n, reduction_tile, "NT A reduction")?,
+                    tf32_last_tile_start(shape.m, tile_rows, "NT A rows")?,
+                ],
+                box_dimensions: [spec.map_bk, spec.tile.0],
+                name: "A",
+            },
+            Tf32OperandLayout {
+                pointer: operands.b,
+                stride: shape.ldb,
+                width: shape.n,
+                rows: shape.k,
+                issued_coordinate_max: [
+                    tf32_last_tile_start(shape.n, reduction_tile, "NT B reduction")?,
+                    tf32_last_tile_start(shape.k, tile_columns, "NT B columns")?,
+                ],
+                box_dimensions: [spec.map_bk, spec.tile.1],
+                name: "B",
+            },
+        ],
+    };
+    Ok(layouts)
+}
+
+fn validate_tf32_issued_coordinates(
+    layout: Tf32OperandLayout,
+    origin: (u64, u64),
+) -> Result<(), String> {
+    for (axis, origin, issued) in [
+        ("x", origin.0, layout.issued_coordinate_max[0]),
+        ("y", origin.1, layout.issued_coordinate_max[1]),
+    ] {
+        let issued = u64::try_from(issued).map_err(|_| {
+            format!(
+                "TF32 {} issued {axis} coordinate exceeds u64::MAX",
+                layout.name
+            )
+        })?;
+        let coordinate = origin.checked_add(issued).ok_or_else(|| {
+            format!(
+                "TF32 {} issued {axis} coordinate overflows u64",
+                layout.name
+            )
+        })?;
+        i32::try_from(coordinate).map_err(|_| {
+            format!(
+                "TF32 {} issued {axis} coordinate exceeds i32::MAX after applying the subview origin",
+                layout.name
+            )
+        })?;
+    }
+    Ok(())
+}
+
+fn tf32_subview_plan(
+    layout: Tf32OperandLayout,
+    allocation_domain: AllocationDomain,
+    format: Tf32TensorMapFormat,
+) -> Result<(Tf32TensorMapKey, Sm90aAllocationIdentity, (i32, i32)), String> {
+    if !layout.pointer.is_multiple_of(16) {
+        return Err(format!(
+            "TF32 {} TMA pointer must be 16-byte aligned",
+            layout.name
+        ));
+    }
+    let outer_byte_stride = u64::try_from(
+        layout
+            .stride
+            .checked_mul(4)
+            .ok_or_else(|| format!("TF32 {} byte stride overflows usize", layout.name))?,
+    )
+    .map_err(|_| format!("TF32 {} byte stride exceeds u64::MAX", layout.name))?;
+    let width = u64::try_from(layout.width)
+        .map_err(|_| format!("TF32 {} width exceeds u64::MAX", layout.name))?;
+    let rows = u64::try_from(layout.rows)
+        .map_err(|_| format!("TF32 {} rows exceed u64::MAX", layout.name))?;
+    let row_bytes = width
+        .checked_mul(4)
+        .ok_or_else(|| format!("TF32 {} row bytes overflow u64", layout.name))?;
+    let required_bytes = rows
+        .checked_sub(1)
+        .and_then(|prefix_rows| prefix_rows.checked_mul(outer_byte_stride))
+        .and_then(|prefix| prefix.checked_add(row_bytes))
+        .ok_or_else(|| format!("TF32 {} allocation span overflows u64", layout.name))?;
+    let logical = Sm90aAllocationIdentity::query(
+        layout.pointer,
+        required_bytes,
+        allocation_domain,
+        "TF32",
+        layout.name,
+    )?;
+    if !logical.offset_bytes.is_multiple_of(4) {
+        return Err(format!(
+            "TF32 {} subview offset must be element aligned",
+            layout.name
+        ));
+    }
+    let origin_y = logical.offset_bytes / outer_byte_stride;
+    let origin_x = (logical.offset_bytes % outer_byte_stride) / 4;
+    let stride_elements = outer_byte_stride / 4;
+    if origin_x
+        .checked_add(width)
+        .is_none_or(|end| end > stride_elements)
+    {
+        return Err(format!(
+            "TF32 {} subview crosses its physical row",
+            layout.name
+        ));
+    }
+    let global_dimensions = [
+        origin_x
+            .checked_add(width)
+            .ok_or_else(|| format!("TF32 {} inner dimension overflows u64", layout.name))?,
+        origin_y
+            .checked_add(rows)
+            .ok_or_else(|| format!("TF32 {} outer dimension overflows u64", layout.name))?,
+    ];
+    validate_tf32_issued_coordinates(layout, (origin_x, origin_y))?;
+    let key = Tf32TensorMapKey {
+        base: logical.allocation_base,
+        global_dimensions,
+        outer_byte_stride,
+        box_dimensions: layout.box_dimensions,
+        format,
+    };
+    key.validate()?;
+    Ok((
+        key,
+        logical,
+        (
+            i32::try_from(origin_x)
+                .map_err(|_| format!("TF32 {} x origin exceeds i32::MAX", layout.name))?,
+            i32::try_from(origin_y)
+                .map_err(|_| format!("TF32 {} y origin exceeds i32::MAX", layout.name))?,
+        ),
+    ))
+}
+
+pub(super) fn tf32_tensor_map_plan(
+    request: F32TriadRequest,
+    operands: F32TriadOperands,
+    route: Tf32PhysicalRoute,
+    allocation_domain: AllocationDomain,
+) -> Result<Tf32TensorMapPlan, String> {
+    let format = match route {
+        Tf32PhysicalRoute::Sm90aWgmmaTf32TmaV1(_) | Tf32PhysicalRoute::Sm100Tcgen05Tf32TmaV1(_) => {
+            Tf32TensorMapFormat::Tfloat32V1
+        }
+        Tf32PhysicalRoute::Sm120TmaMmaTf32RnaV1(_) => Tf32TensorMapFormat::Uint32V1,
+        Tf32PhysicalRoute::MmaTf32RnaV1(_)
+        | Tf32PhysicalRoute::MmaTf32RnaSplitK2V1(_)
+        | Tf32PhysicalRoute::MmaTf32RnaSplitK4V1(_)
+        | Tf32PhysicalRoute::MmaTf32RnaSplitK8V1(_) => {
+            return Err("portable TF32 does not use tensor maps".into());
+        }
+    };
+    let layouts = tf32_operand_layouts(request, operands, route)?;
+    let (a_key, a_allocation, (a_x, a_y)) =
+        tf32_subview_plan(layouts[0], allocation_domain, format)?;
+    let (b_key, b_allocation, (b_x, b_y)) =
+        tf32_subview_plan(layouts[1], allocation_domain, format)?;
+    let keys = [a_key, b_key];
+    for key in keys {
+        key.validate()?;
+    }
+    Ok(Tf32TensorMapPlan {
+        allocations: [a_allocation, b_allocation],
+        keys,
+        origins: Tf32TensorOrigins { a_x, a_y, b_x, b_y },
+        format,
+    })
+}
+
+pub(super) fn encode_tf32_tensor_maps(
+    plan: Tf32TensorMapPlan,
+    request: F32TriadRequest,
+    route: Tf32PhysicalRoute,
+    binding: Tf32MapBinding,
+) -> Result<F32PreparedTensorMaps, String> {
+    Ok(F32PreparedTensorMaps::EncodedV1 {
+        data: Box::new(F32EncodedTensorMaps {
+            a: Tf32TensorMap::encode(plan.keys[0])?,
+            b: Tf32TensorMap::encode(plan.keys[1])?,
+            keys: plan.keys,
+            request,
+            route,
+            binding,
+            allocations: plan.allocations,
+            origins: plan.origins,
+            format: plan.format,
+        }),
+    })
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct F32LaunchResourceSnapshot {
+    output: Sm90aAllocationIdentity,
+    bias: Option<Sm90aAllocationIdentity>,
+    inputs: Option<[Sm90aAllocationIdentity; 2]>,
+    split_scratch: Option<Sm90aAllocationIdentity>,
+    transpose_scratch: Option<Sm90aAllocationIdentity>,
+    coordination_scratch: Option<Sm90aAllocationIdentity>,
+}
+
+impl F32LaunchResourceSnapshot {
+    pub(super) fn physical_digest(self) -> Sha256Digest {
+        let mut digest = FramedSha256::new(b"f32-triad-physical-resources.v1")
+            .required(b"output", &self.output.physical_digest());
+        for (role, identity) in [
+            (b"bias".as_slice(), self.bias),
+            (b"A".as_slice(), self.inputs.map(|inputs| inputs[0])),
+            (b"B".as_slice(), self.inputs.map(|inputs| inputs[1])),
+            (b"split-scratch".as_slice(), self.split_scratch),
+            (b"transpose-scratch".as_slice(), self.transpose_scratch),
+            (
+                b"coordination-scratch".as_slice(),
+                self.coordination_scratch,
+            ),
+        ] {
+            digest = match identity {
+                Some(identity) => digest.optional(role, Some(&identity.physical_digest())),
+                None => digest.optional(role, None),
+            };
+        }
+        digest.finish()
+    }
+
+    pub(super) fn managed_epoch(self) -> Option<ManagedAllocationEpochStamp> {
+        let mut ranges = [(0_u64, 0_u64); 4];
+        let mut count = 0;
+        for identity in [
+            Some(self.output),
+            self.bias,
+            self.inputs.map(|inputs| inputs[0]),
+            self.inputs.map(|inputs| inputs[1]),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if identity.allocation_domain != self.output.allocation_domain {
+                return None;
+            }
+            ranges[count] = (
+                identity
+                    .allocation_base
+                    .checked_add(identity.offset_bytes)?,
+                identity.required_bytes,
+            );
+            count += 1;
+        }
+        managed_allocation_epoch_for_ranges(
+            self.output.allocation_domain.context_handle,
+            &ranges[..count],
+        )
+    }
+
+    pub(super) fn query_output(
+        request: F32TriadRequest,
+        operands: F32TriadOperands,
+        allocation_domain: AllocationDomain,
+    ) -> Result<Self, String> {
+        let rows = request.shape.output_rows(request.op);
+        let columns = request.shape.output_columns(request.op);
+        let output_bytes =
+            matrix_span_bytes(rows, columns, request.shape.ldc, 4, "f32 Triad output")?;
+        let output = Sm90aAllocationIdentity::query(
+            operands.output,
+            output_bytes,
+            allocation_domain,
+            "f32 Triad",
+            "output",
+        )?;
+        let bias = match operands.bias {
+            Some(pointer) => {
+                let bytes = u64::try_from(columns)
+                    .ok()
+                    .and_then(|columns| columns.checked_mul(4))
+                    .ok_or_else(|| "f32 Triad bias allocation span overflows u64".to_string())?;
+                Some(Sm90aAllocationIdentity::query(
+                    pointer,
+                    bytes,
+                    allocation_domain,
+                    "f32 Triad",
+                    "bias",
+                )?)
+            }
+            None => None,
+        };
+        if bias.is_some_and(|bias| output.requested_range_overlaps(bias)) {
+            return Err("f32 Triad output overlaps the requested bias range".into());
+        }
+        Ok(Self {
+            output,
+            bias,
+            inputs: None,
+            split_scratch: None,
+            transpose_scratch: None,
+            coordination_scratch: None,
+        })
+    }
+
+    pub(super) fn with_inputs(
+        mut self,
+        request: F32TriadRequest,
+        operands: F32TriadOperands,
+        allocation_domain: AllocationDomain,
+    ) -> Result<Self, String> {
+        let shape = request.shape;
+        let ((a_rows, a_columns), (b_rows, b_columns)) = match request.op {
+            ResolvedGemmOp::Nn => ((shape.m, shape.k), (shape.k, shape.n)),
+            ResolvedGemmOp::Tn => ((shape.m, shape.k), (shape.m, shape.n)),
+            ResolvedGemmOp::Nt => ((shape.m, shape.n), (shape.k, shape.n)),
+        };
+        let a_bytes = matrix_span_bytes(a_rows, a_columns, shape.lda, 4, "f32 Triad A")?;
+        let b_bytes = matrix_span_bytes(b_rows, b_columns, shape.ldb, 4, "f32 Triad B")?;
+        let inputs = [
+            Sm90aAllocationIdentity::query(
+                operands.a,
+                a_bytes,
+                allocation_domain,
+                "f32 Triad",
+                "A",
+            )?,
+            Sm90aAllocationIdentity::query(
+                operands.b,
+                b_bytes,
+                allocation_domain,
+                "f32 Triad",
+                "B",
+            )?,
+        ];
+        for (input, name) in [(inputs[0], "A"), (inputs[1], "B")] {
+            if self.output.requested_range_overlaps(input) {
+                return Err(format!(
+                    "f32 Triad output overlaps the requested {name} input range"
+                ));
+            }
+        }
+        self.inputs = Some(inputs);
+        Ok(self)
+    }
+
+    pub(super) fn with_scratch(
+        mut self,
+        split: Option<(CUptr, u64)>,
+        transpose: Option<(CUptr, u64)>,
+        coordination: Option<(CUptr, u64)>,
+        allocation_domain: AllocationDomain,
+    ) -> Result<Self, String> {
+        self.split_scratch = split
+            .map(|(pointer, bytes)| {
+                Sm90aAllocationIdentity::query(
+                    pointer,
+                    bytes,
+                    allocation_domain,
+                    "f32 Triad",
+                    "split scratch",
+                )
+            })
+            .transpose()?;
+        self.transpose_scratch = transpose
+            .map(|(pointer, bytes)| {
+                Sm90aAllocationIdentity::query(
+                    pointer,
+                    bytes,
+                    allocation_domain,
+                    "f32 Triad",
+                    "transpose scratch",
+                )
+            })
+            .transpose()?;
+        self.coordination_scratch = coordination
+            .map(|(pointer, bytes)| {
+                Sm90aAllocationIdentity::query(
+                    pointer,
+                    bytes,
+                    allocation_domain,
+                    "f32 Triad",
+                    "coordination scratch",
+                )
+            })
+            .transpose()?;
+        Ok(self)
+    }
+
+    pub(super) fn validate_live(self) -> Result<(), String> {
+        for (identity, name) in [
+            (Some(self.output), "output"),
+            (self.bias, "bias"),
+            (self.inputs.map(|inputs| inputs[0]), "A"),
+            (self.inputs.map(|inputs| inputs[1]), "B"),
+            (self.split_scratch, "split scratch"),
+            (self.transpose_scratch, "transpose scratch"),
+            (self.coordination_scratch, "coordination scratch"),
+        ] {
+            if let Some(identity) = identity
+                && identity.requery("f32 Triad", name)? != identity
+            {
+                return Err(format!(
+                    "f32 Triad {name} allocation identity changed since preparation"
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    pub(super) fn digest(
+        self,
+        request: F32TriadRequest,
+        operands: F32TriadOperands,
+        tensor_maps_digest: Sha256Digest,
+    ) -> Sha256Digest {
+        let bias_pointer = operands.bias.map(CUptr::to_le_bytes);
+        let mut digest = self
+            .output
+            .append_digest(FramedSha256::new(b"f32-triad-launch-resources.v1"))
+            .required(b"op", &[request.op as u8])
+            .required(b"m", &(request.shape.m as u64).to_le_bytes())
+            .required(b"k", &(request.shape.k as u64).to_le_bytes())
+            .required(b"n", &(request.shape.n as u64).to_le_bytes())
+            .required(b"lda", &(request.shape.lda as u64).to_le_bytes())
+            .required(b"ldb", &(request.shape.ldb as u64).to_le_bytes())
+            .required(b"ldc", &(request.shape.ldc as u64).to_le_bytes())
+            .required(b"tensor-maps", &tensor_maps_digest)
+            .required(b"output-pointer", &operands.output.to_le_bytes())
+            .optional(
+                b"bias-pointer",
+                bias_pointer.as_ref().map(<[u8; 8]>::as_slice),
+            )
+            .required(b"alpha", &operands.alpha.to_bits().to_le_bytes())
+            .required(b"beta", &operands.beta.to_bits().to_le_bytes());
+        for identity in [
+            self.bias,
+            self.inputs.map(|inputs| inputs[0]),
+            self.inputs.map(|inputs| inputs[1]),
+            self.split_scratch,
+            self.transpose_scratch,
+            self.coordination_scratch,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            digest = identity.append_digest(digest);
+        }
+        digest.finish()
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Tf32PortableTile {
     M128N64,
     M64N64,
     M16N32,
+    M16N16,
+    M32N32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -175,6 +1349,7 @@ impl Tf32PortableRoute {
                 Tf32PortableTile::M128N64 | Tf32PortableTile::M64N64,
                 Tf32PortableStages::S2 | Tf32PortableStages::S3
             ) | (Tf32PortableTile::M16N32, Tf32PortableStages::S4)
+                | (Tf32PortableTile::M16N16, Tf32PortableStages::S4)
         ) {
             Ok(())
         } else {
@@ -199,17 +1374,39 @@ pub struct Tf32Sm100Route {
 pub enum Tf32Sm120Tile {
     M128N64,
     M64N128,
+    M64N64,
+    M80N32Bk64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Tf32Sm120Stages {
+    S2,
+    S3,
+    S4,
+}
+
+impl Tf32Sm120Stages {
+    pub const fn count(self) -> u8 {
+        match self {
+            Self::S2 => 2,
+            Self::S3 => 3,
+            Self::S4 => 4,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Tf32Sm120Route {
     pub tile: Tf32Sm120Tile,
-    pub stages: Sm120Stages,
+    pub stages: Tf32Sm120Stages,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Tf32PhysicalRoute {
     MmaTf32RnaV1(Tf32PortableRoute),
+    MmaTf32RnaSplitK2V1(Tf32PortableRoute),
+    MmaTf32RnaSplitK4V1(Tf32PortableRoute),
+    MmaTf32RnaSplitK8V1(Tf32PortableRoute),
     Sm90aWgmmaTf32TmaV1(Tf32Sm90aRoute),
     Sm100Tcgen05Tf32TmaV1(Tf32Sm100Route),
     Sm120TmaMmaTf32RnaV1(Tf32Sm120Route),
@@ -218,7 +1415,10 @@ pub enum Tf32PhysicalRoute {
 impl Tf32PhysicalRoute {
     pub const fn module_kind(self) -> ModuleKind {
         match self {
-            Self::MmaTf32RnaV1(_) => ModuleKind::TriadSm80,
+            Self::MmaTf32RnaV1(_)
+            | Self::MmaTf32RnaSplitK2V1(_)
+            | Self::MmaTf32RnaSplitK4V1(_)
+            | Self::MmaTf32RnaSplitK8V1(_) => ModuleKind::TriadSm80,
             Self::Sm90aWgmmaTf32TmaV1(_) => ModuleKind::TriadSm90a,
             Self::Sm100Tcgen05Tf32TmaV1(_) => ModuleKind::TriadSm100,
             Self::Sm120TmaMmaTf32RnaV1(_) => ModuleKind::TriadSm120,
@@ -259,11 +1459,208 @@ pub struct Tf32KernelSpec {
     pub operand_conversion: ResolvedOperandConversion,
     pub tile: (u32, u32),
     pub bk: u32,
+    pub map_bk: u32,
     pub stages: u8,
     pub threads: u32,
     pub dynamic_shared_bytes: u32,
     pub tensor_map_revision: u16,
     pub schedule_revision: u16,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Tf32SplitKSpec {
+    pub op: ResolvedGemmOp,
+    pub route: Tf32PhysicalRoute,
+    pub symbol: &'static str,
+    pub tile: (u32, u32),
+    pub bk: u32,
+    pub stages: u8,
+    pub partitions: u32,
+    pub threads: u32,
+    pub dynamic_shared_bytes: u32,
+    pub register_cap: u32,
+    pub occupancy_gate: u32,
+}
+
+pub const TF32_SPLITK2_SPEC: Tf32SplitKSpec = Tf32SplitKSpec {
+    op: ResolvedGemmOp::Nn,
+    route: Tf32PhysicalRoute::MmaTf32RnaSplitK2V1(Tf32PortableRoute {
+        tile: Tf32PortableTile::M16N32,
+        stages: Tf32PortableStages::S4,
+    }),
+    symbol: "gemm_bi_nn_sm80_mma_tf32_splitk2_v1_m16n32_bk32_s4",
+    tile: (16, 32),
+    bk: 32,
+    stages: 4,
+    partitions: 2,
+    threads: 128,
+    dynamic_shared_bytes: 29_696,
+    register_cap: 128,
+    occupancy_gate: 3,
+};
+
+pub const TF32_SPLITK4_SPEC: Tf32SplitKSpec = Tf32SplitKSpec {
+    op: ResolvedGemmOp::Nn,
+    route: Tf32PhysicalRoute::MmaTf32RnaSplitK4V1(Tf32PortableRoute {
+        tile: Tf32PortableTile::M16N32,
+        stages: Tf32PortableStages::S4,
+    }),
+    symbol: "gemm_bi_nn_sm80_mma_tf32_splitk4_v1_m16n32_bk32_s4",
+    tile: (16, 32),
+    bk: 32,
+    stages: 4,
+    partitions: 4,
+    threads: 128,
+    dynamic_shared_bytes: 29_696,
+    register_cap: 128,
+    occupancy_gate: 3,
+};
+
+pub const TF32_NT_SPLITK4_S3_SPEC: Tf32SplitKSpec = Tf32SplitKSpec {
+    op: ResolvedGemmOp::Nt,
+    route: Tf32PhysicalRoute::MmaTf32RnaSplitK4V1(Tf32PortableRoute {
+        tile: Tf32PortableTile::M16N32,
+        stages: Tf32PortableStages::S3,
+    }),
+    symbol: "gemm_bi_nt_sm80_mma_tf32_splitk4_v1_m16n32_bk32_s3",
+    tile: (16, 32),
+    bk: 32,
+    stages: 3,
+    partitions: 4,
+    threads: 128,
+    dynamic_shared_bytes: 20_736,
+    register_cap: 96,
+    occupancy_gate: 3,
+};
+
+pub const TF32_NT_SPLITK4_S4_SPEC: Tf32SplitKSpec = Tf32SplitKSpec {
+    op: ResolvedGemmOp::Nt,
+    route: Tf32PhysicalRoute::MmaTf32RnaSplitK4V1(Tf32PortableRoute {
+        tile: Tf32PortableTile::M16N32,
+        stages: Tf32PortableStages::S4,
+    }),
+    symbol: "gemm_bi_nt_sm80_mma_tf32_splitk4_v1_m16n32_bk32_s4",
+    tile: (16, 32),
+    bk: 32,
+    stages: 4,
+    partitions: 4,
+    threads: 128,
+    dynamic_shared_bytes: 27_648,
+    register_cap: 96,
+    occupancy_gate: 3,
+};
+
+pub const TF32_NT_SPLITK8_S3_SPEC: Tf32SplitKSpec = Tf32SplitKSpec {
+    op: ResolvedGemmOp::Nt,
+    route: Tf32PhysicalRoute::MmaTf32RnaSplitK8V1(Tf32PortableRoute {
+        tile: Tf32PortableTile::M32N32,
+        stages: Tf32PortableStages::S3,
+    }),
+    symbol: "gemm_bi_nt_sm80_mma_tf32_splitk8_v1_m32n32_bk32_s3",
+    tile: (32, 32),
+    bk: 32,
+    stages: 3,
+    partitions: 8,
+    threads: 128,
+    dynamic_shared_bytes: 27_648,
+    register_cap: 96,
+    occupancy_gate: 3,
+};
+
+pub const TF32_NT_SPLITK8_S4_SPEC: Tf32SplitKSpec = Tf32SplitKSpec {
+    op: ResolvedGemmOp::Nt,
+    route: Tf32PhysicalRoute::MmaTf32RnaSplitK8V1(Tf32PortableRoute {
+        tile: Tf32PortableTile::M32N32,
+        stages: Tf32PortableStages::S4,
+    }),
+    symbol: "gemm_bi_nt_sm80_mma_tf32_splitk8_v1_m32n32_bk32_s4",
+    tile: (32, 32),
+    bk: 32,
+    stages: 4,
+    partitions: 8,
+    threads: 128,
+    dynamic_shared_bytes: 36_864,
+    register_cap: 96,
+    occupancy_gate: 2,
+};
+
+pub const TF32_SPLITK_CANDIDATE_SPECS: [Tf32SplitKSpec; 6] = [
+    TF32_SPLITK2_SPEC,
+    TF32_SPLITK4_SPEC,
+    TF32_NT_SPLITK4_S3_SPEC,
+    TF32_NT_SPLITK4_S4_SPEC,
+    TF32_NT_SPLITK8_S3_SPEC,
+    TF32_NT_SPLITK8_S4_SPEC,
+];
+
+pub fn tf32_splitk_spec(
+    op: ResolvedGemmOp,
+    route: Tf32PhysicalRoute,
+) -> Result<&'static Tf32SplitKSpec, String> {
+    TF32_SPLITK_CANDIDATE_SPECS
+        .iter()
+        .find(|spec| spec.op == op && spec.route == route)
+        .ok_or_else(|| format!("no TF32 split-K kernel matches {op:?}/{route:?}"))
+}
+
+pub fn tf32_splitk_partition_bounds(
+    reduction: usize,
+    partitions: u32,
+    partition: u32,
+) -> Result<(usize, usize), String> {
+    const BK: usize = 32;
+    if !matches!(partitions, 2 | 4 | 8) {
+        return Err(format!(
+            "TF32 split-K partition count {partitions} is unsupported"
+        ));
+    }
+    if partition >= partitions {
+        return Err(format!(
+            "TF32 split-K partition {partition} is out of range for {partitions} partitions"
+        ));
+    }
+    let tiles = reduction.div_ceil(BK);
+    let partitions = partitions as usize;
+    let partition = partition as usize;
+    let tiles_per_partition = tiles.div_ceil(partitions);
+    let begin_tile = tiles_per_partition
+        .checked_mul(partition)
+        .ok_or_else(|| "TF32 split-K begin tile overflows usize".to_string())?
+        .min(tiles);
+    let end_tile = tiles_per_partition
+        .checked_mul(partition + 1)
+        .ok_or_else(|| "TF32 split-K end tile overflows usize".to_string())?
+        .min(tiles);
+    Ok((
+        begin_tile
+            .checked_mul(BK)
+            .ok_or_else(|| "TF32 split-K begin offset overflows usize".to_string())?
+            .min(reduction),
+        end_tile
+            .checked_mul(BK)
+            .ok_or_else(|| "TF32 split-K end offset overflows usize".to_string())?
+            .min(reduction),
+    ))
+}
+
+const fn portable_tf32_dynamic_shared_bytes(
+    op: ResolvedGemmOp,
+    tile: Tf32PortableTile,
+    stages: Tf32PortableStages,
+) -> u32 {
+    let stage_bytes = match (op, tile) {
+        (ResolvedGemmOp::Nn | ResolvedGemmOp::Nt, Tf32PortableTile::M128N64) => 27_648,
+        (ResolvedGemmOp::Tn, Tf32PortableTile::M128N64) => 26_624,
+        (_, Tf32PortableTile::M64N64) => 18_432,
+        (ResolvedGemmOp::Nn, Tf32PortableTile::M16N32) => 7_424,
+        (ResolvedGemmOp::Tn, Tf32PortableTile::M16N32) => 8_192,
+        (ResolvedGemmOp::Nt, Tf32PortableTile::M16N32) => 6_912,
+        (ResolvedGemmOp::Nn, Tf32PortableTile::M16N16) => 5_376,
+        (ResolvedGemmOp::Tn, Tf32PortableTile::M16N16) => 6_144,
+        (ResolvedGemmOp::Nt, Tf32PortableTile::M16N16) => 4_608,
+        (_, Tf32PortableTile::M32N32) => 9_216,
+    };
+    stage_bytes * stages.count() as u32
 }
 
 macro_rules! portable_tf32_specs {
@@ -275,18 +1672,23 @@ macro_rules! portable_tf32_specs {
                     tile: Tf32PortableTile::M128N64,
                     stages: Tf32PortableStages::S2,
                 }),
-                symbol: concat!("sgemm_bi_", $op_name, "_sm80_mma_tf32_v1_m128n64_bk32_s2"),
+                symbol: concat!("gemm_bi_", $op_name, "_sm80_mma_tf32_v1_m128n64_bk32_s2"),
                 module_kind: ModuleKind::TriadSm80,
                 instruction_family: ResolvedInstructionFamily::MmaSync,
                 instruction_shape: ResolvedInstructionShape { m: 16, n: 8, k: 8 },
                 operand_conversion: ResolvedOperandConversion::RegisterCvtRnaTf32F32V1,
                 tile: (128, 64),
                 bk: 32,
+                map_bk: 32,
                 stages: 2,
                 threads: 256,
-                dynamic_shared_bytes: 55_296,
+                dynamic_shared_bytes: portable_tf32_dynamic_shared_bytes(
+                    $op,
+                    Tf32PortableTile::M128N64,
+                    Tf32PortableStages::S2,
+                ),
                 tensor_map_revision: 0,
-                schedule_revision: TF32_SCHEDULE_REVISION,
+                schedule_revision: TF32_PORTABLE_SCHEDULE_REVISION,
             },
             Tf32KernelSpec {
                 op: $op,
@@ -294,18 +1696,23 @@ macro_rules! portable_tf32_specs {
                     tile: Tf32PortableTile::M128N64,
                     stages: Tf32PortableStages::S3,
                 }),
-                symbol: concat!("sgemm_bi_", $op_name, "_sm80_mma_tf32_v1_m128n64_bk32_s3"),
+                symbol: concat!("gemm_bi_", $op_name, "_sm80_mma_tf32_v1_m128n64_bk32_s3"),
                 module_kind: ModuleKind::TriadSm80,
                 instruction_family: ResolvedInstructionFamily::MmaSync,
                 instruction_shape: ResolvedInstructionShape { m: 16, n: 8, k: 8 },
                 operand_conversion: ResolvedOperandConversion::RegisterCvtRnaTf32F32V1,
                 tile: (128, 64),
                 bk: 32,
+                map_bk: 32,
                 stages: 3,
                 threads: 256,
-                dynamic_shared_bytes: 82_944,
+                dynamic_shared_bytes: portable_tf32_dynamic_shared_bytes(
+                    $op,
+                    Tf32PortableTile::M128N64,
+                    Tf32PortableStages::S3,
+                ),
                 tensor_map_revision: 0,
-                schedule_revision: TF32_SCHEDULE_REVISION,
+                schedule_revision: TF32_PORTABLE_SCHEDULE_REVISION,
             },
             Tf32KernelSpec {
                 op: $op,
@@ -313,18 +1720,23 @@ macro_rules! portable_tf32_specs {
                     tile: Tf32PortableTile::M64N64,
                     stages: Tf32PortableStages::S2,
                 }),
-                symbol: concat!("sgemm_bi_", $op_name, "_sm80_mma_tf32_v1_m64n64_bk32_s2"),
+                symbol: concat!("gemm_bi_", $op_name, "_sm80_mma_tf32_v1_m64n64_bk32_s2"),
                 module_kind: ModuleKind::TriadSm80,
                 instruction_family: ResolvedInstructionFamily::MmaSync,
                 instruction_shape: ResolvedInstructionShape { m: 16, n: 8, k: 8 },
                 operand_conversion: ResolvedOperandConversion::RegisterCvtRnaTf32F32V1,
                 tile: (64, 64),
                 bk: 32,
+                map_bk: 32,
                 stages: 2,
                 threads: 128,
-                dynamic_shared_bytes: 36_864,
+                dynamic_shared_bytes: portable_tf32_dynamic_shared_bytes(
+                    $op,
+                    Tf32PortableTile::M64N64,
+                    Tf32PortableStages::S2,
+                ),
                 tensor_map_revision: 0,
-                schedule_revision: TF32_SCHEDULE_REVISION,
+                schedule_revision: TF32_PORTABLE_SCHEDULE_REVISION,
             },
             Tf32KernelSpec {
                 op: $op,
@@ -332,18 +1744,23 @@ macro_rules! portable_tf32_specs {
                     tile: Tf32PortableTile::M64N64,
                     stages: Tf32PortableStages::S3,
                 }),
-                symbol: concat!("sgemm_bi_", $op_name, "_sm80_mma_tf32_v1_m64n64_bk32_s3"),
+                symbol: concat!("gemm_bi_", $op_name, "_sm80_mma_tf32_v1_m64n64_bk32_s3"),
                 module_kind: ModuleKind::TriadSm80,
                 instruction_family: ResolvedInstructionFamily::MmaSync,
                 instruction_shape: ResolvedInstructionShape { m: 16, n: 8, k: 8 },
                 operand_conversion: ResolvedOperandConversion::RegisterCvtRnaTf32F32V1,
                 tile: (64, 64),
                 bk: 32,
+                map_bk: 32,
                 stages: 3,
                 threads: 128,
-                dynamic_shared_bytes: 55_296,
+                dynamic_shared_bytes: portable_tf32_dynamic_shared_bytes(
+                    $op,
+                    Tf32PortableTile::M64N64,
+                    Tf32PortableStages::S3,
+                ),
                 tensor_map_revision: 0,
-                schedule_revision: TF32_SCHEDULE_REVISION,
+                schedule_revision: TF32_PORTABLE_SCHEDULE_REVISION,
             },
             Tf32KernelSpec {
                 op: $op,
@@ -351,18 +1768,47 @@ macro_rules! portable_tf32_specs {
                     tile: Tf32PortableTile::M16N32,
                     stages: Tf32PortableStages::S4,
                 }),
-                symbol: concat!("sgemm_bi_", $op_name, "_sm80_mma_tf32_v1_m16n32_bk32_s4"),
+                symbol: concat!("gemm_bi_", $op_name, "_sm80_mma_tf32_v1_m16n32_bk32_s4"),
                 module_kind: ModuleKind::TriadSm80,
                 instruction_family: ResolvedInstructionFamily::MmaSync,
                 instruction_shape: ResolvedInstructionShape { m: 16, n: 8, k: 8 },
                 operand_conversion: ResolvedOperandConversion::RegisterCvtRnaTf32F32V1,
                 tile: (16, 32),
                 bk: 32,
+                map_bk: 32,
                 stages: 4,
                 threads: 128,
-                dynamic_shared_bytes: 29_696,
+                dynamic_shared_bytes: portable_tf32_dynamic_shared_bytes(
+                    $op,
+                    Tf32PortableTile::M16N32,
+                    Tf32PortableStages::S4,
+                ),
                 tensor_map_revision: 0,
-                schedule_revision: TF32_SCHEDULE_REVISION,
+                schedule_revision: TF32_PORTABLE_SCHEDULE_REVISION,
+            },
+            Tf32KernelSpec {
+                op: $op,
+                route: Tf32PhysicalRoute::MmaTf32RnaV1(Tf32PortableRoute {
+                    tile: Tf32PortableTile::M16N16,
+                    stages: Tf32PortableStages::S4,
+                }),
+                symbol: concat!("gemm_bi_", $op_name, "_sm80_mma_tf32_v1_m16n16_bk32_s4"),
+                module_kind: ModuleKind::TriadSm80,
+                instruction_family: ResolvedInstructionFamily::MmaSync,
+                instruction_shape: ResolvedInstructionShape { m: 16, n: 8, k: 8 },
+                operand_conversion: ResolvedOperandConversion::RegisterCvtRnaTf32F32V1,
+                tile: (16, 16),
+                bk: 32,
+                map_bk: 32,
+                stages: 4,
+                threads: 64,
+                dynamic_shared_bytes: portable_tf32_dynamic_shared_bytes(
+                    $op,
+                    Tf32PortableTile::M16N16,
+                    Tf32PortableStages::S4,
+                ),
+                tensor_map_revision: 0,
+                schedule_revision: TF32_PORTABLE_SCHEDULE_REVISION,
             },
         ]
     };
@@ -377,7 +1823,7 @@ macro_rules! sm90a_tf32_specs {
                     schedule: Sm90aWarpgroupSchedule::Wg1,
                 }),
                 symbol: concat!(
-                    "sgemm_bi_",
+                    "gemm_bi_",
                     $op_name,
                     "_sm90a_wgmma_tf32_v1_m64n128_bk32_s3_wg1"
                 ),
@@ -391,6 +1837,7 @@ macro_rules! sm90a_tf32_specs {
                 operand_conversion: ResolvedOperandConversion::TensorMapTfloat32V1,
                 tile: (64, 128),
                 bk: 32,
+                map_bk: 32,
                 stages: 3,
                 threads: 128,
                 dynamic_shared_bytes: 73_984,
@@ -403,7 +1850,7 @@ macro_rules! sm90a_tf32_specs {
                     schedule: Sm90aWarpgroupSchedule::Wg2,
                 }),
                 symbol: concat!(
-                    "sgemm_bi_",
+                    "gemm_bi_",
                     $op_name,
                     "_sm90a_wgmma_tf32_v1_m64n128_bk32_s3_wg2"
                 ),
@@ -417,6 +1864,7 @@ macro_rules! sm90a_tf32_specs {
                 operand_conversion: ResolvedOperandConversion::TensorMapTfloat32V1,
                 tile: (64, 128),
                 bk: 32,
+                map_bk: 32,
                 stages: 3,
                 threads: 256,
                 dynamic_shared_bytes: 73_984,
@@ -437,7 +1885,7 @@ macro_rules! sm100_tf32_spec {
                 schedule: $schedule,
             }),
             symbol: concat!(
-                "sgemm_bi_",
+                "gemm_bi_",
                 $op_name,
                 "_sm100_tcgen_tf32_v1_m128n",
                 $n,
@@ -456,6 +1904,7 @@ macro_rules! sm100_tf32_spec {
             operand_conversion: ResolvedOperandConversion::TensorMapTfloat32V1,
             tile: (128, $n),
             bk: 32,
+            map_bk: 32,
             stages: $s,
             threads: $threads,
             dynamic_shared_bytes: $shared,
@@ -625,7 +2074,7 @@ macro_rules! sm120_tf32_spec {
                 stages: $stage,
             }),
             symbol: concat!(
-                "sgemm_bi_",
+                "gemm_bi_",
                 $op_name,
                 "_sm120_tma_mma_tf32_v1_",
                 $tile_name,
@@ -639,10 +2088,17 @@ macro_rules! sm120_tf32_spec {
             tile: match $tile {
                 Tf32Sm120Tile::M128N64 => (128, 64),
                 Tf32Sm120Tile::M64N128 => (64, 128),
+                Tf32Sm120Tile::M64N64 => (64, 64),
+                Tf32Sm120Tile::M80N32Bk64 => (80, 32),
             },
             bk: 32,
+            map_bk: 32,
             stages: $s,
-            threads: 256,
+            threads: match $tile {
+                Tf32Sm120Tile::M64N64 => 128,
+                Tf32Sm120Tile::M128N64 | Tf32Sm120Tile::M64N128 => 256,
+                Tf32Sm120Tile::M80N32Bk64 => 160,
+            },
             dynamic_shared_bytes: $shared,
             tensor_map_revision: TF32_TENSOR_MAP_REVISION,
             schedule_revision: TF32_SCHEDULE_REVISION,
@@ -658,7 +2114,7 @@ macro_rules! sm120_tf32_specs {
                 $op_name,
                 Tf32Sm120Tile::M128N64,
                 "m128n64",
-                Sm120Stages::S2,
+                Tf32Sm120Stages::S2,
                 2,
                 49_280
             ),
@@ -667,7 +2123,7 @@ macro_rules! sm120_tf32_specs {
                 $op_name,
                 Tf32Sm120Tile::M128N64,
                 "m128n64",
-                Sm120Stages::S3,
+                Tf32Sm120Stages::S3,
                 3,
                 73_856
             ),
@@ -676,7 +2132,7 @@ macro_rules! sm120_tf32_specs {
                 $op_name,
                 Tf32Sm120Tile::M64N128,
                 "m64n128",
-                Sm120Stages::S2,
+                Tf32Sm120Stages::S2,
                 2,
                 49_280
             ),
@@ -685,33 +2141,45 @@ macro_rules! sm120_tf32_specs {
                 $op_name,
                 Tf32Sm120Tile::M64N128,
                 "m64n128",
-                Sm120Stages::S3,
+                Tf32Sm120Stages::S3,
                 3,
                 73_856
+            ),
+            sm120_tf32_spec!(
+                $op,
+                $op_name,
+                Tf32Sm120Tile::M64N64,
+                "m64n64",
+                Tf32Sm120Stages::S2,
+                2,
+                32_896
             ),
         ]
     };
 }
 
-const SM80_TF32_NN: [Tf32KernelSpec; 5] = portable_tf32_specs!(ResolvedGemmOp::Nn, "nn");
-const SM80_TF32_TN: [Tf32KernelSpec; 5] = portable_tf32_specs!(ResolvedGemmOp::Tn, "tn");
-const SM80_TF32_NT: [Tf32KernelSpec; 5] = portable_tf32_specs!(ResolvedGemmOp::Nt, "nt");
-pub const SM80_TF32_ROUTE_SPECS: [Tf32KernelSpec; 15] = [
+const SM80_TF32_NN: [Tf32KernelSpec; 6] = portable_tf32_specs!(ResolvedGemmOp::Nn, "nn");
+const SM80_TF32_TN: [Tf32KernelSpec; 6] = portable_tf32_specs!(ResolvedGemmOp::Tn, "tn");
+const SM80_TF32_NT: [Tf32KernelSpec; 6] = portable_tf32_specs!(ResolvedGemmOp::Nt, "nt");
+pub const SM80_TF32_ROUTE_SPECS: [Tf32KernelSpec; 18] = [
     SM80_TF32_NN[0],
     SM80_TF32_NN[1],
     SM80_TF32_NN[2],
     SM80_TF32_NN[3],
     SM80_TF32_NN[4],
+    SM80_TF32_NN[5],
     SM80_TF32_TN[0],
     SM80_TF32_TN[1],
     SM80_TF32_TN[2],
     SM80_TF32_TN[3],
     SM80_TF32_TN[4],
+    SM80_TF32_TN[5],
     SM80_TF32_NT[0],
     SM80_TF32_NT[1],
     SM80_TF32_NT[2],
     SM80_TF32_NT[3],
     SM80_TF32_NT[4],
+    SM80_TF32_NT[5],
 ];
 
 const SM90A_TF32_NN: [Tf32KernelSpec; 2] = sm90a_tf32_specs!(ResolvedGemmOp::Nn, "nn");
@@ -768,22 +2236,69 @@ pub const SM100_TF32_ROUTE_SPECS: [Tf32KernelSpec; 36] = [
     SM100_TF32_NT[11],
 ];
 
-const SM120_TF32_NN: [Tf32KernelSpec; 4] = sm120_tf32_specs!(ResolvedGemmOp::Nn, "nn");
-const SM120_TF32_TN: [Tf32KernelSpec; 4] = sm120_tf32_specs!(ResolvedGemmOp::Tn, "tn");
-const SM120_TF32_NT: [Tf32KernelSpec; 4] = sm120_tf32_specs!(ResolvedGemmOp::Nt, "nt");
-pub const SM120_TF32_ROUTE_SPECS: [Tf32KernelSpec; 12] = [
+const SM120_TF32_NN: [Tf32KernelSpec; 5] = sm120_tf32_specs!(ResolvedGemmOp::Nn, "nn");
+const SM120_TF32_TN: [Tf32KernelSpec; 5] = sm120_tf32_specs!(ResolvedGemmOp::Tn, "tn");
+const SM120_TF32_NT: [Tf32KernelSpec; 5] = sm120_tf32_specs!(ResolvedGemmOp::Nt, "nt");
+const SM120_TF32_TN_M64N128_S4_PAIR: Tf32KernelSpec = Tf32KernelSpec {
+    op: ResolvedGemmOp::Tn,
+    route: Tf32PhysicalRoute::Sm120TmaMmaTf32RnaV1(Tf32Sm120Route {
+        tile: Tf32Sm120Tile::M64N128,
+        stages: Tf32Sm120Stages::S4,
+    }),
+    symbol: "gemm_bi_tn_sm120_tma_mma_tf32_v1_m64n128_bk32_s4_pair",
+    module_kind: ModuleKind::TriadSm120,
+    instruction_family: ResolvedInstructionFamily::MmaSync,
+    instruction_shape: ResolvedInstructionShape { m: 16, n: 8, k: 8 },
+    operand_conversion: ResolvedOperandConversion::TensorMapUint32ThenCvtRnaTf32F32V1,
+    tile: (64, 128),
+    bk: 32,
+    map_bk: 32,
+    stages: 4,
+    threads: 256,
+    dynamic_shared_bytes: 98_432,
+    tensor_map_revision: TF32_TENSOR_MAP_REVISION,
+    schedule_revision: TF32_SCHEDULE_REVISION,
+};
+
+const SM120_TF32_NN_M80N32_BK64_S2: Tf32KernelSpec = Tf32KernelSpec {
+    op: ResolvedGemmOp::Nn,
+    route: Tf32PhysicalRoute::Sm120TmaMmaTf32RnaV1(Tf32Sm120Route {
+        tile: Tf32Sm120Tile::M80N32Bk64,
+        stages: Tf32Sm120Stages::S2,
+    }),
+    symbol: "gemm_bi_nn_sm120_tma_mma_tf32_v1_m80n32_bk64_s2",
+    module_kind: ModuleKind::TriadSm120,
+    instruction_family: ResolvedInstructionFamily::MmaSync,
+    instruction_shape: ResolvedInstructionShape { m: 16, n: 8, k: 8 },
+    operand_conversion: ResolvedOperandConversion::TensorMapUint32ThenCvtRnaTf32F32V1,
+    tile: (80, 32),
+    bk: 64,
+    map_bk: 32,
+    stages: 2,
+    threads: 160,
+    dynamic_shared_bytes: 57_472,
+    tensor_map_revision: TF32_TENSOR_MAP_REVISION,
+    schedule_revision: TF32_SCHEDULE_REVISION,
+};
+
+pub const SM120_TF32_ROUTE_SPECS: [Tf32KernelSpec; 17] = [
     SM120_TF32_NN[0],
     SM120_TF32_NN[1],
     SM120_TF32_NN[2],
     SM120_TF32_NN[3],
+    SM120_TF32_NN[4],
+    SM120_TF32_NN_M80N32_BK64_S2,
     SM120_TF32_TN[0],
     SM120_TF32_TN[1],
     SM120_TF32_TN[2],
     SM120_TF32_TN[3],
+    SM120_TF32_TN[4],
+    SM120_TF32_TN_M64N128_S4_PAIR,
     SM120_TF32_NT[0],
     SM120_TF32_NT[1],
     SM120_TF32_NT[2],
     SM120_TF32_NT[3],
+    SM120_TF32_NT[4],
 ];
 
 pub fn tf32_route_specs(module_kind: ModuleKind) -> &'static [Tf32KernelSpec] {
@@ -804,8 +2319,16 @@ pub fn tf32_kernel_spec(
     op: ResolvedGemmOp,
     route: Tf32PhysicalRoute,
 ) -> Result<&'static Tf32KernelSpec, String> {
-    if let Tf32PhysicalRoute::MmaTf32RnaV1(portable) = route {
-        portable.validate()?;
+    match route {
+        Tf32PhysicalRoute::MmaTf32RnaV1(portable) => portable.validate()?,
+        Tf32PhysicalRoute::MmaTf32RnaSplitK2V1(_)
+        | Tf32PhysicalRoute::MmaTf32RnaSplitK4V1(_)
+        | Tf32PhysicalRoute::MmaTf32RnaSplitK8V1(_) => {
+            return Err(format!(
+                "TF32 split-K route {op:?}/{route:?} has a fused-kernel specification"
+            ));
+        }
+        _ => {}
     }
     let mut matches = tf32_route_specs(route.module_kind())
         .iter()
@@ -817,6 +2340,43 @@ pub fn tf32_kernel_spec(
         Err(format!("duplicate TF32 kernels match {op:?}/{route:?}"))
     } else {
         Ok(spec)
+    }
+}
+
+pub(super) fn build_sm90a_tf32_descriptor(
+    shared_address: u32,
+    leading_offset: u32,
+    stride_offset: u32,
+) -> u64 {
+    let mut descriptor = (u64::from(shared_address) >> 4) & 0x3fff;
+    descriptor |= u64::from(leading_offset & 0x3fff) << 16;
+    descriptor |= u64::from(stride_offset & 0x3fff) << 32;
+    descriptor |= 1_u64 << 46;
+    descriptor | (2_u64 << 61)
+}
+
+pub(super) fn decode_sm90a_tf32_descriptor(descriptor: u64) -> (u32, u32, u32) {
+    (
+        u32::try_from((descriptor & 0x3fff) << 4).expect("14-bit shared address fits u32"),
+        u32::try_from((descriptor >> 16) & 0x3fff).expect("14-bit leading offset fits u32"),
+        u32::try_from((descriptor >> 32) & 0x3fff).expect("14-bit stride offset fits u32"),
+    )
+}
+
+pub(super) fn sm100_tf32_instruction_descriptor(
+    op: ResolvedGemmOp,
+    columns: u32,
+) -> Result<u32, String> {
+    match (op, columns) {
+        (ResolvedGemmOp::Nt, 64) => Ok(0x08100910),
+        (ResolvedGemmOp::Nn, 64) => Ok(0x08110910),
+        (ResolvedGemmOp::Tn, 64) => Ok(0x08118910),
+        (ResolvedGemmOp::Nt, 128) => Ok(0x08200910),
+        (ResolvedGemmOp::Nn, 128) => Ok(0x08210910),
+        (ResolvedGemmOp::Tn, 128) => Ok(0x08218910),
+        (_, columns) => Err(format!(
+            "unsupported SM100 TF32 instruction width {columns}"
+        )),
     }
 }
 
@@ -956,40 +2516,40 @@ impl Sm90aForcedRoute {
     pub fn symbol(self) -> &'static str {
         match (self.op, self.dtype, self.schedule) {
             (Sm90aOp::Nn, WeightDtype::Bf16, Sm90aWarpgroupSchedule::Wg1) => {
-                "sgemm_bi_nn_sm90a_wgmma_wg1_bf16"
+                "gemm_bi_nn_sm90a_wgmma_wg1_bf16"
             }
             (Sm90aOp::Nn, WeightDtype::F16, Sm90aWarpgroupSchedule::Wg1) => {
-                "sgemm_bi_nn_sm90a_wgmma_wg1_f16"
+                "gemm_bi_nn_sm90a_wgmma_wg1_f16"
             }
             (Sm90aOp::Tn, WeightDtype::Bf16, Sm90aWarpgroupSchedule::Wg1) => {
-                "sgemm_bi_tn_sm90a_wgmma_wg1_bf16"
+                "gemm_bi_tn_sm90a_wgmma_wg1_bf16"
             }
             (Sm90aOp::Tn, WeightDtype::F16, Sm90aWarpgroupSchedule::Wg1) => {
-                "sgemm_bi_tn_sm90a_wgmma_wg1_f16"
+                "gemm_bi_tn_sm90a_wgmma_wg1_f16"
             }
             (Sm90aOp::Nt, WeightDtype::Bf16, Sm90aWarpgroupSchedule::Wg1) => {
-                "sgemm_bi_nt_sm90a_wgmma_wg1_bf16"
+                "gemm_bi_nt_sm90a_wgmma_wg1_bf16"
             }
             (Sm90aOp::Nt, WeightDtype::F16, Sm90aWarpgroupSchedule::Wg1) => {
-                "sgemm_bi_nt_sm90a_wgmma_wg1_f16"
+                "gemm_bi_nt_sm90a_wgmma_wg1_f16"
             }
             (Sm90aOp::Nn, WeightDtype::Bf16, Sm90aWarpgroupSchedule::Wg2) => {
-                "sgemm_bi_nn_sm90a_wgmma_wg2_bf16"
+                "gemm_bi_nn_sm90a_wgmma_wg2_bf16"
             }
             (Sm90aOp::Nn, WeightDtype::F16, Sm90aWarpgroupSchedule::Wg2) => {
-                "sgemm_bi_nn_sm90a_wgmma_wg2_f16"
+                "gemm_bi_nn_sm90a_wgmma_wg2_f16"
             }
             (Sm90aOp::Tn, WeightDtype::Bf16, Sm90aWarpgroupSchedule::Wg2) => {
-                "sgemm_bi_tn_sm90a_wgmma_wg2_bf16"
+                "gemm_bi_tn_sm90a_wgmma_wg2_bf16"
             }
             (Sm90aOp::Tn, WeightDtype::F16, Sm90aWarpgroupSchedule::Wg2) => {
-                "sgemm_bi_tn_sm90a_wgmma_wg2_f16"
+                "gemm_bi_tn_sm90a_wgmma_wg2_f16"
             }
             (Sm90aOp::Nt, WeightDtype::Bf16, Sm90aWarpgroupSchedule::Wg2) => {
-                "sgemm_bi_nt_sm90a_wgmma_wg2_bf16"
+                "gemm_bi_nt_sm90a_wgmma_wg2_bf16"
             }
             (Sm90aOp::Nt, WeightDtype::F16, Sm90aWarpgroupSchedule::Wg2) => {
-                "sgemm_bi_nt_sm90a_wgmma_wg2_f16"
+                "gemm_bi_nt_sm90a_wgmma_wg2_f16"
             }
             (_, WeightDtype::F32, _) => unreachable!("f32 has no SM90a WGMMA route"),
         }
@@ -1200,7 +2760,7 @@ pub const SM100_KERNEL_SPECS: [Sm100KernelSpec; 72] = [
         Sm100Tile::M128N64,
         Sm100Stages::S2,
         Sm100Schedule::C4,
-        "sgemm_bi_nn_sm100_tcgen_m128n64_bk64_s2_c4_bf16"
+        "gemm_bi_nn_sm100_tcgen_m128n64_bk64_s2_c4_bf16"
     ),
     sm100_spec!(
         Sm100Op::Nn,
@@ -1208,7 +2768,7 @@ pub const SM100_KERNEL_SPECS: [Sm100KernelSpec; 72] = [
         Sm100Tile::M128N64,
         Sm100Stages::S2,
         Sm100Schedule::C4,
-        "sgemm_bi_nn_sm100_tcgen_m128n64_bk64_s2_c4_f16"
+        "gemm_bi_nn_sm100_tcgen_m128n64_bk64_s2_c4_f16"
     ),
     sm100_spec!(
         Sm100Op::Nn,
@@ -1216,7 +2776,7 @@ pub const SM100_KERNEL_SPECS: [Sm100KernelSpec; 72] = [
         Sm100Tile::M128N64,
         Sm100Stages::S2,
         Sm100Schedule::P8,
-        "sgemm_bi_nn_sm100_tcgen_m128n64_bk64_s2_p8_bf16"
+        "gemm_bi_nn_sm100_tcgen_m128n64_bk64_s2_p8_bf16"
     ),
     sm100_spec!(
         Sm100Op::Nn,
@@ -1224,7 +2784,7 @@ pub const SM100_KERNEL_SPECS: [Sm100KernelSpec; 72] = [
         Sm100Tile::M128N64,
         Sm100Stages::S2,
         Sm100Schedule::P8,
-        "sgemm_bi_nn_sm100_tcgen_m128n64_bk64_s2_p8_f16"
+        "gemm_bi_nn_sm100_tcgen_m128n64_bk64_s2_p8_f16"
     ),
     sm100_spec!(
         Sm100Op::Nn,
@@ -1232,7 +2792,7 @@ pub const SM100_KERNEL_SPECS: [Sm100KernelSpec; 72] = [
         Sm100Tile::M128N64,
         Sm100Stages::S3,
         Sm100Schedule::C4,
-        "sgemm_bi_nn_sm100_tcgen_m128n64_bk64_s3_c4_bf16"
+        "gemm_bi_nn_sm100_tcgen_m128n64_bk64_s3_c4_bf16"
     ),
     sm100_spec!(
         Sm100Op::Nn,
@@ -1240,7 +2800,7 @@ pub const SM100_KERNEL_SPECS: [Sm100KernelSpec; 72] = [
         Sm100Tile::M128N64,
         Sm100Stages::S3,
         Sm100Schedule::C4,
-        "sgemm_bi_nn_sm100_tcgen_m128n64_bk64_s3_c4_f16"
+        "gemm_bi_nn_sm100_tcgen_m128n64_bk64_s3_c4_f16"
     ),
     sm100_spec!(
         Sm100Op::Nn,
@@ -1248,7 +2808,7 @@ pub const SM100_KERNEL_SPECS: [Sm100KernelSpec; 72] = [
         Sm100Tile::M128N64,
         Sm100Stages::S3,
         Sm100Schedule::P8,
-        "sgemm_bi_nn_sm100_tcgen_m128n64_bk64_s3_p8_bf16"
+        "gemm_bi_nn_sm100_tcgen_m128n64_bk64_s3_p8_bf16"
     ),
     sm100_spec!(
         Sm100Op::Nn,
@@ -1256,7 +2816,7 @@ pub const SM100_KERNEL_SPECS: [Sm100KernelSpec; 72] = [
         Sm100Tile::M128N64,
         Sm100Stages::S3,
         Sm100Schedule::P8,
-        "sgemm_bi_nn_sm100_tcgen_m128n64_bk64_s3_p8_f16"
+        "gemm_bi_nn_sm100_tcgen_m128n64_bk64_s3_p8_f16"
     ),
     sm100_spec!(
         Sm100Op::Nn,
@@ -1264,7 +2824,7 @@ pub const SM100_KERNEL_SPECS: [Sm100KernelSpec; 72] = [
         Sm100Tile::M128N64,
         Sm100Stages::S4,
         Sm100Schedule::C4,
-        "sgemm_bi_nn_sm100_tcgen_m128n64_bk64_s4_c4_bf16"
+        "gemm_bi_nn_sm100_tcgen_m128n64_bk64_s4_c4_bf16"
     ),
     sm100_spec!(
         Sm100Op::Nn,
@@ -1272,7 +2832,7 @@ pub const SM100_KERNEL_SPECS: [Sm100KernelSpec; 72] = [
         Sm100Tile::M128N64,
         Sm100Stages::S4,
         Sm100Schedule::C4,
-        "sgemm_bi_nn_sm100_tcgen_m128n64_bk64_s4_c4_f16"
+        "gemm_bi_nn_sm100_tcgen_m128n64_bk64_s4_c4_f16"
     ),
     sm100_spec!(
         Sm100Op::Nn,
@@ -1280,7 +2840,7 @@ pub const SM100_KERNEL_SPECS: [Sm100KernelSpec; 72] = [
         Sm100Tile::M128N64,
         Sm100Stages::S4,
         Sm100Schedule::P8,
-        "sgemm_bi_nn_sm100_tcgen_m128n64_bk64_s4_p8_bf16"
+        "gemm_bi_nn_sm100_tcgen_m128n64_bk64_s4_p8_bf16"
     ),
     sm100_spec!(
         Sm100Op::Nn,
@@ -1288,7 +2848,7 @@ pub const SM100_KERNEL_SPECS: [Sm100KernelSpec; 72] = [
         Sm100Tile::M128N64,
         Sm100Stages::S4,
         Sm100Schedule::P8,
-        "sgemm_bi_nn_sm100_tcgen_m128n64_bk64_s4_p8_f16"
+        "gemm_bi_nn_sm100_tcgen_m128n64_bk64_s4_p8_f16"
     ),
     sm100_spec!(
         Sm100Op::Nn,
@@ -1296,7 +2856,7 @@ pub const SM100_KERNEL_SPECS: [Sm100KernelSpec; 72] = [
         Sm100Tile::M128N128,
         Sm100Stages::S2,
         Sm100Schedule::C4,
-        "sgemm_bi_nn_sm100_tcgen_m128n128_bk64_s2_c4_bf16"
+        "gemm_bi_nn_sm100_tcgen_m128n128_bk64_s2_c4_bf16"
     ),
     sm100_spec!(
         Sm100Op::Nn,
@@ -1304,7 +2864,7 @@ pub const SM100_KERNEL_SPECS: [Sm100KernelSpec; 72] = [
         Sm100Tile::M128N128,
         Sm100Stages::S2,
         Sm100Schedule::C4,
-        "sgemm_bi_nn_sm100_tcgen_m128n128_bk64_s2_c4_f16"
+        "gemm_bi_nn_sm100_tcgen_m128n128_bk64_s2_c4_f16"
     ),
     sm100_spec!(
         Sm100Op::Nn,
@@ -1312,7 +2872,7 @@ pub const SM100_KERNEL_SPECS: [Sm100KernelSpec; 72] = [
         Sm100Tile::M128N128,
         Sm100Stages::S2,
         Sm100Schedule::P8,
-        "sgemm_bi_nn_sm100_tcgen_m128n128_bk64_s2_p8_bf16"
+        "gemm_bi_nn_sm100_tcgen_m128n128_bk64_s2_p8_bf16"
     ),
     sm100_spec!(
         Sm100Op::Nn,
@@ -1320,7 +2880,7 @@ pub const SM100_KERNEL_SPECS: [Sm100KernelSpec; 72] = [
         Sm100Tile::M128N128,
         Sm100Stages::S2,
         Sm100Schedule::P8,
-        "sgemm_bi_nn_sm100_tcgen_m128n128_bk64_s2_p8_f16"
+        "gemm_bi_nn_sm100_tcgen_m128n128_bk64_s2_p8_f16"
     ),
     sm100_spec!(
         Sm100Op::Nn,
@@ -1328,7 +2888,7 @@ pub const SM100_KERNEL_SPECS: [Sm100KernelSpec; 72] = [
         Sm100Tile::M128N128,
         Sm100Stages::S3,
         Sm100Schedule::C4,
-        "sgemm_bi_nn_sm100_tcgen_m128n128_bk64_s3_c4_bf16"
+        "gemm_bi_nn_sm100_tcgen_m128n128_bk64_s3_c4_bf16"
     ),
     sm100_spec!(
         Sm100Op::Nn,
@@ -1336,7 +2896,7 @@ pub const SM100_KERNEL_SPECS: [Sm100KernelSpec; 72] = [
         Sm100Tile::M128N128,
         Sm100Stages::S3,
         Sm100Schedule::C4,
-        "sgemm_bi_nn_sm100_tcgen_m128n128_bk64_s3_c4_f16"
+        "gemm_bi_nn_sm100_tcgen_m128n128_bk64_s3_c4_f16"
     ),
     sm100_spec!(
         Sm100Op::Nn,
@@ -1344,7 +2904,7 @@ pub const SM100_KERNEL_SPECS: [Sm100KernelSpec; 72] = [
         Sm100Tile::M128N128,
         Sm100Stages::S3,
         Sm100Schedule::P8,
-        "sgemm_bi_nn_sm100_tcgen_m128n128_bk64_s3_p8_bf16"
+        "gemm_bi_nn_sm100_tcgen_m128n128_bk64_s3_p8_bf16"
     ),
     sm100_spec!(
         Sm100Op::Nn,
@@ -1352,7 +2912,7 @@ pub const SM100_KERNEL_SPECS: [Sm100KernelSpec; 72] = [
         Sm100Tile::M128N128,
         Sm100Stages::S3,
         Sm100Schedule::P8,
-        "sgemm_bi_nn_sm100_tcgen_m128n128_bk64_s3_p8_f16"
+        "gemm_bi_nn_sm100_tcgen_m128n128_bk64_s3_p8_f16"
     ),
     sm100_spec!(
         Sm100Op::Nn,
@@ -1360,7 +2920,7 @@ pub const SM100_KERNEL_SPECS: [Sm100KernelSpec; 72] = [
         Sm100Tile::M128N128,
         Sm100Stages::S4,
         Sm100Schedule::C4,
-        "sgemm_bi_nn_sm100_tcgen_m128n128_bk64_s4_c4_bf16"
+        "gemm_bi_nn_sm100_tcgen_m128n128_bk64_s4_c4_bf16"
     ),
     sm100_spec!(
         Sm100Op::Nn,
@@ -1368,7 +2928,7 @@ pub const SM100_KERNEL_SPECS: [Sm100KernelSpec; 72] = [
         Sm100Tile::M128N128,
         Sm100Stages::S4,
         Sm100Schedule::C4,
-        "sgemm_bi_nn_sm100_tcgen_m128n128_bk64_s4_c4_f16"
+        "gemm_bi_nn_sm100_tcgen_m128n128_bk64_s4_c4_f16"
     ),
     sm100_spec!(
         Sm100Op::Nn,
@@ -1376,7 +2936,7 @@ pub const SM100_KERNEL_SPECS: [Sm100KernelSpec; 72] = [
         Sm100Tile::M128N128,
         Sm100Stages::S4,
         Sm100Schedule::P8,
-        "sgemm_bi_nn_sm100_tcgen_m128n128_bk64_s4_p8_bf16"
+        "gemm_bi_nn_sm100_tcgen_m128n128_bk64_s4_p8_bf16"
     ),
     sm100_spec!(
         Sm100Op::Nn,
@@ -1384,7 +2944,7 @@ pub const SM100_KERNEL_SPECS: [Sm100KernelSpec; 72] = [
         Sm100Tile::M128N128,
         Sm100Stages::S4,
         Sm100Schedule::P8,
-        "sgemm_bi_nn_sm100_tcgen_m128n128_bk64_s4_p8_f16"
+        "gemm_bi_nn_sm100_tcgen_m128n128_bk64_s4_p8_f16"
     ),
     sm100_spec!(
         Sm100Op::Tn,
@@ -1392,7 +2952,7 @@ pub const SM100_KERNEL_SPECS: [Sm100KernelSpec; 72] = [
         Sm100Tile::M128N64,
         Sm100Stages::S2,
         Sm100Schedule::C4,
-        "sgemm_bi_tn_sm100_tcgen_m128n64_bk64_s2_c4_bf16"
+        "gemm_bi_tn_sm100_tcgen_m128n64_bk64_s2_c4_bf16"
     ),
     sm100_spec!(
         Sm100Op::Tn,
@@ -1400,7 +2960,7 @@ pub const SM100_KERNEL_SPECS: [Sm100KernelSpec; 72] = [
         Sm100Tile::M128N64,
         Sm100Stages::S2,
         Sm100Schedule::C4,
-        "sgemm_bi_tn_sm100_tcgen_m128n64_bk64_s2_c4_f16"
+        "gemm_bi_tn_sm100_tcgen_m128n64_bk64_s2_c4_f16"
     ),
     sm100_spec!(
         Sm100Op::Tn,
@@ -1408,7 +2968,7 @@ pub const SM100_KERNEL_SPECS: [Sm100KernelSpec; 72] = [
         Sm100Tile::M128N64,
         Sm100Stages::S2,
         Sm100Schedule::P8,
-        "sgemm_bi_tn_sm100_tcgen_m128n64_bk64_s2_p8_bf16"
+        "gemm_bi_tn_sm100_tcgen_m128n64_bk64_s2_p8_bf16"
     ),
     sm100_spec!(
         Sm100Op::Tn,
@@ -1416,7 +2976,7 @@ pub const SM100_KERNEL_SPECS: [Sm100KernelSpec; 72] = [
         Sm100Tile::M128N64,
         Sm100Stages::S2,
         Sm100Schedule::P8,
-        "sgemm_bi_tn_sm100_tcgen_m128n64_bk64_s2_p8_f16"
+        "gemm_bi_tn_sm100_tcgen_m128n64_bk64_s2_p8_f16"
     ),
     sm100_spec!(
         Sm100Op::Tn,
@@ -1424,7 +2984,7 @@ pub const SM100_KERNEL_SPECS: [Sm100KernelSpec; 72] = [
         Sm100Tile::M128N64,
         Sm100Stages::S3,
         Sm100Schedule::C4,
-        "sgemm_bi_tn_sm100_tcgen_m128n64_bk64_s3_c4_bf16"
+        "gemm_bi_tn_sm100_tcgen_m128n64_bk64_s3_c4_bf16"
     ),
     sm100_spec!(
         Sm100Op::Tn,
@@ -1432,7 +2992,7 @@ pub const SM100_KERNEL_SPECS: [Sm100KernelSpec; 72] = [
         Sm100Tile::M128N64,
         Sm100Stages::S3,
         Sm100Schedule::C4,
-        "sgemm_bi_tn_sm100_tcgen_m128n64_bk64_s3_c4_f16"
+        "gemm_bi_tn_sm100_tcgen_m128n64_bk64_s3_c4_f16"
     ),
     sm100_spec!(
         Sm100Op::Tn,
@@ -1440,7 +3000,7 @@ pub const SM100_KERNEL_SPECS: [Sm100KernelSpec; 72] = [
         Sm100Tile::M128N64,
         Sm100Stages::S3,
         Sm100Schedule::P8,
-        "sgemm_bi_tn_sm100_tcgen_m128n64_bk64_s3_p8_bf16"
+        "gemm_bi_tn_sm100_tcgen_m128n64_bk64_s3_p8_bf16"
     ),
     sm100_spec!(
         Sm100Op::Tn,
@@ -1448,7 +3008,7 @@ pub const SM100_KERNEL_SPECS: [Sm100KernelSpec; 72] = [
         Sm100Tile::M128N64,
         Sm100Stages::S3,
         Sm100Schedule::P8,
-        "sgemm_bi_tn_sm100_tcgen_m128n64_bk64_s3_p8_f16"
+        "gemm_bi_tn_sm100_tcgen_m128n64_bk64_s3_p8_f16"
     ),
     sm100_spec!(
         Sm100Op::Tn,
@@ -1456,7 +3016,7 @@ pub const SM100_KERNEL_SPECS: [Sm100KernelSpec; 72] = [
         Sm100Tile::M128N64,
         Sm100Stages::S4,
         Sm100Schedule::C4,
-        "sgemm_bi_tn_sm100_tcgen_m128n64_bk64_s4_c4_bf16"
+        "gemm_bi_tn_sm100_tcgen_m128n64_bk64_s4_c4_bf16"
     ),
     sm100_spec!(
         Sm100Op::Tn,
@@ -1464,7 +3024,7 @@ pub const SM100_KERNEL_SPECS: [Sm100KernelSpec; 72] = [
         Sm100Tile::M128N64,
         Sm100Stages::S4,
         Sm100Schedule::C4,
-        "sgemm_bi_tn_sm100_tcgen_m128n64_bk64_s4_c4_f16"
+        "gemm_bi_tn_sm100_tcgen_m128n64_bk64_s4_c4_f16"
     ),
     sm100_spec!(
         Sm100Op::Tn,
@@ -1472,7 +3032,7 @@ pub const SM100_KERNEL_SPECS: [Sm100KernelSpec; 72] = [
         Sm100Tile::M128N64,
         Sm100Stages::S4,
         Sm100Schedule::P8,
-        "sgemm_bi_tn_sm100_tcgen_m128n64_bk64_s4_p8_bf16"
+        "gemm_bi_tn_sm100_tcgen_m128n64_bk64_s4_p8_bf16"
     ),
     sm100_spec!(
         Sm100Op::Tn,
@@ -1480,7 +3040,7 @@ pub const SM100_KERNEL_SPECS: [Sm100KernelSpec; 72] = [
         Sm100Tile::M128N64,
         Sm100Stages::S4,
         Sm100Schedule::P8,
-        "sgemm_bi_tn_sm100_tcgen_m128n64_bk64_s4_p8_f16"
+        "gemm_bi_tn_sm100_tcgen_m128n64_bk64_s4_p8_f16"
     ),
     sm100_spec!(
         Sm100Op::Tn,
@@ -1488,7 +3048,7 @@ pub const SM100_KERNEL_SPECS: [Sm100KernelSpec; 72] = [
         Sm100Tile::M128N128,
         Sm100Stages::S2,
         Sm100Schedule::C4,
-        "sgemm_bi_tn_sm100_tcgen_m128n128_bk64_s2_c4_bf16"
+        "gemm_bi_tn_sm100_tcgen_m128n128_bk64_s2_c4_bf16"
     ),
     sm100_spec!(
         Sm100Op::Tn,
@@ -1496,7 +3056,7 @@ pub const SM100_KERNEL_SPECS: [Sm100KernelSpec; 72] = [
         Sm100Tile::M128N128,
         Sm100Stages::S2,
         Sm100Schedule::C4,
-        "sgemm_bi_tn_sm100_tcgen_m128n128_bk64_s2_c4_f16"
+        "gemm_bi_tn_sm100_tcgen_m128n128_bk64_s2_c4_f16"
     ),
     sm100_spec!(
         Sm100Op::Tn,
@@ -1504,7 +3064,7 @@ pub const SM100_KERNEL_SPECS: [Sm100KernelSpec; 72] = [
         Sm100Tile::M128N128,
         Sm100Stages::S2,
         Sm100Schedule::P8,
-        "sgemm_bi_tn_sm100_tcgen_m128n128_bk64_s2_p8_bf16"
+        "gemm_bi_tn_sm100_tcgen_m128n128_bk64_s2_p8_bf16"
     ),
     sm100_spec!(
         Sm100Op::Tn,
@@ -1512,7 +3072,7 @@ pub const SM100_KERNEL_SPECS: [Sm100KernelSpec; 72] = [
         Sm100Tile::M128N128,
         Sm100Stages::S2,
         Sm100Schedule::P8,
-        "sgemm_bi_tn_sm100_tcgen_m128n128_bk64_s2_p8_f16"
+        "gemm_bi_tn_sm100_tcgen_m128n128_bk64_s2_p8_f16"
     ),
     sm100_spec!(
         Sm100Op::Tn,
@@ -1520,7 +3080,7 @@ pub const SM100_KERNEL_SPECS: [Sm100KernelSpec; 72] = [
         Sm100Tile::M128N128,
         Sm100Stages::S3,
         Sm100Schedule::C4,
-        "sgemm_bi_tn_sm100_tcgen_m128n128_bk64_s3_c4_bf16"
+        "gemm_bi_tn_sm100_tcgen_m128n128_bk64_s3_c4_bf16"
     ),
     sm100_spec!(
         Sm100Op::Tn,
@@ -1528,7 +3088,7 @@ pub const SM100_KERNEL_SPECS: [Sm100KernelSpec; 72] = [
         Sm100Tile::M128N128,
         Sm100Stages::S3,
         Sm100Schedule::C4,
-        "sgemm_bi_tn_sm100_tcgen_m128n128_bk64_s3_c4_f16"
+        "gemm_bi_tn_sm100_tcgen_m128n128_bk64_s3_c4_f16"
     ),
     sm100_spec!(
         Sm100Op::Tn,
@@ -1536,7 +3096,7 @@ pub const SM100_KERNEL_SPECS: [Sm100KernelSpec; 72] = [
         Sm100Tile::M128N128,
         Sm100Stages::S3,
         Sm100Schedule::P8,
-        "sgemm_bi_tn_sm100_tcgen_m128n128_bk64_s3_p8_bf16"
+        "gemm_bi_tn_sm100_tcgen_m128n128_bk64_s3_p8_bf16"
     ),
     sm100_spec!(
         Sm100Op::Tn,
@@ -1544,7 +3104,7 @@ pub const SM100_KERNEL_SPECS: [Sm100KernelSpec; 72] = [
         Sm100Tile::M128N128,
         Sm100Stages::S3,
         Sm100Schedule::P8,
-        "sgemm_bi_tn_sm100_tcgen_m128n128_bk64_s3_p8_f16"
+        "gemm_bi_tn_sm100_tcgen_m128n128_bk64_s3_p8_f16"
     ),
     sm100_spec!(
         Sm100Op::Tn,
@@ -1552,7 +3112,7 @@ pub const SM100_KERNEL_SPECS: [Sm100KernelSpec; 72] = [
         Sm100Tile::M128N128,
         Sm100Stages::S4,
         Sm100Schedule::C4,
-        "sgemm_bi_tn_sm100_tcgen_m128n128_bk64_s4_c4_bf16"
+        "gemm_bi_tn_sm100_tcgen_m128n128_bk64_s4_c4_bf16"
     ),
     sm100_spec!(
         Sm100Op::Tn,
@@ -1560,7 +3120,7 @@ pub const SM100_KERNEL_SPECS: [Sm100KernelSpec; 72] = [
         Sm100Tile::M128N128,
         Sm100Stages::S4,
         Sm100Schedule::C4,
-        "sgemm_bi_tn_sm100_tcgen_m128n128_bk64_s4_c4_f16"
+        "gemm_bi_tn_sm100_tcgen_m128n128_bk64_s4_c4_f16"
     ),
     sm100_spec!(
         Sm100Op::Tn,
@@ -1568,7 +3128,7 @@ pub const SM100_KERNEL_SPECS: [Sm100KernelSpec; 72] = [
         Sm100Tile::M128N128,
         Sm100Stages::S4,
         Sm100Schedule::P8,
-        "sgemm_bi_tn_sm100_tcgen_m128n128_bk64_s4_p8_bf16"
+        "gemm_bi_tn_sm100_tcgen_m128n128_bk64_s4_p8_bf16"
     ),
     sm100_spec!(
         Sm100Op::Tn,
@@ -1576,7 +3136,7 @@ pub const SM100_KERNEL_SPECS: [Sm100KernelSpec; 72] = [
         Sm100Tile::M128N128,
         Sm100Stages::S4,
         Sm100Schedule::P8,
-        "sgemm_bi_tn_sm100_tcgen_m128n128_bk64_s4_p8_f16"
+        "gemm_bi_tn_sm100_tcgen_m128n128_bk64_s4_p8_f16"
     ),
     sm100_spec!(
         Sm100Op::Nt,
@@ -1584,7 +3144,7 @@ pub const SM100_KERNEL_SPECS: [Sm100KernelSpec; 72] = [
         Sm100Tile::M128N64,
         Sm100Stages::S2,
         Sm100Schedule::C4,
-        "sgemm_bi_nt_sm100_tcgen_m128n64_bk64_s2_c4_bf16"
+        "gemm_bi_nt_sm100_tcgen_m128n64_bk64_s2_c4_bf16"
     ),
     sm100_spec!(
         Sm100Op::Nt,
@@ -1592,7 +3152,7 @@ pub const SM100_KERNEL_SPECS: [Sm100KernelSpec; 72] = [
         Sm100Tile::M128N64,
         Sm100Stages::S2,
         Sm100Schedule::C4,
-        "sgemm_bi_nt_sm100_tcgen_m128n64_bk64_s2_c4_f16"
+        "gemm_bi_nt_sm100_tcgen_m128n64_bk64_s2_c4_f16"
     ),
     sm100_spec!(
         Sm100Op::Nt,
@@ -1600,7 +3160,7 @@ pub const SM100_KERNEL_SPECS: [Sm100KernelSpec; 72] = [
         Sm100Tile::M128N64,
         Sm100Stages::S2,
         Sm100Schedule::P8,
-        "sgemm_bi_nt_sm100_tcgen_m128n64_bk64_s2_p8_bf16"
+        "gemm_bi_nt_sm100_tcgen_m128n64_bk64_s2_p8_bf16"
     ),
     sm100_spec!(
         Sm100Op::Nt,
@@ -1608,7 +3168,7 @@ pub const SM100_KERNEL_SPECS: [Sm100KernelSpec; 72] = [
         Sm100Tile::M128N64,
         Sm100Stages::S2,
         Sm100Schedule::P8,
-        "sgemm_bi_nt_sm100_tcgen_m128n64_bk64_s2_p8_f16"
+        "gemm_bi_nt_sm100_tcgen_m128n64_bk64_s2_p8_f16"
     ),
     sm100_spec!(
         Sm100Op::Nt,
@@ -1616,7 +3176,7 @@ pub const SM100_KERNEL_SPECS: [Sm100KernelSpec; 72] = [
         Sm100Tile::M128N64,
         Sm100Stages::S3,
         Sm100Schedule::C4,
-        "sgemm_bi_nt_sm100_tcgen_m128n64_bk64_s3_c4_bf16"
+        "gemm_bi_nt_sm100_tcgen_m128n64_bk64_s3_c4_bf16"
     ),
     sm100_spec!(
         Sm100Op::Nt,
@@ -1624,7 +3184,7 @@ pub const SM100_KERNEL_SPECS: [Sm100KernelSpec; 72] = [
         Sm100Tile::M128N64,
         Sm100Stages::S3,
         Sm100Schedule::C4,
-        "sgemm_bi_nt_sm100_tcgen_m128n64_bk64_s3_c4_f16"
+        "gemm_bi_nt_sm100_tcgen_m128n64_bk64_s3_c4_f16"
     ),
     sm100_spec!(
         Sm100Op::Nt,
@@ -1632,7 +3192,7 @@ pub const SM100_KERNEL_SPECS: [Sm100KernelSpec; 72] = [
         Sm100Tile::M128N64,
         Sm100Stages::S3,
         Sm100Schedule::P8,
-        "sgemm_bi_nt_sm100_tcgen_m128n64_bk64_s3_p8_bf16"
+        "gemm_bi_nt_sm100_tcgen_m128n64_bk64_s3_p8_bf16"
     ),
     sm100_spec!(
         Sm100Op::Nt,
@@ -1640,7 +3200,7 @@ pub const SM100_KERNEL_SPECS: [Sm100KernelSpec; 72] = [
         Sm100Tile::M128N64,
         Sm100Stages::S3,
         Sm100Schedule::P8,
-        "sgemm_bi_nt_sm100_tcgen_m128n64_bk64_s3_p8_f16"
+        "gemm_bi_nt_sm100_tcgen_m128n64_bk64_s3_p8_f16"
     ),
     sm100_spec!(
         Sm100Op::Nt,
@@ -1648,7 +3208,7 @@ pub const SM100_KERNEL_SPECS: [Sm100KernelSpec; 72] = [
         Sm100Tile::M128N64,
         Sm100Stages::S4,
         Sm100Schedule::C4,
-        "sgemm_bi_nt_sm100_tcgen_m128n64_bk64_s4_c4_bf16"
+        "gemm_bi_nt_sm100_tcgen_m128n64_bk64_s4_c4_bf16"
     ),
     sm100_spec!(
         Sm100Op::Nt,
@@ -1656,7 +3216,7 @@ pub const SM100_KERNEL_SPECS: [Sm100KernelSpec; 72] = [
         Sm100Tile::M128N64,
         Sm100Stages::S4,
         Sm100Schedule::C4,
-        "sgemm_bi_nt_sm100_tcgen_m128n64_bk64_s4_c4_f16"
+        "gemm_bi_nt_sm100_tcgen_m128n64_bk64_s4_c4_f16"
     ),
     sm100_spec!(
         Sm100Op::Nt,
@@ -1664,7 +3224,7 @@ pub const SM100_KERNEL_SPECS: [Sm100KernelSpec; 72] = [
         Sm100Tile::M128N64,
         Sm100Stages::S4,
         Sm100Schedule::P8,
-        "sgemm_bi_nt_sm100_tcgen_m128n64_bk64_s4_p8_bf16"
+        "gemm_bi_nt_sm100_tcgen_m128n64_bk64_s4_p8_bf16"
     ),
     sm100_spec!(
         Sm100Op::Nt,
@@ -1672,7 +3232,7 @@ pub const SM100_KERNEL_SPECS: [Sm100KernelSpec; 72] = [
         Sm100Tile::M128N64,
         Sm100Stages::S4,
         Sm100Schedule::P8,
-        "sgemm_bi_nt_sm100_tcgen_m128n64_bk64_s4_p8_f16"
+        "gemm_bi_nt_sm100_tcgen_m128n64_bk64_s4_p8_f16"
     ),
     sm100_spec!(
         Sm100Op::Nt,
@@ -1680,7 +3240,7 @@ pub const SM100_KERNEL_SPECS: [Sm100KernelSpec; 72] = [
         Sm100Tile::M128N128,
         Sm100Stages::S2,
         Sm100Schedule::C4,
-        "sgemm_bi_nt_sm100_tcgen_m128n128_bk64_s2_c4_bf16"
+        "gemm_bi_nt_sm100_tcgen_m128n128_bk64_s2_c4_bf16"
     ),
     sm100_spec!(
         Sm100Op::Nt,
@@ -1688,7 +3248,7 @@ pub const SM100_KERNEL_SPECS: [Sm100KernelSpec; 72] = [
         Sm100Tile::M128N128,
         Sm100Stages::S2,
         Sm100Schedule::C4,
-        "sgemm_bi_nt_sm100_tcgen_m128n128_bk64_s2_c4_f16"
+        "gemm_bi_nt_sm100_tcgen_m128n128_bk64_s2_c4_f16"
     ),
     sm100_spec!(
         Sm100Op::Nt,
@@ -1696,7 +3256,7 @@ pub const SM100_KERNEL_SPECS: [Sm100KernelSpec; 72] = [
         Sm100Tile::M128N128,
         Sm100Stages::S2,
         Sm100Schedule::P8,
-        "sgemm_bi_nt_sm100_tcgen_m128n128_bk64_s2_p8_bf16"
+        "gemm_bi_nt_sm100_tcgen_m128n128_bk64_s2_p8_bf16"
     ),
     sm100_spec!(
         Sm100Op::Nt,
@@ -1704,7 +3264,7 @@ pub const SM100_KERNEL_SPECS: [Sm100KernelSpec; 72] = [
         Sm100Tile::M128N128,
         Sm100Stages::S2,
         Sm100Schedule::P8,
-        "sgemm_bi_nt_sm100_tcgen_m128n128_bk64_s2_p8_f16"
+        "gemm_bi_nt_sm100_tcgen_m128n128_bk64_s2_p8_f16"
     ),
     sm100_spec!(
         Sm100Op::Nt,
@@ -1712,7 +3272,7 @@ pub const SM100_KERNEL_SPECS: [Sm100KernelSpec; 72] = [
         Sm100Tile::M128N128,
         Sm100Stages::S3,
         Sm100Schedule::C4,
-        "sgemm_bi_nt_sm100_tcgen_m128n128_bk64_s3_c4_bf16"
+        "gemm_bi_nt_sm100_tcgen_m128n128_bk64_s3_c4_bf16"
     ),
     sm100_spec!(
         Sm100Op::Nt,
@@ -1720,7 +3280,7 @@ pub const SM100_KERNEL_SPECS: [Sm100KernelSpec; 72] = [
         Sm100Tile::M128N128,
         Sm100Stages::S3,
         Sm100Schedule::C4,
-        "sgemm_bi_nt_sm100_tcgen_m128n128_bk64_s3_c4_f16"
+        "gemm_bi_nt_sm100_tcgen_m128n128_bk64_s3_c4_f16"
     ),
     sm100_spec!(
         Sm100Op::Nt,
@@ -1728,7 +3288,7 @@ pub const SM100_KERNEL_SPECS: [Sm100KernelSpec; 72] = [
         Sm100Tile::M128N128,
         Sm100Stages::S3,
         Sm100Schedule::P8,
-        "sgemm_bi_nt_sm100_tcgen_m128n128_bk64_s3_p8_bf16"
+        "gemm_bi_nt_sm100_tcgen_m128n128_bk64_s3_p8_bf16"
     ),
     sm100_spec!(
         Sm100Op::Nt,
@@ -1736,7 +3296,7 @@ pub const SM100_KERNEL_SPECS: [Sm100KernelSpec; 72] = [
         Sm100Tile::M128N128,
         Sm100Stages::S3,
         Sm100Schedule::P8,
-        "sgemm_bi_nt_sm100_tcgen_m128n128_bk64_s3_p8_f16"
+        "gemm_bi_nt_sm100_tcgen_m128n128_bk64_s3_p8_f16"
     ),
     sm100_spec!(
         Sm100Op::Nt,
@@ -1744,7 +3304,7 @@ pub const SM100_KERNEL_SPECS: [Sm100KernelSpec; 72] = [
         Sm100Tile::M128N128,
         Sm100Stages::S4,
         Sm100Schedule::C4,
-        "sgemm_bi_nt_sm100_tcgen_m128n128_bk64_s4_c4_bf16"
+        "gemm_bi_nt_sm100_tcgen_m128n128_bk64_s4_c4_bf16"
     ),
     sm100_spec!(
         Sm100Op::Nt,
@@ -1752,7 +3312,7 @@ pub const SM100_KERNEL_SPECS: [Sm100KernelSpec; 72] = [
         Sm100Tile::M128N128,
         Sm100Stages::S4,
         Sm100Schedule::C4,
-        "sgemm_bi_nt_sm100_tcgen_m128n128_bk64_s4_c4_f16"
+        "gemm_bi_nt_sm100_tcgen_m128n128_bk64_s4_c4_f16"
     ),
     sm100_spec!(
         Sm100Op::Nt,
@@ -1760,7 +3320,7 @@ pub const SM100_KERNEL_SPECS: [Sm100KernelSpec; 72] = [
         Sm100Tile::M128N128,
         Sm100Stages::S4,
         Sm100Schedule::P8,
-        "sgemm_bi_nt_sm100_tcgen_m128n128_bk64_s4_p8_bf16"
+        "gemm_bi_nt_sm100_tcgen_m128n128_bk64_s4_p8_bf16"
     ),
     sm100_spec!(
         Sm100Op::Nt,
@@ -1768,7 +3328,7 @@ pub const SM100_KERNEL_SPECS: [Sm100KernelSpec; 72] = [
         Sm100Tile::M128N128,
         Sm100Stages::S4,
         Sm100Schedule::P8,
-        "sgemm_bi_nt_sm100_tcgen_m128n128_bk64_s4_p8_f16"
+        "gemm_bi_nt_sm100_tcgen_m128n128_bk64_s4_p8_f16"
     ),
 ];
 
@@ -1838,7 +3398,7 @@ pub(super) struct Sm90aTensorMapKey {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(super) struct Sm90aAllocationIdentity {
-    context_handle: usize,
+    allocation_domain: AllocationDomain,
     allocation_base: CUptr,
     allocation_bytes: u64,
     offset_bytes: u64,
@@ -1847,28 +3407,45 @@ pub(super) struct Sm90aAllocationIdentity {
 }
 
 impl Sm90aAllocationIdentity {
-    fn query(
+    fn requested_range_overlaps(self, other: Self) -> bool {
+        if self.allocation_domain != other.allocation_domain
+            || self.allocation_base != other.allocation_base
+            || self.buffer_id != other.buffer_id
+        {
+            return false;
+        }
+        let self_end = self.offset_bytes.saturating_add(self.required_bytes);
+        let other_end = other.offset_bytes.saturating_add(other.required_bytes);
+        self.offset_bytes < other_end && other.offset_bytes < self_end
+    }
+
+    pub(super) fn query(
         pointer: CUptr,
         required_bytes: u64,
-        expected_context: usize,
+        expected_domain: AllocationDomain,
         backend: &str,
         name: &str,
     ) -> Result<Self, String> {
+        #[cfg(test)]
+        ALLOCATION_IDENTITY_QUERY_COUNT.fetch_add(1, Ordering::Relaxed);
         if pointer == 0 || required_bytes == 0 {
             return Err(format!("{backend} {name} allocation must be non-empty"));
         }
         let mut context: sys::CUcontext = std::ptr::null_mut();
+        let mut device_ordinal = 0_i32;
         let mut buffer_id = 0_u64;
         let mut allocation_base = 0_u64;
         let mut allocation_bytes = 0_usize;
         let mut attributes = [
             sys::CUpointer_attribute::CU_POINTER_ATTRIBUTE_CONTEXT,
+            sys::CUpointer_attribute::CU_POINTER_ATTRIBUTE_DEVICE_ORDINAL,
             sys::CUpointer_attribute::CU_POINTER_ATTRIBUTE_BUFFER_ID,
             sys::CUpointer_attribute::CU_POINTER_ATTRIBUTE_RANGE_START_ADDR,
             sys::CUpointer_attribute::CU_POINTER_ATTRIBUTE_RANGE_SIZE,
         ];
         let mut outputs = [
             std::ptr::from_mut(&mut context).cast(),
+            std::ptr::from_mut(&mut device_ordinal).cast(),
             std::ptr::from_mut(&mut buffer_id).cast(),
             std::ptr::from_mut(&mut allocation_base).cast(),
             std::ptr::from_mut(&mut allocation_bytes).cast(),
@@ -1886,12 +3463,14 @@ impl Sm90aAllocationIdentity {
                 "query {backend} {name} allocation identity: {result:?}"
             ));
         }
-        let context_handle = context as usize;
-        if context_handle != expected_context {
-            return Err(format!(
-                "{backend} {name} allocation belongs to a different CUDA context"
-            ));
-        }
+        let associated_context = (!context.is_null()).then_some(context as usize);
+        validate_allocation_domain(
+            expected_domain,
+            associated_context,
+            device_ordinal,
+            backend,
+            name,
+        )?;
         let allocation_bytes = u64::try_from(allocation_bytes)
             .map_err(|_| format!("{backend} {name} allocation size exceeds u64::MAX"))?;
         let offset_bytes = pointer
@@ -1906,7 +3485,7 @@ impl Sm90aAllocationIdentity {
             ));
         }
         Ok(Self {
-            context_handle,
+            allocation_domain: expected_domain,
             allocation_base,
             allocation_bytes,
             offset_bytes,
@@ -1918,14 +3497,54 @@ impl Sm90aAllocationIdentity {
     fn append_digest(self, digest: FramedSha256) -> FramedSha256 {
         digest
             .required(
-                b"context-handle",
-                &(self.context_handle as u64).to_le_bytes(),
+                b"device-ordinal",
+                &self.allocation_domain.device_ordinal.to_le_bytes(),
             )
             .required(b"allocation-base", &self.allocation_base.to_le_bytes())
             .required(b"allocation-bytes", &self.allocation_bytes.to_le_bytes())
             .required(b"offset-bytes", &self.offset_bytes.to_le_bytes())
             .required(b"required-bytes", &self.required_bytes.to_le_bytes())
             .required(b"buffer-id", &self.buffer_id.to_le_bytes())
+    }
+
+    pub(super) fn physical_subrange(self, pointer: CUptr, required_bytes: u64) -> Option<Self> {
+        let offset_bytes = pointer.checked_sub(self.allocation_base)?;
+        let end = offset_bytes.checked_add(required_bytes)?;
+        if required_bytes == 0 || end > self.allocation_bytes {
+            return None;
+        }
+        Some(Self {
+            offset_bytes,
+            required_bytes,
+            ..self
+        })
+    }
+
+    pub(super) fn physical_digest(self) -> Sha256Digest {
+        FramedSha256::new(b"physical-allocation-identity.v1")
+            .required(
+                b"device-ordinal",
+                &self.allocation_domain.device_ordinal.to_le_bytes(),
+            )
+            .required(b"allocation-bytes", &self.allocation_bytes.to_le_bytes())
+            .required(b"offset-bytes", &self.offset_bytes.to_le_bytes())
+            .required(b"required-bytes", &self.required_bytes.to_le_bytes())
+            .required(b"buffer-id", &self.buffer_id.to_le_bytes())
+            .finish()
+    }
+
+    fn requery(self, backend: &str, name: &str) -> Result<Self, String> {
+        let pointer = self
+            .allocation_base
+            .checked_add(self.offset_bytes)
+            .ok_or_else(|| format!("{backend} {name} live pointer overflows u64"))?;
+        Self::query(
+            pointer,
+            self.required_bytes,
+            self.allocation_domain,
+            backend,
+            name,
+        )
     }
 }
 
@@ -2023,7 +3642,7 @@ pub struct Sm90aPreparedTensorMaps {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct Sm90aMapBinding {
-    pub context_handle: usize,
+    pub allocation_domain: AllocationDomain,
     pub artifact: ArtifactIdentity,
     pub compiler: CompilerIdentity,
     pub device: DeviceIdentity,
@@ -2075,7 +3694,7 @@ impl Sm90aPreparedTensorMaps {
     }
 
     pub(super) fn validate_live_allocations(&self) -> Result<(), String> {
-        let live = sm90a_allocation_identities(self.keys, self.binding.context_handle)?;
+        let live = sm90a_allocation_identities(self.keys, self.binding.allocation_domain)?;
         if live != self.allocations {
             return Err(
                 "SM90a input allocation identity changed since tensor-map preparation".into(),
@@ -2163,7 +3782,7 @@ pub(super) fn encode_sm90a_tensor_maps(
 
 pub(super) fn sm90a_allocation_identities(
     keys: [Sm90aTensorMapKey; 2],
-    context_handle: usize,
+    allocation_domain: AllocationDomain,
 ) -> Result<[Sm90aAllocationIdentity; 2], String> {
     let required = |key: Sm90aTensorMapKey| {
         let rows = key.global_dimensions[1];
@@ -2179,14 +3798,14 @@ pub(super) fn sm90a_allocation_identities(
         Sm90aAllocationIdentity::query(
             keys[0].base,
             required(keys[0])?,
-            context_handle,
+            allocation_domain,
             "SM90a",
             "A",
         )?,
         Sm90aAllocationIdentity::query(
             keys[1].base,
             required(keys[1])?,
-            context_handle,
+            allocation_domain,
             "SM90a",
             "B",
         )?,
@@ -2196,7 +3815,7 @@ pub(super) fn sm90a_allocation_identities(
 pub(super) fn sm90a_resources_digest(
     route: Sm90aForcedRoute,
     operands: Sm90aLaunchOperands,
-    context_handle: usize,
+    allocation_domain: AllocationDomain,
     tensor_maps_digest: Sha256Digest,
 ) -> Result<Sha256Digest, String> {
     let (rows, columns, element_bytes) = match route.op {
@@ -2221,7 +3840,7 @@ pub(super) fn sm90a_resources_digest(
     let output = Sm90aAllocationIdentity::query(
         operands.output_ptr,
         output_bytes,
-        context_handle,
+        allocation_domain,
         "SM90a",
         "output",
     )?;
@@ -2248,7 +3867,7 @@ pub(super) fn sm90a_resources_digest(
         let bias = Sm90aAllocationIdentity::query(
             operands.bias_ptr,
             bias_bytes,
-            context_handle,
+            allocation_domain,
             "SM90a",
             "bias",
         )?;
@@ -2293,31 +3912,9 @@ pub(super) struct Sm100TensorOrigins {
     pub b_y: i32,
 }
 
-#[repr(C)]
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Sm100KernelParams {
-    pub a_x: i32,
-    pub a_y: i32,
-    pub b_x: i32,
-    pub b_y: i32,
-    pub alpha: f32,
-    pub beta: f32,
-    pub m: i32,
-    pub k: i32,
-    pub n: i32,
-    pub ldc: i32,
-}
-
-unsafe impl DeviceRepr for Sm100KernelParams {}
-
-const _: () = {
-    assert!(std::mem::size_of::<Sm100KernelParams>() == 40);
-    assert!(std::mem::align_of::<Sm100KernelParams>() == 4);
-};
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct Sm100MapBinding {
-    pub context_handle: usize,
+    pub allocation_domain: AllocationDomain,
     pub artifact: ArtifactIdentity,
     pub compiler: CompilerIdentity,
     pub device: DeviceIdentity,
@@ -2384,7 +3981,7 @@ impl Sm100PreparedTensorMaps {
     }
 
     pub(super) fn validate_live_allocations(&self) -> Result<(), String> {
-        let plan = sm100_tensor_map_plan(self.request, self.binding.context_handle)?;
+        let plan = sm100_tensor_map_plan(self.request, self.binding.allocation_domain)?;
         if plan.keys != self.keys
             || plan.allocations != self.allocations
             || plan.origins != self.origins
@@ -2626,10 +4223,10 @@ pub(super) struct Sm100TensorMapPlan {
 
 fn sm100_subview_plan(
     layout: Sm100OperandLayout,
-    context_handle: usize,
+    allocation_domain: AllocationDomain,
 ) -> Result<(Sm90aTensorMapKey, Sm90aAllocationIdentity, (i32, i32)), String> {
     let initial =
-        Sm90aAllocationIdentity::query(layout.pointer, 2, context_handle, "SM100", layout.name)?;
+        Sm90aAllocationIdentity::query(layout.pointer, 2, allocation_domain, "SM100", layout.name)?;
     if !initial.offset_bytes.is_multiple_of(2) {
         return Err(format!(
             "SM100 {} subview offset is not element aligned",
@@ -2678,7 +4275,7 @@ fn sm100_subview_plan(
     let allocation = Sm90aAllocationIdentity::query(
         layout.pointer,
         required_bytes,
-        context_handle,
+        allocation_domain,
         "SM100",
         layout.name,
     )?;
@@ -2706,12 +4303,12 @@ fn sm100_subview_plan(
 
 pub(super) fn sm100_tensor_map_plan(
     request: Sm100MapRequest,
-    context_handle: usize,
+    allocation_domain: AllocationDomain,
 ) -> Result<Sm100TensorMapPlan, String> {
     validate_sm100_request(request)?;
     let layouts = sm100_operand_layouts(request);
-    let (a_key, a_allocation, (a_x, a_y)) = sm100_subview_plan(layouts[0], context_handle)?;
-    let (b_key, b_allocation, (b_x, b_y)) = sm100_subview_plan(layouts[1], context_handle)?;
+    let (a_key, a_allocation, (a_x, a_y)) = sm100_subview_plan(layouts[0], allocation_domain)?;
+    let (b_key, b_allocation, (b_x, b_y)) = sm100_subview_plan(layouts[1], allocation_domain)?;
     Ok(Sm100TensorMapPlan {
         keys: [a_key, b_key],
         allocations: [a_allocation, b_allocation],
@@ -2729,7 +4326,7 @@ impl Sm100LaunchResourceSnapshot {
     pub(super) fn query(
         route: Sm100ForcedRoute,
         operands: Sm100LaunchOperands,
-        context_handle: usize,
+        allocation_domain: AllocationDomain,
     ) -> Result<Self, String> {
         let (rows, columns, element_bytes) = sm100_output_layout(route);
         let output_bytes = matrix_span_bytes(
@@ -2742,7 +4339,7 @@ impl Sm100LaunchResourceSnapshot {
         let output = Sm90aAllocationIdentity::query(
             operands.output_ptr,
             output_bytes,
-            context_handle,
+            allocation_domain,
             "SM100",
             "output",
         )?;
@@ -2756,7 +4353,7 @@ impl Sm100LaunchResourceSnapshot {
             Some(Sm90aAllocationIdentity::query(
                 operands.bias_ptr,
                 bytes,
-                context_handle,
+                allocation_domain,
                 "SM100",
                 "bias",
             )?)
@@ -2827,7 +4424,7 @@ pub struct Sm100PreparedLaunch {
     pub(super) route: Sm100ForcedRoute,
     pub(super) maps: Sm100PreparedTensorMaps,
     pub(super) operands: Sm100LaunchOperands,
-    pub(super) params: Sm100KernelParams,
+    pub(super) params: [u32; 10],
     pub(super) identity: Sm100RouteIdentity,
     pub(super) resources: Sm100LaunchResourceSnapshot,
 }
@@ -3090,7 +4687,7 @@ pub struct TcFwdOperands {
 
 /// Strided scalar-forward operands shared by every deterministic NN bucket.
 #[derive(Clone, Copy)]
-pub struct SgemmFwdSubOperands {
+pub struct GemmBiFwdSubOperands {
     pub x_ptr: CUptr,
     pub lda: usize,
     pub w_ptr: CUptr,
@@ -3098,17 +4695,25 @@ pub struct SgemmFwdSubOperands {
     pub bias_ptr: CUptr,
 }
 
-pub const SM120_TENSOR_MAP_REVISION: u16 = 1;
+/// Tensor-map layout revision sealed into SM120 route identities.
+pub const SM120_TENSOR_MAP_REVISION: u16 = 3;
+/// Qualified automatic-route table revision for SM120.
 pub const SM120_TUNING_REVISION: u16 = 0;
-pub const SM120_SCHEDULE_REVISION: u16 = 1;
+/// Device schedule revision sealed into SM120 route identities.
+pub const SM120_SCHEDULE_REVISION: u16 = 9;
 
+/// Logical GEMM operation implemented by the SM120 Triad module.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Sm120Op {
+    /// Forward matrix product, `Y = X @ W`.
     Nn,
+    /// Weight-gradient product, `dW += X^T @ dY`.
     Tn,
+    /// Input-gradient product, `dX = dY @ W^T`.
     Nt,
 }
 
+/// Output tile owned by one SM120 thread block.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Sm120Tile {
     M64N64,
@@ -3141,6 +4746,7 @@ impl Sm120Tile {
     }
 }
 
+/// Reduction-slab width for an SM120 physical route.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Sm120Bk {
     Bk32,
@@ -3156,6 +4762,7 @@ impl Sm120Bk {
     }
 }
 
+/// Number of TMA pipeline stages for an SM120 physical route.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Sm120Stages {
     S2,
@@ -3171,6 +4778,7 @@ impl Sm120Stages {
     }
 }
 
+/// Complete physical schedule selected for one SM120 kernel launch.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Sm120PhysicalRoute {
     pub tile: Sm120Tile,
@@ -3179,6 +4787,30 @@ pub struct Sm120PhysicalRoute {
 }
 
 impl Sm120PhysicalRoute {
+    pub const fn wide_m_warp(self) -> bool {
+        matches!(self.tile, Sm120Tile::M128N128) && matches!(self.bk, Sm120Bk::Bk32)
+    }
+
+    pub const fn compute_warps(self) -> u32 {
+        if self.wide_m_warp() {
+            8
+        } else {
+            self.tile.compute_warps()
+        }
+    }
+
+    pub const fn threads(self) -> u32 {
+        self.compute_warps() * 32
+    }
+
+    pub const fn warp_tile(self) -> (u32, u32) {
+        if self.wide_m_warp() {
+            (64, 32)
+        } else {
+            (32, 32)
+        }
+    }
+
     pub const fn dynamic_shared_bytes(self) -> u32 {
         let payload =
             (self.tile.output_rows() + self.tile.output_columns()) * self.bk.elements() * 2;
@@ -3190,6 +4822,9 @@ impl Sm120PhysicalRoute {
     }
 }
 
+/// Logical GEMM extents and physical row-major strides.
+///
+/// Use [`Sm120Shape::contiguous`] to derive operation-correct strides.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Sm120Shape {
     pub m: usize,
@@ -3250,6 +4885,10 @@ impl Sm120Shape {
     }
 }
 
+/// Explicit SM120 route used by qualification and kernel census tooling.
+///
+/// Normal training code uses the typed GEMM entry points, which select only
+/// measured cells from the minor-specific automatic table.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Sm120ForcedRoute {
     pub op: Sm120Op,
@@ -3258,6 +4897,7 @@ pub struct Sm120ForcedRoute {
     pub shape: Sm120Shape,
 }
 
+/// NVRTC and device-code target pair accepted for an SM120 module build.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Sm120TargetCandidate {
     pub device_cc: (i32, i32),
@@ -3265,6 +4905,7 @@ pub struct Sm120TargetCandidate {
     pub ptx_target: &'static str,
 }
 
+/// Static launch and resource contract for one exported SM120 kernel.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Sm120KernelSpec {
     pub op: Sm120Op,
@@ -3280,6 +4921,7 @@ pub struct Sm120KernelSpec {
     pub expected_transaction_bytes: u32,
 }
 
+/// Driver-reported resources checked before an SM120 route can be promoted.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Sm120KernelResources {
     pub threads: u32,
@@ -3304,12 +4946,12 @@ macro_rules! sm120_spec {
             dtype: $dtype,
             physical,
             symbol: $symbol,
-            threads: physical.tile.threads(),
+            threads: physical.threads(),
             dynamic_shared_bytes: physical.dynamic_shared_bytes(),
-            empty_barrier_arrivals: physical.tile.threads(),
+            empty_barrier_arrivals: physical.compute_warps(),
             full_barrier_arrivals: 1,
             cluster: (1, 1, 1),
-            warp_tile: (32, 32),
+            warp_tile: physical.warp_tile(),
             expected_transaction_bytes: physical.expected_transaction_bytes(),
         }
     }};
@@ -3319,25 +4961,26 @@ macro_rules! sm120_specs {
     ($(($op:expr, $op_name:literal, $tile:expr, $tile_name:literal)),+ $(,)?) => {
         [$(
             sm120_spec!($op, WeightDtype::Bf16, $tile, Sm120Bk::Bk32, Sm120Stages::S2,
-                concat!("sgemm_bi_", $op_name, "_sm120_tma_", $tile_name, "_bk32_s2_bf16")),
+                concat!("gemm_bi_", $op_name, "_sm120_tma_", $tile_name, "_bk32_s2_bf16")),
             sm120_spec!($op, WeightDtype::F16, $tile, Sm120Bk::Bk32, Sm120Stages::S2,
-                concat!("sgemm_bi_", $op_name, "_sm120_tma_", $tile_name, "_bk32_s2_f16")),
+                concat!("gemm_bi_", $op_name, "_sm120_tma_", $tile_name, "_bk32_s2_f16")),
             sm120_spec!($op, WeightDtype::Bf16, $tile, Sm120Bk::Bk32, Sm120Stages::S3,
-                concat!("sgemm_bi_", $op_name, "_sm120_tma_", $tile_name, "_bk32_s3_bf16")),
+                concat!("gemm_bi_", $op_name, "_sm120_tma_", $tile_name, "_bk32_s3_bf16")),
             sm120_spec!($op, WeightDtype::F16, $tile, Sm120Bk::Bk32, Sm120Stages::S3,
-                concat!("sgemm_bi_", $op_name, "_sm120_tma_", $tile_name, "_bk32_s3_f16")),
+                concat!("gemm_bi_", $op_name, "_sm120_tma_", $tile_name, "_bk32_s3_f16")),
             sm120_spec!($op, WeightDtype::Bf16, $tile, Sm120Bk::Bk64, Sm120Stages::S2,
-                concat!("sgemm_bi_", $op_name, "_sm120_tma_", $tile_name, "_bk64_s2_bf16")),
+                concat!("gemm_bi_", $op_name, "_sm120_tma_", $tile_name, "_bk64_s2_bf16")),
             sm120_spec!($op, WeightDtype::F16, $tile, Sm120Bk::Bk64, Sm120Stages::S2,
-                concat!("sgemm_bi_", $op_name, "_sm120_tma_", $tile_name, "_bk64_s2_f16")),
+                concat!("gemm_bi_", $op_name, "_sm120_tma_", $tile_name, "_bk64_s2_f16")),
             sm120_spec!($op, WeightDtype::Bf16, $tile, Sm120Bk::Bk64, Sm120Stages::S3,
-                concat!("sgemm_bi_", $op_name, "_sm120_tma_", $tile_name, "_bk64_s3_bf16")),
+                concat!("gemm_bi_", $op_name, "_sm120_tma_", $tile_name, "_bk64_s3_bf16")),
             sm120_spec!($op, WeightDtype::F16, $tile, Sm120Bk::Bk64, Sm120Stages::S3,
-                concat!("sgemm_bi_", $op_name, "_sm120_tma_", $tile_name, "_bk64_s3_f16")),
+                concat!("gemm_bi_", $op_name, "_sm120_tma_", $tile_name, "_bk64_s3_f16")),
         )+]
     };
 }
 
+/// Full forced SM120 census inventory; automatic dispatch uses a measured subset.
 pub const SM120_KERNEL_SPECS: [Sm120KernelSpec; 96] = sm120_specs!(
     (Sm120Op::Nn, "nn", Sm120Tile::M64N64, "64x64"),
     (Sm120Op::Nn, "nn", Sm120Tile::M128N64, "128x64"),
@@ -3364,11 +5007,14 @@ impl Sm120ForcedRoute {
     }
 }
 
+/// Arithmetic contract sealed into every SM120 route identity.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Sm120NumericContract {
+    /// BF16/F16 operands, `mma.sync` FP32 accumulation, deterministic route order.
     TmaMma16F32V1,
 }
 
+/// Replay-stable identity of a prepared SM120 route and all of its bindings.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Sm120RouteIdentity {
     pub numeric_contract: Sm120NumericContract,
@@ -3402,6 +5048,11 @@ impl Sm120RouteIdentity {
     }
 
     pub fn resolved_route(self) -> Result<ResolvedGemmRoute, String> {
+        if self.tuning_revision != SM120_TUNING_REVISION
+            || self.schedule_revision != SM120_SCHEDULE_REVISION
+        {
+            return Err("SM120 identity revision is stale".into());
+        }
         let route = Sm120ForcedRoute {
             op: self.op,
             dtype: self.dtype,
@@ -3448,6 +5099,33 @@ impl Sm120RouteIdentity {
             WeightDtype::Bf16 => PolicyDtype::Bf16,
             WeightDtype::F32 => return Err("SM120 TMA route requires f16 or bf16".into()),
         };
+        let (output_rows, output_columns) = match self.op {
+            Sm120Op::Nn => (self.shape.m, self.shape.n),
+            Sm120Op::Tn => (self.shape.k, self.shape.n),
+            Sm120Op::Nt => (self.shape.m, self.shape.k),
+        };
+        let grid = checked_grid_product(
+            checked_u32(output_rows, "SM120 route output rows")?
+                .div_ceil(self.physical.tile.output_rows()),
+            checked_u32(output_columns, "SM120 route output columns")?
+                .div_ceil(self.physical.tile.output_columns()),
+            1,
+        )?;
+        let arguments_digest = FramedSha256::new(b"sm120-kernel-arguments.v1")
+            .required(b"symbol", self.symbol.as_bytes())
+            .required(b"op", &[op as u8])
+            .required(b"dtype", &[dtype as u8])
+            .required(b"m", &(self.shape.m as u64).to_le_bytes())
+            .required(b"k", &(self.shape.k as u64).to_le_bytes())
+            .required(b"n", &(self.shape.n as u64).to_le_bytes())
+            .required(b"lda", &(self.shape.lda as u64).to_le_bytes())
+            .required(b"ldb", &(self.shape.ldb as u64).to_le_bytes())
+            .required(b"ldc", &(self.shape.ldc as u64).to_le_bytes())
+            .required(b"tuning-revision", &self.tuning_revision.to_le_bytes())
+            .required(b"schedule-revision", &self.schedule_revision.to_le_bytes())
+            .required(b"tensor-maps", &self.tensor_maps_digest)
+            .required(b"resources", &self.resources_digest)
+            .finish();
         Ok(ResolvedGemmRoute {
             op,
             dtype,
@@ -3456,6 +5134,7 @@ impl Sm120RouteIdentity {
             instruction_family: ResolvedInstructionFamily::MmaSync,
             instruction_shape: ResolvedInstructionShape { m: 16, n: 8, k: 16 },
             operand_conversion: ResolvedOperandConversion::None,
+            ownership: ResolvedOutputOwnership::OneCtaPerOutputTileV1,
             symbol: self.symbol,
             module_kind: self.module_kind,
             target: self.compiler.target,
@@ -3472,15 +5151,22 @@ impl Sm120RouteIdentity {
             bk: self.physical.bk.elements(),
             stages: self.physical.stages.count(),
             threads: spec.threads,
+            launch: ResolvedKernelLaunch {
+                grid_dim: (grid, 1, 1),
+                block_dim: (spec.threads, 1, 1),
+                shared_mem_bytes: spec.dynamic_shared_bytes,
+                arguments_digest,
+            },
             tensor_map_revision: self.tensor_map_revision,
             tensor_maps_digest: self.tensor_maps_digest,
             resources_digest: self.resources_digest,
-            tuning_table_revision: self.tuning_revision,
+            tuning_table_revision: TUNING_TABLE_REVISION,
             schedule_revision: self.schedule_revision,
         })
     }
 }
 
+/// Inputs required to validate and encode the two SM120 TMA tensor maps.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Sm120MapRequest {
     pub op: Sm120Op,
@@ -3492,6 +5178,7 @@ pub struct Sm120MapRequest {
     pub shape: Sm120Shape,
 }
 
+/// Output, optional bias, and scalar operands for a prepared SM120 launch.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Sm120LaunchOperands {
     pub output_ptr: CUptr,
@@ -3499,28 +5186,6 @@ pub struct Sm120LaunchOperands {
     pub alpha: f32,
     pub beta: f32,
 }
-
-#[repr(C)]
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Sm120KernelParams {
-    pub a_x: i32,
-    pub a_y: i32,
-    pub b_x: i32,
-    pub b_y: i32,
-    pub alpha: f32,
-    pub beta: f32,
-    pub m: i32,
-    pub k: i32,
-    pub n: i32,
-    pub ldc: i32,
-}
-
-unsafe impl DeviceRepr for Sm120KernelParams {}
-
-const _: () = {
-    assert!(std::mem::size_of::<Sm120KernelParams>() == 40);
-    assert!(std::mem::align_of::<Sm120KernelParams>() == 4);
-};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum Sm120Swizzle {
@@ -3602,6 +5267,7 @@ impl Sm120TensorMapKey {
 }
 
 #[repr(transparent)]
+/// Driver-compatible encoded tensor map passed by value to an SM120 kernel.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Sm120TensorMap(sys::CUtensorMap);
 
@@ -3630,7 +5296,7 @@ impl Sm120TensorMap {
                 element_strides.as_ptr(),
                 sys::CUtensorMapInterleave::CU_TENSOR_MAP_INTERLEAVE_NONE,
                 key.swizzle.driver(),
-                sys::CUtensorMapL2promotion::CU_TENSOR_MAP_L2_PROMOTION_NONE,
+                sys::CUtensorMapL2promotion::CU_TENSOR_MAP_L2_PROMOTION_L2_256B,
                 sys::CUtensorMapFloatOOBfill::CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE,
             )
             .result()
@@ -3650,7 +5316,7 @@ pub(super) struct Sm120TensorOrigins {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct Sm120MapBinding {
-    pub context_handle: usize,
+    pub allocation_domain: AllocationDomain,
     pub artifact: ArtifactIdentity,
     pub compiler: CompilerIdentity,
     pub device: DeviceIdentity,
@@ -3658,6 +5324,7 @@ pub(super) struct Sm120MapBinding {
     pub target: Sm120TargetCandidate,
 }
 
+/// Validated tensor-map pair bound to one CUDA context and module identity.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Sm120PreparedTensorMaps {
     pub(super) a: Sm120TensorMap,
@@ -3722,7 +5389,7 @@ impl Sm120PreparedTensorMaps {
     }
 
     pub(super) fn validate_live_allocations(&self) -> Result<(), String> {
-        let plan = sm120_tensor_map_plan(self.request, self.binding.context_handle)?;
+        let plan = sm120_tensor_map_plan(self.request, self.binding.allocation_domain)?;
         if plan.keys != self.keys
             || plan.allocations != self.allocations
             || plan.origins != self.origins
@@ -3772,6 +5439,12 @@ fn sm120_operand_layouts(request: Sm120MapRequest) -> [Sm120OperandLayout; 2] {
     let last_output_row = last_tile(output_rows, tile_m);
     let last_output_column = last_tile(output_columns, tile_n);
     let last_reduction = last_tile(reduction, bk);
+    let nn_wide_b = request.op == Sm120Op::Nn
+        && request.tile == Sm120Tile::M128N64
+        && request.bk == Sm120Bk::Bk32;
+    let tn_wide_ab = request.op == Sm120Op::Tn
+        && request.tile != Sm120Tile::M128N128
+        && request.bk == Sm120Bk::Bk32;
     match request.op {
         Sm120Op::Nn => [
             Sm120OperandLayout {
@@ -3789,9 +5462,24 @@ fn sm120_operand_layouts(request: Sm120MapRequest) -> [Sm120OperandLayout; 2] {
                 stride: shape.ldb,
                 width: shape.n,
                 rows: shape.k,
-                issued_coordinate_max: [last_output_column + tile_n - bk, last_reduction],
-                box_dimensions: [request.bk.elements(), request.bk.elements()],
-                swizzle,
+                issued_coordinate_max: [
+                    if nn_wide_b {
+                        last_output_column
+                    } else {
+                        last_output_column + tile_n - bk
+                    },
+                    last_reduction,
+                ],
+                box_dimensions: if nn_wide_b {
+                    [request.tile.output_columns(), request.bk.elements()]
+                } else {
+                    [request.bk.elements(), request.bk.elements()]
+                },
+                swizzle: if nn_wide_b {
+                    Sm120Swizzle::Bytes128
+                } else {
+                    swizzle
+                },
                 name: "B",
             },
         ],
@@ -3801,9 +5489,24 @@ fn sm120_operand_layouts(request: Sm120MapRequest) -> [Sm120OperandLayout; 2] {
                 stride: shape.lda,
                 width: shape.k,
                 rows: shape.m,
-                issued_coordinate_max: [last_output_row + tile_m - bk, last_reduction],
-                box_dimensions: [request.bk.elements(), request.bk.elements()],
-                swizzle,
+                issued_coordinate_max: [
+                    if tn_wide_ab {
+                        last_output_row + tile_m - 64
+                    } else {
+                        last_output_row + tile_m - bk
+                    },
+                    last_reduction,
+                ],
+                box_dimensions: if tn_wide_ab {
+                    [64, request.bk.elements()]
+                } else {
+                    [request.bk.elements(), request.bk.elements()]
+                },
+                swizzle: if tn_wide_ab {
+                    Sm120Swizzle::Bytes128
+                } else {
+                    swizzle
+                },
                 name: "A",
             },
             Sm120OperandLayout {
@@ -3811,9 +5514,24 @@ fn sm120_operand_layouts(request: Sm120MapRequest) -> [Sm120OperandLayout; 2] {
                 stride: shape.ldb,
                 width: shape.n,
                 rows: shape.m,
-                issued_coordinate_max: [last_output_column + tile_n - bk, last_reduction],
-                box_dimensions: [request.bk.elements(), request.bk.elements()],
-                swizzle,
+                issued_coordinate_max: [
+                    if tn_wide_ab {
+                        last_output_column + tile_n - 64
+                    } else {
+                        last_output_column + tile_n - bk
+                    },
+                    last_reduction,
+                ],
+                box_dimensions: if tn_wide_ab {
+                    [64, request.bk.elements()]
+                } else {
+                    [request.bk.elements(), request.bk.elements()]
+                },
+                swizzle: if tn_wide_ab {
+                    Sm120Swizzle::Bytes128
+                } else {
+                    swizzle
+                },
                 name: "B",
             },
         ],
@@ -3878,9 +5596,9 @@ fn validate_sm120_request(request: Sm120MapRequest) -> Result<(), String> {
         return Err("SM120 TMA tensor maps require bf16 or f16 operands".into());
     }
     for layout in sm120_operand_layouts(request) {
-        if layout.pointer == 0 || !layout.pointer.is_multiple_of(2) {
+        if layout.pointer == 0 || !layout.pointer.is_multiple_of(16) {
             return Err(format!(
-                "SM120 {} logical pointer must be non-null and element aligned",
+                "SM120 {} TMA logical pointer must be non-null and 16-byte aligned",
                 layout.name
             ));
         }
@@ -3898,6 +5616,7 @@ fn validate_sm120_request(request: Sm120MapRequest) -> Result<(), String> {
     Ok(())
 }
 
+/// Validates an SM120 map request without touching the CUDA driver.
 pub fn validate_sm120_map_request(request: Sm120MapRequest) -> Result<(), String> {
     validate_sm120_request(request)
 }
@@ -3910,10 +5629,10 @@ pub(super) struct Sm120TensorMapPlan {
 
 fn sm120_subview_plan(
     layout: Sm120OperandLayout,
-    context_handle: usize,
+    allocation_domain: AllocationDomain,
 ) -> Result<(Sm120TensorMapKey, Sm90aAllocationIdentity, (i32, i32)), String> {
     let initial =
-        Sm90aAllocationIdentity::query(layout.pointer, 2, context_handle, "SM120", layout.name)?;
+        Sm90aAllocationIdentity::query(layout.pointer, 2, allocation_domain, "SM120", layout.name)?;
     if !initial.offset_bytes.is_multiple_of(2) {
         return Err(format!(
             "SM120 {} subview offset is not element aligned",
@@ -3962,7 +5681,7 @@ fn sm120_subview_plan(
     let allocation = Sm90aAllocationIdentity::query(
         layout.pointer,
         required_bytes,
-        context_handle,
+        allocation_domain,
         "SM120",
         layout.name,
     )?;
@@ -3991,12 +5710,12 @@ fn sm120_subview_plan(
 
 pub(super) fn sm120_tensor_map_plan(
     request: Sm120MapRequest,
-    context_handle: usize,
+    allocation_domain: AllocationDomain,
 ) -> Result<Sm120TensorMapPlan, String> {
     validate_sm120_request(request)?;
     let layouts = sm120_operand_layouts(request);
-    let (a_key, a_allocation, (a_x, a_y)) = sm120_subview_plan(layouts[0], context_handle)?;
-    let (b_key, b_allocation, (b_x, b_y)) = sm120_subview_plan(layouts[1], context_handle)?;
+    let (a_key, a_allocation, (a_x, a_y)) = sm120_subview_plan(layouts[0], allocation_domain)?;
+    let (b_key, b_allocation, (b_x, b_y)) = sm120_subview_plan(layouts[1], allocation_domain)?;
     Ok(Sm120TensorMapPlan {
         keys: [a_key, b_key],
         allocations: [a_allocation, b_allocation],
@@ -4032,7 +5751,7 @@ impl Sm120LaunchResourceSnapshot {
     pub(super) fn query(
         route: Sm120ForcedRoute,
         operands: Sm120LaunchOperands,
-        context_handle: usize,
+        allocation_domain: AllocationDomain,
     ) -> Result<Self, String> {
         let (rows, columns, element_bytes) = sm120_output_layout(route);
         let output_bytes = matrix_span_bytes(
@@ -4045,7 +5764,7 @@ impl Sm120LaunchResourceSnapshot {
         let output = Sm90aAllocationIdentity::query(
             operands.output_ptr,
             output_bytes,
-            context_handle,
+            allocation_domain,
             "SM120",
             "output",
         )?;
@@ -4059,7 +5778,7 @@ impl Sm120LaunchResourceSnapshot {
             Some(Sm90aAllocationIdentity::query(
                 operands.bias_ptr,
                 bytes,
-                context_handle,
+                allocation_domain,
                 "SM120",
                 "bias",
             )?)
@@ -4109,13 +5828,17 @@ fn sm120_output_layout(route: Sm120ForcedRoute) -> (usize, usize, u64) {
     }
 }
 
+/// Fully prepared forced SM120 launch for direct execution or graph capture.
+///
+/// Preparation is eager-only. Call [`crate::mamba_ssm::gpu::gemm_bi_triad::validate_sm120_graph_replay`]
+/// before replaying a captured launch after any allocation or module change.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Sm120PreparedLaunch {
     pub(super) stream_handle: usize,
     pub(super) route: Sm120ForcedRoute,
     pub(super) maps: Sm120PreparedTensorMaps,
     pub(super) operands: Sm120LaunchOperands,
-    pub(super) params: Sm120KernelParams,
+    pub(super) params: [u32; 10],
     pub(super) identity: Sm120RouteIdentity,
     pub(super) resolved_launch_set: ResolvedGemmLaunchSet,
     pub(super) resources: Sm120LaunchResourceSnapshot,
@@ -4123,33 +5846,182 @@ pub struct Sm120PreparedLaunch {
 }
 
 impl Sm120PreparedLaunch {
+    /// Returns the complete physical route and binding identity.
     pub fn identity(&self) -> Sm120RouteIdentity {
         self.identity
     }
 
+    /// Returns the driver resource census recorded during preparation.
     pub fn resources(&self) -> Sm120KernelResources {
         self.kernel_resources
     }
 
+    /// Returns the resolved launch set sealed into this preparation.
     pub fn resolved_launch_set(&self) -> ResolvedGemmLaunchSet {
         self.resolved_launch_set
+    }
+
+    pub(super) fn managed_epoch(&self) -> Option<ManagedAllocationEpochStamp> {
+        let mut ranges = Vec::with_capacity(4);
+        for allocation in self
+            .maps
+            .allocations
+            .iter()
+            .chain(std::iter::once(&self.resources.output))
+            .chain(self.resources.bias.iter())
+        {
+            ranges.push((allocation.allocation_base, allocation.allocation_bytes));
+        }
+        managed_allocation_epoch_for_ranges(
+            self.maps.binding.allocation_domain.context_handle,
+            &ranges,
+        )
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        F32TriadShape, GemmDims, SM120_KERNEL_SPECS, Sm90aMapRequest, Sm90aOp, Sm90aShape,
-        Sm100MapRequest, Sm100Op, Sm100Shape, Sm100Tile, Sm120Bk, Sm120Op, Sm120Stages, Sm120Tile,
-        checked_grid_product, checked_u32, sm90a_tensor_map_keys, sm100_operand_layouts,
-        sm100_tensor_map_keys, tf32_kernel_spec, tf32_route_specs, validate_bias_preseed,
-        validate_sm100_issued_coordinates,
+        AllocationDomain, F32EncodedTensorMaps, F32LaunchResourceSnapshot, F32PreparedTensorMaps,
+        F32TriadOperands, F32TriadRequest, F32TriadShape, F32ZeroReductionTensorMaps, GemmDims,
+        SCALAR_NN_M32N64_SPLITK32_DYNAMIC_SHARED_BYTES,
+        SCALAR_NN_M32N64_SPLITK32_MIN_ACTIVE_BLOCKS, SCALAR_NN_M32N64_SPLITK32_REGISTER_CAP,
+        SCALAR_NN_M32N64_SPLITK32_STATIC_SHARED_BYTES, SCALAR_NN_M32N64_SPLITK32_THREADS,
+        SCALAR_TN_M16N16_DYNAMIC_SHARED_BYTES, SCALAR_TN_M16N16_MIN_ACTIVE_BLOCKS,
+        SCALAR_TN_M16N16_REGISTER_CAP, SCALAR_TN_M16N16_STATIC_SHARED_BYTES,
+        SCALAR_TN_M16N16_THREADS, SM120_KERNEL_SPECS, Sm90aAllocationIdentity, Sm90aMapRequest,
+        Sm90aOp, Sm90aShape, Sm90aWarpgroupSchedule, Sm100MapRequest, Sm100Op, Sm100Schedule,
+        Sm100Shape, Sm100Stages, Sm100Tile, Sm120Bk, Sm120Op, Sm120Stages, Sm120Tile,
+        TF32_NT_SPLITK4_S4_SPEC, TF32_NT_SPLITK8_S3_SPEC, TF32_PORTABLE_SCHEDULE_REVISION,
+        TF32_SCHEDULE_REVISION, TF32_SPLITK_CANDIDATE_SPECS, TF32_SPLITK2_SPEC, TF32_SPLITK4_SPEC,
+        TF32_TENSOR_MAP_REVISION, Tf32EncodedMapIdentity, Tf32MapBinding, Tf32OperandLayout,
+        Tf32PhysicalRoute, Tf32PortableRoute, Tf32PortableStages, Tf32PortableTile,
+        Tf32QualifiedModule, Tf32Sm90aRoute, Tf32Sm100Route, Tf32Sm120Route, Tf32Sm120Stages,
+        Tf32Sm120Tile, Tf32TensorMap, Tf32TensorMapFormat, Tf32TensorMapKey, Tf32TensorOrigins,
+        ZERO_REDUCTION_MAP_REVISION, append_tf32_encoded_map_identity, build_sm90a_tf32_descriptor,
+        checked_grid_product, checked_u32, decode_sm90a_tf32_descriptor, sm90a_tensor_map_keys,
+        sm100_operand_layouts, sm100_tensor_map_keys, sm100_tf32_instruction_descriptor,
+        tf32_kernel_spec, tf32_operand_layouts, tf32_route_specs, tf32_splitk_partition_bounds,
+        tf32_splitk_spec, tf32_subview_plan, validate_allocation_domain, validate_bias_preseed,
+        validate_sm100_issued_coordinates, validate_tf32_issued_coordinates,
+        zeroed_tensor_map_sentinel,
     };
+
+    const TEST_ALLOCATION_DOMAIN: AllocationDomain = AllocationDomain {
+        context_handle: 0x1234,
+        device_ordinal: 2,
+    };
+
+    fn allocation_identity(offset_bytes: u64, required_bytes: u64) -> Sm90aAllocationIdentity {
+        Sm90aAllocationIdentity {
+            allocation_domain: TEST_ALLOCATION_DOMAIN,
+            allocation_base: 0x1000,
+            allocation_bytes: 0x1000,
+            offset_bytes,
+            required_bytes,
+            buffer_id: 7,
+        }
+    }
+
+    #[test]
+    fn allocation_identity_detects_requested_span_overlap() {
+        let output = allocation_identity(64, 128);
+        assert!(output.requested_range_overlaps(allocation_identity(0, 65)));
+        assert!(output.requested_range_overlaps(allocation_identity(191, 32)));
+        assert!(output.requested_range_overlaps(allocation_identity(96, 16)));
+    }
+
+    #[test]
+    fn tma_tensor_map_rejects_a_logical_pointer_below_its_alignment() {
+        let layout = Tf32OperandLayout {
+            pointer: 0x1004,
+            stride: 64,
+            width: 32,
+            rows: 32,
+            issued_coordinate_max: [0, 0],
+            box_dimensions: [32, 32],
+            name: "A",
+        };
+        let error = tf32_subview_plan(
+            layout,
+            TEST_ALLOCATION_DOMAIN,
+            Tf32TensorMapFormat::Uint32V1,
+        )
+        .expect_err("TMA must reject a four-byte-aligned logical pointer");
+        assert!(error.contains("TMA pointer must be 16-byte aligned"));
+    }
+
+    #[test]
+    fn allocation_identity_accepts_adjacent_or_distinct_allocations() {
+        let output = allocation_identity(64, 128);
+        assert!(!output.requested_range_overlaps(allocation_identity(0, 64)));
+        assert!(!output.requested_range_overlaps(allocation_identity(192, 32)));
+        assert!(!output.requested_range_overlaps(Sm90aAllocationIdentity {
+            buffer_id: 8,
+            ..allocation_identity(96, 16)
+        }));
+    }
+
+    #[test]
+    fn allocation_domain_accepts_matching_associated_context_and_device() {
+        validate_allocation_domain(TEST_ALLOCATION_DOMAIN, Some(0x1234), 2, "test", "A").unwrap();
+    }
+
+    #[test]
+    fn allocation_domain_rejects_mismatched_associated_context() {
+        let error =
+            validate_allocation_domain(TEST_ALLOCATION_DOMAIN, Some(0x5678), 2, "test", "A")
+                .expect_err("an associated allocation from another context must be rejected");
+        assert!(error.contains("different CUDA context"), "{error}");
+    }
+
+    #[test]
+    fn allocation_domain_rejects_mismatched_device_after_context_match() {
+        let error =
+            validate_allocation_domain(TEST_ALLOCATION_DOMAIN, Some(0x1234), 3, "test", "A")
+                .expect_err("an associated allocation from another device must be rejected");
+        assert!(error.contains("CUDA device 3"), "{error}");
+        assert!(error.contains("expected CUDA device 2"), "{error}");
+    }
+
+    #[test]
+    fn allocation_domain_accepts_null_context_only_on_matching_device() {
+        validate_allocation_domain(TEST_ALLOCATION_DOMAIN, None, 2, "test", "A").unwrap();
+    }
+
+    #[test]
+    fn allocation_domain_rejects_null_context_on_mismatched_device() {
+        let error = validate_allocation_domain(TEST_ALLOCATION_DOMAIN, None, 3, "test", "A")
+            .expect_err("a contextless allocation from another device must be rejected");
+        assert!(error.contains("CUDA device 3"), "{error}");
+        assert!(error.contains("expected CUDA device 2"), "{error}");
+    }
+    use crate::mamba_ssm::gpu::buffers::register_managed_allocation_range;
     use crate::mamba_ssm::gpu::dtype::WeightDtype;
     use crate::mamba_ssm::gpu::kernel_identity::{
-        ModuleKind, ResolvedGemmOp, ResolvedInstructionFamily, ResolvedInstructionShape,
-        ResolvedOperandConversion,
+        ArtifactIdentity, ArtifactKind, COMPILER_REVISION, COMPOSER_REVISION, CompilerIdentity,
+        CudaTarget, DeviceCaps, DeviceIdentity, DriverIdentity, ModuleKind, NUMERIC_ABI_REVISION,
+        ResolvedGemmOp, ResolvedInstructionFamily, ResolvedInstructionShape,
+        ResolvedOperandConversion, SCHEDULE_REVISION,
     };
+
+    #[test]
+    fn scalar_tn_m16n16_resource_contract_is_exact() {
+        assert_eq!(SCALAR_TN_M16N16_THREADS, 64);
+        assert_eq!(SCALAR_TN_M16N16_DYNAMIC_SHARED_BYTES, 4_096);
+        assert_eq!(SCALAR_TN_M16N16_STATIC_SHARED_BYTES, 0);
+        assert_eq!(SCALAR_TN_M16N16_REGISTER_CAP, 112);
+        assert_eq!(SCALAR_TN_M16N16_MIN_ACTIVE_BLOCKS, 8);
+    }
+
+    #[test]
+    fn scalar_nn_m32n64_splitk32_resource_contract_is_exact() {
+        assert_eq!(SCALAR_NN_M32N64_SPLITK32_THREADS, 128);
+        assert_eq!(SCALAR_NN_M32N64_SPLITK32_DYNAMIC_SHARED_BYTES, 0);
+        assert_eq!(SCALAR_NN_M32N64_SPLITK32_STATIC_SHARED_BYTES, 13_312);
+        assert_eq!(SCALAR_NN_M32N64_SPLITK32_REGISTER_CAP, 64);
+        assert_eq!(SCALAR_NN_M32N64_SPLITK32_MIN_ACTIVE_BLOCKS, 4);
+    }
 
     #[test]
     fn f32_zero_reduction_validation_is_op_normalized() {
@@ -4169,9 +6041,12 @@ mod tests {
         ];
         for (op, shape) in cases {
             shape.validate(op).unwrap();
-            assert_eq!(shape.reduction(op), 0);
-            assert_eq!(shape.output_rows(op), 3);
-            assert_eq!(shape.output_columns(op), 5);
+            let reduction = || shape.reduction(op);
+            let output_rows = || shape.output_rows(op);
+            let output_columns = || shape.output_columns(op);
+            assert_eq!(reduction(), 0);
+            assert_eq!(output_rows(), 3);
+            assert_eq!(output_columns(), 5);
         }
 
         for (op, dims) in [
@@ -4208,19 +6083,23 @@ mod tests {
     #[test]
     fn tf32_route_spec_inventories_are_exact_and_unique() {
         let expected = [
-            (ModuleKind::TriadSm80, 15),
-            (ModuleKind::TriadSm90a, 6),
-            (ModuleKind::TriadSm100, 36),
-            (ModuleKind::TriadSm120, 12),
+            (ModuleKind::TriadSm80, 18, [6, 6, 6]),
+            (ModuleKind::TriadSm90a, 6, [2, 2, 2]),
+            (ModuleKind::TriadSm100, 36, [12, 12, 12]),
+            (ModuleKind::TriadSm120, 17, [6, 6, 5]),
         ];
+        let expected_total = expected.iter().map(|(_, count, _)| count).sum::<usize>();
         let mut all_symbols = std::collections::BTreeSet::new();
-        for (module_kind, count) in expected {
+        for (module_kind, count, op_counts) in expected {
             let specs = tf32_route_specs(module_kind);
             assert_eq!(specs.len(), count, "{module_kind:?}");
-            for op in [ResolvedGemmOp::Nn, ResolvedGemmOp::Tn, ResolvedGemmOp::Nt] {
+            for (op, op_count) in [ResolvedGemmOp::Nn, ResolvedGemmOp::Tn, ResolvedGemmOp::Nt]
+                .into_iter()
+                .zip(op_counts)
+            {
                 assert_eq!(
                     specs.iter().filter(|spec| spec.op == op).count(),
-                    count / 3,
+                    op_count,
                     "{module_kind:?}/{op:?}"
                 );
             }
@@ -4229,6 +6108,9 @@ mod tests {
                 assert_eq!(tf32_kernel_spec(spec.op, spec.route).unwrap(), spec);
                 match spec.route {
                     super::Tf32PhysicalRoute::MmaTf32RnaV1(_)
+                    | super::Tf32PhysicalRoute::MmaTf32RnaSplitK2V1(_)
+                    | super::Tf32PhysicalRoute::MmaTf32RnaSplitK4V1(_)
+                    | super::Tf32PhysicalRoute::MmaTf32RnaSplitK8V1(_)
                     | super::Tf32PhysicalRoute::Sm120TmaMmaTf32RnaV1(_) => {
                         assert_eq!(spec.instruction_family, ResolvedInstructionFamily::MmaSync);
                         assert_eq!(
@@ -4263,10 +6145,546 @@ mod tests {
                 assert!(all_symbols.insert(spec.symbol), "duplicate {}", spec.symbol);
             }
         }
-        assert_eq!(all_symbols.len(), 69);
+        assert_eq!(all_symbols.len(), expected_total);
         assert!(tf32_route_specs(ModuleKind::Fixed).is_empty());
         assert!(tf32_route_specs(ModuleKind::TriadScalar).is_empty());
         assert!(tf32_route_specs(ModuleKind::Mamba3Combined).is_empty());
+    }
+
+    #[test]
+    fn tag33_rect_wide_spec_keeps_logical_bk64_and_bk32_tensor_maps() {
+        let route = Tf32PhysicalRoute::Sm120TmaMmaTf32RnaV1(Tf32Sm120Route {
+            tile: Tf32Sm120Tile::M80N32Bk64,
+            stages: Tf32Sm120Stages::S2,
+        });
+        let spec = tf32_kernel_spec(ResolvedGemmOp::Nn, route).unwrap();
+        assert_eq!(
+            spec.symbol,
+            "gemm_bi_nn_sm120_tma_mma_tf32_v1_m80n32_bk64_s2"
+        );
+        assert_eq!(spec.tile, (80, 32));
+        assert_eq!((spec.bk, spec.map_bk), (64, 32));
+        assert_eq!(
+            (spec.stages, spec.threads, spec.dynamic_shared_bytes),
+            (2, 160, 57_472)
+        );
+
+        let request = F32TriadRequest {
+            op: ResolvedGemmOp::Nn,
+            shape: F32TriadShape::contiguous(ResolvedGemmOp::Nn, (512, 3_072, 768)),
+        };
+        let layouts = tf32_operand_layouts(
+            request,
+            F32TriadOperands {
+                output: 0x1000,
+                a: 0x2000,
+                b: 0x3000,
+                bias: None,
+                alpha: 1.0,
+                beta: 0.0,
+            },
+            route,
+        )
+        .unwrap();
+        assert_eq!(layouts[0].box_dimensions, [32, 80]);
+        assert_eq!(layouts[1].box_dimensions, [32, 32]);
+        assert_eq!(
+            (layouts[0].width, layouts[0].rows, layouts[0].stride),
+            (3_072, 512, 3_072)
+        );
+        assert_eq!(
+            (layouts[1].width, layouts[1].rows, layouts[1].stride),
+            (768, 3_072, 768)
+        );
+
+        for (op, stages) in [
+            (ResolvedGemmOp::Tn, Tf32Sm120Stages::S2),
+            (ResolvedGemmOp::Nt, Tf32Sm120Stages::S2),
+            (ResolvedGemmOp::Nn, Tf32Sm120Stages::S3),
+            (ResolvedGemmOp::Nn, Tf32Sm120Stages::S4),
+        ] {
+            assert!(
+                tf32_kernel_spec(
+                    op,
+                    Tf32PhysicalRoute::Sm120TmaMmaTf32RnaV1(Tf32Sm120Route {
+                        tile: Tf32Sm120Tile::M80N32Bk64,
+                        stages,
+                    }),
+                )
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn portable_tf32_nn_splitk2_and_splitk4_are_distinct_bit_families() {
+        let splitk2 = Tf32PhysicalRoute::MmaTf32RnaSplitK2V1(Tf32PortableRoute {
+            tile: Tf32PortableTile::M16N32,
+            stages: Tf32PortableStages::S4,
+        });
+        let route = Tf32PhysicalRoute::MmaTf32RnaSplitK4V1(Tf32PortableRoute {
+            tile: Tf32PortableTile::M16N32,
+            stages: Tf32PortableStages::S4,
+        });
+        let splitk2_spec = tf32_splitk_spec(ResolvedGemmOp::Nn, splitk2).unwrap();
+        assert_eq!(splitk2_spec, &TF32_SPLITK2_SPEC);
+        assert_eq!(splitk2_spec.route, splitk2);
+        assert_eq!(
+            splitk2_spec.symbol,
+            "gemm_bi_nn_sm80_mma_tf32_splitk2_v1_m16n32_bk32_s4"
+        );
+        assert_eq!(splitk2_spec.tile, (16, 32));
+        assert_eq!(splitk2_spec.bk, 32);
+        assert_eq!(splitk2_spec.stages, 4);
+        assert_eq!(splitk2_spec.partitions, 2);
+        assert_eq!(splitk2_spec.threads, 128);
+        assert_eq!(splitk2_spec.dynamic_shared_bytes, 29_696);
+
+        let spec = tf32_splitk_spec(ResolvedGemmOp::Nn, route).unwrap();
+        assert_eq!(spec, &TF32_SPLITK4_SPEC);
+        assert_eq!(spec.route, route);
+        assert_eq!(
+            spec.symbol,
+            "gemm_bi_nn_sm80_mma_tf32_splitk4_v1_m16n32_bk32_s4"
+        );
+        assert_eq!(spec.tile, (16, 32));
+        assert_eq!(spec.bk, 32);
+        assert_eq!(spec.stages, 4);
+        assert_eq!(spec.partitions, 4);
+        assert_eq!(spec.threads, 128);
+        assert_eq!(spec.dynamic_shared_bytes, 29_696);
+
+        assert_eq!(&TF32_SPLITK_CANDIDATE_SPECS[..2], &[*splitk2_spec, *spec]);
+        assert!(
+            tf32_splitk_spec(
+                ResolvedGemmOp::Nn,
+                Tf32PhysicalRoute::MmaTf32RnaSplitK4V1(Tf32PortableRoute {
+                    tile: Tf32PortableTile::M16N32,
+                    stages: Tf32PortableStages::S3,
+                }),
+            )
+            .is_err()
+        );
+
+        assert_eq!(
+            (0..2)
+                .map(|partition| tf32_splitk_partition_bounds(384, 2, partition).unwrap())
+                .collect::<Vec<_>>(),
+            [(0, 192), (192, 384)]
+        );
+        assert_eq!(
+            (0..2)
+                .map(|partition| tf32_splitk_partition_bounds(833, 2, partition).unwrap())
+                .collect::<Vec<_>>(),
+            [(0, 448), (448, 833)]
+        );
+        assert_eq!(
+            (0..2)
+                .map(|partition| tf32_splitk_partition_bounds(17, 2, partition).unwrap())
+                .collect::<Vec<_>>(),
+            [(0, 17), (17, 17)]
+        );
+        assert_eq!(
+            (0..4)
+                .map(|partition| tf32_splitk_partition_bounds(384, 4, partition).unwrap())
+                .collect::<Vec<_>>(),
+            [(0, 96), (96, 192), (192, 288), (288, 384)]
+        );
+        assert_eq!(
+            (0..4)
+                .map(|partition| tf32_splitk_partition_bounds(833, 4, partition).unwrap())
+                .collect::<Vec<_>>(),
+            [(0, 224), (224, 448), (448, 672), (672, 833)]
+        );
+        assert!(tf32_splitk_partition_bounds(384, 2, 2).is_err());
+        assert!(tf32_splitk_partition_bounds(384, 4, 4).is_err());
+        assert!(tf32_splitk_partition_bounds(384, 3, 0).is_err());
+        assert!(tf32_splitk_spec(ResolvedGemmOp::Tn, splitk2).is_err());
+        assert!(tf32_splitk_spec(ResolvedGemmOp::Nt, splitk2).is_err());
+        assert!(tf32_splitk_spec(ResolvedGemmOp::Tn, route).is_err());
+        assert_eq!(
+            tf32_splitk_spec(ResolvedGemmOp::Nt, route).unwrap(),
+            &TF32_NT_SPLITK4_S4_SPEC
+        );
+        assert!(
+            tf32_splitk_spec(
+                ResolvedGemmOp::Nn,
+                Tf32PhysicalRoute::MmaTf32RnaV1(Tf32PortableRoute {
+                    tile: Tf32PortableTile::M16N32,
+                    stages: Tf32PortableStages::S4,
+                }),
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn portable_tf32_splitk_inventory_covers_nn_and_nt_candidates_exactly() {
+        let actual = TF32_SPLITK_CANDIDATE_SPECS
+            .iter()
+            .map(|spec| {
+                (
+                    spec.op,
+                    spec.symbol,
+                    spec.tile,
+                    spec.stages,
+                    spec.partitions,
+                    spec.dynamic_shared_bytes,
+                    spec.register_cap,
+                    spec.occupancy_gate,
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            actual,
+            [
+                (
+                    ResolvedGemmOp::Nn,
+                    "gemm_bi_nn_sm80_mma_tf32_splitk2_v1_m16n32_bk32_s4",
+                    (16, 32),
+                    4,
+                    2,
+                    29_696,
+                    128,
+                    3,
+                ),
+                (
+                    ResolvedGemmOp::Nn,
+                    "gemm_bi_nn_sm80_mma_tf32_splitk4_v1_m16n32_bk32_s4",
+                    (16, 32),
+                    4,
+                    4,
+                    29_696,
+                    128,
+                    3,
+                ),
+                (
+                    ResolvedGemmOp::Nt,
+                    "gemm_bi_nt_sm80_mma_tf32_splitk4_v1_m16n32_bk32_s3",
+                    (16, 32),
+                    3,
+                    4,
+                    20_736,
+                    96,
+                    3,
+                ),
+                (
+                    ResolvedGemmOp::Nt,
+                    "gemm_bi_nt_sm80_mma_tf32_splitk4_v1_m16n32_bk32_s4",
+                    (16, 32),
+                    4,
+                    4,
+                    27_648,
+                    96,
+                    3,
+                ),
+                (
+                    ResolvedGemmOp::Nt,
+                    "gemm_bi_nt_sm80_mma_tf32_splitk8_v1_m32n32_bk32_s3",
+                    (32, 32),
+                    3,
+                    8,
+                    27_648,
+                    96,
+                    3,
+                ),
+                (
+                    ResolvedGemmOp::Nt,
+                    "gemm_bi_nt_sm80_mma_tf32_splitk8_v1_m32n32_bk32_s4",
+                    (32, 32),
+                    4,
+                    8,
+                    36_864,
+                    96,
+                    2,
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn portable_tf32_splitk_lookup_and_partitioning_are_operation_aware() {
+        let p4 = Tf32PhysicalRoute::MmaTf32RnaSplitK4V1(Tf32PortableRoute {
+            tile: Tf32PortableTile::M16N32,
+            stages: Tf32PortableStages::S4,
+        });
+        assert_eq!(
+            tf32_splitk_spec(ResolvedGemmOp::Nn, p4).unwrap().symbol,
+            "gemm_bi_nn_sm80_mma_tf32_splitk4_v1_m16n32_bk32_s4"
+        );
+        assert_eq!(
+            tf32_splitk_spec(ResolvedGemmOp::Nt, p4).unwrap().symbol,
+            "gemm_bi_nt_sm80_mma_tf32_splitk4_v1_m16n32_bk32_s4"
+        );
+
+        let p8 = TF32_NT_SPLITK8_S3_SPEC.route;
+        assert_eq!(
+            tf32_splitk_spec(ResolvedGemmOp::Nt, p8).unwrap(),
+            &TF32_NT_SPLITK8_S3_SPEC
+        );
+        assert!(tf32_splitk_spec(ResolvedGemmOp::Nn, p8).is_err());
+        assert!(tf32_splitk_spec(ResolvedGemmOp::Tn, p8).is_err());
+        assert_eq!(
+            (0..8)
+                .map(|partition| tf32_splitk_partition_bounds(1_536, 8, partition).unwrap())
+                .collect::<Vec<_>>(),
+            [
+                (0, 192),
+                (192, 384),
+                (384, 576),
+                (576, 768),
+                (768, 960),
+                (960, 1_152),
+                (1_152, 1_344),
+                (1_344, 1_536),
+            ]
+        );
+        assert!(tf32_splitk_partition_bounds(1_536, 8, 8).is_err());
+    }
+
+    #[test]
+    fn portable_tf32_shared_bytes_are_op_specific() {
+        for (op, expected) in [
+            (
+                ResolvedGemmOp::Nn,
+                [55_296, 82_944, 36_864, 55_296, 29_696, 21_504],
+            ),
+            (
+                ResolvedGemmOp::Tn,
+                [53_248, 79_872, 36_864, 55_296, 32_768, 24_576],
+            ),
+            (
+                ResolvedGemmOp::Nt,
+                [55_296, 82_944, 36_864, 55_296, 27_648, 18_432],
+            ),
+        ] {
+            let actual = tf32_route_specs(ModuleKind::TriadSm80)
+                .iter()
+                .filter(|spec| spec.op == op)
+                .map(|spec| spec.dynamic_shared_bytes)
+                .collect::<Vec<_>>();
+            assert_eq!(actual, expected, "{op:?} portable TF32 shared bytes");
+        }
+    }
+
+    #[test]
+    fn portable_tf32_schedule_revision_tracks_the_current_layout() {
+        assert_eq!(SCHEDULE_REVISION, 8);
+        assert_eq!(TF32_PORTABLE_SCHEDULE_REVISION, SCHEDULE_REVISION);
+        assert_eq!(TF32_SCHEDULE_REVISION, SCHEDULE_REVISION);
+        for module_kind in [
+            ModuleKind::TriadSm80,
+            ModuleKind::TriadSm90a,
+            ModuleKind::TriadSm100,
+            ModuleKind::TriadSm120,
+        ] {
+            assert!(
+                tf32_route_specs(module_kind)
+                    .iter()
+                    .all(|spec| spec.schedule_revision == SCHEDULE_REVISION),
+                "{module_kind:?} TF32 schedule revision drifted"
+            );
+        }
+    }
+
+    #[test]
+    fn tf32_descriptor_oracles_match_production_builders() {
+        for (shared_address, leading_offset, stride_offset, expected_raw, expected_decoded) in [
+            (0, 1, 64, 0x4000404000010000, (0, 1, 64)),
+            (0, 0, 64, 0x4000404000000000, (0, 0, 64)),
+            (0, 256, 64, 0x4000404001000000, (0, 256, 64)),
+            (0x1230, 192, 320, 0x4000414000c00123, (0x1230, 192, 320)),
+            (0x40000, 0x4001, 0x7fff, 0x40007fff00010000, (0, 1, 0x3fff)),
+            (
+                0x3fff0,
+                0x3fff,
+                0x3fff,
+                0x40007fff3fff3fff,
+                (0x3fff0, 0x3fff, 0x3fff),
+            ),
+        ] {
+            let descriptor =
+                build_sm90a_tf32_descriptor(shared_address, leading_offset, stride_offset);
+            assert_eq!(descriptor, expected_raw);
+            assert_eq!(decode_sm90a_tf32_descriptor(descriptor), expected_decoded);
+        }
+
+        for (op, columns, expected) in [
+            (ResolvedGemmOp::Nt, 64, 0x08100910),
+            (ResolvedGemmOp::Nn, 64, 0x08110910),
+            (ResolvedGemmOp::Tn, 64, 0x08118910),
+            (ResolvedGemmOp::Nt, 128, 0x08200910),
+            (ResolvedGemmOp::Nn, 128, 0x08210910),
+            (ResolvedGemmOp::Tn, 128, 0x08218910),
+        ] {
+            assert_eq!(
+                sm100_tf32_instruction_descriptor(op, columns).unwrap(),
+                expected,
+                "{op:?}/{columns}"
+            );
+        }
+        assert!(sm100_tf32_instruction_descriptor(ResolvedGemmOp::Nn, 32).is_err());
+    }
+
+    fn sm120_tf32_sw128_offset(plane_base: u32, logical_row: u32, element: u32) -> u32 {
+        let chunk = element / 4;
+        let element_in_vector = element & 3;
+        let phase = (plane_base / 128) % 8;
+        let physical_chunk = chunk ^ ((logical_row + phase) % 8);
+        plane_base + logical_row * 128 + physical_chunk * 16 + element_in_vector * 4
+    }
+
+    #[test]
+    fn sm120_sw128_oracle_matches_production_decode() {
+        const CHUNK_PERMUTATIONS: [[u32; 8]; 8] = [
+            [0, 1, 2, 3, 4, 5, 6, 7],
+            [1, 0, 3, 2, 5, 4, 7, 6],
+            [2, 3, 0, 1, 6, 7, 4, 5],
+            [3, 2, 1, 0, 7, 6, 5, 4],
+            [4, 5, 6, 7, 0, 1, 2, 3],
+            [5, 4, 7, 6, 1, 0, 3, 2],
+            [6, 7, 4, 5, 2, 3, 0, 1],
+            [7, 6, 5, 4, 3, 2, 1, 0],
+        ];
+
+        for op in [ResolvedGemmOp::Nn, ResolvedGemmOp::Tn, ResolvedGemmOp::Nt] {
+            for phase in 0_u32..8 {
+                let plane_base = phase * 128;
+                for logical_row in 0_u32..32 {
+                    let swizzle = ((logical_row + phase) % 8) as usize;
+                    let mut addresses = std::collections::BTreeSet::new();
+                    for element in 0_u32..32 {
+                        let chunk = (element / 4) as usize;
+                        let expected = plane_base
+                            + logical_row * 128
+                            + CHUNK_PERMUTATIONS[swizzle][chunk] * 16
+                            + (element & 3) * 4;
+                        let actual = sm120_tf32_sw128_offset(plane_base, logical_row, element);
+                        assert_eq!(
+                            actual, expected,
+                            "{op:?}/phase={phase}/row={logical_row}/element={element}"
+                        );
+                        assert!(addresses.insert(actual - plane_base));
+                    }
+                    let expected_addresses: std::collections::BTreeSet<_> = (0_u32..32)
+                        .map(|element| logical_row * 128 + element * 4)
+                        .collect();
+                    assert_eq!(
+                        addresses, expected_addresses,
+                        "{op:?}/phase={phase}/row={logical_row}"
+                    );
+                }
+            }
+        }
+    }
+
+    fn tf32_epilogue_reference(
+        op: ResolvedGemmOp,
+        accumulator: f32,
+        old_output: f32,
+        alpha: f32,
+        beta: f32,
+    ) -> f32 {
+        match op {
+            ResolvedGemmOp::Nn => {
+                let value = if alpha == 1.0 {
+                    accumulator
+                } else {
+                    alpha * accumulator
+                };
+                if beta == 0.0 {
+                    value
+                } else {
+                    beta.mul_add(old_output, value)
+                }
+            }
+            ResolvedGemmOp::Tn => alpha.mul_add(accumulator, old_output),
+            ResolvedGemmOp::Nt => {
+                if alpha == 1.0 {
+                    accumulator
+                } else {
+                    alpha * accumulator
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn tf32_epilogue_matches_scalar_reference_bits() {
+        let just_above_one = f32::from_bits(0x3f800001);
+        let negative_rounded_product = f32::from_bits(0xbf800002);
+        for (op, accumulator, old_output, alpha, beta, expected) in [
+            (
+                ResolvedGemmOp::Nn,
+                negative_rounded_product,
+                just_above_one,
+                1.0,
+                just_above_one,
+                0x28800000,
+            ),
+            (
+                ResolvedGemmOp::Nn,
+                just_above_one,
+                0.0,
+                just_above_one,
+                0.0,
+                0x3f800002,
+            ),
+            (
+                ResolvedGemmOp::Tn,
+                just_above_one,
+                negative_rounded_product,
+                just_above_one,
+                1.0,
+                0x28800000,
+            ),
+            (
+                ResolvedGemmOp::Nt,
+                just_above_one,
+                37.0,
+                just_above_one,
+                0.0,
+                0x3f800002,
+            ),
+        ] {
+            assert_eq!(
+                tf32_epilogue_reference(op, accumulator, old_output, alpha, beta).to_bits(),
+                expected,
+                "{op:?}"
+            );
+        }
+
+        assert_eq!(
+            tf32_epilogue_reference(ResolvedGemmOp::Nt, -0.0, 19.0, 1.0, 0.0).to_bits(),
+            (-0.0_f32).to_bits()
+        );
+        assert!(
+            tf32_epilogue_reference(ResolvedGemmOp::Nn, f32::INFINITY, 0.0, 1.0, 0.0).is_infinite()
+        );
+        assert!(tf32_epilogue_reference(ResolvedGemmOp::Nt, f32::NAN, 0.0, 1.0, 0.0).is_nan());
+        for poisoned_old_output in [f32::NAN, f32::INFINITY] {
+            assert_eq!(
+                tf32_epilogue_reference(
+                    ResolvedGemmOp::Nn,
+                    negative_rounded_product,
+                    poisoned_old_output,
+                    1.0,
+                    0.0,
+                )
+                .to_bits(),
+                negative_rounded_product.to_bits()
+            );
+        }
+        assert!(
+            tf32_epilogue_reference(
+                ResolvedGemmOp::Tn,
+                f32::INFINITY,
+                f32::NEG_INFINITY,
+                1.0,
+                1.0,
+            )
+            .is_nan()
+        );
     }
 
     fn sm90a_request(op: Sm90aOp) -> Sm90aMapRequest {
@@ -4490,13 +6908,695 @@ mod tests {
         assert_eq!(nn[1].issued_coordinate_max[0], 192);
     }
 
+    fn tf32_sm100_route() -> Tf32PhysicalRoute {
+        Tf32PhysicalRoute::Sm100Tcgen05Tf32TmaV1(Tf32Sm100Route {
+            tile: Sm100Tile::M128N128,
+            stages: Sm100Stages::S2,
+            schedule: Sm100Schedule::C4,
+        })
+    }
+
+    fn tf32_test_binding() -> Tf32MapBinding {
+        let target = CudaTarget::new("sm_100a").unwrap();
+        let nvrtc_version = (13, 2);
+        Tf32MapBinding {
+            allocation_domain: AllocationDomain {
+                context_handle: 1,
+                device_ordinal: 0,
+            },
+            qualified: Tf32QualifiedModule {
+                module_kind: ModuleKind::TriadSm100,
+                target,
+                artifact: ArtifactIdentity {
+                    module_kind: ModuleKind::TriadSm100,
+                    artifact_kind: ArtifactKind::Ptx,
+                    compile_key: [1; 32],
+                    artifact_digest: [2; 32],
+                },
+                compiler: CompilerIdentity {
+                    source_digest: [3; 32],
+                    invocation_digest: [4; 32],
+                    header_manifest_digest: [5; 32],
+                    target,
+                    nvrtc_version,
+                    nvrtc_library_domain: [6; 32],
+                    nvrtc_library_known: true,
+                    output_kind: ArtifactKind::Ptx,
+                    composer_revision: COMPOSER_REVISION,
+                    compiler_revision: COMPILER_REVISION,
+                    numeric_abi_revision: NUMERIC_ABI_REVISION,
+                    schedule_revision: SCHEDULE_REVISION,
+                },
+                device: DeviceIdentity {
+                    compute_capability: (10, 0),
+                    multiprocessor_count: 132,
+                    target,
+                    driver: DriverIdentity {
+                        api_version: 13_020,
+                        build_sources: 1,
+                        build_digest: [7; 32],
+                    },
+                },
+                device_caps: DeviceCaps {
+                    compute_capability: (10, 0),
+                    nvrtc_version,
+                    accepted_target: Some(target),
+                    optin_shared_bytes: 228_000,
+                    tensor_map_access: true,
+                },
+            },
+        }
+    }
+
+    fn tf32_request(op: ResolvedGemmOp) -> F32TriadRequest {
+        F32TriadRequest {
+            op,
+            shape: F32TriadShape {
+                m: 65,
+                k: 127,
+                n: 129,
+                lda: if op == ResolvedGemmOp::Nt { 132 } else { 128 },
+                ldb: 132,
+                ldc: if op == ResolvedGemmOp::Nt { 128 } else { 132 },
+            },
+        }
+    }
+
+    fn tf32_operands() -> F32TriadOperands {
+        F32TriadOperands {
+            output: 0x3000,
+            a: 0x1000,
+            b: 0x2000,
+            bias: None,
+            alpha: 1.0,
+            beta: 0.0,
+        }
+    }
+
+    #[test]
+    fn specialized_tf32_issued_coordinates_include_tail_plane_starts() {
+        let routes = [
+            (
+                Tf32PhysicalRoute::Sm90aWgmmaTf32TmaV1(Tf32Sm90aRoute {
+                    schedule: Sm90aWarpgroupSchedule::Wg1,
+                }),
+                [
+                    [[96, 64], [224, 96]],
+                    [[96, 64], [224, 64]],
+                    [[128, 64], [128, 0]],
+                ],
+            ),
+            (
+                tf32_sm100_route(),
+                [
+                    [[96, 0], [224, 96]],
+                    [[96, 64], [224, 64]],
+                    [[128, 0], [128, 0]],
+                ],
+            ),
+            (
+                Tf32PhysicalRoute::Sm100Tcgen05Tf32TmaV1(Tf32Sm100Route {
+                    tile: Sm100Tile::M128N64,
+                    stages: Sm100Stages::S2,
+                    schedule: Sm100Schedule::C4,
+                }),
+                [
+                    [[96, 0], [160, 96]],
+                    [[96, 64], [160, 64]],
+                    [[128, 0], [128, 64]],
+                ],
+            ),
+            (
+                Tf32PhysicalRoute::Sm120TmaMmaTf32RnaV1(Tf32Sm120Route {
+                    tile: Tf32Sm120Tile::M128N64,
+                    stages: Tf32Sm120Stages::S2,
+                }),
+                [
+                    [[96, 0], [160, 96]],
+                    [[96, 64], [160, 64]],
+                    [[128, 0], [128, 64]],
+                ],
+            ),
+            (
+                Tf32PhysicalRoute::Sm120TmaMmaTf32RnaV1(Tf32Sm120Route {
+                    tile: Tf32Sm120Tile::M64N128,
+                    stages: Tf32Sm120Stages::S2,
+                }),
+                [
+                    [[96, 64], [224, 96]],
+                    [[96, 64], [224, 64]],
+                    [[128, 64], [128, 0]],
+                ],
+            ),
+        ];
+        let operations = [ResolvedGemmOp::Nn, ResolvedGemmOp::Tn, ResolvedGemmOp::Nt];
+        for (route, expected_by_op) in routes {
+            for (op, expected_maxima) in operations.into_iter().zip(expected_by_op) {
+                let layouts =
+                    tf32_operand_layouts(tf32_request(op), tf32_operands(), route).unwrap();
+                assert_eq!(
+                    layouts.map(|layout| layout.issued_coordinate_max),
+                    expected_maxima
+                );
+                for layout in layouts {
+                    for axis in 0..2 {
+                        let issued = layout.issued_coordinate_max[axis] as u64;
+                        let boundary = i32::MAX as u64 - issued;
+                        let accepted_origin = if axis == 0 {
+                            (boundary, 0)
+                        } else {
+                            (0, boundary)
+                        };
+                        validate_tf32_issued_coordinates(layout, accepted_origin).unwrap();
+                        let rejected_origin = if axis == 0 {
+                            (boundary + 1, 0)
+                        } else {
+                            (0, boundary + 1)
+                        };
+                        let error = validate_tf32_issued_coordinates(layout, rejected_origin)
+                            .expect_err(
+                                "the last specialized TMA issue must remain in the i32 domain",
+                            );
+                        let axis_name = if axis == 0 { "x" } else { "y" };
+                        assert!(
+                            error.contains(&format!(
+                                "issued {axis_name} coordinate exceeds i32::MAX"
+                            )),
+                            "{error}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    fn descriptor_with_first_byte(value: u8) -> Tf32TensorMap {
+        let mut map = zeroed_tensor_map_sentinel();
+        unsafe {
+            *std::ptr::from_mut(&mut map.0).cast::<u8>() = value;
+        }
+        map
+    }
+
+    fn zero_reduction_fixture(a: Tf32TensorMap, b: Tf32TensorMap) -> F32PreparedTensorMaps {
+        F32PreparedTensorMaps::ZeroReductionV1 {
+            data: Box::new(F32ZeroReductionTensorMaps {
+                a,
+                b,
+                request: F32TriadRequest {
+                    op: ResolvedGemmOp::Nn,
+                    shape: F32TriadShape::contiguous(ResolvedGemmOp::Nn, (65, 0, 129)),
+                },
+                route: Some(tf32_sm100_route()),
+                binding: Some(tf32_test_binding()),
+                format: Tf32TensorMapFormat::Tfloat32V1,
+                revision: ZERO_REDUCTION_MAP_REVISION,
+            }),
+        }
+    }
+
+    #[test]
+    fn zero_reduction_identity_excludes_stored_descriptor_bytes() {
+        let zero = zeroed_tensor_map_sentinel();
+        let canonical = zero_reduction_fixture(zero, zero);
+        let poisoned = zero_reduction_fixture(
+            descriptor_with_first_byte(0x5a),
+            descriptor_with_first_byte(0xa5),
+        );
+
+        assert_eq!(canonical.identity_digest(), poisoned.identity_digest());
+    }
+
+    #[test]
+    fn zero_reduction_validation_rejects_nonzero_sentinels() {
+        let zero = zeroed_tensor_map_sentinel();
+        zero_reduction_fixture(zero, zero)
+            .validate_live_allocations()
+            .unwrap();
+        let error = zero_reduction_fixture(descriptor_with_first_byte(1), zero)
+            .validate_live_allocations()
+            .expect_err("nonzero map storage must not pass mapless validation");
+        assert!(error.contains("zero-reduction tensor-map sentinel changed"));
+    }
+
+    fn encoded_identity_fixture() -> Tf32EncodedMapIdentity {
+        let keys = [
+            Tf32TensorMapKey {
+                base: 0x1000,
+                global_dimensions: [127, 65],
+                outer_byte_stride: 512,
+                box_dimensions: [32, 128],
+                format: Tf32TensorMapFormat::Tfloat32V1,
+            },
+            Tf32TensorMapKey {
+                base: 0x2000,
+                global_dimensions: [129, 127],
+                outer_byte_stride: 528,
+                box_dimensions: [32, 32],
+                format: Tf32TensorMapFormat::Tfloat32V1,
+            },
+        ];
+        let allocations = [
+            Sm90aAllocationIdentity {
+                allocation_domain: AllocationDomain {
+                    context_handle: 1,
+                    device_ordinal: 0,
+                },
+                allocation_base: 0x1000,
+                allocation_bytes: 1 << 20,
+                offset_bytes: 16,
+                required_bytes: 32_000,
+                buffer_id: 11,
+            },
+            Sm90aAllocationIdentity {
+                allocation_domain: AllocationDomain {
+                    context_handle: 1,
+                    device_ordinal: 0,
+                },
+                allocation_base: 0x2000,
+                allocation_bytes: 1 << 20,
+                offset_bytes: 32,
+                required_bytes: 64_000,
+                buffer_id: 22,
+            },
+        ];
+        Tf32EncodedMapIdentity {
+            revision: TF32_TENSOR_MAP_REVISION,
+            maps: [descriptor_with_first_byte(1), descriptor_with_first_byte(2)],
+            keys,
+            allocations,
+            origins: Tf32TensorOrigins {
+                a_x: 4,
+                a_y: 1,
+                b_x: 8,
+                b_y: 2,
+            },
+            format: Tf32TensorMapFormat::Tfloat32V1,
+            route: tf32_sm100_route(),
+        }
+    }
+
+    fn encoded_prepared_fixture(identity: Tf32EncodedMapIdentity) -> F32PreparedTensorMaps {
+        F32PreparedTensorMaps::EncodedV1 {
+            data: Box::new(F32EncodedTensorMaps {
+                a: identity.maps[0],
+                b: identity.maps[1],
+                keys: identity.keys,
+                request: tf32_request(ResolvedGemmOp::Nn),
+                route: identity.route,
+                binding: tf32_test_binding(),
+                allocations: identity.allocations,
+                origins: identity.origins,
+                format: identity.format,
+            }),
+        }
+    }
+
+    fn encoded_identity_digest(identity: Tf32EncodedMapIdentity) -> [u8; 32] {
+        append_tf32_encoded_map_identity(
+            crate::mamba_ssm::gpu::kernel_identity::FramedSha256::new(b"tf32-encoded-map-test.v1"),
+            identity,
+        )
+        .finish()
+    }
+
+    fn allocation_identity_digest(identity: Sm90aAllocationIdentity) -> [u8; 32] {
+        identity
+            .append_digest(crate::mamba_ssm::gpu::kernel_identity::FramedSha256::new(
+                b"allocation-identity-test.v1",
+            ))
+            .finish()
+    }
+
+    #[test]
+    fn allocation_identity_digest_excludes_raw_context_and_tracks_logical_identity() {
+        let identity = encoded_identity_fixture().allocations[0];
+        let expected = allocation_identity_digest(identity);
+        assert_eq!(
+            allocation_identity_digest(Sm90aAllocationIdentity {
+                allocation_domain: AllocationDomain {
+                    context_handle: identity.allocation_domain.context_handle + 1,
+                    ..identity.allocation_domain
+                },
+                ..identity
+            }),
+            expected,
+            "a raw CUDA context address must not enter a stable allocation digest"
+        );
+        let changes = [
+            Sm90aAllocationIdentity {
+                allocation_domain: AllocationDomain {
+                    device_ordinal: identity.allocation_domain.device_ordinal + 1,
+                    ..identity.allocation_domain
+                },
+                ..identity
+            },
+            Sm90aAllocationIdentity {
+                allocation_base: identity.allocation_base + 1,
+                ..identity
+            },
+            Sm90aAllocationIdentity {
+                allocation_bytes: identity.allocation_bytes + 1,
+                ..identity
+            },
+            Sm90aAllocationIdentity {
+                offset_bytes: identity.offset_bytes + 1,
+                ..identity
+            },
+            Sm90aAllocationIdentity {
+                required_bytes: identity.required_bytes + 1,
+                ..identity
+            },
+            Sm90aAllocationIdentity {
+                buffer_id: identity.buffer_id + 1,
+                ..identity
+            },
+        ];
+        for changed in changes {
+            assert_ne!(allocation_identity_digest(changed), expected);
+        }
+    }
+
+    #[test]
+    fn physical_allocation_digest_excludes_addresses_and_tracks_subview_generation() {
+        let identity = encoded_identity_fixture().allocations[0];
+        let expected = identity.physical_digest();
+        assert_eq!(
+            Sm90aAllocationIdentity {
+                allocation_domain: AllocationDomain {
+                    context_handle: identity.allocation_domain.context_handle + 1,
+                    ..identity.allocation_domain
+                },
+                ..identity
+            }
+            .physical_digest(),
+            expected,
+            "a raw CUDA context address must not enter stable physical evidence"
+        );
+        assert_eq!(
+            Sm90aAllocationIdentity {
+                allocation_base: identity.allocation_base + 0x10_0000,
+                ..identity
+            }
+            .physical_digest(),
+            expected
+        );
+        for changed in [
+            Sm90aAllocationIdentity {
+                offset_bytes: identity.offset_bytes + 2,
+                ..identity
+            },
+            Sm90aAllocationIdentity {
+                required_bytes: identity.required_bytes + 2,
+                ..identity
+            },
+            Sm90aAllocationIdentity {
+                buffer_id: identity.buffer_id + 1,
+                ..identity
+            },
+        ] {
+            assert_ne!(changed.physical_digest(), expected);
+        }
+    }
+
+    #[test]
+    fn physical_f32_resources_bind_roles_nullness_and_scratch_provenance() {
+        let first = encoded_identity_fixture().allocations[0];
+        let second = Sm90aAllocationIdentity {
+            allocation_base: first.allocation_base + 0x20_0000,
+            buffer_id: first.buffer_id + 1,
+            ..first
+        };
+        let baseline = F32LaunchResourceSnapshot {
+            output: first,
+            bias: None,
+            inputs: Some([first, second]),
+            split_scratch: Some(first),
+            transpose_scratch: Some(second),
+            coordination_scratch: Some(first),
+        };
+        let expected = baseline.physical_digest();
+        for changed in [
+            F32LaunchResourceSnapshot {
+                inputs: Some([second, first]),
+                ..baseline
+            },
+            F32LaunchResourceSnapshot {
+                inputs: None,
+                ..baseline
+            },
+            F32LaunchResourceSnapshot {
+                bias: Some(first),
+                ..baseline
+            },
+            F32LaunchResourceSnapshot {
+                split_scratch: None,
+                ..baseline
+            },
+            F32LaunchResourceSnapshot {
+                transpose_scratch: None,
+                ..baseline
+            },
+            F32LaunchResourceSnapshot {
+                coordination_scratch: None,
+                ..baseline
+            },
+            F32LaunchResourceSnapshot {
+                split_scratch: Some(Sm90aAllocationIdentity {
+                    buffer_id: first.buffer_id + 9,
+                    ..first
+                }),
+                ..baseline
+            },
+            F32LaunchResourceSnapshot {
+                split_scratch: Some(Sm90aAllocationIdentity {
+                    offset_bytes: first.offset_bytes + 4,
+                    ..first
+                }),
+                ..baseline
+            },
+            F32LaunchResourceSnapshot {
+                transpose_scratch: Some(Sm90aAllocationIdentity {
+                    buffer_id: second.buffer_id + 9,
+                    ..second
+                }),
+                ..baseline
+            },
+            F32LaunchResourceSnapshot {
+                transpose_scratch: Some(Sm90aAllocationIdentity {
+                    offset_bytes: second.offset_bytes + 4,
+                    ..second
+                }),
+                ..baseline
+            },
+            F32LaunchResourceSnapshot {
+                coordination_scratch: Some(Sm90aAllocationIdentity {
+                    buffer_id: first.buffer_id + 11,
+                    ..first
+                }),
+                ..baseline
+            },
+        ] {
+            assert_ne!(changed.physical_digest(), expected);
+        }
+    }
+
+    #[test]
+    fn f32_resource_epoch_tracks_external_owners_but_not_context_scratch() {
+        let domain = AllocationDomain {
+            context_handle: 0x2201,
+            device_ordinal: 0,
+        };
+        let identity = |base, offset, required, buffer_id| Sm90aAllocationIdentity {
+            allocation_domain: domain,
+            allocation_base: base,
+            allocation_bytes: 4096,
+            offset_bytes: offset,
+            required_bytes: required,
+            buffer_id,
+        };
+        let output = register_managed_allocation_range(domain.context_handle, 0x50_0000, 4096)
+            .expect("register output");
+        let a = register_managed_allocation_range(domain.context_handle, 0x60_0000, 4096)
+            .expect("register A");
+        let b = register_managed_allocation_range(domain.context_handle, 0x70_0000, 4096)
+            .expect("register B");
+        let resources = F32LaunchResourceSnapshot {
+            output: identity(0x50_0000, 128, 512, 1),
+            bias: None,
+            inputs: Some([
+                identity(0x60_0000, 0, 1024, 2),
+                identity(0x70_0000, 64, 2048, 3),
+            ]),
+            split_scratch: Some(identity(0x80_0000, 0, 4096, 4)),
+            transpose_scratch: None,
+            coordination_scratch: Some(identity(0x90_0000, 0, 4096, 5)),
+        };
+        let stamp = resources
+            .managed_epoch()
+            .expect("all external resources are managed");
+
+        assert!(stamp.is_current());
+        drop(a);
+        assert!(!stamp.is_current());
+        drop((output, b));
+    }
+
+    #[test]
+    fn encoded_tf32_map_identity_frames_every_graph_bound_resource() {
+        let identity = encoded_identity_fixture();
+        let expected = encoded_identity_digest(identity);
+        let independently_framed = match std::mem::align_of::<Tf32TensorMap>() {
+            64 => [
+                19, 209, 35, 117, 240, 122, 6, 14, 164, 7, 107, 111, 251, 130, 246, 150, 204, 91,
+                75, 158, 173, 20, 98, 38, 66, 74, 26, 62, 191, 152, 255, 48,
+            ],
+            128 => [
+                147, 96, 49, 185, 154, 29, 14, 4, 210, 164, 178, 208, 31, 14, 109, 171, 111, 126,
+                154, 240, 246, 2, 219, 27, 222, 128, 166, 16, 164, 242, 182, 61,
+            ],
+            alignment => panic!("unexpected CUtensorMap alignment {alignment}"),
+        };
+        assert_eq!(expected, independently_framed);
+
+        let mut revision = identity;
+        revision.revision += 1;
+        assert_ne!(encoded_identity_digest(revision), expected);
+
+        let mut format = identity;
+        format.format = Tf32TensorMapFormat::Uint32V1;
+        assert_ne!(encoded_identity_digest(format), expected);
+
+        let mut origin = identity;
+        origin.origins.b_y += 1;
+        assert_ne!(encoded_identity_digest(origin), expected);
+
+        let mut allocation = identity;
+        allocation.allocations[1].buffer_id += 1;
+        assert_ne!(encoded_identity_digest(allocation), expected);
+
+        let mut allocation_context = identity;
+        allocation_context.allocations[0]
+            .allocation_domain
+            .context_handle += 1;
+        assert_eq!(
+            encoded_identity_digest(allocation_context),
+            expected,
+            "a raw CUDA context address is not graph identity"
+        );
+
+        let mut allocation_device = identity;
+        allocation_device.allocations[0]
+            .allocation_domain
+            .device_ordinal += 1;
+        assert_ne!(encoded_identity_digest(allocation_device), expected);
+
+        let mut key = identity;
+        key.keys[0].global_dimensions[1] += 1;
+        assert_ne!(encoded_identity_digest(key), expected);
+
+        let mut descriptor = identity;
+        descriptor.maps[0] = descriptor_with_first_byte(3);
+        assert_ne!(encoded_identity_digest(descriptor), expected);
+
+        let mut order = identity;
+        order.maps.swap(0, 1);
+        order.keys.swap(0, 1);
+        order.allocations.swap(0, 1);
+        assert_ne!(encoded_identity_digest(order), expected);
+    }
+
+    #[test]
+    fn prepared_encoded_identity_tracks_stored_descriptor_bytes() {
+        let identity = encoded_identity_fixture();
+        let expected = encoded_prepared_fixture(identity).identity_digest();
+        let mut changed = identity;
+        changed.maps[1] = descriptor_with_first_byte(0x7f);
+
+        assert_ne!(
+            encoded_prepared_fixture(changed).identity_digest(),
+            expected
+        );
+    }
+
+    #[test]
+    fn physical_encoded_identity_excludes_addresses_and_descriptor_storage() {
+        let identity = encoded_identity_fixture();
+        let prepared = encoded_prepared_fixture(identity);
+        let expected = prepared.physical_identity_digest();
+        let graph_identity = prepared.identity_digest();
+
+        for changed in [
+            {
+                let mut changed = identity;
+                changed.maps[0] = descriptor_with_first_byte(0x7f);
+                changed
+            },
+            {
+                let mut changed = identity;
+                changed.keys[0].base += 0x10_0000;
+                changed
+            },
+            {
+                let mut changed = identity;
+                changed.allocations[0].allocation_base += 0x10_0000;
+                changed
+            },
+        ] {
+            let changed = encoded_prepared_fixture(changed);
+            assert_eq!(changed.physical_identity_digest(), expected);
+            assert_ne!(changed.identity_digest(), graph_identity);
+        }
+
+        let mut changed_context = identity;
+        changed_context.allocations[0]
+            .allocation_domain
+            .context_handle += 1;
+        let changed_context = encoded_prepared_fixture(changed_context);
+        assert_eq!(changed_context.physical_identity_digest(), expected);
+        assert_eq!(changed_context.identity_digest(), graph_identity);
+
+        for changed in [
+            {
+                let mut changed = identity;
+                changed.keys[1].box_dimensions[0] += 1;
+                changed
+            },
+            {
+                let mut changed = identity;
+                changed.origins.b_y += 1;
+                changed
+            },
+            {
+                let mut changed = identity;
+                changed.allocations[1].offset_bytes += 4;
+                changed
+            },
+            {
+                let mut changed = identity;
+                changed.allocations[1].required_bytes += 4;
+                changed
+            },
+            {
+                let mut changed = identity;
+                changed.allocations[1].buffer_id += 1;
+                changed
+            },
+        ] {
+            assert_ne!(
+                encoded_prepared_fixture(changed).physical_identity_digest(),
+                expected
+            );
+        }
+    }
+
     #[test]
     fn sm120_inventory_covers_all_ninety_six_physical_routes_once() {
         assert_eq!(SM120_KERNEL_SPECS.len(), 96);
         let mut symbols = std::collections::BTreeSet::new();
         for spec in SM120_KERNEL_SPECS {
             assert!(symbols.insert(spec.symbol), "duplicate {}", spec.symbol);
-            assert!(spec.symbol.starts_with("sgemm_bi_"), "{}", spec.symbol);
+            assert!(spec.symbol.starts_with("gemm_bi_"), "{}", spec.symbol);
         }
 
         for op in [Sm120Op::Nn, Sm120Op::Tn, Sm120Op::Nt] {
@@ -4626,14 +7726,14 @@ mod tests {
                 Sm120Tile::M128N128,
                 Sm120Bk::Bk32,
                 Sm120Stages::S2,
-                512,
+                256,
                 32_896,
             ),
             (
                 Sm120Tile::M128N128,
                 Sm120Bk::Bk32,
                 Sm120Stages::S3,
-                512,
+                256,
                 49_280,
             ),
             (

@@ -23,7 +23,7 @@ use mamba_rs::mamba_ssm::gpu::buffers::{DtypedBuf, GpuBuffer};
 use mamba_rs::mamba_ssm::gpu::context::{BiGemmFamily, GpuCtx};
 use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
 use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
-use mamba_rs::mamba_ssm::gpu::gemm_bi_triad::sgemm_bi_forward_tc;
+use mamba_rs::mamba_ssm::gpu::gemm_bi_triad::gemm_bi_forward_tc;
 
 fn synth(n: usize, seed: u64) -> Vec<f32> {
     let mut s = seed;
@@ -107,7 +107,7 @@ fn census_wmma_vs_mma_sync() {
 
         // Route 2: the triad's mma.sync TC tier, called directly.
         let run_tc = |c: &DtypedBuf| {
-            sgemm_bi_forward_tc(
+            gemm_bi_forward_tc(
                 &ctx.stream,
                 &ctx.kernels,
                 TypedPtr {
@@ -164,7 +164,7 @@ fn census_wmma_vs_mma_sync() {
 #[ignore = "needs a CUDA device"]
 fn census_thin16_vs_tile64() {
     use mamba_rs::mamba_ssm::gpu::gemm_bi_triad::{
-        TcFwdOperands, TcTile, sgemm_bi_forward_tc_with_tile,
+        TcFwdOperands, TcTile, gemm_bi_forward_tc_with_tile,
     };
 
     let dev = GpuDevice::new(0).expect("cuda device");
@@ -208,7 +208,7 @@ fn census_thin16_vs_tile64() {
         let c64 = DtypedBuf::zeros(&ctx.stream, m * n, WeightDtype::Bf16).expect("C64");
 
         let run = |c: &DtypedBuf, tile: TcTile| {
-            sgemm_bi_forward_tc_with_tile(
+            gemm_bi_forward_tc_with_tile(
                 &ctx.stream,
                 &ctx.kernels,
                 &TcFwdOperands {
@@ -253,7 +253,7 @@ fn census_thin16_vs_tile64() {
 #[ignore = "needs a CUDA device"]
 fn census_backward_tile64_tail_contract() {
     use mamba_rs::mamba_ssm::gpu::gemm_bi_triad::{
-        TcTile, sgemm_bi_backward_dw_tc_with_tile, sgemm_bi_backward_dx_tc_with_tile,
+        TcTile, gemm_bi_backward_dw_tc_with_tile, gemm_bi_backward_dx_tc_with_tile,
     };
 
     let dev = GpuDevice::new(0).expect("cuda device");
@@ -285,7 +285,7 @@ fn census_backward_tile64_tail_contract() {
             dw64.upload(&ctx.stream, &initial).expect("dW64 upload");
             dw128.upload(&ctx.stream, &initial).expect("dW128 upload");
             for (output, tile) in [(&dw64, TcTile::Tile64), (&dw128, TcTile::Tile128)] {
-                sgemm_bi_backward_dw_tc_with_tile(
+                gemm_bi_backward_dw_tc_with_tile(
                     &ctx.stream,
                     &ctx.kernels,
                     output.cached_ptr(),
@@ -327,7 +327,7 @@ fn census_backward_tile64_tail_contract() {
                 .upload_f32(&ctx.stream, &sentinel)
                 .expect("dX128 upload");
             for (output, tile) in [(&dx64, TcTile::Tile64), (&dx128, TcTile::Tile128)] {
-                sgemm_bi_backward_dx_tc_with_tile(
+                gemm_bi_backward_dx_tc_with_tile(
                     &ctx.stream,
                     &ctx.kernels,
                     TypedPtr {
@@ -366,7 +366,7 @@ fn census_backward_tile64_tail_contract() {
 fn census_matvec_vs_thin16() {
     use mamba_rs::mamba_ssm::gpu::blas::gpu_gemm_typed_forward_raw;
     use mamba_rs::mamba_ssm::gpu::gemm_bi_triad::{
-        TcFwdOperands, TcTile, sgemm_bi_forward_tc_with_tile,
+        TcFwdOperands, TcTile, gemm_bi_forward_tc_with_tile,
     };
 
     let dev = GpuDevice::new(0).expect("cuda device");
@@ -424,7 +424,7 @@ fn census_matvec_vs_thin16() {
         )
         .expect("matvec route");
 
-        sgemm_bi_forward_tc_with_tile(
+        gemm_bi_forward_tc_with_tile(
             &ctx.stream,
             &ctx.kernels,
             &TcFwdOperands {

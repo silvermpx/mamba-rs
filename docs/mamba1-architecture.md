@@ -112,9 +112,28 @@ GEMM tiers, per `GpuCtx` flags:
   — `Triad` (`gemm_bi_triad/`, default; all three layouts, per-bucket
   invariance) or `Fixed` (`gemm_bi_fixed/`; forward-only, a bit-identical
   tile ladder with `SPLIT_K=1`, invariant by construction);
-- + `set_bi_tensor_cores(true)`: the mma.sync tier of the same contract.
+- + `set_bi_tensor_cores(true)`: permission to use the separately identified
+  deterministic `mma.sync` contract. CC12.0 automatic dispatch is sealed to
+  the qualified 18-cell BF16/F16 NN/TN/NT table, whose physical routes include
+  both BK32 and BK64 schedules. CC12.1 and shapes outside that table decline
+  the SM120 route and continue through the portable deterministic ladder;
+- `set_f32_triad_policy(..)`: exact scalar F32 is the default. The TF32 policy
+  permits a frozen, separately identified deterministic TF32 route and falls
+  back to exact scalar `__fmaf_rn` when no such route is qualified.
 
-Graph captures snapshot the full route (`ctx.gemm_route()` — the three
-flags plus the family) and replays assert it; the split forward/backward
-cycle refuses a mid-cycle flip. Checkpoint provenance:
+The deterministic custom routes assign each output to one owner and reduce K
+in a fixed ascending order. Numerical atomics and dynamic Split-K reductions
+are not part of the contract. The public typed forward, dW, and dX calls are
+the normal integration surface. The low-level forced SM120 resolver, tensor-map
+preparation, launch, and replay-validation calls exist for qualification and
+route census; forcing one does not make it eligible for automatic dispatch.
+
+Graph captures snapshot the full route (`ctx.gemm_route()`, including policy,
+physical schedule, compiler, artifact, and device identity) and replays assert
+it; the split forward/backward cycle refuses a mid-cycle flip. A qualified
+SM120 route must be prepared once in eager execution. Capture fails closed if
+its tensor-map cache entry is missing, stale for the current managed-allocation
+epoch, or backed by an untracked allocation; unsupported routes keep using the
+existing fallback rather than silently changing the numeric contract.
+Checkpoint provenance:
 `serialize` carries `scan_mode` + `rms_norm_eps` in the checkpoint.

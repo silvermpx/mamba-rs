@@ -11,8 +11,8 @@ use std::sync::Arc;
 
 use crate::hf::embed::embed_lookup;
 use crate::mamba_ssm::gpu::blas::{
-    TiedLmDims, TypedPtr, gpu_gemm_ex_tied_lm_head_blas, gpu_gemm_typed_raw_no_bias,
-    gpu_sgemm_tied_lm_head_blas,
+    TiedLmDims, TypedPtr, gpu_gemm_bi_tied_lm_head_blas, gpu_gemm_ex_tied_lm_head_blas,
+    gpu_gemm_typed_raw_no_bias,
 };
 use crate::mamba_ssm::gpu::buffers::{GpuBuffer, GpuByteBuffer};
 use crate::mamba_ssm::gpu::dtype::WeightDtype;
@@ -504,7 +504,7 @@ impl GpuMamba3LM {
                         (b, d, self.vocab_size_padded),
                     )?;
                 } else {
-                    gpu_sgemm_tied_lm_head_blas(
+                    gpu_gemm_bi_tied_lm_head_blas(
                         blas,
                         self.gpu_logits.cached_ptr(),
                         temporal_ptr,

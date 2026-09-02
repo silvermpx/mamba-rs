@@ -170,14 +170,17 @@ fn scan_trio_time_and_hash() {
         fnv(&ks_h),
         fnv(&cst_h)
     );
-    common::evidence::record_digest("m3_scan_micro_bench", "scan_trio", "y", fnv(&host));
-    common::evidence::record_digest("m3_scan_micro_bench", "scan_trio", "k_scaled", fnv(&ks_h));
+    common::evidence::record_digest("m3_scan_micro_bench", "scan_trio", "y", fnv(&host))
+        .expect("acceptance evidence");
+    common::evidence::record_digest("m3_scan_micro_bench", "scan_trio", "k_scaled", fnv(&ks_h))
+        .expect("acceptance evidence");
     common::evidence::record_digest(
         "m3_scan_micro_bench",
         "scan_trio",
         "chunk_states",
         fnv(&cst_h),
-    );
+    )
+    .expect("acceptance evidence");
 
     let iters = 100usize;
     let time = |f: &dyn Fn()| -> f64 {
@@ -335,8 +338,10 @@ fn scan_trio_time_and_hash() {
         "state_passing",
         "entering",
         fnv(&sp_h),
-    );
-    common::evidence::record_digest("m3_scan_micro_bench", "state_passing", "final", fnv(&fs_h));
+    )
+    .expect("acceptance evidence");
+    common::evidence::record_digest("m3_scan_micro_bench", "state_passing", "final", fnv(&fs_h))
+        .expect("acceptance evidence");
     println!("state_pass  {:8.1} us", time(&state_passing));
 }
 
@@ -487,20 +492,28 @@ fn coeff_chain_time_and_hash() {
     };
     let angle_out = std::cell::RefCell::new(GpuBuffer::zeros(st, bt * nh * na).unwrap());
     let angles = || {
-        mamba_rs::mamba3_siso::gpu::forward::gpu_angle_chunked_fwd(
-            &ctx,
-            &m3k,
-            &mut angle_out.borrow_mut(),
-            angle_state.cached_ptr(),
-            &angles_raw,
-            &dtc,
-            &sums,
-            &carries,
-            batch,
-            t,
-            nh,
-            na,
-        )
+        // SAFETY: this benchmark owns distinct same-context buffers that
+        // remain live until after every measured launch completes.
+        unsafe {
+            mamba_rs::mamba3_siso::gpu::forward::gpu_angle_chunked_fwd(
+                &ctx,
+                &m3k,
+                mamba_rs::mamba3_siso::gpu::forward::AngleChunkedFwd {
+                    angle_cumsum: &mut angle_out.borrow_mut(),
+                    angle_state_ptr: angle_state.cached_ptr(),
+                    angles_raw: &angles_raw,
+                    dt: &dtc,
+                    sums: &sums,
+                    carries: &carries,
+                    shape: mamba_rs::mamba3_siso::gpu::forward::AngleChunkedShape {
+                        batch,
+                        seq_len: t,
+                        heads: nh,
+                        angles: na,
+                    },
+                },
+            )
+        }
         .unwrap();
     };
     let bias_rope = || {

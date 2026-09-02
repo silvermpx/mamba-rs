@@ -1,29 +1,36 @@
 //! Real-device qualification for the deterministic generic SM120 triad.
 //!
-//! Automatic tables remain empty. This census forces every physical route,
-//! checks the ordinary MMA16 baseline bit-for-bit, and is also the focused
-//! target for memcheck, initcheck, racecheck, and synccheck.
+//! CC12.0 automatic cells remain independent from this forced-route census.
+//! The census checks every physical route against the ordinary MMA16 baseline
+//! bit-for-bit and is the focused memcheck, initcheck, racecheck, and synccheck target.
 #![cfg(feature = "cuda")]
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use mamba_rs::mamba_ssm::gpu::blas::TypedPtr;
+use mamba_rs::mamba_ssm::gpu::blas::{
+    TypedPtr, gemm_bi_backward_dw_typed, gemm_bi_backward_dx_typed, gemm_bi_forward_typed,
+};
 use mamba_rs::mamba_ssm::gpu::buffers::{DtypedBuf, GpuBuffer};
-use mamba_rs::mamba_ssm::gpu::context::GpuCtx;
+use mamba_rs::mamba_ssm::gpu::context::{BiGemmFamily, GpuCtx};
 use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
 use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
 use mamba_rs::mamba_ssm::gpu::gemm_bi_triad::{
-    SM120_AUTO_CELLS_CC120, SM120_AUTO_CELLS_CC121, SM120_KERNEL_SPECS, SM120_TENSOR_MAP_REVISION,
-    SM120_TUNING_REVISION, Sm120Bk, Sm120ForcedRoute, Sm120LaunchOperands, Sm120MapRequest,
-    Sm120NumericContract, Sm120Op, Sm120PhysicalRoute, Sm120PreparedLaunch,
-    Sm120PreparedTensorMaps, Sm120Shape, Sm120Stages, Sm120Tile, TcFwdOperands, TcTile,
-    launch_sm120_tma_prepared, prepare_sm120_tensor_maps, prepare_sm120_tma_forced,
-    resolve_sm120_forced, sgemm_bi_backward_dw_tc_with_tile, sgemm_bi_backward_dx_tc_with_tile,
-    sgemm_bi_forward_tc_with_tile, validate_sm120_graph_replay, validate_sm120_map_request,
+    PhysicalQualificationRequest, PhysicalQualificationRoute, SM120_AUTO_CELLS_CC120,
+    SM120_AUTO_CELLS_CC121, SM120_KERNEL_SPECS, SM120_TENSOR_MAP_REVISION, SM120_TUNING_REVISION,
+    Sm120Bk, Sm120ForcedRoute, Sm120LaunchOperands, Sm120MapRequest, Sm120NumericContract, Sm120Op,
+    Sm120PhysicalRoute, Sm120PreparedLaunch, Sm120PreparedTensorMaps, Sm120Shape, Sm120Stages,
+    Sm120Tile, TcFwdOperands, TcTile, gemm_bi_backward_dw_tc_with_tile,
+    gemm_bi_backward_dx_tc_with_tile, gemm_bi_forward_tc_with_tile, launch_sm120_tma_prepared,
+    prepare_sm120_tensor_maps, prepare_sm120_tma_forced, presize_physical_qualification_suite,
+    qualify_physical_launch, resolve_sm120_forced, validate_sm120_graph_replay,
+    validate_sm120_map_request,
 };
 use mamba_rs::mamba_ssm::gpu::graph_capture::capture_into_graph;
-use mamba_rs::mamba_ssm::gpu::kernel_identity::{FramedSha256, ModuleKind, Sha256Digest};
+use mamba_rs::mamba_ssm::gpu::kernel_identity::{
+    FramedSha256, ModuleKind, PhysicalGemmBackend, ResolvedGemmOp, ResolvedNumericContract,
+    Sha256Digest,
+};
 
 const EDGES: &[usize] = &[1, 7, 8, 15, 16, 17, 31, 32, 33, 63, 64, 65, 127, 128, 129];
 const ASYMMETRIC: (usize, usize, usize) = (65, 127, 129);
@@ -231,13 +238,63 @@ struct CensusCase {
     output_columns: usize,
 }
 
+#[derive(Clone, Copy)]
+struct CensusCaseOptions {
+    a_origin: (usize, usize),
+    b_origin: (usize, usize),
+    compact: bool,
+    compute_reference: bool,
+}
+
 impl CensusCase {
     fn new(ctx: &GpuCtx, op: Sm120Op, dtype: WeightDtype, dims: (usize, usize, usize)) -> Self {
-        Self::with_origins(ctx, op, dtype, dims, (0, 0), (0, 0), false)
+        Self::build(
+            ctx,
+            op,
+            dtype,
+            dims,
+            CensusCaseOptions {
+                a_origin: (0, 0),
+                b_origin: (0, 0),
+                compact: false,
+                compute_reference: true,
+            },
+        )
     }
 
     fn compact(ctx: &GpuCtx, op: Sm120Op, dtype: WeightDtype, dims: (usize, usize, usize)) -> Self {
-        Self::with_origins(ctx, op, dtype, dims, (0, 0), (0, 0), true)
+        Self::build(
+            ctx,
+            op,
+            dtype,
+            dims,
+            CensusCaseOptions {
+                a_origin: (0, 0),
+                b_origin: (0, 0),
+                compact: true,
+                compute_reference: true,
+            },
+        )
+    }
+
+    fn compact_performance(
+        ctx: &GpuCtx,
+        op: Sm120Op,
+        dtype: WeightDtype,
+        dims: (usize, usize, usize),
+    ) -> Self {
+        Self::build(
+            ctx,
+            op,
+            dtype,
+            dims,
+            CensusCaseOptions {
+                a_origin: (0, 0),
+                b_origin: (0, 0),
+                compact: true,
+                compute_reference: false,
+            },
+        )
     }
 
     fn with_origins(
@@ -249,6 +306,33 @@ impl CensusCase {
         b_origin: (usize, usize),
         compact: bool,
     ) -> Self {
+        Self::build(
+            ctx,
+            op,
+            dtype,
+            dims,
+            CensusCaseOptions {
+                a_origin,
+                b_origin,
+                compact,
+                compute_reference: true,
+            },
+        )
+    }
+
+    fn build(
+        ctx: &GpuCtx,
+        op: Sm120Op,
+        dtype: WeightDtype,
+        dims: (usize, usize, usize),
+        options: CensusCaseOptions,
+    ) -> Self {
+        let CensusCaseOptions {
+            a_origin,
+            b_origin,
+            compact,
+            compute_reference,
+        } = options;
         let (m, k, n) = dims;
         let (a_rows, a_width) = match op {
             Sm120Op::Nn | Sm120Op::Tn => (m, k),
@@ -346,7 +430,9 @@ impl CensusCase {
             output_rows,
             output_columns,
         };
-        case.expected = case.reference(case.operands(0, false));
+        if compute_reference {
+            case.expected = case.reference(case.operands(0, false));
+        }
         case
     }
 
@@ -373,12 +459,16 @@ impl CensusCase {
             alpha: if baseline_contract || self.op == Sm120Op::Nn {
                 1.0
             } else {
-                0.75
+                std::env::var("GEMM_BI_SM120_ALPHA")
+                    .map_or(Ok(0.75), |value| value.parse::<f32>())
+                    .expect("parse GEMM_BI_SM120_ALPHA")
             },
             beta: if baseline_contract {
-                0.0
+                if self.op == Sm120Op::Tn { 1.0 } else { 0.0 }
             } else if self.op == Sm120Op::Nn {
-                -0.25
+                std::env::var("GEMM_BI_SM120_NN_BETA")
+                    .map_or(Ok(-0.25), |value| value.parse::<f32>())
+                    .expect("parse GEMM_BI_SM120_NN_BETA")
             } else if self.op == Sm120Op::Tn {
                 1.0
             } else {
@@ -435,7 +525,7 @@ impl CensusCase {
         output
     }
 
-    fn assert_cpu_reference(&self, actual: &[f32], route: Sm120ForcedRoute) {
+    fn assert_reference(&self, actual: &[f32], expected: &[f32], route: Sm120ForcedRoute) {
         let (absolute_tolerance, relative_tolerance) = match (self.op, self.dtype) {
             (Sm120Op::Tn, _) => (8.0e-4, 8.0e-4),
             (_, WeightDtype::Bf16) => (3.0e-2, 3.0e-2),
@@ -446,17 +536,19 @@ impl CensusCase {
             for column in 0..self.output_columns {
                 let index = row * self.shape.ldc + column;
                 let got = actual[index];
-                let want = self.expected[index];
+                let want = expected[index];
                 let tolerance = absolute_tolerance + relative_tolerance * want.abs();
+                let matches = if want.is_nan() {
+                    got.is_nan()
+                } else if want.is_infinite() {
+                    got == want
+                } else {
+                    got.is_finite() && (got - want).abs() <= tolerance
+                };
                 assert!(
-                    got.is_finite() && (got - want).abs() <= tolerance,
+                    matches,
                     "{:?}/{:?}/{:?} M{} K{} N{} at ({row},{column}): got {got}, expected {want}",
-                    self.op,
-                    self.dtype,
-                    route.physical,
-                    self.shape.m,
-                    self.shape.k,
-                    self.shape.n,
+                    self.op, self.dtype, route.physical, self.shape.m, self.shape.k, self.shape.n,
                 );
             }
             for column in self.output_columns..self.shape.ldc {
@@ -471,6 +563,10 @@ impl CensusCase {
                 );
             }
         }
+    }
+
+    fn assert_cpu_reference(&self, actual: &[f32], route: Sm120ForcedRoute) {
+        self.assert_reference(actual, &self.expected, route);
     }
 
     fn assert_inputs_unchanged(&self, stream: &Arc<cudarc::driver::CudaStream>) {
@@ -664,7 +760,7 @@ fn launch_baseline(ctx: &GpuCtx, case: &CensusCase, output: &GuardedOutput) -> R
     };
     let dims = (case.shape.m, case.shape.k, case.shape.n);
     match case.op {
-        Sm120Op::Nn => sgemm_bi_forward_tc_with_tile(
+        Sm120Op::Nn => gemm_bi_forward_tc_with_tile(
             &ctx.stream,
             &ctx.kernels,
             &TcFwdOperands {
@@ -676,7 +772,7 @@ fn launch_baseline(ctx: &GpuCtx, case: &CensusCase, output: &GuardedOutput) -> R
             dims,
             TcTile::Tile128,
         ),
-        Sm120Op::Tn => sgemm_bi_backward_dw_tc_with_tile(
+        Sm120Op::Tn => gemm_bi_backward_dw_tc_with_tile(
             &ctx.stream,
             &ctx.kernels,
             output.ptr(),
@@ -685,7 +781,7 @@ fn launch_baseline(ctx: &GpuCtx, case: &CensusCase, output: &GuardedOutput) -> R
             dims,
             TcTile::Tile128,
         ),
-        Sm120Op::Nt => sgemm_bi_backward_dx_tc_with_tile(
+        Sm120Op::Nt => gemm_bi_backward_dx_tc_with_tile(
             &ctx.stream,
             &ctx.kernels,
             typed(output.ptr()),
@@ -706,24 +802,29 @@ fn assert_exact_baseline(ctx: &GpuCtx, case: &CensusCase, physical: Sm120Physica
     let mut baseline = GuardedOutput::new(ctx, case.op, case.dtype, case.initial.len(), 0);
     candidate.reset(&ctx.stream, &case.initial);
     baseline.reset(&ctx.stream, &case.initial);
-    let (_, prepared) = prepared_route(ctx, case, &maps, physical, candidate.ptr(), true);
+    let (route, prepared) = prepared_route(ctx, case, &maps, physical, candidate.ptr(), true);
     launch_sm120_tma_prepared(&ctx.stream, &ctx.kernels, &prepared)
         .expect("launch SM120 baseline comparison");
     launch_baseline(ctx, case, &baseline).expect("launch same-target MMA16 baseline");
     let candidate = candidate.download(&ctx.stream);
     let baseline = baseline.download(&ctx.stream);
-    assert_eq!(
-        candidate
-            .iter()
-            .map(|value| value.to_bits())
-            .collect::<Vec<_>>(),
-        baseline
-            .iter()
-            .map(|value| value.to_bits())
-            .collect::<Vec<_>>(),
-        "{:?}/{:?}/{physical:?} differs from the same-target MMA16 baseline",
+    let expected = case.reference(case.operands(0, true));
+    case.assert_reference(&candidate, &expected, route);
+    case.assert_reference(&baseline, &expected, route);
+    let candidate_bits = candidate.iter().map(|value| value.to_bits());
+    let baseline_bits = baseline.iter().map(|value| value.to_bits());
+    let differences = candidate_bits
+        .zip(baseline_bits)
+        .enumerate()
+        .filter(|(_, (candidate, baseline))| candidate != baseline)
+        .collect::<Vec<_>>();
+    assert!(
+        differences.is_empty(),
+        "{:?}/{:?}/{physical:?} differs from the same-target MMA16 baseline at {} elements; first mismatch {:?}",
         case.op,
         case.dtype,
+        differences.len(),
+        differences.first(),
     );
     case.assert_inputs_unchanged(&ctx.stream);
 }
@@ -927,7 +1028,7 @@ fn assert_map_and_route_fail_closed(ctx: &GpuCtx) {
         resolve_sm120_forced(caps, None, requested).expect("fail-closed route result"),
         None
     );
-    assert!(SM120_AUTO_CELLS_CC120.is_empty());
+    assert_eq!(SM120_AUTO_CELLS_CC120.len(), 18);
     assert!(SM120_AUTO_CELLS_CC121.is_empty());
 }
 
@@ -989,6 +1090,430 @@ fn sm120_context() -> Option<(GpuDevice, GpuCtx)> {
     Some((device, ctx))
 }
 
+fn enable_sm120_auto_policy(ctx: &GpuCtx) {
+    ctx.set_batch_invariant(true);
+    ctx.set_bi_gemm_family(BiGemmFamily::Triad);
+    ctx.set_bi_tensor_cores(true);
+}
+
+fn launch_auto_typed(
+    ctx: &GpuCtx,
+    case: &CensusCase,
+    output: &GuardedOutput,
+) -> Result<(), String> {
+    launch_auto_typed_ptr(ctx, case, output.ptr())
+}
+
+fn launch_auto_typed_ptr(ctx: &GpuCtx, case: &CensusCase, output: u64) -> Result<(), String> {
+    let typed = |ptr| TypedPtr {
+        ptr,
+        dtype: case.dtype,
+    };
+    let dims = (case.shape.m, case.shape.k, case.shape.n);
+    match case.op {
+        Sm120Op::Nn => gemm_bi_forward_typed(
+            ctx,
+            typed(output),
+            typed(case.a.cached_ptr()),
+            typed(case.b.cached_ptr()),
+            case.bias.cached_ptr(),
+            dims,
+        ),
+        Sm120Op::Tn => gemm_bi_backward_dw_typed(
+            ctx,
+            output,
+            typed(case.b.cached_ptr()),
+            typed(case.a.cached_ptr()),
+            dims,
+        ),
+        Sm120Op::Nt => gemm_bi_backward_dx_typed(
+            ctx,
+            typed(output),
+            typed(case.a.cached_ptr()),
+            typed(case.b.cached_ptr()),
+            dims,
+        ),
+    }
+}
+
+fn assert_auto_route(
+    actual: &mamba_rs::mamba_ssm::gpu::kernel_identity::RecordedGemmTrace,
+    expected: Sm120ForcedRoute,
+) {
+    let [route] = actual.routes() else {
+        panic!("automatic SM120 typed call did not record exactly one route");
+    };
+    let expected_op = match expected.op {
+        Sm120Op::Nn => ResolvedGemmOp::Nn,
+        Sm120Op::Tn => ResolvedGemmOp::Tn,
+        Sm120Op::Nt => ResolvedGemmOp::Nt,
+    };
+    assert_eq!(route.op, expected_op);
+    assert_eq!(route.module_kind, ModuleKind::TriadSm120);
+    assert_eq!(route.backend, PhysicalGemmBackend::Sm120TmaMma16V1);
+    assert_eq!(
+        route.numeric_contract,
+        ResolvedNumericContract::MmaSyncF32V1
+    );
+    assert_eq!(
+        route.shape,
+        (expected.shape.m, expected.shape.k, expected.shape.n)
+    );
+    assert_eq!(
+        route.strides,
+        (expected.shape.lda, expected.shape.ldb, expected.shape.ldc)
+    );
+    assert_eq!(
+        route.tile,
+        (
+            expected.physical.tile.output_rows(),
+            expected.physical.tile.output_columns(),
+        )
+    );
+    assert_eq!(route.bk, expected.physical.bk.elements());
+    assert_eq!(route.stages, expected.physical.stages.count());
+    assert_eq!(route.symbol, expected.kernel_spec().unwrap().symbol);
+    assert_ne!(route.tensor_maps_digest, [0; 32]);
+    assert_ne!(route.resources_digest, [0; 32]);
+    assert_ne!(route.launch.arguments_digest, [0; 32]);
+}
+
+fn assert_auto_matches_mma16_baseline(
+    ctx: &GpuCtx,
+    route: Sm120ForcedRoute,
+) -> (CensusCase, GuardedOutput, Vec<u32>) {
+    let case = CensusCase::compact_performance(
+        ctx,
+        route.op,
+        route.dtype,
+        (route.shape.m, route.shape.k, route.shape.n),
+    );
+    let mut baseline = GuardedOutput::new(ctx, route.op, route.dtype, case.initial.len(), 0);
+    baseline.reset(&ctx.stream, &case.initial);
+    launch_baseline(ctx, &case, &baseline).expect("launch typed MMA16 baseline");
+    let expected = baseline
+        .download(&ctx.stream)
+        .into_iter()
+        .map(f32::to_bits)
+        .collect::<Vec<_>>();
+
+    let mut actual = GuardedOutput::new(ctx, route.op, route.dtype, case.initial.len(), 0);
+    actual.reset(&ctx.stream, &case.initial);
+    let trace = ctx
+        .record_eager_gemm_trace(|| launch_auto_typed(ctx, &case, &actual))
+        .expect("record automatic typed SM120 route");
+    assert_auto_route(&trace, route);
+    let bits = actual
+        .download(&ctx.stream)
+        .into_iter()
+        .map(f32::to_bits)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        bits, expected,
+        "automatic typed route differs from MMA16 baseline"
+    );
+    (case, actual, expected)
+}
+
+fn auto_graph_and_qualification_route(dtype: WeightDtype, op: Sm120Op) -> Sm120ForcedRoute {
+    let routes = SM120_AUTO_CELLS_CC120
+        .iter()
+        .copied()
+        .filter(|route| {
+            route.dtype == dtype
+                && route.op == op
+                && (route.shape.m, route.shape.k, route.shape.n) == (2048, 1536, 768)
+        })
+        .collect::<Vec<_>>();
+    let [route] = routes.as_slice() else {
+        panic!("expected one projection route for {dtype:?}/{op:?}, found {routes:?}");
+    };
+    *route
+}
+
+fn auto_graph_and_qualification_routes() -> [Sm120ForcedRoute; 6] {
+    [WeightDtype::Bf16, WeightDtype::F16]
+        .map(|dtype| {
+            [Sm120Op::Nn, Sm120Op::Tn, Sm120Op::Nt]
+                .map(|op| auto_graph_and_qualification_route(dtype, op))
+        })
+        .concat()
+        .try_into()
+        .expect("two dtypes by three operations")
+}
+
+#[test]
+fn sm120_auto_graph_and_physical_inventory_is_dtype_symmetric() {
+    let actual = auto_graph_and_qualification_routes()
+        .into_iter()
+        .map(|route| {
+            (
+                route.dtype,
+                route.op,
+                (
+                    route.shape.m,
+                    route.shape.k,
+                    route.shape.n,
+                    route.shape.lda,
+                    route.shape.ldb,
+                    route.shape.ldc,
+                ),
+                route.physical,
+                route.kernel_spec().expect("SM120 route spec").symbol,
+            )
+        })
+        .collect::<Vec<_>>();
+    let nn = Sm120PhysicalRoute {
+        tile: Sm120Tile::M64N64,
+        bk: Sm120Bk::Bk64,
+        stages: Sm120Stages::S2,
+    };
+    let tn = Sm120PhysicalRoute {
+        tile: Sm120Tile::M64N128,
+        bk: Sm120Bk::Bk32,
+        stages: Sm120Stages::S3,
+    };
+    let nt = Sm120PhysicalRoute {
+        tile: Sm120Tile::M64N64,
+        bk: Sm120Bk::Bk64,
+        stages: Sm120Stages::S2,
+    };
+    let shape = (2048, 1536, 768, 1536, 768, 768);
+    let nt_shape = (2048, 1536, 768, 768, 768, 1536);
+    assert_eq!(
+        actual,
+        vec![
+            (
+                WeightDtype::Bf16,
+                Sm120Op::Nn,
+                shape,
+                nn,
+                "gemm_bi_nn_sm120_tma_64x64_bk64_s2_bf16",
+            ),
+            (
+                WeightDtype::Bf16,
+                Sm120Op::Tn,
+                shape,
+                tn,
+                "gemm_bi_tn_sm120_tma_64x128_bk32_s3_bf16",
+            ),
+            (
+                WeightDtype::Bf16,
+                Sm120Op::Nt,
+                nt_shape,
+                nt,
+                "gemm_bi_nt_sm120_tma_64x64_bk64_s2_bf16",
+            ),
+            (
+                WeightDtype::F16,
+                Sm120Op::Nn,
+                shape,
+                nn,
+                "gemm_bi_nn_sm120_tma_64x64_bk64_s2_f16",
+            ),
+            (
+                WeightDtype::F16,
+                Sm120Op::Tn,
+                shape,
+                tn,
+                "gemm_bi_tn_sm120_tma_64x128_bk32_s3_f16",
+            ),
+            (
+                WeightDtype::F16,
+                Sm120Op::Nt,
+                nt_shape,
+                nt,
+                "gemm_bi_nt_sm120_tma_64x64_bk64_s2_f16",
+            ),
+        ]
+    );
+}
+
+#[test]
+#[ignore = "needs a real CC 12.0 device"]
+fn sm120_auto_typed_qualified_cells() {
+    let Some((device, ctx)) = sm120_context() else {
+        return;
+    };
+    assert_eq!(device.compute_capability, (12, 0), "CC12.0 auto table gate");
+    enable_sm120_auto_policy(&ctx);
+    for route in SM120_AUTO_CELLS_CC120.iter().copied() {
+        let (case, mut output, expected) = assert_auto_matches_mma16_baseline(&ctx, route);
+        output.reset(&ctx.stream, &case.initial);
+        let repeated = ctx
+            .record_eager_gemm_trace(|| launch_auto_typed(&ctx, &case, &output))
+            .expect("repeat automatic typed SM120 route");
+        assert_auto_route(&repeated, route);
+        assert_eq!(
+            output
+                .download(&ctx.stream)
+                .into_iter()
+                .map(f32::to_bits)
+                .collect::<Vec<_>>(),
+            expected,
+            "repeated {:?}/{:?}/{:?} changed bits",
+            route.op,
+            route.dtype,
+            route.shape,
+        );
+    }
+}
+
+#[test]
+#[ignore = "needs a real CC 12.0 device"]
+fn sm120_auto_typed_graph_cache() {
+    let Some((device, ctx)) = sm120_context() else {
+        return;
+    };
+    assert_eq!(device.compute_capability, (12, 0), "CC12.0 auto table gate");
+    enable_sm120_auto_policy(&ctx);
+
+    for route in auto_graph_and_qualification_routes() {
+        let op = route.op;
+        let dtype = route.dtype;
+        let (case, mut output, expected) = assert_auto_matches_mma16_baseline(&ctx, route);
+        output.reset(&ctx.stream, &case.initial);
+        let mut graph = None;
+        let capture_trace = ctx
+            .record_eager_gemm_trace(|| {
+                graph = Some(unsafe {
+                    capture_into_graph(&ctx.stream, || launch_auto_typed(&ctx, &case, &output))
+                }?);
+                Ok(())
+            })
+            .expect("capture warmed automatic typed SM120 route");
+        assert_auto_route(&capture_trace, route);
+        graph
+            .as_ref()
+            .expect("captured graph")
+            .launch()
+            .expect("replay automatic typed SM120 graph");
+        assert_eq!(
+            output
+                .download(&ctx.stream)
+                .into_iter()
+                .map(f32::to_bits)
+                .collect::<Vec<_>>(),
+            expected,
+            "captured {dtype:?}/{op:?} changed bits"
+        );
+
+        let fresh = GuardedOutput::new(&ctx, route.op, route.dtype, case.initial.len(), 0);
+        let miss = match unsafe {
+            capture_into_graph(&ctx.stream, || launch_auto_typed(&ctx, &case, &fresh))
+        } {
+            Ok(_) => panic!("fresh output unexpectedly captured without eager warmup"),
+            Err(error) => error,
+        };
+        assert!(
+            miss.contains("missing") && miss.contains("eager warmup"),
+            "{miss}"
+        );
+    }
+
+    let route = SM120_AUTO_CELLS_CC120[0];
+    let (case, output, _) = assert_auto_matches_mma16_baseline(&ctx, route);
+    let recycled_ptr = output.ptr();
+    drop(output);
+    let stale = match unsafe {
+        capture_into_graph(&ctx.stream, || {
+            launch_auto_typed_ptr(&ctx, &case, recycled_ptr)
+        })
+    } {
+        Ok(_) => panic!("freed output address unexpectedly captured"),
+        Err(error) => error,
+    };
+    assert_eq!(
+        stale.strip_prefix("body: ").unwrap_or(&stale),
+        "prepared SM120 Triad allocation epoch changed during graph capture; run eager warmup again"
+    );
+
+    ctx.set_bi_tensor_cores(false);
+    let logical_len = case.initial.len();
+    let fallback = GuardedOutput::new(&ctx, route.op, route.dtype, logical_len, 0);
+    let fallback_trace = ctx
+        .record_eager_gemm_trace(|| launch_auto_typed(&ctx, &case, &fallback))
+        .expect("tensor-core-disabled fallback remains available");
+    assert!(
+        fallback_trace
+            .routes()
+            .iter()
+            .all(|route| route.module_kind != ModuleKind::TriadSm120)
+    );
+}
+
+#[test]
+#[ignore = "needs a real CC 12.0 device"]
+fn sm120_auto_physical_qualification_matches_eager_and_graph() {
+    let Some((device, ctx)) = sm120_context() else {
+        return;
+    };
+    assert_eq!(device.compute_capability, (12, 0), "CC12.0 auto table gate");
+    let routes = auto_graph_and_qualification_routes();
+    let requests = routes.map(|route| {
+        let logical_op = match route.op {
+            Sm120Op::Nn => ResolvedGemmOp::Nn,
+            Sm120Op::Tn => ResolvedGemmOp::Tn,
+            Sm120Op::Nt => ResolvedGemmOp::Nt,
+        };
+        PhysicalQualificationRequest::contiguous(
+            logical_op,
+            (route.shape.m, route.shape.k, route.shape.n),
+            PhysicalQualificationRoute::HalfPolicy {
+                dtype: route.dtype,
+                tensor_cores: true,
+            },
+        )
+    });
+    presize_physical_qualification_suite(&ctx, &requests)
+        .expect("pre-size SM120 physical qualification resources");
+    for (route, request) in routes.into_iter().zip(requests) {
+        let mut qualified =
+            qualify_physical_launch(&ctx, request).expect("qualify automatic SM120 physical route");
+        let evidence = qualified.evidence();
+        assert_eq!(evidence.launch_count(), 1);
+        assert!(evidence.eager_graph_equal());
+        assert_eq!(evidence.uniform_module_kind(), Some(ModuleKind::TriadSm120));
+        let [node] = evidence.nodes() else {
+            panic!("automatic SM120 qualification did not record one node");
+        };
+        let expected_op = match route.op {
+            Sm120Op::Nn => ResolvedGemmOp::Nn,
+            Sm120Op::Tn => ResolvedGemmOp::Tn,
+            Sm120Op::Nt => ResolvedGemmOp::Nt,
+        };
+        assert_eq!(node.logical_op, expected_op);
+        assert_eq!(node.shape, (route.shape.m, route.shape.k, route.shape.n));
+        assert_eq!(
+            node.strides,
+            (route.shape.lda, route.shape.ldb, route.shape.ldc)
+        );
+        assert_eq!(
+            node.tile,
+            Some((
+                route.physical.tile.output_rows(),
+                route.physical.tile.output_columns(),
+            ))
+        );
+        assert_eq!(node.symbol, route.kernel_spec().expect("SM120 spec").symbol);
+        assert_ne!(node.launch.arguments_digest, [0; 32]);
+        qualified
+            .validate_timed_request(&ctx, request)
+            .expect("validate exact SM120 timed request");
+        qualified
+            .measure_graph_window_ms(&ctx, 1)
+            .expect("replay qualified SM120 graph");
+        qualified
+            .measure_eager_window_ms(&ctx, 1)
+            .expect("replay qualified SM120 eager route");
+        let guards = qualified
+            .validate_red_zones(&ctx)
+            .expect("validate SM120 qualification red zones");
+        assert_eq!(guards.allocation_count(), 3);
+        assert!(guards.element_count() >= 3 * 32);
+    }
+}
+
 #[test]
 #[ignore = "needs a real CC 12.0 or CC 12.1 device"]
 fn qualifies_all_96_forced_sm120_routes() {
@@ -996,25 +1521,26 @@ fn qualifies_all_96_forced_sm120_routes() {
         return;
     };
     assert_eq!(SM120_KERNEL_SPECS.len(), 96);
-    assert!(SM120_AUTO_CELLS_CC120.is_empty());
+    assert_eq!(SM120_AUTO_CELLS_CC120.len(), 18);
     assert!(SM120_AUTO_CELLS_CC121.is_empty());
 
     for op in [Sm120Op::Nn, Sm120Op::Tn, Sm120Op::Nt] {
         for dtype in [WeightDtype::Bf16, WeightDtype::F16] {
+            let routes = physical_routes();
             let baseline = CensusCase::compact(&ctx, op, dtype, ALIGNED_BASELINE);
-            for physical in physical_routes() {
+            for physical in routes.iter().copied() {
                 assert_exact_baseline(&ctx, &baseline, physical);
             }
 
             let mut exceptional = CensusCase::compact(&ctx, op, dtype, (64, 64, 64));
             exceptional.replace_with_adversarial_inputs(&ctx.stream);
-            for physical in physical_routes() {
+            for physical in routes.iter().copied() {
                 assert_exact_baseline(&ctx, &exceptional, physical);
             }
 
             for dims in independent_axis_shapes() {
                 let case = CensusCase::new(&ctx, op, dtype, dims);
-                for (index, physical) in physical_routes().into_iter().enumerate() {
+                for (index, physical) in routes.iter().copied().enumerate() {
                     run_candidate(&ctx, &case, physical, 0, index % 8);
                 }
             }
@@ -1029,15 +1555,27 @@ fn qualifies_all_96_forced_sm120_routes() {
                     (8 - logical_offset, 2),
                     false,
                 );
-                assert!(!case.request(physical_routes()[0]).a_ptr.is_multiple_of(128));
-                assert!(!case.request(physical_routes()[0]).b_ptr.is_multiple_of(128));
-                for physical in physical_routes() {
-                    run_candidate(&ctx, &case, physical, 0, logical_offset);
+                for physical in routes.iter().copied() {
+                    let request = case.request(physical);
+                    assert!(!request.a_ptr.is_multiple_of(16));
+                    assert!(!request.b_ptr.is_multiple_of(16));
+                    let error = validate_sm120_map_request(request)
+                        .expect_err("unaligned TMA subview must fail before launch");
+                    assert!(error.contains("16-byte aligned"), "{error}");
                 }
             }
 
+            let aligned_subview =
+                CensusCase::with_origins(&ctx, op, dtype, ASYMMETRIC, (8, 1), (16, 2), false);
+            for physical in routes.iter().copied() {
+                let request = aligned_subview.request(physical);
+                assert!(request.a_ptr.is_multiple_of(16));
+                assert!(request.b_ptr.is_multiple_of(16));
+                run_candidate(&ctx, &aligned_subview, physical, 0, 5);
+            }
+
             let repeated = CensusCase::new(&ctx, op, dtype, ASYMMETRIC);
-            for physical in physical_routes() {
+            for physical in routes.iter().copied() {
                 run_candidate(&ctx, &repeated, physical, EAGER_REPEATS, 3);
                 run_graph_route(&ctx, &repeated, physical);
             }
@@ -1051,6 +1589,75 @@ fn qualifies_all_96_forced_sm120_routes() {
 }
 
 #[test]
+#[ignore = "needs a real CC 12.0 or CC 12.1 device"]
+fn qualifies_sm120_nn_bf16_m64n64_bk32_s2_reduction_boundaries() {
+    let Some((_device, ctx)) = sm120_context() else {
+        return;
+    };
+    let physical = Sm120PhysicalRoute {
+        tile: Sm120Tile::M64N64,
+        bk: Sm120Bk::Bk32,
+        stages: Sm120Stages::S2,
+    };
+    for reduction in [16, 32, 64, 128] {
+        let case = CensusCase::compact(&ctx, Sm120Op::Nn, WeightDtype::Bf16, (64, reduction, 64));
+        assert_exact_baseline(&ctx, &case, physical);
+    }
+}
+
+#[test]
+#[ignore = "needs a real CC 12.0 or CC 12.1 device"]
+fn sm120_nn_bf16_sw64_fragment_mapping_matches_identity_probe() {
+    let Some((_device, ctx)) = sm120_context() else {
+        return;
+    };
+    let mut case = CensusCase::compact(&ctx, Sm120Op::Nn, WeightDtype::Bf16, (64, 32, 64));
+    case.a_values.fill(0.0);
+    for row in 0..64 {
+        for reduction in 0..32 {
+            case.a_values[row * 32 + reduction] = (reduction + 1) as f32;
+        }
+    }
+    case.b_values.fill(0.0);
+    for diagonal in 0..32 {
+        case.b_values[diagonal * 64 + diagonal] = 1.0;
+    }
+    case.bias_values.fill(0.0);
+    case.initial.fill(0.0);
+    case.a_storage_before[..case.a_values.len()].copy_from_slice(&case.a_values);
+    case.b_storage_before[..case.b_values.len()].copy_from_slice(&case.b_values);
+    case.a
+        .upload_f32(&ctx.stream, &case.a_storage_before)
+        .expect("upload identity-probe A");
+    case.b
+        .upload_f32(&ctx.stream, &case.b_storage_before)
+        .expect("upload identity-probe B");
+    case.bias
+        .upload(&ctx.stream, &case.bias_values)
+        .expect("upload identity-probe bias");
+    case.expected = case.reference(case.operands(0, false));
+
+    let physical = Sm120PhysicalRoute {
+        tile: Sm120Tile::M64N64,
+        bk: Sm120Bk::Bk32,
+        stages: Sm120Stages::S2,
+    };
+    let maps = prepare_sm120_tensor_maps(&ctx.stream, &ctx.kernels, case.request(physical))
+        .expect("prepare identity-probe maps");
+    let mut output = GuardedOutput::new(&ctx, case.op, case.dtype, case.initial.len(), 0);
+    output.reset(&ctx.stream, &case.initial);
+    let (route, prepared) = prepared_route(&ctx, &case, &maps, physical, output.ptr(), false);
+    launch_sm120_tma_prepared(&ctx.stream, &ctx.kernels, &prepared)
+        .expect("launch identity-probe route");
+    let actual = output.download(&ctx.stream);
+    assert_eq!(
+        &actual[..32],
+        &case.expected[..32],
+        "{route:?} identity-probe first row"
+    );
+}
+
+#[test]
 #[ignore = "run under compute-sanitizer on a real CC 12.0 and CC 12.1 device"]
 fn sm120_stage_wrap_tail_sanitizer_target() {
     let Some((_device, ctx)) = sm120_context() else {
@@ -1058,7 +1665,8 @@ fn sm120_stage_wrap_tail_sanitizer_target() {
     };
     for op in [Sm120Op::Nn, Sm120Op::Tn, Sm120Op::Nt] {
         for dtype in [WeightDtype::Bf16, WeightDtype::F16] {
-            for physical in physical_routes() {
+            let routes = physical_routes();
+            for physical in routes {
                 let reduction = match physical.bk {
                     Sm120Bk::Bk32 => match physical.stages {
                         Sm120Stages::S2 => 81,
@@ -1074,8 +1682,250 @@ fn sm120_stage_wrap_tail_sanitizer_target() {
                     Sm120Op::Tn => (reduction, 65, 129),
                     Sm120Op::Nt => (65, 129, reduction),
                 };
-                let case = CensusCase::with_origins(&ctx, op, dtype, dims, (3, 1), (5, 2), false);
+                let case = CensusCase::with_origins(&ctx, op, dtype, dims, (8, 1), (16, 2), false);
                 run_candidate(&ctx, &case, physical, 2, 7);
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct Sm120HotShape {
+    name: &'static str,
+    dims: (usize, usize, usize),
+}
+
+const SM120_HOT_SHAPES: [Sm120HotShape; 3] = [
+    Sm120HotShape {
+        name: "large",
+        dims: (2048, 3072, 768),
+    },
+    Sm120HotShape {
+        name: "large_deep",
+        dims: (4096, 3072, 1536),
+    },
+    Sm120HotShape {
+        name: "d768_out_proj",
+        dims: (2048, 1536, 768),
+    },
+];
+
+fn measure_sm120_window(
+    ctx: &GpuCtx,
+    prepared: &Sm120PreparedLaunch,
+    iterations: usize,
+) -> Result<f64, String> {
+    let start = ctx
+        .stream
+        .record_event(Some(cudarc::driver::sys::CUevent_flags::CU_EVENT_DEFAULT))
+        .map_err(|error| format!("record SM120 start event: {error:?}"))?;
+    for _ in 0..iterations {
+        launch_sm120_tma_prepared(&ctx.stream, &ctx.kernels, prepared)?;
+    }
+    let end = ctx
+        .stream
+        .record_event(Some(cudarc::driver::sys::CUevent_flags::CU_EVENT_DEFAULT))
+        .map_err(|error| format!("record SM120 end event: {error:?}"))?;
+    start
+        .elapsed_ms(&end)
+        .map(f64::from)
+        .map_err(|error| format!("measure SM120 events: {error:?}"))
+}
+
+fn percentile(sorted: &[f64], percentile: f64) -> f64 {
+    let index = ((sorted.len() - 1) as f64 * percentile).round() as usize;
+    sorted[index]
+}
+
+fn sm120_tile_name(tile: Sm120Tile) -> &'static str {
+    match tile {
+        Sm120Tile::M64N64 => "m64n64",
+        Sm120Tile::M128N64 => "m128n64",
+        Sm120Tile::M64N128 => "m64n128",
+        Sm120Tile::M128N128 => "m128n128",
+    }
+}
+
+fn sm120_dtype_name(dtype: WeightDtype) -> &'static str {
+    match dtype {
+        WeightDtype::Bf16 => "bf16",
+        WeightDtype::F16 => "f16",
+        WeightDtype::F32 => unreachable!(),
+    }
+}
+
+fn sm120_op_name(op: Sm120Op) -> &'static str {
+    match op {
+        Sm120Op::Nn => "nn",
+        Sm120Op::Tn => "tn",
+        Sm120Op::Nt => "nt",
+    }
+}
+
+fn run_sm120_hot_performance_cell(
+    ctx: &GpuCtx,
+    case: &CensusCase,
+    shape: Sm120HotShape,
+    physical: Sm120PhysicalRoute,
+    windows: usize,
+) {
+    let maps = prepare_sm120_tensor_maps(&ctx.stream, &ctx.kernels, case.request(physical))
+        .expect("prepare SM120 performance maps");
+    let mut output = GuardedOutput::new(ctx, case.op, case.dtype, case.initial.len(), 0);
+    let (route, prepared) = prepared_route(ctx, case, &maps, physical, output.ptr(), false);
+    let resources = prepared.resources();
+
+    output.reset(&ctx.stream, &case.initial);
+    measure_sm120_window(ctx, &prepared, 128).expect("warm up SM120 performance route");
+    output.reset(&ctx.stream, &case.initial);
+    let pilot_ms = measure_sm120_window(ctx, &prepared, 16).expect("pilot SM120 route");
+    let per_launch_ms = pilot_ms / 16.0;
+    assert!(per_launch_ms.is_finite() && per_launch_ms > 0.0);
+    let iterations = (5.0 / per_launch_ms).ceil().clamp(1.0, 4096.0) as usize;
+
+    let mut samples = Vec::with_capacity(windows);
+    for _ in 0..windows {
+        output.reset(&ctx.stream, &case.initial);
+        let elapsed = measure_sm120_window(ctx, &prepared, iterations)
+            .expect("measure SM120 performance route");
+        let sample = elapsed * 1000.0 / iterations as f64;
+        assert!(sample.is_finite() && sample > 0.0);
+        samples.push(sample);
+    }
+    let mut sorted = samples.clone();
+    sorted.sort_by(f64::total_cmp);
+    let p50 = percentile(&sorted, 0.50);
+    let p95 = percentile(&sorted, 0.95);
+    let (m, k, n) = shape.dims;
+    let tflops = 2.0 * m as f64 * k as f64 * n as f64 / (p50 * 1.0e6);
+    println!(
+        concat!(
+            "{{\"schema\":\"MambaBiSm120ForcedPerformanceCellV1\",",
+            "\"suite\":\"gemm_bi_sm120_forced_performance\",",
+            "\"cell_id\":\"sm120_forced/{}/{}/{}/bk{}/s{}/{}/contiguous\",",
+            "\"dtype\":\"{}\",\"op\":\"{}\",\"shape\":\"{}\",",
+            "\"alpha_bits\":{},\"beta_bits\":{},",
+            "\"m\":{},\"k\":{},\"n\":{},\"tile\":\"{}\",",
+            "\"bk\":{},\"stages\":{},\"symbol\":\"{}\",",
+            "\"registers_per_thread\":{},\"active_blocks_per_sm\":{},",
+            "\"dynamic_shared_bytes\":{},\"local_bytes\":{},",
+            "\"spill_store_bytes\":{},\"spill_load_bytes\":{},",
+            "\"iterations\":{},\"windows\":{},\"p50_us\":{:.9},",
+            "\"p95_us\":{:.9},\"min_us\":{:.9},\"max_us\":{:.9},",
+            "\"tflops\":{:.9},\"samples_us\":{:?}}}"
+        ),
+        sm120_dtype_name(case.dtype),
+        sm120_op_name(case.op),
+        sm120_tile_name(physical.tile),
+        physical.bk.elements(),
+        physical.stages.count(),
+        shape.name,
+        sm120_dtype_name(case.dtype),
+        sm120_op_name(case.op),
+        shape.name,
+        case.operands(0, false).alpha.to_bits(),
+        case.operands(0, false).beta.to_bits(),
+        m,
+        k,
+        n,
+        sm120_tile_name(physical.tile),
+        physical.bk.elements(),
+        physical.stages.count(),
+        route.kernel_spec().expect("SM120 performance spec").symbol,
+        resources.registers_per_thread,
+        resources.active_blocks_per_sm,
+        resources.dynamic_shared_bytes,
+        resources.local_bytes,
+        resources.spill_store_bytes,
+        resources.spill_load_bytes,
+        iterations,
+        samples.len(),
+        p50,
+        p95,
+        sorted[0],
+        sorted[sorted.len() - 1],
+        tflops,
+        samples,
+    );
+}
+
+#[test]
+#[ignore = "needs a real CC 12.0 or CC 12.1 device and emits performance JSONL"]
+fn sm120_forced_nn_hot_performance_matrix() {
+    let Some((_device, ctx)) = sm120_context() else {
+        return;
+    };
+    let windows = std::env::var("GEMM_BI_QUAL_WINDOWS")
+        .map_or(Ok(11), |value| value.parse::<usize>())
+        .expect("parse GEMM_BI_QUAL_WINDOWS");
+    assert!(windows > 0);
+    for dtype in [WeightDtype::Bf16, WeightDtype::F16] {
+        for shape in SM120_HOT_SHAPES {
+            let case = CensusCase::compact_performance(&ctx, Sm120Op::Nn, dtype, shape.dims);
+            for physical in physical_routes() {
+                run_sm120_hot_performance_cell(&ctx, &case, shape, physical, windows);
+            }
+        }
+    }
+}
+
+#[test]
+#[ignore = "needs a real CC 12.0 or CC 12.1 device and emits performance JSONL"]
+fn sm120_forced_tn_hot_performance_matrix() {
+    let Some((_device, ctx)) = sm120_context() else {
+        return;
+    };
+    let windows = std::env::var("GEMM_BI_QUAL_WINDOWS")
+        .map_or(Ok(11), |value| value.parse::<usize>())
+        .expect("parse GEMM_BI_QUAL_WINDOWS");
+    assert!(windows > 0);
+    for dtype in [WeightDtype::Bf16, WeightDtype::F16] {
+        for shape in SM120_HOT_SHAPES {
+            let case = CensusCase::compact_performance(&ctx, Sm120Op::Tn, dtype, shape.dims);
+            for physical in physical_routes() {
+                run_sm120_hot_performance_cell(&ctx, &case, shape, physical, windows);
+            }
+        }
+    }
+}
+
+#[test]
+#[ignore = "needs a real CC 12.0 or CC 12.1 device and emits performance JSONL"]
+fn sm120_forced_nt_hot_performance_matrix() {
+    let Some((_device, ctx)) = sm120_context() else {
+        return;
+    };
+    let windows = std::env::var("GEMM_BI_QUAL_WINDOWS")
+        .map_or(Ok(11), |value| value.parse::<usize>())
+        .expect("parse GEMM_BI_QUAL_WINDOWS");
+    assert!(windows > 0);
+    for dtype in [WeightDtype::Bf16, WeightDtype::F16] {
+        for shape in SM120_HOT_SHAPES {
+            let case = CensusCase::compact_performance(&ctx, Sm120Op::Nt, dtype, shape.dims);
+            for physical in physical_routes() {
+                run_sm120_hot_performance_cell(&ctx, &case, shape, physical, windows);
+            }
+        }
+    }
+}
+
+#[test]
+#[ignore = "needs a real CC 12.0 or CC 12.1 device and emits all-op performance JSONL"]
+fn sm120_forced_all_ops_hot_performance_matrix() {
+    let Some((_device, ctx)) = sm120_context() else {
+        return;
+    };
+    let windows = std::env::var("GEMM_BI_QUAL_WINDOWS")
+        .map_or(Ok(11), |value| value.parse::<usize>())
+        .expect("parse GEMM_BI_QUAL_WINDOWS");
+    assert!(windows > 0);
+    for op in [Sm120Op::Nn, Sm120Op::Tn, Sm120Op::Nt] {
+        for dtype in [WeightDtype::Bf16, WeightDtype::F16] {
+            for shape in SM120_HOT_SHAPES {
+                let case = CensusCase::compact_performance(&ctx, op, dtype, shape.dims);
+                for physical in physical_routes() {
+                    run_sm120_hot_performance_cell(&ctx, &case, shape, physical, windows);
+                }
             }
         }
     }

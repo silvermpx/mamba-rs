@@ -179,7 +179,8 @@ fn print_run_digests() {
             "run_digests",
             &format!("{tier:?}"),
             h,
-        );
+        )
+        .expect("acceptance evidence");
     }
 }
 
@@ -217,7 +218,8 @@ fn print_run_digests_multichunk() {
                 "run_digests_multichunk",
                 &format!("{label}.{tier:?}"),
                 h,
-            );
+            )
+            .expect("acceptance evidence");
         }
     }
 }

@@ -103,8 +103,11 @@ fn decode_run_digest() {
              conv={h_conv:016x} ssm={h_ssm:016x}"
         );
         let arm = if graph { "graph" } else { "eager" };
-        common::evidence::record_digest("decode_digest", arm, "out_chain", chained);
-        common::evidence::record_digest("decode_digest", arm, "conv", h_conv);
-        common::evidence::record_digest("decode_digest", arm, "ssm", h_ssm);
+        common::evidence::record_digest("decode_digest", arm, "out_chain", chained)
+            .expect("acceptance evidence");
+        common::evidence::record_digest("decode_digest", arm, "conv", h_conv)
+            .expect("acceptance evidence");
+        common::evidence::record_digest("decode_digest", arm, "ssm", h_ssm)
+            .expect("acceptance evidence");
     }
 }

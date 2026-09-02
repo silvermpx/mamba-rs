@@ -103,8 +103,8 @@ __device__ __forceinline__ float zero_f32() { return 0.0f; }
 //   - the fast stage requires 16B-aligned operand BASES, not just
 //     8-element strides (a 2-byte-aligned typed subview with an even
 //     stride otherwise stages wrong bytes silently);
-//   - the packed pair store fires only on a 4-byte-aligned destination
-//     (PTX faults or silently masks misaligned 32-bit stores).
+//   - packed pair stores check the alignment required by their transport;
+//     the f32 overload keeps a scalar fallback for 4-byte subviews.
 // ---------------------------------------------------------------------------
 static __device__ __forceinline__ bool gbf_aligned16(const void* p) {
     return (reinterpret_cast<unsigned long long>(p) & 15ull) == 0ull;
@@ -119,4 +119,13 @@ static __device__ __forceinline__ void gbf_store_pair_rne(
 static __device__ __forceinline__ void gbf_store_pair_rne(
     __half* dst, float v0, float v1) {
     *reinterpret_cast<__half2*>(dst) = __floats2half2_rn(v0, v1);
+}
+static __device__ __forceinline__ void gbf_store_pair_rne(
+    float* dst, float v0, float v1) {
+    if ((reinterpret_cast<unsigned long long>(dst) & 7ull) == 0ull) {
+        *reinterpret_cast<float2*>(dst) = make_float2(v0, v1);
+    } else {
+        dst[0] = v0;
+        dst[1] = v1;
+    }
 }

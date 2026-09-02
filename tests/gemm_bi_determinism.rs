@@ -1,8 +1,8 @@
-//! Batch-invariant SGEMM triad (sgemm_bi) — determinism, parity, and speed.
+//! Batch-invariant SGEMM triad (gemm_bi) — determinism, parity, and speed.
 //!
 //! With `ctx.set_batch_invariant(true)` every f32 training GEMM (NN fwd,
 //! TN dW, NT dX) routes through the deterministic warptiling dispatcher in
-//! `gpu/sgemm_bi.rs` instead of cuBLAS TF32. Contract under test:
+//! `gpu/gemm_bi.rs` instead of cuBLAS TF32. Contract under test:
 //!
 //! 1. `flag_on_training_is_bit_identical_across_runs` — two fresh f32
 //!    trainers, same seed/inputs, N steps each: snapshots must agree BIT
@@ -19,7 +19,7 @@
 //!    K-reduction association by design — every bucket stays
 //!    deterministic, but the buckets are distinct fixed orders. Strict
 //!    all-M invariance is the INFERENCE matvec_bi kernel's contract.
-//! 4. `bench_sgemm_bi_vs_tf32` (#[ignore]) — wall-clock of trainer steps
+//! 4. `bench_gemm_bi_vs_tf32` (#[ignore]) — wall-clock of trainer steps
 //!    with the flag on vs off across small/medium/large shapes.
 
 #![cfg(feature = "cuda")]
@@ -150,7 +150,7 @@ fn flag_on_matches_cublas_loosely() {
         nb += y as f64 * y as f64;
     }
     let cos = dot / (na.sqrt() * nb.sqrt()).max(1e-30);
-    eprintln!("sgemm_bi vs cuBLAS-TF32 snapshot cosine = {cos:.9}");
+    eprintln!("gemm_bi vs cuBLAS-TF32 snapshot cosine = {cos:.9}");
     assert!(
         cos > 0.99999,
         "deterministic triad diverged from cuBLAS trajectory: cos={cos}"
@@ -160,7 +160,7 @@ fn flag_on_matches_cublas_loosely() {
 #[test]
 fn flag_on_mixed_training_is_bit_identical_across_runs() {
     // With the typed tier, bf16/f16 mixed training with the flag on routes every GEMM
-    // through the typed sgemm_bi buckets or the upcast fallback — both
+    // through the typed gemm_bi buckets or the upcast fallback — both
     // fully deterministic. Two fresh trainers must agree bit for bit.
     for dt in [WeightDtype::Bf16, WeightDtype::F16] {
         let a = run_training(4, 64, 5, true, dt);
@@ -198,7 +198,7 @@ fn flag_on_mixed_matches_pedantic_loosely() {
         nb += y as f64 * y as f64;
     }
     let cos = dot / (na.sqrt() * nb.sqrt()).max(1e-30);
-    eprintln!("bf16 sgemm_bi vs cuBLAS-PEDANTIC snapshot cosine = {cos:.9}");
+    eprintln!("bf16 gemm_bi vs cuBLAS-PEDANTIC snapshot cosine = {cos:.9}");
     assert!(
         cos > 0.999,
         "deterministic bf16 triad diverged from PEDANTIC trajectory: cos={cos}"
@@ -207,7 +207,7 @@ fn flag_on_mixed_matches_pedantic_loosely() {
 
 #[test]
 fn nn_forward_is_batch_invariant_within_bucket() {
-    use mamba_rs::mamba_ssm::gpu::blas::gpu_sgemm_forward_raw;
+    use mamba_rs::mamba_ssm::gpu::blas::gpu_gemm_bi_forward_raw;
     use mamba_rs::mamba_ssm::gpu::buffers::GpuBuffer;
     use mamba_rs::mamba_ssm::gpu::context::GpuCtx;
     use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
@@ -229,7 +229,7 @@ fn nn_forward_is_batch_invariant_within_bucket() {
         let mut w = GpuBuffer::zeros(&ctx.stream, k * n).unwrap();
         w.upload(&ctx.stream, &w_host).unwrap();
         let mut y = GpuBuffer::zeros(&ctx.stream, m * n).unwrap();
-        gpu_sgemm_forward_raw(&ctx, &mut y, &x, w.cached_ptr(), None, (m, k, n)).unwrap();
+        gpu_gemm_bi_forward_raw(&ctx, &mut y, &x, w.cached_ptr(), None, (m, k, n)).unwrap();
         ctx.stream.synchronize().unwrap();
         let host = y.to_cpu(&ctx.stream).unwrap();
         host[..n].to_vec()
@@ -259,7 +259,7 @@ fn nn_forward_is_batch_invariant_within_bucket() {
 
 #[test]
 #[ignore] // wall-clock benchmark — run explicitly on a quiet GPU
-fn bench_sgemm_bi_vs_tf32() {
+fn bench_gemm_bi_vs_tf32() {
     use std::time::Instant;
     // (d_model, n_layers, batch, seq_len, label)
     let shapes = [
@@ -321,7 +321,7 @@ fn bench_sgemm_bi_vs_tf32() {
             let t_blas = time_mode(false, false, dt);
             let t_bi = time_mode(true, false, dt);
             eprintln!(
-                "[{label} {dt:?}] B={b} T={t}: {baseline} {:.3} ms/step | sgemm_bi {:.3} ms/step | ratio {:.2}x",
+                "[{label} {dt:?}] B={b} T={t}: {baseline} {:.3} ms/step | gemm_bi {:.3} ms/step | ratio {:.2}x",
                 t_blas * 1e3,
                 t_bi * 1e3,
                 t_bi / t_blas
@@ -329,7 +329,7 @@ fn bench_sgemm_bi_vs_tf32() {
             if dt != WeightDtype::F32 {
                 let t_tc = time_mode(true, true, dt);
                 eprintln!(
-                    "[{label} {dt:?}] B={b} T={t}: sgemm_bi+TC {:.3} ms/step | vs {baseline} {:.2}x | vs scalar bi {:.2}x",
+                    "[{label} {dt:?}] B={b} T={t}: gemm_bi+TC {:.3} ms/step | vs {baseline} {:.2}x | vs scalar bi {:.2}x",
                     t_tc * 1e3,
                     t_tc / t_blas,
                     t_tc / t_bi

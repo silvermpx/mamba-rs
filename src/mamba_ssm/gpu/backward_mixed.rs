@@ -55,7 +55,7 @@
 //! Backbone: norm_f bwd (pure f32) → reverse layer loop → input_proj bwd
 //! (identity guard: only non-identity path is currently unsupported).
 
-use super::blas::{TypedPtr, gpu_gemm_ex_backward_dx_typed, gpu_sgemm_backward_dw_grad_typed};
+use super::blas::{TypedPtr, gpu_gemm_bi_backward_dw_grad_typed, gpu_gemm_ex_backward_dx_typed};
 use super::buffers::GpuBuffer;
 use super::context::GpuCtx;
 use super::dtype::WeightDtype;
@@ -142,7 +142,7 @@ pub fn gpu_backward_mamba_layer_mixed(
 
     // ─── B1: out_proj backward — typed dW + typed dX ─────────────────
     // dW[di, dm] += gated^T[di, bt] @ d_out_flat[bt, dm]
-    gpu_sgemm_backward_dw_grad_typed(
+    gpu_gemm_bi_backward_dw_grad_typed(
         ctx,
         &d_lw.out_proj_w,
         TypedPtr {
@@ -464,7 +464,7 @@ pub fn gpu_backward_mamba_layer_mixed(
             .map_err(|e| format!("gather_cols dt bwd typed: {e:?}"))?;
     }
     // dt_proj dW — typed GemmEx accumulator on f32 master.
-    gpu_sgemm_backward_dw_grad_typed(
+    gpu_gemm_bi_backward_dw_grad_typed(
         ctx,
         &d_lw.dt_proj_w,
         TypedPtr {
@@ -541,7 +541,7 @@ pub fn gpu_backward_mamba_layer_mixed(
 
     // ─── B5: x_proj backward ─────────────────────────────────────────
     // dW — typed GemmEx.
-    gpu_sgemm_backward_dw_grad_typed(
+    gpu_gemm_bi_backward_dw_grad_typed(
         ctx,
         &d_lw.x_proj_w,
         TypedPtr {
@@ -710,7 +710,7 @@ pub fn gpu_backward_mamba_layer_mixed(
     // the gate half and the conv dx pass wrote the x half, both in the
     // layout the forward split reads (x in [0..di), gate in [di..2di)).
     // in_proj dW — typed GemmEx.
-    gpu_sgemm_backward_dw_grad_typed(
+    gpu_gemm_bi_backward_dw_grad_typed(
         ctx,
         &d_lw.in_proj_w,
         TypedPtr {
@@ -965,7 +965,7 @@ pub fn gpu_backward_mamba_backbone_mixed(
         }
         // dW: saved typed inputs^T @ dY, accumulated into the f32 grad
         // slice (bi-deterministic or cuBLAS, routed inside the helper).
-        gpu_sgemm_backward_dw_grad_typed(
+        gpu_gemm_bi_backward_dw_grad_typed(
             ctx,
             &d_mamba.input_proj_w,
             TypedPtr { ptr: dy_ptr, dtype },

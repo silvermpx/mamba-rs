@@ -1,2 +1,2 @@
 schema = 1
-provision = ["brew:cargo-deny"]
+provision = ["brew:cargo-deny", "brew:cargo-flotilla"]

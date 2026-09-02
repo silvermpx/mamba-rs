@@ -7,13 +7,15 @@
 
 use std::time::Instant;
 
-use mamba_rs::mamba_ssm::gpu::blas::{TypedPtr, gpu_gemm_typed_forward_raw, gpu_sgemm_forward_raw};
+use mamba_rs::mamba_ssm::gpu::blas::{
+    TypedPtr, gpu_gemm_bi_forward_raw, gpu_gemm_typed_forward_raw,
+};
 use mamba_rs::mamba_ssm::gpu::buffers::{DtypedBuf, GpuBuffer};
 use mamba_rs::mamba_ssm::gpu::context::{BiGemmFamily, GpuCtx};
 use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
 use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
 use mamba_rs::mamba_ssm::gpu::gemm_bi_triad::{
-    TcFwdOperands, TcTile, sgemm_bi_forward_tc_with_tile,
+    TcFwdOperands, TcTile, gemm_bi_forward_tc_with_tile,
 };
 
 const ITERS: usize = 200;
@@ -95,7 +97,7 @@ fn thin16_vs_matvec_decode() {
             .expect("matvec route");
         };
         let tc = |c: &DtypedBuf, tile: TcTile| {
-            sgemm_bi_forward_tc_with_tile(
+            gemm_bi_forward_tc_with_tile(
                 &ctx.stream,
                 &ctx.kernels,
                 &TcFwdOperands {
@@ -173,7 +175,7 @@ fn tile128_prefill_bench() {
         let c = DtypedBuf::zeros(&ctx.stream, m * n, WeightDtype::Bf16).expect("C");
 
         let tc = |tile: TcTile| {
-            sgemm_bi_forward_tc_with_tile(
+            gemm_bi_forward_tc_with_tile(
                 &ctx.stream,
                 &ctx.kernels,
                 &TcFwdOperands {
@@ -257,8 +259,15 @@ fn tile128_prefill_bench() {
         let t_tf32 = {
             ctx.set_batch_invariant(false);
             let mut run = || {
-                gpu_sgemm_forward_raw(&ctx, &mut cf, &af, wf.raw_ptr(&ctx.stream), None, (m, k, n))
-                    .expect("tf32 route");
+                gpu_gemm_bi_forward_raw(
+                    &ctx,
+                    &mut cf,
+                    &af,
+                    wf.raw_ptr(&ctx.stream),
+                    None,
+                    (m, k, n),
+                )
+                .expect("tf32 route");
             };
             run();
             ctx.stream.synchronize().expect("sync");

@@ -8,4 +8,6 @@
 pub mod bench;
 pub mod digest;
 pub mod evidence;
+#[cfg(feature = "cuda")]
+pub mod gpu_quiet;
 pub mod source_scan;

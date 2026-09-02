@@ -7,7 +7,7 @@
 //! pass before a benchmark number means anything.
 #![cfg(feature = "cuda")]
 
-use mamba_rs::mamba_ssm::gpu::blas::gpu_sgemm_forward_raw;
+use mamba_rs::mamba_ssm::gpu::blas::gpu_gemm_bi_forward_raw;
 use mamba_rs::mamba_ssm::gpu::buffers::GpuBuffer;
 use mamba_rs::mamba_ssm::gpu::context::{BiGemmFamily, GpuCtx};
 use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
@@ -71,7 +71,7 @@ fn fixed_tile_matches_cpu_across_tails() {
 
         ctx.set_batch_invariant(true);
         ctx.set_bi_gemm_family(BiGemmFamily::Fixed);
-        gpu_sgemm_forward_raw(&ctx, &mut y, &x, w.raw_ptr(&stream), None, (m, k, n))
+        gpu_gemm_bi_forward_raw(&ctx, &mut y, &x, w.raw_ptr(&stream), None, (m, k, n))
             .expect("fixed forward");
         let got = y.to_cpu(&stream).expect("d2h");
         ctx.set_batch_invariant(false);

@@ -17,7 +17,10 @@ use crate::mamba_ssm::gpu::adamw::{AdamWBiasFactors, AdamWMultiPlan, GpuAdamW, s
 use crate::mamba_ssm::gpu::buffers::GpuBuffer;
 use crate::mamba_ssm::gpu::context::{GemmRoute, GpuCtx};
 use crate::mamba_ssm::gpu::dtype::WeightDtype;
-use crate::mamba_ssm::gpu::graph_capture::capture_into_graph;
+use crate::mamba_ssm::gpu::graph_capture::{
+    capture_into_graph_with_gemm_plan, require_f32_triad_graph_plan,
+};
+use crate::mamba_ssm::gpu::kernel_identity::{CapturedGemmGraphPlan, PreparedGemmCaptureManifest};
 use crate::mamba3_siso::gpu::backward_mixed::gpu_backward_mamba3_backbone_mixed;
 use crate::mamba3_siso::gpu::forward_mixed::{
     GpuMamba3BackboneMixedActs, GpuMamba3MixedScratch, gpu_forward_mamba3_backbone_mixed,
@@ -25,6 +28,18 @@ use crate::mamba3_siso::gpu::forward_mixed::{
 use crate::mamba3_siso::gpu::state::{GpuMamba3Scratch, GpuMamba3StateBufs, M3Exec};
 use crate::mamba3_siso::gpu::weights::GpuMamba3Grads;
 use crate::mamba3_siso::gpu::weights_mixed_train::GpuMamba3TrainMixedWeights;
+
+fn with_validated_launch(
+    ctx: &GpuCtx,
+    plan: Option<&CapturedGemmGraphPlan>,
+    label: &str,
+    launch: impl FnOnce() -> Result<(), String>,
+) -> Result<(), String> {
+    match plan {
+        Some(plan) => plan.with_validated_launch(ctx, label, launch),
+        None => launch(),
+    }
+}
 
 /// Buffers and parameter state borrowed into the captured M3 bf16
 /// training-step body (forward + backward + AdamW + master→compute sync).
@@ -111,6 +126,7 @@ pub struct GpuMamba3TrainingStepGraph {
     // (see the M1 mixed graph) — M3 bf16 bi GEMMs route through it too.
     captured_bi_upcast_ptrs: [u64; 3],
     captured_gemm_route: GemmRoute,
+    captured_gemm_plan: Option<CapturedGemmGraphPlan>,
     captured_ctx_token: u64,
     captured_stream_token: usize,
 }
@@ -128,6 +144,7 @@ impl GpuMamba3TrainingStepGraph {
         exec: &M3Exec<'_>,
         cfg: &crate::mamba3_siso::config::Mamba3Config,
         cap: Mamba3MixedCapture<'_>,
+        manifest: &PreparedGemmCaptureManifest,
     ) -> Result<Self, String> {
         let M3Exec {
             ctx,
@@ -182,10 +199,11 @@ impl GpuMamba3TrainingStepGraph {
         let snap_half_staging = ctx.half_staging_ptr();
         let snap_bi_upcast = ctx.bi_upcast_scratch_ptrs();
         let snap_gemm_route = ctx.gemm_route();
+        let route_capacity = manifest.route_capacity;
 
         ctx.freeze_graph_scratch();
-        let graph = unsafe {
-            capture_into_graph(&ctx.stream, || {
+        let (graph, captured_gemm_plan) = unsafe {
+            capture_into_graph_with_gemm_plan(ctx, route_capacity, manifest, || {
                 grads.zero(&ctx.stream)?;
                 gpu_forward_mamba3_backbone_mixed(
                     exec,
@@ -244,6 +262,7 @@ impl GpuMamba3TrainingStepGraph {
             captured_half_staging_ptr: snap_half_staging,
             captured_bi_upcast_ptrs: snap_bi_upcast,
             captured_gemm_route: snap_gemm_route,
+            captured_gemm_plan,
             captured_ctx_token: ctx.instance_token(),
             captured_stream_token: ctx.stream_token(),
         })
@@ -370,9 +389,16 @@ impl GpuMamba3TrainingStepGraph {
                     .into(),
             );
         }
-        self.graph
-            .launch()
-            .map_err(|e| format!("M3 training_graph launch: {e:?}"))
+        with_validated_launch(
+            ctx,
+            self.captured_gemm_plan.as_ref(),
+            "M3 training_graph replay",
+            || {
+                self.graph
+                    .launch()
+                    .map_err(|e| format!("M3 training_graph launch: {e:?}"))
+            },
+        )
     }
 }
 
@@ -458,6 +484,7 @@ pub struct GpuMamba3F32TrainingStepGraph {
     captured_weights_input_proj_w_ptr: u64,
     captured_weights_norm_f_ptr: u64,
     captured_gemm_route: GemmRoute,
+    captured_gemm_plan: Option<CapturedGemmGraphPlan>,
     captured_ctx_token: u64,
     captured_stream_token: usize,
 }
@@ -469,7 +496,11 @@ impl GpuMamba3F32TrainingStepGraph {
     /// multi-plan, and every captured allocation or view must remain unchanged
     /// until this holder is destroyed and every replay has completed. Replay
     /// pointer checks diagnose drift but do not extend any CUDA lifetime.
-    pub unsafe fn capture(exec: &M3Exec<'_>, cap: Mamba3F32Capture<'_>) -> Result<Self, String> {
+    pub unsafe fn capture(
+        exec: &M3Exec<'_>,
+        cap: Mamba3F32Capture<'_>,
+        manifest: &PreparedGemmCaptureManifest,
+    ) -> Result<Self, String> {
         let M3Exec {
             ctx,
             kernels: m3k,
@@ -502,9 +533,10 @@ impl GpuMamba3F32TrainingStepGraph {
         let snap_input_proj = weights.input_proj_w.cached_ptr();
         let snap_norm_f = weights.norm_f_weight.cached_ptr();
         let snap_gemm_route = ctx.gemm_route();
+        let route_capacity = manifest.route_capacity;
 
-        let graph = unsafe {
-            capture_into_graph(&ctx.stream, || {
+        let (graph, captured_gemm_plan) = unsafe {
+            capture_into_graph_with_gemm_plan(ctx, route_capacity, manifest, || {
                 grads.zero(&ctx.stream)?;
                 gpu_forward_mamba3_backbone(
                     exec,
@@ -527,6 +559,12 @@ impl GpuMamba3F32TrainingStepGraph {
                 Ok(())
             })
         }?;
+        require_f32_triad_graph_plan(
+            ctx,
+            true,
+            captured_gemm_plan.as_ref(),
+            "M3 f32 training graph capture",
+        )?;
         ctx.note_graph_capture();
 
         Ok(Self {
@@ -549,6 +587,7 @@ impl GpuMamba3F32TrainingStepGraph {
             captured_weights_input_proj_w_ptr: snap_input_proj,
             captured_weights_norm_f_ptr: snap_norm_f,
             captured_gemm_route: snap_gemm_route,
+            captured_gemm_plan,
             captured_ctx_token: ctx.instance_token(),
             captured_stream_token: ctx.stream_token(),
         })
@@ -653,9 +692,16 @@ impl GpuMamba3F32TrainingStepGraph {
                     .into(),
             );
         }
-        self.graph
-            .launch()
-            .map_err(|e| format!("M3 f32 training_graph launch: {e:?}"))
+        with_validated_launch(
+            ctx,
+            self.captured_gemm_plan.as_ref(),
+            "M3 f32 training_graph replay",
+            || {
+                self.graph
+                    .launch()
+                    .map_err(|e| format!("M3 f32 training_graph launch: {e:?}"))
+            },
+        )
     }
 }
 

@@ -8,6 +8,16 @@
 use std::sync::Arc;
 
 /// Wrapper around CudaContext with convenience methods.
+///
+/// Device topology is captured once and cannot drift from its identity.
+///
+/// ```compile_fail
+/// use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
+///
+/// fn rewrite_topology(device: &mut GpuDevice) {
+///     device.multiprocessor_count = 1;
+/// }
+/// ```
 pub struct GpuDevice {
     ctx: Arc<cudarc::driver::CudaContext>,
     /// Compute capability (major, minor). E.g., (9, 0) for Hopper/GH200.
@@ -23,6 +33,7 @@ impl GpuDevice {
             .map_err(|e| format!("CUDA device {} init failed: {:?}", ordinal, e))?;
 
         let cc = Self::query_compute_capability(ordinal)?;
+        let multiprocessor_count = Self::query_multiprocessor_count(ordinal)?;
         let nvrtc_target = Self::resolve_nvrtc_target_for_nvrtc(cc, Self::query_nvrtc_version()?)?;
         let target = super::kernel_identity::CudaTarget::new(Self::resolve_nvrtc_target(cc)?)?;
         let driver = super::kernel_identity::query_driver_identity()?;
@@ -33,6 +44,7 @@ impl GpuDevice {
             nvrtc_target,
             identity: super::kernel_identity::DeviceIdentity {
                 compute_capability: cc,
+                multiprocessor_count,
                 target,
                 driver,
             },
@@ -75,6 +87,34 @@ impl GpuDevice {
         Ok((major, minor))
     }
 
+    fn query_multiprocessor_count(ordinal: usize) -> Result<u32, String> {
+        use cudarc::driver::sys;
+        let device = i32::try_from(ordinal)
+            .map_err(|_| format!("CUDA device ordinal {ordinal} exceeds i32::MAX"))?;
+        let mut count = 0;
+        let result = unsafe {
+            sys::cuDeviceGetAttribute(
+                &mut count,
+                sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT,
+                device,
+            )
+        };
+        if result != sys::cudaError_enum::CUDA_SUCCESS {
+            return Err(format!(
+                "cuDeviceGetAttribute(MULTIPROCESSOR_COUNT) failed for device {ordinal}: {result:?}"
+            ));
+        }
+        let count = u32::try_from(count).map_err(|_| {
+            format!("CUDA device {ordinal} returned negative multiprocessor count {count}")
+        })?;
+        if count == 0 {
+            return Err(format!(
+                "CUDA device {ordinal} returned zero multiprocessors"
+            ));
+        }
+        Ok(count)
+    }
+
     /// Resolve the NVRTC target without silently lowering the device family.
     pub fn resolve_nvrtc_target(cc: (u32, u32)) -> Result<&'static str, String> {
         let target = match cc {
@@ -84,6 +124,7 @@ impl GpuDevice {
             (8, 9) => "sm_89",
             (9, 0) => "sm_90a",
             (10, 0) => "sm_100a",
+            (10, 1) => "sm_101a",
             (10, 3) => "sm_103a",
             (11, 0) => "sm_110",
             (12, 0) => "sm_120",
@@ -114,6 +155,21 @@ impl GpuDevice {
         nvrtc_version: (i32, i32),
     ) -> Result<&'static str, String> {
         match cc {
+            (10, 1) if (12, 8) <= nvrtc_version && nvrtc_version < (13, 0) => Ok("sm_101a"),
+            (10, 1) => Err(format!(
+                "CUDA {}.{} cannot compile compute capability 10.1; the SM101 target is available in CUDA 12.8 and 12.9",
+                nvrtc_version.0, nvrtc_version.1
+            )),
+            (10, 3) if nvrtc_version >= (12, 9) => Ok("sm_103a"),
+            (10, 3) => Err(format!(
+                "CUDA {}.{} cannot compile compute capability 10.3; SM103 needs CUDA 12.9 or newer",
+                nvrtc_version.0, nvrtc_version.1
+            )),
+            (11, 0) if nvrtc_version >= (13, 2) => Ok("sm_110"),
+            (11, 0) => Err(format!(
+                "CUDA {}.{} cannot compile compute capability 11.0; SM110 needs CUDA 13.2 or newer",
+                nvrtc_version.0, nvrtc_version.1
+            )),
             (12, 0) if nvrtc_version >= (12, 8) => Ok("compute_120"),
             (12, 1) if nvrtc_version >= (12, 9) => Ok("compute_121"),
             (12, 1) if nvrtc_version >= (12, 8) => Ok("compute_120"),
@@ -140,6 +196,11 @@ impl GpuDevice {
     /// Immutable device and driver domain used by graph route snapshots.
     pub fn identity(&self) -> super::kernel_identity::DeviceIdentity {
         self.identity
+    }
+
+    /// Physical SM count captured in the immutable device identity.
+    pub fn multiprocessor_count(&self) -> u32 {
+        self.identity.multiprocessor_count
     }
 
     /// Get the default CUDA stream for this device.
@@ -224,6 +285,7 @@ mod tests {
             ((8, 9), "sm_89"),
             ((9, 0), "sm_90a"),
             ((10, 0), "sm_100a"),
+            ((10, 1), "sm_101a"),
             ((10, 3), "sm_103a"),
             ((11, 0), "sm_110"),
             ((12, 0), "sm_120"),
@@ -262,6 +324,38 @@ mod tests {
     }
 
     #[test]
+    fn sm110_target_requires_cuda_13_2() {
+        assert!(GpuDevice::resolve_nvrtc_target_for_nvrtc((11, 0), (13, 1)).is_err());
+        assert_eq!(
+            GpuDevice::resolve_nvrtc_target_for_nvrtc((11, 0), (13, 2)),
+            Ok("sm_110")
+        );
+    }
+
+    #[test]
+    fn sm103_target_requires_cuda_12_9() {
+        assert!(GpuDevice::resolve_nvrtc_target_for_nvrtc((10, 3), (12, 8)).is_err());
+        assert_eq!(
+            GpuDevice::resolve_nvrtc_target_for_nvrtc((10, 3), (12, 9)),
+            Ok("sm_103a")
+        );
+    }
+
+    #[test]
+    fn sm101_target_uses_its_cuda_12_native_name() {
+        assert!(GpuDevice::resolve_nvrtc_target_for_nvrtc((10, 1), (12, 7)).is_err());
+        assert_eq!(
+            GpuDevice::resolve_nvrtc_target_for_nvrtc((10, 1), (12, 8)),
+            Ok("sm_101a")
+        );
+        assert_eq!(
+            GpuDevice::resolve_nvrtc_target_for_nvrtc((10, 1), (12, 9)),
+            Ok("sm_101a")
+        );
+        assert!(GpuDevice::resolve_nvrtc_target_for_nvrtc((10, 1), (13, 0)).is_err());
+    }
+
+    #[test]
     fn nvrtc_target_rejects_cc_below_80() {
         for cc in [(6, 0), (7, 0), (7, 5)] {
             assert!(GpuDevice::resolve_nvrtc_target(cc).is_err());
@@ -270,7 +364,7 @@ mod tests {
 
     #[test]
     fn nvrtc_target_rejects_unknown_known_family_minor() {
-        for cc in [(8, 1), (9, 1), (10, 1), (11, 1), (12, 2)] {
+        for cc in [(8, 1), (9, 1), (10, 2), (11, 1), (12, 2)] {
             assert!(GpuDevice::resolve_nvrtc_target(cc).is_err());
         }
     }

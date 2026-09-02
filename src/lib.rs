@@ -12,10 +12,11 @@
 //! - Mamba SSM and Mamba-3 SISO architectures
 //! - CPU and GPU (CUDA) paths for both
 //! - Full training with BPTT through the recurrent SSM state + AdamW
-//! - `WeightDtype::{F32, Bf16, F16}` — f32 compute regardless of storage
+//! - `WeightDtype::{F32, Bf16, F16}` with f32 master state and accumulation;
+//!   GEMM product precision follows the selected numeric route
 //! - CUDA Graph capture for inference and training steps
-//! - Batch-invariant bf16 inference (custom GEMM kernel; logits are
-//!   bit-identical across batch sizes for the same prompt)
+//! - Deterministic batch-invariant f32/bf16/f16 GEMM routes for inference
+//!   and training
 //! - HuggingFace safetensors loader for Mamba SSM checkpoints
 //!
 //! ## Module Structure

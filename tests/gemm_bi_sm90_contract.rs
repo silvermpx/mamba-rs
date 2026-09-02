@@ -12,18 +12,18 @@ use mamba_rs::mamba_ssm::gpu::gemm_bi_triad::{
 const SOURCE: &str = include_str!("../kernels/gemm_bi_triad/sm90a.cu");
 
 const SYMBOLS: &[&str] = &[
-    "sgemm_bi_nn_sm90a_wgmma_wg1_bf16",
-    "sgemm_bi_nn_sm90a_wgmma_wg1_f16",
-    "sgemm_bi_tn_sm90a_wgmma_wg1_bf16",
-    "sgemm_bi_tn_sm90a_wgmma_wg1_f16",
-    "sgemm_bi_nt_sm90a_wgmma_wg1_bf16",
-    "sgemm_bi_nt_sm90a_wgmma_wg1_f16",
-    "sgemm_bi_nn_sm90a_wgmma_wg2_bf16",
-    "sgemm_bi_nn_sm90a_wgmma_wg2_f16",
-    "sgemm_bi_tn_sm90a_wgmma_wg2_bf16",
-    "sgemm_bi_tn_sm90a_wgmma_wg2_f16",
-    "sgemm_bi_nt_sm90a_wgmma_wg2_bf16",
-    "sgemm_bi_nt_sm90a_wgmma_wg2_f16",
+    "gemm_bi_nn_sm90a_wgmma_wg1_bf16",
+    "gemm_bi_nn_sm90a_wgmma_wg1_f16",
+    "gemm_bi_tn_sm90a_wgmma_wg1_bf16",
+    "gemm_bi_tn_sm90a_wgmma_wg1_f16",
+    "gemm_bi_nt_sm90a_wgmma_wg1_bf16",
+    "gemm_bi_nt_sm90a_wgmma_wg1_f16",
+    "gemm_bi_nn_sm90a_wgmma_wg2_bf16",
+    "gemm_bi_nn_sm90a_wgmma_wg2_f16",
+    "gemm_bi_tn_sm90a_wgmma_wg2_bf16",
+    "gemm_bi_tn_sm90a_wgmma_wg2_f16",
+    "gemm_bi_nt_sm90a_wgmma_wg2_bf16",
+    "gemm_bi_nt_sm90a_wgmma_wg2_f16",
 ];
 
 #[test]

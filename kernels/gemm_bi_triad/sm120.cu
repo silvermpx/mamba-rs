@@ -33,6 +33,9 @@ static_assert(sizeof(Sm120KernelParams) == 40,
               "SM120 kernel parameter size changed");
 static_assert(alignof(Sm120KernelParams) == 4,
               "SM120 kernel parameter alignment changed");
+static_assert(__is_standard_layout(Sm120KernelParams),
+              "SM120 kernel parameters must remain standard layout");
+// Ten ordered 4-byte fields in 40 bytes leave no internal or tail padding.
 static_assert(sizeof(((Sm120KernelParams*)0)->a_x) == 4,
               "SM120 A x origin size changed");
 static_assert(sizeof(((Sm120KernelParams*)0)->a_y) == 4,
@@ -53,19 +56,6 @@ static_assert(sizeof(((Sm120KernelParams*)0)->n) == 4,
               "SM120 N size changed");
 static_assert(sizeof(((Sm120KernelParams*)0)->ldc) == 4,
               "SM120 output stride size changed");
-#if !defined(__CUDACC_RTC__)
-static_assert(offsetof(Sm120KernelParams, a_x) == 0, "a_x offset");
-static_assert(offsetof(Sm120KernelParams, a_y) == 4, "a_y offset");
-static_assert(offsetof(Sm120KernelParams, b_x) == 8, "b_x offset");
-static_assert(offsetof(Sm120KernelParams, b_y) == 12, "b_y offset");
-static_assert(offsetof(Sm120KernelParams, alpha) == 16, "alpha offset");
-static_assert(offsetof(Sm120KernelParams, beta) == 20, "beta offset");
-static_assert(offsetof(Sm120KernelParams, m) == 24, "m offset");
-static_assert(offsetof(Sm120KernelParams, k) == 28, "k offset");
-static_assert(offsetof(Sm120KernelParams, n) == 32, "n offset");
-static_assert(offsetof(Sm120KernelParams, ldc) == 36, "ldc offset");
-#endif
-
 enum Sm120Op {
     Sm120Nn = 0,
     Sm120Tn = 1,
@@ -80,7 +70,11 @@ enum Sm120Op {
 
 template <int M, int N, int BK, int Stages>
 struct Sm120Storage {
-    static constexpr int threads = (M / 32) * (N / 32) * 32;
+    static constexpr bool wide_m_warp =
+        M == 128 && N == 128 && BK == 32;
+    static constexpr int compute_warps =
+        wide_m_warp ? 8 : (M / 32) * (N / 32);
+    static constexpr int threads = compute_warps * 32;
     static constexpr int stage_bytes = (M + N) * BK * 2;
     static constexpr int dynamic_bytes = 128 + Stages * stage_bytes;
 };
@@ -160,12 +154,11 @@ template <int Groups>
 static __device__ __forceinline__ unsigned sm120_swizzled_address_impl(
     unsigned shared_address, unsigned logical_row, unsigned element) {
     constexpr unsigned groups = Groups;
-    unsigned offset = (shared_address / 128U) % groups;
     unsigned logical_chunk = element / 8U;
-    unsigned physical_chunk =
-        logical_chunk ^ ((logical_row + offset) % groups);
-    return shared_address + logical_row * groups * 16U +
-           physical_chunk * 16U;
+    unsigned row_start = shared_address + logical_row * groups * 16U;
+    unsigned phase = (row_start / 128U) % groups;
+    unsigned physical_chunk = logical_chunk ^ phase;
+    return row_start + physical_chunk * 16U;
 }
 
 template <int BK>
@@ -287,24 +280,51 @@ static __device__ __forceinline__ void sm120_produce_stage(
     if constexpr (Op == Sm120Nn) {
         sm120_tma_copy(a_destination, a_descriptor, reduction,
                        pipeline.output_row, params.a_x, params.a_y, barrier);
+        if constexpr (M == 128 && N == 64 && BK == 32) {
+            sm120_tma_copy(b_destination, b_descriptor,
+                           pipeline.output_col, reduction,
+                           params.b_x, params.b_y, barrier);
+        } else {
 #pragma unroll
-        for (int plane = 0; plane < N / BK; ++plane) {
-            int column = pipeline.output_col + plane * BK;
-            sm120_tma_copy(b_destination + plane * plane_bytes, b_descriptor,
-                           column, reduction, params.b_x, params.b_y, barrier);
+            for (int plane = 0; plane < N / BK; ++plane) {
+                int column = pipeline.output_col + plane * BK;
+                sm120_tma_copy(
+                    b_destination + plane * plane_bytes, b_descriptor,
+                    column, reduction, params.b_x, params.b_y, barrier);
+            }
         }
     } else if constexpr (Op == Sm120Tn) {
+        if constexpr (BK == 32 && (M == 64 || N == 64)) {
+            constexpr int wide_plane_bytes = 64 * BK * 2;
 #pragma unroll
-        for (int plane = 0; plane < M / BK; ++plane) {
-            int row = pipeline.output_row + plane * BK;
-            sm120_tma_copy(a_destination + plane * plane_bytes, a_descriptor,
-                           row, reduction, params.a_x, params.a_y, barrier);
-        }
+            for (int plane = 0; plane < M / 64; ++plane) {
+                int row = pipeline.output_row + plane * 64;
+                sm120_tma_copy(
+                    a_destination + plane * wide_plane_bytes, a_descriptor,
+                    row, reduction, params.a_x, params.a_y, barrier);
+            }
 #pragma unroll
-        for (int plane = 0; plane < N / BK; ++plane) {
-            int column = pipeline.output_col + plane * BK;
-            sm120_tma_copy(b_destination + plane * plane_bytes, b_descriptor,
-                           column, reduction, params.b_x, params.b_y, barrier);
+            for (int plane = 0; plane < N / 64; ++plane) {
+                int column = pipeline.output_col + plane * 64;
+                sm120_tma_copy(
+                    b_destination + plane * wide_plane_bytes, b_descriptor,
+                    column, reduction, params.b_x, params.b_y, barrier);
+            }
+        } else {
+#pragma unroll
+            for (int plane = 0; plane < M / BK; ++plane) {
+                int row = pipeline.output_row + plane * BK;
+                sm120_tma_copy(
+                    a_destination + plane * plane_bytes, a_descriptor,
+                    row, reduction, params.a_x, params.a_y, barrier);
+            }
+#pragma unroll
+            for (int plane = 0; plane < N / BK; ++plane) {
+                int column = pipeline.output_col + plane * BK;
+                sm120_tma_copy(
+                    b_destination + plane * plane_bytes, b_descriptor,
+                    column, reduction, params.b_x, params.b_y, barrier);
+            }
         }
     } else {
         sm120_tma_copy(a_destination, a_descriptor, reduction,
@@ -314,33 +334,57 @@ static __device__ __forceinline__ void sm120_produce_stage(
     }
 }
 
-template <int Op, int M, int BK>
+template <int Op, int M, int N, int BK, int Stages, int MAtoms>
 static __device__ __forceinline__ void sm120_load_a_fragments(
     unsigned stage, int warp_m, int slab,
-    unsigned (&a_fragment)[2][4]) {
+    unsigned (&a_fragment)[MAtoms][4]) {
     constexpr int plane_bytes = BK * BK * 2;
     unsigned a_base = stage;
+    constexpr bool compact_a_addresses =
+        (Op == Sm120Nt &&
+         ((M == 64 && N == 128 && BK == 64 && Stages == 2) ||
+          (M == 128 && N == 128 && BK == 32 && Stages == 3))) ||
+        (Op == Sm120Nn && M == 128 && N == 128 && BK == 32 &&
+         Stages == 2);
     int lane = threadIdx.x & 31;
     int row8 = lane & 7;
     int quadrant = lane >> 3;
     int k0 = slab * 16;
 
 #pragma unroll
-    for (int fm = 0; fm < 2; ++fm) {
+    for (int fm = 0; fm < MAtoms; ++fm) {
         if constexpr (Op == Sm120Tn) {
             int logical_row = k0 + ((quadrant & 2) ? 8 : 0) + row8;
             int output_element =
                 warp_m + fm * 16 + ((quadrant & 1) ? 8 : 0);
-            unsigned plane = a_base +
-                static_cast<unsigned>((output_element / BK) * plane_bytes);
-            unsigned address = sm120_swizzled_address<BK>(
-                plane, static_cast<unsigned>(logical_row),
-                static_cast<unsigned>(output_element % BK));
+            unsigned address;
+            if constexpr (BK == 32 && (M == 64 || N == 64)) {
+                constexpr int wide_plane_bytes = 64 * BK * 2;
+                unsigned plane = a_base + static_cast<unsigned>(
+                    (output_element / 64) * wide_plane_bytes);
+                address = sm120_swizzled_address_impl<SM120_SWIZZLE_128B>(
+                    plane, static_cast<unsigned>(logical_row),
+                    static_cast<unsigned>(output_element % 64));
+            } else {
+                unsigned plane = a_base +
+                    static_cast<unsigned>((output_element / BK) * plane_bytes);
+                address = sm120_swizzled_address<BK>(
+                    plane, static_cast<unsigned>(logical_row),
+                    static_cast<unsigned>(output_element % BK));
+            }
             sm120_load_x4_transpose(address, a_fragment[fm]);
         } else {
-            int logical_row =
-                warp_m + fm * 16 + ((quadrant & 1) ? 8 : 0) + row8;
-            int element = k0 + ((quadrant & 2) ? 8 : 0);
+            int logical_row;
+            int element;
+            if constexpr (compact_a_addresses) {
+                logical_row = warp_m + fm * 16 + (lane & 15);
+                element = k0 + ((lane & 16) >> 1);
+            } else {
+                logical_row =
+                    warp_m + fm * 16 +
+                    ((quadrant & 1) ? 8 : 0) + row8;
+                element = k0 + ((quadrant & 2) ? 8 : 0);
+            }
             unsigned address = sm120_swizzled_address<BK>(
                 a_base, static_cast<unsigned>(logical_row),
                 static_cast<unsigned>(element));
@@ -349,57 +393,152 @@ static __device__ __forceinline__ void sm120_load_a_fragments(
     }
 }
 
-template <int Op, int M, int BK>
+template <int Op, int M, int N, int BK, int Stages>
 static __device__ __forceinline__ void sm120_load_b_fragment(
     unsigned stage, int warp_n, int slab, int fn,
     unsigned (&b_fragment)[2]) {
     constexpr int plane_bytes = BK * BK * 2;
     constexpr int a_bytes = M * BK * 2;
+    constexpr bool compact_tn_x2_addresses = Op == Sm120Tn &&
+        (Stages == 3 ||
+         (BK == 32 && ((M == 64 && N == 128) ||
+                       (M == 128 && N == 64))));
+    constexpr bool compact_nn_x2_addresses = Op == Sm120Nn &&
+        ((Stages == 2 &&
+          ((M == 128 && N == 64) ||
+           (M == 128 && N == 128 && BK == 64))) ||
+         (Stages == 3 &&
+          ((M == 64 && N == 64 && BK == 32) ||
+           (M == 64 && N == 128) ||
+           (M == 128 && N == 128))));
+    constexpr bool compact_x2_addresses =
+        compact_tn_x2_addresses || compact_nn_x2_addresses;
     unsigned b_base = stage + a_bytes;
     int lane = threadIdx.x & 31;
     int row8 = lane & 7;
-    int quadrant = lane >> 3;
     int k0 = slab * 16;
 
     if constexpr (Op == Sm120Nt) {
         int logical_row = warp_n + fn * 8 + row8;
+        int quadrant = lane >> 3;
         int element = k0 + ((quadrant & 1) ? 8 : 0);
         unsigned address = sm120_swizzled_address<BK>(
             b_base, static_cast<unsigned>(logical_row),
             static_cast<unsigned>(element));
         sm120_load_x2(address, b_fragment);
     } else {
-        int logical_row = k0 + ((quadrant & 1) ? 8 : 0) + row8;
+        int logical_row;
+        if constexpr (compact_x2_addresses) {
+            logical_row = k0 + (lane & 15);
+        } else {
+            int quadrant = lane >> 3;
+            logical_row = k0 + ((quadrant & 1) ? 8 : 0) + row8;
+        }
         int output_element = warp_n + fn * 8;
-        unsigned plane = b_base +
-            static_cast<unsigned>((output_element / BK) * plane_bytes);
-        unsigned address = sm120_swizzled_address<BK>(
-            plane, static_cast<unsigned>(logical_row),
-            static_cast<unsigned>(output_element % BK));
+        unsigned address;
+        if constexpr (((Op == Sm120Nn && M == 128 && N == 64) ||
+                       (Op == Sm120Tn && (M == 64 || N == 64))) &&
+                      BK == 32) {
+            constexpr int wide_plane_bytes = 64 * BK * 2;
+            unsigned plane = b_base +
+                static_cast<unsigned>((output_element / 64) * wide_plane_bytes);
+            address = sm120_swizzled_address_impl<SM120_SWIZZLE_128B>(
+                plane, static_cast<unsigned>(logical_row),
+                static_cast<unsigned>(output_element % 64));
+        } else {
+            unsigned plane = b_base +
+                static_cast<unsigned>((output_element / BK) * plane_bytes);
+            address = sm120_swizzled_address<BK>(
+                plane, static_cast<unsigned>(logical_row),
+                static_cast<unsigned>(output_element % BK));
+        }
         sm120_load_x2_transpose(address, b_fragment);
     }
 }
 
-template <typename T, int Op, int M, int N, int BK, int Stages>
+template <typename T, int Op, int M, int N, int BK, int Stages,
+          int MAtoms, bool RotatingStage>
 static __device__ __forceinline__ void sm120_issue_stage(
-    unsigned payload, int tile, int warp_m, int warp_n,
-    float (&accumulator)[2][4][4]) {
+    unsigned payload, int stage_or_tile, int warp_m, int warp_n,
+    float (&accumulator)[MAtoms][4][4]) {
     constexpr int stage_bytes = Sm120Storage<M, N, BK, Stages>::stage_bytes;
-    unsigned stage = payload + (tile % Stages) * stage_bytes;
+    constexpr bool lookahead_a = BK == 64 && Stages == 2 &&
+        ((Op == Sm120Nn && M == 64) ||
+         (Op == Sm120Tn && N == 128) ||
+         (Op == Sm120Nt && M == 128 && N == 128));
+    constexpr bool b_before_next_a =
+        (Op == Sm120Nn && M == 64 && N == 64) ||
+        (Op == Sm120Tn && M == 64 && N == 128);
+    int stage_index;
+    if constexpr (RotatingStage) {
+        stage_index = stage_or_tile;
+    } else {
+        stage_index = stage_or_tile % Stages;
+    }
+    unsigned stage = payload + stage_index * stage_bytes;
+    unsigned a_fragment[lookahead_a ? 2 : 1][MAtoms][4];
+    if constexpr (lookahead_a) {
+        sm120_load_a_fragments<Op, M, N, BK, Stages, MAtoms>(
+            stage, warp_m, 0, a_fragment[0]);
+    }
 #pragma unroll
     for (int slab = 0; slab < BK / 16; ++slab) {
-        unsigned a_fragment[2][4];
-        sm120_load_a_fragments<Op, M, BK>(
-            stage, warp_m, slab, a_fragment);
+        int current_a = lookahead_a ? slab & 1 : 0;
+        if constexpr (!lookahead_a) {
+            sm120_load_a_fragments<Op, M, N, BK, Stages, MAtoms>(
+                stage, warp_m, slab, a_fragment[0]);
+        }
+        if constexpr (lookahead_a && !b_before_next_a) {
+            if (slab + 1 < BK / 16) {
+                sm120_load_a_fragments<Op, M, N, BK, Stages, MAtoms>(
+                    stage, warp_m, slab + 1, a_fragment[current_a ^ 1]);
+            }
+        }
+        if constexpr (N == 64 && BK == 64 && Stages == 2) {
+            unsigned b_fragment[2][2];
+            sm120_load_b_fragment<Op, M, N, BK, Stages>(
+                stage, warp_n, slab, 0, b_fragment[0]);
+            if constexpr (lookahead_a && b_before_next_a) {
+                if (slab + 1 < BK / 16) {
+                    sm120_load_a_fragments<Op, M, N, BK, Stages, MAtoms>(
+                        stage, warp_m, slab + 1,
+                        a_fragment[current_a ^ 1]);
+                }
+            }
 #pragma unroll
-        for (int fn = 0; fn < 4; ++fn) {
-            unsigned b_fragment[2];
-            sm120_load_b_fragment<Op, M, BK>(
-                stage, warp_n, slab, fn, b_fragment);
+            for (int fn = 0; fn < 4; ++fn) {
+                int current = fn & 1;
+                int next = current ^ 1;
+                if (fn + 1 < 4) {
+                    sm120_load_b_fragment<Op, M, N, BK, Stages>(
+                        stage, warp_n, slab, fn + 1, b_fragment[next]);
+                }
 #pragma unroll
-            for (int fm = 0; fm < 2; ++fm) {
-                Sm120Mma<T>::issue(
-                    accumulator[fm][fn], a_fragment[fm], b_fragment);
+                for (int fm = 0; fm < MAtoms; ++fm) {
+                    Sm120Mma<T>::issue(
+                        accumulator[fm][fn], a_fragment[current_a][fm],
+                        b_fragment[current]);
+                }
+            }
+        } else {
+#pragma unroll
+            for (int fn = 0; fn < 4; ++fn) {
+                unsigned b_fragment[2];
+                sm120_load_b_fragment<Op, M, N, BK, Stages>(
+                    stage, warp_n, slab, fn, b_fragment);
+                if constexpr (lookahead_a && b_before_next_a) {
+                    if (fn == 0 && slab + 1 < BK / 16) {
+                        sm120_load_a_fragments<Op, M, N, BK, Stages, MAtoms>(
+                            stage, warp_m, slab + 1,
+                            a_fragment[current_a ^ 1]);
+                    }
+                }
+#pragma unroll
+                for (int fm = 0; fm < MAtoms; ++fm) {
+                    Sm120Mma<T>::issue(
+                        accumulator[fm][fn], a_fragment[current_a][fm],
+                        b_fragment);
+                }
             }
         }
     }
@@ -457,7 +596,7 @@ static __device__ __forceinline__ void sm120_store_pair(
             }
         }
         if ((reinterpret_cast<unsigned long long>(destination) & 3ULL) == 0) {
-            sgb_store_pair_rne(destination, v0, v1);
+            gemm_bi_store_pair_rne(destination, v0, v1);
         } else {
             destination[0] = sm120_from_float<T>(v0);
             destination[1] = sm120_from_float<T>(v1);
@@ -485,21 +624,130 @@ static __device__ __forceinline__ void sm120_store_scalar(
     }
 }
 
-template <typename T, int Op>
+template <int M, int N, int MAtoms>
+static __device__ __forceinline__ void sm120_epilogue_tn_full(
+    const Sm120Output& output,
+    const float (&accumulator)[MAtoms][4][4]) {
+    int lane = threadIdx.x & 31;
+    int group = lane >> 2;
+    int pair = lane & 3;
+    int warp = threadIdx.x >> 5;
+    int warp_row = output.row_tile +
+        (warp / (N / 32)) * (MAtoms * 16);
+    int warp_column = output.column_tile +
+        (warp % (N / 32)) * 32 + pair * 2;
+
+#pragma unroll
+    for (int fm = 0; fm < MAtoms; ++fm) {
+#pragma unroll
+        for (int half = 0; half < 2; ++half) {
+            int row = warp_row + fm * 16 + group + half * 8;
+            float* row_destination = static_cast<float*>(output.pointer) +
+                static_cast<long long>(row) * output.stride + warp_column;
+            int element = half * 2;
+#pragma unroll
+            for (int fn = 0; fn < 4; ++fn) {
+                float* destination = row_destination + fn * 8;
+                float2 value = {
+                    __fmaf_rn(output.alpha,
+                        accumulator[fm][fn][element], destination[0]),
+                    __fmaf_rn(output.alpha,
+                        accumulator[fm][fn][element + 1], destination[1]),
+                };
+                *reinterpret_cast<float2*>(destination) = value;
+            }
+        }
+    }
+}
+
+template <typename T, int Op, int M, int N, int MAtoms>
+static __device__ __forceinline__ void sm120_epilogue_half_full(
+    const Sm120Output& output,
+    const float (&accumulator)[MAtoms][4][4]) {
+    int lane = threadIdx.x & 31;
+    int group = lane >> 2;
+    int pair = lane & 3;
+    int warp = threadIdx.x >> 5;
+    int warp_row = output.row_tile +
+        (warp / (N / 32)) * (MAtoms * 16);
+    int warp_column = output.column_tile +
+        (warp % (N / 32)) * 32 + pair * 2;
+
+#pragma unroll
+    for (int fm = 0; fm < MAtoms; ++fm) {
+#pragma unroll
+        for (int half = 0; half < 2; ++half) {
+            int row = warp_row + fm * 16 + group + half * 8;
+            T* row_destination = static_cast<T*>(output.pointer) +
+                static_cast<long long>(row) * output.stride + warp_column;
+            int element = half * 2;
+#pragma unroll
+            for (int fn = 0; fn < 4; ++fn) {
+                T* destination = row_destination + fn * 8;
+                float v0 = __fmul_rn(
+                    output.alpha, accumulator[fm][fn][element]);
+                float v1 = __fmul_rn(
+                    output.alpha, accumulator[fm][fn][element + 1]);
+                if constexpr (Op == Sm120Nn) {
+                    if (output.beta != 0.0f) {
+                        v0 = __fmaf_rn(
+                            output.beta, to_f(destination[0]), v0);
+                        v1 = __fmaf_rn(
+                            output.beta, to_f(destination[1]), v1);
+                    }
+                }
+                gemm_bi_store_pair_rne(destination, v0, v1);
+            }
+        }
+    }
+}
+
+template <typename T, int Op, int M, int N, int BK, int Stages,
+          int MAtoms>
 static __device__ __forceinline__ void sm120_epilogue(
-    const Sm120Output& output, const float (&accumulator)[2][4][4]) {
+    const Sm120Output& output,
+    const float (&accumulator)[MAtoms][4][4]) {
+    constexpr bool row_major_half =
+        (Op == Sm120Nn &&
+         !(M == 64 && N == 64 && BK == 32 && Stages == 3)) ||
+        (Op == Sm120Nt &&
+         ((M == 64 && N == 64) ||
+          (M == 128 && N == 128) ||
+          (M == 128 && N == 64 && BK == 32 && Stages == 2) ||
+          (BK == 64 && Stages == 3)));
+    if constexpr (Op == Sm120Tn) {
+        bool full = output.row_tile <= output.rows - M &&
+                    output.column_tile <= output.columns - N &&
+                    (reinterpret_cast<unsigned long long>(output.pointer) & 7ULL) == 0 &&
+                    (output.stride & 1) == 0;
+        if (full) {
+            sm120_epilogue_tn_full<M, N, MAtoms>(output, accumulator);
+            return;
+        }
+    } else if constexpr (row_major_half) {
+        bool full = output.row_tile <= output.rows - M &&
+                    output.column_tile <= output.columns - N &&
+                    (reinterpret_cast<unsigned long long>(output.pointer) & 3ULL) == 0 &&
+                    (output.stride & 1) == 0;
+        if (full) {
+            sm120_epilogue_half_full<T, Op, M, N, MAtoms>(
+                output, accumulator);
+            return;
+        }
+    }
     int lane = threadIdx.x & 31;
     int group = lane >> 2;
     int pair = lane & 3;
     int warp = threadIdx.x >> 5;
 
 #pragma unroll
-    for (int fm = 0; fm < 2; ++fm) {
+    for (int fm = 0; fm < MAtoms; ++fm) {
 #pragma unroll
         for (int fn = 0; fn < 4; ++fn) {
 #pragma unroll
             for (int half = 0; half < 2; ++half) {
-                int row = output.row_tile + (warp / output.warp_columns) * 32 +
+                int row = output.row_tile +
+                          (warp / output.warp_columns) * (MAtoms * 16) +
                           fm * 16 + group + half * 8;
                 int column = output.column_tile +
                              (warp % output.warp_columns) * 32 +
@@ -519,13 +767,13 @@ static __device__ __forceinline__ void sm120_epilogue(
     }
 }
 
-template <int Op>
+template <int Op, int MAtoms>
 static __device__ __forceinline__ void sm120_initialize_accumulator(
-    float (&accumulator)[2][4][4], const float* bias,
+    float (&accumulator)[MAtoms][4][4], const float* bias,
     int output_columns, int output_col, int warp_n) {
     int pair = threadIdx.x & 3;
 #pragma unroll
-    for (int fm = 0; fm < 2; ++fm) {
+    for (int fm = 0; fm < MAtoms; ++fm) {
 #pragma unroll
         for (int fn = 0; fn < 4; ++fn) {
             float first = 0.0f;
@@ -550,6 +798,19 @@ static __device__ __forceinline__ void sm120_kernel(
     void* output, const CUtensorMap& a_map, const CUtensorMap& b_map,
     const float* bias, const Sm120KernelParams& params) {
     constexpr int threads = Sm120Storage<M, N, BK, Stages>::threads;
+    constexpr int warps = threads / 32;
+    constexpr int m_atoms =
+        Sm120Storage<M, N, BK, Stages>::wide_m_warp ? 4 : 2;
+    constexpr bool rotating_stage =
+        (Op == Sm120Nn &&
+         ((M == 64 && N == 128) ||
+          (M == 128 && N == 64 && Stages == 2) ||
+          (M == 128 && N == 128 && BK == 64 && Stages == 3))) ||
+        (Op == Sm120Tn &&
+         ((M == 64 && N == 128 && Stages == 3) ||
+          (M == 128 && N == 128 && BK == 64 && Stages == 3))) ||
+        (Op == Sm120Nt && BK == 64 &&
+         (Stages == 3 || (M == 64 && N == 64 && Stages == 2)));
     extern __shared__ __align__(128) unsigned char storage[];
     unsigned shared = static_cast<unsigned>(__cvta_generic_to_shared(storage));
     int output_rows = Op == Sm120Tn ? params.k : params.m;
@@ -573,7 +834,7 @@ static __device__ __forceinline__ void sm120_kernel(
 #pragma unroll
         for (int stage = 0; stage < Stages; ++stage) {
             sm120_init_barrier<1>(pipeline.full + stage * 8);
-            sm120_init_barrier<threads>(pipeline.empty + stage * 8);
+            sm120_init_barrier<warps>(pipeline.empty + stage * 8);
         }
         asm volatile("fence.mbarrier_init.release.cluster;" ::: "memory");
     }
@@ -591,28 +852,47 @@ static __device__ __forceinline__ void sm120_kernel(
     sm120_sync_warp();
 
     int warp_columns = N / 32;
-    int warp_m = (warp / warp_columns) * 32;
+    int warp_m = (warp / warp_columns) * (m_atoms * 16);
     int warp_n = (warp % warp_columns) * 32;
-    float accumulator[2][4][4];
-    sm120_initialize_accumulator<Op>(
+    float accumulator[m_atoms][4][4];
+    sm120_initialize_accumulator<Op, m_atoms>(
         accumulator, bias, output_columns, output_col, warp_n);
+    int rotating_stage_index = 0;
+    unsigned rotating_phase = 0;
     for (int tile = 0; tile < tile_count; ++tile) {
-        int stage = tile % Stages;
-        unsigned generation = static_cast<unsigned>(tile / Stages);
-        sm120_wait_barrier(pipeline.full + stage * 8, generation & 1U);
-        sm120_issue_stage<T, Op, M, N, BK, Stages>(
-            pipeline.payload, tile, warp_m, warp_n, accumulator);
-        sm120_arrive_empty(pipeline.empty + stage * 8);
+        int stage;
+        unsigned phase;
+        if constexpr (rotating_stage) {
+            stage = rotating_stage_index;
+            phase = rotating_phase;
+        } else {
+            stage = tile % Stages;
+            phase = static_cast<unsigned>(tile / Stages) & 1U;
+        }
+        sm120_wait_barrier(pipeline.full + stage * 8, phase);
+        sm120_issue_stage<T, Op, M, N, BK, Stages, m_atoms, rotating_stage>(
+            pipeline.payload, rotating_stage ? stage : tile,
+            warp_m, warp_n, accumulator);
+        sm120_sync_warp();
+        if ((threadIdx.x & 31) == 0) {
+            sm120_arrive_empty(pipeline.empty + stage * 8);
+        }
         if (warp == 0 && (threadIdx.x & 31) == 0) {
             int refill = tile + Stages;
             if (refill < tile_count) {
                 sm120_wait_barrier(
-                    pipeline.empty + stage * 8, generation & 1U);
+                    pipeline.empty + stage * 8, phase);
                 sm120_produce_stage<Op, M, N, BK, Stages>(
                     a_map, b_map, params, pipeline, refill);
             }
         }
         sm120_sync_warp();
+        if constexpr (rotating_stage) {
+            if (++rotating_stage_index == Stages) {
+                rotating_stage_index = 0;
+                rotating_phase ^= 1U;
+            }
+        }
     }
 
     Sm120Output destination = {
@@ -626,11 +906,13 @@ static __device__ __forceinline__ void sm120_kernel(
         output_col,
         warp_columns,
     };
-    sm120_epilogue<T, Op>(destination, accumulator);
+    sm120_epilogue<T, Op, M, N, BK, Stages, m_atoms>(
+        destination, accumulator);
 }
 
 #define SM120_DEFINE_KERNEL(NAME, TYPE, OP, M, N, BK, STAGES)                \
-    extern "C" __global__ __launch_bounds__((M * N) / 32)                  \
+    extern "C" __global__                                                   \
+    __launch_bounds__(Sm120Storage<M, N, BK, STAGES>::threads)               \
     void NAME(void* output,                                                   \
               const __grid_constant__ CUtensorMap a_map,                     \
               const __grid_constant__ CUtensorMap b_map,                     \
@@ -640,108 +922,108 @@ static __device__ __forceinline__ void sm120_kernel(
             output, a_map, b_map, bias, params);                              \
     }
 
-SM120_DEFINE_KERNEL(sgemm_bi_nn_sm120_tma_64x64_bk32_s2_bf16, __nv_bfloat16, Sm120Nn, 64, 64, 32, 2)
-SM120_DEFINE_KERNEL(sgemm_bi_nn_sm120_tma_64x64_bk32_s2_f16, __half, Sm120Nn, 64, 64, 32, 2)
-SM120_DEFINE_KERNEL(sgemm_bi_nn_sm120_tma_64x64_bk32_s3_bf16, __nv_bfloat16, Sm120Nn, 64, 64, 32, 3)
-SM120_DEFINE_KERNEL(sgemm_bi_nn_sm120_tma_64x64_bk32_s3_f16, __half, Sm120Nn, 64, 64, 32, 3)
-SM120_DEFINE_KERNEL(sgemm_bi_nn_sm120_tma_64x64_bk64_s2_bf16, __nv_bfloat16, Sm120Nn, 64, 64, 64, 2)
-SM120_DEFINE_KERNEL(sgemm_bi_nn_sm120_tma_64x64_bk64_s2_f16, __half, Sm120Nn, 64, 64, 64, 2)
-SM120_DEFINE_KERNEL(sgemm_bi_nn_sm120_tma_64x64_bk64_s3_bf16, __nv_bfloat16, Sm120Nn, 64, 64, 64, 3)
-SM120_DEFINE_KERNEL(sgemm_bi_nn_sm120_tma_64x64_bk64_s3_f16, __half, Sm120Nn, 64, 64, 64, 3)
-SM120_DEFINE_KERNEL(sgemm_bi_nn_sm120_tma_128x64_bk32_s2_bf16, __nv_bfloat16, Sm120Nn, 128, 64, 32, 2)
-SM120_DEFINE_KERNEL(sgemm_bi_nn_sm120_tma_128x64_bk32_s2_f16, __half, Sm120Nn, 128, 64, 32, 2)
-SM120_DEFINE_KERNEL(sgemm_bi_nn_sm120_tma_128x64_bk32_s3_bf16, __nv_bfloat16, Sm120Nn, 128, 64, 32, 3)
-SM120_DEFINE_KERNEL(sgemm_bi_nn_sm120_tma_128x64_bk32_s3_f16, __half, Sm120Nn, 128, 64, 32, 3)
-SM120_DEFINE_KERNEL(sgemm_bi_nn_sm120_tma_128x64_bk64_s2_bf16, __nv_bfloat16, Sm120Nn, 128, 64, 64, 2)
-SM120_DEFINE_KERNEL(sgemm_bi_nn_sm120_tma_128x64_bk64_s2_f16, __half, Sm120Nn, 128, 64, 64, 2)
-SM120_DEFINE_KERNEL(sgemm_bi_nn_sm120_tma_128x64_bk64_s3_bf16, __nv_bfloat16, Sm120Nn, 128, 64, 64, 3)
-SM120_DEFINE_KERNEL(sgemm_bi_nn_sm120_tma_128x64_bk64_s3_f16, __half, Sm120Nn, 128, 64, 64, 3)
-SM120_DEFINE_KERNEL(sgemm_bi_nn_sm120_tma_64x128_bk32_s2_bf16, __nv_bfloat16, Sm120Nn, 64, 128, 32, 2)
-SM120_DEFINE_KERNEL(sgemm_bi_nn_sm120_tma_64x128_bk32_s2_f16, __half, Sm120Nn, 64, 128, 32, 2)
-SM120_DEFINE_KERNEL(sgemm_bi_nn_sm120_tma_64x128_bk32_s3_bf16, __nv_bfloat16, Sm120Nn, 64, 128, 32, 3)
-SM120_DEFINE_KERNEL(sgemm_bi_nn_sm120_tma_64x128_bk32_s3_f16, __half, Sm120Nn, 64, 128, 32, 3)
-SM120_DEFINE_KERNEL(sgemm_bi_nn_sm120_tma_64x128_bk64_s2_bf16, __nv_bfloat16, Sm120Nn, 64, 128, 64, 2)
-SM120_DEFINE_KERNEL(sgemm_bi_nn_sm120_tma_64x128_bk64_s2_f16, __half, Sm120Nn, 64, 128, 64, 2)
-SM120_DEFINE_KERNEL(sgemm_bi_nn_sm120_tma_64x128_bk64_s3_bf16, __nv_bfloat16, Sm120Nn, 64, 128, 64, 3)
-SM120_DEFINE_KERNEL(sgemm_bi_nn_sm120_tma_64x128_bk64_s3_f16, __half, Sm120Nn, 64, 128, 64, 3)
-SM120_DEFINE_KERNEL(sgemm_bi_nn_sm120_tma_128x128_bk32_s2_bf16, __nv_bfloat16, Sm120Nn, 128, 128, 32, 2)
-SM120_DEFINE_KERNEL(sgemm_bi_nn_sm120_tma_128x128_bk32_s2_f16, __half, Sm120Nn, 128, 128, 32, 2)
-SM120_DEFINE_KERNEL(sgemm_bi_nn_sm120_tma_128x128_bk32_s3_bf16, __nv_bfloat16, Sm120Nn, 128, 128, 32, 3)
-SM120_DEFINE_KERNEL(sgemm_bi_nn_sm120_tma_128x128_bk32_s3_f16, __half, Sm120Nn, 128, 128, 32, 3)
-SM120_DEFINE_KERNEL(sgemm_bi_nn_sm120_tma_128x128_bk64_s2_bf16, __nv_bfloat16, Sm120Nn, 128, 128, 64, 2)
-SM120_DEFINE_KERNEL(sgemm_bi_nn_sm120_tma_128x128_bk64_s2_f16, __half, Sm120Nn, 128, 128, 64, 2)
-SM120_DEFINE_KERNEL(sgemm_bi_nn_sm120_tma_128x128_bk64_s3_bf16, __nv_bfloat16, Sm120Nn, 128, 128, 64, 3)
-SM120_DEFINE_KERNEL(sgemm_bi_nn_sm120_tma_128x128_bk64_s3_f16, __half, Sm120Nn, 128, 128, 64, 3)
+SM120_DEFINE_KERNEL(gemm_bi_nn_sm120_tma_64x64_bk32_s2_bf16, __nv_bfloat16, Sm120Nn, 64, 64, 32, 2)
+SM120_DEFINE_KERNEL(gemm_bi_nn_sm120_tma_64x64_bk32_s2_f16, __half, Sm120Nn, 64, 64, 32, 2)
+SM120_DEFINE_KERNEL(gemm_bi_nn_sm120_tma_64x64_bk32_s3_bf16, __nv_bfloat16, Sm120Nn, 64, 64, 32, 3)
+SM120_DEFINE_KERNEL(gemm_bi_nn_sm120_tma_64x64_bk32_s3_f16, __half, Sm120Nn, 64, 64, 32, 3)
+SM120_DEFINE_KERNEL(gemm_bi_nn_sm120_tma_64x64_bk64_s2_bf16, __nv_bfloat16, Sm120Nn, 64, 64, 64, 2)
+SM120_DEFINE_KERNEL(gemm_bi_nn_sm120_tma_64x64_bk64_s2_f16, __half, Sm120Nn, 64, 64, 64, 2)
+SM120_DEFINE_KERNEL(gemm_bi_nn_sm120_tma_64x64_bk64_s3_bf16, __nv_bfloat16, Sm120Nn, 64, 64, 64, 3)
+SM120_DEFINE_KERNEL(gemm_bi_nn_sm120_tma_64x64_bk64_s3_f16, __half, Sm120Nn, 64, 64, 64, 3)
+SM120_DEFINE_KERNEL(gemm_bi_nn_sm120_tma_128x64_bk32_s2_bf16, __nv_bfloat16, Sm120Nn, 128, 64, 32, 2)
+SM120_DEFINE_KERNEL(gemm_bi_nn_sm120_tma_128x64_bk32_s2_f16, __half, Sm120Nn, 128, 64, 32, 2)
+SM120_DEFINE_KERNEL(gemm_bi_nn_sm120_tma_128x64_bk32_s3_bf16, __nv_bfloat16, Sm120Nn, 128, 64, 32, 3)
+SM120_DEFINE_KERNEL(gemm_bi_nn_sm120_tma_128x64_bk32_s3_f16, __half, Sm120Nn, 128, 64, 32, 3)
+SM120_DEFINE_KERNEL(gemm_bi_nn_sm120_tma_128x64_bk64_s2_bf16, __nv_bfloat16, Sm120Nn, 128, 64, 64, 2)
+SM120_DEFINE_KERNEL(gemm_bi_nn_sm120_tma_128x64_bk64_s2_f16, __half, Sm120Nn, 128, 64, 64, 2)
+SM120_DEFINE_KERNEL(gemm_bi_nn_sm120_tma_128x64_bk64_s3_bf16, __nv_bfloat16, Sm120Nn, 128, 64, 64, 3)
+SM120_DEFINE_KERNEL(gemm_bi_nn_sm120_tma_128x64_bk64_s3_f16, __half, Sm120Nn, 128, 64, 64, 3)
+SM120_DEFINE_KERNEL(gemm_bi_nn_sm120_tma_64x128_bk32_s2_bf16, __nv_bfloat16, Sm120Nn, 64, 128, 32, 2)
+SM120_DEFINE_KERNEL(gemm_bi_nn_sm120_tma_64x128_bk32_s2_f16, __half, Sm120Nn, 64, 128, 32, 2)
+SM120_DEFINE_KERNEL(gemm_bi_nn_sm120_tma_64x128_bk32_s3_bf16, __nv_bfloat16, Sm120Nn, 64, 128, 32, 3)
+SM120_DEFINE_KERNEL(gemm_bi_nn_sm120_tma_64x128_bk32_s3_f16, __half, Sm120Nn, 64, 128, 32, 3)
+SM120_DEFINE_KERNEL(gemm_bi_nn_sm120_tma_64x128_bk64_s2_bf16, __nv_bfloat16, Sm120Nn, 64, 128, 64, 2)
+SM120_DEFINE_KERNEL(gemm_bi_nn_sm120_tma_64x128_bk64_s2_f16, __half, Sm120Nn, 64, 128, 64, 2)
+SM120_DEFINE_KERNEL(gemm_bi_nn_sm120_tma_64x128_bk64_s3_bf16, __nv_bfloat16, Sm120Nn, 64, 128, 64, 3)
+SM120_DEFINE_KERNEL(gemm_bi_nn_sm120_tma_64x128_bk64_s3_f16, __half, Sm120Nn, 64, 128, 64, 3)
+SM120_DEFINE_KERNEL(gemm_bi_nn_sm120_tma_128x128_bk32_s2_bf16, __nv_bfloat16, Sm120Nn, 128, 128, 32, 2)
+SM120_DEFINE_KERNEL(gemm_bi_nn_sm120_tma_128x128_bk32_s2_f16, __half, Sm120Nn, 128, 128, 32, 2)
+SM120_DEFINE_KERNEL(gemm_bi_nn_sm120_tma_128x128_bk32_s3_bf16, __nv_bfloat16, Sm120Nn, 128, 128, 32, 3)
+SM120_DEFINE_KERNEL(gemm_bi_nn_sm120_tma_128x128_bk32_s3_f16, __half, Sm120Nn, 128, 128, 32, 3)
+SM120_DEFINE_KERNEL(gemm_bi_nn_sm120_tma_128x128_bk64_s2_bf16, __nv_bfloat16, Sm120Nn, 128, 128, 64, 2)
+SM120_DEFINE_KERNEL(gemm_bi_nn_sm120_tma_128x128_bk64_s2_f16, __half, Sm120Nn, 128, 128, 64, 2)
+SM120_DEFINE_KERNEL(gemm_bi_nn_sm120_tma_128x128_bk64_s3_bf16, __nv_bfloat16, Sm120Nn, 128, 128, 64, 3)
+SM120_DEFINE_KERNEL(gemm_bi_nn_sm120_tma_128x128_bk64_s3_f16, __half, Sm120Nn, 128, 128, 64, 3)
 
-SM120_DEFINE_KERNEL(sgemm_bi_tn_sm120_tma_64x64_bk32_s2_bf16, __nv_bfloat16, Sm120Tn, 64, 64, 32, 2)
-SM120_DEFINE_KERNEL(sgemm_bi_tn_sm120_tma_64x64_bk32_s2_f16, __half, Sm120Tn, 64, 64, 32, 2)
-SM120_DEFINE_KERNEL(sgemm_bi_tn_sm120_tma_64x64_bk32_s3_bf16, __nv_bfloat16, Sm120Tn, 64, 64, 32, 3)
-SM120_DEFINE_KERNEL(sgemm_bi_tn_sm120_tma_64x64_bk32_s3_f16, __half, Sm120Tn, 64, 64, 32, 3)
-SM120_DEFINE_KERNEL(sgemm_bi_tn_sm120_tma_64x64_bk64_s2_bf16, __nv_bfloat16, Sm120Tn, 64, 64, 64, 2)
-SM120_DEFINE_KERNEL(sgemm_bi_tn_sm120_tma_64x64_bk64_s2_f16, __half, Sm120Tn, 64, 64, 64, 2)
-SM120_DEFINE_KERNEL(sgemm_bi_tn_sm120_tma_64x64_bk64_s3_bf16, __nv_bfloat16, Sm120Tn, 64, 64, 64, 3)
-SM120_DEFINE_KERNEL(sgemm_bi_tn_sm120_tma_64x64_bk64_s3_f16, __half, Sm120Tn, 64, 64, 64, 3)
-SM120_DEFINE_KERNEL(sgemm_bi_tn_sm120_tma_128x64_bk32_s2_bf16, __nv_bfloat16, Sm120Tn, 128, 64, 32, 2)
-SM120_DEFINE_KERNEL(sgemm_bi_tn_sm120_tma_128x64_bk32_s2_f16, __half, Sm120Tn, 128, 64, 32, 2)
-SM120_DEFINE_KERNEL(sgemm_bi_tn_sm120_tma_128x64_bk32_s3_bf16, __nv_bfloat16, Sm120Tn, 128, 64, 32, 3)
-SM120_DEFINE_KERNEL(sgemm_bi_tn_sm120_tma_128x64_bk32_s3_f16, __half, Sm120Tn, 128, 64, 32, 3)
-SM120_DEFINE_KERNEL(sgemm_bi_tn_sm120_tma_128x64_bk64_s2_bf16, __nv_bfloat16, Sm120Tn, 128, 64, 64, 2)
-SM120_DEFINE_KERNEL(sgemm_bi_tn_sm120_tma_128x64_bk64_s2_f16, __half, Sm120Tn, 128, 64, 64, 2)
-SM120_DEFINE_KERNEL(sgemm_bi_tn_sm120_tma_128x64_bk64_s3_bf16, __nv_bfloat16, Sm120Tn, 128, 64, 64, 3)
-SM120_DEFINE_KERNEL(sgemm_bi_tn_sm120_tma_128x64_bk64_s3_f16, __half, Sm120Tn, 128, 64, 64, 3)
-SM120_DEFINE_KERNEL(sgemm_bi_tn_sm120_tma_64x128_bk32_s2_bf16, __nv_bfloat16, Sm120Tn, 64, 128, 32, 2)
-SM120_DEFINE_KERNEL(sgemm_bi_tn_sm120_tma_64x128_bk32_s2_f16, __half, Sm120Tn, 64, 128, 32, 2)
-SM120_DEFINE_KERNEL(sgemm_bi_tn_sm120_tma_64x128_bk32_s3_bf16, __nv_bfloat16, Sm120Tn, 64, 128, 32, 3)
-SM120_DEFINE_KERNEL(sgemm_bi_tn_sm120_tma_64x128_bk32_s3_f16, __half, Sm120Tn, 64, 128, 32, 3)
-SM120_DEFINE_KERNEL(sgemm_bi_tn_sm120_tma_64x128_bk64_s2_bf16, __nv_bfloat16, Sm120Tn, 64, 128, 64, 2)
-SM120_DEFINE_KERNEL(sgemm_bi_tn_sm120_tma_64x128_bk64_s2_f16, __half, Sm120Tn, 64, 128, 64, 2)
-SM120_DEFINE_KERNEL(sgemm_bi_tn_sm120_tma_64x128_bk64_s3_bf16, __nv_bfloat16, Sm120Tn, 64, 128, 64, 3)
-SM120_DEFINE_KERNEL(sgemm_bi_tn_sm120_tma_64x128_bk64_s3_f16, __half, Sm120Tn, 64, 128, 64, 3)
-SM120_DEFINE_KERNEL(sgemm_bi_tn_sm120_tma_128x128_bk32_s2_bf16, __nv_bfloat16, Sm120Tn, 128, 128, 32, 2)
-SM120_DEFINE_KERNEL(sgemm_bi_tn_sm120_tma_128x128_bk32_s2_f16, __half, Sm120Tn, 128, 128, 32, 2)
-SM120_DEFINE_KERNEL(sgemm_bi_tn_sm120_tma_128x128_bk32_s3_bf16, __nv_bfloat16, Sm120Tn, 128, 128, 32, 3)
-SM120_DEFINE_KERNEL(sgemm_bi_tn_sm120_tma_128x128_bk32_s3_f16, __half, Sm120Tn, 128, 128, 32, 3)
-SM120_DEFINE_KERNEL(sgemm_bi_tn_sm120_tma_128x128_bk64_s2_bf16, __nv_bfloat16, Sm120Tn, 128, 128, 64, 2)
-SM120_DEFINE_KERNEL(sgemm_bi_tn_sm120_tma_128x128_bk64_s2_f16, __half, Sm120Tn, 128, 128, 64, 2)
-SM120_DEFINE_KERNEL(sgemm_bi_tn_sm120_tma_128x128_bk64_s3_bf16, __nv_bfloat16, Sm120Tn, 128, 128, 64, 3)
-SM120_DEFINE_KERNEL(sgemm_bi_tn_sm120_tma_128x128_bk64_s3_f16, __half, Sm120Tn, 128, 128, 64, 3)
+SM120_DEFINE_KERNEL(gemm_bi_tn_sm120_tma_64x64_bk32_s2_bf16, __nv_bfloat16, Sm120Tn, 64, 64, 32, 2)
+SM120_DEFINE_KERNEL(gemm_bi_tn_sm120_tma_64x64_bk32_s2_f16, __half, Sm120Tn, 64, 64, 32, 2)
+SM120_DEFINE_KERNEL(gemm_bi_tn_sm120_tma_64x64_bk32_s3_bf16, __nv_bfloat16, Sm120Tn, 64, 64, 32, 3)
+SM120_DEFINE_KERNEL(gemm_bi_tn_sm120_tma_64x64_bk32_s3_f16, __half, Sm120Tn, 64, 64, 32, 3)
+SM120_DEFINE_KERNEL(gemm_bi_tn_sm120_tma_64x64_bk64_s2_bf16, __nv_bfloat16, Sm120Tn, 64, 64, 64, 2)
+SM120_DEFINE_KERNEL(gemm_bi_tn_sm120_tma_64x64_bk64_s2_f16, __half, Sm120Tn, 64, 64, 64, 2)
+SM120_DEFINE_KERNEL(gemm_bi_tn_sm120_tma_64x64_bk64_s3_bf16, __nv_bfloat16, Sm120Tn, 64, 64, 64, 3)
+SM120_DEFINE_KERNEL(gemm_bi_tn_sm120_tma_64x64_bk64_s3_f16, __half, Sm120Tn, 64, 64, 64, 3)
+SM120_DEFINE_KERNEL(gemm_bi_tn_sm120_tma_128x64_bk32_s2_bf16, __nv_bfloat16, Sm120Tn, 128, 64, 32, 2)
+SM120_DEFINE_KERNEL(gemm_bi_tn_sm120_tma_128x64_bk32_s2_f16, __half, Sm120Tn, 128, 64, 32, 2)
+SM120_DEFINE_KERNEL(gemm_bi_tn_sm120_tma_128x64_bk32_s3_bf16, __nv_bfloat16, Sm120Tn, 128, 64, 32, 3)
+SM120_DEFINE_KERNEL(gemm_bi_tn_sm120_tma_128x64_bk32_s3_f16, __half, Sm120Tn, 128, 64, 32, 3)
+SM120_DEFINE_KERNEL(gemm_bi_tn_sm120_tma_128x64_bk64_s2_bf16, __nv_bfloat16, Sm120Tn, 128, 64, 64, 2)
+SM120_DEFINE_KERNEL(gemm_bi_tn_sm120_tma_128x64_bk64_s2_f16, __half, Sm120Tn, 128, 64, 64, 2)
+SM120_DEFINE_KERNEL(gemm_bi_tn_sm120_tma_128x64_bk64_s3_bf16, __nv_bfloat16, Sm120Tn, 128, 64, 64, 3)
+SM120_DEFINE_KERNEL(gemm_bi_tn_sm120_tma_128x64_bk64_s3_f16, __half, Sm120Tn, 128, 64, 64, 3)
+SM120_DEFINE_KERNEL(gemm_bi_tn_sm120_tma_64x128_bk32_s2_bf16, __nv_bfloat16, Sm120Tn, 64, 128, 32, 2)
+SM120_DEFINE_KERNEL(gemm_bi_tn_sm120_tma_64x128_bk32_s2_f16, __half, Sm120Tn, 64, 128, 32, 2)
+SM120_DEFINE_KERNEL(gemm_bi_tn_sm120_tma_64x128_bk32_s3_bf16, __nv_bfloat16, Sm120Tn, 64, 128, 32, 3)
+SM120_DEFINE_KERNEL(gemm_bi_tn_sm120_tma_64x128_bk32_s3_f16, __half, Sm120Tn, 64, 128, 32, 3)
+SM120_DEFINE_KERNEL(gemm_bi_tn_sm120_tma_64x128_bk64_s2_bf16, __nv_bfloat16, Sm120Tn, 64, 128, 64, 2)
+SM120_DEFINE_KERNEL(gemm_bi_tn_sm120_tma_64x128_bk64_s2_f16, __half, Sm120Tn, 64, 128, 64, 2)
+SM120_DEFINE_KERNEL(gemm_bi_tn_sm120_tma_64x128_bk64_s3_bf16, __nv_bfloat16, Sm120Tn, 64, 128, 64, 3)
+SM120_DEFINE_KERNEL(gemm_bi_tn_sm120_tma_64x128_bk64_s3_f16, __half, Sm120Tn, 64, 128, 64, 3)
+SM120_DEFINE_KERNEL(gemm_bi_tn_sm120_tma_128x128_bk32_s2_bf16, __nv_bfloat16, Sm120Tn, 128, 128, 32, 2)
+SM120_DEFINE_KERNEL(gemm_bi_tn_sm120_tma_128x128_bk32_s2_f16, __half, Sm120Tn, 128, 128, 32, 2)
+SM120_DEFINE_KERNEL(gemm_bi_tn_sm120_tma_128x128_bk32_s3_bf16, __nv_bfloat16, Sm120Tn, 128, 128, 32, 3)
+SM120_DEFINE_KERNEL(gemm_bi_tn_sm120_tma_128x128_bk32_s3_f16, __half, Sm120Tn, 128, 128, 32, 3)
+SM120_DEFINE_KERNEL(gemm_bi_tn_sm120_tma_128x128_bk64_s2_bf16, __nv_bfloat16, Sm120Tn, 128, 128, 64, 2)
+SM120_DEFINE_KERNEL(gemm_bi_tn_sm120_tma_128x128_bk64_s2_f16, __half, Sm120Tn, 128, 128, 64, 2)
+SM120_DEFINE_KERNEL(gemm_bi_tn_sm120_tma_128x128_bk64_s3_bf16, __nv_bfloat16, Sm120Tn, 128, 128, 64, 3)
+SM120_DEFINE_KERNEL(gemm_bi_tn_sm120_tma_128x128_bk64_s3_f16, __half, Sm120Tn, 128, 128, 64, 3)
 
-SM120_DEFINE_KERNEL(sgemm_bi_nt_sm120_tma_64x64_bk32_s2_bf16, __nv_bfloat16, Sm120Nt, 64, 64, 32, 2)
-SM120_DEFINE_KERNEL(sgemm_bi_nt_sm120_tma_64x64_bk32_s2_f16, __half, Sm120Nt, 64, 64, 32, 2)
-SM120_DEFINE_KERNEL(sgemm_bi_nt_sm120_tma_64x64_bk32_s3_bf16, __nv_bfloat16, Sm120Nt, 64, 64, 32, 3)
-SM120_DEFINE_KERNEL(sgemm_bi_nt_sm120_tma_64x64_bk32_s3_f16, __half, Sm120Nt, 64, 64, 32, 3)
-SM120_DEFINE_KERNEL(sgemm_bi_nt_sm120_tma_64x64_bk64_s2_bf16, __nv_bfloat16, Sm120Nt, 64, 64, 64, 2)
-SM120_DEFINE_KERNEL(sgemm_bi_nt_sm120_tma_64x64_bk64_s2_f16, __half, Sm120Nt, 64, 64, 64, 2)
-SM120_DEFINE_KERNEL(sgemm_bi_nt_sm120_tma_64x64_bk64_s3_bf16, __nv_bfloat16, Sm120Nt, 64, 64, 64, 3)
-SM120_DEFINE_KERNEL(sgemm_bi_nt_sm120_tma_64x64_bk64_s3_f16, __half, Sm120Nt, 64, 64, 64, 3)
-SM120_DEFINE_KERNEL(sgemm_bi_nt_sm120_tma_128x64_bk32_s2_bf16, __nv_bfloat16, Sm120Nt, 128, 64, 32, 2)
-SM120_DEFINE_KERNEL(sgemm_bi_nt_sm120_tma_128x64_bk32_s2_f16, __half, Sm120Nt, 128, 64, 32, 2)
-SM120_DEFINE_KERNEL(sgemm_bi_nt_sm120_tma_128x64_bk32_s3_bf16, __nv_bfloat16, Sm120Nt, 128, 64, 32, 3)
-SM120_DEFINE_KERNEL(sgemm_bi_nt_sm120_tma_128x64_bk32_s3_f16, __half, Sm120Nt, 128, 64, 32, 3)
-SM120_DEFINE_KERNEL(sgemm_bi_nt_sm120_tma_128x64_bk64_s2_bf16, __nv_bfloat16, Sm120Nt, 128, 64, 64, 2)
-SM120_DEFINE_KERNEL(sgemm_bi_nt_sm120_tma_128x64_bk64_s2_f16, __half, Sm120Nt, 128, 64, 64, 2)
-SM120_DEFINE_KERNEL(sgemm_bi_nt_sm120_tma_128x64_bk64_s3_bf16, __nv_bfloat16, Sm120Nt, 128, 64, 64, 3)
-SM120_DEFINE_KERNEL(sgemm_bi_nt_sm120_tma_128x64_bk64_s3_f16, __half, Sm120Nt, 128, 64, 64, 3)
-SM120_DEFINE_KERNEL(sgemm_bi_nt_sm120_tma_64x128_bk32_s2_bf16, __nv_bfloat16, Sm120Nt, 64, 128, 32, 2)
-SM120_DEFINE_KERNEL(sgemm_bi_nt_sm120_tma_64x128_bk32_s2_f16, __half, Sm120Nt, 64, 128, 32, 2)
-SM120_DEFINE_KERNEL(sgemm_bi_nt_sm120_tma_64x128_bk32_s3_bf16, __nv_bfloat16, Sm120Nt, 64, 128, 32, 3)
-SM120_DEFINE_KERNEL(sgemm_bi_nt_sm120_tma_64x128_bk32_s3_f16, __half, Sm120Nt, 64, 128, 32, 3)
-SM120_DEFINE_KERNEL(sgemm_bi_nt_sm120_tma_64x128_bk64_s2_bf16, __nv_bfloat16, Sm120Nt, 64, 128, 64, 2)
-SM120_DEFINE_KERNEL(sgemm_bi_nt_sm120_tma_64x128_bk64_s2_f16, __half, Sm120Nt, 64, 128, 64, 2)
-SM120_DEFINE_KERNEL(sgemm_bi_nt_sm120_tma_64x128_bk64_s3_bf16, __nv_bfloat16, Sm120Nt, 64, 128, 64, 3)
-SM120_DEFINE_KERNEL(sgemm_bi_nt_sm120_tma_64x128_bk64_s3_f16, __half, Sm120Nt, 64, 128, 64, 3)
-SM120_DEFINE_KERNEL(sgemm_bi_nt_sm120_tma_128x128_bk32_s2_bf16, __nv_bfloat16, Sm120Nt, 128, 128, 32, 2)
-SM120_DEFINE_KERNEL(sgemm_bi_nt_sm120_tma_128x128_bk32_s2_f16, __half, Sm120Nt, 128, 128, 32, 2)
-SM120_DEFINE_KERNEL(sgemm_bi_nt_sm120_tma_128x128_bk32_s3_bf16, __nv_bfloat16, Sm120Nt, 128, 128, 32, 3)
-SM120_DEFINE_KERNEL(sgemm_bi_nt_sm120_tma_128x128_bk32_s3_f16, __half, Sm120Nt, 128, 128, 32, 3)
-SM120_DEFINE_KERNEL(sgemm_bi_nt_sm120_tma_128x128_bk64_s2_bf16, __nv_bfloat16, Sm120Nt, 128, 128, 64, 2)
-SM120_DEFINE_KERNEL(sgemm_bi_nt_sm120_tma_128x128_bk64_s2_f16, __half, Sm120Nt, 128, 128, 64, 2)
-SM120_DEFINE_KERNEL(sgemm_bi_nt_sm120_tma_128x128_bk64_s3_bf16, __nv_bfloat16, Sm120Nt, 128, 128, 64, 3)
-SM120_DEFINE_KERNEL(sgemm_bi_nt_sm120_tma_128x128_bk64_s3_f16, __half, Sm120Nt, 128, 128, 64, 3)
+SM120_DEFINE_KERNEL(gemm_bi_nt_sm120_tma_64x64_bk32_s2_bf16, __nv_bfloat16, Sm120Nt, 64, 64, 32, 2)
+SM120_DEFINE_KERNEL(gemm_bi_nt_sm120_tma_64x64_bk32_s2_f16, __half, Sm120Nt, 64, 64, 32, 2)
+SM120_DEFINE_KERNEL(gemm_bi_nt_sm120_tma_64x64_bk32_s3_bf16, __nv_bfloat16, Sm120Nt, 64, 64, 32, 3)
+SM120_DEFINE_KERNEL(gemm_bi_nt_sm120_tma_64x64_bk32_s3_f16, __half, Sm120Nt, 64, 64, 32, 3)
+SM120_DEFINE_KERNEL(gemm_bi_nt_sm120_tma_64x64_bk64_s2_bf16, __nv_bfloat16, Sm120Nt, 64, 64, 64, 2)
+SM120_DEFINE_KERNEL(gemm_bi_nt_sm120_tma_64x64_bk64_s2_f16, __half, Sm120Nt, 64, 64, 64, 2)
+SM120_DEFINE_KERNEL(gemm_bi_nt_sm120_tma_64x64_bk64_s3_bf16, __nv_bfloat16, Sm120Nt, 64, 64, 64, 3)
+SM120_DEFINE_KERNEL(gemm_bi_nt_sm120_tma_64x64_bk64_s3_f16, __half, Sm120Nt, 64, 64, 64, 3)
+SM120_DEFINE_KERNEL(gemm_bi_nt_sm120_tma_128x64_bk32_s2_bf16, __nv_bfloat16, Sm120Nt, 128, 64, 32, 2)
+SM120_DEFINE_KERNEL(gemm_bi_nt_sm120_tma_128x64_bk32_s2_f16, __half, Sm120Nt, 128, 64, 32, 2)
+SM120_DEFINE_KERNEL(gemm_bi_nt_sm120_tma_128x64_bk32_s3_bf16, __nv_bfloat16, Sm120Nt, 128, 64, 32, 3)
+SM120_DEFINE_KERNEL(gemm_bi_nt_sm120_tma_128x64_bk32_s3_f16, __half, Sm120Nt, 128, 64, 32, 3)
+SM120_DEFINE_KERNEL(gemm_bi_nt_sm120_tma_128x64_bk64_s2_bf16, __nv_bfloat16, Sm120Nt, 128, 64, 64, 2)
+SM120_DEFINE_KERNEL(gemm_bi_nt_sm120_tma_128x64_bk64_s2_f16, __half, Sm120Nt, 128, 64, 64, 2)
+SM120_DEFINE_KERNEL(gemm_bi_nt_sm120_tma_128x64_bk64_s3_bf16, __nv_bfloat16, Sm120Nt, 128, 64, 64, 3)
+SM120_DEFINE_KERNEL(gemm_bi_nt_sm120_tma_128x64_bk64_s3_f16, __half, Sm120Nt, 128, 64, 64, 3)
+SM120_DEFINE_KERNEL(gemm_bi_nt_sm120_tma_64x128_bk32_s2_bf16, __nv_bfloat16, Sm120Nt, 64, 128, 32, 2)
+SM120_DEFINE_KERNEL(gemm_bi_nt_sm120_tma_64x128_bk32_s2_f16, __half, Sm120Nt, 64, 128, 32, 2)
+SM120_DEFINE_KERNEL(gemm_bi_nt_sm120_tma_64x128_bk32_s3_bf16, __nv_bfloat16, Sm120Nt, 64, 128, 32, 3)
+SM120_DEFINE_KERNEL(gemm_bi_nt_sm120_tma_64x128_bk32_s3_f16, __half, Sm120Nt, 64, 128, 32, 3)
+SM120_DEFINE_KERNEL(gemm_bi_nt_sm120_tma_64x128_bk64_s2_bf16, __nv_bfloat16, Sm120Nt, 64, 128, 64, 2)
+SM120_DEFINE_KERNEL(gemm_bi_nt_sm120_tma_64x128_bk64_s2_f16, __half, Sm120Nt, 64, 128, 64, 2)
+SM120_DEFINE_KERNEL(gemm_bi_nt_sm120_tma_64x128_bk64_s3_bf16, __nv_bfloat16, Sm120Nt, 64, 128, 64, 3)
+SM120_DEFINE_KERNEL(gemm_bi_nt_sm120_tma_64x128_bk64_s3_f16, __half, Sm120Nt, 64, 128, 64, 3)
+SM120_DEFINE_KERNEL(gemm_bi_nt_sm120_tma_128x128_bk32_s2_bf16, __nv_bfloat16, Sm120Nt, 128, 128, 32, 2)
+SM120_DEFINE_KERNEL(gemm_bi_nt_sm120_tma_128x128_bk32_s2_f16, __half, Sm120Nt, 128, 128, 32, 2)
+SM120_DEFINE_KERNEL(gemm_bi_nt_sm120_tma_128x128_bk32_s3_bf16, __nv_bfloat16, Sm120Nt, 128, 128, 32, 3)
+SM120_DEFINE_KERNEL(gemm_bi_nt_sm120_tma_128x128_bk32_s3_f16, __half, Sm120Nt, 128, 128, 32, 3)
+SM120_DEFINE_KERNEL(gemm_bi_nt_sm120_tma_128x128_bk64_s2_bf16, __nv_bfloat16, Sm120Nt, 128, 128, 64, 2)
+SM120_DEFINE_KERNEL(gemm_bi_nt_sm120_tma_128x128_bk64_s2_f16, __half, Sm120Nt, 128, 128, 64, 2)
+SM120_DEFINE_KERNEL(gemm_bi_nt_sm120_tma_128x128_bk64_s3_bf16, __nv_bfloat16, Sm120Nt, 128, 128, 64, 3)
+SM120_DEFINE_KERNEL(gemm_bi_nt_sm120_tma_128x128_bk64_s3_f16, __half, Sm120Nt, 128, 128, 64, 3)
 
 template <int M, int N, int Stages>
 struct Sm120Tf32Storage {
-    static constexpr int threads = 256;
+    static constexpr int threads = (M / 32) * (N / 32) * 32;
     static constexpr int stage_bytes = (M + N) * 32 * 4;
     static constexpr int dynamic_bytes = 128 + Stages * stage_bytes;
 };
@@ -750,6 +1032,8 @@ static_assert(Sm120Tf32Storage<128, 64, 2>::dynamic_bytes == 49280);
 static_assert(Sm120Tf32Storage<128, 64, 3>::dynamic_bytes == 73856);
 static_assert(Sm120Tf32Storage<64, 128, 2>::dynamic_bytes == 49280);
 static_assert(Sm120Tf32Storage<64, 128, 3>::dynamic_bytes == 73856);
+static_assert(Sm120Tf32Storage<64, 128, 4>::dynamic_bytes == 98432);
+static_assert(Sm120Tf32Storage<64, 64, 2>::dynamic_bytes == 32896);
 
 template <int Op>
 static __device__ __forceinline__ int sm120_tf32_rows(
@@ -805,6 +1089,7 @@ static __device__ __forceinline__ float sm120_tf32_epilogue(
         float value = params.alpha == 1.0f
             ? accumulator
             : __fmul_rn(params.alpha, accumulator);
+        if (params.beta == 0.0f) return value;
         return __fmaf_rn(params.beta, old_output, value);
     } else if constexpr (Op == Sm120Tn) {
         (void)bias;
@@ -828,7 +1113,12 @@ static __device__ __forceinline__ void sm120_tf32_store(
         column >= sm120_tf32_columns<Op>(params)) return;
     float* destination = static_cast<float*>(output) +
         static_cast<long long>(row) * params.ldc + column;
-    float old_output = Op == Sm120Nt ? 0.0f : *destination;
+    float old_output = 0.0f;
+    if constexpr (Op == Sm120Tn) {
+        old_output = *destination;
+    } else if constexpr (Op == Sm120Nn) {
+        if (params.beta != 0.0f) old_output = *destination;
+    }
     float value = sm120_tf32_epilogue<Op>(
         accumulator, old_output, bias, column, params);
 #line 2001 "mamba_tf32_k0_zero_store"
@@ -836,15 +1126,43 @@ static __device__ __forceinline__ void sm120_tf32_store(
 #line 760 "sm120.cu"
 }
 
+struct Sm120Tf32PairValue {
+    float first;
+    float second;
+};
+
+template <int Op>
+static __device__ __forceinline__ void sm120_tf32_store_pair(
+    void* output, int row, int column, Sm120Tf32PairValue accumulator,
+    const float* bias, const Sm120KernelParams& params, bool full_tile) {
+    if (full_tile) {
+        float* destination = static_cast<float*>(output)
+            + static_cast<long long>(row) * params.ldc + column;
+        float2 old_pair = *reinterpret_cast<const float2*>(destination);
+        float first = sm120_tf32_epilogue<Op>(
+            accumulator.first, old_pair.x, bias, column, params);
+        float second = sm120_tf32_epilogue<Op>(
+            accumulator.second, old_pair.y, bias, column + 1, params);
+        *reinterpret_cast<float2*>(destination) = make_float2(first, second);
+        return;
+    }
+    sm120_tf32_store<Op>(
+        output, row, column, accumulator.first, bias, params);
+    sm120_tf32_store<Op>(
+        output, row, column + 1, accumulator.second, bias, params);
+}
+
 template <int Op, int M, int N>
 static __device__ __forceinline__ void sm120_tf32_zero_reduction_epilogue(
     void* output, const float* bias, const Sm120KernelParams& params) {
     (void)&sm120_tf32_epilogue<Op>;
     int columns = sm120_tf32_columns<Op>(params);
-    int column_tiles = (columns + N - 1) / N;
+    int column_tiles = 1 + (columns - 1) / N;
     int output_row = (int)blockIdx.x / column_tiles * M;
     int output_column = (int)blockIdx.x % column_tiles * N;
-    for (int linear = (int)threadIdx.x; linear < M * N; linear += 256) {
+    for (int linear = (int)threadIdx.x;
+         linear < M * N;
+         linear += (int)blockDim.x) {
         int row = output_row + linear / N;
         int column = output_column + linear % N;
         if (row < sm120_tf32_rows<Op>(params) && column < columns) {
@@ -859,7 +1177,7 @@ struct Sm120Tf32StageContext {
     const CUtensorMap* a_map;
     const CUtensorMap* b_map;
     const Sm120KernelParams* params;
-    unsigned shared;
+    unsigned payload;
     unsigned full_base;
     int output_row;
     int output_column;
@@ -871,7 +1189,7 @@ static __device__ __forceinline__ void sm120_tf32_produce_stage(
     constexpr int plane_bytes = 4096;
     constexpr int stage_bytes = Sm120Tf32Storage<M, N, Stages>::stage_bytes;
     unsigned stage_index = (unsigned)(tile % Stages);
-    unsigned stage = context.shared + stage_index * stage_bytes;
+    unsigned stage = context.payload + stage_index * stage_bytes;
     unsigned barrier = context.full_base + stage_index * 8;
     unsigned a_destination = stage;
     unsigned b_destination = stage + M * 32 * 4;
@@ -912,59 +1230,82 @@ static __device__ __forceinline__ void sm120_tf32_produce_stage(
     }
 }
 
-template <int M, int N, int Stages>
+template <int Op, int M, int N, int Stages>
 static __device__ __forceinline__ float sm120_tf32_load_a(
     unsigned char* storage, int stage, int row, int reduction) {
     constexpr int stage_bytes = Sm120Tf32Storage<M, N, Stages>::stage_bytes;
     unsigned plane = (unsigned)(row / 32) * 4096U;
-    unsigned offset = sm120_tf32_sw128_offset(
-        plane, (unsigned)(row & 31), (unsigned)reduction);
+    unsigned logical_row = (unsigned)(row & 31);
+    unsigned element = (unsigned)reduction;
+    if constexpr (Op == Sm120Tn) {
+        logical_row = (unsigned)reduction;
+        element = (unsigned)(row & 31);
+    }
+    unsigned offset = sm120_tf32_sw128_offset(plane, logical_row, element);
     return *reinterpret_cast<float*>(storage + stage * stage_bytes + offset);
 }
 
-template <int M, int N, int Stages>
+template <int Op, int M, int N, int Stages>
 static __device__ __forceinline__ float sm120_tf32_load_b(
     unsigned char* storage, int stage, int reduction, int column) {
     constexpr int stage_bytes = Sm120Tf32Storage<M, N, Stages>::stage_bytes;
     unsigned base = M * 32 * 4;
     unsigned plane = base + (unsigned)(column / 32) * 4096U;
-    unsigned offset = sm120_tf32_sw128_offset(
-        plane, (unsigned)reduction, (unsigned)(column & 31));
+    unsigned logical_row = (unsigned)reduction;
+    unsigned element = (unsigned)(column & 31);
+    if constexpr (Op == Sm120Nt) {
+        logical_row = (unsigned)(column & 31);
+        element = (unsigned)reduction;
+    }
+    unsigned offset = sm120_tf32_sw128_offset(plane, logical_row, element);
     return *reinterpret_cast<float*>(storage + stage * stage_bytes + offset);
 }
 
-template <int M, int N, int Stages>
-static __device__ __forceinline__ void sm120_tf32_issue_stage(
-    unsigned char* storage, int stage, int warp_m, int warp_n,
-    float (&accumulator)[2][4][4]) {
+template <int Op, int M, int N, int Stages>
+static __device__ __forceinline__ void sm120_tf32_load_issue(
+    unsigned char* storage, int stage, int warp_m, int warp_n, int k8,
+    unsigned (&a_fragments)[2][4], unsigned (&b_fragments)[4][2]) {
     int lane = (int)threadIdx.x & 31;
     int group = lane >> 2;
     int thread = lane & 3;
-    const int k_offsets[4] = {0, 8, 16, 24};
+#pragma unroll
+    for (int m_atom = 0; m_atom < 2; ++m_atom) {
+        int row = warp_m + m_atom * 16 + group;
+        a_fragments[m_atom][0] = sm120_tf32_rna(
+            sm120_tf32_load_a<Op, M, N, Stages>(storage, stage, row, k8 + thread));
+        a_fragments[m_atom][1] = sm120_tf32_rna(
+            sm120_tf32_load_a<Op, M, N, Stages>(storage, stage, row + 8, k8 + thread));
+        a_fragments[m_atom][2] = sm120_tf32_rna(
+            sm120_tf32_load_a<Op, M, N, Stages>(storage, stage, row, k8 + thread + 4));
+        a_fragments[m_atom][3] = sm120_tf32_rna(
+            sm120_tf32_load_a<Op, M, N, Stages>(storage, stage, row + 8, k8 + thread + 4));
+    }
+#pragma unroll
+    for (int n_atom = 0; n_atom < 4; ++n_atom) {
+        int column = warp_n + n_atom * 8 + group;
+        b_fragments[n_atom][0] = sm120_tf32_rna(
+            sm120_tf32_load_b<Op, M, N, Stages>(storage, stage, k8 + thread, column));
+        b_fragments[n_atom][1] = sm120_tf32_rna(
+            sm120_tf32_load_b<Op, M, N, Stages>(storage, stage, k8 + thread + 4, column));
+    }
+}
+
+template <int Op, int M, int N, int Stages>
+static __device__ __forceinline__ void sm120_tf32_issue_stage(
+    unsigned char* storage, int stage, int warp_m, int warp_n,
+    float (&accumulator)[2][4][4]) {
+    unsigned a_fragments[2][2][4];
+    unsigned b_fragments[2][4][2];
+    sm120_tf32_load_issue<Op, M, N, Stages>(
+        storage, stage, warp_m, warp_n, 0, a_fragments[0], b_fragments[0]);
 #pragma unroll
     for (int issue = 0; issue < 4; ++issue) {
-        int k8 = k_offsets[issue];
-        unsigned a_fragments[2][4];
-        unsigned b_fragments[4][2];
-#pragma unroll
-        for (int m_atom = 0; m_atom < 2; ++m_atom) {
-            int row = warp_m + m_atom * 16 + group;
-            a_fragments[m_atom][0] = sm120_tf32_rna(
-                sm120_tf32_load_a<M, N, Stages>(storage, stage, row, k8 + thread));
-            a_fragments[m_atom][1] = sm120_tf32_rna(
-                sm120_tf32_load_a<M, N, Stages>(storage, stage, row + 8, k8 + thread));
-            a_fragments[m_atom][2] = sm120_tf32_rna(
-                sm120_tf32_load_a<M, N, Stages>(storage, stage, row, k8 + thread + 4));
-            a_fragments[m_atom][3] = sm120_tf32_rna(
-                sm120_tf32_load_a<M, N, Stages>(storage, stage, row + 8, k8 + thread + 4));
-        }
-#pragma unroll
-        for (int n_atom = 0; n_atom < 4; ++n_atom) {
-            int column = warp_n + n_atom * 8 + group;
-            b_fragments[n_atom][0] = sm120_tf32_rna(
-                sm120_tf32_load_b<M, N, Stages>(storage, stage, k8 + thread, column));
-            b_fragments[n_atom][1] = sm120_tf32_rna(
-                sm120_tf32_load_b<M, N, Stages>(storage, stage, k8 + thread + 4, column));
+        int k8 = issue * 8;
+        int current = issue & 1;
+        int next = current ^ 1;
+        if (issue + 1 < 4) {
+            sm120_tf32_load_issue<Op, M, N, Stages>(storage, stage,
+                warp_m, warp_n, k8 + 8, a_fragments[next], b_fragments[next]);
         }
 #pragma unroll
         for (int m_atom = 0; m_atom < 2; ++m_atom) {
@@ -972,7 +1313,7 @@ static __device__ __forceinline__ void sm120_tf32_issue_stage(
             for (int n_atom = 0; n_atom < 4; ++n_atom) {
                 sm120_tf32_mma_m16n8k8(
                     accumulator[m_atom][n_atom],
-                    a_fragments[m_atom], b_fragments[n_atom]);
+                    a_fragments[current][m_atom], b_fragments[current][n_atom]);
             }
         }
     }
@@ -985,18 +1326,23 @@ static __device__ __forceinline__ void sm120_tf32_kernel(
     assert(params.alpha == 1.0f || bias == nullptr);
     extern __shared__ __align__(1024) unsigned char storage[];
     constexpr int stage_bytes = Sm120Tf32Storage<M, N, Stages>::stage_bytes;
+    constexpr int warps = Sm120Tf32Storage<M, N, Stages>::threads / 32;
     unsigned shared = static_cast<unsigned>(__cvta_generic_to_shared(storage));
+    unsigned payload = shared;
     unsigned full_base = shared + Stages * stage_bytes;
+    unsigned empty_base = full_base + 64;
     int columns = sm120_tf32_columns<Op>(params);
-    int column_tiles = (columns + N - 1) / N;
+    int column_tiles = 1 + (columns - 1) / N;
     int output_row = (int)blockIdx.x / column_tiles * M;
     int output_column = (int)blockIdx.x % column_tiles * N;
-    int tile_count = (sm120_tf32_reduction<Op>(params) + 31) / 32;
+    int reduction = sm120_tf32_reduction<Op>(params);
+    int tile_count = 1 + (reduction - 1) / 32;
     const Sm120Tf32StageContext stage_context = {
-        &a_map, &b_map, &params, shared, full_base, output_row, output_column};
+        &a_map, &b_map, &params, payload, full_base, output_row, output_column};
     int warp = (int)threadIdx.x >> 5;
-    int warp_m = M == 128 ? (warp >> 1) * 32 : (warp >> 2) * 32;
-    int warp_n = M == 128 ? (warp & 1) * 32 : (warp & 3) * 32;
+    constexpr int warp_columns = N / 32;
+    int warp_m = (warp / warp_columns) * 32;
+    int warp_n = (warp % warp_columns) * 32;
     int lane = (int)threadIdx.x & 31;
     int group = lane >> 2;
     int thread = lane & 3;
@@ -1012,7 +1358,9 @@ static __device__ __forceinline__ void sm120_tf32_kernel(
                     + 2 * thread + (element & 1);
                 float seed = 0.0f;
                 if constexpr (Op == Sm120Nn) {
-                    if (column < params.n && bias != nullptr) seed = bias[column];
+                    if (column < params.n && bias != nullptr) {
+                        seed = bias[column];
+                    }
                 }
                 accumulator[m_atom][n_atom][element] = seed;
             }
@@ -1020,23 +1368,42 @@ static __device__ __forceinline__ void sm120_tf32_kernel(
     }
 
     if (threadIdx.x == 0) {
+#pragma unroll
         for (int stage = 0; stage < Stages; ++stage) {
             sm120_init_barrier<1>(full_base + stage * 8);
+            sm120_init_barrier<warps>(empty_base + stage * 8);
         }
         asm volatile("fence.mbarrier_init.release.cluster;" ::: "memory");
     }
     __syncthreads();
+
+    if (warp == 0 && lane == 0) {
+#pragma unroll
+        for (int tile = 0; tile < Stages; ++tile) {
+            if (tile < tile_count) {
+                sm120_tf32_produce_stage<Op, M, N, Stages>(stage_context, tile);
+            }
+        }
+    }
+    if constexpr (Stages == 2) sm120_sync_warp();
+
     for (int tile = 0; tile < tile_count; ++tile) {
         int stage = tile % Stages;
-        unsigned phase = (unsigned)(tile / Stages) & 1U;
-        if (threadIdx.x == 0) {
-            sm120_tf32_produce_stage<Op, M, N, Stages>(
-                stage_context, tile);
-        }
-        sm120_wait_barrier(full_base + stage * 8, phase);
-        sm120_tf32_issue_stage<M, N, Stages>(
+        unsigned generation = (unsigned)(tile / Stages);
+        sm120_wait_barrier(full_base + stage * 8, generation & 1U);
+        sm120_tf32_issue_stage<Op, M, N, Stages>(
             storage, stage, warp_m, warp_n, accumulator);
-        __syncthreads();
+        if (lane == 0) {
+            sm120_arrive_empty(empty_base + stage * 8);
+        }
+        if (warp == 0 && lane == 0) {
+            int refill = tile + Stages;
+            if (refill < tile_count) {
+                sm120_wait_barrier(empty_base + stage * 8, generation & 1U);
+                sm120_tf32_produce_stage<Op, M, N, Stages>(stage_context, refill);
+            }
+        }
+        if constexpr (Stages == 2) sm120_sync_warp();
     }
 
 #pragma unroll
@@ -1057,6 +1424,329 @@ static __device__ __forceinline__ void sm120_tf32_kernel(
 }
 
 template <int Op, int M, int N, int Stages>
+static __device__ __forceinline__ void sm120_tf32_pair_kernel(
+    void* output, const CUtensorMap& a_map, const CUtensorMap& b_map,
+    const float* bias, const Sm120KernelParams& params) {
+    assert(params.alpha == 1.0f || bias == nullptr);
+    extern __shared__ __align__(1024) unsigned char storage[];
+    constexpr int stage_bytes = Sm120Tf32Storage<M, N, Stages>::stage_bytes;
+    constexpr int warps = Sm120Tf32Storage<M, N, Stages>::threads / 32;
+    unsigned shared = static_cast<unsigned>(__cvta_generic_to_shared(storage));
+    unsigned payload = shared;
+    unsigned full_base = shared + Stages * stage_bytes;
+    unsigned empty_base = full_base + 64;
+    int rows = sm120_tf32_rows<Op>(params);
+    int columns = sm120_tf32_columns<Op>(params);
+    int column_tiles = 1 + (columns - 1) / N;
+    int output_row = (int)blockIdx.x / column_tiles * M;
+    int output_column = (int)blockIdx.x % column_tiles * N;
+    int reduction = sm120_tf32_reduction<Op>(params);
+    int tile_count = 1 + (reduction - 1) / 32;
+    const Sm120Tf32StageContext stage_context = {
+        &a_map, &b_map, &params, payload, full_base, output_row, output_column};
+    int warp = (int)threadIdx.x >> 5;
+    constexpr int warp_columns = N / 32;
+    int warp_m = (warp / warp_columns) * 32;
+    int warp_n = (warp % warp_columns) * 32;
+    int lane = (int)threadIdx.x & 31;
+    int group = lane >> 2;
+    int thread = lane & 3;
+    float accumulator[2][4][4];
+
+#pragma unroll
+    for (int m_atom = 0; m_atom < 2; ++m_atom) {
+#pragma unroll
+        for (int n_atom = 0; n_atom < 4; ++n_atom) {
+#pragma unroll
+            for (int element = 0; element < 4; ++element) {
+                accumulator[m_atom][n_atom][element] = 0.0f;
+            }
+        }
+    }
+
+    if (threadIdx.x == 0) {
+#pragma unroll
+        for (int stage = 0; stage < Stages; ++stage) {
+            sm120_init_barrier<1>(full_base + stage * 8);
+            sm120_init_barrier<warps>(empty_base + stage * 8);
+        }
+        asm volatile("fence.mbarrier_init.release.cluster;" ::: "memory");
+    }
+    __syncthreads();
+
+    if (warp == 0 && lane == 0) {
+#pragma unroll
+        for (int tile = 0; tile < Stages; ++tile) {
+            if (tile < tile_count) {
+                sm120_tf32_produce_stage<Op, M, N, Stages>(stage_context, tile);
+            }
+        }
+    }
+    if constexpr (Stages == 2) sm120_sync_warp();
+
+    for (int tile = 0; tile < tile_count; ++tile) {
+        int stage = tile % Stages;
+        unsigned generation = (unsigned)(tile / Stages);
+        sm120_wait_barrier(full_base + stage * 8, generation & 1U);
+        sm120_tf32_issue_stage<Op, M, N, Stages>(
+            storage, stage, warp_m, warp_n, accumulator);
+        if (lane == 0) {
+            sm120_arrive_empty(empty_base + stage * 8);
+        }
+        if (warp == 0 && lane == 0) {
+            int refill = tile + Stages;
+            if (refill < tile_count) {
+                sm120_wait_barrier(empty_base + stage * 8, generation & 1U);
+                sm120_tf32_produce_stage<Op, M, N, Stages>(
+                    stage_context, refill);
+            }
+        }
+        if constexpr (Stages == 2) sm120_sync_warp();
+    }
+
+    bool full_tile = output_row + M <= rows
+        && output_column + N <= columns
+        && (reinterpret_cast<unsigned long long>(output) & 7ULL) == 0ULL
+        && (params.ldc & 1) == 0;
+#pragma unroll
+    for (int m_atom = 0; m_atom < 2; ++m_atom) {
+#pragma unroll
+        for (int n_atom = 0; n_atom < 4; ++n_atom) {
+#pragma unroll
+            for (int element = 0; element < 4; element += 2) {
+                int row = output_row + warp_m + m_atom * 16
+                    + group + (element >= 2 ? 8 : 0);
+                int column = output_column + warp_n + n_atom * 8
+                    + 2 * thread;
+                Sm120Tf32PairValue pair = {
+                    accumulator[m_atom][n_atom][element],
+                    accumulator[m_atom][n_atom][element + 1]};
+                sm120_tf32_store_pair<Op>(
+                    output, row, column, pair, bias, params, full_tile);
+            }
+        }
+    }
+}
+
+template <int M, int StorageN, int LogicalBK, int Stages>
+struct Sm120Tf32RectWideStorage {
+    static constexpr int slabs = LogicalBK / 32;
+    static constexpr int slab_bytes = (M + StorageN) * 32 * 4;
+    static constexpr int stage_bytes = slabs * slab_bytes;
+    static constexpr int dynamic_bytes = 128 + Stages * stage_bytes;
+};
+
+static_assert(Sm120Tf32RectWideStorage<80, 32, 64, 2>::dynamic_bytes == 57472);
+
+template <int M, int StorageN, int LogicalBK, int Stages>
+static __device__ __forceinline__ void sm120_tf32_rect_wide_produce_stage(
+    const Sm120Tf32StageContext& context, int tile) {
+    constexpr int slabs = Sm120Tf32RectWideStorage<
+        M, StorageN, LogicalBK, Stages>::slabs;
+    constexpr int slab_bytes = Sm120Tf32RectWideStorage<
+        M, StorageN, LogicalBK, Stages>::slab_bytes;
+    constexpr int stage_bytes = Sm120Tf32RectWideStorage<
+        M, StorageN, LogicalBK, Stages>::stage_bytes;
+    constexpr int a_bytes = M * 32 * 4;
+    constexpr int b_plane_bytes = 32 * 32 * 4;
+    unsigned stage_index = (unsigned)(tile % Stages);
+    unsigned stage = context.payload + stage_index * stage_bytes;
+    unsigned barrier = context.full_base + stage_index * 8;
+    unsigned long long a_descriptor =
+        reinterpret_cast<unsigned long long>(context.a_map);
+    unsigned long long b_descriptor =
+        reinterpret_cast<unsigned long long>(context.b_map);
+    const Sm120KernelParams& params = *context.params;
+    sm120_expect_transaction<stage_bytes>(barrier);
+#pragma unroll
+    for (int slab = 0; slab < slabs; ++slab) {
+        unsigned slab_base = stage + slab * slab_bytes;
+        int reduction = tile * LogicalBK + slab * 32;
+        sm120_tma_copy(slab_base, a_descriptor, reduction,
+            context.output_row, params.a_x, params.a_y, barrier);
+#pragma unroll
+        for (int plane = 0; plane < StorageN / 32; ++plane) {
+            sm120_tma_copy(slab_base + a_bytes + plane * b_plane_bytes,
+                b_descriptor, context.output_column + plane * 32, reduction,
+                params.b_x, params.b_y, barrier);
+        }
+    }
+}
+
+template <int M, int StorageN, int LogicalBK, int Stages>
+static __device__ __forceinline__ float sm120_tf32_rect_wide_load_a(
+    unsigned char* storage, int stage, int row, int reduction) {
+    constexpr int slab_bytes = Sm120Tf32RectWideStorage<
+        M, StorageN, LogicalBK, Stages>::slab_bytes;
+    constexpr int stage_bytes = Sm120Tf32RectWideStorage<
+        M, StorageN, LogicalBK, Stages>::stage_bytes;
+    int slab = reduction / 32;
+    unsigned slab_base = (unsigned)(slab * slab_bytes);
+    unsigned offset = sm120_tf32_sw128_offset(
+        slab_base, (unsigned)row, (unsigned)(reduction & 31));
+    return *reinterpret_cast<float*>(
+        storage + stage * stage_bytes + offset);
+}
+
+template <int M, int StorageN, int LogicalBK, int Stages>
+static __device__ __forceinline__ float sm120_tf32_rect_wide_load_b(
+    unsigned char* storage, int stage, int reduction, int column) {
+    constexpr int slab_bytes = Sm120Tf32RectWideStorage<
+        M, StorageN, LogicalBK, Stages>::slab_bytes;
+    constexpr int stage_bytes = Sm120Tf32RectWideStorage<
+        M, StorageN, LogicalBK, Stages>::stage_bytes;
+    constexpr int a_bytes = M * 32 * 4;
+    int slab = reduction / 32;
+    unsigned slab_base = (unsigned)(slab * slab_bytes);
+    unsigned plane = (unsigned)(column / 32) * 4096U;
+    unsigned offset = sm120_tf32_sw128_offset(
+        slab_base + a_bytes + plane, (unsigned)(reduction & 31),
+        (unsigned)(column & 31));
+    return *reinterpret_cast<float*>(
+        storage + stage * stage_bytes + offset);
+}
+
+template <int NAtoms, int M, int StorageN, int LogicalBK, int Stages>
+static __device__ __forceinline__ void sm120_tf32_rect_wide_load_issue(
+    unsigned char* storage, int stage, int warp_m, int k8,
+    unsigned (&a_fragment)[1][4], unsigned (&b_fragment)[NAtoms][2]) {
+    int lane = (int)threadIdx.x & 31;
+    int group = lane >> 2;
+    int thread = lane & 3;
+    int row = warp_m + group;
+    a_fragment[0][0] = sm120_tf32_rna(
+        sm120_tf32_rect_wide_load_a<M, StorageN, LogicalBK, Stages>(
+            storage, stage, row, k8 + thread));
+    a_fragment[0][1] = sm120_tf32_rna(
+        sm120_tf32_rect_wide_load_a<M, StorageN, LogicalBK, Stages>(
+            storage, stage, row + 8, k8 + thread));
+    a_fragment[0][2] = sm120_tf32_rna(
+        sm120_tf32_rect_wide_load_a<M, StorageN, LogicalBK, Stages>(
+            storage, stage, row, k8 + thread + 4));
+    a_fragment[0][3] = sm120_tf32_rna(
+        sm120_tf32_rect_wide_load_a<M, StorageN, LogicalBK, Stages>(
+            storage, stage, row + 8, k8 + thread + 4));
+#pragma unroll
+    for (int n_atom = 0; n_atom < NAtoms; ++n_atom) {
+        int column = n_atom * 8 + group;
+        b_fragment[n_atom][0] = sm120_tf32_rna(
+            sm120_tf32_rect_wide_load_b<M, StorageN, LogicalBK, Stages>(
+                storage, stage, k8 + thread, column));
+        b_fragment[n_atom][1] = sm120_tf32_rna(
+            sm120_tf32_rect_wide_load_b<M, StorageN, LogicalBK, Stages>(
+                storage, stage, k8 + thread + 4, column));
+    }
+}
+
+template <int NAtoms, int M, int StorageN, int LogicalBK, int Stages>
+static __device__ __forceinline__ void sm120_tf32_rect_wide_issue_stage(
+    unsigned char* storage, int stage, int warp_m,
+    float (&accumulator)[1][NAtoms][4]) {
+    unsigned a_fragments[2][1][4];
+    unsigned b_fragments[2][NAtoms][2];
+    sm120_tf32_rect_wide_load_issue<NAtoms, M, StorageN, LogicalBK, Stages>(
+        storage, stage, warp_m, 0, a_fragments[0], b_fragments[0]);
+#pragma unroll
+    for (int issue = 0; issue < LogicalBK / 8; ++issue) {
+        int current = issue & 1;
+        int next = current ^ 1;
+        if (issue + 1 < LogicalBK / 8) {
+            sm120_tf32_rect_wide_load_issue<
+                NAtoms, M, StorageN, LogicalBK, Stages>(storage, stage,
+                warp_m, issue * 8 + 8, a_fragments[next], b_fragments[next]);
+        }
+#pragma unroll
+        for (int n_atom = 0; n_atom < NAtoms; ++n_atom) {
+            sm120_tf32_mma_m16n8k8(accumulator[0][n_atom],
+                a_fragments[current][0], b_fragments[current][n_atom]);
+        }
+    }
+}
+
+template <int M, int N, int StorageN, int LogicalBK, int Stages>
+static __device__ __forceinline__ void sm120_tf32_rect_wide_kernel(
+    void* output, const CUtensorMap& a_map, const CUtensorMap& b_map,
+    const float* bias, const Sm120KernelParams& params) {
+    constexpr int NAtoms = (N + 7) / 8;
+    constexpr int stage_bytes = Sm120Tf32RectWideStorage<
+        M, StorageN, LogicalBK, Stages>::stage_bytes;
+    extern __shared__ __align__(1024) unsigned char storage[];
+    unsigned shared = static_cast<unsigned>(__cvta_generic_to_shared(storage));
+    unsigned payload = shared;
+    unsigned full_base = shared + Stages * stage_bytes;
+    unsigned empty_base = full_base + 64;
+    int column_tiles = 1 + (params.n - 1) / N;
+    int output_row = (int)blockIdx.x / column_tiles * M;
+    int output_column = (int)blockIdx.x % column_tiles * N;
+    int tile_count = 1 + (params.k - 1) / LogicalBK;
+    const Sm120Tf32StageContext stage_context = {
+        &a_map, &b_map, &params, payload, full_base, output_row, output_column};
+    int warp = (int)threadIdx.x >> 5;
+    int lane = (int)threadIdx.x & 31;
+
+    if (threadIdx.x == 0) {
+#pragma unroll
+        for (int stage = 0; stage < Stages; ++stage) {
+            sm120_init_barrier<1>(full_base + stage * 8);
+            sm120_init_barrier<5>(empty_base + stage * 8);
+        }
+        asm volatile("fence.mbarrier_init.release.cluster;" ::: "memory");
+    }
+    __syncthreads();
+
+    if (warp == 0 && lane == 0) {
+#pragma unroll
+        for (int tile = 0; tile < Stages; ++tile) {
+            if (tile < tile_count) {
+                sm120_tf32_rect_wide_produce_stage<
+                    M, StorageN, LogicalBK, Stages>(stage_context, tile);
+            }
+        }
+    }
+    if constexpr (Stages == 2) sm120_sync_warp();
+
+    int warp_m = warp * 16;
+    int group = lane >> 2;
+    int thread = lane & 3;
+    float accumulator[1][NAtoms][4] = {};
+
+    for (int tile = 0; tile < tile_count; ++tile) {
+        int stage = tile % Stages;
+        unsigned generation = (unsigned)(tile / Stages);
+        sm120_wait_barrier(full_base + stage * 8, generation & 1U);
+        sm120_tf32_rect_wide_issue_stage<
+            NAtoms, M, StorageN, LogicalBK, Stages>(
+                storage, stage, warp_m, accumulator);
+        if (lane == 0) sm120_arrive_empty(empty_base + stage * 8);
+        if (warp == 0 && lane == 0) {
+            int refill = tile + Stages;
+            if (refill < tile_count) {
+                sm120_wait_barrier(
+                    empty_base + stage * 8, generation & 1U);
+                sm120_tf32_rect_wide_produce_stage<
+                    M, StorageN, LogicalBK, Stages>(stage_context, refill);
+            }
+        }
+        if constexpr (Stages == 2) sm120_sync_warp();
+    }
+
+#pragma unroll
+    for (int n_atom = 0; n_atom < NAtoms; ++n_atom) {
+#pragma unroll
+        for (int element = 0; element < 4; ++element) {
+            int row = output_row + warp_m + group + (element >= 2 ? 8 : 0);
+            int column = output_column + n_atom * 8
+                + 2 * thread + (element & 1);
+            if (column < output_column + N) {
+                sm120_tf32_store<Sm120Nn>(output, row, column,
+                    accumulator[0][n_atom][element], bias, params);
+            }
+        }
+    }
+}
+
+
+template <int Op, int M, int N, int Stages>
 static __device__ __forceinline__ void sm120_tf32_entry(
     void* output, const CUtensorMap& a_map, const CUtensorMap& b_map,
     const float* bias, const Sm120KernelParams& params) {
@@ -1072,26 +1762,70 @@ static __device__ __forceinline__ void sm120_tf32_entry(
     sm120_tf32_kernel<Op, M, N, Stages>(output, a_map, b_map, bias, params);
 }
 
+static __device__ __forceinline__ void sm120_tf32_rect_wide_entry(
+    void* output, const CUtensorMap& a_map, const CUtensorMap& b_map,
+    const float* bias, const Sm120KernelParams& params) {
+    if (params.k == 0) {
+        sm120_tf32_zero_reduction_epilogue<Sm120Nn, 80, 32>(
+            output, bias, params);
+        return;
+    }
+    sm120_tf32_rect_wide_kernel<80, 32, 32, 64, 2>(
+        output, a_map, b_map, bias, params);
+}
+
+template <int Op, int M, int N, int Stages>
+static __device__ __forceinline__ void sm120_tf32_pair_entry(
+    void* output, const CUtensorMap& a_map, const CUtensorMap& b_map,
+    const float* bias, const Sm120KernelParams& params) {
+    if (sm120_tf32_reduction<Op>(params) == 0) {
+        sm120_tf32_zero_reduction_epilogue<Op, M, N>(output, bias, params);
+        return;
+    }
+    sm120_tf32_pair_kernel<Op, M, N, Stages>(
+        output, a_map, b_map, bias, params);
+}
+
 #define SM120_DEFINE_TF32_KERNEL(NAME, OP, M, N, STAGES)                     \
-extern "C" __global__ __launch_bounds__(256) void NAME(                     \
+extern "C" __global__ __launch_bounds__((M * N) / 32) void NAME(            \
     void* output, const __grid_constant__ CUtensorMap a_map,                   \
     const __grid_constant__ CUtensorMap b_map, const float* bias,              \
     const __grid_constant__ Sm120KernelParams params) {                        \
     sm120_tf32_entry<OP, M, N, STAGES>(output, a_map, b_map, bias, params);    \
 }
 
-SM120_DEFINE_TF32_KERNEL(sgemm_bi_nn_sm120_tma_mma_tf32_v1_m128n64_bk32_s2, Sm120Nn, 128, 64, 2)
-SM120_DEFINE_TF32_KERNEL(sgemm_bi_nn_sm120_tma_mma_tf32_v1_m128n64_bk32_s3, Sm120Nn, 128, 64, 3)
-SM120_DEFINE_TF32_KERNEL(sgemm_bi_nn_sm120_tma_mma_tf32_v1_m64n128_bk32_s2, Sm120Nn, 64, 128, 2)
-SM120_DEFINE_TF32_KERNEL(sgemm_bi_nn_sm120_tma_mma_tf32_v1_m64n128_bk32_s3, Sm120Nn, 64, 128, 3)
-SM120_DEFINE_TF32_KERNEL(sgemm_bi_tn_sm120_tma_mma_tf32_v1_m128n64_bk32_s2, Sm120Tn, 128, 64, 2)
-SM120_DEFINE_TF32_KERNEL(sgemm_bi_tn_sm120_tma_mma_tf32_v1_m128n64_bk32_s3, Sm120Tn, 128, 64, 3)
-SM120_DEFINE_TF32_KERNEL(sgemm_bi_tn_sm120_tma_mma_tf32_v1_m64n128_bk32_s2, Sm120Tn, 64, 128, 2)
-SM120_DEFINE_TF32_KERNEL(sgemm_bi_tn_sm120_tma_mma_tf32_v1_m64n128_bk32_s3, Sm120Tn, 64, 128, 3)
-SM120_DEFINE_TF32_KERNEL(sgemm_bi_nt_sm120_tma_mma_tf32_v1_m128n64_bk32_s2, Sm120Nt, 128, 64, 2)
-SM120_DEFINE_TF32_KERNEL(sgemm_bi_nt_sm120_tma_mma_tf32_v1_m128n64_bk32_s3, Sm120Nt, 128, 64, 3)
-SM120_DEFINE_TF32_KERNEL(sgemm_bi_nt_sm120_tma_mma_tf32_v1_m64n128_bk32_s2, Sm120Nt, 64, 128, 2)
-SM120_DEFINE_TF32_KERNEL(sgemm_bi_nt_sm120_tma_mma_tf32_v1_m64n128_bk32_s3, Sm120Nt, 64, 128, 3)
+#define SM120_DEFINE_TF32_PAIR_KERNEL(NAME, OP, M, N, STAGES)                \
+extern "C" __global__ __launch_bounds__((M * N) / 32) void NAME(            \
+    void* output, const __grid_constant__ CUtensorMap a_map,                  \
+    const __grid_constant__ CUtensorMap b_map, const float* bias,             \
+    const __grid_constant__ Sm120KernelParams params) {                       \
+    sm120_tf32_pair_entry<OP, M, N, STAGES>(                                 \
+        output, a_map, b_map, bias, params);                                  \
+}
+
+SM120_DEFINE_TF32_KERNEL(gemm_bi_nn_sm120_tma_mma_tf32_v1_m128n64_bk32_s2, Sm120Nn, 128, 64, 2)
+SM120_DEFINE_TF32_KERNEL(gemm_bi_nn_sm120_tma_mma_tf32_v1_m128n64_bk32_s3, Sm120Nn, 128, 64, 3)
+SM120_DEFINE_TF32_KERNEL(gemm_bi_nn_sm120_tma_mma_tf32_v1_m64n128_bk32_s2, Sm120Nn, 64, 128, 2)
+SM120_DEFINE_TF32_KERNEL(gemm_bi_nn_sm120_tma_mma_tf32_v1_m64n128_bk32_s3, Sm120Nn, 64, 128, 3)
+SM120_DEFINE_TF32_KERNEL(gemm_bi_nn_sm120_tma_mma_tf32_v1_m64n64_bk32_s2, Sm120Nn, 64, 64, 2)
+extern "C" __global__ __launch_bounds__(160)
+void gemm_bi_nn_sm120_tma_mma_tf32_v1_m80n32_bk64_s2(
+    void* output, const __grid_constant__ CUtensorMap a_map,
+    const __grid_constant__ CUtensorMap b_map, const float* bias,
+    const __grid_constant__ Sm120KernelParams params) {
+    sm120_tf32_rect_wide_entry(output, a_map, b_map, bias, params);
+}
+SM120_DEFINE_TF32_KERNEL(gemm_bi_tn_sm120_tma_mma_tf32_v1_m128n64_bk32_s2, Sm120Tn, 128, 64, 2)
+SM120_DEFINE_TF32_KERNEL(gemm_bi_tn_sm120_tma_mma_tf32_v1_m128n64_bk32_s3, Sm120Tn, 128, 64, 3)
+SM120_DEFINE_TF32_KERNEL(gemm_bi_tn_sm120_tma_mma_tf32_v1_m64n128_bk32_s2, Sm120Tn, 64, 128, 2)
+SM120_DEFINE_TF32_KERNEL(gemm_bi_tn_sm120_tma_mma_tf32_v1_m64n128_bk32_s3, Sm120Tn, 64, 128, 3)
+SM120_DEFINE_TF32_PAIR_KERNEL(gemm_bi_tn_sm120_tma_mma_tf32_v1_m64n128_bk32_s4_pair, Sm120Tn, 64, 128, 4)
+SM120_DEFINE_TF32_KERNEL(gemm_bi_tn_sm120_tma_mma_tf32_v1_m64n64_bk32_s2, Sm120Tn, 64, 64, 2)
+SM120_DEFINE_TF32_KERNEL(gemm_bi_nt_sm120_tma_mma_tf32_v1_m128n64_bk32_s2, Sm120Nt, 128, 64, 2)
+SM120_DEFINE_TF32_KERNEL(gemm_bi_nt_sm120_tma_mma_tf32_v1_m128n64_bk32_s3, Sm120Nt, 128, 64, 3)
+SM120_DEFINE_TF32_KERNEL(gemm_bi_nt_sm120_tma_mma_tf32_v1_m64n128_bk32_s2, Sm120Nt, 64, 128, 2)
+SM120_DEFINE_TF32_KERNEL(gemm_bi_nt_sm120_tma_mma_tf32_v1_m64n128_bk32_s3, Sm120Nt, 64, 128, 3)
+SM120_DEFINE_TF32_KERNEL(gemm_bi_nt_sm120_tma_mma_tf32_v1_m64n64_bk32_s2, Sm120Nt, 64, 64, 2)
 
 template <typename A, typename B> struct Sm120Tf32SameType { static constexpr bool value = false; };
 template <typename A> struct Sm120Tf32SameType<A, A> { static constexpr bool value = true; };
@@ -1100,20 +1834,26 @@ using Sm120Tf32KernelSignature = void (*)(
 #define TF32_ASSERT_KERNEL_SIGNATURE(NAME) \
     static_assert(Sm120Tf32SameType<decltype(&NAME), Sm120Tf32KernelSignature>::value, "TF32 kernel signature")
 
-TF32_ASSERT_KERNEL_SIGNATURE(sgemm_bi_nn_sm120_tma_mma_tf32_v1_m128n64_bk32_s2);
-TF32_ASSERT_KERNEL_SIGNATURE(sgemm_bi_nn_sm120_tma_mma_tf32_v1_m128n64_bk32_s3);
-TF32_ASSERT_KERNEL_SIGNATURE(sgemm_bi_nn_sm120_tma_mma_tf32_v1_m64n128_bk32_s2);
-TF32_ASSERT_KERNEL_SIGNATURE(sgemm_bi_nn_sm120_tma_mma_tf32_v1_m64n128_bk32_s3);
-TF32_ASSERT_KERNEL_SIGNATURE(sgemm_bi_tn_sm120_tma_mma_tf32_v1_m128n64_bk32_s2);
-TF32_ASSERT_KERNEL_SIGNATURE(sgemm_bi_tn_sm120_tma_mma_tf32_v1_m128n64_bk32_s3);
-TF32_ASSERT_KERNEL_SIGNATURE(sgemm_bi_tn_sm120_tma_mma_tf32_v1_m64n128_bk32_s2);
-TF32_ASSERT_KERNEL_SIGNATURE(sgemm_bi_tn_sm120_tma_mma_tf32_v1_m64n128_bk32_s3);
-TF32_ASSERT_KERNEL_SIGNATURE(sgemm_bi_nt_sm120_tma_mma_tf32_v1_m128n64_bk32_s2);
-TF32_ASSERT_KERNEL_SIGNATURE(sgemm_bi_nt_sm120_tma_mma_tf32_v1_m128n64_bk32_s3);
-TF32_ASSERT_KERNEL_SIGNATURE(sgemm_bi_nt_sm120_tma_mma_tf32_v1_m64n128_bk32_s2);
-TF32_ASSERT_KERNEL_SIGNATURE(sgemm_bi_nt_sm120_tma_mma_tf32_v1_m64n128_bk32_s3);
+TF32_ASSERT_KERNEL_SIGNATURE(gemm_bi_nn_sm120_tma_mma_tf32_v1_m128n64_bk32_s2);
+TF32_ASSERT_KERNEL_SIGNATURE(gemm_bi_nn_sm120_tma_mma_tf32_v1_m128n64_bk32_s3);
+TF32_ASSERT_KERNEL_SIGNATURE(gemm_bi_nn_sm120_tma_mma_tf32_v1_m64n128_bk32_s2);
+TF32_ASSERT_KERNEL_SIGNATURE(gemm_bi_nn_sm120_tma_mma_tf32_v1_m64n128_bk32_s3);
+TF32_ASSERT_KERNEL_SIGNATURE(gemm_bi_nn_sm120_tma_mma_tf32_v1_m64n64_bk32_s2);
+TF32_ASSERT_KERNEL_SIGNATURE(gemm_bi_nn_sm120_tma_mma_tf32_v1_m80n32_bk64_s2);
+TF32_ASSERT_KERNEL_SIGNATURE(gemm_bi_tn_sm120_tma_mma_tf32_v1_m128n64_bk32_s2);
+TF32_ASSERT_KERNEL_SIGNATURE(gemm_bi_tn_sm120_tma_mma_tf32_v1_m128n64_bk32_s3);
+TF32_ASSERT_KERNEL_SIGNATURE(gemm_bi_tn_sm120_tma_mma_tf32_v1_m64n128_bk32_s2);
+TF32_ASSERT_KERNEL_SIGNATURE(gemm_bi_tn_sm120_tma_mma_tf32_v1_m64n128_bk32_s3);
+TF32_ASSERT_KERNEL_SIGNATURE(gemm_bi_tn_sm120_tma_mma_tf32_v1_m64n128_bk32_s4_pair);
+TF32_ASSERT_KERNEL_SIGNATURE(gemm_bi_tn_sm120_tma_mma_tf32_v1_m64n64_bk32_s2);
+TF32_ASSERT_KERNEL_SIGNATURE(gemm_bi_nt_sm120_tma_mma_tf32_v1_m128n64_bk32_s2);
+TF32_ASSERT_KERNEL_SIGNATURE(gemm_bi_nt_sm120_tma_mma_tf32_v1_m128n64_bk32_s3);
+TF32_ASSERT_KERNEL_SIGNATURE(gemm_bi_nt_sm120_tma_mma_tf32_v1_m64n128_bk32_s2);
+TF32_ASSERT_KERNEL_SIGNATURE(gemm_bi_nt_sm120_tma_mma_tf32_v1_m64n128_bk32_s3);
+TF32_ASSERT_KERNEL_SIGNATURE(gemm_bi_nt_sm120_tma_mma_tf32_v1_m64n64_bk32_s2);
 
 #undef TF32_ASSERT_KERNEL_SIGNATURE
+#undef SM120_DEFINE_TF32_PAIR_KERNEL
 #undef SM120_DEFINE_TF32_KERNEL
 
 #undef SM120_DEFINE_KERNEL

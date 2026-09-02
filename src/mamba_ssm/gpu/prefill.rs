@@ -18,17 +18,31 @@
 
 use super::backward::{GpuMambaTargetMixedScratch, GpuMambaTargetScratch};
 use super::blas::{
-    TypedPtr, gpu_gemm_forward_dispatch, gpu_gemm_typed_forward_raw, gpu_sgemm_forward_raw,
+    TypedPtr, gpu_gemm_bi_forward_raw, gpu_gemm_forward_dispatch, gpu_gemm_typed_forward_raw,
 };
 use super::buffers::GpuBuffer;
 use super::context::GpuCtx;
 use super::dtype::WeightDtype;
 use super::forward::GpuMambaDims;
+use super::graph_capture::{capture_into_graph_with_gemm_plan, require_f32_triad_graph_plan};
 use super::inference::GpuInferenceState;
+use super::kernel_identity::CapturedGemmGraphPlan;
 use super::launch::{grid_1d, grid_norm, grid_parallel_scan};
 use super::weights::{MambaLayerWeightsView, MambaWeightsView};
 use cudarc::driver::PushKernelArg;
 use std::rc::Rc;
+
+fn with_validated_launch(
+    ctx: &GpuCtx,
+    plan: Option<&CapturedGemmGraphPlan>,
+    label: &str,
+    launch: impl FnOnce() -> Result<(), String>,
+) -> Result<(), String> {
+    match plan {
+        Some(plan) => plan.with_validated_launch(ctx, label, launch),
+        None => launch(),
+    }
+}
 
 fn layer_bulk_dtype<W: MambaWeightsView>(weights: &W) -> Result<WeightDtype, String> {
     let mut half_dtype = None;
@@ -171,7 +185,7 @@ pub fn gpu_forward_inference_prefill_full<W: MambaWeightsView>(
 }
 
 /// Prefill from RAW (pre-projection) input: applies `input_proj` internally
-/// through the SAME `gpu_sgemm_forward_raw` call the training forward makes
+/// through the SAME `gpu_gemm_bi_forward_raw` call the training forward makes
 /// (`gpu_forward_mamba_backbone`), so the projected bits equal training's
 /// `ip_out` — then runs the shared prefill body. This is the one-call GPU
 /// serving entry for classifier-style consumers.
@@ -206,7 +220,7 @@ pub fn gpu_forward_inference_prefill_from_raw<W: MambaWeightsView>(
     // Projected values land directly in the working temporal; the body's
     // first step snapshots it into the residual, exactly as if it had been
     // copied from a caller-provided ip_out buffer.
-    gpu_sgemm_forward_raw(
+    gpu_gemm_bi_forward_raw(
         ctx,
         &mut scratch.out_flat,
         input_flat,
@@ -287,7 +301,7 @@ pub fn gpu_forward_inference_prefill_pooled_sum_from_raw<W: MambaWeightsView>(
              the mixed prefill has no raw-input entry"
         ));
     }
-    gpu_sgemm_forward_raw(
+    gpu_gemm_bi_forward_raw(
         ctx,
         &mut scratch.out_flat,
         input_flat,
@@ -328,6 +342,7 @@ pub fn gpu_forward_inference_prefill_pooled_sum_from_raw<W: MambaWeightsView>(
 /// - the complete GEMM route is snapshotted and checked before launch.
 pub struct PrefillPooledGraph {
     graph: cudarc::driver::CudaGraph,
+    captured_gemm_plan: Option<CapturedGemmGraphPlan>,
     ctx_resources: Rc<crate::mamba_ssm::gpu::context::GpuCtxResources>,
     flags_at_capture: crate::mamba_ssm::gpu::context::GemmRoute,
     captured_ctx_token: u64,
@@ -370,11 +385,25 @@ impl PrefillPooledGraph {
         let pooled_ptr = pooled_sum.cached_ptr();
         let bulk_dtype = layer_bulk_dtype(weights)?;
         ctx.presize_mixed_graph_scratch_m1(&scratch.dims, bulk_dtype)?;
+        let manifest = ctx.record_eager_gemm_manifest(|| {
+            state.reset(&ctx.stream)?;
+            gpu_forward_inference_prefill_pooled_sum_from_raw(
+                ctx,
+                pooled_sum,
+                PrefillRawInputs {
+                    input_flat,
+                    weights,
+                    a_neg_all,
+                },
+                state,
+                scratch,
+            )
+        })?;
         if bulk_dtype != WeightDtype::F32 {
             ctx.freeze_graph_scratch();
         }
-        let graph = unsafe {
-            super::graph_capture::capture_into_graph(&ctx.stream, || {
+        let (graph, captured_gemm_plan) = unsafe {
+            capture_into_graph_with_gemm_plan(ctx, manifest.route_capacity, &manifest, || {
                 state.reset(&ctx.stream)?;
                 gpu_forward_inference_prefill_pooled_sum_from_raw(
                     ctx,
@@ -389,9 +418,16 @@ impl PrefillPooledGraph {
                 )
             })
         }?;
+        require_f32_triad_graph_plan(
+            ctx,
+            true,
+            captured_gemm_plan.as_ref(),
+            "M1 pooled prefill graph capture",
+        )?;
         ctx.note_graph_capture();
         Ok(Self {
             graph,
+            captured_gemm_plan,
             ctx_resources: ctx.resource_anchor(),
             flags_at_capture,
             captured_ctx_token: ctx.instance_token(),
@@ -447,9 +483,16 @@ impl PrefillPooledGraph {
                  captured allocations - the graph would write the old ones"
                 .to_string());
         }
-        self.graph
-            .launch()
-            .map_err(|e| format!("PrefillPooledGraph launch: {e:?}"))
+        with_validated_launch(
+            ctx,
+            self.captured_gemm_plan.as_ref(),
+            "M1 pooled prefill graph replay",
+            || {
+                self.graph
+                    .launch()
+                    .map_err(|error| format!("PrefillPooledGraph launch: {error:?}"))
+            },
+        )
     }
 }
 

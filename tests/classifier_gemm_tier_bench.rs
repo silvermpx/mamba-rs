@@ -1,6 +1,7 @@
-//! Vision-classifier serve shapes: cuBLAS vs `sgemm_bi` (training triad, f32) vs
-//! `gemm_bi` (the WMMA batch-invariant GEMM) — latency and cross-kernel
-//! drift at the exact GEMMs the m3 classify prefill runs.
+//! Vision-classifier serve shapes: cuBLAS vs the deterministic `triad` and
+//! `fixed` routes — latency and cross-route drift at the exact f32 GEMMs the
+//! m3 classify prefill runs. Fixed is the forward-only deterministic inference
+//! ladder; Triad is the three-layout deterministic training family.
 //!
 //! M = T_TOTAL per page (4621 = 57x81 patches + 4 registers); the batched
 //! rows show whether a bucket boundary is ever crossed.
@@ -12,7 +13,7 @@
 
 use std::time::Instant;
 
-use mamba_rs::mamba_ssm::gpu::blas::gpu_sgemm_forward_raw;
+use mamba_rs::mamba_ssm::gpu::blas::gpu_gemm_bi_forward_raw;
 use mamba_rs::mamba_ssm::gpu::buffers::GpuBuffer;
 use mamba_rs::mamba_ssm::gpu::context::BiGemmFamily;
 use mamba_rs::mamba_ssm::gpu::context::GpuCtx;
@@ -34,7 +35,7 @@ fn synth(n: usize, seed: u64) -> Vec<f32> {
 
 #[test]
 #[ignore = "needs a CUDA device"]
-fn classifier_shapes_cublas_vs_sgemm_bi_vs_gemm_bi() {
+fn classifier_shapes_cublas_vs_triad_vs_fixed() {
     let dev = GpuDevice::new(0).expect("cuda device");
 
     // The three projections of one m3 classify layer at d_model=384,
@@ -65,7 +66,7 @@ fn classifier_shapes_cublas_vs_sgemm_bi_vs_gemm_bi() {
                 ctx.set_batch_invariant(bi);
                 ctx.set_bi_gemm_family(family);
                 let once = |y: &mut GpuBuffer| {
-                    gpu_sgemm_forward_raw(&ctx, y, &x, w.raw_ptr(&stream), None, (m, k, n))
+                    gpu_gemm_bi_forward_raw(&ctx, y, &x, w.raw_ptr(&stream), None, (m, k, n))
                         .expect("forward")
                 };
                 once(&mut y);

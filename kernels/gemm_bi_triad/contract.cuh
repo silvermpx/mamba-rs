@@ -1,11 +1,8 @@
 // Batch-invariant deterministic GEMM — the multi-tile triad.
 //
-// The SGEMM in the file name is historical BLAS notation (S = single
-// precision) and no longer describes the coverage: this file carries
-// f32, bf16 and f16, on CUDA cores and on Tensor Cores. It is named for
-// its STRUCTURE elsewhere in the API — the triad, i.e. the family that
-// carries all three operand layouts and therefore the only one that can
-// serve a backward. (See BiGemmFamily::Triad.)
+// This contract carries f32, bf16 and f16 on CUDA cores and Tensor Cores.
+// The triad is the family with all three operand layouts and therefore the
+// only one that can serve a backward. (See BiGemmFamily::Triad.)
 //
 // Based on siboehm's warptiling kernel (93.7% cuBLAS on A6000).
 // Adapted for NVRTC compilation (no templates, no includes).
@@ -31,7 +28,7 @@
 //   Thread tile: TM=8, TN=8
 //   Per-thread output: 64 elements (16 rows x 4 cols × WMITER=2 = 64)
 //   float4 coalesced global loads, A transposed in smem
-//   SGB_GROUP_M per-arch L2 swizzle (8 sm_80, 16 sm_89+), deterministic K-reduction
+//   GEMM_BI_GROUP_M per-arch L2 swizzle (8 sm_80, 16 sm_89+), deterministic K-reduction
 //
 // Source: github.com/siboehm/SGEMM_CUDA (kernel 10, warptiling)
 

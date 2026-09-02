@@ -20,7 +20,8 @@ use crate::mamba_ssm::gpu::dtype::WeightDtype;
 use crate::mamba_ssm::gpu::grad_clip::{
     GradRegionGeom, alloc_partials, clip_grads_device, clip_region_device, scale_grads,
 };
-use crate::mamba_ssm::gpu::graph_capture::capture_into_graph;
+use crate::mamba_ssm::gpu::graph_capture::capture_into_graph_with_gemm_plan;
+use crate::mamba_ssm::gpu::kernel_identity::{CapturedGemmGraphPlan, PreparedGemmCaptureManifest};
 use crate::mamba_ssm::gpu::loss_scaler::{
     DynamicLossScaler, OverflowFlag, UnscaleFactor, check_inf_nan_gpu, scale_grads_skip_gpu,
 };
@@ -44,6 +45,18 @@ use crate::mamba3_siso::gpu::training_graph::{
 use crate::mamba3_siso::gpu::weights::{GpuMamba3Grads, GpuMamba3Weights};
 use crate::mamba3_siso::gpu::weights_mixed_train::GpuMamba3TrainMixedWeights;
 use crate::mamba3_siso::weights::Mamba3Weights;
+
+fn with_validated_launch(
+    ctx: &GpuCtx,
+    plan: Option<&CapturedGemmGraphPlan>,
+    label: &str,
+    launch: impl FnOnce() -> Result<(), String>,
+) -> Result<(), String> {
+    match plan {
+        Some(plan) => plan.with_validated_launch(ctx, label, launch),
+        None => launch(),
+    }
+}
 
 /// CPU-side snapshot of the four carried Mamba-3 recurrences (SSM, K,
 /// V, RoPE angle) for TBPTT-style window handoff on the sequential
@@ -680,6 +693,7 @@ pub(crate) struct Mamba3TrainerMixed {
     angle_states: GpuBuffer,
 
     graph: Option<GpuMamba3TrainingStepGraph>,
+    prepared_gemm_manifest: Option<PreparedGemmCaptureManifest>,
 
     /// Route that produced the saved split-forward activations.
     split_forward_route: Option<crate::mamba_ssm::gpu::context::GemmRoute>,
@@ -698,6 +712,8 @@ pub(crate) struct Mamba3TrainerMixed {
     d_temporal_scaled: Option<GpuBuffer>,
     /// f16 CUDA Graph (M3 analogue of M1's `graph_f16`).
     graph_f16: Option<cudarc::driver::CudaGraph>,
+    prepared_f16_gemm_manifest: Option<PreparedGemmCaptureManifest>,
+    captured_f16_gemm_plan: Option<CapturedGemmGraphPlan>,
     /// 1-element device buffer of `1/loss_scale`.
     unscale_factor: Option<UnscaleFactor>,
     /// Pointer-stability snapshots for the f16 graph.
@@ -856,6 +872,7 @@ impl Mamba3TrainerMixed {
             v_states,
             angle_states,
             graph: None,
+            prepared_gemm_manifest: None,
             split_forward_route: None,
             grads_dirty: false,
             clip_partials,
@@ -864,6 +881,8 @@ impl Mamba3TrainerMixed {
             overflow_flag,
             d_temporal_scaled,
             graph_f16: None,
+            prepared_f16_gemm_manifest: None,
+            captured_f16_gemm_plan: None,
             unscale_factor,
             captured_f16_bias_ptr: 0,
             captured_f16_unscale_ptr: 0,
@@ -890,6 +909,16 @@ impl Mamba3TrainerMixed {
         Ok(())
     }
 
+    fn presize_prepared_gemm_scratch(&self) -> Result<(), String> {
+        self.ctx.presize_bi_upcast_scratch_for_train_m3(
+            &self.cfg,
+            self.dims.batch,
+            self.dims.seq_len,
+            self.dims.mamba_input_dim,
+            self.dtype,
+        )
+    }
+
     /// Capture the training-step CUDA Graph. Call once after at least one
     /// warmup [`Self::step`].
     pub fn capture_graph(&mut self) -> Result<(), String> {
@@ -897,6 +926,9 @@ impl Mamba3TrainerMixed {
             return self.capture_graph_f16();
         }
         self.bias.write(&self.ctx.stream, 1.0, 1.0, self.adam.lr)?;
+        let manifest = self.prepared_gemm_manifest.ok_or_else(|| {
+            "M3 bf16 training graph capture requires one successful eager step".to_string()
+        })?;
 
         // The trainer owns every captured allocation and drops the graph first.
         let g = unsafe {
@@ -926,6 +958,7 @@ impl Mamba3TrainerMixed {
                         angle: &mut self.angle_states,
                     },
                 },
+                &manifest,
             )
         }?;
         self.graph = Some(g);
@@ -983,6 +1016,63 @@ impl Mamba3TrainerMixed {
         };
 
         Ok(StepMetrics::plain(step, replayed))
+    }
+
+    fn eager_f16_forward_backward(&mut self) -> Result<(), String> {
+        self.presize_prepared_gemm_scratch()?;
+        let Self {
+            ctx,
+            m3k,
+            dims,
+            weights,
+            grads,
+            acts,
+            f32_scratch,
+            mixed_scratch,
+            temporal,
+            mamba_input,
+            d_temporal_scaled,
+            ssm_states,
+            k_states,
+            v_states,
+            angle_states,
+            prepared_f16_gemm_manifest,
+            ..
+        } = self;
+        let exec = M3Exec {
+            ctx,
+            kernels: m3k,
+            dims,
+        };
+        let d_temporal = d_temporal_scaled.as_mut().expect("f16 dt_scaled");
+        let manifest = ctx.record_eager_gemm_manifest(|| {
+            grads.zero(&ctx.stream)?;
+            gpu_forward_mamba3_backbone_mixed(
+                &exec,
+                temporal,
+                acts,
+                weights,
+                mamba_input,
+                GpuMamba3StateBufs {
+                    ssm: ssm_states,
+                    k: k_states,
+                    v: v_states,
+                    angle: angle_states,
+                },
+                mixed_scratch,
+            )?;
+            gpu_backward_mamba3_backbone_mixed(
+                &exec,
+                d_temporal,
+                acts,
+                weights,
+                grads,
+                f32_scratch,
+                mixed_scratch,
+            )
+        })?;
+        *prepared_f16_gemm_manifest = Some(manifest);
+        Ok(())
     }
 
     /// f16 step. See M1 [`crate::mamba_ssm::gpu::trainer::MambaTrainerMixed::step_f16`]
@@ -1066,8 +1156,15 @@ impl Mamba3TrainerMixed {
                     .into());
             }
 
-            g.launch()
-                .map_err(|e| format!("M3 f16 graph launch: {e:?}"))?;
+            with_validated_launch(
+                &self.ctx,
+                self.captured_f16_gemm_plan.as_ref(),
+                "M3 f16 training graph replay",
+                || {
+                    g.launch()
+                        .map_err(|e| format!("M3 f16 graph launch: {e:?}"))
+                },
+            )?;
             let overflow = self
                 .overflow_flag
                 .as_ref()
@@ -1079,9 +1176,7 @@ impl Mamba3TrainerMixed {
         } else {
             // Same op sequence as the captured graph body (composed from
             // the shared eager phase bodies).
-            self.grads.zero(&self.ctx.stream)?;
-            self.eager_forward()?;
-            self.eager_backward(true)?;
+            self.eager_f16_forward_backward()?;
             check_inf_nan_gpu(
                 &self.ctx,
                 &self.ctx.kernels,
@@ -1146,13 +1241,10 @@ impl Mamba3TrainerMixed {
             self.dims.seq_len,
             self.dtype,
         )?;
-        self.ctx.presize_bi_upcast_scratch_for_train_m3(
-            &self.cfg,
-            self.dims.batch,
-            self.dims.seq_len,
-            self.dims.mamba_input_dim,
-            self.dtype,
-        )?;
+        self.presize_prepared_gemm_scratch()?;
+        let manifest = self.prepared_f16_gemm_manifest.ok_or_else(|| {
+            "M3 f16 training graph capture requires one successful eager step".to_string()
+        })?;
         // Snapshot every device buffer baked into the captured kernels.
         let snap_bias = self.bias.ptr();
         let snap_unscale = self.unscale_factor.as_ref().unwrap().ptr();
@@ -1169,31 +1261,90 @@ impl Mamba3TrainerMixed {
 
         // Capture body: mirrors the eager f16 path 1:1 (composed from the
         // shared eager phase bodies) so numerics match.
-        let stream = self.ctx.stream.clone();
         self.ctx.freeze_graph_scratch();
-        let g = unsafe {
-            capture_into_graph(&stream, || {
-                self.grads.zero(&self.ctx.stream)?;
-                self.eager_forward()?;
-                self.eager_backward(true)?;
-                check_inf_nan_gpu(
-                    &self.ctx,
-                    &self.ctx.kernels,
-                    self.overflow_flag.as_mut().unwrap(),
-                    &self.grads.flat,
-                )?;
-                scale_grads_skip_gpu(
-                    &self.ctx,
-                    &self.ctx.kernels,
-                    self.overflow_flag.as_mut().unwrap(),
-                    &mut self.grads.flat,
-                    self.unscale_factor.as_ref().unwrap(),
-                )?;
-                self.eager_optimize()?;
-                Ok(())
-            })
+        let (g, captured_f16_gemm_plan) = {
+            let Self {
+                ctx,
+                m3k,
+                dims,
+                dtype,
+                weights,
+                grads,
+                adam,
+                bias,
+                multi_plan,
+                acts,
+                f32_scratch,
+                mixed_scratch,
+                temporal,
+                mamba_input,
+                d_temporal_scaled,
+                ssm_states,
+                k_states,
+                v_states,
+                angle_states,
+                overflow_flag,
+                unscale_factor,
+                ..
+            } = self;
+            let exec = M3Exec {
+                ctx,
+                kernels: m3k,
+                dims,
+            };
+            let d_temporal = d_temporal_scaled.as_mut().expect("f16 dt_scaled");
+            unsafe {
+                capture_into_graph_with_gemm_plan(ctx, manifest.route_capacity, &manifest, || {
+                    grads.zero(&ctx.stream)?;
+                    gpu_forward_mamba3_backbone_mixed(
+                        &exec,
+                        temporal,
+                        acts,
+                        weights,
+                        mamba_input,
+                        GpuMamba3StateBufs {
+                            ssm: ssm_states,
+                            k: k_states,
+                            v: v_states,
+                            angle: angle_states,
+                        },
+                        mixed_scratch,
+                    )?;
+                    gpu_backward_mamba3_backbone_mixed(
+                        &exec,
+                        d_temporal,
+                        acts,
+                        weights,
+                        grads,
+                        f32_scratch,
+                        mixed_scratch,
+                    )?;
+                    check_inf_nan_gpu(
+                        ctx,
+                        &ctx.kernels,
+                        overflow_flag.as_mut().unwrap(),
+                        &grads.flat,
+                    )?;
+                    scale_grads_skip_gpu(
+                        ctx,
+                        &ctx.kernels,
+                        overflow_flag.as_mut().unwrap(),
+                        &mut grads.flat,
+                        unscale_factor.as_ref().unwrap(),
+                    )?;
+                    step_multi(
+                        ctx,
+                        m3k.adamw_step_multi.get(*dtype),
+                        multi_plan,
+                        adam,
+                        bias.ptr(),
+                    )?;
+                    weights.sync_master_to_compute(ctx)
+                })
+            }
         }?;
         self.graph_f16 = Some(g);
+        self.captured_f16_gemm_plan = captured_f16_gemm_plan;
         self.captured_f16_bias_ptr = snap_bias;
         self.captured_f16_unscale_ptr = snap_unscale;
         self.captured_f16_overflow_ptr = snap_overflow;
@@ -1277,10 +1428,71 @@ impl Mamba3TrainerMixed {
     }
 
     fn step_eager(&mut self) -> Result<(), String> {
-        self.grads.zero(&self.ctx.stream)?;
-        self.eager_forward()?;
-        self.eager_backward(false)?;
-        self.eager_optimize()
+        self.presize_prepared_gemm_scratch()?;
+        let Self {
+            ctx,
+            m3k,
+            dims,
+            dtype,
+            weights,
+            grads,
+            adam,
+            bias,
+            multi_plan,
+            acts,
+            f32_scratch,
+            mixed_scratch,
+            temporal,
+            mamba_input,
+            d_temporal,
+            ssm_states,
+            k_states,
+            v_states,
+            angle_states,
+            prepared_gemm_manifest,
+            ..
+        } = self;
+        let exec = M3Exec {
+            ctx,
+            kernels: m3k,
+            dims,
+        };
+        let manifest = ctx.record_eager_gemm_manifest(|| {
+            grads.zero(&ctx.stream)?;
+            gpu_forward_mamba3_backbone_mixed(
+                &exec,
+                temporal,
+                acts,
+                weights,
+                mamba_input,
+                GpuMamba3StateBufs {
+                    ssm: ssm_states,
+                    k: k_states,
+                    v: v_states,
+                    angle: angle_states,
+                },
+                mixed_scratch,
+            )?;
+            gpu_backward_mamba3_backbone_mixed(
+                &exec,
+                d_temporal,
+                acts,
+                weights,
+                grads,
+                f32_scratch,
+                mixed_scratch,
+            )?;
+            step_multi(
+                ctx,
+                m3k.adamw_step_multi.get(*dtype),
+                multi_plan,
+                adam,
+                bias.ptr(),
+            )?;
+            weights.sync_master_to_compute(ctx)
+        })?;
+        *prepared_gemm_manifest = Some(manifest);
+        Ok(())
     }
 
     /// Split forward (see [`Mamba3Trainer::forward`]). The M3 mixed forward
@@ -1619,6 +1831,7 @@ pub(crate) struct Mamba3TrainerF32 {
     v_states: GpuBuffer,
     angle_states: GpuBuffer,
     graph: Option<GpuMamba3F32TrainingStepGraph>,
+    prepared_gemm_manifest: Option<PreparedGemmCaptureManifest>,
     /// Route that produced the saved split-forward activations.
     split_forward_route: Option<crate::mamba_ssm::gpu::context::GemmRoute>,
     /// True while the grad arena holds accumulated (un-applied) gradients
@@ -1743,6 +1956,7 @@ impl Mamba3TrainerF32 {
             v_states,
             angle_states,
             graph: None,
+            prepared_gemm_manifest: None,
             split_forward_route: None,
             grads_dirty: false,
             clip_partials,
@@ -1761,6 +1975,9 @@ impl Mamba3TrainerF32 {
 
     pub fn capture_graph(&mut self) -> Result<(), String> {
         self.bias.write(&self.ctx.stream, 1.0, 1.0, self.adam.lr)?;
+        let manifest = self.prepared_gemm_manifest.ok_or_else(|| {
+            "M3 f32 training graph capture requires one successful eager step".to_string()
+        })?;
         // The trainer owns every captured allocation and drops the graph first.
         let g = unsafe {
             GpuMamba3F32TrainingStepGraph::capture(
@@ -1787,6 +2004,7 @@ impl Mamba3TrainerF32 {
                         angle: &mut self.angle_states,
                     },
                 },
+                &manifest,
             )
         }?;
         self.graph = Some(g);
@@ -1895,10 +2113,59 @@ impl Mamba3TrainerF32 {
     }
 
     fn step_eager(&mut self) -> Result<(), String> {
-        self.grads.zero(&self.ctx.stream)?;
-        self.eager_forward()?;
-        self.eager_backward()?;
-        self.eager_optimize()
+        let Self {
+            ctx,
+            m3k,
+            dims,
+            weights,
+            grads,
+            adam,
+            bias,
+            multi_plan,
+            acts,
+            scratch,
+            temporal,
+            mamba_input,
+            d_temporal,
+            ssm_states,
+            k_states,
+            v_states,
+            angle_states,
+            prepared_gemm_manifest,
+            ..
+        } = self;
+        let exec = M3Exec {
+            ctx,
+            kernels: m3k,
+            dims,
+        };
+        let manifest = ctx.record_eager_gemm_manifest(|| {
+            grads.zero(&ctx.stream)?;
+            gpu_forward_mamba3_backbone(
+                &exec,
+                temporal,
+                acts,
+                weights,
+                mamba_input,
+                GpuMamba3StateBufs {
+                    ssm: ssm_states,
+                    k: k_states,
+                    v: v_states,
+                    angle: angle_states,
+                },
+                scratch,
+            )?;
+            gpu_backward_mamba3_backbone(&exec, d_temporal, acts, weights, grads, scratch)?;
+            step_multi(
+                ctx,
+                m3k.adamw_step_multi.get(WeightDtype::F32),
+                multi_plan,
+                adam,
+                bias.ptr(),
+            )
+        })?;
+        *prepared_gemm_manifest = Some(manifest);
+        Ok(())
     }
 
     /// Split forward (see [`Mamba3Trainer::forward`]).

@@ -29,10 +29,26 @@ use crate::mamba_ssm::gpu::blas::TypedPtr;
 use crate::mamba_ssm::gpu::buffers::GpuBuffer;
 use crate::mamba_ssm::gpu::context::GpuCtx;
 use crate::mamba_ssm::gpu::dtype::WeightDtype;
+use crate::mamba_ssm::gpu::graph_capture::{
+    capture_into_graph_with_gemm_plan, require_f32_triad_graph_plan,
+};
+use crate::mamba_ssm::gpu::kernel_identity::{CapturedGemmGraphPlan, PreparedGemmCaptureManifest};
 use crate::mamba_ssm::gpu::launch::{grid_1d, grid_norm};
 use cudarc::driver::PushKernelArg;
 use std::rc::Rc;
 use std::sync::Arc;
+
+fn with_validated_launch(
+    ctx: &GpuCtx,
+    plan: Option<&CapturedGemmGraphPlan>,
+    label: &str,
+    launch: impl FnOnce() -> Result<(), String>,
+) -> Result<(), String> {
+    match plan {
+        Some(plan) => plan.with_validated_launch(ctx, label, launch),
+        None => launch(),
+    }
+}
 
 /// Chunk-pipeline intermediates the prefill needs beyond the no-save layer
 /// scratch: per-window buffers consumed inside F6 and released to the next
@@ -104,6 +120,7 @@ pub struct Mamba3Prefill {
     /// other dims — a longer window would silently index past the
     /// scratch allocations.
     sized_for: GpuMamba3Dims,
+    eager_gemm_manifest: Option<PreparedGemmCaptureManifest>,
 }
 
 /// Output request for [`Mamba3Prefill::run_full`] - the m3 serve surface.
@@ -198,6 +215,7 @@ impl Mamba3Prefill {
             typed,
             dtype,
             sized_for: *dims,
+            eager_gemm_manifest: None,
         })
     }
 
@@ -227,6 +245,19 @@ impl Mamba3Prefill {
     /// plus the optional full post-norm_f temporal and the on-device
     /// pooled column sum (see [`Mamba3PrefillOutputs`]).
     pub fn run_full(
+        &mut self,
+        run: &Mamba3PrefillRun<'_>,
+        states: GpuMamba3StateBufs<'_>,
+        outputs: Mamba3PrefillOutputs<'_>,
+    ) -> Result<(), String> {
+        let manifest = run
+            .ctx
+            .record_eager_gemm_manifest(|| self.run_full_body(run, states, outputs))?;
+        self.eager_gemm_manifest = Some(manifest);
+        Ok(())
+    }
+
+    fn run_full_body(
         &mut self,
         run: &Mamba3PrefillRun<'_>,
         states: GpuMamba3StateBufs<'_>,
@@ -354,7 +385,7 @@ impl Mamba3Prefill {
                     .map_err(|e| format!("prefill input upcast: {e:?}"))?;
             }
         } else {
-            crate::mamba_ssm::gpu::blas::gpu_sgemm_forward_raw(
+            crate::mamba_ssm::gpu::blas::gpu_gemm_bi_forward_raw(
                 ctx,
                 &mut tgt.temporal_work,
                 mamba_input,
@@ -432,7 +463,7 @@ impl Mamba3Prefill {
                     (bt, dm, ip),
                 )?;
             } else {
-                crate::mamba_ssm::gpu::blas::gpu_sgemm_forward_raw(
+                crate::mamba_ssm::gpu::blas::gpu_gemm_bi_forward_raw(
                     ctx,
                     &mut tgt.proj_flat,
                     &tgt.out_flat,
@@ -582,20 +613,28 @@ impl Mamba3Prefill {
             // RoPE angle accumulation continues from the persistent
             // accumulator (zeroed above for a stateless window).
             if na > 0 {
-                crate::mamba3_siso::gpu::forward::gpu_angle_chunked_fwd(
-                    ctx,
-                    m3k,
-                    &mut tgt.angle_cumsum,
-                    a_ptr,
-                    &tgt.angles_raw,
-                    &tgt.dt,
-                    &ck.angle_chunk_sums,
-                    &ck.angle_chunk_carries,
-                    dims.batch,
-                    dims.seq_len,
-                    nh,
-                    na,
-                )?;
+                // SAFETY: the prefill state and scratch buffers are disjoint
+                // allocations on this context and outlive this launch.
+                unsafe {
+                    crate::mamba3_siso::gpu::forward::gpu_angle_chunked_fwd(
+                        ctx,
+                        m3k,
+                        crate::mamba3_siso::gpu::forward::AngleChunkedFwd {
+                            angle_cumsum: &mut tgt.angle_cumsum,
+                            angle_state_ptr: a_ptr,
+                            angles_raw: &tgt.angles_raw,
+                            dt: &tgt.dt,
+                            sums: &ck.angle_chunk_sums,
+                            carries: &ck.angle_chunk_carries,
+                            shape: crate::mamba3_siso::gpu::forward::AngleChunkedShape {
+                                batch: dims.batch,
+                                seq_len: dims.seq_len,
+                                heads: nh,
+                                angles: na,
+                            },
+                        },
+                    )
+                }?;
             }
             // Fused bias add (B + C) + RoPE: one launch, biased tensors
             // still materialize; n_angles == 0 passes through (replacing
@@ -1102,7 +1141,7 @@ impl Mamba3Prefill {
                 unsafe { b.launch(grid_1d(bt * dm)) }
                     .map_err(|e| format!("prefill residual typed L{l}: {e:?}"))?;
             } else {
-                crate::mamba_ssm::gpu::blas::gpu_sgemm_forward_raw(
+                crate::mamba_ssm::gpu::blas::gpu_gemm_bi_forward_raw(
                     ctx,
                     &mut tgt.out_flat,
                     &tgt.gated,
@@ -1217,6 +1256,7 @@ pub struct Mamba3PrefillGraph {
     ctx_resources: Rc<crate::mamba_ssm::gpu::context::GpuCtxResources>,
     _m3_modules: crate::mamba_ssm::gpu::kernels::CudaModuleAnchors,
     flags_at_capture: crate::mamba_ssm::gpu::context::GemmRoute,
+    captured_gemm_plan: Option<CapturedGemmGraphPlan>,
     captured_ctx_token: u64,
     captured_stream_token: usize,
     captured_half_staging_ptr: u64,
@@ -1259,23 +1299,38 @@ impl Mamba3PrefillGraph {
         let weights_arenas = run.weights.arena_identity();
         let weights_dtype = run.weights.bulk_dtype();
         let module_identity = run.kernels.module_identity.clone();
+        let manifest = prefill.eager_gemm_manifest.ok_or_else(|| {
+            "m3 prefill graph capture requires a successful eager run".to_string()
+        })?;
         if weights_dtype != WeightDtype::F32 {
             run.ctx.freeze_graph_scratch();
         }
-        let graph = unsafe {
-            crate::mamba_ssm::gpu::graph_capture::capture_into_graph(&run.ctx.stream, || {
-                prefill.run(run, states.reborrow(), last_hidden)
+        let (graph, captured_gemm_plan) = unsafe {
+            capture_into_graph_with_gemm_plan(run.ctx, manifest.route_capacity, &manifest, || {
+                prefill.run_full_body(
+                    run,
+                    states.reborrow(),
+                    Mamba3PrefillOutputs {
+                        last_hidden,
+                        full_temporal: None,
+                        pooled_sum: None,
+                    },
+                )
             })
         }?;
-        graph
-            .upload()
-            .map_err(|e| format!("prefill graph upload: {e:?}"))?;
+        require_f32_triad_graph_plan(
+            run.ctx,
+            weights_dtype == WeightDtype::F32,
+            captured_gemm_plan.as_ref(),
+            "m3 prefill graph capture",
+        )?;
         run.ctx.note_graph_capture();
         Ok(Self {
             graph,
             ctx_resources: run.ctx.resource_anchor(),
             _m3_modules: run.kernels.module_anchors(),
             flags_at_capture,
+            captured_gemm_plan,
             captured_ctx_token: run.ctx.instance_token(),
             captured_stream_token: run.ctx.stream_token(),
             captured_half_staging_ptr: run.ctx.half_staging_ptr(),
@@ -1364,9 +1419,16 @@ impl Mamba3PrefillGraph {
                     .to_string(),
             );
         }
-        self.graph
-            .launch()
-            .map_err(|e| format!("prefill graph launch: {e:?}"))
+        with_validated_launch(
+            ctx,
+            self.captured_gemm_plan.as_ref(),
+            "m3 prefill graph replay",
+            || {
+                self.graph
+                    .launch()
+                    .map_err(|e| format!("prefill graph launch: {e:?}"))
+            },
+        )
     }
 }
 
@@ -1389,6 +1451,7 @@ pub struct Mamba3PrefillPooledGraph {
     ctx_resources: Rc<crate::mamba_ssm::gpu::context::GpuCtxResources>,
     _m3_modules: crate::mamba_ssm::gpu::kernels::CudaModuleAnchors,
     flags_at_capture: crate::mamba_ssm::gpu::context::GemmRoute,
+    captured_gemm_plan: Option<CapturedGemmGraphPlan>,
     captured_ctx_token: u64,
     captured_stream_token: usize,
     captured_half_staging_ptr: u64,
@@ -1440,12 +1503,15 @@ impl Mamba3PrefillPooledGraph {
         let weights_arenas = run.weights.arena_identity();
         let weights_dtype = run.weights.bulk_dtype();
         let module_identity = run.kernels.module_identity.clone();
+        let manifest = prefill.eager_gemm_manifest.ok_or_else(|| {
+            "m3 pooled prefill graph capture requires a successful eager run".to_string()
+        })?;
         if weights_dtype != WeightDtype::F32 {
             run.ctx.freeze_graph_scratch();
         }
-        let graph = unsafe {
-            crate::mamba_ssm::gpu::graph_capture::capture_into_graph(&run.ctx.stream, || {
-                prefill.run_full(
+        let (graph, captured_gemm_plan) = unsafe {
+            capture_into_graph_with_gemm_plan(run.ctx, manifest.route_capacity, &manifest, || {
+                prefill.run_full_body(
                     run,
                     states.reborrow(),
                     Mamba3PrefillOutputs {
@@ -1456,15 +1522,19 @@ impl Mamba3PrefillPooledGraph {
                 )
             })
         }?;
-        graph
-            .upload()
-            .map_err(|e| format!("m3 pooled prefill graph upload: {e:?}"))?;
+        require_f32_triad_graph_plan(
+            run.ctx,
+            weights_dtype == WeightDtype::F32,
+            captured_gemm_plan.as_ref(),
+            "m3 pooled prefill graph capture",
+        )?;
         run.ctx.note_graph_capture();
         Ok(Self {
             graph,
             ctx_resources: run.ctx.resource_anchor(),
             _m3_modules: run.kernels.module_anchors(),
             flags_at_capture,
+            captured_gemm_plan,
             captured_ctx_token: run.ctx.instance_token(),
             captured_stream_token: run.ctx.stream_token(),
             captured_half_staging_ptr: run.ctx.half_staging_ptr(),
@@ -1549,9 +1619,16 @@ impl Mamba3PrefillPooledGraph {
                     .to_string(),
             );
         }
-        self.graph
-            .launch()
-            .map_err(|e| format!("m3 pooled prefill graph launch: {e:?}"))
+        with_validated_launch(
+            ctx,
+            self.captured_gemm_plan.as_ref(),
+            "m3 pooled prefill graph replay",
+            || {
+                self.graph
+                    .launch()
+                    .map_err(|e| format!("m3 pooled prefill graph launch: {e:?}"))
+            },
+        )
     }
 }
 

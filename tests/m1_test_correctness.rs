@@ -1193,7 +1193,7 @@ mod gpu_tests {
     fn test_backward_diagnostic() {
         use cudarc::driver::PushKernelArg;
         use mamba_rs::gpu::backward::gpu_backward_mamba_layer;
-        use mamba_rs::gpu::blas::gpu_sgemm_backward_grad_raw;
+        use mamba_rs::gpu::blas::gpu_gemm_bi_backward_grad_raw;
         use mamba_rs::gpu::buffers::GpuBuffer;
         use mamba_rs::gpu::context::GpuCtx;
         use mamba_rs::gpu::device::GpuDevice;
@@ -1440,7 +1440,7 @@ mod gpu_tests {
         );
 
         // GPU input_proj backward
-        gpu_sgemm_backward_grad_raw(
+        gpu_gemm_bi_backward_grad_raw(
             &ctx,
             &mut gpu_scratch.d_input_proj_dx,
             (&gpu_grads.input_proj_w, Some(&gpu_grads.input_proj_b)),

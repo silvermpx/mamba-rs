@@ -16,7 +16,7 @@ use mamba_rs::mamba_ssm::gpu::adamw::{
 };
 use mamba_rs::mamba_ssm::gpu::backward::gpu_backward_mamba_backbone;
 use mamba_rs::mamba_ssm::gpu::buffers::GpuBuffer;
-use mamba_rs::mamba_ssm::gpu::context::GpuCtx;
+use mamba_rs::mamba_ssm::gpu::context::{BiGemmFamily, F32TriadPolicy, GpuCtx};
 use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
 use mamba_rs::mamba_ssm::gpu::forward::{
     GpuMambaBackboneActs, GpuMambaDims, GpuMambaScratch, GpuRecurrentState,
@@ -52,10 +52,20 @@ fn cfg() -> MambaConfig {
     }
 }
 
+fn triad_ctx(device: &GpuDevice) -> GpuCtx {
+    let ctx = GpuCtx::new(device).unwrap();
+    ctx.set_batch_invariant(true);
+    ctx.set_bi_gemm_family(BiGemmFamily::Triad);
+    ctx.set_bi_tensor_cores(false);
+    ctx.set_fast_gemm(false);
+    ctx.set_f32_triad_policy(F32TriadPolicy::ExactScalarFmaV1);
+    ctx
+}
+
 #[test]
 fn m1_f32_training_graph_matches_eager() {
     let dev = GpuDevice::new(0).unwrap();
-    let ctx = GpuCtx::new(&dev).unwrap();
+    let ctx = triad_ctx(&dev);
     let cfg = cfg();
     let batch = 1;
     let seq_len = 4;
@@ -194,6 +204,40 @@ fn m1_f32_training_graph_matches_eager() {
     )
     .unwrap();
 
+    let manifest = ctx
+        .record_eager_gemm_manifest(|| {
+            g_grads.zero(&ctx.stream)?;
+            gpu_forward_mamba_backbone(
+                &ctx,
+                &mut g_temp,
+                &mut g_acts,
+                &g_w,
+                &g_input,
+                &mut g_state,
+                &mut g_scratch,
+            )?;
+            gpu_backward_mamba_backbone(
+                &ctx,
+                &mut g_dtemp,
+                &g_grads,
+                &g_acts,
+                &g_w,
+                &g_a_neg,
+                &mut g_scratch,
+            )
+        })
+        .unwrap();
+    assert!(
+        manifest.route_capacity > 0,
+        "explicit Triad warmup must record at least one f32 route"
+    );
+    ctx.stream.synchronize().unwrap();
+    g_state.conv_states.zero(&ctx.stream).unwrap();
+    g_state.ssm_states.zero(&ctx.stream).unwrap();
+    g_state.a_neg_all.upload(&ctx.stream, &a_neg_flat).unwrap();
+    g_input.upload(&ctx.stream, &inp).unwrap();
+    g_dtemp.upload(&ctx.stream, &dt).unwrap();
+
     // All captured allocations outlive the graph in this scope.
     let graph = unsafe {
         GpuMambaF32TrainingStepGraph::capture(
@@ -215,6 +259,7 @@ fn m1_f32_training_graph_matches_eager() {
             },
             batch,
             seq_len,
+            &manifest,
         )
     }
     .unwrap();
@@ -321,7 +366,7 @@ fn m3_f32_training_graph_matches_eager() {
         ..Mamba3Config::default()
     };
     let dev = GpuDevice::new(0).unwrap();
-    let ctx = GpuCtx::new(&dev).unwrap();
+    let ctx = triad_ctx(&dev);
     let m3k = Mamba3Kernels::compile(dev.context(), common::bench::arch0()).unwrap();
     let batch = 1;
     let seq_len = 64;
@@ -482,6 +527,52 @@ fn m3_f32_training_graph_matches_eager() {
         g_adam.weight_decay,
     )
     .unwrap();
+    let manifest = ctx
+        .record_eager_gemm_manifest(|| {
+            g_grads.zero(&ctx.stream)?;
+            gpu_forward_mamba3_backbone(
+                &M3Exec {
+                    ctx: &ctx,
+                    kernels: &m3k,
+                    dims: &dims,
+                },
+                &mut g_temp,
+                &mut g_acts,
+                &g_w,
+                &g_mi,
+                GpuMamba3StateBufs {
+                    ssm: &mut g_ssm,
+                    k: &mut g_ks,
+                    v: &mut g_vs,
+                    angle: &mut g_ang,
+                },
+                &mut g_scratch,
+            )?;
+            gpu_backward_mamba3_backbone(
+                &M3Exec {
+                    ctx: &ctx,
+                    kernels: &m3k,
+                    dims: &dims,
+                },
+                &mut g_dtemp,
+                &g_acts,
+                &g_w,
+                &g_grads,
+                &mut g_scratch,
+            )
+        })
+        .unwrap();
+    assert!(
+        manifest.route_capacity > 0,
+        "explicit Triad warmup must record at least one f32 route"
+    );
+    ctx.stream.synchronize().unwrap();
+    g_ssm.zero(&ctx.stream).unwrap();
+    g_ks.zero(&ctx.stream).unwrap();
+    g_vs.zero(&ctx.stream).unwrap();
+    g_ang.zero(&ctx.stream).unwrap();
+    g_mi.upload(&ctx.stream, &inp).unwrap();
+    g_dtemp.upload(&ctx.stream, &dt).unwrap();
     // All captured allocations outlive the graph in this scope.
     let graph = unsafe {
         GpuMamba3F32TrainingStepGraph::capture(
@@ -508,6 +599,7 @@ fn m3_f32_training_graph_matches_eager() {
                     angle: &mut g_ang,
                 },
             },
+            &manifest,
         )
     }
     .unwrap();

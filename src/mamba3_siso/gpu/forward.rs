@@ -19,13 +19,168 @@ use super::state::{
     GpuMamba3TargetScratch, M3Exec, Mamba3LayerPtrs,
 };
 use super::weights::{GpuMamba3LayerWeights, GpuMamba3Weights};
-use crate::mamba_ssm::gpu::blas::gpu_sgemm_forward_raw;
+use crate::mamba_ssm::gpu::blas::gpu_gemm_bi_forward_raw;
 use crate::mamba_ssm::gpu::buffers::{GpuBuffer, GpuByteBuffer};
 use crate::mamba_ssm::gpu::context::GpuCtx;
 use crate::mamba_ssm::gpu::launch::{grid_1d, grid_norm};
 use cudarc::driver::PushKernelArg;
 
-/// Mamba-3 SISO single-layer GPU forward (8-phase pipeline).
+/// Logical dimensions for chunk-parallel angle accumulation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AngleChunkedShape {
+    pub batch: usize,
+    pub seq_len: usize,
+    pub heads: usize,
+    pub angles: usize,
+}
+
+/// Buffers consumed by one chunk-parallel angle launch.
+pub struct AngleChunkedFwd<'a> {
+    pub angle_cumsum: &'a mut GpuBuffer,
+    pub angle_state_ptr: cudarc::driver::sys::CUdeviceptr,
+    pub angles_raw: &'a GpuBuffer,
+    pub dt: &'a GpuBuffer,
+    pub sums: &'a GpuByteBuffer,
+    pub carries: &'a GpuByteBuffer,
+    pub shape: AngleChunkedShape,
+}
+
+#[derive(Clone, Copy)]
+struct AngleChunkedLengths {
+    angle_cumsum: usize,
+    angles_raw: usize,
+    dt: usize,
+    sums_bytes: usize,
+    carries_bytes: usize,
+}
+
+#[derive(Debug)]
+struct ValidatedAngleChunkedLaunch {
+    batch: i32,
+    seq_len: i32,
+    heads: i32,
+    angles: i32,
+    chunk_size: i32,
+    grid_x: u32,
+    grid_y: u32,
+    block_x: u32,
+    snapshot_bytes: usize,
+}
+
+fn checked_angle_product(label: &str, factors: &[usize]) -> Result<usize, String> {
+    factors.iter().try_fold(1usize, |product, &factor| {
+        product
+            .checked_mul(factor)
+            .ok_or_else(|| format!("angle {label} overflows usize"))
+    })
+}
+
+fn angle_i32(label: &str, value: usize) -> Result<i32, String> {
+    i32::try_from(value).map_err(|_| format!("angle {label} does not fit i32: {value}"))
+}
+
+fn require_angle_length(label: &str, actual: usize, required: usize) -> Result<(), String> {
+    if actual < required {
+        return Err(format!(
+            "angle {label} is undersized: need {required}, got {actual}"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_angle_chunked_layout(
+    shape: AngleChunkedShape,
+    lengths: AngleChunkedLengths,
+    angle_state_ptr: cudarc::driver::sys::CUdeviceptr,
+) -> Result<ValidatedAngleChunkedLaunch, String> {
+    let AngleChunkedShape {
+        batch,
+        seq_len,
+        heads,
+        angles,
+    } = shape;
+    for (label, value) in [
+        ("batch", batch),
+        ("sequence length", seq_len),
+        ("head count", heads),
+        ("angle count", angles),
+    ] {
+        if value == 0 {
+            return Err(format!("angle {label} must be non-zero"));
+        }
+    }
+    if angle_state_ptr == 0 {
+        return Err("angle state pointer is null".into());
+    }
+
+    let padded_seq_len = seq_len
+        .checked_add(CHUNK_SIZE - 1)
+        .ok_or_else(|| "angle padded sequence length overflows usize".to_string())?;
+    let _ = angle_i32("padded sequence length", padded_seq_len)?;
+    let n_chunks = padded_seq_len / CHUNK_SIZE;
+    let batch_time = checked_angle_product("batch-time extent", &[batch, seq_len])?;
+    let lanes = checked_angle_product("lane extent", &[heads, angles])?;
+    let output_elements = checked_angle_product("output extent", &[batch_time, lanes])?;
+    let angle_elements = checked_angle_product("raw-angle extent", &[batch_time, angles])?;
+    let dt_elements = checked_angle_product("dt extent", &[batch_time, heads])?;
+    let sum_elements =
+        checked_angle_product("chunk-sum extent", &[batch, n_chunks, heads, angles])?;
+    let state_elements = checked_angle_product("state extent", &[batch, heads, angles])?;
+    let sums_bytes = checked_angle_product(
+        "chunk-sum byte extent",
+        &[sum_elements, std::mem::size_of::<f64>()],
+    )?;
+    let snapshot_bytes = checked_angle_product(
+        "state snapshot byte extent",
+        &[state_elements, std::mem::size_of::<f32>()],
+    )?;
+
+    let batch_i = angle_i32("batch", batch)?;
+    let seq_len_i = angle_i32("sequence length", seq_len)?;
+    let heads_i = angle_i32("head count", heads)?;
+    let angles_i = angle_i32("angle count", angles)?;
+    let chunk_size_i = angle_i32("chunk size", CHUNK_SIZE)?;
+    for (label, extent) in [
+        ("batch-time extent", batch_time),
+        ("lane extent", lanes),
+        ("output extent", output_elements),
+        ("raw-angle extent", angle_elements),
+        ("dt extent", dt_elements),
+        ("chunk-sum extent", sum_elements),
+        ("state extent", state_elements),
+    ] {
+        let _ = angle_i32(label, extent)?;
+    }
+
+    require_angle_length("angle_cumsum", lengths.angle_cumsum, output_elements)?;
+    require_angle_length("angles_raw", lengths.angles_raw, angle_elements)?;
+    require_angle_length("dt", lengths.dt, dt_elements)?;
+    require_angle_length("sums", lengths.sums_bytes, sums_bytes)?;
+    require_angle_length("carries", lengths.carries_bytes, snapshot_bytes)?;
+
+    let grid_x = u32::try_from(checked_angle_product("grid-x extent", &[batch, n_chunks])?)
+        .map_err(|_| "angle grid-x extent does not fit u32".to_string())?;
+    let grid_y = u32::try_from(lanes.div_ceil(256))
+        .map_err(|_| "angle grid-y extent does not fit u32".to_string())?;
+    if grid_y > u16::MAX.into() {
+        return Err(format!("angle grid-y extent exceeds CUDA limit: {grid_y}"));
+    }
+    let block_x = u32::try_from(lanes.min(256))
+        .map_err(|_| "angle block-x extent does not fit u32".to_string())?;
+
+    Ok(ValidatedAngleChunkedLaunch {
+        batch: batch_i,
+        seq_len: seq_len_i,
+        heads: heads_i,
+        angles: angles_i,
+        chunk_size: chunk_size_i,
+        grid_x,
+        grid_y,
+        block_x,
+        snapshot_bytes,
+    })
+}
+
 /// Chunk-parallel angle accumulation: per-chunk fp64 delta sums, a
 /// serial carry chain per (batch, head, angle) seeded from the
 /// persistent angle state, then a per-chunk re-walk writing the f32
@@ -33,36 +188,57 @@ use cudarc::driver::PushKernelArg;
 /// association, one writer per cell, no atomics); replaces the
 /// sequential single-thread-per-lane kernel whose dependent fp64 chain
 /// dominates multi-chunk windows.
-#[allow(
-    clippy::too_many_arguments,
-    reason = "flat launch-parameter pack \
-    shared by three call sites; a struct would be built and destructured \
-    at every launch for no reuse"
-)]
-pub fn gpu_angle_chunked_fwd(
+///
+/// # Safety
+///
+/// Every request buffer and `request.angle_state_ptr` must belong to
+/// `ctx`'s CUDA context. The state pointer must name readable and
+/// writable storage for `batch * heads * angles` contiguous `f32`
+/// values and must not overlap any request buffer. All allocations must
+/// remain alive and must not be accessed from another stream until this
+/// stream has completed the enqueued work.
+pub unsafe fn gpu_angle_chunked_fwd(
     ctx: &GpuCtx,
     m3k: &Mamba3Kernels,
-    angle_cumsum: &mut GpuBuffer,
-    angle_state_ptr: cudarc::driver::sys::CUdeviceptr,
-    angles_raw: &GpuBuffer,
-    dt: &GpuBuffer,
-    sums: &GpuByteBuffer,
-    carries: &GpuByteBuffer,
-    batch: usize,
-    seq_len: usize,
-    nh: usize,
-    na: usize,
+    request: AngleChunkedFwd<'_>,
 ) -> Result<(), String> {
     use cudarc::driver::PushKernelArg;
-    let cs = CHUNK_SIZE;
-    let nc = seq_len.div_ceil(cs);
-    let b_i = batch as i32;
-    let t_i = seq_len as i32;
-    let nh_i = nh as i32;
-    let na_i = na as i32;
-    let cs_i = cs as i32;
-    let lane_grid_y = (nh * na).div_ceil(256) as u32;
-    let lane_block = 256.min((nh * na) as u32);
+    let AngleChunkedFwd {
+        angle_cumsum,
+        angle_state_ptr,
+        angles_raw,
+        dt,
+        sums,
+        carries,
+        shape:
+            AngleChunkedShape {
+                batch,
+                seq_len,
+                heads: nh,
+                angles: na,
+            },
+    } = request;
+    let launch = validate_angle_chunked_layout(
+        AngleChunkedShape {
+            batch,
+            seq_len,
+            heads: nh,
+            angles: na,
+        },
+        AngleChunkedLengths {
+            angle_cumsum: angle_cumsum.len(),
+            angles_raw: angles_raw.len(),
+            dt: dt.len(),
+            sums_bytes: sums.len_bytes(),
+            carries_bytes: carries.len_bytes(),
+        },
+        angle_state_ptr,
+    )?;
+    let b_i = launch.batch;
+    let t_i = launch.seq_len;
+    let nh_i = launch.heads;
+    let na_i = launch.angles;
+    let cs_i = launch.chunk_size;
     let sums_ptr = sums.cached_ptr();
     // The carries buffer is repurposed as the ENTRY-STATE SNAPSHOT: the
     // apply kernel folds the per-chunk carry chain inline (bit-identical
@@ -70,12 +246,11 @@ pub fn gpu_angle_chunked_fwd(
     // entering state from this copy because the last chunk's block
     // writes the exit state into angle_state concurrently.
     let snapshot_ptr = carries.cached_ptr();
-    let snap_bytes = batch * nh * na * std::mem::size_of::<f32>();
     let rc = unsafe {
         cudarc::driver::sys::cuMemcpyDtoDAsync_v2(
             snapshot_ptr,
             angle_state_ptr,
-            snap_bytes,
+            launch.snapshot_bytes,
             ctx.stream.cu_stream(),
         )
     };
@@ -93,8 +268,8 @@ pub fn gpu_angle_chunked_fwd(
         bld.arg(&na_i);
         bld.arg(&cs_i);
         let grid = cudarc::driver::LaunchConfig {
-            grid_dim: ((batch * nc) as u32, lane_grid_y, 1),
-            block_dim: (lane_block, 1, 1),
+            grid_dim: (launch.grid_x, launch.grid_y, 1),
+            block_dim: (launch.block_x, 1, 1),
             shared_mem_bytes: 0,
         };
         unsafe { bld.launch(grid) }.map_err(|e| format!("angle chunk sums: {e:?}"))?;
@@ -113,8 +288,8 @@ pub fn gpu_angle_chunked_fwd(
         bld.arg(&na_i);
         bld.arg(&cs_i);
         let grid = cudarc::driver::LaunchConfig {
-            grid_dim: ((batch * nc) as u32, lane_grid_y, 1),
-            block_dim: (lane_block, 1, 1),
+            grid_dim: (launch.grid_x, launch.grid_y, 1),
+            block_dim: (launch.block_x, 1, 1),
             shared_mem_bytes: 0,
         };
         unsafe { bld.launch(grid) }.map_err(|e| format!("angle chunk apply: {e:?}"))?;
@@ -167,7 +342,7 @@ pub fn gpu_forward_mamba3_layer(
     }
 
     // F2: in_proj SGEMM
-    gpu_sgemm_forward_raw(
+    gpu_gemm_bi_forward_raw(
         ctx,
         &mut scratch.proj_flat,
         &acts.post_norm,
@@ -257,20 +432,28 @@ pub fn gpu_forward_mamba3_layer(
     }
     // F5: angle accumulation (chunk-parallel; see gpu_angle_chunked_fwd)
     if na > 0 {
-        gpu_angle_chunked_fwd(
-            ctx,
-            m3k,
-            &mut acts.angle_cumsum,
-            layer_ptrs.angle_state,
-            &acts.angles_raw,
-            &acts.dt,
-            &scratch.angle_chunk_sums,
-            &scratch.angle_chunk_carries,
-            bt / dims.seq_len,
-            dims.seq_len,
-            nh,
-            na,
-        )?;
+        // SAFETY: layer state and activations are disjoint allocations on
+        // this context and remain live for the enclosing forward pass.
+        unsafe {
+            gpu_angle_chunked_fwd(
+                ctx,
+                m3k,
+                AngleChunkedFwd {
+                    angle_cumsum: &mut acts.angle_cumsum,
+                    angle_state_ptr: layer_ptrs.angle_state,
+                    angles_raw: &acts.angles_raw,
+                    dt: &acts.dt,
+                    sums: &scratch.angle_chunk_sums,
+                    carries: &scratch.angle_chunk_carries,
+                    shape: AngleChunkedShape {
+                        batch: bt / dims.seq_len,
+                        seq_len: dims.seq_len,
+                        heads: nh,
+                        angles: na,
+                    },
+                },
+            )
+        }?;
     }
 
     // F4c-f fused: bias add (B + C) + RoPE in one launch. The biased
@@ -589,7 +772,7 @@ pub fn gpu_forward_mamba3_layer(
     }
 
     // F8: out_proj + residual
-    gpu_sgemm_forward_raw(
+    gpu_gemm_bi_forward_raw(
         ctx,
         &mut scratch.out_flat,
         &acts.gated,
@@ -660,7 +843,7 @@ pub fn gpu_forward_mamba3_backbone(
 
     acts.input_proj_inputs
         .copy_from_raw(mamba_input, &ctx.stream)?;
-    gpu_sgemm_forward_raw(
+    gpu_gemm_bi_forward_raw(
         ctx,
         temporal,
         mamba_input,
@@ -766,7 +949,7 @@ pub fn gpu_forward_mamba3_target_burnin(
     tgt.v_states.zero(&ctx.stream)?;
     tgt.angle_states.zero(&ctx.stream)?;
 
-    gpu_sgemm_forward_raw(
+    gpu_gemm_bi_forward_raw(
         ctx,
         &mut tgt.temporal_work,
         mamba_input,
@@ -795,7 +978,7 @@ pub fn gpu_forward_mamba3_target_burnin(
             unsafe { builder.launch(grid_norm(bt, dm)) }
                 .map_err(|e| format!("rmsnorm_fwd m3 tgt L{l}: {:?}", e))?;
         }
-        gpu_sgemm_forward_raw(
+        gpu_gemm_bi_forward_raw(
             ctx,
             &mut tgt.proj_flat,
             &tgt.out_flat,
@@ -1048,7 +1231,7 @@ pub fn gpu_forward_mamba3_target_burnin(
             unsafe { builder.launch(grid_1d(bt * di)) }
                 .map_err(|e| format!("silu_gate_fwd m3 tgt L{l}: {:?}", e))?;
         }
-        gpu_sgemm_forward_raw(
+        gpu_gemm_bi_forward_raw(
             ctx,
             &mut tgt.out_flat,
             &tgt.gated,
@@ -1102,4 +1285,139 @@ pub fn gpu_forward_mamba3_target_burnin(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod angle_chunked_contract_tests {
+    use super::{
+        AngleChunkedLengths, AngleChunkedShape, CHUNK_SIZE, validate_angle_chunked_layout,
+    };
+
+    const SHAPE: AngleChunkedShape = AngleChunkedShape {
+        batch: 2,
+        seq_len: 65,
+        heads: 3,
+        angles: 4,
+    };
+    const LENGTHS: AngleChunkedLengths = AngleChunkedLengths {
+        angle_cumsum: 1_560,
+        angles_raw: 520,
+        dt: 390,
+        sums_bytes: 384,
+        carries_bytes: 96,
+    };
+
+    #[test]
+    fn rejects_zero_dimensions_and_state_pointer() {
+        for shape in [
+            AngleChunkedShape { batch: 0, ..SHAPE },
+            AngleChunkedShape {
+                seq_len: 0,
+                ..SHAPE
+            },
+            AngleChunkedShape { heads: 0, ..SHAPE },
+            AngleChunkedShape { angles: 0, ..SHAPE },
+        ] {
+            let err = validate_angle_chunked_layout(shape, LENGTHS, 1).unwrap_err();
+            assert!(err.contains("must be non-zero"), "{err}");
+        }
+
+        let err = validate_angle_chunked_layout(SHAPE, LENGTHS, 0).unwrap_err();
+        assert!(err.contains("angle state pointer is null"), "{err}");
+    }
+
+    #[test]
+    fn rejects_geometry_overflow_before_launch() {
+        let shape = AngleChunkedShape {
+            batch: usize::MAX,
+            seq_len: 2,
+            heads: 1,
+            angles: 1,
+        };
+        let err = validate_angle_chunked_layout(shape, LENGTHS, 1).unwrap_err();
+        assert!(err.contains("overflows usize"), "{err}");
+    }
+
+    #[test]
+    fn rejects_dimension_truncation_before_launch() {
+        let shape = AngleChunkedShape {
+            batch: i32::MAX as usize + 1,
+            seq_len: 1,
+            heads: 1,
+            angles: 1,
+        };
+        let lengths = AngleChunkedLengths {
+            angle_cumsum: shape.batch,
+            angles_raw: shape.batch,
+            dt: shape.batch,
+            sums_bytes: shape.batch * std::mem::size_of::<f64>(),
+            carries_bytes: shape.batch * std::mem::size_of::<f32>(),
+        };
+        let err = validate_angle_chunked_layout(shape, lengths, 1).unwrap_err();
+        assert!(err.contains("does not fit i32"), "{err}");
+    }
+
+    #[test]
+    fn rejects_chunk_ceiling_integer_overflow() {
+        let shape = AngleChunkedShape {
+            batch: 1,
+            seq_len: i32::MAX as usize,
+            heads: 1,
+            angles: 1,
+        };
+        let n_chunks = shape.seq_len.div_ceil(CHUNK_SIZE);
+        let lengths = AngleChunkedLengths {
+            angle_cumsum: shape.seq_len,
+            angles_raw: shape.seq_len,
+            dt: shape.seq_len,
+            sums_bytes: n_chunks * std::mem::size_of::<f64>(),
+            carries_bytes: std::mem::size_of::<f32>(),
+        };
+        let err = validate_angle_chunked_layout(shape, lengths, 1).unwrap_err();
+        assert!(err.contains("padded sequence length"), "{err}");
+    }
+
+    #[test]
+    fn rejects_each_undersized_buffer() {
+        for (label, lengths) in [
+            (
+                "angle_cumsum",
+                AngleChunkedLengths {
+                    angle_cumsum: LENGTHS.angle_cumsum - 1,
+                    ..LENGTHS
+                },
+            ),
+            (
+                "angles_raw",
+                AngleChunkedLengths {
+                    angles_raw: LENGTHS.angles_raw - 1,
+                    ..LENGTHS
+                },
+            ),
+            (
+                "dt",
+                AngleChunkedLengths {
+                    dt: LENGTHS.dt - 1,
+                    ..LENGTHS
+                },
+            ),
+            (
+                "sums",
+                AngleChunkedLengths {
+                    sums_bytes: LENGTHS.sums_bytes - 1,
+                    ..LENGTHS
+                },
+            ),
+            (
+                "carries",
+                AngleChunkedLengths {
+                    carries_bytes: LENGTHS.carries_bytes - 1,
+                    ..LENGTHS
+                },
+            ),
+        ] {
+            let err = validate_angle_chunked_layout(SHAPE, lengths, 1).unwrap_err();
+            assert!(err.contains(label), "{label}: {err}");
+        }
+    }
 }

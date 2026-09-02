@@ -446,20 +446,28 @@ pub fn gpu_forward_mamba3_layer_mixed(
     // F5: angle accumulation (chunk-parallel, f32 args; see
     // gpu_angle_chunked_fwd).
     if na > 0 {
-        crate::mamba3_siso::gpu::forward::gpu_angle_chunked_fwd(
-            ctx,
-            m3k,
-            &mut acts.angle_cumsum,
-            angle_state,
-            &acts.angles_raw,
-            &acts.dt,
-            &scratch.angle_chunk_sums,
-            &scratch.angle_chunk_carries,
-            bt / dims.seq_len,
-            dims.seq_len,
-            nh,
-            na,
-        )?;
+        // SAFETY: layer state and activations are disjoint allocations on
+        // this context and remain live for the enclosing forward pass.
+        unsafe {
+            crate::mamba3_siso::gpu::forward::gpu_angle_chunked_fwd(
+                ctx,
+                m3k,
+                crate::mamba3_siso::gpu::forward::AngleChunkedFwd {
+                    angle_cumsum: &mut acts.angle_cumsum,
+                    angle_state_ptr: angle_state,
+                    angles_raw: &acts.angles_raw,
+                    dt: &acts.dt,
+                    sums: &scratch.angle_chunk_sums,
+                    carries: &scratch.angle_chunk_carries,
+                    shape: crate::mamba3_siso::gpu::forward::AngleChunkedShape {
+                        batch: bt / dims.seq_len,
+                        seq_len: dims.seq_len,
+                        heads: nh,
+                        angles: na,
+                    },
+                },
+            )
+        }?;
     }
 
     // F4c-f fused: typed bias add (B + C) + RoPE in one launch (the

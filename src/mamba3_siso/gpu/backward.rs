@@ -10,7 +10,7 @@ use super::state::{GpuMamba3BackboneActs, GpuMamba3LayerActs, GpuMamba3Scratch, 
 use super::weights::{
     GpuMamba3Grads, GpuMamba3LayerGrads, GpuMamba3LayerWeights, GpuMamba3Weights,
 };
-use crate::mamba_ssm::gpu::blas::gpu_sgemm_backward_grad_raw;
+use crate::mamba_ssm::gpu::blas::gpu_gemm_bi_backward_grad_raw;
 use crate::mamba_ssm::gpu::buffers::GpuBuffer;
 use crate::mamba_ssm::gpu::launch::{grid_1d, grid_norm};
 use cudarc::driver::PushKernelArg;
@@ -43,7 +43,7 @@ pub fn gpu_backward_mamba3_layer(
 
     // B8: out_proj backward: d_gated = d_temporal @ out_proj_w^T,
     //     d_out_proj_w += gated^T @ d_temporal.
-    gpu_sgemm_backward_grad_raw(
+    gpu_gemm_bi_backward_grad_raw(
         ctx,
         &mut scratch.d_gated,
         (&lg.out_proj_w, None),
@@ -805,7 +805,7 @@ pub fn gpu_backward_mamba3_layer(
     }
 
     // B2: in_proj backward.
-    gpu_sgemm_backward_grad_raw(
+    gpu_gemm_bi_backward_grad_raw(
         ctx,
         &mut scratch.d_norm,
         (&lg.in_proj_w, None),
@@ -959,7 +959,7 @@ pub fn gpu_backward_mamba3_backbone(
     }
 
     // input_proj bwd.
-    gpu_sgemm_backward_grad_raw(
+    gpu_gemm_bi_backward_grad_raw(
         ctx,
         &mut scratch.d_input_proj_dx,
         (&grads.input_proj_w, Some(&grads.input_proj_b)),

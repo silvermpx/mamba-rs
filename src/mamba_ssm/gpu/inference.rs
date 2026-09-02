@@ -11,6 +11,8 @@ use super::context::GpuCtx;
 use super::device::GpuDevice;
 use super::dtype::WeightDtype;
 use super::forward::GpuMambaDims;
+use super::graph_capture::{capture_into_graph_with_gemm_plan, require_f32_triad_graph_plan};
+use super::kernel_identity::{CapturedGemmGraphPlan, PreparedGemmCaptureManifest};
 use super::launch::{grid_1d, grid_norm};
 use super::weights::{
     GpuMambaMixedWeights, GpuMambaWeights, MambaLayerWeightsView, MambaWeightsView,
@@ -18,7 +20,20 @@ use super::weights::{
 use crate::config::MambaConfig;
 use crate::weights::MambaWeights;
 use cudarc::driver::PushKernelArg;
+use std::cell::Cell;
 use std::sync::Arc;
+
+fn with_validated_launch(
+    ctx: &GpuCtx,
+    plan: Option<&CapturedGemmGraphPlan>,
+    label: &str,
+    launch: impl FnOnce() -> Result<(), String>,
+) -> Result<(), String> {
+    match plan {
+        Some(plan) => plan.with_validated_launch(ctx, label, launch),
+        None => launch(),
+    }
+}
 
 // ---------------------------------------------------------------------------
 // GPU Inference State
@@ -246,6 +261,8 @@ pub struct GpuMambaInference {
     pub(super) identity_proj: bool,
     graph: Option<cudarc::driver::CudaGraph>,
     captured_gemm_route: Option<crate::mamba_ssm::gpu::context::GemmRoute>,
+    captured_gemm_plan: Option<CapturedGemmGraphPlan>,
+    eager_gemm_manifest: Cell<Option<PreparedGemmCaptureManifest>>,
     /// Raw pointers captured during graph capture for runtime validation.
     captured_state_ptr: u64,
     captured_scratch_ptr: u64,
@@ -320,6 +337,8 @@ impl GpuMambaInference {
             identity_proj,
             graph: None,
             captured_gemm_route: None,
+            captured_gemm_plan: None,
+            eager_gemm_manifest: Cell::new(None),
             captured_state_ptr: 0,
             captured_scratch_ptr: 0,
         })
@@ -347,18 +366,44 @@ impl GpuMambaInference {
         let snap_state = state.conv.cached_ptr();
         let snap_scratch = scratch.gpu_input.cached_ptr();
         let snap_gemm_route = self.ctx.gemm_route();
-        let stream = self.ctx.stream.clone();
-        let graph = unsafe {
-            crate::mamba_ssm::gpu::graph_capture::capture_into_graph(&stream, || {
+        let manifest = self.eager_gemm_manifest.get().ok_or_else(|| {
+            "M1 f32 inference graph capture requires a successful eager step".to_string()
+        })?;
+        let (graph, captured_gemm_plan) = unsafe {
+            capture_into_graph_with_gemm_plan(&self.ctx, manifest.route_capacity, &manifest, || {
                 self.step_kernels(state, scratch)
             })
         }?;
+        require_f32_triad_graph_plan(
+            &self.ctx,
+            true,
+            captured_gemm_plan.as_ref(),
+            "M1 f32 inference graph capture",
+        )?;
         self.graph = Some(graph);
         self.captured_gemm_route = Some(snap_gemm_route);
+        self.captured_gemm_plan = captured_gemm_plan;
         self.captured_state_ptr = snap_state;
         self.captured_scratch_ptr = snap_scratch;
         self.ctx.note_graph_capture();
         Ok(())
+    }
+
+    fn launch_captured_graph(&self) -> Result<(), String> {
+        let graph = self
+            .graph
+            .as_ref()
+            .ok_or_else(|| "M1 f32 inference graph is not captured".to_string())?;
+        with_validated_launch(
+            &self.ctx,
+            self.captured_gemm_plan.as_ref(),
+            "M1 f32 inference graph replay",
+            || {
+                graph
+                    .launch()
+                    .map_err(|error| format!("graph launch: {error:?}"))
+            },
+        )
     }
 
     /// Whether a CUDA Graph has been captured.
@@ -398,7 +443,7 @@ impl GpuMambaInference {
         scratch.gpu_input.upload(&self.ctx.stream, input)?;
 
         // Run GPU kernel pipeline (graph replay or individual launches)
-        if let Some(ref g) = self.graph {
+        if self.graph.is_some() {
             if self.captured_gemm_route != Some(self.ctx.gemm_route()) {
                 return Err("inference graph replay: GEMM route changed since capture".into());
             }
@@ -412,9 +457,12 @@ impl GpuMambaInference {
                 self.captured_scratch_ptr,
                 "CUDA Graph replay requires the same scratch buffers used during capture"
             );
-            g.launch().map_err(|e| format!("graph launch: {e:?}"))?;
+            self.launch_captured_graph()?;
         } else {
-            self.step_kernels(state, scratch)?;
+            let manifest = self
+                .ctx
+                .record_eager_gemm_manifest(|| self.step_kernels(state, scratch))?;
+            self.eager_gemm_manifest.set(Some(manifest));
         }
 
         // Sync: ensure all GPU work completes before D2H download.
@@ -435,15 +483,18 @@ impl GpuMambaInference {
         scratch: &mut GpuInferenceScratch,
     ) -> Result<(), String> {
         scratch.gpu_input.upload(&self.ctx.stream, input)?;
-        if let Some(ref g) = self.graph {
+        if self.graph.is_some() {
             if self.captured_gemm_route != Some(self.ctx.gemm_route()) {
                 return Err("inference graph replay: GEMM route changed since capture".into());
             }
             assert_eq!(state.conv.cached_ptr(), self.captured_state_ptr);
             assert_eq!(scratch.gpu_input.cached_ptr(), self.captured_scratch_ptr);
-            g.launch().map_err(|e| format!("graph launch: {e:?}"))?;
+            self.launch_captured_graph()?;
         } else {
-            self.step_kernels(state, scratch)?;
+            let manifest = self
+                .ctx
+                .record_eager_gemm_manifest(|| self.step_kernels(state, scratch))?;
+            self.eager_gemm_manifest.set(Some(manifest));
         }
         Ok(())
     }
@@ -843,6 +894,8 @@ pub struct GpuMambaInferenceMixed {
     a_neg_all: GpuBuffer,
     graph: Option<cudarc::driver::CudaGraph>,
     captured_gemm_route: Option<crate::mamba_ssm::gpu::context::GemmRoute>,
+    captured_mixed_native_gemm_plan: Option<CapturedGemmGraphPlan>,
+    eager_mixed_native_gemm_manifest: Cell<Option<PreparedGemmCaptureManifest>>,
     captured_state_ptr: u64,
     captured_scratch_ptr: u64,
     captured_half_staging_ptr: u64,
@@ -862,6 +915,23 @@ impl GpuMambaInferenceMixed {
             self.captured_half_staging_ptr,
             self.captured_bi_upcast_ptrs,
             "mixed inference graph replay",
+        )
+    }
+
+    fn launch_mixed_native_graph(&self) -> Result<(), String> {
+        let graph = self
+            .graph
+            .as_ref()
+            .ok_or_else(|| "M1 mixed-native inference graph is not captured".to_string())?;
+        with_validated_launch(
+            &self.engine.ctx,
+            self.captured_mixed_native_gemm_plan.as_ref(),
+            "M1 mixed-native inference graph replay",
+            || {
+                graph
+                    .launch()
+                    .map_err(|error| format!("graph launch mixed_native: {error:?}"))
+            },
         )
     }
 
@@ -918,6 +988,8 @@ impl GpuMambaInferenceMixed {
             a_neg_all,
             graph: None,
             captured_gemm_route: None,
+            captured_mixed_native_gemm_plan: None,
+            eager_mixed_native_gemm_manifest: Cell::new(None),
             captured_state_ptr: 0,
             captured_scratch_ptr: 0,
             captured_half_staging_ptr: 0,
@@ -1373,7 +1445,7 @@ impl GpuMambaInferenceMixed {
         scratch: &mut GpuInferenceMixedScratch,
     ) -> Result<(), String> {
         scratch.gpu_input.upload(&self.engine.ctx.stream, input)?;
-        if let Some(ref g) = self.graph {
+        if self.graph.is_some() {
             if self.captured_gemm_route != Some(self.engine.ctx.gemm_route()) {
                 return Err(
                     "mixed inference graph replay: GEMM route changed since capture".into(),
@@ -1382,10 +1454,13 @@ impl GpuMambaInferenceMixed {
             self.ensure_graph_scratch()?;
             assert_eq!(state.conv.cached_ptr(), self.captured_state_ptr);
             assert_eq!(scratch.gpu_input.cached_ptr(), self.captured_scratch_ptr);
-            g.launch()
-                .map_err(|e| format!("graph launch mixed_native: {e:?}"))?;
+            self.launch_mixed_native_graph()?;
         } else {
-            self.step_kernels_mixed_native(state, scratch)?;
+            let manifest = self
+                .engine
+                .ctx
+                .record_eager_gemm_manifest(|| self.step_kernels_mixed_native(state, scratch))?;
+            self.eager_mixed_native_gemm_manifest.set(Some(manifest));
         }
         self.engine
             .ctx
@@ -1406,7 +1481,7 @@ impl GpuMambaInferenceMixed {
         scratch: &mut GpuInferenceMixedScratch,
     ) -> Result<(), String> {
         scratch.gpu_input.upload(&self.engine.ctx.stream, input)?;
-        if let Some(ref g) = self.graph {
+        if self.graph.is_some() {
             if self.captured_gemm_route != Some(self.engine.ctx.gemm_route()) {
                 return Err(
                     "mixed inference graph replay: GEMM route changed since capture".into(),
@@ -1415,11 +1490,15 @@ impl GpuMambaInferenceMixed {
             self.ensure_graph_scratch()?;
             assert_eq!(state.conv.cached_ptr(), self.captured_state_ptr);
             assert_eq!(scratch.gpu_input.cached_ptr(), self.captured_scratch_ptr);
-            g.launch()
-                .map_err(|e| format!("graph launch mixed_native: {e:?}"))?;
+            self.launch_mixed_native_graph()?;
             Ok(())
         } else {
-            self.step_kernels_mixed_native(state, scratch)
+            let manifest = self
+                .engine
+                .ctx
+                .record_eager_gemm_manifest(|| self.step_kernels_mixed_native(state, scratch))?;
+            self.eager_mixed_native_gemm_manifest.set(Some(manifest));
+            Ok(())
         }
     }
 
@@ -1455,15 +1534,21 @@ impl GpuMambaInferenceMixed {
         let snap_half_staging = self.engine.ctx.half_staging_ptr();
         let snap_bi_upcast = self.engine.ctx.bi_upcast_scratch_ptrs();
         let snap_gemm_route = self.engine.ctx.gemm_route();
-        let stream = self.engine.ctx.stream.clone();
+        let manifest = self.eager_mixed_native_gemm_manifest.get().ok_or_else(|| {
+            "M1 mixed-native inference graph capture requires a successful eager step".to_string()
+        })?;
         self.engine.ctx.freeze_graph_scratch();
-        let graph = unsafe {
-            crate::mamba_ssm::gpu::graph_capture::capture_into_graph(&stream, || {
-                self.step_kernels_mixed_native(state, scratch)
-            })
+        let (graph, captured_gemm_plan) = unsafe {
+            capture_into_graph_with_gemm_plan(
+                &self.engine.ctx,
+                manifest.route_capacity,
+                &manifest,
+                || self.step_kernels_mixed_native(state, scratch),
+            )
         }?;
         self.graph = Some(graph);
         self.captured_gemm_route = Some(snap_gemm_route);
+        self.captured_mixed_native_gemm_plan = captured_gemm_plan;
         self.captured_state_ptr = snap_state;
         self.captured_scratch_ptr = snap_scratch;
         self.captured_half_staging_ptr = snap_half_staging;

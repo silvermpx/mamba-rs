@@ -1,15 +1,439 @@
-use std::sync::Arc;
-use std::{collections::HashMap, sync::Mutex};
+use std::{
+    cell::Cell,
+    collections::{BTreeMap, BTreeSet, HashMap},
+    ffi::{CString, c_void},
+    sync::{Arc, Mutex},
+};
 
-use cudarc::driver::{CudaContext, CudaFunction, CudaModule, CudaSlice, CudaStream};
+use cudarc::driver::{
+    CudaContext, CudaFunction, CudaModule, CudaSlice, CudaStream, DevicePtr, DevicePtrMut,
+    LaunchConfig,
+};
 
 use crate::mamba_ssm::gpu::kernel_identity::{
     ArtifactIdentity, ArtifactKind, CompilerIdentity, CudaTarget, FramedSha256, ModuleKind,
+    ResolvedGemmOp, Sha256Digest,
 };
 
+use super::super::buffers::{cu_memcpy_dtoh_raw, cu_memcpy_htod_raw};
 use super::super::kernels::{
     CudaModuleAnchors, HalfKernel, cuda_include_paths, kernel_cache_dir, nvrtc_version,
 };
+
+const TF32_EXCEPTIONAL_PROBE_BITS: [u32; 10] = [
+    0x00000000, 0x80000000, 0x7f800000, 0xff800000, 0x7fc00001, 0x7f800001, 0x00000001, 0x007fffff,
+    0x00800000, 0x7f7fffff,
+];
+
+fn qualify_tf32_conversion_artifact<Launch, Download>(
+    artifact: ArtifactIdentity,
+    mut launch: Launch,
+    mut download: Download,
+) -> Result<Sha256Digest, String>
+where
+    Launch: FnMut() -> Result<(), String>,
+    Download: FnMut() -> Result<Vec<u32>, String>,
+{
+    launch().map_err(|error| format!("first TF32 exceptional probe launch: {error}"))?;
+    let first =
+        download().map_err(|error| format!("first TF32 exceptional probe download: {error}"))?;
+    if first.len() != TF32_EXCEPTIONAL_PROBE_BITS.len() {
+        return Err(format!(
+            "first TF32 exceptional probe returned {} words, expected {}",
+            first.len(),
+            TF32_EXCEPTIONAL_PROBE_BITS.len()
+        ));
+    }
+
+    launch().map_err(|error| format!("second TF32 exceptional probe launch: {error}"))?;
+    let second =
+        download().map_err(|error| format!("second TF32 exceptional probe download: {error}"))?;
+    if second.len() != TF32_EXCEPTIONAL_PROBE_BITS.len() {
+        return Err(format!(
+            "second TF32 exceptional probe returned {} words, expected {}",
+            second.len(),
+            TF32_EXCEPTIONAL_PROBE_BITS.len()
+        ));
+    }
+    if first != second {
+        return Err("TF32 exceptional probe output changed between launches".into());
+    }
+
+    let count = u64::try_from(TF32_EXCEPTIONAL_PROBE_BITS.len())
+        .map_err(|_| "TF32 exceptional probe length exceeds u64::MAX".to_string())?;
+    let mut digest = FramedSha256::new(b"tf32-exceptional-conversion-artifact.v1")
+        .required(b"module-kind", &[artifact.module_kind as u8])
+        .required(b"artifact-kind", &[artifact.artifact_kind as u8])
+        .required(b"compile-key", &artifact.compile_key)
+        .required(b"artifact-digest", &artifact.artifact_digest)
+        .required(b"input-count", &count.to_le_bytes());
+    for (index, bits) in TF32_EXCEPTIONAL_PROBE_BITS.iter().copied().enumerate() {
+        let index = u64::try_from(index)
+            .map_err(|_| "TF32 exceptional input index exceeds u64::MAX".to_string())?;
+        digest = digest
+            .required(b"input-index", &index.to_le_bytes())
+            .required(b"input-bits", &bits.to_le_bytes());
+    }
+    digest = digest.required(b"output-count", &count.to_le_bytes());
+    for (index, bits) in first.iter().copied().enumerate() {
+        let index = u64::try_from(index)
+            .map_err(|_| "TF32 exceptional output index exceeds u64::MAX".to_string())?;
+        digest = digest
+            .required(b"output-index", &index.to_le_bytes())
+            .required(b"output-bits", &bits.to_le_bytes());
+    }
+    Ok(digest.finish())
+}
+
+fn retain_tf32_candidate<T, Binding>(
+    functions: HashMap<&'static str, T>,
+    binding: Binding,
+    qualification: Result<Sha256Digest, String>,
+) -> Result<(HashMap<&'static str, T>, Option<Binding>), String> {
+    qualification?;
+    if functions.is_empty() {
+        Ok((HashMap::new(), None))
+    } else {
+        Ok((functions, Some(binding)))
+    }
+}
+
+fn retain_forced_only_functions<T>(
+    functions: Result<HashMap<&'static str, T>, String>,
+) -> Result<HashMap<&'static str, T>, String> {
+    functions
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Tf32DriverParameterAbi {
+    offset: usize,
+    size: usize,
+}
+
+impl Tf32DriverParameterAbi {
+    pub(crate) fn offset(self) -> usize {
+        self.offset
+    }
+
+    pub(crate) fn size(self) -> usize {
+        self.size
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Tf32DriverAbi {
+    parameter_count: usize,
+    parameters: Box<[Tf32DriverParameterAbi]>,
+}
+
+impl Tf32DriverAbi {
+    fn checked(parameter_count: usize, parameters: Vec<(usize, usize)>) -> Result<Self, String> {
+        if parameter_count == 0 {
+            return Err("TF32 Driver ABI has no parameters".into());
+        }
+        if parameter_count != parameters.len() {
+            return Err(format!(
+                "TF32 Driver ABI count is {parameter_count}, but {} layouts were queried",
+                parameters.len()
+            ));
+        }
+        if parameter_count > 64 {
+            return Err(format!(
+                "TF32 Driver ABI reports an implausible parameter count {parameter_count}"
+            ));
+        }
+
+        let mut previous_end = 0;
+        let mut checked = Vec::with_capacity(parameter_count);
+        for (index, (offset, size)) in parameters.into_iter().enumerate() {
+            if size == 0 {
+                return Err(format!("TF32 Driver ABI parameter {index} has zero size"));
+            }
+            if index == 0 && offset != 0 {
+                return Err(format!(
+                    "TF32 Driver ABI first parameter starts at offset {offset}"
+                ));
+            }
+            if offset < previous_end {
+                return Err(format!(
+                    "TF32 Driver ABI parameter {index} overlaps its predecessor"
+                ));
+            }
+            previous_end = offset.checked_add(size).ok_or_else(|| {
+                format!("TF32 Driver ABI parameter {index} extent overflows usize")
+            })?;
+            checked.push(Tf32DriverParameterAbi { offset, size });
+        }
+        Ok(Self {
+            parameter_count,
+            parameters: checked.into_boxed_slice(),
+        })
+    }
+
+    pub(crate) fn parameter_count(&self) -> usize {
+        self.parameter_count
+    }
+
+    pub(crate) fn parameters(&self) -> &[Tf32DriverParameterAbi] {
+        &self.parameters
+    }
+
+    pub(crate) fn tsv_record(&self, symbol: &str) -> Result<String, String> {
+        if symbol.is_empty()
+            || !symbol
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+        {
+            return Err("TF32 Driver ABI symbol is not safe for TSV output".into());
+        }
+        let layout = self
+            .parameters()
+            .iter()
+            .map(|parameter| format!("{}:{}", parameter.offset(), parameter.size()))
+            .collect::<Vec<_>>()
+            .join(",");
+        Ok(format!(
+            "{symbol}\t{}\tptx_contract+cuFuncGetParamInfo_terminal_probe\t{layout}",
+            self.parameter_count()
+        ))
+    }
+}
+
+fn merge_tf32_driver_abi(
+    mut portable: BTreeMap<&'static str, Tf32DriverAbi>,
+    specialized: Option<BTreeMap<&'static str, Tf32DriverAbi>>,
+) -> Result<BTreeMap<&'static str, Tf32DriverAbi>, String> {
+    for (symbol, abi) in specialized.into_iter().flatten() {
+        if portable.insert(symbol, abi).is_some() {
+            return Err(format!(
+                "TF32 Driver ABI symbol {symbol} belongs to more than one module"
+            ));
+        }
+    }
+    Ok(portable)
+}
+
+struct DriverModule {
+    raw: Option<cudarc::driver::sys::CUmodule>,
+}
+
+impl DriverModule {
+    fn load(ctx: &CudaContext, ptx: &str) -> Result<Self, String> {
+        ctx.bind_to_thread()
+            .map_err(|error| format!("bind CUDA context for Driver ABI census: {error:?}"))?;
+        let image = CString::new(ptx)
+            .map_err(|_| "canonical PTX contains an interior NUL byte".to_string())?;
+        let raw = unsafe {
+            cudarc::driver::result::module::load_data(image.as_ptr().cast::<c_void>())
+        }
+        .map_err(|error| format!("load temporary module for Driver ABI census: {error:?}"))?;
+        Ok(Self { raw: Some(raw) })
+    }
+
+    fn raw(&self) -> cudarc::driver::sys::CUmodule {
+        self.raw.expect("live DriverModule")
+    }
+
+    fn unload(mut self) -> Result<(), String> {
+        let raw = self.raw.take().expect("live DriverModule");
+        unsafe { cudarc::driver::result::module::unload(raw) }
+            .map_err(|error| format!("unload temporary Driver ABI module: {error:?}"))
+    }
+}
+
+impl Drop for DriverModule {
+    fn drop(&mut self) {
+        if let Some(raw) = self.raw.take() {
+            let _ = unsafe { cudarc::driver::result::module::unload(raw) };
+        }
+    }
+}
+
+fn driver_call(result: cudarc::driver::sys::CUresult, operation: &str) -> Result<(), String> {
+    if result == cudarc::driver::sys::CUresult::CUDA_SUCCESS {
+        Ok(())
+    } else {
+        Err(format!(
+            "{operation}: {:?}",
+            cudarc::driver::result::DriverError(result)
+        ))
+    }
+}
+
+fn driver_proc_address(symbol: &str, cuda_version: i32) -> Result<*mut c_void, String> {
+    let symbol = CString::new(symbol).expect("static CUDA Driver symbol");
+    let mut address = std::ptr::null_mut();
+    let mut status =
+        cudarc::driver::sys::CUdriverProcAddressQueryResult::CU_GET_PROC_ADDRESS_SYMBOL_NOT_FOUND;
+    let result = unsafe {
+        cudarc::driver::sys::cuGetProcAddress_v2(
+            symbol.as_ptr(),
+            &mut address,
+            cuda_version,
+            cudarc::driver::sys::CUdriverProcAddress_flags::CU_GET_PROC_ADDRESS_DEFAULT as u64,
+            &mut status,
+        )
+    };
+    driver_call(result, &format!("resolve {}", symbol.to_string_lossy()))?;
+    if status != cudarc::driver::sys::CUdriverProcAddressQueryResult::CU_GET_PROC_ADDRESS_SUCCESS
+        || address.is_null()
+    {
+        return Err(format!(
+            "resolve {} returned {status:?} at address {address:p}",
+            symbol.to_string_lossy(),
+        ));
+    }
+    Ok(address)
+}
+
+const TF32_DRIVER_PARAMETER_COUNT: usize = 5;
+
+fn query_driver_parameter_abi(
+    label: &str,
+    parameter_count: usize,
+    mut get_parameter_info: impl FnMut(usize, &mut usize, &mut usize) -> cudarc::driver::sys::CUresult,
+) -> Result<Tf32DriverAbi, String> {
+    let mut parameters = Vec::with_capacity(parameter_count);
+    for index in 0..parameter_count {
+        let mut offset = 0;
+        let mut size = 0;
+        let result = get_parameter_info(index, &mut offset, &mut size);
+        driver_call(result, &format!("cuFuncGetParamInfo {label}[{index}]"))?;
+        parameters.push((offset, size));
+    }
+
+    let mut extra_offset = 0;
+    let mut extra_size = 0;
+    let extra = get_parameter_info(parameter_count, &mut extra_offset, &mut extra_size);
+    if extra == cudarc::driver::sys::CUresult::CUDA_SUCCESS {
+        return Err(format!(
+            "{label} exposes more than {parameter_count} Driver ABI parameters"
+        ));
+    }
+    if extra != cudarc::driver::sys::CUresult::CUDA_ERROR_INVALID_VALUE {
+        driver_call(
+            extra,
+            &format!("cuFuncGetParamInfo {label}[{parameter_count}] sentinel"),
+        )?;
+    }
+    Tf32DriverAbi::checked(parameters.len(), parameters)
+        .map_err(|error| format!("{label}: {error}"))
+}
+
+fn query_tf32_driver_parameter_abi(
+    label: &str,
+    get_parameter_info: impl FnMut(usize, &mut usize, &mut usize) -> cudarc::driver::sys::CUresult,
+) -> Result<Tf32DriverAbi, String> {
+    query_driver_parameter_abi(label, TF32_DRIVER_PARAMETER_COUNT, get_parameter_info)
+}
+
+fn census_tf32_driver_abi(
+    ctx: &CudaContext,
+    module_kind: ModuleKind,
+    ptx: &str,
+) -> Result<BTreeMap<&'static str, Tf32DriverAbi>, String> {
+    let symbols = super::contract::tf32_module_symbols(module_kind);
+    if symbols.len() == 0 {
+        return Ok(BTreeMap::new());
+    }
+
+    type GetParamInfo = unsafe extern "C" fn(
+        cudarc::driver::sys::CUfunction,
+        usize,
+        *mut usize,
+        *mut usize,
+    ) -> cudarc::driver::sys::CUresult;
+
+    let module = DriverModule::load(ctx, ptx)?;
+    let get_parameter_info: GetParamInfo =
+        unsafe { std::mem::transmute(driver_proc_address("cuFuncGetParamInfo", 12_040)?) };
+    let mut census = BTreeMap::new();
+    for symbol in symbols {
+        let name = CString::new(symbol).expect("static TF32 symbol");
+        let function = unsafe { cudarc::driver::result::module::get_function(module.raw(), name) }
+            .map_err(|error| format!("load {module_kind:?}/{symbol} for Driver ABI: {error:?}"))?;
+        let label = format!("{module_kind:?}/{symbol}");
+        let abi = query_tf32_driver_parameter_abi(&label, |index, offset, size| unsafe {
+            get_parameter_info(function, index, offset, size)
+        })?;
+        if census.insert(symbol, abi).is_some() {
+            return Err(format!(
+                "{module_kind:?} Driver ABI census contains duplicate symbol {symbol}"
+            ));
+        }
+    }
+    module.unload()?;
+    Ok(census)
+}
+
+fn census_tf32_splitk_driver_abi(
+    ctx: &CudaContext,
+    module_kind: ModuleKind,
+    ptx: &str,
+) -> Result<BTreeMap<&'static str, Tf32DriverAbi>, String> {
+    if module_kind != ModuleKind::TriadSm80 {
+        return Ok(BTreeMap::new());
+    }
+    type GetParamInfo = unsafe extern "C" fn(
+        cudarc::driver::sys::CUfunction,
+        usize,
+        *mut usize,
+        *mut usize,
+    ) -> cudarc::driver::sys::CUresult;
+
+    let module = DriverModule::load(ctx, ptx)?;
+    let get_parameter_info: GetParamInfo =
+        unsafe { std::mem::transmute(driver_proc_address("cuFuncGetParamInfo", 12_040)?) };
+    let mut census = BTreeMap::new();
+    for spec in super::contract::TF32_SPLITK_CANDIDATE_SPECS {
+        let symbol = spec.symbol;
+        let name = CString::new(symbol).expect("static TF32 split-K symbol");
+        let function = unsafe { cudarc::driver::result::module::get_function(module.raw(), name) }
+            .map_err(|error| format!("load {module_kind:?}/{symbol} for Driver ABI: {error:?}"))?;
+        let label = format!("{module_kind:?}/{symbol}");
+        let abi = query_driver_parameter_abi(&label, 7, |index, offset, size| unsafe {
+            get_parameter_info(function, index, offset, size)
+        })?;
+        if census.insert(symbol, abi).is_some() {
+            return Err(format!(
+                "{module_kind:?} split-K Driver ABI census contains duplicate symbol {symbol}"
+            ));
+        }
+    }
+    module.unload()?;
+    Ok(census)
+}
+
+fn census_all_tf32_driver_abi(
+    ctx: &CudaContext,
+    module_kind: ModuleKind,
+    ptx: &str,
+) -> Result<BTreeMap<&'static str, Tf32DriverAbi>, String> {
+    let mut census = census_tf32_driver_abi(ctx, module_kind, ptx)?;
+    for (symbol, abi) in census_tf32_splitk_driver_abi(ctx, module_kind, ptx)? {
+        if census.insert(symbol, abi).is_some() {
+            return Err(format!(
+                "{module_kind:?} Driver ABI census contains duplicate symbol {symbol}"
+            ));
+        }
+    }
+    Ok(census)
+}
+
+fn complete_tf32_driver_abi(
+    module_kind: ModuleKind,
+    census: &BTreeMap<&'static str, Tf32DriverAbi>,
+) -> bool {
+    let mut production = super::contract::tf32_module_symbols(module_kind);
+    let production_complete =
+        production.len() != 0 && production.all(|symbol| census.contains_key(symbol));
+    let splitk_complete = module_kind != ModuleKind::TriadSm80
+        || super::contract::TF32_SPLITK_CANDIDATE_SPECS
+            .iter()
+            .map(|spec| spec.symbol)
+            .all(|symbol| census.contains_key(symbol));
+    production_complete && splitk_complete
+}
 
 pub(crate) struct CompileModuleRequest<'a> {
     pub ctx: &'a Arc<CudaContext>,
@@ -22,11 +446,15 @@ pub(crate) struct CompiledModule {
     pub module: Arc<CudaModule>,
     pub compiler_identity: CompilerIdentity,
     pub artifact_identity: ArtifactIdentity,
+    tf32_qualified: bool,
+    tf32_driver_abi: BTreeMap<&'static str, Tf32DriverAbi>,
 }
 
 pub(crate) struct QualifiedSpecializedModule {
     module: CompiledModule,
     functions: HashMap<&'static str, CudaFunction>,
+    tf32_functions: HashMap<&'static str, CudaFunction>,
+    tf32_rejection: Option<String>,
     sm120_target: Option<super::contract::Sm120TargetCandidate>,
     sm120_device_caps: Option<crate::mamba_ssm::gpu::kernel_identity::DeviceCaps>,
     sm120_resources: HashMap<&'static str, super::contract::Sm120KernelResources>,
@@ -39,19 +467,30 @@ pub(crate) struct Sm120ArtifactSet {
     pub specialized: Option<QualifiedSpecializedModule>,
 }
 
-pub(crate) fn compile_module(request: CompileModuleRequest<'_>) -> Result<CompiledModule, String> {
-    validate_module_target(request.module_kind, request.arch)?;
-    let combined = compose_module_source(request.module_kind)?;
-    let group_m = match request.arch {
+const SCALAR_GROUP_M_MACRO: &str = "GEMM_BI_GROUP_M";
+
+fn scalar_group_m_option(arch: &str) -> String {
+    let group_m = match arch {
         "sm_80" | "sm_86" | "sm_87" => 8,
         _ => 16,
     };
+    format!("-D{SCALAR_GROUP_M_MACRO}={group_m}")
+}
+
+pub(crate) fn compile_module(request: CompileModuleRequest<'_>) -> Result<CompiledModule, String> {
+    validate_module_target(request.module_kind, request.arch)?;
+    let combined = compose_module_source(request.module_kind)?;
+    if request.module_kind == ModuleKind::TriadScalar
+        && !combined.contains(&format!("#ifndef {SCALAR_GROUP_M_MACRO}"))
+    {
+        return Err("scalar L2 swizzle macro is missing from the composed source".into());
+    }
     let nvrtc = nvrtc_version();
     let mut option_strings = vec![
         "--fmad=true".to_string(),
         "--extra-device-vectorization".to_string(),
         "-DNDEBUG".to_string(),
-        format!("-DSGB_GROUP_M={group_m}"),
+        scalar_group_m_option(request.arch),
         format!("-DMAMBA_RS_STATE_CAP={}", request.state_cap),
     ];
     option_strings.extend(
@@ -110,8 +549,10 @@ pub(crate) fn compile_module(request: CompileModuleRequest<'_>) -> Result<Compil
             crate::mamba_ssm::gpu::kernel_identity::read_cache(path, key, ArtifactKind::Ptx)
         && let Ok(src) =
             crate::mamba_ssm::gpu::kernel_identity::canonical_ptx_from_cache(hit.payload)
-        && validate_specialized_ptx(request.module_kind, request.arch, &src).is_ok()
-        && let Ok(module) = request.ctx.load_module(cudarc::nvrtc::Ptx::from_src(src))
+        && validate_module_ptx(request.module_kind, request.arch, &src).is_ok()
+        && let Ok(module) = request
+            .ctx
+            .load_module(cudarc::nvrtc::Ptx::from_src(src.clone()))
         && crate::mamba_ssm::gpu::kernel_identity::cache_hit_header_closure_is_current(
             combined.as_bytes(),
             &include_paths,
@@ -121,10 +562,15 @@ pub(crate) fn compile_module(request: CompileModuleRequest<'_>) -> Result<Compil
             .as_deref()
             .is_some_and(crate::mamba_ssm::gpu::kernel_identity::nvrtc_library_domain_is_current)
     {
-        loaded = Some((module, hit.artifact_digest));
+        let census = census_all_tf32_driver_abi(request.ctx, request.module_kind, &src);
+        let tf32_driver_abi = census.unwrap_or_default();
+        let validation = validate_tf32_specialization(request.module_kind, &src);
+        let tf32_qualified =
+            validation.is_ok() && complete_tf32_driver_abi(request.module_kind, &tf32_driver_abi);
+        loaded = Some((module, hit.artifact_digest, tf32_qualified, tf32_driver_abi));
     }
 
-    let (module, artifact_digest) = match loaded {
+    let (module, artifact_digest, tf32_qualified, tf32_driver_abi) = match loaded {
         Some(value) => value,
         None => {
             let ptx = cudarc::nvrtc::compile_ptx_with_opts(&combined, opts).map_err(|error| {
@@ -139,7 +585,12 @@ pub(crate) fn compile_module(request: CompileModuleRequest<'_>) -> Result<Compil
                 .ok_or_else(|| format!("{:?} NVRTC returned no PTX image", request.module_kind))?;
             let ptx_source =
                 crate::mamba_ssm::gpu::kernel_identity::canonical_ptx_image(ptx_image)?;
-            validate_specialized_ptx(request.module_kind, request.arch, &ptx_source)?;
+            validate_module_ptx(request.module_kind, request.arch, &ptx_source)?;
+            let census = census_all_tf32_driver_abi(request.ctx, request.module_kind, &ptx_source);
+            let tf32_driver_abi = census.unwrap_or_default();
+            let validation = validate_tf32_specialization(request.module_kind, &ptx_source);
+            let tf32_qualified = validation.is_ok()
+                && complete_tf32_driver_abi(request.module_kind, &tf32_driver_abi);
             if !crate::mamba_ssm::gpu::kernel_identity::header_manifest_is_current(
                 combined.as_bytes(),
                 &include_paths,
@@ -173,7 +624,7 @@ pub(crate) fn compile_module(request: CompileModuleRequest<'_>) -> Result<Compil
                 .map_err(|error| {
                     format!("{:?} module load failed: {error:?}", request.module_kind)
                 })?;
-            (module, artifact_digest)
+            (module, artifact_digest, tf32_qualified, tf32_driver_abi)
         }
     };
 
@@ -204,6 +655,8 @@ pub(crate) fn compile_module(request: CompileModuleRequest<'_>) -> Result<Compil
             compile_key: invocation_digest,
             artifact_digest,
         },
+        tf32_qualified,
+        tf32_driver_abi,
     })
 }
 
@@ -213,7 +666,7 @@ pub(crate) fn compile_sm100_optional(
     device_cc: (i32, i32),
 ) -> Option<QualifiedSpecializedModule> {
     select_sm100_candidate(
-        super::dispatch::sm100_target_candidates(device_cc),
+        sm100_target_candidates(device_cc),
         |candidate| probe_sm100_target(ctx, candidate),
         |candidate| {
             compile_module(CompileModuleRequest {
@@ -225,6 +678,12 @@ pub(crate) fn compile_sm100_optional(
         },
         qualify_specialized_module,
     )
+}
+
+fn sm100_target_candidates(
+    device_cc: (i32, i32),
+) -> &'static [super::contract::Sm100TargetCandidate] {
+    super::dispatch::sm100_target_candidates(device_cc)
 }
 
 fn select_sm100_candidate<T, U>(
@@ -652,6 +1111,11 @@ fn probe_sm100_target(
 }
 
 fn validate_module_target(kind: ModuleKind, arch: &str) -> Result<(), String> {
+    if kind == ModuleKind::TriadSm80 && sm80_ptx_target(arch).is_none() {
+        return Err(format!(
+            "TriadSm80 requires an admitted SM80+ portable target, got {arch}"
+        ));
+    }
     if kind == ModuleKind::TriadSm90a && arch != "sm_90a" {
         return Err(format!(
             "TriadSm90a requires exact target sm_90a, got {arch}"
@@ -659,7 +1123,7 @@ fn validate_module_target(kind: ModuleKind, arch: &str) -> Result<(), String> {
     }
     if kind == ModuleKind::TriadSm100 && sm100_target_for_arch(arch).is_none() {
         return Err(format!(
-            "TriadSm100 requires compute_100f, compute_100a, compute_103f, or compute_103a, got {arch}"
+            "TriadSm100 requires an admitted compute_100f/a, compute_103f/a, or compute_110f/a target, got {arch}"
         ));
     }
     if kind == ModuleKind::TriadSm120 && !matches!(arch, "compute_120" | "compute_121") {
@@ -670,71 +1134,1678 @@ fn validate_module_target(kind: ModuleKind, arch: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn validate_specialized_ptx(kind: ModuleKind, arch: &str, ptx: &str) -> Result<(), String> {
-    match kind {
+fn validate_tf32_ptx_inventory(module_kind: ModuleKind, ptx: &str) -> Result<(), String> {
+    let kernel_specs = super::contract::tf32_route_specs(module_kind);
+    if kernel_specs.is_empty() {
+        return Ok(());
+    }
+    let expected: BTreeSet<_> = kernel_specs
+        .iter()
+        .map(|kernel_spec| kernel_spec.symbol)
+        .collect();
+    if expected.len() != kernel_specs.len() {
+        return Err(format!(
+            "{module_kind:?} TF32 contract contains duplicate symbols"
+        ));
+    }
+    let symbols = ptx_entry_symbols(ptx)?;
+    let actual: Vec<_> = symbols
+        .iter()
+        .map(String::as_str)
+        .filter(|symbol| symbol.contains("_tf32_v1_"))
+        .collect();
+    let unique: BTreeSet<_> = actual.iter().copied().collect();
+    if actual.len() != unique.len() || unique != expected {
+        return Err(format!(
+            "{module_kind:?} TF32 PTX inventory is incomplete, duplicated, or contains foreign entries"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_module_ptx(module_kind: ModuleKind, arch: &str, ptx: &str) -> Result<(), String> {
+    match module_kind {
+        ModuleKind::Fixed => validate_fixed_tf32_ptx(arch, ptx),
+        ModuleKind::TriadScalar => {
+            validate_exact_ptx_exports("TriadScalar", SCALAR_SYMBOLS.len(), SCALAR_SYMBOLS, ptx)?;
+            validate_scalar_zero_reduction_ptx(ptx)?;
+            validate_scalar_nn_m32n64_splitk32_ptx(ptx)?;
+            validate_scalar_nt_m2n16_ptx(ptx)?;
+            validate_scalar_tn_m16n16_ptx(ptx)?;
+            validate_tn_narrow_splitm_partial_ptx(ptx)?;
+            validate_tn_splitm_partial_ptx(ptx)
+        }
+        ModuleKind::TriadSm80 => validate_sm80_ptx(arch, ptx),
         ModuleKind::TriadSm90a => validate_sm90a_ptx(ptx),
         ModuleKind::TriadSm100 => validate_sm100_ptx(arch, ptx),
         ModuleKind::TriadSm120 => validate_sm120_ptx(arch, ptx),
-        _ => Ok(()),
+        ModuleKind::Mamba3Combined => Ok(()),
     }
 }
 
-fn ptx_target(ptx: &str) -> Result<&str, String> {
-    ptx.lines()
-        .find_map(|line| line.trim().strip_prefix(".target "))
-        .and_then(|target| target.split(',').next().map(str::trim))
+const FIXED_TF32_SYMBOLS: [&str; 5] = [
+    "gemm_bi_nn_tf32_v1_m128n64_bk32_s2",
+    "gemm_bi_nn_tf32_v1_m128n64_bk32_s3",
+    "gemm_bi_nn_tf32_v1_m64n64_bk32_s2",
+    "gemm_bi_nn_tf32_v1_m64n64_bk32_s3",
+    "gemm_bi_nn_tf32_v1_m16n32_bk32_s4",
+];
+
+const FIXED_SM120_TF32_SYMBOLS: [&str; 7] = [
+    "gemm_bi_nn_sm120_tma_tf32_v1_m128n64_bk32_s2",
+    "gemm_bi_nn_sm120_tma_tf32_v1_m128n64_bk32_s3",
+    "gemm_bi_nn_sm120_tma_tf32_v1_m64n128_bk32_s2",
+    "gemm_bi_nn_sm120_tma_tf32_v1_m64n128_bk32_s3",
+    "gemm_bi_nn_sm120_tma_tf32_v1_m64n64_bk32_s2_producer_warp",
+    "gemm_bi_nn_sm120_tma_tf32_v1_m64n64_bk32_s2",
+    "gemm_bi_nn_sm120_tma_tf32_v1_m64n64_bk32_s2_pair_store",
+];
+
+const FIXED_SM120_HALF_BASES: [&str; 5] = [
+    "gemm_bi_nn_sm120_tma_64x64_bk64_s2",
+    "gemm_bi_nn_sm120_tma_64x128_bk64_s2",
+    "gemm_bi_nn_sm120_tma_128x64_bk32_s3",
+    "gemm_bi_nn_sm120_tma_128x128_bk32_s2",
+    "gemm_bi_nn_sm120_tma_128x128_bk32_s3",
+];
+
+fn validate_fixed_tf32_ptx(arch: &str, ptx: &str) -> Result<(), String> {
+    let owns_sm120 = matches!(arch, "sm_120" | "sm_121" | "compute_120" | "compute_121");
+    let mut expected = FIXED_TF32_SYMBOLS.to_vec();
+    if owns_sm120 {
+        expected.extend(FIXED_SM120_TF32_SYMBOLS);
+    }
+    let symbols = ptx_entry_symbols(ptx)?;
+    let actual: BTreeSet<_> = symbols
+        .iter()
+        .map(String::as_str)
+        .filter(|symbol| symbol.contains("_tf32_v1_"))
+        .collect();
+    let expected: BTreeSet<_> = expected.into_iter().collect();
+    if actual != expected {
+        return Err("Fixed TF32 PTX inventory is incomplete or contains foreign entries".into());
+    }
+    if super::super::gemm_bi_fixed::FIXED_TF32_PARAMS_SIZE != 24 {
+        return Err("Fixed portable TF32 host parameter ABI drifted".into());
+    }
+    let portable_bundle = ".param .align 4 .b8 ";
+    for symbol in FIXED_TF32_SYMBOLS {
+        let entry = ptx_entry(ptx, symbol)?;
+        let parameters = entry
+            .split_once('(')
+            .and_then(|(_, tail)| tail.split_once("\n)").map(|(head, _)| head))
+            .ok_or_else(|| format!("{symbol} has no PTX parameter list"))?;
+        let declarations: Vec<_> = parameters
+            .lines()
+            .map(str::trim)
+            .filter(|line| line.starts_with(".param "))
+            .collect();
+        if declarations.len() != 5
+            || !declarations[..4]
+                .iter()
+                .all(|line| line.starts_with(".param .u64 "))
+            || !declarations[4].starts_with(portable_bundle)
+            || !declarations[4].contains("[24]")
+        {
+            return Err(format!("{symbol} has the wrong five-parameter ABI"));
+        }
+        for required in [
+            "cvt.rna.tf32.f32",
+            "mma.sync.aligned.m16n8k8.row.col.f32.tf32.tf32.f32",
+        ] {
+            if !entry.contains(required) {
+                return Err(format!("{symbol} is missing {required}"));
+            }
+        }
+    }
+    if owns_sm120 {
+        let map_size = super::super::gemm_bi_fixed::FIXED_TENSOR_MAP_SIZE;
+        let map_alignment = super::super::gemm_bi_fixed::FIXED_TENSOR_MAP_ALIGN;
+        let expected_alignment = match nvrtc_version().0 {
+            12 => 64,
+            13 => 128,
+            major => return Err(format!("unsupported CUDA tensor-map ABI major {major}")),
+        };
+        if map_size != 128 || map_alignment != expected_alignment {
+            return Err(format!(
+                "Fixed tensor-map ABI mismatch: size={map_size} align={map_alignment}, expected 128/{expected_alignment}"
+            ));
+        }
+        if super::super::gemm_bi_fixed::FIXED_SM120_TF32_PARAMS_SIZE != 16 {
+            return Err("Fixed SM120 TF32 host parameter ABI drifted".into());
+        }
+        if super::super::gemm_bi_fixed::FIXED_SM120_HALF_PARAMS_SIZE != 40 {
+            return Err("Fixed SM120 half host parameter ABI drifted".into());
+        }
+        let map = format!(".param .align {expected_alignment} .b8 ");
+        for symbol in FIXED_SM120_TF32_SYMBOLS {
+            let entry = ptx_entry(ptx, symbol)?;
+            let parameters = entry
+                .split_once('(')
+                .and_then(|(_, tail)| tail.split_once("\n)").map(|(head, _)| head))
+                .ok_or_else(|| format!("{symbol} has no PTX parameter list"))?;
+            let declarations: Vec<_> = parameters
+                .lines()
+                .map(str::trim)
+                .filter(|line| line.starts_with(".param "))
+                .collect();
+            let is_map = |line: &str| line.starts_with(&map) && line.contains("[128]");
+            if declarations.len() != 5
+                || !declarations[0].starts_with(".param .u64 ")
+                || !is_map(declarations[1])
+                || !is_map(declarations[2])
+                || !declarations[3].starts_with(".param .u64 ")
+                || !declarations[4].starts_with(".param .align 4 .b8 ")
+                || !declarations[4].contains("[16]")
+            {
+                return Err(format!("{symbol} has the wrong five-parameter TMA ABI"));
+            }
+            for required in [
+                "cp.async.bulk.tensor.2d.shared::cta.global.tile.mbarrier::complete_tx::bytes",
+                "cvt.rna.tf32.f32",
+                "mma.sync.aligned.m16n8k8.row.col.f32.tf32.tf32.f32",
+            ] {
+                if !entry.contains(required) {
+                    return Err(format!("{symbol} is missing {required}"));
+                }
+            }
+        }
+        let expected_half: BTreeSet<_> = FIXED_SM120_HALF_BASES
+            .iter()
+            .flat_map(|base| {
+                [
+                    format!("{base}_bf16"),
+                    format!("{base}_f16"),
+                    format!("{base}_f32out_bf16"),
+                    format!("{base}_f32out_f16"),
+                ]
+            })
+            .collect();
+        let actual_half: BTreeSet<_> = symbols
+            .iter()
+            .filter(|symbol| {
+                symbol.starts_with("gemm_bi_nn_sm120_tma_")
+                    && !symbol.contains("_tf32_v1_")
+                    && (symbol.ends_with("_bf16") || symbol.ends_with("_f16"))
+            })
+            .cloned()
+            .collect();
+        if actual_half != expected_half {
+            return Err(
+                "Fixed SM120 half PTX inventory is incomplete or contains foreign entries".into(),
+            );
+        }
+        for symbol in &expected_half {
+            let entry = ptx_entry(ptx, symbol)?;
+            let parameters = entry
+                .split_once('(')
+                .and_then(|(_, tail)| tail.split_once("\n)").map(|(head, _)| head))
+                .ok_or_else(|| format!("{symbol} has no PTX parameter list"))?;
+            let declarations: Vec<_> = parameters
+                .lines()
+                .map(str::trim)
+                .filter(|line| line.starts_with(".param "))
+                .collect();
+            let is_map = |line: &str| line.starts_with(&map) && line.contains("[128]");
+            if declarations.len() != 5
+                || !declarations[0].starts_with(".param .u64 ")
+                || !is_map(declarations[1])
+                || !is_map(declarations[2])
+                || !declarations[3].starts_with(".param .u64 ")
+                || !declarations[4].starts_with(".param .align 4 .b8 ")
+                || !declarations[4].contains("[40]")
+            {
+                return Err(format!("{symbol} has the wrong five-parameter TMA ABI"));
+            }
+            for required in [
+                "cp.async.bulk.tensor.2d.shared::cta.global.tile.mbarrier::complete_tx::bytes",
+                "mbarrier.arrive.release.cta.shared::cta.b64",
+                "ldmatrix.sync.aligned.m8n8.x4.shared.b16",
+                "ldmatrix.sync.aligned.m8n8.x2.trans.shared.b16",
+            ] {
+                if !entry.contains(required) {
+                    return Err(format!("{symbol} is missing {required}"));
+                }
+            }
+            let mma = if symbol.ends_with("_bf16") {
+                "mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32"
+            } else {
+                "mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32"
+            };
+            if !entry.contains(mma) {
+                return Err(format!("{symbol} is missing {mma}"));
+            }
+        }
+    }
+    let stripped = strip_ptx_comments(ptx)?;
+    for symbol in expected {
+        let entry = ptx_entry(&stripped, symbol)?;
+        if ptx_has_unquoted_token(&entry, |token| {
+            token.starts_with("atom.")
+                || token.starts_with("atom::")
+                || token.starts_with("red.")
+                || token.starts_with("red::")
+                || token.starts_with("redux.")
+        }) {
+            return Err(format!(
+                "Fixed TF32 {symbol} contains a reduction instruction"
+            ));
+        }
+    }
+    if owns_sm120 {
+        for base in FIXED_SM120_HALF_BASES {
+            for suffix in ["_bf16", "_f16", "_f32out_bf16", "_f32out_f16"] {
+                let symbol = format!("{base}{suffix}");
+                let entry = ptx_entry(&stripped, &symbol)?;
+                if ptx_has_unquoted_token(&entry, |token| {
+                    token.starts_with("atom.")
+                        || token.starts_with("atom::")
+                        || token.starts_with("red.")
+                        || token.starts_with("red::")
+                        || token.starts_with("redux.")
+                }) {
+                    return Err(format!(
+                        "Fixed SM120 half {symbol} contains a reduction instruction"
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_scalar_zero_reduction_ptx(ptx: &str) -> Result<(), String> {
+    let expected: BTreeSet<_> = SCALAR_ZERO_REDUCTION_SYMBOLS.iter().copied().collect();
+    let symbols = ptx_entry_symbols(ptx)?;
+    let actual: Vec<_> = symbols
+        .iter()
+        .map(String::as_str)
+        .filter(|symbol| symbol.ends_with("_zero_reduction_v1"))
+        .collect();
+    let unique: BTreeSet<_> = actual.iter().copied().collect();
+    if actual.len() != unique.len() || unique != expected {
+        return Err(
+            "TriadScalar zero-reduction PTX inventory is incomplete, duplicated, or foreign".into(),
+        );
+    }
+    let host_size = super::launch::GEMM_BI_ZERO_REDUCTION_PARAMS_SIZE;
+    if host_size != 32 {
+        return Err(format!(
+            "Rust zero-reduction parameter size is {host_size}, expected 32"
+        ));
+    }
+    for symbol in SCALAR_ZERO_REDUCTION_SYMBOLS {
+        let entry = ptx_entry(ptx, symbol)?;
+        let parameters = entry
+            .split_once('(')
+            .and_then(|(_, tail)| tail.split_once("\n)").map(|(head, _)| head))
+            .ok_or_else(|| format!("{symbol} has no PTX parameter list"))?;
+        let declarations: Vec<_> = parameters
+            .lines()
+            .map(str::trim)
+            .filter(|line| line.starts_with(".param "))
+            .collect();
+        let pointers_are_u64 = declarations
+            .get(..4)
+            .is_some_and(|pointers| pointers.iter().all(|line| line.starts_with(".param .u64 ")));
+        let bundle_is_exact = declarations
+            .get(4)
+            .is_some_and(|line| line.starts_with(".param .align 4 .b8 ") && line.contains("[32]"));
+        if declarations.len() != 5 || !pointers_are_u64 || !bundle_is_exact {
+            return Err(format!("{symbol} has the wrong five-parameter ABI"));
+        }
+    }
+    Ok(())
+}
+
+fn validate_scalar_nt_m2n16_ptx(ptx: &str) -> Result<(), String> {
+    const SYMBOL: &str = "gemm_bi_nt_m2n16_bk64_splitk32_v1";
+    let entry = ptx_entry(ptx, SYMBOL)?;
+    let parameters = entry
+        .split_once('(')
+        .and_then(|(_, tail)| tail.split_once("\n)").map(|(head, _)| head))
+        .ok_or_else(|| format!("{SYMBOL} has no PTX parameter list"))?;
+    let declarations: Vec<_> = parameters
+        .lines()
+        .map(str::trim)
+        .filter(|line| line.starts_with(".param "))
+        .collect();
+    if declarations.len() != 7
+        || !declarations[..3]
+            .iter()
+            .all(|line| line.starts_with(".param .u64 "))
+        || !declarations[3].starts_with(".param .f32 ")
+        || !declarations[4..]
+            .iter()
+            .all(|line| line.starts_with(".param .u32 "))
+    {
+        return Err(format!("{SYMBOL} has the wrong seven-parameter ABI"));
+    }
+    let body = ptx_entry_body(ptx, SYMBOL)?;
+    for required in ["fma.rn.f32", "add.rn.f32", "mul.rn.f32"] {
+        if !body.contains(required) {
+            return Err(format!("{SYMBOL} is missing {required}"));
+        }
+    }
+    if ptx_has_unquoted_token(&body, |token| {
+        token.starts_with("atom.")
+            || token.starts_with("atom::")
+            || token.starts_with("red.")
+            || token.starts_with("red::")
+            || token.starts_with("redux.")
+            || token.starts_with("mma.")
+            || token.contains(".ftz")
+            || token == "call"
+            || token.starts_with("call.")
+    }) {
+        return Err(format!(
+            "{SYMBOL} contains a forbidden PTX instruction family"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_scalar_nn_m32n64_splitk32_ptx(ptx: &str) -> Result<(), String> {
+    const SYMBOL: &str = "gemm_bi_nn_splitk32_m32n64_exact_v1";
+    let entry = ptx_entry(ptx, SYMBOL)?;
+    let parameters = entry
+        .split_once('(')
+        .and_then(|(_, tail)| tail.split_once("\n)").map(|(head, _)| head))
+        .ok_or_else(|| format!("{SYMBOL} has no PTX parameter list"))?;
+    let declarations: Vec<_> = parameters
+        .lines()
+        .map(str::trim)
+        .filter(|line| line.starts_with(".param "))
+        .collect();
+    if declarations.len() != 7
+        || !declarations[..3]
+            .iter()
+            .all(|line| line.starts_with(".param .u64 "))
+        || !declarations[3..]
+            .iter()
+            .all(|line| line.starts_with(".param .u32 "))
+    {
+        return Err(format!("{SYMBOL} has the wrong seven-parameter ABI"));
+    }
+    let body = ptx_entry_body(ptx, SYMBOL)?;
+    if !body.contains("fma.rn.f32") {
+        return Err(format!("{SYMBOL} is missing fma.rn.f32"));
+    }
+    if ptx_has_unquoted_token(&body, |token| {
+        token.starts_with("atom.")
+            || token.starts_with("atom::")
+            || token.starts_with("red.")
+            || token.starts_with("red::")
+            || token.starts_with("redux.")
+            || token.starts_with("mma.")
+            || token.contains(".ftz")
+            || token == "call"
+            || token.starts_with("call.")
+    }) {
+        return Err(format!(
+            "{SYMBOL} contains a forbidden PTX instruction family"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_scalar_tn_m16n16_ptx(ptx: &str) -> Result<(), String> {
+    const SYMBOL: &str = "gemm_bi_tn_m16n16_bk16_s2_splitm16_v1";
+    let entry = ptx_entry(ptx, SYMBOL)?;
+    let parameters = entry
+        .split_once('(')
+        .and_then(|(_, tail)| tail.split_once("\n)").map(|(head, _)| head))
+        .ok_or_else(|| format!("{SYMBOL} has no PTX parameter list"))?;
+    let declarations: Vec<_> = parameters
+        .lines()
+        .map(str::trim)
+        .filter(|line| line.starts_with(".param "))
+        .collect();
+    if declarations.len() != 7
+        || !declarations[..3]
+            .iter()
+            .all(|line| line.starts_with(".param .u64 "))
+        || !declarations[3].starts_with(".param .f32 ")
+        || !declarations[4..]
+            .iter()
+            .all(|line| line.starts_with(".param .u32 "))
+    {
+        return Err(format!("{SYMBOL} has the wrong seven-parameter ABI"));
+    }
+    let body = ptx_entry_body(ptx, SYMBOL)?;
+    let mut previous = 0;
+    for required in [
+        "fma.rn.f32",
+        "add.rn.f64",
+        "mul.rn.f64",
+        "cvt.rn.f32.f64",
+        "add.rn.f32",
+    ] {
+        let offset = body[previous..]
+            .find(required)
+            .map(|offset| previous + offset)
+            .ok_or_else(|| format!("{SYMBOL} is missing ordered {required}"))?;
+        previous = offset + required.len();
+    }
+    if ptx_has_unquoted_token(&body, |token| {
+        token.starts_with("atom.")
+            || token.starts_with("atom::")
+            || token.starts_with("red.")
+            || token.starts_with("red::")
+            || token.starts_with("redux.")
+            || token.starts_with("mma.")
+            || token.contains(".ftz")
+            || token == "call"
+            || token.starts_with("call.")
+    }) {
+        return Err(format!(
+            "{SYMBOL} contains a forbidden PTX instruction family"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_tf32_specialization(module_kind: ModuleKind, ptx: &str) -> Result<(), String> {
+    if !matches!(
+        module_kind,
+        ModuleKind::TriadSm80
+            | ModuleKind::TriadSm90a
+            | ModuleKind::TriadSm100
+            | ModuleKind::TriadSm120
+    ) {
+        return Err(format!("{module_kind:?} does not own TF32 kernels"));
+    }
+    validate_tf32_ptx_inventory(module_kind, ptx)?;
+    validate_tf32_parameter_abi(module_kind, ptx, nvrtc_version().0)?;
+    validate_tf32_host_abi(module_kind, ptx)?;
+    validate_tf32_feature_instructions(module_kind, ptx)?;
+    if module_kind == ModuleKind::TriadSm80 {
+        validate_tf32_splitk_ptx(ptx)?;
+    }
+    Ok(())
+}
+
+fn validate_tf32_host_abi(module_kind: ModuleKind, ptx: &str) -> Result<(), String> {
+    let map_size = std::mem::size_of::<cudarc::driver::sys::CUtensorMap>();
+    let map_alignment = std::mem::align_of::<cudarc::driver::sys::CUtensorMap>();
+    if map_size != 128 || !matches!(map_alignment, 64 | 128) {
+        return Err(format!(
+            "unsupported Rust CUtensorMap ABI size={map_size} align={map_alignment}"
+        ));
+    }
+    let host_cuda_major = if map_alignment == 64 { 12 } else { 13 };
+    if nvrtc_version().0 != host_cuda_major {
+        return Err(format!(
+            "Rust CUtensorMap ABI is CUDA {host_cuda_major}, runtime NVRTC is CUDA {}",
+            nvrtc_version().0
+        ));
+    }
+    let parameter_size = super::launch::tf32_kernel_params_size(module_kind)
+        .ok_or_else(|| format!("{module_kind:?} does not own a TF32 parameter ABI"))?;
+    let expected_size = if module_kind == ModuleKind::TriadSm80 {
+        32
+    } else {
+        40
+    };
+    if parameter_size != expected_size {
+        return Err(format!(
+            "{module_kind:?} Rust TF32 parameter size is {parameter_size}, expected {expected_size}"
+        ));
+    }
+    validate_tf32_parameter_abi(module_kind, ptx, host_cuda_major)
+}
+
+fn sm80_ptx_target(arch: &str) -> Option<&'static str> {
+    match arch {
+        "sm_80" => Some("sm_80"),
+        "sm_86" => Some("sm_86"),
+        "sm_87" => Some("sm_87"),
+        "sm_89" => Some("sm_89"),
+        "sm_90" => Some("sm_90"),
+        "sm_90a" => Some("sm_90a"),
+        "sm_100" => Some("sm_100"),
+        "sm_100a" => Some("sm_100a"),
+        "sm_101a" => Some("sm_101a"),
+        "sm_103a" => Some("sm_103a"),
+        "sm_110" => Some("sm_110"),
+        "sm_120" | "compute_120" => Some("sm_120"),
+        "sm_121" | "compute_121" => Some("sm_121"),
+        _ => None,
+    }
+}
+
+#[derive(Clone, Copy)]
+struct PtxToken<'a> {
+    text: &'a str,
+    start: usize,
+    end: usize,
+}
+
+#[derive(Debug)]
+struct ParsedPtxEntry {
+    symbol: String,
+    text: String,
+    body: String,
+}
+
+#[derive(Debug)]
+struct ParsedPtxFunction {
+    symbol: String,
+    body: Option<String>,
+}
+
+#[derive(Debug)]
+struct ParsedPtx {
+    target: Option<String>,
+    entries: Vec<ParsedPtxEntry>,
+    functions: Vec<ParsedPtxFunction>,
+}
+
+fn strip_ptx_comments(ptx: &str) -> Result<String, String> {
+    let mut stripped = ptx.as_bytes().to_vec();
+    let mut cursor = 0;
+    while cursor < stripped.len() {
+        if stripped[cursor] == b'"' {
+            cursor += 1;
+            let mut closed = false;
+            while cursor < stripped.len() {
+                match stripped[cursor] {
+                    b'\\' => cursor = cursor.saturating_add(2),
+                    b'"' => {
+                        cursor += 1;
+                        closed = true;
+                        break;
+                    }
+                    _ => cursor += 1,
+                }
+            }
+            if !closed {
+                return Err("PTX contains an unterminated string literal".into());
+            }
+            continue;
+        }
+        if stripped.get(cursor..cursor + 2) == Some(b"//") {
+            while cursor < stripped.len() && stripped[cursor] != b'\n' {
+                stripped[cursor] = b' ';
+                cursor += 1;
+            }
+            continue;
+        }
+        if stripped.get(cursor..cursor + 2) == Some(b"/*") {
+            stripped[cursor] = b' ';
+            stripped[cursor + 1] = b' ';
+            cursor += 2;
+            let mut closed = false;
+            while cursor < stripped.len() {
+                if stripped.get(cursor..cursor + 2) == Some(b"*/") {
+                    stripped[cursor] = b' ';
+                    stripped[cursor + 1] = b' ';
+                    cursor += 2;
+                    closed = true;
+                    break;
+                }
+                if stripped[cursor] != b'\n' {
+                    stripped[cursor] = b' ';
+                }
+                cursor += 1;
+            }
+            if !closed {
+                return Err("PTX contains an unterminated block comment".into());
+            }
+            continue;
+        }
+        cursor += 1;
+    }
+    String::from_utf8(stripped).map_err(|_| "comment-stripped PTX is not UTF-8".to_string())
+}
+
+fn ptx_tokens(ptx: &str) -> Vec<PtxToken<'_>> {
+    let bytes = ptx.as_bytes();
+    let mut tokens = Vec::new();
+    let mut cursor = 0;
+    while cursor < bytes.len() {
+        if bytes[cursor].is_ascii_whitespace() {
+            cursor += 1;
+            continue;
+        }
+        let start = cursor;
+        if bytes[cursor] == b'"' {
+            cursor += 1;
+            while cursor < bytes.len() {
+                match bytes[cursor] {
+                    b'\\' => cursor = cursor.saturating_add(2),
+                    b'"' => {
+                        cursor += 1;
+                        break;
+                    }
+                    _ => cursor += 1,
+                }
+            }
+        } else if matches!(
+            bytes[cursor],
+            b'(' | b')' | b'{' | b'}' | b'[' | b']' | b',' | b';'
+        ) {
+            cursor += 1;
+        } else {
+            cursor += 1;
+            while cursor < bytes.len()
+                && !bytes[cursor].is_ascii_whitespace()
+                && !matches!(
+                    bytes[cursor],
+                    b'(' | b')' | b'{' | b'}' | b'[' | b']' | b',' | b';' | b'"'
+                )
+            {
+                cursor += 1;
+            }
+        }
+        tokens.push(PtxToken {
+            text: &ptx[start..cursor],
+            start,
+            end: cursor,
+        });
+    }
+    tokens
+}
+
+fn ptx_has_unquoted_token(ptx: &str, mut predicate: impl FnMut(&str) -> bool) -> bool {
+    ptx_tokens(ptx)
+        .into_iter()
+        .filter(|token| !token.text.starts_with('"'))
+        .any(|token| predicate(token.text))
+}
+
+fn ptx_atomic_inc_limits(body: &str) -> Result<Vec<u32>, String> {
+    let tokens = ptx_tokens(body);
+    let mut limits = Vec::new();
+    for (opcode_index, token) in tokens.iter().enumerate() {
+        if token.text != "atom.global.inc.u32" {
+            continue;
+        }
+        let mut bracket_depth = 0_usize;
+        let mut operands = vec![Vec::new()];
+        let mut terminated = false;
+        for operand in tokens.iter().skip(opcode_index + 1) {
+            match operand.text {
+                "[" => {
+                    bracket_depth += 1;
+                    operands.last_mut().unwrap().push(operand.text);
+                }
+                "]" => {
+                    bracket_depth = bracket_depth
+                        .checked_sub(1)
+                        .ok_or_else(|| "TF32 split-K atomicInc has an unmatched ']'".to_owned())?;
+                    operands.last_mut().unwrap().push(operand.text);
+                }
+                "," if bracket_depth == 0 => operands.push(Vec::new()),
+                ";" if bracket_depth == 0 => {
+                    terminated = true;
+                    break;
+                }
+                _ => operands.last_mut().unwrap().push(operand.text),
+            }
+        }
+        if !terminated || bracket_depth != 0 || operands.len() != 3 || operands[2].len() != 1 {
+            return Err("TF32 split-K atomicInc must have three well-formed operands".into());
+        }
+        let limit = operands[2][0]
+            .parse::<u32>()
+            .map_err(|_| "TF32 split-K atomicInc limit must be a decimal immediate".to_owned())?;
+        limits.push(limit);
+    }
+    Ok(limits)
+}
+
+fn require_last_block_protocol_order(
+    label: &str,
+    entry: &ParsedPtxEntry,
+    store_opcodes: &[&str],
+    load_opcodes: &[&str],
+) -> Result<(), String> {
+    let tokens = ptx_tokens(&entry.body);
+    let positions = |opcodes: &[&str]| {
+        tokens
+            .iter()
+            .filter(|token| opcodes.contains(&token.text))
+            .map(|token| token.start)
+            .collect::<Vec<_>>()
+    };
+    let stores = positions(store_opcodes);
+    let fences = positions(&["membar.gl"]);
+    let atomics = positions(&["atom.global.inc.u32"]);
+    let loads = positions(load_opcodes);
+    if stores.is_empty() || fences.len() != 1 || atomics.len() != 1 || loads.is_empty() {
+        return Err(format!(
+            "{label}/{} has an incomplete last-block protocol",
+            entry.symbol
+        ));
+    }
+    let last_store = stores.into_iter().max().unwrap();
+    let fence = fences[0];
+    let atomic = atomics[0];
+    let first_load = loads.into_iter().min().unwrap();
+    if !(last_store < fence && fence < atomic && atomic < first_load) {
+        return Err(format!(
+            "{label}/{} must publish partials before the fence, signal completion after the fence, and reload only after the atomic",
+            entry.symbol
+        ));
+    }
+    Ok(())
+}
+
+fn is_ptx_symbol(token: &str) -> bool {
+    let mut bytes = token.bytes();
+    bytes
+        .next()
+        .is_some_and(|byte| byte.is_ascii_alphabetic() || matches!(byte, b'_' | b'$'))
+        && bytes.all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'$'))
+}
+
+fn matching_ptx_token(
+    tokens: &[PtxToken<'_>],
+    start: usize,
+    open: &str,
+    close: &str,
+) -> Option<usize> {
+    let mut depth = 0_usize;
+    for (index, token) in tokens.iter().enumerate().skip(start) {
+        if token.text == open {
+            depth += 1;
+        } else if token.text == close {
+            depth = depth.checked_sub(1)?;
+            if depth == 0 {
+                return Some(index);
+            }
+        }
+    }
+    None
+}
+
+fn ptx_entry_signature_end(
+    tokens: &[PtxToken<'_>],
+    entry: usize,
+    symbol: &str,
+) -> Result<usize, String> {
+    let after_symbol = entry + 2;
+    match tokens.get(after_symbol).map(|token| token.text) {
+        Some("(") => matching_ptx_token(tokens, after_symbol, "(", ")")
+            .map(|close| close + 1)
+            .ok_or_else(|| format!("PTX entry {symbol} has an unclosed parameter list")),
+        Some("{") => Ok(after_symbol),
+        Some(directive) if directive.starts_with('.') => Ok(after_symbol),
+        Some(_) => Err(format!("PTX entry {symbol} has a malformed signature")),
+        None => Err(format!("PTX entry {symbol} has no body")),
+    }
+}
+
+fn ptx_entry_body_open(
+    tokens: &[PtxToken<'_>],
+    mut cursor: usize,
+    symbol: &str,
+) -> Result<usize, String> {
+    loop {
+        let token = tokens
+            .get(cursor)
+            .ok_or_else(|| format!("PTX entry {symbol} has no body"))?;
+        if token.text == "{" {
+            return Ok(cursor);
+        }
+        if matches!(
+            token.text,
+            ";" | "}" | ".entry" | ".extern" | ".func" | ".target"
+        ) || !token.text.starts_with('.')
+        {
+            return Err(format!("PTX entry {symbol} has no body"));
+        }
+
+        if token.text == ".pragma" {
+            tokens
+                .get(cursor + 1)
+                .filter(|value| value.text.starts_with('"') && value.text.ends_with('"'))
+                .ok_or_else(|| format!("PTX entry {symbol} has a malformed pragma"))?;
+            tokens
+                .get(cursor + 2)
+                .filter(|terminator| terminator.text == ";")
+                .ok_or_else(|| format!("PTX entry {symbol} has a malformed pragma"))?;
+            cursor += 3;
+            continue;
+        }
+
+        cursor += 1;
+        while let Some(operand) = tokens.get(cursor) {
+            if operand.text == "{" || operand.text.starts_with('.') {
+                break;
+            }
+            if operand.text == "}" {
+                return Err(format!("PTX entry {symbol} has no body"));
+            }
+            cursor += 1;
+            if operand.text == ";" {
+                break;
+            }
+        }
+    }
+}
+
+fn reject_nested_ptx_module_directives(
+    tokens: &[PtxToken<'_>],
+    body_open: usize,
+    body_close: usize,
+    owner: &str,
+) -> Result<(), String> {
+    if let Some(directive) = tokens[body_open + 1..body_close]
+        .iter()
+        .find(|token| matches!(token.text, ".entry" | ".func" | ".target"))
+    {
+        return Err(format!(
+            "PTX {owner} contains nested module directive {}",
+            directive.text
+        ));
+    }
+    Ok(())
+}
+
+fn parse_ptx_function(
+    ptx: &str,
+    tokens: &[PtxToken<'_>],
+    function: usize,
+) -> Result<(ParsedPtxFunction, usize), String> {
+    let mut cursor = function + 1;
+    if tokens.get(cursor).is_some_and(|token| token.text == "(") {
+        cursor = matching_ptx_token(tokens, cursor, "(", ")")
+            .map(|close| close + 1)
+            .ok_or_else(|| "PTX function has an unclosed return parameter list".to_string())?;
+    }
+    let symbol = tokens
+        .get(cursor)
+        .filter(|token| is_ptx_symbol(token.text))
+        .ok_or_else(|| "PTX function has no valid symbol".to_string())?;
+    cursor += 1;
+    if tokens.get(cursor).is_some_and(|token| token.text == "(") {
+        cursor = matching_ptx_token(tokens, cursor, "(", ")")
+            .map(|close| close + 1)
+            .ok_or_else(|| format!("PTX function {} has unclosed parameters", symbol.text))?;
+    }
+
+    let mut modifier = function;
+    let mut is_extern = false;
+    while modifier > 0 && tokens[modifier - 1].text.starts_with('.') {
+        modifier -= 1;
+        is_extern |= tokens[modifier].text == ".extern";
+    }
+    while let Some(token) = tokens.get(cursor) {
+        match token.text {
+            "{" => {
+                if is_extern {
+                    return Err(format!("extern PTX function {} has a body", symbol.text));
+                }
+                let body_close = matching_ptx_token(tokens, cursor, "{", "}")
+                    .ok_or_else(|| format!("PTX function {} has an unclosed body", symbol.text))?;
+                reject_nested_ptx_module_directives(tokens, cursor, body_close, "function")?;
+                return Ok((
+                    ParsedPtxFunction {
+                        symbol: symbol.text.to_owned(),
+                        body: Some(ptx[tokens[cursor].end..tokens[body_close].start].to_owned()),
+                    },
+                    body_close + 1,
+                ));
+            }
+            ";" => {
+                return Ok((
+                    ParsedPtxFunction {
+                        symbol: symbol.text.to_owned(),
+                        body: None,
+                    },
+                    cursor + 1,
+                ));
+            }
+            "}" | ".entry" | ".func" | ".target" => {
+                return Err(format!("PTX function {} has no valid body", symbol.text));
+            }
+            _ => cursor += 1,
+        }
+    }
+    Err(format!(
+        "PTX function {} has no body or declaration terminator",
+        symbol.text
+    ))
+}
+
+fn parse_ptx(ptx: &str) -> Result<ParsedPtx, String> {
+    let stripped = strip_ptx_comments(ptx)?;
+    let tokens = ptx_tokens(&stripped);
+
+    let mut target = None;
+    let mut entries = Vec::new();
+    let mut functions = Vec::new();
+    let mut cursor = 0;
+    while cursor < tokens.len() {
+        match tokens[cursor].text {
+            ".target" => {
+                let value = tokens
+                    .get(cursor + 1)
+                    .filter(|token| is_ptx_symbol(token.text))
+                    .ok_or_else(|| "PTX has a malformed target directive".to_string())?;
+                if target.replace(value.text.to_owned()).is_some() {
+                    return Err("PTX contains duplicate target directives".into());
+                }
+                cursor += 2;
+                continue;
+            }
+            ".func" => {
+                let (function, next) = parse_ptx_function(&stripped, &tokens, cursor)?;
+                functions.push(function);
+                cursor = next;
+                continue;
+            }
+            "{" => {
+                let close = matching_ptx_token(&tokens, cursor, "{", "}")
+                    .ok_or_else(|| "PTX contains an unclosed module-scope brace".to_string())?;
+                reject_nested_ptx_module_directives(&tokens, cursor, close, "module scope")?;
+                cursor = close + 1;
+                continue;
+            }
+            "}" => return Err("PTX contains an unmatched module-scope closing brace".into()),
+            ".entry" => {}
+            _ => {
+                cursor += 1;
+                continue;
+            }
+        }
+        let mut modifier = cursor;
+        while modifier > 0 && tokens[modifier - 1].text.starts_with('.') {
+            modifier -= 1;
+            if tokens[modifier].text == ".extern" {
+                return Err("PTX contains an extern entry directive".into());
+            }
+        }
+        let symbol = tokens
+            .get(cursor + 1)
+            .filter(|token| is_ptx_symbol(token.text))
+            .ok_or_else(|| "PTX has an entry directive without a valid symbol".to_string())?;
+        let signature_end = ptx_entry_signature_end(&tokens, cursor, symbol.text)?;
+        let body_open = ptx_entry_body_open(&tokens, signature_end, symbol.text)?;
+        let body_open_token = tokens
+            .get(body_open)
+            .ok_or_else(|| format!("PTX entry {} has no body", symbol.text))?;
+        let body_close = matching_ptx_token(&tokens, body_open, "{", "}")
+            .ok_or_else(|| format!("PTX entry {} has an unclosed body", symbol.text))?;
+        reject_nested_ptx_module_directives(
+            &tokens,
+            body_open,
+            body_close,
+            &format!("entry {}", symbol.text),
+        )?;
+        entries.push(ParsedPtxEntry {
+            symbol: symbol.text.to_owned(),
+            text: stripped[tokens[cursor].start..tokens[body_close].end].to_owned(),
+            body: stripped[body_open_token.end..tokens[body_close].start].to_owned(),
+        });
+        cursor = body_close + 1;
+    }
+    Ok(ParsedPtx {
+        target,
+        entries,
+        functions,
+    })
+}
+
+fn ptx_entry_symbols(ptx: &str) -> Result<Vec<String>, String> {
+    Ok(parse_ptx(ptx)?
+        .entries
+        .into_iter()
+        .map(|entry| entry.symbol)
+        .collect())
+}
+
+fn validate_exact_ptx_exports(
+    label: &str,
+    expected_count: usize,
+    expected: &[&str],
+    ptx: &str,
+) -> Result<ParsedPtx, String> {
+    let expected_entries = expected.len();
+    let mut expected_counts = BTreeMap::new();
+    for &symbol in expected {
+        *expected_counts.entry(symbol).or_insert(0_usize) += 1;
+    }
+    let expected_duplicates: Vec<_> = expected_counts
+        .iter()
+        .filter_map(|(&symbol, &count)| (count > 1).then_some(symbol))
+        .collect();
+    let expected: BTreeSet<_> = expected_counts.into_keys().collect();
+    let parsed = parse_ptx(ptx).map_err(|error| format!("{label} PTX parse failed: {error}"))?;
+    let actual: Vec<_> = parsed
+        .entries
+        .iter()
+        .map(|entry| entry.symbol.as_str())
+        .collect();
+    let actual_entries = actual.len();
+    let actual_unique: BTreeSet<_> = actual.iter().copied().collect();
+    let mut actual_counts = BTreeMap::new();
+    for &symbol in &actual {
+        *actual_counts.entry(symbol).or_insert(0_usize) += 1;
+    }
+    let actual_duplicates: Vec<_> = actual_counts
+        .into_iter()
+        .filter_map(|(symbol, count)| (count > 1).then_some(symbol))
+        .collect();
+    let missing: Vec<_> = expected.difference(&actual_unique).copied().collect();
+    let foreign: Vec<_> = actual_unique.difference(&expected).copied().collect();
+    if expected_entries == expected_count
+        && actual_entries == expected_count
+        && actual_duplicates.is_empty()
+        && missing.is_empty()
+        && foreign.is_empty()
+        && expected_duplicates.is_empty()
+    {
+        return Ok(parsed);
+    }
+    Err(format!(
+        "{label} PTX export mismatch: expected_count={expected_count}; expected_entries={}; actual_entries={}; expected_duplicates={expected_duplicates:?}; actual_duplicates={actual_duplicates:?}; missing={missing:?}; foreign={foreign:?}",
+        expected_entries, actual_entries
+    ))
+}
+
+fn parsed_ptx_entry(ptx: &str, symbol: &str) -> Result<ParsedPtxEntry, String> {
+    let mut matches = parse_ptx(ptx)?
+        .entries
+        .into_iter()
+        .filter(|entry| entry.symbol == symbol);
+    let entry = matches
+        .next()
+        .ok_or_else(|| format!("TF32 PTX is missing entry {symbol}"))?;
+    if matches.next().is_some() {
+        return Err(format!("TF32 PTX contains duplicate entry {symbol}"));
+    }
+    Ok(entry)
+}
+
+fn parsed_ptx_entry_ref<'a>(
+    parsed: &'a ParsedPtx,
+    symbol: &str,
+) -> Result<&'a ParsedPtxEntry, String> {
+    let mut matches = parsed.entries.iter().filter(|entry| entry.symbol == symbol);
+    let entry = matches
+        .next()
+        .ok_or_else(|| format!("PTX is missing entry {symbol}"))?;
+    if matches.next().is_some() {
+        return Err(format!("PTX contains duplicate entry {symbol}"));
+    }
+    Ok(entry)
+}
+
+fn parsed_ptx_function_ref<'a>(
+    parsed: &'a ParsedPtx,
+    symbol: &str,
+) -> Result<&'a ParsedPtxFunction, String> {
+    let mut matches = parsed
+        .functions
+        .iter()
+        .filter(|function| function.symbol == symbol);
+    let function = matches
+        .next()
+        .ok_or_else(|| format!("PTX is missing function {symbol}"))?;
+    if matches.next().is_some() {
+        return Err(format!("PTX contains ambiguous function {symbol}"));
+    }
+    Ok(function)
+}
+
+fn ptx_direct_call_targets(body: &str) -> Result<Vec<String>, String> {
+    let tokens = ptx_tokens(body);
+    let mut targets = Vec::new();
+    for (call, token) in tokens.iter().enumerate() {
+        if token.text != "call" && !token.text.starts_with("call.") {
+            continue;
+        }
+        if token.text != "call.uni" {
+            return Err(format!(
+                "PTX contains unsupported call opcode {}",
+                token.text
+            ));
+        }
+        let mut cursor = call + 1;
+        if tokens.get(cursor).is_some_and(|token| token.text == "(") {
+            cursor = matching_ptx_token(&tokens, cursor, "(", ")")
+                .map(|close| close + 1)
+                .ok_or_else(|| "PTX call has unclosed return arguments".to_string())?;
+            if !tokens.get(cursor).is_some_and(|token| token.text == ",") {
+                return Err("PTX call has no target separator".into());
+            }
+            cursor += 1;
+        }
+        let target = tokens
+            .get(cursor)
+            .filter(|target| is_ptx_symbol(target.text))
+            .ok_or_else(|| "PTX call has no direct target".to_string())?;
+        cursor += 1;
+        if !tokens.get(cursor).is_some_and(|token| token.text == ",") {
+            return Err(format!(
+                "PTX call to {} has no argument separator",
+                target.text
+            ));
+        }
+        cursor += 1;
+        if !tokens.get(cursor).is_some_and(|token| token.text == "(") {
+            return Err(format!("PTX call to {} has no argument list", target.text));
+        }
+        cursor = matching_ptx_token(&tokens, cursor, "(", ")")
+            .map(|close| close + 1)
+            .ok_or_else(|| format!("PTX call to {} has unclosed arguments", target.text))?;
+        if !tokens.get(cursor).is_some_and(|token| token.text == ";") {
+            return Err(format!("PTX call to {} has no terminator", target.text));
+        }
+        targets.push(target.text.to_owned());
+    }
+    Ok(targets)
+}
+
+fn ptx_entry(ptx: &str, symbol: &str) -> Result<String, String> {
+    Ok(parsed_ptx_entry(ptx, symbol)?.text)
+}
+
+fn ptx_entry_body(ptx: &str, symbol: &str) -> Result<String, String> {
+    Ok(parsed_ptx_entry(ptx, symbol)?.body)
+}
+
+fn validate_tf32_parameter_abi(
+    module_kind: ModuleKind,
+    ptx: &str,
+    cuda_major: i32,
+) -> Result<(), String> {
+    let map_alignment = match cuda_major {
+        12 => 64,
+        13 => 128,
+        _ => {
+            return Err(format!(
+                "unsupported CUDA tensor-map ABI major {cuda_major}"
+            ));
+        }
+    };
+    let parsed = parse_ptx(ptx)?;
+    for kernel_spec in super::contract::tf32_route_specs(module_kind) {
+        let entry = &parsed_ptx_entry_ref(&parsed, kernel_spec.symbol)?.text;
+        let parameters = entry
+            .split_once('(')
+            .and_then(|(_, tail)| tail.split_once("\n)").map(|(head, _)| head))
+            .ok_or_else(|| format!("{} has no PTX parameter list", kernel_spec.symbol))?;
+        let declarations: Vec<_> = parameters
+            .lines()
+            .map(str::trim)
+            .filter(|line| line.starts_with(".param "))
+            .collect();
+        if declarations.len() != 5 {
+            return Err(format!(
+                "{} must have five ABI parameters",
+                kernel_spec.symbol
+            ));
+        }
+        let bundle_size = if module_kind == ModuleKind::TriadSm80 {
+            32
+        } else {
+            40
+        };
+        let bundle = ".param .align 4 .b8 ";
+        let is_bundle =
+            |line: &str| line.starts_with(bundle) && line.contains(&format!("[{bundle_size}]"));
+        let is_u64 = |line: &str| line.starts_with(".param .u64 ");
+        if !is_bundle(declarations[4]) {
+            return Err(format!(
+                "{} has the wrong parameter bundle ABI",
+                kernel_spec.symbol
+            ));
+        }
+        if module_kind == ModuleKind::TriadSm80 {
+            if !declarations[..4].iter().all(|line| is_u64(line)) {
+                return Err(format!(
+                    "{} has the wrong pointer parameter ABI",
+                    kernel_spec.symbol
+                ));
+            }
+        } else {
+            let map = format!(".param .align {map_alignment} .b8 ");
+            let is_map = |line: &str| line.starts_with(&map) && line.contains("[128]");
+            if !is_u64(declarations[0])
+                || !is_map(declarations[1])
+                || !is_map(declarations[2])
+                || !is_u64(declarations[3])
+            {
+                return Err(format!(
+                    "{} has the wrong tensor-map ABI",
+                    kernel_spec.symbol
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_tf32_splitk_ptx(ptx: &str) -> Result<(), String> {
+    let specs = &super::contract::TF32_SPLITK_CANDIDATE_SPECS;
+    let expected = specs
+        .iter()
+        .map(|spec| spec.symbol)
+        .collect::<BTreeSet<_>>();
+    let symbols = ptx_entry_symbols(ptx)?;
+    let actual = symbols
+        .iter()
+        .map(String::as_str)
+        .filter(|symbol| symbol.contains("_tf32_splitk"))
+        .collect::<Vec<_>>();
+    let unique = actual.iter().copied().collect::<BTreeSet<_>>();
+    if actual.len() != unique.len() || unique != expected {
+        return Err(
+            "TriadSm80 TF32 split-K PTX inventory is incomplete, duplicated, or foreign".into(),
+        );
+    }
+    let parsed = parse_ptx(ptx)?;
+    for spec in specs {
+        let symbol = spec.symbol;
+        let entry = parsed_ptx_entry_ref(&parsed, symbol)?;
+        let parameters = entry
+            .text
+            .split_once('(')
+            .and_then(|(_, tail)| tail.split_once("\n)").map(|(head, _)| head))
+            .ok_or_else(|| format!("{symbol} has no PTX parameter list"))?;
+        let declarations = parameters
+            .lines()
+            .map(str::trim)
+            .filter(|line| line.starts_with(".param "))
+            .collect::<Vec<_>>();
+        let pointers_are_u64 = declarations
+            .get(..6)
+            .is_some_and(|pointers| pointers.iter().all(|line| line.starts_with(".param .u64 ")));
+        let bundle_is_exact = declarations
+            .get(6)
+            .is_some_and(|line| line.starts_with(".param .align 4 .b8 ") && line.contains("[32]"));
+        if declarations.len() != 7 || !pointers_are_u64 || !bundle_is_exact {
+            return Err(format!("{symbol} has the wrong seven-parameter ABI"));
+        }
+        if ptx_has_unquoted_token(&entry.body, |token| {
+            (token.starts_with("atom.") && !token.starts_with("atom.global.inc.u32"))
+                || token.starts_with("red.")
+                || token.starts_with("redux.")
+        }) {
+            return Err(format!(
+                "{symbol} contains a forbidden synchronization or reduction opcode"
+            ));
+        }
+        let limits = ptx_atomic_inc_limits(&entry.body)?;
+        let expected_limit = spec.partitions - 1;
+        if limits != [expected_limit] {
+            return Err(format!(
+                "{symbol} must contain exactly one atomicInc with immediate limit {expected_limit}, got {limits:?}"
+            ));
+        }
+        if ptx_has_unquoted_token(&entry.body, |token| {
+            token.starts_with("div.") || token.starts_with("rem.")
+        }) {
+            return Err(format!(
+                "TriadSm80 TF32 split-K fused kernel {symbol} contains runtime division"
+            ));
+        }
+        require_ptx_entry_tokens(
+            "TriadSm80 TF32 split-K fused kernel",
+            entry,
+            &[
+                "cvt.rna.tf32.f32",
+                "mma.sync.aligned.m16n8k8.row.col.f32.tf32.tf32.f32",
+                "atom.global.inc.u32",
+                "membar.gl",
+                "add.rn.f32",
+                "mul.rn.f32",
+                "st.global.cg.f32",
+                "st.global.cg.v2.f32",
+                "ld.global.cg.f32",
+                "ld.global.cg.v2.f32",
+            ],
+        )?;
+        if spec.op == ResolvedGemmOp::Nn {
+            require_ptx_entry_tokens("TriadSm80 TF32 split-K NN epilogue", entry, &["fma.rn.f32"])?;
+        }
+        require_last_block_protocol_order(
+            "TriadSm80 TF32 split-K fused kernel",
+            entry,
+            &["st.global.cg.f32", "st.global.cg.v2.f32"],
+            &["ld.global.cg.f32", "ld.global.cg.v2.f32"],
+        )?;
+    }
+    Ok(())
+}
+
+fn validate_tn_narrow_splitm_partial_ptx(ptx: &str) -> Result<(), String> {
+    validate_tn_splitm_partial_ptx_cohort(
+        ptx,
+        "_tn_narrow_splitm_partial",
+        SCALAR_TN_NARROW_SPLITM_PARTIAL_SYMBOLS,
+        "TriadScalar TN narrow split-M partial",
+        true,
+    )
+}
+
+fn validate_tn_splitm_partial_ptx(ptx: &str) -> Result<(), String> {
+    validate_tn_splitm_partial_ptx_cohort(
+        ptx,
+        "_tn_splitm_partial",
+        SCALAR_TN_SPLITM_PARTIAL_SYMBOLS,
+        "TriadScalar TN split-M partial",
+        false,
+    )
+}
+
+fn validate_tn_splitm_partial_ptx_cohort(
+    ptx: &str,
+    symbol_marker: &str,
+    expected_symbols: &[&str],
+    label: &str,
+    forbid_runtime_tile_division: bool,
+) -> Result<(), String> {
+    let symbols = ptx_entry_symbols(ptx)?;
+    let actual = symbols
+        .iter()
+        .map(String::as_str)
+        .filter(|symbol| symbol.contains(symbol_marker))
+        .collect::<BTreeSet<_>>();
+    let expected = expected_symbols.iter().copied().collect::<BTreeSet<_>>();
+    if actual != expected {
+        return Err(format!("{label} PTX inventory is incomplete or foreign"));
+    }
+    let parsed = parse_ptx(ptx)?;
+    for symbol in expected_symbols {
+        let entry = parsed_ptx_entry_ref(&parsed, symbol)?;
+        let parameters = entry
+            .text
+            .split_once('(')
+            .and_then(|(_, tail)| tail.split_once("\n)").map(|(head, _)| head))
+            .ok_or_else(|| format!("{symbol} has no PTX parameter list"))?;
+        let declarations = parameters
+            .lines()
+            .map(str::trim)
+            .filter(|line| line.starts_with(".param "))
+            .collect::<Vec<_>>();
+        let pointers_are_u64 = declarations
+            .get(..3)
+            .is_some_and(|items| items.iter().all(|line| line.starts_with(".param .u64 ")));
+        let scalars_are_u32 = declarations
+            .get(3..)
+            .is_some_and(|items| items.iter().all(|line| line.starts_with(".param .u32 ")));
+        if declarations.len() != 7 || !pointers_are_u64 || !scalars_are_u32 {
+            return Err(format!("{symbol} has the wrong seven-parameter ABI"));
+        }
+        if ptx_has_unquoted_token(&entry.body, |token| {
+            token.starts_with("atom.") || token.starts_with("red.") || token.starts_with("redux.")
+        }) {
+            return Err(format!("{symbol} contains an atomic or reduction opcode"));
+        }
+        if forbid_runtime_tile_division
+            && ptx_has_unquoted_token(&entry.body, |token| {
+                token.starts_with("div.") || token.starts_with("rem.")
+            })
+        {
+            return Err(format!("{symbol} contains runtime tile division"));
+        }
+        require_ptx_entry_tokens(label, entry, &["fma.rn.f32"])?;
+    }
+    Ok(())
+}
+
+fn validate_sm80_ptx(arch: &str, ptx: &str) -> Result<(), String> {
+    let expected = sm80_ptx_target(arch)
+        .ok_or_else(|| format!("TriadSm80 has no portable target candidate for {arch}"))?;
+    let actual = ptx_target(ptx)?;
+    if actual != expected {
+        return Err(format!(
+            "TriadSm80 PTX target is {actual}, expected {expected}"
+        ));
+    }
+    Ok(())
+}
+
+fn ptx_target(ptx: &str) -> Result<String, String> {
+    parse_ptx(ptx)?
+        .target
         .ok_or_else(|| "specialized PTX has no target directive".to_string())
 }
 
+fn require_ptx_entry_tokens(
+    label: &str,
+    entry: &ParsedPtxEntry,
+    required: &[&str],
+) -> Result<(), String> {
+    require_ptx_scope_tokens(label, &entry.symbol, &entry.body, required)
+}
+
+fn require_ptx_scope_tokens(
+    label: &str,
+    scope: &str,
+    body: &str,
+    required: &[&str],
+) -> Result<(), String> {
+    for &instruction in required {
+        if !ptx_has_unquoted_token(body, |token| token == instruction) {
+            return Err(format!("{label}/{scope} PTX is missing {instruction}"));
+        }
+    }
+    Ok(())
+}
+
+fn require_ptx_entry_opcode(
+    label: &str,
+    entry: &ParsedPtxEntry,
+    description: &str,
+    mut predicate: impl FnMut(&str) -> bool,
+) -> Result<(), String> {
+    if ptx_has_unquoted_token(&entry.body, |token| predicate(token)) {
+        return Ok(());
+    }
+    Err(format!(
+        "{label}/{} PTX is missing {description}",
+        entry.symbol
+    ))
+}
+
+fn reject_ptx_entry_tokens(
+    label: &str,
+    entry: &ParsedPtxEntry,
+    forbidden: &[&str],
+) -> Result<(), String> {
+    for &instruction in forbidden {
+        if ptx_has_unquoted_token(&entry.body, |token| token == instruction) {
+            return Err(format!(
+                "{label}/{} PTX contains incompatible core {instruction}",
+                entry.symbol
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_sm90a_wg2_producer_features(parsed: &ParsedPtx) -> Result<(), String> {
+    const PRODUCER: &[&str] = &[
+        "setmaxnreg.dec.sync.aligned.u32",
+        "bar.sync",
+        "mbarrier.try_wait.parity.acquire.cta.shared::cta.b64",
+        "mbarrier.arrive.expect_tx.release.cta.shared::cta.b64",
+        "cp.async.bulk.tensor.2d.shared::cta.global.tile.mbarrier::complete_tx::bytes",
+        "ret",
+    ];
+    let mut group_targets = Vec::new();
+    for pair in SM90A_SYMBOLS[6..].as_chunks::<2>().0 {
+        let mut pair_target = None;
+        for &symbol in pair {
+            let entry = parsed_ptx_entry_ref(parsed, symbol)?;
+            let calls = ptx_direct_call_targets(&entry.body)
+                .map_err(|error| format!("TriadSm90a/{symbol}: {error}"))?;
+            if calls.len() != 1 {
+                return Err(format!(
+                    "TriadSm90a/{symbol} has {} direct calls, expected one producer call",
+                    calls.len()
+                ));
+            }
+            let target = &calls[0];
+            let function = parsed_ptx_function_ref(parsed, target)?;
+            let body = function
+                .body
+                .as_deref()
+                .ok_or_else(|| format!("TriadSm90a producer {target} has no body"))?;
+            require_ptx_scope_tokens("TriadSm90a producer", target, body, PRODUCER)?;
+            if let Some(expected) = &pair_target
+                && expected != target
+            {
+                return Err(format!(
+                    "TriadSm90a WG2 pair {pair:?} calls different producers {expected} and {target}"
+                ));
+            }
+            pair_target = Some(target.clone());
+        }
+        group_targets.push(
+            pair_target
+                .ok_or_else(|| "TriadSm90a WG2 metadata contains an empty pair".to_string())?,
+        );
+    }
+    if group_targets.iter().collect::<BTreeSet<_>>().len() != group_targets.len() {
+        return Err("TriadSm90a WG2 operation groups must call three distinct producers".into());
+    }
+    Ok(())
+}
+
+fn validate_sm90a_entry_features(parsed: &ParsedPtx) -> Result<(), String> {
+    const BF16_CORE: &str = "wgmma.mma_async.sync.aligned.m64n128k16.f32.bf16.bf16";
+    const F16_CORE: &str = "wgmma.mma_async.sync.aligned.m64n128k16.f32.f16.f16";
+    const TF32_CORE: &str = "wgmma.mma_async.sync.aligned.m64n128k8.f32.tf32.tf32";
+    const COMMON: &[&str] = &[
+        "mbarrier.try_wait.parity.acquire.cta.shared::cta.b64",
+        "wgmma.fence.sync.aligned",
+        "wgmma.commit_group.sync.aligned",
+        "wgmma.wait_group.sync.aligned",
+    ];
+    const PRODUCER: &[&str] = &[
+        "cp.async.bulk.tensor.2d.shared::cta.global.tile.mbarrier::complete_tx::bytes",
+        "mbarrier.arrive.expect_tx.release.cta.shared::cta.b64",
+    ];
+
+    for (index, &symbol) in SM90A_SYMBOLS.iter().enumerate() {
+        let entry = parsed_ptx_entry_ref(parsed, symbol)?;
+        require_ptx_entry_tokens("TriadSm90a", entry, COMMON)?;
+        let (core, forbidden) = if index % 2 == 0 {
+            (BF16_CORE, [F16_CORE, TF32_CORE])
+        } else {
+            (F16_CORE, [BF16_CORE, TF32_CORE])
+        };
+        require_ptx_entry_tokens("TriadSm90a", entry, &[core])?;
+        reject_ptx_entry_tokens("TriadSm90a", entry, &forbidden)?;
+        if index < 6 {
+            require_ptx_entry_tokens("TriadSm90a", entry, PRODUCER)?;
+        } else {
+            require_ptx_entry_tokens("TriadSm90a", entry, &["setmaxnreg.inc.sync.aligned.u32"])?;
+        }
+    }
+    validate_sm90a_wg2_producer_features(parsed)?;
+
+    for spec in super::contract::tf32_route_specs(ModuleKind::TriadSm90a) {
+        let entry = parsed_ptx_entry_ref(parsed, spec.symbol)?;
+        require_ptx_entry_tokens("TriadSm90a", entry, COMMON)?;
+        require_ptx_entry_tokens("TriadSm90a", entry, PRODUCER)?;
+        require_ptx_entry_tokens("TriadSm90a", entry, &[TF32_CORE])?;
+        reject_ptx_entry_tokens("TriadSm90a", entry, &[BF16_CORE, F16_CORE])?;
+        let super::contract::Tf32PhysicalRoute::Sm90aWgmmaTf32TmaV1(route) = spec.route else {
+            return Err(format!(
+                "TriadSm90a/{} has foreign route metadata",
+                spec.symbol
+            ));
+        };
+        if route.schedule == super::contract::Sm90aWarpgroupSchedule::Wg2 {
+            require_ptx_entry_tokens(
+                "TriadSm90a",
+                entry,
+                &[
+                    "setmaxnreg.inc.sync.aligned.u32",
+                    "setmaxnreg.dec.sync.aligned.u32",
+                ],
+            )?;
+        }
+    }
+    Ok(())
+}
+
 fn validate_sm90a_ptx(ptx: &str) -> Result<(), String> {
-    let target = ptx
-        .lines()
-        .find_map(|line| line.trim().strip_prefix(".target "))
-        .ok_or_else(|| "TriadSm90a PTX has no target directive".to_string())?;
-    if target.split(',').next().map(str::trim) != Some("sm_90a") {
+    let target = ptx_target(ptx)?;
+    if target != "sm_90a" {
         return Err(format!(
             "TriadSm90a PTX target is {target}, expected sm_90a"
         ));
     }
-    for &symbol in SM90A_SYMBOLS {
-        let marker = format!(".entry {symbol}(");
-        if ptx.matches(&marker).count() != 1 {
-            return Err(format!("TriadSm90a PTX must contain one entry {symbol}"));
-        }
-    }
-    for instruction in [
-        "cp.async.bulk.tensor.2d.shared::cta.global.tile.mbarrier::complete_tx::bytes",
-        "mbarrier.arrive.expect_tx",
-        "mbarrier.try_wait.parity",
-        "wgmma.mma_async.sync.aligned.m64n128k16.f32.bf16.bf16",
-        "wgmma.mma_async.sync.aligned.m64n128k16.f32.f16.f16",
-        "wgmma.fence.sync.aligned",
-        "wgmma.commit_group.sync.aligned",
-        "wgmma.wait_group.sync.aligned",
-        "setmaxnreg.dec.sync.aligned.u32",
-        "setmaxnreg.inc.sync.aligned.u32",
-    ] {
-        if !ptx.contains(instruction) {
-            return Err(format!("TriadSm90a PTX is missing {instruction}"));
-        }
-    }
-    if ptx.split_ascii_whitespace().any(|token| {
+    let mut expected = SM90A_SYMBOLS.to_vec();
+    expected.extend(super::contract::tf32_module_symbols(ModuleKind::TriadSm90a));
+    let parsed = validate_exact_ptx_exports("TriadSm90a", 18, &expected, ptx)?;
+    validate_sm90a_entry_features(&parsed)?;
+    let ptx = strip_ptx_comments(ptx)?;
+    if ptx_has_unquoted_token(&ptx, |token| {
         token.starts_with("atom.")
             || token.starts_with("red.")
             || token.starts_with("atom::")
             || token.starts_with("red::")
+            || token == "cvt.rna.tf32.f32"
     }) {
-        return Err("TriadSm90a PTX contains a numeric atomic or reduction instruction".into());
+        return Err("TriadSm90a PTX contains a forbidden instruction family".into());
     }
     Ok(())
 }
 
 fn sm100_target_for_arch(arch: &str) -> Option<super::contract::Sm100TargetCandidate> {
-    [(10, 0), (10, 3)]
+    [(10, 0), (10, 3), (11, 0)]
         .into_iter()
-        .flat_map(super::dispatch::sm100_target_candidates)
+        .flat_map(sm100_target_candidates)
         .copied()
         .find(|target| target.nvrtc_arch == arch)
+}
+
+fn validate_sm100_entry_features(parsed: &ParsedPtx) -> Result<(), String> {
+    const COMMON: &[&str] = &[
+        "cp.async.bulk.tensor.2d.shared::cta.global.tile.mbarrier::complete_tx::bytes",
+        "mbarrier.arrive.expect_tx.release.cta.shared::cta.b64",
+        "mbarrier.try_wait.parity.acquire.cta.shared::cta.b64",
+        "tcgen05.alloc.cta_group::1.sync.aligned.shared::cta.b32",
+        "tcgen05.relinquish_alloc_permit.cta_group::1.sync.aligned",
+        "tcgen05.dealloc.cta_group::1.sync.aligned.b32",
+        "tcgen05.commit.cta_group::1.mbarrier::arrive::one.shared::cluster.b64",
+        "tcgen05.fence::before_thread_sync",
+        "tcgen05.fence::after_thread_sync",
+        "tcgen05.ld.sync.aligned.32x32b.x8.b32",
+        "tcgen05.wait::ld.sync.aligned",
+    ];
+    const STORE: &[&str] = &[
+        "tcgen05.st.sync.aligned.32x32b.x8.b32",
+        "tcgen05.wait::st.sync.aligned",
+    ];
+
+    for spec in &super::contract::SM100_KERNEL_SPECS {
+        let entry = parsed_ptx_entry_ref(parsed, spec.symbol)?;
+        require_ptx_entry_tokens("TriadSm100", entry, COMMON)?;
+        require_ptx_entry_tokens("TriadSm100", entry, &["tcgen05.mma.cta_group::1.kind::f16"])?;
+        reject_ptx_entry_tokens(
+            "TriadSm100",
+            entry,
+            &["tcgen05.mma.cta_group::1.kind::tf32"],
+        )?;
+        if spec.op == super::contract::Sm100Op::Nn {
+            require_ptx_entry_tokens("TriadSm100", entry, STORE)?;
+        }
+    }
+    for spec in super::contract::tf32_route_specs(ModuleKind::TriadSm100) {
+        let entry = parsed_ptx_entry_ref(parsed, spec.symbol)?;
+        require_ptx_entry_tokens("TriadSm100", entry, COMMON)?;
+        require_ptx_entry_tokens(
+            "TriadSm100",
+            entry,
+            &["tcgen05.mma.cta_group::1.kind::tf32"],
+        )?;
+        reject_ptx_entry_tokens("TriadSm100", entry, &["tcgen05.mma.cta_group::1.kind::f16"])?;
+        if spec.op == ResolvedGemmOp::Nn {
+            require_ptx_entry_tokens("TriadSm100", entry, STORE)?;
+        }
+    }
+    Ok(())
 }
 
 fn validate_sm100_ptx(arch: &str, ptx: &str) -> Result<(), String> {
@@ -747,16 +2818,15 @@ fn validate_sm100_ptx(arch: &str, ptx: &str) -> Result<(), String> {
             candidate.ptx_target
         ));
     }
-    for spec in super::contract::SM100_KERNEL_SPECS {
-        let marker = format!(".entry {}(", spec.symbol);
-        if ptx.matches(&marker).count() != 1 {
-            return Err(format!(
-                "TriadSm100 PTX must contain one entry {}",
-                spec.symbol
-            ));
-        }
-    }
-    validate_sm100_feature_instructions(ptx)
+    let mut expected: Vec<_> = super::contract::SM100_KERNEL_SPECS
+        .iter()
+        .map(|spec| spec.symbol)
+        .collect();
+    expected.extend(super::contract::tf32_module_symbols(ModuleKind::TriadSm100));
+    let parsed = validate_exact_ptx_exports("TriadSm100", 108, &expected, ptx)?;
+    validate_sm100_entry_features(&parsed)?;
+    let ptx = strip_ptx_comments(ptx)?;
+    validate_sm100_forbidden_instructions(&ptx)
 }
 
 fn validate_sm100_probe_ptx(arch: &str, ptx: &str) -> Result<(), String> {
@@ -769,22 +2839,26 @@ fn validate_sm100_probe_ptx(arch: &str, ptx: &str) -> Result<(), String> {
             candidate.ptx_target
         ));
     }
-    if ptx.matches(".entry tcgen05_probe(").count() != 1 {
-        return Err("TriadSm100 probe PTX must contain one entry tcgen05_probe".into());
-    }
-    validate_sm100_feature_instructions(ptx)
+    validate_exact_ptx_exports("TriadSm100 probe", 1, &["tcgen05_probe"], ptx)?;
+    let body = ptx_entry_body(ptx, "tcgen05_probe")?;
+    let ptx = strip_ptx_comments(ptx)?;
+    validate_sm100_feature_instructions(&body, &ptx)
 }
 
-fn validate_sm100_feature_instructions(ptx: &str) -> Result<(), String> {
+fn validate_sm100_feature_instructions(
+    required_scope: &str,
+    forbidden_scope: &str,
+) -> Result<(), String> {
+    let required_tokens = ptx_tokens(required_scope);
     for instruction in [
         "cp.async.bulk.tensor.2d.shared::cta.global.tile.mbarrier::complete_tx::bytes",
-        "mbarrier.arrive.expect_tx",
-        "mbarrier.try_wait.parity",
-        "tcgen05.alloc.cta_group::1",
-        "tcgen05.relinquish_alloc_permit.cta_group::1",
-        "tcgen05.dealloc.cta_group::1",
+        "mbarrier.arrive.expect_tx.release.cta.shared::cta.b64",
+        "mbarrier.try_wait.parity.acquire.cta.shared::cta.b64",
+        "tcgen05.alloc.cta_group::1.sync.aligned.shared::cta.b32",
+        "tcgen05.relinquish_alloc_permit.cta_group::1.sync.aligned",
+        "tcgen05.dealloc.cta_group::1.sync.aligned.b32",
         "tcgen05.mma.cta_group::1.kind::f16",
-        "tcgen05.commit.cta_group::1",
+        "tcgen05.commit.cta_group::1.mbarrier::arrive::one.shared::cluster.b64",
         "tcgen05.fence::before_thread_sync",
         "tcgen05.fence::after_thread_sync",
         "tcgen05.ld.sync.aligned.32x32b.x8.b32",
@@ -792,23 +2866,31 @@ fn validate_sm100_feature_instructions(ptx: &str) -> Result<(), String> {
         "tcgen05.st.sync.aligned.32x32b.x8.b32",
         "tcgen05.wait::st.sync.aligned",
     ] {
-        if !ptx.contains(instruction) {
+        if !required_tokens
+            .iter()
+            .any(|token| token.text == instruction)
+        {
             return Err(format!("TriadSm100 PTX is missing {instruction}"));
         }
     }
-    if ptx.split_ascii_whitespace().any(|token| {
+    validate_sm100_forbidden_instructions(forbidden_scope)
+}
+
+fn validate_sm100_forbidden_instructions(forbidden_scope: &str) -> Result<(), String> {
+    if ptx_has_unquoted_token(forbidden_scope, |token| {
         token.starts_with("atom.")
             || token.starts_with("red.")
             || token.starts_with("atom::")
             || token.starts_with("red::")
             || token.starts_with("tcgen05.ld.red")
             || token.starts_with("wgmma.")
-            || token.contains("cta_group::2")
-            || token.contains("multicast")
+            || token == "cvt.rna.tf32.f32"
+            || (token.starts_with("tcgen05.") && token.contains("cta_group::2"))
+            || token.contains(".multicast")
     }) {
         return Err("TriadSm100 PTX contains a forbidden instruction family".into());
     }
-    if ptx.split_ascii_whitespace().any(|token| {
+    if ptx_has_unquoted_token(forbidden_scope, |token| {
         token == "call"
             || token.starts_with("call.")
             || token == ".callprototype"
@@ -827,7 +2909,7 @@ fn validate_sm100_feature_instructions(ptx: &str) -> Result<(), String> {
         "operator new",
         "operator delete",
     ] {
-        if ptx.contains(symbol) {
+        if ptx_has_unquoted_token(forbidden_scope, |token| token == symbol) {
             return Err(format!(
                 "TriadSm100 PTX contains forbidden device-runtime symbol {symbol}"
             ));
@@ -844,6 +2926,69 @@ fn sm120_ptx_target(arch: &str) -> Option<&'static str> {
     }
 }
 
+fn validate_sm120_entry_features(parsed: &ParsedPtx) -> Result<(), String> {
+    const BF16_CORE: &str = "mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32";
+    const F16_CORE: &str = "mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32";
+    const TF32_CORE: &str = "mma.sync.aligned.m16n8k8.row.col.f32.tf32.tf32.f32";
+    const COMMON: &[&str] = &[
+        "cp.async.bulk.tensor.2d.shared::cta.global.tile.mbarrier::complete_tx::bytes",
+        "mbarrier.init.shared::cta.b64",
+        "fence.mbarrier_init.release.cluster",
+        "mbarrier.arrive.expect_tx.release.cta.shared::cta.b64",
+        "mbarrier.try_wait.parity.acquire.cta.shared::cta.b64",
+    ];
+
+    for spec in &super::contract::SM120_KERNEL_SPECS {
+        let entry = parsed_ptx_entry_ref(parsed, spec.symbol)?;
+        require_ptx_entry_tokens("TriadSm120", entry, COMMON)?;
+        require_ptx_entry_tokens(
+            "TriadSm120",
+            entry,
+            &["mbarrier.arrive.release.cta.shared::cta.b64"],
+        )?;
+        let (core, forbidden) = match spec.dtype {
+            super::super::dtype::WeightDtype::Bf16 => (BF16_CORE, [F16_CORE, TF32_CORE]),
+            super::super::dtype::WeightDtype::F16 => (F16_CORE, [BF16_CORE, TF32_CORE]),
+            super::super::dtype::WeightDtype::F32 => {
+                return Err(format!(
+                    "TriadSm120/{} has unsupported typed route metadata",
+                    spec.symbol
+                ));
+            }
+        };
+        require_ptx_entry_tokens("TriadSm120", entry, &[core])?;
+        reject_ptx_entry_tokens("TriadSm120", entry, &forbidden)?;
+        let loads = match spec.op {
+            super::contract::Sm120Op::Nn => [
+                "ldmatrix.sync.aligned.m8n8.x4.shared.b16",
+                "ldmatrix.sync.aligned.m8n8.x2.trans.shared.b16",
+            ],
+            super::contract::Sm120Op::Tn => [
+                "ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16",
+                "ldmatrix.sync.aligned.m8n8.x2.trans.shared.b16",
+            ],
+            super::contract::Sm120Op::Nt => [
+                "ldmatrix.sync.aligned.m8n8.x4.shared.b16",
+                "ldmatrix.sync.aligned.m8n8.x2.shared.b16",
+            ],
+        };
+        require_ptx_entry_tokens("TriadSm120", entry, &loads)?;
+        require_ptx_entry_opcode("TriadSm120", entry, "st.global opcode", |token| {
+            token.starts_with("st.global.")
+        })?;
+    }
+    for spec in super::contract::tf32_route_specs(ModuleKind::TriadSm120) {
+        let entry = parsed_ptx_entry_ref(parsed, spec.symbol)?;
+        require_ptx_entry_tokens("TriadSm120", entry, COMMON)?;
+        require_ptx_entry_tokens("TriadSm120", entry, &["cvt.rna.tf32.f32", TF32_CORE])?;
+        reject_ptx_entry_tokens("TriadSm120", entry, &[BF16_CORE, F16_CORE])?;
+        require_ptx_entry_opcode("TriadSm120", entry, "st.global opcode", |token| {
+            token.starts_with("st.global.")
+        })?;
+    }
+    Ok(())
+}
+
 fn validate_sm120_ptx(arch: &str, ptx: &str) -> Result<(), String> {
     let expected = sm120_ptx_target(arch)
         .ok_or_else(|| format!("TriadSm120 has no generic target candidate for {arch}"))?;
@@ -853,28 +2998,15 @@ fn validate_sm120_ptx(arch: &str, ptx: &str) -> Result<(), String> {
             "TriadSm120 PTX target is {actual}, expected {expected}"
         ));
     }
-    for spec in super::contract::SM120_KERNEL_SPECS {
-        let marker = format!(".entry {}(", spec.symbol);
-        if ptx.matches(&marker).count() != 1 {
-            return Err(format!(
-                "TriadSm120 PTX must contain one entry {}",
-                spec.symbol
-            ));
-        }
-    }
-    for instruction in [
-        "cp.async.bulk.tensor.2d.shared::cta.global.tile.mbarrier::complete_tx::bytes",
-        "mbarrier.arrive.expect_tx",
-        "mbarrier.try_wait.parity",
-        "ldmatrix.sync.aligned.m8n8.x4.shared.b16",
-        "mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32",
-        "mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32",
-    ] {
-        if !ptx.contains(instruction) {
-            return Err(format!("TriadSm120 PTX is missing {instruction}"));
-        }
-    }
-    if ptx.split_ascii_whitespace().any(|token| {
+    let mut expected: Vec<_> = super::contract::SM120_KERNEL_SPECS
+        .iter()
+        .map(|spec| spec.symbol)
+        .collect();
+    expected.extend(super::contract::tf32_module_symbols(ModuleKind::TriadSm120));
+    let parsed = validate_exact_ptx_exports("TriadSm120", 113, &expected, ptx)?;
+    validate_sm120_entry_features(&parsed)?;
+    let ptx = strip_ptx_comments(ptx)?;
+    if ptx_has_unquoted_token(&ptx, |token| {
         token.starts_with("atom.")
             || token.starts_with("atom::")
             || token.starts_with("red.")
@@ -883,14 +3015,17 @@ fn validate_sm120_ptx(arch: &str, ptx: &str) -> Result<(), String> {
             || token.starts_with("tcgen05.")
             || token.starts_with("wgmma.")
             || token.starts_with("setmaxnreg.")
-            || token.contains("multicast")
-            || token.contains("cta_group::2")
-            || token.contains("shared::cluster")
+            || token.contains(".multicast")
+            || (token.starts_with("tcgen05.") && token.contains("cta_group::2"))
+            || token.contains(".shared::cluster")
             || token.starts_with("multimem.")
+            || token.starts_with("mapa.")
+            || token.starts_with("clusterlaunchcontrol.")
+            || token.starts_with("griddepcontrol.")
     }) {
         return Err("TriadSm120 PTX contains a forbidden instruction family".into());
     }
-    if ptx.split_ascii_whitespace().any(|token| {
+    if ptx_has_unquoted_token(&ptx, |token| {
         token == "call"
             || token.starts_with("call.")
             || token == ".callprototype"
@@ -909,9 +3044,106 @@ fn validate_sm120_ptx(arch: &str, ptx: &str) -> Result<(), String> {
         "operator new",
         "operator delete",
     ] {
-        if ptx.contains(symbol) {
+        if ptx_has_unquoted_token(&ptx, |token| token == symbol) {
             return Err(format!("TriadSm120 PTX contains forbidden symbol {symbol}"));
         }
+    }
+    Ok(())
+}
+
+fn validate_tf32_feature_instructions(module_kind: ModuleKind, ptx: &str) -> Result<(), String> {
+    use crate::mamba_ssm::gpu::kernel_identity::{
+        ResolvedInstructionFamily, ResolvedOperandConversion,
+    };
+
+    let expected_contract = match module_kind {
+        ModuleKind::TriadSm80 => (
+            ResolvedInstructionFamily::MmaSync,
+            ResolvedOperandConversion::RegisterCvtRnaTf32F32V1,
+        ),
+        ModuleKind::TriadSm90a => (
+            ResolvedInstructionFamily::Wgmma,
+            ResolvedOperandConversion::TensorMapTfloat32V1,
+        ),
+        ModuleKind::TriadSm100 => (
+            ResolvedInstructionFamily::Tcgen05,
+            ResolvedOperandConversion::TensorMapTfloat32V1,
+        ),
+        ModuleKind::TriadSm120 => (
+            ResolvedInstructionFamily::MmaSync,
+            ResolvedOperandConversion::TensorMapUint32ThenCvtRnaTf32F32V1,
+        ),
+        _ => return Ok(()),
+    };
+    if super::contract::tf32_route_specs(module_kind)
+        .iter()
+        .any(|kernel_spec| {
+            (
+                kernel_spec.instruction_family,
+                kernel_spec.operand_conversion,
+            ) != expected_contract
+        })
+    {
+        return Err(format!(
+            "{module_kind:?} TF32 route metadata has the wrong conversion contract"
+        ));
+    }
+    let required: &[&str] = match module_kind {
+        ModuleKind::TriadSm80 | ModuleKind::TriadSm120 => &[
+            "cvt.rna.tf32.f32",
+            "mma.sync.aligned.m16n8k8.row.col.f32.tf32.tf32.f32",
+        ],
+        ModuleKind::TriadSm90a => &[
+            "cp.async.bulk.tensor.2d.shared::cta.global.tile.mbarrier::complete_tx::bytes",
+            "wgmma.mma_async.sync.aligned.m64n128k8.f32.tf32.tf32",
+        ],
+        ModuleKind::TriadSm100 => &[
+            "cp.async.bulk.tensor.2d.shared::cta.global.tile.mbarrier::complete_tx::bytes",
+            "tcgen05.mma.cta_group::1.kind::tf32",
+        ],
+        _ => &[],
+    };
+    let parsed = parse_ptx(ptx)?;
+    for kernel_spec in super::contract::tf32_route_specs(module_kind) {
+        let entry = &parsed_ptx_entry_ref(&parsed, kernel_spec.symbol)?.text;
+        for instruction in required {
+            if !ptx_has_unquoted_token(entry, |token| token == *instruction) {
+                return Err(format!(
+                    "{module_kind:?}/{} TF32 PTX is missing {instruction}",
+                    kernel_spec.symbol
+                ));
+            }
+        }
+        if ptx_has_unquoted_token(entry, |token| {
+            token.starts_with("atom.")
+                || token.starts_with("atom::")
+                || token.starts_with("red.")
+                || token.starts_with("red::")
+                || token.starts_with("redux.")
+        }) {
+            return Err(format!(
+                "{module_kind:?}/{} TF32 PTX contains a numeric atomic or reduction",
+                kernel_spec.symbol
+            ));
+        }
+    }
+    let ptx = strip_ptx_comments(ptx)?;
+    if module_kind == ModuleKind::TriadSm90a
+        && ptx_has_unquoted_token(&ptx, |token| token == "cvt.rna.tf32.f32")
+    {
+        return Err("TriadSm90a must convert TF32 through TFLOAT32 tensor maps".into());
+    }
+    if module_kind == ModuleKind::TriadSm100
+        && ptx_has_unquoted_token(&ptx, |token| {
+            token == "cvt.rna.tf32.f32" || token.starts_with("wgmma.")
+        })
+    {
+        return Err("TriadSm100 contains a foreign TF32 instruction family".into());
+    }
+    if module_kind == ModuleKind::TriadSm120
+        && ptx_has_unquoted_token(&ptx, |token| token.starts_with("tcgen05."))
+    {
+        return Err("TriadSm120 must not contain TCGEN05 instructions".into());
     }
     Ok(())
 }
@@ -986,6 +3218,21 @@ const FIXED_SOURCE_FRAGMENTS: &[SourceFragment] = &[
         allowed_quoted_includes: &[],
     },
     SourceFragment {
+        logical_name: "kernels/gemm_bi_fixed/tf32.cu",
+        source: include_str!("../../../../kernels/gemm_bi_fixed/tf32.cu"),
+        allowed_quoted_includes: &[],
+    },
+    SourceFragment {
+        logical_name: "kernels/gemm_bi_fixed/tf32_sm120.cu",
+        source: include_str!("../../../../kernels/gemm_bi_fixed/tf32_sm120.cu"),
+        allowed_quoted_includes: &[],
+    },
+    SourceFragment {
+        logical_name: "kernels/gemm_bi_fixed/sm120_tma.cu",
+        source: include_str!("../../../../kernels/gemm_bi_fixed/sm120_tma.cu"),
+        allowed_quoted_includes: &[],
+    },
+    SourceFragment {
         logical_name: "kernels/gemm_bi_fixed/wmma_legacy.cu",
         source: include_str!("../../../../kernels/gemm_bi_fixed/wmma_legacy.cu"),
         allowed_quoted_includes: &[],
@@ -1045,6 +3292,31 @@ const SCALAR_SOURCE_FRAGMENTS: &[SourceFragment] = &[
         source: include_str!("../../../../kernels/gemm_bi_triad/scalar.cu"),
         allowed_quoted_includes: &[],
     },
+    SourceFragment {
+        logical_name: "kernels/gemm_bi_triad/scalar_nn_m64n64.cu",
+        source: include_str!("../../../../kernels/gemm_bi_triad/scalar_nn_m64n64.cu"),
+        allowed_quoted_includes: &[],
+    },
+    SourceFragment {
+        logical_name: "kernels/gemm_bi_triad/scalar_nn_splitk_m32n64.cu",
+        source: include_str!("../../../../kernels/gemm_bi_triad/scalar_nn_splitk_m32n64.cu"),
+        allowed_quoted_includes: &[],
+    },
+    SourceFragment {
+        logical_name: "kernels/gemm_bi_triad/scalar_nt_d768_transpose.cu",
+        source: include_str!("../../../../kernels/gemm_bi_triad/scalar_nt_d768_transpose.cu"),
+        allowed_quoted_includes: &[],
+    },
+    SourceFragment {
+        logical_name: "kernels/gemm_bi_triad/scalar_nt_m2n16.cu",
+        source: include_str!("../../../../kernels/gemm_bi_triad/scalar_nt_m2n16.cu"),
+        allowed_quoted_includes: &[],
+    },
+    SourceFragment {
+        logical_name: "kernels/gemm_bi_triad/scalar_tn_m16n16.cu",
+        source: include_str!("../../../../kernels/gemm_bi_triad/scalar_tn_m16n16.cu"),
+        allowed_quoted_includes: &[],
+    },
 ];
 
 const SM80_SOURCE_FRAGMENTS: &[SourceFragment] = &[
@@ -1094,96 +3366,119 @@ const SM120_SOURCE_FRAGMENTS: &[SourceFragment] = &[
     TRIAD_COMMON,
     TRIAD_EPILOGUE,
     SourceFragment {
-        logical_name: "kernels/gemm_bi_triad/mma16.cuh",
-        source: include_str!("../../../../kernels/gemm_bi_triad/mma16.cuh"),
-        allowed_quoted_includes: &[],
-    },
-    SourceFragment {
         logical_name: "kernels/gemm_bi_triad/sm120.cu",
         source: include_str!("../../../../kernels/gemm_bi_triad/sm120.cu"),
         allowed_quoted_includes: &[],
     },
 ];
 
+pub(super) const SCALAR_ZERO_REDUCTION_SYMBOLS: &[&str] = &[
+    "gemm_bi_nn_zero_reduction_v1",
+    "gemm_bi_tn_zero_reduction_v1",
+    "gemm_bi_nt_zero_reduction_v1",
+];
+
+pub(super) const SCALAR_TN_NARROW_SPLITM_PARTIAL_SYMBOLS: &[&str] = &[
+    "gemm_bi_tn_narrow_splitm_partial",
+    "gemm_bi_tn_narrow_splitm_partial_aligned",
+];
+
+pub(super) const SCALAR_TN_SPLITM_PARTIAL_SYMBOLS: &[&str] = &[
+    "gemm_bi_tn_splitm_partial",
+    "gemm_bi_tn_splitm_partial_aligned",
+];
+
 pub(super) const SCALAR_SYMBOLS: &[&str] = &[
-    "sgemm_bi_nn",
-    "sgemm_bi_tn",
-    "sgemm_bi_tn_splitm_partial",
-    "sgemm_bi_splitm_reduce",
-    "sgemm_bi_nn_splitk_big_partial",
-    "sgemm_bi_nt",
-    "sgemm_bi_nt_splitn_big_partial",
-    "sgemm_bi_nn_slim",
-    "sgemm_bi_nn_splitk_slim_partial",
-    "sgemm_bi_tn_slim",
-    "sgemm_bi_nt_slim",
-    "sgemm_bi_nn_ultra_thin",
-    "sgemm_bi_nn_gemv",
-    "sgemm_bi_tn_gemv",
-    "sgemm_bi_nt_gemv",
-    "sgemm_bi_nn_narrow",
-    "sgemm_bi_nn_narrow_small",
-    "sgemm_bi_tn_narrow",
-    "sgemm_bi_tn_narrow_splitm_partial",
-    "sgemm_bi_nt_narrow",
-    "sgemm_bi_nn_splitk32_partial",
-    "sgemm_bi_splitk_reduce",
-    "sgemm_bi_dx_col_gemv",
-    "sgemm_transpose_f32_2d",
-    "sgemm_bi_nn_gemv_bf16",
-    "sgemm_bi_nn_gemv_f16",
-    "sgemm_bi_tn_gemv_bf16",
-    "sgemm_bi_tn_gemv_f16",
-    "sgemm_bi_nt_gemv_bf16",
-    "sgemm_bi_nt_gemv_f16",
-    "sgemm_bi_nn_ultra_thin_bf16",
-    "sgemm_bi_nn_ultra_thin_f16",
-    "sgemm_bi_nn_narrow_bf16",
-    "sgemm_bi_nn_narrow_f16",
-    "sgemm_bi_nn_narrow_small_bf16",
-    "sgemm_bi_nn_narrow_small_f16",
-    "sgemm_bi_tn_narrow_bf16",
-    "sgemm_bi_tn_narrow_f16",
-    "sgemm_bi_nt_narrow_bf16",
-    "sgemm_bi_nt_narrow_f16",
-    "sgemm_bi_nn_big_bf16",
-    "sgemm_bi_nn_big_f16",
-    "sgemm_bi_tn_big_bf16",
-    "sgemm_bi_tn_big_f16",
-    "sgemm_bi_nt_big_bf16",
-    "sgemm_bi_nt_big_f16",
+    "gemm_bi_nn",
+    "gemm_bi_nn_m64n64_bk16_s2_v1",
+    "gemm_bi_nn_splitk32_m32n64_exact_v1",
+    "gemm_bi_nn_prism_m64n64_bk16_s2_v1",
+    "gemm_bi_nn_zero_reduction_v1",
+    "gemm_bi_tn",
+    "gemm_bi_tn_aligned",
+    "gemm_bi_tn_zero_reduction_v1",
+    "gemm_bi_tn_narrow_splitm_partial",
+    "gemm_bi_tn_narrow_splitm_partial_aligned",
+    "gemm_bi_tn_splitm_partial",
+    "gemm_bi_tn_splitm_partial_aligned",
+    "gemm_bi_tn_m16n16_bk16_s2_splitm16_v1",
+    "gemm_bi_splitm_reduce",
+    "gemm_bi_nt",
+    "gemm_bi_nt_m2n16_bk64_splitk32_v1",
+    "gemm_bi_nt_zero_reduction_v1",
+    "gemm_bi_nn_slim",
+    "gemm_bi_nn_splitk_slim_partial",
+    "gemm_bi_tn_slim",
+    "gemm_bi_nt_slim",
+    "gemm_bi_nn_ultra_thin",
+    "gemm_bi_nn_gemv",
+    "gemm_bi_tn_gemv",
+    "gemm_bi_nt_gemv",
+    "gemm_bi_nn_narrow",
+    "gemm_bi_nn_narrow_small",
+    "gemm_bi_tn_narrow",
+    "gemm_bi_nt_narrow",
+    "gemm_bi_nn_splitk32_partial",
+    "gemm_bi_splitk_reduce",
+    "gemm_bi_dx_col_gemv",
+    "gemm_bi_transpose_f32_2d",
+    "gemm_bi_transpose_f32_32x16_d768_v1",
+    "gemm_bi_nn_gemv_bf16",
+    "gemm_bi_nn_gemv_f16",
+    "gemm_bi_tn_gemv_bf16",
+    "gemm_bi_tn_gemv_f16",
+    "gemm_bi_nt_gemv_bf16",
+    "gemm_bi_nt_gemv_f16",
+    "gemm_bi_nn_ultra_thin_bf16",
+    "gemm_bi_nn_ultra_thin_f16",
+    "gemm_bi_nn_narrow_bf16",
+    "gemm_bi_nn_narrow_f16",
+    "gemm_bi_nn_narrow_small_bf16",
+    "gemm_bi_nn_narrow_small_f16",
+    "gemm_bi_tn_narrow_bf16",
+    "gemm_bi_tn_narrow_f16",
+    "gemm_bi_nt_narrow_bf16",
+    "gemm_bi_nt_narrow_f16",
+    "gemm_bi_nn_big_bf16",
+    "gemm_bi_nn_big_f16",
+    "gemm_bi_tn_big_bf16",
+    "gemm_bi_tn_big_f16",
+    "gemm_bi_nt_big_bf16",
+    "gemm_bi_nt_big_f16",
 ];
 
 pub(super) const SM80_SYMBOLS: &[&str] = &[
-    "sgemm_bi_nn_tc_bf16",
-    "sgemm_bi_nn_tc_f16",
-    "sgemm_bi_tn_tc_bf16",
-    "sgemm_bi_tn_tc_f16",
-    "sgemm_bi_nt_tc_bf16",
-    "sgemm_bi_nt_tc_f16",
-    "sgemm_bi_nn_tc64_bf16",
-    "sgemm_bi_nn_tc64_f16",
-    "sgemm_bi_nn_tc16_bf16",
-    "sgemm_bi_nn_tc16_f16",
-    "sgemm_bi_tn_tc64_bf16",
-    "sgemm_bi_tn_tc64_f16",
-    "sgemm_bi_nt_tc64_bf16",
-    "sgemm_bi_nt_tc64_f16",
+    "gemm_bi_nn_tc_bf16",
+    "gemm_bi_nn_tc_f16",
+    "gemm_bi_tn_tc_bf16",
+    "gemm_bi_tn_tc_f16",
+    "gemm_bi_nt_tc_bf16",
+    "gemm_bi_nt_tc_f16",
+    "gemm_bi_nn_tc64_bf16",
+    "gemm_bi_nn_tc64_f16",
+    "gemm_bi_nn_tc16_bf16",
+    "gemm_bi_nn_tc16_f16",
+    "gemm_bi_tn_tc64_bf16",
+    "gemm_bi_tn_tc64_f16",
+    "gemm_bi_tn_tc128x64_bf16",
+    "gemm_bi_tn_tc128x64_f16",
+    "gemm_bi_nt_tc64_bf16",
+    "gemm_bi_nt_tc64_f16",
 ];
 
 pub const SM90A_SYMBOLS: &[&str] = &[
-    "sgemm_bi_nn_sm90a_wgmma_wg1_bf16",
-    "sgemm_bi_nn_sm90a_wgmma_wg1_f16",
-    "sgemm_bi_tn_sm90a_wgmma_wg1_bf16",
-    "sgemm_bi_tn_sm90a_wgmma_wg1_f16",
-    "sgemm_bi_nt_sm90a_wgmma_wg1_bf16",
-    "sgemm_bi_nt_sm90a_wgmma_wg1_f16",
-    "sgemm_bi_nn_sm90a_wgmma_wg2_bf16",
-    "sgemm_bi_nn_sm90a_wgmma_wg2_f16",
-    "sgemm_bi_tn_sm90a_wgmma_wg2_bf16",
-    "sgemm_bi_tn_sm90a_wgmma_wg2_f16",
-    "sgemm_bi_nt_sm90a_wgmma_wg2_bf16",
-    "sgemm_bi_nt_sm90a_wgmma_wg2_f16",
+    "gemm_bi_nn_sm90a_wgmma_wg1_bf16",
+    "gemm_bi_nn_sm90a_wgmma_wg1_f16",
+    "gemm_bi_tn_sm90a_wgmma_wg1_bf16",
+    "gemm_bi_tn_sm90a_wgmma_wg1_f16",
+    "gemm_bi_nt_sm90a_wgmma_wg1_bf16",
+    "gemm_bi_nt_sm90a_wgmma_wg1_f16",
+    "gemm_bi_nn_sm90a_wgmma_wg2_bf16",
+    "gemm_bi_nn_sm90a_wgmma_wg2_f16",
+    "gemm_bi_tn_sm90a_wgmma_wg2_bf16",
+    "gemm_bi_tn_sm90a_wgmma_wg2_f16",
+    "gemm_bi_nt_sm90a_wgmma_wg2_bf16",
+    "gemm_bi_nt_sm90a_wgmma_wg2_f16",
 ];
 
 fn module_fragments(kind: ModuleKind) -> Result<&'static [SourceFragment], String> {
@@ -1445,6 +3740,13 @@ type Sm120MapCacheKey = (
     super::contract::Sm120Shape,
 );
 type Sm120MapCache = Mutex<HashMap<Sm120MapCacheKey, super::contract::Sm120PreparedTensorMaps>>;
+type Tf32MapCacheKey = (
+    [super::contract::Tf32TensorMapKey; 2],
+    [super::contract::Sm90aAllocationIdentity; 2],
+    super::contract::F32TriadRequest,
+    super::contract::Tf32PhysicalRoute,
+);
+type Tf32MapCache = Mutex<HashMap<Tf32MapCacheKey, super::contract::F32PreparedTensorMaps>>;
 
 pub(crate) fn qualify_specialized_module(
     module: CompiledModule,
@@ -1455,9 +3757,19 @@ pub(crate) fn qualify_specialized_module(
         ModuleKind::TriadSm120 => load_sm120_functions(&module),
         kind => Err(format!("unsupported specialized triad module {kind:?}")),
     }?;
+    let (tf32_functions, tf32_rejection) = if module.tf32_qualified {
+        match load_tf32_functions(&module) {
+            Ok(functions) => (functions, None),
+            Err(error) => (HashMap::new(), Some(error)),
+        }
+    } else {
+        (HashMap::new(), None)
+    };
     Ok(QualifiedSpecializedModule {
         module,
         functions,
+        tf32_functions,
+        tf32_rejection,
         sm120_target: None,
         sm120_device_caps: None,
         sm120_resources: HashMap::new(),
@@ -1466,75 +3778,115 @@ pub(crate) fn qualify_specialized_module(
 
 pub struct GemmBiKernels {
     _modules: CudaModuleAnchors,
-    context_handle: usize,
+    allocation_domain: super::contract::AllocationDomain,
+    compute_capability: (u32, u32),
+    multiprocessor_count: u32,
     scalar_compiler_identity: CompilerIdentity,
     sm80_compiler_identity: CompilerIdentity,
     specialized_compiler_identity: Option<CompilerIdentity>,
     artifact_set_identity: crate::mamba_ssm::gpu::kernel_identity::ArtifactSetIdentity,
+    f32_triad_availability: super::contract::F32TriadAvailability,
+    tf32_driver_abi: BTreeMap<&'static str, Tf32DriverAbi>,
+    portable_tf32_functions: HashMap<&'static str, CudaFunction>,
+    tf32_splitk_functions: HashMap<&'static str, CudaFunction>,
+    specialized_tf32_functions: HashMap<&'static str, CudaFunction>,
+    portable_tf32_rejection: Option<String>,
+    specialized_tf32_rejection: Option<String>,
     specialized_functions: HashMap<&'static str, CudaFunction>,
     sm120_target: Option<super::contract::Sm120TargetCandidate>,
     sm120_device_caps: Option<crate::mamba_ssm::gpu::kernel_identity::DeviceCaps>,
     sm120_resources: HashMap<&'static str, super::contract::Sm120KernelResources>,
+    tf32_tensor_maps: Tf32MapCache,
     sm90a_tensor_maps: Sm90aMapCache,
     sm100_tensor_maps: Sm100MapCache,
     sm120_tensor_maps: Sm120MapCache,
 
-    pub sgemm_nn: CudaFunction,
-    pub sgemm_tn: CudaFunction,
-    pub sgemm_nt: CudaFunction,
-    pub sgemm_nn_slim: CudaFunction,
-    pub sgemm_tn_slim: CudaFunction,
-    pub sgemm_nt_slim: CudaFunction,
-    pub sgemm_nn_ultra_thin: CudaFunction,
-    pub sgemm_nn_gemv: CudaFunction,
-    pub sgemm_tn_gemv: CudaFunction,
-    pub sgemm_nt_gemv: CudaFunction,
-    pub sgemm_nn_narrow: CudaFunction,
-    pub sgemm_nn_narrow_small: CudaFunction,
-    pub sgemm_tn_narrow: CudaFunction,
-    pub sgemm_tn_narrow_splitm_partial: CudaFunction,
-    pub sgemm_nt_narrow: CudaFunction,
-    pub sgemm_nn_splitk32_partial: CudaFunction,
-    pub sgemm_splitk_reduce: CudaFunction,
-    pub sgemm_tn_splitm_partial: CudaFunction,
-    pub sgemm_splitm_reduce: CudaFunction,
-    pub sgemm_nn_splitk_big_partial: CudaFunction,
-    pub sgemm_nt_splitn_big_partial: CudaFunction,
-    pub sgemm_nn_splitk_slim_partial: CudaFunction,
-    pub sgemm_transpose_f32_2d: CudaFunction,
-    pub sgemm_dx_col_gemv: CudaFunction,
+    pub gemm_bi_nn: CudaFunction,
+    pub gemm_bi_nn_m64n64_bk16_s2_v1: CudaFunction,
+    pub gemm_bi_nn_splitk32_m32n64_exact_v1: CudaFunction,
+    pub gemm_bi_nn_prism_m64n64_bk16_s2_v1: CudaFunction,
+    pub gemm_bi_tn: CudaFunction,
+    pub gemm_bi_tn_aligned: CudaFunction,
+    pub gemm_bi_tn_m16n16_bk16_s2_splitm16_v1: CudaFunction,
+    pub gemm_bi_nt: CudaFunction,
+    pub gemm_bi_nt_m2n16_bk64_splitk32_v1: CudaFunction,
+    pub gemm_bi_nn_slim: CudaFunction,
+    pub gemm_bi_tn_slim: CudaFunction,
+    pub gemm_bi_nt_slim: CudaFunction,
+    pub gemm_bi_nn_ultra_thin: CudaFunction,
+    pub gemm_bi_nn_gemv: CudaFunction,
+    pub gemm_bi_tn_gemv: CudaFunction,
+    pub gemm_bi_nt_gemv: CudaFunction,
+    pub gemm_bi_nn_narrow: CudaFunction,
+    pub gemm_bi_nn_narrow_small: CudaFunction,
+    pub gemm_bi_tn_narrow: CudaFunction,
+    pub gemm_bi_tn_narrow_splitm_partial: CudaFunction,
+    pub gemm_bi_tn_narrow_splitm_partial_aligned: CudaFunction,
+    pub gemm_bi_nt_narrow: CudaFunction,
+    pub gemm_bi_nn_splitk32_partial: CudaFunction,
+    pub gemm_bi_splitk_reduce: CudaFunction,
+    pub gemm_bi_tn_splitm_partial: CudaFunction,
+    pub gemm_bi_tn_splitm_partial_aligned: CudaFunction,
+    pub gemm_bi_splitm_reduce: CudaFunction,
+    pub gemm_bi_nn_splitk_slim_partial: CudaFunction,
+    pub gemm_bi_transpose_f32_2d: CudaFunction,
+    pub gemm_bi_transpose_f32_32x16_d768_v1: CudaFunction,
+    pub gemm_bi_dx_col_gemv: CudaFunction,
+    pub gemm_bi_nn_zero_reduction: CudaFunction,
+    pub gemm_bi_tn_zero_reduction: CudaFunction,
+    pub gemm_bi_nt_zero_reduction: CudaFunction,
 
-    pub sgemm_nn_gemv_typed: HalfKernel,
-    pub sgemm_tn_gemv_typed: HalfKernel,
-    pub sgemm_nt_gemv_typed: HalfKernel,
-    pub sgemm_nn_ultra_thin_typed: HalfKernel,
-    pub sgemm_nn_narrow_typed: HalfKernel,
-    pub sgemm_nn_narrow_small_typed: HalfKernel,
-    pub sgemm_tn_narrow_typed: HalfKernel,
-    pub sgemm_nt_narrow_typed: HalfKernel,
-    pub sgemm_nn_big_typed: HalfKernel,
-    pub sgemm_tn_big_typed: HalfKernel,
-    pub sgemm_nt_big_typed: HalfKernel,
-    pub sgemm_nn_tc_typed: HalfKernel,
-    pub sgemm_tn_tc_typed: HalfKernel,
-    pub sgemm_nt_tc_typed: HalfKernel,
-    pub sgemm_nn_tc64_typed: HalfKernel,
-    pub sgemm_nn_tc16_typed: HalfKernel,
-    pub sgemm_tn_tc64_typed: HalfKernel,
-    pub sgemm_nt_tc64_typed: HalfKernel,
+    pub gemm_bi_nn_gemv_typed: HalfKernel,
+    pub gemm_bi_tn_gemv_typed: HalfKernel,
+    pub gemm_bi_nt_gemv_typed: HalfKernel,
+    pub gemm_bi_nn_ultra_thin_typed: HalfKernel,
+    pub gemm_bi_nn_narrow_typed: HalfKernel,
+    pub gemm_bi_nn_narrow_small_typed: HalfKernel,
+    pub gemm_bi_tn_narrow_typed: HalfKernel,
+    pub gemm_bi_nt_narrow_typed: HalfKernel,
+    pub gemm_bi_nn_big_typed: HalfKernel,
+    pub gemm_bi_tn_big_typed: HalfKernel,
+    pub gemm_bi_nt_big_typed: HalfKernel,
+    pub gemm_bi_nn_tc_typed: HalfKernel,
+    pub gemm_bi_tn_tc_typed: HalfKernel,
+    pub gemm_bi_nt_tc_typed: HalfKernel,
+    pub gemm_bi_nn_tc64_typed: HalfKernel,
+    pub gemm_bi_nn_tc16_typed: HalfKernel,
+    pub gemm_bi_tn_tc64_typed: HalfKernel,
+    pub gemm_bi_tn_tc128x64_typed: HalfKernel,
+    pub gemm_bi_nt_tc64_typed: HalfKernel,
 
     splitk_scratch: std::sync::OnceLock<CudaSlice<f32>>,
+    tf32_splitk_counters: std::sync::OnceLock<CudaSlice<u32>>,
     transpose_scratch: std::sync::OnceLock<CudaSlice<f32>>,
 }
 
 impl GemmBiKernels {
     pub(crate) fn load(
-        context_handle: usize,
+        ctx: &Arc<CudaContext>,
         fixed_artifact: ArtifactIdentity,
         scalar: CompiledModule,
         sm80: CompiledModule,
         specialized: Option<QualifiedSpecializedModule>,
     ) -> Result<Self, String> {
+        let allocation_domain = super::contract::AllocationDomain::from_context(ctx)?;
+        let (major, minor) = ctx
+            .compute_capability()
+            .map_err(|error| format!("query scalar compute capability: {error:?}"))?;
+        let compute_capability = (
+            u32::try_from(major).map_err(|_| format!("negative CUDA CC major {major}"))?,
+            u32::try_from(minor).map_err(|_| format!("negative CUDA CC minor {minor}"))?,
+        );
+        let multiprocessor_count = ctx
+            .attribute(
+                cudarc::driver::sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT,
+            )
+            .map_err(|error| format!("query multiprocessor count: {error:?}"))?;
+        let multiprocessor_count = u32::try_from(multiprocessor_count)
+            .map_err(|_| format!("negative multiprocessor count {multiprocessor_count}"))?;
+        if multiprocessor_count == 0 {
+            return Err("CUDA device reported zero multiprocessors".into());
+        }
         let mut artifacts = vec![
             fixed_artifact,
             scalar.artifact_identity,
@@ -1545,6 +3897,70 @@ impl GemmBiKernels {
         }
         let artifact_set_identity =
             crate::mamba_ssm::gpu::kernel_identity::build_artifact_set(&artifacts)?;
+        let tf32_driver_abi = merge_tf32_driver_abi(
+            sm80.tf32_driver_abi.clone(),
+            specialized
+                .as_ref()
+                .map(|specialized| specialized.module.tf32_driver_abi.clone()),
+        )?;
+        let mut portable_tf32_rejection = None;
+        let (portable_tf32_functions, portable) = if sm80.tf32_qualified {
+            let qualification = (|| {
+                let functions = load_tf32_functions(&sm80)?;
+                let binding = qualify_tf32_module_binding(ctx, &sm80)?;
+                let artifact = qualify_loaded_tf32_artifact(
+                    ctx,
+                    allocation_domain,
+                    &sm80,
+                    binding,
+                    &functions,
+                );
+                retain_tf32_candidate(functions, binding, artifact)
+            })();
+            match qualification {
+                Ok(qualified) => qualified,
+                Err(error) => {
+                    portable_tf32_rejection = Some(error);
+                    (HashMap::new(), None)
+                }
+            }
+        } else {
+            (HashMap::new(), None)
+        };
+        let tf32_splitk_functions =
+            retain_forced_only_functions(load_tf32_splitk_functions(&sm80))?;
+        let mut specialized_tf32_rejection = specialized
+            .as_ref()
+            .and_then(|specialized| specialized.tf32_rejection.clone());
+        let specialized_qualification = specialized
+            .as_ref()
+            .filter(|_| specialized_tf32_rejection.is_none())
+            .filter(|specialized| !specialized.tf32_functions.is_empty())
+            .map(|specialized| {
+                let binding = qualify_tf32_module_binding(ctx, &specialized.module)?;
+                let functions = specialized.tf32_functions.clone();
+                let artifact = qualify_loaded_tf32_artifact(
+                    ctx,
+                    allocation_domain,
+                    &specialized.module,
+                    binding,
+                    &functions,
+                );
+                retain_tf32_candidate(functions, binding, artifact)
+            })
+            .transpose();
+        let (specialized_tf32_functions, specialized_binding) = match specialized_qualification {
+            Ok(Some(qualified)) => qualified,
+            Ok(None) => (HashMap::new(), None),
+            Err(error) => {
+                specialized_tf32_rejection = Some(error);
+                (HashMap::new(), None)
+            }
+        };
+        let f32_triad_availability = super::contract::F32TriadAvailability {
+            portable,
+            specialized: specialized_binding,
+        };
         let load = |name: &str| load_owned_function(name, &scalar.module, &sm80.module);
         let load_half = |base: &str| load_owned_half(base, &scalar.module, &sm80.module);
         let load_half_dynsmem = |base: &str, bytes: i32| {
@@ -1553,24 +3969,57 @@ impl GemmBiKernels {
             Ok::<HalfKernel, String>(kernel)
         };
 
-        let sgemm_nn = load("sgemm_bi_nn")?;
-        set_dynamic_shared(&sgemm_nn, "sgemm_bi_nn", 34 * 1024)?;
-        let sgemm_tn = load("sgemm_bi_tn")?;
-        set_dynamic_shared(&sgemm_tn, "sgemm_bi_tn", 34 * 1024)?;
-        let sgemm_nt = load("sgemm_bi_nt")?;
-        set_dynamic_shared(&sgemm_nt, "sgemm_bi_nt", 34 * 1024)?;
-        let sgemm_nn_splitk_big_partial = load("sgemm_bi_nn_splitk_big_partial")?;
+        let gemm_bi_nn = load("gemm_bi_nn")?;
+        set_dynamic_shared(&gemm_bi_nn, "gemm_bi_nn", 34 * 1024)?;
+        let gemm_bi_nn_m64n64_bk16_s2_v1 = load("gemm_bi_nn_m64n64_bk16_s2_v1")?;
         set_dynamic_shared(
-            &sgemm_nn_splitk_big_partial,
-            "sgemm_bi_nn_splitk_big_partial",
-            34 * 1024,
+            &gemm_bi_nn_m64n64_bk16_s2_v1,
+            "gemm_bi_nn_m64n64_bk16_s2_v1",
+            super::contract::SCALAR_NN_M64N64_DYNAMIC_SHARED_BYTES as i32,
         )?;
-        let sgemm_nt_splitn_big_partial = load("sgemm_bi_nt_splitn_big_partial")?;
+        let gemm_bi_nn_splitk32_m32n64_exact_v1 = load("gemm_bi_nn_splitk32_m32n64_exact_v1")?;
+        let gemm_bi_nn_prism_m64n64_bk16_s2_v1 = load("gemm_bi_nn_prism_m64n64_bk16_s2_v1")?;
         set_dynamic_shared(
-            &sgemm_nt_splitn_big_partial,
-            "sgemm_bi_nt_splitn_big_partial",
-            34 * 1024,
+            &gemm_bi_nn_prism_m64n64_bk16_s2_v1,
+            "gemm_bi_nn_prism_m64n64_bk16_s2_v1",
+            super::contract::SCALAR_NN_M64N64_DYNAMIC_SHARED_BYTES as i32,
         )?;
+        let gemm_bi_tn = load("gemm_bi_tn")?;
+        set_dynamic_shared(&gemm_bi_tn, "gemm_bi_tn", 34 * 1024)?;
+        let gemm_bi_tn_aligned = load("gemm_bi_tn_aligned")?;
+        set_dynamic_shared(&gemm_bi_tn_aligned, "gemm_bi_tn_aligned", 34 * 1024)?;
+        let gemm_bi_tn_m16n16_bk16_s2_splitm16_v1 = load("gemm_bi_tn_m16n16_bk16_s2_splitm16_v1")?;
+        set_dynamic_shared(
+            &gemm_bi_tn_m16n16_bk16_s2_splitm16_v1,
+            "gemm_bi_tn_m16n16_bk16_s2_splitm16_v1",
+            super::contract::SCALAR_TN_M16N16_DYNAMIC_SHARED_BYTES as i32,
+        )?;
+        let gemm_bi_nt = load("gemm_bi_nt")?;
+        set_dynamic_shared(
+            &gemm_bi_nt,
+            "gemm_bi_nt",
+            super::contract::SCALAR_BIG_NT_DYNAMIC_SHARED_BYTES as i32,
+        )?;
+        let gemm_bi_nt_m2n16_bk64_splitk32_v1 = load("gemm_bi_nt_m2n16_bk64_splitk32_v1")?;
+        set_dynamic_shared(
+            &gemm_bi_nt_m2n16_bk64_splitk32_v1,
+            "gemm_bi_nt_m2n16_bk64_splitk32_v1",
+            super::contract::SCALAR_NT_M2N16_DYNAMIC_SHARED_BYTES as i32,
+        )?;
+        let gemm_bi_transpose_f32_32x16_d768_v1 = load("gemm_bi_transpose_f32_32x16_d768_v1")?;
+        let scalar_compiler = scalar.compiler_identity;
+        let scalar_artifact = scalar.artifact_identity;
+        if qualified_scalar_resource_environment(
+            compute_capability,
+            multiprocessor_count,
+            scalar_compiler,
+            scalar_artifact,
+        ) {
+            qualify_scalar_nt_d768_transpose(&gemm_bi_transpose_f32_32x16_d768_v1)?;
+            qualify_scalar_nn_m32n64_splitk32(&gemm_bi_nn_splitk32_m32n64_exact_v1)?;
+            qualify_scalar_nt_m2n16(&gemm_bi_nt_m2n16_bk64_splitk32_v1)?;
+            qualify_scalar_tn_m16n16(&gemm_bi_tn_m16n16_bk16_s2_splitm16_v1)?;
+        }
 
         let specialized_functions = specialized
             .as_ref()
@@ -1593,63 +4042,87 @@ impl GemmBiKernels {
 
         Ok(Self {
             _modules: CudaModuleAnchors::new(anchors),
-            context_handle,
+            allocation_domain,
+            compute_capability,
+            multiprocessor_count,
             scalar_compiler_identity: scalar.compiler_identity,
             sm80_compiler_identity: sm80.compiler_identity,
             specialized_compiler_identity: specialized
                 .as_ref()
                 .map(|specialized| specialized.module.compiler_identity),
             artifact_set_identity,
+            f32_triad_availability,
+            tf32_driver_abi,
+            portable_tf32_functions,
+            tf32_splitk_functions,
+            specialized_tf32_functions,
+            portable_tf32_rejection,
+            specialized_tf32_rejection,
             specialized_functions,
             sm120_target,
             sm120_device_caps,
             sm120_resources,
+            tf32_tensor_maps: Mutex::new(HashMap::new()),
             sm90a_tensor_maps: Mutex::new(HashMap::new()),
             sm100_tensor_maps: Mutex::new(HashMap::new()),
             sm120_tensor_maps: Mutex::new(HashMap::new()),
-            sgemm_nn,
-            sgemm_tn,
-            sgemm_nt,
-            sgemm_nn_slim: load("sgemm_bi_nn_slim")?,
-            sgemm_tn_slim: load("sgemm_bi_tn_slim")?,
-            sgemm_nt_slim: load("sgemm_bi_nt_slim")?,
-            sgemm_nn_ultra_thin: load("sgemm_bi_nn_ultra_thin")?,
-            sgemm_nn_gemv: load("sgemm_bi_nn_gemv")?,
-            sgemm_tn_gemv: load("sgemm_bi_tn_gemv")?,
-            sgemm_nt_gemv: load("sgemm_bi_nt_gemv")?,
-            sgemm_nn_narrow: load("sgemm_bi_nn_narrow")?,
-            sgemm_nn_narrow_small: load("sgemm_bi_nn_narrow_small")?,
-            sgemm_tn_narrow: load("sgemm_bi_tn_narrow")?,
-            sgemm_tn_narrow_splitm_partial: load("sgemm_bi_tn_narrow_splitm_partial")?,
-            sgemm_nt_narrow: load("sgemm_bi_nt_narrow")?,
-            sgemm_nn_splitk32_partial: load("sgemm_bi_nn_splitk32_partial")?,
-            sgemm_splitk_reduce: load("sgemm_bi_splitk_reduce")?,
-            sgemm_tn_splitm_partial: load("sgemm_bi_tn_splitm_partial")?,
-            sgemm_splitm_reduce: load("sgemm_bi_splitm_reduce")?,
-            sgemm_nn_splitk_big_partial,
-            sgemm_nt_splitn_big_partial,
-            sgemm_nn_splitk_slim_partial: load("sgemm_bi_nn_splitk_slim_partial")?,
-            sgemm_transpose_f32_2d: load("sgemm_transpose_f32_2d")?,
-            sgemm_dx_col_gemv: load("sgemm_bi_dx_col_gemv")?,
-            sgemm_nn_gemv_typed: load_half("sgemm_bi_nn_gemv")?,
-            sgemm_tn_gemv_typed: load_half("sgemm_bi_tn_gemv")?,
-            sgemm_nt_gemv_typed: load_half("sgemm_bi_nt_gemv")?,
-            sgemm_nn_ultra_thin_typed: load_half("sgemm_bi_nn_ultra_thin")?,
-            sgemm_nn_narrow_typed: load_half("sgemm_bi_nn_narrow")?,
-            sgemm_nn_narrow_small_typed: load_half("sgemm_bi_nn_narrow_small")?,
-            sgemm_tn_narrow_typed: load_half("sgemm_bi_tn_narrow")?,
-            sgemm_nt_narrow_typed: load_half("sgemm_bi_nt_narrow")?,
-            sgemm_nn_big_typed: load_half_dynsmem("sgemm_bi_nn_big", 34 * 1024)?,
-            sgemm_tn_big_typed: load_half_dynsmem("sgemm_bi_tn_big", 34 * 1024)?,
-            sgemm_nt_big_typed: load_half_dynsmem("sgemm_bi_nt_big", 34 * 1024)?,
-            sgemm_nn_tc_typed: load_half_dynsmem("sgemm_bi_nn_tc", 75_776)?,
-            sgemm_tn_tc_typed: load_half_dynsmem("sgemm_bi_tn_tc", 75_776)?,
-            sgemm_nt_tc_typed: load_half_dynsmem("sgemm_bi_nt_tc", 75_776)?,
-            sgemm_nn_tc64_typed: load_half("sgemm_bi_nn_tc64")?,
-            sgemm_nn_tc16_typed: load_half("sgemm_bi_nn_tc16")?,
-            sgemm_tn_tc64_typed: load_half("sgemm_bi_tn_tc64")?,
-            sgemm_nt_tc64_typed: load_half("sgemm_bi_nt_tc64")?,
+            gemm_bi_nn,
+            gemm_bi_nn_m64n64_bk16_s2_v1,
+            gemm_bi_nn_splitk32_m32n64_exact_v1,
+            gemm_bi_nn_prism_m64n64_bk16_s2_v1,
+            gemm_bi_tn,
+            gemm_bi_tn_aligned,
+            gemm_bi_tn_m16n16_bk16_s2_splitm16_v1,
+            gemm_bi_nt,
+            gemm_bi_nt_m2n16_bk64_splitk32_v1,
+            gemm_bi_nn_slim: load("gemm_bi_nn_slim")?,
+            gemm_bi_tn_slim: load("gemm_bi_tn_slim")?,
+            gemm_bi_nt_slim: load("gemm_bi_nt_slim")?,
+            gemm_bi_nn_ultra_thin: load("gemm_bi_nn_ultra_thin")?,
+            gemm_bi_nn_gemv: load("gemm_bi_nn_gemv")?,
+            gemm_bi_tn_gemv: load("gemm_bi_tn_gemv")?,
+            gemm_bi_nt_gemv: load("gemm_bi_nt_gemv")?,
+            gemm_bi_nn_narrow: load("gemm_bi_nn_narrow")?,
+            gemm_bi_nn_narrow_small: load("gemm_bi_nn_narrow_small")?,
+            gemm_bi_tn_narrow: load("gemm_bi_tn_narrow")?,
+            gemm_bi_tn_narrow_splitm_partial: load("gemm_bi_tn_narrow_splitm_partial")?,
+            gemm_bi_tn_narrow_splitm_partial_aligned: load(
+                "gemm_bi_tn_narrow_splitm_partial_aligned",
+            )?,
+            gemm_bi_nt_narrow: load("gemm_bi_nt_narrow")?,
+            gemm_bi_nn_splitk32_partial: load("gemm_bi_nn_splitk32_partial")?,
+            gemm_bi_splitk_reduce: load("gemm_bi_splitk_reduce")?,
+            gemm_bi_tn_splitm_partial: load("gemm_bi_tn_splitm_partial")?,
+            gemm_bi_tn_splitm_partial_aligned: load("gemm_bi_tn_splitm_partial_aligned")?,
+            gemm_bi_splitm_reduce: load("gemm_bi_splitm_reduce")?,
+            gemm_bi_nn_splitk_slim_partial: load("gemm_bi_nn_splitk_slim_partial")?,
+            gemm_bi_transpose_f32_2d: load("gemm_bi_transpose_f32_2d")?,
+            gemm_bi_transpose_f32_32x16_d768_v1,
+            gemm_bi_dx_col_gemv: load("gemm_bi_dx_col_gemv")?,
+            gemm_bi_nn_zero_reduction: load("gemm_bi_nn_zero_reduction_v1")?,
+            gemm_bi_tn_zero_reduction: load("gemm_bi_tn_zero_reduction_v1")?,
+            gemm_bi_nt_zero_reduction: load("gemm_bi_nt_zero_reduction_v1")?,
+            gemm_bi_nn_gemv_typed: load_half("gemm_bi_nn_gemv")?,
+            gemm_bi_tn_gemv_typed: load_half("gemm_bi_tn_gemv")?,
+            gemm_bi_nt_gemv_typed: load_half("gemm_bi_nt_gemv")?,
+            gemm_bi_nn_ultra_thin_typed: load_half("gemm_bi_nn_ultra_thin")?,
+            gemm_bi_nn_narrow_typed: load_half("gemm_bi_nn_narrow")?,
+            gemm_bi_nn_narrow_small_typed: load_half("gemm_bi_nn_narrow_small")?,
+            gemm_bi_tn_narrow_typed: load_half("gemm_bi_tn_narrow")?,
+            gemm_bi_nt_narrow_typed: load_half("gemm_bi_nt_narrow")?,
+            gemm_bi_nn_big_typed: load_half_dynsmem("gemm_bi_nn_big", 34 * 1024)?,
+            gemm_bi_tn_big_typed: load_half_dynsmem("gemm_bi_tn_big", 34 * 1024)?,
+            gemm_bi_nt_big_typed: load_half_dynsmem("gemm_bi_nt_big", 34 * 1024)?,
+            gemm_bi_nn_tc_typed: load_half_dynsmem("gemm_bi_nn_tc", 75_776)?,
+            gemm_bi_tn_tc_typed: load_half_dynsmem("gemm_bi_tn_tc", 75_776)?,
+            gemm_bi_nt_tc_typed: load_half_dynsmem("gemm_bi_nt_tc", 75_776)?,
+            gemm_bi_nn_tc64_typed: load_half("gemm_bi_nn_tc64")?,
+            gemm_bi_nn_tc16_typed: load_half("gemm_bi_nn_tc16")?,
+            gemm_bi_tn_tc64_typed: load_half("gemm_bi_tn_tc64")?,
+            gemm_bi_tn_tc128x64_typed: load_half("gemm_bi_tn_tc128x64")?,
+            gemm_bi_nt_tc64_typed: load_half("gemm_bi_nt_tc64")?,
             splitk_scratch: std::sync::OnceLock::new(),
+            tf32_splitk_counters: std::sync::OnceLock::new(),
             transpose_scratch: std::sync::OnceLock::new(),
         })
     }
@@ -1658,6 +4131,48 @@ impl GemmBiKernels {
         &self,
     ) -> crate::mamba_ssm::gpu::kernel_identity::ArtifactSetIdentity {
         self.artifact_set_identity
+    }
+
+    pub(crate) fn multiprocessor_count(&self) -> u32 {
+        self.multiprocessor_count
+    }
+
+    pub(crate) fn compute_capability(&self) -> (u32, u32) {
+        self.compute_capability
+    }
+
+    pub fn f32_triad_availability(&self) -> super::contract::F32TriadAvailability {
+        self.f32_triad_availability
+    }
+
+    pub(crate) fn tf32_qualification_rejection(
+        &self,
+        route: super::contract::Tf32PhysicalRoute,
+    ) -> Option<&str> {
+        match route.module_kind() {
+            ModuleKind::TriadSm80 => self.portable_tf32_rejection.as_deref(),
+            ModuleKind::TriadSm90a | ModuleKind::TriadSm100 | ModuleKind::TriadSm120 => {
+                self.specialized_tf32_rejection.as_deref()
+            }
+            _ => None,
+        }
+    }
+
+    pub(crate) fn tf32_driver_abi(&self, symbol: &str) -> Option<&Tf32DriverAbi> {
+        self.tf32_driver_abi.get(symbol)
+    }
+
+    pub(crate) fn tf32_function(&self, symbol: &str) -> Option<&CudaFunction> {
+        self.tf32_driver_abi(symbol)?;
+        self.portable_tf32_functions
+            .get(symbol)
+            .or_else(|| self.specialized_tf32_functions.get(symbol))
+    }
+
+    pub(crate) fn tf32_splitk_function(&self, symbol: &str) -> Option<&CudaFunction> {
+        self.f32_triad_availability.portable?;
+        self.tf32_driver_abi(symbol)?;
+        self.tf32_splitk_functions.get(symbol)
     }
 
     pub fn scalar_compiler_identity(&self) -> CompilerIdentity {
@@ -1720,8 +4235,8 @@ impl GemmBiKernels {
             && self.sm120_resources.len() == super::contract::SM120_KERNEL_SPECS.len()
     }
 
-    pub(super) fn context_handle(&self) -> usize {
-        self.context_handle
+    pub(super) fn allocation_domain(&self) -> super::contract::AllocationDomain {
+        self.allocation_domain
     }
 
     pub(super) fn sm90a_function(&self, symbol: &str) -> Option<&CudaFunction> {
@@ -1751,6 +4266,46 @@ impl GemmBiKernels {
             .flatten()
     }
 
+    pub(super) fn prepare_tf32_tensor_maps(
+        &self,
+        request: super::contract::F32TriadRequest,
+        route: super::contract::Tf32PhysicalRoute,
+        plan: super::contract::Tf32TensorMapPlan,
+        capturing: bool,
+        binding: super::contract::Tf32MapBinding,
+    ) -> Result<super::contract::F32PreparedTensorMaps, String> {
+        let expected = match route {
+            super::contract::Tf32PhysicalRoute::MmaTf32RnaV1(_) => {
+                self.f32_triad_availability.portable
+            }
+            _ => self.f32_triad_availability.specialized,
+        };
+        if binding.allocation_domain != self.allocation_domain
+            || expected != Some(binding.qualified)
+            || binding.qualified.module_kind != route.module_kind()
+            || binding.qualified.artifact.module_kind != route.module_kind()
+        {
+            return Err("TF32 tensor-map binding does not match its CUDA module context".into());
+        }
+        let cache_key = (plan.keys, plan.allocations, request, route);
+        let mut cache = self
+            .tf32_tensor_maps
+            .lock()
+            .map_err(|_| "TF32 tensor-map cache is poisoned".to_string())?;
+        cache.retain(|(keys, allocations, _, cached_route), _| {
+            *cached_route != route || *keys != plan.keys || *allocations == plan.allocations
+        });
+        if let Some(maps) = cache.get(&cache_key) {
+            return Ok(maps.clone());
+        }
+        if capturing {
+            return Err("TF32 tensor-map cache miss during graph capture".into());
+        }
+        let maps = super::contract::encode_tf32_tensor_maps(plan, request, route, binding)?;
+        cache.insert(cache_key, maps.clone());
+        Ok(maps)
+    }
+
     pub(super) fn prepare_sm90a_tensor_maps(
         &self,
         request: super::contract::Sm90aMapRequest,
@@ -1759,7 +4314,7 @@ impl GemmBiKernels {
         capturing: bool,
         binding: super::contract::Sm90aMapBinding,
     ) -> Result<super::contract::Sm90aPreparedTensorMaps, String> {
-        if binding.context_handle != self.context_handle
+        if binding.allocation_domain != self.allocation_domain
             || Some(binding.compiler) != self.sm90a_compiler_identity()
             || Some(binding.artifact) != self.artifact_set_identity.specialized
         {
@@ -1798,7 +4353,7 @@ impl GemmBiKernels {
         capturing: bool,
         binding: super::contract::Sm100MapBinding,
     ) -> Result<super::contract::Sm100PreparedTensorMaps, String> {
-        if binding.context_handle != self.context_handle
+        if binding.allocation_domain != self.allocation_domain
             || Some(binding.compiler) != self.sm100_compiler_identity()
             || Some(binding.artifact) != self.artifact_set_identity.specialized
             || Some(binding.target) != self.sm100_target_candidate()
@@ -1852,7 +4407,7 @@ impl GemmBiKernels {
         capturing: bool,
         binding: super::contract::Sm120MapBinding,
     ) -> Result<super::contract::Sm120PreparedTensorMaps, String> {
-        if binding.context_handle != self.context_handle
+        if binding.allocation_domain != self.allocation_domain
             || Some(binding.compiler) != self.sm120_compiler_identity()
             || Some(binding.artifact) != self.artifact_set_identity.specialized
             || binding.target.nvrtc_arch != binding.compiler.target.as_str()
@@ -1910,13 +4465,28 @@ impl GemmBiKernels {
             .ok_or_else(|| "splitk_scratch cell empty after init".to_string())
     }
 
+    pub fn tf32_splitk_counter_buf(
+        &self,
+        stream: &Arc<CudaStream>,
+    ) -> Result<&CudaSlice<u32>, String> {
+        if self.tf32_splitk_counters.get().is_none() {
+            let buffer = stream
+                .alloc_zeros::<u32>(super::dispatch::TF32_SPLITK_COUNTER_CAP)
+                .map_err(|error| format!("tf32_splitk_counters alloc: {error:?}"))?;
+            let _ = self.tf32_splitk_counters.set(buffer);
+        }
+        self.tf32_splitk_counters
+            .get()
+            .ok_or_else(|| "tf32_splitk_counters cell empty after init".to_string())
+    }
+
     pub fn transpose_scratch_buf(
         &self,
         stream: &Arc<CudaStream>,
     ) -> Result<&CudaSlice<f32>, String> {
         if self.transpose_scratch.get().is_none() {
             let buffer = stream
-                .alloc_zeros::<f32>(1 << 22)
+                .alloc_zeros::<f32>(super::contract::SCALAR_TRANSPOSE_SCRATCH_CAP_ELEMENTS)
                 .map_err(|error| format!("transpose_scratch alloc: {error:?}"))?;
             let _ = self.transpose_scratch.set(buffer);
         }
@@ -1946,6 +4516,524 @@ fn load_function(
     module
         .load_function(name)
         .map_err(|error| format!("{kind:?} kernel {name} not found: {error:?}"))
+}
+
+fn load_tf32_functions(
+    module: &CompiledModule,
+) -> Result<HashMap<&'static str, CudaFunction>, String> {
+    let module_kind = module.artifact_identity.module_kind;
+    let specs = super::contract::tf32_route_specs(module_kind);
+    if specs.is_empty() {
+        return Err(format!("{module_kind:?} has no TF32 symbol inventory"));
+    }
+    let mut functions = HashMap::with_capacity(specs.len());
+    for kernel_spec in specs {
+        let function = load_function(&module.module, module_kind, kernel_spec.symbol)?;
+        let shared = i32::try_from(kernel_spec.dynamic_shared_bytes)
+            .map_err(|_| format!("{} shared memory exceeds i32::MAX", kernel_spec.symbol))?;
+        set_dynamic_shared(&function, kernel_spec.symbol, shared)?;
+        let local_bytes =
+            u32::try_from(function.local_size_bytes().map_err(|error| {
+                format!("query {} local memory: {error:?}", kernel_spec.symbol)
+            })?)
+            .map_err(|_| format!("{} returned negative local memory", kernel_spec.symbol))?;
+        validate_tf32_driver_jit_local_memory(
+            local_bytes,
+            module_kind,
+            kernel_spec.symbol,
+            module.compiler_identity,
+        )?;
+        let registers = u32::try_from(
+            function
+                .num_regs()
+                .map_err(|error| format!("query {} registers: {error:?}", kernel_spec.symbol))?,
+        )
+        .map_err(|_| format!("{} returned a negative register count", kernel_spec.symbol))?;
+        let register_cap = tf32_register_cap(module_kind, kernel_spec.symbol)?;
+        if registers > register_cap {
+            return Err(format!(
+                "{} uses {registers} registers, above its {register_cap}-register gate",
+                kernel_spec.symbol
+            ));
+        }
+        let threads = i32::try_from(kernel_spec.threads)
+            .map_err(|_| format!("{} thread count exceeds i32::MAX", kernel_spec.symbol))?;
+        if function
+            .max_threads_per_block()
+            .map_err(|error| format!("query {} max threads: {error:?}", kernel_spec.symbol))?
+            < threads
+        {
+            return Err(format!(
+                "{} cannot launch {} threads",
+                kernel_spec.symbol, kernel_spec.threads
+            ));
+        }
+        let occupancy = function
+            .occupancy_max_active_blocks_per_multiprocessor(
+                kernel_spec.threads,
+                kernel_spec.dynamic_shared_bytes as usize,
+                None,
+            )
+            .map_err(|error| format!("query {} occupancy: {error:?}", kernel_spec.symbol))?;
+        let required_occupancy =
+            if module_kind == ModuleKind::TriadSm90a && kernel_spec.symbol.ends_with("_wg1") {
+                3
+            } else {
+                1
+            };
+        if occupancy < required_occupancy {
+            return Err(format!(
+                "{} occupancy {occupancy} misses its {required_occupancy}-CTA gate",
+                kernel_spec.symbol
+            ));
+        }
+        if functions.insert(kernel_spec.symbol, function).is_some() {
+            return Err(format!("duplicate TF32 function {}", kernel_spec.symbol));
+        }
+    }
+    if functions.len() != specs.len() {
+        return Err(format!(
+            "{module_kind:?} did not load its complete TF32 inventory"
+        ));
+    }
+    Ok(functions)
+}
+
+fn load_tf32_splitk_functions(
+    module: &CompiledModule,
+) -> Result<HashMap<&'static str, CudaFunction>, String> {
+    if module.artifact_identity.module_kind != ModuleKind::TriadSm80 {
+        return Err("portable TF32 split-K requires the TriadSm80 module".into());
+    }
+    if !module.tf32_qualified {
+        return Ok(HashMap::new());
+    }
+    let specs = &super::contract::TF32_SPLITK_CANDIDATE_SPECS;
+    let mut functions = HashMap::with_capacity(specs.len());
+    for spec in specs {
+        let (symbol, threads, dynamic_shared_bytes, register_cap, occupancy_gate) = (
+            spec.symbol,
+            spec.threads,
+            spec.dynamic_shared_bytes,
+            spec.register_cap,
+            spec.occupancy_gate,
+        );
+        module.tf32_driver_abi.get(symbol).ok_or_else(|| {
+            format!("{symbol} has no live CUDA Driver parameter ABI census entry")
+        })?;
+        let function = load_function(&module.module, ModuleKind::TriadSm80, symbol)?;
+        set_dynamic_shared(
+            &function,
+            symbol,
+            i32::try_from(dynamic_shared_bytes)
+                .map_err(|_| format!("{symbol} shared memory exceeds i32::MAX"))?,
+        )?;
+        if function
+            .local_size_bytes()
+            .map_err(|error| format!("query {symbol} local memory: {error:?}"))?
+            != 0
+        {
+            return Err(format!("{symbol} spills to local memory"));
+        }
+        let registers = u32::try_from(
+            function
+                .num_regs()
+                .map_err(|error| format!("query {symbol} registers: {error:?}"))?,
+        )
+        .map_err(|_| format!("{symbol} returned a negative register count"))?;
+        if registers > register_cap {
+            return Err(format!(
+                "{symbol} uses {registers} registers, above its {register_cap}-register gate"
+            ));
+        }
+        let threads_i32 = i32::try_from(threads)
+            .map_err(|_| format!("{symbol} thread count exceeds i32::MAX"))?;
+        if function
+            .max_threads_per_block()
+            .map_err(|error| format!("query {symbol} max threads: {error:?}"))?
+            < threads_i32
+        {
+            return Err(format!("{symbol} cannot launch {threads} threads"));
+        }
+        let occupancy = function
+            .occupancy_max_active_blocks_per_multiprocessor(
+                threads,
+                dynamic_shared_bytes as usize,
+                None,
+            )
+            .map_err(|error| format!("query {symbol} occupancy: {error:?}"))?;
+        if occupancy < occupancy_gate {
+            return Err(format!(
+                "{symbol} occupancy {occupancy} misses its {occupancy_gate}-CTA gate"
+            ));
+        }
+        if functions.insert(symbol, function).is_some() {
+            return Err(format!("duplicate TF32 split-K function {symbol}"));
+        }
+    }
+    if functions.len() != specs.len() {
+        return Err("TriadSm80 did not load its complete TF32 split-K inventory".into());
+    }
+    Ok(functions)
+}
+
+fn tf32_register_cap(module_kind: ModuleKind, symbol: &str) -> Result<u32, String> {
+    const SM120_TAG33_SYMBOL: &str = "gemm_bi_nn_sm120_tma_mma_tf32_v1_m80n32_bk64_s2";
+
+    match module_kind {
+        ModuleKind::TriadSm80 if symbol.contains("_m128n64_") => Ok(192),
+        ModuleKind::TriadSm80 if symbol.contains("_m64n64_") => Ok(128),
+        ModuleKind::TriadSm80 if symbol.contains("_m16n32_") || symbol.contains("_m16n16_") => {
+            Ok(96)
+        }
+        ModuleKind::TriadSm90a if symbol.ends_with("_wg1") => Ok(168),
+        ModuleKind::TriadSm90a if symbol.ends_with("_wg2") => Ok(128),
+        ModuleKind::TriadSm120 if symbol == SM120_TAG33_SYMBOL => Ok(80),
+        ModuleKind::TriadSm100 | ModuleKind::TriadSm120 => Ok(128),
+        _ => Err(format!(
+            "no TF32 register gate for {module_kind:?}/{symbol}"
+        )),
+    }
+}
+
+#[derive(Clone, Copy)]
+struct Tf32DriverJitLocalMemoryFacts<'a> {
+    module_kind: ModuleKind,
+    symbol: &'a str,
+    target: CudaTarget,
+    nvrtc_version: (i32, i32),
+    nvrtc_library_known: bool,
+    nvrtc_library_current: bool,
+}
+
+impl<'a> Tf32DriverJitLocalMemoryFacts<'a> {
+    fn from_compiler(module_kind: ModuleKind, symbol: &'a str, compiler: CompilerIdentity) -> Self {
+        let current_domain = crate::mamba_ssm::gpu::kernel_identity::nvrtc_library_domain();
+        let current_digest = FramedSha256::new(b"nvrtc-library-set-identity.v2")
+            .optional(b"domain", current_domain.as_deref())
+            .finish();
+        Self {
+            module_kind,
+            symbol,
+            target: compiler.target,
+            nvrtc_version: compiler.nvrtc_version,
+            nvrtc_library_known: compiler.nvrtc_library_known,
+            nvrtc_library_current: current_domain.is_some()
+                && current_digest == compiler.nvrtc_library_domain,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct Tf32DriverJitLocalMemoryAdmission {
+    pub observed_bytes: u32,
+    pub approved_cap_bytes: u32,
+}
+
+pub(super) fn validate_tf32_driver_jit_local_memory(
+    local_bytes: u32,
+    module_kind: ModuleKind,
+    symbol: &str,
+    compiler: CompilerIdentity,
+) -> Result<Tf32DriverJitLocalMemoryAdmission, String> {
+    validate_tf32_driver_jit_local_memory_facts(
+        local_bytes,
+        Tf32DriverJitLocalMemoryFacts::from_compiler(module_kind, symbol, compiler),
+    )
+}
+
+fn validate_tf32_driver_jit_local_memory_facts(
+    local_bytes: u32,
+    facts: Tf32DriverJitLocalMemoryFacts<'_>,
+) -> Result<Tf32DriverJitLocalMemoryAdmission, String> {
+    if local_bytes == 0 {
+        return Ok(Tf32DriverJitLocalMemoryAdmission {
+            observed_bytes: 0,
+            approved_cap_bytes: 0,
+        });
+    }
+    Err(format!(
+        "{} uses {local_bytes} bytes of Driver JIT local memory; the current module requires zero: module={:?}, target={}, NVRTC={}.{}, library-known={}, library-current={}",
+        facts.symbol,
+        facts.module_kind,
+        facts.target.as_str(),
+        facts.nvrtc_version.0,
+        facts.nvrtc_version.1,
+        facts.nvrtc_library_known,
+        facts.nvrtc_library_current
+    ))
+}
+
+fn qualify_loaded_tf32_artifact(
+    ctx: &Arc<CudaContext>,
+    allocation_domain: super::contract::AllocationDomain,
+    module: &CompiledModule,
+    binding: super::contract::Tf32QualifiedModule,
+    functions: &HashMap<&'static str, CudaFunction>,
+) -> Result<Sha256Digest, String> {
+    let stream = ctx.default_stream();
+    let capture_status = stream
+        .capture_status()
+        .map_err(|error| format!("query TF32 artifact probe capture status: {error:?}"))?;
+    if capture_status != cudarc::driver::sys::CUstreamCaptureStatus::CU_STREAM_CAPTURE_STATUS_NONE {
+        return Err("TF32 artifact probe cannot run during CUDA stream capture".into());
+    }
+
+    let module_kind = module.artifact_identity.module_kind;
+    if binding.module_kind != module_kind || binding.artifact != module.artifact_identity {
+        return Err("TF32 artifact probe binding does not match its compiled module".into());
+    }
+    let spec = super::contract::tf32_route_specs(module_kind)
+        .iter()
+        .find(|spec| spec.op == ResolvedGemmOp::Nn)
+        .ok_or_else(|| format!("{module_kind:?} has no NN TF32 artifact probe route"))?;
+    let function = functions.get(spec.symbol).ok_or_else(|| {
+        format!(
+            "{module_kind:?} TF32 artifact probe function {} is unavailable",
+            spec.symbol
+        )
+    })?;
+
+    let result = (|| -> Result<Sha256Digest, String> {
+        let a_host = [0x3f800000_u32, 0, 0, 0];
+        let mut b_host = [0_u32; 12];
+        b_host[..TF32_EXCEPTIONAL_PROBE_BITS.len()].copy_from_slice(&TF32_EXCEPTIONAL_PROBE_BITS);
+        let a = stream
+            .clone_htod(&a_host)
+            .map_err(|error| format!("allocate TF32 artifact probe A: {error:?}"))?;
+        let b = stream
+            .clone_htod(&b_host)
+            .map_err(|error| format!("allocate TF32 artifact probe B: {error:?}"))?;
+        let mut output = stream
+            .alloc_zeros::<u32>(TF32_EXCEPTIONAL_PROBE_BITS.len())
+            .map_err(|error| format!("allocate TF32 artifact probe output: {error:?}"))?;
+        stream
+            .synchronize()
+            .map_err(|error| format!("initialize TF32 artifact probe allocations: {error:?}"))?;
+
+        let (a_ptr, a_guard) = a.device_ptr(&stream);
+        let (b_ptr, b_guard) = b.device_ptr(&stream);
+        let (output_ptr, output_guard) = output.device_ptr_mut(&stream);
+        let request = super::contract::F32TriadRequest {
+            op: ResolvedGemmOp::Nn,
+            shape: super::contract::F32TriadShape {
+                m: 1,
+                k: 1,
+                n: TF32_EXCEPTIONAL_PROBE_BITS.len(),
+                lda: 4,
+                ldb: 12,
+                ldc: TF32_EXCEPTIONAL_PROBE_BITS.len(),
+            },
+        };
+        let operands = super::contract::F32TriadOperands {
+            output: output_ptr,
+            a: a_ptr,
+            b: b_ptr,
+            bias: None,
+            alpha: 1.0,
+            beta: 0.0,
+        };
+        let maps = if module_kind == ModuleKind::TriadSm80 {
+            None
+        } else {
+            let map_binding = super::contract::Tf32MapBinding {
+                allocation_domain,
+                qualified: binding,
+            };
+            let plan = super::contract::tf32_tensor_map_plan(
+                request,
+                operands,
+                spec.route,
+                allocation_domain,
+            )?;
+            Some(super::contract::encode_tf32_tensor_maps(
+                plan,
+                request,
+                spec.route,
+                map_binding,
+            )?)
+        };
+        let config = LaunchConfig {
+            grid_dim: (1, 1, 1),
+            block_dim: (spec.threads, 1, 1),
+            shared_mem_bytes: spec.dynamic_shared_bytes,
+        };
+        const CANARIES: [u32; 2] = [0x3f123456, 0xbf654321];
+        let next_run = Cell::new(0_usize);
+        let active_canary = Cell::new(None::<u32>);
+        let qualification = qualify_tf32_conversion_artifact(
+            module.artifact_identity,
+            || {
+                let run = next_run.get();
+                let canary = CANARIES
+                    .get(run)
+                    .copied()
+                    .ok_or_else(|| "TF32 artifact probe launched more than twice".to_string())?;
+                let canary_words = [canary; TF32_EXCEPTIONAL_PROBE_BITS.len()];
+                cu_memcpy_htod_raw(&stream, output_ptr, bytemuck::cast_slice(&canary_words))?;
+                unsafe {
+                    super::launch::enqueue_tf32_qualification_probe(
+                        &stream,
+                        function,
+                        request,
+                        operands,
+                        spec.route,
+                        maps.as_ref(),
+                        config,
+                    )
+                }?;
+                active_canary.set(Some(canary));
+                next_run.set(run + 1);
+                Ok(())
+            },
+            || {
+                let canary = active_canary.get().ok_or_else(|| {
+                    "TF32 artifact probe download has no active launch".to_string()
+                })?;
+                let mut words = [0_u32; TF32_EXCEPTIONAL_PROBE_BITS.len()];
+                cu_memcpy_dtoh_raw(&stream, output_ptr, bytemuck::cast_slice_mut(&mut words))?;
+                if let Some(index) = words.iter().position(|&bits| bits == canary) {
+                    return Err(format!(
+                        "TF32 artifact probe output slot {index} retained its canary"
+                    ));
+                }
+                active_canary.set(None);
+                Ok(words.to_vec())
+            },
+        );
+        drop(maps);
+        drop(output_guard);
+        drop(b_guard);
+        drop(a_guard);
+        qualification
+    })();
+    let cleanup = stream
+        .synchronize()
+        .map_err(|error| format!("TF32 artifact probe cleanup: {error:?}"));
+    match (result, cleanup) {
+        (Ok(digest), Ok(())) => Ok(digest),
+        (Err(error), Ok(())) => Err(error),
+        (Ok(_), Err(cleanup)) => Err(cleanup),
+        (Err(error), Err(cleanup)) => Err(format!("{error}; {cleanup}")),
+    }
+}
+
+fn qualify_tf32_module_binding(
+    ctx: &Arc<CudaContext>,
+    module: &CompiledModule,
+) -> Result<super::contract::Tf32QualifiedModule, String> {
+    let module_kind = module.artifact_identity.module_kind;
+    let compiler_target = module.compiler_identity.target.as_str();
+    let (major, minor) = ctx
+        .compute_capability()
+        .map_err(|error| format!("query TF32 compute capability: {error:?}"))?;
+    let device_cc = (
+        u32::try_from(major).map_err(|_| format!("negative CUDA CC major {major}"))?,
+        u32::try_from(minor).map_err(|_| format!("negative CUDA CC minor {minor}"))?,
+    );
+    let ptx_target = qualified_ptx_target(module_kind, compiler_target, (major, minor))?;
+    let optin_shared = ctx
+        .attribute(
+            cudarc::driver::sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK_OPTIN,
+        )
+        .map_err(|error| format!("query TF32 opt-in shared memory: {error:?}"))?;
+    let tensor_map_access = match ctx.attribute(
+        cudarc::driver::sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_TENSOR_MAP_ACCESS_SUPPORTED,
+    ) {
+        Ok(value) => value != 0,
+        Err(_) if module_kind == ModuleKind::TriadSm80 => false,
+        Err(error) => return Err(format!("query TF32 tensor-map support: {error:?}")),
+    };
+    if module_kind != ModuleKind::TriadSm80 && !tensor_map_access {
+        return Err(format!("{module_kind:?} requires tensor-map access"));
+    }
+    let target = CudaTarget::new(compiler_target)?;
+    let multiprocessor_count = ctx
+        .attribute(
+            cudarc::driver::sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT,
+        )
+        .map_err(|error| format!("query TF32 multiprocessor count: {error:?}"))?;
+    let multiprocessor_count = u32::try_from(multiprocessor_count)
+        .map_err(|_| format!("negative TF32 multiprocessor count {multiprocessor_count}"))?;
+    if multiprocessor_count == 0 {
+        return Err("CUDA device reported zero multiprocessors".into());
+    }
+    let binding = super::contract::Tf32QualifiedModule {
+        module_kind,
+        target,
+        artifact: module.artifact_identity,
+        compiler: module.compiler_identity,
+        device: crate::mamba_ssm::gpu::kernel_identity::DeviceIdentity {
+            compute_capability: device_cc,
+            multiprocessor_count,
+            target: CudaTarget::new(ptx_target)?,
+            driver: crate::mamba_ssm::gpu::kernel_identity::query_driver_identity()?,
+        },
+        device_caps: crate::mamba_ssm::gpu::kernel_identity::DeviceCaps {
+            compute_capability: device_cc,
+            nvrtc_version: module.compiler_identity.nvrtc_version,
+            accepted_target: Some(target),
+            optin_shared_bytes: u32::try_from(optin_shared)
+                .map_err(|_| format!("negative TF32 opt-in shared memory {optin_shared}"))?,
+            tensor_map_access,
+        },
+    };
+    Ok(binding)
+}
+
+fn qualified_ptx_target(
+    module_kind: ModuleKind,
+    compiler_target: &str,
+    device_cc: (i32, i32),
+) -> Result<&'static str, String> {
+    match module_kind {
+        ModuleKind::TriadSm80 => {
+            let expected = portable_target_for_device(device_cc)?;
+            let actual = sm80_ptx_target(compiler_target)
+                .ok_or_else(|| format!("TriadSm80 target {compiler_target} is not admitted"))?;
+            (actual == expected || (device_cc == (12, 1) && actual == "sm_120"))
+                .then_some(actual)
+                .ok_or_else(|| {
+                    format!("TriadSm80 target {compiler_target} does not own CC {device_cc:?}")
+                })
+        }
+        ModuleKind::TriadSm90a if device_cc == (9, 0) && compiler_target == "sm_90a" => {
+            Ok("sm_90a")
+        }
+        ModuleKind::TriadSm100 => sm100_target_for_arch(compiler_target)
+            .filter(|candidate| candidate.device_cc == device_cc)
+            .map(|candidate| candidate.ptx_target)
+            .ok_or_else(|| {
+                format!("TriadSm100 target {compiler_target} does not own CC {device_cc:?}")
+            }),
+        ModuleKind::TriadSm120 => {
+            super::dispatch::sm120_target_candidates(device_cc, nvrtc_version())
+                .iter()
+                .find(|candidate| candidate.nvrtc_arch == compiler_target)
+                .map(|candidate| candidate.ptx_target)
+                .ok_or_else(|| {
+                    format!("TriadSm120 target {compiler_target} does not own CC {device_cc:?}")
+                })
+        }
+        _ => Err(format!("{module_kind:?} is not a qualified TF32 module")),
+    }
+}
+
+fn portable_target_for_device(device_cc: (i32, i32)) -> Result<&'static str, String> {
+    match device_cc {
+        (8, 0) => Ok("sm_80"),
+        (8, 6) => Ok("sm_86"),
+        (8, 7) => Ok("sm_87"),
+        (8, 9) => Ok("sm_89"),
+        (9, 0) => Ok("sm_90a"),
+        (10, 0) => Ok("sm_100a"),
+        (10, 1) => Ok("sm_101a"),
+        (10, 3) => Ok("sm_103a"),
+        (11, 0) => Ok("sm_110"),
+        (12, 0) => Ok("sm_120"),
+        (12, 1) => Ok("sm_121"),
+        _ => Err(format!("no portable TF32 target for CC {device_cc:?}")),
+    }
 }
 
 fn load_sm90a_functions(
@@ -2127,6 +5215,141 @@ fn set_dynamic_shared(function: &CudaFunction, name: &str, bytes: i32) -> Result
         .map_err(|error| format!("set MAX_DYNAMIC_SHARED for {name}: {error:?}"))
 }
 
+fn qualified_scalar_resource_environment(
+    compute_capability: (u32, u32),
+    multiprocessor_count: u32,
+    compiler: CompilerIdentity,
+    artifact: ArtifactIdentity,
+) -> bool {
+    compute_capability == (12, 0)
+        && multiprocessor_count == 170
+        && compiler.target.as_str() == "compute_120"
+        && compiler.nvrtc_version == (13, 2)
+        && compiler.nvrtc_library_known
+        && compiler.nvrtc_library_domain != [0; 32]
+        && compiler.invocation_digest != [0; 32]
+        && artifact.module_kind == ModuleKind::TriadScalar
+        && artifact.artifact_kind == compiler.output_kind
+        && artifact.compile_key == compiler.invocation_digest
+        && artifact.artifact_digest != [0; 32]
+}
+
+fn qualify_scalar_nt_d768_transpose(function: &CudaFunction) -> Result<(), String> {
+    let registers = function
+        .num_regs()
+        .map_err(|error| format!("query d768 transpose registers: {error:?}"))?;
+    let local = function
+        .local_size_bytes()
+        .map_err(|error| format!("query d768 transpose local bytes: {error:?}"))?;
+    let static_shared = function
+        .shared_size_bytes()
+        .map_err(|error| format!("query d768 transpose static shared bytes: {error:?}"))?;
+    let active_blocks = function
+        .occupancy_max_active_blocks_per_multiprocessor(
+            super::contract::SCALAR_NT_D768_TRANSPOSE_THREADS,
+            super::contract::SCALAR_NT_D768_TRANSPOSE_DYNAMIC_SHARED_BYTES,
+            None,
+        )
+        .map_err(|error| format!("query d768 transpose occupancy: {error:?}"))?;
+    if registers > super::contract::SCALAR_NT_D768_TRANSPOSE_REGISTER_CAP
+        || local != 0
+        || static_shared as usize != super::contract::SCALAR_NT_D768_TRANSPOSE_STATIC_SHARED_BYTES
+        || active_blocks < super::contract::SCALAR_NT_D768_TRANSPOSE_MIN_ACTIVE_BLOCKS
+    {
+        return Err(format!(
+            "d768 transpose resource qualification failed: registers={registers} local={local} static_shared={static_shared} active_blocks={active_blocks}"
+        ));
+    }
+    Ok(())
+}
+
+fn qualify_scalar_nt_m2n16(function: &CudaFunction) -> Result<(), String> {
+    let registers = function
+        .num_regs()
+        .map_err(|error| format!("query M2N16 registers: {error:?}"))?;
+    let local = function
+        .local_size_bytes()
+        .map_err(|error| format!("query M2N16 local bytes: {error:?}"))?;
+    let static_shared = function
+        .shared_size_bytes()
+        .map_err(|error| format!("query M2N16 static shared bytes: {error:?}"))?;
+    let active_blocks = function
+        .occupancy_max_active_blocks_per_multiprocessor(
+            super::contract::SCALAR_NT_M2N16_THREADS,
+            super::contract::SCALAR_NT_M2N16_DYNAMIC_SHARED_BYTES as usize,
+            None,
+        )
+        .map_err(|error| format!("query M2N16 occupancy: {error:?}"))?;
+    if registers > super::contract::SCALAR_NT_M2N16_REGISTER_CAP
+        || local != 0
+        || static_shared as usize != super::contract::SCALAR_NT_M2N16_STATIC_SHARED_BYTES
+        || active_blocks < super::contract::SCALAR_NT_M2N16_MIN_ACTIVE_BLOCKS
+    {
+        return Err(format!(
+            "M2N16 resource qualification failed: registers={registers} local={local} static_shared={static_shared} active_blocks={active_blocks}"
+        ));
+    }
+    Ok(())
+}
+
+fn qualify_scalar_nn_m32n64_splitk32(function: &CudaFunction) -> Result<(), String> {
+    let registers = function
+        .num_regs()
+        .map_err(|error| format!("query NN M32N64 Split-K registers: {error:?}"))?;
+    let local = function
+        .local_size_bytes()
+        .map_err(|error| format!("query NN M32N64 Split-K local bytes: {error:?}"))?;
+    let static_shared = function
+        .shared_size_bytes()
+        .map_err(|error| format!("query NN M32N64 Split-K static shared bytes: {error:?}"))?;
+    let active_blocks = function
+        .occupancy_max_active_blocks_per_multiprocessor(
+            super::contract::SCALAR_NN_M32N64_SPLITK32_THREADS,
+            super::contract::SCALAR_NN_M32N64_SPLITK32_DYNAMIC_SHARED_BYTES as usize,
+            None,
+        )
+        .map_err(|error| format!("query NN M32N64 Split-K occupancy: {error:?}"))?;
+    if registers > super::contract::SCALAR_NN_M32N64_SPLITK32_REGISTER_CAP
+        || local != 0
+        || static_shared as usize != super::contract::SCALAR_NN_M32N64_SPLITK32_STATIC_SHARED_BYTES
+        || active_blocks < super::contract::SCALAR_NN_M32N64_SPLITK32_MIN_ACTIVE_BLOCKS
+    {
+        return Err(format!(
+            "NN M32N64 Split-K resource qualification failed: registers={registers} local={local} static_shared={static_shared} active_blocks={active_blocks}"
+        ));
+    }
+    Ok(())
+}
+
+fn qualify_scalar_tn_m16n16(function: &CudaFunction) -> Result<(), String> {
+    let registers = function
+        .num_regs()
+        .map_err(|error| format!("query TN M16N16 registers: {error:?}"))?;
+    let local = function
+        .local_size_bytes()
+        .map_err(|error| format!("query TN M16N16 local bytes: {error:?}"))?;
+    let static_shared = function
+        .shared_size_bytes()
+        .map_err(|error| format!("query TN M16N16 static shared bytes: {error:?}"))?;
+    let active_blocks = function
+        .occupancy_max_active_blocks_per_multiprocessor(
+            super::contract::SCALAR_TN_M16N16_THREADS,
+            super::contract::SCALAR_TN_M16N16_DYNAMIC_SHARED_BYTES as usize,
+            None,
+        )
+        .map_err(|error| format!("query TN M16N16 occupancy: {error:?}"))?;
+    if registers > super::contract::SCALAR_TN_M16N16_REGISTER_CAP
+        || local != 0
+        || static_shared as usize != super::contract::SCALAR_TN_M16N16_STATIC_SHARED_BYTES
+        || active_blocks < super::contract::SCALAR_TN_M16N16_MIN_ACTIVE_BLOCKS
+    {
+        return Err(format!(
+            "TN M16N16 resource qualification failed: registers={registers} local={local} static_shared={static_shared} active_blocks={active_blocks}"
+        ));
+    }
+    Ok(())
+}
+
 fn set_half_dynamic_shared(kernel: &HalfKernel, name: &str, bytes: i32) -> Result<(), String> {
     set_dynamic_shared(&kernel.bf16, name, bytes)?;
     set_dynamic_shared(&kernel.f16, name, bytes)
@@ -2134,17 +5357,2038 @@ fn set_half_dynamic_shared(kernel: &HalfKernel, name: &str, bytes: i32) -> Resul
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeSet;
+    use std::{
+        cell::{Cell, RefCell},
+        collections::{BTreeSet, HashMap, VecDeque},
+    };
 
-    use crate::mamba_ssm::gpu::kernel_identity::ModuleKind;
+    use crate::mamba_ssm::gpu::kernel_identity::{
+        ArtifactIdentity, ArtifactKind, COMPILER_REVISION, COMPOSER_REVISION, CompilerIdentity,
+        CudaTarget as KernelCudaTarget, ModuleKind, NUMERIC_ABI_REVISION, ResolvedGemmOp,
+        SCHEDULE_REVISION,
+    };
 
     use super::{
-        SCALAR_SYMBOLS as PRODUCTION_SCALAR_SYMBOLS, SM80_SYMBOLS as PRODUCTION_SM80_SYMBOLS,
-        SM90A_SYMBOLS, SM100_PROBE_SOURCE, SourceFragment, compose_fragments,
-        compose_module_source, resolve_owned_symbol, select_sm100_candidate,
-        select_sm120_candidate, validate_module_target, validate_sm100_probe_ptx,
-        validate_sm100_ptx, validate_sm120_ptx,
+        SCALAR_GROUP_M_MACRO, SCALAR_SYMBOLS as PRODUCTION_SCALAR_SYMBOLS,
+        SM80_SYMBOLS as PRODUCTION_SM80_SYMBOLS, SM90A_SYMBOLS, SM100_PROBE_SOURCE, SourceFragment,
+        Tf32DriverAbi, Tf32DriverJitLocalMemoryFacts, compose_fragments, compose_module_source,
+        merge_tf32_driver_abi, parse_ptx, portable_target_for_device, ptx_entry,
+        qualified_ptx_target, qualified_scalar_resource_environment,
+        qualify_tf32_conversion_artifact, query_driver_parameter_abi,
+        query_tf32_driver_parameter_abi, resolve_owned_symbol, retain_forced_only_functions,
+        retain_tf32_candidate, scalar_group_m_option, select_sm100_candidate,
+        select_sm120_candidate, sm100_target_candidates, tf32_register_cap,
+        validate_exact_ptx_exports, validate_module_ptx, validate_module_target,
+        validate_sm90a_ptx, validate_sm100_probe_ptx, validate_sm100_ptx, validate_sm120_ptx,
+        validate_tf32_driver_jit_local_memory_facts, validate_tf32_feature_instructions,
+        validate_tf32_parameter_abi, validate_tf32_ptx_inventory, validate_tf32_splitk_ptx,
+        validate_tn_narrow_splitm_partial_ptx,
     };
+
+    #[test]
+    fn scalar_resource_environment_rejects_zero_identity_domains() {
+        let compiler = CompilerIdentity {
+            source_digest: [1; 32],
+            invocation_digest: [2; 32],
+            header_manifest_digest: [3; 32],
+            target: KernelCudaTarget::new("compute_120").unwrap(),
+            nvrtc_version: (13, 2),
+            nvrtc_library_domain: [4; 32],
+            nvrtc_library_known: true,
+            output_kind: ArtifactKind::Ptx,
+            composer_revision: COMPOSER_REVISION,
+            compiler_revision: COMPILER_REVISION,
+            numeric_abi_revision: NUMERIC_ABI_REVISION,
+            schedule_revision: SCHEDULE_REVISION,
+        };
+        let artifact = ArtifactIdentity {
+            module_kind: ModuleKind::TriadScalar,
+            artifact_kind: ArtifactKind::Ptx,
+            compile_key: compiler.invocation_digest,
+            artifact_digest: [5; 32],
+        };
+        assert!(qualified_scalar_resource_environment(
+            (12, 0),
+            170,
+            compiler,
+            artifact
+        ));
+
+        let mut zero_library = compiler;
+        zero_library.nvrtc_library_domain = [0; 32];
+        assert!(!qualified_scalar_resource_environment(
+            (12, 0),
+            170,
+            zero_library,
+            artifact
+        ));
+        let mut zero_compile = compiler;
+        zero_compile.invocation_digest = [0; 32];
+        let mut zero_key = artifact;
+        zero_key.compile_key = [0; 32];
+        assert!(!qualified_scalar_resource_environment(
+            (12, 0),
+            170,
+            zero_compile,
+            zero_key
+        ));
+        let mut zero_artifact = artifact;
+        zero_artifact.artifact_digest = [0; 32];
+        assert!(!qualified_scalar_resource_environment(
+            (12, 0),
+            170,
+            compiler,
+            zero_artifact
+        ));
+    }
+
+    fn tf32_test_artifact(artifact_digest: [u8; 32]) -> ArtifactIdentity {
+        ArtifactIdentity {
+            module_kind: ModuleKind::TriadSm80,
+            artifact_kind: ArtifactKind::Ptx,
+            compile_key: [0x31; 32],
+            artifact_digest,
+        }
+    }
+
+    fn opaque_tf32_outputs() -> Vec<u32> {
+        vec![
+            0x0000_0000,
+            0x8000_0000,
+            0x7fc0_0001,
+            0x7f80_0001,
+            0x7f80_0000,
+            0xff80_0000,
+            0x0000_0001,
+            0x007f_ffff,
+            0x0080_0000,
+            0x3f12_3456,
+        ]
+    }
+
+    #[test]
+    fn tf32_driver_jit_local_memory_admission_requires_zero() {
+        let symbol = "gemm_bi_nn_sm120_tma_mma_tf32_v1_m64n128_bk32_s3";
+        let qualified = Tf32DriverJitLocalMemoryFacts {
+            module_kind: ModuleKind::TriadSm120,
+            symbol,
+            target: crate::mamba_ssm::gpu::kernel_identity::CudaTarget::new("compute_120").unwrap(),
+            nvrtc_version: (13, 2),
+            nvrtc_library_known: true,
+            nvrtc_library_current: true,
+        };
+
+        validate_tf32_driver_jit_local_memory_facts(0, qualified).unwrap();
+        for local_bytes in [1, 15, 16, 17] {
+            let error = validate_tf32_driver_jit_local_memory_facts(local_bytes, qualified)
+                .expect_err("nonzero local-memory size must fail");
+            assert!(error.contains(symbol), "{error}");
+            assert!(error.contains(&local_bytes.to_string()), "{error}");
+        }
+    }
+
+    #[test]
+    fn tf32_register_caps_freeze_tag33_exact_symbol_without_weakening_generic_caps() {
+        const TAG33: &str = "gemm_bi_nn_sm120_tma_mma_tf32_v1_m80n32_bk64_s2";
+
+        assert_eq!(tf32_register_cap(ModuleKind::TriadSm120, TAG33), Ok(80));
+        assert_eq!(
+            tf32_register_cap(
+                ModuleKind::TriadSm120,
+                "gemm_bi_nn_sm120_tma_mma_tf32_v1_m64n64_bk32_s2"
+            ),
+            Ok(128)
+        );
+        for mutated in [
+            "gemm_bi_nn_sm120_tma_mma_tf32_v1_m80n32_bk64_s3",
+            "gemm_bi_nn_sm120_tma_mma_tf32_v1_m80n32_bk32_s2",
+            "gemm_bi_tn_sm120_tma_mma_tf32_v1_m80n32_bk64_s2",
+            "gemm_bi_nn_sm120_tma_mma_tf32_v1_m80n32_bk64_s2_exp",
+        ] {
+            assert_eq!(
+                tf32_register_cap(ModuleKind::TriadSm120, mutated),
+                Ok(128),
+                "nearby symbol must retain the generic SM120 cap: {mutated}"
+            );
+        }
+        assert_eq!(tf32_register_cap(ModuleKind::TriadSm100, TAG33), Ok(128));
+    }
+
+    #[test]
+    fn tf32_exceptional_qualifier_calls_launch_and_download_twice_in_order() {
+        let trace = RefCell::new(Vec::new());
+        let output = opaque_tf32_outputs();
+        let downloads = RefCell::new(VecDeque::from([output.clone(), output]));
+
+        let digest = qualify_tf32_conversion_artifact(
+            tf32_test_artifact([0x42; 32]),
+            || {
+                trace.borrow_mut().push("launch");
+                Ok(())
+            },
+            || {
+                trace.borrow_mut().push("download");
+                downloads
+                    .borrow_mut()
+                    .pop_front()
+                    .ok_or_else(|| "missing injected output".to_string())
+            },
+        )
+        .expect("stable artifact output must qualify");
+
+        assert_eq!(
+            *trace.borrow(),
+            ["launch", "download", "launch", "download"]
+        );
+        assert_eq!(downloads.borrow().len(), 0);
+        assert_ne!(digest, [0; 32]);
+    }
+
+    #[test]
+    fn tf32_exceptional_qualifier_rejects_length_and_repeat_drift() {
+        let stable = opaque_tf32_outputs();
+        let mut changed = stable.clone();
+        changed[6] ^= 1;
+        for (label, first, second, expected) in [
+            ("short first", stable[..9].to_vec(), stable.clone(), "first"),
+            (
+                "long first",
+                [stable.as_slice(), &[0xdead_beef]].concat(),
+                stable.clone(),
+                "first",
+            ),
+            (
+                "short second",
+                stable.clone(),
+                stable[..9].to_vec(),
+                "second",
+            ),
+            (
+                "long second",
+                stable.clone(),
+                [stable.as_slice(), &[0xdead_beef]].concat(),
+                "second",
+            ),
+            ("bit drift", stable.clone(), changed, "changed"),
+        ] {
+            let downloads = RefCell::new(VecDeque::from([first, second]));
+            let error = qualify_tf32_conversion_artifact(
+                tf32_test_artifact([0x42; 32]),
+                || Ok(()),
+                || {
+                    downloads
+                        .borrow_mut()
+                        .pop_front()
+                        .ok_or_else(|| "missing injected output".to_string())
+                },
+            )
+            .expect_err(label);
+            assert!(error.contains(expected), "{label}: {error}");
+        }
+    }
+
+    #[test]
+    fn tf32_exceptional_qualifier_propagates_callbacks() {
+        let error = qualify_tf32_conversion_artifact(
+            tf32_test_artifact([0x42; 32]),
+            || Err("injected first launch".into()),
+            || panic!("download followed a failed launch"),
+        )
+        .expect_err("first launch failure must propagate");
+        assert!(error.contains("injected first launch"), "{error}");
+
+        let error = qualify_tf32_conversion_artifact(
+            tf32_test_artifact([0x42; 32]),
+            || Ok(()),
+            || Err("injected first download".into()),
+        )
+        .expect_err("first download failure must propagate");
+        assert!(error.contains("injected first download"), "{error}");
+
+        let launches = Cell::new(0);
+        let output = opaque_tf32_outputs();
+        let error = qualify_tf32_conversion_artifact(
+            tf32_test_artifact([0x42; 32]),
+            || {
+                let next = launches.get() + 1;
+                launches.set(next);
+                if next == 2 {
+                    Err("injected second launch".into())
+                } else {
+                    Ok(())
+                }
+            },
+            || Ok(output.clone()),
+        )
+        .expect_err("second launch failure must propagate");
+        assert!(error.contains("injected second launch"), "{error}");
+
+        let downloads = Cell::new(0);
+        let error = qualify_tf32_conversion_artifact(
+            tf32_test_artifact([0x42; 32]),
+            || Ok(()),
+            || {
+                let next = downloads.get() + 1;
+                downloads.set(next);
+                if next == 2 {
+                    Err("injected second download".into())
+                } else {
+                    Ok(output.clone())
+                }
+            },
+        )
+        .expect_err("second download failure must propagate");
+        assert!(error.contains("injected second download"), "{error}");
+    }
+
+    #[test]
+    fn tf32_exceptional_digest_is_artifact_scoped_and_outputs_are_opaque() {
+        let qualify = |artifact| {
+            let output = opaque_tf32_outputs();
+            let downloads = RefCell::new(VecDeque::from([output.clone(), output]));
+            qualify_tf32_conversion_artifact(
+                artifact,
+                || Ok(()),
+                || {
+                    downloads
+                        .borrow_mut()
+                        .pop_front()
+                        .ok_or_else(|| "missing injected output".to_string())
+                },
+            )
+            .expect("opaque stable outputs must qualify")
+        };
+
+        let first = qualify(tf32_test_artifact([0x42; 32]));
+        assert_eq!(first, qualify(tf32_test_artifact([0x42; 32])));
+        assert_ne!(first, qualify(tf32_test_artifact([0x43; 32])));
+    }
+
+    #[test]
+    fn specialized_tf32_qualification_error_is_not_reported_as_unavailable() {
+        let functions = HashMap::from([("tf32", 7_u8)]);
+        let rejected_symbol = "gemm_bi_nn_sm120_mma_tf32_v1_m16n32_bk16_s4";
+        let qualification_error = format!(
+            "specialized TF32 symbol {rejected_symbol} rejected: registers 129 exceed limit 128"
+        );
+        let error =
+            retain_tf32_candidate(functions.clone(), 9_u8, Err(qualification_error.clone()))
+                .expect_err("specialized qualification failure must abort module initialization");
+        assert_eq!(error, qualification_error);
+        assert!(error.contains(rejected_symbol), "{error}");
+        assert!(error.contains("registers 129 exceed limit 128"), "{error}");
+
+        let (kept_functions, kept_binding) =
+            retain_tf32_candidate(functions.clone(), 9_u8, Ok([0x55; 32])).unwrap();
+        assert_eq!(kept_functions, functions);
+        assert_eq!(kept_binding, Some(9));
+
+        let (empty_functions, empty_binding) =
+            retain_tf32_candidate(HashMap::<&'static str, u8>::new(), 9_u8, Ok([0x55; 32]))
+                .unwrap();
+        assert!(empty_functions.is_empty());
+        assert_eq!(empty_binding, None);
+    }
+
+    #[test]
+    fn specialized_tf32_function_load_preserves_symbol_and_resource_error() {
+        let rejected_symbol = "gemm_bi_nt_sm80_mma_tf32_splitk4_v1_m16n32_bk32_s4";
+        let load_error = format!(
+            "load specialized TF32 symbol {rejected_symbol}: dynamic shared memory 65536 exceeds device limit 49152"
+        );
+        let error = retain_forced_only_functions::<u8>(Err(load_error.clone()))
+            .expect_err("specialized function-load failure must abort module initialization");
+        assert_eq!(error, load_error);
+        assert!(error.contains(rejected_symbol), "{error}");
+        assert!(
+            error.contains("dynamic shared memory 65536 exceeds device limit 49152"),
+            "{error}"
+        );
+
+        let functions = HashMap::from([("forced", 7_u8)]);
+        assert_eq!(
+            retain_forced_only_functions(Ok(functions.clone())).unwrap(),
+            functions
+        );
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum CudaTarget {
+        Compute110f,
+        Compute110a,
+        Sm110f,
+        Sm110a,
+    }
+
+    fn synthetic_tf32_ptx(module_kind: ModuleKind) -> String {
+        let target = match module_kind {
+            ModuleKind::TriadSm80 => "sm_80",
+            ModuleKind::TriadSm90a => "sm_90a",
+            ModuleKind::TriadSm100 => "sm_100f",
+            ModuleKind::TriadSm120 => "sm_120",
+            _ => panic!("no TF32 inventory for {module_kind:?}"),
+        };
+        let mut ptx = format!(".version 9.0\n.target {target}\n");
+        for kernel_spec in super::super::contract::tf32_route_specs(module_kind) {
+            ptx.push_str(&format!(".entry {}(\n) {{}}\n", kernel_spec.symbol));
+        }
+        ptx
+    }
+
+    fn synthetic_tf32_abi_ptx(module_kind: ModuleKind, map_alignment: usize) -> String {
+        let mut ptx = String::new();
+        for kernel_spec in super::super::contract::tf32_route_specs(module_kind) {
+            ptx.push_str(&format!(".visible .entry {}(\n", kernel_spec.symbol));
+            if module_kind == ModuleKind::TriadSm80 {
+                for parameter in 0..4 {
+                    ptx.push_str(&format!(".param .u64 p{parameter},\n"));
+                }
+                ptx.push_str(".param .align 4 .b8 bundle[32]\n) {}\n");
+            } else {
+                ptx.push_str(".param .u64 output,\n");
+                ptx.push_str(&format!(
+                    ".param .align {map_alignment} .b8 a_map[128],\n\
+                     .param .align {map_alignment} .b8 b_map[128],\n"
+                ));
+                ptx.push_str(".param .u64 bias,\n");
+                ptx.push_str(".param .align 4 .b8 bundle[40]\n) {}\n");
+            }
+        }
+        ptx
+    }
+
+    fn synthetic_splitk_ptx() -> String {
+        let parameters = ".param .u64 p0,\n.param .u64 p1,\n.param .u64 p2,\n.param .u64 p3,\n.param .u64 p4,\n.param .u64 p5,\n.param .align 4 .b8 bundle[32]";
+        let mut ptx = ".version 9.0\n.target sm_80\n".to_string();
+        for spec in super::super::contract::TF32_SPLITK_CANDIDATE_SPECS {
+            let epilogue = if spec.op == ResolvedGemmOp::Nn {
+                " fma.rn.f32 %f5, %f1, %f2, %f3;"
+            } else {
+                ""
+            };
+            let body = format!(
+                "cvt.rna.tf32.f32 %r1, %f1; mma.sync.aligned.m16n8k8.row.col.f32.tf32.tf32.f32; st.global.cg.f32 [%rd2], %f1; st.global.cg.v2.f32 [%rd2], {{%f1, %f2}}; membar.gl; atom.global.inc.u32 %r2, [%rd1], {}; ld.global.cg.f32 %f1, [%rd2]; ld.global.cg.v2.f32 {{%f1, %f2}}, [%rd2]; add.rn.f32 %f1, %f2, %f3; mul.rn.f32 %f4, %f1, %f2;{epilogue} ret;",
+                spec.partitions - 1,
+            );
+            ptx.push_str(&format!(
+                ".visible .entry {}(\n{}\n) {{ {} }}\n",
+                spec.symbol, parameters, body,
+            ));
+        }
+        ptx
+    }
+
+    fn mutate_splitk_entry(ptx: &str, symbol: &str, from: &str, to: &str) -> String {
+        let entry = ptx_entry(ptx, symbol).unwrap();
+        let changed = entry.replacen(from, to, 1);
+        assert_ne!(changed, entry, "{symbol} fixture did not contain {from}");
+        ptx.replacen(&entry, &changed, 1)
+    }
+
+    #[test]
+    fn splitk_candidate_ptx_inventory_and_parameter_abi_are_exact() {
+        let valid = synthetic_splitk_ptx();
+        validate_tf32_splitk_ptx(&valid).unwrap();
+        for spec in super::super::contract::TF32_SPLITK_CANDIDATE_SPECS {
+            let missing = valid.replacen(spec.symbol, "removed_splitk_fused", 1);
+            assert!(validate_tf32_splitk_ptx(&missing).is_err());
+        }
+        let foreign = valid.replace(
+            ".version 9.0",
+            ".version 9.0\n.visible .entry foreign_tf32_splitk2_v1_kernel() { ret; }",
+        );
+        assert!(validate_tf32_splitk_ptx(&foreign).is_err());
+        let wrong_bundle = valid.replacen("bundle[32]", "bundle[40]", 1);
+        assert!(validate_tf32_splitk_ptx(&wrong_bundle).is_err());
+        let float_atomic = valid.replacen("atom.global.inc.u32", "atom.global.add.f32", 1);
+        assert!(validate_tf32_splitk_ptx(&float_atomic).is_err());
+        let missing_counter = valid.replacen("atom.global.inc.u32", "add.u32", 1);
+        assert!(validate_tf32_splitk_ptx(&missing_counter).is_err());
+        let duplicate_counter = valid.replacen(
+            "atom.global.inc.u32 %r2, [%rd1], 1;",
+            "atom.global.inc.u32 %r2, [%rd1], 1; atom.global.inc.u32 %r3, [%rd1], 1;",
+            1,
+        );
+        assert!(validate_tf32_splitk_ptx(&duplicate_counter).is_err());
+        let wrong_k2_limit = valid.replacen(
+            "atom.global.inc.u32 %r2, [%rd1], 1;",
+            "atom.global.inc.u32 %r2, [%rd1], 3;",
+            1,
+        );
+        assert!(validate_tf32_splitk_ptx(&wrong_k2_limit).is_err());
+        let register_limit = valid.replacen(
+            "atom.global.inc.u32 %r2, [%rd1], 1;",
+            "atom.global.inc.u32 %r2, [%rd1], %r9;",
+            1,
+        );
+        assert!(validate_tf32_splitk_ptx(&register_limit).is_err());
+        let formatted_limit = valid.replacen(
+            "atom.global.inc.u32 %r2, [%rd1], 1;",
+            "atom.global.inc.u32\n    %r2, [ %rd1 ], 1 ;",
+            1,
+        );
+        validate_tf32_splitk_ptx(&formatted_limit).unwrap();
+        for opcode in [
+            "st.global.cg.f32",
+            "st.global.cg.v2.f32",
+            "ld.global.cg.f32",
+            "ld.global.cg.v2.f32",
+        ] {
+            let stale_visibility = valid.replacen(opcode, &opcode.replace(".cg", ".wb"), 1);
+            assert!(validate_tf32_splitk_ptx(&stale_visibility).is_err());
+        }
+        let missing_fence = valid.replacen("membar.gl", "bar.sync 0", 1);
+        assert!(validate_tf32_splitk_ptx(&missing_fence).is_err());
+        let atomic_before_fence = valid.replacen(
+            "membar.gl; atom.global.inc.u32 %r2, [%rd1], 1;",
+            "atom.global.inc.u32 %r2, [%rd1], 1; membar.gl;",
+            1,
+        );
+        assert!(validate_tf32_splitk_ptx(&atomic_before_fence).is_err());
+        let reload_before_atomic = valid.replacen(
+            "atom.global.inc.u32 %r2, [%rd1], 1; ld.global.cg.f32 %f1, [%rd2];",
+            "ld.global.cg.f32 %f1, [%rd2]; atom.global.inc.u32 %r2, [%rd1], 1;",
+            1,
+        );
+        assert!(validate_tf32_splitk_ptx(&reload_before_atomic).is_err());
+        let division = valid.replacen(
+            "fma.rn.f32 %f5, %f1, %f2, %f3; ret;",
+            "fma.rn.f32 %f5, %f1, %f2, %f3; div.u32 %r4, %r2, %r3; ret;",
+            1,
+        );
+        assert!(validate_tf32_splitk_ptx(&division).is_err());
+        let fused_division = valid.replacen(
+            "mma.sync.aligned.m16n8k8.row.col.f32.tf32.tf32.f32; st.global.cg.f32",
+            "mma.sync.aligned.m16n8k8.row.col.f32.tf32.tf32.f32; div.u32 %r4, %r2, %r3; st.global.cg.f32",
+            1,
+        );
+        assert!(validate_tf32_splitk_ptx(&fused_division).is_err());
+
+        for spec in super::super::contract::TF32_SPLITK_CANDIDATE_SPECS
+            .iter()
+            .filter(|spec| spec.op == ResolvedGemmOp::Nt)
+        {
+            let missing_fence = mutate_splitk_entry(&valid, spec.symbol, "membar.gl", "bar.sync 0");
+            assert!(validate_tf32_splitk_ptx(&missing_fence).is_err());
+
+            let atomic_before_fence = mutate_splitk_entry(
+                &valid,
+                spec.symbol,
+                "membar.gl; atom.global.inc.u32",
+                "atom.global.inc.u32 %r7, [%rd7], 0; membar.gl; atom.global.inc.u32",
+            );
+            assert!(validate_tf32_splitk_ptx(&atomic_before_fence).is_err());
+
+            let reload_before_atomic = mutate_splitk_entry(
+                &valid,
+                spec.symbol,
+                "atom.global.inc.u32",
+                "ld.global.cg.f32 %f7, [%rd7]; atom.global.inc.u32",
+            );
+            assert!(validate_tf32_splitk_ptx(&reload_before_atomic).is_err());
+
+            let float_atomic = mutate_splitk_entry(
+                &valid,
+                spec.symbol,
+                "atom.global.inc.u32",
+                "atom.global.add.f32",
+            );
+            assert!(validate_tf32_splitk_ptx(&float_atomic).is_err());
+
+            let division = mutate_splitk_entry(
+                &valid,
+                spec.symbol,
+                "mul.rn.f32",
+                "div.u32 %r7, %r8, %r9; mul.rn.f32",
+            );
+            assert!(validate_tf32_splitk_ptx(&division).is_err());
+        }
+
+        for spec in super::super::contract::TF32_SPLITK_CANDIDATE_SPECS
+            .iter()
+            .filter(|spec| spec.partitions == 8)
+        {
+            let wrong_limit = mutate_splitk_entry(
+                &valid,
+                spec.symbol,
+                "atom.global.inc.u32 %r2, [%rd1], 7;",
+                "atom.global.inc.u32 %r2, [%rd1], 3;",
+            );
+            assert!(validate_tf32_splitk_ptx(&wrong_limit).is_err());
+        }
+    }
+
+    #[test]
+    fn scalar_tn_narrow_splitm_partial_ptx_abi_is_fail_closed() {
+        let parameters = ".param .u64 partial,\n.param .u64 a,\n.param .u64 b,\n.param .u32 m,\n.param .u32 k,\n.param .u32 n,\n.param .u32 chunk";
+        let body =
+            "fma.rn.f32 %f1, %f2, %f3, %f4; st.global.v4.f32 [%rd1], {%f1, %f2, %f3, %f4}; ret;";
+        let mut valid = ".version 9.0\n.target sm_80\n".to_string();
+        for symbol in super::SCALAR_TN_NARROW_SPLITM_PARTIAL_SYMBOLS {
+            valid.push_str(&format!(
+                ".visible .entry {symbol}(\n{parameters}\n) {{ {body} }}\n"
+            ));
+        }
+        validate_tn_narrow_splitm_partial_ptx(&valid).unwrap();
+        for symbol in super::SCALAR_TN_NARROW_SPLITM_PARTIAL_SYMBOLS {
+            assert!(
+                validate_tn_narrow_splitm_partial_ptx(&valid.replacen(
+                    symbol,
+                    "removed_tn_narrow_splitm_partial",
+                    1,
+                ))
+                .is_err()
+            );
+        }
+        assert!(
+            validate_tn_narrow_splitm_partial_ptx(&valid.replacen(
+                ".param .u32 chunk",
+                ".param .u64 chunk",
+                1,
+            ))
+            .is_err()
+        );
+        assert!(
+            validate_tn_narrow_splitm_partial_ptx(&valid.replacen("fma.rn.f32", "mul.rn.f32", 1,))
+                .is_err()
+        );
+        let runtime_division = valid.replacen("ret;", "rem.s32 %r4, %r5, %r6; ret;", 1);
+        assert!(validate_tn_narrow_splitm_partial_ptx(&runtime_division).is_err());
+    }
+
+    fn synthetic_scalar_splitm_module_ptx() -> String {
+        let zero_parameters = ".param .u64 output,\n.param .u64 a,\n.param .u64 b,\n.param .u64 bias,\n.param .align 4 .b8 bundle[32]";
+        let partial_parameters = ".param .u64 partial,\n.param .u64 a,\n.param .u64 b,\n.param .u32 m,\n.param .u32 k,\n.param .u32 n,\n.param .u32 chunk";
+        let partial_body =
+            "fma.rn.f32 %f1, %f2, %f3, %f4; st.global.v4.f32 [%rd1], {%f1, %f2, %f3, %f4}; ret;";
+        let generic_partial_body = "div.u32 %r1, %r2, %r3; rem.u32 %r4, %r2, %r3; fma.rn.f32 %f1, %f2, %f3, %f4; st.global.v4.f32 [%rd1], {%f1, %f2, %f3, %f4}; ret;";
+        let mut ptx = ".version 9.0\n.target sm_80\n".to_string();
+        for symbol in super::SCALAR_ZERO_REDUCTION_SYMBOLS {
+            ptx.push_str(&format!(
+                ".visible .entry {symbol}(\n{zero_parameters}\n) {{ ret; }}\n"
+            ));
+        }
+        for symbol in super::SCALAR_TN_NARROW_SPLITM_PARTIAL_SYMBOLS {
+            ptx.push_str(&format!(
+                ".visible .entry {symbol}(\n{partial_parameters}\n) {{ {partial_body} }}\n"
+            ));
+        }
+        for symbol in [
+            "gemm_bi_tn_splitm_partial",
+            "gemm_bi_tn_splitm_partial_aligned",
+        ] {
+            ptx.push_str(&format!(
+                ".visible .entry {symbol}(\n{partial_parameters}\n) {{ {generic_partial_body} }}\n"
+            ));
+        }
+        for symbol in super::SCALAR_SYMBOLS {
+            if super::SCALAR_ZERO_REDUCTION_SYMBOLS.contains(symbol)
+                || super::SCALAR_TN_NARROW_SPLITM_PARTIAL_SYMBOLS.contains(symbol)
+                || super::SCALAR_TN_SPLITM_PARTIAL_SYMBOLS.contains(symbol)
+            {
+                continue;
+            }
+            if *symbol == "gemm_bi_nt_m2n16_bk64_splitk32_v1" {
+                let parameters = ".param .u64 output,\n.param .u64 a,\n.param .u64 b,\n.param .f32 alpha,\n.param .u32 m,\n.param .u32 n,\n.param .u32 k_out";
+                let body = "fma.rn.f32 %f1, %f2, %f3, %f4; add.rn.f32 %f5, %f1, %f4; mul.rn.f32 %f6, %f5, %f2; ret;";
+                ptx.push_str(&format!(
+                    ".visible .entry {symbol}(\n{parameters}\n) {{ {body} }}\n"
+                ));
+                continue;
+            }
+            if *symbol == "gemm_bi_nn_splitk32_m32n64_exact_v1" {
+                let parameters = ".param .u64 partial,\n.param .u64 a,\n.param .u64 b,\n.param .u32 m,\n.param .u32 n,\n.param .u32 chunks,\n.param .u32 lda";
+                let body = "fma.rn.f32 %f1, %f2, %f3, %f4; ret;";
+                ptx.push_str(&format!(
+                    ".visible .entry {symbol}(\n{parameters}\n) {{ {body} }}\n"
+                ));
+                continue;
+            }
+            if *symbol == "gemm_bi_tn_m16n16_bk16_s2_splitm16_v1" {
+                let parameters = ".param .u64 output,\n.param .u64 a,\n.param .u64 b,\n.param .f32 alpha,\n.param .u32 m,\n.param .u32 k,\n.param .u32 n";
+                let body = "fma.rn.f32 %f1, %f2, %f3, %f4; add.rn.f64 %fd1, %fd2, %fd3; mul.rn.f64 %fd4, %fd1, %fd2; cvt.rn.f32.f64 %f6, %fd4; add.rn.f32 %f5, %f1, %f6; ret;";
+                ptx.push_str(&format!(
+                    ".visible .entry {symbol}(\n{parameters}\n) {{ {body} }}\n"
+                ));
+                continue;
+            }
+            ptx.push_str(&format!(".visible .entry {symbol}() {{ ret; }}\n"));
+        }
+        ptx
+    }
+
+    #[test]
+    fn triad_scalar_module_validation_rejects_m2n16_contract_mutations() {
+        const SYMBOL: &str = "gemm_bi_nt_m2n16_bk64_splitk32_v1";
+        let valid = synthetic_scalar_splitm_module_ptx();
+        validate_module_ptx(ModuleKind::TriadScalar, "sm_80", &valid).unwrap();
+
+        for (label, from, to) in [
+            (
+                "seven-parameter ABI mutation",
+                ".param .f32 alpha",
+                ".param .u32 alpha",
+            ),
+            ("missing FFMA", "fma.rn.f32", "mad.rn.f32"),
+            ("missing rounded add", "add.rn.f32", "sub.rn.f32"),
+            ("missing rounded multiply", "mul.rn.f32", "div.rn.f32"),
+            (
+                "atomic reduction",
+                "ret;",
+                "atom.global.add.f32 %f7, [%rd7], %f1; ret;",
+            ),
+            (
+                "red reduction",
+                "ret;",
+                "red.global.add.f32 [%rd7], %f1; ret;",
+            ),
+            (
+                "redux reduction",
+                "ret;",
+                "redux.sync.add.u32 %r7, %r8, 0xffffffff; ret;",
+            ),
+            (
+                "MMA instruction",
+                "ret;",
+                "mma.sync.aligned.m16n8k8.row.col.f32.tf32.tf32.f32; ret;",
+            ),
+            (
+                "flush-to-zero instruction",
+                "ret;",
+                "add.rn.ftz.f32 %f7, %f1, %f2; ret;",
+            ),
+            ("device call", "ret;", "call.uni (); ret;"),
+        ] {
+            let mutated = mutate_splitk_entry(&valid, SYMBOL, from, to);
+            assert!(
+                validate_module_ptx(ModuleKind::TriadScalar, "sm_80", &mutated).is_err(),
+                "TriadScalar module validation accepted {label} in {SYMBOL}"
+            );
+        }
+    }
+
+    #[test]
+    fn triad_scalar_module_validation_rejects_nn_m32n64_splitk32_mutations() {
+        const SYMBOL: &str = "gemm_bi_nn_splitk32_m32n64_exact_v1";
+        let valid = synthetic_scalar_splitm_module_ptx();
+        validate_module_ptx(ModuleKind::TriadScalar, "sm_80", &valid).unwrap();
+
+        for (label, from, to) in [
+            (
+                "seven-parameter ABI mutation",
+                ".param .u32 lda",
+                ".param .u64 lda",
+            ),
+            ("missing FFMA", "fma.rn.f32", "mad.rn.f32"),
+            (
+                "atomic reduction",
+                "ret;",
+                "atom.global.add.f32 %f7, [%rd7], %f1; ret;",
+            ),
+            (
+                "red reduction",
+                "ret;",
+                "red.global.add.f32 [%rd7], %f1; ret;",
+            ),
+            (
+                "redux reduction",
+                "ret;",
+                "redux.sync.add.u32 %r7, %r8, 0xffffffff; ret;",
+            ),
+            (
+                "MMA instruction",
+                "ret;",
+                "mma.sync.aligned.m16n8k8.row.col.f32.tf32.tf32.f32; ret;",
+            ),
+            (
+                "flush-to-zero instruction",
+                "ret;",
+                "add.rn.ftz.f32 %f7, %f1, %f2; ret;",
+            ),
+            ("device call", "ret;", "call.uni (); ret;"),
+        ] {
+            let mutated = mutate_splitk_entry(&valid, SYMBOL, from, to);
+            assert!(
+                validate_module_ptx(ModuleKind::TriadScalar, "sm_80", &mutated).is_err(),
+                "TriadScalar module validation accepted {label} in {SYMBOL}"
+            );
+        }
+    }
+
+    #[test]
+    fn triad_scalar_module_validation_rejects_tn_m16n16_contract_mutations() {
+        const SYMBOL: &str = "gemm_bi_tn_m16n16_bk16_s2_splitm16_v1";
+        let valid = synthetic_scalar_splitm_module_ptx();
+        validate_module_ptx(ModuleKind::TriadScalar, "sm_80", &valid).unwrap();
+
+        for (label, from, to) in [
+            (
+                "seven-parameter ABI mutation",
+                ".param .f32 alpha",
+                ".param .u32 alpha",
+            ),
+            ("missing FFMA", "fma.rn.f32", "mad.rn.f32"),
+            ("missing rounded f64 add", "add.rn.f64", "sub.rn.f64"),
+            ("missing rounded f64 multiply", "mul.rn.f64", "div.rn.f64"),
+            (
+                "missing rounded f64 conversion",
+                "cvt.rn.f32.f64",
+                "cvt.rz.f32.f64",
+            ),
+            ("missing rounded output add", "add.rn.f32", "sub.rn.f32"),
+            (
+                "reordered reducer scale",
+                "add.rn.f64 %fd1, %fd2, %fd3; mul.rn.f64 %fd4, %fd1, %fd2;",
+                "mul.rn.f64 %fd4, %fd1, %fd2; add.rn.f64 %fd1, %fd2, %fd3;",
+            ),
+            (
+                "atomic reduction",
+                "ret;",
+                "atom.global.add.f32 %f7, [%rd7], %f1; ret;",
+            ),
+            (
+                "red reduction",
+                "ret;",
+                "red.global.add.f32 [%rd7], %f1; ret;",
+            ),
+            (
+                "redux reduction",
+                "ret;",
+                "redux.sync.add.u32 %r7, %r8, 0xffffffff; ret;",
+            ),
+            (
+                "MMA instruction",
+                "ret;",
+                "mma.sync.aligned.m16n8k8.row.col.f32.tf32.tf32.f32; ret;",
+            ),
+            (
+                "flush-to-zero instruction",
+                "ret;",
+                "add.rn.ftz.f32 %f7, %f1, %f2; ret;",
+            ),
+            ("device call", "ret;", "call.uni (); ret;"),
+        ] {
+            let mutated = mutate_splitk_entry(&valid, SYMBOL, from, to);
+            assert!(
+                validate_module_ptx(ModuleKind::TriadScalar, "sm_80", &mutated).is_err(),
+                "TriadScalar module validation accepted {label} in {SYMBOL}"
+            );
+        }
+    }
+
+    #[test]
+    fn triad_scalar_module_validation_rejects_generic_splitm_contract_mutations() {
+        let valid = synthetic_scalar_splitm_module_ptx();
+        validate_module_ptx(ModuleKind::TriadScalar, "sm_80", &valid).unwrap();
+        for symbol in [
+            "gemm_bi_tn_splitm_partial",
+            "gemm_bi_tn_splitm_partial_aligned",
+        ] {
+            let missing = valid.replacen(symbol, "removed_tn_splitm_partial", 1);
+            assert!(
+                validate_module_ptx(ModuleKind::TriadScalar, "sm_80", &missing).is_err(),
+                "TriadScalar module validation accepted missing {symbol}"
+            );
+            for (label, from, to) in [
+                (
+                    "seven-parameter ABI mutation",
+                    ".param .u32 chunk",
+                    ".param .u64 chunk",
+                ),
+                ("missing FFMA", "fma.rn.f32", "mul.rn.f32"),
+                (
+                    "atomic reduction",
+                    "ret;",
+                    "atom.global.add.f32 %f5, [%rd2], %f1; ret;",
+                ),
+                (
+                    "red reduction",
+                    "ret;",
+                    "red.global.add.f32 [%rd2], %f1; ret;",
+                ),
+                (
+                    "redux reduction",
+                    "ret;",
+                    "redux.sync.add.u32 %r7, %r8, 0xffffffff; ret;",
+                ),
+            ] {
+                let mutated = mutate_splitk_entry(&valid, symbol, from, to);
+                assert!(
+                    validate_module_ptx(ModuleKind::TriadScalar, "sm_80", &mutated).is_err(),
+                    "TriadScalar module validation accepted {label} in {symbol}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn triad_scalar_module_validation_requires_the_exact_whole_module_exports() {
+        const M64N64_SYMBOL: &str = "gemm_bi_nn_m64n64_bk16_s2_v1";
+        const M32N64_SPLITK32_SYMBOL: &str = "gemm_bi_nn_splitk32_m32n64_exact_v1";
+        const PRISM_M64N64_SYMBOL: &str = "gemm_bi_nn_prism_m64n64_bk16_s2_v1";
+        const D768_TRANSPOSE_SYMBOL: &str = "gemm_bi_transpose_f32_32x16_d768_v1";
+        const TN_M16N16_SYMBOL: &str = "gemm_bi_tn_m16n16_bk16_s2_splitm16_v1";
+        let valid = synthetic_scalar_splitm_module_ptx();
+        assert_eq!(super::SCALAR_SYMBOLS.len(), 56);
+        validate_module_ptx(ModuleKind::TriadScalar, "sm_80", &valid)
+            .expect("complete TriadScalar export inventory");
+
+        let mut foreign = valid.clone();
+        foreign.push_str(".visible .entry foreign_scalar_kernel() { ret; }\n");
+        let error = validate_module_ptx(ModuleKind::TriadScalar, "sm_80", &foreign)
+            .expect_err("TriadScalar module validation accepted a foreign export");
+        assert!(error.contains("foreign_scalar_kernel"), "{error}");
+
+        let missing = valid.replacen(
+            &format!(".visible .entry {M64N64_SYMBOL}()"),
+            ".visible .entry removed_m64n64_kernel()",
+            1,
+        );
+        let error = validate_module_ptx(ModuleKind::TriadScalar, "sm_80", &missing)
+            .expect_err("TriadScalar module validation accepted a missing M64N64 export");
+        assert!(error.contains("removed_m64n64_kernel"), "{error}");
+
+        let missing = valid.replacen(M32N64_SPLITK32_SYMBOL, "removed_m32n64_splitk32_kernel", 1);
+        let error = validate_module_ptx(ModuleKind::TriadScalar, "sm_80", &missing)
+            .expect_err("TriadScalar module validation accepted a missing M32N64 Split-K export");
+        assert!(error.contains("removed_m32n64_splitk32_kernel"), "{error}");
+
+        let duplicate = format!("{valid}.visible .entry {M64N64_SYMBOL}() {{ ret; }}\n");
+        let error = validate_module_ptx(ModuleKind::TriadScalar, "sm_80", &duplicate)
+            .expect_err("TriadScalar module validation accepted a duplicate M64N64 export");
+        assert!(error.contains(M64N64_SYMBOL), "{error}");
+
+        let missing = valid.replacen(
+            &format!(".visible .entry {PRISM_M64N64_SYMBOL}()"),
+            ".visible .entry removed_prism_m64n64_kernel()",
+            1,
+        );
+        let error = validate_module_ptx(ModuleKind::TriadScalar, "sm_80", &missing)
+            .expect_err("TriadScalar module validation accepted a missing prism M64N64 export");
+        assert!(error.contains(PRISM_M64N64_SYMBOL), "{error}");
+
+        let duplicate = format!("{valid}.visible .entry {PRISM_M64N64_SYMBOL}() {{ ret; }}\n");
+        let error = validate_module_ptx(ModuleKind::TriadScalar, "sm_80", &duplicate)
+            .expect_err("TriadScalar module validation accepted a duplicate prism M64N64 export");
+        assert!(error.contains(PRISM_M64N64_SYMBOL), "{error}");
+
+        let missing = valid.replacen(
+            &format!(".visible .entry {D768_TRANSPOSE_SYMBOL}()"),
+            ".visible .entry removed_d768_transpose_kernel()",
+            1,
+        );
+        let error = validate_module_ptx(ModuleKind::TriadScalar, "sm_80", &missing)
+            .expect_err("TriadScalar module validation accepted a missing d768 transpose export");
+        assert!(error.contains(D768_TRANSPOSE_SYMBOL), "{error}");
+
+        let duplicate = format!("{valid}.visible .entry {D768_TRANSPOSE_SYMBOL}() {{ ret; }}\n");
+        let error = validate_module_ptx(ModuleKind::TriadScalar, "sm_80", &duplicate)
+            .expect_err("TriadScalar module validation accepted a duplicate d768 transpose export");
+        assert!(error.contains(D768_TRANSPOSE_SYMBOL), "{error}");
+
+        let missing = valid.replacen(
+            &format!(".visible .entry {TN_M16N16_SYMBOL}("),
+            ".visible .entry removed_tn_m16n16_kernel(",
+            1,
+        );
+        let error = validate_module_ptx(ModuleKind::TriadScalar, "sm_80", &missing)
+            .expect_err("TriadScalar module validation accepted a missing TN M16N16 export");
+        assert!(error.contains(TN_M16N16_SYMBOL), "{error}");
+
+        let duplicate = format!("{valid}.visible .entry {TN_M16N16_SYMBOL}() {{ ret; }}\n");
+        let error = validate_module_ptx(ModuleKind::TriadScalar, "sm_80", &duplicate)
+            .expect_err("TriadScalar module validation accepted a duplicate TN M16N16 export");
+        assert!(error.contains(TN_M16N16_SYMBOL), "{error}");
+    }
+
+    fn whole_module_symbols(module_kind: ModuleKind) -> Vec<&'static str> {
+        let mut symbols = match module_kind {
+            ModuleKind::TriadSm90a => SM90A_SYMBOLS.to_vec(),
+            ModuleKind::TriadSm100 => super::super::contract::SM100_KERNEL_SPECS
+                .iter()
+                .map(|spec| spec.symbol)
+                .collect(),
+            ModuleKind::TriadSm120 => super::super::contract::SM120_KERNEL_SPECS
+                .iter()
+                .map(|spec| spec.symbol)
+                .collect(),
+            _ => panic!("no whole-module fixture for {module_kind:?}"),
+        };
+        symbols.extend(super::super::contract::tf32_module_symbols(module_kind));
+        symbols
+    }
+
+    fn representative_entry_instructions(
+        module_kind: ModuleKind,
+        symbol: &str,
+    ) -> Vec<&'static str> {
+        let mut instructions = match module_kind {
+            ModuleKind::TriadSm90a => vec![
+                "mbarrier.try_wait.parity.acquire.cta.shared::cta.b64",
+                "wgmma.fence.sync.aligned",
+                "wgmma.commit_group.sync.aligned",
+                "wgmma.wait_group.sync.aligned",
+            ],
+            ModuleKind::TriadSm100 => vec![
+                "cp.async.bulk.tensor.2d.shared::cta.global.tile.mbarrier::complete_tx::bytes",
+                "mbarrier.arrive.expect_tx.release.cta.shared::cta.b64",
+                "mbarrier.try_wait.parity.acquire.cta.shared::cta.b64",
+                "tcgen05.alloc.cta_group::1.sync.aligned.shared::cta.b32",
+                "tcgen05.relinquish_alloc_permit.cta_group::1.sync.aligned",
+                "tcgen05.dealloc.cta_group::1.sync.aligned.b32",
+                "tcgen05.commit.cta_group::1.mbarrier::arrive::one.shared::cluster.b64",
+                "tcgen05.fence::before_thread_sync",
+                "tcgen05.fence::after_thread_sync",
+                "tcgen05.ld.sync.aligned.32x32b.x8.b32",
+                "tcgen05.wait::ld.sync.aligned",
+            ],
+            ModuleKind::TriadSm120 => vec![
+                "cp.async.bulk.tensor.2d.shared::cta.global.tile.mbarrier::complete_tx::bytes",
+                "mbarrier.init.shared::cta.b64",
+                "fence.mbarrier_init.release.cluster",
+                "mbarrier.arrive.expect_tx.release.cta.shared::cta.b64",
+                "mbarrier.try_wait.parity.acquire.cta.shared::cta.b64",
+                "st.global.b32",
+            ],
+            _ => panic!("no representative body for {module_kind:?}"),
+        };
+
+        match module_kind {
+            ModuleKind::TriadSm90a => {
+                let tf32 = super::super::contract::tf32_module_symbols(module_kind)
+                    .any(|expected| expected == symbol);
+                if tf32 || symbol.contains("_wg1") {
+                    instructions.extend([
+                        "cp.async.bulk.tensor.2d.shared::cta.global.tile.mbarrier::complete_tx::bytes",
+                        "mbarrier.arrive.expect_tx.release.cta.shared::cta.b64",
+                    ]);
+                }
+                if symbol.contains("_wg2") {
+                    instructions.push("setmaxnreg.inc.sync.aligned.u32");
+                    if tf32 {
+                        instructions.push("setmaxnreg.dec.sync.aligned.u32");
+                    }
+                }
+                instructions.push(if tf32 {
+                    "wgmma.mma_async.sync.aligned.m64n128k8.f32.tf32.tf32"
+                } else if symbol.ends_with("_bf16") {
+                    "wgmma.mma_async.sync.aligned.m64n128k16.f32.bf16.bf16"
+                } else {
+                    "wgmma.mma_async.sync.aligned.m64n128k16.f32.f16.f16"
+                });
+            }
+            ModuleKind::TriadSm100 => {
+                instructions.push(if symbol.contains("_tf32_v1_") {
+                    "tcgen05.mma.cta_group::1.kind::tf32"
+                } else {
+                    "tcgen05.mma.cta_group::1.kind::f16"
+                });
+                if symbol.contains("_nn_") {
+                    instructions.extend([
+                        "tcgen05.st.sync.aligned.32x32b.x8.b32",
+                        "tcgen05.wait::st.sync.aligned",
+                    ]);
+                }
+            }
+            ModuleKind::TriadSm120 => {
+                if symbol.contains("_tf32_v1_") {
+                    instructions.extend([
+                        "cvt.rna.tf32.f32",
+                        "mma.sync.aligned.m16n8k8.row.col.f32.tf32.tf32.f32",
+                    ]);
+                } else {
+                    instructions.push("mbarrier.arrive.release.cta.shared::cta.b64");
+                    let dtype = if symbol.ends_with("_bf16") {
+                        "mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32"
+                    } else {
+                        "mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32"
+                    };
+                    instructions.push(dtype);
+                    instructions.extend(if symbol.contains("_tn_") {
+                        [
+                            "ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16",
+                            "ldmatrix.sync.aligned.m8n8.x2.trans.shared.b16",
+                        ]
+                    } else if symbol.contains("_nt_") {
+                        [
+                            "ldmatrix.sync.aligned.m8n8.x4.shared.b16",
+                            "ldmatrix.sync.aligned.m8n8.x2.shared.b16",
+                        ]
+                    } else {
+                        [
+                            "ldmatrix.sync.aligned.m8n8.x4.shared.b16",
+                            "ldmatrix.sync.aligned.m8n8.x2.trans.shared.b16",
+                        ]
+                    });
+                }
+            }
+            _ => unreachable!(),
+        }
+        instructions
+    }
+
+    fn sm90a_wg2_producer_symbol(entry: &str) -> Option<&'static str> {
+        SM90A_SYMBOLS[6..]
+            .iter()
+            .position(|&symbol| symbol == entry)
+            .map(|index| {
+                [
+                    "_ZL18sm90a_wg2_producerILi0EEv",
+                    "_ZL18sm90a_wg2_producerILi1EEv",
+                    "_ZL18sm90a_wg2_producerILi2EEv",
+                ][index / 2]
+            })
+    }
+
+    fn sm90a_wg2_producer_instructions() -> [&'static str; 5] {
+        [
+            "setmaxnreg.dec.sync.aligned.u32",
+            "bar.sync",
+            "mbarrier.try_wait.parity.acquire.cta.shared::cta.b64",
+            "mbarrier.arrive.expect_tx.release.cta.shared::cta.b64",
+            "cp.async.bulk.tensor.2d.shared::cta.global.tile.mbarrier::complete_tx::bytes",
+        ]
+    }
+
+    fn sm90a_wg2_producer_function(symbol: &str, body: &[&str]) -> String {
+        let body = body
+            .iter()
+            .map(|instruction| format!("    {instruction};\n"))
+            .collect::<String>();
+        format!(".visible .func {symbol}() {{\n{body}    ret;\n}}\n")
+    }
+
+    fn append_sm90a_wg2_producer_functions(ptx: &mut String) {
+        for symbol in [
+            "_ZL18sm90a_wg2_producerILi0EEv",
+            "_ZL18sm90a_wg2_producerILi1EEv",
+            "_ZL18sm90a_wg2_producerILi2EEv",
+        ] {
+            ptx.push_str(&sm90a_wg2_producer_function(
+                symbol,
+                &sm90a_wg2_producer_instructions(),
+            ));
+        }
+    }
+
+    fn whole_module_entry(symbol: &str, body: &[&str]) -> String {
+        let mut body = body
+            .iter()
+            .map(|instruction| format!("    {instruction};\n"))
+            .collect::<String>();
+        if let Some(target) = sm90a_wg2_producer_symbol(symbol) {
+            body.push_str(&format!("    call.uni {target}, ();\n"));
+        }
+        format!(".entry {symbol}(\n) {{\n{body}}}\n")
+    }
+
+    fn whole_module_fixture(module_kind: ModuleKind, target: &str) -> String {
+        let symbols = whole_module_symbols(module_kind);
+        let expected_count = match module_kind {
+            ModuleKind::TriadSm90a => 18,
+            ModuleKind::TriadSm100 => 108,
+            ModuleKind::TriadSm120 => 113,
+            _ => unreachable!(),
+        };
+        assert_eq!(symbols.len(), expected_count);
+
+        let mut ptx = format!(".version 9.0\n.target {target}\n");
+        for symbol in symbols {
+            let body = representative_entry_instructions(module_kind, symbol);
+            ptx.push_str(&whole_module_entry(symbol, &body));
+        }
+        if module_kind == ModuleKind::TriadSm90a {
+            append_sm90a_wg2_producer_functions(&mut ptx);
+        }
+        ptx
+    }
+
+    fn whole_module_with_bodies(
+        module_kind: ModuleKind,
+        target: &str,
+        mut body: impl FnMut(&str) -> Vec<&'static str>,
+    ) -> String {
+        let mut ptx = format!(".version 9.0\n.target {target}\n");
+        for symbol in whole_module_symbols(module_kind) {
+            ptx.push_str(&whole_module_entry(symbol, &body(symbol)));
+        }
+        ptx
+    }
+
+    fn omnibus_entry_instructions(module_kind: ModuleKind) -> Vec<&'static str> {
+        let mut instructions = BTreeSet::new();
+        for symbol in whole_module_symbols(module_kind) {
+            instructions.extend(representative_entry_instructions(module_kind, symbol));
+        }
+        instructions.into_iter().collect()
+    }
+
+    fn validate_specialized_fixture(
+        module_kind: ModuleKind,
+        arch: &str,
+        ptx: &str,
+    ) -> Result<(), String> {
+        match module_kind {
+            ModuleKind::TriadSm90a => validate_sm90a_ptx(ptx),
+            ModuleKind::TriadSm100 => validate_sm100_ptx(arch, ptx),
+            ModuleKind::TriadSm120 => validate_sm120_ptx(arch, ptx),
+            _ => panic!("no specialized fixture validator for {module_kind:?}"),
+        }
+    }
+
+    fn sm100_probe_instructions() -> [&'static str; 14] {
+        [
+            "cp.async.bulk.tensor.2d.shared::cta.global.tile.mbarrier::complete_tx::bytes",
+            "mbarrier.arrive.expect_tx.release.cta.shared::cta.b64",
+            "mbarrier.try_wait.parity.acquire.cta.shared::cta.b64",
+            "tcgen05.alloc.cta_group::1.sync.aligned.shared::cta.b32",
+            "tcgen05.relinquish_alloc_permit.cta_group::1.sync.aligned",
+            "tcgen05.dealloc.cta_group::1.sync.aligned.b32",
+            "tcgen05.mma.cta_group::1.kind::f16",
+            "tcgen05.commit.cta_group::1.mbarrier::arrive::one.shared::cluster.b64",
+            "tcgen05.fence::before_thread_sync",
+            "tcgen05.fence::after_thread_sync",
+            "tcgen05.ld.sync.aligned.32x32b.x8.b32",
+            "tcgen05.wait::ld.sync.aligned",
+            "tcgen05.st.sync.aligned.32x32b.x8.b32",
+            "tcgen05.wait::st.sync.aligned",
+        ]
+    }
+
+    fn sm100_probe_fixture(body: &str) -> String {
+        format!(".version 9.0\n.target sm_100f\n.visible .entry tcgen05_probe()\n{{\n{body}\n}}\n")
+    }
+
+    fn assert_whole_module_export_mutations_fail(
+        module_kind: ModuleKind,
+        target: &str,
+        validate: impl Fn(&str) -> Result<(), String>,
+    ) {
+        let valid = whole_module_fixture(module_kind, target);
+        validate(&valid).expect("complete whole-module fixture must pass");
+        let tf32 = super::super::contract::tf32_module_symbols(module_kind)
+            .next()
+            .expect("specialized module TF32 export");
+        let entry = whole_module_entry(tf32, &representative_entry_instructions(module_kind, tf32));
+
+        let missing = valid.replacen(&entry, "", 1);
+        let error = validate(&missing).expect_err("removed TF32 export must fail");
+        assert!(error.contains(tf32), "{error}");
+
+        let typed = match module_kind {
+            ModuleKind::TriadSm90a => SM90A_SYMBOLS[0],
+            ModuleKind::TriadSm100 => super::super::contract::SM100_KERNEL_SPECS[0].symbol,
+            ModuleKind::TriadSm120 => super::super::contract::SM120_KERNEL_SPECS[0].symbol,
+            _ => unreachable!(),
+        };
+        let typed_entry = whole_module_entry(
+            typed,
+            &representative_entry_instructions(module_kind, typed),
+        );
+        let missing = valid.replacen(&typed_entry, "", 1);
+        let error = validate(&missing).expect_err("removed typed export must fail");
+        assert!(error.contains(typed), "{error}");
+
+        let duplicate = format!("{valid}\n{entry}");
+        let error = validate(&duplicate).expect_err("duplicate TF32 export must fail");
+        assert!(error.contains(tf32), "{error}");
+
+        let foreign = format!("{valid}\n.entry harmless_foreign_export(\n) {{}}\n");
+        let error = validate(&foreign).expect_err("foreign export must fail");
+        assert!(error.contains("harmless_foreign_export"), "{error}");
+    }
+
+    #[test]
+    fn specialized_whole_module_validators_require_exact_export_sets() {
+        assert_whole_module_export_mutations_fail(ModuleKind::TriadSm90a, "sm_90a", |ptx| {
+            validate_sm90a_ptx(ptx)
+        });
+        assert_whole_module_export_mutations_fail(ModuleKind::TriadSm100, "sm_100f", |ptx| {
+            validate_sm100_ptx("compute_100f", ptx)
+        });
+        assert_whole_module_export_mutations_fail(ModuleKind::TriadSm120, "sm_121", |ptx| {
+            validate_sm120_ptx("compute_121", ptx)
+        });
+    }
+
+    #[test]
+    fn sm90a_wg2_exports_require_exact_producer_linkage_and_helper_protocol() {
+        let valid = whole_module_fixture(ModuleKind::TriadSm90a, "sm_90a");
+        validate_sm90a_ptx(&valid).expect("complete SM90a producer fixture");
+        let entry_symbol = SM90A_SYMBOLS[6];
+        let paired_symbol = SM90A_SYMBOLS[7];
+        let target = sm90a_wg2_producer_symbol(entry_symbol).unwrap();
+        let foreign_target = sm90a_wg2_producer_symbol(SM90A_SYMBOLS[8]).unwrap();
+        let call = format!("    call.uni {target}, ();\n");
+        let function = sm90a_wg2_producer_function(target, &sm90a_wg2_producer_instructions());
+
+        let missing_call = valid.replacen(&call, "", 1);
+        let wrong_target = valid.replacen(
+            &format!("    call.uni {target}, ();\n"),
+            &format!("    call.uni {foreign_target}, ();\n"),
+            1,
+        );
+        let missing_helper = valid.replacen(&function, "", 1);
+        let duplicate_helper = format!("{valid}\n{function}");
+        let stub_helper =
+            valid.replacen(&function, &sm90a_wg2_producer_function(target, &["ret"]), 1);
+        let mut incomplete = sm90a_wg2_producer_instructions().to_vec();
+        incomplete.retain(|instruction| {
+            *instruction
+                != "cp.async.bulk.tensor.2d.shared::cta.global.tile.mbarrier::complete_tx::bytes"
+        });
+        let incomplete_helper = sm90a_wg2_producer_function(target, &incomplete);
+        let unrelated_helper = sm90a_wg2_producer_function(
+            "unrelated_protocol_holder",
+            &sm90a_wg2_producer_instructions(),
+        );
+        let unrelated_protocol = format!(
+            "{}\n{unrelated_helper}",
+            valid.replacen(&function, &incomplete_helper, 1)
+        );
+        let paired_call = format!(
+            "    call.uni {}, ();\n",
+            sm90a_wg2_producer_symbol(paired_symbol).unwrap()
+        );
+        let duplicate_call =
+            valid.replacen(&paired_call, &format!("{paired_call}{paired_call}"), 1);
+
+        for (label, malformed) in [
+            ("missing call", missing_call),
+            ("wrong call target", wrong_target),
+            ("missing helper", missing_helper),
+            ("duplicate helper", duplicate_helper),
+            ("stub helper", stub_helper),
+            ("protocol in unrelated helper", unrelated_protocol),
+            ("duplicate producer call", duplicate_call),
+        ] {
+            assert!(
+                validate_sm90a_ptx(&malformed).is_err(),
+                "SM90a validator accepted {label}"
+            );
+        }
+    }
+
+    #[test]
+    fn specialized_validators_reject_instruction_spoofs_in_unused_functions() {
+        for (module_kind, arch, target) in [
+            (ModuleKind::TriadSm90a, "compute_90a", "sm_90a"),
+            (ModuleKind::TriadSm100, "compute_100f", "sm_100f"),
+            (ModuleKind::TriadSm120, "compute_121", "sm_121"),
+        ] {
+            let mut spoofed = whole_module_with_bodies(module_kind, target, |_| vec!["ret"]);
+            let omnibus = omnibus_entry_instructions(module_kind);
+            spoofed.push_str(".visible .func unused_feature_spoof() {\n");
+            for instruction in omnibus {
+                spoofed.push_str(&format!("    {instruction};\n"));
+            }
+            spoofed.push_str("}\n");
+
+            validate_specialized_fixture(module_kind, arch, &spoofed)
+                .expect_err("unused functions and quoted metadata must not supply export features");
+        }
+    }
+
+    #[test]
+    fn specialized_validators_reject_instruction_spoofs_in_quoted_metadata() {
+        for (module_kind, arch, target) in [
+            (ModuleKind::TriadSm90a, "compute_90a", "sm_90a"),
+            (ModuleKind::TriadSm100, "compute_100f", "sm_100f"),
+            (ModuleKind::TriadSm120, "compute_121", "sm_121"),
+        ] {
+            let mut spoofed = whole_module_with_bodies(module_kind, target, |_| vec!["ret"]);
+            for (index, instruction) in omnibus_entry_instructions(module_kind)
+                .into_iter()
+                .enumerate()
+            {
+                spoofed.push_str(&format!(".file {index} \"{instruction}\"\n"));
+                spoofed.push_str(&format!(".pragma \"{instruction}\";\n"));
+            }
+            validate_specialized_fixture(module_kind, arch, &spoofed)
+                .expect_err("quoted metadata must not supply export features");
+        }
+    }
+
+    #[test]
+    fn specialized_validators_require_core_compute_in_every_export_body() {
+        for (module_kind, arch, target) in [
+            (ModuleKind::TriadSm90a, "compute_90a", "sm_90a"),
+            (ModuleKind::TriadSm100, "compute_100f", "sm_100f"),
+            (ModuleKind::TriadSm120, "compute_121", "sm_121"),
+        ] {
+            let first = whole_module_symbols(module_kind)[0];
+            let omnibus = omnibus_entry_instructions(module_kind);
+            let one_real = whole_module_with_bodies(module_kind, target, |symbol| {
+                if symbol == first {
+                    omnibus.clone()
+                } else {
+                    vec!["ret"]
+                }
+            });
+            validate_specialized_fixture(module_kind, arch, &one_real)
+                .expect_err("one real kernel must not validate a module of stub exports");
+        }
+    }
+
+    #[test]
+    fn specialized_validators_reject_wrong_core_compute_for_one_export() {
+        let sm90a_tf32 = super::super::contract::tf32_module_symbols(ModuleKind::TriadSm90a)
+            .next()
+            .unwrap();
+        let sm100_tf32 = super::super::contract::tf32_module_symbols(ModuleKind::TriadSm100)
+            .next()
+            .unwrap();
+        let sm120_tf32 = super::super::contract::tf32_module_symbols(ModuleKind::TriadSm120)
+            .next()
+            .unwrap();
+        for (module_kind, arch, target, symbol, correct, wrong) in [
+            (
+                ModuleKind::TriadSm90a,
+                "compute_90a",
+                "sm_90a",
+                SM90A_SYMBOLS[0],
+                "wgmma.mma_async.sync.aligned.m64n128k16.f32.bf16.bf16",
+                "wgmma.mma_async.sync.aligned.m64n128k16.f32.f16.f16",
+            ),
+            (
+                ModuleKind::TriadSm100,
+                "compute_100f",
+                "sm_100f",
+                super::super::contract::SM100_KERNEL_SPECS[0].symbol,
+                "tcgen05.mma.cta_group::1.kind::f16",
+                "tcgen05.mma.cta_group::1.kind::tf32",
+            ),
+            (
+                ModuleKind::TriadSm120,
+                "compute_121",
+                "sm_121",
+                super::super::contract::SM120_KERNEL_SPECS[0].symbol,
+                "mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32",
+                "mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32",
+            ),
+            (
+                ModuleKind::TriadSm90a,
+                "compute_90a",
+                "sm_90a",
+                sm90a_tf32,
+                "wgmma.mma_async.sync.aligned.m64n128k8.f32.tf32.tf32",
+                "wgmma.mma_async.sync.aligned.m64n128k16.f32.f16.f16",
+            ),
+            (
+                ModuleKind::TriadSm100,
+                "compute_100f",
+                "sm_100f",
+                sm100_tf32,
+                "tcgen05.mma.cta_group::1.kind::tf32",
+                "tcgen05.mma.cta_group::1.kind::f16",
+            ),
+            (
+                ModuleKind::TriadSm120,
+                "compute_121",
+                "sm_121",
+                sm120_tf32,
+                "mma.sync.aligned.m16n8k8.row.col.f32.tf32.tf32.f32",
+                "mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32",
+            ),
+        ] {
+            let valid = whole_module_fixture(module_kind, target);
+            let correct_entry = whole_module_entry(
+                symbol,
+                &representative_entry_instructions(module_kind, symbol),
+            );
+            let wrong_entry = correct_entry.replacen(correct, wrong, 1);
+            let wrong_core = valid.replacen(&correct_entry, &wrong_entry, 1);
+            validate_specialized_fixture(module_kind, arch, &wrong_core)
+                .expect_err("one export with the wrong compute instruction must fail");
+        }
+    }
+
+    #[test]
+    fn specialized_validators_reject_additive_incompatible_core_in_same_entry() {
+        let sm90a_tf32 = super::super::contract::tf32_module_symbols(ModuleKind::TriadSm90a)
+            .next()
+            .unwrap();
+        let sm100_tf32 = super::super::contract::tf32_module_symbols(ModuleKind::TriadSm100)
+            .next()
+            .unwrap();
+        let sm120_tf32 = super::super::contract::tf32_module_symbols(ModuleKind::TriadSm120)
+            .next()
+            .unwrap();
+        for (module_kind, arch, target, symbol, sibling) in [
+            (
+                ModuleKind::TriadSm90a,
+                "compute_90a",
+                "sm_90a",
+                SM90A_SYMBOLS[0],
+                "wgmma.mma_async.sync.aligned.m64n128k16.f32.f16.f16",
+            ),
+            (
+                ModuleKind::TriadSm90a,
+                "compute_90a",
+                "sm_90a",
+                SM90A_SYMBOLS[1],
+                "wgmma.mma_async.sync.aligned.m64n128k16.f32.bf16.bf16",
+            ),
+            (
+                ModuleKind::TriadSm90a,
+                "compute_90a",
+                "sm_90a",
+                sm90a_tf32,
+                "wgmma.mma_async.sync.aligned.m64n128k16.f32.bf16.bf16",
+            ),
+            (
+                ModuleKind::TriadSm100,
+                "compute_100f",
+                "sm_100f",
+                super::super::contract::SM100_KERNEL_SPECS[0].symbol,
+                "tcgen05.mma.cta_group::1.kind::tf32",
+            ),
+            (
+                ModuleKind::TriadSm100,
+                "compute_100f",
+                "sm_100f",
+                sm100_tf32,
+                "tcgen05.mma.cta_group::1.kind::f16",
+            ),
+            (
+                ModuleKind::TriadSm120,
+                "compute_121",
+                "sm_121",
+                super::super::contract::SM120_KERNEL_SPECS[0].symbol,
+                "mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32",
+            ),
+            (
+                ModuleKind::TriadSm120,
+                "compute_121",
+                "sm_121",
+                super::super::contract::SM120_KERNEL_SPECS[1].symbol,
+                "mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32",
+            ),
+            (
+                ModuleKind::TriadSm120,
+                "compute_121",
+                "sm_121",
+                sm120_tf32,
+                "mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32",
+            ),
+        ] {
+            let valid = whole_module_fixture(module_kind, target);
+            let entry = whole_module_entry(
+                symbol,
+                &representative_entry_instructions(module_kind, symbol),
+            );
+            let additive_entry = entry.replacen("}\n", &format!("    {sibling};\n}}\n"), 1);
+            let additive = valid.replacen(&entry, &additive_entry, 1);
+            assert!(
+                validate_specialized_fixture(module_kind, arch, &additive).is_err(),
+                "{module_kind:?}/{symbol} accepted sibling core {sibling}"
+            );
+        }
+    }
+
+    #[test]
+    fn specialized_validators_require_protocol_in_each_export_body() {
+        for (module_kind, arch, target, symbol, protocol) in [
+            (
+                ModuleKind::TriadSm90a,
+                "compute_90a",
+                "sm_90a",
+                SM90A_SYMBOLS[0],
+                "mbarrier.try_wait.parity.acquire.cta.shared::cta.b64",
+            ),
+            (
+                ModuleKind::TriadSm100,
+                "compute_100f",
+                "sm_100f",
+                super::super::contract::SM100_KERNEL_SPECS[0].symbol,
+                "tcgen05.alloc.cta_group::1.sync.aligned.shared::cta.b32",
+            ),
+            (
+                ModuleKind::TriadSm120,
+                "compute_121",
+                "sm_121",
+                super::super::contract::SM120_KERNEL_SPECS[0].symbol,
+                "mbarrier.init.shared::cta.b64",
+            ),
+        ] {
+            let valid = whole_module_fixture(module_kind, target);
+            let entry = whole_module_entry(
+                symbol,
+                &representative_entry_instructions(module_kind, symbol),
+            );
+            let missing_protocol = entry.replacen(&format!("    {protocol};\n"), "", 1);
+            let malformed = valid.replacen(&entry, &missing_protocol, 1);
+            validate_specialized_fixture(module_kind, arch, &malformed)
+                .expect_err("a protocol token in another export must not repair this export");
+        }
+    }
+
+    #[test]
+    fn specialized_validators_ignore_quoted_and_commented_core_spoofs() {
+        for (module_kind, arch, target, symbol, core) in [
+            (
+                ModuleKind::TriadSm90a,
+                "compute_90a",
+                "sm_90a",
+                SM90A_SYMBOLS[0],
+                "wgmma.mma_async.sync.aligned.m64n128k16.f32.bf16.bf16",
+            ),
+            (
+                ModuleKind::TriadSm100,
+                "compute_100f",
+                "sm_100f",
+                super::super::contract::SM100_KERNEL_SPECS[0].symbol,
+                "tcgen05.mma.cta_group::1.kind::f16",
+            ),
+            (
+                ModuleKind::TriadSm120,
+                "compute_121",
+                "sm_121",
+                super::super::contract::SM120_KERNEL_SPECS[0].symbol,
+                "mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32",
+            ),
+        ] {
+            let valid = whole_module_fixture(module_kind, target);
+            let entry = whole_module_entry(
+                symbol,
+                &representative_entry_instructions(module_kind, symbol),
+            );
+            let spoof = format!("    .pragma \"{core}\";\n    // {core}\n");
+            let quoted = entry.replacen(&format!("    {core};\n"), &spoof, 1);
+            let malformed = valid.replacen(&entry, &quoted, 1);
+            validate_specialized_fixture(module_kind, arch, &malformed)
+                .expect_err("quoted and commented core spellings must not count");
+        }
+    }
+
+    #[test]
+    fn specialized_base_admission_rejects_foreign_tf32_instruction_families() {
+        for (module_kind, arch, target, forbidden) in [
+            (
+                ModuleKind::TriadSm90a,
+                "compute_90a",
+                "sm_90a",
+                "cvt.rna.tf32.f32",
+            ),
+            (
+                ModuleKind::TriadSm100,
+                "compute_100f",
+                "sm_100f",
+                "cvt.rna.tf32.f32",
+            ),
+            (
+                ModuleKind::TriadSm120,
+                "compute_121",
+                "sm_121",
+                "tcgen05.mma.cta_group::1.kind::tf32",
+            ),
+        ] {
+            let symbol = super::super::contract::tf32_module_symbols(module_kind)
+                .next()
+                .unwrap();
+            let valid = whole_module_fixture(module_kind, target);
+            let entry = whole_module_entry(
+                symbol,
+                &representative_entry_instructions(module_kind, symbol),
+            );
+            let foreign_entry = entry.replacen("}\n", &format!("    {forbidden};\n}}\n"), 1);
+            let foreign = valid.replacen(&entry, &foreign_entry, 1);
+            validate_specialized_fixture(module_kind, arch, &foreign)
+                .expect_err("foreign TF32 instructions must make base admission fail");
+        }
+    }
+
+    #[test]
+    fn specialized_validators_accept_real_per_entry_representative_bodies() {
+        for (module_kind, arch, target) in [
+            (ModuleKind::TriadSm90a, "compute_90a", "sm_90a"),
+            (ModuleKind::TriadSm100, "compute_100f", "sm_100f"),
+            (ModuleKind::TriadSm120, "compute_121", "sm_121"),
+        ] {
+            let valid = whole_module_fixture(module_kind, target);
+            validate_specialized_fixture(module_kind, arch, &valid)
+                .unwrap_or_else(|error| panic!("{module_kind:?} representative PTX: {error}"));
+        }
+    }
+
+    #[test]
+    fn exact_export_set_rejects_duplicate_expected_symbols_with_a_useful_diff() {
+        let ptx = ".version 9.0\n.target sm_90a\n.entry repeated_export(\n) {}\n";
+        let error = validate_exact_ptx_exports(
+            "duplicate-expected fixture",
+            1,
+            &["repeated_export", "repeated_export"],
+            ptx,
+        )
+        .expect_err("duplicate expected exports must fail");
+        assert!(error.contains("expected_duplicates"), "{error}");
+        assert!(error.contains("repeated_export"), "{error}");
+    }
+
+    #[test]
+    fn exact_export_set_rejects_wrong_expected_cardinality() {
+        let ptx = ".version 9.0\n.target sm_90a\n.entry only_export(\n) {}\n";
+        let error =
+            validate_exact_ptx_exports("wrong-cardinality fixture", 2, &["only_export"], ptx)
+                .expect_err("wrong expected export cardinality must fail");
+        assert!(error.contains("expected_count=2"), "{error}");
+        assert!(error.contains("expected_entries=1"), "{error}");
+    }
+
+    #[test]
+    fn exact_export_parser_ignores_directives_in_line_and_block_comments() {
+        let valid = whole_module_fixture(ModuleKind::TriadSm90a, "sm_90a");
+        for spoof in [
+            "// .entry harmless_line_spoof() {}",
+            "/* .entry harmless_block_spoof() {} */",
+        ] {
+            validate_sm90a_ptx(&format!("{valid}\n{spoof}\n"))
+                .unwrap_or_else(|error| panic!("comment spoof must be ignored: {error}"));
+        }
+
+        let symbol = SM90A_SYMBOLS[0];
+        let entry = whole_module_entry(
+            symbol,
+            &representative_entry_instructions(ModuleKind::TriadSm90a, symbol),
+        );
+        let missing = valid.replacen(&entry, "", 1);
+        for spoof in [
+            format!("// .entry {symbol}() {{}}"),
+            format!("/* .entry {symbol}() {{}} */"),
+        ] {
+            validate_sm90a_ptx(&format!("{missing}\n{spoof}\n"))
+                .expect_err("commented expected export must not repair the inventory");
+        }
+    }
+
+    #[test]
+    fn exact_export_parser_accepts_ptx_whitespace_and_intervening_comments() {
+        let valid = whole_module_fixture(ModuleKind::TriadSm90a, "sm_90a");
+        let symbol = SM90A_SYMBOLS[0];
+        let ordinary = format!(".entry {symbol}(");
+        let spaced = format!(".entry\t/* directive gap */\n{symbol}\t(");
+        validate_sm90a_ptx(&valid.replacen(&ordinary, &spaced, 1))
+            .expect("PTX whitespace and comments must separate entry tokens");
+    }
+
+    #[test]
+    fn exact_export_parser_rejects_obfuscated_duplicates_and_malformed_entries() {
+        let valid = whole_module_fixture(ModuleKind::TriadSm90a, "sm_90a");
+        let symbol = SM90A_SYMBOLS[0];
+        let duplicate = format!("{valid}\n.entry/* gap */{symbol}() {{}}\n");
+        validate_sm90a_ptx(&duplicate).expect_err("obfuscated duplicate export must fail");
+
+        let ordinary = whole_module_entry(
+            symbol,
+            &representative_entry_instructions(ModuleKind::TriadSm90a, symbol),
+        );
+        let malformed = valid.replacen(&ordinary, &format!(".entry {symbol}(\n"), 1);
+        validate_sm90a_ptx(&malformed).expect_err("unclosed entry directive must fail");
+
+        let external = valid.replacen(&ordinary, &format!(".extern .entry {symbol}(\n) {{}}\n"), 1);
+        validate_sm90a_ptx(&external).expect_err("extern entry must not count as an export");
+    }
+
+    #[test]
+    fn exact_export_parser_accepts_parameterless_entries() {
+        let ptx = ".version 9.0\n.target sm_90a\n.visible .func helper() { ret; }\n.visible .entry only_export { .pragma \"}\"; ret; }\n";
+        validate_exact_ptx_exports("parameterless fixture", 1, &["only_export"], ptx)
+            .expect("valid parameterless entry must be counted and bounded");
+    }
+
+    #[test]
+    fn exact_export_parser_accepts_entry_scoped_pragma_before_body() {
+        let ptx = ".version 9.0\n.target sm_90a\n.visible .entry only_export()\n.pragma \"nounroll\";\n{ ret; }\n.visible .func helper() { ret; }\n";
+        validate_exact_ptx_exports("entry pragma fixture", 1, &["only_export"], ptx)
+            .expect("entry-scoped pragma must not terminate the entry");
+
+        let malformed =
+            ".version 9.0\n.target sm_90a\n.entry only_export .func helper() { ret; }\n";
+        validate_exact_ptx_exports("function confusion fixture", 1, &["only_export"], malformed)
+            .expect_err("function directive must not supply an entry body");
+    }
+
+    #[test]
+    fn exact_export_parser_rejects_nested_module_directives_and_unbalanced_scopes() {
+        let expected = ["only_export"];
+        for ptx in [
+            ".version 9.0\n.target sm_90a\n.visible .func helper() { .entry only_export() { ret; } }\n",
+            ".version 9.0\n.visible .func helper() { .target sm_90a; ret; }\n.entry only_export() { ret; }\n",
+            ".version 9.0\n.target sm_90a\n.visible .func helper() { ret;\n.entry only_export() { ret; }\n",
+            ".version 9.0\n.target sm_90a\n.entry only_export() { ret; }\n}\n",
+            ".version 9.0\n.target sm_90a\n.visible .func outer() { .func nested() { ret; } }\n.entry only_export() { ret; }\n",
+        ] {
+            validate_exact_ptx_exports("nested-scope fixture", 1, &expected, ptx)
+                .expect_err("nested directives and unbalanced scopes must fail closed");
+        }
+
+        let nested_target =
+            ".version 9.0\n.target sm_90a\n.entry only_export() { .target sm_90a; ret; }\n";
+        assert!(
+            parse_ptx(nested_target).is_err(),
+            "an entry-local target directive must be rejected"
+        );
+    }
+
+    #[test]
+    fn target_parser_ignores_comments_and_accepts_ptx_whitespace() {
+        let valid = whole_module_fixture(ModuleKind::TriadSm90a, "sm_90a");
+        let spaced = valid.replacen(".target sm_90a", ".target\t/* target gap */\nsm_90a", 1);
+        validate_sm90a_ptx(&spaced).expect("PTX whitespace must separate target tokens");
+
+        let spoofed = valid.replacen(".target sm_90a", "/*\n.target sm_90a\n*/\n.target sm_90", 1);
+        validate_sm90a_ptx(&spoofed).expect_err("comment target must not spoof the real target");
+
+        let duplicate = valid.replacen(".target sm_90a", ".target sm_90a\n.target sm_90a", 1);
+        validate_sm90a_ptx(&duplicate).expect_err("duplicate target directive must fail");
+    }
+
+    #[test]
+    fn tf32_contract_and_loader_inventories_match_cuda_exports() {
+        for (module_kind, expected) in [
+            (ModuleKind::TriadSm80, 18),
+            (ModuleKind::TriadSm90a, 6),
+            (ModuleKind::TriadSm100, 36),
+            (ModuleKind::TriadSm120, 17),
+        ] {
+            let kernel_specs = super::super::contract::tf32_route_specs(module_kind);
+            let symbols: BTreeSet<_> =
+                super::super::contract::tf32_module_symbols(module_kind).collect();
+            assert_eq!(kernel_specs.len(), expected);
+            assert_eq!(symbols.len(), expected);
+
+            let source = compose_module_source(module_kind).unwrap();
+            let load_function = |symbol: &str| source.contains(symbol);
+            for kernel_spec in kernel_specs {
+                assert!(load_function(kernel_spec.symbol));
+            }
+        }
+    }
+
+    #[test]
+    fn tf32_compiled_inventory_rejects_every_partial_module() {
+        for module_kind in [
+            ModuleKind::TriadSm80,
+            ModuleKind::TriadSm90a,
+            ModuleKind::TriadSm100,
+            ModuleKind::TriadSm120,
+        ] {
+            let complete = synthetic_tf32_ptx(module_kind);
+            validate_tf32_ptx_inventory(module_kind, &complete).unwrap();
+
+            let mut symbols: BTreeSet<_> =
+                super::super::contract::tf32_module_symbols(module_kind).collect();
+            let removed = symbols.pop_first().unwrap();
+            assert!(!symbols.remove(removed));
+            let partial = complete.replacen(
+                &format!(".entry {removed}("),
+                ".entry removed_tf32_symbol(",
+                1,
+            );
+            assert!(validate_tf32_ptx_inventory(module_kind, &partial).is_err());
+
+            let duplicate = format!("{complete}\n.entry {removed}(\n) {{}}\n");
+            assert!(validate_tf32_ptx_inventory(module_kind, &duplicate).is_err());
+        }
+    }
+
+    #[test]
+    fn sm110_feature_candidates_exclude_ordinary_sm110() {
+        let candidates = sm100_target_candidates((11, 0));
+        let expected = [("compute_110f", "sm_110f"), ("compute_110a", "sm_110a")];
+        let identity_names = [
+            (CudaTarget::Compute110f, CudaTarget::Sm110f),
+            (CudaTarget::Compute110a, CudaTarget::Sm110a),
+        ];
+        assert_eq!(identity_names.len(), expected.len());
+        assert_eq!(
+            candidates
+                .iter()
+                .map(|candidate| (candidate.nvrtc_arch, candidate.ptx_target))
+                .collect::<Vec<_>>(),
+            expected
+        );
+        assert!(
+            candidates
+                .iter()
+                .all(|candidate| candidate.nvrtc_arch != "compute_110")
+        );
+        assert!(validate_module_target(ModuleKind::TriadSm100, "compute_110").is_err());
+        assert!(validate_module_target(ModuleKind::TriadSm100, "sm_110").is_err());
+    }
+
+    #[test]
+    fn tf32_parameter_abi_tracks_cuda_12_and_13_tensor_map_alignment() {
+        let portable = synthetic_tf32_abi_ptx(ModuleKind::TriadSm80, 64);
+        validate_tf32_parameter_abi(ModuleKind::TriadSm80, &portable, 12).unwrap();
+        validate_tf32_parameter_abi(ModuleKind::TriadSm80, &portable, 13).unwrap();
+
+        for module_kind in [
+            ModuleKind::TriadSm90a,
+            ModuleKind::TriadSm100,
+            ModuleKind::TriadSm120,
+        ] {
+            let cuda12 = synthetic_tf32_abi_ptx(module_kind, 64);
+            let cuda13 = synthetic_tf32_abi_ptx(module_kind, 128);
+            validate_tf32_parameter_abi(module_kind, &cuda12, 12).unwrap();
+            validate_tf32_parameter_abi(module_kind, &cuda13, 13).unwrap();
+            assert!(validate_tf32_parameter_abi(module_kind, &cuda12, 13).is_err());
+            assert!(validate_tf32_parameter_abi(module_kind, &cuda13, 12).is_err());
+        }
+        assert!(validate_tf32_parameter_abi(ModuleKind::TriadSm90a, "", 14).is_err());
+    }
+
+    #[test]
+    fn driver_abi_validates_and_formats_live_layout() {
+        let abi =
+            Tf32DriverAbi::checked(5, vec![(0, 8), (128, 128), (256, 128), (384, 8), (392, 40)])
+                .expect("valid CUDA 13 tensor-map ABI");
+
+        assert_eq!(abi.parameter_count(), 5);
+        assert_eq!(
+            abi.parameters()
+                .iter()
+                .map(|parameter| (parameter.offset(), parameter.size()))
+                .collect::<Vec<_>>(),
+            [(0, 8), (128, 128), (256, 128), (384, 8), (392, 40)]
+        );
+        assert_eq!(
+            abi.tsv_record("gemm_bi_nn_tf32_sm100_m128n256_s2")
+                .expect("safe symbol"),
+            "gemm_bi_nn_tf32_sm100_m128n256_s2\t5\tptx_contract+cuFuncGetParamInfo_terminal_probe\t0:8,128:128,256:128,384:8,392:40"
+        );
+    }
+
+    #[test]
+    fn driver_abi_rejects_malformed_driver_results() {
+        for (label, count, parameters) in [
+            ("empty", 0, vec![]),
+            ("count", 2, vec![(0, 8)]),
+            ("first offset", 1, vec![(8, 8)]),
+            ("zero size", 1, vec![(0, 0)]),
+            ("overlap", 2, vec![(0, 16), (8, 8)]),
+            ("overflow", 2, vec![(0, 8), (16, usize::MAX)]),
+        ] {
+            assert!(
+                Tf32DriverAbi::checked(count, parameters).is_err(),
+                "{label}"
+            );
+        }
+
+        let abi = Tf32DriverAbi::checked(1, vec![(0, 8)]).unwrap();
+        for symbol in ["", "bad\tsymbol", "bad\nsymbol", "bad\rsymbol"] {
+            assert!(abi.tsv_record(symbol).is_err(), "{symbol:?}");
+        }
+    }
+
+    #[test]
+    fn driver_abi_live_query_requires_five_parameters_and_a_terminal_probe() {
+        use cudarc::driver::sys::CUresult;
+
+        let layout = [(0, 8), (8, 8), (16, 8), (24, 8), (32, 32)];
+        let mut queried = Vec::new();
+        let abi = query_tf32_driver_parameter_abi("TriadSm80/test", |index, offset, size| {
+            queried.push(index);
+            if let Some((value_offset, value_size)) = layout.get(index).copied() {
+                *offset = value_offset;
+                *size = value_size;
+                CUresult::CUDA_SUCCESS
+            } else {
+                CUresult::CUDA_ERROR_INVALID_VALUE
+            }
+        })
+        .expect("five live parameters followed by the terminal probe");
+        assert_eq!(queried, [0, 1, 2, 3, 4, 5]);
+        assert_eq!(
+            abi.parameters()
+                .iter()
+                .map(|parameter| (parameter.offset(), parameter.size()))
+                .collect::<Vec<_>>(),
+            layout
+        );
+
+        let split_layout = [(0, 8), (8, 8), (16, 8), (24, 8), (32, 8), (40, 8), (48, 32)];
+        let split = query_driver_parameter_abi("TriadSm80/split-K", 7, |index, offset, size| {
+            if let Some((value_offset, value_size)) = split_layout.get(index).copied() {
+                *offset = value_offset;
+                *size = value_size;
+                CUresult::CUDA_SUCCESS
+            } else {
+                CUresult::CUDA_ERROR_INVALID_VALUE
+            }
+        })
+        .expect("seven live split-K parameters followed by the terminal probe");
+        assert_eq!(split.parameter_count(), 7);
+        assert_eq!(
+            split
+                .parameters()
+                .iter()
+                .map(|parameter| (parameter.offset(), parameter.size()))
+                .collect::<Vec<_>>(),
+            split_layout
+        );
+
+        let mut queried = Vec::new();
+        let missing =
+            query_tf32_driver_parameter_abi("TriadSm80/missing", |index, offset, size| {
+                queried.push(index);
+                *offset = index * 8;
+                *size = 8;
+                if index == 3 {
+                    CUresult::CUDA_ERROR_INVALID_VALUE
+                } else {
+                    CUresult::CUDA_SUCCESS
+                }
+            })
+            .expect_err("a required parameter may not terminate the ABI");
+        assert_eq!(queried, [0, 1, 2, 3]);
+        assert!(missing.contains("TriadSm80/missing[3]"));
+
+        let extra = query_tf32_driver_parameter_abi("TriadSm80/extra", |index, offset, size| {
+            *offset = index * 8;
+            *size = 8;
+            CUresult::CUDA_SUCCESS
+        })
+        .expect_err("a sixth live parameter must fail the ABI census");
+        assert!(extra.contains("more than 5 Driver ABI parameters"));
+
+        let sentinel =
+            query_tf32_driver_parameter_abi("TriadSm80/sentinel", |index, offset, size| {
+                *offset = index * 8;
+                *size = 8;
+                if index == 5 {
+                    CUresult::CUDA_ERROR_INVALID_CONTEXT
+                } else {
+                    CUresult::CUDA_SUCCESS
+                }
+            })
+            .expect_err("a non-terminal Driver error must not be accepted");
+        assert!(sentinel.contains("TriadSm80/sentinel[5] sentinel"));
+    }
+
+    #[test]
+    fn driver_abi_merge_rejects_cross_module_symbol_aliases() {
+        let portable = std::collections::BTreeMap::from([(
+            "portable",
+            Tf32DriverAbi::checked(1, vec![(0, 8)]).unwrap(),
+        )]);
+        let specialized = std::collections::BTreeMap::from([(
+            "specialized",
+            Tf32DriverAbi::checked(1, vec![(0, 8)]).unwrap(),
+        )]);
+        let merged = merge_tf32_driver_abi(portable.clone(), Some(specialized))
+            .expect("disjoint inventories");
+        assert_eq!(
+            merged.keys().copied().collect::<Vec<_>>(),
+            ["portable", "specialized"]
+        );
+
+        let duplicate = std::collections::BTreeMap::from([(
+            "portable",
+            Tf32DriverAbi::checked(1, vec![(0, 8)]).unwrap(),
+        )]);
+        assert!(merge_tf32_driver_abi(portable, Some(duplicate)).is_err());
+    }
 
     const FIXED_FRAGMENTS: &[&str] = &[
         "kernels/_typed_prelude.cuh",
@@ -2159,6 +7403,9 @@ mod tests {
         "kernels/adamw.cu",
         "kernels/gemm_bi_fixed/common.cuh",
         "kernels/gemm_bi_fixed/ffma.cu",
+        "kernels/gemm_bi_fixed/tf32.cu",
+        "kernels/gemm_bi_fixed/tf32_sm120.cu",
+        "kernels/gemm_bi_fixed/sm120_tma.cu",
         "kernels/gemm_bi_fixed/wmma_legacy.cu",
         "kernels/gemm_bi_fixed/matvec.cu",
         "kernels/gemm_bi_fixed/mma16.cu",
@@ -2173,6 +7420,11 @@ mod tests {
         "kernels/gemm_bi_triad/common.cuh",
         "kernels/gemm_bi_triad/epilogue.cuh",
         "kernels/gemm_bi_triad/scalar.cu",
+        "kernels/gemm_bi_triad/scalar_nn_m64n64.cu",
+        "kernels/gemm_bi_triad/scalar_nn_splitk_m32n64.cu",
+        "kernels/gemm_bi_triad/scalar_nt_d768_transpose.cu",
+        "kernels/gemm_bi_triad/scalar_nt_m2n16.cu",
+        "kernels/gemm_bi_triad/scalar_tn_m16n16.cu",
     ];
 
     const SM80_FRAGMENTS: &[&str] = &[
@@ -2205,74 +7457,85 @@ mod tests {
         "kernels/gemm_bi_triad/contract.cuh",
         "kernels/gemm_bi_triad/common.cuh",
         "kernels/gemm_bi_triad/epilogue.cuh",
-        "kernels/gemm_bi_triad/mma16.cuh",
         "kernels/gemm_bi_triad/sm120.cu",
     ];
 
     const SCALAR_SYMBOLS: &[&str] = &[
-        "sgemm_bi_nn",
-        "sgemm_bi_tn",
-        "sgemm_bi_tn_splitm_partial",
-        "sgemm_bi_splitm_reduce",
-        "sgemm_bi_nn_splitk_big_partial",
-        "sgemm_bi_nt",
-        "sgemm_bi_nt_splitn_big_partial",
-        "sgemm_bi_nn_slim",
-        "sgemm_bi_nn_splitk_slim_partial",
-        "sgemm_bi_tn_slim",
-        "sgemm_bi_nt_slim",
-        "sgemm_bi_nn_ultra_thin",
-        "sgemm_bi_nn_gemv",
-        "sgemm_bi_tn_gemv",
-        "sgemm_bi_nt_gemv",
-        "sgemm_bi_nn_narrow",
-        "sgemm_bi_nn_narrow_small",
-        "sgemm_bi_tn_narrow",
-        "sgemm_bi_tn_narrow_splitm_partial",
-        "sgemm_bi_nt_narrow",
-        "sgemm_bi_nn_splitk32_partial",
-        "sgemm_bi_splitk_reduce",
-        "sgemm_bi_dx_col_gemv",
-        "sgemm_transpose_f32_2d",
-        "sgemm_bi_nn_gemv_bf16",
-        "sgemm_bi_nn_gemv_f16",
-        "sgemm_bi_tn_gemv_bf16",
-        "sgemm_bi_tn_gemv_f16",
-        "sgemm_bi_nt_gemv_bf16",
-        "sgemm_bi_nt_gemv_f16",
-        "sgemm_bi_nn_ultra_thin_bf16",
-        "sgemm_bi_nn_ultra_thin_f16",
-        "sgemm_bi_nn_narrow_bf16",
-        "sgemm_bi_nn_narrow_f16",
-        "sgemm_bi_nn_narrow_small_bf16",
-        "sgemm_bi_nn_narrow_small_f16",
-        "sgemm_bi_tn_narrow_bf16",
-        "sgemm_bi_tn_narrow_f16",
-        "sgemm_bi_nt_narrow_bf16",
-        "sgemm_bi_nt_narrow_f16",
-        "sgemm_bi_nn_big_bf16",
-        "sgemm_bi_nn_big_f16",
-        "sgemm_bi_tn_big_bf16",
-        "sgemm_bi_tn_big_f16",
-        "sgemm_bi_nt_big_bf16",
-        "sgemm_bi_nt_big_f16",
+        "gemm_bi_nn",
+        "gemm_bi_nn_m64n64_bk16_s2_v1",
+        "gemm_bi_nn_splitk32_m32n64_exact_v1",
+        "gemm_bi_nn_prism_m64n64_bk16_s2_v1",
+        "gemm_bi_nn_zero_reduction_v1",
+        "gemm_bi_tn",
+        "gemm_bi_tn_aligned",
+        "gemm_bi_tn_zero_reduction_v1",
+        "gemm_bi_tn_narrow_splitm_partial",
+        "gemm_bi_tn_narrow_splitm_partial_aligned",
+        "gemm_bi_tn_splitm_partial",
+        "gemm_bi_tn_splitm_partial_aligned",
+        "gemm_bi_tn_m16n16_bk16_s2_splitm16_v1",
+        "gemm_bi_splitm_reduce",
+        "gemm_bi_nt",
+        "gemm_bi_nt_m2n16_bk64_splitk32_v1",
+        "gemm_bi_nt_zero_reduction_v1",
+        "gemm_bi_nn_slim",
+        "gemm_bi_nn_splitk_slim_partial",
+        "gemm_bi_tn_slim",
+        "gemm_bi_nt_slim",
+        "gemm_bi_nn_ultra_thin",
+        "gemm_bi_nn_gemv",
+        "gemm_bi_tn_gemv",
+        "gemm_bi_nt_gemv",
+        "gemm_bi_nn_narrow",
+        "gemm_bi_nn_narrow_small",
+        "gemm_bi_tn_narrow",
+        "gemm_bi_nt_narrow",
+        "gemm_bi_nn_splitk32_partial",
+        "gemm_bi_splitk_reduce",
+        "gemm_bi_dx_col_gemv",
+        "gemm_bi_transpose_f32_2d",
+        "gemm_bi_transpose_f32_32x16_d768_v1",
+        "gemm_bi_nn_gemv_bf16",
+        "gemm_bi_nn_gemv_f16",
+        "gemm_bi_tn_gemv_bf16",
+        "gemm_bi_tn_gemv_f16",
+        "gemm_bi_nt_gemv_bf16",
+        "gemm_bi_nt_gemv_f16",
+        "gemm_bi_nn_ultra_thin_bf16",
+        "gemm_bi_nn_ultra_thin_f16",
+        "gemm_bi_nn_narrow_bf16",
+        "gemm_bi_nn_narrow_f16",
+        "gemm_bi_nn_narrow_small_bf16",
+        "gemm_bi_nn_narrow_small_f16",
+        "gemm_bi_tn_narrow_bf16",
+        "gemm_bi_tn_narrow_f16",
+        "gemm_bi_nt_narrow_bf16",
+        "gemm_bi_nt_narrow_f16",
+        "gemm_bi_nn_big_bf16",
+        "gemm_bi_nn_big_f16",
+        "gemm_bi_tn_big_bf16",
+        "gemm_bi_tn_big_f16",
+        "gemm_bi_nt_big_bf16",
+        "gemm_bi_nt_big_f16",
     ];
 
     const SM80_SYMBOLS: &[&str] = &[
-        "sgemm_bi_nn_tc_bf16",
-        "sgemm_bi_nn_tc_f16",
-        "sgemm_bi_tn_tc_bf16",
-        "sgemm_bi_tn_tc_f16",
-        "sgemm_bi_nt_tc_bf16",
-        "sgemm_bi_nt_tc_f16",
-        "sgemm_bi_nn_tc64_bf16",
-        "sgemm_bi_nn_tc64_f16",
-        "sgemm_bi_nn_tc16_bf16",
-        "sgemm_bi_nn_tc16_f16",
-        "sgemm_bi_tn_tc64_bf16",
-        "sgemm_bi_tn_tc64_f16",
-        "sgemm_bi_nt_tc64_bf16",
-        "sgemm_bi_nt_tc64_f16",
+        "gemm_bi_nn_tc_bf16",
+        "gemm_bi_nn_tc_f16",
+        "gemm_bi_tn_tc_bf16",
+        "gemm_bi_tn_tc_f16",
+        "gemm_bi_nt_tc_bf16",
+        "gemm_bi_nt_tc_f16",
+        "gemm_bi_nn_tc64_bf16",
+        "gemm_bi_nn_tc64_f16",
+        "gemm_bi_nn_tc16_bf16",
+        "gemm_bi_nn_tc16_f16",
+        "gemm_bi_tn_tc64_bf16",
+        "gemm_bi_tn_tc64_f16",
+        "gemm_bi_tn_tc128x64_bf16",
+        "gemm_bi_tn_tc128x64_f16",
+        "gemm_bi_nt_tc64_bf16",
+        "gemm_bi_nt_tc64_f16",
     ];
 
     fn assert_composition(kind: ModuleKind, expected_names: &[&str]) {
@@ -2303,11 +7566,177 @@ mod tests {
                 .exists(),
             "obsolete root triad monolith must not return"
         );
-        assert!(
-            !compose_module_source(ModuleKind::Fixed)
-                .unwrap()
-                .contains("sgemm_bi_")
-        );
+    }
+
+    #[test]
+    fn scalar_group_m_option_matches_the_source_guard() {
+        let source = compose_module_source(ModuleKind::TriadScalar).unwrap();
+        assert!(source.contains(&format!("#ifndef {SCALAR_GROUP_M_MACRO}")));
+        assert_eq!(scalar_group_m_option("sm_80"), "-DGEMM_BI_GROUP_M=8");
+        assert_eq!(scalar_group_m_option("sm_87"), "-DGEMM_BI_GROUP_M=8");
+        assert_eq!(scalar_group_m_option("sm_89"), "-DGEMM_BI_GROUP_M=16");
+        assert_eq!(scalar_group_m_option("sm_120"), "-DGEMM_BI_GROUP_M=16");
+    }
+
+    #[test]
+    fn scalar_big_nt_source_uses_raw_to_conflict_free_b_staging() {
+        let source = compose_module_source(ModuleKind::TriadScalar).unwrap();
+        let start = source.find("void gemm_bi_nt(").expect("Big NT entry");
+        let end = source[start..]
+            .find("void gemm_bi_nn_slim(")
+            .map(|offset| start + offset)
+            .expect("Slim NN entry after Big NT");
+        let kernel = &source[start..end];
+
+        for required in [
+            "constexpr int B_RAW_STAGE = GEMM_BI_SCALAR_BN * GEMM_BI_SCALAR_BK;",
+            "constexpr int B_COMPUTE_STAGE = 2072;",
+            "float* Braw = smem + K_PIPE * A_STAGE;",
+            "float* Bcompute = Braw + B_RAW_STAGE;",
+            "static_assert(TOTAL_SMEM_BYTES == 33376",
+            "reinterpret_cast<const uint4*>(Braw",
+            "reinterpret_cast<unsigned int*>(Bcompute)",
+            "cp.async.ca.shared.global [%0], [%1], 16, %2;",
+            "cp.async.ca.shared.global [%0], [%1], 4, %2;",
+            "(N & 3) == 0",
+            "(threadIdx.x >> 2) + _half * (GEMM_BI_SCALAR_BN / 2)",
+            "(threadIdx.x & 3) * 4",
+            "((n_local) * GEMM_BI_SCALAR_BN + ((n_local) >> 2) * B_COMPUTE_GROUP_PAD + (k_local))",
+        ] {
+            assert!(
+                kernel.contains(required),
+                "missing Big NT staging fragment: {required}"
+            );
+        }
+        assert!(kernel.contains("? B + (long long)_g_k * N + _g_n : B"));
+        assert_eq!(kernel.matches("for (int dotIdx = 0;").count(), 1);
+        assert_eq!(kernel.matches("threadResults[idx] = __fmaf_rn(").count(), 1);
+    }
+
+    #[test]
+    fn scalar_splitm_reducer_declares_a_portable_four_cta_bound() {
+        let source = compose_module_source(ModuleKind::TriadScalar).unwrap();
+        let entry = source
+            .find("void gemm_bi_splitm_reduce(")
+            .expect("split-M reducer entry");
+        let declaration = &source[entry.saturating_sub(160)..entry];
+        assert!(declaration.contains("__launch_bounds__(256, 4)"));
+        assert!(!declaration.contains("__launch_bounds__(256, 8)"));
+    }
+
+    #[test]
+    fn scalar_f32_vector_paths_require_aligned_external_bases() {
+        let source = compose_module_source(ModuleKind::TriadScalar).unwrap();
+        let require = |body: &str, guards: &[&str]| -> Result<(), String> {
+            for guard in guards {
+                if !body.contains(guard) {
+                    return Err(format!("missing scalar f32 vector guard {guard}"));
+                }
+            }
+            Ok(())
+        };
+
+        for (start_name, end_name, guards) in [
+            (
+                "void gemm_bi_nn(",
+                "void gemm_bi_tn_impl(",
+                &["gemm_bi_is_aligned_16(B)", "gemm_bi_is_aligned_16(C)"][..],
+            ),
+            (
+                "void gemm_bi_tn_impl(",
+                "void gemm_bi_tn(",
+                &[
+                    "gemm_bi_is_aligned_16(A)",
+                    "gemm_bi_is_aligned_16(B)",
+                    "gemm_bi_is_aligned_16(C)",
+                ][..],
+            ),
+            (
+                "void gemm_bi_tn_splitm_partial_impl(",
+                "void gemm_bi_tn_splitm_partial(",
+                &["gemm_bi_is_aligned_16(A)", "gemm_bi_is_aligned_16(B)"][..],
+            ),
+            (
+                "void gemm_bi_nt(",
+                "void gemm_bi_nn_slim(",
+                &["gemm_bi_is_aligned_16(B)", "gemm_bi_is_aligned_16(C)"][..],
+            ),
+            (
+                "void gemm_bi_nn_slim(",
+                "void gemm_bi_nn_splitk_slim_partial(",
+                &["gemm_bi_is_aligned_16(B)", "gemm_bi_is_aligned_16(C)"][..],
+            ),
+            (
+                "void gemm_bi_nn_splitk_slim_partial(",
+                "void gemm_bi_tn_slim(",
+                &["gemm_bi_is_aligned_16(B)"][..],
+            ),
+            (
+                "void gemm_bi_tn_slim(",
+                "void gemm_bi_nt_slim(",
+                &[
+                    "gemm_bi_is_aligned_16(A)",
+                    "gemm_bi_is_aligned_16(B)",
+                    "gemm_bi_is_aligned_16(C)",
+                ][..],
+            ),
+            (
+                "void gemm_bi_nt_slim(",
+                "void gemm_bi_nn_ultra_thin(",
+                &["gemm_bi_is_aligned_16(C)"][..],
+            ),
+            (
+                "void gemm_bi_nn_narrow(",
+                "void gemm_bi_nn_narrow_small(",
+                &["gemm_bi_is_aligned_16(B)"][..],
+            ),
+            (
+                "void gemm_bi_nn_narrow_small(",
+                "void gemm_bi_tn_narrow_splitm_impl(",
+                &["gemm_bi_is_aligned_16(B)"][..],
+            ),
+            (
+                "void gemm_bi_tn_narrow(",
+                "void gemm_bi_nt_narrow(",
+                &["gemm_bi_is_aligned_16(A)", "gemm_bi_is_aligned_16(B)"][..],
+            ),
+            (
+                "void gemm_bi_nt_narrow(",
+                "void gemm_bi_nn_splitk32_partial(",
+                &["gemm_bi_is_aligned_16(B)"][..],
+            ),
+            (
+                "void gemm_bi_nn_splitk32_partial(",
+                "void gemm_bi_splitk_reduce(",
+                &["gemm_bi_is_aligned_16(B)"][..],
+            ),
+        ] {
+            let start = source.find(start_name).expect("scalar f32 kernel start");
+            let end = source[start..]
+                .find(end_name)
+                .map(|offset| start + offset)
+                .expect("next scalar f32 kernel");
+            let body = &source[start..end];
+            require(body, guards).unwrap_or_else(|error| panic!("{start_name}: {error}"));
+            for guard in guards {
+                let mutated = body.replacen(guard, "gemm_bi_alignment_guard_removed()", 1);
+                assert!(
+                    require(&mutated, guards).is_err(),
+                    "{start_name} accepted removal of {guard}"
+                );
+            }
+        }
+        for instantiation in [
+            "gemm_bi_tn_impl<false>(C, A, B, alpha, M_red, K_out, N);",
+            "gemm_bi_tn_impl<true>(C, A, B, alpha, M_red, K_out, N);",
+            "gemm_bi_tn_splitm_partial_impl<false>(",
+            "gemm_bi_tn_splitm_partial_impl<true>(",
+        ] {
+            assert!(
+                source.contains(instantiation),
+                "missing scalar TN alignment specialization {instantiation}"
+            );
+        }
     }
 
     #[test]
@@ -2404,8 +7833,8 @@ mod tests {
 
         let scalar: BTreeSet<_> = SCALAR_SYMBOLS.iter().copied().collect();
         let sm80: BTreeSet<_> = SM80_SYMBOLS.iter().copied().collect();
-        assert_eq!(scalar.len(), 46);
-        assert_eq!(sm80.len(), 14);
+        assert_eq!(scalar.len(), 55);
+        assert_eq!(sm80.len(), 16);
         assert_eq!(SM90A_SYMBOLS.len(), 12);
         let sm90a: BTreeSet<_> = SM90A_SYMBOLS.iter().copied().collect();
         let sm100: BTreeSet<_> = super::super::contract::SM100_KERNEL_SPECS
@@ -2420,13 +7849,88 @@ mod tests {
         assert!(sm80.is_disjoint(&sm90a));
         assert!(sm80.is_disjoint(&sm100));
         assert!(sm90a.is_disjoint(&sm100));
-        assert_eq!(scalar.union(&sm80).count(), 60);
+        assert_eq!(scalar.union(&sm80).count(), 71);
         assert!(
             scalar
                 .union(&sm80)
                 .copied()
-                .all(|name| { name.starts_with("sgemm_bi_") || name == "sgemm_transpose_f32_2d" })
+                .all(|name| name.starts_with("gemm_bi_"))
         );
+    }
+
+    #[test]
+    fn triad_cuda_sources_and_export_inventories_use_gemm_bi_prefix() {
+        let legacy_prefix = ["s", "gemm_bi_"].concat();
+        let module_kinds = [
+            ModuleKind::TriadScalar,
+            ModuleKind::TriadSm80,
+            ModuleKind::TriadSm90a,
+            ModuleKind::TriadSm100,
+            ModuleKind::TriadSm120,
+        ];
+        for module_kind in module_kinds {
+            let source = compose_module_source(module_kind).expect("compose Triad CUDA source");
+            let identifiers = source
+                .split(|character: char| !(character.is_ascii_alphanumeric() || character == '_'))
+                .collect::<Vec<_>>();
+            assert!(
+                !identifiers
+                    .iter()
+                    .any(|identifier| identifier.starts_with(&legacy_prefix)),
+                "{module_kind:?} source retains the legacy S-prefixed ABI"
+            );
+            assert!(
+                !identifiers
+                    .iter()
+                    .any(|identifier| identifier.contains("_SGEMM_BI_")),
+                "{module_kind:?} source retains a legacy SGEMM macro identifier"
+            );
+            assert!(
+                identifiers
+                    .iter()
+                    .any(|identifier| identifier.starts_with("gemm_bi_")),
+                "{module_kind:?} source has no gemm_bi_ ABI exports"
+            );
+        }
+
+        let inventories = [
+            ("scalar", PRODUCTION_SCALAR_SYMBOLS.to_vec()),
+            ("sm80", PRODUCTION_SM80_SYMBOLS.to_vec()),
+            ("sm90a", SM90A_SYMBOLS.to_vec()),
+            (
+                "sm100",
+                super::super::contract::SM100_KERNEL_SPECS
+                    .iter()
+                    .map(|spec| spec.symbol)
+                    .collect(),
+            ),
+            (
+                "sm120",
+                super::super::contract::SM120_KERNEL_SPECS
+                    .iter()
+                    .map(|spec| spec.symbol)
+                    .collect(),
+            ),
+        ];
+        for (inventory, symbols) in inventories {
+            assert!(
+                symbols.iter().all(|symbol| symbol.starts_with("gemm_bi_")),
+                "{inventory} export inventory retains a non-gemm_bi_ ABI symbol"
+            );
+        }
+
+        for module_kind in [
+            ModuleKind::TriadSm80,
+            ModuleKind::TriadSm90a,
+            ModuleKind::TriadSm100,
+            ModuleKind::TriadSm120,
+        ] {
+            assert!(
+                super::super::contract::tf32_module_symbols(module_kind)
+                    .all(|symbol| symbol.starts_with("gemm_bi_")),
+                "{module_kind:?} TF32 export inventory retains a non-gemm_bi_ ABI symbol"
+            );
+        }
     }
 
     #[test]
@@ -2437,6 +7941,28 @@ mod tests {
             assert!(error.contains("exact target sm_90a"), "{error}");
         }
         validate_module_target(ModuleKind::TriadSm80, "sm_90a").unwrap();
+    }
+
+    #[test]
+    fn portable_sm103a_target_is_admitted_and_owns_live_cc103_topology() {
+        validate_module_target(ModuleKind::TriadSm80, "sm_103a").unwrap();
+        assert_eq!(portable_target_for_device((10, 3)), Ok("sm_103a"));
+        assert_eq!(
+            qualified_ptx_target(ModuleKind::TriadSm80, "sm_103a", (10, 3)),
+            Ok("sm_103a")
+        );
+        assert!(qualified_ptx_target(ModuleKind::TriadSm80, "sm_103", (10, 3)).is_err());
+    }
+
+    #[test]
+    fn portable_sm101a_target_is_admitted_and_owns_live_cc101_topology() {
+        validate_module_target(ModuleKind::TriadSm80, "sm_101a").unwrap();
+        assert_eq!(portable_target_for_device((10, 1)), Ok("sm_101a"));
+        assert_eq!(
+            qualified_ptx_target(ModuleKind::TriadSm80, "sm_101a", (10, 1)),
+            Ok("sm_101a")
+        );
+        assert!(qualified_ptx_target(ModuleKind::TriadSm80, "sm_101", (10, 1)).is_err());
     }
 
     #[test]
@@ -2465,28 +7991,9 @@ mod tests {
         assert!(SM100_PROBE_SOURCE.contains("tcgen05_probe"));
         assert!(SM100_PROBE_SOURCE.contains("cp.async.bulk.tensor.2d"));
         assert!(SM100_PROBE_SOURCE.contains("tcgen05.mma.cta_group::1.kind::f16"));
-        assert!(!SM100_PROBE_SOURCE.contains("sgemm_bi_nn_sm100"));
+        assert!(!SM100_PROBE_SOURCE.contains("gemm_bi_nn_sm100"));
 
-        let instructions = [
-            "cp.async.bulk.tensor.2d.shared::cta.global.tile.mbarrier::complete_tx::bytes",
-            "mbarrier.arrive.expect_tx",
-            "mbarrier.try_wait.parity",
-            "tcgen05.alloc.cta_group::1",
-            "tcgen05.relinquish_alloc_permit.cta_group::1",
-            "tcgen05.dealloc.cta_group::1",
-            "tcgen05.mma.cta_group::1.kind::f16",
-            "tcgen05.commit.cta_group::1",
-            "tcgen05.fence::before_thread_sync",
-            "tcgen05.fence::after_thread_sync",
-            "tcgen05.ld.sync.aligned.32x32b.x8.b32",
-            "tcgen05.wait::ld.sync.aligned",
-            "tcgen05.st.sync.aligned.32x32b.x8.b32",
-            "tcgen05.wait::st.sync.aligned",
-        ];
-        let valid = format!(
-            ".version 9.0\n.target sm_100f\n.entry tcgen05_probe(\n{}\n",
-            instructions.join("\n")
-        );
+        let valid = sm100_probe_fixture(&sm100_probe_instructions().join("\n"));
         validate_sm100_probe_ptx("compute_100f", &valid).unwrap();
 
         assert!(validate_sm100_probe_ptx("compute_100a", &valid).is_err());
@@ -2494,6 +8001,12 @@ mod tests {
             validate_sm100_probe_ptx("compute_100f", &valid.replace("tcgen05_probe", "wrong"))
                 .is_err()
         );
+        let duplicate = format!("{valid}\n.entry tcgen05_probe(\n) {{}}\n");
+        assert!(validate_sm100_probe_ptx("compute_100f", &duplicate).is_err());
+        let foreign = format!("{valid}\n.entry harmless_foreign_export(\n) {{}}\n");
+        let error = validate_sm100_probe_ptx("compute_100f", &foreign)
+            .expect_err("SM100 probe foreign export must fail");
+        assert!(error.contains("harmless_foreign_export"), "{error}");
         assert!(
             validate_sm100_probe_ptx(
                 "compute_100f",
@@ -2508,13 +8021,74 @@ mod tests {
     }
 
     #[test]
+    fn sm100_probe_requires_opcodes_inside_its_comment_stripped_body() {
+        let empty = sm100_probe_fixture("");
+        validate_sm100_probe_ptx("compute_100f", &empty).expect_err("empty probe body must fail");
+
+        let line_comments = sm100_probe_instructions()
+            .iter()
+            .map(|instruction| format!("// {instruction}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        validate_sm100_probe_ptx("compute_100f", &sm100_probe_fixture(&line_comments))
+            .expect_err("opcodes in line comments must not qualify the probe");
+
+        let block_comments = sm100_probe_instructions()
+            .iter()
+            .map(|instruction| format!("/* {instruction} */"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        validate_sm100_probe_ptx("compute_100f", &sm100_probe_fixture(&block_comments))
+            .expect_err("opcodes in block comments must not qualify the probe");
+
+        let quoted = sm100_probe_instructions()
+            .iter()
+            .map(|instruction| format!(".pragma \"{instruction}\";"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        validate_sm100_probe_ptx("compute_100f", &sm100_probe_fixture(&quoted))
+            .expect_err("opcode spellings in string operands must not qualify the probe");
+
+        let unused = format!(
+            "{}\n.visible .func unused_feature_holder()\n{{\n{}\n}}\n",
+            empty,
+            sm100_probe_instructions().join("\n")
+        );
+        validate_sm100_probe_ptx("compute_100f", &unused)
+            .expect_err("opcodes in an unused function must not qualify the probe");
+    }
+
+    #[test]
+    fn sm100_probe_rejects_malformed_and_extern_entry_directives() {
+        let valid = sm100_probe_fixture(&sm100_probe_instructions().join("\n"));
+        let malformed = valid
+            .strip_suffix("}\n")
+            .expect("coherent probe fixture suffix");
+        validate_sm100_probe_ptx("compute_100f", malformed)
+            .expect_err("unclosed probe body must fail");
+
+        let external = valid.replacen(
+            ".visible .entry tcgen05_probe",
+            ".visible .extern .entry tcgen05_probe",
+            1,
+        );
+        validate_sm100_probe_ptx("compute_100f", &external)
+            .expect_err("extern probe declaration must fail");
+    }
+
+    #[test]
     fn sm100_probe_compiles_for_every_exact_feature_target() {
         for (requested, emitted) in [
             ("compute_100f", "sm_100f"),
             ("compute_100a", "sm_100a"),
             ("compute_103f", "sm_103f"),
             ("compute_103a", "sm_103a"),
+            ("compute_110f", "sm_110f"),
+            ("compute_110a", "sm_110a"),
         ] {
+            if requested.contains("110") && super::nvrtc_version() < (13, 2) {
+                continue;
+            }
             let options = cudarc::nvrtc::CompileOptions {
                 arch: Some(requested),
                 options: vec!["--fmad=true".to_string(), "-DNDEBUG".to_string()],
@@ -2658,18 +8232,7 @@ mod tests {
 
     #[test]
     fn sm120_ptx_validation_is_complete_and_fail_closed() {
-        let mut valid = ".version 9.0\n.target sm_121\n".to_string();
-        for spec in super::super::contract::SM120_KERNEL_SPECS {
-            valid.push_str(&format!(".entry {}(\n", spec.symbol));
-        }
-        valid.push_str(
-            "cp.async.bulk.tensor.2d.shared::cta.global.tile.mbarrier::complete_tx::bytes\n\
-             mbarrier.arrive.expect_tx\n\
-             mbarrier.try_wait.parity\n\
-             ldmatrix.sync.aligned.m8n8.x4.shared.b16\n\
-             mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32\n\
-             mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32\n",
-        );
+        let valid = whole_module_fixture(ModuleKind::TriadSm120, "sm_121");
 
         validate_sm120_ptx("compute_121", &valid).unwrap();
         assert!(validate_sm120_ptx("compute_120", &valid).is_err());
@@ -2685,6 +8248,7 @@ mod tests {
             "atom.global.add.f32",
             "red.global.add.f32",
             "tcgen05.mma.cta_group::1.kind::f16",
+            "tcgen05.mma.cta_group::1.kind::tf32",
             "wgmma.mma_async.sync.aligned",
             "setmaxnreg.inc.sync.aligned.u32",
             "cp.async.bulk.tensor.2d.shared::cluster.global.tile.multicast",
@@ -2700,27 +8264,7 @@ mod tests {
 
     #[test]
     fn sm100_production_ptx_validator_rejects_partial_or_mixed_artifacts() {
-        let instructions = [
-            "cp.async.bulk.tensor.2d.shared::cta.global.tile.mbarrier::complete_tx::bytes",
-            "mbarrier.arrive.expect_tx",
-            "mbarrier.try_wait.parity",
-            "tcgen05.alloc.cta_group::1",
-            "tcgen05.relinquish_alloc_permit.cta_group::1",
-            "tcgen05.dealloc.cta_group::1",
-            "tcgen05.mma.cta_group::1.kind::f16",
-            "tcgen05.commit.cta_group::1",
-            "tcgen05.fence::before_thread_sync",
-            "tcgen05.fence::after_thread_sync",
-            "tcgen05.ld.sync.aligned.32x32b.x8.b32",
-            "tcgen05.wait::ld.sync.aligned",
-            "tcgen05.st.sync.aligned.32x32b.x8.b32",
-            "tcgen05.wait::st.sync.aligned",
-        ];
-        let mut valid = ".version 9.0\n.target sm_100f\n".to_string();
-        for spec in super::super::contract::SM100_KERNEL_SPECS {
-            valid.push_str(&format!(".entry {}(\n", spec.symbol));
-        }
-        valid.push_str(&instructions.join("\n"));
+        let valid = whole_module_fixture(ModuleKind::TriadSm100, "sm_100f");
         validate_sm100_ptx("compute_100f", &valid).unwrap();
 
         assert!(validate_sm100_ptx("compute_100a", &valid).is_err());
@@ -2754,11 +8298,94 @@ mod tests {
     }
 
     #[test]
+    fn forbidden_scan_distinguishes_harmless_strings_from_real_tokens() {
+        for (module_kind, target, validate) in [
+            (
+                ModuleKind::TriadSm100,
+                "sm_100f",
+                validate_sm100_ptx as fn(&str, &str) -> Result<(), String>,
+            ),
+            (
+                ModuleKind::TriadSm120,
+                "sm_120",
+                validate_sm120_ptx as fn(&str, &str) -> Result<(), String>,
+            ),
+        ] {
+            let arch = match module_kind {
+                ModuleKind::TriadSm100 => "compute_100f",
+                ModuleKind::TriadSm120 => "compute_120",
+                _ => unreachable!(),
+            };
+            let valid = whole_module_fixture(module_kind, target);
+            let harmless = format!(
+                "{valid}\n.file 7 \"free cudaLaunchDevice multicast shared::cluster\"\n.pragma \"operator new call.uni atom.global.add.f32 tcgen05.ld.red\";\n"
+            );
+            validate(arch, &harmless).unwrap_or_else(|error| {
+                panic!("{module_kind:?} rejected harmless strings: {error}")
+            });
+
+            for forbidden in [
+                "atom.global.add.f32 %f1, [%rd1], %f2;",
+                ".extern .func free();",
+                "cp.async.bulk.tensor.2d.shared::cluster.global.tile.multicast::cluster;",
+            ] {
+                validate(arch, &format!("{valid}\n{forbidden}\n"))
+                    .expect_err("real forbidden opcode or runtime symbol must fail");
+            }
+        }
+    }
+
+    #[test]
+    fn tf32_forbidden_scan_distinguishes_strings_from_real_opcodes() {
+        for (module_kind, required, forbidden) in [
+            (
+                ModuleKind::TriadSm90a,
+                [
+                    "cp.async.bulk.tensor.2d.shared::cta.global.tile.mbarrier::complete_tx::bytes",
+                    "wgmma.mma_async.sync.aligned.m64n128k8.f32.tf32.tf32",
+                ],
+                "cvt.rna.tf32.f32",
+            ),
+            (
+                ModuleKind::TriadSm100,
+                [
+                    "cp.async.bulk.tensor.2d.shared::cta.global.tile.mbarrier::complete_tx::bytes",
+                    "tcgen05.mma.cta_group::1.kind::tf32",
+                ],
+                "wgmma.mma_async.sync.aligned.m64n128k8.f32.tf32.tf32",
+            ),
+            (
+                ModuleKind::TriadSm120,
+                [
+                    "cvt.rna.tf32.f32",
+                    "mma.sync.aligned.m16n8k8.row.col.f32.tf32.tf32.f32",
+                ],
+                "tcgen05.mma.cta_group::1.kind::tf32",
+            ),
+        ] {
+            let mut ptx = ".version 9.0\n.target sm_90a\n".to_string();
+            for symbol in super::super::contract::tf32_module_symbols(module_kind) {
+                ptx.push_str(&format!(
+                    ".entry {symbol}() {{\n{}\n}}\n",
+                    required.join("\n")
+                ));
+            }
+            validate_tf32_feature_instructions(
+                module_kind,
+                &format!("{ptx}\n.file 9 \"{forbidden}\"\n.pragma \"{forbidden}\";\n"),
+            )
+            .unwrap_or_else(|error| panic!("{module_kind:?} rejected harmless strings: {error}"));
+            validate_tf32_feature_instructions(module_kind, &format!("{ptx}\n{forbidden};\n"))
+                .expect_err("real foreign TF32 opcode must fail");
+        }
+    }
+
+    #[test]
     fn owned_symbol_resolution_never_falls_back_to_fixed() {
         let scalar_calls = std::cell::Cell::new(0);
         let sm80_calls = std::cell::Cell::new(0);
         let value: usize = resolve_owned_symbol(
-            "sgemm_bi_nn",
+            "gemm_bi_nn",
             |name| {
                 scalar_calls.set(scalar_calls.get() + 1);
                 Ok(name.len())
@@ -2766,12 +8393,12 @@ mod tests {
             |_| panic!("scalar symbol consulted the SM80 module"),
         )
         .unwrap();
-        assert_eq!(value, "sgemm_bi_nn".len());
+        assert_eq!(value, "gemm_bi_nn".len());
         assert_eq!(scalar_calls.get(), 1);
         assert_eq!(sm80_calls.get(), 0);
 
         let missing: Result<(), String> = resolve_owned_symbol(
-            "sgemm_bi_nn_tc_bf16",
+            "gemm_bi_nn_tc_bf16",
             |_| panic!("SM80 symbol consulted the scalar module"),
             |name| {
                 sm80_calls.set(sm80_calls.get() + 1);
@@ -2780,7 +8407,7 @@ mod tests {
         );
         let error = missing.expect_err("missing owned symbol must abort initialization");
         assert!(error.contains("TriadSm80"), "{error}");
-        assert!(error.contains("sgemm_bi_nn_tc_bf16"), "{error}");
+        assert!(error.contains("gemm_bi_nn_tc_bf16"), "{error}");
         assert_eq!(sm80_calls.get(), 1);
     }
 }

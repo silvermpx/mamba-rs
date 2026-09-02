@@ -169,7 +169,7 @@ fn emulated_ddp_composes_with_the_deterministic_gemm_tier() {
     // participates in how they were computed, so every per-rank GEMM
     // tier must ride DDP unchanged. Pin the batch-invariant house tier
     // on both trainer dtypes (on f32 the flag routes every projection
-    // GEMM to the sgemm_bi kernels by program text): replay stays
+    // GEMM to the gemm_bi kernels by program text): replay stays
     // bitwise and the fold stays delivery-order immune. No cross-tier
     // bit-difference assertion — at these small shapes two correct
     // GEMMs may legitimately agree bitwise, so a difference is an

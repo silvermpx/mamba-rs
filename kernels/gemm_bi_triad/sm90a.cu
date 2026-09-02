@@ -283,7 +283,7 @@ static __device__ __forceinline__ void sm90a_store_output(
             bool paired = col + 1 < output_cols &&
                 (reinterpret_cast<unsigned long long>(destination) & 3ULL) == 0;
             if (paired) {
-                sgb_store_pair_rne(destination, v0, v1);
+                gemm_bi_store_pair_rne(destination, v0, v1);
             } else {
                 destination[0] = sm90a_from_float<T>(v0);
                 if (col + 1 < output_cols)
@@ -432,18 +432,18 @@ void NAME(void* output, const __grid_constant__ CUtensorMap a_map,           \
                                  m, k, n, ldc);                               \
 }
 
-SM90A_DEFINE_WG1(sgemm_bi_nn_sm90a_wgmma_wg1_bf16, __nv_bfloat16, Sm90aNn)
-SM90A_DEFINE_WG1(sgemm_bi_nn_sm90a_wgmma_wg1_f16, __half, Sm90aNn)
-SM90A_DEFINE_WG1(sgemm_bi_tn_sm90a_wgmma_wg1_bf16, __nv_bfloat16, Sm90aTn)
-SM90A_DEFINE_WG1(sgemm_bi_tn_sm90a_wgmma_wg1_f16, __half, Sm90aTn)
-SM90A_DEFINE_WG1(sgemm_bi_nt_sm90a_wgmma_wg1_bf16, __nv_bfloat16, Sm90aNt)
-SM90A_DEFINE_WG1(sgemm_bi_nt_sm90a_wgmma_wg1_f16, __half, Sm90aNt)
-SM90A_DEFINE_WG2(sgemm_bi_nn_sm90a_wgmma_wg2_bf16, __nv_bfloat16, Sm90aNn)
-SM90A_DEFINE_WG2(sgemm_bi_nn_sm90a_wgmma_wg2_f16, __half, Sm90aNn)
-SM90A_DEFINE_WG2(sgemm_bi_tn_sm90a_wgmma_wg2_bf16, __nv_bfloat16, Sm90aTn)
-SM90A_DEFINE_WG2(sgemm_bi_tn_sm90a_wgmma_wg2_f16, __half, Sm90aTn)
-SM90A_DEFINE_WG2(sgemm_bi_nt_sm90a_wgmma_wg2_bf16, __nv_bfloat16, Sm90aNt)
-SM90A_DEFINE_WG2(sgemm_bi_nt_sm90a_wgmma_wg2_f16, __half, Sm90aNt)
+SM90A_DEFINE_WG1(gemm_bi_nn_sm90a_wgmma_wg1_bf16, __nv_bfloat16, Sm90aNn)
+SM90A_DEFINE_WG1(gemm_bi_nn_sm90a_wgmma_wg1_f16, __half, Sm90aNn)
+SM90A_DEFINE_WG1(gemm_bi_tn_sm90a_wgmma_wg1_bf16, __nv_bfloat16, Sm90aTn)
+SM90A_DEFINE_WG1(gemm_bi_tn_sm90a_wgmma_wg1_f16, __half, Sm90aTn)
+SM90A_DEFINE_WG1(gemm_bi_nt_sm90a_wgmma_wg1_bf16, __nv_bfloat16, Sm90aNt)
+SM90A_DEFINE_WG1(gemm_bi_nt_sm90a_wgmma_wg1_f16, __half, Sm90aNt)
+SM90A_DEFINE_WG2(gemm_bi_nn_sm90a_wgmma_wg2_bf16, __nv_bfloat16, Sm90aNn)
+SM90A_DEFINE_WG2(gemm_bi_nn_sm90a_wgmma_wg2_f16, __half, Sm90aNn)
+SM90A_DEFINE_WG2(gemm_bi_tn_sm90a_wgmma_wg2_bf16, __nv_bfloat16, Sm90aTn)
+SM90A_DEFINE_WG2(gemm_bi_tn_sm90a_wgmma_wg2_f16, __half, Sm90aTn)
+SM90A_DEFINE_WG2(gemm_bi_nt_sm90a_wgmma_wg2_bf16, __nv_bfloat16, Sm90aNt)
+SM90A_DEFINE_WG2(gemm_bi_nt_sm90a_wgmma_wg2_f16, __half, Sm90aNt)
 
 struct Sm90aTf32KernelParams {
     int a_x;
@@ -460,18 +460,35 @@ struct Sm90aTf32KernelParams {
 
 static_assert(sizeof(Sm90aTf32KernelParams) == 40, "TF32 parameter ABI drift");
 static_assert(alignof(Sm90aTf32KernelParams) == 4, "TF32 parameter alignment drift");
-#if !defined(__CUDACC_RTC__)
-static_assert(offsetof(Sm90aTf32KernelParams, a_x) == 0, "a_x offset");
-static_assert(offsetof(Sm90aTf32KernelParams, a_y) == 4, "a_y offset");
-static_assert(offsetof(Sm90aTf32KernelParams, b_x) == 8, "b_x offset");
-static_assert(offsetof(Sm90aTf32KernelParams, b_y) == 12, "b_y offset");
-static_assert(offsetof(Sm90aTf32KernelParams, alpha) == 16, "alpha offset");
-static_assert(offsetof(Sm90aTf32KernelParams, beta) == 20, "beta offset");
-static_assert(offsetof(Sm90aTf32KernelParams, m) == 24, "m offset");
-static_assert(offsetof(Sm90aTf32KernelParams, k) == 28, "k offset");
-static_assert(offsetof(Sm90aTf32KernelParams, n) == 32, "n offset");
-static_assert(offsetof(Sm90aTf32KernelParams, ldc) == 36, "ldc offset");
-#endif
+static_assert(__is_standard_layout(Sm90aTf32KernelParams),
+              "TF32 parameters must remain standard layout");
+// Ten ordered 4-byte fields in 40 bytes leave no internal or tail padding.
+static_assert(sizeof(((Sm90aTf32KernelParams*)0)->a_x) == 4,
+              "TF32 A x origin size changed");
+static_assert(sizeof(((Sm90aTf32KernelParams*)0)->a_y) == 4,
+              "TF32 A y origin size changed");
+static_assert(sizeof(((Sm90aTf32KernelParams*)0)->b_x) == 4,
+              "TF32 B x origin size changed");
+static_assert(sizeof(((Sm90aTf32KernelParams*)0)->b_y) == 4,
+              "TF32 B y origin size changed");
+static_assert(sizeof(((Sm90aTf32KernelParams*)0)->alpha) == 4,
+              "TF32 alpha size changed");
+static_assert(sizeof(((Sm90aTf32KernelParams*)0)->beta) == 4,
+              "TF32 beta size changed");
+static_assert(sizeof(((Sm90aTf32KernelParams*)0)->m) == 4,
+              "TF32 M size changed");
+static_assert(sizeof(((Sm90aTf32KernelParams*)0)->k) == 4,
+              "TF32 K size changed");
+static_assert(sizeof(((Sm90aTf32KernelParams*)0)->n) == 4,
+              "TF32 N size changed");
+static_assert(sizeof(((Sm90aTf32KernelParams*)0)->ldc) == 4,
+              "TF32 output stride size changed");
+
+static __device__ __forceinline__ void sm90a_tf32_tma_copy(
+    unsigned destination, unsigned long long map, int x, int y,
+    int origin_x, int origin_y, unsigned barrier) {
+    sm90a_tma_copy(destination, map, x + origin_x, y + origin_y, barrier);
+}
 
 static __device__ __forceinline__ unsigned long long sm90a_tf32_desc(
     const void* pointer, unsigned leading_offset, unsigned stride_offset) {
@@ -513,6 +530,7 @@ static __device__ __forceinline__ float sm90a_tf32_epilogue(
         float value = params.alpha == 1.0f
             ? accumulator
             : __fmul_rn(params.alpha, accumulator);
+        if (params.beta == 0.0f) return value;
         return __fmaf_rn(params.beta, old_output, value);
     } else if constexpr (Op == Sm90aTn) {
         (void)bias;
@@ -536,7 +554,12 @@ static __device__ __forceinline__ void sm90a_tf32_store(
         column >= sm90a_tf32_columns<Op>(params)) return;
     float* destination = static_cast<float*>(output) +
         static_cast<long long>(row) * params.ldc + column;
-    float old_output = Op == Sm90aNt ? 0.0f : *destination;
+    float old_output = 0.0f;
+    if constexpr (Op == Sm90aTn) {
+        old_output = *destination;
+    } else if constexpr (Op == Sm90aNn) {
+        if (params.beta != 0.0f) old_output = *destination;
+    }
     float value = sm90a_tf32_epilogue<Op>(
         accumulator, old_output, bias, column, params);
 #line 2001 "mamba_tf32_k0_zero_store"
@@ -549,7 +572,7 @@ static __device__ __forceinline__ void sm90a_tf32_zero_reduction_epilogue(
     void* output, const float* bias, const Sm90aTf32KernelParams& params) {
     (void)&sm90a_tf32_epilogue<Op>;
     int columns = sm90a_tf32_columns<Op>(params);
-    int column_tiles = (columns + 127) / 128;
+    int column_tiles = 1 + (columns - 1) / 128;
     int tile_row = (int)blockIdx.x / column_tiles * 64;
     int tile_column = (int)blockIdx.x % column_tiles * 128;
     if (threadIdx.x >= 128) return;
@@ -566,8 +589,9 @@ static __device__ __forceinline__ void sm90a_tf32_zero_reduction_epilogue(
 
 template <int Op>
 static __device__ __forceinline__ void sm90a_tf32_produce_stage(
-    const CUtensorMap& a_map, const CUtensorMap& b_map, unsigned stage,
-    unsigned barrier, int tile, int output_row, int output_column) {
+    const CUtensorMap& a_map, const CUtensorMap& b_map,
+    const Sm90aTf32KernelParams& params, unsigned stage, unsigned barrier,
+    int tile, int output_row, int output_column) {
     constexpr int SM90A_TF32_BK = 32;
     constexpr int SM90A_TF32_PLANE_BYTES = 4096;
     unsigned a_destination = stage;
@@ -579,29 +603,35 @@ static __device__ __forceinline__ void sm90a_tf32_produce_stage(
     int reduction = tile * SM90A_TF32_BK;
     sm90a_expect_transaction(barrier);
     if constexpr (Op == Sm90aNn) {
-        sm90a_tma_copy(a_destination, a_descriptor,
-            reduction, output_row, barrier);
+        sm90a_tf32_tma_copy(a_destination, a_descriptor,
+            reduction, output_row, params.a_x, params.a_y, barrier);
 #pragma unroll
         for (int plane = 0; plane < 4; ++plane) {
-            sm90a_tma_copy(b_destination + plane * SM90A_TF32_PLANE_BYTES,
-                b_descriptor, output_column + plane * 32, reduction, barrier);
+            sm90a_tf32_tma_copy(
+                b_destination + plane * SM90A_TF32_PLANE_BYTES,
+                b_descriptor, output_column + plane * 32, reduction,
+                params.b_x, params.b_y, barrier);
         }
     } else if constexpr (Op == Sm90aTn) {
 #pragma unroll
         for (int plane = 0; plane < 2; ++plane) {
-            sm90a_tma_copy(a_destination + plane * SM90A_TF32_PLANE_BYTES,
-                a_descriptor, output_row + plane * 32, reduction, barrier);
+            sm90a_tf32_tma_copy(
+                a_destination + plane * SM90A_TF32_PLANE_BYTES,
+                a_descriptor, output_row + plane * 32, reduction,
+                params.a_x, params.a_y, barrier);
         }
 #pragma unroll
         for (int plane = 0; plane < 4; ++plane) {
-            sm90a_tma_copy(b_destination + plane * SM90A_TF32_PLANE_BYTES,
-                b_descriptor, output_column + plane * 32, reduction, barrier);
+            sm90a_tf32_tma_copy(
+                b_destination + plane * SM90A_TF32_PLANE_BYTES,
+                b_descriptor, output_column + plane * 32, reduction,
+                params.b_x, params.b_y, barrier);
         }
     } else {
-        sm90a_tma_copy(a_destination, a_descriptor,
-            reduction, output_row, barrier);
-        sm90a_tma_copy(b_destination, b_descriptor,
-            reduction, output_column, barrier);
+        sm90a_tf32_tma_copy(a_destination, a_descriptor,
+            reduction, output_row, params.a_x, params.a_y, barrier);
+        sm90a_tf32_tma_copy(b_destination, b_descriptor,
+            reduction, output_column, params.b_x, params.b_y, barrier);
     }
 }
 
@@ -659,10 +689,11 @@ static __device__ __forceinline__ void sm90a_tf32_kernel(
     unsigned shared = static_cast<unsigned>(__cvta_generic_to_shared(storage));
     unsigned full_base = shared + SM90A_STAGES * SM90A_STAGE_BYTES;
     int columns = sm90a_tf32_columns<Op>(params);
-    int column_tiles = (columns + 127) / 128;
+    int column_tiles = 1 + (columns - 1) / 128;
     int output_row = (int)blockIdx.x / column_tiles * 64;
     int output_column = (int)blockIdx.x % column_tiles * 128;
-    int tiles = (sm90a_tf32_reduction<Op>(params) + 31) / 32;
+    int reduction = sm90a_tf32_reduction<Op>(params);
+    int tiles = 1 + (reduction - 1) / 32;
     bool consumer = threadIdx.x < 128;
 
     if constexpr (Wg2) {
@@ -702,7 +733,7 @@ static __device__ __forceinline__ void sm90a_tf32_kernel(
     int scale_d = Op == Sm90aNn ? 1 : 0;
     for (int tile = 0; tile < tiles; ++tile) {
         if (threadIdx.x == 0) {
-            sm90a_tf32_produce_stage<Op>(a_map, b_map, shared,
+            sm90a_tf32_produce_stage<Op>(a_map, b_map, params, shared,
                 full_base, tile, output_row, output_column);
         }
         sm90a_wait_barrier(full_base, tile & 1);
@@ -763,12 +794,12 @@ extern "C" __global__ __maxnreg__(128) void NAME(                           \
     sm90a_tf32_entry<OP, true>(output, a_map, b_map, bias, params);            \
 }
 
-SM90A_DEFINE_TF32_WG1(sgemm_bi_nn_sm90a_wgmma_tf32_v1_m64n128_bk32_s3_wg1, Sm90aNn)
-SM90A_DEFINE_TF32_WG2(sgemm_bi_nn_sm90a_wgmma_tf32_v1_m64n128_bk32_s3_wg2, Sm90aNn)
-SM90A_DEFINE_TF32_WG1(sgemm_bi_tn_sm90a_wgmma_tf32_v1_m64n128_bk32_s3_wg1, Sm90aTn)
-SM90A_DEFINE_TF32_WG2(sgemm_bi_tn_sm90a_wgmma_tf32_v1_m64n128_bk32_s3_wg2, Sm90aTn)
-SM90A_DEFINE_TF32_WG1(sgemm_bi_nt_sm90a_wgmma_tf32_v1_m64n128_bk32_s3_wg1, Sm90aNt)
-SM90A_DEFINE_TF32_WG2(sgemm_bi_nt_sm90a_wgmma_tf32_v1_m64n128_bk32_s3_wg2, Sm90aNt)
+SM90A_DEFINE_TF32_WG1(gemm_bi_nn_sm90a_wgmma_tf32_v1_m64n128_bk32_s3_wg1, Sm90aNn)
+SM90A_DEFINE_TF32_WG2(gemm_bi_nn_sm90a_wgmma_tf32_v1_m64n128_bk32_s3_wg2, Sm90aNn)
+SM90A_DEFINE_TF32_WG1(gemm_bi_tn_sm90a_wgmma_tf32_v1_m64n128_bk32_s3_wg1, Sm90aTn)
+SM90A_DEFINE_TF32_WG2(gemm_bi_tn_sm90a_wgmma_tf32_v1_m64n128_bk32_s3_wg2, Sm90aTn)
+SM90A_DEFINE_TF32_WG1(gemm_bi_nt_sm90a_wgmma_tf32_v1_m64n128_bk32_s3_wg1, Sm90aNt)
+SM90A_DEFINE_TF32_WG2(gemm_bi_nt_sm90a_wgmma_tf32_v1_m64n128_bk32_s3_wg2, Sm90aNt)
 
 template <typename A, typename B> struct Sm90aTf32SameType { static constexpr bool value = false; };
 template <typename A> struct Sm90aTf32SameType<A, A> { static constexpr bool value = true; };
@@ -777,12 +808,12 @@ using Sm90aTf32KernelSignature = void (*)(
 #define TF32_ASSERT_KERNEL_SIGNATURE(NAME) \
     static_assert(Sm90aTf32SameType<decltype(&NAME), Sm90aTf32KernelSignature>::value, "TF32 kernel signature")
 
-TF32_ASSERT_KERNEL_SIGNATURE(sgemm_bi_nn_sm90a_wgmma_tf32_v1_m64n128_bk32_s3_wg1);
-TF32_ASSERT_KERNEL_SIGNATURE(sgemm_bi_nn_sm90a_wgmma_tf32_v1_m64n128_bk32_s3_wg2);
-TF32_ASSERT_KERNEL_SIGNATURE(sgemm_bi_tn_sm90a_wgmma_tf32_v1_m64n128_bk32_s3_wg1);
-TF32_ASSERT_KERNEL_SIGNATURE(sgemm_bi_tn_sm90a_wgmma_tf32_v1_m64n128_bk32_s3_wg2);
-TF32_ASSERT_KERNEL_SIGNATURE(sgemm_bi_nt_sm90a_wgmma_tf32_v1_m64n128_bk32_s3_wg1);
-TF32_ASSERT_KERNEL_SIGNATURE(sgemm_bi_nt_sm90a_wgmma_tf32_v1_m64n128_bk32_s3_wg2);
+TF32_ASSERT_KERNEL_SIGNATURE(gemm_bi_nn_sm90a_wgmma_tf32_v1_m64n128_bk32_s3_wg1);
+TF32_ASSERT_KERNEL_SIGNATURE(gemm_bi_nn_sm90a_wgmma_tf32_v1_m64n128_bk32_s3_wg2);
+TF32_ASSERT_KERNEL_SIGNATURE(gemm_bi_tn_sm90a_wgmma_tf32_v1_m64n128_bk32_s3_wg1);
+TF32_ASSERT_KERNEL_SIGNATURE(gemm_bi_tn_sm90a_wgmma_tf32_v1_m64n128_bk32_s3_wg2);
+TF32_ASSERT_KERNEL_SIGNATURE(gemm_bi_nt_sm90a_wgmma_tf32_v1_m64n128_bk32_s3_wg1);
+TF32_ASSERT_KERNEL_SIGNATURE(gemm_bi_nt_sm90a_wgmma_tf32_v1_m64n128_bk32_s3_wg2);
 
 #undef TF32_ASSERT_KERNEL_SIGNATURE
 #undef SM90A_DEFINE_TF32_WG2

@@ -36,8 +36,8 @@ use mamba_rs::mamba_ssm::gpu::context::GpuCtx;
 use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
 use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
 use mamba_rs::mamba_ssm::gpu::gemm_bi_triad::{
-    TcFwdOperands, TcTile, sgemm_bi_backward_dw_tc_with_tile, sgemm_bi_backward_dx_tc_with_tile,
-    sgemm_bi_forward_tc_with_tile,
+    TcFwdOperands, TcTile, gemm_bi_backward_dw_tc_with_tile, gemm_bi_backward_dx_tc_with_tile,
+    gemm_bi_forward_tc_with_tile,
 };
 use std::io::Write as _;
 
@@ -75,6 +75,7 @@ fn rung_name(t: TcTile) -> &'static str {
         TcTile::Tile128 => "tile128",
         TcTile::Tile64 => "tile64",
         TcTile::Thin16 => "thin16",
+        TcTile::Rect128x64 => "rect128x64",
     }
 }
 
@@ -147,7 +148,7 @@ impl Cell<'_> {
             dtype: self.dt,
         };
         match self.op {
-            Op::NnFwd => sgemm_bi_forward_tc_with_tile(
+            Op::NnFwd => gemm_bi_forward_tc_with_tile(
                 &self.ctx.stream,
                 &self.ctx.kernels,
                 &TcFwdOperands {
@@ -160,7 +161,7 @@ impl Cell<'_> {
                 tile,
             )
             .expect("fwd launch"),
-            Op::TnDw => sgemm_bi_backward_dw_tc_with_tile(
+            Op::TnDw => gemm_bi_backward_dw_tc_with_tile(
                 &self.ctx.stream,
                 &self.ctx.kernels,
                 self.dw.cached_ptr(),
@@ -170,7 +171,7 @@ impl Cell<'_> {
                 tile,
             )
             .expect("dw launch"),
-            Op::NtDx => sgemm_bi_backward_dx_tc_with_tile(
+            Op::NtDx => gemm_bi_backward_dx_tc_with_tile(
                 &self.ctx.stream,
                 &self.ctx.kernels,
                 tp(self.dx),

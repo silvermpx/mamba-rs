@@ -282,6 +282,31 @@ fn m3_pooled_page_bench_typed_vs_f32() {
         let mut ast =
             GpuBuffer::zeros(&ctx.stream, nl * nh * cfg.num_rope_angles().max(1)).unwrap();
 
+        prefill
+            .run_full(
+                &Mamba3PrefillRun {
+                    ctx: &ctx,
+                    kernels: &kernels,
+                    dims: &dims,
+                    weights: view,
+                    mamba_input: &gpu_input,
+                    identity_proj: false,
+                    carry_state: false,
+                },
+                GpuMamba3StateBufs {
+                    ssm: &mut ssm,
+                    k: &mut kst,
+                    v: &mut vst,
+                    angle: &mut ast,
+                },
+                mamba_rs::mamba3_siso::gpu::prefill::Mamba3PrefillOutputs {
+                    last_hidden: &mut last_hidden,
+                    full_temporal: None,
+                    pooled_sum: Some(&mut pooled),
+                },
+            )
+            .expect("pooled graph warmup");
+
         // The benchmark keeps every captured allocation alive through the graph.
         let graph = unsafe {
             Mamba3PrefillPooledGraph::capture(

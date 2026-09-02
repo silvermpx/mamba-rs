@@ -7,8 +7,8 @@
 use std::path::Path;
 
 use crate::mamba_ssm::gpu::blas::{
-    TiedLmDims, TypedPtr, gpu_gemm_ex_forward_raw, gpu_gemm_ex_tied_lm_head_raw,
-    gpu_sgemm_forward_ptr, gpu_sgemm_tied_lm_head_raw,
+    TiedLmDims, TypedPtr, gpu_gemm_bi_forward_ptr, gpu_gemm_bi_tied_lm_head_raw,
+    gpu_gemm_ex_forward_raw, gpu_gemm_ex_tied_lm_head_raw,
 };
 use crate::mamba_ssm::gpu::buffers::{GpuBuffer, GpuByteBuffer};
 use crate::mamba_ssm::gpu::dtype::WeightDtype;
@@ -553,7 +553,7 @@ impl GpuMambaLM {
                     // The hidden state already lives on the GPU (temporal_ptr)
                     // — feed it directly; the old path bounced it through host
                     // memory (D2H + H2D) on every decoded token.
-                    gpu_sgemm_forward_ptr(
+                    gpu_gemm_bi_forward_ptr(
                         ctx,
                         &mut self.gpu_logits,
                         temporal_ptr,
@@ -564,7 +564,7 @@ impl GpuMambaLM {
                 } else {
                     // Tied: logits[B,V] = temporal[B,D] @ embed^T[D,V]
                     // Single SGEMM via OP_T on embed (reuses row-major [V,D] buffer).
-                    gpu_sgemm_tied_lm_head_raw(
+                    gpu_gemm_bi_tied_lm_head_raw(
                         ctx,
                         self.gpu_logits.cached_ptr(),
                         temporal_ptr,

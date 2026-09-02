@@ -59,12 +59,27 @@ use crate::mamba_ssm::gpu::forward::{
 use crate::mamba_ssm::gpu::forward_mixed::{
     GpuMambaBackboneMixedActs, GpuMambaMixedTrainScratch, gpu_forward_mamba_backbone_mixed,
 };
-use crate::mamba_ssm::gpu::graph_capture::capture_into_graph;
+use crate::mamba_ssm::gpu::graph_capture::{
+    capture_into_graph_with_gemm_plan, require_f32_triad_graph_plan,
+};
+use crate::mamba_ssm::gpu::kernel_identity::{CapturedGemmGraphPlan, PreparedGemmCaptureManifest};
 use crate::mamba_ssm::gpu::launch::grid_1d;
 use crate::mamba_ssm::gpu::weights::{
     GpuMambaGrads, GpuMambaTrainLayerWeights, GpuMambaTrainWeights,
 };
 use crate::mamba_ssm::gpu::weights_mixed_train::GpuMambaTrainMixedWeights;
+
+fn with_validated_launch(
+    ctx: &GpuCtx,
+    plan: Option<&CapturedGemmGraphPlan>,
+    label: &str,
+    launch: impl FnOnce() -> Result<(), String>,
+) -> Result<(), String> {
+    match plan {
+        Some(plan) => plan.with_validated_launch(ctx, label, launch),
+        None => launch(),
+    }
+}
 
 /// Capture-side variant of the trainer's `recompute_a_neg_all` helper.
 /// Launches `exp_negate` per layer from `master_layers[l].a_log` into
@@ -196,6 +211,7 @@ pub struct GpuMambaTrainingStepGraph {
     captured_bi_upcast_ptrs: [u64; 3],
     // Complete GEMM route captured with the graph.
     captured_gemm_flags: crate::mamba_ssm::gpu::context::GemmRoute,
+    captured_gemm_plan: Option<CapturedGemmGraphPlan>,
     captured_ctx_token: u64,
     captured_stream_token: usize,
 }
@@ -233,6 +249,7 @@ impl GpuMambaTrainingStepGraph {
         cap: MambaMixedCapture<'_>,
         batch: usize,
         seq_len: usize,
+        manifest: &PreparedGemmCaptureManifest,
     ) -> Result<Self, String> {
         let MambaMixedCapture {
             train_w,
@@ -300,10 +317,11 @@ impl GpuMambaTrainingStepGraph {
         let snap_compute_norm_f = train_w.compute.norm_f_weight.ptr();
         let snap_half_staging = ctx.half_staging_ptr();
         let snap_bi_upcast = ctx.bi_upcast_scratch_ptrs();
+        let route_capacity = manifest.route_capacity;
 
         ctx.freeze_graph_scratch();
-        let graph = unsafe {
-            capture_into_graph(&ctx.stream, || {
+        let (graph, captured_gemm_plan) = unsafe {
+            capture_into_graph_with_gemm_plan(ctx, route_capacity, manifest, || {
                 grads.zero(&ctx.stream)?;
                 gpu_forward_mamba_backbone_mixed(
                     ctx,
@@ -377,6 +395,7 @@ impl GpuMambaTrainingStepGraph {
                 ctx.note_graph_capture();
                 ctx.gemm_route()
             },
+            captured_gemm_plan,
             captured_ctx_token: ctx.instance_token(),
             captured_stream_token: ctx.stream_token(),
         })
@@ -501,9 +520,16 @@ impl GpuMambaTrainingStepGraph {
             self.captured_gemm_flags,
             "training_graph replay: GEMM route changed since capture; re-capture instead"
         );
-        self.graph
-            .launch()
-            .map_err(|e| format!("training_graph launch: {e:?}"))
+        with_validated_launch(
+            ctx,
+            self.captured_gemm_plan.as_ref(),
+            "training_graph replay",
+            || {
+                self.graph
+                    .launch()
+                    .map_err(|e| format!("training_graph launch: {e:?}"))
+            },
+        )
     }
 }
 
@@ -589,6 +615,7 @@ pub struct GpuMambaF32TrainingStepGraph {
     captured_weights_norm_f_ptr: u64,
     // The trainer checks this route before replay.
     captured_gemm_flags: crate::mamba_ssm::gpu::context::GemmRoute,
+    captured_gemm_plan: Option<CapturedGemmGraphPlan>,
     captured_ctx_token: u64,
     captured_stream_token: usize,
 }
@@ -615,6 +642,7 @@ impl GpuMambaF32TrainingStepGraph {
         cap: MambaF32Capture<'_>,
         batch: usize,
         seq_len: usize,
+        manifest: &PreparedGemmCaptureManifest,
     ) -> Result<Self, String> {
         let MambaF32Capture {
             weights,
@@ -643,10 +671,11 @@ impl GpuMambaF32TrainingStepGraph {
         let snap_a_neg = a_neg_all.cached_ptr();
         let snap_input_proj = weights.input_proj_w.cached_ptr();
         let snap_norm_f = weights.norm_f_weight.cached_ptr();
+        let route_capacity = manifest.route_capacity;
 
         let cfg_local = *cfg;
-        let graph = unsafe {
-            capture_into_graph(&ctx.stream, || {
+        let (graph, captured_gemm_plan) = unsafe {
+            capture_into_graph_with_gemm_plan(ctx, route_capacity, manifest, || {
                 grads.zero(&ctx.stream)?;
                 gpu_forward_mamba_backbone(
                     ctx,
@@ -683,6 +712,12 @@ impl GpuMambaF32TrainingStepGraph {
                 Ok(())
             })
         }?;
+        require_f32_triad_graph_plan(
+            ctx,
+            true,
+            captured_gemm_plan.as_ref(),
+            "M1 f32 training graph capture",
+        )?;
 
         Ok(Self {
             graph,
@@ -706,6 +741,7 @@ impl GpuMambaF32TrainingStepGraph {
                 ctx.note_graph_capture();
                 ctx.gemm_route()
             },
+            captured_gemm_plan,
             captured_ctx_token: ctx.instance_token(),
             captured_stream_token: ctx.stream_token(),
         })
@@ -802,9 +838,16 @@ impl GpuMambaF32TrainingStepGraph {
             self.captured_weights_norm_f_ptr,
             "f32 training_graph replay: norm_f_weight pointer changed since capture"
         );
-        self.graph
-            .launch()
-            .map_err(|e| format!("f32 training_graph launch: {e:?}"))
+        with_validated_launch(
+            ctx,
+            self.captured_gemm_plan.as_ref(),
+            "f32 training_graph replay",
+            || {
+                self.graph
+                    .launch()
+                    .map_err(|e| format!("f32 training_graph launch: {e:?}"))
+            },
+        )
     }
 }
 

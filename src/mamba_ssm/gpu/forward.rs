@@ -17,7 +17,7 @@
 //! Source: CPU reference in train/forward.rs
 
 use super::backward::GpuMambaTargetScratch;
-use super::blas::gpu_sgemm_forward_raw;
+use super::blas::gpu_gemm_bi_forward_raw;
 use super::buffers::GpuBuffer;
 use super::context::GpuCtx;
 use super::launch::{grid_1d, grid_norm, grid_parallel_scan};
@@ -443,7 +443,7 @@ pub fn gpu_forward_mamba_layer(
     // F2: Batch in_proj -- ONE cuBLAS SGEMM
     //     [B*T, d_model] -> [B*T, 2*d_inner]
     // ===================================================================
-    gpu_sgemm_forward_raw(
+    gpu_gemm_bi_forward_raw(
         ctx,
         &mut scratch.proj_flat,
         &acts.post_norm,
@@ -509,7 +509,7 @@ pub fn gpu_forward_mamba_layer(
     // F4b: x_proj -- ONE cuBLAS SGEMM
     //      [B*T, d_inner] -> [B*T, xdbl_dim]
     // ===================================================================
-    gpu_sgemm_forward_raw(
+    gpu_gemm_bi_forward_raw(
         ctx,
         &mut acts.xdbl,
         &acts.u,
@@ -539,7 +539,7 @@ pub fn gpu_forward_mamba_layer(
             .map_err(|e| format!("gather_cols dt mamba: {:?}", e))?;
     }
 
-    gpu_sgemm_forward_raw(
+    gpu_gemm_bi_forward_raw(
         ctx,
         &mut acts.delta_raw,
         &scratch.dt_gather_buf,
@@ -676,7 +676,7 @@ pub fn gpu_forward_mamba_layer(
     // F5: Batch out_proj — ONE cuBLAS SGEMM
     //     [B*T, d_inner] -> [B*T, d_model]
     // ===================================================================
-    gpu_sgemm_forward_raw(
+    gpu_gemm_bi_forward_raw(
         ctx,
         &mut scratch.out_flat,
         &acts.gated,
@@ -777,7 +777,7 @@ pub fn gpu_forward_mamba_backbone(
     acts.input_proj_inputs.copy_from(mamba_input, &ctx.stream)?;
 
     // Batched input_proj: [B*T, mamba_input_dim] -> [B*T, d_model]
-    gpu_sgemm_forward_raw(
+    gpu_gemm_bi_forward_raw(
         ctx,
         temporal,
         mamba_input,
@@ -932,7 +932,7 @@ pub fn gpu_forward_mamba_target_burnin(
         }
 
         // === F2: in_proj SGEMM [B*T, dm] -> [B*T, 2*di] ===
-        gpu_sgemm_forward_raw(
+        gpu_gemm_bi_forward_raw(
             ctx,
             &mut scratch.proj_flat,
             &scratch.out_flat,
@@ -982,7 +982,7 @@ pub fn gpu_forward_mamba_target_burnin(
         }
 
         // === F4b: x_proj SGEMM [B*T, di] -> [B*T, xdbl_dim] ===
-        gpu_sgemm_forward_raw(
+        gpu_gemm_bi_forward_raw(
             ctx,
             &mut scratch.xdbl,
             &scratch.u,
@@ -1007,7 +1007,7 @@ pub fn gpu_forward_mamba_target_burnin(
             unsafe { builder.launch(grid_1d(bt * dt_rank)) }
                 .map_err(|e| format!("gather dt target L{layer_idx}: {:?}", e))?;
         }
-        gpu_sgemm_forward_raw(
+        gpu_gemm_bi_forward_raw(
             ctx,
             &mut scratch.delta,
             &scratch.dt_gather,
@@ -1126,7 +1126,7 @@ pub fn gpu_forward_mamba_target_burnin(
         }
 
         // === F5: out_proj SGEMM [B*T, di] -> [B*T, dm] ===
-        gpu_sgemm_forward_raw(
+        gpu_gemm_bi_forward_raw(
             ctx,
             &mut scratch.out_flat,
             &scratch.gated,

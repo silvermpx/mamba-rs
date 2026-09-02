@@ -4,11 +4,13 @@ use sha2::{Digest as _, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::sync::OnceLock;
 #[cfg(target_os = "linux")]
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use super::context::{BiGemmFamily, F32TriadPolicy};
+use super::buffers::ManagedAllocationEpochStamp;
+use super::context::{BiGemmFamily, F32TriadPolicy, GpuCtx, GpuCtxResources};
 
 pub type Sha256Digest = [u8; 32];
 
@@ -27,15 +29,17 @@ const CACHE_FORMAT_VERSION: u16 = 1;
 
 pub const COMPOSER_REVISION: u16 = 1;
 pub const COMPILER_REVISION: u16 = 2;
-pub const NUMERIC_ABI_REVISION: u16 = 2;
-pub const TUNING_TABLE_REVISION: u16 = 1;
-pub const SCHEDULE_REVISION: u16 = 2;
+pub const NUMERIC_ABI_REVISION: u16 = 5;
+pub const TUNING_TABLE_REVISION: u16 = 36;
+pub const SCHEDULE_REVISION: u16 = 8;
 
 const NUMERIC_CONTRACT_DOMAIN: &[u8] = b"mamba-rs.resolved-numeric-contract.v2";
 const ARTIFACT_DIGEST_DOMAIN: &[u8] = b"mamba-rs.artifact-digest.v1";
 const COMPILER_TARGET_DOMAIN: &[u8] = b"mamba-rs.compiler-target.v1";
 const DRIVER_BUILD_DIGEST_DOMAIN: &[u8] = b"mamba-rs.driver-build-digest.v1";
 const LAUNCH_COUNT_DOMAIN: &[u8] = b"mamba-rs.resolved-launch-count.v1";
+const ROUTE_INDEX_DOMAIN: &[u8] = b"mamba-rs.resolved-route-index.v1";
+const PHYSICAL_LAUNCH_INDEX_DOMAIN: &[u8] = b"mamba-rs.resolved-physical-launch-index.v1";
 
 pub(crate) fn deterministic_nvrtc_options(
     nvrtc_version: (i32, i32),
@@ -48,7 +52,7 @@ pub(crate) fn deterministic_nvrtc_options(
     options
 }
 
-pub const POLICY_REVISION: u16 = 1;
+pub const POLICY_REVISION: u16 = 4;
 
 /// SHA-256 framing with explicit tags, presence, and byte lengths.
 pub struct FramedSha256(Sha256);
@@ -700,6 +704,7 @@ pub struct DriverIdentity {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct DeviceIdentity {
     pub compute_capability: (u32, u32),
+    pub multiprocessor_count: u32,
     pub target: CudaTarget,
     pub driver: DriverIdentity,
 }
@@ -2470,79 +2475,65 @@ pub enum PolicyDtype {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct BackwardPolicyCell {
-    pub op: PolicyOp,
-    pub dtype: PolicyDtype,
-    pub dims: (usize, usize, usize),
-}
-
-const fn policy_cell(
-    op: PolicyOp,
-    dtype: PolicyDtype,
-    dims: (usize, usize, usize),
-) -> BackwardPolicyCell {
-    BackwardPolicyCell { op, dtype, dims }
-}
-
-const LEGACY_BACKWARD_CELLS: [BackwardPolicyCell; 18] = [
-    policy_cell(PolicyOp::Dw, PolicyDtype::Bf16, (1024, 8, 256)),
-    policy_cell(PolicyOp::Dw, PolicyDtype::Bf16, (2048, 16, 512)),
-    policy_cell(PolicyOp::Dw, PolicyDtype::Bf16, (2048, 48, 1536)),
-    policy_cell(PolicyOp::Dw, PolicyDtype::Bf16, (1024, 256, 40)),
-    policy_cell(PolicyOp::Dw, PolicyDtype::Bf16, (2048, 512, 48)),
-    policy_cell(PolicyOp::Dx, PolicyDtype::Bf16, (1024, 8, 256)),
-    policy_cell(PolicyOp::Dx, PolicyDtype::Bf16, (2048, 16, 512)),
-    policy_cell(PolicyOp::Dx, PolicyDtype::Bf16, (2048, 48, 1536)),
-    policy_cell(PolicyOp::Dx, PolicyDtype::Bf16, (32, 256, 1024)),
-    policy_cell(PolicyOp::Dw, PolicyDtype::F16, (1024, 8, 256)),
-    policy_cell(PolicyOp::Dw, PolicyDtype::F16, (2048, 16, 512)),
-    policy_cell(PolicyOp::Dw, PolicyDtype::F16, (2048, 48, 1536)),
-    policy_cell(PolicyOp::Dw, PolicyDtype::F16, (1024, 256, 40)),
-    policy_cell(PolicyOp::Dw, PolicyDtype::F16, (2048, 512, 48)),
-    policy_cell(PolicyOp::Dx, PolicyDtype::F16, (1024, 8, 256)),
-    policy_cell(PolicyOp::Dx, PolicyDtype::F16, (2048, 16, 512)),
-    policy_cell(PolicyOp::Dx, PolicyDtype::F16, (2048, 48, 1536)),
-    policy_cell(PolicyOp::Dx, PolicyDtype::F16, (32, 256, 1024)),
-];
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct LegacySm80Policy {
+pub struct Sm80TcPolicyV3 {
     pub reject_zero_axes: bool,
     pub square_tile_min: usize,
     pub large_tile_min: usize,
-    pub tile128_prefer_min_tiles: u32,
     pub forward_min_columns: usize,
     pub forward_thin_max_rows: usize,
     pub forward_thin_below_square_columns: bool,
-    pub backward_one_axis_tile64: bool,
-    pub backward_two_small_fallback: bool,
-    pub backward_cells: [BackwardPolicyCell; 18],
+    pub forward_underfill_max_reduction: usize,
+    pub forward_underfill_min_columns: usize,
+    pub forward_underfill_wave_numerator: u64,
+    pub forward_underfill_wave_denominator: u64,
+    pub forward_short_reduction_max: usize,
+    pub forward_short_reduction_wave_numerator: u64,
+    pub forward_short_reduction_wave_denominator: u64,
+    pub tile128_base_wave_numerator: u64,
+    pub tile128_base_wave_denominator: u64,
+    pub tn_rectangular_min_aspect: u64,
+    pub tn_rectangular_wave_numerator: u64,
+    pub tn_rectangular_wave_denominator: u64,
+    pub backward_tail_min_reduction: usize,
+    pub backward_tail_min_tile64_ctas: u64,
+    pub deep_split_k_compute_capability: (u32, u32),
+    pub deep_split_k_output_columns: usize,
+    pub deep_split_k_tail_min_reduction: usize,
+    pub deep_split_k_aligned_min_reduction: usize,
 }
 
-impl LegacySm80Policy {
+impl Sm80TcPolicyV3 {
     pub const fn current() -> Self {
         Self {
             reject_zero_axes: true,
             square_tile_min: 64,
             large_tile_min: 128,
-            tile128_prefer_min_tiles: 72,
             forward_min_columns: 32,
             forward_thin_max_rows: 64,
             forward_thin_below_square_columns: true,
-            backward_one_axis_tile64: true,
-            backward_two_small_fallback: true,
-            backward_cells: LEGACY_BACKWARD_CELLS,
+            forward_underfill_max_reduction: 512,
+            forward_underfill_min_columns: 256,
+            forward_underfill_wave_numerator: 3,
+            forward_underfill_wave_denominator: 16,
+            forward_short_reduction_max: 16,
+            forward_short_reduction_wave_numerator: 7,
+            forward_short_reduction_wave_denominator: 16,
+            tile128_base_wave_numerator: 1,
+            tile128_base_wave_denominator: 2,
+            tn_rectangular_min_aspect: 4,
+            tn_rectangular_wave_numerator: 9,
+            tn_rectangular_wave_denominator: 8,
+            backward_tail_min_reduction: 256,
+            backward_tail_min_tile64_ctas: 4,
+            deep_split_k_compute_capability: (8, 9),
+            deep_split_k_output_columns: 128,
+            deep_split_k_tail_min_reduction: 511,
+            deep_split_k_aligned_min_reduction: 1024,
         }
     }
 
-    pub fn admits(&self, op: PolicyOp, dtype: PolicyDtype, dims: (usize, usize, usize)) -> bool {
-        self.backward_cells
-            .iter()
-            .any(|cell| cell.op == op && cell.dtype == dtype && cell.dims == dims)
-    }
-
-    pub fn digest(&self) -> Sha256Digest {
-        let mut hash = FramedSha256::new(b"legacy-sm80-policy.v1")
+    pub fn digest(&self, multiprocessor_count: u32) -> Sha256Digest {
+        FramedSha256::new(b"sm80-tc-policy.v3")
             .required(b"reject-zero-axes", &[self.reject_zero_axes as u8])
             .required(
                 b"square-tile-min",
@@ -2551,10 +2542,6 @@ impl LegacySm80Policy {
             .required(
                 b"large-tile-min",
                 &(self.large_tile_min as u64).to_le_bytes(),
-            )
-            .required(
-                b"tile128-prefer-min-tiles",
-                &self.tile128_prefer_min_tiles.to_le_bytes(),
             )
             .required(
                 b"forward-min-columns",
@@ -2569,32 +2556,147 @@ impl LegacySm80Policy {
                 &[self.forward_thin_below_square_columns as u8],
             )
             .required(
-                b"backward-one-axis-tile64",
-                &[self.backward_one_axis_tile64 as u8],
+                b"forward-underfill-max-reduction",
+                &(self.forward_underfill_max_reduction as u64).to_le_bytes(),
             )
             .required(
-                b"backward-two-small-fallback",
-                &[self.backward_two_small_fallback as u8],
+                b"forward-underfill-min-columns",
+                &(self.forward_underfill_min_columns as u64).to_le_bytes(),
             )
             .required(
-                b"backward-cell-count",
-                &(self.backward_cells.len() as u64).to_le_bytes(),
-            );
-        for cell in self.backward_cells {
-            hash = hash
-                .required(b"backward-op", &[cell.op as u8])
-                .required(b"backward-dtype", &[cell.dtype as u8])
-                .required(b"backward-m", &(cell.dims.0 as u64).to_le_bytes())
-                .required(b"backward-k", &(cell.dims.1 as u64).to_le_bytes())
-                .required(b"backward-n", &(cell.dims.2 as u64).to_le_bytes());
-        }
-        hash.finish()
+                b"forward-underfill-wave-numerator",
+                &self.forward_underfill_wave_numerator.to_le_bytes(),
+            )
+            .required(
+                b"forward-underfill-wave-denominator",
+                &self.forward_underfill_wave_denominator.to_le_bytes(),
+            )
+            .required(
+                b"forward-short-reduction-max",
+                &(self.forward_short_reduction_max as u64).to_le_bytes(),
+            )
+            .required(
+                b"forward-short-reduction-wave-numerator",
+                &self.forward_short_reduction_wave_numerator.to_le_bytes(),
+            )
+            .required(
+                b"forward-short-reduction-wave-denominator",
+                &self.forward_short_reduction_wave_denominator.to_le_bytes(),
+            )
+            .required(
+                b"tile128-base-wave-numerator",
+                &self.tile128_base_wave_numerator.to_le_bytes(),
+            )
+            .required(
+                b"tile128-base-wave-denominator",
+                &self.tile128_base_wave_denominator.to_le_bytes(),
+            )
+            .required(
+                b"tn-rectangular-min-aspect",
+                &self.tn_rectangular_min_aspect.to_le_bytes(),
+            )
+            .required(
+                b"tn-rectangular-wave-numerator",
+                &self.tn_rectangular_wave_numerator.to_le_bytes(),
+            )
+            .required(
+                b"tn-rectangular-wave-denominator",
+                &self.tn_rectangular_wave_denominator.to_le_bytes(),
+            )
+            .required(
+                b"backward-tail-min-reduction",
+                &(self.backward_tail_min_reduction as u64).to_le_bytes(),
+            )
+            .required(
+                b"backward-tail-min-tile64-ctas",
+                &self.backward_tail_min_tile64_ctas.to_le_bytes(),
+            )
+            .required(
+                b"deep-split-k-cc-major",
+                &self.deep_split_k_compute_capability.0.to_le_bytes(),
+            )
+            .required(
+                b"deep-split-k-cc-minor",
+                &self.deep_split_k_compute_capability.1.to_le_bytes(),
+            )
+            .required(
+                b"deep-split-k-output-columns",
+                &(self.deep_split_k_output_columns as u64).to_le_bytes(),
+            )
+            .required(
+                b"deep-split-k-tail-min-reduction",
+                &(self.deep_split_k_tail_min_reduction as u64).to_le_bytes(),
+            )
+            .required(
+                b"deep-split-k-aligned-min-reduction",
+                &(self.deep_split_k_aligned_min_reduction as u64).to_le_bytes(),
+            )
+            .required(b"multiprocessor-count", &multiprocessor_count.to_le_bytes())
+            .finish()
     }
 }
 
-pub fn legacy_sm80_policy_digest() -> Sha256Digest {
-    static DIGEST: OnceLock<Sha256Digest> = OnceLock::new();
-    *DIGEST.get_or_init(|| LegacySm80Policy::current().digest())
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct ScalarWavePolicyV1 {
+    pub thin_split_wave_numerator: u64,
+    pub thin_split_wave_denominator: u64,
+    pub slim_split_wave_numerator: u64,
+    pub slim_split_wave_denominator: u64,
+    pub tn_split_m_wave_numerator: u64,
+    pub tn_split_m_wave_denominator: u64,
+}
+
+impl ScalarWavePolicyV1 {
+    pub const fn current() -> Self {
+        Self {
+            thin_split_wave_numerator: 1,
+            thin_split_wave_denominator: 1,
+            slim_split_wave_numerator: 3,
+            slim_split_wave_denominator: 1,
+            tn_split_m_wave_numerator: 2,
+            tn_split_m_wave_denominator: 1,
+        }
+    }
+
+    pub fn digest(&self, multiprocessor_count: u32) -> Sha256Digest {
+        FramedSha256::new(b"scalar-wave-policy.v1")
+            .required(
+                b"thin-split-wave-numerator",
+                &self.thin_split_wave_numerator.to_le_bytes(),
+            )
+            .required(
+                b"thin-split-wave-denominator",
+                &self.thin_split_wave_denominator.to_le_bytes(),
+            )
+            .required(
+                b"slim-split-wave-numerator",
+                &self.slim_split_wave_numerator.to_le_bytes(),
+            )
+            .required(
+                b"slim-split-wave-denominator",
+                &self.slim_split_wave_denominator.to_le_bytes(),
+            )
+            .required(
+                b"tn-split-m-wave-numerator",
+                &self.tn_split_m_wave_numerator.to_le_bytes(),
+            )
+            .required(
+                b"tn-split-m-wave-denominator",
+                &self.tn_split_m_wave_denominator.to_le_bytes(),
+            )
+            .required(b"multiprocessor-count", &multiprocessor_count.to_le_bytes())
+            .finish()
+    }
+}
+
+pub fn gemm_dispatch_policy_digest(multiprocessor_count: u32) -> Sha256Digest {
+    let tensor_core = Sm80TcPolicyV3::current().digest(multiprocessor_count);
+    let scalar = ScalarWavePolicyV1::current().digest(multiprocessor_count);
+    FramedSha256::new(b"gemm-dispatch-policy.v4")
+        .required(b"sm80-tensor-core-policy", &tensor_core)
+        .required(b"scalar-wave-policy", &scalar)
+        .required(b"multiprocessor-count", &multiprocessor_count.to_le_bytes())
+        .finish()
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -2635,6 +2737,7 @@ impl NumericContractSet {
     pub const FIXED_MMA_SYNC_V1: Self = Self(1 << 4);
     pub const FIXED_MATVEC_TREE_V1: Self = Self(1 << 5);
     pub const TRIAD_DETERMINISTIC_TF32_V1: Self = Self(1 << 6);
+    pub const TRIAD_DETERMINISTIC_TF32_SPLIT_K_V1: Self = Self(1 << 7);
 
     pub const fn union(self, other: Self) -> Self {
         Self(self.0 | other.0)
@@ -2677,7 +2780,9 @@ pub fn route_backend_contract_sets(policy: GemmPolicy) -> (BackendSet, NumericCo
     let contracts = if policy.bi_gemm_family == BiGemmFamily::Triad
         && policy.f32_triad_policy == F32TriadPolicy::AllowDeterministicTf32V1
     {
-        contracts.union(NumericContractSet::TRIAD_DETERMINISTIC_TF32_V1)
+        contracts
+            .union(NumericContractSet::TRIAD_DETERMINISTIC_TF32_V1)
+            .union(NumericContractSet::TRIAD_DETERMINISTIC_TF32_SPLIT_K_V1)
     } else {
         contracts
     };
@@ -2731,6 +2836,14 @@ pub enum PhysicalGemmBackend {
     Sm90aWgmmaTf32TmaV1 = 6,
     Sm100Tcgen05Tf32TmaV1 = 7,
     Sm120TmaMmaTf32RnaV1 = 8,
+    ScalarFmaV1 = 9,
+    MmaTf32RnaSplitK4V1 = 10,
+    MmaTf32RnaSplitK2V1 = 11,
+    ScalarFmaTnNarrowSplitMPartialV1 = 13,
+    ScalarFmaTnSplitMF64ReduceV1 = 15,
+    MmaTf32RnaSplitK8V1 = 16,
+    ScalarFmaSplitKPartialV1 = 17,
+    ScalarFmaSplitKF32ReduceV1 = 18,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -2744,6 +2857,15 @@ pub enum ResolvedNumericContract {
     Sm90aWgmmaTf32TmaV1 = 6,
     Sm100Tcgen05Tf32TmaV1 = 7,
     Sm120TmaMmaTf32RnaV1 = 8,
+    ZeroReductionEpilogueF32V1 = 9,
+    MmaTf32RnaSplitK4V1 = 10,
+    MmaTf32RnaSplitK2V1 = 11,
+    ScalarFmaTnSplitMF64ReduceV1 = 12,
+    ScalarFmaTnNarrowSplitMPartialV1 = 13,
+    ScalarFmaTnNarrowSplitMF64ReduceV1 = 14,
+    MmaTf32RnaSplitK8V1 = 15,
+    ScalarFmaSplitKPartialV1 = 16,
+    ScalarFmaSplitKF32ReduceV1 = 17,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -2772,6 +2894,26 @@ pub enum ResolvedOperandConversion {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[repr(u8)]
+pub enum ResolvedOutputOwnership {
+    OneCtaPerOutputTileV1 = 1,
+    LastCtaPerOutputTileFixedSplitK4ReduceV1 = 4,
+    LastCtaPerOutputTileFixedSplitK2ReduceV1 = 5,
+    OneThreadPerOutputElementFixedSplitMReduceV1 = 7,
+    LastCtaPerOutputTileFixedSplitK8ReduceV1 = 8,
+    OneCtaPerOutputTilePerSplitKPartitionV1 = 9,
+    OneThreadPerOutputElementFixedSplitKReduceV1 = 10,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct ResolvedKernelLaunch {
+    pub grid_dim: (u32, u32, u32),
+    pub block_dim: (u32, u32, u32),
+    pub shared_mem_bytes: u32,
+    pub arguments_digest: Sha256Digest,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct ResolvedGemmRoute {
     pub op: ResolvedGemmOp,
     pub dtype: PolicyDtype,
@@ -2780,6 +2922,7 @@ pub struct ResolvedGemmRoute {
     pub instruction_family: ResolvedInstructionFamily,
     pub instruction_shape: ResolvedInstructionShape,
     pub operand_conversion: ResolvedOperandConversion,
+    pub ownership: ResolvedOutputOwnership,
     pub symbol: &'static str,
     pub module_kind: ModuleKind,
     pub target: CudaTarget,
@@ -2793,6 +2936,7 @@ pub struct ResolvedGemmRoute {
     pub bk: u32,
     pub stages: u8,
     pub threads: u32,
+    pub launch: ResolvedKernelLaunch,
     pub tensor_map_revision: u16,
     pub tensor_maps_digest: Sha256Digest,
     pub resources_digest: Sha256Digest,
@@ -2815,6 +2959,1369 @@ impl ResolvedGemmLaunchSet {
                 "{prefix}: resolved GEMM launch set changed since capture; re-capture before replay"
             ))
         }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[repr(u8)]
+#[doc(hidden)]
+/// Physical work category exposed by qualification evidence.
+pub enum PhysicalLaunchKind {
+    /// A GEMM kernel launch.
+    Gemm = 1,
+    /// A conversion from the logical input dtype to the execution dtype.
+    InputUpcast = 2,
+    /// A conversion from the execution dtype to the logical output dtype.
+    OutputDowncast = 3,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct ResolvedPhysicalKernelLaunch {
+    pub(crate) kind: PhysicalLaunchKind,
+    pub(crate) symbol: &'static str,
+    pub(crate) module_kind: ModuleKind,
+    pub(crate) logical_op: ResolvedGemmOp,
+    pub(crate) logical_dtype: PolicyDtype,
+    pub(crate) execution_dtype: PolicyDtype,
+    pub(crate) shape: (usize, usize, usize),
+    pub(crate) strides: (usize, usize, usize),
+    pub(crate) tile: Option<(u32, u32)>,
+    pub(crate) launch: ResolvedKernelLaunch,
+    pub(crate) gemm_route: Option<ResolvedGemmRoute>,
+}
+
+impl ResolvedPhysicalKernelLaunch {
+    pub(crate) fn kind(&self) -> PhysicalLaunchKind {
+        self.kind
+    }
+
+    pub(crate) fn symbol(&self) -> &'static str {
+        self.symbol
+    }
+
+    pub(crate) fn module_kind(&self) -> ModuleKind {
+        self.module_kind
+    }
+
+    pub(crate) fn logical_op(&self) -> ResolvedGemmOp {
+        self.logical_op
+    }
+
+    pub(crate) fn logical_dtype(&self) -> PolicyDtype {
+        self.logical_dtype
+    }
+
+    pub(crate) fn execution_dtype(&self) -> PolicyDtype {
+        self.execution_dtype
+    }
+
+    pub(crate) fn shape(&self) -> (usize, usize, usize) {
+        self.shape
+    }
+
+    pub(crate) fn strides(&self) -> (usize, usize, usize) {
+        self.strides
+    }
+
+    pub(crate) fn tile(&self) -> Option<(u32, u32)> {
+        self.tile
+    }
+
+    pub(crate) fn launch(&self) -> ResolvedKernelLaunch {
+        self.launch
+    }
+
+    pub(crate) fn gemm_route(&self) -> Option<ResolvedGemmRoute> {
+        self.gemm_route
+    }
+}
+
+mod physical_observer_private {
+    use super::ResolvedPhysicalKernelLaunch;
+
+    pub struct Authority(());
+
+    impl Authority {
+        pub(super) fn new() -> Self {
+            Self(())
+        }
+    }
+
+    pub trait Sealed {
+        fn record_before_enqueue(
+            &mut self,
+            authority: &mut Authority,
+            launch: ResolvedPhysicalKernelLaunch,
+        ) -> Result<(), String>;
+
+        fn invalidate_enqueue(&mut self, authority: &mut Authority);
+    }
+}
+
+pub(super) trait PhysicalLaunchObserver: physical_observer_private::Sealed {
+    const ENABLED: bool;
+
+    fn route_context(&self) -> Option<GemmRouteIdentity>;
+
+    fn argument_identity_digest(
+        &self,
+        pointer: cudarc::driver::sys::CUdeviceptr,
+        required_bytes: u64,
+    ) -> Result<Sha256Digest, String>;
+}
+
+#[derive(Clone, Copy, Default)]
+pub(super) struct NoPhysicalObserver;
+
+const _: [(); 0] = [(); std::mem::size_of::<NoPhysicalObserver>()];
+
+impl PhysicalLaunchObserver for NoPhysicalObserver {
+    const ENABLED: bool = false;
+
+    #[inline(always)]
+    fn route_context(&self) -> Option<GemmRouteIdentity> {
+        None
+    }
+
+    #[inline(always)]
+    fn argument_identity_digest(
+        &self,
+        _: cudarc::driver::sys::CUdeviceptr,
+        _: u64,
+    ) -> Result<Sha256Digest, String> {
+        Ok([0; 32])
+    }
+}
+
+impl physical_observer_private::Sealed for NoPhysicalObserver {
+    #[inline(always)]
+    fn record_before_enqueue(
+        &mut self,
+        _: &mut physical_observer_private::Authority,
+        _: ResolvedPhysicalKernelLaunch,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+
+    #[inline(always)]
+    fn invalidate_enqueue(&mut self, _: &mut physical_observer_private::Authority) {}
+}
+
+impl<T: PhysicalLaunchObserver + ?Sized> PhysicalLaunchObserver for &mut T {
+    const ENABLED: bool = T::ENABLED;
+
+    #[inline(always)]
+    fn route_context(&self) -> Option<GemmRouteIdentity> {
+        T::route_context(self)
+    }
+
+    #[inline(always)]
+    fn argument_identity_digest(
+        &self,
+        pointer: cudarc::driver::sys::CUdeviceptr,
+        required_bytes: u64,
+    ) -> Result<Sha256Digest, String> {
+        T::argument_identity_digest(self, pointer, required_bytes)
+    }
+}
+
+impl<T: PhysicalLaunchObserver + ?Sized> physical_observer_private::Sealed for &mut T {
+    #[inline(always)]
+    fn record_before_enqueue(
+        &mut self,
+        authority: &mut physical_observer_private::Authority,
+        launch: ResolvedPhysicalKernelLaunch,
+    ) -> Result<(), String> {
+        physical_observer_private::Sealed::record_before_enqueue(*self, authority, launch)
+    }
+
+    #[inline(always)]
+    fn invalidate_enqueue(&mut self, authority: &mut physical_observer_private::Authority) {
+        physical_observer_private::Sealed::invalidate_enqueue(*self, authority);
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct PhysicalConversionArguments {
+    source: cudarc::driver::sys::CUdeviceptr,
+    source_bytes: u64,
+    destination: cudarc::driver::sys::CUdeviceptr,
+    destination_bytes: u64,
+}
+
+impl PhysicalConversionArguments {
+    pub(super) fn new(
+        source: cudarc::driver::sys::CUdeviceptr,
+        source_bytes: u64,
+        destination: cudarc::driver::sys::CUdeviceptr,
+        destination_bytes: u64,
+    ) -> Self {
+        Self {
+            source,
+            source_bytes,
+            destination,
+            destination_bytes,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct PhysicalGemmObservation {
+    logical_dtype: PolicyDtype,
+    resources_digest: Option<Sha256Digest>,
+    route: ResolvedGemmRoute,
+}
+
+#[derive(Clone, Copy)]
+struct PhysicalConversionObservation {
+    kind: PhysicalLaunchKind,
+    logical_op: ResolvedGemmOp,
+    logical_dtype: PolicyDtype,
+    shape: (usize, usize, usize),
+    strides: (usize, usize, usize),
+    element_count: u64,
+    arguments: PhysicalConversionArguments,
+}
+
+/// Opaque, allocation-free semantic input for one physical CUDA enqueue.
+/// Exactly one private payload is populated by the owning constructors.
+#[derive(Clone, Copy)]
+pub(super) struct PhysicalLaunchObservation {
+    gemm: Option<PhysicalGemmObservation>,
+    conversion: Option<PhysicalConversionObservation>,
+}
+
+impl PhysicalLaunchObservation {
+    pub(super) fn gemm(
+        logical_dtype: PolicyDtype,
+        resources_digest: Option<Sha256Digest>,
+        route: ResolvedGemmRoute,
+    ) -> Self {
+        Self {
+            gemm: Some(PhysicalGemmObservation {
+                logical_dtype,
+                resources_digest,
+                route,
+            }),
+            conversion: None,
+        }
+    }
+
+    pub(super) fn conversion(
+        kind: PhysicalLaunchKind,
+        logical_op: ResolvedGemmOp,
+        logical_dtype: PolicyDtype,
+        shape: (usize, usize, usize),
+        strides: (usize, usize, usize),
+        element_count: u64,
+        arguments: PhysicalConversionArguments,
+    ) -> Self {
+        Self {
+            gemm: None,
+            conversion: Some(PhysicalConversionObservation {
+                kind,
+                logical_op,
+                logical_dtype,
+                shape,
+                strides,
+                element_count,
+                arguments,
+            }),
+        }
+    }
+
+    fn resolve<O: PhysicalLaunchObserver>(
+        self,
+        observer: &O,
+        config: cudarc::driver::LaunchConfig,
+    ) -> Result<ResolvedPhysicalKernelLaunch, String> {
+        match (self.gemm, self.conversion) {
+            (
+                Some(PhysicalGemmObservation {
+                    logical_dtype,
+                    resources_digest,
+                    route,
+                }),
+                None,
+            ) => {
+                let launch = ResolvedKernelLaunch {
+                    grid_dim: config.grid_dim,
+                    block_dim: config.block_dim,
+                    shared_mem_bytes: config.shared_mem_bytes,
+                    arguments_digest: route.launch.arguments_digest,
+                };
+                if launch != route.launch {
+                    return Err("physical GEMM launch config changed after route binding".into());
+                }
+                let mut physical_route = route;
+                if let Some(resources_digest) = resources_digest {
+                    physical_route.resources_digest = resources_digest;
+                }
+                Ok(ResolvedPhysicalKernelLaunch {
+                    kind: PhysicalLaunchKind::Gemm,
+                    symbol: route.symbol,
+                    module_kind: route.module_kind,
+                    logical_op: route.op,
+                    logical_dtype,
+                    execution_dtype: route.dtype,
+                    shape: route.shape,
+                    strides: route.strides,
+                    tile: Some(route.tile),
+                    launch,
+                    gemm_route: Some(physical_route),
+                })
+            }
+            (
+                None,
+                Some(PhysicalConversionObservation {
+                    kind,
+                    logical_op,
+                    logical_dtype,
+                    shape,
+                    strides,
+                    element_count,
+                    arguments,
+                }),
+            ) => {
+                let symbol = match (kind, logical_dtype) {
+                    (PhysicalLaunchKind::InputUpcast, PolicyDtype::Bf16) => "cast_bf16_to_f32",
+                    (PhysicalLaunchKind::InputUpcast, PolicyDtype::F16) => "cast_f16_to_f32",
+                    (PhysicalLaunchKind::OutputDowncast, PolicyDtype::Bf16) => "cast_f32_to_bf16",
+                    (PhysicalLaunchKind::OutputDowncast, PolicyDtype::F16) => "cast_f32_to_f16",
+                    (PhysicalLaunchKind::Gemm, _) => {
+                        return Err("conversion launch cannot use GEMM kind".into());
+                    }
+                    (_, PolicyDtype::F32) => {
+                        return Err("conversion launch does not accept f32 logical dtype".into());
+                    }
+                };
+                let source_identity =
+                    observer.argument_identity_digest(arguments.source, arguments.source_bytes)?;
+                let destination_identity = observer
+                    .argument_identity_digest(arguments.destination, arguments.destination_bytes)?;
+                let arguments_digest = FramedSha256::new(b"triad-half-conversion-arguments.v2")
+                    .required(b"symbol", symbol.as_bytes())
+                    .required(b"kind", &[kind as u8])
+                    .required(b"logical-op", &[logical_op as u8])
+                    .required(b"logical-dtype", &[logical_dtype as u8])
+                    .required(b"element-count", &element_count.to_le_bytes())
+                    .required(b"null-pointer-mask", &0_u64.to_le_bytes())
+                    .required(b"source-allocation", &source_identity)
+                    .required(b"destination-allocation", &destination_identity)
+                    .finish();
+                Ok(ResolvedPhysicalKernelLaunch {
+                    kind,
+                    symbol,
+                    module_kind: ModuleKind::Fixed,
+                    logical_op,
+                    logical_dtype,
+                    execution_dtype: PolicyDtype::F32,
+                    shape,
+                    strides,
+                    tile: None,
+                    launch: ResolvedKernelLaunch {
+                        grid_dim: config.grid_dim,
+                        block_dim: config.block_dim,
+                        shared_mem_bytes: config.shared_mem_bytes,
+                        arguments_digest,
+                    },
+                    gemm_route: None,
+                })
+            }
+            _ => Err("physical launch observation must contain exactly one payload".into()),
+        }
+    }
+}
+
+pub(super) fn resolve_physical_launch_observation<O: PhysicalLaunchObserver>(
+    observer: &O,
+    observation: PhysicalLaunchObservation,
+    config: cudarc::driver::LaunchConfig,
+) -> Result<ResolvedPhysicalKernelLaunch, String> {
+    observation.resolve(observer, config)
+}
+
+pub(super) enum PhysicalCudaLaunchError {
+    #[cfg(test)]
+    Prepared(&'static str),
+    Identity(String),
+    Driver(cudarc::driver::result::DriverError),
+}
+
+impl PhysicalCudaLaunchError {
+    pub(super) fn with_driver_context(self, context: std::fmt::Arguments<'_>) -> String {
+        match self {
+            #[cfg(test)]
+            Self::Prepared(error) => error.to_string(),
+            Self::Identity(error) => error,
+            Self::Driver(error) => format!("{context}: {error:?}"),
+        }
+    }
+}
+
+impl From<String> for PhysicalCudaLaunchError {
+    fn from(error: String) -> Self {
+        Self::Identity(error)
+    }
+}
+
+/// Records one physical node and submits the exact pre-bound cudarc launch.
+///
+/// The builder already owns the selected `CudaFunction` and ordered ABI
+/// arguments. This function alone couples recorder mutation to its real Driver
+/// enqueue, using the same copied launch configuration for both identities.
+///
+/// # Safety
+///
+/// The caller must uphold [`cudarc::driver::LaunchArgs::launch`]'s function,
+/// argument, pointer-lifetime, and asynchronous-mutation requirements.
+#[inline(always)]
+pub(super) unsafe fn enqueue_with_physical_observation<O: PhysicalLaunchObserver>(
+    observer: &mut O,
+    builder: &mut cudarc::driver::LaunchArgs<'_>,
+    config: cudarc::driver::LaunchConfig,
+    observation: Option<PhysicalLaunchObservation>,
+) -> Result<(), PhysicalCudaLaunchError> {
+    let mut authority = physical_observer_private::Authority::new();
+    if O::ENABLED {
+        let record = observation
+            .ok_or_else(|| "recording CUDA launch has no physical observation".to_string())
+            .and_then(|observation| observation.resolve(observer, config))
+            .and_then(|launch| {
+                physical_observer_private::Sealed::record_before_enqueue(
+                    observer,
+                    &mut authority,
+                    launch,
+                )
+            });
+        if let Err(error) = record {
+            physical_observer_private::Sealed::invalidate_enqueue(observer, &mut authority);
+            return Err(PhysicalCudaLaunchError::Identity(error));
+        }
+    }
+    match unsafe { builder.launch(config) } {
+        Ok(_) => Ok(()),
+        Err(error) => {
+            if O::ENABLED {
+                physical_observer_private::Sealed::invalidate_enqueue(observer, &mut authority);
+            }
+            Err(PhysicalCudaLaunchError::Driver(error))
+        }
+    }
+}
+
+/// Records one already-resolved physical node and submits its pre-bound launch.
+///
+/// Resolution, hashing, function selection, argument binding, and backing
+/// storage growth must all finish before this boundary is entered. The exact
+/// graph package is the only production caller.
+///
+/// # Safety
+///
+/// The prepared node, function, argument ABI, and launch configuration must
+/// describe the same CUDA enqueue and all referenced allocations must remain
+/// live until the stream completes.
+#[inline(always)]
+pub(super) unsafe fn enqueue_prepared_physical_launch(
+    observer: &mut RecordingPhysicalObserver,
+    builder: &mut cudarc::driver::LaunchArgs<'_>,
+    config: cudarc::driver::LaunchConfig,
+    launch: ResolvedPhysicalKernelLaunch,
+) -> Result<(), PhysicalCudaLaunchError> {
+    let mut authority = physical_observer_private::Authority::new();
+    if let Err(error) =
+        physical_observer_private::Sealed::record_before_enqueue(observer, &mut authority, launch)
+    {
+        physical_observer_private::Sealed::invalidate_enqueue(observer, &mut authority);
+        return Err(PhysicalCudaLaunchError::Identity(error));
+    }
+    match unsafe { builder.launch(config) } {
+        Ok(_) => Ok(()),
+        Err(error) => {
+            physical_observer_private::Sealed::invalidate_enqueue(observer, &mut authority);
+            Err(PhysicalCudaLaunchError::Driver(error))
+        }
+    }
+}
+
+struct PhysicalTraceRecorder {
+    capacity: usize,
+    nodes: Vec<ResolvedPhysicalKernelLaunch>,
+    enqueue_events: Vec<PhysicalEnqueueEvent>,
+    overflowed: bool,
+    enqueue_failed: bool,
+}
+
+#[derive(Clone, Copy)]
+struct PhysicalEnqueueEvent {
+    launch: ResolvedPhysicalKernelLaunch,
+}
+
+impl PhysicalTraceRecorder {
+    fn with_capacity(capacity: usize) -> Result<Self, String> {
+        if capacity == 0 {
+            return Err("physical launch observer capacity must be nonzero".into());
+        }
+        let mut nodes = Vec::new();
+        nodes
+            .try_reserve_exact(capacity)
+            .map_err(|error| format!("reserve physical launch observer capacity: {error}"))?;
+        let mut enqueue_events = Vec::new();
+        enqueue_events
+            .try_reserve_exact(capacity)
+            .map_err(|error| format!("reserve physical enqueue provenance capacity: {error}"))?;
+        Ok(Self {
+            capacity,
+            nodes,
+            enqueue_events,
+            overflowed: false,
+            enqueue_failed: false,
+        })
+    }
+
+    fn validate_start(&self, expected_capacity: usize) -> Result<(), String> {
+        if self.capacity != expected_capacity {
+            return Err(format!(
+                "physical launch observer capacity {} does not match expected capacity {expected_capacity}",
+                self.capacity
+            ));
+        }
+        if !self.nodes.is_empty()
+            || !self.enqueue_events.is_empty()
+            || self.overflowed
+            || self.enqueue_failed
+        {
+            return Err("physical launch observer must be empty before recording starts".into());
+        }
+        if self.nodes.capacity() != self.capacity || self.enqueue_events.capacity() != self.capacity
+        {
+            return Err("physical launch observer backing capacity is not exact".into());
+        }
+        Ok(())
+    }
+
+    fn validate_complete(&self) -> Result<(), String> {
+        if self.enqueue_failed {
+            return Err("physical launch recording includes a failed CUDA enqueue".into());
+        }
+        if self.overflowed {
+            return Err(format!(
+                "physical launch recording exceeded its fixed capacity {}",
+                self.capacity
+            ));
+        }
+        if self.nodes.is_empty() {
+            return Err("physical launch recording produced no nodes".into());
+        }
+        if self.enqueue_events.len() != self.nodes.len() {
+            return Err("physical enqueue provenance count does not match recorded nodes".into());
+        }
+        Ok(())
+    }
+
+    fn record(&mut self, launch: ResolvedPhysicalKernelLaunch) -> Result<(), String> {
+        if self.nodes.len() == self.capacity {
+            self.overflowed = true;
+            return Ok(());
+        }
+        self.enqueue_events.push(PhysicalEnqueueEvent { launch });
+        self.nodes.push(launch);
+        Ok(())
+    }
+
+    fn invalidate_enqueue(&mut self) {
+        self.enqueue_failed = true;
+    }
+
+    fn finish(
+        self,
+        context: GemmRouteIdentity,
+        binding: PhysicalGraphBinding,
+    ) -> Result<RecordedPhysicalTrace, String> {
+        self.validate_complete()?;
+        binding
+            .context
+            .ensure_current(context, "recorded physical trace")?;
+        let launches = ResolvedPhysicalLaunchSet::from_nodes(&self.nodes)?;
+        let enqueue_provenance = physical_enqueue_provenance_digest(
+            self.enqueue_events.iter().map(|event| event.launch),
+        )?;
+        Ok(RecordedPhysicalTrace {
+            context,
+            binding,
+            launches,
+            enqueue_provenance,
+            nodes: self.nodes.into_boxed_slice(),
+        })
+    }
+}
+
+type PhysicalArgumentIdentityResolver =
+    dyn Fn(cudarc::driver::sys::CUdeviceptr, u64) -> Result<Sha256Digest, String>;
+
+pub(super) struct RecordingPhysicalObserver {
+    recorder: PhysicalTraceRecorder,
+    context: Option<GemmRouteIdentity>,
+    argument_identity: Box<PhysicalArgumentIdentityResolver>,
+    replay_provenance: Option<PhysicalReplayProvenance>,
+}
+
+impl RecordingPhysicalObserver {
+    fn with_argument_identity<Resolve>(
+        capacity: usize,
+        context: Option<GemmRouteIdentity>,
+        resolve: Resolve,
+    ) -> Result<Self, String>
+    where
+        Resolve:
+            Fn(cudarc::driver::sys::CUdeviceptr, u64) -> Result<Sha256Digest, String> + 'static,
+    {
+        Ok(Self {
+            recorder: PhysicalTraceRecorder::with_capacity(capacity)?,
+            context,
+            argument_identity: Box::new(resolve),
+            replay_provenance: None,
+        })
+    }
+
+    fn with_replay_provenance(
+        mut self,
+        ctx: &GpuCtx,
+        managed_epoch: Option<ManagedAllocationEpochStamp>,
+    ) -> Result<Self, String> {
+        self.replay_provenance = Some(PhysicalReplayProvenance::new(ctx, managed_epoch)?);
+        Ok(self)
+    }
+
+    pub(super) fn validate_start(&self, expected_capacity: usize) -> Result<(), String> {
+        self.recorder.validate_start(expected_capacity)
+    }
+
+    pub(super) fn validate_capture_start(
+        &self,
+        ctx: &GpuCtx,
+        manifest: &PreparedPhysicalCaptureManifest,
+    ) -> Result<(), String> {
+        let provenance = self.replay_provenance.as_ref().ok_or_else(|| {
+            "physical graph observer has no prepared replay provenance".to_string()
+        })?;
+        manifest.validate_capture_binding(provenance.binding, self.recorder.capacity)?;
+        self.validate_start(manifest.launch_capacity)?;
+        provenance.validate(ctx, "physical graph capture")
+    }
+
+    pub(super) fn validate_capture_binding(&self, ctx: &GpuCtx) -> Result<(), String> {
+        self.replay_provenance
+            .as_ref()
+            .ok_or_else(|| "physical graph observer has no prepared replay provenance".to_string())?
+            .validate(ctx, "physical graph post-capture")
+    }
+
+    fn finish(self, context: GemmRouteIdentity) -> Result<RecordedPhysicalTrace, String> {
+        if let Some(bound) = self.context {
+            bound.ensure_current(context, "physical launch observer")?;
+        }
+        let binding = self
+            .replay_provenance
+            .as_ref()
+            .ok_or_else(|| {
+                "physical launch observer has no prepared replay provenance".to_string()
+            })?
+            .binding;
+        self.recorder.finish(context, binding)
+    }
+
+    fn finish_capture(
+        self,
+        ctx: &GpuCtx,
+        manifest: &PreparedPhysicalCaptureManifest,
+    ) -> Result<CapturedPhysicalGraphPlan, String> {
+        let Self {
+            recorder,
+            context,
+            argument_identity: _,
+            replay_provenance,
+        } = self;
+        let provenance = replay_provenance.ok_or_else(|| {
+            "physical graph observer has no prepared replay provenance".to_string()
+        })?;
+        provenance.validate(ctx, "physical graph post-capture")?;
+        if let Some(bound) = context {
+            bound.ensure_current(ctx.gemm_route(), "physical graph observer")?;
+        }
+        let trace = recorder.finish(ctx.gemm_route(), provenance.binding)?;
+        manifest.validate_trace(&trace)?;
+        let identity =
+            CapturedPhysicalGraphIdentity::from_nodes(provenance.binding, trace.nodes.into_vec())?;
+        Ok(CapturedPhysicalGraphPlan {
+            identity,
+            provenance,
+        })
+    }
+}
+
+pub(super) fn prepare_recording_physical_observer<Resolve>(
+    ctx: &GpuCtx,
+    capacity: usize,
+    managed_epoch: Option<ManagedAllocationEpochStamp>,
+    resolve: Resolve,
+) -> Result<RecordingPhysicalObserver, String>
+where
+    Resolve: Fn(cudarc::driver::sys::CUdeviceptr, u64) -> Result<Sha256Digest, String> + 'static,
+{
+    RecordingPhysicalObserver::with_argument_identity(capacity, Some(ctx.gemm_route()), resolve)?
+        .with_replay_provenance(ctx, managed_epoch)
+}
+
+pub(super) fn finish_recording_physical_observer(
+    observer: RecordingPhysicalObserver,
+    context: GemmRouteIdentity,
+) -> Result<RecordedPhysicalTrace, String> {
+    observer.finish(context)
+}
+
+pub(super) fn finish_recording_physical_capture(
+    observer: RecordingPhysicalObserver,
+    ctx: &GpuCtx,
+    manifest: &PreparedPhysicalCaptureManifest,
+) -> Result<CapturedPhysicalGraphPlan, String> {
+    observer.finish_capture(ctx, manifest)
+}
+
+impl PhysicalLaunchObserver for RecordingPhysicalObserver {
+    const ENABLED: bool = true;
+
+    fn route_context(&self) -> Option<GemmRouteIdentity> {
+        self.context
+    }
+
+    fn argument_identity_digest(
+        &self,
+        pointer: cudarc::driver::sys::CUdeviceptr,
+        required_bytes: u64,
+    ) -> Result<Sha256Digest, String> {
+        (self.argument_identity)(pointer, required_bytes)
+    }
+}
+
+impl physical_observer_private::Sealed for RecordingPhysicalObserver {
+    fn record_before_enqueue(
+        &mut self,
+        _: &mut physical_observer_private::Authority,
+        launch: ResolvedPhysicalKernelLaunch,
+    ) -> Result<(), String> {
+        self.recorder.record(launch)
+    }
+
+    fn invalidate_enqueue(&mut self, _: &mut physical_observer_private::Authority) {
+        self.recorder.invalidate_enqueue();
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct ResolvedPhysicalLaunchSet {
+    launch_count: u32,
+    ordered_digest: Sha256Digest,
+    physical_symbol: Option<&'static str>,
+    tile: Option<(u32, u32)>,
+}
+
+impl ResolvedPhysicalLaunchSet {
+    pub(crate) fn from_nodes(nodes: &[ResolvedPhysicalKernelLaunch]) -> Result<Self, String> {
+        if nodes.is_empty() {
+            return Err("resolved physical launch set must not be empty".into());
+        }
+        let launch_count = u32::try_from(nodes.len())
+            .map_err(|_| "resolved physical launch count exceeds u32::MAX".to_string())?;
+        let mut hash = FramedSha256::new(b"resolved-physical-launch-set.v1")
+            .required(b"launch-count-domain", LAUNCH_COUNT_DOMAIN)
+            .required(b"launch-count", &launch_count.to_le_bytes());
+        for (index, node) in nodes.iter().enumerate() {
+            let gemm_route_digest = validate_physical_launch(node)?;
+            hash = append_resolved_physical_launch(hash, index, node, gemm_route_digest.as_ref());
+        }
+        let (physical_symbol, tile) = if let [node] = nodes {
+            (Some(node.symbol), node.tile)
+        } else {
+            (None, None)
+        };
+        Ok(Self {
+            launch_count,
+            ordered_digest: hash.finish(),
+            physical_symbol,
+            tile,
+        })
+    }
+
+    pub(crate) fn launch_count(&self) -> u32 {
+        self.launch_count
+    }
+
+    pub(crate) fn ordered_digest(&self) -> Sha256Digest {
+        self.ordered_digest
+    }
+
+    pub(crate) fn physical_symbol(&self) -> Option<&'static str> {
+        self.physical_symbol
+    }
+
+    pub(crate) fn tile(&self) -> Option<(u32, u32)> {
+        self.tile
+    }
+
+    pub(crate) fn validate_nodes(
+        self,
+        nodes: &[ResolvedPhysicalKernelLaunch],
+    ) -> Result<(), String> {
+        let actual = Self::from_nodes(nodes)?;
+        if self == actual {
+            Ok(())
+        } else {
+            Err("resolved physical launch set does not match its exact ordered nodes".into())
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct RecordedPhysicalTrace {
+    context: GemmRouteIdentity,
+    binding: PhysicalGraphBinding,
+    launches: ResolvedPhysicalLaunchSet,
+    enqueue_provenance: Sha256Digest,
+    nodes: Box<[ResolvedPhysicalKernelLaunch]>,
+}
+
+impl RecordedPhysicalTrace {
+    pub(crate) fn context(&self) -> GemmRouteIdentity {
+        self.context
+    }
+
+    pub(crate) fn nodes(&self) -> &[ResolvedPhysicalKernelLaunch] {
+        &self.nodes
+    }
+
+    pub(crate) fn launches(&self) -> ResolvedPhysicalLaunchSet {
+        self.launches
+    }
+
+    pub(crate) fn validate_integrity(&self) -> Result<(), String> {
+        self.binding
+            .context
+            .ensure_current(self.context, "recorded physical trace")?;
+        let launches = ResolvedPhysicalLaunchSet::from_nodes(&self.nodes)?;
+        if launches != self.launches {
+            return Err("recorded physical trace does not match its immutable identity".into());
+        }
+        if physical_enqueue_provenance_digest(self.nodes.iter().copied())?
+            != self.enqueue_provenance
+        {
+            return Err("recorded physical trace lacks its enqueue-bound provenance".into());
+        }
+        let manifest = self.manifest();
+        manifest.validate_capture_request(self.context, self.nodes.len())?;
+        manifest.validate_capture_binding(self.binding, self.nodes.len())?;
+        manifest.validate_capture_result(self.context, &self.nodes)
+    }
+
+    pub(crate) fn manifest(&self) -> PreparedPhysicalCaptureManifest {
+        PreparedPhysicalCaptureManifest::from_nodes(
+            self.binding,
+            self.enqueue_provenance,
+            self.nodes.to_vec(),
+        )
+        .expect("a recorded physical trace remains a valid non-empty manifest")
+    }
+}
+
+fn physical_enqueue_event_digest(
+    node: &ResolvedPhysicalKernelLaunch,
+) -> Result<Sha256Digest, String> {
+    let launch = ResolvedPhysicalLaunchSet::from_nodes(std::slice::from_ref(node))?;
+    Ok(FramedSha256::new(b"physical-enqueue-event.v1")
+        .required(b"launch", &launch.ordered_digest)
+        .finish())
+}
+
+fn physical_enqueue_provenance_digest(
+    events: impl ExactSizeIterator<Item = ResolvedPhysicalKernelLaunch>,
+) -> Result<Sha256Digest, String> {
+    let mut digest = FramedSha256::new(b"physical-enqueue-provenance.v1")
+        .required(b"event-count", &(events.len() as u64).to_le_bytes());
+    for (index, launch) in events.enumerate() {
+        let event = physical_enqueue_event_digest(&launch)?;
+        digest = digest
+            .required(b"event-index", &(index as u64).to_le_bytes())
+            .required(b"event", &event);
+    }
+    Ok(digest.finish())
+}
+
+#[cfg(test)]
+fn recorded_physical_trace_for_test(
+    context: GemmRouteIdentity,
+    nodes: Vec<ResolvedPhysicalKernelLaunch>,
+) -> Result<RecordedPhysicalTrace, String> {
+    let mut recorder = PhysicalTraceRecorder::with_capacity(nodes.len().max(1))?;
+    for node in nodes {
+        recorder.record(node)?;
+    }
+    recorder.finish(context, PhysicalGraphBinding::new(context, 0x1200, 0x3400))
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PreparedPhysicalCaptureManifest {
+    context: GemmRouteIdentity,
+    binding: PhysicalGraphBinding,
+    launches: ResolvedPhysicalLaunchSet,
+    enqueue_provenance: Sha256Digest,
+    launch_capacity: usize,
+    nodes: Box<[ResolvedPhysicalKernelLaunch]>,
+}
+
+impl PreparedPhysicalCaptureManifest {
+    fn from_nodes(
+        binding: PhysicalGraphBinding,
+        enqueue_provenance: Sha256Digest,
+        nodes: Vec<ResolvedPhysicalKernelLaunch>,
+    ) -> Result<Self, String> {
+        let context = binding.context;
+        let launches = ResolvedPhysicalLaunchSet::from_nodes(&nodes)?;
+        let launch_capacity = nodes.len();
+        Ok(Self {
+            context,
+            binding,
+            launches,
+            enqueue_provenance,
+            launch_capacity,
+            nodes: nodes.into_boxed_slice(),
+        })
+    }
+
+    pub(crate) fn launch_capacity(&self) -> usize {
+        self.launch_capacity
+    }
+
+    pub(crate) fn nodes(&self) -> &[ResolvedPhysicalKernelLaunch] {
+        &self.nodes
+    }
+
+    pub(crate) fn validate_capture_request(
+        &self,
+        live_context: GemmRouteIdentity,
+        launch_capacity: usize,
+    ) -> Result<(), String> {
+        self.validate_invariants()?;
+        self.context
+            .ensure_current(live_context, "prepared physical capture manifest")?;
+        if launch_capacity != self.launch_capacity {
+            return Err(format!(
+                "physical capture launch capacity {launch_capacity} does not match prepared manifest capacity {}",
+                self.launch_capacity
+            ));
+        }
+        Ok(())
+    }
+
+    fn validate_capture_binding(
+        &self,
+        live_binding: PhysicalGraphBinding,
+        launch_capacity: usize,
+    ) -> Result<(), String> {
+        self.validate_capture_request(live_binding.context, launch_capacity)?;
+        self.binding
+            .ensure_current(live_binding, "prepared physical capture manifest")
+    }
+
+    pub(crate) fn validate_nodes(
+        &self,
+        nodes: &[ResolvedPhysicalKernelLaunch],
+    ) -> Result<(), String> {
+        self.validate_invariants()?;
+        self.launches.validate_nodes(nodes)?;
+        if self.nodes.as_ref() == nodes {
+            Ok(())
+        } else {
+            Err("physical capture nodes do not exactly match the prepared eager manifest".into())
+        }
+    }
+
+    pub(crate) fn validate_capture_result(
+        &self,
+        recorded_context: GemmRouteIdentity,
+        nodes: &[ResolvedPhysicalKernelLaunch],
+    ) -> Result<(), String> {
+        self.context
+            .ensure_current(recorded_context, "prepared physical capture manifest")?;
+        self.validate_nodes(nodes)
+    }
+
+    fn validate_trace(&self, trace: &RecordedPhysicalTrace) -> Result<(), String> {
+        self.validate_capture_binding(trace.binding, trace.nodes.len())?;
+        self.validate_capture_result(trace.context, &trace.nodes)?;
+        if self.enqueue_provenance != trace.enqueue_provenance {
+            return Err(
+                "physical capture enqueue provenance does not match the eager manifest".into(),
+            );
+        }
+        Ok(())
+    }
+
+    fn validate_invariants(&self) -> Result<(), String> {
+        self.binding
+            .context
+            .ensure_current(self.context, "prepared physical capture manifest")?;
+        if self.nodes.is_empty() {
+            return Err("prepared physical capture manifest must not be empty".into());
+        }
+        if self.launch_capacity != self.nodes.len() {
+            return Err(format!(
+                "prepared physical capture manifest has launch capacity {} but stores {} nodes",
+                self.launch_capacity,
+                self.nodes.len()
+            ));
+        }
+        self.launches.validate_nodes(&self.nodes)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PhysicalConversionModuleBinding {
+    artifact: ArtifactIdentity,
+    compiler: CompilerIdentity,
+}
+
+impl PhysicalConversionModuleBinding {
+    #[cfg(test)]
+    fn from_context(context: GemmRouteIdentity) -> Self {
+        Self {
+            artifact: context.artifacts.fixed,
+            compiler: context.compiler,
+        }
+    }
+
+    fn from_gpu_ctx(ctx: &GpuCtx) -> Self {
+        Self {
+            artifact: ctx.kernels.artifact_set_identity().fixed,
+            compiler: ctx.kernels.compiler_identity(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PhysicalGraphBinding {
+    context: GemmRouteIdentity,
+    context_token: u64,
+    stream_token: usize,
+    conversion: PhysicalConversionModuleBinding,
+}
+
+impl PhysicalGraphBinding {
+    #[cfg(test)]
+    fn new(context: GemmRouteIdentity, context_token: u64, stream_token: usize) -> Self {
+        Self {
+            context,
+            context_token,
+            stream_token,
+            conversion: PhysicalConversionModuleBinding::from_context(context),
+        }
+    }
+
+    fn from_context(ctx: &GpuCtx) -> Self {
+        Self {
+            context: ctx.gemm_route(),
+            context_token: ctx.instance_token(),
+            stream_token: ctx.stream_token(),
+            conversion: PhysicalConversionModuleBinding::from_gpu_ctx(ctx),
+        }
+    }
+
+    fn ensure_current(self, live: Self, label: &str) -> Result<(), String> {
+        self.context.ensure_current(live.context, label)?;
+        if self.context_token != live.context_token {
+            return Err(format!(
+                "{label}: CUDA context instance changed since capture; re-capture before replay"
+            ));
+        }
+        if self.stream_token != live.stream_token {
+            return Err(format!(
+                "{label}: CUDA stream changed since capture; re-capture before replay"
+            ));
+        }
+        if self.conversion != live.conversion {
+            return Err(format!(
+                "{label}: physical conversion module binding changed since capture"
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone)]
+struct CapturedPhysicalGraphIdentity {
+    binding: PhysicalGraphBinding,
+    launches: ResolvedPhysicalLaunchSet,
+    launch_capacity: usize,
+    nodes: Box<[ResolvedPhysicalKernelLaunch]>,
+}
+
+struct PhysicalAllocationLiveness {
+    epoch: ManagedAllocationEpochStamp,
+}
+
+struct PhysicalReplayProvenance {
+    binding: PhysicalGraphBinding,
+    allocation_liveness: PhysicalAllocationLiveness,
+    resources: Rc<GpuCtxResources>,
+    half_staging: cudarc::driver::sys::CUdeviceptr,
+    bi_upcast: [cudarc::driver::sys::CUdeviceptr; 3],
+}
+
+impl PhysicalReplayProvenance {
+    fn new(
+        ctx: &GpuCtx,
+        managed_epoch: Option<ManagedAllocationEpochStamp>,
+    ) -> Result<Self, String> {
+        let provenance = Self {
+            binding: PhysicalGraphBinding::from_context(ctx),
+            allocation_liveness: PhysicalAllocationLiveness::new(managed_epoch)?,
+            resources: ctx.resource_anchor(),
+            half_staging: ctx.half_staging_ptr(),
+            bi_upcast: ctx.bi_upcast_scratch_ptrs(),
+        };
+        provenance.validate(ctx, "physical graph preparation")?;
+        Ok(provenance)
+    }
+
+    fn validate(&self, ctx: &GpuCtx, label: &str) -> Result<(), String> {
+        self.binding
+            .ensure_current(PhysicalGraphBinding::from_context(ctx), label)?;
+        if !Rc::ptr_eq(&self.resources, &ctx.resource_anchor()) {
+            return Err(format!(
+                "{label}: CUDA context resources changed since physical graph preparation"
+            ));
+        }
+        self.allocation_liveness.validate()?;
+        ctx.ensure_graph_scratch_ptrs(self.half_staging, self.bi_upcast, label)
+    }
+}
+
+impl PhysicalAllocationLiveness {
+    fn new(epoch: Option<ManagedAllocationEpochStamp>) -> Result<Self, String> {
+        let epoch = epoch.ok_or_else(|| {
+            "physical graph capture requires managed allocation generation provenance".to_string()
+        })?;
+        let liveness = Self { epoch };
+        liveness.validate()?;
+        Ok(liveness)
+    }
+
+    fn validate(&self) -> Result<(), String> {
+        if self.epoch.is_current() {
+            Ok(())
+        } else {
+            Err("physical graph allocation generation is no longer live".into())
+        }
+    }
+}
+
+impl CapturedPhysicalGraphIdentity {
+    fn from_nodes(
+        binding: PhysicalGraphBinding,
+        nodes: Vec<ResolvedPhysicalKernelLaunch>,
+    ) -> Result<Self, String> {
+        let launches = ResolvedPhysicalLaunchSet::from_nodes(&nodes)?;
+        let launch_capacity = nodes.len();
+        Ok(Self {
+            binding,
+            launches,
+            launch_capacity,
+            nodes: nodes.into_boxed_slice(),
+        })
+    }
+
+    fn validate(
+        &self,
+        live_binding: PhysicalGraphBinding,
+        allocations_current: bool,
+        mut validate_route: impl FnMut(&ResolvedGemmRoute) -> Result<(), String>,
+    ) -> Result<(), String> {
+        self.binding
+            .ensure_current(live_binding, "captured physical graph")?;
+        if !allocations_current {
+            return Err("captured physical graph allocation generation is no longer live".into());
+        }
+        if self.launch_capacity == 0 || self.launch_capacity != self.nodes.len() {
+            return Err(format!(
+                "captured physical graph capacity {} does not match its {} exact nodes",
+                self.launch_capacity,
+                self.nodes.len()
+            ));
+        }
+        self.launches.validate_nodes(&self.nodes)?;
+        for node in &self.nodes {
+            match (node.kind, node.gemm_route.as_ref()) {
+                (PhysicalLaunchKind::Gemm, Some(route)) => validate_route(route)?,
+                (PhysicalLaunchKind::InputUpcast | PhysicalLaunchKind::OutputDowncast, None)
+                    if node.module_kind == ModuleKind::Fixed => {}
+                _ => {
+                    return Err(
+                        "captured physical graph node lost its exact route or conversion binding"
+                            .into(),
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+pub(crate) struct CapturedPhysicalGraphPlan {
+    identity: CapturedPhysicalGraphIdentity,
+    provenance: PhysicalReplayProvenance,
+}
+
+impl CapturedPhysicalGraphPlan {
+    pub(crate) fn nodes(&self) -> &[ResolvedPhysicalKernelLaunch] {
+        &self.identity.nodes
+    }
+
+    pub(crate) fn launches(&self) -> ResolvedPhysicalLaunchSet {
+        self.identity.launches
+    }
+
+    pub(crate) fn validate_replay(&self, ctx: &GpuCtx, label: &str) -> Result<(), String> {
+        self.provenance.validate(ctx, label)?;
+        self.identity
+            .validate(PhysicalGraphBinding::from_context(ctx), true, |route| {
+                ctx.validate_resolved_gemm_route(route, label)
+            })
+    }
+}
+
+/// Exact physical GEMM inventory prepared by one successful eager execution.
+///
+/// CUDA Graph capture must reproduce both the presence/absence of GEMM work
+/// and the ordered launch-set digest. `route_capacity` is deliberately stored
+/// alongside the digest so capture can reserve all recorder storage before
+/// entering CUDA's allocation-free capture region.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PreparedGemmCaptureManifest {
+    pub context: GemmRouteIdentity,
+    pub launches: Option<ResolvedGemmLaunchSet>,
+    pub route_capacity: usize,
+}
+
+impl PreparedGemmCaptureManifest {
+    pub(crate) fn new(context: GemmRouteIdentity, launches: Option<ResolvedGemmLaunchSet>) -> Self {
+        Self {
+            context,
+            launches,
+            route_capacity: Self::route_capacity_for_launches(launches),
+        }
+    }
+
+    pub(crate) fn route_capacity_for_launches(launches: Option<ResolvedGemmLaunchSet>) -> usize {
+        launches
+            .map(|launches| {
+                usize::try_from(launches.launch_count)
+                    .expect("u32 GEMM launch count always fits in usize")
+            })
+            .unwrap_or(0)
+    }
+
+    pub(crate) fn validate_capture_request(
+        &self,
+        live_context: GemmRouteIdentity,
+        route_capacity: usize,
+    ) -> Result<(), String> {
+        self.context
+            .ensure_current(live_context, "prepared GEMM capture manifest")?;
+        let exact_capacity = Self::route_capacity_for_launches(self.launches);
+        if self.route_capacity != exact_capacity {
+            return Err(format!(
+                "prepared GEMM capture manifest has route capacity {} but its ordered launch set requires {exact_capacity}",
+                self.route_capacity
+            ));
+        }
+        if route_capacity != self.route_capacity {
+            return Err(format!(
+                "GEMM capture route capacity {route_capacity} does not match prepared manifest capacity {}",
+                self.route_capacity
+            ));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn ensure_exact_launches(
+        required: Option<ResolvedGemmLaunchSet>,
+        actual: Option<ResolvedGemmLaunchSet>,
+    ) -> Result<(), String> {
+        if required == actual {
+            Ok(())
+        } else {
+            Err(
+                "captured GEMM ordered launch set does not match its prepared eager manifest"
+                    .into(),
+            )
+        }
+    }
+
+    pub(crate) fn validate_capture_result(
+        &self,
+        recorded_context: GemmRouteIdentity,
+        actual: Option<ResolvedGemmLaunchSet>,
+    ) -> Result<(), String> {
+        self.context
+            .ensure_current(recorded_context, "prepared GEMM capture manifest")?;
+        Self::ensure_exact_launches(self.launches, actual)
+    }
+}
+
+/// Exact ordered physical routes observed during one eager GEMM body.
+///
+/// The trace owns its route storage so qualification code can inspect the
+/// actual launches after recording has ended without keeping the recorder
+/// active. Its read-only launch set is derived from the same routes; trace
+/// construction and mutation remain internal.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RecordedGemmTrace {
+    context: GemmRouteIdentity,
+    launches: Option<ResolvedGemmLaunchSet>,
+    routes: Box<[ResolvedGemmRoute]>,
+}
+
+impl RecordedGemmTrace {
+    pub(crate) fn from_routes(
+        context: GemmRouteIdentity,
+        routes: Vec<ResolvedGemmRoute>,
+    ) -> Result<Self, String> {
+        let launches = if routes.is_empty() {
+            None
+        } else {
+            Some(build_resolved_gemm_launch_set(&routes)?)
+        };
+        Ok(Self {
+            context,
+            launches,
+            routes: routes.into_boxed_slice(),
+        })
+    }
+
+    /// Returns the physical routes in their actual enqueue order.
+    pub fn routes(&self) -> &[ResolvedGemmRoute] {
+        &self.routes
+    }
+
+    /// Returns the ordered launch count and digest, or `None` when the body
+    /// launched no recorded GEMM route.
+    pub fn launches(&self) -> Option<ResolvedGemmLaunchSet> {
+        self.launches
+    }
+
+    pub(crate) fn manifest(&self) -> PreparedGemmCaptureManifest {
+        let manifest = PreparedGemmCaptureManifest::new(self.context, self.launches);
+        debug_assert_eq!(manifest.route_capacity, self.routes().len());
+        manifest
     }
 }
 
@@ -2846,6 +4353,49 @@ impl ResolvedGemmLaunchSetBuilder {
             return Err(format!(
                 "resolved GEMM launch set exceeds its declared count {}",
                 self.expected_launch_count
+            ));
+        }
+        if [
+            route.launch.grid_dim.0,
+            route.launch.grid_dim.1,
+            route.launch.grid_dim.2,
+        ]
+        .contains(&0)
+        {
+            return Err(format!(
+                "resolved GEMM launch {} has a zero grid dimension",
+                route.symbol
+            ));
+        }
+        let block_threads = [
+            route.launch.block_dim.0,
+            route.launch.block_dim.1,
+            route.launch.block_dim.2,
+        ]
+        .into_iter()
+        .try_fold(1_u32, |threads, dimension| threads.checked_mul(dimension))
+        .ok_or_else(|| {
+            format!(
+                "resolved GEMM launch {} block dimensions overflow u32",
+                route.symbol
+            )
+        })?;
+        if block_threads == 0 {
+            return Err(format!(
+                "resolved GEMM launch {} has a zero block dimension",
+                route.symbol
+            ));
+        }
+        if block_threads != route.threads {
+            return Err(format!(
+                "resolved GEMM launch {} block has {block_threads} threads but route records {}",
+                route.symbol, route.threads
+            ));
+        }
+        if route.launch.arguments_digest == [0; 32] {
+            return Err(format!(
+                "resolved GEMM launch {} has a placeholder arguments digest",
+                route.symbol
             ));
         }
         let digest = self
@@ -2890,6 +4440,59 @@ pub fn build_resolved_gemm_launch_set(
     builder.finish()
 }
 
+pub(crate) fn build_zero_reduction_route_identity(
+    route: ResolvedGemmRoute,
+) -> Result<ResolvedGemmLaunchSet, String> {
+    if route.numeric_contract != ResolvedNumericContract::ZeroReductionEpilogueF32V1 {
+        return Err("zero-reduction route identity requires the zero epilogue contract".into());
+    }
+    if route.tensor_map_revision == 0 || route.tensor_maps_digest == [0; 32] {
+        return Err("zero-reduction route identity requires revisioned mapless identity".into());
+    }
+    build_resolved_gemm_launch_set(&[route])
+}
+
+pub(crate) struct CapturedGemmGraphPlan {
+    pub(crate) context: GemmRouteIdentity,
+    pub(crate) launches: ResolvedGemmLaunchSet,
+    routes: Box<[ResolvedGemmRoute]>,
+}
+
+impl CapturedGemmGraphPlan {
+    pub(crate) fn new(
+        context: GemmRouteIdentity,
+        launches: ResolvedGemmLaunchSet,
+        routes: Box<[ResolvedGemmRoute]>,
+    ) -> Self {
+        Self {
+            context,
+            launches,
+            routes,
+        }
+    }
+
+    pub(crate) fn routes(&self) -> &[ResolvedGemmRoute] {
+        &self.routes
+    }
+
+    pub(crate) fn with_validated_launch(
+        &self,
+        ctx: &GpuCtx,
+        label: &str,
+        launch: impl FnOnce() -> Result<(), String>,
+    ) -> Result<(), String> {
+        self.context.ensure_current(ctx.gemm_route(), label)?;
+        let mut live_launch_set = ResolvedGemmLaunchSetBuilder::new(self.routes().len())?;
+        for route in self.routes() {
+            ctx.validate_resolved_gemm_route(route, label)?;
+            live_launch_set.push(route)?;
+        }
+        self.launches
+            .ensure_current(live_launch_set.finish()?, label)?;
+        launch()
+    }
+}
+
 fn append_resolved_gemm_route(
     digest: FramedSha256,
     index: usize,
@@ -2898,8 +4501,10 @@ fn append_resolved_gemm_route(
     let accepted_target = route
         .device_caps
         .accepted_target
-        .map(|target| target.as_str().as_bytes().to_vec());
+        .as_ref()
+        .map(|target| target.as_str().as_bytes());
     digest
+        .required(b"route-index-domain", ROUTE_INDEX_DOMAIN)
         .required(b"route-index", &(index as u64).to_le_bytes())
         .required(b"op", &[route.op as u8])
         .required(b"dtype", &[route.dtype as u8])
@@ -2920,6 +4525,7 @@ fn append_resolved_gemm_route(
             &route.instruction_shape.k.to_le_bytes(),
         )
         .required(b"operand-conversion", &[route.operand_conversion as u8])
+        .required(b"ownership", &[route.ownership as u8])
         .required(b"symbol", route.symbol.as_bytes())
         .required(b"module-kind", &[route.module_kind as u8])
         .required(b"target", route.target.as_str().as_bytes())
@@ -2977,6 +4583,10 @@ fn append_resolved_gemm_route(
             b"device-cc-minor",
             &route.device.compute_capability.1.to_le_bytes(),
         )
+        .required(
+            b"device-multiprocessor-count",
+            &route.device.multiprocessor_count.to_le_bytes(),
+        )
         .required(b"device-target", route.device.target.as_str().as_bytes())
         .required(
             b"driver-api-version",
@@ -3004,7 +4614,7 @@ fn append_resolved_gemm_route(
             b"caps-nvrtc-minor",
             &route.device_caps.nvrtc_version.1.to_le_bytes(),
         )
-        .optional(b"caps-accepted-target", accepted_target.as_deref())
+        .optional(b"caps-accepted-target", accepted_target)
         .required(
             b"caps-optin-shared-bytes",
             &route.device_caps.optin_shared_bytes.to_le_bytes(),
@@ -3024,6 +4634,17 @@ fn append_resolved_gemm_route(
         .required(b"bk", &route.bk.to_le_bytes())
         .required(b"stages", &[route.stages])
         .required(b"threads", &route.threads.to_le_bytes())
+        .required(b"grid-x", &route.launch.grid_dim.0.to_le_bytes())
+        .required(b"grid-y", &route.launch.grid_dim.1.to_le_bytes())
+        .required(b"grid-z", &route.launch.grid_dim.2.to_le_bytes())
+        .required(b"block-x", &route.launch.block_dim.0.to_le_bytes())
+        .required(b"block-y", &route.launch.block_dim.1.to_le_bytes())
+        .required(b"block-z", &route.launch.block_dim.2.to_le_bytes())
+        .required(
+            b"dynamic-shared-bytes",
+            &route.launch.shared_mem_bytes.to_le_bytes(),
+        )
+        .required(b"kernel-arguments-digest", &route.launch.arguments_digest)
         .required(
             b"tensor-map-revision",
             &route.tensor_map_revision.to_le_bytes(),
@@ -3037,11 +4658,1087 @@ fn append_resolved_gemm_route(
         .required(b"schedule-revision", &route.schedule_revision.to_le_bytes())
 }
 
+fn validate_physical_launch(
+    node: &ResolvedPhysicalKernelLaunch,
+) -> Result<Option<Sha256Digest>, String> {
+    if node.symbol.is_empty() || !node.symbol.is_ascii() {
+        return Err("resolved physical launch requires a non-empty ASCII CUDA symbol".into());
+    }
+    if [
+        node.launch.grid_dim.0,
+        node.launch.grid_dim.1,
+        node.launch.grid_dim.2,
+    ]
+    .contains(&0)
+    {
+        return Err(format!(
+            "resolved physical launch {} has a zero grid dimension",
+            node.symbol
+        ));
+    }
+    let block_threads = [
+        node.launch.block_dim.0,
+        node.launch.block_dim.1,
+        node.launch.block_dim.2,
+    ]
+    .into_iter()
+    .try_fold(1_u32, |threads, dimension| threads.checked_mul(dimension))
+    .ok_or_else(|| {
+        format!(
+            "resolved physical launch {} block dimensions overflow u32",
+            node.symbol
+        )
+    })?;
+    if block_threads == 0 {
+        return Err(format!(
+            "resolved physical launch {} has a zero block dimension",
+            node.symbol
+        ));
+    }
+    if node.launch.arguments_digest == [0; 32] {
+        return Err(format!(
+            "resolved physical launch {} has a placeholder argument-layout digest",
+            node.symbol
+        ));
+    }
+    let native_half_suffix = match (node.logical_dtype, node.execution_dtype) {
+        (PolicyDtype::Bf16, PolicyDtype::Bf16) => Some("_bf16"),
+        (PolicyDtype::F16, PolicyDtype::F16) => Some("_f16"),
+        _ => None,
+    };
+    if node.kind == PhysicalLaunchKind::Gemm
+        && native_half_suffix.is_some_and(|suffix| !node.symbol.ends_with(suffix))
+    {
+        return Err(format!(
+            "resolved native half GEMM launch {} is missing its exact dtype suffix",
+            node.symbol
+        ));
+    }
+
+    match (node.kind, node.gemm_route) {
+        (PhysicalLaunchKind::Gemm, Some(route)) => {
+            if route.module_kind != route.artifact.module_kind {
+                return Err(format!(
+                    "resolved physical GEMM launch {} has an unresolved module owner",
+                    node.symbol
+                ));
+            }
+            if node.symbol != route.symbol
+                || node.module_kind != route.module_kind
+                || node.logical_op != route.op
+                || node.execution_dtype != route.dtype
+                || node.shape != route.shape
+                || node.strides != route.strides
+                || node.tile != Some(route.tile)
+                || node.launch != route.launch
+            {
+                return Err(format!(
+                    "resolved physical GEMM launch {} contradicts its GEMM route",
+                    node.symbol
+                ));
+            }
+            Ok(Some(
+                build_resolved_gemm_launch_set(&[route])?.ordered_digest,
+            ))
+        }
+        (PhysicalLaunchKind::Gemm, None) => Err(format!(
+            "resolved physical GEMM launch {} has no GEMM route",
+            node.symbol
+        )),
+        (PhysicalLaunchKind::InputUpcast | PhysicalLaunchKind::OutputDowncast, Some(_)) => {
+            Err(format!(
+                "resolved physical conversion launch {} must not claim a GEMM route",
+                node.symbol
+            ))
+        }
+        (PhysicalLaunchKind::InputUpcast | PhysicalLaunchKind::OutputDowncast, None)
+            if node.module_kind != ModuleKind::Fixed =>
+        {
+            Err(format!(
+                "resolved physical conversion launch {} has an unresolved module owner",
+                node.symbol
+            ))
+        }
+        (PhysicalLaunchKind::InputUpcast | PhysicalLaunchKind::OutputDowncast, None) => Ok(None),
+    }
+}
+
+fn append_resolved_physical_launch(
+    hash: FramedSha256,
+    index: usize,
+    node: &ResolvedPhysicalKernelLaunch,
+    gemm_route_digest: Option<&Sha256Digest>,
+) -> FramedSha256 {
+    let hash = hash
+        .required(
+            b"physical-launch-index-domain",
+            PHYSICAL_LAUNCH_INDEX_DOMAIN,
+        )
+        .required(b"physical-launch-index", &(index as u64).to_le_bytes())
+        .required(b"kind", &[node.kind as u8])
+        .required(b"symbol", node.symbol.as_bytes())
+        .required(b"module-kind", &[node.module_kind as u8])
+        .required(b"logical-op", &[node.logical_op as u8])
+        .required(b"logical-dtype", &[node.logical_dtype as u8])
+        .required(b"execution-dtype", &[node.execution_dtype as u8])
+        .required(b"shape-m", &(node.shape.0 as u64).to_le_bytes())
+        .required(b"shape-k", &(node.shape.1 as u64).to_le_bytes())
+        .required(b"shape-n", &(node.shape.2 as u64).to_le_bytes())
+        .required(b"stride-a", &(node.strides.0 as u64).to_le_bytes())
+        .required(b"stride-b", &(node.strides.1 as u64).to_le_bytes())
+        .required(b"stride-output", &(node.strides.2 as u64).to_le_bytes());
+    let hash = match node.tile {
+        Some((tile_m, tile_n)) => {
+            let mut bytes = [0_u8; 8];
+            bytes[..4].copy_from_slice(&tile_m.to_le_bytes());
+            bytes[4..].copy_from_slice(&tile_n.to_le_bytes());
+            hash.optional(b"tile", Some(&bytes))
+        }
+        None => hash.optional(b"tile", None),
+    };
+    hash.required(b"grid-x", &node.launch.grid_dim.0.to_le_bytes())
+        .required(b"grid-y", &node.launch.grid_dim.1.to_le_bytes())
+        .required(b"grid-z", &node.launch.grid_dim.2.to_le_bytes())
+        .required(b"block-x", &node.launch.block_dim.0.to_le_bytes())
+        .required(b"block-y", &node.launch.block_dim.1.to_le_bytes())
+        .required(b"block-z", &node.launch.block_dim.2.to_le_bytes())
+        .required(
+            b"dynamic-shared-memory-bytes",
+            &node.launch.shared_mem_bytes.to_le_bytes(),
+        )
+        .required(b"argument-layout-digest", &node.launch.arguments_digest)
+        .optional(
+            b"gemm-route-digest",
+            gemm_route_digest.map(Sha256Digest::as_slice),
+        )
+}
+
+#[cfg(test)]
+mod physical_launch_tests {
+    use super::*;
+
+    fn physical_launch(
+        kind: PhysicalLaunchKind,
+        symbol: &'static str,
+    ) -> ResolvedPhysicalKernelLaunch {
+        ResolvedPhysicalKernelLaunch {
+            kind,
+            symbol,
+            module_kind: ModuleKind::Fixed,
+            logical_op: ResolvedGemmOp::Nn,
+            logical_dtype: PolicyDtype::Bf16,
+            execution_dtype: PolicyDtype::F32,
+            shape: (17, 65, 33),
+            strides: (80, 48, 48),
+            tile: None,
+            launch: ResolvedKernelLaunch {
+                grid_dim: (5, 1, 1),
+                block_dim: (256, 1, 1),
+                shared_mem_bytes: 0,
+                arguments_digest: [37; 32],
+            },
+            gemm_route: None,
+        }
+    }
+
+    fn physical_context() -> GemmRouteIdentity {
+        let compiler = CompilerIdentity {
+            source_digest: [1; 32],
+            invocation_digest: [2; 32],
+            header_manifest_digest: [3; 32],
+            target: CudaTarget::new("sm_89").unwrap(),
+            nvrtc_version: (13, 2),
+            nvrtc_library_domain: [4; 32],
+            nvrtc_library_known: true,
+            output_kind: ArtifactKind::Ptx,
+            composer_revision: COMPOSER_REVISION,
+            compiler_revision: COMPILER_REVISION,
+            numeric_abi_revision: NUMERIC_ABI_REVISION,
+            schedule_revision: SCHEDULE_REVISION,
+        };
+        let artifact = |module_kind, seed| ArtifactIdentity {
+            module_kind,
+            artifact_kind: ArtifactKind::Ptx,
+            compile_key: [seed; 32],
+            artifact_digest: [seed + 1; 32],
+        };
+        GemmRouteIdentity {
+            policy: GemmPolicy {
+                batch_invariant: true,
+                bi_tensor_cores: true,
+                fast_gemm: false,
+                cublas_tf32: false,
+                f32_triad_policy: F32TriadPolicy::ExactScalarFmaV1,
+                bi_gemm_family: BiGemmFamily::Triad,
+            },
+            backend_set: BackendSet::TRIAD,
+            numeric_contracts: NumericContractSet::TRIAD_SCALAR_FMA_V1,
+            compiler,
+            artifacts: build_artifact_set(&[
+                artifact(ModuleKind::Fixed, 5),
+                artifact(ModuleKind::TriadScalar, 7),
+                artifact(ModuleKind::TriadSm80, 9),
+            ])
+            .unwrap(),
+            policy_revision: POLICY_REVISION,
+            policy_hash: [11; 32],
+            device: DeviceIdentity {
+                compute_capability: (8, 9),
+                multiprocessor_count: 142,
+                target: CudaTarget::new("sm_89").unwrap(),
+                driver: DriverIdentity {
+                    api_version: 13_200,
+                    build_sources: 1,
+                    build_digest: [12; 32],
+                },
+            },
+            device_caps: DeviceCaps {
+                compute_capability: (8, 9),
+                nvrtc_version: (13, 2),
+                accepted_target: None,
+                optin_shared_bytes: 101_376,
+                tensor_map_access: false,
+            },
+            tuning_table_revision: TUNING_TABLE_REVISION,
+            schedule_set_revision: SCHEDULE_REVISION,
+            state_capacity: 64,
+        }
+    }
+
+    pub(super) fn synthetic_scalar_route() -> ResolvedGemmRoute {
+        let context = physical_context();
+        ResolvedGemmRoute {
+            op: ResolvedGemmOp::Nn,
+            dtype: PolicyDtype::F32,
+            backend: PhysicalGemmBackend::ScalarFmaV1,
+            numeric_contract: ResolvedNumericContract::ScalarFmaV1,
+            instruction_family: ResolvedInstructionFamily::ScalarFma,
+            instruction_shape: ResolvedInstructionShape { m: 1, n: 1, k: 1 },
+            operand_conversion: ResolvedOperandConversion::None,
+            ownership: ResolvedOutputOwnership::OneCtaPerOutputTileV1,
+            symbol: "gemm_bi_nn",
+            module_kind: ModuleKind::TriadScalar,
+            target: context.compiler.target,
+            artifact: context.artifacts.triad_scalar,
+            compiler: context.compiler,
+            device: context.device,
+            device_caps: context.device_caps,
+            shape: (17, 65, 33),
+            strides: (80, 48, 48),
+            tile: (1, 1),
+            bk: 1,
+            stages: 1,
+            threads: 256,
+            launch: ResolvedKernelLaunch {
+                grid_dim: (5, 1, 1),
+                block_dim: (256, 1, 1),
+                shared_mem_bytes: 0,
+                arguments_digest: [41; 32],
+            },
+            tensor_map_revision: 0,
+            tensor_maps_digest: [0; 32],
+            resources_digest: [42; 32],
+            tuning_table_revision: TUNING_TABLE_REVISION,
+            schedule_revision: SCHEDULE_REVISION,
+        }
+    }
+
+    fn physical_gemm_launch() -> ResolvedPhysicalKernelLaunch {
+        let route = synthetic_scalar_route();
+        ResolvedPhysicalKernelLaunch {
+            kind: PhysicalLaunchKind::Gemm,
+            symbol: route.symbol,
+            module_kind: route.module_kind,
+            logical_op: route.op,
+            logical_dtype: PolicyDtype::Bf16,
+            execution_dtype: route.dtype,
+            shape: route.shape,
+            strides: route.strides,
+            tile: Some(route.tile),
+            launch: route.launch,
+            gemm_route: Some(route),
+        }
+    }
+
+    fn physical_graph_binding() -> PhysicalGraphBinding {
+        PhysicalGraphBinding::new(physical_context(), 0x1200, 0x3400)
+    }
+
+    fn physical_graph_nodes() -> Vec<ResolvedPhysicalKernelLaunch> {
+        vec![
+            physical_launch(PhysicalLaunchKind::InputUpcast, "cast_bf16_to_f32"),
+            physical_gemm_launch(),
+            physical_launch(PhysicalLaunchKind::OutputDowncast, "cast_f32_to_bf16"),
+        ]
+    }
+
+    #[test]
+    fn captured_physical_graph_identity_rejects_exact_contract_mutations() {
+        let binding = physical_graph_binding();
+        let nodes = physical_graph_nodes();
+        assert!(CapturedPhysicalGraphIdentity::from_nodes(binding, Vec::new()).is_err());
+        let identity = CapturedPhysicalGraphIdentity::from_nodes(binding, nodes.clone()).unwrap();
+        let validated_routes = std::cell::Cell::new(0_usize);
+        identity
+            .validate(binding, true, |route| {
+                assert_eq!(*route, physical_gemm_launch().gemm_route.unwrap());
+                validated_routes.set(validated_routes.get() + 1);
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(validated_routes.get(), 1);
+
+        let mut mutations = Vec::new();
+        let mut missing = identity.clone();
+        missing.nodes = nodes[..2].to_vec().into_boxed_slice();
+        mutations.push(missing);
+        let mut extra = identity.clone();
+        extra.nodes = [nodes.as_slice(), &nodes[2..]].concat().into_boxed_slice();
+        mutations.push(extra);
+        let mut reordered = identity.clone();
+        reordered.nodes.swap(0, 1);
+        mutations.push(reordered);
+        let mut renamed = identity.clone();
+        renamed.nodes[0].symbol = "renamed_cast_bf16_to_f32";
+        mutations.push(renamed);
+        let mut conversion = identity.clone();
+        conversion.nodes[0].kind = PhysicalLaunchKind::OutputDowncast;
+        mutations.push(conversion);
+        let mut tile = identity.clone();
+        tile.nodes[1].tile = Some((64, 64));
+        mutations.push(tile);
+        let mut arguments = identity.clone();
+        arguments.nodes[2].launch.arguments_digest[0] ^= 1;
+        mutations.push(arguments);
+        let mut capacity = identity.clone();
+        capacity.launch_capacity += 1;
+        mutations.push(capacity);
+        let mut launch_count = identity.clone();
+        launch_count.launches.launch_count += 1;
+        mutations.push(launch_count);
+
+        for mutation in mutations {
+            assert!(
+                mutation.validate(binding, true, |_| Ok(())).is_err(),
+                "captured physical graph identity mutation was accepted"
+            );
+        }
+
+        let mut changed_context = binding;
+        changed_context.context.state_capacity += 1;
+        assert!(
+            identity
+                .validate(changed_context, true, |_| Ok(()))
+                .is_err()
+        );
+        let mut changed_instance = binding;
+        changed_instance.context_token += 1;
+        assert!(
+            identity
+                .validate(changed_instance, true, |_| Ok(()))
+                .is_err()
+        );
+        let mut changed_stream = binding;
+        changed_stream.stream_token += 1;
+        assert!(identity.validate(changed_stream, true, |_| Ok(())).is_err());
+        let mut changed_conversion_binding = binding;
+        changed_conversion_binding
+            .conversion
+            .artifact
+            .artifact_digest[0] ^= 1;
+        assert!(
+            identity
+                .validate(changed_conversion_binding, true, |_| Ok(()))
+                .is_err()
+        );
+        assert!(identity.validate(binding, false, |_| Ok(())).is_err());
+        assert!(
+            identity
+                .validate(binding, true, |_| Err("embedded route drift".into()))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn physical_graph_allocation_liveness_rejects_generation_drift() {
+        use crate::mamba_ssm::gpu::buffers::{
+            managed_allocation_epoch_for_ranges, register_managed_allocation_range,
+        };
+
+        assert!(PhysicalAllocationLiveness::new(None).is_err());
+        let registration = register_managed_allocation_range(0x7010, 0x8000, 4096).unwrap();
+        let epoch = managed_allocation_epoch_for_ranges(0x7010, &[(0x8100, 1024)]).unwrap();
+        let liveness = PhysicalAllocationLiveness::new(Some(epoch)).unwrap();
+        liveness.validate().unwrap();
+        drop(registration);
+        assert!(liveness.validate().is_err());
+    }
+
+    #[test]
+    fn private_recorder_preserves_order_and_sticky_invalidates_failures() {
+        let first = physical_launch(PhysicalLaunchKind::InputUpcast, "cast_bf16_to_f32");
+        let second = physical_gemm_launch();
+        let third = physical_launch(PhysicalLaunchKind::OutputDowncast, "cast_f32_to_bf16");
+        let mut recorder = PhysicalTraceRecorder::with_capacity(3).unwrap();
+        recorder.validate_start(3).unwrap();
+        for launch in [first, second, third] {
+            recorder.record(launch).unwrap();
+        }
+        assert_eq!(recorder.nodes, vec![first, second, third]);
+        assert_eq!(recorder.enqueue_events.len(), 3);
+        recorder
+            .record(first)
+            .expect("capture-time overflow handling must not allocate an error");
+        let error = recorder
+            .validate_complete()
+            .expect_err("post-capture validation must reject capacity overflow");
+        assert!(error.contains("capacity"), "{error}");
+
+        let mut failed = PhysicalTraceRecorder::with_capacity(1).unwrap();
+        failed.record(first).unwrap();
+        failed.invalidate_enqueue();
+        let error = failed
+            .validate_complete()
+            .expect_err("a Driver failure must permanently invalidate its recorder");
+        assert!(error.contains("failed CUDA enqueue"), "{error}");
+
+        let mut deferred = PhysicalTraceRecorder::with_capacity(1).unwrap();
+        let mut malformed = first;
+        malformed.kind = PhysicalLaunchKind::Gemm;
+        deferred
+            .record(malformed)
+            .expect("capture-time recording must only copy the enqueue event");
+        assert!(
+            deferred
+                .finish(physical_context(), physical_graph_binding())
+                .is_err(),
+            "physical hashing and validation must remain deferred until finish"
+        );
+
+        let mut oversized = PhysicalTraceRecorder::with_capacity(1).unwrap();
+        oversized.nodes.reserve_exact(2);
+        let error = oversized
+            .validate_start(1)
+            .expect_err("capture must reject oversized recorder backing storage");
+        assert!(error.contains("backing capacity"), "{error}");
+    }
+
+    #[test]
+    fn physical_launch_digest_covers_every_semantic_field_and_ordered_position() {
+        let first = physical_launch(PhysicalLaunchKind::InputUpcast, "cast_in");
+        let second = physical_gemm_launch();
+        let ordered = ResolvedPhysicalLaunchSet::from_nodes(&[first, second]).unwrap();
+        assert_eq!(ordered.launch_count(), 2);
+        assert_ne!(
+            ordered,
+            ResolvedPhysicalLaunchSet::from_nodes(&[second, first]).unwrap()
+        );
+        assert_ne!(
+            ordered,
+            ResolvedPhysicalLaunchSet::from_nodes(&[first, first]).unwrap()
+        );
+
+        let baseline = ResolvedPhysicalLaunchSet::from_nodes(&[first]).unwrap();
+        let mut mutations = Vec::new();
+        let mut value = first;
+        value.kind = PhysicalLaunchKind::OutputDowncast;
+        mutations.push(value);
+        let mut value = first;
+        value.symbol = "renamed_cast_in";
+        mutations.push(value);
+        let mut value = first;
+        value.logical_op = ResolvedGemmOp::Tn;
+        mutations.push(value);
+        let mut value = first;
+        value.logical_dtype = PolicyDtype::F16;
+        mutations.push(value);
+        let mut value = first;
+        value.execution_dtype = PolicyDtype::F16;
+        mutations.push(value);
+        for dimension in 0..3 {
+            let mut value = first;
+            let mut shape = [value.shape.0, value.shape.1, value.shape.2];
+            shape[dimension] += 1;
+            value.shape = (shape[0], shape[1], shape[2]);
+            mutations.push(value);
+
+            let mut value = first;
+            let mut strides = [value.strides.0, value.strides.1, value.strides.2];
+            strides[dimension] += 1;
+            value.strides = (strides[0], strides[1], strides[2]);
+            mutations.push(value);
+
+            let mut value = first;
+            let mut grid = [
+                value.launch.grid_dim.0,
+                value.launch.grid_dim.1,
+                value.launch.grid_dim.2,
+            ];
+            grid[dimension] += 1;
+            value.launch.grid_dim = (grid[0], grid[1], grid[2]);
+            mutations.push(value);
+
+            let mut value = first;
+            let mut block = [
+                value.launch.block_dim.0,
+                value.launch.block_dim.1,
+                value.launch.block_dim.2,
+            ];
+            block[dimension] += 1;
+            value.launch.block_dim = (block[0], block[1], block[2]);
+            mutations.push(value);
+        }
+        let mut value = first;
+        value.tile = Some((64, 128));
+        mutations.push(value);
+        let mut value = first;
+        value.launch.shared_mem_bytes += 4;
+        mutations.push(value);
+        let mut value = first;
+        value.launch.arguments_digest[0] ^= 1;
+        mutations.push(value);
+
+        for mutation in mutations {
+            assert_ne!(
+                ResolvedPhysicalLaunchSet::from_nodes(&[mutation]).unwrap(),
+                baseline,
+                "physical launch mutation was omitted from the ordered digest: {mutation:?}"
+            );
+        }
+
+        let mut tiled = first;
+        tiled.tile = Some((64, 64));
+        let tiled_baseline = ResolvedPhysicalLaunchSet::from_nodes(&[tiled]).unwrap();
+        for tile in [(128, 64), (64, 128)] {
+            let mut changed = tiled;
+            changed.tile = Some(tile);
+            assert_ne!(
+                ResolvedPhysicalLaunchSet::from_nodes(&[changed]).unwrap(),
+                tiled_baseline
+            );
+        }
+
+        let with_gemm_route = physical_gemm_launch();
+        let mut changed_route = with_gemm_route;
+        changed_route.gemm_route.as_mut().unwrap().resources_digest[0] ^= 1;
+        assert_ne!(
+            ResolvedPhysicalLaunchSet::from_nodes(&[with_gemm_route]).unwrap(),
+            ResolvedPhysicalLaunchSet::from_nodes(&[changed_route]).unwrap()
+        );
+    }
+
+    #[test]
+    fn physical_launch_set_rejects_empty_placeholder_and_incoherent_nodes() {
+        assert!(ResolvedPhysicalLaunchSet::from_nodes(&[]).is_err());
+
+        let baseline = physical_launch(PhysicalLaunchKind::InputUpcast, "cast_in");
+        let mut invalid = Vec::new();
+        let mut empty_symbol = baseline;
+        empty_symbol.symbol = "";
+        invalid.push(empty_symbol);
+        let mut non_ascii_symbol = baseline;
+        non_ascii_symbol.symbol = "upcast_\u{00df}";
+        invalid.push(non_ascii_symbol);
+        let mut wrong_conversion_owner = baseline;
+        wrong_conversion_owner.module_kind = ModuleKind::TriadScalar;
+        invalid.push(wrong_conversion_owner);
+        let mut placeholder_arguments = baseline;
+        placeholder_arguments.launch.arguments_digest = [0; 32];
+        invalid.push(placeholder_arguments);
+        let mut zero_grid = baseline;
+        zero_grid.launch.grid_dim.0 = 0;
+        invalid.push(zero_grid);
+        let mut zero_block = baseline;
+        zero_block.launch.block_dim.1 = 0;
+        invalid.push(zero_block);
+        let mut overflowing_block = baseline;
+        overflowing_block.launch.block_dim = (u32::MAX, 2, 1);
+        invalid.push(overflowing_block);
+        let mut cast_claims_route = baseline;
+        cast_claims_route.gemm_route = physical_gemm_launch().gemm_route;
+        invalid.push(cast_claims_route);
+        let mut gemm_without_route = physical_gemm_launch();
+        gemm_without_route.gemm_route = None;
+        invalid.push(gemm_without_route);
+        let mut unsuffixed_half = physical_gemm_launch();
+        unsuffixed_half.logical_dtype = PolicyDtype::Bf16;
+        unsuffixed_half.execution_dtype = PolicyDtype::Bf16;
+        unsuffixed_half.gemm_route.as_mut().unwrap().dtype = PolicyDtype::Bf16;
+        invalid.push(unsuffixed_half);
+        let mut post_hoc_tile = physical_gemm_launch();
+        post_hoc_tile.tile = Some((64, 64));
+        invalid.push(post_hoc_tile);
+        let mut unresolved_module_owner = physical_gemm_launch();
+        unresolved_module_owner
+            .gemm_route
+            .as_mut()
+            .unwrap()
+            .artifact
+            .module_kind = ModuleKind::TriadSm80;
+        invalid.push(unresolved_module_owner);
+        for node in invalid {
+            assert!(
+                ResolvedPhysicalLaunchSet::from_nodes(&[node]).is_err(),
+                "invalid physical launch must fail closed: {node:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn native_half_manifest_rejects_unsuffixed_and_post_hoc_selector_metadata() {
+        let mut native = physical_gemm_launch();
+        native.symbol = "gemm_bi_nn_big_bf16";
+        native.logical_dtype = PolicyDtype::Bf16;
+        native.execution_dtype = PolicyDtype::Bf16;
+        let route = native.gemm_route.as_mut().unwrap();
+        route.symbol = native.symbol;
+        route.dtype = PolicyDtype::Bf16;
+        ResolvedPhysicalLaunchSet::from_nodes(&[native]).unwrap();
+
+        let mut unsuffixed = native;
+        unsuffixed.symbol = "gemm_bi_nn_big";
+        unsuffixed.gemm_route.as_mut().unwrap().symbol = unsuffixed.symbol;
+        assert!(ResolvedPhysicalLaunchSet::from_nodes(&[unsuffixed]).is_err());
+
+        let mut post_hoc_tile = native;
+        post_hoc_tile.tile = Some((64, 64));
+        assert!(ResolvedPhysicalLaunchSet::from_nodes(&[post_hoc_tile]).is_err());
+
+        let mut coherent_post_hoc_tile = native;
+        coherent_post_hoc_tile.tile = Some((64, 64));
+        coherent_post_hoc_tile.gemm_route.as_mut().unwrap().tile = (64, 64);
+        let mut trace = recorded_physical_trace_for_test(physical_context(), vec![native]).unwrap();
+        trace.nodes = vec![coherent_post_hoc_tile].into_boxed_slice();
+        trace.launches = ResolvedPhysicalLaunchSet::from_nodes(&trace.nodes).unwrap();
+        assert!(trace.validate_integrity().is_err());
+    }
+
+    #[test]
+    fn physical_launch_set_validation_rejects_count_digest_and_singular_drift() {
+        let nodes = [
+            physical_launch(PhysicalLaunchKind::InputUpcast, "cast_in"),
+            physical_gemm_launch(),
+        ];
+        let launches = ResolvedPhysicalLaunchSet::from_nodes(&nodes).unwrap();
+        assert_eq!(launches.physical_symbol(), None);
+        assert_eq!(launches.tile(), None);
+
+        let mut wrong_count = launches;
+        wrong_count.launch_count += 1;
+        let mut wrong_digest = launches;
+        wrong_digest.ordered_digest[0] ^= 1;
+        let mut singular_claim = launches;
+        singular_claim.physical_symbol = Some(nodes[1].symbol);
+        singular_claim.tile = nodes[1].tile;
+        for changed in [wrong_count, wrong_digest, singular_claim] {
+            assert!(changed.validate_nodes(&nodes).is_err());
+        }
+    }
+
+    #[test]
+    fn physical_launch_trace_and_manifest_reject_empty_nodes() {
+        assert!(recorded_physical_trace_for_test(physical_context(), Vec::new()).is_err());
+        assert!(
+            PreparedPhysicalCaptureManifest::from_nodes(
+                physical_graph_binding(),
+                [0; 32],
+                Vec::new(),
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn physical_launch_manifest_rejects_context_capacity_and_node_mutations() {
+        let nodes = vec![
+            physical_launch(PhysicalLaunchKind::InputUpcast, "cast_in"),
+            physical_launch(PhysicalLaunchKind::OutputDowncast, "cast_out"),
+        ];
+        let context = physical_context();
+        let trace = recorded_physical_trace_for_test(context, nodes.clone()).unwrap();
+        let manifest = trace.manifest();
+
+        assert_eq!(trace.nodes(), nodes);
+        assert_eq!(trace.context(), context);
+        assert_eq!(manifest.context, context);
+        assert_eq!(manifest.launch_capacity(), nodes.len());
+        assert!(
+            manifest
+                .validate_capture_request(context, nodes.len())
+                .is_ok()
+        );
+        assert!(
+            manifest
+                .validate_capture_binding(manifest.binding, nodes.len())
+                .is_ok()
+        );
+        assert!(manifest.validate_nodes(&nodes).is_ok());
+        assert!(manifest.validate_capture_result(context, &nodes).is_ok());
+
+        let mut changed_context = context;
+        changed_context.state_capacity += 1;
+        assert_ne!(trace.context(), changed_context);
+        assert!(
+            manifest
+                .validate_capture_request(changed_context, nodes.len())
+                .is_err()
+        );
+        assert!(
+            manifest
+                .validate_capture_request(context, nodes.len() + 1)
+                .is_err()
+        );
+        assert!(
+            manifest
+                .validate_capture_result(changed_context, &nodes)
+                .is_err()
+        );
+        let mut changed_instance = manifest.binding;
+        changed_instance.context_token += 1;
+        assert!(
+            manifest
+                .validate_capture_binding(changed_instance, nodes.len())
+                .is_err()
+        );
+        let mut changed_stream = manifest.binding;
+        changed_stream.stream_token += 1;
+        assert!(
+            manifest
+                .validate_capture_binding(changed_stream, nodes.len())
+                .is_err()
+        );
+
+        let mut wrong_capacity = manifest.clone();
+        wrong_capacity.launch_capacity += 1;
+        assert!(
+            wrong_capacity
+                .validate_capture_request(context, nodes.len() + 1)
+                .is_err()
+        );
+        let mut wrong_count = manifest.clone();
+        wrong_count.launches.launch_count += 1;
+        assert!(wrong_count.validate_nodes(&nodes).is_err());
+
+        let mut renamed = nodes.clone();
+        renamed[0].symbol = "renamed_cast_in";
+        for changed in [
+            vec![nodes[1], nodes[0]],
+            renamed,
+            vec![nodes[0]],
+            vec![nodes[0], nodes[1], nodes[1]],
+        ] {
+            assert!(manifest.validate_nodes(&changed).is_err());
+            assert!(manifest.validate_capture_result(context, &changed).is_err());
+        }
+    }
+
+    #[test]
+    fn physical_launch_ordered_digest_is_pinned_to_v1_framing() {
+        let nodes = [
+            physical_launch(PhysicalLaunchKind::InputUpcast, "cast_in"),
+            physical_launch(PhysicalLaunchKind::OutputDowncast, "cast_out"),
+        ];
+        let launches = ResolvedPhysicalLaunchSet::from_nodes(&nodes).unwrap();
+
+        assert_eq!(launches.launch_count(), 2);
+        assert_eq!(
+            digest_hex(&launches.ordered_digest()),
+            "40da3eeb418858775b3377cfa8b01f7716c93d5e6271cf41ca374a7a964d6a46"
+        );
+    }
+}
+
 #[cfg(test)]
 mod cache_and_header_tests {
     use super::*;
+    use crate::mamba_ssm::gpu::context::{BiGemmFamily, F32TriadPolicy, GpuCtx};
+    use crate::mamba_ssm::gpu::device::GpuDevice;
+    use std::cell::Cell;
     #[cfg(target_os = "linux")]
     use std::sync::{Arc, Barrier};
+
+    #[test]
+    fn tag36_changes_only_the_tuning_table_revision() {
+        assert_eq!(NUMERIC_ABI_REVISION, 5);
+        assert_eq!(TUNING_TABLE_REVISION, 36);
+    }
+
+    #[test]
+    fn prepared_capture_manifest_matches_an_exact_optional_ordered_launch_set() {
+        let launch = ResolvedGemmLaunchSet {
+            launch_count: 2,
+            ordered_digest: [7; 32],
+        };
+        let reordered = ResolvedGemmLaunchSet {
+            launch_count: 2,
+            ordered_digest: [8; 32],
+        };
+
+        assert_eq!(
+            PreparedGemmCaptureManifest::route_capacity_for_launches(None),
+            0
+        );
+        assert_eq!(
+            PreparedGemmCaptureManifest::route_capacity_for_launches(Some(launch)),
+            2
+        );
+        assert!(
+            PreparedGemmCaptureManifest::ensure_exact_launches(Some(launch), Some(launch)).is_ok()
+        );
+        assert!(
+            PreparedGemmCaptureManifest::ensure_exact_launches(Some(launch), Some(reordered))
+                .is_err()
+        );
+        assert!(PreparedGemmCaptureManifest::ensure_exact_launches(None, Some(launch)).is_err());
+        assert!(PreparedGemmCaptureManifest::ensure_exact_launches(Some(launch), None).is_err());
+    }
+
+    fn scalar_test_route(ctx: &GpuCtx, op: ResolvedGemmOp) -> ResolvedGemmRoute {
+        let context = ctx.gemm_route();
+        let compiler = ctx.kernels.triad_scalar_compiler_identity();
+        let symbol = match op {
+            ResolvedGemmOp::Nn => "gemm_bi_nn",
+            ResolvedGemmOp::Tn => "gemm_bi_tn",
+            ResolvedGemmOp::Nt => "gemm_bi_nt",
+        };
+        let arguments_digest = FramedSha256::new(b"scalar-test-kernel-arguments.v1")
+            .required(b"symbol", symbol.as_bytes())
+            .required(b"op", &[op as u8])
+            .finish();
+        ResolvedGemmRoute {
+            op,
+            dtype: PolicyDtype::F32,
+            backend: PhysicalGemmBackend::ScalarFmaV1,
+            numeric_contract: ResolvedNumericContract::ScalarFmaV1,
+            instruction_family: ResolvedInstructionFamily::ScalarFma,
+            instruction_shape: ResolvedInstructionShape { m: 1, n: 1, k: 1 },
+            operand_conversion: ResolvedOperandConversion::None,
+            ownership: ResolvedOutputOwnership::OneCtaPerOutputTileV1,
+            symbol,
+            module_kind: ModuleKind::TriadScalar,
+            target: compiler.target,
+            artifact: context.artifacts.triad_scalar,
+            compiler,
+            device: context.device,
+            device_caps: context.device_caps,
+            shape: (8, 16, 24),
+            strides: (16, 24, 24),
+            tile: (1, 1),
+            bk: 1,
+            stages: 1,
+            threads: 32,
+            launch: ResolvedKernelLaunch {
+                grid_dim: (1, 1, 1),
+                block_dim: (32, 1, 1),
+                shared_mem_bytes: 0,
+                arguments_digest,
+            },
+            tensor_map_revision: 0,
+            tensor_maps_digest: [0; 32],
+            resources_digest: [0; 32],
+            tuning_table_revision: TUNING_TABLE_REVISION,
+            schedule_revision: SCHEDULE_REVISION,
+        }
+    }
+
+    #[test]
+    fn zero_reduction_identity_is_domain_separated_and_pointer_free() {
+        use crate::mamba_ssm::gpu::gemm_bi_triad::{
+            TF32_TENSOR_MAP_REVISION, ZERO_REDUCTION_DIGEST_DOMAIN, ZERO_REDUCTION_MAP_REVISION,
+        };
+
+        enum PreparedMapMode {
+            ZeroReductionV1,
+            EncodedV1,
+        }
+        let modes = [PreparedMapMode::ZeroReductionV1, PreparedMapMode::EncodedV1];
+        assert_ne!(
+            std::mem::discriminant(&modes[0]),
+            std::mem::discriminant(&modes[1])
+        );
+        let mapless_digest = FramedSha256::new(ZERO_REDUCTION_DIGEST_DOMAIN)
+            .required(b"revision", &ZERO_REDUCTION_MAP_REVISION.to_le_bytes())
+            .finish();
+        let encoded_digest = FramedSha256::new(b"tf32-encoded-maps.v1")
+            .required(b"revision", &TF32_TENSOR_MAP_REVISION.to_le_bytes())
+            .finish();
+        let mut zero = super::physical_launch_tests::synthetic_scalar_route();
+        zero.numeric_contract = ResolvedNumericContract::ZeroReductionEpilogueF32V1;
+        zero.tensor_map_revision = ZERO_REDUCTION_MAP_REVISION;
+        zero.tensor_maps_digest = mapless_digest;
+        zero.launch.arguments_digest = FramedSha256::bytes(b"zero-reduction-args");
+        let zero_identity = build_zero_reduction_route_identity(zero).unwrap();
+        let mut encoded = zero;
+        encoded.numeric_contract = ResolvedNumericContract::ScalarFmaV1;
+        encoded.tensor_map_revision = TF32_TENSOR_MAP_REVISION;
+        encoded.tensor_maps_digest = encoded_digest;
+        let encoded_identity = build_resolved_gemm_launch_set(&[encoded]).unwrap();
+        assert_eq!(zero.tensor_map_revision, ZERO_REDUCTION_MAP_REVISION);
+        assert_ne!(mapless_digest, encoded_digest);
+        assert_ne!(zero_identity, encoded_identity);
+    }
+
+    fn graph_test_context() -> GpuCtx {
+        let device = GpuDevice::new(0).expect("CUDA device for graph-plan test");
+        let ctx = GpuCtx::new(&device).expect("GPU context for graph-plan test");
+        ctx.set_batch_invariant(true);
+        ctx.set_bi_gemm_family(BiGemmFamily::Triad);
+        ctx.set_bi_tensor_cores(false);
+        ctx.set_f32_triad_policy(F32TriadPolicy::ExactScalarFmaV1);
+        ctx
+    }
+
+    #[test]
+    #[ignore = "requires a CUDA device and NVRTC"]
+    fn fixed_policy_accepts_only_declared_triad_fallback_contracts() {
+        let ctx = graph_test_context();
+        ctx.set_bi_gemm_family(BiGemmFamily::Fixed);
+        for op in [ResolvedGemmOp::Nn, ResolvedGemmOp::Tn, ResolvedGemmOp::Nt] {
+            ctx.validate_resolved_gemm_route(&scalar_test_route(&ctx, op), "fixed scalar")
+                .unwrap();
+        }
+
+        let mut tf32 = scalar_test_route(&ctx, ResolvedGemmOp::Nn);
+        tf32.numeric_contract = ResolvedNumericContract::MmaTf32RnaV1;
+        let error = ctx
+            .validate_resolved_gemm_route(&tf32, "fixed TF32")
+            .expect_err("Fixed policy must not admit a Triad TF32 contract");
+        assert!(error.contains("numeric contract"), "{error}");
+    }
+
+    #[test]
+    #[ignore = "requires a CUDA device and NVRTC"]
+    fn validated_launch_accepts_an_unchanged_plan_once() {
+        let ctx = graph_test_context();
+        let guard = ctx.begin_gemm_route_recording(1).unwrap();
+        ctx.record_resolved_gemm_route(scalar_test_route(&ctx, ResolvedGemmOp::Nn))
+            .unwrap();
+        let plan = guard.finish().unwrap();
+        assert_eq!(plan.routes().len(), 1);
+        assert_eq!(plan.routes()[0].op, ResolvedGemmOp::Nn);
+        let attempts = Cell::new(0_u64);
+
+        plan.with_validated_launch(&ctx, "unchanged graph plan", || {
+            attempts.set(attempts.get() + 1);
+            Ok(())
+        })
+        .unwrap();
+
+        assert_eq!(attempts.get(), 1);
+    }
+
+    #[test]
+    #[ignore = "requires a CUDA device and NVRTC"]
+    fn validated_launch_rejects_policy_mutation_before_closure() {
+        let ctx = graph_test_context();
+        let guard = ctx.begin_gemm_route_recording(2).unwrap();
+        ctx.record_resolved_gemm_route(scalar_test_route(&ctx, ResolvedGemmOp::Nn))
+            .unwrap();
+        ctx.record_resolved_gemm_route(scalar_test_route(&ctx, ResolvedGemmOp::Tn))
+            .unwrap();
+        let mut plan = guard.finish().unwrap();
+        let attempts = Cell::new(0_u64);
+
+        ctx.set_f32_triad_policy(F32TriadPolicy::AllowDeterministicTf32V1);
+        let result = plan.with_validated_launch(&ctx, "mutated graph policy", || {
+            attempts.set(attempts.get() + 1);
+            Ok(())
+        });
+        assert!(result.is_err());
+        assert_eq!(attempts.get(), 0);
+
+        ctx.set_f32_triad_policy(F32TriadPolicy::ExactScalarFmaV1);
+        plan.routes.swap(0, 1);
+        let result = plan.with_validated_launch(&ctx, "mutated route order", || {
+            attempts.set(attempts.get() + 1);
+            Ok(())
+        });
+        assert!(result.is_err());
+        assert_eq!(attempts.get(), 0);
+    }
+
+    #[test]
+    #[ignore = "requires a CUDA device and NVRTC"]
+    fn eager_manifest_records_exact_routes_and_error_paths_clear_the_recorder() {
+        let ctx = graph_test_context();
+        let trace = ctx
+            .record_eager_gemm_trace(|| {
+                ctx.record_resolved_gemm_route(scalar_test_route(&ctx, ResolvedGemmOp::Nn))?;
+                ctx.record_resolved_gemm_route(scalar_test_route(&ctx, ResolvedGemmOp::Tn))?;
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(trace.routes().len(), 2);
+        assert_eq!(trace.routes()[0].op, ResolvedGemmOp::Nn);
+        assert_eq!(trace.routes()[1].op, ResolvedGemmOp::Tn);
+        let manifest = trace.manifest();
+        assert_eq!(manifest.route_capacity, 2);
+        assert!(manifest.launches.is_some());
+        let wrapped_manifest = ctx
+            .record_eager_gemm_manifest(|| {
+                ctx.record_resolved_gemm_route(scalar_test_route(&ctx, ResolvedGemmOp::Nn))?;
+                ctx.record_resolved_gemm_route(scalar_test_route(&ctx, ResolvedGemmOp::Tn))?;
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(wrapped_manifest, manifest);
+
+        let error = ctx
+            .record_eager_gemm_manifest(|| Err("expected eager failure".to_string()))
+            .unwrap_err();
+        assert_eq!(error, "expected eager failure");
+        drop(ctx.begin_gemm_route_recording(0).unwrap());
+
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = ctx.record_eager_gemm_manifest(|| -> Result<(), String> {
+                panic!("expected eager panic")
+            });
+        }));
+        assert!(panic.is_err());
+        drop(ctx.begin_gemm_route_recording(0).unwrap());
+    }
+
+    #[test]
+    #[ignore = "requires a CUDA device and NVRTC"]
+    fn fixed_capture_recording_rejects_route_order_drift_and_remains_reusable() {
+        let ctx = graph_test_context();
+        let manifest = ctx
+            .record_eager_gemm_manifest(|| {
+                ctx.record_resolved_gemm_route(scalar_test_route(&ctx, ResolvedGemmOp::Nn))?;
+                ctx.record_resolved_gemm_route(scalar_test_route(&ctx, ResolvedGemmOp::Tn))?;
+                Ok(())
+            })
+            .unwrap();
+        assert!(
+            manifest
+                .validate_capture_request(ctx.gemm_route(), manifest.route_capacity - 1)
+                .is_err()
+        );
+
+        let recording = ctx
+            .begin_gemm_route_recording(manifest.route_capacity)
+            .unwrap();
+        ctx.record_resolved_gemm_route(scalar_test_route(&ctx, ResolvedGemmOp::Nn))
+            .unwrap();
+        ctx.record_resolved_gemm_route(scalar_test_route(&ctx, ResolvedGemmOp::Tn))
+            .unwrap();
+        assert!(
+            recording
+                .finish_against_manifest(&manifest)
+                .unwrap()
+                .is_some()
+        );
+
+        let recording = ctx
+            .begin_gemm_route_recording(manifest.route_capacity)
+            .unwrap();
+        ctx.record_resolved_gemm_route(scalar_test_route(&ctx, ResolvedGemmOp::Tn))
+            .unwrap();
+        ctx.record_resolved_gemm_route(scalar_test_route(&ctx, ResolvedGemmOp::Nn))
+            .unwrap();
+        assert!(recording.finish_against_manifest(&manifest).is_err());
+        drop(ctx.begin_gemm_route_recording(0).unwrap());
+    }
 
     #[cfg(target_os = "linux")]
     fn trusted_tempdir() -> tempfile::TempDir {

@@ -15,13 +15,15 @@ use mamba_rs::mamba_ssm::gpu::adamw::{AdamWBiasFactors, GpuAdamW, step_multi};
 use mamba_rs::mamba_ssm::gpu::adamw::{AdamWMultiPlan, build_multi_plan, m1_specs_mixed};
 use mamba_rs::mamba_ssm::gpu::backward_mixed::gpu_backward_mamba_backbone_mixed;
 use mamba_rs::mamba_ssm::gpu::buffers::GpuBuffer;
-use mamba_rs::mamba_ssm::gpu::context::GpuCtx;
+use mamba_rs::mamba_ssm::gpu::context::{BiGemmFamily, F32TriadPolicy, GpuCtx};
 use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
 use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
 use mamba_rs::mamba_ssm::gpu::forward::{GpuMambaDims, GpuRecurrentState};
 use mamba_rs::mamba_ssm::gpu::forward_mixed::{
     GpuMambaBackboneMixedActs, GpuMambaMixedTrainScratch, gpu_forward_mamba_backbone_train_mixed,
 };
+use mamba_rs::mamba_ssm::gpu::kernel_identity::PreparedGemmCaptureManifest;
+use mamba_rs::mamba_ssm::gpu::trainer::{MambaTrainer, TrainSessionCfg};
 use mamba_rs::mamba_ssm::gpu::training_graph::{
     GpuMambaTrainingStepGraph, MambaMixedCapture, MambaMixedReplay,
 };
@@ -51,6 +53,71 @@ fn det_input(n: usize, seed: u32) -> Vec<f32> {
             (s & 0xFFFF) as f32 / 65536.0 - 0.5
         })
         .collect()
+}
+
+fn triad_ctx(device: &GpuDevice) -> GpuCtx {
+    let ctx = GpuCtx::new(device).unwrap();
+    ctx.set_batch_invariant(true);
+    ctx.set_bi_gemm_family(BiGemmFamily::Triad);
+    ctx.set_bi_tensor_cores(false);
+    ctx.set_fast_gemm(false);
+    ctx.set_f32_triad_policy(F32TriadPolicy::ExactScalarFmaV1);
+    ctx
+}
+
+fn assert_first_triad_step_captures(dtype: WeightDtype) {
+    let cfg = tiny_cfg();
+    let batch = 1;
+    let seq_len = 4;
+    let input_dim = cfg.d_model;
+    let mut cpu = MambaWeights::init(&cfg, input_dim, 0x6A50_1000 ^ dtype as u64);
+    cpu.input_proj_w.clear();
+    cpu.input_proj_b.clear();
+    let n = batch * seq_len * input_dim;
+    let input = det_input(n, 0xA11C_1001);
+    let d_temporal = det_input(n, 0xD7E0_1001);
+    let mut trainer = MambaTrainer::new_full(
+        0,
+        &cpu,
+        cfg,
+        TrainSessionCfg {
+            input_dim,
+            batch,
+            seq_len,
+            lr: 1e-7,
+            weight_decay: 0.0,
+        },
+        dtype,
+    )
+    .expect("construct M1 trainer");
+
+    trainer.ctx().set_batch_invariant(true);
+    trainer.ctx().set_bi_gemm_family(BiGemmFamily::Triad);
+    trainer.ctx().set_bi_tensor_cores(false);
+    trainer.ctx().set_fast_gemm(false);
+    trainer
+        .ctx()
+        .set_f32_triad_policy(F32TriadPolicy::ExactScalarFmaV1);
+    let warmup = trainer
+        .step(&input, &d_temporal)
+        .expect("warm up M1 Triad graph resources");
+    assert!(!warmup.graph_replayed);
+    trainer.reset_state().expect("reset state after warmup");
+    trainer.capture_graph().expect("capture M1 Triad graph");
+    let metrics = trainer
+        .step(&input, &d_temporal)
+        .expect("replay M1 Triad graph");
+    assert!(metrics.graph_replayed, "captured graph must replay");
+}
+
+#[test]
+fn m1_bf16_first_triad_step_prepares_graph_cache() {
+    assert_first_triad_step_captures(WeightDtype::Bf16);
+}
+
+#[test]
+fn m1_f16_first_triad_step_prepares_graph_cache() {
+    assert_first_triad_step_captures(WeightDtype::F16);
 }
 
 struct Setup {
@@ -234,6 +301,56 @@ fn one_eager_step(setup: &mut Setup, ctx: &GpuCtx, input: &[f32], d_temp: &[f32]
     recompute_a_neg_eager_test(ctx, setup);
 }
 
+fn prepare_gemm_manifest(
+    setup: &mut Setup,
+    ctx: &GpuCtx,
+    input: &[f32],
+    d_temporal: &[f32],
+    batch: usize,
+    seq_len: usize,
+) -> PreparedGemmCaptureManifest {
+    let input_dim = input.len() / (batch * seq_len);
+    ctx.presize_bi_upcast_scratch_for_train_with_input(
+        &setup.cfg,
+        batch,
+        seq_len,
+        input_dim,
+        setup.weights.dtype,
+    )
+    .unwrap();
+    let manifest = ctx
+        .record_eager_gemm_manifest(|| {
+            setup.grads.zero(&ctx.stream)?;
+            gpu_forward_mamba_backbone_train_mixed(
+                ctx,
+                &mut setup.acts,
+                &setup.weights,
+                &setup.mamba_input,
+                &mut setup.state,
+                &mut setup.scratch,
+            )?;
+            gpu_backward_mamba_backbone_mixed(
+                ctx,
+                &mut setup.d_temporal,
+                &setup.grads,
+                &setup.acts,
+                &setup.weights.compute,
+                &setup.a_neg_all,
+                &mut setup.scratch,
+            )
+        })
+        .unwrap();
+    assert!(
+        manifest.route_capacity > 0,
+        "explicit Triad warmup must record at least one f32 fallback route"
+    );
+    ctx.stream.synchronize().unwrap();
+    reset_state(setup, ctx);
+    setup.mamba_input.upload(&ctx.stream, input).unwrap();
+    setup.d_temporal.upload(&ctx.stream, d_temporal).unwrap();
+    manifest
+}
+
 fn recompute_a_neg_eager_test(ctx: &GpuCtx, setup: &mut Setup) {
     use cudarc::driver::PushKernelArg;
     let di = setup.cfg.d_inner();
@@ -263,7 +380,7 @@ fn recompute_a_neg_eager_test(ctx: &GpuCtx, setup: &mut Setup) {
 #[test]
 fn training_graph_bf16_one_step_matches_eager() {
     let dev = GpuDevice::new(0).unwrap();
-    let ctx = GpuCtx::new(&dev).unwrap();
+    let ctx = triad_ctx(&dev);
     let batch = 1;
     let seq_len = 4;
 
@@ -288,6 +405,7 @@ fn training_graph_bf16_one_step_matches_eager() {
     // what would normally happen via adam.advance() → bias.write()).
     let (_, bc1, bc2) = g.adam.advance();
     g.bias.write(&ctx.stream, bc1, bc2, 1e-4).unwrap();
+    let manifest = prepare_gemm_manifest(&mut g, &ctx, &input, &d_temp, batch, seq_len);
 
     // All captured allocations outlive the graph in this scope.
     let graph = unsafe {
@@ -309,6 +427,7 @@ fn training_graph_bf16_one_step_matches_eager() {
             },
             batch,
             seq_len,
+            &manifest,
         )
     }
     .unwrap();
@@ -372,7 +491,7 @@ fn training_graph_bf16_one_step_matches_eager() {
 #[test]
 fn training_graph_bf16_multi_replay_matches_eager() {
     let dev = GpuDevice::new(0).unwrap();
-    let ctx = GpuCtx::new(&dev).unwrap();
+    let ctx = triad_ctx(&dev);
     let batch = 1;
     let seq_len = 4;
     let n_steps = 5;
@@ -403,6 +522,7 @@ fn training_graph_bf16_multi_replay_matches_eager() {
     g.mamba_input.upload(&ctx.stream, &inputs[0]).unwrap();
     g.d_temporal.upload(&ctx.stream, &d_temps[0]).unwrap();
     g.bias.write(&ctx.stream, 1.0, 1.0, 1e-4).unwrap(); // dummy; real values per replay
+    let manifest = prepare_gemm_manifest(&mut g, &ctx, &inputs[0], &d_temps[0], batch, seq_len);
     // All captured allocations outlive the graph in this scope.
     let graph = unsafe {
         GpuMambaTrainingStepGraph::capture(
@@ -423,6 +543,7 @@ fn training_graph_bf16_multi_replay_matches_eager() {
             },
             batch,
             seq_len,
+            &manifest,
         )
     }
     .unwrap();
@@ -481,17 +602,20 @@ fn training_graph_bf16_multi_replay_matches_eager() {
 #[should_panic(expected = "state.conv_states pointer changed since capture")]
 fn training_graph_panics_on_state_conv_mismatch() {
     let dev = GpuDevice::new(0).unwrap();
-    let ctx = GpuCtx::new(&dev).unwrap();
+    let ctx = triad_ctx(&dev);
     let batch = 1;
     let seq_len = 4;
     let n = batch * seq_len * tiny_cfg().d_model;
 
     let mut g = build_setup(&ctx, WeightDtype::Bf16, batch, seq_len);
     reset_state(&mut g, &ctx);
-    g.mamba_input.upload(&ctx.stream, &det_input(n, 1)).unwrap();
-    g.d_temporal.upload(&ctx.stream, &det_input(n, 2)).unwrap();
+    let input = det_input(n, 1);
+    let d_temporal = det_input(n, 2);
+    g.mamba_input.upload(&ctx.stream, &input).unwrap();
+    g.d_temporal.upload(&ctx.stream, &d_temporal).unwrap();
     let (_, bc1, bc2) = g.adam.advance();
     g.bias.write(&ctx.stream, bc1, bc2, 1e-4).unwrap();
+    let manifest = prepare_gemm_manifest(&mut g, &ctx, &input, &d_temporal, batch, seq_len);
 
     // All captured allocations outlive the graph in this scope.
     let graph = unsafe {
@@ -513,6 +637,7 @@ fn training_graph_panics_on_state_conv_mismatch() {
             },
             batch,
             seq_len,
+            &manifest,
         )
     }
     .unwrap();
@@ -548,17 +673,20 @@ fn training_graph_panics_on_state_conv_mismatch() {
 #[should_panic(expected = "pointer changed since capture")]
 fn training_graph_panics_on_pointer_mismatch() {
     let dev = GpuDevice::new(0).unwrap();
-    let ctx = GpuCtx::new(&dev).unwrap();
+    let ctx = triad_ctx(&dev);
     let batch = 1;
     let seq_len = 4;
     let n = batch * seq_len * tiny_cfg().d_model;
 
     let mut g = build_setup(&ctx, WeightDtype::Bf16, batch, seq_len);
     reset_state(&mut g, &ctx);
-    g.mamba_input.upload(&ctx.stream, &det_input(n, 1)).unwrap();
-    g.d_temporal.upload(&ctx.stream, &det_input(n, 2)).unwrap();
+    let input = det_input(n, 1);
+    let d_temporal = det_input(n, 2);
+    g.mamba_input.upload(&ctx.stream, &input).unwrap();
+    g.d_temporal.upload(&ctx.stream, &d_temporal).unwrap();
     let (_, bc1, bc2) = g.adam.advance();
     g.bias.write(&ctx.stream, bc1, bc2, 1e-4).unwrap();
+    let manifest = prepare_gemm_manifest(&mut g, &ctx, &input, &d_temporal, batch, seq_len);
 
     // All captured allocations outlive the graph in this scope.
     let graph = unsafe {
@@ -580,6 +708,7 @@ fn training_graph_panics_on_pointer_mismatch() {
             },
             batch,
             seq_len,
+            &manifest,
         )
     }
     .unwrap();

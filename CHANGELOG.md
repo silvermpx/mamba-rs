@@ -7,6 +7,17 @@
 - The deterministic training GEMM triad now compiles as disjoint scalar and
   SM80 modules under `kernels/gemm_bi_triad/`. The obsolete root monolith was
   removed; module ownership and cache identity now fail closed per artifact.
+- CC12.0 automatic typed routing is sealed to the qualified 18-cell BF16/F16
+  NN/TN/NT table, including its measured BK32 and BK64 physical schedules.
+  CC12.1 and shapes outside the table decline to the portable deterministic
+  ladder. Qualified SM120 graph routes require eager tensor-map preparation
+  and fail closed during capture if their cache or allocation epoch is invalid.
+- The ordinary `cuda` feature no longer enables cuBLASLt. The explicit
+  `cuda-cublaslt-qualification` feature adds it only to the vendor-comparison
+  harness; production routing does not depend on cuBLASLt.
+- Low-level typed bucket probes now use the `*_typed_native` suffix, separating
+  their `UNCOVERED` qualification contract from the full-policy typed BLAS
+  entries. No legacy aliases retain the ambiguous names.
 - `GpuCtx::gemm_route` now returns the complete numeric route, including
   backend contracts, compiler and artifact identities, and the target
   device. Callers that only need the three policy flags can continue to
@@ -32,8 +43,15 @@
 
 ### Fixed
 
-- Build and release-pipeline fixes. No functional change: every route
-  returns bit-identical output to 0.6.8.
+- Exact-scalar F32 routes preserve their established `__fmaf_rn` numeric
+  contract. Typed automatic routing now keeps the exact scalar contract for
+  the measured SM89 NN deep-K, N=128 Split-K cells where it is faster; those
+  cells previously selected the separate Tensor Core numeric contract.
+- Deterministic TF32 is an explicit, separately identified numeric contract.
+  The `tf32` policy grants permission to use a frozen qualified route and
+  otherwise falls back to exact scalar FMA; it does not force TF32 execution.
+- Misaligned F32 subviews and odd output strides now take alignment-safe
+  scalar vector fallbacks without changing the reduction or epilogue order.
 - CUDA cache entries with wrong metadata, links, partial publication, stale
   identities, malformed envelopes, or ambiguous preprocessor dependencies
   are ignored and rebuilt instead of being trusted.
@@ -67,9 +85,9 @@ bit-identical output.
 
 ### Changed
 
-- Kernel files carry the names the API uses: `sgemm_bi.cu` ->
+- Kernel files carry the names the API uses: `gemm_bi.cu` ->
   `gemm_bi_triad.cu`, `gemm_batch_invariant.cu` -> `gemm_bi_fixed.cu`,
-  and the Rust module `gpu::sgemm_bi` -> `gpu::gemm_bi_triad`. The
+  and the Rust module `gpu::gemm_bi` -> `gpu::gemm_bi_triad`. The
   `sgemm` prefix was BLAS notation for single precision and had not
   described the coverage since the typed and Tensor-Core sections
   landed.
@@ -469,8 +487,8 @@ unchanged.
   pin. Isolated: 11.40 -> 4.02 ms/launch (f32), 10.97 -> 3.89 (bf16).
   New `m3_kernels_isolated_bench` arm keeps the M3 kernel ledger
   measurable without a profiler.
-- The `sgemm_bi_forward` scalar dispatcher gained a strided-X entry
-  (`sgemm_bi_forward_sub` with an explicit `lda`); the public wrapper
+- The `gemm_bi_forward` scalar dispatcher gained a strided-X entry
+  (`gemm_bi_forward_sub` with an explicit `lda`); the public wrapper
   delegates with `lda = K`, behavior unchanged.
 - The workspace test harness runs single-threaded
   (`RUST_TEST_THREADS=1` via `.cargo/config.toml`): `cudaFree` from a
@@ -862,7 +880,7 @@ by tests).
   full activations every layer (was ~25 D2D copies of [T * d_model] per
   page). The one value-affecting change is the operand order of a
   commutative f32 addition — bit-equal, pinned by the parity suite.
-- The sgemm_bi split-K/split-M and transpose scratches (32 + 16 MB)
+- The gemm_bi split-K/split-M and transpose scratches (32 + 16 MB)
   allocate lazily on first batch-invariant use — inference-only
   consumers no longer hold 48 MB of dead VRAM.
 
@@ -1089,7 +1107,7 @@ are bit-identical to 0.4.1 by golden-hash verification).
 
 ### Added: Tile64 TC family (64x64 output tiles)
 
-Six new kernels (`sgemm_bi_{nn,tn,nt}_tc64_{bf16,f16}`): CTA 128
+Six new kernels (`gemm_bi_{nn,tn,nt}_tc64_{bf16,f16}`): CTA 128
 threads / 4 warps, each warp owning a 32x32 quadrant. They cover the
 64..127 output-dim band the 128-tile family gated out, and grids that
 would underfill the GPU at 128x128 route to the 64-tile twins
@@ -1150,7 +1168,7 @@ parity and determinism tests stayed green — but the native kernels never
 executed, and the Big-shape upcast scratch (~0.5 GB at 2.8b mixed) was
 still being allocated and paid for.
 
-- The typed Big section now carries its own `SGB_T_*` tile constants
+- The typed Big section now carries its own `GEMM_BI_T_*` tile constants
   (256 threads, 128x128x16 tiles), immune to preprocessor state left by
   earlier sections. The kernels execute for real and remain bit-identical
   to the f32 reference on upcast inputs (typed parity + 60-shape
@@ -1160,7 +1178,7 @@ still being allocated and paid for.
 
 ### Fixed: dispatch fallbacks no longer swallow launch errors
 
-`bi_sgemm_forward_typed` / `_backward_dw_typed` / `_backward_dx_typed`
+`gemm_bi_forward_typed` / `_backward_dw_typed` / `_backward_dx_typed`
 and the tensor-core try-first paths matched on `.is_ok()`, so a genuine
 launch failure in a covered bucket was silently "recovered" by
 recomputing through the fallback — hiding the root cause (this is exactly
@@ -1251,8 +1269,8 @@ freed memory.
 
 - `GpuCtx::set_bi_tensor_cores` / `bi_tensor_cores` (new flag,
   `MAMBA_RS_BI_TENSOR_CORES` env).
-- `blas::bi_sgemm_forward_typed` / `bi_sgemm_backward_dw_typed` /
-  `bi_sgemm_backward_dx_typed` — full-coverage typed deterministic GEMM
+- `blas::gemm_bi_forward_typed` / `gemm_bi_backward_dw_typed` /
+  `gemm_bi_backward_dx_typed` — full-coverage typed deterministic GEMM
   entries.
 - `WeightSliceDyn::{download_to_f32, upload_from_cpu_f32,
   upload_raw_bytes}` now take the stream they order against (breaking

@@ -10,12 +10,13 @@ use mamba_rs::mamba_ssm::gpu::gemm_bi_triad::{
 use mamba_rs::mamba_ssm::gpu::kernel_identity::{
     ArtifactIdentity, ArtifactKind, BackendSet, CacheEnvelope, CompileKeyMaterial,
     CompilerIdentity, CudaTarget, DeviceCaps, DeviceIdentity, DriverIdentity, FramedSha256,
-    GemmPolicy, GemmRouteIdentity, LegacySm80Policy, ModuleKind, NUMERIC_ABI_REVISION,
-    NumericContractSet, PhysicalGemmBackend, PolicyDtype, PolicyOp, ResolvedGemmLaunchSet,
+    GemmPolicy, GemmRouteIdentity, ModuleKind, NUMERIC_ABI_REVISION, NumericContractSet,
+    POLICY_REVISION, PhysicalGemmBackend, PhysicalLaunchKind, PolicyDtype, ResolvedGemmLaunchSet,
     ResolvedGemmLaunchSetBuilder, ResolvedGemmOp, ResolvedGemmRoute, ResolvedInstructionFamily,
     ResolvedInstructionShape, ResolvedNumericContract, ResolvedOperandConversion,
-    SCHEDULE_REVISION, TUNING_TABLE_REVISION, build_artifact_set, build_resolved_gemm_launch_set,
-    canonical_ptx_image, route_backend_contract_sets,
+    ResolvedOutputOwnership, SCHEDULE_REVISION, ScalarWavePolicyV1, Sm80TcPolicyV3,
+    TUNING_TABLE_REVISION, build_artifact_set, build_resolved_gemm_launch_set, canonical_ptx_image,
+    gemm_dispatch_policy_digest, route_backend_contract_sets,
 };
 
 fn digest(seed: u8) -> [u8; 32] {
@@ -319,45 +320,135 @@ fn artifact_set_is_ordered_and_rejects_duplicate_module_kinds() {
 }
 
 #[test]
-fn legacy_policy_hash_and_admission_cover_the_frozen_table() {
-    let policy = LegacySm80Policy::current();
-    assert_eq!(policy.backward_cells.len(), 18);
-    assert!(policy.admits(PolicyOp::Dw, PolicyDtype::Bf16, (1024, 8, 256)));
-    assert!(policy.admits(PolicyOp::Dx, PolicyDtype::F16, (32, 256, 1024)));
-    assert!(!policy.admits(PolicyOp::Dw, PolicyDtype::F32, (1024, 8, 256)));
-    assert!(!policy.admits(PolicyOp::Dw, PolicyDtype::Bf16, (1024, 8, 257)));
+fn sm80_tc_policy_v3_digest_covers_geometry_waves_device_and_deep_split_k() {
+    let policy = Sm80TcPolicyV3::current();
+    let hash = policy.digest(142);
+    assert_ne!(policy.digest(141), hash);
 
-    let hash = policy.digest();
-    let mut changed = policy;
-    changed.backward_cells[17].dims.2 += 1;
-    assert_ne!(changed.digest(), hash);
-    let mut changed = policy;
-    changed.tile128_prefer_min_tiles += 1;
-    assert_ne!(changed.digest(), hash);
-    let mut changed = policy;
-    changed.forward_thin_max_rows += 1;
-    assert_ne!(changed.digest(), hash);
-    let mut changed = policy;
-    changed.forward_min_columns += 1;
-    assert_ne!(changed.digest(), hash);
-    let mut changed = policy;
-    changed.square_tile_min += 1;
-    assert_ne!(changed.digest(), hash);
-    let mut changed = policy;
-    changed.large_tile_min += 1;
-    assert_ne!(changed.digest(), hash);
-    let mut changed = policy;
-    changed.reject_zero_axes = !changed.reject_zero_axes;
-    assert_ne!(changed.digest(), hash);
-    let mut changed = policy;
-    changed.forward_thin_below_square_columns = !changed.forward_thin_below_square_columns;
-    assert_ne!(changed.digest(), hash);
-    let mut changed = policy;
-    changed.backward_one_axis_tile64 = !changed.backward_one_axis_tile64;
-    assert_ne!(changed.digest(), hash);
-    let mut changed = policy;
-    changed.backward_two_small_fallback = !changed.backward_two_small_fallback;
-    assert_ne!(changed.digest(), hash);
+    macro_rules! assert_field_changes_digest {
+        ($field:ident, $value:expr) => {{
+            let mut changed = policy;
+            changed.$field = $value;
+            assert_ne!(changed.digest(142), hash, stringify!($field));
+        }};
+    }
+
+    assert_field_changes_digest!(reject_zero_axes, !policy.reject_zero_axes);
+    assert_field_changes_digest!(square_tile_min, policy.square_tile_min + 1);
+    assert_field_changes_digest!(large_tile_min, policy.large_tile_min + 1);
+    assert_field_changes_digest!(forward_min_columns, policy.forward_min_columns + 1);
+    assert_field_changes_digest!(forward_thin_max_rows, policy.forward_thin_max_rows + 1);
+    assert_field_changes_digest!(
+        forward_thin_below_square_columns,
+        !policy.forward_thin_below_square_columns
+    );
+    assert_field_changes_digest!(
+        forward_underfill_max_reduction,
+        policy.forward_underfill_max_reduction + 1
+    );
+    assert_field_changes_digest!(
+        forward_underfill_min_columns,
+        policy.forward_underfill_min_columns + 1
+    );
+    assert_field_changes_digest!(
+        forward_underfill_wave_numerator,
+        policy.forward_underfill_wave_numerator + 1
+    );
+    assert_field_changes_digest!(
+        forward_underfill_wave_denominator,
+        policy.forward_underfill_wave_denominator + 1
+    );
+    assert_field_changes_digest!(
+        forward_short_reduction_max,
+        policy.forward_short_reduction_max + 1
+    );
+    assert_field_changes_digest!(
+        forward_short_reduction_wave_numerator,
+        policy.forward_short_reduction_wave_numerator + 1
+    );
+    assert_field_changes_digest!(
+        forward_short_reduction_wave_denominator,
+        policy.forward_short_reduction_wave_denominator + 1
+    );
+    assert_field_changes_digest!(
+        tile128_base_wave_numerator,
+        policy.tile128_base_wave_numerator + 1
+    );
+    assert_field_changes_digest!(
+        tile128_base_wave_denominator,
+        policy.tile128_base_wave_denominator + 1
+    );
+    assert_field_changes_digest!(
+        tn_rectangular_min_aspect,
+        policy.tn_rectangular_min_aspect + 1
+    );
+    assert_field_changes_digest!(
+        tn_rectangular_wave_numerator,
+        policy.tn_rectangular_wave_numerator + 1
+    );
+    assert_field_changes_digest!(
+        tn_rectangular_wave_denominator,
+        policy.tn_rectangular_wave_denominator + 1
+    );
+    assert_field_changes_digest!(
+        backward_tail_min_reduction,
+        policy.backward_tail_min_reduction + 1
+    );
+    assert_field_changes_digest!(
+        backward_tail_min_tile64_ctas,
+        policy.backward_tail_min_tile64_ctas + 1
+    );
+    assert_field_changes_digest!(
+        deep_split_k_compute_capability,
+        (
+            policy.deep_split_k_compute_capability.0 + 1,
+            policy.deep_split_k_compute_capability.1
+        )
+    );
+    assert_field_changes_digest!(
+        deep_split_k_output_columns,
+        policy.deep_split_k_output_columns + 1
+    );
+    assert_field_changes_digest!(
+        deep_split_k_tail_min_reduction,
+        policy.deep_split_k_tail_min_reduction + 1
+    );
+    assert_field_changes_digest!(
+        deep_split_k_aligned_min_reduction,
+        policy.deep_split_k_aligned_min_reduction + 1
+    );
+}
+
+#[test]
+fn scalar_wave_policy_v1_digest_covers_every_wave_and_device_field() {
+    let policy = ScalarWavePolicyV1::current();
+    let hash = policy.digest(142);
+    assert_ne!(policy.digest(141), hash);
+
+    macro_rules! assert_field_changes_digest {
+        ($field:ident) => {{
+            let mut changed = policy;
+            changed.$field += 1;
+            assert_ne!(changed.digest(142), hash, stringify!($field));
+        }};
+    }
+
+    assert_field_changes_digest!(thin_split_wave_numerator);
+    assert_field_changes_digest!(thin_split_wave_denominator);
+    assert_field_changes_digest!(slim_split_wave_numerator);
+    assert_field_changes_digest!(slim_split_wave_denominator);
+    assert_field_changes_digest!(tn_split_m_wave_numerator);
+    assert_field_changes_digest!(tn_split_m_wave_denominator);
+
+    assert_ne!(
+        gemm_dispatch_policy_digest(141),
+        gemm_dispatch_policy_digest(142)
+    );
+    assert_ne!(gemm_dispatch_policy_digest(142), hash);
+    assert_ne!(
+        gemm_dispatch_policy_digest(142),
+        Sm80TcPolicyV3::current().digest(142)
+    );
 }
 
 fn route() -> GemmRouteIdentity {
@@ -395,10 +486,11 @@ fn route() -> GemmRouteIdentity {
             .union(NumericContractSet::TRIAD_MMA_SYNC_V1),
         compiler,
         artifacts,
-        policy_revision: 1,
-        policy_hash: LegacySm80Policy::current().digest(),
+        policy_revision: POLICY_REVISION,
+        policy_hash: gemm_dispatch_policy_digest(142),
         device: DeviceIdentity {
             compute_capability: (8, 9),
+            multiprocessor_count: 142,
             target: CudaTarget::new("sm_89").unwrap(),
             driver: DriverIdentity {
                 api_version: 13_200,
@@ -539,6 +631,9 @@ fn route_guard_rejects_every_policy_artifact_and_device_field() {
     value.device.compute_capability.1 += 1;
     changed.push(value);
     let mut value = captured;
+    value.device.multiprocessor_count -= 1;
+    changed.push(value);
+    let mut value = captured;
     value.device.target = CudaTarget::new("sm_90a").unwrap();
     changed.push(value);
     let mut value = captured;
@@ -620,7 +715,7 @@ fn sm120_route_identity() -> Sm120RouteIdentity {
             ldb: 144,
             ldc: 144,
         },
-        symbol: "sgemm_bi_nn_sm120_tma_128x64_bk64_s3_bf16",
+        symbol: "gemm_bi_nn_sm120_tma_128x64_bk64_s3_bf16",
         module_kind: ModuleKind::TriadSm120,
         target: Sm120TargetCandidate {
             device_cc: (12, 1),
@@ -631,6 +726,7 @@ fn sm120_route_identity() -> Sm120RouteIdentity {
         compiler,
         device: DeviceIdentity {
             compute_capability: (12, 1),
+            multiprocessor_count: 84,
             target: CudaTarget::new("sm_121").unwrap(),
             driver,
         },
@@ -679,6 +775,11 @@ fn sm120_route_identity_resolves_the_exact_production_route() {
         (resolved.bk, resolved.stages, resolved.threads),
         (64, 3, 256)
     );
+    assert_eq!(resolved.launch.grid_dim, (9, 1, 1));
+    assert_eq!(resolved.launch.block_dim, (256, 1, 1));
+    assert_eq!(resolved.launch.shared_mem_bytes, 73_856);
+    assert_ne!(resolved.launch.arguments_digest, [0; 32]);
+    assert_eq!(resolved.schedule_revision, SM120_SCHEDULE_REVISION);
 }
 
 #[test]
@@ -691,6 +792,24 @@ fn deterministic_tf32_identity_variants_have_stable_distinct_discriminants() {
     assert_eq!(ResolvedNumericContract::Sm90aWgmmaTf32TmaV1 as u8, 6);
     assert_eq!(ResolvedNumericContract::Sm100Tcgen05Tf32TmaV1 as u8, 7);
     assert_eq!(ResolvedNumericContract::Sm120TmaMmaTf32RnaV1 as u8, 8);
+    assert_eq!(PhysicalGemmBackend::MmaTf32RnaSplitK4V1 as u8, 10);
+    assert_eq!(PhysicalGemmBackend::MmaTf32RnaSplitK2V1 as u8, 11);
+    assert_eq!(PhysicalGemmBackend::MmaTf32RnaSplitK8V1 as u8, 16);
+    assert_eq!(ResolvedNumericContract::MmaTf32RnaSplitK4V1 as u8, 10);
+    assert_eq!(ResolvedNumericContract::MmaTf32RnaSplitK2V1 as u8, 11);
+    assert_eq!(ResolvedNumericContract::MmaTf32RnaSplitK8V1 as u8, 15);
+    assert_eq!(
+        ResolvedOutputOwnership::LastCtaPerOutputTileFixedSplitK4ReduceV1 as u8,
+        4
+    );
+    assert_eq!(
+        ResolvedOutputOwnership::LastCtaPerOutputTileFixedSplitK2ReduceV1 as u8,
+        5
+    );
+    assert_eq!(
+        ResolvedOutputOwnership::LastCtaPerOutputTileFixedSplitK8ReduceV1 as u8,
+        8
+    );
     assert_eq!(ResolvedInstructionFamily::ScalarFma as u8, 1);
     assert_eq!(ResolvedInstructionFamily::MmaSync as u8, 2);
     assert_eq!(ResolvedInstructionFamily::Wgmma as u8, 3);
@@ -705,10 +824,31 @@ fn deterministic_tf32_identity_variants_have_stable_distinct_discriminants() {
 }
 
 #[test]
+fn scalar_split_m_identity_variants_have_stable_distinct_discriminants() {
+    assert_eq!(
+        PhysicalGemmBackend::ScalarFmaTnNarrowSplitMPartialV1 as u8,
+        13
+    );
+    assert_eq!(PhysicalGemmBackend::ScalarFmaTnSplitMF64ReduceV1 as u8, 15);
+    assert_eq!(
+        ResolvedNumericContract::ScalarFmaTnSplitMF64ReduceV1 as u8,
+        12
+    );
+    assert_eq!(
+        ResolvedNumericContract::ScalarFmaTnNarrowSplitMPartialV1 as u8,
+        13
+    );
+    assert_eq!(
+        ResolvedNumericContract::ScalarFmaTnNarrowSplitMF64ReduceV1 as u8,
+        14
+    );
+}
+
+#[test]
 fn sm120_route_identity_conversion_rejects_incoherent_inputs() {
     let baseline = sm120_route_identity();
     let mut wrong_symbol = baseline;
-    wrong_symbol.symbol = "sgemm_bi_nn_sm120_tma_64x64_bk32_s2_bf16";
+    wrong_symbol.symbol = "gemm_bi_nn_sm120_tma_64x64_bk32_s2_bf16";
     let mut wrong_target = baseline;
     wrong_target.device_caps.accepted_target = Some(CudaTarget::new("compute_120").unwrap());
     let mut unsupported_dtype = baseline;
@@ -731,7 +871,7 @@ fn resolved_launch_set_is_ordered_and_covers_every_physical_identity_field() {
     let first = resolved_sm120_route();
     let mut second = first;
     second.op = ResolvedGemmOp::Tn;
-    second.symbol = "sgemm_bi_tn_sm120_tma_64x128_bk32_s2_f16";
+    second.symbol = "gemm_bi_tn_sm120_tma_64x128_bk32_s2_f16";
     second.dtype = PolicyDtype::F16;
     second.shape = (509, 65, 257);
     second.strides = (80, 272, 272);
@@ -773,7 +913,7 @@ fn resolved_launch_set_is_ordered_and_covers_every_physical_identity_field() {
     value.operand_conversion = ResolvedOperandConversion::TensorMapTfloat32V1;
     mutations.push(value);
     let mut value = first;
-    value.symbol = "sgemm_bi_nn_tc_bf16";
+    value.symbol = "gemm_bi_nn_tc_bf16";
     mutations.push(value);
     let mut value = first;
     value.module_kind = ModuleKind::TriadSm80;
@@ -789,6 +929,9 @@ fn resolved_launch_set_is_ordered_and_covers_every_physical_identity_field() {
     mutations.push(value);
     let mut value = first;
     value.device.compute_capability.1 = 0;
+    mutations.push(value);
+    let mut value = first;
+    value.device.multiprocessor_count -= 1;
     mutations.push(value);
     let mut value = first;
     value.device.driver.build_digest[0] ^= 1;
@@ -822,6 +965,19 @@ fn resolved_launch_set_is_ordered_and_covers_every_physical_identity_field() {
     mutations.push(value);
     let mut value = first;
     value.threads = 512;
+    value.launch.block_dim = (512, 1, 1);
+    mutations.push(value);
+    let mut value = first;
+    value.launch.grid_dim.0 += 1;
+    mutations.push(value);
+    let mut value = first;
+    value.launch.block_dim = (128, 2, 1);
+    mutations.push(value);
+    let mut value = first;
+    value.launch.shared_mem_bytes += 4;
+    mutations.push(value);
+    let mut value = first;
+    value.launch.arguments_digest[0] ^= 1;
     mutations.push(value);
     let mut value = first;
     value.tensor_map_revision += 1;
@@ -853,7 +1009,7 @@ fn streaming_launch_set_builder_matches_slice_builder_and_fails_closed() {
     let first = resolved_sm120_route();
     let mut second = first;
     second.op = ResolvedGemmOp::Tn;
-    second.symbol = "sgemm_bi_tn_sm120_tma_128x64_bk64_s3_bf16";
+    second.symbol = "gemm_bi_tn_sm120_tma_128x64_bk64_s3_bf16";
 
     let expected = build_resolved_gemm_launch_set(&[first, second]).unwrap();
     let mut builder = ResolvedGemmLaunchSetBuilder::new(2).unwrap();
@@ -868,6 +1024,55 @@ fn streaming_launch_set_builder_matches_slice_builder_and_fails_closed() {
     let mut overflow = ResolvedGemmLaunchSetBuilder::new(1).unwrap();
     overflow.push(&first).unwrap();
     assert!(overflow.push(&second).is_err());
+}
+
+#[test]
+fn resolved_launch_set_rejects_placeholder_or_incoherent_launches() {
+    let baseline = resolved_sm120_route();
+    let mut invalid = Vec::new();
+
+    for dimension in 0..3 {
+        let mut route = baseline;
+        let mut grid = [
+            route.launch.grid_dim.0,
+            route.launch.grid_dim.1,
+            route.launch.grid_dim.2,
+        ];
+        grid[dimension] = 0;
+        route.launch.grid_dim = (grid[0], grid[1], grid[2]);
+        invalid.push(route);
+
+        let mut route = baseline;
+        let mut block = [
+            route.launch.block_dim.0,
+            route.launch.block_dim.1,
+            route.launch.block_dim.2,
+        ];
+        block[dimension] = 0;
+        route.launch.block_dim = (block[0], block[1], block[2]);
+        invalid.push(route);
+    }
+
+    let mut wrong_thread_count = baseline;
+    wrong_thread_count.threads += 1;
+    invalid.push(wrong_thread_count);
+
+    let mut overflowing_block = baseline;
+    overflowing_block.launch.block_dim = (u32::MAX, 2, 1);
+    invalid.push(overflowing_block);
+
+    let mut placeholder_arguments = baseline;
+    placeholder_arguments.launch.arguments_digest = [0; 32];
+    invalid.push(placeholder_arguments);
+
+    for route in invalid {
+        assert!(
+            build_resolved_gemm_launch_set(&[route]).is_err(),
+            "invalid launch for {} must fail closed: {:?}",
+            route.symbol,
+            route.launch
+        );
+    }
 }
 
 #[test]
@@ -894,6 +1099,13 @@ fn resolved_launch_guard_fails_closed_on_order_count_or_device_drift() {
             .expect_err("resolved launch drift must reject replay");
         assert!(error.starts_with("SM120 graph replay"), "{error}");
     }
+}
+
+#[test]
+fn physical_launch_kind_discriminants_are_stable() {
+    assert_eq!(PhysicalLaunchKind::Gemm as u8, 1);
+    assert_eq!(PhysicalLaunchKind::InputUpcast as u8, 2);
+    assert_eq!(PhysicalLaunchKind::OutputDowncast as u8, 3);
 }
 
 const _: fn(&[ResolvedGemmRoute]) -> Result<ResolvedGemmLaunchSet, String> =

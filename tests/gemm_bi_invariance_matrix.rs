@@ -30,7 +30,7 @@
 mod common;
 
 use mamba_rs::mamba_ssm::gpu::blas::{
-    TypedPtr, gemm_bi_forward_raw, gpu_gemm_typed_forward_raw, gpu_sgemm_forward_raw,
+    TypedPtr, gemm_bi_forward_raw, gpu_gemm_bi_forward_raw, gpu_gemm_typed_forward_raw,
 };
 use mamba_rs::mamba_ssm::gpu::buffers::{DtypedBuf, GpuBuffer};
 use mamba_rs::mamba_ssm::gpu::context::{BiGemmFamily, GpuCtx};
@@ -110,7 +110,8 @@ fn assert_contract(family: &str, k: usize, n: usize, declared: Invariance, obser
             .map(|m| m.to_string())
             .collect::<Vec<_>>()
             .join(","),
-    );
+    )
+    .expect("acceptance evidence");
     match declared {
         Invariance::Strict => assert!(
             observed.is_empty(),
@@ -381,7 +382,7 @@ fn triad_f32_boundaries_match_the_declared_table() {
         let b = GpuBuffer::from_cpu(&ctx.stream, &synth(k * n, 0xB0B ^ n as u64)).expect("B");
         let mut c = GpuBuffer::zeros(&ctx.stream, m_max * n).expect("C");
         let mut launch = |m: usize| -> Vec<u32> {
-            gpu_sgemm_forward_raw(&ctx, &mut c, &a, b.raw_ptr(&ctx.stream), None, (m, k, n))
+            gpu_gemm_bi_forward_raw(&ctx, &mut c, &a, b.raw_ptr(&ctx.stream), None, (m, k, n))
                 .expect("triad f32 forward");
             let full = c.to_cpu(&ctx.stream).expect("C D2H");
             full[..m.min(CMP_ROWS) * n]

@@ -13,9 +13,10 @@ use mamba_rs::mamba_ssm::gpu::adamw::{
     AdamWBiasFactors, GpuAdamW, build_multi_plan, m3_specs_mixed, step_multi,
 };
 use mamba_rs::mamba_ssm::gpu::buffers::GpuBuffer;
-use mamba_rs::mamba_ssm::gpu::context::GpuCtx;
+use mamba_rs::mamba_ssm::gpu::context::{BiGemmFamily, F32TriadPolicy, GpuCtx};
 use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
 use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
+use mamba_rs::mamba_ssm::gpu::kernel_identity::PreparedGemmCaptureManifest;
 use mamba_rs::mamba3_siso::config::Mamba3Config;
 use mamba_rs::mamba3_siso::gpu::backward_mixed::gpu_backward_mamba3_backbone_mixed;
 use mamba_rs::mamba3_siso::gpu::forward_mixed::{
@@ -45,6 +46,16 @@ fn cfg_m3() -> Mamba3Config {
         is_outproj_norm: true,
         ..Mamba3Config::default()
     }
+}
+
+fn triad_ctx(device: &GpuDevice) -> GpuCtx {
+    let ctx = GpuCtx::new(device).unwrap();
+    ctx.set_batch_invariant(true);
+    ctx.set_bi_gemm_family(BiGemmFamily::Triad);
+    ctx.set_bi_tensor_cores(false);
+    ctx.set_fast_gemm(false);
+    ctx.set_f32_triad_policy(F32TriadPolicy::ExactScalarFmaV1);
+    ctx
 }
 
 fn dims_for(cfg: &Mamba3Config, batch: usize, seq_len: usize) -> GpuMamba3Dims {
@@ -206,7 +217,23 @@ fn snapshot(s: &Setup, ctx: &GpuCtx) -> Vec<f32> {
 fn one_eager_step(s: &mut Setup, ctx: &GpuCtx, m3k: &Mamba3Kernels, inp: &[f32], dt: &[f32]) {
     s.mamba_input.upload(&ctx.stream, inp).unwrap();
     s.d_temporal.upload(&ctx.stream, dt).unwrap();
-    s.grads.zero(&ctx.stream).unwrap();
+    forward_backward(s, ctx, m3k).unwrap();
+    let (_, bc1, bc2) = s.adam.advance();
+    s.bias.write(&ctx.stream, bc1, bc2, 1e-4).unwrap();
+    // Keep the eager twin identical to the captured optimizer tail.
+    step_multi(
+        ctx,
+        m3k.adamw_step_multi.get(s.weights.dtype),
+        &s.multi_plan,
+        &s.adam,
+        s.bias.ptr(),
+    )
+    .unwrap();
+    s.weights.sync_master_to_compute(ctx).unwrap();
+}
+
+fn forward_backward(s: &mut Setup, ctx: &GpuCtx, m3k: &Mamba3Kernels) -> Result<(), String> {
+    s.grads.zero(&ctx.stream)?;
     let exec = M3Exec {
         ctx,
         kernels: m3k,
@@ -225,8 +252,7 @@ fn one_eager_step(s: &mut Setup, ctx: &GpuCtx, m3k: &Mamba3Kernels, inp: &[f32],
             angle: &mut s.angle_states,
         },
         &mut s.mixed_scratch,
-    )
-    .unwrap();
+    )?;
     gpu_backward_mamba3_backbone_mixed(
         &exec,
         &mut s.d_temporal,
@@ -236,28 +262,45 @@ fn one_eager_step(s: &mut Setup, ctx: &GpuCtx, m3k: &Mamba3Kernels, inp: &[f32],
         &mut s.f32_scratch,
         &mut s.mixed_scratch,
     )
-    .unwrap();
-    let (_, bc1, bc2) = s.adam.advance();
-    s.bias.write(&ctx.stream, bc1, bc2, 1e-4).unwrap();
-    // Same fused kernel as the captured body — the old per-tensor kernel
-    // updates only the master, and the trimmed sync no longer refreshes
-    // the bulk shadows, so an old-kernel eager twin diverges from the
-    // graph lane on every step after the first.
-    step_multi(
-        ctx,
-        m3k.adamw_step_multi.get(s.weights.dtype),
-        &s.multi_plan,
-        &s.adam,
-        s.bias.ptr(),
+}
+
+fn prepare_graph_gemm_manifest(
+    s: &mut Setup,
+    ctx: &GpuCtx,
+    m3k: &Mamba3Kernels,
+    inp: &[f32],
+    dt: &[f32],
+) -> PreparedGemmCaptureManifest {
+    let cfg = cfg_m3();
+    ctx.presize_bi_upcast_scratch_for_train_m3(
+        &cfg,
+        s.dims.batch,
+        s.dims.seq_len,
+        s.dims.mamba_input_dim,
+        s.weights.dtype,
     )
     .unwrap();
-    s.weights.sync_master_to_compute(ctx).unwrap();
+    reset_state(s, ctx);
+    s.mamba_input.upload(&ctx.stream, inp).unwrap();
+    s.d_temporal.upload(&ctx.stream, dt).unwrap();
+    let manifest = ctx
+        .record_eager_gemm_manifest(|| forward_backward(s, ctx, m3k))
+        .unwrap();
+    assert!(
+        manifest.route_capacity > 0,
+        "explicit Triad warmup must record at least one f32 fallback route"
+    );
+    ctx.stream.synchronize().unwrap();
+    reset_state(s, ctx);
+    s.mamba_input.upload(&ctx.stream, inp).unwrap();
+    s.d_temporal.upload(&ctx.stream, dt).unwrap();
+    manifest
 }
 
 #[test]
 fn m3_training_graph_bf16_one_step_matches_eager() {
     let dev = GpuDevice::new(0).unwrap();
-    let ctx = GpuCtx::new(&dev).unwrap();
+    let ctx = triad_ctx(&dev);
     let mut m3k = Mamba3Kernels::compile(dev.context(), common::bench::arch0()).unwrap();
     let batch = 1;
     let seq_len = 64;
@@ -273,9 +316,7 @@ fn m3_training_graph_bf16_one_step_matches_eager() {
     let after_eager = snapshot(&eager, &ctx);
 
     let mut g = build(&ctx, WeightDtype::Bf16, batch, seq_len);
-    reset_state(&mut g, &ctx);
-    g.mamba_input.upload(&ctx.stream, &inp).unwrap();
-    g.d_temporal.upload(&ctx.stream, &dt).unwrap();
+    let manifest = prepare_graph_gemm_manifest(&mut g, &ctx, &m3k, &inp, &dt);
     g.bias.write(&ctx.stream, 1.0, 1.0, 1e-4).unwrap();
 
     // All captured allocations outlive the graph in this scope.
@@ -306,6 +347,7 @@ fn m3_training_graph_bf16_one_step_matches_eager() {
                     angle: &mut g.angle_states,
                 },
             },
+            &manifest,
         )
     }
     .unwrap();
@@ -375,7 +417,7 @@ fn m3_training_graph_bf16_one_step_matches_eager() {
 #[test]
 fn m3_training_graph_bf16_multi_replay_matches_eager() {
     let dev = GpuDevice::new(0).unwrap();
-    let ctx = GpuCtx::new(&dev).unwrap();
+    let ctx = triad_ctx(&dev);
     let m3k = Mamba3Kernels::compile(dev.context(), common::bench::arch0()).unwrap();
     let batch = 1;
     let seq_len = 64;
@@ -394,9 +436,7 @@ fn m3_training_graph_bf16_multi_replay_matches_eager() {
     let after_eager = snapshot(&eager, &ctx);
 
     let mut g = build(&ctx, WeightDtype::Bf16, batch, seq_len);
-    reset_state(&mut g, &ctx);
-    g.mamba_input.upload(&ctx.stream, &inputs[0]).unwrap();
-    g.d_temporal.upload(&ctx.stream, &d_temps[0]).unwrap();
+    let manifest = prepare_graph_gemm_manifest(&mut g, &ctx, &m3k, &inputs[0], &d_temps[0]);
     g.bias.write(&ctx.stream, 1.0, 1.0, 1e-4).unwrap();
     // All captured allocations outlive the graph in this scope.
     let graph = unsafe {
@@ -426,6 +466,7 @@ fn m3_training_graph_bf16_multi_replay_matches_eager() {
                     angle: &mut g.angle_states,
                 },
             },
+            &manifest,
         )
     }
     .unwrap();

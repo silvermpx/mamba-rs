@@ -1,4 +1,4 @@
-//! Typed (bf16/f16) sgemm_bi — bit parity vs the f32 triad.
+//! Typed (bf16/f16) gemm_bi — bit parity vs the f32 triad.
 //!
 //! Contract under test: a typed GEMM is BIT-IDENTICAL to "quantize inputs
 //! to the 16-bit dtype, upcast to f32, run the f32 kernel, RNE-downcast the
@@ -9,8 +9,8 @@
 //! - stage-2 native buckets (NN gemv / ultra-thin / narrow / narrow-small,
 //!   TN gemv / narrow with f32 dW, NT gemv / narrow) — direct dispatcher
 //!   calls;
-//! - full-coverage `bi_sgemm_*_typed` blas entries — uncovered shapes route
-//!   through the upcast → f32 sgemm_bi → RNE-downcast fallback, which must
+//! - full-coverage `gemm_bi_*_typed` blas entries — uncovered shapes route
+//!   through the upcast → f32 gemm_bi → RNE-downcast fallback, which must
 //!   satisfy the SAME bit contract.
 
 #![cfg(feature = "cuda")]
@@ -18,14 +18,34 @@
 use cudarc::driver::PushKernelArg;
 use half::{bf16, f16};
 use mamba_rs::mamba_ssm::gpu::blas::{
-    TypedPtr, bi_sgemm_backward_dw_typed, bi_sgemm_backward_dx_typed, bi_sgemm_forward_typed,
+    TypedPtr, gemm_bi_backward_dw_typed, gemm_bi_backward_dx_typed, gemm_bi_forward_typed,
 };
 use mamba_rs::mamba_ssm::gpu::buffers::{DtypedBuf, GpuBuffer};
-use mamba_rs::mamba_ssm::gpu::context::GpuCtx;
+use mamba_rs::mamba_ssm::gpu::context::{BiGemmFamily, GpuCtx};
 use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
 use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
 use mamba_rs::mamba_ssm::gpu::gemm_bi_triad;
 use std::mem::size_of;
+
+fn cuda_braced_scope_after<'a>(source: &'a str, marker: &str) -> &'a str {
+    let marker_start = source.find(marker).expect("CUDA scope marker");
+    let marker_source = &source[marker_start..];
+    let open = marker_source.find('{').expect("CUDA scope opening brace");
+    let mut depth = 0usize;
+    for (offset, byte) in marker_source[open..].bytes().enumerate() {
+        match byte {
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return &marker_source[..open + offset + 1];
+                }
+            }
+            _ => {}
+        }
+    }
+    panic!("CUDA scope closing brace");
+}
 
 fn det(n: usize, seed: u32, scale: f32) -> Vec<f32> {
     let mut s = seed;
@@ -97,7 +117,7 @@ fn assert_bits(label: &str, got: &[f32], want: &[f32]) {
 }
 
 /// Forward parity: typed dispatch vs f32 dispatch on quantized inputs.
-/// `full` routes through the blas-layer `bi_sgemm_forward_typed` (native
+/// `full` routes through the blas-layer `gemm_bi_forward_typed` (native
 /// buckets + upcast fallback); otherwise the stage-2 dispatcher is called
 /// directly and the shape must be natively covered.
 fn check_forward(
@@ -119,7 +139,7 @@ fn check_forward(
     let b32 = t.f32_buf(&bias);
     let mut y32 = GpuBuffer::zeros(&t.ctx.stream, m * n).unwrap();
     let bias_ptr = if with_bias { b32.cached_ptr() } else { 0 };
-    gemm_bi_triad::sgemm_bi_forward(
+    gemm_bi_triad::gemm_bi_forward(
         &t.ctx.stream,
         &t.ctx.kernels,
         &mut y32,
@@ -151,9 +171,9 @@ fn check_forward(
         },
     );
     if full {
-        bi_sgemm_forward_typed(&t.ctx, ytp, xtp, wtp, bias_ptr, (m, k, n)).unwrap();
+        gemm_bi_forward_typed(&t.ctx, ytp, xtp, wtp, bias_ptr, (m, k, n)).unwrap();
     } else {
-        gemm_bi_triad::sgemm_bi_forward_typed(
+        gemm_bi_triad::gemm_bi_forward_typed_native(
             &t.ctx.stream,
             &t.ctx.kernels,
             ytp,
@@ -181,7 +201,7 @@ fn check_dw(t: &Ctx, dt: WeightDtype, dims: (usize, usize, usize), full: bool) {
     let x32 = t.f32_buf(&qx);
     let dy32 = t.f32_buf(&qdy);
     let dw32 = GpuBuffer::zeros(&t.ctx.stream, k * n).unwrap();
-    gemm_bi_triad::sgemm_bi_backward_dw(
+    gemm_bi_triad::gemm_bi_backward_dw(
         &t.ctx.stream,
         &t.ctx.kernels,
         dw32.cached_ptr(),
@@ -207,9 +227,9 @@ fn check_dw(t: &Ctx, dt: WeightDtype, dims: (usize, usize, usize), full: bool) {
         },
     );
     if full {
-        bi_sgemm_backward_dw_typed(&t.ctx, dwt.cached_ptr(), dytp, xtp, (m, k, n)).unwrap();
+        gemm_bi_backward_dw_typed(&t.ctx, dwt.cached_ptr(), dytp, xtp, (m, k, n)).unwrap();
     } else {
-        gemm_bi_triad::sgemm_bi_backward_dw_typed(
+        gemm_bi_triad::gemm_bi_backward_dw_typed_native(
             &t.ctx.stream,
             &t.ctx.kernels,
             dwt.cached_ptr(),
@@ -235,7 +255,7 @@ fn check_dx(t: &Ctx, dt: WeightDtype, dims: (usize, usize, usize), full: bool) {
     let dy32 = t.f32_buf(&qdy);
     let w32 = t.f32_buf(&qw);
     let mut dx32 = GpuBuffer::zeros(&t.ctx.stream, m * k).unwrap();
-    gemm_bi_triad::sgemm_bi_backward_dx(
+    gemm_bi_triad::gemm_bi_backward_dx(
         &t.ctx.stream,
         &t.ctx.kernels,
         &mut dx32,
@@ -265,9 +285,9 @@ fn check_dx(t: &Ctx, dt: WeightDtype, dims: (usize, usize, usize), full: bool) {
         },
     );
     if full {
-        bi_sgemm_backward_dx_typed(&t.ctx, dxtp, dytp, wtp, (m, k, n)).unwrap();
+        gemm_bi_backward_dx_typed(&t.ctx, dxtp, dytp, wtp, (m, k, n)).unwrap();
     } else {
-        gemm_bi_triad::sgemm_bi_backward_dx_typed(
+        gemm_bi_triad::gemm_bi_backward_dx_typed_native(
             &t.ctx.stream,
             &t.ctx.kernels,
             dxtp,
@@ -312,7 +332,7 @@ fn typed_stage2_buckets_bit_match_f32_triad() {
 }
 
 /// Full-coverage entries: shapes WITHOUT a native typed bucket must take
-/// the upcast → f32 sgemm_bi → RNE-downcast fallback and still satisfy the
+/// the upcast → f32 gemm_bi → RNE-downcast fallback and still satisfy the
 /// bit contract. Shapes mirror real training GEMMs (M = B·T, layer dims).
 #[test]
 fn typed_full_coverage_bit_match_f32_triad() {
@@ -345,6 +365,18 @@ fn typed_full_coverage_bit_match_f32_triad() {
         check_dx(&t, dt, (250, 100, 512), true);
         check_dx(&t, dt, (256, 8, 256), true);
         check_dx(&t, dt, (64, 768, 3072), true);
+    }
+}
+
+#[test]
+fn fixed_family_keeps_uncovered_typed_scalar_fallbacks() {
+    let t = Ctx::new();
+    t.ctx.set_bi_gemm_family(BiGemmFamily::Fixed);
+    let dims = (64, 128, 128);
+    for dtype in [WeightDtype::Bf16, WeightDtype::F16] {
+        check_forward(&t, dtype, dims, true, true);
+        check_dw(&t, dtype, dims, true);
+        check_dx(&t, dtype, dims, true);
     }
 }
 
@@ -403,7 +435,7 @@ fn bench_upcast_fallback_tax() {
         let iters = 50;
         // Bare f32 kernel (operands already f32).
         for _ in 0..3 {
-            gemm_bi_triad::sgemm_bi_forward(
+            gemm_bi_triad::gemm_bi_forward(
                 &t.ctx.stream,
                 &t.ctx.kernels,
                 &mut y32,
@@ -417,7 +449,7 @@ fn bench_upcast_fallback_tax() {
         t.ctx.stream.synchronize().unwrap();
         let t0 = Instant::now();
         for _ in 0..iters {
-            gemm_bi_triad::sgemm_bi_forward(
+            gemm_bi_triad::gemm_bi_forward(
                 &t.ctx.stream,
                 &t.ctx.kernels,
                 &mut y32,
@@ -433,7 +465,7 @@ fn bench_upcast_fallback_tax() {
 
         // Typed entry: upcast → same f32 kernel → RNE downcast.
         let run_typed = || {
-            bi_sgemm_forward_typed(
+            gemm_bi_forward_typed(
                 &t.ctx,
                 TypedPtr {
                     ptr: yt.cached_ptr(),
@@ -493,7 +525,7 @@ fn typed_forward_is_batch_invariant_within_bucket() {
             x_host[..k].copy_from_slice(&row);
             let xt = t.typed_buf(&x_host, dt);
             let yt = DtypedBuf::zeros(&t.ctx.stream, m * n, dt).unwrap();
-            bi_sgemm_forward_typed(
+            gemm_bi_forward_typed(
                 &t.ctx,
                 TypedPtr {
                     ptr: yt.cached_ptr(),
@@ -748,9 +780,9 @@ fn launch_tc_nn(
     let (m, k, n) = dims;
     let (lda, ldb, ldc) = strides;
     let (function, bm, bn, threads, shared_mem_bytes) = match schedule {
-        NnSchedule::Tile128 => (&t.ctx.kernels.sgemm_nn_tc_typed, 128, 128, 256, 71_680),
-        NnSchedule::Tile64 => (&t.ctx.kernels.sgemm_nn_tc64_typed, 64, 64, 128, 0),
-        NnSchedule::Thin16 => (&t.ctx.kernels.sgemm_nn_tc16_typed, 16, 32, 128, 0),
+        NnSchedule::Tile128 => (&t.ctx.kernels.gemm_bi_nn_tc_typed, 128, 128, 256, 71_680),
+        NnSchedule::Tile64 => (&t.ctx.kernels.gemm_bi_nn_tc64_typed, 64, 64, 128, 0),
+        NnSchedule::Thin16 => (&t.ctx.kernels.gemm_bi_nn_tc16_typed, 16, 32, 128, 0),
     };
     let cfg = cudarc::driver::LaunchConfig {
         grid_dim: (
@@ -796,8 +828,8 @@ fn launch_tc_tn(
 ) -> Result<(), String> {
     let (m, k, n) = dims;
     let (function, edge, threads, shared_mem_bytes) = match schedule {
-        BackwardSchedule::Tile128 => (&t.ctx.kernels.sgemm_tn_tc_typed, 128, 256, 69_632),
-        BackwardSchedule::Tile64 => (&t.ctx.kernels.sgemm_tn_tc64_typed, 64, 128, 0),
+        BackwardSchedule::Tile128 => (&t.ctx.kernels.gemm_bi_tn_tc_typed, 128, 256, 69_632),
+        BackwardSchedule::Tile64 => (&t.ctx.kernels.gemm_bi_tn_tc64_typed, 64, 128, 0),
     };
     let cfg = cudarc::driver::LaunchConfig {
         grid_dim: (
@@ -825,6 +857,41 @@ fn launch_tc_tn(
         .map_err(|error| format!("{schedule:?} TN synchronize: {error:?}"))
 }
 
+fn launch_scalar_tn_slim(
+    t: &Ctx,
+    c: u64,
+    a: u64,
+    b: u64,
+    dims: (usize, usize, usize),
+) -> Result<(), String> {
+    let (m, k, n) = dims;
+    let config = cudarc::driver::LaunchConfig {
+        grid_dim: (
+            k.div_ceil(128).checked_mul(n.div_ceil(64)).unwrap() as u32,
+            1,
+            1,
+        ),
+        block_dim: (128, 1, 1),
+        shared_mem_bytes: 0,
+    };
+    let alpha = 1.0f32;
+    let (m, k, n) = (m as i32, k as i32, n as i32);
+    let mut launch = t.ctx.stream.launch_builder(&t.ctx.kernels.gemm_bi_tn_slim);
+    launch.arg(&c);
+    launch.arg(&a);
+    launch.arg(&b);
+    launch.arg(&alpha);
+    launch.arg(&m);
+    launch.arg(&k);
+    launch.arg(&n);
+    unsafe { launch.launch(config) }
+        .map_err(|error| format!("scalar TN slim launch: {error:?}"))?;
+    t.ctx
+        .stream
+        .synchronize()
+        .map_err(|error| format!("scalar TN slim synchronize: {error:?}"))
+}
+
 fn launch_tc_nt(
     t: &Ctx,
     schedule: BackwardSchedule,
@@ -836,8 +903,8 @@ fn launch_tc_nt(
 ) -> Result<(), String> {
     let (m, k, n) = dims;
     let (function, edge, threads, shared_mem_bytes) = match schedule {
-        BackwardSchedule::Tile128 => (&t.ctx.kernels.sgemm_nt_tc_typed, 128, 256, 73_728),
-        BackwardSchedule::Tile64 => (&t.ctx.kernels.sgemm_nt_tc64_typed, 64, 128, 0),
+        BackwardSchedule::Tile128 => (&t.ctx.kernels.gemm_bi_nt_tc_typed, 128, 256, 73_728),
+        BackwardSchedule::Tile64 => (&t.ctx.kernels.gemm_bi_nt_tc64_typed, 64, 128, 0),
     };
     let cfg = cudarc::driver::LaunchConfig {
         grid_dim: (
@@ -1081,6 +1148,40 @@ fn tc128_packed_epilogues_match_scalar_fallback_bytes() {
 }
 
 #[test]
+fn scalar_tn_slim_output_subview_matches_the_aligned_result() {
+    let t = Ctx::new();
+    let dims = (65usize, 128usize, 128usize);
+    let a = F32Subview::new(
+        &t,
+        &det(dims.0 * dims.1, 815, 0.5),
+        dims.0,
+        dims.1,
+        dims.1,
+        0,
+    );
+    let b = F32Subview::new(
+        &t,
+        &det(dims.0 * dims.2, 816, 0.5),
+        dims.0,
+        dims.2,
+        dims.2,
+        0,
+    );
+    let initial = det(dims.1 * dims.2, 817, 0.125);
+    let aligned = F32Subview::new(&t, &initial, dims.1, dims.2, dims.2, 0);
+    launch_scalar_tn_slim(&t, aligned.ptr(), a.ptr(), b.ptr(), dims).unwrap();
+    let expected = aligned.logical_bits(&t);
+
+    let shifted = F32Subview::new(&t, &initial, dims.1, dims.2, dims.2, 1);
+    launch_scalar_tn_slim(&t, shifted.ptr(), a.ptr(), b.ptr(), dims).unwrap();
+    assert_exact(
+        "scalar TN slim output offset=1",
+        &shifted.logical_bits(&t),
+        &expected,
+    );
+}
+
+#[test]
 fn tc128_tn_odd_width_output_subviews_match_exactly() {
     let t = Ctx::new();
     let dims = (65usize, 128usize, 129usize);
@@ -1290,23 +1391,216 @@ fn tc_cp_async_misaligned_operands_match_scalar_stage_bytes() {
 
 #[test]
 fn tc_source_centralizes_async_copy_and_avoids_type_punned_stores() {
+    let mma_source = include_str!("../kernels/gemm_bi_triad/mma16.cuh");
+    let sm80_source = include_str!("../kernels/gemm_bi_triad/sm80.cu");
+    let (typed_sm80, tf32_sm80) = sm80_source
+        .split_once("struct Sm80Tf32KernelParams")
+        .expect("SM80 typed/TF32 source boundary");
     let source = [
         include_str!("../kernels/gemm_bi_triad/contract.cuh"),
         include_str!("../kernels/gemm_bi_triad/common.cuh"),
         include_str!("../kernels/gemm_bi_triad/epilogue.cuh"),
-        include_str!("../kernels/gemm_bi_triad/mma16.cuh"),
-        include_str!("../kernels/gemm_bi_triad/sm80.cu"),
+        mma_source,
+        sm80_source,
     ]
     .concat();
-    let tc_source = source.as_str();
+    let typed_helper = cuda_braced_scope_after(mma_source, "void gemm_bi_cp_async_16_zfill(");
+    let typed_l2_helper = cuda_braced_scope_after(mma_source, "void gemm_bi_cp_async_16_zfill_l2(");
+    let tf32_stage = cuda_braced_scope_after(tf32_sm80, "void gemm_bi_tf32_stage_async(");
 
     assert_eq!(
-        tc_source.matches("cp.async.ca.shared.global").count(),
+        mma_source
+            .matches("void gemm_bi_cp_async_16_zfill(")
+            .count(),
         1,
-        "tensor-core async copies must go through sgb_cp_async_16_zfill"
+        "the shared typed async-copy helper must have one definition"
     );
-    assert!(!tc_source.contains("*(unsigned *)&C"));
-    assert!(!tc_source.contains("float2 *dst"));
+    assert_eq!(
+        typed_helper.matches("cp.async.ca.shared.global").count(),
+        1,
+        "the shared typed helper must own one cache-all cp.async opcode"
+    );
+    assert!(typed_helper.contains("[%0], [%1], 16, %2"));
+    assert_eq!(
+        mma_source
+            .matches("void gemm_bi_cp_async_16_zfill_l2(")
+            .count(),
+        1,
+        "the L2-only typed async-copy helper must have one definition"
+    );
+    assert_eq!(
+        typed_l2_helper.matches("cp.async.cg.shared.global").count(),
+        1,
+        "the L2-only typed helper must own one cp.async opcode"
+    );
+    assert!(typed_l2_helper.contains("[%0], [%1], 16, %2"));
+    assert!(mma_source.contains("return valid_bytes == 0 ? base : base + valid_offset;"));
+    assert_eq!(
+        typed_sm80.matches("cp.async.ca.shared.global").count(),
+        0,
+        "typed SM80 kernels must not bypass gemm_bi_cp_async_16_zfill"
+    );
+    assert_eq!(
+        typed_sm80.matches("cp.async.cg.shared.global").count(),
+        0,
+        "typed SM80 kernels must not bypass the named async-copy helpers"
+    );
+    let typed_copies = typed_sm80.matches("gemm_bi_cp_async_16_zfill(").count()
+        + typed_sm80.matches("gemm_bi_cp_async_16_zfill_l2(").count();
+    assert!(typed_copies > 0, "typed SM80 kernels must use async copies");
+    assert_eq!(
+        typed_copies,
+        typed_sm80.matches("gemm_bi_cp_async_source(").count(),
+        "every typed async copy must select an in-allocation source"
+    );
+    assert_eq!(
+        typed_copies,
+        typed_sm80.matches("_bytes == 0 ? 0").count(),
+        "every typed async copy must clamp its zero-byte integer offset"
+    );
+    assert_eq!(
+        tf32_sm80
+            .matches("void gemm_bi_tf32_cp_async_4_zfill(")
+            .count(),
+        0,
+        "portable TF32 staging must not retain the scalar-width async path"
+    );
+    assert_eq!(
+        tf32_sm80.matches("cp.async.ca.shared.global").count(),
+        0,
+        "portable TF32 staging must use only the named 16-byte helper"
+    );
+    let tf32_copy_helper =
+        cuda_braced_scope_after(tf32_sm80, "void gemm_bi_tf32_cp_async_16_zfill(");
+    assert_eq!(
+        tf32_sm80
+            .matches("void gemm_bi_tf32_cp_async_16_zfill(")
+            .count(),
+        1,
+        "portable TF32 staging must centralize its tile-aware cache policy"
+    );
+    assert!(tf32_copy_helper.contains("if constexpr (BM == 16)"));
+    assert!(tf32_copy_helper.contains("gemm_bi_cp_async_16_zfill("));
+    assert!(tf32_copy_helper.contains("gemm_bi_cp_async_16_zfill_l2("));
+    let tf32_wide_copies = tf32_stage
+        .matches("gemm_bi_tf32_cp_async_16_zfill<BM>(")
+        .count();
+    assert_eq!(tf32_wide_copies, 4);
+    let tf32_copies = tf32_wide_copies;
+    assert_eq!(
+        tf32_copies,
+        tf32_stage
+            .matches("long long safe_offset = _bytes == 0 ? 0 : valid_offset;")
+            .count(),
+        "every TF32 async copy must clamp its zero-byte integer offset"
+    );
+    assert_eq!(
+        tf32_copies,
+        tf32_stage.matches("gemm_bi_cp_async_source(").count(),
+        "every TF32 async copy must select an in-allocation source"
+    );
+    for line in tf32_stage
+        .lines()
+        .filter(|line| line.contains("gemm_bi_cp_async_source("))
+    {
+        assert!(
+            line.contains("safe_offset, _bytes"),
+            "TF32 source selection bypasses its safe offset: {line}"
+        );
+    }
+    for line in tf32_stage
+        .lines()
+        .filter(|line| line.contains("gemm_bi_tf32_cp_async_16_zfill<BM>("))
+    {
+        assert!(
+            line.contains("dst, src, _bytes"),
+            "TF32 async-copy call bypasses its selected source: {line}"
+        );
+    }
+    assert_eq!(
+        source.matches("cp.async.ca.shared.global").count(),
+        typed_helper.matches("cp.async.ca.shared.global").count(),
+        "only the named helpers may own cache-all cp.async opcodes"
+    );
+    assert_eq!(
+        source.matches("cp.async.cg.shared.global").count(),
+        typed_l2_helper.matches("cp.async.cg.shared.global").count(),
+        "only the L2-only typed helper may own an L2-cached cp.async opcode"
+    );
+    assert!(!source.contains("*(unsigned *)&C"));
+    assert!(!source.contains("float2 *dst"));
+}
+
+#[test]
+fn typed_native_api_names_are_distinct_from_full_policy_entries() {
+    let launch = include_str!("../src/mamba_ssm/gpu/gemm_bi_triad/launch.rs");
+    let blas = include_str!("../src/mamba_ssm/gpu/blas.rs");
+    for operation in ["forward", "backward_dw", "backward_dx"] {
+        let full = format!("pub fn gemm_bi_{operation}_typed(");
+        let native = format!("pub fn gemm_bi_{operation}_typed_native(");
+        assert!(blas.contains(&full), "missing full-policy API {full}");
+        assert!(!blas.contains(&native), "BLAS layer exports {native}");
+        assert!(launch.contains(&native), "missing native-only API {native}");
+        assert!(
+            !launch.contains(&full),
+            "native dispatcher duplicates full-policy API {full}"
+        );
+    }
+}
+
+#[test]
+fn tn_rect128x64_source_contract_is_forced_tn_ca_one_bank_bk32_s3() {
+    let source = include_str!("../kernels/gemm_bi_triad/sm80.cu");
+    let marker = "#define GEMM_BI_TN_RECT_BM";
+    let candidate = &source[source.find(marker).expect("TN Rect128x64 source marker")..];
+    let candidate = candidate
+        .split_once("// NT (dX) staging")
+        .expect("Tile64 NT source boundary")
+        .0;
+
+    for required in [
+        "#define GEMM_BI_TN_RECT_BM 128",
+        "#define GEMM_BI_TN_RECT_BN 64",
+        "#define GEMM_BI_TN_RECT_BK 32",
+        "#define GEMM_BI_TN_RECT_STAGES 3",
+        "#define GEMM_BI_TN_RECT_THREADS 256",
+        "__launch_bounds__(256, 2)",
+        "Xs[GEMM_BI_TN_RECT_STAGES][GEMM_BI_TN_RECT_BK][GEMM_BI_TN_RECT_LDX]",
+        "Ys[GEMM_BI_TN_RECT_STAGES][GEMM_BI_TN_RECT_BK][GEMM_BI_TN_RECT_LDY]",
+        "gemm_bi_cp_async_16_zfill(_dst, _src, _bytes)",
+        "cp.async.wait_group 1",
+        "int macro64_tiles = (M_red - 1) / 64 + 1",
+        "int k32_tiles = 2 * macro64_tiles",
+        "unsigned a_frag[2][4]",
+        "unsigned b_frag[4][2]",
+        "GEMM_BI_DEFINE_GEMM_BI_TN_TC128X64(bf16",
+        "GEMM_BI_DEFINE_GEMM_BI_TN_TC128X64(f16",
+        "#undef GEMM_BI_DEFINE_GEMM_BI_TN_TC128X64",
+        "#undef GEMM_BI_TN_RECT_BM",
+    ] {
+        assert!(
+            candidate.contains(required),
+            "TN Rect128x64 source is missing {required:?}"
+        );
+    }
+    for forbidden in [
+        "gemm_bi_cp_async_16_zfill_l2",
+        "cp.async.cg",
+        "float2",
+        "gemm_bi_accumulate_float2_or_scalar",
+        "atomic",
+        "split",
+        "REDUX",
+        "gemm_bi_nn_tc128x64",
+        "gemm_bi_nt_tc128x64",
+        "a_frag_next",
+        "b_frag_next",
+    ] {
+        assert!(
+            !candidate.contains(forbidden),
+            "TN Rect128x64 source contains forbidden {forbidden:?}"
+        );
+    }
 }
 
 #[test]
@@ -1320,12 +1614,14 @@ fn tc128_output_pointer_formation_is_column_guarded() {
     ]
     .concat();
     let tc128_source = source
-        .split_once("#define SGB_TC64_BM")
+        .split_once("#define GEMM_BI_TC64_BM")
         .expect("Tile64 macro boundary")
         .0;
 
     assert_eq!(
-        tc128_source.matches("sgb_output_start_if_valid(").count(),
+        tc128_source
+            .matches("gemm_bi_output_start_if_valid(")
+            .count(),
         4,
         "the helper definition and all three TC128 epilogues must use the guarded output start"
     );
@@ -1334,10 +1630,10 @@ fn tc128_output_pointer_formation_is_column_guarded() {
         "TC128 epilogues must not form output pointers before validating c0"
     );
     let helper = tc128_source
-        .split_once("T* sgb_output_start_if_valid(")
+        .split_once("T* gemm_bi_output_start_if_valid(")
         .expect("guarded output helper")
         .1
-        .split_once("__device__ __forceinline__ int sgb_cp_async_valid_elems")
+        .split_once("__device__ __forceinline__ int gemm_bi_cp_async_valid_elems")
         .expect("next device helper")
         .0;
     let guard = helper

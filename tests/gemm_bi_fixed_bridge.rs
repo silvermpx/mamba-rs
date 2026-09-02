@@ -17,9 +17,11 @@ use mamba_rs::mamba_ssm::gpu::buffers::DtypedBuf;
 use mamba_rs::mamba_ssm::gpu::context::GpuCtx;
 use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
 use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
-use mamba_rs::mamba_ssm::gpu::gemm_bi_fixed::{FixedTile, fixed_forward};
+use mamba_rs::mamba_ssm::gpu::gemm_bi_fixed::{
+    FixedFwdOperands, FixedShape, FixedTile, fixed_forward, fixed_forward_with_tile,
+};
 use mamba_rs::mamba_ssm::gpu::gemm_bi_triad::{
-    TcFwdOperands, TcTile, sgemm_bi_forward_tc_with_tile,
+    TcFwdOperands, TcTile, gemm_bi_forward_tc_with_tile,
 };
 
 fn synth(n: usize, seed: u64) -> Vec<f32> {
@@ -67,7 +69,7 @@ fn bridge_fixed_ladder_bit_identical_to_triad() {
         (64, 384, 384, FixedTile::Tc16, TcTile::Thin16),
         (300, 768, 40, FixedTile::Tc16, TcTile::Thin16),
         (129, 384, 1928, FixedTile::Tc64, TcTile::Tile64),
-        (100, 383, 383, FixedTile::Tc64, TcTile::Tile64),
+        (100, 383, 383, FixedTile::Tc16, TcTile::Thin16),
         (4621, 768, 2304, FixedTile::Tc128, TcTile::Tile128),
         (2048, 1024, 3072, FixedTile::Tc128, TcTile::Tile128),
     ];
@@ -86,10 +88,19 @@ fn bridge_fixed_ladder_bit_identical_to_triad() {
                 ptr: b.cached_ptr(),
                 dtype: dt,
             };
-            let got = fixed_forward(&ctx, tp(&c_fixed), tp(&a), tp(&w), None, (m, k, n))
-                .expect("fixed forward");
-            assert_eq!(got, want_fixed, "tile pick at M{m} K{k} N{n}");
-            sgemm_bi_forward_tc_with_tile(
+            fixed_forward_with_tile(
+                &ctx,
+                FixedFwdOperands {
+                    c: tp(&c_fixed),
+                    x: tp(&a),
+                    w: tp(&w),
+                    bias_ptr: None,
+                },
+                FixedShape { m, k, n },
+                want_fixed,
+            )
+            .expect("forced Fixed bridge launch");
+            gemm_bi_forward_tc_with_tile(
                 &ctx.stream,
                 &ctx.kernels,
                 &TcFwdOperands {

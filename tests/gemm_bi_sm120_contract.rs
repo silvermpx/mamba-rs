@@ -14,6 +14,7 @@ const SOURCE: &str = include_str!("../kernels/gemm_bi_triad/sm120.cu");
 const CONTRACT_SOURCE: &str = include_str!("../src/mamba_ssm/gpu/gemm_bi_triad/contract.rs");
 const LAUNCH_SOURCE: &str = include_str!("../src/mamba_ssm/gpu/gemm_bi_triad/launch.rs");
 const MODULE_SOURCE: &str = include_str!("../src/mamba_ssm/gpu/gemm_bi_triad/modules.rs");
+const BLAS_SOURCE: &str = include_str!("../src/mamba_ssm/gpu/blas.rs");
 
 fn public_function_source(source: &str, name: &str) -> String {
     let marker = format!("pub fn {name}(");
@@ -24,6 +25,27 @@ fn public_function_source(source: &str, name: &str) -> String {
         .map(|offset| marker.len() + offset)
         .unwrap_or(tail.len());
     tail[..end].to_string()
+}
+
+fn function_source(source: &str, name: &str) -> String {
+    let marker = format!("fn {name}");
+    let start = source.find(&marker).expect("function source");
+    let tail = &source[start..];
+    let body = tail.find('{').expect("function body");
+    let mut depth = 0_usize;
+    for (offset, byte) in tail[body..].bytes().enumerate() {
+        match byte {
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return tail[..=body + offset].to_string();
+                }
+            }
+            _ => {}
+        }
+    }
+    panic!("unterminated function source for {name}")
 }
 
 fn contains_opcode_prefix(source: &str, prefix: &str) -> bool {
@@ -51,7 +73,7 @@ fn expected_symbols() -> BTreeSet<String> {
                 for stages in [2, 3] {
                     for dtype in ["bf16", "f16"] {
                         symbols.insert(format!(
-                            "sgemm_bi_{op}_sm120_tma_{tile}_bk{bk}_s{stages}_{dtype}"
+                            "gemm_bi_{op}_sm120_tma_{tile}_bk{bk}_s{stages}_{dtype}"
                         ));
                     }
                 }
@@ -125,10 +147,24 @@ fn caps(
 }
 
 #[test]
-fn sm120_source_owns_exact_96_symbol_cross_product() {
+fn sm120_source_owns_exact_96_symbol_inventory() {
     let expected = expected_symbols();
     assert_eq!(expected.len(), 96);
     assert_eq!(source_declared_symbols(), expected);
+}
+
+#[test]
+fn sm120_tensor_maps_promote_full_l2_sectors() {
+    let start = CONTRACT_SOURCE
+        .find("impl Sm120TensorMap {")
+        .expect("SM120 tensor-map encoder");
+    let body = &CONTRACT_SOURCE[start..];
+    let end = body
+        .find("pub(super) struct Sm120TensorOrigins")
+        .expect("SM120 tensor-map encoder end");
+    let body = &body[..end];
+    assert!(body.contains("CU_TENSOR_MAP_L2_PROMOTION_L2_256B"));
+    assert!(!body.contains("CU_TENSOR_MAP_L2_PROMOTION_NONE"));
 }
 
 #[test]
@@ -256,14 +292,14 @@ fn sm120_specs_freeze_threads_barriers_and_exact_shared_bytes() {
             Sm120Tile::M128N128,
             Sm120Bk::Bk32,
             Sm120Stages::S2,
-            512,
+            256,
             32_896,
         ),
         (
             Sm120Tile::M128N128,
             Sm120Bk::Bk32,
             Sm120Stages::S3,
-            512,
+            256,
             49_280,
         ),
         (
@@ -290,7 +326,8 @@ fn sm120_specs_freeze_threads_barriers_and_exact_shared_bytes() {
             .unwrap_or_else(|| panic!("missing geometry for {}", spec.symbol));
         assert_eq!(spec.threads, threads, "{} threads", spec.symbol);
         assert_eq!(
-            spec.empty_barrier_arrivals, threads,
+            spec.empty_barrier_arrivals,
+            spec.physical.compute_warps(),
             "{} empty arrivals",
             spec.symbol
         );
@@ -301,8 +338,13 @@ fn sm120_specs_freeze_threads_barriers_and_exact_shared_bytes() {
         );
         assert_eq!(spec.dynamic_shared_bytes, shared, "{} smem", spec.symbol);
         assert_eq!(spec.cluster, (1, 1, 1), "{} cluster", spec.symbol);
-        assert_eq!(spec.warp_tile, (32, 32), "{} warp tile", spec.symbol);
-        assert_eq!(spec.threads / 32, spec.physical.tile.compute_warps());
+        assert_eq!(
+            spec.warp_tile,
+            spec.physical.warp_tile(),
+            "{} warp tile",
+            spec.symbol
+        );
+        assert_eq!(spec.threads / 32, spec.physical.compute_warps());
         assert_eq!(
             spec.expected_transaction_bytes,
             match spec.physical.bk {
@@ -322,8 +364,8 @@ fn sm120_specs_freeze_threads_barriers_and_exact_shared_bytes() {
 }
 
 #[test]
-fn sm120_auto_tables_are_minor_specific_and_empty() {
-    assert_eq!(SM120_AUTO_CELLS_CC120, &[]);
+fn sm120_auto_tables_are_minor_specific() {
+    assert_eq!(SM120_AUTO_CELLS_CC120.len(), 18);
     assert_eq!(SM120_AUTO_CELLS_CC121, &[]);
 }
 
@@ -543,7 +585,7 @@ fn sm120_map_requests_cover_sw64_sw128_and_reject_unsupported_views() {
         })
         .unwrap_err();
         assert!(
-            error.contains("element aligned") || error.contains("non-null"),
+            error.contains("16-byte aligned") || error.contains("non-null"),
             "{error}"
         );
     }
@@ -565,7 +607,7 @@ fn sm120_map_requests_cover_sw64_sw128_and_reject_unsupported_views() {
 }
 
 #[test]
-fn sm120_swizzled_maps_separate_encoded_base_and_logical_view_alignment() {
+fn sm120_swizzled_maps_require_encoded_and_logical_tma_alignment() {
     let key_start = CONTRACT_SOURCE
         .find("impl Sm120TensorMapKey {")
         .expect("SM120 tensor-map key validator");
@@ -588,7 +630,7 @@ fn sm120_swizzled_maps_separate_encoded_base_and_logical_view_alignment() {
         !key_validator.contains("!self.base.is_multiple_of(16)"),
         "swizzled SM120 tensor-map base must not use the unswizzled 16-byte rule"
     );
-    assert!(CONTRACT_SOURCE.contains("!layout.pointer.is_multiple_of(2)"));
+    assert!(CONTRACT_SOURCE.contains("!layout.pointer.is_multiple_of(16)"));
 }
 
 #[test]
@@ -609,6 +651,8 @@ fn sm120_source_freezes_tma_swizzle_and_pipeline_contract() {
         "ldmatrix.sync.aligned.m8n8.x2.trans.shared.b16",
         "mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32",
         "mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32",
+        "sm120_init_barrier<warps>",
+        "if ((threadIdx.x & 31) == 0) {\n            sm120_arrive_empty",
         "__syncwarp()",
         "__align__(128)",
     ] {
@@ -653,6 +697,7 @@ fn sm120_source_freezes_tma_swizzle_and_pipeline_contract() {
         "ldmatrix.sync.aligned.m8n8.x4.shared.b16",
         "red."
     ));
+    assert_eq!(SOURCE.matches("sm120_sync_warp();").count(), 6);
 }
 
 #[test]
@@ -694,8 +739,9 @@ fn sm120_device_tile_counts_use_overflow_safe_positive_ceil_division() {
 #[test]
 fn sm120_source_accounts_for_every_swizzle_offset_and_split_plane() {
     for required in [
-        "(shared_address / 128U) % groups",
-        "logical_chunk ^ ((logical_row + offset) % groups)",
+        "shared_address + logical_row * groups * 16U",
+        "(row_start / 128U) % groups",
+        "logical_chunk ^ phase",
         "groups = 4",
         "groups = 8",
         "+ 64",
@@ -713,6 +759,36 @@ fn sm120_source_accounts_for_every_swizzle_offset_and_split_plane() {
         SOURCE.matches("SM120_SWIZZLE_128B").count() >= 2,
         "SW128 must be selected and consumed"
     );
+}
+
+#[test]
+fn sm120_half_swizzle_matches_the_absolute_address_bit_permutation() {
+    let decode = |base: u32, row: u32, element: u32, groups: u32| {
+        let row_start = base + row * groups * 16;
+        let phase = (row_start / 128) % groups;
+        row_start + ((element / 8) ^ phase) * 16
+    };
+    for base_phase in 0_u32..8 {
+        let base = base_phase * 128;
+        for row in 0_u32..16 {
+            for chunk in 0_u32..4 {
+                let expected_chunk = chunk ^ ((base_phase + row / 2) % 4);
+                assert_eq!(
+                    decode(base, row, chunk * 8, 4),
+                    base + row * 64 + expected_chunk * 16,
+                    "SW64 base_phase={base_phase} row={row} chunk={chunk}"
+                );
+            }
+            for chunk in 0_u32..8 {
+                let expected_chunk = chunk ^ ((base_phase + row) % 8);
+                assert_eq!(
+                    decode(base, row, chunk * 8, 8),
+                    base + row * 128 + expected_chunk * 16,
+                    "SW128 base_phase={base_phase} row={row} chunk={chunk}"
+                );
+            }
+        }
+    }
 }
 
 #[test]
@@ -773,6 +849,99 @@ fn sm120_capture_launch_is_prepared_and_has_no_replay_side_effects() {
         assert!(
             capture < capability,
             "{name} must reject capture before capability, query, encode, or allocation work"
+        );
+    }
+}
+
+#[test]
+fn sm120_auto_bridge_is_request_based_and_capture_prepared_only() {
+    let bridge = function_source(LAUNCH_SOURCE, "launch_sm120_auto_observed");
+    for required in [
+        "resolve_sm120_auto(",
+        "with_sm120_prepared_launches",
+        "Sm120PreparedKey::new",
+    ] {
+        assert!(bridge.contains(required), "auto bridge omits {required}");
+    }
+    for forbidden in [
+        "resolve_sm120_forced(",
+        "gemm_bi_forward_typed",
+        "gemm_bi_backward_dw_typed",
+        "gemm_bi_backward_dx_typed",
+    ] {
+        assert!(
+            !bridge.contains(forbidden),
+            "auto bridge contains {forbidden}"
+        );
+    }
+
+    let cache = function_source(LAUNCH_SOURCE, "ensure_sm120_prepared");
+    let decision = cache.find("sm120_cache_action(").expect("capture decision");
+    for preparation in ["prepare_sm120_tensor_maps(", "prepare_sm120_tma_forced("] {
+        assert!(
+            decision < cache.find(preparation).expect("eager preparation"),
+            "{preparation} occurs before the capture decision"
+        );
+    }
+    let errors = function_source(LAUNCH_SOURCE, "sm120_capture_cache_error");
+    for error in [
+        "prepared SM120 Triad cache entry is missing during graph capture; run eager warmup again",
+        "prepared SM120 Triad allocation epoch changed during graph capture; run eager warmup again",
+        "prepared SM120 Triad automatic capture requires managed allocations; run eager warmup again",
+    ] {
+        assert!(
+            errors.contains(error),
+            "cache omits fail-closed error {error}"
+        );
+    }
+
+    let enqueue = function_source(LAUNCH_SOURCE, "enqueue_sm120_tma_prepared_observed");
+    assert_eq!(enqueue.matches("builder.arg(").count(), 5);
+    assert!(enqueue.contains("enqueue_with_physical_observation"));
+    for forbidden in [
+        "capture_status",
+        "validate_sm120_graph_replay",
+        "prepare_sm120_tensor_maps",
+        "prepare_sm120_tma_forced",
+        "pointer_get_attribute",
+    ] {
+        assert!(
+            !enqueue.contains(forbidden),
+            "prepared enqueue contains {forbidden}"
+        );
+    }
+}
+
+#[test]
+fn sm120_half_graph_package_uses_the_cached_prepared_route() {
+    let package = function_source(BLAS_SOURCE, "prepare_half_physical_graph_package");
+    for required in [
+        "ModuleKind::TriadSm120",
+        "prepare_sm120_auto_graph_sequence",
+        "Sm120AutoRequest",
+        "manifest.nodes().len() != 1",
+    ] {
+        assert!(
+            package.contains(required),
+            "half graph package omits {required}"
+        );
+    }
+
+    let adapter = function_source(LAUNCH_SOURCE, "prepare_sm120_auto_graph_sequence");
+    assert_eq!(
+        adapter.matches("validate_sm120_graph_replay(").count(),
+        2,
+        "prepared SM120 graph adapter must validate before and after binding"
+    );
+    for forbidden in [
+        "prepare_sm120_tensor_maps(",
+        "prepare_sm120_tma_forced(",
+        "encode_sm120_tensor_maps",
+        "resolve_sm120_forced(",
+    ] {
+        assert!(
+            !adapter.contains(forbidden),
+            "graph adapter contains {forbidden}"
         );
     }
 }

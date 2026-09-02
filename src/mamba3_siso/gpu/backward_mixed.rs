@@ -23,7 +23,7 @@
 //!   the existing `GpuMamba3Scratch`.
 
 use crate::mamba_ssm::gpu::blas::{
-    TypedPtr, gpu_gemm_ex_backward_dx_typed, gpu_sgemm_backward_dw_grad_typed,
+    TypedPtr, gpu_gemm_bi_backward_dw_grad_typed, gpu_gemm_ex_backward_dx_typed,
 };
 use crate::mamba_ssm::gpu::buffers::GpuBuffer;
 use crate::mamba_ssm::gpu::context::GpuCtx;
@@ -184,7 +184,7 @@ pub fn gpu_backward_mamba3_backbone_mixed(
                 .map_err(|e| format!("m3_mixed reduce_bias input_proj: {e:?}"))?;
         }
         // dW: saved typed inputs^T @ dY, accumulated into the f32 grad slice.
-        gpu_sgemm_backward_dw_grad_typed(
+        gpu_gemm_bi_backward_dw_grad_typed(
             ctx,
             &grads.input_proj_w,
             TypedPtr { ptr: dy_ptr, dtype },
@@ -276,7 +276,7 @@ fn gpu_backward_mamba3_layer_mixed(
     cast_f32_to_typed(ctx, m3k, &mut msc.d_temporal_typed, d_temporal, bt * dm)?;
 
     // dW: d_out_proj_w += gated^T @ d_temporal_typed (typed inputs, f32 grad out).
-    gpu_sgemm_backward_dw_grad_typed(
+    gpu_gemm_bi_backward_dw_grad_typed(
         ctx,
         &lg.out_proj_w,
         tp(msc.d_temporal_typed.cached_ptr(), dtype),
@@ -938,7 +938,7 @@ fn gpu_backward_mamba3_layer_mixed(
     //   d_post_norm_typed = d_proj_typed @ in_proj_w^T
     //   d_in_proj_w += post_norm^T @ d_proj_typed
     // ----------------------------------------------------------------
-    gpu_sgemm_backward_dw_grad_typed(
+    gpu_gemm_bi_backward_dw_grad_typed(
         ctx,
         &lg.in_proj_w,
         tp(msc.d_proj_typed.cached_ptr(), dtype),

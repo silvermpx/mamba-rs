@@ -39,12 +39,32 @@ Pure Rust + CUDA. Kernels compile at runtime via NVRTC.
   is pure scheduling and no bucket boundary exists to cross. The family is part of the numeric route
   (`ctx.gemm_route()`) and a flip after a CUDA-graph capture is refused at
   replay like any tier flip.
-- **Tensor-core deterministic tier (opt-in)** — `MAMBA_RS_BI_TENSOR_CORES=1`
-  / `ctx.set_bi_tensor_cores(true)` on top of the flag above swaps the
-  training GEMM triad for mma.sync tensor-core kernels: still fully
-  deterministic (own numeric contract), at-or-near cuBLAS parity even on
+- **Fast typed deterministic tier (opt-in)** — `MAMBA_RS_BI_TENSOR_CORES=1`
+  / `ctx.set_bi_tensor_cores(true)` on top of the flag above selects the
+  fastest qualified typed route: usually mma.sync tensor-core kernels, with
+  measured scalar fallbacks where they win. On SM89, automatic BF16/F16 NN
+  uses the exact scalar Split-K route only when N=128 and the scalar plan is
+  `NnSplitKThinTail` with K>=511 or `NnSplitKThin` with K>=1024; forced tile
+  requests and every other architecture remain unchanged. On CC12.0, automatic
+  SM120 routing is deliberately narrower: an immutable 18-cell BF16/F16 table
+  covers the qualified NN, TN and NT hot shapes with route-sealed BK32 or BK64
+  TMA/MMA16 schedules. CC12.1 and every non-cell decline to the existing
+  portable ladder. Each SM120 output has one owner, follows one fixed ascending
+  K16 MMA chain, and uses no numerical atomics or Split-K reduction. It stays
+  fully deterministic, freezes the selected numeric contract and physical
+  schedule in the route identity, and reaches at-or-near cuBLAS parity even on
   d128/d256 models and **faster than cuBLAS** from d_model ≥ 768
-  (0.70× of PEDANTIC per step at d1536 bf16).
+  (0.70× of PEDANTIC per step at d1536 bf16). A qualified SM120 CUDA Graph
+  route must first run eagerly to prepare its tensor maps and cache entry;
+  capture fails closed on a missing, stale or untracked allocation epoch rather
+  than allocating, retuning or silently changing routes inside capture.
+- **Deterministic F32 policy** — `MAMBA_RS_BI_F32_POLICY=exact|tf32` or
+  `ctx.set_f32_triad_policy(...)` controls the batch-invariant F32 route.
+  `exact` is the default scalar `__fmaf_rn` contract. `tf32` permits only a
+  frozen qualified deterministic TF32 route; it does not force one, and an
+  unsupported or unmeasured cell remains on exact scalar FMA. TF32 has a
+  different reduction contract from exact scalar FMA, but repeated eager and
+  graph launches of the same frozen route are bit-identical.
 - **Per-architecture tensor-core rungs** — on Hopper (`wgmma`) and
   Blackwell (`tcgen05`) the deterministic forward ladder routes to native
   per-architecture kernels, each a bit family of its own, guarded by a
@@ -104,9 +124,30 @@ Pure Rust + CUDA. Kernels compile at runtime via NVRTC.
 | `gemm-blas` | [`gemm`] crate BLAS-class CPU GEMM (+ rayon) | ANY serious CPU use |
 | `accelerate` | Apple Accelerate GEMM (macOS) | macOS deployments |
 | `cuda` | GPU inference + training (NVRTC-compiled kernels) | needs the CUDA toolkit |
+| `cuda-cublaslt-qualification` | adds cuBLASLt to the CUDA qualification/benchmark harness; ordinary `cuda` does not enable it | maintainer qualification only, not production route selection |
 | `hf` | safetensors/HF checkpoint loaders | LM checkpoints |
 | `cli` | `mamba-generate` binary (tokenizers + hf-hub) | text generation CLI |
 | `nccl` | data-parallel transport (pinned NCCL binding) | multi-GPU training |
+
+### Typed GEMM routing and low-level SM120 APIs
+
+Application code normally reaches the deterministic GEMM engine through the
+trainers/backbones. Direct GPU integrations should use
+`mamba_ssm::gpu::blas::gemm_bi_forward_typed`,
+`mamba_ssm::gpu::blas::gemm_bi_backward_dw_typed` and
+`mamba_ssm::gpu::blas::gemm_bi_backward_dx_typed`; these entries own automatic
+policy lookup and fall back without exposing tile choices to callers. The
+similarly scoped `gemm_bi_triad::*_typed_native` functions are native-bucket
+qualification hooks and may return `UNCOVERED`; they are not application APIs.
+
+The exported SM120 route constants and the `resolve_sm120_forced`,
+`prepare_sm120_tensor_maps`, `prepare_sm120_tma_forced`,
+`launch_sm120_tma_prepared` and `validate_sm120_graph_replay` functions are
+low-level qualification and census building blocks. A forced launch neither
+adds a cell to production automatic dispatch nor relaxes its exact target,
+shape, pointer, tensor-map, context or allocation-lifetime validation. IDE and
+docs users inspecting normal CUDA code need only the `cuda` feature; enable
+`cuda-cublaslt-qualification` only when building the vendor-comparison harness.
 
 ## Use cases and API choice
 
@@ -337,9 +378,8 @@ let (weights, input_dim) = load_mamba3(Path::new("m3.safetensors"), &cfg)?;
 | f16   | 1 028 tok/s      | 958 tok/s              | −7 % |
 
 On f32 both paths run on CUDA cores (no Tensor Core route), so the gap
-is small. On
-bf16/f16 cuBLAS routes through Tensor Cores (TF32-style accumulation)
-and wins ~7 % on per-token latency, at the cost of M=1 vs M=N
+is small. On bf16/f16 cuBLAS routes through Tensor Cores with f32
+accumulation and wins ~7 % on per-token latency, at the cost of M=1 vs M=N
 algorithm-selection drift (KL ≈ 1e-3 on adversarial prompts). The
 batch-invariant path keeps `b=1` ≡ `b=N` per slot (KL ≈ 1e-11).
 
@@ -422,7 +462,9 @@ sequences, 24-layer shapes) live in the detailed docs:
 
 ## Testing
 
-102 integration test files plus in-module unit tests — 568 `#[test]` functions total:
+The suite combines integration tests with in-module unit tests. CI results are
+the authoritative inventory; hand-maintained test totals are intentionally
+omitted because architecture qualification adds and retires cells over time:
 
 - Correctness: bit-parity WITHIN a numeric route (eager ↔ CUDA Graph,
   run ↔ run, save ↔ nosave prefill, CPU Single ↔ CPU Parallel); tolerance

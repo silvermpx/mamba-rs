@@ -20,7 +20,7 @@ use mamba_rs::mamba_ssm::gpu::context::GpuCtx;
 use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
 use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
 use mamba_rs::mamba_ssm::gpu::gemm_bi_triad::{
-    TcFwdOperands, TcTile, sgemm_bi_forward_tc_with_tile,
+    TcFwdOperands, TcTile, gemm_bi_forward_tc_with_tile,
 };
 
 fn exposing(n: usize, seed: u64) -> Vec<f32> {
@@ -101,7 +101,7 @@ fn tcgen05_vs_mma_sync_family_verdict() {
         b.arg(&ni);
         unsafe { b.launch(cfg) }.expect("tcgen05 launch");
 
-        sgemm_bi_forward_tc_with_tile(
+        gemm_bi_forward_tc_with_tile(
             &ctx.stream,
             &ctx.kernels,
             &TcFwdOperands {

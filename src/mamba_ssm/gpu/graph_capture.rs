@@ -25,6 +25,14 @@ use std::sync::Arc;
 
 use cudarc::driver::{CudaGraph, CudaStream};
 
+use super::blas::{BoundPhysicalGraphLaunches, PreparedPhysicalGraphPackage};
+use super::context::{BiGemmFamily, GpuCtx};
+use super::kernel_identity::{
+    CapturedGemmGraphPlan, CapturedPhysicalGraphPlan, PhysicalCudaLaunchError,
+    PreparedGemmCaptureManifest, RecordingPhysicalObserver, ResolvedPhysicalKernelLaunch,
+    ResolvedPhysicalLaunchSet, finish_recording_physical_capture,
+};
+
 /// Capture all CUDA work issued by `body` on `stream` into a CUDA Graph.
 ///
 /// Mirrors the pattern in `inference::GpuInferenceEngine::capture_graph`,
@@ -84,4 +92,207 @@ where
             "body: {b}; end_capture ALSO failed (stream may be in invalid state): {e:?}"
         )),
     }
+}
+
+pub(crate) unsafe fn capture_into_graph_with_gemm_plan<F>(
+    ctx: &GpuCtx,
+    route_capacity: usize,
+    manifest: &PreparedGemmCaptureManifest,
+    body: F,
+) -> Result<(CudaGraph, Option<CapturedGemmGraphPlan>), String>
+where
+    F: FnOnce() -> Result<(), String>,
+{
+    manifest.validate_capture_request(ctx.gemm_route(), route_capacity)?;
+    let recording = ctx.begin_gemm_route_recording(route_capacity)?;
+    let graph = unsafe { capture_into_graph(&ctx.stream, body) }?;
+    let plan = recording.finish_against_manifest(manifest)?;
+    Ok((graph, plan))
+}
+
+fn physical_capture_body_error(error: PhysicalCudaLaunchError) -> String {
+    match error {
+        #[cfg(test)]
+        PhysicalCudaLaunchError::Prepared(error) => error.to_string(),
+        PhysicalCudaLaunchError::Identity(error) => error,
+        PhysicalCudaLaunchError::Driver(error) => {
+            format!("prepared physical CUDA enqueue: {error:?}")
+        }
+    }
+}
+
+unsafe fn capture_prepared_physical_launches(
+    stream: &Arc<CudaStream>,
+    launches: &mut BoundPhysicalGraphLaunches<'_>,
+    observer: &mut RecordingPhysicalObserver,
+) -> Result<CudaGraph, String> {
+    stream
+        .synchronize()
+        .map_err(|error| format!("pre-capture sync: {error:?}"))?;
+    stream
+        .begin_capture(
+            cudarc::driver::sys::CUstreamCaptureMode::CU_STREAM_CAPTURE_MODE_THREAD_LOCAL,
+        )
+        .map_err(|error| format!("begin_capture: {error:?}"))?;
+
+    let body_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
+        launches.enqueue(observer)
+    }));
+    let end_result = stream.end_capture(
+        cudarc::driver::sys::CUgraphInstantiate_flags::CUDA_GRAPH_INSTANTIATE_FLAG_AUTO_FREE_ON_LAUNCH,
+    );
+    let body_result = match body_result {
+        Ok(result) => result,
+        Err(payload) => {
+            drop(end_result);
+            std::panic::resume_unwind(payload);
+        }
+    };
+    match (body_result, end_result) {
+        (Ok(()), Ok(Some(graph))) => {
+            graph
+                .upload()
+                .map_err(|error| format!("graph upload: {error:?}"))?;
+            Ok(graph)
+        }
+        (Ok(()), Ok(None)) => Err("end_capture returned no graph for physical package".into()),
+        (Ok(()), Err(error)) => Err(format!("end_capture: {error:?}")),
+        (Err(body), Ok(_)) => Err(format!("body: {}", physical_capture_body_error(body))),
+        (Err(body), Err(end)) => Err(format!(
+            "body: {}; end_capture ALSO failed (stream may be in invalid state): {end:?}",
+            physical_capture_body_error(body)
+        )),
+    }
+}
+
+pub(super) struct CapturedPhysicalGraph {
+    graph: CudaGraph,
+    plan: CapturedPhysicalGraphPlan,
+}
+
+impl CapturedPhysicalGraph {
+    fn new(graph: CudaGraph, plan: CapturedPhysicalGraphPlan) -> Self {
+        Self { graph, plan }
+    }
+
+    pub(super) fn nodes(&self) -> &[ResolvedPhysicalKernelLaunch] {
+        self.plan.nodes()
+    }
+
+    pub(super) fn launches(&self) -> ResolvedPhysicalLaunchSet {
+        self.plan.launches()
+    }
+
+    #[cfg(test)]
+    pub(super) fn launch(&self, ctx: &GpuCtx, label: &str) -> Result<(), String> {
+        self.plan.validate_replay(ctx, label)?;
+        self.graph
+            .launch()
+            .map_err(|error| format!("{label}: launch physical graph: {error:?}"))
+    }
+
+    pub(super) fn measure_prevalidated(
+        &self,
+        ctx: &GpuCtx,
+        iterations: usize,
+        label: &str,
+    ) -> Result<f64, String> {
+        if iterations == 0 {
+            return Err(format!(
+                "{label}: timed graph iteration count must be positive"
+            ));
+        }
+        self.plan.validate_replay(ctx, label)?;
+        let start = ctx
+            .stream
+            .record_event(Some(cudarc::driver::sys::CUevent_flags::CU_EVENT_DEFAULT))
+            .map_err(|error| format!("{label}: record graph start event: {error:?}"))?;
+        let mut failure = None;
+        for _ in 0..iterations {
+            if let Err(error) = self.graph.launch() {
+                failure = Some(error);
+                break;
+            }
+        }
+        let end = match ctx
+            .stream
+            .record_event(Some(cudarc::driver::sys::CUevent_flags::CU_EVENT_DEFAULT))
+        {
+            Ok(end) => end,
+            Err(error) => {
+                return Err(physical_graph_timing_error(
+                    ctx,
+                    format!("{label}: record graph end event: {error:?}"),
+                ));
+            }
+        };
+        if let Some(error) = failure {
+            return Err(physical_graph_timing_error(
+                ctx,
+                format!("{label}: launch physical graph: {error:?}"),
+            ));
+        }
+        let elapsed = start
+            .elapsed_ms(&end)
+            .map(f64::from)
+            .map_err(|error| format!("{label}: measure physical graph events: {error:?}"));
+        elapsed.map_err(|primary| physical_graph_timing_error(ctx, primary))
+    }
+}
+
+fn physical_graph_timing_error(ctx: &GpuCtx, primary: String) -> String {
+    match ctx.stream.synchronize() {
+        Ok(()) => primary,
+        Err(cleanup) => format!("{primary}; cleanup synchronize failed: {cleanup:?}"),
+    }
+}
+
+pub(super) unsafe fn capture_into_graph_with_physical_plan(
+    mut package: PreparedPhysicalGraphPackage<'_>,
+) -> Result<CapturedPhysicalGraph, String> {
+    package.validate()?;
+    let mut observer = package.take_observer()?;
+    let ctx = package.context();
+    let manifest = package.manifest();
+    observer.validate_capture_start(ctx, manifest)?;
+    let mut launches = package.bind_launches()?;
+    package.validate()?;
+    observer.validate_capture_start(ctx, manifest)?;
+    ctx.freeze_graph_scratch();
+    let graph_result =
+        unsafe { capture_prepared_physical_launches(&ctx.stream, &mut launches, &mut observer) };
+    drop(launches);
+    #[cfg(test)]
+    package.apply_post_capture_test_mutation();
+    let binding_result = observer.validate_capture_binding(ctx);
+    let graph = match (graph_result, binding_result) {
+        (Ok(graph), Ok(())) => graph,
+        (Err(capture), Ok(())) => return Err(capture),
+        (Ok(_), Err(binding)) => return Err(binding),
+        (Err(capture), Err(binding)) => {
+            return Err(format!(
+                "{capture}; physical graph post-capture validation also failed: {binding}"
+            ));
+        }
+    };
+    let plan = finish_recording_physical_capture(observer, ctx, manifest)?;
+    Ok(CapturedPhysicalGraph::new(graph, plan))
+}
+
+pub(crate) fn require_f32_triad_graph_plan(
+    ctx: &GpuCtx,
+    logical_f32: bool,
+    plan: Option<&CapturedGemmGraphPlan>,
+    label: &str,
+) -> Result<(), String> {
+    if ctx.batch_invariant()
+        && ctx.bi_gemm_family() == BiGemmFamily::Triad
+        && logical_f32
+        && plan.is_none()
+    {
+        return Err(format!(
+            "{label}: logical-f32 Triad graph captured no resolved GEMM route"
+        ));
+    }
+    Ok(())
 }

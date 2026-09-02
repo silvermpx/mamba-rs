@@ -39,12 +39,19 @@
 // tracked MMA work no longer reads the stage; every thread waits on that
 // barrier's phase before the buffer is refilled.
 //
-// Everything below compiles only for the CC 10.x family targets
-// (compute_100a/100f/103a/103f): tcgen05 exists on datacenter Blackwell
-// alone (Hopper has wgmma, consumer Blackwell kept mma.sync), and the
-// loader looks these symbols up only when the device resolves there.
-#if defined(__CUDA_ARCH_FAMILY_SPECIFIC__) && \
-    (__CUDA_ARCH_FAMILY_SPECIFIC__ == 1000 || __CUDA_ARCH_FAMILY_SPECIFIC__ == 1030)
+// Everything below compiles only for datacenter-Blackwell feature targets.
+// CUDA 12.8 exposes exact targets through __CUDA_ARCH_FEAT_SM*_ALL; CUDA
+// 12.9 and newer also expose the public architecture/family macros. Baseline
+// targets stay on the portable ladder because they may not issue tcgen05.
+#if defined(__CUDA_ARCH_FEAT_SM100_ALL) || \
+    defined(__CUDA_ARCH_FEAT_SM101_ALL) || \
+    defined(__CUDA_ARCH_FEAT_SM103_ALL) || \
+    defined(__CUDA_ARCH_FEAT_SM110_ALL) || \
+    (defined(__CUDA_ARCH_FAMILY_SPECIFIC__) && \
+     (__CUDA_ARCH_FAMILY_SPECIFIC__ == 1000 || \
+      __CUDA_ARCH_FAMILY_SPECIFIC__ == 1010 || \
+      __CUDA_ARCH_FAMILY_SPECIFIC__ == 1030 || \
+      __CUDA_ARCH_FAMILY_SPECIFIC__ == 1100))
 
 // Shared-memory matrix descriptor for tcgen05: 14-bit address fields in
 // 16-byte units, version 1, the 128-byte-swizzle layout tag in bits

@@ -63,7 +63,8 @@ use crate::mamba_ssm::gpu::forward_mixed::{
     GpuMambaBackboneMixedActs, GpuMambaMixedTrainScratch, gpu_forward_mamba_backbone_train_mixed,
 };
 use crate::mamba_ssm::gpu::grad_clip::{alloc_partials, clip_grads_device, scale_grads};
-use crate::mamba_ssm::gpu::graph_capture::capture_into_graph;
+use crate::mamba_ssm::gpu::graph_capture::capture_into_graph_with_gemm_plan;
+use crate::mamba_ssm::gpu::kernel_identity::{CapturedGemmGraphPlan, PreparedGemmCaptureManifest};
 use crate::mamba_ssm::gpu::launch::grid_1d;
 use crate::mamba_ssm::gpu::weights::GpuMambaTrainLayerWeights;
 
@@ -104,6 +105,18 @@ fn recompute_a_neg_all(
             .map_err(|e| format!("exp_negate2 a_neg mirrors L{li}: {e:?}"))?;
     }
     Ok(())
+}
+
+fn with_validated_launch(
+    ctx: &GpuCtx,
+    plan: Option<&CapturedGemmGraphPlan>,
+    label: &str,
+    launch: impl FnOnce() -> Result<(), String>,
+) -> Result<(), String> {
+    match plan {
+        Some(plan) => plan.with_validated_launch(ctx, label, launch),
+        None => launch(),
+    }
 }
 use crate::mamba_ssm::gpu::loss_scaler::{
     DynamicLossScaler, OverflowFlag, UnscaleFactor, check_inf_nan_gpu, scale_grads_skip_gpu,
@@ -835,6 +848,7 @@ pub(crate) struct MambaTrainerMixed {
     // Always None for f16 (loss-scaler overflow check requires CPU readback,
     // which breaks graph capture).
     graph: Option<GpuMambaTrainingStepGraph>,
+    prepared_gemm_manifest: Option<PreparedGemmCaptureManifest>,
 
     // f16 AMP loss scaler — populated for `WeightDtype::F16`, None otherwise.
     // When present, every step scales d_temporal by `scaler.scale()` before
@@ -851,6 +865,8 @@ pub(crate) struct MambaTrainerMixed {
     /// before each replay; the captured `scale_grads_skip` kernel reads it
     /// via a stable device pointer baked at capture time.
     graph_f16: Option<cudarc::driver::CudaGraph>,
+    prepared_f16_gemm_manifest: Option<PreparedGemmCaptureManifest>,
+    captured_f16_gemm_plan: Option<CapturedGemmGraphPlan>,
     /// 1-element device buffer of `1/loss_scale`.
     unscale_factor: Option<UnscaleFactor>,
     /// Pointer-stability snapshots for the f16 graph. The three device
@@ -1062,10 +1078,13 @@ impl MambaTrainerMixed {
             clip_partials,
             clip_scratch,
             graph: None,
+            prepared_gemm_manifest: None,
             scaler,
             overflow_flag,
             d_temporal_scaled,
             graph_f16: None,
+            prepared_f16_gemm_manifest: None,
+            captured_f16_gemm_plan: None,
             unscale_factor,
             // Sentinel zeros — overwritten in capture_graph_f16; never used
             // before the graph is captured (gated by `if graph_f16.is_some()`).
@@ -1085,6 +1104,17 @@ impl MambaTrainerMixed {
 
     pub fn has_graph(&self) -> bool {
         self.graph.is_some() || self.graph_f16.is_some()
+    }
+
+    fn presize_prepared_gemm_scratch(&self) -> Result<(), String> {
+        let input_dim = self.mamba_input.len() / (self.batch * self.seq_len);
+        self.ctx.presize_bi_upcast_scratch_for_train_with_input(
+            &self.cfg,
+            self.batch,
+            self.seq_len,
+            input_dim,
+            self.dtype,
+        )
     }
 
     /// Reset recurrent state (conv_states + ssm_states) to zero. Keeps
@@ -1146,6 +1176,9 @@ impl MambaTrainerMixed {
         // will record the AdamW kernel reading from it. Real values are
         // overwritten per step by `step()`.
         self.bias.write(&self.ctx.stream, 1.0, 1.0, self.adam.lr)?;
+        let manifest = self.prepared_gemm_manifest.ok_or_else(|| {
+            "M1 mixed training graph capture requires one successful eager step".to_string()
+        })?;
 
         // The trainer owns every captured allocation and drops the graph first.
         let g = unsafe {
@@ -1167,6 +1200,7 @@ impl MambaTrainerMixed {
                 },
                 self.batch,
                 self.seq_len,
+                &manifest,
             )
         }?;
         self.graph = Some(g);
@@ -1505,6 +1539,46 @@ impl MambaTrainerMixed {
         })
     }
 
+    fn eager_f16_forward_backward(&mut self) -> Result<(), String> {
+        self.presize_prepared_gemm_scratch()?;
+        let Self {
+            ctx,
+            weights,
+            grads,
+            acts,
+            scratch,
+            state,
+            a_neg_all,
+            mamba_input,
+            d_temporal_scaled,
+            prepared_f16_gemm_manifest,
+            ..
+        } = self;
+        let d_temporal = d_temporal_scaled.as_mut().expect("f16 d_temporal_scaled");
+        let manifest = ctx.record_eager_gemm_manifest(|| {
+            grads.zero(&ctx.stream)?;
+            gpu_forward_mamba_backbone_train_mixed(
+                ctx,
+                acts,
+                weights,
+                mamba_input,
+                state,
+                scratch,
+            )?;
+            gpu_backward_mamba_backbone_mixed(
+                ctx,
+                d_temporal,
+                grads,
+                acts,
+                &weights.compute,
+                a_neg_all,
+                scratch,
+            )
+        })?;
+        *prepared_f16_gemm_manifest = Some(manifest);
+        Ok(())
+    }
+
     /// f16 step (eager, no graph). Mirrors PyTorch GradScaler protocol:
     ///   1. Upload d_temporal scaled by `scaler.scale()`
     ///   2. forward + backward → grads (also scaled)
@@ -1604,7 +1678,15 @@ impl MambaTrainerMixed {
             // Graph replay: forward + backward + check_inf_nan +
             // scale_grads_skip + AdamW + sync all run as one cuGraphLaunch.
             // grads.zero is included in the captured body.
-            g.launch().map_err(|e| format!("f16 graph launch: {e:?}"))?;
+            with_validated_launch(
+                &self.ctx,
+                self.captured_f16_gemm_plan.as_ref(),
+                "M1 f16 training graph replay",
+                || {
+                    g.launch()
+                        .map_err(|error| format!("f16 graph launch: {error:?}"))
+                },
+            )?;
             // Read overflow flag for scaler state machine. Graph already
             // applied the conditional unscale — no rollback needed.
             let overflow = self
@@ -1622,9 +1704,7 @@ impl MambaTrainerMixed {
             // to run AdamW unconditionally because branching mid-graph
             // isn't supported — the `scale_grads_skip_f32` device-side
             // conditional + NaN-sanitization is the price paid there.
-            self.grads.zero(&self.ctx.stream)?;
-            self.eager_forward()?;
-            self.eager_backward(true)?;
+            self.eager_f16_forward_backward()?;
             check_inf_nan_gpu(
                 &self.ctx,
                 &self.ctx.kernels,
@@ -1706,14 +1786,10 @@ impl MambaTrainerMixed {
         // Same for the bi upcast scratch (input_dim-aware): under the
         // batch-invariant flag the captured body's typed GEMMs route through
         // with_bi_upcast_scratch — a lazy grow inside capture is illegal.
-        let input_dim = self.mamba_input.len() / (self.batch * self.seq_len);
-        self.ctx.presize_bi_upcast_scratch_for_train_with_input(
-            &self.cfg,
-            self.batch,
-            self.seq_len,
-            input_dim,
-            self.dtype,
-        )?;
+        self.presize_prepared_gemm_scratch()?;
+        let manifest = self.prepared_f16_gemm_manifest.ok_or_else(|| {
+            "M1 f16 training graph capture requires one successful eager step".to_string()
+        })?;
         // Snapshot every device pointer the captured kernels reference, so
         // step_f16 can assert pointer-stability on each replay (audit Step
         // audit finding: f16 graph was missing these guards).
@@ -1730,36 +1806,87 @@ impl MambaTrainerMixed {
         // Capture body: zero_grads + forward + backward + check_inf_nan +
         // scale_grads_skip + AdamW + sync_master_to_compute. Mirrors
         // `step_f16` eager path 1:1 so numerics match.
-        let stream = self.ctx.stream.clone();
         self.ctx.freeze_graph_scratch();
-        let g = unsafe {
-            capture_into_graph(&stream, || {
-                self.grads.zero(&self.ctx.stream)?;
-                self.eager_forward()?;
-                self.eager_backward(true)?;
-                check_inf_nan_gpu(
-                    &self.ctx,
-                    &self.ctx.kernels,
-                    self.overflow_flag.as_mut().unwrap(),
-                    &self.grads.flat,
-                )?;
-                scale_grads_skip_gpu(
-                    &self.ctx,
-                    &self.ctx.kernels,
-                    self.overflow_flag.as_mut().unwrap(),
-                    &mut self.grads.flat,
-                    self.unscale_factor.as_ref().unwrap(),
-                )?;
-                // AdamW runs unconditionally in the captured body (branching
-                // mid-graph is unsupported); scale_grads_skip has already
-                // sanitized the arena on overflow. eager_optimize also recomputes
-                // a_neg after AdamW so each replay sees the updated A-matrix
-                // (same rationale as the eager and bf16-graph paths).
-                self.eager_optimize()?;
-                Ok(())
-            })
+        let (g, captured_f16_gemm_plan) = {
+            let Self {
+                ctx,
+                cfg,
+                dtype,
+                weights,
+                grads,
+                adam,
+                bias,
+                multi_plan,
+                acts,
+                scratch,
+                state,
+                a_neg_all,
+                mamba_input,
+                d_temporal_scaled,
+                overflow_flag,
+                unscale_factor,
+                ..
+            } = self;
+            let d_temporal = d_temporal_scaled.as_mut().expect("f16 dt_scaled");
+            unsafe {
+                capture_into_graph_with_gemm_plan(ctx, manifest.route_capacity, &manifest, || {
+                    grads.zero(&ctx.stream)?;
+                    gpu_forward_mamba_backbone_train_mixed(
+                        ctx,
+                        acts,
+                        weights,
+                        mamba_input,
+                        state,
+                        scratch,
+                    )?;
+                    gpu_backward_mamba_backbone_mixed(
+                        ctx,
+                        d_temporal,
+                        grads,
+                        acts,
+                        &weights.compute,
+                        a_neg_all,
+                        scratch,
+                    )?;
+                    check_inf_nan_gpu(
+                        ctx,
+                        &ctx.kernels,
+                        overflow_flag.as_mut().unwrap(),
+                        &grads.flat,
+                    )?;
+                    scale_grads_skip_gpu(
+                        ctx,
+                        &ctx.kernels,
+                        overflow_flag.as_mut().unwrap(),
+                        &mut grads.flat,
+                        unscale_factor.as_ref().unwrap(),
+                    )?;
+                    // AdamW runs unconditionally in the captured body (branching
+                    // mid-graph is unsupported); scale_grads_skip has already
+                    // sanitized the arena on overflow. The optimizer tail also
+                    // recomputes a_neg after AdamW so each replay sees the updated
+                    // A-matrix (same rationale as the eager and bf16-graph paths).
+                    step_multi(
+                        ctx,
+                        ctx.kernels.adamw_step_multi.get(*dtype),
+                        multi_plan,
+                        adam,
+                        bias.ptr(),
+                    )?;
+                    weights.sync_master_to_compute(ctx)?;
+                    recompute_a_neg_all(
+                        ctx,
+                        &weights.master.layers,
+                        a_neg_all,
+                        &state.a_neg_all,
+                        cfg.d_inner(),
+                        cfg.d_state,
+                    )
+                })
+            }
         }?;
         self.graph_f16 = Some(g);
+        self.captured_f16_gemm_plan = captured_f16_gemm_plan;
         self.captured_f16_bias_ptr = snap_bias;
         self.captured_f16_unscale_ptr = snap_unscale;
         self.captured_f16_overflow_ptr = snap_overflow;
@@ -1840,10 +1967,63 @@ impl MambaTrainerMixed {
     /// shared as the body of capture). Mirrors the exact op sequence the
     /// captured graph records.
     fn step_eager(&mut self) -> Result<(), String> {
-        self.grads.zero(&self.ctx.stream)?;
-        self.eager_forward()?;
-        self.eager_backward(false)?;
-        self.eager_optimize()
+        self.presize_prepared_gemm_scratch()?;
+        let Self {
+            ctx,
+            cfg,
+            dtype,
+            weights,
+            grads,
+            adam,
+            bias,
+            multi_plan,
+            acts,
+            scratch,
+            state,
+            a_neg_all,
+            mamba_input,
+            d_temporal,
+            prepared_gemm_manifest,
+            ..
+        } = self;
+        let manifest = ctx.record_eager_gemm_manifest(|| {
+            grads.zero(&ctx.stream)?;
+            gpu_forward_mamba_backbone_train_mixed(
+                ctx,
+                acts,
+                weights,
+                mamba_input,
+                state,
+                scratch,
+            )?;
+            gpu_backward_mamba_backbone_mixed(
+                ctx,
+                d_temporal,
+                grads,
+                acts,
+                &weights.compute,
+                a_neg_all,
+                scratch,
+            )?;
+            step_multi(
+                ctx,
+                ctx.kernels.adamw_step_multi.get(*dtype),
+                multi_plan,
+                adam,
+                bias.ptr(),
+            )?;
+            weights.sync_master_to_compute(ctx)?;
+            recompute_a_neg_all(
+                ctx,
+                &weights.master.layers,
+                a_neg_all,
+                &state.a_neg_all,
+                cfg.d_inner(),
+                cfg.d_state,
+            )
+        })?;
+        *prepared_gemm_manifest = Some(manifest);
+        Ok(())
     }
 
     /// Download the master weights to a CPU-side `MambaWeights` for
@@ -1903,6 +2083,7 @@ pub(crate) struct MambaTrainerF32 {
     mamba_input: GpuBuffer,
     d_temporal: GpuBuffer,
     graph: Option<GpuMambaF32TrainingStepGraph>,
+    prepared_gemm_manifest: Option<PreparedGemmCaptureManifest>,
     /// Route that produced the saved split-forward activations.
     split_forward_route: Option<crate::mamba_ssm::gpu::context::GemmRoute>,
     /// True while an `accumulate_only` backward window is open (see the
@@ -2064,6 +2245,7 @@ impl MambaTrainerF32 {
             mamba_input,
             d_temporal,
             graph: None,
+            prepared_gemm_manifest: None,
             split_forward_route: None,
             grads_dirty: false,
             clip_partials,
@@ -2083,6 +2265,9 @@ impl MambaTrainerF32 {
 
     pub fn capture_graph(&mut self) -> Result<(), String> {
         self.bias.write(&self.ctx.stream, 1.0, 1.0, self.adam.lr)?;
+        let manifest = self.prepared_gemm_manifest.ok_or_else(|| {
+            "M1 f32 training graph capture requires one successful eager step".to_string()
+        })?;
         // The trainer owns every captured allocation and drops the graph first.
         let g = unsafe {
             GpuMambaF32TrainingStepGraph::capture(
@@ -2104,6 +2289,7 @@ impl MambaTrainerF32 {
                 },
                 self.batch,
                 self.seq_len,
+                &manifest,
             )
         }?;
         self.graph = Some(g);
@@ -2364,10 +2550,46 @@ impl MambaTrainerF32 {
     }
 
     fn step_eager(&mut self) -> Result<(), String> {
-        self.grads.zero(&self.ctx.stream)?;
-        self.eager_forward()?;
-        self.eager_backward()?;
-        self.eager_optimize()
+        let Self {
+            ctx,
+            cfg,
+            weights,
+            grads,
+            adam,
+            bias,
+            multi_plan,
+            acts,
+            scratch,
+            state,
+            a_neg_all,
+            temporal,
+            mamba_input,
+            d_temporal,
+            prepared_gemm_manifest,
+            ..
+        } = self;
+        let manifest = ctx.record_eager_gemm_manifest(|| {
+            grads.zero(&ctx.stream)?;
+            gpu_forward_mamba_backbone(ctx, temporal, acts, weights, mamba_input, state, scratch)?;
+            gpu_backward_mamba_backbone(ctx, d_temporal, grads, acts, weights, a_neg_all, scratch)?;
+            step_multi(
+                ctx,
+                ctx.kernels.adamw_step_multi.get(WeightDtype::F32),
+                multi_plan,
+                adam,
+                bias.ptr(),
+            )?;
+            recompute_a_neg_all(
+                ctx,
+                &weights.layers,
+                a_neg_all,
+                &state.a_neg_all,
+                cfg.d_inner(),
+                cfg.d_state,
+            )
+        })?;
+        *prepared_gemm_manifest = Some(manifest);
+        Ok(())
     }
 
     /// Compute the deterministic global grad norm, apply the clip

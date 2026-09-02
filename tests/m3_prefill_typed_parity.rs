@@ -255,6 +255,26 @@ fn typed_pooled_graph_replay_and_container_guard() {
     let mut pooled = GpuBuffer::zeros(&ctx.stream, dm).unwrap();
     let mut states = StateSet::zeros(&ctx, &cfg, 1);
 
+    prefill
+        .run_full(
+            &Mamba3PrefillRun {
+                ctx: &ctx,
+                kernels: &kernels,
+                dims: &dims,
+                weights: &mw,
+                mamba_input: &gpu_input,
+                identity_proj: false,
+                carry_state: false,
+            },
+            states.bufs(),
+            Mamba3PrefillOutputs {
+                last_hidden: &mut last_hidden,
+                full_temporal: None,
+                pooled_sum: Some(&mut pooled),
+            },
+        )
+        .expect("pooled graph warmup");
+
     // Every captured allocation remains alive through graph destruction.
     let graph = unsafe {
         Mamba3PrefillPooledGraph::capture(

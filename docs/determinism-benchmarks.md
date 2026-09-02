@@ -11,7 +11,36 @@ Mamba SSM and Mamba-3 SISO — these results apply to both architectures.
 | (off) | cuBLAS | f32 → TF32 tensor cores; bf16/f16 → GemmEx `COMPUTE_32F_PEDANTIC` (CUDA cores, f32 accumulate). Run-to-run stable on one machine, NOT batch-invariant, no stability across cuBLAS versions. |
 | `MAMBA_RS_BATCH_INVARIANT=1` | scalar deterministic | custom fixed-reduction-order kernels. Training bit-identical across runs on every dtype; inference decode strictly all-M invariant via `matvec_bi` (KL ≈ 1e-12). bf16/f16 outputs are bit-identical to "upcast → f32 kernel → RNE downcast". Which family serves the forward is selectable — see the row below. |
 | + `MAMBA_RS_BI_GEMM_FAMILY=triad\|fixed` | family selector | `triad` (`kernels/gemm_bi_triad/`, default): the multi-tile dispatcher, all three operand layouts, per-bucket batch invariance (same dispatch bucket → row 0 bit-identical across M). `fixed` (`kernels/gemm_bi_fixed/`): the forward serving family — a ladder of bit-identical tiles (16-row thin, 64, 128, wide 128×256) with `SPLIT_K=1` everywhere, batch-invariant BY CONSTRUCTION (every rung produces the same bits per element, so tile choice is pure scheduling and no bucket exists to cross); on Hopper/Blackwell it routes to per-architecture rungs (`wgmma`, `tcgen05`) that form their own bit families, behind a first-use self-check. A backward requires `triad`. The family is part of `ctx.gemm_route()`, so a flip after a CUDA-graph capture is refused at replay. |
-| + `MAMBA_RS_BI_TENSOR_CORES=1` | tensor-core deterministic | `mma.sync.m16n8k16`, f32 accumulators, no atomics/splits. OWN numeric contract (TC reduction tree ≠ scalar FMA chain) — but runs are bit-identical to each other (incl. CUDA Graph capture/replay) and the forward is STRICTLY batch-invariant across all M. The tile ladder — 16-row thin, 64×64, 128×128 and wide 128×256 — is BIT-IDENTICAL per output element (same ascending BK=64 reduction slabs, same mma chain, same tail zero-fill), so the shape-only tile routing never changes output bits. |
+| + `MAMBA_RS_BI_TENSOR_CORES=1` | fast typed deterministic | Admitted shapes use `mma.sync.m16n8k16` with f32 accumulators. That tensor-core reduction tree has its own numeric contract, but repeated launches of one frozen route are bit-identical, including eager vs CUDA Graph replay. An architecture-qualified policy cell may retain the exact scalar contract when its deterministic Split-K route is faster; the route identity records that choice. The portable shape-only ladder — 16-row thin, 64×64, 128×128 and wide 128×256 — keeps the same ascending BK64 slabs, MMA chain and tail zero-fill, so its rungs are bit-identical per output element. The qualified CC12.0 SM120 table is a separate route-sealed family with measured BK32 and BK64 schedules; it promises bit identity within the selected physical route, not across different routes. |
+
+### CC12.0 SM120 automatic boundary
+
+The SM120 production auto table contains exactly 18 contiguous hot cells:
+BF16/F16 × NN/TN/NT × three measured training shapes. CC12.1 intentionally
+has no auto cells, and any wrong target, toolkit capability, alignment,
+operand contract or non-cell shape declines to the existing portable policy.
+Forced SM120 APIs remain available to qualification and census harnesses, but
+a forced result does not promote a production auto route.
+
+The half contracts are operation-specific and all use alpha one. NN stores
+BF16/F16 with beta zero and may fuse the optional bias; NT also stores BF16/F16
+with beta zero. Both perform one final RNE conversion. TN accumulates into the
+F32 dW destination with beta one. Each SM120 CTA owns its output tile and
+executes a fixed ascending K16 MMA sequence; there are no numerical atomics,
+Split-K partials or schedule-time reductions. BK, tile and stage count are part
+of the physical route identity.
+
+The deterministic TF32 policy is separate from this 18-cell half table. It is
+an opt-in F32 contract that may choose only a frozen qualified TF32 route and
+otherwise stays on exact scalar `__fmaf_rn`; selecting the policy never forces
+an unsupported TF32 launch. BF16/F16 MMA, deterministic TF32 and exact scalar
+FMA are distinct bit families.
+
+An eager launch prepares the qualified SM120 tensor maps and cache entry before
+CUDA Graph capture. During capture, a cache miss, stale allocation generation
+or untracked raw allocation fails closed with a warmup error. Capture never
+allocates, re-encodes maps, retunes a route or falls through after a qualified
+SM120 cell has been selected.
 
 Accuracy cross-checks: bf16 scalar-tier training trajectory vs cuBLAS
 PEDANTIC cosine 0.999999976 (5 steps); f32 vs TF32 0.999999996. TC tier
@@ -20,7 +49,7 @@ TC dW (f32 accumulate) cos 1.000000000.
 
 ## Training step cost (`MambaTrainer`, ms/step)
 
-`tests/gemm_bi_determinism.rs::bench_sgemm_bi_vs_tf32`
+`tests/gemm_bi_determinism.rs::bench_gemm_bi_vs_tf32`
 
 | model | dtype | cuBLAS baseline | scalar deterministic | + tensor cores |
 |---|---|---:|---:|---:|
@@ -199,7 +228,7 @@ GEMM. With the TC tier on, none of this is on the bf16/f16 hot path.
 ```sh
 # training step, all 3 dtypes × {cuBLAS, scalar bi, +TC}:
 cargo test --features cuda --release --test gemm_bi_determinism \
-  bench_sgemm_bi_vs_tf32 -- --ignored --nocapture --test-threads=1
+  bench_gemm_bi_vs_tf32 -- --ignored --nocapture --test-threads=1
 
 # TC vs scalar at GEMM level (fwd/dW/dX):
 cargo test --features cuda --release --test gemm_bi_tc \
@@ -281,12 +310,12 @@ Findings, in decision order:
 
 Consequence for bf16 TRAINING speed: the cuBLAS default lane stays
 pinned PEDANTIC; the speed lever for bf16 training remains the
-batch-invariant SGEMM-BI tier (fp32 fixed-order accumulation, no cuBLAS)
+batch-invariant Triad tier (f32 fixed-order accumulation, no cuBLAS)
 and its occupancy work.
 
 ## Family comparison at a prefill shape (f32)
 
-`tests/classifier_gemm_tier_bench.rs::classifier_shapes_cublas_vs_sgemm_bi_vs_gemm_bi`
+`tests/classifier_gemm_tier_bench.rs::classifier_shapes_cublas_vs_triad_vs_fixed`
 
 Vision-classifier projections, f32, M = 4621 rows per page (a batched row
 shows whether a dispatch bucket boundary is ever crossed). RTX 6000 Ada.

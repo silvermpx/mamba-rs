@@ -16,8 +16,8 @@
 
 use cudarc::driver::PushKernelArg;
 use mamba_rs::mamba_ssm::gpu::blas::{
-    TypedPtr, gpu_gemm_ex_backward_dx_typed, gpu_sgemm_backward_dw_grad,
-    gpu_sgemm_backward_dw_grad_typed, gpu_sgemm_backward_dx_raw,
+    TypedPtr, gpu_gemm_bi_backward_dw_grad, gpu_gemm_bi_backward_dw_grad_typed,
+    gpu_gemm_bi_backward_dx_raw, gpu_gemm_ex_backward_dx_typed,
 };
 use mamba_rs::mamba_ssm::gpu::buffers::{DtypedBuf, GpuBuffer, GradSlice};
 use mamba_rs::mamba_ssm::gpu::context::GpuCtx;
@@ -995,7 +995,7 @@ fn ssm_backward_local_bf16_matches_f32() {
     );
 }
 
-// ─── gpu_sgemm_backward_dw_grad_typed ──────────────────────
+// ─── gpu_gemm_bi_backward_dw_grad_typed ──────────────────────
 //
 // cuBLAS GemmEx typed dW: dW[n_in, n_out] += X^T @ dY. bf16/f16 A,B with
 // f32 master C, CUBLAS_COMPUTE_32F_PEDANTIC (true f32 accumulate — we
@@ -1017,7 +1017,7 @@ fn run_dw_grad_f32(
     let dw = GpuBuffer::zeros(&ctx.stream, n_in * n_out).unwrap();
     ctx.stream.synchronize().unwrap();
     let dw_slice = GradSlice::from_raw(dw.cached_ptr(), n_in * n_out);
-    gpu_sgemm_backward_dw_grad(ctx, &dw_slice, dy, x, batch, n_in, n_out).unwrap();
+    gpu_gemm_bi_backward_dw_grad(ctx, &dw_slice, dy, x, batch, n_in, n_out).unwrap();
     ctx.stream.synchronize().unwrap();
     let mut out = vec![0f32; n_in * n_out];
     dw.download(&ctx.stream, &mut out).unwrap();
@@ -1044,7 +1044,7 @@ fn run_dw_grad_typed(
         ptr: x.cached_ptr(),
         dtype,
     };
-    gpu_sgemm_backward_dw_grad_typed(ctx, &dw_slice, dy_typed, x_typed, batch, n_in, n_out)
+    gpu_gemm_bi_backward_dw_grad_typed(ctx, &dw_slice, dy_typed, x_typed, batch, n_in, n_out)
         .unwrap();
     ctx.stream.synchronize().unwrap();
     let mut out = vec![0f32; n_in * n_out];
@@ -1129,9 +1129,9 @@ fn sgemm_backward_dw_grad_typed_accumulates() {
             ptr: x.cached_ptr(),
             dtype,
         };
-        gpu_sgemm_backward_dw_grad_typed(&ctx, &dw_slice, dy_typed, x_typed, batch, n_in, n_out)
+        gpu_gemm_bi_backward_dw_grad_typed(&ctx, &dw_slice, dy_typed, x_typed, batch, n_in, n_out)
             .unwrap();
-        gpu_sgemm_backward_dw_grad_typed(&ctx, &dw_slice, dy_typed, x_typed, batch, n_in, n_out)
+        gpu_gemm_bi_backward_dw_grad_typed(&ctx, &dw_slice, dy_typed, x_typed, batch, n_in, n_out)
             .unwrap();
         ctx.stream.synchronize().unwrap();
         let mut dw_double = vec![0f32; n_in * n_out];
@@ -1159,7 +1159,7 @@ fn sgemm_backward_dw_grad_typed_accumulates() {
 // ─── gpu_gemm_ex_backward_dx_typed ─────────────────────────
 //
 // Typed dX backward GEMM: dX[B,K] = dY[B,N] @ W^T[N,K]. Mirrors f32
-// `gpu_sgemm_backward_dx_raw` math (OP_T on W, OP_N on dY) with typed
+// `gpu_gemm_bi_backward_dx_raw` math (OP_T on W, OP_N on dY) with typed
 // A/B/C and CUBLAS_COMPUTE_32F_PEDANTIC. Production shape matches the
 // dW test (mamba-130m in_proj bwd: B*T=2048, n_in=768, n_out=3072).
 
@@ -1173,7 +1173,7 @@ fn run_dx_f32(
 ) -> Vec<f32> {
     let mut dx = GpuBuffer::zeros(&ctx.stream, batch * n_in).unwrap();
     ctx.stream.synchronize().unwrap();
-    gpu_sgemm_backward_dx_raw(ctx, &mut dx, dy, w_ptr, batch, n_in, n_out).unwrap();
+    gpu_gemm_bi_backward_dx_raw(ctx, &mut dx, dy, w_ptr, batch, n_in, n_out).unwrap();
     ctx.stream.synchronize().unwrap();
     let mut out = vec![0f32; batch * n_in];
     dx.download(&ctx.stream, &mut out).unwrap();

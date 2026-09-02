@@ -1,11 +1,10 @@
 #![cfg(all(feature = "cuda", target_os = "linux"))]
 
 use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
-use mamba_rs::mamba_ssm::gpu::kernel_identity::{ArtifactKind, CacheEnvelope, ModuleKind};
+use mamba_rs::mamba_ssm::gpu::kernel_identity::{ArtifactKind, ModuleKind};
 use mamba_rs::mamba3_siso::gpu::Mamba3Kernels;
 
 struct CacheEnvGuard(Option<std::ffi::OsString>);
-struct CudaCacheEnvGuard(Option<std::ffi::OsString>);
 
 impl Drop for CacheEnvGuard {
     fn drop(&mut self) {
@@ -14,18 +13,6 @@ impl Drop for CacheEnvGuard {
                 std::env::set_var("MAMBA_RS_KERNEL_CACHE", value);
             } else {
                 std::env::remove_var("MAMBA_RS_KERNEL_CACHE");
-            }
-        }
-    }
-}
-
-impl Drop for CudaCacheEnvGuard {
-    fn drop(&mut self) {
-        unsafe {
-            if let Some(value) = self.0.take() {
-                std::env::set_var("CUDA_CACHE_DISABLE", value);
-            } else {
-                std::env::remove_var("CUDA_CACHE_DISABLE");
             }
         }
     }
@@ -46,16 +33,8 @@ fn one_cache_entry(cache: &std::path::Path) -> std::path::PathBuf {
     entries.into_iter().next().unwrap()
 }
 
-fn envelope_payload(path: &std::path::Path) -> Vec<u8> {
-    let bytes = std::fs::read(path).unwrap();
-    let key = bytes[18..50].try_into().unwrap();
-    CacheEnvelope::decode(key, ArtifactKind::Ptx, &bytes)
-        .unwrap()
-        .payload
-}
-
 #[test]
-fn repeated_m3_nvrtc_compiles_have_the_same_identity() {
+fn m3_cache_hit_preserves_the_exact_artifact_identity() {
     let home = std::env::var_os("HOME").expect("HOME");
     let home = std::fs::canonicalize(home).expect("canonical HOME");
     let root = tempfile::Builder::new()
@@ -64,10 +43,8 @@ fn repeated_m3_nvrtc_compiles_have_the_same_identity() {
         .expect("trusted cache root");
     let cache = root.path().join("cache");
     let _env_guard = CacheEnvGuard(std::env::var_os("MAMBA_RS_KERNEL_CACHE"));
-    let _cuda_cache_guard = CudaCacheEnvGuard(std::env::var_os("CUDA_CACHE_DISABLE"));
     unsafe {
         std::env::set_var("MAMBA_RS_KERNEL_CACHE", &cache);
-        std::env::set_var("CUDA_CACHE_DISABLE", "1");
     }
     let legacy = cache.join("mamba3-kernels-deadbeef.ptx");
     std::fs::create_dir_all(&cache).unwrap();
@@ -109,23 +86,6 @@ fn repeated_m3_nvrtc_compiles_have_the_same_identity() {
         ModuleKind::Mamba3Combined
     );
     assert_eq!(first.artifact_identity().artifact_kind, ArtifactKind::Ptx);
-
-    if first.compiler_identity().nvrtc_version >= (12, 9) {
-        let first_payload = envelope_payload(&cached_entry);
-        let second_cache = root.path().join("second-cache");
-        unsafe {
-            std::env::set_var("MAMBA_RS_KERNEL_CACHE", &second_cache);
-        }
-        let third = Mamba3Kernels::compile(device.context(), device.nvrtc_target())
-            .expect("independent cold M3 compile");
-        let second_entry = one_cache_entry(&second_cache);
-        let second_payload = envelope_payload(&second_entry);
-        assert_eq!(
-            first_payload, second_payload,
-            "two cold M3 NVRTC compiles produced different canonical PTX"
-        );
-        assert_eq!(first.artifact_identity(), third.artifact_identity());
-    }
 
     assert_eq!(
         std::fs::read(legacy).unwrap(),

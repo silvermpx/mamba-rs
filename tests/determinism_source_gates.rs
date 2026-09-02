@@ -67,6 +67,69 @@ fn kernels_contain_no_numeric_atomics() {
     );
 }
 
+/// Measurement candidates are preserved as evidence, not as callable release
+/// routes. The exact TN narrow admission owns only the ordered partial/reducer
+/// pair and must not regain a fused, counter, heuristic, or forced bypass.
+#[test]
+fn tn_narrow_release_surface_excludes_measurement_only_routes() {
+    let forbidden = [
+        (
+            "src/mamba_ssm/gpu/gemm_bi_triad/dispatch.rs",
+            &[
+                "measurement_tn_narrow_splitm_partition",
+                "TnNarrowSplitMFused",
+                "TN_SPLITM_COUNTER_CAP",
+                "needs_split_coordination",
+            ][..],
+        ),
+        (
+            "src/mamba_ssm/gpu/gemm_bi_triad/launch.rs",
+            &[
+                "launch_forced_f32_tn_narrow_splitm",
+                "force_tn_narrow_splitm",
+                "TnNarrowSplitMFused",
+                "tn_splitm_counter_buf",
+            ][..],
+        ),
+        (
+            "src/mamba_ssm/gpu/gemm_bi_triad/modules.rs",
+            &["gemm_bi_tn_narrow_splitm_fused", "tn_splitm_counter"][..],
+        ),
+        (
+            "src/mamba_ssm/gpu/kernel_identity.rs",
+            &[
+                "ScalarFmaTnNarrowSplitMFusedV1",
+                "LastCtaPerOutputTileRuntimeSplitMReduceV1",
+            ][..],
+        ),
+        (
+            "src/mamba_ssm/gpu/context.rs",
+            &["ScalarFmaTnNarrowSplitMFusedV1"][..],
+        ),
+        (
+            "kernels/gemm_bi_triad/scalar.cu",
+            &["gemm_bi_tn_narrow_splitm_fused", "atomicInc"][..],
+        ),
+    ];
+    let mut offenders = Vec::new();
+    for (relative, tokens) in forbidden {
+        let text = std::fs::read_to_string(root().join(relative)).expect("production source");
+        let stripped = common::source_scan::strip_comments_lines(&text);
+        for (line_index, line) in stripped.iter().enumerate() {
+            for token in tokens {
+                if line.contains(token) {
+                    offenders.push(format!("{relative}:{}: {token}", line_index + 1));
+                }
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "measurement-only TN narrow release surface remains:\n{}",
+        offenders.join("\n")
+    );
+}
+
 /// The NVRTC option builders must never grow fast-math flags: they
 /// flush denormals and swap exact operations for approximations, which
 /// changes bits per target and per toolchain.

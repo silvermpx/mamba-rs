@@ -9,8 +9,17 @@
 use super::buffers::{GpuBuffer, GradSlice};
 use super::context::GpuCtx;
 use super::dtype::WeightDtype;
+use super::gemm_bi_triad::{PhysicalArgumentRange, prepare_physical_observer};
+use super::kernel_identity::{
+    ModuleKind, NoPhysicalObserver, PhysicalConversionArguments, PhysicalCudaLaunchError,
+    PhysicalLaunchKind, PhysicalLaunchObservation, PhysicalLaunchObserver, PolicyDtype,
+    PreparedPhysicalCaptureManifest, RecordedPhysicalTrace, RecordingPhysicalObserver,
+    ResolvedGemmOp, ResolvedPhysicalKernelLaunch, enqueue_prepared_physical_launch,
+    enqueue_with_physical_observation, finish_recording_physical_observer,
+    resolve_physical_launch_observation,
+};
 use super::launch::grid_1d;
-use cudarc::driver::PushKernelArg;
+use cudarc::driver::{CudaFunction, DeviceRepr, LaunchArgs, LaunchConfig, PushKernelArg};
 use std::ffi::{c_int, c_void};
 
 /// Effective cuBLAS compute type for a typed GEMM: the PEDANTIC default,
@@ -27,7 +36,7 @@ fn effective_compute(
     }
 }
 
-pub fn gpu_sgemm_forward_raw(
+pub fn gpu_gemm_bi_forward_raw(
     ctx: &GpuCtx,
     y: &mut GpuBuffer,
     x: &GpuBuffer,
@@ -42,9 +51,8 @@ pub fn gpu_sgemm_forward_raw(
         return match ctx.bi_gemm_family() {
             // The triad dispatcher; bias is fused into its kernels (no
             // separate broadcast launch).
-            super::context::BiGemmFamily::Triad => super::gemm_bi_triad::sgemm_bi_forward(
-                &ctx.stream,
-                &ctx.kernels,
+            super::context::BiGemmFamily::Triad => super::gemm_bi_triad::launch_cached_f32_forward(
+                ctx,
                 y,
                 x,
                 w_ptr,
@@ -129,10 +137,10 @@ pub fn gpu_sgemm_forward_raw(
     Ok(())
 }
 
-/// Same as [`gpu_sgemm_forward_raw`] but the input is a raw device pointer
+/// Same as [`gpu_gemm_bi_forward_raw`] but the input is a raw device pointer
 /// (e.g. the backbone's temporal buffer during decode — avoids a per-token
 /// D2H + H2D round trip just to re-wrap an on-device tensor).
-pub fn gpu_sgemm_forward_ptr(
+pub fn gpu_gemm_bi_forward_ptr(
     ctx: &GpuCtx,
     y: &mut GpuBuffer,
     x_ptr: cudarc::driver::sys::CUdeviceptr,
@@ -186,7 +194,7 @@ pub fn gpu_sgemm_forward_ptr(
 }
 
 /// Input gradient: `dX[B,K] = dY[B,N] @ W^T[N,K]`.
-pub fn gpu_sgemm_backward_dx_raw(
+pub fn gpu_gemm_bi_backward_dx_raw(
     ctx: &GpuCtx,
     dx: &mut GpuBuffer,
     dy: &GpuBuffer,
@@ -196,14 +204,25 @@ pub fn gpu_sgemm_backward_dx_raw(
     n_out: usize,
 ) -> Result<(), String> {
     if ctx.batch_invariant() {
-        return super::gemm_bi_triad::sgemm_bi_backward_dx(
-            &ctx.stream,
-            &ctx.kernels,
-            dx,
-            dy,
-            w_ptr,
-            (batch, n_in, n_out),
-        );
+        return match ctx.bi_gemm_family() {
+            super::context::BiGemmFamily::Triad => {
+                super::gemm_bi_triad::launch_cached_f32_backward_dx(
+                    ctx,
+                    dx,
+                    dy,
+                    w_ptr,
+                    (batch, n_in, n_out),
+                )
+            }
+            super::context::BiGemmFamily::Fixed => super::gemm_bi_triad::gemm_bi_backward_dx(
+                &ctx.stream,
+                &ctx.kernels,
+                dx,
+                dy,
+                w_ptr,
+                (batch, n_in, n_out),
+            ),
+        };
     }
     let alpha: f32 = 1.0;
     let beta: f32 = 0.0;
@@ -236,7 +255,7 @@ pub fn gpu_sgemm_backward_dx_raw(
 }
 
 /// Weight gradient: `dW[K,N] += X^T[K,B] @ dY[B,N]`.
-pub fn gpu_sgemm_backward_dw_grad(
+pub fn gpu_gemm_bi_backward_dw_grad(
     ctx: &GpuCtx,
     dw: &GradSlice,
     dy: &GpuBuffer,
@@ -246,14 +265,25 @@ pub fn gpu_sgemm_backward_dw_grad(
     n_out: usize,
 ) -> Result<(), String> {
     if ctx.batch_invariant() {
-        return super::gemm_bi_triad::sgemm_bi_backward_dw(
-            &ctx.stream,
-            &ctx.kernels,
-            dw.ptr(),
-            dy,
-            x_saved,
-            (batch, n_in, n_out),
-        );
+        return match ctx.bi_gemm_family() {
+            super::context::BiGemmFamily::Triad => {
+                super::gemm_bi_triad::launch_cached_f32_backward_dw(
+                    ctx,
+                    dw.ptr(),
+                    dy,
+                    x_saved,
+                    (batch, n_in, n_out),
+                )
+            }
+            super::context::BiGemmFamily::Fixed => super::gemm_bi_triad::gemm_bi_backward_dw(
+                &ctx.stream,
+                &ctx.kernels,
+                dw.ptr(),
+                dy,
+                x_saved,
+                (batch, n_in, n_out),
+            ),
+        };
     }
     let alpha: f32 = 1.0;
     let beta: f32 = 1.0;
@@ -285,7 +315,7 @@ pub fn gpu_sgemm_backward_dw_grad(
 }
 
 /// Typed dW backward GEMM. Matches the f32
-/// [`gpu_sgemm_backward_dw_grad`] math with bf16/f16 inputs and f32 master
+/// [`gpu_gemm_bi_backward_dw_grad`] math with bf16/f16 inputs and f32 master
 /// gradient accumulator.
 ///
 /// Math: `dW[K=n_in, N=n_out] += X^T @ dY` where X is `[batch, n_in]` and
@@ -300,7 +330,7 @@ pub fn gpu_sgemm_backward_dw_grad(
 ///
 /// `dy.dtype` and `x.dtype` MUST match (cuBLAS GemmEx requires same A/B
 /// element type). Output buffer `dw` is always f32 (master grad).
-pub fn gpu_sgemm_backward_dw_grad_typed(
+pub fn gpu_gemm_bi_backward_dw_grad_typed(
     ctx: &GpuCtx,
     dw: &GradSlice,
     dy: TypedPtr,
@@ -320,10 +350,10 @@ pub fn gpu_sgemm_backward_dw_grad_typed(
     assert!(
         dy.dtype != WeightDtype::F32 || !ctx.batch_invariant(),
         "f32 TypedPtr under the batch-invariant flag would silently take \
-         non-deterministic cuBLAS — use gpu_sgemm_backward_dw_grad instead"
+         non-deterministic cuBLAS — use gpu_gemm_bi_backward_dw_grad instead"
     );
     if ctx.batch_invariant() && dy.dtype != WeightDtype::F32 {
-        return bi_sgemm_backward_dw_typed(ctx, dw.ptr(), dy, x_saved, (batch, n_in, n_out));
+        return gemm_bi_backward_dw_typed(ctx, dw.ptr(), dy, x_saved, (batch, n_in, n_out));
     }
     let alpha: f32 = 1.0;
     let beta: f32 = 1.0;
@@ -355,7 +385,7 @@ pub fn gpu_sgemm_backward_dw_grad_typed(
 }
 
 /// Typed dX backward GEMM. Typed twin of
-/// [`gpu_sgemm_backward_dx_raw`]: `dX[B,K] = dY[B,N] @ W^T[N,K]` with
+/// [`gpu_gemm_bi_backward_dx_raw`]: `dX[B,K] = dY[B,N] @ W^T[N,K]` with
 /// bf16/f16 A,B,C and f32 master accumulate (no TC, PEDANTIC).
 ///
 /// Layout mirrors the f32 twin exactly (OP_T on W, OP_N on dY,
@@ -388,10 +418,10 @@ pub fn gpu_gemm_ex_backward_dx_typed(
     assert!(
         dx.dtype != WeightDtype::F32 || !ctx.batch_invariant(),
         "f32 TypedPtr under the batch-invariant flag would silently take \
-         non-deterministic cuBLAS — use gpu_sgemm_backward_dx_raw instead"
+         non-deterministic cuBLAS — use gpu_gemm_bi_backward_dx_raw instead"
     );
     if ctx.batch_invariant() && dx.dtype != WeightDtype::F32 {
-        return bi_sgemm_backward_dx_typed(ctx, dx, dy, w, (batch, n_in, n_out));
+        return gemm_bi_backward_dx_typed(ctx, dx, dy, w, (batch, n_in, n_out));
     }
     let alpha: f32 = 1.0;
     let beta: f32 = 0.0;
@@ -424,11 +454,86 @@ pub fn gpu_gemm_ex_backward_dx_typed(
 
 /// Elementwise upcast of a typed (bf16/f16) device buffer into f32 (exact —
 /// 16-bit grids embed in f32 without rounding).
-fn bi_upcast_to_f32(
+#[derive(Clone, Copy)]
+struct HalfPhysicalContext {
+    op: ResolvedGemmOp,
+    dtype: WeightDtype,
+    dims: (usize, usize, usize),
+}
+
+impl HalfPhysicalContext {
+    fn policy_dtype(self) -> Result<PolicyDtype, String> {
+        match self.dtype {
+            WeightDtype::Bf16 => Ok(PolicyDtype::Bf16),
+            WeightDtype::F16 => Ok(PolicyDtype::F16),
+            WeightDtype::F32 => Err("half physical context does not accept f32".into()),
+        }
+    }
+
+    fn strides(self) -> (usize, usize, usize) {
+        let (_, k, n) = self.dims;
+        match self.op {
+            ResolvedGemmOp::Nn => (k, n, n),
+            ResolvedGemmOp::Tn => (k, n, n),
+            ResolvedGemmOp::Nt => (n, n, k),
+        }
+    }
+}
+
+#[inline(always)]
+fn validate_half_physical_policy<O: PhysicalLaunchObserver>(ctx: &GpuCtx) -> Result<(), String> {
+    if O::ENABLED
+        && (!ctx.batch_invariant() || ctx.bi_gemm_family() != super::context::BiGemmFamily::Triad)
+    {
+        return Err(
+            "recording a half launch requires the live batch-invariant Triad policy".into(),
+        );
+    }
+    Ok(())
+}
+
+fn conversion_observation(
+    physical: HalfPhysicalContext,
+    kind: PhysicalLaunchKind,
+    element_count: usize,
+    source: cudarc::driver::sys::CUdeviceptr,
+    destination: cudarc::driver::sys::CUdeviceptr,
+) -> Result<PhysicalLaunchObservation, String> {
+    let logical_dtype = physical.policy_dtype()?;
+    let element_count_u64 = u64::try_from(element_count)
+        .map_err(|_| "half conversion element count exceeds u64::MAX".to_string())?;
+    let half_bytes = u64::try_from(physical.dtype.size_bytes())
+        .ok()
+        .and_then(|width| element_count_u64.checked_mul(width))
+        .ok_or_else(|| "half conversion span overflows u64".to_string())?;
+    let f32_bytes = element_count_u64
+        .checked_mul(4)
+        .ok_or_else(|| "f32 conversion span overflows u64".to_string())?;
+    let (source_bytes, destination_bytes) = match kind {
+        PhysicalLaunchKind::InputUpcast => (half_bytes, f32_bytes),
+        PhysicalLaunchKind::OutputDowncast => (f32_bytes, half_bytes),
+        PhysicalLaunchKind::Gemm => {
+            return Err("conversion launch cannot use GEMM kind".into());
+        }
+    };
+    Ok(PhysicalLaunchObservation::conversion(
+        kind,
+        physical.op,
+        logical_dtype,
+        physical.dims,
+        physical.strides(),
+        element_count_u64,
+        PhysicalConversionArguments::new(source, source_bytes, destination, destination_bytes),
+    ))
+}
+
+fn bi_upcast_to_f32<O: PhysicalLaunchObserver>(
     ctx: &GpuCtx,
     src: TypedPtr,
     dst_ptr: cudarc::driver::sys::CUdeviceptr,
     n: usize,
+    physical: HalfPhysicalContext,
+    observer: &mut O,
 ) -> Result<(), String> {
     let kernel = match src.dtype {
         WeightDtype::Bf16 => &ctx.kernels.cast_bf16_to_f32,
@@ -442,18 +547,31 @@ fn bi_upcast_to_f32(
     b.arg(&dst_ptr);
     b.arg(&src_ptr);
     b.arg(&n_i);
-    unsafe { b.launch(grid_1d(n)) }
-        .map(|_| ())
-        .map_err(|e| format!("bi_upcast_to_f32: {e:?}"))
+    let config = grid_1d(n);
+    let observation = if O::ENABLED {
+        Some(conversion_observation(
+            physical,
+            PhysicalLaunchKind::InputUpcast,
+            n,
+            src_ptr,
+            dst_ptr,
+        )?)
+    } else {
+        None
+    };
+    unsafe { enqueue_with_physical_observation(observer, &mut b, config, observation) }
+        .map_err(|error| error.with_driver_context(format_args!("bi_upcast_to_f32")))
 }
 
 /// Elementwise RNE downcast of an f32 device buffer into a typed (bf16/f16)
 /// buffer — the single rounding the typed-GEMM contract allows.
-fn bi_downcast_from_f32(
+fn bi_downcast_from_f32<O: PhysicalLaunchObserver>(
     ctx: &GpuCtx,
     dst: TypedPtr,
     src_ptr: cudarc::driver::sys::CUdeviceptr,
     n: usize,
+    physical: HalfPhysicalContext,
+    observer: &mut O,
 ) -> Result<(), String> {
     let kernel = match dst.dtype {
         WeightDtype::Bf16 => &ctx.kernels.cast_f32_to_bf16,
@@ -467,19 +585,32 @@ fn bi_downcast_from_f32(
     b.arg(&dst_ptr);
     b.arg(&src_ptr);
     b.arg(&n_i);
-    unsafe { b.launch(grid_1d(n)) }
-        .map(|_| ())
-        .map_err(|e| format!("bi_downcast_from_f32: {e:?}"))
+    let config = grid_1d(n);
+    let observation = if O::ENABLED {
+        Some(conversion_observation(
+            physical,
+            PhysicalLaunchKind::OutputDowncast,
+            n,
+            src_ptr,
+            dst_ptr,
+        )?)
+    } else {
+        None
+    };
+    unsafe { enqueue_with_physical_observation(observer, &mut b, config, observation) }
+        .map_err(|error| error.with_driver_context(format_args!("bi_downcast_from_f32")))
 }
 
 /// Batch-invariant typed NN forward with FULL shape coverage:
 /// `Y[B,N] = X[B,K] @ W[K,N] (+ bias)` for homogeneous bf16/f16 operands.
 /// Covered typed buckets run natively; every other shape routes through
-/// "upcast inputs → f32 sgemm_bi → RNE downcast Y", which produces the
-/// SAME bits as a native typed kernel (the stage-2 contract: typed kernels
+/// "upcast inputs → f32 gemm_bi → RNE downcast Y", which produces the
+/// SAME bits as a native typed kernel (typed kernels
 /// keep f32 accumulation and the f32 twin's FMA chain, with exactly one
 /// RNE downcast at the store). `dims` = `(batch, n_in, n_out)`.
-pub fn bi_sgemm_forward_typed(
+/// Qualified CC12.0 BF16/F16 cells may use cached SM120 TMA/MMA16; all other
+/// cells retain the existing tensor-core and exact fallback policy.
+pub fn gemm_bi_forward_typed(
     ctx: &GpuCtx,
     y: TypedPtr,
     x: TypedPtr,
@@ -487,37 +618,78 @@ pub fn bi_sgemm_forward_typed(
     bias_ptr: cudarc::driver::sys::CUdeviceptr,
     dims: (usize, usize, usize),
 ) -> Result<(), String> {
+    let mut observer = NoPhysicalObserver;
+    gemm_bi_forward_typed_in(ctx, y, x, w, bias_ptr, dims, &mut observer).map(drop)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::mamba_ssm::gpu) enum HalfPolicyBranchSeal {
+    Native(super::gemm_bi_triad::HalfNativeBranchSeal),
+    Sm120(super::gemm_bi_triad::Sm120AutoBranchSeal),
+    ExactF32Fallback,
+}
+
+fn gemm_bi_forward_typed_in<O: PhysicalLaunchObserver>(
+    ctx: &GpuCtx,
+    y: TypedPtr,
+    x: TypedPtr,
+    w: TypedPtr,
+    bias_ptr: cudarc::driver::sys::CUdeviceptr,
+    dims: (usize, usize, usize),
+    observer: &mut O,
+) -> Result<HalfPolicyBranchSeal, String> {
     let checked_dims = super::gemm_bi_triad::GemmDims::nn(dims, dims.1)?;
-    // Stage 5 tensor-core tier: opt-in, SEPARATE numeric contract (see
-    // `sgemm_bi_forward_tc`). Tried first so big shapes get the TC speed;
-    // shapes below its gate fall through to the scalar buckets.
+    validate_half_physical_policy::<O>(ctx)?;
+    let physical = HalfPhysicalContext {
+        op: ResolvedGemmOp::Nn,
+        dtype: y.dtype,
+        dims,
+    };
     if ctx.bi_tensor_cores() {
-        match super::gemm_bi_triad::sgemm_bi_forward_tc(
-            &ctx.stream,
-            &ctx.kernels,
-            y,
-            x,
-            w,
-            bias_ptr,
+        let request = super::gemm_bi_triad::Sm120AutoRequest {
+            op: super::gemm_bi_triad::Sm120Op::Nn,
+            dtype: y.dtype,
+            shape: super::gemm_bi_triad::Sm120Shape::contiguous(
+                super::gemm_bi_triad::Sm120Op::Nn,
+                dims,
+            ),
+            a_ptr: x.ptr,
+            b_ptr: w.ptr,
+            operands: super::gemm_bi_triad::Sm120LaunchOperands {
+                output_ptr: y.ptr,
+                bias_ptr,
+                alpha: 1.0,
+                beta: 0.0,
+            },
+        };
+        if let Some(seal) =
+            super::gemm_bi_triad::launch_sm120_auto_observed(ctx, observer, request)?
+        {
+            return Ok(HalfPolicyBranchSeal::Sm120(seal));
+        }
+    }
+    // The SM89 deep-K N=128 bucket keeps the exact
+    // scalar contract when its measured Split-K plan wins. Other admitted
+    // shapes use the separate tensor-core contract in `gemm_bi_forward_tc`.
+    if ctx.bi_tensor_cores()
+        && !super::gemm_bi_triad::tc_half_policy_prefers_scalar_forward(
+            ctx.compute_capability(),
             dims,
-        ) {
-            Ok(_tile) => return Ok(()),
+            ctx.kernels.multiprocessor_count(),
+        )?
+    {
+        let ops = super::gemm_bi_triad::TcFwdOperands { y, x, w, bias_ptr };
+        match super::gemm_bi_triad::gemm_bi_forward_tc_observed(ctx, observer, &ops, dims) {
+            Ok((_tile, seal)) => return Ok(HalfPolicyBranchSeal::Native(seal)),
             // Below-tile-gate shapes drop to the scalar tier; real launch
             // failures must surface, not be recomputed around.
             Err(e) if e.starts_with("UNCOVERED") => {}
             Err(e) => return Err(e),
         }
     }
-    match super::gemm_bi_triad::sgemm_bi_forward_typed(
-        &ctx.stream,
-        &ctx.kernels,
-        y,
-        x,
-        w,
-        bias_ptr,
-        dims,
-    ) {
-        Ok(()) => return Ok(()),
+    let ops = super::gemm_bi_triad::TcFwdOperands { y, x, w, bias_ptr };
+    match super::gemm_bi_triad::gemm_bi_forward_typed_observed(ctx, observer, &ops, dims) {
+        Ok(seal) => return Ok(HalfPolicyBranchSeal::Native(seal)),
         // Only a bucket miss may fall through to the upcast path; a real
         // launch failure must surface, not be recomputed around.
         Err(e) if e.starts_with("UNCOVERED") => {}
@@ -526,20 +698,24 @@ pub fn bi_sgemm_forward_typed(
     ctx.with_bi_upcast_scratch(
         (checked_dims.mk, checked_dims.kn, checked_dims.mn),
         |xs, ws, ys| {
-            bi_upcast_to_f32(ctx, x, xs.cached_ptr(), checked_dims.mk)?;
-            bi_upcast_to_f32(ctx, w, ws.cached_ptr(), checked_dims.kn)?;
-            super::gemm_bi_triad::sgemm_bi_forward(
-                &ctx.stream,
-                &ctx.kernels,
+            bi_upcast_to_f32(ctx, x, xs.cached_ptr(), checked_dims.mk, physical, observer)?;
+            bi_upcast_to_f32(ctx, w, ws.cached_ptr(), checked_dims.kn, physical, observer)?;
+            super::gemm_bi_triad::record_physical_exact_scalar_f32_forward(
+                ctx,
+                observer,
                 ys,
                 xs,
                 ws.cached_ptr(),
                 bias_ptr,
-                dims,
+                super::gemm_bi_triad::ScalarFallbackPhysicalContext {
+                    dims,
+                    dtype: physical.dtype,
+                },
             )?;
-            bi_downcast_from_f32(ctx, y, ys.cached_ptr(), checked_dims.mn)
+            bi_downcast_from_f32(ctx, y, ys.cached_ptr(), checked_dims.mn, physical, observer)
         },
     )
+    .map(|()| HalfPolicyBranchSeal::ExactF32Fallback)
 }
 
 /// Batch-invariant typed dW backward with FULL shape coverage:
@@ -547,107 +723,1194 @@ pub fn bi_sgemm_forward_typed(
 /// downcast; gradients accumulate in f32 by design). Uncovered typed
 /// buckets upcast dY/X and run the f32 TN dispatcher — bit-identical to a
 /// native typed kernel. `dims` = `(batch, n_in, n_out)`.
-pub fn bi_sgemm_backward_dw_typed(
+/// Qualified CC12.0 BF16/F16 cells may use cached SM120 TMA/MMA16; all other
+/// cells retain the existing tensor-core and exact fallback policy.
+pub fn gemm_bi_backward_dw_typed(
     ctx: &GpuCtx,
     dw_ptr: cudarc::driver::sys::CUdeviceptr,
     dy: TypedPtr,
     x_saved: TypedPtr,
     dims: (usize, usize, usize),
 ) -> Result<(), String> {
+    let mut observer = NoPhysicalObserver;
+    gemm_bi_backward_dw_typed_in(ctx, dw_ptr, dy, x_saved, dims, &mut observer).map(drop)
+}
+
+fn gemm_bi_backward_dw_typed_in<O: PhysicalLaunchObserver>(
+    ctx: &GpuCtx,
+    dw_ptr: cudarc::driver::sys::CUdeviceptr,
+    dy: TypedPtr,
+    x_saved: TypedPtr,
+    dims: (usize, usize, usize),
+    observer: &mut O,
+) -> Result<HalfPolicyBranchSeal, String> {
     let checked_dims = super::gemm_bi_triad::GemmDims::tn(dims)?;
+    validate_half_physical_policy::<O>(ctx)?;
+    let physical = HalfPhysicalContext {
+        op: ResolvedGemmOp::Tn,
+        dtype: dy.dtype,
+        dims,
+    };
     if ctx.bi_tensor_cores() {
-        match super::gemm_bi_triad::sgemm_bi_backward_dw_tc(
-            &ctx.stream,
-            &ctx.kernels,
-            dw_ptr,
-            dy,
-            x_saved,
-            dims,
+        let request = super::gemm_bi_triad::Sm120AutoRequest {
+            op: super::gemm_bi_triad::Sm120Op::Tn,
+            dtype: dy.dtype,
+            shape: super::gemm_bi_triad::Sm120Shape::contiguous(
+                super::gemm_bi_triad::Sm120Op::Tn,
+                dims,
+            ),
+            a_ptr: x_saved.ptr,
+            b_ptr: dy.ptr,
+            operands: super::gemm_bi_triad::Sm120LaunchOperands {
+                output_ptr: dw_ptr,
+                bias_ptr: 0,
+                alpha: 1.0,
+                beta: 1.0,
+            },
+        };
+        if let Some(seal) =
+            super::gemm_bi_triad::launch_sm120_auto_observed(ctx, observer, request)?
+        {
+            return Ok(HalfPolicyBranchSeal::Sm120(seal));
+        }
+        match super::gemm_bi_triad::gemm_bi_backward_dw_tc_observed(
+            ctx, observer, dw_ptr, dy, x_saved, dims,
         ) {
-            Ok(_tile) => return Ok(()),
+            Ok((_tile, seal)) => return Ok(HalfPolicyBranchSeal::Native(seal)),
             Err(e) if e.starts_with("UNCOVERED") => {}
             Err(e) => return Err(e),
         }
     }
-    match super::gemm_bi_triad::sgemm_bi_backward_dw_typed(
-        &ctx.stream,
-        &ctx.kernels,
-        dw_ptr,
-        dy,
-        x_saved,
-        dims,
+    match super::gemm_bi_triad::gemm_bi_backward_dw_typed_observed(
+        ctx, observer, dw_ptr, dy, x_saved, dims,
     ) {
-        Ok(()) => return Ok(()),
+        Ok(seal) => return Ok(HalfPolicyBranchSeal::Native(seal)),
         Err(e) if e.starts_with("UNCOVERED") => {}
         Err(e) => return Err(e),
     }
     ctx.with_bi_upcast_scratch((checked_dims.mn, checked_dims.mk, 0), |dys, xs, _| {
-        bi_upcast_to_f32(ctx, dy, dys.cached_ptr(), checked_dims.mn)?;
-        bi_upcast_to_f32(ctx, x_saved, xs.cached_ptr(), checked_dims.mk)?;
-        super::gemm_bi_triad::sgemm_bi_backward_dw(&ctx.stream, &ctx.kernels, dw_ptr, dys, xs, dims)
+        bi_upcast_to_f32(
+            ctx,
+            dy,
+            dys.cached_ptr(),
+            checked_dims.mn,
+            physical,
+            observer,
+        )?;
+        bi_upcast_to_f32(
+            ctx,
+            x_saved,
+            xs.cached_ptr(),
+            checked_dims.mk,
+            physical,
+            observer,
+        )?;
+        super::gemm_bi_triad::record_physical_exact_scalar_f32_backward_dw(
+            ctx,
+            observer,
+            dw_ptr,
+            dys,
+            xs,
+            super::gemm_bi_triad::ScalarFallbackPhysicalContext {
+                dims,
+                dtype: physical.dtype,
+            },
+        )
     })
+    .map(|()| HalfPolicyBranchSeal::ExactF32Fallback)
 }
 
 /// Batch-invariant typed dX backward with FULL shape coverage:
 /// `dX[B,K] = dY[B,N] @ W^T[N,K]` — typed dY/W/dX. Uncovered typed buckets
 /// upcast dY/W, run the f32 NT dispatcher, and RNE-downcast dX —
 /// bit-identical to a native typed kernel. `dims` = `(batch, n_in, n_out)`.
-pub fn bi_sgemm_backward_dx_typed(
+/// Qualified CC12.0 BF16/F16 cells may use cached SM120 TMA/MMA16; all other
+/// cells retain the existing tensor-core and exact fallback policy.
+pub fn gemm_bi_backward_dx_typed(
     ctx: &GpuCtx,
     dx: TypedPtr,
     dy: TypedPtr,
     w: TypedPtr,
     dims: (usize, usize, usize),
 ) -> Result<(), String> {
+    let mut observer = NoPhysicalObserver;
+    gemm_bi_backward_dx_typed_in(ctx, dx, dy, w, dims, &mut observer).map(drop)
+}
+
+fn gemm_bi_backward_dx_typed_in<O: PhysicalLaunchObserver>(
+    ctx: &GpuCtx,
+    dx: TypedPtr,
+    dy: TypedPtr,
+    w: TypedPtr,
+    dims: (usize, usize, usize),
+    observer: &mut O,
+) -> Result<HalfPolicyBranchSeal, String> {
     let checked_dims = super::gemm_bi_triad::GemmDims::nt(dims)?;
+    validate_half_physical_policy::<O>(ctx)?;
+    let physical = HalfPhysicalContext {
+        op: ResolvedGemmOp::Nt,
+        dtype: dx.dtype,
+        dims,
+    };
     if ctx.bi_tensor_cores() {
-        match super::gemm_bi_triad::sgemm_bi_backward_dx_tc(
-            &ctx.stream,
-            &ctx.kernels,
-            dx,
-            dy,
-            w,
-            dims,
-        ) {
-            Ok(_tile) => return Ok(()),
+        let request = super::gemm_bi_triad::Sm120AutoRequest {
+            op: super::gemm_bi_triad::Sm120Op::Nt,
+            dtype: dx.dtype,
+            shape: super::gemm_bi_triad::Sm120Shape::contiguous(
+                super::gemm_bi_triad::Sm120Op::Nt,
+                dims,
+            ),
+            a_ptr: dy.ptr,
+            b_ptr: w.ptr,
+            operands: super::gemm_bi_triad::Sm120LaunchOperands {
+                output_ptr: dx.ptr,
+                bias_ptr: 0,
+                alpha: 1.0,
+                beta: 0.0,
+            },
+        };
+        if let Some(seal) =
+            super::gemm_bi_triad::launch_sm120_auto_observed(ctx, observer, request)?
+        {
+            return Ok(HalfPolicyBranchSeal::Sm120(seal));
+        }
+        match super::gemm_bi_triad::gemm_bi_backward_dx_tc_observed(ctx, observer, dx, dy, w, dims)
+        {
+            Ok((_tile, seal)) => return Ok(HalfPolicyBranchSeal::Native(seal)),
             Err(e) if e.starts_with("UNCOVERED") => {}
             Err(e) => return Err(e),
         }
     }
-    match super::gemm_bi_triad::sgemm_bi_backward_dx_typed(
-        &ctx.stream,
-        &ctx.kernels,
-        dx,
-        dy,
-        w,
-        dims,
-    ) {
-        Ok(()) => return Ok(()),
+    match super::gemm_bi_triad::gemm_bi_backward_dx_typed_observed(ctx, observer, dx, dy, w, dims) {
+        Ok(seal) => return Ok(HalfPolicyBranchSeal::Native(seal)),
         Err(e) if e.starts_with("UNCOVERED") => {}
         Err(e) => return Err(e),
     }
     ctx.with_bi_upcast_scratch(
         (checked_dims.mn, checked_dims.kn, checked_dims.mk),
         |dys, ws, dxs| {
-            bi_upcast_to_f32(ctx, dy, dys.cached_ptr(), checked_dims.mn)?;
-            bi_upcast_to_f32(ctx, w, ws.cached_ptr(), checked_dims.kn)?;
-            super::gemm_bi_triad::sgemm_bi_backward_dx(
-                &ctx.stream,
-                &ctx.kernels,
+            bi_upcast_to_f32(
+                ctx,
+                dy,
+                dys.cached_ptr(),
+                checked_dims.mn,
+                physical,
+                observer,
+            )?;
+            bi_upcast_to_f32(ctx, w, ws.cached_ptr(), checked_dims.kn, physical, observer)?;
+            super::gemm_bi_triad::record_physical_exact_scalar_f32_backward_dx(
+                ctx,
+                observer,
                 dxs,
                 dys,
                 ws.cached_ptr(),
-                dims,
+                super::gemm_bi_triad::ScalarFallbackPhysicalContext {
+                    dims,
+                    dtype: physical.dtype,
+                },
             )?;
-            bi_downcast_from_f32(ctx, dx, dxs.cached_ptr(), checked_dims.mk)
+            bi_downcast_from_f32(
+                ctx,
+                dx,
+                dxs.cached_ptr(),
+                checked_dims.mk,
+                physical,
+                observer,
+            )
         },
     )
+    .map(|()| HalfPolicyBranchSeal::ExactF32Fallback)
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(in crate::mamba_ssm::gpu) struct HalfPhysicalTraceRequest {
+    pub(in crate::mamba_ssm::gpu) op: ResolvedGemmOp,
+    pub(in crate::mamba_ssm::gpu) output: cudarc::driver::sys::CUdeviceptr,
+    pub(in crate::mamba_ssm::gpu) a: cudarc::driver::sys::CUdeviceptr,
+    pub(in crate::mamba_ssm::gpu) b: cudarc::driver::sys::CUdeviceptr,
+    pub(in crate::mamba_ssm::gpu) bias: cudarc::driver::sys::CUdeviceptr,
+    pub(in crate::mamba_ssm::gpu) dtype: WeightDtype,
+    pub(in crate::mamba_ssm::gpu) dims: (usize, usize, usize),
+    pub(in crate::mamba_ssm::gpu) nn_strides: Option<(usize, usize, usize)>,
+    pub(in crate::mamba_ssm::gpu) forced_tile: Option<super::gemm_bi_triad::TcTile>,
+    pub(in crate::mamba_ssm::gpu) capacity: usize,
+}
+
+pub(in crate::mamba_ssm::gpu) struct F32PhysicalGraphPackageRequest<'a> {
+    pub(in crate::mamba_ssm::gpu) prepared: &'a super::gemm_bi_triad::PreparedF32TriadLaunch,
+    pub(in crate::mamba_ssm::gpu) output: &'a mut GpuBuffer,
+    pub(in crate::mamba_ssm::gpu) a: &'a GpuBuffer,
+    pub(in crate::mamba_ssm::gpu) b: &'a GpuBuffer,
+    pub(in crate::mamba_ssm::gpu) capacity: usize,
+}
+
+const PHYSICAL_GRAPH_MAX_KERNEL_ARGUMENTS: usize = 16;
+const PHYSICAL_GRAPH_MAX_ARGUMENT_BYTES: usize = 64;
+
+#[derive(Clone, Copy)]
+#[repr(C, align(16))]
+struct PhysicalGraphKernelArgument {
+    bytes: [u8; PHYSICAL_GRAPH_MAX_ARGUMENT_BYTES],
+}
+
+unsafe impl DeviceRepr for PhysicalGraphKernelArgument {}
+
+impl PhysicalGraphKernelArgument {
+    fn encode<T: Copy>(value: T) -> Result<Self, String> {
+        let width = std::mem::size_of::<T>();
+        if width > PHYSICAL_GRAPH_MAX_ARGUMENT_BYTES {
+            return Err(format!(
+                "physical graph kernel argument uses {width} bytes; maximum is {PHYSICAL_GRAPH_MAX_ARGUMENT_BYTES}"
+            ));
+        }
+        let mut encoded = Self {
+            bytes: [0; PHYSICAL_GRAPH_MAX_ARGUMENT_BYTES],
+        };
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                std::ptr::from_ref(&value).cast::<u8>(),
+                encoded.bytes.as_mut_ptr(),
+                width,
+            );
+        }
+        Ok(encoded)
+    }
+}
+
+struct PhysicalGraphKernelArguments {
+    values: [PhysicalGraphKernelArgument; PHYSICAL_GRAPH_MAX_KERNEL_ARGUMENTS],
+    len: usize,
+}
+
+impl PhysicalGraphKernelArguments {
+    fn new() -> Self {
+        Self {
+            values: [PhysicalGraphKernelArgument {
+                bytes: [0; PHYSICAL_GRAPH_MAX_ARGUMENT_BYTES],
+            }; PHYSICAL_GRAPH_MAX_KERNEL_ARGUMENTS],
+            len: 0,
+        }
+    }
+
+    fn push<T: Copy>(&mut self, value: T) -> Result<(), String> {
+        let slot = self
+            .values
+            .get_mut(self.len)
+            .ok_or_else(|| "physical graph kernel argument capacity exceeded".to_string())?;
+        *slot = PhysicalGraphKernelArgument::encode(value)?;
+        self.len += 1;
+        Ok(())
+    }
+
+    fn values(&self) -> &[PhysicalGraphKernelArgument] {
+        &self.values[..self.len]
+    }
+}
+
+struct PreparedPhysicalGraphLaunch {
+    function: CudaFunction,
+    config: LaunchConfig,
+    node: ResolvedPhysicalKernelLaunch,
+    arguments: PhysicalGraphKernelArguments,
+}
+
+struct BoundPhysicalGraphLaunch<'a> {
+    builder: LaunchArgs<'a>,
+    config: LaunchConfig,
+    node: ResolvedPhysicalKernelLaunch,
+}
+
+pub(super) struct BoundPhysicalGraphLaunches<'a> {
+    prefix: Vec<BoundPhysicalGraphLaunch<'a>>,
+    triad: Option<super::gemm_bi_triad::BoundTriadPhysicalGraphSequence<'a>>,
+    suffix: Vec<BoundPhysicalGraphLaunch<'a>>,
+    #[cfg(test)]
+    fail_before_enqueue: bool,
+}
+
+impl BoundPhysicalGraphLaunches<'_> {
+    #[inline(always)]
+    pub(super) unsafe fn enqueue(
+        &mut self,
+        observer: &mut RecordingPhysicalObserver,
+    ) -> Result<(), PhysicalCudaLaunchError> {
+        #[cfg(test)]
+        if self.fail_before_enqueue {
+            return Err(PhysicalCudaLaunchError::Prepared(
+                "expected prepared physical body error",
+            ));
+        }
+        for launch in &mut self.prefix {
+            unsafe {
+                enqueue_prepared_physical_launch(
+                    observer,
+                    &mut launch.builder,
+                    launch.config,
+                    launch.node,
+                )?;
+            }
+        }
+        if let Some(triad) = &mut self.triad {
+            unsafe { triad.enqueue(observer)? };
+        }
+        for launch in &mut self.suffix {
+            unsafe {
+                enqueue_prepared_physical_launch(
+                    observer,
+                    &mut launch.builder,
+                    launch.config,
+                    launch.node,
+                )?;
+            }
+        }
+        Ok(())
+    }
+}
+
+pub(super) struct PreparedPhysicalGraphPackage<'a> {
+    ctx: &'a GpuCtx,
+    manifest: PreparedPhysicalCaptureManifest,
+    observer: Option<RecordingPhysicalObserver>,
+    prefix: Box<[PreparedPhysicalGraphLaunch]>,
+    triad: Option<super::gemm_bi_triad::PreparedTriadPhysicalGraphSequence>,
+    suffix: Box<[PreparedPhysicalGraphLaunch]>,
+    launch_capacity: usize,
+    context_token: u64,
+    stream_token: usize,
+    #[cfg(test)]
+    fail_before_enqueue: bool,
+    #[cfg(test)]
+    drift_policy_after_capture: bool,
+}
+
+impl PreparedPhysicalGraphPackage<'_> {
+    pub(super) fn context(&self) -> &GpuCtx {
+        self.ctx
+    }
+
+    pub(super) fn manifest(&self) -> &PreparedPhysicalCaptureManifest {
+        &self.manifest
+    }
+
+    pub(super) fn take_observer(&mut self) -> Result<RecordingPhysicalObserver, String> {
+        self.observer
+            .take()
+            .ok_or_else(|| "physical graph package observer was already consumed".to_string())
+    }
+
+    pub(super) fn validate(&self) -> Result<(), String> {
+        if self.context_token != self.ctx.instance_token() {
+            return Err("physical graph package belongs to another GPU context".into());
+        }
+        if self.stream_token != self.ctx.stream_token() {
+            return Err("physical graph package belongs to another CUDA stream".into());
+        }
+        let prepared_count = self.prefix.len()
+            + self.triad.as_ref().map_or(0, |triad| triad.len())
+            + self.suffix.len();
+        if self.launch_capacity == 0
+            || self.launch_capacity != prepared_count
+            || self.launch_capacity != self.manifest.launch_capacity()
+        {
+            return Err("physical graph package has inconsistent exact launch capacity".into());
+        }
+        Ok(())
+    }
+
+    fn bind_direct_launches<'a>(
+        &'a self,
+        prepared: &'a [PreparedPhysicalGraphLaunch],
+    ) -> Result<Vec<BoundPhysicalGraphLaunch<'a>>, String> {
+        let mut launches = Vec::new();
+        launches
+            .try_reserve_exact(prepared.len())
+            .map_err(|error| format!("reserve bound physical graph launches: {error}"))?;
+        for launch in prepared {
+            let mut builder = self.ctx.stream.launch_builder(&launch.function);
+            for argument in launch.arguments.values() {
+                builder.arg(argument);
+            }
+            launches.push(BoundPhysicalGraphLaunch {
+                builder,
+                config: launch.config,
+                node: launch.node,
+            });
+        }
+        if launches.len() != prepared.len() || launches.capacity() != prepared.len() {
+            return Err("bound physical graph launch backing capacity is not exact".into());
+        }
+        Ok(launches)
+    }
+
+    pub(super) fn bind_launches(&self) -> Result<BoundPhysicalGraphLaunches<'_>, String> {
+        let prefix = self.bind_direct_launches(&self.prefix)?;
+        let triad = self
+            .triad
+            .as_ref()
+            .map(|triad| triad.bind(&self.ctx.stream))
+            .transpose()?;
+        let suffix = self.bind_direct_launches(&self.suffix)?;
+        Ok(BoundPhysicalGraphLaunches {
+            prefix,
+            triad,
+            suffix,
+            #[cfg(test)]
+            fail_before_enqueue: self.fail_before_enqueue,
+        })
+    }
+
+    #[cfg(test)]
+    fn inject_body_failure(&mut self) {
+        self.fail_before_enqueue = true;
+    }
+
+    #[cfg(test)]
+    fn inject_driver_failure(&mut self) {
+        self.prefix[0].config.grid_dim.0 = 0;
+    }
+
+    #[cfg(test)]
+    fn inject_post_capture_policy_drift(&mut self) {
+        self.drift_policy_after_capture = true;
+    }
+
+    #[cfg(test)]
+    pub(super) fn apply_post_capture_test_mutation(&self) {
+        if self.drift_policy_after_capture {
+            self.ctx.set_bi_tensor_cores(false);
+        }
+    }
+}
+
+fn physical_argument_bytes(elements: usize, width: usize, name: &str) -> Result<u64, String> {
+    elements
+        .checked_mul(width)
+        .and_then(|bytes| u64::try_from(bytes).ok())
+        .ok_or_else(|| format!("physical graph {name} span overflows u64"))
+}
+
+fn physical_f32_storage_elements(
+    rows: usize,
+    width: usize,
+    stride: usize,
+    name: &str,
+) -> Result<usize, String> {
+    if rows == 0 || width == 0 || stride < width {
+        return Err(format!("physical F32 {name} has invalid storage geometry"));
+    }
+    (rows - 1)
+        .checked_mul(stride)
+        .and_then(|offset| offset.checked_add(width))
+        .ok_or_else(|| format!("physical F32 {name} storage span overflows usize"))
+}
+
+fn prepare_f32_physical_graph_observer(
+    ctx: &GpuCtx,
+    prepared: &super::gemm_bi_triad::PreparedF32TriadLaunch,
+    capacity: usize,
+) -> Result<RecordingPhysicalObserver, String> {
+    let request = prepared.physical_graph_request();
+    let operands = prepared.physical_graph_operands();
+    request.shape.validate(request.op)?;
+    let shape = request.shape;
+    let (a_geometry, b_geometry, output_geometry) = match request.op {
+        ResolvedGemmOp::Nn => (
+            (shape.m, shape.k, shape.lda),
+            (shape.k, shape.n, shape.ldb),
+            (shape.m, shape.n, shape.ldc),
+        ),
+        ResolvedGemmOp::Tn => (
+            (shape.m, shape.k, shape.lda),
+            (shape.m, shape.n, shape.ldb),
+            (shape.k, shape.n, shape.ldc),
+        ),
+        ResolvedGemmOp::Nt => (
+            (shape.m, shape.n, shape.lda),
+            (shape.k, shape.n, shape.ldb),
+            (shape.m, shape.k, shape.ldc),
+        ),
+    };
+    let mut ranges = Vec::new();
+    ranges
+        .try_reserve_exact(3 + usize::from(operands.bias.is_some()))
+        .map_err(|error| format!("reserve physical F32 argument ranges: {error}"))?;
+    for (pointer, (rows, width, stride), name) in [
+        (operands.output, output_geometry, "output"),
+        (operands.a, a_geometry, "A"),
+        (operands.b, b_geometry, "B"),
+    ] {
+        let elements = physical_f32_storage_elements(rows, width, stride, name)?;
+        ranges.push(PhysicalArgumentRange {
+            pointer,
+            required_bytes: physical_argument_bytes(elements, std::mem::size_of::<f32>(), name)?,
+        });
+    }
+    if let Some(bias) = operands.bias {
+        ranges.push(PhysicalArgumentRange {
+            pointer: bias,
+            required_bytes: physical_argument_bytes(shape.n, std::mem::size_of::<f32>(), "bias")?,
+        });
+    }
+    if ranges.capacity() != ranges.len() {
+        return Err("physical F32 argument range capacity is not exact".into());
+    }
+    prepare_physical_observer(ctx, capacity, &ranges)
+}
+
+fn prepare_half_physical_observer(
+    ctx: &GpuCtx,
+    request: HalfPhysicalTraceRequest,
+) -> Result<RecordingPhysicalObserver, String> {
+    let (_, _, n) = request.dims;
+    let shape = half_physical_request_shape(request)?;
+    let checked_dims = match request.op {
+        ResolvedGemmOp::Nn => super::gemm_bi_triad::GemmDims::nn(request.dims, shape.lda)?,
+        ResolvedGemmOp::Tn => super::gemm_bi_triad::GemmDims::tn(request.dims)?,
+        ResolvedGemmOp::Nt => super::gemm_bi_triad::GemmDims::nt(request.dims)?,
+    };
+    let half_width = request.dtype.size_bytes();
+    let (output_geometry, a_geometry, b_geometry) = match request.op {
+        ResolvedGemmOp::Nn => (
+            (shape.m, shape.n, shape.ldc),
+            (shape.m, shape.k, shape.lda),
+            (shape.k, shape.n, shape.ldb),
+        ),
+        ResolvedGemmOp::Tn => (
+            (shape.k, shape.n, shape.ldc),
+            (shape.m, shape.k, shape.lda),
+            (shape.m, shape.n, shape.ldb),
+        ),
+        ResolvedGemmOp::Nt => (
+            (shape.m, shape.k, shape.ldc),
+            (shape.m, shape.n, shape.lda),
+            (shape.k, shape.n, shape.ldb),
+        ),
+    };
+    let output_width = if request.op == ResolvedGemmOp::Tn {
+        std::mem::size_of::<f32>()
+    } else {
+        half_width
+    };
+    let output_elements = physical_f32_storage_elements(
+        output_geometry.0,
+        output_geometry.1,
+        output_geometry.2,
+        "output",
+    )?;
+    let a_elements = physical_f32_storage_elements(a_geometry.0, a_geometry.1, a_geometry.2, "A")?;
+    let b_elements = physical_f32_storage_elements(b_geometry.0, b_geometry.1, b_geometry.2, "B")?;
+    let mut ranges = Vec::with_capacity(7);
+    ranges.push(PhysicalArgumentRange {
+        pointer: request.output,
+        required_bytes: physical_argument_bytes(output_elements, output_width, "output")?,
+    });
+    ranges.push(PhysicalArgumentRange {
+        pointer: request.a,
+        required_bytes: physical_argument_bytes(a_elements, half_width, "A")?,
+    });
+    ranges.push(PhysicalArgumentRange {
+        pointer: request.b,
+        required_bytes: physical_argument_bytes(b_elements, half_width, "B")?,
+    });
+    if request.bias != 0 {
+        ranges.push(PhysicalArgumentRange {
+            pointer: request.bias,
+            required_bytes: physical_argument_bytes(n, std::mem::size_of::<f32>(), "bias")?,
+        });
+    }
+    let scratch_sizes = match request.op {
+        ResolvedGemmOp::Nn => (checked_dims.mk, checked_dims.kn, checked_dims.mn),
+        ResolvedGemmOp::Tn => (checked_dims.mn, checked_dims.mk, 0),
+        ResolvedGemmOp::Nt => (checked_dims.mn, checked_dims.kn, checked_dims.mk),
+    };
+    ctx.with_bi_upcast_scratch(scratch_sizes, |first, second, third| {
+        for (buffer, elements) in [
+            (first, scratch_sizes.0),
+            (second, scratch_sizes.1),
+            (third, scratch_sizes.2),
+        ] {
+            if elements != 0 {
+                ranges.push(PhysicalArgumentRange {
+                    pointer: buffer.cached_ptr(),
+                    required_bytes: physical_argument_bytes(
+                        elements,
+                        std::mem::size_of::<f32>(),
+                        "scratch",
+                    )?,
+                });
+            }
+        }
+        Ok(())
+    })?;
+    prepare_physical_observer(ctx, request.capacity, &ranges)
+}
+
+fn half_physical_request_shape(
+    request: HalfPhysicalTraceRequest,
+) -> Result<super::gemm_bi_triad::F32TriadShape, String> {
+    let mut shape = super::gemm_bi_triad::F32TriadShape::contiguous(request.op, request.dims);
+    if let Some((lda, ldb, ldc)) = request.nn_strides {
+        if request.op != ResolvedGemmOp::Nn || request.forced_tile.is_none() {
+            return Err("padded half physical strides require a forced NN route".into());
+        }
+        (shape.lda, shape.ldb, shape.ldc) = (lda, ldb, ldc);
+    }
+    shape.validate(request.op)?;
+    Ok(shape)
+}
+
+fn prepare_native_half_graph_launch(
+    ctx: &GpuCtx,
+    observer: &RecordingPhysicalObserver,
+    request: HalfPhysicalTraceRequest,
+    expected: ResolvedPhysicalKernelLaunch,
+) -> Result<PreparedPhysicalGraphLaunch, String> {
+    let identity =
+        super::gemm_bi_triad::prepare_native_half_graph_identity(ctx, observer, expected, request)?;
+    let (function, config, node, base) = identity.into_parts();
+    let shape = half_physical_request_shape(request)?;
+    let checked = match request.op {
+        ResolvedGemmOp::Nn => super::gemm_bi_triad::GemmDims::nn(request.dims, shape.lda)?,
+        ResolvedGemmOp::Tn => super::gemm_bi_triad::GemmDims::tn(request.dims)?,
+        ResolvedGemmOp::Nt => super::gemm_bi_triad::GemmDims::nt(request.dims)?,
+    };
+    let alpha = 1.0_f32;
+    let mut arguments = PhysicalGraphKernelArguments::new();
+    match request.op {
+        ResolvedGemmOp::Nn => {
+            let beta = 0.0_f32;
+            arguments.push(request.output)?;
+            arguments.push(request.a)?;
+            arguments.push(request.b)?;
+            arguments.push(request.bias)?;
+            arguments.push(alpha)?;
+            arguments.push(beta)?;
+            arguments.push(checked.m_i32)?;
+            if base == "gemm_bi_nn_gemv" {
+                arguments.push(checked.k_i32)?;
+                arguments.push(checked.k_i32)?;
+                arguments.push(1_i32)?;
+            } else {
+                arguments.push(checked.n_i32)?;
+                arguments.push(checked.k_i32)?;
+                arguments.push(i32::try_from(shape.lda).map_err(|_| "NN lda exceeds i32::MAX")?)?;
+                arguments.push(i32::try_from(shape.ldb).map_err(|_| "NN ldb exceeds i32::MAX")?)?;
+                arguments.push(i32::try_from(shape.ldc).map_err(|_| "NN ldc exceeds i32::MAX")?)?;
+                if matches!(base, "gemm_bi_nn_narrow" | "gemm_bi_nn_narrow_small") {
+                    arguments.push(0_i32)?;
+                }
+            }
+        }
+        ResolvedGemmOp::Tn => {
+            arguments.push(request.output)?;
+            arguments.push(request.a)?;
+            arguments.push(request.b)?;
+            arguments.push(alpha)?;
+            arguments.push(checked.m_i32)?;
+            arguments.push(checked.k_i32)?;
+            if base == "gemm_bi_tn_gemv" {
+                arguments.push(checked.k_i32)?;
+                arguments.push(1_i32)?;
+            } else {
+                arguments.push(checked.n_i32)?;
+            }
+        }
+        ResolvedGemmOp::Nt => {
+            arguments.push(request.output)?;
+            arguments.push(request.a)?;
+            arguments.push(request.b)?;
+            arguments.push(alpha)?;
+            arguments.push(checked.m_i32)?;
+            if base == "gemm_bi_nt_gemv" {
+                arguments.push(checked.k_i32)?;
+                arguments.push(checked.k_i32)?;
+                arguments.push(1_i32)?;
+            } else {
+                arguments.push(checked.n_i32)?;
+                arguments.push(checked.k_i32)?;
+            }
+        }
+    }
+    Ok(PreparedPhysicalGraphLaunch {
+        function,
+        config,
+        node,
+        arguments,
+    })
+}
+
+fn prepare_conversion_graph_launch(
+    ctx: &GpuCtx,
+    observer: &RecordingPhysicalObserver,
+    physical: HalfPhysicalContext,
+    kind: PhysicalLaunchKind,
+    conversion: (usize, u64, u64),
+) -> Result<PreparedPhysicalGraphLaunch, String> {
+    let (count, source, destination) = conversion;
+    let config = grid_1d(count);
+    let observation = conversion_observation(physical, kind, count, source, destination)?;
+    let node = resolve_physical_launch_observation(observer, observation, config)?;
+    let function = match (kind, request_half_dtype(physical)?) {
+        (PhysicalLaunchKind::InputUpcast, WeightDtype::Bf16) => {
+            ctx.kernels.cast_bf16_to_f32.clone()
+        }
+        (PhysicalLaunchKind::InputUpcast, WeightDtype::F16) => ctx.kernels.cast_f16_to_f32.clone(),
+        (PhysicalLaunchKind::OutputDowncast, WeightDtype::Bf16) => {
+            ctx.kernels.cast_f32_to_bf16.clone()
+        }
+        (PhysicalLaunchKind::OutputDowncast, WeightDtype::F16) => {
+            ctx.kernels.cast_f32_to_f16.clone()
+        }
+        _ => {
+            return Err(
+                "physical graph conversion requires a half dtype and conversion kind".into(),
+            );
+        }
+    };
+    let count_i32 =
+        i32::try_from(count).map_err(|_| "physical graph conversion count exceeds i32::MAX")?;
+    let mut arguments = PhysicalGraphKernelArguments::new();
+    match kind {
+        PhysicalLaunchKind::InputUpcast => {
+            arguments.push(destination)?;
+            arguments.push(source)?;
+        }
+        PhysicalLaunchKind::OutputDowncast => {
+            arguments.push(destination)?;
+            arguments.push(source)?;
+        }
+        PhysicalLaunchKind::Gemm => {
+            return Err("physical graph conversion cannot bind a GEMM node".into());
+        }
+    }
+    arguments.push(count_i32)?;
+    Ok(PreparedPhysicalGraphLaunch {
+        function,
+        config,
+        node,
+        arguments,
+    })
+}
+
+fn request_half_dtype(physical: HalfPhysicalContext) -> Result<WeightDtype, String> {
+    match physical.dtype {
+        WeightDtype::Bf16 | WeightDtype::F16 => Ok(physical.dtype),
+        WeightDtype::F32 => Err("physical half graph fallback does not accept f32".into()),
+    }
+}
+
+type PreparedFallbackGraphSegments = (
+    Vec<PreparedPhysicalGraphLaunch>,
+    super::gemm_bi_triad::PreparedTriadPhysicalGraphSequence,
+    Vec<PreparedPhysicalGraphLaunch>,
+);
+
+fn prepare_fallback_graph_segments(
+    ctx: &GpuCtx,
+    observer: &RecordingPhysicalObserver,
+    request: HalfPhysicalTraceRequest,
+) -> Result<PreparedFallbackGraphSegments, String> {
+    let checked = match request.op {
+        ResolvedGemmOp::Nn => super::gemm_bi_triad::GemmDims::nn(request.dims, request.dims.1)?,
+        ResolvedGemmOp::Tn => super::gemm_bi_triad::GemmDims::tn(request.dims)?,
+        ResolvedGemmOp::Nt => super::gemm_bi_triad::GemmDims::nt(request.dims)?,
+    };
+    let physical = HalfPhysicalContext {
+        op: request.op,
+        dtype: request.dtype,
+        dims: request.dims,
+    };
+    request_half_dtype(physical)?;
+    let scratch_sizes = match request.op {
+        ResolvedGemmOp::Nn => (checked.mk, checked.kn, checked.mn),
+        ResolvedGemmOp::Tn => (checked.mn, checked.mk, 0),
+        ResolvedGemmOp::Nt => (checked.mn, checked.kn, checked.mk),
+    };
+    ctx.with_bi_upcast_scratch(scratch_sizes, |first, second, third| {
+        let first_ptr = first.cached_ptr();
+        let second_ptr = second.cached_ptr();
+        let third_ptr = third.cached_ptr();
+        let input_conversions = match request.op {
+            ResolvedGemmOp::Nn => [
+                (checked.mk, request.a, first_ptr),
+                (checked.kn, request.b, second_ptr),
+            ],
+            ResolvedGemmOp::Tn => [
+                (checked.mn, request.b, first_ptr),
+                (checked.mk, request.a, second_ptr),
+            ],
+            ResolvedGemmOp::Nt => [
+                (checked.mn, request.a, first_ptr),
+                (checked.kn, request.b, second_ptr),
+            ],
+        };
+        let mut prefix = Vec::new();
+        prefix
+            .try_reserve_exact(input_conversions.len())
+            .map_err(|error| format!("reserve physical graph conversion prefix: {error}"))?;
+        for conversion in input_conversions {
+            prefix.push(prepare_conversion_graph_launch(
+                ctx,
+                observer,
+                physical,
+                PhysicalLaunchKind::InputUpcast,
+                conversion,
+            )?);
+        }
+        if prefix.capacity() != prefix.len() {
+            return Err("physical graph conversion prefix capacity is not exact".into());
+        }
+        let scalar_physical = super::gemm_bi_triad::ScalarFallbackPhysicalContext {
+            dims: request.dims,
+            dtype: request.dtype,
+        };
+        let scalar = match request.op {
+            ResolvedGemmOp::Nn => {
+                super::gemm_bi_triad::prepare_exact_scalar_f32_forward_graph_sequence(
+                    ctx,
+                    observer,
+                    third,
+                    first,
+                    second_ptr,
+                    request.bias,
+                    scalar_physical,
+                )?
+            }
+            ResolvedGemmOp::Tn => {
+                super::gemm_bi_triad::prepare_exact_scalar_f32_backward_dw_graph_sequence(
+                    ctx,
+                    observer,
+                    request.output,
+                    first,
+                    second,
+                    scalar_physical,
+                )?
+            }
+            ResolvedGemmOp::Nt => {
+                super::gemm_bi_triad::prepare_exact_scalar_f32_backward_dx_graph_sequence(
+                    ctx,
+                    observer,
+                    third,
+                    first,
+                    second_ptr,
+                    scalar_physical,
+                )?
+            }
+        };
+        let mut suffix = Vec::new();
+        let downcast = match request.op {
+            ResolvedGemmOp::Nn => Some((checked.mn, third_ptr, request.output)),
+            ResolvedGemmOp::Tn => None,
+            ResolvedGemmOp::Nt => Some((checked.mk, third_ptr, request.output)),
+        };
+        if let Some(conversion) = downcast {
+            suffix
+                .try_reserve_exact(1)
+                .map_err(|error| format!("reserve physical graph conversion suffix: {error}"))?;
+            suffix.push(prepare_conversion_graph_launch(
+                ctx,
+                observer,
+                physical,
+                PhysicalLaunchKind::OutputDowncast,
+                conversion,
+            )?);
+            if suffix.capacity() != suffix.len() {
+                return Err("physical graph conversion suffix capacity is not exact".into());
+            }
+        }
+        Ok((prefix, scalar, suffix))
+    })
+}
+
+pub(super) fn prepare_half_physical_graph_package<'a>(
+    ctx: &'a GpuCtx,
+    request: HalfPhysicalTraceRequest,
+    manifest: &PreparedPhysicalCaptureManifest,
+) -> Result<PreparedPhysicalGraphPackage<'a>, String> {
+    manifest.validate_capture_request(ctx.gemm_route(), request.capacity)?;
+    let observer = prepare_half_physical_observer(ctx, request)?;
+    let first = manifest
+        .nodes()
+        .first()
+        .ok_or_else(|| "prepared physical graph manifest is empty".to_string())?;
+    let (prefix, triad, suffix) = match (first.kind(), first.module_kind()) {
+        (PhysicalLaunchKind::Gemm, ModuleKind::TriadSm80 | ModuleKind::TriadScalar) => (
+            vec![prepare_native_half_graph_launch(
+                ctx, &observer, request, *first,
+            )?],
+            None,
+            Vec::new(),
+        ),
+        (PhysicalLaunchKind::InputUpcast, ModuleKind::Fixed) => {
+            let (prefix, triad, suffix) = prepare_fallback_graph_segments(ctx, &observer, request)?;
+            (prefix, Some(triad), suffix)
+        }
+        (PhysicalLaunchKind::Gemm, ModuleKind::TriadSm120) => {
+            let op = match request.op {
+                ResolvedGemmOp::Nn => super::gemm_bi_triad::Sm120Op::Nn,
+                ResolvedGemmOp::Tn => super::gemm_bi_triad::Sm120Op::Tn,
+                ResolvedGemmOp::Nt => super::gemm_bi_triad::Sm120Op::Nt,
+            };
+            let auto = super::gemm_bi_triad::Sm120AutoRequest {
+                op,
+                dtype: request.dtype,
+                shape: super::gemm_bi_triad::Sm120Shape::contiguous(op, request.dims),
+                a_ptr: request.a,
+                b_ptr: request.b,
+                operands: super::gemm_bi_triad::Sm120LaunchOperands {
+                    output_ptr: request.output,
+                    bias_ptr: request.bias,
+                    alpha: 1.0,
+                    beta: if op == super::gemm_bi_triad::Sm120Op::Tn {
+                        1.0
+                    } else {
+                        0.0
+                    },
+                },
+            };
+            let triad =
+                super::gemm_bi_triad::prepare_sm120_auto_graph_sequence(ctx, &observer, auto)?;
+            if triad.len() != 1 || manifest.nodes().len() != 1 {
+                return Err("prepared SM120 graph package must contain exactly one launch".into());
+            }
+            (Vec::new(), Some(triad), Vec::new())
+        }
+        _ => return Err("prepared physical graph manifest has an unsupported first node".into()),
+    };
+    let prepared_count =
+        prefix.len() + triad.as_ref().map_or(0, |triad| triad.len()) + suffix.len();
+    if prepared_count != request.capacity {
+        return Err("prepared physical graph package backing capacity is not exact".into());
+    }
+    Ok(PreparedPhysicalGraphPackage {
+        ctx,
+        manifest: manifest.clone(),
+        observer: Some(observer),
+        prefix: prefix.into_boxed_slice(),
+        triad,
+        suffix: suffix.into_boxed_slice(),
+        launch_capacity: request.capacity,
+        context_token: ctx.instance_token(),
+        stream_token: ctx.stream_token(),
+        #[cfg(test)]
+        fail_before_enqueue: false,
+        #[cfg(test)]
+        drift_policy_after_capture: false,
+    })
+}
+
+struct PreparedF32PhysicalGraphParts {
+    observer: RecordingPhysicalObserver,
+    triad: super::gemm_bi_triad::PreparedTriadPhysicalGraphSequence,
+}
+
+fn prepare_f32_physical_graph_parts(
+    ctx: &GpuCtx,
+    request: F32PhysicalGraphPackageRequest<'_>,
+) -> Result<PreparedF32PhysicalGraphParts, String> {
+    let F32PhysicalGraphPackageRequest {
+        prepared,
+        output,
+        a,
+        b,
+        capacity,
+    } = request;
+    let prepared_request = prepared.physical_graph_request();
+    let operands = prepared.physical_graph_operands();
+    if output.cached_ptr() != operands.output
+        || a.cached_ptr() != operands.a
+        || b.cached_ptr() != operands.b
+    {
+        return Err("prepared F32 graph package buffer binding changed".into());
+    }
+    let observer = prepare_f32_physical_graph_observer(ctx, prepared, capacity)?;
+    let triad = if prepared.physical_graph_is_direct() {
+        super::gemm_bi_triad::prepare_prepared_f32_direct_graph_sequence(ctx, &observer, prepared)?
+    } else {
+        match prepared_request.op {
+            ResolvedGemmOp::Nn => {
+                super::gemm_bi_triad::prepare_prepared_f32_forward_graph_sequence(
+                    ctx, &observer, prepared, output, a,
+                )?
+            }
+            ResolvedGemmOp::Tn => {
+                super::gemm_bi_triad::prepare_prepared_f32_backward_dw_graph_sequence(
+                    ctx, &observer, prepared, b, a,
+                )?
+            }
+            ResolvedGemmOp::Nt => {
+                super::gemm_bi_triad::prepare_prepared_f32_backward_dx_graph_sequence(
+                    ctx, &observer, prepared, output, a,
+                )?
+            }
+        }
+    };
+    if triad.len() != capacity {
+        return Err("prepared F32 graph package launch capacity is not exact".into());
+    }
+    Ok(PreparedF32PhysicalGraphParts { observer, triad })
+}
+
+pub(in crate::mamba_ssm::gpu) fn prepare_f32_physical_graph_package<'a>(
+    ctx: &'a GpuCtx,
+    request: F32PhysicalGraphPackageRequest<'_>,
+    manifest: &PreparedPhysicalCaptureManifest,
+) -> Result<PreparedPhysicalGraphPackage<'a>, String> {
+    manifest.validate_capture_request(ctx.gemm_route(), request.capacity)?;
+    let capacity = request.capacity;
+    let PreparedF32PhysicalGraphParts { observer, triad } =
+        prepare_f32_physical_graph_parts(ctx, request)?;
+    Ok(PreparedPhysicalGraphPackage {
+        ctx,
+        manifest: manifest.clone(),
+        observer: Some(observer),
+        prefix: Box::new([]),
+        triad: Some(triad),
+        suffix: Box::new([]),
+        launch_capacity: capacity,
+        context_token: ctx.instance_token(),
+        stream_token: ctx.stream_token(),
+        #[cfg(test)]
+        fail_before_enqueue: false,
+        #[cfg(test)]
+        drift_policy_after_capture: false,
+    })
+}
+
+pub(in crate::mamba_ssm::gpu) unsafe fn record_prepared_f32_physical_trace(
+    ctx: &GpuCtx,
+    request: F32PhysicalGraphPackageRequest<'_>,
+) -> Result<RecordedPhysicalTrace, String> {
+    let PreparedF32PhysicalGraphParts {
+        mut observer,
+        triad,
+    } = prepare_f32_physical_graph_parts(ctx, request)?;
+    let mut bound = triad.bind(&ctx.stream)?;
+    unsafe { bound.enqueue(&mut observer) }
+        .map_err(|error| error.with_driver_context(format_args!("prepared F32 eager enqueue")))?;
+    finish_recording_physical_observer(observer, ctx.gemm_route())
+}
+
+/// Records one real eager half GEMM route through the production branch body.
+///
+/// # Safety
+///
+/// Every raw device pointer must belong to `ctx` and remain live until the
+/// stream has completed the enqueued work. The pointer roles follow `op`:
+/// NN is `(Y, X, W)`, TN is `(dW, X, dY)`, and NT is `(dX, dY, W)`.
+pub(in crate::mamba_ssm::gpu) unsafe fn record_half_physical_trace(
+    ctx: &GpuCtx,
+    request: HalfPhysicalTraceRequest,
+) -> Result<RecordedPhysicalTrace, String> {
+    let mut observer = prepare_half_physical_observer(ctx, request)?;
+    dispatch_half_physical_request(ctx, request, &mut observer)?;
+    finish_recording_physical_observer(observer, ctx.gemm_route())
+}
+
+pub(in crate::mamba_ssm::gpu) fn launch_half_production_branch(
+    ctx: &GpuCtx,
+    request: HalfPhysicalTraceRequest,
+) -> Result<HalfPolicyBranchSeal, String> {
+    let mut observer = NoPhysicalObserver;
+    dispatch_half_physical_request(ctx, request, &mut observer)
+}
+
+fn dispatch_half_physical_request<O: PhysicalLaunchObserver>(
+    ctx: &GpuCtx,
+    request: HalfPhysicalTraceRequest,
+    observer: &mut O,
+) -> Result<HalfPolicyBranchSeal, String> {
+    if request.nn_strides.is_some() && request.forced_tile.is_none() {
+        return Err("padded half physical strides require a forced NN route".into());
+    }
+    let a = TypedPtr {
+        ptr: request.a,
+        dtype: request.dtype,
+    };
+    let b = TypedPtr {
+        ptr: request.b,
+        dtype: request.dtype,
+    };
+    match (request.op, request.forced_tile) {
+        (ResolvedGemmOp::Nn, None) => gemm_bi_forward_typed_in(
+            ctx,
+            TypedPtr {
+                ptr: request.output,
+                dtype: request.dtype,
+            },
+            a,
+            b,
+            request.bias,
+            request.dims,
+            observer,
+        ),
+        (ResolvedGemmOp::Tn, None) => {
+            gemm_bi_backward_dw_typed_in(ctx, request.output, b, a, request.dims, observer)
+        }
+        (ResolvedGemmOp::Nt, None) => gemm_bi_backward_dx_typed_in(
+            ctx,
+            TypedPtr {
+                ptr: request.output,
+                dtype: request.dtype,
+            },
+            a,
+            b,
+            request.dims,
+            observer,
+        ),
+        (ResolvedGemmOp::Nn, Some(tile)) => {
+            let ops = super::gemm_bi_triad::TcFwdOperands {
+                y: TypedPtr {
+                    ptr: request.output,
+                    dtype: request.dtype,
+                },
+                x: a,
+                w: b,
+                bias_ptr: request.bias,
+            };
+            super::gemm_bi_triad::gemm_bi_forward_tc_with_tile_observed(
+                ctx,
+                observer,
+                &ops,
+                half_physical_request_shape(request)?,
+                tile,
+            )
+            .map(HalfPolicyBranchSeal::Native)
+        }
+        (ResolvedGemmOp::Tn, Some(tile)) => {
+            super::gemm_bi_triad::gemm_bi_backward_dw_tc_with_tile_observed(
+                ctx,
+                observer,
+                request.output,
+                b,
+                a,
+                request.dims,
+                tile,
+            )
+            .map(HalfPolicyBranchSeal::Native)
+        }
+        (ResolvedGemmOp::Nt, Some(tile)) => {
+            super::gemm_bi_triad::gemm_bi_backward_dx_tc_with_tile_observed(
+                ctx,
+                observer,
+                TypedPtr {
+                    ptr: request.output,
+                    dtype: request.dtype,
+                },
+                a,
+                b,
+                request.dims,
+                tile,
+            )
+            .map(HalfPolicyBranchSeal::Native)
+        }
+    }
 }
 
 /// Full backward: dW (accumulated), dX (overwritten), db (accumulated).
 ///
 /// `grads` = `(dw, db)`. `dims` = `(batch, n_in, n_out)`.
-pub fn gpu_sgemm_backward_grad_raw(
+pub fn gpu_gemm_bi_backward_grad_raw(
     ctx: &GpuCtx,
     dx: &mut GpuBuffer,
     grads: (&GradSlice, Option<&GradSlice>),
@@ -658,8 +1921,8 @@ pub fn gpu_sgemm_backward_grad_raw(
 ) -> Result<(), String> {
     let (dw, db) = grads;
     let (batch, n_in, n_out) = dims;
-    gpu_sgemm_backward_dw_grad(ctx, dw, dy, x_saved, batch, n_in, n_out)?;
-    gpu_sgemm_backward_dx_raw(ctx, dx, dy, w_ptr, batch, n_in, n_out)?;
+    gpu_gemm_bi_backward_dw_grad(ctx, dw, dy, x_saved, batch, n_in, n_out)?;
+    gpu_gemm_bi_backward_dx_raw(ctx, dx, dy, w_ptr, batch, n_in, n_out)?;
 
     if let Some(db) = db {
         let b_i = batch as i32;
@@ -693,7 +1956,7 @@ pub fn gpu_gemm_forward_dispatch(
     dims: (usize, usize, usize),
 ) -> Result<(), String> {
     match w_dtype {
-        WeightDtype::F32 => gpu_sgemm_forward_raw(ctx, y, x, w_ptr, bias_ptr, dims),
+        WeightDtype::F32 => gpu_gemm_bi_forward_raw(ctx, y, x, w_ptr, bias_ptr, dims),
         WeightDtype::F16 | WeightDtype::Bf16 => {
             // cuBLAS requires A and B to have matching dtype. Downcast x f32 -> w_dtype
             // into the ctx's reusable half-staging buffer.
@@ -741,7 +2004,7 @@ pub fn gpu_gemm_forward_dispatch(
 ///   `embed` row-major `[V,D]` = col-major `[D,V]`, OP_T → logical `[V,D]`.
 ///   `temporal` row-major `[B,D]` = col-major `[D,B]`, OP_N → logical `[D,B]`.
 ///   Output col-major `[V,B]` = row-major `[B,V]`.
-pub fn gpu_sgemm_tied_lm_head_raw(
+pub fn gpu_gemm_bi_tied_lm_head_raw(
     ctx: &GpuCtx,
     logits_ptr: cudarc::driver::sys::CUdeviceptr,
     temporal_ptr: cudarc::driver::sys::CUdeviceptr,
@@ -750,7 +2013,7 @@ pub fn gpu_sgemm_tied_lm_head_raw(
     d_model: usize,
     vocab_padded: usize,
 ) -> Result<(), String> {
-    gpu_sgemm_tied_lm_head_blas(
+    gpu_gemm_bi_tied_lm_head_blas(
         &ctx.blas,
         logits_ptr,
         temporal_ptr,
@@ -761,10 +2024,10 @@ pub fn gpu_sgemm_tied_lm_head_raw(
     )
 }
 
-/// No-context twin of `gpu_sgemm_tied_lm_head_raw` — takes only the cuBLAS
+/// No-context twin of `gpu_gemm_bi_tied_lm_head_raw` — takes only the cuBLAS
 /// handle so callers without a `GpuCtx` (e.g., Mamba-3 LLM wrapper) can use
 /// the same OP_T row-major trick without synthesizing a context.
-pub fn gpu_sgemm_tied_lm_head_blas(
+pub fn gpu_gemm_bi_tied_lm_head_blas(
     blas: &cudarc::cublas::CudaBlas,
     logits_ptr: cudarc::driver::sys::CUdeviceptr,
     temporal_ptr: cudarc::driver::sys::CUdeviceptr,
@@ -797,6 +2060,518 @@ pub fn gpu_sgemm_tied_lm_head_blas(
     Ok(())
 }
 
+#[cfg(test)]
+mod physical_graph_tests {
+    use super::*;
+    use crate::mamba_ssm::gpu::buffers::DtypedBuf;
+    use crate::mamba_ssm::gpu::context::{BiGemmFamily, F32TriadPolicy};
+    use crate::mamba_ssm::gpu::device::GpuDevice;
+    use crate::mamba_ssm::gpu::graph_capture::{
+        CapturedPhysicalGraph, capture_into_graph, capture_into_graph_with_physical_plan,
+    };
+    use crate::mamba_ssm::gpu::kernel_identity::PreparedPhysicalCaptureManifest;
+
+    fn half_branch_is_sm120(branch: HalfPolicyBranchSeal) -> bool {
+        matches!(branch, HalfPolicyBranchSeal::Sm120(_))
+    }
+
+    #[test]
+    fn half_policy_has_a_distinct_sm120_branch_seal() {
+        let projection: fn(HalfPolicyBranchSeal) -> bool = half_branch_is_sm120;
+        assert_eq!(
+            std::mem::size_of_val(&projection),
+            std::mem::size_of::<usize>()
+        );
+    }
+
+    #[test]
+    #[ignore = "requires a CC 12.0 CUDA device and NVRTC"]
+    fn sm120_auto_cache_rejects_managed_epoch_aba_during_capture() {
+        let ctx = physical_graph_context();
+        if ctx.compute_capability() != (12, 0) {
+            return;
+        }
+        ctx.set_bi_tensor_cores(true);
+        let route = super::super::gemm_bi_triad::SM120_AUTO_CELLS_CC120
+            .iter()
+            .copied()
+            .find(|route| {
+                route.op == super::super::gemm_bi_triad::Sm120Op::Nn
+                    && route.dtype == WeightDtype::Bf16
+            })
+            .expect("qualified CC12.0 BF16 NN route");
+        let dims = (route.shape.m, route.shape.k, route.shape.n);
+        let mut buffers =
+            PhysicalGraphBuffers::new_for_op(&ctx, WeightDtype::Bf16, dims, ResolvedGemmOp::Nn)
+                .unwrap();
+        let output_ptr = buffers.output.cached_ptr();
+        let a_ptr = buffers.a.cached_ptr();
+        let b_ptr = buffers.b.cached_ptr();
+        let launch = || {
+            gemm_bi_forward_typed(
+                &ctx,
+                TypedPtr {
+                    ptr: output_ptr,
+                    dtype: WeightDtype::Bf16,
+                },
+                TypedPtr {
+                    ptr: a_ptr,
+                    dtype: WeightDtype::Bf16,
+                },
+                TypedPtr {
+                    ptr: b_ptr,
+                    dtype: WeightDtype::Bf16,
+                },
+                0,
+                dims,
+            )
+        };
+        launch().expect("warm automatic SM120 cache");
+        ctx.stream.synchronize().expect("finish SM120 warmup");
+        buffers
+            .output
+            .replace_managed_allocation_generation_for_test()
+            .expect("replace managed output generation at the same address");
+        let error = match unsafe { capture_into_graph(&ctx.stream, launch) } {
+            Ok(_) => panic!("managed-generation ABA unexpectedly captured"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            error.strip_prefix("body: ").unwrap_or(&error),
+            "prepared SM120 Triad allocation epoch changed during graph capture; run eager warmup again"
+        );
+    }
+
+    struct PhysicalGraphBuffers {
+        output: DtypedBuf,
+        a: DtypedBuf,
+        b: DtypedBuf,
+    }
+
+    impl PhysicalGraphBuffers {
+        fn new(
+            ctx: &GpuCtx,
+            dtype: WeightDtype,
+            dims: (usize, usize, usize),
+        ) -> Result<Self, String> {
+            Self::new_for_op(ctx, dtype, dims, ResolvedGemmOp::Nn)
+        }
+
+        fn new_for_op(
+            ctx: &GpuCtx,
+            dtype: WeightDtype,
+            dims: (usize, usize, usize),
+            op: ResolvedGemmOp,
+        ) -> Result<Self, String> {
+            let (m, k, n) = dims;
+            let (output_len, output_dtype, a_len, b_len) = match op {
+                ResolvedGemmOp::Nn => (m * n, dtype, m * k, k * n),
+                ResolvedGemmOp::Tn => (k * n, WeightDtype::F32, m * k, m * n),
+                ResolvedGemmOp::Nt => (m * k, dtype, m * n, k * n),
+            };
+            Ok(Self {
+                output: DtypedBuf::zeros(&ctx.stream, output_len, output_dtype)?,
+                a: DtypedBuf::zeros(&ctx.stream, a_len, dtype)?,
+                b: DtypedBuf::zeros(&ctx.stream, b_len, dtype)?,
+            })
+        }
+
+        fn request(
+            &self,
+            dtype: WeightDtype,
+            dims: (usize, usize, usize),
+            capacity: usize,
+        ) -> HalfPhysicalTraceRequest {
+            self.request_for_op(dtype, dims, ResolvedGemmOp::Nn, capacity)
+        }
+
+        fn request_for_op(
+            &self,
+            dtype: WeightDtype,
+            dims: (usize, usize, usize),
+            op: ResolvedGemmOp,
+            capacity: usize,
+        ) -> HalfPhysicalTraceRequest {
+            HalfPhysicalTraceRequest {
+                op,
+                output: self.output.cached_ptr(),
+                a: self.a.cached_ptr(),
+                b: self.b.cached_ptr(),
+                bias: 0,
+                dtype,
+                dims,
+                nn_strides: None,
+                forced_tile: None,
+                capacity,
+            }
+        }
+    }
+
+    struct F32PhysicalGraphBuffers {
+        output: GpuBuffer,
+        a: GpuBuffer,
+        b: GpuBuffer,
+    }
+
+    impl F32PhysicalGraphBuffers {
+        fn new(ctx: &GpuCtx, dims: (usize, usize, usize)) -> Result<Self, String> {
+            let (m, k, n) = dims;
+            Ok(Self {
+                output: GpuBuffer::zeros(&ctx.stream, m * n)?,
+                a: GpuBuffer::zeros(&ctx.stream, m * k)?,
+                b: GpuBuffer::zeros(&ctx.stream, k * n)?,
+            })
+        }
+
+        fn operands(&self) -> super::super::gemm_bi_triad::F32TriadOperands {
+            super::super::gemm_bi_triad::F32TriadOperands {
+                output: self.output.cached_ptr(),
+                a: self.a.cached_ptr(),
+                b: self.b.cached_ptr(),
+                bias: None,
+                alpha: 1.0,
+                beta: 0.0,
+            }
+        }
+
+        fn package_request<'a>(
+            &'a mut self,
+            prepared: &'a super::super::gemm_bi_triad::PreparedF32TriadLaunch,
+            capacity: usize,
+        ) -> F32PhysicalGraphPackageRequest<'a> {
+            F32PhysicalGraphPackageRequest {
+                prepared,
+                output: &mut self.output,
+                a: &self.a,
+                b: &self.b,
+                capacity,
+            }
+        }
+    }
+
+    fn physical_graph_context() -> GpuCtx {
+        let device = GpuDevice::new(0).expect("CUDA device for physical graph test");
+        let ctx = GpuCtx::new(&device).expect("GPU context for physical graph test");
+        ctx.set_batch_invariant(true);
+        ctx.set_bi_gemm_family(BiGemmFamily::Triad);
+        ctx
+    }
+
+    fn eager_manifest(
+        ctx: &GpuCtx,
+        request: HalfPhysicalTraceRequest,
+    ) -> Result<PreparedPhysicalCaptureManifest, String> {
+        let trace = unsafe { record_half_physical_trace(ctx, request) }?;
+        ctx.stream
+            .synchronize()
+            .map_err(|error| format!("synchronize eager physical graph trace: {error:?}"))?;
+        Ok(trace.manifest())
+    }
+
+    #[test]
+    #[ignore = "requires a CUDA device and NVRTC"]
+    fn half_physical_trace_arguments_track_base_offsets_without_device_addresses() {
+        let ctx = physical_graph_context();
+        ctx.set_bi_tensor_cores(false);
+        let dims = (64, 96, 80);
+        for dtype in [WeightDtype::Bf16, WeightDtype::F16] {
+            let width = dtype.size_bytes() as u64;
+            let output = DtypedBuf::zeros(&ctx.stream, dims.0 * dims.2 + 1, dtype).unwrap();
+            let a = DtypedBuf::zeros(&ctx.stream, dims.0 * dims.1 + 1, dtype).unwrap();
+            let b = DtypedBuf::zeros(&ctx.stream, dims.1 * dims.2 + 1, dtype).unwrap();
+            let record = |offset: u64| unsafe {
+                record_half_physical_trace(
+                    &ctx,
+                    HalfPhysicalTraceRequest {
+                        op: ResolvedGemmOp::Nn,
+                        output: output.cached_ptr() + offset,
+                        a: a.cached_ptr() + offset,
+                        b: b.cached_ptr() + offset,
+                        bias: 0,
+                        dtype,
+                        dims,
+                        nn_strides: None,
+                        forced_tile: None,
+                        capacity: 1,
+                    },
+                )
+            };
+            let base = record(0).unwrap();
+            let offset = record(width).unwrap();
+            ctx.stream.synchronize().unwrap();
+            assert_ne!(
+                base.nodes()[0].launch().arguments_digest,
+                offset.nodes()[0].launch().arguments_digest,
+                "{dtype:?}"
+            );
+        }
+    }
+
+    unsafe fn capture_case(
+        ctx: &GpuCtx,
+        request: HalfPhysicalTraceRequest,
+        manifest: &PreparedPhysicalCaptureManifest,
+    ) -> Result<CapturedPhysicalGraph, String> {
+        let package = prepare_half_physical_graph_package(ctx, request, manifest)?;
+        unsafe { capture_into_graph_with_physical_plan(package) }
+    }
+
+    #[test]
+    #[ignore = "requires a CUDA device and NVRTC"]
+    fn physical_graph_captures_native_half_and_exact_typed_fallback() {
+        let cases = [
+            (ResolvedGemmOp::Nn, true, (128, 128, 128), 1),
+            (ResolvedGemmOp::Tn, true, (128, 128, 128), 1),
+            (ResolvedGemmOp::Nt, true, (128, 128, 128), 1),
+            (ResolvedGemmOp::Nn, false, (64, 384, 512), 5),
+            (ResolvedGemmOp::Tn, false, (64, 384, 512), 3),
+            (ResolvedGemmOp::Nt, false, (64, 384, 512), 6),
+        ];
+        for (op, tensor_cores, dims, capacity) in cases {
+            let ctx = physical_graph_context();
+            ctx.set_bi_tensor_cores(tensor_cores);
+            let buffers =
+                PhysicalGraphBuffers::new_for_op(&ctx, WeightDtype::Bf16, dims, op).unwrap();
+            let request = buffers.request_for_op(WeightDtype::Bf16, dims, op, capacity);
+            let manifest = eager_manifest(&ctx, request).unwrap();
+            assert_eq!(manifest.launch_capacity(), capacity, "{op:?} {dims:?}");
+            let graph = unsafe { capture_case(&ctx, request, &manifest) }.unwrap();
+            assert_eq!(graph.nodes(), manifest.nodes());
+            assert_eq!(
+                graph.launches(),
+                super::super::kernel_identity::ResolvedPhysicalLaunchSet::from_nodes(
+                    manifest.nodes()
+                )
+                .unwrap()
+            );
+            graph.launch(&ctx, "physical graph success").unwrap();
+            ctx.stream.synchronize().unwrap();
+        }
+    }
+
+    #[test]
+    #[ignore = "requires a CUDA device and NVRTC"]
+    fn physical_graph_captures_prepared_f32_exact_and_tf32() {
+        let dims = (128, 128, 128);
+        for forced_tf32 in [false, true] {
+            let ctx = physical_graph_context();
+            ctx.set_f32_triad_policy(if forced_tf32 {
+                F32TriadPolicy::AllowDeterministicTf32V1
+            } else {
+                F32TriadPolicy::ExactScalarFmaV1
+            });
+            let mut buffers = F32PhysicalGraphBuffers::new(&ctx, dims).unwrap();
+            let request = super::super::gemm_bi_triad::F32TriadRequest {
+                op: ResolvedGemmOp::Nn,
+                shape: super::super::gemm_bi_triad::F32TriadShape::contiguous(
+                    ResolvedGemmOp::Nn,
+                    dims,
+                ),
+            };
+            let operands = buffers.operands();
+            let prepared = if forced_tf32 {
+                let availability = ctx.kernels.f32_triad_availability();
+                let module_kind = availability
+                    .specialized
+                    .or(availability.portable)
+                    .expect("qualified TF32 module")
+                    .module_kind;
+                let specs: &[super::super::gemm_bi_triad::Tf32KernelSpec] = match module_kind {
+                    ModuleKind::TriadSm80 => &super::super::gemm_bi_triad::SM80_TF32_ROUTE_SPECS,
+                    ModuleKind::TriadSm90a => &super::super::gemm_bi_triad::SM90A_TF32_ROUTE_SPECS,
+                    ModuleKind::TriadSm100 => &super::super::gemm_bi_triad::SM100_TF32_ROUTE_SPECS,
+                    ModuleKind::TriadSm120 => &super::super::gemm_bi_triad::SM120_TF32_ROUTE_SPECS,
+                    _ => panic!("non-Triad TF32 module {module_kind:?}"),
+                };
+                let route = specs
+                    .iter()
+                    .find(|spec| spec.op == ResolvedGemmOp::Nn)
+                    .expect("NN TF32 route")
+                    .route;
+                super::super::gemm_bi_triad::prepare_f32_triad_forced(
+                    &ctx, request, operands, route,
+                )
+                .unwrap()
+            } else {
+                super::super::gemm_bi_triad::prepare_f32_triad(&ctx, request, operands).unwrap()
+            };
+            let capacity = prepared.physical_graph_launch_count();
+            let trace = unsafe {
+                record_prepared_f32_physical_trace(
+                    &ctx,
+                    buffers.package_request(&prepared, capacity),
+                )
+            }
+            .unwrap();
+            ctx.stream.synchronize().unwrap();
+            let manifest = trace.manifest();
+            assert_eq!(manifest.launch_capacity(), capacity);
+            let package = prepare_f32_physical_graph_package(
+                &ctx,
+                buffers.package_request(&prepared, capacity),
+                &manifest,
+            )
+            .unwrap();
+            let graph = unsafe { capture_into_graph_with_physical_plan(package) }.unwrap();
+            assert_eq!(graph.nodes(), manifest.nodes());
+            graph.launch(&ctx, "prepared F32 physical graph").unwrap();
+            ctx.stream.synchronize().unwrap();
+        }
+    }
+
+    #[test]
+    #[ignore = "requires a CUDA device and NVRTC"]
+    fn physical_graph_rejects_a_valid_unobserved_raw_cuda_node() {
+        let ctx = physical_graph_context();
+        ctx.set_bi_tensor_cores(true);
+        let dims = (128, 128, 128);
+        let buffers = PhysicalGraphBuffers::new(&ctx, WeightDtype::Bf16, dims).unwrap();
+        let request = buffers.request(WeightDtype::Bf16, dims, 1);
+        let manifest = eager_manifest(&ctx, request).unwrap();
+        let package = prepare_half_physical_graph_package(&ctx, request, &manifest).unwrap();
+        assert_eq!(package.launch_capacity, manifest.launch_capacity());
+        let graph = unsafe { capture_into_graph_with_physical_plan(package) }.unwrap();
+        assert_eq!(graph.nodes(), manifest.nodes());
+        graph
+            .launch(&ctx, "physical graph excludes raw-node escape")
+            .unwrap();
+        ctx.stream.synchronize().unwrap();
+    }
+
+    #[test]
+    #[ignore = "requires a CUDA device and NVRTC"]
+    fn physical_graph_rejects_failures_and_replay_drift_then_reuses_stream() {
+        let ctx = physical_graph_context();
+        ctx.set_bi_tensor_cores(true);
+        let dims = (128, 128, 128);
+        let buffers = PhysicalGraphBuffers::new(&ctx, WeightDtype::Bf16, dims).unwrap();
+        let request = buffers.request(WeightDtype::Bf16, dims, 1);
+        let manifest = eager_manifest(&ctx, request).unwrap();
+
+        let mut body_failure =
+            prepare_half_physical_graph_package(&ctx, request, &manifest).unwrap();
+        body_failure.inject_body_failure();
+        let error = match unsafe { capture_into_graph_with_physical_plan(body_failure) } {
+            Ok(_) => panic!("body failure returned a physical graph"),
+            Err(error) => error,
+        };
+        assert!(
+            error.contains("expected prepared physical body error"),
+            "{error}"
+        );
+
+        let mut driver_failure =
+            prepare_half_physical_graph_package(&ctx, request, &manifest).unwrap();
+        driver_failure.inject_driver_failure();
+        let driver_error = match unsafe { capture_into_graph_with_physical_plan(driver_failure) } {
+            Ok(_) => panic!("Driver failure returned a physical graph"),
+            Err(error) => error,
+        };
+        assert!(
+            driver_error.contains("CUDA") || driver_error.contains("Driver"),
+            "{driver_error}"
+        );
+
+        let stale_package = prepare_half_physical_graph_package(&ctx, request, &manifest).unwrap();
+        let graph = unsafe { capture_case(&ctx, request, &manifest) }.unwrap();
+        ctx.set_bi_tensor_cores(false);
+        assert!(graph.launch(&ctx, "changed physical policy").is_err());
+        ctx.set_bi_tensor_cores(true);
+
+        let other = physical_graph_context();
+        other.set_bi_tensor_cores(true);
+        let other_buffers = PhysicalGraphBuffers::new(&other, WeightDtype::Bf16, dims).unwrap();
+        let other_request = other_buffers.request(WeightDtype::Bf16, dims, 1);
+        let other_package =
+            prepare_half_physical_graph_package(&other, other_request, &manifest).unwrap();
+        let other_capture_error =
+            match unsafe { capture_into_graph_with_physical_plan(other_package) } {
+                Ok(_) => panic!("a different context returned a physical graph"),
+                Err(error) => error,
+            };
+        assert!(
+            other_capture_error.contains("context instance"),
+            "{other_capture_error}"
+        );
+        assert!(graph.launch(&other, "changed physical context").is_err());
+
+        drop(buffers.a);
+        let stale_capture_error =
+            match unsafe { capture_into_graph_with_physical_plan(stale_package) } {
+                Ok(_) => panic!("stale allocation generation returned a physical graph"),
+                Err(error) => error,
+            };
+        assert!(
+            stale_capture_error.contains("allocation generation"),
+            "{stale_capture_error}"
+        );
+        assert!(graph.launch(&ctx, "changed allocation generation").is_err());
+        drop(graph);
+
+        let recovered = PhysicalGraphBuffers::new(&ctx, WeightDtype::Bf16, dims).unwrap();
+        let recovered_request = recovered.request(WeightDtype::Bf16, dims, 1);
+        let recovered_manifest = eager_manifest(&ctx, recovered_request).unwrap();
+        let recovered_graph =
+            unsafe { capture_case(&ctx, recovered_request, &recovered_manifest) }.unwrap();
+        recovered_graph
+            .launch(&ctx, "recovered physical graph")
+            .unwrap();
+        ctx.stream.synchronize().unwrap();
+    }
+
+    #[test]
+    #[ignore = "requires a CUDA device and NVRTC"]
+    fn physical_graph_rejects_capture_and_post_capture_identity_drift() {
+        let ctx = physical_graph_context();
+        ctx.set_bi_tensor_cores(true);
+        let dims = (128, 128, 128);
+        let eager_buffers = PhysicalGraphBuffers::new(&ctx, WeightDtype::Bf16, dims).unwrap();
+        let eager_request = eager_buffers.request(WeightDtype::Bf16, dims, 1);
+        let manifest = eager_manifest(&ctx, eager_request).unwrap();
+
+        let changed_buffers = PhysicalGraphBuffers::new(&ctx, WeightDtype::Bf16, dims).unwrap();
+        let changed_request = changed_buffers.request(WeightDtype::Bf16, dims, 1);
+        let changed_package =
+            prepare_half_physical_graph_package(&ctx, changed_request, &manifest).unwrap();
+        let changed_arguments =
+            match unsafe { capture_into_graph_with_physical_plan(changed_package) } {
+                Ok(_) => panic!("changed arguments returned a physical graph"),
+                Err(error) => error,
+            };
+        assert!(changed_arguments.contains("exact"), "{changed_arguments}");
+
+        let mut drift_package =
+            prepare_half_physical_graph_package(&ctx, eager_request, &manifest).unwrap();
+        drift_package.inject_post_capture_policy_drift();
+        let post_capture_policy =
+            match unsafe { capture_into_graph_with_physical_plan(drift_package) } {
+                Ok(_) => panic!("post-capture policy drift returned a physical graph"),
+                Err(error) => error,
+            };
+        assert!(
+            post_capture_policy.contains("changed since capture"),
+            "{post_capture_policy}"
+        );
+        ctx.set_bi_tensor_cores(true);
+
+        let oversized_request = HalfPhysicalTraceRequest {
+            capacity: 2,
+            ..eager_request
+        };
+        let capacity_error =
+            prepare_half_physical_graph_package(&ctx, oversized_request, &manifest)
+                .err()
+                .expect("wrong observer capacity must reject the package");
+        assert!(capacity_error.contains("capacity"), "{capacity_error}");
+
+        let graph = unsafe { capture_case(&ctx, eager_request, &manifest) }.unwrap();
+        graph
+            .launch(&ctx, "recovered exact physical graph")
+            .unwrap();
+        ctx.stream.synchronize().unwrap();
+    }
+}
+
 /// Typed device pointer: raw ptr + element dtype.
 #[derive(Copy, Clone)]
 pub struct TypedPtr {
@@ -812,7 +2587,7 @@ pub struct TiedLmDims {
     pub vocab_padded: usize,
 }
 
-/// Half-precision twin of `gpu_sgemm_tied_lm_head_raw` for bf16/f16 embed.
+/// Half-precision twin of `gpu_gemm_bi_tied_lm_head_raw` for bf16/f16 embed.
 /// `temporal_ptr` input activations must already be in `dtype` (not f32).
 pub fn gpu_gemm_ex_tied_lm_head_raw(
     ctx: &GpuCtx,
@@ -873,7 +2648,7 @@ pub fn gpu_gemm_ex_tied_lm_head_blas(
 /// Inputs X and W are in `w_dtype` (f32/f16/bf16). Output Y is always f32.
 /// Compute type is f32 (CUBLAS_COMPUTE_32F) — f32 accumulation regardless of input dtype.
 ///
-/// For `WeightDtype::F32`, this is mathematically identical to `gpu_sgemm_forward_raw`
+/// For `WeightDtype::F32`, this is mathematically identical to `gpu_gemm_bi_forward_raw`
 /// (callers should prefer sgemm path for f32 to avoid gemmEx overhead).
 ///
 /// `dims` = `(batch, n_in, n_out)`. `x_ptr` and `w_ptr` are raw device pointers (CUDA
@@ -963,16 +2738,16 @@ fn pick_bi_gemm(
     a_dtype: WeightDtype,
     b_dtype: WeightDtype,
     c_dtype: WeightDtype,
-) -> Option<&cudarc::driver::CudaFunction> {
+) -> Option<(&cudarc::driver::CudaFunction, u32)> {
     if a_dtype != b_dtype {
         return None;
     }
     match (a_dtype, c_dtype) {
-        (WeightDtype::Bf16, WeightDtype::Bf16) => Some(&ctx.kernels.gemm_bi_bf16_bf16),
-        (WeightDtype::F16, WeightDtype::F16) => Some(&ctx.kernels.gemm_bi_f16_f16),
-        (WeightDtype::Bf16, WeightDtype::F32) => Some(&ctx.kernels.gemm_bi_bf16_f32),
-        (WeightDtype::F16, WeightDtype::F32) => Some(&ctx.kernels.gemm_bi_f16_f32),
-        (WeightDtype::F32, WeightDtype::F32) => Some(&ctx.kernels.gemm_bi_f32_f32),
+        (WeightDtype::Bf16, WeightDtype::Bf16) => Some((&ctx.kernels.gemm_bi_bf16_bf16, 256)),
+        (WeightDtype::F16, WeightDtype::F16) => Some((&ctx.kernels.gemm_bi_f16_f16, 256)),
+        (WeightDtype::Bf16, WeightDtype::F32) => Some((&ctx.kernels.gemm_bi_bf16_f32, 256)),
+        (WeightDtype::F16, WeightDtype::F32) => Some((&ctx.kernels.gemm_bi_f16_f32, 256)),
+        (WeightDtype::F32, WeightDtype::F32) => Some((&ctx.kernels.gemm_bi_f32_f32_s2, 128)),
         _ => None,
     }
 }
@@ -1000,24 +2775,22 @@ struct BiGemmArgs {
 fn launch_bi_gemm(
     ctx: &GpuCtx,
     kernel: &cudarc::driver::CudaFunction,
+    threads: u32,
     args: BiGemmArgs,
 ) -> Result<(), String> {
-    // MUST equal the legacy kernel's constants in kernels/gemm_bi_fixed/
-    // (both the TC and the f32 FFMA instantiations use the same 64x64
-    // tile with 256 threads). A launch that disagrees fills part of the
-    // tile and returns plausible garbage - measured: a 64-thread launch
-    // of this 256-thread tile ran 2.3x "faster" and was wrong everywhere.
+    // The selected kernel supplies its qualified thread count. Every
+    // variant below still owns a 64x64 output tile; a mismatched block
+    // size can return plausible garbage rather than a launch error.
     // Static smem only - shared_mem_bytes stays 0 here; the dynamic
     // K-buffer belongs to launch_bi_matvec alone.
     const BLOCK_M: i32 = 64;
     const BLOCK_N: i32 = 64;
-    const THREADS: u32 = 256;
     let num_pid_m = (args.m + BLOCK_M - 1) / BLOCK_M;
     let num_pid_n = (args.n + BLOCK_N - 1) / BLOCK_N;
     let grid = (num_pid_m as u32) * (num_pid_n as u32);
     let cfg = cudarc::driver::LaunchConfig {
         grid_dim: (grid, 1, 1),
-        block_dim: (THREADS, 1, 1),
+        block_dim: (threads, 1, 1),
         shared_mem_bytes: 0,
     };
     let lda = args.k;
@@ -1067,7 +2840,7 @@ pub(crate) fn fixed_legacy_forward(
     dims: (usize, usize, usize),
 ) -> Result<(), String> {
     let (batch, n_in, n_out) = dims;
-    let Some(kernel) = pick_bi_gemm(ctx, x.dtype, w.dtype, c.dtype) else {
+    let Some((kernel, threads)) = pick_bi_gemm(ctx, x.dtype, w.dtype, c.dtype) else {
         return Err(format!(
             "gemm_bi: no kernel for operand dtypes a={:?} b={:?} c={:?}",
             x.dtype, w.dtype, c.dtype
@@ -1076,6 +2849,7 @@ pub(crate) fn fixed_legacy_forward(
     launch_bi_gemm(
         ctx,
         kernel,
+        threads,
         BiGemmArgs {
             c: c.ptr,
             a: x.ptr,
@@ -1179,7 +2953,7 @@ pub fn gpu_gemm_typed_forward_raw(
     // Opt-in only — default is cuBLAS gemv for maximum throughput.
     // Enable via `ctx.set_batch_invariant(true)` or the
     // `MAMBA_RS_BATCH_INVARIANT=1` environment variable.
-    // Typed sgemm_bi , homogeneous bf16/f16 operand triples only.
+    // Typed gemm_bi, homogeneous bf16/f16 operand triples only.
     // Routing:
     //   - TC tier ON, N >= 32: the forward tile ladder
     //     (Thin16/Tile64/Tile128 — bit-identical per output element)
@@ -1189,7 +2963,7 @@ pub fn gpu_gemm_typed_forward_raw(
     //     bucket edge) at a measured M=1 cost of ~1.4-1.9x vs matvec
     //     (thin_rung_decode_bench); from M=4 the ladder is FASTER.
     //   - scalar tier (TC off), M >= 128: full-coverage typed entry —
-    //     native typed buckets, else upcast → f32 sgemm_bi → RNE
+    //     native typed buckets, else upcast → f32 gemm_bi → RNE
     //     downcast. Bit-identical by contract.
     //   - scalar tier M < 128, and N < 32 on either tier: matvec_bi
     //     below — one reduction order for every M within its band.
@@ -1210,7 +2984,7 @@ pub fn gpu_gemm_typed_forward_raw(
     if ctx.batch_invariant() && homogeneous_half && n_out >= 2 {
         let tc_ladder = ctx.bi_tensor_cores() && n_out >= 32;
         if tc_ladder || batch >= 128 {
-            return bi_sgemm_forward_typed(ctx, c, x, w, bias_ptr.unwrap_or(0), dims);
+            return gemm_bi_forward_typed(ctx, c, x, w, bias_ptr.unwrap_or(0), dims);
         }
     }
 

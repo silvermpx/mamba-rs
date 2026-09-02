@@ -42,7 +42,7 @@ pub struct Mamba3Kernels {
     pub angle_dt_fwd: CudaFunction,
     pub m3_angle_dt_fwd_batch: CudaFunction,
     pub m3_angle_dt_fwd_seq: CudaFunction,
-    /// Chunk-parallel angle accumulation trio — replaces the sequential
+    /// Chunk-parallel angle accumulation pair — replaces the sequential
     /// kernel on multi-chunk windows (its serial fp64 chain dominates
     /// the prefill profile at production shapes).
     pub m3_angle_chunk_sums: CudaFunction,

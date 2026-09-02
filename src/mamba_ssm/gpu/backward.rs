@@ -16,7 +16,7 @@
 //!
 //! Source: CPU reference in train/forward.rs
 
-use super::blas::gpu_sgemm_backward_grad_raw;
+use super::blas::gpu_gemm_bi_backward_grad_raw;
 use super::buffers::GpuBuffer;
 use super::context::GpuCtx;
 use super::forward::{GpuMambaBackboneActs, GpuMambaLayerActs, GpuMambaScratch};
@@ -52,7 +52,7 @@ pub fn gpu_backward_mamba_layer(
     // ===================================================================
     // B1: Batch out_proj backward
     // ===================================================================
-    gpu_sgemm_backward_grad_raw(
+    gpu_gemm_bi_backward_grad_raw(
         ctx,
         &mut scratch.d_gated,
         (&d_lw.out_proj_w, None),
@@ -324,7 +324,7 @@ pub fn gpu_backward_mamba_layer(
             .map_err(|e| format!("gather dt x_saved mamba: {:?}", e))?;
     }
 
-    gpu_sgemm_backward_grad_raw(
+    gpu_gemm_bi_backward_grad_raw(
         ctx,
         &mut scratch.d_dt_input, // dx [B*T*dt_rank]
         (&d_lw.dt_proj_w, Some(&d_lw.dt_proj_b)),
@@ -358,7 +358,7 @@ pub fn gpu_backward_mamba_layer(
     // ===================================================================
     // B5: x_proj backward
     // ===================================================================
-    gpu_sgemm_backward_grad_raw(
+    gpu_gemm_bi_backward_grad_raw(
         ctx,
         &mut scratch.d_u_xproj,
         (&d_lw.x_proj_w, None),
@@ -495,7 +495,7 @@ pub fn gpu_backward_mamba_layer(
     // d_proj is already complete: the gating backward wrote its gate
     // half and the conv dx pass wrote its x half, both in place.
 
-    gpu_sgemm_backward_grad_raw(
+    gpu_gemm_bi_backward_grad_raw(
         ctx,
         &mut scratch.d_norm,
         (&d_lw.in_proj_w, None),
@@ -568,7 +568,7 @@ pub fn gpu_backward_mamba_layer(
 /// Mirrors CPU `backward_mamba_backbone_batched` from train/forward.rs.
 ///
 /// **IMPORTANT**: weight gradients in `d_mamba` are **accumulated** via
-/// `beta=1.0` in `gpu_sgemm_backward_dw_grad`. The caller MUST call
+/// `beta=1.0` in `gpu_gemm_bi_backward_dw_grad`. The caller MUST call
 /// [`GpuMambaGrads::zero`] before each training step if the buffer is
 /// reused across iterations; otherwise gradients from step N−1 pollute
 /// step N and the optimizer sees doubled updates.
@@ -656,7 +656,7 @@ pub fn gpu_backward_mamba_backbone(
     }
 
     // Input projection backward (dx discarded — input embedding detached)
-    gpu_sgemm_backward_grad_raw(
+    gpu_gemm_bi_backward_grad_raw(
         ctx,
         &mut scratch.d_input_proj_dx,
         (&d_mamba.input_proj_w, Some(&d_mamba.input_proj_b)),

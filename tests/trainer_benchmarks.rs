@@ -1056,7 +1056,7 @@ fn bench_bwd_kernels_isolated() {
 #[ignore]
 fn bench_bwd_gemms_isolated() {
     use mamba_rs::mamba_ssm::gpu::blas::{
-        TypedPtr, bi_sgemm_backward_dw_typed, bi_sgemm_backward_dx_typed,
+        TypedPtr, gemm_bi_backward_dw_typed, gemm_bi_backward_dx_typed,
     };
     use mamba_rs::mamba_ssm::gpu::buffers::{DtypedBuf, GpuBuffer};
     use mamba_rs::mamba_ssm::gpu::context::GpuCtx;
@@ -1082,7 +1082,7 @@ fn bench_bwd_gemms_isolated() {
         let dx = DtypedBuf::zeros(&ctx.stream, bt * n_in, dtype).unwrap();
         let dw = GpuBuffer::zeros(&ctx.stream, n_in * n_out).unwrap();
         let run = |ctx: &GpuCtx| {
-            bi_sgemm_backward_dw_typed(
+            gemm_bi_backward_dw_typed(
                 ctx,
                 dw.cached_ptr(),
                 TypedPtr {
@@ -1096,7 +1096,7 @@ fn bench_bwd_gemms_isolated() {
                 (bt, n_in, n_out),
             )
             .unwrap();
-            bi_sgemm_backward_dx_typed(
+            gemm_bi_backward_dx_typed(
                 ctx,
                 TypedPtr {
                     ptr: dx.cached_ptr(),
@@ -1115,7 +1115,7 @@ fn bench_bwd_gemms_isolated() {
             .unwrap();
         };
         let run_dw = |ctx: &GpuCtx| {
-            bi_sgemm_backward_dw_typed(
+            gemm_bi_backward_dw_typed(
                 ctx,
                 dw.cached_ptr(),
                 TypedPtr {
