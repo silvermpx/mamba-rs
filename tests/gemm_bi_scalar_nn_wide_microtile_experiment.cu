@@ -1,31 +1,43 @@
 // Exact-F32 NN experiment: the production ascending-k FMA chain behind an
-// 8x8 register microtile, instantiated over three block tiles.
+// 8x8 register microtile, fed by TMA, instantiated over three block tiles.
 //
 // Every output element still walks its reduction in ascending k with one
 // __fmaf_rn per step starting from the bias (or zero), so the bits match
-// the production 64x64 route bit for bit; only the work per thread and the
-// block geometry change.
+// the production 64x64 route bit for bit; only the work per thread, the
+// block geometry and the way operands reach shared memory change.
 //
 // Shape of the schedule:
-//   - A stays row-major in shared memory ([m][k], padded to 80 bytes per
-//     row) and arrives through 16-byte cp.async, so no copy scatters
-//     4-byte elements. Each thread reads its eight rows as one float4 per
-//     row every four k steps.
-//   - B stays [k][n] and is read as float4 along n every k step.
+//   - A and B tiles arrive through cp.async.bulk.tensor, one 2d box each
+//     per k tile, issued by a single thread and completed on an mbarrier.
+//     The compute warps never touch the load/store pipe for operands, so
+//     the FMA and shared-load streams run without the per-warp copy stalls
+//     that held the cp.async schedule at 53 TFLOPS.
+//   - A lands row-major ([m][k], 64-byte rows) and B lands [k][n]; each
+//     thread reads its eight A rows as one float4 per row every four k
+//     steps and its B columns as float4 along n every k step.
 //   - Each thread owns rows thread_row + i * LANE_ROWS and column chunks
 //     j * LANE_COLUMNS * 4 + thread_column * 4, so every float4 shared
-//     load is bank-conflict free in both warp shapes.
-//   - The copies for the next k tile are spread across the unrolled k
-//     loop instead of being issued in one burst after the barrier, which
-//     keeps the FMA pipe fed while the memory pipe drains.
+//     load is bank-conflict free in both warp shapes without padding.
+//   - Two shared stages; the barrier at the top of a k tile is what
+//     retires the stage refilled during that tile.
+// The driver's opaque tensor-map descriptor, laid out the way the SM120
+// production source declares it; NVRTC does not ship cuda.h.
+#if __CUDACC_VER_MAJOR__ >= 13
+struct alignas(128) CUtensorMap {
+#else
+struct alignas(64) CUtensorMap {
+#endif
+    unsigned long long opaque[16];
+};
+
+static_assert(sizeof(CUtensorMap) == 128, "CUtensorMap size changed");
+
 #ifndef WIDE_NN_BK
 #define WIDE_NN_BK 16
 #endif
 #define WIDE_NN_TM 8
 #define WIDE_NN_TN 8
 #define WIDE_NN_WARP_SIZE 32
-#define WIDE_NN_A_PAD 4
-#define WIDE_NN_B_PAD 4
 #define WIDE_NN_GROUP_M 16
 #ifndef WIDE_NN_K_PIPE
 #define WIDE_NN_K_PIPE 2
@@ -49,47 +61,82 @@ static_assert(alignof(SgbNnWideParams) == 4,
 static_assert(__is_standard_layout(SgbNnWideParams),
               "wide-microtile parameters must remain standard layout");
 
+template <int Arrivals>
+static __device__ __forceinline__ void wide_nn_init_barrier(unsigned barrier) {
+    asm volatile("mbarrier.init.shared::cta.b64 [%0], %1;"
+                 :: "r"(barrier), "n"(Arrivals) : "memory");
+}
+
+static __device__ __forceinline__ void wide_nn_wait_barrier(
+    unsigned barrier, unsigned phase) {
+    unsigned ready;
+    do {
+        asm volatile(
+            "{ .reg .pred p; "
+            "mbarrier.try_wait.parity.acquire.cta.shared::cta.b64 "
+            "p, [%1], %2; "
+            "selp.b32 %0, 1, 0, p; }"
+            : "=r"(ready) : "r"(barrier), "r"(phase) : "memory");
+    } while (!ready);
+}
+
+template <int Bytes>
+static __device__ __forceinline__ void wide_nn_expect_transaction(
+    unsigned barrier) {
+    asm volatile(
+        "mbarrier.arrive.expect_tx.release.cta.shared::cta.b64 "
+        "_, [%0], %1;"
+        :: "r"(barrier), "n"(Bytes) : "memory");
+}
+
+static __device__ __forceinline__ void wide_nn_tma_copy(
+    unsigned destination, const CUtensorMap* map, int x, int y,
+    unsigned barrier) {
+    asm volatile(
+        "cp.async.bulk.tensor.2d.shared::cta.global.tile.mbarrier::complete_tx::bytes "
+        "[%0], [%1, {%2, %3}], [%4];"
+        :: "r"(destination), "l"(reinterpret_cast<unsigned long long>(map)),
+           "r"(x), "r"(y), "r"(barrier)
+        : "memory");
+}
+
 template <int BM, int BN, int WM, int WN, int THREADS>
 __device__ __forceinline__ void wide_nn_microtile_body(
     float* __restrict__ C,
-    const float* __restrict__ A,
-    const float* __restrict__ B,
     const float* __restrict__ bias,
-    const SgbNnWideParams& params
+    const SgbNnWideParams& params,
+    const CUtensorMap& a_map,
+    const CUtensorMap& b_map
 ) {
     constexpr int BK = WIDE_NN_BK;
     constexpr int TM = WIDE_NN_TM;
     constexpr int TN = WIDE_NN_TN;
     constexpr int K_PIPE = WIDE_NN_K_PIPE;
-    constexpr int A_ROW = BK + WIDE_NN_A_PAD;
-    constexpr int B_ROW = BN + WIDE_NN_B_PAD;
+    constexpr int A_ROW = BK;
+    constexpr int B_ROW = BN;
     constexpr int A_STAGE = BM * A_ROW;
     constexpr int B_STAGE = BK * B_ROW;
+    constexpr int STAGE_FLOATS = A_STAGE + B_STAGE;
+    constexpr int STAGE_BYTES = STAGE_FLOATS * (int)sizeof(float);
     constexpr int WARPS = THREADS / WIDE_NN_WARP_SIZE;
     constexpr int LANE_COLUMNS = WN / TN;
     constexpr int LANE_ROWS = WM / TM;
-    constexpr int A_COPY_ROWS = THREADS / (BK / 4);
-    constexpr int A_COPIES = BM / A_COPY_ROWS;
-    constexpr int B_COPY_ROWS = THREADS / (BN / 4);
-    constexpr int B_COPIES = BK / B_COPY_ROWS;
-    constexpr int COPIES = A_COPIES + B_COPIES;
-    constexpr int COPY_STRIDE = BK / COPIES;
     static_assert(WARPS == (BM / WM) * (BN / WN),
                   "warp grid does not cover the block tile");
     static_assert(LANE_COLUMNS * LANE_ROWS == WIDE_NN_WARP_SIZE,
                   "lane grid does not cover the warp tile");
-    static_assert(BM % A_COPY_ROWS == 0 && BK % B_COPY_ROWS == 0,
-                  "copies do not cover the tiles");
-    static_assert(COPIES <= BK && COPY_STRIDE >= 1,
-                  "too many copies to spread over the k loop");
     static_assert(BK % 4 == 0 && A_ROW % 4 == 0 && B_ROW % 4 == 0,
                   "shared rows must stay float4 aligned");
+    static_assert(STAGE_BYTES % 128 == 0,
+                  "TMA stages must stay 128-byte aligned");
     static_assert(TM % 4 == 0 && TN % 4 == 0,
                   "fragments must be whole float4 groups");
+    static_assert(K_PIPE >= 2, "the pipeline needs a stage to refill");
 
-    extern __shared__ __align__(16) float smem[];
-    float* As_buf = smem;
-    float* Bs_buf = smem + K_PIPE * A_STAGE;
+    extern __shared__ __align__(128) float wide_nn_smem[];
+    float* stages = wide_nn_smem;
+    unsigned smem_base = __cvta_generic_to_shared(wide_nn_smem);
+    unsigned barrier_base = smem_base + K_PIPE * STAGE_BYTES;
 
     int num_pid_m = (params.m + BM - 1) / BM;
     int num_pid_n = (params.n + BN - 1) / BN;
@@ -109,12 +156,6 @@ __device__ __forceinline__ void wide_nn_microtile_body(
     int thread_row = lane / LANE_COLUMNS;
     int row_base = warp_row * WM + thread_row;
     int column_base = warp_column * WN + thread_column * 4;
-    int a_copy_row = threadIdx.x / (BK / 4);
-    int a_copy_k = (threadIdx.x % (BK / 4)) * 4;
-    int b_copy_row = threadIdx.x / (BN / 4);
-    int b_copy_column = (threadIdx.x % (BN / 4)) * 4;
-    bool a_vector = (params.lda & 3) == 0 && gemm_bi_is_aligned_16(A);
-    bool b_vector = (params.ldb & 3) == 0 && gemm_bi_is_aligned_16(B);
 
     float threadResults[TM * TN];
 
@@ -140,112 +181,49 @@ __device__ __forceinline__ void wide_nn_microtile_body(
         }
     }
 
-    unsigned As_base = __cvta_generic_to_shared(As_buf);
-    unsigned Bs_base = __cvta_generic_to_shared(Bs_buf);
-
-    // One 16-byte copy of A per call; the source-size operand zero-fills
-    // whatever lies past the k edge, and the element path covers strides
-    // that are not float4 aligned.
-    auto issue_a = [&](int stage, int bk_index, int copy) {
-        int m_local = copy * A_COPY_ROWS + a_copy_row;
-        int global_row = pid_m * BM + m_local;
-        int global_column = bk_index + a_copy_k;
-        unsigned destination = As_base
-            + (stage * A_STAGE + m_local * A_ROW + a_copy_k)
-                * (unsigned)sizeof(float);
-        int remaining = params.k - global_column;
-        bool valid = global_row < params.m && remaining > 0;
-        if (a_vector) {
-            int source_bytes = valid ? min(remaining, 4) * 4 : 0;
-            const float* source = valid
-                ? A + (long long)global_row * params.lda + global_column
-                : A;
-            asm volatile(
-                "cp.async.ca.shared.global [%0], [%1], 16, %2;\n"
-                :: "r"(destination), "l"(source), "r"(source_bytes));
-        } else {
-            #pragma unroll
-            for (int element = 0; element < 4; ++element) {
-                bool element_valid = valid && element < remaining;
-                const float* source = element_valid
-                    ? A + (long long)global_row * params.lda
-                        + global_column + element
-                    : A;
-                int source_bytes = element_valid ? 4 : 0;
-                asm volatile(
-                    "cp.async.ca.shared.global [%0], [%1], 4, %2;\n"
-                    :: "r"(destination + element * (unsigned)sizeof(float)),
-                       "l"(source), "r"(source_bytes));
-            }
+    if (threadIdx.x == 0) {
+        #pragma unroll
+        for (int stage = 0; stage < K_PIPE; ++stage) {
+            wide_nn_init_barrier<1>(barrier_base + stage * 8);
         }
-    };
+        asm volatile("fence.mbarrier_init.release.cluster;" ::: "memory");
+    }
+    __syncthreads();
 
-    auto issue_b = [&](int stage, int bk_index, int copy) {
-        int k_local = copy * B_COPY_ROWS + b_copy_row;
-        int global_row = bk_index + k_local;
-        int global_column = pid_n * BN + b_copy_column;
-        unsigned destination = Bs_base
-            + (stage * B_STAGE + k_local * B_ROW + b_copy_column)
-                * (unsigned)sizeof(float);
-        int remaining = params.n - global_column;
-        bool valid = global_row < params.k && remaining > 0;
-        if (b_vector) {
-            int source_bytes = valid ? min(remaining, 4) * 4 : 0;
-            const float* source = valid
-                ? B + (long long)global_row * params.ldb + global_column
-                : B;
-            asm volatile(
-                "cp.async.ca.shared.global [%0], [%1], 16, %2;\n"
-                :: "r"(destination), "l"(source), "r"(source_bytes));
-        } else {
-            #pragma unroll
-            for (int element = 0; element < 4; ++element) {
-                bool element_valid = valid && element < remaining;
-                const float* source = element_valid
-                    ? B + (long long)global_row * params.ldb
-                        + global_column + element
-                    : B;
-                int source_bytes = element_valid ? 4 : 0;
-                asm volatile(
-                    "cp.async.ca.shared.global [%0], [%1], 4, %2;\n"
-                    :: "r"(destination + element * (unsigned)sizeof(float)),
-                       "l"(source), "r"(source_bytes));
-            }
-        }
-    };
-
-    auto issue_copy = [&](int stage, int bk_index, int copy) {
-        if (copy < A_COPIES) {
-            issue_a(stage, bk_index, copy);
-        } else {
-            issue_b(stage, bk_index, copy - A_COPIES);
-        }
+    // Out-of-range rows and columns arrive as zeros from the tensor map,
+    // which is exactly what the production loader zero-fills.
+    auto produce = [&](int stage, int k_tile) {
+        unsigned barrier = barrier_base + stage * 8;
+        unsigned destination = smem_base + stage * STAGE_BYTES;
+        wide_nn_expect_transaction<STAGE_BYTES>(barrier);
+        wide_nn_tma_copy(destination, &a_map, k_tile * BK, pid_m * BM, barrier);
+        wide_nn_tma_copy(destination + A_STAGE * (int)sizeof(float), &b_map,
+                         pid_n * BN, k_tile * BK, barrier);
     };
 
     int num_k_tiles = (params.k + BK - 1) / BK;
-    #pragma unroll
-    for (int stage = 0; stage < K_PIPE - 1; ++stage) {
-        if (stage < num_k_tiles) {
-            #pragma unroll
-            for (int copy = 0; copy < COPIES; ++copy) {
-                issue_copy(stage, stage * BK, copy);
+    if (threadIdx.x == 0) {
+        #pragma unroll
+        for (int stage = 0; stage < K_PIPE - 1; ++stage) {
+            if (stage < num_k_tiles) {
+                produce(stage, stage);
             }
         }
-        asm volatile("cp.async.commit_group;\n");
     }
-    int read_stage = 0;
     for (int tile = 0; tile < num_k_tiles; ++tile) {
-        asm volatile("cp.async.wait_group %0;\n" :: "n"(K_PIPE - 2));
+        int stage = tile % K_PIPE;
+        wide_nn_wait_barrier(barrier_base + stage * 8,
+                             (unsigned)((tile / K_PIPE) & 1));
+        // The stage refilled below was read one iteration ago; this barrier
+        // is what proves every thread has left it.
         __syncthreads();
-
-        // The stage written during this iteration was read one iteration
-        // ago; every thread has passed the barrier above since then.
         int next_tile = tile + K_PIPE - 1;
-        int write_stage = (read_stage + K_PIPE - 1) % K_PIPE;
-        bool has_next = next_tile < num_k_tiles;
-        int next_bk = next_tile * BK;
-        const float* As_read = As_buf + read_stage * A_STAGE;
-        const float* Bs_read = Bs_buf + read_stage * B_STAGE;
+        if (threadIdx.x == 0 && next_tile < num_k_tiles) {
+            produce(next_tile % K_PIPE, next_tile);
+        }
+
+        const float* As_read = stages + stage * STAGE_FLOATS;
+        const float* Bs_read = As_read + A_STAGE;
         float a_fragment[TM][4];
         float b_fragment[TN];
 
@@ -273,16 +251,6 @@ __device__ __forceinline__ void wide_nn_microtile_body(
                 b_fragment[j * 4 + 2] = value.z;
                 b_fragment[j * 4 + 3] = value.w;
             }
-            if (dot_index % COPY_STRIDE == 0
-                && dot_index / COPY_STRIDE < COPIES) {
-                int copy = dot_index / COPY_STRIDE;
-                if (has_next) {
-                    issue_copy(write_stage, next_bk, copy);
-                }
-                if (copy == COPIES - 1) {
-                    asm volatile("cp.async.commit_group;\n");
-                }
-            }
 
             // Keep this row-major result nest in ascending reduction order.
             #pragma unroll
@@ -295,8 +263,6 @@ __device__ __forceinline__ void wide_nn_microtile_body(
                 }
             }
         }
-
-        read_stage = (read_stage + 1) % K_PIPE;
     }
 
     #pragma unroll
@@ -350,46 +316,43 @@ __device__ __forceinline__ void wide_nn_microtile_body(
 extern "C" __global__ __launch_bounds__(128, 3)
 void gemm_bi_nn_m64n128_bk16_s2_micro8x8_exp(
     float* __restrict__ C,
-    const float* __restrict__ A,
-    const float* __restrict__ B,
     const float* __restrict__ bias,
-    SgbNnWideParams params
+    const __grid_constant__ SgbNnWideParams params,
+    const __grid_constant__ CUtensorMap a_map,
+    const __grid_constant__ CUtensorMap b_map
 ) {
     assert(params.alpha == 1.0f || bias == nullptr);
-    wide_nn_microtile_body<64, 128, 64, 32, 128>(C, A, B, bias, params);
+    wide_nn_microtile_body<64, 128, 64, 32, 128>(C, bias, params, a_map, b_map);
 }
 
-// 128x128 block tile, eight warps in a 2x4 grid each owning 64x32. Two
-// blocks per SM would cap it at 128 registers and spill, so it runs alone.
-extern "C" __global__ __launch_bounds__(256, 1)
+// 128x128 block tile, eight warps in a 2x4 grid each owning 64x32.
+extern "C" __global__ __launch_bounds__(256, 2)
 void gemm_bi_nn_m128n128_bk16_s2_micro8x8_exp(
     float* __restrict__ C,
-    const float* __restrict__ A,
-    const float* __restrict__ B,
     const float* __restrict__ bias,
-    SgbNnWideParams params
+    const __grid_constant__ SgbNnWideParams params,
+    const __grid_constant__ CUtensorMap a_map,
+    const __grid_constant__ CUtensorMap b_map
 ) {
     assert(params.alpha == 1.0f || bias == nullptr);
-    wide_nn_microtile_body<128, 128, 64, 32, 256>(C, A, B, bias, params);
+    wide_nn_microtile_body<128, 128, 64, 32, 256>(C, bias, params, a_map, b_map);
 }
 
 // 128x64 block tile, four warps stacked each owning 32x64.
 extern "C" __global__ __launch_bounds__(128, 3)
 void gemm_bi_nn_m128n64_bk16_s2_micro8x8_exp(
     float* __restrict__ C,
-    const float* __restrict__ A,
-    const float* __restrict__ B,
     const float* __restrict__ bias,
-    SgbNnWideParams params
+    const __grid_constant__ SgbNnWideParams params,
+    const __grid_constant__ CUtensorMap a_map,
+    const __grid_constant__ CUtensorMap b_map
 ) {
     assert(params.alpha == 1.0f || bias == nullptr);
-    wide_nn_microtile_body<128, 64, 32, 64, 128>(C, A, B, bias, params);
+    wide_nn_microtile_body<128, 64, 32, 64, 128>(C, bias, params, a_map, b_map);
 }
 
 #undef WIDE_NN_K_PIPE
 #undef WIDE_NN_GROUP_M
-#undef WIDE_NN_B_PAD
-#undef WIDE_NN_A_PAD
 #undef WIDE_NN_WARP_SIZE
 #undef WIDE_NN_TN
 #undef WIDE_NN_TM

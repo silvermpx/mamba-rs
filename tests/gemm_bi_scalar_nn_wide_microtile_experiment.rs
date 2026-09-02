@@ -31,7 +31,6 @@ struct CandidateSpec {
     tile: (usize, usize),
     threads: u32,
     shared_mem_bytes: u32,
-    ptxas_sm80: PtxasResourceContract,
     ptxas_sm120: PtxasResourceContract,
     driver: DriverResourceContract,
 }
@@ -41,7 +40,6 @@ const PRODUCTION_SPEC: CandidateSpec = CandidateSpec {
     tile: (64, 64),
     threads: 128,
     shared_mem_bytes: 17_408,
-    ptxas_sm80: PtxasResourceContract { registers: 123 },
     ptxas_sm120: PtxasResourceContract { registers: 101 },
     driver: DriverResourceContract {
         registers: 103,
@@ -54,11 +52,10 @@ const CANDIDATES: [CandidateSpec; 3] = [
         symbol: "gemm_bi_nn_m64n128_bk16_s2_micro8x8_exp",
         tile: (64, 128),
         threads: 128,
-        shared_mem_bytes: 27_136,
-        ptxas_sm80: PtxasResourceContract { registers: 128 },
-        ptxas_sm120: PtxasResourceContract { registers: 167 },
+        shared_mem_bytes: 24_592,
+        ptxas_sm120: PtxasResourceContract { registers: 128 },
         driver: DriverResourceContract {
-            registers: 167,
+            registers: 128,
             occupancy: 3,
         },
     },
@@ -66,23 +63,21 @@ const CANDIDATES: [CandidateSpec; 3] = [
         symbol: "gemm_bi_nn_m128n128_bk16_s2_micro8x8_exp",
         tile: (128, 128),
         threads: 256,
-        shared_mem_bytes: 37_376,
-        ptxas_sm80: PtxasResourceContract { registers: 128 },
-        ptxas_sm120: PtxasResourceContract { registers: 167 },
+        shared_mem_bytes: 32_784,
+        ptxas_sm120: PtxasResourceContract { registers: 128 },
         driver: DriverResourceContract {
-            registers: 167,
-            occupancy: 1,
+            registers: 128,
+            occupancy: 2,
         },
     },
     CandidateSpec {
         symbol: "gemm_bi_nn_m128n64_bk16_s2_micro8x8_exp",
         tile: (128, 64),
         threads: 128,
-        shared_mem_bytes: 29_184,
-        ptxas_sm80: PtxasResourceContract { registers: 128 },
-        ptxas_sm120: PtxasResourceContract { registers: 167 },
+        shared_mem_bytes: 24_592,
+        ptxas_sm120: PtxasResourceContract { registers: 128 },
         driver: DriverResourceContract {
-            registers: 167,
+            registers: 128,
             occupancy: 3,
         },
     },
@@ -97,7 +92,6 @@ impl CandidateSpec {
 
     fn ptxas(self, target: &str) -> Result<PtxasResourceContract, String> {
         match target {
-            "sm_80" => Ok(self.ptxas_sm80),
             "sm_120" => Ok(self.ptxas_sm120),
             _ => Err(format!("unsupported PTXAS resource target {target}")),
         }
@@ -300,9 +294,10 @@ fn candidate_source_is_exact_one_owner_and_never_enters_production() {
         "#define WIDE_NN_TN 8",
         "#define WIDE_NN_K_PIPE 2",
         "__launch_bounds__(128, 3)",
-        "__launch_bounds__(256, 1)",
+        "__launch_bounds__(256, 2)",
         "__fmaf_rn(",
-        "cp.async",
+        "cp.async.bulk.tensor.2d",
+        "mbarrier.try_wait.parity",
         "Keep this row-major result nest in ascending reduction order.",
     ] {
         assert!(source.contains(required), "candidate omitted {required}");
@@ -333,13 +328,13 @@ fn candidate_geometry_covers_the_cell_and_stays_distinct() {
         let (bm, bn) = candidate.tile;
         assert_eq!(candidate.threads % 32, 0);
         assert_eq!(bm * bn / 64, candidate.threads as usize);
-        let stage = bm * (16 + 4) + 16 * (bn + 4);
-        assert_eq!(candidate.shared_mem_bytes as usize, 2 * stage * 4);
+        let stage = bm * 16 + 16 * bn;
+        assert_eq!(candidate.shared_mem_bytes as usize, 2 * stage * 4 + 2 * 8);
         assert_eq!(
             candidate.grid() as usize,
             DIMS.0.div_ceil(bm) * DIMS.2.div_ceil(bn)
         );
-        assert!(candidate.ptxas("sm_80").is_ok());
+        assert!(candidate.ptxas("sm_80").is_err());
         assert!(candidate.ptxas("sm_120").is_ok());
         assert!(candidate.ptxas("sm_89").is_err());
         assert!(!symbols.contains(&candidate.symbol));
@@ -436,7 +431,7 @@ fn windows_percentiles_and_promotion_thresholds_are_fail_closed() {
 
 #[cfg(feature = "cuda")]
 mod cuda_experiment {
-    use std::ffi::CStr;
+    use std::ffi::{CStr, c_void};
     use std::process::Command;
     use std::sync::Arc;
 
@@ -530,6 +525,61 @@ mod cuda_experiment {
 
     const _: [(); 32] = [(); std::mem::size_of::<KernelParams>()];
     const _: [(); 4] = [(); std::mem::align_of::<KernelParams>()];
+
+    #[derive(Clone, Copy)]
+    #[repr(transparent)]
+    struct DirectTensorMap(sys::CUtensorMap);
+
+    unsafe impl DeviceRepr for DirectTensorMap {}
+
+    const _: [(); 128] = [(); std::mem::size_of::<DirectTensorMap>()];
+
+    /// One 2d f32 tensor map with zero fill past the edges, boxed the way
+    /// the kernel names its k tile: A boxes are BK wide along k and BM tall,
+    /// B boxes are BN wide along n and BK tall.
+    fn encode_tensor_map(
+        pointer: u64,
+        inner: usize,
+        outer: usize,
+        stride: usize,
+        box_dimensions: [u32; 2],
+        label: &str,
+    ) -> Result<DirectTensorMap, String> {
+        if pointer == 0 || !pointer.is_multiple_of(16) || inner == 0 || outer == 0 || stride < inner
+        {
+            return Err(format!("invalid {label} tensor-map input"));
+        }
+        let byte_stride = stride
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| format!("{label} byte stride overflow"))?;
+        if !byte_stride.is_multiple_of(16) {
+            return Err(format!("{label} byte stride is not 16-byte aligned"));
+        }
+        let dimensions = [inner as u64, outer as u64];
+        let global_strides = [byte_stride as u64];
+        let element_strides = [1_u32, 1_u32];
+        let mut raw = std::mem::MaybeUninit::<sys::CUtensorMap>::zeroed();
+        cuda_ok(
+            unsafe {
+                sys::cuTensorMapEncodeTiled(
+                    raw.as_mut_ptr(),
+                    sys::CUtensorMapDataType::CU_TENSOR_MAP_DATA_TYPE_UINT32,
+                    2,
+                    pointer as usize as *mut c_void,
+                    dimensions.as_ptr(),
+                    global_strides.as_ptr(),
+                    box_dimensions.as_ptr(),
+                    element_strides.as_ptr(),
+                    sys::CUtensorMapInterleave::CU_TENSOR_MAP_INTERLEAVE_NONE,
+                    sys::CUtensorMapSwizzle::CU_TENSOR_MAP_SWIZZLE_NONE,
+                    sys::CUtensorMapL2promotion::CU_TENSOR_MAP_L2_PROMOTION_L2_256B,
+                    sys::CUtensorMapFloatOOBfill::CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE,
+                )
+            },
+            &format!("encode {label} tensor map"),
+        )?;
+        Ok(DirectTensorMap(unsafe { raw.assume_init() }))
+    }
 
     struct Runtime {
         production_ctx: GpuCtx,
@@ -635,6 +685,7 @@ mod cuda_experiment {
         b: GuardedBuffer,
         production_output: GuardedBuffer,
         candidate_output: GuardedBuffer,
+        maps: Vec<(DirectTensorMap, DirectTensorMap)>,
         a_host: Vec<f32>,
         b_host: Vec<f32>,
         kind: usize,
@@ -832,15 +883,40 @@ mod cuda_experiment {
 
     fn new_fixture(runtime: &Runtime, kind: usize) -> Result<Fixture, String> {
         let (a_host, b_host, output) = make_values(kind);
+        let a = GuardedBuffer::new(&runtime.stream, a_host.clone(), INPUT_GUARD_BITS)?;
+        let b = GuardedBuffer::new(&runtime.stream, b_host.clone(), INPUT_GUARD_BITS)?;
+        let mut maps = Vec::with_capacity(CANDIDATES.len());
+        for candidate in CANDIDATES {
+            let (bm, bn) = candidate.tile;
+            maps.push((
+                encode_tensor_map(
+                    a.ptr(&runtime.stream),
+                    DIMS.1,
+                    DIMS.0,
+                    DIMS.1,
+                    [16, bm as u32],
+                    "A",
+                )?,
+                encode_tensor_map(
+                    b.ptr(&runtime.stream),
+                    DIMS.2,
+                    DIMS.1,
+                    DIMS.2,
+                    [bn as u32, 16],
+                    "B",
+                )?,
+            ));
+        }
         Ok(Fixture {
-            a: GuardedBuffer::new(&runtime.stream, a_host.clone(), INPUT_GUARD_BITS)?,
-            b: GuardedBuffer::new(&runtime.stream, b_host.clone(), INPUT_GUARD_BITS)?,
+            a,
+            b,
             production_output: GuardedBuffer::new(
                 &runtime.stream,
                 output.clone(),
                 OUTPUT_GUARD_BITS,
             )?,
             candidate_output: GuardedBuffer::new(&runtime.stream, output, OUTPUT_GUARD_BITS)?,
+            maps,
             a_host,
             b_host,
             kind,
@@ -887,11 +963,23 @@ mod cuda_experiment {
             return Err("wide-microtile launch requires non-null 16-byte-aligned C/A/B".into());
         }
         let mut builder = runtime.stream.launch_builder(kernels.function(arm));
-        builder.arg(&output);
-        builder.arg(&a);
-        builder.arg(&b);
-        builder.arg(&bias);
-        builder.arg(&fixture.params);
+        match arm {
+            Arm::Production => {
+                builder.arg(&output);
+                builder.arg(&a);
+                builder.arg(&b);
+                builder.arg(&bias);
+                builder.arg(&fixture.params);
+            }
+            Arm::Candidate(index) => {
+                let (a_map, b_map) = &fixture.maps[index];
+                builder.arg(&output);
+                builder.arg(&bias);
+                builder.arg(&fixture.params);
+                builder.arg(a_map);
+                builder.arg(b_map);
+            }
+        }
         unsafe { builder.launch(arm.config()) }
             .map(|_| ())
             .map_err(|error| format!("launch {}: {error:?}", arm.symbol()))
@@ -982,7 +1070,11 @@ mod cuda_experiment {
         }
         let mut digest = Sha256::new();
         digest.update(b"scalar-nn-wide-microtile-graph-args.v1");
-        for (index, size) in [8_usize, 8, 8, 8, 32].into_iter().enumerate() {
+        let sizes: [usize; 5] = match arm {
+            Arm::Production => [8, 8, 8, 8, 32],
+            Arm::Candidate(_) => [8, 8, 32, 128, 128],
+        };
+        for (index, size) in sizes.into_iter().enumerate() {
             let pointer = unsafe { *params.kernelParams.add(index) };
             if pointer.is_null() {
                 return Err(format!("{} graph argument {index} is null", arm.symbol()));
@@ -1376,8 +1468,12 @@ mod cuda_experiment {
                 if let Err(detail) = validate_ptxas_register_observation(contract, &registers) {
                     failures.push(format!("{} {target} {detail}", arm.symbol()));
                 }
-                if !entry.contains("FFMA") || !entry.contains("LDGSTS") {
-                    failures.push(format!("{} SASS omitted FFMA or LDGSTS", arm.symbol()));
+                let copies = match arm {
+                    Arm::Production => "LDGSTS",
+                    Arm::Candidate(_) => "UTMALDG",
+                };
+                if !entry.contains("FFMA") || !entry.contains(copies) {
+                    failures.push(format!("{} SASS omitted FFMA or {copies}", arm.symbol()));
                 }
                 for forbidden in [" LDL", " STL", " ATOM", " RED", " REDUX"] {
                     if entry.contains(forbidden) {
@@ -1593,8 +1689,7 @@ mod cuda_experiment {
 
     #[test]
     #[ignore = "requires CUDA 13.2 NVRTC but launches no GPU work"]
-    fn candidate_compiles_for_compute80_and_sm120_with_exact_ptx() -> Result<(), String> {
-        validate_ptx(&compile_ptx("compute_80")?)?;
+    fn candidate_compiles_for_sm120_with_exact_ptx() -> Result<(), String> {
         validate_ptx(&compile_ptx("compute_120")?)
     }
 
@@ -1602,12 +1697,6 @@ mod cuda_experiment {
     #[ignore = "requires CUDA 13.2 NVRTC, ptxas, and nvdisasm but launches no GPU work"]
     fn candidate_meets_sm120_ptxas_sass_and_resource_contracts() -> Result<(), String> {
         validate_ptxas_and_sass("sm_120", &compile_ptx("compute_120")?)
-    }
-
-    #[test]
-    #[ignore = "requires CUDA 13.2 NVRTC, ptxas, and nvdisasm but launches no GPU work"]
-    fn candidate_meets_sm80_ptxas_sass_and_resource_contracts() -> Result<(), String> {
-        validate_ptxas_and_sass("sm_80", &compile_ptx("compute_80")?)
     }
 
     #[test]
