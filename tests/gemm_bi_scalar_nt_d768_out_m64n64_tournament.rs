@@ -4,7 +4,8 @@ const TEST_SOURCE: &str = include_str!("gemm_bi_scalar_nt_d768_transpose_tournam
 #[test]
 fn d768_out_source_is_test_only_bounded_copy_kernel() {
     let registry = include_str!("../src/mamba_ssm/gpu/gemm_bi_triad/modules.rs");
-    for symbol in [TRANSPOSE_32X16] {
+    {
+        let symbol = TRANSPOSE_32X16;
         let marker = format!("void {symbol}(");
         assert_eq!(TEST_SOURCE.matches(&marker).count(), 1);
         let (_, signature) = TEST_SOURCE
@@ -13,7 +14,7 @@ fn d768_out_source_is_test_only_bounded_copy_kernel() {
         let (parameters, _) = signature
             .split_once(") {")
             .expect("candidate parameter list");
-        assert!(parameters.matches(',').count() + 1 <= 7);
+        assert!(parameters.matches(',').count() < 7);
         assert!(
             !registry.contains(symbol),
             "{symbol} escaped into production"

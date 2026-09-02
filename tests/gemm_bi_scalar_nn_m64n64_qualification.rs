@@ -38,7 +38,7 @@ fn production_source_is_an_isolated_one_owner_exact_kernel() {
     let (parameters, _) = signature_tail
         .split_once(") {")
         .expect("production parameter list");
-    assert!(parameters.matches(',').count() + 1 <= 7);
+    assert!(parameters.matches(',').count() < 7);
     // The fragment now also owns the prism twin of this schedule; nothing
     // else may join it without being named here.
     assert_eq!(source.matches("threadResults[idx] = __fmaf_rn(").count(), 2);

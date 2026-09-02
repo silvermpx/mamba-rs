@@ -2141,7 +2141,8 @@ mod cuda_experiment {
 
     fn resource_gate(kernels: &Kernels) -> Result<(), String> {
         let mut observations = Vec::new();
-        for arm in [Arm::M8Runner] {
+        {
+            let arm = Arm::M8Runner;
             let kernel = kernel(kernels, arm);
             let local = kernel
                 .function

@@ -30,6 +30,7 @@ const SCALAR_ENTRIES: &[&str] = &[
     "gemm_bi_tn_aligned",
     "gemm_bi_tn_zero_reduction_v1",
     "gemm_bi_tn_splitm_partial",
+    "gemm_bi_tn_m16n16_bk16_s2_splitm16_v1",
     "gemm_bi_tn_splitm_partial_aligned",
     "gemm_bi_splitm_reduce",
     "gemm_bi_nt",

@@ -32,7 +32,9 @@ struct NodeIdentity {
     arguments_digest: [u8; 32],
 }
 
-fn expected_candidate_configs() -> [(&'static str, (u32, u32, u32), (u32, u32, u32), u32); 2] {
+type CandidateConfig = (&'static str, (u32, u32, u32), (u32, u32, u32), u32);
+
+fn expected_candidate_configs() -> [CandidateConfig; 2] {
     [
         (
             CANDIDATE_SYMBOL,

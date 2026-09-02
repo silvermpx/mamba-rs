@@ -377,11 +377,13 @@ fn launch_live(ctx: &GpuCtx, buffers: &mut NtBuffers, dims: (usize, usize, usize
     .expect("launch live scalar NT");
 }
 
+type NtLiveOracle = fn(&[f32], &[f32], (usize, usize, usize)) -> Vec<u32>;
+
 fn assert_repeated_outputs(
     ctx: &GpuCtx,
     case: NtCase,
     buffers: &mut NtBuffers,
-    live_oracle: fn(&[f32], &[f32], (usize, usize, usize)) -> Vec<u32>,
+    live_oracle: NtLiveOracle,
 ) {
     let elements = case.dims.0 * case.dims.1;
     let forced_expected = oracle_bits(&buffers.a_host, &buffers.b_host, case.dims);

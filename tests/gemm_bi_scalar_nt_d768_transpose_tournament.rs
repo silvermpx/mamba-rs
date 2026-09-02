@@ -4,7 +4,8 @@ const TEST_SOURCE: &str = include_str!("../kernels/gemm_bi_triad/scalar_nt_d768_
 #[test]
 fn production_transpose_is_a_bounded_scalar_owned_copy_kernel() {
     let registry = include_str!("../src/mamba_ssm/gpu/gemm_bi_triad/modules.rs");
-    for symbol in [TRANSPOSE_32X16] {
+    {
+        let symbol = TRANSPOSE_32X16;
         assert!(TEST_SOURCE.contains(&format!("void {symbol}(")));
         assert!(registry.contains(symbol), "{symbol} is not scalar-owned");
     }

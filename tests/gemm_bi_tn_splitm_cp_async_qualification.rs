@@ -557,7 +557,7 @@ mod cuda_qualification {
         })
     }
 
-    fn partial_function<'a>(kernels: &'a Kernels, case: Case) -> &'a CudaFunction {
+    fn partial_function(kernels: &Kernels, case: Case) -> &CudaFunction {
         if case.aligned {
             &kernels.aligned_partial
         } else {

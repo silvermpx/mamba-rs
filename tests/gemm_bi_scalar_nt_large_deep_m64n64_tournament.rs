@@ -5,7 +5,8 @@ const HARNESS_SOURCE: &str = include_str!("gemm_bi_scalar_nt_large_deep_m64n64_t
 #[test]
 fn large_deep_tournament_contract() {
     let registry = include_str!("../src/mamba_ssm/gpu/gemm_bi_triad/modules.rs");
-    for symbol in [TRANSPOSE_32X16] {
+    {
+        let symbol = TRANSPOSE_32X16;
         let marker = format!("void {symbol}(");
         assert_eq!(TEST_SOURCE.matches(&marker).count(), 1);
         let (_, signature) = TEST_SOURCE
@@ -14,7 +15,7 @@ fn large_deep_tournament_contract() {
         let (parameters, _) = signature
             .split_once(") {")
             .expect("candidate parameter list");
-        assert!(parameters.matches(',').count() + 1 <= 7);
+        assert!(parameters.matches(',').count() < 7);
         assert!(
             !registry.contains(symbol),
             "{symbol} escaped into production"
@@ -320,9 +321,9 @@ mod cuda_tournament {
         arguments_digest: [u8; 32],
     }
 
-    fn expected_candidate_configs(
-        arm: Arm,
-    ) -> Result<Vec<(&'static str, (u32, u32, u32), (u32, u32, u32), u32)>, String> {
+    type CandidateConfig = (&'static str, (u32, u32, u32), (u32, u32, u32), u32);
+
+    fn expected_candidate_configs(arm: Arm) -> Result<Vec<CandidateConfig>, String> {
         match arm {
             Arm::ChunkedTranspose16 => Ok(vec![
                 (TRANSPOSE_32X16, (48, 48, 1), (32, 16, 1), 0),

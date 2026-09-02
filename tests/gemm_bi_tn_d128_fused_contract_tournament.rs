@@ -63,7 +63,7 @@ fn candidates_are_test_only_and_keep_the_bounded_abi() {
     ];
     for symbol in [PRIMARY, SENSITIVITY] {
         assert_eq!(SOURCE.matches(&format!("void {symbol}(")).count(), 1);
-        assert!(parameters(symbol).matches(',').count() + 1 <= 7);
+        assert!(parameters(symbol).matches(',').count() < 7);
         assert!(production.iter().all(|source| !source.contains(symbol)));
     }
     assert!(!SOURCE.contains("atomic"));

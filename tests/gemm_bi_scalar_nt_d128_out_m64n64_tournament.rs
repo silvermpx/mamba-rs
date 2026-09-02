@@ -1272,7 +1272,8 @@ mod cuda_tournament {
             );
         }
 
-        for baseline in [Arm::GenericNt] {
+        {
+            let baseline = Arm::GenericNt;
             assert!(
                 validate_performance_gate(
                     baseline,
