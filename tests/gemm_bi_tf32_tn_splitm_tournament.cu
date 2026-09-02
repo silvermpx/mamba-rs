@@ -204,15 +204,18 @@ static __device__ __forceinline__ void sm120_tf32_tn_splitm_pair_kernel(
             }
         }
     }
+    // The completion flag lives in the spare tail of the barrier block, so
+    // the kernel keeps the production layout with no static shared memory.
     __threadfence();
     __syncthreads();
-    __shared__ bool last_partition;
+    unsigned* last_partition = reinterpret_cast<unsigned*>(
+        storage + Stages * stage_bytes + 120);
     if (threadIdx.x == 0) {
-        last_partition =
+        *last_partition =
             atomicInc(counters + blockIdx.x, Partitions - 1U) == Partitions - 1U;
     }
     __syncthreads();
-    if (!last_partition) return;
+    if (*last_partition == 0U) return;
 
     // Fixed-order combine: partition 0 first, then 1, 2, ... regardless of
     // which CTA arrived last. This is the whole numeric contract of the family.

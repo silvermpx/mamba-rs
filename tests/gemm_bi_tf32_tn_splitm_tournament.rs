@@ -421,6 +421,7 @@ fn candidate_source_keeps_a_fixed_reduction_order_and_no_floating_atomics() {
         "st.global.cg.v2.f32",
         "ld.global.cg.v2.f32",
         "__threadfence();",
+        "storage + Stages * stage_bytes + 120",
     ] {
         assert!(
             CUDA_SOURCE.contains(required),
@@ -696,10 +697,10 @@ mod cuda_tournament {
         let registers = metric_before(usage, " registers")
             .ok_or_else(|| format!("{} malformed ptxas usage: {usage}", spec.symbol))?;
         let static_shared = metric_before(usage, " bytes smem").unwrap_or(0);
-        let allowed_static = if spec.partitions > 1 { 16 } else { 0 };
+        let allowed_static = 0;
         if registers == 0
             || registers > u64::from(spec.maximum_registers)
-            || static_shared > allowed_static
+            || static_shared != allowed_static
         {
             return Err(format!(
                 "{} ptxas budget failed: regs={registers}/{} static_shared={static_shared}/{allowed_static}",
@@ -939,11 +940,11 @@ mod cuda_tournament {
                 None,
             )
             .map_err(|error| format!("occupancy: {error:?}"))?;
-        let allowed_static = if spec.partitions > 1 { 16 } else { 0 };
+        let allowed_static = 0;
         if registers <= 0
             || registers > spec.maximum_registers as i32
             || local != 0
-            || static_shared > allowed_static
+            || static_shared != allowed_static
             || max_threads < spec.block.0 as i32
             || max_dynamic < spec.dynamic_shared_bytes as i32
             || occupancy < spec.minimum_occupancy
