@@ -13,7 +13,7 @@ mod common;
 const CUDA_SOURCE: &str = include_str!("gemm_bi_tf32_tn_panel8_tournament.cu");
 const PRODUCTION_SYMBOL: &str = "gemm_bi_tn_sm120_tma_mma_tf32_v1_m64n128_bk32_s4_pair";
 const PRODUCTION_TUNING_TABLE_REVISION: u16 = 36;
-const CANDIDATE_SUFFIX: &str = "_exp_panel8_v1";
+const CANDIDATE_SUFFIXES: [&str; 2] = ["_exp_panel8_v1", "_exp_panel8x2d_v1"];
 const PANEL_WIDTH: usize = 8;
 const SCREENING_WINDOWS: usize = 21;
 const OFFICIAL_WINDOWS: usize = 101;
@@ -46,11 +46,20 @@ const CELLS: [Cell; 3] = [
     },
 ];
 
+/// How the candidate stages a panel: one rank-3 box per operand, or one
+/// rank-2 box per panel through the production map geometry.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PanelMap {
+    Rank3,
+    Rank2,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct CandidateSpec {
     symbol: &'static str,
     tile: (u32, u32),
     stages: u32,
+    map: PanelMap,
     block: (u32, u32, u32),
     dynamic_shared_bytes: u32,
     minimum_occupancy: u32,
@@ -66,11 +75,13 @@ const fn spec(
     tile: (u32, u32),
     stages: u32,
     minimum_occupancy: u32,
+    map: PanelMap,
 ) -> CandidateSpec {
     CandidateSpec {
         symbol,
         tile,
         stages,
+        map,
         block: (tile.0 * tile.1 / 32, 1, 1),
         dynamic_shared_bytes: dynamic_shared_bytes(tile, stages),
         minimum_occupancy,
@@ -78,41 +89,53 @@ const fn spec(
     }
 }
 
-const CANDIDATES: [CandidateSpec; 5] = [
+const CANDIDATES: [CandidateSpec; 6] = [
     spec(
         "gemm_bi_tn_sm120_tma_mma_tf32_v1_m64n128_bk32_s4_pair_exp_panel8_v1",
         (64, 128),
         4,
         1,
+        PanelMap::Rank3,
     ),
     spec(
         "gemm_bi_tn_sm120_tma_mma_tf32_v1_m64n128_bk32_s3_pair_exp_panel8_v1",
         (64, 128),
         3,
         1,
+        PanelMap::Rank3,
     ),
     spec(
         "gemm_bi_tn_sm120_tma_mma_tf32_v1_m64n128_bk32_s2_pair_exp_panel8_v1",
         (64, 128),
         2,
         2,
+        PanelMap::Rank3,
     ),
     spec(
         "gemm_bi_tn_sm120_tma_mma_tf32_v1_m128n64_bk32_s3_pair_exp_panel8_v1",
         (128, 64),
         3,
         1,
+        PanelMap::Rank3,
     ),
     spec(
         "gemm_bi_tn_sm120_tma_mma_tf32_v1_m64n64_bk32_s2_pair_exp_panel8_v1",
         (64, 64),
         2,
         2,
+        PanelMap::Rank3,
+    ),
+    spec(
+        "gemm_bi_tn_sm120_tma_mma_tf32_v1_m64n128_bk32_s4_pair_exp_panel8x2d_v1",
+        (64, 128),
+        4,
+        1,
+        PanelMap::Rank2,
     ),
 ];
 
 const fn production_spec() -> CandidateSpec {
-    spec(PRODUCTION_SYMBOL, (64, 128), 4, 1)
+    spec(PRODUCTION_SYMBOL, (64, 128), 4, 1, PanelMap::Rank3)
 }
 
 fn tn_grid(dims: (usize, usize, usize), tile: (u32, u32)) -> Result<u32, String> {
@@ -173,7 +196,9 @@ fn validate_spec(spec: CandidateSpec) -> Result<(), String> {
 
 fn validate_candidate_symbol(symbol: &str) -> Result<(), String> {
     if !symbol.starts_with("gemm_bi_tn_sm120_tma_mma_tf32_v1_")
-        || !symbol.ends_with(CANDIDATE_SUFFIX)
+        || !CANDIDATE_SUFFIXES
+            .iter()
+            .any(|suffix| symbol.ends_with(suffix))
     {
         return Err(format!("{symbol} is not a test-only TN panel candidate"));
     }
@@ -989,6 +1014,52 @@ mod cuda_tournament {
         Ok(DirectTensorMap(unsafe { raw.assume_init() }))
     }
 
+    /// Plan B map: the production rank-2 geometry with an 8x32 box and no
+    /// swizzle, so each TMA instruction lands one 32-byte-row panel.
+    fn panel_rank2_tensor_map(
+        pointer: u64,
+        width: usize,
+        rows: usize,
+        stride: usize,
+        label: &str,
+    ) -> Result<DirectTensorMap, String> {
+        if pointer == 0 || !pointer.is_multiple_of(16) || width == 0 || rows == 0 || stride < width
+        {
+            return Err(format!("invalid {label} rank-2 panel tensor-map input"));
+        }
+        let byte_stride = stride
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| format!("{label} byte stride overflow"))?;
+        if !byte_stride.is_multiple_of(16) {
+            return Err(format!("{label} byte stride is not 16-byte aligned"));
+        }
+        let dimensions = [width as u64, rows as u64];
+        let global_strides = [byte_stride as u64];
+        let box_dimensions = [PANEL_WIDTH as u32, 32_u32];
+        let element_strides = [1_u32, 1_u32];
+        let mut raw = std::mem::MaybeUninit::<sys::CUtensorMap>::zeroed();
+        cuda_ok(
+            unsafe {
+                sys::cuTensorMapEncodeTiled(
+                    raw.as_mut_ptr(),
+                    sys::CUtensorMapDataType::CU_TENSOR_MAP_DATA_TYPE_UINT32,
+                    2,
+                    pointer as usize as *mut c_void,
+                    dimensions.as_ptr(),
+                    global_strides.as_ptr(),
+                    box_dimensions.as_ptr(),
+                    element_strides.as_ptr(),
+                    sys::CUtensorMapInterleave::CU_TENSOR_MAP_INTERLEAVE_NONE,
+                    sys::CUtensorMapSwizzle::CU_TENSOR_MAP_SWIZZLE_NONE,
+                    sys::CUtensorMapL2promotion::CU_TENSOR_MAP_L2_PROMOTION_NONE,
+                    sys::CUtensorMapFloatOOBfill::CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE,
+                )
+            },
+            &format!("encode {label} rank-2 panel tensor map"),
+        )?;
+        Ok(DirectTensorMap(unsafe { raw.assume_init() }))
+    }
+
     /// The candidate map: a reduction-major operand viewed as 8-wide panels.
     /// Dimension 0 walks the eight elements of a panel row, dimension 1 the
     /// reduction rows, dimension 2 the panels; the box spans one tile.
@@ -1156,9 +1227,15 @@ mod cuda_tournament {
             a: plane_tensor_map(a_pointer, k, m, lda, "production A")?,
             b: plane_tensor_map(b_pointer, n, m, ldb, "production B")?,
         };
-        let candidate_maps = DirectMaps {
-            a: panel_tensor_map(a_pointer, k, m, lda, spec.tile.0, "candidate A")?,
-            b: panel_tensor_map(b_pointer, n, m, ldb, spec.tile.1, "candidate B")?,
+        let candidate_maps = match spec.map {
+            PanelMap::Rank3 => DirectMaps {
+                a: panel_tensor_map(a_pointer, k, m, lda, spec.tile.0, "candidate A")?,
+                b: panel_tensor_map(b_pointer, n, m, ldb, spec.tile.1, "candidate B")?,
+            },
+            PanelMap::Rank2 => DirectMaps {
+                a: panel_rank2_tensor_map(a_pointer, k, m, lda, "candidate A")?,
+                b: panel_rank2_tensor_map(b_pointer, n, m, ldb, "candidate B")?,
+            },
         };
         Ok(Fixture {
             a,

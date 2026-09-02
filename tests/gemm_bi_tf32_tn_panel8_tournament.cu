@@ -31,8 +31,40 @@ static __device__ __forceinline__ void sm120_tf32_panel8_tma_copy(
         : "memory");
 }
 
-// One TMA box per operand per stage: the box spans the whole tile in the
-// output dimension (M/8 or N/8 panels) and 32 reduction rows.
+// Plan A, one TMA box per operand per stage: a rank-3 map whose box spans
+// the whole tile in the output dimension (M/8 or N/8 panels) and 32
+// reduction rows. Plan B, one 2D box per panel: the production rank-2 map
+// with an 8x32 box and no swizzle, one TMA instruction per panel.
+template <int M, int N, int Stages>
+static __device__ __forceinline__ void sm120_tf32_panel8_produce_stage_2d(
+    const Sm120Tf32StageContext& context, int tile) {
+    constexpr int stage_bytes = Sm120Tf32Storage<M, N, Stages>::stage_bytes;
+    unsigned stage_index = (unsigned)(tile % Stages);
+    unsigned stage = context.payload + stage_index * stage_bytes;
+    unsigned barrier = context.full_base + stage_index * 8;
+    unsigned a_destination = stage;
+    unsigned b_destination = stage + M * 32 * 4;
+    unsigned long long a_descriptor =
+        reinterpret_cast<unsigned long long>(context.a_map);
+    unsigned long long b_descriptor =
+        reinterpret_cast<unsigned long long>(context.b_map);
+    const Sm120KernelParams& params = *context.params;
+    int reduction = tile * 32;
+    sm120_expect_transaction<stage_bytes>(barrier);
+#pragma unroll
+    for (int panel = 0; panel < M / SM120_PANEL_WIDTH; ++panel) {
+        sm120_tma_copy(a_destination + panel * SM120_PANEL_BYTES, a_descriptor,
+            context.output_row + panel * SM120_PANEL_WIDTH, reduction,
+            params.a_x, params.a_y, barrier);
+    }
+#pragma unroll
+    for (int panel = 0; panel < N / SM120_PANEL_WIDTH; ++panel) {
+        sm120_tma_copy(b_destination + panel * SM120_PANEL_BYTES, b_descriptor,
+            context.output_column + panel * SM120_PANEL_WIDTH, reduction,
+            params.b_x, params.b_y, barrier);
+    }
+}
+
 template <int M, int N, int Stages>
 static __device__ __forceinline__ void sm120_tf32_panel8_produce_stage(
     const Sm120Tf32StageContext& context, int tile) {
@@ -135,7 +167,7 @@ static __device__ __forceinline__ void sm120_tf32_panel8_issue_stage(
     }
 }
 
-template <int M, int N, int Stages>
+template <int M, int N, int Stages, bool Rank3>
 static __device__ __forceinline__ void sm120_tf32_tn_panel8_pair_kernel(
     void* output, const CUtensorMap& a_map, const CUtensorMap& b_map,
     const float* bias, const Sm120KernelParams& params) {
@@ -191,7 +223,11 @@ static __device__ __forceinline__ void sm120_tf32_tn_panel8_pair_kernel(
 #pragma unroll
         for (int tile = 0; tile < Stages; ++tile) {
             if (tile < tile_count) {
-                sm120_tf32_panel8_produce_stage<M, N, Stages>(stage_context, tile);
+                if constexpr (Rank3) {
+                    sm120_tf32_panel8_produce_stage<M, N, Stages>(stage_context, tile);
+                } else {
+                    sm120_tf32_panel8_produce_stage_2d<M, N, Stages>(stage_context, tile);
+                }
             }
         }
     }
@@ -210,8 +246,13 @@ static __device__ __forceinline__ void sm120_tf32_tn_panel8_pair_kernel(
             int refill = tile + Stages;
             if (refill < tile_count) {
                 sm120_wait_barrier(empty_base + stage * 8, generation & 1U);
-                sm120_tf32_panel8_produce_stage<M, N, Stages>(
-                    stage_context, refill);
+                if constexpr (Rank3) {
+                    sm120_tf32_panel8_produce_stage<M, N, Stages>(
+                        stage_context, refill);
+                } else {
+                    sm120_tf32_panel8_produce_stage_2d<M, N, Stages>(
+                        stage_context, refill);
+                }
             }
         }
         if constexpr (Stages == 2) sm120_sync_warp();
@@ -241,7 +282,7 @@ static __device__ __forceinline__ void sm120_tf32_tn_panel8_pair_kernel(
     }
 }
 
-template <int M, int N, int Stages>
+template <int M, int N, int Stages, bool Rank3>
 static __device__ __forceinline__ void sm120_tf32_tn_panel8_pair_entry(
     void* output, const CUtensorMap& a_map, const CUtensorMap& b_map,
     const float* bias, const Sm120KernelParams& params) {
@@ -249,28 +290,30 @@ static __device__ __forceinline__ void sm120_tf32_tn_panel8_pair_entry(
         sm120_tf32_zero_reduction_epilogue<Sm120Tn, M, N>(output, bias, params);
         return;
     }
-    sm120_tf32_tn_panel8_pair_kernel<M, N, Stages>(
+    sm120_tf32_tn_panel8_pair_kernel<M, N, Stages, Rank3>(
         output, a_map, b_map, bias, params);
 }
 
-#define SM120_DEFINE_TF32_TN_PANEL8_KERNEL(NAME, M, N, STAGES)               \
+#define SM120_DEFINE_TF32_TN_PANEL8_KERNEL(NAME, M, N, STAGES, RANK3)        \
 extern "C" __global__ __launch_bounds__((M * N) / 32) void NAME(            \
     void* output, const __grid_constant__ CUtensorMap a_map,                   \
     const __grid_constant__ CUtensorMap b_map, const float* bias,              \
     const __grid_constant__ Sm120KernelParams params) {                        \
-    sm120_tf32_tn_panel8_pair_entry<M, N, STAGES>(                             \
+    sm120_tf32_tn_panel8_pair_entry<M, N, STAGES, RANK3>(                      \
         output, a_map, b_map, bias, params);                                   \
 }
 
 SM120_DEFINE_TF32_TN_PANEL8_KERNEL(
-    gemm_bi_tn_sm120_tma_mma_tf32_v1_m64n128_bk32_s4_pair_exp_panel8_v1, 64, 128, 4)
+    gemm_bi_tn_sm120_tma_mma_tf32_v1_m64n128_bk32_s4_pair_exp_panel8_v1, 64, 128, 4, true)
 SM120_DEFINE_TF32_TN_PANEL8_KERNEL(
-    gemm_bi_tn_sm120_tma_mma_tf32_v1_m64n128_bk32_s3_pair_exp_panel8_v1, 64, 128, 3)
+    gemm_bi_tn_sm120_tma_mma_tf32_v1_m64n128_bk32_s3_pair_exp_panel8_v1, 64, 128, 3, true)
 SM120_DEFINE_TF32_TN_PANEL8_KERNEL(
-    gemm_bi_tn_sm120_tma_mma_tf32_v1_m64n128_bk32_s2_pair_exp_panel8_v1, 64, 128, 2)
+    gemm_bi_tn_sm120_tma_mma_tf32_v1_m64n128_bk32_s2_pair_exp_panel8_v1, 64, 128, 2, true)
 SM120_DEFINE_TF32_TN_PANEL8_KERNEL(
-    gemm_bi_tn_sm120_tma_mma_tf32_v1_m128n64_bk32_s3_pair_exp_panel8_v1, 128, 64, 3)
+    gemm_bi_tn_sm120_tma_mma_tf32_v1_m128n64_bk32_s3_pair_exp_panel8_v1, 128, 64, 3, true)
 SM120_DEFINE_TF32_TN_PANEL8_KERNEL(
-    gemm_bi_tn_sm120_tma_mma_tf32_v1_m64n64_bk32_s2_pair_exp_panel8_v1, 64, 64, 2)
+    gemm_bi_tn_sm120_tma_mma_tf32_v1_m64n64_bk32_s2_pair_exp_panel8_v1, 64, 64, 2, true)
+SM120_DEFINE_TF32_TN_PANEL8_KERNEL(
+    gemm_bi_tn_sm120_tma_mma_tf32_v1_m64n128_bk32_s4_pair_exp_panel8x2d_v1, 64, 128, 4, false)
 
 #endif
