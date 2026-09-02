@@ -970,10 +970,10 @@ const SM120_TF32_EVIDENCE_COHORTS: &[Tf32AutoEvidenceCohort] = &[
     },
 ];
 
-fn matching_tf32_cohort<'a>(
+fn matching_tf32_cohort(
     module: Tf32QualifiedModule,
-    cohorts: &'a [Tf32AutoEvidenceCohort],
-) -> Option<&'a Tf32AutoEvidenceCohort> {
+    cohorts: &[Tf32AutoEvidenceCohort],
+) -> Option<&Tf32AutoEvidenceCohort> {
     cohorts
         .iter()
         .find(|cohort| cohort.identity.matches(module))
@@ -1002,19 +1002,19 @@ fn measured_tf32_route_with_operands(
     availability: F32TriadAvailability,
     tuning_revision: u16,
 ) -> Option<Tf32PhysicalRoute> {
-    if let Some(module) = availability.specialized {
-        if let Some(cohort) = matching_tf32_cohort(module, SM120_TF32_EVIDENCE_COHORTS) {
-            let route = measured_tf32_cell(request, operands, tuning_revision, cohort.cells)?;
-            if cohort.identity == SM120_TF32_QUALIFICATION_IDENTITY
-                && route.module_kind() == ModuleKind::TriadSm80
-                && !availability.portable.is_some_and(|portable| {
-                    SM120_TF32_PORTABLE_QUALIFICATION_IDENTITY_CUDA_13_2.matches(portable)
-                })
-            {
-                return None;
-            }
-            return Some(route);
+    if let Some(module) = availability.specialized
+        && let Some(cohort) = matching_tf32_cohort(module, SM120_TF32_EVIDENCE_COHORTS)
+    {
+        let route = measured_tf32_cell(request, operands, tuning_revision, cohort.cells)?;
+        if cohort.identity == SM120_TF32_QUALIFICATION_IDENTITY
+            && route.module_kind() == ModuleKind::TriadSm80
+            && !availability.portable.is_some_and(|portable| {
+                SM120_TF32_PORTABLE_QUALIFICATION_IDENTITY_CUDA_13_2.matches(portable)
+            })
+        {
+            return None;
         }
+        return Some(route);
     }
     let portable = availability.portable?;
     SM89_TF32_QUALIFICATION_IDENTITY

@@ -7833,7 +7833,7 @@ mod tests {
 
         let scalar: BTreeSet<_> = SCALAR_SYMBOLS.iter().copied().collect();
         let sm80: BTreeSet<_> = SM80_SYMBOLS.iter().copied().collect();
-        assert_eq!(scalar.len(), 55);
+        assert_eq!(scalar.len(), 56);
         assert_eq!(sm80.len(), 16);
         assert_eq!(SM90A_SYMBOLS.len(), 12);
         let sm90a: BTreeSet<_> = SM90A_SYMBOLS.iter().copied().collect();
@@ -7849,7 +7849,7 @@ mod tests {
         assert!(sm80.is_disjoint(&sm90a));
         assert!(sm80.is_disjoint(&sm100));
         assert!(sm90a.is_disjoint(&sm100));
-        assert_eq!(scalar.union(&sm80).count(), 71);
+        assert_eq!(scalar.union(&sm80).count(), 72);
         assert!(
             scalar
                 .union(&sm80)

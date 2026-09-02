@@ -155,7 +155,7 @@ impl GpuDevice {
         nvrtc_version: (i32, i32),
     ) -> Result<&'static str, String> {
         match cc {
-            (10, 1) if (12, 8) <= nvrtc_version && nvrtc_version < (13, 0) => Ok("sm_101a"),
+            (10, 1) if ((12, 8)..(13, 0)).contains(&nvrtc_version) => Ok("sm_101a"),
             (10, 1) => Err(format!(
                 "CUDA {}.{} cannot compile compute capability 10.1; the SM101 target is available in CUDA 12.8 and 12.9",
                 nvrtc_version.0, nvrtc_version.1
