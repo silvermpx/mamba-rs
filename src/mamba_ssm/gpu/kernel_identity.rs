@@ -5461,7 +5461,7 @@ mod cache_and_header_tests {
     use std::sync::{Arc, Barrier};
 
     #[test]
-    fn tag37_changes_only_the_tuning_table_revision() {
+    fn only_the_tuning_table_revision_moved() {
         assert_eq!(NUMERIC_ABI_REVISION, 5);
         assert_eq!(TUNING_TABLE_REVISION, 37);
     }

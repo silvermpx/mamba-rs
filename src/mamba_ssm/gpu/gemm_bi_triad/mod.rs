@@ -4,8 +4,7 @@
 //! Covers f32, bf16 and f16, on CUDA cores and on Tensor Cores. Physical
 //! exports and Triad-specific identifiers use the `gemm_bi` family name.
 //!
-//! Ported from SQV-RS `sqv_uaac` (`blas_gpu.rs` + `kernels/gemm_bi_triad/`,
-//! siboehm warptiling lineage). Three entry points used when
+//! A warptiled GEMM family of our own. Three entry points used when
 //! `ctx.batch_invariant()` is enabled:
 //!
 //!   - [`gemm_bi_forward`]      NN: `Y = X @ W + bias`

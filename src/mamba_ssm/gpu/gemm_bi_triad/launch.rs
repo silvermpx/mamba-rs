@@ -6642,8 +6642,8 @@ fn gemm_bi_forward_sub_with_control<C: ScalarLaunchController>(
     // better fill under Thin-M). Only fat-M Mamba shapes land here.
     //
     // K_CHUNK choice: 64 (2× BK=32) — gives F=2 for K=128 (Mamba in_proj),
-    // F=4 for K=256 (out_proj). Note post-Phase-1 the Mamba input_proj K is
-    // `obs_dim` (was `obs_dim + emb = 384`), which falls below the F≥6 gate
+    // F=4 for K=256 (out_proj). Since z_s left the Mamba input, the input_proj
+    // K is `obs_dim` (was `obs_dim + emb = 384`), which falls below the F≥6 gate
     // below — Mamba input_proj routes via regular Slim NN dispatch now.
     // Sweet spot: small enough to split K=128, big enough that each fc does
     // 2+ BK iterations to amortize kernel launch overhead.
@@ -6662,8 +6662,8 @@ fn gemm_bi_forward_sub_with_control<C: ScalarLaunchController>(
         //     K-split → splitk_slim only adds reducer overhead. Moved out
         //     of splitk_slim at the F≥6 raise.
         //   - (Historical) Mamba input_proj (M=3840 K=384 N=128, F=6): 60 M-N
-        //     tiles < SM count, F=6 wave-fill was a win. Post-Phase-1 (z_s
-        //     dropped from Mamba input) K=obs_dim falls below the F≥6 gate
+        //     tiles < SM count, F=6 wave-fill was a win. With z_s dropped
+        //     from the Mamba input, K=obs_dim falls below the F≥6 gate
         //     and routes via regular Slim NN. Gate retained for any future
         //     K∈[384,512] fat-M shape.
         //
@@ -11736,7 +11736,7 @@ mod prepared_f32_launch_tests {
     }
 
     #[test]
-    fn scalar_nt_large_deep_transpose_plan_has_tag27_and_two_exact_nodes() {
+    fn scalar_nt_large_deep_transpose_plan_has_the_qualified_revision_and_two_exact_nodes() {
         let request = F32TriadRequest {
             op: ResolvedGemmOp::Nt,
             shape: F32TriadShape::contiguous(ResolvedGemmOp::Nt, (4_096, 3_072, 1_536)),
@@ -11785,7 +11785,7 @@ mod prepared_f32_launch_tests {
     }
 
     #[test]
-    fn scalar_nt_prism_vector_plan_has_tag30_and_two_exact_nodes() {
+    fn scalar_nt_prism_vector_plan_has_the_qualified_revision_and_two_exact_nodes() {
         let request = F32TriadRequest {
             op: ResolvedGemmOp::Nt,
             shape: F32TriadShape::contiguous(ResolvedGemmOp::Nt, (4_621, 384, 1_928)),
@@ -11842,7 +11842,7 @@ mod prepared_f32_launch_tests {
     }
 
     #[test]
-    fn scalar_nt_d128_out_transpose_plan_has_tag29_and_two_exact_nodes() {
+    fn scalar_nt_d128_out_transpose_plan_has_the_qualified_revision_and_two_exact_nodes() {
         let request = F32TriadRequest {
             op: ResolvedGemmOp::Nt,
             shape: F32TriadShape::contiguous(ResolvedGemmOp::Nt, (1_024, 256, 128)),
@@ -12436,7 +12436,7 @@ mod prepared_f32_launch_tests {
     }
 
     #[test]
-    fn tag33_tn_underfill_route_freezes_physical_and_graph_identity() {
+    fn tn_underfill_route_freezes_physical_and_graph_identity() {
         let route = Tf32PhysicalRoute::MmaTf32RnaV1(Tf32PortableRoute {
             tile: Tf32PortableTile::M16N32,
             stages: Tf32PortableStages::S4,
@@ -12503,7 +12503,7 @@ mod prepared_f32_launch_tests {
     }
 
     #[test]
-    fn tag33_rect_wide_route_freezes_physical_and_graph_identity() {
+    fn rect_wide_route_freezes_physical_and_graph_identity() {
         let route = Tf32PhysicalRoute::Sm120TmaMmaTf32RnaV1(Tf32Sm120Route {
             tile: Tf32Sm120Tile::M80N32Bk64,
             stages: Tf32Sm120Stages::S2,

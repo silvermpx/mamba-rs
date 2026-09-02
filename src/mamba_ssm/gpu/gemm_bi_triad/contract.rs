@@ -6197,7 +6197,7 @@ mod tests {
     }
 
     #[test]
-    fn tag33_rect_wide_spec_keeps_logical_bk64_and_bk32_tensor_maps() {
+    fn rect_wide_spec_keeps_logical_bk64_and_bk32_tensor_maps() {
         let route = Tf32PhysicalRoute::Sm120TmaMmaTf32RnaV1(Tf32Sm120Route {
             tile: Tf32Sm120Tile::M80N32Bk64,
             stages: Tf32Sm120Stages::S2,

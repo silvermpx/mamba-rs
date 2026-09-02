@@ -642,7 +642,7 @@ fn sm120_tf32_symbols() -> Vec<String> {
 }
 
 #[test]
-fn sm120_tf32_rect_wide_tag33_source_contract() {
+fn sm120_tf32_rect_wide_source_contract() {
     let source = include_str!("../kernels/gemm_bi_triad/sm120.cu");
     let symbol = "gemm_bi_nn_sm120_tma_mma_tf32_v1_m80n32_bk64_s2";
     assert!(source.contains(symbol));

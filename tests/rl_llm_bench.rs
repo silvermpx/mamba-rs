@@ -1,6 +1,6 @@
 //! Workload-focused benchmarks: RL training loop + LLM inference.
 //!
-//! RL benches (CPU — matches SQV-RS deployment) exercise the batched training
+//! RL benches (CPU, matching the deployment target) exercise the batched training
 //! step (forward + parallel backward) at realistic RL shapes (small model,
 //! batch of 32–128 parallel envs, short window T=32 with a burn-in prefix).
 //!
@@ -21,7 +21,7 @@ use std::time::Instant;
 // ═══════════════════════════════════════════════════════════════════════════
 
 fn rl_config_small() -> mamba_rs::mamba3_siso::config::Mamba3Config {
-    // Matches the typical SQV-RS actor backbone: small d_model, few layers,
+    // Matches the typical actor backbone: small d_model, few layers,
     // full RoPE fraction. d_state=16 is the paper default.
     mamba_rs::mamba3_siso::config::Mamba3Config {
         d_model: 128,

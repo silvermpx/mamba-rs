@@ -156,7 +156,7 @@ fn launch_geometry(
 }
 
 #[test]
-fn tag33_production_fixture_is_exact_m80n32_bk64_and_rejects_old_launch_geometry() {
+fn rect_wide_production_fixture_is_exact_m80n32_bk64_and_rejects_old_launch_geometry() {
     let spec = production_spec();
     assert_eq!(
         spec.symbol,
@@ -493,7 +493,7 @@ fn ranked_candidates_have_exact_geometry_and_resources() {
 }
 
 #[test]
-fn production_witness_freezes_tag36_and_rejects_tag35() {
+fn production_witness_freezes_the_current_revision_and_rejects_the_previous() {
     assert_eq!(PRODUCTION_TUNING_TABLE_REVISION, 36);
     validate_production_tuning_revision(36).unwrap();
     assert!(validate_production_tuning_revision(35).is_err());

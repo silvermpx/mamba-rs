@@ -5577,7 +5577,7 @@ mod tests {
     }
 
     #[test]
-    fn tf32_register_caps_freeze_tag33_exact_symbol_without_weakening_generic_caps() {
+    fn tf32_register_caps_freeze_the_rect_wide_symbol_without_weakening_generic_caps() {
         const TAG33: &str = "gemm_bi_nn_sm120_tma_mma_tf32_v1_m80n32_bk64_s2";
 
         assert_eq!(tf32_register_cap(ModuleKind::TriadSm120, TAG33), Ok(80));

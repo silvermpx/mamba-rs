@@ -3,7 +3,7 @@ use std::path::PathBuf;
 #[cfg(feature = "cuda")]
 mod common;
 
-const CANDIDATE_SOURCE_PATH: &str = "gemm_bi_scalar_nt_prism_post_tag30_experiment.cu";
+const CANDIDATE_SOURCE_PATH: &str = "gemm_bi_scalar_nt_prism_experiment.cu";
 const TRANSPOSE_SYMBOL: &str = "gemm_bi_transpose_f32_32x16_d768_v1";
 const PRODUCTION_SYMBOL: &str = "gemm_bi_nn_prism_m64n64_bk16_s2_v1";
 const CANDIDATE1_SYMBOL: &str = "gemm_bi_nn_prism_m64n64_bk16_s2_occ5_experiment_v1";
@@ -650,7 +650,7 @@ mod cuda_tournament {
             include_str!("../kernels/gemm_bi_triad/scalar.cu"),
             include_str!("../kernels/gemm_bi_triad/scalar_nn_m64n64.cu"),
             include_str!("../kernels/gemm_bi_triad/scalar_nt_d768_transpose.cu"),
-            include_str!("gemm_bi_scalar_nt_prism_post_tag30_experiment.cu"),
+            include_str!("gemm_bi_scalar_nt_prism_experiment.cu"),
         ]
         .iter()
         .map(|source| {
@@ -1447,7 +1447,7 @@ mod cuda_tournament {
 
     #[test]
     #[ignore = "requires CUDA NVRTC and ptxas but launches no GPU work"]
-    fn prism_post_tag30_candidates_compile_without_spills() {
+    fn prism_candidates_compile_without_spills() {
         for (arch, sm) in [("compute_89", "sm_89"), ("compute_120", "sm_120")] {
             let options = cudarc::nvrtc::CompileOptions {
                 arch: Some(arch),
@@ -1545,7 +1545,7 @@ mod cuda_tournament {
 
     #[test]
     #[ignore = "requires an exclusive CC12.0/170-SM GPU"]
-    fn prism_post_tag30_candidates_are_exact_and_graph_stable() -> Result<(), String> {
+    fn prism_candidates_are_exact_and_graph_stable() -> Result<(), String> {
         let quiet = QuietGpu::for_cuda_ordinal(0)?;
         quiet.require_pre_context("prism-post-tag30-correctness-pre-context")?;
         let runtime = new_runtime()?;
@@ -1740,7 +1740,7 @@ mod cuda_tournament {
 
     #[test]
     #[ignore = "requires an exclusive quiet CC12.0/170-SM GPU and exactly 21 windows"]
-    fn prism_post_tag30_screening_abba_baab() -> Result<(), String> {
+    fn prism_screening_abba_baab() -> Result<(), String> {
         if cfg!(debug_assertions) {
             return Err("timing requires a release build".into());
         }
@@ -1798,7 +1798,7 @@ mod cuda_tournament {
 
     #[test]
     #[ignore = "requires parent-selected winner and an exclusive quiet CC12.0/170-SM GPU"]
-    fn prism_post_tag30_official_101_abba_baab() -> Result<(), String> {
+    fn prism_official_101_abba_baab() -> Result<(), String> {
         if cfg!(debug_assertions) {
             return Err("timing requires a release build".into());
         }

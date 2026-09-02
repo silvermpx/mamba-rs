@@ -1796,7 +1796,7 @@ pub fn resolve_sm90a_forced(
     }))
 }
 
-// ── Split-M TN partition heuristic (ported from SQV-RS blas_bi.rs) ──
+// ── Split-M TN partition heuristic ──
 
 /// Scratch cap for split-M partials, in f32 elements. Must not exceed the
 /// `splitk_scratch` allocation in kernels.rs.

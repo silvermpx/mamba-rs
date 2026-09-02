@@ -57,7 +57,7 @@
 "gemm_bi_scalar_nt_d768_transpose_tournament" = "record"
 "gemm_bi_scalar_nt_large_deep_m64n64_tournament" = "record"
 "gemm_bi_scalar_nt_prism_m64n64_tournament" = "record"
-"gemm_bi_scalar_nt_prism_post_tag30_tournament" = "record"
+"gemm_bi_scalar_nt_prism_tournament" = "record"
 "gemm_bi_scalar_nt_skinny_direct_experiment" = "record"
 "gemm_bi_scalar_nt_slim_qualification" = "contract"
 "gemm_bi_scalar_tn_underfill_direct_experiment" = "record"

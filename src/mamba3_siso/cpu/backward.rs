@@ -128,7 +128,7 @@ pub fn backward_mamba3_layer_batched(
                 // SAME algebraic shape as `silu_gate_bwd` in
                 // kernels/mamba3_ops.cu (parity pin: the expanded
                 // `sig + z*sig*(1-sig)` twin measured 88K max_ulp apart on
-                // the SQV corpus). Change one side only in lockstep with
+                // the reference corpus). Change one side only in lockstep with
                 // the other.
                 let d_silu = sig * (1.0 + z * (1.0 - sig));
                 dy[d] = dg[d] * silu;
