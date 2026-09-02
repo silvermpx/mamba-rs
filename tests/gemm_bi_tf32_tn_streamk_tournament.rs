@@ -89,12 +89,30 @@ const fn spec(
     }
 }
 
-const CANDIDATES: [CandidateSpec; 4] = [
+// The 96- and 144-CTA entries are probes, not contenders: on the cells whose
+// tile count is a multiple of the grid every CTA is dealt whole tiles only, so
+// the run pays no partial slab, no wait and no fixup, and its distance from the
+// production route measures the segment mainloop alone.
+const CANDIDATES: [CandidateSpec; 6] = [
     spec(
         "gemm_bi_tn_sm120_tma_mma_tf32_v1_m64n128_bk32_s4_pair_exp_streamk_v1",
         (64, 128),
         4,
         170,
+        1,
+    ),
+    spec(
+        "gemm_bi_tn_sm120_tma_mma_tf32_v1_m64n128_bk32_s4_pair_exp_streamk_v1",
+        (64, 128),
+        4,
+        96,
+        1,
+    ),
+    spec(
+        "gemm_bi_tn_sm120_tma_mma_tf32_v1_m64n128_bk32_s4_pair_exp_streamk_v1",
+        (64, 128),
+        4,
+        144,
         1,
     ),
     spec(

@@ -324,8 +324,7 @@ const SM120_TF32_QUALIFICATION_IDENTITY: Tf32AutoQualificationIdentity =
         optin_shared_bytes: 101_376,
         tensor_map_access: true,
         compile_key: [
-            204, 155, 123, 58, 64, 241, 34, 137, 144, 196, 146, 181, 57, 51, 85, 40, 19, 221, 108,
-            186, 90, 91, 229, 105, 74, 3, 33, 141, 240, 94, 204, 90,
+            107, 167, 105, 85, 0, 72, 8, 10, 52, 213, 112, 164, 127, 232, 8, 149, 122, 125, 217, 25, 244, 44, 69, 53, 254, 34, 88, 154, 46, 71, 182, 162,
         ],
         artifact_digest: [
             162, 190, 40, 186, 151, 113, 196, 176, 64, 140, 131, 94, 127, 69, 196, 228, 185, 69,
@@ -336,8 +335,7 @@ const SM120_TF32_QUALIFICATION_IDENTITY: Tf32AutoQualificationIdentity =
             232, 79, 245, 143, 23, 246, 99, 141, 153, 184, 24, 44,
         ],
         invocation_digest: [
-            204, 155, 123, 58, 64, 241, 34, 137, 144, 196, 146, 181, 57, 51, 85, 40, 19, 221, 108,
-            186, 90, 91, 229, 105, 74, 3, 33, 141, 240, 94, 204, 90,
+            107, 167, 105, 85, 0, 72, 8, 10, 52, 213, 112, 164, 127, 232, 8, 149, 122, 125, 217, 25, 244, 44, 69, 53, 254, 34, 88, 154, 46, 71, 182, 162,
         ],
         header_manifest_digest: [
             67, 191, 64, 100, 1, 191, 236, 254, 153, 179, 107, 219, 56, 225, 124, 120, 1, 215, 0,
@@ -348,8 +346,7 @@ const SM120_TF32_QUALIFICATION_IDENTITY: Tf32AutoQualificationIdentity =
             224, 180, 229, 223, 42, 5, 188, 9, 134, 254, 98, 65,
         ],
         driver_build_digest: [
-            187, 232, 57, 127, 110, 241, 26, 80, 106, 80, 45, 18, 125, 94, 184, 39, 69, 165, 21,
-            171, 100, 249, 178, 144, 29, 171, 78, 131, 75, 241, 144, 216,
+            198, 167, 186, 45, 24, 253, 128, 109, 152, 54, 59, 29, 126, 209, 127, 60, 52, 112, 16, 227, 178, 168, 2, 40, 61, 220, 25, 31, 187, 87, 122, 188,
         ],
     };
 
@@ -7283,7 +7280,7 @@ mod tf32_tests {
         assert!(identity.tensor_map_access);
         assert_eq!(
             digest_hex(&identity.compile_key),
-            "cc9b7b3a40f1228990c492b53933552813dd6cba5a5be5694a03218df05ecc5a"
+            "6ba769550048080a34d570a47fe808957a7dd919f42c4535fe22589a2e47b6a2"
         );
         assert_eq!(
             digest_hex(&identity.artifact_digest),
@@ -7295,7 +7292,7 @@ mod tf32_tests {
         );
         assert_eq!(
             digest_hex(&identity.invocation_digest),
-            "cc9b7b3a40f1228990c492b53933552813dd6cba5a5be5694a03218df05ecc5a"
+            "6ba769550048080a34d570a47fe808957a7dd919f42c4535fe22589a2e47b6a2"
         );
         assert_eq!(
             digest_hex(&identity.header_manifest_digest),
@@ -7307,7 +7304,7 @@ mod tf32_tests {
         );
         assert_eq!(
             digest_hex(&identity.driver_build_digest),
-            "bbe8397f6ef11a506a502d127d5eb82745a515ab64f9b2901dab4e834bf190d8"
+            "c6a7ba2d18fd806d98363b1d7ed17f3c347010e3b2a802283ddc191fbb577abc"
         );
 
         let module = qualified_module_for_auto_identity(identity);

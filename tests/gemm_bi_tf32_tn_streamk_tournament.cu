@@ -17,6 +17,13 @@
 // every dependency points at a lower CTA and the harness admits a grid no
 // larger than what the device keeps resident at once, no CTA waits on a CTA
 // that cannot run.
+//
+// Each CTA walks its range from the end: the segment it publishes comes
+// first, whole tiles next, the segment it owns last. A publisher therefore
+// never waits, and every owner waits only on slabs that are already being
+// produced. Walking forwards would put each owner behind the owner below it,
+// whose publish comes after its own wait, and the grid would run as one
+// serial chain.
 #if defined(__CUDA_ARCH__) && \
     (__CUDA_ARCH__ == 1200 || __CUDA_ARCH__ == 1210)
 
@@ -273,10 +280,10 @@ static __device__ __forceinline__ void sm120_tf32_tn_streamk_pair_kernel(
     float accumulator[2][4][4];
     long long first_tile = mine.first / k_tiles;
 
-    for (long long unit = mine.first; unit < mine.last;) {
-        long long tile = unit / k_tiles;
-        int k_begin = (int)(unit - tile * k_tiles);
-        int k_end = (int)min(k_tiles, k_begin + (mine.last - unit));
+    for (long long unit = mine.last; unit > mine.first;) {
+        long long tile = (unit - 1) / k_tiles;
+        int k_end = (int)(unit - tile * k_tiles);
+        int k_begin = (int)max(0LL, (long long)k_end - (unit - mine.first));
         int output_row = (int)(tile / column_tiles) * M;
         int output_column = (int)(tile % column_tiles) * N;
         const Sm120Tf32StageContext stage_context = {
@@ -350,7 +357,7 @@ static __device__ __forceinline__ void sm120_tf32_tn_streamk_pair_kernel(
                 output, rows, columns, output_row, output_column,
                 warp_m, warp_n, bias, params, accumulator);
         }
-        unit += k_end - k_begin;
+        unit -= k_end - k_begin;
     }
 }
 
