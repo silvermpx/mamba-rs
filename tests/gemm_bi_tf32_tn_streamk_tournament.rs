@@ -85,15 +85,15 @@ const fn spec(
         block: (tile.0 * tile.1 / 32, 1, 1),
         dynamic_shared_bytes: dynamic_shared_bytes(tile, stages),
         minimum_occupancy,
-        maximum_registers: 128,
+        // Two resident CTAs share the 64K-register file, one has it alone;
+        // the budget follows what the candidate must keep resident.
+        maximum_registers: if minimum_occupancy >= 2 { 128 } else { 255 },
     }
 }
 
-// The 96- and 144-CTA entries are probes, not contenders: on the cells whose
-// tile count is a multiple of the grid every CTA is dealt whole tiles only, so
-// the run pays no partial slab, no wait and no fixup, and its distance from the
-// production route measures the segment mainloop alone.
-const CANDIDATES: [CandidateSpec; 6] = [
+// The first two entries keep the first design as the yardstick; the rest
+// are the continuous-pipeline design at the same grids.
+const CANDIDATES: [CandidateSpec; 8] = [
     spec(
         "gemm_bi_tn_sm120_tma_mma_tf32_v1_m64n128_bk32_s4_pair_exp_streamk_v1",
         (64, 128),
@@ -102,24 +102,17 @@ const CANDIDATES: [CandidateSpec; 6] = [
         1,
     ),
     spec(
-        "gemm_bi_tn_sm120_tma_mma_tf32_v1_m64n128_bk32_s4_pair_exp_streamk_v1",
+        "gemm_bi_tn_sm120_tma_mma_tf32_v1_m64n128_bk32_s3_pair_exp_streamk_v2",
         (64, 128),
-        4,
+        3,
         96,
         1,
     ),
     spec(
-        "gemm_bi_tn_sm120_tma_mma_tf32_v1_m64n128_bk32_s4_pair_exp_streamk_v1",
-        (64, 128),
-        4,
-        144,
-        1,
-    ),
-    spec(
-        "gemm_bi_tn_sm120_tma_mma_tf32_v1_m64n128_bk32_s3_pair_exp_streamk_v1",
+        "gemm_bi_tn_sm120_tma_mma_tf32_v1_m64n128_bk32_s3_pair_exp_streamk_v2",
         (64, 128),
         3,
-        170,
+        128,
         1,
     ),
     spec(
@@ -130,10 +123,31 @@ const CANDIDATES: [CandidateSpec; 6] = [
         2,
     ),
     spec(
-        "gemm_bi_tn_sm120_tma_mma_tf32_v1_m64n128_bk32_s2_pair_exp_streamk_v1",
+        "gemm_bi_tn_sm120_tma_mma_tf32_v1_m64n128_bk32_s4_pair_exp_streamk_v2",
+        (64, 128),
+        4,
+        170,
+        1,
+    ),
+    spec(
+        "gemm_bi_tn_sm120_tma_mma_tf32_v1_m64n128_bk32_s3_pair_exp_streamk_v2",
+        (64, 128),
+        3,
+        170,
+        1,
+    ),
+    spec(
+        "gemm_bi_tn_sm120_tma_mma_tf32_v1_m64n128_bk32_s2_pair_exp_streamk_v2",
         (64, 128),
         2,
         170,
+        2,
+    ),
+    spec(
+        "gemm_bi_tn_sm120_tma_mma_tf32_v1_m64n128_bk32_s2_pair_exp_streamk_v2",
+        (64, 128),
+        2,
+        340,
         2,
     ),
 ];
@@ -200,7 +214,7 @@ fn validate_spec(spec: CandidateSpec) -> Result<(), String> {
 
 fn validate_candidate_symbol(spec: CandidateSpec) -> Result<(), String> {
     if !spec.symbol.starts_with("gemm_bi_tn_sm120_tma_mma_tf32_v1_")
-        || !spec.symbol.ends_with("_exp_streamk_v1")
+        || !(spec.symbol.ends_with("_exp_streamk_v1") || spec.symbol.ends_with("_exp_streamk_v2"))
     {
         return Err(format!(
             "{} is not a test-only TN stream-K candidate",
@@ -448,6 +462,12 @@ fn candidates_are_test_only_and_match_the_storage_formula() {
     assert_eq!(
         CUDA_SOURCE
             .matches("SM120_DEFINE_TF32_TN_STREAMK_KERNEL(\n")
+            .count(),
+        3
+    );
+    assert_eq!(
+        CUDA_SOURCE
+            .matches("SM120_DEFINE_TF32_TN_STREAMK_V2_KERNEL(\n")
             .count(),
         3
     );
@@ -712,14 +732,20 @@ mod cuda_tournament {
         source
     }
 
-    fn compile_sm120_source() -> Result<String, String> {
+    /// The traced build stamps %globaltimer around every segment; only the
+    /// trace test loads it, every gate and timing runs the plain build.
+    fn compile_sm120_source(trace: bool) -> Result<String, String> {
+        let mut options = vec![
+            "--fmad=true".to_owned(),
+            "--extra-device-vectorization".to_owned(),
+            "-DNDEBUG".to_owned(),
+        ];
+        if trace {
+            options.push("-DSM120_STREAMK_TRACE=1".to_owned());
+        }
         let options = cudarc::nvrtc::CompileOptions {
             arch: Some("compute_120"),
-            options: vec![
-                "--fmad=true".to_owned(),
-                "--extra-device-vectorization".to_owned(),
-                "-DNDEBUG".to_owned(),
-            ],
+            options,
             include_paths: mamba_rs::mamba_ssm::gpu::kernels::cuda_include_paths(),
             ..Default::default()
         };
@@ -874,7 +900,7 @@ mod cuda_tournament {
     }
 
     fn validate_ptxas_resources_and_sass() -> Result<(), String> {
-        let ptx = compile_sm120_source()?;
+        let ptx = compile_sm120_source(false)?;
         let directory =
             tempfile::tempdir().map_err(|error| format!("resource tempdir: {error}"))?;
         let ptx_path = directory.path().join("tn-streamk.ptx");
@@ -945,10 +971,10 @@ mod cuda_tournament {
         }
     }
 
-    fn load_resource_module(device: &GpuDevice) -> Result<ResourceModule, String> {
+    fn load_resource_module(device: &GpuDevice, trace: bool) -> Result<ResourceModule, String> {
         let module = device
             .context()
-            .load_module(cudarc::nvrtc::Ptx::from_src(compile_sm120_source()?))
+            .load_module(cudarc::nvrtc::Ptx::from_src(compile_sm120_source(trace)?))
             .map_err(|error| format!("load the stream-K tournament module: {error:?}"))?;
         let production_spec = production_spec();
         let production = module
@@ -1035,7 +1061,7 @@ mod cuda_tournament {
     }
 
     fn validate_driver_resources(device: &GpuDevice) -> Result<(), String> {
-        let resources = load_resource_module(device)?;
+        let resources = load_resource_module(device, false)?;
         validate_function_resources(&resources.production, production_spec())?;
         for (spec, function) in &resources.candidates {
             validate_function_resources(function, *spec)?;
@@ -1201,10 +1227,14 @@ mod cuda_tournament {
         module: ResourceModule,
     }
 
-    fn new_runtime(device: &GpuDevice, stream: Arc<CudaStream>) -> Result<Runtime, String> {
+    fn new_runtime(
+        device: &GpuDevice,
+        stream: Arc<CudaStream>,
+        trace: bool,
+    ) -> Result<Runtime, String> {
         Ok(Runtime {
             stream,
-            module: load_resource_module(device)?,
+            module: load_resource_module(device, trace)?,
         })
     }
 
@@ -1232,7 +1262,10 @@ mod cuda_tournament {
         }
         let slab = (spec.block.0 as usize) * 32;
         let slots = (spec.grid.max(1) as usize) * 2;
-        let partial_len = slab.checked_mul(slots).ok_or("partial extent overflow")?;
+        let partial_len = slab
+            .checked_mul(slots)
+            .and_then(|slabs| slabs.checked_add(trace_words(spec.grid)))
+            .ok_or("partial extent overflow")?;
         let a = GuardedBuffer::new(&runtime.stream, a_values)?;
         let b = GuardedBuffer::new(&runtime.stream, b_values)?;
         let production_output = GuardedBuffer::new(&runtime.stream, output_values.clone())?;
@@ -1547,7 +1580,7 @@ mod cuda_tournament {
         report_production_dispatch(&ctx);
         validate_ptxas_resources_and_sass()?;
         validate_driver_resources(&device)?;
-        let runtime = new_runtime(&device, ctx.stream.clone())?;
+        let runtime = new_runtime(&device, ctx.stream.clone(), false)?;
         let references: BTreeMap<&str, CellReference> = CELLS
             .iter()
             .map(|cell| (cell.label, cell_reference(*cell)))
@@ -1843,7 +1876,7 @@ mod cuda_tournament {
         validate_exact_environment(&ctx)?;
         report_production_dispatch(&ctx);
         validate_driver_resources(&device)?;
-        let runtime = new_runtime(&device, ctx.stream.clone())?;
+        let runtime = new_runtime(&device, ctx.stream.clone(), false)?;
         let references: BTreeMap<&str, CellReference> = CELLS
             .iter()
             .map(|cell| (cell.label, cell_reference(*cell)))
@@ -1891,6 +1924,349 @@ mod cuda_tournament {
         if winners.is_empty() {
             return Err("no stream-K candidate passed screening on any cell".into());
         }
+        Ok(())
+    }
+
+    /// Eight 64-bit stamps per CTA, stored as f32 words behind the slabs.
+    fn trace_words(grid: u32) -> usize {
+        (grid.max(1) as usize) * 16
+    }
+
+    struct CtaTrace {
+        entry: u64,
+        first_begin: u64,
+        first_end: u64,
+        last_begin: u64,
+        last_end: u64,
+        fixup_end: u64,
+        exit: u64,
+        segments: u64,
+        units_first: u64,
+        units_last: u64,
+    }
+
+    fn read_traces(runtime: &Runtime, fixture: &Fixture, grid: u32) -> Result<Vec<CtaTrace>, String> {
+        let bits = fixture.partial.bits(&runtime.stream)?;
+        let words = trace_words(grid);
+        if bits.len() < words {
+            return Err("partial buffer is shorter than its trace tail".into());
+        }
+        let tail = &bits[bits.len() - words..];
+        Ok((0..grid as usize)
+            .map(|cta| {
+                let word = |slot: usize| {
+                    u64::from(tail[cta * 16 + slot * 2])
+                        | (u64::from(tail[cta * 16 + slot * 2 + 1]) << 32)
+                };
+                let packed = word(7);
+                CtaTrace {
+                    entry: word(0),
+                    first_begin: word(1),
+                    first_end: word(2),
+                    last_begin: word(3),
+                    last_end: word(4),
+                    fixup_end: word(5),
+                    exit: word(6),
+                    segments: packed >> 48,
+                    units_first: (packed >> 24) & 0xff_ffff,
+                    units_last: packed & 0xff_ffff,
+                }
+            })
+            .collect())
+    }
+
+    fn median_us(values: &mut Vec<f64>) -> f64 {
+        if values.is_empty() {
+            return f64::NAN;
+        }
+        values.sort_by(f64::total_cmp);
+        values[values.len() / 2] / 1_000.0
+    }
+
+    fn report_trace(cell: Cell, spec: CandidateSpec, traces: &[CtaTrace]) {
+        let origin = traces.iter().map(|t| t.entry).min().unwrap_or(0);
+        let span = traces.iter().map(|t| t.exit).max().unwrap_or(0).saturating_sub(origin);
+        let skew = traces.iter().map(|t| t.entry).max().unwrap_or(0).saturating_sub(origin);
+        let delta = |a: u64, b: u64| a.saturating_sub(b) as f64;
+        let mut prologue: Vec<f64> = traces.iter().map(|t| delta(t.first_begin, t.entry)).collect();
+        let mut first_rate: Vec<f64> = traces
+            .iter()
+            .filter(|t| t.units_first > 0)
+            .map(|t| delta(t.first_end, t.first_begin) / t.units_first as f64)
+            .collect();
+        let mut last_rate: Vec<f64> = traces
+            .iter()
+            .filter(|t| t.segments >= 2 && t.units_last > 0)
+            .map(|t| delta(t.last_end, t.last_begin) / t.units_last as f64)
+            .collect();
+        let mut gap: Vec<f64> = traces
+            .iter()
+            .filter(|t| t.segments == 2)
+            .map(|t| delta(t.last_begin, t.first_end))
+            .collect();
+        let mut fixup: Vec<f64> = traces
+            .iter()
+            .filter(|t| t.fixup_end != 0)
+            .map(|t| delta(t.fixup_end, t.last_end))
+            .collect();
+        let mut tail: Vec<f64> = traces
+            .iter()
+            .map(|t| delta(t.exit, t.last_end.max(t.fixup_end)))
+            .collect();
+        let mut busy: Vec<f64> = traces.iter().map(|t| delta(t.exit, t.entry)).collect();
+        let busy_max = traces.iter().map(|t| t.exit.saturating_sub(t.entry)).max().unwrap_or(0);
+        let mut histogram = [0_usize; 4];
+        for trace in traces {
+            histogram[(trace.segments as usize).min(3)] += 1;
+        }
+        let owners = fixup.len();
+        let mut slowest: Vec<(u64, usize)> = traces
+            .iter()
+            .enumerate()
+            .map(|(cta, t)| (t.exit.saturating_sub(t.entry), cta))
+            .collect();
+        slowest.sort_unstable_by(|a, b| b.cmp(a));
+        let stragglers: Vec<String> = slowest
+            .iter()
+            .take(4)
+            .map(|(busy, cta)| {
+                let t = &traces[*cta];
+                format!(
+                    "cta{cta}:{:.1}us/seg{}/{}+{}",
+                    *busy as f64 / 1_000.0,
+                    t.segments,
+                    t.units_first,
+                    t.units_last
+                )
+            })
+            .collect();
+        let busy_p90 = slowest[slowest.len() / 10].0 as f64 / 1_000.0;
+        eprintln!("{LABEL} stragglers cell={} candidate={} grid={} busy_p90_us={busy_p90:.2} {}", cell.label, spec.symbol, spec.grid, stragglers.join(" "));
+        eprintln!(
+            "{LABEL} trace cell={} candidate={} grid={} span_us={:.2} entry_skew_us={:.2} busy_p50_us={:.2} busy_max_us={:.2} prologue_us={:.2} first_ns_per_unit={:.1} last_ns_per_unit={:.1} segment_gap_us={:.2} fixup_us={:.2} owners={owners} tail_us={:.2} segments_1_2_3={}/{}/{}",
+            cell.label,
+            spec.symbol,
+            spec.grid,
+            span as f64 / 1_000.0,
+            skew as f64 / 1_000.0,
+            median_us(&mut busy),
+            busy_max as f64 / 1_000.0,
+            median_us(&mut prologue),
+            median_us(&mut first_rate) * 1_000.0,
+            median_us(&mut last_rate) * 1_000.0,
+            median_us(&mut gap),
+            median_us(&mut fixup),
+            median_us(&mut tail),
+            histogram[1],
+            histogram[2],
+            histogram[3],
+        );
+    }
+
+    #[test]
+    #[ignore = "requires exclusive CC12.0/170-SM CUDA13.2 hardware"]
+    fn streamk_segment_trace() -> Result<(), String> {
+        let device = GpuDevice::new(0)?;
+        let ctx = configure(&device)?;
+        validate_exact_environment(&ctx)?;
+        let runtime = new_runtime(&device, ctx.stream.clone(), true)?;
+        for cell in CELLS {
+            for spec in CANDIDATES {
+                let (m, k, n) = cell.dims;
+                let fixture = new_fixture(
+                    &runtime,
+                    spec,
+                    cell.dims,
+                    (k, n, n),
+                    seeded_values(m * k, CORPUS_SALT ^ 0x11),
+                    seeded_values(m * n, CORPUS_SALT ^ 0x22),
+                    vec![0.0; k * n],
+                )?;
+                // Every launch overwrites the trace, so the readback holds the
+                // last launch of a long back-to-back batch: the first few
+                // milliseconds after an idle gap run below the settled clock.
+                for _ in 0..1_024 {
+                    launch_candidate(&runtime, spec, &fixture)?;
+                }
+                synchronize(&runtime, "trace batch")?;
+                // One more launch between two events: the wall time of a launch
+                // next to the span the stamps see inside it.
+                let start = runtime
+                    .stream
+                    .record_event(Some(sys::CUevent_flags::CU_EVENT_DEFAULT))
+                    .map_err(|error| format!("trace start event: {error:?}"))?;
+                launch_candidate(&runtime, spec, &fixture)?;
+                let end = runtime
+                    .stream
+                    .record_event(Some(sys::CUevent_flags::CU_EVENT_DEFAULT))
+                    .map_err(|error| format!("trace end event: {error:?}"))?;
+                synchronize(&runtime, "trace event launch")?;
+                let event_us = f64::from(
+                    start
+                        .elapsed_ms(&end)
+                        .map_err(|error| format!("trace elapsed: {error:?}"))?,
+                ) * 1_000.0;
+                let traces = read_traces(&runtime, &fixture, spec.grid)?;
+                eprintln!(
+                    "{LABEL} launch cell={} candidate={} grid={} event_us={event_us:.2}",
+                    cell.label, spec.symbol, spec.grid
+                );
+                report_trace(cell, spec, &traces);
+            }
+        }
+        Ok(())
+    }
+
+    /// The launch cost of an empty kernel at the candidates' launch shapes:
+    /// what a back-to-back stream pays between two kernel bodies.
+    #[test]
+    #[ignore = "requires exclusive CC12.0/170-SM CUDA13.2 hardware"]
+    fn streamk_launch_cost_probe() -> Result<(), String> {
+        let device = GpuDevice::new(0)?;
+        let ctx = configure(&device)?;
+        validate_exact_environment(&ctx)?;
+        let source = r#"
+extern "C" __global__ void launch_probe_kernel(float* sink, int arm) {
+    extern __shared__ float storage[];
+    if (arm < 0) {
+        storage[threadIdx.x] = 1.0f;
+        __syncthreads();
+        sink[blockIdx.x] = storage[(threadIdx.x + 1) % blockDim.x];
+    }
+}
+"#;
+        let options = cudarc::nvrtc::CompileOptions {
+            arch: Some("compute_120"),
+            ..Default::default()
+        };
+        let ptx = cudarc::nvrtc::compile_ptx_with_opts(source, options)
+            .map_err(|error| format!("compile the launch probe: {error:?}"))?;
+        let module = device
+            .context()
+            .load_module(ptx)
+            .map_err(|error| format!("load the launch probe: {error:?}"))?;
+        let function = module
+            .load_function("launch_probe_kernel")
+            .map_err(|error| format!("load the launch probe function: {error:?}"))?;
+        function
+            .set_attribute(
+                sys::CUfunction_attribute_enum::CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
+                98_432,
+            )
+            .map_err(|error| format!("set launch probe dynamic shared: {error:?}"))?;
+        let sink = GuardedBuffer::new(&ctx.stream, vec![0.0; 512])?;
+        let sink_ptr = sink.active_ptr(&ctx.stream, "sink")?;
+        let arm = 0_i32;
+        for (grid, shared) in [
+            (170_u32, 0_u32),
+            (170, 49_280),
+            (170, 73_856),
+            (170, 98_432),
+            (96, 98_432),
+            (288, 98_432),
+            (340, 49_280),
+        ] {
+            let config = LaunchConfig {
+                grid_dim: (grid, 1, 1),
+                block_dim: (256, 1, 1),
+                shared_mem_bytes: shared,
+            };
+            let launch = |stream: &Arc<CudaStream>| -> Result<(), String> {
+                let mut builder = stream.launch_builder(&function);
+                builder.arg(&sink_ptr);
+                builder.arg(&arm);
+                unsafe { builder.launch(config) }
+                    .map(|_| ())
+                    .map_err(|error| format!("launch probe: {error:?}"))
+            };
+            for _ in 0..256 {
+                launch(&ctx.stream)?;
+            }
+            ctx.stream
+                .synchronize()
+                .map_err(|error| format!("probe warmup: {error:?}"))?;
+            let iterations = 2_000;
+            let start = ctx
+                .stream
+                .record_event(Some(sys::CUevent_flags::CU_EVENT_DEFAULT))
+                .map_err(|error| format!("probe start event: {error:?}"))?;
+            for _ in 0..iterations {
+                launch(&ctx.stream)?;
+            }
+            let end = ctx
+                .stream
+                .record_event(Some(sys::CUevent_flags::CU_EVENT_DEFAULT))
+                .map_err(|error| format!("probe end event: {error:?}"))?;
+            ctx.stream
+                .synchronize()
+                .map_err(|error| format!("probe batch: {error:?}"))?;
+            let per_launch_us = f64::from(
+                start
+                    .elapsed_ms(&end)
+                    .map_err(|error| format!("probe elapsed: {error:?}"))?,
+            ) * 1_000.0
+                / iterations as f64;
+            eprintln!(
+                "{LABEL} launch-cost grid={grid} threads=256 dynamic_shared={shared} per_launch_us={per_launch_us:.2}"
+            );
+        }
+        Ok(())
+    }
+
+    /// Replays one arm's graph for a few seconds so an external sampler can
+    /// read the clocks and power the arm settles at.
+    #[test]
+    #[ignore = "requires exclusive CC12.0/170-SM CUDA13.2 hardware"]
+    fn streamk_sustained_probe() -> Result<(), String> {
+        let label = std::env::var("STREAMK_PROBE_CELL")
+            .map_err(|_| "STREAMK_PROBE_CELL names the cell label".to_string())?;
+        let arm = std::env::var("STREAMK_PROBE_ARM")
+            .map_err(|_| "STREAMK_PROBE_ARM is production or a candidate index".to_string())?;
+        let seconds: f64 = std::env::var("STREAMK_PROBE_SECONDS")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(4.0);
+        let cell = CELLS
+            .iter()
+            .copied()
+            .find(|cell| cell.label == label)
+            .ok_or_else(|| format!("unknown cell {label}"))?;
+        let candidate = if arm == "production" {
+            None
+        } else {
+            let index: usize = arm
+                .parse()
+                .map_err(|_| format!("candidate index expected, got {arm}"))?;
+            Some(
+                *CANDIDATES
+                    .get(index)
+                    .ok_or_else(|| format!("candidate index {index} out of range"))?,
+            )
+        };
+        let device = GpuDevice::new(0)?;
+        let ctx = configure(&device)?;
+        validate_exact_environment(&ctx)?;
+        let runtime = new_runtime(&device, ctx.stream.clone(), false)?;
+        let spec = candidate.unwrap_or(production_spec());
+        let timed = new_timed_arm(&runtime, cell, spec, candidate)?;
+        for _ in 0..64 {
+            launch_timed(&timed, Path::Graph)?;
+        }
+        synchronize(&runtime, "probe warmup")?;
+        let started = std::time::Instant::now();
+        let mut launches = 0_usize;
+        let mut total_us = 0.0;
+        while started.elapsed().as_secs_f64() < seconds {
+            total_us += measure(&timed, Path::Graph, 200)? * 200.0;
+            launches += 200;
+        }
+        eprintln!(
+            "{LABEL} sustained cell={} arm={} grid={} launches={launches} mean_us={:.3}",
+            cell.label,
+            arm_name(candidate),
+            spec.grid,
+            total_us / launches as f64
+        );
         Ok(())
     }
 
