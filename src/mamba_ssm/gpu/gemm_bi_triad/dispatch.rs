@@ -1021,8 +1021,10 @@ const SM120_TF32_QUALIFICATION_IDENTITY_CUDA_13_2_DRIVER_595_84: Tf32AutoQualifi
         ],
     };
 
-/// Exact SM120 TF32 evidence inventory measured on the 595.84 driver build,
-/// nine projection cells over the 101-window selector protocol.
+/// Exact SM120 TF32 evidence inventory measured on the 595.84 driver build:
+/// nineteen projection cells over the 101-window selector protocol. Two of the
+/// twenty-one shapes measured, both 1024x256x128 output projections, admitted
+/// no TF32 winner at all and are absent by measurement, not by omission.
 const SM120_TF32_EVIDENCE_CELLS_CUDA_13_2_DRIVER_595_84: &[Tf32AutoCell] = &[
     sm120_tf32_cell(
         Nn,
@@ -1102,6 +1104,114 @@ const SM120_TF32_EVIDENCE_CELLS_CUDA_13_2_DRIVER_595_84: &[Tf32AutoCell] = &[
         super::contract::Tf32Sm120Stages::S2,
         RequiresVectorAlignmentEvidence,
     ),
+    sm120_tf32_cell(
+        Nn,
+        4096,
+        1536,
+        3072,
+        super::contract::Tf32Sm120Tile::M64N128,
+        super::contract::Tf32Sm120Stages::S2,
+        RequiresNoBiasAndVectorAlignmentEvidence,
+    ),
+    sm120_tf32_streamk_cell(
+        Tn,
+        3072,
+        1536,
+        4096,
+        super::contract::Tf32Sm120Stages::S3,
+        RequiresVectorAlignmentEvidence,
+    ),
+    sm120_tf32_cell(
+        Nt,
+        4096,
+        3072,
+        1536,
+        super::contract::Tf32Sm120Tile::M64N128,
+        super::contract::Tf32Sm120Stages::S2,
+        RequiresVectorAlignmentEvidence,
+    ),
+    sm120_tf32_cell(
+        Nn,
+        2048,
+        768,
+        3072,
+        super::contract::Tf32Sm120Tile::M64N64,
+        super::contract::Tf32Sm120Stages::S2,
+        RequiresNoBiasAndVectorAlignmentEvidence,
+    ),
+    sm120_tf32_streamk_cell(
+        Tn,
+        3072,
+        768,
+        2048,
+        super::contract::Tf32Sm120Stages::S3,
+        RequiresVectorAlignmentEvidence,
+    ),
+    sm120_tf32_cell(
+        Nt,
+        2048,
+        3072,
+        768,
+        super::contract::Tf32Sm120Tile::M64N128,
+        super::contract::Tf32Sm120Stages::S2,
+        RequiresVectorAlignmentEvidence,
+    ),
+    Tf32AutoCell {
+        op: Nn,
+        shape: Tf32ExactShape {
+            output_rows: 1024,
+            output_columns: 512,
+            reduction: 128,
+        },
+        route: Tf32PhysicalRoute::MmaTf32RnaV1(super::contract::Tf32PortableRoute {
+            tile: super::contract::Tf32PortableTile::M64N64,
+            stages: super::contract::Tf32PortableStages::S3,
+        }),
+        tuning_revision: SM120_TF32_QUALIFIED_TUNING_REVISION,
+        operand_gate: RequiresNoBiasAndVectorAlignmentEvidence,
+    },
+    Tf32AutoCell {
+        op: Tn,
+        shape: Tf32ExactShape {
+            output_rows: 128,
+            output_columns: 512,
+            reduction: 1024,
+        },
+        route: Tf32PhysicalRoute::MmaTf32RnaV1(super::contract::Tf32PortableRoute {
+            tile: super::contract::Tf32PortableTile::M16N32,
+            stages: super::contract::Tf32PortableStages::S4,
+        }),
+        tuning_revision: SM120_TF32_QUALIFIED_TUNING_REVISION,
+        operand_gate: RequiresVectorAlignmentEvidence,
+    },
+    Tf32AutoCell {
+        op: Nt,
+        shape: Tf32ExactShape {
+            output_rows: 1024,
+            output_columns: 128,
+            reduction: 512,
+        },
+        route: Tf32PhysicalRoute::MmaTf32RnaV1(super::contract::Tf32PortableRoute {
+            tile: super::contract::Tf32PortableTile::M16N16,
+            stages: super::contract::Tf32PortableStages::S4,
+        }),
+        tuning_revision: SM120_TF32_QUALIFIED_TUNING_REVISION,
+        operand_gate: RequiresVectorAlignmentEvidence,
+    },
+    Tf32AutoCell {
+        op: Tn,
+        shape: Tf32ExactShape {
+            output_rows: 256,
+            output_columns: 128,
+            reduction: 1024,
+        },
+        route: Tf32PhysicalRoute::MmaTf32RnaV1(super::contract::Tf32PortableRoute {
+            tile: super::contract::Tf32PortableTile::M16N16,
+            stages: super::contract::Tf32PortableStages::S4,
+        }),
+        tuning_revision: SM120_TF32_QUALIFIED_TUNING_REVISION,
+        operand_gate: RequiresVectorAlignmentEvidence,
+    },
 ];
 
 const SM120_TF32_EVIDENCE_COHORTS: &[Tf32AutoEvidenceCohort] = &[
