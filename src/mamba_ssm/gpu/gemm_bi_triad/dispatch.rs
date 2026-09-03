@@ -976,6 +976,134 @@ const SM120_TF32_EVIDENCE_CELLS: &[Tf32AutoCell] = &[
     ),
 ];
 
+/// Frozen CUDA 13.2 qualification identity from the 595.84 driver build. The
+/// 13.2 cohort above was taken on 595.91, and two of its nine cells chose a
+/// different route there, so the two builds carry separate evidence.
+const SM120_TF32_QUALIFICATION_IDENTITY_CUDA_13_2_DRIVER_595_84: Tf32AutoQualificationIdentity =
+    Tf32AutoQualificationIdentity {
+        module_kind: ModuleKind::TriadSm120,
+        module_target: "compute_120",
+        device_target: "sm_120",
+        compute_capability: (12, 0),
+        multiprocessor_count: 170,
+        nvrtc_version: (13, 2),
+        driver_api_version: 13_020,
+        driver_build_sources: 7,
+        optin_shared_bytes: 101_376,
+        tensor_map_access: true,
+        compile_key: [
+            164, 111, 255, 220, 20, 165, 216, 226, 182, 171, 219, 3, 7, 114, 247, 176, 17, 171, 94,
+            27, 103, 33, 223, 150, 13, 39, 77, 154, 160, 146, 90, 252,
+        ],
+        artifact_digest: [
+            84, 105, 236, 114, 208, 179, 3, 173, 38, 68, 104, 40, 127, 52, 184, 89, 101, 109, 115,
+            160, 208, 54, 150, 90, 148, 230, 54, 213, 21, 212, 71, 227,
+        ],
+        source_digest: [
+            125, 146, 67, 184, 153, 20, 74, 5, 79, 185, 32, 107, 196, 155, 195, 167, 59, 100, 79,
+            61, 54, 211, 230, 24, 212, 155, 175, 154, 80, 133, 233, 145,
+        ],
+        invocation_digest: [
+            164, 111, 255, 220, 20, 165, 216, 226, 182, 171, 219, 3, 7, 114, 247, 176, 17, 171, 94,
+            27, 103, 33, 223, 150, 13, 39, 77, 154, 160, 146, 90, 252,
+        ],
+        header_manifest_digest: [
+            101, 83, 218, 3, 23, 116, 215, 159, 181, 30, 190, 53, 234, 120, 114, 18, 88, 118, 25,
+            76, 202, 62, 69, 221, 223, 33, 204, 218, 138, 5, 236, 133,
+        ],
+        nvrtc_library_domain: [
+            220, 223, 96, 48, 189, 148, 19, 101, 183, 103, 158, 213, 226, 50, 226, 19, 235, 24,
+            147, 98, 12, 178, 250, 224, 154, 245, 36, 3, 79, 180, 23, 212,
+        ],
+        driver_build_digest: [
+            142, 150, 68, 239, 130, 136, 131, 5, 214, 222, 50, 93, 180, 249, 96, 244, 193, 247,
+            254, 61, 169, 46, 223, 96, 180, 53, 238, 116, 173, 98, 33, 178,
+        ],
+    };
+
+/// Exact SM120 TF32 evidence inventory measured on the 595.84 driver build,
+/// nine projection cells over the 101-window selector protocol.
+const SM120_TF32_EVIDENCE_CELLS_CUDA_13_2_DRIVER_595_84: &[Tf32AutoCell] = &[
+    sm120_tf32_cell(
+        Nn,
+        2048,
+        3072,
+        768,
+        super::contract::Tf32Sm120Tile::M64N128,
+        super::contract::Tf32Sm120Stages::S2,
+        RequiresNoBiasAndVectorAlignmentEvidence,
+    ),
+    sm120_tf32_streamk_cell(
+        Tn,
+        768,
+        3072,
+        2048,
+        super::contract::Tf32Sm120Stages::S3,
+        RequiresVectorAlignmentEvidence,
+    ),
+    sm120_tf32_cell(
+        Nt,
+        2048,
+        768,
+        3072,
+        super::contract::Tf32Sm120Tile::M64N64,
+        super::contract::Tf32Sm120Stages::S2,
+        RequiresVectorAlignmentEvidence,
+    ),
+    sm120_tf32_cell(
+        Nn,
+        2048,
+        768,
+        1536,
+        super::contract::Tf32Sm120Tile::M64N64,
+        super::contract::Tf32Sm120Stages::S2,
+        RequiresNoBiasAndVectorAlignmentEvidence,
+    ),
+    sm120_tf32_streamk_cell(
+        Tn,
+        1536,
+        768,
+        2048,
+        super::contract::Tf32Sm120Stages::S3,
+        RequiresVectorAlignmentEvidence,
+    ),
+    sm120_tf32_cell(
+        Nt,
+        2048,
+        1536,
+        768,
+        super::contract::Tf32Sm120Tile::M64N64,
+        super::contract::Tf32Sm120Stages::S2,
+        RequiresVectorAlignmentEvidence,
+    ),
+    sm120_tf32_cell(
+        Nn,
+        4621,
+        1928,
+        384,
+        super::contract::Tf32Sm120Tile::M64N64,
+        super::contract::Tf32Sm120Stages::S2,
+        RequiresNoBiasAndVectorAlignmentEvidence,
+    ),
+    sm120_tf32_streamk_cell(
+        Tn,
+        384,
+        1928,
+        4621,
+        super::contract::Tf32Sm120Stages::S3,
+        RequiresVectorAlignmentEvidence,
+    ),
+    sm120_tf32_cell(
+        Nt,
+        4621,
+        384,
+        1928,
+        super::contract::Tf32Sm120Tile::M64N64,
+        super::contract::Tf32Sm120Stages::S2,
+        RequiresVectorAlignmentEvidence,
+    ),
+];
+
 const SM120_TF32_EVIDENCE_COHORTS: &[Tf32AutoEvidenceCohort] = &[
     Tf32AutoEvidenceCohort {
         identity: SM120_TF32_QUALIFICATION_IDENTITY_CUDA_12_8,
@@ -988,6 +1116,10 @@ const SM120_TF32_EVIDENCE_COHORTS: &[Tf32AutoEvidenceCohort] = &[
     Tf32AutoEvidenceCohort {
         identity: SM120_TF32_QUALIFICATION_IDENTITY,
         cells: SM120_TF32_EVIDENCE_CELLS,
+    },
+    Tf32AutoEvidenceCohort {
+        identity: SM120_TF32_QUALIFICATION_IDENTITY_CUDA_13_2_DRIVER_595_84,
+        cells: SM120_TF32_EVIDENCE_CELLS_CUDA_13_2_DRIVER_595_84,
     },
 ];
 
@@ -7152,18 +7284,31 @@ mod tf32_tests {
                 .count(),
             1,
         );
-        assert_eq!(
+        // One NVRTC version can carry several cohorts: a cohort is a whole
+        // stack, and two driver builds of the same toolkit chose different
+        // routes. What must stay unique is the driver build behind each one.
+        assert!(
             SM120_TF32_EVIDENCE_COHORTS
                 .iter()
                 .filter(|cohort| cohort.identity.nvrtc_version == (13, 2))
-                .count(),
-            1,
+                .count()
+                >= 1,
         );
         assert!(
             SM120_TF32_EVIDENCE_COHORTS
                 .iter()
                 .all(|cohort| cohort.identity.nvrtc_version != (13, 1))
         );
+        for (index, cohort) in SM120_TF32_EVIDENCE_COHORTS.iter().enumerate() {
+            for other in SM120_TF32_EVIDENCE_COHORTS.iter().skip(index + 1) {
+                assert!(
+                    cohort.identity.nvrtc_version != other.identity.nvrtc_version
+                        || cohort.identity.driver_build_digest
+                            != other.identity.driver_build_digest,
+                    "cohort {index} shares a stack with a later cohort",
+                );
+            }
+        }
         for (index, cohort) in SM120_TF32_EVIDENCE_COHORTS.iter().enumerate() {
             assert_eq!(cohort.identity.module_kind, ModuleKind::TriadSm120);
             assert!(!cohort.cells.is_empty());
