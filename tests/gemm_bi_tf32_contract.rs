@@ -12029,8 +12029,13 @@ fn qualification_v5_route_rows<'a>(
         let portable_nonzero = rows
             .iter()
             .any(|row| !sm120_symbols.contains(row[0]) && (row[14] != "0" || row[15] != "0"));
-        if sm120_rows.len() != 16 || zero_rows != 16 || portable_nonzero {
-            return Err("SM120 qualification must contain sixteen zero-local-memory routes".into());
+        if sm120_rows.len() != sm120_symbols.len()
+            || zero_rows != sm120_symbols.len()
+            || portable_nonzero
+        {
+            return Err(
+                "SM120 qualification must contain every SM120 route with zero local memory".into(),
+            );
         }
     }
     Ok(rows)
@@ -12536,13 +12541,23 @@ fn assert_driver_abi_proof(proof: &str, expected: &BTreeSet<String>, tensor_map_
         let count_source = fields.next().expect("driver ABI count source");
         let layout = fields.next().expect("driver ABI parameter layout");
         assert!(fields.next().is_none(), "extra driver ABI fields: {line}");
-        assert_eq!(count, 5, "{symbol} live Driver ABI parameter count");
+        // Stream-K carries the partial slabs and the flags ahead of the maps.
+        let streamk = symbol.contains("_streamk");
+        assert_eq!(
+            count,
+            if streamk { 7 } else { 5 },
+            "{symbol} live Driver ABI parameter count"
+        );
         assert_eq!(
             count_source, "ptx_contract+cuFuncGetParamInfo_terminal_probe",
             "{symbol} live Driver ABI count source"
         );
         let expected_layout = if symbol.contains("_sm80_") {
             "0:8,8:8,16:8,24:8,32:32"
+        } else if streamk && tensor_map_alignment == 64 {
+            "0:8,8:8,16:8,64:128,192:128,320:8,328:40"
+        } else if streamk {
+            "0:8,8:8,16:8,128:128,256:128,384:8,392:40"
         } else if tensor_map_alignment == 64 {
             "0:8,64:128,192:128,320:8,328:40"
         } else {
@@ -13116,8 +13131,52 @@ fn driver_abi_lookup_uses_the_cuda12_compatible_symbol() {
     assert_cuda12_driver_abi_lookup_contract();
 }
 
+/// Per-op census of the routes the tool qualifies on a device: the portable
+/// set plus the device module's TF32 routes. The exact-F32 SM120 routes are
+/// not TF32 candidates.
+struct QualifiedOpCensus {
+    nn: usize,
+    tn: usize,
+    nt: usize,
+}
+
+fn qualified_op_census(cc: (u32, u32), expected_routes: usize) -> QualifiedOpCensus {
+    use mamba_rs::mamba_ssm::gpu::gemm_bi_triad::tf32_route_specs;
+    use mamba_rs::mamba_ssm::gpu::kernel_identity::{ModuleKind, ResolvedGemmOp};
+    let mut modules = vec![ModuleKind::TriadSm80];
+    match cc.0 {
+        9 => modules.push(ModuleKind::TriadSm90a),
+        10 | 11 => modules.push(ModuleKind::TriadSm100),
+        12 => modules.push(ModuleKind::TriadSm120),
+        _ => {}
+    }
+    let mut census = QualifiedOpCensus {
+        nn: 0,
+        tn: 0,
+        nt: 0,
+    };
+    for spec in modules
+        .iter()
+        .flat_map(|module| tf32_route_specs(*module).iter())
+        .filter(|spec| !spec.route.is_exact_fma())
+    {
+        match spec.op {
+            ResolvedGemmOp::Nn => census.nn += 1,
+            ResolvedGemmOp::Tn => census.tn += 1,
+            ResolvedGemmOp::Nt => census.nt += 1,
+        }
+    }
+    assert_eq!(
+        census.nn + census.tn + census.nt,
+        expected_routes,
+        "qualified route census for CC {cc:?}"
+    );
+    census
+}
+
 fn run_hardware_qualification(cc: (u32, u32), expected_routes: usize) {
     require_exact_cc(cc);
+    let census = qualified_op_census(cc, expected_routes);
     let directory = tempfile::tempdir().expect("TF32 qualification target directory");
     let target = directory.path().join("target");
     let mut build = Command::new("cargo");
@@ -13206,9 +13265,9 @@ fn run_hardware_qualification(cc: (u32, u32), expected_routes: usize) {
         ("staged_cases", (expected_routes * 4) as u64),
         ("guard_poison_pairs", expected_routes as u64),
         ("exceptional_symbols", expected_routes as u64),
-        ("cross_m_symbols", (expected_routes * 2 / 3) as u64),
-        ("cross_m_shapes", (expected_routes * 8 / 3) as u64),
-        ("nn_bias_beta_symbols", (expected_routes / 3) as u64),
+        ("cross_m_symbols", (census.nn + census.nt) as u64),
+        ("cross_m_shapes", ((census.nn + census.nt) * 4) as u64),
+        ("nn_bias_beta_symbols", census.nn as u64),
     ] {
         assert_eq!(
             strict_json_u64(fields, field).unwrap_or_else(|error| panic!("{error}")),
@@ -13334,5 +13393,5 @@ fn hardware_sm120_tf32_runtime_and_performance_gate() {
 #[test]
 #[ignore = "requires exact CC 12.1 and the full TF32 runtime/performance qualification corpus"]
 fn hardware_sm121_tf32_runtime_and_performance_gate() {
-    run_hardware_qualification((12, 1), 35);
+    run_hardware_qualification((12, 1), 36);
 }

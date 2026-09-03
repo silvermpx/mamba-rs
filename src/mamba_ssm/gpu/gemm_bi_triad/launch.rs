@@ -3207,13 +3207,18 @@ fn prepare_tf32_streamk_f32(
     use cudarc::driver::DevicePtr;
 
     let spec = tf32_kernel_spec(request.op, route)?;
-    if request.shape.reduction(request.op) == 0 {
-        return Err("stream-K TF32 route requires a nonzero reduction".into());
-    }
+    // An empty reduction walks the persistent grid over the epilogue alone:
+    // no operand maps, no inputs, the same placeholder maps as the tiled
+    // SM120 routes.
+    let zero_reduction = request.shape.reduction(request.op) == 0;
     let plan = tf32_streamk_launch_plan(request, spec, ctx.kernels.multiprocessor_count())?;
     let binding = f32_map_binding(ctx, route)?;
     let allocation_domain = binding.allocation_domain;
-    let resources = output_resources.with_inputs(request, operands, allocation_domain)?;
+    let resources = if zero_reduction {
+        output_resources
+    } else {
+        output_resources.with_inputs(request, operands, allocation_domain)?
+    };
     let scratch_buffer = ctx.kernels.splitk_scratch_buf(&ctx.stream)?;
     let (partial, _) = scratch_buffer.device_ptr(&ctx.stream);
     let flag_buffer = ctx
@@ -3227,7 +3232,16 @@ fn prepare_tf32_streamk_f32(
         Some((flags, (TF32_SPLITK_COUNTER_CAP as u64) * 4)),
         allocation_domain,
     )?;
-    let maps = prepare_specialized_tf32_maps(ctx, request, operands, route, binding)?;
+    let maps = if zero_reduction {
+        F32PreparedTensorMaps::zero_reduction(
+            request,
+            Some(route),
+            Some(binding),
+            Tf32TensorMapFormat::Uint32V1,
+        )
+    } else {
+        prepare_specialized_tf32_maps(ctx, request, operands, route, binding)?
+    };
     let origins = maps.origins();
     let maps_digest = maps.identity_digest();
     let resources_digest = resources.digest(request, operands, maps_digest);
@@ -3247,7 +3261,7 @@ fn prepare_tf32_streamk_f32(
             resources: resources_digest,
             arguments: arguments_digest,
         },
-        false,
+        zero_reduction,
         config,
     );
     let routes = vec![resolved].into_boxed_slice();

@@ -1717,7 +1717,19 @@ static __device__ __forceinline__ void sm120_tf32_rect_wide_kernel(
     int warp_m = warp * 16;
     int group = lane >> 2;
     int thread = lane & 3;
-    float accumulator[1][NAtoms][4] = {};
+    // The bias rides in the accumulator seed, the way the other NN routes
+    // carry it, so the epilogue stays a plain scale.
+    float accumulator[1][NAtoms][4];
+#pragma unroll
+    for (int n_atom = 0; n_atom < NAtoms; ++n_atom) {
+#pragma unroll
+        for (int element = 0; element < 4; ++element) {
+            int column = output_column + n_atom * 8 + 2 * thread + (element & 1);
+            float seed = 0.0f;
+            if (column < params.n && bias != nullptr) seed = bias[column];
+            accumulator[0][n_atom][element] = seed;
+        }
+    }
 
     for (int tile = 0; tile < tile_count; ++tile) {
         int stage = tile % Stages;
@@ -1774,6 +1786,7 @@ static __device__ __forceinline__ void sm120_tf32_entry(
 static __device__ __forceinline__ void sm120_tf32_rect_wide_entry(
     void* output, const CUtensorMap& a_map, const CUtensorMap& b_map,
     const float* bias, const Sm120KernelParams& params) {
+    assert(params.alpha == 1.0f || bias == nullptr);
     if (params.k == 0) {
         sm120_tf32_zero_reduction_epilogue<Sm120Nn, 80, 32>(
             output, bias, params);
