@@ -428,7 +428,9 @@ fn fixed_pick_f32out_tile(
     }
     let multiprocessors = device.multiprocessors.max(1);
     let thin_tiles = (rows as u32).div_ceil(16) * (cols as u32).div_ceil(32);
-    let thin_residency = if matches!(device.compute_capability, (8, 9) | (12, 0)) {
+    let thin_residency = if device.compute_capability == (8, 9)
+        || super::device::is_sm120_family(device.compute_capability)
+    {
         4
     } else {
         2
@@ -456,7 +458,7 @@ fn fixed_pick_f32out_tile(
 }
 
 fn fixed_adjust_arch_tile(tile: FixedTile, k: usize, compute_capability: (u32, u32)) -> FixedTile {
-    if compute_capability == (12, 0) && tile == FixedTile::Tc128 && k >= 1024 {
+    if super::device::is_sm120_family(compute_capability) && tile == FixedTile::Tc128 && k >= 1024 {
         FixedTile::TcW64
     } else {
         tile
@@ -922,7 +924,7 @@ fn fixed_pick_tf32(
         }
         return FixedTile::Tf32Sm120M64S2;
     }
-    if matches!(compute_capability, (12, 0) | (12, 1)) {
+    if super::device::is_sm120_family(compute_capability) {
         return FixedTile::Tf32M64S2;
     }
     if cols >= 768 {
@@ -1119,7 +1121,7 @@ fn launch_sm120_tf32(
 
 fn fixed_sm120_half_eligible(ctx: &GpuCtx, args: &FixedArgs) -> bool {
     ctx.kernels.gemm_bi_nn_half_sm120.is_some()
-        && matches!(ctx.compute_capability(), (12, 0) | (12, 1))
+        && super::device::is_sm120_family(ctx.compute_capability())
         && args.k > 0
         && args.a.is_multiple_of(16)
         && args.b.is_multiple_of(16)
@@ -1241,9 +1243,10 @@ fn fixed_pick_sm120_half(
         let Some(b_grid) = rows.div_ceil(128).checked_mul(cols.div_ceil(128)) else {
             return Some(FixedSm120HalfTile::M64N64Bk64S2);
         };
-        let c_waves = c_grid.div_ceil(170);
-        let a_waves = a_grid.div_ceil(170);
-        let b_waves = b_grid.div_ceil(170);
+        let sms = multiprocessors as usize;
+        let c_waves = c_grid.div_ceil(sms);
+        let a_waves = a_grid.div_ceil(sms);
+        let b_waves = b_grid.div_ceil(sms);
         // These paired 170-SM wave keys promote only measured A wins; every
         // unqualified topology falls through to the existing shallow policy.
         let paired_a_win = match cols {
@@ -1285,7 +1288,7 @@ fn fixed_pick_sm120_f32out(
     k: usize,
     device: FixedSm120HalfExactDevice,
 ) -> Option<FixedSm120HalfTile> {
-    if !matches!(device.compute_capability, (12, 0) | (12, 1)) {
+    if !super::device::is_sm120_family(device.compute_capability) {
         return None;
     }
     let fallback = fixed_pick_sm120_half(rows, cols, k, device.multiprocessors);
@@ -1577,7 +1580,7 @@ pub fn fixed_forward(
         && ctx.f32_triad_policy() == super::context::F32TriadPolicy::AllowDeterministicTf32V1
     {
         let sm120_tma = ctx.kernels.gemm_bi_nn_tf32_sm120.is_some()
-            && matches!(ctx.compute_capability(), (12, 0) | (12, 1))
+            && super::device::is_sm120_family(ctx.compute_capability())
             && n_in > 0
             && x.ptr.is_multiple_of(16)
             && w.ptr.is_multiple_of(16)

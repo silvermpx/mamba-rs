@@ -16,6 +16,7 @@ pub mod blas;
 pub mod buffers;
 pub mod context;
 pub mod device;
+pub(crate) mod diagnostics;
 pub mod dtype;
 pub mod forward;
 pub mod forward_mixed;

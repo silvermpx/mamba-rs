@@ -749,15 +749,23 @@ fn select_sm100_candidate<T, U>(
     mut qualify: impl FnMut(T) -> Result<U, String>,
 ) -> Option<U> {
     for &candidate in candidates {
-        if probe(candidate).is_err() {
-            continue;
-        }
-        let Ok(compiled) = compile(candidate) else {
-            continue;
+        let (stage, error) = match probe(candidate) {
+            Err(error) => ("probe", error),
+            Ok(()) => match compile(candidate) {
+                Err(error) => ("compile", error),
+                Ok(compiled) => match qualify(compiled) {
+                    Err(error) => ("qualify", error),
+                    Ok(qualified) => return Some(qualified),
+                },
+            },
         };
-        if let Ok(qualified) = qualify(compiled) {
-            return Some(qualified);
-        }
+        static REJECTED: std::sync::Once = std::sync::Once::new();
+        crate::mamba_ssm::gpu::diagnostics::warn_once(&REJECTED, || {
+            format!(
+                "SM100 candidate {candidate:?} rejected at {stage}: {error}; the next \
+                 candidate or the portable kernels serve"
+            )
+        });
     }
     None
 }
@@ -769,6 +777,17 @@ pub(crate) fn compile_sm120_artifact_set(
     nvrtc: (i32, i32),
 ) -> Option<Sm120ArtifactSet> {
     let candidates = super::dispatch::sm120_target_candidates(device_cc, nvrtc);
+    if candidates.is_empty() {
+        static NO_TARGET: std::sync::Once = std::sync::Once::new();
+        crate::mamba_ssm::gpu::diagnostics::warn_once(&NO_TARGET, || {
+            format!(
+                "CUDA {}.{} has no SM120 target for compute capability {}.{}; the SM120 \
+                 kernels are not compiled and the portable kernels serve",
+                nvrtc.0, nvrtc.1, device_cc.0, device_cc.1
+            )
+        });
+        return None;
+    }
     let mut baseline = None;
     for &candidate in candidates {
         let specialized = compile_module(CompileModuleRequest {
@@ -783,10 +802,34 @@ pub(crate) fn compile_sm120_artifact_set(
             }
             qualify_specialized_module(module)
         });
-        let Ok((fixed, scalar, sm80)) = compile_sm120_baseline(ctx, state_cap, candidate) else {
-            continue;
+        let (fixed, scalar, sm80) = match compile_sm120_baseline(ctx, state_cap, candidate) {
+            Ok(baseline) => baseline,
+            Err(error) => {
+                static BASELINE: std::sync::Once = std::sync::Once::new();
+                crate::mamba_ssm::gpu::diagnostics::warn_once(&BASELINE, || {
+                    format!(
+                        "the baseline modules failed to compile for {}: {error}",
+                        candidate.nvrtc_arch
+                    )
+                });
+                continue;
+            }
         };
-        if let Ok(mut specialized) = specialized {
+        let specialized = match specialized {
+            Ok(specialized) => Some(specialized),
+            Err(error) => {
+                static REJECTED: std::sync::Once = std::sync::Once::new();
+                crate::mamba_ssm::gpu::diagnostics::warn_once(&REJECTED, || {
+                    format!(
+                        "the SM120 module was rejected for {}: {error}; the portable kernels \
+                         serve every GEMM on this board",
+                        candidate.nvrtc_arch
+                    )
+                });
+                None
+            }
+        };
+        if let Some(mut specialized) = specialized {
             let complete = crate::mamba_ssm::gpu::kernel_identity::build_artifact_set(&[
                 fixed.artifact_identity,
                 scalar.artifact_identity,
@@ -795,16 +838,33 @@ pub(crate) fn compile_sm120_artifact_set(
             ]);
             let caps = query_sm120_device_caps(ctx, candidate, nvrtc);
             let resources = snapshot_sm120_resources(&specialized.functions);
-            if let (Ok(_), Ok(caps), Ok(resources)) = (complete, caps, resources) {
-                specialized.sm120_target = Some(candidate);
-                specialized.sm120_device_caps = Some(caps);
-                specialized.sm120_resources = resources;
-                return Some(Sm120ArtifactSet {
-                    fixed,
-                    scalar,
-                    sm80,
-                    specialized: Some(specialized),
-                });
+            match (complete, caps, resources) {
+                (Ok(_), Ok(caps), Ok(resources)) => {
+                    specialized.sm120_target = Some(candidate);
+                    specialized.sm120_device_caps = Some(caps);
+                    specialized.sm120_resources = resources;
+                    return Some(Sm120ArtifactSet {
+                        fixed,
+                        scalar,
+                        sm80,
+                        specialized: Some(specialized),
+                    });
+                }
+                (complete, caps, resources) => {
+                    let error = complete
+                        .err()
+                        .or_else(|| caps.err())
+                        .or_else(|| resources.err())
+                        .unwrap_or_default();
+                    static UNBOUND: std::sync::Once = std::sync::Once::new();
+                    crate::mamba_ssm::gpu::diagnostics::warn_once(&UNBOUND, || {
+                        format!(
+                            "the SM120 module compiled for {} but could not be bound \
+                             ({error}); the portable kernels serve every GEMM on this board",
+                            candidate.nvrtc_arch
+                        )
+                    });
+                }
             }
         }
         if baseline.is_none() {

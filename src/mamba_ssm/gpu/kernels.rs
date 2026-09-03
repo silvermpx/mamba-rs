@@ -553,9 +553,37 @@ impl MambaKernels {
         arch: &'static str,
         state_cap: usize,
     ) -> Result<Self, String> {
-        let device_cc = ctx.compute_capability().ok();
+        let device_cc = match ctx.compute_capability() {
+            Ok(device_cc) => Some(device_cc),
+            Err(error) => {
+                static UNKNOWN_CC: std::sync::Once = std::sync::Once::new();
+                super::diagnostics::warn_once(&UNKNOWN_CC, || {
+                    format!(
+                        "the driver did not report a compute capability ({error:?}); only the \
+                         portable kernels are compiled"
+                    )
+                });
+                None
+            }
+        };
+        // The loader and the selectors share one family predicate, so a
+        // kernel is never compiled for a board that cannot select it.
+        let sm120_board = device_cc.is_some_and(|(major, minor)| {
+            u32::try_from(major)
+                .and_then(|major| Ok((major, u32::try_from(minor)?)))
+                .is_ok_and(super::device::is_sm120_family)
+        });
+        if !sm120_board && matches!(arch, "compute_120" | "compute_121") {
+            static UNQUALIFIED: std::sync::Once = std::sync::Once::new();
+            super::diagnostics::warn_once(&UNQUALIFIED, || {
+                format!(
+                    "compute capability {device_cc:?} is not a qualified family; only the \
+                     portable kernels serve it"
+                )
+            });
+        }
         let sm120_artifacts = match device_cc {
-            Some(device_cc @ ((12, 0) | (12, 1))) => {
+            Some(device_cc) if sm120_board => {
                 super::gemm_bi_triad::modules::compile_sm120_artifact_set(
                     ctx,
                     state_cap,
@@ -836,10 +864,9 @@ impl MambaKernels {
                 }
                 kernels
             },
-            gemm_bi_nn_tf32_sm120: if matches!(
-                arch,
-                "sm_120" | "sm_121" | "compute_120" | "compute_121"
-            ) {
+            gemm_bi_nn_tf32_sm120: if sm120_board
+                && matches!(arch, "sm_120" | "sm_121" | "compute_120" | "compute_121")
+            {
                 let kernels = FixedSm120Tf32Kernels {
                     m128n64_s2: get("gemm_bi_nn_sm120_tma_tf32_v1_m128n64_bk32_s2")?,
                     m128n64_s3: get("gemm_bi_nn_sm120_tma_tf32_v1_m128n64_bk32_s3")?,
@@ -875,18 +902,16 @@ impl MambaKernels {
             } else {
                 None
             },
-            gemm_bi_nn_half_sm120: if matches!(
-                arch,
-                "sm_120" | "sm_121" | "compute_120" | "compute_121"
-            ) {
+            gemm_bi_nn_half_sm120: if sm120_board
+                && matches!(arch, "sm_120" | "sm_121" | "compute_120" | "compute_121")
+            {
                 Some(load_sm120_half("")?)
             } else {
                 None
             },
-            gemm_bi_nn_half_sm120_f32out: if matches!(
-                arch,
-                "sm_120" | "sm_121" | "compute_120" | "compute_121"
-            ) {
+            gemm_bi_nn_half_sm120_f32out: if sm120_board
+                && matches!(arch, "sm_120" | "sm_121" | "compute_120" | "compute_121")
+            {
                 Some(load_sm120_half("_f32out")?)
             } else {
                 None

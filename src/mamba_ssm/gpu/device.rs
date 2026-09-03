@@ -129,6 +129,9 @@ impl GpuDevice {
             (11, 0) => "sm_110",
             (12, 0) => "sm_120",
             (12, 1) => "sm_121",
+            // A minor this table does not name still belongs to the family
+            // and runs the family's virtual target.
+            (12, _) => "compute_120",
             (major, _) if major > 12 => "compute_120",
             _ => {
                 return Err(format!(
@@ -172,8 +175,8 @@ impl GpuDevice {
             )),
             (12, 0) if nvrtc_version >= (12, 8) => Ok("compute_120"),
             (12, 1) if nvrtc_version >= (12, 9) => Ok("compute_121"),
-            (12, 1) if nvrtc_version >= (12, 8) => Ok("compute_120"),
-            (12, 0 | 1) => Err(format!(
+            (12, _) if nvrtc_version >= (12, 8) => Ok("compute_120"),
+            (12, _) => Err(format!(
                 "CUDA {}.{} cannot compile compute capability {}.{}; SM120 needs CUDA 12.8 and SM121 needs CUDA 12.9 for its native generic target",
                 nvrtc_version.0, nvrtc_version.1, cc.0, cc.1
             )),
@@ -272,9 +275,21 @@ impl GpuDevice {
     }
 }
 
+/// Whether `cc` belongs to the SM120 family (consumer Blackwell).
+///
+/// Every minor of major 12 runs the `compute_120` PTX the SM120 kernels are
+/// built for, so the loader and every selector key on this one predicate:
+/// a kernel is never compiled for a board that cannot select it, and never
+/// selected on a board it was not compiled for. Measured tables stay scoped
+/// to the exact board they were measured on; this only says which family the
+/// kernels serve.
+pub fn is_sm120_family(cc: (u32, u32)) -> bool {
+    cc.0 == 12
+}
+
 #[cfg(test)]
 mod tests {
-    use super::GpuDevice;
+    use super::{GpuDevice, is_sm120_family};
 
     #[test]
     fn nvrtc_target_accepts_supported_sm80_plus() {
@@ -364,8 +379,27 @@ mod tests {
 
     #[test]
     fn nvrtc_target_rejects_unknown_known_family_minor() {
-        for cc in [(8, 1), (9, 1), (10, 2), (11, 1), (12, 2)] {
+        for cc in [(8, 1), (9, 1), (10, 2), (11, 1)] {
             assert!(GpuDevice::resolve_nvrtc_target(cc).is_err());
+        }
+    }
+
+    #[test]
+    fn unmapped_sm120_minor_takes_the_family_virtual_target() {
+        assert_eq!(
+            GpuDevice::resolve_nvrtc_target((12, 2)).unwrap(),
+            "compute_120"
+        );
+        assert_eq!(
+            GpuDevice::resolve_nvrtc_target_for_nvrtc((12, 2), (13, 2)).unwrap(),
+            "compute_120"
+        );
+        assert!(GpuDevice::resolve_nvrtc_target_for_nvrtc((12, 2), (12, 7)).is_err());
+        for cc in [(12, 0), (12, 1), (12, 2)] {
+            assert!(is_sm120_family(cc));
+        }
+        for cc in [(8, 9), (9, 0), (10, 0), (13, 0)] {
+            assert!(!is_sm120_family(cc));
         }
     }
 }

@@ -1,7 +1,7 @@
 use super::super::buffers::{
     GpuBuffer, ManagedAllocationEpochStamp, managed_allocation_epoch_for_ranges,
 };
-use super::super::context::{F32TriadPolicy, GpuCtx};
+use super::super::context::GpuCtx;
 use super::super::kernels::MambaKernels as GpuKernels;
 use super::contract::*;
 use super::dispatch::*;
@@ -2907,9 +2907,8 @@ fn scalar_transpose_scratch_elements(
     Ok(Some(elements))
 }
 
-fn scalar_launch_facts(kernels: &GpuKernels, policy: F32TriadPolicy) -> ScalarLaunchFacts {
+fn scalar_launch_facts(kernels: &GpuKernels) -> ScalarLaunchFacts {
     ScalarLaunchFacts {
-        policy,
         scalar_artifact: kernels.artifact_set_identity().triad_scalar,
         scalar_compiler: kernels.triad_scalar_compiler_identity(),
         compute_capability: kernels.triad_scalar_compute_capability(),
@@ -2961,12 +2960,11 @@ fn scalar_scratch_resources(
 
 fn prepare_scalar_f32(
     ctx: &GpuCtx,
-    policy: F32TriadPolicy,
     request: F32TriadRequest,
     operands: F32TriadOperands,
     output_resources: F32LaunchResourceSnapshot,
 ) -> Result<PreparedF32TriadLaunch, String> {
-    let plan = scalar_launch_plan(scalar_launch_facts(&ctx.kernels, policy), request, operands)?;
+    let plan = scalar_launch_plan(scalar_launch_facts(&ctx.kernels), request, operands)?;
     prepare_scalar_f32_with_plan(ctx, request, operands, output_resources, plan)
 }
 
@@ -3518,13 +3516,9 @@ pub(in crate::mamba_ssm::gpu) fn prepare_f32_triad(
         operands,
         ctx.kernels.f32_triad_availability(),
     )? {
-        F32TriadSelection::ScalarFmaV1 => prepare_scalar_f32(
-            ctx,
-            ctx.f32_triad_policy(),
-            request,
-            operands,
-            output_resources,
-        ),
+        F32TriadSelection::ScalarFmaV1 => {
+            prepare_scalar_f32(ctx, request, operands, output_resources)
+        }
         F32TriadSelection::Tf32(route) => {
             prepare_tf32_f32(ctx, request, operands, output_resources, route)
         }
@@ -3558,13 +3552,7 @@ fn prepare_exact_scalar_f32_triad(
         );
         return prepare_scalar_zero_f32(ctx, request, operands, output_resources, maps);
     }
-    prepare_scalar_f32(
-        ctx,
-        F32TriadPolicy::ExactScalarFmaV1,
-        request,
-        operands,
-        output_resources,
-    )
+    prepare_scalar_f32(ctx, request, operands, output_resources)
 }
 
 impl F32PreparedLaunchCache {
@@ -6260,13 +6248,42 @@ pub(in crate::mamba_ssm::gpu) fn launch_sm120_auto_observed<O: PhysicalLaunchObs
     observer: &mut O,
     request: Sm120AutoRequest,
 ) -> Result<Option<Sm120AutoBranchSeal>, String> {
+    // Off the SM120 family the tiles are not compiled and silence is the
+    // designed answer; on the family every decline is reported once.
+    let family = crate::mamba_ssm::gpu::device::is_sm120_family(ctx.compute_capability());
     let Some(caps) = ctx.kernels.sm120_device_caps() else {
+        if family {
+            static NO_CAPS: std::sync::Once = std::sync::Once::new();
+            crate::mamba_ssm::gpu::diagnostics::warn_once(&NO_CAPS, || {
+                "this SM120 board reports no SM120 device capabilities; the portable \
+                 tensor-core tiles serve every half GEMM"
+                    .to_string()
+            });
+        }
         return Ok(None);
     };
     let Some(target) = ctx.kernels.sm120_target_candidate() else {
+        if family {
+            static NO_TARGET: std::sync::Once = std::sync::Once::new();
+            crate::mamba_ssm::gpu::diagnostics::warn_once(&NO_TARGET, || {
+                "this SM120 board has no bound SM120 module target; the portable \
+                 tensor-core tiles serve every half GEMM"
+                    .to_string()
+            });
+        }
         return Ok(None);
     };
     let Some(route) = resolve_sm120_auto(caps, Some(target), request) else {
+        if family {
+            static NO_CELL: std::sync::Once = std::sync::Once::new();
+            crate::mamba_ssm::gpu::diagnostics::warn_once(&NO_CELL, || {
+                format!(
+                    "no measured SM120 half cell for {:?} {:?} {:?}; the portable tensor-core \
+                     tiles serve it (reported once; later uncovered shapes are silent)",
+                    request.op, request.dtype, request.shape
+                )
+            });
+        }
         return Ok(None);
     };
     let key = Sm120PreparedKey::new(ctx.gemm_route(), route, request);
@@ -6478,11 +6495,7 @@ fn gemm_bi_forward_sub_with_control<C: ScalarLaunchController>(
     }
     let scalar_plan = match control.as_ref() {
         Some(prepared) => prepared.plan(),
-        None => scalar_launch_plan(
-            scalar_launch_facts(kernels, F32TriadPolicy::ExactScalarFmaV1),
-            request,
-            actual_operands,
-        )?,
+        None => scalar_launch_plan(scalar_launch_facts(kernels), request, actual_operands)?,
     };
     validate_bias_preseed(alpha, bias_ptr, "gemm_bi_forward_sub")?;
     // Shape-A Ultra-Thin-M NN dispatch: batch ∈ [1, 31] (actor inference rollout).
@@ -7212,11 +7225,7 @@ fn gemm_bi_backward_dw_with_control<C: ScalarLaunchController>(
     };
     let scalar_plan = match control.as_ref() {
         Some(prepared) => prepared.plan(),
-        None => scalar_launch_plan(
-            scalar_launch_facts(kernels, F32TriadPolicy::ExactScalarFmaV1),
-            request,
-            operands,
-        )?,
+        None => scalar_launch_plan(scalar_launch_facts(kernels), request, operands)?,
     };
     if let Some(control) = control.as_ref() {
         let prepared = control.operands();
@@ -7598,11 +7607,7 @@ fn gemm_bi_backward_dx_with_control<C: ScalarLaunchController>(
     };
     let scalar_plan = match control.as_ref() {
         Some(prepared) => prepared.plan(),
-        None => scalar_launch_plan(
-            scalar_launch_facts(kernels, F32TriadPolicy::ExactScalarFmaV1),
-            request,
-            operands,
-        )?,
+        None => scalar_launch_plan(scalar_launch_facts(kernels), request, operands)?,
     };
     if let Some(control) = control.as_ref() {
         let prepared = control.operands();
@@ -13033,7 +13038,6 @@ mod prepared_f32_launch_tests {
             schedule_revision: SCHEDULE_REVISION,
         };
         ScalarLaunchFacts {
-            policy: F32TriadPolicy::ExactScalarFmaV1,
             scalar_artifact: ArtifactIdentity {
                 module_kind: ModuleKind::TriadScalar,
                 artifact_kind: ArtifactKind::Ptx,

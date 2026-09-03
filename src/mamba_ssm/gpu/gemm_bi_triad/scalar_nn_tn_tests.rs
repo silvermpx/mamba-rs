@@ -1038,7 +1038,6 @@ fn runtime_production_shapes_resolve_to_single_big_routes() {
 fn qualified_tn_m16n16_facts() -> ScalarLaunchFacts {
     let target = CudaTarget::new("compute_120").expect("valid scalar qualification target");
     ScalarLaunchFacts {
-        policy: F32TriadPolicy::ExactScalarFmaV1,
         scalar_artifact: ArtifactIdentity {
             module_kind: ModuleKind::TriadScalar,
             artifact_kind: ArtifactKind::Ptx,

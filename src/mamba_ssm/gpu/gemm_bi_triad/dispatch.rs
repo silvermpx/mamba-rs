@@ -1332,7 +1332,17 @@ fn resolve_f32_triad_auto_impl(
             };
             match resolve_tf32_forced(request, availability, route) {
                 Ok(route) => Ok(F32TriadSelection::Tf32(route)),
-                Err(_) => Ok(exact_or_scalar_selection(request, operands, availability)),
+                Err(reason) => {
+                    static DECLINED: std::sync::Once = std::sync::Once::new();
+                    crate::mamba_ssm::gpu::diagnostics::warn_once(&DECLINED, || {
+                        format!(
+                            "deterministic TF32 route {route:?} is measured for this shape but \
+                             does not bind on this stack ({reason}); the exact family serves \
+                             instead"
+                        )
+                    });
+                    Ok(exact_or_scalar_selection(request, operands, availability))
+                }
             }
         }
     }
@@ -2228,10 +2238,15 @@ pub(super) fn resolve_sm120_auto(
     module_target: Option<Sm120TargetCandidate>,
     request: Sm120AutoRequest,
 ) -> Option<Sm120ForcedRoute> {
+    if !crate::mamba_ssm::gpu::device::is_sm120_family(caps.compute_capability) {
+        return None;
+    }
+    // A minor without a measured table has no cell to find and declines the
+    // way an uncovered shape does.
     let cells = match caps.compute_capability {
         (12, 0) => SM120_AUTO_CELLS_CC120,
         (12, 1) => SM120_AUTO_CELLS_CC121,
-        _ => return None,
+        _ => &[],
     };
     resolve_sm120_auto_from_cells(cells, caps, module_target, request)
 }
@@ -2258,10 +2273,26 @@ fn resolve_sm120_auto_from_cells(
     if !sm120_auto_operands_supported(request.op, request.operands) {
         return None;
     }
-    if resolve_sm120_forced(caps, module_target, route).ok()? != Some(route) {
-        return None;
+    match sm120_forced_decline(caps, module_target, route) {
+        Ok(None) => Some(route),
+        Ok(Some(reason)) => {
+            static DECLINED: std::sync::Once = std::sync::Once::new();
+            crate::mamba_ssm::gpu::diagnostics::warn_once(&DECLINED, || {
+                format!(
+                    "SM120 half cell {route:?} is measured for this shape but this board \
+                     declines it ({reason}); the portable tensor-core tiles serve instead"
+                )
+            });
+            None
+        }
+        Err(error) => {
+            static INVALID: std::sync::Once = std::sync::Once::new();
+            crate::mamba_ssm::gpu::diagnostics::warn_once(&INVALID, || {
+                format!("SM120 half cell {route:?} is not a launchable route: {error}")
+            });
+            None
+        }
     }
-    Some(route)
 }
 
 fn sm120_auto_operands_supported(op: Sm120Op, operands: Sm120LaunchOperands) -> bool {
@@ -2380,13 +2411,27 @@ pub fn resolve_sm120_forced(
     module_target: Option<Sm120TargetCandidate>,
     route: Sm120ForcedRoute,
 ) -> Result<Option<Sm120ForcedRoute>, String> {
+    Ok(sm120_forced_decline(caps, module_target, route)?
+        .is_none()
+        .then_some(route))
+}
+
+/// The first board-level reason `route` cannot launch here, or `None` when
+/// it can. [`resolve_sm120_forced`] collapses this into its option; the
+/// automatic path reports it, so a wrong board is told apart from a missing
+/// cell.
+pub(super) fn sm120_forced_decline(
+    caps: DeviceCaps,
+    module_target: Option<Sm120TargetCandidate>,
+    route: Sm120ForcedRoute,
+) -> Result<Option<&'static str>, String> {
     route.shape.validate(route.op)?;
     if !matches!(route.dtype, WeightDtype::Bf16 | WeightDtype::F16) {
         return Err("SM120 TMA supports bf16 and f16 operands only".into());
     }
     let spec = route.kernel_spec()?;
     let Some(module_target) = module_target else {
-        return Ok(None);
+        return Ok(Some("no SM120 module is bound"));
     };
     let device_cc = (
         i32::try_from(caps.compute_capability.0)
@@ -2397,15 +2442,19 @@ pub fn resolve_sm120_forced(
     let accepted = caps
         .accepted_target
         .map(|target| target.as_str().to_owned());
-    if module_target.device_cc != device_cc
-        || !sm120_target_candidates(device_cc, caps.nvrtc_version).contains(&module_target)
-        || accepted.as_deref() != Some(module_target.nvrtc_arch)
-        || !caps.tensor_map_access
-        || caps.optin_shared_bytes < spec.dynamic_shared_bytes
-    {
-        return Ok(None);
-    }
-    Ok(Some(route))
+    Ok(if module_target.device_cc != device_cc {
+        Some("the bound SM120 module was compiled for another compute capability")
+    } else if !sm120_target_candidates(device_cc, caps.nvrtc_version).contains(&module_target) {
+        Some("this toolkit has no SM120 target for the device")
+    } else if accepted.as_deref() != Some(module_target.nvrtc_arch) {
+        Some("the driver accepted a different target than the bound module")
+    } else if !caps.tensor_map_access {
+        Some("the driver exposes no tensor-map access")
+    } else if caps.optin_shared_bytes < spec.dynamic_shared_bytes {
+        Some("the device opt-in shared memory is below the kernel's staging")
+    } else {
+        None
+    })
 }
 
 pub fn resolve_sm100_forced(
@@ -2577,9 +2626,11 @@ fn qualified_tn_narrow_splitm_cell(request: F32TriadRequest) -> Option<TnNarrowS
         .find(|cell| cell.shape == request.shape)
 }
 
+/// The facts a tuned scalar cell is admitted on. The f32 policy is not one
+/// of them: a tuned exact-FMA route is the floor the TF32 policy falls back
+/// to, so it serves under either policy.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct ScalarLaunchFacts {
-    pub policy: F32TriadPolicy,
     pub scalar_artifact: ArtifactIdentity,
     pub scalar_compiler: CompilerIdentity,
     pub compute_capability: (u32, u32),
@@ -2587,8 +2638,7 @@ pub(super) struct ScalarLaunchFacts {
 }
 
 fn qualified_scalar_sm120_cc120_170_nvrtc132_environment(facts: ScalarLaunchFacts) -> bool {
-    facts.policy == F32TriadPolicy::ExactScalarFmaV1
-        && facts.compute_capability == (12, 0)
+    facts.compute_capability == (12, 0)
         && facts.multiprocessor_count == 170
         && facts.scalar_artifact.module_kind == ModuleKind::TriadScalar
         && facts.scalar_artifact.artifact_kind == facts.scalar_compiler.output_kind
@@ -3351,7 +3401,6 @@ pub(super) fn nt_routes_to_big(
 #[cfg(test)]
 mod scalar_wave_policy_tests {
     use super::{ScalarDispatchPlan, ScalarLaunchFacts, scalar_dispatch_plan, scalar_launch_plan};
-    use crate::mamba_ssm::gpu::context::F32TriadPolicy;
     use crate::mamba_ssm::gpu::gemm_bi_triad::{F32TriadOperands, F32TriadRequest, F32TriadShape};
     use crate::mamba_ssm::gpu::kernel_identity::{
         ArtifactIdentity, ArtifactKind, COMPILER_REVISION, COMPOSER_REVISION, CompilerIdentity,
@@ -3399,7 +3448,6 @@ mod scalar_wave_policy_tests {
     fn tn_admission_facts() -> ScalarLaunchFacts {
         let compiler = tn_admission_compiler("compute_120", (13, 2), [4; 32], true);
         ScalarLaunchFacts {
-            policy: F32TriadPolicy::ExactScalarFmaV1,
             scalar_artifact: ArtifactIdentity {
                 module_kind: ModuleKind::TriadScalar,
                 artifact_kind: ArtifactKind::Ptx,
@@ -3708,7 +3756,7 @@ mod scalar_wave_policy_tests {
             );
         }
 
-        let mut mutations = [facts; 14];
+        let mut mutations = [facts; 13];
         mutations[0].compute_capability = (8, 9);
         mutations[1].compute_capability = (12, 1);
         mutations[2].multiprocessor_count = 169;
@@ -3719,10 +3767,9 @@ mod scalar_wave_policy_tests {
         mutations[7].scalar_artifact.compile_key[0] ^= 1;
         mutations[8].scalar_artifact.artifact_digest = [0; 32];
         mutations[9].scalar_artifact.module_kind = ModuleKind::TriadSm80;
-        mutations[10].policy = F32TriadPolicy::AllowDeterministicTf32V1;
-        mutations[11].scalar_compiler.invocation_digest = [0; 32];
-        mutations[12].scalar_artifact.artifact_kind = ArtifactKind::Cubin;
-        mutations[13].scalar_compiler.output_kind = ArtifactKind::Cubin;
+        mutations[10].scalar_compiler.invocation_digest = [0; 32];
+        mutations[11].scalar_artifact.artifact_kind = ArtifactKind::Cubin;
+        mutations[12].scalar_compiler.output_kind = ArtifactKind::Cubin;
         for mutation in mutations {
             assert_eq!(
                 scalar_launch_plan(mutation, request, operands).unwrap(),
@@ -3851,10 +3898,6 @@ mod scalar_wave_policy_tests {
         let request = tn_admission_request((1024, 47, 17));
         let operands = tn_admission_operands();
         let fallback = ScalarDispatchPlan::TnNarrow;
-
-        let mut wrong_policy = tn_admission_facts();
-        wrong_policy.policy = F32TriadPolicy::AllowDeterministicTf32V1;
-        assert_eq!(admitted_tn_plan(wrong_policy, request, operands), fallback);
 
         let mut wrong_arch = tn_admission_facts();
         wrong_arch.compute_capability = (12, 1);
@@ -4274,9 +4317,6 @@ mod scalar_wave_policy_tests {
         let mut fact_mutations = Vec::new();
 
         let mut facts = tn_admission_facts();
-        facts.policy = F32TriadPolicy::AllowDeterministicTf32V1;
-        fact_mutations.push(facts);
-        let mut facts = tn_admission_facts();
         facts.compute_capability = (12, 1);
         fact_mutations.push(facts);
         let mut facts = tn_admission_facts();
@@ -4516,9 +4556,6 @@ mod scalar_wave_policy_tests {
 
         let mut fact_mutations = Vec::new();
         let mut wrong = facts;
-        wrong.policy = F32TriadPolicy::AllowDeterministicTf32V1;
-        fact_mutations.push(wrong);
-        let mut wrong = facts;
         wrong.compute_capability = (12, 1);
         fact_mutations.push(wrong);
         let mut wrong = facts;
@@ -4584,9 +4621,6 @@ mod scalar_wave_policy_tests {
         let qualified = ScalarDispatchPlan::NtPrismVectorQualified;
         let mut fact_mutations = Vec::new();
 
-        let mut facts = tn_admission_facts();
-        facts.policy = F32TriadPolicy::AllowDeterministicTf32V1;
-        fact_mutations.push(facts);
         let mut facts = tn_admission_facts();
         facts.compute_capability = (12, 1);
         fact_mutations.push(facts);
@@ -4707,9 +4741,6 @@ mod scalar_wave_policy_tests {
         let plan = ScalarDispatchPlan::NtD768OutTransposeM64N64Qualified;
         let mut mutations = Vec::new();
         let mut facts = tn_admission_facts();
-        facts.policy = F32TriadPolicy::AllowDeterministicTf32V1;
-        mutations.push(facts);
-        let mut facts = tn_admission_facts();
         facts.compute_capability = (8, 9);
         mutations.push(facts);
         let mut facts = tn_admission_facts();
@@ -4804,9 +4835,6 @@ mod scalar_wave_policy_tests {
         let operands = nn_qualified_operands();
         let mut facts_mutations = Vec::new();
         let mut facts = tn_admission_facts();
-        facts.policy = F32TriadPolicy::AllowDeterministicTf32V1;
-        facts_mutations.push(facts);
-        let mut facts = tn_admission_facts();
         facts.compute_capability = (12, 1);
         facts_mutations.push(facts);
         let mut facts = tn_admission_facts();
@@ -4877,9 +4905,6 @@ mod scalar_wave_policy_tests {
         let operands = nn_qualified_operands();
 
         let mut mutations = Vec::new();
-        let mut facts = tn_admission_facts();
-        facts.policy = F32TriadPolicy::AllowDeterministicTf32V1;
-        mutations.push(facts);
         let mut facts = tn_admission_facts();
         facts.compute_capability = (12, 1);
         mutations.push(facts);
