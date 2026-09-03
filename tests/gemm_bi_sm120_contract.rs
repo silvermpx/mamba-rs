@@ -365,7 +365,7 @@ fn sm120_specs_freeze_threads_barriers_and_exact_shared_bytes() {
 
 #[test]
 fn sm120_auto_tables_are_minor_specific() {
-    assert_eq!(SM120_AUTO_CELLS_CC120.len(), 18);
+    assert_eq!(SM120_AUTO_CELLS_CC120.len(), 60);
     assert_eq!(SM120_AUTO_CELLS_CC121, &[]);
 }
 

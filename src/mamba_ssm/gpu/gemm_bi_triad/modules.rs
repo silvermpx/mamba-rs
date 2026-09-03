@@ -4389,6 +4389,13 @@ impl GemmBiKernels {
         self.multiprocessor_count
     }
 
+    /// Whether the board the kernels were bound on belongs to the SM120
+    /// family, from the identity taken at load: the launch path reads it
+    /// without a driver query.
+    pub(crate) fn serves_sm120_family(&self) -> bool {
+        crate::mamba_ssm::gpu::device::is_sm120_family(self.compute_capability())
+    }
+
     pub(crate) fn compute_capability(&self) -> (u32, u32) {
         self.compute_capability
     }

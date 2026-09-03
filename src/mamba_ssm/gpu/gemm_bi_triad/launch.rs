@@ -6281,7 +6281,7 @@ pub(in crate::mamba_ssm::gpu) fn launch_sm120_auto_observed<O: PhysicalLaunchObs
 ) -> Result<Option<Sm120AutoBranchSeal>, String> {
     // Off the SM120 family the tiles are not compiled and silence is the
     // designed answer; on the family every decline is reported once.
-    let family = crate::mamba_ssm::gpu::device::is_sm120_family(ctx.compute_capability());
+    let family = ctx.kernels.triad_kernels().serves_sm120_family();
     let Some(caps) = ctx.kernels.sm120_device_caps() else {
         if family {
             static NO_CAPS: std::sync::Once = std::sync::Once::new();
