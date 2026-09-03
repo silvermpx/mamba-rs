@@ -110,12 +110,18 @@ const SM80_SPLITK_ENTRIES: &[&str] = &[
 ];
 
 #[cfg(target_os = "linux")]
-const FIXED_TF32_ENTRIES_SM120: &[&str] = &[
+/// The portable TF32 entries every Fixed PTX carries, whatever its target.
+const FIXED_TF32_ENTRIES_PORTABLE: &[&str] = &[
     "gemm_bi_nn_tf32_v1_m128n64_bk32_s2",
     "gemm_bi_nn_tf32_v1_m128n64_bk32_s3",
     "gemm_bi_nn_tf32_v1_m64n64_bk32_s2",
     "gemm_bi_nn_tf32_v1_m64n64_bk32_s3",
     "gemm_bi_nn_tf32_v1_m16n32_bk32_s4",
+];
+
+/// The TMA entries the Fixed source compiles only for the 12.0 and 12.1
+/// architectures; every other target's PTX must not carry them.
+const FIXED_TF32_ENTRIES_SM120: &[&str] = &[
     "gemm_bi_nn_sm120_tma_tf32_v1_m128n64_bk32_s2",
     "gemm_bi_nn_sm120_tma_tf32_v1_m128n64_bk32_s3",
     "gemm_bi_nn_sm120_tma_tf32_v1_m64n128_bk32_s2",
@@ -124,6 +130,19 @@ const FIXED_TF32_ENTRIES_SM120: &[&str] = &[
     "gemm_bi_nn_sm120_tma_tf32_v1_m64n64_bk32_s2",
     "gemm_bi_nn_sm120_tma_tf32_v1_m64n64_bk32_s2_pair_store",
 ];
+
+/// The Fixed TF32 entries a PTX compiled for `target` carries: the portable
+/// set on every architecture, plus the TMA set on the two SM120 targets the
+/// kernel source admits.
+#[cfg(target_os = "linux")]
+fn expected_fixed_tf32_entries(target: &str) -> std::collections::BTreeSet<String> {
+    let sm120 = matches!(target, "compute_120" | "compute_121");
+    FIXED_TF32_ENTRIES_PORTABLE
+        .iter()
+        .chain(FIXED_TF32_ENTRIES_SM120.iter().filter(|_| sm120))
+        .map(|name| (*name).to_string())
+        .collect()
+}
 
 #[cfg(target_os = "linux")]
 fn expected_scalar_entries() -> std::collections::BTreeSet<String> {
@@ -156,12 +175,12 @@ fn expected_cuda_module_fixtures_are_unique() {
         SM80_TYPED_ENTRIES.len() + SM80_SPLITK_ENTRIES.len() + SM80_TF32_ROUTE_SPECS.len()
     );
     assert_eq!(
-        FIXED_TF32_ENTRIES_SM120
-            .iter()
-            .copied()
-            .collect::<std::collections::BTreeSet<_>>()
-            .len(),
-        FIXED_TF32_ENTRIES_SM120.len()
+        expected_fixed_tf32_entries("compute_120").len(),
+        FIXED_TF32_ENTRIES_PORTABLE.len() + FIXED_TF32_ENTRIES_SM120.len()
+    );
+    assert_eq!(
+        expected_fixed_tf32_entries("compute_89").len(),
+        FIXED_TF32_ENTRIES_PORTABLE.len()
     );
     let specialized: std::collections::BTreeSet<_> = SM120_KERNEL_SPECS
         .iter()
@@ -688,10 +707,8 @@ fn repeated_nvrtc_compiles_have_the_same_identity() {
             .filter(|name| name.contains("_tf32_v1_"))
             .cloned()
             .collect();
-        let expected_fixed_tf32: std::collections::BTreeSet<_> = FIXED_TF32_ENTRIES_SM120
-            .iter()
-            .map(|name| (*name).to_string())
-            .collect();
+        let expected_fixed_tf32 =
+            expected_fixed_tf32_entries(first.kernels.compiler_identity().target.as_str());
         assert_eq!(fixed_tf32_entries, expected_fixed_tf32);
 
         let scalar_entries = ptx_entries(&artifact_payload(
