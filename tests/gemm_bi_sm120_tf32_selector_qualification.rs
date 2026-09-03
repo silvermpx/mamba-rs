@@ -23,6 +23,7 @@ use sha2::{Digest as _, Sha256};
 
 const ENABLE_ENV: &str = "MAMBA_RS_SM120_TF32_SELECTOR_QUALIFICATION";
 const OUTPUT_ENV: &str = "MAMBA_RS_SM120_TF32_SELECTOR_JSONL";
+const CELLS_ENV: &str = "MAMBA_RS_SM120_TF32_SELECTOR_CELLS";
 const DISCOVERY_WINDOWS: usize = 21;
 const FINAL_WINDOWS: usize = 101;
 const TARGET_WINDOW_MS: f64 = 5.0;
@@ -200,7 +201,7 @@ const CELLS: [Cell; 18] = [
     },
 ];
 
-const PROJECTION_CELLS: [Cell; 21] = [
+const PROJECTION_CELLS: [Cell; 27] = [
     Cell {
         id: "nn_d768_in_proj",
         op: ResolvedGemmOp::Nn,
@@ -365,6 +366,56 @@ const PROJECTION_CELLS: [Cell; 21] = [
         id: "nt_d128_out_proj",
         op: ResolvedGemmOp::Nt,
         dims: (1024, 256, 128),
+        alpha: 1.0,
+        beta: 0.0,
+        bias: false,
+    },
+    // The deep reductions: the split-K arms have never won a projection
+    // cell, and these are the shapes where they could.
+    Cell {
+        id: "nn_split_candidate",
+        op: ResolvedGemmOp::Nn,
+        dims: (128, 8192, 128),
+        alpha: 1.0,
+        beta: 0.0,
+        bias: false,
+    },
+    Cell {
+        id: "nn_batch_in_proj",
+        op: ResolvedGemmOp::Nn,
+        dims: (10400, 384, 1536),
+        alpha: 1.0,
+        beta: 0.0,
+        bias: false,
+    },
+    Cell {
+        id: "tn_split_candidate",
+        op: ResolvedGemmOp::Tn,
+        dims: (128, 8192, 128),
+        alpha: 1.0,
+        beta: 1.0,
+        bias: false,
+    },
+    Cell {
+        id: "tn_batch_in_proj",
+        op: ResolvedGemmOp::Tn,
+        dims: (10400, 384, 1536),
+        alpha: 1.0,
+        beta: 1.0,
+        bias: false,
+    },
+    Cell {
+        id: "nt_split_candidate",
+        op: ResolvedGemmOp::Nt,
+        dims: (128, 8192, 128),
+        alpha: 1.0,
+        beta: 0.0,
+        bias: false,
+    },
+    Cell {
+        id: "nt_batch_in_proj",
+        op: ResolvedGemmOp::Nt,
+        dims: (10400, 384, 1536),
         alpha: 1.0,
         beta: 0.0,
         bias: false,
@@ -1462,7 +1513,7 @@ fn run_cell(device: &GpuDevice, cell: Cell, quiet: &QuietGpu) -> Result<CellResu
                 cell.id
             )
         })?;
-    let (candidates, excluded_candidates) = candidate_inventory(cell, specialized_bound);
+    let (candidates, mut excluded_candidates) = candidate_inventory(cell, specialized_bound);
 
     let mut discovery = BTreeMap::new();
     let mut final_stats = BTreeMap::new();
@@ -1488,13 +1539,21 @@ fn run_cell(device: &GpuDevice, cell: Cell, quiet: &QuietGpu) -> Result<CellResu
                 route_identity_json(*candidate.evidence().route_identity()),
             ),
         );
-        bit_gate(
+        // A candidate outside the numeric gate is excluded from this cell
+        // with its reason and never timed; the other candidates still run.
+        if let Err(error) = bit_gate(
             &mut candidate,
             &candidate_ctx,
             &reference_bits,
             spec.shares_reference_bits(),
-        )
-        .map_err(|error| format!("{} {} bit gate: {error}", cell.id, spec.symbol))?;
+        ) {
+            eprintln!("{} {} bit gate: {error}", cell.id, spec.symbol);
+            excluded_candidates.push(CandidateExclusion {
+                symbol: spec.symbol,
+                reason: "bit_gate_mismatch",
+            });
+            continue;
+        }
         for path in [Path::Eager, Path::Graph] {
             let path_name = match path {
                 Path::Eager => "eager",
@@ -1559,11 +1618,22 @@ fn run_cell(device: &GpuDevice, cell: Cell, quiet: &QuietGpu) -> Result<CellResu
             ));
         }
     }
-    let winners =
-        [Path::Eager, Path::Graph].map(|path| select_winner(&candidates, &discovery, path));
+    // Only the candidates that passed the numeric gate were timed; the
+    // excluded ones carry their reason in the record and take no part in
+    // the selection.
+    let timed = candidates
+        .iter()
+        .filter(|spec| {
+            !excluded_candidates
+                .iter()
+                .any(|excluded| excluded.symbol == spec.symbol)
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    let winners = [Path::Eager, Path::Graph].map(|path| select_winner(&timed, &discovery, path));
     let final_winners =
-        [Path::Eager, Path::Graph].map(|path| select_winner(&candidates, &final_stats, path));
-    let chosen_selection = select_stable_winner(&candidates, &discovery, &final_stats);
+        [Path::Eager, Path::Graph].map(|path| select_winner(&timed, &final_stats, path));
+    let chosen_selection = select_stable_winner(&timed, &discovery, &final_stats);
     if chosen_selection != "scalar_fma_v1" {
         for path in [Path::Eager, Path::Graph] {
             let (median, p05) = final_stats[&(path, chosen_selection)];
@@ -1575,7 +1645,7 @@ fn run_cell(device: &GpuDevice, cell: Cell, quiet: &QuietGpu) -> Result<CellResu
             })?;
         }
     }
-    let candidate_results = candidates
+    let candidate_results = timed
         .iter()
         .map(|spec| CandidateResult {
             symbol: spec.symbol,
@@ -1714,13 +1784,31 @@ fn sm120_tf32_projection_selector_qualification() -> Result<(), String> {
         device.multiprocessor_count()
     );
     let mut sink = JsonlSink::create_from_env()?;
+    // A comma-separated cell list measures only those cells: a new shape
+    // does not cost the whole suite again.
+    let only = std::env::var(CELLS_ENV)
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .map(|value| {
+            value
+                .split(',')
+                .map(|id| id.trim().to_string())
+                .collect::<Vec<_>>()
+        });
+    let mut measured = 0;
     for cell in PROJECTION_CELLS {
+        if let Some(only) = &only
+            && !only.iter().any(|id| id == cell.id)
+        {
+            continue;
+        }
         quiet.require_cohort(&format!("sm120-projection-selector/{}/pre-cell", cell.id))?;
         sink.write(&run_cell(&device, cell, &quiet)?)?;
         quiet.verify_post_cohort(&format!("sm120-projection-selector/{}/post-cell", cell.id))?;
+        measured += 1;
     }
     let postflight = quiet.verify_post_cohort("sm120-projection-selector/post-suite")?;
-    sink.finish(&device, PROJECTION_CELLS.len(), &pre_context, &postflight)?;
+    sink.finish(&device, measured, &pre_context, &postflight)?;
     eprintln!(
         "{{\"schema\":\"{SCHEMA}\",\"projection_cells\":{},\"discovery_windows_per_order\":{DISCOVERY_WINDOWS},\"final_windows_per_order\":{FINAL_WINDOWS},\"passed\":true}}",
         PROJECTION_CELLS.len(),

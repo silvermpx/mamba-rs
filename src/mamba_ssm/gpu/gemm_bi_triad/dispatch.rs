@@ -687,8 +687,8 @@ const SM89_TF32_EVIDENCE_CELLS: &[Tf32AutoCell] = &[
         128,
         8192,
         128,
-        M128N64,
-        S3,
+        M64N64,
+        S2,
         RequiresVectorAlignmentEvidence,
     ),
     sm89_tf32_cell(
@@ -824,6 +824,24 @@ const SM89_TF32_EVIDENCE_CELLS: &[Tf32AutoCell] = &[
             tile: M16N32,
             stages: S3,
         }),
+        RequiresVectorAlignmentEvidence,
+    ),
+    sm89_tf32_cell(
+        Nn,
+        10400,
+        1536,
+        384,
+        M64N64,
+        S2,
+        RequiresNoBiasAndVectorAlignmentEvidence,
+    ),
+    sm89_tf32_cell(
+        Nt,
+        10400,
+        384,
+        1536,
+        M128N64,
+        S3,
         RequiresVectorAlignmentEvidence,
     ),
 ];
@@ -1394,6 +1412,50 @@ const SM120_TF32_EVIDENCE_CELLS_CUDA_13_2_DRIVER_595_84: &[Tf32AutoCell] = &[
         tuning_revision: SM120_TF32_QUALIFIED_TUNING_REVISION,
         operand_gate: RequiresVectorAlignmentEvidence,
     },
+    // The deep reductions of the training batch and the split candidate
+    // (internal/perf/sm120-requal-deepk-20260903): no split-K arm won, and the
+    // TN batch projection admitted no TF32 route at all.
+    sm120_tf32_cell(
+        Nn,
+        10400,
+        1536,
+        384,
+        super::contract::Tf32Sm120Tile::M64N64,
+        super::contract::Tf32Sm120Stages::S2,
+        RequiresNoBiasAndVectorAlignmentEvidence,
+    ),
+    sm120_tf32_cell(
+        Tn,
+        128,
+        128,
+        8192,
+        super::contract::Tf32Sm120Tile::M64N128,
+        super::contract::Tf32Sm120Stages::S4,
+        RequiresVectorAlignmentEvidence,
+    ),
+    Tf32AutoCell {
+        op: Nt,
+        shape: Tf32ExactShape {
+            output_rows: 128,
+            output_columns: 8192,
+            reduction: 128,
+        },
+        route: Tf32PhysicalRoute::MmaTf32RnaV1(super::contract::Tf32PortableRoute {
+            tile: super::contract::Tf32PortableTile::M64N64,
+            stages: super::contract::Tf32PortableStages::S2,
+        }),
+        tuning_revision: SM120_TF32_QUALIFIED_TUNING_REVISION,
+        operand_gate: RequiresVectorAlignmentEvidence,
+    },
+    sm120_tf32_cell(
+        Nt,
+        10400,
+        384,
+        1536,
+        super::contract::Tf32Sm120Tile::M64N128,
+        super::contract::Tf32Sm120Stages::S2,
+        RequiresVectorAlignmentEvidence,
+    ),
 ];
 
 const SM120_TF32_EVIDENCE_COHORTS: &[Tf32AutoEvidenceCohort] = &[
@@ -2023,9 +2085,55 @@ fn resolve_sm100_auto_from_cells(
     module_target: Option<Sm100TargetCandidate>,
     request: Sm100AutoRequest,
 ) -> Option<Sm100ForcedRoute> {
-    let route = cells.iter().copied().find(|cell| {
-        cell.op == request.op && cell.dtype == request.dtype && cell.shape == request.shape
-    })?;
+    // A measured cell first; anything the table does not cover takes the wave
+    // rule: the wide tile only when the output still fills a device with it,
+    // deeper stages and the larger schedule only when the reduction is deep
+    // enough to feed them. The map, operand and admission checks below apply
+    // to both sources equally.
+    let route = cells
+        .iter()
+        .copied()
+        .find(|cell| {
+            cell.op == request.op && cell.dtype == request.dtype && cell.shape == request.shape
+        })
+        .unwrap_or_else(|| {
+            let (rows, columns, reduction) = match request.op {
+                Sm100Op::Nn => (request.shape.m, request.shape.n, request.shape.k),
+                Sm100Op::Tn => (request.shape.k, request.shape.n, request.shape.m),
+                Sm100Op::Nt => (request.shape.m, request.shape.k, request.shape.n),
+            };
+            // No board of this family is qualified yet, so the tile floor is
+            // the family's own SM counts: the smallest announced part carries
+            // well over a hundred multiprocessors, and 128 wide tiles cover it.
+            let wide_tiles = rows.div_ceil(128).saturating_mul(columns.div_ceil(128));
+            let tile = if columns >= 128 && wide_tiles >= 128 {
+                super::contract::Sm100Tile::M128N128
+            } else {
+                super::contract::Sm100Tile::M128N64
+            };
+            let stages = if reduction >= 2048 {
+                super::contract::Sm100Stages::S4
+            } else if reduction >= 512 {
+                super::contract::Sm100Stages::S3
+            } else {
+                super::contract::Sm100Stages::S2
+            };
+            let schedule = if reduction >= 1024 {
+                super::contract::Sm100Schedule::P8
+            } else {
+                super::contract::Sm100Schedule::C4
+            };
+            Sm100ForcedRoute {
+                op: request.op,
+                dtype: request.dtype,
+                physical: super::contract::Sm100PhysicalRoute {
+                    tile,
+                    stages,
+                    schedule,
+                },
+                shape: request.shape,
+            }
+        });
     super::contract::validate_sm100_map_request(super::contract::Sm100MapRequest {
         op: request.op,
         dtype: request.dtype,
@@ -2087,9 +2195,36 @@ fn resolve_sm90a_auto_from_cells(
     module_available: bool,
     request: Sm90aAutoRequest,
 ) -> Option<Sm90aForcedRoute> {
-    let route = cells.iter().copied().find(|cell| {
-        cell.op == request.op && cell.dtype == request.dtype && cell.shape == request.shape
-    })?;
+    // A measured cell first; anything the table does not cover takes the wave
+    // rule, so a Hopper board runs its own wgmma kernels rather than the
+    // portable tiles. The second warpgroup of Wg2 is a dedicated TMA producer:
+    // it earns its threads on a deep reduction and costs occupancy on a
+    // shallow one, so the reduction depth is the axis the rule reads. The map,
+    // operand and admission checks below apply to both sources equally.
+    let route = cells
+        .iter()
+        .copied()
+        .find(|cell| {
+            cell.op == request.op && cell.dtype == request.dtype && cell.shape == request.shape
+        })
+        .unwrap_or_else(|| {
+            let reduction = match request.op {
+                Sm90aOp::Nn => request.shape.k,
+                Sm90aOp::Tn => request.shape.m,
+                Sm90aOp::Nt => request.shape.n,
+            };
+            let schedule = if reduction >= 1024 {
+                Sm90aWarpgroupSchedule::Wg2
+            } else {
+                Sm90aWarpgroupSchedule::Wg1
+            };
+            Sm90aForcedRoute {
+                op: request.op,
+                dtype: request.dtype,
+                schedule,
+                shape: request.shape,
+            }
+        });
     super::contract::validate_sm90a_map_request(super::contract::Sm90aMapRequest {
         op: request.op,
         dtype: request.dtype,
@@ -10044,7 +10179,7 @@ mod tf32_tests {
 
     #[test]
     fn sm89_tf32_evidence_inventory_encodes_the_missing_operand_gates() {
-        assert_eq!(SM89_TF32_EVIDENCE_CELLS.len(), 41);
+        assert_eq!(SM89_TF32_EVIDENCE_CELLS.len(), 43);
         let mut gate_counts = [0_usize; 4];
         for cell in SM89_TF32_EVIDENCE_CELLS {
             let request = normalized_request(
@@ -10078,7 +10213,7 @@ mod tf32_tests {
                 }
             }
         }
-        assert_eq!(gate_counts, [5, 3, 23, 10]);
+        assert_eq!(gate_counts, [5, 3, 24, 11]);
     }
 
     #[test]
@@ -10372,8 +10507,8 @@ mod tf32_tests {
                 8192,
                 128,
                 Tf32PhysicalRoute::MmaTf32RnaV1(Tf32PortableRoute {
-                    tile: M128N64,
-                    stages: S3,
+                    tile: M64N64,
+                    stages: S2,
                 }),
                 Align,
             ),
@@ -10538,6 +10673,28 @@ mod tf32_tests {
                 512,
                 Tf32PhysicalRoute::MmaTf32RnaSplitK4V1(Tf32PortableRoute {
                     tile: M16N32,
+                    stages: S3,
+                }),
+                Align,
+            ),
+            (
+                ResolvedGemmOp::Nn,
+                10400,
+                1536,
+                384,
+                Tf32PhysicalRoute::MmaTf32RnaV1(Tf32PortableRoute {
+                    tile: M64N64,
+                    stages: S2,
+                }),
+                BiasAlign,
+            ),
+            (
+                ResolvedGemmOp::Nt,
+                10400,
+                384,
+                1536,
+                Tf32PhysicalRoute::MmaTf32RnaV1(Tf32PortableRoute {
+                    tile: M128N64,
                     stages: S3,
                 }),
                 Align,
