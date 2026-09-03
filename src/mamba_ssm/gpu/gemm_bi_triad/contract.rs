@@ -4939,6 +4939,26 @@ pub struct Sm100PreparedLaunch {
 }
 
 impl Sm100PreparedLaunch {
+    /// The managed-allocation epoch every operand of this preparation was
+    /// taken in, when all of them are managed; a later epoch means the
+    /// preparation no longer describes live memory.
+    pub(super) fn managed_epoch(&self) -> Option<ManagedAllocationEpochStamp> {
+        let mut ranges = Vec::with_capacity(4);
+        for allocation in self
+            .maps
+            .allocations
+            .iter()
+            .chain(std::iter::once(&self.resources.output))
+            .chain(self.resources.bias.iter())
+        {
+            ranges.push((allocation.allocation_base, allocation.allocation_bytes));
+        }
+        managed_allocation_epoch_for_ranges(
+            self.maps.binding.allocation_domain.context_handle,
+            &ranges,
+        )
+    }
+
     pub fn identity(&self) -> Sm100RouteIdentity {
         self.identity
     }

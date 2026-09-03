@@ -626,6 +626,7 @@ pub fn gemm_bi_forward_typed(
 pub(in crate::mamba_ssm::gpu) enum HalfPolicyBranchSeal {
     Native(super::gemm_bi_triad::HalfNativeBranchSeal),
     Sm120(super::gemm_bi_triad::Sm120AutoBranchSeal),
+    Sm100(super::gemm_bi_triad::Sm100AutoBranchSeal),
     ExactF32Fallback,
 }
 
@@ -667,6 +668,29 @@ fn gemm_bi_forward_typed_in<O: PhysicalLaunchObserver>(
             super::gemm_bi_triad::launch_sm120_auto_observed(ctx, observer, request)?
         {
             return Ok(HalfPolicyBranchSeal::Sm120(seal));
+        }
+        // The SM100 family reads its own measured table; it is empty until a
+        // board of that capability qualifies its cells.
+        let sm100_request = super::gemm_bi_triad::Sm100AutoRequest {
+            op: super::gemm_bi_triad::Sm100Op::Nn,
+            dtype: y.dtype,
+            shape: super::gemm_bi_triad::Sm100Shape::contiguous(
+                super::gemm_bi_triad::Sm100Op::Nn,
+                dims,
+            ),
+            a_ptr: x.ptr,
+            b_ptr: w.ptr,
+            operands: super::gemm_bi_triad::Sm100LaunchOperands {
+                output_ptr: y.ptr,
+                bias_ptr,
+                alpha: 1.0,
+                beta: 0.0,
+            },
+        };
+        if let Some(seal) =
+            super::gemm_bi_triad::launch_sm100_auto_observed(ctx, observer, sm100_request)?
+        {
+            return Ok(HalfPolicyBranchSeal::Sm100(seal));
         }
     }
     // The SM89 deep-K N=128 bucket keeps the exact
@@ -775,6 +799,29 @@ fn gemm_bi_backward_dw_typed_in<O: PhysicalLaunchObserver>(
         {
             return Ok(HalfPolicyBranchSeal::Sm120(seal));
         }
+        // The SM100 family reads its own measured table; it is empty until a
+        // board of that capability qualifies its cells.
+        let sm100_request = super::gemm_bi_triad::Sm100AutoRequest {
+            op: super::gemm_bi_triad::Sm100Op::Tn,
+            dtype: dy.dtype,
+            shape: super::gemm_bi_triad::Sm100Shape::contiguous(
+                super::gemm_bi_triad::Sm100Op::Tn,
+                dims,
+            ),
+            a_ptr: x_saved.ptr,
+            b_ptr: dy.ptr,
+            operands: super::gemm_bi_triad::Sm100LaunchOperands {
+                output_ptr: dw_ptr,
+                bias_ptr: 0,
+                alpha: 1.0,
+                beta: 1.0,
+            },
+        };
+        if let Some(seal) =
+            super::gemm_bi_triad::launch_sm100_auto_observed(ctx, observer, sm100_request)?
+        {
+            return Ok(HalfPolicyBranchSeal::Sm100(seal));
+        }
         match super::gemm_bi_triad::gemm_bi_backward_dw_tc_observed(
             ctx, observer, dw_ptr, dy, x_saved, dims,
         ) {
@@ -876,6 +923,29 @@ fn gemm_bi_backward_dx_typed_in<O: PhysicalLaunchObserver>(
             super::gemm_bi_triad::launch_sm120_auto_observed(ctx, observer, request)?
         {
             return Ok(HalfPolicyBranchSeal::Sm120(seal));
+        }
+        // The SM100 family reads its own measured table; it is empty until a
+        // board of that capability qualifies its cells.
+        let sm100_request = super::gemm_bi_triad::Sm100AutoRequest {
+            op: super::gemm_bi_triad::Sm100Op::Nt,
+            dtype: dx.dtype,
+            shape: super::gemm_bi_triad::Sm100Shape::contiguous(
+                super::gemm_bi_triad::Sm100Op::Nt,
+                dims,
+            ),
+            a_ptr: dy.ptr,
+            b_ptr: w.ptr,
+            operands: super::gemm_bi_triad::Sm100LaunchOperands {
+                output_ptr: dx.ptr,
+                bias_ptr: 0,
+                alpha: 1.0,
+                beta: 0.0,
+            },
+        };
+        if let Some(seal) =
+            super::gemm_bi_triad::launch_sm100_auto_observed(ctx, observer, sm100_request)?
+        {
+            return Ok(HalfPolicyBranchSeal::Sm100(seal));
         }
         match super::gemm_bi_triad::gemm_bi_backward_dx_tc_observed(ctx, observer, dx, dy, w, dims)
         {
@@ -1676,6 +1746,36 @@ pub(super) fn prepare_half_physical_graph_package<'a>(
                 super::gemm_bi_triad::prepare_sm120_auto_graph_sequence(ctx, &observer, auto)?;
             if triad.len() != 1 || manifest.nodes().len() != 1 {
                 return Err("prepared SM120 graph package must contain exactly one launch".into());
+            }
+            (Vec::new(), Some(triad), Vec::new())
+        }
+        (PhysicalLaunchKind::Gemm, ModuleKind::TriadSm100) => {
+            let op = match request.op {
+                ResolvedGemmOp::Nn => super::gemm_bi_triad::Sm100Op::Nn,
+                ResolvedGemmOp::Tn => super::gemm_bi_triad::Sm100Op::Tn,
+                ResolvedGemmOp::Nt => super::gemm_bi_triad::Sm100Op::Nt,
+            };
+            let auto = super::gemm_bi_triad::Sm100AutoRequest {
+                op,
+                dtype: request.dtype,
+                shape: super::gemm_bi_triad::Sm100Shape::contiguous(op, request.dims),
+                a_ptr: request.a,
+                b_ptr: request.b,
+                operands: super::gemm_bi_triad::Sm100LaunchOperands {
+                    output_ptr: request.output,
+                    bias_ptr: request.bias,
+                    alpha: 1.0,
+                    beta: if op == super::gemm_bi_triad::Sm100Op::Tn {
+                        1.0
+                    } else {
+                        0.0
+                    },
+                },
+            };
+            let triad =
+                super::gemm_bi_triad::prepare_sm100_auto_graph_sequence(ctx, &observer, auto)?;
+            if triad.len() != 1 || manifest.nodes().len() != 1 {
+                return Err("prepared SM100 graph package must contain exactly one launch".into());
             }
             (Vec::new(), Some(triad), Vec::new())
         }

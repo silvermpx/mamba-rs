@@ -815,6 +815,350 @@ impl Sm120PreparedLaunchCache {
     }
 }
 
+const SM100_PREPARED_CACHE_LIMIT: usize = 1024;
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Sm100PreparedKey {
+    context: GemmRouteIdentity,
+    route: Sm100ForcedRoute,
+    a: CUptr,
+    b: CUptr,
+    output: CUptr,
+    bias: CUptr,
+    alpha_bits: u32,
+    beta_bits: u32,
+}
+
+impl Eq for Sm100PreparedKey {}
+
+impl std::hash::Hash for Sm100PreparedKey {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.context.hash(state);
+        self.route.op.hash(state);
+        match self.route.dtype {
+            WeightDtype::F32 => 0_u8,
+            WeightDtype::F16 => 1,
+            WeightDtype::Bf16 => 2,
+        }
+        .hash(state);
+        self.route.physical.hash(state);
+        self.route.shape.hash(state);
+        self.a.hash(state);
+        self.b.hash(state);
+        self.output.hash(state);
+        self.bias.hash(state);
+        self.alpha_bits.hash(state);
+        self.beta_bits.hash(state);
+    }
+}
+
+impl Sm100PreparedKey {
+    fn new(context: GemmRouteIdentity, route: Sm100ForcedRoute, request: Sm100AutoRequest) -> Self {
+        Self {
+            context,
+            route,
+            a: request.a_ptr,
+            b: request.b_ptr,
+            output: request.operands.output_ptr,
+            bias: request.operands.bias_ptr,
+            alpha_bits: request.operands.alpha.to_bits(),
+            beta_bits: request.operands.beta.to_bits(),
+        }
+    }
+}
+
+struct Sm100PreparedCacheEntry {
+    prepared: Box<Sm100PreparedLaunch>,
+    managed_epoch: Option<ManagedAllocationEpochStamp>,
+}
+
+/// Prepared SM100 launches, keyed the way the SM120 cache is: an eager
+/// launch prepares and caches, a capture replays a prepared entry or fails
+/// closed.
+#[derive(Default)]
+pub(crate) struct Sm100PreparedLaunchCache {
+    entries: HashMap<Sm100PreparedKey, Sm100PreparedCacheEntry>,
+}
+
+fn sm100_capture_cache_error(action: Sm120CacheAction) -> &'static str {
+    match action {
+        Sm120CacheAction::CaptureMissing => {
+            "prepared SM100 Triad cache entry is missing during graph capture; run eager warmup again"
+        }
+        Sm120CacheAction::CaptureStale => {
+            "prepared SM100 Triad allocation epoch changed during graph capture; run eager warmup again"
+        }
+        Sm120CacheAction::CaptureUntracked => {
+            "prepared SM100 Triad automatic capture requires managed allocations; run eager warmup again"
+        }
+        Sm120CacheAction::UsePrepared | Sm120CacheAction::Validate | Sm120CacheAction::Prepare => {
+            "SM100 cache action is not a capture error"
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::mamba_ssm::gpu) struct Sm100AutoBranchSeal {
+    pub(in crate::mamba_ssm::gpu) route: Sm100ForcedRoute,
+}
+
+impl Sm100PreparedLaunchCache {
+    fn managed_epoch_state(entry: Option<&Sm100PreparedCacheEntry>) -> Sm120ManagedEpochState {
+        match entry {
+            None => Sm120ManagedEpochState::Missing,
+            Some(entry) => match entry.managed_epoch.as_ref() {
+                Some(epoch) if epoch.is_current() => Sm120ManagedEpochState::Current,
+                Some(_) => Sm120ManagedEpochState::Stale,
+                None => Sm120ManagedEpochState::Untracked,
+            },
+        }
+    }
+
+    fn ensure_sm100_prepared(
+        &mut self,
+        ctx: &GpuCtx,
+        key: Sm100PreparedKey,
+        route: Sm100ForcedRoute,
+        request: Sm100AutoRequest,
+    ) -> Result<&Sm100PreparedLaunch, String> {
+        let capturing = ctx
+            .stream
+            .capture_status()
+            .map_err(|error| format!("query SM100 TCGEN capture status: {error:?}"))?
+            != cudarc::driver::sys::CUstreamCaptureStatus::CU_STREAM_CAPTURE_STATUS_NONE;
+        let epoch = Self::managed_epoch_state(self.entries.get(&key));
+        let action = sm120_cache_action(capturing, self.entries.contains_key(&key), epoch);
+        match action {
+            Sm120CacheAction::UsePrepared => {
+                return Ok(&self.entries.get(&key).expect("cache hit above").prepared);
+            }
+            Sm120CacheAction::CaptureMissing
+            | Sm120CacheAction::CaptureStale
+            | Sm120CacheAction::CaptureUntracked => {
+                return Err(sm100_capture_cache_error(action).into());
+            }
+            Sm120CacheAction::Validate => {
+                let validation = validate_sm100_graph_replay(
+                    &ctx.stream,
+                    &ctx.kernels,
+                    &self.entries.get(&key).expect("cache hit above").prepared,
+                );
+                if validation.is_ok() {
+                    return Ok(&self
+                        .entries
+                        .get(&key)
+                        .expect("validated cache hit")
+                        .prepared);
+                }
+                self.entries.remove(&key);
+            }
+            Sm120CacheAction::Prepare => {}
+        }
+
+        let maps = prepare_sm100_tensor_maps(
+            &ctx.stream,
+            &ctx.kernels,
+            Sm100MapRequest {
+                op: route.op,
+                dtype: route.dtype,
+                tile: route.physical.tile,
+                a_ptr: request.a_ptr,
+                b_ptr: request.b_ptr,
+                shape: route.shape,
+            },
+        )?;
+        let prepared =
+            prepare_sm100_tcgen_forced(&ctx.stream, &ctx.kernels, route, &maps, request.operands)?;
+        let entry = Sm100PreparedCacheEntry {
+            managed_epoch: prepared.managed_epoch(),
+            prepared: Box::new(prepared),
+        };
+        make_room_in_bounded_cache(
+            &mut self.entries,
+            &key,
+            SM100_PREPARED_CACHE_LIMIT,
+            |cached| {
+                cached
+                    .managed_epoch
+                    .as_ref()
+                    .is_none_or(ManagedAllocationEpochStamp::is_current)
+            },
+        );
+        if !self.entries.contains_key(&key) {
+            self.entries
+                .try_reserve(1)
+                .map_err(|error| format!("reserve prepared SM100 TCGEN cache: {error}"))?;
+        }
+        self.entries.insert(key, entry);
+        Ok(&self
+            .entries
+            .get(&key)
+            .expect("prepared SM100 TCGEN cache entry was inserted above")
+            .prepared)
+    }
+}
+
+fn sm100_policy_dtype(dtype: WeightDtype) -> Result<PolicyDtype, String> {
+    match dtype {
+        WeightDtype::Bf16 => Ok(PolicyDtype::Bf16),
+        WeightDtype::F16 => Ok(PolicyDtype::F16),
+        WeightDtype::F32 => Err("SM100 automatic route requires BF16 or F16".into()),
+    }
+}
+
+unsafe fn enqueue_sm100_tcgen_prepared_observed<O: PhysicalLaunchObserver>(
+    stream: &Arc<cudarc::driver::CudaStream>,
+    kernels: &GpuKernels,
+    prepared: &Sm100PreparedLaunch,
+    observer: &mut O,
+    observation: Option<PhysicalLaunchObservation>,
+) -> Result<(), String> {
+    validate_sm100_prepared_binding(stream, kernels, prepared)?;
+    let spec = prepared.route.kernel_spec()?;
+    if spec.symbol != prepared.identity.symbol {
+        return Err("SM100 prepared symbol no longer matches its physical route".into());
+    }
+    let function = kernels
+        .sm100_function(spec.symbol)
+        .ok_or_else(|| format!("SM100 kernel {} is unavailable", spec.symbol))?;
+    let (rows, columns) = match prepared.route.op {
+        Sm100Op::Nn => (prepared.route.shape.m, prepared.route.shape.n),
+        Sm100Op::Tn => (prepared.route.shape.k, prepared.route.shape.n),
+        Sm100Op::Nt => (prepared.route.shape.m, prepared.route.shape.k),
+    };
+    let rows = checked_u32(rows, "SM100 output rows")?;
+    let columns = checked_u32(columns, "SM100 output columns")?;
+    let grid = checked_grid_product(
+        rows.div_ceil(prepared.route.physical.tile.output_rows()),
+        columns.div_ceil(prepared.route.physical.tile.output_columns()),
+        1,
+    )?;
+    let config = cudarc::driver::LaunchConfig {
+        grid_dim: (grid, 1, 1),
+        block_dim: (spec.threads, 1, 1),
+        shared_mem_bytes: spec.dynamic_shared_bytes,
+    };
+    let mut builder = stream.launch_builder(function);
+    builder.arg(&prepared.operands.output_ptr);
+    builder.arg(&prepared.maps.a);
+    builder.arg(&prepared.maps.b);
+    builder.arg(&prepared.operands.bias_ptr);
+    let params = Sm100KernelParams::from_words(prepared.params);
+    builder.arg(&params);
+    unsafe { enqueue_with_physical_observation(observer, &mut builder, config, observation) }
+        .map_err(|error| error.with_driver_context(format_args!("launch {}", spec.symbol)))
+}
+
+/// The automatic SM100 launch: a measured cell of the board's capability
+/// prepares once, launches under the observer and is replayed by graphs;
+/// every other request declines to the portable caller.
+pub(in crate::mamba_ssm::gpu) fn launch_sm100_auto_observed<O: PhysicalLaunchObserver>(
+    ctx: &GpuCtx,
+    observer: &mut O,
+    request: Sm100AutoRequest,
+) -> Result<Option<Sm100AutoBranchSeal>, String> {
+    let Some(target) = ctx.kernels.sm100_target_candidate() else {
+        return Ok(None);
+    };
+    let Some(route) = resolve_sm100_auto(target.device_cc, Some(target), request) else {
+        static NO_CELL: std::sync::Once = std::sync::Once::new();
+        crate::mamba_ssm::gpu::diagnostics::warn_once(&NO_CELL, || {
+            format!(
+                "no measured SM100 cell for {:?} {:?} {:?}; the portable tensor-core tiles serve \
+                 it (reported once; later uncovered shapes are silent)",
+                request.op, request.dtype, request.shape
+            )
+        });
+        return Ok(None);
+    };
+    let key = Sm100PreparedKey::new(ctx.gemm_route(), route, request);
+    let caps = query_specialized_device_caps(
+        &ctx.stream,
+        target.nvrtc_arch,
+        crate::mamba_ssm::gpu::kernels::nvrtc_version(),
+    )?;
+    ctx.with_sm100_prepared_launches(|cache| {
+        let prepared = cache.ensure_sm100_prepared(ctx, key, route, request)?;
+        let resolved = prepared.identity().resolved_route(caps)?;
+        unsafe {
+            enqueue_sm100_tcgen_prepared_observed(
+                &ctx.stream,
+                &ctx.kernels,
+                prepared,
+                observer,
+                Some(PhysicalLaunchObservation::gemm(
+                    sm100_policy_dtype(route.dtype)?,
+                    None,
+                    resolved,
+                )),
+            )
+        }?;
+        ctx.record_resolved_gemm_route(resolved)?;
+        Ok(Some(Sm100AutoBranchSeal { route }))
+    })
+}
+
+/// The prepared SM100 launch a graph capture replays: the entry the eager
+/// warmup cached, validated against the live binding.
+pub(in crate::mamba_ssm::gpu) fn prepare_sm100_auto_graph_sequence<O: PhysicalLaunchObserver>(
+    ctx: &GpuCtx,
+    observer: &O,
+    request: Sm100AutoRequest,
+) -> Result<PreparedTriadPhysicalGraphSequence, String> {
+    let target = ctx
+        .kernels
+        .sm100_target_candidate()
+        .ok_or_else(|| "prepared SM100 graph route has no module target".to_string())?;
+    let route = resolve_sm100_auto(target.device_cc, Some(target), request)
+        .ok_or_else(|| "prepared SM100 graph request is no longer qualified".to_string())?;
+    let key = Sm100PreparedKey::new(ctx.gemm_route(), route, request);
+    let caps = query_specialized_device_caps(
+        &ctx.stream,
+        target.nvrtc_arch,
+        crate::mamba_ssm::gpu::kernels::nvrtc_version(),
+    )?;
+    ctx.with_sm100_prepared_launches(|cache| {
+        let prepared = &cache
+            .entries
+            .get(&key)
+            .ok_or_else(|| {
+                "prepared SM100 graph cache entry is missing; run eager warmup again".to_string()
+            })?
+            .prepared;
+        validate_sm100_graph_replay(&ctx.stream, &ctx.kernels, prepared)?;
+        let resolved = prepared.identity().resolved_route(caps)?;
+        let config = LaunchConfig {
+            grid_dim: resolved.launch.grid_dim,
+            block_dim: resolved.launch.block_dim,
+            shared_mem_bytes: resolved.launch.shared_mem_bytes,
+        };
+        let observation =
+            PhysicalLaunchObservation::gemm(sm100_policy_dtype(route.dtype)?, None, resolved);
+        let node = resolve_physical_launch_observation(observer, observation, config)?;
+        let function = ctx
+            .kernels
+            .sm100_function(resolved.symbol)
+            .ok_or_else(|| format!("qualified SM100 symbol {} is unavailable", resolved.symbol))?
+            .clone();
+        let mut arguments = PhysicalScalarKernelArguments::new();
+        arguments.push(prepared.operands.output_ptr)?;
+        arguments.push(prepared.maps.a)?;
+        arguments.push(prepared.maps.b)?;
+        arguments.push(prepared.operands.bias_ptr)?;
+        arguments.push(Sm100KernelParams::from_words(prepared.params))?;
+        validate_sm100_graph_replay(&ctx.stream, &ctx.kernels, prepared)?;
+        Ok(PreparedTriadPhysicalGraphSequence {
+            launches: vec![PreparedTriadPhysicalGraphLaunch {
+                function,
+                config,
+                node,
+                arguments: Box::new(arguments),
+            }]
+            .into_boxed_slice(),
+        })
+    })
+}
+
 pub(in crate::mamba_ssm::gpu) struct ScalarLaunchControl<'a> {
     ctx: &'a GpuCtx,
     routes: &'a [ResolvedGemmRoute],

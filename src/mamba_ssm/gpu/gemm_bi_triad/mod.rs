@@ -83,8 +83,8 @@ pub(in crate::mamba_ssm::gpu) use dispatch::{
 };
 pub use launch::*;
 pub(crate) use launch::{
-    F32PreparedLaunchCache, Sm120PreparedLaunchCache, launch_cached_f32_backward_dw,
-    launch_cached_f32_backward_dx, launch_cached_f32_forward,
+    F32PreparedLaunchCache, Sm100PreparedLaunchCache, Sm120PreparedLaunchCache,
+    launch_cached_f32_backward_dw, launch_cached_f32_backward_dx, launch_cached_f32_forward,
 };
 #[doc(hidden)]
 pub use modules::GemmBiKernels;
