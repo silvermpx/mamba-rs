@@ -9,9 +9,9 @@ use super::super::{
 use super::contract::{
     F32_TF32_TUNING_REVISION, F32TriadAvailability, F32TriadOperands, F32TriadRequest,
     F32TriadSelection, F32TriadShape, Sm90aForcedRoute, Sm90aOp, Sm90aShape,
-    Sm90aWarpgroupSchedule, Sm100ForcedRoute, Sm100TargetCandidate, Sm100TargetKind, Sm120Bk,
-    Sm120FmaRoute, Sm120FmaTile, Sm120ForcedRoute, Sm120LaunchOperands, Sm120MapRequest, Sm120Op,
-    Sm120PhysicalRoute, Sm120Shape, Sm120Stages, Sm120TargetCandidate, Sm120Tile,
+    Sm90aWarpgroupSchedule, Sm100ForcedRoute, Sm100Op, Sm100TargetCandidate, Sm100TargetKind,
+    Sm120Bk, Sm120FmaRoute, Sm120FmaTile, Sm120ForcedRoute, Sm120LaunchOperands, Sm120MapRequest,
+    Sm120Op, Sm120PhysicalRoute, Sm120Shape, Sm120Stages, Sm120TargetCandidate, Sm120Tile,
     Tf32PhysicalRoute, Tf32QualifiedModule, tf32_kernel_spec, validate_sm120_map_request,
 };
 use super::contract::{GemmDims, checked_mul3, checked_tile_grid, checked_usize};
@@ -1975,6 +1975,160 @@ pub(super) fn sm120_fma_exact_route(
 pub const SM90A_AUTO_CELLS: &[Sm90aForcedRoute] = &[];
 pub const SM100_AUTO_CELLS_CC100: &[Sm100ForcedRoute] = &[];
 pub const SM100_AUTO_CELLS_CC103: &[Sm100ForcedRoute] = &[];
+/// Automatic CC 11.0 routes. Empty until a board measures them.
+pub const SM100_AUTO_CELLS_CC110: &[Sm100ForcedRoute] = &[];
+
+/// An automatic SM100 request: the measured table names the tile, the
+/// caller only the operation, operands and shape.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Sm100AutoRequest {
+    pub op: Sm100Op,
+    pub dtype: WeightDtype,
+    pub shape: super::contract::Sm100Shape,
+    pub a_ptr: super::contract::CUptr,
+    pub b_ptr: super::contract::CUptr,
+    pub operands: super::contract::Sm100LaunchOperands,
+}
+
+/// The measured SM100 cells of a board's compute capability. A minor with
+/// no table has no cell to find and declines like an uncovered shape.
+pub fn sm100_auto_cells(device_cc: (i32, i32)) -> &'static [Sm100ForcedRoute] {
+    match device_cc {
+        (10, 0) => SM100_AUTO_CELLS_CC100,
+        (10, 3) => SM100_AUTO_CELLS_CC103,
+        (11, 0) => SM100_AUTO_CELLS_CC110,
+        _ => &[],
+    }
+}
+
+/// Resolves a measured SM100 cell for the request, or declines to the
+/// portable caller. The table is per compute capability and stays empty
+/// until a board of that capability qualifies its cells.
+pub fn resolve_sm100_auto(
+    device_cc: (i32, i32),
+    module_target: Option<Sm100TargetCandidate>,
+    request: Sm100AutoRequest,
+) -> Option<Sm100ForcedRoute> {
+    resolve_sm100_auto_from_cells(
+        sm100_auto_cells(device_cc),
+        device_cc,
+        module_target,
+        request,
+    )
+}
+
+fn resolve_sm100_auto_from_cells(
+    cells: &[Sm100ForcedRoute],
+    device_cc: (i32, i32),
+    module_target: Option<Sm100TargetCandidate>,
+    request: Sm100AutoRequest,
+) -> Option<Sm100ForcedRoute> {
+    let route = cells.iter().copied().find(|cell| {
+        cell.op == request.op && cell.dtype == request.dtype && cell.shape == request.shape
+    })?;
+    super::contract::validate_sm100_map_request(super::contract::Sm100MapRequest {
+        op: request.op,
+        dtype: request.dtype,
+        tile: route.physical.tile,
+        a_ptr: request.a_ptr,
+        b_ptr: request.b_ptr,
+        shape: request.shape,
+    })
+    .ok()?;
+    if !sm100_auto_operands_supported(request.op, request.operands) {
+        return None;
+    }
+    (resolve_sm100_forced(device_cc, module_target, route).ok()? == Some(route)).then_some(route)
+}
+
+/// The epilogue contexts the measured SM100 cells were qualified under:
+/// the same law as the SM120 tiles, until a board measures otherwise.
+fn sm100_auto_operands_supported(
+    op: Sm100Op,
+    operands: super::contract::Sm100LaunchOperands,
+) -> bool {
+    let output_alignment = if op == Sm100Op::Tn { 4 } else { 2 };
+    operands.output_ptr != 0
+        && operands.output_ptr.is_multiple_of(output_alignment)
+        && (operands.bias_ptr == 0 || operands.bias_ptr.is_multiple_of(4))
+        && match op {
+            Sm100Op::Nn => operands.bias_ptr == 0 || operands.alpha == 1.0,
+            Sm100Op::Tn => operands.bias_ptr == 0 && operands.beta == 1.0,
+            Sm100Op::Nt => operands.bias_ptr == 0 && operands.beta == 0.0,
+        }
+}
+
+/// An automatic SM90a request: the measured table names the warpgroup
+/// schedule, the caller only the operation, operands and shape.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Sm90aAutoRequest {
+    pub op: Sm90aOp,
+    pub dtype: WeightDtype,
+    pub shape: Sm90aShape,
+    pub a_ptr: super::contract::CUptr,
+    pub b_ptr: super::contract::CUptr,
+    pub operands: super::contract::Sm90aLaunchOperands,
+}
+
+/// Resolves a measured SM90a cell for the request, or declines to the
+/// portable caller. The table stays empty until a CC 9.0 board qualifies
+/// its cells.
+pub fn resolve_sm90a_auto(
+    device_cc: (i32, i32),
+    module_available: bool,
+    request: Sm90aAutoRequest,
+) -> Option<Sm90aForcedRoute> {
+    resolve_sm90a_auto_from_cells(SM90A_AUTO_CELLS, device_cc, module_available, request)
+}
+
+fn resolve_sm90a_auto_from_cells(
+    cells: &[Sm90aForcedRoute],
+    device_cc: (i32, i32),
+    module_available: bool,
+    request: Sm90aAutoRequest,
+) -> Option<Sm90aForcedRoute> {
+    let route = cells.iter().copied().find(|cell| {
+        cell.op == request.op && cell.dtype == request.dtype && cell.shape == request.shape
+    })?;
+    super::contract::validate_sm90a_map_request(super::contract::Sm90aMapRequest {
+        op: request.op,
+        dtype: request.dtype,
+        a_ptr: request.a_ptr,
+        b_ptr: request.b_ptr,
+        shape: request.shape,
+    })
+    .ok()?;
+    if !sm90a_auto_operands_supported(request.op, request.operands) {
+        return None;
+    }
+    let resolved = resolve_sm90a_forced(
+        device_cc,
+        module_available,
+        route.op,
+        route.dtype,
+        route.schedule,
+        route.shape,
+    )
+    .ok()?;
+    (resolved == Some(route)).then_some(route)
+}
+
+/// The epilogue contexts the measured SM90a cells were qualified under:
+/// the same law as the SM120 tiles, until a board measures otherwise.
+fn sm90a_auto_operands_supported(
+    op: Sm90aOp,
+    operands: super::contract::Sm90aLaunchOperands,
+) -> bool {
+    let output_alignment = if op == Sm90aOp::Tn { 4 } else { 2 };
+    operands.output_ptr != 0
+        && operands.output_ptr.is_multiple_of(output_alignment)
+        && (operands.bias_ptr == 0 || operands.bias_ptr.is_multiple_of(4))
+        && match op {
+            Sm90aOp::Nn => operands.bias_ptr == 0 || operands.alpha == 1.0,
+            Sm90aOp::Tn => operands.bias_ptr == 0 && operands.beta == 1.0,
+            Sm90aOp::Nt => operands.bias_ptr == 0 && operands.beta == 0.0,
+        }
+}
 /// Measured BF16/F16 NN/TN/NT cells eligible for automatic CC 12.0 dispatch.
 ///
 /// These routes are exact shape-and-stride matches; this is not a heuristic
@@ -10773,5 +10927,145 @@ mod sm100_toolkit_tests {
         assert!(sm100_target_candidates_for_nvrtc((11, 0), (13, 0)).is_empty());
         assert_eq!(sm100_target_candidates_for_nvrtc((11, 0), (13, 2)).len(), 2);
         assert!(sm100_target_candidates_for_nvrtc((12, 0), (13, 2)).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod sm100_sm90a_auto_tests {
+    use super::super::contract::{
+        Sm90aLaunchOperands, Sm90aShape, Sm100LaunchOperands, Sm100PhysicalRoute, Sm100Schedule,
+        Sm100Shape, Sm100Stages, Sm100Tile,
+    };
+    use super::*;
+
+    fn sm100_request(op: Sm100Op, dims: (usize, usize, usize)) -> Sm100AutoRequest {
+        let beta = if op == Sm100Op::Tn { 1.0 } else { 0.0 };
+        Sm100AutoRequest {
+            op,
+            dtype: WeightDtype::Bf16,
+            shape: Sm100Shape::contiguous(op, dims),
+            a_ptr: 0x1_0000,
+            b_ptr: 0x2_0000,
+            operands: Sm100LaunchOperands {
+                output_ptr: 0x3_0000,
+                bias_ptr: 0,
+                alpha: 1.0,
+                beta,
+            },
+        }
+    }
+
+    fn sm100_cell(op: Sm100Op, dims: (usize, usize, usize)) -> Sm100ForcedRoute {
+        Sm100ForcedRoute {
+            op,
+            dtype: WeightDtype::Bf16,
+            physical: Sm100PhysicalRoute {
+                tile: Sm100Tile::M128N64,
+                stages: Sm100Stages::S2,
+                schedule: Sm100Schedule::C4,
+            },
+            shape: Sm100Shape::contiguous(op, dims),
+        }
+    }
+
+    #[test]
+    fn every_sm100_table_is_empty_until_a_board_measures_it() {
+        for device_cc in [(10, 0), (10, 3), (11, 0), (12, 0), (9, 0)] {
+            assert!(sm100_auto_cells(device_cc).is_empty());
+            let target = sm100_target_candidates(device_cc).first().copied();
+            assert_eq!(
+                resolve_sm100_auto(
+                    device_cc,
+                    target,
+                    sm100_request(Sm100Op::Nn, (2048, 768, 3072))
+                ),
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn a_measured_sm100_cell_resolves_on_its_board_and_declines_elsewhere() {
+        let dims = (2048, 768, 3072);
+        let cells = [sm100_cell(Sm100Op::Nn, dims)];
+        let target = sm100_target_candidates((10, 0))[0];
+        let request = sm100_request(Sm100Op::Nn, dims);
+        assert_eq!(
+            resolve_sm100_auto_from_cells(&cells, (10, 0), Some(target), request),
+            Some(cells[0])
+        );
+        // No bound module, another board, a shape one row off, or an
+        // epilogue outside the measured law each decline.
+        assert_eq!(
+            resolve_sm100_auto_from_cells(&cells, (10, 0), None, request),
+            None
+        );
+        assert_eq!(
+            resolve_sm100_auto_from_cells(&cells, (10, 3), Some(target), request),
+            None
+        );
+        let mut off = request;
+        off.shape.m += 1;
+        assert_eq!(
+            resolve_sm100_auto_from_cells(&cells, (10, 0), Some(target), off),
+            None
+        );
+        let mut biased = request;
+        biased.operands.bias_ptr = 0x4_0000;
+        biased.operands.alpha = 2.0;
+        assert_eq!(
+            resolve_sm100_auto_from_cells(&cells, (10, 0), Some(target), biased),
+            None
+        );
+    }
+
+    fn sm90a_request(op: Sm90aOp, dims: (usize, usize, usize)) -> Sm90aAutoRequest {
+        let beta = if op == Sm90aOp::Tn { 1.0 } else { 0.0 };
+        Sm90aAutoRequest {
+            op,
+            dtype: WeightDtype::Bf16,
+            shape: Sm90aShape::contiguous(op, dims),
+            a_ptr: 0x1_0000,
+            b_ptr: 0x2_0000,
+            operands: Sm90aLaunchOperands {
+                output_ptr: 0x3_0000,
+                bias_ptr: 0,
+                alpha: 1.0,
+                beta,
+            },
+        }
+    }
+
+    #[test]
+    fn the_sm90a_table_is_empty_and_a_measured_cell_resolves_only_on_hopper() {
+        let dims = (2048, 768, 3072);
+        let request = sm90a_request(Sm90aOp::Nn, dims);
+        assert!(SM90A_AUTO_CELLS.is_empty());
+        assert_eq!(resolve_sm90a_auto((9, 0), true, request), None);
+        let cell = Sm90aForcedRoute {
+            op: Sm90aOp::Nn,
+            dtype: WeightDtype::Bf16,
+            schedule: Sm90aWarpgroupSchedule::Wg1,
+            shape: Sm90aShape::contiguous(Sm90aOp::Nn, dims),
+        };
+        assert_eq!(
+            resolve_sm90a_auto_from_cells(&[cell], (9, 0), true, request),
+            Some(cell)
+        );
+        assert_eq!(
+            resolve_sm90a_auto_from_cells(&[cell], (9, 0), false, request),
+            None
+        );
+        assert_eq!(
+            resolve_sm90a_auto_from_cells(&[cell], (12, 0), true, request),
+            None
+        );
+        let mut biased = request;
+        biased.operands.bias_ptr = 0x4_0000;
+        biased.operands.alpha = 2.0;
+        assert_eq!(
+            resolve_sm90a_auto_from_cells(&[cell], (9, 0), true, biased),
+            None
+        );
     }
 }

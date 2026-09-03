@@ -72,10 +72,11 @@ pub use contract::{
 #[cfg(test)]
 pub(crate) use contract::{ZERO_REDUCTION_DIGEST_DOMAIN, ZERO_REDUCTION_MAP_REVISION};
 pub use dispatch::{
-    SM90A_AUTO_CELLS, SM100_AUTO_CELLS_CC100, SM100_AUTO_CELLS_CC103, SM120_AUTO_CELLS_CC120,
-    SM120_AUTO_CELLS_CC121, TcTile, resolve_f32_triad_auto, resolve_sm90a_forced,
-    resolve_sm100_forced, resolve_sm120_forced, resolve_tf32_forced, sm100_target_candidates,
-    sm120_target_candidates,
+    SM90A_AUTO_CELLS, SM100_AUTO_CELLS_CC100, SM100_AUTO_CELLS_CC103, SM100_AUTO_CELLS_CC110,
+    SM120_AUTO_CELLS_CC120, SM120_AUTO_CELLS_CC121, Sm90aAutoRequest, Sm100AutoRequest, TcTile,
+    resolve_f32_triad_auto, resolve_sm90a_auto, resolve_sm90a_forced, resolve_sm100_auto,
+    resolve_sm100_forced, resolve_sm120_forced, resolve_tf32_forced, sm100_auto_cells,
+    sm100_target_candidates, sm120_target_candidates,
 };
 pub(in crate::mamba_ssm::gpu) use dispatch::{
     Sm120AutoRequest, tc_half_policy_prefers_scalar_forward,
