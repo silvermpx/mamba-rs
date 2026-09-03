@@ -3520,6 +3520,37 @@ pub(in crate::mamba_ssm::gpu) fn prepare_f32_triad(
             prepare_scalar_f32(ctx, request, operands, output_resources)
         }
         F32TriadSelection::Tf32(route) => {
+            // A measured TF32 route whose kernel this toolkit could not serve
+            // declines to the exact floor, with the reason said once.
+            if let Ok(spec) = super::contract::tf32_kernel_spec(request.op, route)
+                && let Some(reason) = ctx
+                    .kernels
+                    .triad_kernels()
+                    .tf32_symbol_exclusion(spec.symbol)
+            {
+                static EXCLUDED: std::sync::Once = std::sync::Once::new();
+                crate::mamba_ssm::gpu::diagnostics::warn_once(&EXCLUDED, || {
+                    format!(
+                        "TF32 route {} is excluded on this toolkit ({reason}); the exact \
+                         family serves this shape",
+                        spec.symbol
+                    )
+                });
+                return match super::dispatch::exact_or_scalar_selection(
+                    request,
+                    Some(operands),
+                    ctx.kernels.f32_triad_availability(),
+                ) {
+                    F32TriadSelection::ExactSm120Fma(route) => prepare_tf32_f32(
+                        ctx,
+                        request,
+                        operands,
+                        output_resources,
+                        Tf32PhysicalRoute::Sm120TmaFmaExactV1(route),
+                    ),
+                    _ => prepare_scalar_f32(ctx, request, operands, output_resources),
+                };
+            }
             prepare_tf32_f32(ctx, request, operands, output_resources, route)
         }
         F32TriadSelection::ExactSm120Fma(route) => prepare_tf32_f32(
@@ -10630,6 +10661,7 @@ mod prepared_f32_launch_tests {
             shape: route.shape,
             a_ptr: 0x1_0000,
             b_ptr: 0x2_0000,
+            multiprocessors: 170,
             operands: Sm120LaunchOperands {
                 output_ptr: 0x3_0000,
                 bias_ptr: 0x4_0000,

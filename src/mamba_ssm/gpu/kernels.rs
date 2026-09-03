@@ -643,6 +643,22 @@ impl MambaKernels {
                 )
             });
         }
+        let excluded = triad.tf32_excluded_symbols();
+        if !excluded.is_empty() {
+            static EXCLUDED: std::sync::Once = std::sync::Once::new();
+            super::diagnostics::warn_once(&EXCLUDED, || {
+                format!(
+                    "{} TF32 route(s) are excluded on this toolkit and decline to the exact \
+                     family: {}",
+                    excluded.len(),
+                    excluded
+                        .iter()
+                        .map(|exclusion| exclusion.reason.as_str())
+                        .collect::<Vec<_>>()
+                        .join("; ")
+                )
+            });
+        }
         if let Some(reason) = triad.specialized_tf32_rejection() {
             static SPECIALIZED: std::sync::Once = std::sync::Once::new();
             super::diagnostics::warn_once(&SPECIALIZED, || {

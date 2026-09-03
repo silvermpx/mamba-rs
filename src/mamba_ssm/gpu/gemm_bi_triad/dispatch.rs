@@ -1475,7 +1475,7 @@ fn resolve_f32_triad_auto_impl(
 /// measured TF32 route still runs on the SM120 exact routes when the operands
 /// admit them, and only falls through to the plain scalar chain when they do
 /// not: allowing TF32 must never select something slower than forbidding it.
-fn exact_or_scalar_selection(
+pub(super) fn exact_or_scalar_selection(
     request: F32TriadRequest,
     operands: Option<F32TriadOperands>,
     availability: F32TriadAvailability,
@@ -2931,6 +2931,9 @@ pub(in crate::mamba_ssm::gpu) struct Sm120AutoRequest {
     pub a_ptr: super::contract::CUptr,
     pub b_ptr: super::contract::CUptr,
     pub operands: Sm120LaunchOperands,
+    /// Live multiprocessor count of the board: the neighbour rule refuses a
+    /// tile whose grid cannot fill one wave of it.
+    pub multiprocessors: u32,
 }
 
 /// Resolves only a measured, minor-specific SM120 cell. Every unsupported
@@ -2953,15 +2956,106 @@ pub(super) fn resolve_sm120_auto(
     resolve_sm120_auto_from_cells(cells, caps, module_target, request)
 }
 
+/// How far, per axis and in natural-log units, a shape may sit from the
+/// nearest measured cell and still take that cell's tile: a factor of eight
+/// in output rows, output columns and reduction. Inside that band the
+/// leave-one-out check over the sixty measured cells loses 8 percent on
+/// average to the best tile (internal/perf/sm120-half-census-20260903b);
+/// outside it the portable tensor-core tiles serve, as they did before.
+const SM120_AUTO_NEIGHBOUR_LOG_BOUND: f64 = 2.079_441_541_679_836;
+
+/// Output rows, output columns and reduction length of an SM120 request,
+/// the three axes a tile choice depends on.
+fn sm120_auto_geometry(op: Sm120Op, shape: Sm120Shape) -> [f64; 3] {
+    let (rows, columns, reduction) = match op {
+        Sm120Op::Nn => (shape.m, shape.n, shape.k),
+        Sm120Op::Tn => (shape.k, shape.n, shape.m),
+        Sm120Op::Nt => (shape.m, shape.k, shape.n),
+    };
+    [rows as f64, columns as f64, reduction as f64]
+}
+
+/// The tile of the nearest measured cell of the same operation and dtype,
+/// when one lies within the neighbour band. Ties keep table order, so the
+/// choice is deterministic for a given table.
+fn nearest_sm120_cell(
+    cells: &[Sm120ForcedRoute],
+    op: Sm120Op,
+    dtype: WeightDtype,
+    shape: Sm120Shape,
+    multiprocessors: u32,
+) -> Option<Sm120PhysicalRoute> {
+    let target = sm120_auto_geometry(op, shape).map(f64::ln);
+    let mut best: Option<(f64, &Sm120ForcedRoute)> = None;
+    for cell in cells {
+        if cell.op != op || cell.dtype != dtype {
+            continue;
+        }
+        let axes = sm120_auto_geometry(op, cell.shape)
+            .map(f64::ln)
+            .iter()
+            .zip(target.iter())
+            .map(|(cell_axis, target_axis)| (cell_axis - target_axis).abs())
+            .collect::<Vec<_>>();
+        if axes
+            .iter()
+            .any(|axis| *axis > SM120_AUTO_NEIGHBOUR_LOG_BOUND)
+        {
+            continue;
+        }
+        let distance = axes.iter().map(|axis| axis * axis).sum::<f64>().sqrt();
+        if best.is_none_or(|(best_distance, _)| distance < best_distance) {
+            best = Some((distance, cell));
+        }
+    }
+    let (_, neighbour) = best?;
+    let mut physical = neighbour.physical;
+    // A neighbour measured on a larger output may carry a tile whose grid
+    // leaves most of this board idle. When the shape fills less than one
+    // wave with that tile and less than half of what the neighbour filled,
+    // the smallest tile serves instead: the census shows it winning every
+    // cell that far into underfill. The pipeline depth and reduction step
+    // stay the neighbour's. A neighbour that won underfilled itself keeps
+    // its tile for shapes that are underfilled the same way.
+    let grid = |cell_shape: Sm120Shape| {
+        let [rows, columns, _] = sm120_auto_geometry(op, cell_shape);
+        (rows / f64::from(physical.tile.output_rows())).ceil()
+            * (columns / f64::from(physical.tile.output_columns())).ceil()
+    };
+    let target_grid = grid(shape);
+    if target_grid < f64::from(multiprocessors) && target_grid * 2.0 < grid(neighbour.shape) {
+        physical.tile = Sm120Tile::M64N64;
+    }
+    Some(physical)
+}
+
 fn resolve_sm120_auto_from_cells(
     cells: &[Sm120ForcedRoute],
     caps: DeviceCaps,
     module_target: Option<Sm120TargetCandidate>,
     request: Sm120AutoRequest,
 ) -> Option<Sm120ForcedRoute> {
-    let route = cells.iter().copied().find(|cell| {
+    let measured = cells.iter().copied().find(|cell| {
         cell.op == request.op && cell.dtype == request.dtype && cell.shape == request.shape
-    })?;
+    });
+    // A shape no cell names takes the tile of the nearest measured cell, so
+    // every shape in the measured band has a path; the exact cell still wins
+    // where one exists.
+    let route = match measured {
+        Some(cell) => cell,
+        None => Sm120ForcedRoute {
+            op: request.op,
+            dtype: request.dtype,
+            physical: nearest_sm120_cell(
+                cells,
+                request.op,
+                request.dtype,
+                request.shape,
+                request.multiprocessors,
+            )?,
+            shape: request.shape,
+        },
+    };
     let maps = Sm120MapRequest {
         op: request.op,
         dtype: request.dtype,
@@ -6931,6 +7025,84 @@ mod sm120_tests {
         ]
     }
 
+    #[test]
+    fn a_shape_off_the_table_takes_the_nearest_measured_tile_inside_the_band() {
+        use super::{SM120_AUTO_CELLS_CC120, nearest_sm120_cell};
+        // The tall rectangle sits nearest the 4621x384-output serve
+        // projections and takes their tiles, one per operation.
+        let tall = Sm120Shape::contiguous(Sm120Op::Nn, (4096, 512, 768));
+        assert_eq!(
+            nearest_sm120_cell(
+                SM120_AUTO_CELLS_CC120,
+                Sm120Op::Nn,
+                WeightDtype::Bf16,
+                tall,
+                170
+            ),
+            Some(Sm120PhysicalRoute {
+                tile: Sm120Tile::M64N64,
+                bk: Sm120Bk::Bk64,
+                stages: Sm120Stages::S2,
+            })
+        );
+        let tall_tn = Sm120Shape::contiguous(Sm120Op::Tn, (4096, 512, 768));
+        assert_eq!(
+            nearest_sm120_cell(
+                SM120_AUTO_CELLS_CC120,
+                Sm120Op::Tn,
+                WeightDtype::F16,
+                tall_tn,
+                170,
+            ),
+            Some(Sm120PhysicalRoute {
+                tile: Sm120Tile::M64N64,
+                bk: Sm120Bk::Bk64,
+                stages: Sm120Stages::S3,
+            })
+        );
+        // A measured shape is its own nearest cell.
+        let measured = Sm120Shape::contiguous(Sm120Op::Nt, (2048, 3072, 768));
+        assert_eq!(
+            nearest_sm120_cell(
+                SM120_AUTO_CELLS_CC120,
+                Sm120Op::Nt,
+                WeightDtype::Bf16,
+                measured,
+                170,
+            ),
+            Some(Sm120PhysicalRoute {
+                tile: Sm120Tile::M128N64,
+                bk: Sm120Bk::Bk32,
+                stages: Sm120Stages::S2,
+            })
+        );
+        // A narrow output whose neighbour carries a 128x128 tile cannot fill
+        // one wave with it and takes the smallest tile instead.
+        let narrow = Sm120Shape::contiguous(Sm120Op::Nt, (1024, 128, 512));
+        let picked = nearest_sm120_cell(
+            SM120_AUTO_CELLS_CC120,
+            Sm120Op::Nt,
+            WeightDtype::Bf16,
+            narrow,
+            170,
+        )
+        .expect("the narrow projection is inside the band");
+        assert_eq!(picked.tile, Sm120Tile::M64N64);
+        // A tiny square is more than a factor of eight from every cell on at
+        // least one axis and gets no tile: the portable tiles serve it.
+        let tiny = Sm120Shape::contiguous(Sm120Op::Nn, (64, 64, 64));
+        assert_eq!(
+            nearest_sm120_cell(
+                SM120_AUTO_CELLS_CC120,
+                Sm120Op::Nn,
+                WeightDtype::Bf16,
+                tiny,
+                170
+            ),
+            None
+        );
+    }
+
     fn request_for(route: Sm120ForcedRoute) -> Sm120AutoRequest {
         let beta = if route.op == Sm120Op::Tn { 1.0 } else { 0.0 };
         Sm120AutoRequest {
@@ -6939,6 +7111,7 @@ mod sm120_tests {
             shape: route.shape,
             a_ptr: 0x1_0000,
             b_ptr: 0x2_0000,
+            multiprocessors: 170,
             operands: Sm120LaunchOperands {
                 output_ptr: 0x3_0000,
                 bias_ptr: 0,
@@ -7005,11 +7178,30 @@ mod sm120_tests {
         request.shape.m += 1;
         let target = sm120_target_candidates((12, 0), (12, 8))[0];
 
+        // One row off a measured cell is inside the neighbour band: the
+        // request takes that cell's tile on its own shape.
         assert_eq!(
             resolve_sm120_auto(
                 caps((12, 0), (12, 8), Some("compute_120")),
                 Some(target),
                 request,
+            ),
+            Some(Sm120ForcedRoute {
+                op: route.op,
+                dtype: route.dtype,
+                physical: route.physical,
+                shape: request.shape,
+            })
+        );
+
+        // Far outside the band nothing is measured and the request declines.
+        let mut far = request_for(route);
+        far.shape = Sm120Shape::contiguous(route.op, (64, 64, 64));
+        assert_eq!(
+            resolve_sm120_auto(
+                caps((12, 0), (12, 8), Some("compute_120")),
+                Some(target),
+                far,
             ),
             None
         );

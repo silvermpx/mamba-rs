@@ -3,7 +3,10 @@ use std::thread;
 use std::time::Duration;
 
 const MAX_UTILIZATION_PERCENT: u32 = 1;
-const MAX_PRE_CONTEXT_MEMORY_MIB: u64 = 128;
+// The driver keeps a reservation with no process alive; the RTX 6000 Ada
+// idles at 132 MiB where the RTX 5090 idles at 15. The gate is about other
+// contexts, which the process census catches, so the reservation is allowed.
+const MAX_PRE_CONTEXT_MEMORY_MIB: u64 = 256;
 const ATTEMPTS: usize = 50;
 const REQUIRED_QUIET_SAMPLES: usize = 5;
 

@@ -99,8 +99,8 @@ fn retain_tf32_candidate<T, Binding>(
 }
 
 fn retain_forced_only_functions<T>(
-    functions: Result<HashMap<&'static str, T>, String>,
-) -> Result<HashMap<&'static str, T>, String> {
+    functions: Result<(HashMap<&'static str, T>, Vec<Tf32SymbolExclusion>), String>,
+) -> Result<(HashMap<&'static str, T>, Vec<Tf32SymbolExclusion>), String> {
     functions
 }
 
@@ -478,11 +478,49 @@ pub(crate) struct CompiledModule {
     tf32_driver_abi: BTreeMap<&'static str, Tf32DriverAbi>,
 }
 
+/// A TF32 symbol the loaded module cannot serve on this toolkit: the
+/// compiler spilled it to local memory, or it exceeds its register or thread
+/// gate. The rest of the module serves; a route to this symbol declines to
+/// the exact family with the reason.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Tf32SymbolExclusion {
+    pub symbol: &'static str,
+    pub reason: String,
+}
+
+/// Whether one loaded TF32 kernel meets its resource gates. Every violation
+/// is a per-symbol exclusion, never a module rejection: one kernel a toolkit
+/// spills must not darken the family.
+pub(super) fn tf32_symbol_admission(
+    symbol: &str,
+    local_bytes: u32,
+    registers: u32,
+    register_cap: u32,
+    max_threads: i32,
+    threads: i32,
+) -> Result<(), String> {
+    if local_bytes != 0 {
+        return Err(format!(
+            "{symbol} uses {local_bytes} bytes of Driver JIT local memory on this toolkit"
+        ));
+    }
+    if registers > register_cap {
+        return Err(format!(
+            "{symbol} uses {registers} registers, above its {register_cap}-register gate"
+        ));
+    }
+    if max_threads < threads {
+        return Err(format!("{symbol} cannot launch {threads} threads"));
+    }
+    Ok(())
+}
+
 pub(crate) struct QualifiedSpecializedModule {
     module: CompiledModule,
     functions: HashMap<&'static str, CudaFunction>,
     tf32_functions: HashMap<&'static str, CudaFunction>,
     tf32_rejection: Option<String>,
+    tf32_excluded: Vec<Tf32SymbolExclusion>,
     sm120_target: Option<super::contract::Sm120TargetCandidate>,
     sm120_device_caps: Option<crate::mamba_ssm::gpu::kernel_identity::DeviceCaps>,
     sm120_resources: HashMap<&'static str, super::contract::Sm120KernelResources>,
@@ -3957,19 +3995,24 @@ pub(crate) fn qualify_specialized_module(
         ModuleKind::TriadSm120 => load_sm120_functions(&module),
         kind => Err(format!("unsupported specialized triad module {kind:?}")),
     }?;
-    let (tf32_functions, tf32_rejection) = if module.tf32_qualified {
+    let (tf32_functions, tf32_excluded, tf32_rejection) = if module.tf32_qualified {
         match load_tf32_functions(&module) {
-            Ok(functions) => (functions, None),
-            Err(error) => (HashMap::new(), Some(error)),
+            Ok((functions, excluded)) => (functions, excluded, None),
+            Err(error) => (HashMap::new(), Vec::new(), Some(error)),
         }
     } else {
-        (HashMap::new(), module.tf32_qualification_error.clone())
+        (
+            HashMap::new(),
+            Vec::new(),
+            module.tf32_qualification_error.clone(),
+        )
     };
     Ok(QualifiedSpecializedModule {
         module,
         functions,
         tf32_functions,
         tf32_rejection,
+        tf32_excluded,
         sm120_target: None,
         sm120_device_caps: None,
         sm120_resources: HashMap::new(),
@@ -3992,6 +4035,7 @@ pub struct GemmBiKernels {
     specialized_tf32_functions: HashMap<&'static str, CudaFunction>,
     portable_tf32_rejection: Option<String>,
     specialized_tf32_rejection: Option<String>,
+    tf32_excluded_symbols: Vec<Tf32SymbolExclusion>,
     specialized_functions: HashMap<&'static str, CudaFunction>,
     sm120_target: Option<super::contract::Sm120TargetCandidate>,
     sm120_device_caps: Option<crate::mamba_ssm::gpu::kernel_identity::DeviceCaps>,
@@ -4104,9 +4148,11 @@ impl GemmBiKernels {
                 .map(|specialized| specialized.module.tf32_driver_abi.clone()),
         )?;
         let mut portable_tf32_rejection = None;
+        let mut tf32_excluded_symbols = Vec::new();
         let (portable_tf32_functions, portable) = if sm80.tf32_qualified {
             let qualification = (|| {
-                let functions = load_tf32_functions(&sm80)?;
+                let (functions, excluded) = load_tf32_functions(&sm80)?;
+                tf32_excluded_symbols.extend(excluded);
                 let binding = qualify_tf32_module_binding(ctx, &sm80)?;
                 let artifact = qualify_loaded_tf32_artifact(
                     ctx,
@@ -4128,8 +4174,12 @@ impl GemmBiKernels {
             portable_tf32_rejection = sm80.tf32_qualification_error.clone();
             (HashMap::new(), None)
         };
-        let tf32_splitk_functions =
+        let (tf32_splitk_functions, splitk_excluded) =
             retain_forced_only_functions(load_tf32_splitk_functions(&sm80))?;
+        tf32_excluded_symbols.extend(splitk_excluded);
+        if let Some(specialized) = specialized.as_ref() {
+            tf32_excluded_symbols.extend(specialized.tf32_excluded.iter().cloned());
+        }
         let mut specialized_tf32_rejection = specialized
             .as_ref()
             .and_then(|specialized| specialized.tf32_rejection.clone());
@@ -4256,6 +4306,7 @@ impl GemmBiKernels {
             tf32_driver_abi,
             portable_tf32_functions,
             tf32_splitk_functions,
+            tf32_excluded_symbols,
             specialized_tf32_functions,
             portable_tf32_rejection,
             specialized_tf32_rejection,
@@ -4355,6 +4406,19 @@ impl GemmBiKernels {
     /// Why the portable SM80 TF32 routes are not bound, if they are not.
     pub(crate) fn portable_tf32_rejection(&self) -> Option<&str> {
         self.portable_tf32_rejection.as_deref()
+    }
+
+    /// The TF32 symbols this toolkit could not serve, each with its reason.
+    pub(crate) fn tf32_excluded_symbols(&self) -> &[Tf32SymbolExclusion] {
+        &self.tf32_excluded_symbols
+    }
+
+    /// Why `symbol` is excluded on this toolkit, if it is.
+    pub(crate) fn tf32_symbol_exclusion(&self, symbol: &str) -> Option<&str> {
+        self.tf32_excluded_symbols
+            .iter()
+            .find(|exclusion| exclusion.symbol == symbol)
+            .map(|exclusion| exclusion.reason.as_str())
     }
 
     pub(crate) fn tf32_qualification_rejection(
@@ -4730,15 +4794,19 @@ fn load_function(
         .map_err(|error| format!("{kind:?} kernel {name} not found: {error:?}"))
 }
 
-fn load_tf32_functions(
-    module: &CompiledModule,
-) -> Result<HashMap<&'static str, CudaFunction>, String> {
+type Tf32LoadedFunctions = (
+    HashMap<&'static str, CudaFunction>,
+    Vec<Tf32SymbolExclusion>,
+);
+
+fn load_tf32_functions(module: &CompiledModule) -> Result<Tf32LoadedFunctions, String> {
     let module_kind = module.artifact_identity.module_kind;
     let specs = super::contract::tf32_route_specs(module_kind);
     if specs.is_empty() {
         return Err(format!("{module_kind:?} has no TF32 symbol inventory"));
     }
     let mut functions = HashMap::with_capacity(specs.len());
+    let mut excluded = Vec::new();
     for kernel_spec in specs {
         let function = load_function(&module.module, module_kind, kernel_spec.symbol)?;
         let shared = i32::try_from(kernel_spec.dynamic_shared_bytes)
@@ -4749,12 +4817,6 @@ fn load_tf32_functions(
                 format!("query {} local memory: {error:?}", kernel_spec.symbol)
             })?)
             .map_err(|_| format!("{} returned negative local memory", kernel_spec.symbol))?;
-        validate_tf32_driver_jit_local_memory(
-            local_bytes,
-            module_kind,
-            kernel_spec.symbol,
-            module.compiler_identity,
-        )?;
         let registers = u32::try_from(
             function
                 .num_regs()
@@ -4762,23 +4824,24 @@ fn load_tf32_functions(
         )
         .map_err(|_| format!("{} returned a negative register count", kernel_spec.symbol))?;
         let register_cap = tf32_register_cap(module_kind, kernel_spec.symbol)?;
-        if registers > register_cap {
-            return Err(format!(
-                "{} uses {registers} registers, above its {register_cap}-register gate",
-                kernel_spec.symbol
-            ));
-        }
         let threads = i32::try_from(kernel_spec.threads)
             .map_err(|_| format!("{} thread count exceeds i32::MAX", kernel_spec.symbol))?;
-        if function
+        let max_threads = function
             .max_threads_per_block()
-            .map_err(|error| format!("query {} max threads: {error:?}", kernel_spec.symbol))?
-            < threads
-        {
-            return Err(format!(
-                "{} cannot launch {} threads",
-                kernel_spec.symbol, kernel_spec.threads
-            ));
+            .map_err(|error| format!("query {} max threads: {error:?}", kernel_spec.symbol))?;
+        if let Err(reason) = tf32_symbol_admission(
+            kernel_spec.symbol,
+            local_bytes,
+            registers,
+            register_cap,
+            max_threads,
+            threads,
+        ) {
+            excluded.push(Tf32SymbolExclusion {
+                symbol: kernel_spec.symbol,
+                reason,
+            });
+            continue;
         }
         let occupancy = function
             .occupancy_max_active_blocks_per_multiprocessor(
@@ -4794,34 +4857,47 @@ fn load_tf32_functions(
                 1
             };
         if occupancy < required_occupancy {
-            return Err(format!(
-                "{} occupancy {occupancy} misses its {required_occupancy}-CTA gate",
-                kernel_spec.symbol
-            ));
+            excluded.push(Tf32SymbolExclusion {
+                symbol: kernel_spec.symbol,
+                reason: format!(
+                    "{} occupancy {occupancy} misses its {required_occupancy}-CTA gate",
+                    kernel_spec.symbol
+                ),
+            });
+            continue;
         }
         if functions.insert(kernel_spec.symbol, function).is_some() {
             return Err(format!("duplicate TF32 function {}", kernel_spec.symbol));
         }
     }
-    if functions.len() != specs.len() {
+    if functions.len() + excluded.len() != specs.len() {
         return Err(format!(
             "{module_kind:?} did not load its complete TF32 inventory"
         ));
     }
-    Ok(functions)
+    if functions.is_empty() {
+        return Err(format!(
+            "{module_kind:?} has no TF32 kernel this toolkit can serve: {}",
+            excluded
+                .iter()
+                .map(|exclusion| exclusion.reason.as_str())
+                .collect::<Vec<_>>()
+                .join("; ")
+        ));
+    }
+    Ok((functions, excluded))
 }
 
-fn load_tf32_splitk_functions(
-    module: &CompiledModule,
-) -> Result<HashMap<&'static str, CudaFunction>, String> {
+fn load_tf32_splitk_functions(module: &CompiledModule) -> Result<Tf32LoadedFunctions, String> {
     if module.artifact_identity.module_kind != ModuleKind::TriadSm80 {
         return Err("portable TF32 split-K requires the TriadSm80 module".into());
     }
     if !module.tf32_qualified {
-        return Ok(HashMap::new());
+        return Ok((HashMap::new(), Vec::new()));
     }
     let specs = &super::contract::TF32_SPLITK_CANDIDATE_SPECS;
     let mut functions = HashMap::with_capacity(specs.len());
+    let mut excluded = Vec::new();
     for spec in specs {
         let (symbol, threads, dynamic_shared_bytes, register_cap, occupancy_gate) = (
             spec.symbol,
@@ -4840,32 +4916,33 @@ fn load_tf32_splitk_functions(
             i32::try_from(dynamic_shared_bytes)
                 .map_err(|_| format!("{symbol} shared memory exceeds i32::MAX"))?,
         )?;
-        if function
-            .local_size_bytes()
-            .map_err(|error| format!("query {symbol} local memory: {error:?}"))?
-            != 0
-        {
-            return Err(format!("{symbol} spills to local memory"));
-        }
+        let local_bytes = u32::try_from(
+            function
+                .local_size_bytes()
+                .map_err(|error| format!("query {symbol} local memory: {error:?}"))?,
+        )
+        .map_err(|_| format!("{symbol} returned negative local memory"))?;
         let registers = u32::try_from(
             function
                 .num_regs()
                 .map_err(|error| format!("query {symbol} registers: {error:?}"))?,
         )
         .map_err(|_| format!("{symbol} returned a negative register count"))?;
-        if registers > register_cap {
-            return Err(format!(
-                "{symbol} uses {registers} registers, above its {register_cap}-register gate"
-            ));
-        }
         let threads_i32 = i32::try_from(threads)
             .map_err(|_| format!("{symbol} thread count exceeds i32::MAX"))?;
-        if function
+        let max_threads = function
             .max_threads_per_block()
-            .map_err(|error| format!("query {symbol} max threads: {error:?}"))?
-            < threads_i32
-        {
-            return Err(format!("{symbol} cannot launch {threads} threads"));
+            .map_err(|error| format!("query {symbol} max threads: {error:?}"))?;
+        if let Err(reason) = tf32_symbol_admission(
+            symbol,
+            local_bytes,
+            registers,
+            register_cap,
+            max_threads,
+            threads_i32,
+        ) {
+            excluded.push(Tf32SymbolExclusion { symbol, reason });
+            continue;
         }
         let occupancy = function
             .occupancy_max_active_blocks_per_multiprocessor(
@@ -4875,18 +4952,22 @@ fn load_tf32_splitk_functions(
             )
             .map_err(|error| format!("query {symbol} occupancy: {error:?}"))?;
         if occupancy < occupancy_gate {
-            return Err(format!(
-                "{symbol} occupancy {occupancy} misses its {occupancy_gate}-CTA gate"
-            ));
+            excluded.push(Tf32SymbolExclusion {
+                symbol,
+                reason: format!(
+                    "{symbol} occupancy {occupancy} misses its {occupancy_gate}-CTA gate"
+                ),
+            });
+            continue;
         }
         if functions.insert(symbol, function).is_some() {
             return Err(format!("duplicate TF32 split-K function {symbol}"));
         }
     }
-    if functions.len() != specs.len() {
+    if functions.len() + excluded.len() != specs.len() {
         return Err("TriadSm80 did not load its complete TF32 split-K inventory".into());
     }
-    Ok(functions)
+    Ok((functions, excluded))
 }
 
 fn tf32_register_cap(module_kind: ModuleKind, symbol: &str) -> Result<u32, String> {
@@ -5690,6 +5771,21 @@ mod tests {
     }
 
     #[test]
+    fn a_symbol_failing_a_resource_gate_is_excluded_with_its_reason() {
+        use super::tf32_symbol_admission;
+        assert!(tf32_symbol_admission("k", 0, 120, 128, 1024, 256).is_ok());
+        let spill = tf32_symbol_admission("k", 8, 120, 128, 1024, 256).unwrap_err();
+        assert!(
+            spill.contains("8 bytes of Driver JIT local memory"),
+            "{spill}"
+        );
+        let registers = tf32_symbol_admission("k", 0, 129, 128, 1024, 256).unwrap_err();
+        assert!(registers.contains("129 registers"), "{registers}");
+        let threads = tf32_symbol_admission("k", 0, 120, 128, 128, 256).unwrap_err();
+        assert!(threads.contains("cannot launch 256 threads"), "{threads}");
+    }
+
+    #[test]
     fn tf32_driver_jit_local_memory_admission_requires_zero() {
         let symbol = "gemm_bi_nn_sm120_tma_mma_tf32_v1_m64n128_bk32_s3";
         let qualified = Tf32DriverJitLocalMemoryFacts {
@@ -5930,7 +6026,9 @@ mod tests {
 
         let functions = HashMap::from([("forced", 7_u8)]);
         assert_eq!(
-            retain_forced_only_functions(Ok(functions.clone())).unwrap(),
+            retain_forced_only_functions(Ok((functions.clone(), Vec::new())))
+                .unwrap()
+                .0,
             functions
         );
     }

@@ -1695,7 +1695,7 @@ struct Sm120HotShape {
     dims: (usize, usize, usize),
 }
 
-const SM120_HOT_SHAPES: [Sm120HotShape; 10] = [
+const SM120_HOT_SHAPES: [Sm120HotShape; 15] = [
     Sm120HotShape {
         name: "large",
         dims: (2048, 3072, 768),
@@ -1735,6 +1735,28 @@ const SM120_HOT_SHAPES: [Sm120HotShape; 10] = [
     Sm120HotShape {
         name: "prod_out_proj",
         dims: (10400, 768, 384),
+    },
+    // Held-out shapes of the performance matrix: the nearest-cell rule is
+    // judged on them against the forced census.
+    Sm120HotShape {
+        name: "rect_wide",
+        dims: (512, 3072, 768),
+    },
+    Sm120HotShape {
+        name: "rect_tall",
+        dims: (4096, 512, 768),
+    },
+    Sm120HotShape {
+        name: "underfill",
+        dims: (256, 512, 384),
+    },
+    Sm120HotShape {
+        name: "d128_in_proj",
+        dims: (1024, 128, 512),
+    },
+    Sm120HotShape {
+        name: "d128_out_proj",
+        dims: (1024, 256, 128),
     },
     Sm120HotShape {
         name: "prod_input_proj",
