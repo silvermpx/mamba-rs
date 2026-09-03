@@ -1028,7 +1028,7 @@ fn assert_map_and_route_fail_closed(ctx: &GpuCtx) {
         resolve_sm120_forced(caps, None, requested).expect("fail-closed route result"),
         None
     );
-    assert_eq!(SM120_AUTO_CELLS_CC120.len(), 18);
+    assert_eq!(SM120_AUTO_CELLS_CC120.len(), 60);
     assert!(SM120_AUTO_CELLS_CC121.is_empty());
 }
 
@@ -1521,7 +1521,7 @@ fn qualifies_all_96_forced_sm120_routes() {
         return;
     };
     assert_eq!(SM120_KERNEL_SPECS.len(), 96);
-    assert_eq!(SM120_AUTO_CELLS_CC120.len(), 18);
+    assert_eq!(SM120_AUTO_CELLS_CC120.len(), 60);
     assert!(SM120_AUTO_CELLS_CC121.is_empty());
 
     for op in [Sm120Op::Nn, Sm120Op::Tn, Sm120Op::Nt] {

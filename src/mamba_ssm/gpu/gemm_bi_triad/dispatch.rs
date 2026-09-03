@@ -2213,6 +2213,516 @@ pub const SM120_AUTO_CELLS_CC120: &[Sm120ForcedRoute] = &[
             ldc: 384,
         },
     },
+    Sm120ForcedRoute {
+        op: Sm120Op::Nn,
+        dtype: WeightDtype::Bf16,
+        physical: Sm120PhysicalRoute {
+            tile: Sm120Tile::M64N64,
+            bk: Sm120Bk::Bk64,
+            stages: Sm120Stages::S2,
+        },
+        shape: Sm120Shape {
+            m: 4621,
+            k: 768,
+            n: 384,
+            lda: 768,
+            ldb: 384,
+            ldc: 384,
+        },
+    },
+    Sm120ForcedRoute {
+        op: Sm120Op::Nn,
+        dtype: WeightDtype::Bf16,
+        physical: Sm120PhysicalRoute {
+            tile: Sm120Tile::M64N64,
+            bk: Sm120Bk::Bk64,
+            stages: Sm120Stages::S2,
+        },
+        shape: Sm120Shape {
+            m: 4621,
+            k: 1024,
+            n: 384,
+            lda: 1024,
+            ldb: 384,
+            ldc: 384,
+        },
+    },
+    Sm120ForcedRoute {
+        op: Sm120Op::Nn,
+        dtype: WeightDtype::Bf16,
+        physical: Sm120PhysicalRoute {
+            tile: Sm120Tile::M128N64,
+            bk: Sm120Bk::Bk32,
+            stages: Sm120Stages::S2,
+        },
+        shape: Sm120Shape {
+            m: 10400,
+            k: 384,
+            n: 384,
+            lda: 384,
+            ldb: 384,
+            ldc: 384,
+        },
+    },
+    Sm120ForcedRoute {
+        op: Sm120Op::Nn,
+        dtype: WeightDtype::Bf16,
+        physical: Sm120PhysicalRoute {
+            tile: Sm120Tile::M128N128,
+            bk: Sm120Bk::Bk32,
+            stages: Sm120Stages::S3,
+        },
+        shape: Sm120Shape {
+            m: 10400,
+            k: 384,
+            n: 1536,
+            lda: 384,
+            ldb: 1536,
+            ldc: 1536,
+        },
+    },
+    Sm120ForcedRoute {
+        op: Sm120Op::Nn,
+        dtype: WeightDtype::Bf16,
+        physical: Sm120PhysicalRoute {
+            tile: Sm120Tile::M128N64,
+            bk: Sm120Bk::Bk32,
+            stages: Sm120Stages::S2,
+        },
+        shape: Sm120Shape {
+            m: 10400,
+            k: 768,
+            n: 384,
+            lda: 768,
+            ldb: 384,
+            ldc: 384,
+        },
+    },
+    Sm120ForcedRoute {
+        op: Sm120Op::Nn,
+        dtype: WeightDtype::F16,
+        physical: Sm120PhysicalRoute {
+            tile: Sm120Tile::M64N64,
+            bk: Sm120Bk::Bk64,
+            stages: Sm120Stages::S2,
+        },
+        shape: Sm120Shape {
+            m: 4621,
+            k: 768,
+            n: 384,
+            lda: 768,
+            ldb: 384,
+            ldc: 384,
+        },
+    },
+    Sm120ForcedRoute {
+        op: Sm120Op::Nn,
+        dtype: WeightDtype::F16,
+        physical: Sm120PhysicalRoute {
+            tile: Sm120Tile::M64N64,
+            bk: Sm120Bk::Bk64,
+            stages: Sm120Stages::S2,
+        },
+        shape: Sm120Shape {
+            m: 4621,
+            k: 1024,
+            n: 384,
+            lda: 1024,
+            ldb: 384,
+            ldc: 384,
+        },
+    },
+    Sm120ForcedRoute {
+        op: Sm120Op::Nn,
+        dtype: WeightDtype::F16,
+        physical: Sm120PhysicalRoute {
+            tile: Sm120Tile::M128N64,
+            bk: Sm120Bk::Bk32,
+            stages: Sm120Stages::S2,
+        },
+        shape: Sm120Shape {
+            m: 10400,
+            k: 384,
+            n: 384,
+            lda: 384,
+            ldb: 384,
+            ldc: 384,
+        },
+    },
+    Sm120ForcedRoute {
+        op: Sm120Op::Nn,
+        dtype: WeightDtype::F16,
+        physical: Sm120PhysicalRoute {
+            tile: Sm120Tile::M128N128,
+            bk: Sm120Bk::Bk32,
+            stages: Sm120Stages::S3,
+        },
+        shape: Sm120Shape {
+            m: 10400,
+            k: 384,
+            n: 1536,
+            lda: 384,
+            ldb: 1536,
+            ldc: 1536,
+        },
+    },
+    Sm120ForcedRoute {
+        op: Sm120Op::Nn,
+        dtype: WeightDtype::F16,
+        physical: Sm120PhysicalRoute {
+            tile: Sm120Tile::M128N64,
+            bk: Sm120Bk::Bk32,
+            stages: Sm120Stages::S2,
+        },
+        shape: Sm120Shape {
+            m: 10400,
+            k: 768,
+            n: 384,
+            lda: 768,
+            ldb: 384,
+            ldc: 384,
+        },
+    },
+    Sm120ForcedRoute {
+        op: Sm120Op::Tn,
+        dtype: WeightDtype::Bf16,
+        physical: Sm120PhysicalRoute {
+            tile: Sm120Tile::M64N64,
+            bk: Sm120Bk::Bk64,
+            stages: Sm120Stages::S3,
+        },
+        shape: Sm120Shape {
+            m: 4621,
+            k: 768,
+            n: 384,
+            lda: 768,
+            ldb: 384,
+            ldc: 384,
+        },
+    },
+    Sm120ForcedRoute {
+        op: Sm120Op::Tn,
+        dtype: WeightDtype::Bf16,
+        physical: Sm120PhysicalRoute {
+            tile: Sm120Tile::M64N64,
+            bk: Sm120Bk::Bk64,
+            stages: Sm120Stages::S3,
+        },
+        shape: Sm120Shape {
+            m: 4621,
+            k: 1024,
+            n: 384,
+            lda: 1024,
+            ldb: 384,
+            ldc: 384,
+        },
+    },
+    Sm120ForcedRoute {
+        op: Sm120Op::Tn,
+        dtype: WeightDtype::Bf16,
+        physical: Sm120PhysicalRoute {
+            tile: Sm120Tile::M64N64,
+            bk: Sm120Bk::Bk64,
+            stages: Sm120Stages::S3,
+        },
+        shape: Sm120Shape {
+            m: 10400,
+            k: 384,
+            n: 384,
+            lda: 384,
+            ldb: 384,
+            ldc: 384,
+        },
+    },
+    Sm120ForcedRoute {
+        op: Sm120Op::Tn,
+        dtype: WeightDtype::Bf16,
+        physical: Sm120PhysicalRoute {
+            tile: Sm120Tile::M64N64,
+            bk: Sm120Bk::Bk64,
+            stages: Sm120Stages::S3,
+        },
+        shape: Sm120Shape {
+            m: 10400,
+            k: 384,
+            n: 1536,
+            lda: 384,
+            ldb: 1536,
+            ldc: 1536,
+        },
+    },
+    Sm120ForcedRoute {
+        op: Sm120Op::Tn,
+        dtype: WeightDtype::Bf16,
+        physical: Sm120PhysicalRoute {
+            tile: Sm120Tile::M64N64,
+            bk: Sm120Bk::Bk64,
+            stages: Sm120Stages::S3,
+        },
+        shape: Sm120Shape {
+            m: 10400,
+            k: 768,
+            n: 384,
+            lda: 768,
+            ldb: 384,
+            ldc: 384,
+        },
+    },
+    Sm120ForcedRoute {
+        op: Sm120Op::Tn,
+        dtype: WeightDtype::F16,
+        physical: Sm120PhysicalRoute {
+            tile: Sm120Tile::M64N64,
+            bk: Sm120Bk::Bk64,
+            stages: Sm120Stages::S3,
+        },
+        shape: Sm120Shape {
+            m: 4621,
+            k: 768,
+            n: 384,
+            lda: 768,
+            ldb: 384,
+            ldc: 384,
+        },
+    },
+    Sm120ForcedRoute {
+        op: Sm120Op::Tn,
+        dtype: WeightDtype::F16,
+        physical: Sm120PhysicalRoute {
+            tile: Sm120Tile::M64N64,
+            bk: Sm120Bk::Bk64,
+            stages: Sm120Stages::S3,
+        },
+        shape: Sm120Shape {
+            m: 4621,
+            k: 1024,
+            n: 384,
+            lda: 1024,
+            ldb: 384,
+            ldc: 384,
+        },
+    },
+    Sm120ForcedRoute {
+        op: Sm120Op::Tn,
+        dtype: WeightDtype::F16,
+        physical: Sm120PhysicalRoute {
+            tile: Sm120Tile::M64N64,
+            bk: Sm120Bk::Bk64,
+            stages: Sm120Stages::S3,
+        },
+        shape: Sm120Shape {
+            m: 10400,
+            k: 384,
+            n: 384,
+            lda: 384,
+            ldb: 384,
+            ldc: 384,
+        },
+    },
+    Sm120ForcedRoute {
+        op: Sm120Op::Tn,
+        dtype: WeightDtype::F16,
+        physical: Sm120PhysicalRoute {
+            tile: Sm120Tile::M64N64,
+            bk: Sm120Bk::Bk64,
+            stages: Sm120Stages::S3,
+        },
+        shape: Sm120Shape {
+            m: 10400,
+            k: 384,
+            n: 1536,
+            lda: 384,
+            ldb: 1536,
+            ldc: 1536,
+        },
+    },
+    Sm120ForcedRoute {
+        op: Sm120Op::Tn,
+        dtype: WeightDtype::F16,
+        physical: Sm120PhysicalRoute {
+            tile: Sm120Tile::M64N64,
+            bk: Sm120Bk::Bk64,
+            stages: Sm120Stages::S3,
+        },
+        shape: Sm120Shape {
+            m: 10400,
+            k: 768,
+            n: 384,
+            lda: 768,
+            ldb: 384,
+            ldc: 384,
+        },
+    },
+    Sm120ForcedRoute {
+        op: Sm120Op::Nt,
+        dtype: WeightDtype::Bf16,
+        physical: Sm120PhysicalRoute {
+            tile: Sm120Tile::M64N128,
+            bk: Sm120Bk::Bk32,
+            stages: Sm120Stages::S2,
+        },
+        shape: Sm120Shape {
+            m: 4621,
+            k: 768,
+            n: 384,
+            lda: 384,
+            ldb: 384,
+            ldc: 768,
+        },
+    },
+    Sm120ForcedRoute {
+        op: Sm120Op::Nt,
+        dtype: WeightDtype::Bf16,
+        physical: Sm120PhysicalRoute {
+            tile: Sm120Tile::M128N128,
+            bk: Sm120Bk::Bk32,
+            stages: Sm120Stages::S3,
+        },
+        shape: Sm120Shape {
+            m: 4621,
+            k: 1024,
+            n: 384,
+            lda: 384,
+            ldb: 384,
+            ldc: 1024,
+        },
+    },
+    Sm120ForcedRoute {
+        op: Sm120Op::Nt,
+        dtype: WeightDtype::Bf16,
+        physical: Sm120PhysicalRoute {
+            tile: Sm120Tile::M128N64,
+            bk: Sm120Bk::Bk32,
+            stages: Sm120Stages::S2,
+        },
+        shape: Sm120Shape {
+            m: 10400,
+            k: 384,
+            n: 384,
+            lda: 384,
+            ldb: 384,
+            ldc: 384,
+        },
+    },
+    Sm120ForcedRoute {
+        op: Sm120Op::Nt,
+        dtype: WeightDtype::Bf16,
+        physical: Sm120PhysicalRoute {
+            tile: Sm120Tile::M128N64,
+            bk: Sm120Bk::Bk32,
+            stages: Sm120Stages::S2,
+        },
+        shape: Sm120Shape {
+            m: 10400,
+            k: 384,
+            n: 1536,
+            lda: 1536,
+            ldb: 1536,
+            ldc: 384,
+        },
+    },
+    Sm120ForcedRoute {
+        op: Sm120Op::Nt,
+        dtype: WeightDtype::Bf16,
+        physical: Sm120PhysicalRoute {
+            tile: Sm120Tile::M128N128,
+            bk: Sm120Bk::Bk32,
+            stages: Sm120Stages::S3,
+        },
+        shape: Sm120Shape {
+            m: 10400,
+            k: 768,
+            n: 384,
+            lda: 384,
+            ldb: 384,
+            ldc: 768,
+        },
+    },
+    Sm120ForcedRoute {
+        op: Sm120Op::Nt,
+        dtype: WeightDtype::F16,
+        physical: Sm120PhysicalRoute {
+            tile: Sm120Tile::M64N128,
+            bk: Sm120Bk::Bk32,
+            stages: Sm120Stages::S2,
+        },
+        shape: Sm120Shape {
+            m: 4621,
+            k: 768,
+            n: 384,
+            lda: 384,
+            ldb: 384,
+            ldc: 768,
+        },
+    },
+    Sm120ForcedRoute {
+        op: Sm120Op::Nt,
+        dtype: WeightDtype::F16,
+        physical: Sm120PhysicalRoute {
+            tile: Sm120Tile::M128N128,
+            bk: Sm120Bk::Bk32,
+            stages: Sm120Stages::S3,
+        },
+        shape: Sm120Shape {
+            m: 4621,
+            k: 1024,
+            n: 384,
+            lda: 384,
+            ldb: 384,
+            ldc: 1024,
+        },
+    },
+    Sm120ForcedRoute {
+        op: Sm120Op::Nt,
+        dtype: WeightDtype::F16,
+        physical: Sm120PhysicalRoute {
+            tile: Sm120Tile::M128N64,
+            bk: Sm120Bk::Bk32,
+            stages: Sm120Stages::S2,
+        },
+        shape: Sm120Shape {
+            m: 10400,
+            k: 384,
+            n: 384,
+            lda: 384,
+            ldb: 384,
+            ldc: 384,
+        },
+    },
+    Sm120ForcedRoute {
+        op: Sm120Op::Nt,
+        dtype: WeightDtype::F16,
+        physical: Sm120PhysicalRoute {
+            tile: Sm120Tile::M128N64,
+            bk: Sm120Bk::Bk32,
+            stages: Sm120Stages::S2,
+        },
+        shape: Sm120Shape {
+            m: 10400,
+            k: 384,
+            n: 1536,
+            lda: 1536,
+            ldb: 1536,
+            ldc: 384,
+        },
+    },
+    Sm120ForcedRoute {
+        op: Sm120Op::Nt,
+        dtype: WeightDtype::F16,
+        physical: Sm120PhysicalRoute {
+            tile: Sm120Tile::M128N128,
+            bk: Sm120Bk::Bk32,
+            stages: Sm120Stages::S3,
+        },
+        shape: Sm120Shape {
+            m: 10400,
+            k: 768,
+            n: 384,
+            lda: 384,
+            ldb: 384,
+            ldc: 768,
+        },
+    },
 ];
 /// Automatic CC 12.1 routes. Empty until separate physical evidence exists.
 pub const SM120_AUTO_CELLS_CC121: &[Sm120ForcedRoute] = &[];
@@ -5911,7 +6421,7 @@ mod sm120_tests {
         }
     }
 
-    fn qualified_cc120_routes() -> [Sm120ForcedRoute; 30] {
+    fn qualified_cc120_routes() -> [Sm120ForcedRoute; 60] {
         let m64n64_bk64_s2 = Sm120PhysicalRoute {
             tile: Sm120Tile::M64N64,
             bk: Sm120Bk::Bk64,
@@ -5942,11 +6452,26 @@ mod sm120_tests {
             bk: Sm120Bk::Bk64,
             stages: Sm120Stages::S3,
         };
+        let m64n64_bk64_s3 = Sm120PhysicalRoute {
+            tile: Sm120Tile::M64N64,
+            bk: Sm120Bk::Bk64,
+            stages: Sm120Stages::S3,
+        };
+        let m64n128_bk32_s2 = Sm120PhysicalRoute {
+            tile: Sm120Tile::M64N128,
+            bk: Sm120Bk::Bk32,
+            stages: Sm120Stages::S2,
+        };
         let projection = (2048, 1536, 768);
         let large = (2048, 3072, 768);
         let deep = (4096, 3072, 1536);
         let input_projection = (2048, 768, 3072);
         let prism = (4621, 384, 1928);
+        let out_projection = (4621, 768, 384);
+        let input_projection_wide = (4621, 1024, 384);
+        let batch_input_projection = (10400, 384, 384);
+        let batch_in_projection = (10400, 384, 1536);
+        let batch_out_projection = (10400, 768, 384);
         [
             route(Sm120Op::Nn, WeightDtype::Bf16, projection, m64n64_bk64_s2),
             route(Sm120Op::Nn, WeightDtype::Bf16, large, m64n64_bk64_s2),
@@ -6008,6 +6533,186 @@ mod sm120_tests {
                 m64n64_bk64_s2,
             ),
             route(Sm120Op::Nt, WeightDtype::F16, prism, m128n128_bk64_s3),
+            route(
+                Sm120Op::Nn,
+                WeightDtype::Bf16,
+                out_projection,
+                m64n64_bk64_s2,
+            ),
+            route(
+                Sm120Op::Nn,
+                WeightDtype::Bf16,
+                input_projection_wide,
+                m64n64_bk64_s2,
+            ),
+            route(
+                Sm120Op::Nn,
+                WeightDtype::Bf16,
+                batch_input_projection,
+                m128n64_bk32_s2,
+            ),
+            route(
+                Sm120Op::Nn,
+                WeightDtype::Bf16,
+                batch_in_projection,
+                m128n128_bk32_s3,
+            ),
+            route(
+                Sm120Op::Nn,
+                WeightDtype::Bf16,
+                batch_out_projection,
+                m128n64_bk32_s2,
+            ),
+            route(
+                Sm120Op::Nn,
+                WeightDtype::F16,
+                out_projection,
+                m64n64_bk64_s2,
+            ),
+            route(
+                Sm120Op::Nn,
+                WeightDtype::F16,
+                input_projection_wide,
+                m64n64_bk64_s2,
+            ),
+            route(
+                Sm120Op::Nn,
+                WeightDtype::F16,
+                batch_input_projection,
+                m128n64_bk32_s2,
+            ),
+            route(
+                Sm120Op::Nn,
+                WeightDtype::F16,
+                batch_in_projection,
+                m128n128_bk32_s3,
+            ),
+            route(
+                Sm120Op::Nn,
+                WeightDtype::F16,
+                batch_out_projection,
+                m128n64_bk32_s2,
+            ),
+            route(
+                Sm120Op::Tn,
+                WeightDtype::Bf16,
+                out_projection,
+                m64n64_bk64_s3,
+            ),
+            route(
+                Sm120Op::Tn,
+                WeightDtype::Bf16,
+                input_projection_wide,
+                m64n64_bk64_s3,
+            ),
+            route(
+                Sm120Op::Tn,
+                WeightDtype::Bf16,
+                batch_input_projection,
+                m64n64_bk64_s3,
+            ),
+            route(
+                Sm120Op::Tn,
+                WeightDtype::Bf16,
+                batch_in_projection,
+                m64n64_bk64_s3,
+            ),
+            route(
+                Sm120Op::Tn,
+                WeightDtype::Bf16,
+                batch_out_projection,
+                m64n64_bk64_s3,
+            ),
+            route(
+                Sm120Op::Tn,
+                WeightDtype::F16,
+                out_projection,
+                m64n64_bk64_s3,
+            ),
+            route(
+                Sm120Op::Tn,
+                WeightDtype::F16,
+                input_projection_wide,
+                m64n64_bk64_s3,
+            ),
+            route(
+                Sm120Op::Tn,
+                WeightDtype::F16,
+                batch_input_projection,
+                m64n64_bk64_s3,
+            ),
+            route(
+                Sm120Op::Tn,
+                WeightDtype::F16,
+                batch_in_projection,
+                m64n64_bk64_s3,
+            ),
+            route(
+                Sm120Op::Tn,
+                WeightDtype::F16,
+                batch_out_projection,
+                m64n64_bk64_s3,
+            ),
+            route(
+                Sm120Op::Nt,
+                WeightDtype::Bf16,
+                out_projection,
+                m64n128_bk32_s2,
+            ),
+            route(
+                Sm120Op::Nt,
+                WeightDtype::Bf16,
+                input_projection_wide,
+                m128n128_bk32_s3,
+            ),
+            route(
+                Sm120Op::Nt,
+                WeightDtype::Bf16,
+                batch_input_projection,
+                m128n64_bk32_s2,
+            ),
+            route(
+                Sm120Op::Nt,
+                WeightDtype::Bf16,
+                batch_in_projection,
+                m128n64_bk32_s2,
+            ),
+            route(
+                Sm120Op::Nt,
+                WeightDtype::Bf16,
+                batch_out_projection,
+                m128n128_bk32_s3,
+            ),
+            route(
+                Sm120Op::Nt,
+                WeightDtype::F16,
+                out_projection,
+                m64n128_bk32_s2,
+            ),
+            route(
+                Sm120Op::Nt,
+                WeightDtype::F16,
+                input_projection_wide,
+                m128n128_bk32_s3,
+            ),
+            route(
+                Sm120Op::Nt,
+                WeightDtype::F16,
+                batch_input_projection,
+                m128n64_bk32_s2,
+            ),
+            route(
+                Sm120Op::Nt,
+                WeightDtype::F16,
+                batch_in_projection,
+                m128n64_bk32_s2,
+            ),
+            route(
+                Sm120Op::Nt,
+                WeightDtype::F16,
+                batch_out_projection,
+                m128n128_bk32_s3,
+            ),
         ]
     }
 
