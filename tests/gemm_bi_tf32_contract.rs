@@ -6161,6 +6161,36 @@ fn validate_physical_sensitive_call_site_ownership(
                     ][..],
                 ),
                 (
+                    audited_function_scope(source, "enqueue_sm100_tcgen_prepared_observed", "")?,
+                    &[(PhysicalSensitiveCall::Submission, 1)][..],
+                ),
+                (
+                    audited_function_scope(source, "launch_sm100_auto_observed", "")?,
+                    &[(PhysicalSensitiveCall::GemmObservation, 1)][..],
+                ),
+                (
+                    audited_function_scope(source, "prepare_sm100_auto_graph_sequence", "")?,
+                    &[
+                        (PhysicalSensitiveCall::GemmObservation, 1),
+                        (PhysicalSensitiveCall::ObservationResolution, 1),
+                    ][..],
+                ),
+                (
+                    audited_function_scope(source, "enqueue_sm90a_wgmma_prepared_observed", "")?,
+                    &[(PhysicalSensitiveCall::Submission, 1)][..],
+                ),
+                (
+                    audited_function_scope(source, "launch_sm90a_auto_observed", "")?,
+                    &[(PhysicalSensitiveCall::GemmObservation, 1)][..],
+                ),
+                (
+                    audited_function_scope(source, "prepare_sm90a_auto_graph_sequence", "")?,
+                    &[
+                        (PhysicalSensitiveCall::GemmObservation, 1),
+                        (PhysicalSensitiveCall::ObservationResolution, 1),
+                    ][..],
+                ),
+                (
                     audited_function_scope(source, "prepare_native_half_graph_identity", "")?,
                     &[(PhysicalSensitiveCall::ObservationResolution, 1)][..],
                 ),
