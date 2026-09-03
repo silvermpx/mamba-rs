@@ -1159,6 +1159,387 @@ pub(in crate::mamba_ssm::gpu) fn prepare_sm100_auto_graph_sequence<O: PhysicalLa
     })
 }
 
+const SM90A_PREPARED_CACHE_LIMIT: usize = 1024;
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Sm90aPreparedKey {
+    context: GemmRouteIdentity,
+    route: Sm90aForcedRoute,
+    a: CUptr,
+    b: CUptr,
+    output: CUptr,
+    bias: CUptr,
+    alpha_bits: u32,
+    beta_bits: u32,
+}
+
+impl Eq for Sm90aPreparedKey {}
+
+impl std::hash::Hash for Sm90aPreparedKey {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.context.hash(state);
+        self.route.op.hash(state);
+        match self.route.dtype {
+            WeightDtype::F32 => 0_u8,
+            WeightDtype::F16 => 1,
+            WeightDtype::Bf16 => 2,
+        }
+        .hash(state);
+        self.route.schedule.hash(state);
+        self.route.shape.hash(state);
+        self.a.hash(state);
+        self.b.hash(state);
+        self.output.hash(state);
+        self.bias.hash(state);
+        self.alpha_bits.hash(state);
+        self.beta_bits.hash(state);
+    }
+}
+
+impl Sm90aPreparedKey {
+    fn new(context: GemmRouteIdentity, route: Sm90aForcedRoute, request: Sm90aAutoRequest) -> Self {
+        Self {
+            context,
+            route,
+            a: request.a_ptr,
+            b: request.b_ptr,
+            output: request.operands.output_ptr,
+            bias: request.operands.bias_ptr,
+            alpha_bits: request.operands.alpha.to_bits(),
+            beta_bits: request.operands.beta.to_bits(),
+        }
+    }
+}
+
+/// A prepared SM90a launch: the encoded tensor maps, the identity the
+/// eager launch recorded, and the route and operands that produced them.
+struct Sm90aPreparedCacheEntry {
+    maps: Box<Sm90aPreparedTensorMaps>,
+    identity: Sm90aRouteIdentity,
+    route: Sm90aForcedRoute,
+    operands: Sm90aLaunchOperands,
+    managed_epoch: Option<ManagedAllocationEpochStamp>,
+}
+
+/// Prepared SM90a launches, keyed the way the SM120 cache is: an eager
+/// launch prepares and caches, a capture replays a prepared entry or fails
+/// closed.
+#[derive(Default)]
+pub(crate) struct Sm90aPreparedLaunchCache {
+    entries: HashMap<Sm90aPreparedKey, Sm90aPreparedCacheEntry>,
+}
+
+fn sm90a_capture_cache_error(action: Sm120CacheAction) -> &'static str {
+    match action {
+        Sm120CacheAction::CaptureMissing => {
+            "prepared SM90a Triad cache entry is missing during graph capture; run eager warmup again"
+        }
+        Sm120CacheAction::CaptureStale => {
+            "prepared SM90a Triad allocation epoch changed during graph capture; run eager warmup again"
+        }
+        Sm120CacheAction::CaptureUntracked => {
+            "prepared SM90a Triad automatic capture requires managed allocations; run eager warmup again"
+        }
+        Sm120CacheAction::UsePrepared | Sm120CacheAction::Validate | Sm120CacheAction::Prepare => {
+            "SM90a cache action is not a capture error"
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::mamba_ssm::gpu) struct Sm90aAutoBranchSeal {
+    pub(in crate::mamba_ssm::gpu) route: Sm90aForcedRoute,
+}
+
+impl Sm90aPreparedLaunchCache {
+    fn managed_epoch_state(entry: Option<&Sm90aPreparedCacheEntry>) -> Sm120ManagedEpochState {
+        match entry {
+            None => Sm120ManagedEpochState::Missing,
+            Some(entry) => match entry.managed_epoch.as_ref() {
+                Some(epoch) if epoch.is_current() => Sm120ManagedEpochState::Current,
+                Some(_) => Sm120ManagedEpochState::Stale,
+                None => Sm120ManagedEpochState::Untracked,
+            },
+        }
+    }
+
+    fn ensure_sm90a_prepared(
+        &mut self,
+        ctx: &GpuCtx,
+        key: Sm90aPreparedKey,
+        route: Sm90aForcedRoute,
+        request: Sm90aAutoRequest,
+    ) -> Result<&Sm90aPreparedCacheEntry, String> {
+        let capturing = ctx
+            .stream
+            .capture_status()
+            .map_err(|error| format!("query SM90a WGMMA capture status: {error:?}"))?
+            != cudarc::driver::sys::CUstreamCaptureStatus::CU_STREAM_CAPTURE_STATUS_NONE;
+        let epoch = Self::managed_epoch_state(self.entries.get(&key));
+        let action = sm120_cache_action(capturing, self.entries.contains_key(&key), epoch);
+        match action {
+            Sm120CacheAction::UsePrepared => {
+                return Ok(self.entries.get(&key).expect("cache hit above"));
+            }
+            Sm120CacheAction::CaptureMissing
+            | Sm120CacheAction::CaptureStale
+            | Sm120CacheAction::CaptureUntracked => {
+                return Err(sm90a_capture_cache_error(action).into());
+            }
+            Sm120CacheAction::Validate => {
+                let entry = self.entries.get(&key).expect("cache hit above");
+                let validation = validate_sm90a_graph_replay(
+                    &ctx.stream,
+                    &ctx.kernels,
+                    entry.route,
+                    &entry.maps,
+                    entry.operands,
+                    entry.identity,
+                );
+                if validation.is_ok() {
+                    return Ok(self.entries.get(&key).expect("validated cache hit"));
+                }
+                self.entries.remove(&key);
+            }
+            Sm120CacheAction::Prepare => {}
+        }
+
+        let maps = prepare_sm90a_tensor_maps(
+            &ctx.stream,
+            &ctx.kernels,
+            Sm90aMapRequest {
+                op: route.op,
+                dtype: route.dtype,
+                a_ptr: request.a_ptr,
+                b_ptr: request.b_ptr,
+                shape: route.shape,
+            },
+        )?;
+        let identity =
+            sm90a_forced_identity(&ctx.stream, &ctx.kernels, route, &maps, request.operands)?;
+        let managed_epoch = maps.managed_epoch(route, request.operands)?;
+        let entry = Sm90aPreparedCacheEntry {
+            maps: Box::new(maps),
+            identity,
+            route,
+            operands: request.operands,
+            managed_epoch,
+        };
+        make_room_in_bounded_cache(
+            &mut self.entries,
+            &key,
+            SM90A_PREPARED_CACHE_LIMIT,
+            |cached| {
+                cached
+                    .managed_epoch
+                    .as_ref()
+                    .is_none_or(ManagedAllocationEpochStamp::is_current)
+            },
+        );
+        if !self.entries.contains_key(&key) {
+            self.entries
+                .try_reserve(1)
+                .map_err(|error| format!("reserve prepared SM90a WGMMA cache: {error}"))?;
+        }
+        self.entries.insert(key, entry);
+        Ok(self
+            .entries
+            .get(&key)
+            .expect("prepared SM90a WGMMA cache entry was inserted above"))
+    }
+}
+
+fn sm90a_policy_dtype(dtype: WeightDtype) -> Result<PolicyDtype, String> {
+    match dtype {
+        WeightDtype::Bf16 => Ok(PolicyDtype::Bf16),
+        WeightDtype::F16 => Ok(PolicyDtype::F16),
+        WeightDtype::F32 => Err("SM90a automatic route requires BF16 or F16".into()),
+    }
+}
+
+/// The SM90a launch configuration of a route: one CTA per 64 by 128 output
+/// tile, the schedule's threads, the module's dynamic shared memory.
+fn sm90a_launch_config(route: Sm90aForcedRoute) -> Result<cudarc::driver::LaunchConfig, String> {
+    let (rows, columns) = match route.op {
+        Sm90aOp::Nn => (route.shape.m, route.shape.n),
+        Sm90aOp::Tn => (route.shape.k, route.shape.n),
+        Sm90aOp::Nt => (route.shape.m, route.shape.k),
+    };
+    let rows = checked_u32(rows, "SM90a output rows")?;
+    let columns = checked_u32(columns, "SM90a output columns")?;
+    let grid = checked_grid_product(
+        rows.div_ceil(SM90A_TILE.0),
+        columns.div_ceil(SM90A_TILE.1),
+        1,
+    )?;
+    Ok(cudarc::driver::LaunchConfig {
+        grid_dim: (grid, 1, 1),
+        block_dim: (route.schedule.threads(), 1, 1),
+        shared_mem_bytes: SM90A_DYNAMIC_SHARED_BYTES,
+    })
+}
+
+unsafe fn enqueue_sm90a_wgmma_prepared_observed<O: PhysicalLaunchObserver>(
+    stream: &Arc<cudarc::driver::CudaStream>,
+    kernels: &GpuKernels,
+    entry: &Sm90aPreparedCacheEntry,
+    observer: &mut O,
+    observation: Option<PhysicalLaunchObservation>,
+) -> Result<(), String> {
+    let live = sm90a_forced_identity(stream, kernels, entry.route, &entry.maps, entry.operands)?;
+    entry
+        .identity
+        .ensure_current(live, "SM90a automatic launch")?;
+    let symbol = entry.route.symbol();
+    let function = kernels
+        .sm90a_function(symbol)
+        .ok_or_else(|| format!("SM90a kernel {symbol} is unavailable"))?;
+    let config = sm90a_launch_config(entry.route)?;
+    let m = checked_i32(entry.route.shape.m, "M")?;
+    let k = checked_i32(entry.route.shape.k, "K")?;
+    let n = checked_i32(entry.route.shape.n, "N")?;
+    let ldc = checked_i32(entry.route.shape.ldc, "ldc")?;
+    let mut builder = stream.launch_builder(function);
+    builder.arg(&entry.operands.output_ptr);
+    builder.arg(&entry.maps.a);
+    builder.arg(&entry.maps.b);
+    builder.arg(&entry.operands.bias_ptr);
+    builder.arg(&entry.operands.alpha);
+    builder.arg(&entry.operands.beta);
+    builder.arg(&m);
+    builder.arg(&k);
+    builder.arg(&n);
+    builder.arg(&ldc);
+    unsafe { enqueue_with_physical_observation(observer, &mut builder, config, observation) }
+        .map_err(|error| error.with_driver_context(format_args!("launch {symbol}")))
+}
+
+/// The automatic SM90a launch: a Hopper board's measured cell or wave-rule
+/// schedule prepares once, launches under the observer and is replayed by
+/// graphs; every other board declines to the portable caller.
+pub(in crate::mamba_ssm::gpu) fn launch_sm90a_auto_observed<O: PhysicalLaunchObserver>(
+    ctx: &GpuCtx,
+    observer: &mut O,
+    request: Sm90aAutoRequest,
+) -> Result<Option<Sm90aAutoBranchSeal>, String> {
+    if !ctx.kernels.has_sm90a_wgmma() {
+        return Ok(None);
+    }
+    let device_cc = ctx
+        .stream
+        .context()
+        .compute_capability()
+        .map_err(|error| format!("query compute capability for the SM90a branch: {error:?}"))?;
+    let Some(route) = resolve_sm90a_auto(device_cc, true, request) else {
+        static NO_ROUTE: std::sync::Once = std::sync::Once::new();
+        crate::mamba_ssm::gpu::diagnostics::warn_once(&NO_ROUTE, || {
+            format!(
+                "no SM90a route for {:?} {:?} {:?}; the portable tensor-core tiles serve it \
+                 (reported once; later unserved shapes are silent)",
+                request.op, request.dtype, request.shape
+            )
+        });
+        return Ok(None);
+    };
+    let key = Sm90aPreparedKey::new(ctx.gemm_route(), route, request);
+    let caps = query_specialized_device_caps(
+        &ctx.stream,
+        "sm_90a",
+        crate::mamba_ssm::gpu::kernels::nvrtc_version(),
+    )?;
+    ctx.with_sm90a_prepared_launches(|cache| {
+        let entry = cache.ensure_sm90a_prepared(ctx, key, route, request)?;
+        let resolved = entry.identity.resolved_route(caps)?;
+        unsafe {
+            enqueue_sm90a_wgmma_prepared_observed(
+                &ctx.stream,
+                &ctx.kernels,
+                entry,
+                observer,
+                Some(PhysicalLaunchObservation::gemm(
+                    sm90a_policy_dtype(route.dtype)?,
+                    None,
+                    resolved,
+                )),
+            )
+        }?;
+        ctx.record_resolved_gemm_route(resolved)?;
+        Ok(Some(Sm90aAutoBranchSeal { route }))
+    })
+}
+
+/// The prepared SM90a launch a graph capture replays: the entry the eager
+/// warmup cached, validated against the live binding.
+pub(in crate::mamba_ssm::gpu) fn prepare_sm90a_auto_graph_sequence<O: PhysicalLaunchObserver>(
+    ctx: &GpuCtx,
+    observer: &O,
+    request: Sm90aAutoRequest,
+) -> Result<PreparedTriadPhysicalGraphSequence, String> {
+    if !ctx.kernels.has_sm90a_wgmma() {
+        return Err("prepared SM90a graph route has no module".into());
+    }
+    let device_cc = ctx
+        .stream
+        .context()
+        .compute_capability()
+        .map_err(|error| format!("query compute capability for the SM90a graph: {error:?}"))?;
+    let route = resolve_sm90a_auto(device_cc, true, request)
+        .ok_or_else(|| "prepared SM90a graph request is no longer qualified".to_string())?;
+    let key = Sm90aPreparedKey::new(ctx.gemm_route(), route, request);
+    let caps = query_specialized_device_caps(
+        &ctx.stream,
+        "sm_90a",
+        crate::mamba_ssm::gpu::kernels::nvrtc_version(),
+    )?;
+    ctx.with_sm90a_prepared_launches(|cache| {
+        let entry = cache.entries.get(&key).ok_or_else(|| {
+            "prepared SM90a graph cache entry is missing; run eager warmup again".to_string()
+        })?;
+        validate_sm90a_graph_replay(
+            &ctx.stream,
+            &ctx.kernels,
+            entry.route,
+            &entry.maps,
+            entry.operands,
+            entry.identity,
+        )?;
+        let resolved = entry.identity.resolved_route(caps)?;
+        let config = LaunchConfig {
+            grid_dim: resolved.launch.grid_dim,
+            block_dim: resolved.launch.block_dim,
+            shared_mem_bytes: resolved.launch.shared_mem_bytes,
+        };
+        let observation =
+            PhysicalLaunchObservation::gemm(sm90a_policy_dtype(route.dtype)?, None, resolved);
+        let node = resolve_physical_launch_observation(observer, observation, config)?;
+        let function = ctx
+            .kernels
+            .sm90a_function(resolved.symbol)
+            .ok_or_else(|| format!("qualified SM90a symbol {} is unavailable", resolved.symbol))?
+            .clone();
+        let mut arguments = PhysicalScalarKernelArguments::new();
+        arguments.push(entry.operands.output_ptr)?;
+        arguments.push(entry.maps.a)?;
+        arguments.push(entry.maps.b)?;
+        arguments.push(entry.operands.bias_ptr)?;
+        arguments.push(entry.operands.alpha)?;
+        arguments.push(entry.operands.beta)?;
+        arguments.push(checked_i32(entry.route.shape.m, "M")?)?;
+        arguments.push(checked_i32(entry.route.shape.k, "K")?)?;
+        arguments.push(checked_i32(entry.route.shape.n, "N")?)?;
+        arguments.push(checked_i32(entry.route.shape.ldc, "ldc")?)?;
+        Ok(PreparedTriadPhysicalGraphSequence {
+            launches: vec![PreparedTriadPhysicalGraphLaunch {
+                function,
+                config,
+                node,
+                arguments: Box::new(arguments),
+            }]
+            .into_boxed_slice(),
+        })
+    })
+}
+
 pub(in crate::mamba_ssm::gpu) struct ScalarLaunchControl<'a> {
     ctx: &'a GpuCtx,
     routes: &'a [ResolvedGemmRoute],
@@ -5920,19 +6301,7 @@ pub fn launch_sm90a_wgmma_forced(
     let function = kernels
         .sm90a_function(route.symbol())
         .ok_or_else(|| format!("SM90a kernel {} is unavailable", route.symbol()))?;
-    let (rows, columns) = match route.op {
-        Sm90aOp::Nn => (route.shape.m, route.shape.n),
-        Sm90aOp::Tn => (route.shape.k, route.shape.n),
-        Sm90aOp::Nt => (route.shape.m, route.shape.k),
-    };
-    let rows = checked_u32(rows, "SM90a output rows")?;
-    let columns = checked_u32(columns, "SM90a output columns")?;
-    let grid = checked_grid_product(rows.div_ceil(64), columns.div_ceil(128), 1)?;
-    let config = cudarc::driver::LaunchConfig {
-        grid_dim: (grid, 1, 1),
-        block_dim: (route.schedule.threads(), 1, 1),
-        shared_mem_bytes: SM90A_DYNAMIC_SHARED_BYTES,
-    };
+    let config = sm90a_launch_config(route)?;
     let m = checked_i32(route.shape.m, "M")?;
     let k = checked_i32(route.shape.k, "K")?;
     let n = checked_i32(route.shape.n, "N")?;

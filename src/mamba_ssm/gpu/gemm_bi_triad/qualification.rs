@@ -16,9 +16,10 @@ use sha2::{Digest as _, Sha256};
 use super::contract::tf32_splitk_spec;
 use super::{
     F32TriadOperands, F32TriadRequest, F32TriadShape, HalfNativeBranchSeal, PreparedF32TriadLaunch,
-    SM80_TF32_ROUTE_SPECS, SM90A_TF32_ROUTE_SPECS, SM100_TF32_ROUTE_SPECS, SM120_TF32_ROUTE_SPECS,
-    Sm100AutoBranchSeal, Sm120AutoBranchSeal, TcFwdOperands, TcTile, Tf32KernelSpec,
-    Tf32PhysicalRoute, enqueue_validated_prepared_f32_triad, gemm_bi_backward_dw_tc_with_tile,
+    SM80_TF32_ROUTE_SPECS, SM90A_STAGES, SM90A_TF32_ROUTE_SPECS, SM90A_TILE,
+    SM100_TF32_ROUTE_SPECS, SM120_TF32_ROUTE_SPECS, Sm90aAutoBranchSeal, Sm100AutoBranchSeal,
+    Sm120AutoBranchSeal, TcFwdOperands, TcTile, Tf32KernelSpec, Tf32PhysicalRoute,
+    enqueue_validated_prepared_f32_triad, gemm_bi_backward_dw_tc_with_tile,
     gemm_bi_backward_dx_tc_with_tile, gemm_bi_forward_tc_with_tile,
     gemm_bi_forward_tc_with_tile_shape, launch_prepared_f32_triad, prepare_f32_triad_forced,
     tf32_kernel_spec, validate_prepared_f32_triad_for_timing, with_cached_f32_triad_prepared,
@@ -826,7 +827,8 @@ impl ProductionBranchSeal {
             Self::Half(branch) => match branch.seal {
                 HalfPolicyBranchSeal::Native(_)
                 | HalfPolicyBranchSeal::Sm120(_)
-                | HalfPolicyBranchSeal::Sm100(_) => false,
+                | HalfPolicyBranchSeal::Sm100(_)
+                | HalfPolicyBranchSeal::Sm90a(_) => false,
                 HalfPolicyBranchSeal::ExactF32Fallback => branch.production_routes.is_empty(),
             },
         }
@@ -1955,10 +1957,110 @@ fn validate_sm100_half_branch(
     Ok(())
 }
 
+fn validate_sm90a_half_branch(
+    seal: Sm90aAutoBranchSeal,
+    production_routes: &[ResolvedGemmRoute],
+    eager_nodes: &[ResolvedPhysicalKernelLaunch],
+    graph_nodes: &[ResolvedPhysicalKernelLaunch],
+) -> Result<(), String> {
+    let [expected] = production_routes else {
+        return Err("SM90a half production branch must record exactly one production route".into());
+    };
+    let [eager] = eager_nodes else {
+        return Err("SM90a half production branch must match exactly one eager node".into());
+    };
+    let [graph] = graph_nodes else {
+        return Err("SM90a half production branch must match exactly one graph node".into());
+    };
+    let expected_dtype = half_policy_dtype(seal.route.dtype)?;
+    let expected_op = match seal.route.op {
+        super::Sm90aOp::Nn => ResolvedGemmOp::Nn,
+        super::Sm90aOp::Tn => ResolvedGemmOp::Tn,
+        super::Sm90aOp::Nt => ResolvedGemmOp::Nt,
+    };
+    if expected.op != expected_op
+        || expected.dtype != expected_dtype
+        || expected.backend != PhysicalGemmBackend::Sm90aWgmmaV1
+        || expected.numeric_contract != ResolvedNumericContract::WgmmaF32V1
+        || expected.instruction_family != ResolvedInstructionFamily::Wgmma
+        || expected.symbol != seal.route.symbol()
+        || expected.module_kind != ModuleKind::TriadSm90a
+        || expected.shape != (seal.route.shape.m, seal.route.shape.k, seal.route.shape.n)
+        || expected.strides
+            != (
+                seal.route.shape.lda,
+                seal.route.shape.ldb,
+                seal.route.shape.ldc,
+            )
+        || expected.tile != (SM90A_TILE.0, SM90A_TILE.1)
+        || expected.bk != SM90A_TILE.2
+        || expected.stages != SM90A_STAGES
+        || expected.threads != seal.route.schedule.threads()
+    {
+        return Err(format!(
+            "SM90a production route differs from its selected route: selected={:?}, production={expected:?}",
+            seal.route
+        ));
+    }
+    for (label, node) in [("eager", eager), ("graph", graph)] {
+        let actual = node
+            .gemm_route()
+            .ok_or_else(|| format!("SM90a {label} node has no GEMM route"))?;
+        if node.kind() != PhysicalLaunchKind::Gemm
+            || node.module_kind() != ModuleKind::TriadSm90a
+            || node.logical_dtype() != expected_dtype
+            || node.execution_dtype() != expected_dtype
+            || actual.backend != PhysicalGemmBackend::Sm90aWgmmaV1
+            || actual.numeric_contract != ResolvedNumericContract::WgmmaF32V1
+            || actual.instruction_family != ResolvedInstructionFamily::Wgmma
+            || actual != *expected
+        {
+            return Err(format!(
+                "SM90a {label} route differs from its exact production seal: expected={expected:?}, actual={actual:?}"
+            ));
+        }
+    }
+    if eager.gemm_route() != graph.gemm_route() || eager.launch() != graph.launch() {
+        return Err("SM90a eager and graph nodes differ in their full prepared route".into());
+    }
+    Ok(())
+}
+
 fn normalized_half_production_routes(
     seal: HalfPolicyBranchSeal,
     routes: &[ResolvedGemmRoute],
 ) -> Result<Box<[ResolvedGemmRoute]>, String> {
+    if let HalfPolicyBranchSeal::Sm90a(seal) = seal {
+        let [route] = routes else {
+            return Err(format!(
+                "SM90a production route recorder must contain exactly one route: actual={routes:?}"
+            ));
+        };
+        if route.op
+            != match seal.route.op {
+                super::Sm90aOp::Nn => ResolvedGemmOp::Nn,
+                super::Sm90aOp::Tn => ResolvedGemmOp::Tn,
+                super::Sm90aOp::Nt => ResolvedGemmOp::Nt,
+            }
+            || route.dtype != half_policy_dtype(seal.route.dtype)?
+            || route.shape != (seal.route.shape.m, seal.route.shape.k, seal.route.shape.n)
+            || route.strides
+                != (
+                    seal.route.shape.lda,
+                    seal.route.shape.ldb,
+                    seal.route.shape.ldc,
+                )
+            || route.tile != (SM90A_TILE.0, SM90A_TILE.1)
+            || route.bk != SM90A_TILE.2
+            || route.stages != SM90A_STAGES
+        {
+            return Err(format!(
+                "SM90a production route recorder differs from its selected route: selected={:?}, actual={route:?}",
+                seal.route
+            ));
+        }
+        return Ok(routes.to_vec().into_boxed_slice());
+    }
     if let HalfPolicyBranchSeal::Sm100(seal) = seal {
         let [route] = routes else {
             return Err(format!(
@@ -2166,6 +2268,12 @@ fn summarize_physical_evidence(
                 graph.nodes(),
             )?,
             HalfPolicyBranchSeal::Sm100(seal) => validate_sm100_half_branch(
+                seal,
+                &branch.production_routes,
+                trace.nodes(),
+                graph.nodes(),
+            )?,
+            HalfPolicyBranchSeal::Sm90a(seal) => validate_sm90a_half_branch(
                 seal,
                 &branch.production_routes,
                 trace.nodes(),

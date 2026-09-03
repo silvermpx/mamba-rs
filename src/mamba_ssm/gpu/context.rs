@@ -6,7 +6,8 @@
 use super::device::GpuDevice;
 use super::dtype::WeightDtype;
 use super::gemm_bi_triad::{
-    F32PreparedLaunchCache, Sm100PreparedLaunchCache, Sm120PreparedLaunchCache,
+    F32PreparedLaunchCache, Sm90aPreparedLaunchCache, Sm100PreparedLaunchCache,
+    Sm120PreparedLaunchCache,
 };
 use super::kernel_identity::{
     ArtifactIdentity, BackendSet, CapturedGemmGraphPlan, CompilerIdentity, ModuleKind,
@@ -284,6 +285,7 @@ pub struct GpuCtx {
     f32_prepared_launches: RefCell<F32PreparedLaunchCache>,
     sm120_prepared_launches: RefCell<Sm120PreparedLaunchCache>,
     sm100_prepared_launches: RefCell<Sm100PreparedLaunchCache>,
+    sm90a_prepared_launches: RefCell<Sm90aPreparedLaunchCache>,
     pub(crate) fixed_tf32_maps: RefCell<super::gemm_bi_fixed::FixedTf32MapCache>,
     pub(crate) fixed_half_maps: RefCell<super::gemm_bi_fixed::FixedHalfMapCache>,
     /// Opt-in flag for deterministic batch-invariant GEMM dispatch.
@@ -505,6 +507,7 @@ impl GpuCtx {
             f32_prepared_launches: RefCell::new(F32PreparedLaunchCache::default()),
             sm120_prepared_launches: RefCell::new(Sm120PreparedLaunchCache::default()),
             sm100_prepared_launches: RefCell::new(Sm100PreparedLaunchCache::default()),
+            sm90a_prepared_launches: RefCell::new(Sm90aPreparedLaunchCache::default()),
             fixed_tf32_maps: RefCell::new(super::gemm_bi_fixed::FixedTf32MapCache::default()),
             fixed_half_maps: RefCell::new(super::gemm_bi_fixed::FixedHalfMapCache::default()),
             batch_invariant: std::cell::Cell::new(false),
@@ -935,6 +938,17 @@ impl GpuCtx {
             .sm120_prepared_launches
             .try_borrow_mut()
             .map_err(|_| "prepared SM120 TMA cache is already borrowed".to_string())?;
+        access(&mut launches)
+    }
+
+    pub(crate) fn with_sm90a_prepared_launches<T>(
+        &self,
+        access: impl FnOnce(&mut Sm90aPreparedLaunchCache) -> Result<T, String>,
+    ) -> Result<T, String> {
+        let mut launches = self
+            .sm90a_prepared_launches
+            .try_borrow_mut()
+            .map_err(|_| "prepared SM90a WGMMA cache is already borrowed".to_string())?;
         access(&mut launches)
     }
 

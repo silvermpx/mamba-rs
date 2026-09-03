@@ -2975,7 +2975,7 @@ impl Sm90aShape {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Sm90aForcedRoute {
     pub op: Sm90aOp,
     pub dtype: WeightDtype,
@@ -4158,6 +4158,32 @@ pub(super) struct Sm90aMapBinding {
 }
 
 impl Sm90aPreparedTensorMaps {
+    /// The managed-allocation epoch of the operands this preparation took
+    /// in together with the output and bias the route touches, when all of
+    /// them are managed; a later epoch means the preparation no longer
+    /// describes live memory.
+    pub(super) fn managed_epoch(
+        &self,
+        route: Sm90aForcedRoute,
+        operands: Sm90aLaunchOperands,
+    ) -> Result<Option<ManagedAllocationEpochStamp>, String> {
+        let (output, bias) =
+            sm90a_launch_allocations(route, operands, self.binding.allocation_domain)?;
+        let mut ranges = Vec::with_capacity(4);
+        for allocation in self
+            .allocations
+            .iter()
+            .chain(std::iter::once(&output))
+            .chain(bias.iter())
+        {
+            ranges.push((allocation.allocation_base, allocation.allocation_bytes));
+        }
+        Ok(managed_allocation_epoch_for_ranges(
+            self.binding.allocation_domain.context_handle,
+            &ranges,
+        ))
+    }
+
     pub fn identity_digest(&self) -> Sha256Digest {
         let dtype = match self.request.dtype {
             WeightDtype::F32 => 0,
@@ -4321,17 +4347,14 @@ pub(super) fn sm90a_allocation_identities(
     ])
 }
 
-pub(super) fn sm90a_resources_digest(
+/// The output and bias allocations an SM90a launch touches beside its
+/// tensor maps, identified over the span the route actually writes.
+pub(super) fn sm90a_launch_allocations(
     route: Sm90aForcedRoute,
     operands: Sm90aLaunchOperands,
     allocation_domain: AllocationDomain,
-    tensor_maps_digest: Sha256Digest,
-) -> Result<Sha256Digest, String> {
-    let (rows, columns, element_bytes) = match route.op {
-        Sm90aOp::Nn => (route.shape.m, route.shape.n, 2_u64),
-        Sm90aOp::Tn => (route.shape.k, route.shape.n, 4_u64),
-        Sm90aOp::Nt => (route.shape.m, route.shape.k, 2_u64),
-    };
+) -> Result<(Sm90aAllocationIdentity, Option<Sm90aAllocationIdentity>), String> {
+    let (rows, columns, element_bytes) = sm90a_output_geometry(route);
     let row_bytes = u64::try_from(columns)
         .ok()
         .and_then(|columns| columns.checked_mul(element_bytes))
@@ -4353,6 +4376,40 @@ pub(super) fn sm90a_resources_digest(
         "SM90a",
         "output",
     )?;
+    let bias = if operands.bias_ptr != 0 {
+        let bias_bytes = u64::try_from(columns)
+            .ok()
+            .and_then(|columns| columns.checked_mul(4))
+            .ok_or_else(|| "SM90a bias allocation span overflows u64".to_string())?;
+        Some(Sm90aAllocationIdentity::query(
+            operands.bias_ptr,
+            bias_bytes,
+            allocation_domain,
+            "SM90a",
+            "bias",
+        )?)
+    } else {
+        None
+    };
+    Ok((output, bias))
+}
+
+fn sm90a_output_geometry(route: Sm90aForcedRoute) -> (usize, usize, u64) {
+    match route.op {
+        Sm90aOp::Nn => (route.shape.m, route.shape.n, 2_u64),
+        Sm90aOp::Tn => (route.shape.k, route.shape.n, 4_u64),
+        Sm90aOp::Nt => (route.shape.m, route.shape.k, 2_u64),
+    }
+}
+
+pub(super) fn sm90a_resources_digest(
+    route: Sm90aForcedRoute,
+    operands: Sm90aLaunchOperands,
+    allocation_domain: AllocationDomain,
+    tensor_maps_digest: Sha256Digest,
+) -> Result<Sha256Digest, String> {
+    let (rows, columns, element_bytes) = sm90a_output_geometry(route);
+    let (output, bias) = sm90a_launch_allocations(route, operands, allocation_domain)?;
     let mut digest = output
         .append_digest(FramedSha256::new(b"sm90a-launch-resources.v2"))
         .required(b"tensor-maps", &tensor_maps_digest)
@@ -4368,18 +4425,7 @@ pub(super) fn sm90a_resources_digest(
         .required(b"bias-present", &[u8::from(operands.bias_ptr != 0)])
         .required(b"alpha", &operands.alpha.to_bits().to_le_bytes())
         .required(b"beta", &operands.beta.to_bits().to_le_bytes());
-    if operands.bias_ptr != 0 {
-        let bias_bytes = u64::try_from(columns)
-            .ok()
-            .and_then(|columns| columns.checked_mul(4))
-            .ok_or_else(|| "SM90a bias allocation span overflows u64".to_string())?;
-        let bias = Sm90aAllocationIdentity::query(
-            operands.bias_ptr,
-            bias_bytes,
-            allocation_domain,
-            "SM90a",
-            "bias",
-        )?;
+    if let Some(bias) = bias {
         digest = bias.append_digest(digest);
     }
     Ok(digest.finish())
