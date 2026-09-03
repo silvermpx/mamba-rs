@@ -11126,23 +11126,35 @@ mod sm100_sm90a_auto_tests {
     }
 
     #[test]
-    fn every_sm100_table_is_empty_until_a_board_measures_it() {
-        for device_cc in [(10, 0), (10, 3), (11, 0), (12, 0), (9, 0)] {
+    fn sm100_tables_are_empty_and_the_wave_rule_serves_the_family() {
+        let request = sm100_request(Sm100Op::Nn, (2048, 768, 3072));
+        // The measured tables stay empty until a board qualifies its cells,
+        // and the wave rule serves the family's boards in the meantime: the
+        // output fills a device with wide tiles and the reduction feeds three
+        // stages but not the larger schedule.
+        let expected = Sm100PhysicalRoute {
+            tile: Sm100Tile::M128N128,
+            stages: Sm100Stages::S3,
+            schedule: Sm100Schedule::C4,
+        };
+        for device_cc in [(10, 0), (10, 3), (11, 0)] {
             assert!(sm100_auto_cells(device_cc).is_empty());
             let target = sm100_target_candidates(device_cc).first().copied();
-            assert_eq!(
-                resolve_sm100_auto(
-                    device_cc,
-                    target,
-                    sm100_request(Sm100Op::Nn, (2048, 768, 3072))
-                ),
-                None
-            );
+            let resolved = resolve_sm100_auto(device_cc, target, request)
+                .unwrap_or_else(|| panic!("wave rule must serve {device_cc:?}"));
+            assert_eq!(resolved.physical, expected);
+            assert_eq!(resolved.shape, request.shape);
+        }
+        // Off the family nothing resolves, wave rule or not.
+        for device_cc in [(12, 0), (9, 0)] {
+            assert!(sm100_auto_cells(device_cc).is_empty());
+            let target = sm100_target_candidates(device_cc).first().copied();
+            assert_eq!(resolve_sm100_auto(device_cc, target, request), None);
         }
     }
 
     #[test]
-    fn a_measured_sm100_cell_resolves_on_its_board_and_declines_elsewhere() {
+    fn a_measured_sm100_cell_wins_on_its_board_and_the_rule_takes_the_rest() {
         let dims = (2048, 768, 3072);
         let cells = [sm100_cell(Sm100Op::Nn, dims)];
         let target = sm100_target_candidates((10, 0))[0];
@@ -11161,12 +11173,14 @@ mod sm100_sm90a_auto_tests {
             resolve_sm100_auto_from_cells(&cells, (10, 3), Some(target), request),
             None
         );
+        // A shape one row off the cell is not a decline any more: it takes
+        // the wave rule instead of the measured route.
         let mut off = request;
         off.shape.m += 1;
-        assert_eq!(
-            resolve_sm100_auto_from_cells(&cells, (10, 0), Some(target), off),
-            None
-        );
+        let drifted = resolve_sm100_auto_from_cells(&cells, (10, 0), Some(target), off)
+            .expect("the wave rule serves the drifted shape");
+        assert_ne!(drifted, cells[0]);
+        assert_eq!(drifted.shape, off.shape);
         let mut biased = request;
         biased.operands.bias_ptr = 0x4_0000;
         biased.operands.alpha = 2.0;
@@ -11194,11 +11208,23 @@ mod sm100_sm90a_auto_tests {
     }
 
     #[test]
-    fn the_sm90a_table_is_empty_and_a_measured_cell_resolves_only_on_hopper() {
+    fn the_sm90a_wave_rule_serves_hopper_and_measured_cells_stay_scoped() {
         let dims = (2048, 768, 3072);
         let request = sm90a_request(Sm90aOp::Nn, dims);
         assert!(SM90A_AUTO_CELLS.is_empty());
-        assert_eq!(resolve_sm90a_auto((9, 0), true, request), None);
+        // With the table empty the wave rule serves Hopper: this reduction is
+        // too shallow to feed a dedicated producer warpgroup.
+        assert_eq!(
+            resolve_sm90a_auto((9, 0), true, request).map(|route| route.schedule),
+            Some(Sm90aWarpgroupSchedule::Wg1)
+        );
+        let mut deep = sm90a_request(Sm90aOp::Nn, (2048, 2048, 3072));
+        deep.operands.beta = 0.0;
+        assert_eq!(
+            resolve_sm90a_auto((9, 0), true, deep).map(|route| route.schedule),
+            Some(Sm90aWarpgroupSchedule::Wg2)
+        );
+        assert_eq!(resolve_sm90a_auto((12, 0), true, request), None);
         let cell = Sm90aForcedRoute {
             op: Sm90aOp::Nn,
             dtype: WeightDtype::Bf16,
