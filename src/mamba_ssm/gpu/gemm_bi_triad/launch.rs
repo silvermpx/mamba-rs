@@ -13465,3 +13465,41 @@ mod sm120_api_tests {
     const _: LaunchPrepared = launch_sm120_tma_prepared;
     const _: ValidateReplay = validate_sm120_graph_replay;
 }
+
+/// The board capabilities a specialized module was bound on, as the launch
+/// observer records them: the compute capability, the opt-in shared memory
+/// and tensor-map access of the device, and the target the driver accepted.
+pub fn query_specialized_device_caps(
+    stream: &Arc<cudarc::driver::CudaStream>,
+    nvrtc_arch: &'static str,
+    nvrtc_version: (i32, i32),
+) -> Result<crate::mamba_ssm::gpu::kernel_identity::DeviceCaps, String> {
+    let ctx = stream.context();
+    let (major, minor) = ctx
+        .compute_capability()
+        .map_err(|error| format!("query compute capability for {nvrtc_arch}: {error:?}"))?;
+    let optin_shared = ctx
+        .attribute(
+            cudarc::driver::sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK_OPTIN,
+        )
+        .map_err(|error| format!("query opt-in shared memory for {nvrtc_arch}: {error:?}"))?;
+    let tensor_map_access = ctx
+        .attribute(
+            cudarc::driver::sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_TENSOR_MAP_ACCESS_SUPPORTED,
+        )
+        .map_err(|error| format!("query tensor-map support for {nvrtc_arch}: {error:?}"))?
+        != 0;
+    Ok(crate::mamba_ssm::gpu::kernel_identity::DeviceCaps {
+        compute_capability: (
+            u32::try_from(major).map_err(|_| format!("negative CUDA CC major {major}"))?,
+            u32::try_from(minor).map_err(|_| format!("negative CUDA CC minor {minor}"))?,
+        ),
+        nvrtc_version,
+        accepted_target: Some(crate::mamba_ssm::gpu::kernel_identity::CudaTarget::new(
+            nvrtc_arch,
+        )?),
+        optin_shared_bytes: u32::try_from(optin_shared)
+            .map_err(|_| format!("negative opt-in shared memory {optin_shared}"))?,
+        tensor_map_access,
+    })
+}

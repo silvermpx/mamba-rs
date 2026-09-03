@@ -6388,6 +6388,218 @@ impl Sm120PreparedLaunch {
     }
 }
 
+/// Schedule revision of the SM100 half routes: no schedule has been tuned
+/// yet, so the observer sees the first one.
+pub const SM100_SCHEDULE_REVISION: u16 = 0;
+/// Schedule revision of the SM90a half routes: the warpgroup schedule is
+/// the route itself, and no other has been tuned.
+pub const SM90A_SCHEDULE_REVISION: u16 = 0;
+/// Tensor-map revision of the SM90a half routes: the first encoding.
+pub const SM90A_TENSOR_MAP_REVISION: u16 = 1;
+
+impl Sm100RouteIdentity {
+    /// The route this identity names, in the form the launch observer and
+    /// the graph replay record; `device_caps` is the board the module was
+    /// bound on. Mirrors the SM120 conversion field for field so that the
+    /// three specialized families are observed alike.
+    pub fn resolved_route(self, device_caps: DeviceCaps) -> Result<ResolvedGemmRoute, String> {
+        let route = Sm100ForcedRoute {
+            op: self.op,
+            dtype: self.dtype,
+            physical: self.physical,
+            shape: self.shape,
+        };
+        route.shape.validate(route.op)?;
+        let spec = route.kernel_spec()?;
+        if self.symbol != spec.symbol {
+            return Err("SM100 identity symbol does not match its physical route".into());
+        }
+        if self.module_kind != ModuleKind::TriadSm100
+            || self.artifact.module_kind != ModuleKind::TriadSm100
+        {
+            return Err("SM100 identity does not name the SM100 TRIAD module".into());
+        }
+        if self.compiler.target.as_str() != self.target.nvrtc_arch
+            || self.device.target.as_str() != self.target.ptx_target
+        {
+            return Err("SM100 identity target transaction is inconsistent".into());
+        }
+        let op = match self.op {
+            Sm100Op::Nn => ResolvedGemmOp::Nn,
+            Sm100Op::Tn => ResolvedGemmOp::Tn,
+            Sm100Op::Nt => ResolvedGemmOp::Nt,
+        };
+        let dtype = match self.dtype {
+            WeightDtype::F16 => PolicyDtype::F16,
+            WeightDtype::Bf16 => PolicyDtype::Bf16,
+            WeightDtype::F32 => return Err("SM100 TCGEN route requires f16 or bf16".into()),
+        };
+        let (output_rows, output_columns) = match self.op {
+            Sm100Op::Nn => (self.shape.m, self.shape.n),
+            Sm100Op::Tn => (self.shape.k, self.shape.n),
+            Sm100Op::Nt => (self.shape.m, self.shape.k),
+        };
+        let grid = checked_grid_product(
+            checked_u32(output_rows, "SM100 route output rows")?
+                .div_ceil(self.physical.tile.output_rows()),
+            checked_u32(output_columns, "SM100 route output columns")?
+                .div_ceil(self.physical.tile.output_columns()),
+            1,
+        )?;
+        let arguments_digest = FramedSha256::new(b"sm100-kernel-arguments.v1")
+            .required(b"symbol", self.symbol.as_bytes())
+            .required(b"op", &[op as u8])
+            .required(b"dtype", &[dtype as u8])
+            .required(b"m", &(self.shape.m as u64).to_le_bytes())
+            .required(b"k", &(self.shape.k as u64).to_le_bytes())
+            .required(b"n", &(self.shape.n as u64).to_le_bytes())
+            .required(b"lda", &(self.shape.lda as u64).to_le_bytes())
+            .required(b"ldb", &(self.shape.ldb as u64).to_le_bytes())
+            .required(b"ldc", &(self.shape.ldc as u64).to_le_bytes())
+            .required(b"tuning-revision", &self.tuning_revision.to_le_bytes())
+            .required(b"tensor-maps", &self.tensor_maps_digest)
+            .required(b"resources", &self.resources_digest)
+            .finish();
+        let tile_columns = self.physical.tile.output_columns();
+        Ok(ResolvedGemmRoute {
+            op,
+            dtype,
+            backend: PhysicalGemmBackend::Sm100Tcgen05V1,
+            numeric_contract: ResolvedNumericContract::Tcgen05F32V1,
+            instruction_family: ResolvedInstructionFamily::Tcgen05,
+            instruction_shape: ResolvedInstructionShape {
+                m: 128,
+                n: u16::try_from(tile_columns)
+                    .map_err(|_| format!("SM100 tile width {tile_columns} exceeds u16"))?,
+                k: 16,
+            },
+            operand_conversion: ResolvedOperandConversion::None,
+            ownership: ResolvedOutputOwnership::OneCtaPerOutputTileV1,
+            symbol: self.symbol,
+            module_kind: self.module_kind,
+            target: self.compiler.target,
+            artifact: self.artifact,
+            compiler: self.compiler,
+            device: self.device,
+            device_caps,
+            shape: (self.shape.m, self.shape.k, self.shape.n),
+            strides: (self.shape.lda, self.shape.ldb, self.shape.ldc),
+            tile: (
+                self.physical.tile.output_rows(),
+                self.physical.tile.output_columns(),
+            ),
+            bk: spec.bk,
+            stages: self.physical.stages.count(),
+            threads: spec.threads,
+            launch: ResolvedKernelLaunch {
+                grid_dim: (grid, 1, 1),
+                block_dim: (spec.threads, 1, 1),
+                shared_mem_bytes: spec.dynamic_shared_bytes,
+                arguments_digest,
+            },
+            tensor_map_revision: self.tensor_map_revision,
+            tensor_maps_digest: self.tensor_maps_digest,
+            resources_digest: self.resources_digest,
+            tuning_table_revision: TUNING_TABLE_REVISION,
+            schedule_revision: SM100_SCHEDULE_REVISION,
+        })
+    }
+}
+
+impl Sm90aRouteIdentity {
+    /// The route this identity names, in the form the launch observer and
+    /// the graph replay record; `device_caps` is the board the module was
+    /// bound on.
+    pub fn resolved_route(self, device_caps: DeviceCaps) -> Result<ResolvedGemmRoute, String> {
+        self.shape.validate(self.op)?;
+        if self.module_kind != ModuleKind::TriadSm90a
+            || self.artifact.module_kind != ModuleKind::TriadSm90a
+        {
+            return Err("SM90a identity does not name the SM90a TRIAD module".into());
+        }
+        if self.compiler.target.as_str() != self.exact_target
+            || self.device.target.as_str() != self.exact_target
+        {
+            return Err("SM90a identity target transaction is inconsistent".into());
+        }
+        let op = match self.op {
+            Sm90aOp::Nn => ResolvedGemmOp::Nn,
+            Sm90aOp::Tn => ResolvedGemmOp::Tn,
+            Sm90aOp::Nt => ResolvedGemmOp::Nt,
+        };
+        let dtype = match self.dtype {
+            WeightDtype::F16 => PolicyDtype::F16,
+            WeightDtype::Bf16 => PolicyDtype::Bf16,
+            WeightDtype::F32 => return Err("SM90a WGMMA route requires f16 or bf16".into()),
+        };
+        let (output_rows, output_columns) = match self.op {
+            Sm90aOp::Nn => (self.shape.m, self.shape.n),
+            Sm90aOp::Tn => (self.shape.k, self.shape.n),
+            Sm90aOp::Nt => (self.shape.m, self.shape.k),
+        };
+        let (tile_rows, tile_columns, tile_reduction) = self.tile;
+        let grid = checked_grid_product(
+            checked_u32(output_rows, "SM90a route output rows")?.div_ceil(tile_rows),
+            checked_u32(output_columns, "SM90a route output columns")?.div_ceil(tile_columns),
+            1,
+        )?;
+        let threads = self.schedule.threads();
+        let arguments_digest = FramedSha256::new(b"sm90a-kernel-arguments.v1")
+            .required(b"symbol", self.symbol.as_bytes())
+            .required(b"op", &[op as u8])
+            .required(b"dtype", &[dtype as u8])
+            .required(b"m", &(self.shape.m as u64).to_le_bytes())
+            .required(b"k", &(self.shape.k as u64).to_le_bytes())
+            .required(b"n", &(self.shape.n as u64).to_le_bytes())
+            .required(b"lda", &(self.shape.lda as u64).to_le_bytes())
+            .required(b"ldb", &(self.shape.ldb as u64).to_le_bytes())
+            .required(b"ldc", &(self.shape.ldc as u64).to_le_bytes())
+            .required(b"tuning-revision", &self.tuning_revision.to_le_bytes())
+            .required(b"tensor-maps", &self.tensor_maps_digest)
+            .required(b"resources", &self.resources_digest)
+            .finish();
+        Ok(ResolvedGemmRoute {
+            op,
+            dtype,
+            backend: PhysicalGemmBackend::Sm90aWgmmaV1,
+            numeric_contract: ResolvedNumericContract::WgmmaF32V1,
+            instruction_family: ResolvedInstructionFamily::Wgmma,
+            instruction_shape: ResolvedInstructionShape {
+                m: 64,
+                n: u16::try_from(tile_columns)
+                    .map_err(|_| format!("SM90a tile width {tile_columns} exceeds u16"))?,
+                k: 16,
+            },
+            operand_conversion: ResolvedOperandConversion::None,
+            ownership: ResolvedOutputOwnership::OneCtaPerOutputTileV1,
+            symbol: self.symbol,
+            module_kind: self.module_kind,
+            target: self.compiler.target,
+            artifact: self.artifact,
+            compiler: self.compiler,
+            device: self.device,
+            device_caps,
+            shape: (self.shape.m, self.shape.k, self.shape.n),
+            strides: (self.shape.lda, self.shape.ldb, self.shape.ldc),
+            tile: (tile_rows, tile_columns),
+            bk: tile_reduction,
+            stages: self.stages,
+            threads,
+            launch: ResolvedKernelLaunch {
+                grid_dim: (grid, 1, 1),
+                block_dim: (threads, 1, 1),
+                shared_mem_bytes: SM90A_DYNAMIC_SHARED_BYTES,
+                arguments_digest,
+            },
+            tensor_map_revision: SM90A_TENSOR_MAP_REVISION,
+            tensor_maps_digest: self.tensor_maps_digest,
+            resources_digest: self.resources_digest,
+            tuning_table_revision: TUNING_TABLE_REVISION,
+            schedule_revision: SM90A_SCHEDULE_REVISION,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
