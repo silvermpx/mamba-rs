@@ -1304,6 +1304,11 @@ fn fixed_pick_sm120_f32out(
         (4621, 1928, 384) | (2048, 768, 2304) | (2048, 2304, 768) => {
             Some(FixedSm120HalfTile::M64N64Bk64S2)
         }
+        // The deep wide projection sits past the band the generic comparator
+        // was fitted on (k up to 2304); there it extrapolates to the 128x128
+        // tile at 228 us where this tile measures 178 us
+        // (internal/perf/sm120-half-tiles-20260903).
+        (4096, 3072, 1536) => Some(FixedSm120HalfTile::M64N128Bk64S2),
         _ => fallback,
     }
 }
@@ -2671,6 +2676,7 @@ mod tests {
             ((4621, 1928, 384), C),
             ((2048, 768, 2304), C),
             ((2048, 2304, 768), C),
+            ((4096, 3072, 1536), FixedSm120HalfTile::M64N128Bk64S2),
         ] {
             assert_eq!(
                 fixed_pick_sm120_f32out(dims.0, dims.2, dims.1, device),
@@ -2678,6 +2684,11 @@ mod tests {
                 "mixed-output selector changed at {dims:?}",
             );
         }
+        assert_eq!(
+            fixed_pick_sm120_half(4096, 1536, 3072, 170),
+            Some(FixedSm120HalfTile::M128N128Bk32S2),
+            "the generic comparator still extrapolates on the deep wide projection"
+        );
         assert_eq!(
             fixed_pick_sm120_f32out(
                 4621,

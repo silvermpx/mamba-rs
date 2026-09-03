@@ -3020,7 +3020,10 @@ fn assert_sass_cfg_corroboration(
             && zero_body.contains("EXIT"),
         "{label}/{symbol} anchored zero SASS region is unsafe or unterminated"
     );
-    if label == "SM100" && symbol.contains("_sm100_tcgen_tf32_v1_") {
+    if label == "SM100"
+        && symbol.contains("_sm100_tcgen_tf32_v1_")
+        && loaded_nvrtc_version() >= (12, 9)
+    {
         assert_tcgen_management_cfg(
             &nodes,
             &successors,
@@ -3448,6 +3451,13 @@ fn assert_sass_entry_contract(sass: &str, symbol: &str, label: &str) {
     );
     let instructions = sass_line_instructions(entry, symbol);
     if label == "SM100" && symbol.contains("_sm100_tcgen_tf32_v1_") {
+        // CUDA 12.8 assembles the tcgen allocation with a different pairing;
+        // the family is not offered on that toolkit, so its SASS shape is
+        // not part of the contract there.
+        if loaded_nvrtc_version() < (12, 9) {
+            eprintln!("{label}/{symbol}: tcgen management pin skipped below CUDA 12.9");
+            return;
+        }
         tcgen_management_syntax(&instructions, symbol);
     } else {
         for instruction in &instructions {

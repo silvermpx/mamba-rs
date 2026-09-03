@@ -907,7 +907,13 @@ fn tma_strides_are_representable(cell: Cell) -> bool {
     lda.is_multiple_of(4) && ldb.is_multiple_of(4)
 }
 
-fn candidate_inventory(cell: Cell) -> (Vec<Candidate>, Vec<CandidateExclusion>) {
+/// The candidates a board can run for `cell`. A board without the SM120
+/// module (every board outside that family) still qualifies its portable
+/// routes; the SM120 routes are excluded there rather than failing the run.
+fn candidate_inventory(
+    cell: Cell,
+    specialized_bound: bool,
+) -> (Vec<Candidate>, Vec<CandidateExclusion>) {
     let output_elements = match cell.op {
         ResolvedGemmOp::Nn => cell.dims.0.checked_mul(cell.dims.2),
         ResolvedGemmOp::Tn => cell.dims.1.checked_mul(cell.dims.2),
@@ -923,7 +929,13 @@ fn candidate_inventory(cell: Cell) -> (Vec<Candidate>, Vec<CandidateExclusion>) 
         });
         let tma_fits =
             candidate.module != ModuleKind::TriadSm120 || tma_strides_are_representable(cell);
-        if !splitk_fits {
+        let module_bound = candidate.module != ModuleKind::TriadSm120 || specialized_bound;
+        if !module_bound {
+            excluded.push(CandidateExclusion {
+                symbol: candidate.symbol,
+                reason: "specialized_module_unbound",
+            });
+        } else if !splitk_fits {
             excluded.push(CandidateExclusion {
                 symbol: candidate.symbol,
                 reason: "splitk_fixed_workspace",
@@ -941,7 +953,7 @@ fn candidate_inventory(cell: Cell) -> (Vec<Candidate>, Vec<CandidateExclusion>) 
 }
 
 fn candidates_for_cell(cell: Cell) -> Vec<Candidate> {
-    candidate_inventory(cell).0
+    candidate_inventory(cell, true).0
 }
 
 #[derive(Clone, Debug)]
@@ -1422,13 +1434,16 @@ fn op_name(op: ResolvedGemmOp) -> &'static str {
 fn run_cell(device: &GpuDevice, cell: Cell, quiet: &QuietGpu) -> Result<CellResult, String> {
     let candidate_ctx = configure(device, F32TriadPolicy::AllowDeterministicTf32V1)?;
     let scalar_ctx = configure(device, F32TriadPolicy::ExactScalarFmaV1)?;
-    let specialized_identity_json = candidate_ctx
-        .kernels
-        .f32_triad_availability()
+    // The identity the cohort is frozen against: the SM120 module where the
+    // board has one, otherwise the portable SM80 module the board runs.
+    let availability = candidate_ctx.kernels.f32_triad_availability();
+    let specialized_bound = availability.specialized.is_some();
+    let specialized_identity_json = availability
         .specialized
+        .or(availability.portable)
         .map(qualified_module_json)
         .ok_or_else(|| {
-            "SM120 selector qualification has no specialized TF32 binding".to_string()
+            "selector qualification has no TF32 module bound on this board".to_string()
         })?;
     let reference_bits = portable_reference(&candidate_ctx, cell)?;
     let mut scalar_gate = qualify(
@@ -1447,7 +1462,7 @@ fn run_cell(device: &GpuDevice, cell: Cell, quiet: &QuietGpu) -> Result<CellResu
                 cell.id
             )
         })?;
-    let (candidates, excluded_candidates) = candidate_inventory(cell);
+    let (candidates, excluded_candidates) = candidate_inventory(cell, specialized_bound);
 
     let mut discovery = BTreeMap::new();
     let mut final_stats = BTreeMap::new();
@@ -1625,14 +1640,26 @@ fn sm120_tf32_selector_qualification() -> Result<(), String> {
     let quiet = QuietGpu::for_cuda_ordinal(0)?;
     let pre_context = quiet.require_pre_context("sm120-selector/pre-context")?;
     let device = GpuDevice::new(0)?;
-    if device.compute_capability != (12, 0) || device.multiprocessor_count() != 170 {
+    // Any board with a bound TF32 module qualifies its own cohort; the JSONL
+    // records the board, and the cohort it freezes is scoped to it.
+    if configure(&device, F32TriadPolicy::AllowDeterministicTf32V1)?
+        .kernels
+        .f32_triad_availability()
+        .portable
+        .is_none()
+    {
         eprintln!(
-            "skipping: requires exact CC12.0/170SM, got {:?}/{}SM",
+            "skipping: no portable TF32 module is bound on {:?}/{}SM",
             device.compute_capability,
             device.multiprocessor_count()
         );
         return Ok(());
     }
+    eprintln!(
+        "selector qualification on {:?}/{}SM",
+        device.compute_capability,
+        device.multiprocessor_count()
+    );
     let mut sink = JsonlSink::create_from_env()?;
     for cell in CELLS {
         quiet.require_cohort(&format!("sm120-selector/{}/pre-cell", cell.id))?;
@@ -1666,14 +1693,26 @@ fn sm120_tf32_projection_selector_qualification() -> Result<(), String> {
     let quiet = QuietGpu::for_cuda_ordinal(0)?;
     let pre_context = quiet.require_pre_context("sm120-projection-selector/pre-context")?;
     let device = GpuDevice::new(0)?;
-    if device.compute_capability != (12, 0) || device.multiprocessor_count() != 170 {
+    // Any board with a bound TF32 module qualifies its own cohort; the JSONL
+    // records the board, and the cohort it freezes is scoped to it.
+    if configure(&device, F32TriadPolicy::AllowDeterministicTf32V1)?
+        .kernels
+        .f32_triad_availability()
+        .portable
+        .is_none()
+    {
         eprintln!(
-            "skipping: requires exact CC12.0/170SM, got {:?}/{}SM",
+            "skipping: no portable TF32 module is bound on {:?}/{}SM",
             device.compute_capability,
             device.multiprocessor_count()
         );
         return Ok(());
     }
+    eprintln!(
+        "selector qualification on {:?}/{}SM",
+        device.compute_capability,
+        device.multiprocessor_count()
+    );
     let mut sink = JsonlSink::create_from_env()?;
     for cell in PROJECTION_CELLS {
         quiet.require_cohort(&format!("sm120-projection-selector/{}/pre-cell", cell.id))?;

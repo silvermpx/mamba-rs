@@ -722,7 +722,7 @@ pub(crate) fn compile_sm100_optional(
     device_cc: (i32, i32),
 ) -> Option<QualifiedSpecializedModule> {
     select_sm100_candidate(
-        sm100_target_candidates(device_cc),
+        &super::dispatch::sm100_target_candidates_for_nvrtc(device_cc, nvrtc_version()),
         |candidate| probe_sm100_target(ctx, candidate),
         |candidate| {
             compile_module(CompileModuleRequest {
@@ -4350,6 +4350,11 @@ impl GemmBiKernels {
     /// it is not: the first qualification step that rejected it.
     pub(crate) fn specialized_tf32_rejection(&self) -> Option<&str> {
         self.specialized_tf32_rejection.as_deref()
+    }
+
+    /// Why the portable SM80 TF32 routes are not bound, if they are not.
+    pub(crate) fn portable_tf32_rejection(&self) -> Option<&str> {
+        self.portable_tf32_rejection.as_deref()
     }
 
     pub(crate) fn tf32_qualification_rejection(
@@ -8332,7 +8337,12 @@ mod tests {
             ("compute_110f", "sm_110f"),
             ("compute_110a", "sm_110a"),
         ] {
-            if requested.contains("110") && super::nvrtc_version() < (13, 2) {
+            // Family-specific targets and CC 10.3 need CUDA 12.9; CC 11.0
+            // needs CUDA 13.2. An older toolkit cannot name them at all.
+            let nvrtc = super::nvrtc_version();
+            if (requested.contains("110") && nvrtc < (13, 2))
+                || ((requested.ends_with('f') || requested.contains("103")) && nvrtc < (12, 9))
+            {
                 continue;
             }
             let options = cudarc::nvrtc::CompileOptions {

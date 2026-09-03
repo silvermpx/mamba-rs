@@ -106,38 +106,135 @@ struct Tf32AutoQualificationIdentity {
 
 impl Tf32AutoQualificationIdentity {
     fn matches(self, module: Tf32QualifiedModule) -> bool {
-        module.module_kind == self.module_kind
-            && module.target.as_str() == self.module_target
-            && module.artifact.module_kind == self.module_kind
-            && module.artifact.artifact_kind == ArtifactKind::Ptx
-            && module.artifact.compile_key == self.compile_key
-            && module.artifact.artifact_digest == self.artifact_digest
-            && module.compiler.source_digest == self.source_digest
-            && module.compiler.invocation_digest == self.invocation_digest
-            && module.compiler.header_manifest_digest == self.header_manifest_digest
-            && module.compiler.target.as_str() == self.module_target
-            && module.compiler.nvrtc_version == self.nvrtc_version
-            && module.compiler.nvrtc_library_domain == self.nvrtc_library_domain
-            && module.compiler.nvrtc_library_known
-            && module.compiler.output_kind == ArtifactKind::Ptx
-            && module.compiler.composer_revision == COMPOSER_REVISION
-            && module.compiler.compiler_revision == COMPILER_REVISION
-            && module.compiler.numeric_abi_revision == NUMERIC_ABI_REVISION
-            && module.compiler.schedule_revision == SCHEDULE_REVISION
-            && module.device.compute_capability == self.compute_capability
-            && module.device.multiprocessor_count == self.multiprocessor_count
-            && module.device.target.as_str() == self.device_target
-            && module.device.driver.api_version == self.driver_api_version
-            && module.device.driver.build_sources == self.driver_build_sources
-            && module.device.driver.build_digest == self.driver_build_digest
-            && module.device_caps.compute_capability == self.compute_capability
-            && module.device_caps.nvrtc_version == self.nvrtc_version
-            && module
-                .device_caps
-                .accepted_target
-                .is_some_and(|target| target.as_str() == self.module_target)
-            && module.device_caps.optin_shared_bytes == self.optin_shared_bytes
-            && module.device_caps.tensor_map_access == self.tensor_map_access
+        self.mismatch(module).is_none()
+    }
+
+    /// The first identity field the bound module does not satisfy, or `None`
+    /// when the cohort applies to it. A decline on this path used to be a bare
+    /// `None`; the field name is what tells a wrong board, a moved toolkit and
+    /// an edited kernel apart.
+    fn mismatch(self, module: Tf32QualifiedModule) -> Option<&'static str> {
+        let checks: [(&'static str, bool); 31] = [
+            ("module kind", module.module_kind == self.module_kind),
+            (
+                "module target",
+                module.target.as_str() == self.module_target,
+            ),
+            (
+                "artifact module kind",
+                module.artifact.module_kind == self.module_kind,
+            ),
+            (
+                "artifact kind",
+                module.artifact.artifact_kind == ArtifactKind::Ptx,
+            ),
+            (
+                "compile key",
+                module.artifact.compile_key == self.compile_key,
+            ),
+            (
+                "artifact digest",
+                module.artifact.artifact_digest == self.artifact_digest,
+            ),
+            (
+                "source digest",
+                module.compiler.source_digest == self.source_digest,
+            ),
+            (
+                "invocation digest",
+                module.compiler.invocation_digest == self.invocation_digest,
+            ),
+            (
+                "header manifest digest",
+                module.compiler.header_manifest_digest == self.header_manifest_digest,
+            ),
+            (
+                "compiler target",
+                module.compiler.target.as_str() == self.module_target,
+            ),
+            (
+                "nvrtc version",
+                module.compiler.nvrtc_version == self.nvrtc_version,
+            ),
+            (
+                "nvrtc library domain",
+                module.compiler.nvrtc_library_domain == self.nvrtc_library_domain,
+            ),
+            ("nvrtc library known", module.compiler.nvrtc_library_known),
+            (
+                "compiler output kind",
+                module.compiler.output_kind == ArtifactKind::Ptx,
+            ),
+            (
+                "composer revision",
+                module.compiler.composer_revision == COMPOSER_REVISION,
+            ),
+            (
+                "compiler revision",
+                module.compiler.compiler_revision == COMPILER_REVISION,
+            ),
+            (
+                "numeric abi revision",
+                module.compiler.numeric_abi_revision == NUMERIC_ABI_REVISION,
+            ),
+            (
+                "schedule revision",
+                module.compiler.schedule_revision == SCHEDULE_REVISION,
+            ),
+            (
+                "device compute capability",
+                module.device.compute_capability == self.compute_capability,
+            ),
+            (
+                "multiprocessor count",
+                module.device.multiprocessor_count == self.multiprocessor_count,
+            ),
+            (
+                "device target",
+                module.device.target.as_str() == self.device_target,
+            ),
+            (
+                "driver api version",
+                module.device.driver.api_version == self.driver_api_version,
+            ),
+            (
+                "driver build sources",
+                module.device.driver.build_sources == self.driver_build_sources,
+            ),
+            (
+                "driver build digest",
+                module.device.driver.build_digest == self.driver_build_digest,
+            ),
+            (
+                "caps compute capability",
+                module.device_caps.compute_capability == self.compute_capability,
+            ),
+            (
+                "caps nvrtc version",
+                module.device_caps.nvrtc_version == self.nvrtc_version,
+            ),
+            (
+                "accepted target",
+                module
+                    .device_caps
+                    .accepted_target
+                    .is_some_and(|target| target.as_str() == self.module_target),
+            ),
+            (
+                "opt-in shared bytes",
+                module.device_caps.optin_shared_bytes == self.optin_shared_bytes,
+            ),
+            (
+                "tensor map access",
+                module.device_caps.tensor_map_access == self.tensor_map_access,
+            ),
+            ("cohort compute capability", true),
+            ("cohort multiprocessor count", true),
+        ];
+        checks
+            .into_iter()
+            .find(|(_, holds)| !holds)
+            .map(|(field, _)| field)
     }
 }
 
@@ -1266,6 +1363,22 @@ fn measured_tf32_route_with_operands(
     tuning_revision: u16,
 ) -> Option<Tf32PhysicalRoute> {
     if let Some(module) = availability.specialized
+        && matching_tf32_cohort(module, SM120_TF32_EVIDENCE_COHORTS).is_none()
+    {
+        static NO_COHORT: std::sync::Once = std::sync::Once::new();
+        crate::mamba_ssm::gpu::diagnostics::warn_once(&NO_COHORT, || {
+            let newest = SM120_TF32_EVIDENCE_COHORTS
+                .last()
+                .and_then(|cohort| cohort.identity.mismatch(module))
+                .unwrap_or("no cohort is frozen");
+            format!(
+                "no SM120 TF32 evidence cohort matches this stack (newest cohort differs at: \
+                 {newest}); the exact f32 family serves every TF32 request until a \
+                 requalification is frozen"
+            )
+        });
+    }
+    if let Some(module) = availability.specialized
         && let Some(cohort) = matching_tf32_cohort(module, SM120_TF32_EVIDENCE_COHORTS)
     {
         let route = measured_tf32_cell(request, operands, tuning_revision, cohort.cells)?;
@@ -1280,10 +1393,20 @@ fn measured_tf32_route_with_operands(
         return Some(route);
     }
     let portable = availability.portable?;
-    SM89_TF32_QUALIFICATION_IDENTITY
-        .matches(portable)
-        .then(|| measured_tf32_cell(request, operands, tuning_revision, SM89_TF32_EVIDENCE_CELLS))
-        .flatten()
+    if let Some(field) = SM89_TF32_QUALIFICATION_IDENTITY.mismatch(portable) {
+        if availability.specialized.is_none() {
+            static STALE: std::sync::Once = std::sync::Once::new();
+            crate::mamba_ssm::gpu::diagnostics::warn_once(&STALE, || {
+                format!(
+                    "the portable TF32 evidence cohort does not match this stack (differs at: \
+                     {field}); the exact f32 family serves every TF32 request until a \
+                     requalification is frozen"
+                )
+            });
+        }
+        return None;
+    }
+    measured_tf32_cell(request, operands, tuning_revision, SM89_TF32_EVIDENCE_CELLS)
 }
 
 pub fn resolve_f32_triad_auto(
@@ -2869,6 +2992,29 @@ pub fn sm100_target_candidates(cc: (i32, i32)) -> &'static [Sm100TargetCandidate
         (11, 0) => &SM100_CC110_TARGETS,
         _ => &[],
     }
+}
+
+/// The SM100 candidates a toolkit can compile and that the contract has
+/// verified. Family-specific targets (`compute_100f` and siblings) and the
+/// CC 10.3 targets arrived with CUDA 12.9, the CC 11.0 targets with CUDA
+/// 13.2, and CUDA 12.8 assembles the tcgen allocation with a different
+/// instruction pairing than the one the contract freezes; below 12.9 the
+/// family is not offered at all rather than run unverified.
+pub fn sm100_target_candidates_for_nvrtc(
+    cc: (i32, i32),
+    nvrtc_version: (i32, i32),
+) -> Vec<Sm100TargetCandidate> {
+    sm100_target_candidates(cc)
+        .iter()
+        .copied()
+        .filter(|candidate| {
+            let floor = match candidate.device_cc {
+                (11, 0) => (13, 2),
+                _ => (12, 9),
+            };
+            nvrtc_version >= floor
+        })
+        .collect()
 }
 
 const SM120_CC120_TARGETS: [Sm120TargetCandidate; 1] = [Sm120TargetCandidate {
@@ -9841,5 +9987,28 @@ mod tf32_tests {
             )
             .is_err()
         );
+    }
+}
+
+#[cfg(test)]
+mod sm100_toolkit_tests {
+    use super::super::contract::Sm100TargetKind;
+    use super::sm100_target_candidates_for_nvrtc;
+
+    #[test]
+    fn older_toolkits_are_offered_only_the_targets_they_can_name() {
+        assert!(sm100_target_candidates_for_nvrtc((10, 0), (12, 8)).is_empty());
+
+        let on_12_9 = sm100_target_candidates_for_nvrtc((10, 0), (12, 9));
+        assert_eq!(on_12_9.len(), 2);
+        assert_eq!(on_12_9[0].nvrtc_arch, "compute_100f");
+        assert_eq!(on_12_9[0].kind, Sm100TargetKind::Family);
+        assert_eq!(on_12_9[1].kind, Sm100TargetKind::Exact);
+
+        assert!(sm100_target_candidates_for_nvrtc((10, 3), (12, 8)).is_empty());
+        assert_eq!(sm100_target_candidates_for_nvrtc((10, 3), (12, 9)).len(), 2);
+        assert!(sm100_target_candidates_for_nvrtc((11, 0), (13, 0)).is_empty());
+        assert_eq!(sm100_target_candidates_for_nvrtc((11, 0), (13, 2)).len(), 2);
+        assert!(sm100_target_candidates_for_nvrtc((12, 0), (13, 2)).is_empty());
     }
 }

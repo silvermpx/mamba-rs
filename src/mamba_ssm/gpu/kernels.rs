@@ -632,6 +632,26 @@ impl MambaKernels {
         };
         let compiler_identity = fixed.compiler_identity;
         let triad = GemmBiKernels::load(ctx, fixed.artifact_identity, scalar, sm80, specialized)?;
+        // A rejected TF32 module used to be recorded and never shown: the
+        // process booted green and every TF32 request quietly ran scalar.
+        if let Some(reason) = triad.portable_tf32_rejection() {
+            static PORTABLE: std::sync::Once = std::sync::Once::new();
+            super::diagnostics::warn_once(&PORTABLE, || {
+                format!(
+                    "the portable TF32 routes are not bound on this board ({reason}); the \
+                     exact f32 kernels serve every TF32 request"
+                )
+            });
+        }
+        if let Some(reason) = triad.specialized_tf32_rejection() {
+            static SPECIALIZED: std::sync::Once = std::sync::Once::new();
+            super::diagnostics::warn_once(&SPECIALIZED, || {
+                format!(
+                    "the specialized TF32 module is not bound on this board ({reason}); the \
+                     portable or exact kernels serve every TF32 request"
+                )
+            });
+        }
         let module = fixed.module;
 
         let get = |name: &str| -> Result<CudaFunction, String> {
