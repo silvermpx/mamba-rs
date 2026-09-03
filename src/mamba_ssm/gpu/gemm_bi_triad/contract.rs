@@ -227,6 +227,16 @@ pub struct F32TriadOperands {
 pub enum Tf32TensorMapFormat {
     Tfloat32V1 = 1,
     Uint32V1 = 2,
+    /// Exact F32 words, no swizzle, dense boxes as the exact routes read them.
+    Uint32DenseV1 = 3,
+    /// Exact F32 words behind the 64-byte swizzle of the NT B stage.
+    Uint32Swizzle64V1 = 4,
+}
+
+impl Tf32TensorMapFormat {
+    const fn is_exact_fma(self) -> bool {
+        matches!(self, Self::Uint32DenseV1 | Self::Uint32Swizzle64V1)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -261,6 +271,25 @@ impl Tf32TensorMapKey {
         if self.outer_byte_stride < row_bytes {
             return Err("TF32 tensor-map outer stride is smaller than its inner dimension".into());
         }
+        if self.format.is_exact_fma() {
+            let inner_bytes = self.box_dimensions[0] * 4;
+            let swizzle_span = match self.format {
+                Tf32TensorMapFormat::Uint32Swizzle64V1 => 64,
+                _ => 256 * 4,
+            };
+            if self.box_dimensions[0] == 0
+                || self.box_dimensions[1] == 0
+                || self.box_dimensions[1] > 256
+                || !inner_bytes.is_multiple_of(16)
+                || inner_bytes > swizzle_span
+            {
+                return Err(
+                    "exact-F32 box dimensions must be [16-byte multiples within the swizzle span, 1..=256]"
+                        .into(),
+                );
+            }
+            return Ok(());
+        }
         if self.box_dimensions[0] != 32
             || self.box_dimensions[1] == 0
             || self.box_dimensions[1] > 256
@@ -289,9 +318,27 @@ impl Tf32TensorMap {
             Tf32TensorMapFormat::Tfloat32V1 => {
                 sys::CUtensorMapDataType::CU_TENSOR_MAP_DATA_TYPE_TFLOAT32
             }
-            Tf32TensorMapFormat::Uint32V1 => {
+            Tf32TensorMapFormat::Uint32V1
+            | Tf32TensorMapFormat::Uint32DenseV1
+            | Tf32TensorMapFormat::Uint32Swizzle64V1 => {
                 sys::CUtensorMapDataType::CU_TENSOR_MAP_DATA_TYPE_UINT32
             }
+        };
+        // The exact routes read dense stages and promote L2 lines, the TF32
+        // routes keep their frozen 128-byte swizzle and promotion.
+        let (swizzle, promotion) = match key.format {
+            Tf32TensorMapFormat::Uint32DenseV1 => (
+                sys::CUtensorMapSwizzle::CU_TENSOR_MAP_SWIZZLE_NONE,
+                sys::CUtensorMapL2promotion::CU_TENSOR_MAP_L2_PROMOTION_L2_256B,
+            ),
+            Tf32TensorMapFormat::Uint32Swizzle64V1 => (
+                sys::CUtensorMapSwizzle::CU_TENSOR_MAP_SWIZZLE_64B,
+                sys::CUtensorMapL2promotion::CU_TENSOR_MAP_L2_PROMOTION_L2_256B,
+            ),
+            Tf32TensorMapFormat::Tfloat32V1 | Tf32TensorMapFormat::Uint32V1 => (
+                sys::CUtensorMapSwizzle::CU_TENSOR_MAP_SWIZZLE_128B,
+                sys::CUtensorMapL2promotion::CU_TENSOR_MAP_L2_PROMOTION_NONE,
+            ),
         };
         let mut raw = std::mem::MaybeUninit::<sys::CUtensorMap>::zeroed();
         let element_strides = [1_u32, 1_u32];
@@ -307,8 +354,8 @@ impl Tf32TensorMap {
                 key.box_dimensions.as_ptr(),
                 element_strides.as_ptr(),
                 sys::CUtensorMapInterleave::CU_TENSOR_MAP_INTERLEAVE_NONE,
-                sys::CUtensorMapSwizzle::CU_TENSOR_MAP_SWIZZLE_128B,
-                sys::CUtensorMapL2promotion::CU_TENSOR_MAP_L2_PROMOTION_NONE,
+                swizzle,
+                promotion,
                 sys::CUtensorMapFloatOOBfill::CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE,
             )
             .result()
@@ -741,6 +788,11 @@ pub(super) fn append_tf32_route_digest(
                 .required(b"tile", &[tile])
                 .required(b"stages", &[route.stages.count()])
         }
+        Tf32PhysicalRoute::Sm120TmaFmaExactV1(route) => digest
+            .required(b"route-family", &[9])
+            .required(b"tile", &[route.tile.digest_code()])
+            .required(b"kvec", &[u8::from(route.kvec)])
+            .required(b"splits", &[route.splits]),
     }
 }
 
@@ -799,6 +851,9 @@ fn tf32_operand_layouts(
     }
     if matches!(route, Tf32PhysicalRoute::MmaTf32RnaV1(_)) {
         return Err("portable TF32 does not use tensor maps".into());
+    }
+    if route.is_exact_fma() {
+        return sm120_fma_operand_layouts(request, operands, route);
     }
     let spec = tf32_kernel_spec(request.op, route)?;
     if spec.map_bk != 32 || !spec.bk.is_multiple_of(spec.map_bk) {
@@ -927,6 +982,142 @@ fn validate_tf32_issued_coordinates(
     Ok(())
 }
 
+/// Operand layouts of the exact-F32 routes. Kernel-side terms: C[M][N] over
+/// the reduction K; NN reads A [M][K] and B [K][N], TN reads A [K][M] and B
+/// [K][N], NT reads A [M][K] and B [N][K]. Boxes are one 16-wide k tile by a
+/// block tile edge, so every coordinate the kernel issues is a multiple of a
+/// box edge.
+fn sm120_fma_operand_layouts(
+    request: F32TriadRequest,
+    operands: F32TriadOperands,
+    route: Tf32PhysicalRoute,
+) -> Result<[Tf32OperandLayout; 2], String> {
+    let spec = tf32_kernel_spec(request.op, route)?;
+    let shape = request.shape;
+    let (bm, bn) = spec.tile;
+    let bk = SM120_FMA_BK;
+    let rows_out = shape.output_rows(request.op);
+    let columns_out = shape.output_columns(request.op);
+    let reduction = shape.reduction(request.op);
+    let last_k = tf32_last_tile_start(reduction, bk as usize, "exact-F32 reduction")?;
+    let last_rows = tf32_last_tile_start(rows_out, bm as usize, "exact-F32 rows")?;
+    let last_columns = tf32_last_tile_start(columns_out, bn as usize, "exact-F32 columns")?;
+    let (a, b) = match request.op {
+        ResolvedGemmOp::Nn => (
+            Tf32OperandLayout {
+                pointer: operands.a,
+                stride: shape.lda,
+                width: shape.k,
+                rows: shape.m,
+                issued_coordinate_max: [last_k, last_rows],
+                box_dimensions: [bk, bm],
+                name: "A",
+            },
+            Tf32OperandLayout {
+                pointer: operands.b,
+                stride: shape.ldb,
+                width: shape.n,
+                rows: shape.k,
+                issued_coordinate_max: [last_columns, last_k],
+                box_dimensions: [bn, bk],
+                name: "B",
+            },
+        ),
+        ResolvedGemmOp::Tn => (
+            Tf32OperandLayout {
+                pointer: operands.a,
+                stride: shape.lda,
+                width: shape.k,
+                rows: shape.m,
+                issued_coordinate_max: [last_rows, last_k],
+                box_dimensions: [bm, bk],
+                name: "A",
+            },
+            Tf32OperandLayout {
+                pointer: operands.b,
+                stride: shape.ldb,
+                width: shape.n,
+                rows: shape.m,
+                issued_coordinate_max: [last_columns, last_k],
+                box_dimensions: [bn, bk],
+                name: "B",
+            },
+        ),
+        ResolvedGemmOp::Nt => (
+            Tf32OperandLayout {
+                pointer: operands.a,
+                stride: shape.lda,
+                width: shape.n,
+                rows: shape.m,
+                issued_coordinate_max: [last_k, last_rows],
+                box_dimensions: [bk, bm],
+                name: "A",
+            },
+            Tf32OperandLayout {
+                pointer: operands.b,
+                stride: shape.ldb,
+                width: shape.n,
+                rows: shape.k,
+                issued_coordinate_max: [last_k, last_columns],
+                box_dimensions: [bk, bn],
+                name: "B",
+            },
+        ),
+    };
+    Ok([a, b])
+}
+
+/// The exact-F32 map of one operand: the pointer is the map base, the map
+/// spans exactly the operand, and the allocation identity is kept for the
+/// live check before every launch.
+fn sm120_fma_map_plan(
+    layout: Tf32OperandLayout,
+    allocation_domain: AllocationDomain,
+    format: Tf32TensorMapFormat,
+) -> Result<(Tf32TensorMapKey, Sm90aAllocationIdentity), String> {
+    if !layout.pointer.is_multiple_of(16) {
+        return Err(format!(
+            "exact-F32 {} TMA pointer must be 16-byte aligned",
+            layout.name
+        ));
+    }
+    let outer_byte_stride = u64::try_from(
+        layout
+            .stride
+            .checked_mul(4)
+            .ok_or_else(|| format!("exact-F32 {} byte stride overflows usize", layout.name))?,
+    )
+    .map_err(|_| format!("exact-F32 {} byte stride exceeds u64::MAX", layout.name))?;
+    let width = u64::try_from(layout.width)
+        .map_err(|_| format!("exact-F32 {} width exceeds u64::MAX", layout.name))?;
+    let rows = u64::try_from(layout.rows)
+        .map_err(|_| format!("exact-F32 {} rows exceed u64::MAX", layout.name))?;
+    let row_bytes = width
+        .checked_mul(4)
+        .ok_or_else(|| format!("exact-F32 {} row bytes overflow u64", layout.name))?;
+    let required_bytes = rows
+        .checked_sub(1)
+        .and_then(|prefix_rows| prefix_rows.checked_mul(outer_byte_stride))
+        .and_then(|prefix| prefix.checked_add(row_bytes))
+        .ok_or_else(|| format!("exact-F32 {} allocation span overflows u64", layout.name))?;
+    let allocation = Sm90aAllocationIdentity::query(
+        layout.pointer,
+        required_bytes,
+        allocation_domain,
+        "exact-F32",
+        layout.name,
+    )?;
+    validate_tf32_issued_coordinates(layout, (0, 0))?;
+    let key = Tf32TensorMapKey {
+        base: layout.pointer,
+        global_dimensions: [width, rows],
+        outer_byte_stride,
+        box_dimensions: layout.box_dimensions,
+        format,
+    };
+    Ok((key, allocation))
+}
+
 fn tf32_subview_plan(
     layout: Tf32OperandLayout,
     allocation_domain: AllocationDomain,
@@ -1023,6 +1214,7 @@ pub(super) fn tf32_tensor_map_plan(
         }
         Tf32PhysicalRoute::Sm120TmaMmaTf32RnaV1(_)
         | Tf32PhysicalRoute::Sm120TmaMmaTf32RnaStreamKV1(_) => Tf32TensorMapFormat::Uint32V1,
+        Tf32PhysicalRoute::Sm120TmaFmaExactV1(_) => Tf32TensorMapFormat::Uint32DenseV1,
         Tf32PhysicalRoute::MmaTf32RnaV1(_)
         | Tf32PhysicalRoute::MmaTf32RnaSplitK2V1(_)
         | Tf32PhysicalRoute::MmaTf32RnaSplitK4V1(_)
@@ -1031,6 +1223,27 @@ pub(super) fn tf32_tensor_map_plan(
         }
     };
     let layouts = tf32_operand_layouts(request, operands, route)?;
+    if route.is_exact_fma() {
+        // The exact kernels take no subview origin: the map base is the
+        // operand pointer itself and every coordinate starts at zero.
+        let b_format = if request.op == ResolvedGemmOp::Nt {
+            Tf32TensorMapFormat::Uint32Swizzle64V1
+        } else {
+            format
+        };
+        let (a_key, a_allocation) = sm120_fma_map_plan(layouts[0], allocation_domain, format)?;
+        let (b_key, b_allocation) = sm120_fma_map_plan(layouts[1], allocation_domain, b_format)?;
+        let keys = [a_key, b_key];
+        for key in keys {
+            key.validate()?;
+        }
+        return Ok(Tf32TensorMapPlan {
+            allocations: [a_allocation, b_allocation],
+            keys,
+            origins: Tf32TensorOrigins::default(),
+            format,
+        });
+    }
     let (a_key, a_allocation, (a_x, a_y)) =
         tf32_subview_plan(layouts[0], allocation_domain, format)?;
     let (b_key, b_allocation, (b_x, b_y)) =
@@ -1414,6 +1627,95 @@ pub struct Tf32Sm120Route {
     pub stages: Tf32Sm120Stages,
 }
 
+/// The reduction tile of the exact-F32 SM120 routes.
+pub const SM120_FMA_BK: u32 = 16;
+/// Register gate of the exact-F32 SM120 routes: the plain arms keep three
+/// blocks per multiprocessor, the NT k-vector arms two.
+pub const SM120_FMA_REGISTER_CAP: u32 = 168;
+pub const SM120_FMA_KVEC_REGISTER_CAP: u32 = 255;
+
+/// Block tiles of the exact-F32 SM120 routes: an 8x8 register microtile,
+/// BK 16, two TMA stages.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Sm120FmaTile {
+    M128N64,
+    M64N128,
+    M64N64,
+}
+
+impl Sm120FmaTile {
+    pub const fn dims(self) -> (u32, u32) {
+        match self {
+            Self::M128N64 => (128, 64),
+            Self::M64N128 => (64, 128),
+            Self::M64N64 => (64, 64),
+        }
+    }
+
+    pub const fn threads(self) -> u32 {
+        match self {
+            Self::M128N64 | Self::M64N128 => 128,
+            Self::M64N64 => 64,
+        }
+    }
+
+    /// Two dense stages plus one mbarrier per stage.
+    pub const fn dynamic_shared_bytes(self) -> u32 {
+        let (bm, bn) = self.dims();
+        2 * (bm * SM120_FMA_BK + SM120_FMA_BK * bn) * 4 + 2 * 8
+    }
+
+    pub const fn min_blocks(self, kvec: bool) -> u32 {
+        match (self, kvec) {
+            (Self::M64N64, false) => 5,
+            (Self::M64N64, true) => 4,
+            (_, false) => 3,
+            (_, true) => 2,
+        }
+    }
+
+    const fn digest_code(self) -> u8 {
+        match self {
+            Self::M128N64 => 1,
+            Self::M64N128 => 2,
+            Self::M64N64 => 3,
+        }
+    }
+}
+
+/// One exact-F32 SM120 route: the block tile, whether an NT arm keeps its B
+/// fragment as float4 along k, and how many reduction splits the launch
+/// deals. One split reproduces the scalar chain bit for bit; more splits
+/// fold fixed-order partials.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Sm120FmaRoute {
+    pub tile: Sm120FmaTile,
+    pub kvec: bool,
+    pub splits: u8,
+}
+
+impl Sm120FmaRoute {
+    pub fn validate(self, op: ResolvedGemmOp) -> Result<(), String> {
+        if self.splits == 0 {
+            return Err("exact-F32 SM120 route needs at least one split".into());
+        }
+        if self.kvec && op != ResolvedGemmOp::Nt {
+            return Err("the k-vector B fragment only exists for NT".into());
+        }
+        Ok(())
+    }
+
+    /// The route with its split count normalized to one: the kernel is the
+    /// same, only the launch deals differently.
+    pub const fn spec_key(self) -> Self {
+        Self {
+            tile: self.tile,
+            kvec: self.kvec,
+            splits: 1,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Tf32PhysicalRoute {
     MmaTf32RnaV1(Tf32PortableRoute),
@@ -1424,6 +1726,9 @@ pub enum Tf32PhysicalRoute {
     Sm100Tcgen05Tf32TmaV1(Tf32Sm100Route),
     Sm120TmaMmaTf32RnaV1(Tf32Sm120Route),
     Sm120TmaMmaTf32RnaStreamKV1(Tf32Sm120Route),
+    /// Exact F32 through the scalar FMA chain, fed by TMA; lives in the
+    /// SM120 module next to the TF32 routes but never rounds an operand.
+    Sm120TmaFmaExactV1(Sm120FmaRoute),
 }
 
 impl Tf32PhysicalRoute {
@@ -1435,9 +1740,32 @@ impl Tf32PhysicalRoute {
             | Self::MmaTf32RnaSplitK8V1(_) => ModuleKind::TriadSm80,
             Self::Sm90aWgmmaTf32TmaV1(_) => ModuleKind::TriadSm90a,
             Self::Sm100Tcgen05Tf32TmaV1(_) => ModuleKind::TriadSm100,
-            Self::Sm120TmaMmaTf32RnaV1(_) | Self::Sm120TmaMmaTf32RnaStreamKV1(_) => {
-                ModuleKind::TriadSm120
-            }
+            Self::Sm120TmaMmaTf32RnaV1(_)
+            | Self::Sm120TmaMmaTf32RnaStreamKV1(_)
+            | Self::Sm120TmaFmaExactV1(_) => ModuleKind::TriadSm120,
+        }
+    }
+
+    /// True for the exact-F32 FMA routes, which the TF32 policy never
+    /// selects and the exact policy owns.
+    pub const fn is_exact_fma(self) -> bool {
+        matches!(self, Self::Sm120TmaFmaExactV1(_))
+    }
+
+    /// The exact-F32 route payload, if this is one.
+    pub const fn exact_fma(self) -> Option<Sm120FmaRoute> {
+        match self {
+            Self::Sm120TmaFmaExactV1(route) => Some(route),
+            _ => None,
+        }
+    }
+
+    /// The route as the kernel inventory names it: an exact-F32 route with
+    /// its split count normalized to one.
+    pub const fn spec_key(self) -> Self {
+        match self {
+            Self::Sm120TmaFmaExactV1(route) => Self::Sm120TmaFmaExactV1(route.spec_key()),
+            other => other,
         }
     }
 }
@@ -1446,6 +1774,9 @@ impl Tf32PhysicalRoute {
 pub enum F32TriadSelection {
     ScalarFmaV1,
     Tf32(Tf32PhysicalRoute),
+    /// The exact policy's own SM120 route: scalar FMA numerics behind TMA,
+    /// never a TF32 selection.
+    ExactSm120Fma(Sm120FmaRoute),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1462,6 +1793,21 @@ pub struct Tf32QualifiedModule {
 pub struct F32TriadAvailability {
     pub portable: Option<Tf32QualifiedModule>,
     pub specialized: Option<Tf32QualifiedModule>,
+}
+
+/// Kernel parameters of the exact-F32 SM120 routes: kernel-side (M, N, K),
+/// the output stride, and the reduction split the launch deals.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Sm120FmaKernelParams {
+    pub alpha: f32,
+    pub beta: f32,
+    pub m: i32,
+    pub n: i32,
+    pub k: i32,
+    pub ldc: i32,
+    pub splits: i32,
+    pub tiles_per_split: i32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2324,7 +2670,113 @@ const SM120_TF32_TN_M64N128_S3_PAIR_STREAMK: Tf32KernelSpec = Tf32KernelSpec {
     schedule_revision: TF32_SCHEDULE_REVISION,
 };
 
-pub const SM120_TF32_ROUTE_SPECS: [Tf32KernelSpec; 18] = [
+const fn sm120_fma_spec(
+    op: ResolvedGemmOp,
+    tile: Sm120FmaTile,
+    kvec: bool,
+    symbol: &'static str,
+) -> Tf32KernelSpec {
+    Tf32KernelSpec {
+        op,
+        route: Tf32PhysicalRoute::Sm120TmaFmaExactV1(Sm120FmaRoute {
+            tile,
+            kvec,
+            splits: 1,
+        }),
+        symbol,
+        module_kind: ModuleKind::TriadSm120,
+        instruction_family: ResolvedInstructionFamily::ScalarFma,
+        instruction_shape: ResolvedInstructionShape { m: 1, n: 1, k: 1 },
+        operand_conversion: ResolvedOperandConversion::None,
+        tile: tile.dims(),
+        bk: SM120_FMA_BK,
+        map_bk: SM120_FMA_BK,
+        stages: 2,
+        threads: tile.threads(),
+        dynamic_shared_bytes: tile.dynamic_shared_bytes(),
+        tensor_map_revision: TF32_TENSOR_MAP_REVISION,
+        schedule_revision: TF32_SCHEDULE_REVISION,
+    }
+}
+
+/// The exact-F32 SM120 inventory: three tiles per operation plus the NT
+/// k-vector arms.
+pub const SM120_FMA_ROUTE_SPECS: [Tf32KernelSpec; 12] = [
+    sm120_fma_spec(
+        ResolvedGemmOp::Nn,
+        Sm120FmaTile::M128N64,
+        false,
+        "gemm_bi_nn_sm120_tma_fma_v1_m128n64_bk16_s2",
+    ),
+    sm120_fma_spec(
+        ResolvedGemmOp::Nn,
+        Sm120FmaTile::M64N128,
+        false,
+        "gemm_bi_nn_sm120_tma_fma_v1_m64n128_bk16_s2",
+    ),
+    sm120_fma_spec(
+        ResolvedGemmOp::Nn,
+        Sm120FmaTile::M64N64,
+        false,
+        "gemm_bi_nn_sm120_tma_fma_v1_m64n64_bk16_s2",
+    ),
+    sm120_fma_spec(
+        ResolvedGemmOp::Tn,
+        Sm120FmaTile::M128N64,
+        false,
+        "gemm_bi_tn_sm120_tma_fma_v1_m128n64_bk16_s2",
+    ),
+    sm120_fma_spec(
+        ResolvedGemmOp::Tn,
+        Sm120FmaTile::M64N128,
+        false,
+        "gemm_bi_tn_sm120_tma_fma_v1_m64n128_bk16_s2",
+    ),
+    sm120_fma_spec(
+        ResolvedGemmOp::Tn,
+        Sm120FmaTile::M64N64,
+        false,
+        "gemm_bi_tn_sm120_tma_fma_v1_m64n64_bk16_s2",
+    ),
+    sm120_fma_spec(
+        ResolvedGemmOp::Nt,
+        Sm120FmaTile::M128N64,
+        false,
+        "gemm_bi_nt_sm120_tma_fma_v1_m128n64_bk16_s2",
+    ),
+    sm120_fma_spec(
+        ResolvedGemmOp::Nt,
+        Sm120FmaTile::M64N128,
+        false,
+        "gemm_bi_nt_sm120_tma_fma_v1_m64n128_bk16_s2",
+    ),
+    sm120_fma_spec(
+        ResolvedGemmOp::Nt,
+        Sm120FmaTile::M64N64,
+        false,
+        "gemm_bi_nt_sm120_tma_fma_v1_m64n64_bk16_s2",
+    ),
+    sm120_fma_spec(
+        ResolvedGemmOp::Nt,
+        Sm120FmaTile::M128N64,
+        true,
+        "gemm_bi_nt_sm120_tma_fma_v1_m128n64_bk16_s2_kvec",
+    ),
+    sm120_fma_spec(
+        ResolvedGemmOp::Nt,
+        Sm120FmaTile::M64N128,
+        true,
+        "gemm_bi_nt_sm120_tma_fma_v1_m64n128_bk16_s2_kvec",
+    ),
+    sm120_fma_spec(
+        ResolvedGemmOp::Nt,
+        Sm120FmaTile::M64N64,
+        true,
+        "gemm_bi_nt_sm120_tma_fma_v1_m64n64_bk16_s2_kvec",
+    ),
+];
+
+pub const SM120_TF32_ROUTE_SPECS: [Tf32KernelSpec; 30] = [
     SM120_TF32_NN[0],
     SM120_TF32_NN[1],
     SM120_TF32_NN[2],
@@ -2343,6 +2795,18 @@ pub const SM120_TF32_ROUTE_SPECS: [Tf32KernelSpec; 18] = [
     SM120_TF32_NT[2],
     SM120_TF32_NT[3],
     SM120_TF32_NT[4],
+    SM120_FMA_ROUTE_SPECS[0],
+    SM120_FMA_ROUTE_SPECS[1],
+    SM120_FMA_ROUTE_SPECS[2],
+    SM120_FMA_ROUTE_SPECS[3],
+    SM120_FMA_ROUTE_SPECS[4],
+    SM120_FMA_ROUTE_SPECS[5],
+    SM120_FMA_ROUTE_SPECS[6],
+    SM120_FMA_ROUTE_SPECS[7],
+    SM120_FMA_ROUTE_SPECS[8],
+    SM120_FMA_ROUTE_SPECS[9],
+    SM120_FMA_ROUTE_SPECS[10],
+    SM120_FMA_ROUTE_SPECS[11],
 ];
 
 pub fn tf32_route_specs(module_kind: ModuleKind) -> &'static [Tf32KernelSpec] {
@@ -2374,9 +2838,10 @@ pub fn tf32_kernel_spec(
         }
         _ => {}
     }
+    let key = route.spec_key();
     let mut matches = tf32_route_specs(route.module_kind())
         .iter()
-        .filter(|spec| spec.op == op && spec.route == route);
+        .filter(|spec| spec.op == op && spec.route == key);
     let Some(spec) = matches.next() else {
         return Err(format!("no TF32 kernel matches {op:?}/{route:?}"));
     };
@@ -6130,7 +6595,7 @@ mod tests {
             (ModuleKind::TriadSm80, 18, [6, 6, 6]),
             (ModuleKind::TriadSm90a, 6, [2, 2, 2]),
             (ModuleKind::TriadSm100, 36, [12, 12, 12]),
-            (ModuleKind::TriadSm120, 18, [6, 7, 5]),
+            (ModuleKind::TriadSm120, 30, [9, 10, 11]),
         ];
         let expected_total = expected.iter().map(|(_, count, _)| count).sum::<usize>();
         let mut all_symbols = std::collections::BTreeSet::new();
@@ -6174,6 +6639,19 @@ mod tests {
                             }
                         );
                     }
+                    super::Tf32PhysicalRoute::Sm120TmaFmaExactV1(_) => {
+                        assert_eq!(
+                            spec.instruction_family,
+                            ResolvedInstructionFamily::ScalarFma
+                        );
+                        assert_eq!(
+                            spec.instruction_shape,
+                            ResolvedInstructionShape { m: 1, n: 1, k: 1 }
+                        );
+                        assert_eq!(spec.operand_conversion, ResolvedOperandConversion::None);
+                        assert_eq!(spec.bk, super::SM120_FMA_BK);
+                        assert_eq!(spec.stages, 2);
+                    }
                     super::Tf32PhysicalRoute::Sm100Tcgen05Tf32TmaV1(_) => {
                         assert_eq!(spec.instruction_family, ResolvedInstructionFamily::Tcgen05);
                         assert_eq!(spec.instruction_shape.k, 8);
@@ -6186,7 +6664,9 @@ mod tests {
                         );
                     }
                 }
-                assert_ne!(spec.operand_conversion, ResolvedOperandConversion::None);
+                if !spec.route.is_exact_fma() {
+                    assert_ne!(spec.operand_conversion, ResolvedOperandConversion::None);
+                }
                 assert!(all_symbols.insert(spec.symbol), "duplicate {}", spec.symbol);
             }
         }

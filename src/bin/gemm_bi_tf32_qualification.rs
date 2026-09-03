@@ -122,7 +122,7 @@ fn expected_routes_for_cc(cc: (u32, u32)) -> Option<usize> {
         (8, 0 | 6 | 7 | 9) => Some(18),
         (9, 0) => Some(24),
         (10, 0 | 3) | (11, 0) => Some(54),
-        (12, 0 | 1) => Some(35),
+        (12, 0 | 1) => Some(36),
         _ => None,
     }
 }
@@ -479,8 +479,8 @@ mod tests {
 
     #[test]
     fn release_route_counts_include_every_sm120_route() {
-        assert_eq!(expected_routes_for_cc((12, 0)), Some(35));
-        assert_eq!(expected_routes_for_cc((12, 1)), Some(35));
+        assert_eq!(expected_routes_for_cc((12, 0)), Some(36));
+        assert_eq!(expected_routes_for_cc((12, 1)), Some(36));
     }
 
     fn contract_arguments() -> Vec<String> {

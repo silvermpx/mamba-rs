@@ -683,8 +683,7 @@ mod cuda_experiment {
     use std::sync::Arc;
 
     use cudarc::driver::{
-        CudaFunction, CudaGraph, CudaModule, CudaStream, DeviceRepr, LaunchConfig, PushKernelArg,
-        sys,
+        CudaFunction, CudaGraph, CudaStream, DeviceRepr, LaunchConfig, PushKernelArg, sys,
     };
     use mamba_rs::mamba_ssm::gpu::buffers::GpuBuffer;
     use mamba_rs::mamba_ssm::gpu::context::{BiGemmFamily, F32TriadPolicy, GpuCtx};
@@ -808,7 +807,6 @@ mod cuda_experiment {
     struct Runtime {
         production_ctx: GpuCtx,
         stream: Arc<CudaStream>,
-        module: Arc<CudaModule>,
         kernels: Vec<CudaFunction>,
     }
 
@@ -1011,7 +1009,6 @@ mod cuda_experiment {
         Ok(Runtime {
             production_ctx,
             stream,
-            module,
             kernels,
         })
     }
@@ -1360,14 +1357,14 @@ mod cuda_experiment {
             digests.push(digest);
             graphs.push(graph);
         }
-        for index in 0..fixture.arms.len() {
+        for (index, graph) in graphs.iter().enumerate() {
             let mut reference: Option<Vec<u32>> = None;
             for path in [PathKind::Eager, PathKind::Graph] {
                 for repeat in 0..CORRECTNESS_REPEATS {
                     fixture.output.reset(&runtime.stream)?;
                     match path {
                         PathKind::Eager => launch(runtime, fixture, index)?,
-                        PathKind::Graph => graphs[index].launch().map_err(|error| {
+                        PathKind::Graph => graph.launch().map_err(|error| {
                             format!(
                                 "launch {} graph: {error:?}",
                                 fixture.arms[index].kernel.symbol
@@ -1815,16 +1812,27 @@ mod cuda_experiment {
     /// One paired cohort for one arm on one cell. Reports both p50s and the
     /// speedup percentiles, then returns the speedup stats so the caller
     /// can decide which arm carries the cell.
-    fn paired(
-        runtime: &Runtime,
-        holder: &mut QualifiedPhysicalLaunch<'_>,
-        timing: &TimingFixture,
+    #[derive(Clone, Copy)]
+    struct Cohort {
         index: usize,
         path: PathKind,
         order: Order,
         windows: usize,
+    }
+
+    fn paired(
+        runtime: &Runtime,
+        holder: &mut QualifiedPhysicalLaunch<'_>,
+        timing: &TimingFixture,
+        cohort: Cohort,
         quiet: &QuietGpu,
     ) -> Result<(f64, f64, f64), String> {
+        let Cohort {
+            index,
+            path,
+            order,
+            windows,
+        } = cohort;
         let cell = timing.fixture.cell;
         let arm = &timing.fixture.arms[index];
         let production_probe = measure_production(runtime, holder, path, 4)?;
@@ -1901,10 +1909,12 @@ mod cuda_experiment {
                                 &runtime,
                                 &mut holder,
                                 &timing,
-                                index,
-                                path,
-                                order,
-                                windows,
+                                Cohort {
+                                    index,
+                                    path,
+                                    order,
+                                    windows,
+                                },
                                 &quiet,
                             )?;
                             worst_p50 = worst_p50.min(stats.1);

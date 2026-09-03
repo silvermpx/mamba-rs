@@ -463,6 +463,7 @@ fn sm120_blob() -> String {
         include_str!("../kernels/gemm_bi_triad/common.cuh"),
         include_str!("../kernels/gemm_bi_triad/epilogue.cuh"),
         include_str!("../kernels/gemm_bi_triad/sm120.cu"),
+        include_str!("../kernels/gemm_bi_triad/sm120_exact.cu"),
     ])
 }
 
@@ -638,6 +639,18 @@ fn sm120_tf32_symbols() -> Vec<String> {
     symbols.push("gemm_bi_tn_sm120_tma_mma_tf32_v1_m64n128_bk32_s4_pair".to_string());
     symbols.push("gemm_bi_tn_sm120_tma_mma_tf32_v1_m64n128_bk32_s3_pair_streamk".to_string());
     symbols.push("gemm_bi_nn_sm120_tma_mma_tf32_v1_m80n32_bk64_s2".to_string());
+    for (op, tiles) in [
+        ("nn", &["m128n64", "m64n128", "m64n64"][..]),
+        ("tn", &["m128n64", "m64n128", "m64n64"][..]),
+        ("nt", &["m128n64", "m64n128", "m64n64"][..]),
+    ] {
+        for tile in tiles {
+            symbols.push(format!("gemm_bi_{op}_sm120_tma_fma_v1_{tile}_bk16_s2"));
+        }
+    }
+    for tile in ["m128n64", "m64n128", "m64n64"] {
+        symbols.push(format!("gemm_bi_nt_sm120_tma_fma_v1_{tile}_bk16_s2_kvec"));
+    }
     symbols
 }
 
@@ -3622,7 +3635,7 @@ fn compiles_generic_sm120_triad_modules_with_exact_ptx_contract() {
             &ptx,
             emitted,
             &expected,
-            114,
+            126,
         )
         .unwrap();
 
@@ -3740,7 +3753,7 @@ fn compiles_generic_sm120_triad_modules_with_exact_ptx_contract() {
             );
             assert!(!entry.contains("call.uni"), "device call in {symbol}");
         }
-        assert_eq!(sm120_tf32_symbols().len(), 18);
+        assert_eq!(sm120_tf32_symbols().len(), 30);
         for symbol in sm120_tf32_symbols() {
             let entry = parsed.entry(&symbol);
             assert_compile_gate_entry_tokens(
@@ -3752,11 +3765,33 @@ fn compiles_generic_sm120_triad_modules_with_exact_ptx_contract() {
                     "fence.mbarrier_init.release.cluster",
                     "mbarrier.arrive.expect_tx.release.cta.shared::cta.b64",
                     "mbarrier.try_wait.parity.acquire.cta.shared::cta.b64",
-                    "cvt.rna.tf32.f32",
-                    "mma.sync.aligned.m16n8k8.row.col.f32.tf32.tf32.f32",
                 ],
             );
-            assert_compile_gate_entry_excludes(requested, entry, &[BF16_CORE, F16_CORE]);
+            // The exact-F32 routes multiply in scalar FMA and never round an
+            // operand; the TF32 routes convert and run the tensor core.
+            if symbol.contains("_tma_fma_v1_") {
+                assert_compile_gate_entry_tokens(requested, entry, &["fma.rn.f32"]);
+                assert_compile_gate_entry_excludes(
+                    requested,
+                    entry,
+                    &[
+                        BF16_CORE,
+                        F16_CORE,
+                        "cvt.rna.tf32.f32",
+                        "mma.sync.aligned.m16n8k8.row.col.f32.tf32.tf32.f32",
+                    ],
+                );
+            } else {
+                assert_compile_gate_entry_tokens(
+                    requested,
+                    entry,
+                    &[
+                        "cvt.rna.tf32.f32",
+                        "mma.sync.aligned.m16n8k8.row.col.f32.tf32.tf32.f32",
+                    ],
+                );
+                assert_compile_gate_entry_excludes(requested, entry, &[BF16_CORE, F16_CORE]);
+            }
             assert!(
                 compile_gate_ptx_tokens(&entry.body)
                     .into_iter()
@@ -3764,13 +3799,15 @@ fn compiles_generic_sm120_triad_modules_with_exact_ptx_contract() {
                 "{requested}/{symbol} is missing st.global opcode"
             );
             let parameters = ptx_parameters(&entry.text, &symbol);
-            // The stream-K kernel carries its slab and flag buffers ahead of
-            // the tensor maps; every other route keeps the five-argument ABI.
-            let expected_parameters = if symbol.ends_with("_pair_streamk") {
-                7
-            } else {
-                5
-            };
+            // The stream-K and exact-F32 kernels carry their slab and flag
+            // buffers ahead of the tensor maps; every other route keeps the
+            // five-argument ABI.
+            let expected_parameters =
+                if symbol.ends_with("_pair_streamk") || symbol.contains("_tma_fma_v1_") {
+                    7
+                } else {
+                    5
+                };
             assert_eq!(parameters.matches(".param").count(), expected_parameters);
             assert_eq!(
                 parameters

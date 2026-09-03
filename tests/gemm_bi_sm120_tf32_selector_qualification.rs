@@ -588,6 +588,29 @@ fn require_route(
     Ok(())
 }
 
+/// The exact-policy comparator is whatever the exact policy runs for the cell:
+/// the scalar module, or the SM120 exact family once the cell has a measured
+/// arm there. Either way no node may be a TF32 kernel.
+fn require_exact_route(launch: &QualifiedPhysicalLaunch<'_>) -> Result<(), String> {
+    let evidence = launch.evidence();
+    let module = evidence.uniform_module_kind();
+    let exact_module = matches!(
+        module,
+        Some(ModuleKind::TriadScalar | ModuleKind::TriadSm120)
+    );
+    let exact_symbols = evidence.nodes().iter().all(|node| {
+        !node.symbol.contains("tf32")
+            && (node.module_kind != ModuleKind::TriadSm120 || node.symbol.contains("_tma_fma_v1_"))
+    });
+    if !evidence.eager_graph_equal() || !exact_module || !exact_symbols {
+        return Err(format!(
+            "exact comparator route mismatch: {:?}",
+            evidence.nodes()
+        ));
+    }
+    Ok(())
+}
+
 fn portable_reference(ctx: &GpuCtx, cell: Cell) -> Result<Vec<u32>, String> {
     let spec = tf32_route_specs(ModuleKind::TriadSm80)
         .iter()
@@ -759,10 +782,12 @@ fn candidates(op: ResolvedGemmOp) -> Vec<Candidate> {
         })
         .collect::<Vec<_>>();
     candidates.extend(split_candidates(op));
+    // The exact-F32 SM120 routes share the module but not the TF32 numeric
+    // contract; the exact-family harness qualifies them, not this selector.
     candidates.extend(
         tf32_route_specs(ModuleKind::TriadSm120)
             .iter()
-            .filter(|spec| spec.op == op)
+            .filter(|spec| spec.op == op && !spec.route.is_exact_fma())
             .map(|spec| Candidate {
                 route: spec.route,
                 symbol: spec.symbol,
@@ -1317,7 +1342,7 @@ fn run_cell(device: &GpuDevice, cell: Cell, quiet: &QuietGpu) -> Result<CellResu
             PhysicalQualificationRoute::F32Policy(F32TriadPolicy::ExactScalarFmaV1),
         ),
     )?;
-    require_route(&scalar_gate, ModuleKind::TriadScalar, None)?;
+    require_exact_route(&scalar_gate)?;
     let scalar_nodes = format!("{:?}", scalar_gate.evidence().nodes());
     let scalar_reference_bits =
         eager_graph_bits(&mut scalar_gate, &scalar_ctx).map_err(|error| {
@@ -1612,26 +1637,21 @@ fn qualification_plan_is_exact() {
             .count(),
         3
     );
+    let tf32_routes = |op| {
+        tf32_route_specs(ModuleKind::TriadSm120)
+            .iter()
+            .filter(|spec| spec.op == op && !spec.route.is_exact_fma())
+            .count()
+    };
+    assert_eq!(tf32_routes(ResolvedGemmOp::Nn), 6);
+    assert_eq!(tf32_routes(ResolvedGemmOp::Tn), 7);
+    assert_eq!(tf32_routes(ResolvedGemmOp::Nt), 5);
     assert_eq!(
         tf32_route_specs(ModuleKind::TriadSm120)
             .iter()
-            .filter(|spec| spec.op == ResolvedGemmOp::Nn)
+            .filter(|spec| spec.route.is_exact_fma())
             .count(),
-        6
-    );
-    assert_eq!(
-        tf32_route_specs(ModuleKind::TriadSm120)
-            .iter()
-            .filter(|spec| spec.op == ResolvedGemmOp::Tn)
-            .count(),
-        7
-    );
-    assert_eq!(
-        tf32_route_specs(ModuleKind::TriadSm120)
-            .iter()
-            .filter(|spec| spec.op == ResolvedGemmOp::Nt)
-            .count(),
-        5
+        12
     );
     assert_eq!(candidates(ResolvedGemmOp::Nn).len(), 14);
     assert_eq!(candidates(ResolvedGemmOp::Tn).len(), 13);

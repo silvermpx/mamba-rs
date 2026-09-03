@@ -10,9 +10,9 @@ use super::contract::{
     F32_TF32_TUNING_REVISION, F32TriadAvailability, F32TriadOperands, F32TriadRequest,
     F32TriadSelection, F32TriadShape, Sm90aForcedRoute, Sm90aOp, Sm90aShape,
     Sm90aWarpgroupSchedule, Sm100ForcedRoute, Sm100TargetCandidate, Sm100TargetKind, Sm120Bk,
-    Sm120ForcedRoute, Sm120LaunchOperands, Sm120MapRequest, Sm120Op, Sm120PhysicalRoute,
-    Sm120Shape, Sm120Stages, Sm120TargetCandidate, Sm120Tile, Tf32PhysicalRoute,
-    Tf32QualifiedModule, tf32_kernel_spec, validate_sm120_map_request,
+    Sm120FmaRoute, Sm120FmaTile, Sm120ForcedRoute, Sm120LaunchOperands, Sm120MapRequest, Sm120Op,
+    Sm120PhysicalRoute, Sm120Shape, Sm120Stages, Sm120TargetCandidate, Sm120Tile,
+    Tf32PhysicalRoute, Tf32QualifiedModule, tf32_kernel_spec, validate_sm120_map_request,
 };
 use super::contract::{GemmDims, checked_mul3, checked_tile_grid, checked_usize};
 use crate::mamba_ssm::gpu::kernel_identity::DeviceCaps;
@@ -324,24 +324,24 @@ const SM120_TF32_QUALIFICATION_IDENTITY: Tf32AutoQualificationIdentity =
         optin_shared_bytes: 101_376,
         tensor_map_access: true,
         compile_key: [
-            230, 40, 84, 73, 153, 230, 12, 64, 140, 106, 10, 254, 141, 254, 217, 240, 113, 110, 40,
-            196, 58, 246, 61, 88, 30, 29, 176, 90, 12, 41, 189, 44,
+            112, 238, 69, 136, 32, 242, 124, 85, 78, 231, 125, 63, 137, 201, 144, 207, 0, 93, 126,
+            62, 86, 109, 196, 135, 234, 127, 136, 146, 46, 195, 54, 69,
         ],
         artifact_digest: [
-            152, 214, 12, 99, 106, 203, 225, 58, 51, 14, 184, 139, 62, 249, 170, 55, 150, 108, 153,
-            124, 126, 217, 206, 240, 30, 139, 155, 42, 209, 91, 151, 146,
+            80, 206, 171, 198, 77, 105, 232, 87, 90, 121, 116, 211, 68, 150, 5, 152, 12, 177, 180,
+            45, 222, 248, 149, 42, 206, 55, 37, 7, 60, 217, 4, 65,
         ],
         source_digest: [
-            31, 11, 33, 141, 232, 151, 110, 170, 101, 248, 95, 92, 226, 33, 244, 119, 120, 15, 243,
-            154, 202, 109, 145, 86, 44, 231, 74, 138, 2, 233, 162, 44,
+            101, 223, 188, 193, 100, 34, 155, 115, 243, 247, 111, 161, 80, 22, 226, 138, 58, 223,
+            154, 210, 50, 128, 48, 235, 31, 230, 217, 126, 227, 208, 26, 175,
         ],
         invocation_digest: [
-            230, 40, 84, 73, 153, 230, 12, 64, 140, 106, 10, 254, 141, 254, 217, 240, 113, 110, 40,
-            196, 58, 246, 61, 88, 30, 29, 176, 90, 12, 41, 189, 44,
+            112, 238, 69, 136, 32, 242, 124, 85, 78, 231, 125, 63, 137, 201, 144, 207, 0, 93, 126,
+            62, 86, 109, 196, 135, 234, 127, 136, 146, 46, 195, 54, 69,
         ],
         header_manifest_digest: [
-            237, 164, 204, 234, 133, 175, 152, 53, 113, 149, 152, 89, 52, 194, 151, 53, 153, 238,
-            11, 55, 117, 90, 218, 123, 105, 12, 58, 86, 27, 230, 83, 49,
+            144, 90, 202, 198, 154, 11, 239, 32, 177, 45, 241, 189, 47, 183, 11, 111, 139, 211,
+            143, 197, 48, 236, 2, 191, 245, 242, 177, 36, 191, 141, 145, 87,
         ],
         nvrtc_library_domain: [
             14, 13, 195, 250, 169, 151, 174, 150, 68, 46, 246, 47, 252, 2, 100, 13, 54, 26, 92, 80,
@@ -1069,7 +1069,12 @@ fn resolve_f32_triad_auto_impl(
 ) -> Result<F32TriadSelection, String> {
     request.shape.validate(request.op)?;
     match policy {
-        F32TriadPolicy::ExactScalarFmaV1 => Ok(F32TriadSelection::ScalarFmaV1),
+        F32TriadPolicy::ExactScalarFmaV1 => Ok(operands
+            .and_then(|operands| sm120_fma_exact_route(request, operands, availability))
+            .map_or(
+                F32TriadSelection::ScalarFmaV1,
+                F32TriadSelection::ExactSm120Fma,
+            )),
         F32TriadPolicy::AllowDeterministicTf32V1 => {
             if availability.portable.is_none() && availability.specialized.is_none() {
                 return Ok(F32TriadSelection::ScalarFmaV1);
@@ -1120,7 +1125,8 @@ pub fn resolve_tf32_forced(
         Tf32PhysicalRoute::Sm90aWgmmaTf32TmaV1(_)
         | Tf32PhysicalRoute::Sm100Tcgen05Tf32TmaV1(_)
         | Tf32PhysicalRoute::Sm120TmaMmaTf32RnaV1(_)
-        | Tf32PhysicalRoute::Sm120TmaMmaTf32RnaStreamKV1(_) => availability.specialized,
+        | Tf32PhysicalRoute::Sm120TmaMmaTf32RnaStreamKV1(_)
+        | Tf32PhysicalRoute::Sm120TmaFmaExactV1(_) => availability.specialized,
     }
     .ok_or_else(|| format!("forced TF32 route {route:?} has no qualified module"))?;
     ensure_tf32_binding_contract(binding, module_kind, dynamic_shared_bytes, route)?;
@@ -1224,13 +1230,200 @@ fn target_admits_route(binding: Tf32QualifiedModule, route: Tf32PhysicalRoute) -
                 | ((11, 0), "compute_110a", "sm_110a")
         ),
         Tf32PhysicalRoute::Sm120TmaMmaTf32RnaV1(_)
-        | Tf32PhysicalRoute::Sm120TmaMmaTf32RnaStreamKV1(_) => matches!(
+        | Tf32PhysicalRoute::Sm120TmaMmaTf32RnaStreamKV1(_)
+        | Tf32PhysicalRoute::Sm120TmaFmaExactV1(_) => matches!(
             (cc, target, device_target),
             ((12, 0), "compute_120", "sm_120")
                 | ((12, 1), "compute_121", "sm_121")
                 | ((12, 1), "compute_120", "sm_120")
         ),
     }
+}
+
+/// One exact-F32 SM120 cell measured under the exact policy: the shape in
+/// the performance-matrix convention with contiguous strides, and the arm
+/// that won its official 101-window qualification.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Sm120FmaMeasuredCell {
+    op: ResolvedGemmOp,
+    shape: F32TriadShape,
+    route: Sm120FmaRoute,
+}
+
+const fn sm120_fma_cell(
+    op: ResolvedGemmOp,
+    dims: (usize, usize, usize),
+    tile: Sm120FmaTile,
+    kvec: bool,
+    splits: u8,
+) -> Sm120FmaMeasuredCell {
+    let (m, k, n) = dims;
+    let (lda, ldb, ldc) = match op {
+        ResolvedGemmOp::Nn => (k, n, n),
+        ResolvedGemmOp::Tn => (k, n, n),
+        ResolvedGemmOp::Nt => (n, n, k),
+    };
+    Sm120FmaMeasuredCell {
+        op,
+        shape: F32TriadShape {
+            m,
+            k,
+            n,
+            lda,
+            ldb,
+            ldc,
+        },
+        route: Sm120FmaRoute { tile, kvec, splits },
+    }
+}
+
+/// The nine hot cells, each carrying the arm that won its official
+/// qualification against the scalar production route (1.22x to 1.60x).
+const SM120_FMA_MEASURED_CELLS_CC120_170: [Sm120FmaMeasuredCell; 9] = [
+    sm120_fma_cell(
+        ResolvedGemmOp::Nn,
+        (2_048, 768, 3_072),
+        Sm120FmaTile::M128N64,
+        false,
+        1,
+    ),
+    sm120_fma_cell(
+        ResolvedGemmOp::Nn,
+        (2_048, 1_536, 768),
+        Sm120FmaTile::M128N64,
+        false,
+        4,
+    ),
+    sm120_fma_cell(
+        ResolvedGemmOp::Nn,
+        (4_621, 384, 1_928),
+        Sm120FmaTile::M64N128,
+        false,
+        1,
+    ),
+    sm120_fma_cell(
+        ResolvedGemmOp::Tn,
+        (2_048, 768, 3_072),
+        Sm120FmaTile::M64N128,
+        false,
+        1,
+    ),
+    sm120_fma_cell(
+        ResolvedGemmOp::Tn,
+        (2_048, 1_536, 768),
+        Sm120FmaTile::M128N64,
+        false,
+        2,
+    ),
+    sm120_fma_cell(
+        ResolvedGemmOp::Tn,
+        (4_621, 384, 1_928),
+        Sm120FmaTile::M128N64,
+        false,
+        5,
+    ),
+    sm120_fma_cell(
+        ResolvedGemmOp::Nt,
+        (2_048, 768, 3_072),
+        Sm120FmaTile::M128N64,
+        true,
+        5,
+    ),
+    sm120_fma_cell(
+        ResolvedGemmOp::Nt,
+        (2_048, 1_536, 768),
+        Sm120FmaTile::M64N128,
+        false,
+        2,
+    ),
+    sm120_fma_cell(
+        ResolvedGemmOp::Nt,
+        (4_621, 384, 1_928),
+        Sm120FmaTile::M128N64,
+        true,
+        3,
+    ),
+];
+
+/// Shapes past the measured cells take the exact family only when they fill
+/// the device with whole tiles on their own: at least three tiles per
+/// multiprocessor, no split, and a reduction long enough for the pipeline
+/// to matter.
+const SM120_FMA_GENERIC_TILES_PER_MULTIPROCESSOR: usize = 3;
+const SM120_FMA_GENERIC_MIN_EDGE: usize = 128;
+const SM120_FMA_GENERIC_MIN_REDUCTION: usize = 256;
+
+fn sm120_fma_generic_route(
+    request: F32TriadRequest,
+    multiprocessor_count: u32,
+) -> Option<Sm120FmaRoute> {
+    let (tile, kvec) = match request.op {
+        ResolvedGemmOp::Nn => (Sm120FmaTile::M128N64, false),
+        ResolvedGemmOp::Tn => (Sm120FmaTile::M64N128, false),
+        ResolvedGemmOp::Nt => (Sm120FmaTile::M128N64, true),
+    };
+    let rows = request.shape.output_rows(request.op);
+    let columns = request.shape.output_columns(request.op);
+    let reduction = request.shape.reduction(request.op);
+    if rows < SM120_FMA_GENERIC_MIN_EDGE
+        || columns < SM120_FMA_GENERIC_MIN_EDGE
+        || reduction < SM120_FMA_GENERIC_MIN_REDUCTION
+    {
+        return None;
+    }
+    let (bm, bn) = tile.dims();
+    let tiles = rows
+        .div_ceil(bm as usize)
+        .checked_mul(columns.div_ceil(bn as usize))?;
+    let required =
+        (multiprocessor_count as usize).checked_mul(SM120_FMA_GENERIC_TILES_PER_MULTIPROCESSOR)?;
+    (tiles >= required).then_some(Sm120FmaRoute {
+        tile,
+        kvec,
+        splits: 1,
+    })
+}
+
+fn f32_pointer_is_tma_aligned(pointer: super::contract::CUptr) -> bool {
+    pointer != 0 && pointer.is_multiple_of(16)
+}
+
+/// The exact-F32 SM120 route for a request under the exact policy: the
+/// specialized module must be bound on a CC 12.0 device, every operand must
+/// sit on a 16-byte boundary with float4 leading dimensions (the tensor
+/// maps demand it), and the shape must be a measured cell or fill the
+/// device on its own. Anything else keeps the scalar routes.
+pub(super) fn sm120_fma_exact_route(
+    request: F32TriadRequest,
+    operands: F32TriadOperands,
+    availability: F32TriadAvailability,
+) -> Option<Sm120FmaRoute> {
+    let qualified = availability.specialized?;
+    if qualified.module_kind != ModuleKind::TriadSm120
+        || qualified.device.compute_capability != (12, 0)
+        || !qualified.device_caps.tensor_map_access
+    {
+        return None;
+    }
+    let shape = request.shape;
+    if shape.reduction(request.op) == 0
+        || !f32_pointer_is_tma_aligned(operands.a)
+        || !f32_pointer_is_tma_aligned(operands.b)
+        || !f32_pointer_is_tma_aligned(operands.output)
+        || !shape.lda.is_multiple_of(4)
+        || !shape.ldb.is_multiple_of(4)
+    {
+        return None;
+    }
+    let measured = SM120_FMA_MEASURED_CELLS_CC120_170
+        .iter()
+        .find(|cell| cell.op == request.op && cell.shape == shape)
+        .map(|cell| cell.route)
+        .filter(|_| qualified.device.multiprocessor_count == 170);
+    let route = measured
+        .or_else(|| sm120_fma_generic_route(request, qualified.device.multiprocessor_count))?;
+    super::launch::sm120_fma_launch_plan(request, route).ok()?;
+    Some(route)
 }
 
 pub const SM90A_AUTO_CELLS: &[Sm90aForcedRoute] = &[];
@@ -6243,6 +6436,9 @@ mod tf32_tests {
                 );
             }
 
+            // The exact policy owns the exact-F32 SM120 family: a measured
+            // cell resolves to its qualified arm whatever the TF32
+            // qualification identity says, everything else stays scalar.
             assert_eq!(
                 resolve_f32_triad_auto_with_operands(
                     F32TriadPolicy::ExactScalarFmaV1,
@@ -6251,8 +6447,91 @@ mod tf32_tests {
                     sm120_availability_for(cohort.identity),
                 )
                 .unwrap(),
+                expected_exact_selection(
+                    request,
+                    operands,
+                    sm120_availability_for(cohort.identity)
+                ),
+            );
+        }
+    }
+
+    /// The exact-policy selection the measured-cell table implies: the
+    /// official arm for a measured shape on a bound CC 12.0 module with
+    /// tensor-map-aligned operands, otherwise the scalar routes.
+    fn expected_exact_selection(
+        request: F32TriadRequest,
+        operands: F32TriadOperands,
+        availability: F32TriadAvailability,
+    ) -> F32TriadSelection {
+        super::sm120_fma_exact_route(request, operands, availability).map_or(
+            F32TriadSelection::ScalarFmaV1,
+            F32TriadSelection::ExactSm120Fma,
+        )
+    }
+
+    #[test]
+    fn exact_policy_measured_cells_resolve_to_their_official_arms() {
+        let identity = sm120_cohort((13, 2)).identity;
+        let availability = sm120_availability_for(identity);
+        for cell in super::SM120_FMA_MEASURED_CELLS_CC120_170 {
+            let request = F32TriadRequest {
+                op: cell.op,
+                shape: cell.shape,
+            };
+            let operands = F32TriadOperands {
+                output: 0x1000,
+                a: 0x2000,
+                b: 0x3000,
+                bias: None,
+                alpha: 1.0,
+                beta: if cell.op == ResolvedGemmOp::Tn {
+                    1.0
+                } else {
+                    0.0
+                },
+            };
+            assert_eq!(
+                resolve_f32_triad_auto_with_operands(
+                    F32TriadPolicy::ExactScalarFmaV1,
+                    request,
+                    operands,
+                    availability,
+                )
+                .unwrap(),
+                F32TriadSelection::ExactSm120Fma(cell.route),
+                "{:?} {:?}",
+                cell.op,
+                cell.shape
+            );
+            // A misaligned operand or leading dimension keeps the scalar
+            // routes: the tensor maps cannot describe it.
+            let misaligned = F32TriadOperands {
+                a: 0x2004,
+                ..operands
+            };
+            assert_eq!(
+                resolve_f32_triad_auto_with_operands(
+                    F32TriadPolicy::ExactScalarFmaV1,
+                    request,
+                    misaligned,
+                    availability,
+                )
+                .unwrap(),
                 F32TriadSelection::ScalarFmaV1,
             );
+            // The TF32 policy never selects the exact family on its own.
+            assert!(!matches!(
+                resolve_f32_triad_auto_with_operands(
+                    F32TriadPolicy::AllowDeterministicTf32V1,
+                    request,
+                    operands,
+                    availability,
+                )
+                .unwrap(),
+                F32TriadSelection::ExactSm120Fma(_)
+                    | F32TriadSelection::Tf32(super::Tf32PhysicalRoute::Sm120TmaFmaExactV1(_))
+            ));
         }
     }
 
@@ -6355,8 +6634,8 @@ mod tf32_tests {
 
     #[test]
     fn tf32_tn_underfill_qualification_uses_current_tuning_revision() {
-        assert_eq!(TUNING_TABLE_REVISION, 37);
-        assert_eq!(F32_TF32_TUNING_REVISION, 37);
+        assert_eq!(TUNING_TABLE_REVISION, 38);
+        assert_eq!(F32_TF32_TUNING_REVISION, 38);
     }
 
     #[test]
@@ -7205,7 +7484,7 @@ mod tf32_tests {
                     exact_availability,
                 )
                 .unwrap(),
-                F32TriadSelection::ScalarFmaV1,
+                expected_exact_selection(measured, operands, exact_availability),
             );
 
             for mutate in sm120_identity_mutations() {
@@ -7278,23 +7557,23 @@ mod tf32_tests {
         assert!(identity.tensor_map_access);
         assert_eq!(
             digest_hex(&identity.compile_key),
-            "e628544999e60c408c6a0afe8dfed9f0716e28c43af63d581e1db05a0c29bd2c"
+            "70ee458820f27c554ee77d3f89c990cf005d7e3e566dc487ea7f88922ec33645"
         );
         assert_eq!(
             digest_hex(&identity.artifact_digest),
-            "98d60c636acbe13a330eb88b3ef9aa37966c997c7ed9cef01e8b9b2ad15b9792"
+            "50ceabc64d69e8575a7974d3449605980cb1b42ddef8952ace3725073cd90441"
         );
         assert_eq!(
             digest_hex(&identity.source_digest),
-            "1f0b218de8976eaa65f85f5ce221f477780ff39aca6d91562ce74a8a02e9a22c"
+            "65dfbcc164229b73f3f76fa15016e28a3adf9ad2328030eb1fe6d97ee3d01aaf"
         );
         assert_eq!(
             digest_hex(&identity.invocation_digest),
-            "e628544999e60c408c6a0afe8dfed9f0716e28c43af63d581e1db05a0c29bd2c"
+            "70ee458820f27c554ee77d3f89c990cf005d7e3e566dc487ea7f88922ec33645"
         );
         assert_eq!(
             digest_hex(&identity.header_manifest_digest),
-            "eda4ccea85af98357195985934c2973599ee0b37755ada7b690c3a561be65331"
+            "905acac69a0bef20b12df1bd2fb70b6f8bd38fc530ec02bff5f2b124bf8d9157"
         );
         assert_eq!(
             digest_hex(&identity.nvrtc_library_domain),

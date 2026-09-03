@@ -179,6 +179,7 @@ struct Sm120KernelParams {
 }
 
 unsafe impl DeviceRepr for Sm120KernelParams {}
+unsafe impl DeviceRepr for Sm120FmaKernelParams {}
 
 pub(super) const GEMM_BI_ZERO_REDUCTION_PARAMS_SIZE: usize =
     std::mem::size_of::<SgbZeroReductionParams>();
@@ -368,6 +369,7 @@ enum PreparedTf32Params {
     Sm90a(Sm90aTf32KernelParams),
     Sm100(Sm100KernelParams),
     Sm120(Sm120KernelParams),
+    Sm120Fma(Sm120FmaKernelParams),
 }
 
 #[derive(Clone, Copy)]
@@ -2418,6 +2420,91 @@ fn tf32_params(
                 ldc,
             })
         }
+        Tf32PhysicalRoute::Sm120TmaFmaExactV1(exact) => {
+            // The exact kernels speak in output rows, output columns and the
+            // reduction, whatever the operation stores as m, k and n.
+            let plan = sm120_fma_launch_plan(request, exact)?;
+            PreparedTf32Params::Sm120Fma(Sm120FmaKernelParams {
+                alpha: operands.alpha,
+                beta: operands.beta,
+                m: checked_i32(shape.output_rows(request.op), "exact-F32 rows")?,
+                n: checked_i32(shape.output_columns(request.op), "exact-F32 columns")?,
+                k: checked_i32(shape.reduction(request.op), "exact-F32 reduction")?,
+                ldc,
+                splits: i32::from(exact.splits),
+                tiles_per_split: checked_i32(plan.tiles_per_split, "exact-F32 tiles per split")?,
+            })
+        }
+    })
+}
+
+/// The launch of an exact-F32 SM120 route: one unit per (tile, split), the
+/// slabs the non-owning splits publish, and one flag per slab.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct Sm120FmaLaunchPlan {
+    pub tiles: usize,
+    pub tiles_per_split: usize,
+    pub units: u32,
+    pub slab_elements: usize,
+    pub flag_elements: usize,
+}
+
+pub(super) fn sm120_fma_launch_plan(
+    request: F32TriadRequest,
+    route: Sm120FmaRoute,
+) -> Result<Sm120FmaLaunchPlan, String> {
+    request.shape.validate(request.op)?;
+    route.validate(request.op)?;
+    let (bm, bn) = route.tile.dims();
+    let rows = request.shape.output_rows(request.op);
+    let columns = request.shape.output_columns(request.op);
+    let reduction = request.shape.reduction(request.op);
+    if reduction == 0 {
+        return Err("exact-F32 SM120 route requires a nonzero reduction".into());
+    }
+    let tiles = rows
+        .div_ceil(bm as usize)
+        .checked_mul(columns.div_ceil(bn as usize))
+        .ok_or_else(|| invalid_gemm_dimensions("exact-F32 tile count overflows usize"))?;
+    let splits = usize::from(route.splits);
+    let k_tiles = reduction.div_ceil(SM120_FMA_BK as usize);
+    let tiles_per_split = k_tiles.div_ceil(splits);
+    if tiles_per_split
+        .checked_mul(splits - 1)
+        .is_none_or(|covered| covered >= k_tiles)
+    {
+        return Err(invalid_gemm_dimensions(
+            "exact-F32 split leaves a reduction range empty",
+        ));
+    }
+    let units = tiles
+        .checked_mul(splits)
+        .and_then(|units| u32::try_from(units).ok())
+        .filter(|units| *units <= i32::MAX as u32)
+        .ok_or_else(|| {
+            invalid_gemm_dimensions("exact-F32 unit count exceeds the kernel's range")
+        })?;
+    let slab_elements = tiles
+        .checked_mul((bm * bn) as usize)
+        .and_then(|slab| slab.checked_mul(splits - 1))
+        .ok_or_else(|| invalid_gemm_dimensions("exact-F32 slab extent overflows usize"))?;
+    if slab_elements > SPLITK_SCRATCH_CAP {
+        return Err(invalid_gemm_dimensions(
+            "exact-F32 slabs exceed the fixed workspace",
+        ));
+    }
+    let flag_elements = tiles * (splits - 1);
+    if flag_elements > TF32_SPLITK_COUNTER_CAP {
+        return Err(invalid_gemm_dimensions(
+            "exact-F32 flags exceed the fixed counter workspace",
+        ));
+    }
+    Ok(Sm120FmaLaunchPlan {
+        tiles,
+        tiles_per_split,
+        units,
+        slab_elements,
+        flag_elements,
     })
 }
 
@@ -2660,11 +2747,16 @@ fn tf32_resolved_route(
             PhysicalGemmBackend::Sm120TmaMmaTf32RnaStreamKV1,
             ResolvedNumericContract::Sm120TmaMmaTf32RnaStreamKV1,
         ),
+        Tf32PhysicalRoute::Sm120TmaFmaExactV1(exact) => (
+            PhysicalGemmBackend::Sm120TmaFmaExactV1,
+            sm120_fma_numeric_contract(exact),
+        ),
     };
     let ownership = match spec.route {
         Tf32PhysicalRoute::Sm120TmaMmaTf32RnaStreamKV1(_) => {
             ResolvedOutputOwnership::OwnerCtaPerOutputTileStreamKFixedOrderV1
         }
+        Tf32PhysicalRoute::Sm120TmaFmaExactV1(exact) => sm120_fma_ownership(exact),
         _ => ResolvedOutputOwnership::OneCtaPerOutputTileV1,
     };
     ResolvedGemmRoute {
@@ -3015,6 +3107,9 @@ fn prepare_tf32_f32(
     if matches!(route, Tf32PhysicalRoute::Sm120TmaMmaTf32RnaStreamKV1(_)) {
         return prepare_tf32_streamk_f32(ctx, request, operands, output_resources, route);
     }
+    if route.is_exact_fma() {
+        return prepare_sm120_fma_f32(ctx, request, operands, output_resources, route);
+    }
     let spec = tf32_kernel_spec(request.op, route)?;
     let binding = f32_map_binding(ctx, route)?;
     let allocation_domain = binding.allocation_domain;
@@ -3178,6 +3273,112 @@ fn prepare_tf32_streamk_f32(
     })
 }
 
+/// Prepares an exact-F32 SM120 launch. It reuses the stream-K shape of a
+/// prepared launch: tensor maps, a slab and flag workspace, one grid of
+/// units. With one split the workspace goes unused and the chain matches
+/// the scalar route bit for bit.
+fn prepare_sm120_fma_f32(
+    ctx: &GpuCtx,
+    request: F32TriadRequest,
+    operands: F32TriadOperands,
+    output_resources: F32LaunchResourceSnapshot,
+    route: Tf32PhysicalRoute,
+) -> Result<PreparedF32TriadLaunch, String> {
+    use cudarc::driver::DevicePtr;
+
+    let exact = route
+        .exact_fma()
+        .ok_or_else(|| "exact-F32 preparation requires an exact route".to_string())?;
+    let spec = tf32_kernel_spec(request.op, route)?;
+    let plan = sm120_fma_launch_plan(request, exact)?;
+    let binding = f32_map_binding(ctx, route)?;
+    let allocation_domain = binding.allocation_domain;
+    let resources = output_resources.with_inputs(request, operands, allocation_domain)?;
+    let scratch_buffer = ctx.kernels.splitk_scratch_buf(&ctx.stream)?;
+    let (partial, _) = scratch_buffer.device_ptr(&ctx.stream);
+    let flag_buffer = ctx
+        .kernels
+        .triad_kernels()
+        .tf32_splitk_counter_buf(&ctx.stream)?;
+    let (flags, _) = flag_buffer.device_ptr(&ctx.stream);
+    let resources = resources.with_scratch(
+        Some((partial, (SPLITK_SCRATCH_CAP as u64) * 4)),
+        None,
+        Some((flags, (TF32_SPLITK_COUNTER_CAP as u64) * 4)),
+        allocation_domain,
+    )?;
+    let maps = prepare_specialized_tf32_maps(ctx, request, operands, route, binding)?;
+    let origins = maps.origins();
+    let maps_digest = maps.identity_digest();
+    let resources_digest = resources.digest(request, operands, maps_digest);
+    let config = cudarc::driver::LaunchConfig {
+        grid_dim: (plan.units, 1, 1),
+        block_dim: (spec.threads, 1, 1),
+        shared_mem_bytes: spec.dynamic_shared_bytes,
+    };
+    let arguments_digest =
+        tf32_kernel_arguments_digest(request, operands, spec.symbol, maps_digest);
+    let resolved = tf32_resolved_route(
+        request,
+        spec,
+        binding,
+        Tf32LaunchDigests {
+            maps: maps_digest,
+            resources: resources_digest,
+            arguments: arguments_digest,
+        },
+        false,
+        config,
+    );
+    let resolved = ResolvedGemmRoute {
+        numeric_contract: sm120_fma_numeric_contract(exact),
+        ownership: sm120_fma_ownership(exact),
+        ..resolved
+    };
+    let routes = vec![resolved].into_boxed_slice();
+    let resolved_launch_set = build_resolved_gemm_launch_set(&routes)?;
+    let managed_epoch = resources.managed_epoch();
+    Ok(PreparedF32TriadLaunch {
+        context_token: ctx.instance_token(),
+        stream_token: ctx.stream_token(),
+        request,
+        operands,
+        resources,
+        managed_epoch,
+        routes,
+        resolved_launch_set,
+        kind: PreparedF32Kind::Tf32StreamK {
+            route,
+            maps,
+            params: tf32_params(request, operands, origins, route)?,
+            config,
+            plan: Tf32StreamKLaunchPlan {
+                grid: plan.units,
+                partial_elements: plan.slab_elements,
+                flag_elements: plan.flag_elements,
+            },
+            workspace: Tf32StreamKWorkspace { partial, flags },
+        },
+    })
+}
+
+/// One split keeps the scalar chain; more splits fold fixed-order partials.
+fn sm120_fma_numeric_contract(route: Sm120FmaRoute) -> ResolvedNumericContract {
+    if route.splits == 1 {
+        ResolvedNumericContract::ScalarFmaV1
+    } else {
+        ResolvedNumericContract::ScalarFmaFixedSplitFoldV1
+    }
+}
+
+fn sm120_fma_ownership(route: Sm120FmaRoute) -> ResolvedOutputOwnership {
+    if route.splits == 1 {
+        ResolvedOutputOwnership::OneCtaPerOutputTileV1
+    } else {
+        ResolvedOutputOwnership::OwnerCtaPerOutputTileFixedSplitFoldV1
+    }
+}
+
 fn prepare_tf32_splitk_f32(
     ctx: &GpuCtx,
     request: F32TriadRequest,
@@ -3313,6 +3514,13 @@ pub(in crate::mamba_ssm::gpu) fn prepare_f32_triad(
         F32TriadSelection::Tf32(route) => {
             prepare_tf32_f32(ctx, request, operands, output_resources, route)
         }
+        F32TriadSelection::ExactSm120Fma(route) => prepare_tf32_f32(
+            ctx,
+            request,
+            operands,
+            output_resources,
+            Tf32PhysicalRoute::Sm120TmaFmaExactV1(route),
+        ),
     }
 }
 
@@ -3980,9 +4188,6 @@ pub(in crate::mamba_ssm::gpu) fn prepare_prepared_f32_direct_graph_sequence<
             workspace,
             ..
         } => {
-            let PreparedTf32Params::Sm120(params) = params else {
-                return Err("prepared TF32 stream-K route and parameter ABI disagree".into());
-            };
             let maps = maps.maps();
             arguments.push(output)?;
             arguments.push(workspace.partial)?;
@@ -3990,7 +4195,13 @@ pub(in crate::mamba_ssm::gpu) fn prepare_prepared_f32_direct_graph_sequence<
             arguments.push(maps[0])?;
             arguments.push(maps[1])?;
             arguments.push(bias)?;
-            arguments.push(*params)?;
+            match params {
+                PreparedTf32Params::Sm120(params) => arguments.push(*params)?,
+                PreparedTf32Params::Sm120Fma(params) => arguments.push(*params)?,
+                _ => {
+                    return Err("prepared TF32 stream-K route and parameter ABI disagree".into());
+                }
+            }
             ctx.kernels
                 .triad_kernels()
                 .tf32_function(route.symbol)
@@ -4573,8 +4784,19 @@ fn validate_tf32_streamk_prepared_layout(
     if resolved.symbol != spec.symbol {
         return Err("prepared TF32 stream-K route changed".into());
     }
-    let expected =
-        tf32_streamk_launch_plan(prepared.request, spec, ctx.kernels.multiprocessor_count())?;
+    let expected = match route.exact_fma() {
+        Some(exact) => {
+            let plan = sm120_fma_launch_plan(prepared.request, exact)?;
+            Tf32StreamKLaunchPlan {
+                grid: plan.units,
+                partial_elements: plan.slab_elements,
+                flag_elements: plan.flag_elements,
+            }
+        }
+        None => {
+            tf32_streamk_launch_plan(prepared.request, spec, ctx.kernels.multiprocessor_count())?
+        }
+    };
     if expected.grid != plan.grid
         || expected.partial_elements != plan.partial_elements
         || expected.flag_elements != plan.flag_elements
@@ -4787,38 +5009,58 @@ unsafe fn enqueue_tf32_raw<O: PhysicalLaunchObserver>(
         (
             Tf32PhysicalRoute::Sm120TmaMmaTf32RnaV1(_)
             | Tf32PhysicalRoute::Sm120TmaMmaTf32RnaStreamKV1(_),
-            PreparedTf32Params::Sm120(params),
-        ) => {
+            PreparedTf32Params::Sm120(_),
+        )
+        | (Tf32PhysicalRoute::Sm120TmaFmaExactV1(_), PreparedTf32Params::Sm120Fma(_)) => {
             let maps = launch
                 .maps
                 .ok_or_else(|| "SM120 TF32 launch has no tensor maps".to_string())?
                 .maps();
-            // The stream-K kernel takes its slab and flag buffers ahead of the
-            // tensor maps; a workspace-less launch is the single-CTA
-            // qualification probe, which deals whole tiles only.
-            let streamk = matches!(
-                launch.route,
-                Tf32PhysicalRoute::Sm120TmaMmaTf32RnaStreamKV1(_)
-            );
-            if streamk && launch.streamk.is_none() && launch.config.grid_dim != (1, 1, 1) {
-                return Err(
-                    "SM120 TF32 stream-K launch without a workspace must be one CTA".into(),
-                );
-            }
+            // The stream-K and exact-F32 kernels take their slab and flag
+            // buffers ahead of the tensor maps. A workspace-less launch is
+            // legal only when nothing is ever folded: the single-CTA stream-K
+            // qualification probe, which deals whole tiles only, and any
+            // exact-F32 launch with one split, which keeps the scalar chain.
+            let workspace_first = match launch.route {
+                Tf32PhysicalRoute::Sm120TmaMmaTf32RnaStreamKV1(_) => {
+                    if launch.streamk.is_none() && launch.config.grid_dim != (1, 1, 1) {
+                        return Err(
+                            "SM120 TF32 stream-K launch without a workspace must be one CTA".into(),
+                        );
+                    }
+                    true
+                }
+                Tf32PhysicalRoute::Sm120TmaFmaExactV1(exact) => {
+                    if launch.streamk.is_none() && exact.splits != 1 {
+                        return Err("exact-F32 SM120 split launch requires a workspace".into());
+                    }
+                    true
+                }
+                _ => false,
+            };
             let workspace = launch.streamk.unwrap_or(Tf32StreamKWorkspace {
                 partial: 0,
                 flags: 0,
             });
+            let params = launch.params;
             let mut builder = stream.launch_builder(function);
             builder.arg(&output);
-            if streamk {
+            if workspace_first {
                 builder.arg(&workspace.partial);
                 builder.arg(&workspace.flags);
             }
             builder.arg(&maps[0]);
             builder.arg(&maps[1]);
             builder.arg(&bias);
-            builder.arg(&params);
+            match &params {
+                PreparedTf32Params::Sm120(params) => {
+                    builder.arg(params);
+                }
+                PreparedTf32Params::Sm120Fma(params) => {
+                    builder.arg(params);
+                }
+                _ => return Err("prepared TF32 route and parameter ABI disagree".into()),
+            }
             unsafe {
                 enqueue_with_physical_observation(
                     observer,
@@ -12486,7 +12728,7 @@ mod prepared_f32_launch_tests {
         assert_eq!(resolved.tensor_maps_digest, [0; 32]);
         assert_eq!(resolved.resources_digest, [2; 32]);
         assert_eq!(resolved.launch.arguments_digest, [3; 32]);
-        assert_eq!(resolved.tuning_table_revision, 37);
+        assert_eq!(resolved.tuning_table_revision, 38);
 
         let eager = build_resolved_gemm_launch_set(&[resolved]).unwrap();
         let graph = build_resolved_gemm_launch_set(&[resolved]).unwrap();
@@ -12553,7 +12795,7 @@ mod prepared_f32_launch_tests {
         assert_eq!(resolved.tensor_maps_digest, [1; 32]);
         assert_eq!(resolved.resources_digest, [2; 32]);
         assert_eq!(resolved.launch.arguments_digest, [3; 32]);
-        assert_eq!(resolved.tuning_table_revision, 37);
+        assert_eq!(resolved.tuning_table_revision, 38);
 
         let launch_set = build_resolved_gemm_launch_set(&[resolved]).unwrap();
         assert_eq!(launch_set.launch_count, 1);

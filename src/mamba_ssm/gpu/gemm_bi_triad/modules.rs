@@ -296,10 +296,11 @@ fn tf32_driver_parameter_count(module_kind: ModuleKind, symbol: &str) -> usize {
         .iter()
         .any(|spec| {
             spec.symbol == symbol
-                && matches!(
-                    spec.route,
-                    super::contract::Tf32PhysicalRoute::Sm120TmaMmaTf32RnaStreamKV1(_)
-                )
+                && (spec.route.is_exact_fma()
+                    || matches!(
+                        spec.route,
+                        super::contract::Tf32PhysicalRoute::Sm120TmaMmaTf32RnaStreamKV1(_)
+                    ))
         });
     if streamk {
         TF32_STREAMK_DRIVER_PARAMETER_COUNT
@@ -1207,7 +1208,7 @@ fn validate_tf32_ptx_inventory(module_kind: ModuleKind, ptx: &str) -> Result<(),
     let actual: Vec<_> = symbols
         .iter()
         .map(String::as_str)
-        .filter(|symbol| symbol.contains("_tf32_v1_"))
+        .filter(|symbol| symbol.contains("_tf32_v1_") || symbol.contains("_tma_fma_v1_"))
         .collect();
     let unique: BTreeSet<_> = actual.iter().copied().collect();
     if actual.len() != unique.len() || unique != expected {
@@ -2400,11 +2401,20 @@ fn validate_tf32_parameter_abi(
         let is_u64 = |line: &str| line.starts_with(".param .u64 ");
         let map = format!(".param .align {map_alignment} .b8 ");
         let is_map = |line: &str| line.starts_with(&map) && line.contains("[128]");
-        if matches!(
+        let seven_parameter_bundle = if kernel_spec.route.is_exact_fma() {
+            Some(32)
+        } else if matches!(
             kernel_spec.route,
             super::contract::Tf32PhysicalRoute::Sm120TmaMmaTf32RnaStreamKV1(_)
         ) {
+            Some(bundle_size)
+        } else {
+            None
+        };
+        if let Some(bundle_size) = seven_parameter_bundle {
             // Output, slabs, flags, two tensor maps, bias, parameter bundle.
+            let is_bundle =
+                |line: &str| line.starts_with(bundle) && line.contains(&format!("[{bundle_size}]"));
             if declarations.len() != 7 {
                 return Err(format!(
                     "{} must have seven ABI parameters",
@@ -3059,8 +3069,19 @@ fn validate_sm120_entry_features(parsed: &ParsedPtx) -> Result<(), String> {
     for spec in super::contract::tf32_route_specs(ModuleKind::TriadSm120) {
         let entry = parsed_ptx_entry_ref(parsed, spec.symbol)?;
         require_ptx_entry_tokens("TriadSm120", entry, COMMON)?;
-        require_ptx_entry_tokens("TriadSm120", entry, &["cvt.rna.tf32.f32", TF32_CORE])?;
-        reject_ptx_entry_tokens("TriadSm120", entry, &[BF16_CORE, F16_CORE])?;
+        if spec.route.is_exact_fma() {
+            // The exact routes multiply in scalar FMA and never round an
+            // operand: no tensor-core instruction and no TF32 conversion.
+            require_ptx_entry_tokens("TriadSm120", entry, &["fma.rn.f32"])?;
+            reject_ptx_entry_tokens(
+                "TriadSm120",
+                entry,
+                &[BF16_CORE, F16_CORE, TF32_CORE, "cvt.rna.tf32.f32"],
+            )?;
+        } else {
+            require_ptx_entry_tokens("TriadSm120", entry, &["cvt.rna.tf32.f32", TF32_CORE])?;
+            reject_ptx_entry_tokens("TriadSm120", entry, &[BF16_CORE, F16_CORE])?;
+        }
         require_ptx_entry_opcode("TriadSm120", entry, "st.global opcode", |token| {
             token.starts_with("st.global.")
         })?;
@@ -3082,7 +3103,7 @@ fn validate_sm120_ptx(arch: &str, ptx: &str) -> Result<(), String> {
         .map(|spec| spec.symbol)
         .collect();
     expected.extend(super::contract::tf32_module_symbols(ModuleKind::TriadSm120));
-    let parsed = validate_exact_ptx_exports("TriadSm120", 114, &expected, ptx)?;
+    let parsed = validate_exact_ptx_exports("TriadSm120", 126, &expected, ptx)?;
     validate_sm120_entry_features(&parsed)?;
     let ptx = strip_ptx_comments(ptx)?;
     if ptx_has_unquoted_token(&ptx, |token| {
@@ -3156,6 +3177,7 @@ fn validate_tf32_feature_instructions(module_kind: ModuleKind, ptx: &str) -> Res
     };
     if super::contract::tf32_route_specs(module_kind)
         .iter()
+        .filter(|kernel_spec| !kernel_spec.route.is_exact_fma())
         .any(|kernel_spec| {
             (
                 kernel_spec.instruction_family,
@@ -3165,6 +3187,23 @@ fn validate_tf32_feature_instructions(module_kind: ModuleKind, ptx: &str) -> Res
     {
         return Err(format!(
             "{module_kind:?} TF32 route metadata has the wrong conversion contract"
+        ));
+    }
+    if super::contract::tf32_route_specs(module_kind)
+        .iter()
+        .filter(|kernel_spec| kernel_spec.route.is_exact_fma())
+        .any(|kernel_spec| {
+            (
+                kernel_spec.instruction_family,
+                kernel_spec.operand_conversion,
+            ) != (
+                ResolvedInstructionFamily::ScalarFma,
+                ResolvedOperandConversion::None,
+            )
+        })
+    {
+        return Err(format!(
+            "{module_kind:?} exact-F32 route metadata has the wrong conversion contract"
         ));
     }
     let required: &[&str] = match module_kind {
@@ -3182,9 +3221,18 @@ fn validate_tf32_feature_instructions(module_kind: ModuleKind, ptx: &str) -> Res
         ],
         _ => &[],
     };
+    const EXACT_REQUIRED: &[&str] = &[
+        "cp.async.bulk.tensor.2d.shared::cta.global.tile.mbarrier::complete_tx::bytes",
+        "fma.rn.f32",
+    ];
     let parsed = parse_ptx(ptx)?;
     for kernel_spec in super::contract::tf32_route_specs(module_kind) {
         let entry = &parsed_ptx_entry_ref(&parsed, kernel_spec.symbol)?.text;
+        let required = if kernel_spec.route.is_exact_fma() {
+            EXACT_REQUIRED
+        } else {
+            required
+        };
         for instruction in required {
             if !ptx_has_unquoted_token(entry, |token| token == *instruction) {
                 return Err(format!(
@@ -3447,6 +3495,11 @@ const SM120_SOURCE_FRAGMENTS: &[SourceFragment] = &[
     SourceFragment {
         logical_name: "kernels/gemm_bi_triad/sm120.cu",
         source: include_str!("../../../../kernels/gemm_bi_triad/sm120.cu"),
+        allowed_quoted_includes: &[],
+    },
+    SourceFragment {
+        logical_name: "kernels/gemm_bi_triad/sm120_exact.cu",
+        source: include_str!("../../../../kernels/gemm_bi_triad/sm120_exact.cu"),
         allowed_quoted_includes: &[],
     },
 ];
@@ -4778,6 +4831,14 @@ fn tf32_register_cap(module_kind: ModuleKind, symbol: &str) -> Result<u32, Strin
         // The stream-K kernel keeps one CTA per multiprocessor by design and
         // spends the register file on its pipeline state and boundary code.
         ModuleKind::TriadSm120 if symbol.ends_with("_pair_streamk") => Ok(240),
+        // The exact FMA routes hold a 64-accumulator microtile; the NT
+        // k-vector arms also keep a float4 B fragment per column.
+        ModuleKind::TriadSm120 if symbol.contains("_tma_fma_v1_") && symbol.ends_with("_kvec") => {
+            Ok(super::contract::SM120_FMA_KVEC_REGISTER_CAP)
+        }
+        ModuleKind::TriadSm120 if symbol.contains("_tma_fma_v1_") => {
+            Ok(super::contract::SM120_FMA_REGISTER_CAP)
+        }
         ModuleKind::TriadSm100 | ModuleKind::TriadSm120 => Ok(128),
         _ => Err(format!(
             "no TF32 register gate for {module_kind:?}/{symbol}"
@@ -5835,10 +5896,13 @@ mod tests {
                 ptx.push_str(".param .align 4 .b8 bundle[32]\n) {}\n");
             } else {
                 ptx.push_str(".param .u64 output,\n");
-                if matches!(
-                    kernel_spec.route,
-                    super::super::contract::Tf32PhysicalRoute::Sm120TmaMmaTf32RnaStreamKV1(_)
-                ) {
+                let exact = kernel_spec.route.is_exact_fma();
+                if exact
+                    || matches!(
+                        kernel_spec.route,
+                        super::super::contract::Tf32PhysicalRoute::Sm120TmaMmaTf32RnaStreamKV1(_)
+                    )
+                {
                     ptx.push_str(".param .u64 partial,\n.param .u64 flags,\n");
                 }
                 ptx.push_str(&format!(
@@ -5846,7 +5910,8 @@ mod tests {
                      .param .align {map_alignment} .b8 b_map[128],\n"
                 ));
                 ptx.push_str(".param .u64 bias,\n");
-                ptx.push_str(".param .align 4 .b8 bundle[40]\n) {}\n");
+                let bundle = if exact { 32 } else { 40 };
+                ptx.push_str(&format!(".param .align 4 .b8 bundle[{bundle}]\n) {{}}\n"));
             }
         }
         ptx
@@ -6486,7 +6551,9 @@ mod tests {
                 }
             }
             ModuleKind::TriadSm120 => {
-                if symbol.contains("_tf32_v1_") {
+                if symbol.contains("_tma_fma_v1_") {
+                    instructions.push("fma.rn.f32");
+                } else if symbol.contains("_tf32_v1_") {
                     instructions.extend([
                         "cvt.rna.tf32.f32",
                         "mma.sync.aligned.m16n8k8.row.col.f32.tf32.tf32.f32",
@@ -6582,7 +6649,7 @@ mod tests {
         let expected_count = match module_kind {
             ModuleKind::TriadSm90a => 18,
             ModuleKind::TriadSm100 => 108,
-            ModuleKind::TriadSm120 => 114,
+            ModuleKind::TriadSm120 => 126,
             _ => unreachable!(),
         };
         assert_eq!(symbols.len(), expected_count);
@@ -7244,7 +7311,7 @@ mod tests {
             (ModuleKind::TriadSm80, 18),
             (ModuleKind::TriadSm90a, 6),
             (ModuleKind::TriadSm100, 36),
-            (ModuleKind::TriadSm120, 18),
+            (ModuleKind::TriadSm120, 30),
         ] {
             let kernel_specs = super::super::contract::tf32_route_specs(module_kind);
             let symbols: BTreeSet<_> =
@@ -7568,6 +7635,7 @@ mod tests {
         "kernels/gemm_bi_triad/common.cuh",
         "kernels/gemm_bi_triad/epilogue.cuh",
         "kernels/gemm_bi_triad/sm120.cu",
+        "kernels/gemm_bi_triad/sm120_exact.cu",
     ];
 
     const SCALAR_SYMBOLS: &[&str] = &[
@@ -8475,10 +8543,15 @@ mod tests {
         ] {
             let mut ptx = ".version 9.0\n.target sm_90a\n".to_string();
             for symbol in super::super::contract::tf32_module_symbols(module_kind) {
-                ptx.push_str(&format!(
-                    ".entry {symbol}() {{\n{}\n}}\n",
-                    required.join("\n")
-                ));
+                let body: &[&str] = if symbol.contains("_tma_fma_v1_") {
+                    &[
+                        "cp.async.bulk.tensor.2d.shared::cta.global.tile.mbarrier::complete_tx::bytes",
+                        "fma.rn.f32",
+                    ]
+                } else {
+                    &required
+                };
+                ptx.push_str(&format!(".entry {symbol}() {{\n{}\n}}\n", body.join("\n")));
             }
             validate_tf32_feature_instructions(
                 module_kind,

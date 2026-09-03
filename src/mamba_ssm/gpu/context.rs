@@ -1030,6 +1030,7 @@ impl GpuCtx {
             | ResolvedNumericContract::ScalarFmaTnNarrowSplitMPartialV1
             | ResolvedNumericContract::ScalarFmaTnNarrowSplitMF64ReduceV1
             | ResolvedNumericContract::ScalarFmaTnSplitMF64ReduceV1
+            | ResolvedNumericContract::ScalarFmaFixedSplitFoldV1
             | ResolvedNumericContract::ZeroReductionEpilogueF32V1 => {
                 NumericContractSet::TRIAD_SCALAR_FMA_V1
             }
@@ -1073,7 +1074,8 @@ impl GpuCtx {
             }
             PhysicalGemmBackend::Sm120TmaMma16V1
             | PhysicalGemmBackend::Sm120TmaMmaTf32RnaV1
-            | PhysicalGemmBackend::Sm120TmaMmaTf32RnaStreamKV1 => ModuleKind::TriadSm120,
+            | PhysicalGemmBackend::Sm120TmaMmaTf32RnaStreamKV1
+            | PhysicalGemmBackend::Sm120TmaFmaExactV1 => ModuleKind::TriadSm120,
         };
         if route.module_kind != expected_module || route.artifact.module_kind != expected_module {
             return Err(format!(
@@ -1091,7 +1093,8 @@ impl GpuCtx {
                 | super::kernel_identity::ResolvedNumericContract::Sm120TmaMmaTf32RnaV1
                 | super::kernel_identity::ResolvedNumericContract::Sm120TmaMmaTf32RnaStreamKV1
                 | super::kernel_identity::ResolvedNumericContract::ZeroReductionEpilogueF32V1
-        ) && route.module_kind != ModuleKind::TriadScalar;
+        ) && route.module_kind != ModuleKind::TriadScalar
+            || route.backend == super::kernel_identity::PhysicalGemmBackend::Sm120TmaFmaExactV1;
         if uses_qualified_tf32_module {
             let binding = self
                 .live_qualified_tf32_binding(route.module_kind)
@@ -1427,6 +1430,7 @@ const fn scalar_backend_supports_logical_f32(backend: PhysicalGemmBackend) -> bo
             | PhysicalGemmBackend::ScalarFmaSplitKF32ReduceV1
             | PhysicalGemmBackend::ScalarFmaTnNarrowSplitMPartialV1
             | PhysicalGemmBackend::ScalarFmaTnSplitMF64ReduceV1
+            | PhysicalGemmBackend::Sm120TmaFmaExactV1
     )
 }
 
@@ -1498,6 +1502,7 @@ mod tests {
             PhysicalGemmBackend::ScalarFmaSplitKF32ReduceV1,
             PhysicalGemmBackend::ScalarFmaTnNarrowSplitMPartialV1,
             PhysicalGemmBackend::ScalarFmaTnSplitMF64ReduceV1,
+            PhysicalGemmBackend::Sm120TmaFmaExactV1,
         ] {
             assert!(scalar_backend_supports_logical_f32(backend), "{backend:?}");
         }

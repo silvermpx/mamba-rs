@@ -2917,9 +2917,13 @@ fn route_specs(cc: (u32, u32)) -> Result<Vec<&'static Tf32KernelSpec>, String> {
             ));
         }
     };
+    // The exact-F32 SM120 routes share the module but not the TF32 numeric
+    // contract; their qualification is the exact-family harness, not the
+    // TF32 selector.
     Ok(SM80_TF32_ROUTE_SPECS
         .iter()
         .chain(specialized.iter())
+        .filter(|spec| !spec.route.is_exact_fma())
         .collect())
 }
 

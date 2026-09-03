@@ -7934,7 +7934,7 @@ fn gemm_bi_sm120_tf32_forced_hot_performance() {
         .filter(|shape| SM120_TF32_HOT_SHAPES.contains(&shape.name));
     let cells = tf32_route_specs(ModuleKind::TriadSm120)
         .iter()
-        .filter(|spec| spec.op == ResolvedGemmOp::Tn)
+        .filter(|spec| spec.op == ResolvedGemmOp::Tn && !spec.route.is_exact_fma())
         .flat_map(|spec| {
             shapes.clone().map(|shape| Cell {
                 route: Route::Tf32Forced(spec),
@@ -8003,7 +8003,7 @@ fn gemm_bi_sm120_tf32_forced_nn_nt_hot_performance() {
     for op in [ResolvedGemmOp::Nn, ResolvedGemmOp::Nt] {
         for spec in tf32_route_specs(ModuleKind::TriadSm120)
             .iter()
-            .filter(|spec| spec.op == op)
+            .filter(|spec| spec.op == op && !spec.route.is_exact_fma())
         {
             for shape in shapes.iter().copied() {
                 cells.push(Cell {
@@ -8666,8 +8666,22 @@ fn sm120_tf32_hot_suite_totals_follow_the_exact_route_inventory() {
         .iter()
         .filter(|shape| SM120_TF32_HOT_SHAPES.contains(&shape.name))
         .count();
+    // The exact-F32 routes share the module but belong to the exact policy;
+    // the TF32 hot suite times the TF32 routes only.
     let specs = tf32_route_specs(ModuleKind::TriadSm120);
-    let routes = |op| specs.iter().filter(|spec| spec.op == op).count();
+    let routes = |op| {
+        specs
+            .iter()
+            .filter(|spec| spec.op == op && !spec.route.is_exact_fma())
+            .count()
+    };
+    assert_eq!(
+        specs
+            .iter()
+            .filter(|spec| spec.route.is_exact_fma())
+            .count(),
+        12
+    );
 
     assert_eq!(shapes, 5);
     assert_eq!(routes(ResolvedGemmOp::Nn), 6);

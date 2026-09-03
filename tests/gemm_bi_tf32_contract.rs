@@ -1274,7 +1274,15 @@ fn expected_ptx_parameters(
             parameter(3, "u64", 8, None),
             parameter(4, "b8", 32, Some(4)),
         ]
-    } else if symbol.contains("_streamk") {
+    } else if symbol.contains("_streamk") || symbol.contains("_tma_fma_v1_") {
+        // The exact-F32 routes share the stream-K parameter order with a
+        // 32-byte bundle: output rows, columns, reduction, output stride,
+        // split count, k tiles per split behind alpha and beta.
+        let bundle = if symbol.contains("_tma_fma_v1_") {
+            32
+        } else {
+            40
+        };
         vec![
             parameter(0, "u64", 8, None),
             parameter(1, "u64", 8, None),
@@ -1282,7 +1290,7 @@ fn expected_ptx_parameters(
             parameter(3, "b8", 128, Some(tensor_map_alignment)),
             parameter(4, "b8", 128, Some(tensor_map_alignment)),
             parameter(5, "u64", 8, None),
-            parameter(6, "b8", 40, Some(4)),
+            parameter(6, "b8", bundle, Some(4)),
         ]
     } else {
         vec![
@@ -2033,6 +2041,18 @@ fn tf32_resource_caps(symbol: &str) -> (u64, u64) {
     if symbol.ends_with("_s3_pair_streamk") {
         // One resident CTA per multiprocessor owns the whole register file.
         return (255, 73_856);
+    }
+    if symbol.contains("_tma_fma_v1_") {
+        // Two dense 16-deep stages plus one mbarrier per stage; the NT
+        // k-vector arms keep a float4 B fragment per column and run two
+        // blocks per multiprocessor.
+        let shared = if symbol.contains("_m64n64_") {
+            16_400
+        } else {
+            24_592
+        };
+        let registers = if symbol.ends_with("_kvec") { 255 } else { 168 };
+        return (registers, shared);
     }
     if symbol.contains("_m80n32_bk64_s2") {
         return (128, 57_472);
@@ -13306,7 +13326,9 @@ fn hardware_sm110_tf32_runtime_and_performance_gate() {
 #[test]
 #[ignore = "requires exact CC 12.0 and the full TF32 runtime/performance qualification corpus"]
 fn hardware_sm120_tf32_runtime_and_performance_gate() {
-    run_hardware_qualification((12, 0), 35);
+    // Eighteen portable routes plus the eighteen SM120 TF32 routes; the
+    // exact-F32 SM120 routes are not TF32 qualification candidates.
+    run_hardware_qualification((12, 0), 36);
 }
 
 #[test]
