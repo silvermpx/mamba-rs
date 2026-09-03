@@ -1666,9 +1666,13 @@ const fn sm120_fma_cell(
     }
 }
 
-/// The nine hot cells, each carrying the arm that won its official
-/// qualification against the scalar production route (1.22x to 1.60x).
-const SM120_FMA_MEASURED_CELLS_CC120_170: [Sm120FmaMeasuredCell; 9] = [
+/// The measured cells, each carrying the arm that won its qualification:
+/// the nine research projections against the scalar production route
+/// (1.22x to 1.60x, internal/perf/sm120-exact-nn-wide-20260903), and the
+/// classifier serve and training-batch projections against what the exact
+/// policy resolved before them (1.21x to 2.07x,
+/// internal/perf/sm120-exact-wide-product-20260903).
+const SM120_FMA_MEASURED_CELLS_CC120_170: [Sm120FmaMeasuredCell; 18] = [
     sm120_fma_cell(
         ResolvedGemmOp::Nn,
         (2_048, 768, 3_072),
@@ -1732,13 +1736,78 @@ const SM120_FMA_MEASURED_CELLS_CC120_170: [Sm120FmaMeasuredCell; 9] = [
         true,
         3,
     ),
+    sm120_fma_cell(
+        ResolvedGemmOp::Nn,
+        (4_621, 768, 384),
+        Sm120FmaTile::M64N64,
+        false,
+        2,
+    ),
+    sm120_fma_cell(
+        ResolvedGemmOp::Nn,
+        (4_621, 1_024, 384),
+        Sm120FmaTile::M64N64,
+        false,
+        2,
+    ),
+    sm120_fma_cell(
+        ResolvedGemmOp::Nn,
+        (10_400, 384, 384),
+        Sm120FmaTile::M128N64,
+        false,
+        1,
+    ),
+    sm120_fma_cell(
+        ResolvedGemmOp::Nn,
+        (10_400, 768, 384),
+        Sm120FmaTile::M128N64,
+        false,
+        1,
+    ),
+    sm120_fma_cell(
+        ResolvedGemmOp::Tn,
+        (10_400, 384, 1_536),
+        Sm120FmaTile::M64N128,
+        false,
+        5,
+    ),
+    sm120_fma_cell(
+        ResolvedGemmOp::Tn,
+        (4_096, 3_072, 1_536),
+        Sm120FmaTile::M64N128,
+        false,
+        2,
+    ),
+    sm120_fma_cell(
+        ResolvedGemmOp::Nt,
+        (10_400, 384, 1_536),
+        Sm120FmaTile::M128N64,
+        false,
+        1,
+    ),
+    sm120_fma_cell(
+        ResolvedGemmOp::Nt,
+        (10_400, 384, 384),
+        Sm120FmaTile::M64N64,
+        false,
+        1,
+    ),
+    sm120_fma_cell(
+        ResolvedGemmOp::Nt,
+        (4_621, 768, 384),
+        Sm120FmaTile::M64N64,
+        false,
+        1,
+    ),
 ];
 
-/// Shapes past the measured cells take the exact family only when they fill
-/// the device with whole tiles on their own: at least three tiles per
+/// Shapes past the measured cells take the exact family when they fill the
+/// device with whole tiles on their own: at least one tile per
 /// multiprocessor, no split, and a reduction long enough for the pipeline
-/// to matter.
-const SM120_FMA_GENERIC_TILES_PER_MULTIPROCESSOR: usize = 3;
+/// to matter. The floor was three; the product-shape screen showed the
+/// family beating the scalar route at 1.3 tiles per multiprocessor (1.68x
+/// on the 4621x384 output) and at 2.9 (1.81x on the 10400x384 output).
+const SM120_FMA_GENERIC_TILES_PER_MULTIPROCESSOR: usize = 1;
 const SM120_FMA_GENERIC_MIN_EDGE: usize = 128;
 const SM120_FMA_GENERIC_MIN_REDUCTION: usize = 256;
 
@@ -7920,7 +7989,9 @@ mod tf32_tests {
                 .unwrap(),
                 F32TriadSelection::ScalarFmaV1,
             );
-            // The TF32 policy never selects the exact family on its own.
+            // Under the TF32 policy a measured cell takes its TF32 route when
+            // the cohort has one and the exact family otherwise; it never
+            // falls through to the bare scalar route.
             assert!(!matches!(
                 resolve_f32_triad_auto_with_operands(
                     F32TriadPolicy::AllowDeterministicTf32V1,
@@ -7929,7 +8000,7 @@ mod tf32_tests {
                     availability,
                 )
                 .unwrap(),
-                F32TriadSelection::ExactSm120Fma(_)
+                F32TriadSelection::ScalarFmaV1
                     | F32TriadSelection::Tf32(super::Tf32PhysicalRoute::Sm120TmaFmaExactV1(_))
             ));
         }

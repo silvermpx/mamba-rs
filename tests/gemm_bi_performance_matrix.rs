@@ -41,9 +41,9 @@ const TARGET_WINDOW_MS: f64 = 5.0;
 const FROZEN_ITERATION_FORMAT: &str = "gemm-bi-frozen-iterations.v1";
 const FROZEN_ITERATION_SUITE: &str = "gemm_bi_canonical_performance";
 const EDGE_FROZEN_ITERATION_SUITE: &str = "gemm_bi_deterministic_performance_edges";
-const CANONICAL_INVENTORY_COUNT: usize = 652;
+const CANONICAL_INVENTORY_COUNT: usize = 742;
 const CANONICAL_INVENTORY_DIGEST: &str =
-    "cdfe923e3b00710e2cd52a9e942961b64d7f9d7b6b9ff24eebb202858526ac5d";
+    "2731392c3df82a8485e86a26e9cd13bbd79c47bc8c7030ffb5007ba1b28c1b9d";
 const FROZEN_ITERATION_HEADER: &str = "cell_id\teager_iterations\tgraph_iterations";
 const QUALIFICATION_CELL_IDS_ENV: &str = "GEMM_BI_QUAL_CELL_IDS";
 const EDGE_QUALIFICATION_CELL_IDS_ENV: &str = "GEMM_BI_EDGE_QUAL_CELL_IDS";
@@ -62,7 +62,7 @@ struct Shape {
     dims: (usize, usize, usize),
 }
 
-const SHAPES: [Shape; 17] = [
+const SHAPES: [Shape; 22] = [
     Shape {
         name: "sq64",
         dims: (64, 64, 64),
@@ -130,6 +130,27 @@ const SHAPES: [Shape; 17] = [
     Shape {
         name: "prism_in_proj",
         dims: (4621, 384, 1928),
+    },
+    // The classifier serve projections and the production training batch.
+    Shape {
+        name: "prism_out_proj",
+        dims: (4621, 768, 384),
+    },
+    Shape {
+        name: "prism_input_proj",
+        dims: (4621, 1024, 384),
+    },
+    Shape {
+        name: "batch_in_proj",
+        dims: (10400, 384, 1536),
+    },
+    Shape {
+        name: "batch_input_proj",
+        dims: (10400, 384, 384),
+    },
+    Shape {
+        name: "batch_out_proj",
+        dims: (10400, 768, 384),
     },
 ];
 
@@ -8223,8 +8244,8 @@ fn frozen_iteration_manifest_is_strict_and_round_trips() {
     assert!(rendered.starts_with(concat!(
         "format\tgemm-bi-frozen-iterations.v1\n",
         "suite\tgemm_bi_canonical_performance\n",
-        "inventory_count\t652\n",
-        "inventory_digest\tcdfe923e3b00710e2cd52a9e942961b64d7f9d7b6b9ff24eebb202858526ac5d\n",
+        "inventory_count\t742\n",
+        "inventory_digest\t2731392c3df82a8485e86a26e9cd13bbd79c47bc8c7030ffb5007ba1b28c1b9d\n",
         "cell_id\teager_iterations\tgraph_iterations\n",
         "f32_policy_exact/nn/sq64/contiguous\t17\t31\n",
     )));
@@ -8233,7 +8254,7 @@ fn frozen_iteration_manifest_is_strict_and_round_trips() {
 
     for changed in [
         rendered.replacen("suite\tgemm_bi_canonical_performance", "suite\tother", 1),
-        rendered.replacen("inventory_count\t652", "inventory_count\t651", 1),
+        rendered.replacen("inventory_count\t742", "inventory_count\t741", 1),
         rendered.replacen(CANONICAL_INVENTORY_DIGEST, &"0".repeat(64), 1),
     ] {
         assert!(parse_frozen_iterations(&changed, &cells).is_err());
@@ -8559,8 +8580,8 @@ fn inventory_includes_cached_f32_and_forced_production_cells() {
 fn canonical_inventory_count_order_and_digest_are_frozen() {
     let cells = build_cells();
     let ids = cells.iter().copied().map(cell_id).collect::<Vec<_>>();
-    assert_eq!(ids.len(), 652);
-    assert_eq!(ids.iter().collect::<BTreeSet<_>>().len(), 652);
+    assert_eq!(ids.len(), 742);
+    assert_eq!(ids.iter().collect::<BTreeSet<_>>().len(), 742);
     assert_eq!(ids.first().unwrap(), "f32_policy_exact/nn/sq64/contiguous");
     assert_eq!(
         ids.last().unwrap(),
@@ -8568,7 +8589,7 @@ fn canonical_inventory_count_order_and_digest_are_frozen() {
     );
     assert_eq!(
         hex_digest(canonical_inventory_digest(&cells)),
-        "cdfe923e3b00710e2cd52a9e942961b64d7f9d7b6b9ff24eebb202858526ac5d"
+        "2731392c3df82a8485e86a26e9cd13bbd79c47bc8c7030ffb5007ba1b28c1b9d"
     );
 }
 
@@ -8594,9 +8615,9 @@ fn every_cell_has_physical_evidence() {
 
     assert_eq!(
         (f32_policy, half_policy, half_forced, tf32_forced),
-        (102, 204, 166, 180)
+        (132, 264, 166, 180)
     );
-    assert_eq!(f32_policy + half_policy + half_forced + tf32_forced, 652);
+    assert_eq!(f32_policy + half_policy + half_forced + tf32_forced, 742);
 }
 
 #[test]
@@ -8980,7 +9001,7 @@ fn cublas_denominator_inventory_is_full_unique_and_ordered() {
     assert_eq!(ids.first().map(String::as_str), Some("cublas/f32/nn/sq64"));
     assert_eq!(
         ids.last().map(String::as_str),
-        Some("cublas/f16/nt/prism_in_proj")
+        Some("cublas/f16/nt/batch_out_proj")
     );
     assert_eq!(ids.iter().collect::<BTreeSet<_>>().len(), ids.len());
 }
