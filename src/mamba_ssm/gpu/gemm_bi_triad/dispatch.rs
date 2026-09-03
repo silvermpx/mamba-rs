@@ -1477,6 +1477,26 @@ const SM120_TF32_EVIDENCE_COHORTS: &[Tf32AutoEvidenceCohort] = &[
     },
 ];
 
+/// No SM90a board has frozen a TF32 cohort yet; the family declines to the
+/// portable ladder until one does.
+const SM90A_TF32_EVIDENCE_COHORTS: &[Tf32AutoEvidenceCohort] = &[];
+
+/// No SM100-family board has frozen a TF32 cohort yet; the family declines
+/// to the portable ladder until one does.
+const SM100_TF32_EVIDENCE_COHORTS: &[Tf32AutoEvidenceCohort] = &[];
+
+/// The frozen TF32 evidence cohorts of the specialized module family a
+/// board binds, with the family's name for the decline report.
+fn tf32_evidence_cohorts(
+    module: Tf32QualifiedModule,
+) -> (&'static str, &'static [Tf32AutoEvidenceCohort]) {
+    match module.module_kind {
+        ModuleKind::TriadSm90a => ("SM90a", SM90A_TF32_EVIDENCE_COHORTS),
+        ModuleKind::TriadSm100 => ("SM100", SM100_TF32_EVIDENCE_COHORTS),
+        _ => ("SM120", SM120_TF32_EVIDENCE_COHORTS),
+    }
+}
+
 fn matching_tf32_cohort(
     module: Tf32QualifiedModule,
     cohorts: &[Tf32AutoEvidenceCohort],
@@ -1510,23 +1530,24 @@ fn measured_tf32_route_with_operands(
     tuning_revision: u16,
 ) -> Option<Tf32PhysicalRoute> {
     if let Some(module) = availability.specialized
-        && matching_tf32_cohort(module, SM120_TF32_EVIDENCE_COHORTS).is_none()
+        && let (family, cohorts) = tf32_evidence_cohorts(module)
+        && matching_tf32_cohort(module, cohorts).is_none()
     {
         static NO_COHORT: std::sync::Once = std::sync::Once::new();
         crate::mamba_ssm::gpu::diagnostics::warn_once(&NO_COHORT, || {
-            let newest = SM120_TF32_EVIDENCE_COHORTS
+            let newest = cohorts
                 .last()
                 .and_then(|cohort| cohort.identity.mismatch(module))
-                .unwrap_or("no cohort is frozen");
+                .unwrap_or("no cohort is frozen for this family");
             format!(
-                "no SM120 TF32 evidence cohort matches this stack (newest cohort differs at: \
+                "no {family} TF32 evidence cohort matches this stack (newest cohort differs at: \
                  {newest}); the exact f32 family serves every TF32 request until a \
                  requalification is frozen"
             )
         });
     }
     if let Some(module) = availability.specialized
-        && let Some(cohort) = matching_tf32_cohort(module, SM120_TF32_EVIDENCE_COHORTS)
+        && let Some(cohort) = matching_tf32_cohort(module, tf32_evidence_cohorts(module).1)
     {
         let route = measured_tf32_cell(request, operands, tuning_revision, cohort.cells)?;
         if cohort.identity == SM120_TF32_QUALIFICATION_IDENTITY
@@ -8000,6 +8021,45 @@ mod tf32_tests {
     }
 
     #[test]
+    fn tf32_cohorts_follow_the_bound_module_family() {
+        let sm120 = qualified_module(
+            ModuleKind::TriadSm120,
+            "compute_120",
+            "sm_120",
+            (12, 0),
+            true,
+            101_376,
+        );
+        let sm90a = qualified_module(
+            ModuleKind::TriadSm90a,
+            "sm_90a",
+            "sm_90a",
+            (9, 0),
+            true,
+            232_448,
+        );
+        let sm100 = qualified_module(
+            ModuleKind::TriadSm100,
+            "compute_100a",
+            "sm_100a",
+            (10, 0),
+            true,
+            232_448,
+        );
+        let (family, cohorts) = super::tf32_evidence_cohorts(sm120);
+        assert_eq!(family, "SM120");
+        assert!(!cohorts.is_empty());
+        // The families without a measured board hold no cohort yet, so the
+        // search declines them instead of reading the SM120 evidence.
+        for (module, expected) in [(sm90a, "SM90a"), (sm100, "SM100")] {
+            let (family, cohorts) = super::tf32_evidence_cohorts(module);
+            assert_eq!(family, expected);
+            assert!(cohorts.is_empty());
+            assert!(super::matching_tf32_cohort(module, cohorts).is_none());
+        }
+    }
+
+    #[test]
     fn sm120_tf32_cuda_12_8_identity_matches_the_literal_qualification_manifest() {
         let identity = sm120_cohort((12, 8)).identity;
         assert_eq!(identity.module_kind, ModuleKind::TriadSm120);
@@ -10857,7 +10917,7 @@ mod tf32_tests {
     }
 
     #[test]
-    fn portable_sm110_accepts_the_generic_target_transaction() {
+    fn portable_sm110_accepts_the_arch_specific_target_transaction() {
         let route = Tf32PhysicalRoute::MmaTf32RnaV1(Tf32PortableRoute {
             tile: Tf32PortableTile::M16N32,
             stages: Tf32PortableStages::S4,
