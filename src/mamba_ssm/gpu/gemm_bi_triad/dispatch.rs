@@ -1069,12 +1069,9 @@ fn resolve_f32_triad_auto_impl(
 ) -> Result<F32TriadSelection, String> {
     request.shape.validate(request.op)?;
     match policy {
-        F32TriadPolicy::ExactScalarFmaV1 => Ok(operands
-            .and_then(|operands| sm120_fma_exact_route(request, operands, availability))
-            .map_or(
-                F32TriadSelection::ScalarFmaV1,
-                F32TriadSelection::ExactSm120Fma,
-            )),
+        F32TriadPolicy::ExactScalarFmaV1 => {
+            Ok(exact_or_scalar_selection(request, operands, availability))
+        }
         F32TriadPolicy::AllowDeterministicTf32V1 => {
             if availability.portable.is_none() && availability.specialized.is_none() {
                 return Ok(F32TriadSelection::ScalarFmaV1);
@@ -1089,14 +1086,31 @@ fn resolve_f32_triad_auto_impl(
                 None => None,
             };
             let Some(route) = route else {
-                return Ok(F32TriadSelection::ScalarFmaV1);
+                return Ok(exact_or_scalar_selection(request, operands, availability));
             };
             match resolve_tf32_forced(request, availability, route) {
                 Ok(route) => Ok(F32TriadSelection::Tf32(route)),
-                Err(_) => Ok(F32TriadSelection::ScalarFmaV1),
+                Err(_) => Ok(exact_or_scalar_selection(request, operands, availability)),
             }
         }
     }
+}
+
+/// The exact-F32 family is the floor under both policies. A shape with no
+/// measured TF32 route still runs on the SM120 exact routes when the operands
+/// admit them, and only falls through to the plain scalar chain when they do
+/// not: allowing TF32 must never select something slower than forbidding it.
+fn exact_or_scalar_selection(
+    request: F32TriadRequest,
+    operands: Option<F32TriadOperands>,
+    availability: F32TriadAvailability,
+) -> F32TriadSelection {
+    operands
+        .and_then(|operands| sm120_fma_exact_route(request, operands, availability))
+        .map_or(
+            F32TriadSelection::ScalarFmaV1,
+            F32TriadSelection::ExactSm120Fma,
+        )
 }
 
 pub fn resolve_tf32_forced(
@@ -5812,6 +5826,16 @@ mod tf32_tests {
         }
     }
 
+    /// TF32 fail-closed: a request or operand set that drifts off a measured
+    /// cell may still run on the exact family, which carries its own
+    /// qualification, but it must never reach a TF32 route.
+    fn assert_no_tf32_route(selection: F32TriadSelection) {
+        assert!(
+            !matches!(selection, F32TriadSelection::Tf32(_)),
+            "drifted request selected {selection:?}"
+        );
+    }
+
     fn sm120_availability_for(
         identity: super::Tf32AutoQualificationIdentity,
     ) -> F32TriadAvailability {
@@ -6356,7 +6380,7 @@ mod tf32_tests {
                         cell.shape.reduction,
                     ];
                     shape[axis] = changed;
-                    assert_eq!(
+                    assert_no_tf32_route(
                         resolve_f32_triad_auto_with_operands(
                             F32TriadPolicy::AllowDeterministicTf32V1,
                             normalized_request(cell.op, shape[0], shape[1], shape[2]),
@@ -6364,7 +6388,6 @@ mod tf32_tests {
                             sm120_availability_for(cohort.identity),
                         )
                         .unwrap(),
-                        F32TriadSelection::ScalarFmaV1,
                     );
                 }
             }
@@ -6376,7 +6399,7 @@ mod tf32_tests {
                     1 => noncontiguous.shape.ldb += 1,
                     _ => noncontiguous.shape.ldc += 1,
                 }
-                assert_eq!(
+                assert_no_tf32_route(
                     resolve_f32_triad_auto_with_operands(
                         F32TriadPolicy::AllowDeterministicTf32V1,
                         noncontiguous,
@@ -6384,7 +6407,6 @@ mod tf32_tests {
                         sm120_availability_for(cohort.identity),
                     )
                     .unwrap(),
-                    F32TriadSelection::ScalarFmaV1,
                 );
             }
 
@@ -6424,7 +6446,7 @@ mod tf32_tests {
                     ..operands
                 },
             ] {
-                assert_eq!(
+                assert_no_tf32_route(
                     resolve_f32_triad_auto_with_operands(
                         F32TriadPolicy::AllowDeterministicTf32V1,
                         request,
@@ -6432,7 +6454,6 @@ mod tf32_tests {
                         sm120_availability_for(cohort.identity),
                     )
                     .unwrap(),
-                    F32TriadSelection::ScalarFmaV1,
                 );
             }
 
@@ -7374,7 +7395,7 @@ mod tf32_tests {
                             cell.shape.reduction,
                         ];
                         shape[axis] = changed;
-                        assert_eq!(
+                        assert_no_tf32_route(
                             resolve_f32_triad_auto_with_operands(
                                 F32TriadPolicy::AllowDeterministicTf32V1,
                                 normalized_request(cell.op, shape[0], shape[1], shape[2]),
@@ -7382,7 +7403,6 @@ mod tf32_tests {
                                 exact_availability,
                             )
                             .unwrap(),
-                            F32TriadSelection::ScalarFmaV1,
                         );
                     }
                 }
@@ -7394,7 +7414,7 @@ mod tf32_tests {
                         1 => noncontiguous.shape.ldb += 1,
                         _ => noncontiguous.shape.ldc += 1,
                     }
-                    assert_eq!(
+                    assert_no_tf32_route(
                         resolve_f32_triad_auto_with_operands(
                             F32TriadPolicy::AllowDeterministicTf32V1,
                             noncontiguous,
@@ -7402,7 +7422,6 @@ mod tf32_tests {
                             exact_availability,
                         )
                         .unwrap(),
-                        F32TriadSelection::ScalarFmaV1,
                     );
                 }
 
@@ -7442,7 +7461,7 @@ mod tf32_tests {
                         ..operands
                     },
                 ] {
-                    assert_eq!(
+                    assert_no_tf32_route(
                         resolve_f32_triad_auto_with_operands(
                             F32TriadPolicy::AllowDeterministicTf32V1,
                             request,
@@ -7450,7 +7469,6 @@ mod tf32_tests {
                             exact_availability,
                         )
                         .unwrap(),
-                        F32TriadSelection::ScalarFmaV1,
                     );
                 }
             }
@@ -7464,7 +7482,7 @@ mod tf32_tests {
                 alpha: 1.0,
                 beta: 1.0,
             };
-            assert_eq!(
+            assert_no_tf32_route(
                 resolve_f32_triad_auto_with_operands(
                     F32TriadPolicy::AllowDeterministicTf32V1,
                     unmeasured,
@@ -7472,7 +7490,6 @@ mod tf32_tests {
                     exact_availability,
                 )
                 .unwrap(),
-                F32TriadSelection::ScalarFmaV1,
             );
 
             let measured = normalized_request(ResolvedGemmOp::Tn, 384, 1928, 4621);
@@ -7490,7 +7507,7 @@ mod tf32_tests {
             for mutate in sm120_identity_mutations() {
                 let mut availability = exact_availability;
                 mutate(availability.specialized.as_mut().unwrap());
-                assert_eq!(
+                assert_no_tf32_route(
                     resolve_f32_triad_auto_with_operands(
                         F32TriadPolicy::AllowDeterministicTf32V1,
                         measured,
@@ -7498,7 +7515,6 @@ mod tf32_tests {
                         availability,
                     )
                     .unwrap(),
-                    F32TriadSelection::ScalarFmaV1,
                 );
             }
             for version in [(12, 8), (13, 0), (13, 1), (13, 2), (13, 3)]
@@ -7509,7 +7525,7 @@ mod tf32_tests {
                 let module = availability.specialized.as_mut().unwrap();
                 module.compiler.nvrtc_version = version;
                 module.device_caps.nvrtc_version = version;
-                assert_eq!(
+                assert_no_tf32_route(
                     resolve_f32_triad_auto_with_operands(
                         F32TriadPolicy::AllowDeterministicTf32V1,
                         measured,
@@ -7517,7 +7533,6 @@ mod tf32_tests {
                         availability,
                     )
                     .unwrap(),
-                    F32TriadSelection::ScalarFmaV1,
                 );
             }
             for multiprocessors in [169, 171] {
@@ -7528,7 +7543,7 @@ mod tf32_tests {
                     .unwrap()
                     .device
                     .multiprocessor_count = multiprocessors;
-                assert_eq!(
+                assert_no_tf32_route(
                     resolve_f32_triad_auto_with_operands(
                         F32TriadPolicy::AllowDeterministicTf32V1,
                         measured,
@@ -7536,7 +7551,6 @@ mod tf32_tests {
                         availability,
                     )
                     .unwrap(),
-                    F32TriadSelection::ScalarFmaV1,
                 );
             }
         }
