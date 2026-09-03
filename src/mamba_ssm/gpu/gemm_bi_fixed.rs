@@ -1485,9 +1485,20 @@ static ARCH_RUNG_OK: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 
 fn arch_rung_enabled(ctx: &GpuCtx, tile: FixedTile) -> bool {
     *ARCH_RUNG_OK.get_or_init(|| {
-        if std::env::var("MAMBA_RS_ARCH_RUNG").is_ok_and(|v| v.trim() == "off") {
-            eprintln!("gemm_bi: architecture rung disabled by MAMBA_RS_ARCH_RUNG=off");
-            return false;
+        match std::env::var("MAMBA_RS_ARCH_RUNG") {
+            Ok(value) if value.trim().eq_ignore_ascii_case("off") => {
+                eprintln!("gemm_bi: architecture rung disabled by MAMBA_RS_ARCH_RUNG=off");
+                return false;
+            }
+            Ok(value) if !value.trim().is_empty() => {
+                // A context built without the env route reaches here with the
+                // flag unchecked; say so rather than run as if it were unset.
+                eprintln!(
+                    "gemm_bi WARNING: MAMBA_RS_ARCH_RUNG={value:?} is not a recognized \
+                     value (only off is); the rung runs its self-check as if unset"
+                );
+            }
+            _ => {}
         }
         match arch_rung_self_check(ctx, tile) {
             Ok(()) => true,

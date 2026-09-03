@@ -303,7 +303,10 @@ impl GpuMambaInference {
     ) -> Result<Self, String> {
         cfg.validate()?;
         let state_cap = crate::mamba_ssm::gpu::kernels::state_capacity(cfg.d_state)?;
-        let ctx = GpuCtx::new_with_state_cap(device, state_cap)?;
+        // The engine honours the same GEMM route flags as a training context:
+        // a deterministic family asked for in the environment serves the
+        // inference projections too, instead of being read and dropped.
+        let ctx = GpuCtx::new_from_env_with_state_cap(device, state_cap)?;
 
         let weights = GpuMambaWeights::from_cpu(&ctx.stream, cpu_weights, &cfg)?;
 

@@ -64,6 +64,60 @@ pub enum BiGemmFamily {
     Fixed,
 }
 
+/// `MAMBA_RS_ARCH_RUNG` knows one value, `off`; any other spelling would
+/// leave the architecture rung running as if the flag were unset, so it is
+/// refused here instead.
+fn validate_arch_rung_flag(value: Result<String, std::env::VarError>) -> Result<(), String> {
+    match value {
+        Ok(value) => match value.trim().to_ascii_lowercase().as_str() {
+            "" | "off" => Ok(()),
+            other => Err(format!(
+                "MAMBA_RS_ARCH_RUNG={other:?} is not a recognized value; only off is \
+                 (leave it unset to keep the rung on)"
+            )),
+        },
+        Err(std::env::VarError::NotPresent) => Ok(()),
+        Err(std::env::VarError::NotUnicode(value)) => Err(format!(
+            "MAMBA_RS_ARCH_RUNG={value:?} is not valid Unicode; only off is recognized"
+        )),
+    }
+}
+
+/// The flag combinations that change nothing: each one names a tier the
+/// other flag makes unreachable, so setting it is a mistake, not a choice.
+fn validate_env_route_combination(
+    batch_invariant: bool,
+    bi_tensor_cores: bool,
+    fast_gemm: bool,
+    bi_gemm_family: BiGemmFamily,
+) -> Result<(), String> {
+    if bi_tensor_cores && !batch_invariant {
+        return Err(
+            "MAMBA_RS_BI_TENSOR_CORES=1 without MAMBA_RS_BATCH_INVARIANT=1 is a \
+             silent no-op: the tensor-core tier is reachable only under the \
+             batch-invariant dispatch. Set both or neither."
+                .to_string(),
+        );
+    }
+    if fast_gemm && batch_invariant {
+        return Err(
+            "MAMBA_RS_FAST_GEMM=1 with MAMBA_RS_BATCH_INVARIANT=1 is a silent no-op: \
+             the batch-invariant dispatch never calls cuBLAS, so the fast compute \
+             type changes nothing. Set one or the other."
+                .to_string(),
+        );
+    }
+    if bi_gemm_family == BiGemmFamily::Fixed && !batch_invariant {
+        return Err(
+            "MAMBA_RS_BI_GEMM_FAMILY=fixed without MAMBA_RS_BATCH_INVARIANT=1 is a \
+             silent no-op: the family is read only under the batch-invariant \
+             dispatch. Set both or neither."
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
 fn bi_gemm_family_from_result(
     value: Result<String, std::env::VarError>,
 ) -> Result<BiGemmFamily, String> {
@@ -402,14 +456,13 @@ impl GpuCtx {
             tier_flag_from_result("MAMBA_RS_FAST_GEMM", std::env::var("MAMBA_RS_FAST_GEMM"))?;
         let f32_triad_policy = f32_triad_policy_from_env()?;
         let bi_gemm_family = bi_gemm_family_from_result(std::env::var("MAMBA_RS_BI_GEMM_FAMILY"))?;
-        if bi_tensor_cores && !batch_invariant {
-            return Err(
-                "MAMBA_RS_BI_TENSOR_CORES=1 without MAMBA_RS_BATCH_INVARIANT=1 is a \
-                 silent no-op: the tensor-core tier is reachable only under the \
-                 batch-invariant dispatch. Set both or neither."
-                    .to_string(),
-            );
-        }
+        validate_arch_rung_flag(std::env::var("MAMBA_RS_ARCH_RUNG"))?;
+        validate_env_route_combination(
+            batch_invariant,
+            bi_tensor_cores,
+            fast_gemm,
+            bi_gemm_family,
+        )?;
         ctx.set_batch_invariant(batch_invariant);
         ctx.set_bi_tensor_cores(bi_tensor_cores);
         ctx.set_fast_gemm(fast_gemm);
@@ -1631,6 +1684,35 @@ mod tests {
             .expect_err("non-Unicode family names must fail");
             assert!(error.contains("MAMBA_RS_BI_GEMM_FAMILY"), "{error}");
             assert!(error.contains("only fixed or triad"), "{error}");
+        }
+    }
+
+    #[test]
+    fn env_route_refuses_the_flag_combinations_that_change_nothing() {
+        use BiGemmFamily::{Fixed, Triad};
+        assert!(super::validate_env_route_combination(false, false, false, Triad).is_ok());
+        assert!(super::validate_env_route_combination(true, true, false, Fixed).is_ok());
+        assert!(super::validate_env_route_combination(false, false, true, Triad).is_ok());
+        let error = super::validate_env_route_combination(false, true, false, Triad).unwrap_err();
+        assert!(error.contains("MAMBA_RS_BI_TENSOR_CORES"), "{error}");
+        let error = super::validate_env_route_combination(true, false, true, Triad).unwrap_err();
+        assert!(error.contains("MAMBA_RS_FAST_GEMM"), "{error}");
+        let error = super::validate_env_route_combination(false, false, false, Fixed).unwrap_err();
+        assert!(error.contains("MAMBA_RS_BI_GEMM_FAMILY=fixed"), "{error}");
+    }
+
+    #[test]
+    fn arch_rung_flag_knows_only_off() {
+        assert!(super::validate_arch_rung_flag(Err(std::env::VarError::NotPresent)).is_ok());
+        for value in ["", "off", " OFF\n"] {
+            assert!(
+                super::validate_arch_rung_flag(Ok(value.into())).is_ok(),
+                "{value:?}"
+            );
+        }
+        for value in ["on", "1", "0", "disabled"] {
+            let error = super::validate_arch_rung_flag(Ok(value.into())).unwrap_err();
+            assert!(error.contains("MAMBA_RS_ARCH_RUNG"), "{error}");
         }
     }
 }
