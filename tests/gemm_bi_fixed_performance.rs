@@ -1701,6 +1701,29 @@ fn half_to_f32_sm120_tma_hot_shapes_smoke() {
             k: 2304,
             n: 768,
         },
+        // The projection shapes the performance matrix measures: this is
+        // where the automatic selector still falls back to the older tensor
+        // core tiles instead of the TMA ones.
+        FixedShape {
+            m: 2048,
+            k: 768,
+            n: 3072,
+        },
+        FixedShape {
+            m: 4621,
+            k: 384,
+            n: 1928,
+        },
+        FixedShape {
+            m: 2048,
+            k: 1536,
+            n: 768,
+        },
+        FixedShape {
+            m: 4096,
+            k: 3072,
+            n: 1536,
+        },
     ];
     let device = GpuDevice::new(0).expect("CUDA device");
     assert!(matches!(device.compute_capability, (12, 0) | (12, 1)));

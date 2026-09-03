@@ -1655,8 +1655,11 @@ pub(super) fn sm120_fma_exact_route(
     availability: F32TriadAvailability,
 ) -> Option<Sm120FmaRoute> {
     let qualified = availability.specialized?;
+    // The kernels are built for both minors of the family and the route
+    // admission already names sm_121, so the gate follows the kernel rather
+    // than the board the cells happen to be measured on.
     if qualified.module_kind != ModuleKind::TriadSm120
-        || qualified.device.compute_capability != (12, 0)
+        || !matches!(qualified.device.compute_capability, (12, 0) | (12, 1))
         || !qualified.device_caps.tensor_map_access
     {
         return None;
@@ -1994,6 +1997,210 @@ pub const SM120_AUTO_CELLS_CC120: &[Sm120ForcedRoute] = &[
             lda: 1536,
             ldb: 1536,
             ldc: 3072,
+        },
+    },
+    Sm120ForcedRoute {
+        op: Sm120Op::Nn,
+        dtype: WeightDtype::Bf16,
+        physical: Sm120PhysicalRoute {
+            tile: Sm120Tile::M128N64,
+            bk: Sm120Bk::Bk32,
+            stages: Sm120Stages::S2,
+        },
+        shape: Sm120Shape {
+            m: 2048,
+            k: 768,
+            n: 3072,
+            lda: 768,
+            ldb: 3072,
+            ldc: 3072,
+        },
+    },
+    Sm120ForcedRoute {
+        op: Sm120Op::Nn,
+        dtype: WeightDtype::Bf16,
+        physical: Sm120PhysicalRoute {
+            tile: Sm120Tile::M128N64,
+            bk: Sm120Bk::Bk64,
+            stages: Sm120Stages::S2,
+        },
+        shape: Sm120Shape {
+            m: 4621,
+            k: 384,
+            n: 1928,
+            lda: 384,
+            ldb: 1928,
+            ldc: 1928,
+        },
+    },
+    Sm120ForcedRoute {
+        op: Sm120Op::Nn,
+        dtype: WeightDtype::F16,
+        physical: Sm120PhysicalRoute {
+            tile: Sm120Tile::M128N64,
+            bk: Sm120Bk::Bk32,
+            stages: Sm120Stages::S2,
+        },
+        shape: Sm120Shape {
+            m: 2048,
+            k: 768,
+            n: 3072,
+            lda: 768,
+            ldb: 3072,
+            ldc: 3072,
+        },
+    },
+    Sm120ForcedRoute {
+        op: Sm120Op::Nn,
+        dtype: WeightDtype::F16,
+        physical: Sm120PhysicalRoute {
+            tile: Sm120Tile::M128N64,
+            bk: Sm120Bk::Bk64,
+            stages: Sm120Stages::S2,
+        },
+        shape: Sm120Shape {
+            m: 4621,
+            k: 384,
+            n: 1928,
+            lda: 384,
+            ldb: 1928,
+            ldc: 1928,
+        },
+    },
+    Sm120ForcedRoute {
+        op: Sm120Op::Tn,
+        dtype: WeightDtype::Bf16,
+        physical: Sm120PhysicalRoute {
+            tile: Sm120Tile::M64N128,
+            bk: Sm120Bk::Bk32,
+            stages: Sm120Stages::S3,
+        },
+        shape: Sm120Shape {
+            m: 2048,
+            k: 768,
+            n: 3072,
+            lda: 768,
+            ldb: 3072,
+            ldc: 3072,
+        },
+    },
+    Sm120ForcedRoute {
+        op: Sm120Op::Tn,
+        dtype: WeightDtype::Bf16,
+        physical: Sm120PhysicalRoute {
+            tile: Sm120Tile::M64N128,
+            bk: Sm120Bk::Bk32,
+            stages: Sm120Stages::S3,
+        },
+        shape: Sm120Shape {
+            m: 4621,
+            k: 384,
+            n: 1928,
+            lda: 384,
+            ldb: 1928,
+            ldc: 1928,
+        },
+    },
+    Sm120ForcedRoute {
+        op: Sm120Op::Tn,
+        dtype: WeightDtype::F16,
+        physical: Sm120PhysicalRoute {
+            tile: Sm120Tile::M64N128,
+            bk: Sm120Bk::Bk32,
+            stages: Sm120Stages::S3,
+        },
+        shape: Sm120Shape {
+            m: 2048,
+            k: 768,
+            n: 3072,
+            lda: 768,
+            ldb: 3072,
+            ldc: 3072,
+        },
+    },
+    Sm120ForcedRoute {
+        op: Sm120Op::Tn,
+        dtype: WeightDtype::F16,
+        physical: Sm120PhysicalRoute {
+            tile: Sm120Tile::M64N128,
+            bk: Sm120Bk::Bk32,
+            stages: Sm120Stages::S3,
+        },
+        shape: Sm120Shape {
+            m: 4621,
+            k: 384,
+            n: 1928,
+            lda: 384,
+            ldb: 1928,
+            ldc: 1928,
+        },
+    },
+    Sm120ForcedRoute {
+        op: Sm120Op::Nt,
+        dtype: WeightDtype::Bf16,
+        physical: Sm120PhysicalRoute {
+            tile: Sm120Tile::M64N64,
+            bk: Sm120Bk::Bk64,
+            stages: Sm120Stages::S2,
+        },
+        shape: Sm120Shape {
+            m: 2048,
+            k: 768,
+            n: 3072,
+            lda: 3072,
+            ldb: 3072,
+            ldc: 768,
+        },
+    },
+    Sm120ForcedRoute {
+        op: Sm120Op::Nt,
+        dtype: WeightDtype::Bf16,
+        physical: Sm120PhysicalRoute {
+            tile: Sm120Tile::M128N128,
+            bk: Sm120Bk::Bk64,
+            stages: Sm120Stages::S3,
+        },
+        shape: Sm120Shape {
+            m: 4621,
+            k: 384,
+            n: 1928,
+            lda: 1928,
+            ldb: 1928,
+            ldc: 384,
+        },
+    },
+    Sm120ForcedRoute {
+        op: Sm120Op::Nt,
+        dtype: WeightDtype::F16,
+        physical: Sm120PhysicalRoute {
+            tile: Sm120Tile::M64N64,
+            bk: Sm120Bk::Bk64,
+            stages: Sm120Stages::S2,
+        },
+        shape: Sm120Shape {
+            m: 2048,
+            k: 768,
+            n: 3072,
+            lda: 3072,
+            ldb: 3072,
+            ldc: 768,
+        },
+    },
+    Sm120ForcedRoute {
+        op: Sm120Op::Nt,
+        dtype: WeightDtype::F16,
+        physical: Sm120PhysicalRoute {
+            tile: Sm120Tile::M128N128,
+            bk: Sm120Bk::Bk64,
+            stages: Sm120Stages::S3,
+        },
+        shape: Sm120Shape {
+            m: 4621,
+            k: 384,
+            n: 1928,
+            lda: 1928,
+            ldb: 1928,
+            ldc: 384,
         },
     },
 ];
@@ -5679,7 +5886,7 @@ mod sm120_tests {
         }
     }
 
-    fn qualified_cc120_routes() -> [Sm120ForcedRoute; 18] {
+    fn qualified_cc120_routes() -> [Sm120ForcedRoute; 30] {
         let m64n64_bk64_s2 = Sm120PhysicalRoute {
             tile: Sm120Tile::M64N64,
             bk: Sm120Bk::Bk64,
@@ -5700,9 +5907,21 @@ mod sm120_tests {
             bk: Sm120Bk::Bk32,
             stages: Sm120Stages::S3,
         };
+        let m128n64_bk64_s2 = Sm120PhysicalRoute {
+            tile: Sm120Tile::M128N64,
+            bk: Sm120Bk::Bk64,
+            stages: Sm120Stages::S2,
+        };
+        let m128n128_bk64_s3 = Sm120PhysicalRoute {
+            tile: Sm120Tile::M128N128,
+            bk: Sm120Bk::Bk64,
+            stages: Sm120Stages::S3,
+        };
         let projection = (2048, 1536, 768);
         let large = (2048, 3072, 768);
         let deep = (4096, 3072, 1536);
+        let input_projection = (2048, 768, 3072);
+        let prism = (4621, 384, 1928);
         [
             route(Sm120Op::Nn, WeightDtype::Bf16, projection, m64n64_bk64_s2),
             route(Sm120Op::Nn, WeightDtype::Bf16, large, m64n64_bk64_s2),
@@ -5722,6 +5941,48 @@ mod sm120_tests {
             route(Sm120Op::Nt, WeightDtype::F16, projection, m64n64_bk64_s2),
             route(Sm120Op::Nt, WeightDtype::F16, large, m128n64_bk32_s2),
             route(Sm120Op::Nt, WeightDtype::F16, deep, m128n128_bk32_s3),
+            route(
+                Sm120Op::Nn,
+                WeightDtype::Bf16,
+                input_projection,
+                m128n64_bk32_s2,
+            ),
+            route(Sm120Op::Nn, WeightDtype::Bf16, prism, m128n64_bk64_s2),
+            route(
+                Sm120Op::Nn,
+                WeightDtype::F16,
+                input_projection,
+                m128n64_bk32_s2,
+            ),
+            route(Sm120Op::Nn, WeightDtype::F16, prism, m128n64_bk64_s2),
+            route(
+                Sm120Op::Tn,
+                WeightDtype::Bf16,
+                input_projection,
+                m64n128_bk32_s3,
+            ),
+            route(Sm120Op::Tn, WeightDtype::Bf16, prism, m64n128_bk32_s3),
+            route(
+                Sm120Op::Tn,
+                WeightDtype::F16,
+                input_projection,
+                m64n128_bk32_s3,
+            ),
+            route(Sm120Op::Tn, WeightDtype::F16, prism, m64n128_bk32_s3),
+            route(
+                Sm120Op::Nt,
+                WeightDtype::Bf16,
+                input_projection,
+                m64n64_bk64_s2,
+            ),
+            route(Sm120Op::Nt, WeightDtype::Bf16, prism, m128n128_bk64_s3),
+            route(
+                Sm120Op::Nt,
+                WeightDtype::F16,
+                input_projection,
+                m64n64_bk64_s2,
+            ),
+            route(Sm120Op::Nt, WeightDtype::F16, prism, m128n128_bk64_s3),
         ]
     }
 
@@ -7375,6 +7636,30 @@ mod tf32_tests {
                 );
             }
         }
+    }
+
+    /// A cohort is frozen against the module source it was measured on. Editing
+    /// any kernel of that module changes the source digest, and every cohort
+    /// whose digest no longer matches is silently unreachable: the TF32 policy
+    /// resolves nothing and falls through to the exact floor with no error.
+    /// At least one cohort has to still describe this tree, or the whole
+    /// deterministic TF32 family is dead code until someone requalifies it.
+    #[test]
+    fn at_least_one_sm120_tf32_cohort_matches_this_tree() {
+        let live = super::super::modules::module_source_digest(ModuleKind::TriadSm120)
+            .expect("compose the SM120 module source");
+        let stale: Vec<usize> = SM120_TF32_EVIDENCE_COHORTS
+            .iter()
+            .enumerate()
+            .filter(|(_, cohort)| cohort.identity.source_digest != live)
+            .map(|(index, _)| index)
+            .collect();
+        assert!(
+            stale.len() < SM120_TF32_EVIDENCE_COHORTS.len(),
+            "every SM120 TF32 cohort is frozen against a source this tree no \
+             longer contains: requalify one against the current kernels or \
+             delete the table. Stale cohort indices: {stale:?}",
+        );
     }
 
     #[test]

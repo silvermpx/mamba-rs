@@ -1695,7 +1695,7 @@ struct Sm120HotShape {
     dims: (usize, usize, usize),
 }
 
-const SM120_HOT_SHAPES: [Sm120HotShape; 3] = [
+const SM120_HOT_SHAPES: [Sm120HotShape; 10] = [
     Sm120HotShape {
         name: "large",
         dims: (2048, 3072, 768),
@@ -1707,6 +1707,38 @@ const SM120_HOT_SHAPES: [Sm120HotShape; 3] = [
     Sm120HotShape {
         name: "d768_out_proj",
         dims: (2048, 1536, 768),
+    },
+    // The two projection shapes the automatic table does not cover, where
+    // half requests still fall through to the older tensor core tiles.
+    Sm120HotShape {
+        name: "d768_in_proj",
+        dims: (2048, 768, 3072),
+    },
+    Sm120HotShape {
+        name: "prism_in_proj",
+        dims: (4621, 384, 1928),
+    },
+    // The classifier serve projections the table never covered.
+    Sm120HotShape {
+        name: "prism_out_proj",
+        dims: (4621, 768, 384),
+    },
+    Sm120HotShape {
+        name: "prism_input_proj",
+        dims: (4621, 1024, 384),
+    },
+    // The designated production training batch: B*T = 8 * 1300.
+    Sm120HotShape {
+        name: "prod_in_proj",
+        dims: (10400, 384, 1536),
+    },
+    Sm120HotShape {
+        name: "prod_out_proj",
+        dims: (10400, 768, 384),
+    },
+    Sm120HotShape {
+        name: "prod_input_proj",
+        dims: (10400, 384, 384),
     },
 ];
 

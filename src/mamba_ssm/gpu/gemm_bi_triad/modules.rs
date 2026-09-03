@@ -3629,6 +3629,14 @@ fn compose_module_source(kind: ModuleKind) -> Result<String, String> {
     compose_fragments(module_fragments(kind)?)
 }
 
+/// Digest of a module's composed source, the way the compiler identity takes
+/// it. Frozen evidence carries this value, so a host-side gate can tell that a
+/// cohort was measured against a source this tree no longer contains.
+#[cfg(test)]
+pub(super) fn module_source_digest(kind: ModuleKind) -> Result<[u8; 32], String> {
+    Ok(FramedSha256::bytes(compose_module_source(kind)?.as_bytes()))
+}
+
 fn compose_fragments(fragments: &[SourceFragment]) -> Result<String, String> {
     let mut composed = String::new();
     for fragment in fragments {
