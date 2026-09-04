@@ -1345,7 +1345,7 @@ mod cublaslt_tn_nt_qualification {
     }
 
     pub(super) fn build_sm120_paired_tn_nt_cells() -> Vec<Sm120PairedTnNtCell> {
-        let mut cells = Vec::with_capacity(12);
+        let mut cells = Vec::with_capacity(16);
         for dtype in [WeightDtype::Bf16, WeightDtype::F16] {
             for op in [Sm120Op::Tn, Sm120Op::Nt] {
                 for shape in [
@@ -1360,6 +1360,12 @@ mod cublaslt_tn_nt_qualification {
                     Shape {
                         name: "d768_out_proj",
                         dims: (2048, 1536, 768),
+                    },
+                    // The training batch: the TN reduction runs 10400 deep in
+                    // one CTA, the shape the split question is about.
+                    Shape {
+                        name: "batch_in_proj",
+                        dims: (10400, 384, 1536),
                     },
                 ] {
                     let physical = match (op, shape.name) {
@@ -1388,6 +1394,17 @@ mod cublaslt_tn_nt_qualification {
                             bk: Sm120Bk::Bk32,
                             stages: Sm120Stages::S3,
                         },
+                        // The live half table's picks for the batch shape.
+                        (Sm120Op::Tn, "batch_in_proj") => Sm120PhysicalRoute {
+                            tile: Sm120Tile::M64N64,
+                            bk: Sm120Bk::Bk64,
+                            stages: Sm120Stages::S3,
+                        },
+                        (Sm120Op::Nt, "batch_in_proj") => Sm120PhysicalRoute {
+                            tile: Sm120Tile::M128N64,
+                            bk: Sm120Bk::Bk32,
+                            stages: Sm120Stages::S2,
+                        },
                         _ => unreachable!("fixed TN/NT inventory"),
                     };
                     cells.push(Sm120PairedTnNtCell {
@@ -1409,17 +1426,25 @@ mod cublaslt_tn_nt_qualification {
             (WeightDtype::Bf16, Sm120Op::Tn, "d768_out_proj") => {
                 "sm120_paired/bf16/tn/d768_out_proj"
             }
+            (WeightDtype::Bf16, Sm120Op::Tn, "batch_in_proj") => {
+                "sm120_paired/bf16/tn/batch_in_proj"
+            }
             (WeightDtype::Bf16, Sm120Op::Nt, "large") => "sm120_paired/bf16/nt/large",
             (WeightDtype::Bf16, Sm120Op::Nt, "large_deep") => "sm120_paired/bf16/nt/large_deep",
             (WeightDtype::Bf16, Sm120Op::Nt, "d768_out_proj") => {
                 "sm120_paired/bf16/nt/d768_out_proj"
             }
+            (WeightDtype::Bf16, Sm120Op::Nt, "batch_in_proj") => {
+                "sm120_paired/bf16/nt/batch_in_proj"
+            }
             (WeightDtype::F16, Sm120Op::Tn, "large") => "sm120_paired/f16/tn/large",
             (WeightDtype::F16, Sm120Op::Tn, "large_deep") => "sm120_paired/f16/tn/large_deep",
             (WeightDtype::F16, Sm120Op::Tn, "d768_out_proj") => "sm120_paired/f16/tn/d768_out_proj",
+            (WeightDtype::F16, Sm120Op::Tn, "batch_in_proj") => "sm120_paired/f16/tn/batch_in_proj",
             (WeightDtype::F16, Sm120Op::Nt, "large") => "sm120_paired/f16/nt/large",
             (WeightDtype::F16, Sm120Op::Nt, "large_deep") => "sm120_paired/f16/nt/large_deep",
             (WeightDtype::F16, Sm120Op::Nt, "d768_out_proj") => "sm120_paired/f16/nt/d768_out_proj",
+            (WeightDtype::F16, Sm120Op::Nt, "batch_in_proj") => "sm120_paired/f16/nt/batch_in_proj",
             _ => "sm120_paired/unsupported",
         }
     }
@@ -9444,7 +9469,7 @@ fn sm120_paired_tn_nt_inventory_is_exact_unique_and_pins_accepted_routes() {
     use cublaslt_tn_nt_qualification::*;
 
     let cells = build_sm120_paired_tn_nt_cells();
-    assert_eq!(cells.len(), 12);
+    assert_eq!(cells.len(), 16);
     assert_eq!(SM120_PAIRED_FINAL_WINDOWS_PER_ORDER, 101);
     assert_eq!(SM120_PAIRED_PILOT_WINDOWS_PER_ORDER, 11);
     assert_eq!(SM120_PAIRED_WARMUP_LAUNCHES, 128);
@@ -9459,15 +9484,19 @@ fn sm120_paired_tn_nt_inventory_is_exact_unique_and_pins_accepted_routes() {
             "sm120_paired/bf16/tn/large",
             "sm120_paired/bf16/tn/large_deep",
             "sm120_paired/bf16/tn/d768_out_proj",
+            "sm120_paired/bf16/tn/batch_in_proj",
             "sm120_paired/bf16/nt/large",
             "sm120_paired/bf16/nt/large_deep",
             "sm120_paired/bf16/nt/d768_out_proj",
+            "sm120_paired/bf16/nt/batch_in_proj",
             "sm120_paired/f16/tn/large",
             "sm120_paired/f16/tn/large_deep",
             "sm120_paired/f16/tn/d768_out_proj",
+            "sm120_paired/f16/tn/batch_in_proj",
             "sm120_paired/f16/nt/large",
             "sm120_paired/f16/nt/large_deep",
             "sm120_paired/f16/nt/d768_out_proj",
+            "sm120_paired/f16/nt/batch_in_proj",
         ]
     );
     assert_eq!(
