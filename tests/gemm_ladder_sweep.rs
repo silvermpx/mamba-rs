@@ -76,6 +76,7 @@ fn rung_name(t: TcTile) -> &'static str {
         TcTile::Tile64 => "tile64",
         TcTile::Thin16 => "thin16",
         TcTile::Rect128x64 => "rect128x64",
+        TcTile::Tile64StreamK => "tile64_streamk",
     }
 }
 

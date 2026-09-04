@@ -34,7 +34,7 @@ use crate::mamba_ssm::gpu::{
         record_half_physical_trace, record_prepared_f32_physical_trace,
     },
     buffers::{DtypedBuf, GpuBuffer, GradSlice},
-    context::{BiGemmFamily, F32TriadPolicy, GpuCtx},
+    context::{BiGemmFamily, F32TriadPolicy, GpuCtx, HalfTriadPolicy},
     dtype::WeightDtype,
     graph_capture::{
         CapturedPhysicalGraph, capture_into_graph_with_gemm_plan,
@@ -298,6 +298,7 @@ pub fn presize_physical_qualification_suite(
 struct PhysicalQualificationPolicy {
     bi_tensor_cores: bool,
     f32_triad_policy: F32TriadPolicy,
+    half_triad_policy: HalfTriadPolicy,
 }
 
 struct PhysicalQualificationPolicyLease<'a> {
@@ -307,6 +308,7 @@ struct PhysicalQualificationPolicyLease<'a> {
     original_tensor_cores: bool,
     original_fast_gemm: bool,
     original_f32_policy: F32TriadPolicy,
+    original_half_policy: HalfTriadPolicy,
     frozen_cublas_tf32: bool,
     qualified_route: GemmRouteIdentity,
     active: ActiveQualificationToken,
@@ -327,6 +329,7 @@ impl PhysicalQualificationPolicyLease<'_> {
 
 impl Drop for PhysicalQualificationPolicyLease<'_> {
     fn drop(&mut self) {
+        self.ctx.set_half_triad_policy(self.original_half_policy);
         self.ctx.set_f32_triad_policy(self.original_f32_policy);
         self.ctx.set_fast_gemm(self.original_fast_gemm);
         self.ctx.set_bi_tensor_cores(self.original_tensor_cores);
@@ -346,12 +349,14 @@ fn begin_physical_qualification_policy(
     let original_tensor_cores = ctx.bi_tensor_cores();
     let original_fast_gemm = ctx.fast_gemm();
     let original_f32_policy = ctx.f32_triad_policy();
+    let original_half_policy = ctx.half_triad_policy();
     let frozen_cublas_tf32 = ctx.tf32();
     ctx.set_batch_invariant(true);
     ctx.set_bi_gemm_family(BiGemmFamily::Triad);
     ctx.set_fast_gemm(false);
     ctx.set_bi_tensor_cores(policy.bi_tensor_cores);
     ctx.set_f32_triad_policy(policy.f32_triad_policy);
+    ctx.set_half_triad_policy(policy.half_triad_policy);
     Ok(PhysicalQualificationPolicyLease {
         ctx,
         original_batch_invariant,
@@ -359,6 +364,7 @@ fn begin_physical_qualification_policy(
         original_tensor_cores,
         original_fast_gemm,
         original_f32_policy,
+        original_half_policy,
         frozen_cublas_tf32,
         qualified_route: ctx.gemm_route(),
         active,
@@ -396,18 +402,29 @@ impl PhysicalQualificationRoute {
             Self::F32Policy(policy) => PhysicalQualificationPolicy {
                 bi_tensor_cores: false,
                 f32_triad_policy: policy,
+                half_triad_policy: HalfTriadPolicy::TiledParityV1,
             },
             Self::HalfPolicy { tensor_cores, .. } => PhysicalQualificationPolicy {
                 bi_tensor_cores: tensor_cores,
                 f32_triad_policy: F32TriadPolicy::ExactScalarFmaV1,
+                half_triad_policy: HalfTriadPolicy::TiledParityV1,
             },
-            Self::HalfForced { .. } => PhysicalQualificationPolicy {
+            // The forced stream-K tile records a route that only the
+            // permitting half policy admits; every other forced tile stays
+            // on the tiled parity contract.
+            Self::HalfForced { tile, .. } => PhysicalQualificationPolicy {
                 bi_tensor_cores: true,
                 f32_triad_policy: F32TriadPolicy::ExactScalarFmaV1,
+                half_triad_policy: if tile == TcTile::Tile64StreamK {
+                    HalfTriadPolicy::AllowStreamKFixedOrderV1
+                } else {
+                    HalfTriadPolicy::TiledParityV1
+                },
             },
             Self::Tf32Forced(_) => PhysicalQualificationPolicy {
                 bi_tensor_cores: false,
                 f32_triad_policy: F32TriadPolicy::AllowDeterministicTf32V1,
+                half_triad_policy: HalfTriadPolicy::TiledParityV1,
             },
         }
     }
@@ -583,6 +600,12 @@ impl PhysicalQualificationRequest {
             } if self.op != ResolvedGemmOp::Tn => {
                 return Err("forced Rect128x64 qualification only supports TN".into());
             }
+            PhysicalQualificationRoute::HalfForced {
+                tile: TcTile::Tile64StreamK,
+                ..
+            } if self.op != ResolvedGemmOp::Tn => {
+                return Err("forced Tile64StreamK qualification only supports TN".into());
+            }
             PhysicalQualificationRoute::HalfPolicy { dtype, .. }
             | PhysicalQualificationRoute::HalfForced { dtype, .. } => {
                 for (label, elements) in [
@@ -643,6 +666,7 @@ impl PhysicalQualificationRequest {
                     TcTile::Tile64 => (64, 64),
                     TcTile::Thin16 => (16, 32),
                     TcTile::Rect128x64 => (128, 64),
+                    TcTile::Tile64StreamK => (64, 64),
                 };
                 (None, Some(tile))
             }
@@ -691,6 +715,7 @@ fn tc_tile_name(tile: TcTile) -> &'static [u8] {
         TcTile::Tile64 => b"tile64",
         TcTile::Thin16 => b"thin16",
         TcTile::Rect128x64 => b"rect128x64",
+        TcTile::Tile64StreamK => b"tile64_streamk",
     }
 }
 
@@ -783,6 +808,10 @@ pub struct QualifiedPhysicalLaunchNode {
     pub strides: (usize, usize, usize),
     /// Kernel tile when the node has a tiled contract.
     pub tile: Option<(u32, u32)>,
+    /// Numeric contract of the GEMM route, when the node is a GEMM.
+    pub numeric_contract: Option<ResolvedNumericContract>,
+    /// Output ownership of the GEMM route, when the node is a GEMM.
+    pub ownership: Option<crate::mamba_ssm::gpu::kernel_identity::ResolvedOutputOwnership>,
     /// Grid, block, dynamic shared memory, and raw-address-free argument digest.
     ///
     /// The digest is bound to the holder's allocation sizes, subview offsets,
@@ -803,6 +832,8 @@ impl From<&ResolvedPhysicalKernelLaunch> for QualifiedPhysicalLaunchNode {
             shape: node.shape(),
             strides: node.strides(),
             tile: node.tile(),
+            numeric_contract: node.gemm_route().map(|route| route.numeric_contract),
+            ownership: node.gemm_route().map(|route| route.ownership),
             launch: node.launch(),
         }
     }
@@ -5553,6 +5584,8 @@ mod tests {
             shape: (64, 64, 64),
             strides: (64, 64, 64),
             tile: Some((64, 64)),
+            numeric_contract: None,
+            ownership: None,
             launch: ResolvedKernelLaunch {
                 grid_dim: (1, 1, 1),
                 block_dim: (256, 1, 1),

@@ -436,6 +436,20 @@ fn sm80_blob() -> String {
     ])
 }
 
+/// The portable module as every non-CC-12 target composes it: sm80.cu plus
+/// the tc64 TN stream-K fragment.
+fn sm80_streamk_blob() -> String {
+    compose(&[
+        include_str!("../kernels/_typed_prelude.cuh"),
+        include_str!("../kernels/gemm_bi_triad/contract.cuh"),
+        include_str!("../kernels/gemm_bi_triad/common.cuh"),
+        include_str!("../kernels/gemm_bi_triad/epilogue.cuh"),
+        include_str!("../kernels/gemm_bi_triad/mma16.cuh"),
+        include_str!("../kernels/gemm_bi_triad/sm80.cu"),
+        include_str!("../kernels/gemm_bi_triad/sm80_streamk.cu"),
+    ])
+}
+
 fn sm90a_blob() -> String {
     compose(&[
         include_str!("../kernels/_typed_prelude.cuh"),
@@ -2115,11 +2129,12 @@ fn compile_module_uncached(kind: &str, source: String, arch: &'static str) -> St
     }
 }
 
-fn module_sources() -> [(&'static str, String); 3] {
+fn module_sources() -> [(&'static str, String); 4] {
     [
         ("Fixed", fixed_blob()),
         ("TriadScalar", scalar_blob()),
         ("TriadSm80", sm80_blob()),
+        ("TriadSm80+streamk", sm80_streamk_blob()),
     ]
 }
 

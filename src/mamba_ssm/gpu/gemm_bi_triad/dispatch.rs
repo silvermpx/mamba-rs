@@ -254,24 +254,24 @@ const SM89_TF32_QUALIFICATION_IDENTITY: Tf32AutoQualificationIdentity =
         optin_shared_bytes: 101376,
         tensor_map_access: false,
         compile_key: [
-            16, 74, 71, 50, 208, 8, 170, 83, 107, 230, 147, 71, 151, 1, 149, 181, 219, 187, 246,
-            160, 21, 122, 139, 51, 218, 253, 197, 57, 176, 183, 238, 32,
+            33, 67, 51, 140, 139, 142, 172, 150, 3, 123, 231, 176, 226, 79, 15, 252, 79, 190, 170,
+            146, 55, 84, 141, 114, 136, 169, 51, 172, 247, 10, 197, 94,
         ],
         artifact_digest: [
-            248, 184, 177, 29, 225, 252, 108, 18, 6, 155, 40, 243, 158, 125, 57, 69, 204, 35, 73,
-            234, 102, 238, 121, 182, 218, 142, 17, 200, 185, 70, 157, 2,
+            223, 138, 36, 14, 198, 157, 91, 215, 33, 185, 140, 107, 122, 170, 44, 255, 14, 99, 90,
+            2, 144, 200, 7, 33, 131, 205, 148, 0, 198, 214, 113, 242,
         ],
         source_digest: [
-            123, 6, 93, 13, 99, 156, 70, 127, 222, 185, 224, 146, 228, 74, 32, 36, 95, 28, 144,
-            127, 173, 220, 249, 144, 110, 139, 173, 76, 241, 66, 192, 127,
+            202, 239, 129, 126, 175, 124, 1, 1, 158, 235, 249, 238, 0, 5, 237, 239, 63, 190, 211,
+            12, 224, 232, 53, 68, 80, 155, 58, 10, 87, 198, 174, 126,
         ],
         invocation_digest: [
-            16, 74, 71, 50, 208, 8, 170, 83, 107, 230, 147, 71, 151, 1, 149, 181, 219, 187, 246,
-            160, 21, 122, 139, 51, 218, 253, 197, 57, 176, 183, 238, 32,
+            33, 67, 51, 140, 139, 142, 172, 150, 3, 123, 231, 176, 226, 79, 15, 252, 79, 190, 170,
+            146, 55, 84, 141, 114, 136, 169, 51, 172, 247, 10, 197, 94,
         ],
         header_manifest_digest: [
-            10, 239, 1, 191, 15, 19, 213, 142, 41, 133, 167, 118, 99, 219, 167, 154, 128, 174, 212,
-            209, 216, 181, 220, 151, 93, 30, 190, 48, 22, 197, 192, 110,
+            70, 63, 13, 197, 243, 88, 215, 100, 41, 124, 244, 153, 246, 82, 138, 56, 19, 124, 143,
+            46, 211, 62, 109, 201, 92, 179, 84, 198, 121, 174, 151, 202,
         ],
         nvrtc_library_domain: [
             208, 49, 165, 62, 185, 114, 53, 183, 15, 98, 246, 82, 147, 45, 177, 189, 247, 40, 234,
@@ -6809,6 +6809,13 @@ pub enum TcTile {
     /// 128x64 CTA tile, 256 threads / 8 warps, BK32 with three stages.
     /// Forced TN dW experiment only; automatic policy never selects it.
     Rect128x64,
+    /// The 64x64 TN dW body over a persistent stream-K grid
+    /// (`gemm_bi_tn_tc64_streamk_*`): one CTA per multiprocessor walks a
+    /// contiguous range of (tile, slab) units and the tile's last CTA folds
+    /// the partial slabs in a fixed order. Its own numeric contract; the
+    /// automatic policy selects it only on SM89 under
+    /// `HalfTriadPolicy::AllowStreamKFixedOrderV1`.
+    Tile64StreamK,
 }
 
 #[derive(Clone, Copy)]
@@ -6955,10 +6962,32 @@ pub(super) fn tc_pick_tile_backward_for_device(
     dims: (usize, usize, usize),
     multiprocessor_count: u32,
     compute_capability: (i32, i32),
+    half_policy: HalfTriadPolicy,
 ) -> Option<TcTile> {
     let portable = tc_pick_tile_backward(op, dims, multiprocessor_count);
     if compute_capability != (8, 9) || multiprocessor_count == 0 {
         return portable;
+    }
+    // The stream-K dW schedule serves a 64x64 grid of at most one wave and
+    // a fraction whose (tile, slab) units give every CTA of the persistent
+    // grid a deep enough reduction, and only when the half policy permits
+    // its fixed-order fold; a request that stays on the tiled contract never
+    // sees it (internal/perf/sm89-streamk-tn-20260904).
+    if op == super::super::kernel_identity::PolicyOp::Dw
+        && half_policy == HalfTriadPolicy::AllowStreamKFixedOrderV1
+    {
+        let (batch, n_in, n_out) = dims;
+        let policy = super::super::kernel_identity::Sm80TcPolicyV3::current();
+        let tiles64 = tc_grid_ctas(n_in, n_out, 64, 64)?;
+        let slabs = u64::try_from(batch).ok()?.div_ceil(64);
+        let units = tiles64.checked_mul(slabs)?;
+        let sms = u64::from(multiprocessor_count);
+        let within_waves = tiles64.checked_mul(policy.stream_k_max_wave_denominator)?
+            <= sms.checked_mul(policy.stream_k_max_wave_numerator)?;
+        let deep_enough = units >= sms.checked_mul(policy.stream_k_min_slabs_per_cta)?;
+        if tiles64 > 0 && within_waves && deep_enough {
+            return Some(TcTile::Tile64StreamK);
+        }
     }
 
     let (batch, n_in, n_out) = dims;
@@ -7009,11 +7038,99 @@ mod tc_policy_tests {
         TcTile, tc_half_policy_prefers_scalar_forward, tc_pick_tile_backward,
         tc_pick_tile_backward_for_device, tc_pick_tile_forward,
     };
+    use crate::mamba_ssm::gpu::context::HalfTriadPolicy;
     use crate::mamba_ssm::gpu::kernel_identity::{
         FramedSha256, PolicyOp, digest_hex, gemm_dispatch_policy_digest,
     };
 
     const RTX_6000_ADA_SMS: u32 = 142;
+
+    #[test]
+    fn sm89_stream_k_dw_needs_the_half_permission_an_underfilled_grid_and_depth() {
+        let pick = |dims, policy, cc| {
+            tc_pick_tile_backward_for_device(PolicyOp::Dw, dims, RTX_6000_ADA_SMS, cc, policy)
+        };
+        let tiled = HalfTriadPolicy::TiledParityV1;
+        let stream_k = HalfTriadPolicy::AllowStreamKFixedOrderV1;
+        // The measured winners (internal/perf/sm89-streamk-tn-20260904, ratio
+        // to the best tiled route): batch_input_proj 0.34, batch_out_proj
+        // 0.56, prism_out_proj 0.64, prism_input_proj 0.79, rect_tall 0.80,
+        // and batch_in_proj 0.86 with 144 tiles on 142 multiprocessors.
+        for dims in [
+            (10400, 384, 384),
+            (10400, 768, 384),
+            (4621, 768, 384),
+            (4621, 1024, 384),
+            (4096, 512, 768),
+            (10400, 384, 1536),
+        ] {
+            assert_ne!(
+                pick(dims, tiled, (8, 9)),
+                Some(TcTile::Tile64StreamK),
+                "{dims:?}"
+            );
+            assert_eq!(
+                pick(dims, stream_k, (8, 9)),
+                Some(TcTile::Tile64StreamK),
+                "{dims:?}"
+            );
+            // Off SM89 the measured rule does not apply.
+            assert_ne!(
+                pick(dims, stream_k, (8, 6)),
+                Some(TcTile::Tile64StreamK),
+                "{dims:?}"
+            );
+            assert_eq!(
+                pick(dims, stream_k, (8, 6)),
+                pick(dims, tiled, (8, 6)),
+                "{dims:?}"
+            );
+        }
+        // The measured losers keep the tiled pick under both policies: more
+        // than a wave and an eighth of tiles (prism_in_proj 186 tiles, 1.12;
+        // large 576 tiles, 1.23; a filled 32 x 24 grid), or too few slabs
+        // per CTA (d128_out_proj 8 tiles x 16 slabs, 1.34; d128_in_proj
+        // 16 x 16, 1.22; underfill 48 x 4, 1.56; split_candidate 4 x 128,
+        // 1.65; a shallow 512-row batch).
+        for dims in [
+            (4621, 384, 1928),
+            (2048, 3072, 768),
+            (10400, 2048, 1536),
+            (1024, 256, 128),
+            (1024, 128, 512),
+            (256, 512, 384),
+            (128, 8192, 128),
+            (512, 384, 384),
+        ] {
+            assert_eq!(
+                pick(dims, stream_k, (8, 9)),
+                pick(dims, tiled, (8, 9)),
+                "{dims:?}"
+            );
+            assert_ne!(
+                pick(dims, stream_k, (8, 9)),
+                Some(TcTile::Tile64StreamK),
+                "{dims:?}"
+            );
+        }
+        // dX never takes the dW schedule.
+        assert_eq!(
+            tc_pick_tile_backward_for_device(
+                PolicyOp::Dx,
+                (10400, 384, 384),
+                RTX_6000_ADA_SMS,
+                (8, 9),
+                stream_k
+            ),
+            tc_pick_tile_backward_for_device(
+                PolicyOp::Dx,
+                (10400, 384, 384),
+                RTX_6000_ADA_SMS,
+                (8, 9),
+                tiled
+            )
+        );
+    }
 
     #[test]
     fn sm89_half_policy_prefers_proven_split_k_scalar_boundaries_only() {
@@ -7075,6 +7192,7 @@ mod tc_policy_tests {
             Some(TcTile::Tile64) => "tile64",
             Some(TcTile::Tile128) => "tile128",
             Some(TcTile::Rect128x64) => "rect128x64",
+            Some(TcTile::Tile64StreamK) => "tile64_streamk",
         }
     }
 
@@ -7112,34 +7230,41 @@ mod tc_policy_tests {
 
     #[test]
     fn selector_policy_identity_is_pinned_for_sm80_plus_device_sizes() {
+        let mut mismatches = Vec::new();
         for (multiprocessor_count, expected) in [
             (
                 48,
-                "3d78b978fd63011482be287553dff74fc8ad5ed44c3cbb6211eb847876920492",
+                "43f85c45907dc58d8523ade791ab18a2f6c5bce66d138c711566082c08ab552d",
             ),
             (
                 80,
-                "f9b667ff684bb9c2059b699328e28a3c72f880c6368484faa2bc259d3765c5a5",
+                "1d325d5d0d620fbe52895506fcdfc1ea578d0ed4cae87724aea71e16b6a6cf65",
             ),
             (
                 108,
-                "8ce633125ebffc7baa5c3648a854af37f1f323fdbb9e1ec4c5b84bc6655ba4f4",
+                "f88caa7b24c9aefc5f1b545789901257b5b54fa8ab11f62297843fa83bb7ce05",
             ),
             (
                 120,
-                "ba5987deabc8a8aa0aecbf566edbee4b14911abafeba381ad3f05a0a3b9c1e78",
+                "b1257cb5790e53811adb3ccd7f35be46e7a40bc33fa996a6487290a33e3813aa",
             ),
             (
                 142,
-                "9a418830be2f351bc6655d07b58d29605cab6df64ceedab30dc854bdda8758be",
+                "b9456bad001b11b2b9dcb88f4322f8a8cdb078e2b2dcec66e779001bf3623775",
             ),
         ] {
-            assert_eq!(
-                digest_hex(&gemm_dispatch_policy_digest(multiprocessor_count)),
-                expected,
-                "{multiprocessor_count} SM policy identity"
-            );
+            let actual = digest_hex(&gemm_dispatch_policy_digest(multiprocessor_count));
+            if actual != expected {
+                mismatches.push(format!(
+                    "{multiprocessor_count} SM: pinned {expected}, live {actual}"
+                ));
+            }
         }
+        assert!(
+            mismatches.is_empty(),
+            "policy identity moved; repin every size from the live digests:\n{}",
+            mismatches.join("\n")
+        );
     }
 
     #[test]
@@ -7386,6 +7511,7 @@ mod tc_policy_tests {
                 (2048, 1536, 768),
                 RTX_6000_ADA_SMS,
                 sm89,
+                HalfTriadPolicy::TiledParityV1,
             ),
             Some(TcTile::Tile64),
         );
@@ -7395,6 +7521,7 @@ mod tc_policy_tests {
                 (4096, 3072, 1536),
                 RTX_6000_ADA_SMS,
                 sm89,
+                HalfTriadPolicy::TiledParityV1,
             ),
             Some(TcTile::Tile64),
         );
@@ -7404,6 +7531,7 @@ mod tc_policy_tests {
                 (2048, 1536, 768),
                 RTX_6000_ADA_SMS,
                 sm89,
+                HalfTriadPolicy::TiledParityV1,
             ),
             Some(TcTile::Tile64),
         );
@@ -7413,6 +7541,7 @@ mod tc_policy_tests {
                 (2048, 3072, 768),
                 RTX_6000_ADA_SMS,
                 sm89,
+                HalfTriadPolicy::TiledParityV1,
             ),
             Some(TcTile::Tile128),
         );
@@ -7422,6 +7551,7 @@ mod tc_policy_tests {
                 (4096, 3072, 1536),
                 RTX_6000_ADA_SMS,
                 sm80,
+                HalfTriadPolicy::TiledParityV1,
             ),
             tc_pick_tile_backward(PolicyOp::Dw, (4096, 3072, 1536), RTX_6000_ADA_SMS,),
         );
@@ -9810,7 +9940,7 @@ mod tf32_tests {
 
     #[test]
     fn at_least_one_sm120_tf32_cohort_matches_this_tree() {
-        let live = super::super::modules::module_source_digest(ModuleKind::TriadSm120)
+        let live = super::super::modules::module_source_digest(ModuleKind::TriadSm120, "sm_120a")
             .expect("compose the SM120 module source");
         let stale: Vec<usize> = SM120_TF32_EVIDENCE_COHORTS
             .iter()
@@ -9825,11 +9955,17 @@ mod tf32_tests {
              the current kernels or retire it. Stale cohort indices: {stale:?}",
         );
         assert!(!SM120_TF32_EVIDENCE_COHORTS.is_empty());
-        let portable_live = super::super::modules::module_source_digest(ModuleKind::TriadSm80)
-            .expect("compose the portable module source");
         for cohort in SM120_TF32_EVIDENCE_COHORTS {
             if let Some(twin) = cohort.portable {
                 assert_eq!(twin.module_kind, ModuleKind::TriadSm80);
+                // The portable module a CC 12.x board compiles leaves the
+                // sm80 stream-K fragment out, so the twin's source is the
+                // composition for its own target.
+                let portable_live = super::super::modules::module_source_digest(
+                    ModuleKind::TriadSm80,
+                    twin.module_target,
+                )
+                .expect("compose the portable module source");
                 assert_eq!(
                     twin.source_digest, portable_live,
                     "a live cohort's portable twin is frozen against a portable source this \

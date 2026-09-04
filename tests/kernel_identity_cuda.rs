@@ -99,6 +99,19 @@ const SM80_TYPED_ENTRIES: &[&str] = &[
     "gemm_bi_nt_tc64_f16",
 ];
 
+/// Composed into the portable module on every sm80-family target except
+/// CC 12.x, whose boards run the SM120 stream-K kernel instead.
+#[cfg(target_os = "linux")]
+const SM80_STREAMK_ENTRIES: &[&str] = &[
+    "gemm_bi_tn_tc64_streamk_bf16",
+    "gemm_bi_tn_tc64_streamk_f16",
+];
+
+#[cfg(target_os = "linux")]
+fn sm80_target_composes_streamk(target: &str) -> bool {
+    !matches!(target, "compute_120" | "compute_121" | "sm_120" | "sm_121")
+}
+
 #[cfg(target_os = "linux")]
 const SM80_SPLITK_ENTRIES: &[&str] = &[
     "gemm_bi_nn_sm80_mma_tf32_splitk2_v1_m16n32_bk32_s4",
@@ -153,9 +166,14 @@ fn expected_scalar_entries() -> std::collections::BTreeSet<String> {
 }
 
 #[cfg(target_os = "linux")]
-fn expected_sm80_entries() -> std::collections::BTreeSet<String> {
+fn expected_sm80_entries(target: &str) -> std::collections::BTreeSet<String> {
     SM80_TYPED_ENTRIES
         .iter()
+        .chain(
+            SM80_STREAMK_ENTRIES
+                .iter()
+                .filter(|_| sm80_target_composes_streamk(target)),
+        )
         .chain(SM80_SPLITK_ENTRIES)
         .map(|name| (*name).to_string())
         .chain(
@@ -171,7 +189,14 @@ fn expected_sm80_entries() -> std::collections::BTreeSet<String> {
 fn expected_cuda_module_fixtures_are_unique() {
     assert_eq!(expected_scalar_entries().len(), SCALAR_ENTRIES.len());
     assert_eq!(
-        expected_sm80_entries().len(),
+        expected_sm80_entries("sm_89").len(),
+        SM80_TYPED_ENTRIES.len()
+            + SM80_STREAMK_ENTRIES.len()
+            + SM80_SPLITK_ENTRIES.len()
+            + SM80_TF32_ROUTE_SPECS.len()
+    );
+    assert_eq!(
+        expected_sm80_entries("compute_120").len(),
         SM80_TYPED_ENTRIES.len() + SM80_SPLITK_ENTRIES.len() + SM80_TF32_ROUTE_SPECS.len()
     );
     assert_eq!(
@@ -745,10 +770,18 @@ fn repeated_nvrtc_compiles_have_the_same_identity() {
             &cached_entries,
             first_artifacts.triad_sm80,
         ));
-        let expected_sm80 = expected_sm80_entries();
+        let sm80_target = first.kernels.compiler_identity().target;
+        let expected_sm80 = expected_sm80_entries(sm80_target.as_str());
         assert_eq!(
             expected_sm80.len(),
-            SM80_TYPED_ENTRIES.len() + SM80_SPLITK_ENTRIES.len() + SM80_TF32_ROUTE_SPECS.len(),
+            SM80_TYPED_ENTRIES.len()
+                + if sm80_target_composes_streamk(sm80_target.as_str()) {
+                    SM80_STREAMK_ENTRIES.len()
+                } else {
+                    0
+                }
+                + SM80_SPLITK_ENTRIES.len()
+                + SM80_TF32_ROUTE_SPECS.len(),
             "SM80 fixture contains duplicate entries"
         );
         assert_eq!(sm80_entries, expected_sm80);

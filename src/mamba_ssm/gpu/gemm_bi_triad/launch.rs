@@ -1,7 +1,7 @@
 use super::super::buffers::{
     GpuBuffer, ManagedAllocationEpochStamp, managed_allocation_epoch_for_ranges,
 };
-use super::super::context::GpuCtx;
+use super::super::context::{GpuCtx, HalfTriadPolicy};
 use super::super::kernels::MambaKernels as GpuKernels;
 use super::contract::*;
 use super::dispatch::*;
@@ -9369,10 +9369,20 @@ fn require_half(dt: WeightDtype, what: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// How a half kernel reduces one output tile: the tiled kernels keep one
+/// owner CTA and one reduction order per tile; the stream-K kernel folds
+/// per-CTA partial slabs in a fixed order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HalfSchedule {
+    Tiled,
+    StreamKFixedOrder,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct HalfKernelIdentity {
     symbol: &'static str,
     module_kind: ModuleKind,
+    schedule: HalfSchedule,
 }
 
 impl HalfKernelIdentity {
@@ -9384,6 +9394,7 @@ impl HalfKernelIdentity {
                 | "gemm_bi_nn_tc16"
                 | "gemm_bi_tn_tc"
                 | "gemm_bi_tn_tc64"
+                | "gemm_bi_tn_tc64_streamk"
                 | "gemm_bi_tn_tc128x64"
                 | "gemm_bi_nt_tc"
                 | "gemm_bi_nt_tc64"
@@ -9391,6 +9402,11 @@ impl HalfKernelIdentity {
             ModuleKind::TriadSm80
         } else {
             ModuleKind::TriadScalar
+        };
+        let schedule = if base == "gemm_bi_tn_tc64_streamk" {
+            HalfSchedule::StreamKFixedOrder
+        } else {
+            HalfSchedule::Tiled
         };
         let symbol = match (base, dtype) {
             ("gemm_bi_nn_gemv", WeightDtype::Bf16) => "gemm_bi_nn_gemv_bf16",
@@ -9425,6 +9441,8 @@ impl HalfKernelIdentity {
             ("gemm_bi_tn_tc", WeightDtype::F16) => "gemm_bi_tn_tc_f16",
             ("gemm_bi_tn_tc64", WeightDtype::Bf16) => "gemm_bi_tn_tc64_bf16",
             ("gemm_bi_tn_tc64", WeightDtype::F16) => "gemm_bi_tn_tc64_f16",
+            ("gemm_bi_tn_tc64_streamk", WeightDtype::Bf16) => "gemm_bi_tn_tc64_streamk_bf16",
+            ("gemm_bi_tn_tc64_streamk", WeightDtype::F16) => "gemm_bi_tn_tc64_streamk_f16",
             ("gemm_bi_tn_tc128x64", WeightDtype::Bf16) => "gemm_bi_tn_tc128x64_bf16",
             ("gemm_bi_tn_tc128x64", WeightDtype::F16) => "gemm_bi_tn_tc128x64_f16",
             ("gemm_bi_nt_tc", WeightDtype::Bf16) => "gemm_bi_nt_tc_bf16",
@@ -9439,6 +9457,7 @@ impl HalfKernelIdentity {
         Ok(Self {
             symbol,
             module_kind,
+            schedule,
         })
     }
 
@@ -9685,7 +9704,12 @@ fn resolved_half_gemm_route<O: PhysicalLaunchObserver>(
                 kernels.triad_sm80_compiler_identity(),
                 context.artifacts.triad_sm80,
                 PhysicalGemmBackend::Sm80Mma16V1,
-                ResolvedNumericContract::MmaSyncF32V1,
+                match identity.schedule {
+                    HalfSchedule::Tiled => ResolvedNumericContract::MmaSyncF32V1,
+                    HalfSchedule::StreamKFixedOrder => {
+                        ResolvedNumericContract::MmaSyncF32StreamKFixedOrderV1
+                    }
+                },
                 ResolvedInstructionFamily::MmaSync,
                 ResolvedInstructionShape { m: 16, n: 8, k: 16 },
             ),
@@ -9709,7 +9733,12 @@ fn resolved_half_gemm_route<O: PhysicalLaunchObserver>(
         instruction_family,
         instruction_shape,
         operand_conversion: ResolvedOperandConversion::None,
-        ownership: ResolvedOutputOwnership::OneCtaPerOutputTileV1,
+        ownership: match identity.schedule {
+            HalfSchedule::Tiled => ResolvedOutputOwnership::OneCtaPerOutputTileV1,
+            HalfSchedule::StreamKFixedOrder => {
+                ResolvedOutputOwnership::OwnerCtaPerOutputTileStreamKFixedOrderV1
+            }
+        },
         symbol: identity.symbol,
         module_kind: identity.module_kind,
         target: compiler.target,
@@ -9850,6 +9879,16 @@ pub(in crate::mamba_ssm::gpu) fn prepare_native_half_graph_identity<O: PhysicalL
         "gemm_bi_tn_tc64" => {
             HalfKernelChoice::new(base, ctx.kernels.gemm_bi_tn_tc64_typed.get(request.dtype))
         }
+        "gemm_bi_tn_tc64_streamk" => HalfKernelChoice::new(
+            base,
+            ctx.kernels
+                .gemm_bi_tn_tc64_streamk_typed
+                .as_ref()
+                .ok_or_else(|| {
+                    "the portable stream-K dW kernel is not composed for this target".to_string()
+                })?
+                .get(request.dtype),
+        ),
         "gemm_bi_nt_tc" => {
             HalfKernelChoice::new(base, ctx.kernels.gemm_bi_nt_tc_typed.get(request.dtype))
         }
@@ -9944,6 +9983,7 @@ impl TcTile {
             TcTile::Tile64 => (64, 64),
             TcTile::Thin16 => (16, 32),
             TcTile::Rect128x64 => (128, 64),
+            TcTile::Tile64StreamK => (64, 64),
         }
     }
 
@@ -9951,14 +9991,14 @@ impl TcTile {
     fn block_dim(self) -> u32 {
         match self {
             TcTile::Tile128 => 256,
-            TcTile::Tile64 | TcTile::Thin16 => 128,
+            TcTile::Tile64 | TcTile::Thin16 | TcTile::Tile64StreamK => 128,
             TcTile::Rect128x64 => 256,
         }
     }
 
     fn bk_stages(self) -> (u32, u8) {
         match self {
-            TcTile::Tile128 | TcTile::Tile64 => (64, 2),
+            TcTile::Tile128 | TcTile::Tile64 | TcTile::Tile64StreamK => (64, 2),
             TcTile::Thin16 => (64, 4),
             TcTile::Rect128x64 => (32, 3),
         }
@@ -9976,6 +10016,11 @@ impl TcTile {
         cols: usize,
         dyn_bytes128: u32,
     ) -> Result<cudarc::driver::LaunchConfig, String> {
+        if self == TcTile::Tile64StreamK {
+            return Err(
+                "Tile64StreamK launches a persistent grid; use the stream-K dW path".into(),
+            );
+        }
         let (bm, bn) = self.extents();
         let total_tiles = checked_tile_grid(
             checked_u32(rows, "tile rows")?,
@@ -9988,11 +10033,64 @@ impl TcTile {
             block_dim: (self.block_dim(), 1, 1),
             shared_mem_bytes: match self {
                 TcTile::Tile128 => dyn_bytes128,
-                TcTile::Tile64 | TcTile::Thin16 => 0,
+                TcTile::Tile64 | TcTile::Thin16 | TcTile::Tile64StreamK => 0,
                 TcTile::Rect128x64 => 0,
             },
         })
     }
+}
+
+/// Slab floats of one stream-K (CTA, slot) pair: 128 threads by 32
+/// accumulators, matching `GEMM_BI_TC64_STREAMK_ACCUMULATORS` in sm80.cu.
+const SM80_STREAMK_SLAB_FLOATS: usize = 128 * 32;
+/// Slots per CTA: a range can end inside its first tile or a later one.
+const SM80_STREAMK_SLOTS_PER_CTA: usize = 2;
+
+/// The persistent grid of the tc64 TN stream-K kernel: one CTA per
+/// multiprocessor, never more CTAs than (tile, slab) units, never zero.
+pub fn sm80_streamk_grid(kernels: &GpuKernels, dims: (usize, usize, usize)) -> Result<u32, String> {
+    let checked = GemmDims::tn(dims)?;
+    let (batch, n_in, n_out) = checked.tuple();
+    let tiles = checked_tile_grid(
+        checked_u32(n_in, "tile rows")?,
+        64,
+        checked_u32(n_out, "tile columns")?,
+        64,
+    )?;
+    let slabs = checked_u32(batch, "reduction rows")?.div_ceil(64);
+    let units = u64::from(tiles) * u64::from(slabs);
+    let multiprocessors = u64::from(kernels.multiprocessor_count().max(1));
+    u32::try_from(units.min(multiprocessors).max(1))
+        .map_err(|_| "stream-K grid exceeds u32".to_string())
+}
+
+/// The partial-slab and flag pointers of the stream-K dW kernel, from the
+/// fixed split-K workspaces; the extents are checked against their caps so
+/// a grid the workspace cannot hold fails here, not in the kernel.
+pub fn sm80_streamk_workspace(
+    stream: &Arc<cudarc::driver::CudaStream>,
+    kernels: &GpuKernels,
+    grid: u32,
+) -> Result<(CUptr, CUptr), String> {
+    use cudarc::driver::DevicePtr;
+    let slots = (grid as usize)
+        .checked_mul(SM80_STREAMK_SLOTS_PER_CTA)
+        .ok_or_else(|| "sm80 stream-K slot count overflows usize".to_string())?;
+    let partial_floats = slots
+        .checked_mul(SM80_STREAMK_SLAB_FLOATS)
+        .ok_or_else(|| "sm80 stream-K slab extent overflows usize".to_string())?;
+    if partial_floats > SPLITK_SCRATCH_CAP {
+        return Err("sm80 stream-K slabs exceed the fixed workspace".into());
+    }
+    if slots > TF32_SPLITK_COUNTER_CAP {
+        return Err("sm80 stream-K flags exceed the fixed counter workspace".into());
+    }
+    let (partial, _) = kernels.splitk_scratch_buf(stream)?.device_ptr(stream);
+    let (flags, _) = kernels
+        .triad_kernels()
+        .tf32_splitk_counter_buf(stream)?
+        .device_ptr(stream);
+    Ok((partial, flags))
 }
 
 /// Tensor-core NN forward (`bi_tensor_cores` tier):
@@ -10111,6 +10209,9 @@ fn gemm_bi_forward_tc_with_tile_in<O: PhysicalLaunchObserver>(
         TcTile::Rect128x64 => {
             return Err("Rect128x64 is a forced TN dW tile; NN has no rectangular route".into());
         }
+        TcTile::Tile64StreamK => {
+            return Err("Tile64StreamK is a TN dW schedule; NN has no stream-K route".into());
+        }
     };
     let mut b = environment.stream.launch_builder(choice.function);
     b.arg(&ops.y.ptr);
@@ -10167,7 +10268,15 @@ pub fn gemm_bi_backward_dw_tc(
     dims: (usize, usize, usize),
 ) -> Result<TcTile, String> {
     let mut environment = HalfLaunchEnvironment::production(stream, kernels);
-    gemm_bi_backward_dw_tc_in(&mut environment, dw_ptr, dy, x_saved, dims).map(|(tile, _)| tile)
+    gemm_bi_backward_dw_tc_in(
+        &mut environment,
+        dw_ptr,
+        dy,
+        x_saved,
+        dims,
+        HalfTriadPolicy::TiledParityV1,
+    )
+    .map(|(tile, _)| tile)
 }
 
 fn gemm_bi_backward_dw_tc_in<O: PhysicalLaunchObserver>(
@@ -10176,6 +10285,7 @@ fn gemm_bi_backward_dw_tc_in<O: PhysicalLaunchObserver>(
     dy: TypedPtr,
     x_saved: TypedPtr,
     dims: (usize, usize, usize),
+    half_policy: HalfTriadPolicy,
 ) -> Result<(TcTile, HalfNativeBranchSeal), String> {
     let checked_dims = GemmDims::tn(dims)?;
     let (batch, n_in, n_out) = checked_dims.tuple();
@@ -10191,6 +10301,7 @@ fn gemm_bi_backward_dw_tc_in<O: PhysicalLaunchObserver>(
         dims,
         environment.kernels.multiprocessor_count(),
         compute_capability,
+        half_policy,
     ).ok_or_else(|| {
         format!(
             "UNCOVERED gemm_bi_backward_dw_tc: shape M={batch} K={n_in} N={n_out} outside the automatic TC route"
@@ -10233,20 +10344,55 @@ fn gemm_bi_backward_dw_tc_with_tile_in<O: PhysicalLaunchObserver>(
     let m_red_i = checked_dims.m_i32;
     let k_out_i = checked_dims.k_i32;
     let n_i = checked_dims.n_i32;
-    let cfg = tile.launch_cfg(n_in, n_out, 69_632)?;
-    let choice = match tile {
-        TcTile::Tile128 => HalfKernelChoice::new(
-            "gemm_bi_tn_tc",
-            environment.kernels.gemm_bi_tn_tc_typed.get(dt),
+    let (cfg, choice, workspace) = match tile {
+        TcTile::Tile128 => (
+            tile.launch_cfg(n_in, n_out, 69_632)?,
+            HalfKernelChoice::new(
+                "gemm_bi_tn_tc",
+                environment.kernels.gemm_bi_tn_tc_typed.get(dt),
+            ),
+            None,
         ),
-        TcTile::Tile64 => HalfKernelChoice::new(
-            "gemm_bi_tn_tc64",
-            environment.kernels.gemm_bi_tn_tc64_typed.get(dt),
+        TcTile::Tile64 => (
+            tile.launch_cfg(n_in, n_out, 69_632)?,
+            HalfKernelChoice::new(
+                "gemm_bi_tn_tc64",
+                environment.kernels.gemm_bi_tn_tc64_typed.get(dt),
+            ),
+            None,
         ),
-        TcTile::Rect128x64 => HalfKernelChoice::new(
-            "gemm_bi_tn_tc128x64",
-            environment.kernels.gemm_bi_tn_tc128x64_typed.get(dt),
+        TcTile::Rect128x64 => (
+            tile.launch_cfg(n_in, n_out, 69_632)?,
+            HalfKernelChoice::new(
+                "gemm_bi_tn_tc128x64",
+                environment.kernels.gemm_bi_tn_tc128x64_typed.get(dt),
+            ),
+            None,
         ),
+        TcTile::Tile64StreamK => {
+            let grid = sm80_streamk_grid(environment.kernels, dims)?;
+            let workspace = sm80_streamk_workspace(environment.stream, environment.kernels, grid)?;
+            (
+                cudarc::driver::LaunchConfig {
+                    grid_dim: (grid, 1, 1),
+                    block_dim: (tile.block_dim(), 1, 1),
+                    shared_mem_bytes: 0,
+                },
+                HalfKernelChoice::new(
+                    "gemm_bi_tn_tc64_streamk",
+                    environment
+                        .kernels
+                        .gemm_bi_tn_tc64_streamk_typed
+                        .as_ref()
+                        .ok_or_else(|| {
+                            "the portable stream-K dW kernel is not composed for this target"
+                                .to_string()
+                        })?
+                        .get(dt),
+                ),
+                Some(workspace),
+            )
+        }
         TcTile::Thin16 => {
             return Err("Thin16 is an NN-forward rung; the TN dW path has no thin tile".into());
         }
@@ -10259,6 +10405,10 @@ fn gemm_bi_backward_dw_tc_with_tile_in<O: PhysicalLaunchObserver>(
     b.arg(&m_red_i);
     b.arg(&k_out_i);
     b.arg(&n_i);
+    if let Some((partial, flags)) = &workspace {
+        b.arg(partial);
+        b.arg(flags);
+    }
     unsafe {
         enqueue_half_gemm(
             &mut environment.observer,
@@ -10319,6 +10469,7 @@ fn gemm_bi_backward_dx_tc_in<O: PhysicalLaunchObserver>(
         dims,
         environment.kernels.multiprocessor_count(),
         compute_capability,
+        HalfTriadPolicy::TiledParityV1,
     ).ok_or_else(|| {
         format!(
             "UNCOVERED gemm_bi_backward_dx_tc: shape M={batch} K={n_in} N={n_out} outside the automatic TC route"
@@ -10376,6 +10527,9 @@ fn gemm_bi_backward_dx_tc_with_tile_in<O: PhysicalLaunchObserver>(
         }
         TcTile::Rect128x64 => {
             return Err("Rect128x64 is a forced TN dW tile; NT has no rectangular route".into());
+        }
+        TcTile::Tile64StreamK => {
+            return Err("Tile64StreamK is a TN dW schedule; NT has no stream-K route".into());
         }
     };
     let mut b = environment.stream.launch_builder(choice.function);
@@ -11123,7 +11277,14 @@ pub(in crate::mamba_ssm::gpu) fn gemm_bi_backward_dw_tc_observed<O: PhysicalLaun
     dims: (usize, usize, usize),
 ) -> Result<(TcTile, HalfNativeBranchSeal), String> {
     let mut environment = HalfLaunchEnvironment::observed(ctx, observer);
-    gemm_bi_backward_dw_tc_in(&mut environment, dw_ptr, dy, x_saved, dims)
+    gemm_bi_backward_dw_tc_in(
+        &mut environment,
+        dw_ptr,
+        dy,
+        x_saved,
+        dims,
+        ctx.half_triad_policy(),
+    )
 }
 
 pub(in crate::mamba_ssm::gpu) fn gemm_bi_backward_dw_tc_with_tile_observed<

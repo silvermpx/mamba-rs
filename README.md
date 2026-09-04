@@ -67,13 +67,16 @@ Pure Rust + CUDA. Kernels compile at runtime via NVRTC.
   graph launches of the same frozen route are bit-identical.
 - **Half-precision stream-K policy** — `MAMBA_RS_BI_HALF_POLICY=tiled|streamk`
   or `ctx.set_half_triad_policy(...)` controls the batch-invariant bf16/f16
-  route on the CC 12.x boards. `tiled` is the default: every automatic half
-  route reproduces the forced portable tensor-core kernel bit for bit.
-  `streamk` permits only the measured stream-K cells, a persistent grid that
-  folds per-CTA partials in a fixed order (a different reduction contract from
-  the tiled body; repeated eager and graph launches of the same route stay
-  bit-identical). It does not force one: an unmeasured shape, or a grid that
-  already fills the device, stays on the tiled route. Requires
+  route. `tiled` is the default: every automatic half route reproduces the
+  forced portable tensor-core kernel bit for bit. `streamk` permits the
+  measured stream-K routes, a persistent grid that folds per-CTA partials in
+  a fixed order (a different reduction contract from the tiled body; repeated
+  eager and graph launches of the same route stay bit-identical): the
+  measured TN cells on the CC 12.x boards, and the dW reduction on SM89 when
+  the 64x64 tile grid is at most a wave and an eighth and every CTA of the
+  persistent grid holds at least 32 slabs. It does not force one: an
+  unmeasured shape, or a grid that fills the device, stays on the tiled
+  route. Requires
   `MAMBA_RS_BI_TENSOR_CORES=1`; the flag refuses to be a silent no-op.
 - **Per-architecture tensor-core rungs** — on Hopper (`wgmma`) and
   Blackwell (`tcgen05`) the deterministic forward ladder routes to native

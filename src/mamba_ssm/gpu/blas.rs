@@ -1557,6 +1557,15 @@ fn prepare_native_half_graph_launch(
             } else {
                 arguments.push(checked.n_i32)?;
             }
+            if base == "gemm_bi_tn_tc64_streamk" {
+                let (partial, flags) = super::gemm_bi_triad::sm80_streamk_workspace(
+                    &ctx.stream,
+                    &ctx.kernels,
+                    config.grid_dim.0,
+                )?;
+                arguments.push(partial)?;
+                arguments.push(flags)?;
+            }
         }
         ResolvedGemmOp::Nt => {
             arguments.push(request.output)?;

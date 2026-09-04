@@ -1905,3 +1905,393 @@ fn step0_tc_attrs_and_goldens() {
         println!("fwd M{m} K{k_} N{n}: {us:.1} us = {tflops:.1} TFLOPS");
     }
 }
+
+/// The portable module composes the tc64 TN stream-K fragment on every
+/// sm80-family board except CC 12.x, whose boards run the SM120 stream-K
+/// kernel; the forced stream-K tests have nothing to launch there.
+fn portable_module_composes_streamk() -> bool {
+    let device = GpuDevice::new(0).expect("device 0");
+    if device.compute_capability.0 == 12 {
+        eprintln!(
+            "skip: the portable stream-K fragment is not composed for CC {:?}",
+            device.compute_capability
+        );
+        return false;
+    }
+    true
+}
+
+/// The stream-K dW schedule folds per-CTA partial slabs in a fixed order, so
+/// its bits differ from the tiled ladder on a multi-CTA grid; the contract it
+/// carries is bit-stability per device plus agreement with the reference to
+/// f32 accumulation tolerance. With a one-CTA grid every tile is one segment
+/// in ascending order and the output equals the tiled kernel bit for bit.
+#[test]
+fn tn_tc64_streamk_forced_agrees_with_reference_and_repeats_bit_for_bit() {
+    use gemm_bi_triad::TcTile;
+
+    if !portable_module_composes_streamk() {
+        return;
+    }
+    let t = Ctx::new();
+    let shapes: [(usize, usize, usize); 7] = [
+        (10400, 384, 384),
+        (4621, 200, 136),
+        (2048, 48, 1536),
+        (65, 129, 65),
+        (200, 130, 70),
+        (1, 64, 64),
+        (8192, 128, 128),
+    ];
+    for dt in [WeightDtype::Bf16, WeightDtype::F16] {
+        for (index, dims) in shapes.into_iter().enumerate() {
+            let seed = 0x5000 + index as u32 * 7;
+            let qx = quantize(&det(dims.0 * dims.1, seed, 0.5), dt);
+            let qdy = quantize(&det(dims.0 * dims.2, seed + 1, 0.25), dt);
+            let initial = det(dims.1 * dims.2, seed + 2, 0.125);
+            let x = t.typed_buf(&qx, dt);
+            let dy = t.typed_buf(&qdy, dt);
+            let launch = |tile: TcTile| {
+                let dw = t.f32_buf(&initial);
+                gemm_bi_triad::gemm_bi_backward_dw_tc_with_tile(
+                    &t.ctx.stream,
+                    &t.ctx.kernels,
+                    dw.cached_ptr(),
+                    TypedPtr {
+                        ptr: dy.cached_ptr(),
+                        dtype: dt,
+                    },
+                    TypedPtr {
+                        ptr: x.cached_ptr(),
+                        dtype: dt,
+                    },
+                    dims,
+                    tile,
+                )
+                .unwrap();
+                t.ctx.stream.synchronize().unwrap();
+                dw.to_cpu(&t.ctx.stream).unwrap()
+            };
+            let first = launch(TcTile::Tile64StreamK);
+            let second = launch(TcTile::Tile64StreamK);
+            assert_eq!(
+                first.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                second.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                "{dt:?} {dims:?}: stream-K repeat drift"
+            );
+            let tiled = launch(TcTile::Tile64);
+            // Reference: dW[k][n] = initial + sum_m x[m][k] * dy[m][n] in f64.
+            let (m, k, n) = dims;
+            let mut worst = 0.0f64;
+            for kk in 0..k {
+                for nn in 0..n {
+                    let mut sum = 0.0f64;
+                    for mm in 0..m {
+                        sum += f64::from(qx[mm * k + kk]) * f64::from(qdy[mm * n + nn]);
+                    }
+                    let expected = f64::from(initial[kk * n + nn]) + sum;
+                    let got = f64::from(first[kk * n + nn]);
+                    let scale = expected
+                        .abs()
+                        .max(f64::from(tiled[kk * n + nn]).abs())
+                        .max(1.0);
+                    worst = worst.max((got - expected).abs() / scale);
+                }
+            }
+            // f32 accumulation over m products, folded in a different order.
+            let bound = 4e-6 * (m as f64).sqrt().max(1.0);
+            assert!(
+                worst <= bound,
+                "{dt:?} {dims:?}: stream-K differs from the f64 reference by {worst:e} (bound {bound:e})"
+            );
+        }
+    }
+}
+
+#[test]
+fn tn_tc64_streamk_qualifies_under_its_own_contract_on_a_persistent_grid() {
+    use gemm_bi_triad::{
+        PhysicalQualificationRequest, PhysicalQualificationRoute, TcTile, qualify_physical_launch,
+    };
+    use mamba_rs::mamba_ssm::gpu::kernel_identity::{
+        ResolvedGemmOp, ResolvedNumericContract, ResolvedOutputOwnership,
+    };
+
+    if !portable_module_composes_streamk() {
+        return;
+    }
+    let t = Ctx::new();
+    let dims = (2048usize, 384usize, 384usize);
+    for dtype in [WeightDtype::Bf16, WeightDtype::F16] {
+        let physical = qualify_physical_launch(
+            &t.ctx,
+            PhysicalQualificationRequest::contiguous(
+                ResolvedGemmOp::Tn,
+                dims,
+                PhysicalQualificationRoute::HalfForced {
+                    dtype,
+                    tile: TcTile::Tile64StreamK,
+                },
+            ),
+        )
+        .expect("qualify the forced stream-K dW route");
+        let evidence = physical.evidence();
+        assert!(
+            evidence.eager_graph_equal(),
+            "{dtype:?}: eager and graph replay differ"
+        );
+        assert_eq!(evidence.launch_count(), 1, "{dtype:?}");
+        let [node] = evidence.nodes() else {
+            panic!(
+                "{dtype:?}: forced stream-K dW recorded {} nodes",
+                evidence.nodes().len()
+            );
+        };
+        assert!(
+            node.symbol.starts_with("gemm_bi_tn_tc64_streamk"),
+            "{dtype:?}: {}",
+            node.symbol
+        );
+        assert_eq!(
+            node.numeric_contract,
+            Some(ResolvedNumericContract::MmaSyncF32StreamKFixedOrderV1),
+            "{dtype:?}"
+        );
+        assert_eq!(
+            node.ownership,
+            Some(ResolvedOutputOwnership::OwnerCtaPerOutputTileStreamKFixedOrderV1),
+            "{dtype:?}"
+        );
+        // 36 tiles by 32 slabs: a persistent grid of one CTA per
+        // multiprocessor, well under the 1152 units it walks.
+        assert!(
+            node.launch.grid_dim.0 > 1 && node.launch.grid_dim.0 < 1152,
+            "{dtype:?}: grid {:?}",
+            node.launch.grid_dim
+        );
+        assert_eq!(node.launch.block_dim, (128, 1, 1), "{dtype:?}");
+    }
+    // The lease restored the tiled parity policy.
+    assert_eq!(
+        t.ctx.half_triad_policy(),
+        mamba_rs::mamba_ssm::gpu::context::HalfTriadPolicy::TiledParityV1
+    );
+}
+
+/// Timing census of the tc64 TN dW body over its two schedules on this
+/// device: the tiled kernel and the stream-K twin, forced through the
+/// physical qualification facade and timed as graph replays. Prints one
+/// JSON line per cell; the automatic SM89 rule is set from these numbers.
+#[test]
+#[ignore = "timing census; run by hand on the measured board"]
+fn tn_tc64_streamk_versus_tiled_timing_census() {
+    use gemm_bi_triad::{
+        PhysicalQualificationRequest, PhysicalQualificationRoute, TcTile, qualify_physical_launch,
+    };
+    use mamba_rs::mamba_ssm::gpu::kernel_identity::ResolvedGemmOp;
+
+    if !portable_module_composes_streamk() {
+        return;
+    }
+
+    const SHAPES: [(&str, (usize, usize, usize)); 22] = [
+        ("sq64", (64, 64, 64)),
+        ("underfill", (256, 512, 384)),
+        ("large", (2048, 3072, 768)),
+        ("large_deep", (4096, 3072, 1536)),
+        ("rect_wide", (512, 3072, 768)),
+        ("rect_tall", (4096, 512, 768)),
+        ("thin_rows", (16, 512, 2048)),
+        ("thin_cols", (512, 16, 2048)),
+        ("thin_rows_tail", (49, 65, 129)),
+        ("thin_cols_tail", (65, 49, 129)),
+        ("all_tail", (129, 131, 100)),
+        ("split_candidate", (128, 8192, 128)),
+        ("d128_in_proj", (1024, 128, 512)),
+        ("d128_out_proj", (1024, 256, 128)),
+        ("d768_in_proj", (2048, 768, 3072)),
+        ("d768_out_proj", (2048, 1536, 768)),
+        ("prism_in_proj", (4621, 384, 1928)),
+        ("prism_out_proj", (4621, 768, 384)),
+        ("prism_input_proj", (4621, 1024, 384)),
+        ("batch_in_proj", (10400, 384, 1536)),
+        ("batch_input_proj", (10400, 384, 384)),
+        ("batch_out_proj", (10400, 768, 384)),
+    ];
+    const WINDOWS: usize = 9;
+    const ITERATIONS: usize = 20;
+
+    let t = Ctx::new();
+    let multiprocessors = mamba_rs::mamba_ssm::gpu::device::GpuDevice::new(0)
+        .expect("query device 0")
+        .multiprocessor_count();
+    // Every cell captures a graph, and the context's scratch cannot grow
+    // after a capture: size the whole suite before the first cell.
+    let suite = SHAPES
+        .iter()
+        .flat_map(|(_, dims)| {
+            [WeightDtype::Bf16, WeightDtype::F16]
+                .into_iter()
+                .flat_map(move |dtype| {
+                    [TcTile::Tile64, TcTile::Tile128, TcTile::Tile64StreamK]
+                        .into_iter()
+                        .map(move |tile| {
+                            PhysicalQualificationRequest::contiguous(
+                                ResolvedGemmOp::Tn,
+                                *dims,
+                                PhysicalQualificationRoute::HalfForced { dtype, tile },
+                            )
+                        })
+                })
+        })
+        .collect::<Vec<_>>();
+    gemm_bi_triad::presize_physical_qualification_suite(&t.ctx, &suite)
+        .expect("pre-size the stream-K census suite");
+    for (name, dims) in SHAPES {
+        for dtype in [WeightDtype::Bf16, WeightDtype::F16] {
+            let mut row = format!(
+                "{{\"schema\":\"MambaBiTnStreamKCensusV1\",\"shape\":\"{name}\",\"m\":{},\"k\":{},\"n\":{},\"dtype\":\"{}\",\"multiprocessors\":{multiprocessors}",
+                dims.0,
+                dims.1,
+                dims.2,
+                match dtype {
+                    WeightDtype::Bf16 => "bf16",
+                    WeightDtype::F16 => "f16",
+                    WeightDtype::F32 => "f32",
+                }
+            );
+            for (label, tile) in [
+                ("tile64", TcTile::Tile64),
+                ("tile128", TcTile::Tile128),
+                ("tile64_streamk", TcTile::Tile64StreamK),
+            ] {
+                let request = PhysicalQualificationRequest::contiguous(
+                    ResolvedGemmOp::Tn,
+                    dims,
+                    PhysicalQualificationRoute::HalfForced { dtype, tile },
+                );
+                let physical = match qualify_physical_launch(&t.ctx, request) {
+                    Ok(physical) => physical,
+                    Err(error) => {
+                        row.push_str(&format!(
+                            ",\"{label}_error\":\"{}\"",
+                            error.replace('"', "'")
+                        ));
+                        continue;
+                    }
+                };
+                let grid = physical.evidence().nodes()[0].launch.grid_dim.0;
+                let mut best = f64::INFINITY;
+                for _ in 0..WINDOWS {
+                    let window = physical
+                        .measure_graph_window_ms(&t.ctx, ITERATIONS)
+                        .expect("measure graph window");
+                    best = best.min(window * 1000.0 / ITERATIONS as f64);
+                }
+                row.push_str(&format!(
+                    ",\"{label}_grid\":{grid},\"{label}_us\":{best:.3}"
+                ));
+            }
+            row.push('}');
+            println!("{row}");
+        }
+    }
+}
+
+/// On SM89 the automatic dW route takes the stream-K schedule for an
+/// underfilled deep batch cell only under the permitting half policy. The
+/// native half path records no eager route, so the route is proven by its
+/// bits: the automatic launch equals the forced kernel of the schedule the
+/// policy names, bit for bit, and the two schedules are distinguishable.
+#[test]
+fn sm89_automatic_dw_takes_stream_k_only_under_the_half_policy() {
+    use gemm_bi_triad::TcTile;
+    use mamba_rs::mamba_ssm::gpu::blas::gemm_bi_backward_dw_typed;
+    use mamba_rs::mamba_ssm::gpu::context::{BiGemmFamily, HalfTriadPolicy};
+
+    let device = GpuDevice::new(0).expect("device 0");
+    if device.compute_capability != (8, 9) {
+        eprintln!(
+            "skip: the stream-K dW rule is measured on CC 8.9, this board is {:?}",
+            device.compute_capability
+        );
+        return;
+    }
+    let t = Ctx::new();
+    t.ctx.set_batch_invariant(true);
+    t.ctx.set_bi_gemm_family(BiGemmFamily::Triad);
+    t.ctx.set_bi_tensor_cores(true);
+    let dims = (10400usize, 384usize, 384usize);
+    let dt = WeightDtype::Bf16;
+    let x = t.typed_buf(&quantize(&det(dims.0 * dims.1, 0x91, 0.5), dt), dt);
+    let dy = t.typed_buf(&quantize(&det(dims.0 * dims.2, 0x92, 0.25), dt), dt);
+    let dyp = TypedPtr {
+        ptr: dy.cached_ptr(),
+        dtype: dt,
+    };
+    let xp = TypedPtr {
+        ptr: x.cached_ptr(),
+        dtype: dt,
+    };
+    let bits = |dw: &GpuBuffer| {
+        t.ctx.stream.synchronize().unwrap();
+        dw.to_cpu(&t.ctx.stream)
+            .unwrap()
+            .into_iter()
+            .map(f32::to_bits)
+            .collect::<Vec<_>>()
+    };
+    let automatic = |policy: HalfTriadPolicy| {
+        t.ctx.set_half_triad_policy(policy);
+        let dw = GpuBuffer::zeros(&t.ctx.stream, dims.1 * dims.2).unwrap();
+        gemm_bi_backward_dw_typed(&t.ctx, dw.cached_ptr(), dyp, xp, dims).expect("automatic dW");
+        bits(&dw)
+    };
+    let forced = |tile: TcTile| {
+        let dw = GpuBuffer::zeros(&t.ctx.stream, dims.1 * dims.2).unwrap();
+        gemm_bi_triad::gemm_bi_backward_dw_tc_with_tile(
+            &t.ctx.stream,
+            &t.ctx.kernels,
+            dw.cached_ptr(),
+            dyp,
+            xp,
+            dims,
+            tile,
+        )
+        .unwrap();
+        bits(&dw)
+    };
+    let tiled = forced(TcTile::Tile64);
+    let stream_k = forced(TcTile::Tile64StreamK);
+    assert_ne!(
+        tiled, stream_k,
+        "the two schedules must be distinguishable on this shape for the route proof"
+    );
+    assert_eq!(
+        automatic(HalfTriadPolicy::TiledParityV1),
+        tiled,
+        "the default policy must launch the tiled tc64 kernel"
+    );
+    assert_eq!(
+        automatic(HalfTriadPolicy::AllowStreamKFixedOrderV1),
+        stream_k,
+        "the permitting policy must launch the stream-K kernel"
+    );
+    t.ctx.set_half_triad_policy(HalfTriadPolicy::TiledParityV1);
+    assert_eq!(automatic(HalfTriadPolicy::TiledParityV1), tiled);
+    // The stream-K fold differs in order, not in value: accumulation tolerance.
+    let worst = tiled
+        .iter()
+        .zip(&stream_k)
+        .map(|(a, b)| {
+            let a = f64::from(f32::from_bits(*a));
+            let b = f64::from(f32::from_bits(*b));
+            (a - b).abs() / a.abs().max(1.0)
+        })
+        .fold(0.0f64, f64::max);
+    let bound = 4e-6 * (dims.0 as f64).sqrt();
+    assert!(
+        worst <= bound,
+        "stream-K differs from tiled by {worst:e} (bound {bound:e})"
+    );
+}

@@ -545,7 +545,7 @@ fn scalar_group_m_option(arch: &str) -> String {
 
 pub(crate) fn compile_module(request: CompileModuleRequest<'_>) -> Result<CompiledModule, String> {
     validate_module_target(request.module_kind, request.arch)?;
-    let combined = compose_module_source(request.module_kind)?;
+    let combined = compose_module_source_for(request.module_kind, request.arch)?;
     if request.module_kind == ModuleKind::TriadScalar
         && !combined.contains(&format!("#ifndef {SCALAR_GROUP_M_MACRO}"))
     {
@@ -2746,6 +2746,20 @@ fn validate_sm80_ptx(arch: &str, ptx: &str) -> Result<(), String> {
             "TriadSm80 PTX target is {actual}, expected {expected}"
         ));
     }
+    // The stream-K fragment is present exactly on the targets that compose
+    // it: a missing kernel there or a stray one elsewhere is a composition
+    // defect, not a runtime surprise.
+    let symbols = ptx_entry_symbols(ptx)?;
+    let composed = sm80_target_composes_streamk(arch);
+    for symbol in SM80_STREAMK_SYMBOLS {
+        let present = symbols.iter().any(|entry| entry == symbol);
+        if present != composed {
+            return Err(format!(
+                "TriadSm80 PTX for {arch} {} {symbol}",
+                if composed { "lacks" } else { "carries" }
+            ));
+        }
+    }
     Ok(())
 }
 
@@ -3373,6 +3387,7 @@ fn validate_tf32_feature_instructions(module_kind: ModuleKind, ptx: &str) -> Res
     Ok(())
 }
 
+#[derive(Clone, Copy)]
 struct SourceFragment {
     logical_name: &'static str,
     source: &'static str,
@@ -3561,6 +3576,24 @@ const SM80_SOURCE_FRAGMENTS: &[SourceFragment] = &[
     },
 ];
 
+/// The tc64 TN dW stream-K twin. Composed after the portable fragments for
+/// every sm80-family target except CC 12.x (see
+/// [`sm80_target_composes_streamk`]).
+const SM80_STREAMK_SOURCE_FRAGMENT: SourceFragment = SourceFragment {
+    logical_name: "kernels/gemm_bi_triad/sm80_streamk.cu",
+    source: include_str!("../../../../kernels/gemm_bi_triad/sm80_streamk.cu"),
+    allowed_quoted_includes: &[],
+};
+
+/// Whether the portable module compiled for `arch` carries the tc64 TN
+/// stream-K kernels. CC 12.x boards run the SM120 TMA stream-K kernel, and
+/// leaving the fragment out keeps their portable module byte-identical to
+/// the one their TF32 cohort's portable twin was frozen against.
+pub(super) fn sm80_target_composes_streamk(arch: &str) -> bool {
+    sm80_ptx_target(arch).is_some()
+        && !matches!(arch, "sm_120" | "compute_120" | "sm_121" | "compute_121")
+}
+
 const SM90A_SOURCE_FRAGMENTS: &[SourceFragment] = &[
     TYPED_PRELUDE,
     TRIAD_CONTRACT,
@@ -3696,6 +3729,13 @@ pub(super) const SM80_SYMBOLS: &[&str] = &[
     "gemm_bi_nt_tc64_f16",
 ];
 
+/// Exports of the stream-K fragment; present only where
+/// [`sm80_target_composes_streamk`] holds.
+pub(super) const SM80_STREAMK_SYMBOLS: &[&str] = &[
+    "gemm_bi_tn_tc64_streamk_bf16",
+    "gemm_bi_tn_tc64_streamk_f16",
+];
+
 pub const SM90A_SYMBOLS: &[&str] = &[
     "gemm_bi_nn_sm90a_wgmma_wg1_bf16",
     "gemm_bi_nn_sm90a_wgmma_wg1_f16",
@@ -3723,16 +3763,35 @@ fn module_fragments(kind: ModuleKind) -> Result<&'static [SourceFragment], Strin
     }
 }
 
-fn compose_module_source(kind: ModuleKind) -> Result<String, String> {
-    compose_fragments(module_fragments(kind)?)
+/// The composed source the compiler sees for `kind` on `arch`: the module's
+/// fragments, plus the stream-K fragment for the portable module on the
+/// targets that carry it.
+fn compose_module_source_for(kind: ModuleKind, arch: &str) -> Result<String, String> {
+    let base = module_fragments(kind)?;
+    if kind == ModuleKind::TriadSm80 && sm80_target_composes_streamk(arch) {
+        let mut fragments = base.to_vec();
+        fragments.push(SM80_STREAMK_SOURCE_FRAGMENT);
+        return compose_fragments(&fragments);
+    }
+    compose_fragments(base)
 }
 
-/// Digest of a module's composed source, the way the compiler identity takes
-/// it. Frozen evidence carries this value, so a host-side gate can tell that a
-/// cohort was measured against a source this tree no longer contains.
+/// The fullest composition of `kind`: every fragment any target composes.
+/// Source scans read this one; the compiler takes the per-target form.
 #[cfg(test)]
-pub(super) fn module_source_digest(kind: ModuleKind) -> Result<[u8; 32], String> {
-    Ok(FramedSha256::bytes(compose_module_source(kind)?.as_bytes()))
+fn compose_module_source(kind: ModuleKind) -> Result<String, String> {
+    compose_module_source_for(kind, "sm_80")
+}
+
+/// Digest of a module's composed source for `arch`, the way the compiler
+/// identity takes it. Frozen evidence carries this value, so a host-side gate
+/// can tell that a cohort was measured against a source this tree no longer
+/// contains.
+#[cfg(test)]
+pub(super) fn module_source_digest(kind: ModuleKind, arch: &str) -> Result<[u8; 32], String> {
+    Ok(FramedSha256::bytes(
+        compose_module_source_for(kind, arch)?.as_bytes(),
+    ))
 }
 
 fn compose_fragments(fragments: &[SourceFragment]) -> Result<String, String> {
@@ -3937,7 +3996,7 @@ fn resolve_owned_symbol<T>(
 ) -> Result<T, String> {
     if SCALAR_SYMBOLS.contains(&symbol) {
         scalar_get(symbol).map_err(|error| format!("TriadScalar symbol {symbol}: {error}"))
-    } else if SM80_SYMBOLS.contains(&symbol) {
+    } else if SM80_SYMBOLS.contains(&symbol) || SM80_STREAMK_SYMBOLS.contains(&symbol) {
         sm80_get(symbol).map_err(|error| format!("TriadSm80 symbol {symbol}: {error}"))
     } else {
         Err(format!("no triad module owns symbol {symbol}"))
@@ -4097,6 +4156,9 @@ pub struct GemmBiKernels {
     pub gemm_bi_nn_tc64_typed: HalfKernel,
     pub gemm_bi_nn_tc16_typed: HalfKernel,
     pub gemm_bi_tn_tc64_typed: HalfKernel,
+    /// The tc64 TN dW body over the persistent stream-K grid; `None` on the
+    /// targets whose portable module does not compose it (CC 12.x).
+    pub gemm_bi_tn_tc64_streamk_typed: Option<HalfKernel>,
     pub gemm_bi_tn_tc128x64_typed: HalfKernel,
     pub gemm_bi_nt_tc64_typed: HalfKernel,
 
@@ -4371,6 +4433,13 @@ impl GemmBiKernels {
             gemm_bi_nn_tc64_typed: load_half("gemm_bi_nn_tc64")?,
             gemm_bi_nn_tc16_typed: load_half("gemm_bi_nn_tc16")?,
             gemm_bi_tn_tc64_typed: load_half("gemm_bi_tn_tc64")?,
+            gemm_bi_tn_tc64_streamk_typed: if sm80_target_composes_streamk(
+                sm80.compiler_identity.target.as_str(),
+            ) {
+                Some(load_half("gemm_bi_tn_tc64_streamk")?)
+            } else {
+                None
+            },
             gemm_bi_tn_tc128x64_typed: load_half("gemm_bi_tn_tc128x64")?,
             gemm_bi_nt_tc64_typed: load_half("gemm_bi_nt_tc64")?,
             splitk_scratch: std::sync::OnceLock::new(),
@@ -7788,6 +7857,7 @@ mod tests {
         "kernels/gemm_bi_triad/epilogue.cuh",
         "kernels/gemm_bi_triad/mma16.cuh",
         "kernels/gemm_bi_triad/sm80.cu",
+        "kernels/gemm_bi_triad/sm80_streamk.cu",
     ];
 
     const SM90A_FRAGMENTS: &[&str] = &[
@@ -7911,6 +7981,17 @@ mod tests {
         assert_composition(ModuleKind::Fixed, FIXED_FRAGMENTS);
         assert_composition(ModuleKind::TriadScalar, SCALAR_FRAGMENTS);
         assert_composition(ModuleKind::TriadSm80, SM80_FRAGMENTS);
+        let portable_cc12 = super::compose_module_source_for(ModuleKind::TriadSm80, "compute_120")
+            .expect("compose the portable module for compute_120");
+        let boundaries: Vec<_> = portable_cc12
+            .lines()
+            .filter_map(|line| line.strip_prefix("#line 1 \"")?.strip_suffix('"'))
+            .collect();
+        assert_eq!(
+            boundaries,
+            &SM80_FRAGMENTS[..SM80_FRAGMENTS.len() - 1],
+            "the CC 12.x portable module must not compose the stream-K fragment"
+        );
         assert_composition(ModuleKind::TriadSm90a, SM90A_FRAGMENTS);
         assert_composition(ModuleKind::TriadSm100, SM100_FRAGMENTS);
         assert_composition(ModuleKind::TriadSm120, SM120_FRAGMENTS);
@@ -8190,6 +8271,34 @@ mod tests {
         let sm80: BTreeSet<_> = SM80_SYMBOLS.iter().copied().collect();
         assert_eq!(scalar.len(), 56);
         assert_eq!(sm80.len(), 16);
+        let sm80_streamk: BTreeSet<_> = super::SM80_STREAMK_SYMBOLS.iter().copied().collect();
+        assert_eq!(sm80_streamk.len(), 2);
+        assert!(sm80_streamk.is_disjoint(&sm80));
+        assert!(sm80_streamk.is_disjoint(&scalar));
+        // The fragment instantiates its kernels through one macro per dtype.
+        let fragment = super::SM80_STREAMK_SOURCE_FRAGMENT.source;
+        assert!(fragment.contains("void gemm_bi_tn_tc64_streamk_##SUFFIX("));
+        for suffix in ["bf16", "f16"] {
+            assert!(
+                fragment.contains(&format!("GEMM_BI_DEFINE_GEMM_BI_TN_TC64_STREAMK({suffix},")),
+                "the stream-K fragment does not instantiate the {suffix} kernel"
+            );
+        }
+        for arch in [
+            "sm_80", "sm_86", "sm_87", "sm_89", "sm_90a", "sm_100a", "sm_110a",
+        ] {
+            assert!(super::sm80_target_composes_streamk(arch), "{arch}");
+        }
+        for arch in [
+            "sm_120",
+            "compute_120",
+            "sm_121",
+            "compute_121",
+            "sm_75",
+            "",
+        ] {
+            assert!(!super::sm80_target_composes_streamk(arch), "{arch}");
+        }
         assert_eq!(SM90A_SYMBOLS.len(), 12);
         let sm90a: BTreeSet<_> = SM90A_SYMBOLS.iter().copied().collect();
         let sm100: BTreeSet<_> = super::super::contract::SM100_KERNEL_SPECS
