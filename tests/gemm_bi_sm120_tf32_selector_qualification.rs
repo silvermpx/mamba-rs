@@ -1011,6 +1011,9 @@ fn candidates_for_cell(cell: Cell) -> Vec<Candidate> {
 struct CellResult {
     cell: Cell,
     specialized_identity_json: String,
+    /// The portable SM80 module the board also binds, `null` when it has
+    /// none; a cohort couples its portable routes to this identity.
+    portable_identity_json: String,
     candidates: Vec<CandidateResult>,
     excluded_candidates: Vec<CandidateExclusion>,
     discovery_winners: [&'static str; 2],
@@ -1096,6 +1099,7 @@ impl CellResult {
                 "\"dims\":[{},{},{}],",
                 "\"epilogue\":{{\"alpha\":{},\"beta\":{},\"bias\":{}}},",
                 "\"specialized_identity\":{},",
+                "\"portable_identity\":{},",
                 "\"candidates\":[{}],",
                 "\"excluded_candidates\":[{}],",
                 "\"discovery_winners\":{{\"eager\":\"{}\",\"graph\":\"{}\"}},",
@@ -1113,6 +1117,7 @@ impl CellResult {
             self.cell.beta,
             self.cell.bias,
             self.specialized_identity_json,
+            self.portable_identity_json,
             candidates,
             excluded,
             self.discovery_winners[0],
@@ -1496,6 +1501,9 @@ fn run_cell(device: &GpuDevice, cell: Cell, quiet: &QuietGpu) -> Result<CellResu
         .ok_or_else(|| {
             "selector qualification has no TF32 module bound on this board".to_string()
         })?;
+    let portable_identity_json = availability
+        .portable
+        .map_or_else(|| "null".to_string(), qualified_module_json);
     let reference_bits = portable_reference(&candidate_ctx, cell)?;
     let mut scalar_gate = qualify(
         &scalar_ctx,
@@ -1682,6 +1690,7 @@ fn run_cell(device: &GpuDevice, cell: Cell, quiet: &QuietGpu) -> Result<CellResu
     Ok(CellResult {
         cell,
         specialized_identity_json,
+        portable_identity_json,
         candidates: candidate_results,
         excluded_candidates,
         discovery_winners: winners,
@@ -1795,6 +1804,20 @@ fn sm120_tf32_projection_selector_qualification() -> Result<(), String> {
                 .map(|id| id.trim().to_string())
                 .collect::<Vec<_>>()
         });
+    // A list naming no projection cell would measure nothing and still
+    // finish green; it is refused before the first cell instead.
+    if let Some(only) = &only {
+        let unknown = only
+            .iter()
+            .filter(|id| !PROJECTION_CELLS.iter().any(|cell| cell.id == id.as_str()))
+            .cloned()
+            .collect::<Vec<_>>();
+        if !unknown.is_empty() {
+            return Err(format!(
+                "{CELLS_ENV} names cells the projection suite does not have: {unknown:?}"
+            ));
+        }
+    }
     let mut measured = 0;
     for cell in PROJECTION_CELLS {
         if let Some(only) = &only
@@ -2112,6 +2135,7 @@ fn cell_artifact_schema_has_exact_candidate_and_stat_counts() {
     let json = CellResult {
         cell: CELLS[0],
         specialized_identity_json: "{}".into(),
+        portable_identity_json: "null".into(),
         candidates,
         excluded_candidates: vec![CandidateExclusion {
             symbol: "excluded",
@@ -2134,6 +2158,7 @@ fn cell_artifact_schema_has_exact_candidate_and_stat_counts() {
     assert_eq!(json.matches("\"raw_samples\":").count(), 14);
     assert_eq!(json.matches("\"qualification_identity\":").count(), 14);
     assert_eq!(json.matches("\"specialized_identity\":").count(), 1);
+    assert_eq!(json.matches("\"portable_identity\":null").count(), 1);
     assert_eq!(json.matches("\"iterations\":").count(), 14);
     assert_eq!(json.matches("\"ab\":").count(), 112);
     assert_eq!(json.matches("\"ba\":").count(), 112);
