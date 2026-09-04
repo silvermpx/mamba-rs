@@ -4,10 +4,11 @@ use std::collections::{BTreeSet, HashSet};
 
 use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
 use mamba_rs::mamba_ssm::gpu::gemm_bi_triad::{
-    SM120_AUTO_CELLS_CC120, SM120_AUTO_CELLS_CC121, SM120_KERNEL_SPECS, SM120_STREAMK_KERNEL_SPECS,
-    Sm120Bk, Sm120ForcedRoute, Sm120MapRequest, Sm120Op, Sm120PhysicalRoute, Sm120Schedule,
-    Sm120Shape, Sm120Stages, Sm120TensorMap, Sm120Tile, resolve_sm120_forced,
-    sm120_target_candidates, validate_sm120_map_request,
+    SM120_AUTO_CELLS_CC120, SM120_AUTO_CELLS_CC121, SM120_KERNEL_SPECS, SM120_STREAMK_CELLS_CC120,
+    SM120_STREAMK_CELLS_CC121, SM120_STREAMK_KERNEL_SPECS, Sm120Bk, Sm120ForcedRoute,
+    Sm120MapRequest, Sm120Op, Sm120PhysicalRoute, Sm120Schedule, Sm120Shape, Sm120Stages,
+    Sm120TensorMap, Sm120Tile, resolve_sm120_forced, sm120_target_candidates,
+    validate_sm120_map_request,
 };
 use mamba_rs::mamba_ssm::gpu::kernel_identity::{CudaTarget, DeviceCaps};
 
@@ -395,6 +396,8 @@ fn sm120_specs_freeze_threads_barriers_and_exact_shared_bytes() {
 fn sm120_auto_tables_are_minor_specific() {
     assert_eq!(SM120_AUTO_CELLS_CC120.len(), 60);
     assert_eq!(SM120_AUTO_CELLS_CC121, &[]);
+    assert_eq!(SM120_STREAMK_CELLS_CC120.len(), 12);
+    assert_eq!(SM120_STREAMK_CELLS_CC121, &[]);
 }
 
 #[test]
@@ -1025,4 +1028,53 @@ fn sm120_source_closes_every_private_macro() {
     }
     assert!(!definitions.is_empty());
     assert!(live.is_empty(), "live macros at end of fragment: {live:?}");
+}
+
+#[test]
+fn streamk_cells_are_the_persistent_twins_of_measured_tn_cells() {
+    let streamk = Sm120PhysicalRoute {
+        tile: Sm120Tile::M64N64,
+        bk: Sm120Bk::Bk64,
+        stages: Sm120Stages::S3,
+        schedule: Sm120Schedule::StreamK,
+    };
+    for cell in SM120_STREAMK_CELLS_CC120 {
+        assert_eq!(cell.op, Sm120Op::Tn, "{cell:?}");
+        assert_eq!(cell.physical, streamk, "{cell:?}");
+        assert_eq!(
+            cell.shape,
+            Sm120Shape::contiguous(cell.op, (cell.shape.m, cell.shape.k, cell.shape.n))
+        );
+        let spec = cell.kernel_spec().expect("stream-K cell resolves a spec");
+        assert!(
+            SM120_STREAMK_KERNEL_SPECS
+                .iter()
+                .any(|known| known.symbol == spec.symbol),
+            "{} is not a stream-K symbol",
+            spec.symbol
+        );
+        // Every stream-K shape keeps a tiled cell, so the default half policy
+        // never loses a measured route to the opt-in table.
+        let tiled = SM120_AUTO_CELLS_CC120
+            .iter()
+            .filter(|tiled| {
+                tiled.op == cell.op && tiled.dtype == cell.dtype && tiled.shape == cell.shape
+            })
+            .count();
+        assert_eq!(tiled, 1, "{cell:?} needs exactly one tiled cell");
+    }
+    let shapes = |dtype: WeightDtype| {
+        SM120_STREAMK_CELLS_CC120
+            .iter()
+            .filter(|cell| cell.dtype == dtype)
+            .map(|cell| (cell.shape.m, cell.shape.k, cell.shape.n))
+            .collect::<BTreeSet<_>>()
+    };
+    assert_eq!(shapes(WeightDtype::Bf16), shapes(WeightDtype::F16));
+    assert_eq!(shapes(WeightDtype::Bf16).len(), 6);
+    assert_eq!(
+        shapes(WeightDtype::Bf16).len() * 2,
+        SM120_STREAMK_CELLS_CC120.len(),
+        "no duplicate stream-K cell"
+    );
 }

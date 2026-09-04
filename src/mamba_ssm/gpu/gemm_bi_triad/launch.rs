@@ -11208,7 +11208,7 @@ mod prepared_f32_launch_tests {
     use crate::mamba_ssm::gpu::buffers::{
         managed_allocation_epoch_for_ranges, register_managed_allocation_range,
     };
-    use crate::mamba_ssm::gpu::context::{BiGemmFamily, F32TriadPolicy};
+    use crate::mamba_ssm::gpu::context::{BiGemmFamily, F32TriadPolicy, HalfTriadPolicy};
     use crate::mamba_ssm::gpu::device::GpuDevice;
     use crate::mamba_ssm::gpu::gemm_bi_triad::contract::{
         TF32_NT_SPLITK4_S3_SPEC, TF32_NT_SPLITK4_S4_SPEC, TF32_NT_SPLITK8_S3_SPEC,
@@ -11423,6 +11423,7 @@ mod prepared_f32_launch_tests {
                 fast_gemm: false,
                 cublas_tf32: false,
                 f32_triad_policy: F32TriadPolicy::ExactScalarFmaV1,
+                half_triad_policy: HalfTriadPolicy::TiledParityV1,
                 bi_gemm_family: BiGemmFamily::Triad,
             },
             backend_set: BackendSet::TRIAD,
@@ -11469,6 +11470,7 @@ mod prepared_f32_launch_tests {
             a_ptr: 0x1_0000,
             b_ptr: 0x2_0000,
             multiprocessors: 170,
+            half_policy: HalfTriadPolicy::TiledParityV1,
             operands: Sm120LaunchOperands {
                 output_ptr: 0x3_0000,
                 bias_ptr: 0x4_0000,
@@ -11537,6 +11539,10 @@ mod prepared_f32_launch_tests {
             },
             GemmPolicy {
                 f32_triad_policy: F32TriadPolicy::AllowDeterministicTf32V1,
+                ..policy
+            },
+            GemmPolicy {
+                half_triad_policy: HalfTriadPolicy::AllowStreamKFixedOrderV1,
                 ..policy
             },
             GemmPolicy {

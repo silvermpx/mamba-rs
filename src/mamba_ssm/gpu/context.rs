@@ -90,6 +90,7 @@ fn validate_env_route_combination(
     bi_tensor_cores: bool,
     fast_gemm: bool,
     bi_gemm_family: BiGemmFamily,
+    half_triad_policy: HalfTriadPolicy,
 ) -> Result<(), String> {
     if bi_tensor_cores && !batch_invariant {
         return Err(
@@ -112,6 +113,14 @@ fn validate_env_route_combination(
             "MAMBA_RS_BI_GEMM_FAMILY=fixed without MAMBA_RS_BATCH_INVARIANT=1 is a \
              silent no-op: the family is read only under the batch-invariant \
              dispatch. Set both or neither."
+                .to_string(),
+        );
+    }
+    if half_triad_policy == HalfTriadPolicy::AllowStreamKFixedOrderV1 && !bi_tensor_cores {
+        return Err(
+            "MAMBA_RS_BI_HALF_POLICY=streamk without MAMBA_RS_BI_TENSOR_CORES=1 is a \
+             silent no-op: the stream-K half routes live in the tensor-core tier. \
+             Set both or neither."
                 .to_string(),
         );
     }
@@ -202,6 +211,55 @@ fn f32_triad_policy_from_result(
 
 fn f32_triad_policy_from_env() -> Result<F32TriadPolicy, String> {
     f32_triad_policy_from_result(std::env::var("MAMBA_RS_BI_F32_POLICY"))
+}
+
+/// Numeric policy for batch-invariant half-precision (bf16/f16) Triad GEMMs.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[repr(u8)]
+pub enum HalfTriadPolicy {
+    /// Every automatic half route reproduces the forced portable tensor-core
+    /// kernel bit for bit: one owner CTA per output tile, one reduction order.
+    #[default]
+    TiledParityV1 = 0,
+    /// Permit the measured stream-K half routes: a persistent grid folds
+    /// per-CTA partials in a fixed order that differs from the tiled
+    /// reduction, while repeated eager and graph launches of the same route
+    /// stay bit-identical.
+    ///
+    /// This is permission, not a forced schedule. Unmeasured shapes, and
+    /// shapes whose tile grid already fills the device, keep the tiled
+    /// contract.
+    AllowStreamKFixedOrderV1 = 1,
+}
+
+impl HalfTriadPolicy {
+    /// Parse the strict public environment spelling for this policy.
+    pub fn parse_env_value(value: &str) -> Result<Self, String> {
+        match value.trim_ascii() {
+            "tiled" => Ok(Self::TiledParityV1),
+            "streamk" => Ok(Self::AllowStreamKFixedOrderV1),
+            _ => Err(format!(
+                "MAMBA_RS_BI_HALF_POLICY={value:?} is not a recognized half triad policy \
+                 (use tiled or streamk)"
+            )),
+        }
+    }
+}
+
+fn half_triad_policy_from_result(
+    value: Result<String, std::env::VarError>,
+) -> Result<HalfTriadPolicy, String> {
+    match value {
+        Ok(value) => HalfTriadPolicy::parse_env_value(&value),
+        Err(std::env::VarError::NotPresent) => Ok(HalfTriadPolicy::TiledParityV1),
+        Err(std::env::VarError::NotUnicode(value)) => Err(format!(
+            "MAMBA_RS_BI_HALF_POLICY={value:?} is not valid Unicode (use tiled or streamk)"
+        )),
+    }
+}
+
+fn half_triad_policy_from_env() -> Result<HalfTriadPolicy, String> {
+    half_triad_policy_from_result(std::env::var("MAMBA_RS_BI_HALF_POLICY"))
 }
 
 pub use super::kernel_identity::{
@@ -372,6 +430,8 @@ pub struct GpuCtx {
     cublas_tf32: std::cell::Cell<bool>,
     /// Explicit numeric policy for deterministic batch-invariant f32 GEMMs.
     f32_triad_policy: std::cell::Cell<F32TriadPolicy>,
+    /// Explicit numeric policy for batch-invariant half-precision GEMMs.
+    half_triad_policy: std::cell::Cell<HalfTriadPolicy>,
     /// The state capacity the kernels were compiled with — part of the
     /// numeric-route identity a bench stamp must carry.
     state_cap: usize,
@@ -455,6 +515,7 @@ impl GpuCtx {
         let fast_gemm =
             tier_flag_from_result("MAMBA_RS_FAST_GEMM", std::env::var("MAMBA_RS_FAST_GEMM"))?;
         let f32_triad_policy = f32_triad_policy_from_env()?;
+        let half_triad_policy = half_triad_policy_from_env()?;
         let bi_gemm_family = bi_gemm_family_from_result(std::env::var("MAMBA_RS_BI_GEMM_FAMILY"))?;
         validate_arch_rung_flag(std::env::var("MAMBA_RS_ARCH_RUNG"))?;
         validate_env_route_combination(
@@ -462,12 +523,14 @@ impl GpuCtx {
             bi_tensor_cores,
             fast_gemm,
             bi_gemm_family,
+            half_triad_policy,
         )?;
         ctx.set_batch_invariant(batch_invariant);
         ctx.set_bi_tensor_cores(bi_tensor_cores);
         ctx.set_fast_gemm(fast_gemm);
         ctx.set_bi_gemm_family(bi_gemm_family);
         ctx.set_f32_triad_policy(f32_triad_policy);
+        ctx.set_half_triad_policy(half_triad_policy);
         Ok(())
     }
 
@@ -569,6 +632,7 @@ impl GpuCtx {
             fast_gemm: std::cell::Cell::new(false),
             cublas_tf32: std::cell::Cell::new(true),
             f32_triad_policy: std::cell::Cell::new(F32TriadPolicy::ExactScalarFmaV1),
+            half_triad_policy: std::cell::Cell::new(HalfTriadPolicy::TiledParityV1),
             state_cap,
             instance_token,
             device_identity,
@@ -1117,9 +1181,11 @@ impl GpuCtx {
                 NumericContractSet::TRIAD_SCALAR_FMA_V1
             }
             ResolvedNumericContract::MmaSyncF32V1
-            | ResolvedNumericContract::MmaSyncF32StreamKFixedOrderV1
             | ResolvedNumericContract::WgmmaF32V1
             | ResolvedNumericContract::Tcgen05F32V1 => NumericContractSet::TRIAD_MMA_SYNC_V1,
+            ResolvedNumericContract::MmaSyncF32StreamKFixedOrderV1 => {
+                NumericContractSet::TRIAD_MMA_SYNC_STREAM_K_V1
+            }
             ResolvedNumericContract::MmaTf32RnaV1
             | ResolvedNumericContract::Sm90aWgmmaTf32TmaV1
             | ResolvedNumericContract::Sm100Tcgen05Tf32TmaV1
@@ -1282,6 +1348,7 @@ impl GpuCtx {
             fast_gemm: fast,
             cublas_tf32: self.cublas_tf32.get(),
             f32_triad_policy: self.f32_triad_policy.get(),
+            half_triad_policy: self.half_triad_policy.get(),
             bi_gemm_family: family,
         }
     }
@@ -1329,6 +1396,21 @@ impl GpuCtx {
     /// Return the deterministic numeric policy used by f32 Triad GEMMs.
     pub fn f32_triad_policy(&self) -> F32TriadPolicy {
         self.f32_triad_policy.get()
+    }
+
+    /// Select the numeric policy used by half-precision Triad GEMMs.
+    pub fn set_half_triad_policy(&self, policy: HalfTriadPolicy) {
+        if self.graphs_captured.get() > 0 {
+            eprintln!(
+                "mamba-rs WARNING: GEMM route changed after graph capture; replay will reject it"
+            );
+        }
+        self.half_triad_policy.set(policy);
+    }
+
+    /// Return the numeric policy used by half-precision Triad GEMMs.
+    pub fn half_triad_policy(&self) -> HalfTriadPolicy {
+        self.half_triad_policy.get()
     }
 
     /// Disable cuBLAS TF32 math without changing the deterministic Triad policy.
@@ -1690,16 +1772,64 @@ mod tests {
 
     #[test]
     fn env_route_refuses_the_flag_combinations_that_change_nothing() {
+        use super::HalfTriadPolicy::{AllowStreamKFixedOrderV1 as StreamK, TiledParityV1 as Tiled};
         use BiGemmFamily::{Fixed, Triad};
-        assert!(super::validate_env_route_combination(false, false, false, Triad).is_ok());
-        assert!(super::validate_env_route_combination(true, true, false, Fixed).is_ok());
-        assert!(super::validate_env_route_combination(false, false, true, Triad).is_ok());
-        let error = super::validate_env_route_combination(false, true, false, Triad).unwrap_err();
+        let validate = super::validate_env_route_combination;
+        assert!(validate(false, false, false, Triad, Tiled).is_ok());
+        assert!(validate(true, true, false, Fixed, Tiled).is_ok());
+        assert!(validate(false, false, true, Triad, Tiled).is_ok());
+        assert!(validate(true, true, false, Triad, StreamK).is_ok());
+        assert!(validate(true, true, false, Fixed, StreamK).is_ok());
+        let error = validate(false, true, false, Triad, Tiled).unwrap_err();
         assert!(error.contains("MAMBA_RS_BI_TENSOR_CORES"), "{error}");
-        let error = super::validate_env_route_combination(true, false, true, Triad).unwrap_err();
+        let error = validate(true, false, true, Triad, Tiled).unwrap_err();
         assert!(error.contains("MAMBA_RS_FAST_GEMM"), "{error}");
-        let error = super::validate_env_route_combination(false, false, false, Fixed).unwrap_err();
+        let error = validate(false, false, false, Fixed, Tiled).unwrap_err();
         assert!(error.contains("MAMBA_RS_BI_GEMM_FAMILY=fixed"), "{error}");
+        // The stream-K permission without the tensor-core tier reaches no
+        // kernel: refused, not ignored.
+        let error = validate(true, false, false, Triad, StreamK).unwrap_err();
+        assert!(error.contains("MAMBA_RS_BI_HALF_POLICY=streamk"), "{error}");
+        assert!(error.contains("MAMBA_RS_BI_TENSOR_CORES=1"), "{error}");
+        let error = validate(false, false, false, Triad, StreamK).unwrap_err();
+        assert!(error.contains("MAMBA_RS_BI_HALF_POLICY=streamk"), "{error}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn half_triad_policy_environment_is_strict_and_defaults_to_tiled() {
+        use std::os::unix::ffi::OsStringExt as _;
+
+        assert_eq!(
+            super::half_triad_policy_from_result(Err(std::env::VarError::NotPresent)).unwrap(),
+            super::HalfTriadPolicy::TiledParityV1
+        );
+        assert_eq!(
+            super::half_triad_policy_from_result(Ok(" tiled ".into())).unwrap(),
+            super::HalfTriadPolicy::TiledParityV1
+        );
+        assert_eq!(
+            super::half_triad_policy_from_result(Ok("streamk".into())).unwrap(),
+            super::HalfTriadPolicy::AllowStreamKFixedOrderV1
+        );
+        for wrong in ["", "stream-k", "StreamK", "1", "on"] {
+            let error = super::half_triad_policy_from_result(Ok(wrong.into()))
+                .expect_err("unknown half policy spelling must fail");
+            assert!(error.contains("MAMBA_RS_BI_HALF_POLICY"), "{error}");
+            assert!(
+                error.contains("tiled") && error.contains("streamk"),
+                "{error}"
+            );
+        }
+        let error = super::half_triad_policy_from_result(Err(std::env::VarError::NotUnicode(
+            OsString::from_vec(vec![b's', b't', 0xff, b'k']),
+        )))
+        .expect_err("non-Unicode policy must fail");
+        assert!(error.contains("MAMBA_RS_BI_HALF_POLICY"), "{error}");
+        assert!(
+            error.contains("tiled") && error.contains("streamk"),
+            "{error}"
+        );
     }
 
     #[test]

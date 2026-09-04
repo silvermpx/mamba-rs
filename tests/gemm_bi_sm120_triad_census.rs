@@ -12,15 +12,16 @@ use mamba_rs::mamba_ssm::gpu::blas::{
     TypedPtr, gemm_bi_backward_dw_typed, gemm_bi_backward_dx_typed, gemm_bi_forward_typed,
 };
 use mamba_rs::mamba_ssm::gpu::buffers::{DtypedBuf, GpuBuffer};
-use mamba_rs::mamba_ssm::gpu::context::{BiGemmFamily, GpuCtx};
+use mamba_rs::mamba_ssm::gpu::context::{BiGemmFamily, GpuCtx, HalfTriadPolicy};
 use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
 use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
 use mamba_rs::mamba_ssm::gpu::gemm_bi_triad::{
     PhysicalQualificationRequest, PhysicalQualificationRoute, SM120_AUTO_CELLS_CC120,
-    SM120_AUTO_CELLS_CC121, SM120_KERNEL_SPECS, SM120_TENSOR_MAP_REVISION, SM120_TUNING_REVISION,
-    Sm120Bk, Sm120ForcedRoute, Sm120LaunchOperands, Sm120MapRequest, Sm120NumericContract, Sm120Op,
-    Sm120PhysicalRoute, Sm120PreparedLaunch, Sm120PreparedTensorMaps, Sm120Schedule, Sm120Shape,
-    Sm120Stages, Sm120Tile, TcFwdOperands, TcTile, gemm_bi_backward_dw_tc_with_tile,
+    SM120_AUTO_CELLS_CC121, SM120_KERNEL_SPECS, SM120_STREAMK_CELLS_CC120,
+    SM120_TENSOR_MAP_REVISION, SM120_TUNING_REVISION, Sm120Bk, Sm120ForcedRoute,
+    Sm120LaunchOperands, Sm120MapRequest, Sm120NumericContract, Sm120Op, Sm120PhysicalRoute,
+    Sm120PreparedLaunch, Sm120PreparedTensorMaps, Sm120Schedule, Sm120Shape, Sm120Stages,
+    Sm120Tile, TcFwdOperands, TcTile, gemm_bi_backward_dw_tc_with_tile,
     gemm_bi_backward_dx_tc_with_tile, gemm_bi_forward_tc_with_tile, launch_sm120_tma_prepared,
     prepare_sm120_tensor_maps, prepare_sm120_tma_forced, presize_physical_qualification_suite,
     qualify_physical_launch, resolve_sm120_forced, validate_sm120_graph_replay,
@@ -1369,25 +1370,47 @@ fn sm120_auto_typed_qualified_cells() {
     assert_eq!(device.compute_capability, (12, 0), "CC12.0 auto table gate");
     enable_sm120_auto_policy(&ctx);
     for route in SM120_AUTO_CELLS_CC120.iter().copied() {
-        let (case, mut output, expected) = assert_auto_matches_mma16_baseline(&ctx, route);
-        output.reset(&ctx.stream, &case.initial);
-        let repeated = ctx
-            .record_eager_gemm_trace(|| launch_auto_typed(&ctx, &case, &output))
-            .expect("repeat automatic typed SM120 route");
-        assert_auto_route(&repeated, route);
-        assert_eq!(
-            output
-                .download(&ctx.stream)
-                .into_iter()
-                .map(f32::to_bits)
-                .collect::<Vec<_>>(),
-            expected,
-            "repeated {:?}/{:?}/{:?} changed bits",
-            route.op,
-            route.dtype,
-            route.shape,
-        );
+        assert_auto_cell_repeats_bit_for_bit(&ctx, route);
     }
+    // The stream-K cells open under the half policy that permits their
+    // fixed-order fold; each qualifies against its forced stream-K route and
+    // repeats bit for bit, while the tiled table stays the default answer.
+    ctx.set_half_triad_policy(HalfTriadPolicy::AllowStreamKFixedOrderV1);
+    for route in SM120_STREAMK_CELLS_CC120.iter().copied() {
+        assert_auto_cell_repeats_bit_for_bit(&ctx, route);
+    }
+    ctx.set_half_triad_policy(HalfTriadPolicy::TiledParityV1);
+    for streamk in SM120_STREAMK_CELLS_CC120.iter().copied() {
+        let tiled = SM120_AUTO_CELLS_CC120
+            .iter()
+            .copied()
+            .find(|cell| {
+                cell.op == streamk.op && cell.dtype == streamk.dtype && cell.shape == streamk.shape
+            })
+            .expect("every stream-K shape keeps a tiled cell");
+        assert_auto_cell_repeats_bit_for_bit(&ctx, tiled);
+    }
+}
+
+fn assert_auto_cell_repeats_bit_for_bit(ctx: &GpuCtx, route: Sm120ForcedRoute) {
+    let (case, mut output, expected) = assert_auto_matches_mma16_baseline(ctx, route);
+    output.reset(&ctx.stream, &case.initial);
+    let repeated = ctx
+        .record_eager_gemm_trace(|| launch_auto_typed(ctx, &case, &output))
+        .expect("repeat automatic typed SM120 route");
+    assert_auto_route(&repeated, route);
+    assert_eq!(
+        output
+            .download(&ctx.stream)
+            .into_iter()
+            .map(f32::to_bits)
+            .collect::<Vec<_>>(),
+        expected,
+        "repeated {:?}/{:?}/{:?} changed bits",
+        route.op,
+        route.dtype,
+        route.shape,
+    );
 }
 
 #[test]

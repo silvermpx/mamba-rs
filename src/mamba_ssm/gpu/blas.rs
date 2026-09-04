@@ -658,6 +658,7 @@ fn gemm_bi_forward_typed_in<O: PhysicalLaunchObserver>(
             a_ptr: x.ptr,
             b_ptr: w.ptr,
             multiprocessors: ctx.kernels.multiprocessor_count(),
+            half_policy: ctx.half_triad_policy(),
             operands: super::gemm_bi_triad::Sm120LaunchOperands {
                 output_ptr: y.ptr,
                 bias_ptr,
@@ -810,6 +811,7 @@ fn gemm_bi_backward_dw_typed_in<O: PhysicalLaunchObserver>(
             a_ptr: x_saved.ptr,
             b_ptr: dy.ptr,
             multiprocessors: ctx.kernels.multiprocessor_count(),
+            half_policy: ctx.half_triad_policy(),
             operands: super::gemm_bi_triad::Sm120LaunchOperands {
                 output_ptr: dw_ptr,
                 bias_ptr: 0,
@@ -957,6 +959,7 @@ fn gemm_bi_backward_dx_typed_in<O: PhysicalLaunchObserver>(
             a_ptr: dy.ptr,
             b_ptr: w.ptr,
             multiprocessors: ctx.kernels.multiprocessor_count(),
+            half_policy: ctx.half_triad_policy(),
             operands: super::gemm_bi_triad::Sm120LaunchOperands {
                 output_ptr: dx.ptr,
                 bias_ptr: 0,
@@ -1798,6 +1801,7 @@ pub(super) fn prepare_half_physical_graph_package<'a>(
                 a_ptr: request.a,
                 b_ptr: request.b,
                 multiprocessors: ctx.kernels.multiprocessor_count(),
+                half_policy: ctx.half_triad_policy(),
                 operands: super::gemm_bi_triad::Sm120LaunchOperands {
                     output_ptr: request.output,
                     bias_ptr: request.bias,

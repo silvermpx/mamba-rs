@@ -1,6 +1,6 @@
 #![cfg(feature = "cuda")]
 
-use mamba_rs::mamba_ssm::gpu::context::{BiGemmFamily, F32TriadPolicy};
+use mamba_rs::mamba_ssm::gpu::context::{BiGemmFamily, F32TriadPolicy, HalfTriadPolicy};
 use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
 use mamba_rs::mamba_ssm::gpu::gemm_bi_triad::{
     SM120_SCHEDULE_REVISION, SM120_TENSOR_MAP_REVISION, SM120_TUNING_REVISION, Sm120Bk,
@@ -191,6 +191,7 @@ fn backend_contract_sets_match_reachable_dispatch_trees() {
         fast_gemm: false,
         cublas_tf32: false,
         f32_triad_policy: F32TriadPolicy::ExactScalarFmaV1,
+        half_triad_policy: HalfTriadPolicy::TiledParityV1,
         bi_gemm_family,
     };
 
@@ -236,6 +237,7 @@ fn gemm_policy_keeps_cublas_and_deterministic_triad_tf32_independent() {
         fast_gemm: false,
         cublas_tf32,
         f32_triad_policy,
+        half_triad_policy: HalfTriadPolicy::TiledParityV1,
         bi_gemm_family: BiGemmFamily::Triad,
     };
 
@@ -258,6 +260,60 @@ fn gemm_policy_keeps_cublas_and_deterministic_triad_tf32_independent() {
     fixed_allow.bi_gemm_family = BiGemmFamily::Fixed;
     let (_, fixed_contracts) = route_backend_contract_sets(fixed_allow);
     assert!(!fixed_contracts.contains(NumericContractSet::TRIAD_DETERMINISTIC_TF32_V1));
+}
+
+#[test]
+fn half_policy_opens_the_stream_k_contract_only_inside_the_tensor_core_tier() {
+    let policy = |bi_tensor_cores, half_triad_policy, bi_gemm_family| GemmPolicy {
+        batch_invariant: true,
+        bi_tensor_cores,
+        fast_gemm: false,
+        cublas_tf32: false,
+        f32_triad_policy: F32TriadPolicy::ExactScalarFmaV1,
+        half_triad_policy,
+        bi_gemm_family,
+    };
+    let stream_k = NumericContractSet::TRIAD_MMA_SYNC_STREAM_K_V1;
+
+    // The default policy never carries the fixed-order fold, tensor cores or not.
+    for tc in [false, true] {
+        for family in [BiGemmFamily::Triad, BiGemmFamily::Fixed] {
+            let (_, contracts) =
+                route_backend_contract_sets(policy(tc, HalfTriadPolicy::TiledParityV1, family));
+            assert!(!contracts.contains(stream_k), "{tc} {family:?}");
+        }
+    }
+    // The permission reaches a kernel only through the tensor-core tier,
+    // under either family.
+    for family in [BiGemmFamily::Triad, BiGemmFamily::Fixed] {
+        let (_, without_tc) = route_backend_contract_sets(policy(
+            false,
+            HalfTriadPolicy::AllowStreamKFixedOrderV1,
+            family,
+        ));
+        assert!(!without_tc.contains(stream_k), "{family:?}");
+        let (_, with_tc) = route_backend_contract_sets(policy(
+            true,
+            HalfTriadPolicy::AllowStreamKFixedOrderV1,
+            family,
+        ));
+        assert!(with_tc.contains(stream_k), "{family:?}");
+        assert!(
+            with_tc.contains(NumericContractSet::TRIAD_MMA_SYNC_V1),
+            "{family:?}"
+        );
+    }
+    // Outside the batch-invariant dispatch cuBLAS owns the route.
+    let mut cublas = policy(
+        true,
+        HalfTriadPolicy::AllowStreamKFixedOrderV1,
+        BiGemmFamily::Triad,
+    );
+    cublas.batch_invariant = false;
+    assert_eq!(
+        route_backend_contract_sets(cublas).1,
+        NumericContractSet::CUBLAS_POLICY_V1
+    );
 }
 
 #[test]
@@ -475,6 +531,7 @@ fn route() -> GemmRouteIdentity {
             fast_gemm: false,
             cublas_tf32: false,
             f32_triad_policy: F32TriadPolicy::ExactScalarFmaV1,
+            half_triad_policy: HalfTriadPolicy::TiledParityV1,
             bi_gemm_family: BiGemmFamily::Triad,
         },
         backend_set: BackendSet::TRIAD,

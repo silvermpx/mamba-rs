@@ -10,7 +10,7 @@ use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::buffers::ManagedAllocationEpochStamp;
-use super::context::{BiGemmFamily, F32TriadPolicy, GpuCtx, GpuCtxResources};
+use super::context::{BiGemmFamily, F32TriadPolicy, GpuCtx, GpuCtxResources, HalfTriadPolicy};
 
 pub type Sha256Digest = [u8; 32];
 
@@ -52,7 +52,7 @@ pub(crate) fn deterministic_nvrtc_options(
     options
 }
 
-pub const POLICY_REVISION: u16 = 4;
+pub const POLICY_REVISION: u16 = 5;
 
 /// SHA-256 framing with explicit tags, presence, and byte lengths.
 pub struct FramedSha256(Sha256);
@@ -2698,6 +2698,7 @@ pub struct GemmPolicy {
     pub fast_gemm: bool,
     pub cublas_tf32: bool,
     pub f32_triad_policy: F32TriadPolicy,
+    pub half_triad_policy: HalfTriadPolicy,
     pub bi_gemm_family: BiGemmFamily,
 }
 
@@ -2719,7 +2720,7 @@ impl BackendSet {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct NumericContractSet(u8);
+pub struct NumericContractSet(u16);
 
 impl NumericContractSet {
     pub const CUBLAS_POLICY_V1: Self = Self(1 << 0);
@@ -2730,6 +2731,9 @@ impl NumericContractSet {
     pub const FIXED_MATVEC_TREE_V1: Self = Self(1 << 5);
     pub const TRIAD_DETERMINISTIC_TF32_V1: Self = Self(1 << 6);
     pub const TRIAD_DETERMINISTIC_TF32_SPLIT_K_V1: Self = Self(1 << 7);
+    /// The stream-K half routes: a persistent grid whose per-CTA partials
+    /// fold in a fixed order, distinct from the tiled `mma.sync` reduction.
+    pub const TRIAD_MMA_SYNC_STREAM_K_V1: Self = Self(1 << 8);
 
     pub const fn union(self, other: Self) -> Self {
         Self(self.0 | other.0)
@@ -2775,6 +2779,15 @@ pub fn route_backend_contract_sets(policy: GemmPolicy) -> (BackendSet, NumericCo
         contracts
             .union(NumericContractSet::TRIAD_DETERMINISTIC_TF32_V1)
             .union(NumericContractSet::TRIAD_DETERMINISTIC_TF32_SPLIT_K_V1)
+    } else {
+        contracts
+    };
+    // The stream-K half routes are reachable only through the tensor-core
+    // tier, under either family, and only with the half policy's permission.
+    let contracts = if policy.bi_tensor_cores
+        && policy.half_triad_policy == HalfTriadPolicy::AllowStreamKFixedOrderV1
+    {
+        contracts.union(NumericContractSet::TRIAD_MMA_SYNC_STREAM_K_V1)
     } else {
         contracts
     };
@@ -4871,6 +4884,7 @@ mod physical_launch_tests {
                 fast_gemm: false,
                 cublas_tf32: false,
                 f32_triad_policy: F32TriadPolicy::ExactScalarFmaV1,
+                half_triad_policy: HalfTriadPolicy::TiledParityV1,
                 bi_gemm_family: BiGemmFamily::Triad,
             },
             backend_set: BackendSet::TRIAD,

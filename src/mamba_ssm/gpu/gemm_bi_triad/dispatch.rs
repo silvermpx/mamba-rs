@@ -16,6 +16,7 @@ use super::contract::{
     validate_sm120_map_request,
 };
 use super::contract::{GemmDims, checked_mul3, checked_tile_grid, checked_usize};
+use crate::mamba_ssm::gpu::context::HalfTriadPolicy;
 use crate::mamba_ssm::gpu::kernel_identity::DeviceCaps;
 use crate::mamba_ssm::gpu::kernel_identity::ResolvedGemmOp;
 
@@ -3453,6 +3454,240 @@ pub const SM120_AUTO_CELLS_CC120: &[Sm120ForcedRoute] = &[
 /// Automatic CC 12.1 routes. Empty until separate physical evidence exists.
 pub const SM120_AUTO_CELLS_CC121: &[Sm120ForcedRoute] = &[];
 
+/// Stream-K half cells measured on the 5090 (CC 12.0, driver 595.84;
+/// internal/perf/sm120-streamk-tn-20260904): the TN shapes whose tile grid
+/// underfills the 170 multiprocessors. Each names the persistent-grid twin of
+/// the M64N64/BK64/S3 body and is served only under
+/// `HalfTriadPolicy::AllowStreamKFixedOrderV1`; the tiled table keeps its own
+/// cell for every one of these shapes, so the default policy loses nothing.
+/// Against the best tiled route of the same shape (p50, both dtypes within
+/// 0.01): 10400x384x384 0.32, 10400x768x384 0.53, 4621x768x384 0.60,
+/// 4621x1024x384 0.74, 4621x384x1928 0.93, 10400x384x1536 0.96. Where the
+/// tile grid already covers the multiprocessors the same body loses 1.22-1.77x,
+/// which is why no such shape is listed and why the neighbour rule declines
+/// a stream-K neighbour for a filled grid.
+pub const SM120_STREAMK_CELLS_CC120: &[Sm120ForcedRoute] = &[
+    Sm120ForcedRoute {
+        op: Sm120Op::Tn,
+        dtype: WeightDtype::Bf16,
+        physical: Sm120PhysicalRoute {
+            tile: Sm120Tile::M64N64,
+            bk: Sm120Bk::Bk64,
+            stages: Sm120Stages::S3,
+            schedule: Sm120Schedule::StreamK,
+        },
+        shape: Sm120Shape {
+            m: 4621,
+            k: 384,
+            n: 1928,
+            lda: 384,
+            ldb: 1928,
+            ldc: 1928,
+        },
+    },
+    Sm120ForcedRoute {
+        op: Sm120Op::Tn,
+        dtype: WeightDtype::Bf16,
+        physical: Sm120PhysicalRoute {
+            tile: Sm120Tile::M64N64,
+            bk: Sm120Bk::Bk64,
+            stages: Sm120Stages::S3,
+            schedule: Sm120Schedule::StreamK,
+        },
+        shape: Sm120Shape {
+            m: 4621,
+            k: 768,
+            n: 384,
+            lda: 768,
+            ldb: 384,
+            ldc: 384,
+        },
+    },
+    Sm120ForcedRoute {
+        op: Sm120Op::Tn,
+        dtype: WeightDtype::Bf16,
+        physical: Sm120PhysicalRoute {
+            tile: Sm120Tile::M64N64,
+            bk: Sm120Bk::Bk64,
+            stages: Sm120Stages::S3,
+            schedule: Sm120Schedule::StreamK,
+        },
+        shape: Sm120Shape {
+            m: 4621,
+            k: 1024,
+            n: 384,
+            lda: 1024,
+            ldb: 384,
+            ldc: 384,
+        },
+    },
+    Sm120ForcedRoute {
+        op: Sm120Op::Tn,
+        dtype: WeightDtype::Bf16,
+        physical: Sm120PhysicalRoute {
+            tile: Sm120Tile::M64N64,
+            bk: Sm120Bk::Bk64,
+            stages: Sm120Stages::S3,
+            schedule: Sm120Schedule::StreamK,
+        },
+        shape: Sm120Shape {
+            m: 10400,
+            k: 384,
+            n: 384,
+            lda: 384,
+            ldb: 384,
+            ldc: 384,
+        },
+    },
+    Sm120ForcedRoute {
+        op: Sm120Op::Tn,
+        dtype: WeightDtype::Bf16,
+        physical: Sm120PhysicalRoute {
+            tile: Sm120Tile::M64N64,
+            bk: Sm120Bk::Bk64,
+            stages: Sm120Stages::S3,
+            schedule: Sm120Schedule::StreamK,
+        },
+        shape: Sm120Shape {
+            m: 10400,
+            k: 384,
+            n: 1536,
+            lda: 384,
+            ldb: 1536,
+            ldc: 1536,
+        },
+    },
+    Sm120ForcedRoute {
+        op: Sm120Op::Tn,
+        dtype: WeightDtype::Bf16,
+        physical: Sm120PhysicalRoute {
+            tile: Sm120Tile::M64N64,
+            bk: Sm120Bk::Bk64,
+            stages: Sm120Stages::S3,
+            schedule: Sm120Schedule::StreamK,
+        },
+        shape: Sm120Shape {
+            m: 10400,
+            k: 768,
+            n: 384,
+            lda: 768,
+            ldb: 384,
+            ldc: 384,
+        },
+    },
+    Sm120ForcedRoute {
+        op: Sm120Op::Tn,
+        dtype: WeightDtype::F16,
+        physical: Sm120PhysicalRoute {
+            tile: Sm120Tile::M64N64,
+            bk: Sm120Bk::Bk64,
+            stages: Sm120Stages::S3,
+            schedule: Sm120Schedule::StreamK,
+        },
+        shape: Sm120Shape {
+            m: 4621,
+            k: 384,
+            n: 1928,
+            lda: 384,
+            ldb: 1928,
+            ldc: 1928,
+        },
+    },
+    Sm120ForcedRoute {
+        op: Sm120Op::Tn,
+        dtype: WeightDtype::F16,
+        physical: Sm120PhysicalRoute {
+            tile: Sm120Tile::M64N64,
+            bk: Sm120Bk::Bk64,
+            stages: Sm120Stages::S3,
+            schedule: Sm120Schedule::StreamK,
+        },
+        shape: Sm120Shape {
+            m: 4621,
+            k: 768,
+            n: 384,
+            lda: 768,
+            ldb: 384,
+            ldc: 384,
+        },
+    },
+    Sm120ForcedRoute {
+        op: Sm120Op::Tn,
+        dtype: WeightDtype::F16,
+        physical: Sm120PhysicalRoute {
+            tile: Sm120Tile::M64N64,
+            bk: Sm120Bk::Bk64,
+            stages: Sm120Stages::S3,
+            schedule: Sm120Schedule::StreamK,
+        },
+        shape: Sm120Shape {
+            m: 4621,
+            k: 1024,
+            n: 384,
+            lda: 1024,
+            ldb: 384,
+            ldc: 384,
+        },
+    },
+    Sm120ForcedRoute {
+        op: Sm120Op::Tn,
+        dtype: WeightDtype::F16,
+        physical: Sm120PhysicalRoute {
+            tile: Sm120Tile::M64N64,
+            bk: Sm120Bk::Bk64,
+            stages: Sm120Stages::S3,
+            schedule: Sm120Schedule::StreamK,
+        },
+        shape: Sm120Shape {
+            m: 10400,
+            k: 384,
+            n: 384,
+            lda: 384,
+            ldb: 384,
+            ldc: 384,
+        },
+    },
+    Sm120ForcedRoute {
+        op: Sm120Op::Tn,
+        dtype: WeightDtype::F16,
+        physical: Sm120PhysicalRoute {
+            tile: Sm120Tile::M64N64,
+            bk: Sm120Bk::Bk64,
+            stages: Sm120Stages::S3,
+            schedule: Sm120Schedule::StreamK,
+        },
+        shape: Sm120Shape {
+            m: 10400,
+            k: 384,
+            n: 1536,
+            lda: 384,
+            ldb: 1536,
+            ldc: 1536,
+        },
+    },
+    Sm120ForcedRoute {
+        op: Sm120Op::Tn,
+        dtype: WeightDtype::F16,
+        physical: Sm120PhysicalRoute {
+            tile: Sm120Tile::M64N64,
+            bk: Sm120Bk::Bk64,
+            stages: Sm120Stages::S3,
+            schedule: Sm120Schedule::StreamK,
+        },
+        shape: Sm120Shape {
+            m: 10400,
+            k: 768,
+            n: 384,
+            lda: 768,
+            ldb: 384,
+            ldc: 384,
+        },
+    },
+];
+
+/// CC 12.1 has no measured stream-K cell yet.
+pub const SM120_STREAMK_CELLS_CC121: &[Sm120ForcedRoute] = &[];
+
 /// Logical operands for an SM120 automatic route lookup.
 ///
 /// The selected physical route comes solely from the per-minor qualified
@@ -3468,6 +3703,9 @@ pub(in crate::mamba_ssm::gpu) struct Sm120AutoRequest {
     /// Live multiprocessor count of the board: the neighbour rule refuses a
     /// tile whose grid cannot fill one wave of it.
     pub multiprocessors: u32,
+    /// The live half-precision policy. Only its stream-K permission opens
+    /// the measured stream-K cells; every other request sees the tiled table.
+    pub half_policy: HalfTriadPolicy,
 }
 
 /// Resolves only a measured, minor-specific SM120 cell. Every unsupported
@@ -3482,12 +3720,21 @@ pub(super) fn resolve_sm120_auto(
     }
     // A minor without a measured table has no cell to find and declines the
     // way an uncovered shape does.
-    let cells = match caps.compute_capability {
-        (12, 0) => SM120_AUTO_CELLS_CC120,
-        (12, 1) => SM120_AUTO_CELLS_CC121,
-        _ => &[],
+    let (tiled, stream_k) = match caps.compute_capability {
+        (12, 0) => (SM120_AUTO_CELLS_CC120, SM120_STREAMK_CELLS_CC120),
+        (12, 1) => (SM120_AUTO_CELLS_CC121, SM120_STREAMK_CELLS_CC121),
+        _ => (&[][..], &[][..]),
     };
-    resolve_sm120_auto_from_cells(cells, caps, module_target, request)
+    // The stream-K cells open only under the half policy that permits their
+    // fixed-order fold. A permitted request that no stream-K cell serves, or
+    // whose own grid already fills the device, falls through to the tiled
+    // table exactly as an unpermitted one does.
+    if request.half_policy == HalfTriadPolicy::AllowStreamKFixedOrderV1
+        && let Some(route) = resolve_sm120_auto_from_cells(stream_k, caps, module_target, request)
+    {
+        return Some(route);
+    }
+    resolve_sm120_auto_from_cells(tiled, caps, module_target, request)
 }
 
 /// How far, per axis and in natural-log units, a shape may sit from the
@@ -3562,10 +3809,10 @@ fn nearest_sm120_cell(
     }
     // A stream-K neighbour earns its persistent grid only while the target's
     // own grid underfills the device; a shape whose tiles already cover the
-    // multiprocessors takes the tiled twin of the same body (measured on the
-    // 5090: stream-K loses 35-80% wherever the tiles reach the SM count).
+    // multiprocessors declines here so the tiled table serves it (measured on
+    // the 5090: stream-K loses 22-77% wherever the tiles reach the SM count).
     if physical.schedule == Sm120Schedule::StreamK && target_grid >= f64::from(multiprocessors) {
-        physical.schedule = Sm120Schedule::Tiled;
+        return None;
     }
     Some(physical)
 }
@@ -7230,6 +7477,8 @@ mod sm120_tests {
         SM120_AUTO_CELLS_CC120, SM120_AUTO_CELLS_CC121, Sm120AutoRequest, resolve_sm120_auto,
         sm120_target_candidates,
     };
+    use super::{SM120_STREAMK_CELLS_CC120, SM120_STREAMK_CELLS_CC121};
+    use crate::mamba_ssm::gpu::context::HalfTriadPolicy;
     use crate::mamba_ssm::gpu::dtype::WeightDtype;
     use crate::mamba_ssm::gpu::gemm_bi_triad::contract::{
         Sm120Bk, Sm120ForcedRoute, Sm120LaunchOperands, Sm120Op, Sm120PhysicalRoute, Sm120Shape,
@@ -7665,6 +7914,7 @@ mod sm120_tests {
             a_ptr: 0x1_0000,
             b_ptr: 0x2_0000,
             multiprocessors: 170,
+            half_policy: HalfTriadPolicy::TiledParityV1,
             operands: Sm120LaunchOperands {
                 output_ptr: 0x3_0000,
                 bias_ptr: 0,
@@ -7749,14 +7999,111 @@ mod sm120_tests {
             Some(Sm120Schedule::StreamK)
         );
         // Inside the neighbour band but with a grid that covers the device
-        // several times over: the tiled twin of the same body.
+        // several times over: the stream-K cell declines, leaving the shape
+        // to the tiled table.
         let wide = Sm120Shape::contiguous(Sm120Op::Tn, (10400, 2048, 2048));
         assert_eq!(
             super::nearest_sm120_cell(&cells, Sm120Op::Tn, WeightDtype::Bf16, wide, 170),
-            Some(Sm120PhysicalRoute {
-                schedule: Sm120Schedule::Tiled,
-                ..cell.physical
+            None
+        );
+    }
+
+    fn streamk_cc120_routes() -> [Sm120ForcedRoute; 12] {
+        let streamk = Sm120PhysicalRoute {
+            tile: Sm120Tile::M64N64,
+            bk: Sm120Bk::Bk64,
+            stages: Sm120Stages::S3,
+            schedule: Sm120Schedule::StreamK,
+        };
+        let shapes = [
+            (4621, 384, 1928),
+            (4621, 768, 384),
+            (4621, 1024, 384),
+            (10400, 384, 384),
+            (10400, 384, 1536),
+            (10400, 768, 384),
+        ];
+        [WeightDtype::Bf16, WeightDtype::F16]
+            .into_iter()
+            .flat_map(|dtype| {
+                shapes.into_iter().map(move |shape| Sm120ForcedRoute {
+                    op: Sm120Op::Tn,
+                    dtype,
+                    physical: streamk,
+                    shape: Sm120Shape::contiguous(Sm120Op::Tn, shape),
+                })
             })
+            .collect::<Vec<_>>()
+            .try_into()
+            .expect("six shapes by two dtypes")
+    }
+
+    #[test]
+    fn streamk_table_is_the_measured_twelve_with_a_tiled_cell_each() {
+        assert_eq!(SM120_STREAMK_CELLS_CC120, &streamk_cc120_routes()[..]);
+        assert!(SM120_STREAMK_CELLS_CC121.is_empty());
+        for cell in SM120_STREAMK_CELLS_CC120 {
+            assert_eq!(cell.op, Sm120Op::Tn, "{cell:?}");
+            assert_eq!(cell.physical.schedule, Sm120Schedule::StreamK, "{cell:?}");
+            assert!(
+                cell.kernel_spec()
+                    .expect("stream-K cell spec")
+                    .symbol
+                    .contains("_streamk_"),
+                "{cell:?}"
+            );
+            // The default policy keeps a measured tiled route for the shape.
+            assert!(
+                SM120_AUTO_CELLS_CC120.iter().any(|tiled| {
+                    tiled.op == cell.op
+                        && tiled.dtype == cell.dtype
+                        && tiled.shape == cell.shape
+                        && tiled.physical.schedule == Sm120Schedule::Tiled
+                }),
+                "{cell:?} has no tiled cell"
+            );
+        }
+    }
+
+    #[test]
+    fn streamk_cells_open_only_under_the_half_policy() {
+        let target = sm120_target_candidates((12, 0), (12, 8))[0];
+        let device = || caps((12, 0), (12, 8), Some("compute_120"));
+        for cell in SM120_STREAMK_CELLS_CC120.iter().copied() {
+            let tiled = resolve_sm120_auto(device(), Some(target), request_for(cell))
+                .expect("the tiled table serves every stream-K shape");
+            assert_eq!(tiled.physical.schedule, Sm120Schedule::Tiled, "{cell:?}");
+            assert_eq!(tiled.shape, cell.shape);
+
+            let mut permitted = request_for(cell);
+            permitted.half_policy = HalfTriadPolicy::AllowStreamKFixedOrderV1;
+            assert_eq!(
+                resolve_sm120_auto(device(), Some(target), permitted),
+                Some(cell),
+                "permitted request must take the measured stream-K cell"
+            );
+        }
+    }
+
+    #[test]
+    fn a_permitted_request_with_a_filled_grid_takes_the_tiled_table() {
+        // Inside the neighbour band of the 10400-deep stream-K cells (the
+        // dW output grows from 384 to 2048 rows, a factor inside the band),
+        // but its 32 x 24 tile grid already covers the 170 multiprocessors:
+        // the stream-K neighbour declines and the tiled table answers, so the
+        // permitted route equals the default one.
+        let target = sm120_target_candidates((12, 0), (12, 8))[0];
+        let device = || caps((12, 0), (12, 8), Some("compute_120"));
+        let template = SM120_STREAMK_CELLS_CC120[0];
+        let mut request = request_for(template);
+        request.shape = Sm120Shape::contiguous(Sm120Op::Tn, (10400, 2048, 1536));
+        let default = resolve_sm120_auto(device(), Some(target), request)
+            .expect("the tiled table covers the shape");
+        assert_eq!(default.physical.schedule, Sm120Schedule::Tiled);
+        request.half_policy = HalfTriadPolicy::AllowStreamKFixedOrderV1;
+        assert_eq!(
+            resolve_sm120_auto(device(), Some(target), request),
+            Some(default)
         );
     }
 

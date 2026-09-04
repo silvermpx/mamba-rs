@@ -65,6 +65,16 @@ Pure Rust + CUDA. Kernels compile at runtime via NVRTC.
   unsupported or unmeasured cell remains on exact scalar FMA. TF32 has a
   different reduction contract from exact scalar FMA, but repeated eager and
   graph launches of the same frozen route are bit-identical.
+- **Half-precision stream-K policy** — `MAMBA_RS_BI_HALF_POLICY=tiled|streamk`
+  or `ctx.set_half_triad_policy(...)` controls the batch-invariant bf16/f16
+  route on the CC 12.x boards. `tiled` is the default: every automatic half
+  route reproduces the forced portable tensor-core kernel bit for bit.
+  `streamk` permits only the measured stream-K cells, a persistent grid that
+  folds per-CTA partials in a fixed order (a different reduction contract from
+  the tiled body; repeated eager and graph launches of the same route stay
+  bit-identical). It does not force one: an unmeasured shape, or a grid that
+  already fills the device, stays on the tiled route. Requires
+  `MAMBA_RS_BI_TENSOR_CORES=1`; the flag refuses to be a silent no-op.
 - **Per-architecture tensor-core rungs** — on Hopper (`wgmma`) and
   Blackwell (`tcgen05`) the deterministic forward ladder routes to native
   per-architecture kernels, each a bit family of its own, guarded by a
