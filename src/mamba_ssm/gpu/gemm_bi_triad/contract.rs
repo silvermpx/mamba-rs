@@ -5353,12 +5353,26 @@ impl Sm120Stages {
     }
 }
 
+/// How the CTAs of one SM120 launch divide the work.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[repr(u8)]
+pub enum Sm120Schedule {
+    /// One CTA per output tile over the whole reduction.
+    Tiled = 0,
+    /// A persistent grid of one CTA per multiprocessor over contiguous
+    /// ranges of (tile, k-tile) units, partial slabs folded in a fixed
+    /// order; TN only, where the training batch reduces ten thousand rows
+    /// deep over a few dozen tiles.
+    StreamK = 1,
+}
+
 /// Complete physical schedule selected for one SM120 kernel launch.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Sm120PhysicalRoute {
     pub tile: Sm120Tile,
     pub bk: Sm120Bk,
     pub stages: Sm120Stages,
+    pub schedule: Sm120Schedule,
 }
 
 impl Sm120PhysicalRoute {
@@ -5510,11 +5524,23 @@ pub struct Sm120KernelResources {
 }
 
 macro_rules! sm120_spec {
-    ($op:expr, $dtype:expr, $tile:expr, $bk:expr, $stages:expr, $symbol:expr) => {{
+    ($op:expr, $dtype:expr, $tile:expr, $bk:expr, $stages:expr, $symbol:expr) => {
+        sm120_spec!(
+            $op,
+            $dtype,
+            $tile,
+            $bk,
+            $stages,
+            Sm120Schedule::Tiled,
+            $symbol
+        )
+    };
+    ($op:expr, $dtype:expr, $tile:expr, $bk:expr, $stages:expr, $schedule:expr, $symbol:expr) => {{
         let physical = Sm120PhysicalRoute {
             tile: $tile,
             bk: $bk,
             stages: $stages,
+            schedule: $schedule,
         };
         Sm120KernelSpec {
             op: $op,
@@ -5571,10 +5597,40 @@ pub const SM120_KERNEL_SPECS: [Sm120KernelSpec; 96] = sm120_specs!(
     (Sm120Op::Nt, "nt", Sm120Tile::M128N128, "128x128"),
 );
 
+/// The stream-K half kernels: TN over the 64x64 BK64 S3 body, the tile the
+/// half table picks for the training batch, one per operand dtype.
+pub const SM120_STREAMK_KERNEL_SPECS: [Sm120KernelSpec; 2] = [
+    sm120_spec!(
+        Sm120Op::Tn,
+        WeightDtype::Bf16,
+        Sm120Tile::M64N64,
+        Sm120Bk::Bk64,
+        Sm120Stages::S3,
+        Sm120Schedule::StreamK,
+        "gemm_bi_tn_sm120_tma_64x64_bk64_s3_streamk_bf16"
+    ),
+    sm120_spec!(
+        Sm120Op::Tn,
+        WeightDtype::F16,
+        Sm120Tile::M64N64,
+        Sm120Bk::Bk64,
+        Sm120Stages::S3,
+        Sm120Schedule::StreamK,
+        "gemm_bi_tn_sm120_tma_64x64_bk64_s3_streamk_f16"
+    ),
+];
+
+/// Every SM120 half kernel the module exports: the tiled census inventory
+/// followed by the stream-K bodies.
+pub fn sm120_kernel_specs() -> impl Iterator<Item = &'static Sm120KernelSpec> {
+    SM120_KERNEL_SPECS
+        .iter()
+        .chain(SM120_STREAMK_KERNEL_SPECS.iter())
+}
+
 impl Sm120ForcedRoute {
     pub fn kernel_spec(self) -> Result<&'static Sm120KernelSpec, String> {
-        SM120_KERNEL_SPECS
-            .iter()
+        sm120_kernel_specs()
             .find(|spec| {
                 spec.op == self.op && spec.dtype == self.dtype && spec.physical == self.physical
             })
@@ -5587,6 +5643,21 @@ impl Sm120ForcedRoute {
 pub enum Sm120NumericContract {
     /// BF16/F16 operands, `mma.sync` FP32 accumulation, deterministic route order.
     TmaMma16F32V1,
+    /// The same operands and accumulation over the stream-K schedule: the
+    /// reduction is split across a persistent grid and the partial slabs
+    /// fold in a fixed order, so the bits are stable for a shape on a
+    /// device but differ from the tiled ladder's.
+    TmaMma16F32StreamKV1,
+}
+
+impl Sm120NumericContract {
+    /// The contract a physical route's schedule carries.
+    pub const fn for_schedule(schedule: Sm120Schedule) -> Self {
+        match schedule {
+            Sm120Schedule::Tiled => Self::TmaMma16F32V1,
+            Sm120Schedule::StreamK => Self::TmaMma16F32StreamKV1,
+        }
+    }
 }
 
 /// Replay-stable identity of a prepared SM120 route and all of its bindings.
@@ -5705,11 +5776,19 @@ impl Sm120RouteIdentity {
             op,
             dtype,
             backend: PhysicalGemmBackend::Sm120TmaMma16V1,
-            numeric_contract: ResolvedNumericContract::MmaSyncF32V1,
+            numeric_contract: match self.physical.schedule {
+                Sm120Schedule::Tiled => ResolvedNumericContract::MmaSyncF32V1,
+                Sm120Schedule::StreamK => ResolvedNumericContract::MmaSyncF32StreamKFixedOrderV1,
+            },
             instruction_family: ResolvedInstructionFamily::MmaSync,
             instruction_shape: ResolvedInstructionShape { m: 16, n: 8, k: 16 },
             operand_conversion: ResolvedOperandConversion::None,
-            ownership: ResolvedOutputOwnership::OneCtaPerOutputTileV1,
+            ownership: match self.physical.schedule {
+                Sm120Schedule::Tiled => ResolvedOutputOwnership::OneCtaPerOutputTileV1,
+                Sm120Schedule::StreamK => {
+                    ResolvedOutputOwnership::OwnerCtaPerOutputTileStreamKFixedOrderV1
+                }
+            },
             symbol: self.symbol,
             module_kind: self.module_kind,
             target: self.compiler.target,
@@ -6384,6 +6463,7 @@ impl Sm120LaunchResourceSnapshot {
             )
             .required(b"bk", &route.physical.bk.elements().to_le_bytes())
             .required(b"stages", &[route.physical.stages.count()])
+            .required(b"schedule", &[route.physical.schedule as u8])
             .required(b"output-pointer", &operands.output_ptr.to_le_bytes())
             .required(b"bias-pointer", &operands.bias_ptr.to_le_bytes())
             .required(b"alpha", &operands.alpha.to_bits().to_le_bytes())

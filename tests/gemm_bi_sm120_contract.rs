@@ -4,9 +4,10 @@ use std::collections::{BTreeSet, HashSet};
 
 use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
 use mamba_rs::mamba_ssm::gpu::gemm_bi_triad::{
-    SM120_AUTO_CELLS_CC120, SM120_AUTO_CELLS_CC121, SM120_KERNEL_SPECS, Sm120Bk, Sm120ForcedRoute,
-    Sm120MapRequest, Sm120Op, Sm120PhysicalRoute, Sm120Shape, Sm120Stages, Sm120TensorMap,
-    Sm120Tile, resolve_sm120_forced, sm120_target_candidates, validate_sm120_map_request,
+    SM120_AUTO_CELLS_CC120, SM120_AUTO_CELLS_CC121, SM120_KERNEL_SPECS, SM120_STREAMK_KERNEL_SPECS,
+    Sm120Bk, Sm120ForcedRoute, Sm120MapRequest, Sm120Op, Sm120PhysicalRoute, Sm120Schedule,
+    Sm120Shape, Sm120Stages, Sm120TensorMap, Sm120Tile, resolve_sm120_forced,
+    sm120_target_candidates, validate_sm120_map_request,
 };
 use mamba_rs::mamba_ssm::gpu::kernel_identity::{CudaTarget, DeviceCaps};
 
@@ -127,7 +128,12 @@ fn route(
     Sm120ForcedRoute {
         op,
         dtype,
-        physical: Sm120PhysicalRoute { tile, bk, stages },
+        physical: Sm120PhysicalRoute {
+            tile,
+            bk,
+            stages,
+            schedule: Sm120Schedule::Tiled,
+        },
         shape: shape(op),
     }
 }
@@ -170,6 +176,28 @@ fn sm120_tensor_maps_promote_full_l2_sectors() {
 #[test]
 fn sm120_kernel_specs_cover_every_forced_route_once() {
     assert_eq!(SM120_KERNEL_SPECS.len(), 96);
+    assert!(
+        SM120_KERNEL_SPECS
+            .iter()
+            .all(|spec| spec.physical.schedule == Sm120Schedule::Tiled)
+    );
+    // The stream-K bodies: TN only, one per dtype, over the batch tile.
+    assert_eq!(SM120_STREAMK_KERNEL_SPECS.len(), 2);
+    for spec in SM120_STREAMK_KERNEL_SPECS {
+        assert_eq!(spec.op, Sm120Op::Tn, "{}", spec.symbol);
+        assert_eq!(
+            spec.physical.schedule,
+            Sm120Schedule::StreamK,
+            "{}",
+            spec.symbol
+        );
+        assert_eq!(spec.physical.tile, Sm120Tile::M64N64, "{}", spec.symbol);
+        assert_eq!(spec.physical.bk, Sm120Bk::Bk64, "{}", spec.symbol);
+        assert_eq!(spec.physical.stages, Sm120Stages::S3, "{}", spec.symbol);
+        assert!(spec.symbol.ends_with("_streamk_bf16") || spec.symbol.ends_with("_streamk_f16"));
+        assert_eq!(spec.threads, 128, "{}", spec.symbol);
+        assert_eq!(spec.dynamic_shared_bytes, 49_280, "{}", spec.symbol);
+    }
     let symbols: BTreeSet<_> = SM120_KERNEL_SPECS
         .iter()
         .map(|spec| spec.symbol.to_string())
@@ -697,7 +725,8 @@ fn sm120_source_freezes_tma_swizzle_and_pipeline_contract() {
         "ldmatrix.sync.aligned.m8n8.x4.shared.b16",
         "red."
     ));
-    assert_eq!(SOURCE.matches("sm120_sync_warp();").count(), 11);
+    // Eleven in the tiled kernels, three more in the stream-K mainloop.
+    assert_eq!(SOURCE.matches("sm120_sync_warp();").count(), 14);
 }
 
 #[test]
@@ -816,8 +845,10 @@ fn sm120_cuda_abi_is_five_parameters_and_carries_all_route_coordinates() {
             "missing CUDA ABI item: {required}"
         );
     }
+    // Five arguments for the tiled ABI, plus the two stream-K workspace
+    // pointers pushed under their schedule guard.
     let launch = public_function_source(LAUNCH_SOURCE, "launch_sm120_tma_prepared");
-    assert_eq!(launch.matches("builder.arg(").count(), 5);
+    assert_eq!(launch.matches("builder.arg(").count(), 7);
 }
 
 #[test]
@@ -896,7 +927,8 @@ fn sm120_auto_bridge_is_request_based_and_capture_prepared_only() {
     }
 
     let enqueue = function_source(LAUNCH_SOURCE, "enqueue_sm120_tma_prepared_observed");
-    assert_eq!(enqueue.matches("builder.arg(").count(), 5);
+    assert_eq!(enqueue.matches("builder.arg(").count(), 7);
+    assert!(enqueue.contains("if let Some(workspace) = &workspace"));
     assert!(enqueue.contains("enqueue_with_physical_observation"));
     for forbidden in [
         "capture_status",

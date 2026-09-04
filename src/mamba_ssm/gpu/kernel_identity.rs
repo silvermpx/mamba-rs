@@ -2862,6 +2862,10 @@ pub enum ResolvedNumericContract {
     ScalarFmaSplitKF32ReduceV1 = 17,
     Sm120TmaMmaTf32RnaStreamKV1 = 18,
     ScalarFmaFixedSplitFoldV1 = 19,
+    /// `mma.sync` FP32 accumulation over a persistent stream-K grid whose
+    /// partial slabs fold in a fixed order: bit-stable for a shape on a
+    /// device, not bit-equal to the one-CTA-per-tile ladder.
+    MmaSyncF32StreamKFixedOrderV1 = 20,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

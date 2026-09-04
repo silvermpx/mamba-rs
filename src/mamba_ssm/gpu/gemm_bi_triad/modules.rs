@@ -987,7 +987,7 @@ fn snapshot_sm120_resources(
     functions: &HashMap<&'static str, CudaFunction>,
 ) -> Result<HashMap<&'static str, super::contract::Sm120KernelResources>, String> {
     let mut resources = HashMap::new();
-    for spec in super::contract::SM120_KERNEL_SPECS {
+    for spec in super::contract::sm120_kernel_specs() {
         let function = functions
             .get(spec.symbol)
             .ok_or_else(|| format!("SM120 resource census is missing {}", spec.symbol))?;
@@ -3126,7 +3126,7 @@ fn validate_sm120_entry_features(parsed: &ParsedPtx) -> Result<(), String> {
         "mbarrier.try_wait.parity.acquire.cta.shared::cta.b64",
     ];
 
-    for spec in &super::contract::SM120_KERNEL_SPECS {
+    for spec in super::contract::sm120_kernel_specs() {
         let entry = parsed_ptx_entry_ref(parsed, spec.symbol)?;
         require_ptx_entry_tokens("TriadSm120", entry, COMMON)?;
         require_ptx_entry_tokens(
@@ -3197,12 +3197,11 @@ fn validate_sm120_ptx(arch: &str, ptx: &str) -> Result<(), String> {
             "TriadSm120 PTX target is {actual}, expected {expected}"
         ));
     }
-    let mut expected: Vec<_> = super::contract::SM120_KERNEL_SPECS
-        .iter()
+    let mut expected: Vec<_> = super::contract::sm120_kernel_specs()
         .map(|spec| spec.symbol)
         .collect();
     expected.extend(super::contract::tf32_module_symbols(ModuleKind::TriadSm120));
-    let parsed = validate_exact_ptx_exports("TriadSm120", 126, &expected, ptx)?;
+    let parsed = validate_exact_ptx_exports("TriadSm120", 128, &expected, ptx)?;
     validate_sm120_entry_features(&parsed)?;
     let ptx = strip_ptx_comments(ptx)?;
     if ptx_has_unquoted_token(&ptx, |token| {
@@ -4513,10 +4512,10 @@ impl GemmBiKernels {
 
     pub fn has_sm120_tma_mma16(&self) -> bool {
         self.sm120_compiler_identity().is_some()
-            && self.specialized_functions.len() == super::contract::SM120_KERNEL_SPECS.len()
+            && self.specialized_functions.len() == super::contract::sm120_kernel_specs().count()
             && self.sm120_target.is_some()
             && self.sm120_device_caps.is_some()
-            && self.sm120_resources.len() == super::contract::SM120_KERNEL_SPECS.len()
+            && self.sm120_resources.len() == super::contract::sm120_kernel_specs().count()
     }
 
     pub(super) fn allocation_domain(&self) -> super::contract::AllocationDomain {
@@ -5465,7 +5464,7 @@ fn load_sm120_functions(
         return Err("specialized triad module is not a valid TriadSm120 target".into());
     }
     let mut functions = HashMap::new();
-    for spec in super::contract::SM120_KERNEL_SPECS {
+    for spec in super::contract::sm120_kernel_specs() {
         let function = load_function(&module.module, ModuleKind::TriadSm120, spec.symbol)?;
         let shared = i32::try_from(spec.dynamic_shared_bytes)
             .map_err(|_| format!("{} shared memory exceeds i32::MAX", spec.symbol))?;
@@ -5501,7 +5500,7 @@ fn load_sm120_functions(
         }
         functions.insert(spec.symbol, function);
     }
-    if functions.len() != super::contract::SM120_KERNEL_SPECS.len() {
+    if functions.len() != super::contract::sm120_kernel_specs().count() {
         return Err("TriadSm120 did not load its complete symbol inventory".into());
     }
     Ok(functions)
@@ -6647,8 +6646,7 @@ mod tests {
                 .iter()
                 .map(|spec| spec.symbol)
                 .collect(),
-            ModuleKind::TriadSm120 => super::super::contract::SM120_KERNEL_SPECS
-                .iter()
+            ModuleKind::TriadSm120 => super::super::contract::sm120_kernel_specs()
                 .map(|spec| spec.symbol)
                 .collect(),
             _ => panic!("no whole-module fixture for {module_kind:?}"),
@@ -6828,7 +6826,7 @@ mod tests {
         let expected_count = match module_kind {
             ModuleKind::TriadSm90a => 18,
             ModuleKind::TriadSm100 => 108,
-            ModuleKind::TriadSm120 => 126,
+            ModuleKind::TriadSm120 => 128,
             _ => unreachable!(),
         };
         assert_eq!(symbols.len(), expected_count);
@@ -8263,8 +8261,7 @@ mod tests {
             ),
             (
                 "sm120",
-                super::super::contract::SM120_KERNEL_SPECS
-                    .iter()
+                super::super::contract::sm120_kernel_specs()
                     .map(|spec| spec.symbol)
                     .collect(),
             ),

@@ -586,7 +586,7 @@ fn tf32_positive_ceil_divisions_use_subtract_before_addition() {
             "SM120",
             include_str!("../kernels/gemm_bi_triad/sm120.cu"),
             "N",
-            5,
+            6,
             3,
         ),
     ] {
@@ -678,6 +678,12 @@ fn sm120_symbols() -> Vec<String> {
                 }
             }
         }
+    }
+    // The stream-K TN bodies over the training batch's tile.
+    for dtype in ["bf16", "f16"] {
+        symbols.push(format!(
+            "gemm_bi_tn_sm120_tma_64x64_bk64_s3_streamk_{dtype}"
+        ));
     }
     symbols
 }
@@ -3672,7 +3678,7 @@ fn compiles_generic_sm120_triad_modules_with_exact_ptx_contract() {
             &ptx,
             emitted,
             &expected,
-            126,
+            128,
         )
         .unwrap();
 
@@ -3681,9 +3687,12 @@ fn compiles_generic_sm120_triad_modules_with_exact_ptx_contract() {
             let parsed_entry = parsed.entry(&symbol);
             let entry = &parsed_entry.text;
             let parameters = ptx_parameters(entry, &symbol);
+            // The stream-K bodies take the partial-slab and flag pointers
+            // between the output and the tensor maps.
+            let expected_parameters = if symbol.contains("_streamk_") { 7 } else { 5 };
             assert_eq!(
                 parameters.matches(".param").count(),
-                5,
+                expected_parameters,
                 "{requested} ABI parameter count for {symbol}"
             );
             assert_eq!(
@@ -3698,8 +3707,11 @@ fn compiles_generic_sm120_triad_modules_with_exact_ptx_contract() {
                 2,
                 "{requested} tensor-map sizes for {symbol}: {parameters}"
             );
+            let bundle_index = expected_parameters - 1;
             assert!(
-                parameters.contains(&format!(".param .align 4 .b8 {symbol}_param_4[40]")),
+                parameters.contains(&format!(
+                    ".param .align 4 .b8 {symbol}_param_{bundle_index}[40]"
+                )),
                 "{requested} 40-byte parameter bundle for {symbol}: {parameters}"
             );
 

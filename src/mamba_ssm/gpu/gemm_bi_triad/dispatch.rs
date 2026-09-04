@@ -11,8 +11,9 @@ use super::contract::{
     F32TriadSelection, F32TriadShape, Sm90aForcedRoute, Sm90aOp, Sm90aShape,
     Sm90aWarpgroupSchedule, Sm100ForcedRoute, Sm100Op, Sm100TargetCandidate, Sm100TargetKind,
     Sm120Bk, Sm120FmaRoute, Sm120FmaTile, Sm120ForcedRoute, Sm120LaunchOperands, Sm120MapRequest,
-    Sm120Op, Sm120PhysicalRoute, Sm120Shape, Sm120Stages, Sm120TargetCandidate, Sm120Tile,
-    Tf32PhysicalRoute, Tf32QualifiedModule, tf32_kernel_spec, validate_sm120_map_request,
+    Sm120Op, Sm120PhysicalRoute, Sm120Schedule, Sm120Shape, Sm120Stages, Sm120TargetCandidate,
+    Sm120Tile, Tf32PhysicalRoute, Tf32QualifiedModule, tf32_kernel_spec,
+    validate_sm120_map_request,
 };
 use super::contract::{GemmDims, checked_mul3, checked_tile_grid, checked_usize};
 use crate::mamba_ssm::gpu::kernel_identity::DeviceCaps;
@@ -1200,24 +1201,24 @@ const SM120_TF32_QUALIFICATION_IDENTITY_CUDA_13_2_DRIVER_595_84: Tf32AutoQualifi
         optin_shared_bytes: 101376,
         tensor_map_access: true,
         compile_key: [
-            236, 77, 180, 106, 223, 48, 98, 186, 210, 155, 114, 131, 84, 141, 182, 106, 23, 203,
-            161, 163, 185, 179, 204, 54, 64, 98, 238, 9, 219, 162, 89, 35,
+            28, 84, 82, 85, 129, 226, 121, 33, 56, 49, 75, 214, 197, 207, 86, 234, 107, 252, 141,
+            101, 232, 34, 242, 150, 46, 71, 211, 177, 159, 116, 98, 117,
         ],
         artifact_digest: [
-            84, 105, 236, 114, 208, 179, 3, 173, 38, 68, 104, 40, 127, 52, 184, 89, 101, 109, 115,
-            160, 208, 54, 150, 90, 148, 230, 54, 213, 21, 212, 71, 227,
+            28, 191, 210, 49, 134, 16, 255, 94, 16, 94, 237, 24, 236, 38, 148, 83, 36, 111, 239,
+            48, 202, 35, 172, 148, 172, 77, 51, 120, 223, 232, 146, 70,
         ],
         source_digest: [
-            125, 146, 67, 184, 153, 20, 74, 5, 79, 185, 32, 107, 196, 155, 195, 167, 59, 100, 79,
-            61, 54, 211, 230, 24, 212, 155, 175, 154, 80, 133, 233, 145,
+            157, 71, 239, 137, 217, 228, 227, 1, 113, 54, 73, 227, 171, 203, 71, 58, 54, 250, 144,
+            111, 179, 161, 15, 189, 72, 154, 32, 245, 204, 113, 118, 175,
         ],
         invocation_digest: [
-            236, 77, 180, 106, 223, 48, 98, 186, 210, 155, 114, 131, 84, 141, 182, 106, 23, 203,
-            161, 163, 185, 179, 204, 54, 64, 98, 238, 9, 219, 162, 89, 35,
+            28, 84, 82, 85, 129, 226, 121, 33, 56, 49, 75, 214, 197, 207, 86, 234, 107, 252, 141,
+            101, 232, 34, 242, 150, 46, 71, 211, 177, 159, 116, 98, 117,
         ],
         header_manifest_digest: [
-            101, 83, 218, 3, 23, 116, 215, 159, 181, 30, 190, 53, 234, 120, 114, 18, 88, 118, 25,
-            76, 202, 62, 69, 221, 223, 33, 204, 218, 138, 5, 236, 133,
+            143, 85, 219, 234, 61, 129, 87, 149, 245, 72, 111, 4, 240, 23, 105, 19, 161, 194, 107,
+            70, 82, 111, 102, 46, 92, 130, 139, 229, 179, 192, 186, 1,
         ],
         nvrtc_library_domain: [
             220, 223, 96, 48, 189, 148, 19, 101, 183, 103, 158, 213, 226, 50, 226, 19, 235, 24,
@@ -2375,6 +2376,7 @@ pub const SM120_AUTO_CELLS_CC120: &[Sm120ForcedRoute] = &[
             tile: Sm120Tile::M64N64,
             bk: Sm120Bk::Bk64,
             stages: Sm120Stages::S2,
+            schedule: Sm120Schedule::Tiled,
         },
         shape: Sm120Shape {
             m: 2048,
@@ -2392,6 +2394,7 @@ pub const SM120_AUTO_CELLS_CC120: &[Sm120ForcedRoute] = &[
             tile: Sm120Tile::M64N64,
             bk: Sm120Bk::Bk64,
             stages: Sm120Stages::S2,
+            schedule: Sm120Schedule::Tiled,
         },
         shape: Sm120Shape {
             m: 2048,
@@ -2409,6 +2412,7 @@ pub const SM120_AUTO_CELLS_CC120: &[Sm120ForcedRoute] = &[
             tile: Sm120Tile::M128N64,
             bk: Sm120Bk::Bk32,
             stages: Sm120Stages::S2,
+            schedule: Sm120Schedule::Tiled,
         },
         shape: Sm120Shape {
             m: 4096,
@@ -2426,6 +2430,7 @@ pub const SM120_AUTO_CELLS_CC120: &[Sm120ForcedRoute] = &[
             tile: Sm120Tile::M64N64,
             bk: Sm120Bk::Bk64,
             stages: Sm120Stages::S2,
+            schedule: Sm120Schedule::Tiled,
         },
         shape: Sm120Shape {
             m: 2048,
@@ -2443,6 +2448,7 @@ pub const SM120_AUTO_CELLS_CC120: &[Sm120ForcedRoute] = &[
             tile: Sm120Tile::M64N64,
             bk: Sm120Bk::Bk64,
             stages: Sm120Stages::S2,
+            schedule: Sm120Schedule::Tiled,
         },
         shape: Sm120Shape {
             m: 2048,
@@ -2460,6 +2466,7 @@ pub const SM120_AUTO_CELLS_CC120: &[Sm120ForcedRoute] = &[
             tile: Sm120Tile::M128N64,
             bk: Sm120Bk::Bk32,
             stages: Sm120Stages::S2,
+            schedule: Sm120Schedule::Tiled,
         },
         shape: Sm120Shape {
             m: 4096,
@@ -2477,6 +2484,7 @@ pub const SM120_AUTO_CELLS_CC120: &[Sm120ForcedRoute] = &[
             tile: Sm120Tile::M64N128,
             bk: Sm120Bk::Bk32,
             stages: Sm120Stages::S3,
+            schedule: Sm120Schedule::Tiled,
         },
         shape: Sm120Shape {
             m: 2048,
@@ -2494,6 +2502,7 @@ pub const SM120_AUTO_CELLS_CC120: &[Sm120ForcedRoute] = &[
             tile: Sm120Tile::M64N128,
             bk: Sm120Bk::Bk32,
             stages: Sm120Stages::S3,
+            schedule: Sm120Schedule::Tiled,
         },
         shape: Sm120Shape {
             m: 2048,
@@ -2511,6 +2520,7 @@ pub const SM120_AUTO_CELLS_CC120: &[Sm120ForcedRoute] = &[
             tile: Sm120Tile::M128N128,
             bk: Sm120Bk::Bk32,
             stages: Sm120Stages::S3,
+            schedule: Sm120Schedule::Tiled,
         },
         shape: Sm120Shape {
             m: 4096,
@@ -2528,6 +2538,7 @@ pub const SM120_AUTO_CELLS_CC120: &[Sm120ForcedRoute] = &[
             tile: Sm120Tile::M64N128,
             bk: Sm120Bk::Bk32,
             stages: Sm120Stages::S3,
+            schedule: Sm120Schedule::Tiled,
         },
         shape: Sm120Shape {
             m: 2048,
@@ -2545,6 +2556,7 @@ pub const SM120_AUTO_CELLS_CC120: &[Sm120ForcedRoute] = &[
             tile: Sm120Tile::M64N128,
             bk: Sm120Bk::Bk32,
             stages: Sm120Stages::S3,
+            schedule: Sm120Schedule::Tiled,
         },
         shape: Sm120Shape {
             m: 2048,
@@ -2562,6 +2574,7 @@ pub const SM120_AUTO_CELLS_CC120: &[Sm120ForcedRoute] = &[
             tile: Sm120Tile::M128N128,
             bk: Sm120Bk::Bk32,
             stages: Sm120Stages::S3,
+            schedule: Sm120Schedule::Tiled,
         },
         shape: Sm120Shape {
             m: 4096,
@@ -2579,6 +2592,7 @@ pub const SM120_AUTO_CELLS_CC120: &[Sm120ForcedRoute] = &[
             tile: Sm120Tile::M64N64,
             bk: Sm120Bk::Bk64,
             stages: Sm120Stages::S2,
+            schedule: Sm120Schedule::Tiled,
         },
         shape: Sm120Shape {
             m: 2048,
@@ -2596,6 +2610,7 @@ pub const SM120_AUTO_CELLS_CC120: &[Sm120ForcedRoute] = &[
             tile: Sm120Tile::M128N64,
             bk: Sm120Bk::Bk32,
             stages: Sm120Stages::S2,
+            schedule: Sm120Schedule::Tiled,
         },
         shape: Sm120Shape {
             m: 2048,
@@ -2613,6 +2628,7 @@ pub const SM120_AUTO_CELLS_CC120: &[Sm120ForcedRoute] = &[
             tile: Sm120Tile::M128N128,
             bk: Sm120Bk::Bk32,
             stages: Sm120Stages::S3,
+            schedule: Sm120Schedule::Tiled,
         },
         shape: Sm120Shape {
             m: 4096,
@@ -2630,6 +2646,7 @@ pub const SM120_AUTO_CELLS_CC120: &[Sm120ForcedRoute] = &[
             tile: Sm120Tile::M64N64,
             bk: Sm120Bk::Bk64,
             stages: Sm120Stages::S2,
+            schedule: Sm120Schedule::Tiled,
         },
         shape: Sm120Shape {
             m: 2048,
@@ -2647,6 +2664,7 @@ pub const SM120_AUTO_CELLS_CC120: &[Sm120ForcedRoute] = &[
             tile: Sm120Tile::M128N64,
             bk: Sm120Bk::Bk32,
             stages: Sm120Stages::S2,
+            schedule: Sm120Schedule::Tiled,
         },
         shape: Sm120Shape {
             m: 2048,
@@ -2664,6 +2682,7 @@ pub const SM120_AUTO_CELLS_CC120: &[Sm120ForcedRoute] = &[
             tile: Sm120Tile::M128N128,
             bk: Sm120Bk::Bk32,
             stages: Sm120Stages::S3,
+            schedule: Sm120Schedule::Tiled,
         },
         shape: Sm120Shape {
             m: 4096,
@@ -2681,6 +2700,7 @@ pub const SM120_AUTO_CELLS_CC120: &[Sm120ForcedRoute] = &[
             tile: Sm120Tile::M128N64,
             bk: Sm120Bk::Bk32,
             stages: Sm120Stages::S2,
+            schedule: Sm120Schedule::Tiled,
         },
         shape: Sm120Shape {
             m: 2048,
@@ -2698,6 +2718,7 @@ pub const SM120_AUTO_CELLS_CC120: &[Sm120ForcedRoute] = &[
             tile: Sm120Tile::M128N64,
             bk: Sm120Bk::Bk64,
             stages: Sm120Stages::S2,
+            schedule: Sm120Schedule::Tiled,
         },
         shape: Sm120Shape {
             m: 4621,
@@ -2715,6 +2736,7 @@ pub const SM120_AUTO_CELLS_CC120: &[Sm120ForcedRoute] = &[
             tile: Sm120Tile::M128N64,
             bk: Sm120Bk::Bk32,
             stages: Sm120Stages::S2,
+            schedule: Sm120Schedule::Tiled,
         },
         shape: Sm120Shape {
             m: 2048,
@@ -2732,6 +2754,7 @@ pub const SM120_AUTO_CELLS_CC120: &[Sm120ForcedRoute] = &[
             tile: Sm120Tile::M128N64,
             bk: Sm120Bk::Bk64,
             stages: Sm120Stages::S2,
+            schedule: Sm120Schedule::Tiled,
         },
         shape: Sm120Shape {
             m: 4621,
@@ -2749,6 +2772,7 @@ pub const SM120_AUTO_CELLS_CC120: &[Sm120ForcedRoute] = &[
             tile: Sm120Tile::M64N128,
             bk: Sm120Bk::Bk32,
             stages: Sm120Stages::S3,
+            schedule: Sm120Schedule::Tiled,
         },
         shape: Sm120Shape {
             m: 2048,
@@ -2763,9 +2787,10 @@ pub const SM120_AUTO_CELLS_CC120: &[Sm120ForcedRoute] = &[
         op: Sm120Op::Tn,
         dtype: WeightDtype::Bf16,
         physical: Sm120PhysicalRoute {
-            tile: Sm120Tile::M64N128,
-            bk: Sm120Bk::Bk32,
+            tile: Sm120Tile::M64N64,
+            bk: Sm120Bk::Bk64,
             stages: Sm120Stages::S3,
+            schedule: Sm120Schedule::StreamK,
         },
         shape: Sm120Shape {
             m: 4621,
@@ -2783,6 +2808,7 @@ pub const SM120_AUTO_CELLS_CC120: &[Sm120ForcedRoute] = &[
             tile: Sm120Tile::M64N128,
             bk: Sm120Bk::Bk32,
             stages: Sm120Stages::S3,
+            schedule: Sm120Schedule::Tiled,
         },
         shape: Sm120Shape {
             m: 2048,
@@ -2797,9 +2823,10 @@ pub const SM120_AUTO_CELLS_CC120: &[Sm120ForcedRoute] = &[
         op: Sm120Op::Tn,
         dtype: WeightDtype::F16,
         physical: Sm120PhysicalRoute {
-            tile: Sm120Tile::M64N128,
-            bk: Sm120Bk::Bk32,
+            tile: Sm120Tile::M64N64,
+            bk: Sm120Bk::Bk64,
             stages: Sm120Stages::S3,
+            schedule: Sm120Schedule::StreamK,
         },
         shape: Sm120Shape {
             m: 4621,
@@ -2817,6 +2844,7 @@ pub const SM120_AUTO_CELLS_CC120: &[Sm120ForcedRoute] = &[
             tile: Sm120Tile::M64N64,
             bk: Sm120Bk::Bk64,
             stages: Sm120Stages::S2,
+            schedule: Sm120Schedule::Tiled,
         },
         shape: Sm120Shape {
             m: 2048,
@@ -2834,6 +2862,7 @@ pub const SM120_AUTO_CELLS_CC120: &[Sm120ForcedRoute] = &[
             tile: Sm120Tile::M128N128,
             bk: Sm120Bk::Bk64,
             stages: Sm120Stages::S3,
+            schedule: Sm120Schedule::Tiled,
         },
         shape: Sm120Shape {
             m: 4621,
@@ -2851,6 +2880,7 @@ pub const SM120_AUTO_CELLS_CC120: &[Sm120ForcedRoute] = &[
             tile: Sm120Tile::M64N64,
             bk: Sm120Bk::Bk64,
             stages: Sm120Stages::S2,
+            schedule: Sm120Schedule::Tiled,
         },
         shape: Sm120Shape {
             m: 2048,
@@ -2868,6 +2898,7 @@ pub const SM120_AUTO_CELLS_CC120: &[Sm120ForcedRoute] = &[
             tile: Sm120Tile::M128N128,
             bk: Sm120Bk::Bk64,
             stages: Sm120Stages::S3,
+            schedule: Sm120Schedule::Tiled,
         },
         shape: Sm120Shape {
             m: 4621,
@@ -2885,6 +2916,7 @@ pub const SM120_AUTO_CELLS_CC120: &[Sm120ForcedRoute] = &[
             tile: Sm120Tile::M64N64,
             bk: Sm120Bk::Bk64,
             stages: Sm120Stages::S2,
+            schedule: Sm120Schedule::Tiled,
         },
         shape: Sm120Shape {
             m: 4621,
@@ -2902,6 +2934,7 @@ pub const SM120_AUTO_CELLS_CC120: &[Sm120ForcedRoute] = &[
             tile: Sm120Tile::M64N64,
             bk: Sm120Bk::Bk64,
             stages: Sm120Stages::S2,
+            schedule: Sm120Schedule::Tiled,
         },
         shape: Sm120Shape {
             m: 4621,
@@ -2919,6 +2952,7 @@ pub const SM120_AUTO_CELLS_CC120: &[Sm120ForcedRoute] = &[
             tile: Sm120Tile::M128N64,
             bk: Sm120Bk::Bk32,
             stages: Sm120Stages::S2,
+            schedule: Sm120Schedule::Tiled,
         },
         shape: Sm120Shape {
             m: 10400,
@@ -2936,6 +2970,7 @@ pub const SM120_AUTO_CELLS_CC120: &[Sm120ForcedRoute] = &[
             tile: Sm120Tile::M128N128,
             bk: Sm120Bk::Bk32,
             stages: Sm120Stages::S3,
+            schedule: Sm120Schedule::Tiled,
         },
         shape: Sm120Shape {
             m: 10400,
@@ -2953,6 +2988,7 @@ pub const SM120_AUTO_CELLS_CC120: &[Sm120ForcedRoute] = &[
             tile: Sm120Tile::M128N64,
             bk: Sm120Bk::Bk32,
             stages: Sm120Stages::S2,
+            schedule: Sm120Schedule::Tiled,
         },
         shape: Sm120Shape {
             m: 10400,
@@ -2970,6 +3006,7 @@ pub const SM120_AUTO_CELLS_CC120: &[Sm120ForcedRoute] = &[
             tile: Sm120Tile::M64N64,
             bk: Sm120Bk::Bk64,
             stages: Sm120Stages::S2,
+            schedule: Sm120Schedule::Tiled,
         },
         shape: Sm120Shape {
             m: 4621,
@@ -2987,6 +3024,7 @@ pub const SM120_AUTO_CELLS_CC120: &[Sm120ForcedRoute] = &[
             tile: Sm120Tile::M64N64,
             bk: Sm120Bk::Bk64,
             stages: Sm120Stages::S2,
+            schedule: Sm120Schedule::Tiled,
         },
         shape: Sm120Shape {
             m: 4621,
@@ -3004,6 +3042,7 @@ pub const SM120_AUTO_CELLS_CC120: &[Sm120ForcedRoute] = &[
             tile: Sm120Tile::M128N64,
             bk: Sm120Bk::Bk32,
             stages: Sm120Stages::S2,
+            schedule: Sm120Schedule::Tiled,
         },
         shape: Sm120Shape {
             m: 10400,
@@ -3021,6 +3060,7 @@ pub const SM120_AUTO_CELLS_CC120: &[Sm120ForcedRoute] = &[
             tile: Sm120Tile::M128N128,
             bk: Sm120Bk::Bk32,
             stages: Sm120Stages::S3,
+            schedule: Sm120Schedule::Tiled,
         },
         shape: Sm120Shape {
             m: 10400,
@@ -3038,6 +3078,7 @@ pub const SM120_AUTO_CELLS_CC120: &[Sm120ForcedRoute] = &[
             tile: Sm120Tile::M128N64,
             bk: Sm120Bk::Bk32,
             stages: Sm120Stages::S2,
+            schedule: Sm120Schedule::Tiled,
         },
         shape: Sm120Shape {
             m: 10400,
@@ -3055,6 +3096,7 @@ pub const SM120_AUTO_CELLS_CC120: &[Sm120ForcedRoute] = &[
             tile: Sm120Tile::M64N64,
             bk: Sm120Bk::Bk64,
             stages: Sm120Stages::S3,
+            schedule: Sm120Schedule::StreamK,
         },
         shape: Sm120Shape {
             m: 4621,
@@ -3072,6 +3114,7 @@ pub const SM120_AUTO_CELLS_CC120: &[Sm120ForcedRoute] = &[
             tile: Sm120Tile::M64N64,
             bk: Sm120Bk::Bk64,
             stages: Sm120Stages::S3,
+            schedule: Sm120Schedule::StreamK,
         },
         shape: Sm120Shape {
             m: 4621,
@@ -3089,6 +3132,7 @@ pub const SM120_AUTO_CELLS_CC120: &[Sm120ForcedRoute] = &[
             tile: Sm120Tile::M64N64,
             bk: Sm120Bk::Bk64,
             stages: Sm120Stages::S3,
+            schedule: Sm120Schedule::StreamK,
         },
         shape: Sm120Shape {
             m: 10400,
@@ -3106,6 +3150,7 @@ pub const SM120_AUTO_CELLS_CC120: &[Sm120ForcedRoute] = &[
             tile: Sm120Tile::M64N64,
             bk: Sm120Bk::Bk64,
             stages: Sm120Stages::S3,
+            schedule: Sm120Schedule::StreamK,
         },
         shape: Sm120Shape {
             m: 10400,
@@ -3123,6 +3168,7 @@ pub const SM120_AUTO_CELLS_CC120: &[Sm120ForcedRoute] = &[
             tile: Sm120Tile::M64N64,
             bk: Sm120Bk::Bk64,
             stages: Sm120Stages::S3,
+            schedule: Sm120Schedule::StreamK,
         },
         shape: Sm120Shape {
             m: 10400,
@@ -3140,6 +3186,7 @@ pub const SM120_AUTO_CELLS_CC120: &[Sm120ForcedRoute] = &[
             tile: Sm120Tile::M64N64,
             bk: Sm120Bk::Bk64,
             stages: Sm120Stages::S3,
+            schedule: Sm120Schedule::StreamK,
         },
         shape: Sm120Shape {
             m: 4621,
@@ -3157,6 +3204,7 @@ pub const SM120_AUTO_CELLS_CC120: &[Sm120ForcedRoute] = &[
             tile: Sm120Tile::M64N64,
             bk: Sm120Bk::Bk64,
             stages: Sm120Stages::S3,
+            schedule: Sm120Schedule::StreamK,
         },
         shape: Sm120Shape {
             m: 4621,
@@ -3174,6 +3222,7 @@ pub const SM120_AUTO_CELLS_CC120: &[Sm120ForcedRoute] = &[
             tile: Sm120Tile::M64N64,
             bk: Sm120Bk::Bk64,
             stages: Sm120Stages::S3,
+            schedule: Sm120Schedule::StreamK,
         },
         shape: Sm120Shape {
             m: 10400,
@@ -3191,6 +3240,7 @@ pub const SM120_AUTO_CELLS_CC120: &[Sm120ForcedRoute] = &[
             tile: Sm120Tile::M64N64,
             bk: Sm120Bk::Bk64,
             stages: Sm120Stages::S3,
+            schedule: Sm120Schedule::StreamK,
         },
         shape: Sm120Shape {
             m: 10400,
@@ -3208,6 +3258,7 @@ pub const SM120_AUTO_CELLS_CC120: &[Sm120ForcedRoute] = &[
             tile: Sm120Tile::M64N64,
             bk: Sm120Bk::Bk64,
             stages: Sm120Stages::S3,
+            schedule: Sm120Schedule::StreamK,
         },
         shape: Sm120Shape {
             m: 10400,
@@ -3225,6 +3276,7 @@ pub const SM120_AUTO_CELLS_CC120: &[Sm120ForcedRoute] = &[
             tile: Sm120Tile::M64N128,
             bk: Sm120Bk::Bk32,
             stages: Sm120Stages::S2,
+            schedule: Sm120Schedule::Tiled,
         },
         shape: Sm120Shape {
             m: 4621,
@@ -3242,6 +3294,7 @@ pub const SM120_AUTO_CELLS_CC120: &[Sm120ForcedRoute] = &[
             tile: Sm120Tile::M128N128,
             bk: Sm120Bk::Bk32,
             stages: Sm120Stages::S3,
+            schedule: Sm120Schedule::Tiled,
         },
         shape: Sm120Shape {
             m: 4621,
@@ -3259,6 +3312,7 @@ pub const SM120_AUTO_CELLS_CC120: &[Sm120ForcedRoute] = &[
             tile: Sm120Tile::M128N64,
             bk: Sm120Bk::Bk32,
             stages: Sm120Stages::S2,
+            schedule: Sm120Schedule::Tiled,
         },
         shape: Sm120Shape {
             m: 10400,
@@ -3276,6 +3330,7 @@ pub const SM120_AUTO_CELLS_CC120: &[Sm120ForcedRoute] = &[
             tile: Sm120Tile::M128N64,
             bk: Sm120Bk::Bk32,
             stages: Sm120Stages::S2,
+            schedule: Sm120Schedule::Tiled,
         },
         shape: Sm120Shape {
             m: 10400,
@@ -3293,6 +3348,7 @@ pub const SM120_AUTO_CELLS_CC120: &[Sm120ForcedRoute] = &[
             tile: Sm120Tile::M128N128,
             bk: Sm120Bk::Bk32,
             stages: Sm120Stages::S3,
+            schedule: Sm120Schedule::Tiled,
         },
         shape: Sm120Shape {
             m: 10400,
@@ -3310,6 +3366,7 @@ pub const SM120_AUTO_CELLS_CC120: &[Sm120ForcedRoute] = &[
             tile: Sm120Tile::M64N128,
             bk: Sm120Bk::Bk32,
             stages: Sm120Stages::S2,
+            schedule: Sm120Schedule::Tiled,
         },
         shape: Sm120Shape {
             m: 4621,
@@ -3327,6 +3384,7 @@ pub const SM120_AUTO_CELLS_CC120: &[Sm120ForcedRoute] = &[
             tile: Sm120Tile::M128N128,
             bk: Sm120Bk::Bk32,
             stages: Sm120Stages::S3,
+            schedule: Sm120Schedule::Tiled,
         },
         shape: Sm120Shape {
             m: 4621,
@@ -3344,6 +3402,7 @@ pub const SM120_AUTO_CELLS_CC120: &[Sm120ForcedRoute] = &[
             tile: Sm120Tile::M128N64,
             bk: Sm120Bk::Bk32,
             stages: Sm120Stages::S2,
+            schedule: Sm120Schedule::Tiled,
         },
         shape: Sm120Shape {
             m: 10400,
@@ -3361,6 +3420,7 @@ pub const SM120_AUTO_CELLS_CC120: &[Sm120ForcedRoute] = &[
             tile: Sm120Tile::M128N64,
             bk: Sm120Bk::Bk32,
             stages: Sm120Stages::S2,
+            schedule: Sm120Schedule::Tiled,
         },
         shape: Sm120Shape {
             m: 10400,
@@ -3378,6 +3438,7 @@ pub const SM120_AUTO_CELLS_CC120: &[Sm120ForcedRoute] = &[
             tile: Sm120Tile::M128N128,
             bk: Sm120Bk::Bk32,
             stages: Sm120Stages::S3,
+            schedule: Sm120Schedule::Tiled,
         },
         shape: Sm120Shape {
             m: 10400,
@@ -3498,6 +3559,13 @@ fn nearest_sm120_cell(
     let target_grid = grid(shape);
     if target_grid < f64::from(multiprocessors) && target_grid * 2.0 < grid(neighbour.shape) {
         physical.tile = Sm120Tile::M64N64;
+    }
+    // A stream-K neighbour earns its persistent grid only while the target's
+    // own grid underfills the device; a shape whose tiles already cover the
+    // multiprocessors takes the tiled twin of the same body (measured on the
+    // 5090: stream-K loses 35-80% wherever the tiles reach the SM count).
+    if physical.schedule == Sm120Schedule::StreamK && target_grid >= f64::from(multiprocessors) {
+        physical.schedule = Sm120Schedule::Tiled;
     }
     Some(physical)
 }
@@ -7157,6 +7225,7 @@ mod tc_policy_tests {
 
 #[cfg(test)]
 mod sm120_tests {
+    use super::Sm120Schedule;
     use super::{
         SM120_AUTO_CELLS_CC120, SM120_AUTO_CELLS_CC121, Sm120AutoRequest, resolve_sm120_auto,
         sm120_target_candidates,
@@ -7208,41 +7277,56 @@ mod sm120_tests {
             tile: Sm120Tile::M64N64,
             bk: Sm120Bk::Bk64,
             stages: Sm120Stages::S2,
+            schedule: Sm120Schedule::Tiled,
         };
         let m128n64_bk32_s2 = Sm120PhysicalRoute {
             tile: Sm120Tile::M128N64,
             bk: Sm120Bk::Bk32,
             stages: Sm120Stages::S2,
+            schedule: Sm120Schedule::Tiled,
         };
         let m64n128_bk32_s3 = Sm120PhysicalRoute {
             tile: Sm120Tile::M64N128,
             bk: Sm120Bk::Bk32,
             stages: Sm120Stages::S3,
+            schedule: Sm120Schedule::Tiled,
         };
         let m128n128_bk32_s3 = Sm120PhysicalRoute {
             tile: Sm120Tile::M128N128,
             bk: Sm120Bk::Bk32,
             stages: Sm120Stages::S3,
+            schedule: Sm120Schedule::Tiled,
         };
         let m128n64_bk64_s2 = Sm120PhysicalRoute {
             tile: Sm120Tile::M128N64,
             bk: Sm120Bk::Bk64,
             stages: Sm120Stages::S2,
+            schedule: Sm120Schedule::Tiled,
         };
         let m128n128_bk64_s3 = Sm120PhysicalRoute {
             tile: Sm120Tile::M128N128,
             bk: Sm120Bk::Bk64,
             stages: Sm120Stages::S3,
+            schedule: Sm120Schedule::Tiled,
         };
         let m64n64_bk64_s3 = Sm120PhysicalRoute {
             tile: Sm120Tile::M64N64,
             bk: Sm120Bk::Bk64,
             stages: Sm120Stages::S3,
+            schedule: Sm120Schedule::Tiled,
+        };
+        // The same body over the persistent stream-K grid: measured on the
+        // 5090 for the TN shapes whose tile grid underfills the device
+        // (internal/perf/sm120-streamk-tn-20260904).
+        let m64n64_bk64_s3_streamk = Sm120PhysicalRoute {
+            schedule: Sm120Schedule::StreamK,
+            ..m64n64_bk64_s3
         };
         let m64n128_bk32_s2 = Sm120PhysicalRoute {
             tile: Sm120Tile::M64N128,
             bk: Sm120Bk::Bk32,
             stages: Sm120Stages::S2,
+            schedule: Sm120Schedule::Tiled,
         };
         let projection = (2048, 1536, 768);
         let large = (2048, 3072, 768);
@@ -7293,14 +7377,19 @@ mod sm120_tests {
                 input_projection,
                 m64n128_bk32_s3,
             ),
-            route(Sm120Op::Tn, WeightDtype::Bf16, prism, m64n128_bk32_s3),
+            route(
+                Sm120Op::Tn,
+                WeightDtype::Bf16,
+                prism,
+                m64n64_bk64_s3_streamk,
+            ),
             route(
                 Sm120Op::Tn,
                 WeightDtype::F16,
                 input_projection,
                 m64n128_bk32_s3,
             ),
-            route(Sm120Op::Tn, WeightDtype::F16, prism, m64n128_bk32_s3),
+            route(Sm120Op::Tn, WeightDtype::F16, prism, m64n64_bk64_s3_streamk),
             route(
                 Sm120Op::Nt,
                 WeightDtype::Bf16,
@@ -7379,61 +7468,61 @@ mod sm120_tests {
                 Sm120Op::Tn,
                 WeightDtype::Bf16,
                 out_projection,
-                m64n64_bk64_s3,
+                m64n64_bk64_s3_streamk,
             ),
             route(
                 Sm120Op::Tn,
                 WeightDtype::Bf16,
                 input_projection_wide,
-                m64n64_bk64_s3,
+                m64n64_bk64_s3_streamk,
             ),
             route(
                 Sm120Op::Tn,
                 WeightDtype::Bf16,
                 batch_input_projection,
-                m64n64_bk64_s3,
+                m64n64_bk64_s3_streamk,
             ),
             route(
                 Sm120Op::Tn,
                 WeightDtype::Bf16,
                 batch_in_projection,
-                m64n64_bk64_s3,
+                m64n64_bk64_s3_streamk,
             ),
             route(
                 Sm120Op::Tn,
                 WeightDtype::Bf16,
                 batch_out_projection,
-                m64n64_bk64_s3,
+                m64n64_bk64_s3_streamk,
             ),
             route(
                 Sm120Op::Tn,
                 WeightDtype::F16,
                 out_projection,
-                m64n64_bk64_s3,
+                m64n64_bk64_s3_streamk,
             ),
             route(
                 Sm120Op::Tn,
                 WeightDtype::F16,
                 input_projection_wide,
-                m64n64_bk64_s3,
+                m64n64_bk64_s3_streamk,
             ),
             route(
                 Sm120Op::Tn,
                 WeightDtype::F16,
                 batch_input_projection,
-                m64n64_bk64_s3,
+                m64n64_bk64_s3_streamk,
             ),
             route(
                 Sm120Op::Tn,
                 WeightDtype::F16,
                 batch_in_projection,
-                m64n64_bk64_s3,
+                m64n64_bk64_s3_streamk,
             ),
             route(
                 Sm120Op::Tn,
                 WeightDtype::F16,
                 batch_out_projection,
-                m64n64_bk64_s3,
+                m64n64_bk64_s3_streamk,
             ),
             route(
                 Sm120Op::Nt,
@@ -7516,8 +7605,12 @@ mod sm120_tests {
                 tile: Sm120Tile::M64N64,
                 bk: Sm120Bk::Bk64,
                 stages: Sm120Stages::S2,
+                schedule: Sm120Schedule::Tiled,
             })
         );
+        // The tall TN shape's nearest cell is a stream-K batch cell, and its
+        // own grid (8 x 12 tiles) underfills the device, so it keeps the
+        // persistent schedule (measured 0.75 of the tiled twin).
         let tall_tn = Sm120Shape::contiguous(Sm120Op::Tn, (4096, 512, 768));
         assert_eq!(
             nearest_sm120_cell(
@@ -7531,6 +7624,7 @@ mod sm120_tests {
                 tile: Sm120Tile::M64N64,
                 bk: Sm120Bk::Bk64,
                 stages: Sm120Stages::S3,
+                schedule: Sm120Schedule::StreamK,
             })
         );
         // A measured shape is its own nearest cell.
@@ -7547,6 +7641,7 @@ mod sm120_tests {
                 tile: Sm120Tile::M128N64,
                 bk: Sm120Bk::Bk32,
                 stages: Sm120Stages::S2,
+                schedule: Sm120Schedule::Tiled,
             })
         );
         // A narrow output whose neighbour carries a 128x128 tile cannot fill
@@ -7642,6 +7737,42 @@ mod sm120_tests {
                 "unsupported {op:?} operands"
             );
         }
+    }
+
+    #[test]
+    fn a_streamk_neighbour_serves_only_an_underfilled_grid() {
+        // One measured stream-K cell: the batch out projection, whose
+        // twelve-by-six tile grid leaves most of the device idle.
+        let cell = Sm120ForcedRoute {
+            op: Sm120Op::Tn,
+            dtype: WeightDtype::Bf16,
+            physical: Sm120PhysicalRoute {
+                tile: Sm120Tile::M64N64,
+                bk: Sm120Bk::Bk64,
+                stages: Sm120Stages::S3,
+                schedule: Sm120Schedule::StreamK,
+            },
+            shape: Sm120Shape::contiguous(Sm120Op::Tn, (10400, 768, 384)),
+        };
+        let cells = [cell];
+        // A few columns wider: still a small grid, the persistent schedule
+        // carries over.
+        let near = Sm120Shape::contiguous(Sm120Op::Tn, (10400, 768, 512));
+        assert_eq!(
+            super::nearest_sm120_cell(&cells, Sm120Op::Tn, WeightDtype::Bf16, near, 170)
+                .map(|physical| physical.schedule),
+            Some(Sm120Schedule::StreamK)
+        );
+        // Inside the neighbour band but with a grid that covers the device
+        // several times over: the tiled twin of the same body.
+        let wide = Sm120Shape::contiguous(Sm120Op::Tn, (10400, 2048, 2048));
+        assert_eq!(
+            super::nearest_sm120_cell(&cells, Sm120Op::Tn, WeightDtype::Bf16, wide, 170),
+            Some(Sm120PhysicalRoute {
+                schedule: Sm120Schedule::Tiled,
+                ..cell.physical
+            })
+        );
     }
 
     #[test]

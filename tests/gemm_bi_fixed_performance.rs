@@ -20,9 +20,9 @@ use mamba_rs::mamba_ssm::gpu::gemm_bi_fixed::{
 };
 use mamba_rs::mamba_ssm::gpu::gemm_bi_triad::{
     PhysicalQualificationRequest, PhysicalQualificationRoute, Sm120Bk, Sm120ForcedRoute,
-    Sm120LaunchOperands, Sm120MapRequest, Sm120Op, Sm120PhysicalRoute, Sm120Shape, Sm120Stages,
-    Sm120Tile, TcTile, Tf32PhysicalRoute, Tf32PortableRoute, Tf32PortableStages, Tf32PortableTile,
-    Tf32Sm120Route, Tf32Sm120Stages, Tf32Sm120Tile, launch_sm120_tma_prepared,
+    Sm120LaunchOperands, Sm120MapRequest, Sm120Op, Sm120PhysicalRoute, Sm120Schedule, Sm120Shape,
+    Sm120Stages, Sm120Tile, TcTile, Tf32PhysicalRoute, Tf32PortableRoute, Tf32PortableStages,
+    Tf32PortableTile, Tf32Sm120Route, Tf32Sm120Stages, Tf32Sm120Tile, launch_sm120_tma_prepared,
     prepare_sm120_tensor_maps, prepare_sm120_tma_forced, presize_physical_qualification_suite,
     qualify_physical_launch, resolve_sm120_forced, tf32_route_specs,
 };
@@ -1584,7 +1584,12 @@ fn fixed_vs_triad_pairwise_census() {
             ];
             for (pair, fixed_tile, tile, bk, stages) in tiles {
                 let pair = format!("{pair}_{dtype:?}");
-                let physical = Sm120PhysicalRoute { tile, bk, stages };
+                let physical = Sm120PhysicalRoute {
+                    tile,
+                    bk,
+                    stages,
+                    schedule: Sm120Schedule::Tiled,
+                };
                 let triad = (|| -> Result<f64, String> {
                     let route = resolve_sm120_forced(
                         caps,

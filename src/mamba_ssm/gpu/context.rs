@@ -1117,6 +1117,7 @@ impl GpuCtx {
                 NumericContractSet::TRIAD_SCALAR_FMA_V1
             }
             ResolvedNumericContract::MmaSyncF32V1
+            | ResolvedNumericContract::MmaSyncF32StreamKFixedOrderV1
             | ResolvedNumericContract::WgmmaF32V1
             | ResolvedNumericContract::Tcgen05F32V1 => NumericContractSet::TRIAD_MMA_SYNC_V1,
             ResolvedNumericContract::MmaTf32RnaV1

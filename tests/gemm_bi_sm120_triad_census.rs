@@ -19,8 +19,8 @@ use mamba_rs::mamba_ssm::gpu::gemm_bi_triad::{
     PhysicalQualificationRequest, PhysicalQualificationRoute, SM120_AUTO_CELLS_CC120,
     SM120_AUTO_CELLS_CC121, SM120_KERNEL_SPECS, SM120_TENSOR_MAP_REVISION, SM120_TUNING_REVISION,
     Sm120Bk, Sm120ForcedRoute, Sm120LaunchOperands, Sm120MapRequest, Sm120NumericContract, Sm120Op,
-    Sm120PhysicalRoute, Sm120PreparedLaunch, Sm120PreparedTensorMaps, Sm120Shape, Sm120Stages,
-    Sm120Tile, TcFwdOperands, TcTile, gemm_bi_backward_dw_tc_with_tile,
+    Sm120PhysicalRoute, Sm120PreparedLaunch, Sm120PreparedTensorMaps, Sm120Schedule, Sm120Shape,
+    Sm120Stages, Sm120Tile, TcFwdOperands, TcTile, gemm_bi_backward_dw_tc_with_tile,
     gemm_bi_backward_dx_tc_with_tile, gemm_bi_forward_tc_with_tile, launch_sm120_tma_prepared,
     prepare_sm120_tensor_maps, prepare_sm120_tma_forced, presize_physical_qualification_suite,
     qualify_physical_launch, resolve_sm120_forced, validate_sm120_graph_replay,
@@ -107,7 +107,12 @@ fn physical_routes() -> Vec<Sm120PhysicalRoute> {
     ] {
         for bk in [Sm120Bk::Bk32, Sm120Bk::Bk64] {
             for stages in [Sm120Stages::S2, Sm120Stages::S3] {
-                routes.push(Sm120PhysicalRoute { tile, bk, stages });
+                routes.push(Sm120PhysicalRoute {
+                    tile,
+                    bk,
+                    stages,
+                    schedule: Sm120Schedule::Tiled,
+                });
             }
         }
     }
@@ -636,7 +641,7 @@ fn assert_identity_and_resources(prepared: &Sm120PreparedLaunch, route: Sm120For
     let identity = prepared.identity();
     assert_eq!(
         identity.numeric_contract,
-        Sm120NumericContract::TmaMma16F32V1
+        Sm120NumericContract::for_schedule(route.physical.schedule)
     );
     assert_eq!(identity.op, route.op);
     assert_eq!(identity.dtype, route.dtype);
@@ -917,6 +922,7 @@ fn assert_multi_stream_concurrency(ctx: &GpuCtx) {
         tile: Sm120Tile::M128N128,
         bk: Sm120Bk::Bk64,
         stages: Sm120Stages::S3,
+        schedule: Sm120Schedule::Tiled,
     };
     let route = forced_route(ctx, &case, physical);
     let maps = prepare_sm120_tensor_maps(&ctx.stream, &ctx.kernels, case.request(physical))
@@ -964,6 +970,7 @@ fn assert_semantic_rejections(ctx: &GpuCtx) {
             tile: Sm120Tile::M64N64,
             bk: Sm120Bk::Bk32,
             stages: Sm120Stages::S2,
+            schedule: Sm120Schedule::Tiled,
         };
         let maps = prepare_sm120_tensor_maps(&ctx.stream, &ctx.kernels, case.request(physical))
             .expect("prepare rejection maps");
@@ -996,6 +1003,7 @@ fn assert_map_and_route_fail_closed(ctx: &GpuCtx) {
         tile: Sm120Tile::M128N128,
         bk: Sm120Bk::Bk64,
         stages: Sm120Stages::S3,
+        schedule: Sm120Schedule::Tiled,
     };
     let mut request = case.request(physical);
     request.a_ptr = 0;
@@ -1038,6 +1046,7 @@ fn assert_replay_rejects_allocation_generation_change(ctx: &GpuCtx) {
         tile: Sm120Tile::M128N64,
         bk: Sm120Bk::Bk32,
         stages: Sm120Stages::S2,
+        schedule: Sm120Schedule::Tiled,
     };
     let route = forced_route(ctx, &case, physical);
     let maps = prepare_sm120_tensor_maps(&ctx.stream, &ctx.kernels, case.request(physical))
@@ -1153,7 +1162,10 @@ fn assert_auto_route(
     assert_eq!(route.backend, PhysicalGemmBackend::Sm120TmaMma16V1);
     assert_eq!(
         route.numeric_contract,
-        ResolvedNumericContract::MmaSyncF32V1
+        match expected.physical.schedule {
+            Sm120Schedule::Tiled => ResolvedNumericContract::MmaSyncF32V1,
+            Sm120Schedule::StreamK => ResolvedNumericContract::MmaSyncF32StreamKFixedOrderV1,
+        }
     );
     assert_eq!(
         route.shape,
@@ -1190,7 +1202,23 @@ fn assert_auto_matches_mma16_baseline(
     );
     let mut baseline = GuardedOutput::new(ctx, route.op, route.dtype, case.initial.len(), 0);
     baseline.reset(&ctx.stream, &case.initial);
-    launch_baseline(ctx, &case, &baseline).expect("launch typed MMA16 baseline");
+    match route.physical.schedule {
+        Sm120Schedule::Tiled => {
+            launch_baseline(ctx, &case, &baseline).expect("launch typed MMA16 baseline");
+        }
+        // A stream-K cell folds its slabs in its own fixed order: the bits
+        // it must reproduce are the forced stream-K route's, whose own
+        // census holds them to the CPU reference.
+        Sm120Schedule::StreamK => {
+            let maps =
+                prepare_sm120_tensor_maps(&ctx.stream, &ctx.kernels, case.request(route.physical))
+                    .expect("prepare stream-K tensor maps");
+            let (_, prepared) =
+                prepared_route(ctx, &case, &maps, route.physical, baseline.ptr(), true);
+            launch_sm120_tma_prepared(&ctx.stream, &ctx.kernels, &prepared)
+                .expect("launch forced stream-K baseline");
+        }
+    }
     let expected = baseline
         .download(&ctx.stream)
         .into_iter()
@@ -1267,16 +1295,19 @@ fn sm120_auto_graph_and_physical_inventory_is_dtype_symmetric() {
         tile: Sm120Tile::M64N64,
         bk: Sm120Bk::Bk64,
         stages: Sm120Stages::S2,
+        schedule: Sm120Schedule::Tiled,
     };
     let tn = Sm120PhysicalRoute {
         tile: Sm120Tile::M64N128,
         bk: Sm120Bk::Bk32,
         stages: Sm120Stages::S3,
+        schedule: Sm120Schedule::Tiled,
     };
     let nt = Sm120PhysicalRoute {
         tile: Sm120Tile::M64N64,
         bk: Sm120Bk::Bk64,
         stages: Sm120Stages::S2,
+        schedule: Sm120Schedule::Tiled,
     };
     let shape = (2048, 1536, 768, 1536, 768, 768);
     let nt_shape = (2048, 1536, 768, 768, 768, 1536);
@@ -1598,6 +1629,7 @@ fn qualifies_sm120_nn_bf16_m64n64_bk32_s2_reduction_boundaries() {
         tile: Sm120Tile::M64N64,
         bk: Sm120Bk::Bk32,
         stages: Sm120Stages::S2,
+        schedule: Sm120Schedule::Tiled,
     };
     for reduction in [16, 32, 64, 128] {
         let case = CensusCase::compact(&ctx, Sm120Op::Nn, WeightDtype::Bf16, (64, reduction, 64));
@@ -1641,6 +1673,7 @@ fn sm120_nn_bf16_sw64_fragment_mapping_matches_identity_probe() {
         tile: Sm120Tile::M64N64,
         bk: Sm120Bk::Bk32,
         stages: Sm120Stages::S2,
+        schedule: Sm120Schedule::Tiled,
     };
     let maps = prepare_sm120_tensor_maps(&ctx.stream, &ctx.kernels, case.request(physical))
         .expect("prepare identity-probe maps");
@@ -1791,6 +1824,22 @@ fn percentile(sorted: &[f64], percentile: f64) -> f64 {
     sorted[index]
 }
 
+fn sm120_schedule_name(schedule: Sm120Schedule) -> &'static str {
+    match schedule {
+        Sm120Schedule::Tiled => "tiled",
+        Sm120Schedule::StreamK => "streamk",
+    }
+}
+
+/// The cell-id segment of a schedule: the tiled census ids stay as they
+/// were, the stream-K cells carry their own segment.
+fn sm120_schedule_segment(schedule: Sm120Schedule) -> &'static str {
+    match schedule {
+        Sm120Schedule::Tiled => "",
+        Sm120Schedule::StreamK => "/streamk",
+    }
+}
+
 fn sm120_tile_name(tile: Sm120Tile) -> &'static str {
     match tile {
         Sm120Tile::M64N64 => "m64n64",
@@ -1856,7 +1905,8 @@ fn run_sm120_hot_performance_cell(
         concat!(
             "{{\"schema\":\"MambaBiSm120ForcedPerformanceCellV1\",",
             "\"suite\":\"gemm_bi_sm120_forced_performance\",",
-            "\"cell_id\":\"sm120_forced/{}/{}/{}/bk{}/s{}/{}/contiguous\",",
+            "\"cell_id\":\"sm120_forced/{}/{}/{}/bk{}/s{}{}/{}/contiguous\",",
+            "\"schedule\":\"{}\",",
             "\"dtype\":\"{}\",\"op\":\"{}\",\"shape\":\"{}\",",
             "\"alpha_bits\":{},\"beta_bits\":{},",
             "\"m\":{},\"k\":{},\"n\":{},\"tile\":\"{}\",",
@@ -1873,7 +1923,9 @@ fn run_sm120_hot_performance_cell(
         sm120_tile_name(physical.tile),
         physical.bk.elements(),
         physical.stages.count(),
+        sm120_schedule_segment(physical.schedule),
         shape.name,
+        sm120_schedule_name(physical.schedule),
         sm120_dtype_name(case.dtype),
         sm120_op_name(case.op),
         shape.name,
@@ -1957,6 +2009,60 @@ fn sm120_forced_nt_hot_performance_matrix() {
         for shape in SM120_HOT_SHAPES {
             let case = CensusCase::compact_performance(&ctx, Sm120Op::Nt, dtype, shape.dims);
             for physical in physical_routes() {
+                run_sm120_hot_performance_cell(&ctx, &case, shape, physical, windows);
+            }
+        }
+    }
+}
+
+/// The stream-K TN route: the same 64x64 BK64 S3 body as its tiled twin
+/// over a persistent grid with a fixed-order slab fold.
+fn streamk_tn_route() -> Sm120PhysicalRoute {
+    Sm120PhysicalRoute {
+        tile: Sm120Tile::M64N64,
+        bk: Sm120Bk::Bk64,
+        stages: Sm120Stages::S3,
+        schedule: Sm120Schedule::StreamK,
+    }
+}
+
+/// Every TN hot shape through the stream-K route: the CPU reference, three
+/// bit-identical reruns, untouched inputs. The training batch is the shape
+/// the schedule exists for; the others prove it holds where a range covers
+/// whole tiles or only slivers of one.
+#[test]
+#[ignore = "needs a real CC 12.0 or CC 12.1 device"]
+fn sm120_streamk_tn_census() {
+    let Some((_device, ctx)) = sm120_context() else {
+        return;
+    };
+    for dtype in [WeightDtype::Bf16, WeightDtype::F16] {
+        for shape in SM120_HOT_SHAPES {
+            let case = CensusCase::compact(&ctx, Sm120Op::Tn, dtype, shape.dims);
+            run_candidate(&ctx, &case, streamk_tn_route(), 2, 0);
+        }
+    }
+}
+
+/// The stream-K route timed beside its tiled twin on every TN hot shape.
+#[test]
+#[ignore = "needs a real CC 12.0 or CC 12.1 device and emits performance JSONL"]
+fn sm120_streamk_tn_hot_performance() {
+    let Some((_device, ctx)) = sm120_context() else {
+        return;
+    };
+    let windows = std::env::var("GEMM_BI_QUAL_WINDOWS")
+        .map_or(Ok(11), |value| value.parse::<usize>())
+        .expect("parse GEMM_BI_QUAL_WINDOWS");
+    assert!(windows > 0);
+    let tiled = Sm120PhysicalRoute {
+        schedule: Sm120Schedule::Tiled,
+        ..streamk_tn_route()
+    };
+    for dtype in [WeightDtype::Bf16, WeightDtype::F16] {
+        for shape in SM120_HOT_SHAPES {
+            let case = CensusCase::compact_performance(&ctx, Sm120Op::Tn, dtype, shape.dims);
+            for physical in [tiled, streamk_tn_route()] {
                 run_sm120_hot_performance_cell(&ctx, &case, shape, physical, windows);
             }
         }

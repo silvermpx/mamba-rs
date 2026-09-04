@@ -27,8 +27,8 @@ use mamba_rs::mamba_ssm::gpu::gemm_bi_triad::{
 #[cfg(feature = "cuda-cublaslt-qualification")]
 use mamba_rs::mamba_ssm::gpu::gemm_bi_triad::{
     Sm120Bk, Sm120ForcedRoute, Sm120LaunchOperands, Sm120MapRequest, Sm120Op, Sm120PhysicalRoute,
-    Sm120PreparedLaunch, Sm120Shape, Sm120Stages, Sm120Tile, launch_sm120_tma_prepared,
-    prepare_sm120_tensor_maps, prepare_sm120_tma_forced,
+    Sm120PreparedLaunch, Sm120Schedule, Sm120Shape, Sm120Stages, Sm120Tile,
+    launch_sm120_tma_prepared, prepare_sm120_tensor_maps, prepare_sm120_tma_forced,
 };
 use mamba_rs::mamba_ssm::gpu::graph_capture::capture_into_graph;
 use mamba_rs::mamba_ssm::gpu::kernel_identity::{
@@ -435,12 +435,14 @@ mod cublaslt_qualification {
                         tile: Sm120Tile::M128N64,
                         bk: Sm120Bk::Bk32,
                         stages: Sm120Stages::S2,
+                        schedule: Sm120Schedule::Tiled,
                     }
                 } else {
                     Sm120PhysicalRoute {
                         tile: Sm120Tile::M64N64,
                         bk: Sm120Bk::Bk64,
                         stages: Sm120Stages::S2,
+                        schedule: Sm120Schedule::Tiled,
                     }
                 };
                 cells.push(Sm120PairedNnCell {
@@ -1373,37 +1375,44 @@ mod cublaslt_tn_nt_qualification {
                             tile: Sm120Tile::M64N128,
                             bk: Sm120Bk::Bk32,
                             stages: Sm120Stages::S3,
+                            schedule: Sm120Schedule::Tiled,
                         },
                         (Sm120Op::Tn, "large_deep") => Sm120PhysicalRoute {
                             tile: Sm120Tile::M128N128,
                             bk: Sm120Bk::Bk32,
                             stages: Sm120Stages::S3,
+                            schedule: Sm120Schedule::Tiled,
                         },
                         (Sm120Op::Nt, "d768_out_proj") => Sm120PhysicalRoute {
                             tile: Sm120Tile::M64N64,
                             bk: Sm120Bk::Bk64,
                             stages: Sm120Stages::S2,
+                            schedule: Sm120Schedule::Tiled,
                         },
                         (Sm120Op::Nt, "large") => Sm120PhysicalRoute {
                             tile: Sm120Tile::M128N64,
                             bk: Sm120Bk::Bk32,
                             stages: Sm120Stages::S2,
+                            schedule: Sm120Schedule::Tiled,
                         },
                         (Sm120Op::Nt, "large_deep") => Sm120PhysicalRoute {
                             tile: Sm120Tile::M128N128,
                             bk: Sm120Bk::Bk32,
                             stages: Sm120Stages::S3,
+                            schedule: Sm120Schedule::Tiled,
                         },
                         // The live half table's picks for the batch shape.
                         (Sm120Op::Tn, "batch_in_proj") => Sm120PhysicalRoute {
                             tile: Sm120Tile::M64N64,
                             bk: Sm120Bk::Bk64,
                             stages: Sm120Stages::S3,
+                            schedule: Sm120Schedule::Tiled,
                         },
                         (Sm120Op::Nt, "batch_in_proj") => Sm120PhysicalRoute {
                             tile: Sm120Tile::M128N64,
                             bk: Sm120Bk::Bk32,
                             stages: Sm120Stages::S2,
+                            schedule: Sm120Schedule::Tiled,
                         },
                         _ => unreachable!("fixed TN/NT inventory"),
                     };
@@ -9342,6 +9351,7 @@ fn sm120_paired_nn_cublaslt_descriptor_keeps_no_bias_transpose_identity() {
             tile: Sm120Tile::M64N64,
             bk: Sm120Bk::Bk64,
             stages: Sm120Stages::S2,
+            schedule: Sm120Schedule::Tiled,
         },
         alpha: 1.0,
         beta: 0.0,
@@ -9561,6 +9571,7 @@ fn sm120_paired_tn_nt_layouts_match_the_row_major_training_contracts() {
             tile: Sm120Tile::M64N64,
             bk: Sm120Bk::Bk32,
             stages: Sm120Stages::S2,
+            schedule: Sm120Schedule::Tiled,
         },
     };
 
@@ -9646,6 +9657,7 @@ fn sm120_paired_tn_nt_semantic_probe_has_one_exact_term_and_stable_tn_seed() {
             tile: Sm120Tile::M64N64,
             bk: Sm120Bk::Bk32,
             stages: Sm120Stages::S2,
+            schedule: Sm120Schedule::Tiled,
         },
     };
 

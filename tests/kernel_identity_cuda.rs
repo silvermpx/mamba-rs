@@ -9,7 +9,7 @@ use mamba_rs::mamba_ssm::gpu::gemm_bi_triad::{
 };
 #[cfg(target_os = "linux")]
 use mamba_rs::mamba_ssm::gpu::gemm_bi_triad::{
-    SM80_TF32_ROUTE_SPECS, SM120_KERNEL_SPECS, SM120_TF32_ROUTE_SPECS,
+    SM80_TF32_ROUTE_SPECS, SM120_KERNEL_SPECS, SM120_STREAMK_KERNEL_SPECS, SM120_TF32_ROUTE_SPECS,
 };
 #[cfg(target_os = "linux")]
 use mamba_rs::mamba_ssm::gpu::kernel_identity::{
@@ -184,12 +184,13 @@ fn expected_cuda_module_fixtures_are_unique() {
     );
     let specialized: std::collections::BTreeSet<_> = SM120_KERNEL_SPECS
         .iter()
+        .chain(SM120_STREAMK_KERNEL_SPECS.iter())
         .map(|spec| spec.symbol)
         .chain(SM120_TF32_ROUTE_SPECS.iter().map(|spec| spec.symbol))
         .collect();
     assert_eq!(
         specialized.len(),
-        SM120_KERNEL_SPECS.len() + SM120_TF32_ROUTE_SPECS.len()
+        SM120_KERNEL_SPECS.len() + SM120_STREAMK_KERNEL_SPECS.len() + SM120_TF32_ROUTE_SPECS.len()
     );
 }
 
@@ -758,6 +759,7 @@ fn repeated_nvrtc_compiles_have_the_same_identity() {
             let specialized_entries = ptx_entries(&artifact_payload(&cached_entries, specialized));
             let expected_specialized: std::collections::BTreeSet<_> = SM120_KERNEL_SPECS
                 .iter()
+                .chain(SM120_STREAMK_KERNEL_SPECS.iter())
                 .map(|spec| spec.symbol.to_string())
                 .chain(
                     SM120_TF32_ROUTE_SPECS

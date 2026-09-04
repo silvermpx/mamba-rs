@@ -1819,6 +1819,10 @@ fn validate_sm120_half_branch(
     let [eager] = eager_nodes else {
         return Err("SM120 half production branch must match exactly one eager node".into());
     };
+    let expected_contract = match seal.route.physical.schedule {
+        super::Sm120Schedule::Tiled => ResolvedNumericContract::MmaSyncF32V1,
+        super::Sm120Schedule::StreamK => ResolvedNumericContract::MmaSyncF32StreamKFixedOrderV1,
+    };
     let [graph] = graph_nodes else {
         return Err("SM120 half production branch must match exactly one graph node".into());
     };
@@ -1842,7 +1846,7 @@ fn validate_sm120_half_branch(
     if expected.op != expected_op
         || expected.dtype != expected_dtype
         || expected.backend != PhysicalGemmBackend::Sm120TmaMma16V1
-        || expected.numeric_contract != ResolvedNumericContract::MmaSyncF32V1
+        || expected.numeric_contract != expected_contract
         || expected.instruction_family != ResolvedInstructionFamily::MmaSync
         || expected.symbol != spec.symbol
         || expected.module_kind != ModuleKind::TriadSm120
@@ -1867,7 +1871,7 @@ fn validate_sm120_half_branch(
             || node.logical_dtype() != expected_dtype
             || node.execution_dtype() != expected_dtype
             || actual.backend != PhysicalGemmBackend::Sm120TmaMma16V1
-            || actual.numeric_contract != ResolvedNumericContract::MmaSyncF32V1
+            || actual.numeric_contract != expected_contract
             || actual.instruction_family != ResolvedInstructionFamily::MmaSync
             || actual != *expected
         {

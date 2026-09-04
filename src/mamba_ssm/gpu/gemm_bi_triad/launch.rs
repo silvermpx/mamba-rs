@@ -6786,7 +6786,7 @@ pub fn prepare_sm120_tma_forced(
         ldc: checked_i32(route.shape.ldc, "ldc")?,
     };
     let identity = Sm120RouteIdentity {
-        numeric_contract: Sm120NumericContract::TmaMma16F32V1,
+        numeric_contract: Sm120NumericContract::for_schedule(route.physical.schedule),
         op: route.op,
         dtype: route.dtype,
         physical: route.physical,
@@ -6958,18 +6958,19 @@ unsafe fn enqueue_sm120_tma_prepared_observed<O: PhysicalLaunchObserver>(
     };
     let rows = checked_u32(rows, "SM120 output rows")?;
     let columns = checked_u32(columns, "SM120 output columns")?;
-    let grid = checked_grid_product(
-        rows.div_ceil(prepared.route.physical.tile.output_rows()),
-        columns.div_ceil(prepared.route.physical.tile.output_columns()),
-        1,
-    )?;
+    let grid = sm120_launch_grid(kernels, prepared.route, spec, rows, columns)?;
     let config = cudarc::driver::LaunchConfig {
         grid_dim: (grid, 1, 1),
         block_dim: (spec.threads, 1, 1),
         shared_mem_bytes: spec.dynamic_shared_bytes,
     };
+    let workspace = sm120_streamk_workspace(stream, kernels, prepared.route, spec, grid)?;
     let mut builder = stream.launch_builder(function);
     builder.arg(&prepared.operands.output_ptr);
+    if let Some(workspace) = &workspace {
+        builder.arg(&workspace.partial);
+        builder.arg(&workspace.flags);
+    }
     builder.arg(&prepared.maps.a);
     builder.arg(&prepared.maps.b);
     builder.arg(&prepared.operands.bias_ptr);
@@ -6977,6 +6978,88 @@ unsafe fn enqueue_sm120_tma_prepared_observed<O: PhysicalLaunchObserver>(
     builder.arg(&params);
     unsafe { enqueue_with_physical_observation(observer, &mut builder, config, observation) }
         .map_err(|error| error.with_driver_context(format_args!("launch {}", spec.symbol)))
+}
+
+/// The grid of an SM120 launch: one CTA per output tile, or the persistent
+/// grid of one CTA per multiprocessor under the stream-K schedule.
+fn sm120_launch_grid(
+    kernels: &GpuKernels,
+    route: Sm120ForcedRoute,
+    spec: &Sm120KernelSpec,
+    rows: u32,
+    columns: u32,
+) -> Result<u32, String> {
+    match route.physical.schedule {
+        Sm120Schedule::Tiled => checked_grid_product(
+            rows.div_ceil(route.physical.tile.output_rows()),
+            columns.div_ceil(route.physical.tile.output_columns()),
+            1,
+        ),
+        Sm120Schedule::StreamK => {
+            let grid = kernels.multiprocessor_count();
+            if grid == 0 {
+                return Err("SM120 stream-K launch requires at least one multiprocessor".into());
+            }
+            let reduction = match route.op {
+                Sm120Op::Nn => route.shape.k,
+                Sm120Op::Tn => route.shape.m,
+                Sm120Op::Nt => route.shape.n,
+            };
+            let k_tiles = reduction
+                .div_ceil(route.physical.bk.elements() as usize)
+                .max(1);
+            let tiles = (rows.div_ceil(route.physical.tile.output_rows()) as usize)
+                .checked_mul(columns.div_ceil(route.physical.tile.output_columns()) as usize)
+                .ok_or_else(|| "SM120 stream-K tile count overflows usize".to_string())?;
+            let units = tiles
+                .checked_mul(k_tiles)
+                .ok_or_else(|| "SM120 stream-K unit count overflows usize".to_string())?;
+            if units > i32::MAX as usize {
+                return Err("SM120 stream-K unit count exceeds the kernel's 32-bit range".into());
+            }
+            let _ = spec;
+            Ok(grid)
+        }
+    }
+}
+
+/// The partial-slab and flag workspace a stream-K launch reads and writes;
+/// `None` under the tiled schedule.
+struct Sm120StreamKWorkspace {
+    partial: CUptr,
+    flags: CUptr,
+}
+
+fn sm120_streamk_workspace(
+    stream: &Arc<cudarc::driver::CudaStream>,
+    kernels: &GpuKernels,
+    route: Sm120ForcedRoute,
+    spec: &Sm120KernelSpec,
+    grid: u32,
+) -> Result<Option<Sm120StreamKWorkspace>, String> {
+    use cudarc::driver::DevicePtr;
+    if route.physical.schedule != Sm120Schedule::StreamK {
+        return Ok(None);
+    }
+    // One slab per (CTA, slot): every thread holds MAtoms x 16 accumulators.
+    let m_atoms = if route.physical.wide_m_warp() { 4 } else { 2 };
+    let slab_floats = (spec.threads as usize) * m_atoms * 16;
+    let partial_floats = (grid as usize)
+        .checked_mul(SM120_TF32_STREAMK_SLOTS_PER_CTA)
+        .and_then(|slots| slots.checked_mul(slab_floats))
+        .ok_or_else(|| "SM120 stream-K slab extent overflows usize".to_string())?;
+    if partial_floats > SPLITK_SCRATCH_CAP {
+        return Err("SM120 stream-K slabs exceed the fixed workspace".into());
+    }
+    if (grid as usize) * SM120_TF32_STREAMK_SLOTS_PER_CTA > TF32_SPLITK_COUNTER_CAP {
+        return Err("SM120 stream-K flags exceed the fixed counter workspace".into());
+    }
+    let (partial, _) = kernels.splitk_scratch_buf(stream)?.device_ptr(stream);
+    let (flags, _) = kernels
+        .triad_kernels()
+        .tf32_splitk_counter_buf(stream)?
+        .device_ptr(stream);
+    Ok(Some(Sm120StreamKWorkspace { partial, flags }))
 }
 
 fn sm120_policy_dtype(dtype: WeightDtype) -> Result<PolicyDtype, String> {
@@ -7094,6 +7177,17 @@ pub(in crate::mamba_ssm::gpu) fn prepare_sm120_auto_graph_sequence<O: PhysicalLa
             .clone();
         let mut arguments = PhysicalScalarKernelArguments::new();
         arguments.push(prepared.operands.output_ptr)?;
+        let spec = prepared.route.kernel_spec()?;
+        if let Some(workspace) = sm120_streamk_workspace(
+            &ctx.stream,
+            &ctx.kernels,
+            prepared.route,
+            spec,
+            resolved.launch.grid_dim.0,
+        )? {
+            arguments.push(workspace.partial)?;
+            arguments.push(workspace.flags)?;
+        }
         arguments.push(prepared.maps.a)?;
         arguments.push(prepared.maps.b)?;
         arguments.push(prepared.operands.bias_ptr)?;

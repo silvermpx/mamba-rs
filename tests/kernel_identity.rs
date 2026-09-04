@@ -4,8 +4,8 @@ use mamba_rs::mamba_ssm::gpu::context::{BiGemmFamily, F32TriadPolicy};
 use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
 use mamba_rs::mamba_ssm::gpu::gemm_bi_triad::{
     SM120_SCHEDULE_REVISION, SM120_TENSOR_MAP_REVISION, SM120_TUNING_REVISION, Sm120Bk,
-    Sm120NumericContract, Sm120Op, Sm120PhysicalRoute, Sm120RouteIdentity, Sm120Shape, Sm120Stages,
-    Sm120TargetCandidate, Sm120Tile,
+    Sm120NumericContract, Sm120Op, Sm120PhysicalRoute, Sm120RouteIdentity, Sm120Schedule,
+    Sm120Shape, Sm120Stages, Sm120TargetCandidate, Sm120Tile,
 };
 use mamba_rs::mamba_ssm::gpu::kernel_identity::{
     ArtifactIdentity, ArtifactKind, BackendSet, CacheEnvelope, CompileKeyMaterial,
@@ -702,6 +702,7 @@ fn sm120_route_identity() -> Sm120RouteIdentity {
             tile: Sm120Tile::M128N64,
             bk: Sm120Bk::Bk64,
             stages: Sm120Stages::S3,
+            schedule: Sm120Schedule::Tiled,
         },
         shape: Sm120Shape {
             m: 257,
