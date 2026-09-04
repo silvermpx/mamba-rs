@@ -3921,3 +3921,46 @@ fn compiles_generic_sm120_triad_modules_with_exact_ptx_contract() {
         }
     }
 }
+
+/// Diagnostic: compiles the scalar module with the production options and
+/// writes the PTX under `MAMBA_RS_PTX_PROBE_DIR`, so repeated processes can
+/// compare their images byte for byte./// The scalar kernels load their register fragments from shared memory as
+/// explicit vectors. A scalar element loop (`regM[... + i] = As[... + i]`)
+/// left the merging to the compiler's vectoriser, which chose differently
+/// from one compile to the next and moved the module's artifact identity
+/// (two PTX images of `gemm_bi_nt_slim` under one compile key).
+#[test]
+fn scalar_fragment_loads_are_explicit_vectors() {
+    let source = include_str!("../kernels/gemm_bi_triad/scalar.cu");
+    let mut offenders = Vec::new();
+    for (index, line) in source.lines().enumerate() {
+        let body = line.trim_end_matches('\\').trim();
+        if (body.starts_with("regM") || body.starts_with("regN"))
+            && body.contains("] =")
+            && body.ends_with("+ i];")
+        {
+            offenders.push(index + 1);
+        }
+        if body.ends_with("+ i];") && !body.contains("gemm_bi_scalar_load_fragment") {
+            let previous = source
+                .lines()
+                .nth(index.saturating_sub(1))
+                .unwrap_or_default()
+                .trim();
+            if previous.contains("regM[")
+                || previous.contains("regN[")
+                || previous.contains("_next[")
+            {
+                offenders.push(index + 1);
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "scalar.cu loads register fragments element by element at lines {offenders:?}"
+    );
+    assert!(
+        source.matches("gemm_bi_scalar_load_fragment<").count() >= 40,
+        "the explicit fragment loader must serve every scalar kernel"
+    );
+}

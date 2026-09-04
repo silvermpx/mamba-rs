@@ -35,6 +35,42 @@
 #define GEMM_BI_SCALAR_SMEM_A_PAD 4
 #define GEMM_BI_SCALAR_SMEM_B_PAD 4
 
+// Loads a thread's fragment of consecutive floats from shared memory as
+// explicit 16-byte (or 8-byte) vectors. The scalar form left the merging of
+// eight neighbouring loads to the compiler's vectoriser, which chose
+// differently from one compile to the next and moved the module's artifact
+// identity; fixing the width at the source pins the instruction selection.
+// Every caller's base is a multiple of the vector width: the tile strides
+// carry a four-float pad and the per-thread offsets are multiples of the
+// fragment width.
+template <int Count>
+__device__ __forceinline__ void gemm_bi_scalar_load_fragment(float* out, const float* src) {
+    // The fragment loads are fixed PTX shared-memory vector loads rather
+    // than C++ vector types: given plain element or float4 loads, the NVRTC
+    // optimizer sometimes re-loads part of a fragment later (an extra v2
+    // load with a used-bytes pragma) and the decision differs from one
+    // compile to the next, which moves the module's artifact identity. An
+    // opaque asm value cannot be split or re-loaded, so the instruction
+    // stream is the same on every compile.
+    static_assert(Count == 2 || Count % 4 == 0, "fragment loads are two or four floats wide");
+    unsigned address = (unsigned)__cvta_generic_to_shared(src);
+    if constexpr (Count == 2) {
+        asm volatile("ld.shared.v2.f32 {%0, %1}, [%2];"
+                     : "=f"(out[0]), "=f"(out[1])
+                     : "r"(address)
+                     : "memory");
+    } else {
+#pragma unroll
+        for (int vector = 0; vector < Count / 4; ++vector) {
+            asm volatile("ld.shared.v4.f32 {%0, %1, %2, %3}, [%4];"
+                         : "=f"(out[vector * 4]), "=f"(out[vector * 4 + 1]),
+                           "=f"(out[vector * 4 + 2]), "=f"(out[vector * 4 + 3])
+                         : "r"(address + (unsigned)(vector * 16))
+                         : "memory");
+        }
+    }
+}
+
 // Derived constants
 #define GEMM_BI_SCALAR_NUM_WARPS (GEMM_BI_SCALAR_NUM_THREADS / GEMM_BI_SCALAR_WARP_SIZE)  // 8
 #define GEMM_BI_SCALAR_WMITER ((GEMM_BI_SCALAR_WM * GEMM_BI_SCALAR_WN) / (GEMM_BI_SCALAR_WARP_SIZE * GEMM_BI_SCALAR_TM * GEMM_BI_SCALAR_TN * GEMM_BI_SCALAR_WNITER))  // (64*32)/(32*8*8*1) = 2
@@ -388,36 +424,20 @@ void gemm_bi_nn(
         // Prime fragment 0.
         #pragma unroll
         for (int wSubRowIdx = 0; wSubRowIdx < GEMM_BI_SCALAR_WMITER; ++wSubRowIdx)
-            #pragma unroll
-            for (int i = 0; i < GEMM_BI_SCALAR_TM; ++i)
-                regM[wSubRowIdx * GEMM_BI_SCALAR_TM + i] =
-                    As_rd[0 * (GEMM_BI_SCALAR_BM + GEMM_BI_SCALAR_SMEM_A_PAD) + warpRow * GEMM_BI_SCALAR_WM + wSubRowIdx * GEMM_BI_SCALAR_WSUBM +
-                          threadRowInWarp * GEMM_BI_SCALAR_TM + i];
+            gemm_bi_scalar_load_fragment<GEMM_BI_SCALAR_TM>(&regM[wSubRowIdx * GEMM_BI_SCALAR_TM], &As_rd[0 * (GEMM_BI_SCALAR_BM + GEMM_BI_SCALAR_SMEM_A_PAD) + warpRow * GEMM_BI_SCALAR_WM + wSubRowIdx * GEMM_BI_SCALAR_WSUBM + threadRowInWarp * GEMM_BI_SCALAR_TM]);
         #pragma unroll
         for (int wSubColIdx = 0; wSubColIdx < GEMM_BI_SCALAR_WNITER; ++wSubColIdx)
-            #pragma unroll
-            for (int i = 0; i < GEMM_BI_SCALAR_TN; ++i)
-                regN[wSubColIdx * GEMM_BI_SCALAR_TN + i] =
-                    Bs_rd[0 * (GEMM_BI_SCALAR_BN + GEMM_BI_SCALAR_SMEM_B_PAD) + warpCol * GEMM_BI_SCALAR_WN + wSubColIdx * GEMM_BI_SCALAR_WSUBN +
-                          threadColInWarp * GEMM_BI_SCALAR_TN + i];
+            gemm_bi_scalar_load_fragment<GEMM_BI_SCALAR_TN>(&regN[wSubColIdx * GEMM_BI_SCALAR_TN], &Bs_rd[0 * (GEMM_BI_SCALAR_BN + GEMM_BI_SCALAR_SMEM_B_PAD) + warpCol * GEMM_BI_SCALAR_WN + wSubColIdx * GEMM_BI_SCALAR_WSUBN + threadColInWarp * GEMM_BI_SCALAR_TN]);
 
         for (int dotIdx = 0; dotIdx < GEMM_BI_SCALAR_BK; ++dotIdx) {
             // Prefetch fragment dotIdx+1 into *_next while we FMA on *_curr.
             if (dotIdx + 1 < GEMM_BI_SCALAR_BK) {
                 #pragma unroll
                 for (int wSubRowIdx = 0; wSubRowIdx < GEMM_BI_SCALAR_WMITER; ++wSubRowIdx)
-                    #pragma unroll
-                    for (int i = 0; i < GEMM_BI_SCALAR_TM; ++i)
-                        regM_next[wSubRowIdx * GEMM_BI_SCALAR_TM + i] =
-                            As_rd[(dotIdx + 1) * (GEMM_BI_SCALAR_BM + GEMM_BI_SCALAR_SMEM_A_PAD) + warpRow * GEMM_BI_SCALAR_WM +
-                                  wSubRowIdx * GEMM_BI_SCALAR_WSUBM + threadRowInWarp * GEMM_BI_SCALAR_TM + i];
+                    gemm_bi_scalar_load_fragment<GEMM_BI_SCALAR_TM>(&regM_next[wSubRowIdx * GEMM_BI_SCALAR_TM], &As_rd[(dotIdx + 1) * (GEMM_BI_SCALAR_BM + GEMM_BI_SCALAR_SMEM_A_PAD) + warpRow * GEMM_BI_SCALAR_WM + wSubRowIdx * GEMM_BI_SCALAR_WSUBM + threadRowInWarp * GEMM_BI_SCALAR_TM]);
                 #pragma unroll
                 for (int wSubColIdx = 0; wSubColIdx < GEMM_BI_SCALAR_WNITER; ++wSubColIdx)
-                    #pragma unroll
-                    for (int i = 0; i < GEMM_BI_SCALAR_TN; ++i)
-                        regN_next[wSubColIdx * GEMM_BI_SCALAR_TN + i] =
-                            Bs_rd[(dotIdx + 1) * (GEMM_BI_SCALAR_BN + GEMM_BI_SCALAR_SMEM_B_PAD) + warpCol * GEMM_BI_SCALAR_WN +
-                                  wSubColIdx * GEMM_BI_SCALAR_WSUBN + threadColInWarp * GEMM_BI_SCALAR_TN + i];
+                    gemm_bi_scalar_load_fragment<GEMM_BI_SCALAR_TN>(&regN_next[wSubColIdx * GEMM_BI_SCALAR_TN], &Bs_rd[(dotIdx + 1) * (GEMM_BI_SCALAR_BN + GEMM_BI_SCALAR_SMEM_B_PAD) + warpCol * GEMM_BI_SCALAR_WN + wSubColIdx * GEMM_BI_SCALAR_WSUBN + threadColInWarp * GEMM_BI_SCALAR_TN]);
             }
             // FMAs on current fragment — IDENTICAL order to single-buffer.
             #pragma unroll
@@ -692,28 +712,20 @@ __device__ __forceinline__ void gemm_bi_tn_impl(
         float regN_next[GEMM_BI_SCALAR_WNITER * GEMM_BI_SCALAR_TN];
         #pragma unroll
         for (int wSubRowIdx = 0; wSubRowIdx < GEMM_BI_SCALAR_WMITER; ++wSubRowIdx)
-            #pragma unroll
-            for (int i = 0; i < GEMM_BI_SCALAR_TM; ++i)
-                regM[wSubRowIdx * GEMM_BI_SCALAR_TM + i] = As_rd[0 * (GEMM_BI_SCALAR_BM + GEMM_BI_SCALAR_SMEM_A_PAD) + warpRow * GEMM_BI_SCALAR_WM + wSubRowIdx * GEMM_BI_SCALAR_WSUBM + threadRowInWarp * GEMM_BI_SCALAR_TM + i];
+            gemm_bi_scalar_load_fragment<GEMM_BI_SCALAR_TM>(&regM[wSubRowIdx * GEMM_BI_SCALAR_TM], &As_rd[0 * (GEMM_BI_SCALAR_BM + GEMM_BI_SCALAR_SMEM_A_PAD) + warpRow * GEMM_BI_SCALAR_WM + wSubRowIdx * GEMM_BI_SCALAR_WSUBM + threadRowInWarp * GEMM_BI_SCALAR_TM]);
         #pragma unroll
         for (int wSubColIdx = 0; wSubColIdx < GEMM_BI_SCALAR_WNITER; ++wSubColIdx)
-            #pragma unroll
-            for (int i = 0; i < GEMM_BI_SCALAR_TN; ++i)
-                regN[wSubColIdx * GEMM_BI_SCALAR_TN + i] = Bs_rd[0 * (GEMM_BI_SCALAR_BN + GEMM_BI_SCALAR_SMEM_B_PAD) + warpCol * GEMM_BI_SCALAR_WN + wSubColIdx * GEMM_BI_SCALAR_WSUBN + threadColInWarp * GEMM_BI_SCALAR_TN + i];
+            gemm_bi_scalar_load_fragment<GEMM_BI_SCALAR_TN>(&regN[wSubColIdx * GEMM_BI_SCALAR_TN], &Bs_rd[0 * (GEMM_BI_SCALAR_BN + GEMM_BI_SCALAR_SMEM_B_PAD) + warpCol * GEMM_BI_SCALAR_WN + wSubColIdx * GEMM_BI_SCALAR_WSUBN + threadColInWarp * GEMM_BI_SCALAR_TN]);
 
         #pragma unroll 16
         for (int dotIdx = 0; dotIdx < GEMM_BI_SCALAR_BK; ++dotIdx) {
             if (dotIdx + 1 < GEMM_BI_SCALAR_BK) {
                 #pragma unroll
                 for (int wSubRowIdx = 0; wSubRowIdx < GEMM_BI_SCALAR_WMITER; ++wSubRowIdx)
-                    #pragma unroll
-                    for (int i = 0; i < GEMM_BI_SCALAR_TM; ++i)
-                        regM_next[wSubRowIdx * GEMM_BI_SCALAR_TM + i] = As_rd[(dotIdx + 1) * (GEMM_BI_SCALAR_BM + GEMM_BI_SCALAR_SMEM_A_PAD) + warpRow * GEMM_BI_SCALAR_WM + wSubRowIdx * GEMM_BI_SCALAR_WSUBM + threadRowInWarp * GEMM_BI_SCALAR_TM + i];
+                    gemm_bi_scalar_load_fragment<GEMM_BI_SCALAR_TM>(&regM_next[wSubRowIdx * GEMM_BI_SCALAR_TM], &As_rd[(dotIdx + 1) * (GEMM_BI_SCALAR_BM + GEMM_BI_SCALAR_SMEM_A_PAD) + warpRow * GEMM_BI_SCALAR_WM + wSubRowIdx * GEMM_BI_SCALAR_WSUBM + threadRowInWarp * GEMM_BI_SCALAR_TM]);
                 #pragma unroll
                 for (int wSubColIdx = 0; wSubColIdx < GEMM_BI_SCALAR_WNITER; ++wSubColIdx)
-                    #pragma unroll
-                    for (int i = 0; i < GEMM_BI_SCALAR_TN; ++i)
-                        regN_next[wSubColIdx * GEMM_BI_SCALAR_TN + i] = Bs_rd[(dotIdx + 1) * (GEMM_BI_SCALAR_BN + GEMM_BI_SCALAR_SMEM_B_PAD) + warpCol * GEMM_BI_SCALAR_WN + wSubColIdx * GEMM_BI_SCALAR_WSUBN + threadColInWarp * GEMM_BI_SCALAR_TN + i];
+                    gemm_bi_scalar_load_fragment<GEMM_BI_SCALAR_TN>(&regN_next[wSubColIdx * GEMM_BI_SCALAR_TN], &Bs_rd[(dotIdx + 1) * (GEMM_BI_SCALAR_BN + GEMM_BI_SCALAR_SMEM_B_PAD) + warpCol * GEMM_BI_SCALAR_WN + wSubColIdx * GEMM_BI_SCALAR_WSUBN + threadColInWarp * GEMM_BI_SCALAR_TN]);
             }
             // explicit __fmaf_rn for bit-exact
             // match with CPU `_mm256_fmadd_ps`. gemm_bi_tn (GEMM_BI_SCALAR_TN GEMM, K-pipelined).
@@ -983,22 +995,10 @@ __device__ __forceinline__ void gemm_bi_tn_splitm_partial_impl(
         for (int dotIdx = 0; dotIdx < GEMM_BI_SCALAR_BK; ++dotIdx) {
             #pragma unroll
             for (int wSubRowIdx = 0; wSubRowIdx < GEMM_BI_SCALAR_WMITER; ++wSubRowIdx)
-                #pragma unroll
-                for (int i = 0; i < GEMM_BI_SCALAR_TM; ++i)
-                    regM[wSubRowIdx * GEMM_BI_SCALAR_TM + i] =
-                        As_read[dotIdx * (GEMM_BI_SCALAR_BM + GEMM_BI_SCALAR_SMEM_A_PAD)
-                            + warpRow * GEMM_BI_SCALAR_WM
-                            + wSubRowIdx * GEMM_BI_SCALAR_WSUBM
-                            + threadRowInWarp * GEMM_BI_SCALAR_TM + i];
+                gemm_bi_scalar_load_fragment<GEMM_BI_SCALAR_TM>(&regM[wSubRowIdx * GEMM_BI_SCALAR_TM], &As_read[dotIdx * (GEMM_BI_SCALAR_BM + GEMM_BI_SCALAR_SMEM_A_PAD) + warpRow * GEMM_BI_SCALAR_WM + wSubRowIdx * GEMM_BI_SCALAR_WSUBM + threadRowInWarp * GEMM_BI_SCALAR_TM]);
             #pragma unroll
             for (int wSubColIdx = 0; wSubColIdx < GEMM_BI_SCALAR_WNITER; ++wSubColIdx)
-                #pragma unroll
-                for (int i = 0; i < GEMM_BI_SCALAR_TN; ++i)
-                    regN[wSubColIdx * GEMM_BI_SCALAR_TN + i] =
-                        Bs_read[dotIdx * (GEMM_BI_SCALAR_BN + GEMM_BI_SCALAR_SMEM_B_PAD)
-                            + warpCol * GEMM_BI_SCALAR_WN
-                            + wSubColIdx * GEMM_BI_SCALAR_WSUBN
-                            + threadColInWarp * GEMM_BI_SCALAR_TN + i];
+                gemm_bi_scalar_load_fragment<GEMM_BI_SCALAR_TN>(&regN[wSubColIdx * GEMM_BI_SCALAR_TN], &Bs_read[dotIdx * (GEMM_BI_SCALAR_BN + GEMM_BI_SCALAR_SMEM_B_PAD) + warpCol * GEMM_BI_SCALAR_WN + wSubColIdx * GEMM_BI_SCALAR_WSUBN + threadColInWarp * GEMM_BI_SCALAR_TN]);
 
             #pragma unroll
             for (int wSubRowIdx = 0; wSubRowIdx < GEMM_BI_SCALAR_WMITER; ++wSubRowIdx)
@@ -1292,24 +1292,16 @@ void gemm_bi_nt(
         float regN_next[GEMM_BI_SCALAR_WNITER * GEMM_BI_SCALAR_TN];
         #pragma unroll
         for (int wSubRowIdx = 0; wSubRowIdx < GEMM_BI_SCALAR_WMITER; ++wSubRowIdx)
-            #pragma unroll
-            for (int i = 0; i < GEMM_BI_SCALAR_TM; ++i)
-                regM[wSubRowIdx * GEMM_BI_SCALAR_TM + i] = As_rd[0 * (GEMM_BI_SCALAR_BM + GEMM_BI_SCALAR_SMEM_A_PAD) + warpRow * GEMM_BI_SCALAR_WM + wSubRowIdx * GEMM_BI_SCALAR_WSUBM + threadRowInWarp * GEMM_BI_SCALAR_TM + i];
+            gemm_bi_scalar_load_fragment<GEMM_BI_SCALAR_TM>(&regM[wSubRowIdx * GEMM_BI_SCALAR_TM], &As_rd[0 * (GEMM_BI_SCALAR_BM + GEMM_BI_SCALAR_SMEM_A_PAD) + warpRow * GEMM_BI_SCALAR_WM + wSubRowIdx * GEMM_BI_SCALAR_WSUBM + threadRowInWarp * GEMM_BI_SCALAR_TM]);
         #pragma unroll
         for (int wSubColIdx = 0; wSubColIdx < GEMM_BI_SCALAR_WNITER; ++wSubColIdx)
-            #pragma unroll
-            for (int i = 0; i < GEMM_BI_SCALAR_TN; ++i)
-                regN[wSubColIdx * GEMM_BI_SCALAR_TN + i] = Bcompute[BCOMPUTE_OFFSET_NT(
-                    0, warpCol * GEMM_BI_SCALAR_WN + wSubColIdx * GEMM_BI_SCALAR_WSUBN
-                        + threadColInWarp * GEMM_BI_SCALAR_TN + i)];
+            gemm_bi_scalar_load_fragment<GEMM_BI_SCALAR_TN>(&regN[wSubColIdx * GEMM_BI_SCALAR_TN], &Bcompute[BCOMPUTE_OFFSET_NT( 0, warpCol * GEMM_BI_SCALAR_WN + wSubColIdx * GEMM_BI_SCALAR_WSUBN + threadColInWarp * GEMM_BI_SCALAR_TN)]);
 
         for (int dotIdx = 0; dotIdx < GEMM_BI_SCALAR_BK; ++dotIdx) {
             if (dotIdx + 1 < GEMM_BI_SCALAR_BK) {
                 #pragma unroll
                 for (int wSubRowIdx = 0; wSubRowIdx < GEMM_BI_SCALAR_WMITER; ++wSubRowIdx)
-                    #pragma unroll
-                    for (int i = 0; i < GEMM_BI_SCALAR_TM; ++i)
-                        regM_next[wSubRowIdx * GEMM_BI_SCALAR_TM + i] = As_rd[(dotIdx + 1) * (GEMM_BI_SCALAR_BM + GEMM_BI_SCALAR_SMEM_A_PAD) + warpRow * GEMM_BI_SCALAR_WM + wSubRowIdx * GEMM_BI_SCALAR_WSUBM + threadRowInWarp * GEMM_BI_SCALAR_TM + i];
+                    gemm_bi_scalar_load_fragment<GEMM_BI_SCALAR_TM>(&regM_next[wSubRowIdx * GEMM_BI_SCALAR_TM], &As_rd[(dotIdx + 1) * (GEMM_BI_SCALAR_BM + GEMM_BI_SCALAR_SMEM_A_PAD) + warpRow * GEMM_BI_SCALAR_WM + wSubRowIdx * GEMM_BI_SCALAR_WSUBM + threadRowInWarp * GEMM_BI_SCALAR_TM]);
                 #pragma unroll
                 for (int wSubColIdx = 0; wSubColIdx < GEMM_BI_SCALAR_WNITER; ++wSubColIdx)
                     #pragma unroll
@@ -1583,19 +1575,11 @@ void gemm_bi_nn_slim(
         for (int dotIdx = 0; dotIdx < GEMM_BI_SCALAR_BK; ++dotIdx) {
             // Load A column into registers (transposed smem = contiguous)
             for (int wSubRowIdx = 0; wSubRowIdx < GEMM_BI_SCALAR_WMITER; ++wSubRowIdx) {
-                for (int i = 0; i < GEMM_BI_SCALAR_TM; ++i) {
-                    regM[wSubRowIdx * GEMM_BI_SCALAR_TM + i] =
-                        As[dotIdx * (GEMM_BI_SCALAR_BM + GEMM_BI_SCALAR_SMEM_A_PAD) + warpRow * GEMM_BI_SCALAR_WM + wSubRowIdx * GEMM_BI_SCALAR_WSUBM +
-                           threadRowInWarp * GEMM_BI_SCALAR_TM + i];
-                }
+                gemm_bi_scalar_load_fragment<GEMM_BI_SCALAR_TM>(&regM[wSubRowIdx * GEMM_BI_SCALAR_TM], &As[dotIdx * (GEMM_BI_SCALAR_BM + GEMM_BI_SCALAR_SMEM_A_PAD) + warpRow * GEMM_BI_SCALAR_WM + wSubRowIdx * GEMM_BI_SCALAR_WSUBM + threadRowInWarp * GEMM_BI_SCALAR_TM]);
             }
             // Load B row into registers
             for (int wSubColIdx = 0; wSubColIdx < GEMM_BI_SCALAR_WNITER; ++wSubColIdx) {
-                for (int i = 0; i < GEMM_BI_SCALAR_TN; ++i) {
-                    regN[wSubColIdx * GEMM_BI_SCALAR_TN + i] =
-                        Bs[dotIdx * (GEMM_BI_SCALAR_BN + GEMM_BI_SCALAR_SMEM_B_PAD) + warpCol * GEMM_BI_SCALAR_WN + wSubColIdx * GEMM_BI_SCALAR_WSUBN +
-                           threadColInWarp * GEMM_BI_SCALAR_TN + i];
-                }
+                gemm_bi_scalar_load_fragment<GEMM_BI_SCALAR_TN>(&regN[wSubColIdx * GEMM_BI_SCALAR_TN], &Bs[dotIdx * (GEMM_BI_SCALAR_BN + GEMM_BI_SCALAR_SMEM_B_PAD) + warpCol * GEMM_BI_SCALAR_WN + wSubColIdx * GEMM_BI_SCALAR_WSUBN + threadColInWarp * GEMM_BI_SCALAR_TN]);
             }
             // Outer product: 256 FMA
             for (int wSubRowIdx = 0; wSubRowIdx < GEMM_BI_SCALAR_WMITER; ++wSubRowIdx) {
@@ -1820,18 +1804,10 @@ void gemm_bi_nn_splitk_slim_partial(
         // Compute: same warptile matmul as Slim NN — identical FMA order.
         for (int dotIdx = 0; dotIdx < GEMM_BI_SCALAR_BK; ++dotIdx) {
             for (int wSubRowIdx = 0; wSubRowIdx < GEMM_BI_SCALAR_WMITER; ++wSubRowIdx) {
-                for (int i = 0; i < GEMM_BI_SCALAR_TM; ++i) {
-                    regM[wSubRowIdx * GEMM_BI_SCALAR_TM + i] =
-                        As[dotIdx * (GEMM_BI_SCALAR_BM + GEMM_BI_SCALAR_SMEM_A_PAD) + warpRow * GEMM_BI_SCALAR_WM + wSubRowIdx * GEMM_BI_SCALAR_WSUBM +
-                           threadRowInWarp * GEMM_BI_SCALAR_TM + i];
-                }
+                gemm_bi_scalar_load_fragment<GEMM_BI_SCALAR_TM>(&regM[wSubRowIdx * GEMM_BI_SCALAR_TM], &As[dotIdx * (GEMM_BI_SCALAR_BM + GEMM_BI_SCALAR_SMEM_A_PAD) + warpRow * GEMM_BI_SCALAR_WM + wSubRowIdx * GEMM_BI_SCALAR_WSUBM + threadRowInWarp * GEMM_BI_SCALAR_TM]);
             }
             for (int wSubColIdx = 0; wSubColIdx < GEMM_BI_SCALAR_WNITER; ++wSubColIdx) {
-                for (int i = 0; i < GEMM_BI_SCALAR_TN; ++i) {
-                    regN[wSubColIdx * GEMM_BI_SCALAR_TN + i] =
-                        Bs[dotIdx * (GEMM_BI_SCALAR_BN + GEMM_BI_SCALAR_SMEM_B_PAD) + warpCol * GEMM_BI_SCALAR_WN + wSubColIdx * GEMM_BI_SCALAR_WSUBN +
-                           threadColInWarp * GEMM_BI_SCALAR_TN + i];
-                }
+                gemm_bi_scalar_load_fragment<GEMM_BI_SCALAR_TN>(&regN[wSubColIdx * GEMM_BI_SCALAR_TN], &Bs[dotIdx * (GEMM_BI_SCALAR_BN + GEMM_BI_SCALAR_SMEM_B_PAD) + warpCol * GEMM_BI_SCALAR_WN + wSubColIdx * GEMM_BI_SCALAR_WSUBN + threadColInWarp * GEMM_BI_SCALAR_TN]);
             }
             for (int wSubRowIdx = 0; wSubRowIdx < GEMM_BI_SCALAR_WMITER; ++wSubRowIdx) {
                 for (int wSubColIdx = 0; wSubColIdx < GEMM_BI_SCALAR_WNITER; ++wSubColIdx) {
@@ -2034,11 +2010,9 @@ void gemm_bi_tn_slim(
 
         for (int dotIdx = 0; dotIdx < GEMM_BI_SCALAR_BK; ++dotIdx) {
             for (int wSubRowIdx = 0; wSubRowIdx < GEMM_BI_SCALAR_WMITER; ++wSubRowIdx)
-                for (int i = 0; i < GEMM_BI_SCALAR_TM; ++i)
-                    regM[wSubRowIdx * GEMM_BI_SCALAR_TM + i] = As[dotIdx * (GEMM_BI_SCALAR_BM + GEMM_BI_SCALAR_SMEM_A_PAD) + warpRow * GEMM_BI_SCALAR_WM + wSubRowIdx * GEMM_BI_SCALAR_WSUBM + threadRowInWarp * GEMM_BI_SCALAR_TM + i];
+                gemm_bi_scalar_load_fragment<GEMM_BI_SCALAR_TM>(&regM[wSubRowIdx * GEMM_BI_SCALAR_TM], &As[dotIdx * (GEMM_BI_SCALAR_BM + GEMM_BI_SCALAR_SMEM_A_PAD) + warpRow * GEMM_BI_SCALAR_WM + wSubRowIdx * GEMM_BI_SCALAR_WSUBM + threadRowInWarp * GEMM_BI_SCALAR_TM]);
             for (int wSubColIdx = 0; wSubColIdx < GEMM_BI_SCALAR_WNITER; ++wSubColIdx)
-                for (int i = 0; i < GEMM_BI_SCALAR_TN; ++i)
-                    regN[wSubColIdx * GEMM_BI_SCALAR_TN + i] = Bs[dotIdx * (GEMM_BI_SCALAR_BN + GEMM_BI_SCALAR_SMEM_B_PAD) + warpCol * GEMM_BI_SCALAR_WN + wSubColIdx * GEMM_BI_SCALAR_WSUBN + threadColInWarp * GEMM_BI_SCALAR_TN + i];
+                gemm_bi_scalar_load_fragment<GEMM_BI_SCALAR_TN>(&regN[wSubColIdx * GEMM_BI_SCALAR_TN], &Bs[dotIdx * (GEMM_BI_SCALAR_BN + GEMM_BI_SCALAR_SMEM_B_PAD) + warpCol * GEMM_BI_SCALAR_WN + wSubColIdx * GEMM_BI_SCALAR_WSUBN + threadColInWarp * GEMM_BI_SCALAR_TN]);
             // explicit __fmaf_rn for bit-exact
             // match with CPU `_mm256_fmadd_ps`. This matches the sibling kernels
             // (RoPE backward FMA pin).
@@ -2242,11 +2216,9 @@ void gemm_bi_nt_slim(
 
             for (int dotIdx = 0; dotIdx < GEMM_BI_SCALAR_BK; ++dotIdx) {
                 for (int wSubRowIdx = 0; wSubRowIdx < GEMM_BI_SCALAR_WMITER; ++wSubRowIdx)
-                    for (int i = 0; i < GEMM_BI_SCALAR_TM; ++i)
-                        regM[wSubRowIdx * GEMM_BI_SCALAR_TM + i] = As[dotIdx * (GEMM_BI_SCALAR_BM + GEMM_BI_SCALAR_SMEM_A_PAD) + warpRow * GEMM_BI_SCALAR_WM + wSubRowIdx * GEMM_BI_SCALAR_WSUBM + threadRowInWarp * GEMM_BI_SCALAR_TM + i];
+                    gemm_bi_scalar_load_fragment<GEMM_BI_SCALAR_TM>(&regM[wSubRowIdx * GEMM_BI_SCALAR_TM], &As[dotIdx * (GEMM_BI_SCALAR_BM + GEMM_BI_SCALAR_SMEM_A_PAD) + warpRow * GEMM_BI_SCALAR_WM + wSubRowIdx * GEMM_BI_SCALAR_WSUBM + threadRowInWarp * GEMM_BI_SCALAR_TM]);
                 for (int wSubColIdx = 0; wSubColIdx < GEMM_BI_SCALAR_WNITER; ++wSubColIdx)
-                    for (int i = 0; i < GEMM_BI_SCALAR_TN; ++i)
-                        regN[wSubColIdx * GEMM_BI_SCALAR_TN + i] = Bcompute[dotIdx * (GEMM_BI_SCALAR_BN + GEMM_BI_SCALAR_SMEM_B_PAD) + warpCol * GEMM_BI_SCALAR_WN + wSubColIdx * GEMM_BI_SCALAR_WSUBN + threadColInWarp * GEMM_BI_SCALAR_TN + i];
+                    gemm_bi_scalar_load_fragment<GEMM_BI_SCALAR_TN>(&regN[wSubColIdx * GEMM_BI_SCALAR_TN], &Bcompute[dotIdx * (GEMM_BI_SCALAR_BN + GEMM_BI_SCALAR_SMEM_B_PAD) + warpCol * GEMM_BI_SCALAR_WN + wSubColIdx * GEMM_BI_SCALAR_WSUBN + threadColInWarp * GEMM_BI_SCALAR_TN]);
                 // Keep the qualified NT Slim operation order exactly: one
                 // round-to-nearest FFMA update per dotIdx for every output.
                 for (int wSubRowIdx = 0; wSubRowIdx < GEMM_BI_SCALAR_WMITER; ++wSubRowIdx)
@@ -2732,12 +2704,8 @@ void gemm_bi_nn_narrow(
 
         // Compute.
         for (int dotIdx = 0; dotIdx < GEMM_BI_NARROW_BK; ++dotIdx) {
-            for (int i = 0; i < GEMM_BI_NARROW_TM; ++i) {
-                regM[i] = As[dotIdx * (GEMM_BI_NARROW_BM + GEMM_BI_SCALAR_SMEM_A_PAD) + warpRow * GEMM_BI_NARROW_WM + threadRowInWarp * GEMM_BI_NARROW_TM + i];
-            }
-            for (int i = 0; i < GEMM_BI_NARROW_TN; ++i) {
-                regN[i] = Bs[dotIdx * (GEMM_BI_NARROW_BN + GEMM_BI_SCALAR_SMEM_B_PAD) + warpCol * GEMM_BI_NARROW_WN + threadColInWarp * GEMM_BI_NARROW_TN + i];
-            }
+            gemm_bi_scalar_load_fragment<GEMM_BI_NARROW_TM>(&regM[0], &As[dotIdx * (GEMM_BI_NARROW_BM + GEMM_BI_SCALAR_SMEM_A_PAD) + warpRow * GEMM_BI_NARROW_WM + threadRowInWarp * GEMM_BI_NARROW_TM]);
+            gemm_bi_scalar_load_fragment<GEMM_BI_NARROW_TN>(&regN[0], &Bs[dotIdx * (GEMM_BI_NARROW_BN + GEMM_BI_SCALAR_SMEM_B_PAD) + warpCol * GEMM_BI_NARROW_WN + threadColInWarp * GEMM_BI_NARROW_TN]);
             // explicit __fmaf_rn for bit-exact
             // match with CPU `_mm256_fmadd_ps`. gemm_bi_nn_narrow.
             for (int resIdxM = 0; resIdxM < GEMM_BI_NARROW_TM; ++resIdxM) {
@@ -2950,12 +2918,8 @@ void gemm_bi_nn_narrow_small(
         // Compute. Identical per-output ascending K __fmaf_rn chain as
         // gemm_bi_nn_narrow — bit-exact f32 output regardless of tile size.
         for (int dotIdx = 0; dotIdx < GEMM_BI_NARROW_SMALL_BK; ++dotIdx) {
-            for (int i = 0; i < GEMM_BI_NARROW_SMALL_TM; ++i) {
-                regM[i] = As[dotIdx * (GEMM_BI_NARROW_SMALL_BM + GEMM_BI_SCALAR_SMEM_A_PAD) + warpRow * GEMM_BI_NARROW_SMALL_WM + threadRowInWarp * GEMM_BI_NARROW_SMALL_TM + i];
-            }
-            for (int i = 0; i < GEMM_BI_NARROW_SMALL_TN; ++i) {
-                regN[i] = Bs[dotIdx * (GEMM_BI_NARROW_SMALL_BN + GEMM_BI_SCALAR_SMEM_B_PAD) + warpCol * GEMM_BI_NARROW_SMALL_WN + threadColInWarp * GEMM_BI_NARROW_SMALL_TN + i];
-            }
+            gemm_bi_scalar_load_fragment<GEMM_BI_NARROW_SMALL_TM>(&regM[0], &As[dotIdx * (GEMM_BI_NARROW_SMALL_BM + GEMM_BI_SCALAR_SMEM_A_PAD) + warpRow * GEMM_BI_NARROW_SMALL_WM + threadRowInWarp * GEMM_BI_NARROW_SMALL_TM]);
+            gemm_bi_scalar_load_fragment<GEMM_BI_NARROW_SMALL_TN>(&regN[0], &Bs[dotIdx * (GEMM_BI_NARROW_SMALL_BN + GEMM_BI_SCALAR_SMEM_B_PAD) + warpCol * GEMM_BI_NARROW_SMALL_WN + threadColInWarp * GEMM_BI_NARROW_SMALL_TN]);
             // explicit __fmaf_rn for bit-exact match with CPU
             // `f32::mul_add` ascending K — same chain as gemm_bi_nn_narrow.
             for (int resIdxM = 0; resIdxM < GEMM_BI_NARROW_SMALL_TM; ++resIdxM) {
@@ -3322,12 +3286,8 @@ void gemm_bi_tn_narrow(
         __syncthreads();
 
         for (int dotIdx = 0; dotIdx < GEMM_BI_NARROW_BK; ++dotIdx) {
-            for (int i = 0; i < GEMM_BI_NARROW_TM; ++i) {
-                regM[i] = As[dotIdx * (GEMM_BI_NARROW_BM + GEMM_BI_SCALAR_SMEM_A_PAD) + warpRow * GEMM_BI_NARROW_WM + threadRowInWarp * GEMM_BI_NARROW_TM + i];
-            }
-            for (int i = 0; i < GEMM_BI_NARROW_TN; ++i) {
-                regN[i] = Bs[dotIdx * (GEMM_BI_NARROW_BN + GEMM_BI_SCALAR_SMEM_B_PAD) + warpCol * GEMM_BI_NARROW_WN + threadColInWarp * GEMM_BI_NARROW_TN + i];
-            }
+            gemm_bi_scalar_load_fragment<GEMM_BI_NARROW_TM>(&regM[0], &As[dotIdx * (GEMM_BI_NARROW_BM + GEMM_BI_SCALAR_SMEM_A_PAD) + warpRow * GEMM_BI_NARROW_WM + threadRowInWarp * GEMM_BI_NARROW_TM]);
+            gemm_bi_scalar_load_fragment<GEMM_BI_NARROW_TN>(&regN[0], &Bs[dotIdx * (GEMM_BI_NARROW_BN + GEMM_BI_SCALAR_SMEM_B_PAD) + warpCol * GEMM_BI_NARROW_WN + threadColInWarp * GEMM_BI_NARROW_TN]);
             for (int rm = 0; rm < GEMM_BI_NARROW_TM; ++rm) {
                 for (int rn = 0; rn < GEMM_BI_NARROW_TN; ++rn) {
                     // explicit __fmaf_rn for
@@ -3474,12 +3434,8 @@ void gemm_bi_nt_narrow(
         __syncthreads();
 
         for (int dotIdx = 0; dotIdx < GEMM_BI_NARROW_BK; ++dotIdx) {
-            for (int i = 0; i < GEMM_BI_NARROW_TM; ++i) {
-                regM[i] = As[dotIdx * (GEMM_BI_NARROW_BM + GEMM_BI_SCALAR_SMEM_A_PAD) + warpRow * GEMM_BI_NARROW_WM + threadRowInWarp * GEMM_BI_NARROW_TM + i];
-            }
-            for (int i = 0; i < GEMM_BI_NARROW_TN; ++i) {
-                regN[i] = Bs[dotIdx * (GEMM_BI_NARROW_BN + GEMM_BI_SCALAR_SMEM_B_PAD) + warpCol * GEMM_BI_NARROW_WN + threadColInWarp * GEMM_BI_NARROW_TN + i];
-            }
+            gemm_bi_scalar_load_fragment<GEMM_BI_NARROW_TM>(&regM[0], &As[dotIdx * (GEMM_BI_NARROW_BM + GEMM_BI_SCALAR_SMEM_A_PAD) + warpRow * GEMM_BI_NARROW_WM + threadRowInWarp * GEMM_BI_NARROW_TM]);
+            gemm_bi_scalar_load_fragment<GEMM_BI_NARROW_TN>(&regN[0], &Bs[dotIdx * (GEMM_BI_NARROW_BN + GEMM_BI_SCALAR_SMEM_B_PAD) + warpCol * GEMM_BI_NARROW_WN + threadColInWarp * GEMM_BI_NARROW_TN]);
             for (int rm = 0; rm < GEMM_BI_NARROW_TM; ++rm) {
                 for (int rn = 0; rn < GEMM_BI_NARROW_TN; ++rn) {
                     // explicit __fmaf_rn for
@@ -3665,24 +3621,16 @@ void gemm_bi_nn_splitk32_partial(
     __syncthreads();
 
     // Register double-buffer: prefetch dotIdx=0 into buf=0.
-    #pragma unroll
-    for (int i = 0; i < GEMM_BI_SPLITK32_TM; ++i)
-        regM[0][i] = As[0 * (GEMM_BI_SPLITK32_BM + GEMM_BI_SCALAR_SMEM_A_PAD) + warpRow * GEMM_BI_SPLITK32_WM + threadRowInWarp * GEMM_BI_SPLITK32_TM + i];
-    #pragma unroll
-    for (int i = 0; i < GEMM_BI_SPLITK32_TN; ++i)
-        regN[0][i] = Bs[0 * (GEMM_BI_SPLITK32_BN + GEMM_BI_SCALAR_SMEM_B_PAD) + warpCol * GEMM_BI_SPLITK32_WN + threadColInWarp * GEMM_BI_SPLITK32_TN + i];
+    gemm_bi_scalar_load_fragment<GEMM_BI_SPLITK32_TM>(&regM[0][0], &As[0 * (GEMM_BI_SPLITK32_BM + GEMM_BI_SCALAR_SMEM_A_PAD) + warpRow * GEMM_BI_SPLITK32_WM + threadRowInWarp * GEMM_BI_SPLITK32_TM]);
+    gemm_bi_scalar_load_fragment<GEMM_BI_SPLITK32_TN>(&regN[0][0], &Bs[0 * (GEMM_BI_SPLITK32_BN + GEMM_BI_SCALAR_SMEM_B_PAD) + warpCol * GEMM_BI_SPLITK32_WN + threadColInWarp * GEMM_BI_SPLITK32_TN]);
     for (int dotIdx = 0; dotIdx < GEMM_BI_SPLITK32_BK; ++dotIdx) {
         int cur = dotIdx & 1;
         int nxt = cur ^ 1;
         // Prefetch next iteration's fragments (skip on last iter).
         if (dotIdx + 1 < GEMM_BI_SPLITK32_BK) {
             int next_k = dotIdx + 1;
-            #pragma unroll
-            for (int i = 0; i < GEMM_BI_SPLITK32_TM; ++i)
-                regM[nxt][i] = As[next_k * (GEMM_BI_SPLITK32_BM + GEMM_BI_SCALAR_SMEM_A_PAD) + warpRow * GEMM_BI_SPLITK32_WM + threadRowInWarp * GEMM_BI_SPLITK32_TM + i];
-            #pragma unroll
-            for (int i = 0; i < GEMM_BI_SPLITK32_TN; ++i)
-                regN[nxt][i] = Bs[next_k * (GEMM_BI_SPLITK32_BN + GEMM_BI_SCALAR_SMEM_B_PAD) + warpCol * GEMM_BI_SPLITK32_WN + threadColInWarp * GEMM_BI_SPLITK32_TN + i];
+            gemm_bi_scalar_load_fragment<GEMM_BI_SPLITK32_TM>(&regM[nxt][0], &As[next_k * (GEMM_BI_SPLITK32_BM + GEMM_BI_SCALAR_SMEM_A_PAD) + warpRow * GEMM_BI_SPLITK32_WM + threadRowInWarp * GEMM_BI_SPLITK32_TM]);
+            gemm_bi_scalar_load_fragment<GEMM_BI_SPLITK32_TN>(&regN[nxt][0], &Bs[next_k * (GEMM_BI_SPLITK32_BN + GEMM_BI_SCALAR_SMEM_B_PAD) + warpCol * GEMM_BI_SPLITK32_WN + threadColInWarp * GEMM_BI_SPLITK32_TN]);
         }
         // FMA consumes current buffer — bit-exact: same rm-major, rn-minor order.
         // explicit __fmaf_rn for bit-exact match
@@ -4082,14 +4030,8 @@ void NAME(                                                                    \
             }                                                                 \
             __syncthreads();                                                  \
             for (int dotIdx = 0; dotIdx < BK_; ++dotIdx) {                    \
-                for (int i = 0; i < TM_; ++i) {                               \
-                    regM[i] = As[dotIdx * (BM_ + GEMM_BI_SCALAR_SMEM_A_PAD)                  \
-                                 + warpRow * WM_ + threadRowInWarp * TM_ + i]; \
-                }                                                             \
-                for (int i = 0; i < TN_; ++i) {                               \
-                    regN[i] = Bs[dotIdx * (BN_ + GEMM_BI_SCALAR_SMEM_B_PAD)                  \
-                                 + warpCol * WN_ + threadColInWarp * TN_ + i]; \
-                }                                                             \
+                gemm_bi_scalar_load_fragment<TM_>(&regM[0], &As[dotIdx * (BM_ + GEMM_BI_SCALAR_SMEM_A_PAD) + warpRow * WM_ + threadRowInWarp * TM_]); \
+                gemm_bi_scalar_load_fragment<TN_>(&regN[0], &Bs[dotIdx * (BN_ + GEMM_BI_SCALAR_SMEM_B_PAD) + warpCol * WN_ + threadColInWarp * TN_]); \
                 for (int resIdxM = 0; resIdxM < TM_; ++resIdxM) {             \
                     for (int resIdxN = 0; resIdxN < TN_; ++resIdxN) {         \
                         threadResults[resIdxM * TN_ + resIdxN] = __fmaf_rn(   \
@@ -4180,14 +4122,8 @@ void NAME(                                                                    \
             }                                                                 \
             __syncthreads();                                                  \
             for (int dotIdx = 0; dotIdx < 16; ++dotIdx) {                     \
-                for (int i = 0; i < 4; ++i) {                                 \
-                    regM[i] = As[dotIdx * (64 + GEMM_BI_SCALAR_SMEM_A_PAD)                   \
-                                 + warpRow * 32 + threadRowInWarp * 4 + i];   \
-                }                                                             \
-                for (int i = 0; i < 4; ++i) {                                 \
-                    regN[i] = Bs[dotIdx * (32 + GEMM_BI_SCALAR_SMEM_B_PAD)                   \
-                                 + warpCol * 16 + threadColInWarp * 4 + i];   \
-                }                                                             \
+                gemm_bi_scalar_load_fragment<4>(&regM[0], &As[dotIdx * (64 + GEMM_BI_SCALAR_SMEM_A_PAD) + warpRow * 32 + threadRowInWarp * 4]); \
+                gemm_bi_scalar_load_fragment<4>(&regN[0], &Bs[dotIdx * (32 + GEMM_BI_SCALAR_SMEM_B_PAD) + warpCol * 16 + threadColInWarp * 4]); \
                 for (int rm = 0; rm < 4; ++rm) {                              \
                     for (int rn = 0; rn < 4; ++rn) {                          \
                         threadResults[rm * 4 + rn] = __fmaf_rn(               \
@@ -4268,14 +4204,8 @@ void NAME(                                                                    \
             }                                                                 \
             __syncthreads();                                                  \
             for (int dotIdx = 0; dotIdx < 16; ++dotIdx) {                     \
-                for (int i = 0; i < 4; ++i) {                                 \
-                    regM[i] = As[dotIdx * (64 + GEMM_BI_SCALAR_SMEM_A_PAD)                   \
-                                 + warpRow * 32 + threadRowInWarp * 4 + i];   \
-                }                                                             \
-                for (int i = 0; i < 4; ++i) {                                 \
-                    regN[i] = Bs[dotIdx * (32 + GEMM_BI_SCALAR_SMEM_B_PAD)                   \
-                                 + warpCol * 16 + threadColInWarp * 4 + i];   \
-                }                                                             \
+                gemm_bi_scalar_load_fragment<4>(&regM[0], &As[dotIdx * (64 + GEMM_BI_SCALAR_SMEM_A_PAD) + warpRow * 32 + threadRowInWarp * 4]); \
+                gemm_bi_scalar_load_fragment<4>(&regN[0], &Bs[dotIdx * (32 + GEMM_BI_SCALAR_SMEM_B_PAD) + warpCol * 16 + threadColInWarp * 4]); \
                 for (int rm = 0; rm < 4; ++rm) {                              \
                     for (int rn = 0; rn < 4; ++rn) {                          \
                         threadResults[rm * 4 + rn] = __fmaf_rn(               \
@@ -4357,36 +4287,18 @@ GEMM_BI_DEFINE_GEMM_BI_NT_NARROW_T(gemm_bi_nt_narrow_f16,  __half,        from_f
         float regN_next[GEMM_BI_T_WNITER * GEMM_BI_T_TN];                                          \
         _Pragma("unroll")                                                      \
         for (int wSubRowIdx = 0; wSubRowIdx < GEMM_BI_T_WMITER; ++wSubRowIdx)            \
-            _Pragma("unroll")                                                  \
-            for (int i = 0; i < GEMM_BI_T_TM; ++i)                                       \
-                regM[wSubRowIdx * GEMM_BI_T_TM + i] =                                    \
-                    As_rd[0 * (GEMM_BI_T_BM + GEMM_BI_SCALAR_SMEM_A_PAD) + warpRow * GEMM_BI_T_WM +               \
-                          wSubRowIdx * GEMM_BI_T_WSUBM + threadRowInWarp * GEMM_BI_T_TM + i];      \
+            gemm_bi_scalar_load_fragment<GEMM_BI_T_TM>(&regM[wSubRowIdx * GEMM_BI_T_TM], &As_rd[0 * (GEMM_BI_T_BM + GEMM_BI_SCALAR_SMEM_A_PAD) + warpRow * GEMM_BI_T_WM + wSubRowIdx * GEMM_BI_T_WSUBM + threadRowInWarp * GEMM_BI_T_TM]); \
         _Pragma("unroll")                                                      \
         for (int wSubColIdx = 0; wSubColIdx < GEMM_BI_T_WNITER; ++wSubColIdx)            \
-            _Pragma("unroll")                                                  \
-            for (int i = 0; i < GEMM_BI_T_TN; ++i)                                       \
-                regN[wSubColIdx * GEMM_BI_T_TN + i] =                                    \
-                    Bs_rd[0 * (GEMM_BI_T_BN + GEMM_BI_SCALAR_SMEM_B_PAD) + warpCol * GEMM_BI_T_WN +               \
-                          wSubColIdx * GEMM_BI_T_WSUBN + threadColInWarp * GEMM_BI_T_TN + i];      \
+            gemm_bi_scalar_load_fragment<GEMM_BI_T_TN>(&regN[wSubColIdx * GEMM_BI_T_TN], &Bs_rd[0 * (GEMM_BI_T_BN + GEMM_BI_SCALAR_SMEM_B_PAD) + warpCol * GEMM_BI_T_WN + wSubColIdx * GEMM_BI_T_WSUBN + threadColInWarp * GEMM_BI_T_TN]); \
         for (int dotIdx = 0; dotIdx < GEMM_BI_T_BK; ++dotIdx) {                          \
             if (dotIdx + 1 < GEMM_BI_T_BK) {                                             \
                 _Pragma("unroll")                                              \
                 for (int wSubRowIdx = 0; wSubRowIdx < GEMM_BI_T_WMITER; ++wSubRowIdx)    \
-                    _Pragma("unroll")                                          \
-                    for (int i = 0; i < GEMM_BI_T_TM; ++i)                               \
-                        regM_next[wSubRowIdx * GEMM_BI_T_TM + i] =                       \
-                            As_rd[(dotIdx + 1) * (GEMM_BI_T_BM + GEMM_BI_SCALAR_SMEM_A_PAD) +           \
-                                  warpRow * GEMM_BI_T_WM + wSubRowIdx * GEMM_BI_T_WSUBM +          \
-                                  threadRowInWarp * GEMM_BI_T_TM + i];                   \
+                    gemm_bi_scalar_load_fragment<GEMM_BI_T_TM>(&regM_next[wSubRowIdx * GEMM_BI_T_TM], &As_rd[(dotIdx + 1) * (GEMM_BI_T_BM + GEMM_BI_SCALAR_SMEM_A_PAD) + warpRow * GEMM_BI_T_WM + wSubRowIdx * GEMM_BI_T_WSUBM + threadRowInWarp * GEMM_BI_T_TM]); \
                 _Pragma("unroll")                                              \
                 for (int wSubColIdx = 0; wSubColIdx < GEMM_BI_T_WNITER; ++wSubColIdx)    \
-                    _Pragma("unroll")                                          \
-                    for (int i = 0; i < GEMM_BI_T_TN; ++i)                               \
-                        regN_next[wSubColIdx * GEMM_BI_T_TN + i] =                       \
-                            Bs_rd[(dotIdx + 1) * (GEMM_BI_T_BN + GEMM_BI_SCALAR_SMEM_B_PAD) +           \
-                                  warpCol * GEMM_BI_T_WN + wSubColIdx * GEMM_BI_T_WSUBN +          \
-                                  threadColInWarp * GEMM_BI_T_TN + i];                   \
+                    gemm_bi_scalar_load_fragment<GEMM_BI_T_TN>(&regN_next[wSubColIdx * GEMM_BI_T_TN], &Bs_rd[(dotIdx + 1) * (GEMM_BI_T_BN + GEMM_BI_SCALAR_SMEM_B_PAD) + warpCol * GEMM_BI_T_WN + wSubColIdx * GEMM_BI_T_WSUBN + threadColInWarp * GEMM_BI_T_TN]); \
             }                                                                  \
             _Pragma("unroll")                                                  \
             for (int wSubRowIdx = 0; wSubRowIdx < GEMM_BI_T_WMITER; ++wSubRowIdx)        \
