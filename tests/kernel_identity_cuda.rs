@@ -9,7 +9,8 @@ use mamba_rs::mamba_ssm::gpu::gemm_bi_triad::{
 };
 #[cfg(target_os = "linux")]
 use mamba_rs::mamba_ssm::gpu::gemm_bi_triad::{
-    SM80_TF32_ROUTE_SPECS, SM120_KERNEL_SPECS, SM120_STREAMK_KERNEL_SPECS, SM120_TF32_ROUTE_SPECS,
+    SM80_TF32_ROUTE_SPECS, SM80_TF32_WIDE_ROUTE_SPECS, SM120_KERNEL_SPECS,
+    SM120_STREAMK_KERNEL_SPECS, SM120_TF32_ROUTE_SPECS,
 };
 #[cfg(target_os = "linux")]
 use mamba_rs::mamba_ssm::gpu::kernel_identity::{
@@ -122,6 +123,16 @@ const SM80_SPLITK_ENTRIES: &[&str] = &[
     "gemm_bi_nt_sm80_mma_tf32_splitk8_v1_m32n32_bk32_s4",
 ];
 
+/// The TN split-K family of the extension fragment, composed with the
+/// stream-K kernels and the wide TF32 tile on the sm80-family targets.
+#[cfg(target_os = "linux")]
+const SM80_TN_SPLITK_ENTRIES: &[&str] = &[
+    "gemm_bi_tn_sm80_mma_tf32_splitk8_v1_m64n64_bk32_s2",
+    "gemm_bi_tn_sm80_mma_tf32_splitk8_v1_m64n64_bk32_s3",
+    "gemm_bi_tn_sm80_mma_tf32_splitk8_v1_m32n32_bk32_s3",
+    "gemm_bi_tn_sm80_mma_tf32_splitk8_v1_m32n32_bk32_s4",
+];
+
 #[cfg(target_os = "linux")]
 /// The portable TF32 entries every Fixed PTX carries, whatever its target.
 const FIXED_TF32_ENTRIES_PORTABLE: &[&str] = &[
@@ -175,10 +186,20 @@ fn expected_sm80_entries(target: &str) -> std::collections::BTreeSet<String> {
                 .filter(|_| sm80_target_composes_streamk(target)),
         )
         .chain(SM80_SPLITK_ENTRIES)
+        .chain(
+            SM80_TN_SPLITK_ENTRIES
+                .iter()
+                .filter(|_| sm80_target_composes_streamk(target)),
+        )
         .map(|name| (*name).to_string())
         .chain(
             SM80_TF32_ROUTE_SPECS
                 .iter()
+                .chain(
+                    SM80_TF32_WIDE_ROUTE_SPECS
+                        .iter()
+                        .filter(|_| sm80_target_composes_streamk(target)),
+                )
                 .map(|spec| spec.symbol.to_string()),
         )
         .collect()
@@ -193,7 +214,9 @@ fn expected_cuda_module_fixtures_are_unique() {
         SM80_TYPED_ENTRIES.len()
             + SM80_STREAMK_ENTRIES.len()
             + SM80_SPLITK_ENTRIES.len()
+            + SM80_TN_SPLITK_ENTRIES.len()
             + SM80_TF32_ROUTE_SPECS.len()
+            + SM80_TF32_WIDE_ROUTE_SPECS.len()
     );
     assert_eq!(
         expected_sm80_entries("compute_120").len(),
@@ -777,6 +800,8 @@ fn repeated_nvrtc_compiles_have_the_same_identity() {
             SM80_TYPED_ENTRIES.len()
                 + if sm80_target_composes_streamk(sm80_target.as_str()) {
                     SM80_STREAMK_ENTRIES.len()
+                        + SM80_TF32_WIDE_ROUTE_SPECS.len()
+                        + SM80_TN_SPLITK_ENTRIES.len()
                 } else {
                     0
                 }

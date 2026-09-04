@@ -292,16 +292,14 @@ const TF32_DRIVER_PARAMETER_COUNT: usize = 5;
 const TF32_STREAMK_DRIVER_PARAMETER_COUNT: usize = 7;
 
 fn tf32_driver_parameter_count(module_kind: ModuleKind, symbol: &str) -> usize {
-    let streamk = super::contract::tf32_route_specs(module_kind)
-        .iter()
-        .any(|spec| {
-            spec.symbol == symbol
-                && (spec.route.is_exact_fma()
-                    || matches!(
-                        spec.route,
-                        super::contract::Tf32PhysicalRoute::Sm120TmaMmaTf32RnaStreamKV1(_)
-                    ))
-        });
+    let streamk = super::contract::tf32_route_specs_all(module_kind).any(|spec| {
+        spec.symbol == symbol
+            && (spec.route.is_exact_fma()
+                || matches!(
+                    spec.route,
+                    super::contract::Tf32PhysicalRoute::Sm120TmaMmaTf32RnaStreamKV1(_)
+                ))
+    });
     if streamk {
         TF32_STREAMK_DRIVER_PARAMETER_COUNT
     } else {
@@ -354,10 +352,13 @@ fn query_tf32_driver_parameter_abi(
 fn census_tf32_driver_abi(
     ctx: &CudaContext,
     module_kind: ModuleKind,
+    extensions: bool,
     ptx: &str,
 ) -> Result<BTreeMap<&'static str, Tf32DriverAbi>, String> {
-    let symbols = super::contract::tf32_module_symbols(module_kind);
-    if symbols.len() == 0 {
+    let symbols: Vec<&'static str> = super::contract::tf32_route_specs_for(module_kind, extensions)
+        .map(|spec| spec.symbol)
+        .collect();
+    if symbols.is_empty() {
         return Ok(BTreeMap::new());
     }
 
@@ -395,6 +396,7 @@ fn census_tf32_driver_abi(
 fn census_tf32_splitk_driver_abi(
     ctx: &CudaContext,
     module_kind: ModuleKind,
+    extensions: bool,
     ptx: &str,
 ) -> Result<BTreeMap<&'static str, Tf32DriverAbi>, String> {
     if module_kind != ModuleKind::TriadSm80 {
@@ -411,7 +413,7 @@ fn census_tf32_splitk_driver_abi(
     let get_parameter_info: GetParamInfo =
         unsafe { std::mem::transmute(driver_proc_address("cuFuncGetParamInfo", 12_040)?) };
     let mut census = BTreeMap::new();
-    for spec in super::contract::TF32_SPLITK_CANDIDATE_SPECS {
+    for spec in super::contract::tf32_splitk_specs_for(extensions) {
         let symbol = spec.symbol;
         let name = CString::new(symbol).expect("static TF32 split-K symbol");
         let function = unsafe { cudarc::driver::result::module::get_function(module.raw(), name) }
@@ -433,10 +435,11 @@ fn census_tf32_splitk_driver_abi(
 fn census_all_tf32_driver_abi(
     ctx: &CudaContext,
     module_kind: ModuleKind,
+    extensions: bool,
     ptx: &str,
 ) -> Result<BTreeMap<&'static str, Tf32DriverAbi>, String> {
-    let mut census = census_tf32_driver_abi(ctx, module_kind, ptx)?;
-    for (symbol, abi) in census_tf32_splitk_driver_abi(ctx, module_kind, ptx)? {
+    let mut census = census_tf32_driver_abi(ctx, module_kind, extensions, ptx)?;
+    for (symbol, abi) in census_tf32_splitk_driver_abi(ctx, module_kind, extensions, ptx)? {
         if census.insert(symbol, abi).is_some() {
             return Err(format!(
                 "{module_kind:?} Driver ABI census contains duplicate symbol {symbol}"
@@ -448,14 +451,17 @@ fn census_all_tf32_driver_abi(
 
 fn complete_tf32_driver_abi(
     module_kind: ModuleKind,
+    extensions: bool,
     census: &BTreeMap<&'static str, Tf32DriverAbi>,
 ) -> bool {
-    let mut production = super::contract::tf32_module_symbols(module_kind);
+    let production: Vec<&'static str> =
+        super::contract::tf32_route_specs_for(module_kind, extensions)
+            .map(|spec| spec.symbol)
+            .collect();
     let production_complete =
-        production.len() != 0 && production.all(|symbol| census.contains_key(symbol));
+        !production.is_empty() && production.iter().all(|symbol| census.contains_key(symbol));
     let splitk_complete = module_kind != ModuleKind::TriadSm80
-        || super::contract::TF32_SPLITK_CANDIDATE_SPECS
-            .iter()
+        || super::contract::tf32_splitk_specs_for(extensions)
             .map(|spec| spec.symbol)
             .all(|symbol| census.contains_key(symbol));
     production_complete && splitk_complete
@@ -609,6 +615,20 @@ pub(crate) fn compile_module(request: CompileModuleRequest<'_>) -> Result<Compil
         })
     });
 
+    let trace = std::env::var_os("MAMBA_RS_CACHE_TRACE").is_some();
+    if trace {
+        eprintln!(
+            "mamba-rs cache trace: {:?} arch={} key={} path={:?} source_len={}",
+            request.module_kind,
+            request.arch,
+            cache_key.map_or_else(
+                || "none".to_string(),
+                |key| { crate::mamba_ssm::gpu::kernel_identity::digest_hex(&key) }
+            ),
+            cache_path,
+            combined.len()
+        );
+    }
     let mut loaded = None;
     if let (Some(path), Some(key)) = (&cache_path, cache_key)
         && let Some(hit) =
@@ -628,10 +648,18 @@ pub(crate) fn compile_module(request: CompileModuleRequest<'_>) -> Result<Compil
             .as_deref()
             .is_some_and(crate::mamba_ssm::gpu::kernel_identity::nvrtc_library_domain_is_current)
     {
-        let census = census_all_tf32_driver_abi(request.ctx, request.module_kind, &src);
-        let validation = validate_tf32_specialization(request.module_kind, &src);
+        let extensions = module_composes_extensions(request.module_kind, request.arch);
+        let census = census_all_tf32_driver_abi(request.ctx, request.module_kind, extensions, &src);
+        let validation = validate_tf32_specialization(request.module_kind, request.arch, &src);
         let (tf32_driver_abi, tf32_qualification_error) =
-            tf32_qualification_verdict(request.module_kind, census, validation);
+            tf32_qualification_verdict(request.module_kind, extensions, census, validation);
+        if trace {
+            eprintln!(
+                "mamba-rs cache trace: {:?} hit artifact={}",
+                request.module_kind,
+                crate::mamba_ssm::gpu::kernel_identity::digest_hex(&hit.artifact_digest)
+            );
+        }
         loaded = Some((
             module,
             hit.artifact_digest,
@@ -656,10 +684,17 @@ pub(crate) fn compile_module(request: CompileModuleRequest<'_>) -> Result<Compil
             let ptx_source =
                 crate::mamba_ssm::gpu::kernel_identity::canonical_ptx_image(ptx_image)?;
             validate_module_ptx(request.module_kind, request.arch, &ptx_source)?;
-            let census = census_all_tf32_driver_abi(request.ctx, request.module_kind, &ptx_source);
-            let validation = validate_tf32_specialization(request.module_kind, &ptx_source);
+            let extensions = module_composes_extensions(request.module_kind, request.arch);
+            let census = census_all_tf32_driver_abi(
+                request.ctx,
+                request.module_kind,
+                extensions,
+                &ptx_source,
+            );
+            let validation =
+                validate_tf32_specialization(request.module_kind, request.arch, &ptx_source);
             let (tf32_driver_abi, tf32_qualification_error) =
-                tf32_qualification_verdict(request.module_kind, census, validation);
+                tf32_qualification_verdict(request.module_kind, extensions, census, validation);
             if !crate::mamba_ssm::gpu::kernel_identity::header_manifest_is_current(
                 combined.as_bytes(),
                 &include_paths,
@@ -679,6 +714,27 @@ pub(crate) fn compile_module(request: CompileModuleRequest<'_>) -> Result<Compil
                 ));
             }
             let artifact_digest = FramedSha256::bytes(ptx_source.as_bytes());
+            if trace {
+                eprintln!(
+                    "mamba-rs cache trace: {:?} miss compiled artifact={} ptx_len={} publish={}",
+                    request.module_kind,
+                    crate::mamba_ssm::gpu::kernel_identity::digest_hex(&artifact_digest),
+                    ptx_source.len(),
+                    cache_path.is_some() && cache_key.is_some()
+                );
+                if let Some(directory) = std::env::var_os("MAMBA_RS_CACHE_TRACE_DIR") {
+                    let digest =
+                        crate::mamba_ssm::gpu::kernel_identity::digest_hex(&artifact_digest);
+                    let file = std::path::Path::new(&directory).join(format!(
+                        "{:?}-{}.ptx",
+                        request.module_kind,
+                        &digest[..12]
+                    ));
+                    if let Err(error) = std::fs::write(&file, ptx_source.as_bytes()) {
+                        eprintln!("mamba-rs cache trace: could not write {file:?}: {error}");
+                    }
+                }
+            }
             if let (Some(path), Some(key)) = (&cache_path, cache_key) {
                 crate::mamba_ssm::gpu::kernel_identity::publish_cache(
                     path,
@@ -740,6 +796,7 @@ pub(crate) fn compile_module(request: CompileModuleRequest<'_>) -> Result<Compil
 /// first failing step is kept as the reason.
 fn tf32_qualification_verdict(
     module_kind: ModuleKind,
+    extensions: bool,
     census: Result<BTreeMap<&'static str, Tf32DriverAbi>, String>,
     validation: Result<(), String>,
 ) -> (BTreeMap<&'static str, Tf32DriverAbi>, Option<String>) {
@@ -748,7 +805,7 @@ fn tf32_qualification_verdict(
         Err(error) => (BTreeMap::new(), Some(error)),
     };
     let error = validation.err().or(census_error).or_else(|| {
-        (!complete_tf32_driver_abi(module_kind, &tf32_driver_abi))
+        (!complete_tf32_driver_abi(module_kind, extensions, &tf32_driver_abi))
             .then(|| format!("{module_kind:?} TF32 Driver ABI census is incomplete"))
     });
     (tf32_driver_abi, error)
@@ -1288,8 +1345,13 @@ fn validate_module_target(kind: ModuleKind, arch: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn validate_tf32_ptx_inventory(module_kind: ModuleKind, ptx: &str) -> Result<(), String> {
-    let kernel_specs = super::contract::tf32_route_specs(module_kind);
+fn validate_tf32_ptx_inventory(
+    module_kind: ModuleKind,
+    extensions: bool,
+    ptx: &str,
+) -> Result<(), String> {
+    let kernel_specs: Vec<_> =
+        super::contract::tf32_route_specs_for(module_kind, extensions).collect();
     if kernel_specs.is_empty() {
         return Ok(());
     }
@@ -1759,7 +1821,11 @@ fn validate_scalar_tn_m16n16_ptx(ptx: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn validate_tf32_specialization(module_kind: ModuleKind, ptx: &str) -> Result<(), String> {
+fn validate_tf32_specialization(
+    module_kind: ModuleKind,
+    arch: &str,
+    ptx: &str,
+) -> Result<(), String> {
     if !matches!(
         module_kind,
         ModuleKind::TriadSm80
@@ -1769,17 +1835,22 @@ fn validate_tf32_specialization(module_kind: ModuleKind, ptx: &str) -> Result<()
     ) {
         return Err(format!("{module_kind:?} does not own TF32 kernels"));
     }
-    validate_tf32_ptx_inventory(module_kind, ptx)?;
-    validate_tf32_parameter_abi(module_kind, ptx, nvrtc_version().0)?;
-    validate_tf32_host_abi(module_kind, ptx)?;
-    validate_tf32_feature_instructions(module_kind, ptx)?;
+    let extensions = module_kind == ModuleKind::TriadSm80 && sm80_target_composes_streamk(arch);
+    validate_tf32_ptx_inventory(module_kind, extensions, ptx)?;
+    validate_tf32_parameter_abi(module_kind, extensions, ptx, nvrtc_version().0)?;
+    validate_tf32_host_abi(module_kind, extensions, ptx)?;
+    validate_tf32_feature_instructions(module_kind, extensions, ptx)?;
     if module_kind == ModuleKind::TriadSm80 {
-        validate_tf32_splitk_ptx(ptx)?;
+        validate_tf32_splitk_ptx(extensions, ptx)?;
     }
     Ok(())
 }
 
-fn validate_tf32_host_abi(module_kind: ModuleKind, ptx: &str) -> Result<(), String> {
+fn validate_tf32_host_abi(
+    module_kind: ModuleKind,
+    extensions: bool,
+    ptx: &str,
+) -> Result<(), String> {
     let map_size = std::mem::size_of::<cudarc::driver::sys::CUtensorMap>();
     let map_alignment = std::mem::align_of::<cudarc::driver::sys::CUtensorMap>();
     if map_size != 128 || !matches!(map_alignment, 64 | 128) {
@@ -1806,7 +1877,7 @@ fn validate_tf32_host_abi(module_kind: ModuleKind, ptx: &str) -> Result<(), Stri
             "{module_kind:?} Rust TF32 parameter size is {parameter_size}, expected {expected_size}"
         ));
     }
-    validate_tf32_parameter_abi(module_kind, ptx, host_cuda_major)
+    validate_tf32_parameter_abi(module_kind, extensions, ptx, host_cuda_major)
 }
 
 fn sm80_ptx_target(arch: &str) -> Option<&'static str> {
@@ -2465,6 +2536,7 @@ fn ptx_entry_body(ptx: &str, symbol: &str) -> Result<String, String> {
 
 fn validate_tf32_parameter_abi(
     module_kind: ModuleKind,
+    extensions: bool,
     ptx: &str,
     cuda_major: i32,
 ) -> Result<(), String> {
@@ -2478,7 +2550,7 @@ fn validate_tf32_parameter_abi(
         }
     };
     let parsed = parse_ptx(ptx)?;
-    for kernel_spec in super::contract::tf32_route_specs(module_kind) {
+    for kernel_spec in super::contract::tf32_route_specs_for(module_kind, extensions) {
         let entry = &parsed_ptx_entry_ref(&parsed, kernel_spec.symbol)?.text;
         let parameters = entry
             .split_once('(')
@@ -2568,10 +2640,8 @@ fn validate_tf32_parameter_abi(
     Ok(())
 }
 
-fn validate_tf32_splitk_ptx(ptx: &str) -> Result<(), String> {
-    let specs = &super::contract::TF32_SPLITK_CANDIDATE_SPECS;
-    let expected = specs
-        .iter()
+fn validate_tf32_splitk_ptx(extensions: bool, ptx: &str) -> Result<(), String> {
+    let expected = super::contract::tf32_splitk_specs_for(extensions)
         .map(|spec| spec.symbol)
         .collect::<BTreeSet<_>>();
     let symbols = ptx_entry_symbols(ptx)?;
@@ -2587,7 +2657,7 @@ fn validate_tf32_splitk_ptx(ptx: &str) -> Result<(), String> {
         );
     }
     let parsed = parse_ptx(ptx)?;
-    for spec in specs {
+    for spec in super::contract::tf32_splitk_specs_for(extensions) {
         let symbol = spec.symbol;
         let entry = parsed_ptx_entry_ref(&parsed, symbol)?;
         let parameters = entry
@@ -3263,7 +3333,11 @@ fn validate_sm120_ptx(arch: &str, ptx: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn validate_tf32_feature_instructions(module_kind: ModuleKind, ptx: &str) -> Result<(), String> {
+fn validate_tf32_feature_instructions(
+    module_kind: ModuleKind,
+    extensions: bool,
+    ptx: &str,
+) -> Result<(), String> {
     use crate::mamba_ssm::gpu::kernel_identity::{
         ResolvedInstructionFamily, ResolvedOperandConversion,
     };
@@ -3287,8 +3361,7 @@ fn validate_tf32_feature_instructions(module_kind: ModuleKind, ptx: &str) -> Res
         ),
         _ => return Ok(()),
     };
-    if super::contract::tf32_route_specs(module_kind)
-        .iter()
+    if super::contract::tf32_route_specs_all(module_kind)
         .filter(|kernel_spec| !kernel_spec.route.is_exact_fma())
         .any(|kernel_spec| {
             (
@@ -3301,8 +3374,7 @@ fn validate_tf32_feature_instructions(module_kind: ModuleKind, ptx: &str) -> Res
             "{module_kind:?} TF32 route metadata has the wrong conversion contract"
         ));
     }
-    if super::contract::tf32_route_specs(module_kind)
-        .iter()
+    if super::contract::tf32_route_specs_all(module_kind)
         .filter(|kernel_spec| kernel_spec.route.is_exact_fma())
         .any(|kernel_spec| {
             (
@@ -3338,7 +3410,7 @@ fn validate_tf32_feature_instructions(module_kind: ModuleKind, ptx: &str) -> Res
         "fma.rn.f32",
     ];
     let parsed = parse_ptx(ptx)?;
-    for kernel_spec in super::contract::tf32_route_specs(module_kind) {
+    for kernel_spec in super::contract::tf32_route_specs_for(module_kind, extensions) {
         let entry = &parsed_ptx_entry_ref(&parsed, kernel_spec.symbol)?.text;
         let required = if kernel_spec.route.is_exact_fma() {
             EXACT_REQUIRED
@@ -3585,13 +3657,36 @@ const SM80_STREAMK_SOURCE_FRAGMENT: SourceFragment = SourceFragment {
     allowed_quoted_includes: &[],
 };
 
-/// Whether the portable module compiled for `arch` carries the tc64 TN
-/// stream-K kernels. CC 12.x boards run the SM120 TMA stream-K kernel, and
-/// leaving the fragment out keeps their portable module byte-identical to
-/// the one their TF32 cohort's portable twin was frozen against.
+/// The wide deterministic TF32 tile (NN, 128 x 128, eight computing
+/// warps), composed with the stream-K fragment on the same targets.
+const SM80_TF32_WIDE_SOURCE_FRAGMENT: SourceFragment = SourceFragment {
+    logical_name: "kernels/gemm_bi_triad/sm80_tf32_wide.cu",
+    source: include_str!("../../../../kernels/gemm_bi_triad/sm80_tf32_wide.cu"),
+    allowed_quoted_includes: &[],
+};
+
+/// The TN split-K family (eight partitions on the m64n64 and m32n32 tiles),
+/// composed with the other two extension fragments on the same targets.
+const SM80_TN_SPLITK_SOURCE_FRAGMENT: SourceFragment = SourceFragment {
+    logical_name: "kernels/gemm_bi_triad/sm80_tn_splitk.cu",
+    source: include_str!("../../../../kernels/gemm_bi_triad/sm80_tn_splitk.cu"),
+    allowed_quoted_includes: &[],
+};
+
+/// Whether the portable module compiled for `arch` carries the extension
+/// fragments (the tc64 TN stream-K kernels, the wide TF32 tile and the TN
+/// split-K family). CC 12.x
+/// boards run the SM120 kernels, and leaving the fragments out keeps their
+/// portable module byte-identical to the one their TF32 cohort's portable
+/// twin was frozen against.
 pub(super) fn sm80_target_composes_streamk(arch: &str) -> bool {
-    sm80_ptx_target(arch).is_some()
-        && !matches!(arch, "sm_120" | "compute_120" | "sm_121" | "compute_121")
+    sm80_ptx_target(arch).is_some() && super::contract::sm80_target_composes_extensions(arch)
+}
+
+/// Whether the module of `kind` compiled for `arch` composes the extension
+/// fragments: only the portable module, and only on sm80-family targets.
+fn module_composes_extensions(kind: ModuleKind, arch: &str) -> bool {
+    kind == ModuleKind::TriadSm80 && sm80_target_composes_streamk(arch)
 }
 
 const SM90A_SOURCE_FRAGMENTS: &[SourceFragment] = &[
@@ -3771,6 +3866,8 @@ fn compose_module_source_for(kind: ModuleKind, arch: &str) -> Result<String, Str
     if kind == ModuleKind::TriadSm80 && sm80_target_composes_streamk(arch) {
         let mut fragments = base.to_vec();
         fragments.push(SM80_STREAMK_SOURCE_FRAGMENT);
+        fragments.push(SM80_TF32_WIDE_SOURCE_FRAGMENT);
+        fragments.push(SM80_TN_SPLITK_SOURCE_FRAGMENT);
         return compose_fragments(&fragments);
     }
     compose_fragments(base)
@@ -4877,13 +4974,15 @@ type Tf32LoadedFunctions = (
 
 fn load_tf32_functions(module: &CompiledModule) -> Result<Tf32LoadedFunctions, String> {
     let module_kind = module.artifact_identity.module_kind;
-    let specs = super::contract::tf32_route_specs(module_kind);
+    let extensions = module_kind == ModuleKind::TriadSm80
+        && sm80_target_composes_streamk(module.compiler_identity.target.as_str());
+    let specs: Vec<_> = super::contract::tf32_route_specs_for(module_kind, extensions).collect();
     if specs.is_empty() {
         return Err(format!("{module_kind:?} has no TF32 symbol inventory"));
     }
     let mut functions = HashMap::with_capacity(specs.len());
     let mut excluded = Vec::new();
-    for kernel_spec in specs {
+    for kernel_spec in &specs {
         let function = load_function(&module.module, module_kind, kernel_spec.symbol)?;
         let shared = i32::try_from(kernel_spec.dynamic_shared_bytes)
             .map_err(|_| format!("{} shared memory exceeds i32::MAX", kernel_spec.symbol))?;
@@ -4971,10 +5070,14 @@ fn load_tf32_splitk_functions(module: &CompiledModule) -> Result<Tf32LoadedFunct
     if !module.tf32_qualified {
         return Ok((HashMap::new(), Vec::new()));
     }
-    let specs = &super::contract::TF32_SPLITK_CANDIDATE_SPECS;
+    let extensions = module_composes_extensions(
+        ModuleKind::TriadSm80,
+        module.compiler_identity.target.as_str(),
+    );
+    let specs: Vec<_> = super::contract::tf32_splitk_specs_for(extensions).collect();
     let mut functions = HashMap::with_capacity(specs.len());
     let mut excluded = Vec::new();
-    for spec in specs {
+    for spec in &specs {
         let (symbol, threads, dynamic_shared_bytes, register_cap, occupancy_gate) = (
             spec.symbol,
             spec.threads,
@@ -5051,6 +5154,9 @@ fn tf32_register_cap(module_kind: ModuleKind, symbol: &str) -> Result<u32, Strin
 
     match module_kind {
         ModuleKind::TriadSm80 if symbol.contains("_m128n64_") => Ok(192),
+        // The wide tile holds the same 64-accumulator microtile per thread as
+        // the 128x64 body, on all eight warps and one CTA per multiprocessor.
+        ModuleKind::TriadSm80 if symbol.contains("_m128n128_") => Ok(192),
         ModuleKind::TriadSm80 if symbol.contains("_m64n64_") => Ok(128),
         ModuleKind::TriadSm80 if symbol.contains("_m16n32_") || symbol.contains("_m16n16_") => {
             Ok(96)
@@ -5752,8 +5858,8 @@ mod tests {
         SCALAR_GROUP_M_MACRO, SCALAR_SYMBOLS as PRODUCTION_SCALAR_SYMBOLS,
         SM80_SYMBOLS as PRODUCTION_SM80_SYMBOLS, SM90A_SYMBOLS, SM100_PROBE_SOURCE, SourceFragment,
         TF32_DRIVER_PARAMETER_COUNT, Tf32DriverAbi, Tf32DriverJitLocalMemoryFacts,
-        compose_fragments, compose_module_source, merge_tf32_driver_abi, parse_ptx,
-        portable_target_for_device, ptx_entry, qualified_ptx_target,
+        compose_fragments, compose_module_source, compose_module_source_for, merge_tf32_driver_abi,
+        parse_ptx, portable_target_for_device, ptx_entry, qualified_ptx_target,
         qualified_scalar_resource_environment, qualify_tf32_conversion_artifact,
         query_tf32_driver_parameter_abi, resolve_owned_symbol, retain_forced_only_functions,
         retain_tf32_candidate, scalar_group_m_option, select_sm100_candidate,
@@ -6195,46 +6301,46 @@ mod tests {
     #[test]
     fn splitk_candidate_ptx_inventory_and_parameter_abi_are_exact() {
         let valid = synthetic_splitk_ptx();
-        validate_tf32_splitk_ptx(&valid).unwrap();
+        validate_tf32_splitk_ptx(false, &valid).unwrap();
         for spec in super::super::contract::TF32_SPLITK_CANDIDATE_SPECS {
             let missing = valid.replacen(spec.symbol, "removed_splitk_fused", 1);
-            assert!(validate_tf32_splitk_ptx(&missing).is_err());
+            assert!(validate_tf32_splitk_ptx(false, &missing).is_err());
         }
         let foreign = valid.replace(
             ".version 9.0",
             ".version 9.0\n.visible .entry foreign_tf32_splitk2_v1_kernel() { ret; }",
         );
-        assert!(validate_tf32_splitk_ptx(&foreign).is_err());
+        assert!(validate_tf32_splitk_ptx(false, &foreign).is_err());
         let wrong_bundle = valid.replacen("bundle[32]", "bundle[40]", 1);
-        assert!(validate_tf32_splitk_ptx(&wrong_bundle).is_err());
+        assert!(validate_tf32_splitk_ptx(false, &wrong_bundle).is_err());
         let float_atomic = valid.replacen("atom.global.inc.u32", "atom.global.add.f32", 1);
-        assert!(validate_tf32_splitk_ptx(&float_atomic).is_err());
+        assert!(validate_tf32_splitk_ptx(false, &float_atomic).is_err());
         let missing_counter = valid.replacen("atom.global.inc.u32", "add.u32", 1);
-        assert!(validate_tf32_splitk_ptx(&missing_counter).is_err());
+        assert!(validate_tf32_splitk_ptx(false, &missing_counter).is_err());
         let duplicate_counter = valid.replacen(
             "atom.global.inc.u32 %r2, [%rd1], 1;",
             "atom.global.inc.u32 %r2, [%rd1], 1; atom.global.inc.u32 %r3, [%rd1], 1;",
             1,
         );
-        assert!(validate_tf32_splitk_ptx(&duplicate_counter).is_err());
+        assert!(validate_tf32_splitk_ptx(false, &duplicate_counter).is_err());
         let wrong_k2_limit = valid.replacen(
             "atom.global.inc.u32 %r2, [%rd1], 1;",
             "atom.global.inc.u32 %r2, [%rd1], 3;",
             1,
         );
-        assert!(validate_tf32_splitk_ptx(&wrong_k2_limit).is_err());
+        assert!(validate_tf32_splitk_ptx(false, &wrong_k2_limit).is_err());
         let register_limit = valid.replacen(
             "atom.global.inc.u32 %r2, [%rd1], 1;",
             "atom.global.inc.u32 %r2, [%rd1], %r9;",
             1,
         );
-        assert!(validate_tf32_splitk_ptx(&register_limit).is_err());
+        assert!(validate_tf32_splitk_ptx(false, &register_limit).is_err());
         let formatted_limit = valid.replacen(
             "atom.global.inc.u32 %r2, [%rd1], 1;",
             "atom.global.inc.u32\n    %r2, [ %rd1 ], 1 ;",
             1,
         );
-        validate_tf32_splitk_ptx(&formatted_limit).unwrap();
+        validate_tf32_splitk_ptx(false, &formatted_limit).unwrap();
         for opcode in [
             "st.global.cg.f32",
             "st.global.cg.v2.f32",
@@ -6242,41 +6348,41 @@ mod tests {
             "ld.global.cg.v2.f32",
         ] {
             let stale_visibility = valid.replacen(opcode, &opcode.replace(".cg", ".wb"), 1);
-            assert!(validate_tf32_splitk_ptx(&stale_visibility).is_err());
+            assert!(validate_tf32_splitk_ptx(false, &stale_visibility).is_err());
         }
         let missing_fence = valid.replacen("membar.gl", "bar.sync 0", 1);
-        assert!(validate_tf32_splitk_ptx(&missing_fence).is_err());
+        assert!(validate_tf32_splitk_ptx(false, &missing_fence).is_err());
         let atomic_before_fence = valid.replacen(
             "membar.gl; atom.global.inc.u32 %r2, [%rd1], 1;",
             "atom.global.inc.u32 %r2, [%rd1], 1; membar.gl;",
             1,
         );
-        assert!(validate_tf32_splitk_ptx(&atomic_before_fence).is_err());
+        assert!(validate_tf32_splitk_ptx(false, &atomic_before_fence).is_err());
         let reload_before_atomic = valid.replacen(
             "atom.global.inc.u32 %r2, [%rd1], 1; ld.global.cg.f32 %f1, [%rd2];",
             "ld.global.cg.f32 %f1, [%rd2]; atom.global.inc.u32 %r2, [%rd1], 1;",
             1,
         );
-        assert!(validate_tf32_splitk_ptx(&reload_before_atomic).is_err());
+        assert!(validate_tf32_splitk_ptx(false, &reload_before_atomic).is_err());
         let division = valid.replacen(
             "fma.rn.f32 %f5, %f1, %f2, %f3; ret;",
             "fma.rn.f32 %f5, %f1, %f2, %f3; div.u32 %r4, %r2, %r3; ret;",
             1,
         );
-        assert!(validate_tf32_splitk_ptx(&division).is_err());
+        assert!(validate_tf32_splitk_ptx(false, &division).is_err());
         let fused_division = valid.replacen(
             "mma.sync.aligned.m16n8k8.row.col.f32.tf32.tf32.f32; st.global.cg.f32",
             "mma.sync.aligned.m16n8k8.row.col.f32.tf32.tf32.f32; div.u32 %r4, %r2, %r3; st.global.cg.f32",
             1,
         );
-        assert!(validate_tf32_splitk_ptx(&fused_division).is_err());
+        assert!(validate_tf32_splitk_ptx(false, &fused_division).is_err());
 
         for spec in super::super::contract::TF32_SPLITK_CANDIDATE_SPECS
             .iter()
             .filter(|spec| spec.op == ResolvedGemmOp::Nt)
         {
             let missing_fence = mutate_splitk_entry(&valid, spec.symbol, "membar.gl", "bar.sync 0");
-            assert!(validate_tf32_splitk_ptx(&missing_fence).is_err());
+            assert!(validate_tf32_splitk_ptx(false, &missing_fence).is_err());
 
             let atomic_before_fence = mutate_splitk_entry(
                 &valid,
@@ -6284,7 +6390,7 @@ mod tests {
                 "membar.gl; atom.global.inc.u32",
                 "atom.global.inc.u32 %r7, [%rd7], 0; membar.gl; atom.global.inc.u32",
             );
-            assert!(validate_tf32_splitk_ptx(&atomic_before_fence).is_err());
+            assert!(validate_tf32_splitk_ptx(false, &atomic_before_fence).is_err());
 
             let reload_before_atomic = mutate_splitk_entry(
                 &valid,
@@ -6292,7 +6398,7 @@ mod tests {
                 "atom.global.inc.u32",
                 "ld.global.cg.f32 %f7, [%rd7]; atom.global.inc.u32",
             );
-            assert!(validate_tf32_splitk_ptx(&reload_before_atomic).is_err());
+            assert!(validate_tf32_splitk_ptx(false, &reload_before_atomic).is_err());
 
             let float_atomic = mutate_splitk_entry(
                 &valid,
@@ -6300,7 +6406,7 @@ mod tests {
                 "atom.global.inc.u32",
                 "atom.global.add.f32",
             );
-            assert!(validate_tf32_splitk_ptx(&float_atomic).is_err());
+            assert!(validate_tf32_splitk_ptx(false, &float_atomic).is_err());
 
             let division = mutate_splitk_entry(
                 &valid,
@@ -6308,7 +6414,7 @@ mod tests {
                 "mul.rn.f32",
                 "div.u32 %r7, %r8, %r9; mul.rn.f32",
             );
-            assert!(validate_tf32_splitk_ptx(&division).is_err());
+            assert!(validate_tf32_splitk_ptx(false, &division).is_err());
         }
 
         for spec in super::super::contract::TF32_SPLITK_CANDIDATE_SPECS
@@ -6321,7 +6427,7 @@ mod tests {
                 "atom.global.inc.u32 %r2, [%rd1], 7;",
                 "atom.global.inc.u32 %r2, [%rd1], 3;",
             );
-            assert!(validate_tf32_splitk_ptx(&wrong_limit).is_err());
+            assert!(validate_tf32_splitk_ptx(false, &wrong_limit).is_err());
         }
     }
 
@@ -7571,6 +7677,24 @@ mod tests {
                 assert!(load_function(kernel_spec.symbol));
             }
         }
+        // The portable extension routes are composed for an sm80-family
+        // target and absent from the CC 12.x composition.
+        let extensions = super::super::contract::tf32_extension_route_specs(ModuleKind::TriadSm80);
+        assert_eq!(extensions.len(), 1);
+        let sm89 = compose_module_source_for(ModuleKind::TriadSm80, "sm_89").unwrap();
+        let cc12 = compose_module_source_for(ModuleKind::TriadSm80, "compute_120").unwrap();
+        for spec in extensions {
+            assert!(sm89.contains(spec.symbol), "{}", spec.symbol);
+            assert!(!cc12.contains(spec.symbol), "{}", spec.symbol);
+        }
+        assert_eq!(
+            super::super::contract::tf32_route_specs_for(ModuleKind::TriadSm80, true).count(),
+            19
+        );
+        assert_eq!(
+            super::super::contract::tf32_route_specs_for(ModuleKind::TriadSm80, false).count(),
+            18
+        );
     }
 
     #[test]
@@ -7582,7 +7706,7 @@ mod tests {
             ModuleKind::TriadSm120,
         ] {
             let complete = synthetic_tf32_ptx(module_kind);
-            validate_tf32_ptx_inventory(module_kind, &complete).unwrap();
+            validate_tf32_ptx_inventory(module_kind, false, &complete).unwrap();
 
             let mut symbols: BTreeSet<_> =
                 super::super::contract::tf32_module_symbols(module_kind).collect();
@@ -7593,10 +7717,10 @@ mod tests {
                 ".entry removed_tf32_symbol(",
                 1,
             );
-            assert!(validate_tf32_ptx_inventory(module_kind, &partial).is_err());
+            assert!(validate_tf32_ptx_inventory(module_kind, false, &partial).is_err());
 
             let duplicate = format!("{complete}\n.entry {removed}(\n) {{}}\n");
-            assert!(validate_tf32_ptx_inventory(module_kind, &duplicate).is_err());
+            assert!(validate_tf32_ptx_inventory(module_kind, false, &duplicate).is_err());
         }
     }
 
@@ -7628,8 +7752,8 @@ mod tests {
     #[test]
     fn tf32_parameter_abi_tracks_cuda_12_and_13_tensor_map_alignment() {
         let portable = synthetic_tf32_abi_ptx(ModuleKind::TriadSm80, 64);
-        validate_tf32_parameter_abi(ModuleKind::TriadSm80, &portable, 12).unwrap();
-        validate_tf32_parameter_abi(ModuleKind::TriadSm80, &portable, 13).unwrap();
+        validate_tf32_parameter_abi(ModuleKind::TriadSm80, false, &portable, 12).unwrap();
+        validate_tf32_parameter_abi(ModuleKind::TriadSm80, false, &portable, 13).unwrap();
 
         for module_kind in [
             ModuleKind::TriadSm90a,
@@ -7638,12 +7762,12 @@ mod tests {
         ] {
             let cuda12 = synthetic_tf32_abi_ptx(module_kind, 64);
             let cuda13 = synthetic_tf32_abi_ptx(module_kind, 128);
-            validate_tf32_parameter_abi(module_kind, &cuda12, 12).unwrap();
-            validate_tf32_parameter_abi(module_kind, &cuda13, 13).unwrap();
-            assert!(validate_tf32_parameter_abi(module_kind, &cuda12, 13).is_err());
-            assert!(validate_tf32_parameter_abi(module_kind, &cuda13, 12).is_err());
+            validate_tf32_parameter_abi(module_kind, false, &cuda12, 12).unwrap();
+            validate_tf32_parameter_abi(module_kind, false, &cuda13, 13).unwrap();
+            assert!(validate_tf32_parameter_abi(module_kind, false, &cuda12, 13).is_err());
+            assert!(validate_tf32_parameter_abi(module_kind, false, &cuda13, 12).is_err());
         }
-        assert!(validate_tf32_parameter_abi(ModuleKind::TriadSm90a, "", 14).is_err());
+        assert!(validate_tf32_parameter_abi(ModuleKind::TriadSm90a, false, "", 14).is_err());
     }
 
     #[test]
@@ -7858,6 +7982,8 @@ mod tests {
         "kernels/gemm_bi_triad/mma16.cuh",
         "kernels/gemm_bi_triad/sm80.cu",
         "kernels/gemm_bi_triad/sm80_streamk.cu",
+        "kernels/gemm_bi_triad/sm80_tf32_wide.cu",
+        "kernels/gemm_bi_triad/sm80_tn_splitk.cu",
     ];
 
     const SM90A_FRAGMENTS: &[&str] = &[
@@ -7989,8 +8115,8 @@ mod tests {
             .collect();
         assert_eq!(
             boundaries,
-            &SM80_FRAGMENTS[..SM80_FRAGMENTS.len() - 1],
-            "the CC 12.x portable module must not compose the stream-K fragment"
+            &SM80_FRAGMENTS[..SM80_FRAGMENTS.len() - 3],
+            "the CC 12.x portable module must not compose the extension fragments"
         );
         assert_composition(ModuleKind::TriadSm90a, SM90A_FRAGMENTS);
         assert_composition(ModuleKind::TriadSm100, SM100_FRAGMENTS);
@@ -8845,11 +8971,16 @@ mod tests {
             }
             validate_tf32_feature_instructions(
                 module_kind,
+                false,
                 &format!("{ptx}\n.file 9 \"{forbidden}\"\n.pragma \"{forbidden}\";\n"),
             )
             .unwrap_or_else(|error| panic!("{module_kind:?} rejected harmless strings: {error}"));
-            validate_tf32_feature_instructions(module_kind, &format!("{ptx}\n{forbidden};\n"))
-                .expect_err("real foreign TF32 opcode must fail");
+            validate_tf32_feature_instructions(
+                module_kind,
+                false,
+                &format!("{ptx}\n{forbidden};\n"),
+            )
+            .expect_err("real foreign TF32 opcode must fail");
         }
     }
 

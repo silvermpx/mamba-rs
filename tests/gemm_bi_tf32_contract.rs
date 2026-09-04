@@ -8,6 +8,7 @@ use std::process::{Command, Output};
 const SCALAR_SOURCE: &str = include_str!("../kernels/gemm_bi_triad/scalar.cu");
 const COMMON_SOURCE: &str = include_str!("../kernels/gemm_bi_triad/common.cuh");
 const SM80_SOURCE: &str = include_str!("../kernels/gemm_bi_triad/sm80.cu");
+const SM80_TN_SPLITK_SOURCE: &str = include_str!("../kernels/gemm_bi_triad/sm80_tn_splitk.cu");
 const SM90A_SOURCE: &str = include_str!("../kernels/gemm_bi_triad/sm90a.cu");
 const SM100_SOURCE: &str = include_str!("../kernels/gemm_bi_triad/sm100.cu");
 const SM120_SOURCE: &str = include_str!("../kernels/gemm_bi_triad/sm120.cu");
@@ -8445,8 +8446,9 @@ fn rust_contract_and_module_loader_own_the_same_exact_tf32_inventories() {
     );
     let module_code = source_mask(MODULE_SOURCE);
     assert!(
-        module_code.contains("validate_tf32_ptx_inventory(module_kind, ptx")
-            || module_code.contains("validate_tf32_ptx_inventory(request.module_kind, ptx"),
+        module_code.contains("validate_tf32_ptx_inventory(module_kind, extensions, ptx")
+            || module_code
+                .contains("validate_tf32_ptx_inventory(request.module_kind, extensions, ptx"),
         "module admission must call the compiled-PTX inventory validator"
     );
     let module_tests = braced_scope_after(MODULE_SOURCE, "#[cfg(test)]\nmod tests");
@@ -8952,6 +8954,106 @@ fn portable_sm80_tf32_nt_splitk_candidates_freeze_cuda_contract() {
         assert!(
             !fused.contains(forbidden),
             "portable NT split-K source contains forbidden {forbidden}"
+        );
+    }
+}
+
+#[test]
+fn portable_sm80_tf32_tn_splitk_candidates_freeze_cuda_contract() {
+    let candidates = [
+        (
+            "gemm_bi_tn_sm80_mma_tf32_splitk8_v1_m64n64_bk32_s2",
+            "gemm_bi_tf32_tn_splitk_fused_kernel<SgbTf32Tn, 64, 64, 2, 8>",
+            "__launch_bounds__(128, 2)",
+        ),
+        (
+            "gemm_bi_tn_sm80_mma_tf32_splitk8_v1_m64n64_bk32_s3",
+            "gemm_bi_tf32_tn_splitk_fused_kernel<SgbTf32Tn, 64, 64, 3, 8>",
+            "__launch_bounds__(128, 1)",
+        ),
+        (
+            "gemm_bi_tn_sm80_mma_tf32_splitk8_v1_m32n32_bk32_s3",
+            "gemm_bi_tf32_tn_splitk_fused_kernel<SgbTf32Tn, 32, 32, 3, 8>",
+            "__launch_bounds__(128, 3)",
+        ),
+        (
+            "gemm_bi_tn_sm80_mma_tf32_splitk8_v1_m32n32_bk32_s4",
+            "gemm_bi_tf32_tn_splitk_fused_kernel<SgbTf32Tn, 32, 32, 4, 8>",
+            "__launch_bounds__(128, 2)",
+        ),
+    ];
+    for (symbol, specialization, launch_bounds) in candidates {
+        assert!(
+            SM80_TN_SPLITK_SOURCE.contains(&format!("{launch_bounds}\nvoid {symbol}(")),
+            "{symbol} launch bounds drifted"
+        );
+        assert!(
+            SM80_TN_SPLITK_SOURCE.contains(specialization),
+            "{symbol} must bind its fixed tile/stage/partition specialization"
+        );
+        assert!(
+            SM80_TN_SPLITK_SOURCE
+                .contains(&format!("TF32_ASSERT_SPLITK_KERNEL_SIGNATURE({symbol})")),
+            "{symbol} is missing its seven-parameter signature assertion"
+        );
+        assert!(
+            !SM80_SOURCE.contains(symbol),
+            "{symbol} must live in the extension fragment, not the shared source"
+        );
+    }
+
+    assert_contains_all(
+        SM80_SOURCE,
+        &[
+            "sizeof(SgbTf32Storage<SgbTf32Tn, 64, 64, 2>) == 36864",
+            "sizeof(SgbTf32Storage<SgbTf32Tn, 64, 64, 3>) == 55296",
+        ],
+        "shared TN split-K storage ABI",
+    );
+    assert_contains_all(
+        SM80_TN_SPLITK_SOURCE,
+        &[
+            "sizeof(SgbTf32Storage<SgbTf32Tn, 32, 32, 3>) == 30720",
+            "sizeof(SgbTf32Storage<SgbTf32Tn, 32, 32, 4>) == 40960",
+        ],
+        "extension TN split-K storage ABI",
+    );
+
+    // The TN stage loads A k-major on the full-tile fast path; the fixup
+    // folds beta into the fused output like NN does, without a bias term.
+    let stage = compact_code(&source_mask(braced_scope_after(
+        SM80_TN_SPLITK_SOURCE,
+        "gemm_bi_tf32_tn_splitk_stage_async",
+    )));
+    assert_contains_all(
+        &stage,
+        &[
+            "static_assert(Op==SgbTf32Tn,",
+            "constexprintRowChunks=BM/4;",
+            "+(longlong)(reduction_base+reduction)*problem.params.lda+problem.tile_row+row;",
+        ],
+        "TN split-K k-major stage",
+    );
+    let fused = compact_code(&source_mask(braced_scope_after(
+        SM80_TN_SPLITK_SOURCE,
+        "gemm_bi_tf32_tn_splitk_fused_kernel",
+    )));
+    assert_contains_all(
+        &fused,
+        &[
+            "static_assert(Op==SgbTf32Tn,",
+            "assert(bias==nullptr);",
+            "gemm_bi_tf32_tn_splitk_async_mainloop<",
+            "if(params.beta!=0.0f){value0=__fmaf_rn(params.beta,destination[0],value0);}",
+            "if(params.beta!=0.0f){value1=__fmaf_rn(params.beta,destination[1],value1);}",
+            "atomicInc(counters+tile,Partitions-1U)",
+        ],
+        "TN split-K fused kernel",
+    );
+    for forbidden in ["atomicAdd", "atomicExch", "atomicCAS", "%"] {
+        assert!(
+            !fused.contains(forbidden),
+            "TN split-K source contains forbidden {forbidden}"
         );
     }
 }
@@ -10887,8 +10989,8 @@ fn driver_abi_lookup_oracle_rejects_dead_correct_and_live_wrong_calls() {
     assert!(validate_cuda12_driver_abi_lookup_contract(&synthetic_tail).is_err());
 
     let empty_symbols = canonical.replace(
-        "let symbols = super::contract::tf32_module_symbols(module_kind);",
-        "let symbols = Vec::new();",
+        "    let symbols: Vec<&'static str> = super::contract::tf32_route_specs_for(module_kind, extensions)\n        .map(|spec| spec.symbol)\n        .collect();",
+        "let symbols: Vec<&'static str> = Vec::new();",
     );
     assert!(validate_cuda12_driver_abi_lookup_contract(&empty_symbols).is_err());
 
@@ -12914,10 +13016,13 @@ fn validate_cuda12_driver_abi_lookup_contract(source: &str) -> Result<(), String
         fn census_tf32_driver_abi(
             ctx: &CudaContext,
             module_kind: ModuleKind,
+            extensions: bool,
             ptx: &str,
         ) -> Result<BTreeMap<&'static str, Tf32DriverAbi>, String> {
-            let symbols = super::contract::tf32_module_symbols(module_kind);
-            if symbols.len() == 0 {
+            let symbols: Vec<&'static str> = super::contract::tf32_route_specs_for(module_kind, extensions)
+                .map(|spec| spec.symbol)
+                .collect();
+            if symbols.is_empty() {
                 return Ok(BTreeMap::new());
             }
 
@@ -13112,7 +13217,7 @@ fn validate_cuda12_driver_abi_lookup_contract(source: &str) -> Result<(), String
     let splitk_census = active_production_function_scope(source, "census_tf32_splitk_driver_abi")?;
     let splitk_loops = marker_offsets_at_brace_depth(
         splitk_census,
-        "for spec in super::contract::TF32_SPLITK_CANDIDATE_SPECS",
+        "for spec in super::contract::tf32_splitk_specs_for(extensions)",
         1,
     );
     let [splitk_loop] = splitk_loops.as_slice() else {

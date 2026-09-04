@@ -708,6 +708,7 @@ pub(super) fn append_tf32_route_digest(
                 Tf32PortableTile::M16N32 => 3,
                 Tf32PortableTile::M16N16 => 4,
                 Tf32PortableTile::M32N32 => 5,
+                Tf32PortableTile::M128N128 => 6,
             };
             digest
                 .required(b"route-family", &[1])
@@ -721,6 +722,7 @@ pub(super) fn append_tf32_route_digest(
                 Tf32PortableTile::M16N32 => 3,
                 Tf32PortableTile::M16N16 => 4,
                 Tf32PortableTile::M32N32 => 5,
+                Tf32PortableTile::M128N128 => 6,
             };
             digest
                 .required(b"route-family", &[5])
@@ -735,6 +737,7 @@ pub(super) fn append_tf32_route_digest(
                 Tf32PortableTile::M16N32 => 3,
                 Tf32PortableTile::M16N16 => 4,
                 Tf32PortableTile::M32N32 => 5,
+                Tf32PortableTile::M128N128 => 6,
             };
             digest
                 .required(b"route-family", &[6])
@@ -749,6 +752,7 @@ pub(super) fn append_tf32_route_digest(
                 Tf32PortableTile::M16N32 => 3,
                 Tf32PortableTile::M16N16 => 4,
                 Tf32PortableTile::M32N32 => 5,
+                Tf32PortableTile::M128N128 => 6,
             };
             digest
                 .required(b"route-family", &[7])
@@ -1542,6 +1546,9 @@ pub enum Tf32PortableTile {
     M16N32,
     M16N16,
     M32N32,
+    /// The wide eight-warp tile of the portable extension fragment; NN only,
+    /// absent from the CC 12.x composition of the portable module.
+    M128N128,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -1576,6 +1583,7 @@ impl Tf32PortableRoute {
                 Tf32PortableStages::S2 | Tf32PortableStages::S3
             ) | (Tf32PortableTile::M16N32, Tf32PortableStages::S4)
                 | (Tf32PortableTile::M16N16, Tf32PortableStages::S4)
+                | (Tf32PortableTile::M128N128, Tf32PortableStages::S3)
         ) {
             Ok(())
         } else {
@@ -1955,12 +1963,103 @@ pub const TF32_SPLITK_CANDIDATE_SPECS: [Tf32SplitKSpec; 6] = [
     TF32_NT_SPLITK8_S4_SPEC,
 ];
 
+pub const TF32_TN_SPLITK8_M64_S2_SPEC: Tf32SplitKSpec = Tf32SplitKSpec {
+    op: ResolvedGemmOp::Tn,
+    route: Tf32PhysicalRoute::MmaTf32RnaSplitK8V1(Tf32PortableRoute {
+        tile: Tf32PortableTile::M64N64,
+        stages: Tf32PortableStages::S2,
+    }),
+    symbol: "gemm_bi_tn_sm80_mma_tf32_splitk8_v1_m64n64_bk32_s2",
+    tile: (64, 64),
+    bk: 32,
+    stages: 2,
+    partitions: 8,
+    threads: 128,
+    dynamic_shared_bytes: 36_864,
+    register_cap: 128,
+    occupancy_gate: 2,
+};
+pub const TF32_TN_SPLITK8_M64_S3_SPEC: Tf32SplitKSpec = Tf32SplitKSpec {
+    op: ResolvedGemmOp::Tn,
+    route: Tf32PhysicalRoute::MmaTf32RnaSplitK8V1(Tf32PortableRoute {
+        tile: Tf32PortableTile::M64N64,
+        stages: Tf32PortableStages::S3,
+    }),
+    symbol: "gemm_bi_tn_sm80_mma_tf32_splitk8_v1_m64n64_bk32_s3",
+    tile: (64, 64),
+    bk: 32,
+    stages: 3,
+    partitions: 8,
+    threads: 128,
+    dynamic_shared_bytes: 55_296,
+    register_cap: 128,
+    occupancy_gate: 1,
+};
+pub const TF32_TN_SPLITK8_M32_S3_SPEC: Tf32SplitKSpec = Tf32SplitKSpec {
+    op: ResolvedGemmOp::Tn,
+    route: Tf32PhysicalRoute::MmaTf32RnaSplitK8V1(Tf32PortableRoute {
+        tile: Tf32PortableTile::M32N32,
+        stages: Tf32PortableStages::S3,
+    }),
+    symbol: "gemm_bi_tn_sm80_mma_tf32_splitk8_v1_m32n32_bk32_s3",
+    tile: (32, 32),
+    bk: 32,
+    stages: 3,
+    partitions: 8,
+    threads: 128,
+    dynamic_shared_bytes: 30_720,
+    register_cap: 96,
+    occupancy_gate: 3,
+};
+pub const TF32_TN_SPLITK8_M32_S4_SPEC: Tf32SplitKSpec = Tf32SplitKSpec {
+    op: ResolvedGemmOp::Tn,
+    route: Tf32PhysicalRoute::MmaTf32RnaSplitK8V1(Tf32PortableRoute {
+        tile: Tf32PortableTile::M32N32,
+        stages: Tf32PortableStages::S4,
+    }),
+    symbol: "gemm_bi_tn_sm80_mma_tf32_splitk8_v1_m32n32_bk32_s4",
+    tile: (32, 32),
+    bk: 32,
+    stages: 4,
+    partitions: 8,
+    threads: 128,
+    dynamic_shared_bytes: 40_960,
+    register_cap: 96,
+    occupancy_gate: 2,
+};
+/// The TN split-K candidates live in the extension fragment, composed for
+/// the sm80-family targets only; the CC 12.x portable module never carries
+/// them (see `sm80_target_composes_extensions`).
+pub const TF32_SPLITK_EXTENSION_SPECS: [Tf32SplitKSpec; 4] = [
+    TF32_TN_SPLITK8_M64_S2_SPEC,
+    TF32_TN_SPLITK8_M64_S3_SPEC,
+    TF32_TN_SPLITK8_M32_S3_SPEC,
+    TF32_TN_SPLITK8_M32_S4_SPEC,
+];
+
+/// The split-K candidates the portable module carries when `extensions`
+/// says its target composes the extension fragments.
+pub fn tf32_splitk_specs_for(extensions: bool) -> impl Iterator<Item = &'static Tf32SplitKSpec> {
+    TF32_SPLITK_CANDIDATE_SPECS.iter().chain(
+        if extensions {
+            &TF32_SPLITK_EXTENSION_SPECS[..]
+        } else {
+            &[]
+        }
+        .iter(),
+    )
+}
+
+/// Every split-K candidate the portable module can carry on any target.
+pub fn tf32_splitk_specs_all() -> impl Iterator<Item = &'static Tf32SplitKSpec> {
+    tf32_splitk_specs_for(true)
+}
+
 pub fn tf32_splitk_spec(
     op: ResolvedGemmOp,
     route: Tf32PhysicalRoute,
 ) -> Result<&'static Tf32SplitKSpec, String> {
-    TF32_SPLITK_CANDIDATE_SPECS
-        .iter()
+    tf32_splitk_specs_all()
         .find(|spec| spec.op == op && spec.route == route)
         .ok_or_else(|| format!("no TF32 split-K kernel matches {op:?}/{route:?}"))
 }
@@ -2020,7 +2119,10 @@ const fn portable_tf32_dynamic_shared_bytes(
         (ResolvedGemmOp::Nn, Tf32PortableTile::M16N16) => 5_376,
         (ResolvedGemmOp::Tn, Tf32PortableTile::M16N16) => 6_144,
         (ResolvedGemmOp::Nt, Tf32PortableTile::M16N16) => 4_608,
+        (ResolvedGemmOp::Tn, Tf32PortableTile::M32N32) => 10_240,
         (_, Tf32PortableTile::M32N32) => 9_216,
+        // Unpadded XOR-swizzled stages: 128 x 32 + 32 x 128 floats.
+        (_, Tf32PortableTile::M128N128) => 32_768,
     };
     stage_bytes * stages.count() as u32
 }
@@ -2523,6 +2625,80 @@ macro_rules! sm120_tf32_specs {
 const SM80_TF32_NN: [Tf32KernelSpec; 6] = portable_tf32_specs!(ResolvedGemmOp::Nn, "nn");
 const SM80_TF32_TN: [Tf32KernelSpec; 6] = portable_tf32_specs!(ResolvedGemmOp::Tn, "tn");
 const SM80_TF32_NT: [Tf32KernelSpec; 6] = portable_tf32_specs!(ResolvedGemmOp::Nt, "nt");
+/// The portable extension fragment's TF32 routes: composed into the module
+/// for every sm80-family target except CC 12.x, so they sit outside
+/// [`SM80_TF32_ROUTE_SPECS`] and join it through [`tf32_route_specs_for`].
+pub const SM80_TF32_WIDE_ROUTE_SPECS: [Tf32KernelSpec; 1] = [Tf32KernelSpec {
+    op: ResolvedGemmOp::Nn,
+    route: Tf32PhysicalRoute::MmaTf32RnaV1(Tf32PortableRoute {
+        tile: Tf32PortableTile::M128N128,
+        stages: Tf32PortableStages::S3,
+    }),
+    symbol: "gemm_bi_nn_sm80_mma_tf32_v1_m128n128_bk32_s3",
+    module_kind: ModuleKind::TriadSm80,
+    instruction_family: ResolvedInstructionFamily::MmaSync,
+    instruction_shape: ResolvedInstructionShape { m: 16, n: 8, k: 8 },
+    operand_conversion: ResolvedOperandConversion::RegisterCvtRnaTf32F32V1,
+    tile: (128, 128),
+    bk: 32,
+    map_bk: 32,
+    stages: 3,
+    threads: 256,
+    dynamic_shared_bytes: portable_tf32_dynamic_shared_bytes(
+        ResolvedGemmOp::Nn,
+        Tf32PortableTile::M128N128,
+        Tf32PortableStages::S3,
+    ),
+    tensor_map_revision: 0,
+    schedule_revision: TF32_PORTABLE_SCHEDULE_REVISION,
+}];
+
+/// Whether the portable module compiled for `arch` composes the extension
+/// fragments (the tc64 TN stream-K twin and the wide TF32 tile). CC 12.x
+/// boards run the SM120 kernels and keep their portable module byte-identical
+/// to the one their TF32 cohort's portable twin was frozen against.
+pub fn sm80_target_composes_extensions(arch: &str) -> bool {
+    !matches!(arch, "sm_120" | "compute_120" | "sm_121" | "compute_121")
+}
+
+/// The same fact from a board's compute capability, for harnesses that hold
+/// the device rather than the module target.
+pub fn portable_extensions_composed_for_cc(compute_capability: (u32, u32)) -> bool {
+    compute_capability.0 != 12
+}
+
+/// The extension routes of a module: the portable module's wide tile, and
+/// nothing for the others.
+pub fn tf32_extension_route_specs(module_kind: ModuleKind) -> &'static [Tf32KernelSpec] {
+    match module_kind {
+        ModuleKind::TriadSm80 => &SM80_TF32_WIDE_ROUTE_SPECS,
+        _ => &[],
+    }
+}
+
+/// The routes a module carries when `extensions` says its target composes
+/// the extension fragments.
+pub fn tf32_route_specs_for(
+    module_kind: ModuleKind,
+    extensions: bool,
+) -> impl Iterator<Item = &'static Tf32KernelSpec> {
+    tf32_route_specs(module_kind).iter().chain(
+        if extensions {
+            tf32_extension_route_specs(module_kind)
+        } else {
+            &[]
+        }
+        .iter(),
+    )
+}
+
+/// Every route a module can carry on any target.
+pub fn tf32_route_specs_all(
+    module_kind: ModuleKind,
+) -> impl Iterator<Item = &'static Tf32KernelSpec> {
+    tf32_route_specs_for(module_kind, true)
+}
+
 pub const SM80_TF32_ROUTE_SPECS: [Tf32KernelSpec; 18] = [
     SM80_TF32_NN[0],
     SM80_TF32_NN[1],
@@ -2839,9 +3015,8 @@ pub fn tf32_kernel_spec(
         _ => {}
     }
     let key = route.spec_key();
-    let mut matches = tf32_route_specs(route.module_kind())
-        .iter()
-        .filter(|spec| spec.op == op && spec.route == key);
+    let mut matches =
+        tf32_route_specs_all(route.module_kind()).filter(|spec| spec.op == op && spec.route == key);
     let Some(spec) = matches.next() else {
         return Err(format!("no TF32 kernel matches {op:?}/{route:?}"));
     };
@@ -6760,8 +6935,9 @@ mod tests {
         Sm90aOp, Sm90aShape, Sm90aWarpgroupSchedule, Sm100MapRequest, Sm100Op, Sm100Schedule,
         Sm100Shape, Sm100Stages, Sm100Tile, Sm120Bk, Sm120Op, Sm120Stages, Sm120Tile,
         TF32_NT_SPLITK4_S4_SPEC, TF32_NT_SPLITK8_S3_SPEC, TF32_PORTABLE_SCHEDULE_REVISION,
-        TF32_SCHEDULE_REVISION, TF32_SPLITK_CANDIDATE_SPECS, TF32_SPLITK2_SPEC, TF32_SPLITK4_SPEC,
-        TF32_TENSOR_MAP_REVISION, Tf32EncodedMapIdentity, Tf32MapBinding, Tf32OperandLayout,
+        TF32_SCHEDULE_REVISION, TF32_SPLITK_CANDIDATE_SPECS, TF32_SPLITK_EXTENSION_SPECS,
+        TF32_SPLITK2_SPEC, TF32_SPLITK4_SPEC, TF32_TENSOR_MAP_REVISION,
+        TF32_TN_SPLITK8_M32_S3_SPEC, Tf32EncodedMapIdentity, Tf32MapBinding, Tf32OperandLayout,
         Tf32PhysicalRoute, Tf32PortableRoute, Tf32PortableStages, Tf32PortableTile,
         Tf32QualifiedModule, Tf32Sm90aRoute, Tf32Sm100Route, Tf32Sm120Route, Tf32Sm120Stages,
         Tf32Sm120Tile, Tf32TensorMap, Tf32TensorMapFormat, Tf32TensorMapKey, Tf32TensorOrigins,
@@ -6769,9 +6945,9 @@ mod tests {
         checked_grid_product, checked_u32, decode_sm90a_tf32_descriptor, sm90a_tensor_map_keys,
         sm100_operand_layouts, sm100_tensor_map_keys, sm100_tf32_instruction_descriptor,
         tf32_kernel_spec, tf32_operand_layouts, tf32_route_specs, tf32_splitk_partition_bounds,
-        tf32_splitk_spec, tf32_subview_plan, validate_allocation_domain, validate_bias_preseed,
-        validate_sm100_issued_coordinates, validate_tf32_issued_coordinates,
-        zeroed_tensor_map_sentinel,
+        tf32_splitk_spec, tf32_splitk_specs_all, tf32_splitk_specs_for, tf32_subview_plan,
+        validate_allocation_domain, validate_bias_preseed, validate_sm100_issued_coordinates,
+        validate_tf32_issued_coordinates, zeroed_tensor_map_sentinel,
     };
 
     const TEST_ALLOCATION_DOMAIN: AllocationDomain = AllocationDomain {
@@ -7286,6 +7462,85 @@ mod tests {
     }
 
     #[test]
+    fn portable_tf32_splitk_extension_inventory_covers_tn_candidates_exactly() {
+        let actual = TF32_SPLITK_EXTENSION_SPECS
+            .iter()
+            .map(|spec| {
+                (
+                    spec.op,
+                    spec.symbol,
+                    spec.tile,
+                    spec.stages,
+                    spec.partitions,
+                    spec.dynamic_shared_bytes,
+                    spec.register_cap,
+                    spec.occupancy_gate,
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            actual,
+            [
+                (
+                    ResolvedGemmOp::Tn,
+                    "gemm_bi_tn_sm80_mma_tf32_splitk8_v1_m64n64_bk32_s2",
+                    (64, 64),
+                    2,
+                    8,
+                    36_864,
+                    128,
+                    2,
+                ),
+                (
+                    ResolvedGemmOp::Tn,
+                    "gemm_bi_tn_sm80_mma_tf32_splitk8_v1_m64n64_bk32_s3",
+                    (64, 64),
+                    3,
+                    8,
+                    55_296,
+                    128,
+                    1,
+                ),
+                (
+                    ResolvedGemmOp::Tn,
+                    "gemm_bi_tn_sm80_mma_tf32_splitk8_v1_m32n32_bk32_s3",
+                    (32, 32),
+                    3,
+                    8,
+                    30_720,
+                    96,
+                    3,
+                ),
+                (
+                    ResolvedGemmOp::Tn,
+                    "gemm_bi_tn_sm80_mma_tf32_splitk8_v1_m32n32_bk32_s4",
+                    (32, 32),
+                    4,
+                    8,
+                    40_960,
+                    96,
+                    2,
+                ),
+            ]
+        );
+        assert!(TF32_SPLITK_EXTENSION_SPECS.iter().all(|spec| spec.route
+            == Tf32PhysicalRoute::MmaTf32RnaSplitK8V1(Tf32PortableRoute {
+                tile: match spec.tile {
+                    (64, 64) => Tf32PortableTile::M64N64,
+                    _ => Tf32PortableTile::M32N32,
+                },
+                stages: match spec.stages {
+                    2 => Tf32PortableStages::S2,
+                    3 => Tf32PortableStages::S3,
+                    _ => Tf32PortableStages::S4,
+                },
+            })));
+        assert_eq!(tf32_splitk_specs_for(false).count(), 6);
+        assert_eq!(tf32_splitk_specs_all().count(), 10);
+        assert!(tf32_splitk_specs_for(false).all(|spec| spec.op != ResolvedGemmOp::Tn));
+    }
+
+    #[test]
     fn portable_tf32_splitk_lookup_and_partitioning_are_operation_aware() {
         let p4 = Tf32PhysicalRoute::MmaTf32RnaSplitK4V1(Tf32PortableRoute {
             tile: Tf32PortableTile::M16N32,
@@ -7306,7 +7561,10 @@ mod tests {
             &TF32_NT_SPLITK8_S3_SPEC
         );
         assert!(tf32_splitk_spec(ResolvedGemmOp::Nn, p8).is_err());
-        assert!(tf32_splitk_spec(ResolvedGemmOp::Tn, p8).is_err());
+        assert_eq!(
+            tf32_splitk_spec(ResolvedGemmOp::Tn, p8).unwrap(),
+            &TF32_TN_SPLITK8_M32_S3_SPEC
+        );
         assert_eq!(
             (0..8)
                 .map(|partition| tf32_splitk_partition_bounds(1_536, 8, partition).unwrap())

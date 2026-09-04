@@ -437,7 +437,7 @@ fn sm80_blob() -> String {
 }
 
 /// The portable module as every non-CC-12 target composes it: sm80.cu plus
-/// the tc64 TN stream-K fragment.
+/// the extension fragments (the tc64 TN stream-K twin and the wide TF32 tile).
 fn sm80_streamk_blob() -> String {
     compose(&[
         include_str!("../kernels/_typed_prelude.cuh"),
@@ -447,7 +447,79 @@ fn sm80_streamk_blob() -> String {
         include_str!("../kernels/gemm_bi_triad/mma16.cuh"),
         include_str!("../kernels/gemm_bi_triad/sm80.cu"),
         include_str!("../kernels/gemm_bi_triad/sm80_streamk.cu"),
+        include_str!("../kernels/gemm_bi_triad/sm80_tf32_wide.cu"),
+        include_str!("../kernels/gemm_bi_triad/sm80_tn_splitk.cu"),
     ])
+}
+
+/// The exports the extension fragments add to the portable module.
+const SM80_EXTENSION_SYMBOLS: [&str; 7] = [
+    "gemm_bi_tn_tc64_streamk_bf16",
+    "gemm_bi_tn_tc64_streamk_f16",
+    "gemm_bi_nn_sm80_mma_tf32_v1_m128n128_bk32_s3",
+    "gemm_bi_tn_sm80_mma_tf32_splitk8_v1_m64n64_bk32_s2",
+    "gemm_bi_tn_sm80_mma_tf32_splitk8_v1_m64n64_bk32_s3",
+    "gemm_bi_tn_sm80_mma_tf32_splitk8_v1_m32n32_bk32_s3",
+    "gemm_bi_tn_sm80_mma_tf32_splitk8_v1_m32n32_bk32_s4",
+];
+
+/// Every sm80-family target composes the extension fragments and exports
+/// each of their kernels exactly once; sm_89 also assembles them without
+/// spills or a stack frame.
+#[test]
+fn sm80_extension_kernels_compile_for_every_portable_target() {
+    for arch in [
+        "sm_80", "sm_86", "sm_87", "sm_89", "sm_90a", "sm_100a", "sm_110a",
+    ] {
+        let ptx = compile_module_for("TriadSm80+extensions", sm80_streamk_blob(), arch);
+        for symbol in SM80_EXTENSION_SYMBOLS {
+            assert_eq!(
+                ptx.matches(&format!(".entry {symbol}(")).count(),
+                1,
+                "{arch} must export {symbol} exactly once"
+            );
+        }
+    }
+    // The assembler pass runs on the sm_80 image: the helper assembles for
+    // sm_80, and the register file the spill census measures is the same on
+    // every sm80-family part.
+    let ptx = compile_module_for("TriadSm80+extensions", sm80_streamk_blob(), "sm_80");
+    let (report, _) = assemble_and_disassemble_sm80_scalar(&ptx);
+    let mut current: Option<&str> = None;
+    let mut seen = std::collections::BTreeSet::new();
+    for line in report.lines() {
+        if let Some(rest) = line.split_once("Compiling entry function '") {
+            current = SM80_EXTENSION_SYMBOLS
+                .iter()
+                .copied()
+                .find(|symbol| rest.1.starts_with(symbol));
+        }
+        if let Some(symbol) = current
+            && (line.contains(" bytes spill ") || line.contains(" bytes stack frame"))
+        {
+            for marker in [
+                " bytes stack frame",
+                " bytes spill stores",
+                " bytes spill loads",
+            ] {
+                if let Some(head) = line.split(marker).next()
+                    && let Some(value) = head
+                        .split_whitespace()
+                        .last()
+                        .and_then(|v| v.parse::<u64>().ok())
+                    && line.contains(marker)
+                {
+                    assert_eq!(value, 0, "{symbol} uses local resources: {line}");
+                }
+            }
+            seen.insert(symbol);
+        }
+    }
+    assert_eq!(
+        seen.len(),
+        SM80_EXTENSION_SYMBOLS.len(),
+        "ptxas reported resources for {seen:?}"
+    );
 }
 
 fn sm90a_blob() -> String {
@@ -2134,7 +2206,7 @@ fn module_sources() -> [(&'static str, String); 4] {
         ("Fixed", fixed_blob()),
         ("TriadScalar", scalar_blob()),
         ("TriadSm80", sm80_blob()),
-        ("TriadSm80+streamk", sm80_streamk_blob()),
+        ("TriadSm80+extensions", sm80_streamk_blob()),
     ]
 }
 

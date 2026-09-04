@@ -12,9 +12,10 @@ use mamba_rs::mamba_ssm::gpu::context::{BiGemmFamily, F32TriadPolicy, GpuCtx};
 use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
 use mamba_rs::mamba_ssm::gpu::gemm_bi_triad::{
     PhysicalQualificationF32Epilogue, PhysicalQualificationRequest, PhysicalQualificationRoute,
-    QualifiedPhysicalLaunch, Tf32PhysicalRoute, Tf32PortableRoute, Tf32PortableStages,
-    Tf32PortableTile, Tf32QualifiedModule, presize_physical_qualification_suite,
-    qualify_physical_launch, tf32_route_specs,
+    QualifiedPhysicalLaunch, TF32_SPLITK_EXTENSION_SPECS, Tf32PhysicalRoute, Tf32PortableRoute,
+    Tf32PortableStages, Tf32PortableTile, Tf32QualifiedModule, portable_extensions_composed_for_cc,
+    presize_physical_qualification_suite, qualify_physical_launch, tf32_extension_route_specs,
+    tf32_route_specs, tf32_route_specs_all,
 };
 use mamba_rs::mamba_ssm::gpu::kernel_identity::{
     GemmRouteIdentity, ModuleKind, ResolvedGemmOp, digest_hex,
@@ -817,7 +818,7 @@ fn check_numeric_accuracy(actual: &[u32], reference: &[u32]) -> Result<(), Strin
         let tolerance = 0.0025 * (1.0 + reference.abs());
         if !actual.is_finite() || !reference.is_finite() || (actual - reference).abs() > tolerance {
             return Err(format!(
-                "candidate output {index} was {actual}, portable reference {reference}, tolerance {tolerance}"
+                "candidate output {index} was {actual}, reference {reference}, tolerance {tolerance}"
             ));
         }
     }
@@ -1061,13 +1062,45 @@ fn split_candidates(op: ResolvedGemmOp) -> Vec<Candidate> {
                 module: ModuleKind::TriadSm80,
             },
         ],
-        ResolvedGemmOp::Tn => Vec::new(),
+        ResolvedGemmOp::Tn => vec![
+            Candidate {
+                route: Tf32PhysicalRoute::MmaTf32RnaSplitK8V1(route(
+                    Tf32PortableTile::M64N64,
+                    Tf32PortableStages::S2,
+                )),
+                symbol: "gemm_bi_tn_sm80_mma_tf32_splitk8_v1_m64n64_bk32_s2",
+                module: ModuleKind::TriadSm80,
+            },
+            Candidate {
+                route: Tf32PhysicalRoute::MmaTf32RnaSplitK8V1(route(
+                    Tf32PortableTile::M64N64,
+                    Tf32PortableStages::S3,
+                )),
+                symbol: "gemm_bi_tn_sm80_mma_tf32_splitk8_v1_m64n64_bk32_s3",
+                module: ModuleKind::TriadSm80,
+            },
+            Candidate {
+                route: Tf32PhysicalRoute::MmaTf32RnaSplitK8V1(route(
+                    Tf32PortableTile::M32N32,
+                    Tf32PortableStages::S3,
+                )),
+                symbol: "gemm_bi_tn_sm80_mma_tf32_splitk8_v1_m32n32_bk32_s3",
+                module: ModuleKind::TriadSm80,
+            },
+            Candidate {
+                route: Tf32PhysicalRoute::MmaTf32RnaSplitK8V1(route(
+                    Tf32PortableTile::M32N32,
+                    Tf32PortableStages::S4,
+                )),
+                symbol: "gemm_bi_tn_sm80_mma_tf32_splitk8_v1_m32n32_bk32_s4",
+                module: ModuleKind::TriadSm80,
+            },
+        ],
     }
 }
 
 fn candidates(op: ResolvedGemmOp) -> Vec<Candidate> {
-    let mut candidates = tf32_route_specs(ModuleKind::TriadSm80)
-        .iter()
+    let mut candidates = tf32_route_specs_all(ModuleKind::TriadSm80)
         .filter(|spec| spec.op == op)
         .map(|spec| Candidate {
             route: spec.route,
@@ -1111,6 +1144,7 @@ fn tma_strides_are_representable(cell: Cell) -> bool {
 fn candidate_inventory(
     cell: Cell,
     specialized_bound: bool,
+    portable_extensions: bool,
 ) -> (Vec<Candidate>, Vec<CandidateExclusion>) {
     let output_elements = match cell.op {
         ResolvedGemmOp::Nn => cell.dims.0.checked_mul(cell.dims.2),
@@ -1128,10 +1162,22 @@ fn candidate_inventory(
         let tma_fits =
             candidate.module != ModuleKind::TriadSm120 || tma_strides_are_representable(cell);
         let module_bound = candidate.module != ModuleKind::TriadSm120 || specialized_bound;
+        let extension_composed = portable_extensions
+            || !(tf32_extension_route_specs(ModuleKind::TriadSm80)
+                .iter()
+                .any(|spec| spec.symbol == candidate.symbol)
+                || TF32_SPLITK_EXTENSION_SPECS
+                    .iter()
+                    .any(|spec| spec.symbol == candidate.symbol));
         if !module_bound {
             excluded.push(CandidateExclusion {
                 symbol: candidate.symbol,
                 reason: "specialized_module_unbound",
+            });
+        } else if !extension_composed {
+            excluded.push(CandidateExclusion {
+                symbol: candidate.symbol,
+                reason: "portable_extension_not_composed",
             });
         } else if !splitk_fits {
             excluded.push(CandidateExclusion {
@@ -1151,7 +1197,7 @@ fn candidate_inventory(
 }
 
 fn candidates_for_cell(cell: Cell) -> Vec<Candidate> {
-    candidate_inventory(cell, true).0
+    candidate_inventory(cell, true, true).0
 }
 
 #[derive(Clone, Debug)]
@@ -1668,7 +1714,11 @@ fn run_cell(device: &GpuDevice, cell: Cell, quiet: &QuietGpu) -> Result<CellResu
                 cell.id
             )
         })?;
-    let (candidates, mut excluded_candidates) = candidate_inventory(cell, specialized_bound);
+    let (candidates, mut excluded_candidates) = candidate_inventory(
+        cell,
+        specialized_bound,
+        portable_extensions_composed_for_cc(device.compute_capability),
+    );
 
     let mut discovery = BTreeMap::new();
     let mut final_stats = BTreeMap::new();
@@ -1696,10 +1746,21 @@ fn run_cell(device: &GpuDevice, cell: Cell, quiet: &QuietGpu) -> Result<CellResu
         );
         // A candidate outside the numeric gate is excluded from this cell
         // with its reason and never timed; the other candidates still run.
+        // Candidates of the reference family must reproduce the forced
+        // portable bits; the split and stream families sum partials in a
+        // different order and are held to the tolerance against the exact
+        // scalar output, not the tiled TF32 reference: over a ten-thousand-row
+        // reduction the tiled kernel itself drifts past the tolerance on a
+        // few elements while the partial sums land within a tenth of it.
+        let gate_reference = if spec.shares_reference_bits() {
+            &reference_bits
+        } else {
+            &scalar_reference_bits
+        };
         if let Err(error) = bit_gate(
             &mut candidate,
             &candidate_ctx,
-            &reference_bits,
+            gate_reference,
             spec.shares_reference_bits(),
         ) {
             eprintln!("{} {} bit gate: {error}", cell.id, spec.symbol);
@@ -1761,7 +1822,7 @@ fn run_cell(device: &GpuDevice, cell: Cell, quiet: &QuietGpu) -> Result<CellResu
         bit_gate(
             &mut candidate,
             &candidate_ctx,
-            &reference_bits,
+            gate_reference,
             spec.shares_reference_bits(),
         )
         .map_err(|error| format!("{} {} final bit gate: {error}", cell.id, spec.symbol))?;
@@ -2046,8 +2107,8 @@ fn qualification_plan_is_exact() {
             .count(),
         12
     );
-    assert_eq!(candidates(ResolvedGemmOp::Nn).len(), 14);
-    assert_eq!(candidates(ResolvedGemmOp::Tn).len(), 13);
+    assert_eq!(candidates(ResolvedGemmOp::Nn).len(), 15);
+    assert_eq!(candidates(ResolvedGemmOp::Tn).len(), 17);
     assert_eq!(candidates(ResolvedGemmOp::Nt).len(), 15);
     assert_eq!(DISCOVERY_WINDOWS, 21);
     assert_eq!(FINAL_WINDOWS, 101);
@@ -2171,8 +2232,14 @@ fn split_candidate_inventory_is_exact_and_operation_scoped() {
     let tn = split_candidates(ResolvedGemmOp::Tn);
     let nt = split_candidates(ResolvedGemmOp::Nt);
     assert_eq!(nn.len(), 2);
-    assert!(tn.is_empty());
+    assert_eq!(tn.len(), 4);
     assert_eq!(nt.len(), 4);
+    assert!(tn.iter().all(|candidate| candidate.symbol.contains("_tn_")));
+    assert!(tn.iter().all(|candidate| {
+        TF32_SPLITK_EXTENSION_SPECS
+            .iter()
+            .any(|spec| spec.symbol == candidate.symbol && spec.route == candidate.route)
+    }));
     assert!(nn.iter().all(|candidate| candidate.symbol.contains("_nn_")));
     assert!(nt.iter().all(|candidate| candidate.symbol.contains("_nt_")));
     assert!(
@@ -2185,12 +2252,12 @@ fn split_candidate_inventory_is_exact_and_operation_scoped() {
 #[test]
 fn split_candidates_that_exceed_the_fixed_workspace_are_not_timed() {
     assert!(DISPATCH_SOURCE.contains("pub(super) const SPLITK_SCRATCH_CAP: usize = 1 << 23;"));
-    assert_eq!(candidates_for_cell(CELLS[0]).len(), 14);
-    assert_eq!(candidates_for_cell(CELLS[9]).len(), 13);
-    assert_eq!(candidates_for_cell(CELLS[14]).len(), 13);
+    assert_eq!(candidates_for_cell(CELLS[0]).len(), 15);
+    assert_eq!(candidates_for_cell(CELLS[9]).len(), 14);
+    assert_eq!(candidates_for_cell(CELLS[14]).len(), 14);
     assert_eq!(candidates_for_cell(CELLS[17]).len(), 11);
-    assert_eq!(candidates_for_cell(CELLS[2]).len(), 8);
-    assert_eq!(candidates_for_cell(CELLS[3]).len(), 8);
+    assert_eq!(candidates_for_cell(CELLS[2]).len(), 9);
+    assert_eq!(candidates_for_cell(CELLS[3]).len(), 9);
     for cell in [CELLS[2], CELLS[3]] {
         assert!(
             candidates_for_cell(cell)
@@ -2298,23 +2365,23 @@ fn cell_artifact_schema_has_exact_candidate_and_stat_counts() {
 
     assert!(json.starts_with(&format!("{{\"schema\":\"{SCHEMA}\"")));
     assert!(json_delimiters_are_balanced(&json));
-    assert_eq!(json.matches("\"symbol\":").count(), 15);
-    assert_eq!(json.matches("\"discovery\":").count(), 14);
-    assert_eq!(json.matches("\"final\":").count(), 14);
-    assert_eq!(json.matches("\"order_stats\":").count(), 14);
-    assert_eq!(json.matches("\"raw_samples\":").count(), 14);
-    assert_eq!(json.matches("\"qualification_identity\":").count(), 14);
+    assert_eq!(json.matches("\"symbol\":").count(), 16);
+    assert_eq!(json.matches("\"discovery\":").count(), 15);
+    assert_eq!(json.matches("\"final\":").count(), 15);
+    assert_eq!(json.matches("\"order_stats\":").count(), 15);
+    assert_eq!(json.matches("\"raw_samples\":").count(), 15);
+    assert_eq!(json.matches("\"qualification_identity\":").count(), 15);
     assert_eq!(json.matches("\"specialized_identity\":").count(), 1);
     assert_eq!(json.matches("\"portable_identity\":null").count(), 1);
-    assert_eq!(json.matches("\"iterations\":").count(), 14);
-    assert_eq!(json.matches("\"ab\":").count(), 112);
-    assert_eq!(json.matches("\"ba\":").count(), 112);
-    assert_eq!(json.matches("\"scalar_us\":").count(), 112);
-    assert_eq!(json.matches("\"candidate_us\":").count(), 112);
-    assert_eq!(json.matches("\"speedup\":").count(), 112);
+    assert_eq!(json.matches("\"iterations\":").count(), 15);
+    assert_eq!(json.matches("\"ab\":").count(), 120);
+    assert_eq!(json.matches("\"ba\":").count(), 120);
+    assert_eq!(json.matches("\"scalar_us\":").count(), 120);
+    assert_eq!(json.matches("\"candidate_us\":").count(), 120);
+    assert_eq!(json.matches("\"speedup\":").count(), 120);
     assert!(json.contains("{\"scalar_us\":4,\"candidate_us\":2,\"speedup\":2}"));
-    assert_eq!(json.matches("_median_speedup\"").count(), 56);
-    assert_eq!(json.matches("_p05_speedup\"").count(), 28);
+    assert_eq!(json.matches("_median_speedup\"").count(), 60);
+    assert_eq!(json.matches("_p05_speedup\"").count(), 30);
     assert!(json.contains("\"dims\":[64,384,1536]"));
     assert!(json.contains("\"epilogue\":{\"alpha\":1,\"beta\":0,\"bias\":true}"));
     assert!(json.contains(
@@ -2334,4 +2401,109 @@ fn split_numeric_gate_accepts_rounding_drift_and_rejects_corruption() {
     let corrupt = [f32::INFINITY.to_bits(), (-3.5_f32).to_bits()];
     assert!(check_numeric_accuracy(&corrupt, &reference).is_err());
     assert!(check_numeric_accuracy(&reference[..1], &reference).is_err());
+}
+
+/// Element-level view of the numeric gate for one cell: the TN split-K
+/// candidate against the tiled portable reference and the exact scalar
+/// output. `MAMBA_RS_TF32_DIAG_CELL` names the cell, `MAMBA_RS_TF32_DIAG_SYMBOL`
+/// the candidate; the report lists the mismatch counts of every pairing and
+/// the first mismatching elements with their row and column.
+#[test]
+#[ignore = "diagnostic, needs an idle CUDA board"]
+fn tf32_candidate_mismatch_map() -> Result<(), String> {
+    let cell_id = std::env::var("MAMBA_RS_TF32_DIAG_CELL").unwrap_or("tn_batch_input_proj".into());
+    let symbol = std::env::var("MAMBA_RS_TF32_DIAG_SYMBOL")
+        .unwrap_or("gemm_bi_tn_sm80_mma_tf32_splitk8_v1_m64n64_bk32_s3".into());
+    let cell = *CELLS
+        .iter()
+        .chain(PROJECTION_CELLS.iter())
+        .find(|cell| cell.id == cell_id)
+        .ok_or_else(|| format!("unknown cell {cell_id}"))?;
+    let candidate_spec = candidates(cell.op)
+        .into_iter()
+        .find(|candidate| candidate.symbol == symbol)
+        .ok_or_else(|| format!("unknown candidate {symbol}"))?;
+    let device = GpuDevice::new(0)?;
+    let candidate_ctx = configure(&device, F32TriadPolicy::AllowDeterministicTf32V1)?;
+    let scalar_ctx = configure(&device, F32TriadPolicy::ExactScalarFmaV1)?;
+    let reference = portable_reference(&candidate_ctx, cell)?;
+    let mut scalar = qualify(
+        &scalar_ctx,
+        request(
+            cell,
+            PhysicalQualificationRoute::F32Policy(F32TriadPolicy::ExactScalarFmaV1),
+        ),
+    )?;
+    let exact = eager_graph_bits(&mut scalar, &scalar_ctx)?;
+    let mut launch = qualify(
+        &candidate_ctx,
+        request(
+            cell,
+            PhysicalQualificationRoute::Tf32Forced(candidate_spec.route),
+        ),
+    )?;
+    require_route(&launch, candidate_spec.module, Some(candidate_spec.symbol))?;
+    let candidate = eager_graph_bits(&mut launch, &candidate_ctx)?;
+    let columns = match cell.op {
+        ResolvedGemmOp::Nn | ResolvedGemmOp::Tn => cell.dims.2,
+        ResolvedGemmOp::Nt => cell.dims.1,
+    };
+    let value = |bits: u32| f64::from(f32::from_bits(bits));
+    let mismatches = |a: &[u32], b: &[u32]| -> Vec<usize> {
+        a.iter()
+            .zip(b)
+            .enumerate()
+            .filter(|&(_, (&x, &y))| {
+                let (x, y) = (value(x), value(y));
+                (x - y).abs() > 0.0025 * (1.0 + y.abs())
+            })
+            .map(|(index, _)| index)
+            .collect()
+    };
+    let cand_ref = mismatches(&candidate, &reference);
+    let cand_exact = mismatches(&candidate, &exact);
+    let ref_exact = mismatches(&reference, &exact);
+    eprintln!(
+        "{cell_id} {symbol}: elements={} candidate/reference={} candidate/exact={} reference/exact={}",
+        candidate.len(),
+        cand_ref.len(),
+        cand_exact.len(),
+        ref_exact.len()
+    );
+    let mut max_err = (0.0f64, 0usize);
+    for (index, (&x, &y)) in candidate.iter().zip(&exact).enumerate() {
+        let err = (value(x) - value(y)).abs() / (1.0 + value(y).abs());
+        if err > max_err.0 {
+            max_err = (err, index);
+        }
+    }
+    eprintln!(
+        "max relative error candidate/exact {:.5} at {} (row {}, col {})",
+        max_err.0,
+        max_err.1,
+        max_err.1 / columns,
+        max_err.1 % columns
+    );
+    if !cand_exact.is_empty() {
+        let rows: Vec<usize> = cand_exact.iter().map(|i| i / columns).collect();
+        let cols: Vec<usize> = cand_exact.iter().map(|i| i % columns).collect();
+        eprintln!(
+            "candidate/exact mismatch rows {}..{} cols {}..{}",
+            rows.iter().min().unwrap(),
+            rows.iter().max().unwrap(),
+            cols.iter().min().unwrap(),
+            cols.iter().max().unwrap()
+        );
+        for &index in cand_exact.iter().take(12) {
+            eprintln!(
+                "  [{index}] row {} col {}: candidate {} reference {} exact {}",
+                index / columns,
+                index % columns,
+                value(candidate[index]),
+                value(reference[index]),
+                value(exact[index])
+            );
+        }
+    }
+    Ok(())
 }
