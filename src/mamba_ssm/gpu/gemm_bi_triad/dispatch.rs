@@ -854,6 +854,162 @@ const SM89_TF32_EVIDENCE_CELLS: &[Tf32AutoCell] = &[
         S3,
         RequiresVectorAlignmentEvidence,
     ),
+    // The hot training projections of the SM89 census, qualified on the
+    // RTX 6000 Ada (internal/perf/sm89-requal-hot-20260904): prism_out_proj,
+    // prism_input_proj, batch_input_proj, batch_out_proj, rect_tall and
+    // underfill. Three TN cells (prism_out_proj, batch_input_proj,
+    // batch_out_proj) kept the scalar winner: the TN TF32 family has no split
+    // schedule for a 72-tile grid over a ten-thousand-row reduction.
+    // nn_prism_out_proj: gemm_bi_nn_sm80_mma_tf32_v1_m64n64_bk32_s2
+    sm89_tf32_cell(
+        Nn,
+        4621,
+        384,
+        768,
+        M64N64,
+        S2,
+        RequiresNoBiasAndVectorAlignmentEvidence,
+    ),
+    // nt_prism_out_proj: gemm_bi_nt_sm80_mma_tf32_v1_m64n64_bk32_s2
+    sm89_tf32_cell(
+        Nt,
+        4621,
+        768,
+        384,
+        M64N64,
+        S2,
+        RequiresVectorAlignmentEvidence,
+    ),
+    // nn_prism_input_proj: gemm_bi_nn_sm80_mma_tf32_v1_m64n64_bk32_s2
+    sm89_tf32_cell(
+        Nn,
+        4621,
+        384,
+        1024,
+        M64N64,
+        S2,
+        RequiresNoBiasAndVectorAlignmentEvidence,
+    ),
+    // tn_prism_input_proj: gemm_bi_tn_sm80_mma_tf32_v1_m64n64_bk32_s3
+    sm89_tf32_cell(
+        Tn,
+        1024,
+        384,
+        4621,
+        M64N64,
+        S3,
+        RequiresVectorAlignmentEvidence,
+    ),
+    // nt_prism_input_proj: gemm_bi_nt_sm80_mma_tf32_v1_m64n64_bk32_s2
+    sm89_tf32_cell(
+        Nt,
+        4621,
+        1024,
+        384,
+        M64N64,
+        S2,
+        RequiresVectorAlignmentEvidence,
+    ),
+    // nn_batch_input_proj: gemm_bi_nn_sm80_mma_tf32_v1_m64n64_bk32_s2
+    sm89_tf32_cell(
+        Nn,
+        10400,
+        384,
+        384,
+        M64N64,
+        S2,
+        RequiresNoBiasAndVectorAlignmentEvidence,
+    ),
+    // nt_batch_input_proj: gemm_bi_nt_sm80_mma_tf32_v1_m64n64_bk32_s2
+    sm89_tf32_cell(
+        Nt,
+        10400,
+        384,
+        384,
+        M64N64,
+        S2,
+        RequiresVectorAlignmentEvidence,
+    ),
+    // nn_batch_out_proj: gemm_bi_nn_sm80_mma_tf32_v1_m64n64_bk32_s2
+    sm89_tf32_cell(
+        Nn,
+        10400,
+        384,
+        768,
+        M64N64,
+        S2,
+        RequiresNoBiasAndVectorAlignmentEvidence,
+    ),
+    // nt_batch_out_proj: gemm_bi_nt_sm80_mma_tf32_v1_m128n64_bk32_s3
+    sm89_tf32_cell(
+        Nt,
+        10400,
+        768,
+        384,
+        M128N64,
+        S3,
+        RequiresVectorAlignmentEvidence,
+    ),
+    // nn_rect_tall: gemm_bi_nn_sm80_mma_tf32_v1_m64n64_bk32_s2
+    sm89_tf32_cell(
+        Nn,
+        4096,
+        768,
+        512,
+        M64N64,
+        S2,
+        RequiresNoBiasAndVectorAlignmentEvidence,
+    ),
+    // tn_rect_tall: gemm_bi_tn_sm80_mma_tf32_v1_m64n64_bk32_s3
+    sm89_tf32_cell(
+        Tn,
+        512,
+        768,
+        4096,
+        M64N64,
+        S3,
+        RequiresVectorAlignmentEvidence,
+    ),
+    // nt_rect_tall: gemm_bi_nt_sm80_mma_tf32_v1_m128n64_bk32_s3
+    sm89_tf32_cell(
+        Nt,
+        4096,
+        512,
+        768,
+        M128N64,
+        S3,
+        RequiresVectorAlignmentEvidence,
+    ),
+    // nn_underfill: gemm_bi_nn_sm80_mma_tf32_splitk2_v1_m16n32_bk32_s4
+    sm89_tf32_route_cell(
+        Nn,
+        (256, 384, 512),
+        Tf32PhysicalRoute::MmaTf32RnaSplitK2V1(super::contract::Tf32PortableRoute {
+            tile: M16N32,
+            stages: S4,
+        }),
+        RequiresNoBiasAndVectorAlignmentEvidence,
+    ),
+    // tn_underfill: gemm_bi_tn_sm80_mma_tf32_v1_m16n32_bk32_s4
+    sm89_tf32_cell(
+        Tn,
+        512,
+        384,
+        256,
+        M16N32,
+        S4,
+        RequiresVectorAlignmentEvidence,
+    ),
+    // nt_underfill: gemm_bi_nt_sm80_mma_tf32_v1_m16n32_bk32_s4
+    sm89_tf32_cell(
+        Nt,
+        256,
+        512,
+        384,
+        M16N32,
+        S4,
+        RequiresVectorAlignmentEvidence,
+    ),
 ];
 
 const fn sm120_tf32_streamk_cell(
@@ -10980,7 +11136,7 @@ mod tf32_tests {
 
     #[test]
     fn sm89_tf32_evidence_inventory_encodes_the_missing_operand_gates() {
-        assert_eq!(SM89_TF32_EVIDENCE_CELLS.len(), 43);
+        assert_eq!(SM89_TF32_EVIDENCE_CELLS.len(), 58);
         let mut gate_counts = [0_usize; 4];
         for cell in SM89_TF32_EVIDENCE_CELLS {
             let request = normalized_request(
@@ -11014,7 +11170,7 @@ mod tf32_tests {
                 }
             }
         }
-        assert_eq!(gate_counts, [5, 3, 24, 11]);
+        assert_eq!(gate_counts, [5, 3, 33, 17]);
     }
 
     #[test]
@@ -11497,6 +11653,171 @@ mod tf32_tests {
                 Tf32PhysicalRoute::MmaTf32RnaV1(Tf32PortableRoute {
                     tile: M128N64,
                     stages: S3,
+                }),
+                Align,
+            ),
+            (
+                ResolvedGemmOp::Nn,
+                4621,
+                384,
+                768,
+                Tf32PhysicalRoute::MmaTf32RnaV1(Tf32PortableRoute {
+                    tile: M64N64,
+                    stages: S2,
+                }),
+                BiasAlign,
+            ),
+            (
+                ResolvedGemmOp::Nt,
+                4621,
+                768,
+                384,
+                Tf32PhysicalRoute::MmaTf32RnaV1(Tf32PortableRoute {
+                    tile: M64N64,
+                    stages: S2,
+                }),
+                Align,
+            ),
+            (
+                ResolvedGemmOp::Nn,
+                4621,
+                384,
+                1024,
+                Tf32PhysicalRoute::MmaTf32RnaV1(Tf32PortableRoute {
+                    tile: M64N64,
+                    stages: S2,
+                }),
+                BiasAlign,
+            ),
+            (
+                ResolvedGemmOp::Tn,
+                1024,
+                384,
+                4621,
+                Tf32PhysicalRoute::MmaTf32RnaV1(Tf32PortableRoute {
+                    tile: M64N64,
+                    stages: S3,
+                }),
+                Align,
+            ),
+            (
+                ResolvedGemmOp::Nt,
+                4621,
+                1024,
+                384,
+                Tf32PhysicalRoute::MmaTf32RnaV1(Tf32PortableRoute {
+                    tile: M64N64,
+                    stages: S2,
+                }),
+                Align,
+            ),
+            (
+                ResolvedGemmOp::Nn,
+                10400,
+                384,
+                384,
+                Tf32PhysicalRoute::MmaTf32RnaV1(Tf32PortableRoute {
+                    tile: M64N64,
+                    stages: S2,
+                }),
+                BiasAlign,
+            ),
+            (
+                ResolvedGemmOp::Nt,
+                10400,
+                384,
+                384,
+                Tf32PhysicalRoute::MmaTf32RnaV1(Tf32PortableRoute {
+                    tile: M64N64,
+                    stages: S2,
+                }),
+                Align,
+            ),
+            (
+                ResolvedGemmOp::Nn,
+                10400,
+                384,
+                768,
+                Tf32PhysicalRoute::MmaTf32RnaV1(Tf32PortableRoute {
+                    tile: M64N64,
+                    stages: S2,
+                }),
+                BiasAlign,
+            ),
+            (
+                ResolvedGemmOp::Nt,
+                10400,
+                768,
+                384,
+                Tf32PhysicalRoute::MmaTf32RnaV1(Tf32PortableRoute {
+                    tile: M128N64,
+                    stages: S3,
+                }),
+                Align,
+            ),
+            (
+                ResolvedGemmOp::Nn,
+                4096,
+                768,
+                512,
+                Tf32PhysicalRoute::MmaTf32RnaV1(Tf32PortableRoute {
+                    tile: M64N64,
+                    stages: S2,
+                }),
+                BiasAlign,
+            ),
+            (
+                ResolvedGemmOp::Tn,
+                512,
+                768,
+                4096,
+                Tf32PhysicalRoute::MmaTf32RnaV1(Tf32PortableRoute {
+                    tile: M64N64,
+                    stages: S3,
+                }),
+                Align,
+            ),
+            (
+                ResolvedGemmOp::Nt,
+                4096,
+                512,
+                768,
+                Tf32PhysicalRoute::MmaTf32RnaV1(Tf32PortableRoute {
+                    tile: M128N64,
+                    stages: S3,
+                }),
+                Align,
+            ),
+            (
+                ResolvedGemmOp::Nn,
+                256,
+                384,
+                512,
+                Tf32PhysicalRoute::MmaTf32RnaSplitK2V1(Tf32PortableRoute {
+                    tile: M16N32,
+                    stages: S4,
+                }),
+                BiasAlign,
+            ),
+            (
+                ResolvedGemmOp::Tn,
+                512,
+                384,
+                256,
+                Tf32PhysicalRoute::MmaTf32RnaV1(Tf32PortableRoute {
+                    tile: M16N32,
+                    stages: S4,
+                }),
+                Align,
+            ),
+            (
+                ResolvedGemmOp::Nt,
+                256,
+                512,
+                384,
+                Tf32PhysicalRoute::MmaTf32RnaV1(Tf32PortableRoute {
+                    tile: M16N32,
+                    stages: S4,
                 }),
                 Align,
             ),
