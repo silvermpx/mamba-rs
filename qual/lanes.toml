@@ -70,6 +70,7 @@
 "gemm_bi_sm90_contract" = "gate"
 "gemm_bi_sm90a_triad_census" = "record"
 "gemm_bi_tc" = "contract"
+"gemm_bi_tf32_cohort_binding" = "contract"
 "gemm_bi_tf32_contract" = "contract"
 "gemm_bi_tf32_m16n16_qualification" = "record"
 "gemm_bi_tf32_nn_rect_wide_next_tournament" = "record"
