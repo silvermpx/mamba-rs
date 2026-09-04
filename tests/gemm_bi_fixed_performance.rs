@@ -19,8 +19,12 @@ use mamba_rs::mamba_ssm::gpu::gemm_bi_fixed::{
     fixed_forward_f32_legacy_baseline, fixed_forward_with_tile,
 };
 use mamba_rs::mamba_ssm::gpu::gemm_bi_triad::{
-    PhysicalQualificationRequest, PhysicalQualificationRoute, qualify_physical_launch,
-    tf32_route_specs,
+    PhysicalQualificationRequest, PhysicalQualificationRoute, Sm120Bk, Sm120ForcedRoute,
+    Sm120LaunchOperands, Sm120MapRequest, Sm120Op, Sm120PhysicalRoute, Sm120Shape, Sm120Stages,
+    Sm120Tile, TcTile, Tf32PhysicalRoute, Tf32PortableRoute, Tf32PortableStages, Tf32PortableTile,
+    Tf32Sm120Route, Tf32Sm120Stages, Tf32Sm120Tile, launch_sm120_tma_prepared,
+    prepare_sm120_tensor_maps, prepare_sm120_tma_forced, qualify_physical_launch,
+    resolve_sm120_forced, tf32_route_specs,
 };
 use mamba_rs::mamba_ssm::gpu::graph_capture::capture_into_graph;
 use mamba_rs::mamba_ssm::gpu::kernel_identity::{
@@ -1272,6 +1276,365 @@ fn triad_sm120_tf32_nn_reference_smoke() {
                 "m={} k={} n={} specialized_symbol={} elapsed_us={elapsed_us:.3}",
                 shape.m, shape.k, shape.n, spec.symbol
             );
+        }
+    }
+}
+
+/// One body, two families: the Fixed inference family and the Triad
+/// family carry kernels of the same tile geometry. This census times each
+/// pair on the same NN shapes so the slower body can be retired on evidence.
+#[test]
+#[ignore = "requires a quiet SM120 CUDA device and emits the Fixed/Triad pairwise census"]
+fn fixed_vs_triad_pairwise_census() {
+    fixed_sm120_tf32_bd_environment_preflight("pairwise census")
+        .expect("pairwise census preflight");
+    let shapes = [
+        FixedShape {
+            m: 4621,
+            k: 384,
+            n: 1928,
+        },
+        FixedShape {
+            m: 4621,
+            k: 768,
+            n: 2304,
+        },
+        FixedShape {
+            m: 4621,
+            k: 1928,
+            n: 384,
+        },
+        FixedShape {
+            m: 2048,
+            k: 768,
+            n: 2304,
+        },
+        FixedShape {
+            m: 2048,
+            k: 2304,
+            n: 768,
+        },
+        FixedShape {
+            m: 2048,
+            k: 768,
+            n: 3072,
+        },
+        FixedShape {
+            m: 2048,
+            k: 1536,
+            n: 768,
+        },
+        FixedShape {
+            m: 10400,
+            k: 768,
+            n: 384,
+        },
+    ];
+    let device = GpuDevice::new(0).expect("CUDA device");
+    let ctx = GpuCtx::new(&device).expect("GPU context");
+    let sm120 = matches!(device.compute_capability, (12, 0) | (12, 1));
+    ctx.set_batch_invariant(true);
+    ctx.set_bi_gemm_family(BiGemmFamily::Fixed);
+    ctx.set_f32_triad_policy(F32TriadPolicy::AllowDeterministicTf32V1);
+    let iterations = 200;
+    let triad_us = |request: PhysicalQualificationRequest, label: &str| -> Option<f64> {
+        match qualify_physical_launch(&ctx, request) {
+            Ok(mut qualified) => Some(
+                qualified
+                    .measure_eager_window_ms(&ctx, iterations)
+                    .unwrap_or_else(|error| panic!("measure {label}: {error}"))
+                    * 1000.0
+                    / iterations as f64,
+            ),
+            Err(error) => {
+                println!("triad {label}: unavailable ({error})");
+                None
+            }
+        }
+    };
+    let fixed_us =
+        |operands: FixedFwdOperands, shape: FixedShape, tile: FixedTile| -> Option<f64> {
+            if let Err(error) = fixed_forward_with_tile(&ctx, operands, shape, tile) {
+                println!("fixed {tile:?}: unavailable ({error})");
+                return None;
+            }
+            Some(average_us(&ctx, || {
+                fixed_forward_with_tile(&ctx, operands, shape, tile)
+                    .unwrap_or_else(|error| panic!("forced {tile:?}: {error}"));
+            }))
+        };
+    let report = |shape: FixedShape, pair: &str, fixed: Option<f64>, triad: Option<f64>| {
+        let verdict = match (fixed, triad) {
+            (Some(fixed), Some(triad)) if fixed < triad => {
+                format!("fixed faster by {:.3}x", triad / fixed)
+            }
+            (Some(fixed), Some(triad)) => format!("triad faster by {:.3}x", fixed / triad),
+            _ => "one side unavailable".to_string(),
+        };
+        let show =
+            |value: Option<f64>| value.map_or("n/a".to_string(), |value| format!("{value:.3}"));
+        println!(
+            "m={} k={} n={} pair={pair} fixed_us={} triad_us={} verdict={verdict}",
+            shape.m,
+            shape.k,
+            shape.n,
+            show(fixed),
+            show(triad)
+        );
+    };
+    for shape in shapes {
+        let dims = (shape.m, shape.k, shape.n);
+        // TF32: the five portable bodies and, on SM120, the five TMA bodies.
+        let a = DtypedBuf::zeros(&ctx.stream, shape.m * shape.k, WeightDtype::F32).expect("A");
+        let b = DtypedBuf::zeros(&ctx.stream, shape.k * shape.n, WeightDtype::F32).expect("B");
+        let c = DtypedBuf::zeros(&ctx.stream, shape.m * shape.n, WeightDtype::F32).expect("C");
+        let f32_operands = FixedFwdOperands {
+            c: typed(&c, WeightDtype::F32),
+            x: typed(&a, WeightDtype::F32),
+            w: typed(&b, WeightDtype::F32),
+            bias_ptr: None,
+        };
+        let portable = [
+            (
+                "tf32_m128n64_s2",
+                FixedTile::Tf32M128S2,
+                Tf32PortableTile::M128N64,
+                Tf32PortableStages::S2,
+            ),
+            (
+                "tf32_m128n64_s3",
+                FixedTile::Tf32M128S3,
+                Tf32PortableTile::M128N64,
+                Tf32PortableStages::S3,
+            ),
+            (
+                "tf32_m64n64_s2",
+                FixedTile::Tf32M64S2,
+                Tf32PortableTile::M64N64,
+                Tf32PortableStages::S2,
+            ),
+            (
+                "tf32_m64n64_s3",
+                FixedTile::Tf32M64S3,
+                Tf32PortableTile::M64N64,
+                Tf32PortableStages::S3,
+            ),
+            (
+                "tf32_m16n32_s4",
+                FixedTile::Tf32M16S4,
+                Tf32PortableTile::M16N32,
+                Tf32PortableStages::S4,
+            ),
+        ];
+        for (pair, fixed_tile, tile, stages) in portable {
+            let route = Tf32PhysicalRoute::MmaTf32RnaV1(Tf32PortableRoute { tile, stages });
+            let request = PhysicalQualificationRequest::contiguous(
+                ResolvedGemmOp::Nn,
+                dims,
+                PhysicalQualificationRoute::Tf32Forced(route),
+            );
+            report(
+                shape,
+                pair,
+                fixed_us(f32_operands, shape, fixed_tile),
+                triad_us(request, pair),
+            );
+        }
+        if sm120 {
+            let tma = [
+                (
+                    "tf32_sm120_m128n64_s2",
+                    FixedTile::Tf32Sm120M128S2,
+                    Tf32Sm120Tile::M128N64,
+                    Tf32Sm120Stages::S2,
+                ),
+                (
+                    "tf32_sm120_m128n64_s3",
+                    FixedTile::Tf32Sm120M128S3,
+                    Tf32Sm120Tile::M128N64,
+                    Tf32Sm120Stages::S3,
+                ),
+                (
+                    "tf32_sm120_m64n128_s2",
+                    FixedTile::Tf32Sm120M64N128S2,
+                    Tf32Sm120Tile::M64N128,
+                    Tf32Sm120Stages::S2,
+                ),
+                (
+                    "tf32_sm120_m64n128_s3",
+                    FixedTile::Tf32Sm120M64N128S3,
+                    Tf32Sm120Tile::M64N128,
+                    Tf32Sm120Stages::S3,
+                ),
+                (
+                    "tf32_sm120_m64n64_s2",
+                    FixedTile::Tf32Sm120M64S2,
+                    Tf32Sm120Tile::M64N64,
+                    Tf32Sm120Stages::S2,
+                ),
+            ];
+            for (pair, fixed_tile, tile, stages) in tma {
+                let route =
+                    Tf32PhysicalRoute::Sm120TmaMmaTf32RnaV1(Tf32Sm120Route { tile, stages });
+                let request = PhysicalQualificationRequest::contiguous(
+                    ResolvedGemmOp::Nn,
+                    dims,
+                    PhysicalQualificationRoute::Tf32Forced(route),
+                );
+                report(
+                    shape,
+                    pair,
+                    fixed_us(f32_operands, shape, fixed_tile),
+                    triad_us(request, pair),
+                );
+            }
+        }
+        // Half: the portable 64x64 and 16x32 bodies, and on SM120 the five TMA tiles.
+        for dtype in [WeightDtype::Bf16, WeightDtype::F16] {
+            let a = DtypedBuf::zeros(&ctx.stream, shape.m * shape.k, dtype).expect("A");
+            let b = DtypedBuf::zeros(&ctx.stream, shape.k * shape.n, dtype).expect("B");
+            let c = DtypedBuf::zeros(&ctx.stream, shape.m * shape.n, dtype).expect("C");
+            let half_operands = FixedFwdOperands {
+                c: typed(&c, dtype),
+                x: typed(&a, dtype),
+                w: typed(&b, dtype),
+                bias_ptr: None,
+            };
+            for (pair, fixed_tile, tile) in [
+                ("half_tc64", FixedTile::Tc64, TcTile::Tile64),
+                ("half_tc16", FixedTile::Tc16, TcTile::Thin16),
+            ] {
+                let pair = format!("{pair}_{dtype:?}");
+                let request = PhysicalQualificationRequest::contiguous(
+                    ResolvedGemmOp::Nn,
+                    dims,
+                    PhysicalQualificationRoute::HalfForced { dtype, tile },
+                );
+                report(
+                    shape,
+                    &pair,
+                    fixed_us(half_operands, shape, fixed_tile),
+                    triad_us(request, &pair),
+                );
+            }
+            if !sm120 {
+                continue;
+            }
+            let caps = ctx.kernels.sm120_device_caps().expect("SM120 device caps");
+            let target = ctx.kernels.sm120_target_candidate().expect("SM120 target");
+            let sm120_shape = Sm120Shape::contiguous(Sm120Op::Nn, dims);
+            let tiles = [
+                (
+                    "half_sm120_m64n64_bk64_s2",
+                    FixedSm120HalfTile::M64N64Bk64S2,
+                    Sm120Tile::M64N64,
+                    Sm120Bk::Bk64,
+                    Sm120Stages::S2,
+                ),
+                (
+                    "half_sm120_m64n128_bk64_s2",
+                    FixedSm120HalfTile::M64N128Bk64S2,
+                    Sm120Tile::M64N128,
+                    Sm120Bk::Bk64,
+                    Sm120Stages::S2,
+                ),
+                (
+                    "half_sm120_m128n64_bk32_s3",
+                    FixedSm120HalfTile::M128N64Bk32S3,
+                    Sm120Tile::M128N64,
+                    Sm120Bk::Bk32,
+                    Sm120Stages::S3,
+                ),
+                (
+                    "half_sm120_m128n128_bk32_s2",
+                    FixedSm120HalfTile::M128N128Bk32S2,
+                    Sm120Tile::M128N128,
+                    Sm120Bk::Bk32,
+                    Sm120Stages::S2,
+                ),
+                (
+                    "half_sm120_m128n128_bk32_s3",
+                    FixedSm120HalfTile::M128N128Bk32S3,
+                    Sm120Tile::M128N128,
+                    Sm120Bk::Bk32,
+                    Sm120Stages::S3,
+                ),
+            ];
+            for (pair, fixed_tile, tile, bk, stages) in tiles {
+                let pair = format!("{pair}_{dtype:?}");
+                let physical = Sm120PhysicalRoute { tile, bk, stages };
+                let triad = (|| -> Result<f64, String> {
+                    let route = resolve_sm120_forced(
+                        caps,
+                        Some(target),
+                        Sm120ForcedRoute {
+                            op: Sm120Op::Nn,
+                            dtype,
+                            physical,
+                            shape: sm120_shape,
+                        },
+                    )?
+                    .ok_or_else(|| "route declined".to_string())?;
+                    let maps = prepare_sm120_tensor_maps(
+                        &ctx.stream,
+                        &ctx.kernels,
+                        Sm120MapRequest {
+                            op: Sm120Op::Nn,
+                            dtype,
+                            tile,
+                            bk,
+                            a_ptr: half_operands.x.ptr,
+                            b_ptr: half_operands.w.ptr,
+                            shape: sm120_shape,
+                        },
+                    )?;
+                    let prepared = prepare_sm120_tma_forced(
+                        &ctx.stream,
+                        &ctx.kernels,
+                        route,
+                        &maps,
+                        Sm120LaunchOperands {
+                            output_ptr: half_operands.c.ptr,
+                            bias_ptr: 0,
+                            alpha: 1.0,
+                            beta: 0.0,
+                        },
+                    )?;
+                    for _ in 0..WARMUPS {
+                        launch_sm120_tma_prepared(&ctx.stream, &ctx.kernels, &prepared)?;
+                    }
+                    let start = ctx
+                        .stream
+                        .record_event(Some(cudarc::driver::sys::CUevent_flags::CU_EVENT_DEFAULT))
+                        .map_err(|error| format!("record start: {error:?}"))?;
+                    for _ in 0..iterations {
+                        launch_sm120_tma_prepared(&ctx.stream, &ctx.kernels, &prepared)?;
+                    }
+                    let end = ctx
+                        .stream
+                        .record_event(Some(cudarc::driver::sys::CUevent_flags::CU_EVENT_DEFAULT))
+                        .map_err(|error| format!("record end: {error:?}"))?;
+                    Ok(f64::from(
+                        start
+                            .elapsed_ms(&end)
+                            .map_err(|error| format!("measure: {error:?}"))?,
+                    ) * 1000.0
+                        / iterations as f64)
+                })();
+                let triad = match triad {
+                    Ok(value) => Some(value),
+                    Err(error) => {
+                        println!("triad {pair}: unavailable ({error})");
+                        None
+                    }
+                };
+                report(
+                    shape,
+                    &pair,
+                    fixed_us(half_operands, shape, FixedTile::Sm120Half(fixed_tile)),
+                    triad,
+                );
+            }
         }
     }
 }
