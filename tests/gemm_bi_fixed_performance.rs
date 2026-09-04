@@ -23,8 +23,8 @@ use mamba_rs::mamba_ssm::gpu::gemm_bi_triad::{
     Sm120LaunchOperands, Sm120MapRequest, Sm120Op, Sm120PhysicalRoute, Sm120Shape, Sm120Stages,
     Sm120Tile, TcTile, Tf32PhysicalRoute, Tf32PortableRoute, Tf32PortableStages, Tf32PortableTile,
     Tf32Sm120Route, Tf32Sm120Stages, Tf32Sm120Tile, launch_sm120_tma_prepared,
-    prepare_sm120_tensor_maps, prepare_sm120_tma_forced, qualify_physical_launch,
-    resolve_sm120_forced, tf32_route_specs,
+    prepare_sm120_tensor_maps, prepare_sm120_tma_forced, presize_physical_qualification_suite,
+    qualify_physical_launch, resolve_sm120_forced, tf32_route_specs,
 };
 use mamba_rs::mamba_ssm::gpu::graph_capture::capture_into_graph;
 use mamba_rs::mamba_ssm::gpu::kernel_identity::{
@@ -1337,6 +1337,28 @@ fn fixed_vs_triad_pairwise_census() {
     ctx.set_bi_gemm_family(BiGemmFamily::Fixed);
     ctx.set_f32_triad_policy(F32TriadPolicy::AllowDeterministicTf32V1);
     let iterations = 200;
+    // The half routes stage an upcast scratch that cannot grow once a
+    // qualification has captured a graph: size it for every request first.
+    let half_requests = shapes
+        .iter()
+        .flat_map(|shape| {
+            [WeightDtype::Bf16, WeightDtype::F16]
+                .into_iter()
+                .flat_map(move |dtype| {
+                    [TcTile::Tile64, TcTile::Thin16]
+                        .into_iter()
+                        .map(move |tile| {
+                            PhysicalQualificationRequest::contiguous(
+                                ResolvedGemmOp::Nn,
+                                (shape.m, shape.k, shape.n),
+                                PhysicalQualificationRoute::HalfForced { dtype, tile },
+                            )
+                        })
+                })
+        })
+        .collect::<Vec<_>>();
+    presize_physical_qualification_suite(&ctx, &half_requests)
+        .expect("pre-size the half qualification scratch");
     let triad_us = |request: PhysicalQualificationRequest, label: &str| -> Option<f64> {
         match qualify_physical_launch(&ctx, request) {
             Ok(mut qualified) => Some(
