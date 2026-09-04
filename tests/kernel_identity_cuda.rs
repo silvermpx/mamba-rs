@@ -13,7 +13,7 @@ use mamba_rs::mamba_ssm::gpu::gemm_bi_triad::{
 };
 #[cfg(target_os = "linux")]
 use mamba_rs::mamba_ssm::gpu::kernel_identity::{
-    ArtifactIdentity, ArtifactSetIdentity, CacheEnvelope, FramedSha256,
+    ArtifactIdentity, ArtifactSetIdentity, CacheEnvelope, FramedSha256, digest_hex,
 };
 use mamba_rs::mamba_ssm::gpu::kernel_identity::{
     ArtifactKind, ModuleKind, PhysicalLaunchKind, PolicyDtype, ResolvedGemmOp,
@@ -312,7 +312,24 @@ fn artifact_cache_entry(
         .iter()
         .find(|path| FramedSha256::bytes(&envelope_payload(path)) == artifact.artifact_digest)
         .cloned()
-        .unwrap_or_else(|| panic!("cache payload for {:?} not found", artifact.module_kind))
+        .unwrap_or_else(|| {
+            let seen = entries
+                .iter()
+                .map(|path| {
+                    format!(
+                        "{}={}",
+                        path.file_name().unwrap_or_default().to_string_lossy(),
+                        digest_hex(&FramedSha256::bytes(&envelope_payload(path)))
+                    )
+                })
+                .collect::<Vec<_>>();
+            panic!(
+                "cache payload for {:?} not found: expected artifact digest {} under compile key {}; cache holds {seen:?}",
+                artifact.module_kind,
+                digest_hex(&artifact.artifact_digest),
+                digest_hex(&artifact.compile_key)
+            )
+        })
 }
 
 #[cfg(target_os = "linux")]

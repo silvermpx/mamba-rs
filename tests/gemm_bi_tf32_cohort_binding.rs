@@ -36,7 +36,7 @@ fn tf32_cohort_binds_on_this_board() {
             PhysicalQualificationRoute::F32Policy(F32TriadPolicy::AllowDeterministicTf32V1),
             PhysicalQualificationF32Epilogue::new(1.0, 0.0, false),
         );
-        let mut qualified = qualify_physical_launch(&ctx, request)
+        let qualified = qualify_physical_launch(&ctx, request)
             .unwrap_or_else(|error| panic!("qualify {dims:?}: {error}"));
         let nodes = qualified.evidence().nodes();
         let served = nodes
