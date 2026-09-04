@@ -623,7 +623,7 @@ impl MambaKernels {
                 ("sm_100a", Some(device_cc @ (10, 0))) | ("sm_103a", Some(device_cc @ (10, 3))) => {
                     super::gemm_bi_triad::modules::compile_sm100_optional(ctx, state_cap, device_cc)
                 }
-                ("sm_110", Some(device_cc @ (11, 0))) => {
+                ("sm_110a", Some(device_cc @ (11, 0))) => {
                     super::gemm_bi_triad::modules::compile_sm100_optional(ctx, state_cap, device_cc)
                 }
                 _ => None,
@@ -1027,7 +1027,7 @@ impl MambaKernels {
             } else {
                 None
             },
-            gemm_bi_nn_sm100_typed: if arch == "sm_100a" || arch == "sm_103a" {
+            gemm_bi_nn_sm100_typed: if matches!(arch, "sm_100a" | "sm_103a" | "sm_110a") {
                 Some(load_half_dynsmem("gemm_bi_nn_sm100_tcgen_c4", 65_536)?)
             } else {
                 None

@@ -10381,8 +10381,8 @@ fn tf32_target_and_toolchain_admission_is_fail_closed() {
 
     assert_eq!(
         mamba_rs::mamba_ssm::gpu::device::GpuDevice::resolve_nvrtc_target((11, 0)),
-        Ok("sm_110"),
-        "SM110 portable target support is mandatory"
+        Ok("sm_110a"),
+        "SM110 runs its arch-specific target so the Fixed tcgen05 rung is in its PTX"
     );
     assert_contains_all(
         SM100_SOURCE,

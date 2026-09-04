@@ -2069,7 +2069,22 @@ fn scalar_big_nn_and_tn_epilogues_have_no_terminal_cta_barrier() {
     );
 }
 
+/// One NVRTC compile per (module, target, source): the gates ask for the
+/// same PTX many times over, and a compile of the Fixed blob costs seconds.
 fn compile_module_for(kind: &str, source: String, arch: &'static str) -> String {
+    type CompileMemo = std::collections::HashMap<(String, &'static str, String), String>;
+    static MEMO: std::sync::OnceLock<std::sync::Mutex<CompileMemo>> = std::sync::OnceLock::new();
+    let memo = MEMO.get_or_init(Default::default);
+    let key = (kind.to_string(), arch, source);
+    if let Some(ptx) = memo.lock().unwrap().get(&key) {
+        return ptx.clone();
+    }
+    let ptx = compile_module_uncached(kind, key.2.clone(), arch);
+    memo.lock().unwrap().insert(key, ptx.clone());
+    ptx
+}
+
+fn compile_module_uncached(kind: &str, source: String, arch: &'static str) -> String {
     let group_m = if matches!(arch, "sm_80" | "sm_86" | "sm_87") {
         8
     } else {
@@ -2466,7 +2481,9 @@ fn fixed_f32_n128_s2_source_and_ptx_contract() {
     assert!(!compiler.contains("--use_fast_math"));
 
     let version = nvrtc_version();
-    let mut architectures = vec!["sm_80", "sm_89", "sm_90a", "sm_100a", "sm_120"];
+    let mut architectures = vec![
+        "sm_80", "sm_86", "sm_87", "sm_89", "sm_90a", "sm_100a", "sm_120",
+    ];
     if version.0 == 12 && version >= (12, 8) {
         architectures.push("sm_101a");
     }
@@ -2476,6 +2493,7 @@ fn fixed_f32_n128_s2_source_and_ptx_contract() {
     }
     if version >= (13, 2) {
         architectures.push("sm_110");
+        architectures.push("sm_110a");
     }
     for arch in architectures {
         let ptx = compile_fixed_for(arch);
@@ -3336,6 +3354,16 @@ fn compiles_for_sm101a_when_the_active_nvrtc_supports_it() {
 }
 
 #[test]
+fn compiles_for_sm86() {
+    compile_for("sm_86");
+}
+
+#[test]
+fn compiles_for_sm87() {
+    compile_for("sm_87");
+}
+
+#[test]
 fn compiles_for_sm103a() {
     if nvrtc_version() < (12, 9) {
         return;
@@ -3350,7 +3378,7 @@ fn family_targets_assemble_under_ptxas() {
         return;
     };
     let version = nvrtc_version();
-    let mut architectures = vec!["sm_89", "sm_90a", "sm_100a", "sm_120"];
+    let mut architectures = vec!["sm_86", "sm_87", "sm_89", "sm_90a", "sm_100a", "sm_120"];
     if version.0 == 12 && version >= (12, 8) {
         architectures.push("sm_101a");
     }
@@ -3359,6 +3387,7 @@ fn family_targets_assemble_under_ptxas() {
     }
     if version >= (13, 2) {
         architectures.push("sm_110");
+        architectures.push("sm_110a");
     }
     for arch in architectures {
         for (kind, source) in module_sources() {

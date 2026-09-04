@@ -126,7 +126,10 @@ impl GpuDevice {
             (10, 0) => "sm_100a",
             (10, 1) => "sm_101a",
             (10, 3) => "sm_103a",
-            (11, 0) => "sm_110",
+            // The arch-specific target, like the CC 10.x parts: the baseline
+            // sm_110 compiles the portable ladder only and leaves the Fixed
+            // tcgen05 rung out of the PTX.
+            (11, 0) => "sm_110a",
             (12, 0) => "sm_120",
             (12, 1) => "sm_121",
             // A minor this table does not name still belongs to the family
@@ -168,7 +171,7 @@ impl GpuDevice {
                 "CUDA {}.{} cannot compile compute capability 10.3; SM103 needs CUDA 12.9 or newer",
                 nvrtc_version.0, nvrtc_version.1
             )),
-            (11, 0) if nvrtc_version >= (13, 2) => Ok("sm_110"),
+            (11, 0) if nvrtc_version >= (13, 2) => Ok("sm_110a"),
             (11, 0) => Err(format!(
                 "CUDA {}.{} cannot compile compute capability 11.0; SM110 needs CUDA 13.2 or newer",
                 nvrtc_version.0, nvrtc_version.1
@@ -302,7 +305,7 @@ mod tests {
             ((10, 0), "sm_100a"),
             ((10, 1), "sm_101a"),
             ((10, 3), "sm_103a"),
-            ((11, 0), "sm_110"),
+            ((11, 0), "sm_110a"),
             ((12, 0), "sm_120"),
             ((12, 1), "sm_121"),
         ];
@@ -343,7 +346,7 @@ mod tests {
         assert!(GpuDevice::resolve_nvrtc_target_for_nvrtc((11, 0), (13, 1)).is_err());
         assert_eq!(
             GpuDevice::resolve_nvrtc_target_for_nvrtc((11, 0), (13, 2)),
-            Ok("sm_110")
+            Ok("sm_110a")
         );
     }
 

@@ -1769,7 +1769,7 @@ fn target_admits_route(binding: Tf32QualifiedModule, route: Tf32PhysicalRoute) -
                 | ((10, 0), "sm_100a", "sm_100a")
                 | ((10, 1), "sm_101a", "sm_101a")
                 | ((10, 3), "sm_103a", "sm_103a")
-                | ((11, 0), "sm_110", "sm_110")
+                | ((11, 0), "sm_110a", "sm_110a")
                 | ((12, 0), "compute_120", "sm_120")
                 | ((12, 1), "compute_121", "sm_121")
                 | ((12, 1), "compute_120", "sm_120")
@@ -10925,8 +10925,8 @@ mod tf32_tests {
         let availability = F32TriadAvailability {
             portable: Some(qualified_module(
                 ModuleKind::TriadSm80,
-                "sm_110",
-                "sm_110",
+                "sm_110a",
+                "sm_110a",
                 (11, 0),
                 false,
                 29_696,
