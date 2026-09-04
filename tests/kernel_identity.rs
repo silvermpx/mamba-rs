@@ -32,7 +32,6 @@ fn compile_material() -> CompileKeyMaterial {
             b"--fmad=true".to_vec(),
             b"--gpu-architecture=sm_89".to_vec(),
         ],
-        include_roots: vec![b"/cuda/include".to_vec()],
         header_manifest: Some(b"headers".to_vec()),
         nvrtc_version: (13, 2),
         nvrtc_library_domain: Some(b"libnvrtc.so.13".to_vec()),
@@ -138,9 +137,6 @@ fn compile_key_covers_every_invocation_field() {
     mutations.push(value);
     let mut value = base.clone();
     value.argv.reverse();
-    mutations.push(value);
-    let mut value = base.clone();
-    value.include_roots[0].push(b'!');
     mutations.push(value);
     let mut value = base.clone();
     value.header_manifest.as_mut().unwrap().push(b'!');

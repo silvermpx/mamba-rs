@@ -247,13 +247,13 @@ const SM89_TF32_QUALIFICATION_IDENTITY: Tf32AutoQualificationIdentity =
         compute_capability: (8, 9),
         multiprocessor_count: 142,
         nvrtc_version: (13, 2),
-        driver_api_version: 13_020,
+        driver_api_version: 13020,
         driver_build_sources: 7,
-        optin_shared_bytes: 101_376,
+        optin_shared_bytes: 101376,
         tensor_map_access: false,
         compile_key: [
-            200, 155, 40, 187, 13, 40, 216, 221, 209, 116, 242, 247, 73, 127, 161, 55, 56, 132, 90,
-            93, 215, 45, 64, 180, 36, 103, 141, 71, 68, 237, 217, 207,
+            16, 74, 71, 50, 208, 8, 170, 83, 107, 230, 147, 71, 151, 1, 149, 181, 219, 187, 246,
+            160, 21, 122, 139, 51, 218, 253, 197, 57, 176, 183, 238, 32,
         ],
         artifact_digest: [
             248, 184, 177, 29, 225, 252, 108, 18, 6, 155, 40, 243, 158, 125, 57, 69, 204, 35, 73,
@@ -264,8 +264,8 @@ const SM89_TF32_QUALIFICATION_IDENTITY: Tf32AutoQualificationIdentity =
             127, 173, 220, 249, 144, 110, 139, 173, 76, 241, 66, 192, 127,
         ],
         invocation_digest: [
-            200, 155, 40, 187, 13, 40, 216, 221, 209, 116, 242, 247, 73, 127, 161, 55, 56, 132, 90,
-            93, 215, 45, 64, 180, 36, 103, 141, 71, 68, 237, 217, 207,
+            16, 74, 71, 50, 208, 8, 170, 83, 107, 230, 147, 71, 151, 1, 149, 181, 219, 187, 246,
+            160, 21, 122, 139, 51, 218, 253, 197, 57, 176, 183, 238, 32,
         ],
         header_manifest_digest: [
             10, 239, 1, 191, 15, 19, 213, 142, 41, 133, 167, 118, 99, 219, 167, 154, 128, 174, 212,
@@ -1195,13 +1195,13 @@ const SM120_TF32_QUALIFICATION_IDENTITY_CUDA_13_2_DRIVER_595_84: Tf32AutoQualifi
         compute_capability: (12, 0),
         multiprocessor_count: 170,
         nvrtc_version: (13, 2),
-        driver_api_version: 13_020,
+        driver_api_version: 13020,
         driver_build_sources: 7,
-        optin_shared_bytes: 101_376,
+        optin_shared_bytes: 101376,
         tensor_map_access: true,
         compile_key: [
-            164, 111, 255, 220, 20, 165, 216, 226, 182, 171, 219, 3, 7, 114, 247, 176, 17, 171, 94,
-            27, 103, 33, 223, 150, 13, 39, 77, 154, 160, 146, 90, 252,
+            236, 77, 180, 106, 223, 48, 98, 186, 210, 155, 114, 131, 84, 141, 182, 106, 23, 203,
+            161, 163, 185, 179, 204, 54, 64, 98, 238, 9, 219, 162, 89, 35,
         ],
         artifact_digest: [
             84, 105, 236, 114, 208, 179, 3, 173, 38, 68, 104, 40, 127, 52, 184, 89, 101, 109, 115,
@@ -1212,8 +1212,8 @@ const SM120_TF32_QUALIFICATION_IDENTITY_CUDA_13_2_DRIVER_595_84: Tf32AutoQualifi
             61, 54, 211, 230, 24, 212, 155, 175, 154, 80, 133, 233, 145,
         ],
         invocation_digest: [
-            164, 111, 255, 220, 20, 165, 216, 226, 182, 171, 219, 3, 7, 114, 247, 176, 17, 171, 94,
-            27, 103, 33, 223, 150, 13, 39, 77, 154, 160, 146, 90, 252,
+            236, 77, 180, 106, 223, 48, 98, 186, 210, 155, 114, 131, 84, 141, 182, 106, 23, 203,
+            161, 163, 185, 179, 204, 54, 64, 98, 238, 9, 219, 162, 89, 35,
         ],
         header_manifest_digest: [
             101, 83, 218, 3, 23, 116, 215, 159, 181, 30, 190, 53, 234, 120, 114, 18, 88, 118, 25,
@@ -1249,8 +1249,8 @@ const SM120_TF32_PORTABLE_QUALIFICATION_IDENTITY_CUDA_13_2_DRIVER_595_84:
     optin_shared_bytes: 101376,
     tensor_map_access: true,
     compile_key: [
-        174, 138, 61, 184, 22, 81, 90, 98, 200, 244, 184, 49, 91, 57, 43, 45, 139, 178, 36, 176,
-        160, 82, 81, 43, 240, 238, 162, 55, 15, 131, 84, 78,
+        229, 54, 65, 220, 83, 106, 56, 16, 62, 74, 54, 94, 89, 164, 100, 187, 228, 232, 74, 149,
+        128, 220, 134, 237, 47, 106, 125, 185, 156, 143, 74, 101,
     ],
     artifact_digest: [
         144, 207, 184, 214, 122, 117, 42, 193, 255, 28, 176, 122, 194, 48, 64, 62, 58, 112, 10,
@@ -1261,8 +1261,8 @@ const SM120_TF32_PORTABLE_QUALIFICATION_IDENTITY_CUDA_13_2_DRIVER_595_84:
         173, 220, 249, 144, 110, 139, 173, 76, 241, 66, 192, 127,
     ],
     invocation_digest: [
-        174, 138, 61, 184, 22, 81, 90, 98, 200, 244, 184, 49, 91, 57, 43, 45, 139, 178, 36, 176,
-        160, 82, 81, 43, 240, 238, 162, 55, 15, 131, 84, 78,
+        229, 54, 65, 220, 83, 106, 56, 16, 62, 74, 54, 94, 89, 164, 100, 187, 228, 232, 74, 149,
+        128, 220, 134, 237, 47, 106, 125, 185, 156, 143, 74, 101,
     ],
     header_manifest_digest: [
         10, 239, 1, 191, 15, 19, 213, 142, 41, 133, 167, 118, 99, 219, 167, 154, 128, 174, 212,
@@ -8205,7 +8205,7 @@ mod tf32_tests {
         assert!(module.compiler.nvrtc_library_known);
         assert_eq!(module.compiler.output_kind, ArtifactKind::Ptx);
         assert_eq!(module.compiler.composer_revision, 1);
-        assert_eq!(module.compiler.compiler_revision, 2);
+        assert_eq!(module.compiler.compiler_revision, COMPILER_REVISION);
         assert_eq!(module.compiler.numeric_abi_revision, 5);
         assert_eq!(module.compiler.schedule_revision, 8);
         assert_eq!(module.device_caps.compute_capability, (12, 0));
@@ -8388,7 +8388,7 @@ mod tf32_tests {
         assert!(module.compiler.nvrtc_library_known);
         assert_eq!(module.compiler.output_kind, ArtifactKind::Ptx);
         assert_eq!(module.compiler.composer_revision, 1);
-        assert_eq!(module.compiler.compiler_revision, 2);
+        assert_eq!(module.compiler.compiler_revision, COMPILER_REVISION);
         assert_eq!(module.compiler.numeric_abi_revision, 5);
         assert_eq!(module.compiler.schedule_revision, 8);
         assert_eq!(module.device_caps.compute_capability, (12, 0));
@@ -9860,7 +9860,7 @@ mod tf32_tests {
         assert!(module.compiler.nvrtc_library_known);
         assert_eq!(module.compiler.output_kind, ArtifactKind::Ptx);
         assert_eq!(module.compiler.composer_revision, 1);
-        assert_eq!(module.compiler.compiler_revision, 2);
+        assert_eq!(module.compiler.compiler_revision, COMPILER_REVISION);
         assert_eq!(module.compiler.numeric_abi_revision, 5);
         assert_eq!(module.compiler.schedule_revision, 8);
         assert_eq!(module.device_caps.compute_capability, (12, 0));

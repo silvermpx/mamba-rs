@@ -292,21 +292,13 @@ impl Mamba3Kernels {
             combined.as_bytes(),
             &include_paths,
         );
-        let mut argv: Vec<Vec<u8>> = include_paths
-            .iter()
-            .map(|path| format!("--include-path={path}").into_bytes())
-            .collect();
-        argv.push(format!("--gpu-architecture={arch}").into_bytes());
+        let mut argv = vec![format!("--gpu-architecture={arch}").into_bytes()];
         argv.extend(option_strings.iter().map(|value| value.as_bytes().to_vec()));
         let key_material = crate::mamba_ssm::gpu::kernel_identity::CompileKeyMaterial {
             module_kind: crate::mamba_ssm::gpu::kernel_identity::ModuleKind::Mamba3Combined,
             source: combined.as_bytes().to_vec(),
             target: arch.as_bytes().to_vec(),
             argv,
-            include_roots: include_paths
-                .iter()
-                .map(|path| path.as_bytes().to_vec())
-                .collect(),
             header_manifest: header_manifest.clone(),
             nvrtc_version: (nv_major, nv_minor),
             nvrtc_library_domain: nvrtc_library_domain.clone(),

@@ -28,7 +28,7 @@ const CACHE_MAGIC: [u8; 16] = *b"MAMBA-PTX-CACHE\0";
 const CACHE_FORMAT_VERSION: u16 = 1;
 
 pub const COMPOSER_REVISION: u16 = 1;
-pub const COMPILER_REVISION: u16 = 2;
+pub const COMPILER_REVISION: u16 = 3;
 pub const NUMERIC_ABI_REVISION: u16 = 5;
 pub const TUNING_TABLE_REVISION: u16 = 38;
 pub const SCHEDULE_REVISION: u16 = 8;
@@ -117,7 +117,6 @@ pub struct CompileKeyMaterial {
     pub source: Vec<u8>,
     pub target: Vec<u8>,
     pub argv: Vec<Vec<u8>>,
-    pub include_roots: Vec<Vec<u8>>,
     pub header_manifest: Option<Vec<u8>>,
     pub nvrtc_version: (i32, i32),
     pub nvrtc_library_domain: Option<Vec<u8>>,
@@ -196,13 +195,6 @@ impl CompileKeyMaterial {
             .required(b"argv-count", &(self.argv.len() as u64).to_le_bytes());
         for value in &self.argv {
             hash = hash.required(b"argv", value);
-        }
-        hash = hash.required(
-            b"include-root-count",
-            &(self.include_roots.len() as u64).to_le_bytes(),
-        );
-        for value in &self.include_roots {
-            hash = hash.required(b"include-root", value);
         }
         hash.finish()
     }
@@ -5983,7 +5975,6 @@ mod cache_and_header_tests {
                 source: b"source".to_vec(),
                 target: b"sm_89".to_vec(),
                 argv: vec![b"--gpu-architecture=sm_89".to_vec()],
-                include_roots: vec![],
                 header_manifest: Some(vec![]),
                 nvrtc_version: (13, 2),
                 nvrtc_library_domain: Some(domain),
@@ -6263,7 +6254,6 @@ const char *stamp = CAT(__TI, ME__);";
                 source: source.to_vec(),
                 target: b"sm_80".to_vec(),
                 argv: vec![],
-                include_roots: vec![],
                 header_manifest: Some(manifest),
                 nvrtc_version: (13, 2),
                 nvrtc_library_domain: Some(b"runtime-and-builtins".to_vec()),
@@ -6361,7 +6351,6 @@ extern \"C\" __global__ void SYMBOL(main)() {}";
             source: source.to_vec(),
             target: b"sm_89".to_vec(),
             argv,
-            include_roots: vec![],
             header_manifest: Some(vec![]),
             nvrtc_version: (13, 2),
             nvrtc_library_domain: Some(b"runtime-and-builtins".to_vec()),
@@ -6412,7 +6401,6 @@ extern \"C\" __global__ void SYMBOL(main)() {}";
             source: b"extern \"C\" __global__ void stable() {}".to_vec(),
             target: b"sm_89".to_vec(),
             argv,
-            include_roots: vec![include_root.as_bytes().to_vec()],
             header_manifest: Some(manifest),
             nvrtc_version: (13, 2),
             nvrtc_library_domain: Some(b"runtime-and-builtins".to_vec()),
@@ -6459,7 +6447,6 @@ extern \"C\" __global__ void SYMBOL(main)() {}";
                 source: b"#if CHECK\nint selected;\n#endif".to_vec(),
                 target: b"sm_89".to_vec(),
                 argv: vec![b"-DCHECK=__has_include(\"probe_optional.h\")".to_vec()],
-                include_roots: vec![include_root.as_bytes().to_vec()],
                 header_manifest: header_manifest(
                     b"#if CHECK\nint selected;\n#endif",
                     std::slice::from_ref(&include_root),
@@ -6487,7 +6474,6 @@ extern \"C\" __global__ void SYMBOL(main)() {}";
             source: source.to_vec(),
             target: b"sm_89".to_vec(),
             argv,
-            include_roots: vec![],
             header_manifest: header_manifest(source, &[]),
             nvrtc_version: (13, 2),
             nvrtc_library_domain: Some(b"runtime-and-builtins".to_vec()),

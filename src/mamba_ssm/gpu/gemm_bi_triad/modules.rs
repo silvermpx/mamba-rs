@@ -557,8 +557,13 @@ pub(crate) fn compile_module(request: CompileModuleRequest<'_>) -> Result<Compil
         "--extra-device-vectorization".to_string(),
         "-DNDEBUG".to_string(),
         scalar_group_m_option(request.arch),
-        format!("-DMAMBA_RS_STATE_CAP={}", request.state_cap),
     ];
+    // The state cap sizes the SSM kernels' register arrays; only the Fixed
+    // module carries those kernels. A GEMM module compiled with it would
+    // change its compile key with every model's d_state for nothing.
+    if request.module_kind == ModuleKind::Fixed {
+        option_strings.push(format!("-DMAMBA_RS_STATE_CAP={}", request.state_cap));
+    }
     option_strings.extend(
         crate::mamba_ssm::gpu::kernel_identity::deterministic_nvrtc_options(nvrtc, "1295072049"),
     );
@@ -574,21 +579,16 @@ pub(crate) fn compile_module(request: CompileModuleRequest<'_>) -> Result<Compil
         combined.as_bytes(),
         &include_paths,
     );
-    let mut argv: Vec<Vec<u8>> = include_paths
-        .iter()
-        .map(|path| format!("--include-path={path}").into_bytes())
-        .collect();
-    argv.push(format!("--gpu-architecture={}", request.arch).into_bytes());
+    // The include paths are a fact about this machine, not about the
+    // kernels: the header manifest already digests every header the source
+    // reaches, so the key stays the same wherever the toolkit is installed.
+    let mut argv = vec![format!("--gpu-architecture={}", request.arch).into_bytes()];
     argv.extend(option_strings.iter().map(|value| value.as_bytes().to_vec()));
     let key_material = crate::mamba_ssm::gpu::kernel_identity::CompileKeyMaterial {
         module_kind: request.module_kind,
         source: combined.as_bytes().to_vec(),
         target: request.arch.as_bytes().to_vec(),
         argv,
-        include_roots: include_paths
-            .iter()
-            .map(|value| value.as_bytes().to_vec())
-            .collect(),
         header_manifest: header_manifest.clone(),
         nvrtc_version: nvrtc,
         nvrtc_library_domain: nvrtc_library_domain.clone(),
