@@ -5155,7 +5155,8 @@ fn tf32_register_cap(module_kind: ModuleKind, symbol: &str) -> Result<u32, Strin
     match module_kind {
         ModuleKind::TriadSm80 if symbol.contains("_m128n64_") => Ok(192),
         // The wide tile holds the same 64-accumulator microtile per thread as
-        // the 128x64 body, on all eight warps and one CTA per multiprocessor.
+        // the 128x64 body plus a second fragment set, on all eight warps and
+        // one CTA per multiprocessor.
         ModuleKind::TriadSm80 if symbol.contains("_m128n128_") => Ok(192),
         ModuleKind::TriadSm80 if symbol.contains("_m64n64_") => Ok(128),
         ModuleKind::TriadSm80 if symbol.contains("_m16n32_") || symbol.contains("_m16n16_") => {

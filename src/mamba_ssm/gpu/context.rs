@@ -90,7 +90,7 @@ fn validate_env_route_combination(
     bi_tensor_cores: bool,
     fast_gemm: bool,
     bi_gemm_family: BiGemmFamily,
-    half_triad_policy: HalfTriadPolicy,
+    explicit_half_policy: Option<HalfTriadPolicy>,
 ) -> Result<(), String> {
     if bi_tensor_cores && !batch_invariant {
         return Err(
@@ -116,7 +116,7 @@ fn validate_env_route_combination(
                 .to_string(),
         );
     }
-    if half_triad_policy == HalfTriadPolicy::AllowStreamKFixedOrderV1 && !bi_tensor_cores {
+    if explicit_half_policy == Some(HalfTriadPolicy::AllowStreamKFixedOrderV1) && !bi_tensor_cores {
         return Err(
             "MAMBA_RS_BI_HALF_POLICY=streamk without MAMBA_RS_BI_TENSOR_CORES=1 is a \
              silent no-op: the stream-K half routes live in the tensor-core tier. \
@@ -246,20 +246,38 @@ impl HalfTriadPolicy {
     }
 }
 
+/// The explicit half policy, `None` when the environment names none: the
+/// tensor-core tier then runs its fastest deterministic route (stream-K
+/// where the SM89 rule admits it), and `tiled` opts back into bit parity
+/// with the tiled kernels.
 fn half_triad_policy_from_result(
     value: Result<String, std::env::VarError>,
-) -> Result<HalfTriadPolicy, String> {
+) -> Result<Option<HalfTriadPolicy>, String> {
     match value {
-        Ok(value) => HalfTriadPolicy::parse_env_value(&value),
-        Err(std::env::VarError::NotPresent) => Ok(HalfTriadPolicy::TiledParityV1),
+        Ok(value) => HalfTriadPolicy::parse_env_value(&value).map(Some),
+        Err(std::env::VarError::NotPresent) => Ok(None),
         Err(std::env::VarError::NotUnicode(value)) => Err(format!(
             "MAMBA_RS_BI_HALF_POLICY={value:?} is not valid Unicode (use tiled or streamk)"
         )),
     }
 }
 
-fn half_triad_policy_from_env() -> Result<HalfTriadPolicy, String> {
+fn half_triad_policy_from_env() -> Result<Option<HalfTriadPolicy>, String> {
     half_triad_policy_from_result(std::env::var("MAMBA_RS_BI_HALF_POLICY"))
+}
+
+/// The half policy in force: the explicit one, else stream-K under the
+/// tensor-core tier and tiled parity outside it (where no half tensor
+/// route runs and the policy changes nothing).
+fn resolve_half_triad_policy(
+    explicit: Option<HalfTriadPolicy>,
+    bi_tensor_cores: bool,
+) -> HalfTriadPolicy {
+    explicit.unwrap_or(if bi_tensor_cores {
+        HalfTriadPolicy::AllowStreamKFixedOrderV1
+    } else {
+        HalfTriadPolicy::TiledParityV1
+    })
 }
 
 pub use super::kernel_identity::{
@@ -515,7 +533,7 @@ impl GpuCtx {
         let fast_gemm =
             tier_flag_from_result("MAMBA_RS_FAST_GEMM", std::env::var("MAMBA_RS_FAST_GEMM"))?;
         let f32_triad_policy = f32_triad_policy_from_env()?;
-        let half_triad_policy = half_triad_policy_from_env()?;
+        let explicit_half_policy = half_triad_policy_from_env()?;
         let bi_gemm_family = bi_gemm_family_from_result(std::env::var("MAMBA_RS_BI_GEMM_FAMILY"))?;
         validate_arch_rung_flag(std::env::var("MAMBA_RS_ARCH_RUNG"))?;
         validate_env_route_combination(
@@ -523,8 +541,9 @@ impl GpuCtx {
             bi_tensor_cores,
             fast_gemm,
             bi_gemm_family,
-            half_triad_policy,
+            explicit_half_policy,
         )?;
+        let half_triad_policy = resolve_half_triad_policy(explicit_half_policy, bi_tensor_cores);
         ctx.set_batch_invariant(batch_invariant);
         ctx.set_bi_tensor_cores(bi_tensor_cores);
         ctx.set_fast_gemm(fast_gemm);
@@ -1775,42 +1794,51 @@ mod tests {
         use super::HalfTriadPolicy::{AllowStreamKFixedOrderV1 as StreamK, TiledParityV1 as Tiled};
         use BiGemmFamily::{Fixed, Triad};
         let validate = super::validate_env_route_combination;
-        assert!(validate(false, false, false, Triad, Tiled).is_ok());
-        assert!(validate(true, true, false, Fixed, Tiled).is_ok());
-        assert!(validate(false, false, true, Triad, Tiled).is_ok());
-        assert!(validate(true, true, false, Triad, StreamK).is_ok());
-        assert!(validate(true, true, false, Fixed, StreamK).is_ok());
-        let error = validate(false, true, false, Triad, Tiled).unwrap_err();
+        assert!(validate(false, false, false, Triad, None).is_ok());
+        assert!(validate(true, true, false, Fixed, Some(Tiled)).is_ok());
+        assert!(validate(false, false, true, Triad, None).is_ok());
+        assert!(validate(true, true, false, Triad, Some(StreamK)).is_ok());
+        assert!(validate(true, true, false, Fixed, Some(StreamK)).is_ok());
+        // No explicit policy never conflicts: the tier resolves it.
+        assert!(validate(true, false, false, Triad, None).is_ok());
+        let error = validate(false, true, false, Triad, None).unwrap_err();
         assert!(error.contains("MAMBA_RS_BI_TENSOR_CORES"), "{error}");
-        let error = validate(true, false, true, Triad, Tiled).unwrap_err();
+        let error = validate(true, false, true, Triad, None).unwrap_err();
         assert!(error.contains("MAMBA_RS_FAST_GEMM"), "{error}");
-        let error = validate(false, false, false, Fixed, Tiled).unwrap_err();
+        let error = validate(false, false, false, Fixed, None).unwrap_err();
         assert!(error.contains("MAMBA_RS_BI_GEMM_FAMILY=fixed"), "{error}");
-        // The stream-K permission without the tensor-core tier reaches no
-        // kernel: refused, not ignored.
-        let error = validate(true, false, false, Triad, StreamK).unwrap_err();
+        // The explicit stream-K permission without the tensor-core tier
+        // reaches no kernel: refused, not ignored.
+        let error = validate(true, false, false, Triad, Some(StreamK)).unwrap_err();
         assert!(error.contains("MAMBA_RS_BI_HALF_POLICY=streamk"), "{error}");
         assert!(error.contains("MAMBA_RS_BI_TENSOR_CORES=1"), "{error}");
-        let error = validate(false, false, false, Triad, StreamK).unwrap_err();
+        let error = validate(false, false, false, Triad, Some(StreamK)).unwrap_err();
         assert!(error.contains("MAMBA_RS_BI_HALF_POLICY=streamk"), "{error}");
+        // The resolved policy: stream-K under the tensor-core tier, tiled
+        // parity outside it, and the explicit word always wins.
+        let resolve = super::resolve_half_triad_policy;
+        assert_eq!(resolve(None, true), StreamK);
+        assert_eq!(resolve(None, false), Tiled);
+        assert_eq!(resolve(Some(Tiled), true), Tiled);
+        assert_eq!(resolve(Some(StreamK), true), StreamK);
     }
 
     #[cfg(unix)]
     #[test]
-    fn half_triad_policy_environment_is_strict_and_defaults_to_tiled() {
+    fn half_triad_policy_environment_is_strict_and_absent_means_unset() {
         use std::os::unix::ffi::OsStringExt as _;
 
         assert_eq!(
             super::half_triad_policy_from_result(Err(std::env::VarError::NotPresent)).unwrap(),
-            super::HalfTriadPolicy::TiledParityV1
+            None
         );
         assert_eq!(
             super::half_triad_policy_from_result(Ok(" tiled ".into())).unwrap(),
-            super::HalfTriadPolicy::TiledParityV1
+            Some(super::HalfTriadPolicy::TiledParityV1)
         );
         assert_eq!(
             super::half_triad_policy_from_result(Ok("streamk".into())).unwrap(),
-            super::HalfTriadPolicy::AllowStreamKFixedOrderV1
+            Some(super::HalfTriadPolicy::AllowStreamKFixedOrderV1)
         );
         for wrong in ["", "stream-k", "StreamK", "1", "on"] {
             let error = super::half_triad_policy_from_result(Ok(wrong.into()))
