@@ -2932,6 +2932,13 @@ pub enum ResolvedOperandConversion {
     RegisterCvtRnaTf32F32V1 = 1,
     TensorMapTfloat32V1 = 2,
     TensorMapUint32ThenCvtRnaTf32F32V1 = 3,
+    /// TF32 rounding as one integer add of half an ulp of the ten-bit
+    /// mantissa (0x1000) in registers, with no finiteness guard: the tensor
+    /// core reads only the upper 19 bits of an operand, so every finite
+    /// value and both infinities multiply exactly as after cvt.rna.tf32.f32,
+    /// and a NaN whose payload sits in the low bits stays a NaN instead of
+    /// turning into an infinity.
+    RegisterAddHalfUlpTf32V1 = 4,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

@@ -875,6 +875,7 @@ fn deterministic_tf32_identity_variants_have_stable_distinct_discriminants() {
         ResolvedOperandConversion::TensorMapUint32ThenCvtRnaTf32F32V1 as u8,
         3
     );
+    assert_eq!(ResolvedOperandConversion::RegisterAddHalfUlpTf32V1 as u8, 4);
 }
 
 #[test]

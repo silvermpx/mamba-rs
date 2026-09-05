@@ -2638,7 +2638,7 @@ pub const SM80_TF32_WIDE_ROUTE_SPECS: [Tf32KernelSpec; 1] = [Tf32KernelSpec {
     module_kind: ModuleKind::TriadSm80,
     instruction_family: ResolvedInstructionFamily::MmaSync,
     instruction_shape: ResolvedInstructionShape { m: 16, n: 8, k: 8 },
-    operand_conversion: ResolvedOperandConversion::RegisterCvtRnaTf32F32V1,
+    operand_conversion: ResolvedOperandConversion::RegisterAddHalfUlpTf32V1,
     tile: (128, 128),
     bk: 32,
     map_bk: 32,

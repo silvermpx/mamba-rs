@@ -3361,14 +3361,25 @@ fn validate_tf32_feature_instructions(
         ),
         _ => return Ok(()),
     };
+    // The portable module's wide extension tiles may round in registers by
+    // the half-ulp add instead of cvt.rna.tf32.f32; every other route keeps
+    // the module's one contract.
+    let contract_allowed = |kernel_spec: &super::contract::Tf32KernelSpec| {
+        let contract = (
+            kernel_spec.instruction_family,
+            kernel_spec.operand_conversion,
+        );
+        contract == expected_contract
+            || (module_kind == ModuleKind::TriadSm80
+                && contract
+                    == (
+                        ResolvedInstructionFamily::MmaSync,
+                        ResolvedOperandConversion::RegisterAddHalfUlpTf32V1,
+                    ))
+    };
     if super::contract::tf32_route_specs_all(module_kind)
         .filter(|kernel_spec| !kernel_spec.route.is_exact_fma())
-        .any(|kernel_spec| {
-            (
-                kernel_spec.instruction_family,
-                kernel_spec.operand_conversion,
-            ) != expected_contract
-        })
+        .any(|kernel_spec| !contract_allowed(kernel_spec))
     {
         return Err(format!(
             "{module_kind:?} TF32 route metadata has the wrong conversion contract"
@@ -3409,11 +3420,16 @@ fn validate_tf32_feature_instructions(
         "cp.async.bulk.tensor.2d.shared::cta.global.tile.mbarrier::complete_tx::bytes",
         "fma.rn.f32",
     ];
+    const ADD_HALF_ULP_REQUIRED: &[&str] = &["mma.sync.aligned.m16n8k8.row.col.f32.tf32.tf32.f32"];
     let parsed = parse_ptx(ptx)?;
     for kernel_spec in super::contract::tf32_route_specs_for(module_kind, extensions) {
         let entry = &parsed_ptx_entry_ref(&parsed, kernel_spec.symbol)?.text;
+        let add_half_ulp =
+            kernel_spec.operand_conversion == ResolvedOperandConversion::RegisterAddHalfUlpTf32V1;
         let required = if kernel_spec.route.is_exact_fma() {
             EXACT_REQUIRED
+        } else if add_half_ulp {
+            ADD_HALF_ULP_REQUIRED
         } else {
             required
         };
@@ -3424,6 +3440,12 @@ fn validate_tf32_feature_instructions(
                     kernel_spec.symbol
                 ));
             }
+        }
+        if add_half_ulp && ptx_has_unquoted_token(entry, |token| token == "cvt.rna.tf32.f32") {
+            return Err(format!(
+                "{module_kind:?}/{} rounds by the half-ulp add and must not also convert by cvt.rna.tf32.f32",
+                kernel_spec.symbol
+            ));
         }
         if ptx_has_unquoted_token(entry, |token| {
             token.starts_with("atom.")
@@ -5157,7 +5179,7 @@ fn tf32_register_cap(module_kind: ModuleKind, symbol: &str) -> Result<u32, Strin
         // The wide tile holds the same 64-accumulator microtile per thread as
         // the 128x64 body plus a second fragment set, on all eight warps and
         // one CTA per multiprocessor.
-        ModuleKind::TriadSm80 if symbol.contains("_m128n128_") => Ok(192),
+        ModuleKind::TriadSm80 if symbol.contains("_m128n128_") => Ok(224),
         ModuleKind::TriadSm80 if symbol.contains("_m64n64_") => Ok(128),
         ModuleKind::TriadSm80 if symbol.contains("_m16n32_") || symbol.contains("_m16n16_") => {
             Ok(96)
