@@ -474,14 +474,41 @@ const SM80_EXTENSION_SYMBOLS: [&str; 7] = [
     "gemm_bi_tn_sm80_mma_tf32_splitk8_v1_m32n32_bk32_s4",
 ];
 
-/// Every sm80-family target composes the extension fragments and exports
-/// each of their kernels exactly once; sm_89 also assembles them without
-/// spills or a stack frame.
+/// The existing extension target set, limited by the active toolkit's
+/// explicit SM110 support floor. Compilation errors remain fatal.
+fn sm80_extension_targets(version: (i32, i32)) -> Vec<&'static str> {
+    let mut targets = vec!["sm_80", "sm_86", "sm_87", "sm_89", "sm_90a", "sm_100a"];
+    if version >= (13, 2) {
+        targets.push("sm_110a");
+    }
+    targets
+}
+
+#[test]
+fn sm80_extension_targets_respect_nvrtc_version() {
+    for version in [(12, 8), (12, 9), (13, 0), (13, 1)] {
+        assert_eq!(
+            sm80_extension_targets(version),
+            ["sm_80", "sm_86", "sm_87", "sm_89", "sm_90a", "sm_100a"],
+            "unsupported sm_110a must not be requested with NVRTC {version:?}"
+        );
+    }
+    for version in [(13, 2), (13, 3), (14, 0)] {
+        assert_eq!(
+            sm80_extension_targets(version),
+            [
+                "sm_80", "sm_86", "sm_87", "sm_89", "sm_90a", "sm_100a", "sm_110a"
+            ],
+            "supported extension target disappeared with NVRTC {version:?}"
+        );
+    }
+}
+
+/// Every supported target composes each extension export exactly once;
+/// the sm_80 image additionally passes the strict assembler resource census.
 #[test]
 fn sm80_extension_kernels_compile_for_every_portable_target() {
-    for arch in [
-        "sm_80", "sm_86", "sm_87", "sm_89", "sm_90a", "sm_100a", "sm_110a",
-    ] {
+    for arch in sm80_extension_targets(nvrtc_version()) {
         let ptx = compile_module_for("TriadSm80+extensions", sm80_streamk_blob(), arch);
         for symbol in SM80_EXTENSION_SYMBOLS {
             assert_eq!(
