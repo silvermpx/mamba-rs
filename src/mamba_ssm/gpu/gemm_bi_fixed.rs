@@ -37,6 +37,9 @@ pub enum FixedTile {
     Tf32M128S2,
     /// Portable deterministic TF32, 128x64 CTA, three-stage mainloop.
     Tf32M128S3,
+    /// Force-only Triad TF32 wide tile, 128x128 CTA, three-stage mainloop.
+    /// Uses the wide route's half-ulp operand conversion, including its NaN behavior.
+    Tf32M128N128S3,
     /// Portable deterministic TF32, 64x64 CTA, two-stage mainloop.
     Tf32M64S2,
     /// Portable deterministic TF32, 64x64 CTA, three-stage mainloop.
@@ -170,6 +173,7 @@ pub fn fixed_forward_with_tile(
         tile,
         FixedTile::Tf32M128S2
             | FixedTile::Tf32M128S3
+            | FixedTile::Tf32M128N128S3
             | FixedTile::Tf32M64S2
             | FixedTile::Tf32M64S3
             | FixedTile::Tf32M16S4
@@ -478,6 +482,7 @@ fn ladder_cfg(tile: FixedTile, rows: usize, cols: usize) -> cudarc::driver::Laun
         | FixedTile::F32N128S2
         | FixedTile::Tf32M128S2
         | FixedTile::Tf32M128S3
+        | FixedTile::Tf32M128N128S3
         | FixedTile::Tf32M64S2
         | FixedTile::Tf32M64S3
         | FixedTile::Tf32M16S4
@@ -576,6 +581,23 @@ struct FixedTf32Params {
 unsafe impl DeviceRepr for FixedTf32Params {}
 
 pub(crate) const FIXED_TF32_PARAMS_SIZE: usize = std::mem::size_of::<FixedTf32Params>();
+
+/// The borrowed Triad symbol takes alpha/beta before the six dimensions;
+/// its 32-byte parameter block is not the 24-byte Fixed TF32 ABI above.
+#[derive(Clone, Copy)]
+#[repr(C)]
+struct FixedTf32WideParams {
+    alpha: f32,
+    beta: f32,
+    m: i32,
+    k: i32,
+    n: i32,
+    lda: i32,
+    ldb: i32,
+    ldc: i32,
+}
+
+unsafe impl DeviceRepr for FixedTf32WideParams {}
 
 #[repr(transparent)]
 #[derive(Clone, Copy)]
@@ -958,6 +980,9 @@ fn launch_tf32(
     if args.m == 0 || args.n == 0 {
         return Ok(());
     }
+    if tile == FixedTile::Tf32M128N128S3 {
+        return launch_tf32_wide(ctx, args);
+    }
     if matches!(
         tile,
         FixedTile::Tf32Sm120M128S2
@@ -1017,6 +1042,67 @@ fn launch_tf32(
     unsafe { builder.launch(config) }
         .map(|_| ())
         .map_err(|error| format!("gemm_bi Fixed TF32 ({tile:?}): {error:?}"))
+}
+
+fn launch_tf32_wide(ctx: &GpuCtx, args: &FixedArgs) -> Result<(), String> {
+    if args.k % 4 != 0 || args.n % 4 != 0 {
+        return Err("Fixed TF32 wide requires K and N divisible by four".into());
+    }
+    // The wide body has vector-only input staging. K=0 does not issue any
+    // input copies and may use null A/B; C and bias use scalar-safe stores/loads.
+    if args.k != 0
+        && [args.a, args.b]
+            .into_iter()
+            .any(|pointer| pointer == 0 || !pointer.is_multiple_of(16))
+    {
+        return Err("Fixed TF32 wide requires non-null, 16-byte-aligned A and B".into());
+    }
+    if args.c == 0 || !args.c.is_multiple_of(4) || !args.bias.is_multiple_of(4) {
+        return Err("Fixed TF32 wide requires non-null f32-aligned C and f32-aligned bias".into());
+    }
+    let rows = u32::try_from(args.m).map_err(|_| "Fixed TF32 wide M is negative")?;
+    // The CUDA body computes (N + 127) in signed 32-bit arithmetic.
+    let padded_columns = args
+        .n
+        .checked_add(127)
+        .ok_or("Fixed TF32 wide padded N exceeds i32")?;
+    let column_tiles =
+        u32::try_from(padded_columns).map_err(|_| "Fixed TF32 wide N is negative")? / 128;
+    let grid = rows
+        .div_ceil(128)
+        .checked_mul(column_tiles)
+        .filter(|grid| *grid <= i32::MAX as u32)
+        .ok_or("Fixed TF32 wide launch grid exceeds i32")?;
+    // The loader already admits this exact function's driver ABI, registers,
+    // local memory and occupancy. No module is loaded or reconfigured here.
+    let function = ctx
+        .kernels
+        .tf32_function("gemm_bi_nn_sm80_mma_tf32_v1_m128n128_bk32_s3")
+        .ok_or("Fixed TF32 wide Triad symbol is not bound")?;
+    let config = cudarc::driver::LaunchConfig {
+        grid_dim: (grid, 1, 1),
+        block_dim: (256, 1, 1),
+        shared_mem_bytes: 98_304,
+    };
+    let params = FixedTf32WideParams {
+        alpha: 1.0,
+        beta: 0.0,
+        m: args.m,
+        k: args.k,
+        n: args.n,
+        lda: args.k,
+        ldb: args.n,
+        ldc: args.n,
+    };
+    let mut builder = ctx.stream.launch_builder(function);
+    builder.arg(&args.c);
+    builder.arg(&args.a);
+    builder.arg(&args.b);
+    builder.arg(&args.bias);
+    builder.arg(&params);
+    unsafe { builder.launch(config) }
+        .map(|_| ())
+        .map_err(|error| format!("gemm_bi forced Fixed TF32 wide: {error:?}"))
 }
 
 fn fixed_sm120_pair_store_schedule_cell(
@@ -1407,6 +1493,7 @@ fn launch_ladder(
         | FixedTile::F32N128S2
         | FixedTile::Tf32M128S2
         | FixedTile::Tf32M128S3
+        | FixedTile::Tf32M128N128S3
         | FixedTile::Tf32M64S2
         | FixedTile::Tf32M64S3
         | FixedTile::Tf32M16S4

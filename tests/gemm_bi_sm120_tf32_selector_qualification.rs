@@ -25,6 +25,7 @@ use sha2::{Digest as _, Sha256};
 const ENABLE_ENV: &str = "MAMBA_RS_SM120_TF32_SELECTOR_QUALIFICATION";
 const OUTPUT_ENV: &str = "MAMBA_RS_SM120_TF32_SELECTOR_JSONL";
 const CELLS_ENV: &str = "MAMBA_RS_SM120_TF32_SELECTOR_CELLS";
+const CANDIDATES_ENV: &str = "MAMBA_RS_TF32_SELECTOR_CANDIDATES";
 const DISCOVERY_WINDOWS: usize = 21;
 const FINAL_WINDOWS: usize = 101;
 const TARGET_WINDOW_MS: f64 = 5.0;
@@ -1200,6 +1201,82 @@ fn candidates_for_cell(cell: Cell) -> Vec<Candidate> {
     candidate_inventory(cell, true, true).0
 }
 
+fn filter_candidates(
+    admitted: Vec<Candidate>,
+    mut excluded: Vec<CandidateExclusion>,
+    filter: Option<&str>,
+) -> Result<(Vec<Candidate>, Vec<CandidateExclusion>), String> {
+    let Some(filter) = filter else {
+        return Ok((admitted, excluded));
+    };
+    let mut symbols = Vec::new();
+    for symbol in filter.split(',').map(str::trim) {
+        if symbol.is_empty()
+            || symbols.contains(&symbol)
+            || !admitted.iter().any(|candidate| candidate.symbol == symbol)
+        {
+            return Err(format!(
+                "{CANDIDATES_ENV}: empty, duplicate or unavailable candidate {symbol:?}"
+            ));
+        }
+        symbols.push(symbol);
+    }
+    let mut kept = Vec::new();
+    for candidate in admitted {
+        if symbols.contains(&candidate.symbol) {
+            kept.push(candidate);
+        } else {
+            excluded.push(CandidateExclusion {
+                symbol: candidate.symbol,
+                reason: "explicit_candidate_filter",
+            });
+        }
+    }
+    Ok((kept, excluded))
+}
+
+#[test]
+fn explicit_candidate_filter_is_fail_closed_and_preserves_admission() {
+    let cell = PROJECTION_CELLS[0];
+    let inventory = || candidate_inventory(cell, false, true);
+    let (all, exclusions) = inventory();
+    let wide = "gemm_bi_nn_sm80_mma_tf32_v1_m128n128_bk32_s3";
+    assert!(all.iter().any(|candidate| candidate.symbol == wide));
+    let (kept, omitted) = filter_candidates(all.clone(), exclusions.clone(), None).unwrap();
+    assert_eq!(kept.len(), all.len());
+    assert_eq!(omitted.len(), exclusions.len());
+    let (kept, omitted) = filter_candidates(all.clone(), exclusions.clone(), Some(wide)).unwrap();
+    assert_eq!(kept.len(), 1);
+    assert_eq!(kept[0].symbol, wide);
+    assert_eq!(omitted.len(), exclusions.len() + all.len() - 1);
+    assert_eq!(
+        omitted
+            .iter()
+            .filter(|record| record.reason == "explicit_candidate_filter")
+            .count(),
+        all.len() - 1,
+    );
+    for invalid in [
+        "",
+        " ",
+        "missing",
+        ",",
+        &format!("{wide},{wide}"),
+        &format!("{wide},"),
+    ] {
+        assert!(
+            filter_candidates(all.clone(), exclusions.clone(), Some(invalid)).is_err(),
+            "{invalid:?}"
+        );
+    }
+    let unavailable = exclusions
+        .iter()
+        .find(|record| record.reason == "specialized_module_unbound")
+        .unwrap()
+        .symbol;
+    assert!(filter_candidates(all, exclusions, Some(unavailable)).is_err());
+}
+
 #[derive(Clone, Debug)]
 struct CellResult {
     cell: Cell,
@@ -1680,7 +1757,12 @@ fn op_name(op: ResolvedGemmOp) -> &'static str {
     }
 }
 
-fn run_cell(device: &GpuDevice, cell: Cell, quiet: &QuietGpu) -> Result<CellResult, String> {
+fn run_cell(
+    device: &GpuDevice,
+    cell: Cell,
+    quiet: &QuietGpu,
+    candidate_filter: Option<&str>,
+) -> Result<CellResult, String> {
     let candidate_ctx = configure(device, F32TriadPolicy::AllowDeterministicTf32V1)?;
     let scalar_ctx = configure(device, F32TriadPolicy::ExactScalarFmaV1)?;
     // The identity the cohort is frozen against: the SM120 module where the
@@ -1714,11 +1796,15 @@ fn run_cell(device: &GpuDevice, cell: Cell, quiet: &QuietGpu) -> Result<CellResu
                 cell.id
             )
         })?;
-    let (candidates, mut excluded_candidates) = candidate_inventory(
+    let (candidates, excluded_candidates) = candidate_inventory(
         cell,
         specialized_bound,
         portable_extensions_composed_for_cc(device.compute_capability),
     );
+    // Filtering can only remove already-admitted routes. Every omitted symbol
+    // remains visible in the artifact, and all numeric/timing gates are intact.
+    let (candidates, mut excluded_candidates) =
+        filter_candidates(candidates, excluded_candidates, candidate_filter)?;
 
     let mut discovery = BTreeMap::new();
     let mut final_stats = BTreeMap::new();
@@ -1950,7 +2036,7 @@ fn sm120_tf32_selector_qualification() -> Result<(), String> {
     let mut sink = JsonlSink::create_from_env()?;
     for cell in CELLS {
         quiet.require_cohort(&format!("sm120-selector/{}/pre-cell", cell.id))?;
-        sink.write(&run_cell(&device, cell, &quiet)?)?;
+        sink.write(&run_cell(&device, cell, &quiet, None)?)?;
         quiet.verify_post_cohort(&format!("sm120-selector/{}/post-cell", cell.id))?;
     }
     let postflight = quiet.verify_post_cohort("sm120-selector/post-suite")?;
@@ -1965,6 +2051,30 @@ fn sm120_tf32_selector_qualification() -> Result<(), String> {
 #[test]
 #[ignore = "requires an explicitly enabled idle CC12.0/170SM GPU"]
 fn sm120_tf32_projection_selector_qualification() -> Result<(), String> {
+    run_projection_selector_qualification(&PROJECTION_CELLS)
+}
+
+/// A separate artifact qualifies the actual NN bias epilogue; the no-bias
+/// projection records cannot authorize it even when the kernel supports it.
+#[test]
+#[ignore = "qualification harness; requires an idle CUDA device and explicit opt-in"]
+fn sm120_tf32_projection_bias_selector_qualification() -> Result<(), String> {
+    let cells = projection_bias_cells();
+    run_projection_selector_qualification(&cells)
+}
+
+fn projection_bias_cells() -> Vec<Cell> {
+    PROJECTION_CELLS
+        .iter()
+        .filter(|cell| cell.op == ResolvedGemmOp::Nn)
+        .map(|cell| Cell {
+            bias: true,
+            ..*cell
+        })
+        .collect()
+}
+
+fn run_projection_selector_qualification(cells: &[Cell]) -> Result<(), String> {
     match std::env::var(ENABLE_ENV) {
         Ok(value) if value == "1" => {}
         Err(std::env::VarError::NotPresent) => {
@@ -1977,6 +2087,11 @@ fn sm120_tf32_projection_selector_qualification() -> Result<(), String> {
     if cfg!(debug_assertions) {
         return Err("SM120 TF32 selector qualification requires --release".into());
     }
+    let candidate_filter = match std::env::var(CANDIDATES_ENV) {
+        Ok(value) => Some(value),
+        Err(std::env::VarError::NotPresent) => None,
+        Err(error) => return Err(format!("read {CANDIDATES_ENV}: {error}")),
+    };
     let quiet = QuietGpu::for_cuda_ordinal(0)?;
     let pre_context = quiet.require_pre_context("sm120-projection-selector/pre-context")?;
     let device = GpuDevice::new(0)?;
@@ -2017,7 +2132,7 @@ fn sm120_tf32_projection_selector_qualification() -> Result<(), String> {
     if let Some(only) = &only {
         let unknown = only
             .iter()
-            .filter(|id| !PROJECTION_CELLS.iter().any(|cell| cell.id == id.as_str()))
+            .filter(|id| !cells.iter().any(|cell| cell.id == id.as_str()))
             .cloned()
             .collect::<Vec<_>>();
         if !unknown.is_empty() {
@@ -2027,14 +2142,19 @@ fn sm120_tf32_projection_selector_qualification() -> Result<(), String> {
         }
     }
     let mut measured = 0;
-    for cell in PROJECTION_CELLS {
+    for &cell in cells {
         if let Some(only) = &only
             && !only.iter().any(|id| id == cell.id)
         {
             continue;
         }
         quiet.require_cohort(&format!("sm120-projection-selector/{}/pre-cell", cell.id))?;
-        sink.write(&run_cell(&device, cell, &quiet)?)?;
+        sink.write(&run_cell(
+            &device,
+            cell,
+            &quiet,
+            candidate_filter.as_deref(),
+        )?)?;
         quiet.verify_post_cohort(&format!("sm120-projection-selector/{}/post-cell", cell.id))?;
         measured += 1;
     }
@@ -2042,9 +2162,28 @@ fn sm120_tf32_projection_selector_qualification() -> Result<(), String> {
     sink.finish(&device, measured, &pre_context, &postflight)?;
     eprintln!(
         "{{\"schema\":\"{SCHEMA}\",\"projection_cells\":{},\"discovery_windows_per_order\":{DISCOVERY_WINDOWS},\"final_windows_per_order\":{FINAL_WINDOWS},\"passed\":true}}",
-        PROJECTION_CELLS.len(),
+        cells.len(),
     );
     Ok(())
+}
+
+#[test]
+fn projection_bias_qualification_covers_forward_epilogues_only() {
+    let cells = projection_bias_cells();
+    assert_eq!(cells.len(), 15);
+    assert!(cells.iter().all(|cell| {
+        cell.op == ResolvedGemmOp::Nn && cell.alpha == 1.0 && cell.beta == 0.0 && cell.bias
+    }));
+    let forward = cells
+        .iter()
+        .find(|cell| cell.id == "nn_d768_in_proj")
+        .unwrap();
+    assert_eq!(forward.dims, (2048, 768, 3072));
+    assert_eq!(
+        forward.epilogue(),
+        PhysicalQualificationF32Epilogue::new(1.0, 0.0, true)
+    );
+    assert!(!cells.iter().any(|cell| cell.id == "tn_batch_input_proj"));
 }
 
 #[test]

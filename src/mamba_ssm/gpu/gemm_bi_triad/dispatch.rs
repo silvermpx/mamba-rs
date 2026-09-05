@@ -1865,6 +1865,55 @@ fn measured_tf32_cell(
         .map(|cell| cell.route)
 }
 
+/// Separately qualified NN bias epilogues on the frozen Ada module. The
+/// 2026-09-05 bias-wide5-v2 qualification measured 21 discovery and 101 final
+/// windows per order/path, with repeat, graph and red-zone gates. No-bias
+/// evidence elsewhere does not authorize this epilogue or adjacent shapes.
+fn sm89_measured_tf32_bias_route(
+    request: F32TriadRequest,
+    operands: F32TriadOperands,
+    cohort: &Tf32AutoEvidenceCohort,
+) -> Option<Tf32PhysicalRoute> {
+    if cohort.identity != SM89_TF32_QUALIFICATION_IDENTITY
+        || request.op != ResolvedGemmOp::Nn
+        || !operands
+            .bias
+            .is_some_and(|pointer| pointer != 0 && pointer.is_multiple_of(16))
+        || !tf32_auto_operands_match(
+            request.op,
+            F32TriadOperands {
+                bias: None,
+                ..operands
+            },
+        )
+    {
+        return None;
+    }
+    let qualified = [
+        (2048, 3072, 768),
+        (2048, 768, 1536),
+        (4621, 1928, 384),
+        (4096, 1536, 3072),
+        (2048, 768, 3072),
+    ];
+    qualified
+        .into_iter()
+        .any(|(output_rows, output_columns, reduction)| {
+            Tf32ExactShape {
+                output_rows,
+                output_columns,
+                reduction,
+            }
+            .matches_contiguous(request)
+        })
+        .then_some(Tf32PhysicalRoute::MmaTf32RnaV1(
+            super::contract::Tf32PortableRoute {
+                tile: M128N128,
+                stages: S3,
+            },
+        ))
+}
+
 fn measured_tf32_route_with_operands(
     request: F32TriadRequest,
     operands: F32TriadOperands,
@@ -1914,7 +1963,8 @@ fn measured_tf32_route_with_operands(
         });
         return None;
     }
-    let route = measured_tf32_cell(request, operands, cohort.cells)?;
+    let route = measured_tf32_cell(request, operands, cohort.cells)
+        .or_else(|| sm89_measured_tf32_bias_route(request, operands, cohort))?;
     if availability.specialized.is_some() && route.module_kind() == ModuleKind::TriadSm80 {
         let twin = cohort.portable?;
         if !availability
@@ -11279,6 +11329,95 @@ mod tf32_tests {
     }
 
     #[test]
+    fn sm89_tf32_bias_wide_requires_its_exact_qualified_epilogue() {
+        let operands = F32TriadOperands {
+            output: 0x1000,
+            a: 0x2000,
+            b: 0x3000,
+            bias: Some(0x4000),
+            alpha: 1.0,
+            beta: 0.0,
+        };
+        let resolve = |request, operands| {
+            resolve_f32_triad_auto_with_operands(
+                F32TriadPolicy::AllowDeterministicTf32V1,
+                request,
+                operands,
+                sm89_availability(),
+            )
+            .unwrap()
+        };
+        for (rows, columns, reduction) in [
+            (2048, 3072, 768),
+            (2048, 768, 1536),
+            (4621, 1928, 384),
+            (4096, 1536, 3072),
+            (2048, 768, 3072),
+        ] {
+            let request = normalized_request(ResolvedGemmOp::Nn, rows, columns, reduction);
+            assert_eq!(
+                resolve(request, operands),
+                F32TriadSelection::Tf32(Tf32PhysicalRoute::MmaTf32RnaV1(Tf32PortableRoute {
+                    tile: Tf32PortableTile::M128N128,
+                    stages: Tf32PortableStages::S3,
+                })),
+            );
+            for drift in [
+                F32TriadOperands {
+                    bias: Some(0),
+                    ..operands
+                },
+                F32TriadOperands {
+                    bias: Some(0x4004),
+                    ..operands
+                },
+                F32TriadOperands {
+                    a: 0x2004,
+                    ..operands
+                },
+                F32TriadOperands {
+                    b: 0x3004,
+                    ..operands
+                },
+                F32TriadOperands {
+                    output: 0x1004,
+                    ..operands
+                },
+                F32TriadOperands {
+                    alpha: 0.5,
+                    ..operands
+                },
+                F32TriadOperands {
+                    beta: -0.0,
+                    ..operands
+                },
+                F32TriadOperands {
+                    beta: 1.0,
+                    ..operands
+                },
+            ] {
+                assert_eq!(resolve(request, drift), F32TriadSelection::ScalarFmaV1);
+            }
+            assert_eq!(
+                resolve(
+                    normalized_request(ResolvedGemmOp::Nn, rows + 1, columns, reduction),
+                    operands
+                ),
+                F32TriadSelection::ScalarFmaV1,
+                "bias evidence must not expand to adjacent shapes",
+            );
+        }
+        assert_eq!(
+            resolve(
+                normalized_request(ResolvedGemmOp::Nn, 4096, 768, 512),
+                operands
+            ),
+            F32TriadSelection::ScalarFmaV1,
+            "an archived no-bias wide winner does not authorize bias",
+        );
+    }
+
+    #[test]
     fn sm89_tf32_operand_aware_resolution_rejects_semantic_and_alignment_drift() {
         let request = normalized_request(ResolvedGemmOp::Nn, 2048, 768, 1536);
         let operands = F32TriadOperands {
@@ -11303,7 +11442,7 @@ mod tf32_tests {
                 ..operands
             },
             F32TriadOperands {
-                bias: Some(0x4000),
+                bias: Some(0x4004),
                 ..operands
             },
             F32TriadOperands {
