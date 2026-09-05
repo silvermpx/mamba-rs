@@ -428,6 +428,10 @@ pub struct MambaKernels {
     pub gemm_bi_nn_half_sm120: Option<FixedSm120HalfKernels>,
     /// SM120 TMA BF16/F16-input, F32-output inference candidates.
     pub gemm_bi_nn_half_sm120_f32out: Option<FixedSm120HalfKernels>,
+    /// Ada-only homogeneous-half Tc128 pipeline; force-only until qualified.
+    pub fixed_sm89_half_pipeline: Option<HalfKernel>,
+    /// Why the optional Ada pipeline is absent (including non-Ada targets).
+    pub fixed_sm89_half_pipeline_rejection: Option<String>,
 
     // -- Batch-invariant matvec (M=1 specialization) --
     /// Specialized M=1 matvec. The GEMM kernels above waste 98% of smem
@@ -631,6 +635,8 @@ impl MambaKernels {
             (fixed, scalar, sm80, specialized)
         };
         let compiler_identity = fixed.compiler_identity;
+        let (fixed_sm89_half_pipeline, fixed_sm89_half_pipeline_rejection) =
+            super::gemm_bi_triad::modules::load_fixed_sm89_half_pipeline(ctx, &fixed);
         let triad = GemmBiKernels::load(ctx, fixed.artifact_identity, scalar, sm80, specialized)?;
         // A rejected TF32 module used to be recorded and never shown: the
         // process booted green and every TF32 request quietly ran scalar.
@@ -874,6 +880,8 @@ impl MambaKernels {
             gemm_bi_f32_f32: get("gemm_bi_f32_f32")?,
             gemm_bi_f32_f32_s2: get("gemm_bi_f32_f32_s2")?,
             gemm_bi_f32_f32_n128_s2: get("gemm_bi_f32_f32_n128_s2")?,
+            fixed_sm89_half_pipeline,
+            fixed_sm89_half_pipeline_rejection,
             gemm_bi_nn_tf32: {
                 let kernels = FixedTf32Kernels {
                     m128n64_s2: get("gemm_bi_nn_tf32_v1_m128n64_bk32_s2")?,

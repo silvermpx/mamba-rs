@@ -3250,8 +3250,21 @@ fn fixed_sm120_half_exact_selector_routes_match_incumbent_bits_and_graphs() {
                     dtype.as_str(),
                     if has_bias { "bias" } else { "none" }
                 );
+                // The qualified no-bias S3 cells supersede D only for these
+                // exact dtype/shape combinations; all bit/graph gates remain.
+                let expected = if !has_bias
+                    && ((shape.m, shape.k, shape.n) == (1536, 1032, 1536)
+                        || (dtype == WeightDtype::F16
+                            && matches!(
+                                (shape.m, shape.k, shape.n),
+                                (1024, 1928, 1928) | (1024, 1928, 2304) | (1536, 1928, 1536)
+                            ))) {
+                    FixedSm120HalfTile::M128N128Bk32S3
+                } else {
+                    D
+                };
                 run_fixed_sm120_half_exact_overlay_route_case(
-                    &ctx, &label, dtype, shape, has_bias, D, incumbent,
+                    &ctx, &label, dtype, shape, has_bias, expected, incumbent,
                 );
             }
         }
@@ -9130,18 +9143,503 @@ fn fixed_ada_normalized_error(
     normalized
 }
 
+fn fixed_explicit_vendor_admit_cc(
+    requested: Option<&str>,
+    actual: (u32, u32),
+) -> Result<(u32, u32), String> {
+    let expected = match requested.unwrap_or("8.9") {
+        "8.9" => (8, 9),
+        "12.0" => (12, 0),
+        value => return Err(format!("unsupported explicit vendor exact CC {value:?}")),
+    };
+    if actual != expected {
+        return Err(format!(
+            "explicit vendor exact CC {}.{} does not match actual {}.{}",
+            expected.0, expected.1, actual.0, actual.1
+        ));
+    }
+    Ok(expected)
+}
+
+fn fixed_explicit_vendor_tiles(row: &str, cc: (u32, u32)) -> Vec<FixedTile> {
+    assert!(matches!(cc, (8, 9) | (12, 0)), "unadmitted comparator CC");
+    let mut tiles = match row {
+        "bf16" | "f16" => vec![
+            FixedTile::Tc16,
+            FixedTile::Tc64,
+            FixedTile::Tc128,
+            FixedTile::TcW64,
+            FixedTile::TcWn64,
+        ],
+        "tf32" => vec![
+            FixedTile::Tf32M128S2,
+            FixedTile::Tf32M128S3,
+            FixedTile::Tf32M64S2,
+            FixedTile::Tf32M64S3,
+            FixedTile::Tf32M16S4,
+        ],
+        "f32_exact" => vec![FixedTile::Legacy, FixedTile::F32N128S2],
+        _ => panic!("unsupported explicit vendor row {row:?}"),
+    };
+    if cc == (12, 0) {
+        match row {
+            "bf16" | "f16" => tiles.extend(FixedSm120HalfTile::ALL.map(FixedTile::Sm120Half)),
+            "tf32" => tiles.extend([
+                FixedTile::Tf32Sm120M128S2,
+                FixedTile::Tf32Sm120M128S3,
+                FixedTile::Tf32Sm120M64N128S2,
+                FixedTile::Tf32Sm120M64N128S3,
+                FixedTile::Tf32Sm120M64S2ProducerWarp,
+                FixedTile::Tf32Sm120M64S2,
+            ]),
+            _ => {}
+        }
+    } else if row == "tf32" {
+        // The wide symbol is not bound in the committed CC12 module cohort.
+        tiles.insert(2, FixedTile::Tf32M128N128S3);
+    } else if matches!(row, "bf16" | "f16") {
+        tiles.push(FixedTile::Tc128Sm89Pipeline);
+    }
+    tiles
+}
+
+fn fixed_explicit_vendor_filter_tiles(
+    inventory: &[FixedTile],
+    requested: Option<&str>,
+) -> Result<Vec<FixedTile>, String> {
+    let Some(requested) = requested else {
+        return Ok(inventory.to_vec());
+    };
+    let mut selected = Vec::new();
+    for name in requested.split(',') {
+        let tile = inventory
+            .iter()
+            .copied()
+            .find(|tile| format!("{tile:?}") == name)
+            .ok_or_else(|| {
+                format!("unknown MAMBA_FIXED_VENDOR_TILES entry {name:?}; expected {inventory:?}")
+            })?;
+        if selected.contains(&tile) {
+            return Err(format!("duplicate MAMBA_FIXED_VENDOR_TILES entry {name:?}"));
+        }
+        selected.push(tile);
+    }
+    Ok(selected)
+}
+
+fn fixed_explicit_vendor_paths(requested: Option<&str>) -> Result<Vec<&'static str>, String> {
+    let mut paths = Vec::new();
+    for name in requested.unwrap_or("eager").split(',') {
+        let path = match name {
+            "eager" => "eager",
+            "graph" => "graph",
+            _ => {
+                return Err(format!(
+                    "unknown MAMBA_FIXED_VENDOR_PATHS entry {name:?}; expected eager,graph"
+                ));
+            }
+        };
+        if paths.contains(&path) {
+            return Err(format!("duplicate MAMBA_FIXED_VENDOR_PATHS entry {name:?}"));
+        }
+        paths.push(path);
+    }
+    Ok(paths)
+}
+
+fn fixed_explicit_vendor_pipeline_graph_contract(
+    dtype: WeightDtype,
+    node_count: usize,
+    symbol: &str,
+    block: (u32, u32, u32),
+    shared_bytes: u32,
+) -> Result<(), String> {
+    let expected = match dtype {
+        WeightDtype::Bf16 => "gemm_bi_nn_fixed_sm89_tc128_pipeline_v1_bf16",
+        WeightDtype::F16 => "gemm_bi_nn_fixed_sm89_tc128_pipeline_v1_f16",
+        WeightDtype::F32 => return Err("Ada half pipeline cannot have F32 storage".into()),
+    };
+    if node_count != 1 || symbol != expected || block != (256, 1, 1) || shared_bytes != 71_680 {
+        return Err(format!(
+            "wrong physical Ada half pipeline: nodes={node_count} symbol={symbol:?} block={block:?} shared={shared_bytes}"
+        ));
+    }
+    Ok(())
+}
+
+fn fixed_explicit_vendor_raw_bytes(ctx: &GpuCtx, buffer: &DtypedBuf) -> Vec<u8> {
+    let mut bytes = vec![0; buffer.size_bytes()];
+    if !bytes.is_empty() {
+        assert_eq!(
+            unsafe {
+                cudarc::driver::sys::cuMemcpyDtoHAsync_v2(
+                    bytes.as_mut_ptr().cast(),
+                    buffer.cached_ptr(),
+                    bytes.len(),
+                    ctx.stream.cu_stream(),
+                )
+            },
+            cudarc::driver::sys::CUresult::CUDA_SUCCESS,
+            "explicit comparator raw-storage download"
+        );
+        ctx.stream
+            .synchronize()
+            .expect("complete raw-storage download");
+    }
+    bytes
+}
+
+fn fixed_explicit_vendor_poison_output(ctx: &GpuCtx, buffer: &DtypedBuf) {
+    assert_eq!(
+        unsafe {
+            cudarc::driver::sys::cuMemsetD8Async(
+                buffer.cached_ptr(),
+                0xff,
+                buffer.size_bytes(),
+                ctx.stream.cu_stream(),
+            )
+        },
+        cudarc::driver::sys::CUresult::CUDA_SUCCESS,
+        "poison explicit comparator output before graph replay"
+    );
+}
+
+// Inspect the captured Driver graph, not the returned FixedTile. This runs
+// outside capture and timing; the optional bias symbol proves the vendor
+// graph includes the broadcast as well as at least one GEMM kernel.
+fn fixed_explicit_vendor_graph_inventory(
+    graph: &CudaGraph,
+    label: &str,
+    pipeline_dtype: Option<WeightDtype>,
+    bias_symbol: Option<&str>,
+) -> String {
+    use cudarc::driver::sys;
+    let mut count = 0;
+    assert_eq!(
+        unsafe { sys::cuGraphGetNodes(graph.cu_graph(), std::ptr::null_mut(), &mut count) },
+        sys::CUresult::CUDA_SUCCESS,
+        "{label} graph node count"
+    );
+    assert!(count > 0, "{label} captured no work");
+    let mut nodes = vec![std::ptr::null_mut(); count];
+    assert_eq!(
+        unsafe { sys::cuGraphGetNodes(graph.cu_graph(), nodes.as_mut_ptr(), &mut count) },
+        sys::CUresult::CUDA_SUCCESS,
+        "{label} graph node inventory"
+    );
+    let mut kernels = Vec::new();
+    let mut non_kernel_nodes = 0;
+    let mut bias_count = 0;
+    for node in nodes {
+        let mut kind = sys::CUgraphNodeType::CU_GRAPH_NODE_TYPE_EMPTY;
+        assert_eq!(
+            unsafe { sys::cuGraphNodeGetType(node, &mut kind) },
+            sys::CUresult::CUDA_SUCCESS
+        );
+        if kind != sys::CUgraphNodeType::CU_GRAPH_NODE_TYPE_KERNEL {
+            assert!(
+                pipeline_dtype.is_none(),
+                "{label} pipeline captured non-kernel work"
+            );
+            non_kernel_nodes += 1;
+            continue;
+        }
+        let mut params: sys::CUDA_KERNEL_NODE_PARAMS = unsafe { std::mem::zeroed() };
+        assert_eq!(
+            unsafe { sys::cuGraphKernelNodeGetParams_v2(node, &mut params) },
+            sys::CUresult::CUDA_SUCCESS,
+            "{label} graph kernel parameters"
+        );
+        let mut name = std::ptr::null();
+        assert_eq!(
+            unsafe { sys::cuFuncGetName(&mut name, params.func) },
+            sys::CUresult::CUDA_SUCCESS
+        );
+        assert!(!name.is_null(), "{label} graph function name is null");
+        let symbol = unsafe { CStr::from_ptr(name) }
+            .to_str()
+            .expect("UTF-8 graph symbol");
+        let block = (params.blockDimX, params.blockDimY, params.blockDimZ);
+        if let Some(dtype) = pipeline_dtype {
+            fixed_explicit_vendor_pipeline_graph_contract(
+                dtype,
+                count,
+                symbol,
+                block,
+                params.sharedMemBytes,
+            )
+            .unwrap_or_else(|error| panic!("{label}: {error}"));
+        }
+        bias_count += usize::from(bias_symbol == Some(symbol));
+        kernels.push(format!(
+            "{{\"symbol\":\"{}\",\"grid\":[{},{},{}],\"block\":[{},{},{}],\"shared_bytes\":{}}}",
+            fixed_sm120_tf32_bd_json_escape(symbol),
+            params.gridDimX,
+            params.gridDimY,
+            params.gridDimZ,
+            block.0,
+            block.1,
+            block.2,
+            params.sharedMemBytes
+        ));
+    }
+    assert!(!kernels.is_empty(), "{label} graph has no actual kernels");
+    if bias_symbol.is_some() {
+        assert_eq!(
+            bias_count, 1,
+            "{label} must capture exactly one bias broadcast"
+        );
+        assert!(
+            kernels.len() >= 2,
+            "{label} captured bias but no GEMM kernel"
+        );
+    }
+    format!(
+        "{{\"node_count\":{count},\"non_kernel_nodes\":{non_kernel_nodes},\"kernels\":[{}]}}",
+        kernels.join(",")
+    )
+}
+
 #[test]
-#[ignore = "requires MAMBA_FIXED_ADA_VENDOR=1 and a quiet CC8.9 GPU; emits paired production AUTO evidence"]
+fn fixed_explicit_vendor_cc_admission_is_fail_closed() {
+    assert_eq!(fixed_explicit_vendor_admit_cc(None, (8, 9)), Ok((8, 9)));
+    assert_eq!(
+        fixed_explicit_vendor_admit_cc(Some("8.9"), (8, 9)),
+        Ok((8, 9))
+    );
+    assert_eq!(
+        fixed_explicit_vendor_admit_cc(Some("12.0"), (12, 0)),
+        Ok((12, 0))
+    );
+    assert!(fixed_explicit_vendor_admit_cc(None, (12, 0)).is_err());
+    assert!(fixed_explicit_vendor_admit_cc(Some("8.9"), (12, 0)).is_err());
+    assert!(fixed_explicit_vendor_admit_cc(Some("12.0"), (8, 9)).is_err());
+    assert!(fixed_explicit_vendor_admit_cc(Some("12.0"), (12, 1)).is_err());
+    for invalid in ["", "12.1", "9.0", "120", " 12.0", "12.0 ", "8.9,12.0"] {
+        assert!(fixed_explicit_vendor_admit_cc(Some(invalid), (12, 0)).is_err());
+    }
+}
+
+#[test]
+fn fixed_explicit_vendor_rung_inventory_is_arch_specific() {
+    for row in ["bf16", "f16"] {
+        let sm120 = fixed_explicit_vendor_tiles(row, (12, 0));
+        assert_eq!(sm120.len(), 10);
+        for tile in FixedSm120HalfTile::ALL {
+            assert!(sm120.contains(&FixedTile::Sm120Half(tile)));
+        }
+        assert!(!sm120.contains(&FixedTile::Tc128Sm89Pipeline));
+        let ada = fixed_explicit_vendor_tiles(row, (8, 9));
+        assert_eq!(ada.len(), 6);
+        assert!(ada.contains(&FixedTile::Tc128Sm89Pipeline));
+        assert!(
+            ada.iter()
+                .all(|tile| !matches!(tile, FixedTile::Sm120Half(_)))
+        );
+    }
+    let sm120 = fixed_explicit_vendor_tiles("tf32", (12, 0));
+    assert_eq!(sm120.len(), 11);
+    assert!(!sm120.contains(&FixedTile::Tf32M128N128S3));
+    for tile in [
+        FixedTile::Tf32Sm120M128S2,
+        FixedTile::Tf32Sm120M128S3,
+        FixedTile::Tf32Sm120M64N128S2,
+        FixedTile::Tf32Sm120M64N128S3,
+        FixedTile::Tf32Sm120M64S2ProducerWarp,
+        FixedTile::Tf32Sm120M64S2,
+    ] {
+        assert!(sm120.contains(&tile));
+    }
+    let ada = fixed_explicit_vendor_tiles("tf32", (8, 9));
+    assert_eq!(ada.len(), 6);
+    assert!(ada.contains(&FixedTile::Tf32M128N128S3));
+    assert!(!ada.contains(&FixedTile::Tc128Sm89Pipeline));
+    for cc in [(8, 9), (12, 0)] {
+        assert_eq!(
+            fixed_explicit_vendor_tiles("f32_exact", cc),
+            [FixedTile::Legacy, FixedTile::F32N128S2]
+        );
+    }
+}
+
+#[test]
+fn fixed_explicit_vendor_tile_filter_is_strict_and_row_scoped() {
+    let inventory = [FixedTile::Tc128, FixedTile::Tc128Sm89Pipeline];
+    assert_eq!(
+        fixed_explicit_vendor_filter_tiles(&inventory, None).unwrap(),
+        [FixedTile::Tc128, FixedTile::Tc128Sm89Pipeline]
+    );
+    assert_eq!(
+        fixed_explicit_vendor_filter_tiles(&inventory, Some("Tc128Sm89Pipeline")).unwrap(),
+        [FixedTile::Tc128Sm89Pipeline]
+    );
+    assert_eq!(
+        fixed_explicit_vendor_filter_tiles(&inventory, Some("Tc128Sm89Pipeline,Tc128")).unwrap(),
+        [FixedTile::Tc128Sm89Pipeline, FixedTile::Tc128]
+    );
+    for invalid in [
+        "",
+        "tc128",
+        "Tc128Sm89Pipeline ",
+        " Tc128Sm89Pipeline",
+        "Tc128,Tc128",
+        "Tc128,",
+        ",Tc128",
+        "Tc64",
+        "Tf32M128S2",
+        "Sm120Half(M128N128Bk32S2)",
+    ] {
+        assert!(
+            fixed_explicit_vendor_filter_tiles(&inventory, Some(invalid)).is_err(),
+            "filter accepted unavailable, duplicate, or malformed tile {invalid:?}"
+        );
+    }
+    for (row, cc) in [
+        ("bf16", (12, 0)),
+        ("f16", (12, 0)),
+        ("tf32", (8, 9)),
+        ("f32_exact", (8, 9)),
+    ] {
+        assert!(
+            fixed_explicit_vendor_filter_tiles(
+                &fixed_explicit_vendor_tiles(row, cc),
+                Some("Tc128Sm89Pipeline")
+            )
+            .is_err(),
+            "pipeline filter escaped its Ada homogeneous-half inventory: {row}/{cc:?}"
+        );
+    }
+}
+
+#[test]
+fn fixed_explicit_vendor_paths_preserve_eager_default_and_allow_graph() {
+    assert_eq!(fixed_explicit_vendor_paths(None).unwrap(), ["eager"]);
+    assert_eq!(
+        fixed_explicit_vendor_paths(Some("eager")).unwrap(),
+        ["eager"]
+    );
+    assert_eq!(
+        fixed_explicit_vendor_paths(Some("graph")).unwrap(),
+        ["graph"]
+    );
+    assert_eq!(
+        fixed_explicit_vendor_paths(Some("eager,graph")).unwrap(),
+        ["eager", "graph"]
+    );
+    assert_eq!(
+        fixed_explicit_vendor_paths(Some("graph,eager")).unwrap(),
+        ["graph", "eager"]
+    );
+    for invalid in [
+        "",
+        "Graph",
+        "graph ",
+        " eager",
+        "eager,eager",
+        "graph,",
+        ",graph",
+        "both",
+    ] {
+        assert!(
+            fixed_explicit_vendor_paths(Some(invalid)).is_err(),
+            "path filter accepted {invalid:?}"
+        );
+    }
+}
+
+#[test]
+fn fixed_explicit_vendor_pipeline_graph_contract_rejects_wrong_physical_launch() {
+    for (dtype, symbol) in [
+        (
+            WeightDtype::Bf16,
+            "gemm_bi_nn_fixed_sm89_tc128_pipeline_v1_bf16",
+        ),
+        (
+            WeightDtype::F16,
+            "gemm_bi_nn_fixed_sm89_tc128_pipeline_v1_f16",
+        ),
+    ] {
+        fixed_explicit_vendor_pipeline_graph_contract(dtype, 1, symbol, (256, 1, 1), 71_680)
+            .expect("one actual dtype-specific pipeline launch");
+        for (count, block, shared) in [
+            (0, (256, 1, 1), 71_680),
+            (2, (256, 1, 1), 71_680),
+            (1, (128, 1, 1), 71_680),
+            (1, (256, 2, 1), 71_680),
+            (1, (256, 1, 2), 71_680),
+            (1, (256, 1, 1), 0),
+            (1, (256, 1, 1), 98_304),
+        ] {
+            assert!(
+                fixed_explicit_vendor_pipeline_graph_contract(dtype, count, symbol, block, shared)
+                    .is_err(),
+                "accepted pipeline launch count={count} block={block:?} shared={shared}"
+            );
+        }
+        for wrong_symbol in [
+            "gemm_bi_nn_tc128_bf16",
+            "",
+            "gemm_bi_nn_fixed_sm89_tc128_pipeline_v2_bf16",
+        ] {
+            assert!(
+                fixed_explicit_vendor_pipeline_graph_contract(
+                    dtype,
+                    1,
+                    wrong_symbol,
+                    (256, 1, 1),
+                    71_680
+                )
+                .is_err(),
+                "accepted wrong pipeline symbol {wrong_symbol:?}"
+            );
+        }
+        let other_dtype = if dtype == WeightDtype::Bf16 {
+            WeightDtype::F16
+        } else {
+            WeightDtype::Bf16
+        };
+        assert!(
+            fixed_explicit_vendor_pipeline_graph_contract(
+                other_dtype,
+                1,
+                symbol,
+                (256, 1, 1),
+                71_680
+            )
+            .is_err(),
+            "accepted the other homogeneous-half symbol"
+        );
+        assert!(
+            fixed_explicit_vendor_pipeline_graph_contract(
+                WeightDtype::F32,
+                1,
+                symbol,
+                (256, 1, 1),
+                71_680
+            )
+            .is_err(),
+            "accepted F32 for a homogeneous-half pipeline"
+        );
+    }
+}
+
+#[test]
+#[ignore = "requires MAMBA_FIXED_ADA_VENDOR=1 and an explicitly admitted quiet CC8.9/12.0 GPU (default 8.9); emits paired production AUTO evidence"]
 fn fixed_ada_production_auto_paired_precision_cublas() {
     use cudarc::cublas::sys::cublasComputeType_t;
 
     assert_eq!(
         std::env::var("MAMBA_FIXED_ADA_VENDOR").as_deref(),
         Ok("1"),
-        "set MAMBA_FIXED_ADA_VENDOR=1 to run the Ada comparator"
+        "set MAMBA_FIXED_ADA_VENDOR=1 to run the explicit vendor comparator"
+    );
+    assert_ne!(
+        std::env::var("NVIDIA_TF32_OVERRIDE").as_deref(),
+        Ok("0"),
+        "NVIDIA_TF32_OVERRIDE=0 disables the explicit FAST_TF32 denominator"
     );
     if cfg!(debug_assertions) {
-        panic!("Ada comparator requires --release");
+        panic!("explicit vendor comparator requires --release");
     }
     let rows = [
         (
@@ -9190,17 +9688,29 @@ fn fixed_ada_production_auto_paired_precision_cublas() {
     };
     assert!(
         (1..=10_001).contains(&windows),
-        "Ada windows must be in 1..=10001"
+        "explicit vendor windows must be in 1..=10001"
     );
-    fixed_sm120_tf32_bd_environment_preflight("Ada AUTO/vendor")
-        .expect("Ada AUTO/vendor preflight");
-    let device = GpuDevice::new(0).expect("Ada CUDA device");
-    assert_eq!(
-        device.compute_capability,
-        (8, 9),
-        "Ada comparator requires CC8.9"
+    fixed_sm120_tf32_bd_environment_preflight("explicit vendor AUTO/vendor")
+        .expect("explicit vendor AUTO/vendor preflight");
+    let requested_cc = match std::env::var("MAMBA_FIXED_VENDOR_EXACT_CC") {
+        Ok(value) => Some(value),
+        Err(std::env::VarError::NotPresent) => None,
+        Err(error) => panic!("read MAMBA_FIXED_VENDOR_EXACT_CC: {error}"),
+    };
+    let device = GpuDevice::new(0).expect("explicit vendor CUDA device");
+    fixed_explicit_vendor_admit_cc(requested_cc.as_deref(), device.compute_capability)
+        .expect("explicit vendor exact-CC admission");
+    let ctx = GpuCtx::new(&device).expect("explicit vendor GPU context");
+    let compiler = ctx.kernels.compiler_identity();
+    let device_metadata = format!(
+        "\"cc\":\"{}.{}\",\"sm_count\":{},\"nvrtc\":[{},{}],\"compiler_target\":\"{:?}\"",
+        device.compute_capability.0,
+        device.compute_capability.1,
+        device.multiprocessor_count(),
+        compiler.nvrtc_version.0,
+        compiler.nvrtc_version.1,
+        compiler.target,
     );
-    let ctx = GpuCtx::new(&device).expect("Ada GPU context");
     let mut records = 0;
     for row_index in selected_rows {
         let (row, dtype, policy, compute, tolerance) = rows[row_index];
@@ -9209,19 +9719,24 @@ fn fixed_ada_production_auto_paired_precision_cublas() {
             let cell = FIXED_AUTO_VENDOR_EXACT_CELLS[cell_index];
             let shape = cell.shape;
             let elements = shape.m * shape.n;
-            let a = DtypedBuf::zeros(&ctx.stream, shape.m * shape.k, dtype).expect("Ada A");
-            let b = DtypedBuf::zeros(&ctx.stream, shape.k * shape.n, dtype).expect("Ada B");
+            let a =
+                DtypedBuf::zeros(&ctx.stream, shape.m * shape.k, dtype).expect("explicit vendor A");
+            let b =
+                DtypedBuf::zeros(&ctx.stream, shape.k * shape.n, dtype).expect("explicit vendor B");
             a.upload_f32(&ctx.stream, &synth(shape.m * shape.k, 0x0ada_a001))
-                .expect("Ada A upload");
+                .expect("explicit vendor A upload");
             b.upload_f32(&ctx.stream, &synth(shape.k * shape.n, 0x0ada_b001))
-                .expect("Ada B upload");
-            let custom = DtypedBuf::zeros(&ctx.stream, elements, dtype).expect("Ada custom C");
-            let vendor = DtypedBuf::zeros(&ctx.stream, elements, dtype).expect("Ada vendor C");
-            let reference =
-                DtypedBuf::zeros(&ctx.stream, elements, WeightDtype::F32).expect("Ada reference C");
-            let bias = DtypedBuf::zeros(&ctx.stream, shape.n, WeightDtype::F32).expect("Ada bias");
+                .expect("explicit vendor B upload");
+            let custom =
+                DtypedBuf::zeros(&ctx.stream, elements, dtype).expect("explicit vendor custom C");
+            let vendor =
+                DtypedBuf::zeros(&ctx.stream, elements, dtype).expect("explicit vendor vendor C");
+            let reference = DtypedBuf::zeros(&ctx.stream, elements, WeightDtype::F32)
+                .expect("explicit vendor reference C");
+            let bias = DtypedBuf::zeros(&ctx.stream, shape.n, WeightDtype::F32)
+                .expect("explicit vendor bias");
             bias.upload_f32(&ctx.stream, &synth(shape.n, 0x0ada_b1a5))
-                .expect("Ada bias upload");
+                .expect("explicit vendor bias upload");
             for &bias_index in &biases {
                 let has_bias = bias_index == 1;
                 let custom_ops = FixedFwdOperands {
@@ -9247,7 +9762,7 @@ fn fixed_ada_production_auto_paired_precision_cublas() {
                 assert_eq!(
                     f32_bits(&ctx, &custom, elements),
                     first,
-                    "Ada AUTO repeat bits row={row} cell={} bias={has_bias}",
+                    "explicit vendor AUTO repeat bits row={row} cell={} bias={has_bias}",
                     cell.label
                 );
                 fixed_ada_vendor_launch(&ctx, vendor_ops, shape, compute);
@@ -9258,19 +9773,23 @@ fn fixed_ada_production_auto_paired_precision_cublas() {
                     cublasComputeType_t::CUBLAS_COMPUTE_32F_PEDANTIC,
                 );
                 let reference_bits = f32_bits(&ctx, &reference, elements);
-                let custom_error =
-                    fixed_ada_normalized_error(&first, &reference_bits, tolerance, "Ada AUTO");
+                let custom_error = fixed_ada_normalized_error(
+                    &first,
+                    &reference_bits,
+                    tolerance,
+                    "explicit vendor AUTO",
+                );
                 let vendor_error = fixed_ada_normalized_error(
                     &f32_bits(&ctx, &vendor, elements),
                     &reference_bits,
                     tolerance,
-                    "Ada vendor",
+                    "explicit vendor vendor",
                 );
                 let custom_launch = || {
                     assert_eq!(
                         launch_fixed_auto_vendor_custom(&ctx, custom_ops, shape),
                         selected,
-                        "Ada AUTO tile changed during measurement"
+                        "explicit vendor AUTO tile changed during measurement"
                     );
                 };
                 let vendor_launch = || fixed_ada_vendor_launch(&ctx, vendor_ops, shape, compute);
@@ -9278,7 +9797,9 @@ fn fixed_ada_production_auto_paired_precision_cublas() {
                     custom_launch();
                     vendor_launch();
                 }
-                ctx.stream.synchronize().expect("Ada paired warmup sync");
+                ctx.stream
+                    .synchronize()
+                    .expect("explicit vendor paired warmup sync");
                 let custom_iterations = fixed_auto_vendor_iterations(fixed_ada_event_window_us(
                     &ctx,
                     16,
@@ -9314,7 +9835,7 @@ fn fixed_ada_production_auto_paired_precision_cublas() {
                     assert_eq!(
                         f32_bits(&ctx, &custom, elements),
                         first,
-                        "Ada AUTO post-timing bits row={row} cell={} bias={has_bias}",
+                        "explicit vendor AUTO post-timing bits row={row} cell={} bias={has_bias}",
                         cell.label
                     );
                     let mut custom_sorted = custom_samples.clone();
@@ -9324,8 +9845,8 @@ fn fixed_ada_production_auto_paired_precision_cublas() {
                     ratios.sort_by(f64::total_cmp);
                     println!(
                         concat!(
-                            "{{\"schema\":\"MambaBiFixedAdaAutoVendorV1\",\"row\":\"{}\",",
-                            "\"cell\":\"{}\",\"cc\":\"8.9\",\"sm_count\":{},\"nvrtc\":[{},{}],",
+                            "{{\"schema\":\"MambaBiFixedExplicitAutoVendorV2\",{},\"row\":\"{}\",",
+                            "\"cell\":\"{}\",",
                             "\"tuning_table_revision\":{},\"m\":{},\"k\":{},\"n\":{},",
                             "\"input_dtype\":\"{}\",\"output_dtype\":\"{}\",\"auto_tile\":\"{:?}\",",
                             "\"op\":\"nn\",\"path\":\"eager\",\"call_scope\":\"production_auto\",",
@@ -9338,11 +9859,9 @@ fn fixed_ada_production_auto_paired_precision_cublas() {
                             "\"custom_p50_us\":{},\"vendor_p50_us\":{},\"custom_over_vendor_p50\":{},",
                             "\"custom_over_vendor_p95\":{},\"custom_samples_us\":{:?},\"vendor_samples_us\":{:?}}}"
                         ),
+                        device_metadata,
                         row,
                         cell.label,
-                        device.multiprocessor_count(),
-                        ctx.kernels.compiler_identity().nvrtc_version.0,
-                        ctx.kernels.compiler_identity().nvrtc_version.1,
                         TUNING_TABLE_REVISION,
                         shape.m,
                         shape.k,
@@ -9374,22 +9893,28 @@ fn fixed_ada_production_auto_paired_precision_cublas() {
         }
     }
     println!(
-        "{{\"schema\":\"MambaBiFixedAdaAutoVendorCompleteV1\",\"records\":{records},\"passed\":true}}"
+        "{{\"schema\":\"MambaBiFixedExplicitAutoVendorCompleteV2\",{},\"records\":{records},\"passed\":true}}",
+        device_metadata
     );
 }
 
 #[test]
-#[ignore = "requires MAMBA_FIXED_ADA_VENDOR=1 and a quiet CC8.9 GPU; emits forced-rung/AUTO/vendor evidence"]
+#[ignore = "requires MAMBA_FIXED_ADA_VENDOR=1 and an explicitly admitted quiet CC8.9/12.0 GPU (default 8.9); emits forced-rung/AUTO/vendor evidence"]
 fn fixed_ada_forced_rungs_paired_precision_cublas() {
     use cudarc::cublas::sys::cublasComputeType_t;
 
     assert_eq!(
         std::env::var("MAMBA_FIXED_ADA_VENDOR").as_deref(),
         Ok("1"),
-        "set MAMBA_FIXED_ADA_VENDOR=1 to run the Ada rung census"
+        "set MAMBA_FIXED_ADA_VENDOR=1 to run the explicit vendor rung census"
+    );
+    assert_ne!(
+        std::env::var("NVIDIA_TF32_OVERRIDE").as_deref(),
+        Ok("0"),
+        "NVIDIA_TF32_OVERRIDE=0 disables the explicit FAST_TF32 denominator"
     );
     if cfg!(debug_assertions) {
-        panic!("Ada rung census requires --release");
+        panic!("explicit vendor rung census requires --release");
     }
     let rows = [
         (
@@ -9437,40 +9962,62 @@ fn fixed_ada_forced_rungs_paired_precision_cublas() {
     };
     assert!(
         (1..=10_001).contains(&windows),
-        "Ada windows must be in 1..=10001"
+        "explicit vendor windows must be in 1..=10001"
     );
-    fixed_sm120_tf32_bd_environment_preflight("Ada forced-rung/AUTO/vendor")
-        .expect("Ada forced-rung preflight");
-    let device = GpuDevice::new(0).expect("Ada CUDA device");
-    assert_eq!(
-        device.compute_capability,
-        (8, 9),
-        "Ada rung census requires CC8.9"
+    // Strict optional filters: exact Debug tile names, and eager/graph paths.
+    // Absent filters preserve the full target-valid inventory and eager timing.
+    let requested_tiles = match std::env::var("MAMBA_FIXED_VENDOR_TILES") {
+        Ok(value) => Some(value),
+        Err(std::env::VarError::NotPresent) => None,
+        Err(error) => panic!("read MAMBA_FIXED_VENDOR_TILES: {error}"),
+    };
+    let requested_paths = match std::env::var("MAMBA_FIXED_VENDOR_PATHS") {
+        Ok(value) => Some(value),
+        Err(std::env::VarError::NotPresent) => None,
+        Err(error) => panic!("read MAMBA_FIXED_VENDOR_PATHS: {error}"),
+    };
+    let paths = fixed_explicit_vendor_paths(requested_paths.as_deref())
+        .expect("explicit vendor path filter");
+    fixed_sm120_tf32_bd_environment_preflight("explicit vendor forced-rung/AUTO/vendor")
+        .expect("explicit vendor forced-rung preflight");
+    let requested_cc = match std::env::var("MAMBA_FIXED_VENDOR_EXACT_CC") {
+        Ok(value) => Some(value),
+        Err(std::env::VarError::NotPresent) => None,
+        Err(error) => panic!("read MAMBA_FIXED_VENDOR_EXACT_CC: {error}"),
+    };
+    let device = GpuDevice::new(0).expect("explicit vendor CUDA device");
+    fixed_explicit_vendor_admit_cc(requested_cc.as_deref(), device.compute_capability)
+        .expect("explicit vendor exact-CC admission");
+    let ctx = GpuCtx::new(&device).expect("explicit vendor GPU context");
+    let compiler = ctx.kernels.compiler_identity();
+    let device_metadata = format!(
+        "\"cc\":\"{}.{}\",\"sm_count\":{},\"nvrtc\":[{},{}],\"compiler_target\":\"{:?}\"",
+        device.compute_capability.0,
+        device.compute_capability.1,
+        device.multiprocessor_count(),
+        compiler.nvrtc_version.0,
+        compiler.nvrtc_version.1,
+        compiler.target,
     );
-    let ctx = GpuCtx::new(&device).expect("Ada GPU context");
+    let fixed_artifact = ctx.kernels.artifact_set_identity().fixed;
+    let device_metadata = format!(
+        "{device_metadata},\"fixed_source_digest\":\"{}\",\"fixed_invocation_digest\":\"{}\",\"fixed_artifact_digest\":\"{}\",\"header_manifest_digest\":\"{}\",\"nvrtc_library_domain\":\"{}\",\"nvrtc_library_known\":{}",
+        digest_hex(&compiler.source_digest),
+        digest_hex(&compiler.invocation_digest),
+        digest_hex(&fixed_artifact.artifact_digest),
+        digest_hex(&compiler.header_manifest_digest),
+        digest_hex(&compiler.nvrtc_library_domain),
+        compiler.nvrtc_library_known,
+    );
     let mut records = 0usize;
     let mut rejected = 0usize;
     for row_index in selected_rows {
         let (row, dtype, policy, compute, tolerance) = rows[row_index];
-        let tiles: &[FixedTile] = match row {
-            "bf16" | "f16" => &[
-                FixedTile::Tc16,
-                FixedTile::Tc64,
-                FixedTile::Tc128,
-                FixedTile::TcW64,
-                FixedTile::TcWn64,
-            ],
-            "tf32" => &[
-                FixedTile::Tf32M128S2,
-                FixedTile::Tf32M128S3,
-                FixedTile::Tf32M128N128S3,
-                FixedTile::Tf32M64S2,
-                FixedTile::Tf32M64S3,
-                FixedTile::Tf32M16S4,
-            ],
-            "f32_exact" => &[FixedTile::Legacy, FixedTile::F32N128S2],
-            _ => unreachable!("row comes from the fixed inventory"),
-        };
+        let tiles = fixed_explicit_vendor_filter_tiles(
+            &fixed_explicit_vendor_tiles(row, device.compute_capability),
+            requested_tiles.as_deref(),
+        )
+        .unwrap_or_else(|error| panic!("{row}: {error}"));
         configure_fixed_auto_vendor_custom(&ctx, policy);
         for &cell_index in &selected_cells {
             let cell = FIXED_AUTO_VENDOR_EXACT_CELLS[cell_index];
@@ -9512,6 +10059,7 @@ fn fixed_ada_forced_rungs_paired_precision_cublas() {
                 };
                 let selected = launch_fixed_auto_vendor_custom(&ctx, auto_ops, shape);
                 let auto_bits = f32_bits(&ctx, &auto, elements);
+                let auto_raw = fixed_explicit_vendor_raw_bytes(&ctx, &auto);
                 fixed_ada_vendor_launch(
                     &ctx,
                     reference_ops,
@@ -9526,6 +10074,7 @@ fn fixed_ada_forced_rungs_paired_precision_cublas() {
                     &format!("rung AUTO {row}/{} bias={has_bias}", cell.label),
                 );
                 fixed_ada_vendor_launch(&ctx, vendor_ops, shape, compute);
+                let vendor_raw = fixed_explicit_vendor_raw_bytes(&ctx, &vendor);
                 let vendor_error = fixed_ada_normalized_error(
                     &f32_bits(&ctx, &vendor, elements),
                     &reference_bits,
@@ -9536,18 +10085,19 @@ fn fixed_ada_forced_rungs_paired_precision_cublas() {
                     assert_eq!(
                         launch_fixed_auto_vendor_custom(&ctx, auto_ops, shape),
                         selected,
-                        "Ada AUTO tile changed during rung census"
+                        "explicit vendor AUTO tile changed during rung census"
                     );
                 };
                 let vendor_launch = || fixed_ada_vendor_launch(&ctx, vendor_ops, shape, compute);
-                for &tile in tiles {
+                for &tile in &tiles {
                     if let Err(error) = fixed_forward_with_tile(&ctx, forced_ops, shape, tile) {
                         println!(
                             concat!(
-                                "{{\"schema\":\"MambaBiFixedAdaForcedRungRejectedV1\",\"row\":\"{}\",",
+                                "{{\"schema\":\"MambaBiFixedExplicitForcedRungRejectedV2\",{},\"row\":\"{}\",",
                                 "\"cell\":\"{}\",\"bias\":{},\"forced_tile\":\"{:?}\",",
                                 "\"gate\":\"launch_availability\",\"reason\":\"{}\"}}"
                             ),
+                            device_metadata,
                             row,
                             cell.label,
                             has_bias,
@@ -9558,19 +10108,20 @@ fn fixed_ada_forced_rungs_paired_precision_cublas() {
                         continue;
                     }
                     let first = f32_bits(&ctx, &forced, elements);
+                    let first_raw = fixed_explicit_vendor_raw_bytes(&ctx, &forced);
                     let label = format!("rung {row}/{} {tile:?} bias={has_bias}", cell.label);
                     let forced_error =
                         fixed_ada_normalized_error(&first, &reference_bits, tolerance, &label);
                     // A retune between M-dependent Fixed rungs is only eligible
                     // when it retains AUTO's per-element numeric family.
-                    if first != auto_bits {
+                    if first_raw != auto_raw {
                         println!(
                             concat!(
-                                "{{\"schema\":\"MambaBiFixedAdaForcedRungRejectedV1\",\"row\":\"{}\",",
+                                "{{\"schema\":\"MambaBiFixedExplicitForcedRungRejectedV2\",{},\"row\":\"{}\",",
                                 "\"cell\":\"{}\",\"bias\":{},\"forced_tile\":\"{:?}\",",
                                 "\"gate\":\"auto_bit_identity\",\"forced_normalized_error\":{}}}"
                             ),
-                            row, cell.label, has_bias, tile, forced_error
+                            device_metadata, row, cell.label, has_bias, tile, forced_error
                         );
                         rejected += 1;
                         continue;
@@ -9581,7 +10132,7 @@ fn fixed_ada_forced_rungs_paired_precision_cublas() {
                     };
                     forced_launch();
                     assert!(
-                        f32_bits(&ctx, &forced, elements) == first,
+                        fixed_explicit_vendor_raw_bytes(&ctx, &forced) == first_raw,
                         "{label} repeat bits differ"
                     );
                     for _ in 0..128 {
@@ -9590,136 +10141,278 @@ fn fixed_ada_forced_rungs_paired_precision_cublas() {
                         vendor_launch();
                     }
                     ctx.stream.synchronize().expect("rung warmup sync");
-                    let auto_iterations = fixed_auto_vendor_iterations(fixed_ada_event_window_us(
-                        &ctx,
-                        16,
-                        auto_launch,
-                    ));
-                    let forced_iterations = fixed_auto_vendor_iterations(
-                        fixed_ada_event_window_us(&ctx, 16, forced_launch),
-                    );
-                    let vendor_iterations = fixed_auto_vendor_iterations(
-                        fixed_ada_event_window_us(&ctx, 16, vendor_launch),
-                    );
-                    for auto_first in [true, false] {
-                        let mut auto_samples = Vec::with_capacity(windows);
-                        let mut forced_samples = Vec::with_capacity(windows);
-                        let mut vendor_samples = Vec::with_capacity(windows);
-                        let mut over_auto = Vec::with_capacity(windows);
-                        let mut over_vendor = Vec::with_capacity(windows);
-                        for _ in 0..windows {
-                            let (auto_us, forced_us, vendor_us) = if auto_first {
-                                (
-                                    fixed_ada_event_window_us(&ctx, auto_iterations, auto_launch),
-                                    fixed_ada_event_window_us(
-                                        &ctx,
-                                        forced_iterations,
-                                        forced_launch,
-                                    ),
-                                    fixed_ada_event_window_us(
-                                        &ctx,
-                                        vendor_iterations,
-                                        vendor_launch,
-                                    ),
-                                )
+                    // Allocate and warm the complete workflows before capture.
+                    // These graphs and all captured buffers outlive every replay.
+                    let graphs = if paths.contains(&"graph") {
+                        let auto_graph = unsafe {
+                            capture_into_graph(&ctx.stream, || {
+                                auto_launch();
+                                Ok(())
+                            })
+                        }
+                        .expect("capture complete AUTO workflow");
+                        let forced_graph = unsafe {
+                            capture_into_graph(&ctx.stream, || {
+                                forced_launch();
+                                Ok(())
+                            })
+                        }
+                        .expect("capture complete forced workflow");
+                        let vendor_graph = unsafe {
+                            capture_into_graph(&ctx.stream, || {
+                                vendor_launch();
+                                Ok(())
+                            })
+                        }
+                        .expect("capture complete vendor bias/GEMM workflow");
+                        Some((auto_graph, forced_graph, vendor_graph))
+                    } else {
+                        None
+                    };
+                    let graph_inventory = if let Some((auto_graph, forced_graph, vendor_graph)) =
+                        &graphs
+                    {
+                        let auto_inventory = fixed_explicit_vendor_graph_inventory(
+                            auto_graph,
+                            "AUTO",
+                            (selected == FixedTile::Tc128Sm89Pipeline).then_some(dtype),
+                            None,
+                        );
+                        let forced_inventory = fixed_explicit_vendor_graph_inventory(
+                            forced_graph,
+                            "forced",
+                            (tile == FixedTile::Tc128Sm89Pipeline).then_some(dtype),
+                            None,
+                        );
+                        let bias_symbol = has_bias.then_some(match dtype {
+                            WeightDtype::F32 => "bias_broadcast",
+                            WeightDtype::Bf16 => "bias_broadcast_bf16",
+                            WeightDtype::F16 => "bias_broadcast_f16",
+                        });
+                        let vendor_inventory = fixed_explicit_vendor_graph_inventory(
+                            vendor_graph,
+                            "vendor",
+                            None,
+                            bias_symbol,
+                        );
+                        format!(
+                            "{{\"auto\":{auto_inventory},\"forced\":{forced_inventory},\"vendor\":{vendor_inventory}}}"
+                        )
+                    } else {
+                        "null".to_owned()
+                    };
+                    for &path in &paths {
+                        let auto_run = || {
+                            if path == "graph" {
+                                graphs
+                                    .as_ref()
+                                    .unwrap()
+                                    .0
+                                    .launch()
+                                    .expect("AUTO graph replay");
                             } else {
-                                let vendor_us = fixed_ada_event_window_us(
-                                    &ctx,
-                                    vendor_iterations,
-                                    vendor_launch,
+                                auto_launch();
+                            }
+                        };
+                        let forced_run = || {
+                            if path == "graph" {
+                                graphs
+                                    .as_ref()
+                                    .unwrap()
+                                    .1
+                                    .launch()
+                                    .expect("forced graph replay");
+                            } else {
+                                forced_launch();
+                            }
+                        };
+                        let vendor_run = || {
+                            if path == "graph" {
+                                graphs
+                                    .as_ref()
+                                    .unwrap()
+                                    .2
+                                    .launch()
+                                    .expect("vendor graph replay");
+                            } else {
+                                vendor_launch();
+                            }
+                        };
+                        if path == "graph" {
+                            for replay in 0..2 {
+                                // A no-op graph must not pass on the old eager output.
+                                for output in [&auto, &forced, &vendor] {
+                                    fixed_explicit_vendor_poison_output(&ctx, output);
+                                }
+                                auto_run();
+                                forced_run();
+                                vendor_run();
+                                assert!(
+                                    fixed_explicit_vendor_raw_bytes(&ctx, &auto) == auto_raw,
+                                    "{label} AUTO graph replay {replay} changed storage bits"
                                 );
-                                let forced_us = fixed_ada_event_window_us(
-                                    &ctx,
-                                    forced_iterations,
-                                    forced_launch,
+                                assert!(
+                                    fixed_explicit_vendor_raw_bytes(&ctx, &forced) == first_raw,
+                                    "{label} forced graph replay {replay} changed storage bits"
                                 );
-                                (
-                                    fixed_ada_event_window_us(&ctx, auto_iterations, auto_launch),
-                                    forced_us,
-                                    vendor_us,
-                                )
-                            };
-                            auto_samples.push(auto_us);
-                            forced_samples.push(forced_us);
-                            vendor_samples.push(vendor_us);
-                            over_auto.push(forced_us / auto_us);
-                            over_vendor.push(forced_us / vendor_us);
+                                assert!(
+                                    fixed_explicit_vendor_raw_bytes(&ctx, &vendor) == vendor_raw,
+                                    "{label} vendor graph replay {replay} changed storage bits"
+                                );
+                            }
+                            for _ in 0..128 {
+                                auto_run();
+                                forced_run();
+                                vendor_run();
+                            }
                         }
                         assert!(
-                            f32_bits(&ctx, &forced, elements) == first,
-                            "{label} post-timing bits differ"
+                            fixed_explicit_vendor_raw_bytes(&ctx, &auto) == auto_raw,
+                            "{label} {path} AUTO pre-timing storage bits differ"
                         );
                         assert!(
-                            f32_bits(&ctx, &auto, elements) == auto_bits,
-                            "{label} AUTO post-timing bits differ"
+                            fixed_explicit_vendor_raw_bytes(&ctx, &forced) == first_raw,
+                            "{label} {path} forced pre-timing storage bits differ"
                         );
-                        let mut auto_sorted = auto_samples.clone();
-                        let mut forced_sorted = forced_samples.clone();
-                        let mut vendor_sorted = vendor_samples.clone();
-                        auto_sorted.sort_by(f64::total_cmp);
-                        forced_sorted.sort_by(f64::total_cmp);
-                        vendor_sorted.sort_by(f64::total_cmp);
-                        over_auto.sort_by(f64::total_cmp);
-                        over_vendor.sort_by(f64::total_cmp);
-                        println!(
-                            concat!(
-                                "{{\"schema\":\"MambaBiFixedAdaForcedRungV1\",\"row\":\"{}\",",
-                                "\"cell\":\"{}\",\"m\":{},\"k\":{},\"n\":{},\"cc\":\"8.9\",\"sm_count\":{},",
-                                "\"nvrtc\":[{},{}],\"tuning_table_revision\":{},\"dtype\":\"{}\",",
-                                "\"auto_tile\":\"{:?}\",\"forced_tile\":\"{:?}\",\"op\":\"nn\",\"path\":\"eager\",",
-                                "\"timing\":\"cuda_events\",\"alpha\":1,\"beta\":0,\"bias\":{},",
-                                "\"vendor_gemm_beta\":{},\"vendor_bias_broadcast_timed\":{},",
-                                "\"vendor_compute\":\"{:?}\",\"reference_compute\":\"CUBLAS_COMPUTE_32F_PEDANTIC\",",
-                                "\"reference_output_dtype\":\"f32\",\"auto_bits_equal\":true,\"repeat_bits_equal\":true,",
-                                "\"normalized_error_tolerance\":{},\"auto_normalized_error\":{},",
-                                "\"forced_normalized_error\":{},\"vendor_normalized_error\":{},\"order\":\"{}\",",
-                                "\"windows\":{},\"auto_iterations\":{},\"forced_iterations\":{},\"vendor_iterations\":{},",
-                                "\"auto_p50_us\":{},\"forced_p50_us\":{},\"vendor_p50_us\":{},",
-                                "\"forced_over_auto_p50\":{},\"forced_over_auto_p95\":{},",
-                                "\"forced_over_vendor_p50\":{},\"forced_over_vendor_p95\":{},",
-                                "\"auto_samples_us\":{:?},\"forced_samples_us\":{:?},\"vendor_samples_us\":{:?}}}"
-                            ),
-                            row,
-                            cell.label,
-                            shape.m,
-                            shape.k,
-                            shape.n,
-                            device.multiprocessor_count(),
-                            ctx.kernels.compiler_identity().nvrtc_version.0,
-                            ctx.kernels.compiler_identity().nvrtc_version.1,
-                            TUNING_TABLE_REVISION,
-                            dtype.as_str(),
-                            selected,
-                            tile,
-                            has_bias,
-                            u8::from(has_bias),
-                            has_bias,
-                            compute,
-                            tolerance,
-                            auto_error,
-                            forced_error,
-                            vendor_error,
-                            if auto_first {
-                                "auto_forced_vendor"
-                            } else {
-                                "vendor_forced_auto"
-                            },
-                            windows,
-                            auto_iterations,
-                            forced_iterations,
-                            vendor_iterations,
-                            percentile(&auto_sorted, 0.5),
-                            percentile(&forced_sorted, 0.5),
-                            percentile(&vendor_sorted, 0.5),
-                            percentile(&over_auto, 0.5),
-                            percentile(&over_auto, 0.95),
-                            percentile(&over_vendor, 0.5),
-                            percentile(&over_vendor, 0.95),
-                            auto_samples,
-                            forced_samples,
-                            vendor_samples
+                        assert!(
+                            fixed_explicit_vendor_raw_bytes(&ctx, &vendor) == vendor_raw,
+                            "{label} {path} vendor pre-timing storage bits differ"
                         );
-                        records += 1;
+                        let auto_iterations = fixed_auto_vendor_iterations(
+                            fixed_ada_event_window_us(&ctx, 16, auto_run),
+                        );
+                        let forced_iterations = fixed_auto_vendor_iterations(
+                            fixed_ada_event_window_us(&ctx, 16, forced_run),
+                        );
+                        let vendor_iterations = fixed_auto_vendor_iterations(
+                            fixed_ada_event_window_us(&ctx, 16, vendor_run),
+                        );
+                        for auto_first in [true, false] {
+                            let mut auto_samples = Vec::with_capacity(windows);
+                            let mut forced_samples = Vec::with_capacity(windows);
+                            let mut vendor_samples = Vec::with_capacity(windows);
+                            let mut over_auto = Vec::with_capacity(windows);
+                            let mut over_vendor = Vec::with_capacity(windows);
+                            for _ in 0..windows {
+                                let (auto_us, forced_us, vendor_us) = if auto_first {
+                                    (
+                                        fixed_ada_event_window_us(&ctx, auto_iterations, auto_run),
+                                        fixed_ada_event_window_us(
+                                            &ctx,
+                                            forced_iterations,
+                                            forced_run,
+                                        ),
+                                        fixed_ada_event_window_us(
+                                            &ctx,
+                                            vendor_iterations,
+                                            vendor_run,
+                                        ),
+                                    )
+                                } else {
+                                    let vendor_us = fixed_ada_event_window_us(
+                                        &ctx,
+                                        vendor_iterations,
+                                        vendor_run,
+                                    );
+                                    let forced_us = fixed_ada_event_window_us(
+                                        &ctx,
+                                        forced_iterations,
+                                        forced_run,
+                                    );
+                                    (
+                                        fixed_ada_event_window_us(&ctx, auto_iterations, auto_run),
+                                        forced_us,
+                                        vendor_us,
+                                    )
+                                };
+                                auto_samples.push(auto_us);
+                                forced_samples.push(forced_us);
+                                vendor_samples.push(vendor_us);
+                                over_auto.push(forced_us / auto_us);
+                                over_vendor.push(forced_us / vendor_us);
+                            }
+                            assert!(
+                                fixed_explicit_vendor_raw_bytes(&ctx, &forced) == first_raw,
+                                "{label} {path} forced post-timing storage bits differ"
+                            );
+                            assert!(
+                                fixed_explicit_vendor_raw_bytes(&ctx, &auto) == auto_raw,
+                                "{label} {path} AUTO post-timing storage bits differ"
+                            );
+                            assert!(
+                                fixed_explicit_vendor_raw_bytes(&ctx, &vendor) == vendor_raw,
+                                "{label} {path} vendor post-timing storage bits differ"
+                            );
+                            let mut auto_sorted = auto_samples.clone();
+                            let mut forced_sorted = forced_samples.clone();
+                            let mut vendor_sorted = vendor_samples.clone();
+                            auto_sorted.sort_by(f64::total_cmp);
+                            forced_sorted.sort_by(f64::total_cmp);
+                            vendor_sorted.sort_by(f64::total_cmp);
+                            over_auto.sort_by(f64::total_cmp);
+                            over_vendor.sort_by(f64::total_cmp);
+                            println!(
+                                concat!(
+                                    "{{\"schema\":\"MambaBiFixedExplicitForcedRungV2\",{},\"row\":\"{}\",",
+                                    "\"cell\":\"{}\",\"m\":{},\"k\":{},\"n\":{},",
+                                    "\"tuning_table_revision\":{},\"dtype\":\"{}\",",
+                                    "\"auto_tile\":\"{:?}\",\"forced_tile\":\"{:?}\",\"op\":\"nn\",\"path\":\"{}\",",
+                                    "\"graphs\":{},\"graph_replay_bits_equal\":{},\"raw_storage_bits_equal\":true,\"vendor_repeat_bits_equal\":true,",
+                                    "\"timing\":\"cuda_events\",\"alpha\":1,\"beta\":0,\"bias\":{},",
+                                    "\"vendor_gemm_beta\":{},\"vendor_bias_broadcast_timed\":{},",
+                                    "\"vendor_compute\":\"{:?}\",\"reference_compute\":\"CUBLAS_COMPUTE_32F_PEDANTIC\",",
+                                    "\"reference_output_dtype\":\"f32\",\"auto_bits_equal\":true,\"repeat_bits_equal\":true,",
+                                    "\"normalized_error_tolerance\":{},\"auto_normalized_error\":{},",
+                                    "\"forced_normalized_error\":{},\"vendor_normalized_error\":{},\"order\":\"{}\",",
+                                    "\"windows\":{},\"auto_iterations\":{},\"forced_iterations\":{},\"vendor_iterations\":{},",
+                                    "\"auto_p50_us\":{},\"forced_p50_us\":{},\"vendor_p50_us\":{},",
+                                    "\"forced_over_auto_p50\":{},\"forced_over_auto_p95\":{},",
+                                    "\"forced_over_vendor_p50\":{},\"forced_over_vendor_p95\":{},",
+                                    "\"auto_samples_us\":{:?},\"forced_samples_us\":{:?},\"vendor_samples_us\":{:?}}}"
+                                ),
+                                device_metadata,
+                                row,
+                                cell.label,
+                                shape.m,
+                                shape.k,
+                                shape.n,
+                                TUNING_TABLE_REVISION,
+                                dtype.as_str(),
+                                selected,
+                                tile,
+                                path,
+                                graph_inventory,
+                                path == "graph",
+                                has_bias,
+                                u8::from(has_bias),
+                                has_bias,
+                                compute,
+                                tolerance,
+                                auto_error,
+                                forced_error,
+                                vendor_error,
+                                if auto_first {
+                                    "auto_forced_vendor"
+                                } else {
+                                    "vendor_forced_auto"
+                                },
+                                windows,
+                                auto_iterations,
+                                forced_iterations,
+                                vendor_iterations,
+                                percentile(&auto_sorted, 0.5),
+                                percentile(&forced_sorted, 0.5),
+                                percentile(&vendor_sorted, 0.5),
+                                percentile(&over_auto, 0.5),
+                                percentile(&over_auto, 0.95),
+                                percentile(&over_vendor, 0.5),
+                                percentile(&over_vendor, 0.95),
+                                auto_samples,
+                                forced_samples,
+                                vendor_samples
+                            );
+                            records += 1;
+                        }
                     }
                 }
             }
@@ -9727,10 +10420,11 @@ fn fixed_ada_forced_rungs_paired_precision_cublas() {
     }
     assert!(
         records > 0,
-        "Ada rung census measured no eligible candidates"
+        "explicit vendor rung census measured no eligible candidates"
     );
     println!(
-        "{{\"schema\":\"MambaBiFixedAdaForcedRungCompleteV1\",\"records\":{records},\"rejected\":{rejected},\"passed\":true}}"
+        "{{\"schema\":\"MambaBiFixedExplicitForcedRungCompleteV2\",{},\"records\":{records},\"rejected\":{rejected},\"passed\":true}}",
+        device_metadata
     );
 }
 

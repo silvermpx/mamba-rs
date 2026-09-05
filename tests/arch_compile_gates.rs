@@ -112,6 +112,17 @@ fn fixed_blob() -> String {
     ])
 }
 
+fn fixed_blob_for(arch: &str) -> String {
+    let mut source = fixed_blob();
+    if arch == "sm_89" {
+        source.push('\n');
+        source.push_str(include_str!(
+            "../kernels/gemm_bi_fixed/sm89_half_pipeline.cu"
+        ));
+    }
+    source
+}
+
 fn scalar_blob() -> String {
     compose(&[
         include_str!("../kernels/_typed_prelude.cuh"),
@@ -2201,9 +2212,9 @@ fn compile_module_uncached(kind: &str, source: String, arch: &'static str) -> St
     }
 }
 
-fn module_sources() -> [(&'static str, String); 4] {
+fn module_sources(arch: &str) -> [(&'static str, String); 4] {
     [
-        ("Fixed", fixed_blob()),
+        ("Fixed", fixed_blob_for(arch)),
         ("TriadScalar", scalar_blob()),
         ("TriadSm80", sm80_blob()),
         ("TriadSm80+extensions", sm80_streamk_blob()),
@@ -2211,7 +2222,7 @@ fn module_sources() -> [(&'static str, String); 4] {
 }
 
 fn compile_for(arch: &'static str) {
-    for (kind, source) in module_sources() {
+    for (kind, source) in module_sources(arch) {
         let ptx = compile_module_for(kind, source, arch);
         if kind == "Fixed" {
             assert_fixed_tf32_ptx(arch, &ptx);
@@ -2220,7 +2231,7 @@ fn compile_for(arch: &'static str) {
 }
 
 fn compile_fixed_for(arch: &'static str) -> String {
-    compile_module_for("Fixed", fixed_blob(), arch)
+    compile_module_for("Fixed", fixed_blob_for(arch), arch)
 }
 
 fn normalized_whitespace(source: &str) -> String {
@@ -2633,7 +2644,88 @@ fn fixed_f32_n128_s2_source_and_ptx_contract() {
     }
 }
 
+fn assert_fixed_sm89_half_pipeline_ptx(arch: &str, ptx: &str) {
+    const SYMBOLS: [&str; 2] = [
+        "gemm_bi_nn_fixed_sm89_tc128_pipeline_v1_bf16",
+        "gemm_bi_nn_fixed_sm89_tc128_pipeline_v1_f16",
+    ];
+    let parsed = parse_compile_gate_ptx(ptx).expect("parse Fixed half pipeline PTX");
+    let actual: Vec<_> = parsed
+        .entries
+        .iter()
+        .filter(|entry| {
+            entry
+                .symbol
+                .starts_with("gemm_bi_nn_fixed_sm89_tc128_pipeline")
+        })
+        .map(|entry| entry.symbol.as_str())
+        .collect();
+    let unique: std::collections::BTreeSet<_> = actual.iter().copied().collect();
+    let expected = if arch == "sm_89" {
+        SYMBOLS.into_iter().collect()
+    } else {
+        std::collections::BTreeSet::new()
+    };
+    assert_eq!(
+        actual.len(),
+        unique.len(),
+        "{arch} duplicated Fixed half pipeline export"
+    );
+    assert_eq!(
+        unique, expected,
+        "{arch} Fixed half pipeline export inventory"
+    );
+    for symbol in expected {
+        let entry = parsed.entry(symbol);
+        let mma = if symbol.ends_with("_bf16") {
+            "mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32"
+        } else {
+            "mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32"
+        };
+        assert_compile_gate_entry_tokens(
+            "Fixed SM89 half pipeline",
+            entry,
+            &[
+                mma,
+                "cp.async.cg.shared.global",
+                "ldmatrix.sync.aligned.m8n8.x4.shared.b16",
+                "ldmatrix.sync.aligned.m8n8.x2.trans.shared.b16",
+            ],
+        );
+        let parameters = ptx_parameters(&entry.text, symbol);
+        let declarations: Vec<_> = parameters
+            .lines()
+            .map(str::trim)
+            .filter(|line| line.starts_with(".param "))
+            .collect();
+        assert_eq!(declarations.len(), 5, "{arch}/{symbol} five-argument ABI");
+        assert!(
+            declarations[..4]
+                .iter()
+                .all(|line| line.starts_with(".param .u64 ")),
+            "{arch}/{symbol} pointer ABI"
+        );
+        assert!(
+            declarations[4].starts_with(".param .align 4 .b8 ") && declarations[4].contains("[32]"),
+            "{arch}/{symbol} parameter-bundle ABI"
+        );
+        assert!(
+            !compile_gate_ptx_tokens(&entry.body)
+                .into_iter()
+                .any(|token| {
+                    token.text.starts_with("atom.")
+                        || token.text.starts_with("atom::")
+                        || token.text.starts_with("red.")
+                        || token.text.starts_with("red::")
+                        || token.text.starts_with("redux.")
+                }),
+            "{arch}/{symbol} contains a numeric atomic or reduction"
+        );
+    }
+}
+
 fn assert_fixed_tf32_ptx(arch: &str, ptx: &str) {
+    assert_fixed_sm89_half_pipeline_ptx(arch, ptx);
     const PORTABLE: [&str; 5] = [
         "gemm_bi_nn_tf32_v1_m128n64_bk32_s2",
         "gemm_bi_nn_tf32_v1_m128n64_bk32_s3",
@@ -3483,7 +3575,7 @@ fn family_targets_assemble_under_ptxas() {
         architectures.push("sm_110a");
     }
     for arch in architectures {
-        for (kind, source) in module_sources() {
+        for (kind, source) in module_sources(arch) {
             let ptx = compile_module_for(kind, source, arch);
             let directory = tempfile::tempdir().expect("architecture-gate ptxas tempdir");
             let input = directory.path().join(format!("{kind}-{arch}.ptx"));

@@ -3693,6 +3693,9 @@ fn expected_sm120_symbols() -> BTreeSet<String> {
 
 fn expected_hardware_symbols(cc: (u32, u32)) -> BTreeSet<String> {
     let mut symbols = expected_sm80_symbols();
+    if matches!(cc, (8, 0 | 6 | 7 | 9) | (9, 0) | (10, 0 | 3) | (11, 0)) {
+        symbols.insert("gemm_bi_nn_sm80_mma_tf32_v1_m128n128_bk32_s3".to_string());
+    }
     let specialized = match cc.0 {
         8 => BTreeSet::new(),
         9 => expected_sm90a_symbols(),
@@ -3702,6 +3705,29 @@ fn expected_hardware_symbols(cc: (u32, u32)) -> BTreeSet<String> {
     };
     symbols.extend(specialized);
     symbols
+}
+
+#[test]
+fn hardware_artifact_expected_exports_cover_wide_without_changing_frozen_base() {
+    const WIDE: &str = "gemm_bi_nn_sm80_mma_tf32_v1_m128n128_bk32_s3";
+    assert_eq!(expected_sm80_symbols().len(), 18);
+    assert!(!expected_sm80_symbols().contains(WIDE));
+    for (cc, count, wide) in [
+        ((8, 0), 19, true),
+        ((8, 6), 19, true),
+        ((8, 7), 19, true),
+        ((8, 9), 19, true),
+        ((9, 0), 25, true),
+        ((10, 0), 55, true),
+        ((10, 3), 55, true),
+        ((11, 0), 55, true),
+        ((12, 0), 36, false),
+        ((12, 1), 36, false),
+    ] {
+        let symbols = expected_hardware_symbols(cc);
+        assert_eq!(symbols.len(), count, "hardware artifact CC={cc:?}");
+        assert_eq!(symbols.contains(WIDE), wide, "hardware artifact CC={cc:?}");
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -13360,25 +13386,14 @@ struct QualifiedOpCensus {
 }
 
 fn qualified_op_census(cc: (u32, u32), expected_routes: usize) -> QualifiedOpCensus {
-    use mamba_rs::mamba_ssm::gpu::gemm_bi_triad::tf32_route_specs;
-    use mamba_rs::mamba_ssm::gpu::kernel_identity::{ModuleKind, ResolvedGemmOp};
-    let mut modules = vec![ModuleKind::TriadSm80];
-    match cc.0 {
-        9 => modules.push(ModuleKind::TriadSm90a),
-        10 | 11 => modules.push(ModuleKind::TriadSm100),
-        12 => modules.push(ModuleKind::TriadSm120),
-        _ => {}
-    }
+    use mamba_rs::mamba_ssm::gpu::gemm_bi_triad::tf32_qualification_route_specs;
+    use mamba_rs::mamba_ssm::gpu::kernel_identity::ResolvedGemmOp;
     let mut census = QualifiedOpCensus {
         nn: 0,
         tn: 0,
         nt: 0,
     };
-    for spec in modules
-        .iter()
-        .flat_map(|module| tf32_route_specs(*module).iter())
-        .filter(|spec| !spec.route.is_exact_fma())
-    {
+    for spec in tf32_qualification_route_specs(cc).expect("supported qualification CC") {
         match spec.op {
             ResolvedGemmOp::Nn => census.nn += 1,
             ResolvedGemmOp::Tn => census.tn += 1,
@@ -13391,6 +13406,31 @@ fn qualified_op_census(cc: (u32, u32), expected_routes: usize) -> QualifiedOpCen
         "qualified route census for CC {cc:?}"
     );
     census
+}
+
+#[test]
+fn wide_qualification_op_census_includes_the_composed_nn_extension() {
+    for (cc, total, expected) in [
+        ((8, 0), 19, (7, 6, 6)),
+        ((8, 6), 19, (7, 6, 6)),
+        ((8, 7), 19, (7, 6, 6)),
+        ((8, 9), 19, (7, 6, 6)),
+        ((9, 0), 25, (9, 8, 8)),
+        ((10, 0), 55, (19, 18, 18)),
+        ((10, 3), 55, (19, 18, 18)),
+        ((11, 0), 55, (19, 18, 18)),
+    ] {
+        let census = qualified_op_census(cc, total);
+        assert_eq!((census.nn, census.tn, census.nt), expected, "CC {cc:?}");
+    }
+}
+
+#[test]
+fn wide_qualification_op_census_preserves_cc12_without_the_extension() {
+    for cc in [(12, 0), (12, 1)] {
+        let census = qualified_op_census(cc, 36);
+        assert_eq!((census.nn, census.tn, census.nt), (12, 13, 11), "CC {cc:?}");
+    }
 }
 
 fn run_hardware_qualification(cc: (u32, u32), expected_routes: usize) {
@@ -13556,49 +13596,49 @@ fn run_hardware_qualification(cc: (u32, u32), expected_routes: usize) {
 #[test]
 #[ignore = "requires exact CC 8.0 and the full TF32 runtime/performance qualification corpus"]
 fn hardware_sm80_tf32_runtime_and_performance_gate() {
-    run_hardware_qualification((8, 0), 18);
+    run_hardware_qualification((8, 0), 19);
 }
 
 #[test]
 #[ignore = "requires exact CC 8.6 and the full portable TF32 qualification corpus"]
 fn hardware_sm86_tf32_runtime_and_performance_gate() {
-    run_hardware_qualification((8, 6), 18);
+    run_hardware_qualification((8, 6), 19);
 }
 
 #[test]
 #[ignore = "requires exact CC 8.7 and the full portable TF32 qualification corpus"]
 fn hardware_sm87_tf32_runtime_and_performance_gate() {
-    run_hardware_qualification((8, 7), 18);
+    run_hardware_qualification((8, 7), 19);
 }
 
 #[test]
 #[ignore = "requires exact Ada CC 8.9 and the full portable TF32 qualification corpus"]
 fn hardware_sm89_ada_tf32_runtime_and_performance_gate() {
-    run_hardware_qualification((8, 9), 18);
+    run_hardware_qualification((8, 9), 19);
 }
 
 #[test]
 #[ignore = "requires exact CC 9.0 and the full TF32 runtime/performance qualification corpus"]
 fn hardware_sm90a_tf32_runtime_and_performance_gate() {
-    run_hardware_qualification((9, 0), 24);
+    run_hardware_qualification((9, 0), 25);
 }
 
 #[test]
 #[ignore = "requires exact CC 10.0 and the full TF32 runtime/performance qualification corpus"]
 fn hardware_sm100_tf32_runtime_and_performance_gate() {
-    run_hardware_qualification((10, 0), 54);
+    run_hardware_qualification((10, 0), 55);
 }
 
 #[test]
 #[ignore = "requires exact CC 10.3 and the full TF32 runtime/performance qualification corpus"]
 fn hardware_sm103_tf32_runtime_and_performance_gate() {
-    run_hardware_qualification((10, 3), 54);
+    run_hardware_qualification((10, 3), 55);
 }
 
 #[test]
 #[ignore = "requires exact CC 11.0 and the full TF32 runtime/performance qualification corpus"]
 fn hardware_sm110_tf32_runtime_and_performance_gate() {
-    run_hardware_qualification((11, 0), 54);
+    run_hardware_qualification((11, 0), 55);
 }
 
 #[test]

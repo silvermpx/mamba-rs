@@ -13,16 +13,18 @@ use std::sync::{Mutex, OnceLock};
 use cudarc::driver::sys;
 use sha2::{Digest as _, Sha256};
 
-use super::contract::tf32_splitk_spec;
+use super::contract::{
+    Tf32PortableTile, portable_extensions_composed_for_cc, tf32_route_specs_for, tf32_splitk_spec,
+};
 use super::{
     F32TriadOperands, F32TriadRequest, F32TriadShape, HalfNativeBranchSeal, PreparedF32TriadLaunch,
-    SM80_TF32_ROUTE_SPECS, SM90A_STAGES, SM90A_TF32_ROUTE_SPECS, SM90A_TILE,
-    SM100_TF32_ROUTE_SPECS, SM120_TF32_ROUTE_SPECS, Sm90aAutoBranchSeal, Sm100AutoBranchSeal,
-    Sm120AutoBranchSeal, TcFwdOperands, TcTile, Tf32KernelSpec, Tf32PhysicalRoute,
-    enqueue_validated_prepared_f32_triad, gemm_bi_backward_dw_tc_with_tile,
-    gemm_bi_backward_dx_tc_with_tile, gemm_bi_forward_tc_with_tile,
-    gemm_bi_forward_tc_with_tile_shape, launch_prepared_f32_triad, prepare_f32_triad_forced,
-    tf32_kernel_spec, validate_prepared_f32_triad_for_timing, with_cached_f32_triad_prepared,
+    SM90A_STAGES, SM90A_TF32_ROUTE_SPECS, SM90A_TILE, SM100_TF32_ROUTE_SPECS,
+    SM120_TF32_ROUTE_SPECS, Sm90aAutoBranchSeal, Sm100AutoBranchSeal, Sm120AutoBranchSeal,
+    TcFwdOperands, TcTile, Tf32KernelSpec, Tf32PhysicalRoute, enqueue_validated_prepared_f32_triad,
+    gemm_bi_backward_dw_tc_with_tile, gemm_bi_backward_dx_tc_with_tile,
+    gemm_bi_forward_tc_with_tile, gemm_bi_forward_tc_with_tile_shape, launch_prepared_f32_triad,
+    prepare_f32_triad_forced, tf32_kernel_spec, validate_prepared_f32_triad_for_timing,
+    with_cached_f32_triad_prepared,
 };
 use crate::mamba_ssm::gpu::{
     blas::{
@@ -44,7 +46,7 @@ use crate::mamba_ssm::gpu::{
         FramedSha256, GemmRouteIdentity, ModuleKind, PhysicalGemmBackend, PhysicalLaunchKind,
         PolicyDtype, RecordedPhysicalTrace, ResolvedGemmOp, ResolvedGemmRoute,
         ResolvedInstructionFamily, ResolvedKernelLaunch, ResolvedNumericContract,
-        ResolvedPhysicalKernelLaunch, digest_hex,
+        ResolvedOperandConversion, ResolvedPhysicalKernelLaunch, digest_hex,
     },
 };
 
@@ -2788,9 +2790,14 @@ fn shape_for_spec(
     spec: &Tf32KernelSpec,
     dims: (usize, usize, usize),
 ) -> Result<F32TriadShape, String> {
-    if matches!(spec.route, Tf32PhysicalRoute::MmaTf32RnaV1(_)) {
+    if matches!(
+        spec.route,
+        Tf32PhysicalRoute::MmaTf32RnaV1(route) if route.tile != Tf32PortableTile::M128N128
+    ) {
         Ok(F32TriadShape::contiguous(spec.op, dims))
     } else {
+        // The wide portable tile uses 16-byte copies, like TMA routes it
+        // needs aligned physical A/B strides even for logical K/N tails.
         padded_shape(spec.op, dims, 1)
     }
 }
@@ -2840,6 +2847,70 @@ fn exceptional_class(value: f32) -> ExceptionalClass {
     } else {
         ExceptionalClass::Finite(converted)
     }
+}
+
+fn exceptional_class_for_spec(spec: &Tf32KernelSpec, value: f32) -> ExceptionalClass {
+    if spec.operand_conversion != ResolvedOperandConversion::RegisterAddHalfUlpTf32V1 {
+        return exceptional_class(value);
+    }
+
+    // This route does an unconditional wrapping integer add, then MMA
+    // consumes only the upper 19 bits. Classify that operand, not the input:
+    // low-payload NaNs can become infinities, and payload carry can wrap
+    // across the sign bit to zero. Do not change the older route oracles.
+    let converted = f32::from_bits(value.to_bits().wrapping_add(0x1000) & 0xffff_e000);
+    if converted.is_nan() {
+        ExceptionalClass::Nan
+    } else if converted.is_infinite() {
+        ExceptionalClass::Infinity {
+            negative: converted.is_sign_negative(),
+        }
+    } else if converted == 0.0 {
+        ExceptionalClass::Zero
+    } else {
+        ExceptionalClass::Finite(f64::from(converted))
+    }
+}
+
+fn exceptional_values_for_spec(spec: &Tf32KernelSpec) -> &'static [u32] {
+    if spec.operand_conversion == ResolvedOperandConversion::RegisterAddHalfUlpTf32V1 {
+        return &[
+            0x8000_0000,
+            0x0000_0001,
+            0x007f_ffff,
+            0x7f7f_ffff,
+            0x7f80_0000,
+            0xff80_0000,
+            0x7fc1_2345,
+            0x7f81_2345,
+            0x0000_0000,
+            0x8000_0001,
+            0x807f_ffff,
+            0xff7f_ffff,
+            0x3f80_1000,
+            0xbf80_1000,
+            0x7f80_0001,
+            0xff80_0001,
+            0x7f80_1000,
+            0xff80_1000,
+            0x7f80_2000,
+            0xff80_2000,
+            0x7fff_ffff,
+            0xffff_ffff,
+            0x7fc0_1234,
+            0xffc0_1234,
+        ];
+    }
+    &[
+        0x8000_0000,
+        0x0000_0001,
+        0x007f_ffff,
+        0x7f7f_ffff,
+        0x7f80_0000,
+        0xff80_0000,
+        0x7fc1_2345,
+        0x7f81_2345,
+    ]
 }
 
 fn adversarial_counts(specs: &[&Tf32KernelSpec]) -> AdversarialCounts {
@@ -3166,7 +3237,12 @@ fn nn_bias_beta_epilogue() -> EpilogueCase {
     }
 }
 
-fn route_specs(cc: (u32, u32)) -> Result<Vec<&'static Tf32KernelSpec>, String> {
+/// TF32 route-spec corpus composed for the qualification device, in order.
+/// Exact-FMA and separate portable split-K spec collections are excluded.
+#[doc(hidden)]
+pub fn tf32_qualification_route_specs(
+    cc: (u32, u32),
+) -> Result<Vec<&'static Tf32KernelSpec>, String> {
     let specialized = match cc {
         (8, 0 | 6 | 7 | 9) => &[][..],
         (9, 0) => &SM90A_TF32_ROUTE_SPECS,
@@ -3182,11 +3258,13 @@ fn route_specs(cc: (u32, u32)) -> Result<Vec<&'static Tf32KernelSpec>, String> {
     // The exact-F32 SM120 routes share the module but not the TF32 numeric
     // contract; their qualification is the exact-family harness, not the
     // TF32 selector.
-    Ok(SM80_TF32_ROUTE_SPECS
-        .iter()
-        .chain(specialized.iter())
-        .filter(|spec| !spec.route.is_exact_fma())
-        .collect())
+    Ok(tf32_route_specs_for(
+        ModuleKind::TriadSm80,
+        portable_extensions_composed_for_cc(cc),
+    )
+    .chain(specialized.iter())
+    .filter(|spec| !spec.route.is_exact_fma())
+    .collect())
 }
 
 fn logical_dims(
@@ -3898,24 +3976,16 @@ fn qualify_exceptional_values(
     spec: &'static Tf32KernelSpec,
     salt: usize,
 ) -> Result<[u8; 32], String> {
-    const VALUES: [u32; 8] = [
-        0x8000_0000,
-        0x0000_0001,
-        0x007f_ffff,
-        0x7f7f_ffff,
-        0x7f80_0000,
-        0xff80_0000,
-        0x7fc1_2345,
-        0x7f81_2345,
-    ];
-    let dims = logical_dims(spec.op, 8, 8, 8);
+    let values = exceptional_values_for_spec(spec);
+    let extent = values.len();
+    let dims = logical_dims(spec.op, extent, extent, extent);
     let mut host = build_guarded_case(spec.op, dims, salt, primary_epilogue(spec.op), 0x7fc1_5a5a)?;
     host.bias = None;
     host.bias_storage = None;
     host.alpha = 1.0;
     host.beta = beta_for_op(spec.op);
-    for (row, bits) in VALUES.into_iter().enumerate() {
-        for column in 0..8 {
+    for (row, bits) in values.iter().copied().enumerate() {
+        for column in 0..extent {
             set_guarded_value(&mut host.a, host.a_storage, row, column, 0.0);
             set_guarded_value(&mut host.b, host.b_storage, row, column, 0.0);
             set_guarded_value(&mut host.initial, host.output_storage, row, column, 0.0);
@@ -3951,10 +4021,10 @@ fn qualify_exceptional_values(
     }
     check_guarded_red_zones(&host, &second)?;
 
-    for (index, bits) in VALUES.into_iter().enumerate() {
+    for (index, bits) in values.iter().copied().enumerate() {
         let output_index = host.output_storage.offset + index * host.output_storage.stride + index;
         let actual = f32::from_bits(first[output_index]);
-        match exceptional_class(f32::from_bits(bits)) {
+        match exceptional_class_for_spec(spec, f32::from_bits(bits)) {
             ExceptionalClass::Nan if !actual.is_nan() => {
                 return Err(format!("{} exceptional NaN class changed", spec.symbol));
             }
@@ -4491,7 +4561,7 @@ pub fn run_tf32_qualification(
     if config.repeat == 0 {
         return Err("TF32 qualification repeat count must be positive".into());
     }
-    let specs = route_specs(config.exact_cc)?;
+    let specs = tf32_qualification_route_specs(config.exact_cc)?;
     if specs.len() != config.expected_routes {
         return Err(format!(
             "qualification route inventory has {} entries, expected {}",
@@ -5090,16 +5160,74 @@ mod tests {
     #[test]
     fn route_inventory_counts_match_the_release_contract() {
         for (cc, count) in [
-            ((8, 0), 18),
-            ((8, 9), 18),
-            ((9, 0), 24),
-            ((10, 0), 54),
-            ((10, 3), 54),
-            ((11, 0), 54),
+            ((8, 0), 19),
+            ((8, 6), 19),
+            ((8, 7), 19),
+            ((8, 9), 19),
+            ((9, 0), 25),
+            ((10, 0), 55),
+            ((10, 3), 55),
+            ((11, 0), 55),
             ((12, 0), 36),
             ((12, 1), 36),
         ] {
-            assert_eq!(route_specs(cc).expect("supported CC").len(), count);
+            assert_eq!(
+                tf32_qualification_route_specs(cc)
+                    .expect("supported CC")
+                    .len(),
+                count
+            );
+        }
+    }
+
+    #[test]
+    fn wide_qualification_inventory_matches_target_composition() {
+        const WIDE: &str = "gemm_bi_nn_sm80_mma_tf32_v1_m128n128_bk32_s3";
+        for (cc, expected_wide) in [
+            ((8, 0), 1),
+            ((8, 6), 1),
+            ((8, 7), 1),
+            ((8, 9), 1),
+            ((9, 0), 1),
+            ((10, 0), 1),
+            ((10, 3), 1),
+            ((11, 0), 1),
+            ((12, 0), 0),
+            ((12, 1), 0),
+        ] {
+            let specs = tf32_qualification_route_specs(cc).expect("supported CC");
+            assert_eq!(
+                specs.iter().filter(|spec| spec.symbol == WIDE).count(),
+                expected_wide,
+                "wide qualification membership for CC {cc:?}"
+            );
+            let symbols = specs
+                .iter()
+                .map(|spec| spec.symbol)
+                .collect::<BTreeSet<_>>();
+            assert_eq!(symbols.len(), specs.len(), "duplicate route for CC {cc:?}");
+            assert!(specs.iter().all(|spec| !spec.route.is_exact_fma()));
+        }
+        assert!(tf32_qualification_route_specs((8, 1)).is_err());
+        assert!(tf32_qualification_route_specs((12, 2)).is_err());
+    }
+
+    #[test]
+    fn wide_qualification_keeps_the_frozen_cc12_route_order() {
+        let frozen = super::super::SM80_TF32_ROUTE_SPECS
+            .iter()
+            .chain(SM120_TF32_ROUTE_SPECS.iter())
+            .filter(|spec| !spec.route.is_exact_fma())
+            .map(|spec| spec.symbol)
+            .collect::<Vec<_>>();
+        assert_eq!(frozen.len(), 36);
+        for cc in [(12, 0), (12, 1)] {
+            let actual = tf32_qualification_route_specs(cc)
+                .expect("frozen CC12 inventory")
+                .into_iter()
+                .map(|spec| spec.symbol)
+                .collect::<Vec<_>>();
+            assert_eq!(actual, frozen, "CC12 qualification route order for {cc:?}");
         }
     }
 
@@ -5108,7 +5236,7 @@ mod tests {
         const SYMBOL: &str = "gemm_bi_tn_sm120_tma_mma_tf32_v1_m64n128_bk32_s4_pair";
         for cc in [(12, 0), (12, 1)] {
             assert_eq!(
-                route_specs(cc)
+                tf32_qualification_route_specs(cc)
                     .expect("SM120 route inventory")
                     .iter()
                     .filter(|spec| spec.symbol == SYMBOL)
@@ -5366,7 +5494,7 @@ mod tests {
             repeat: 1,
             suite: Tf32QualificationSuite::Sanitizer,
         };
-        let specs = route_specs(config.exact_cc).expect("SM120 route inventory");
+        let specs = tf32_qualification_route_specs(config.exact_cc).expect("SM120 route inventory");
         let mut evidence = specs
             .iter()
             .map(|spec| synthetic_route_with_resources(spec.symbol, [4; 32], 0, 0))
@@ -5497,7 +5625,7 @@ mod tests {
 
     #[test]
     fn portable_primary_cases_stay_contiguous_but_tma_cases_are_stride_aligned() {
-        let portable = route_specs((8, 9)).unwrap()[0];
+        let portable = tf32_qualification_route_specs((8, 9)).unwrap()[0];
         let portable_shape =
             shape_for_spec(portable, logical_dims(portable.op, 17, 17, 33)).unwrap();
         assert_eq!(portable_shape.lda, 33);
@@ -5508,6 +5636,24 @@ mod tests {
         assert_eq!(specialized_shape.lda, 36);
         assert_eq!(specialized_shape.ldb % 4, 0);
         assert_eq!(specialized_shape.ldc % 4, 0);
+    }
+
+    #[test]
+    fn wide_qualification_tail_shapes_keep_vector_copy_strides_aligned() {
+        let wide = &super::super::SM80_TF32_WIDE_ROUTE_SPECS[0];
+        for reduction in K_CASES {
+            for columns in TAIL_CASES {
+                let shape = shape_for_spec(wide, (1, reduction, columns))
+                    .expect("wide qualification tail layout");
+                assert_eq!((shape.m, shape.k, shape.n), (1, reduction, columns));
+                assert!(shape.lda >= reduction && shape.ldb >= columns);
+                assert_eq!(shape.lda % 4, 0, "wide A stride at K={reduction}");
+                assert_eq!(shape.ldb % 4, 0, "wide B stride at N={columns}");
+                shape
+                    .validate(ResolvedGemmOp::Nn)
+                    .expect("valid wide shape");
+            }
+        }
     }
 
     #[test]
@@ -5562,15 +5708,169 @@ mod tests {
     }
 
     #[test]
+    fn wide_exceptional_oracle_observes_the_add_half_ulp_operand_classes() {
+        let wide = &super::super::SM80_TF32_WIDE_ROUTE_SPECS[0];
+        assert_eq!(
+            wide.operand_conversion,
+            ResolvedOperandConversion::RegisterAddHalfUlpTf32V1
+        );
+        // Literal expectations describe the bits consumed by MMA after the
+        // register add and discarded low 13 bits, not the original f32 class.
+        for (bits, expected) in [
+            (0x7f80_0001, ExceptionalClass::Infinity { negative: false }),
+            (0xff80_0001, ExceptionalClass::Infinity { negative: true }),
+            (0x7f80_1000, ExceptionalClass::Nan),
+            (0xff80_1000, ExceptionalClass::Nan),
+            (0x7f80_2000, ExceptionalClass::Nan),
+            (0xff80_2000, ExceptionalClass::Nan),
+            (0x7fff_ffff, ExceptionalClass::Zero),
+            (0xffff_ffff, ExceptionalClass::Zero),
+            (0x7fc0_1234, ExceptionalClass::Nan),
+            (0xffc0_1234, ExceptionalClass::Nan),
+            (0x7f80_0000, ExceptionalClass::Infinity { negative: false }),
+            (0xff80_0000, ExceptionalClass::Infinity { negative: true }),
+            (0x7f7f_ffff, ExceptionalClass::Infinity { negative: false }),
+            (0xff7f_ffff, ExceptionalClass::Infinity { negative: true }),
+            (0x3f80_1000, ExceptionalClass::Finite(1.000_976_562_5)),
+            (0xbf80_1000, ExceptionalClass::Finite(-1.000_976_562_5)),
+            (0x0000_0000, ExceptionalClass::Zero),
+            (0x8000_0000, ExceptionalClass::Zero),
+            (0x0000_0001, ExceptionalClass::Zero),
+            (0x8000_0001, ExceptionalClass::Zero),
+            (
+                0x007f_ffff,
+                ExceptionalClass::Finite(f32::MIN_POSITIVE as f64),
+            ),
+            (
+                0x807f_ffff,
+                ExceptionalClass::Finite(-(f32::MIN_POSITIVE as f64)),
+            ),
+        ] {
+            assert_eq!(
+                exceptional_class_for_spec(wide, f32::from_bits(bits)),
+                expected,
+                "wide operand 0x{bits:08x}"
+            );
+        }
+    }
+
+    #[test]
+    fn wide_exceptional_corpus_exercises_conversion_edges_on_the_bound_route() {
+        let wide = &super::super::SM80_TF32_WIDE_ROUTE_SPECS[0];
+        let values = exceptional_values_for_spec(wide);
+        for required in [
+            0x7f80_0001,
+            0xff80_0001,
+            0x7f80_1000,
+            0xff80_1000,
+            0x7f80_2000,
+            0xff80_2000,
+            0x7fff_ffff,
+            0xffff_ffff,
+            0x3f80_1000,
+            0xbf80_1000,
+            0x0000_0000,
+            0x8000_0001,
+            0x807f_ffff,
+            0xff7f_ffff,
+            0x7fc0_1234,
+            0xffc0_1234,
+        ] {
+            assert!(
+                values.contains(&required),
+                "wide corpus omits 0x{required:08x}"
+            );
+        }
+        assert_eq!(values.len(), 24);
+        assert_eq!(values.iter().copied().collect::<BTreeSet<_>>().len(), 24);
+    }
+
+    #[test]
+    fn wide_exceptional_changes_leave_existing_conversion_corpora_unchanged() {
+        for spec in super::super::SM80_TF32_ROUTE_SPECS
+            .iter()
+            .chain(SM90A_TF32_ROUTE_SPECS.iter())
+            .chain(SM100_TF32_ROUTE_SPECS.iter())
+            .chain(SM120_TF32_ROUTE_SPECS.iter())
+            .filter(|spec| !spec.route.is_exact_fma())
+        {
+            assert_eq!(
+                exceptional_values_for_spec(spec),
+                &[
+                    0x8000_0000,
+                    0x0000_0001,
+                    0x007f_ffff,
+                    0x7f7f_ffff,
+                    0x7f80_0000,
+                    0xff80_0000,
+                    0x7fc1_2345,
+                    0x7f81_2345,
+                ],
+                "legacy exceptional corpus changed for {}",
+                spec.symbol
+            );
+            for bits in exceptional_values_for_spec(spec).iter().copied() {
+                assert_eq!(
+                    exceptional_class_for_spec(spec, f32::from_bits(bits)),
+                    exceptional_class(f32::from_bits(bits)),
+                    "legacy class changed for {} operand 0x{bits:08x}",
+                    spec.symbol
+                );
+            }
+            // These distinguish the legacy oracle from the wide one even
+            // though the frozen eight-value corpus does not include them.
+            for (bits, expected) in [
+                (0x7f80_0001, ExceptionalClass::Nan),
+                (0x7fff_ffff, ExceptionalClass::Nan),
+                (0x3f80_1000, ExceptionalClass::Finite(1.0)),
+                (0xbf80_1000, ExceptionalClass::Finite(-1.0)),
+            ] {
+                assert_eq!(
+                    exceptional_class_for_spec(spec, f32::from_bits(bits)),
+                    expected,
+                    "wide oracle leaked into {} for 0x{bits:08x}",
+                    spec.symbol
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "requires exact Ada CC 8.9 and the bound portable wide TF32 kernel"]
+    fn wide_tf32_qualification_numeric_smoke() {
+        let device = crate::mamba_ssm::gpu::device::GpuDevice::new(0).expect("CUDA device");
+        assert_eq!(device.compute_capability, (8, 9), "wide smoke requires Ada");
+        let ctx = GpuCtx::new(&device).expect("CUDA context");
+        let _policy_guard = QualificationPolicyGuard::enter(&ctx);
+        let spec = tf32_qualification_route_specs(device.compute_capability)
+            .expect("Ada qualification inventory")
+            .into_iter()
+            .find(|spec| spec.symbol == "gemm_bi_nn_sm80_mma_tf32_v1_m128n128_bk32_s3")
+            .expect("wide must be in the admitted qualification inventory");
+
+        // These are the full corpus's production-bound helpers, not a
+        // separately compiled kernel. No timing or all-route qualification.
+        qualify_exceptional_values(&ctx, spec, 0x89_0100)
+            .expect("wide exceptional classes, repeat bits and red zones");
+        qualify_zero_reduction(&ctx, spec, 0x89_0200)
+            .expect("wide K=0 null inputs, bias bits and eager/graph symbol identity");
+        qualify_shape_boundaries(&ctx, spec, 0x89_0300)
+            .expect("wide complete logical K/row/column tail corpus");
+        let (_, symbols, shapes) = qualify_cross_m(&ctx, spec, 0x89_0400)
+            .expect("wide guarded M=1/tile/tile+1/two-tiles+1 prefix bits");
+        assert_eq!((symbols, shapes), (1, 4));
+    }
+
+    #[test]
     fn adversarial_counts_are_derived_from_the_live_route_inventory() {
-        let specs = route_specs((8, 9)).unwrap();
+        let specs = tf32_qualification_route_specs((8, 9)).unwrap();
         let counts = adversarial_counts(&specs);
-        assert_eq!(counts.staged_cases, 72);
-        assert_eq!(counts.guard_poison_pairs, 18);
-        assert_eq!(counts.exceptional_symbols, 18);
-        assert_eq!(counts.cross_m_symbols, 12);
-        assert_eq!(counts.cross_m_shapes, 48);
-        assert_eq!(counts.nn_bias_beta_symbols, 6);
+        assert_eq!(counts.staged_cases, 76);
+        assert_eq!(counts.guard_poison_pairs, 19);
+        assert_eq!(counts.exceptional_symbols, 19);
+        assert_eq!(counts.cross_m_symbols, 13);
+        assert_eq!(counts.cross_m_shapes, 52);
+        assert_eq!(counts.nn_bias_beta_symbols, 7);
     }
 
     fn physical_node(symbol: &'static str) -> QualifiedPhysicalLaunchNode {

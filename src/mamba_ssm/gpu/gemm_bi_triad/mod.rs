@@ -100,4 +100,5 @@ pub use qualification::{
     QualifiedPhysicalLaunch, QualifiedPhysicalLaunchEvidence, QualifiedPhysicalLaunchNode,
     Tf32QualificationConfig, Tf32QualificationOutput, Tf32QualificationSuite,
     presize_physical_qualification_suite, qualify_physical_launch, run_tf32_qualification,
+    tf32_qualification_route_specs,
 };

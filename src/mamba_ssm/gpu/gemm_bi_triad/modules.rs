@@ -482,6 +482,9 @@ pub(crate) struct CompiledModule {
     /// The first step that kept the module's TF32 routes from qualifying.
     tf32_qualification_error: Option<String>,
     tf32_driver_abi: BTreeMap<&'static str, Tf32DriverAbi>,
+    /// Separate from Triad TF32 qualification: the optional Ada Fixed half
+    /// extension has the same generic Driver layout representation only.
+    fixed_sm89_half_driver_abi: Result<BTreeMap<&'static str, Tf32DriverAbi>, String>,
 }
 
 /// A TF32 symbol the loaded module cannot serve on this toolkit: the
@@ -650,6 +653,8 @@ pub(crate) fn compile_module(request: CompileModuleRequest<'_>) -> Result<Compil
     {
         let extensions = module_composes_extensions(request.module_kind, request.arch);
         let census = census_all_tf32_driver_abi(request.ctx, request.module_kind, extensions, &src);
+        let fixed_half_abi =
+            census_fixed_sm89_half_driver_abi(request.ctx, request.module_kind, request.arch, &src);
         let validation = validate_tf32_specialization(request.module_kind, request.arch, &src);
         let (tf32_driver_abi, tf32_qualification_error) =
             tf32_qualification_verdict(request.module_kind, extensions, census, validation);
@@ -665,10 +670,17 @@ pub(crate) fn compile_module(request: CompileModuleRequest<'_>) -> Result<Compil
             hit.artifact_digest,
             tf32_qualification_error,
             tf32_driver_abi,
+            fixed_half_abi,
         ));
     }
 
-    let (module, artifact_digest, tf32_qualification_error, tf32_driver_abi) = match loaded {
+    let (
+        module,
+        artifact_digest,
+        tf32_qualification_error,
+        tf32_driver_abi,
+        fixed_sm89_half_driver_abi,
+    ) = match loaded {
         Some(value) => value,
         None => {
             let ptx = cudarc::nvrtc::compile_ptx_with_opts(&combined, opts).map_err(|error| {
@@ -689,6 +701,12 @@ pub(crate) fn compile_module(request: CompileModuleRequest<'_>) -> Result<Compil
                 request.ctx,
                 request.module_kind,
                 extensions,
+                &ptx_source,
+            );
+            let fixed_half_abi = census_fixed_sm89_half_driver_abi(
+                request.ctx,
+                request.module_kind,
+                request.arch,
                 &ptx_source,
             );
             let validation =
@@ -754,6 +772,7 @@ pub(crate) fn compile_module(request: CompileModuleRequest<'_>) -> Result<Compil
                 artifact_digest,
                 tf32_qualification_error,
                 tf32_driver_abi,
+                fixed_half_abi,
             )
         }
     };
@@ -788,6 +807,7 @@ pub(crate) fn compile_module(request: CompileModuleRequest<'_>) -> Result<Compil
         tf32_qualified: tf32_qualification_error.is_none(),
         tf32_qualification_error,
         tf32_driver_abi,
+        fixed_sm89_half_driver_abi,
     })
 }
 
@@ -1381,7 +1401,10 @@ fn validate_tf32_ptx_inventory(
 
 fn validate_module_ptx(module_kind: ModuleKind, arch: &str, ptx: &str) -> Result<(), String> {
     match module_kind {
-        ModuleKind::Fixed => validate_fixed_tf32_ptx(arch, ptx),
+        ModuleKind::Fixed => {
+            validate_fixed_tf32_ptx(arch, ptx)?;
+            validate_fixed_sm89_half_ptx(arch, ptx)
+        }
         ModuleKind::TriadScalar => {
             validate_exact_ptx_exports("TriadScalar", SCALAR_SYMBOLS.len(), SCALAR_SYMBOLS, ptx)?;
             validate_scalar_zero_reduction_ptx(ptx)?;
@@ -1424,6 +1447,232 @@ const FIXED_SM120_HALF_BASES: [&str; 5] = [
     "gemm_bi_nn_sm120_tma_128x128_bk32_s2",
     "gemm_bi_nn_sm120_tma_128x128_bk32_s3",
 ];
+
+const FIXED_SM89_HALF_SYMBOLS: [&str; 2] = [
+    "gemm_bi_nn_fixed_sm89_tc128_pipeline_v1_bf16",
+    "gemm_bi_nn_fixed_sm89_tc128_pipeline_v1_f16",
+];
+const FIXED_SM89_HALF_SHARED_BYTES: u32 = 71_680;
+const FIXED_SM89_HALF_THREADS: u32 = 256;
+const FIXED_SM89_HALF_REGISTER_CAP: u32 = 224;
+
+fn fixed_sm89_half_composed(arch: &str) -> bool {
+    arch == "sm_89"
+}
+
+fn validate_fixed_sm89_half_ptx(arch: &str, ptx: &str) -> Result<(), String> {
+    let parsed = parse_ptx(ptx)?;
+    let actual: Vec<_> = parsed
+        .entries
+        .iter()
+        .map(|entry| entry.symbol.as_str())
+        .filter(|symbol| symbol.starts_with("gemm_bi_nn_fixed_sm89_tc128_pipeline"))
+        .collect();
+    let expected: BTreeSet<_> = if fixed_sm89_half_composed(arch) {
+        FIXED_SM89_HALF_SYMBOLS.into_iter().collect()
+    } else {
+        BTreeSet::new()
+    };
+    let unique: BTreeSet<_> = actual.iter().copied().collect();
+    if actual.len() != unique.len() || unique != expected {
+        return Err(format!(
+            "Fixed SM89 half pipeline PTX inventory is incomplete, duplicated, or foreign on {arch}"
+        ));
+    }
+    for symbol in expected {
+        let entry = parsed_ptx_entry_ref(&parsed, symbol)?;
+        let parameters = entry
+            .text
+            .split_once('(')
+            .and_then(|(_, tail)| tail.split_once("\n)").map(|(head, _)| head))
+            .ok_or_else(|| format!("{symbol} has no PTX parameter list"))?;
+        let declarations: Vec<_> = parameters
+            .lines()
+            .map(str::trim)
+            .filter(|line| line.starts_with(".param "))
+            .collect();
+        if declarations.len() != 5
+            || !declarations[..4]
+                .iter()
+                .all(|line| line.starts_with(".param .u64 "))
+            || !declarations[4].starts_with(".param .align 4 .b8 ")
+            || !declarations[4].contains("[32]")
+        {
+            return Err(format!(
+                "{symbol} requires four pointers and an align-4 32-byte bundle"
+            ));
+        }
+        let mma = if symbol.ends_with("_bf16") {
+            "mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32"
+        } else {
+            "mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32"
+        };
+        for required in [
+            mma,
+            "cp.async.cg.shared.global",
+            "ldmatrix.sync.aligned.m8n8.x4.shared.b16",
+            "ldmatrix.sync.aligned.m8n8.x2.trans.shared.b16",
+        ] {
+            if !ptx_has_unquoted_token(&entry.body, |token| token == required) {
+                return Err(format!("{symbol} is missing {required}"));
+            }
+        }
+        if ptx_has_unquoted_token(&entry.body, |token| {
+            token.starts_with("atom.")
+                || token.starts_with("atom::")
+                || token.starts_with("red.")
+                || token.starts_with("red::")
+                || token.starts_with("redux.")
+        }) {
+            return Err(format!("{symbol} contains a numeric atomic or reduction"));
+        }
+    }
+    Ok(())
+}
+
+fn validate_fixed_sm89_half_driver_abi(symbol: &str, abi: &Tf32DriverAbi) -> Result<(), String> {
+    const EXPECTED: [(usize, usize); 5] = [(0, 8), (8, 8), (16, 8), (24, 8), (32, 32)];
+    if super::super::gemm_bi_fixed::FIXED_SM89_HALF_PARAMS_SIZE != 32 {
+        return Err("Fixed SM89 half host parameter ABI drifted".into());
+    }
+    if abi.parameter_count() != EXPECTED.len()
+        || !abi
+            .parameters()
+            .iter()
+            .zip(EXPECTED)
+            .all(|(actual, expected)| (actual.offset(), actual.size()) == expected)
+    {
+        return Err(format!(
+            "{symbol} has the wrong live five-argument/64-byte Driver ABI"
+        ));
+    }
+    Ok(())
+}
+
+fn census_fixed_sm89_half_driver_abi(
+    ctx: &CudaContext,
+    kind: ModuleKind,
+    arch: &str,
+    ptx: &str,
+) -> Result<BTreeMap<&'static str, Tf32DriverAbi>, String> {
+    if kind != ModuleKind::Fixed || !fixed_sm89_half_composed(arch) {
+        return Ok(BTreeMap::new());
+    }
+    type GetParamInfo = unsafe extern "C" fn(
+        cudarc::driver::sys::CUfunction,
+        usize,
+        *mut usize,
+        *mut usize,
+    ) -> cudarc::driver::sys::CUresult;
+    let module = DriverModule::load(ctx, ptx)?;
+    let get: GetParamInfo =
+        unsafe { std::mem::transmute(driver_proc_address("cuFuncGetParamInfo", 12_040)?) };
+    let mut census = BTreeMap::new();
+    for symbol in FIXED_SM89_HALF_SYMBOLS {
+        let function = unsafe {
+            cudarc::driver::result::module::get_function(
+                module.raw(),
+                CString::new(symbol).unwrap(),
+            )
+        }
+        .map_err(|error| format!("load Fixed/{symbol} for Driver ABI: {error:?}"))?;
+        let abi = query_driver_parameter_abi(symbol, 5, |index, offset, size| unsafe {
+            get(function, index, offset, size)
+        })?;
+        validate_fixed_sm89_half_driver_abi(symbol, &abi)?;
+        census.insert(symbol, abi);
+    }
+    module.unload()?;
+    Ok(census)
+}
+
+/// Admit both homogeneous-half exports together. Unknown targets, ABI drift,
+/// resource exclusions and Driver-query failures keep the optional holder
+/// absent; they do not disable the mandatory portable Fixed kernels.
+pub(crate) fn load_fixed_sm89_half_pipeline(
+    ctx: &CudaContext,
+    module: &CompiledModule,
+) -> (Option<HalfKernel>, Option<String>) {
+    let admitted = (|| -> Result<HalfKernel, String> {
+        if module.artifact_identity.module_kind != ModuleKind::Fixed
+            || !fixed_sm89_half_composed(module.compiler_identity.target.as_str())
+            || ctx
+                .compute_capability()
+                .map_err(|error| format!("query Fixed half CC: {error:?}"))?
+                != (8, 9)
+        {
+            return Err(
+                "Fixed SM89 half pipeline is only composed and admitted on sm_89/CC8.9".into(),
+            );
+        }
+        let shared_cap = ctx.attribute(
+            cudarc::driver::sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK_OPTIN,
+        ).map_err(|error| format!("query Fixed half opt-in shared capacity: {error:?}"))?;
+        if shared_cap < FIXED_SM89_HALF_SHARED_BYTES as i32 {
+            return Err(format!(
+                "Fixed SM89 half requires {} shared bytes, device permits {shared_cap}",
+                FIXED_SM89_HALF_SHARED_BYTES
+            ));
+        }
+        let abi = module
+            .fixed_sm89_half_driver_abi
+            .as_ref()
+            .map_err(Clone::clone)?;
+        let mut functions = Vec::with_capacity(2);
+        for symbol in FIXED_SM89_HALF_SYMBOLS {
+            validate_fixed_sm89_half_driver_abi(
+                symbol,
+                abi.get(symbol)
+                    .ok_or_else(|| format!("{symbol} has no live Driver ABI census"))?,
+            )?;
+            let function = load_function(&module.module, ModuleKind::Fixed, symbol)?;
+            set_dynamic_shared(&function, symbol, FIXED_SM89_HALF_SHARED_BYTES as i32)?;
+            let local = function
+                .local_size_bytes()
+                .map_err(|error| format!("query {symbol} local bytes: {error:?}"))?;
+            let registers = function
+                .num_regs()
+                .map_err(|error| format!("query {symbol} registers: {error:?}"))?;
+            let threads = function
+                .max_threads_per_block()
+                .map_err(|error| format!("query {symbol} threads: {error:?}"))?;
+            let local =
+                u32::try_from(local).map_err(|_| format!("{symbol} negative local memory"))?;
+            let registers =
+                u32::try_from(registers).map_err(|_| format!("{symbol} negative registers"))?;
+            tf32_symbol_admission(
+                symbol,
+                local,
+                registers,
+                FIXED_SM89_HALF_REGISTER_CAP,
+                threads,
+                FIXED_SM89_HALF_THREADS as i32,
+            )?;
+            let occupancy = function
+                .occupancy_max_active_blocks_per_multiprocessor(
+                    FIXED_SM89_HALF_THREADS,
+                    FIXED_SM89_HALF_SHARED_BYTES as usize,
+                    None,
+                )
+                .map_err(|error| format!("query {symbol} occupancy: {error:?}"))?;
+            if occupancy == 0 {
+                return Err(format!(
+                    "{symbol} has no resident CTA at its required shared-memory size"
+                ));
+            }
+            functions.push(function);
+        }
+        let mut functions = functions.into_iter();
+        Ok(HalfKernel {
+            bf16: functions.next().unwrap(),
+            f16: functions.next().unwrap(),
+        })
+    })();
+    match admitted {
+        Ok(functions) => (Some(functions), None),
+        Err(reason) => (None, Some(reason)),
+    }
+}
 
 fn validate_fixed_tf32_ptx(arch: &str, ptx: &str) -> Result<(), String> {
     let owns_sm120 = matches!(arch, "sm_120" | "sm_121" | "compute_120" | "compute_121");
@@ -3598,6 +3847,12 @@ const FIXED_SOURCE_FRAGMENTS: &[SourceFragment] = &[
     },
 ];
 
+const FIXED_SM89_HALF_SOURCE_FRAGMENT: SourceFragment = SourceFragment {
+    logical_name: "kernels/gemm_bi_fixed/sm89_half_pipeline.cu",
+    source: include_str!("../../../../kernels/gemm_bi_fixed/sm89_half_pipeline.cu"),
+    allowed_quoted_includes: &[],
+};
+
 const TRIAD_CONTRACT: SourceFragment = SourceFragment {
     logical_name: "kernels/gemm_bi_triad/contract.cuh",
     source: include_str!("../../../../kernels/gemm_bi_triad/contract.cuh"),
@@ -3881,10 +4136,14 @@ fn module_fragments(kind: ModuleKind) -> Result<&'static [SourceFragment], Strin
 }
 
 /// The composed source the compiler sees for `kind` on `arch`: the module's
-/// fragments, plus the stream-K fragment for the portable module on the
-/// targets that carry it.
+/// frozen base and only that target's admitted extension fragments.
 fn compose_module_source_for(kind: ModuleKind, arch: &str) -> Result<String, String> {
     let base = module_fragments(kind)?;
+    if kind == ModuleKind::Fixed && fixed_sm89_half_composed(arch) {
+        let mut fragments = base.to_vec();
+        fragments.push(FIXED_SM89_HALF_SOURCE_FRAGMENT);
+        return compose_fragments(&fragments);
+    }
     if kind == ModuleKind::TriadSm80 && sm80_target_composes_streamk(arch) {
         let mut fragments = base.to_vec();
         fragments.push(SM80_STREAMK_SOURCE_FRAGMENT);
@@ -3899,7 +4158,14 @@ fn compose_module_source_for(kind: ModuleKind, arch: &str) -> Result<String, Str
 /// Source scans read this one; the compiler takes the per-target form.
 #[cfg(test)]
 fn compose_module_source(kind: ModuleKind) -> Result<String, String> {
-    compose_module_source_for(kind, "sm_80")
+    compose_module_source_for(
+        kind,
+        if kind == ModuleKind::Fixed {
+            "sm_89"
+        } else {
+            "sm_80"
+        },
+    )
 }
 
 /// Digest of a module's composed source for `arch`, the way the compiler
@@ -7982,6 +8248,7 @@ mod tests {
         "kernels/gemm_bi_fixed/tcw64.cu",
         "kernels/gemm_bi_fixed/sm90_wgmma.cu",
         "kernels/gemm_bi_fixed/sm100_tcgen05.cu",
+        "kernels/gemm_bi_fixed/sm89_half_pipeline.cu",
     ];
 
     const SCALAR_FRAGMENTS: &[&str] = &[
@@ -9005,6 +9272,279 @@ mod tests {
             )
             .expect_err("real foreign TF32 opcode must fail");
         }
+    }
+
+    // These fixtures exercise the production composer and PTX admission
+    // boundary. They are parser fixtures, not executable CUDA programs.
+    const FIXED_SM89_HALF_TEST_SYMBOLS: [&str; 2] = [
+        "gemm_bi_nn_fixed_sm89_tc128_pipeline_v1_bf16",
+        "gemm_bi_nn_fixed_sm89_tc128_pipeline_v1_f16",
+    ];
+
+    fn fixed_sm89_half_test_base_ptx() -> String {
+        let mut ptx = ".version 8.7\n.target sm_89\n.address_size 64\n".to_string();
+        for symbol in [
+            "gemm_bi_nn_tf32_v1_m128n64_bk32_s2",
+            "gemm_bi_nn_tf32_v1_m128n64_bk32_s3",
+            "gemm_bi_nn_tf32_v1_m64n64_bk32_s2",
+            "gemm_bi_nn_tf32_v1_m64n64_bk32_s3",
+            "gemm_bi_nn_tf32_v1_m16n32_bk32_s4",
+        ] {
+            ptx.push_str(&format!(
+                ".visible .entry {symbol}(\n\
+                 .param .u64 c,\n.param .u64 a,\n.param .u64 b,\n.param .u64 bias,\n\
+                 .param .align 4 .b8 params[24]\n) {{\n\
+                 cvt.rna.tf32.f32 %r0, %f0;\n\
+                 mma.sync.aligned.m16n8k8.row.col.f32.tf32.tf32.f32\n\
+                 {{%f0,%f1,%f2,%f3}}, {{%r0,%r1,%r2,%r3}}, {{%r4,%r5}}, {{%f0,%f1,%f2,%f3}};\n\
+                 ret;\n}}\n"
+            ));
+        }
+        ptx
+    }
+
+    fn fixed_sm89_half_test_entry(symbol: &str, dtype: &str) -> String {
+        format!(
+            ".visible .entry {symbol}(\n\
+             .param .u64 c,\n.param .u64 a,\n.param .u64 b,\n.param .u64 bias,\n\
+             .param .align 4 .b8 params[32]\n) {{\n\
+             cp.async.cg.shared.global [%r0], [%rd0], 16, %r1;\n\
+             cp.async.commit_group;\ncp.async.wait_group 0;\nbar.sync 0;\n\
+             ldmatrix.sync.aligned.m8n8.x4.shared.b16 {{%r0,%r1,%r2,%r3}}, [%r4];\n\
+             ldmatrix.sync.aligned.m8n8.x2.trans.shared.b16 {{%r4,%r5}}, [%r6];\n\
+             mma.sync.aligned.m16n8k16.row.col.f32.{dtype}.{dtype}.f32\n\
+             {{%f0,%f1,%f2,%f3}}, {{%r0,%r1,%r2,%r3}}, {{%r4,%r5}}, {{%f0,%f1,%f2,%f3}};\n\
+             mul.rn.f32 %f0, %f0, %f4;\nfma.rn.f32 %f0, %f1, %f2, %f0;\n\
+             cvt.rn.{dtype}.f32 %rs0, %f0;\n\
+             st.global.v4.u32 [%rd0], {{%r0,%r1,%r2,%r3}};\nret;\n}}\n"
+        )
+    }
+
+    fn fixed_sm89_half_test_ptx() -> String {
+        let mut ptx = fixed_sm89_half_test_base_ptx();
+        ptx.push_str(&fixed_sm89_half_test_entry(
+            FIXED_SM89_HALF_TEST_SYMBOLS[0],
+            "bf16",
+        ));
+        ptx.push_str(&fixed_sm89_half_test_entry(
+            FIXED_SM89_HALF_TEST_SYMBOLS[1],
+            "f16",
+        ));
+        ptx
+    }
+
+    #[test]
+    fn fixed_sm89_half_pipeline_composes_the_ada_only_extension() {
+        let base = compose_fragments(super::FIXED_SOURCE_FRAGMENTS).unwrap();
+        let ada = compose_module_source_for(ModuleKind::Fixed, "sm_89").unwrap();
+        let extension = ada
+            .strip_prefix(&base)
+            .expect("Ada must preserve the exact existing Fixed source prefix");
+        let boundaries: Vec<_> = extension
+            .lines()
+            .filter_map(|line| line.strip_prefix("#line 1 \"")?.strip_suffix('"'))
+            .collect();
+        assert_eq!(
+            boundaries,
+            ["kernels/gemm_bi_fixed/sm89_half_pipeline.cu"],
+            "Ada must append exactly its new Fixed half fragment"
+        );
+    }
+
+    #[test]
+    fn fixed_sm89_half_pipeline_preserves_non_ada_fixed_composed_bytes() {
+        let base = compose_fragments(super::FIXED_SOURCE_FRAGMENTS).unwrap();
+        for target in [
+            "sm_80",
+            "sm_86",
+            "sm_87",
+            "sm_90",
+            "sm_90a",
+            "sm_100a",
+            "sm_103a",
+            "sm_110a",
+            "sm_120",
+            "compute_120",
+            "sm_121",
+            "compute_121",
+        ] {
+            assert_eq!(
+                compose_module_source_for(ModuleKind::Fixed, target)
+                    .unwrap()
+                    .as_bytes(),
+                base.as_bytes(),
+                "Fixed composition changed on non-admitted target {target}"
+            );
+        }
+    }
+
+    #[test]
+    fn fixed_sm89_half_pipeline_does_not_enter_any_triad_composition() {
+        for target in ["sm_89", "sm_120", "compute_120", "sm_121", "compute_121"] {
+            for kind in [
+                ModuleKind::TriadScalar,
+                ModuleKind::TriadSm80,
+                ModuleKind::TriadSm120,
+            ] {
+                let source = compose_module_source_for(kind, target).unwrap();
+                let boundaries: Vec<_> = source
+                    .lines()
+                    .filter_map(|line| line.strip_prefix("#line 1 \"")?.strip_suffix('"'))
+                    .collect();
+                assert!(
+                    !boundaries.contains(&"kernels/gemm_bi_fixed/sm89_half_pipeline.cu"),
+                    "Fixed half extension leaked into {kind:?}/{target}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn fixed_sm89_half_pipeline_ptx_requires_both_typed_exports() {
+        validate_module_ptx(ModuleKind::Fixed, "sm_89", &fixed_sm89_half_test_ptx())
+            .expect("both typed exports with the five-argument ABI must be accepted");
+        validate_module_ptx(ModuleKind::Fixed, "sm_89", &fixed_sm89_half_test_base_ptx())
+            .expect_err("an Ada Fixed module missing both pipeline exports must fail admission");
+        for missing in 0..2 {
+            let mut ptx = fixed_sm89_half_test_base_ptx();
+            let retained = 1 - missing;
+            ptx.push_str(&fixed_sm89_half_test_entry(
+                FIXED_SM89_HALF_TEST_SYMBOLS[retained],
+                if retained == 0 { "bf16" } else { "f16" },
+            ));
+            validate_module_ptx(ModuleKind::Fixed, "sm_89", &ptx)
+                .expect_err("a partially compiled half holder must not be admitted");
+        }
+    }
+
+    #[test]
+    fn fixed_sm89_half_pipeline_ptx_rejects_duplicate_or_foreign_exports() {
+        for extra in [
+            FIXED_SM89_HALF_TEST_SYMBOLS[0],
+            "gemm_bi_nn_fixed_sm89_tc128_pipeline_v1_f32",
+            "gemm_bi_nn_fixed_sm89_tc128_pipeline_v1_vec_bf16",
+        ] {
+            let ptx = fixed_sm89_half_test_ptx() + &fixed_sm89_half_test_entry(extra, "bf16");
+            validate_module_ptx(ModuleKind::Fixed, "sm_89", &ptx)
+                .expect_err("the admitted half extension owns exactly two unique exports");
+        }
+    }
+
+    #[test]
+    fn fixed_sm89_half_pipeline_ptx_rejects_exports_on_non_ada_targets() {
+        for target in [
+            "sm_80", "sm_86", "sm_87", "sm_90a", "sm_100a", "sm_103a", "sm_110a",
+        ] {
+            let base = fixed_sm89_half_test_base_ptx()
+                .replace(".target sm_89", &format!(".target {target}"));
+            validate_module_ptx(ModuleKind::Fixed, target, &base)
+                .expect("the unchanged portable Fixed inventory must remain admitted");
+            let ptx =
+                fixed_sm89_half_test_ptx().replace(".target sm_89", &format!(".target {target}"));
+            validate_module_ptx(ModuleKind::Fixed, target, &ptx)
+                .expect_err("the Ada-only half export must be rejected on other targets");
+        }
+    }
+
+    #[test]
+    fn fixed_sm89_half_pipeline_ptx_rejects_pointer_or_bundle_abi_drift() {
+        let baseline = fixed_sm89_half_test_ptx();
+        validate_module_ptx(ModuleKind::Fixed, "sm_89", &baseline).unwrap();
+        let symbol = FIXED_SM89_HALF_TEST_SYMBOLS[0];
+        let entry = fixed_sm89_half_test_entry(symbol, "bf16");
+        for malformed in [
+            entry.replacen(".param .u64 a,", ".param .u32 a,", 1),
+            entry.replacen(".param .u64 bias,", ".param .u32 bias,", 1),
+            entry.replacen("params[32]", "params[24]", 1),
+            entry.replacen("params[32]", "params[28]", 1),
+            entry.replacen("params[32]", "params[36]", 1),
+            entry.replacen(".param .align 4 .b8 params", ".param .align 8 .b8 params", 1),
+            entry.replacen("params[32]\n)", "params[32],\n.param .u64 scratch\n)", 1),
+            entry.replacen(
+                ".param .align 4 .b8 params[32]",
+                ".param .f32 alpha,\n.param .f32 beta,\n.param .u32 m,\n.param .u32 n,\n.param .u32 k,\n.param .u32 lda,\n.param .u32 ldb,\n.param .u32 ldc",
+                1,
+            ),
+        ] {
+            let ptx = baseline.replacen(&entry, &malformed, 1);
+            assert_ne!(ptx, baseline, "ABI fixture mutation must affect the typed entry");
+            validate_module_ptx(ModuleKind::Fixed, "sm_89", &ptx)
+                .expect_err("half pipeline requires four u64 pointers and one align-4 32-byte bundle");
+        }
+    }
+
+    #[test]
+    fn fixed_sm89_half_pipeline_ptx_requires_native_typed_mma_and_async_staging() {
+        let baseline = fixed_sm89_half_test_ptx();
+        validate_module_ptx(ModuleKind::Fixed, "sm_89", &baseline).unwrap();
+        for (index, dtype) in [(0, "bf16"), (1, "f16")] {
+            let entry = fixed_sm89_half_test_entry(FIXED_SM89_HALF_TEST_SYMBOLS[index], dtype);
+            for instruction in [
+                format!("mma.sync.aligned.m16n8k16.row.col.f32.{dtype}.{dtype}.f32"),
+                "cp.async.cg.shared.global".to_string(),
+                "ldmatrix.sync.aligned.m8n8.x4.shared.b16".to_string(),
+            ] {
+                let malformed = entry.replace(&instruction, "not_the_required_instruction");
+                let ptx = baseline.replacen(&entry, &malformed, 1);
+                validate_module_ptx(ModuleKind::Fixed, "sm_89", &ptx)
+                    .expect_err("half dtype and asynchronous pipeline instructions are mandatory");
+            }
+        }
+    }
+
+    #[test]
+    fn fixed_sm89_half_pipeline_ptx_rejects_numeric_atomics_and_reductions() {
+        let baseline = fixed_sm89_half_test_ptx();
+        for instruction in [
+            "atom.global.add.f32 %f0, [%rd0], %f1;",
+            "red.global.add.f32 [%rd0], %f1;",
+            "redux.sync.add.s32 %r0, %r1, -1;",
+        ] {
+            let entry = fixed_sm89_half_test_entry(FIXED_SM89_HALF_TEST_SYMBOLS[0], "bf16");
+            let malformed = entry.replacen("ret;", &format!("{instruction}\nret;"), 1);
+            let ptx = baseline.replacen(&entry, &malformed, 1);
+            validate_module_ptx(ModuleKind::Fixed, "sm_89", &ptx)
+                .expect_err("the fixed half chain must not acquire numeric reductions");
+        }
+    }
+
+    #[test]
+    fn fixed_sm89_half_pipeline_driver_abi_requires_exact_offsets_sizes_and_terminal_probe() {
+        use super::{query_driver_parameter_abi, validate_fixed_sm89_half_driver_abi};
+        use cudarc::driver::sys::CUresult;
+        let symbol = FIXED_SM89_HALF_TEST_SYMBOLS[0];
+        let layout = [(0, 8), (8, 8), (16, 8), (24, 8), (32, 32)];
+        let mut queries = Vec::new();
+        let abi = query_driver_parameter_abi(symbol, 5, |index, offset, size| {
+            queries.push(index);
+            if let Some((parameter_offset, parameter_size)) = layout.get(index) {
+                *offset = *parameter_offset;
+                *size = *parameter_size;
+                CUresult::CUDA_SUCCESS
+            } else {
+                CUresult::CUDA_ERROR_INVALID_VALUE
+            }
+        })
+        .expect("exact five-argument Driver ABI");
+        assert_eq!(queries, [0, 1, 2, 3, 4, 5]);
+        validate_fixed_sm89_half_driver_abi(symbol, &abi).unwrap();
+        for layout in [
+            vec![(0, 8), (8, 8), (16, 8), (24, 8)],
+            vec![(0, 8), (8, 8), (16, 8), (24, 8), (32, 28)],
+            vec![(0, 8), (8, 8), (16, 8), (24, 8), (36, 32)],
+            vec![(0, 4), (8, 8), (16, 8), (24, 8), (32, 32)],
+            vec![(0, 8), (8, 8), (16, 8), (24, 8), (32, 32), (64, 4)],
+        ] {
+            let malformed = Tf32DriverAbi::checked(layout.len(), layout).unwrap();
+            validate_fixed_sm89_half_driver_abi(symbol, &malformed)
+                .expect_err("valid generic layouts must still match the exact half ABI");
+        }
+        query_driver_parameter_abi(symbol, 5, |index, offset, size| {
+            *offset = index * 8;
+            *size = 8;
+            CUresult::CUDA_SUCCESS
+        })
+        .expect_err("a sixth successful Driver parameter query must reject");
     }
 
     #[test]

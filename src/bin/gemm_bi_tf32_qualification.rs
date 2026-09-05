@@ -118,13 +118,9 @@ fn parse_cc(value: &str) -> Result<(u32, u32), String> {
 }
 
 fn expected_routes_for_cc(cc: (u32, u32)) -> Option<usize> {
-    match cc {
-        (8, 0 | 6 | 7 | 9) => Some(18),
-        (9, 0) => Some(24),
-        (10, 0 | 3) | (11, 0) => Some(54),
-        (12, 0 | 1) => Some(36),
-        _ => None,
-    }
+    mamba_rs::mamba_ssm::gpu::gemm_bi_triad::tf32_qualification_route_specs(cc)
+        .ok()
+        .map(|specs| specs.len())
 }
 
 fn expect_value(cursor: &mut ArgumentCursor, flag: &str, expected: &str) -> Result<(), String> {
@@ -483,6 +479,47 @@ mod tests {
         assert_eq!(expected_routes_for_cc((12, 1)), Some(36));
     }
 
+    #[test]
+    fn wide_qualification_cli_admits_the_complete_target_inventory() {
+        for (cc, expected) in [
+            ((8, 0), 19),
+            ((8, 6), 19),
+            ((8, 7), 19),
+            ((8, 9), 19),
+            ((9, 0), 25),
+            ((10, 0), 55),
+            ((10, 3), 55),
+            ((11, 0), 55),
+            ((12, 0), 36),
+            ((12, 1), 36),
+        ] {
+            let mut arguments = contract_arguments();
+            arguments[1] = format!("{}.{}", cc.0, cc.1);
+            let count = arguments
+                .iter()
+                .position(|argument| argument == "--expected-routes")
+                .expect("route count flag")
+                + 1;
+            arguments[count] = expected.to_string();
+            let parsed = parse_arguments(arguments)
+                .unwrap_or_else(|error| panic!("CC {cc:?} full inventory: {error}"));
+            assert_eq!(parsed.exact_cc, cc);
+            assert_eq!(parsed.expected_routes, expected);
+        }
+    }
+
+    #[test]
+    fn wide_qualification_cli_rejects_the_obsolete_base_only_route_count() {
+        let mut arguments = contract_arguments();
+        let count = arguments
+            .iter()
+            .position(|argument| argument == "--expected-routes")
+            .expect("route count flag")
+            + 1;
+        arguments[count] = "18".to_owned();
+        assert!(parse_arguments(arguments).is_err());
+    }
+
     fn contract_arguments() -> Vec<String> {
         [
             "--exact-cc",
@@ -502,7 +539,7 @@ mod tests {
             "--repeat",
             "100",
             "--expected-routes",
-            "18",
+            "19",
             "--k0-every-symbol",
             "--k0-null-inputs",
             "--driver-abi",
@@ -523,7 +560,7 @@ mod tests {
     fn parses_the_tracked_qualification_cli() {
         let parsed = parse_arguments(contract_arguments()).expect("parse tracked CLI");
         assert_eq!(parsed.exact_cc, (8, 9));
-        assert_eq!(parsed.expected_routes, 18);
+        assert_eq!(parsed.expected_routes, 19);
         assert_eq!(parsed.repeat, 100);
         assert_eq!(parsed.artifact_output, PathBuf::from("/tmp/artifact.bin"));
         assert_eq!(

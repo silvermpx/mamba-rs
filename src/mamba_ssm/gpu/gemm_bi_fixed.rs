@@ -62,6 +62,8 @@ pub enum FixedTile {
     Sm120Half(FixedSm120HalfTile),
     /// 128x128 CTA, 256 threads, 2-stage cp.async, dynamic smem 71 680 B.
     Tc128,
+    /// Ada-only pipelined/vector-store Tc128, AUTO in qualified hot cells.
+    Tc128Sm89Pipeline,
     /// 128x256 CTA, 256 threads, 64x64 warp tiles (fragment reuse),
     /// XOR-swizzled dynamic smem 98 304 B. Bit-identical to Tc128.
     TcWn64,
@@ -158,6 +160,16 @@ pub fn fixed_forward_with_tile(
             operands.bias_ptr,
             (shape.m, shape.k, shape.n),
         );
+    }
+    if tile == FixedTile::Tc128Sm89Pipeline {
+        if operands.x.dtype == WeightDtype::F32
+            || operands.x.dtype != operands.w.dtype
+            || operands.x.dtype != operands.c.dtype
+        {
+            return Err("Fixed Ada half pipeline requires matching bf16/f16 operands".into());
+        }
+        let args = FixedArgs::try_new(operands, shape)?;
+        return launch_sm89_half_pipeline(ctx, operands.x.dtype, &args);
     }
     if tile == FixedTile::F32N128S2 {
         if operands.c.dtype != WeightDtype::F32
@@ -365,6 +377,179 @@ struct FixedTileDevice {
     compute_capability: (u32, u32),
 }
 
+// Actual NVRTC CUDA13.2/142-SM Ada qualification: all five hot shapes, both
+// homogeneous half dtypes and both bias modes, 101 windows in each order,
+// eager and graph. The original ladder is bit-identical across each boundary.
+// This new source and its AUTO promotion ship together; the new Fixed artifact
+// invalidates old graph identities without relabeling frozen Triad evidence.
+fn fixed_sm89_half_pipeline_auto_eligible(
+    operands: FixedFwdOperands,
+    shape: FixedShape,
+    device: FixedTileDevice,
+    nvrtc: (i32, i32),
+    loaded: bool,
+) -> bool {
+    loaded
+        && device.compute_capability == (8, 9)
+        && device.multiprocessors == 142
+        && nvrtc == (13, 2)
+        && operands.c.dtype != WeightDtype::F32
+        && operands.c.dtype == operands.x.dtype
+        && operands.x.dtype == operands.w.dtype
+        && [operands.c.ptr, operands.x.ptr, operands.w.ptr]
+            .into_iter()
+            .all(|ptr| ptr != 0 && ptr.is_multiple_of(16))
+        && operands.bias_ptr.is_none_or(|ptr| ptr.is_multiple_of(4))
+        && matches!(
+            (shape.m, shape.k, shape.n),
+            (4621, 384, 1928)
+                | (4621, 768, 2304)
+                | (4621, 1928, 384)
+                | (2048, 768, 2304)
+                | (2048, 2304, 768)
+        )
+}
+
+#[cfg(test)]
+mod sm89_pipeline_auto_tests {
+    use super::*;
+
+    #[test]
+    fn sm89_pipeline_auto_requires_measured_shape_device_and_operand_contract() {
+        let device = FixedTileDevice {
+            multiprocessors: 142,
+            compute_capability: (8, 9),
+        };
+        for dtype in [WeightDtype::Bf16, WeightDtype::F16] {
+            for (m, k, n) in [
+                (4621, 384, 1928),
+                (4621, 768, 2304),
+                (4621, 1928, 384),
+                (2048, 768, 2304),
+                (2048, 2304, 768),
+            ] {
+                for bias_ptr in [None, Some(0x4004)] {
+                    let ops = FixedFwdOperands {
+                        c: TypedPtr { ptr: 0x1000, dtype },
+                        x: TypedPtr { ptr: 0x2000, dtype },
+                        w: TypedPtr { ptr: 0x3000, dtype },
+                        bias_ptr,
+                    };
+                    let shape = FixedShape { m, k, n };
+                    let eligible = |o, s, d, v, loaded| {
+                        fixed_sm89_half_pipeline_auto_eligible(o, s, d, v, loaded)
+                    };
+                    assert!(
+                        eligible(ops, shape, device, (13, 2), true),
+                        "measured {dtype:?} {shape:?}"
+                    );
+                    assert!(!eligible(ops, shape, device, (13, 2), false));
+                    for version in [(12, 8), (13, 1), (13, 3), (14, 0)] {
+                        assert!(!eligible(ops, shape, device, version, true));
+                    }
+                    for cc in [
+                        (8, 0),
+                        (8, 6),
+                        (8, 7),
+                        (9, 0),
+                        (10, 0),
+                        (10, 3),
+                        (11, 0),
+                        (12, 0),
+                        (12, 1),
+                    ] {
+                        assert!(!eligible(
+                            ops,
+                            shape,
+                            FixedTileDevice {
+                                compute_capability: cc,
+                                ..device
+                            },
+                            (13, 2),
+                            true
+                        ));
+                    }
+                    for sm in [0, 141, 143, 170] {
+                        assert!(!eligible(
+                            ops,
+                            shape,
+                            FixedTileDevice {
+                                multiprocessors: sm,
+                                ..device
+                            },
+                            (13, 2),
+                            true
+                        ));
+                    }
+                    for adjacent in [
+                        FixedShape { m: m - 1, ..shape },
+                        FixedShape { m: m + 1, ..shape },
+                        FixedShape { k: k - 1, ..shape },
+                        FixedShape { k: k + 1, ..shape },
+                        FixedShape { n: n - 1, ..shape },
+                        FixedShape { n: n + 1, ..shape },
+                        FixedShape { m: 1, ..shape },
+                        FixedShape { k: 0, ..shape },
+                    ] {
+                        assert!(!eligible(ops, adjacent, device, (13, 2), true));
+                    }
+                    for ptr in [0, 0x1001, 0x1002, 0x1004, 0x1008] {
+                        for wrong in [
+                            FixedFwdOperands {
+                                c: TypedPtr { ptr, dtype },
+                                ..ops
+                            },
+                            FixedFwdOperands {
+                                x: TypedPtr { ptr, dtype },
+                                ..ops
+                            },
+                            FixedFwdOperands {
+                                w: TypedPtr { ptr, dtype },
+                                ..ops
+                            },
+                        ] {
+                            assert!(!eligible(wrong, shape, device, (13, 2), true));
+                        }
+                    }
+                    for wrong in [
+                        FixedFwdOperands {
+                            c: TypedPtr {
+                                dtype: WeightDtype::F32,
+                                ..ops.c
+                            },
+                            ..ops
+                        },
+                        FixedFwdOperands {
+                            x: TypedPtr {
+                                dtype: WeightDtype::F32,
+                                ..ops.x
+                            },
+                            ..ops
+                        },
+                        FixedFwdOperands {
+                            w: TypedPtr {
+                                dtype: WeightDtype::F32,
+                                ..ops.w
+                            },
+                            ..ops
+                        },
+                        FixedFwdOperands {
+                            bias_ptr: Some(0x4001),
+                            ..ops
+                        },
+                        FixedFwdOperands {
+                            bias_ptr: Some(0x4002),
+                            ..ops
+                        },
+                    ] {
+                        assert!(!eligible(wrong, shape, device, (13, 2), true));
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Shape-keyed pick for the bf16/f16 inference ladder.
 /// The reduction depth `k` keys only the wide fragment-reuse rung - a
 /// legal key like every other, since the rungs are bit-identical.
@@ -492,7 +677,8 @@ fn ladder_cfg(tile: FixedTile, rows: usize, cols: usize) -> cudarc::driver::Laun
         | FixedTile::Tf32Sm120M64N128S3
         | FixedTile::Tf32Sm120M64S2ProducerWarp
         | FixedTile::Tf32Sm120M64S2
-        | FixedTile::Sm120Half(_) => unreachable!("tile has its own launcher"),
+        | FixedTile::Sm120Half(_)
+        | FixedTile::Tc128Sm89Pipeline => unreachable!("tile has its own launcher"),
     };
     let grid = (rows as u32).div_ceil(bm) * (cols as u32).div_ceil(bn);
     cudarc::driver::LaunchConfig {
@@ -598,6 +784,38 @@ struct FixedTf32WideParams {
 }
 
 unsafe impl DeviceRepr for FixedTf32WideParams {}
+
+/// Ada Fixed half owns a distinct five-argument ABI. Its dimension order is
+/// M,N,K, unlike the borrowed Triad TF32 wide bundle's M,K,N order.
+#[derive(Clone, Copy)]
+#[repr(C)]
+struct FixedSm89HalfParams {
+    alpha: f32,
+    beta: f32,
+    m: i32,
+    n: i32,
+    k: i32,
+    lda: i32,
+    ldb: i32,
+    ldc: i32,
+}
+
+unsafe impl DeviceRepr for FixedSm89HalfParams {}
+
+pub(crate) const FIXED_SM89_HALF_PARAMS_SIZE: usize = std::mem::size_of::<FixedSm89HalfParams>();
+
+const _: () = {
+    assert!(FIXED_SM89_HALF_PARAMS_SIZE == 32);
+    assert!(std::mem::align_of::<FixedSm89HalfParams>() == 4);
+    assert!(std::mem::offset_of!(FixedSm89HalfParams, alpha) == 0);
+    assert!(std::mem::offset_of!(FixedSm89HalfParams, beta) == 4);
+    assert!(std::mem::offset_of!(FixedSm89HalfParams, m) == 8);
+    assert!(std::mem::offset_of!(FixedSm89HalfParams, n) == 12);
+    assert!(std::mem::offset_of!(FixedSm89HalfParams, k) == 16);
+    assert!(std::mem::offset_of!(FixedSm89HalfParams, lda) == 20);
+    assert!(std::mem::offset_of!(FixedSm89HalfParams, ldb) == 24);
+    assert!(std::mem::offset_of!(FixedSm89HalfParams, ldc) == 28);
+};
 
 #[repr(transparent)]
 #[derive(Clone, Copy)]
@@ -1465,6 +1683,84 @@ fn launch_sm120_half(
         .map_err(|error| format!("gemm_bi Fixed SM120 half ({tile:?}): {error:?}"))
 }
 
+fn launch_sm89_half_pipeline(
+    ctx: &GpuCtx,
+    dtype: WeightDtype,
+    args: &FixedArgs,
+) -> Result<(), String> {
+    if ctx.compute_capability() != (8, 9) {
+        return Err("Fixed Ada half pipeline requires CC8.9".into());
+    }
+    if args.m == 0 || args.n == 0 {
+        return Ok(());
+    }
+    if args.c == 0 || !args.c.is_multiple_of(2) || !args.bias.is_multiple_of(4) {
+        return Err(
+            "Fixed Ada half pipeline requires non-null half-aligned C and f32-aligned bias".into(),
+        );
+    }
+    // Scalar staging supports odd strides and independently two-byte-aligned
+    // A/B views. K0 never reads A/B, so actual null inputs remain legal.
+    if args.k != 0
+        && [args.a, args.b]
+            .into_iter()
+            .any(|p| p == 0 || !p.is_multiple_of(2))
+    {
+        return Err("Fixed Ada half pipeline requires non-null half-aligned A and B".into());
+    }
+    args.m
+        .checked_add(127)
+        .ok_or("Fixed Ada half padded M exceeds i32")?;
+    let padded_n = args
+        .n
+        .checked_add(127)
+        .ok_or("Fixed Ada half padded N exceeds i32")?;
+    args.k
+        .checked_add(63)
+        .ok_or("Fixed Ada half padded K exceeds i32")?;
+    let grid = (args.m as u32)
+        .div_ceil(128)
+        .checked_mul(padded_n as u32 / 128)
+        .filter(|grid| *grid <= i32::MAX as u32)
+        .ok_or("Fixed Ada half launch grid exceeds i32")?;
+    // Opt-in, live Driver ABI and resource admission happened during module
+    // loading. Capture performs no allocation or function reconfiguration.
+    let kernels = ctx
+        .kernels
+        .fixed_sm89_half_pipeline
+        .as_ref()
+        .ok_or_else(|| {
+            ctx.kernels
+                .fixed_sm89_half_pipeline_rejection
+                .clone()
+                .unwrap_or_else(|| "Fixed Ada half pipeline is not admitted".into())
+        })?;
+    let params = FixedSm89HalfParams {
+        alpha: 1.0,
+        beta: 0.0,
+        m: args.m,
+        n: args.n,
+        k: args.k,
+        lda: args.k,
+        ldb: args.n,
+        ldc: args.n,
+    };
+    let config = cudarc::driver::LaunchConfig {
+        grid_dim: (grid, 1, 1),
+        block_dim: (256, 1, 1),
+        shared_mem_bytes: 71_680,
+    };
+    let mut builder = ctx.stream.launch_builder(kernels.get(dtype));
+    builder.arg(&args.c);
+    builder.arg(&args.a);
+    builder.arg(&args.b);
+    builder.arg(&args.bias);
+    builder.arg(&params);
+    unsafe { builder.launch(config) }
+        .map(|_| ())
+        .map_err(|error| format!("gemm_bi Fixed Ada half pipeline: {error:?}"))
+}
+
 fn launch_ladder(
     ctx: &GpuCtx,
     tile: FixedTile,
@@ -1503,7 +1799,8 @@ fn launch_ladder(
         | FixedTile::Tf32Sm120M64N128S3
         | FixedTile::Tf32Sm120M64S2ProducerWarp
         | FixedTile::Tf32Sm120M64S2
-        | FixedTile::Sm120Half(_) => unreachable!("tile has its own launcher"),
+        | FixedTile::Sm120Half(_)
+        | FixedTile::Tc128Sm89Pipeline => unreachable!("tile has its own launcher"),
     };
     let cfg = ladder_cfg(tile, args.m as usize, args.n as usize);
     let alpha: f32 = 1.0;
@@ -1721,6 +2018,22 @@ pub fn fixed_forward(
     let homogeneous_half = c.dtype != WeightDtype::F32 && c.dtype == x.dtype && x.dtype == w.dtype;
     let mixed_half_f32 =
         c.dtype == WeightDtype::F32 && x.dtype != WeightDtype::F32 && x.dtype == w.dtype;
+    let compiler = ctx.kernels.compiler_identity();
+    if homogeneous_half
+        && fixed_sm89_half_pipeline_auto_eligible(
+            operands,
+            shape,
+            FixedTileDevice {
+                multiprocessors: ctx.kernels.multiprocessor_count(),
+                compute_capability: ctx.compute_capability(),
+            },
+            compiler.nvrtc_version,
+            ctx.kernels.fixed_sm89_half_pipeline.is_some() && compiler.nvrtc_library_known,
+        )
+    {
+        launch_sm89_half_pipeline(ctx, c.dtype, &args)?;
+        return Ok(FixedTile::Tc128Sm89Pipeline);
+    }
     // Architecture rungs: on Hopper and datacenter Blackwell the arch's
     // own tensor path is the numeric family for every eligible shape
     // (per-arch families are the documented law; batch invariance holds
