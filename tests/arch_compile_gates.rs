@@ -119,6 +119,10 @@ fn fixed_blob_for(arch: &str) -> String {
         source.push_str(include_str!(
             "../kernels/gemm_bi_fixed/sm89_half_pipeline.cu"
         ));
+        source.push('\n');
+        source.push_str(include_str!(
+            "../kernels/gemm_bi_fixed/sm89_f32_n64_copyplan.cu"
+        ));
     }
     source
 }
@@ -2671,6 +2675,199 @@ fn fixed_f32_n128_s2_source_and_ptx_contract() {
     }
 }
 
+const FIXED_SM89_EXACT_N64_COPYPLAN: &str = "gemm_bi_nn_fixed_sm89_f32_n64_copyplan_v1";
+
+fn assert_fixed_sm89_exact_n64_copyplan_ptx(arch: &str, ptx: &str) {
+    let parsed = parse_compile_gate_ptx(ptx).expect("parse Fixed exact N64 copy-plan PTX");
+    let actual: Vec<_> = parsed
+        .entries
+        .iter()
+        .filter(|entry| {
+            entry
+                .symbol
+                .starts_with("gemm_bi_nn_fixed_sm89_f32_n64_copyplan")
+        })
+        .map(|entry| entry.symbol.as_str())
+        .collect();
+    let expected = if arch == "sm_89" {
+        vec![FIXED_SM89_EXACT_N64_COPYPLAN]
+    } else {
+        vec![]
+    };
+    assert_eq!(actual, expected, "{arch} Fixed exact N64 inventory");
+    if arch != "sm_89" {
+        return;
+    }
+    let entry = parsed.entry(FIXED_SM89_EXACT_N64_COPYPLAN);
+    assert!(
+        has_exact_maxntid(&entry.text, 128),
+        "{arch} exact N64 maxntid"
+    );
+    assert!(
+        has_exact_minnctapersm(&entry.text, 2),
+        "{arch} exact N64 min CTAs"
+    );
+    let parameters = ptx_parameters(&entry.text, FIXED_SM89_EXACT_N64_COPYPLAN);
+    let declarations: Vec<_> = parameters
+        .lines()
+        .map(str::trim)
+        .filter(|line| line.starts_with(".param "))
+        .collect();
+    assert_eq!(declarations.len(), 5, "exact N64 five-argument ABI");
+    assert!(
+        declarations[..4]
+            .iter()
+            .all(|line| line.starts_with(".param .u64 "))
+    );
+    assert!(
+        declarations[4].starts_with(".param .align 4 .b8 ") && declarations[4].contains("[32]"),
+        "exact N64 compact parameter ABI"
+    );
+    assert_compile_gate_entry_tokens(
+        "Fixed SM89 exact N64 copy-plan",
+        entry,
+        &[
+            "cp.async.cg.shared.global",
+            "cp.async.commit_group",
+            "cp.async.wait_group",
+            "fma.rn.f32",
+        ],
+    );
+    for token in compile_gate_ptx_tokens(&entry.body) {
+        assert!(
+            token.text != ".local"
+                && !token.text.starts_with("ld.local")
+                && !token.text.starts_with("st.local")
+                && !token.text.starts_with("mma.")
+                && !token.text.starts_with("wmma.")
+                && !token
+                    .text
+                    .split('.')
+                    .any(|part| part == "tf32" || part == "ftz")
+                && !token.text.starts_with("atom.")
+                && !token.text.starts_with("atom::")
+                && !token.text.starts_with("red.")
+                && !token.text.starts_with("red::")
+                && !token.text.starts_with("redux."),
+            "exact N64 forbidden PTX token {}",
+            token.text,
+        );
+    }
+}
+
+#[test]
+fn fixed_sm89_exact_n64_copyplan_source_contract_and_target_boundary() {
+    let candidate = include_str!("../kernels/gemm_bi_fixed/sm89_f32_n64_copyplan.cu");
+    assert_eq!(candidate.matches(FIXED_SM89_EXACT_N64_COPYPLAN).count(), 1);
+    let parameters = candidate
+        .split_once(&format!("{FIXED_SM89_EXACT_N64_COPYPLAN}("))
+        .and_then(|(_, tail)| tail.split_once(") {").map(|(parameters, _)| parameters))
+        .unwrap();
+    assert_eq!(
+        parameters.matches(',').count() + 1,
+        5,
+        "production maximum-seven ABI"
+    );
+    for required in [
+        "sizeof(FixedSm89ExactF32Params) == 32",
+        "alignof(FixedSm89ExactF32Params) == 4",
+        "float alpha, beta;",
+        "int m, n, k, lda, ldb, ldc;",
+        "__launch_bounds__(SM89_EXACT_N64_CP_THREADS, 2)",
+        "SM89_EXACT_N64_CP_BM == 64 && SM89_EXACT_N64_CP_BN == 64 && SM89_EXACT_N64_CP_BK == 32",
+        "smem_a[2][SM89_EXACT_N64_CP_BM * SM89_EXACT_N64_CP_BK]",
+        "smem_b[2][SM89_EXACT_N64_CP_BK * SM89_EXACT_N64_CP_BN]",
+        "const float alpha = params.alpha, beta = params.beta;",
+        "const int m = params.m, n = params.n, k = params.k;",
+        "const int lda = params.lda, ldb = params.ldb, ldc = params.ldc;",
+    ] {
+        assert!(
+            candidate.contains(required),
+            "exact N64 source omitted {required}"
+        );
+    }
+    let base = fixed_blob();
+    for arch in [
+        "sm_80",
+        "sm_86",
+        "sm_87",
+        "compute_89",
+        "sm_90a",
+        "sm_100a",
+        "sm_103a",
+        "sm_110a",
+        "sm_120",
+        "sm_121",
+        "compute_120",
+        "compute_121",
+    ] {
+        assert_eq!(fixed_blob_for(arch), base, "{arch} Fixed base bytes");
+    }
+    let mut retained = base;
+    retained.push('\n');
+    retained.push_str(include_str!(
+        "../kernels/gemm_bi_fixed/sm89_half_pipeline.cu"
+    ));
+    let ada = fixed_blob_for("sm_89");
+    assert_eq!(
+        ada.strip_prefix(&retained).unwrap(),
+        format!("\n{candidate}")
+    );
+}
+
+#[test]
+fn fixed_sm89_exact_n64_copyplan_nvrtc_ptx_and_zero_spill_resources() {
+    let ptx = compile_fixed_for("sm_89");
+    assert_fixed_sm89_exact_n64_copyplan_ptx("sm_89", &ptx);
+    // Existing assembler utility accepts a whole PTX module; its temporary names
+    // do not affect the Fixed artifact or the exact per-symbol resource census.
+    let (report, sass) = assemble_and_disassemble_sm89_scalar(&ptx);
+    let resources = function_resource_report(&report, FIXED_SM89_EXACT_N64_COPYPLAN);
+    assert_zero_local_resources(resources, "SM89 Fixed exact N64 copy-plan");
+    for marker in [
+        " bytes stack frame",
+        " bytes spill stores",
+        " bytes spill loads",
+    ] {
+        let values: Vec<_> = resources
+            .lines()
+            .filter_map(|line| metric_before(line, marker))
+            .collect();
+        assert_eq!(values, [0], "exact N64 requires explicit zero{marker}");
+    }
+    let registers = resources
+        .lines()
+        .find_map(|line| metric_before(line, " registers"))
+        .unwrap();
+    assert!(
+        (1..=160).contains(&registers),
+        "exact N64 registers {registers} exceed 160"
+    );
+    let shared = resources
+        .lines()
+        .find_map(|line| metric_before(line, " bytes smem"))
+        .unwrap();
+    assert_eq!(shared, 32_768, "exact N64 static shared contract");
+    let entry = sass_entry(&sass, FIXED_SM89_EXACT_N64_COPYPLAN);
+    for forbidden in ["LDL", "STL", "ATOM", "RED", "REDUX", "HMMA", "IMMA", "DMMA"] {
+        assert!(
+            !contains_opcode_prefix(entry, forbidden),
+            "exact N64 SASS contains {forbidden}"
+        );
+    }
+    assert!(
+        contains_opcode_prefix(entry, "FFMA"),
+        "exact N64 SASS omitted FMA"
+    );
+    assert!(
+        contains_opcode_prefix(entry, "LDGSTS"),
+        "exact N64 SASS omitted asynchronous copy"
+    );
+    println!(
+        "SM89 Fixed exact N64 copy-plan: registers={registers} static_shared={shared} stack=0 spills=0"
+    );
+}
+
 fn assert_fixed_sm89_half_pipeline_ptx(arch: &str, ptx: &str) {
     const SYMBOLS: [&str; 2] = [
         "gemm_bi_nn_fixed_sm89_tc128_pipeline_v1_bf16",
@@ -2753,6 +2950,7 @@ fn assert_fixed_sm89_half_pipeline_ptx(arch: &str, ptx: &str) {
 
 fn assert_fixed_tf32_ptx(arch: &str, ptx: &str) {
     assert_fixed_sm89_half_pipeline_ptx(arch, ptx);
+    assert_fixed_sm89_exact_n64_copyplan_ptx(arch, ptx);
     const PORTABLE: [&str; 5] = [
         "gemm_bi_nn_tf32_v1_m128n64_bk32_s2",
         "gemm_bi_nn_tf32_v1_m128n64_bk32_s3",

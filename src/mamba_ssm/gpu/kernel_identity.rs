@@ -4976,6 +4976,46 @@ mod physical_launch_tests {
             .unwrap();
     }
 
+    #[test]
+    fn fixed_only_artifact_replacement_invalidates_graph_at_unchanged_epoch39() {
+        let captured = physical_context();
+        let mut current = captured;
+        let mut replaced_fixed = captured.artifacts.fixed;
+        replaced_fixed.artifact_digest[0] ^= 1;
+        current.artifacts = build_artifact_set(&[
+            replaced_fixed,
+            captured.artifacts.triad_scalar,
+            captured.artifacts.triad_sm80,
+        ])
+        .unwrap();
+        assert_eq!(captured.tuning_table_revision, 39);
+        assert_eq!(
+            current.tuning_table_revision,
+            captured.tuning_table_revision
+        );
+        assert_eq!(current.compiler, captured.compiler);
+        assert_eq!(
+            current.artifacts.triad_scalar,
+            captured.artifacts.triad_scalar
+        );
+        assert_eq!(current.artifacts.triad_sm80, captured.artifacts.triad_sm80);
+        assert_eq!(
+            current.schedule_set_revision,
+            captured.schedule_set_revision
+        );
+        assert_eq!(current.numeric_contracts, captured.numeric_contracts);
+        captured
+            .ensure_current(captured, "unchanged Fixed graph")
+            .unwrap();
+        let error = captured
+            .ensure_current(current, "replaced Fixed artifact graph")
+            .expect_err("Fixed-only source replacement reused a stale captured graph");
+        assert!(error.contains("re-capture before replay"));
+        current
+            .ensure_current(current, "recaptured Fixed graph")
+            .unwrap();
+    }
+
     pub(super) fn synthetic_scalar_route() -> ResolvedGemmRoute {
         let context = physical_context();
         ResolvedGemmRoute {

@@ -35,6 +35,16 @@ use sha2::{Digest, Sha256};
 const WARMUPS: usize = 10;
 const ITERS: usize = 200;
 
+// Separate protocol: do not reinterpret the historical triple comparator below.
+#[path = "support/fixed_sm89_exact_n64_admission.rs"]
+mod exact_n64_admission;
+
+#[test]
+#[ignore = "requires exclusive pinned Ada, actual NVRTC candidate admission and paired evidence output"]
+fn fixed_sm89_exact_n64_paired_admission() {
+    exact_n64_admission::run();
+}
+
 fn typed(buffer: &DtypedBuf, dtype: WeightDtype) -> TypedPtr {
     TypedPtr {
         ptr: buffer.cached_ptr(),

@@ -432,6 +432,9 @@ pub struct MambaKernels {
     pub fixed_sm89_half_pipeline: Option<HalfKernel>,
     /// Why the optional Ada pipeline is absent (including non-Ada targets).
     pub fixed_sm89_half_pipeline_rejection: Option<String>,
+    /// Optional Ada exact-F32 N64 copy-plan; admitted independently of incumbents.
+    pub fixed_sm89_f32_n64_copyplan: Option<CudaFunction>,
+    pub fixed_sm89_f32_n64_copyplan_rejection: Option<String>,
 
     // -- Batch-invariant matvec (M=1 specialization) --
     /// Specialized M=1 matvec. The GEMM kernels above waste 98% of smem
@@ -637,6 +640,8 @@ impl MambaKernels {
         let compiler_identity = fixed.compiler_identity;
         let (fixed_sm89_half_pipeline, fixed_sm89_half_pipeline_rejection) =
             super::gemm_bi_triad::modules::load_fixed_sm89_half_pipeline(ctx, &fixed);
+        let (fixed_sm89_f32_n64_copyplan, fixed_sm89_f32_n64_copyplan_rejection) =
+            super::gemm_bi_triad::modules::load_fixed_sm89_f32_n64_copyplan(ctx, &fixed);
         let triad = GemmBiKernels::load(ctx, fixed.artifact_identity, scalar, sm80, specialized)?;
         // A rejected TF32 module used to be recorded and never shown: the
         // process booted green and every TF32 request quietly ran scalar.
@@ -882,6 +887,8 @@ impl MambaKernels {
             gemm_bi_f32_f32_n128_s2: get("gemm_bi_f32_f32_n128_s2")?,
             fixed_sm89_half_pipeline,
             fixed_sm89_half_pipeline_rejection,
+            fixed_sm89_f32_n64_copyplan,
+            fixed_sm89_f32_n64_copyplan_rejection,
             gemm_bi_nn_tf32: {
                 let kernels = FixedTf32Kernels {
                     m128n64_s2: get("gemm_bi_nn_tf32_v1_m128n64_bk32_s2")?,

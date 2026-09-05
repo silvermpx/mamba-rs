@@ -485,6 +485,7 @@ pub(crate) struct CompiledModule {
     /// Separate from Triad TF32 qualification: the optional Ada Fixed half
     /// extension has the same generic Driver layout representation only.
     fixed_sm89_half_driver_abi: Result<BTreeMap<&'static str, Tf32DriverAbi>, String>,
+    fixed_sm89_exact_n64_driver_abi: Result<BTreeMap<&'static str, Tf32DriverAbi>, String>,
 }
 
 /// A TF32 symbol the loaded module cannot serve on this toolkit: the
@@ -655,6 +656,12 @@ pub(crate) fn compile_module(request: CompileModuleRequest<'_>) -> Result<Compil
         let census = census_all_tf32_driver_abi(request.ctx, request.module_kind, extensions, &src);
         let fixed_half_abi =
             census_fixed_sm89_half_driver_abi(request.ctx, request.module_kind, request.arch, &src);
+        let fixed_exact_n64_abi = census_fixed_sm89_exact_n64_driver_abi(
+            request.ctx,
+            request.module_kind,
+            request.arch,
+            &src,
+        );
         let validation = validate_tf32_specialization(request.module_kind, request.arch, &src);
         let (tf32_driver_abi, tf32_qualification_error) =
             tf32_qualification_verdict(request.module_kind, extensions, census, validation);
@@ -671,6 +678,7 @@ pub(crate) fn compile_module(request: CompileModuleRequest<'_>) -> Result<Compil
             tf32_qualification_error,
             tf32_driver_abi,
             fixed_half_abi,
+            fixed_exact_n64_abi,
         ));
     }
 
@@ -680,6 +688,7 @@ pub(crate) fn compile_module(request: CompileModuleRequest<'_>) -> Result<Compil
         tf32_qualification_error,
         tf32_driver_abi,
         fixed_sm89_half_driver_abi,
+        fixed_sm89_exact_n64_driver_abi,
     ) = match loaded {
         Some(value) => value,
         None => {
@@ -704,6 +713,12 @@ pub(crate) fn compile_module(request: CompileModuleRequest<'_>) -> Result<Compil
                 &ptx_source,
             );
             let fixed_half_abi = census_fixed_sm89_half_driver_abi(
+                request.ctx,
+                request.module_kind,
+                request.arch,
+                &ptx_source,
+            );
+            let fixed_exact_n64_abi = census_fixed_sm89_exact_n64_driver_abi(
                 request.ctx,
                 request.module_kind,
                 request.arch,
@@ -773,6 +788,7 @@ pub(crate) fn compile_module(request: CompileModuleRequest<'_>) -> Result<Compil
                 tf32_qualification_error,
                 tf32_driver_abi,
                 fixed_half_abi,
+                fixed_exact_n64_abi,
             )
         }
     };
@@ -808,6 +824,7 @@ pub(crate) fn compile_module(request: CompileModuleRequest<'_>) -> Result<Compil
         tf32_qualification_error,
         tf32_driver_abi,
         fixed_sm89_half_driver_abi,
+        fixed_sm89_exact_n64_driver_abi,
     })
 }
 
@@ -1403,7 +1420,8 @@ fn validate_module_ptx(module_kind: ModuleKind, arch: &str, ptx: &str) -> Result
     match module_kind {
         ModuleKind::Fixed => {
             validate_fixed_tf32_ptx(arch, ptx)?;
-            validate_fixed_sm89_half_ptx(arch, ptx)
+            validate_fixed_sm89_half_ptx(arch, ptx)?;
+            validate_fixed_sm89_exact_n64_ptx(arch, ptx)
         }
         ModuleKind::TriadScalar => {
             validate_exact_ptx_exports("TriadScalar", SCALAR_SYMBOLS.len(), SCALAR_SYMBOLS, ptx)?;
@@ -1670,6 +1688,278 @@ pub(crate) fn load_fixed_sm89_half_pipeline(
     })();
     match admitted {
         Ok(functions) => (Some(functions), None),
+        Err(reason) => (None, Some(reason)),
+    }
+}
+
+const FIXED_SM89_EXACT_N64_SYMBOL: &str = "gemm_bi_nn_fixed_sm89_f32_n64_copyplan_v1";
+const FIXED_SM89_EXACT_N64_THREADS: u32 = 128;
+const FIXED_SM89_EXACT_N64_STATIC_SHARED: i32 = 32_768;
+
+fn fixed_sm89_exact_n64_composed(arch: &str) -> bool {
+    arch == "sm_89"
+}
+
+fn validate_fixed_sm89_exact_n64_ptx(arch: &str, ptx: &str) -> Result<(), String> {
+    let parsed = parse_ptx(ptx)?;
+    let actual: Vec<_> = parsed
+        .entries
+        .iter()
+        .filter(|entry| {
+            entry
+                .symbol
+                .starts_with("gemm_bi_nn_fixed_sm89_f32_n64_copyplan")
+        })
+        .collect();
+    if !fixed_sm89_exact_n64_composed(arch) {
+        return if actual.is_empty() {
+            Ok(())
+        } else {
+            Err(format!(
+                "Fixed exact N64 copy-plan export is foreign on {arch}"
+            ))
+        };
+    }
+    if actual.len() != 1 || actual[0].symbol != FIXED_SM89_EXACT_N64_SYMBOL {
+        return Err("Fixed SM89 exact N64 requires exactly its unique v1 export".into());
+    }
+    let entry = actual[0];
+    let symbol = FIXED_SM89_EXACT_N64_SYMBOL;
+    let header = entry
+        .text
+        .split_once('{')
+        .map(|(header, _)| header)
+        .ok_or_else(|| format!("{symbol} has no PTX body"))?;
+    let tokens = ptx_tokens(header);
+    let text: Vec<_> = tokens.iter().map(|token| token.text).collect();
+    let begin = text
+        .iter()
+        .position(|token| *token == "(")
+        .ok_or_else(|| format!("{symbol} has no PTX parameters"))?;
+    let end = text
+        .iter()
+        .position(|token| *token == ")")
+        .ok_or_else(|| format!("{symbol} has no PTX parameter end"))?;
+    if end <= begin {
+        return Err(format!("{symbol} has malformed PTX parameters"));
+    }
+    let declarations: Vec<_> = text[begin + 1..end].split(|token| *token == ",").collect();
+    if declarations.len() != 5
+        || !declarations[..4]
+            .iter()
+            .all(|decl| decl.len() == 3 && decl[..2] == [".param", ".u64"])
+        || declarations[4].len() != 8
+        || declarations[4][..4] != [".param", ".align", "4", ".b8"]
+        || declarations[4][5..] != ["[", "32", "]"]
+    {
+        return Err(format!(
+            "{symbol} requires four pointers and an align-4 32-byte bundle"
+        ));
+    }
+    // Inspect directives, not incidental numbers or quoted source locations.
+    for directive in [".maxntid", ".minnctapersm"] {
+        let positions: Vec<_> = text
+            .iter()
+            .enumerate()
+            .filter_map(|(index, token)| (*token == directive).then_some(index))
+            .collect();
+        if positions.len() != 1 {
+            return Err(format!("{symbol} has the wrong {directive} launch bound"));
+        }
+        let values: Vec<_> = text[positions[0] + 1..]
+            .iter()
+            .copied()
+            .take_while(|token| !token.starts_with('.'))
+            .collect();
+        let valid = match directive {
+            ".maxntid" => values == ["128"] || values == ["128", ",", "1", ",", "1"],
+            _ => values == ["2"],
+        };
+        if !valid {
+            return Err(format!("{symbol} has the wrong {directive} launch bound"));
+        }
+    }
+    for required in [
+        "fma.rn.f32",
+        "cp.async.cg.shared.global",
+        "cp.async.commit_group",
+        "cp.async.wait_group",
+    ] {
+        if !ptx_has_unquoted_token(&entry.body, |token| token == required) {
+            return Err(format!("{symbol} is missing {required}"));
+        }
+    }
+    if ptx_has_unquoted_token(&entry.body, |token| {
+        token == ".local"
+            || token.starts_with("ld.local")
+            || token.starts_with("st.local")
+            || token.starts_with("mma.")
+            || token.starts_with("wmma.")
+            || token.split('.').any(|part| part == "tf32" || part == "ftz")
+            || token.starts_with("atom.")
+            || token.starts_with("atom::")
+            || token.starts_with("red.")
+            || token.starts_with("red::")
+            || token.starts_with("redux.")
+    }) {
+        return Err(format!(
+            "{symbol} contains local, tensor, reduction, or FTZ work"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_fixed_sm89_exact_n64_driver_abi(
+    symbol: &str,
+    abi: &Tf32DriverAbi,
+) -> Result<(), String> {
+    const EXPECTED: [(usize, usize); 5] = [(0, 8), (8, 8), (16, 8), (24, 8), (32, 32)];
+    if abi.parameter_count() != EXPECTED.len()
+        || !abi
+            .parameters()
+            .iter()
+            .zip(EXPECTED)
+            .all(|(actual, expected)| (actual.offset(), actual.size()) == expected)
+    {
+        return Err(format!(
+            "{symbol} has the wrong live five-argument/64-byte Driver ABI"
+        ));
+    }
+    Ok(())
+}
+
+fn census_fixed_sm89_exact_n64_driver_abi(
+    ctx: &CudaContext,
+    kind: ModuleKind,
+    arch: &str,
+    ptx: &str,
+) -> Result<BTreeMap<&'static str, Tf32DriverAbi>, String> {
+    if kind != ModuleKind::Fixed || !fixed_sm89_exact_n64_composed(arch) {
+        return Ok(BTreeMap::new());
+    }
+    type GetParamInfo = unsafe extern "C" fn(
+        cudarc::driver::sys::CUfunction,
+        usize,
+        *mut usize,
+        *mut usize,
+    ) -> cudarc::driver::sys::CUresult;
+    let module = DriverModule::load(ctx, ptx)?;
+    let get: GetParamInfo =
+        unsafe { std::mem::transmute(driver_proc_address("cuFuncGetParamInfo", 12_040)?) };
+    let symbol = FIXED_SM89_EXACT_N64_SYMBOL;
+    let function = unsafe {
+        cudarc::driver::result::module::get_function(module.raw(), CString::new(symbol).unwrap())
+    }
+    .map_err(|error| format!("load Fixed/{symbol} for Driver ABI: {error:?}"))?;
+    let abi = query_driver_parameter_abi(symbol, 5, |index, offset, size| unsafe {
+        get(function, index, offset, size)
+    })?;
+    validate_fixed_sm89_exact_n64_driver_abi(symbol, &abi)?;
+    module.unload()?;
+    Ok(BTreeMap::from([(symbol, abi)]))
+}
+
+#[derive(Clone, Copy)]
+struct FixedSm89ExactN64Resources {
+    local_bytes: i32,
+    registers: i32,
+    static_shared_bytes: i32,
+    max_threads: i32,
+    active_blocks: u32,
+    preferred_carveout: i32,
+}
+
+fn validate_fixed_sm89_exact_n64_resources(
+    resources: FixedSm89ExactN64Resources,
+) -> Result<(), String> {
+    if resources.local_bytes != 0
+        || !(1..=160).contains(&resources.registers)
+        || resources.static_shared_bytes != FIXED_SM89_EXACT_N64_STATIC_SHARED
+        || resources.max_threads < FIXED_SM89_EXACT_N64_THREADS as i32
+        || resources.active_blocks < 3
+        || resources.preferred_carveout != 100
+    {
+        return Err(format!(
+            "{} resource admission declined: local={} registers={} static_shared={} max_threads={} active_blocks={} carveout={}",
+            FIXED_SM89_EXACT_N64_SYMBOL,
+            resources.local_bytes,
+            resources.registers,
+            resources.static_shared_bytes,
+            resources.max_threads,
+            resources.active_blocks,
+            resources.preferred_carveout,
+        ));
+    }
+    Ok(())
+}
+
+/// Candidate-only admission/configuration; never changes incumbent attributes.
+/// Resource/Driver failures retain a reason and leave mandatory Fixed routes live.
+pub(crate) fn load_fixed_sm89_f32_n64_copyplan(
+    ctx: &CudaContext,
+    module: &CompiledModule,
+) -> (Option<CudaFunction>, Option<String>) {
+    let admitted = (|| -> Result<CudaFunction, String> {
+        if module.artifact_identity.module_kind != ModuleKind::Fixed
+            || !fixed_sm89_exact_n64_composed(module.compiler_identity.target.as_str())
+            || ctx
+                .compute_capability()
+                .map_err(|error| format!("query Fixed exact N64 CC: {error:?}"))?
+                != (8, 9)
+        {
+            return Err(
+                "Fixed exact N64 copy-plan is only composed and admitted on sm_89/CC8.9".into(),
+            );
+        }
+        let symbol = FIXED_SM89_EXACT_N64_SYMBOL;
+        let census = module
+            .fixed_sm89_exact_n64_driver_abi
+            .as_ref()
+            .map_err(Clone::clone)?;
+        validate_fixed_sm89_exact_n64_driver_abi(
+            symbol,
+            census
+                .get(symbol)
+                .ok_or_else(|| format!("{symbol} has no live Driver ABI census"))?,
+        )?;
+        let function = load_function(&module.module, ModuleKind::Fixed, symbol)?;
+        let carveout = cudarc::driver::sys::CUfunction_attribute::CU_FUNC_ATTRIBUTE_PREFERRED_SHARED_MEMORY_CARVEOUT;
+        function
+            .set_attribute(
+                carveout,
+                cudarc::driver::sys::CUshared_carveout::CU_SHAREDMEM_CARVEOUT_MAX_SHARED as i32,
+            )
+            .map_err(|error| format!("configure {symbol} MaxShared: {error:?}"))?;
+        let query_error = |label, error| format!("query {symbol} {label}: {error:?}");
+        let resources = FixedSm89ExactN64Resources {
+            local_bytes: function
+                .local_size_bytes()
+                .map_err(|e| query_error("local", e))?,
+            registers: function
+                .num_regs()
+                .map_err(|e| query_error("registers", e))?,
+            static_shared_bytes: function
+                .shared_size_bytes()
+                .map_err(|e| query_error("static shared", e))?,
+            max_threads: function
+                .max_threads_per_block()
+                .map_err(|e| query_error("threads", e))?,
+            active_blocks: function
+                .occupancy_max_active_blocks_per_multiprocessor(
+                    FIXED_SM89_EXACT_N64_THREADS,
+                    0,
+                    None,
+                )
+                .map_err(|e| query_error("occupancy", e))?,
+            preferred_carveout: function
+                .get_attribute(carveout)
+                .map_err(|e| query_error("carveout", e))?,
+        };
+        validate_fixed_sm89_exact_n64_resources(resources)?;
+        Ok(function)
+    })();
+    match admitted {
+        Ok(function) => (Some(function), None),
         Err(reason) => (None, Some(reason)),
     }
 }
@@ -3853,6 +4143,12 @@ const FIXED_SM89_HALF_SOURCE_FRAGMENT: SourceFragment = SourceFragment {
     allowed_quoted_includes: &[],
 };
 
+const FIXED_SM89_EXACT_N64_SOURCE_FRAGMENT: SourceFragment = SourceFragment {
+    logical_name: "kernels/gemm_bi_fixed/sm89_f32_n64_copyplan.cu",
+    source: include_str!("../../../../kernels/gemm_bi_fixed/sm89_f32_n64_copyplan.cu"),
+    allowed_quoted_includes: &[],
+};
+
 const TRIAD_CONTRACT: SourceFragment = SourceFragment {
     logical_name: "kernels/gemm_bi_triad/contract.cuh",
     source: include_str!("../../../../kernels/gemm_bi_triad/contract.cuh"),
@@ -4142,6 +4438,7 @@ fn compose_module_source_for(kind: ModuleKind, arch: &str) -> Result<String, Str
     if kind == ModuleKind::Fixed && fixed_sm89_half_composed(arch) {
         let mut fragments = base.to_vec();
         fragments.push(FIXED_SM89_HALF_SOURCE_FRAGMENT);
+        fragments.push(FIXED_SM89_EXACT_N64_SOURCE_FRAGMENT);
         return compose_fragments(&fragments);
     }
     if kind == ModuleKind::TriadSm80 && sm80_target_composes_streamk(arch) {
@@ -8249,6 +8546,7 @@ mod tests {
         "kernels/gemm_bi_fixed/sm90_wgmma.cu",
         "kernels/gemm_bi_fixed/sm100_tcgen05.cu",
         "kernels/gemm_bi_fixed/sm89_half_pipeline.cu",
+        "kernels/gemm_bi_fixed/sm89_f32_n64_copyplan.cu",
     ];
 
     const SCALAR_FRAGMENTS: &[&str] = &[
@@ -9330,6 +9628,9 @@ mod tests {
             FIXED_SM89_HALF_TEST_SYMBOLS[1],
             "f16",
         ));
+        ptx.push_str(&fixed_sm89_exact_n64_test_entry(
+            FIXED_SM89_EXACT_N64_TEST_SYMBOL,
+        ));
         ptx
     }
 
@@ -9346,8 +9647,11 @@ mod tests {
             .collect();
         assert_eq!(
             boundaries,
-            ["kernels/gemm_bi_fixed/sm89_half_pipeline.cu"],
-            "Ada must append exactly its new Fixed half fragment"
+            [
+                "kernels/gemm_bi_fixed/sm89_half_pipeline.cu",
+                "kernels/gemm_bi_fixed/sm89_f32_n64_copyplan.cu"
+            ],
+            "Ada must retain the half extension before the exact N64 extension"
         );
     }
 
@@ -9547,6 +9851,342 @@ mod tests {
         .expect_err("a sixth successful Driver parameter query must reject");
     }
 
+    const FIXED_SM89_EXACT_N64_TEST_SYMBOL: &str = "gemm_bi_nn_fixed_sm89_f32_n64_copyplan_v1";
+
+    fn fixed_sm89_exact_n64_test_entry(symbol: &str) -> String {
+        format!(
+            ".visible .entry {symbol}(\n\
+             .param .u64 c,\n.param .u64 a,\n.param .u64 b,\n.param .u64 bias,\n\
+             .param .align 4 .b8 params[32]\n)\n\
+             .maxntid 128, 1, 1\n.minnctapersm 2\n{{\n\
+             .shared .align 16 .b8 a_stage[16384];\n\
+             .shared .align 16 .b8 b_stage[16384];\n\
+             cp.async.cg.shared.global [%r0], [%rd0], 16, %r1;\n\
+             cp.async.commit_group;\ncp.async.wait_group 0;\nbar.sync 0;\n\
+             fma.rn.f32 %f0, %f1, %f2, %f0;\n\
+             mul.rn.f32 %f0, %f0, %f3;\nadd.rn.f32 %f0, %f0, %f4;\n\
+             st.global.f32 [%rd0], %f0;\nret;\n}}\n"
+        )
+    }
+
+    fn fixed_sm89_exact_n64_test_ptx() -> String {
+        fixed_sm89_half_test_ptx()
+    }
+
+    #[test]
+    fn fixed_sm89_exact_n64_composition_is_target_scoped() {
+        let mut retained = super::FIXED_SOURCE_FRAGMENTS.to_vec();
+        retained.push(super::FIXED_SM89_HALF_SOURCE_FRAGMENT);
+        let before = compose_fragments(&retained).unwrap();
+        let after = compose_module_source_for(ModuleKind::Fixed, "sm_89").unwrap();
+        let new = after
+            .strip_prefix(&before)
+            .expect("old Ada Fixed bytes changed");
+        let boundaries: Vec<_> = new
+            .lines()
+            .filter_map(|line| line.strip_prefix("#line 1 \"")?.strip_suffix('"'))
+            .collect();
+        assert_eq!(
+            boundaries,
+            ["kernels/gemm_bi_fixed/sm89_f32_n64_copyplan.cu"]
+        );
+    }
+
+    #[test]
+    fn fixed_sm89_exact_n64_retains_all_other_fixed_composed_bytes() {
+        let before = compose_fragments(super::FIXED_SOURCE_FRAGMENTS).unwrap();
+        for arch in [
+            "sm_80",
+            "sm_86",
+            "sm_87",
+            "compute_89",
+            "sm_90",
+            "sm_90a",
+            "sm_100a",
+            "sm_103a",
+            "sm_110a",
+            "sm_120",
+            "compute_120",
+            "sm_121",
+            "compute_121",
+        ] {
+            assert_eq!(
+                compose_module_source_for(ModuleKind::Fixed, arch).unwrap(),
+                before,
+                "{arch}"
+            );
+        }
+    }
+
+    #[test]
+    fn fixed_sm89_exact_n64_retains_every_triad_composition() {
+        for arch in ["sm_89", "sm_120", "compute_120", "sm_121", "compute_121"] {
+            for kind in [
+                ModuleKind::TriadScalar,
+                ModuleKind::TriadSm80,
+                ModuleKind::TriadSm90a,
+                ModuleKind::TriadSm100,
+                ModuleKind::TriadSm120,
+            ] {
+                let mut retained = super::module_fragments(kind).unwrap().to_vec();
+                if kind == ModuleKind::TriadSm80 && super::sm80_target_composes_streamk(arch) {
+                    retained.extend([
+                        super::SM80_STREAMK_SOURCE_FRAGMENT,
+                        super::SM80_TF32_WIDE_SOURCE_FRAGMENT,
+                        super::SM80_TN_SPLITK_SOURCE_FRAGMENT,
+                    ]);
+                }
+                assert_eq!(
+                    compose_module_source_for(kind, arch).unwrap(),
+                    compose_fragments(&retained).unwrap(),
+                    "{kind:?}/{arch}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn fixed_sm89_exact_n64_ptx_requires_its_unique_export() {
+        validate_module_ptx(ModuleKind::Fixed, "sm_89", &fixed_sm89_exact_n64_test_ptx()).unwrap();
+        let missing = fixed_sm89_exact_n64_test_ptx().replacen(
+            &fixed_sm89_exact_n64_test_entry(FIXED_SM89_EXACT_N64_TEST_SYMBOL),
+            "",
+            1,
+        );
+        validate_module_ptx(ModuleKind::Fixed, "sm_89", &missing)
+            .expect_err("Ada Fixed must contain the new exact N64 export");
+        for extra in [
+            FIXED_SM89_EXACT_N64_TEST_SYMBOL,
+            "gemm_bi_nn_fixed_sm89_f32_n64_copyplan_v1_f16",
+            "gemm_bi_nn_fixed_sm89_f32_n64_copyplan_v2",
+        ] {
+            let ptx = fixed_sm89_exact_n64_test_ptx() + &fixed_sm89_exact_n64_test_entry(extra);
+            validate_module_ptx(ModuleKind::Fixed, "sm_89", &ptx)
+                .expect_err("new exact N64 inventory is one unaliased F32 export");
+        }
+    }
+
+    #[test]
+    fn fixed_sm89_exact_n64_ptx_rejects_wrong_pointer_and_bundle_abi() {
+        let entry = fixed_sm89_exact_n64_test_entry(FIXED_SM89_EXACT_N64_TEST_SYMBOL);
+        for malformed in [
+            entry.replacen(".param .u64 a,", ".param .u32 a,", 1),
+            entry.replacen("params[32]", "params[24]", 1),
+            entry.replacen(".align 4 .b8 params", ".align 8 .b8 params", 1),
+            entry.replacen("params[32]\n)", "params[32],\n.param .u64 scratch\n)", 1),
+            entry.replacen(".param .align 4 .b8 params[32]",
+                ".param .f32 alpha,\n.param .f32 beta,\n.param .u32 m,\n.param .u32 n,\n.param .u32 k,\n.param .u32 lda,\n.param .u32 ldb,\n.param .u32 ldc", 1),
+        ] {
+            let ptx = fixed_sm89_exact_n64_test_ptx().replacen(&entry, &malformed, 1);
+            validate_module_ptx(ModuleKind::Fixed, "sm_89", &ptx)
+                .expect_err("new exact N64 requires four pointers and one align4/size32 bundle");
+        }
+    }
+
+    #[test]
+    fn fixed_sm89_exact_n64_ptx_requires_async_fma_and_launch_bounds() {
+        let entry = fixed_sm89_exact_n64_test_entry(FIXED_SM89_EXACT_N64_TEST_SYMBOL);
+        for (from, to) in [
+            ("fma.rn.f32", "not_fma"),
+            ("cp.async.cg.shared.global", "not_async"),
+            ("cp.async.commit_group", "not_commit"),
+            ("cp.async.wait_group", "not_wait"),
+            (".maxntid 128, 1, 1", ".maxntid 256, 1, 1"),
+            (".minnctapersm 2", ".minnctapersm 1"),
+        ] {
+            let malformed = entry.replacen(from, to, 1);
+            let ptx = fixed_sm89_exact_n64_test_ptx().replacen(&entry, &malformed, 1);
+            validate_module_ptx(ModuleKind::Fixed, "sm_89", &ptx)
+                .expect_err("exact N64 pipeline and launch bounds are mandatory");
+        }
+    }
+
+    #[test]
+    fn fixed_sm89_exact_n64_ptx_rejects_local_tensor_reduction_and_ftz_work() {
+        let entry = fixed_sm89_exact_n64_test_entry(FIXED_SM89_EXACT_N64_TEST_SYMBOL);
+        for instruction in [
+            ".local .align 4 .b8 spill[16];",
+            "ld.local.f32 %f0, [%rd0];",
+            "st.local.f32 [%rd0], %f0;",
+            "mma.sync.aligned.m16n8k8.row.col.f32.tf32.tf32.f32;",
+            "wmma.mma.sync.aligned.row.col.f32.f32;",
+            "cvt.rna.tf32.f32 %r0, %f0;",
+            "atom.global.add.f32 %f0, [%rd0], %f1;",
+            "red.global.add.f32 [%rd0], %f1;",
+            "redux.sync.add.s32 %r0, %r1, -1;",
+            "fma.rn.ftz.f32 %f0, %f1, %f2, %f0;",
+        ] {
+            let malformed = entry.replacen("ret;", &format!("{instruction}\nret;"), 1);
+            let ptx = fixed_sm89_exact_n64_test_ptx().replacen(&entry, &malformed, 1);
+            validate_module_ptx(ModuleKind::Fixed, "sm_89", &ptx)
+                .expect_err("exact N64 must not use local storage or a different numeric family");
+        }
+    }
+
+    #[test]
+    fn fixed_sm89_exact_n64_ptx_rejects_export_on_other_portable_targets() {
+        for arch in [
+            "sm_80",
+            "sm_86",
+            "sm_87",
+            "compute_89",
+            "sm_90a",
+            "sm_100a",
+            "sm_103a",
+            "sm_110a",
+        ] {
+            let before = fixed_sm89_half_test_base_ptx();
+            validate_module_ptx(ModuleKind::Fixed, arch, &before).unwrap();
+            let ptx = before + &fixed_sm89_exact_n64_test_entry(FIXED_SM89_EXACT_N64_TEST_SYMBOL);
+            validate_module_ptx(ModuleKind::Fixed, arch, &ptx)
+                .expect_err("exact N64 must not appear outside Fixed/sm_89");
+        }
+    }
+
+    #[test]
+    fn fixed_sm89_exact_n64_driver_abi_requires_five_offsets_and_terminal_probe() {
+        use cudarc::driver::sys::CUresult;
+        let symbol = FIXED_SM89_EXACT_N64_TEST_SYMBOL;
+        let layout = [(0, 8), (8, 8), (16, 8), (24, 8), (32, 32)];
+        let mut queries = Vec::new();
+        let abi = super::query_driver_parameter_abi(symbol, 5, |index, offset, size| {
+            queries.push(index);
+            if let Some((parameter_offset, parameter_size)) = layout.get(index) {
+                *offset = *parameter_offset;
+                *size = *parameter_size;
+                CUresult::CUDA_SUCCESS
+            } else {
+                CUresult::CUDA_ERROR_INVALID_VALUE
+            }
+        })
+        .unwrap();
+        assert_eq!(queries, [0, 1, 2, 3, 4, 5]);
+        super::validate_fixed_sm89_exact_n64_driver_abi(symbol, &abi).unwrap();
+        for layout in [
+            vec![(0, 8), (8, 8), (16, 8), (24, 8)],
+            vec![(0, 8), (8, 8), (16, 8), (24, 8), (32, 28)],
+            vec![(0, 8), (8, 8), (16, 8), (24, 8), (36, 32)],
+            vec![(0, 4), (8, 8), (16, 8), (24, 8), (32, 32)],
+            vec![(0, 8), (8, 8), (16, 8), (24, 8), (32, 32), (64, 4)],
+            // The unchanged standalone twelve-argument signature is not production ABI.
+            vec![
+                (0, 8),
+                (8, 8),
+                (16, 8),
+                (24, 8),
+                (32, 4),
+                (36, 4),
+                (40, 4),
+                (44, 4),
+                (48, 4),
+                (52, 4),
+                (56, 4),
+                (60, 4),
+            ],
+        ] {
+            let malformed = Tf32DriverAbi::checked(layout.len(), layout).unwrap();
+            super::validate_fixed_sm89_exact_n64_driver_abi(symbol, &malformed).unwrap_err();
+        }
+        super::query_driver_parameter_abi(symbol, 5, |index, offset, size| {
+            *offset = index * 8;
+            *size = 8;
+            CUresult::CUDA_SUCCESS
+        })
+        .expect_err("sixth successful Driver query must reject");
+    }
+
+    #[test]
+    fn fixed_sm89_exact_n64_live_resource_gate_is_strict() {
+        use super::{FixedSm89ExactN64Resources, validate_fixed_sm89_exact_n64_resources};
+        let admitted = FixedSm89ExactN64Resources {
+            local_bytes: 0,
+            registers: 135,
+            static_shared_bytes: 32_768,
+            max_threads: 128,
+            active_blocks: 3,
+            preferred_carveout: 100,
+        };
+        validate_fixed_sm89_exact_n64_resources(admitted).unwrap();
+        validate_fixed_sm89_exact_n64_resources(FixedSm89ExactN64Resources {
+            registers: 160,
+            ..admitted
+        })
+        .unwrap();
+        for resources in [
+            FixedSm89ExactN64Resources {
+                local_bytes: -1,
+                ..admitted
+            },
+            FixedSm89ExactN64Resources {
+                local_bytes: 1,
+                ..admitted
+            },
+            FixedSm89ExactN64Resources {
+                registers: -1,
+                ..admitted
+            },
+            FixedSm89ExactN64Resources {
+                registers: 0,
+                ..admitted
+            },
+            FixedSm89ExactN64Resources {
+                registers: 161,
+                ..admitted
+            },
+            FixedSm89ExactN64Resources {
+                static_shared_bytes: -1,
+                ..admitted
+            },
+            FixedSm89ExactN64Resources {
+                static_shared_bytes: 32_767,
+                ..admitted
+            },
+            FixedSm89ExactN64Resources {
+                static_shared_bytes: 32_769,
+                ..admitted
+            },
+            FixedSm89ExactN64Resources {
+                max_threads: -1,
+                ..admitted
+            },
+            FixedSm89ExactN64Resources {
+                max_threads: 127,
+                ..admitted
+            },
+            FixedSm89ExactN64Resources {
+                active_blocks: 0,
+                ..admitted
+            },
+            FixedSm89ExactN64Resources {
+                active_blocks: 2,
+                ..admitted
+            },
+            FixedSm89ExactN64Resources {
+                preferred_carveout: -1,
+                ..admitted
+            },
+            FixedSm89ExactN64Resources {
+                preferred_carveout: 0,
+                ..admitted
+            },
+            FixedSm89ExactN64Resources {
+                preferred_carveout: 101,
+                ..admitted
+            },
+        ] {
+            let reason = validate_fixed_sm89_exact_n64_resources(resources).unwrap_err();
+            assert!(reason.contains(FIXED_SM89_EXACT_N64_TEST_SYMBOL));
+        }
+    }
+
+    #[test]
+    fn fixed_sm89_exact_n64_ptx_rejects_cc12_exports_without_nvrtc() {
+        let entry = fixed_sm89_exact_n64_test_entry(FIXED_SM89_EXACT_N64_TEST_SYMBOL);
+        for arch in ["sm_120", "compute_120", "sm_121", "compute_121"] {
+            super::validate_fixed_sm89_exact_n64_ptx(arch, "").unwrap();
+            super::validate_fixed_sm89_exact_n64_ptx(arch, &entry).unwrap_err();
+        }
+    }
     #[test]
     fn owned_symbol_resolution_never_falls_back_to_fixed() {
         let scalar_calls = std::cell::Cell::new(0);

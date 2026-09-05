@@ -6,7 +6,8 @@
 //! FFMA tile. One dispatcher, shape-keyed:
 //!
 //!   exact f32            -> FFMA 64x128 at two measured CC12.0/170-SM
-//!                           points; portable FFMA 64x64 everywhere else
+//!                           points; Ada N64 copy-plan at qualified B/E
+//!                           bias rows; portable FFMA 64x64 elsewhere
 //!   bf16/f16, N >= 32    -> the GBF ladder (Tc16 / Tc64 / Tc128), one
 //!                           arithmetic family, STRICT across all M
 //!   bf16/f16, N <  32    -> the legacy WMMA tile (all M, strict)
@@ -80,6 +81,8 @@ pub enum FixedTile {
     /// Datacenter-Blackwell tcgen05 rung (CC 10.x only): the arch's own
     /// numeric family.
     Sm100Tcgen,
+    /// Ada-only exact-F32 N64 copy-plan, AUTO at qualified B/E bias rows.
+    F32Sm89N64CopyPlan,
 }
 
 /// Forced SM120 TMA BF16/F16 tile used by qualification and dispatch.
@@ -151,6 +154,9 @@ pub fn fixed_forward_with_tile(
     shape: FixedShape,
     tile: FixedTile,
 ) -> Result<(), String> {
+    if tile == FixedTile::F32Sm89N64CopyPlan {
+        return launch_sm89_exact_n64(ctx, operands, shape);
+    }
     if tile == FixedTile::Legacy {
         return super::blas::fixed_legacy_forward(
             ctx,
@@ -665,6 +671,7 @@ fn ladder_cfg(tile: FixedTile, rows: usize, cols: usize) -> cudarc::driver::Laun
         FixedTile::Sm100Tcgen => (128, 128, 128, 65_536),
         FixedTile::Legacy
         | FixedTile::F32N128S2
+        | FixedTile::F32Sm89N64CopyPlan
         | FixedTile::Tf32M128S2
         | FixedTile::Tf32M128S3
         | FixedTile::Tf32M128N128S3
@@ -712,6 +719,175 @@ impl FixedArgs {
         })
     }
 }
+
+fn prepare_sm89_exact_n64_launch(
+    operands: FixedFwdOperands,
+    shape: FixedShape,
+    compute_capability: (u32, u32),
+) -> Result<Option<(FixedArgs, u32)>, String> {
+    if compute_capability != (8, 9) {
+        return Err("Fixed Ada exact N64 requires CC8.9".into());
+    }
+    if [operands.c.dtype, operands.x.dtype, operands.w.dtype]
+        .into_iter()
+        .any(|dtype| dtype != WeightDtype::F32)
+    {
+        return Err("Fixed Ada exact N64 requires homogeneous f32 operands".into());
+    }
+    // No output means no pointer arithmetic, shape conversion or work. This
+    // deliberately also admits null pointers and an unused unrepresentable K.
+    if shape.m == 0 || shape.n == 0 {
+        return Ok(None);
+    }
+    let args = FixedArgs::try_new(operands, shape)?;
+    if args.c == 0 || !args.c.is_multiple_of(4) || !args.bias.is_multiple_of(4) {
+        return Err(
+            "Fixed Ada exact N64 requires non-null f32-aligned C and null-or-f32-aligned bias"
+                .into(),
+        );
+    }
+    if args.k != 0
+        && [args.a, args.b]
+            .into_iter()
+            .any(|pointer| pointer == 0 || !pointer.is_multiple_of(4))
+    {
+        return Err(
+            "Fixed Ada exact N64 requires non-null f32-aligned A and B for nonzero K".into(),
+        );
+    }
+    args.m
+        .checked_add(63)
+        .ok_or("Fixed Ada exact N64 padded M exceeds i32")?;
+    args.n
+        .checked_add(63)
+        .ok_or("Fixed Ada exact N64 padded N exceeds i32")?;
+    args.k
+        .checked_add(31)
+        .ok_or("Fixed Ada exact N64 padded K exceeds i32")?;
+    let grid = (args.m as u32)
+        .div_ceil(64)
+        .checked_mul((args.n as u32).div_ceil(64))
+        .filter(|grid| *grid <= i32::MAX as u32)
+        .ok_or("Fixed Ada exact N64 launch grid exceeds i32")?;
+    fixed_sm89_exact_n64_byte_end(args.c, args.m, args.n, "C")?;
+    if args.k != 0 {
+        fixed_sm89_exact_n64_byte_end(args.a, args.m, args.k, "A")?;
+        fixed_sm89_exact_n64_byte_end(args.b, args.k, args.n, "B")?;
+    }
+    if args.bias != 0 {
+        fixed_sm89_exact_n64_byte_end(args.bias, 1, args.n, "bias")?;
+    }
+    // Allocation length, residency and nonaliasing remain the caller's raw
+    // pointer contract; this gate rules out numeric/address wrap before launch.
+    Ok(Some((args, grid)))
+}
+
+fn fixed_sm89_exact_n64_byte_end(
+    pointer: u64,
+    rows: i32,
+    cols: i32,
+    label: &str,
+) -> Result<(), String> {
+    let bytes = u64::try_from(rows)
+        .ok()
+        .and_then(|rows| {
+            u64::try_from(cols)
+                .ok()
+                .and_then(|cols| rows.checked_mul(cols))
+        })
+        .and_then(|elements| elements.checked_mul(4))
+        .ok_or_else(|| format!("Fixed Ada exact N64 {label} byte extent exceeds u64"))?;
+    pointer
+        .checked_add(bytes)
+        .ok_or_else(|| format!("Fixed Ada exact N64 {label} byte endpoint exceeds u64"))?;
+    Ok(())
+}
+
+fn launch_sm89_exact_n64(
+    ctx: &GpuCtx,
+    operands: FixedFwdOperands,
+    shape: FixedShape,
+) -> Result<(), String> {
+    let Some((args, grid)) =
+        prepare_sm89_exact_n64_launch(operands, shape, ctx.compute_capability())?
+    else {
+        return Ok(());
+    };
+    // Module loading already performed the exact Driver ABI/resource census
+    // and candidate-only carveout preference. Capture configures nothing.
+    let function = ctx
+        .kernels
+        .fixed_sm89_f32_n64_copyplan
+        .as_ref()
+        .ok_or_else(|| {
+            ctx.kernels
+                .fixed_sm89_f32_n64_copyplan_rejection
+                .clone()
+                .unwrap_or_else(|| "Fixed Ada exact N64 copy-plan is not admitted".into())
+        })?;
+    let params = FixedSm89ExactF32Params::forward(&args);
+    let config = cudarc::driver::LaunchConfig {
+        grid_dim: (grid, 1, 1),
+        block_dim: (128, 1, 1),
+        shared_mem_bytes: 0,
+    };
+    let mut builder = ctx.stream.launch_builder(function);
+    builder
+        .arg(&args.c)
+        .arg(&args.a)
+        .arg(&args.b)
+        .arg(&args.bias)
+        .arg(&params);
+    // A failed explicit force is not retried through a different arithmetic
+    // route. The caller receives the real launch error.
+    unsafe { builder.launch(config) }
+        .map(|_| ())
+        .map_err(|error| format!("gemm_bi Fixed Ada exact N64 copy-plan: {error:?}"))
+}
+
+/// Exact F32 owns its compact ABI independently of the half and TF32 bundles.
+#[derive(Clone, Copy)]
+#[repr(C)]
+struct FixedSm89ExactF32Params {
+    alpha: f32,
+    beta: f32,
+    m: i32,
+    n: i32,
+    k: i32,
+    lda: i32,
+    ldb: i32,
+    ldc: i32,
+}
+unsafe impl DeviceRepr for FixedSm89ExactF32Params {}
+pub(crate) const FIXED_SM89_EXACT_F32_PARAMS_SIZE: usize =
+    std::mem::size_of::<FixedSm89ExactF32Params>();
+
+impl FixedSm89ExactF32Params {
+    fn forward(args: &FixedArgs) -> Self {
+        Self {
+            alpha: 1.0,
+            beta: 0.0,
+            m: args.m,
+            n: args.n,
+            k: args.k,
+            lda: args.k,
+            ldb: args.n,
+            ldc: args.n,
+        }
+    }
+}
+const _: () = {
+    assert!(FIXED_SM89_EXACT_F32_PARAMS_SIZE == 32);
+    assert!(std::mem::align_of::<FixedSm89ExactF32Params>() == 4);
+    assert!(std::mem::offset_of!(FixedSm89ExactF32Params, alpha) == 0);
+    assert!(std::mem::offset_of!(FixedSm89ExactF32Params, beta) == 4);
+    assert!(std::mem::offset_of!(FixedSm89ExactF32Params, m) == 8);
+    assert!(std::mem::offset_of!(FixedSm89ExactF32Params, n) == 12);
+    assert!(std::mem::offset_of!(FixedSm89ExactF32Params, k) == 16);
+    assert!(std::mem::offset_of!(FixedSm89ExactF32Params, lda) == 20);
+    assert!(std::mem::offset_of!(FixedSm89ExactF32Params, ldb) == 24);
+    assert!(std::mem::offset_of!(FixedSm89ExactF32Params, ldc) == 28);
+};
 
 fn launch_f32_n128_s2(ctx: &GpuCtx, args: &FixedArgs) -> Result<(), String> {
     if args.m == 0 || args.n == 0 {
@@ -1787,6 +1963,7 @@ fn launch_ladder(
             .get(dt),
         FixedTile::Legacy
         | FixedTile::F32N128S2
+        | FixedTile::F32Sm89N64CopyPlan
         | FixedTile::Tf32M128S2
         | FixedTile::Tf32M128S3
         | FixedTile::Tf32M128N128S3
@@ -1999,6 +2176,22 @@ pub fn fixed_forward(
         return Ok(tile);
     }
     if homogeneous_f32 {
+        let compiler = ctx.kernels.compiler_identity();
+        if fixed_sm89_exact_n64_auto_eligible(
+            operands,
+            shape,
+            FixedTileDevice {
+                multiprocessors: ctx.kernels.multiprocessor_count(),
+                compute_capability: ctx.compute_capability(),
+            },
+            compiler.nvrtc_version,
+            compiler.nvrtc_library_known,
+            ctx.kernels.fixed_sm89_f32_n64_copyplan.is_some(),
+            ctx.f32_triad_policy(),
+        ) {
+            launch_sm89_exact_n64(ctx, operands, shape)?;
+            return Ok(FixedTile::F32Sm89N64CopyPlan);
+        }
         let tile = fixed_pick_f32_exact(
             batch,
             n_in,
@@ -2126,6 +2319,641 @@ pub fn fixed_forward(
     let _ = args;
     super::blas::fixed_legacy_forward(ctx, c, x, w, bias_ptr, dims)?;
     Ok(FixedTile::Legacy)
+}
+
+// Actual production NVRTC13.2 / 142-SM Ada paired qualification, 101 windows
+// in both orders and both eager/graph paths: exactly E/B, each bias row.
+// This is a version-scoped measured route, not a claim for every 13.2 stack.
+// New Fixed source and AUTO ship together, so the new Fixed artifact invalidates
+// old graph identities without changing revision39 or frozen Triad evidence.
+fn fixed_sm89_exact_n64_auto_eligible(
+    operands: FixedFwdOperands,
+    shape: FixedShape,
+    device: FixedTileDevice,
+    nvrtc: (i32, i32),
+    nvrtc_library_known: bool,
+    loaded: bool,
+    policy: super::context::F32TriadPolicy,
+) -> bool {
+    loaded
+        && nvrtc_library_known
+        && nvrtc == (13, 2)
+        && device.compute_capability == (8, 9)
+        && device.multiprocessors == 142
+        && policy == super::context::F32TriadPolicy::ExactScalarFmaV1
+        && [operands.c, operands.x, operands.w]
+            .into_iter()
+            .all(|operand| {
+                operand.dtype == WeightDtype::F32
+                    && operand.ptr != 0
+                    && operand.ptr.is_multiple_of(16)
+            })
+        && operands
+            .bias_ptr
+            .is_none_or(|ptr| ptr != 0 && ptr.is_multiple_of(4))
+        && matches!(
+            (shape.m, shape.k, shape.n, operands.bias_ptr.is_some()),
+            (2048, 2304, 768, false)
+                | (2048, 2304, 768, true)
+                | (4621, 768, 2304, false)
+                | (4621, 768, 2304, true)
+        )
+}
+
+#[cfg(test)]
+mod sm89_exact_n64_auto_tests {
+    use super::super::context::F32TriadPolicy;
+    use super::*;
+
+    const DEVICE: FixedTileDevice = FixedTileDevice {
+        multiprocessors: 142,
+        compute_capability: (8, 9),
+    };
+    // Literal admitted rows from production-paired-101-v1.jsonl, SHA256
+    // 91493d7994999bfa48473803a1e29a7cc516a98b5264478c264457c3ba34db86.
+    // B/no-bias wins against own AUTO/Legacy, not against PEDANTIC.
+    const ROWS: [(usize, usize, usize, bool); 4] = [
+        (2048, 2304, 768, false),
+        (2048, 2304, 768, true),
+        (4621, 768, 2304, false),
+        (4621, 768, 2304, true),
+    ];
+
+    fn operands(bias: bool) -> FixedFwdOperands {
+        let typed = |ptr| TypedPtr {
+            ptr,
+            dtype: WeightDtype::F32,
+        };
+        FixedFwdOperands {
+            c: typed(0x1000),
+            x: typed(0x2000),
+            w: typed(0x3000),
+            // A real four-byte-aligned bias need not be sixteen-byte aligned.
+            bias_ptr: bias.then_some(0x4004),
+        }
+    }
+
+    fn eligible(operands: FixedFwdOperands, shape: FixedShape) -> bool {
+        fixed_sm89_exact_n64_auto_eligible(
+            operands,
+            shape,
+            DEVICE,
+            (13, 2),
+            true,
+            true,
+            F32TriadPolicy::ExactScalarFmaV1,
+        )
+    }
+
+    #[test]
+    fn fixed_sm89_exact_n64_auto_admits_only_four_measured_positive_rows() {
+        let observed = ROWS.map(|(m, k, n, bias)| eligible(operands(bias), FixedShape { m, k, n }));
+        assert_eq!(
+            observed,
+            [true, true, true, true],
+            "measured E0/E1/B0/B1 rows"
+        );
+        for (m, k, n, bias) in ROWS {
+            for offset in [0, 4, 8, 12] {
+                let good = FixedFwdOperands {
+                    bias_ptr: bias.then_some(0x4000 + offset),
+                    ..operands(bias)
+                };
+                assert!(
+                    eligible(good, FixedShape { m, k, n }),
+                    "every valid F32 bias alignment"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn fixed_sm89_exact_n64_auto_declines_adjacent_unmeasured_and_thin_shapes() {
+        for (m, k, n, bias) in ROWS {
+            for (m, k, n) in [
+                (m - 1, k, n),
+                (m + 1, k, n),
+                (m, k - 1, n),
+                (m, k + 1, n),
+                (m, k, n - 1),
+                (m, k, n + 1),
+                (0, k, n),
+                (1, k, n),
+                (17, k, n),
+                (63, k, n),
+                (64, k, n),
+                (65, k, n),
+                (127, k, n),
+                (128, k, n),
+                (129, k, n),
+                (m, 0, n),
+                (m, k, 0),
+                (4621, 384, 1928),
+                (4621, 1928, 384),
+                (2048, 768, 2304),
+            ] {
+                assert!(
+                    !eligible(operands(bias), FixedShape { m, k, n }),
+                    "unmeasured M={m} K={k} N={n} bias={bias}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn fixed_sm89_exact_n64_auto_declines_unknown_device_toolchain_holder_and_policy() {
+        for (m, k, n, bias) in ROWS {
+            let ops = operands(bias);
+            let shape = FixedShape { m, k, n };
+            let check = |device, nvrtc, known, loaded, policy| {
+                fixed_sm89_exact_n64_auto_eligible(ops, shape, device, nvrtc, known, loaded, policy)
+            };
+            for cc in [
+                (8, 0),
+                (8, 6),
+                (8, 7),
+                (9, 0),
+                (10, 0),
+                (10, 3),
+                (11, 0),
+                (12, 0),
+                (12, 1),
+            ] {
+                assert!(!check(
+                    FixedTileDevice {
+                        compute_capability: cc,
+                        ..DEVICE
+                    },
+                    (13, 2),
+                    true,
+                    true,
+                    F32TriadPolicy::ExactScalarFmaV1
+                ));
+            }
+            for multiprocessors in [0, 1, 141, 143, 170] {
+                assert!(!check(
+                    FixedTileDevice {
+                        multiprocessors,
+                        ..DEVICE
+                    },
+                    (13, 2),
+                    true,
+                    true,
+                    F32TriadPolicy::ExactScalarFmaV1
+                ));
+            }
+            for version in [(0, 0), (12, 8), (13, 0), (13, 1), (13, 3), (14, 0)] {
+                assert!(!check(
+                    DEVICE,
+                    version,
+                    true,
+                    true,
+                    F32TriadPolicy::ExactScalarFmaV1
+                ));
+            }
+            for (known, loaded) in [(false, true), (true, false), (false, false)] {
+                assert!(!check(
+                    DEVICE,
+                    (13, 2),
+                    known,
+                    loaded,
+                    F32TriadPolicy::ExactScalarFmaV1
+                ));
+            }
+            assert!(!check(
+                DEVICE,
+                (13, 2),
+                true,
+                true,
+                F32TriadPolicy::AllowDeterministicTf32V1
+            ));
+        }
+    }
+
+    #[test]
+    fn fixed_sm89_exact_n64_auto_declines_invalid_alignment_null_bias_and_dtype() {
+        for (m, k, n, bias) in ROWS {
+            let good = operands(bias);
+            let shape = FixedShape { m, k, n };
+            for pointer in [0, 0x1001, 0x1002, 0x1003, 0x1004, 0x1008, 0x100c] {
+                for bad in [
+                    FixedFwdOperands {
+                        c: TypedPtr {
+                            ptr: pointer,
+                            ..good.c
+                        },
+                        ..good
+                    },
+                    FixedFwdOperands {
+                        x: TypedPtr {
+                            ptr: pointer,
+                            ..good.x
+                        },
+                        ..good
+                    },
+                    FixedFwdOperands {
+                        w: TypedPtr {
+                            ptr: pointer,
+                            ..good.w
+                        },
+                        ..good
+                    },
+                ] {
+                    assert!(!eligible(bad, shape), "invalid or non-A16/B16/C16 operand");
+                }
+            }
+            for pointer in [0, 0x4001, 0x4002, 0x4003] {
+                assert!(!eligible(
+                    FixedFwdOperands {
+                        bias_ptr: Some(pointer),
+                        ..good
+                    },
+                    shape
+                ));
+            }
+            for dtype in [WeightDtype::Bf16, WeightDtype::F16] {
+                for bad in [
+                    FixedFwdOperands {
+                        c: TypedPtr { dtype, ..good.c },
+                        ..good
+                    },
+                    FixedFwdOperands {
+                        x: TypedPtr { dtype, ..good.x },
+                        ..good
+                    },
+                    FixedFwdOperands {
+                        w: TypedPtr { dtype, ..good.w },
+                        ..good
+                    },
+                    FixedFwdOperands {
+                        c: TypedPtr { dtype, ..good.c },
+                        x: TypedPtr { dtype, ..good.x },
+                        w: TypedPtr { dtype, ..good.w },
+                        ..good
+                    },
+                ] {
+                    assert!(
+                        !eligible(bad, shape),
+                        "only homogeneous exact F32 is admitted"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn fixed_sm89_exact_n64_auto_keeps_old_cc12_exact_selector_cells() {
+        for cc in [(12, 0), (12, 1)] {
+            let device = FixedTileDevice {
+                compute_capability: cc,
+                multiprocessors: 170,
+            };
+            for (m, k, n, old_cc120) in [
+                (4621, 384, 1928, FixedTile::F32N128S2),
+                (4621, 768, 2304, FixedTile::F32N128S2),
+                (4621, 1928, 384, FixedTile::Legacy),
+                (2048, 768, 2304, FixedTile::Legacy),
+                (2048, 2304, 768, FixedTile::Legacy),
+            ] {
+                for bias in [false, true] {
+                    assert!(!fixed_sm89_exact_n64_auto_eligible(
+                        operands(bias),
+                        FixedShape { m, k, n },
+                        device,
+                        (13, 2),
+                        true,
+                        true,
+                        F32TriadPolicy::ExactScalarFmaV1
+                    ));
+                }
+                let expected = if cc == (12, 0) {
+                    old_cc120
+                } else {
+                    FixedTile::Legacy
+                };
+                assert_eq!(fixed_pick_f32_exact(m, k, n, device), expected);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod sm89_exact_n64_request_tests {
+    use super::*;
+
+    fn operands() -> FixedFwdOperands {
+        let typed = |ptr| TypedPtr {
+            ptr,
+            dtype: WeightDtype::F32,
+        };
+        FixedFwdOperands {
+            c: typed(0x1000),
+            x: typed(0x2000),
+            w: typed(0x3000),
+            bias_ptr: Some(0x4000),
+        }
+    }
+    fn shape() -> FixedShape {
+        FixedShape {
+            m: 65,
+            k: 96,
+            n: 136,
+        }
+    }
+    fn prepare(
+        ops: FixedFwdOperands,
+        dims: FixedShape,
+    ) -> Result<Option<(FixedArgs, u32)>, String> {
+        prepare_sm89_exact_n64_launch(ops, dims, (8, 9))
+    }
+
+    #[test]
+    fn fixed_sm89_exact_n64_operand_and_arch_guards_are_fail_closed() {
+        assert!(prepare(operands(), shape()).unwrap().is_some());
+        for cc in [(8, 0), (8, 6), (9, 0), (12, 0), (12, 1)] {
+            assert!(prepare_sm89_exact_n64_launch(operands(), shape(), cc).is_err());
+        }
+        for dtype in [WeightDtype::Bf16, WeightDtype::F16] {
+            let good = operands();
+            for bad in [
+                FixedFwdOperands {
+                    x: TypedPtr { dtype, ..good.x },
+                    ..good
+                },
+                FixedFwdOperands {
+                    w: TypedPtr { dtype, ..good.w },
+                    ..good
+                },
+                FixedFwdOperands {
+                    c: TypedPtr { dtype, ..good.c },
+                    ..good
+                },
+            ] {
+                assert!(prepare(bad, shape()).is_err(), "mixed dtype admitted");
+            }
+        }
+        let good = operands();
+        for ptr in [0, 1, 2, 3, 0x2001] {
+            for bad in [
+                FixedFwdOperands {
+                    x: TypedPtr { ptr, ..good.x },
+                    ..good
+                },
+                FixedFwdOperands {
+                    w: TypedPtr { ptr, ..good.w },
+                    ..good
+                },
+                FixedFwdOperands {
+                    c: TypedPtr { ptr, ..good.c },
+                    ..good
+                },
+            ] {
+                assert!(
+                    prepare(bad, shape()).is_err(),
+                    "null/unaligned pointer admitted"
+                );
+            }
+        }
+        for ptr in [1, 2, 3, 0x4001] {
+            assert!(
+                prepare(
+                    FixedFwdOperands {
+                        bias_ptr: Some(ptr),
+                        ..good
+                    },
+                    shape()
+                )
+                .is_err()
+            );
+        }
+        // Four-byte views must stay force-admissible; vector alignment only
+        // selects an internal staging/store path and is not a force restriction.
+        for role in 0..3 {
+            let mut shifted = good;
+            match role {
+                0 => shifted.x.ptr += 4,
+                1 => shifted.w.ptr += 4,
+                _ => shifted.c.ptr += 4,
+            }
+            assert!(prepare(shifted, shape()).unwrap().is_some());
+        }
+    }
+
+    #[test]
+    fn fixed_sm89_exact_n64_signed_padding_and_grid_boundaries() {
+        let good = operands();
+        let (_, grid) = prepare(good, shape()).unwrap().unwrap();
+        assert_eq!(grid, 6, "65x136 needs 2x3 N64 CTAs");
+        let max = i32::MAX as usize;
+        for dims in [
+            FixedShape {
+                m: max - 63,
+                k: 0,
+                n: 1,
+            },
+            FixedShape {
+                m: 1,
+                k: max - 31,
+                n: 1,
+            },
+            FixedShape {
+                m: 1,
+                k: 0,
+                n: max - 63,
+            },
+        ] {
+            assert!(
+                prepare(good, dims).unwrap().is_some(),
+                "exact padded boundary {dims:?}"
+            );
+        }
+        for dims in [
+            FixedShape {
+                m: max - 62,
+                k: 0,
+                n: 1,
+            },
+            FixedShape {
+                m: 1,
+                k: max - 30,
+                n: 1,
+            },
+            FixedShape {
+                m: 1,
+                k: 0,
+                n: max - 62,
+            },
+            FixedShape {
+                m: usize::MAX,
+                ..shape()
+            },
+            FixedShape {
+                k: usize::MAX,
+                ..shape()
+            },
+            FixedShape {
+                n: usize::MAX,
+                ..shape()
+            },
+        ] {
+            assert!(
+                prepare(good, dims).is_err(),
+                "signed/padded overflow {dims:?}"
+            );
+        }
+        let accepted = FixedShape {
+            m: 2_097_152,
+            k: 0,
+            n: 4_194_240,
+        };
+        assert_eq!(prepare(good, accepted).unwrap().unwrap().1, 2_147_450_880);
+        let rejected = FixedShape {
+            n: 4_194_304,
+            ..accepted
+        };
+        assert!(
+            prepare(good, rejected).is_err(),
+            "2^31 CTAs overflow signed grouped indexing"
+        );
+    }
+
+    #[test]
+    fn fixed_sm89_exact_n64_operand_byte_endpoints_cannot_wrap() {
+        let good = operands();
+        assert!(prepare(good, shape()).unwrap().is_some());
+        for bad in [
+            FixedFwdOperands {
+                x: TypedPtr {
+                    ptr: u64::MAX - 3,
+                    ..good.x
+                },
+                ..good
+            },
+            FixedFwdOperands {
+                w: TypedPtr {
+                    ptr: u64::MAX - 3,
+                    ..good.w
+                },
+                ..good
+            },
+            FixedFwdOperands {
+                c: TypedPtr {
+                    ptr: u64::MAX - 3,
+                    ..good.c
+                },
+                ..good
+            },
+            FixedFwdOperands {
+                bias_ptr: Some(u64::MAX - 3),
+                ..good
+            },
+        ] {
+            assert!(prepare(bad, shape()).is_err(), "address endpoint wrapped");
+        }
+        let one = FixedShape { m: 1, k: 1, n: 1 };
+        let last = TypedPtr {
+            ptr: u64::MAX - 7,
+            dtype: WeightDtype::F32,
+        };
+        assert!(
+            prepare(
+                FixedFwdOperands {
+                    c: last,
+                    x: last,
+                    w: last,
+                    bias_ptr: Some(last.ptr)
+                },
+                one
+            )
+            .unwrap()
+            .is_some()
+        );
+        let max = i32::MAX as usize;
+        let far = TypedPtr {
+            ptr: 1 << 40,
+            dtype: WeightDtype::F32,
+        };
+        assert!(
+            prepare(
+                FixedFwdOperands { x: far, ..good },
+                FixedShape {
+                    m: max - 63,
+                    k: max - 31,
+                    n: 1
+                }
+            )
+            .is_err(),
+            "A byte extent wrapped"
+        );
+        assert!(
+            prepare(
+                FixedFwdOperands { w: far, ..good },
+                FixedShape {
+                    m: 1,
+                    k: max - 31,
+                    n: max - 63
+                }
+            )
+            .is_err(),
+            "B byte extent wrapped"
+        );
+    }
+
+    #[test]
+    fn fixed_sm89_exact_n64_empty_and_k0_requests_do_not_require_inputs() {
+        let good = operands();
+        assert!(prepare(good, shape()).unwrap().is_some());
+        let null = TypedPtr {
+            ptr: 0,
+            dtype: WeightDtype::F32,
+        };
+        let empty = FixedFwdOperands {
+            c: null,
+            x: null,
+            w: null,
+            bias_ptr: None,
+        };
+        for dims in [
+            FixedShape {
+                m: 0,
+                k: usize::MAX,
+                n: usize::MAX,
+            },
+            FixedShape {
+                m: usize::MAX,
+                k: usize::MAX,
+                n: 0,
+            },
+        ] {
+            assert!(prepare(empty, dims).unwrap().is_none());
+        }
+        for bias_ptr in [None, Some(0), Some(0x4000)] {
+            let no_inputs = FixedFwdOperands {
+                x: null,
+                w: null,
+                bias_ptr,
+                ..good
+            };
+            let (args, grid) = prepare(no_inputs, FixedShape { k: 0, ..shape() })
+                .unwrap()
+                .unwrap();
+            assert_eq!((args.a, args.b, args.k, grid), (0, 0, 0, 6));
+        }
+    }
+
+    #[test]
+    fn fixed_sm89_exact_n64_forward_bundle_has_exact_m_n_k_and_stride_words() {
+        let (args, _) = prepare(operands(), shape()).unwrap().unwrap();
+        let params = FixedSm89ExactF32Params::forward(&args);
+        let words = unsafe {
+            (&params as *const FixedSm89ExactF32Params)
+                .cast::<[u32; 8]>()
+                .read()
+        };
+        assert_eq!(words, [0x3f80_0000, 0, 65, 136, 96, 96, 136, 136]);
+        assert_eq!(std::mem::size_of_val(&params), 32);
+        assert_eq!(std::mem::align_of::<FixedSm89ExactF32Params>(), 4);
+    }
 }
 
 #[cfg(test)]

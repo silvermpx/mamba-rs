@@ -145,6 +145,7 @@ const FIXED_TF32_ENTRIES_PORTABLE: &[&str] = &[
 
 /// The TMA entries the Fixed source compiles only for the 12.0 and 12.1
 /// architectures; every other target's PTX must not carry them.
+#[cfg(target_os = "linux")]
 const FIXED_TF32_ENTRIES_SM120: &[&str] = &[
     "gemm_bi_nn_sm120_tma_tf32_v1_m128n64_bk32_s2",
     "gemm_bi_nn_sm120_tma_tf32_v1_m128n64_bk32_s3",
@@ -680,6 +681,35 @@ fn half_qualification_forced_tiles_normalize_and_restore_policy() {
     assert!(!ctx.batch_invariant());
 }
 
+fn assert_fixed_exact_n64_optional_holder(ctx: &GpuCtx) {
+    let holder = ctx.kernels.fixed_sm89_f32_n64_copyplan.as_ref();
+    let reason = ctx.kernels.fixed_sm89_f32_n64_copyplan_rejection.as_ref();
+    if ctx.kernels.compiler_identity().target.as_str() != "sm_89" {
+        assert!(
+            holder.is_none(),
+            "Ada-only exact kernel loaded on another target"
+        );
+        assert!(reason.is_some(), "non-Ada rejection reason was lost");
+        return;
+    }
+    let function = holder.unwrap_or_else(|| panic!("Ada exact N64 missing: {reason:?}"));
+    assert!(reason.is_none());
+    assert_eq!(function.local_size_bytes().unwrap(), 0);
+    assert_eq!(function.shared_size_bytes().unwrap(), 32_768);
+    assert!((1..=160).contains(&function.num_regs().unwrap()));
+    assert!(function.max_threads_per_block().unwrap() >= 128);
+    assert!(
+        function
+            .occupancy_max_active_blocks_per_multiprocessor(128, 0, None)
+            .unwrap()
+            >= 3
+    );
+    assert_eq!(
+        function.get_attribute(cudarc::driver::sys::CUfunction_attribute::CU_FUNC_ATTRIBUTE_PREFERRED_SHARED_MEMORY_CARVEOUT).unwrap(),
+        100
+    );
+}
+
 #[test]
 fn repeated_nvrtc_compiles_have_the_same_identity() {
     #[cfg(target_os = "linux")]
@@ -703,6 +733,7 @@ fn repeated_nvrtc_compiles_have_the_same_identity() {
 
     let device = GpuDevice::new(0).expect("CUDA device");
     let first = GpuCtx::new(&device).expect("first context");
+    assert_fixed_exact_n64_optional_holder(&first);
     let first_artifacts = first.kernels.artifact_set_identity();
     #[cfg(target_os = "linux")]
     let active_artifacts = active_artifacts(first_artifacts);
@@ -723,6 +754,7 @@ fn repeated_nvrtc_compiles_have_the_same_identity() {
         .map(|artifact| (*artifact, artifact_payload(&cached_entries, *artifact)))
         .collect();
     let second = GpuCtx::new(&device).expect("second context");
+    assert_fixed_exact_n64_optional_holder(&second);
     #[cfg(target_os = "linux")]
     {
         use std::os::unix::fs::MetadataExt;
@@ -769,6 +801,20 @@ fn repeated_nvrtc_compiles_have_the_same_identity() {
     #[cfg(target_os = "linux")]
     {
         let fixed_entries = ptx_entries(&artifact_payload(&cached_entries, first_artifacts.fixed));
+        let exact_n64_entries: std::collections::BTreeSet<_> = fixed_entries
+            .iter()
+            .filter(|name| name.starts_with("gemm_bi_nn_fixed_sm89_f32_n64_copyplan"))
+            .map(String::as_str)
+            .collect();
+        let expected_exact_n64 = if first.kernels.compiler_identity().target.as_str() == "sm_89" {
+            std::collections::BTreeSet::from(["gemm_bi_nn_fixed_sm89_f32_n64_copyplan_v1"])
+        } else {
+            std::collections::BTreeSet::new()
+        };
+        assert_eq!(
+            exact_n64_entries, expected_exact_n64,
+            "cached exact N64 inventory"
+        );
         assert!(
             fixed_entries.iter().all(|name| !name.starts_with("sgemm_")),
             "Fixed unexpectedly exports legacy sgemm symbols: {fixed_entries:?}"
