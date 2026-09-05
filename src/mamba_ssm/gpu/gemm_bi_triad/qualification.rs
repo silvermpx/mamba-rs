@@ -116,6 +116,10 @@ pub enum PhysicalQualificationRoute {
         dtype: WeightDtype,
         /// Whether the production policy enables Tensor Cores.
         tensor_cores: bool,
+        /// Numeric permission installed for this AUTO request. Stream-K
+        /// permission may resolve to a tiled or non-TC production fallback;
+        /// it is not a forced tile or schedule.
+        half_policy: HalfTriadPolicy,
     },
     /// Direct deterministic BF16/F16 Tensor Core route.
     ///
@@ -406,10 +410,14 @@ impl PhysicalQualificationRoute {
                 f32_triad_policy: policy,
                 half_triad_policy: HalfTriadPolicy::TiledParityV1,
             },
-            Self::HalfPolicy { tensor_cores, .. } => PhysicalQualificationPolicy {
+            Self::HalfPolicy {
+                tensor_cores,
+                half_policy,
+                ..
+            } => PhysicalQualificationPolicy {
                 bi_tensor_cores: tensor_cores,
                 f32_triad_policy: F32TriadPolicy::ExactScalarFmaV1,
-                half_triad_policy: HalfTriadPolicy::TiledParityV1,
+                half_triad_policy: half_policy,
             },
             // The forced stream-K tile records a route that only the
             // permitting half policy admits; every other forced tile stays
@@ -752,8 +760,18 @@ fn timed_request_digest(identity: PhysicalTimedRequestIdentity) -> [u8; 32] {
         PhysicalQualificationRoute::HalfPolicy {
             dtype,
             tensor_cores,
+            half_policy,
         } => digest
-            .required(b"route", b"half-policy")
+            .required(
+                b"route",
+                match half_policy {
+                    // Retain the byte-for-byte legacy tiled request encoding.
+                    HalfTriadPolicy::TiledParityV1 => b"half-policy",
+                    HalfTriadPolicy::AllowStreamKFixedOrderV1 => {
+                        b"half-policy-allow-streamk-fixed-order-v1"
+                    }
+                },
+            )
             .required(b"route-dtype", weight_dtype_name(dtype))
             .required(b"tensor-cores", &[u8::from(tensor_cores)]),
         PhysicalQualificationRoute::HalfForced { dtype, tile } => digest
@@ -6119,10 +6137,12 @@ mod tests {
             PhysicalQualificationRoute::HalfPolicy {
                 dtype: WeightDtype::Bf16,
                 tensor_cores: false,
+                half_policy: HalfTriadPolicy::TiledParityV1,
             },
             PhysicalQualificationRoute::HalfPolicy {
                 dtype: WeightDtype::Bf16,
                 tensor_cores: true,
+                half_policy: HalfTriadPolicy::TiledParityV1,
             },
             PhysicalQualificationRoute::HalfForced {
                 dtype: WeightDtype::Bf16,
@@ -6147,6 +6167,94 @@ mod tests {
     }
 
     #[test]
+    fn g2_half_auto_request_preserves_permission_and_separates_identity() {
+        let mut digests = BTreeSet::new();
+        for op in [ResolvedGemmOp::Nn, ResolvedGemmOp::Tn, ResolvedGemmOp::Nt] {
+            for dtype in [WeightDtype::Bf16, WeightDtype::F16] {
+                for tensor_cores in [false, true] {
+                    for half_policy in [
+                        HalfTriadPolicy::TiledParityV1,
+                        HalfTriadPolicy::AllowStreamKFixedOrderV1,
+                    ] {
+                        let route = PhysicalQualificationRoute::HalfPolicy {
+                            dtype,
+                            tensor_cores,
+                            half_policy,
+                        };
+                        let policy = route.policy();
+                        assert_eq!(policy.bi_tensor_cores, tensor_cores);
+                        assert_eq!(policy.half_triad_policy, half_policy);
+                        assert_eq!(policy.f32_triad_policy, F32TriadPolicy::ExactScalarFmaV1);
+                        let request =
+                            PhysicalQualificationRequest::contiguous(op, (256, 512, 384), route);
+                        // Permission is valid for every op and also when TC is
+                        // disabled; it never nominates or promises a schedule.
+                        request.validate().expect("valid half policy permission");
+                        let identity = request.timed_identity().expect("half AUTO identity");
+                        assert_eq!(identity.planned_symbol, None);
+                        assert_eq!(identity.planned_tile, None);
+                        assert_eq!(identity.route, route);
+                        let digest = timed_request_digest(identity);
+                        assert_eq!(
+                            digest,
+                            timed_request_digest(request.timed_identity().unwrap()),
+                            "identical request digest changed"
+                        );
+                        assert!(
+                            digests.insert(digest),
+                            "half AUTO request identities alias: {op:?} {route:?}"
+                        );
+                    }
+                }
+            }
+        }
+        assert_eq!(digests.len(), 24);
+    }
+
+    #[test]
+    fn g2_half_tiled_request_digests_preserve_the_legacy_encoding() {
+        // Independently computed before adding the permission field. These
+        // freeze NN (256,512,384), alpha=1, beta=0, no bias, contiguous layout.
+        for (dtype, tensor_cores, expected) in [
+            (
+                WeightDtype::Bf16,
+                false,
+                "3258c17392c48db82d2772b6fa585cfb1b9920722c9c3df2d61b921bc937235a",
+            ),
+            (
+                WeightDtype::Bf16,
+                true,
+                "4ec1dff5b852a30a3a35e52e8e37b2af789e51b74403dca415b60354aad707f5",
+            ),
+            (
+                WeightDtype::F16,
+                false,
+                "12c69c6d6fe5f211d1056af91d02915d0c579a98f5077a8bf4464e6a1f6a3c46",
+            ),
+            (
+                WeightDtype::F16,
+                true,
+                "fffc2cfcca16831e4e00eb7cf4594a378f4f59da0e223def24005f862f7051ae",
+            ),
+        ] {
+            let request = PhysicalQualificationRequest::contiguous(
+                ResolvedGemmOp::Nn,
+                (256, 512, 384),
+                PhysicalQualificationRoute::HalfPolicy {
+                    dtype,
+                    tensor_cores,
+                    half_policy: HalfTriadPolicy::TiledParityV1,
+                },
+            );
+            assert_eq!(
+                digest_hex(&timed_request_digest(request.timed_identity().unwrap())),
+                expected,
+                "legacy tiled request changed for {dtype:?}, TC={tensor_cores}"
+            );
+        }
+    }
+
+    #[test]
     fn request_validation_rejects_invalid_extent_dtype_and_thin_tile() {
         let scalar = PhysicalQualificationRoute::F32Policy(F32TriadPolicy::ExactScalarFmaV1);
         assert!(
@@ -6162,6 +6270,7 @@ mod tests {
         let half_f32 = PhysicalQualificationRoute::HalfPolicy {
             dtype: WeightDtype::F32,
             tensor_cores: false,
+            half_policy: HalfTriadPolicy::TiledParityV1,
         };
         assert!(
             PhysicalQualificationRequest::contiguous(ResolvedGemmOp::Nn, (1, 0, 1), half_f32)
@@ -6426,6 +6535,312 @@ mod tests {
         );
     }
 
+    // G2 regression-only helpers: all writes/readbacks stay inside facade-owned
+    // allocations. Three nonzero reduction rows give an exact, cheap F64
+    // reference while exercising the first, second and last reduction slabs.
+    fn g2_check_seeded_tn_eager_graph(
+        ctx: &GpuCtx,
+        qualified: &mut QualifiedPhysicalLaunch<'_>,
+    ) -> Result<(), String> {
+        if qualified.request.op != ResolvedGemmOp::Tn {
+            return Err("G2 fixture requires TN".into());
+        }
+        let (m, k, n) = qualified.request.dims;
+        if m <= 65 {
+            return Err("G2 fixture needs three distinct reduction rows".into());
+        }
+        let storage = match &qualified.resources {
+            QualifiedPhysicalResources::Half(resources) => resources.storage,
+            _ => return Err("G2 fixture requires half inputs".into()),
+        };
+        let mut a = storage.a.host_values();
+        let mut b = storage.b.host_values();
+        let active_rows = [0, 64, m - 1];
+        for (term, row) in active_rows.into_iter().enumerate() {
+            for column in 0..k {
+                a[storage.a.offset + row * storage.a.stride + column] = match term {
+                    0 => ((column % 7) as i32 - 3) as f32 * 0.125,
+                    1 => ((column % 5) + 1) as f32 * 0.0625,
+                    _ => ((column % 11) as i32 - 5) as f32 * 0.03125,
+                };
+            }
+            for column in 0..n {
+                b[storage.b.offset + row * storage.b.stride + column] = match term {
+                    0 => ((column % 13) as i32 - 6) as f32 * 0.0625,
+                    1 => ((column % 3) + 1) as f32 * 0.125,
+                    _ => ((column % 7) as i32 - 3) as f32 * 0.0625,
+                };
+            }
+        }
+        let mut initial = storage.output.host_values();
+        let mut expected = Vec::with_capacity(k * n);
+        let mut changed = false;
+        for row in 0..k {
+            for column in 0..n {
+                let old = 0.25 + ((row * n + column) % 17) as f32 * 0.03125;
+                initial[storage.output.offset + row * storage.output.stride + column] = old;
+                let mut value = f64::from(old);
+                for reduction in active_rows {
+                    value += f64::from(a[storage.a.offset + reduction * storage.a.stride + row])
+                        * f64::from(b[storage.b.offset + reduction * storage.b.stride + column]);
+                }
+                // All operands/products/sums are exactly representable in F32,
+                // BF16/F16 inputs included. This is not a general MMA oracle.
+                let word = (value as f32).to_bits();
+                changed |= word != old.to_bits();
+                expected.push(word);
+            }
+        }
+        if !changed {
+            return Err("G2 fixture would not detect a no-op GEMM".into());
+        }
+        let QualifiedPhysicalResources::Half(resources) = &qualified.resources else {
+            unreachable!();
+        };
+        resources.a.upload_f32(&ctx.stream, &a)?;
+        resources.b.upload_f32(&ctx.stream, &b)?;
+
+        // ABBA execution order; every TN call starts from identical nonzero C.
+        // Checking guards BEFORE resetting prevents a reset from hiding damage.
+        for graph_first in [false, true, true, false] {
+            let guards = qualified.validate_red_zones(ctx)?;
+            if guards.allocation_count() != 3
+                || guards.element_count() < 3 * QUALIFICATION_GUARD_ELEMENTS
+            {
+                return Err("G2 fixture lost guarded allocations".into());
+            }
+            let QualifiedPhysicalResources::Half(resources) = &mut qualified.resources else {
+                unreachable!();
+            };
+            let QualifiedHalfOutput::F32(output) = &mut resources.output else {
+                return Err("G2 TN fixture requires F32 output".into());
+            };
+            // Guard values are already validated and copied unchanged.
+            output.upload(&ctx.stream, &initial)?;
+            ctx.stream
+                .synchronize()
+                .map_err(|error| format!("G2 C reset synchronization: {error:?}"))?;
+            if graph_first {
+                qualified.measure_graph_window_ms(ctx, 1)?;
+            } else {
+                qualified.measure_eager_window_ms(ctx, 1)?;
+            }
+            let QualifiedPhysicalResources::Half(resources) = &qualified.resources else {
+                unreachable!();
+            };
+            let values = resources.output.to_cpu(ctx)?;
+            ctx.stream
+                .synchronize()
+                .map_err(|error| format!("G2 output readback synchronization: {error:?}"))?;
+            let mut actual = Vec::with_capacity(k * n);
+            for row in 0..k {
+                let start = storage.output.offset + row * storage.output.stride;
+                actual.extend(values[start..start + n].iter().copied().map(f32::to_bits));
+            }
+            if actual != expected {
+                return Err(format!(
+                    "G2 TN beta=1 exact three-term reference mismatch, graph={graph_first}"
+                ));
+            }
+            let guards = qualified.validate_red_zones(ctx)?;
+            if guards.allocation_count() != 3 {
+                return Err("G2 post-launch guard census changed".into());
+            }
+            let mut a_after = vec![0.0; a.len()];
+            let mut b_after = vec![0.0; b.len()];
+            resources.a.download_f32(&ctx.stream, &mut a_after)?;
+            resources.b.download_f32(&ctx.stream, &mut b_after)?;
+            if a_after != a || b_after != b {
+                return Err("G2 input values or guards changed".into());
+            }
+        }
+        Ok(())
+    }
+
+    fn g2_check_half_tn_physical_evidence(
+        qualified: &QualifiedPhysicalLaunch<'_>,
+        symbol: &str,
+        tile: (u32, u32),
+        bk_stages: (u32, u8),
+        grid: u32,
+        threads: u32,
+        stream_k: bool,
+    ) -> Result<(), String> {
+        use crate::mamba_ssm::gpu::kernel_identity::ResolvedOutputOwnership;
+        let evidence = qualified.evidence();
+        let [eager] = evidence.nodes() else {
+            return Err("G2 expected exactly one eager physical GEMM".into());
+        };
+        let [captured] = qualified.graph.nodes() else {
+            return Err("G2 expected exactly one captured physical GEMM".into());
+        };
+        if !evidence.eager_graph_equal()
+            || evidence.launch_count() != 1
+            || *eager != QualifiedPhysicalLaunchNode::from(captured)
+        {
+            return Err("G2 exact eager/captured node evidence differs".into());
+        }
+        let route = captured
+            .gemm_route()
+            .ok_or_else(|| "G2 captured node lacks GEMM contract".to_string())?;
+        let contract = if stream_k {
+            ResolvedNumericContract::MmaSyncF32StreamKFixedOrderV1
+        } else {
+            ResolvedNumericContract::MmaSyncF32V1
+        };
+        let ownership = if stream_k {
+            ResolvedOutputOwnership::OwnerCtaPerOutputTileStreamKFixedOrderV1
+        } else {
+            ResolvedOutputOwnership::OneCtaPerOutputTileV1
+        };
+        let (m, k, n) = qualified.request.dims;
+        if eager.symbol != symbol
+            || eager.kind != PhysicalLaunchKind::Gemm
+            || eager.module_kind != ModuleKind::TriadSm80
+            || eager.logical_op != ResolvedGemmOp::Tn
+            || eager.logical_dtype != qualified.request.route.logical_dtype()
+            || eager.execution_dtype != qualified.request.route.logical_dtype()
+            || eager.shape != (m, k, n)
+            || eager.strides != (k, n, n)
+            || eager.tile != Some(tile)
+            || (route.bk, route.stages) != bk_stages
+            || eager.numeric_contract != Some(contract)
+            || eager.ownership != Some(ownership)
+            || eager.launch.grid_dim != (grid, 1, 1)
+            || eager.launch.block_dim != (threads, 1, 1)
+            || eager.launch.shared_mem_bytes != 0
+            || eager.launch.arguments_digest == [0; 32]
+        {
+            return Err(format!(
+                "G2 expected {symbol}, tile={tile:?}, BK/stages={bk_stages:?}, grid={grid}, threads={threads}, stream_k={stream_k}; observed {eager:?}, BK/stages={:?}",
+                (route.bk, route.stages)
+            ));
+        }
+        Ok(())
+    }
+
+    fn g2_exact_ada_142_context() -> GpuCtx {
+        let device = crate::mamba_ssm::gpu::device::GpuDevice::new(0).expect("CUDA device");
+        assert_eq!(device.compute_capability, (8, 9), "G2 exact Ada fixture");
+        assert_eq!(
+            device.multiprocessor_count(),
+            142,
+            "G2 measured-board fixture"
+        );
+        GpuCtx::new(&device).expect("G2 actual NVRTC context")
+    }
+
+    #[test]
+    #[ignore = "requires CC8.9/142SM; explicit half AUTO permission and actual eager/graph route"]
+    fn g2_half_auto_streamk_permission_is_not_lost() {
+        let ctx = g2_exact_ada_142_context();
+        ctx.set_half_triad_policy(HalfTriadPolicy::TiledParityV1);
+        // The explicit request must install permission independently of the
+        // ambient context, then restore the original tiled policy on drop.
+        let requests = [WeightDtype::Bf16, WeightDtype::F16].map(|dtype| {
+            PhysicalQualificationRequest::contiguous(
+                ResolvedGemmOp::Tn,
+                (10400, 384, 384),
+                PhysicalQualificationRoute::HalfPolicy {
+                    dtype,
+                    tensor_cores: true,
+                    half_policy: HalfTriadPolicy::AllowStreamKFixedOrderV1,
+                },
+            )
+        });
+        presize_physical_qualification_suite(&ctx, &requests).expect("G2 suite scratch");
+        let mut failures = Vec::new();
+        for (request, symbol) in requests.into_iter().zip([
+            "gemm_bi_tn_tc64_streamk_bf16",
+            "gemm_bi_tn_tc64_streamk_f16",
+        ]) {
+            let planned = request.timed_identity().expect("G2 AUTO identity");
+            assert_eq!(planned.planned_symbol, None, "AUTO must not force a symbol");
+            assert_eq!(planned.planned_tile, None, "AUTO must not force a tile");
+            let result = (|| -> Result<(), String> {
+                let mut qualified = qualify_physical_launch(&ctx, request)?;
+                qualified.validate_timed_request(&ctx, request)?;
+                g2_check_seeded_tn_eager_graph(&ctx, &mut qualified)?;
+                // 36 output tiles * 163 reduction slabs -> 142 persistent CTAs.
+                g2_check_half_tn_physical_evidence(
+                    &qualified,
+                    symbol,
+                    (64, 64),
+                    (64, 2),
+                    142,
+                    128,
+                    true,
+                )
+            })();
+            if let Err(error) = result {
+                failures.push(format!("{symbol}: {error}"));
+            }
+            assert_eq!(
+                ctx.half_triad_policy(),
+                HalfTriadPolicy::TiledParityV1,
+                "G2 lease must restore the original tiled policy even on error"
+            );
+        }
+        assert!(
+            failures.is_empty(),
+            "G2 AUTO permission/physical-route failures for both dtypes:\n{}",
+            failures.join("\n")
+        );
+    }
+
+    #[test]
+    #[ignore = "requires CC8.9/142SM; forced TN Rect128x64 actual eager/graph route"]
+    fn g2_half_forced_rectangular_prepares_the_exact_graph() {
+        let ctx = g2_exact_ada_142_context();
+        ctx.set_half_triad_policy(HalfTriadPolicy::TiledParityV1);
+        let requests = [WeightDtype::Bf16, WeightDtype::F16].map(|dtype| {
+            PhysicalQualificationRequest::one_element_offset(
+                ResolvedGemmOp::Tn,
+                (129, 131, 100),
+                PhysicalQualificationRoute::HalfForced {
+                    dtype,
+                    tile: TcTile::Rect128x64,
+                },
+                PhysicalQualificationOffset::Output,
+            )
+        });
+        presize_physical_qualification_suite(&ctx, &requests).expect("G2 suite scratch");
+        let mut failures = Vec::new();
+        for (request, symbol) in requests
+            .into_iter()
+            .zip(["gemm_bi_tn_tc128x64_bf16", "gemm_bi_tn_tc128x64_f16"])
+        {
+            let result = (|| -> Result<(), String> {
+                let mut qualified = qualify_physical_launch(&ctx, request)?;
+                qualified.validate_timed_request(&ctx, request)?;
+                g2_check_seeded_tn_eager_graph(&ctx, &mut qualified)?;
+                // 131x100 output: two row tiles * two column tiles.
+                g2_check_half_tn_physical_evidence(
+                    &qualified,
+                    symbol,
+                    (128, 64),
+                    (32, 3),
+                    4,
+                    256,
+                    false,
+                )
+            })();
+            if let Err(error) = result {
+                failures.push(format!("{symbol}: {error}"));
+            }
+            assert_eq!(
+                ctx.half_triad_policy(),
+                HalfTriadPolicy::TiledParityV1,
+                "G2 rectangular error must restore the original tiled policy"
+            );
+        }
+        assert!(
+            failures.is_empty(),
+            "G2 rectangular graph qualification failures for both dtypes:\n{}",
+            failures.join("\n")
+        );
+    }
+
     fn seeded_half_values(storage: QualificationStorage, salt: usize) -> Vec<f32> {
         let mut values = storage.host_values();
         for row in 0..storage.rows {
@@ -6515,6 +6930,7 @@ mod tests {
                     PhysicalQualificationRoute::HalfPolicy {
                         dtype: WeightDtype::Bf16,
                         tensor_cores: true,
+                        half_policy: HalfTriadPolicy::TiledParityV1,
                     },
                     PhysicalQualificationOffset::A,
                 ),

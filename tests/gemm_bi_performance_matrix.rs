@@ -13,7 +13,7 @@ use std::sync::{Mutex, OnceLock};
 use common::gpu_quiet::QuietGpu;
 use cudarc::driver::{CudaGraph, PushKernelArg};
 use mamba_rs::mamba_ssm::gpu::buffers::{DtypedBuf, GpuBuffer};
-use mamba_rs::mamba_ssm::gpu::context::{BiGemmFamily, F32TriadPolicy, GpuCtx};
+use mamba_rs::mamba_ssm::gpu::context::{BiGemmFamily, F32TriadPolicy, GpuCtx, HalfTriadPolicy};
 use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
 use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
 use mamba_rs::mamba_ssm::gpu::gemm_bi_triad::{
@@ -4282,6 +4282,7 @@ fn physical_qualification_route(route: Route) -> PhysicalQualificationRoute {
         } => PhysicalQualificationRoute::HalfPolicy {
             dtype,
             tensor_cores,
+            half_policy: HalfTriadPolicy::TiledParityV1,
         },
         Route::HalfForced { dtype, tile } => PhysicalQualificationRoute::HalfForced { dtype, tile },
         Route::Tf32Forced(spec) => PhysicalQualificationRoute::Tf32Forced(spec.route),

@@ -1,6 +1,6 @@
 #![cfg(feature = "cuda")]
 
-use mamba_rs::mamba_ssm::gpu::context::{BiGemmFamily, GpuCtx};
+use mamba_rs::mamba_ssm::gpu::context::{BiGemmFamily, GpuCtx, HalfTriadPolicy};
 use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
 use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
 use mamba_rs::mamba_ssm::gpu::gemm_bi_triad::{
@@ -420,6 +420,7 @@ fn record_half_fixture(
         PhysicalQualificationRoute::HalfPolicy {
             dtype: fixture.dtype,
             tensor_cores: fixture.tensor_cores,
+            half_policy: HalfTriadPolicy::TiledParityV1,
         }
     };
     let request = PhysicalQualificationRequest::contiguous(fixture.op, fixture.dims, route);
@@ -439,6 +440,7 @@ fn half_trace_context() -> GpuCtx {
             PhysicalQualificationRoute::HalfPolicy {
                 dtype: WeightDtype::Bf16,
                 tensor_cores: true,
+                half_policy: HalfTriadPolicy::TiledParityV1,
             },
         ),
         PhysicalQualificationRequest::contiguous(
@@ -447,6 +449,7 @@ fn half_trace_context() -> GpuCtx {
             PhysicalQualificationRoute::HalfPolicy {
                 dtype: WeightDtype::Bf16,
                 tensor_cores: false,
+                half_policy: HalfTriadPolicy::TiledParityV1,
             },
         ),
         PhysicalQualificationRequest::contiguous(
@@ -455,6 +458,7 @@ fn half_trace_context() -> GpuCtx {
             PhysicalQualificationRoute::HalfPolicy {
                 dtype: WeightDtype::Bf16,
                 tensor_cores: false,
+                half_policy: HalfTriadPolicy::TiledParityV1,
             },
         ),
         PhysicalQualificationRequest::contiguous(
@@ -463,6 +467,7 @@ fn half_trace_context() -> GpuCtx {
             PhysicalQualificationRoute::HalfPolicy {
                 dtype: WeightDtype::Bf16,
                 tensor_cores: false,
+                half_policy: HalfTriadPolicy::TiledParityV1,
             },
         ),
     ];

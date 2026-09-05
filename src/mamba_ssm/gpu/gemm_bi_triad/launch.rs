@@ -9879,6 +9879,10 @@ pub(in crate::mamba_ssm::gpu) fn prepare_native_half_graph_identity<O: PhysicalL
         "gemm_bi_tn_tc64" => {
             HalfKernelChoice::new(base, ctx.kernels.gemm_bi_tn_tc64_typed.get(request.dtype))
         }
+        "gemm_bi_tn_tc128x64" => HalfKernelChoice::new(
+            base,
+            ctx.kernels.gemm_bi_tn_tc128x64_typed.get(request.dtype),
+        ),
         "gemm_bi_tn_tc64_streamk" => HalfKernelChoice::new(
             base,
             ctx.kernels

@@ -1516,6 +1516,7 @@ fn sm120_auto_physical_qualification_matches_eager_and_graph() {
             PhysicalQualificationRoute::HalfPolicy {
                 dtype: route.dtype,
                 tensor_cores: true,
+                half_policy: HalfTriadPolicy::TiledParityV1,
             },
         )
     });
