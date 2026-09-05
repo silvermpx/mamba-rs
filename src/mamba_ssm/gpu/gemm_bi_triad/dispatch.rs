@@ -529,7 +529,8 @@ use Tf32AutoOperandGate::{
 
 /// Exact SM89 TF32 evidence inventory. Production preparation supplies the
 /// concrete epilogue and pointers required to match an archived cell. The
-/// request-only API therefore stays on the scalar route.
+/// request-only API therefore stays on the scalar route. Requalification
+/// records follow the archived rows; the last matching record takes precedence.
 const SM89_TF32_EVIDENCE_CELLS: &[Tf32AutoCell] = &[
     sm89_tf32_cell(
         Nn,
@@ -1851,9 +1852,12 @@ fn measured_tf32_cell(
     operands: F32TriadOperands,
     cells: &[Tf32AutoCell],
 ) -> Option<Tf32PhysicalRoute> {
+    // Later qualification records supersede earlier results for the same
+    // exact shape. Searching from the front can silently serve an obsolete
+    // tile even when the cohort contains a measured replacement.
     cells
         .iter()
-        .find(|cell| {
+        .rfind(|cell| {
             cell.op == request.op
                 && cell.shape.matches_contiguous(request)
                 && tf32_auto_operands_match(request.op, operands)
@@ -10812,7 +10816,7 @@ mod tf32_tests {
             };
             let expected = SM89_TF32_EVIDENCE_CELLS
                 .iter()
-                .find(|cell| {
+                .rfind(|cell| {
                     cell.op == op
                         && cell.shape.output_rows == rows
                         && cell.shape.output_columns == columns
@@ -11191,6 +11195,86 @@ mod tf32_tests {
                 .unwrap(),
                 F32TriadSelection::Tf32(_)
             ));
+        }
+    }
+
+    #[test]
+    fn sm89_tf32_requalification_overrides_archived_routes() {
+        // These winners come from the wide5 and hot selector records. The
+        // older, unlabelled rows must not shadow their later requalification.
+        let cases = [
+            (
+                ResolvedGemmOp::Nn,
+                2048,
+                3072,
+                768,
+                Tf32PortableTile::M128N128,
+                Tf32PortableStages::S3,
+            ),
+            (
+                ResolvedGemmOp::Nn,
+                2048,
+                768,
+                1536,
+                Tf32PortableTile::M128N128,
+                Tf32PortableStages::S3,
+            ),
+            (
+                ResolvedGemmOp::Nn,
+                4621,
+                1928,
+                384,
+                Tf32PortableTile::M128N128,
+                Tf32PortableStages::S3,
+            ),
+            (
+                ResolvedGemmOp::Nn,
+                4096,
+                1536,
+                3072,
+                Tf32PortableTile::M128N128,
+                Tf32PortableStages::S3,
+            ),
+            (
+                ResolvedGemmOp::Nn,
+                2048,
+                768,
+                3072,
+                Tf32PortableTile::M128N128,
+                Tf32PortableStages::S3,
+            ),
+            (
+                ResolvedGemmOp::Tn,
+                512,
+                384,
+                256,
+                Tf32PortableTile::M16N32,
+                Tf32PortableStages::S4,
+            ),
+        ];
+        for (op, rows, columns, reduction, tile, stages) in cases {
+            let operands = F32TriadOperands {
+                output: 0x1000,
+                a: 0x2000,
+                b: 0x3000,
+                bias: None,
+                alpha: 1.0,
+                beta: if op == ResolvedGemmOp::Tn { 1.0 } else { 0.0 },
+            };
+            assert_eq!(
+                resolve_f32_triad_auto_with_operands(
+                    F32TriadPolicy::AllowDeterministicTf32V1,
+                    normalized_request(op, rows, columns, reduction),
+                    operands,
+                    sm89_availability(),
+                )
+                .unwrap(),
+                F32TriadSelection::Tf32(Tf32PhysicalRoute::MmaTf32RnaV1(Tf32PortableRoute {
+                    tile,
+                    stages
+                },)),
+                "requalified winner is shadowed for {op:?} {rows}x{columns} over {reduction}",
+            );
         }
     }
 

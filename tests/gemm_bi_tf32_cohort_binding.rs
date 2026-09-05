@@ -58,6 +58,21 @@ fn tf32_cohort_binds_on_this_board() {
             "cc={:?} dims={dims:?} tf32={tf32} served={served}",
             device.compute_capability
         );
+        if device.compute_capability == (8, 9)
+            && device.multiprocessor_count() == 142
+            && matches!(
+                dims,
+                (2048, 768, 3072) | (2048, 1536, 768) | (4621, 384, 1928)
+            )
+        {
+            assert!(
+                nodes.iter().any(|node| {
+                    node.module_kind == ModuleKind::TriadSm80
+                        && node.symbol == "gemm_bi_nn_sm80_mma_tf32_v1_m128n128_bk32_s3"
+                }),
+                "SM89 requalified wide winner did not serve {dims:?}: {served}",
+            );
+        }
     }
     assert!(
         tf32_served > 0,
