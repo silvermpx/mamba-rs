@@ -1354,6 +1354,14 @@ fn prepare_f32_physical_graph_observer(
 ) -> Result<RecordingPhysicalObserver, String> {
     let request = prepared.physical_graph_request();
     let operands = prepared.physical_graph_operands();
+    let ranges = f32_physical_argument_ranges(request, operands)?;
+    prepare_physical_observer(ctx, capacity, &ranges)
+}
+
+fn f32_physical_argument_ranges(
+    request: super::gemm_bi_triad::F32TriadRequest,
+    operands: super::gemm_bi_triad::F32TriadOperands,
+) -> Result<Vec<PhysicalArgumentRange>, String> {
     request.shape.validate(request.op)?;
     let shape = request.shape;
     let (a_geometry, b_geometry, output_geometry) = match request.op {
@@ -1373,15 +1381,26 @@ fn prepare_f32_physical_graph_observer(
             (shape.m, shape.k, shape.ldc),
         ),
     };
+    // Epilogue-only zero-reduction launches bind null A/B and never read
+    // either allocation. Keep output/bias liveness and all nonzero operand
+    // geometry checks; do not weaken the shared half-storage validator.
+    let operand_ranges = if shape.reduction(request.op) == 0 {
+        1
+    } else {
+        3
+    };
     let mut ranges = Vec::new();
     ranges
-        .try_reserve_exact(3 + usize::from(operands.bias.is_some()))
+        .try_reserve_exact(operand_ranges + usize::from(operands.bias.is_some()))
         .map_err(|error| format!("reserve physical F32 argument ranges: {error}"))?;
     for (pointer, (rows, width, stride), name) in [
         (operands.output, output_geometry, "output"),
         (operands.a, a_geometry, "A"),
         (operands.b, b_geometry, "B"),
-    ] {
+    ]
+    .into_iter()
+    .take(operand_ranges)
+    {
         let elements = physical_f32_storage_elements(rows, width, stride, name)?;
         ranges.push(PhysicalArgumentRange {
             pointer,
@@ -1397,7 +1416,7 @@ fn prepare_f32_physical_graph_observer(
     if ranges.capacity() != ranges.len() {
         return Err("physical F32 argument range capacity is not exact".into());
     }
-    prepare_physical_observer(ctx, capacity, &ranges)
+    Ok(ranges)
 }
 
 fn prepare_half_physical_observer(
@@ -2277,6 +2296,87 @@ pub fn gpu_gemm_bi_tied_lm_head_blas(
 #[cfg(test)]
 mod physical_graph_tests {
     use super::*;
+    #[test]
+    fn f32_physical_ranges_omit_unread_zero_reduction_operands() {
+        use super::super::gemm_bi_triad::{F32TriadOperands, F32TriadRequest, F32TriadShape};
+        for (op, dims, expected_output_bytes) in [
+            (ResolvedGemmOp::Nn, (3, 0, 5), 60),
+            (ResolvedGemmOp::Tn, (0, 4, 5), 80),
+            (ResolvedGemmOp::Nt, (3, 4, 0), 48),
+        ] {
+            for bias in [None, Some(0x4000)]
+                .into_iter()
+                .take(if op == ResolvedGemmOp::Nn { 2 } else { 1 })
+            {
+                let request = F32TriadRequest {
+                    op,
+                    shape: F32TriadShape::contiguous(op, dims),
+                };
+                let operands = F32TriadOperands {
+                    output: 0x1000,
+                    a: 0,
+                    b: 0,
+                    bias,
+                    alpha: 1.0,
+                    beta: 0.0,
+                };
+                // Raw A/B really are null: this epilogue-only kernel must not
+                // require allocation identity for either unread operand.
+                let ranges = f32_physical_argument_ranges(request, operands)
+                    .unwrap_or_else(|error| panic!("{op:?} {dims:?} bias={bias:?}: {error}"));
+                let observed: Vec<_> = ranges
+                    .iter()
+                    .map(|r| (r.pointer, r.required_bytes))
+                    .collect();
+                let mut expected = vec![(0x1000, expected_output_bytes)];
+                if bias.is_some() {
+                    expected.push((0x4000, (dims.2 * 4) as u64));
+                }
+                assert_eq!(observed, expected);
+                assert_eq!(ranges.len(), ranges.capacity());
+            }
+        }
+    }
+
+    #[test]
+    fn f32_physical_ranges_retain_nonempty_operand_bounds() {
+        use super::super::gemm_bi_triad::{F32TriadOperands, F32TriadRequest, F32TriadShape};
+        for (op, sizes) in [
+            (ResolvedGemmOp::Nn, [60, 48, 80]),
+            (ResolvedGemmOp::Tn, [80, 48, 60]),
+            (ResolvedGemmOp::Nt, [48, 60, 80]),
+        ] {
+            let request = F32TriadRequest {
+                op,
+                shape: F32TriadShape::contiguous(op, (3, 4, 5)),
+            };
+            let operands = F32TriadOperands {
+                output: 0x1000,
+                a: 0x2000,
+                b: 0x3000,
+                bias: None,
+                alpha: 1.0,
+                beta: 0.0,
+            };
+            let ranges = f32_physical_argument_ranges(request, operands).unwrap();
+            assert_eq!(
+                ranges
+                    .iter()
+                    .map(|r| (r.pointer, r.required_bytes))
+                    .collect::<Vec<_>>(),
+                vec![(0x1000, sizes[0]), (0x2000, sizes[1]), (0x3000, sizes[2])]
+            );
+            assert_eq!(ranges.len(), ranges.capacity());
+            let mut invalid = request;
+            invalid.shape.lda = 0;
+            assert!(f32_physical_argument_ranges(invalid, operands).is_err());
+        }
+        assert!(physical_f32_storage_elements(3, 0, 0, "active").is_err());
+        assert!(physical_f32_storage_elements(0, 4, 4, "active").is_err());
+        assert!(physical_f32_storage_elements(3, 4, 3, "active").is_err());
+        assert!(physical_f32_storage_elements(usize::MAX, 4, 4, "active").is_err());
+    }
+
     use crate::mamba_ssm::gpu::buffers::DtypedBuf;
     use crate::mamba_ssm::gpu::context::{BiGemmFamily, F32TriadPolicy};
     use crate::mamba_ssm::gpu::device::GpuDevice;

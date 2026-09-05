@@ -1000,10 +1000,272 @@ struct QualifiedF32Resources {
     bias: Option<GpuBuffer>,
     prepared: Option<PreparedF32TriadLaunch>,
     binding: (u64, u64, u64, Option<u64>),
+    // Active C/A/B/bias extents; allocations additionally retain trailing guards.
+    active: [usize; 4],
+}
+
+fn f32_guarded_len(active: usize) -> Result<usize, String> {
+    let len = active
+        .checked_add(QUALIFICATION_GUARD_ELEMENTS)
+        .ok_or_else(|| "F32 qualification trailing guard extent overflows usize".to_string())?;
+    len.checked_mul(std::mem::size_of::<f32>())
+        .filter(|&bytes| bytes <= isize::MAX as usize)
+        .ok_or_else(|| {
+            "F32 qualification guarded byte span exceeds host allocation bound".to_string()
+        })?;
+    Ok(len)
+}
+
+fn f32_guarded_values(active: &[f32]) -> Result<Vec<f32>, String> {
+    let mut values = Vec::with_capacity(f32_guarded_len(active.len())?);
+    values.extend_from_slice(active);
+    values.resize(f32_guarded_len(active.len())?, QUALIFICATION_GUARD_VALUE);
+    Ok(values)
+}
+
+fn validate_f32_trailing_guard(
+    values: &[f32],
+    active: usize,
+    label: &str,
+) -> Result<usize, String> {
+    if values.len() != f32_guarded_len(active)? {
+        return Err(format!("{label}: F32 qualification guarded extent changed"));
+    }
+    if let Some(index) = values[active..]
+        .iter()
+        .position(|x| x.to_bits() != QUALIFICATION_GUARD_VALUE.to_bits())
+    {
+        return Err(format!(
+            "{label}: F32 trailing guard changed at element {}",
+            active + index
+        ));
+    }
+    Ok(QUALIFICATION_GUARD_ELEMENTS)
+}
+
+fn upload_f32_guarded(ctx: &GpuCtx, buffer: &mut GpuBuffer, active: &[f32]) -> Result<(), String> {
+    let values = f32_guarded_values(active)?;
+    buffer.upload(&ctx.stream, &values)?;
+    // The borrowed upload source must outlive asynchronous H2D work.
+    ctx.stream
+        .synchronize()
+        .map_err(|error| format!("synchronize F32 guarded upload: {error:?}"))
+}
+
+#[cfg(test)]
+mod f32_trailing_guard_tests {
+    use super::*;
+
+    #[test]
+    fn f32_guarded_storage_keeps_active_bits_and_covers_empty_operands() {
+        let active = [f32::from_bits(0x80000000), f32::from_bits(0x7f800001), 1.25];
+        let guarded = f32_guarded_values(&active).unwrap();
+        assert_eq!(guarded.len(), 35);
+        assert_eq!(
+            guarded[..3].iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+            [0x80000000, 0x7f800001, 0x3fa00000]
+        );
+        assert_eq!(
+            validate_f32_trailing_guard(&guarded, 3, "fixture").unwrap(),
+            32
+        );
+        assert_eq!(f32_guarded_values(&[]).unwrap().len(), 32);
+        assert_eq!(f32_guarded_len(0).unwrap(), 32);
+        assert!(f32_guarded_len(usize::MAX).is_err());
+        assert!(f32_guarded_len(usize::MAX - 31).is_err());
+        assert!(f32_guarded_len(usize::MAX / std::mem::size_of::<f32>()).is_err());
+    }
+
+    #[test]
+    fn f32_guarded_storage_rejects_each_corrupted_tail_and_wrong_span() {
+        let mut values = vec![QUALIFICATION_GUARD_VALUE; 35];
+        values[..3].fill(-0.0);
+        assert_eq!(
+            validate_f32_trailing_guard(&values, 3, "fixture").unwrap(),
+            32
+        );
+        for index in 3..35 {
+            values[index] = 0.0;
+            assert!(
+                validate_f32_trailing_guard(&values, 3, "fixture").is_err(),
+                "guard {index}"
+            );
+            values[index] = QUALIFICATION_GUARD_VALUE;
+        }
+        assert!(validate_f32_trailing_guard(&values[..34], 3, "fixture").is_err());
+        assert!(validate_f32_trailing_guard(&values, 2, "fixture").is_err());
+    }
+
+    #[test]
+    #[ignore = "requires CUDA: actual trailing-canary corruption, active readback, NN/TN/NT and NN K0"]
+    fn f32_trailing_guard_gpu_readback_corruption_and_replay() {
+        let device = crate::mamba_ssm::gpu::device::GpuDevice::new(0).unwrap();
+        let ctx = GpuCtx::new(&device).unwrap();
+        for (op, dims, bias) in [
+            (ResolvedGemmOp::Nn, (3, 4, 5), false),
+            (ResolvedGemmOp::Nn, (3, 4, 5), true),
+            (ResolvedGemmOp::Tn, (3, 4, 5), false),
+            (ResolvedGemmOp::Nt, (3, 4, 5), false),
+            (ResolvedGemmOp::Nn, (3, 0, 5), false),
+            (ResolvedGemmOp::Nn, (3, 0, 5), true),
+        ] {
+            let original = ctx.gemm_route();
+            let request = PhysicalQualificationRequest::contiguous_f32(
+                op,
+                dims,
+                PhysicalQualificationRoute::F32Policy(F32TriadPolicy::ExactScalarFmaV1),
+                PhysicalQualificationF32Epilogue::new(
+                    1.0,
+                    if op == ResolvedGemmOp::Tn { 1.0 } else { 0.0 },
+                    bias,
+                ),
+            );
+            let mut launch = qualify_physical_launch(&ctx, request).unwrap_or_else(|error| {
+                panic!("F32 trailing guard {op:?} {dims:?} bias={bias}: {error}")
+            });
+            let (m, k, n) = dims;
+            let (c_len, a_len, b_len) = match op {
+                ResolvedGemmOp::Nn => (m * n, m * k, k * n),
+                ResolvedGemmOp::Tn => (k * n, m * k, m * n),
+                ResolvedGemmOp::Nt => (m * k, m * n, k * n),
+            };
+            let salt = 0x3947;
+            let expected_a = seeded_qualification_values(a_len, salt ^ 0x2d)
+                .into_iter()
+                .map(f32::to_bits)
+                .collect::<Vec<_>>();
+            let expected_b = seeded_qualification_values(b_len, salt ^ 0x67)
+                .into_iter()
+                .map(f32::to_bits)
+                .collect::<Vec<_>>();
+            let allocations = 3 + usize::from(bias);
+            let raw_a = (0..a_len)
+                .map(|i| f32::from_bits([0x80000000, 0x7f800001, 0x3fa00000][i % 3]))
+                .collect::<Vec<_>>();
+            let raw_b = (0..b_len)
+                .map(|i| f32::from_bits([0x7fc12345, 0x00000001, 0xbf800000][i % 3]))
+                .collect::<Vec<_>>();
+            if let QualifiedPhysicalResources::F32(resources) = &mut launch.resources {
+                upload_f32_guarded(&ctx, &mut resources.a, &raw_a).unwrap();
+                upload_f32_guarded(&ctx, &mut resources.b, &raw_b).unwrap();
+            }
+            assert_eq!(
+                launch.f32_operand_bits(&ctx).unwrap(),
+                (
+                    raw_a.iter().map(|x| x.to_bits()).collect(),
+                    raw_b.iter().map(|x| x.to_bits()).collect()
+                )
+            );
+            for corrupt in 0..allocations {
+                launch.seed_f32_operands(&ctx, salt).unwrap();
+                assert_eq!(
+                    launch.f32_operand_bits(&ctx).unwrap(),
+                    (expected_a.clone(), expected_b.clone())
+                );
+                assert_eq!(launch.f32_output_bits(&ctx).unwrap().len(), c_len);
+                let guards = launch.validate_red_zones(&ctx).unwrap();
+                assert_eq!(
+                    (guards.allocation_count(), guards.element_count()),
+                    (allocations, allocations * 32)
+                );
+                let QualifiedPhysicalResources::F32(resources) = &mut launch.resources else {
+                    panic!("F32 resources");
+                };
+                assert_eq!(resources.binding.0, resources.output.cached_ptr());
+                assert_eq!(resources.binding.1, resources.a.cached_ptr());
+                assert_eq!(resources.binding.2, resources.b.cached_ptr());
+                let active = resources.active[corrupt];
+                let buffer = match corrupt {
+                    0 => &mut resources.output,
+                    1 => &mut resources.a,
+                    2 => &mut resources.b,
+                    _ => resources.bias.as_mut().unwrap(),
+                };
+                let mut values = buffer.to_cpu(&ctx.stream).unwrap();
+                ctx.stream.synchronize().unwrap();
+                values[active + 31] = 0.0;
+                buffer.upload(&ctx.stream, &values).unwrap();
+                ctx.stream.synchronize().unwrap();
+                assert!(
+                    launch.validate_red_zones(&ctx).is_err(),
+                    "missed allocation {corrupt} corruption"
+                );
+            }
+            let mut golden = None;
+            for graph in [false, true, true, false] {
+                launch.seed_f32_operands(&ctx, salt).unwrap();
+                if graph {
+                    launch.measure_graph_window_ms(&ctx, 1).unwrap();
+                } else {
+                    launch.measure_eager_window_ms(&ctx, 1).unwrap();
+                }
+                let actual = launch.f32_output_bits(&ctx).unwrap();
+                assert_eq!(actual.len(), c_len);
+                assert!(actual.iter().all(|&x| f32::from_bits(x).is_finite()));
+                if op == ResolvedGemmOp::Nn && k == 0 {
+                    let bias_values = seeded_qualification_values(n, salt ^ 0xc3);
+                    for (index, &word) in actual.iter().enumerate() {
+                        assert_eq!(
+                            word,
+                            if bias {
+                                bias_values[index % n].to_bits()
+                            } else {
+                                0
+                            }
+                        );
+                    }
+                }
+                if let Some(golden) = &golden {
+                    assert_eq!(&actual, golden);
+                } else {
+                    golden = Some(actual);
+                }
+                assert_eq!(
+                    launch.f32_operand_bits(&ctx).unwrap(),
+                    (expected_a.clone(), expected_b.clone())
+                );
+                assert_eq!(
+                    launch.validate_red_zones(&ctx).unwrap().allocation_count(),
+                    allocations
+                );
+            }
+            if op == ResolvedGemmOp::Nn && k > 0 {
+                launch.seed_f32_nn_single_term_probe(&ctx).unwrap();
+                launch.measure_graph_window_ms(&ctx, 1).unwrap();
+                assert_eq!(
+                    launch.validate_red_zones(&ctx).unwrap().allocation_count(),
+                    allocations
+                );
+                let actual = launch.f32_output_bits(&ctx).unwrap();
+                for (index, &word) in actual.iter().enumerate() {
+                    let a = ((index / n % 7) as i32 - 3) as f32 * 0.125;
+                    let b = ((index % n % 11) as i32 - 5) as f32 * 0.125;
+                    assert_eq!(word, a.mul_add(b, 0.0).to_bits());
+                }
+            }
+            drop(launch);
+            assert_eq!(ctx.gemm_route(), original);
+            println!(
+                "F32 trailing guard PASS op={op:?} dims={dims:?} bias={bias} allocations={allocations}"
+            );
+        }
+    }
 }
 
 impl QualifiedF32Resources {
     fn validate(&self) -> Result<(), String> {
+        for (buffer, active) in [
+            (&self.output, self.active[0]),
+            (&self.a, self.active[1]),
+            (&self.b, self.active[2]),
+        ]
+        .into_iter()
+        .chain(self.bias.as_ref().map(|buffer| (buffer, self.active[3])))
+        {
+            if buffer.len() != f32_guarded_len(active)? {
+                return Err("qualified F32 active/guard allocation extent changed".into());
+            }
+        }
         let current = (
             self.output.cached_ptr(),
             self.a.cached_ptr(),
@@ -1015,6 +1277,33 @@ impl QualifiedF32Resources {
         } else {
             Err("qualified F32 resource binding changed".into())
         }
+    }
+
+    fn validate_red_zones(&self, ctx: &GpuCtx) -> Result<QualifiedGuardValidation, String> {
+        let mut element_count = 0;
+        let mut allocation_count = 0;
+        for (buffer, active, label) in [
+            (&self.output, self.active[0], "output"),
+            (&self.a, self.active[1], "A"),
+            (&self.b, self.active[2], "B"),
+        ]
+        .into_iter()
+        .chain(
+            self.bias
+                .as_ref()
+                .map(|buffer| (buffer, self.active[3], "bias")),
+        ) {
+            let values = buffer.to_cpu(&ctx.stream)?;
+            ctx.stream
+                .synchronize()
+                .map_err(|error| format!("synchronize F32 guard readback: {error:?}"))?;
+            element_count += validate_f32_trailing_guard(&values, active, label)?;
+            allocation_count += 1;
+        }
+        Ok(QualifiedGuardValidation {
+            allocation_count,
+            element_count,
+        })
     }
 }
 
@@ -1191,10 +1480,7 @@ impl QualifiedPhysicalResources {
 
     fn validate_red_zones(&self, ctx: &GpuCtx) -> Result<QualifiedGuardValidation, String> {
         match self {
-            Self::F32(_) => Ok(QualifiedGuardValidation {
-                allocation_count: 0,
-                element_count: 0,
-            }),
+            Self::F32(resources) => resources.validate_red_zones(ctx),
             Self::Half(resources) => {
                 let element_count = resources.validate_red_zones(ctx)?;
                 Ok(QualifiedGuardValidation {
@@ -1471,22 +1757,26 @@ impl QualifiedPhysicalLaunch<'_> {
         let QualifiedPhysicalResources::F32(resources) = &mut self.resources else {
             return Err("F32 operand seeding requires an F32 qualification route".into());
         };
-        resources.output.upload(
-            &ctx.stream,
-            &seeded_qualification_values(resources.output.len(), salt ^ 0x91),
+        upload_f32_guarded(
+            ctx,
+            &mut resources.output,
+            &seeded_qualification_values(resources.active[0], salt ^ 0x91),
         )?;
-        resources.a.upload(
-            &ctx.stream,
-            &seeded_qualification_values(resources.a.len(), salt ^ 0x2d),
+        upload_f32_guarded(
+            ctx,
+            &mut resources.a,
+            &seeded_qualification_values(resources.active[1], salt ^ 0x2d),
         )?;
-        resources.b.upload(
-            &ctx.stream,
-            &seeded_qualification_values(resources.b.len(), salt ^ 0x67),
+        upload_f32_guarded(
+            ctx,
+            &mut resources.b,
+            &seeded_qualification_values(resources.active[2], salt ^ 0x67),
         )?;
         if let Some(bias) = &mut resources.bias {
-            bias.upload(
-                &ctx.stream,
-                &seeded_qualification_values(bias.len(), salt ^ 0xc3),
+            upload_f32_guarded(
+                ctx,
+                bias,
+                &seeded_qualification_values(resources.active[3], salt ^ 0xc3),
             )?;
         }
         ctx.stream
@@ -1510,21 +1800,19 @@ impl QualifiedPhysicalLaunch<'_> {
             return Err("single-term F32 probe requires an F32 qualification route".into());
         };
         let (m, k, n) = self.request.dims;
-        let mut a = vec![0.0; resources.a.len()];
-        let mut b = vec![0.0; resources.b.len()];
+        let mut a = vec![0.0; resources.active[1]];
+        let mut b = vec![0.0; resources.active[2]];
         for row in 0..m {
             a[row * k] = ((row % 7) as i32 - 3) as f32 * 0.125;
         }
         for (column, value) in b.iter_mut().take(n).enumerate() {
             *value = ((column % 11) as i32 - 5) as f32 * 0.125;
         }
-        resources
-            .output
-            .upload(&ctx.stream, &vec![0.0; resources.output.len()])?;
-        resources.a.upload(&ctx.stream, &a)?;
-        resources.b.upload(&ctx.stream, &b)?;
+        upload_f32_guarded(ctx, &mut resources.output, &vec![0.0; resources.active[0]])?;
+        upload_f32_guarded(ctx, &mut resources.a, &a)?;
+        upload_f32_guarded(ctx, &mut resources.b, &b)?;
         if let Some(bias) = &mut resources.bias {
-            bias.upload(&ctx.stream, &vec![0.0; bias.len()])?;
+            upload_f32_guarded(ctx, bias, &vec![0.0; resources.active[3]])?;
         }
         ctx.stream
             .synchronize()
@@ -1538,12 +1826,40 @@ impl QualifiedPhysicalLaunch<'_> {
         let QualifiedPhysicalResources::F32(resources) = &self.resources else {
             return Err("F32 output download requires an F32 qualification route".into());
         };
-        Ok(resources
-            .output
-            .to_cpu(&ctx.stream)?
+        let values = resources.output.to_cpu(&ctx.stream)?;
+        ctx.stream
+            .synchronize()
+            .map_err(|error| format!("synchronize F32 output readback: {error:?}"))?;
+        Ok(values
             .into_iter()
+            .take(resources.active[0])
             .map(f32::to_bits)
             .collect())
+    }
+
+    /// Downloads active F32 A/B words, excluding trailing red zones.
+    /// This read-only qualification hook verifies independently seeded vendor inputs.
+    pub fn f32_operand_bits(&self, ctx: &GpuCtx) -> Result<(Vec<u32>, Vec<u32>), String> {
+        self.policy.validate(ctx)?;
+        self.resources.validate()?;
+        let QualifiedPhysicalResources::F32(resources) = &self.resources else {
+            return Err("F32 operand download requires an F32 qualification route".into());
+        };
+        let a = resources.a.to_cpu(&ctx.stream)?;
+        let b = resources.b.to_cpu(&ctx.stream)?;
+        ctx.stream
+            .synchronize()
+            .map_err(|error| format!("synchronize F32 operand readback: {error:?}"))?;
+        Ok((
+            a.into_iter()
+                .take(resources.active[1])
+                .map(f32::to_bits)
+                .collect(),
+            b.into_iter()
+                .take(resources.active[2])
+                .map(f32::to_bits)
+                .collect(),
+        ))
     }
 
     /// Measures exact graph replays and returns total CUDA-event window milliseconds.
@@ -2388,12 +2704,21 @@ fn allocate_f32_resources(
         ResolvedGemmOp::Tn => (kn, mk, mn),
         ResolvedGemmOp::Nt => (mk, mn, kn),
     };
-    let output = GpuBuffer::zeros(&ctx.stream, output_len)?;
-    let a = GpuBuffer::zeros(&ctx.stream, a_len)?;
-    let b = GpuBuffer::zeros(&ctx.stream, b_len)?;
+    let allocate = |active| {
+        f32_guarded_len(active)?;
+        let values = f32_guarded_values(&vec![0.0; active])?;
+        let buffer = GpuBuffer::from_cpu(&ctx.stream, &values)?;
+        ctx.stream
+            .synchronize()
+            .map_err(|error| format!("synchronize F32 guarded allocation: {error:?}"))?;
+        Ok::<_, String>(buffer)
+    };
+    let output = allocate(output_len)?;
+    let a = allocate(a_len)?;
+    let b = allocate(b_len)?;
     let epilogue = request.f32_epilogue();
     let bias = if epilogue.bias {
-        Some(GpuBuffer::zeros(&ctx.stream, n)?)
+        Some(allocate(n)?)
     } else {
         None
     };
@@ -2432,6 +2757,7 @@ fn allocate_f32_resources(
         bias,
         prepared,
         binding,
+        active: [output_len, a_len, b_len, if epilogue.bias { n } else { 0 }],
     })
 }
 
