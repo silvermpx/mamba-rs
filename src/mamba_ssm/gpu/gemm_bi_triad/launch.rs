@@ -13757,7 +13757,7 @@ mod prepared_f32_launch_tests {
         assert_eq!(resolved.tensor_maps_digest, [0; 32]);
         assert_eq!(resolved.resources_digest, [2; 32]);
         assert_eq!(resolved.launch.arguments_digest, [3; 32]);
-        assert_eq!(resolved.tuning_table_revision, 38);
+        assert_eq!(resolved.tuning_table_revision, 39);
 
         let eager = build_resolved_gemm_launch_set(&[resolved]).unwrap();
         let graph = build_resolved_gemm_launch_set(&[resolved]).unwrap();
@@ -13824,7 +13824,7 @@ mod prepared_f32_launch_tests {
         assert_eq!(resolved.tensor_maps_digest, [1; 32]);
         assert_eq!(resolved.resources_digest, [2; 32]);
         assert_eq!(resolved.launch.arguments_digest, [3; 32]);
-        assert_eq!(resolved.tuning_table_revision, 38);
+        assert_eq!(resolved.tuning_table_revision, 39);
 
         let launch_set = build_resolved_gemm_launch_set(&[resolved]).unwrap();
         assert_eq!(launch_set.launch_count, 1);

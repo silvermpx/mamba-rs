@@ -30,7 +30,9 @@ const CACHE_FORMAT_VERSION: u16 = 1;
 pub const COMPOSER_REVISION: u16 = 1;
 pub const COMPILER_REVISION: u16 = 3;
 pub const NUMERIC_ABI_REVISION: u16 = 5;
-pub const TUNING_TABLE_REVISION: u16 = 38;
+// Host dispatch epoch: fresh 595.58.03 SM120 cells; unchanged modules and
+// retained cohorts keep their original evidence, while all graphs re-capture.
+pub const TUNING_TABLE_REVISION: u16 = 39;
 pub const SCHEDULE_REVISION: u16 = 8;
 
 const NUMERIC_CONTRACT_DOMAIN: &[u8] = b"mamba-rs.resolved-numeric-contract.v2";
@@ -4956,6 +4958,24 @@ mod physical_launch_tests {
         }
     }
 
+    #[test]
+    fn fresh_sm120_dispatch_epoch_rejects_revision38_graph_identity() {
+        let current = physical_context();
+        let mut captured = current;
+        captured.tuning_table_revision = 38;
+        // A host-only table change must invalidate captured dispatch identity
+        // even though its compiled modules and numeric/schedule contracts stay.
+        assert_eq!(captured.compiler, current.compiler);
+        assert_eq!(captured.artifacts, current.artifacts);
+        let error = captured
+            .ensure_current(current, "revision38 graph replay")
+            .expect_err("host-only cohort promotion reused the revision38 graph identity");
+        assert!(error.contains("re-capture before replay"));
+        current
+            .ensure_current(current, "current graph replay")
+            .unwrap();
+    }
+
     pub(super) fn synthetic_scalar_route() -> ResolvedGemmRoute {
         let context = physical_context();
         ResolvedGemmRoute {
@@ -5511,7 +5531,7 @@ mod cache_and_header_tests {
     #[test]
     fn only_the_tuning_table_revision_moved() {
         assert_eq!(NUMERIC_ABI_REVISION, 5);
-        assert_eq!(TUNING_TABLE_REVISION, 38);
+        assert_eq!(TUNING_TABLE_REVISION, 39);
     }
 
     #[test]
