@@ -978,6 +978,28 @@ toolkits before the separate dispatch/epoch/post-AUTO confirmation step.
 Keep all old candidates and frozen evidence; no cleanup or other-architecture
 qualification was performed here. Half/mixed and Triad gaps remain open.
 
+### Ada RNA full-corpus three-toolkit proof (2026-09-06)
+
+The known force-test gap is closed by a one-test-file change. Force mode now
+uses the full tail/A–E corpus and the same C4/C16/prefix/row-view matrix as
+the13.2 AUTO wrapper, without inheriting its AUTO assertions. The intended
+host regression first failed for the old two-family force list, then passed.
+
+Matching12.8/13.0 cold+warm force tests each pass2/2 with exactly448 unique
+view groups.13.2 force2/2 and actual-AUTO1/1 each pass448 groups. Full five-
+rung raw-bit comparisons, finite/exceptional inputs, bias0/1, guarded views,
+two eager repeats and poisoned graph replays are retained; K0/empty/unsafe
+inputs and immutable-input checks remain. Main independently checked all
+raw groups against the expected set,167 local/remote sources,21 raw hashes
+and9 byte-identical matching-toolkit cache blobs, then reran13.0 force2/2
+with448 groups in28.02s. Static source review found no issues.
+
+Evidence: `internal/perf/ada-rna-full-toolkit-qualification-20260906/README.md`.
+No production CUDA/dispatcher/epoch changes or new performance measurements
+in this task. The next separate task is qualified12.8/13.0 RNA AUTO promotion
+and post-AUTO confirmation. Preserve the ordinary C fallback distinction:
+M128S2 on12.8/13.0, M64S2 on13.2; A/B/D/E ordinary routes areM64S2 throughout.
+
 ### Precision and determinism terminology
 
 TF32 is a compute mode for F32 tensors; it is not a distinct tensor storage

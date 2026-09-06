@@ -1,0 +1,3 @@
+    Finished `release` profile [optimized] target(s) in 0.07s
+  Executable tests/gemm_bi_fixed_correctness.rs (/root/target-ada-rna-full-cuda132-20260906/release/deps/gemm_bi_fixed_correctness-7860b14bbe37841d)
+exit_status=0

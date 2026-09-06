@@ -504,20 +504,8 @@ fn fixed_tf32_rna_wide_matches_all_fixed_rungs_prefix_views_and_graph_bits() {
     check_rna_wide_prefix_views_and_graph_bits(false);
 }
 
-#[test]
-#[ignore = "requires exclusive CC8.9 Ada with the Fixed RNA-wide symbol admitted"]
-fn fixed_sm89_rna_wide_actual_auto_all_cells_prefix_views_and_graph_bits() {
-    check_rna_wide_prefix_views_and_graph_bits(true);
-}
-
-fn check_rna_wide_prefix_views_and_graph_bits(actual_auto: bool) {
-    let device = GpuDevice::new(0).expect("CUDA device");
-    assert_eq!(device.compute_capability, (8, 9));
-    assert_eq!(device.multiprocessor_count(), 142);
-    let ctx = GpuCtx::new(&device).expect("GPU context");
-    ctx.set_f32_triad_policy(F32TriadPolicy::AllowDeterministicTf32V1);
-    let tile = FixedTile::Tf32RnaM128N128S3;
-    let mut shape_cases = vec![
+fn rna_wide_qualification_shapes() -> Vec<(&'static str, FixedShape)> {
+    vec![
         (
             "tail",
             FixedShape {
@@ -534,43 +522,72 @@ fn check_rna_wide_prefix_views_and_graph_bits(actual_auto: bool) {
                 n: 1928,
             },
         ),
+        (
+            "hot_b_boundary",
+            FixedShape {
+                m: 4622,
+                k: 768,
+                n: 2304,
+            },
+        ),
+        (
+            "hot_c_boundary",
+            FixedShape {
+                m: 4622,
+                k: 1928,
+                n: 384,
+            },
+        ),
+        (
+            "hot_d_boundary",
+            FixedShape {
+                m: 2049,
+                k: 768,
+                n: 2304,
+            },
+        ),
+        (
+            "hot_e_boundary",
+            FixedShape {
+                m: 2049,
+                k: 2304,
+                n: 768,
+            },
+        ),
+    ]
+}
+
+#[test]
+fn rna_wide_force_corpus_contains_every_hot_shape_family() {
+    let expected = [
+        ("tail", 6018, 36, 132),
+        ("hot_a_boundary", 4622, 384, 1928),
+        ("hot_b_boundary", 4622, 768, 2304),
+        ("hot_c_boundary", 4622, 1928, 384),
+        ("hot_d_boundary", 2049, 768, 2304),
+        ("hot_e_boundary", 2049, 2304, 768),
     ];
-    if actual_auto {
-        shape_cases.extend([
-            (
-                "hot_b_boundary",
-                FixedShape {
-                    m: 4622,
-                    k: 768,
-                    n: 2304,
-                },
-            ),
-            (
-                "hot_c_boundary",
-                FixedShape {
-                    m: 4622,
-                    k: 1928,
-                    n: 384,
-                },
-            ),
-            (
-                "hot_d_boundary",
-                FixedShape {
-                    m: 2049,
-                    k: 768,
-                    n: 2304,
-                },
-            ),
-            (
-                "hot_e_boundary",
-                FixedShape {
-                    m: 2049,
-                    k: 2304,
-                    n: 768,
-                },
-            ),
-        ]);
-    }
+    let actual: Vec<_> = rna_wide_qualification_shapes()
+        .into_iter()
+        .map(|(case, s)| (case, s.m, s.k, s.n))
+        .collect();
+    assert_eq!(actual, expected);
+}
+
+#[test]
+#[ignore = "requires exclusive CC8.9 Ada with the Fixed RNA-wide symbol admitted"]
+fn fixed_sm89_rna_wide_actual_auto_all_cells_prefix_views_and_graph_bits() {
+    check_rna_wide_prefix_views_and_graph_bits(true);
+}
+
+fn check_rna_wide_prefix_views_and_graph_bits(actual_auto: bool) {
+    let device = GpuDevice::new(0).expect("CUDA device");
+    assert_eq!(device.compute_capability, (8, 9));
+    assert_eq!(device.multiprocessor_count(), 142);
+    let ctx = GpuCtx::new(&device).expect("GPU context");
+    ctx.set_f32_triad_policy(F32TriadPolicy::AllowDeterministicTf32V1);
+    let tile = FixedTile::Tf32RnaM128N128S3;
+    let shape_cases = rna_wide_qualification_shapes();
     let fixed_rungs = [
         FixedTile::Tf32M128S2,
         FixedTile::Tf32M128S3,
@@ -688,7 +705,7 @@ fn check_rna_wide_prefix_views_and_graph_bits(actual_auto: bool) {
                         (6017, 0),
                         (6018, 0),
                     ]
-                } else if actual_auto {
+                } else {
                     vec![
                         (1, 0),
                         (16, 0),
@@ -698,16 +715,11 @@ fn check_rna_wide_prefix_views_and_graph_bits(actual_auto: bool) {
                         (shape.m, 0),
                         (shape.m - 1, 1),
                     ]
-                } else {
-                    vec![(4620, 0), (4621, 0), (4622, 0)]
                 };
-                for (m, row_offset, output_offset) in view_cases.into_iter().flat_map(|(m, row)| {
-                    if actual_auto {
-                        vec![(m, row, 1), (m, row, 4)]
-                    } else {
-                        vec![(m, row, 1)]
-                    }
-                }) {
+                for (m, row_offset, output_offset) in view_cases
+                    .into_iter()
+                    .flat_map(|(m, row)| [(m, row, 1), (m, row, 4)])
+                {
                     let initial = vec![-819.25; output_offset + m * shape.n + 7];
                     let mut output =
                         GpuBuffer::from_cpu(&ctx.stream, &initial).expect("guarded RNA output");
@@ -821,6 +833,13 @@ fn check_rna_wide_prefix_views_and_graph_bits(actual_auto: bool) {
                             );
                         }
                     }
+                    println!(
+                        "RNA_WIDE_QUALIFIED_GROUP case={case} shape_m={} k={} n={} \
+                         view_m={m} exceptional={exceptional} bias={has_bias} \
+                         row_offset={row_offset} output_offset={output_offset} \
+                         actual_auto={actual_auto}",
+                        shape.m, shape.k, shape.n,
+                    );
                 }
             }
             if actual_auto && case != "tail" {

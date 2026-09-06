@@ -1,0 +1,23 @@
+timestamp_utc=2026-09-06T16:17:22Z
+hostname=ada-6000
+global_cuda=/usr/local/cuda-13.2
+rustc=rustc 1.98.0 (88d9e12ae 2026-08-18)
+cargo=cargo 1.98.0 (797e8a9bc 2026-08-05)
+NVIDIA RTX 6000 Ada Generation, GPU-d1edd7be-e88d-aed6-047d-622163306f0e, 595.45.04, 8.9, 300.00 W
+cuda=12.8 Build cuda_12.8.r12.8/compiler.35583870_0
+cuda=12.8 nvrtc_real=/usr/local/cuda-12.8/targets/x86_64-linux/lib/libnvrtc.so.12.8.93
+2bb82d1a34b9fefa46aca357299aed66763d4d6613d015d5a591224c00fa7e5a  /usr/local/cuda-12.8/targets/x86_64-linux/lib/libnvrtc.so.12.8.93
+cuda=13.0 Build cuda_13.0.r13.0/compiler.36424714_0
+cuda=13.0 nvrtc_real=/usr/local/cuda-13.0/targets/x86_64-linux/lib/libnvrtc.so.13.0.88
+a49e67e8e74590f1e98de55c39c6287efd3f59e3c3797464d7bbe0fe01349b11  /usr/local/cuda-13.0/targets/x86_64-linux/lib/libnvrtc.so.13.0.88
+cuda=13.2 Build cuda_13.2.r13.2/compiler.37434383_0
+cuda=13.2 nvrtc_real=/usr/local/cuda-13.2/targets/x86_64-linux/lib/libnvrtc.so.13.2.51
+b93dae6f3435a5b7b52a689af7f769cc7876fcfd7b01381ca7d6a3814d405c89  /usr/local/cuda-13.2/targets/x86_64-linux/lib/libnvrtc.so.13.2.51
+44f1a4632512169d56fea483df599507e7cd718cb4853640f2eb3ff733002105  /root/mamba-ada-rna-full-qualification-evidence-20260906/source-manifest.sha256
+7f0566985b7c80ed858258104f166fc46bc7328cd8548eab778fae94e4eb977f  /root/mamba-ada-rna-full-qualification-20260906/tests/gemm_bi_fixed_correctness.rs
+1af67c50c686a7269363faa24d69070402d42a786472f1810d539ce5b3572364  /root/target-ada-rna-full-cuda128-20260906/release/deps/gemm_bi_fixed_correctness-e745b7cbbfaa93fe
+555cee220e8c9a41efc243f9f9cc1216e63c2cf89893b42429a4ee86ff0199e7  /root/target-ada-rna-full-cuda130-20260906/release/deps/gemm_bi_fixed_correctness-e9a896bca3cebdf4
+750c1e69b52333b5b505d0734c532cda04a4a7cc46a70fac8febfc648be54d06  /root/target-ada-rna-full-cuda132-20260906/release/deps/gemm_bi_fixed_correctness-7860b14bbe37841d
+drwx------ 700 root:root /root/mamba-kcache-ada-rna-full-cuda128-20260906
+drwx------ 700 root:root /root/mamba-kcache-ada-rna-full-cuda130-20260906
+drwx------ 700 root:root /root/mamba-kcache-ada-rna-full-cuda132-20260906
