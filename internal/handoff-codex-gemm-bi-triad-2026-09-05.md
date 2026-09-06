@@ -706,5 +706,12 @@ only for NN `d768_in_proj`, NN `prism_in_proj` (M64N128), and NN
 `d768_out_proj` (M64N64); d128 NN still uses scalar split-K/reduce, while all
 TN/NT AllowTF32 cells retain exact-FMA/scalar routes. Those fallbacks are the
 first Triad optimization targets. A strict paired TF32 run was started against
-the same artifact and private cache; append its result separately if it
-finishes before the rental terminates.
+the same artifact and private cache. The rental nearly expired before its
+third cell completed, so the first 16/24 records are preserved in
+`cuda-13.2/paired-partial/`. Both completed cells are strict all-four FAST
+wins: `d768_in_proj` AUTO/forced worst p95 0.902121/0.902750, and
+`d768_out_proj` AUTO/forced worst p95 0.928441/0.927627. Their actual forced
+symbols are respectively the SM120 M64N128 and M64N64 TF32 TMA tiles. All
+numeric/guard/AUTO-versus-forced/eager-versus-graph raw-bit checks passed.
+These remain 21-window screening results with `dispatch_admission=false`, not
+long dispatcher admissions; the third cell and long confirmation remain open.
