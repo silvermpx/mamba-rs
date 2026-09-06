@@ -449,6 +449,10 @@ pub struct MambaKernels {
     pub fixed_sm89_half_pipeline: Option<HalfKernel>,
     /// Why the optional Ada pipeline is absent (including non-Ada targets).
     pub fixed_sm89_half_pipeline_rejection: Option<String>,
+    /// Independent Ada-only packed/XOR homogeneous-half candidate.
+    pub fixed_sm89_half_swizzle: Option<HalfKernel>,
+    /// Why only the swizzle holder is absent; never disables the incumbent.
+    pub fixed_sm89_half_swizzle_rejection: Option<String>,
     /// Fixed-owned Ada RNA-wide TF32 candidate; force-only until qualified.
     pub fixed_sm89_tf32_rna_wide: Option<CudaFunction>,
     pub fixed_sm89_tf32_rna_wide_rejection: Option<String>,
@@ -674,6 +678,8 @@ impl MambaKernels {
         let compiler_identity = fixed.compiler_identity;
         let (fixed_sm89_half_pipeline, fixed_sm89_half_pipeline_rejection) =
             super::gemm_bi_triad::modules::load_fixed_sm89_half_pipeline(ctx, &fixed);
+        let (fixed_sm89_half_swizzle, fixed_sm89_half_swizzle_rejection) =
+            super::gemm_bi_triad::modules::load_fixed_sm89_half_swizzle(ctx, &fixed);
         let (fixed_sm89_tf32_rna_wide, fixed_sm89_tf32_rna_wide_rejection) =
             super::gemm_bi_triad::modules::load_fixed_sm89_rna_wide(ctx, &fixed);
         let (fixed_sm89_f32_n64_copyplan, fixed_sm89_f32_n64_copyplan_rejection) =
@@ -935,6 +941,8 @@ impl MambaKernels {
             gemm_bi_f32_f32_n128_s2: get("gemm_bi_f32_f32_n128_s2")?,
             fixed_sm89_half_pipeline,
             fixed_sm89_half_pipeline_rejection,
+            fixed_sm89_half_swizzle,
+            fixed_sm89_half_swizzle_rejection,
             fixed_sm89_tf32_rna_wide,
             fixed_sm89_tf32_rna_wide_rejection,
             fixed_sm89_f32_n64_copyplan,

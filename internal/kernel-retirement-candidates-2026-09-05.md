@@ -126,6 +126,17 @@ Different architecture, compiler, bias, shape and numeric policy are separate.
 
 ## Next update required
 
+### Newly production-qualified, not yet AUTO
+
+Ada homogeneous half packed-XOR swizzle now has an independent production holder,
+forced dispatcher route and BF16/F16 exports on tested CUDA12.8/13.0/13.2. Full
+bits/graph/ABI/resource/cold-warm and four-tool sanitizer qualification is recorded
+in `internal/perf/ada-half-swizzle-force-20260906/`. Earlier standalone swizzle
+rows remain historical timing evidence, not current-module timing admission.
+No paired21/101 census or AUTO proof exists for this new module yet. Both Tc128
+and pipeline remain essential; neither is retired or deletion-ready. The four
+original swizzle experiment files are preserved unchanged as provenance.
+
 After each production promotion append exact symbol/module/shape/dtype/bias,
 source/compiler identity, old/new/vendor measurements, strict-bit evidence,
 actual AUTO launch proof, and remaining uses of the beaten kernel. Never mark

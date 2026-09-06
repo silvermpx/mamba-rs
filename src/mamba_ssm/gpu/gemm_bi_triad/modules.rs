@@ -486,6 +486,7 @@ pub(crate) struct CompiledModule {
     /// Separate from Triad TF32 qualification: the optional Ada Fixed half
     /// extension has the same generic Driver layout representation only.
     fixed_sm89_half_driver_abi: Result<BTreeMap<&'static str, Tf32DriverAbi>, String>,
+    fixed_sm89_half_swizzle_driver_abi: Result<BTreeMap<&'static str, Tf32DriverAbi>, String>,
     fixed_sm89_rna_wide_driver_abi: Result<Tf32DriverAbi, String>,
     fixed_sm89_exact_n64_driver_abi: Result<BTreeMap<&'static str, Tf32DriverAbi>, String>,
     fixed_sm120_exact_n64_driver_abi: Result<BTreeMap<&'static str, Tf32DriverAbi>, String>,
@@ -661,6 +662,12 @@ pub(crate) fn compile_module(request: CompileModuleRequest<'_>) -> Result<Compil
         let census = census_all_tf32_driver_abi(request.ctx, request.module_kind, extensions, &src);
         let fixed_half_abi =
             census_fixed_sm89_half_driver_abi(request.ctx, request.module_kind, request.arch, &src);
+        let fixed_half_swizzle_abi = census_fixed_sm89_half_swizzle_driver_abi(
+            request.ctx,
+            request.module_kind,
+            request.arch,
+            &src,
+        );
         let fixed_rna_wide_abi = census_fixed_sm89_rna_wide_driver_abi(
             request.ctx,
             request.module_kind,
@@ -707,6 +714,7 @@ pub(crate) fn compile_module(request: CompileModuleRequest<'_>) -> Result<Compil
             tf32_qualification_error,
             tf32_driver_abi,
             fixed_half_abi,
+            fixed_half_swizzle_abi,
             fixed_rna_wide_abi,
             fixed_exact_n64_abi,
             fixed_sm120_exact_n64_abi,
@@ -721,6 +729,7 @@ pub(crate) fn compile_module(request: CompileModuleRequest<'_>) -> Result<Compil
         tf32_qualification_error,
         tf32_driver_abi,
         fixed_sm89_half_driver_abi,
+        fixed_sm89_half_swizzle_driver_abi,
         fixed_sm89_rna_wide_driver_abi,
         fixed_sm89_exact_n64_driver_abi,
         fixed_sm120_exact_n64_driver_abi,
@@ -750,6 +759,12 @@ pub(crate) fn compile_module(request: CompileModuleRequest<'_>) -> Result<Compil
                 &ptx_source,
             );
             let fixed_half_abi = census_fixed_sm89_half_driver_abi(
+                request.ctx,
+                request.module_kind,
+                request.arch,
+                &ptx_source,
+            );
+            let fixed_half_swizzle_abi = census_fixed_sm89_half_swizzle_driver_abi(
                 request.ctx,
                 request.module_kind,
                 request.arch,
@@ -849,6 +864,7 @@ pub(crate) fn compile_module(request: CompileModuleRequest<'_>) -> Result<Compil
                 tf32_qualification_error,
                 tf32_driver_abi,
                 fixed_half_abi,
+                fixed_half_swizzle_abi,
                 fixed_rna_wide_abi,
                 fixed_exact_n64_abi,
                 fixed_sm120_exact_n64_abi,
@@ -889,6 +905,7 @@ pub(crate) fn compile_module(request: CompileModuleRequest<'_>) -> Result<Compil
         tf32_qualification_error,
         tf32_driver_abi,
         fixed_sm89_half_driver_abi,
+        fixed_sm89_half_swizzle_driver_abi,
         fixed_sm89_rna_wide_driver_abi,
         fixed_sm89_exact_n64_driver_abi,
         fixed_sm120_exact_n64_driver_abi,
@@ -1491,6 +1508,7 @@ fn validate_module_ptx(module_kind: ModuleKind, arch: &str, ptx: &str) -> Result
             validate_fixed_tf32_ptx(arch, ptx)?;
             validate_fixed_sm89_rna_wide_ptx(arch, ptx)?;
             validate_fixed_sm89_half_ptx(arch, ptx)?;
+            validate_fixed_sm89_half_swizzle_ptx(arch, ptx)?;
             validate_fixed_sm89_exact_n64_ptx(arch, ptx)?;
             validate_fixed_sm120_exact_n64_ptx(arch, ptx)?;
             validate_fixed_sm120_sliced_ptx(arch, ptx)?;
@@ -1659,6 +1677,13 @@ const FIXED_SM89_HALF_SYMBOLS: [&str; 2] = [
 const FIXED_SM89_HALF_SHARED_BYTES: u32 = 71_680;
 const FIXED_SM89_HALF_THREADS: u32 = 256;
 const FIXED_SM89_HALF_REGISTER_CAP: u32 = 224;
+const FIXED_SM89_HALF_SWIZZLE_SYMBOLS: [&str; 2] = [
+    "gemm_bi_nn_fixed_sm89_tc128_swizzle_v1_bf16",
+    "gemm_bi_nn_fixed_sm89_tc128_swizzle_v1_f16",
+];
+const FIXED_SM89_HALF_SWIZZLE_SHARED_BYTES: u32 = 69_632;
+const FIXED_SM89_HALF_SWIZZLE_THREADS: u32 = 256;
+const FIXED_SM89_HALF_SWIZZLE_REGISTER_CAP: u32 = 224;
 
 fn fixed_sm89_half_composed(arch: &str) -> bool {
     arch == "sm_89"
@@ -1734,6 +1759,81 @@ fn validate_fixed_sm89_half_ptx(arch: &str, ptx: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn validate_fixed_sm89_half_swizzle_ptx(arch: &str, ptx: &str) -> Result<(), String> {
+    let parsed = parse_ptx(ptx)?;
+    let actual: Vec<_> = parsed
+        .entries
+        .iter()
+        .map(|entry| entry.symbol.as_str())
+        .filter(|symbol| symbol.starts_with("gemm_bi_nn_fixed_sm89_tc128_swizzle"))
+        .collect();
+    let expected: BTreeSet<_> = if fixed_sm89_half_composed(arch) {
+        FIXED_SM89_HALF_SWIZZLE_SYMBOLS.into_iter().collect()
+    } else {
+        BTreeSet::new()
+    };
+    let unique: BTreeSet<_> = actual.iter().copied().collect();
+    if actual.len() != unique.len() || unique != expected {
+        return Err(format!(
+            "Fixed SM89 half swizzle PTX inventory is incomplete, duplicated, or foreign on {arch}"
+        ));
+    }
+    for symbol in expected {
+        let entry = parsed_ptx_entry_ref(&parsed, symbol)?;
+        let parameters = entry
+            .text
+            .split_once('(')
+            .and_then(|(_, tail)| tail.split_once("\n)").map(|(head, _)| head))
+            .ok_or_else(|| format!("{symbol} has no PTX parameter list"))?;
+        let declarations: Vec<_> = parameters
+            .lines()
+            .map(str::trim)
+            .filter(|line| line.starts_with(".param "))
+            .collect();
+        if declarations.len() != 5
+            || !declarations[..4]
+                .iter()
+                .all(|line| line.starts_with(".param .u64 "))
+            || !declarations[4].starts_with(".param .align 4 .b8 ")
+            || !declarations[4].contains("[32]")
+        {
+            return Err(format!(
+                "{symbol} requires four pointers and an align-4 32-byte bundle"
+            ));
+        }
+        let mma = if symbol.ends_with("_bf16") {
+            "mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32"
+        } else {
+            "mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32"
+        };
+        for required in [
+            mma,
+            "cp.async.cg.shared.global",
+            "ldmatrix.sync.aligned.m8n8.x4.shared.b16",
+            "ldmatrix.sync.aligned.m8n8.x2.trans.shared.b16",
+        ] {
+            if !ptx_has_unquoted_token(&entry.body, |token| token == required) {
+                return Err(format!("{symbol} is missing {required}"));
+            }
+        }
+        if ptx_has_unquoted_token(&entry.body, |token| {
+            token == ".local"
+                || token.starts_with("ld.local")
+                || token.starts_with("st.local")
+                || token.starts_with("atom.")
+                || token.starts_with("atom::")
+                || token.starts_with("red.")
+                || token.starts_with("red::")
+                || token.starts_with("redux.")
+        }) {
+            return Err(format!(
+                "{symbol} contains local memory, a numeric atomic, or a reduction"
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn validate_fixed_sm89_half_driver_abi(symbol: &str, abi: &Tf32DriverAbi) -> Result<(), String> {
     const EXPECTED: [(usize, usize); 5] = [(0, 8), (8, 8), (16, 8), (24, 8), (32, 32)];
     if super::super::gemm_bi_fixed::FIXED_SM89_HALF_PARAMS_SIZE != 32 {
@@ -1784,6 +1884,65 @@ fn census_fixed_sm89_half_driver_abi(
             get(function, index, offset, size)
         })?;
         validate_fixed_sm89_half_driver_abi(symbol, &abi)?;
+        census.insert(symbol, abi);
+    }
+    module.unload()?;
+    Ok(census)
+}
+
+fn validate_fixed_sm89_half_swizzle_driver_abi(
+    symbol: &str,
+    abi: &Tf32DriverAbi,
+) -> Result<(), String> {
+    const EXPECTED: [(usize, usize); 5] = [(0, 8), (8, 8), (16, 8), (24, 8), (32, 32)];
+    if super::super::gemm_bi_fixed::FIXED_SM89_HALF_SWIZZLE_PARAMS_SIZE != 32 {
+        return Err("Fixed SM89 half swizzle host parameter ABI drifted".into());
+    }
+    if abi.parameter_count() != EXPECTED.len()
+        || !abi
+            .parameters()
+            .iter()
+            .zip(EXPECTED)
+            .all(|(actual, expected)| (actual.offset(), actual.size()) == expected)
+    {
+        return Err(format!(
+            "{symbol} has the wrong live five-argument/64-byte Driver ABI"
+        ));
+    }
+    Ok(())
+}
+
+fn census_fixed_sm89_half_swizzle_driver_abi(
+    ctx: &CudaContext,
+    kind: ModuleKind,
+    arch: &str,
+    ptx: &str,
+) -> Result<BTreeMap<&'static str, Tf32DriverAbi>, String> {
+    if kind != ModuleKind::Fixed || !fixed_sm89_half_composed(arch) {
+        return Ok(BTreeMap::new());
+    }
+    type GetParamInfo = unsafe extern "C" fn(
+        cudarc::driver::sys::CUfunction,
+        usize,
+        *mut usize,
+        *mut usize,
+    ) -> cudarc::driver::sys::CUresult;
+    let module = DriverModule::load(ctx, ptx)?;
+    let get: GetParamInfo =
+        unsafe { std::mem::transmute(driver_proc_address("cuFuncGetParamInfo", 12_040)?) };
+    let mut census = BTreeMap::new();
+    for symbol in FIXED_SM89_HALF_SWIZZLE_SYMBOLS {
+        let function = unsafe {
+            cudarc::driver::result::module::get_function(
+                module.raw(),
+                CString::new(symbol).unwrap(),
+            )
+        }
+        .map_err(|error| format!("load Fixed/{symbol} for Driver ABI: {error:?}"))?;
+        let abi = query_driver_parameter_abi(symbol, 5, |index, offset, size| unsafe {
+            get(function, index, offset, size)
+        })?;
+        validate_fixed_sm89_half_swizzle_driver_abi(symbol, &abi)?;
         census.insert(symbol, abi);
     }
     module.unload()?;
@@ -2037,6 +2196,143 @@ pub(crate) fn load_fixed_sm89_half_pipeline(
                     "{symbol} has no resident CTA at its required shared-memory size"
                 ));
             }
+            functions.push(function);
+        }
+        let mut functions = functions.into_iter();
+        Ok(HalfKernel {
+            bf16: functions.next().unwrap(),
+            f16: functions.next().unwrap(),
+        })
+    })();
+    match admitted {
+        Ok(functions) => (Some(functions), None),
+        Err(reason) => (None, Some(reason)),
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct FixedSm89HalfSwizzleResources {
+    local_bytes: u32,
+    registers: u32,
+    static_shared_bytes: u32,
+    max_threads: i32,
+    active_blocks: u32,
+}
+
+fn validate_fixed_sm89_half_swizzle_resources(
+    symbol: &str,
+    resources: FixedSm89HalfSwizzleResources,
+) -> Result<(), String> {
+    tf32_symbol_admission(
+        symbol,
+        resources.local_bytes,
+        resources.registers,
+        FIXED_SM89_HALF_SWIZZLE_REGISTER_CAP,
+        resources.max_threads,
+        FIXED_SM89_HALF_SWIZZLE_THREADS as i32,
+    )?;
+    if resources.static_shared_bytes != 0 {
+        return Err(format!(
+            "{symbol} uses {} static shared bytes, expected zero",
+            resources.static_shared_bytes
+        ));
+    }
+    if resources.active_blocks < 1 {
+        return Err(format!(
+            "{symbol} has no resident CTA at {} dynamic shared bytes",
+            FIXED_SM89_HALF_SWIZZLE_SHARED_BYTES
+        ));
+    }
+    Ok(())
+}
+
+fn validate_fixed_sm89_half_swizzle_shared_capacity(shared_cap: i32) -> Result<(), String> {
+    if shared_cap < FIXED_SM89_HALF_SWIZZLE_SHARED_BYTES as i32 {
+        return Err(format!(
+            "Fixed SM89 half swizzle requires {} shared bytes, device permits {shared_cap}",
+            FIXED_SM89_HALF_SWIZZLE_SHARED_BYTES
+        ));
+    }
+    Ok(())
+}
+
+/// Admit the swizzled homogeneous-half pair independently from the incumbent
+/// pipeline. A failure here records only the swizzle rejection reason.
+pub(crate) fn load_fixed_sm89_half_swizzle(
+    ctx: &CudaContext,
+    module: &CompiledModule,
+) -> (Option<HalfKernel>, Option<String>) {
+    let admitted = (|| -> Result<HalfKernel, String> {
+        if module.artifact_identity.module_kind != ModuleKind::Fixed
+            || !fixed_sm89_half_composed(module.compiler_identity.target.as_str())
+            || ctx
+                .compute_capability()
+                .map_err(|error| format!("query Fixed half swizzle CC: {error:?}"))?
+                != (8, 9)
+        {
+            return Err(
+                "Fixed SM89 half swizzle is only composed and admitted on sm_89/CC8.9".into(),
+            );
+        }
+        let shared_cap = ctx.attribute(
+            cudarc::driver::sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK_OPTIN,
+        ).map_err(|error| format!("query Fixed half swizzle opt-in shared capacity: {error:?}"))?;
+        validate_fixed_sm89_half_swizzle_shared_capacity(shared_cap)?;
+        let abi = module
+            .fixed_sm89_half_swizzle_driver_abi
+            .as_ref()
+            .map_err(Clone::clone)?;
+        let mut functions = Vec::with_capacity(2);
+        for symbol in FIXED_SM89_HALF_SWIZZLE_SYMBOLS {
+            validate_fixed_sm89_half_swizzle_driver_abi(
+                symbol,
+                abi.get(symbol)
+                    .ok_or_else(|| format!("{symbol} has no live Driver ABI census"))?,
+            )?;
+            let function = load_function(&module.module, ModuleKind::Fixed, symbol)?;
+            set_dynamic_shared(
+                &function,
+                symbol,
+                FIXED_SM89_HALF_SWIZZLE_SHARED_BYTES as i32,
+            )?;
+            let local_bytes = u32::try_from(
+                function
+                    .local_size_bytes()
+                    .map_err(|error| format!("query {symbol} local bytes: {error:?}"))?,
+            )
+            .map_err(|_| format!("{symbol} returned negative local memory"))?;
+            let registers = u32::try_from(
+                function
+                    .num_regs()
+                    .map_err(|error| format!("query {symbol} registers: {error:?}"))?,
+            )
+            .map_err(|_| format!("{symbol} returned negative registers"))?;
+            let static_shared_bytes = u32::try_from(
+                function
+                    .shared_size_bytes()
+                    .map_err(|error| format!("query {symbol} static shared bytes: {error:?}"))?,
+            )
+            .map_err(|_| format!("{symbol} returned negative static shared memory"))?;
+            let max_threads = function
+                .max_threads_per_block()
+                .map_err(|error| format!("query {symbol} max threads: {error:?}"))?;
+            let active_blocks = function
+                .occupancy_max_active_blocks_per_multiprocessor(
+                    FIXED_SM89_HALF_SWIZZLE_THREADS,
+                    FIXED_SM89_HALF_SWIZZLE_SHARED_BYTES as usize,
+                    None,
+                )
+                .map_err(|error| format!("query {symbol} occupancy: {error:?}"))?;
+            validate_fixed_sm89_half_swizzle_resources(
+                symbol,
+                FixedSm89HalfSwizzleResources {
+                    local_bytes,
+                    registers,
+                    static_shared_bytes,
+                    max_threads,
+                    active_blocks,
+                },
+            )?;
             functions.push(function);
         }
         let mut functions = functions.into_iter();
@@ -5466,6 +5762,18 @@ const FIXED_SM89_RNA_WIDE_SOURCE_FRAGMENT: SourceFragment = SourceFragment {
     allowed_quoted_includes: &[],
 };
 
+const FIXED_SM89_HALF_SWIZZLE_LAYOUT_FRAGMENT: SourceFragment = SourceFragment {
+    logical_name: "kernels/gemm_bi_fixed/sm89_half_swizzle_layout.cuh",
+    source: include_str!("../../../../kernels/gemm_bi_fixed/sm89_half_swizzle_layout.cuh"),
+    allowed_quoted_includes: &[],
+};
+
+const FIXED_SM89_HALF_SWIZZLE_SOURCE_FRAGMENT: SourceFragment = SourceFragment {
+    logical_name: "kernels/gemm_bi_fixed/sm89_half_swizzle.cu",
+    source: include_str!("../../../../kernels/gemm_bi_fixed/sm89_half_swizzle.cu"),
+    allowed_quoted_includes: &["sm89_half_swizzle_layout.cuh"],
+};
+
 const FIXED_SM120_EXACT_N64_SOURCE_FRAGMENT: SourceFragment = SourceFragment {
     logical_name: "kernels/gemm_bi_fixed/sm120_f32_n64_copyplan.cu",
     source: include_str!("../../../../kernels/gemm_bi_fixed/sm120_f32_n64_copyplan.cu"),
@@ -5775,6 +6083,8 @@ fn compose_module_source_for(kind: ModuleKind, arch: &str) -> Result<String, Str
         fragments.push(FIXED_SM89_HALF_SOURCE_FRAGMENT);
         fragments.push(FIXED_SM89_EXACT_N64_SOURCE_FRAGMENT);
         fragments.push(FIXED_SM89_RNA_WIDE_SOURCE_FRAGMENT);
+        fragments.push(FIXED_SM89_HALF_SWIZZLE_LAYOUT_FRAGMENT);
+        fragments.push(FIXED_SM89_HALF_SWIZZLE_SOURCE_FRAGMENT);
         return compose_fragments(&fragments);
     }
     if kind == ModuleKind::Fixed && arch == "compute_120" {
@@ -9891,6 +10201,8 @@ mod tests {
         "kernels/gemm_bi_fixed/sm89_half_pipeline.cu",
         "kernels/gemm_bi_fixed/sm89_f32_n64_copyplan.cu",
         "kernels/gemm_bi_fixed/tf32_rna_wide.cu",
+        "kernels/gemm_bi_fixed/sm89_half_swizzle_layout.cuh",
+        "kernels/gemm_bi_fixed/sm89_half_swizzle.cu",
     ];
 
     const SCALAR_FRAGMENTS: &[&str] = &[
@@ -10052,6 +10364,8 @@ mod tests {
                     "kernels/gemm_bi_fixed/sm89_half_pipeline.cu"
                         | "kernels/gemm_bi_fixed/sm89_f32_n64_copyplan.cu"
                         | "kernels/gemm_bi_fixed/tf32_rna_wide.cu"
+                        | "kernels/gemm_bi_fixed/sm89_half_swizzle_layout.cuh"
+                        | "kernels/gemm_bi_fixed/sm89_half_swizzle.cu"
                 )
             })
             .collect::<Vec<_>>();
@@ -10944,6 +11258,10 @@ mod tests {
         "gemm_bi_nn_fixed_sm89_tc128_pipeline_v1_bf16",
         "gemm_bi_nn_fixed_sm89_tc128_pipeline_v1_f16",
     ];
+    const FIXED_SM89_HALF_SWIZZLE_TEST_SYMBOLS: [&str; 2] = [
+        "gemm_bi_nn_fixed_sm89_tc128_swizzle_v1_bf16",
+        "gemm_bi_nn_fixed_sm89_tc128_swizzle_v1_f16",
+    ];
 
     fn fixed_sm89_half_test_base_ptx() -> String {
         let mut ptx = ".version 8.7\n.target sm_89\n.address_size 64\n".to_string();
@@ -10998,6 +11316,14 @@ mod tests {
             FIXED_SM89_EXACT_N64_TEST_SYMBOL,
         ));
         ptx.push_str(&fixed_sm89_rna_wide_test_entry());
+        ptx.push_str(&fixed_sm89_half_test_entry(
+            FIXED_SM89_HALF_SWIZZLE_TEST_SYMBOLS[0],
+            "bf16",
+        ));
+        ptx.push_str(&fixed_sm89_half_test_entry(
+            FIXED_SM89_HALF_SWIZZLE_TEST_SYMBOLS[1],
+            "f16",
+        ));
         ptx
     }
 
@@ -11018,8 +11344,22 @@ mod tests {
                 "kernels/gemm_bi_fixed/sm89_half_pipeline.cu",
                 "kernels/gemm_bi_fixed/sm89_f32_n64_copyplan.cu",
                 "kernels/gemm_bi_fixed/tf32_rna_wide.cu",
+                "kernels/gemm_bi_fixed/sm89_half_swizzle_layout.cuh",
+                "kernels/gemm_bi_fixed/sm89_half_swizzle.cu",
             ],
             "Ada must retain the half extension before the exact N64 extension"
+        );
+        assert_eq!(
+            extension,
+            compose_fragments(&[
+                super::FIXED_SM89_HALF_SOURCE_FRAGMENT,
+                super::FIXED_SM89_EXACT_N64_SOURCE_FRAGMENT,
+                super::FIXED_SM89_RNA_WIDE_SOURCE_FRAGMENT,
+                super::FIXED_SM89_HALF_SWIZZLE_LAYOUT_FRAGMENT,
+                super::FIXED_SM89_HALF_SWIZZLE_SOURCE_FRAGMENT,
+            ])
+            .unwrap(),
+            "Ada composition must preserve every old suffix byte and append only the two swizzle fragments"
         );
     }
 
@@ -11218,6 +11558,110 @@ mod tests {
         .expect_err("a sixth successful Driver parameter query must reject");
     }
 
+    #[test]
+    fn fixed_sm89_half_swizzle_driver_abi_and_resources_are_strict() {
+        let symbol = FIXED_SM89_HALF_SWIZZLE_TEST_SYMBOLS[0];
+        let abi =
+            Tf32DriverAbi::checked(5, vec![(0, 8), (8, 8), (16, 8), (24, 8), (32, 32)]).unwrap();
+        super::validate_fixed_sm89_half_swizzle_driver_abi(symbol, &abi).unwrap();
+        let valid = super::FixedSm89HalfSwizzleResources {
+            local_bytes: 0,
+            registers: super::FIXED_SM89_HALF_SWIZZLE_REGISTER_CAP,
+            static_shared_bytes: 0,
+            max_threads: 256,
+            active_blocks: 1,
+        };
+        super::validate_fixed_sm89_half_swizzle_resources(symbol, valid).unwrap();
+        super::validate_fixed_sm89_half_swizzle_shared_capacity(69_632).unwrap();
+        super::validate_fixed_sm89_half_swizzle_shared_capacity(69_631)
+            .expect_err("one byte below the opt-in shared requirement must reject");
+        for malformed in [
+            super::FixedSm89HalfSwizzleResources {
+                local_bytes: 1,
+                ..valid
+            },
+            super::FixedSm89HalfSwizzleResources {
+                registers: super::FIXED_SM89_HALF_SWIZZLE_REGISTER_CAP + 1,
+                ..valid
+            },
+            super::FixedSm89HalfSwizzleResources {
+                static_shared_bytes: 1,
+                ..valid
+            },
+            super::FixedSm89HalfSwizzleResources {
+                max_threads: 255,
+                ..valid
+            },
+            super::FixedSm89HalfSwizzleResources {
+                active_blocks: 0,
+                ..valid
+            },
+        ] {
+            super::validate_fixed_sm89_half_swizzle_resources(symbol, malformed)
+                .expect_err("each physical resource gate must reject independently");
+        }
+        for malformed in [
+            vec![(0, 8), (8, 8), (16, 8), (24, 8)],
+            vec![(0, 8), (8, 8), (16, 8), (24, 8), (32, 28)],
+            vec![(0, 8), (8, 8), (16, 8), (24, 8), (36, 32)],
+            vec![(0, 8), (8, 8), (16, 8), (24, 8), (32, 32), (64, 4)],
+        ] {
+            let malformed = Tf32DriverAbi::checked(malformed.len(), malformed).unwrap();
+            super::validate_fixed_sm89_half_swizzle_driver_abi(symbol, &malformed)
+                .expect_err("swizzle requires the exact five-argument Driver ABI");
+        }
+    }
+
+    #[test]
+    fn fixed_sm89_half_swizzle_ptx_is_all_or_nothing_and_instruction_exact() {
+        let baseline = fixed_sm89_half_test_ptx();
+        super::validate_fixed_sm89_half_swizzle_ptx("sm_89", &baseline).unwrap();
+        for index in 0..2 {
+            let dtype = if index == 0 { "bf16" } else { "f16" };
+            let entry =
+                fixed_sm89_half_test_entry(FIXED_SM89_HALF_SWIZZLE_TEST_SYMBOLS[index], dtype);
+            super::validate_fixed_sm89_half_swizzle_ptx("sm_89", &baseline.replacen(&entry, "", 1))
+                .expect_err("both homogeneous-half swizzle exports are mandatory");
+            for required in [
+                format!("mma.sync.aligned.m16n8k16.row.col.f32.{dtype}.{dtype}.f32"),
+                "cp.async.cg.shared.global".to_string(),
+                "ldmatrix.sync.aligned.m8n8.x4.shared.b16".to_string(),
+                "ldmatrix.sync.aligned.m8n8.x2.trans.shared.b16".to_string(),
+            ] {
+                let malformed = entry.replace(&required, "not_the_required_instruction");
+                super::validate_fixed_sm89_half_swizzle_ptx(
+                    "sm_89",
+                    &baseline.replacen(&entry, &malformed, 1),
+                )
+                .expect_err("swizzle dtype/staging/fragment instruction drift must reject");
+            }
+            for mutation in [
+                entry.replace("params[32]", "params[28]"),
+                entry.replacen("ret;", ".local .b8 spill[16]; ret;", 1),
+                entry.replacen("ret;", "atom.global.add.f32 %f0, [%rd0], %f1; ret;", 1),
+            ] {
+                super::validate_fixed_sm89_half_swizzle_ptx(
+                    "sm_89",
+                    &baseline.replacen(&entry, &mutation, 1),
+                )
+                .expect_err("swizzle ABI/local/atomic drift must reject");
+            }
+        }
+        let duplicate = baseline.clone()
+            + &fixed_sm89_half_test_entry(FIXED_SM89_HALF_SWIZZLE_TEST_SYMBOLS[0], "bf16");
+        super::validate_fixed_sm89_half_swizzle_ptx("sm_89", &duplicate)
+            .expect_err("duplicate swizzle export must reject");
+        let foreign = baseline.clone()
+            + &fixed_sm89_half_test_entry("gemm_bi_nn_fixed_sm89_tc128_swizzle_v2_bf16", "bf16");
+        super::validate_fixed_sm89_half_swizzle_ptx("sm_89", &foreign)
+            .expect_err("foreign swizzle export must reject");
+        for target in ["sm_80", "compute_120", "sm_120"] {
+            super::validate_fixed_sm89_half_swizzle_ptx(target, "").unwrap();
+            super::validate_fixed_sm89_half_swizzle_ptx(target, &baseline)
+                .expect_err("swizzle exports must reject on foreign targets");
+        }
+    }
+
     const FIXED_SM89_RNA_WIDE_TEST_SYMBOL: &str =
         "gemm_bi_nn_fixed_rna_wide_tf32_v1_m128n128_bk32_s3";
     const FIXED_SM89_EXACT_N64_TEST_SYMBOL: &str = "gemm_bi_nn_fixed_sm89_f32_n64_copyplan_v1";
@@ -11258,8 +11702,13 @@ mod tests {
         let before = compose_fragments(&retained).unwrap();
         assert_eq!(
             source.strip_prefix(&before).unwrap(),
-            compose_fragments(&[super::FIXED_SM89_RNA_WIDE_SOURCE_FRAGMENT]).unwrap(),
-            "RNA-wide must be the only suffix appended to the prior Ada Fixed bytes"
+            compose_fragments(&[
+                super::FIXED_SM89_RNA_WIDE_SOURCE_FRAGMENT,
+                super::FIXED_SM89_HALF_SWIZZLE_LAYOUT_FRAGMENT,
+                super::FIXED_SM89_HALF_SWIZZLE_SOURCE_FRAGMENT,
+            ])
+            .unwrap(),
+            "RNA-wide and the later swizzle twin must follow the prior Ada Fixed bytes"
         );
         for target in [
             "sm_80",
@@ -12060,6 +12509,8 @@ mod tests {
             [
                 "kernels/gemm_bi_fixed/sm89_f32_n64_copyplan.cu",
                 "kernels/gemm_bi_fixed/tf32_rna_wide.cu",
+                "kernels/gemm_bi_fixed/sm89_half_swizzle_layout.cuh",
+                "kernels/gemm_bi_fixed/sm89_half_swizzle.cu",
             ]
         );
     }

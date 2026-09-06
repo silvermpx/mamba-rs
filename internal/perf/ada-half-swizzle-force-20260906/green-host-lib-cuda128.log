@@ -1,0 +1,720 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.07s
+     Running unittests src/lib.rs (/root/target-ada-half-swizzle-force-cuda128-20260906/debug/deps/mamba_rs-89b97bc11220b30f)
+
+running 681 tests
+test dist::bootstrap::tests::barrier_times_out_without_peers ... ok
+test dist::bootstrap::tests::child_env_carries_the_full_contract ... ok
+test dist::bootstrap::tests::env_rank_parses_all_launcher_conventions ... ok
+test dist::bootstrap::tests::file_barrier_two_threads_meet ... ok
+test dist::bootstrap::tests::job_id_validation_rejects_escapes ... ok
+test dist::config::tests::device_grammar ... ok
+test dist::context::tests::reference_mean_validates_like_its_sibling ... ok
+test dist::context::tests::shard_is_the_strided_slice_law ... ok
+test dist::fold::tests::reference_fold_is_ascending_rank_order ... ok
+test dist::fold::tests::remainder_goes_to_lowest_ranks ... ok
+test dist::fold::tests::shards_cover_everything_once_in_rank_order ... ok
+test dist::seed::tests::derivations_are_nonzero_and_domain_separated ... ok
+test dist::seed::tests::same_inputs_same_outputs ... ok
+test dist::watchdog::tests::deadline_errors_when_blocked ... ok
+test dist::watchdog::tests::deadline_returns_result_when_fast ... ok
+test dist::watchdog::tests::disarm_is_immediate_not_poll_paced ... ok
+test dist::watchdog::tests::watchdog_fires_on_deadline_and_reports_through_disarm ... ok
+test dist::watchdog::tests::watchdog_stays_quiet_when_disarmed_in_time ... ok
+test mamba3_siso::config::tests::test_chunked_backward_smem_budget_rejected_loudly ... ok
+test mamba3_siso::config::tests::test_d_state_reference_range ... ok
+test mamba3_siso::config::tests::test_default_config_valid ... ok
+test mamba3_siso::config::tests::test_gated_norm_d_inner_cap_rejected_loudly ... ok
+test mamba3_siso::config::tests::test_invalid_headdim ... ok
+test mamba3_siso::config::tests::test_invalid_rms_norm_eps ... ok
+test mamba3_siso::config::tests::test_invalid_rope_fraction ... ok
+test mamba3_siso::config::tests::test_scan_mode_resolver_pins ... ok
+test mamba3_siso::cpu::backward::tests::test_backward_no_panic ... ok
+test mamba3_siso::cpu::backward::tests::test_gradients_finite ... ok
+test mamba3_siso::cpu::dims::tests::test_dims_bt ... ok
+test mamba3_siso::cpu::dims::tests::test_dims_from_default_config ... ok
+test mamba3_siso::cpu::flat::tests::test_flat_allocation ... ok
+test mamba3_siso::cpu::flat::tests::test_offsets_monotonic ... ok
+test mamba3_siso::cpu::forward::tests::test_forward_no_panic ... ok
+test mamba3_siso::cpu::inference::tests::test_m3_bcnorm_unit_weight ... ok
+test mamba3_siso::cpu::inference::tests::test_m3_deterministic ... ok
+test mamba3_siso::cpu::inference::tests::test_m3_rope_angles_accumulate ... ok
+test mamba3_siso::cpu::inference::tests::test_m3_single_step_nonzero ... ok
+test mamba3_siso::cpu::inference::tests::test_m3_state_carries ... ok
+test mamba3_siso::cpu::inference::tests::test_m3_state_reset_reproduces ... ok
+test mamba3_siso::cpu::inference::tests::test_mamba3_step_batch_matches_sequential ... ok
+test mamba3_siso::cpu::parallel::tests::test_parallel_backward_deterministic ... ok
+test mamba3_siso::cpu::parallel::tests::test_parallel_backward_matches_sequential ... ok
+test mamba3_siso::cpu::parallel::tests::test_parallel_forward_no_panic ... ok
+test mamba3_siso::gpu::forward::angle_chunked_contract_tests::rejects_chunk_ceiling_integer_overflow ... ok
+test mamba3_siso::gpu::forward::angle_chunked_contract_tests::rejects_dimension_truncation_before_launch ... ok
+test mamba3_siso::gpu::forward::angle_chunked_contract_tests::rejects_each_undersized_buffer ... ok
+test mamba3_siso::gpu::forward::angle_chunked_contract_tests::rejects_geometry_overflow_before_launch ... ok
+test mamba3_siso::gpu::forward::angle_chunked_contract_tests::rejects_zero_dimensions_and_state_pointer ... ok
+test mamba3_siso::gpu::state::index_budget_tests::index_budget_guards_long_context ... ok
+test mamba3_siso::serialize::tests::test_self_describing_checkpoint_roundtrip ... ok
+test mamba3_siso::serialize::tests::test_serialize_roundtrip ... ok
+test mamba3_siso::state::tests::test_state_reset ... ok
+test mamba3_siso::state::tests::test_state_zeros ... ok
+test mamba3_siso::weights::tests::test_init_deterministic ... ok
+test mamba3_siso::weights::tests::test_init_valid ... ok
+test mamba3_siso::weights::tests::test_zeros_valid ... ok
+test mamba_ssm::cpu::flat::tests::test_backbone_flat_allocation ... ok
+test mamba_ssm::cpu::flat::tests::test_bulk_copy_gated_all ... ok
+test mamba_ssm::cpu::flat::tests::test_bulk_copy_post_norm_all ... ok
+test mamba_ssm::cpu::flat::tests::test_bulk_copy_u_all ... ok
+test mamba_ssm::cpu::flat::tests::test_bulk_copy_xdbl_dt_all ... ok
+test mamba_ssm::cpu::flat::tests::test_field_accessor_roundtrip ... ok
+test mamba_ssm::cpu::flat::tests::test_field_offsets_no_overlap ... ok
+test mamba_ssm::cpu::parallel::tests::test_rayon_backward_bit_identical_across_runs ... ok
+test mamba_ssm::cpu::parallel::tests::test_rayon_backward_matches_sequential ... ok
+test mamba_ssm::cpu::parallel::tests::test_rayon_forward_matches_sequential ... ok
+test mamba_ssm::cpu::parallel::tests::test_rayon_target_forward_matches_sequential ... ok
+test mamba_ssm::cpu::parallel::tests::test_thread_scratch_allocation ... ok
+test mamba_ssm::cpu::parallel::tests::test_thread_scratch_reuse ... ok
+test mamba_ssm::gpu::adamw::cpu_state_tests::bias_correction_step_large ... ok
+test mamba_ssm::gpu::adamw::cpu_state_tests::bias_correction_step_one ... ok
+test mamba_ssm::gpu::blas::physical_graph_tests::f32_physical_ranges_omit_unread_zero_reduction_operands ... ok
+test mamba_ssm::gpu::blas::physical_graph_tests::f32_physical_ranges_retain_nonempty_operand_bounds ... ok
+test mamba_ssm::gpu::blas::physical_graph_tests::half_physical_trace_arguments_track_base_offsets_without_device_addresses ... ignored, requires a CUDA device and NVRTC
+test mamba_ssm::gpu::blas::physical_graph_tests::half_policy_has_a_distinct_sm120_branch_seal ... ok
+test mamba_ssm::gpu::blas::physical_graph_tests::physical_graph_captures_native_half_and_exact_typed_fallback ... ignored, requires a CUDA device and NVRTC
+test mamba_ssm::gpu::blas::physical_graph_tests::physical_graph_captures_prepared_f32_exact_and_tf32 ... ignored, requires a CUDA device and NVRTC
+test mamba_ssm::gpu::blas::physical_graph_tests::physical_graph_rejects_a_valid_unobserved_raw_cuda_node ... ignored, requires a CUDA device and NVRTC
+test mamba_ssm::gpu::blas::physical_graph_tests::physical_graph_rejects_capture_and_post_capture_identity_drift ... ignored, requires a CUDA device and NVRTC
+test mamba_ssm::gpu::blas::physical_graph_tests::physical_graph_rejects_failures_and_replay_drift_then_reuses_stream ... ignored, requires a CUDA device and NVRTC
+test mamba_ssm::gpu::blas::physical_graph_tests::sm120_auto_cache_rejects_managed_epoch_aba_during_capture ... ignored, requires a CC 12.0 CUDA device and NVRTC
+test mamba_ssm::gpu::buffers::tests::managed_allocation_epoch_covers_subviews_until_owner_drop ... ok
+test mamba_ssm::gpu::buffers::tests::managed_allocation_epoch_rejects_aba_address_reuse ... ok
+test mamba_ssm::gpu::buffers::tests::managed_allocation_epoch_requires_one_domain_and_complete_ranges ... ok
+test mamba_ssm::gpu::buffers::tests::managed_allocation_registry_removes_empty_context_domains ... ok
+test mamba_ssm::gpu::buffers::tests::managed_allocation_stamp_ignores_unrelated_allocation_churn ... ok
+test mamba_ssm::gpu::buffers::tests::mutable_gpu_buffer_access_returns_only_a_kernel_argument ... ok
+test mamba_ssm::gpu::buffers::tests::owning_gpu_buffers_register_and_unregister_their_ranges ... ignored, requires a CUDA device
+test mamba_ssm::gpu::context::tests::arch_rung_flag_knows_only_off ... ok
+test mamba_ssm::gpu::context::tests::bi_gemm_family_environment_accepts_only_semantic_family_names ... ok
+test mamba_ssm::gpu::context::tests::device_and_loaded_kernel_multiprocessor_counts_must_match ... ok
+test mamba_ssm::gpu::context::tests::env_route_refuses_the_flag_combinations_that_change_nothing ... ok
+test mamba_ssm::gpu::context::tests::f32_triad_policy_environment_is_strict_and_defaults_to_exact ... ok
+test mamba_ssm::gpu::context::tests::half_triad_policy_environment_is_strict_and_absent_means_unset ... ok
+test mamba_ssm::gpu::context::tests::logical_f32_accepts_only_scalar_triad_backends ... ok
+test mamba_ssm::gpu::context::tests::mixed_graph_scratch_covers_the_two_inner_projection_output ... ok
+test mamba_ssm::gpu::context::tests::sm120_mma16_graph_routes_use_their_sealed_schedule_revision ... ok
+test mamba_ssm::gpu::context::tests::tier_flag_environment_is_strict_and_fail_closed ... ok
+test mamba_ssm::gpu::device::tests::nvrtc_target_accepts_supported_sm80_plus ... ok
+test mamba_ssm::gpu::device::tests::nvrtc_target_rejects_cc_below_80 ... ok
+test mamba_ssm::gpu::device::tests::nvrtc_target_rejects_unknown_known_family_minor ... ok
+test mamba_ssm::gpu::device::tests::nvrtc_target_uses_virtual_arch_for_future_major ... ok
+test mamba_ssm::gpu::device::tests::sm101_target_uses_its_cuda_12_native_name ... ok
+test mamba_ssm::gpu::device::tests::sm103_target_requires_cuda_12_9 ... ok
+test mamba_ssm::gpu::device::tests::sm110_target_requires_cuda_13_2 ... ok
+test mamba_ssm::gpu::device::tests::sm120_targets_follow_the_installed_nvrtc_floor ... ok
+test mamba_ssm::gpu::device::tests::unmapped_sm120_minor_takes_the_family_virtual_target ... ok
+test mamba_ssm::gpu::diagnostics::tests::a_site_reports_once_and_never_builds_the_message_again ... ok
+test mamba_ssm::gpu::dtype::tests::is_half ... ok
+test mamba_ssm::gpu::dtype::tests::sizes ... ok
+test mamba_ssm::gpu::gemm_bi_fixed::pair_store_schedule_tests::pair_store_loaded_resources_preserve_three_cta_residency ... ignored, requires a CC12.0 CUDA device
+test mamba_ssm::gpu::gemm_bi_fixed::pair_store_schedule_tests::pair_store_odd_ldc_and_misaligned_output_match_incumbent_bits ... ignored, requires a CC12.0 CUDA device
+test mamba_ssm::gpu::gemm_bi_fixed::pair_store_schedule_tests::pair_store_schedule_is_exactly_the_qualified_cc120_170sm_cells ... ok
+test mamba_ssm::gpu::gemm_bi_fixed::sm120_exact_n64_auto_tests::fixed_sm120_bc1_postbias_auto_promotes_only_confirmed_tiles ... ok
+test mamba_ssm::gpu::gemm_bi_fixed::sm120_exact_n64_auto_tests::fixed_sm120_copyplan_t256_force_gate_keeps_hot_rows_and_bias_contract ... ok
+test mamba_ssm::gpu::gemm_bi_fixed::sm120_exact_n64_auto_tests::fixed_sm120_exact_n64_auto_admits_the_six_qualified_rows ... ok
+test mamba_ssm::gpu::gemm_bi_fixed::sm120_exact_n64_auto_tests::fixed_sm120_exact_n64_auto_declines_unmeasured_shape_alignment_and_dtype ... ok
+test mamba_ssm::gpu::gemm_bi_fixed::sm120_exact_n64_auto_tests::fixed_sm120_exact_n64_auto_declines_unqualified_identity_or_policy ... ok
+test mamba_ssm::gpu::gemm_bi_fixed::sm120_exact_n64_auto_tests::fixed_sm120_force_physical_gate_is_independent_of_nvrtc_and_sm_cohort ... ok
+test mamba_ssm::gpu::gemm_bi_fixed::sm120_exact_n64_auto_tests::fixed_sm120_nobias_force_gate_accepts_only_qualified_unbiased_hot_rows ... ok
+test mamba_ssm::gpu::gemm_bi_fixed::sm120_exact_n64_auto_tests::fixed_sm120_sliced_auto_is_withdrawn_and_copyplan_retained ... ok
+test mamba_ssm::gpu::gemm_bi_fixed::sm120_exact_n64_auto_tests::fixed_sm120_tma_fma_a0_gate_is_exact_and_cohort_bound ... ok
+test mamba_ssm::gpu::gemm_bi_fixed::sm120_exact_n64_auto_tests::fixed_sm120_tma_fma_a1_auto_prefers_t256_and_retains_control_fallback ... ok
+test mamba_ssm::gpu::gemm_bi_fixed::sm120_exact_n64_auto_tests::fixed_sm120_tma_fma_a1_postbias_gate_is_exact_and_cohort_bound ... ok
+test mamba_ssm::gpu::gemm_bi_fixed::sm120_exact_n64_auto_tests::fixed_sm120_tma_fma_b0_gate_is_exact_and_cohort_bound ... ok
+test mamba_ssm::gpu::gemm_bi_fixed::sm120_exact_n64_auto_tests::fixed_sm120_tma_fma_force_declines_identity_neighbors_and_operand_drift ... ok
+test mamba_ssm::gpu::gemm_bi_fixed::sm120_exact_n64_auto_tests::fixed_sm120_tma_fma_force_gate_admits_only_unbiased_hot_rows ... ok
+test mamba_ssm::gpu::gemm_bi_fixed::sm120_exact_n64_auto_tests::fixed_sm120_tma_fma_force_gate_separates_bias_arithmetic_variants ... ok
+test mamba_ssm::gpu::gemm_bi_fixed::sm89_exact_n64_auto_tests::fixed_sm89_exact_n64_auto_admits_only_eight_measured_positive_rows ... ok
+test mamba_ssm::gpu::gemm_bi_fixed::sm89_exact_n64_auto_tests::fixed_sm89_exact_n64_auto_declines_adjacent_unmeasured_and_thin_shapes ... ok
+test mamba_ssm::gpu::gemm_bi_fixed::sm89_exact_n64_auto_tests::fixed_sm89_exact_n64_auto_declines_invalid_alignment_null_bias_and_dtype ... ok
+test mamba_ssm::gpu::gemm_bi_fixed::sm89_exact_n64_auto_tests::fixed_sm89_exact_n64_auto_declines_unknown_device_toolchain_holder_and_policy ... ok
+test mamba_ssm::gpu::gemm_bi_fixed::sm89_exact_n64_auto_tests::fixed_sm89_exact_n64_auto_keeps_old_cc12_exact_selector_cells ... ok
+test mamba_ssm::gpu::gemm_bi_fixed::sm89_exact_n64_auto_tests::fixed_sm89_exact_n64_auto_routes_a_and_d_copyplan_winners ... ok
+test mamba_ssm::gpu::gemm_bi_fixed::sm89_exact_n64_request_tests::fixed_sm89_exact_n64_empty_and_k0_requests_do_not_require_inputs ... ok
+test mamba_ssm::gpu::gemm_bi_fixed::sm89_exact_n64_request_tests::fixed_sm89_exact_n64_forward_bundle_has_exact_m_n_k_and_stride_words ... ok
+test mamba_ssm::gpu::gemm_bi_fixed::sm89_exact_n64_request_tests::fixed_sm89_exact_n64_operand_and_arch_guards_are_fail_closed ... ok
+test mamba_ssm::gpu::gemm_bi_fixed::sm89_exact_n64_request_tests::fixed_sm89_exact_n64_operand_byte_endpoints_cannot_wrap ... ok
+test mamba_ssm::gpu::gemm_bi_fixed::sm89_exact_n64_request_tests::fixed_sm89_exact_n64_signed_padding_and_grid_boundaries ... ok
+test mamba_ssm::gpu::gemm_bi_fixed::sm89_pipeline_auto_tests::sm89_pipeline_auto_requires_measured_shape_device_and_operand_contract ... ok
+test mamba_ssm::gpu::gemm_bi_fixed::sm89_rna_auto_tests::fixed_sm89_rna_auto_exact_cells_and_independent_declines ... ok
+test mamba_ssm::gpu::gemm_bi_fixed::tests::exact_f32_selector_keeps_cc121_a_and_b_on_legacy ... ok
+test mamba_ssm::gpu::gemm_bi_fixed::tests::exact_f32_selector_promotes_only_measured_cc120_170_sm_points ... ok
+test mamba_ssm::gpu::gemm_bi_fixed::tests::mixed_f32_output_selector_follows_sm120_wave_balance ... ok
+test mamba_ssm::gpu::gemm_bi_fixed::tests::selector_keeps_unmeasured_architectures_on_two_thin_waves ... ok
+test mamba_ssm::gpu::gemm_bi_fixed::tests::selector_uses_live_sm_count_for_wide_wave_efficiency ... ok
+test mamba_ssm::gpu::gemm_bi_fixed::tests::selector_uses_measured_sm89_thin_wave_boundary ... ok
+test mamba_ssm::gpu::gemm_bi_fixed::tests::sm120_half_deep_selector_matches_measured_170_sm_anchors ... ok
+test mamba_ssm::gpu::gemm_bi_fixed::tests::sm120_half_exact_overlay_promotes_only_qualified_full_context_cells ... ok
+test mamba_ssm::gpu::gemm_bi_fixed::tests::sm120_half_forced_tile_inventory_is_complete ... ok
+test mamba_ssm::gpu::gemm_bi_fixed::tests::sm120_half_selector_matches_measured_regions ... ok
+test mamba_ssm::gpu::gemm_bi_fixed::tests::sm120_half_shallow_selector_matches_measured_170_sm_wave_keys ... ok
+test mamba_ssm::gpu::gemm_bi_fixed::tests::sm120_map_caches_retain_all_live_graph_entries ... ok
+test mamba_ssm::gpu::gemm_bi_fixed::tests::sm120_mixed_f32_output_selector_retains_measured_winners ... ok
+test mamba_ssm::gpu::gemm_bi_fixed::tests::sm120_postbias_bk16_maps_are_isolated_from_tf32_bk32_maps ... ok
+test mamba_ssm::gpu::gemm_bi_fixed::tests::sm120_tf32_selector_promotes_confirmed_a_bias_rows ... ok
+test mamba_ssm::gpu::gemm_bi_fixed::tests::sm120_tf32_selector_promotes_only_the_qualified_cuda_132_b_and_d_cells ... ok
+test mamba_ssm::gpu::gemm_bi_fixed::tests::sm120_uses_fragment_reuse_for_deep_square_tiles ... ok
+test mamba_ssm::gpu::gemm_bi_fixed::tests::sm89_tf32_selector_promotes_only_confirmed_c_bias_rows ... ok
+test mamba_ssm::gpu::gemm_bi_fixed::tests::tc16_compact_xor_layout_is_bijective_and_bank_distinct ... ok
+test mamba_ssm::gpu::gemm_bi_fixed::tests::tf32_selector_keeps_portable_and_thin_fallbacks ... ok
+test mamba_ssm::gpu::gemm_bi_triad::contract::tests::allocation_domain_accepts_matching_associated_context_and_device ... ok
+test mamba_ssm::gpu::gemm_bi_triad::contract::tests::allocation_domain_accepts_null_context_only_on_matching_device ... ok
+test mamba_ssm::gpu::gemm_bi_triad::contract::tests::allocation_domain_rejects_mismatched_associated_context ... ok
+test mamba_ssm::gpu::gemm_bi_triad::contract::tests::allocation_domain_rejects_mismatched_device_after_context_match ... ok
+test mamba_ssm::gpu::gemm_bi_triad::contract::tests::allocation_domain_rejects_null_context_on_mismatched_device ... ok
+test mamba_ssm::gpu::gemm_bi_triad::contract::tests::allocation_identity_accepts_adjacent_or_distinct_allocations ... ok
+test mamba_ssm::gpu::gemm_bi_triad::contract::tests::allocation_identity_detects_requested_span_overlap ... ok
+test mamba_ssm::gpu::gemm_bi_triad::contract::tests::allocation_identity_digest_excludes_raw_context_and_tracks_logical_identity ... ok
+test mamba_ssm::gpu::gemm_bi_triad::contract::tests::bias_preseed_rejects_non_identity_alpha ... ok
+test mamba_ssm::gpu::gemm_bi_triad::contract::tests::encoded_tf32_map_identity_frames_every_graph_bound_resource ... ok
+test mamba_ssm::gpu::gemm_bi_triad::contract::tests::f32_resource_epoch_tracks_external_owners_but_not_context_scratch ... ok
+test mamba_ssm::gpu::gemm_bi_triad::contract::tests::f32_shape_rejects_bad_strides_and_i32_overflow ... ok
+test mamba_ssm::gpu::gemm_bi_triad::contract::tests::f32_zero_reduction_validation_is_op_normalized ... ok
+test mamba_ssm::gpu::gemm_bi_triad::contract::tests::gemm_dims_accept_i32_max_boundary ... ok
+test mamba_ssm::gpu::gemm_bi_triad::contract::tests::gemm_dims_preserve_nt_storage_strides ... ok
+test mamba_ssm::gpu::gemm_bi_triad::contract::tests::gemm_dims_preserve_tn_storage_strides ... ok
+test mamba_ssm::gpu::gemm_bi_triad::contract::tests::gemm_dims_reject_axis_above_i32_max ... ok
+test mamba_ssm::gpu::gemm_bi_triad::contract::tests::gemm_dims_reject_bad_nn_strides ... ok
+test mamba_ssm::gpu::gemm_bi_triad::contract::tests::gemm_dims_reject_bad_nt_strides ... ok
+test mamba_ssm::gpu::gemm_bi_triad::contract::tests::gemm_dims_reject_bad_tn_strides ... ok
+test mamba_ssm::gpu::gemm_bi_triad::contract::tests::gemm_dims_reject_device_total_overflow ... ok
+test mamba_ssm::gpu::gemm_bi_triad::contract::tests::gemm_dims_reject_grid_conversion_overflow ... ok
+test mamba_ssm::gpu::gemm_bi_triad::contract::tests::gemm_dims_reject_product_overflow ... ok
+test mamba_ssm::gpu::gemm_bi_triad::contract::tests::gemm_dims_reject_zero_axes ... ok
+test mamba_ssm::gpu::gemm_bi_triad::contract::tests::physical_allocation_digest_excludes_addresses_and_tracks_subview_generation ... ok
+test mamba_ssm::gpu::gemm_bi_triad::contract::tests::physical_encoded_identity_excludes_addresses_and_descriptor_storage ... ok
+test mamba_ssm::gpu::gemm_bi_triad::contract::tests::physical_f32_resources_bind_roles_nullness_and_scratch_provenance ... ok
+test mamba_ssm::gpu::gemm_bi_triad::contract::tests::portable_tf32_nn_splitk2_and_splitk4_are_distinct_bit_families ... ok
+test mamba_ssm::gpu::gemm_bi_triad::contract::tests::portable_tf32_schedule_revision_tracks_the_current_layout ... ok
+test mamba_ssm::gpu::gemm_bi_triad::contract::tests::portable_tf32_shared_bytes_are_op_specific ... ok
+test mamba_ssm::gpu::gemm_bi_triad::contract::tests::portable_tf32_splitk_extension_inventory_covers_tn_candidates_exactly ... ok
+test mamba_ssm::gpu::gemm_bi_triad::contract::tests::portable_tf32_splitk_inventory_covers_nn_and_nt_candidates_exactly ... ok
+test mamba_ssm::gpu::gemm_bi_triad::contract::tests::portable_tf32_splitk_lookup_and_partitioning_are_operation_aware ... ok
+test mamba_ssm::gpu::gemm_bi_triad::contract::tests::prepared_encoded_identity_tracks_stored_descriptor_bytes ... ok
+test mamba_ssm::gpu::gemm_bi_triad::contract::tests::rect_wide_spec_keeps_logical_bk64_and_bk32_tensor_maps ... ok
+test mamba_ssm::gpu::gemm_bi_triad::contract::tests::scalar_nn_m32n64_splitk32_resource_contract_is_exact ... ok
+test mamba_ssm::gpu::gemm_bi_triad::contract::tests::scalar_tn_m16n16_resource_contract_is_exact ... ok
+test mamba_ssm::gpu::gemm_bi_triad::contract::tests::sm100_i32_max_host_and_device_tile_math_agree ... ok
+test mamba_ssm::gpu::gemm_bi_triad::contract::tests::sm100_map_keys_freeze_each_operand_layout_and_tile ... ok
+test mamba_ssm::gpu::gemm_bi_triad::contract::tests::sm100_map_keys_reject_bad_strides_dtypes_and_shapes ... ok
+test mamba_ssm::gpu::gemm_bi_triad::contract::tests::sm100_subview_origins_cover_secondary_tma_coordinates ... ok
+test mamba_ssm::gpu::gemm_bi_triad::contract::tests::sm120_inventory_covers_all_ninety_six_physical_routes_once ... ok
+test mamba_ssm::gpu::gemm_bi_triad::contract::tests::sm120_physical_metadata_matches_literal_resource_contract ... ok
+test mamba_ssm::gpu::gemm_bi_triad::contract::tests::sm120_sw128_oracle_matches_production_decode ... ok
+test mamba_ssm::gpu::gemm_bi_triad::contract::tests::sm90a_map_keys_freeze_each_operand_layout ... ok
+test mamba_ssm::gpu::gemm_bi_triad::contract::tests::sm90a_map_keys_reject_bad_strides_and_shapes ... ok
+test mamba_ssm::gpu::gemm_bi_triad::contract::tests::specialized_tf32_issued_coordinates_include_tail_plane_starts ... ok
+test mamba_ssm::gpu::gemm_bi_triad::contract::tests::tf32_descriptor_oracles_match_production_builders ... ok
+test mamba_ssm::gpu::gemm_bi_triad::contract::tests::tf32_epilogue_matches_scalar_reference_bits ... ok
+test mamba_ssm::gpu::gemm_bi_triad::contract::tests::tf32_route_spec_inventories_are_exact_and_unique ... ok
+test mamba_ssm::gpu::gemm_bi_triad::contract::tests::tma_tensor_map_rejects_a_logical_pointer_below_its_alignment ... ok
+test mamba_ssm::gpu::gemm_bi_triad::contract::tests::zero_reduction_identity_excludes_stored_descriptor_bytes ... ok
+test mamba_ssm::gpu::gemm_bi_triad::contract::tests::zero_reduction_validation_rejects_nonzero_sentinels ... ok
+test mamba_ssm::gpu::gemm_bi_triad::dispatch::scalar_wave_policy_tests::live_sm_policy_preserves_the_frozen_142_sm_scalar_table ... ok
+test mamba_ssm::gpu::gemm_bi_triad::dispatch::scalar_wave_policy_tests::nn_m32n64_splitk32_exact_cell_is_fail_closed ... ok
+test mamba_ssm::gpu::gemm_bi_triad::dispatch::scalar_wave_policy_tests::nn_m64n64_selector_admits_only_the_seven_measured_cells ... ok
+test mamba_ssm::gpu::gemm_bi_triad::dispatch::scalar_wave_policy_tests::nn_m64n64_selector_requires_the_exact_scalar_environment ... ok
+test mamba_ssm::gpu::gemm_bi_triad::dispatch::scalar_wave_policy_tests::nn_m64n64_selector_requires_the_measured_operand_domain ... ok
+test mamba_ssm::gpu::gemm_bi_triad::dispatch::scalar_wave_policy_tests::nn_slim_split_admission_uses_three_live_waves ... ok
+test mamba_ssm::gpu::gemm_bi_triad::dispatch::scalar_wave_policy_tests::nn_thin_split_admission_uses_the_live_multiprocessor_count ... ok
+test mamba_ssm::gpu::gemm_bi_triad::dispatch::scalar_wave_policy_tests::nt_d128_out_transpose_m64n64_selector_is_an_exact_splitk_cell ... ok
+test mamba_ssm::gpu::gemm_bi_triad::dispatch::scalar_wave_policy_tests::nt_d768_out_transpose_m64n64_requires_qualified_environment_and_operands ... ok
+test mamba_ssm::gpu::gemm_bi_triad::dispatch::scalar_wave_policy_tests::nt_d768_out_transpose_m64n64_selector_is_a_distinct_exact_cell ... ok
+test mamba_ssm::gpu::gemm_bi_triad::dispatch::scalar_wave_policy_tests::nt_d768_transpose_m64n64_requires_qualified_environment_and_operands ... ok
+test mamba_ssm::gpu::gemm_bi_triad::dispatch::scalar_wave_policy_tests::nt_d768_transpose_m64n64_selector_is_an_exact_cell ... ok
+test mamba_ssm::gpu::gemm_bi_triad::dispatch::scalar_wave_policy_tests::nt_generic_split_admission_keeps_the_pre_large_deep_scratch_boundary ... ok
+test mamba_ssm::gpu::gemm_bi_triad::dispatch::scalar_wave_policy_tests::nt_large_deep_transpose_m64n64_rejects_environment_and_operand_mutations ... ok
+test mamba_ssm::gpu::gemm_bi_triad::dispatch::scalar_wave_policy_tests::nt_large_deep_transpose_m64n64_selector_is_an_exact_capacity_cell ... ok
+test mamba_ssm::gpu::gemm_bi_triad::dispatch::scalar_wave_policy_tests::nt_m2n16_exact_cell_requires_shape_operands_and_qualified_environment ... ok
+test mamba_ssm::gpu::gemm_bi_triad::dispatch::scalar_wave_policy_tests::nt_prism_vector_rejects_environment_and_operand_mutations ... ok
+test mamba_ssm::gpu::gemm_bi_triad::dispatch::scalar_wave_policy_tests::nt_prism_vector_selector_is_an_exact_slim_cell ... ok
+test mamba_ssm::gpu::gemm_bi_triad::dispatch::scalar_wave_policy_tests::nt_split_admission_promotes_the_two_qualified_thin_output_cells ... ok
+test mamba_ssm::gpu::gemm_bi_triad::dispatch::scalar_wave_policy_tests::nt_split_admission_uses_the_live_multiprocessor_count ... ok
+test mamba_ssm::gpu::gemm_bi_triad::dispatch::scalar_wave_policy_tests::scalar_dispatch_rejects_zero_multiprocessors ... ok
+test mamba_ssm::gpu::gemm_bi_triad::dispatch::scalar_wave_policy_tests::tn_narrow_split_m_selector_admits_from_independent_scalar_facts ... ok
+test mamba_ssm::gpu::gemm_bi_triad::dispatch::scalar_wave_policy_tests::tn_narrow_split_m_selector_admits_only_the_three_exact_cells ... ok
+test mamba_ssm::gpu::gemm_bi_triad::dispatch::scalar_wave_policy_tests::tn_narrow_split_m_selector_rejects_neighboring_requests_and_epilogues ... ok
+test mamba_ssm::gpu::gemm_bi_triad::dispatch::scalar_wave_policy_tests::tn_narrow_split_m_selector_requires_the_exact_device_and_compiler_domain ... ok
+test mamba_ssm::gpu::gemm_bi_triad::dispatch::scalar_wave_policy_tests::tn_small_input_splitm_gap_is_covered_by_the_generic_member ... ok
+test mamba_ssm::gpu::gemm_bi_triad::dispatch::scalar_wave_policy_tests::tn_split_m_partition_targets_two_live_waves ... ok
+test mamba_ssm::gpu::gemm_bi_triad::dispatch::sm100_sm90a_auto_tests::a_measured_sm100_cell_wins_on_its_board_and_the_rule_takes_the_rest ... ok
+test mamba_ssm::gpu::gemm_bi_triad::dispatch::sm100_sm90a_auto_tests::sm100_tables_are_empty_and_the_wave_rule_serves_the_family ... ok
+test mamba_ssm::gpu::gemm_bi_triad::dispatch::sm100_sm90a_auto_tests::the_sm90a_wave_rule_serves_hopper_and_measured_cells_stay_scoped ... ok
+test mamba_ssm::gpu::gemm_bi_triad::dispatch::sm100_toolkit_tests::older_toolkits_are_offered_only_the_targets_they_can_name ... ok
+test mamba_ssm::gpu::gemm_bi_triad::dispatch::sm120_tests::a_permitted_request_with_a_filled_grid_takes_the_tiled_table ... ok
+test mamba_ssm::gpu::gemm_bi_triad::dispatch::sm120_tests::a_shape_off_the_table_takes_the_nearest_measured_tile_inside_the_band ... ok
+test mamba_ssm::gpu::gemm_bi_triad::dispatch::sm120_tests::a_streamk_neighbour_serves_only_an_underfilled_grid ... ok
+test mamba_ssm::gpu::gemm_bi_triad::dispatch::sm120_tests::sm120_auto_declines_a_mismatched_accepted_target ... ok
+test mamba_ssm::gpu::gemm_bi_triad::dispatch::sm120_tests::sm120_auto_declines_a_nonqualified_shape ... ok
+test mamba_ssm::gpu::gemm_bi_triad::dispatch::sm120_tests::sm120_auto_declines_unaligned_inputs_and_outputs ... ok
+test mamba_ssm::gpu::gemm_bi_triad::dispatch::sm120_tests::sm120_auto_declines_unsupported_operands_for_each_operation ... ok
+test mamba_ssm::gpu::gemm_bi_triad::dispatch::sm120_tests::sm120_auto_declines_without_qualified_minor_table ... ok
+test mamba_ssm::gpu::gemm_bi_triad::dispatch::sm120_tests::sm120_auto_declines_without_tensor_map_capability ... ok
+test mamba_ssm::gpu::gemm_bi_triad::dispatch::sm120_tests::sm120_auto_selects_every_qualified_cc120_cell ... ok
+test mamba_ssm::gpu::gemm_bi_triad::dispatch::sm120_tests::sm120_auto_table_matches_the_qualified_cc120_inventory ... ok
+test mamba_ssm::gpu::gemm_bi_triad::dispatch::sm120_tests::sm120_candidates_follow_toolkit_support_and_generic_compatibility ... ok
+test mamba_ssm::gpu::gemm_bi_triad::dispatch::sm120_tests::streamk_cells_open_only_under_the_half_policy ... ok
+test mamba_ssm::gpu::gemm_bi_triad::dispatch::sm120_tests::streamk_table_is_the_measured_twelve_with_a_tiled_cell_each ... ok
+test mamba_ssm::gpu::gemm_bi_triad::dispatch::tc_policy_tests::backward_tail_envelope_replaces_exact_shape_admission ... ok
+test mamba_ssm::gpu::gemm_bi_triad::dispatch::tc_policy_tests::backward_tail_reduction_boundary_is_inclusive_at_256 ... ok
+test mamba_ssm::gpu::gemm_bi_triad::dispatch::tc_policy_tests::deep_split_k_scalar_preference_is_sm89_specific ... ok
+test mamba_ssm::gpu::gemm_bi_triad::dispatch::tc_policy_tests::edge_selector_outcome_digest_rejects_order_and_route_mutations ... ok
+test mamba_ssm::gpu::gemm_bi_triad::dispatch::tc_policy_tests::edge_selector_outcomes_are_pinned_for_sm80_plus_device_sizes ... ok
+test mamba_ssm::gpu::gemm_bi_triad::dispatch::tc_policy_tests::nn_policy_uses_underfill_and_short_reduction_wave_rules ... ok
+test mamba_ssm::gpu::gemm_bi_triad::dispatch::tc_policy_tests::nn_short_reduction_boundary_is_inclusive_at_k16 ... ok
+test mamba_ssm::gpu::gemm_bi_triad::dispatch::tc_policy_tests::nn_underfill_grid_boundary_is_strict_between_26_and_27_ctas ... ok
+test mamba_ssm::gpu::gemm_bi_triad::dispatch::tc_policy_tests::nn_underfill_reduction_boundary_is_inclusive_at_k512 ... ok
+test mamba_ssm::gpu::gemm_bi_triad::dispatch::tc_policy_tests::one_sub_128_axis_never_uses_the_tile128_square_rule ... ok
+test mamba_ssm::gpu::gemm_bi_triad::dispatch::tc_policy_tests::policy_v3_keeps_long_reduction_and_full_tile_controls ... ok
+test mamba_ssm::gpu::gemm_bi_triad::dispatch::tc_policy_tests::selector_policy_identity_is_pinned_for_sm80_plus_device_sizes ... ok
+test mamba_ssm::gpu::gemm_bi_triad::dispatch::tc_policy_tests::sm89_backward_square_policy_matches_forced_matrix_envelopes ... ok
+test mamba_ssm::gpu::gemm_bi_triad::dispatch::tc_policy_tests::sm89_half_policy_prefers_proven_split_k_scalar_boundaries_only ... ok
+test mamba_ssm::gpu::gemm_bi_triad::dispatch::tc_policy_tests::sm89_stream_k_dw_needs_the_half_permission_an_underfilled_grid_and_depth ... ok
+test mamba_ssm::gpu::gemm_bi_triad::dispatch::tc_policy_tests::square_half_wave_boundary_is_inclusive_between_70_and_71_ctas ... ok
+test mamba_ssm::gpu::gemm_bi_triad::dispatch::tc_policy_tests::tn_policy_uses_tile64_for_one_wave_rectangles ... ok
+test mamba_ssm::gpu::gemm_bi_triad::dispatch::tc_policy_tests::tn_rectangular_aspect_uses_the_ceil_divided_tile_grid ... ok
+test mamba_ssm::gpu::gemm_bi_triad::dispatch::tf32_tests::at_least_one_sm120_tf32_cohort_matches_this_tree ... ok
+test mamba_ssm::gpu::gemm_bi_triad::dispatch::tf32_tests::exact_and_unmeasured_auto_resolution_stay_scalar ... ok
+test mamba_ssm::gpu::gemm_bi_triad::dispatch::tf32_tests::exact_policy_measured_cells_resolve_to_their_official_arms ... ok
+test mamba_ssm::gpu::gemm_bi_triad::dispatch::tf32_tests::exact_scalar_policy_dominates_the_sm89_tf32_table ... ok
+test mamba_ssm::gpu::gemm_bi_triad::dispatch::tf32_tests::forced_resolution_accepts_each_exact_qualified_family ... ok
+test mamba_ssm::gpu::gemm_bi_triad::dispatch::tf32_tests::forced_resolution_rejects_incoherent_or_unavailable_bindings ... ok
+test mamba_ssm::gpu::gemm_bi_triad::dispatch::tf32_tests::fresh_sm120_595_58_03_auto_selects_each_observed_winner ... ok
+test mamba_ssm::gpu::gemm_bi_triad::dispatch::tf32_tests::fresh_sm120_595_58_03_identity_drift_fails_closed ... ok
+test mamba_ssm::gpu::gemm_bi_triad::dispatch::tf32_tests::fresh_sm120_595_58_03_manifest_binds_only_completed_cells ... ok
+test mamba_ssm::gpu::gemm_bi_triad::dispatch::tf32_tests::fresh_sm120_595_58_03_neighbors_epilogues_and_alignment_stay_exact ... ok
+test mamba_ssm::gpu::gemm_bi_triad::dispatch::tf32_tests::nt_splitk8_is_forced_only_and_does_not_change_auto_selection ... ok
+test mamba_ssm::gpu::gemm_bi_triad::dispatch::tf32_tests::portable_sm101a_accepts_the_exact_target_transaction ... ok
+test mamba_ssm::gpu::gemm_bi_triad::dispatch::tf32_tests::portable_sm110_accepts_the_arch_specific_target_transaction ... ok
+test mamba_ssm::gpu::gemm_bi_triad::dispatch::tf32_tests::sm120_tf32_cuda_12_8_identity_matches_the_literal_qualification_manifest ... ok
+test mamba_ssm::gpu::gemm_bi_triad::dispatch::tf32_tests::sm120_tf32_cuda_12_8_identity_rejects_all_29_single_field_mutations ... ok
+test mamba_ssm::gpu::gemm_bi_triad::dispatch::tf32_tests::sm120_tf32_cuda_12_8_route_manifest_is_literal_and_complete ... ok
+test mamba_ssm::gpu::gemm_bi_triad::dispatch::tf32_tests::sm120_tf32_cuda_13_0_all_nine_routes_fail_closed_on_request_or_operand_drift ... ok
+test mamba_ssm::gpu::gemm_bi_triad::dispatch::tf32_tests::sm120_tf32_cuda_13_0_identity_matches_the_literal_qualification_manifest ... ok
+test mamba_ssm::gpu::gemm_bi_triad::dispatch::tf32_tests::sm120_tf32_cuda_13_0_identity_rejects_all_29_single_field_mutations ... ok
+test mamba_ssm::gpu::gemm_bi_triad::dispatch::tf32_tests::sm120_tf32_cuda_13_0_route_manifest_is_literal_and_complete ... ok
+test mamba_ssm::gpu::gemm_bi_triad::dispatch::tf32_tests::sm120_tf32_cuda_13_2_identity_matches_the_literal_qualification_manifest ... ok
+test mamba_ssm::gpu::gemm_bi_triad::dispatch::tf32_tests::sm120_tf32_cuda_13_2_route_manifest_is_literal_and_complete ... ok
+test mamba_ssm::gpu::gemm_bi_triad::dispatch::tf32_tests::sm120_tf32_evidence_cohorts_are_exact_and_unambiguous ... ok
+test mamba_ssm::gpu::gemm_bi_triad::dispatch::tf32_tests::sm120_tf32_live_cohort_manifest_is_exact_and_unique ... ok
+test mamba_ssm::gpu::gemm_bi_triad::dispatch::tf32_tests::sm120_tf32_live_nn_cell_is_exact_and_fail_closed ... ok
+test mamba_ssm::gpu::gemm_bi_triad::dispatch::tf32_tests::sm120_tf32_live_portable_tn_cell_is_exact_and_fail_closed ... ok
+test mamba_ssm::gpu::gemm_bi_triad::dispatch::tf32_tests::sm120_tf32_operand_aware_resolution_admits_only_archived_cells ... ok
+test mamba_ssm::gpu::gemm_bi_triad::dispatch::tf32_tests::sm120_tf32_real_cohorts_bind_routes_and_reject_cross_version_splices ... ok
+test mamba_ssm::gpu::gemm_bi_triad::dispatch::tf32_tests::sm89_tf32_auto_fails_closed_without_operands_alignment_or_exact_identity ... ok
+test mamba_ssm::gpu::gemm_bi_triad::dispatch::tf32_tests::sm89_tf32_bias_wide_requires_its_exact_qualified_epilogue ... ok
+test mamba_ssm::gpu::gemm_bi_triad::dispatch::tf32_tests::sm89_tf32_cells_are_nvrtc_13_2_exact ... ok
+test mamba_ssm::gpu::gemm_bi_triad::dispatch::tf32_tests::sm89_tf32_cells_are_topology_target_and_revision_exact ... ok
+test mamba_ssm::gpu::gemm_bi_triad::dispatch::tf32_tests::sm89_tf32_evidence_inventory_encodes_the_missing_operand_gates ... ok
+test mamba_ssm::gpu::gemm_bi_triad::dispatch::tf32_tests::sm89_tf32_evidence_inventory_matches_all_qualified_routes ... ok
+test mamba_ssm::gpu::gemm_bi_triad::dispatch::tf32_tests::sm89_tf32_operand_aware_resolution_admits_exact_evidence ... ok
+test mamba_ssm::gpu::gemm_bi_triad::dispatch::tf32_tests::sm89_tf32_operand_aware_resolution_rejects_semantic_and_alignment_drift ... ok
+test mamba_ssm::gpu::gemm_bi_triad::dispatch::tf32_tests::sm89_tf32_operand_gated_cells_remain_scalar ... ok
+test mamba_ssm::gpu::gemm_bi_triad::dispatch::tf32_tests::sm89_tf32_requalification_overrides_archived_routes ... ok
+test mamba_ssm::gpu::gemm_bi_triad::dispatch::tf32_tests::sm89_tf32_request_only_cells_remain_scalar ... ok
+test mamba_ssm::gpu::gemm_bi_triad::dispatch::tf32_tests::sm89_tf32_scalar_stride_cells_have_no_bucket_or_layout_bleed ... ok
+test mamba_ssm::gpu::gemm_bi_triad::dispatch::tf32_tests::specialized_sm110_accepts_only_feature_target_transactions ... ok
+test mamba_ssm::gpu::gemm_bi_triad::dispatch::tf32_tests::tf32_cohorts_follow_the_bound_module_family ... ok
+test mamba_ssm::gpu::gemm_bi_triad::dispatch::tf32_tests::tf32_tn_underfill_qualification_uses_current_tuning_revision ... ok
+test mamba_ssm::gpu::gemm_bi_triad::launch::half_physical_trace_tests::half_kernel_identity_uses_exact_dtype_suffix_and_module_owner ... ok
+test mamba_ssm::gpu::gemm_bi_triad::launch::half_physical_trace_tests::no_physical_observer_is_zero_sized_and_never_records ... ok
+test mamba_ssm::gpu::gemm_bi_triad::launch::half_physical_trace_tests::rect128x64_tn_forced_identity_is_exact ... ok
+test mamba_ssm::gpu::gemm_bi_triad::launch::prepared_f32_launch_tests::automatic_scalar_prepared_nn_accepts_managed_b_plus_one ... ignored, requires an SM89 CUDA device
+test mamba_ssm::gpu::gemm_bi_triad::launch::prepared_f32_launch_tests::backward_launch_plan_uses_the_canonical_op_and_contiguous_abi ... ok
+test mamba_ssm::gpu::gemm_bi_triad::launch::prepared_f32_launch_tests::bounded_cache_clears_before_a_distinct_entry_exceeds_the_limit ... ok
+test mamba_ssm::gpu::gemm_bi_triad::launch::prepared_f32_launch_tests::bounded_cache_sweep_removes_stale_entries_before_insertion ... ok
+test mamba_ssm::gpu::gemm_bi_triad::launch::prepared_f32_launch_tests::changed_managed_epoch_refreshes_once_outside_capture ... ok
+test mamba_ssm::gpu::gemm_bi_triad::launch::prepared_f32_launch_tests::changed_managed_epoch_requires_warmup_during_capture ... ok
+test mamba_ssm::gpu::gemm_bi_triad::launch::prepared_f32_launch_tests::current_managed_epoch_skips_cached_full_validation ... ok
+test mamba_ssm::gpu::gemm_bi_triad::launch::prepared_f32_launch_tests::exact_scalar_prepared_nn_accepts_managed_b_plus_one ... ignored, requires an SM89 CUDA device
+test mamba_ssm::gpu::gemm_bi_triad::launch::prepared_f32_launch_tests::exact_scalar_prepared_nn_accepts_managed_output_plus_one ... ignored, requires an SM89 CUDA device
+test mamba_ssm::gpu::gemm_bi_triad::launch::prepared_f32_launch_tests::f32_prepared_key_seals_context_request_pointers_and_scalar_bits ... ok
+test mamba_ssm::gpu::gemm_bi_triad::launch::prepared_f32_launch_tests::f32_triad_operand_validation_rejects_null_and_misaligned_pointers ... ok
+test mamba_ssm::gpu::gemm_bi_triad::launch::prepared_f32_launch_tests::managed_f32_cache_hit_skips_allocation_identity_queries ... ignored, requires a CUDA device
+test mamba_ssm::gpu::gemm_bi_triad::launch::prepared_f32_launch_tests::nt_k_tail_34_node_plan_preserves_repeated_symbol_arguments_and_neighbors ... ok
+test mamba_ssm::gpu::gemm_bi_triad::launch::prepared_f32_launch_tests::operand_aware_auto_prepares_and_repeats_the_measured_tf32_route ... ignored, requires an SM89 CUDA device
+test mamba_ssm::gpu::gemm_bi_triad::launch::prepared_f32_launch_tests::physical_tf32_route_preserves_semantic_arguments_while_projecting_resources ... ok
+test mamba_ssm::gpu::gemm_bi_triad::launch::prepared_f32_launch_tests::prepared_backward_enqueue_skips_fallback_dispatch ... ok
+test mamba_ssm::gpu::gemm_bi_triad::launch::prepared_f32_launch_tests::prepared_cache_lookup_does_not_build_full_route_identity ... ok
+test mamba_ssm::gpu::gemm_bi_triad::launch::prepared_f32_launch_tests::prepared_scalar_binding_uses_frozen_digest_and_rejects_symbol_config_or_order_changes ... ok
+test mamba_ssm::gpu::gemm_bi_triad::launch::prepared_f32_launch_tests::prepared_scalar_enqueue_does_not_rehash_frozen_arguments ... ok
+test mamba_ssm::gpu::gemm_bi_triad::launch::prepared_f32_launch_tests::rect_wide_route_freezes_physical_and_graph_identity ... ok
+test mamba_ssm::gpu::gemm_bi_triad::launch::prepared_f32_launch_tests::scalar_argument_layout_tracks_the_physical_pointer_abi ... ok
+test mamba_ssm::gpu::gemm_bi_triad::launch::prepared_f32_launch_tests::scalar_big_nt_uses_its_exact_shared_memory_contract ... ok
+test mamba_ssm::gpu::gemm_bi_triad::launch::prepared_f32_launch_tests::scalar_f32_big_and_slim_accept_every_four_byte_aligned_external_base ... ignored, requires an SM89 CUDA device
+test mamba_ssm::gpu::gemm_bi_triad::launch::prepared_f32_launch_tests::scalar_nn_m32n64_splitk32_plan_has_two_exact_ordered_nodes ... ok
+test mamba_ssm::gpu::gemm_bi_triad::launch::prepared_f32_launch_tests::scalar_nn_m32n64_splitk32_raw_and_prepared_identity_match ... ok
+test mamba_ssm::gpu::gemm_bi_triad::launch::prepared_f32_launch_tests::scalar_nn_m64n64_plan_has_the_qualified_seven_cell_identity ... ok
+test mamba_ssm::gpu::gemm_bi_triad::launch::prepared_f32_launch_tests::scalar_node_identity_distinguishes_equal_symbol_sequences ... ok
+test mamba_ssm::gpu::gemm_bi_triad::launch::prepared_f32_launch_tests::scalar_nt_d128_out_raw_and_prepared_identity_match ... ok
+test mamba_ssm::gpu::gemm_bi_triad::launch::prepared_f32_launch_tests::scalar_nt_d128_out_transpose_plan_has_the_qualified_revision_and_two_exact_nodes ... ok
+test mamba_ssm::gpu::gemm_bi_triad::launch::prepared_f32_launch_tests::scalar_nt_d768_out_raw_and_prepared_paths_freeze_the_same_identity ... ok
+test mamba_ssm::gpu::gemm_bi_triad::launch::prepared_f32_launch_tests::scalar_nt_d768_out_transpose_plan_has_distinct_tag_and_exact_nodes ... ok
+test mamba_ssm::gpu::gemm_bi_triad::launch::prepared_f32_launch_tests::scalar_nt_d768_transpose_plan_has_two_exact_ordered_nodes ... ok
+test mamba_ssm::gpu::gemm_bi_triad::launch::prepared_f32_launch_tests::scalar_nt_large_deep_raw_and_prepared_identity_match ... ok
+test mamba_ssm::gpu::gemm_bi_triad::launch::prepared_f32_launch_tests::scalar_nt_large_deep_transpose_plan_has_the_qualified_revision_and_two_exact_nodes ... ok
+test mamba_ssm::gpu::gemm_bi_triad::launch::prepared_f32_launch_tests::scalar_nt_m2n16_raw_and_prepared_one_node_identity_match ... ok
+test mamba_ssm::gpu::gemm_bi_triad::launch::prepared_f32_launch_tests::scalar_nt_prism_raw_and_prepared_identity_match ... ok
+test mamba_ssm::gpu::gemm_bi_triad::launch::prepared_f32_launch_tests::scalar_nt_prism_vector_plan_has_the_qualified_revision_and_two_exact_nodes ... ok
+test mamba_ssm::gpu::gemm_bi_triad::launch::prepared_f32_launch_tests::scalar_nt_thin_output_cells_have_the_qualified_splitk_node_identity ... ok
+test mamba_ssm::gpu::gemm_bi_triad::launch::prepared_f32_launch_tests::scalar_physical_plan_freezes_maximum_node_counts_and_neighbors ... ok
+test mamba_ssm::gpu::gemm_bi_triad::launch::prepared_f32_launch_tests::scalar_splitk_symbols_have_stage_specific_route_contracts ... ok
+test mamba_ssm::gpu::gemm_bi_triad::launch::prepared_f32_launch_tests::scalar_tn_m16n16_raw_and_prepared_one_node_identity_match ... ok
+test mamba_ssm::gpu::gemm_bi_triad::launch::prepared_f32_launch_tests::scalar_transpose_workspace_extent_is_checked_per_plan ... ok
+test mamba_ssm::gpu::gemm_bi_triad::launch::prepared_f32_launch_tests::sm120_cache_action_is_prepared_only_and_fail_closed_during_capture ... ok
+test mamba_ssm::gpu::gemm_bi_triad::launch::prepared_f32_launch_tests::sm120_prepared_key_seals_route_context_pointers_and_scalar_bits ... ok
+test mamba_ssm::gpu::gemm_bi_triad::launch::prepared_f32_launch_tests::specialized_device_identity_preserves_the_loaded_kernel_sm_count ... ok
+test mamba_ssm::gpu::gemm_bi_triad::launch::prepared_f32_launch_tests::tf32_argument_digests_bind_bias_nullness ... ok
+test mamba_ssm::gpu::gemm_bi_triad::launch::prepared_f32_launch_tests::tf32_kernel_param_abi_matches_cuda ... ok
+test mamba_ssm::gpu::gemm_bi_triad::launch::prepared_f32_launch_tests::tf32_nt_splitk8_has_distinct_numeric_and_ownership_identity ... ok
+test mamba_ssm::gpu::gemm_bi_triad::launch::prepared_f32_launch_tests::tf32_nt_splitk_live_and_reverse_plans_freeze_p4_and_p8_geometry ... ok
+test mamba_ssm::gpu::gemm_bi_triad::launch::prepared_f32_launch_tests::tf32_splitk2_launch_plan_and_route_freeze_two_partitions ... ok
+test mamba_ssm::gpu::gemm_bi_triad::launch::prepared_f32_launch_tests::tf32_splitk_launch_plan_freezes_one_fused_node_and_workspaces ... ok
+test mamba_ssm::gpu::gemm_bi_triad::launch::prepared_f32_launch_tests::tn_big_and_splitm_physical_symbols_separate_aligned_hot_paths ... ok
+test mamba_ssm::gpu::gemm_bi_triad::launch::prepared_f32_launch_tests::tn_narrow_splitm_qualified_manifests_have_exact_two_node_geometry ... ok
+test mamba_ssm::gpu::gemm_bi_triad::launch::prepared_f32_launch_tests::tn_splitm_plan_matches_enqueue_geometry_at_the_batch_boundary ... ok
+test mamba_ssm::gpu::gemm_bi_triad::launch::prepared_f32_launch_tests::tn_underfill_route_freezes_physical_and_graph_identity ... ok
+test mamba_ssm::gpu::gemm_bi_triad::launch::prepared_f32_launch_tests::untracked_cached_resources_keep_full_validation ... ok
+test mamba_ssm::gpu::gemm_bi_triad::launch::prepared_f32_launch_tests::zero_reduction_preparation_never_queries_input_allocations ... ok
+test mamba_ssm::gpu::gemm_bi_triad::launch::scalar_nn_tn_tests::runtime_production_shapes_resolve_to_single_big_routes ... ok
+test mamba_ssm::gpu::gemm_bi_triad::launch::scalar_nn_tn_tests::scalar_big_nn_tn_runtime_matrix_is_exact_and_graph_stable ... ignored, requires an SM80+ CUDA GPU
+test mamba_ssm::gpu::gemm_bi_triad::launch::scalar_nn_tn_tests::tn_m16n16_selector_is_exact_and_fail_closed ... ok
+test mamba_ssm::gpu::gemm_bi_triad::launch::scalar_nt_tests::ada_scalar_big_nt_runtime_matrix_is_exact_and_graph_stable ... ignored, requires an Ada GPU
+test mamba_ssm::gpu::gemm_bi_triad::launch::scalar_nt_tests::scalar_nt_live_canaries_detect_input_and_output_corruption ... ok
+test mamba_ssm::gpu::gemm_bi_triad::launch::scalar_nt_tests::sm120_scalar_nt_d128_out_production_route_is_exact_and_graph_stable ... ignored, requires an exclusive SM120/170-SM/NVRTC-13.2 CUDA GPU
+test mamba_ssm::gpu::gemm_bi_triad::launch::scalar_nt_tests::sm120_scalar_nt_d768_out_production_route_is_exact_and_graph_stable ... ignored, requires an exclusive SM120/170-SM/NVRTC-13.2 CUDA GPU
+test mamba_ssm::gpu::gemm_bi_triad::launch::scalar_nt_tests::sm120_scalar_nt_large_deep_production_route_is_exact_and_graph_stable ... ignored, requires an exclusive SM120/170-SM/NVRTC-13.2 CUDA GPU
+test mamba_ssm::gpu::gemm_bi_triad::launch::scalar_nt_tests::sm120_scalar_nt_prism_production_route_is_exact_and_graph_stable ... ignored, requires an exclusive SM120/170-SM/NVRTC-13.2 CUDA GPU
+test mamba_ssm::gpu::gemm_bi_triad::launch::scalar_nt_tests::sm80plus_f32_preparation_rejects_output_resource_aliases ... ignored, requires an SM80+ CUDA GPU
+test mamba_ssm::gpu::gemm_bi_triad::launch::scalar_nt_tests::sm80plus_scalar_nt_splitk_matches_its_frozen_f32_tree ... ignored, requires an exclusive SM80+ CUDA GPU
+test mamba_ssm::gpu::gemm_bi_triad::launch::scalar_nt_tests::sm80plus_scalar_nt_thin_outputs_are_exact_and_graph_stable ... ignored, requires an exclusive SM80+ CUDA GPU
+test mamba_ssm::gpu::gemm_bi_triad::modules::tests::a_symbol_failing_a_resource_gate_is_excluded_with_its_reason ... ok
+test mamba_ssm::gpu::gemm_bi_triad::modules::tests::driver_abi_live_query_requires_five_parameters_and_a_terminal_probe ... ok
+test mamba_ssm::gpu::gemm_bi_triad::modules::tests::driver_abi_merge_rejects_cross_module_symbol_aliases ... ok
+test mamba_ssm::gpu::gemm_bi_triad::modules::tests::driver_abi_rejects_malformed_driver_results ... ok
+test mamba_ssm::gpu::gemm_bi_triad::modules::tests::driver_abi_validates_and_formats_live_layout ... ok
+test mamba_ssm::gpu::gemm_bi_triad::modules::tests::exact_export_parser_accepts_entry_scoped_pragma_before_body ... ok
+test mamba_ssm::gpu::gemm_bi_triad::modules::tests::exact_export_parser_accepts_parameterless_entries ... ok
+test mamba_ssm::gpu::gemm_bi_triad::modules::tests::exact_export_parser_accepts_ptx_whitespace_and_intervening_comments ... ok
+test mamba_ssm::gpu::gemm_bi_triad::modules::tests::exact_export_parser_ignores_directives_in_line_and_block_comments ... ok
+test mamba_ssm::gpu::gemm_bi_triad::modules::tests::exact_export_parser_rejects_nested_module_directives_and_unbalanced_scopes ... ok
+test mamba_ssm::gpu::gemm_bi_triad::modules::tests::exact_export_parser_rejects_obfuscated_duplicates_and_malformed_entries ... ok
+test mamba_ssm::gpu::gemm_bi_triad::modules::tests::exact_export_set_rejects_duplicate_expected_symbols_with_a_useful_diff ... ok
+test mamba_ssm::gpu::gemm_bi_triad::modules::tests::exact_export_set_rejects_wrong_expected_cardinality ... ok
+test mamba_ssm::gpu::gemm_bi_triad::modules::tests::fixed_sm120_copyplan_m128n64_t256_requires_own_export_and_two_cta_resources ... ok
+test mamba_ssm::gpu::gemm_bi_triad::modules::tests::fixed_sm120_copyplan_m128n64_t256_resource_contract_is_independent ... ok
+test mamba_ssm::gpu::gemm_bi_triad::modules::tests::fixed_sm120_copyplan_t256_has_own_fixed_export_and_launch_bounds ... ok
+test mamba_ssm::gpu::gemm_bi_triad::modules::tests::fixed_sm120_copyplan_t256_ptx_retains_control_and_requires_twin ... ok
+test mamba_ssm::gpu::gemm_bi_triad::modules::tests::fixed_sm120_copyplan_t256_resources_require_three_ctas_without_spills ... ok
+test mamba_ssm::gpu::gemm_bi_triad::modules::tests::fixed_sm120_exact_n64_composition_is_compute120_only ... ok
+test mamba_ssm::gpu::gemm_bi_triad::modules::tests::fixed_sm120_exact_n64_export_is_rejected_on_foreign_targets ... ok
+test mamba_ssm::gpu::gemm_bi_triad::modules::tests::fixed_sm120_exact_n64_ptx_requires_unique_five_argument_exact_body ... ok
+test mamba_ssm::gpu::gemm_bi_triad::modules::tests::fixed_sm120_nobias_ptx_requires_own_export_and_scale_only_epilogue ... ok
+test mamba_ssm::gpu::gemm_bi_triad::modules::tests::fixed_sm120_postbias_composition_is_fixed_owned ... ok
+test mamba_ssm::gpu::gemm_bi_triad::modules::tests::fixed_sm120_postbias_driver_abi_and_resources_are_strict ... ok
+test mamba_ssm::gpu::gemm_bi_triad::modules::tests::fixed_sm120_postbias_driver_abi_tracks_cuda_12_and_13_tensor_map_alignment ... ok
+test mamba_ssm::gpu::gemm_bi_triad::modules::tests::fixed_sm120_postbias_ptx_is_exact_target_scoped_and_fail_closed ... ok
+test mamba_ssm::gpu::gemm_bi_triad::modules::tests::fixed_sm120_postbias_ptx_tracks_cuda_12_and_13_tensor_map_alignment ... ok
+test mamba_ssm::gpu::gemm_bi_triad::modules::tests::fixed_sm120_postbias_t256_requires_three_ctas_within_register_budget ... ok
+test mamba_ssm::gpu::gemm_bi_triad::modules::tests::fixed_sm120_sliced_composition_is_fixed_compute120_only ... ok
+test mamba_ssm::gpu::gemm_bi_triad::modules::tests::fixed_sm120_sliced_live_resource_gate_is_strict ... ok
+test mamba_ssm::gpu::gemm_bi_triad::modules::tests::fixed_sm120_sliced_ptx_fails_closed_on_abi_body_inventory_and_target ... ok
+test mamba_ssm::gpu::gemm_bi_triad::modules::tests::fixed_sm89_exact_n64_composition_is_target_scoped ... FAILED
+test mamba_ssm::gpu::gemm_bi_triad::modules::tests::fixed_sm89_exact_n64_driver_abi_requires_five_offsets_and_terminal_probe ... ok
+test mamba_ssm::gpu::gemm_bi_triad::modules::tests::fixed_sm89_exact_n64_live_resource_gate_is_strict ... ok
+test mamba_ssm::gpu::gemm_bi_triad::modules::tests::fixed_sm89_exact_n64_ptx_rejects_cc12_exports_without_nvrtc ... ok
+test mamba_ssm::gpu::gemm_bi_triad::modules::tests::fixed_sm89_exact_n64_ptx_rejects_export_on_other_portable_targets ... ok
+test mamba_ssm::gpu::gemm_bi_triad::modules::tests::fixed_sm89_exact_n64_ptx_rejects_local_tensor_reduction_and_ftz_work ... ok
+test mamba_ssm::gpu::gemm_bi_triad::modules::tests::fixed_sm89_exact_n64_ptx_rejects_wrong_pointer_and_bundle_abi ... ok
+test mamba_ssm::gpu::gemm_bi_triad::modules::tests::fixed_sm89_exact_n64_ptx_requires_async_fma_and_launch_bounds ... ok
+test mamba_ssm::gpu::gemm_bi_triad::modules::tests::fixed_sm89_exact_n64_ptx_requires_its_unique_export ... ok
+test mamba_ssm::gpu::gemm_bi_triad::modules::tests::fixed_sm89_exact_n64_retains_all_other_fixed_composed_bytes ... ok
+test mamba_ssm::gpu::gemm_bi_triad::modules::tests::fixed_sm89_exact_n64_retains_every_triad_composition ... ok
+test mamba_ssm::gpu::gemm_bi_triad::modules::tests::fixed_sm89_half_pipeline_composes_the_ada_only_extension ... ok
+test mamba_ssm::gpu::gemm_bi_triad::modules::tests::fixed_sm89_half_pipeline_does_not_enter_any_triad_composition ... ok
+test mamba_ssm::gpu::gemm_bi_triad::modules::tests::fixed_sm89_half_pipeline_driver_abi_requires_exact_offsets_sizes_and_terminal_probe ... ok
+test mamba_ssm::gpu::gemm_bi_triad::modules::tests::fixed_sm89_half_pipeline_preserves_non_ada_fixed_composed_bytes ... ok
+test mamba_ssm::gpu::gemm_bi_triad::modules::tests::fixed_sm89_half_pipeline_ptx_rejects_duplicate_or_foreign_exports ... ok
+test mamba_ssm::gpu::gemm_bi_triad::modules::tests::fixed_sm89_half_pipeline_ptx_rejects_exports_on_non_ada_targets ... ok
+test mamba_ssm::gpu::gemm_bi_triad::modules::tests::fixed_sm89_half_pipeline_ptx_rejects_numeric_atomics_and_reductions ... ok
+test mamba_ssm::gpu::gemm_bi_triad::modules::tests::fixed_sm89_half_pipeline_ptx_rejects_pointer_or_bundle_abi_drift ... ok
+test mamba_ssm::gpu::gemm_bi_triad::modules::tests::fixed_sm89_half_pipeline_ptx_requires_both_typed_exports ... ok
+test mamba_ssm::gpu::gemm_bi_triad::modules::tests::fixed_sm89_half_pipeline_ptx_requires_native_typed_mma_and_async_staging ... ok
+test mamba_ssm::gpu::gemm_bi_triad::modules::tests::fixed_sm89_half_swizzle_driver_abi_and_resources_are_strict ... ok
+test mamba_ssm::gpu::gemm_bi_triad::modules::tests::fixed_sm89_rna_wide_composer_requires_the_ada_only_fragment ... FAILED
+test mamba_ssm::gpu::gemm_bi_triad::modules::tests::fixed_sm89_rna_wide_driver_abi_and_resource_gates_are_strict ... ok
+test mamba_ssm::gpu::gemm_bi_triad::modules::tests::fixed_sm89_rna_wide_validator_accepts_the_exact_rna_pipeline_entry ... ok
+test mamba_ssm::gpu::gemm_bi_triad::modules::tests::fixed_sm89_rna_wide_validator_rejects_inventory_abi_and_body_drift ... ok
+test mamba_ssm::gpu::gemm_bi_triad::modules::tests::forbidden_scan_distinguishes_harmless_strings_from_real_tokens ... ok
+test mamba_ssm::gpu::gemm_bi_triad::modules::tests::module_sources_have_exact_deterministic_boundaries ... FAILED
+test mamba_ssm::gpu::gemm_bi_triad::modules::tests::owned_symbol_resolution_never_falls_back_to_fixed ... ok
+test mamba_ssm::gpu::gemm_bi_triad::modules::tests::portable_sm101a_target_is_admitted_and_owns_live_cc101_topology ... ok
+test mamba_ssm::gpu::gemm_bi_triad::modules::tests::portable_sm103a_target_is_admitted_and_owns_live_cc103_topology ... ok
+test mamba_ssm::gpu::gemm_bi_triad::modules::tests::quoted_include_allowlist_is_exact_and_fail_closed ... ok
+test mamba_ssm::gpu::gemm_bi_triad::modules::tests::scalar_big_nt_source_uses_raw_to_conflict_free_b_staging ... ok
+test mamba_ssm::gpu::gemm_bi_triad::modules::tests::scalar_f32_vector_paths_require_aligned_external_bases ... ok
+test mamba_ssm::gpu::gemm_bi_triad::modules::tests::scalar_group_m_option_matches_the_source_guard ... ok
+test mamba_ssm::gpu::gemm_bi_triad::modules::tests::scalar_resource_environment_rejects_zero_identity_domains ... ok
+test mamba_ssm::gpu::gemm_bi_triad::modules::tests::scalar_splitm_reducer_declares_a_portable_four_cta_bound ... ok
+test mamba_ssm::gpu::gemm_bi_triad::modules::tests::scalar_tn_narrow_splitm_partial_ptx_abi_is_fail_closed ... ok
+test mamba_ssm::gpu::gemm_bi_triad::modules::tests::sm100_candidate_fallback_survives_family_compile_failure ... ok
+test mamba_ssm::gpu::gemm_bi_triad::modules::tests::sm100_candidate_fallback_survives_family_probe_failure ... ok
+test mamba_ssm::gpu::gemm_bi_triad::modules::tests::sm100_candidate_fallback_survives_family_qualification_failure ... ok
+test mamba_ssm::gpu::gemm_bi_triad::modules::tests::sm100_module_accepts_only_exact_feature_targets ... ok
+test mamba_ssm::gpu::gemm_bi_triad::modules::tests::sm100_probe_compiles_for_every_exact_feature_target ... ok
+test mamba_ssm::gpu::gemm_bi_triad::modules::tests::sm100_probe_is_small_feature_complete_and_validated_fail_closed ... ok
+test mamba_ssm::gpu::gemm_bi_triad::modules::tests::sm100_probe_rejects_malformed_and_extern_entry_directives ... ok
+test mamba_ssm::gpu::gemm_bi_triad::modules::tests::sm100_probe_requires_opcodes_inside_its_comment_stripped_body ... ok
+test mamba_ssm::gpu::gemm_bi_triad::modules::tests::sm100_production_ptx_validator_rejects_partial_or_mixed_artifacts ... ok
+test mamba_ssm::gpu::gemm_bi_triad::modules::tests::sm110_feature_candidates_exclude_ordinary_sm110 ... ok
+test mamba_ssm::gpu::gemm_bi_triad::modules::tests::sm120_cc121_resolution_rejects_a_mixed_target_artifact_transaction ... ok
+test mamba_ssm::gpu::gemm_bi_triad::modules::tests::sm120_module_accepts_only_generic_targets ... ok
+test mamba_ssm::gpu::gemm_bi_triad::modules::tests::sm120_ptx_validation_is_complete_and_fail_closed ... ok
+test mamba_ssm::gpu::gemm_bi_triad::modules::tests::sm90a_module_requires_the_exact_architecture_target ... ok
+test mamba_ssm::gpu::gemm_bi_triad::modules::tests::sm90a_wg2_exports_require_exact_producer_linkage_and_helper_protocol ... ok
+test mamba_ssm::gpu::gemm_bi_triad::modules::tests::specialized_base_admission_rejects_foreign_tf32_instruction_families ... ok
+test mamba_ssm::gpu::gemm_bi_triad::modules::tests::specialized_tf32_function_load_preserves_symbol_and_resource_error ... ok
+test mamba_ssm::gpu::gemm_bi_triad::modules::tests::specialized_tf32_qualification_error_is_not_reported_as_unavailable ... ok
+test mamba_ssm::gpu::gemm_bi_triad::modules::tests::specialized_validators_accept_real_per_entry_representative_bodies ... ok
+test mamba_ssm::gpu::gemm_bi_triad::modules::tests::specialized_validators_ignore_quoted_and_commented_core_spoofs ... ok
+test mamba_ssm::gpu::gemm_bi_triad::modules::tests::specialized_validators_reject_additive_incompatible_core_in_same_entry ... ok
+test mamba_ssm::gpu::gemm_bi_triad::modules::tests::specialized_validators_reject_instruction_spoofs_in_quoted_metadata ... ok
+test mamba_ssm::gpu::gemm_bi_triad::modules::tests::specialized_validators_reject_instruction_spoofs_in_unused_functions ... ok
+test mamba_ssm::gpu::gemm_bi_triad::modules::tests::specialized_validators_reject_wrong_core_compute_for_one_export ... ok
+test mamba_ssm::gpu::gemm_bi_triad::modules::tests::specialized_validators_require_core_compute_in_every_export_body ... ok
+test mamba_ssm::gpu::gemm_bi_triad::modules::tests::specialized_validators_require_protocol_in_each_export_body ... ok
+test mamba_ssm::gpu::gemm_bi_triad::modules::tests::specialized_whole_module_validators_require_exact_export_sets ... ok
+test mamba_ssm::gpu::gemm_bi_triad::modules::tests::splitk_candidate_ptx_inventory_and_parameter_abi_are_exact ... ok
+test mamba_ssm::gpu::gemm_bi_triad::modules::tests::target_parser_ignores_comments_and_accepts_ptx_whitespace ... ok
+test mamba_ssm::gpu::gemm_bi_triad::modules::tests::tf32_compiled_inventory_rejects_every_partial_module ... ok
+test mamba_ssm::gpu::gemm_bi_triad::modules::tests::tf32_contract_and_loader_inventories_match_cuda_exports ... ok
+test mamba_ssm::gpu::gemm_bi_triad::modules::tests::tf32_driver_jit_local_memory_admission_requires_zero ... ok
+test mamba_ssm::gpu::gemm_bi_triad::modules::tests::tf32_exceptional_digest_is_artifact_scoped_and_outputs_are_opaque ... ok
+test mamba_ssm::gpu::gemm_bi_triad::modules::tests::tf32_exceptional_qualifier_calls_launch_and_download_twice_in_order ... ok
+test mamba_ssm::gpu::gemm_bi_triad::modules::tests::tf32_exceptional_qualifier_propagates_callbacks ... ok
+test mamba_ssm::gpu::gemm_bi_triad::modules::tests::tf32_exceptional_qualifier_rejects_length_and_repeat_drift ... ok
+test mamba_ssm::gpu::gemm_bi_triad::modules::tests::tf32_forbidden_scan_distinguishes_strings_from_real_opcodes ... ok
+test mamba_ssm::gpu::gemm_bi_triad::modules::tests::tf32_parameter_abi_tracks_cuda_12_and_13_tensor_map_alignment ... ok
+test mamba_ssm::gpu::gemm_bi_triad::modules::tests::tf32_register_caps_freeze_the_rect_wide_symbol_without_weakening_generic_caps ... ok
+test mamba_ssm::gpu::gemm_bi_triad::modules::tests::triad_cuda_sources_and_export_inventories_use_gemm_bi_prefix ... ok
+test mamba_ssm::gpu::gemm_bi_triad::modules::tests::triad_scalar_module_validation_rejects_generic_splitm_contract_mutations ... ok
+test mamba_ssm::gpu::gemm_bi_triad::modules::tests::triad_scalar_module_validation_rejects_m2n16_contract_mutations ... ok
+test mamba_ssm::gpu::gemm_bi_triad::modules::tests::triad_scalar_module_validation_rejects_nn_m32n64_splitk32_mutations ... ok
+test mamba_ssm::gpu::gemm_bi_triad::modules::tests::triad_scalar_module_validation_rejects_tn_m16n16_contract_mutations ... ok
+test mamba_ssm::gpu::gemm_bi_triad::modules::tests::triad_scalar_module_validation_requires_the_exact_whole_module_exports ... ok
+test mamba_ssm::gpu::gemm_bi_triad::modules::tests::triad_symbol_inventories_are_exact_disjoint_and_owned ... ok
+test mamba_ssm::gpu::gemm_bi_triad::qualification::f32_trailing_guard_tests::f32_guarded_storage_keeps_active_bits_and_covers_empty_operands ... ok
+test mamba_ssm::gpu::gemm_bi_triad::qualification::f32_trailing_guard_tests::f32_guarded_storage_rejects_each_corrupted_tail_and_wrong_span ... ok
+test mamba_ssm::gpu::gemm_bi_triad::qualification::f32_trailing_guard_tests::f32_trailing_guard_gpu_readback_corruption_and_replay ... ignored, requires CUDA: actual trailing-canary corruption, active readback, NN/TN/NT and NN K0
+test mamba_ssm::gpu::gemm_bi_triad::qualification::tests::a_and_b_offsets_match_eager_and_graph_with_nonzero_operands_in_both_orders ... ignored, requires an SM80+ CUDA device and NVRTC
+test mamba_ssm::gpu::gemm_bi_triad::qualification::tests::adversarial_counts_are_derived_from_the_live_route_inventory ... ok
+test mamba_ssm::gpu::gemm_bi_triad::qualification::tests::artifact_binds_the_exact_driver_abi_proof_digest ... ok
+test mamba_ssm::gpu::gemm_bi_triad::qualification::tests::biased_nn_f32_policy_matches_eager_graph_and_differs_from_unbiased ... ignored, requires an SM80+ CUDA device and NVRTC
+test mamba_ssm::gpu::gemm_bi_triad::qualification::tests::boundary_corpus_binds_every_case_coordinate_and_order ... ok
+test mamba_ssm::gpu::gemm_bi_triad::qualification::tests::boundary_route_digest_binds_count_order_symbol_and_value ... ok
+test mamba_ssm::gpu::gemm_bi_triad::qualification::tests::boundary_word_digest_has_a_frozen_bitwise_contract ... ok
+test mamba_ssm::gpu::gemm_bi_triad::qualification::tests::driver_jit_resource_digest_binds_route_identity_registers_observed_bytes_and_cap ... ok
+test mamba_ssm::gpu::gemm_bi_triad::qualification::tests::edge_layout_facade_owns_subviews_and_validates_red_zones ... ignored, requires an SM80+ CUDA device and NVRTC
+test mamba_ssm::gpu::gemm_bi_triad::qualification::tests::edge_layout_requests_freeze_named_offsets_and_direct_nn_strides ... ok
+test mamba_ssm::gpu::gemm_bi_triad::qualification::tests::exceptional_oracle_classifies_without_freezing_nan_payloads_or_zero_signs ... ok
+test mamba_ssm::gpu::gemm_bi_triad::qualification::tests::f32_branch_identity_rejects_argument_digest_drift ... ok
+test mamba_ssm::gpu::gemm_bi_triad::qualification::tests::f32_epilogue_rejects_half_routes_before_allocation ... ok
+test mamba_ssm::gpu::gemm_bi_triad::qualification::tests::f32_epilogue_request_preserves_contract_and_identity ... ok
+test mamba_ssm::gpu::gemm_bi_triad::qualification::tests::f32_policy_epilogue_accepts_exact_wrapper_values_and_forced_routes_stay_general ... ok
+test mamba_ssm::gpu::gemm_bi_triad::qualification::tests::f32_policy_epilogue_rejects_values_the_production_wrappers_cannot_express ... ok
+test mamba_ssm::gpu::gemm_bi_triad::qualification::tests::g2_half_auto_request_preserves_permission_and_separates_identity ... ok
+test mamba_ssm::gpu::gemm_bi_triad::qualification::tests::g2_half_auto_streamk_permission_is_not_lost ... ignored, requires CC8.9/142SM; explicit half AUTO permission and actual eager/graph route
+test mamba_ssm::gpu::gemm_bi_triad::qualification::tests::g2_half_auto_tn_permission_matrix_sm89 ... ignored, requires CC8.9/142SM; actual half TN AUTO permission matrix and same-schedule bits
+test mamba_ssm::gpu::gemm_bi_triad::qualification::tests::g2_half_auto_tn_scratch_reuse_sm89 ... ignored, requires CC8.9/142SM; actual AUTO Stream-K reuse across different legal scratch extents
+test mamba_ssm::gpu::gemm_bi_triad::qualification::tests::g2_half_forced_rectangular_prepares_the_exact_graph ... ignored, requires CC8.9/142SM; forced TN Rect128x64 actual eager/graph route
+test mamba_ssm::gpu::gemm_bi_triad::qualification::tests::g2_half_tiled_request_digests_preserve_the_legacy_encoding ... ok
+test mamba_ssm::gpu::gemm_bi_triad::qualification::tests::g2_half_tn_policy_lease_drift_restore_sm89 ... ignored, requires CC8.9/142SM; physical half lease rejects drift and restores all policy fields
+test mamba_ssm::gpu::gemm_bi_triad::qualification::tests::guarded_storage_has_nonzero_xy_origin_and_a_trailing_red_zone ... ok
+test mamba_ssm::gpu::gemm_bi_triad::qualification::tests::guarded_tf32_inputs_meet_the_tma_global_address_alignment ... ok
+test mamba_ssm::gpu::gemm_bi_triad::qualification::tests::half_branch_seal_rejects_production_and_physical_route_drift ... ok
+test mamba_ssm::gpu::gemm_bi_triad::qualification::tests::nn_bias_beta_case_matches_the_supported_bias_preseed_contract ... ok
+test mamba_ssm::gpu::gemm_bi_triad::qualification::tests::nt_splitk_cpu_oracle_matches_the_seed_contract_and_rejects_wrong_output ... ok
+test mamba_ssm::gpu::gemm_bi_triad::qualification::tests::nt_splitk_forced_requests_freeze_live_and_reverse_candidate_routes ... ok
+test mamba_ssm::gpu::gemm_bi_triad::qualification::tests::nt_splitk_forced_routes_are_eager_graph_bit_exact_with_one_fused_node ... ignored, requires an SM80+ CUDA device and NVRTC
+test mamba_ssm::gpu::gemm_bi_triad::qualification::tests::output_offset_eager_and_graph_preserve_the_leading_red_zone ... ignored, requires an SM80+ CUDA device and NVRTC
+test mamba_ssm::gpu::gemm_bi_triad::qualification::tests::padded_shapes_keep_every_physical_row_inside_an_aligned_stride ... ok
+test mamba_ssm::gpu::gemm_bi_triad::qualification::tests::padded_tn_nt_layouts_fail_before_resource_allocation ... ok
+test mamba_ssm::gpu::gemm_bi_triad::qualification::tests::physical_evidence_contract_rejects_graph_drift_and_multi_launch_singular_fields ... ok
+test mamba_ssm::gpu::gemm_bi_triad::qualification::tests::physical_evidence_contract_rejects_missing_or_planned_only_routes ... ok
+test mamba_ssm::gpu::gemm_bi_triad::qualification::tests::portable_primary_cases_stay_contiguous_but_tma_cases_are_stride_aligned ... ok
+test mamba_ssm::gpu::gemm_bi_triad::qualification::tests::qualification_artifact_v5_freezes_driver_jit_resources_per_route ... ok
+test mamba_ssm::gpu::gemm_bi_triad::qualification::tests::qualification_policy_guard_restores_every_setting_after_error ... ok
+test mamba_ssm::gpu::gemm_bi_triad::qualification::tests::report_digest_changes_with_only_the_boundary_corpus ... ok
+test mamba_ssm::gpu::gemm_bi_triad::qualification::tests::report_digest_is_bound_to_the_exact_json_bytes ... ok
+test mamba_ssm::gpu::gemm_bi_triad::qualification::tests::request_validation_rejects_invalid_extent_dtype_and_thin_tile ... ok
+test mamba_ssm::gpu::gemm_bi_triad::qualification::tests::route_inventory_counts_match_the_release_contract ... ok
+test mamba_ssm::gpu::gemm_bi_triad::qualification::tests::sm120_branch_seal_requires_full_exact_eager_and_graph_routes ... ok
+test mamba_ssm::gpu::gemm_bi_triad::qualification::tests::sm120_driver_jit_inventory_requires_all_routes_to_be_zero ... ok
+test mamba_ssm::gpu::gemm_bi_triad::qualification::tests::sm120_pair_route_is_qualified_exactly_once ... ok
+test mamba_ssm::gpu::gemm_bi_triad::qualification::tests::splitk2_forced_request_freezes_the_fused_kernel_as_its_planned_route ... ok
+test mamba_ssm::gpu::gemm_bi_triad::qualification::tests::splitk2_nn_m64_k833_n384_m64_k1536_n384_and_tail_shapes_are_bit_exact ... ignored, requires an SM80+ CUDA device and NVRTC
+test mamba_ssm::gpu::gemm_bi_triad::qualification::tests::splitk4_deep_reduction_shapes_pass_numeric_and_epilogue_qualification ... ignored, requires an SM80+ CUDA device and NVRTC
+test mamba_ssm::gpu::gemm_bi_triad::qualification::tests::splitk4_forced_request_freezes_the_fused_kernel_as_its_planned_route ... ok
+test mamba_ssm::gpu::gemm_bi_triad::qualification::tests::splitk4_forced_route_is_eager_graph_bit_exact_with_one_fused_node ... ignored, requires an SM80+ CUDA device and NVRTC
+test mamba_ssm::gpu::gemm_bi_triad::qualification::tests::tf32_rounding_uses_round_to_nearest_even ... ok
+test mamba_ssm::gpu::gemm_bi_triad::qualification::tests::timed_request_digest_separates_policy_mode_and_forced_tile ... ok
+test mamba_ssm::gpu::gemm_bi_triad::qualification::tests::wide_exceptional_changes_leave_existing_conversion_corpora_unchanged ... ok
+test mamba_ssm::gpu::gemm_bi_triad::qualification::tests::wide_exceptional_corpus_exercises_conversion_edges_on_the_bound_route ... ok
+test mamba_ssm::gpu::gemm_bi_triad::qualification::tests::wide_exceptional_oracle_observes_the_add_half_ulp_operand_classes ... ok
+test mamba_ssm::gpu::gemm_bi_triad::qualification::tests::wide_qualification_inventory_matches_target_composition ... ok
+test mamba_ssm::gpu::gemm_bi_triad::qualification::tests::wide_qualification_keeps_the_frozen_cc12_route_order ... ok
+test mamba_ssm::gpu::gemm_bi_triad::qualification::tests::wide_qualification_tail_shapes_keep_vector_copy_strides_aligned ... ok
+test mamba_ssm::gpu::gemm_bi_triad::qualification::tests::wide_tf32_qualification_numeric_smoke ... ignored, requires exact Ada CC 8.9 and the bound portable wide TF32 kernel
+test mamba_ssm::gpu::gemm_bi_triad::training_pipeline_tests::cuda_qualification::captured_tn_narrow_training_pipeline_qualification ... ignored, requires a quiet SM120/170-SM/NVRTC-13.2 qualification host
+test mamba_ssm::gpu::gemm_bi_triad::training_pipeline_tests::dense_arena_layout_is_exact_and_aligned ... ok
+test mamba_ssm::gpu::gemm_bi_triad::training_pipeline_tests::memcpy_graph_params_use_deferred_initialization ... ok
+test mamba_ssm::gpu::gemm_bi_triad::training_pipeline_tests::ordinal_trajectory_schedule_is_one_through_ten ... ok
+test mamba_ssm::gpu::gemm_bi_triad::training_pipeline_tests::paired_absolute_samples_are_preserved_before_ratio_derivation ... ok
+test mamba_ssm::gpu::gemm_bi_triad::training_pipeline_tests::paired_schedule_has_101_windows_in_both_orders ... ok
+test mamba_ssm::gpu::gemm_bi_triad::training_pipeline_tests::production_and_direct_topologies_are_exact_linear_contracts ... ok
+test mamba_ssm::gpu::gemm_bi_triad::training_pipeline_tests::promotion_requires_every_mode_and_order_gate ... ok
+test mamba_ssm::gpu::gemm_bi_triad::training_pipeline_tests::quiet_gate_requires_five_consecutive_threshold_samples ... ok
+test mamba_ssm::gpu::gemm_bi_triad::training_pipeline_tests::quiet_gate_threshold_is_inclusive ... ok
+test mamba_ssm::gpu::gemm_bi_triad::training_pipeline_tests::stable_schedule_identity_covers_every_protocol_dimension ... ok
+test mamba_ssm::gpu::kernel_identity::cache_and_header_tests::a_directory_symlink_include_cycle_disables_the_manifest ... ok
+test mamba_ssm::gpu::kernel_identity::cache_and_header_tests::an_include_guarded_self_include_remains_cacheable ... ok
+test mamba_ssm::gpu::kernel_identity::cache_and_header_tests::argv_has_include_alias_disables_persistent_keys ... ok
+test mamba_ssm::gpu::kernel_identity::cache_and_header_tests::builtin_header_names_are_bound_until_a_filesystem_header_appears ... ok
+test mamba_ssm::gpu::kernel_identity::cache_and_header_tests::cache_hit_revalidates_the_header_closure_after_lookup ... ok
+test mamba_ssm::gpu::kernel_identity::cache_and_header_tests::cache_rejects_a_private_fifo_without_blocking ... ok
+test mamba_ssm::gpu::kernel_identity::cache_and_header_tests::cache_rejects_a_writable_ancestor ... ok
+test mamba_ssm::gpu::kernel_identity::cache_and_header_tests::cache_rejects_an_intermediate_symlink ... ok
+test mamba_ssm::gpu::kernel_identity::cache_and_header_tests::cache_rejects_non_private_or_multiply_linked_entries ... ok
+test mamba_ssm::gpu::kernel_identity::cache_and_header_tests::cache_rejects_relative_paths ... ok
+test mamba_ssm::gpu::kernel_identity::cache_and_header_tests::cache_rejects_symlinks_and_untrusted_directories ... ok
+test mamba_ssm::gpu::kernel_identity::cache_and_header_tests::cache_rejects_truncation_trailing_bytes_and_oversize ... ok
+test mamba_ssm::gpu::kernel_identity::cache_and_header_tests::cache_size_limit_includes_the_envelope_without_overflow ... ok
+test mamba_ssm::gpu::kernel_identity::cache_and_header_tests::comments_cannot_hide_a_literal_include ... ok
+test mamba_ssm::gpu::kernel_identity::cache_and_header_tests::concurrent_publication_never_exposes_partial_entries ... ok
+test mamba_ssm::gpu::kernel_identity::cache_and_header_tests::deterministic_nvrtc_seed_is_version_gated ... ok
+test mamba_ssm::gpu::kernel_identity::cache_and_header_tests::digraph_cannot_hide_a_literal_include ... ok
+test mamba_ssm::gpu::kernel_identity::cache_and_header_tests::eager_manifest_records_exact_routes_and_error_paths_clear_the_recorder ... ignored, requires a CUDA device and NVRTC
+test mamba_ssm::gpu::kernel_identity::cache_and_header_tests::filesystem_dependent_preprocessor_forms_disable_the_manifest ... ok
+test mamba_ssm::gpu::kernel_identity::cache_and_header_tests::fixed_capture_recording_rejects_route_order_drift_and_remains_reusable ... ignored, requires a CUDA device and NVRTC
+test mamba_ssm::gpu::kernel_identity::cache_and_header_tests::fixed_policy_accepts_only_declared_triad_fallback_contracts ... ignored, requires a CUDA device and NVRTC
+test mamba_ssm::gpu::kernel_identity::cache_and_header_tests::has_include_fragments_and_paste_combine_across_source_and_argv ... ok
+test mamba_ssm::gpu::kernel_identity::cache_and_header_tests::header_appearance_and_disappearance_change_manifest_availability ... ok
+test mamba_ssm::gpu::kernel_identity::cache_and_header_tests::include_next_and_header_mutation_fail_the_closure_guard ... ok
+test mamba_ssm::gpu::kernel_identity::cache_and_header_tests::invalid_read_does_not_remove_a_replacement ... ok
+test mamba_ssm::gpu::kernel_identity::cache_and_header_tests::line_splicing_cannot_hide_a_literal_include ... ok
+test mamba_ssm::gpu::kernel_identity::cache_and_header_tests::literal_include_and_unrelated_token_paste_remain_cacheable ... ok
+test mamba_ssm::gpu::kernel_identity::cache_and_header_tests::numeric_paste_operands_round_trip_through_the_manifest ... ok
+test mamba_ssm::gpu::kernel_identity::cache_and_header_tests::nvrtc_toolchain_domain_hashes_runtime_and_builtins_in_order ... ok
+test mamba_ssm::gpu::kernel_identity::cache_and_header_tests::nvrtc_toolchain_domain_requires_both_libraries ... ok
+test mamba_ssm::gpu::kernel_identity::cache_and_header_tests::one_canonical_header_is_traversed_in_each_logical_context ... ok
+test mamba_ssm::gpu::kernel_identity::cache_and_header_tests::only_the_tuning_table_revision_moved ... ok
+test mamba_ssm::gpu::kernel_identity::cache_and_header_tests::parent_dir_in_a_literal_include_disables_the_manifest ... ok
+test mamba_ssm::gpu::kernel_identity::cache_and_header_tests::parent_dir_in_an_include_root_disables_the_manifest ... ok
+test mamba_ssm::gpu::kernel_identity::cache_and_header_tests::prepared_capture_manifest_matches_an_exact_optional_ordered_launch_set ... ok
+test mamba_ssm::gpu::kernel_identity::cache_and_header_tests::private_cache_publish_and_read_round_trip ... ok
+test mamba_ssm::gpu::kernel_identity::cache_and_header_tests::quoted_include_recurses_from_its_logical_symlink_parent ... ok
+test mamba_ssm::gpu::kernel_identity::cache_and_header_tests::retained_directory_handle_survives_path_replacement ... ok
+test mamba_ssm::gpu::kernel_identity::cache_and_header_tests::token_paste_outside_a_conditional_remains_cacheable ... ok
+test mamba_ssm::gpu::kernel_identity::cache_and_header_tests::token_paste_state_crosses_literal_include_boundaries ... ok
+test mamba_ssm::gpu::kernel_identity::cache_and_header_tests::token_pasted_has_include_forms_disable_the_manifest ... ok
+test mamba_ssm::gpu::kernel_identity::cache_and_header_tests::token_pasted_volatile_macros_disable_the_manifest ... ok
+test mamba_ssm::gpu::kernel_identity::cache_and_header_tests::token_pasted_volatile_macros_in_headers_disable_the_manifest ... ok
+test mamba_ssm::gpu::kernel_identity::cache_and_header_tests::unrelated_token_paste_remains_cacheable ... ok
+test mamba_ssm::gpu::kernel_identity::cache_and_header_tests::validated_launch_accepts_an_unchanged_plan_once ... ignored, requires a CUDA device and NVRTC
+test mamba_ssm::gpu::kernel_identity::cache_and_header_tests::validated_launch_rejects_policy_mutation_before_closure ... ignored, requires a CUDA device and NVRTC
+test mamba_ssm::gpu::kernel_identity::cache_and_header_tests::volatile_fragments_and_token_paste_combine_across_manifest_and_argv ... ok
+test mamba_ssm::gpu::kernel_identity::cache_and_header_tests::volatile_predefined_macros_disable_the_manifest ... ok
+test mamba_ssm::gpu::kernel_identity::cache_and_header_tests::volatile_predefined_macros_in_compile_material_disable_persistent_keys ... ok
+test mamba_ssm::gpu::kernel_identity::cache_and_header_tests::volatile_predefined_macros_in_headers_disable_the_manifest ... ok
+test mamba_ssm::gpu::kernel_identity::cache_and_header_tests::zero_reduction_identity_is_domain_separated_and_pointer_free ... ok
+test mamba_ssm::gpu::kernel_identity::physical_launch_tests::ada_rna_auto_epoch_rejects_revision39_graph_identity ... ok
+test mamba_ssm::gpu::kernel_identity::physical_launch_tests::ada_rna_toolkit_auto_epoch_rejects_revision40_graph_identity ... ok
+test mamba_ssm::gpu::kernel_identity::physical_launch_tests::captured_physical_graph_identity_rejects_exact_contract_mutations ... ok
+test mamba_ssm::gpu::kernel_identity::physical_launch_tests::fixed_only_artifact_replacement_invalidates_graph_at_unchanged_epoch41 ... ok
+test mamba_ssm::gpu::kernel_identity::physical_launch_tests::fresh_sm120_dispatch_epoch_rejects_revision38_graph_identity ... ok
+test mamba_ssm::gpu::kernel_identity::physical_launch_tests::native_half_manifest_rejects_unsuffixed_and_post_hoc_selector_metadata ... ok
+test mamba_ssm::gpu::kernel_identity::physical_launch_tests::physical_graph_allocation_liveness_rejects_generation_drift ... ok
+test mamba_ssm::gpu::kernel_identity::physical_launch_tests::physical_launch_digest_covers_every_semantic_field_and_ordered_position ... ok
+test mamba_ssm::gpu::kernel_identity::physical_launch_tests::physical_launch_manifest_rejects_context_capacity_and_node_mutations ... ok
+test mamba_ssm::gpu::kernel_identity::physical_launch_tests::physical_launch_ordered_digest_is_pinned_to_v1_framing ... ok
+test mamba_ssm::gpu::kernel_identity::physical_launch_tests::physical_launch_set_rejects_empty_placeholder_and_incoherent_nodes ... ok
+test mamba_ssm::gpu::kernel_identity::physical_launch_tests::physical_launch_set_validation_rejects_count_digest_and_singular_drift ... ok
+test mamba_ssm::gpu::kernel_identity::physical_launch_tests::physical_launch_trace_and_manifest_reject_empty_nodes ... ok
+test mamba_ssm::gpu::kernel_identity::physical_launch_tests::private_recorder_preserves_order_and_sticky_invalidates_failures ... ok
+test mamba_ssm::gpu::loss_scaler::tests::cpu_state_machine_clean_growth ... ok
+test mamba_ssm::gpu::loss_scaler::tests::cpu_state_machine_max_scale_cap ... ok
+test mamba_ssm::gpu::loss_scaler::tests::cpu_state_machine_min_scale_floor ... ok
+test mamba_ssm::gpu::loss_scaler::tests::cpu_state_machine_overflow_backoff ... ok
+test mamba_ssm::gpu::loss_scaler::tests::disabled_scaler_is_identity ... ok
+test mamba_ssm::gpu::loss_scaler::tests::growth_interval_zero_panics - should panic ... ok
+test mamba_ssm::gpu::loss_scaler::tests::init_scale_inf_panics - should panic ... ok
+test mamba_ssm::gpu::loss_scaler::tests::init_scale_nan_panics - should panic ... ok
+test mamba_ssm::gpu::loss_scaler::tests::init_scale_neg_panics - should panic ... ok
+test mamba_ssm::gpu::loss_scaler::tests::init_scale_zero_panics - should panic ... ok
+test mamba_ssm::gpu::loss_scaler::tests::load_state_clamps_to_bounds ... ok
+test mamba_ssm::gpu::loss_scaler::tests::max_below_min_panics - should panic ... ok
+test mamba_ssm::gpu::loss_scaler::tests::min_above_max_panics - should panic ... ok
+test mamba_ssm::gpu::loss_scaler::tests::min_scale_pytorch_equivalent ... ok
+test mamba_ssm::gpu::loss_scaler::tests::state_dict_round_trip ... ok
+test module::sample::tests::test_deterministic_with_seed ... ok
+test module::sample::tests::test_different_seed_different_output ... ok
+test module::sample::tests::test_greedy_argmax ... ok
+test module::sample::tests::test_minp_filters_by_fraction ... ok
+test module::sample::tests::test_repetition_penalty_negative_multiplies ... ok
+test module::sample::tests::test_repetition_penalty_positive_divides ... ok
+test module::sample::tests::test_temperature_scaling ... ok
+test module::sample::tests::test_topk_k1_is_argmax ... ok
+test module::sample::tests::test_topk_k2_excludes_rest ... ok
+test module::sample::tests::test_topp_filters_tail ... ok
+test ops::blas::tests::test_sgemm_backward_gradient ... ok
+test ops::blas::tests::test_sgemm_forward_identity ... ok
+test ops::blas::tests::test_sgemm_forward_with_bias ... ok
+test ops::dims::tests::test_mamba_dims_defaults ... ok
+test ops::dims::tests::test_mamba_dims_from_config ... ok
+test ops::fast_math::tests::test_fast_exp_edge_cases ... ok
+test ops::fast_math::tests::test_fast_exp_inplace_accuracy ... ok
+test ops::fast_math::tests::test_fast_exp_scalar_accuracy ... ok
+test ops::fast_math::tests::test_fast_exp_ssm_range ... ok
+test ops::norms::tests::test_bcnorm_per_group ... ok
+test ops::norms::tests::test_rms_norm_weighted_unit_weight ... ok
+
+failures:
+
+---- mamba_ssm::gpu::gemm_bi_triad::modules::tests::fixed_sm89_exact_n64_composition_is_target_scoped stdout ----
+
+thread 'mamba_ssm::gpu::gemm_bi_triad::modules::tests::fixed_sm89_exact_n64_composition_is_target_scoped' (584892) panicked at src/mamba_ssm/gpu/gemm_bi_triad/modules.rs:12428:9:
+assertion `left == right` failed
+  left: ["kernels/gemm_bi_fixed/sm89_f32_n64_copyplan.cu", "kernels/gemm_bi_fixed/tf32_rna_wide.cu", "kernels/gemm_bi_fixed/sm89_half_swizzle_layout.cuh", "kernels/gemm_bi_fixed/sm89_half_swizzle.cu"]
+ right: ["kernels/gemm_bi_fixed/sm89_f32_n64_copyplan.cu", "kernels/gemm_bi_fixed/tf32_rna_wide.cu"]
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- mamba_ssm::gpu::gemm_bi_triad::modules::tests::fixed_sm89_rna_wide_composer_requires_the_ada_only_fragment stdout ----
+
+thread 'mamba_ssm::gpu::gemm_bi_triad::modules::tests::fixed_sm89_rna_wide_composer_requires_the_ada_only_fragment' (584937) panicked at src/mamba_ssm/gpu/gemm_bi_triad/modules.rs:11629:9:
+assertion `left == right` failed: RNA-wide must be the only suffix appended to the prior Ada Fixed bytes
+  left: "#line 1 \"kernels/gemm_bi_fixed/tf32_rna_wide.cu\"\n// Fixed-owned NN wide TF32 candidate. This is the production adaptation of\n// internal/experiments/sm89-nn-wide-rna-compatible.cu at SHA256\n// c0c9eb735374620eaf8a023345ee86359af9f748df53fc5cf7d07ee7051f65c4.\n// The 128x128/BK32/S3 pipeline, ascending k8 MMA sequence, explicit\n// cvt.rna.tf32.f32 conversion, bias initialization, tail handling, and\n// scalar/vector epilogues are unchanged. Only Fixed-private dependency names,\n// the production export, and the self-contained parameter/store helpers differ.\n// Compose this fragment after Fixed common.cuh and tf32.cu, on sm_89 only.\n//\n// Export: gemm_bi_nn_fixed_rna_wide_tf32_v1_m128n128_bk32_s3\n// ABI: (float* output, const float* a, const float* b, const float* bias,\n//       GbfTf32WideParams params).\n// Params: {float alpha,beta; int m,k,n,lda,ldb,ldc;} (32 bytes, alignment 4).\n// Grid=(ceil(m/128)*ceil(n/128),1,1); block=(256,1,1).\n// Dynamic shared=98,304 bytes, opt in the function. No scratch/counters.\n// Same vector-input admission as the existing wide body: A/B base alignment\n// 16 bytes and lda/ldb divisible by four, valid row-major extents/strides,\n// dimensions/tile counts within device and signed-int limits. Host skips\n// empty output. K=0 uses the unchanged zero-reduction epilogue. Fixed callers\n// must pass this 32-byte struct with alpha=1,beta=0, not GbfTf32Params.\n//\n// Byte-level conversion rationale:\n// Fixed's gbf_tf32_rna(float) applies exactly cvt.rna.tf32.f32 to the input\n// register and returns its .b32 result. The new helper bit-reinterprets the\n// incoming unsigned fragment as float, then uses the same PTX and constraints.\n// This preserves all input bits until that instruction, including signed zero,\n// subnormals, infinities, signaling/quiet NaNs and every NaN payload. It also\n// preserves whatever output bits the conversion instruction produces, without\n// an integer mask or a hand-written special-value transformation.\n//\n// For a hypothetical upper19-bit TF32 layout, finite nearest-away rounding\n// equals ((bits+0x1000) & 0xffffe000). That algebra does not prove the PTX\n// instruction's complete NaN payload behavior. In the unguarded old add,\n// 0x7f801000 -> 0x7f802000; 0x7fffffff -> 0x80000fff; and\n// 0xffffffff -> 0x00000fff. A finite-only add would preserve the special input\n// bits, but the available evidence does not certify those bits as cvt.rna's\n// result for every NaN. Therefore this twin deliberately uses explicit cvt.\n//\n// NVIDIA PTX ISA 9.3 defines RNA as nearest with ties away from zero and\n// describes TF32's internal layout as implementation-defined:\n// https://docs.nvidia.com/cuda/parallel-thread-execution/\n// This source-level match is not GPU proof of a cross-route batch ladder.\n// Main must still compare raw conversion results, exceptional-value GEMMs,\n// repeated/batch-prefix bits and performance before any admission.\n\nstruct GbfTf32WideParams {\n    float alpha;\n    float beta;\n    int m;\n    int k;\n    int n;\n    int lda;\n    int ldb;\n    int ldc;\n};\n\nstatic_assert(sizeof(GbfTf32WideParams) == 32, \"Fixed RNA-wide parameter ABI drift\");\nstatic_assert(alignof(GbfTf32WideParams) == 4, \"Fixed RNA-wide parameter alignment drift\");\nstatic_assert(__is_standard_layout(GbfTf32WideParams),\n              \"Fixed RNA-wide parameters must remain standard layout\");\n\n__device__ __forceinline__ int tf32wrc_a_index(int row, int k) {\n    int chunk = (k >> 2) ^ (row & 7);\n    return row * 32 + chunk * 4 + (k & 3);\n}\n\n__device__ __forceinline__ int tf32wrc_b_index(int k, int column) {\n    int chunk = (column >> 2) ^ ((k & 3) << 1);\n    return k * 128 + chunk * 4 + (column & 3);\n}\n\n// One quarter of a stage's copies: the A and B rows this thread owns in\n// slice `slice` (two 16-byte cp.async per thread), so the eight copies of a\n// stage interleave with the four k8 steps of the stage being computed.\n// Each thread owns eight 16-byte copies per stage (four of A, four of B):\n// their global pointers, shared destinations and the row / column bounds\n// depend on the tile and the thread only, so they are computed once; a\n// stage advances the pointers by its k slab and clamps the copy length by\n// the remaining reduction (zero bytes zero-fill the slot; a zero-length\n// copy keeps a valid address).\nstruct Tf32wrcCopyPlan {\n    const float* a_source[4];\n    const float* b_source[4];\n    unsigned a_destination[4];\n    unsigned b_destination[4];\n    int a_k_offset;\n    int b_k_row;\n    bool a_row_valid[4];\n    int b_column_bytes[4];\n};\n\n__device__ __forceinline__ void tf32wrc_copy_plan(\n    float* a_stage0, float* b_stage0, const float* a, const float* b,\n    const GbfTf32WideParams& params, int tile_row, int tile_column, Tf32wrcCopyPlan& plan) {\n    plan.a_k_offset = ((int)threadIdx.x & 7) * 4;\n    plan.b_k_row = (int)threadIdx.x >> 5;\n#pragma unroll\n    for (int slice = 0; slice < 4; ++slice) {\n        int linear = (int)threadIdx.x + slice * 256;\n        int row = linear >> 3;\n        int global_row = tile_row + row;\n        plan.a_row_valid[slice] = global_row < params.m;\n        plan.a_source[slice] = a + (long long)(plan.a_row_valid[slice] ? global_row : 0) * params.lda + plan.a_k_offset;\n        plan.a_destination[slice] = (unsigned)__cvta_generic_to_shared(a_stage0 + tf32wrc_a_index(row, plan.a_k_offset));\n        int k_row = linear >> 5;\n        int column = (linear & 31) * 4;\n        int global_column = tile_column + column;\n        int columns = params.n - global_column;\n        columns = columns < 0 ? 0 : (columns > 4 ? 4 : columns);\n        plan.b_column_bytes[slice] = columns * 4;\n        plan.b_source[slice] = b + (long long)k_row * params.ldb + (columns > 0 ? global_column : 0);\n        plan.b_destination[slice] = (unsigned)__cvta_generic_to_shared(b_stage0 + tf32wrc_b_index(k_row, column));\n    }\n}\n\n// One quarter of a stage's copies. `stage_bytes` is the stage's byte offset\n// in the ring, `k_base` the stage's first k; the pointers already point at\n// the stage (the caller advances them).\n__device__ __forceinline__ void tf32wrc_stage_slice(\n    const Tf32wrcCopyPlan& plan, unsigned stage_bytes, int k_base, int reduction, int slice) {\n    {\n        int remaining = reduction - k_base - plan.a_k_offset;\n        remaining = remaining < 0 ? 0 : (remaining > 4 ? 4 : remaining);\n        int bytes = plan.a_row_valid[slice] ? remaining * 4 : 0;\n        gbf_tf32_copy_cg(plan.a_destination[slice] + stage_bytes, plan.a_source[slice], bytes);\n    }\n    {\n        int bytes = k_base + plan.b_k_row + slice * 8 < reduction ? plan.b_column_bytes[slice] : 0;\n        gbf_tf32_copy_cg(plan.b_destination[slice] + stage_bytes, plan.b_source[slice], bytes);\n    }\n}\n\n__device__ __forceinline__ void tf32wrc_advance_plan(Tf32wrcCopyPlan& plan, long long b_rows) {\n#pragma unroll\n    for (int slice = 0; slice < 4; ++slice) {\n        plan.a_source[slice] += 32;\n        plan.b_source[slice] += b_rows;\n    }\n}\n\n__device__ __forceinline__ void tf32wrc_stage_async(\n    const Tf32wrcCopyPlan& plan, unsigned stage_bytes, int k_base, int reduction) {\n#pragma unroll\n    for (int slice = 0; slice < 4; ++slice) {\n        tf32wrc_stage_slice(plan, stage_bytes, k_base, reduction, slice);\n    }\n    asm volatile(\"cp.async.commit_group;\\n\" ::);\n}\n\nstruct Tf32wrcFragments {\n    unsigned a[4][4];\n    unsigned b[4][2];\n};\n\n// The shared-memory element offsets of this lane's fragments, computed once\n// per thread: the swizzle of A depends on the k8 step through its chunk\n// index, so the ldmatrix offsets are kept per (atom, step); the swizzle of B\n// depends only on the lane's k row within the step, so one offset per\n// (atom, half) serves every step with the step's row term added.\nstruct Tf32wrcFragmentOffsets {\n    int a[4][4];\n    int b[4][2];\n};\n\n__device__ __forceinline__ void tf32wrc_fragment_offsets(\n    int warp_m, int warp_n, int group, int thread, int lane, Tf32wrcFragmentOffsets& offsets) {\n    int a_row = warp_m + (lane & 15);\n    int a_k = (lane >> 4) << 2;\n#pragma unroll\n    for (int m_atom = 0; m_atom < 4; ++m_atom) {\n#pragma unroll\n        for (int step = 0; step < 4; ++step) {\n            offsets.a[m_atom][step] = tf32wrc_a_index(a_row + m_atom * 16, step * 8 + a_k);\n        }\n    }\n#pragma unroll\n    for (int n_atom = 0; n_atom < 4; ++n_atom) {\n        int column = warp_n + n_atom * 8 + group;\n        offsets.b[n_atom][0] = tf32wrc_b_index(thread, column);\n        offsets.b[n_atom][1] = tf32wrc_b_index(thread + 4, column);\n    }\n}\n\n// Keep the operand conversion instruction identical to gbf_tf32_rna in\n// kernels/gemm_bi_fixed/tf32.cu. __uint_as_float is a bit reinterpretation;\n// it performs no FP arithmetic that could quiet or canonicalize an sNaN\n// before the PTX instruction sees the original 32-bit payload.\n__device__ __forceinline__ unsigned tf32wrc_round(unsigned bits) {\n    float value = __uint_as_float(bits);\n    unsigned result;\n    asm(\"cvt.rna.tf32.f32 %0, %1;\" : \"=r\"(result) : \"f\"(value));\n    return result;\n}\n\n// The A fragment of one 16 x 8 atom through ldmatrix.x4: lanes 0-7 address\n// rows 0-7 at k8, 8-15 rows 8-15 at k8, 16-23 rows 0-7 at k8 + 4 and 24-31\n// rows 8-15 at k8 + 4, so the four registers land as a0..a3 of the mma\n// (row g / row g + 8 at k t, then the same at k t + 4). Every row address is\n// a 16-byte chunk of the swizzled stage.\n__device__ __forceinline__ void tf32wrc_load_fragments(\n    const float* a_stage, const float* b_stage, int step,\n    const Tf32wrcFragmentOffsets& offsets, Tf32wrcFragments& fragments) {\n    unsigned a_base = (unsigned)__cvta_generic_to_shared(a_stage);\n#pragma unroll\n    for (int m_atom = 0; m_atom < 4; ++m_atom) {\n        unsigned address = a_base + (unsigned)offsets.a[m_atom][step] * 4U;\n        unsigned raw0, raw1, raw2, raw3;\n        asm volatile(\"ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0, %1, %2, %3}, [%4];\\n\"\n                     : \"=r\"(raw0), \"=r\"(raw1), \"=r\"(raw2), \"=r\"(raw3)\n                     : \"r\"(address));\n        fragments.a[m_atom][0] = tf32wrc_round(raw0);\n        fragments.a[m_atom][1] = tf32wrc_round(raw1);\n        fragments.a[m_atom][2] = tf32wrc_round(raw2);\n        fragments.a[m_atom][3] = tf32wrc_round(raw3);\n    }\n    const float* b_step = b_stage + step * 8 * 128;\n#pragma unroll\n    for (int n_atom = 0; n_atom < 4; ++n_atom) {\n        fragments.b[n_atom][0] = tf32wrc_round(__float_as_uint(b_step[offsets.b[n_atom][0]]));\n        fragments.b[n_atom][1] = tf32wrc_round(__float_as_uint(b_step[offsets.b[n_atom][1]]));\n    }\n}\n\n__device__ __forceinline__ void tf32wrc_mma(const Tf32wrcFragments& fragments, float (&acc)[4][4][4]) {\n#pragma unroll\n    for (int m_atom = 0; m_atom < 4; ++m_atom) {\n#pragma unroll\n        for (int n_atom = 0; n_atom < 4; ++n_atom) {\n            gbf_tf32_mma_m16n8k8(acc[m_atom][n_atom], fragments.a[m_atom], fragments.b[n_atom]);\n        }\n    }\n}\n\n__device__ __forceinline__ void tf32wrc_store(\n    float* output, int row, int column, float accumulator,\n    const GbfTf32WideParams& params) {\n    if (row >= params.m || column >= params.n) return;\n    float value = params.alpha == 1.0f\n        ? accumulator\n        : __fmul_rn(params.alpha, accumulator);\n    float* destination = output + (long long)row * params.ldc + column;\n    if (params.beta != 0.0f) {\n        value = __fmaf_rn(params.beta, *destination, value);\n    }\n    *destination = value;\n}\n\ntemplate <int BM, int BN>\n__device__ __forceinline__ void tf32wrc_zero_reduction(\n    float* output, const float* bias, const GbfTf32WideParams& params) {\n    int column_tiles = (params.n + BN - 1) / BN;\n    int tile_row = (int)blockIdx.x / column_tiles * BM;\n    int tile_column = (int)blockIdx.x % column_tiles * BN;\n    for (int linear = (int)threadIdx.x; linear < BM * BN; linear += (int)blockDim.x) {\n        int row = tile_row + linear / BN;\n        int column = tile_column + linear % BN;\n        if (row < params.m && column < params.n) {\n            float accumulator = bias == nullptr ? 0.0f : bias[column];\n            tf32wrc_store(output, row, column, accumulator, params);\n        }\n    }\n}\n\ntemplate <int Stages>\n__device__ __forceinline__ void tf32wrc_nn_kernel(\n    float* output, const float* a, const float* b, const float* bias,\n    GbfTf32WideParams params) {\n    extern __shared__ __align__(16) unsigned char tf32wrc_shared[];\n    float* a_stages = reinterpret_cast<float*>(tf32wrc_shared);\n    float* b_stages = a_stages + Stages * 128 * 32;\n    int column_tiles = (params.n + 127) / 128;\n    int tile_row = (int)blockIdx.x / column_tiles * 128;\n    int tile_column = (int)blockIdx.x % column_tiles * 128;\n    int warp = (int)threadIdx.x >> 5;\n    int lane = (int)threadIdx.x & 31;\n    int warp_m = (warp >> 2) * 64;\n    int warp_n = (warp & 3) * 32;\n    int group = lane >> 2;\n    int thread = lane & 3;\n    float acc[4][4][4];\n#pragma unroll\n    for (int m_atom = 0; m_atom < 4; ++m_atom) {\n#pragma unroll\n        for (int n_atom = 0; n_atom < 4; ++n_atom) {\n#pragma unroll\n            for (int element = 0; element < 4; ++element) {\n                int row = tile_row + warp_m + m_atom * 16 + group + (element >= 2 ? 8 : 0);\n                int column = tile_column + warp_n + n_atom * 8 + 2 * thread + (element & 1);\n                acc[m_atom][n_atom][element] =\n                    row < params.m && column < params.n && bias != nullptr ? bias[column] : 0.0f;\n            }\n        }\n    }\n    Tf32wrcFragmentOffsets offsets;\n    tf32wrc_fragment_offsets(warp_m, warp_n, group, thread, lane, offsets);\n    Tf32wrcCopyPlan plan;\n    tf32wrc_copy_plan(a_stages, b_stages, a, b, params, tile_row, tile_column, plan);\n    long long b_slab_rows = 32LL * params.ldb;\n    unsigned tile_count = (static_cast<unsigned>(params.k) + 31U) / 32U;\n#pragma unroll\n    for (unsigned tile = 0; tile < Stages - 1; ++tile) {\n        if (tile < tile_count) {\n            tf32wrc_stage_async(plan, tile * 128 * 32 * 4U, (int)(tile * 32U), params.k);\n            tf32wrc_advance_plan(plan, b_slab_rows);\n        } else {\n            asm volatile(\"cp.async.commit_group;\\n\" ::);\n        }\n    }\n    int read_stage = 0;\n    for (unsigned tile = 0; tile < tile_count; ++tile) {\n        asm volatile(\"cp.async.wait_group %0;\\n\" :: \"n\"(Stages - 2));\n        // The barrier also retires every warp's reads of the stage the copies\n        // below overwrite (the one computed in the previous iteration).\n        __syncthreads();\n        unsigned next = tile + Stages - 1;\n        bool has_next = next < tile_count;\n        int write_stage = read_stage == 0 ? Stages - 1 : read_stage - 1;\n        unsigned write_bytes = (unsigned)write_stage * 128U * 32U * 4U;\n        const float* a_read = a_stages + read_stage * 128 * 32;\n        const float* b_read = b_stages + read_stage * 32 * 128;\n        Tf32wrcFragments fragments[2];\n        tf32wrc_load_fragments(a_read, b_read, 0, offsets, fragments[0]);\n#pragma unroll\n        for (int issue = 0; issue < 4; ++issue) {\n            if (has_next) {\n                tf32wrc_stage_slice(plan, write_bytes, (int)(next * 32U), params.k, issue);\n            }\n            if (issue < 3) {\n                tf32wrc_load_fragments(a_read, b_read, issue + 1, offsets, fragments[(issue + 1) & 1]);\n            }\n            tf32wrc_mma(fragments[issue & 1], acc);\n        }\n        asm volatile(\"cp.async.commit_group;\\n\" ::);\n        if (has_next) tf32wrc_advance_plan(plan, b_slab_rows);\n        if (++read_stage == Stages) read_stage = 0;\n    }\n    // Epilogue: the tile goes through shared memory (row stride 136 floats:\n    // the fragment-shaped float2 writes land in two wavefronts) and out as\n    // 16-byte row segments, one warp per 512-byte row, when the output is\n    // 16-byte addressable and the tile's columns lie inside n; each element\n    // sees the same alpha and beta arithmetic as the scalar store.\n    __syncthreads();\n    float* tile = reinterpret_cast<float*>(tf32wrc_shared);\n    bool vector_rows = tile_column + 128 <= params.n && (params.ldc & 3) == 0\n        && gbf_aligned16(output);\n    if (vector_rows) {\n#pragma unroll\n        for (int m_atom = 0; m_atom < 4; ++m_atom) {\n#pragma unroll\n            for (int n_atom = 0; n_atom < 4; ++n_atom) {\n#pragma unroll\n                for (int half = 0; half < 2; ++half) {\n                    int row = warp_m + m_atom * 16 + group + half * 8;\n                    int column = warp_n + n_atom * 8 + 2 * thread;\n                    *reinterpret_cast<float2*>(tile + row * 136 + column) = make_float2(\n                        acc[m_atom][n_atom][2 * half], acc[m_atom][n_atom][2 * half + 1]);\n                }\n            }\n        }\n        __syncthreads();\n        bool scale = params.alpha != 1.0f;\n        bool blend = params.beta != 0.0f;\n#pragma unroll 4\n        for (int linear = (int)threadIdx.x; linear < 128 * 32; linear += 256) {\n            int row = linear >> 5;\n            int chunk = (linear & 31) * 4;\n            int global_row = tile_row + row;\n            if (global_row >= params.m) continue;\n            float4 value = *reinterpret_cast<const float4*>(tile + row * 136 + chunk);\n            float* destination = output + (long long)global_row * params.ldc + tile_column + chunk;\n            if (scale) {\n                value.x = __fmul_rn(params.alpha, value.x);\n                value.y = __fmul_rn(params.alpha, value.y);\n                value.z = __fmul_rn(params.alpha, value.z);\n                value.w = __fmul_rn(params.alpha, value.w);\n            }\n            if (blend) {\n                float4 old = *reinterpret_cast<const float4*>(destination);\n                value.x = __fmaf_rn(params.beta, old.x, value.x);\n                value.y = __fmaf_rn(params.beta, old.y, value.y);\n                value.z = __fmaf_rn(params.beta, old.z, value.z);\n                value.w = __fmaf_rn(params.beta, old.w, value.w);\n            }\n            *reinterpret_cast<float4*>(destination) = value;\n        }\n        return;\n    }\n#pragma unroll\n    for (int m_atom = 0; m_atom < 4; ++m_atom) {\n#pragma unroll\n        for (int n_atom = 0; n_atom < 4; ++n_atom) {\n#pragma unroll\n            for (int element = 0; element < 4; ++element) {\n                int row = tile_row + warp_m + m_atom * 16 + group + (element >= 2 ? 8 : 0);\n                int column = tile_column + warp_n + n_atom * 8 + 2 * thread + (element & 1);\n                tf32wrc_store(output, row, column, acc[m_atom][n_atom][element], params);\n            }\n        }\n    }\n}\n\n\nextern \"C\" __global__ __launch_bounds__(256, 1)\nvoid gemm_bi_nn_fixed_rna_wide_tf32_v1_m128n128_bk32_s3(\n    float* output, const float* a, const float* b, const float* bias,\n    GbfTf32WideParams params) {\n    if (params.k == 0) {\n        tf32wrc_zero_reduction<128, 128>(output, bias, params);\n        return;\n    }\n    tf32wrc_nn_kernel<3>(output, a, b, bias, params);\n}\n\ntemplate <typename A, typename B> struct GbfRnaSameType { static constexpr bool value = false; };\ntemplate <typename A> struct GbfRnaSameType<A, A> { static constexpr bool value = true; };\nusing GbfRnaWideSignature = void (*)(\n    float*, const float*, const float*, const float*, GbfTf32WideParams);\nstatic_assert(GbfRnaSameType<\n    decltype(&gemm_bi_nn_fixed_rna_wide_tf32_v1_m128n128_bk32_s3),\n    GbfRnaWideSignature>::value, \"Fixed NN RNA-wide ABI\");\n#line 1 \"kernels/gemm_bi_fixed/sm89_half_swizzle_layout.cuh\"\n// Production Fixed SM89 homogeneous-half swizzle layout. Shared by the CUDA twin and\n// pure-host address/ldmatrix tests; no CUDA toolkit is needed by the latter.\n#pragma once\n#if defined(__CUDACC__)\n#define SM89_FHS_HD __host__ __device__\n#else\n#define SM89_FHS_HD\n#endif\nnamespace sm89_fixed_half_swizzle_layout {\nconstexpr int kStageElements = 8192;\nconstexpr int kOutputStride = 136;\nconstexpr int kSharedBytes = 69632;\nstatic_assert(4 * kStageElements * 2 <= kSharedBytes, \"S2 staging fits\");\nstatic_assert(128 * kOutputStride * 4 == kSharedBytes, \"unchanged output scratch fits\");\nSM89_FHS_HD constexpr int a_index(int row, int k) {\n    return row * 64 + (k ^ ((row & 7) * 8));\n}\nSM89_FHS_HD constexpr int b_index(int k, int column) {\n    return k * 128 + (column ^ ((k & 7) * 8));\n}\nSM89_FHS_HD constexpr unsigned a_copy_offset(int thread, int slice) {\n    return unsigned(2 * a_index((thread >> 3) + slice * 32, (thread & 7) * 8));\n}\nSM89_FHS_HD constexpr unsigned b_copy_offset(int thread, int slice) {\n    return unsigned(2 * b_index((thread >> 4) + slice * 16, (thread & 15) * 8));\n}\nSM89_FHS_HD constexpr unsigned a_fragment_base(int warp_m, int atom, int lane) {\n    return unsigned(2 * a_index(warp_m + atom * 16 + (lane & 15), (lane & 16) ? 8 : 0));\n}\nSM89_FHS_HD constexpr unsigned b_fragment_base(int warp_n, int atom, int lane) {\n    return unsigned(2 * b_index(lane & 15, warp_n + atom * 8));\n}\nSM89_FHS_HD constexpr unsigned a_fragment_issue(unsigned base, int issue) {\n    // XOR touches only the low seven byte bits; each A row starts at 128B.\n    return base ^ unsigned(issue * 32);\n}\nSM89_FHS_HD constexpr unsigned b_fragment_issue(unsigned base, int issue) {\n    // Advancing K by 16 leaves the low-three-row-bit permutation unchanged.\n    return base + unsigned(issue * 16 * 128 * 2);\n}\n} // namespace sm89_fixed_half_swizzle_layout\n#undef SM89_FHS_HD\n#line 1 \"kernels/gemm_bi_fixed/sm89_half_swizzle.cu\"\n// Production Fixed SM89 homogeneous-half packed/XOR staging twin.\n// Only staging addresses change; exact ascending k16 chain, copy issue\n// schedule, bias seed, alpha/beta, conversion and 136-float output stride stay.\n// Dynamic shared is 69,632 bytes: packed S2 inputs use 65,536, then the\n// unchanged vector epilogue aliases 128*136*4 bytes. Threads=256.\n// Every scalar and cp.async staging path uses the SAME tested layout helper.\n// Actual GPU output, sanitizer and speed qualification remain required.\n// Composed only in the Fixed/sm_89 suffix; every other target remains byte-identical.\n// Exports: gemm_bi_nn_fixed_sm89_tc128_swizzle_v1_bf16 and\n// gemm_bi_nn_fixed_sm89_tc128_swizzle_v1_f16.\n\nstruct FixedSm89HalfSwizzleParams {\n    float alpha;\n    float beta;\n    int m;\n    int n;\n    int k;\n    int lda;\n    int ldb;\n    int ldc;\n};\nstatic_assert(sizeof(FixedSm89HalfSwizzleParams) == 32, \"Fixed SM89 swizzle parameter size\");\nstatic_assert(alignof(FixedSm89HalfSwizzleParams) == 4, \"Fixed SM89 swizzle parameter alignment\");\nstatic_assert(__is_standard_layout(FixedSm89HalfSwizzleParams), \"Fixed SM89 swizzle standard layout\");\nstatic_assert(sizeof(float) == 4 && sizeof(int) == 4, \"Fixed SM89 swizzle field widths\");\n\nnamespace sm89_fixed_half_swizzle {\n\nnamespace layout = sm89_fixed_half_swizzle_layout;\nstatic constexpr int kSharedBytes = layout::kSharedBytes;\nstatic constexpr int kOutputStride = 136;\nstatic_assert(2 * (128 * 64 + 64 * 128) * 2 <= kSharedBytes, \"packed S2 shared ABI\");\nstatic_assert(128 * kOutputStride * 4 <= kSharedBytes, \"epilogue aliases S2 storage\");\nstatic_assert(sizeof(uint4) == 16, \"vector store width\");\n\ntemplate <typename T> struct HalfOps;\n\n#define SM89_FHS_OPS(TYPE, FROM, MMA_TYPE)                                    \\\ntemplate <> struct HalfOps<TYPE> {                                         \\\n    static __device__ __forceinline__ TYPE from_float(float value) {        \\\n        return FROM(value);                                                \\\n    }                                                                      \\\n    static __device__ __forceinline__ void mma(                             \\\n        float (&d)[4], const unsigned (&a)[4], const unsigned (&b)[2]) {      \\\n        asm volatile(                                                      \\\n            \"mma.sync.aligned.m16n8k16.row.col.f32.\" MMA_TYPE \".\"            \\\n            MMA_TYPE \".f32 \"                                               \\\n            \"{%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3};\\n\"       \\\n            : \"+f\"(d[0]), \"+f\"(d[1]), \"+f\"(d[2]), \"+f\"(d[3])               \\\n            : \"r\"(a[0]), \"r\"(a[1]), \"r\"(a[2]), \"r\"(a[3]),                  \\\n              \"r\"(b[0]), \"r\"(b[1]));                                       \\\n    }                                                                      \\\n};\n\nSM89_FHS_OPS(__nv_bfloat16, from_f_bf16, \"bf16\")\nSM89_FHS_OPS(__half, from_f_f16, \"f16\")\n#undef SM89_FHS_OPS\n\ntemplate <typename T>\nstatic __device__ __forceinline__ void stage_scalar(\n    T* a_stages, T* b_stages, const T* A, const T* B,\n    int stage, int k_base, int pid_m, int pid_n,\n    int M, int N, int K, int lda, int ldb) {\n    T* a_stage = a_stages + stage * 128 * 64;\n    T* b_stage = b_stages + stage * 64 * 128;\n    for (int linear = (int)threadIdx.x; linear < 128 * 64; linear += 256) {\n        int row = linear / 64;\n        int k = linear % 64;\n        int global_row = pid_m * 128 + row;\n        int global_k = k_base + k;\n        a_stage[layout::a_index(row, k)] = global_row < M && global_k < K\n            ? A[(long long)global_row * lda + global_k] : HalfOps<T>::from_float(0.0f);\n    }\n    for (int linear = (int)threadIdx.x; linear < 64 * 128; linear += 256) {\n        int k = linear / 128;\n        int column = linear % 128;\n        int global_k = k_base + k;\n        int global_column = pid_n * 128 + column;\n        b_stage[layout::b_index(k, column)] = global_k < K && global_column < N\n            ? B[(long long)global_k * ldb + global_column] : HalfOps<T>::from_float(0.0f);\n    }\n}\n\nstruct FragmentOffsets {\n    unsigned a[4];\n    unsigned b[4];\n};\n\nstruct Fragments {\n    unsigned a[4][4];\n    unsigned b[4][2];\n};\n\nstatic __device__ __forceinline__ FragmentOffsets fragment_offsets(int warpM, int warpN) {\n    FragmentOffsets offsets;\n    int lane = (int)threadIdx.x & 31;\n#pragma unroll\n    for (int atom = 0; atom < 4; ++atom) {\n        offsets.a[atom] = layout::a_fragment_base(warpM, atom, lane);\n        offsets.b[atom] = layout::b_fragment_base(warpN, atom, lane);\n    }\n    return offsets;\n}\n\nstatic __device__ __forceinline__ void load_fragments(\n    unsigned a_stage, unsigned b_stage, int issue,\n    const FragmentOffsets& offsets, Fragments& fragments) {\n#pragma unroll\n    for (int atom = 0; atom < 4; ++atom) {\n        unsigned address = a_stage + layout::a_fragment_issue(offsets.a[atom], issue);\n        asm volatile(\"ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0,%1,%2,%3}, [%4];\\n\"\n            : \"=r\"(fragments.a[atom][0]), \"=r\"(fragments.a[atom][1]),\n              \"=r\"(fragments.a[atom][2]), \"=r\"(fragments.a[atom][3]) : \"r\"(address));\n    }\n#pragma unroll\n    for (int atom = 0; atom < 4; ++atom) {\n        unsigned address = b_stage + layout::b_fragment_issue(offsets.b[atom], issue);\n        asm volatile(\"ldmatrix.sync.aligned.m8n8.x2.trans.shared.b16 {%0,%1}, [%2];\\n\"\n            : \"=r\"(fragments.b[atom][0]), \"=r\"(fragments.b[atom][1]) : \"r\"(address));\n    }\n}\n\ntemplate <typename T>\nstatic __device__ __forceinline__ void consume_fragments(\n    const Fragments& fragments, float (&acc)[4][4][4]) {\n#pragma unroll\n    for (int fm = 0; fm < 4; ++fm) {\n#pragma unroll\n        for (int fn = 0; fn < 4; ++fn) {\n            HalfOps<T>::mma(acc[fm][fn], fragments.a[fm], fragments.b[fn]);\n        }\n    }\n}\n\nstruct CopyPlan {\n    long long a_offset[4];\n    long long b_offset[4];\n    unsigned a_destination[4];\n    unsigned b_destination[4];\n    bool a_row_valid[4];\n    int a_k;\n    int b_k;\n    int b_column_bytes;\n};\n\nstatic __device__ __forceinline__ CopyPlan copy_plan(\n    unsigned a_shared, unsigned b_shared, int pid_m, int pid_n,\n    int M, int N, int lda, int ldb) {\n    CopyPlan plan;\n    int thread = (int)threadIdx.x;\n    plan.a_k = (thread & 7) * 8;\n    plan.b_k = thread >> 4;\n    int local_column = (thread & 15) * 8;\n    int global_column = pid_n * 128 + local_column;\n    int remaining = N - global_column;\n    plan.b_column_bytes = remaining >= 8 ? 16 : (remaining > 0 ? remaining * 2 : 0);\n#pragma unroll\n    for (int slice = 0; slice < 4; ++slice) {\n        int local_row = (thread >> 3) + slice * 32;\n        int global_row = pid_m * 128 + local_row;\n        plan.a_row_valid[slice] = global_row < M;\n        plan.a_offset[slice] = (long long)(global_row < M ? global_row : 0) * lda + plan.a_k;\n        plan.b_offset[slice] = (long long)(plan.b_k + slice * 16) * ldb\n            + (remaining > 0 ? global_column : 0);\n        plan.a_destination[slice] = a_shared + layout::a_copy_offset(thread, slice);\n        plan.b_destination[slice] = b_shared + layout::b_copy_offset(thread, slice);\n    }\n    return plan;\n}\n\ntemplate <typename T>\nstatic __device__ __forceinline__ void copy_slice(\n    const CopyPlan& plan, const T* A, const T* B,\n    int stage, int k_base, long long b_reduction_offset, int K, int slice) {\n    int remaining = K - k_base - plan.a_k;\n    int a_bytes = plan.a_row_valid[slice]\n        ? (remaining >= 8 ? 16 : (remaining > 0 ? remaining * 2 : 0)) : 0;\n    int b_bytes = k_base + plan.b_k + slice * 16 < K ? plan.b_column_bytes : 0;\n    // Only form an in-object source when at least one element is read.\n    const void* a_source = a_bytes > 0 ? (const void*)(A + plan.a_offset[slice] + k_base) : (const void*)A;\n    const void* b_source = b_bytes > 0 ? (const void*)(B + plan.b_offset[slice] + b_reduction_offset) : (const void*)B;\n    unsigned a_destination = plan.a_destination[slice] + (unsigned)(stage * 128 * 64 * 2);\n    unsigned b_destination = plan.b_destination[slice] + (unsigned)(stage * 64 * 128 * 2);\n    asm volatile(\"cp.async.cg.shared.global [%0], [%1], 16, %2;\\n\"\n        :: \"r\"(a_destination), \"l\"(a_source), \"r\"(a_bytes));\n    asm volatile(\"cp.async.cg.shared.global [%0], [%1], 16, %2;\\n\"\n        :: \"r\"(b_destination), \"l\"(b_source), \"r\"(b_bytes));\n}\n\ntemplate <typename T>\nstatic __device__ __forceinline__ void scalar_epilogue(\n    T* C, float (&acc)[4][4][4], float alpha, float beta,\n    int M, int N, int ldc, int pid_m, int pid_n, int warpM, int warpN) {\n    int lane = (int)threadIdx.x & 31;\n    int g = lane >> 2;\n    int t = lane & 3;\n#pragma unroll\n    for (int fm = 0; fm < 4; ++fm) {\n#pragma unroll\n        for (int fn = 0; fn < 4; ++fn) {\n            int r0 = pid_m * 128 + warpM + fm * 16 + g;\n            int c0 = pid_n * 128 + warpN + fn * 8 + 2 * t;\n#pragma unroll\n            for (int half = 0; half < 2; ++half) {\n                int row = r0 + half * 8;\n                if (row >= M) continue;\n                float first = __fmul_rn(alpha, acc[fm][fn][2 * half]);\n                float second = __fmul_rn(alpha, acc[fm][fn][2 * half + 1]);\n                T* destination = c0 < N ? C + (long long)row * ldc + c0 : (T*)0;\n                if (beta == 0.0f && (ldc & 1) == 0 && c0 + 1 < N && gbf_aligned4(destination)) {\n                    gbf_store_pair_rne(destination, first, second);\n                } else {\n#pragma unroll\n                    for (int e = 0; e < 2; ++e) {\n                        int column = c0 + e;\n                        if (column >= N) continue;\n                        float value = e ? second : first;\n                        T* output = C + (long long)row * ldc + column;\n                        if (beta != 0.0f) value = __fmaf_rn(beta, to_f(*output), value);\n                        *output = HalfOps<T>::from_float(value);\n                    }\n                }\n            }\n        }\n    }\n}\n\ntemplate <typename T>\nstatic __device__ __forceinline__ void vector_epilogue(\n    T* C, float* output_tile, float (&acc)[4][4][4], float alpha,\n    int M, int ldc, int pid_m, int pid_n, int warpM, int warpN) {\n    int lane = (int)threadIdx.x & 31;\n    int g = lane >> 2;\n    int t = lane & 3;\n    // Every warp must finish its last ldmatrix reads before aliasing As/Bs.\n    __syncthreads();\n#pragma unroll\n    for (int fm = 0; fm < 4; ++fm) {\n#pragma unroll\n        for (int fn = 0; fn < 4; ++fn) {\n#pragma unroll\n            for (int half = 0; half < 2; ++half) {\n                int row = warpM + fm * 16 + g + half * 8;\n                int column = warpN + fn * 8 + 2 * t;\n                *reinterpret_cast<float2*>(output_tile + row * kOutputStride + column) =\n                    make_float2(acc[fm][fn][2 * half], acc[fm][fn][2 * half + 1]);\n            }\n        }\n    }\n    __syncthreads();\n    // Each warp writes two adjacent rows in 16-byte chunks. The shared row\n    // padding preserves 16-byte addresses for both float4 reads.\n#pragma unroll\n    for (int linear = (int)threadIdx.x; linear < 128 * 16; linear += 256) {\n        int local_row = linear >> 4;\n        int row = pid_m * 128 + local_row;\n        if (row >= M) continue;\n        int column = (linear & 15) * 8;\n        const float* source = output_tile + local_row * kOutputStride + column;\n        float4 first = *reinterpret_cast<const float4*>(source);\n        float4 second = *reinterpret_cast<const float4*>(source + 4);\n        uint4 packed;\n        gbf_store_pair_rne(reinterpret_cast<T*>(&packed.x), __fmul_rn(alpha, first.x), __fmul_rn(alpha, first.y));\n        gbf_store_pair_rne(reinterpret_cast<T*>(&packed.y), __fmul_rn(alpha, first.z), __fmul_rn(alpha, first.w));\n        gbf_store_pair_rne(reinterpret_cast<T*>(&packed.z), __fmul_rn(alpha, second.x), __fmul_rn(alpha, second.y));\n        gbf_store_pair_rne(reinterpret_cast<T*>(&packed.w), __fmul_rn(alpha, second.z), __fmul_rn(alpha, second.w));\n        *reinterpret_cast<uint4*>(C + (long long)row * ldc + pid_n * 128 + column) = packed;\n    }\n}\n\ntemplate <typename T>\nstatic __device__ __forceinline__ void kernel(\n    T* C, const T* A, const T* B, const float* bias,\n    float alpha, float beta, int M, int N, int K, int lda, int ldb, int ldc) {\n    static_assert(sizeof(T) == 2, \"homogeneous half pipeline only\");\n    assert(alpha == 1.0f || bias == nullptr);\n    extern __shared__ __align__(16) unsigned char sm89_fhs_shared[];\n    T (*As)[128][64] = reinterpret_cast<T (*)[128][64]>(sm89_fhs_shared);\n    T (*Bs)[64][128] = reinterpret_cast<T (*)[64][128]>(\n        sm89_fhs_shared + 2 * 128 * 64 * (int)sizeof(T));\n    int num_pid_n = (N + 127) / 128;\n    int pid_m = (int)blockIdx.x / num_pid_n;\n    int pid_n = (int)blockIdx.x % num_pid_n;\n    int warp = (int)threadIdx.x >> 5;\n    int warpM = (warp >> 2) * 64;\n    int warpN = (warp & 3) * 32;\n    int t = (int)threadIdx.x & 3;\n    unsigned As_sbase = (unsigned)__cvta_generic_to_shared(&As[0][0][0]);\n    unsigned Bs_sbase = (unsigned)__cvta_generic_to_shared(&Bs[0][0][0]);\n    bool fast_stage = (lda & 7) == 0 && (ldb & 7) == 0 && gbf_aligned16(A) && gbf_aligned16(B);\n    float acc[4][4][4];\n#pragma unroll\n    for (int fm = 0; fm < 4; ++fm) {\n#pragma unroll\n        for (int fn = 0; fn < 4; ++fn) {\n            int column = pid_n * 128 + warpN + fn * 8 + 2 * t;\n            float first = bias != nullptr && column < N ? bias[column] : 0.0f;\n            float second = bias != nullptr && column + 1 < N ? bias[column + 1] : 0.0f;\n            acc[fm][fn][0] = first;\n            acc[fm][fn][1] = second;\n            acc[fm][fn][2] = first;\n            acc[fm][fn][3] = second;\n        }\n    }\n    FragmentOffsets offsets = fragment_offsets(warpM, warpN);\n    CopyPlan plan;\n    if (fast_stage) plan = copy_plan(As_sbase, Bs_sbase, pid_m, pid_n, M, N, lda, ldb);\n    int num_k_tiles = (K + 63) / 64;\n    if (num_k_tiles > 0) {\n        if (fast_stage) {\n#pragma unroll\n            for (int slice = 0; slice < 4; ++slice) copy_slice(plan, A, B, 0, 0, 0, K, slice);\n            asm volatile(\"cp.async.commit_group;\\n\" ::);\n        } else {\n            stage_scalar(&As[0][0][0], &Bs[0][0][0], A, B, 0, 0, pid_m, pid_n, M, N, K, lda, ldb);\n        }\n    }\n    int read_buf = 0;\n    for (int kt = 0; kt < num_k_tiles; ++kt) {\n        if (fast_stage) asm volatile(\"cp.async.wait_group 0;\\n\" ::);\n        __syncthreads();\n        bool next = kt + 1 < num_k_tiles;\n        int next_k = (kt + 1) * 64;\n        if (next) {\n            if (!fast_stage) {\n                stage_scalar(&As[0][0][0], &Bs[0][0][0], A, B, read_buf ^ 1, next_k,\n                    pid_m, pid_n, M, N, K, lda, ldb);\n            }\n        }\n        unsigned a_read = As_sbase + (unsigned)(read_buf * 128 * 64 * 2);\n        unsigned b_read = Bs_sbase + (unsigned)(read_buf * 64 * 128 * 2);\n        {\n            Fragments fragments[2];\n            load_fragments(a_read, b_read, 0, offsets, fragments[0]);\n            long long next_b = (long long)next_k * ldb;\n#pragma unroll\n            for (int issue = 0; issue < 4; ++issue) {\n                if (fast_stage && next) copy_slice(plan, A, B, read_buf ^ 1, next_k, next_b, K, issue);\n                if (issue < 3) load_fragments(a_read, b_read, issue + 1, offsets, fragments[(issue + 1) & 1]);\n                consume_fragments<T>(fragments[issue & 1], acc);\n            }\n            if (fast_stage && next) asm volatile(\"cp.async.commit_group;\\n\" ::);\n        }\n        read_buf ^= 1;\n    }\n    {\n        bool vector_output = beta == 0.0f && (ldc & 7) == 0 && gbf_aligned16(C)\n            && pid_n * 128 + 128 <= N;\n        if (vector_output) {\n            vector_epilogue(C, reinterpret_cast<float*>(sm89_fhs_shared), acc, alpha,\n                M, ldc, pid_m, pid_n, warpM, warpN);\n            return;\n        }\n    }\n    scalar_epilogue(C, acc, alpha, beta, M, N, ldc, pid_m, pid_n, warpM, warpN);\n}\n\n} // namespace sm89_fixed_half_swizzle\n\n#define SM89_FHS_EXPORT(TYPE, SUFFIX)                                      \\\nextern \"C\" __global__ __launch_bounds__(256, 1)                            \\\nvoid gemm_bi_nn_fixed_sm89_tc128_swizzle_v1_##SUFFIX(                      \\\n    TYPE* __restrict__ C, const TYPE* __restrict__ A,                       \\\n    const TYPE* __restrict__ B, const float* __restrict__ bias,             \\\n    FixedSm89HalfSwizzleParams params) {                                    \\\n    sm89_fixed_half_swizzle::kernel<TYPE>(C, A, B, bias, params.alpha,      \\\n        params.beta, params.m, params.n, params.k, params.lda, params.ldb,   \\\n        params.ldc);                                                         \\\n}\nSM89_FHS_EXPORT(__nv_bfloat16, bf16)\nSM89_FHS_EXPORT(__half, f16)\n#undef SM89_FHS_EXPORT\n"
+ right: "#line 1 \"kernels/gemm_bi_fixed/tf32_rna_wide.cu\"\n// Fixed-owned NN wide TF32 candidate. This is the production adaptation of\n// internal/experiments/sm89-nn-wide-rna-compatible.cu at SHA256\n// c0c9eb735374620eaf8a023345ee86359af9f748df53fc5cf7d07ee7051f65c4.\n// The 128x128/BK32/S3 pipeline, ascending k8 MMA sequence, explicit\n// cvt.rna.tf32.f32 conversion, bias initialization, tail handling, and\n// scalar/vector epilogues are unchanged. Only Fixed-private dependency names,\n// the production export, and the self-contained parameter/store helpers differ.\n// Compose this fragment after Fixed common.cuh and tf32.cu, on sm_89 only.\n//\n// Export: gemm_bi_nn_fixed_rna_wide_tf32_v1_m128n128_bk32_s3\n// ABI: (float* output, const float* a, const float* b, const float* bias,\n//       GbfTf32WideParams params).\n// Params: {float alpha,beta; int m,k,n,lda,ldb,ldc;} (32 bytes, alignment 4).\n// Grid=(ceil(m/128)*ceil(n/128),1,1); block=(256,1,1).\n// Dynamic shared=98,304 bytes, opt in the function. No scratch/counters.\n// Same vector-input admission as the existing wide body: A/B base alignment\n// 16 bytes and lda/ldb divisible by four, valid row-major extents/strides,\n// dimensions/tile counts within device and signed-int limits. Host skips\n// empty output. K=0 uses the unchanged zero-reduction epilogue. Fixed callers\n// must pass this 32-byte struct with alpha=1,beta=0, not GbfTf32Params.\n//\n// Byte-level conversion rationale:\n// Fixed's gbf_tf32_rna(float) applies exactly cvt.rna.tf32.f32 to the input\n// register and returns its .b32 result. The new helper bit-reinterprets the\n// incoming unsigned fragment as float, then uses the same PTX and constraints.\n// This preserves all input bits until that instruction, including signed zero,\n// subnormals, infinities, signaling/quiet NaNs and every NaN payload. It also\n// preserves whatever output bits the conversion instruction produces, without\n// an integer mask or a hand-written special-value transformation.\n//\n// For a hypothetical upper19-bit TF32 layout, finite nearest-away rounding\n// equals ((bits+0x1000) & 0xffffe000). That algebra does not prove the PTX\n// instruction's complete NaN payload behavior. In the unguarded old add,\n// 0x7f801000 -> 0x7f802000; 0x7fffffff -> 0x80000fff; and\n// 0xffffffff -> 0x00000fff. A finite-only add would preserve the special input\n// bits, but the available evidence does not certify those bits as cvt.rna's\n// result for every NaN. Therefore this twin deliberately uses explicit cvt.\n//\n// NVIDIA PTX ISA 9.3 defines RNA as nearest with ties away from zero and\n// describes TF32's internal layout as implementation-defined:\n// https://docs.nvidia.com/cuda/parallel-thread-execution/\n// This source-level match is not GPU proof of a cross-route batch ladder.\n// Main must still compare raw conversion results, exceptional-value GEMMs,\n// repeated/batch-prefix bits and performance before any admission.\n\nstruct GbfTf32WideParams {\n    float alpha;\n    float beta;\n    int m;\n    int k;\n    int n;\n    int lda;\n    int ldb;\n    int ldc;\n};\n\nstatic_assert(sizeof(GbfTf32WideParams) == 32, \"Fixed RNA-wide parameter ABI drift\");\nstatic_assert(alignof(GbfTf32WideParams) == 4, \"Fixed RNA-wide parameter alignment drift\");\nstatic_assert(__is_standard_layout(GbfTf32WideParams),\n              \"Fixed RNA-wide parameters must remain standard layout\");\n\n__device__ __forceinline__ int tf32wrc_a_index(int row, int k) {\n    int chunk = (k >> 2) ^ (row & 7);\n    return row * 32 + chunk * 4 + (k & 3);\n}\n\n__device__ __forceinline__ int tf32wrc_b_index(int k, int column) {\n    int chunk = (column >> 2) ^ ((k & 3) << 1);\n    return k * 128 + chunk * 4 + (column & 3);\n}\n\n// One quarter of a stage's copies: the A and B rows this thread owns in\n// slice `slice` (two 16-byte cp.async per thread), so the eight copies of a\n// stage interleave with the four k8 steps of the stage being computed.\n// Each thread owns eight 16-byte copies per stage (four of A, four of B):\n// their global pointers, shared destinations and the row / column bounds\n// depend on the tile and the thread only, so they are computed once; a\n// stage advances the pointers by its k slab and clamps the copy length by\n// the remaining reduction (zero bytes zero-fill the slot; a zero-length\n// copy keeps a valid address).\nstruct Tf32wrcCopyPlan {\n    const float* a_source[4];\n    const float* b_source[4];\n    unsigned a_destination[4];\n    unsigned b_destination[4];\n    int a_k_offset;\n    int b_k_row;\n    bool a_row_valid[4];\n    int b_column_bytes[4];\n};\n\n__device__ __forceinline__ void tf32wrc_copy_plan(\n    float* a_stage0, float* b_stage0, const float* a, const float* b,\n    const GbfTf32WideParams& params, int tile_row, int tile_column, Tf32wrcCopyPlan& plan) {\n    plan.a_k_offset = ((int)threadIdx.x & 7) * 4;\n    plan.b_k_row = (int)threadIdx.x >> 5;\n#pragma unroll\n    for (int slice = 0; slice < 4; ++slice) {\n        int linear = (int)threadIdx.x + slice * 256;\n        int row = linear >> 3;\n        int global_row = tile_row + row;\n        plan.a_row_valid[slice] = global_row < params.m;\n        plan.a_source[slice] = a + (long long)(plan.a_row_valid[slice] ? global_row : 0) * params.lda + plan.a_k_offset;\n        plan.a_destination[slice] = (unsigned)__cvta_generic_to_shared(a_stage0 + tf32wrc_a_index(row, plan.a_k_offset));\n        int k_row = linear >> 5;\n        int column = (linear & 31) * 4;\n        int global_column = tile_column + column;\n        int columns = params.n - global_column;\n        columns = columns < 0 ? 0 : (columns > 4 ? 4 : columns);\n        plan.b_column_bytes[slice] = columns * 4;\n        plan.b_source[slice] = b + (long long)k_row * params.ldb + (columns > 0 ? global_column : 0);\n        plan.b_destination[slice] = (unsigned)__cvta_generic_to_shared(b_stage0 + tf32wrc_b_index(k_row, column));\n    }\n}\n\n// One quarter of a stage's copies. `stage_bytes` is the stage's byte offset\n// in the ring, `k_base` the stage's first k; the pointers already point at\n// the stage (the caller advances them).\n__device__ __forceinline__ void tf32wrc_stage_slice(\n    const Tf32wrcCopyPlan& plan, unsigned stage_bytes, int k_base, int reduction, int slice) {\n    {\n        int remaining = reduction - k_base - plan.a_k_offset;\n        remaining = remaining < 0 ? 0 : (remaining > 4 ? 4 : remaining);\n        int bytes = plan.a_row_valid[slice] ? remaining * 4 : 0;\n        gbf_tf32_copy_cg(plan.a_destination[slice] + stage_bytes, plan.a_source[slice], bytes);\n    }\n    {\n        int bytes = k_base + plan.b_k_row + slice * 8 < reduction ? plan.b_column_bytes[slice] : 0;\n        gbf_tf32_copy_cg(plan.b_destination[slice] + stage_bytes, plan.b_source[slice], bytes);\n    }\n}\n\n__device__ __forceinline__ void tf32wrc_advance_plan(Tf32wrcCopyPlan& plan, long long b_rows) {\n#pragma unroll\n    for (int slice = 0; slice < 4; ++slice) {\n        plan.a_source[slice] += 32;\n        plan.b_source[slice] += b_rows;\n    }\n}\n\n__device__ __forceinline__ void tf32wrc_stage_async(\n    const Tf32wrcCopyPlan& plan, unsigned stage_bytes, int k_base, int reduction) {\n#pragma unroll\n    for (int slice = 0; slice < 4; ++slice) {\n        tf32wrc_stage_slice(plan, stage_bytes, k_base, reduction, slice);\n    }\n    asm volatile(\"cp.async.commit_group;\\n\" ::);\n}\n\nstruct Tf32wrcFragments {\n    unsigned a[4][4];\n    unsigned b[4][2];\n};\n\n// The shared-memory element offsets of this lane's fragments, computed once\n// per thread: the swizzle of A depends on the k8 step through its chunk\n// index, so the ldmatrix offsets are kept per (atom, step); the swizzle of B\n// depends only on the lane's k row within the step, so one offset per\n// (atom, half) serves every step with the step's row term added.\nstruct Tf32wrcFragmentOffsets {\n    int a[4][4];\n    int b[4][2];\n};\n\n__device__ __forceinline__ void tf32wrc_fragment_offsets(\n    int warp_m, int warp_n, int group, int thread, int lane, Tf32wrcFragmentOffsets& offsets) {\n    int a_row = warp_m + (lane & 15);\n    int a_k = (lane >> 4) << 2;\n#pragma unroll\n    for (int m_atom = 0; m_atom < 4; ++m_atom) {\n#pragma unroll\n        for (int step = 0; step < 4; ++step) {\n            offsets.a[m_atom][step] = tf32wrc_a_index(a_row + m_atom * 16, step * 8 + a_k);\n        }\n    }\n#pragma unroll\n    for (int n_atom = 0; n_atom < 4; ++n_atom) {\n        int column = warp_n + n_atom * 8 + group;\n        offsets.b[n_atom][0] = tf32wrc_b_index(thread, column);\n        offsets.b[n_atom][1] = tf32wrc_b_index(thread + 4, column);\n    }\n}\n\n// Keep the operand conversion instruction identical to gbf_tf32_rna in\n// kernels/gemm_bi_fixed/tf32.cu. __uint_as_float is a bit reinterpretation;\n// it performs no FP arithmetic that could quiet or canonicalize an sNaN\n// before the PTX instruction sees the original 32-bit payload.\n__device__ __forceinline__ unsigned tf32wrc_round(unsigned bits) {\n    float value = __uint_as_float(bits);\n    unsigned result;\n    asm(\"cvt.rna.tf32.f32 %0, %1;\" : \"=r\"(result) : \"f\"(value));\n    return result;\n}\n\n// The A fragment of one 16 x 8 atom through ldmatrix.x4: lanes 0-7 address\n// rows 0-7 at k8, 8-15 rows 8-15 at k8, 16-23 rows 0-7 at k8 + 4 and 24-31\n// rows 8-15 at k8 + 4, so the four registers land as a0..a3 of the mma\n// (row g / row g + 8 at k t, then the same at k t + 4). Every row address is\n// a 16-byte chunk of the swizzled stage.\n__device__ __forceinline__ void tf32wrc_load_fragments(\n    const float* a_stage, const float* b_stage, int step,\n    const Tf32wrcFragmentOffsets& offsets, Tf32wrcFragments& fragments) {\n    unsigned a_base = (unsigned)__cvta_generic_to_shared(a_stage);\n#pragma unroll\n    for (int m_atom = 0; m_atom < 4; ++m_atom) {\n        unsigned address = a_base + (unsigned)offsets.a[m_atom][step] * 4U;\n        unsigned raw0, raw1, raw2, raw3;\n        asm volatile(\"ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0, %1, %2, %3}, [%4];\\n\"\n                     : \"=r\"(raw0), \"=r\"(raw1), \"=r\"(raw2), \"=r\"(raw3)\n                     : \"r\"(address));\n        fragments.a[m_atom][0] = tf32wrc_round(raw0);\n        fragments.a[m_atom][1] = tf32wrc_round(raw1);\n        fragments.a[m_atom][2] = tf32wrc_round(raw2);\n        fragments.a[m_atom][3] = tf32wrc_round(raw3);\n    }\n    const float* b_step = b_stage + step * 8 * 128;\n#pragma unroll\n    for (int n_atom = 0; n_atom < 4; ++n_atom) {\n        fragments.b[n_atom][0] = tf32wrc_round(__float_as_uint(b_step[offsets.b[n_atom][0]]));\n        fragments.b[n_atom][1] = tf32wrc_round(__float_as_uint(b_step[offsets.b[n_atom][1]]));\n    }\n}\n\n__device__ __forceinline__ void tf32wrc_mma(const Tf32wrcFragments& fragments, float (&acc)[4][4][4]) {\n#pragma unroll\n    for (int m_atom = 0; m_atom < 4; ++m_atom) {\n#pragma unroll\n        for (int n_atom = 0; n_atom < 4; ++n_atom) {\n            gbf_tf32_mma_m16n8k8(acc[m_atom][n_atom], fragments.a[m_atom], fragments.b[n_atom]);\n        }\n    }\n}\n\n__device__ __forceinline__ void tf32wrc_store(\n    float* output, int row, int column, float accumulator,\n    const GbfTf32WideParams& params) {\n    if (row >= params.m || column >= params.n) return;\n    float value = params.alpha == 1.0f\n        ? accumulator\n        : __fmul_rn(params.alpha, accumulator);\n    float* destination = output + (long long)row * params.ldc + column;\n    if (params.beta != 0.0f) {\n        value = __fmaf_rn(params.beta, *destination, value);\n    }\n    *destination = value;\n}\n\ntemplate <int BM, int BN>\n__device__ __forceinline__ void tf32wrc_zero_reduction(\n    float* output, const float* bias, const GbfTf32WideParams& params) {\n    int column_tiles = (params.n + BN - 1) / BN;\n    int tile_row = (int)blockIdx.x / column_tiles * BM;\n    int tile_column = (int)blockIdx.x % column_tiles * BN;\n    for (int linear = (int)threadIdx.x; linear < BM * BN; linear += (int)blockDim.x) {\n        int row = tile_row + linear / BN;\n        int column = tile_column + linear % BN;\n        if (row < params.m && column < params.n) {\n            float accumulator = bias == nullptr ? 0.0f : bias[column];\n            tf32wrc_store(output, row, column, accumulator, params);\n        }\n    }\n}\n\ntemplate <int Stages>\n__device__ __forceinline__ void tf32wrc_nn_kernel(\n    float* output, const float* a, const float* b, const float* bias,\n    GbfTf32WideParams params) {\n    extern __shared__ __align__(16) unsigned char tf32wrc_shared[];\n    float* a_stages = reinterpret_cast<float*>(tf32wrc_shared);\n    float* b_stages = a_stages + Stages * 128 * 32;\n    int column_tiles = (params.n + 127) / 128;\n    int tile_row = (int)blockIdx.x / column_tiles * 128;\n    int tile_column = (int)blockIdx.x % column_tiles * 128;\n    int warp = (int)threadIdx.x >> 5;\n    int lane = (int)threadIdx.x & 31;\n    int warp_m = (warp >> 2) * 64;\n    int warp_n = (warp & 3) * 32;\n    int group = lane >> 2;\n    int thread = lane & 3;\n    float acc[4][4][4];\n#pragma unroll\n    for (int m_atom = 0; m_atom < 4; ++m_atom) {\n#pragma unroll\n        for (int n_atom = 0; n_atom < 4; ++n_atom) {\n#pragma unroll\n            for (int element = 0; element < 4; ++element) {\n                int row = tile_row + warp_m + m_atom * 16 + group + (element >= 2 ? 8 : 0);\n                int column = tile_column + warp_n + n_atom * 8 + 2 * thread + (element & 1);\n                acc[m_atom][n_atom][element] =\n                    row < params.m && column < params.n && bias != nullptr ? bias[column] : 0.0f;\n            }\n        }\n    }\n    Tf32wrcFragmentOffsets offsets;\n    tf32wrc_fragment_offsets(warp_m, warp_n, group, thread, lane, offsets);\n    Tf32wrcCopyPlan plan;\n    tf32wrc_copy_plan(a_stages, b_stages, a, b, params, tile_row, tile_column, plan);\n    long long b_slab_rows = 32LL * params.ldb;\n    unsigned tile_count = (static_cast<unsigned>(params.k) + 31U) / 32U;\n#pragma unroll\n    for (unsigned tile = 0; tile < Stages - 1; ++tile) {\n        if (tile < tile_count) {\n            tf32wrc_stage_async(plan, tile * 128 * 32 * 4U, (int)(tile * 32U), params.k);\n            tf32wrc_advance_plan(plan, b_slab_rows);\n        } else {\n            asm volatile(\"cp.async.commit_group;\\n\" ::);\n        }\n    }\n    int read_stage = 0;\n    for (unsigned tile = 0; tile < tile_count; ++tile) {\n        asm volatile(\"cp.async.wait_group %0;\\n\" :: \"n\"(Stages - 2));\n        // The barrier also retires every warp's reads of the stage the copies\n        // below overwrite (the one computed in the previous iteration).\n        __syncthreads();\n        unsigned next = tile + Stages - 1;\n        bool has_next = next < tile_count;\n        int write_stage = read_stage == 0 ? Stages - 1 : read_stage - 1;\n        unsigned write_bytes = (unsigned)write_stage * 128U * 32U * 4U;\n        const float* a_read = a_stages + read_stage * 128 * 32;\n        const float* b_read = b_stages + read_stage * 32 * 128;\n        Tf32wrcFragments fragments[2];\n        tf32wrc_load_fragments(a_read, b_read, 0, offsets, fragments[0]);\n#pragma unroll\n        for (int issue = 0; issue < 4; ++issue) {\n            if (has_next) {\n                tf32wrc_stage_slice(plan, write_bytes, (int)(next * 32U), params.k, issue);\n            }\n            if (issue < 3) {\n                tf32wrc_load_fragments(a_read, b_read, issue + 1, offsets, fragments[(issue + 1) & 1]);\n            }\n            tf32wrc_mma(fragments[issue & 1], acc);\n        }\n        asm volatile(\"cp.async.commit_group;\\n\" ::);\n        if (has_next) tf32wrc_advance_plan(plan, b_slab_rows);\n        if (++read_stage == Stages) read_stage = 0;\n    }\n    // Epilogue: the tile goes through shared memory (row stride 136 floats:\n    // the fragment-shaped float2 writes land in two wavefronts) and out as\n    // 16-byte row segments, one warp per 512-byte row, when the output is\n    // 16-byte addressable and the tile's columns lie inside n; each element\n    // sees the same alpha and beta arithmetic as the scalar store.\n    __syncthreads();\n    float* tile = reinterpret_cast<float*>(tf32wrc_shared);\n    bool vector_rows = tile_column + 128 <= params.n && (params.ldc & 3) == 0\n        && gbf_aligned16(output);\n    if (vector_rows) {\n#pragma unroll\n        for (int m_atom = 0; m_atom < 4; ++m_atom) {\n#pragma unroll\n            for (int n_atom = 0; n_atom < 4; ++n_atom) {\n#pragma unroll\n                for (int half = 0; half < 2; ++half) {\n                    int row = warp_m + m_atom * 16 + group + half * 8;\n                    int column = warp_n + n_atom * 8 + 2 * thread;\n                    *reinterpret_cast<float2*>(tile + row * 136 + column) = make_float2(\n                        acc[m_atom][n_atom][2 * half], acc[m_atom][n_atom][2 * half + 1]);\n                }\n            }\n        }\n        __syncthreads();\n        bool scale = params.alpha != 1.0f;\n        bool blend = params.beta != 0.0f;\n#pragma unroll 4\n        for (int linear = (int)threadIdx.x; linear < 128 * 32; linear += 256) {\n            int row = linear >> 5;\n            int chunk = (linear & 31) * 4;\n            int global_row = tile_row + row;\n            if (global_row >= params.m) continue;\n            float4 value = *reinterpret_cast<const float4*>(tile + row * 136 + chunk);\n            float* destination = output + (long long)global_row * params.ldc + tile_column + chunk;\n            if (scale) {\n                value.x = __fmul_rn(params.alpha, value.x);\n                value.y = __fmul_rn(params.alpha, value.y);\n                value.z = __fmul_rn(params.alpha, value.z);\n                value.w = __fmul_rn(params.alpha, value.w);\n            }\n            if (blend) {\n                float4 old = *reinterpret_cast<const float4*>(destination);\n                value.x = __fmaf_rn(params.beta, old.x, value.x);\n                value.y = __fmaf_rn(params.beta, old.y, value.y);\n                value.z = __fmaf_rn(params.beta, old.z, value.z);\n                value.w = __fmaf_rn(params.beta, old.w, value.w);\n            }\n            *reinterpret_cast<float4*>(destination) = value;\n        }\n        return;\n    }\n#pragma unroll\n    for (int m_atom = 0; m_atom < 4; ++m_atom) {\n#pragma unroll\n        for (int n_atom = 0; n_atom < 4; ++n_atom) {\n#pragma unroll\n            for (int element = 0; element < 4; ++element) {\n                int row = tile_row + warp_m + m_atom * 16 + group + (element >= 2 ? 8 : 0);\n                int column = tile_column + warp_n + n_atom * 8 + 2 * thread + (element & 1);\n                tf32wrc_store(output, row, column, acc[m_atom][n_atom][element], params);\n            }\n        }\n    }\n}\n\n\nextern \"C\" __global__ __launch_bounds__(256, 1)\nvoid gemm_bi_nn_fixed_rna_wide_tf32_v1_m128n128_bk32_s3(\n    float* output, const float* a, const float* b, const float* bias,\n    GbfTf32WideParams params) {\n    if (params.k == 0) {\n        tf32wrc_zero_reduction<128, 128>(output, bias, params);\n        return;\n    }\n    tf32wrc_nn_kernel<3>(output, a, b, bias, params);\n}\n\ntemplate <typename A, typename B> struct GbfRnaSameType { static constexpr bool value = false; };\ntemplate <typename A> struct GbfRnaSameType<A, A> { static constexpr bool value = true; };\nusing GbfRnaWideSignature = void (*)(\n    float*, const float*, const float*, const float*, GbfTf32WideParams);\nstatic_assert(GbfRnaSameType<\n    decltype(&gemm_bi_nn_fixed_rna_wide_tf32_v1_m128n128_bk32_s3),\n    GbfRnaWideSignature>::value, \"Fixed NN RNA-wide ABI\");\n"
+
+---- mamba_ssm::gpu::gemm_bi_triad::modules::tests::module_sources_have_exact_deterministic_boundaries stdout ----
+
+thread 'mamba_ssm::gpu::gemm_bi_triad::modules::tests::module_sources_have_exact_deterministic_boundaries' (584979) panicked at src/mamba_ssm/gpu/gemm_bi_triad/modules.rs:10339:9:
+assertion `left == right` failed: Fixed source boundaries
+  left: ["kernels/_typed_prelude.cuh", "kernels/mamba_ssm.cu", "kernels/mamba_ssm_parallel.cu", "kernels/conv1d.cu", "kernels/activations.cu", "kernels/norms.cu", "kernels/elementwise.cu", "kernels/loss_scaler.cu", "kernels/grad_clip.cu", "kernels/adamw.cu", "kernels/gemm_bi_fixed/common.cuh", "kernels/gemm_bi_fixed/ffma.cu", "kernels/gemm_bi_fixed/tf32.cu", "kernels/gemm_bi_fixed/tf32_sm120.cu", "kernels/gemm_bi_fixed/sm120_tma.cu", "kernels/gemm_bi_fixed/wmma_legacy.cu", "kernels/gemm_bi_fixed/matvec.cu", "kernels/gemm_bi_fixed/mma16.cu", "kernels/gemm_bi_fixed/tcw64.cu", "kernels/gemm_bi_fixed/sm90_wgmma.cu", "kernels/gemm_bi_fixed/sm100_tcgen05.cu", "kernels/gemm_bi_fixed/sm89_half_pipeline.cu", "kernels/gemm_bi_fixed/sm89_f32_n64_copyplan.cu", "kernels/gemm_bi_fixed/tf32_rna_wide.cu", "kernels/gemm_bi_fixed/sm89_half_swizzle_layout.cuh", "kernels/gemm_bi_fixed/sm89_half_swizzle.cu"]
+ right: ["kernels/_typed_prelude.cuh", "kernels/mamba_ssm.cu", "kernels/mamba_ssm_parallel.cu", "kernels/conv1d.cu", "kernels/activations.cu", "kernels/norms.cu", "kernels/elementwise.cu", "kernels/loss_scaler.cu", "kernels/grad_clip.cu", "kernels/adamw.cu", "kernels/gemm_bi_fixed/common.cuh", "kernels/gemm_bi_fixed/ffma.cu", "kernels/gemm_bi_fixed/tf32.cu", "kernels/gemm_bi_fixed/tf32_sm120.cu", "kernels/gemm_bi_fixed/sm120_tma.cu", "kernels/gemm_bi_fixed/wmma_legacy.cu", "kernels/gemm_bi_fixed/matvec.cu", "kernels/gemm_bi_fixed/mma16.cu", "kernels/gemm_bi_fixed/tcw64.cu", "kernels/gemm_bi_fixed/sm90_wgmma.cu", "kernels/gemm_bi_fixed/sm100_tcgen05.cu", "kernels/gemm_bi_fixed/sm89_half_pipeline.cu", "kernels/gemm_bi_fixed/sm89_f32_n64_copyplan.cu", "kernels/gemm_bi_fixed/tf32_rna_wide.cu"]
+
+
+failures:
+    mamba_ssm::gpu::gemm_bi_triad::modules::tests::fixed_sm89_exact_n64_composition_is_target_scoped
+    mamba_ssm::gpu::gemm_bi_triad::modules::tests::fixed_sm89_rna_wide_composer_requires_the_ada_only_fragment
+    mamba_ssm::gpu::gemm_bi_triad::modules::tests::module_sources_have_exact_deterministic_boundaries
+
+test result: FAILED. 632 passed; 3 failed; 46 ignored; 0 measured; 0 filtered out; finished in 3.39s
+
+error: test failed, to rerun pass `--lib`
+EXIT_STATUS=101

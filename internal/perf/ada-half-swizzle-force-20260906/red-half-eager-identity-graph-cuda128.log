@@ -1,0 +1,20 @@
+   Compiling mamba-rs v0.6.9 (/root/mamba-ada-half-swizzle-force-20260906)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.27s
+     Running tests/gemm_bi_fixed_performance.rs (/root/target-ada-half-swizzle-force-cuda128-20260906/debug/deps/gemm_bi_fixed_performance-84a0ffc286ccec02)
+
+running 1 test
+test fixed_explicit_vendor_rna_wide_eager_needs_identity_graph ... FAILED
+
+failures:
+
+failures:
+    fixed_explicit_vendor_rna_wide_eager_needs_identity_graph
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 104 filtered out; finished in 0.00s
+
+
+thread 'fixed_explicit_vendor_rna_wide_eager_needs_identity_graph' (602607) panicked at tests/gemm_bi_fixed_performance.rs:11238:9:
+Ada half Tc128Sm89Pipeline needs an untimed identity graph even for eager-only timing
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+error: test failed, to rerun pass `--test gemm_bi_fixed_performance`
+EXIT_STATUS=101

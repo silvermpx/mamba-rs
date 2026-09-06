@@ -1,0 +1,16 @@
+{
+  "compiler_target": "CudaTarget { bytes: [115, 109, 95, 56, 57, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], len: 5 }",
+  "fixed_source_digest": "d1180079f0067afbc3f54210ce41a80dbc6bb422d53085824082089a0ff97f2a",
+  "fixed_invocation_digest": "58c7853250f2f225830390289de0c1dfce34d81efede704436222e54d53ac991",
+  "fixed_artifact_digest": "c213b3c33d94e94e257d30e472cee583b5f3634d8dd5216e91a08b7c286d21c2",
+  "header_manifest_digest": "4d2b8b1c3d1ec175d3556f37139b52b832d4fccd0112e68ca8474b3276b58b5b",
+  "nvrtc_library_domain": "d031a53eb97235b70f62f652932db1bdf728ea229c8ca809d53c5ffd91642687",
+  "cc": "8.9",
+  "sm_count": 142,
+  "nvrtc": [
+    13,
+    2
+  ],
+  "nvrtc_library_known": true,
+  "tuning_table_revision": 41
+}

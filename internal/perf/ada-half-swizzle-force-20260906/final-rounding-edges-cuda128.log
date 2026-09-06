@@ -1,0 +1,15 @@
+    Finished `release` profile [optimized] target(s) in 0.14s
+     Running tests/gemm_bi_fixed_sm89_pipeline.rs (/root/target-ada-half-swizzle-force-cuda128-20260906/release/deps/gemm_bi_fixed_sm89_pipeline-5341067ad5e00e8f)
+
+running 1 test
+test fixed_sm89_half_swizzle_rounding_edges_match_incumbent_across_store_paths ... mamba-rs cache trace: Fixed arch=sm_89 key=53c404fc45b06ef3faf5ef8842f166da9fa77df7f2965f64f39c4aae608261af path=Some("/root/mamba-kcache-ada-half-swizzle-force-cuda128-20260906/mamba-kernels-v1-53c404fc45b06ef3faf5ef8842f166da9fa77df7f2965f64f39c4aae608261af.bin") source_len=688275
+mamba-rs cache trace: Fixed hit artifact=323538314fb45b937e7eaca4e3c646c8e1d055a56e980e8bf72432bb6f879964
+mamba-rs cache trace: TriadScalar arch=sm_89 key=da5dabeff55570d1fb6ca43a1d4a8aa7a2a9d25efb6436ed7f03c4a28a73d986 path=Some("/root/mamba-kcache-ada-half-swizzle-force-cuda128-20260906/mamba-kernels-v1-da5dabeff55570d1fb6ca43a1d4a8aa7a2a9d25efb6436ed7f03c4a28a73d986.bin") source_len=360564
+mamba-rs cache trace: TriadScalar hit artifact=5ca86bc2e1bd5548977e0c18d0287915e27d57226f1cc3dd0f5fdaf15a549db8
+mamba-rs cache trace: TriadSm80 arch=sm_89 key=73fbec7557a95462a555e39f1b3c94e8d2bcc7047a14f8f3e3fa51a768ec5b9a path=Some("/root/mamba-kcache-ada-half-swizzle-force-cuda128-20260906/mamba-kernels-v1-73fbec7557a95462a555e39f1b3c94e8d2bcc7047a14f8f3e3fa51a768ec5b9a.bin") source_len=268383
+mamba-rs cache trace: TriadSm80 hit artifact=b6214e1c2c4f792a6a765be1f94d51294afd0aeb474f90e706485058c0d10947
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 3.29s
+
+EXIT_STATUS=0

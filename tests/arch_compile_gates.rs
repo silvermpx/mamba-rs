@@ -16,13 +16,76 @@ const SCALAR_TN_M16N16_FRAGMENT: &str = "kernels/gemm_bi_triad/scalar_tn_m16n16.
 const SCALAR_NN_M32N64_SPLITK32_SYMBOL: &str = "gemm_bi_nn_splitk32_m32n64_exact_v1";
 const SCALAR_NN_M32N64_SPLITK32_FRAGMENT: &str = "kernels/gemm_bi_triad/scalar_nn_splitk_m32n64.cu";
 
+#[test]
+fn fixed_sm89_half_swizzle_production_source_and_layout_contract() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let host_proof =
+        std::fs::read_to_string(root.join("tests/cuda/gemm_bi_fixed_sm89_swizzle_layout.cpp"))
+            .expect("production-bound Fixed SM89 half-swizzle host layout proof");
+    assert!(
+        host_proof.contains("../../kernels/gemm_bi_fixed/sm89_half_swizzle_layout.cuh"),
+        "host layout proof must include the production header directly"
+    );
+    let layout =
+        std::fs::read_to_string(root.join("kernels/gemm_bi_fixed/sm89_half_swizzle_layout.cuh"))
+            .expect("production Fixed SM89 half-swizzle layout header");
+    let source = std::fs::read_to_string(root.join("kernels/gemm_bi_fixed/sm89_half_swizzle.cu"))
+        .expect("production Fixed SM89 half-swizzle source");
+
+    for required in [
+        "row * 64 + (k ^ ((row & 7) * 8))",
+        "k * 128 + (column ^ ((k & 7) * 8))",
+        "return base ^ unsigned(issue * 32)",
+        "return base + unsigned(issue * 16 * 128 * 2)",
+        "constexpr int kSharedBytes = 69632",
+    ] {
+        assert!(layout.contains(required), "layout omitted {required}");
+    }
+    for symbol in [
+        "gemm_bi_nn_fixed_sm89_tc128_swizzle_v1_bf16",
+        "gemm_bi_nn_fixed_sm89_tc128_swizzle_v1_f16",
+    ] {
+        assert_eq!(
+            source
+                .split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_'))
+                .filter(|token| *token == symbol)
+                .count(),
+            1,
+            "production swizzle export inventory"
+        );
+    }
+    for required in [
+        "mma.sync.aligned.m16n8k16.row.col.f32.",
+        "cp.async.cg.shared.global",
+        "ldmatrix.sync.aligned.m8n8.x4.shared.b16",
+        "ldmatrix.sync.aligned.m8n8.x2.trans.shared.b16",
+    ] {
+        assert!(
+            source.contains(required),
+            "swizzle source omitted {required}"
+        );
+    }
+    for forbidden in ["gemm_bi_tn_", "gemm_bi_nt_", "atomic", "split_k"] {
+        assert!(
+            !source.to_ascii_lowercase().contains(forbidden),
+            "swizzle source contains forbidden token {forbidden}"
+        );
+    }
+}
+
 fn compose(fragments: &[&str]) -> String {
     fragments
         .iter()
         .map(|source| {
             source
                 .lines()
-                .filter(|line| !line.trim().starts_with("#include \"_typed_prelude.cuh\""))
+                .filter(|line| {
+                    !matches!(
+                        line.trim(),
+                        "#include \"_typed_prelude.cuh\""
+                            | "#include \"sm89_half_swizzle_layout.cuh\""
+                    )
+                })
                 .collect::<Vec<_>>()
                 .join("\n")
         })
@@ -160,6 +223,14 @@ fn fixed_blob_for(arch: &str) -> String {
         ));
         source.push('\n');
         source.push_str(include_str!("../kernels/gemm_bi_fixed/tf32_rna_wide.cu"));
+        source.push('\n');
+        source.push_str(include_str!(
+            "../kernels/gemm_bi_fixed/sm89_half_swizzle_layout.cuh"
+        ));
+        source.push('\n');
+        source.push_str(&compose(&[include_str!(
+            "../kernels/gemm_bi_fixed/sm89_half_swizzle.cu"
+        )]));
     }
     if arch == "compute_120" {
         source.push('\n');
@@ -3282,6 +3353,86 @@ fn assert_fixed_sm89_half_pipeline_ptx(arch: &str, ptx: &str) {
     }
 }
 
+fn assert_fixed_sm89_half_swizzle_ptx(arch: &str, ptx: &str) {
+    const SYMBOLS: [&str; 2] = [
+        "gemm_bi_nn_fixed_sm89_tc128_swizzle_v1_bf16",
+        "gemm_bi_nn_fixed_sm89_tc128_swizzle_v1_f16",
+    ];
+    let parsed = parse_compile_gate_ptx(ptx).expect("parse Fixed half swizzle PTX");
+    let actual: Vec<_> = parsed
+        .entries
+        .iter()
+        .filter(|entry| {
+            entry
+                .symbol
+                .starts_with("gemm_bi_nn_fixed_sm89_tc128_swizzle")
+        })
+        .map(|entry| entry.symbol.as_str())
+        .collect();
+    let unique: std::collections::BTreeSet<_> = actual.iter().copied().collect();
+    let expected = if arch == "sm_89" {
+        SYMBOLS.into_iter().collect()
+    } else {
+        std::collections::BTreeSet::new()
+    };
+    assert_eq!(
+        actual.len(),
+        unique.len(),
+        "{arch} duplicated Fixed half swizzle export"
+    );
+    assert_eq!(
+        unique, expected,
+        "{arch} Fixed half swizzle export inventory"
+    );
+    for symbol in expected {
+        let entry = parsed.entry(symbol);
+        let mma = if symbol.ends_with("_bf16") {
+            "mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32"
+        } else {
+            "mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32"
+        };
+        assert_compile_gate_entry_tokens(
+            "Fixed SM89 half swizzle",
+            entry,
+            &[
+                mma,
+                "cp.async.cg.shared.global",
+                "ldmatrix.sync.aligned.m8n8.x4.shared.b16",
+                "ldmatrix.sync.aligned.m8n8.x2.trans.shared.b16",
+            ],
+        );
+        let parameters = ptx_parameters(&entry.text, symbol);
+        let declarations: Vec<_> = parameters
+            .lines()
+            .map(str::trim)
+            .filter(|line| line.starts_with(".param "))
+            .collect();
+        assert_eq!(declarations.len(), 5, "{arch}/{symbol} five-argument ABI");
+        assert!(
+            declarations[..4]
+                .iter()
+                .all(|line| line.starts_with(".param .u64 ")),
+            "{arch}/{symbol} pointer ABI"
+        );
+        assert!(
+            declarations[4].starts_with(".param .align 4 .b8 ") && declarations[4].contains("[32]"),
+            "{arch}/{symbol} parameter-bundle ABI"
+        );
+        assert!(
+            !compile_gate_ptx_tokens(&entry.body)
+                .into_iter()
+                .any(|token| {
+                    token.text.starts_with("atom.")
+                        || token.text.starts_with("atom::")
+                        || token.text.starts_with("red.")
+                        || token.text.starts_with("red::")
+                        || token.text.starts_with("redux.")
+                }),
+            "{arch}/{symbol} contains a numeric atomic or reduction"
+        );
+    }
+}
+
 fn assert_fixed_sm89_rna_wide_ptx(arch: &str, ptx: &str) {
     let parsed = parse_compile_gate_ptx(ptx).expect("parse Fixed RNA-wide PTX");
     let actual: Vec<_> = parsed
@@ -3348,6 +3499,7 @@ fn assert_fixed_sm89_rna_wide_ptx(arch: &str, ptx: &str) {
 
 fn assert_fixed_tf32_ptx(arch: &str, ptx: &str) {
     assert_fixed_sm89_half_pipeline_ptx(arch, ptx);
+    assert_fixed_sm89_half_swizzle_ptx(arch, ptx);
     assert_fixed_sm89_rna_wide_ptx(arch, ptx);
     assert_fixed_exact_n64_copyplan_ptx(
         arch,

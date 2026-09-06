@@ -10689,6 +10689,7 @@ define_fixed_force_plain_tile_registry!(
     Tf32Sm120M64S2PairStore,
     Tc128,
     Tc128Sm89Pipeline,
+    Tc128Sm89Swizzle,
     TcWn64,
     TcW64,
     Tc64,
@@ -10909,6 +10910,13 @@ fn fixed_force_spec(
             "gemm_bi_nn_fixed_sm89_tc128_pipeline_v1_f16"
         }
         FixedTile::Tc128Sm89Pipeline => return Err(invalid()),
+        FixedTile::Tc128Sm89Swizzle if cc == (8, 9) && row == "bf16" => {
+            "gemm_bi_nn_fixed_sm89_tc128_swizzle_v1_bf16"
+        }
+        FixedTile::Tc128Sm89Swizzle if cc == (8, 9) && row == "f16" => {
+            "gemm_bi_nn_fixed_sm89_tc128_swizzle_v1_f16"
+        }
+        FixedTile::Tc128Sm89Swizzle => return Err(invalid()),
         FixedTile::TcWn64 if row == "bf16" => "gemm_bi_nn_tcwn64_bf16",
         FixedTile::TcWn64 if row == "f16" => "gemm_bi_nn_tcwn64_f16",
         FixedTile::TcWn64 => return Err(invalid()),
@@ -11104,6 +11112,7 @@ fn fixed_explicit_vendor_tiles(row: &str, cc: (u32, u32)) -> Vec<FixedTile> {
         tiles.insert(3, FixedTile::Tf32RnaM128N128S3);
     } else if matches!(row, "bf16" | "f16") {
         tiles.push(FixedTile::Tc128Sm89Pipeline);
+        tiles.push(FixedTile::Tc128Sm89Swizzle);
     } else if matches!(row, "f32_exact" | "f32_exact_fast") {
         tiles.push(FixedTile::F32Sm89N64CopyPlan);
     }
@@ -11155,20 +11164,58 @@ fn fixed_explicit_vendor_paths(requested: Option<&str>) -> Result<Vec<&'static s
 }
 
 fn fixed_explicit_vendor_pipeline_graph_contract(
+    tile: FixedTile,
     dtype: WeightDtype,
     node_count: usize,
     symbol: &str,
+    grid: (u32, u32, u32),
     block: (u32, u32, u32),
     shared_bytes: u32,
+    driver_abi: Vec<(usize, usize)>,
+    terminal_sixth_rejected: bool,
+    pointers: [u64; 4],
+    expected_pointers: [u64; 4],
+    bundle: [u32; 8],
+    shape: FixedShape,
 ) -> Result<(), String> {
-    let expected = match dtype {
-        WeightDtype::Bf16 => "gemm_bi_nn_fixed_sm89_tc128_pipeline_v1_bf16",
-        WeightDtype::F16 => "gemm_bi_nn_fixed_sm89_tc128_pipeline_v1_f16",
+    let suffix = match dtype {
+        WeightDtype::Bf16 => "bf16",
+        WeightDtype::F16 => "f16",
         WeightDtype::F32 => return Err("Ada half pipeline cannot have F32 storage".into()),
     };
-    if node_count != 1 || symbol != expected || block != (256, 1, 1) || shared_bytes != 71_680 {
+    let (family, expected_shared) = match tile {
+        FixedTile::Tc128Sm89Pipeline => ("pipeline", 71_680),
+        FixedTile::Tc128Sm89Swizzle => ("swizzle", 69_632),
+        _ => return Err(format!("{tile:?} is not an Ada half physical descriptor")),
+    };
+    let expected = format!("gemm_bi_nn_fixed_sm89_tc128_{family}_v1_{suffix}");
+    if node_count != 1
+        || symbol != expected
+        || grid
+            != (
+                (shape.m as u32).div_ceil(128) * (shape.n as u32).div_ceil(128),
+                1,
+                1,
+            )
+        || block != (256, 1, 1)
+        || shared_bytes != expected_shared
+        || driver_abi != [(0, 8), (8, 8), (16, 8), (24, 8), (32, 32)]
+        || !terminal_sixth_rejected
+        || pointers != expected_pointers
+        || bundle
+            != [
+                1.0f32.to_bits(),
+                0.0f32.to_bits(),
+                shape.m as u32,
+                shape.n as u32,
+                shape.k as u32,
+                shape.k as u32,
+                shape.n as u32,
+                shape.n as u32,
+            ]
+    {
         return Err(format!(
-            "wrong physical Ada half pipeline: nodes={node_count} symbol={symbol:?} block={block:?} shared={shared_bytes}"
+            "wrong physical Ada half pipeline: nodes={node_count} symbol={symbol:?} grid={grid:?} block={block:?} shared={shared_bytes} abi={driver_abi:?} sixth_rejected={terminal_sixth_rejected} pointers={pointers:?} expected_pointers={expected_pointers:?} bundle={bundle:?}"
         ));
     }
     Ok(())
@@ -11193,7 +11240,13 @@ fn fixed_explicit_vendor_pair_store_graph_contract(
 }
 
 fn fixed_explicit_vendor_needs_identity_graph(paths: &[&str], tile: FixedTile) -> bool {
-    paths.contains(&"graph") || tile == FixedTile::Tf32RnaM128N128S3
+    paths.contains(&"graph")
+        || matches!(
+            tile,
+            FixedTile::Tf32RnaM128N128S3
+                | FixedTile::Tc128Sm89Pipeline
+                | FixedTile::Tc128Sm89Swizzle
+        )
 }
 
 #[test]
@@ -11211,6 +11264,12 @@ fn fixed_explicit_vendor_rna_wide_eager_needs_identity_graph() {
         &["eager"],
         FixedTile::Tf32M64S2,
     ));
+    for tile in [FixedTile::Tc128Sm89Pipeline, FixedTile::Tc128Sm89Swizzle] {
+        assert!(
+            fixed_explicit_vendor_needs_identity_graph(&["eager"], tile),
+            "Ada half {tile:?} needs an untimed identity graph even for eager-only timing"
+        );
+    }
 }
 
 fn fixed_explicit_vendor_rna_wide_graph_contract(
@@ -11382,7 +11441,7 @@ fn fixed_explicit_vendor_poison_output(ctx: &GpuCtx, buffer: &DtypedBuf) {
 fn fixed_explicit_vendor_graph_inventory(
     graph: &CudaGraph,
     label: &str,
-    pipeline_dtype: Option<WeightDtype>,
+    half_descriptor: Option<(FixedTile, WeightDtype, FixedFwdOperands, FixedShape)>,
     bias_symbol: Option<&str>,
 ) -> String {
     use cudarc::driver::sys;
@@ -11410,7 +11469,7 @@ fn fixed_explicit_vendor_graph_inventory(
         );
         if kind != sys::CUgraphNodeType::CU_GRAPH_NODE_TYPE_KERNEL {
             assert!(
-                pipeline_dtype.is_none(),
+                half_descriptor.is_none(),
                 "{label} pipeline captured non-kernel work"
             );
             non_kernel_nodes += 1;
@@ -11514,13 +11573,55 @@ fn fixed_explicit_vendor_graph_inventory(
                 )
             );
         }
-        if let Some(dtype) = pipeline_dtype {
+        if let Some((tile, dtype, operands, shape)) = half_descriptor {
+            let mut driver_abi = Vec::with_capacity(5);
+            for index in 0..5 {
+                let mut offset = 0;
+                let mut size = 0;
+                assert_eq!(
+                    unsafe { sys::cuFuncGetParamInfo(params.func, index, &mut offset, &mut size) },
+                    sys::CUresult::CUDA_SUCCESS,
+                    "{label} Ada half Driver parameter {index}",
+                );
+                driver_abi.push((offset, size));
+            }
+            let mut offset = 0;
+            let mut size = 0;
+            let terminal_sixth_rejected =
+                unsafe { sys::cuFuncGetParamInfo(params.func, 5, &mut offset, &mut size) }
+                    == sys::CUresult::CUDA_ERROR_INVALID_VALUE;
+            assert!(
+                !params.kernelParams.is_null(),
+                "{label} Ada half kernelParams"
+            );
+            let mut pointers = [0; 4];
+            for (index, pointer) in pointers.iter_mut().enumerate() {
+                let argument = unsafe { *params.kernelParams.add(index) };
+                assert!(!argument.is_null(), "{label} Ada half argument {index}");
+                *pointer = unsafe { argument.cast::<u64>().read_unaligned() };
+            }
+            let bundle_pointer = unsafe { *params.kernelParams.add(4) };
+            assert!(!bundle_pointer.is_null(), "{label} Ada half bundle");
+            let bundle = unsafe { bundle_pointer.cast::<[u32; 8]>().read_unaligned() };
             fixed_explicit_vendor_pipeline_graph_contract(
+                tile,
                 dtype,
                 count,
                 symbol,
+                (params.gridDimX, params.gridDimY, params.gridDimZ),
                 block,
                 params.sharedMemBytes,
+                driver_abi,
+                terminal_sixth_rejected,
+                pointers,
+                [
+                    operands.c.ptr,
+                    operands.x.ptr,
+                    operands.w.ptr,
+                    operands.bias_ptr.unwrap_or(0),
+                ],
+                bundle,
+                shape,
             )
             .unwrap_or_else(|error| panic!("{label}: {error}"));
         }
@@ -11627,10 +11728,12 @@ fn fixed_explicit_vendor_rung_inventory_is_arch_specific() {
             assert!(sm120.contains(&FixedTile::Sm120Half(tile)));
         }
         assert!(!sm120.contains(&FixedTile::Tc128Sm89Pipeline));
+        assert!(!sm120.contains(&FixedTile::Tc128Sm89Swizzle));
         let ada = fixed_explicit_vendor_tiles(row, (8, 9));
-        assert_eq!(ada.len(), 7);
+        assert_eq!(ada.len(), 8);
         assert!(ada.contains(&FixedTile::Legacy));
         assert!(ada.contains(&FixedTile::Tc128Sm89Pipeline));
+        assert!(ada.contains(&FixedTile::Tc128Sm89Swizzle));
         assert!(
             ada.iter()
                 .all(|tile| !matches!(tile, FixedTile::Sm120Half(_)))
@@ -12052,30 +12155,85 @@ fn fixed_explicit_vendor_paths_default_to_full_eager_and_graph() {
 
 #[test]
 fn fixed_explicit_vendor_pipeline_graph_contract_rejects_wrong_physical_launch() {
-    for (dtype, symbol) in [
+    let shape = FixedShape {
+        m: 4621,
+        k: 384,
+        n: 1928,
+    };
+    let grid = (592, 1, 1);
+    let abi = [(0, 8), (8, 8), (16, 8), (24, 8), (32, 32)];
+    let pointers = [0x1000, 0x2000, 0x3000, 0x4000];
+    let bundle = [1.0f32.to_bits(), 0, 4621, 1928, 384, 384, 1928, 1928];
+    let valid = |tile, dtype, nodes, symbol, grid, block, shared, abi, sixth, actual, params| {
+        fixed_explicit_vendor_pipeline_graph_contract(
+            tile, dtype, nodes, symbol, grid, block, shared, abi, sixth, actual, pointers, params,
+            shape,
+        )
+    };
+    for (tile, dtype, symbol, required_shared) in [
         (
+            FixedTile::Tc128Sm89Pipeline,
             WeightDtype::Bf16,
             "gemm_bi_nn_fixed_sm89_tc128_pipeline_v1_bf16",
+            71_680,
         ),
         (
+            FixedTile::Tc128Sm89Pipeline,
             WeightDtype::F16,
             "gemm_bi_nn_fixed_sm89_tc128_pipeline_v1_f16",
+            71_680,
+        ),
+        (
+            FixedTile::Tc128Sm89Swizzle,
+            WeightDtype::Bf16,
+            "gemm_bi_nn_fixed_sm89_tc128_swizzle_v1_bf16",
+            69_632,
+        ),
+        (
+            FixedTile::Tc128Sm89Swizzle,
+            WeightDtype::F16,
+            "gemm_bi_nn_fixed_sm89_tc128_swizzle_v1_f16",
+            69_632,
         ),
     ] {
-        fixed_explicit_vendor_pipeline_graph_contract(dtype, 1, symbol, (256, 1, 1), 71_680)
-            .expect("one actual dtype-specific pipeline launch");
+        valid(
+            tile,
+            dtype,
+            1,
+            symbol,
+            grid,
+            (256, 1, 1),
+            required_shared,
+            abi.to_vec(),
+            true,
+            pointers,
+            bundle,
+        )
+        .expect("one actual dtype-specific pipeline launch");
         for (count, block, shared) in [
-            (0, (256, 1, 1), 71_680),
-            (2, (256, 1, 1), 71_680),
-            (1, (128, 1, 1), 71_680),
-            (1, (256, 2, 1), 71_680),
-            (1, (256, 1, 2), 71_680),
+            (0, (256, 1, 1), required_shared),
+            (2, (256, 1, 1), required_shared),
+            (1, (128, 1, 1), required_shared),
+            (1, (256, 2, 1), required_shared),
+            (1, (256, 1, 2), required_shared),
             (1, (256, 1, 1), 0),
             (1, (256, 1, 1), 98_304),
         ] {
             assert!(
-                fixed_explicit_vendor_pipeline_graph_contract(dtype, count, symbol, block, shared)
-                    .is_err(),
+                valid(
+                    tile,
+                    dtype,
+                    count,
+                    symbol,
+                    grid,
+                    block,
+                    shared,
+                    abi.to_vec(),
+                    true,
+                    pointers,
+                    bundle,
+                )
+                .is_err(),
                 "accepted pipeline launch count={count} block={block:?} shared={shared}"
             );
         }
@@ -12085,12 +12243,18 @@ fn fixed_explicit_vendor_pipeline_graph_contract_rejects_wrong_physical_launch()
             "gemm_bi_nn_fixed_sm89_tc128_pipeline_v2_bf16",
         ] {
             assert!(
-                fixed_explicit_vendor_pipeline_graph_contract(
+                valid(
+                    tile,
                     dtype,
                     1,
                     wrong_symbol,
+                    grid,
                     (256, 1, 1),
-                    71_680
+                    71_680,
+                    abi.to_vec(),
+                    true,
+                    pointers,
+                    bundle,
                 )
                 .is_err(),
                 "accepted wrong pipeline symbol {wrong_symbol:?}"
@@ -12102,27 +12266,90 @@ fn fixed_explicit_vendor_pipeline_graph_contract_rejects_wrong_physical_launch()
             WeightDtype::Bf16
         };
         assert!(
-            fixed_explicit_vendor_pipeline_graph_contract(
+            valid(
+                tile,
                 other_dtype,
                 1,
                 symbol,
+                grid,
                 (256, 1, 1),
-                71_680
+                71_680,
+                abi.to_vec(),
+                true,
+                pointers,
+                bundle,
             )
             .is_err(),
             "accepted the other homogeneous-half symbol"
         );
         assert!(
-            fixed_explicit_vendor_pipeline_graph_contract(
+            valid(
+                tile,
                 WeightDtype::F32,
                 1,
                 symbol,
+                grid,
                 (256, 1, 1),
-                71_680
+                71_680,
+                abi.to_vec(),
+                true,
+                pointers,
+                bundle,
             )
             .is_err(),
             "accepted F32 for a homogeneous-half pipeline"
         );
+        for (bad_grid, bad_abi, sixth, bad_pointers, bad_bundle) in [
+            ((591, 1, 1), abi.to_vec(), true, pointers, bundle),
+            ((592, 2, 1), abi.to_vec(), true, pointers, bundle),
+            (
+                grid,
+                vec![(0, 8), (8, 8), (16, 8), (24, 8)],
+                true,
+                pointers,
+                bundle,
+            ),
+            (
+                grid,
+                vec![(0, 8), (8, 8), (16, 4), (24, 8), (32, 32)],
+                true,
+                pointers,
+                bundle,
+            ),
+            (grid, abi.to_vec(), false, pointers, bundle),
+            (
+                grid,
+                abi.to_vec(),
+                true,
+                [0x1001, 0x2000, 0x3000, 0x4000],
+                bundle,
+            ),
+            (
+                grid,
+                abi.to_vec(),
+                true,
+                pointers,
+                [1.0f32.to_bits(), 0, 4621, 384, 1928, 384, 1928, 1928],
+            ),
+        ] {
+            assert!(
+                valid(
+                    tile,
+                    dtype,
+                    1,
+                    symbol,
+                    bad_grid,
+                    (256, 1, 1),
+                    required_shared,
+                    bad_abi,
+                    sixth,
+                    bad_pointers,
+                    bad_bundle,
+                )
+                .is_err(),
+                "accepted mutated Ada half grid/ABI/pointer/bundle"
+            );
+        }
     }
 }
 
@@ -12639,8 +12866,22 @@ fn fixed_ada_forced_rungs_paired_precision_cublas() {
                             .unwrap_or_else(|error| panic!("{label}: {error}"));
                     };
                     // Establish physical identity before timing or numeric-family
-                    // rejection. RNA admission is mandatory even when graph timing
-                    // is disabled: an eager-only filter must not bypass its ABI gate.
+                    // rejection. RNA and both Ada half routes are mandatory even when
+                    // graph timing is disabled: eager-only must not bypass ABI/argument gates.
+                    let auto_identity_graph =
+                        if fixed_explicit_vendor_needs_identity_graph(&paths, selected) {
+                            Some(
+                                unsafe {
+                                    capture_into_graph(&ctx.stream, || {
+                                        auto_launch();
+                                        Ok(())
+                                    })
+                                }
+                                .expect("capture AUTO physical-identity graph"),
+                            )
+                        } else {
+                            None
+                        };
                     let forced_identity_graph =
                         if fixed_explicit_vendor_needs_identity_graph(&paths, tile) {
                             let graph = unsafe {
@@ -12659,17 +12900,49 @@ fn fixed_ada_forced_rungs_paired_precision_cublas() {
                         } else {
                             None
                         };
-                    let rna_identity_inventory =
-                        (tile == FixedTile::Tf32RnaM128N128S3).then(|| {
-                            fixed_explicit_vendor_graph_inventory(
-                                forced_identity_graph
-                                    .as_ref()
-                                    .expect("RNA always captures an untimed identity graph"),
-                                "Tf32RnaM128N128S3",
-                                None,
-                                None,
+                    let auto_identity_inventory = matches!(
+                        selected,
+                        FixedTile::Tc128Sm89Pipeline | FixedTile::Tc128Sm89Swizzle
+                    )
+                    .then(|| {
+                        fixed_explicit_vendor_graph_inventory(
+                            auto_identity_graph
+                                .as_ref()
+                                .expect("Ada half AUTO always captures an identity graph"),
+                            "AUTO",
+                            Some((selected, input_dtype, auto_ops, shape)),
+                            None,
+                        )
+                    });
+                    let forced_identity_inventory = matches!(
+                        tile,
+                        FixedTile::Tf32RnaM128N128S3
+                            | FixedTile::Tc128Sm89Pipeline
+                            | FixedTile::Tc128Sm89Swizzle
+                    )
+                    .then(|| {
+                        fixed_explicit_vendor_graph_inventory(
+                            forced_identity_graph
+                                .as_ref()
+                                .expect("RNA/Ada half always captures an identity graph"),
+                            if tile == FixedTile::Tf32RnaM128N128S3 {
+                                "Tf32RnaM128N128S3"
+                            } else {
+                                "forced"
+                            },
+                            matches!(
+                                tile,
+                                FixedTile::Tc128Sm89Pipeline | FixedTile::Tc128Sm89Swizzle
                             )
-                        });
+                            .then_some((
+                                tile,
+                                input_dtype,
+                                forced_ops,
+                                shape,
+                            )),
+                            None,
+                        )
+                    });
                     // A retune between M-dependent Fixed rungs is only eligible
                     // when it retains AUTO's per-element numeric family.
                     if first_raw != auto_raw {
@@ -12698,13 +12971,8 @@ fn fixed_ada_forced_rungs_paired_precision_cublas() {
                     // Allocate and warm the complete workflows before capture.
                     // These graphs and all captured buffers outlive every replay.
                     let graphs = if paths.contains(&"graph") {
-                        let auto_graph = unsafe {
-                            capture_into_graph(&ctx.stream, || {
-                                auto_launch();
-                                Ok(())
-                            })
-                        }
-                        .expect("capture complete AUTO workflow");
+                        let auto_graph = auto_identity_graph
+                            .expect("graph path must retain AUTO identity graph");
                         let forced_graph = forced_identity_graph
                             .expect("graph path must retain forced identity graph");
                         let vendor_graph = unsafe {
@@ -12724,7 +12992,16 @@ fn fixed_ada_forced_rungs_paired_precision_cublas() {
                         let auto_inventory = fixed_explicit_vendor_graph_inventory(
                             auto_graph,
                             "AUTO",
-                            (selected == FixedTile::Tc128Sm89Pipeline).then_some(input_dtype),
+                            matches!(
+                                selected,
+                                FixedTile::Tc128Sm89Pipeline | FixedTile::Tc128Sm89Swizzle
+                            )
+                            .then_some((
+                                selected,
+                                input_dtype,
+                                auto_ops,
+                                shape,
+                            )),
                             None,
                         );
                         let forced_inventory = fixed_explicit_vendor_graph_inventory(
@@ -12736,7 +13013,16 @@ fn fixed_ada_forced_rungs_paired_precision_cublas() {
                             } else {
                                 "forced"
                             },
-                            (tile == FixedTile::Tc128Sm89Pipeline).then_some(input_dtype),
+                            matches!(
+                                tile,
+                                FixedTile::Tc128Sm89Pipeline | FixedTile::Tc128Sm89Swizzle
+                            )
+                            .then_some((
+                                tile,
+                                input_dtype,
+                                forced_ops,
+                                shape,
+                            )),
                             None,
                         );
                         let bias_symbol = has_bias.then_some(match output_dtype {
@@ -12753,8 +13039,14 @@ fn fixed_ada_forced_rungs_paired_precision_cublas() {
                         format!(
                             "{{\"auto\":{auto_inventory},\"forced\":{forced_inventory},\"vendor\":{vendor_inventory}}}"
                         )
-                    } else if let Some(forced_inventory) = &rna_identity_inventory {
-                        format!("{{\"auto\":null,\"forced\":{forced_inventory},\"vendor\":null}}")
+                    } else if auto_identity_inventory.is_some()
+                        || forced_identity_inventory.is_some()
+                    {
+                        format!(
+                            "{{\"auto\":{},\"forced\":{},\"vendor\":null}}",
+                            auto_identity_inventory.as_deref().unwrap_or("null"),
+                            forced_identity_inventory.as_deref().unwrap_or("null"),
+                        )
                     } else {
                         "null".to_owned()
                     };

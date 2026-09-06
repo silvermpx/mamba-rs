@@ -13,6 +13,7 @@ use mamba_rs::mamba_ssm::gpu::gemm_bi_fixed::{
 use mamba_rs::mamba_ssm::gpu::graph_capture::capture_into_graph;
 
 const CANDIDATE: FixedTile = FixedTile::Tc128Sm89Pipeline;
+const SWIZZLE_CANDIDATE: FixedTile = FixedTile::Tc128Sm89Swizzle;
 const RUNGS: [FixedTile; 5] = [
     FixedTile::Tc16,
     FixedTile::Tc64,
@@ -22,13 +23,78 @@ const RUNGS: [FixedTile; 5] = [
 ];
 
 #[test]
+fn fixed_sm89_half_swizzle_has_a_distinct_forced_route() {
+    assert_ne!(SWIZZLE_CANDIDATE, CANDIDATE);
+    assert_eq!(format!("{SWIZZLE_CANDIDATE:?}"), "Tc128Sm89Swizzle");
+}
+
+#[test]
+#[ignore = "requires exact Ada CC8.9 and live independent half holders"]
+fn fixed_sm89_half_swizzle_and_pipeline_holders_are_independently_live() {
+    let device = GpuDevice::new(0).expect("CUDA device");
+    assert_eq!(device.compute_capability, (8, 9));
+    let ctx = GpuCtx::new(&device).expect("NVRTC context");
+    assert!(ctx.kernels.fixed_sm89_half_pipeline.is_some());
+    assert!(ctx.kernels.fixed_sm89_half_pipeline_rejection.is_none());
+    let swizzle = ctx
+        .kernels
+        .fixed_sm89_half_swizzle
+        .as_ref()
+        .unwrap_or_else(|| {
+            panic!(
+                "swizzle holder rejected: {:?}",
+                ctx.kernels.fixed_sm89_half_swizzle_rejection
+            )
+        });
+    assert!(ctx.kernels.fixed_sm89_half_swizzle_rejection.is_none());
+    for (dtype, function) in [
+        (WeightDtype::Bf16, &swizzle.bf16),
+        (WeightDtype::F16, &swizzle.f16),
+    ] {
+        let local = function.local_size_bytes().expect("local bytes");
+        let registers = function.num_regs().expect("registers");
+        let static_shared = function.shared_size_bytes().expect("static shared");
+        let max_threads = function.max_threads_per_block().expect("max threads");
+        let occupancy = function
+            .occupancy_max_active_blocks_per_multiprocessor(256, 69_632, None)
+            .expect("occupancy");
+        assert_eq!(local, 0);
+        assert_eq!(static_shared, 0);
+        assert!((1..=224).contains(&registers));
+        assert!(max_threads >= 256);
+        assert!(occupancy >= 1);
+        println!(
+            "SWIZZLE_RESOURCE dtype={} local={} registers={} static_shared={} max_threads={} active_blocks={} dynamic_shared=69632",
+            dtype.as_str(),
+            local,
+            registers,
+            static_shared,
+            max_threads,
+            occupancy
+        );
+    }
+}
+
+#[test]
 #[ignore = "requires exact Ada 142SM CUDA13.2 and qualified hot-cell AUTO promotion"]
 fn fixed_sm89_half_pipeline_auto_hot_cell_prefix_view_graph_bits() {
+    fixed_sm89_half_hot_cell_prefix_view_graph_bits(None);
+}
+
+#[test]
+#[ignore = "requires exact Ada CC8.9 and the admitted forced half swizzle"]
+fn fixed_sm89_half_swizzle_forced_hot_a_e_prefix_view_graph_bits() {
+    fixed_sm89_half_hot_cell_prefix_view_graph_bits(Some(SWIZZLE_CANDIDATE));
+}
+
+fn fixed_sm89_half_hot_cell_prefix_view_graph_bits(forced: Option<FixedTile>) {
     let device = GpuDevice::new(0).expect("CUDA device");
     assert_eq!(device.compute_capability, (8, 9));
     assert_eq!(device.multiprocessor_count(), 142);
     let ctx = GpuCtx::new(&device).expect("NVRTC context");
-    assert_eq!(ctx.kernels.compiler_identity().nvrtc_version, (13, 2));
+    if forced.is_none() {
+        assert_eq!(ctx.kernels.compiler_identity().nvrtc_version, (13, 2));
+    }
     for dtype in [WeightDtype::Bf16, WeightDtype::F16] {
         for (hot_m, k, n) in [
             (4621, 384, 1928),
@@ -90,22 +156,36 @@ fn fixed_sm89_half_pipeline_auto_hot_cell_prefix_view_graph_bits() {
                                 x: typed(a.cached_ptr() + (row_offset * k * 2) as u64, dtype),
                                 ..operands
                             };
-                            let run = || {
-                                fixed_forward(
-                                    &ctx,
-                                    view.c,
-                                    view.x,
-                                    view.w,
-                                    view.bias_ptr,
-                                    (m, k, n),
-                                )
+                            let run = || -> Result<FixedTile, String> {
+                                if let Some(tile) = forced {
+                                    fixed_forward_with_tile(
+                                        &ctx,
+                                        view,
+                                        FixedShape { m, k, n },
+                                        tile,
+                                    )?;
+                                    Ok(tile)
+                                } else {
+                                    fixed_forward(
+                                        &ctx,
+                                        view.c,
+                                        view.x,
+                                        view.w,
+                                        view.bias_ptr,
+                                        (m, k, n),
+                                    )
+                                }
                             };
-                            let picked = run().expect("actual AUTO launch");
-                            assert_eq!(
-                                picked == CANDIDATE,
-                                m == hot_m && output_offset == 8,
-                                "AUTO promotion scope {dtype:?} M={m} K={k} N={n} row={row_offset} out={output_offset} bias={has_bias}: {picked:?}"
-                            );
+                            let picked = run().expect("hot-cell launch");
+                            if forced.is_none() {
+                                assert_eq!(
+                                    picked == CANDIDATE,
+                                    m == hot_m && output_offset == 8,
+                                    "AUTO promotion scope {dtype:?} M={m} K={k} N={n} row={row_offset} out={output_offset} bias={has_bias}: {picked:?}"
+                                );
+                            } else {
+                                assert_eq!(picked, SWIZZLE_CANDIDATE);
+                            }
                             let mut expected = initial.clone();
                             expected[output_offset..output_offset + m * n]
                                 .copy_from_slice(&reference[row_offset * n..(row_offset + m) * n]);
@@ -116,8 +196,14 @@ fn fixed_sm89_half_pipeline_auto_hot_cell_prefix_view_graph_bits() {
                             let graph =
                                 unsafe { capture_into_graph(&ctx.stream, || run().map(|_| ())) }
                                     .expect("capture actual AUTO");
-                            if picked == CANDIDATE {
-                                assert_pipeline_graph(&graph, dtype);
+                            if matches!(picked, CANDIDATE | SWIZZLE_CANDIDATE) {
+                                assert_half_graph(
+                                    &graph,
+                                    picked,
+                                    dtype,
+                                    view,
+                                    FixedShape { m, k, n },
+                                );
                             }
                             for _ in 0..2 {
                                 output
@@ -160,7 +246,9 @@ fn fixed_sm89_half_pipeline_rejects_unsafe_operands_and_dimensions() {
         k: 65,
         n: 131,
     };
-    fixed_forward_with_tile(&ctx, good, shape, CANDIDATE).expect("odd-stride positive control");
+    for candidate in [CANDIDATE, SWIZZLE_CANDIDATE] {
+        fixed_forward_with_tile(&ctx, good, shape, candidate).expect("odd-stride positive control");
+    }
     for bad in [
         FixedFwdOperands {
             x: typed(0, dt),
@@ -199,10 +287,12 @@ fn fixed_sm89_half_pipeline_rejects_unsafe_operands_and_dimensions() {
             ..good
         },
     ] {
-        assert!(
-            fixed_forward_with_tile(&ctx, bad, shape, CANDIDATE).is_err(),
-            "unsafe operands admitted"
-        );
+        for candidate in [CANDIDATE, SWIZZLE_CANDIDATE] {
+            assert!(
+                fixed_forward_with_tile(&ctx, bad, shape, candidate).is_err(),
+                "unsafe operands admitted by {candidate:?}"
+            );
+        }
     }
     for bad in [
         FixedShape {
@@ -227,10 +317,12 @@ fn fixed_sm89_half_pipeline_rejects_unsafe_operands_and_dimensions() {
             ..shape
         },
     ] {
-        assert!(
-            fixed_forward_with_tile(&ctx, good, bad, CANDIDATE).is_err(),
-            "unsafe shape admitted: {bad:?}"
-        );
+        for candidate in [CANDIDATE, SWIZZLE_CANDIDATE] {
+            assert!(
+                fixed_forward_with_tile(&ctx, good, bad, candidate).is_err(),
+                "unsafe shape admitted by {candidate:?}: {bad:?}"
+            );
+        }
     }
     let empty = FixedFwdOperands {
         c: typed(0, dt),
@@ -239,8 +331,10 @@ fn fixed_sm89_half_pipeline_rejects_unsafe_operands_and_dimensions() {
         bias_ptr: None,
     };
     for no_output in [FixedShape { m: 0, ..shape }, FixedShape { n: 0, ..shape }] {
-        fixed_forward_with_tile(&ctx, empty, no_output, CANDIDATE)
-            .expect("empty output is a no-op");
+        for candidate in [CANDIDATE, SWIZZLE_CANDIDATE] {
+            fixed_forward_with_tile(&ctx, empty, no_output, candidate)
+                .expect("empty output is a no-op");
+        }
     }
 }
 
@@ -285,7 +379,13 @@ fn typed(ptr: u64, dtype: WeightDtype) -> TypedPtr {
     TypedPtr { ptr, dtype }
 }
 
-fn assert_pipeline_graph(graph: &CudaGraph, dtype: WeightDtype) {
+fn assert_half_graph(
+    graph: &CudaGraph,
+    tile: FixedTile,
+    dtype: WeightDtype,
+    operands: FixedFwdOperands,
+    shape: FixedShape,
+) {
     let mut count = 0;
     assert_eq!(
         unsafe { sys::cuGraphGetNodes(graph.cu_graph(), std::ptr::null_mut(), &mut count) },
@@ -310,7 +410,12 @@ fn assert_pipeline_graph(graph: &CudaGraph, dtype: WeightDtype) {
         unsafe { sys::cuFuncGetName(&mut name, params.func) },
         sys::CUresult::CUDA_SUCCESS
     );
-    let expected = format!("gemm_bi_nn_fixed_sm89_tc128_pipeline_v1_{}", dtype.as_str());
+    let (family, shared) = match tile {
+        FixedTile::Tc128Sm89Pipeline => ("pipeline", 71_680),
+        FixedTile::Tc128Sm89Swizzle => ("swizzle", 69_632),
+        _ => panic!("not an Ada half physical route: {tile:?}"),
+    };
+    let expected = format!("gemm_bi_nn_fixed_sm89_tc128_{family}_v1_{}", dtype.as_str());
     assert_eq!(
         unsafe { std::ffi::CStr::from_ptr(name) }.to_bytes(),
         expected.as_bytes()
@@ -319,7 +424,62 @@ fn assert_pipeline_graph(graph: &CudaGraph, dtype: WeightDtype) {
         (params.blockDimX, params.blockDimY, params.blockDimZ),
         (256, 1, 1)
     );
-    assert_eq!(params.sharedMemBytes, 71_680);
+    assert_eq!(
+        (params.gridDimX, params.gridDimY, params.gridDimZ),
+        (
+            (shape.m as u32).div_ceil(128) * (shape.n as u32).div_ceil(128),
+            1,
+            1,
+        )
+    );
+    assert_eq!(params.sharedMemBytes, shared);
+    for (index, expected) in [(0, 8), (8, 8), (16, 8), (24, 8), (32, 32)]
+        .into_iter()
+        .enumerate()
+    {
+        let mut offset = 0;
+        let mut size = 0;
+        assert_eq!(
+            unsafe { sys::cuFuncGetParamInfo(params.func, index, &mut offset, &mut size) },
+            sys::CUresult::CUDA_SUCCESS
+        );
+        assert_eq!((offset, size), expected);
+    }
+    let mut offset = 0;
+    let mut size = 0;
+    assert_eq!(
+        unsafe { sys::cuFuncGetParamInfo(params.func, 5, &mut offset, &mut size) },
+        sys::CUresult::CUDA_ERROR_INVALID_VALUE
+    );
+    assert!(!params.kernelParams.is_null());
+    for (index, expected) in [
+        operands.c.ptr,
+        operands.x.ptr,
+        operands.w.ptr,
+        operands.bias_ptr.unwrap_or(0),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let pointer = unsafe { *params.kernelParams.add(index) };
+        assert!(!pointer.is_null());
+        assert_eq!(unsafe { pointer.cast::<u64>().read_unaligned() }, expected);
+    }
+    let bundle_pointer = unsafe { *params.kernelParams.add(4) };
+    assert!(!bundle_pointer.is_null());
+    assert_eq!(
+        unsafe { bundle_pointer.cast::<[u32; 8]>().read_unaligned() },
+        [
+            1.0f32.to_bits(),
+            0.0f32.to_bits(),
+            shape.m as u32,
+            shape.n as u32,
+            shape.k as u32,
+            shape.k as u32,
+            shape.n as u32,
+            shape.n as u32,
+        ]
+    );
 }
 
 #[test]
@@ -445,7 +605,7 @@ fn fixed_sm89_half_pipeline_forced_cross_rung_prefix_view_graph_bits() {
                             let mut expected = initial.clone();
                             expected[output_offset..output_offset + m * n]
                                 .copy_from_slice(&reference[row_offset * n..(row_offset + m) * n]);
-                            for tile in std::iter::once(CANDIDATE).chain(RUNGS) {
+                            for tile in [CANDIDATE, SWIZZLE_CANDIDATE].into_iter().chain(RUNGS) {
                                 output
                                     .upload_bytes(&ctx.stream, bytemuck::cast_slice(&initial))
                                     .expect("poison C");
@@ -458,31 +618,33 @@ fn fixed_sm89_half_pipeline_forced_cross_rung_prefix_view_graph_bits() {
                                     "rung/prefix/view/guard bits: {tile:?} {dtype:?} M={m} K={k} N={n} row={row_offset} bias={has_bias} corpus={corpus}"
                                 );
                             }
-                            let run = || fixed_forward_with_tile(&ctx, view, shape, CANDIDATE);
-                            for _ in 0..2 {
-                                output
-                                    .upload_bytes(&ctx.stream, bytemuck::cast_slice(&initial))
-                                    .expect("poison repeat");
-                                run().expect("eager repeat");
-                                assert_eq!(
-                                    raw_half(&ctx, &output),
-                                    expected,
-                                    "eager repeat changed bits"
-                                );
-                            }
-                            let graph = unsafe { capture_into_graph(&ctx.stream, run) }
-                                .expect("capture candidate");
-                            assert_pipeline_graph(&graph, dtype);
-                            for _ in 0..2 {
-                                output
-                                    .upload_bytes(&ctx.stream, bytemuck::cast_slice(&initial))
-                                    .expect("poison replay");
-                                graph.launch().expect("graph replay");
-                                assert_eq!(
-                                    raw_half(&ctx, &output),
-                                    expected,
-                                    "graph replay changed bits"
-                                );
+                            for candidate in [CANDIDATE, SWIZZLE_CANDIDATE] {
+                                let run = || fixed_forward_with_tile(&ctx, view, shape, candidate);
+                                for _ in 0..2 {
+                                    output
+                                        .upload_bytes(&ctx.stream, bytemuck::cast_slice(&initial))
+                                        .expect("poison repeat");
+                                    run().expect("eager repeat");
+                                    assert_eq!(
+                                        raw_half(&ctx, &output),
+                                        expected,
+                                        "eager repeat changed bits"
+                                    );
+                                }
+                                let graph = unsafe { capture_into_graph(&ctx.stream, run) }
+                                    .expect("capture candidate");
+                                assert_half_graph(&graph, candidate, dtype, view, shape);
+                                for _ in 0..2 {
+                                    output
+                                        .upload_bytes(&ctx.stream, bytemuck::cast_slice(&initial))
+                                        .expect("poison replay");
+                                    graph.launch().expect("graph replay");
+                                    assert_eq!(
+                                        raw_half(&ctx, &output),
+                                        expected,
+                                        "graph replay changed bits"
+                                    );
+                                }
                             }
                         }
                     }
@@ -512,6 +674,100 @@ fn fixed_sm89_half_pipeline_forced_cross_rung_prefix_view_graph_bits() {
                     "bias changed"
                 );
             }
+        }
+    }
+}
+
+#[test]
+#[ignore = "requires exact Ada CC8.9; bounded half rounding-edge corpus"]
+fn fixed_sm89_half_swizzle_rounding_edges_match_incumbent_across_store_paths() {
+    let device = GpuDevice::new(0).expect("CUDA device");
+    assert_eq!(device.compute_capability, (8, 9));
+    let ctx = GpuCtx::new(&device).expect("NVRTC context");
+    for dtype in [WeightDtype::Bf16, WeightDtype::F16] {
+        let edges: [u16; 10] = match dtype {
+            WeightDtype::Bf16 => [
+                0x0001, 0x007f, 0x0080, 0x7f7f, 0x8001, 0x807f, 0x8080, 0xff7f, 0x3f80, 0xbf80,
+            ],
+            WeightDtype::F16 => [
+                0x0001, 0x03ff, 0x0400, 0x7bff, 0x8001, 0x83ff, 0x8400, 0xfbff, 0x3c00, 0xbc00,
+            ],
+            WeightDtype::F32 => unreachable!(),
+        };
+        for (m, k, n) in [(129, 64, 136), (17, 65, 131)] {
+            let mut a_host: Vec<_> = (0..m * k).map(|i| edges[i % edges.len()]).collect();
+            // Keep one finite-only row beside the dense max-finite/cancellation rows,
+            // so this corpus checks RNE output stores as well as NaN/overflow behavior.
+            let finite_edges = [edges[0], edges[1], edges[2], edges[4], edges[5], edges[6]];
+            for column in 0..k {
+                a_host[(m - 1) * k + column] = finite_edges[column % finite_edges.len()];
+            }
+            let b_host: Vec<_> = (0..k * n)
+                .map(|i| edges[(i * 7 + i / n) % edges.len()])
+                .collect();
+            let bias_host: Vec<_> = (0..n)
+                .map(|i| f32::from_bits([0x3dcccccd, 0xbdcccccd, 0x3eaaaaab, 0xbeaaaaab][i % 4]))
+                .collect();
+            let a = upload_half(&ctx, &a_host);
+            let b = upload_half(&ctx, &b_host);
+            let bias = GpuBuffer::from_cpu(&ctx.stream, &bias_host).expect("bias upload");
+            let shape = FixedShape { m, k, n };
+            let reference = upload_half(&ctx, &vec![0x7fff; m * n]);
+            let reference_ops = FixedFwdOperands {
+                c: typed(reference.cached_ptr(), dtype),
+                x: typed(a.cached_ptr(), dtype),
+                w: typed(b.cached_ptr(), dtype),
+                bias_ptr: Some(bias.cached_ptr()),
+            };
+            fixed_forward_with_tile(&ctx, reference_ops, shape, FixedTile::Tc128)
+                .expect("portable incumbent rounding oracle");
+            let expected = raw_half(&ctx, &reference);
+            let exponent_mask = if dtype == WeightDtype::Bf16 {
+                0x7f80
+            } else {
+                0x7c00
+            };
+            assert!(
+                expected
+                    .iter()
+                    .any(|bits| bits & exponent_mask != exponent_mask),
+                "rounding-edge corpus must retain finite outputs"
+            );
+            for output_offset in [1, 8] {
+                let initial = vec![0x7fff; output_offset + m * n + 9];
+                let mut poison = initial.clone();
+                for (actual, expected) in poison[output_offset..output_offset + m * n]
+                    .iter_mut()
+                    .zip(&expected)
+                {
+                    *actual = !*expected;
+                }
+                let mut output = upload_half(&ctx, &initial);
+                let operands = FixedFwdOperands {
+                    c: typed(output.cached_ptr() + (output_offset * 2) as u64, dtype),
+                    ..reference_ops
+                };
+                for candidate in [CANDIDATE, SWIZZLE_CANDIDATE] {
+                    output
+                        .upload_bytes(&ctx.stream, bytemuck::cast_slice(&poison))
+                        .expect("poison rounding-edge output");
+                    fixed_forward_with_tile(&ctx, operands, shape, candidate)
+                        .unwrap_or_else(|error| panic!("{candidate:?}: {error}"));
+                    let actual = raw_half(&ctx, &output);
+                    assert_eq!(&actual[..output_offset], &initial[..output_offset]);
+                    assert_eq!(
+                        &actual[output_offset..output_offset + m * n],
+                        expected.as_slice(),
+                        "rounding-edge bits differ for {candidate:?}/{dtype:?}/{shape:?}/offset={output_offset}"
+                    );
+                    assert_eq!(
+                        &actual[output_offset + m * n..],
+                        &initial[output_offset + m * n..]
+                    );
+                }
+            }
+            assert_eq!(raw_half(&ctx, &a), a_host);
+            assert_eq!(raw_half(&ctx, &b), b_host);
         }
     }
 }
@@ -624,31 +880,33 @@ fn fixed_sm89_half_pipeline_sanitizer_smoke() {
                     let reference_start = HALF_GUARD + row_offset * n;
                     expected[output_offset..output_offset + m * n]
                         .copy_from_slice(&reference[reference_start..reference_start + m * n]);
-                    let run = || fixed_forward_with_tile(&ctx, view, shape, CANDIDATE);
-                    for _ in 0..2 {
-                        output
-                            .upload_bytes(&ctx.stream, bytemuck::cast_slice(&initial))
-                            .expect("poison sanitizer eager output");
-                        run().expect("forced NVRTC pipeline eager");
-                        assert_eq!(
-                            raw_half(&ctx, &output),
-                            expected,
-                            "sanitizer eager bits/guards {dtype:?} {shape:?} row={row_offset} C_offset={output_offset} bias={has_bias} exceptional={exceptional}"
-                        );
-                    }
-                    let graph = unsafe { capture_into_graph(&ctx.stream, run) }
-                        .expect("capture actual forced NVRTC pipeline");
-                    assert_pipeline_graph(&graph, dtype);
-                    for _ in 0..2 {
-                        output
-                            .upload_bytes(&ctx.stream, bytemuck::cast_slice(&initial))
-                            .expect("poison sanitizer graph output");
-                        graph.launch().expect("sanitizer graph replay");
-                        assert_eq!(
-                            raw_half(&ctx, &output),
-                            expected,
-                            "sanitizer graph bits/guards {dtype:?} {shape:?} row={row_offset} C_offset={output_offset} bias={has_bias} exceptional={exceptional}"
-                        );
+                    for candidate in [CANDIDATE, SWIZZLE_CANDIDATE] {
+                        let run = || fixed_forward_with_tile(&ctx, view, shape, candidate);
+                        for _ in 0..2 {
+                            output
+                                .upload_bytes(&ctx.stream, bytemuck::cast_slice(&initial))
+                                .expect("poison sanitizer eager output");
+                            run().expect("forced NVRTC Ada half eager");
+                            assert_eq!(
+                                raw_half(&ctx, &output),
+                                expected,
+                                "sanitizer eager bits/guards {candidate:?} {dtype:?} {shape:?} row={row_offset} C_offset={output_offset} bias={has_bias} exceptional={exceptional}"
+                            );
+                        }
+                        let graph = unsafe { capture_into_graph(&ctx.stream, run) }
+                            .expect("capture actual forced NVRTC Ada half");
+                        assert_half_graph(&graph, candidate, dtype, view, shape);
+                        for _ in 0..2 {
+                            output
+                                .upload_bytes(&ctx.stream, bytemuck::cast_slice(&initial))
+                                .expect("poison sanitizer graph output");
+                            graph.launch().expect("sanitizer graph replay");
+                            assert_eq!(
+                                raw_half(&ctx, &output),
+                                expected,
+                                "sanitizer graph bits/guards {candidate:?} {dtype:?} {shape:?} row={row_offset} C_offset={output_offset} bias={has_bias} exceptional={exceptional}"
+                            );
+                        }
                     }
                     assert_eq!(raw_half(&ctx, &a), a_host, "A bits/guards changed");
                     assert_eq!(raw_half(&ctx, &b), b_host, "B bits/guards changed");

@@ -1071,3 +1071,41 @@ Batch invariance, reproducibility after changing a physical route, and
 cross-toolkit/cross-architecture equality are distinct guarantees. Claim only
 the numerical contract and configuration coverage demonstrated by tests;
 deterministic GEMMs alone do not prove full RL-training reproducibility.
+
+## Ada half-swizzle production force checkpoint (2026-09-06)
+
+The existing homogeneous BF16/F16 XOR-staging prototype is now reachable through
+the production loader and `FixedTile::Tc128Sm89Swizzle` forced dispatcher. Exact
+exports are `gemm_bi_nn_fixed_sm89_tc128_swizzle_v1_{bf16,f16}`. This is a verified
+force checkpoint, not AUTO promotion or inference completion. Revision remains41;
+the incumbent pipeline and every ordinary route remain available.
+
+Matching CUDA12.8/13.0/13.2 each pass release636 library/43 static performance
+tests, the SM89 compile gate, cold/warm holder proof, full forced/rounding/hotA-E
+bit corpora, eager-only physical identity and retained RNA AUTO448unique groups.
+The six extra13.2 retained gates cover both TriadTF32 cohorts, ordinary TF32C,
+old halfAUTO, and exact-N64 force/AUTO. Allfour sanitizer tools pass on allthree
+artifacts. Sanitizer CUDA API reporting is disabled for deliberate terminal
+arity-negative probes; device memory/race/init/sync checks remain enabled with
+error-exitcode99. The original unsuppressed99API-probe diagnostic is preserved.
+
+Actual swizzle resources: block256, dynamic shared69632, local/staticshared0,
+occupancy1, registers177/177/180 by toolkit. Main independently reran13.0 hotA-E
+(1pass,11.27s) and live holder/cache proof (1pass,2.94s), reconciled174 local/remote
+inputs,14release binaries and9cache blobs. Allsix Triad blobs match the prior
+checkpoint. Fixed source has26fragments/688275bytes, SHA
+`d1180079f0067afbc3f54210ce41a80dbc6bb422d53085824082089a0ff97f2a`.
+Header-manifest identity also changes because it includes source macro analysis;
+do not carry forward the old RNA header digest into new timing controls.
+
+Evidence and exact commands: `internal/perf/ada-half-swizzle-force-20260906/`.
+The original four `internal/experiments/sm89-fixed-half-swizzle*` files are retained
+as provenance, not shipped tests or new AUTO admissions. No kernel was deleted.
+
+Continue immediately with the paired21/101-window homogeneous-half census on all
+three toolkits. Include old pipeline on12.8/13.0, whose AUTO is still Tc128;13.2
+AUTO is pipeline. If both candidates beat AUTO, pair them directly before picking
+the fastest. Compare native-half cuBLAS FAST with timed bias, retain the bias
+rounding caveat, and promote robust internal p50+p95 winners before considering
+deletion. Mixed F32-output needs a separate epilogue/qualification. No new5090
+measurement and no Triad optimization is claimed by this checkpoint.

@@ -70,6 +70,8 @@ pub enum FixedTile {
     Tc128,
     /// Ada-only pipelined/vector-store Tc128, AUTO in qualified hot cells.
     Tc128Sm89Pipeline,
+    /// Ada-only packed/XOR Tc128 twin; force-only pending paired qualification.
+    Tc128Sm89Swizzle,
     /// 128x256 CTA, 256 threads, 64x64 warp tiles (fragment reuse),
     /// XOR-swizzled dynamic smem 98 304 B. Bit-identical to Tc128.
     TcWn64,
@@ -234,6 +236,16 @@ pub fn fixed_forward_with_tile(
         }
         let args = FixedArgs::try_new(operands, shape)?;
         return launch_sm89_half_pipeline(ctx, operands.x.dtype, &args);
+    }
+    if tile == FixedTile::Tc128Sm89Swizzle {
+        if operands.x.dtype == WeightDtype::F32
+            || operands.x.dtype != operands.w.dtype
+            || operands.x.dtype != operands.c.dtype
+        {
+            return Err("Fixed Ada half swizzle requires matching bf16/f16 operands".into());
+        }
+        let args = FixedArgs::try_new(operands, shape)?;
+        return launch_sm89_half_swizzle(ctx, operands.x.dtype, &args);
     }
     if tile == FixedTile::F32N128S2 {
         if operands.c.dtype != WeightDtype::F32
@@ -762,7 +774,8 @@ fn ladder_cfg(tile: FixedTile, rows: usize, cols: usize) -> cudarc::driver::Laun
         | FixedTile::Tf32Sm120M64S2
         | FixedTile::Tf32Sm120M64S2PairStore
         | FixedTile::Sm120Half(_)
-        | FixedTile::Tc128Sm89Pipeline => unreachable!("tile has its own launcher"),
+        | FixedTile::Tc128Sm89Pipeline
+        | FixedTile::Tc128Sm89Swizzle => unreachable!("tile has its own launcher"),
     };
     let grid = (rows as u32).div_ceil(bm) * (cols as u32).div_ceil(bn);
     cudarc::driver::LaunchConfig {
@@ -1445,6 +1458,8 @@ struct FixedSm89HalfParams {
 unsafe impl DeviceRepr for FixedSm89HalfParams {}
 
 pub(crate) const FIXED_SM89_HALF_PARAMS_SIZE: usize = std::mem::size_of::<FixedSm89HalfParams>();
+pub(crate) const FIXED_SM89_HALF_SWIZZLE_PARAMS_SIZE: usize =
+    std::mem::size_of::<FixedSm89HalfParams>();
 
 const _: () = {
     assert!(FIXED_SM89_HALF_PARAMS_SIZE == 32);
@@ -2652,6 +2667,80 @@ fn launch_sm89_half_pipeline(
         .map_err(|error| format!("gemm_bi Fixed Ada half pipeline: {error:?}"))
 }
 
+fn launch_sm89_half_swizzle(
+    ctx: &GpuCtx,
+    dtype: WeightDtype,
+    args: &FixedArgs,
+) -> Result<(), String> {
+    if ctx.compute_capability() != (8, 9) {
+        return Err("Fixed Ada half swizzle requires CC8.9".into());
+    }
+    if args.m == 0 || args.n == 0 {
+        return Ok(());
+    }
+    if args.c == 0 || !args.c.is_multiple_of(2) || !args.bias.is_multiple_of(4) {
+        return Err(
+            "Fixed Ada half swizzle requires non-null half-aligned C and f32-aligned bias".into(),
+        );
+    }
+    if args.k != 0
+        && [args.a, args.b]
+            .into_iter()
+            .any(|p| p == 0 || !p.is_multiple_of(2))
+    {
+        return Err("Fixed Ada half swizzle requires non-null half-aligned A and B".into());
+    }
+    args.m
+        .checked_add(127)
+        .ok_or("Fixed Ada half swizzle padded M exceeds i32")?;
+    let padded_n = args
+        .n
+        .checked_add(127)
+        .ok_or("Fixed Ada half swizzle padded N exceeds i32")?;
+    args.k
+        .checked_add(63)
+        .ok_or("Fixed Ada half swizzle padded K exceeds i32")?;
+    let grid = (args.m as u32)
+        .div_ceil(128)
+        .checked_mul(padded_n as u32 / 128)
+        .filter(|grid| *grid <= i32::MAX as u32)
+        .ok_or("Fixed Ada half swizzle launch grid exceeds i32")?;
+    let kernels = ctx
+        .kernels
+        .fixed_sm89_half_swizzle
+        .as_ref()
+        .ok_or_else(|| {
+            ctx.kernels
+                .fixed_sm89_half_swizzle_rejection
+                .clone()
+                .unwrap_or_else(|| "Fixed Ada half swizzle is not admitted".into())
+        })?;
+    let params = FixedSm89HalfParams {
+        alpha: 1.0,
+        beta: 0.0,
+        m: args.m,
+        n: args.n,
+        k: args.k,
+        lda: args.k,
+        ldb: args.n,
+        ldc: args.n,
+    };
+    let config = cudarc::driver::LaunchConfig {
+        grid_dim: (grid, 1, 1),
+        block_dim: (256, 1, 1),
+        shared_mem_bytes: 69_632,
+    };
+    let mut builder = ctx.stream.launch_builder(kernels.get(dtype));
+    builder.arg(&args.c);
+    builder.arg(&args.a);
+    builder.arg(&args.b);
+    builder.arg(&args.bias);
+    builder.arg(&params);
+    unsafe { builder.launch(config) }
+        .map(|_| ())
+        .map_err(|error| format!("gemm_bi Fixed Ada half swizzle: {error:?}"))
+}
+
 fn launch_ladder(
     ctx: &GpuCtx,
     tile: FixedTile,
@@ -2706,7 +2795,8 @@ fn launch_ladder(
         | FixedTile::Tf32Sm120M64S2
         | FixedTile::Tf32Sm120M64S2PairStore
         | FixedTile::Sm120Half(_)
-        | FixedTile::Tc128Sm89Pipeline => unreachable!("tile has its own launcher"),
+        | FixedTile::Tc128Sm89Pipeline
+        | FixedTile::Tc128Sm89Swizzle => unreachable!("tile has its own launcher"),
     };
     let cfg = ladder_cfg(tile, args.m as usize, args.n as usize);
     let alpha: f32 = 1.0;
