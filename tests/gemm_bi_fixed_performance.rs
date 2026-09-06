@@ -1349,6 +1349,123 @@ fn fixed_tf32_forward_is_batch_prefix_invariant() {
 }
 
 #[test]
+#[ignore = "requires exclusive CC8.9/142-SM CUDA13.2 Ada device"]
+fn fixed_sm89_tf32_c_auto_prefix_special_bias_graph_bits() {
+    let device = GpuDevice::new(0).expect("CUDA device");
+    assert_eq!(device.compute_capability, (8, 9));
+    assert_eq!(device.multiprocessor_count(), 142);
+    let ctx = GpuCtx::new(&device).expect("GPU context");
+    let compiler = ctx.kernels.compiler_identity();
+    assert_eq!(compiler.nvrtc_version, (13, 2));
+    assert!(compiler.nvrtc_library_known);
+    ctx.set_batch_invariant(true);
+    ctx.set_bi_gemm_family(BiGemmFamily::Fixed);
+    ctx.set_f32_triad_policy(F32TriadPolicy::AllowDeterministicTf32V1);
+
+    let shape = FixedShape {
+        m: 4621,
+        k: 1928,
+        n: 384,
+    };
+    let a_host = synth(shape.m * shape.k, 0xc089_a001);
+    let b_host = synth(shape.k * shape.n, 0xc089_b001);
+    let special_bias_bits = [
+        0x0000_0000,
+        0x8000_0000,
+        0x0000_0001,
+        0x8000_0001,
+        0x007f_ffff,
+        0x0080_0000,
+        0x8080_0000,
+        0x3f80_0000,
+        0xbf80_0000,
+        0x7f7f_ffff,
+        0xff7f_ffff,
+        0x7f80_0000,
+        0xff80_0000,
+        0x7fc1_2345,
+        0xffc5_4321,
+        0x3a80_0000,
+    ];
+    let bias_host = (0..shape.n)
+        .map(|index| f32::from_bits(special_bias_bits[index % special_bias_bits.len()]))
+        .collect::<Vec<_>>();
+    let a = DtypedBuf::zeros(&ctx.stream, a_host.len(), WeightDtype::F32).expect("C-row A");
+    let b = DtypedBuf::zeros(&ctx.stream, b_host.len(), WeightDtype::F32).expect("C-row B");
+    let bias =
+        DtypedBuf::zeros(&ctx.stream, bias_host.len(), WeightDtype::F32).expect("C-row bias");
+    a.upload_f32(&ctx.stream, &a_host).expect("C-row A upload");
+    b.upload_f32(&ctx.stream, &b_host).expect("C-row B upload");
+    bias.upload_f32(&ctx.stream, &bias_host)
+        .expect("C-row bias upload");
+
+    for bias_ptr in [None, Some(bias.cached_ptr())] {
+        let auto = DtypedBuf::zeros(&ctx.stream, shape.m * shape.n, WeightDtype::F32)
+            .expect("C-row AUTO output");
+        let old_auto = DtypedBuf::zeros(&ctx.stream, shape.m * shape.n, WeightDtype::F32)
+            .expect("C-row old AUTO output");
+        let prefix =
+            DtypedBuf::zeros(&ctx.stream, shape.n, WeightDtype::F32).expect("C-row prefix output");
+        let inputs = FixedFwdOperands {
+            c: typed(&auto, WeightDtype::F32),
+            x: typed(&a, WeightDtype::F32),
+            w: typed(&b, WeightDtype::F32),
+            bias_ptr,
+        };
+        fixed_forward_with_tile(
+            &ctx,
+            FixedFwdOperands {
+                c: typed(&old_auto, WeightDtype::F32),
+                ..inputs
+            },
+            shape,
+            FixedTile::Tf32M128S2,
+        )
+        .expect("forced prior C AUTO");
+        let launch_auto = || {
+            fixed_forward(
+                &ctx,
+                inputs.c,
+                inputs.x,
+                inputs.w,
+                bias_ptr,
+                (shape.m, shape.k, shape.n),
+            )
+            .and_then(|tile| {
+                (tile == FixedTile::Tf32M64S2)
+                    .then_some(())
+                    .ok_or_else(|| format!("unexpected Ada C AUTO tile {tile:?}"))
+            })
+        };
+        launch_auto().expect("eager Ada C AUTO");
+        let prefix_tile = fixed_forward(
+            &ctx,
+            typed(&prefix, WeightDtype::F32),
+            inputs.x,
+            inputs.w,
+            bias_ptr,
+            (1, shape.k, shape.n),
+        )
+        .expect("Ada C prefix AUTO");
+        assert_eq!(prefix_tile, FixedTile::Tf32M16S4);
+        ctx.stream.synchronize().expect("Ada C eager sync");
+        let eager = f32_bits(&ctx, &auto, shape.m * shape.n);
+        assert_eq!(eager, f32_bits(&ctx, &old_auto, shape.m * shape.n));
+        assert_eq!(f32_bits(&ctx, &prefix, shape.n), eager[..shape.n]);
+
+        let graph = unsafe { capture_into_graph(&ctx.stream, launch_auto) }
+            .expect("capture Ada C AUTO graph");
+        assert_eq!(
+            single_graph_kernel_name(&graph, "Ada C AUTO"),
+            "gemm_bi_nn_tf32_v1_m64n64_bk32_s2",
+        );
+        graph.launch().expect("replay Ada C AUTO graph");
+        ctx.stream.synchronize().expect("Ada C graph sync");
+        assert_eq!(f32_bits(&ctx, &auto, shape.m * shape.n), eager);
+    }
+}
+
+#[test]
 #[ignore = "requires an SM80+ CUDA device and emits TF32 performance data"]
 fn fixed_tf32_hot_shapes_smoke() {
     let shapes = [

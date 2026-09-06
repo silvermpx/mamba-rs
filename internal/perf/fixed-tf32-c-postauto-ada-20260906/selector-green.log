@@ -1,0 +1,11 @@
+Main independent run, 2026-09-06, on existing Ada release test binary; no compilation or GPU work.
+Command: ssh ada 'export LD_LIBRARY_PATH=/usr/local/cuda-13.2/lib64; /root/target-ada-dispatch-review-gxJWgz/release/deps/mamba_rs-87c2fddad15adab2 tf32_selector --nocapture'
+Exit code: 0
+
+running 4 tests
+test mamba_ssm::gpu::gemm_bi_fixed::tests::sm120_tf32_selector_promotes_only_the_qualified_cuda_132_b_and_d_cells ... ok
+test mamba_ssm::gpu::gemm_bi_fixed::tests::sm89_tf32_selector_promotes_only_confirmed_c_bias_rows ... ok
+test mamba_ssm::gpu::gemm_bi_fixed::tests::sm120_tf32_selector_promotes_confirmed_a_bias_rows ... ok
+test mamba_ssm::gpu::gemm_bi_fixed::tests::tf32_selector_keeps_portable_and_thin_fallbacks ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 669 filtered out; finished in 0.00s

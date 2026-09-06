@@ -789,6 +789,52 @@ finite inputs. Finite performance wins do not prove the full Fixed rung/prefix
 bit contract. Preserve this distinction; qualify a compatible conversion
 implementation before using this wide body as an interchangeable Fixed rung.
 
+### Recovered RNA-compatible Fixed candidate (2026-09-06)
+
+Before the new RNA integration, the existing ordinary Fixed TF32 C0/C1
+promotion is complete and independently reviewed: exact `(4621,1928,384)`,
+CC8.9/142SM/knownNVRTC13.2 now chooses M64S2 instead of M128S2. All other
+shapes/toolkits/architectures keep their prior routes. Ada selector4/4 and
+the actualAUTO special-bias/first-row-prefix/graph test pass. Post-AUTO101
+captures M64S2 in all8bias/path/order records with0rejections; old/new paired
+p50 is1.036022--1.042052, p95 is1.038318--1.045031. Every required rawbit gate
+passes. It remains an internal win: newAUTO/FAST median1.912826--2.121482.
+Evidence `internal/perf/fixed-tf32-c-postauto-ada-20260906/`, performance log
+SHA256 `1758732b2150c0b668c3051e85f6085dfb682403a9deea275d2434392ec65471`.
+The prepromotion all6TF32 screen and C101 are in
+`internal/perf/fixed-tf32-all6-ada-20260906/`; noCUDA bodies changed.
+An uncached repeat (Driver cache disabled, persistent kernel caching declined
+because its empty directory had mode0755) independently confirms all8wins
+with identical loaded artifacts: old/new paired p50 1.026771--1.032084,
+p95 1.029164--1.033931. Preserve the truthful cache-mode distinction in
+`internal/perf/fixed-tf32-c-postauto-privatecache-ada-20260906/README.md`;
+raw log SHA256 `bb74e5e4bdcdfedf54439496e3c5caca0426351c1dfea9149ea3b8e32d38851a`.
+
+Do not recreate the already completed standalone experiment:
+`internal/experiments/sm89-nn-wide-rna-compatible.cu`, SHA256
+`c0c9eb735374620eaf8a023345ee86359af9f748df53fc5cf7d07ee7051f65c4`.
+It preserves the wide pipeline and uses explicit `cvt.rna.tf32.f32`.
+`internal/experiments/fixed-rna-production-integration.md` documents the
+Fixed-owned isolated fragment/holder/ABI design; its historical line numbers
+need to be interpreted against the live tree.
+
+Saved NVCC graph-only 21-window evidence is under
+`internal/perf/nn-rna-probe-20260905/` and
+`internal/perf/nn-rna-fastfinite-probe-20260905/`. A1 RNA/FAST paired p95 was
+0.955720; B1 was 1.062197. These are experimental results, not current
+production NVRTC/AUTO admission. The fastfinite experiment was slower than
+explicit RNA (A1 paired median ratio 1.288064), so keep it as a documented
+loser, not the next production candidate. Its same-run log SHA256 is
+`7c326e4f7f5b47c7971614867cb69fd12eef6295fc09b209fdcfb84e2315c103`.
+
+The saved explicit-RNA probe passed 448 raw conversion cases, 175 GEMM
+contract records and 7 numeric validations, including exceptional A/B/bias,
+prefixes/subviews and graph/repeat bits. It covered only three of the five
+ordinary Fixed rungs and is not a substitute for live Fixed-owned NVRTC
+resource/ABI/capture and complete cross-rung/view qualification. Integrate
+force-only first; promote measured cells after same-build 21/101-window
+eager/graph comparisons against current AUTO and explicit cuBLAS FAST.
+
 ### Precision and determinism terminology
 
 TF32 is a compute mode for F32 tensors; it is not a distinct tensor storage

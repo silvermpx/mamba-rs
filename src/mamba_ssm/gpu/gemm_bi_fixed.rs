@@ -1962,6 +1962,24 @@ fn fixed_pick_tf32(
     if rows <= 16 || cols <= 32 {
         return FixedTile::Tf32M16S4;
     }
+    // C0/C1 M64S2 beat prior AUTO M128S2 in all eight 101-window eager/graph,
+    // candidate-first/incumbent-first cohorts (worst paired p95 0.978250),
+    // with identical output bits and physical graph identity. This is scoped
+    // to the measured RTX 6000 Ada / known NVRTC13.2 stack:
+    // internal/perf/fixed-tf32-all6-ada-20260906/c-m64s2-confirm101.log
+    // SHA256 908b0ffd1fd1e5127b51d7e440d530080a6bd07d985e2aa93720f095accd926a.
+    if !sm120_tma
+        && compute_capability == (8, 9)
+        && multiprocessors == 142
+        && nvrtc_version == (13, 2)
+        && nvrtc_library_known
+        && matches!(
+            (rows, inner, cols, has_bias),
+            (4621, 1928, 384, false) | (4621, 1928, 384, true)
+        )
+    {
+        return FixedTile::Tf32M64S2;
+    }
     if sm120_tma {
         if compute_capability == (12, 0) && multiprocessors == 170 && nvrtc_version == (13, 2) {
             match (rows, inner, cols, has_bias) {
@@ -6290,6 +6308,69 @@ mod tests {
                 ),
                 FixedTile::Tf32Sm120M64S2
             );
+        }
+    }
+
+    #[test]
+    fn sm89_tf32_selector_promotes_only_confirmed_c_bias_rows() {
+        for has_bias in [false, true] {
+            assert_eq!(
+                fixed_pick_tf32(
+                    16,
+                    1928,
+                    384,
+                    142,
+                    (8, 9),
+                    (13, 2),
+                    false,
+                    has_bias,
+                    true,
+                    true,
+                ),
+                FixedTile::Tf32M16S4,
+                "Ada thin route must remain ahead of the C promotion",
+            );
+            for output_aligned in [false, true] {
+                assert_eq!(
+                    fixed_pick_tf32(
+                        4621,
+                        1928,
+                        384,
+                        142,
+                        (8, 9),
+                        (13, 2),
+                        false,
+                        has_bias,
+                        output_aligned,
+                        true,
+                    ),
+                    FixedTile::Tf32M64S2,
+                    "confirmed Ada C row bias={has_bias} output_aligned={output_aligned}",
+                );
+            }
+            for (m, k, n, sms, cc, nvrtc, known) in [
+                (4620, 1928, 384, 142, (8, 9), (13, 2), true),
+                (4622, 1928, 384, 142, (8, 9), (13, 2), true),
+                (4621, 1927, 384, 142, (8, 9), (13, 2), true),
+                (4621, 1929, 384, 142, (8, 9), (13, 2), true),
+                (4621, 1928, 383, 142, (8, 9), (13, 2), true),
+                (4621, 1928, 385, 142, (8, 9), (13, 2), true),
+                (4621, 1928, 384, 141, (8, 9), (13, 2), true),
+                (4621, 1928, 384, 143, (8, 9), (13, 2), true),
+                (4621, 1928, 384, 142, (8, 8), (13, 2), true),
+                (4621, 1928, 384, 142, (9, 0), (13, 2), true),
+                (4621, 1928, 384, 142, (8, 9), (12, 8), true),
+                (4621, 1928, 384, 142, (8, 9), (13, 0), true),
+                (4621, 1928, 384, 142, (8, 9), (13, 1), true),
+                (4621, 1928, 384, 142, (8, 9), (13, 3), true),
+                (4621, 1928, 384, 142, (8, 9), (13, 2), false),
+            ] {
+                assert_eq!(
+                    fixed_pick_tf32(m, k, n, sms, cc, nvrtc, false, has_bias, true, known),
+                    FixedTile::Tf32M128S2,
+                    "unqualified Ada C boundary M={m} K={k} N={n} SMs={sms} CC={cc:?} NVRTC={nvrtc:?} known={known}",
+                );
+            }
         }
     }
 
