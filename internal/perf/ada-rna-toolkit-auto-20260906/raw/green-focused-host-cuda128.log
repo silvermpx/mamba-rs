@@ -1,0 +1,17 @@
+21c12fc982fd70e66410f4da8e13dfa152552949be9b049b8cc2aef6ca95fb00  /root/target-ada-rna-auto-cuda128-20260906/release/deps/mamba_rs-a52898eca32cfbbe
+COMMAND1=/root/target-ada-rna-auto-cuda128-20260906/release/deps/mamba_rs-a52898eca32cfbbe mamba_ssm::gpu::gemm_bi_fixed::sm89_rna_auto_tests::fixed_sm89_rna_auto_exact_cells_and_independent_declines ... --exact --nocapture
+
+running 1 test
+test mamba_ssm::gpu::gemm_bi_fixed::sm89_rna_auto_tests::fixed_sm89_rna_auto_exact_cells_and_independent_declines ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 679 filtered out; finished in 0.00s
+
+EXIT1=0
+COMMAND2=/root/target-ada-rna-auto-cuda128-20260906/release/deps/mamba_rs-a52898eca32cfbbe mamba_ssm::gpu::kernel_identity::physical_launch_tests::ada_rna_toolkit_auto_epoch_rejects_revision40_graph_identity ... --exact --nocapture
+
+running 1 test
+test mamba_ssm::gpu::kernel_identity::physical_launch_tests::ada_rna_toolkit_auto_epoch_rejects_revision40_graph_identity ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 679 filtered out; finished in 0.00s
+
+EXIT2=0

@@ -1,0 +1,28 @@
+BASE=c35646367b30acff74136520f1ad6e9cbb376b9e
+ca34bb69b6921b6d1d673efe4ffa9b4d66990a4f7490f6d0bab71adbf0be0f99  source-manifest-red.sha256
+4d07e82a2623f19c83ee9c7062935ab7077e7075ccc58fd57861d8a416781050  tests/gemm_bi_fixed_correctness.rs
+4a269d3241eb559f2dcbec54a68239e9298cd1dda8265e422c91b374ddd0ed8a  src/mamba_ssm/gpu/gemm_bi_fixed.rs
+afaafd1ce4ee78bb003845dd5c8828dd910812d574ed21a2163c14df61d196e7  src/mamba_ssm/gpu/kernel_identity.rs
+08348ec62c92b7329336546e215933e19a1a9b4e4399790fe37dbb347155a022  /root/target-ada-rna-auto-cuda128-20260906/release/deps/gemm_bi_fixed_correctness-e745b7cbbfaa93fe
+COMMAND=cargo test --release --features cuda,cudarc/cuda-12080 --test gemm_bi_fixed_correctness fixed_sm89_rna_wide_actual_auto_hot_a_route_and_graph -- --exact --ignored --nocapture --test-threads=1
+    Finished `release` profile [optimized] target(s) in 0.07s
+     Running tests/gemm_bi_fixed_correctness.rs (/root/target-ada-rna-auto-cuda128-20260906/release/deps/gemm_bi_fixed_correctness-e745b7cbbfaa93fe)
+
+running 1 test
+test fixed_sm89_rna_wide_actual_auto_hot_a_route_and_graph ... 
+thread 'fixed_sm89_rna_wide_actual_auto_hot_a_route_and_graph' (411300) panicked at tests/gemm_bi_fixed_correctness.rs:155:9:
+assertion `left == right` failed
+  left: Tf32M64S2
+ right: Tf32RnaM128N128S3
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+
+failures:
+    fixed_sm89_rna_wide_actual_auto_hot_a_route_and_graph
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 7 filtered out; finished in 3.00s
+
+error: test failed, to rerun pass `--test gemm_bi_fixed_correctness`
+OBSERVED_EXIT=101

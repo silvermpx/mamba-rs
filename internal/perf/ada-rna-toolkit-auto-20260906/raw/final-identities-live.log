@@ -1,0 +1,24 @@
+BASE=c35646367b30acff74136520f1ad6e9cbb376b9e
+REMOTE_SOURCE=/root/mamba-ada-rna-toolkit-auto-20260906
+21f828115c983114175615bf6b6c044c461b811d3cc11aad787697dff3f7a574  source-manifest-final.sha256
+CUDA=128 TARGET=/root/target-ada-rna-auto-cuda128-20260906 CACHE=/root/mamba-kcache-ada-rna-auto-cuda128-20260906
+CACHE_MODE=700 OWNER=root:root
+6f85e7dc251850a0ebfea45194f3eff3c79a3c44a046610b2b17dec6348c9183  /root/target-ada-rna-auto-cuda128-20260906/release/deps/mamba_rs-a52898eca32cfbbe
+96721d176a28f0e1a1627f93c7e60f637820f455afa108d25c7cdf98a059b40f  /root/target-ada-rna-auto-cuda128-20260906/release/deps/gemm_bi_fixed_correctness-e745b7cbbfaa93fe
+a013bdae3f6da79adfe877854c7a07589ddd269456c27ec64d8519bce531f228  /root/target-ada-rna-auto-cuda128-20260906/release/deps/gemm_bi_fixed_performance-e01d837be76567b7
+2100bc4443edef1fcc7c1207a9cc384b21c3469a02d68082be8a8e9c0b28aee0  /root/target-ada-rna-auto-cuda128-20260906/release/deps/gemm_bi_tf32_cohort_binding-a5eea3bfc064b5b2
+CACHE_MATCH=true FILES=3
+CUDA=130 TARGET=/root/target-ada-rna-auto-cuda130-20260906 CACHE=/root/mamba-kcache-ada-rna-auto-cuda130-20260906
+CACHE_MODE=700 OWNER=root:root
+d4efb887b239cdb6d5bc41f8b79e8955dc368433448366e2c2b218b744ffa9e6  /root/target-ada-rna-auto-cuda130-20260906/release/deps/mamba_rs-9fa71372982351ad
+73afb5ff7364b4ec355fb3041f760f8aaaece64e68552557b1a83c47c9acd868  /root/target-ada-rna-auto-cuda130-20260906/release/deps/gemm_bi_fixed_correctness-e9a896bca3cebdf4
+c0cf51e9eb69772df604dfd4f42e7ac92ee82aede726cd3dbe0051af1ae5ebc3  /root/target-ada-rna-auto-cuda130-20260906/release/deps/gemm_bi_fixed_performance-28fdf8ce2728ddd5
+31b7b46c1264442eb84fc5f5669f3fb0ea617162d8fc3ae1fa90f54378044411  /root/target-ada-rna-auto-cuda130-20260906/release/deps/gemm_bi_tf32_cohort_binding-f666e7f3a1ffd1cd
+CACHE_MATCH=true FILES=3
+CUDA=132 TARGET=/root/target-ada-rna-auto-cuda132-20260906 CACHE=/root/mamba-kcache-ada-rna-auto-cuda132-20260906
+CACHE_MODE=700 OWNER=root:root
+541c00e1bcc719d14b9081367448f24a0173ad9479f8bba58c4ad5d28400f374  /root/target-ada-rna-auto-cuda132-20260906/release/deps/mamba_rs-87c2fddad15adab2
+fb468ff9ffad5813909d1cec0684402b805291f80e15582b138295868846d495  /root/target-ada-rna-auto-cuda132-20260906/release/deps/gemm_bi_fixed_correctness-7860b14bbe37841d
+b8d8cd24b5e44ca27749c1950fb17802477dba432e469ed613c396910e542b38  /root/target-ada-rna-auto-cuda132-20260906/release/deps/gemm_bi_fixed_performance-429f558dd590762a
+4f685222acedc7e5c3302346910339ed5610f5854a9e53c6b08f2e1eceed7d6c  /root/target-ada-rna-auto-cuda132-20260906/release/deps/gemm_bi_tf32_cohort_binding-c96a6105c026b3ba
+CACHE_MATCH=true FILES=3

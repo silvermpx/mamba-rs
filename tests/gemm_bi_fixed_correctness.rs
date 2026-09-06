@@ -129,6 +129,12 @@ fn fixed_sm89_rna_wide_actual_auto_hot_a_route_and_graph() {
     assert_eq!(device.multiprocessor_count(), 142);
     let ctx = GpuCtx::new(&device).expect("GPU context");
     ctx.set_f32_triad_policy(F32TriadPolicy::AllowDeterministicTf32V1);
+    let compiler = ctx.kernels.compiler_identity();
+    assert!(compiler.nvrtc_library_known, "known NVRTC library required");
+    assert!(
+        matches!(compiler.nvrtc_version, (12, 8) | (13, 0) | (13, 2)),
+        "qualified RNA AUTO toolkit required"
+    );
     let shape = FixedShape {
         m: 4621,
         k: 384,
@@ -586,6 +592,12 @@ fn check_rna_wide_prefix_views_and_graph_bits(actual_auto: bool) {
     assert_eq!(device.multiprocessor_count(), 142);
     let ctx = GpuCtx::new(&device).expect("GPU context");
     ctx.set_f32_triad_policy(F32TriadPolicy::AllowDeterministicTf32V1);
+    let compiler = ctx.kernels.compiler_identity();
+    assert!(compiler.nvrtc_library_known, "known NVRTC library required");
+    assert!(
+        matches!(compiler.nvrtc_version, (12, 8) | (13, 0) | (13, 2)),
+        "qualified RNA AUTO toolkit required"
+    );
     let tile = FixedTile::Tf32RnaM128N128S3;
     let shape_cases = rna_wide_qualification_shapes();
     let fixed_rungs = [
@@ -883,7 +895,14 @@ fn check_rna_wide_prefix_views_and_graph_bits(actual_auto: bool) {
                         .expect("aligned RNA view reference");
                         let expected = output_bits(&ctx, &output);
                         output.upload(&ctx.stream, &initial).unwrap();
-                        fixed_forward_with_tile(&ctx, operands, hot, FixedTile::Tf32M64S2)
+                        let expected_old_auto = if case == "hot_c_boundary"
+                            && ctx.kernels.compiler_identity().nvrtc_version != (13, 2)
+                        {
+                            FixedTile::Tf32M128S2
+                        } else {
+                            FixedTile::Tf32M64S2
+                        };
+                        fixed_forward_with_tile(&ctx, operands, hot, expected_old_auto)
                             .expect("misaligned old AUTO control");
                         assert_eq!(
                             output_bits(&ctx, &output),
@@ -900,8 +919,7 @@ fn check_rna_wide_prefix_views_and_graph_bits(actual_auto: bool) {
                                 (hot.m, hot.k, hot.n),
                             )?;
                             assert_eq!(
-                                selected,
-                                FixedTile::Tf32M64S2,
+                                selected, expected_old_auto,
                                 "misaligned A/B must retain old AUTO"
                             );
                             Ok::<(), String>(())

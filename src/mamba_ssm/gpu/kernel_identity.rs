@@ -32,7 +32,7 @@ pub const COMPILER_REVISION: u16 = 3;
 pub const NUMERIC_ABI_REVISION: u16 = 5;
 // Host dispatch epoch: qualified Ada Fixed RNA AUTO; unchanged modules and
 // retained cohorts keep their original evidence, while all graphs re-capture.
-pub const TUNING_TABLE_REVISION: u16 = 40;
+pub const TUNING_TABLE_REVISION: u16 = 41;
 pub const SCHEDULE_REVISION: u16 = 8;
 
 const NUMERIC_CONTRACT_DOMAIN: &[u8] = b"mamba-rs.resolved-numeric-contract.v2";
@@ -4961,7 +4961,7 @@ mod physical_launch_tests {
     #[test]
     fn ada_rna_auto_epoch_rejects_revision39_graph_identity() {
         let current = physical_context();
-        assert_eq!(current.tuning_table_revision, 40);
+        assert_eq!(current.tuning_table_revision, 41);
         let mut captured = current;
         captured.tuning_table_revision = 39;
         assert_eq!(captured.compiler, current.compiler);
@@ -4977,6 +4977,28 @@ mod physical_launch_tests {
         assert!(error.contains("re-capture before replay"));
         current
             .ensure_current(current, "current Fixed AUTO graph replay")
+            .unwrap();
+    }
+
+    #[test]
+    fn ada_rna_toolkit_auto_epoch_rejects_revision40_graph_identity() {
+        let current = physical_context();
+        assert_eq!(current.tuning_table_revision, 41);
+        let mut captured = current;
+        captured.tuning_table_revision = 40;
+        assert_eq!(captured.compiler, current.compiler);
+        assert_eq!(captured.artifacts, current.artifacts);
+        assert_eq!(captured.numeric_contracts, current.numeric_contracts);
+        assert_eq!(
+            captured.schedule_set_revision,
+            current.schedule_set_revision
+        );
+        let error = captured
+            .ensure_current(current, "revision40 Fixed replay")
+            .expect_err("toolkit AUTO reused an old captured route");
+        assert!(error.contains("re-capture before replay"));
+        current
+            .ensure_current(current, "current Fixed replay")
             .unwrap();
     }
 
@@ -4999,7 +5021,7 @@ mod physical_launch_tests {
     }
 
     #[test]
-    fn fixed_only_artifact_replacement_invalidates_graph_at_unchanged_epoch40() {
+    fn fixed_only_artifact_replacement_invalidates_graph_at_unchanged_epoch41() {
         let captured = physical_context();
         let mut current = captured;
         let mut replaced_fixed = captured.artifacts.fixed;
@@ -5010,7 +5032,7 @@ mod physical_launch_tests {
             captured.artifacts.triad_sm80,
         ])
         .unwrap();
-        assert_eq!(captured.tuning_table_revision, 40);
+        assert_eq!(captured.tuning_table_revision, 41);
         assert_eq!(
             current.tuning_table_revision,
             captured.tuning_table_revision
@@ -5593,7 +5615,7 @@ mod cache_and_header_tests {
     #[test]
     fn only_the_tuning_table_revision_moved() {
         assert_eq!(NUMERIC_ABI_REVISION, 5);
-        assert_eq!(TUNING_TABLE_REVISION, 40);
+        assert_eq!(TUNING_TABLE_REVISION, 41);
     }
 
     #[test]

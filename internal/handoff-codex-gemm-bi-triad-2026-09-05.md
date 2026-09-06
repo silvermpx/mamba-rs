@@ -1000,6 +1000,58 @@ in this task. The next separate task is qualified12.8/13.0 RNA AUTO promotion
 and post-AUTO confirmation. Preserve the ordinary C fallback distinction:
 M128S2 on12.8/13.0, M64S2 on13.2; A/B/D/E ordinary routes areM64S2 throughout.
 
+### Ada RNA AUTO on all three qualified toolkits (2026-09-06)
+
+The full-corpus prerequisite is committed atc3564636. Actual Fixed AUTO now
+admits the same ten A-E/bias0,1 cells on known NVRTC12.8,13.0 and13.2,
+CC8.9/142SM, deterministic TF32 policy, homogeneousF32, admitted holder,
+C/A/B16 and optional bias4. The only production changes are this finite
+toolkit membership and global routing epoch40->41. Every other decline and
+ordinary picker is unchanged; old graphs must recapture. Revision38/39
+rejection tests are retained and revision40 rejection is added.
+
+Final matching builds pass634 library tests and43 performance-static tests
+on each toolkit. Actual-AUTO two-wrapper GPU checks pass2/2 with exactly448
+expected unique groups per toolkit: full five-rung raw bits, prefixes/views,
+finite/exceptional values, bias0/1, guards, repeats and poisoned graphs. Both
+existing13.2 Ada Triad cohorts and C-prefix retention pass. Main independently
+reran13.0 actualAUTO2/2,448groups in38.69s. Initial full12.8 library RED exposed
+two stale current-epoch fixtures; these were corrected, not waived. Earlier
+pre-amend build logs are retained and distinguished from final binaries.
+
+Quiet post-AUTO101 completes exactly40 unique records per toolkit, zero
+rejections, after all builds/functional checks finished. The correct old
+comparator is M128S2 for C on12.8/13.0; M64S2 for all other cells/toolkits.
+Main and independent reviewer verified physical AUTO/old graph geometry,
+epoch41, known matching NVRTC, FAST with timed bias, all bit flags and the
+samplewise ratios. Worst paired quantiles are over all four path/order cohorts.
+
+| CUDA | Own p50+p95 wins | Range of worst p95 AUTO/old across10cells | FAST wins | Worst p95 AUTO/FAST in winning cells |
+| --- | ---: | ---: | --- | --- |
+|12.8|10/10|0.648678--0.972474|A1 only|A1:0.956254|
+|13.0|10/10|0.654364--0.992156|A1 only|A1:0.975619|
+|13.2|10/10|0.629951--0.918121|A1,B1|A1:0.908820; B1:0.982497|
+
+FAST losses remain9/10,9/10 and8/10 respectively. Worst remaining ratios are
+E0:1.479948,1.487687 and1.345904.13.0 D1's internal p95 margin is only0.8%;
+do not describe it as a large gain. This is one TF32 inference promotion,
+not all-precision inference or Triad closure and not fresh5090 qualification.
+
+Evidence: `internal/perf/ada-rna-toolkit-auto-20260906/README.md`, raw logs,
+worker and main summaries, independent review, executable validation helpers
+and manifest. Final168-input source manifest SHA256
+`21f828115c983114175615bf6b6c044c461b811d3cc11aad787697dff3f7a574`;
+main checked all168 local/remote hashes,162 unchanged inputs againstc3564636,
+six live correctness/performance binaries and nine byte-identical matching
+cache blobs. CUDA/composer/loader/ABI/numeric/schedule and compiled module
+identities are unchanged. No full architecture suite or clippy rerun is
+claimed for this host-only task. No kernel was deleted or made unreachable.
+
+Next separate kernel work remains the half-swizzle/mixed-output follow-up
+and TF32 FAST gaps, then Triad NN/TN/NT. Keep the saved5090 baseline. Local
+read-only notes describe possible RNA tile-geometry follow-ups, not measured
+or admitted candidates; no new tile was implemented in this checkpoint.
+
 ### Precision and determinism terminology
 
 TF32 is a compute mode for F32 tensors; it is not a distinct tensor storage

@@ -30,6 +30,25 @@ Different architecture, compiler, bias, shape and numeric policy are separate.
 
 ## Production AUTO replacements already implemented
 
+- Ada Fixed explicit-RNA toolkit expansion (supersedes the13.2-only routing
+  epoch below): the same guarded A-E/bias0,1 cells now select
+  `gemm_bi_nn_fixed_rna_wide_tf32_v1_m128n128_bk32_s3` on known
+  NVRTC12.8/13.0/13.2, CC8.9/142SM, homogeneousF32/TF32 policy, admitted
+  holder, C/A/B16 and bias4. Global epoch41 requires graph recapture;
+  no CUDA/composer/loader/numeric/schedule identity changed. Actual AUTO
+  two-wrapper448-group proof passes per toolkit; main repeated13.0. All120
+  quiet101 records pass and each toolkit retains10/10 own p50+p95 wins.
+  Worst p95 AUTO/old ranges12.8:0.648678--0.972474,
+  13.0:0.654364--0.992156,13.2:0.629951--0.918121. FAST wins are A1 only
+  on12.8/13.0 (p950.956254/0.975619), A1/B1 on13.2
+  (0.908820/0.982497). The replaced old route is M128S2 for C on12.8/13.0,
+  otherwise M64S2. Both remain essential for decode/unqualified shapes,
+  C4/misaligned A/B, other devices/toolkits/policies and forced controls;
+  neither is deletion-ready. All nine matching-toolkit cache blobs retain
+  their qualified hashes. Evidence:
+  `internal/perf/ada-rna-toolkit-auto-20260906/` including raw physical launch
+  records and main's explicit live source/binary/cache hashes. No deletion.
+
 - Ada Fixed explicit-RNA wide: actual AUTO at A-E/bias0,1 under the guard
   above; one256-thread/98304-shared launch with five-argument32-byte bundle.
   Post-AUTO101 SHA `3dbb8754b651706d67c83ab1f96fb26ed66a63bc161e8ced015f36ef50831f46`,

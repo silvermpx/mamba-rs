@@ -2861,12 +2861,18 @@ fn arch_rung_self_check(ctx: &GpuCtx, tile: FixedTile) -> Result<(), String> {
     Ok(())
 }
 
-// Production NVRTC13.2 / 142-SM Ada, A-E and both bias states. All ten cells
-// beat the prior M64S2 AUTO in both paired p50/p95 across eager/graph/orders:
-// internal/perf/ada-rna-wide-force-20260906/confirm101-rna-all5-both-paths-final.log
-// SHA256 4983d29fa241538f170e087372c70baa92858033a7b075c7e53945088ba6d910.
-// Only A1/B1 also beat FAST. C16 is the measured output alignment; forced
-// RNA supports C4, but those views retain the unchanged ordinary AUTO picker.
+// Production NVRTC12.8/13.0/13.2 on 142-SM Ada, A-E and both bias states.
+// The complete force corpus is qualified in
+// internal/perf/ada-rna-full-toolkit-qualification-20260906/. The paired101
+// logs are internal/perf/ada-rna-toolkit-census-20260906/cuda-{12.8,13.0}/
+// timing101.log (SHA256 955f252909c94607e359e2a2eeb47e9744f76c41a8f2fac128ef338a80e15dcb
+// and d687caefea0b6c85a378f99230b4ee7f44c55a40e7ac6bfe1980f9967d3b0a37)
+// and internal/perf/ada-rna-wide-auto-20260906/
+// confirm101-old-m64-vs-auto-rna-final.log (SHA256
+// 3dbb8754b651706d67c83ab1f96fb26ed66a63bc161e8ced015f36ef50831f46).
+// RNA wins all ten internal p50/p95 cohorts on each toolkit; FAST wins are
+// only A1 on12.8/13.0 and A1/B1 on13.2. C16 is the measured output alignment;
+// forced RNA supports C4, but those views retain the ordinary AUTO picker.
 fn fixed_sm89_rna_wide_auto_eligible(
     operands: FixedFwdOperands,
     shape: FixedShape,
@@ -2880,7 +2886,7 @@ fn fixed_sm89_rna_wide_auto_eligible(
         && policy == super::context::F32TriadPolicy::AllowDeterministicTf32V1
         && device.compute_capability == (8, 9)
         && device.multiprocessors == 142
-        && nvrtc_version == (13, 2)
+        && matches!(nvrtc_version, (12, 8) | (13, 0) | (13, 2))
         && nvrtc_library_known
         && [operands.c.dtype, operands.x.dtype, operands.w.dtype]
             .into_iter()
@@ -2934,15 +2940,9 @@ mod sm89_rna_auto_tests {
             let shape = FixedShape { m, k, n };
             for bias_ptr in [None, Some(0x4000)] {
                 let operands = FixedFwdOperands { bias_ptr, ..base };
-                assert!(eligible(
-                    operands,
-                    shape,
-                    device,
-                    (13, 2),
-                    true,
-                    true,
-                    policy
-                ));
+                for nvrtc in [(12, 8), (13, 0), (13, 2)] {
+                    assert!(eligible(operands, shape, device, nvrtc, true, true, policy));
+                }
                 assert!(
                     !eligible(operands, shape, device, (13, 2), true, false, policy),
                     "missing holder"
@@ -2988,7 +2988,7 @@ mod sm89_rna_auto_tests {
                         policy
                     ));
                 }
-                for nvrtc in [(12, 8), (13, 0), (13, 1), (13, 3)] {
+                for nvrtc in [(12, 7), (12, 9), (13, 1), (13, 3), (14, 0)] {
                     assert!(!eligible(
                         operands, shape, device, nvrtc, true, true, policy
                     ));
@@ -5899,7 +5899,7 @@ mod tests {
                 TUNING_TABLE_REVISION,
                 SCHEDULE_REVISION,
             ),
-            (5, 40, 8),
+            (5, 41, 8),
             "the release compiler identity must remain explicitly pinned"
         );
         let mut promoted = Vec::new();
