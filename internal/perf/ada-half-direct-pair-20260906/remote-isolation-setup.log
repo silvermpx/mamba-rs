@@ -1,0 +1,9 @@
+CREATE_ISOLATED_REMOTE_COPIES
+COPY_EXIT=0
+SYNC_CHANGED_TEST
+SYNC_EXIT=0
+700 /root/mamba-kcache-ada-half-direct-pair-cuda128-20260906
+700 /root/mamba-kcache-ada-half-direct-pair-cuda130-20260906
+700 /root/mamba-kcache-ada-half-direct-pair-cuda132-20260906
+8127bd9042e83295fe51b13823950f7e51e6e29ef6257fb99ce97749e5a80504  /root/mamba-ada-half-direct-pair-20260906/tests/gemm_bi_fixed_performance.rs
+VERIFY_EXIT=0

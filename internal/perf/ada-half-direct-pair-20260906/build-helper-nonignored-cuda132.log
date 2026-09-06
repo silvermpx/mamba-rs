@@ -1,0 +1,165 @@
++ date --iso-8601=seconds
+2026-09-06T22:32:54+02:00
++ export CUDA_HOME=/usr/local/cuda-13.2 CUDA_PATH=/usr/local/cuda-13.2 LD_LIBRARY_PATH=/usr/local/cuda-13.2/lib64
++ CUDA_HOME=/usr/local/cuda-13.2
++ CUDA_PATH=/usr/local/cuda-13.2
++ LD_LIBRARY_PATH=/usr/local/cuda-13.2/lib64
++ export PATH=/usr/local/cuda-13.2/bin:/root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
++ PATH=/usr/local/cuda-13.2/bin:/root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
++ export CARGO_TARGET_DIR=/root/target-ada-half-direct-pair-cuda132-20260906 MAMBA_RS_KERNEL_CACHE=/root/mamba-kcache-ada-half-direct-pair-cuda132-20260906
++ CARGO_TARGET_DIR=/root/target-ada-half-direct-pair-cuda132-20260906
++ MAMBA_RS_KERNEL_CACHE=/root/mamba-kcache-ada-half-direct-pair-cuda132-20260906
++ cd /root/mamba-ada-half-direct-pair-20260906
++ nvcc --version
+nvcc: NVIDIA (R) Cuda compiler driver
+Copyright (c) 2005-2026 NVIDIA Corporation
+Built on Mon_Mar_02_09:52:23_PM_PST_2026
+Cuda compilation tools, release 13.2, V13.2.51
+Build cuda_13.2.r13.2/compiler.37434383_0
++ cargo test --release --features cuda,cudarc/cuda-13020 --test gemm_bi_fixed_performance --no-run
+   Compiling mamba-rs v0.6.9 (/root/mamba-ada-half-direct-pair-20260906)
+    Finished `release` profile [optimized] target(s) in 9.36s
+  Executable tests/gemm_bi_fixed_performance.rs (/root/target-ada-half-direct-pair-cuda132-20260906/release/deps/gemm_bi_fixed_performance-429f558dd590762a)
++ build_exit=0
++ '[' 0 -eq 0 ']'
++ cargo test --release --features cuda,cudarc/cuda-13020 --test gemm_bi_fixed_performance fixed_ada_direct_pair_ -- --nocapture --test-threads=1
+    Finished `release` profile [optimized] target(s) in 0.07s
+     Running tests/gemm_bi_fixed_performance.rs (/root/target-ada-half-direct-pair-cuda132-20260906/release/deps/gemm_bi_fixed_performance-429f558dd590762a)
+
+running 3 tests
+test fixed_ada_direct_pair_executes_real_windows_in_requested_order ... ok
+test fixed_ada_direct_pair_filters_are_strict_and_vendor_tiles_are_forbidden ... ok
+test fixed_ada_direct_pair_quantiles_use_same_index_pairs_in_both_directions ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 106 filtered out; finished in 0.00s
+
++ helper_exit=0
++ '[' 0 -eq 0 ']'
++ cargo test --release --features cuda,cudarc/cuda-13020 --test gemm_bi_fixed_performance -- --nocapture --test-threads=1
+    Finished `release` profile [optimized] target(s) in 0.07s
+     Running tests/gemm_bi_fixed_performance.rs (/root/target-ada-half-direct-pair-cuda132-20260906/release/deps/gemm_bi_fixed_performance-429f558dd590762a)
+
+running 109 tests
+test exact_n64_admission::exact_n64_admission_cpu_all_finite_controls_precede_any_timing ... ok
+test exact_n64_admission::exact_n64_admission_cpu_auto_phase_rejects_premature_or_broadened_route ... ok
+test exact_n64_admission::exact_n64_admission_cpu_bias_preseed_and_reordered_chain_do_not_certify ... ok
+test exact_n64_admission::exact_n64_admission_cpu_completion_rejects_duplicate_missing_or_foreign_pair ... ok
+test exact_n64_admission::exact_n64_admission_cpu_filters_fail_closed ... ok
+test exact_n64_admission::exact_n64_admission_cpu_graph_contract_rejects_wrong_real_launch ... ok
+test exact_n64_admission::exact_n64_admission_cpu_guards_and_raw_gate_reject_poison_and_single_bits ... ok
+test exact_n64_admission::exact_n64_admission_cpu_missing_launch_red_requires_actual_poison ... ok
+test exact_n64_admission::exact_n64_admission_cpu_preserves_a_and_d_qualification_and_auto_phase ... ok
+test exact_n64_admission::exact_n64_admission_cpu_proof_rejects_foreign_corpus_and_bounds ... ok
+test exact_n64_admission::exact_n64_admission_cpu_proof_reproduces_frozen_cancellation_bits ... ok
+test exact_n64_admission::exact_n64_admission_cpu_proof_uses_actual_view_stride_and_post_bias ... ok
+test exact_n64_admission::exact_n64_admission_cpu_protocol_is_true_four_position_pairing ... ok
+test exact_n64_admission::exact_n64_admission_cpu_resources_decline_unknown_spills_and_residency ... ok
+test exact_n64_admission::exact_n64_admission_cpu_screen_partial_paths_and_controls_never_admit ... ok
+test exact_n64_admission::exact_n64_admission_cpu_windows_distinguish_screen_from_admission ... ok
+test f32_legacy_baseline_launch_uses_structured_arguments ... ok
+test f32_s2_hot_shapes_smoke ... ignored, requires an SM80+ CUDA device and emits F32 candidate data
+test f32_s2_production_matches_legacy_bits ... ignored, requires an SM80+ CUDA device
+test fixed_ada_direct_pair_executes_real_windows_in_requested_order ... ok
+test fixed_ada_direct_pair_filters_are_strict_and_vendor_tiles_are_forbidden ... ok
+test fixed_ada_direct_pair_quantiles_use_same_index_pairs_in_both_directions ... ok
+test fixed_ada_forced_rungs_paired_precision_cublas ... ignored, requires MAMBA_FIXED_ADA_VENDOR=1 and an explicitly admitted quiet CC8.9/12.0 GPU (default 8.9); emits forced-rung/AUTO/vendor evidence
+test fixed_ada_half_forced_direct_pair ... ignored, requires MAMBA_FIXED_ADA_DIRECT_PAIR=1 and an exclusive quiet CC8.9 GPU; emits direct forced pipeline/swizzle evidence
+test fixed_ada_production_auto_paired_precision_cublas ... ignored, requires MAMBA_FIXED_ADA_VENDOR=1 and an explicitly admitted quiet CC8.9/12.0 GPU (default 8.9); emits paired production AUTO evidence
+test fixed_auto_vendor_exact_expectations_are_device_specific ... ok
+test fixed_auto_vendor_mixed_expectation_tracks_the_qualified_compiler_cell ... ok
+test fixed_auto_vendor_tf32_expectation_tracks_the_qualified_compiler_cells ... ok
+test fixed_explicit_vendor_cc_admission_is_fail_closed ... ok
+test fixed_explicit_vendor_exact_rows_keep_distinct_denominators_and_tolerances ... ok
+test fixed_explicit_vendor_fast_exact_row_reuses_every_exact_force_spec_once ... ok
+test fixed_explicit_vendor_pair_store_force_filter_is_sm120_only ... ok
+test fixed_explicit_vendor_pair_store_graph_contract_is_exact ... ok
+test fixed_explicit_vendor_paths_default_to_full_eager_and_graph ... ok
+test fixed_explicit_vendor_pipeline_graph_contract_rejects_wrong_physical_launch ... ok
+test fixed_explicit_vendor_rna_wide_eager_needs_identity_graph ... ok
+test fixed_explicit_vendor_rna_wide_force_filter_is_ada_tf32_only ... ok
+test fixed_explicit_vendor_rna_wide_graph_contract_is_exact ... ok
+test fixed_explicit_vendor_rung_inventory_is_arch_specific ... ok
+test fixed_explicit_vendor_tile_filter_is_strict_and_row_scoped ... ok
+test fixed_f32_n128_matches_legacy_bits ... ignored, requires an SM80+ CUDA device
+test fixed_f32_n128_paired_a_e ... ignored, requires a quiet 170-SM CC12 CUDA device and emits paired F32 N128 evidence
+test fixed_f32_n128_resource_gate_sm120 ... ignored, requires an SM120 CUDA device
+test fixed_force_bias_contract_requires_disallowed_launch_to_fail ... ok
+test fixed_force_disallowed_candidate_is_invoked_exactly_once ... ok
+test fixed_force_enum_registry_is_reverse_complete_for_every_row_and_architecture ... ok
+test fixed_force_specs_bind_mixed_and_exact_tiles_to_physical_symbols ... ok
+test fixed_force_specs_cover_every_inventory_entry_exactly_once ... ok
+test fixed_force_specs_reject_foreign_arch_and_dtype_pairs ... ok
+test fixed_forced_hot_shapes_smoke ... ignored, requires an SM80+ CUDA device and emits forced-route performance data
+test fixed_half_narrow_n_performance_smoke ... ignored, requires a quiet SM80+ CUDA device and emits narrow-N performance data
+test fixed_half_narrow_n_uses_portable_numeric_family ... ignored, requires an SM120 CUDA device
+test fixed_hot_shapes_smoke ... ignored, requires an SM80+ CUDA device and emits performance data
+test fixed_portable_half_epilogues_are_tile_and_alignment_invariant ... ignored, requires an SM80+ CUDA device
+test fixed_portable_resource_smoke ... ignored, requires an SM80+ CUDA device
+test fixed_production_auto_vs_fast_cublas_hot_and_selector_census ... ignored, requires a quiet 170-SM CC12 CUDA device and emits production AUTO/vendor evidence
+test fixed_sm120_copyplan_t256_spike_mapping_and_graph_geometry ... ok
+test fixed_sm120_exact_tma_fma_b0_spike ... ignored, requires a quiet RTX5090 and screens an exact SM120 TMA-FMA route on a Fixed hot cell
+test fixed_sm120_exact_tma_fma_b0_tile_tournament ... ignored, requires a quiet RTX5090 and balances all exact TMA-FMA B0 tile orders
+test fixed_sm120_half_exact_selector_routes_match_incumbent_bits_and_graphs ... ignored, requires an RTX5090 with the Fixed module loaded by NVRTC 13.2
+test fixed_sm120_half_graph_replay_is_bit_exact_and_cold_capture_fails ... ignored, requires an SM120 CUDA device
+test fixed_sm120_half_graph_warmup_retains_more_than_32_live_maps ... ignored, requires an SM120 CUDA device
+test fixed_sm120_half_hot_census ... ignored, requires an SM120 CUDA device and emits performance data
+test fixed_sm120_half_is_batch_prefix_invariant_across_selectors ... ignored, requires an SM120 CUDA device
+test fixed_sm120_half_legacy_overlay_requalification ... ignored, requires a quiet RTX5090 with NVRTC 13.2 and a create-new JSONL sink
+test fixed_sm120_half_loaded_resources_are_safe ... ignored, requires an RTX5090 with the Fixed module loaded by NVRTC 13.2
+test fixed_sm120_half_remaining_gap_all_tile_screen ... ignored, requires a quiet 170-SM CC12 CUDA device and screens every SM120 half tile
+test fixed_sm120_half_retained_tiles_guarded_tails_are_bit_exact ... ignored, requires an SM120 CUDA device
+test fixed_sm120_half_selector_census ... ignored, requires an SM120 CUDA device and emits selector data
+test fixed_sm120_half_selector_paired_boundaries ... ignored, requires a quiet 170-SM CC12 CUDA device and emits paired selector boundary evidence
+test fixed_sm120_half_selector_paired_gaps ... ignored, requires a quiet 170-SM CC12 CUDA device and emits paired selector evidence
+test fixed_sm120_half_selector_paired_shallow_boundaries ... ignored, requires a quiet 170-SM CC12 CUDA device and emits paired shallow selector boundary evidence
+test fixed_sm120_half_tma_matches_portable_bits ... ignored, requires an SM120 CUDA device
+test fixed_sm120_nobias_t256_spike_mapping_and_graph_geometry ... ok
+test fixed_sm120_tf32_bd_expected_portable_rejection_is_terminal ... ok
+test fixed_sm120_tf32_bd_paired_forced_routes ... ignored, requires a quiet 170-SM CC12.0 CUDA device and emits raw paired TF32 B/D evidence
+test fixed_sm120_tf32_bd_paired_inventory_is_frozen ... ok
+test fixed_sm120_tf32_graph_replay_is_bit_exact_and_cold_capture_fails ... ignored, requires an SM120 CUDA device
+test fixed_sm120_tf32_is_portable_bit_exact_and_selected ... ignored, requires an SM120 CUDA device
+test fixed_sm120_tf32_producer_warp_candidate_screen ... ignored, requires a quiet RTX 5090 and screens the SM120 TF32 producer-warp candidate
+test fixed_sm120_tf32_production_routes_match_forced_bits_and_graphs ... ignored, requires a CC12.0 170-SM CUDA device
+test fixed_sm89_exact_n64_paired_admission ... ignored, requires exclusive pinned Ada, actual NVRTC candidate admission and paired evidence output
+test fixed_sm89_tf32_c_auto_prefix_special_bias_graph_bits ... ignored, requires exclusive CC8.9/142-SM CUDA13.2 Ada device
+test fixed_tc16_occupancy_cliff_paired_census ... ignored, requires a quiet SM89 CUDA device and emits Tc16 occupancy evidence
+test fixed_tf32_forward_is_batch_prefix_invariant ... ignored, requires an SM80+ CUDA device
+test fixed_tf32_forward_is_repeatable_and_tile_invariant ... ignored, requires an SM80+ CUDA device
+test fixed_tf32_hot_shapes_smoke ... ignored, requires an SM80+ CUDA device and emits TF32 performance data
+test fixed_thin_selector_grid_smoke ... ignored, requires an SM80+ CUDA device and emits dense selector data
+test fixed_thin_selector_k_axis_smoke ... ignored, requires an SM80+ CUDA device and emits selector K-axis data
+test fixed_thin_selector_large_m_smoke ... ignored, requires an SM80+ CUDA device and emits selector boundary data
+test fixed_thin_selector_sm89_paired_boundary ... ignored, requires a quiet SM89 CUDA device and emits paired selector evidence
+test fixed_thin_selector_smoke ... ignored, requires an SM80+ CUDA device and emits selector performance data
+test fixed_vs_triad_pairwise_census ... ignored, requires a quiet SM120 CUDA device and emits the Fixed/Triad pairwise census
+test fixed_w64_deep_k_grid_smoke ... ignored, requires an SM120 CUDA device and emits W64 selector data
+test forced_fixed_launch_uses_structured_arguments ... ok
+test forced_fixed_portable_tiles_execute ... ignored, requires an SM80+ CUDA device
+test half_sm120_exceptional_values_match_portable_bits ... ignored, requires an SM120 CUDA device
+test half_to_f32_hot_shapes_smoke ... ignored, requires an SM80+ CUDA device and emits mixed-output data
+test half_to_f32_portable_k_axis_smoke ... ignored, requires a quiet SM80+ CUDA device and emits mixed-output K-axis data
+test half_to_f32_portable_ladder_matches_legacy_bits ... ignored, requires an SM80+ CUDA device
+test half_to_f32_portable_ladder_smoke ... ignored, requires a quiet SM80+ CUDA device and emits mixed-output ladder data
+test half_to_f32_portable_selector_grid_smoke ... ignored, requires a quiet SM80+ CUDA device and emits mixed-output selector data
+test half_to_f32_sm120_graph_replay_is_bit_exact_and_cold_capture_fails ... ignored, requires an SM120 CUDA device
+test half_to_f32_sm120_hot_b_auto_vs_forced ... ignored, requires a quiet 170-SM SM120 CUDA device and diagnoses AUTO launch overhead
+test half_to_f32_sm120_hot_b_paired_tile_screen ... ignored, requires a quiet 170-SM SM120 CUDA device and screens mixed-output hot B
+test half_to_f32_sm120_tma_hot_shapes_smoke ... ignored, requires a quiet SM120 CUDA device and emits mixed-output TMA data
+test half_to_f32_sm120_tma_ladder_matches_portable_bits ... ignored, requires an SM120 CUDA device
+test tcw64_matches_tc128_bits ... ignored, requires an SM80+ CUDA device
+test triad_sm120_tf32_nn_reference_smoke ... ignored, requires an SM120 CUDA device and emits specialized TF32 reference data
+
+test result: ok. 46 passed; 0 failed; 63 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
++ suite_exit=0
++ sha256sum tests/gemm_bi_fixed_performance.rs
+3873a40ac14a05615c5758bb3181948e6e4944486400387552de08a8ecb90d3a  tests/gemm_bi_fixed_performance.rs
++ find /root/target-ada-half-direct-pair-cuda132-20260906/release/deps -maxdepth 1 -type f -name 'gemm_bi_fixed_performance-*' -perm -111 -print -exec sha256sum '{}' ';'
+/root/target-ada-half-direct-pair-cuda132-20260906/release/deps/gemm_bi_fixed_performance-429f558dd590762a
+422499ce8485e998412effac9ab172e6341704225536a51c90d73678aeb3d421  /root/target-ada-half-direct-pair-cuda132-20260906/release/deps/gemm_bi_fixed_performance-429f558dd590762a
++ echo BUILD_EXIT=0 HELPER_EXIT=0 SUITE_EXIT=0
+BUILD_EXIT=0 HELPER_EXIT=0 SUITE_EXIT=0
++ '[' 0 -ne 0 ']'
++ '[' 0 -ne 0 ']'
++ exit 0

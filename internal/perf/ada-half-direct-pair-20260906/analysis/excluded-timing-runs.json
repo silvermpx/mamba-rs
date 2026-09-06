@@ -1,0 +1,22 @@
+{
+  "performance_qualification": false,
+  "reason": "Both pre/post nvidia-smi GPU queries used unsupported multiprocessor_count; wrapper ignored their errors and returned the benchmark exit. CUDA test/schema/bit proof can pass but external telemetry is incomplete. Preserve logs; fresh whole runs required.",
+  "runs": [
+    {
+      "path": "internal/perf/ada-half-direct-pair-20260906/direct-cuda128-w21.log",
+      "sha256": "8fa1cb929f5cb2d5784eea507240aec2b279c3553857df4b110ba00db2cac275",
+      "raw_query_failures": 2
+    },
+    {
+      "path": "internal/perf/ada-half-direct-pair-20260906/direct-cuda130-w21.log",
+      "sha256": "3a022a2bf6b41bc9c9b1090e33ca85f03d1b3d68096b8a9708312d2e5eb874f2",
+      "raw_query_failures": 2
+    },
+    {
+      "path": "internal/perf/ada-half-direct-pair-20260906/direct-cuda128-w101.log",
+      "sha256": "a6138c2e5a4a1851b441de34fc87b6a5501d8d99bdba8a448994d38da8b9a327",
+      "raw_query_failures": 2
+    }
+  ],
+  "committed_three_arm_census_affected": false
+}

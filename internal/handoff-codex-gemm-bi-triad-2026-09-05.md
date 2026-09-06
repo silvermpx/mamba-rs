@@ -9,6 +9,19 @@ the dated progress log, 900 lines), then `internal/agent-operational-rules.md`
 
 ## 1. What the work is
 
+Latest checkpoint (2026-09-06): the three-toolkit Ada half production census is
+committed as `98ee1c26`. The follow-up two-forced-arm harness has matching CUDA
+12.8/13.0/13.2 functional passes (46 nonignored tests, 8-record eager and
+80-record full smokes per toolkit), with static review approved. Evidence and
+the corrected timing wrapper are in
+`internal/perf/ada-half-direct-pair-20260906/`. This is a PARTIAL checkpoint:
+three original timing attempts are excluded because telemetry failed; fresh
+fail-closed 21/101 measurements and final remote identity reconciliation are
+pending. SSH to Ada stopped working through its IPv6 tunnel; no remote job is
+active and no network/security settings were changed. Restore access before
+resuming. New half candidates remain force-selectable, AUTO and tuning revision
+41 are unchanged, and no final fastest-route or full-inference claim is made.
+
 mamba-rs ships two GEMM families: the Fixed (inference) family
 (`src/mamba_ssm/gpu/gemm_bi_fixed.rs`, tuned to the maximum earlier) and the
 deterministic training triad (`src/mamba_ssm/gpu/gemm_bi_triad/`, kernels under

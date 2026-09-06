@@ -10414,26 +10414,144 @@ fn fixed_sm120_exact_tma_fma_b0_tile_tournament() {
 }
 
 fn fixed_ada_filter(name: &str, inventory: &[&str]) -> Vec<usize> {
-    match std::env::var(name) {
-        Err(std::env::VarError::NotPresent) => (0..inventory.len()).collect(),
+    let requested = match std::env::var(name) {
+        Ok(value) => Some(value),
+        Err(std::env::VarError::NotPresent) => None,
         Err(error) => panic!("read {name}: {error}"),
-        Ok(value) => {
-            assert!(!value.is_empty(), "{name} must not be empty");
-            let mut seen = std::collections::BTreeSet::new();
-            value
-                .split(',')
-                .map(|id| {
-                    let index = inventory
-                        .iter()
-                        .position(|candidate| *candidate == id)
-                        .unwrap_or_else(|| {
-                            panic!("unknown {name} entry {id:?}; expected {inventory:?}")
-                        });
-                    assert!(seen.insert(index), "duplicate {name} entry {id:?}");
-                    index
-                })
-                .collect()
+    };
+    fixed_ada_direct_pair_filter(name, inventory, requested.as_deref())
+        .unwrap_or_else(|error| panic!("{error}"))
+}
+
+fn fixed_ada_direct_pair_filter(
+    name: &str,
+    inventory: &[&str],
+    requested: Option<&str>,
+) -> Result<Vec<usize>, String> {
+    let Some(value) = requested else {
+        return Ok((0..inventory.len()).collect());
+    };
+    if value.is_empty() {
+        return Err(format!("{name} must not be empty"));
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    value
+        .split(',')
+        .map(|id| {
+            let index = inventory
+                .iter()
+                .position(|candidate| *candidate == id)
+                .ok_or_else(|| format!("unknown {name} entry {id:?}; expected {inventory:?}"))?;
+            if !seen.insert(index) {
+                return Err(format!("duplicate {name} entry {id:?}"));
+            }
+            Ok(index)
+        })
+        .collect()
+}
+
+fn fixed_ada_direct_pair_reject_vendor_tiles(requested: Option<&str>) -> Result<(), String> {
+    match requested {
+        None => Ok(()),
+        Some(value) => Err(format!(
+            "MAMBA_FIXED_VENDOR_TILES must be absent for direct pairing, got {value:?}"
+        )),
+    }
+}
+
+fn fixed_ada_direct_pair_ordered_window(
+    order: &str,
+    mut pipeline: impl FnMut() -> f64,
+    mut swizzle: impl FnMut() -> f64,
+) -> Result<(f64, f64), String> {
+    Ok(match order {
+        "pipeline_swizzle" => (pipeline(), swizzle()),
+        "swizzle_pipeline" => {
+            let swizzle_us = swizzle();
+            (pipeline(), swizzle_us)
         }
+        _ => return Err(format!("unknown direct-pair order {order:?}")),
+    })
+}
+
+fn fixed_ada_direct_pair_ratio_quantiles(
+    pipeline: &[f64],
+    swizzle: &[f64],
+) -> ((f64, f64), (f64, f64)) {
+    assert_eq!(pipeline.len(), swizzle.len(), "paired sample count");
+    assert!(!pipeline.is_empty(), "paired samples must not be empty");
+    let mut swizzle_over_pipeline = swizzle
+        .iter()
+        .zip(pipeline)
+        .map(|(swizzle, pipeline)| swizzle / pipeline)
+        .collect::<Vec<_>>();
+    let mut pipeline_over_swizzle = pipeline
+        .iter()
+        .zip(swizzle)
+        .map(|(pipeline, swizzle)| pipeline / swizzle)
+        .collect::<Vec<_>>();
+    swizzle_over_pipeline.sort_by(f64::total_cmp);
+    pipeline_over_swizzle.sort_by(f64::total_cmp);
+    (
+        (
+            percentile(&swizzle_over_pipeline, 0.5),
+            percentile(&swizzle_over_pipeline, 0.95),
+        ),
+        (
+            percentile(&pipeline_over_swizzle, 0.5),
+            percentile(&pipeline_over_swizzle, 0.95),
+        ),
+    )
+}
+
+#[test]
+fn fixed_ada_direct_pair_executes_real_windows_in_requested_order() {
+    let trace = RefCell::new(Vec::new());
+    let (pipeline, swizzle) = fixed_ada_direct_pair_ordered_window(
+        "swizzle_pipeline",
+        || {
+            trace.borrow_mut().push("pipeline");
+            11.0
+        },
+        || {
+            trace.borrow_mut().push("swizzle");
+            7.0
+        },
+    )
+    .expect("valid reversed direct-pair order");
+    assert_eq!((pipeline, swizzle), (11.0, 7.0));
+    assert_eq!(&*trace.borrow(), &["swizzle", "pipeline"]);
+
+    assert!(
+        fixed_ada_direct_pair_ordered_window("pipeline_auto", || 1.0, || 2.0).is_err(),
+        "AUTO-bearing or foreign orders must fail closed"
+    );
+}
+
+#[test]
+fn fixed_ada_direct_pair_quantiles_use_same_index_pairs_in_both_directions() {
+    let pipeline = [100.0; 5];
+    let swizzle = [50.0, 80.0, 80.0, 120.0, 120.0];
+    let ((swizzle_p50, swizzle_p95), (pipeline_p50, pipeline_p95)) =
+        fixed_ada_direct_pair_ratio_quantiles(&pipeline, &swizzle);
+    assert_eq!((swizzle_p50, swizzle_p95), (0.8, 1.2));
+    assert_eq!((pipeline_p50, pipeline_p95), (1.25, 2.0));
+    assert_ne!(pipeline_p95, 1.0 / swizzle_p95);
+}
+
+#[test]
+fn fixed_ada_direct_pair_filters_are_strict_and_vendor_tiles_are_forbidden() {
+    assert_eq!(
+        fixed_ada_direct_pair_filter("rows", &["bf16", "f16"], Some("f16,bf16"))
+            .expect("valid reordered row filter"),
+        vec![1, 0]
+    );
+    for invalid in [Some(""), Some("bf16,bf16"), Some("f32"), Some("bf16,")] {
+        assert!(fixed_ada_direct_pair_filter("rows", &["bf16", "f16"], invalid).is_err());
+    }
+    assert!(fixed_ada_direct_pair_reject_vendor_tiles(None).is_ok());
+    for supplied in [Some(""), Some("Tc128Sm89Pipeline")] {
+        assert!(fixed_ada_direct_pair_reject_vendor_tiles(supplied).is_err());
     }
 }
 
@@ -13277,6 +13395,492 @@ fn fixed_ada_forced_rungs_paired_precision_cublas() {
         "{{\"schema\":\"MambaBiFixedExplicitForcedRungCompleteV2\",{},{},\"records\":{records},\"rejected\":{rejected},\"passed\":true}}",
         device_metadata,
         fixed_exact_comparator_completion_metadata(),
+    );
+}
+
+fn fixed_ada_direct_pair_poison_complement(
+    ctx: &GpuCtx,
+    output: &DtypedBuf,
+    expected: &[u8],
+    label: &str,
+) {
+    assert_eq!(output.size_bytes(), expected.len(), "{label} poison length");
+    let poison = expected.iter().map(|byte| !byte).collect::<Vec<_>>();
+    assert_eq!(
+        unsafe {
+            cudarc::driver::sys::cuMemcpyHtoDAsync_v2(
+                output.cached_ptr(),
+                poison.as_ptr().cast(),
+                poison.len(),
+                ctx.stream.cu_stream(),
+            )
+        },
+        cudarc::driver::sys::CUresult::CUDA_SUCCESS,
+        "{label} complement poison upload"
+    );
+    ctx.stream
+        .synchronize()
+        .unwrap_or_else(|error| panic!("{label} complement poison synchronization: {error}"));
+}
+
+#[test]
+#[ignore = "requires MAMBA_FIXED_ADA_DIRECT_PAIR=1 and an exclusive quiet CC8.9 GPU; emits direct forced pipeline/swizzle evidence"]
+fn fixed_ada_half_forced_direct_pair() {
+    use cudarc::cublas::sys::cublasComputeType_t;
+
+    assert_eq!(
+        std::env::var("MAMBA_FIXED_ADA_DIRECT_PAIR").as_deref(),
+        Ok("1"),
+        "set MAMBA_FIXED_ADA_DIRECT_PAIR=1 to run direct forced pairing"
+    );
+    if cfg!(debug_assertions) {
+        panic!("Ada half direct pairing requires --release");
+    }
+    let requested_tiles = match std::env::var("MAMBA_FIXED_VENDOR_TILES") {
+        Ok(value) => Some(value),
+        Err(std::env::VarError::NotPresent) => None,
+        Err(error) => panic!("read MAMBA_FIXED_VENDOR_TILES: {error}"),
+    };
+    fixed_ada_direct_pair_reject_vendor_tiles(requested_tiles.as_deref())
+        .expect("direct-pair tile boundary");
+
+    let all_rows = fixed_explicit_vendor_row_specs();
+    let rows = [all_rows[0], all_rows[1]];
+    let selected_rows = fixed_ada_filter("MAMBA_FIXED_ADA_ROWS", &["bf16", "f16"]);
+    let labels = FIXED_AUTO_VENDOR_EXACT_CELLS
+        .iter()
+        .map(|cell| cell.label)
+        .collect::<Vec<_>>();
+    let selected_cells = fixed_ada_filter("MAMBA_FIXED_ADA_CELLS", &labels);
+    let biases = fixed_ada_filter("MAMBA_FIXED_ADA_BIAS", &["0", "1"]);
+    let requested_paths = match std::env::var("MAMBA_FIXED_VENDOR_PATHS") {
+        Ok(value) => Some(value),
+        Err(std::env::VarError::NotPresent) => None,
+        Err(error) => panic!("read MAMBA_FIXED_VENDOR_PATHS: {error}"),
+    };
+    let paths =
+        fixed_explicit_vendor_paths(requested_paths.as_deref()).expect("direct-pair path filter");
+    let windows = match std::env::var("MAMBA_FIXED_ADA_WINDOWS") {
+        Ok(value) => value
+            .parse::<usize>()
+            .expect("MAMBA_FIXED_ADA_WINDOWS must be an integer"),
+        Err(std::env::VarError::NotPresent) => 101,
+        Err(error) => panic!("read MAMBA_FIXED_ADA_WINDOWS: {error}"),
+    };
+    assert!(
+        (1..=10_001).contains(&windows),
+        "direct-pair windows must be in 1..=10001"
+    );
+
+    fixed_sm120_tf32_bd_environment_preflight("Ada half direct forced pipeline/swizzle")
+        .expect("Ada half direct-pair environment preflight");
+    let device = GpuDevice::new(0).expect("Ada half direct-pair CUDA device");
+    let requested_cc = match std::env::var("MAMBA_FIXED_VENDOR_EXACT_CC") {
+        Ok(value) => Some(value),
+        Err(std::env::VarError::NotPresent) => None,
+        Err(error) => panic!("read MAMBA_FIXED_VENDOR_EXACT_CC: {error}"),
+    };
+    fixed_explicit_vendor_admit_cc(requested_cc.as_deref(), device.compute_capability)
+        .expect("Ada half direct-pair exact-CC admission");
+    assert_eq!(device.compute_capability, (8, 9), "direct-pair CC");
+    assert_eq!(device.multiprocessor_count(), 142, "direct-pair SM count");
+    let ctx = GpuCtx::new(&device).expect("Ada half direct-pair GPU context");
+    let compiler = ctx.kernels.compiler_identity();
+    assert!(
+        compiler.nvrtc_library_known,
+        "direct pairing requires a known NVRTC library"
+    );
+    assert!(
+        matches!(compiler.nvrtc_version, (12, 8) | (13, 0) | (13, 2)),
+        "unsupported direct-pair NVRTC {:?}",
+        compiler.nvrtc_version
+    );
+    let expected_auto = if compiler.nvrtc_version == (13, 2) {
+        FixedTile::Tc128Sm89Pipeline
+    } else {
+        FixedTile::Tc128
+    };
+    let fixed_artifact = ctx.kernels.artifact_set_identity().fixed;
+    let device_metadata = format!(
+        concat!(
+            "\"cc\":\"{}.{}\",\"sm_count\":{},\"nvrtc\":[{},{}],",
+            "\"compiler_target\":\"{:?}\",\"fixed_source_digest\":\"{}\",",
+            "\"fixed_invocation_digest\":\"{}\",\"fixed_artifact_digest\":\"{}\",",
+            "\"header_manifest_digest\":\"{}\",\"nvrtc_library_domain\":\"{}\",",
+            "\"nvrtc_library_known\":true"
+        ),
+        device.compute_capability.0,
+        device.compute_capability.1,
+        device.multiprocessor_count(),
+        compiler.nvrtc_version.0,
+        compiler.nvrtc_version.1,
+        compiler.target,
+        digest_hex(&compiler.source_digest),
+        digest_hex(&compiler.invocation_digest),
+        digest_hex(&fixed_artifact.artifact_digest),
+        digest_hex(&compiler.header_manifest_digest),
+        digest_hex(&compiler.nvrtc_library_domain),
+    );
+
+    let pipeline_tile = FixedTile::Tc128Sm89Pipeline;
+    let swizzle_tile = FixedTile::Tc128Sm89Swizzle;
+    let mut records = 0usize;
+    for row_index in selected_rows {
+        let row_spec = rows[row_index];
+        let row = row_spec.name;
+        let input_dtype = row_spec.input_dtype;
+        let output_dtype = row_spec.output_dtype;
+        assert_eq!(input_dtype, output_dtype, "direct-pair homogeneous row");
+        configure_fixed_auto_vendor_custom(&ctx, row_spec.policy);
+        for &cell_index in &selected_cells {
+            let cell = FIXED_AUTO_VENDOR_EXACT_CELLS[cell_index];
+            let shape = cell.shape;
+            let elements = shape.m * shape.n;
+            let a = DtypedBuf::zeros(&ctx.stream, shape.m * shape.k, input_dtype)
+                .expect("direct-pair A");
+            let b = DtypedBuf::zeros(&ctx.stream, shape.k * shape.n, input_dtype)
+                .expect("direct-pair B");
+            a.upload_f32(&ctx.stream, &synth(shape.m * shape.k, 0x0ada_a001))
+                .expect("direct-pair A upload");
+            b.upload_f32(&ctx.stream, &synth(shape.k * shape.n, 0x0ada_b001))
+                .expect("direct-pair B upload");
+            let auto =
+                DtypedBuf::zeros(&ctx.stream, elements, output_dtype).expect("direct-pair AUTO C");
+            let pipeline = DtypedBuf::zeros(&ctx.stream, elements, output_dtype)
+                .expect("direct-pair pipeline C");
+            let swizzle = DtypedBuf::zeros(&ctx.stream, elements, output_dtype)
+                .expect("direct-pair swizzle C");
+            let reference = DtypedBuf::zeros(&ctx.stream, elements, WeightDtype::F32)
+                .expect("direct-pair PEDANTIC reference C");
+            let bias = DtypedBuf::zeros(&ctx.stream, shape.n, WeightDtype::F32)
+                .expect("direct-pair F32 bias");
+            bias.upload_f32(&ctx.stream, &synth(shape.n, 0x0ada_b1a5))
+                .expect("direct-pair F32 bias upload");
+
+            for &bias_index in &biases {
+                let has_bias = bias_index == 1;
+                let auto_ops = FixedFwdOperands {
+                    c: typed(&auto, output_dtype),
+                    x: typed(&a, input_dtype),
+                    w: typed(&b, input_dtype),
+                    bias_ptr: has_bias.then(|| bias.cached_ptr()),
+                };
+                let pipeline_ops = FixedFwdOperands {
+                    c: typed(&pipeline, output_dtype),
+                    ..auto_ops
+                };
+                let swizzle_ops = FixedFwdOperands {
+                    c: typed(&swizzle, output_dtype),
+                    ..auto_ops
+                };
+                let reference_ops = FixedFwdOperands {
+                    c: typed(&reference, WeightDtype::F32),
+                    ..auto_ops
+                };
+
+                assert_eq!(
+                    launch_fixed_auto_vendor_custom(&ctx, auto_ops, shape),
+                    expected_auto,
+                    "direct-pair actual AUTO changed for {row}/{} bias={has_bias}",
+                    cell.label
+                );
+                let auto_raw = fixed_explicit_vendor_raw_bytes(&ctx, &auto);
+                let auto_bits = f32_bits(&ctx, &auto, elements);
+                fixed_ada_vendor_launch(
+                    &ctx,
+                    reference_ops,
+                    shape,
+                    cublasComputeType_t::CUBLAS_COMPUTE_32F_PEDANTIC,
+                );
+                let reference_bits = f32_bits(&ctx, &reference, elements);
+                let auto_error = fixed_ada_normalized_error(
+                    &auto_bits,
+                    &reference_bits,
+                    row_spec.custom_tolerance,
+                    &format!("direct-pair AUTO {row}/{} bias={has_bias}", cell.label),
+                );
+
+                for tile in [pipeline_tile, swizzle_tile] {
+                    let spec = fixed_force_spec(row, device.compute_capability, tile)
+                        .unwrap_or_else(|error| panic!("direct-pair force spec: {error}"));
+                    assert_eq!(
+                        (spec.input_dtype, spec.output_dtype),
+                        (input_dtype, output_dtype)
+                    );
+                }
+                let pipeline_launch = || {
+                    fixed_forward_with_tile(&ctx, pipeline_ops, shape, pipeline_tile)
+                        .unwrap_or_else(|error| panic!("direct-pair pipeline launch: {error}"));
+                };
+                let swizzle_launch = || {
+                    fixed_forward_with_tile(&ctx, swizzle_ops, shape, swizzle_tile)
+                        .unwrap_or_else(|error| panic!("direct-pair swizzle launch: {error}"));
+                };
+                pipeline_launch();
+                let pipeline_raw = fixed_explicit_vendor_raw_bytes(&ctx, &pipeline);
+                let pipeline_bits = f32_bits(&ctx, &pipeline, elements);
+                swizzle_launch();
+                let swizzle_raw = fixed_explicit_vendor_raw_bytes(&ctx, &swizzle);
+                let swizzle_bits = f32_bits(&ctx, &swizzle, elements);
+                assert_eq!(pipeline_raw, auto_raw, "direct-pair pipeline/AUTO raw bits");
+                assert_eq!(swizzle_raw, auto_raw, "direct-pair swizzle/AUTO raw bits");
+                let pipeline_error = fixed_ada_normalized_error(
+                    &pipeline_bits,
+                    &reference_bits,
+                    row_spec.custom_tolerance,
+                    &format!("direct-pair pipeline {row}/{} bias={has_bias}", cell.label),
+                );
+                let swizzle_error = fixed_ada_normalized_error(
+                    &swizzle_bits,
+                    &reference_bits,
+                    row_spec.custom_tolerance,
+                    &format!("direct-pair swizzle {row}/{} bias={has_bias}", cell.label),
+                );
+
+                fixed_ada_direct_pair_poison_complement(
+                    &ctx,
+                    &pipeline,
+                    &pipeline_raw,
+                    "direct-pair pipeline repeat",
+                );
+                pipeline_launch();
+                assert_eq!(
+                    fixed_explicit_vendor_raw_bytes(&ctx, &pipeline),
+                    pipeline_raw,
+                    "direct-pair pipeline repeat bits"
+                );
+                fixed_ada_direct_pair_poison_complement(
+                    &ctx,
+                    &swizzle,
+                    &swizzle_raw,
+                    "direct-pair swizzle repeat",
+                );
+                swizzle_launch();
+                assert_eq!(
+                    fixed_explicit_vendor_raw_bytes(&ctx, &swizzle),
+                    swizzle_raw,
+                    "direct-pair swizzle repeat bits"
+                );
+
+                let pipeline_graph = unsafe {
+                    capture_into_graph(&ctx.stream, || {
+                        pipeline_launch();
+                        Ok(())
+                    })
+                }
+                .expect("capture direct-pair pipeline graph");
+                let swizzle_graph = unsafe {
+                    capture_into_graph(&ctx.stream, || {
+                        swizzle_launch();
+                        Ok(())
+                    })
+                }
+                .expect("capture direct-pair swizzle graph");
+                let pipeline_inventory = fixed_explicit_vendor_graph_inventory(
+                    &pipeline_graph,
+                    "pipeline",
+                    Some((pipeline_tile, input_dtype, pipeline_ops, shape)),
+                    None,
+                );
+                let swizzle_inventory = fixed_explicit_vendor_graph_inventory(
+                    &swizzle_graph,
+                    "swizzle",
+                    Some((swizzle_tile, input_dtype, swizzle_ops, shape)),
+                    None,
+                );
+                let graph_inventory = format!(
+                    "{{\"pipeline\":{pipeline_inventory},\"swizzle\":{swizzle_inventory}}}"
+                );
+
+                for &path in &paths {
+                    let pipeline_run = || {
+                        if path == "graph" {
+                            pipeline_graph
+                                .launch()
+                                .expect("direct-pair pipeline graph replay");
+                        } else {
+                            pipeline_launch();
+                        }
+                    };
+                    let swizzle_run = || {
+                        if path == "graph" {
+                            swizzle_graph
+                                .launch()
+                                .expect("direct-pair swizzle graph replay");
+                        } else {
+                            swizzle_launch();
+                        }
+                    };
+
+                    let replay_checks = if path == "graph" { 2 } else { 1 };
+                    for replay in 0..replay_checks {
+                        fixed_ada_direct_pair_poison_complement(
+                            &ctx,
+                            &pipeline,
+                            &pipeline_raw,
+                            "direct-pair pipeline path check",
+                        );
+                        pipeline_run();
+                        assert_eq!(
+                            fixed_explicit_vendor_raw_bytes(&ctx, &pipeline),
+                            pipeline_raw,
+                            "direct-pair pipeline {path} replay {replay} bits"
+                        );
+                        fixed_ada_direct_pair_poison_complement(
+                            &ctx,
+                            &swizzle,
+                            &swizzle_raw,
+                            "direct-pair swizzle path check",
+                        );
+                        swizzle_run();
+                        assert_eq!(
+                            fixed_explicit_vendor_raw_bytes(&ctx, &swizzle),
+                            swizzle_raw,
+                            "direct-pair swizzle {path} replay {replay} bits"
+                        );
+                    }
+                    for _ in 0..128 {
+                        pipeline_run();
+                        swizzle_run();
+                    }
+                    ctx.stream.synchronize().expect("direct-pair warmup sync");
+                    let pipeline_iterations = fixed_auto_vendor_iterations(
+                        fixed_ada_event_window_us(&ctx, 16, pipeline_run),
+                    );
+                    let swizzle_iterations = fixed_auto_vendor_iterations(
+                        fixed_ada_event_window_us(&ctx, 16, swizzle_run),
+                    );
+
+                    for order in ["pipeline_swizzle", "swizzle_pipeline"] {
+                        fixed_ada_direct_pair_poison_complement(
+                            &ctx,
+                            &pipeline,
+                            &pipeline_raw,
+                            "direct-pair pipeline pre-order",
+                        );
+                        pipeline_run();
+                        assert_eq!(
+                            fixed_explicit_vendor_raw_bytes(&ctx, &pipeline),
+                            pipeline_raw,
+                            "direct-pair pipeline {path}/{order} pre-timing bits"
+                        );
+                        fixed_ada_direct_pair_poison_complement(
+                            &ctx,
+                            &swizzle,
+                            &swizzle_raw,
+                            "direct-pair swizzle pre-order",
+                        );
+                        swizzle_run();
+                        assert_eq!(
+                            fixed_explicit_vendor_raw_bytes(&ctx, &swizzle),
+                            swizzle_raw,
+                            "direct-pair swizzle {path}/{order} pre-timing bits"
+                        );
+
+                        let mut pipeline_samples = Vec::with_capacity(windows);
+                        let mut swizzle_samples = Vec::with_capacity(windows);
+                        for _ in 0..windows {
+                            let (pipeline_us, swizzle_us) = fixed_ada_direct_pair_ordered_window(
+                                order,
+                                || {
+                                    fixed_ada_event_window_us(
+                                        &ctx,
+                                        pipeline_iterations,
+                                        pipeline_run,
+                                    )
+                                },
+                                || fixed_ada_event_window_us(&ctx, swizzle_iterations, swizzle_run),
+                            )
+                            .expect("known direct-pair order");
+                            pipeline_samples.push(pipeline_us);
+                            swizzle_samples.push(swizzle_us);
+                        }
+                        assert_eq!(
+                            fixed_explicit_vendor_raw_bytes(&ctx, &pipeline),
+                            pipeline_raw,
+                            "direct-pair pipeline {path}/{order} post-timing bits"
+                        );
+                        assert_eq!(
+                            fixed_explicit_vendor_raw_bytes(&ctx, &swizzle),
+                            swizzle_raw,
+                            "direct-pair swizzle {path}/{order} post-timing bits"
+                        );
+                        let mut pipeline_sorted = pipeline_samples.clone();
+                        let mut swizzle_sorted = swizzle_samples.clone();
+                        pipeline_sorted.sort_by(f64::total_cmp);
+                        swizzle_sorted.sort_by(f64::total_cmp);
+                        let ((swizzle_p50, swizzle_p95), (pipeline_p50, pipeline_p95)) =
+                            fixed_ada_direct_pair_ratio_quantiles(
+                                &pipeline_samples,
+                                &swizzle_samples,
+                            );
+                        println!(
+                            concat!(
+                                "{{\"schema\":\"MambaBiFixedHalfDirectPairV1\",{},",
+                                "\"tuning_table_revision\":{},\"row\":\"{}\",\"cell\":\"{}\",",
+                                "\"m\":{},\"k\":{},\"n\":{},\"dtype\":\"{}\",",
+                                "\"input_dtype\":\"{}\",\"output_dtype\":\"{}\",\"op\":\"nn\",",
+                                "\"path\":\"{}\",\"bias\":{},\"alpha\":1,\"beta\":0,",
+                                "\"timing\":\"cuda_events\",\"pipeline_tile\":\"{:?}\",",
+                                "\"swizzle_tile\":\"{:?}\",\"graphs\":{},",
+                                "\"actual_auto_tile\":\"{:?}\",\"auto_bits_equal\":true,",
+                                "\"raw_storage_bits_equal\":true,\"repeat_bits_equal\":true,",
+                                "\"graph_replay_bits_equal\":{},",
+                                "\"reference_compute\":\"CUBLAS_COMPUTE_32F_PEDANTIC\",",
+                                "\"reference_output_dtype\":\"f32\",",
+                                "\"custom_normalized_error_tolerance\":{},",
+                                "\"auto_normalized_error\":{},\"pipeline_normalized_error\":{},",
+                                "\"swizzle_normalized_error\":{},\"order\":\"{}\",\"windows\":{},",
+                                "\"pipeline_iterations\":{},\"swizzle_iterations\":{},",
+                                "\"pipeline_p50_us\":{},\"swizzle_p50_us\":{},",
+                                "\"pipeline_samples_us\":{:?},\"swizzle_samples_us\":{:?},",
+                                "\"swizzle_over_pipeline_p50\":{},\"swizzle_over_pipeline_p95\":{},",
+                                "\"pipeline_over_swizzle_p50\":{},\"pipeline_over_swizzle_p95\":{}}}"
+                            ),
+                            device_metadata,
+                            TUNING_TABLE_REVISION,
+                            row,
+                            cell.label,
+                            shape.m,
+                            shape.k,
+                            shape.n,
+                            input_dtype.as_str(),
+                            input_dtype.as_str(),
+                            output_dtype.as_str(),
+                            path,
+                            has_bias,
+                            pipeline_tile,
+                            swizzle_tile,
+                            graph_inventory,
+                            expected_auto,
+                            path == "graph",
+                            row_spec.custom_tolerance,
+                            auto_error,
+                            pipeline_error,
+                            swizzle_error,
+                            order,
+                            windows,
+                            pipeline_iterations,
+                            swizzle_iterations,
+                            percentile(&pipeline_sorted, 0.5),
+                            percentile(&swizzle_sorted, 0.5),
+                            pipeline_samples,
+                            swizzle_samples,
+                            swizzle_p50,
+                            swizzle_p95,
+                            pipeline_p50,
+                            pipeline_p95,
+                        );
+                        records += 1;
+                    }
+                }
+            }
+        }
+    }
+    assert!(records > 0, "direct pairing measured no selected cohorts");
+    println!(
+        "{{\"schema\":\"MambaBiFixedHalfDirectPairCompleteV1\",{},\"tuning_table_revision\":{},\"records\":{records},\"rejected\":0,\"passed\":true}}",
+        device_metadata, TUNING_TABLE_REVISION,
     );
 }
 

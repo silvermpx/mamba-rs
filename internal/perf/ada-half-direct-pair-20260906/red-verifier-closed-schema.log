@@ -1,0 +1,14 @@
+Run options: --name test_unrelated_timing_or_admission_fields_cannot_enter_closed_schema --seed 38728
+
+# Running:
+
+F
+
+Finished in 0.005658s, 176.7409 runs/s, 176.7409 assertions/s.
+
+  1) Failure:
+HalfDirectPairVerifierTest#test_unrelated_timing_or_admission_fields_cannot_enter_closed_schema [.superpowers/sdd/handoff-codex-gemm-bi-triad-2026-09-05/test-verify-half-direct-pair.rb:158]:
+auto_samples_us.
+RuntimeError expected but nothing was raised.
+
+1 runs, 1 assertions, 1 failures, 0 errors, 0 skips

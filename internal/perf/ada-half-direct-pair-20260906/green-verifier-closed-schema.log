@@ -1,0 +1,22 @@
+FOCUSED_GREEN
+Run options: --name test_unrelated_timing_or_admission_fields_cannot_enter_closed_schema --seed 60256
+
+# Running:
+
+.
+
+Finished in 0.012429s, 80.4570 runs/s, 482.7420 assertions/s.
+
+1 runs, 6 assertions, 0 failures, 0 errors, 0 skips
+FOCUSED_EXIT=0
+FULL_GREEN
+Run options: --seed 62581
+
+# Running:
+
+.........
+
+Finished in 0.096880s, 92.8984 runs/s, 495.4583 assertions/s.
+
+9 runs, 48 assertions, 0 failures, 0 errors, 0 skips
+FULL_EXIT=0
