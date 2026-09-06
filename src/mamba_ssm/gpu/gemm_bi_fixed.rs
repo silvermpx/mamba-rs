@@ -458,30 +458,33 @@ struct FixedTileDevice {
     compute_capability: (u32, u32),
 }
 
-// Actual NVRTC CUDA13.2/142-SM Ada qualification: all five hot shapes, both
-// homogeneous half dtypes and both bias modes, 101 windows in each order,
-// eager and graph. The original ladder is bit-identical across each boundary.
-// This new source and its AUTO promotion ship together; the new Fixed artifact
-// invalidates old graph identities without relabeling frozen Triad evidence.
-fn fixed_sm89_half_pipeline_auto_eligible(
+// Actual NVRTC CUDA12.8/13.0/13.2 qualification on the 142-SM Ada target.
+// The preferred route is the reviewed direct-pair winner; compatibility
+// fallback remains limited to independently qualified holders. Returning None
+// preserves the general architecture/portable ladder below this overlay.
+fn fixed_select_sm89_half_auto_tile(
     operands: FixedFwdOperands,
     shape: FixedShape,
     device: FixedTileDevice,
     nvrtc: (i32, i32),
-    loaded: bool,
-) -> bool {
-    loaded
-        && device.compute_capability == (8, 9)
-        && device.multiprocessors == 142
-        && nvrtc == (13, 2)
-        && operands.c.dtype != WeightDtype::F32
-        && operands.c.dtype == operands.x.dtype
-        && operands.x.dtype == operands.w.dtype
-        && [operands.c.ptr, operands.x.ptr, operands.w.ptr]
+    nvrtc_library_known: bool,
+    pipeline_available: bool,
+    swizzle_available: bool,
+) -> Option<FixedTile> {
+    use FixedTile::{Tc128Sm89Pipeline as Pipeline, Tc128Sm89Swizzle as Swizzle};
+
+    if !nvrtc_library_known
+        || device.compute_capability != (8, 9)
+        || device.multiprocessors != 142
+        || !matches!(nvrtc, (12, 8) | (13, 0) | (13, 2))
+        || operands.c.dtype == WeightDtype::F32
+        || operands.c.dtype != operands.x.dtype
+        || operands.x.dtype != operands.w.dtype
+        || [operands.c.ptr, operands.x.ptr, operands.w.ptr]
             .into_iter()
-            .all(|ptr| ptr != 0 && ptr.is_multiple_of(16))
-        && operands.bias_ptr.is_none_or(|ptr| ptr.is_multiple_of(4))
-        && matches!(
+            .any(|ptr| ptr == 0 || !ptr.is_multiple_of(16))
+        || operands.bias_ptr.is_some_and(|ptr| !ptr.is_multiple_of(4))
+        || !matches!(
             (shape.m, shape.k, shape.n),
             (4621, 384, 1928)
                 | (4621, 768, 2304)
@@ -489,144 +492,365 @@ fn fixed_sm89_half_pipeline_auto_eligible(
                 | (2048, 768, 2304)
                 | (2048, 2304, 768)
         )
+    {
+        return None;
+    }
+
+    let dims = (shape.m, shape.k, shape.n);
+    let preferred = match (nvrtc, operands.c.dtype, dims, operands.bias_ptr.is_some()) {
+        ((12, 8) | (13, 0), WeightDtype::Bf16, (4621, 384, 1928), false) => Pipeline,
+        ((12, 8) | (13, 0), WeightDtype::F16, (4621, 384, 1928), _) => Pipeline,
+        ((12, 8) | (13, 0), _, _, _) => Swizzle,
+        ((13, 2), WeightDtype::Bf16, (4621, 384, 1928) | (4621, 1928, 384), _) => Pipeline,
+        (
+            (13, 2),
+            WeightDtype::F16,
+            (4621, 384, 1928) | (4621, 1928, 384) | (2048, 2304, 768),
+            _,
+        ) => Pipeline,
+        ((13, 2), _, _, _) => Swizzle,
+        _ => return None,
+    };
+
+    match (nvrtc, preferred) {
+        ((12, 8) | (13, 0), Pipeline) if pipeline_available => Some(Pipeline),
+        ((12, 8) | (13, 0), Swizzle) if swizzle_available => Some(Swizzle),
+        ((12, 8) | (13, 0), Pipeline) if swizzle_available => Some(Swizzle),
+        ((12, 8) | (13, 0), Swizzle) if pipeline_available => Some(Pipeline),
+        ((13, 2), Pipeline) if pipeline_available => Some(Pipeline),
+        ((13, 2), Swizzle) if swizzle_available => Some(Swizzle),
+        ((13, 2), Swizzle) if pipeline_available => Some(Pipeline),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
 mod sm89_pipeline_auto_tests {
     use super::*;
 
+    const P: FixedTile = FixedTile::Tc128Sm89Pipeline;
+    const S: FixedTile = FixedTile::Tc128Sm89Swizzle;
+
+    fn operands(dtype: WeightDtype, has_bias: bool) -> FixedFwdOperands {
+        FixedFwdOperands {
+            c: TypedPtr { ptr: 0x1000, dtype },
+            x: TypedPtr { ptr: 0x2000, dtype },
+            w: TypedPtr { ptr: 0x3000, dtype },
+            bias_ptr: has_bias.then_some(0x4004),
+        }
+    }
+
+    fn select(
+        nvrtc: (i32, i32),
+        dtype: WeightDtype,
+        dims: (usize, usize, usize),
+        has_bias: bool,
+        known_library: bool,
+        pipeline_available: bool,
+        swizzle_available: bool,
+    ) -> Option<FixedTile> {
+        fixed_select_sm89_half_auto_tile(
+            operands(dtype, has_bias),
+            FixedShape {
+                m: dims.0,
+                k: dims.1,
+                n: dims.2,
+            },
+            FixedTileDevice {
+                multiprocessors: 142,
+                compute_capability: (8, 9),
+            },
+            nvrtc,
+            known_library,
+            pipeline_available,
+            swizzle_available,
+        )
+    }
+
     #[test]
-    fn sm89_pipeline_auto_requires_measured_shape_device_and_operand_contract() {
+    fn sm89_half_auto_v42_matches_all_literal_preferred_cells() {
+        let cases = [
+            ((12, 8), WeightDtype::Bf16, (4621, 384, 1928), false, P),
+            ((12, 8), WeightDtype::Bf16, (4621, 384, 1928), true, S),
+            ((12, 8), WeightDtype::Bf16, (4621, 768, 2304), false, S),
+            ((12, 8), WeightDtype::Bf16, (4621, 768, 2304), true, S),
+            ((12, 8), WeightDtype::Bf16, (4621, 1928, 384), false, S),
+            ((12, 8), WeightDtype::Bf16, (4621, 1928, 384), true, S),
+            ((12, 8), WeightDtype::Bf16, (2048, 768, 2304), false, S),
+            ((12, 8), WeightDtype::Bf16, (2048, 768, 2304), true, S),
+            ((12, 8), WeightDtype::Bf16, (2048, 2304, 768), false, S),
+            ((12, 8), WeightDtype::Bf16, (2048, 2304, 768), true, S),
+            ((12, 8), WeightDtype::F16, (4621, 384, 1928), false, P),
+            ((12, 8), WeightDtype::F16, (4621, 384, 1928), true, P),
+            ((12, 8), WeightDtype::F16, (4621, 768, 2304), false, S),
+            ((12, 8), WeightDtype::F16, (4621, 768, 2304), true, S),
+            ((12, 8), WeightDtype::F16, (4621, 1928, 384), false, S),
+            ((12, 8), WeightDtype::F16, (4621, 1928, 384), true, S),
+            ((12, 8), WeightDtype::F16, (2048, 768, 2304), false, S),
+            ((12, 8), WeightDtype::F16, (2048, 768, 2304), true, S),
+            ((12, 8), WeightDtype::F16, (2048, 2304, 768), false, S),
+            ((12, 8), WeightDtype::F16, (2048, 2304, 768), true, S),
+            ((13, 0), WeightDtype::Bf16, (4621, 384, 1928), false, P),
+            ((13, 0), WeightDtype::Bf16, (4621, 384, 1928), true, S),
+            ((13, 0), WeightDtype::Bf16, (4621, 768, 2304), false, S),
+            ((13, 0), WeightDtype::Bf16, (4621, 768, 2304), true, S),
+            ((13, 0), WeightDtype::Bf16, (4621, 1928, 384), false, S),
+            ((13, 0), WeightDtype::Bf16, (4621, 1928, 384), true, S),
+            ((13, 0), WeightDtype::Bf16, (2048, 768, 2304), false, S),
+            ((13, 0), WeightDtype::Bf16, (2048, 768, 2304), true, S),
+            ((13, 0), WeightDtype::Bf16, (2048, 2304, 768), false, S),
+            ((13, 0), WeightDtype::Bf16, (2048, 2304, 768), true, S),
+            ((13, 0), WeightDtype::F16, (4621, 384, 1928), false, P),
+            ((13, 0), WeightDtype::F16, (4621, 384, 1928), true, P),
+            ((13, 0), WeightDtype::F16, (4621, 768, 2304), false, S),
+            ((13, 0), WeightDtype::F16, (4621, 768, 2304), true, S),
+            ((13, 0), WeightDtype::F16, (4621, 1928, 384), false, S),
+            ((13, 0), WeightDtype::F16, (4621, 1928, 384), true, S),
+            ((13, 0), WeightDtype::F16, (2048, 768, 2304), false, S),
+            ((13, 0), WeightDtype::F16, (2048, 768, 2304), true, S),
+            ((13, 0), WeightDtype::F16, (2048, 2304, 768), false, S),
+            ((13, 0), WeightDtype::F16, (2048, 2304, 768), true, S),
+            ((13, 2), WeightDtype::Bf16, (4621, 384, 1928), false, P),
+            ((13, 2), WeightDtype::Bf16, (4621, 384, 1928), true, P),
+            ((13, 2), WeightDtype::Bf16, (4621, 768, 2304), false, S),
+            ((13, 2), WeightDtype::Bf16, (4621, 768, 2304), true, S),
+            ((13, 2), WeightDtype::Bf16, (4621, 1928, 384), false, P),
+            ((13, 2), WeightDtype::Bf16, (4621, 1928, 384), true, P),
+            ((13, 2), WeightDtype::Bf16, (2048, 768, 2304), false, S),
+            ((13, 2), WeightDtype::Bf16, (2048, 768, 2304), true, S),
+            ((13, 2), WeightDtype::Bf16, (2048, 2304, 768), false, S),
+            ((13, 2), WeightDtype::Bf16, (2048, 2304, 768), true, S),
+            ((13, 2), WeightDtype::F16, (4621, 384, 1928), false, P),
+            ((13, 2), WeightDtype::F16, (4621, 384, 1928), true, P),
+            ((13, 2), WeightDtype::F16, (4621, 768, 2304), false, S),
+            ((13, 2), WeightDtype::F16, (4621, 768, 2304), true, S),
+            ((13, 2), WeightDtype::F16, (4621, 1928, 384), false, P),
+            ((13, 2), WeightDtype::F16, (4621, 1928, 384), true, P),
+            ((13, 2), WeightDtype::F16, (2048, 768, 2304), false, S),
+            ((13, 2), WeightDtype::F16, (2048, 768, 2304), true, S),
+            ((13, 2), WeightDtype::F16, (2048, 2304, 768), false, P),
+            ((13, 2), WeightDtype::F16, (2048, 2304, 768), true, P),
+        ];
+        assert_eq!(cases.len(), 60);
+        for (nvrtc, dtype, dims, has_bias, expected) in cases {
+            assert_eq!(
+                select(nvrtc, dtype, dims, has_bias, true, true, true),
+                Some(expected),
+                "{nvrtc:?} {dtype:?} {dims:?} bias={has_bias}"
+            );
+        }
+    }
+
+    #[test]
+    fn sm89_half_auto_v42_applies_independent_availability_fallbacks() {
+        let a = (4621, 384, 1928);
+        let b = (4621, 768, 2304);
+        let c = (4621, 1928, 384);
+        let e = (2048, 2304, 768);
+
+        for nvrtc in [(12, 8), (13, 0)] {
+            assert_eq!(
+                select(nvrtc, WeightDtype::Bf16, a, false, true, true, false),
+                Some(P)
+            );
+            assert_eq!(
+                select(nvrtc, WeightDtype::Bf16, a, false, true, false, true),
+                Some(S)
+            );
+            assert_eq!(
+                select(nvrtc, WeightDtype::Bf16, a, true, true, true, false),
+                Some(P)
+            );
+            assert_eq!(
+                select(nvrtc, WeightDtype::Bf16, a, true, true, false, true),
+                Some(S)
+            );
+            assert_eq!(
+                select(nvrtc, WeightDtype::Bf16, b, false, true, true, false),
+                Some(P)
+            );
+            assert_eq!(
+                select(nvrtc, WeightDtype::Bf16, b, false, true, false, false),
+                None
+            );
+        }
+
+        assert_eq!(
+            select((13, 2), WeightDtype::Bf16, b, false, true, true, false),
+            Some(P)
+        );
+        assert_eq!(
+            select((13, 2), WeightDtype::Bf16, b, false, true, false, true),
+            Some(S)
+        );
+        assert_eq!(
+            select((13, 2), WeightDtype::Bf16, a, false, true, false, true),
+            None
+        );
+        assert_eq!(
+            select((13, 2), WeightDtype::Bf16, c, true, true, false, true),
+            None
+        );
+        assert_eq!(
+            select((13, 2), WeightDtype::F16, e, false, true, false, true),
+            None
+        );
+        assert_eq!(
+            select((13, 2), WeightDtype::F16, e, true, true, true, false),
+            Some(P)
+        );
+        assert_eq!(
+            select((13, 2), WeightDtype::F16, e, true, true, false, false),
+            None
+        );
+    }
+
+    #[test]
+    fn sm89_half_auto_v42_declines_every_common_gate_failure() {
         let device = FixedTileDevice {
             multiprocessors: 142,
             compute_capability: (8, 9),
         };
-        for dtype in [WeightDtype::Bf16, WeightDtype::F16] {
-            for (m, k, n) in [
-                (4621, 384, 1928),
-                (4621, 768, 2304),
-                (4621, 1928, 384),
-                (2048, 768, 2304),
-                (2048, 2304, 768),
+        let shape = FixedShape {
+            m: 4621,
+            k: 384,
+            n: 1928,
+        };
+        let ops = operands(WeightDtype::Bf16, false);
+        let choose = |o, s, d, v, known, pipeline, swizzle| {
+            fixed_select_sm89_half_auto_tile(o, s, d, v, known, pipeline, swizzle)
+        };
+
+        assert_eq!(choose(ops, shape, device, (13, 2), false, true, true), None);
+        assert_eq!(
+            choose(ops, shape, device, (13, 2), true, false, false),
+            None
+        );
+        for version in [(12, 7), (12, 9), (13, 1), (13, 3), (14, 0)] {
+            assert_eq!(choose(ops, shape, device, version, true, true, true), None);
+        }
+        for cc in [(8, 0), (8, 6), (8, 7), (9, 0), (10, 0), (12, 0), (12, 1)] {
+            assert_eq!(
+                choose(
+                    ops,
+                    shape,
+                    FixedTileDevice {
+                        compute_capability: cc,
+                        ..device
+                    },
+                    (13, 2),
+                    true,
+                    true,
+                    true
+                ),
+                None
+            );
+        }
+        for multiprocessors in [0, 141, 143, 170] {
+            assert_eq!(
+                choose(
+                    ops,
+                    shape,
+                    FixedTileDevice {
+                        multiprocessors,
+                        ..device
+                    },
+                    (13, 2),
+                    true,
+                    true,
+                    true
+                ),
+                None
+            );
+        }
+        for adjacent in [
+            FixedShape {
+                m: shape.m - 1,
+                ..shape
+            },
+            FixedShape {
+                m: shape.m + 1,
+                ..shape
+            },
+            FixedShape {
+                k: shape.k - 1,
+                ..shape
+            },
+            FixedShape {
+                k: shape.k + 1,
+                ..shape
+            },
+            FixedShape {
+                n: shape.n - 1,
+                ..shape
+            },
+            FixedShape {
+                n: shape.n + 1,
+                ..shape
+            },
+        ] {
+            assert_eq!(
+                choose(ops, adjacent, device, (13, 2), true, true, true),
+                None
+            );
+        }
+        for ptr in [0, 0x1001, 0x1002, 0x1004, 0x1008] {
+            for wrong in [
+                FixedFwdOperands {
+                    c: TypedPtr { ptr, ..ops.c },
+                    ..ops
+                },
+                FixedFwdOperands {
+                    x: TypedPtr { ptr, ..ops.x },
+                    ..ops
+                },
+                FixedFwdOperands {
+                    w: TypedPtr { ptr, ..ops.w },
+                    ..ops
+                },
             ] {
-                for bias_ptr in [None, Some(0x4004)] {
-                    let ops = FixedFwdOperands {
-                        c: TypedPtr { ptr: 0x1000, dtype },
-                        x: TypedPtr { ptr: 0x2000, dtype },
-                        w: TypedPtr { ptr: 0x3000, dtype },
-                        bias_ptr,
-                    };
-                    let shape = FixedShape { m, k, n };
-                    let eligible = |o, s, d, v, loaded| {
-                        fixed_sm89_half_pipeline_auto_eligible(o, s, d, v, loaded)
-                    };
-                    assert!(
-                        eligible(ops, shape, device, (13, 2), true),
-                        "measured {dtype:?} {shape:?}"
-                    );
-                    assert!(!eligible(ops, shape, device, (13, 2), false));
-                    for version in [(12, 8), (13, 1), (13, 3), (14, 0)] {
-                        assert!(!eligible(ops, shape, device, version, true));
-                    }
-                    for cc in [
-                        (8, 0),
-                        (8, 6),
-                        (8, 7),
-                        (9, 0),
-                        (10, 0),
-                        (10, 3),
-                        (11, 0),
-                        (12, 0),
-                        (12, 1),
-                    ] {
-                        assert!(!eligible(
-                            ops,
-                            shape,
-                            FixedTileDevice {
-                                compute_capability: cc,
-                                ..device
-                            },
-                            (13, 2),
-                            true
-                        ));
-                    }
-                    for sm in [0, 141, 143, 170] {
-                        assert!(!eligible(
-                            ops,
-                            shape,
-                            FixedTileDevice {
-                                multiprocessors: sm,
-                                ..device
-                            },
-                            (13, 2),
-                            true
-                        ));
-                    }
-                    for adjacent in [
-                        FixedShape { m: m - 1, ..shape },
-                        FixedShape { m: m + 1, ..shape },
-                        FixedShape { k: k - 1, ..shape },
-                        FixedShape { k: k + 1, ..shape },
-                        FixedShape { n: n - 1, ..shape },
-                        FixedShape { n: n + 1, ..shape },
-                        FixedShape { m: 1, ..shape },
-                        FixedShape { k: 0, ..shape },
-                    ] {
-                        assert!(!eligible(ops, adjacent, device, (13, 2), true));
-                    }
-                    for ptr in [0, 0x1001, 0x1002, 0x1004, 0x1008] {
-                        for wrong in [
-                            FixedFwdOperands {
-                                c: TypedPtr { ptr, dtype },
-                                ..ops
-                            },
-                            FixedFwdOperands {
-                                x: TypedPtr { ptr, dtype },
-                                ..ops
-                            },
-                            FixedFwdOperands {
-                                w: TypedPtr { ptr, dtype },
-                                ..ops
-                            },
-                        ] {
-                            assert!(!eligible(wrong, shape, device, (13, 2), true));
-                        }
-                    }
-                    for wrong in [
-                        FixedFwdOperands {
-                            c: TypedPtr {
-                                dtype: WeightDtype::F32,
-                                ..ops.c
-                            },
-                            ..ops
-                        },
-                        FixedFwdOperands {
-                            x: TypedPtr {
-                                dtype: WeightDtype::F32,
-                                ..ops.x
-                            },
-                            ..ops
-                        },
-                        FixedFwdOperands {
-                            w: TypedPtr {
-                                dtype: WeightDtype::F32,
-                                ..ops.w
-                            },
-                            ..ops
-                        },
-                        FixedFwdOperands {
-                            bias_ptr: Some(0x4001),
-                            ..ops
-                        },
-                        FixedFwdOperands {
-                            bias_ptr: Some(0x4002),
-                            ..ops
-                        },
-                    ] {
-                        assert!(!eligible(wrong, shape, device, (13, 2), true));
-                    }
-                }
+                assert_eq!(
+                    choose(wrong, shape, device, (13, 2), true, true, true),
+                    None
+                );
             }
+        }
+        for wrong in [
+            operands(WeightDtype::F32, false),
+            FixedFwdOperands {
+                c: TypedPtr {
+                    dtype: WeightDtype::F32,
+                    ..ops.c
+                },
+                ..ops
+            },
+            FixedFwdOperands {
+                x: TypedPtr {
+                    dtype: WeightDtype::F16,
+                    ..ops.x
+                },
+                ..ops
+            },
+            FixedFwdOperands {
+                w: TypedPtr {
+                    dtype: WeightDtype::F16,
+                    ..ops.w
+                },
+                ..ops
+            },
+            FixedFwdOperands {
+                bias_ptr: Some(0x4001),
+                ..ops
+            },
+            FixedFwdOperands {
+                bias_ptr: Some(0x4002),
+                ..ops
+            },
+        ] {
+            assert_eq!(
+                choose(wrong, shape, device, (13, 2), true, true, true),
+                None
+            );
         }
     }
 }
@@ -3362,8 +3586,8 @@ pub fn fixed_forward(
     let mixed_half_f32 =
         c.dtype == WeightDtype::F32 && x.dtype != WeightDtype::F32 && x.dtype == w.dtype;
     let compiler = ctx.kernels.compiler_identity();
-    if homogeneous_half
-        && fixed_sm89_half_pipeline_auto_eligible(
+    if homogeneous_half {
+        let selected = fixed_select_sm89_half_auto_tile(
             operands,
             shape,
             FixedTileDevice {
@@ -3371,11 +3595,22 @@ pub fn fixed_forward(
                 compute_capability: ctx.compute_capability(),
             },
             compiler.nvrtc_version,
-            ctx.kernels.fixed_sm89_half_pipeline.is_some() && compiler.nvrtc_library_known,
-        )
-    {
-        launch_sm89_half_pipeline(ctx, c.dtype, &args)?;
-        return Ok(FixedTile::Tc128Sm89Pipeline);
+            compiler.nvrtc_library_known,
+            ctx.kernels.fixed_sm89_half_pipeline.is_some(),
+            ctx.kernels.fixed_sm89_half_swizzle.is_some(),
+        );
+        match selected {
+            Some(FixedTile::Tc128Sm89Pipeline) => {
+                launch_sm89_half_pipeline(ctx, c.dtype, &args)?;
+                return Ok(FixedTile::Tc128Sm89Pipeline);
+            }
+            Some(FixedTile::Tc128Sm89Swizzle) => {
+                launch_sm89_half_swizzle(ctx, c.dtype, &args)?;
+                return Ok(FixedTile::Tc128Sm89Swizzle);
+            }
+            Some(_) => unreachable!("Ada half AUTO selector returned a foreign tile"),
+            None => {}
+        }
     }
     // Architecture rungs: on Hopper and datacenter Blackwell the arch's
     // own tensor path is the numeric family for every eligible shape
@@ -5989,7 +6224,7 @@ mod tests {
                 TUNING_TABLE_REVISION,
                 SCHEDULE_REVISION,
             ),
-            (5, 41, 8),
+            (5, 42, 8),
             "the release compiler identity must remain explicitly pinned"
         );
         let mut promoted = Vec::new();

@@ -8793,6 +8793,88 @@ const FIXED_AUTO_VENDOR_EXACT_CELLS: &[FixedAutoVendorCell] = &[
     },
 ];
 
+fn expected_ada_half_auto_v42(
+    nvrtc: (i32, i32),
+    dtype: WeightDtype,
+    shape: FixedShape,
+    has_bias: bool,
+) -> Option<FixedTile> {
+    use FixedTile::{Tc128Sm89Pipeline as Pipeline, Tc128Sm89Swizzle as Swizzle};
+
+    match (nvrtc, dtype, (shape.m, shape.k, shape.n), has_bias) {
+        ((12, 8) | (13, 0), WeightDtype::Bf16, (4621, 384, 1928), false) => Some(Pipeline),
+        ((12, 8) | (13, 0), WeightDtype::Bf16, (4621, 384, 1928), true) => Some(Swizzle),
+        ((12, 8) | (13, 0), WeightDtype::Bf16, (4621, 768, 2304), _) => Some(Swizzle),
+        ((12, 8) | (13, 0), WeightDtype::Bf16, (4621, 1928, 384), _) => Some(Swizzle),
+        ((12, 8) | (13, 0), WeightDtype::Bf16, (2048, 768, 2304), _) => Some(Swizzle),
+        ((12, 8) | (13, 0), WeightDtype::Bf16, (2048, 2304, 768), _) => Some(Swizzle),
+        ((12, 8) | (13, 0), WeightDtype::F16, (4621, 384, 1928), _) => Some(Pipeline),
+        ((12, 8) | (13, 0), WeightDtype::F16, (4621, 768, 2304), _) => Some(Swizzle),
+        ((12, 8) | (13, 0), WeightDtype::F16, (4621, 1928, 384), _) => Some(Swizzle),
+        ((12, 8) | (13, 0), WeightDtype::F16, (2048, 768, 2304), _) => Some(Swizzle),
+        ((12, 8) | (13, 0), WeightDtype::F16, (2048, 2304, 768), _) => Some(Swizzle),
+        ((13, 2), WeightDtype::Bf16, (4621, 384, 1928), _) => Some(Pipeline),
+        ((13, 2), WeightDtype::Bf16, (4621, 768, 2304), _) => Some(Swizzle),
+        ((13, 2), WeightDtype::Bf16, (4621, 1928, 384), _) => Some(Pipeline),
+        ((13, 2), WeightDtype::Bf16, (2048, 768, 2304), _) => Some(Swizzle),
+        ((13, 2), WeightDtype::Bf16, (2048, 2304, 768), _) => Some(Swizzle),
+        ((13, 2), WeightDtype::F16, (4621, 384, 1928), _) => Some(Pipeline),
+        ((13, 2), WeightDtype::F16, (4621, 768, 2304), _) => Some(Swizzle),
+        ((13, 2), WeightDtype::F16, (4621, 1928, 384), _) => Some(Pipeline),
+        ((13, 2), WeightDtype::F16, (2048, 768, 2304), _) => Some(Swizzle),
+        ((13, 2), WeightDtype::F16, (2048, 2304, 768), _) => Some(Pipeline),
+        _ => None,
+    }
+}
+
+#[test]
+fn ada_half_auto_v42_harness_expectation_is_literal_and_fail_closed() {
+    for &nvrtc in &[(12, 8), (13, 0), (13, 2)] {
+        for dtype in [WeightDtype::Bf16, WeightDtype::F16] {
+            for cell in FIXED_AUTO_VENDOR_EXACT_CELLS {
+                for has_bias in [false, true] {
+                    assert!(
+                        expected_ada_half_auto_v42(nvrtc, dtype, cell.shape, has_bias).is_some(),
+                        "{nvrtc:?} {dtype:?} {} bias={has_bias}",
+                        cell.label
+                    );
+                }
+            }
+        }
+    }
+    let hot_a = FIXED_AUTO_VENDOR_EXACT_CELLS[0].shape;
+    assert_eq!(
+        expected_ada_half_auto_v42((12, 8), WeightDtype::Bf16, hot_a, false),
+        Some(FixedTile::Tc128Sm89Pipeline)
+    );
+    assert_eq!(
+        expected_ada_half_auto_v42((12, 8), WeightDtype::Bf16, hot_a, true),
+        Some(FixedTile::Tc128Sm89Swizzle)
+    );
+    for nvrtc in [(12, 7), (13, 1), (13, 3), (14, 0)] {
+        assert_eq!(
+            expected_ada_half_auto_v42(nvrtc, WeightDtype::Bf16, hot_a, false),
+            None
+        );
+    }
+    assert_eq!(
+        expected_ada_half_auto_v42((13, 2), WeightDtype::F32, hot_a, false),
+        None
+    );
+    assert_eq!(
+        expected_ada_half_auto_v42(
+            (13, 2),
+            WeightDtype::F16,
+            FixedShape {
+                m: hot_a.m - 1,
+                ..hot_a
+            },
+            false
+        ),
+        None
+    );
+}
+
 fn fixed_auto_vendor_expected_exact_tile(
     cell: FixedAutoVendorCell,
     device_cc: (u32, u32),
@@ -13495,11 +13577,6 @@ fn fixed_ada_half_forced_direct_pair() {
         "unsupported direct-pair NVRTC {:?}",
         compiler.nvrtc_version
     );
-    let expected_auto = if compiler.nvrtc_version == (13, 2) {
-        FixedTile::Tc128Sm89Pipeline
-    } else {
-        FixedTile::Tc128
-    };
     let fixed_artifact = ctx.kernels.artifact_set_identity().fixed;
     let device_metadata = format!(
         concat!(
@@ -13559,6 +13636,13 @@ fn fixed_ada_half_forced_direct_pair() {
 
             for &bias_index in &biases {
                 let has_bias = bias_index == 1;
+                let expected_auto = expected_ada_half_auto_v42(
+                    compiler.nvrtc_version,
+                    input_dtype,
+                    shape,
+                    has_bias,
+                )
+                .expect("literal revision-42 direct-pair AUTO expectation");
                 let auto_ops = FixedFwdOperands {
                     c: typed(&auto, output_dtype),
                     x: typed(&a, input_dtype),
@@ -13578,9 +13662,9 @@ fn fixed_ada_half_forced_direct_pair() {
                     ..auto_ops
                 };
 
+                let actual_auto = launch_fixed_auto_vendor_custom(&ctx, auto_ops, shape);
                 assert_eq!(
-                    launch_fixed_auto_vendor_custom(&ctx, auto_ops, shape),
-                    expected_auto,
+                    actual_auto, expected_auto,
                     "direct-pair actual AUTO changed for {row}/{} bias={has_bias}",
                     cell.label
                 );
@@ -13852,7 +13936,7 @@ fn fixed_ada_half_forced_direct_pair() {
                             pipeline_tile,
                             swizzle_tile,
                             graph_inventory,
-                            expected_auto,
+                            actual_auto,
                             path == "graph",
                             row_spec.custom_tolerance,
                             auto_error,

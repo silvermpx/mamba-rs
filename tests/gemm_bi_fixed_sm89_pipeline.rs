@@ -11,6 +11,7 @@ use mamba_rs::mamba_ssm::gpu::gemm_bi_fixed::{
     FixedFwdOperands, FixedShape, FixedTile, fixed_forward, fixed_forward_with_tile,
 };
 use mamba_rs::mamba_ssm::gpu::graph_capture::capture_into_graph;
+use mamba_rs::mamba_ssm::gpu::kernel_identity::TUNING_TABLE_REVISION;
 
 const CANDIDATE: FixedTile = FixedTile::Tc128Sm89Pipeline;
 const SWIZZLE_CANDIDATE: FixedTile = FixedTile::Tc128Sm89Swizzle;
@@ -21,6 +22,40 @@ const RUNGS: [FixedTile; 5] = [
     FixedTile::TcW64,
     FixedTile::TcWn64,
 ];
+
+fn expected_ada_half_auto_v42(
+    nvrtc: (i32, i32),
+    dtype: WeightDtype,
+    shape: FixedShape,
+    has_bias: bool,
+) -> Option<FixedTile> {
+    use FixedTile::{Tc128Sm89Pipeline as Pipeline, Tc128Sm89Swizzle as Swizzle};
+
+    match (nvrtc, dtype, (shape.m, shape.k, shape.n), has_bias) {
+        ((12, 8) | (13, 0), WeightDtype::Bf16, (4621, 384, 1928), false) => Some(Pipeline),
+        ((12, 8) | (13, 0), WeightDtype::Bf16, (4621, 384, 1928), true) => Some(Swizzle),
+        ((12, 8) | (13, 0), WeightDtype::Bf16, (4621, 768, 2304), _) => Some(Swizzle),
+        ((12, 8) | (13, 0), WeightDtype::Bf16, (4621, 1928, 384), _) => Some(Swizzle),
+        ((12, 8) | (13, 0), WeightDtype::Bf16, (2048, 768, 2304), _) => Some(Swizzle),
+        ((12, 8) | (13, 0), WeightDtype::Bf16, (2048, 2304, 768), _) => Some(Swizzle),
+        ((12, 8) | (13, 0), WeightDtype::F16, (4621, 384, 1928), _) => Some(Pipeline),
+        ((12, 8) | (13, 0), WeightDtype::F16, (4621, 768, 2304), _) => Some(Swizzle),
+        ((12, 8) | (13, 0), WeightDtype::F16, (4621, 1928, 384), _) => Some(Swizzle),
+        ((12, 8) | (13, 0), WeightDtype::F16, (2048, 768, 2304), _) => Some(Swizzle),
+        ((12, 8) | (13, 0), WeightDtype::F16, (2048, 2304, 768), _) => Some(Swizzle),
+        ((13, 2), WeightDtype::Bf16, (4621, 384, 1928), _) => Some(Pipeline),
+        ((13, 2), WeightDtype::Bf16, (4621, 768, 2304), _) => Some(Swizzle),
+        ((13, 2), WeightDtype::Bf16, (4621, 1928, 384), _) => Some(Pipeline),
+        ((13, 2), WeightDtype::Bf16, (2048, 768, 2304), _) => Some(Swizzle),
+        ((13, 2), WeightDtype::Bf16, (2048, 2304, 768), _) => Some(Swizzle),
+        ((13, 2), WeightDtype::F16, (4621, 384, 1928), _) => Some(Pipeline),
+        ((13, 2), WeightDtype::F16, (4621, 768, 2304), _) => Some(Swizzle),
+        ((13, 2), WeightDtype::F16, (4621, 1928, 384), _) => Some(Pipeline),
+        ((13, 2), WeightDtype::F16, (2048, 768, 2304), _) => Some(Swizzle),
+        ((13, 2), WeightDtype::F16, (2048, 2304, 768), _) => Some(Pipeline),
+        _ => None,
+    }
+}
 
 #[test]
 fn fixed_sm89_half_swizzle_has_a_distinct_forced_route() {
@@ -76,7 +111,7 @@ fn fixed_sm89_half_swizzle_and_pipeline_holders_are_independently_live() {
 }
 
 #[test]
-#[ignore = "requires exact Ada 142SM CUDA13.2 and qualified hot-cell AUTO promotion"]
+#[ignore = "requires exact Ada 142SM CUDA12.8/13.0/13.2 and qualified hot-cell AUTO promotion"]
 fn fixed_sm89_half_pipeline_auto_hot_cell_prefix_view_graph_bits() {
     fixed_sm89_half_hot_cell_prefix_view_graph_bits(None);
 }
@@ -93,7 +128,17 @@ fn fixed_sm89_half_hot_cell_prefix_view_graph_bits(forced: Option<FixedTile>) {
     assert_eq!(device.multiprocessor_count(), 142);
     let ctx = GpuCtx::new(&device).expect("NVRTC context");
     if forced.is_none() {
-        assert_eq!(ctx.kernels.compiler_identity().nvrtc_version, (13, 2));
+        let compiler = ctx.kernels.compiler_identity();
+        assert_eq!(TUNING_TABLE_REVISION, 42);
+        assert!(compiler.nvrtc_library_known);
+        assert!(matches!(
+            compiler.nvrtc_version,
+            (12, 8) | (13, 0) | (13, 2)
+        ));
+        assert!(ctx.kernels.fixed_sm89_half_pipeline.is_some());
+        assert!(ctx.kernels.fixed_sm89_half_pipeline_rejection.is_none());
+        assert!(ctx.kernels.fixed_sm89_half_swizzle.is_some());
+        assert!(ctx.kernels.fixed_sm89_half_swizzle_rejection.is_none());
     }
     for dtype in [WeightDtype::Bf16, WeightDtype::F16] {
         for (hot_m, k, n) in [
@@ -178,11 +223,24 @@ fn fixed_sm89_half_hot_cell_prefix_view_graph_bits(forced: Option<FixedTile>) {
                             };
                             let picked = run().expect("hot-cell launch");
                             if forced.is_none() {
-                                assert_eq!(
-                                    picked == CANDIDATE,
-                                    m == hot_m && output_offset == 8,
-                                    "AUTO promotion scope {dtype:?} M={m} K={k} N={n} row={row_offset} out={output_offset} bias={has_bias}: {picked:?}"
-                                );
+                                if m == hot_m && output_offset == 8 {
+                                    let expected = expected_ada_half_auto_v42(
+                                        ctx.kernels.compiler_identity().nvrtc_version,
+                                        dtype,
+                                        FixedShape { m, k, n },
+                                        has_bias,
+                                    )
+                                    .expect("literal revision-42 hot-cell expectation");
+                                    assert_eq!(
+                                        picked, expected,
+                                        "AUTO promotion scope {dtype:?} M={m} K={k} N={n} row={row_offset} out={output_offset} bias={has_bias}"
+                                    );
+                                } else {
+                                    assert!(
+                                        !matches!(picked, CANDIDATE | SWIZZLE_CANDIDATE),
+                                        "AUTO candidate escaped scope {dtype:?} M={m} K={k} N={n} row={row_offset} out={output_offset} bias={has_bias}: {picked:?}"
+                                    );
+                                }
                             } else {
                                 assert_eq!(picked, SWIZZLE_CANDIDATE);
                             }
