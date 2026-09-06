@@ -1957,6 +1957,7 @@ fn fixed_pick_tf32(
     sm120_tma: bool,
     has_bias: bool,
     output_aligned: bool,
+    nvrtc_library_known: bool,
 ) -> FixedTile {
     if rows <= 16 || cols <= 32 {
         return FixedTile::Tf32M16S4;
@@ -1964,6 +1965,15 @@ fn fixed_pick_tf32(
     if sm120_tma {
         if compute_capability == (12, 0) && multiprocessors == 170 && nvrtc_version == (13, 2) {
             match (rows, inner, cols, has_bias) {
+                // A0/A1 M128S2 beat prior AUTO and FAST_TF32 in all four
+                // 101-window eager/graph AFV/VFA cohorts (worst current p95
+                // 0.955694 / 0.953945). Measured aligned, known NVRTC13.2:
+                // internal/perf/sm120-fixed-internal-winners-confirm101-20260906/cuda-13.2/
+                // fixed-internal-winners-confirm101-cuda13.2-tf32-a01-v1.log
+                // SHA256 71d1f97f3733997b63e6463cb88686bd4b996b5eafa8442bcb8136c623b68faf.
+                (4621, 384, 1928, _) if output_aligned && nvrtc_library_known => {
+                    return FixedTile::Tf32Sm120M128S2;
+                }
                 (4621, 768, 2304, _) => return FixedTile::Tf32Sm120M128S2,
                 // Both D bias rows beat incumbent ProducerWarp in all four
                 // 101-window eager/graph, AFV/VFA cohorts. D1 also beats FAST;
@@ -2834,6 +2844,7 @@ pub fn fixed_forward(
             sm120_tma,
             operands.bias_ptr.is_some(),
             operands.c.ptr.is_multiple_of(8),
+            ctx.kernels.compiler_identity().nvrtc_library_known,
         );
         launch_tf32(ctx, tile, &args, true)?;
         return Ok(tile);
@@ -2883,6 +2894,20 @@ pub fn fixed_forward(
                 .fixed_sm120_fma_postbias
                 .as_ref()
                 .map(|kernels| kernels.m128n64_t256.is_some()),
+        ) {
+            launch_sm120_tma_postbias(ctx, operands, shape, tile)?;
+            return Ok(tile);
+        } else if let Some(tile) = fixed_sm120_tma_fma_bc1_auto_tile(
+            operands,
+            shape,
+            FixedTileDevice {
+                multiprocessors: ctx.kernels.multiprocessor_count(),
+                compute_capability: ctx.compute_capability(),
+            },
+            compiler.nvrtc_version,
+            compiler.nvrtc_library_known,
+            ctx.kernels.fixed_sm120_fma_postbias.is_some(),
+            ctx.f32_triad_policy(),
         ) {
             launch_sm120_tma_postbias(ctx, operands, shape, tile)?;
             return Ok(tile);
@@ -3123,7 +3148,7 @@ fn fixed_sm120_sliced_auto_eligible(
 // cuBLAS. Evidence: internal/perf/sm120-fixed-tma-fma-b0-20260906/
 // sm120-fixed-auto-b0-post101-v1.log, SHA256
 // 20245b1fe378434130f0e74bdfe3117790506afccf34224c27fd516bdf480932.
-// Bias remains on the copy-plan until it receives an independent admission.
+// B1 has a separate post-dot-bias admission below.
 fn fixed_sm120_tma_fma_b0_auto_eligible(
     operands: FixedFwdOperands,
     shape: FixedShape,
@@ -3238,6 +3263,41 @@ fn fixed_sm120_tma_fma_a1_auto_tile(
             FixedTile::F32Sm120TmaFmaFixedPostBiasM128N64
         }
     })
+}
+
+fn fixed_sm120_tma_fma_bc1_auto_tile(
+    operands: FixedFwdOperands,
+    shape: FixedShape,
+    device: FixedTileDevice,
+    nvrtc: (i32, i32),
+    nvrtc_library_known: bool,
+    loaded: bool,
+    policy: super::context::F32TriadPolicy,
+) -> Option<FixedTile> {
+    // Independent 101-window eager/graph AFV/VFA confirmations, all exact
+    // AUTO bits. B1 worst current p95 0.913542, PEDANTIC 0.856601; C1 worst
+    // current p95 0.936753, but PEDANTIC 1.042524 (internal-only win).
+    // internal/perf/sm120-fixed-internal-winners-confirm101-20260906/cuda-13.2/
+    // fixed-internal-winners-confirm101-cuda13.2-f32_exact-b1-v1.log SHA256
+    // 59131d6904855513ce50aff4bcf3c7a1e35243cef71416fd465a5b0c102f9796;
+    // fixed-internal-winners-confirm101-cuda13.2-f32_exact-c1-v1.log SHA256
+    // 164c083bd962c54402b6360104aaba8a7324f1b79be1cdedd6ec0a6a704ac2e1.
+    let tile = match (shape.m, shape.k, shape.n) {
+        (4621, 768, 2304) => FixedTile::F32Sm120TmaFmaFixedPostBiasM128N64,
+        (4621, 1928, 384) => FixedTile::F32Sm120TmaFmaFixedPostBiasM128N96,
+        _ => return None,
+    };
+    (loaded
+        && fixed_sm120_tma_fma_force_eligible(
+            operands,
+            shape,
+            device,
+            nvrtc,
+            nvrtc_library_known,
+            policy,
+            tile,
+        ))
+    .then_some(tile)
 }
 
 // Physical force-only surface for same-run qualification. This deliberately
@@ -3393,6 +3453,211 @@ mod sm120_exact_n64_auto_tests {
             x: typed(0x2000),
             w: typed(0x3000),
             bias_ptr: bias.then_some(0x4004),
+        }
+    }
+
+    #[test]
+    fn fixed_sm120_bc1_postbias_auto_promotes_only_confirmed_tiles() {
+        for (shape, expected) in [
+            (
+                FixedShape {
+                    m: 4621,
+                    k: 768,
+                    n: 2304,
+                },
+                FixedTile::F32Sm120TmaFmaFixedPostBiasM128N64,
+            ),
+            (
+                FixedShape {
+                    m: 4621,
+                    k: 1928,
+                    n: 384,
+                },
+                FixedTile::F32Sm120TmaFmaFixedPostBiasM128N96,
+            ),
+        ] {
+            let pick = |ops, shape, device, nvrtc, known, loaded, policy| {
+                fixed_sm120_tma_fma_bc1_auto_tile(ops, shape, device, nvrtc, known, loaded, policy)
+            };
+            assert_eq!(
+                pick(
+                    operands(true),
+                    shape,
+                    DEVICE,
+                    (13, 2),
+                    true,
+                    true,
+                    F32TriadPolicy::ExactScalarFmaV1
+                ),
+                Some(expected)
+            );
+            assert_eq!(
+                pick(
+                    operands(false),
+                    shape,
+                    DEVICE,
+                    (13, 2),
+                    true,
+                    true,
+                    F32TriadPolicy::ExactScalarFmaV1
+                ),
+                None
+            );
+            for nvrtc in [(12, 8), (13, 0), (13, 1), (13, 3), (14, 0)] {
+                assert_eq!(
+                    pick(
+                        operands(true),
+                        shape,
+                        DEVICE,
+                        nvrtc,
+                        true,
+                        true,
+                        F32TriadPolicy::ExactScalarFmaV1
+                    ),
+                    None
+                );
+            }
+            for (known, loaded) in [(false, true), (true, false), (false, false)] {
+                assert_eq!(
+                    pick(
+                        operands(true),
+                        shape,
+                        DEVICE,
+                        (13, 2),
+                        known,
+                        loaded,
+                        F32TriadPolicy::ExactScalarFmaV1
+                    ),
+                    None
+                );
+            }
+            for device in [
+                FixedTileDevice {
+                    multiprocessors: 169,
+                    ..DEVICE
+                },
+                FixedTileDevice {
+                    compute_capability: (12, 1),
+                    ..DEVICE
+                },
+            ] {
+                assert_eq!(
+                    pick(
+                        operands(true),
+                        shape,
+                        device,
+                        (13, 2),
+                        true,
+                        true,
+                        F32TriadPolicy::ExactScalarFmaV1
+                    ),
+                    None
+                );
+            }
+            for bad in [
+                FixedFwdOperands {
+                    c: TypedPtr {
+                        ptr: 0x1004,
+                        ..operands(true).c
+                    },
+                    ..operands(true)
+                },
+                FixedFwdOperands {
+                    x: TypedPtr {
+                        ptr: 0x2008,
+                        ..operands(true).x
+                    },
+                    ..operands(true)
+                },
+                FixedFwdOperands {
+                    w: TypedPtr {
+                        ptr: 0x300c,
+                        ..operands(true).w
+                    },
+                    ..operands(true)
+                },
+                FixedFwdOperands {
+                    bias_ptr: Some(0),
+                    ..operands(true)
+                },
+                FixedFwdOperands {
+                    bias_ptr: Some(0x4001),
+                    ..operands(true)
+                },
+                FixedFwdOperands {
+                    c: TypedPtr {
+                        dtype: WeightDtype::F16,
+                        ..operands(true).c
+                    },
+                    ..operands(true)
+                },
+            ] {
+                assert_eq!(
+                    pick(
+                        bad,
+                        shape,
+                        DEVICE,
+                        (13, 2),
+                        true,
+                        true,
+                        F32TriadPolicy::ExactScalarFmaV1
+                    ),
+                    None
+                );
+            }
+            assert_eq!(
+                pick(
+                    operands(true),
+                    shape,
+                    DEVICE,
+                    (13, 2),
+                    true,
+                    true,
+                    F32TriadPolicy::AllowDeterministicTf32V1
+                ),
+                None
+            );
+            for adjacent in [
+                FixedShape {
+                    m: shape.m + 1,
+                    ..shape
+                },
+                FixedShape {
+                    k: shape.k + 4,
+                    ..shape
+                },
+                FixedShape {
+                    n: shape.n + 4,
+                    ..shape
+                },
+            ] {
+                assert_eq!(
+                    pick(
+                        operands(true),
+                        adjacent,
+                        DEVICE,
+                        (13, 2),
+                        true,
+                        true,
+                        F32TriadPolicy::ExactScalarFmaV1
+                    ),
+                    None
+                );
+            }
+        }
+        for (m, k, n) in [(4621, 384, 1928), (2048, 768, 2304), (2048, 2304, 768)] {
+            assert_eq!(
+                fixed_sm120_tma_fma_bc1_auto_tile(
+                    operands(true),
+                    FixedShape { m, k, n },
+                    DEVICE,
+                    (13, 2),
+                    true,
+                    true,
+                    F32TriadPolicy::ExactScalarFmaV1
+                ),
+                None
+            );
         }
     }
 
@@ -5741,12 +6006,34 @@ mod tests {
     #[test]
     fn sm120_tf32_selector_promotes_only_the_qualified_cuda_132_b_and_d_cells() {
         assert_eq!(
-            fixed_pick_tf32(4621, 768, 2304, 170, (12, 0), (13, 2), true, false, true),
+            fixed_pick_tf32(
+                4621,
+                768,
+                2304,
+                170,
+                (12, 0),
+                (13, 2),
+                true,
+                false,
+                true,
+                true
+            ),
             FixedTile::Tf32Sm120M128S2
         );
         for has_bias in [false, true] {
             assert_eq!(
-                fixed_pick_tf32(2048, 768, 2304, 170, (12, 0), (13, 2), true, has_bias, true),
+                fixed_pick_tf32(
+                    2048,
+                    768,
+                    2304,
+                    170,
+                    (12, 0),
+                    (13, 2),
+                    true,
+                    has_bias,
+                    true,
+                    true
+                ),
                 FixedTile::Tf32Sm120M64S2PairStore,
                 "both D0 and D1 have independent confirmation"
             );
@@ -5760,7 +6047,8 @@ mod tests {
                     (13, 2),
                     true,
                     has_bias,
-                    false
+                    false,
+                    true
                 ),
                 FixedTile::Tf32Sm120M64S2ProducerWarp,
                 "unaligned C must retain the previously qualified schedule"
@@ -5778,7 +6066,7 @@ mod tests {
                 (2048, 768, 2304, 170, (12, 0), (13, 2), false),
             ] {
                 assert_eq!(
-                    fixed_pick_tf32(m, k, n, sms, cc, nvrtc, loaded, has_bias, true),
+                    fixed_pick_tf32(m, k, n, sms, cc, nvrtc, loaded, has_bias, true, true),
                     if loaded {
                         FixedTile::Tf32Sm120M64S2
                     } else {
@@ -5798,6 +6086,7 @@ mod tests {
                     nvrtc_version,
                     true,
                     false,
+                    true,
                     true
                 ),
                 FixedTile::Tf32Sm120M64S2,
@@ -5813,6 +6102,7 @@ mod tests {
                     nvrtc_version,
                     true,
                     false,
+                    true,
                     true
                 ),
                 FixedTile::Tf32Sm120M64S2,
@@ -5820,47 +6110,236 @@ mod tests {
             );
         }
         assert_eq!(
-            fixed_pick_tf32(4621, 768, 2304, 169, (12, 0), (13, 2), true, false, true),
+            fixed_pick_tf32(
+                4621,
+                768,
+                2304,
+                169,
+                (12, 0),
+                (13, 2),
+                true,
+                false,
+                true,
+                true
+            ),
             FixedTile::Tf32Sm120M64S2
         );
         assert_eq!(
-            fixed_pick_tf32(4621, 768, 2304, 170, (12, 1), (13, 2), true, false, true),
+            fixed_pick_tf32(
+                4621,
+                768,
+                2304,
+                170,
+                (12, 1),
+                (13, 2),
+                true,
+                false,
+                true,
+                true
+            ),
             FixedTile::Tf32Sm120M64S2
         );
         assert_eq!(
-            fixed_pick_tf32(4622, 768, 2304, 170, (12, 0), (13, 2), true, false, true),
+            fixed_pick_tf32(
+                4622,
+                768,
+                2304,
+                170,
+                (12, 0),
+                (13, 2),
+                true,
+                false,
+                true,
+                true
+            ),
             FixedTile::Tf32Sm120M64S2
         );
         assert_eq!(
-            fixed_pick_tf32(4621, 769, 2304, 170, (12, 0), (13, 2), true, false, true),
+            fixed_pick_tf32(
+                4621,
+                769,
+                2304,
+                170,
+                (12, 0),
+                (13, 2),
+                true,
+                false,
+                true,
+                true
+            ),
             FixedTile::Tf32Sm120M64S2
         );
         assert_eq!(
-            fixed_pick_tf32(4621, 768, 2305, 170, (12, 0), (13, 2), true, false, true),
+            fixed_pick_tf32(
+                4621,
+                768,
+                2305,
+                170,
+                (12, 0),
+                (13, 2),
+                true,
+                false,
+                true,
+                true
+            ),
             FixedTile::Tf32Sm120M64S2
         );
     }
 
     #[test]
+    fn sm120_tf32_selector_promotes_confirmed_a_bias_rows() {
+        for has_bias in [false, true] {
+            for (m, k, n, sms, cc, nvrtc, loaded, aligned, known) in [
+                (4622, 384, 1928, 170, (12, 0), (13, 2), true, true, true),
+                (4621, 388, 1928, 170, (12, 0), (13, 2), true, true, true),
+                (4621, 384, 1932, 170, (12, 0), (13, 2), true, true, true),
+                (4621, 384, 1928, 169, (12, 0), (13, 2), true, true, true),
+                (4621, 384, 1928, 170, (12, 1), (13, 2), true, true, true),
+                (4621, 384, 1928, 170, (12, 0), (12, 8), true, true, true),
+                (4621, 384, 1928, 170, (12, 0), (13, 0), true, true, true),
+                (4621, 384, 1928, 170, (12, 0), (13, 1), true, true, true),
+                (4621, 384, 1928, 170, (12, 0), (13, 3), true, true, true),
+                (4621, 384, 1928, 170, (12, 0), (13, 2), true, true, false),
+                (4621, 384, 1928, 170, (12, 0), (13, 2), true, false, true),
+                (4621, 384, 1928, 170, (12, 0), (13, 2), false, true, true),
+            ] {
+                assert_eq!(
+                    fixed_pick_tf32(m, k, n, sms, cc, nvrtc, loaded, has_bias, aligned, known),
+                    if loaded {
+                        FixedTile::Tf32Sm120M64S2
+                    } else {
+                        FixedTile::Tf32M64S2
+                    }
+                );
+            }
+            // Unknown libraries do not change previously qualified B/D behavior.
+            assert_eq!(
+                fixed_pick_tf32(
+                    4621,
+                    768,
+                    2304,
+                    170,
+                    (12, 0),
+                    (13, 2),
+                    true,
+                    has_bias,
+                    true,
+                    false
+                ),
+                FixedTile::Tf32Sm120M128S2
+            );
+            assert_eq!(
+                fixed_pick_tf32(
+                    2048,
+                    768,
+                    2304,
+                    170,
+                    (12, 0),
+                    (13, 2),
+                    true,
+                    has_bias,
+                    true,
+                    false
+                ),
+                FixedTile::Tf32Sm120M64S2PairStore
+            );
+            assert_eq!(
+                fixed_pick_tf32(
+                    4621,
+                    384,
+                    1928,
+                    170,
+                    (12, 0),
+                    (13, 2),
+                    true,
+                    has_bias,
+                    true,
+                    true
+                ),
+                FixedTile::Tf32Sm120M128S2
+            );
+            assert_eq!(
+                fixed_pick_tf32(
+                    4621,
+                    384,
+                    1928,
+                    170,
+                    (12, 0),
+                    (13, 2),
+                    true,
+                    has_bias,
+                    false,
+                    true
+                ),
+                FixedTile::Tf32Sm120M64S2
+            );
+        }
+    }
+
+    #[test]
     fn tf32_selector_keeps_portable_and_thin_fallbacks() {
         assert_eq!(
-            fixed_pick_tf32(4621, 768, 1928, 170, (12, 0), (13, 2), false, false, true),
+            fixed_pick_tf32(
+                4621,
+                768,
+                1928,
+                170,
+                (12, 0),
+                (13, 2),
+                false,
+                false,
+                true,
+                true
+            ),
             FixedTile::Tf32M64S2
         );
         assert_eq!(
-            fixed_pick_tf32(4621, 768, 1928, 170, (12, 0), (13, 2), true, false, true),
+            fixed_pick_tf32(
+                4621,
+                768,
+                1928,
+                170,
+                (12, 0),
+                (13, 2),
+                true,
+                false,
+                true,
+                true
+            ),
             FixedTile::Tf32Sm120M64S2
         );
         assert_eq!(
-            fixed_pick_tf32(1, 768, 1928, 170, (12, 0), (13, 2), true, false, true),
+            fixed_pick_tf32(1, 768, 1928, 170, (12, 0), (13, 2), true, false, true, true),
             FixedTile::Tf32M16S4
         );
         assert_eq!(
-            fixed_pick_tf32(4621, 768, 2304, 142, (8, 9), (13, 2), false, false, true),
+            fixed_pick_tf32(
+                4621,
+                768,
+                2304,
+                142,
+                (8, 9),
+                (13, 2),
+                false,
+                false,
+                true,
+                true
+            ),
             FixedTile::Tf32M64S2
         );
         assert_eq!(
-            fixed_pick_tf32(4621, 768, 384, 142, (8, 9), (13, 2), false, false, true),
+            fixed_pick_tf32(
+                4621,
+                768,
+                384,
+                142,
+                (8, 9),
+                (13, 2),
+                false,
+                false,
+                true,
+                true
+            ),
             FixedTile::Tf32M128S2
         );
     }

@@ -487,6 +487,16 @@ fn fixed_sm120_tf32_production_routes_match_forced_bits_and_graphs() {
             true,
         ),
         (
+            "A_misaligned",
+            FixedShape {
+                m: 4621,
+                k: 384,
+                n: 1928,
+            },
+            1,
+            false,
+        ),
+        (
             "D_misaligned",
             FixedShape {
                 m: 2048,
@@ -549,7 +559,11 @@ fn fixed_sm120_tf32_production_routes_match_forced_bits_and_graphs() {
         )
         .expect("production pair-store launch");
         let dims = (shape.m, shape.k, shape.n);
-        let uses_wide_tile = (nvrtc_major, nvrtc_minor) == (13, 2) && dims == (4621, 768, 2304);
+        let uses_wide_tile = (nvrtc_major, nvrtc_minor) == (13, 2)
+            && (dims == (4621, 768, 2304)
+                || (dims == (4621, 384, 1928)
+                    && ctx.kernels.compiler_identity().nvrtc_library_known
+                    && production_operands.c.ptr.is_multiple_of(8)));
         let uses_d_schedule = (nvrtc_major, nvrtc_minor) == (13, 2) && dims == (2048, 768, 2304);
         let uses_d_pair_store = uses_d_schedule && production_operands.c.ptr.is_multiple_of(8);
         let uses_d_producer_warp = uses_d_schedule && !uses_d_pair_store;
@@ -640,6 +654,25 @@ fn fixed_sm120_tf32_production_routes_match_forced_bits_and_graphs() {
             "gemm_bi_nn_sm120_tma_tf32_v1_m64n64_bk32_s2"
         };
         assert_eq!(function_name, expected_function, "{cell} physical route");
+        if uses_wide_tile {
+            assert_eq!(
+                (params.gridDimX, params.gridDimY, params.gridDimZ),
+                (
+                    if dims == (4621, 384, 1928) {
+                        1147
+                    } else {
+                        1332
+                    },
+                    1,
+                    1
+                )
+            );
+            assert_eq!(
+                (params.blockDimX, params.blockDimY, params.blockDimZ),
+                (128, 1, 1)
+            );
+            assert_eq!(params.sharedMemBytes, 49_280);
+        }
         if uses_d_schedule {
             assert_eq!(
                 (params.gridDimX, params.gridDimY, params.gridDimZ),
@@ -8661,10 +8694,10 @@ fn fixed_auto_vendor_expected_exact_tile(
                 }
                 ((4621, 384, 1928), true) => FixedTile::F32Sm120TmaFmaFixedPostBiasM128N64,
                 ((4621, 768, 2304), false) => FixedTile::F32Sm120TmaFmaM128N64,
+                ((4621, 768, 2304), true) => FixedTile::F32Sm120TmaFmaFixedPostBiasM128N64,
+                ((4621, 1928, 384), true) => FixedTile::F32Sm120TmaFmaFixedPostBiasM128N96,
                 ((2048, 768, 2304), _) => FixedTile::F32Sm120N64CopyPlan,
-                ((4621, 768, 2304) | (2048, 2304, 768), true) | ((2048, 2304, 768), false) => {
-                    FixedTile::F32Sm120N64CopyPlan
-                }
+                ((2048, 2304, 768), _) => FixedTile::F32Sm120N64CopyPlan,
                 _ => cell.expected,
             }
         }
@@ -8740,9 +8773,13 @@ fn fixed_auto_vendor_expected_tf32_tile(
     nvrtc_version: (i32, i32),
     has_bias: bool,
     output_aligned: bool,
+    nvrtc_library_known: bool,
 ) -> FixedTile {
     if device_cc == (12, 0) && sm_count == 170 && nvrtc_version == (13, 2) {
         match (cell.shape.m, cell.shape.k, cell.shape.n, has_bias) {
+            (4621, 384, 1928, _) if output_aligned && nvrtc_library_known => {
+                return FixedTile::Tf32Sm120M128S2;
+            }
             (4621, 768, 2304, _) => return FixedTile::Tf32Sm120M128S2,
             (2048, 768, 2304, false) | (2048, 768, 2304, true) => {
                 return if output_aligned {
@@ -8806,7 +8843,31 @@ fn fixed_auto_vendor_exact_expectations_are_device_specific() {
     );
     assert_eq!(
         fixed_auto_vendor_expected_exact_tile(hot_b, (12, 0), 170, (13, 2), true, true, true),
-        FixedTile::F32Sm120N64CopyPlan
+        FixedTile::F32Sm120TmaFmaFixedPostBiasM128N64
+    );
+    assert_eq!(
+        fixed_auto_vendor_expected_exact_tile(
+            FIXED_AUTO_VENDOR_EXACT_CELLS[2],
+            (12, 0),
+            170,
+            (13, 2),
+            true,
+            true,
+            true
+        ),
+        FixedTile::F32Sm120TmaFmaFixedPostBiasM128N96
+    );
+    assert_eq!(
+        fixed_auto_vendor_expected_exact_tile(
+            FIXED_AUTO_VENDOR_EXACT_CELLS[2],
+            (12, 0),
+            170,
+            (13, 2),
+            true,
+            false,
+            true
+        ),
+        FixedTile::Legacy
     );
     assert_eq!(
         fixed_auto_vendor_expected_exact_tile(hot_a, (12, 0), 169, (13, 2), true, false, true),
@@ -8832,19 +8893,62 @@ fn fixed_auto_vendor_exact_expectations_are_device_specific() {
 
 #[test]
 fn fixed_auto_vendor_tf32_expectation_tracks_the_qualified_compiler_cells() {
+    let hot_a = FIXED_AUTO_VENDOR_TF32_CELLS[0];
     let hot_b = FIXED_AUTO_VENDOR_TF32_CELLS[1];
     let hot_d = FIXED_AUTO_VENDOR_TF32_CELLS[3];
     for has_bias in [false, true] {
+        for (aligned, known, expected) in [
+            (true, true, FixedTile::Tf32Sm120M128S2),
+            (false, true, FixedTile::Tf32Sm120M64S2),
+            (true, false, FixedTile::Tf32Sm120M64S2),
+        ] {
+            assert_eq!(
+                fixed_auto_vendor_expected_tf32_tile(
+                    hot_a,
+                    (12, 0),
+                    170,
+                    (13, 2),
+                    has_bias,
+                    aligned,
+                    known
+                ),
+                expected
+            );
+        }
         assert_eq!(
-            fixed_auto_vendor_expected_tf32_tile(hot_b, (12, 0), 170, (13, 2), has_bias, true),
+            fixed_auto_vendor_expected_tf32_tile(
+                hot_b,
+                (12, 0),
+                170,
+                (13, 2),
+                has_bias,
+                true,
+                true
+            ),
             FixedTile::Tf32Sm120M128S2
         );
         assert_eq!(
-            fixed_auto_vendor_expected_tf32_tile(hot_d, (12, 0), 170, (13, 2), has_bias, true),
+            fixed_auto_vendor_expected_tf32_tile(
+                hot_d,
+                (12, 0),
+                170,
+                (13, 2),
+                has_bias,
+                true,
+                true
+            ),
             FixedTile::Tf32Sm120M64S2PairStore
         );
         assert_eq!(
-            fixed_auto_vendor_expected_tf32_tile(hot_d, (12, 0), 170, (13, 2), has_bias, false),
+            fixed_auto_vendor_expected_tf32_tile(
+                hot_d,
+                (12, 0),
+                170,
+                (13, 2),
+                has_bias,
+                false,
+                true
+            ),
             FixedTile::Tf32Sm120M64S2ProducerWarp
         );
         for (device_cc, sm_count, nvrtc_version) in [
@@ -8861,6 +8965,7 @@ fn fixed_auto_vendor_tf32_expectation_tracks_the_qualified_compiler_cells() {
                     sm_count,
                     nvrtc_version,
                     has_bias,
+                    true,
                     true
                 ),
                 FixedTile::Tf32Sm120M64S2
@@ -8872,6 +8977,7 @@ fn fixed_auto_vendor_tf32_expectation_tracks_the_qualified_compiler_cells() {
                     sm_count,
                     nvrtc_version,
                     has_bias,
+                    true,
                     true
                 ),
                 FixedTile::Tf32Sm120M64S2
@@ -9060,6 +9166,7 @@ fn run_fixed_auto_vendor_cell(
             ctx.kernels.compiler_identity().nvrtc_version,
             has_bias,
             custom_operands.c.ptr.is_multiple_of(8),
+            ctx.kernels.compiler_identity().nvrtc_library_known,
         )
     } else if row.output_dtype == WeightDtype::F32
         && matches!(row.input_dtype, WeightDtype::Bf16 | WeightDtype::F16)
@@ -9584,8 +9691,10 @@ fn fixed_sm120_exact_tma_fma_b0_spike() {
         }
         ("a", true) => FixedTile::F32Sm120TmaFmaFixedPostBiasM128N64,
         ("b", false) => FixedTile::F32Sm120TmaFmaM128N64,
-        ("b" | "d" | "e", _) => FixedTile::F32Sm120N64CopyPlan,
-        ("c", _) => FixedTile::Legacy,
+        ("b", true) => FixedTile::F32Sm120TmaFmaFixedPostBiasM128N64,
+        ("c", true) => FixedTile::F32Sm120TmaFmaFixedPostBiasM128N96,
+        ("d" | "e", _) => FixedTile::F32Sm120N64CopyPlan,
+        ("c", false) => FixedTile::Legacy,
         _ => unreachable!(),
     };
     let launch_auto_checked = || {
@@ -10293,6 +10402,117 @@ struct FixedForceSpec {
     expected_symbol: &'static str,
 }
 
+#[derive(Clone, Copy)]
+struct FixedExplicitVendorRowSpec {
+    name: &'static str,
+    input_dtype: WeightDtype,
+    output_dtype: WeightDtype,
+    policy: F32TriadPolicy,
+    vendor_compute: cudarc::cublas::sys::cublasComputeType_t,
+    vendor_comparator: &'static str,
+    custom_tolerance: f64,
+    vendor_tolerance: f64,
+}
+
+fn fixed_explicit_vendor_row_specs() -> [FixedExplicitVendorRowSpec; 7] {
+    use cudarc::cublas::sys::cublasComputeType_t;
+
+    [
+        FixedExplicitVendorRowSpec {
+            name: "bf16",
+            input_dtype: WeightDtype::Bf16,
+            output_dtype: WeightDtype::Bf16,
+            policy: F32TriadPolicy::ExactScalarFmaV1,
+            vendor_compute: cublasComputeType_t::CUBLAS_COMPUTE_32F,
+            vendor_comparator: "CUBLAS_COMPUTE_32F",
+            custom_tolerance: 0.01,
+            vendor_tolerance: 0.01,
+        },
+        FixedExplicitVendorRowSpec {
+            name: "f16",
+            input_dtype: WeightDtype::F16,
+            output_dtype: WeightDtype::F16,
+            policy: F32TriadPolicy::ExactScalarFmaV1,
+            vendor_compute: cublasComputeType_t::CUBLAS_COMPUTE_32F,
+            vendor_comparator: "CUBLAS_COMPUTE_32F",
+            custom_tolerance: 0.0025,
+            vendor_tolerance: 0.0025,
+        },
+        FixedExplicitVendorRowSpec {
+            name: "bf16_f32",
+            input_dtype: WeightDtype::Bf16,
+            output_dtype: WeightDtype::F32,
+            policy: F32TriadPolicy::ExactScalarFmaV1,
+            vendor_compute: cublasComputeType_t::CUBLAS_COMPUTE_32F,
+            vendor_comparator: "CUBLAS_COMPUTE_32F",
+            custom_tolerance: 0.01,
+            vendor_tolerance: 0.01,
+        },
+        FixedExplicitVendorRowSpec {
+            name: "f16_f32",
+            input_dtype: WeightDtype::F16,
+            output_dtype: WeightDtype::F32,
+            policy: F32TriadPolicy::ExactScalarFmaV1,
+            vendor_compute: cublasComputeType_t::CUBLAS_COMPUTE_32F,
+            vendor_comparator: "CUBLAS_COMPUTE_32F",
+            custom_tolerance: 0.0025,
+            vendor_tolerance: 0.0025,
+        },
+        FixedExplicitVendorRowSpec {
+            name: "tf32",
+            input_dtype: WeightDtype::F32,
+            output_dtype: WeightDtype::F32,
+            policy: F32TriadPolicy::AllowDeterministicTf32V1,
+            vendor_compute: cublasComputeType_t::CUBLAS_COMPUTE_32F_FAST_TF32,
+            vendor_comparator: "CUBLAS_COMPUTE_32F_FAST_TF32",
+            custom_tolerance: 0.0025,
+            vendor_tolerance: 0.0025,
+        },
+        FixedExplicitVendorRowSpec {
+            name: "f32_exact",
+            input_dtype: WeightDtype::F32,
+            output_dtype: WeightDtype::F32,
+            policy: F32TriadPolicy::ExactScalarFmaV1,
+            vendor_compute: cublasComputeType_t::CUBLAS_COMPUTE_32F_PEDANTIC,
+            vendor_comparator: "CUBLAS_COMPUTE_32F_PEDANTIC",
+            custom_tolerance: 0.0002,
+            vendor_tolerance: 0.0002,
+        },
+        FixedExplicitVendorRowSpec {
+            name: "f32_exact_fast",
+            input_dtype: WeightDtype::F32,
+            output_dtype: WeightDtype::F32,
+            policy: F32TriadPolicy::ExactScalarFmaV1,
+            vendor_compute: cublasComputeType_t::CUBLAS_COMPUTE_32F_FAST_TF32,
+            vendor_comparator: "CUBLAS_COMPUTE_32F_FAST_TF32",
+            custom_tolerance: 0.0002,
+            vendor_tolerance: 0.0025,
+        },
+    ]
+}
+
+fn fixed_exact_comparator_completion_metadata() -> String {
+    let rows = fixed_explicit_vendor_row_specs();
+    let comparator = |name| {
+        rows.iter()
+            .find(|row| row.name == name)
+            .unwrap_or_else(|| panic!("missing exact comparator row {name}"))
+            .vendor_comparator
+    };
+    format!(
+        "\"exact_comparators\":{{\"f32_exact\":\"{}\",\"f32_exact_fast\":\"{}\"}}",
+        comparator("f32_exact"),
+        comparator("f32_exact_fast")
+    )
+}
+
+fn fixed_explicit_vendor_tolerance_metadata(row: &FixedExplicitVendorRowSpec) -> String {
+    format!(
+        "\"vendor_comparator\":\"{}\",\"normalized_error_tolerance\":{},\"custom_normalized_error_tolerance\":{},\"vendor_normalized_error_tolerance\":{}",
+        row.vendor_comparator, row.custom_tolerance, row.custom_tolerance, row.vendor_tolerance,
+    )
+}
+
 // Each registry macro drives both the iterable census universe and an
 // exhaustive match. Adding an enum variant therefore cannot compile until it
 // is classified here, and classification automatically adds it to the reverse
@@ -10435,7 +10655,7 @@ fn fixed_force_row_dtypes(row: &str) -> Result<(WeightDtype, WeightDtype), Strin
         "f16" => Ok((WeightDtype::F16, WeightDtype::F16)),
         "bf16_f32" => Ok((WeightDtype::Bf16, WeightDtype::F32)),
         "f16_f32" => Ok((WeightDtype::F16, WeightDtype::F32)),
-        "tf32" | "f32_exact" => Ok((WeightDtype::F32, WeightDtype::F32)),
+        "tf32" | "f32_exact" | "f32_exact_fast" => Ok((WeightDtype::F32, WeightDtype::F32)),
         _ => Err(format!("unsupported explicit vendor row {row:?}")),
     }
 }
@@ -10450,7 +10670,9 @@ fn fixed_force_spec(
     let (input_dtype, output_dtype) = fixed_force_row_dtypes(row)?;
     let invalid = || format!("{tile:?} is not a physical Fixed force candidate for {row}/CC{cc:?}");
     let expected_symbol = match tile {
-        FixedTile::F32N128S2 if row == "f32_exact" => "gemm_bi_f32_f32_n128_s2",
+        FixedTile::F32N128S2 if matches!(row, "f32_exact" | "f32_exact_fast") => {
+            "gemm_bi_f32_f32_n128_s2"
+        }
         FixedTile::F32N128S2 => return Err(invalid()),
         FixedTile::Tf32M128S2 if row == "tf32" => "gemm_bi_nn_tf32_v1_m128n64_bk32_s2",
         FixedTile::Tf32M128S2 => return Err(invalid()),
@@ -10592,61 +10814,85 @@ fn fixed_force_spec(
             "f16" => "gemm_bi_f16_f16",
             "bf16_f32" => "gemm_bi_bf16_f32",
             "f16_f32" => "gemm_bi_f16_f32",
-            "f32_exact" => "gemm_bi_f32_f32_s2",
+            "f32_exact" | "f32_exact_fast" => "gemm_bi_f32_f32_s2",
             _ => return Err(invalid()),
         },
         FixedTile::Sm90Wgmma | FixedTile::Sm100Tcgen => return Err(invalid()),
-        FixedTile::F32Sm89N64CopyPlan if row == "f32_exact" && cc == (8, 9) => {
+        FixedTile::F32Sm89N64CopyPlan
+            if matches!(row, "f32_exact" | "f32_exact_fast") && cc == (8, 9) =>
+        {
             "gemm_bi_nn_fixed_sm89_f32_n64_copyplan_v1"
         }
         FixedTile::F32Sm89N64CopyPlan => return Err(invalid()),
-        FixedTile::F32Sm120N64CopyPlan if row == "f32_exact" && cc == (12, 0) => {
+        FixedTile::F32Sm120N64CopyPlan
+            if matches!(row, "f32_exact" | "f32_exact_fast") && cc == (12, 0) =>
+        {
             "gemm_bi_nn_fixed_sm120_f32_n64_copyplan_v1"
         }
         FixedTile::F32Sm120N64CopyPlan => return Err(invalid()),
-        FixedTile::F32Sm120N64CopyPlanT256 if row == "f32_exact" && cc == (12, 0) => {
+        FixedTile::F32Sm120N64CopyPlanT256
+            if matches!(row, "f32_exact" | "f32_exact_fast") && cc == (12, 0) =>
+        {
             "gemm_bi_nn_fixed_sm120_f32_n64_copyplan_t256_v1"
         }
         FixedTile::F32Sm120N64CopyPlanT256 => return Err(invalid()),
-        FixedTile::F32Sm120M128N64CopyPlanT256 if row == "f32_exact" && cc == (12, 0) => {
+        FixedTile::F32Sm120M128N64CopyPlanT256
+            if matches!(row, "f32_exact" | "f32_exact_fast") && cc == (12, 0) =>
+        {
             "gemm_bi_nn_fixed_sm120_f32_n64_copyplan_m128n64_t256_v1"
         }
         FixedTile::F32Sm120M128N64CopyPlanT256 => return Err(invalid()),
-        FixedTile::F32Sm120N64Sliced if row == "f32_exact" && cc == (12, 0) => {
+        FixedTile::F32Sm120N64Sliced
+            if matches!(row, "f32_exact" | "f32_exact_fast") && cc == (12, 0) =>
+        {
             "gemm_bi_nn_fixed_sm120_f32_n64_sliced_v1"
         }
         FixedTile::F32Sm120N64Sliced => return Err(invalid()),
-        FixedTile::F32Sm120TmaFmaM128N64 if row == "f32_exact" && cc == (12, 0) => {
+        FixedTile::F32Sm120TmaFmaM128N64
+            if matches!(row, "f32_exact" | "f32_exact_fast") && cc == (12, 0) =>
+        {
             "gemm_bi_nn_sm120_tma_fma_v1_m128n64_bk16_s2"
         }
         FixedTile::F32Sm120TmaFmaM128N64 => return Err(invalid()),
-        FixedTile::F32Sm120TmaFmaM64N128 if row == "f32_exact" && cc == (12, 0) => {
+        FixedTile::F32Sm120TmaFmaM64N128
+            if matches!(row, "f32_exact" | "f32_exact_fast") && cc == (12, 0) =>
+        {
             "gemm_bi_nn_sm120_tma_fma_v1_m64n128_bk16_s2"
         }
         FixedTile::F32Sm120TmaFmaM64N128 => return Err(invalid()),
-        FixedTile::F32Sm120TmaFmaFixedPostBiasM128N64 if row == "f32_exact" && cc == (12, 0) => {
+        FixedTile::F32Sm120TmaFmaFixedPostBiasM128N64
+            if matches!(row, "f32_exact" | "f32_exact_fast") && cc == (12, 0) =>
+        {
             "gemm_bi_nn_sm120_tma_fma_v1_fixed_postbias_m128n64_bk16_s2"
         }
         FixedTile::F32Sm120TmaFmaFixedPostBiasM128N64 => return Err(invalid()),
-        FixedTile::F32Sm120TmaFmaFixedPostBiasM64N128 if row == "f32_exact" && cc == (12, 0) => {
+        FixedTile::F32Sm120TmaFmaFixedPostBiasM64N128
+            if matches!(row, "f32_exact" | "f32_exact_fast") && cc == (12, 0) =>
+        {
             "gemm_bi_nn_sm120_tma_fma_v1_fixed_postbias_m64n128_bk16_s2"
         }
         FixedTile::F32Sm120TmaFmaFixedPostBiasM64N128 => return Err(invalid()),
-        FixedTile::F32Sm120TmaFmaFixedPostBiasM128N96 if row == "f32_exact" && cc == (12, 0) => {
+        FixedTile::F32Sm120TmaFmaFixedPostBiasM128N96
+            if matches!(row, "f32_exact" | "f32_exact_fast") && cc == (12, 0) =>
+        {
             "gemm_bi_nn_sm120_tma_fma_v1_fixed_postbias_m128n96_bk16_s2"
         }
         FixedTile::F32Sm120TmaFmaFixedPostBiasM128N96 => return Err(invalid()),
-        FixedTile::F32Sm120TmaFmaFixedPostBiasM128N64K4 if row == "f32_exact" && cc == (12, 0) => {
+        FixedTile::F32Sm120TmaFmaFixedPostBiasM128N64K4
+            if matches!(row, "f32_exact" | "f32_exact_fast") && cc == (12, 0) =>
+        {
             "gemm_bi_nn_sm120_tma_fma_v1_fixed_postbias_m128n64_bk16_s2_k4"
         }
         FixedTile::F32Sm120TmaFmaFixedPostBiasM128N64K4 => return Err(invalid()),
         FixedTile::F32Sm120TmaFmaFixedPostBiasM128N64T256
-            if row == "f32_exact" && cc == (12, 0) =>
+            if matches!(row, "f32_exact" | "f32_exact_fast") && cc == (12, 0) =>
         {
             "gemm_bi_nn_sm120_tma_fma_v1_fixed_postbias_m128n64_t256_bk16_s2"
         }
         FixedTile::F32Sm120TmaFmaFixedPostBiasM128N64T256 => return Err(invalid()),
-        FixedTile::F32Sm120TmaFmaFixedNoBiasM128N64T256 if row == "f32_exact" && cc == (12, 0) => {
+        FixedTile::F32Sm120TmaFmaFixedNoBiasM128N64T256
+            if matches!(row, "f32_exact" | "f32_exact_fast") && cc == (12, 0) =>
+        {
             "gemm_bi_nn_sm120_tma_fma_v1_fixed_nobias_m128n64_t256_bk16_s2"
         }
         FixedTile::F32Sm120TmaFmaFixedNoBiasM128N64T256 => return Err(invalid()),
@@ -10697,7 +10943,7 @@ fn fixed_explicit_vendor_tiles(row: &str, cc: (u32, u32)) -> Vec<FixedTile> {
             FixedTile::Tf32M64S3,
             FixedTile::Tf32M16S4,
         ],
-        "f32_exact" => vec![FixedTile::Legacy, FixedTile::F32N128S2],
+        "f32_exact" | "f32_exact_fast" => vec![FixedTile::Legacy, FixedTile::F32N128S2],
         _ => panic!("unsupported explicit vendor row {row:?}"),
     };
     if cc == (12, 0) {
@@ -10714,7 +10960,7 @@ fn fixed_explicit_vendor_tiles(row: &str, cc: (u32, u32)) -> Vec<FixedTile> {
                 FixedTile::Tf32Sm120M64S2,
                 FixedTile::Tf32Sm120M64S2PairStore,
             ]),
-            "f32_exact" => tiles.extend([
+            "f32_exact" | "f32_exact_fast" => tiles.extend([
                 FixedTile::F32Sm120N64CopyPlan,
                 FixedTile::F32Sm120N64CopyPlanT256,
                 FixedTile::F32Sm120M128N64CopyPlanT256,
@@ -10735,7 +10981,7 @@ fn fixed_explicit_vendor_tiles(row: &str, cc: (u32, u32)) -> Vec<FixedTile> {
         tiles.insert(2, FixedTile::Tf32M128N128S3);
     } else if matches!(row, "bf16" | "f16") {
         tiles.push(FixedTile::Tc128Sm89Pipeline);
-    } else if row == "f32_exact" {
+    } else if matches!(row, "f32_exact" | "f32_exact_fast") {
         tiles.push(FixedTile::F32Sm89N64CopyPlan);
     }
     tiles
@@ -11138,6 +11384,68 @@ fn fixed_explicit_vendor_rung_inventory_is_arch_specific() {
 }
 
 #[test]
+fn fixed_explicit_vendor_exact_rows_keep_distinct_denominators_and_tolerances() {
+    use cudarc::cublas::sys::cublasComputeType_t;
+
+    let rows = fixed_explicit_vendor_row_specs();
+    let pedantic = rows
+        .iter()
+        .find(|row| row.name == "f32_exact")
+        .expect("PEDANTIC exact comparator row");
+    let fast = rows
+        .iter()
+        .find(|row| row.name == "f32_exact_fast")
+        .expect("FAST_TF32 exact comparator row");
+
+    for row in [pedantic, fast] {
+        assert_eq!(row.input_dtype, WeightDtype::F32);
+        assert_eq!(row.output_dtype, WeightDtype::F32);
+        assert_eq!(row.policy, F32TriadPolicy::ExactScalarFmaV1);
+        assert_eq!(row.custom_tolerance, 0.0002);
+    }
+    assert_eq!(
+        pedantic.vendor_compute,
+        cublasComputeType_t::CUBLAS_COMPUTE_32F_PEDANTIC
+    );
+    assert_eq!(pedantic.vendor_tolerance, 0.0002);
+    assert_eq!(pedantic.vendor_comparator, "CUBLAS_COMPUTE_32F_PEDANTIC");
+    assert_eq!(
+        fast.vendor_compute,
+        cublasComputeType_t::CUBLAS_COMPUTE_32F_FAST_TF32
+    );
+    assert_eq!(fast.vendor_tolerance, 0.0025);
+    assert_eq!(fast.vendor_comparator, "CUBLAS_COMPUTE_32F_FAST_TF32");
+    assert_eq!(
+        fixed_exact_comparator_completion_metadata(),
+        "\"exact_comparators\":{\"f32_exact\":\"CUBLAS_COMPUTE_32F_PEDANTIC\",\"f32_exact_fast\":\"CUBLAS_COMPUTE_32F_FAST_TF32\"}"
+    );
+    assert_eq!(
+        fixed_explicit_vendor_tolerance_metadata(fast),
+        "\"vendor_comparator\":\"CUBLAS_COMPUTE_32F_FAST_TF32\",\"normalized_error_tolerance\":0.0002,\"custom_normalized_error_tolerance\":0.0002,\"vendor_normalized_error_tolerance\":0.0025"
+    );
+}
+
+#[test]
+fn fixed_explicit_vendor_fast_exact_row_reuses_every_exact_force_spec_once() {
+    for cc in [(8, 9), (12, 0)] {
+        let pedantic = fixed_explicit_vendor_tiles("f32_exact", cc);
+        let fast = fixed_explicit_vendor_tiles("f32_exact_fast", cc);
+        assert_eq!(fast, pedantic);
+        assert_eq!(fast.len(), if cc == (8, 9) { 3 } else { 14 });
+        for tile in fast {
+            let fast_spec = fixed_force_spec("f32_exact_fast", cc, tile)
+                .expect("FAST_TF32 denominator must retain exact custom force spec");
+            let pedantic_spec =
+                fixed_force_spec("f32_exact", cc, tile).expect("PEDANTIC exact custom force spec");
+            assert_eq!(fast_spec.input_dtype, pedantic_spec.input_dtype);
+            assert_eq!(fast_spec.output_dtype, pedantic_spec.output_dtype);
+            assert_eq!(fast_spec.bias_contract, pedantic_spec.bias_contract);
+            assert_eq!(fast_spec.expected_symbol, pedantic_spec.expected_symbol);
+        }
+    }
+}
+
+#[test]
 fn fixed_force_specs_bind_mixed_and_exact_tiles_to_physical_symbols() {
     let mixed = fixed_force_spec(
         "bf16_f32",
@@ -11239,7 +11547,15 @@ fn fixed_force_disallowed_candidate_is_invoked_exactly_once() {
 #[test]
 fn fixed_force_specs_cover_every_inventory_entry_exactly_once() {
     for cc in [(8, 9), (12, 0)] {
-        for row in ["bf16", "f16", "bf16_f32", "f16_f32", "tf32", "f32_exact"] {
+        for row in [
+            "bf16",
+            "f16",
+            "bf16_f32",
+            "f16_f32",
+            "tf32",
+            "f32_exact",
+            "f32_exact_fast",
+        ] {
             let inventory = fixed_explicit_vendor_tiles(row, cc);
             let mut symbols = std::collections::BTreeSet::new();
             for tile in inventory.iter().copied() {
@@ -11295,7 +11611,15 @@ fn fixed_force_enum_registry_is_reverse_complete_for_every_row_and_architecture(
 
     for tile in universe {
         for cc in [(8, 9), (12, 0)] {
-            for row in ["bf16", "f16", "bf16_f32", "f16_f32", "tf32", "f32_exact"] {
+            for row in [
+                "bf16",
+                "f16",
+                "bf16_f32",
+                "f16_f32",
+                "tf32",
+                "f32_exact",
+                "f32_exact_fast",
+            ] {
                 let eligible = fixed_force_spec(row, cc, tile).is_ok();
                 let occurrences = fixed_explicit_vendor_tiles(row, cc)
                     .into_iter()
@@ -11784,57 +12108,8 @@ fn fixed_ada_forced_rungs_paired_precision_cublas() {
     if cfg!(debug_assertions) {
         panic!("explicit vendor rung census requires --release");
     }
-    let rows = [
-        (
-            "bf16",
-            WeightDtype::Bf16,
-            WeightDtype::Bf16,
-            F32TriadPolicy::ExactScalarFmaV1,
-            cublasComputeType_t::CUBLAS_COMPUTE_32F,
-            0.01,
-        ),
-        (
-            "f16",
-            WeightDtype::F16,
-            WeightDtype::F16,
-            F32TriadPolicy::ExactScalarFmaV1,
-            cublasComputeType_t::CUBLAS_COMPUTE_32F,
-            0.0025,
-        ),
-        (
-            "bf16_f32",
-            WeightDtype::Bf16,
-            WeightDtype::F32,
-            F32TriadPolicy::ExactScalarFmaV1,
-            cublasComputeType_t::CUBLAS_COMPUTE_32F,
-            0.01,
-        ),
-        (
-            "f16_f32",
-            WeightDtype::F16,
-            WeightDtype::F32,
-            F32TriadPolicy::ExactScalarFmaV1,
-            cublasComputeType_t::CUBLAS_COMPUTE_32F,
-            0.0025,
-        ),
-        (
-            "tf32",
-            WeightDtype::F32,
-            WeightDtype::F32,
-            F32TriadPolicy::AllowDeterministicTf32V1,
-            cublasComputeType_t::CUBLAS_COMPUTE_32F_FAST_TF32,
-            0.0025,
-        ),
-        (
-            "f32_exact",
-            WeightDtype::F32,
-            WeightDtype::F32,
-            F32TriadPolicy::ExactScalarFmaV1,
-            cublasComputeType_t::CUBLAS_COMPUTE_32F_PEDANTIC,
-            0.0002,
-        ),
-    ];
-    let selected_rows = fixed_ada_filter("MAMBA_FIXED_ADA_ROWS", &rows.map(|row| row.0));
+    let rows = fixed_explicit_vendor_row_specs();
+    let selected_rows = fixed_ada_filter("MAMBA_FIXED_ADA_ROWS", &rows.map(|row| row.name));
     let labels = FIXED_AUTO_VENDOR_EXACT_CELLS
         .iter()
         .map(|cell| cell.label)
@@ -11900,7 +12175,15 @@ fn fixed_ada_forced_rungs_paired_precision_cublas() {
     let mut records = 0usize;
     let mut rejected = 0usize;
     for row_index in selected_rows {
-        let (row, input_dtype, output_dtype, policy, compute, tolerance) = rows[row_index];
+        let row_spec = rows[row_index];
+        let row = row_spec.name;
+        let input_dtype = row_spec.input_dtype;
+        let output_dtype = row_spec.output_dtype;
+        let policy = row_spec.policy;
+        let compute = row_spec.vendor_compute;
+        let custom_tolerance = row_spec.custom_tolerance;
+        let vendor_tolerance = row_spec.vendor_tolerance;
+        let vendor_comparator = row_spec.vendor_comparator;
         let tiles = fixed_explicit_vendor_filter_tiles(
             &fixed_explicit_vendor_tiles(row, device.compute_capability),
             requested_tiles.as_deref(),
@@ -11960,7 +12243,7 @@ fn fixed_ada_forced_rungs_paired_precision_cublas() {
                 let auto_error = fixed_ada_normalized_error(
                     &auto_bits,
                     &reference_bits,
-                    tolerance,
+                    custom_tolerance,
                     &format!("rung AUTO {row}/{} bias={has_bias}", cell.label),
                 );
                 fixed_ada_vendor_launch(&ctx, vendor_ops, shape, compute);
@@ -11968,8 +12251,11 @@ fn fixed_ada_forced_rungs_paired_precision_cublas() {
                 let vendor_error = fixed_ada_normalized_error(
                     &f32_bits(&ctx, &vendor, elements),
                     &reference_bits,
-                    tolerance,
-                    &format!("rung vendor {row}/{} bias={has_bias}", cell.label),
+                    vendor_tolerance,
+                    &format!(
+                        "rung vendor {vendor_comparator} {row}/{} bias={has_bias}",
+                        cell.label
+                    ),
                 );
                 let auto_launch = || {
                     assert_eq!(
@@ -12031,8 +12317,12 @@ fn fixed_ada_forced_rungs_paired_precision_cublas() {
                     let first = f32_bits(&ctx, &forced, elements);
                     let first_raw = fixed_explicit_vendor_raw_bytes(&ctx, &forced);
                     let label = format!("rung {row}/{} {tile:?} bias={has_bias}", cell.label);
-                    let forced_error =
-                        fixed_ada_normalized_error(&first, &reference_bits, tolerance, &label);
+                    let forced_error = fixed_ada_normalized_error(
+                        &first,
+                        &reference_bits,
+                        custom_tolerance,
+                        &label,
+                    );
                     let forced_launch = || {
                         fixed_forward_with_tile(&ctx, forced_ops, shape, tile)
                             .unwrap_or_else(|error| panic!("{label}: {error}"));
@@ -12300,9 +12590,9 @@ fn fixed_ada_forced_rungs_paired_precision_cublas() {
                                     "\"graphs\":{},\"graph_replay_bits_equal\":{},\"raw_storage_bits_equal\":true,\"vendor_repeat_bits_equal\":true,",
                                     "\"timing\":\"cuda_events\",\"alpha\":1,\"beta\":0,\"bias\":{},",
                                     "\"vendor_gemm_beta\":{},\"vendor_bias_broadcast_timed\":{},",
-                                    "\"vendor_compute\":\"{:?}\",\"reference_compute\":\"CUBLAS_COMPUTE_32F_PEDANTIC\",",
+                                    "{},\"vendor_compute\":\"{:?}\",\"reference_compute\":\"CUBLAS_COMPUTE_32F_PEDANTIC\",",
                                     "\"reference_output_dtype\":\"f32\",\"auto_bits_equal\":true,\"repeat_bits_equal\":true,",
-                                    "\"normalized_error_tolerance\":{},\"auto_normalized_error\":{},",
+                                    "\"auto_normalized_error\":{},",
                                     "\"forced_normalized_error\":{},\"vendor_normalized_error\":{},\"order\":\"{}\",",
                                     "\"windows\":{},\"auto_iterations\":{},\"forced_iterations\":{},\"vendor_iterations\":{},",
                                     "\"auto_p50_us\":{},\"forced_p50_us\":{},\"vendor_p50_us\":{},",
@@ -12328,8 +12618,8 @@ fn fixed_ada_forced_rungs_paired_precision_cublas() {
                                 has_bias,
                                 u8::from(has_bias),
                                 has_bias,
+                                fixed_explicit_vendor_tolerance_metadata(&row_spec),
                                 compute,
-                                tolerance,
                                 auto_error,
                                 forced_error,
                                 vendor_error,
@@ -12365,8 +12655,9 @@ fn fixed_ada_forced_rungs_paired_precision_cublas() {
         "explicit vendor rung census measured no eligible candidates"
     );
     println!(
-        "{{\"schema\":\"MambaBiFixedExplicitForcedRungCompleteV2\",{},\"records\":{records},\"rejected\":{rejected},\"passed\":true}}",
-        device_metadata
+        "{{\"schema\":\"MambaBiFixedExplicitForcedRungCompleteV2\",{},{},\"records\":{records},\"rejected\":{rejected},\"passed\":true}}",
+        device_metadata,
+        fixed_exact_comparator_completion_metadata(),
     );
 }
 
@@ -12669,13 +12960,16 @@ fn fixed_f32_n128_matches_legacy_bits() {
                         ((4621, 768, 2304), false) if measured_stack && specialized_alignment => {
                             FixedTile::F32Sm120TmaFmaM128N64
                         }
+                        ((4621, 768, 2304), true) if measured_stack && specialized_alignment => {
+                            FixedTile::F32Sm120TmaFmaFixedPostBiasM128N64
+                        }
+                        ((4621, 1928, 384), true) if measured_stack && specialized_alignment => {
+                            FixedTile::F32Sm120TmaFmaFixedPostBiasM128N96
+                        }
                         ((2048, 768, 2304), _) if measured_stack && specialized_alignment => {
                             FixedTile::F32Sm120N64CopyPlan
                         }
-                        ((4621, 768, 2304) | (2048, 2304, 768), true)
-                        | ((2048, 2304, 768), false)
-                            if measured_stack && specialized_alignment =>
-                        {
+                        ((2048, 2304, 768), _) if measured_stack && specialized_alignment => {
                             FixedTile::F32Sm120N64CopyPlan
                         }
                         ((4621, 384, 1928) | (4621, 768, 2304), _) if measured_device => {
@@ -12684,6 +12978,35 @@ fn fixed_f32_n128_matches_legacy_bits() {
                         _ => FixedTile::Legacy,
                     };
                     assert_eq!(selected, expected_auto, "production exact-F32 AUTO route");
+                    if measured_stack
+                        && specialized_alignment
+                        && bias_ptr.is_some()
+                        && matches!(dims, (4621, 768, 2304) | (4621, 1928, 384))
+                    {
+                        let graph = unsafe {
+                            capture_into_graph(&ctx.stream, || {
+                                fixed_forward(
+                                    &ctx, auto_ops.c, auto_ops.x, auto_ops.w, bias_ptr, dims,
+                                )
+                                .map(|_| ())
+                            })
+                        }
+                        .expect("capture promoted B1/C1 AUTO graph");
+                        let symbol = if dims == (4621, 768, 2304) {
+                            "gemm_bi_nn_sm120_tma_fma_v1_fixed_postbias_m128n64_bk16_s2"
+                        } else {
+                            "gemm_bi_nn_sm120_tma_fma_v1_fixed_postbias_m128n96_bk16_s2"
+                        };
+                        assert_eq!(single_graph_kernel_name(&graph, "B1/C1 AUTO"), symbol);
+                        assert_sm120_exact_tma_graph_contract(
+                            &graph,
+                            auto_ops.c.ptr,
+                            shape,
+                            bias_ptr,
+                            expected_auto,
+                        );
+                        graph.launch().expect("replay promoted B1/C1 AUTO graph");
+                    }
                     fixed_forward_with_tile(&ctx, candidate_a_ops, shape, FixedTile::F32N128S2)
                         .expect("first forced N128 launch");
                     fixed_forward_with_tile(&ctx, candidate_b_ops, shape, FixedTile::F32N128S2)

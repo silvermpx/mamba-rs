@@ -471,10 +471,11 @@ fn expected_auto(
             FixedTile::F32Sm120TmaFmaFixedPostBiasM128N64
         } else if dims == (4621, 768, 2304) && !has_bias {
             FixedTile::F32Sm120TmaFmaM128N64
-        } else if matches!(
-            dims,
-            (4621, 768, 2304) | (2048, 2304, 768) | (2048, 768, 2304)
-        ) {
+        } else if dims == (4621, 768, 2304) && has_bias {
+            FixedTile::F32Sm120TmaFmaFixedPostBiasM128N64
+        } else if dims == (4621, 1928, 384) && has_bias {
+            FixedTile::F32Sm120TmaFmaFixedPostBiasM128N96
+        } else if matches!(dims, (2048, 2304, 768) | (2048, 768, 2304)) {
             FixedTile::F32Sm120N64CopyPlan
         } else {
             FixedTile::Legacy
@@ -1811,7 +1812,21 @@ fn exact_n64_sliced_cpu_promoted_route_retains_copyplan_and_graph_compact() {
         (2048, 768, 2304, false, FixedTile::F32Sm120N64CopyPlan),
         (2048, 768, 2304, true, FixedTile::F32Sm120N64CopyPlan),
         (4621, 768, 2304, false, FixedTile::F32Sm120TmaFmaM128N64),
-        (4621, 768, 2304, true, FixedTile::F32Sm120N64CopyPlan),
+        (
+            4621,
+            768,
+            2304,
+            true,
+            FixedTile::F32Sm120TmaFmaFixedPostBiasM128N64,
+        ),
+        (4621, 1928, 384, false, FixedTile::Legacy),
+        (
+            4621,
+            1928,
+            384,
+            true,
+            FixedTile::F32Sm120TmaFmaFixedPostBiasM128N96,
+        ),
         (2048, 2304, 768, false, FixedTile::F32Sm120N64CopyPlan),
         (2048, 2304, 768, true, FixedTile::F32Sm120N64CopyPlan),
         (4621, 384, 1928, false, FixedTile::F32Sm120TmaFmaM64N128),
