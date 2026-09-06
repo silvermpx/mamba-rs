@@ -1,0 +1,2533 @@
+{
+  "completion": [
+    {
+      "schema": "MambaBiFixedExplicitForcedRungCompleteV2",
+      "cc": "8.9",
+      "sm_count": 142,
+      "nvrtc": [
+        13,
+        2
+      ],
+      "compiler_target": "CudaTarget { bytes: [115, 109, 95, 56, 57, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], len: 5 }",
+      "fixed_source_digest": "35d4fd870cd7c81aaf0ef5e7c877ed77ed0d95e80b9c522823af2a7c85a1210f",
+      "fixed_invocation_digest": "f094b565e36deecb487d852e4fb67cbd775c4f35ebbc3fb852e06974d74dd6a4",
+      "fixed_artifact_digest": "f933cc6ec76459f2b6a28ee36a77474e1804d6ca2ba44d95cd5113325b635dd7",
+      "header_manifest_digest": "f0a268138e4a40a053532f57c1956dac7012807c0ec3f6b057750395464e2945",
+      "nvrtc_library_domain": "d031a53eb97235b70f62f652932db1bdf728ea229c8ca809d53c5ffd91642687",
+      "nvrtc_library_known": true,
+      "exact_comparators": {
+        "f32_exact": "CUBLAS_COMPUTE_32F_PEDANTIC",
+        "f32_exact_fast": "CUBLAS_COMPUTE_32F_FAST_TF32"
+      },
+      "records": 800,
+      "rejected": 20,
+      "passed": true
+    }
+  ],
+  "rejected": [
+    {
+      "row": "bf16",
+      "cell": "hot_a",
+      "bias": true,
+      "forced_tile": "Legacy",
+      "gate": "auto_bit_identity"
+    },
+    {
+      "row": "bf16",
+      "cell": "hot_b",
+      "bias": true,
+      "forced_tile": "Legacy",
+      "gate": "auto_bit_identity"
+    },
+    {
+      "row": "bf16",
+      "cell": "hot_c",
+      "bias": true,
+      "forced_tile": "Legacy",
+      "gate": "auto_bit_identity"
+    },
+    {
+      "row": "bf16",
+      "cell": "hot_d",
+      "bias": true,
+      "forced_tile": "Legacy",
+      "gate": "auto_bit_identity"
+    },
+    {
+      "row": "bf16",
+      "cell": "hot_e",
+      "bias": true,
+      "forced_tile": "Legacy",
+      "gate": "auto_bit_identity"
+    },
+    {
+      "row": "f16",
+      "cell": "hot_a",
+      "bias": true,
+      "forced_tile": "Legacy",
+      "gate": "auto_bit_identity"
+    },
+    {
+      "row": "f16",
+      "cell": "hot_b",
+      "bias": true,
+      "forced_tile": "Legacy",
+      "gate": "auto_bit_identity"
+    },
+    {
+      "row": "f16",
+      "cell": "hot_c",
+      "bias": true,
+      "forced_tile": "Legacy",
+      "gate": "auto_bit_identity"
+    },
+    {
+      "row": "f16",
+      "cell": "hot_d",
+      "bias": true,
+      "forced_tile": "Legacy",
+      "gate": "auto_bit_identity"
+    },
+    {
+      "row": "f16",
+      "cell": "hot_e",
+      "bias": true,
+      "forced_tile": "Legacy",
+      "gate": "auto_bit_identity"
+    },
+    {
+      "row": "bf16_f32",
+      "cell": "hot_a",
+      "bias": true,
+      "forced_tile": "Legacy",
+      "gate": "auto_bit_identity"
+    },
+    {
+      "row": "bf16_f32",
+      "cell": "hot_b",
+      "bias": true,
+      "forced_tile": "Legacy",
+      "gate": "auto_bit_identity"
+    },
+    {
+      "row": "bf16_f32",
+      "cell": "hot_c",
+      "bias": true,
+      "forced_tile": "Legacy",
+      "gate": "auto_bit_identity"
+    },
+    {
+      "row": "bf16_f32",
+      "cell": "hot_d",
+      "bias": true,
+      "forced_tile": "Legacy",
+      "gate": "auto_bit_identity"
+    },
+    {
+      "row": "bf16_f32",
+      "cell": "hot_e",
+      "bias": true,
+      "forced_tile": "Legacy",
+      "gate": "auto_bit_identity"
+    },
+    {
+      "row": "f16_f32",
+      "cell": "hot_a",
+      "bias": true,
+      "forced_tile": "Legacy",
+      "gate": "auto_bit_identity"
+    },
+    {
+      "row": "f16_f32",
+      "cell": "hot_b",
+      "bias": true,
+      "forced_tile": "Legacy",
+      "gate": "auto_bit_identity"
+    },
+    {
+      "row": "f16_f32",
+      "cell": "hot_c",
+      "bias": true,
+      "forced_tile": "Legacy",
+      "gate": "auto_bit_identity"
+    },
+    {
+      "row": "f16_f32",
+      "cell": "hot_d",
+      "bias": true,
+      "forced_tile": "Legacy",
+      "gate": "auto_bit_identity"
+    },
+    {
+      "row": "f16_f32",
+      "cell": "hot_e",
+      "bias": true,
+      "forced_tile": "Legacy",
+      "gate": "auto_bit_identity"
+    }
+  ],
+  "candidate_groups": [
+    {
+      "row": "bf16",
+      "cell": "hot_a",
+      "bias": false,
+      "auto": "Tc128Sm89Pipeline",
+      "candidate": "Legacy",
+      "cohorts": 4,
+      "worst_own_p50": 3.7357949593110376,
+      "worst_own_p95": 3.7405316475290094
+    },
+    {
+      "row": "bf16",
+      "cell": "hot_a",
+      "bias": false,
+      "auto": "Tc128Sm89Pipeline",
+      "candidate": "Tc128",
+      "cohorts": 4,
+      "worst_own_p50": 1.294731278641119,
+      "worst_own_p95": 1.2965045381804126
+    },
+    {
+      "row": "bf16",
+      "cell": "hot_a",
+      "bias": false,
+      "auto": "Tc128Sm89Pipeline",
+      "candidate": "Tc128Sm89Pipeline",
+      "cohorts": 4,
+      "worst_own_p50": 0.999565755536831,
+      "worst_own_p95": 1.0004088222197447
+    },
+    {
+      "row": "bf16",
+      "cell": "hot_a",
+      "bias": false,
+      "auto": "Tc128Sm89Pipeline",
+      "candidate": "Tc16",
+      "cohorts": 4,
+      "worst_own_p50": 3.351748482885173,
+      "worst_own_p95": 3.387798874776809
+    },
+    {
+      "row": "bf16",
+      "cell": "hot_a",
+      "bias": false,
+      "auto": "Tc128Sm89Pipeline",
+      "candidate": "Tc64",
+      "cohorts": 4,
+      "worst_own_p50": 1.386138041475003,
+      "worst_own_p95": 1.3875874180070518
+    },
+    {
+      "row": "bf16",
+      "cell": "hot_a",
+      "bias": false,
+      "auto": "Tc128Sm89Pipeline",
+      "candidate": "TcW64",
+      "cohorts": 4,
+      "worst_own_p50": 1.4169164153380216,
+      "worst_own_p95": 1.4187328273192366
+    },
+    {
+      "row": "bf16",
+      "cell": "hot_a",
+      "bias": false,
+      "auto": "Tc128Sm89Pipeline",
+      "candidate": "TcWn64",
+      "cohorts": 4,
+      "worst_own_p50": 1.415216277715886,
+      "worst_own_p95": 1.4169688606287136
+    },
+    {
+      "row": "bf16",
+      "cell": "hot_a",
+      "bias": true,
+      "auto": "Tc128Sm89Pipeline",
+      "candidate": "Tc128",
+      "cohorts": 4,
+      "worst_own_p50": 1.282398078483066,
+      "worst_own_p95": 1.2833333333333332
+    },
+    {
+      "row": "bf16",
+      "cell": "hot_a",
+      "bias": true,
+      "auto": "Tc128Sm89Pipeline",
+      "candidate": "Tc128Sm89Pipeline",
+      "cohorts": 4,
+      "worst_own_p50": 1.0000160438062236,
+      "worst_own_p95": 1.0010805021108748
+    },
+    {
+      "row": "bf16",
+      "cell": "hot_a",
+      "bias": true,
+      "auto": "Tc128Sm89Pipeline",
+      "candidate": "Tc16",
+      "cohorts": 4,
+      "worst_own_p50": 3.3399292858226954,
+      "worst_own_p95": 3.3434220039664546
+    },
+    {
+      "row": "bf16",
+      "cell": "hot_a",
+      "bias": true,
+      "auto": "Tc128Sm89Pipeline",
+      "candidate": "Tc64",
+      "cohorts": 4,
+      "worst_own_p50": 1.3657556635797097,
+      "worst_own_p95": 1.3664573421254544
+    },
+    {
+      "row": "bf16",
+      "cell": "hot_a",
+      "bias": true,
+      "auto": "Tc128Sm89Pipeline",
+      "candidate": "TcW64",
+      "cohorts": 4,
+      "worst_own_p50": 1.4085906455518635,
+      "worst_own_p95": 1.4097848896491418
+    },
+    {
+      "row": "bf16",
+      "cell": "hot_a",
+      "bias": true,
+      "auto": "Tc128Sm89Pipeline",
+      "candidate": "TcWn64",
+      "cohorts": 4,
+      "worst_own_p50": 1.397109013137212,
+      "worst_own_p95": 1.3985585484973102
+    },
+    {
+      "row": "bf16",
+      "cell": "hot_b",
+      "bias": false,
+      "auto": "Tc128Sm89Pipeline",
+      "candidate": "Legacy",
+      "cohorts": 4,
+      "worst_own_p50": 4.3625304172151935,
+      "worst_own_p95": 4.51447827057406
+    },
+    {
+      "row": "bf16",
+      "cell": "hot_b",
+      "bias": false,
+      "auto": "Tc128Sm89Pipeline",
+      "candidate": "Tc128",
+      "cohorts": 4,
+      "worst_own_p50": 1.2131574824618887,
+      "worst_own_p95": 1.2750548718649761
+    },
+    {
+      "row": "bf16",
+      "cell": "hot_b",
+      "bias": false,
+      "auto": "Tc128Sm89Pipeline",
+      "candidate": "Tc128Sm89Pipeline",
+      "cohorts": 4,
+      "worst_own_p50": 1.0000842233855576,
+      "worst_own_p95": 1.0535307166728662
+    },
+    {
+      "row": "bf16",
+      "cell": "hot_b",
+      "bias": false,
+      "auto": "Tc128Sm89Pipeline",
+      "candidate": "Tc16",
+      "cohorts": 4,
+      "worst_own_p50": 2.8779841395146994,
+      "worst_own_p95": 2.9826436673446493
+    },
+    {
+      "row": "bf16",
+      "cell": "hot_b",
+      "bias": false,
+      "auto": "Tc128Sm89Pipeline",
+      "candidate": "Tc64",
+      "cohorts": 4,
+      "worst_own_p50": 1.4899114279292751,
+      "worst_own_p95": 1.5557753283690425
+    },
+    {
+      "row": "bf16",
+      "cell": "hot_b",
+      "bias": false,
+      "auto": "Tc128Sm89Pipeline",
+      "candidate": "TcW64",
+      "cohorts": 4,
+      "worst_own_p50": 1.265047027176516,
+      "worst_own_p95": 1.3424513180933197
+    },
+    {
+      "row": "bf16",
+      "cell": "hot_b",
+      "bias": false,
+      "auto": "Tc128Sm89Pipeline",
+      "candidate": "TcWn64",
+      "cohorts": 4,
+      "worst_own_p50": 1.320639007591822,
+      "worst_own_p95": 1.394613013236513
+    },
+    {
+      "row": "bf16",
+      "cell": "hot_b",
+      "bias": true,
+      "auto": "Tc128Sm89Pipeline",
+      "candidate": "Tc128",
+      "cohorts": 4,
+      "worst_own_p50": 1.1945416115187109,
+      "worst_own_p95": 1.212019112872649
+    },
+    {
+      "row": "bf16",
+      "cell": "hot_b",
+      "bias": true,
+      "auto": "Tc128Sm89Pipeline",
+      "candidate": "Tc128Sm89Pipeline",
+      "cohorts": 4,
+      "worst_own_p50": 0.999808655542724,
+      "worst_own_p95": 1.0096450080499295
+    },
+    {
+      "row": "bf16",
+      "cell": "hot_b",
+      "bias": true,
+      "auto": "Tc128Sm89Pipeline",
+      "candidate": "Tc16",
+      "cohorts": 4,
+      "worst_own_p50": 2.8331270347316106,
+      "worst_own_p95": 2.9055509245594515
+    },
+    {
+      "row": "bf16",
+      "cell": "hot_b",
+      "bias": true,
+      "auto": "Tc128Sm89Pipeline",
+      "candidate": "Tc64",
+      "cohorts": 4,
+      "worst_own_p50": 1.49428716104649,
+      "worst_own_p95": 1.512980507824778
+    },
+    {
+      "row": "bf16",
+      "cell": "hot_b",
+      "bias": true,
+      "auto": "Tc128Sm89Pipeline",
+      "candidate": "TcW64",
+      "cohorts": 4,
+      "worst_own_p50": 1.2200079734749527,
+      "worst_own_p95": 1.2425979615551366
+    },
+    {
+      "row": "bf16",
+      "cell": "hot_b",
+      "bias": true,
+      "auto": "Tc128Sm89Pipeline",
+      "candidate": "TcWn64",
+      "cohorts": 4,
+      "worst_own_p50": 1.233401403730731,
+      "worst_own_p95": 1.2543078523814437
+    },
+    {
+      "row": "bf16",
+      "cell": "hot_c",
+      "bias": false,
+      "auto": "Tc128Sm89Pipeline",
+      "candidate": "Legacy",
+      "cohorts": 4,
+      "worst_own_p50": 5.378571099725519,
+      "worst_own_p95": 5.381743276613428
+    },
+    {
+      "row": "bf16",
+      "cell": "hot_c",
+      "bias": false,
+      "auto": "Tc128Sm89Pipeline",
+      "candidate": "Tc128",
+      "cohorts": 4,
+      "worst_own_p50": 1.282976481166752,
+      "worst_own_p95": 1.2838273483686902
+    },
+    {
+      "row": "bf16",
+      "cell": "hot_c",
+      "bias": false,
+      "auto": "Tc128Sm89Pipeline",
+      "candidate": "Tc128Sm89Pipeline",
+      "cohorts": 4,
+      "worst_own_p50": 1,
+      "worst_own_p95": 1.0066383566132489
+    },
+    {
+      "row": "bf16",
+      "cell": "hot_c",
+      "bias": false,
+      "auto": "Tc128Sm89Pipeline",
+      "candidate": "Tc16",
+      "cohorts": 4,
+      "worst_own_p50": 3.0742686852564187,
+      "worst_own_p95": 3.1708852769564517
+    },
+    {
+      "row": "bf16",
+      "cell": "hot_c",
+      "bias": false,
+      "auto": "Tc128Sm89Pipeline",
+      "candidate": "Tc64",
+      "cohorts": 4,
+      "worst_own_p50": 1.6380605356188374,
+      "worst_own_p95": 1.6436694623755168
+    },
+    {
+      "row": "bf16",
+      "cell": "hot_c",
+      "bias": false,
+      "auto": "Tc128Sm89Pipeline",
+      "candidate": "TcW64",
+      "cohorts": 4,
+      "worst_own_p50": 1.2979549319275734,
+      "worst_own_p95": 1.2985824965233503
+    },
+    {
+      "row": "bf16",
+      "cell": "hot_c",
+      "bias": false,
+      "auto": "Tc128Sm89Pipeline",
+      "candidate": "TcWn64",
+      "cohorts": 4,
+      "worst_own_p50": 2.183964417273591,
+      "worst_own_p95": 2.185728688496304
+    },
+    {
+      "row": "bf16",
+      "cell": "hot_c",
+      "bias": true,
+      "auto": "Tc128Sm89Pipeline",
+      "candidate": "Tc128",
+      "cohorts": 4,
+      "worst_own_p50": 1.2827588335495455,
+      "worst_own_p95": 1.283545386716976
+    },
+    {
+      "row": "bf16",
+      "cell": "hot_c",
+      "bias": true,
+      "auto": "Tc128Sm89Pipeline",
+      "candidate": "Tc128Sm89Pipeline",
+      "cohorts": 4,
+      "worst_own_p50": 1.000171504290702,
+      "worst_own_p95": 1.0044735364919186
+    },
+    {
+      "row": "bf16",
+      "cell": "hot_c",
+      "bias": true,
+      "auto": "Tc128Sm89Pipeline",
+      "candidate": "Tc16",
+      "cohorts": 4,
+      "worst_own_p50": 3.0766685212293883,
+      "worst_own_p95": 3.2905675198160242
+    },
+    {
+      "row": "bf16",
+      "cell": "hot_c",
+      "bias": true,
+      "auto": "Tc128Sm89Pipeline",
+      "candidate": "Tc64",
+      "cohorts": 4,
+      "worst_own_p50": 1.6385202777645542,
+      "worst_own_p95": 1.6405327352397105
+    },
+    {
+      "row": "bf16",
+      "cell": "hot_c",
+      "bias": true,
+      "auto": "Tc128Sm89Pipeline",
+      "candidate": "TcW64",
+      "cohorts": 4,
+      "worst_own_p50": 1.2986991312203509,
+      "worst_own_p95": 1.299723290181602
+    },
+    {
+      "row": "bf16",
+      "cell": "hot_c",
+      "bias": true,
+      "auto": "Tc128Sm89Pipeline",
+      "candidate": "TcWn64",
+      "cohorts": 4,
+      "worst_own_p50": 2.1790898720857967,
+      "worst_own_p95": 2.180806341621305
+    },
+    {
+      "row": "bf16",
+      "cell": "hot_d",
+      "bias": false,
+      "auto": "Tc128Sm89Pipeline",
+      "candidate": "Legacy",
+      "cohorts": 4,
+      "worst_own_p50": 3.6256996402654535,
+      "worst_own_p95": 3.628486610327634
+    },
+    {
+      "row": "bf16",
+      "cell": "hot_d",
+      "bias": false,
+      "auto": "Tc128Sm89Pipeline",
+      "candidate": "Tc128",
+      "cohorts": 4,
+      "worst_own_p50": 1.2212348495376921,
+      "worst_own_p95": 1.2236939468907857
+    },
+    {
+      "row": "bf16",
+      "cell": "hot_d",
+      "bias": false,
+      "auto": "Tc128Sm89Pipeline",
+      "candidate": "Tc128Sm89Pipeline",
+      "cohorts": 4,
+      "worst_own_p50": 1.000428683532604,
+      "worst_own_p95": 1.00208815930256
+    },
+    {
+      "row": "bf16",
+      "cell": "hot_d",
+      "bias": false,
+      "auto": "Tc128Sm89Pipeline",
+      "candidate": "Tc16",
+      "cohorts": 4,
+      "worst_own_p50": 2.3291361150952903,
+      "worst_own_p95": 2.4370279243842643
+    },
+    {
+      "row": "bf16",
+      "cell": "hot_d",
+      "bias": false,
+      "auto": "Tc128Sm89Pipeline",
+      "candidate": "Tc64",
+      "cohorts": 4,
+      "worst_own_p50": 1.3605295032150508,
+      "worst_own_p95": 1.3753930903101443
+    },
+    {
+      "row": "bf16",
+      "cell": "hot_d",
+      "bias": false,
+      "auto": "Tc128Sm89Pipeline",
+      "candidate": "TcW64",
+      "cohorts": 4,
+      "worst_own_p50": 1.2818643498250708,
+      "worst_own_p95": 1.2836580410342138
+    },
+    {
+      "row": "bf16",
+      "cell": "hot_d",
+      "bias": false,
+      "auto": "Tc128Sm89Pipeline",
+      "candidate": "TcWn64",
+      "cohorts": 4,
+      "worst_own_p50": 1.483682670559557,
+      "worst_own_p95": 1.4864127475653808
+    },
+    {
+      "row": "bf16",
+      "cell": "hot_d",
+      "bias": true,
+      "auto": "Tc128Sm89Pipeline",
+      "candidate": "Tc128",
+      "cohorts": 4,
+      "worst_own_p50": 1.2111033881807363,
+      "worst_own_p95": 1.212960096427047
+    },
+    {
+      "row": "bf16",
+      "cell": "hot_d",
+      "bias": true,
+      "auto": "Tc128Sm89Pipeline",
+      "candidate": "Tc128Sm89Pipeline",
+      "cohorts": 4,
+      "worst_own_p50": 1.0004339119237724,
+      "worst_own_p95": 1.0014579360343885
+    },
+    {
+      "row": "bf16",
+      "cell": "hot_d",
+      "bias": true,
+      "auto": "Tc128Sm89Pipeline",
+      "candidate": "Tc16",
+      "cohorts": 4,
+      "worst_own_p50": 2.2754261502323416,
+      "worst_own_p95": 2.3353035232000305
+    },
+    {
+      "row": "bf16",
+      "cell": "hot_d",
+      "bias": true,
+      "auto": "Tc128Sm89Pipeline",
+      "candidate": "Tc64",
+      "cohorts": 4,
+      "worst_own_p50": 1.3483406139980556,
+      "worst_own_p95": 1.3504813999927274
+    },
+    {
+      "row": "bf16",
+      "cell": "hot_d",
+      "bias": true,
+      "auto": "Tc128Sm89Pipeline",
+      "candidate": "TcW64",
+      "cohorts": 4,
+      "worst_own_p50": 1.2798750901193043,
+      "worst_own_p95": 1.2814541086125173
+    },
+    {
+      "row": "bf16",
+      "cell": "hot_d",
+      "bias": true,
+      "auto": "Tc128Sm89Pipeline",
+      "candidate": "TcWn64",
+      "cohorts": 4,
+      "worst_own_p50": 1.4694770790113156,
+      "worst_own_p95": 1.4732741178971438
+    },
+    {
+      "row": "bf16",
+      "cell": "hot_e",
+      "bias": false,
+      "auto": "Tc128Sm89Pipeline",
+      "candidate": "Legacy",
+      "cohorts": 4,
+      "worst_own_p50": 4.27539839238182,
+      "worst_own_p95": 4.279780021303927
+    },
+    {
+      "row": "bf16",
+      "cell": "hot_e",
+      "bias": false,
+      "auto": "Tc128Sm89Pipeline",
+      "candidate": "Tc128",
+      "cohorts": 4,
+      "worst_own_p50": 1.273411923725042,
+      "worst_own_p95": 1.2742658301012983
+    },
+    {
+      "row": "bf16",
+      "cell": "hot_e",
+      "bias": false,
+      "auto": "Tc128Sm89Pipeline",
+      "candidate": "Tc128Sm89Pipeline",
+      "cohorts": 4,
+      "worst_own_p50": 1.0003524929974128,
+      "worst_own_p95": 1.0013851344636362
+    },
+    {
+      "row": "bf16",
+      "cell": "hot_e",
+      "bias": false,
+      "auto": "Tc128Sm89Pipeline",
+      "candidate": "Tc16",
+      "cohorts": 4,
+      "worst_own_p50": 2.487978882593251,
+      "worst_own_p95": 2.6047762263401446
+    },
+    {
+      "row": "bf16",
+      "cell": "hot_e",
+      "bias": false,
+      "auto": "Tc128Sm89Pipeline",
+      "candidate": "Tc64",
+      "cohorts": 4,
+      "worst_own_p50": 1.8953129671294853,
+      "worst_own_p95": 1.8972478686583707
+    },
+    {
+      "row": "bf16",
+      "cell": "hot_e",
+      "bias": false,
+      "auto": "Tc128Sm89Pipeline",
+      "candidate": "TcW64",
+      "cohorts": 4,
+      "worst_own_p50": 1.2983710040299923,
+      "worst_own_p95": 1.3002566027741855
+    },
+    {
+      "row": "bf16",
+      "cell": "hot_e",
+      "bias": false,
+      "auto": "Tc128Sm89Pipeline",
+      "candidate": "TcWn64",
+      "cohorts": 4,
+      "worst_own_p50": 2.138573517451266,
+      "worst_own_p95": 2.139913884562366
+    },
+    {
+      "row": "bf16",
+      "cell": "hot_e",
+      "bias": true,
+      "auto": "Tc128Sm89Pipeline",
+      "candidate": "Tc128",
+      "cohorts": 4,
+      "worst_own_p50": 1.2691605154328176,
+      "worst_own_p95": 1.2700069742496902
+    },
+    {
+      "row": "bf16",
+      "cell": "hot_e",
+      "bias": true,
+      "auto": "Tc128Sm89Pipeline",
+      "candidate": "Tc128Sm89Pipeline",
+      "cohorts": 4,
+      "worst_own_p50": 1.0005030045342052,
+      "worst_own_p95": 1.0010945724726688
+    },
+    {
+      "row": "bf16",
+      "cell": "hot_e",
+      "bias": true,
+      "auto": "Tc128Sm89Pipeline",
+      "candidate": "Tc16",
+      "cohorts": 4,
+      "worst_own_p50": 2.478885178459676,
+      "worst_own_p95": 2.5335666615202643
+    },
+    {
+      "row": "bf16",
+      "cell": "hot_e",
+      "bias": true,
+      "auto": "Tc128Sm89Pipeline",
+      "candidate": "Tc64",
+      "cohorts": 4,
+      "worst_own_p50": 1.8853941458102175,
+      "worst_own_p95": 1.8873857344556857
+    },
+    {
+      "row": "bf16",
+      "cell": "hot_e",
+      "bias": true,
+      "auto": "Tc128Sm89Pipeline",
+      "candidate": "TcW64",
+      "cohorts": 4,
+      "worst_own_p50": 1.2951358467669805,
+      "worst_own_p95": 1.2959433634073476
+    },
+    {
+      "row": "bf16",
+      "cell": "hot_e",
+      "bias": true,
+      "auto": "Tc128Sm89Pipeline",
+      "candidate": "TcWn64",
+      "cohorts": 4,
+      "worst_own_p50": 2.1327741484824583,
+      "worst_own_p95": 2.1341885314340483
+    },
+    {
+      "row": "bf16_f32",
+      "cell": "hot_a",
+      "bias": false,
+      "auto": "Tc64",
+      "candidate": "Legacy",
+      "cohorts": 4,
+      "worst_own_p50": 2.9038701586270768,
+      "worst_own_p95": 2.9805016520304872
+    },
+    {
+      "row": "bf16_f32",
+      "cell": "hot_a",
+      "bias": false,
+      "auto": "Tc64",
+      "candidate": "Tc128",
+      "cohorts": 4,
+      "worst_own_p50": 1.218888484290651,
+      "worst_own_p95": 1.2374608817528083
+    },
+    {
+      "row": "bf16_f32",
+      "cell": "hot_a",
+      "bias": false,
+      "auto": "Tc64",
+      "candidate": "Tc16",
+      "cohorts": 4,
+      "worst_own_p50": 2.3687578887537364,
+      "worst_own_p95": 2.547630028721236
+    },
+    {
+      "row": "bf16_f32",
+      "cell": "hot_a",
+      "bias": false,
+      "auto": "Tc64",
+      "candidate": "Tc64",
+      "cohorts": 4,
+      "worst_own_p50": 1.0002039524212345,
+      "worst_own_p95": 1.0074350009851434
+    },
+    {
+      "row": "bf16_f32",
+      "cell": "hot_a",
+      "bias": true,
+      "auto": "Tc64",
+      "candidate": "Tc128",
+      "cohorts": 4,
+      "worst_own_p50": 1.1902505276553887,
+      "worst_own_p95": 1.2055960515628381
+    },
+    {
+      "row": "bf16_f32",
+      "cell": "hot_a",
+      "bias": true,
+      "auto": "Tc64",
+      "candidate": "Tc16",
+      "cohorts": 4,
+      "worst_own_p50": 2.357438841632092,
+      "worst_own_p95": 2.544936904536187
+    },
+    {
+      "row": "bf16_f32",
+      "cell": "hot_a",
+      "bias": true,
+      "auto": "Tc64",
+      "candidate": "Tc64",
+      "cohorts": 4,
+      "worst_own_p50": 0.999848182449841,
+      "worst_own_p95": 1.013213294620373
+    },
+    {
+      "row": "bf16_f32",
+      "cell": "hot_b",
+      "bias": false,
+      "auto": "Tc128",
+      "candidate": "Legacy",
+      "cohorts": 4,
+      "worst_own_p50": 3.0416093934638395,
+      "worst_own_p95": 3.2243003760752336
+    },
+    {
+      "row": "bf16_f32",
+      "cell": "hot_b",
+      "bias": false,
+      "auto": "Tc128",
+      "candidate": "Tc128",
+      "cohorts": 4,
+      "worst_own_p50": 1.0016757199541668,
+      "worst_own_p95": 1.0537070797894592
+    },
+    {
+      "row": "bf16_f32",
+      "cell": "hot_b",
+      "bias": false,
+      "auto": "Tc128",
+      "candidate": "Tc16",
+      "cohorts": 4,
+      "worst_own_p50": 2.022988543606922,
+      "worst_own_p95": 2.0250811300413774
+    },
+    {
+      "row": "bf16_f32",
+      "cell": "hot_b",
+      "bias": false,
+      "auto": "Tc128",
+      "candidate": "Tc64",
+      "cohorts": 4,
+      "worst_own_p50": 1.0379021777109416,
+      "worst_own_p95": 1.1182489265148632
+    },
+    {
+      "row": "bf16_f32",
+      "cell": "hot_b",
+      "bias": true,
+      "auto": "Tc128",
+      "candidate": "Tc128",
+      "cohorts": 4,
+      "worst_own_p50": 1.0017123065467997,
+      "worst_own_p95": 1.0337526764827853
+    },
+    {
+      "row": "bf16_f32",
+      "cell": "hot_b",
+      "bias": true,
+      "auto": "Tc128",
+      "candidate": "Tc16",
+      "cohorts": 4,
+      "worst_own_p50": 1.983829264356829,
+      "worst_own_p95": 2.006625425062903
+    },
+    {
+      "row": "bf16_f32",
+      "cell": "hot_b",
+      "bias": true,
+      "auto": "Tc128",
+      "candidate": "Tc64",
+      "cohorts": 4,
+      "worst_own_p50": 1.0320686691970016,
+      "worst_own_p95": 1.1169284149074525
+    },
+    {
+      "row": "bf16_f32",
+      "cell": "hot_c",
+      "bias": false,
+      "auto": "Tc128",
+      "candidate": "Legacy",
+      "cohorts": 4,
+      "worst_own_p50": 3.755587409394285,
+      "worst_own_p95": 3.7580775530293327
+    },
+    {
+      "row": "bf16_f32",
+      "cell": "hot_c",
+      "bias": false,
+      "auto": "Tc128",
+      "candidate": "Tc128",
+      "cohorts": 4,
+      "worst_own_p50": 1.0031616335093878,
+      "worst_own_p95": 1.0038531558727244
+    },
+    {
+      "row": "bf16_f32",
+      "cell": "hot_c",
+      "bias": false,
+      "auto": "Tc128",
+      "candidate": "Tc16",
+      "cohorts": 4,
+      "worst_own_p50": 2.2007407769368457,
+      "worst_own_p95": 2.3273368557157696
+    },
+    {
+      "row": "bf16_f32",
+      "cell": "hot_c",
+      "bias": false,
+      "auto": "Tc128",
+      "candidate": "Tc64",
+      "cohorts": 4,
+      "worst_own_p50": 1.1522435717847859,
+      "worst_own_p95": 1.1536540354352283
+    },
+    {
+      "row": "bf16_f32",
+      "cell": "hot_c",
+      "bias": true,
+      "auto": "Tc128",
+      "candidate": "Tc128",
+      "cohorts": 4,
+      "worst_own_p50": 1.0023096876285869,
+      "worst_own_p95": 1.003138088217027
+    },
+    {
+      "row": "bf16_f32",
+      "cell": "hot_c",
+      "bias": true,
+      "auto": "Tc128",
+      "candidate": "Tc16",
+      "cohorts": 4,
+      "worst_own_p50": 2.2938004547550905,
+      "worst_own_p95": 2.3356278265830372
+    },
+    {
+      "row": "bf16_f32",
+      "cell": "hot_c",
+      "bias": true,
+      "auto": "Tc128",
+      "candidate": "Tc64",
+      "cohorts": 4,
+      "worst_own_p50": 1.150594032336619,
+      "worst_own_p95": 1.1524804190601408
+    },
+    {
+      "row": "bf16_f32",
+      "cell": "hot_d",
+      "bias": false,
+      "auto": "Tc64",
+      "candidate": "Legacy",
+      "cohorts": 4,
+      "worst_own_p50": 2.6455814722542454,
+      "worst_own_p95": 2.6565322884400246
+    },
+    {
+      "row": "bf16_f32",
+      "cell": "hot_d",
+      "bias": false,
+      "auto": "Tc64",
+      "candidate": "Tc128",
+      "cohorts": 4,
+      "worst_own_p50": 1.0815496013947545,
+      "worst_own_p95": 1.098986335931733
+    },
+    {
+      "row": "bf16_f32",
+      "cell": "hot_d",
+      "bias": false,
+      "auto": "Tc64",
+      "candidate": "Tc16",
+      "cohorts": 4,
+      "worst_own_p50": 1.7631159741193645,
+      "worst_own_p95": 1.8030356155611247
+    },
+    {
+      "row": "bf16_f32",
+      "cell": "hot_d",
+      "bias": false,
+      "auto": "Tc64",
+      "candidate": "Tc64",
+      "cohorts": 4,
+      "worst_own_p50": 1.0019412852287448,
+      "worst_own_p95": 1.0174633700492777
+    },
+    {
+      "row": "bf16_f32",
+      "cell": "hot_d",
+      "bias": true,
+      "auto": "Tc64",
+      "candidate": "Tc128",
+      "cohorts": 4,
+      "worst_own_p50": 1.0764538229558198,
+      "worst_own_p95": 1.079821924551283
+    },
+    {
+      "row": "bf16_f32",
+      "cell": "hot_d",
+      "bias": true,
+      "auto": "Tc64",
+      "candidate": "Tc16",
+      "cohorts": 4,
+      "worst_own_p50": 1.749761762378053,
+      "worst_own_p95": 1.7837612913646856
+    },
+    {
+      "row": "bf16_f32",
+      "cell": "hot_d",
+      "bias": true,
+      "auto": "Tc64",
+      "candidate": "Tc64",
+      "cohorts": 4,
+      "worst_own_p50": 1.0009735555588495,
+      "worst_own_p95": 1.005221417090182
+    },
+    {
+      "row": "bf16_f32",
+      "cell": "hot_e",
+      "bias": false,
+      "auto": "Tc128",
+      "candidate": "Legacy",
+      "cohorts": 4,
+      "worst_own_p50": 3.1028531860709685,
+      "worst_own_p95": 3.104086349552152
+    },
+    {
+      "row": "bf16_f32",
+      "cell": "hot_e",
+      "bias": false,
+      "auto": "Tc128",
+      "candidate": "Tc128",
+      "cohorts": 4,
+      "worst_own_p50": 1.0037299536760902,
+      "worst_own_p95": 1.00432394538579
+    },
+    {
+      "row": "bf16_f32",
+      "cell": "hot_e",
+      "bias": false,
+      "auto": "Tc128",
+      "candidate": "Tc16",
+      "cohorts": 4,
+      "worst_own_p50": 1.7944434096586457,
+      "worst_own_p95": 1.8741915083975298
+    },
+    {
+      "row": "bf16_f32",
+      "cell": "hot_e",
+      "bias": false,
+      "auto": "Tc128",
+      "candidate": "Tc64",
+      "cohorts": 4,
+      "worst_own_p50": 1.3777643827736188,
+      "worst_own_p95": 1.3794165469407216
+    },
+    {
+      "row": "bf16_f32",
+      "cell": "hot_e",
+      "bias": true,
+      "auto": "Tc128",
+      "candidate": "Tc128",
+      "cohorts": 4,
+      "worst_own_p50": 1.0032814348357784,
+      "worst_own_p95": 1.0038368779402302
+    },
+    {
+      "row": "bf16_f32",
+      "cell": "hot_e",
+      "bias": true,
+      "auto": "Tc128",
+      "candidate": "Tc16",
+      "cohorts": 4,
+      "worst_own_p50": 1.833403292711198,
+      "worst_own_p95": 1.9139615479668264
+    },
+    {
+      "row": "bf16_f32",
+      "cell": "hot_e",
+      "bias": true,
+      "auto": "Tc128",
+      "candidate": "Tc64",
+      "cohorts": 4,
+      "worst_own_p50": 1.3737981303205884,
+      "worst_own_p95": 1.3751706779139792
+    },
+    {
+      "row": "f16",
+      "cell": "hot_a",
+      "bias": false,
+      "auto": "Tc128Sm89Pipeline",
+      "candidate": "Legacy",
+      "cohorts": 4,
+      "worst_own_p50": 3.3919899015446178,
+      "worst_own_p95": 3.4588956316910995
+    },
+    {
+      "row": "f16",
+      "cell": "hot_a",
+      "bias": false,
+      "auto": "Tc128Sm89Pipeline",
+      "candidate": "Tc128",
+      "cohorts": 4,
+      "worst_own_p50": 1.3180322032320082,
+      "worst_own_p95": 1.3461437952583999
+    },
+    {
+      "row": "f16",
+      "cell": "hot_a",
+      "bias": false,
+      "auto": "Tc128Sm89Pipeline",
+      "candidate": "Tc128Sm89Pipeline",
+      "cohorts": 4,
+      "worst_own_p50": 1.0001593032034213,
+      "worst_own_p95": 1.0186008924359675
+    },
+    {
+      "row": "f16",
+      "cell": "hot_a",
+      "bias": false,
+      "auto": "Tc128Sm89Pipeline",
+      "candidate": "Tc16",
+      "cohorts": 4,
+      "worst_own_p50": 2.968399337761962,
+      "worst_own_p95": 3.3821255214815795
+    },
+    {
+      "row": "f16",
+      "cell": "hot_a",
+      "bias": false,
+      "auto": "Tc128Sm89Pipeline",
+      "candidate": "Tc64",
+      "cohorts": 4,
+      "worst_own_p50": 1.288224580172915,
+      "worst_own_p95": 1.387654096272882
+    },
+    {
+      "row": "f16",
+      "cell": "hot_a",
+      "bias": false,
+      "auto": "Tc128Sm89Pipeline",
+      "candidate": "TcW64",
+      "cohorts": 4,
+      "worst_own_p50": 1.4381478884573629,
+      "worst_own_p95": 1.4878836213776199
+    },
+    {
+      "row": "f16",
+      "cell": "hot_a",
+      "bias": false,
+      "auto": "Tc128Sm89Pipeline",
+      "candidate": "TcWn64",
+      "cohorts": 4,
+      "worst_own_p50": 1.4202123150349049,
+      "worst_own_p95": 1.4490314126164683
+    },
+    {
+      "row": "f16",
+      "cell": "hot_a",
+      "bias": true,
+      "auto": "Tc128Sm89Pipeline",
+      "candidate": "Tc128",
+      "cohorts": 4,
+      "worst_own_p50": 1.2862551598389185,
+      "worst_own_p95": 1.3100144168879562
+    },
+    {
+      "row": "f16",
+      "cell": "hot_a",
+      "bias": true,
+      "auto": "Tc128Sm89Pipeline",
+      "candidate": "Tc128Sm89Pipeline",
+      "cohorts": 4,
+      "worst_own_p50": 1.0002843075872903,
+      "worst_own_p95": 1.0029740026093925
+    },
+    {
+      "row": "f16",
+      "cell": "hot_a",
+      "bias": true,
+      "auto": "Tc128Sm89Pipeline",
+      "candidate": "Tc16",
+      "cohorts": 4,
+      "worst_own_p50": 2.9461311560365044,
+      "worst_own_p95": 3.335784273931287
+    },
+    {
+      "row": "f16",
+      "cell": "hot_a",
+      "bias": true,
+      "auto": "Tc128Sm89Pipeline",
+      "candidate": "Tc64",
+      "cohorts": 4,
+      "worst_own_p50": 1.2908374747553018,
+      "worst_own_p95": 1.3642528843695467
+    },
+    {
+      "row": "f16",
+      "cell": "hot_a",
+      "bias": true,
+      "auto": "Tc128Sm89Pipeline",
+      "candidate": "TcW64",
+      "cohorts": 4,
+      "worst_own_p50": 1.4077178776338417,
+      "worst_own_p95": 1.4092870988446993
+    },
+    {
+      "row": "f16",
+      "cell": "hot_a",
+      "bias": true,
+      "auto": "Tc128Sm89Pipeline",
+      "candidate": "TcWn64",
+      "cohorts": 4,
+      "worst_own_p50": 1.3976538483159533,
+      "worst_own_p95": 1.3998824702589172
+    },
+    {
+      "row": "f16",
+      "cell": "hot_b",
+      "bias": false,
+      "auto": "Tc128Sm89Pipeline",
+      "candidate": "Legacy",
+      "cohorts": 4,
+      "worst_own_p50": 4.062023901009085,
+      "worst_own_p95": 4.438251012460562
+    },
+    {
+      "row": "f16",
+      "cell": "hot_b",
+      "bias": false,
+      "auto": "Tc128Sm89Pipeline",
+      "candidate": "Tc128",
+      "cohorts": 4,
+      "worst_own_p50": 1.21099615473732,
+      "worst_own_p95": 1.2720143539853952
+    },
+    {
+      "row": "f16",
+      "cell": "hot_b",
+      "bias": false,
+      "auto": "Tc128Sm89Pipeline",
+      "candidate": "Tc128Sm89Pipeline",
+      "cohorts": 4,
+      "worst_own_p50": 0.9999156241945748,
+      "worst_own_p95": 1.032359548776033
+    },
+    {
+      "row": "f16",
+      "cell": "hot_b",
+      "bias": false,
+      "auto": "Tc128Sm89Pipeline",
+      "candidate": "Tc16",
+      "cohorts": 4,
+      "worst_own_p50": 2.908269788296888,
+      "worst_own_p95": 3.03598662749006
+    },
+    {
+      "row": "f16",
+      "cell": "hot_b",
+      "bias": false,
+      "auto": "Tc128Sm89Pipeline",
+      "candidate": "Tc64",
+      "cohorts": 4,
+      "worst_own_p50": 1.4875958818712802,
+      "worst_own_p95": 1.58065691853209
+    },
+    {
+      "row": "f16",
+      "cell": "hot_b",
+      "bias": false,
+      "auto": "Tc128Sm89Pipeline",
+      "candidate": "TcW64",
+      "cohorts": 4,
+      "worst_own_p50": 1.2604083367417966,
+      "worst_own_p95": 1.3527506364752604
+    },
+    {
+      "row": "f16",
+      "cell": "hot_b",
+      "bias": false,
+      "auto": "Tc128Sm89Pipeline",
+      "candidate": "TcWn64",
+      "cohorts": 4,
+      "worst_own_p50": 1.3165994318124579,
+      "worst_own_p95": 1.3594231027423875
+    },
+    {
+      "row": "f16",
+      "cell": "hot_b",
+      "bias": true,
+      "auto": "Tc128Sm89Pipeline",
+      "candidate": "Tc128",
+      "cohorts": 4,
+      "worst_own_p50": 1.2037484558800617,
+      "worst_own_p95": 1.2185479845048144
+    },
+    {
+      "row": "f16",
+      "cell": "hot_b",
+      "bias": true,
+      "auto": "Tc128Sm89Pipeline",
+      "candidate": "Tc128Sm89Pipeline",
+      "cohorts": 4,
+      "worst_own_p50": 1.0000677030012488,
+      "worst_own_p95": 1.0199331749689686
+    },
+    {
+      "row": "f16",
+      "cell": "hot_b",
+      "bias": true,
+      "auto": "Tc128Sm89Pipeline",
+      "candidate": "Tc16",
+      "cohorts": 4,
+      "worst_own_p50": 2.874943029878719,
+      "worst_own_p95": 2.934769479379202
+    },
+    {
+      "row": "f16",
+      "cell": "hot_b",
+      "bias": true,
+      "auto": "Tc128Sm89Pipeline",
+      "candidate": "Tc64",
+      "cohorts": 4,
+      "worst_own_p50": 1.4793664380523142,
+      "worst_own_p95": 1.5302753235408404
+    },
+    {
+      "row": "f16",
+      "cell": "hot_b",
+      "bias": true,
+      "auto": "Tc128Sm89Pipeline",
+      "candidate": "TcW64",
+      "cohorts": 4,
+      "worst_own_p50": 1.2635783924812145,
+      "worst_own_p95": 1.3000652113752624
+    },
+    {
+      "row": "f16",
+      "cell": "hot_b",
+      "bias": true,
+      "auto": "Tc128Sm89Pipeline",
+      "candidate": "TcWn64",
+      "cohorts": 4,
+      "worst_own_p50": 1.3193973233780296,
+      "worst_own_p95": 1.3509214451385434
+    },
+    {
+      "row": "f16",
+      "cell": "hot_c",
+      "bias": false,
+      "auto": "Tc128Sm89Pipeline",
+      "candidate": "Legacy",
+      "cohorts": 4,
+      "worst_own_p50": 4.795763128085601,
+      "worst_own_p95": 4.800304984951917
+    },
+    {
+      "row": "f16",
+      "cell": "hot_c",
+      "bias": false,
+      "auto": "Tc128Sm89Pipeline",
+      "candidate": "Tc128",
+      "cohorts": 4,
+      "worst_own_p50": 1.311442335677158,
+      "worst_own_p95": 1.3306018838719456
+    },
+    {
+      "row": "f16",
+      "cell": "hot_c",
+      "bias": false,
+      "auto": "Tc128Sm89Pipeline",
+      "candidate": "Tc128Sm89Pipeline",
+      "cohorts": 4,
+      "worst_own_p50": 0.9996253272555294,
+      "worst_own_p95": 1.0091099576662708
+    },
+    {
+      "row": "f16",
+      "cell": "hot_c",
+      "bias": false,
+      "auto": "Tc128Sm89Pipeline",
+      "candidate": "Tc16",
+      "cohorts": 4,
+      "worst_own_p50": 3.0947668613780843,
+      "worst_own_p95": 3.122813582771802
+    },
+    {
+      "row": "f16",
+      "cell": "hot_c",
+      "bias": false,
+      "auto": "Tc128Sm89Pipeline",
+      "candidate": "Tc64",
+      "cohorts": 4,
+      "worst_own_p50": 1.544178396694404,
+      "worst_own_p95": 1.6011302837296828
+    },
+    {
+      "row": "f16",
+      "cell": "hot_c",
+      "bias": false,
+      "auto": "Tc128Sm89Pipeline",
+      "candidate": "TcW64",
+      "cohorts": 4,
+      "worst_own_p50": 1.3237862999902459,
+      "worst_own_p95": 1.353275300891191
+    },
+    {
+      "row": "f16",
+      "cell": "hot_c",
+      "bias": false,
+      "auto": "Tc128Sm89Pipeline",
+      "candidate": "TcWn64",
+      "cohorts": 4,
+      "worst_own_p50": 2.1782195990045814,
+      "worst_own_p95": 2.179469731592699
+    },
+    {
+      "row": "f16",
+      "cell": "hot_c",
+      "bias": true,
+      "auto": "Tc128Sm89Pipeline",
+      "candidate": "Tc128",
+      "cohorts": 4,
+      "worst_own_p50": 1.3047608846643883,
+      "worst_own_p95": 1.3165060439232592
+    },
+    {
+      "row": "f16",
+      "cell": "hot_c",
+      "bias": true,
+      "auto": "Tc128Sm89Pipeline",
+      "candidate": "Tc128Sm89Pipeline",
+      "cohorts": 4,
+      "worst_own_p50": 0.9996590661970486,
+      "worst_own_p95": 1.0212204854879074
+    },
+    {
+      "row": "f16",
+      "cell": "hot_c",
+      "bias": true,
+      "auto": "Tc128Sm89Pipeline",
+      "candidate": "Tc16",
+      "cohorts": 4,
+      "worst_own_p50": 3.0728583618225302,
+      "worst_own_p95": 3.338785456891473
+    },
+    {
+      "row": "f16",
+      "cell": "hot_c",
+      "bias": true,
+      "auto": "Tc128Sm89Pipeline",
+      "candidate": "Tc64",
+      "cohorts": 4,
+      "worst_own_p50": 1.5442616835722967,
+      "worst_own_p95": 1.646795843126474
+    },
+    {
+      "row": "f16",
+      "cell": "hot_c",
+      "bias": true,
+      "auto": "Tc128Sm89Pipeline",
+      "candidate": "TcW64",
+      "cohorts": 4,
+      "worst_own_p50": 1.3164412906040588,
+      "worst_own_p95": 1.3250908127882501
+    },
+    {
+      "row": "f16",
+      "cell": "hot_c",
+      "bias": true,
+      "auto": "Tc128Sm89Pipeline",
+      "candidate": "TcWn64",
+      "cohorts": 4,
+      "worst_own_p50": 2.1728499232161202,
+      "worst_own_p95": 2.1750104097977165
+    },
+    {
+      "row": "f16",
+      "cell": "hot_d",
+      "bias": false,
+      "auto": "Tc128Sm89Pipeline",
+      "candidate": "Legacy",
+      "cohorts": 4,
+      "worst_own_p50": 3.2835737470695445,
+      "worst_own_p95": 3.3466202540810834
+    },
+    {
+      "row": "f16",
+      "cell": "hot_d",
+      "bias": false,
+      "auto": "Tc128Sm89Pipeline",
+      "candidate": "Tc128",
+      "cohorts": 4,
+      "worst_own_p50": 1.2728432018883014,
+      "worst_own_p95": 1.3026744151146439
+    },
+    {
+      "row": "f16",
+      "cell": "hot_d",
+      "bias": false,
+      "auto": "Tc128Sm89Pipeline",
+      "candidate": "Tc128Sm89Pipeline",
+      "cohorts": 4,
+      "worst_own_p50": 1.0007564702366494,
+      "worst_own_p95": 1.0255920728722587
+    },
+    {
+      "row": "f16",
+      "cell": "hot_d",
+      "bias": false,
+      "auto": "Tc128Sm89Pipeline",
+      "candidate": "Tc16",
+      "cohorts": 4,
+      "worst_own_p50": 2.3495365137002797,
+      "worst_own_p95": 2.4173980822229404
+    },
+    {
+      "row": "f16",
+      "cell": "hot_d",
+      "bias": false,
+      "auto": "Tc128Sm89Pipeline",
+      "candidate": "Tc64",
+      "cohorts": 4,
+      "worst_own_p50": 1.3516905991793409,
+      "worst_own_p95": 1.3977423745376012
+    },
+    {
+      "row": "f16",
+      "cell": "hot_d",
+      "bias": false,
+      "auto": "Tc128Sm89Pipeline",
+      "candidate": "TcW64",
+      "cohorts": 4,
+      "worst_own_p50": 1.291885398553467,
+      "worst_own_p95": 1.3253588437393815
+    },
+    {
+      "row": "f16",
+      "cell": "hot_d",
+      "bias": false,
+      "auto": "Tc128Sm89Pipeline",
+      "candidate": "TcWn64",
+      "cohorts": 4,
+      "worst_own_p50": 1.4848186611741416,
+      "worst_own_p95": 1.4918253474684144
+    },
+    {
+      "row": "f16",
+      "cell": "hot_d",
+      "bias": true,
+      "auto": "Tc128Sm89Pipeline",
+      "candidate": "Tc128",
+      "cohorts": 4,
+      "worst_own_p50": 1.2107280957257458,
+      "worst_own_p95": 1.2125140589288321
+    },
+    {
+      "row": "f16",
+      "cell": "hot_d",
+      "bias": true,
+      "auto": "Tc128Sm89Pipeline",
+      "candidate": "Tc128Sm89Pipeline",
+      "cohorts": 4,
+      "worst_own_p50": 1.000252492441663,
+      "worst_own_p95": 1.0036801616399655
+    },
+    {
+      "row": "f16",
+      "cell": "hot_d",
+      "bias": true,
+      "auto": "Tc128Sm89Pipeline",
+      "candidate": "Tc16",
+      "cohorts": 4,
+      "worst_own_p50": 2.317590905754221,
+      "worst_own_p95": 2.400506403321524
+    },
+    {
+      "row": "f16",
+      "cell": "hot_d",
+      "bias": true,
+      "auto": "Tc128Sm89Pipeline",
+      "candidate": "Tc64",
+      "cohorts": 4,
+      "worst_own_p50": 1.3466067248590252,
+      "worst_own_p95": 1.3608104030071995
+    },
+    {
+      "row": "f16",
+      "cell": "hot_d",
+      "bias": true,
+      "auto": "Tc128Sm89Pipeline",
+      "candidate": "TcW64",
+      "cohorts": 4,
+      "worst_own_p50": 1.281469024219375,
+      "worst_own_p95": 1.2825382378266665
+    },
+    {
+      "row": "f16",
+      "cell": "hot_d",
+      "bias": true,
+      "auto": "Tc128Sm89Pipeline",
+      "candidate": "TcWn64",
+      "cohorts": 4,
+      "worst_own_p50": 1.4722579637001534,
+      "worst_own_p95": 1.4775335293568923
+    },
+    {
+      "row": "f16",
+      "cell": "hot_e",
+      "bias": false,
+      "auto": "Tc128Sm89Pipeline",
+      "candidate": "Legacy",
+      "cohorts": 4,
+      "worst_own_p50": 3.9056170577218423,
+      "worst_own_p95": 3.907858541662485
+    },
+    {
+      "row": "f16",
+      "cell": "hot_e",
+      "bias": false,
+      "auto": "Tc128Sm89Pipeline",
+      "candidate": "Tc128",
+      "cohorts": 4,
+      "worst_own_p50": 1.320672957089508,
+      "worst_own_p95": 1.3562940905515748
+    },
+    {
+      "row": "f16",
+      "cell": "hot_e",
+      "bias": false,
+      "auto": "Tc128Sm89Pipeline",
+      "candidate": "Tc128Sm89Pipeline",
+      "cohorts": 4,
+      "worst_own_p50": 1.0004111552480575,
+      "worst_own_p95": 1.020167745925975
+    },
+    {
+      "row": "f16",
+      "cell": "hot_e",
+      "bias": false,
+      "auto": "Tc128Sm89Pipeline",
+      "candidate": "Tc16",
+      "cohorts": 4,
+      "worst_own_p50": 2.5085199867062324,
+      "worst_own_p95": 2.578407599910726
+    },
+    {
+      "row": "f16",
+      "cell": "hot_e",
+      "bias": false,
+      "auto": "Tc128Sm89Pipeline",
+      "candidate": "Tc64",
+      "cohorts": 4,
+      "worst_own_p50": 1.84610985924312,
+      "worst_own_p95": 1.8928747794230951
+    },
+    {
+      "row": "f16",
+      "cell": "hot_e",
+      "bias": false,
+      "auto": "Tc128Sm89Pipeline",
+      "candidate": "TcW64",
+      "cohorts": 4,
+      "worst_own_p50": 1.3146336615092271,
+      "worst_own_p95": 1.3407694927182225
+    },
+    {
+      "row": "f16",
+      "cell": "hot_e",
+      "bias": false,
+      "auto": "Tc128Sm89Pipeline",
+      "candidate": "TcWn64",
+      "cohorts": 4,
+      "worst_own_p50": 2.1381375998232612,
+      "worst_own_p95": 2.139903711351751
+    },
+    {
+      "row": "f16",
+      "cell": "hot_e",
+      "bias": true,
+      "auto": "Tc128Sm89Pipeline",
+      "candidate": "Tc128",
+      "cohorts": 4,
+      "worst_own_p50": 1.3131100731450989,
+      "worst_own_p95": 1.3245077134161551
+    },
+    {
+      "row": "f16",
+      "cell": "hot_e",
+      "bias": true,
+      "auto": "Tc128Sm89Pipeline",
+      "candidate": "Tc128Sm89Pipeline",
+      "cohorts": 4,
+      "worst_own_p50": 1.0001378501166207,
+      "worst_own_p95": 1.0168065991211808
+    },
+    {
+      "row": "f16",
+      "cell": "hot_e",
+      "bias": true,
+      "auto": "Tc128Sm89Pipeline",
+      "candidate": "Tc16",
+      "cohorts": 4,
+      "worst_own_p50": 2.496946343066608,
+      "worst_own_p95": 2.5269319751614736
+    },
+    {
+      "row": "f16",
+      "cell": "hot_e",
+      "bias": true,
+      "auto": "Tc128Sm89Pipeline",
+      "candidate": "Tc64",
+      "cohorts": 4,
+      "worst_own_p50": 1.8643617679223836,
+      "worst_own_p95": 1.8800130102989618
+    },
+    {
+      "row": "f16",
+      "cell": "hot_e",
+      "bias": true,
+      "auto": "Tc128Sm89Pipeline",
+      "candidate": "TcW64",
+      "cohorts": 4,
+      "worst_own_p50": 1.2962013092450477,
+      "worst_own_p95": 1.2971358174637935
+    },
+    {
+      "row": "f16",
+      "cell": "hot_e",
+      "bias": true,
+      "auto": "Tc128Sm89Pipeline",
+      "candidate": "TcWn64",
+      "cohorts": 4,
+      "worst_own_p50": 2.1337537020208623,
+      "worst_own_p95": 2.135930085168162
+    },
+    {
+      "row": "f16_f32",
+      "cell": "hot_a",
+      "bias": false,
+      "auto": "Tc64",
+      "candidate": "Legacy",
+      "cohorts": 4,
+      "worst_own_p50": 2.7516710302007943,
+      "worst_own_p95": 2.7907553850315368
+    },
+    {
+      "row": "f16_f32",
+      "cell": "hot_a",
+      "bias": false,
+      "auto": "Tc64",
+      "candidate": "Tc128",
+      "cohorts": 4,
+      "worst_own_p50": 1.2104964921416106,
+      "worst_own_p95": 1.236789743851674
+    },
+    {
+      "row": "f16_f32",
+      "cell": "hot_a",
+      "bias": false,
+      "auto": "Tc64",
+      "candidate": "Tc16",
+      "cohorts": 4,
+      "worst_own_p50": 2.3716357803227366,
+      "worst_own_p95": 2.546524633332875
+    },
+    {
+      "row": "f16_f32",
+      "cell": "hot_a",
+      "bias": false,
+      "auto": "Tc64",
+      "candidate": "Tc64",
+      "cohorts": 4,
+      "worst_own_p50": 1.000440798856188,
+      "worst_own_p95": 1.0276686629514697
+    },
+    {
+      "row": "f16_f32",
+      "cell": "hot_a",
+      "bias": true,
+      "auto": "Tc64",
+      "candidate": "Tc128",
+      "cohorts": 4,
+      "worst_own_p50": 1.2142215190035974,
+      "worst_own_p95": 1.2304548543460205
+    },
+    {
+      "row": "f16_f32",
+      "cell": "hot_a",
+      "bias": true,
+      "auto": "Tc64",
+      "candidate": "Tc16",
+      "cohorts": 4,
+      "worst_own_p50": 2.3634001659928545,
+      "worst_own_p95": 2.5413501369114724
+    },
+    {
+      "row": "f16_f32",
+      "cell": "hot_a",
+      "bias": true,
+      "auto": "Tc64",
+      "candidate": "Tc64",
+      "cohorts": 4,
+      "worst_own_p50": 1.0003008894703604,
+      "worst_own_p95": 1.0069518832430246
+    },
+    {
+      "row": "f16_f32",
+      "cell": "hot_b",
+      "bias": false,
+      "auto": "Tc128",
+      "candidate": "Legacy",
+      "cohorts": 4,
+      "worst_own_p50": 2.7528848564585293,
+      "worst_own_p95": 2.896628691373623
+    },
+    {
+      "row": "f16_f32",
+      "cell": "hot_b",
+      "bias": false,
+      "auto": "Tc128",
+      "candidate": "Tc128",
+      "cohorts": 4,
+      "worst_own_p50": 1.0017825069826554,
+      "worst_own_p95": 1.0486172051212697
+    },
+    {
+      "row": "f16_f32",
+      "cell": "hot_b",
+      "bias": false,
+      "auto": "Tc128",
+      "candidate": "Tc16",
+      "cohorts": 4,
+      "worst_own_p50": 2.0393255026645147,
+      "worst_own_p95": 2.05886511466778
+    },
+    {
+      "row": "f16_f32",
+      "cell": "hot_b",
+      "bias": false,
+      "auto": "Tc128",
+      "candidate": "Tc64",
+      "cohorts": 4,
+      "worst_own_p50": 1.0429500270974017,
+      "worst_own_p95": 1.1308985496575608
+    },
+    {
+      "row": "f16_f32",
+      "cell": "hot_b",
+      "bias": true,
+      "auto": "Tc128",
+      "candidate": "Tc128",
+      "cohorts": 4,
+      "worst_own_p50": 1.002138672451235,
+      "worst_own_p95": 1.0228435275168621
+    },
+    {
+      "row": "f16_f32",
+      "cell": "hot_b",
+      "bias": true,
+      "auto": "Tc128",
+      "candidate": "Tc16",
+      "cohorts": 4,
+      "worst_own_p50": 2.008023001586326,
+      "worst_own_p95": 2.0653129751841077
+    },
+    {
+      "row": "f16_f32",
+      "cell": "hot_b",
+      "bias": true,
+      "auto": "Tc128",
+      "candidate": "Tc64",
+      "cohorts": 4,
+      "worst_own_p50": 1.032177945359874,
+      "worst_own_p95": 1.1126579222127364
+    },
+    {
+      "row": "f16_f32",
+      "cell": "hot_c",
+      "bias": false,
+      "auto": "Tc128",
+      "candidate": "Legacy",
+      "cohorts": 4,
+      "worst_own_p50": 3.345603530846582,
+      "worst_own_p95": 3.3471676179778216
+    },
+    {
+      "row": "f16_f32",
+      "cell": "hot_c",
+      "bias": false,
+      "auto": "Tc128",
+      "candidate": "Tc128",
+      "cohorts": 4,
+      "worst_own_p50": 1.0030711278377502,
+      "worst_own_p95": 1.0040955130236482
+    },
+    {
+      "row": "f16_f32",
+      "cell": "hot_c",
+      "bias": false,
+      "auto": "Tc128",
+      "candidate": "Tc16",
+      "cohorts": 4,
+      "worst_own_p50": 2.124900086581795,
+      "worst_own_p95": 2.2612637314599286
+    },
+    {
+      "row": "f16_f32",
+      "cell": "hot_c",
+      "bias": false,
+      "auto": "Tc128",
+      "candidate": "Tc64",
+      "cohorts": 4,
+      "worst_own_p50": 1.123496068443199,
+      "worst_own_p95": 1.1526703749785052
+    },
+    {
+      "row": "f16_f32",
+      "cell": "hot_c",
+      "bias": true,
+      "auto": "Tc128",
+      "candidate": "Tc128",
+      "cohorts": 4,
+      "worst_own_p50": 1.002277491655985,
+      "worst_own_p95": 1.0028753556058867
+    },
+    {
+      "row": "f16_f32",
+      "cell": "hot_c",
+      "bias": true,
+      "auto": "Tc128",
+      "candidate": "Tc16",
+      "cohorts": 4,
+      "worst_own_p50": 2.153359243791731,
+      "worst_own_p95": 2.297559968516341
+    },
+    {
+      "row": "f16_f32",
+      "cell": "hot_c",
+      "bias": true,
+      "auto": "Tc128",
+      "candidate": "Tc64",
+      "cohorts": 4,
+      "worst_own_p50": 1.1442557141977947,
+      "worst_own_p95": 1.1506250628575572
+    },
+    {
+      "row": "f16_f32",
+      "cell": "hot_d",
+      "bias": false,
+      "auto": "Tc64",
+      "candidate": "Legacy",
+      "cohorts": 4,
+      "worst_own_p50": 2.4660240175911583,
+      "worst_own_p95": 2.539468344014048
+    },
+    {
+      "row": "f16_f32",
+      "cell": "hot_d",
+      "bias": false,
+      "auto": "Tc64",
+      "candidate": "Tc128",
+      "cohorts": 4,
+      "worst_own_p50": 1.1417415327966196,
+      "worst_own_p95": 1.1681724486199896
+    },
+    {
+      "row": "f16_f32",
+      "cell": "hot_d",
+      "bias": false,
+      "auto": "Tc64",
+      "candidate": "Tc16",
+      "cohorts": 4,
+      "worst_own_p50": 1.7705356156614416,
+      "worst_own_p95": 1.7958279858681254
+    },
+    {
+      "row": "f16_f32",
+      "cell": "hot_d",
+      "bias": false,
+      "auto": "Tc64",
+      "candidate": "Tc64",
+      "cohorts": 4,
+      "worst_own_p50": 1.0008462091259567,
+      "worst_own_p95": 1.0567541037194013
+    },
+    {
+      "row": "f16_f32",
+      "cell": "hot_d",
+      "bias": true,
+      "auto": "Tc64",
+      "candidate": "Tc128",
+      "cohorts": 4,
+      "worst_own_p50": 1.0810015761860285,
+      "worst_own_p95": 1.09722716541574
+    },
+    {
+      "row": "f16_f32",
+      "cell": "hot_d",
+      "bias": true,
+      "auto": "Tc64",
+      "candidate": "Tc16",
+      "cohorts": 4,
+      "worst_own_p50": 1.766882158256945,
+      "worst_own_p95": 1.7945882678427778
+    },
+    {
+      "row": "f16_f32",
+      "cell": "hot_d",
+      "bias": true,
+      "auto": "Tc64",
+      "candidate": "Tc64",
+      "cohorts": 4,
+      "worst_own_p50": 1.0007910915976606,
+      "worst_own_p95": 1.0149009734923702
+    },
+    {
+      "row": "f16_f32",
+      "cell": "hot_e",
+      "bias": false,
+      "auto": "Tc128",
+      "candidate": "Legacy",
+      "cohorts": 4,
+      "worst_own_p50": 2.834876438846598,
+      "worst_own_p95": 2.8371414333164116
+    },
+    {
+      "row": "f16_f32",
+      "cell": "hot_e",
+      "bias": false,
+      "auto": "Tc128",
+      "candidate": "Tc128",
+      "cohorts": 4,
+      "worst_own_p50": 1.0039334823855368,
+      "worst_own_p95": 1.004531153118045
+    },
+    {
+      "row": "f16_f32",
+      "cell": "hot_e",
+      "bias": false,
+      "auto": "Tc128",
+      "candidate": "Tc16",
+      "cohorts": 4,
+      "worst_own_p50": 1.7730545746343707,
+      "worst_own_p95": 1.8693934797070202
+    },
+    {
+      "row": "f16_f32",
+      "cell": "hot_e",
+      "bias": false,
+      "auto": "Tc128",
+      "candidate": "Tc64",
+      "cohorts": 4,
+      "worst_own_p50": 1.3779938736497823,
+      "worst_own_p95": 1.3794034107426445
+    },
+    {
+      "row": "f16_f32",
+      "cell": "hot_e",
+      "bias": true,
+      "auto": "Tc128",
+      "candidate": "Tc128",
+      "cohorts": 4,
+      "worst_own_p50": 1.0034296959440072,
+      "worst_own_p95": 1.0038638772444077
+    },
+    {
+      "row": "f16_f32",
+      "cell": "hot_e",
+      "bias": true,
+      "auto": "Tc128",
+      "candidate": "Tc16",
+      "cohorts": 4,
+      "worst_own_p50": 1.763470881929267,
+      "worst_own_p95": 1.8946927405184926
+    },
+    {
+      "row": "f16_f32",
+      "cell": "hot_e",
+      "bias": true,
+      "auto": "Tc128",
+      "candidate": "Tc64",
+      "cohorts": 4,
+      "worst_own_p50": 1.3737721219874686,
+      "worst_own_p95": 1.375222060658178
+    }
+  ],
+  "auto_cells": [
+    {
+      "row": "bf16",
+      "cell": "hot_a",
+      "bias": false,
+      "auto_tile": "Tc128Sm89Pipeline",
+      "cohorts": 28,
+      "worst_auto_vendor_p50": 0.89341257959076,
+      "worst_auto_vendor_p95": 0.9060554048064287
+    },
+    {
+      "row": "bf16",
+      "cell": "hot_a",
+      "bias": true,
+      "auto_tile": "Tc128Sm89Pipeline",
+      "cohorts": 24,
+      "worst_auto_vendor_p50": 0.6085795689471022,
+      "worst_auto_vendor_p95": 0.6112315546714847
+    },
+    {
+      "row": "bf16",
+      "cell": "hot_b",
+      "bias": false,
+      "auto_tile": "Tc128Sm89Pipeline",
+      "cohorts": 28,
+      "worst_auto_vendor_p50": 1.4596413374794648,
+      "worst_auto_vendor_p95": 1.6058015443306424
+    },
+    {
+      "row": "bf16",
+      "cell": "hot_b",
+      "bias": true,
+      "auto_tile": "Tc128Sm89Pipeline",
+      "cohorts": 24,
+      "worst_auto_vendor_p50": 1.1212905572126948,
+      "worst_auto_vendor_p95": 1.1421795655376423
+    },
+    {
+      "row": "bf16",
+      "cell": "hot_c",
+      "bias": false,
+      "auto_tile": "Tc128Sm89Pipeline",
+      "cohorts": 28,
+      "worst_auto_vendor_p50": 0.7642308977674793,
+      "worst_auto_vendor_p95": 0.7879344136361282
+    },
+    {
+      "row": "bf16",
+      "cell": "hot_c",
+      "bias": true,
+      "auto_tile": "Tc128Sm89Pipeline",
+      "cohorts": 24,
+      "worst_auto_vendor_p50": 0.6943810713175246,
+      "worst_auto_vendor_p95": 0.705234788580744
+    },
+    {
+      "row": "bf16",
+      "cell": "hot_d",
+      "bias": false,
+      "auto_tile": "Tc128Sm89Pipeline",
+      "cohorts": 28,
+      "worst_auto_vendor_p50": 1.2278630239425994,
+      "worst_auto_vendor_p95": 1.2546890711643155
+    },
+    {
+      "row": "bf16",
+      "cell": "hot_d",
+      "bias": true,
+      "auto_tile": "Tc128Sm89Pipeline",
+      "cohorts": 24,
+      "worst_auto_vendor_p50": 0.9502100296532289,
+      "worst_auto_vendor_p95": 0.9677002564422358
+    },
+    {
+      "row": "bf16",
+      "cell": "hot_e",
+      "bias": false,
+      "auto_tile": "Tc128Sm89Pipeline",
+      "cohorts": 28,
+      "worst_auto_vendor_p50": 0.9650106437010034,
+      "worst_auto_vendor_p95": 0.9843564818957807
+    },
+    {
+      "row": "bf16",
+      "cell": "hot_e",
+      "bias": true,
+      "auto_tile": "Tc128Sm89Pipeline",
+      "cohorts": 24,
+      "worst_auto_vendor_p50": 0.865145172052365,
+      "worst_auto_vendor_p95": 0.8789117028353786
+    },
+    {
+      "row": "bf16_f32",
+      "cell": "hot_a",
+      "bias": false,
+      "auto_tile": "Tc64",
+      "cohorts": 16,
+      "worst_auto_vendor_p50": 1.2156935149543393,
+      "worst_auto_vendor_p95": 1.2500474245873012
+    },
+    {
+      "row": "bf16_f32",
+      "cell": "hot_a",
+      "bias": true,
+      "auto_tile": "Tc64",
+      "cohorts": 12,
+      "worst_auto_vendor_p50": 0.8100533615204513,
+      "worst_auto_vendor_p95": 0.8280642113434473
+    },
+    {
+      "row": "bf16_f32",
+      "cell": "hot_b",
+      "bias": false,
+      "auto_tile": "Tc128",
+      "cohorts": 16,
+      "worst_auto_vendor_p50": 1.9841587593368548,
+      "worst_auto_vendor_p95": 2.029817305789036
+    },
+    {
+      "row": "bf16_f32",
+      "cell": "hot_b",
+      "bias": true,
+      "auto_tile": "Tc128",
+      "cohorts": 12,
+      "worst_auto_vendor_p50": 1.5332328487089446,
+      "worst_auto_vendor_p95": 1.595075856918268
+    },
+    {
+      "row": "bf16_f32",
+      "cell": "hot_c",
+      "bias": false,
+      "auto_tile": "Tc128",
+      "cohorts": 16,
+      "worst_auto_vendor_p50": 1.0893049461385678,
+      "worst_auto_vendor_p95": 1.129138839723717
+    },
+    {
+      "row": "bf16_f32",
+      "cell": "hot_c",
+      "bias": true,
+      "auto_tile": "Tc128",
+      "cohorts": 12,
+      "worst_auto_vendor_p50": 0.9510419093645841,
+      "worst_auto_vendor_p95": 0.9900091520427
+    },
+    {
+      "row": "bf16_f32",
+      "cell": "hot_d",
+      "bias": false,
+      "auto_tile": "Tc64",
+      "cohorts": 16,
+      "worst_auto_vendor_p50": 1.6209781866641604,
+      "worst_auto_vendor_p95": 1.6672536546557253
+    },
+    {
+      "row": "bf16_f32",
+      "cell": "hot_d",
+      "bias": true,
+      "auto_tile": "Tc64",
+      "cohorts": 12,
+      "worst_auto_vendor_p50": 1.26430518581572,
+      "worst_auto_vendor_p95": 1.3019231241642724
+    },
+    {
+      "row": "bf16_f32",
+      "cell": "hot_e",
+      "bias": false,
+      "auto_tile": "Tc128",
+      "cohorts": 16,
+      "worst_auto_vendor_p50": 1.3592894398971052,
+      "worst_auto_vendor_p95": 1.4024330674027283
+    },
+    {
+      "row": "bf16_f32",
+      "cell": "hot_e",
+      "bias": true,
+      "auto_tile": "Tc128",
+      "cohorts": 12,
+      "worst_auto_vendor_p50": 1.1951086217317042,
+      "worst_auto_vendor_p95": 1.2492212209842812
+    },
+    {
+      "row": "f16",
+      "cell": "hot_a",
+      "bias": false,
+      "auto_tile": "Tc128Sm89Pipeline",
+      "cohorts": 28,
+      "worst_auto_vendor_p50": 0.9749099413463912,
+      "worst_auto_vendor_p95": 1.0264173339801377
+    },
+    {
+      "row": "f16",
+      "cell": "hot_a",
+      "bias": true,
+      "auto_tile": "Tc128Sm89Pipeline",
+      "cohorts": 24,
+      "worst_auto_vendor_p50": 0.6597312858030884,
+      "worst_auto_vendor_p95": 0.6775912309838206
+    },
+    {
+      "row": "f16",
+      "cell": "hot_b",
+      "bias": false,
+      "auto_tile": "Tc128Sm89Pipeline",
+      "cohorts": 28,
+      "worst_auto_vendor_p50": 1.3865153999299817,
+      "worst_auto_vendor_p95": 1.4968405194981707
+    },
+    {
+      "row": "f16",
+      "cell": "hot_b",
+      "bias": true,
+      "auto_tile": "Tc128Sm89Pipeline",
+      "cohorts": 24,
+      "worst_auto_vendor_p50": 1.0678640223405294,
+      "worst_auto_vendor_p95": 1.0979653752333334
+    },
+    {
+      "row": "f16",
+      "cell": "hot_c",
+      "bias": false,
+      "auto_tile": "Tc128Sm89Pipeline",
+      "cohorts": 28,
+      "worst_auto_vendor_p50": 0.7699554334384708,
+      "worst_auto_vendor_p95": 0.7826679977344403
+    },
+    {
+      "row": "f16",
+      "cell": "hot_c",
+      "bias": true,
+      "auto_tile": "Tc128Sm89Pipeline",
+      "cohorts": 24,
+      "worst_auto_vendor_p50": 0.6976441402056592,
+      "worst_auto_vendor_p95": 0.7105418760432554
+    },
+    {
+      "row": "f16",
+      "cell": "hot_d",
+      "bias": false,
+      "auto_tile": "Tc128Sm89Pipeline",
+      "cohorts": 28,
+      "worst_auto_vendor_p50": 1.2478501545333998,
+      "worst_auto_vendor_p95": 1.3314056035329713
+    },
+    {
+      "row": "f16",
+      "cell": "hot_d",
+      "bias": true,
+      "auto_tile": "Tc128Sm89Pipeline",
+      "cohorts": 24,
+      "worst_auto_vendor_p50": 0.9649506542068633,
+      "worst_auto_vendor_p95": 0.985735621450528
+    },
+    {
+      "row": "f16",
+      "cell": "hot_e",
+      "bias": false,
+      "auto_tile": "Tc128Sm89Pipeline",
+      "cohorts": 28,
+      "worst_auto_vendor_p50": 1.1947232816209141,
+      "worst_auto_vendor_p95": 1.2232234222029563
+    },
+    {
+      "row": "f16",
+      "cell": "hot_e",
+      "bias": true,
+      "auto_tile": "Tc128Sm89Pipeline",
+      "cohorts": 24,
+      "worst_auto_vendor_p50": 1.0814432398131146,
+      "worst_auto_vendor_p95": 1.104509774371583
+    },
+    {
+      "row": "f16_f32",
+      "cell": "hot_a",
+      "bias": false,
+      "auto_tile": "Tc64",
+      "cohorts": 16,
+      "worst_auto_vendor_p50": 1.212957277114772,
+      "worst_auto_vendor_p95": 1.296550330039881
+    },
+    {
+      "row": "f16_f32",
+      "cell": "hot_a",
+      "bias": true,
+      "auto_tile": "Tc64",
+      "cohorts": 12,
+      "worst_auto_vendor_p50": 0.8133870713109944,
+      "worst_auto_vendor_p95": 0.8479772444591309
+    },
+    {
+      "row": "f16_f32",
+      "cell": "hot_b",
+      "bias": false,
+      "auto_tile": "Tc128",
+      "cohorts": 16,
+      "worst_auto_vendor_p50": 1.8819833342045877,
+      "worst_auto_vendor_p95": 2.025610224650362
+    },
+    {
+      "row": "f16_f32",
+      "cell": "hot_b",
+      "bias": true,
+      "auto_tile": "Tc128",
+      "cohorts": 12,
+      "worst_auto_vendor_p50": 1.4638336225062323,
+      "worst_auto_vendor_p95": 1.5085623676623627
+    },
+    {
+      "row": "f16_f32",
+      "cell": "hot_c",
+      "bias": false,
+      "auto_tile": "Tc128",
+      "cohorts": 16,
+      "worst_auto_vendor_p50": 1.10482525313233,
+      "worst_auto_vendor_p95": 1.130233596437613
+    },
+    {
+      "row": "f16_f32",
+      "cell": "hot_c",
+      "bias": true,
+      "auto_tile": "Tc128",
+      "cohorts": 12,
+      "worst_auto_vendor_p50": 0.9837365429755532,
+      "worst_auto_vendor_p95": 1.0072989376342225
+    },
+    {
+      "row": "f16_f32",
+      "cell": "hot_d",
+      "bias": false,
+      "auto_tile": "Tc64",
+      "cohorts": 16,
+      "worst_auto_vendor_p50": 1.6290433011279268,
+      "worst_auto_vendor_p95": 1.6965271418841255
+    },
+    {
+      "row": "f16_f32",
+      "cell": "hot_d",
+      "bias": true,
+      "auto_tile": "Tc64",
+      "cohorts": 12,
+      "worst_auto_vendor_p50": 1.26825462697383,
+      "worst_auto_vendor_p95": 1.295062619361931
+    },
+    {
+      "row": "f16_f32",
+      "cell": "hot_e",
+      "bias": false,
+      "auto_tile": "Tc128",
+      "cohorts": 16,
+      "worst_auto_vendor_p50": 1.6582040671120413,
+      "worst_auto_vendor_p95": 1.7157052768722048
+    },
+    {
+      "row": "f16_f32",
+      "cell": "hot_e",
+      "bias": true,
+      "auto_tile": "Tc128",
+      "cohorts": 12,
+      "worst_auto_vendor_p50": 1.4861334053181725,
+      "worst_auto_vendor_p95": 1.5201404409790191
+    }
+  ]
+}

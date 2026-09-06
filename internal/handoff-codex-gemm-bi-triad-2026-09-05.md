@@ -835,6 +835,41 @@ resource/ABI/capture and complete cross-rung/view qualification. Integrate
 force-only first; promote measured cells after same-build 21/101-window
 eager/graph comparisons against current AUTO and explicit cuBLAS FAST.
 
+### Ada Fixed production census checkpoint (2026-09-06 14:10 UTC)
+
+Commit `26b44c4d` contains the qualified TF32 C0/C1 AUTO promotion. A further
+101-window confirmation with active mode-0700 private caching and Driver
+caching disabled passes all eight bias/path/order records. Old/new paired
+p50 is 1.025144--1.035193 and p95 is 1.026725--1.037257, with identical loaded
+artifacts. This remains an internal improvement, not a FAST victory. See
+`internal/perf/fixed-tf32-c-postauto-privatecache-v2-ada-20260906/README.md`.
+
+The complete already-shipped half/mixed force inventory has now been screened:
+22 candidate specifications across A-E, both bias states, eager/graph and two
+timing orders. Of 880 planned timings, 800 passed; 20 Legacy+bias attempts were
+rejected before timing by cross-AUTO bit identity, excluding four timings
+each. All 400 applicable graph replay checks pass. These rejections are not
+run-to-run nondeterminism or broken AUTO cells: the Legacy post-dot bias
+arithmetic differs from the bias-seeded native tensor-core family, and AUTO
+does not select Legacy for these four supported input/output dtype triples.
+
+No non-incumbent compatible candidate wins both paired p50 and p95 in every
+cohort. Actual AUTO robustly beats native half cuBLAS in 14/40 shape-bias-dtype
+cells: BF16 7/10, F16 4/10, BF16->F32 2/10, F16->F32 1/10. The comparator is
+explicit `CUBLAS_COMPUTE_32F` for half inputs, not PEDANTIC or F32 FAST_TF32.
+The remaining largest gaps are mixed B/D/E and homogeneous-half B/D0.
+Full samples, source identities, all candidate/cell summaries and rejection
+analysis are in `internal/perf/fixed-half-mixed-all-ada-20260906/`.
+Standalone RNA and half-swizzle prototypes are not included in this shipped
+inventory result; do not claim every experiment is already in AUTO.
+
+Current work remains Ada Fixed/inference, prioritizing explicit-RNA wide
+TF32 integration. The new symbol is force-only until current production
+NVRTC correctness, physical ABI/resource/capture gates and paired 21/101
+performance justify a promotion. Frozen Triad and CC12 source compositions
+must remain unchanged. Ada and expired-5090 Triad baselines remain saved;
+Triad optimization is not yet the active implementation stage.
+
 ### Precision and determinism terminology
 
 TF32 is a compute mode for F32 tensors; it is not a distinct tensor storage
