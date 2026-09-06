@@ -193,7 +193,7 @@ fn resource_contract(observed: [i32; 6]) -> Result<(), String> {
     Ok(())
 }
 fn admission(cell: &str, windows: usize, paths: &[usize], own_ratios: &[f64]) -> bool {
-    matches!(cell, "hot_e" | "hot_b")
+    matches!(cell, "hot_a" | "hot_b" | "hot_d" | "hot_e")
         && windows == 101
         && paths.len() == 2
         && paths.contains(&0)
@@ -212,8 +212,15 @@ fn auto_phase(
 ) -> Result<(), String> {
     match requested.unwrap_or("legacy") {
         "legacy" if !candidate => Ok(()),
-        "candidate" if matches!(cell, "hot_b" | "hot_e") && (!selected || candidate) => Ok(()),
-        "candidate" if !matches!(cell, "hot_b" | "hot_e") && !candidate => Ok(()),
+        "candidate"
+            if matches!(cell, "hot_a" | "hot_b" | "hot_d" | "hot_e")
+                && (!selected || candidate) =>
+        {
+            Ok(())
+        }
+        "candidate" if !matches!(cell, "hot_a" | "hot_b" | "hot_d" | "hot_e") && !candidate => {
+            Ok(())
+        }
         "legacy" | "candidate" => Err(format!(
             "AUTO phase mismatch: cell={cell}, selected={selected}, actual_candidate={candidate}"
         )),
@@ -290,11 +297,20 @@ fn exact_n64_admission_cpu_resources_decline_unknown_spills_and_residency() {
 }
 
 #[test]
+fn exact_n64_admission_cpu_preserves_a_and_d_qualification_and_auto_phase() {
+    for cell in ["hot_a", "hot_d"] {
+        assert!(admission(cell, 101, &[0, 1], &[0.9; 4]));
+        auto_phase(Some("candidate"), cell, true, true).unwrap();
+        assert!(auto_phase(Some("candidate"), cell, true, false).is_err());
+    }
+}
+
+#[test]
 fn exact_n64_admission_cpu_screen_partial_paths_and_controls_never_admit() {
     assert!(admission("hot_e", 101, &[0, 1], &[0.9; 4]));
     assert!(!admission("hot_e", 21, &[0, 1], &[0.9; 4]));
     assert!(!admission("hot_e", 101, &[0], &[0.9; 2]));
-    for cell in ["hot_a", "hot_c", "hot_d"] {
+    for cell in ["hot_c", "", "unknown"] {
         assert!(!admission(cell, 101, &[0, 1], &[0.9; 4]));
     }
     for ratios in [vec![], vec![0.9; 3], vec![1.0; 4], vec![f64::NAN; 4]] {
@@ -1924,7 +1940,8 @@ fn run_checked() -> Result<(), String> {
         quoted(&format!("{:x}",Sha256::digest(include_bytes!("../gemm_bi_fixed_performance.rs"))))))?;
     single_term_preflight(&ctx, &mut evidence, poison_red)?;
     let mut records = 0;
-    // A/C/D always remain numerical/graph controls, even when only E/B are timed.
+    // All five cells remain numerical/graph controls, even when only a subset
+    // of the qualified A/B/D/E copy-plan rows are timed.
     for (index, bias, corpus, timed) in jobs(&protocol) {
         let (label, shape) = CELLS[index];
         let case = Case::new(&ctx, shape, corpus, bias == 1)?;

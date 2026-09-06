@@ -1,0 +1,9 @@
+utc=2026-09-06T13:06:52Z
+source_git=318b3fbd09c8fe0bfac7eaabefdec2bba457f212
+d0368f56ed46c35f536ca2331aeb7e1f34bbc03026c9820d409316eb26f05ca7  /root/mamba-rs-triad/target-132-fixed-smoke/release/deps/gemm_bi_fixed_performance-fd5155b4b71de901
+case=ad-copyplan-confirm101 cells=hot_a,hot_d tile=F32Sm89N64CopyPlan windows=101 start_utc=2026-09-06T13:06:52Z
+case=ad-copyplan-confirm101 exit=0 end_utc=2026-09-06T13:07:57Z
+case=ad-copyplan-confirm101 promotion_gate=PASS
+case=c-n128-screen21 cells=hot_c tile=F32N128S2 windows=21 start_utc=2026-09-06T13:07:57Z
+case=c-n128-screen21 exit=0 end_utc=2026-09-06T13:08:08Z
+case=c-n128-screen21 promotion_gate=FAIL confirm101=SKIP

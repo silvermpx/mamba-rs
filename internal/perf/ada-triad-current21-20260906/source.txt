@@ -1,0 +1,7 @@
+source_git=318b3fbd09c8fe0bfac7eaabefdec2bba457f212
+source_branch=codex/gemm-bi-triad-sm80
+sync_method=git archive HEAD + rsync -azc without --delete
+manifest_sha256=9a359566f45ce13e788a1fb1d6194ef3c61c18f4e8eaf413f70c88937be98b30
+production_manifest_sha256=bfcd81a6a91ef0b179af4e0b219187ce1aa304ca2a757c7062c33661cce2eac1
+tracked_regular_files=394
+content_changed_tracked_files=45

@@ -1,0 +1,57 @@
+ENV 2026-09-06T12:59:51Z
+CARGO_TARGET_DIR=/root/mamba-rs-triad/target-132-triad-current21
+CUDA_CACHE_DISABLE=1
+CUDA_HOME=/usr/local/cuda-13.2
+CUDA_VISIBLE_DEVICES=GPU-d1edd7be-e88d-aed6-047d-622163306f0e
+GEMM_BI_QUAL_PATH_ORDER=ab
+GEMM_BI_QUAL_VARIANT=ada-current21
+LD_LIBRARY_PATH=/usr/local/cuda-13.2/lib64
+MAMBA_RS_CACHE_TRACE=1
+MAMBA_RS_KERNEL_CACHE=/root/triad-ada-cache-JNe0V1
+PATH=/usr/local/cuda-13.2/bin:/root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+nvcc: NVIDIA (R) Cuda compiler driver
+Copyright (c) 2005-2026 NVIDIA Corporation
+Built on Mon_Mar_02_09:52:23_PM_PST_2026
+Cuda compilation tools, release 13.2, V13.2.51
+Build cuda_13.2.r13.2/compiler.37434383_0
+cargo 1.98.0 (797e8a9bc 2026-08-05)
+rustc 1.98.0 (88d9e12ae 2026-08-18)
+Sun Sep  6 14:59:52 2026       
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 595.45.04              Driver Version: 595.45.04      CUDA Version: 13.2     |
++-----------------------------------------+------------------------+----------------------+
+| GPU  Name                 Persistence-M | Bus-Id          Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
+|                                         |                        |               MIG M. |
+|=========================================+========================+======================|
+|   0  NVIDIA RTX 6000 Ada Gene...    On  |   00000000:6F:00.0 Off |                  Off |
+| 37%   56C    P5             44W /  300W |      90MiB /  49140MiB |      0%      Default |
+|                                         |                        |                  N/A |
++-----------------------------------------+------------------------+----------------------+
+
++-----------------------------------------------------------------------------------------+
+| Processes:                                                                              |
+|  GPU   GI   CI              PID   Type   Process name                        GPU Memory |
+|        ID   ID                                                               Usage      |
+|=========================================================================================|
+|  No running processes found                                                             |
++-----------------------------------------------------------------------------------------+
+621ec150a70f1bd33cdcc6c7f1ef9c30bd8c68c6f2e2a8b4401cc41b54eedaac  Cargo.toml
+ecd66301d368af7593951d7048c51fd563b29f2cf407a8e3c98261f8aeffdb8e  Cargo.lock
+d6aad1442326c4906b504e566c8c7f6a8c8de6bc07212d890ee6b5d08601b67d  src/mamba_ssm/gpu/gemm_bi_triad/mod.rs
+3191ece391163cd9b20931370e8e3514eacc5ee62ea8de508086412a3bdb6b53  src/mamba_ssm/gpu/gemm_bi_triad/modules.rs
+c600c262c0e06faa937869bee6993e08afb38bbb929701b1e8c4a7f5e96e5ddb  tests/gemm_bi_performance_matrix.rs
+GPU-d1edd7be-e88d-aed6-047d-622163306f0e, 0 %, 90 MiB
+START smoke60 2026-09-06T12:59:52Z
+END smoke60 EXIT=0 2026-09-06T13:02:58Z
+3cd029004dd544b580eea7a60d9dc3cb46695cd307afc10f7231b0f8e0b806ff  /root/triad-ada-current21-20260906/smoke60-v1.log
+GPU-d1edd7be-e88d-aed6-047d-622163306f0e, 0 %, 90 MiB
+START auto60 2026-09-06T13:03:00Z
+END auto60 EXIT=0 2026-09-06T13:04:30Z
+1a6e4ff7f4e26efb019fb7937400797ba0d03ffd2a0b09338c3b34d04bdf571b  /root/triad-ada-current21-20260906/auto60-v1.log
+GPU-d1edd7be-e88d-aed6-047d-622163306f0e, 0 %, 90 MiB
+START vendor45 2026-09-06T13:04:32Z
+END vendor45 EXIT=0 2026-09-06T13:05:56Z
+a1025b1d9a85e122550eed7ee309f152b56e1a978edaa262610e912200c79c31  /root/triad-ada-current21-20260906/vendor45-v1.log
+GPU-d1edd7be-e88d-aed6-047d-622163306f0e, 0 %, 90 MiB
+RUNNER_EXIT=0 2026-09-06T13:05:58Z

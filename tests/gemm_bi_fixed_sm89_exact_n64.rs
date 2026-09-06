@@ -1230,10 +1230,15 @@ fn fixed_sm89_exact_n64_auto_prefix_view_graph_bits() {
     ctx.set_bi_tensor_cores(false);
     ctx.set_fast_gemm(false);
     ctx.set_f32_triad_policy(F32TriadPolicy::ExactScalarFmaV1);
-    // The four exact rows were independently admitted by 101-window production
+    // The eight exact rows were independently admitted by 101-window production
     // pairs. This test is the full-hot *raw* batch/view gate, not a replacement
     // for that test's independent PEDANTIC/dyadic numerical gates.
-    for (hot_m, k, n) in [(2048, 2304, 768), (4621, 768, 2304)] {
+    for (hot_m, k, n) in [
+        (2048, 2304, 768),
+        (4621, 768, 2304),
+        (4621, 384, 1928),
+        (2048, 768, 2304),
+    ] {
         for bias in [false, true] {
             for (a_shift, b_shift, c_shift) in [(0, 0, 0), (1, 0, 0), (0, 1, 0), (0, 0, 1)] {
                 let full = Fixture {

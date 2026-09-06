@@ -6,8 +6,8 @@
 //! FFMA tile. One dispatcher, shape-keyed:
 //!
 //!   exact f32            -> CC12.0 exact-TMA at qualified A0/B0, Ada/CC12.0
-//!                           N64 copy-plans at the remaining qualified B/E
-//!                           rows; FFMA 64x128 at other measured CC12.0/
+//!                           N64 copy-plans at qualified rows (Ada A/B/D/E);
+//!                           FFMA 64x128 at other measured CC12.0/
 //!                           170-SM points; portable FFMA 64x64 elsewhere
 //!   bf16/f16, N >= 32    -> the GBF ladder (Tc16 / Tc64 / Tc128), one
 //!                           arithmetic family, STRICT across all M
@@ -84,7 +84,7 @@ pub enum FixedTile {
     /// Datacenter-Blackwell tcgen05 rung (CC 10.x only): the arch's own
     /// numeric family.
     Sm100Tcgen,
-    /// Ada-only exact-F32 N64 copy-plan, AUTO at qualified B/E bias rows.
+    /// Ada-only exact-F32 N64 copy-plan, AUTO at qualified A/B/D/E bias rows.
     F32Sm89N64CopyPlan,
     /// CC12.0 exact-F32 N64 copy-plan, AUTO at qualified E0/E1/B1 rows.
     F32Sm120N64CopyPlan,
@@ -4526,10 +4526,11 @@ mod sm120_exact_n64_auto_tests {
 }
 
 // Actual production NVRTC13.2 / 142-SM Ada paired qualification, 101 windows
-// in both orders and both eager/graph paths: exactly E/B, each bias row.
+// in both orders and both eager/graph paths: exactly A/B/D/E, each bias row.
 // This is a version-scoped measured route, not a claim for every 13.2 stack.
-// New Fixed source and AUTO ship together, so the new Fixed artifact invalidates
-// old graph identities without changing revision39 or frozen Triad evidence.
+// A/D confirmation: fixed-exact-promotions-ada-20260906-318b3fbd09c8,
+// SHA256 9224161eec3a578f472c07810647952c56604a980d699876b187887a929c575a.
+// This dispatch-only promotion reuses the unchanged loaded Fixed artifact.
 fn fixed_sm89_exact_n64_auto_eligible(
     operands: FixedFwdOperands,
     shape: FixedShape,
@@ -4557,7 +4558,11 @@ fn fixed_sm89_exact_n64_auto_eligible(
             .is_none_or(|ptr| ptr != 0 && ptr.is_multiple_of(4))
         && matches!(
             (shape.m, shape.k, shape.n, operands.bias_ptr.is_some()),
-            (2048, 2304, 768, false)
+            (4621, 384, 1928, false)
+                | (4621, 384, 1928, true)
+                | (2048, 768, 2304, false)
+                | (2048, 768, 2304, true)
+                | (2048, 2304, 768, false)
                 | (2048, 2304, 768, true)
                 | (4621, 768, 2304, false)
                 | (4621, 768, 2304, true)
@@ -4576,7 +4581,13 @@ mod sm89_exact_n64_auto_tests {
     // Literal admitted rows from production-paired-101-v1.jsonl, SHA256
     // 91493d7994999bfa48473803a1e29a7cc516a98b5264478c264457c3ba34db86.
     // B/no-bias wins against own AUTO/Legacy, not against PEDANTIC.
-    const ROWS: [(usize, usize, usize, bool); 4] = [
+    // A/D extend that baseline using the independent production 101-window
+    // confirmation referenced immediately above the AUTO predicate.
+    const ROWS: [(usize, usize, usize, bool); 8] = [
+        (4621, 384, 1928, false),
+        (4621, 384, 1928, true),
+        (2048, 768, 2304, false),
+        (2048, 768, 2304, true),
         (2048, 2304, 768, false),
         (2048, 2304, 768, true),
         (4621, 768, 2304, false),
@@ -4610,13 +4621,21 @@ mod sm89_exact_n64_auto_tests {
     }
 
     #[test]
-    fn fixed_sm89_exact_n64_auto_admits_only_four_measured_positive_rows() {
+    fn fixed_sm89_exact_n64_auto_routes_a_and_d_copyplan_winners() {
+        for (m, k, n) in [(4621, 384, 1928), (2048, 768, 2304)] {
+            for bias in [false, true] {
+                assert!(
+                    eligible(operands(bias), FixedShape { m, k, n }),
+                    "qualified copy-plan must be reachable from AUTO: M={m} K={k} N={n} bias={bias}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn fixed_sm89_exact_n64_auto_admits_only_eight_measured_positive_rows() {
         let observed = ROWS.map(|(m, k, n, bias)| eligible(operands(bias), FixedShape { m, k, n }));
-        assert_eq!(
-            observed,
-            [true, true, true, true],
-            "measured E0/E1/B0/B1 rows"
-        );
+        assert_eq!(observed, [true; 8], "measured A0/A1/B0/B1/D0/D1/E0/E1 rows");
         for (m, k, n, bias) in ROWS {
             for offset in [0, 4, 8, 12] {
                 let good = FixedFwdOperands {
@@ -4652,9 +4671,7 @@ mod sm89_exact_n64_auto_tests {
                 (129, k, n),
                 (m, 0, n),
                 (m, k, 0),
-                (4621, 384, 1928),
                 (4621, 1928, 384),
-                (2048, 768, 2304),
             ] {
                 assert!(
                     !eligible(operands(bias), FixedShape { m, k, n }),

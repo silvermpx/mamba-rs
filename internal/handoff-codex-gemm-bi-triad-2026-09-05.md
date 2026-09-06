@@ -23,8 +23,8 @@ The owner's target for release 0.7 (see the release order in section 8):
 - every precision except exact F32 must be AHEAD of cuBLAS FAST on the
   measured boards (for f32 inputs FAST means `CUBLAS_COMPUTE_32F_FAST_TF32`,
   i.e. TF32 against TF32);
-- exact F32 is squeezed to the silicon maximum and judged against cuBLAS
-  PEDANTIC;
+- exact F32 retains its scalar-FMA bit contract and is squeezed toward cuBLAS
+  FAST too; PEDANTIC remains a separately labelled diagnostic denominator;
 - no CUTLASS or any other external kernel in the tree: only our own
   deterministic kernels; cuBLAS stays the fallback (`GemmBackend::Cublas`);
 - every compiled kernel is reachable by a production dispatcher for its card
@@ -42,9 +42,10 @@ The owner's target for release 0.7 (see the release order in section 8):
   `main` is not touched until the 0.7 merge. Never `git push`; commit locally
   after every green phase. No AI authorship trailers in commits. Commit
   subjects describe the defect or the design, never a plan index.
-- `internal/` is git-ignored: every evidence directory (`internal/perf/*`),
-  plan and handoff lives on disk only. Copy what you need before deleting a
-  worktree.
+- `internal/` is git-ignored by default. Selected handoff and evidence files
+  are explicitly tracked in the September 6 checkpoint commits; other evidence
+  remains disk-only until explicitly added. Copy untracked evidence before
+  deleting a worktree.
 - Boxes:
   - `ada`: `ssh ada`, RTX 6000 Ada (SM89, 142 SMs, power cap 300 W; under a
     sustained GEMM the SM clock holds 1800 MHz, so every harness number is at
@@ -715,3 +716,95 @@ symbols are respectively the SM120 M64N128 and M64N64 TF32 TMA tiles. All
 numeric/guard/AUTO-versus-forced/eager-versus-graph raw-bit checks passed.
 These remain 21-window screening results with `dispatch_admission=false`, not
 long dispatcher admissions; the third cell and long confirmation remain open.
+
+### Ada resumption: missing compatible AUTO rows found (2026-09-06)
+
+The current tree was synced from `318b3fbd` to `/root/mamba-rs-triad` without
+deleting remote-only files; all 394 tracked regular files were hash-verified.
+Ada is CC8.9 / 142 SMs, NVRTC13.2, driver 595.45.04. The first exact Fixed
+smoke covers both PEDANTIC and FAST_TF32, A--E, both biases, all three exact
+force tiles and eager/graph: 240 records, zero rejected, all applicable
+repeat/storage/graph gates passed. Actual AUTO was Legacy at A/C/D and the
+SM89 copy-plan at B/E. Evidence:
+`internal/perf/fixed-smoke-ada-20260906T125444Z-318b3fbd09c8/`.
+
+The missing A/D acceleration is not solely an architectural limitation.
+Although the recent SM120 TMA kernels cannot run on Ada, an already loaded,
+compatible SM89 copy-plan beats Legacy at A and D. The AUTO allowlist had
+only B/E. Fresh production 101-window qualification of A/D, both biases,
+both orders and eager/graph passed all 32 paired p50 and p95 comparisons
+against incumbent AUTO: p50 0.830110--0.846557, p95 0.832349--0.854944.
+PEDANTIC is beaten in all 16 corresponding cohorts (worst p95 0.914202);
+FAST_TF32 is still faster than this exact-F32 route (worst p95 2.118521).
+Evidence:
+`internal/perf/fixed-exact-promotions-ada-20260906-318b3fbd09c8/`.
+
+C's existing F32N128S2 wins all 16 medians but only 14/16 p95 cohorts in
+the 21-window screen; its worst paired p95 versus AUTO is 1.022126.
+It is not promoted. The A/D dispatch change adds the two shapes with both
+biases to the existing CUDA13.2/CC8.9/142-SM allowlist, updates admission
+support and expands prefix/view/graph tests; CUDA bodies stay unchanged.
+New selector and admission regression tests both failed before the change,
+then passed (6 selector tests and 16 support tests). Independent review found
+no blocker. Post-AUTO GPU qualification from the isolated source
+`/root/mamba-ada-dispatch-review-gxJWgz` completed successfully: all 32 A/D
+101-window records capture AUTO `F32Sm89N64CopyPlan` and its actual graph
+symbol, with Legacy as the forced control. Legacy/AUTO paired p50 is
+1.181364--1.204765 in every cohort; AUTO beats PEDANTIC in all 16 p50/p95
+cohorts (worst p95 0.91652), while exact-versus-FAST remains open. B/E
+regression21 passes all 32 records with the original copy-plan route intact.
+The expanded prefix/view/misalignment eager/poisoned-graph test passes its
+704 boundary records (134.60 s), including A's partial M tile. Library tests,
+40 nonignored performance-harness tests and formatting pass. Actual source
+hashes and all GPU logs are preserved in
+`internal/perf/fixed-sm89-ad-copyplan-postauto-20260906/`. A/D promotion is
+therefore verified through production AUTO, not only through forced timing.
+
+Ada Triad baseline also completed: 120 smoke records, 120 AUTO records at
+21 windows, 90 vendor records, all applicable eager/graph bit checks passed.
+Actual TF32 and half routes use the portable tensor-core family. Independent
+eager p95 comparisons win FAST/PEDANTIC in respectively 0/0 of 15 exact-F32
+cells, 0/11 TF32, 1/15 BF16, and 2/13 F16. The generic vendor harness is
+eager-only, so graph ratios remain proxies, not paired graph evidence.
+The complete table, symbols and source artifacts are saved in
+`internal/perf/ada-triad-current21-20260906/`.
+
+The owner's clarified priority is deterministic TF32 as the flagship mode,
+especially for the planned RL use of Triad. BF16/F16/mixed and exact F32
+remain supported performance targets. Finish the already qualified A/D
+dispatch fix, then prioritize Ada TF32 Fixed and Triad NN/TN/NT existing
+candidate qualification. A broad claim that every compatible winner on every
+architecture is already in AUTO would still be false: reachability, numerical
+qualification, AUTO promotion and measured speed must be tracked separately.
+
+TF32 inventory audit found an existing force-only Fixed wide tile,
+`Tf32M128N128S3`, with strong historical finite-input results in
+`internal/perf/fixed-wide-rungs-20260905.log` (11-window eager, not a current
+admission). Keep it in the next full TF32 screen, but its exceptional-value
+conversion contract blocks a silent Fixed AUTO promotion: it uses
+`RegisterAddHalfUlpTf32V1`, while ordinary Fixed TF32 uses
+`RegisterCvtRnaTf32F32V1`. Existing `gemm_bi_fixed_correctness.rs` tests compare
+exceptional values only within the wide route and cross-route bits only for
+finite inputs. Finite performance wins do not prove the full Fixed rung/prefix
+bit contract. Preserve this distinction; qualify a compatible conversion
+implementation before using this wide body as an interchangeable Fixed rung.
+
+### Precision and determinism terminology
+
+TF32 is a compute mode for F32 tensors; it is not a distinct tensor storage
+dtype here. Its reduced multiplication precision differs from exact F32 even
+when both implementations are bit-reproducible. The public
+`AllowDeterministicTf32V1` policy permits qualified TF32 routes and falls back
+to the exact-F32 family for unqualified requests (`context.rs` and
+`gemm_bi_triad/dispatch.rs`). Half typed Triad calls prefer eligible native
+tensor-core/typed routes, then use an exact-F32 upcast fallback. NN and dX
+round back to the requested BF16/F16 output; dW is F32 by design (`blas.rs`).
+These are kernel-route fallbacks, not an automatic BF16-to-F16 switch.
+
+Do not equate cuBLAS FAST or TF32 with nondeterminism. NVIDIA documents
+bitwise repeatability under specified toolkit/device/stream/workspace
+conditions: https://docs.nvidia.com/cuda/cublas/index.html#results-reproducibility
+Batch invariance, reproducibility after changing a physical route, and
+cross-toolkit/cross-architecture equality are distinct guarantees. Claim only
+the numerical contract and configuration coverage demonstrated by tests;
+deterministic GEMMs alone do not prove full RL-training reproducibility.

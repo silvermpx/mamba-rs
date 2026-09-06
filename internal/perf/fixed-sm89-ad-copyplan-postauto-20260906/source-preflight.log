@@ -1,0 +1,9 @@
+utc=2026-09-06T13:12:29Z
+source_base_git=318b3fbd09c8fe0bfac7eaabefdec2bba457f212
+816797b32593bfd7b7f20a909b7c6815ce99269ab37c64bc257154ff5fb5c5ac  src/mamba_ssm/gpu/gemm_bi_fixed.rs
+8ca393c1d2a86c773388141fb112e1714cba3465084484356fb7445f87715f90  tests/gemm_bi_fixed_sm89_exact_n64.rs
+22c9d2c9b045f6e40d1f8fdf7cf380e0928911ad2b19282f8a12a2efa5aaaa2f  tests/support/fixed_sm89_exact_n64_admission.rs
+fa6185f7921c9e0cfe2fb2368e17e215a5ddc5c49e9c406d65704eba793b0b98  tests/gemm_bi_fixed_performance.rs
+621ec150a70f1bd33cdcc6c7f1ef9c30bd8c68c6f2e2a8b4401cc41b54eedaac  Cargo.toml
+ecd66301d368af7593951d7048c51fd563b29f2cf407a8e3c98261f8aeffdb8e  Cargo.lock
+NVIDIA RTX 6000 Ada Generation, GPU-d1edd7be-e88d-aed6-047d-622163306f0e, 595.45.04, 8.9, 90 MiB, 0 %, 0 %, P5, 1800 MHz, 43
