@@ -681,19 +681,7 @@ fn half_qualification_forced_tiles_normalize_and_restore_policy() {
     assert!(!ctx.batch_invariant());
 }
 
-fn assert_fixed_exact_n64_optional_holder(ctx: &GpuCtx) {
-    let holder = ctx.kernels.fixed_sm89_f32_n64_copyplan.as_ref();
-    let reason = ctx.kernels.fixed_sm89_f32_n64_copyplan_rejection.as_ref();
-    if ctx.kernels.compiler_identity().target.as_str() != "sm_89" {
-        assert!(
-            holder.is_none(),
-            "Ada-only exact kernel loaded on another target"
-        );
-        assert!(reason.is_some(), "non-Ada rejection reason was lost");
-        return;
-    }
-    let function = holder.unwrap_or_else(|| panic!("Ada exact N64 missing: {reason:?}"));
-    assert!(reason.is_none());
+fn assert_exact_n64_resources(function: &cudarc::driver::CudaFunction) {
     assert_eq!(function.local_size_bytes().unwrap(), 0);
     assert_eq!(function.shared_size_bytes().unwrap(), 32_768);
     assert!((1..=160).contains(&function.num_regs().unwrap()));
@@ -708,6 +696,43 @@ fn assert_fixed_exact_n64_optional_holder(ctx: &GpuCtx) {
         function.get_attribute(cudarc::driver::sys::CUfunction_attribute::CU_FUNC_ATTRIBUTE_PREFERRED_SHARED_MEMORY_CARVEOUT).unwrap(),
         100
     );
+}
+
+fn assert_fixed_exact_n64_optional_holders(ctx: &GpuCtx, compute_capability: (u32, u32)) {
+    let ada_holder = ctx.kernels.fixed_sm89_f32_n64_copyplan.as_ref();
+    let ada_reason = ctx.kernels.fixed_sm89_f32_n64_copyplan_rejection.as_ref();
+    if ctx.kernels.compiler_identity().target.as_str() != "sm_89" {
+        assert!(
+            ada_holder.is_none(),
+            "Ada-only exact kernel loaded on another target"
+        );
+        assert!(ada_reason.is_some(), "non-Ada rejection reason was lost");
+    } else {
+        let function =
+            ada_holder.unwrap_or_else(|| panic!("Ada exact N64 missing: {ada_reason:?}"));
+        assert!(ada_reason.is_none());
+        assert_exact_n64_resources(function);
+    }
+
+    let sm120_holder = ctx.kernels.fixed_sm120_f32_n64_copyplan.as_ref();
+    let sm120_reason = ctx.kernels.fixed_sm120_f32_n64_copyplan_rejection.as_ref();
+    let owns_sm120 = ctx.kernels.compiler_identity().target.as_str() == "compute_120"
+        && compute_capability == (12, 0);
+    if owns_sm120 {
+        let function =
+            sm120_holder.unwrap_or_else(|| panic!("SM120 exact N64 missing: {sm120_reason:?}"));
+        assert!(sm120_reason.is_none());
+        assert_exact_n64_resources(function);
+    } else {
+        assert!(
+            sm120_holder.is_none(),
+            "SM120 exact kernel loaded on a foreign device"
+        );
+        assert!(
+            sm120_reason.is_some(),
+            "non-SM120 rejection reason was lost"
+        );
+    }
 }
 
 #[test]
@@ -733,7 +758,7 @@ fn repeated_nvrtc_compiles_have_the_same_identity() {
 
     let device = GpuDevice::new(0).expect("CUDA device");
     let first = GpuCtx::new(&device).expect("first context");
-    assert_fixed_exact_n64_optional_holder(&first);
+    assert_fixed_exact_n64_optional_holders(&first, device.compute_capability);
     let first_artifacts = first.kernels.artifact_set_identity();
     #[cfg(target_os = "linux")]
     let active_artifacts = active_artifacts(first_artifacts);
@@ -754,7 +779,7 @@ fn repeated_nvrtc_compiles_have_the_same_identity() {
         .map(|artifact| (*artifact, artifact_payload(&cached_entries, *artifact)))
         .collect();
     let second = GpuCtx::new(&device).expect("second context");
-    assert_fixed_exact_n64_optional_holder(&second);
+    assert_fixed_exact_n64_optional_holders(&second, device.compute_capability);
     #[cfg(target_os = "linux")]
     {
         use std::os::unix::fs::MetadataExt;
@@ -814,6 +839,21 @@ fn repeated_nvrtc_compiles_have_the_same_identity() {
         assert_eq!(
             exact_n64_entries, expected_exact_n64,
             "cached exact N64 inventory"
+        );
+        let sm120_exact_n64_entries: std::collections::BTreeSet<_> = fixed_entries
+            .iter()
+            .filter(|name| name.starts_with("gemm_bi_nn_fixed_sm120_f32_n64_copyplan"))
+            .map(String::as_str)
+            .collect();
+        let expected_sm120_exact_n64 =
+            if first.kernels.compiler_identity().target.as_str() == "compute_120" {
+                std::collections::BTreeSet::from(["gemm_bi_nn_fixed_sm120_f32_n64_copyplan_v1"])
+            } else {
+                std::collections::BTreeSet::new()
+            };
+        assert_eq!(
+            sm120_exact_n64_entries, expected_sm120_exact_n64,
+            "cached SM120 exact N64 inventory"
         );
         assert!(
             fixed_entries.iter().all(|name| !name.starts_with("sgemm_")),
