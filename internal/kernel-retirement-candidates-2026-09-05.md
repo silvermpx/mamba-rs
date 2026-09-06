@@ -133,9 +133,15 @@ forced dispatcher route and BF16/F16 exports on tested CUDA12.8/13.0/13.2. Full
 bits/graph/ABI/resource/cold-warm and four-tool sanitizer qualification is recorded
 in `internal/perf/ada-half-swizzle-force-20260906/`. Earlier standalone swizzle
 rows remain historical timing evidence, not current-module timing admission.
-No paired21/101 census or AUTO proof exists for this new module yet. Both Tc128
-and pipeline remain essential; neither is retired or deletion-ready. The four
-original swizzle experiment files are preserved unchanged as provenance.
+The matching three-toolkit paired21/101 census is now complete at frozen6570ce87,
+800records total,zero rejects; evidence in
+`internal/perf/ada-half-swizzle-census-20260906/`. Both pipeline andswizzle win
+20/20 internally vsTc128 on12.8/13.0,so all20 cells need direct pairing before
+selecting a replacement. On13.2 swizzle wins internally forBF16 B/D/E andF16 B/D,
+bothbias;pipeline remains faster/safer forA/C bothdtypes andF16 E. AUTO promotion
+and post-AUTO proof are still pending. Both Tc128 andpipeline remain essential;
+neither is retired or deletion-ready. The four original swizzle experiment files
+are preserved unchanged as provenance.
 
 After each production promotion append exact symbol/module/shape/dtype/bias,
 source/compiler identity, old/new/vendor measurements, strict-bit evidence,

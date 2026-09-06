@@ -1,0 +1,79 @@
+{
+  "local_sources_match": 174,
+  "remote_check_transcripts": {
+    "preflight-identities-telemetry.log": {
+      "source_checks": 174,
+      "binary_cache_checks": 23,
+      "sha256": "1dabdcb58f551c8c2453d8a17e274dda007b756a440f4b8cccff8556d8b28c8d"
+    },
+    "postflight-identities-telemetry.log": {
+      "source_checks": 174,
+      "binary_cache_checks": 23,
+      "sha256": "f0db5bebc29a9400eb85af522df34202b1f6621b89669527341e477debedd76b"
+    }
+  },
+  "runs": [
+    {
+      "path": "internal/perf/ada-half-swizzle-census-20260906/confirm-cuda128-w101.log",
+      "sha256": "25fee8e1e5f4848c3b89434fed635777ae3a126a7f7da7799b08b4939b2eb902",
+      "temperature_c": [
+        57,
+        77
+      ],
+      "quiet_pre_post": true,
+      "exit": 0
+    },
+    {
+      "path": "internal/perf/ada-half-swizzle-census-20260906/confirm-cuda130-w101.log",
+      "sha256": "4f86715a2179f282366df9caab7bd4ce4004a241b414c8b9eda5d8a965903cca",
+      "temperature_c": [
+        59,
+        77
+      ],
+      "quiet_pre_post": true,
+      "exit": 0
+    },
+    {
+      "path": "internal/perf/ada-half-swizzle-census-20260906/confirm-cuda132-w101.log",
+      "sha256": "c1db3e8ab5f319c461ecebfc2bf6bdcc24a87f8ae59d44af5804562a6ee3b6b8",
+      "temperature_c": [
+        56,
+        77
+      ],
+      "quiet_pre_post": true,
+      "exit": 0
+    },
+    {
+      "path": "internal/perf/ada-half-swizzle-census-20260906/screen-cuda128-w21.log",
+      "sha256": "9ca011b8e3cf06e1359225ad8cfe781a94c58aadf750db10f277d7af1f16848b",
+      "temperature_c": [
+        50,
+        71
+      ],
+      "quiet_pre_post": true,
+      "exit": 0
+    },
+    {
+      "path": "internal/perf/ada-half-swizzle-census-20260906/screen-cuda130-w21.log",
+      "sha256": "715c2c2a57adfd45fc23780b1cb0ab87437637094eae9da58c182149812e5391",
+      "temperature_c": [
+        55,
+        73
+      ],
+      "quiet_pre_post": true,
+      "exit": 0
+    },
+    {
+      "path": "internal/perf/ada-half-swizzle-census-20260906/screen-cuda132-w21.log",
+      "sha256": "85edba5691f0f8c861eed7b36ebd29723607332522f3ab2c6a626895dddaf81f",
+      "temperature_c": [
+        39,
+        58
+      ],
+      "quiet_pre_post": true,
+      "exit": 0
+    }
+  ],
+  "module_controls": "external committed Task1 controls; six strict main analyzer outputs adjacent",
+  "auto_admission_authorized": false
+}

@@ -1,0 +1,272 @@
+{
+  "records": 80,
+  "identity": {
+    "compiler_target": "CudaTarget { bytes: [115, 109, 95, 56, 57, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], len: 5 }",
+    "fixed_source_digest": "d1180079f0067afbc3f54210ce41a80dbc6bb422d53085824082089a0ff97f2a",
+    "fixed_invocation_digest": "58c7853250f2f225830390289de0c1dfce34d81efede704436222e54d53ac991",
+    "fixed_artifact_digest": "c213b3c33d94e94e257d30e472cee583b5f3634d8dd5216e91a08b7c286d21c2",
+    "header_manifest_digest": "4d2b8b1c3d1ec175d3556f37139b52b832d4fccd0112e68ca8474b3276b58b5b",
+    "nvrtc_library_domain": "d031a53eb97235b70f62f652932db1bdf728ea229c8ca809d53c5ffd91642687",
+    "cc": "8.9",
+    "sm_count": 142,
+    "nvrtc": [
+      13,
+      2
+    ],
+    "nvrtc_library_known": true,
+    "tuning_table_revision": 41
+  },
+  "windows": 101,
+  "cells": [
+    {
+      "row": "bf16",
+      "cell": "hot_a",
+      "bias": false,
+      "forced_tile": "Tc128Sm89Swizzle",
+      "forced_over_auto_p50": 1.019883520705928,
+      "forced_over_auto_p95": 1.0214908126005453,
+      "forced_over_vendor_p50": 0.8738808742057357,
+      "forced_over_vendor_p95": 0.88237965489064,
+      "internal_win": false,
+      "vendor_win": true
+    },
+    {
+      "row": "bf16",
+      "cell": "hot_a",
+      "bias": true,
+      "forced_tile": "Tc128Sm89Swizzle",
+      "forced_over_auto_p50": 1.0156282242232317,
+      "forced_over_auto_p95": 1.0165347554066515,
+      "forced_over_vendor_p50": 0.6122465182991391,
+      "forced_over_vendor_p95": 0.6130095073611443,
+      "internal_win": false,
+      "vendor_win": true
+    },
+    {
+      "row": "bf16",
+      "cell": "hot_b",
+      "bias": false,
+      "forced_tile": "Tc128Sm89Swizzle",
+      "forced_over_auto_p50": 0.9046096084910803,
+      "forced_over_auto_p95": 0.9412293876387905,
+      "forced_over_vendor_p50": 1.314697905008581,
+      "forced_over_vendor_p95": 1.3465456136275133,
+      "internal_win": true,
+      "vendor_win": false
+    },
+    {
+      "row": "bf16",
+      "cell": "hot_b",
+      "bias": true,
+      "forced_tile": "Tc128Sm89Swizzle",
+      "forced_over_auto_p50": 0.9008862548973089,
+      "forced_over_auto_p95": 0.9089696768096647,
+      "forced_over_vendor_p50": 1.0034015361784299,
+      "forced_over_vendor_p95": 1.0106501542263986,
+      "internal_win": true,
+      "vendor_win": false
+    },
+    {
+      "row": "bf16",
+      "cell": "hot_c",
+      "bias": false,
+      "forced_tile": "Tc128Sm89Swizzle",
+      "forced_over_auto_p50": 1.018383445991615,
+      "forced_over_auto_p95": 1.0211904382245307,
+      "forced_over_vendor_p50": 0.7505544293637973,
+      "forced_over_vendor_p95": 0.7744701890365576,
+      "internal_win": false,
+      "vendor_win": true
+    },
+    {
+      "row": "bf16",
+      "cell": "hot_c",
+      "bias": true,
+      "forced_tile": "Tc128Sm89Swizzle",
+      "forced_over_auto_p50": 1.0218234536396955,
+      "forced_over_auto_p95": 1.0226868237025604,
+      "forced_over_vendor_p50": 0.6712639675146845,
+      "forced_over_vendor_p95": 0.6955547722208901,
+      "internal_win": false,
+      "vendor_win": true
+    },
+    {
+      "row": "bf16",
+      "cell": "hot_d",
+      "bias": false,
+      "forced_tile": "Tc128Sm89Swizzle",
+      "forced_over_auto_p50": 0.9075220350034756,
+      "forced_over_auto_p95": 0.9105616436518538,
+      "forced_over_vendor_p50": 1.100309966473638,
+      "forced_over_vendor_p95": 1.1086183972715815,
+      "internal_win": true,
+      "vendor_win": false
+    },
+    {
+      "row": "bf16",
+      "cell": "hot_d",
+      "bias": true,
+      "forced_tile": "Tc128Sm89Swizzle",
+      "forced_over_auto_p50": 0.907642599384196,
+      "forced_over_auto_p95": 0.9084181124717322,
+      "forced_over_vendor_p50": 0.8394547379886054,
+      "forced_over_vendor_p95": 0.8427495883078426,
+      "internal_win": true,
+      "vendor_win": true
+    },
+    {
+      "row": "bf16",
+      "cell": "hot_e",
+      "bias": false,
+      "forced_tile": "Tc128Sm89Swizzle",
+      "forced_over_auto_p50": 0.9873911173643819,
+      "forced_over_auto_p95": 0.9881778186551502,
+      "forced_over_vendor_p50": 0.8818585802729623,
+      "forced_over_vendor_p95": 0.882979166259178,
+      "internal_win": true,
+      "vendor_win": true
+    },
+    {
+      "row": "bf16",
+      "cell": "hot_e",
+      "bias": true,
+      "forced_tile": "Tc128Sm89Swizzle",
+      "forced_over_auto_p50": 0.9837868626133733,
+      "forced_over_auto_p95": 0.9843209175890186,
+      "forced_over_vendor_p50": 0.7946658742226698,
+      "forced_over_vendor_p95": 0.7960608443413417,
+      "internal_win": true,
+      "vendor_win": true
+    },
+    {
+      "row": "f16",
+      "cell": "hot_a",
+      "bias": false,
+      "forced_tile": "Tc128Sm89Swizzle",
+      "forced_over_auto_p50": 1.0228707547861529,
+      "forced_over_auto_p95": 1.0447250416278848,
+      "forced_over_vendor_p50": 0.954168189631219,
+      "forced_over_vendor_p95": 0.9788388934567271,
+      "internal_win": false,
+      "vendor_win": true
+    },
+    {
+      "row": "f16",
+      "cell": "hot_a",
+      "bias": true,
+      "forced_tile": "Tc128Sm89Swizzle",
+      "forced_over_auto_p50": 1.0177028125997283,
+      "forced_over_auto_p95": 1.0232373772032206,
+      "forced_over_vendor_p50": 0.6414181308218023,
+      "forced_over_vendor_p95": 0.6602182469296606,
+      "internal_win": false,
+      "vendor_win": true
+    },
+    {
+      "row": "f16",
+      "cell": "hot_b",
+      "bias": false,
+      "forced_tile": "Tc128Sm89Swizzle",
+      "forced_over_auto_p50": 0.9104719142120119,
+      "forced_over_auto_p95": 0.9229698093564114,
+      "forced_over_vendor_p50": 1.2551464047095957,
+      "forced_over_vendor_p95": 1.2643031891358332,
+      "internal_win": true,
+      "vendor_win": false
+    },
+    {
+      "row": "f16",
+      "cell": "hot_b",
+      "bias": true,
+      "forced_tile": "Tc128Sm89Swizzle",
+      "forced_over_auto_p50": 0.9075119055957697,
+      "forced_over_auto_p95": 0.9210575083375002,
+      "forced_over_vendor_p50": 0.967448641067628,
+      "forced_over_vendor_p95": 0.975933518647922,
+      "internal_win": true,
+      "vendor_win": true
+    },
+    {
+      "row": "f16",
+      "cell": "hot_c",
+      "bias": false,
+      "forced_tile": "Tc128Sm89Swizzle",
+      "forced_over_auto_p50": 1.0177874088077918,
+      "forced_over_auto_p95": 1.0292457844567207,
+      "forced_over_vendor_p50": 0.779488526576342,
+      "forced_over_vendor_p95": 0.7877535114426624,
+      "internal_win": false,
+      "vendor_win": true
+    },
+    {
+      "row": "f16",
+      "cell": "hot_c",
+      "bias": true,
+      "forced_tile": "Tc128Sm89Swizzle",
+      "forced_over_auto_p50": 1.014962150505534,
+      "forced_over_auto_p95": 1.0223972424291756,
+      "forced_over_vendor_p50": 0.707201539945017,
+      "forced_over_vendor_p95": 0.7139809046727105,
+      "internal_win": false,
+      "vendor_win": true
+    },
+    {
+      "row": "f16",
+      "cell": "hot_d",
+      "bias": false,
+      "forced_tile": "Tc128Sm89Swizzle",
+      "forced_over_auto_p50": 0.9565353532069619,
+      "forced_over_auto_p95": 0.9907877820365014,
+      "forced_over_vendor_p50": 1.1922418250591453,
+      "forced_over_vendor_p95": 1.2211511808568096,
+      "internal_win": true,
+      "vendor_win": false
+    },
+    {
+      "row": "f16",
+      "cell": "hot_d",
+      "bias": true,
+      "forced_tile": "Tc128Sm89Swizzle",
+      "forced_over_auto_p50": 0.9080636196986949,
+      "forced_over_auto_p95": 0.9176922065698888,
+      "forced_over_vendor_p50": 0.847323297485104,
+      "forced_over_vendor_p95": 0.8613443620362135,
+      "internal_win": true,
+      "vendor_win": true
+    },
+    {
+      "row": "f16",
+      "cell": "hot_e",
+      "bias": false,
+      "forced_tile": "Tc128Sm89Swizzle",
+      "forced_over_auto_p50": 1.0265687758459898,
+      "forced_over_auto_p95": 1.0559470071339534,
+      "forced_over_vendor_p50": 1.2077979476159033,
+      "forced_over_vendor_p95": 1.2226596920838884,
+      "internal_win": false,
+      "vendor_win": false
+    },
+    {
+      "row": "f16",
+      "cell": "hot_e",
+      "bias": true,
+      "forced_tile": "Tc128Sm89Swizzle",
+      "forced_over_auto_p50": 1.0217950825402864,
+      "forced_over_auto_p95": 1.0339779334104269,
+      "forced_over_vendor_p50": 1.0529786445373093,
+      "forced_over_vendor_p95": 1.0856222160230722,
+      "internal_win": false,
+      "vendor_win": false
+    }
+  ],
+  "required_census_complete": true,
+  "auto_admission_authorized": false,
+  "direct_pair_required": [],
+  "logs": [
+    {
+      "path": "internal/perf/ada-half-swizzle-census-20260906/confirm-cuda132-w101.log",
+      "sha256": "c1db3e8ab5f319c461ecebfc2bf6bdcc24a87f8ae59d44af5804562a6ee3b6b8"
+    }
+  ],
+  "identity_file_sha256": "2d131b9edb9ec2cfd808ad56a6c76e1afefc6d9e6886cc1442753178cad8c33c"
+}

@@ -1109,3 +1109,38 @@ the fastest. Compare native-half cuBLAS FAST with timed bias, retain the bias
 rounding caveat, and promote robust internal p50+p95 winners before considering
 deletion. Mixed F32-output needs a separate epilogue/qualification. No new5090
 measurement and no Triad optimization is claimed by this checkpoint.
+
+## Ada half-swizzle three-toolkit timing census (2026-09-06)
+
+Frozen production force checkpoint6570ce87 completed allsix paired runs:400
+21-window screening records and400 final101 records,zero rejects. Main separately
+recomputed all samplewise quantiles, checked every external module identity and
+exact cohort/physical graph/bit proof,174local sources and197remote pre/post hash
+check keys(174source,14binary,9cache). No source, AUTO or revision changed.
+
+| CUDA | Candidate | Actual AUTO | Internal p50+p95 wins | cuBLAS FAST wins |
+| --- | --- | --- | ---: | ---: |
+|12.8|Pipeline|Tc128|20/20|12/20|
+|12.8|Swizzle|Tc128|20/20|15/20|
+|13.0|Pipeline|Tc128|20/20|12/20|
+|13.0|Swizzle|Tc128|20/20|15/20|
+|13.2|Swizzle|Pipeline|10/20|13/20|
+
+Each cell aggregate covers BF16/F16 x A-E x bias0/1, with the worst paired p50
+and p95 over eager/graph and both ordering cohorts. CUDA13.2 confirmed internal
+swizzle wins:BF16 B/D/E andF16 B/D,bothbias. Retain pipeline forA/C bothdtypes and
+F16 E;its short-screen E wins did not survive101. CUDA12.8/13.0 both candidates
+beat oldTc128 in every cell, but separate vsAUTO ratios do not rank candidates.
+The required direct pipeline/swizzle paired workflow is the immediate next task.
+
+The vendor denominator is native-half CUBLAS_COMPUTE_32F,not PEDANTIC. F32
+PEDANTIC is only the accuracy reference. Timed vendor bias broadcast rounds the
+FP32bias to half; it is not our FP32-bias-preseed raw-bit oracle. This is not an
+allprecision inference/Triad/5090 completion claim or permission to delete routes.
+
+Evidence:internal/perf/ada-half-swizzle-census-20260906/README.md and
+census-report.md, all raw arrays,100-cell confirmation table and independently
+reproduced main summaries. Immediate pre/post GPU snapshots were idle with
+no compute apps;1800MHz SM clocks,post-run temperatures up to77C are preserved.
+No competing workload was stopped. Continue direct pairing then actualAUTO
+promotion and101 confirmation on allthree toolkits before mixed/remaining gaps.
