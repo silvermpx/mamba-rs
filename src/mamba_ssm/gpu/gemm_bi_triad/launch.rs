@@ -4497,20 +4497,31 @@ where
     ctx.with_f32_prepared_launches(|cache| cache.launch(ctx, selection, request, operands, scalar))
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FixedSm120ExactTmaTile {
+    M128N64,
+    M64N128,
+}
+
 /// Reuses the qualified Triad SM120 exact-TMA implementation from the Fixed
 /// family without entering Triad AUTO. The prepared-cache key seals the
 /// literal physical route, pointers, policy and shape, so graph capture keeps
 /// the same descriptor binding as the eager warmup.
-pub(crate) fn launch_cached_fixed_sm120_b0_exact_tma(
+pub(crate) fn launch_cached_fixed_sm120_exact_tma(
     ctx: &GpuCtx,
+    shape: (usize, usize, usize),
     operands: F32TriadOperands,
+    tile: FixedSm120ExactTmaTile,
 ) -> Result<bool, String> {
     let request = F32TriadRequest {
         op: ResolvedGemmOp::Nn,
-        shape: F32TriadShape::contiguous(ResolvedGemmOp::Nn, (4_621, 768, 2_304)),
+        shape: F32TriadShape::contiguous(ResolvedGemmOp::Nn, shape),
     };
     let route = Tf32PhysicalRoute::Sm120TmaFmaExactV1(Sm120FmaRoute {
-        tile: Sm120FmaTile::M128N64,
+        tile: match tile {
+            FixedSm120ExactTmaTile::M128N64 => Sm120FmaTile::M128N64,
+            FixedSm120ExactTmaTile::M64N128 => Sm120FmaTile::M64N128,
+        },
         kvec: false,
         splits: 1,
     });

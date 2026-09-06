@@ -167,7 +167,13 @@ fn single_graph_kernel_name(graph: &CudaGraph, label: &str) -> String {
         .to_owned()
 }
 
-fn assert_sm120_exact_tma_b0_graph_contract(graph: &CudaGraph, output: u64) {
+fn assert_sm120_exact_tma_graph_contract(
+    graph: &CudaGraph,
+    output: u64,
+    shape: FixedShape,
+    bias: Option<u64>,
+    tile: FixedTile,
+) {
     use cudarc::driver::sys;
 
     let mut node_count = 0usize;
@@ -186,9 +192,18 @@ fn assert_sm120_exact_tma_b0_graph_contract(graph: &CudaGraph, output: u64) {
         unsafe { sys::cuGraphKernelNodeGetParams_v2(nodes[0], &mut params) },
         sys::CUresult::CUDA_SUCCESS
     );
+    let (tile_m, tile_n) = match tile {
+        FixedTile::F32Sm120TmaFmaM128N64 => (128, 64),
+        FixedTile::F32Sm120TmaFmaM64N128 => (64, 128),
+        _ => panic!("non-TMA tile in exact-TMA graph contract: {tile:?}"),
+    };
     assert_eq!(
         (params.gridDimX, params.gridDimY, params.gridDimZ),
-        (1332, 1, 1)
+        (
+            (shape.m.div_ceil(tile_m) * shape.n.div_ceil(tile_n)) as u32,
+            1,
+            1
+        )
     );
     assert_eq!(
         (params.blockDimX, params.blockDimY, params.blockDimZ),
@@ -236,10 +251,19 @@ fn assert_sm120_exact_tma_b0_graph_contract(graph: &CudaGraph, output: u64) {
             .iter()
             .any(|byte| *byte != 0)
     );
-    assert_eq!(pointer(5), 0);
+    assert_eq!(pointer(5), bias.unwrap_or(0));
     assert_eq!(
         unsafe { *(captured(6) as *const [u32; 8]) },
-        [1.0f32.to_bits(), 0, 4621, 2304, 768, 2304, 1, 48]
+        [
+            1.0f32.to_bits(),
+            0,
+            shape.m as u32,
+            shape.n as u32,
+            shape.k as u32,
+            shape.n as u32,
+            1,
+            shape.k.div_ceil(16) as u32,
+        ]
     );
 }
 
@@ -8522,8 +8546,22 @@ const FIXED_AUTO_VENDOR_EXACT_CELLS: &[FixedAutoVendorCell] = &[
 fn fixed_auto_vendor_expected_exact_tile(
     cell: FixedAutoVendorCell,
     device_cc: (u32, u32),
+    sm_count: u32,
+    nvrtc_version: (i32, i32),
+    nvrtc_library_known: bool,
+    has_bias: bool,
 ) -> FixedTile {
     match device_cc {
+        (12, 0) if sm_count == 170 && nvrtc_version == (13, 2) && nvrtc_library_known => {
+            match ((cell.shape.m, cell.shape.k, cell.shape.n), has_bias) {
+                ((4621, 384, 1928), false) => FixedTile::F32Sm120TmaFmaM64N128,
+                ((4621, 768, 2304), false) => FixedTile::F32Sm120TmaFmaM128N64,
+                ((4621, 768, 2304) | (2048, 2304, 768), true) | ((2048, 2304, 768), false) => {
+                    FixedTile::F32Sm120N64CopyPlan
+                }
+                _ => cell.expected,
+            }
+        }
         (12, 0) => cell.expected,
         (12, 1) => FixedTile::Legacy,
         _ => panic!(
@@ -8626,19 +8664,39 @@ fn fixed_auto_vendor_exact_expectations_are_device_specific() {
     let hot_a = FIXED_AUTO_VENDOR_EXACT_CELLS[0];
     let hot_b = FIXED_AUTO_VENDOR_EXACT_CELLS[1];
     assert_eq!(
-        fixed_auto_vendor_expected_exact_tile(hot_a, (12, 0)),
+        fixed_auto_vendor_expected_exact_tile(hot_a, (12, 0), 170, (13, 2), true, false),
+        FixedTile::F32Sm120TmaFmaM64N128
+    );
+    assert_eq!(
+        fixed_auto_vendor_expected_exact_tile(hot_a, (12, 0), 170, (13, 2), true, true),
         FixedTile::F32N128S2
     );
     assert_eq!(
-        fixed_auto_vendor_expected_exact_tile(hot_b, (12, 0)),
+        fixed_auto_vendor_expected_exact_tile(hot_b, (12, 0), 170, (13, 2), true, false),
+        FixedTile::F32Sm120TmaFmaM128N64
+    );
+    assert_eq!(
+        fixed_auto_vendor_expected_exact_tile(hot_b, (12, 0), 170, (13, 2), true, true),
+        FixedTile::F32Sm120N64CopyPlan
+    );
+    assert_eq!(
+        fixed_auto_vendor_expected_exact_tile(hot_a, (12, 0), 169, (13, 2), true, false),
         FixedTile::F32N128S2
     );
     assert_eq!(
-        fixed_auto_vendor_expected_exact_tile(hot_a, (12, 1)),
+        fixed_auto_vendor_expected_exact_tile(hot_b, (12, 0), 170, (13, 2), false, false),
+        FixedTile::F32N128S2
+    );
+    assert_eq!(
+        fixed_auto_vendor_expected_exact_tile(hot_b, (12, 0), 170, (13, 3), true, false),
+        FixedTile::F32N128S2
+    );
+    assert_eq!(
+        fixed_auto_vendor_expected_exact_tile(hot_a, (12, 1), 170, (13, 2), true, false),
         FixedTile::Legacy
     );
     assert_eq!(
-        fixed_auto_vendor_expected_exact_tile(hot_b, (12, 1)),
+        fixed_auto_vendor_expected_exact_tile(hot_b, (12, 1), 170, (13, 2), true, false),
         FixedTile::Legacy
     );
 }
@@ -8833,7 +8891,14 @@ fn run_fixed_auto_vendor_cell(
     configure_fixed_auto_vendor_custom(ctx, row.policy);
     let selected = launch_fixed_auto_vendor_custom(ctx, custom_operands, shape);
     let expected = if row.name == "f32_exact" {
-        fixed_auto_vendor_expected_exact_tile(cell, device_cc)
+        fixed_auto_vendor_expected_exact_tile(
+            cell,
+            device_cc,
+            sm_count,
+            ctx.kernels.compiler_identity().nvrtc_version,
+            ctx.kernels.compiler_identity().nvrtc_library_known,
+            has_bias,
+        )
     } else if row.name == "tf32" {
         fixed_auto_vendor_expected_tf32_tile(
             cell,
@@ -9178,20 +9243,20 @@ fn fixed_ada_event_window_us(ctx: &GpuCtx, iterations: usize, mut launch: impl F
 }
 
 #[test]
-#[ignore = "requires a quiet RTX5090 and screens the production exact SM120 TMA-FMA route on Fixed B0"]
+#[ignore = "requires a quiet RTX5090 and screens an exact SM120 TMA-FMA route on a Fixed hot cell"]
 fn fixed_sm120_exact_tma_fma_b0_spike() {
     use cudarc::cublas::sys::cublasComputeType_t;
 
     assert_eq!(
         std::env::var("MAMBA_FIXED_SM120_FMA_SPIKE").as_deref(),
         Ok("1"),
-        "set MAMBA_FIXED_SM120_FMA_SPIKE=1 for the explicit B0 spike"
+        "set MAMBA_FIXED_SM120_FMA_SPIKE=1 for the explicit hot-cell spike"
     );
-    assert!(!cfg!(debug_assertions), "B0 spike requires --release");
-    let device = GpuDevice::new(0).expect("B0 spike CUDA device");
+    assert!(!cfg!(debug_assertions), "hot-cell spike requires --release");
+    let device = GpuDevice::new(0).expect("hot-cell spike CUDA device");
     assert_eq!(device.compute_capability, (12, 0));
     assert_eq!(device.multiprocessor_count(), 170);
-    let ctx = GpuCtx::new(&device).expect("B0 spike GPU context");
+    let ctx = GpuCtx::new(&device).expect("hot-cell spike GPU context");
     assert_eq!(ctx.kernels.compiler_identity().nvrtc_version, (13, 2));
     assert!(ctx.kernels.compiler_identity().nvrtc_library_known);
     ctx.set_batch_invariant(true);
@@ -9199,18 +9264,47 @@ fn fixed_sm120_exact_tma_fma_b0_spike() {
     ctx.set_fast_gemm(false);
     ctx.set_f32_triad_policy(F32TriadPolicy::ExactScalarFmaV1);
 
-    let dims = (4_621usize, 768usize, 2_304usize);
+    let cell = std::env::var("MAMBA_FIXED_SM120_FMA_SPIKE_CELL").unwrap_or_else(|_| "b".into());
+    let dims = match cell.as_str() {
+        "a" => (4_621usize, 384usize, 1_928usize),
+        "b" => (4_621, 768, 2_304),
+        "c" => (4_621, 1_928, 384),
+        "d" => (2_048, 768, 2_304),
+        "e" => (2_048, 2_304, 768),
+        other => panic!("unknown exact-TMA Fixed hot cell: {other}"),
+    };
+    let has_bias = match std::env::var("MAMBA_FIXED_SM120_FMA_SPIKE_BIAS").as_deref() {
+        Ok("1") => true,
+        Ok("0") | Err(_) => false,
+        Ok(value) => panic!("MAMBA_FIXED_SM120_FMA_SPIKE_BIAS must be 0 or 1, got {value}"),
+    };
+    let candidate_tile = match std::env::var("MAMBA_FIXED_SM120_FMA_SPIKE_TILE").as_deref() {
+        Ok("m64n128") => FixedTile::F32Sm120TmaFmaM64N128,
+        Ok("m128n64") | Err(_) => FixedTile::F32Sm120TmaFmaM128N64,
+        Ok(value) => {
+            panic!("MAMBA_FIXED_SM120_FMA_SPIKE_TILE must be m128n64 or m64n128, got {value}")
+        }
+    };
+    let expected_candidate_symbol = match candidate_tile {
+        FixedTile::F32Sm120TmaFmaM128N64 => "gemm_bi_nn_sm120_tma_fma_v1_m128n64_bk16_s2",
+        FixedTile::F32Sm120TmaFmaM64N128 => "gemm_bi_nn_sm120_tma_fma_v1_m64n128_bk16_s2",
+        _ => unreachable!(),
+    };
     let shape = FixedShape {
         m: dims.0,
         k: dims.1,
         n: dims.2,
     };
     let mut a = GpuBuffer::from_cpu(&ctx.stream, &synth(shape.m * shape.k, 0xf120_a001))
-        .expect("B0 spike A");
+        .expect("hot-cell spike A");
     let mut b = GpuBuffer::from_cpu(&ctx.stream, &synth(shape.k * shape.n, 0xf120_b001))
-        .expect("B0 spike B");
+        .expect("hot-cell spike B");
+    let mut bias = has_bias.then(|| {
+        GpuBuffer::from_cpu(&ctx.stream, &synth(shape.n, 0xf120_b1a5)).expect("hot-cell spike bias")
+    });
     let candidate = GpuBuffer::zeros(&ctx.stream, shape.m * shape.n).expect("candidate C");
-    let copyplan = GpuBuffer::zeros(&ctx.stream, shape.m * shape.n).expect("copyplan C");
+    let auto = GpuBuffer::zeros(&ctx.stream, shape.m * shape.n).expect("AUTO C");
+    let legacy = GpuBuffer::zeros(&ctx.stream, shape.m * shape.n).expect("Legacy C");
     let vendor = GpuBuffer::zeros(&ctx.stream, shape.m * shape.n).expect("vendor C");
     let candidate_operands = FixedFwdOperands {
         c: TypedPtr {
@@ -9225,11 +9319,18 @@ fn fixed_sm120_exact_tma_fma_b0_spike() {
             ptr: b.cached_ptr(),
             dtype: WeightDtype::F32,
         },
-        bias_ptr: None,
+        bias_ptr: bias.as_ref().map(GpuBuffer::cached_ptr),
     };
-    let copyplan_operands = FixedFwdOperands {
+    let auto_operands = FixedFwdOperands {
         c: TypedPtr {
-            ptr: copyplan.cached_ptr(),
+            ptr: auto.cached_ptr(),
+            dtype: WeightDtype::F32,
+        },
+        ..candidate_operands
+    };
+    let legacy_operands = FixedFwdOperands {
+        c: TypedPtr {
+            ptr: legacy.cached_ptr(),
             dtype: WeightDtype::F32,
         },
         ..candidate_operands
@@ -9239,29 +9340,38 @@ fn fixed_sm120_exact_tma_fma_b0_spike() {
             ptr: vendor.cached_ptr(),
             dtype: WeightDtype::F32,
         },
-        ..copyplan_operands
+        ..candidate_operands
     };
 
     let launch_candidate = || {
-        let tile = mamba_rs::mamba_ssm::gpu::gemm_bi_fixed::fixed_forward(
+        fixed_forward_with_tile(&ctx, candidate_operands, shape, candidate_tile)
+            .expect("Fixed exact SM120 TMA-FMA hot-cell forced launch");
+    };
+    let launch_auto = || {
+        mamba_rs::mamba_ssm::gpu::gemm_bi_fixed::fixed_forward(
             &ctx,
-            candidate_operands.c,
-            candidate_operands.x,
-            candidate_operands.w,
-            candidate_operands.bias_ptr,
+            auto_operands.c,
+            auto_operands.x,
+            auto_operands.w,
+            auto_operands.bias_ptr,
             dims,
         )
-        .expect("Fixed exact SM120 TMA-FMA B0 AUTO launch");
-        assert_eq!(tile, FixedTile::F32Sm120TmaFmaM128N64);
+        .expect("Fixed exact SM120 hot-cell AUTO launch")
     };
-    let launch_copyplan = || {
-        fixed_forward_with_tile(
-            &ctx,
-            copyplan_operands,
-            shape,
-            FixedTile::F32Sm120N64CopyPlan,
-        )
-        .expect("B0 copyplan launch");
+    let expected_auto = match (cell.as_str(), has_bias) {
+        ("a", false) => FixedTile::F32Sm120TmaFmaM64N128,
+        ("a", true) => FixedTile::F32N128S2,
+        ("b", false) => FixedTile::F32Sm120TmaFmaM128N64,
+        ("b" | "e", _) => FixedTile::F32Sm120N64CopyPlan,
+        ("c" | "d", _) => FixedTile::Legacy,
+        _ => unreachable!(),
+    };
+    let launch_auto_checked = || {
+        assert_eq!(launch_auto(), expected_auto);
+    };
+    let launch_legacy = || {
+        fixed_forward_with_tile(&ctx, legacy_operands, shape, FixedTile::Legacy)
+            .expect("hot-cell Legacy launch");
     };
     let launch_vendor = || {
         fixed_ada_vendor_launch(
@@ -9273,84 +9383,141 @@ fn fixed_sm120_exact_tma_fma_b0_spike() {
     };
 
     launch_candidate();
-    launch_copyplan();
+    launch_auto_checked();
+    launch_legacy();
     launch_vendor();
     ctx.stream
         .synchronize()
-        .expect("B0 initial synchronization");
+        .expect("hot-cell initial synchronization");
     let candidate_bits = candidate
         .to_cpu(&ctx.stream)
         .expect("candidate download")
         .into_iter()
         .map(f32::to_bits)
         .collect::<Vec<_>>();
-    let copyplan_bits = copyplan
+    let legacy_bits = legacy
         .to_cpu(&ctx.stream)
-        .expect("copyplan download")
+        .expect("Legacy download")
+        .into_iter()
+        .map(f32::to_bits)
+        .collect::<Vec<_>>();
+    let auto_bits = auto
+        .to_cpu(&ctx.stream)
+        .expect("AUTO download")
         .into_iter()
         .map(f32::to_bits)
         .collect::<Vec<_>>();
     assert_eq!(
-        candidate_bits, copyplan_bits,
-        "TMA-FMA must retain Fixed B0 bits"
+        candidate_bits, legacy_bits,
+        "TMA-FMA must retain Fixed hot-cell bits"
+    );
+    assert_eq!(
+        auto_bits, legacy_bits,
+        "AUTO must retain Fixed hot-cell bits"
     );
 
     for _ in 0..128 {
         launch_candidate();
-        launch_copyplan();
+        launch_auto_checked();
+        launch_legacy();
         launch_vendor();
     }
     ctx.stream
         .synchronize()
-        .expect("B0 eager warmup synchronization");
+        .expect("hot-cell eager warmup synchronization");
     let candidate_graph = unsafe {
         capture_into_graph(&ctx.stream, || {
             launch_candidate();
             Ok(())
         })
     }
-    .expect("capture exact SM120 TMA-FMA B0 graph");
-    let copyplan_graph = unsafe {
+    .expect("capture exact SM120 TMA-FMA hot-cell graph");
+    let auto_graph = unsafe {
         capture_into_graph(&ctx.stream, || {
-            launch_copyplan();
+            launch_auto_checked();
             Ok(())
         })
     }
-    .expect("capture copyplan B0 graph");
+    .expect("capture hot-cell AUTO graph");
+    let legacy_graph = unsafe {
+        capture_into_graph(&ctx.stream, || {
+            launch_legacy();
+            Ok(())
+        })
+    }
+    .expect("capture hot-cell Legacy graph");
     let vendor_graph = unsafe {
         capture_into_graph(&ctx.stream, || {
             launch_vendor();
             Ok(())
         })
     }
-    .expect("capture PEDANTIC B0 graph");
-    let candidate_symbol = single_graph_kernel_name(&candidate_graph, "TMA-FMA B0");
-    assert_eq!(
-        candidate_symbol,
-        "gemm_bi_nn_sm120_tma_fma_v1_m128n64_bk16_s2"
+    .expect("capture PEDANTIC hot-cell graph");
+    let candidate_symbol = single_graph_kernel_name(&candidate_graph, "TMA-FMA hot cell");
+    assert_eq!(candidate_symbol, expected_candidate_symbol);
+    assert_sm120_exact_tma_graph_contract(
+        &candidate_graph,
+        candidate.cached_ptr(),
+        shape,
+        candidate_operands.bias_ptr,
+        candidate_tile,
     );
-    assert_sm120_exact_tma_b0_graph_contract(&candidate_graph, candidate.cached_ptr());
+    let expected_auto_symbol = match expected_auto {
+        FixedTile::F32Sm120TmaFmaM128N64 => "gemm_bi_nn_sm120_tma_fma_v1_m128n64_bk16_s2",
+        FixedTile::F32Sm120TmaFmaM64N128 => "gemm_bi_nn_sm120_tma_fma_v1_m64n128_bk16_s2",
+        FixedTile::F32Sm120N64CopyPlan => "gemm_bi_nn_fixed_sm120_f32_n64_copyplan_v1",
+        FixedTile::F32N128S2 => "gemm_bi_f32_f32_n128_s2",
+        FixedTile::Legacy => "gemm_bi_f32_f32_s2",
+        _ => unreachable!(),
+    };
     assert_eq!(
-        single_graph_kernel_name(&copyplan_graph, "copyplan B0"),
-        "gemm_bi_nn_fixed_sm120_f32_n64_copyplan_v1"
+        single_graph_kernel_name(&auto_graph, "hot-cell AUTO"),
+        expected_auto_symbol
+    );
+    if matches!(
+        expected_auto,
+        FixedTile::F32Sm120TmaFmaM128N64 | FixedTile::F32Sm120TmaFmaM64N128
+    ) {
+        assert_sm120_exact_tma_graph_contract(
+            &auto_graph,
+            auto.cached_ptr(),
+            shape,
+            None,
+            expected_auto,
+        );
+    }
+    assert_eq!(
+        single_graph_kernel_name(&legacy_graph, "hot-cell Legacy"),
+        "gemm_bi_f32_f32_s2"
     );
     for _ in 0..128 {
         candidate_graph.launch().expect("candidate graph warmup");
-        copyplan_graph.launch().expect("copyplan graph warmup");
+        auto_graph.launch().expect("AUTO graph warmup");
+        legacy_graph.launch().expect("Legacy graph warmup");
         vendor_graph.launch().expect("vendor graph warmup");
     }
     ctx.stream
         .synchronize()
-        .expect("B0 graph warmup synchronization");
+        .expect("hot-cell graph warmup synchronization");
     let graph_bits = candidate
         .to_cpu(&ctx.stream)
         .expect("candidate graph download")
         .into_iter()
         .map(f32::to_bits)
         .collect::<Vec<_>>();
+    let auto_graph_bits = auto
+        .to_cpu(&ctx.stream)
+        .expect("AUTO graph download")
+        .into_iter()
+        .map(f32::to_bits)
+        .collect::<Vec<_>>();
     assert_eq!(
         graph_bits, candidate_bits,
-        "Fixed exact-TMA AUTO graph replay changed B0 bits"
+        "Fixed exact-TMA graph replay changed hot-cell bits"
+    );
+    assert_eq!(
+        auto_graph_bits, legacy_bits,
+        "Fixed AUTO graph replay changed hot-cell bits"
     );
 
     let windows = std::env::var("MAMBA_FIXED_SM120_FMA_SPIKE_WINDOWS")
@@ -9358,7 +9525,8 @@ fn fixed_sm120_exact_tma_fma_b0_spike() {
     assert!((1..=101).contains(&windows));
     for path in ["eager", "graph"] {
         for (comparator_name, comparator_graph) in [
-            ("copyplan", &copyplan_graph),
+            ("current_auto", &auto_graph),
+            ("legacy", &legacy_graph),
             ("cublas_pedantic", &vendor_graph),
         ] {
             for candidate_outside in [true, false] {
@@ -9372,10 +9540,13 @@ fn fixed_sm120_exact_tma_fma_b0_spike() {
                 let comparator_pilot = fixed_ada_event_window_us(&ctx, 16, || {
                     if path == "graph" {
                         comparator_graph.launch().expect("comparator graph pilot");
-                    } else if comparator_name == "copyplan" {
-                        launch_copyplan();
                     } else {
-                        launch_vendor();
+                        match comparator_name {
+                            "current_auto" => launch_auto_checked(),
+                            "legacy" => launch_legacy(),
+                            "cublas_pedantic" => launch_vendor(),
+                            _ => unreachable!(),
+                        }
                     }
                 });
                 let candidate_iterations = fixed_auto_vendor_iterations(candidate_pilot);
@@ -9397,10 +9568,13 @@ fn fixed_sm120_exact_tma_fma_b0_spike() {
                         fixed_ada_event_window_us(&ctx, comparator_iterations, || {
                             if path == "graph" {
                                 comparator_graph.launch().expect("comparator graph timing");
-                            } else if comparator_name == "copyplan" {
-                                launch_copyplan();
                             } else {
-                                launch_vendor();
+                                match comparator_name {
+                                    "current_auto" => launch_auto_checked(),
+                                    "legacy" => launch_legacy(),
+                                    "cublas_pedantic" => launch_vendor(),
+                                    _ => unreachable!(),
+                                }
                             }
                         })
                     };
@@ -9432,13 +9606,19 @@ fn fixed_sm120_exact_tma_fma_b0_spike() {
                 ratios.sort_by(f64::total_cmp);
                 println!(
                     concat!(
-                        "{{\"schema\":\"MambaBiFixedSm120FmaB0SpikeV1\",",
+                        "{{\"schema\":\"MambaBiFixedSm120FmaHotCellSpikeV2\",",
+                        "\"cell\":\"{}\",\"bias\":{},\"dims_mkn\":[{},{},{}],",
                         "\"path\":\"{}\",\"comparator\":\"{}\",\"order\":\"{}\",",
                         "\"windows\":{},\"candidate_symbol\":\"{}\",",
                         "\"candidate_p50_us\":{:.9},\"candidate_p95_us\":{:.9},",
                         "\"comparator_p50_us\":{:.9},\"comparator_p95_us\":{:.9},",
                         "\"ratio_p50\":{:.9},\"ratio_p95\":{:.9}}}"
                     ),
+                    cell,
+                    has_bias,
+                    shape.m,
+                    shape.k,
+                    shape.n,
                     path,
                     comparator_name,
                     if candidate_outside { "abba" } else { "baab" },
@@ -9458,6 +9638,9 @@ fn fixed_sm120_exact_tma_fma_b0_spike() {
     // Keep the managed input allocations live through every graph replay.
     a.zero(&ctx.stream).expect("keep A live");
     b.zero(&ctx.stream).expect("keep B live");
+    if let Some(bias) = bias.as_mut() {
+        bias.zero(&ctx.stream).expect("keep bias live");
+    }
 }
 
 #[test]
@@ -11096,6 +11279,9 @@ fn fixed_f32_n128_matches_legacy_bits() {
     let measured_device =
         device.compute_capability == (12, 0) && device.multiprocessor_count() == 170;
     let ctx = GpuCtx::new(&device).expect("GPU context");
+    let compiler = ctx.kernels.compiler_identity();
+    let measured_stack =
+        measured_device && compiler.nvrtc_version == (13, 2) && compiler.nvrtc_library_known;
     ctx.set_batch_invariant(true);
     ctx.set_bi_gemm_family(BiGemmFamily::Fixed);
     ctx.set_f32_triad_policy(F32TriadPolicy::ExactScalarFmaV1);
@@ -11275,14 +11461,25 @@ fn fixed_f32_n128_matches_legacy_bits() {
                         (shape.m, shape.k, shape.n),
                     )
                     .expect("production S2 launch");
-                    let expected_auto = if measured_device
-                        && matches!(
-                            (shape.m, shape.k, shape.n),
-                            (4621, 384, 1928) | (4621, 768, 2304)
-                        ) {
-                        FixedTile::F32N128S2
-                    } else {
-                        FixedTile::Legacy
+                    let dims = (shape.m, shape.k, shape.n);
+                    let specialized_alignment = input_offset == 0 && output_offset == 0;
+                    let expected_auto = match (dims, bias_ptr.is_some()) {
+                        ((4621, 384, 1928), false) if measured_stack && specialized_alignment => {
+                            FixedTile::F32Sm120TmaFmaM64N128
+                        }
+                        ((4621, 768, 2304), false) if measured_stack && specialized_alignment => {
+                            FixedTile::F32Sm120TmaFmaM128N64
+                        }
+                        ((4621, 768, 2304) | (2048, 2304, 768), true)
+                        | ((2048, 2304, 768), false)
+                            if measured_stack && specialized_alignment =>
+                        {
+                            FixedTile::F32Sm120N64CopyPlan
+                        }
+                        ((4621, 384, 1928) | (4621, 768, 2304), _) if measured_device => {
+                            FixedTile::F32N128S2
+                        }
+                        _ => FixedTile::Legacy,
                     };
                     assert_eq!(selected, expected_auto, "production exact-F32 AUTO route");
                     fixed_forward_with_tile(&ctx, candidate_a_ops, shape, FixedTile::F32N128S2)

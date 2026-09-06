@@ -5,7 +5,7 @@
 //! plus the legacy 64x64 WMMA tile as the narrow-N fallback and the f32
 //! FFMA tile. One dispatcher, shape-keyed:
 //!
-//!   exact f32            -> CC12.0 exact-TMA at qualified B0, Ada/CC12.0
+//!   exact f32            -> CC12.0 exact-TMA at qualified A0/B0, Ada/CC12.0
 //!                           N64 copy-plans at the remaining qualified B/E
 //!                           rows; FFMA 64x128 at other measured CC12.0/
 //!                           170-SM points; portable FFMA 64x64 elsewhere
@@ -90,6 +90,8 @@ pub enum FixedTile {
     F32Sm120N64Sliced,
     /// Fixed bridge to exact-TMA M128xN64, AUTO at qualified SM120 B0.
     F32Sm120TmaFmaM128N64,
+    /// Fixed bridge to exact-TMA M64xN128, AUTO at qualified SM120 A0.
+    F32Sm120TmaFmaM64N128,
 }
 
 /// Forced SM120 TMA BF16/F16 tile used by qualification and dispatch.
@@ -170,8 +172,11 @@ pub fn fixed_forward_with_tile(
     if tile == FixedTile::F32Sm120N64Sliced {
         return launch_sm120_sliced(ctx, operands, shape);
     }
-    if tile == FixedTile::F32Sm120TmaFmaM128N64 {
-        return launch_sm120_tma_fma_b0(ctx, operands, shape);
+    if matches!(
+        tile,
+        FixedTile::F32Sm120TmaFmaM128N64 | FixedTile::F32Sm120TmaFmaM64N128
+    ) {
+        return launch_sm120_tma_fma(ctx, operands, shape, tile);
     }
     if tile == FixedTile::Legacy {
         return super::blas::fixed_legacy_forward(
@@ -691,6 +696,7 @@ fn ladder_cfg(tile: FixedTile, rows: usize, cols: usize) -> cudarc::driver::Laun
         | FixedTile::F32Sm120N64CopyPlan
         | FixedTile::F32Sm120N64Sliced
         | FixedTile::F32Sm120TmaFmaM128N64
+        | FixedTile::F32Sm120TmaFmaM64N128
         | FixedTile::Tf32M128S2
         | FixedTile::Tf32M128S3
         | FixedTile::Tf32M128N128S3
@@ -1019,13 +1025,14 @@ fn launch_sm120_sliced(
         .map_err(|error| format!("gemm_bi Fixed SM120 sliced N64: {error:?}"))
 }
 
-fn launch_sm120_tma_fma_b0(
+fn launch_sm120_tma_fma(
     ctx: &GpuCtx,
     operands: FixedFwdOperands,
     shape: FixedShape,
+    tile: FixedTile,
 ) -> Result<(), String> {
     let compiler = ctx.kernels.compiler_identity();
-    if !fixed_sm120_tma_fma_b0_auto_eligible(
+    if !fixed_sm120_tma_fma_force_eligible(
         operands,
         shape,
         FixedTileDevice {
@@ -1037,12 +1044,18 @@ fn launch_sm120_tma_fma_b0(
         ctx.f32_triad_policy(),
     ) {
         return Err(
-            "Fixed SM120 exact-TMA M128xN64 forced launch is outside its B0 candidate contract"
+            "Fixed SM120 exact-TMA forced launch is outside its unbiased hot-shape candidate contract"
                 .into(),
         );
     }
-    let launched = super::gemm_bi_triad::launch_cached_fixed_sm120_b0_exact_tma(
+    let physical_tile = match tile {
+        FixedTile::F32Sm120TmaFmaM128N64 => super::gemm_bi_triad::FixedSm120ExactTmaTile::M128N64,
+        FixedTile::F32Sm120TmaFmaM64N128 => super::gemm_bi_triad::FixedSm120ExactTmaTile::M64N128,
+        _ => unreachable!("exact-TMA launcher received a non-TMA Fixed tile"),
+    };
+    let launched = super::gemm_bi_triad::launch_cached_fixed_sm120_exact_tma(
         ctx,
+        (shape.m, shape.k, shape.n),
         super::gemm_bi_triad::F32TriadOperands {
             output: operands.c.ptr,
             a: operands.x.ptr,
@@ -1051,11 +1064,10 @@ fn launch_sm120_tma_fma_b0(
             alpha: 1.0,
             beta: 0.0,
         },
+        physical_tile,
     )?;
     if !launched {
-        return Err(
-            "Fixed SM120 exact-TMA M128xN64 symbol is not qualified on this context".into(),
-        );
+        return Err("Fixed SM120 exact-TMA symbol is not qualified on this context".into());
     }
     Ok(())
 }
@@ -2183,6 +2195,7 @@ fn launch_ladder(
         | FixedTile::Tf32M128S2
         | FixedTile::F32Sm120N64Sliced
         | FixedTile::F32Sm120TmaFmaM128N64
+        | FixedTile::F32Sm120TmaFmaM64N128
         | FixedTile::Tf32M128S3
         | FixedTile::Tf32M128N128S3
         | FixedTile::Tf32M64S2
@@ -2395,7 +2408,7 @@ pub fn fixed_forward(
     }
     if homogeneous_f32 {
         let compiler = ctx.kernels.compiler_identity();
-        if fixed_sm120_tma_fma_b0_auto_eligible(
+        let exact_tma_auto = if fixed_sm120_tma_fma_a0_auto_eligible(
             operands,
             shape,
             FixedTileDevice {
@@ -2405,18 +2418,45 @@ pub fn fixed_forward(
             compiler.nvrtc_version,
             compiler.nvrtc_library_known,
             ctx.f32_triad_policy(),
-        ) && super::gemm_bi_triad::launch_cached_fixed_sm120_b0_exact_tma(
-            ctx,
-            super::gemm_bi_triad::F32TriadOperands {
-                output: operands.c.ptr,
-                a: operands.x.ptr,
-                b: operands.w.ptr,
-                bias: None,
-                alpha: 1.0,
-                beta: 0.0,
+        ) {
+            Some((
+                FixedTile::F32Sm120TmaFmaM64N128,
+                super::gemm_bi_triad::FixedSm120ExactTmaTile::M64N128,
+            ))
+        } else if fixed_sm120_tma_fma_b0_auto_eligible(
+            operands,
+            shape,
+            FixedTileDevice {
+                multiprocessors: ctx.kernels.multiprocessor_count(),
+                compute_capability: ctx.compute_capability(),
             },
-        )? {
-            return Ok(FixedTile::F32Sm120TmaFmaM128N64);
+            compiler.nvrtc_version,
+            compiler.nvrtc_library_known,
+            ctx.f32_triad_policy(),
+        ) {
+            Some((
+                FixedTile::F32Sm120TmaFmaM128N64,
+                super::gemm_bi_triad::FixedSm120ExactTmaTile::M128N64,
+            ))
+        } else {
+            None
+        };
+        if let Some((tile, physical_tile)) = exact_tma_auto
+            && super::gemm_bi_triad::launch_cached_fixed_sm120_exact_tma(
+                ctx,
+                (shape.m, shape.k, shape.n),
+                super::gemm_bi_triad::F32TriadOperands {
+                    output: operands.c.ptr,
+                    a: operands.x.ptr,
+                    b: operands.w.ptr,
+                    bias: None,
+                    alpha: 1.0,
+                    beta: 0.0,
+                },
+                physical_tile,
+            )?
+        {
+            return Ok(tile);
         }
         if fixed_sm120_sliced_auto_eligible(
             operands,
@@ -2636,17 +2676,92 @@ fn fixed_sm120_tma_fma_b0_auto_eligible(
     nvrtc_library_known: bool,
     policy: super::context::F32TriadPolicy,
 ) -> bool {
-    nvrtc_library_known
-        && nvrtc == (13, 2)
-        && device.compute_capability == (12, 0)
-        && device.multiprocessors == 170
-        && policy == super::context::F32TriadPolicy::ExactScalarFmaV1
+    fixed_sm120_tma_fma_force_eligible(operands, shape, device, nvrtc, nvrtc_library_known, policy)
         && shape
             == (FixedShape {
                 m: 4_621,
                 k: 768,
                 n: 2_304,
             })
+        && operands.bias_ptr.is_none()
+}
+
+// Production NVRTC13.2 / 170-SM CC12.0 Fixed A0 qualification. The literal
+// M64xN128 one-split route retained exact Fixed bits and won all eager/graph
+// ABBA/BAAB cohorts at 101 windows. Before promotion its worst paired p95 was
+// 0.953899 versus prior AUTO and 0.881677 versus PEDANTIC cuBLAS; evidence:
+// internal/perf/sm120-fixed-tma-fma-a0-20260906/
+// sm120-fixed-fma-a0-m64n128-admission101-v1.log, SHA256
+// 7a8a46e2eee45109d2d670bd73f62a66fbbc2a28f8b92b474c4cfcb2a27e53f2.
+// Post-AUTO worst p95 was 0.895330 versus Legacy and 0.880051 versus
+// PEDANTIC cuBLAS; sm120-fixed-fma-a0-postauto101-v1.log, SHA256
+// 0974cae2ed67c3b1c1b0325c662b882b7d832f09c8c2f7ca6644675e3c5f410c.
+// Bias is excluded because Triad seeds it before the FMA chain while Fixed
+// adds it after the dot product.
+fn fixed_sm120_tma_fma_a0_auto_eligible(
+    operands: FixedFwdOperands,
+    shape: FixedShape,
+    device: FixedTileDevice,
+    nvrtc: (i32, i32),
+    nvrtc_library_known: bool,
+    policy: super::context::F32TriadPolicy,
+) -> bool {
+    fixed_sm120_tma_fma_force_eligible(operands, shape, device, nvrtc, nvrtc_library_known, policy)
+        && shape
+            == (FixedShape {
+                m: 4_621,
+                k: 384,
+                n: 1_928,
+            })
+        && operands.bias_ptr.is_none()
+}
+
+// Force-only qualification surface for same-run screening. Keeping this to
+// the five production hot rows prevents an explicit candidate launch from
+// silently becoming a broad generic route. The borrowed Triad kernel's bias
+// order is not Fixed-compatible, so biased launches are rejected. AUTO
+// remains independently bound to rows that pass the full admission protocol.
+fn fixed_sm120_tma_fma_force_eligible(
+    operands: FixedFwdOperands,
+    shape: FixedShape,
+    device: FixedTileDevice,
+    nvrtc: (i32, i32),
+    nvrtc_library_known: bool,
+    policy: super::context::F32TriadPolicy,
+) -> bool {
+    const HOT_ROWS: &[FixedShape] = &[
+        FixedShape {
+            m: 4_621,
+            k: 384,
+            n: 1_928,
+        },
+        FixedShape {
+            m: 4_621,
+            k: 768,
+            n: 2_304,
+        },
+        FixedShape {
+            m: 4_621,
+            k: 1_928,
+            n: 384,
+        },
+        FixedShape {
+            m: 2_048,
+            k: 768,
+            n: 2_304,
+        },
+        FixedShape {
+            m: 2_048,
+            k: 2_304,
+            n: 768,
+        },
+    ];
+    nvrtc_library_known
+        && nvrtc == (13, 2)
+        && device.compute_capability == (12, 0)
+        && device.multiprocessors == 170
+        && policy == super::context::F32TriadPolicy::ExactScalarFmaV1
+        && HOT_ROWS.contains(&shape)
         && operands.bias_ptr.is_none()
         && [operands.c, operands.x, operands.w]
             .into_iter()
@@ -2811,7 +2926,100 @@ mod sm120_exact_n64_auto_tests {
     }
 
     #[test]
-    fn fixed_sm120_tma_fma_declines_identity_neighbors_and_operand_drift() {
+    fn fixed_sm120_tma_fma_a0_gate_is_exact_and_cohort_bound() {
+        let a0 = FixedShape {
+            m: 4621,
+            k: 384,
+            n: 1928,
+        };
+        assert!(fixed_sm120_tma_fma_a0_auto_eligible(
+            operands(false),
+            a0,
+            DEVICE,
+            (13, 2),
+            true,
+            F32TriadPolicy::ExactScalarFmaV1,
+        ));
+        assert!(!fixed_sm120_tma_fma_a0_auto_eligible(
+            operands(true),
+            a0,
+            DEVICE,
+            (13, 2),
+            true,
+            F32TriadPolicy::ExactScalarFmaV1,
+        ));
+        assert!(!fixed_sm120_tma_fma_a0_auto_eligible(
+            operands(false),
+            FixedShape { m: 4620, ..a0 },
+            DEVICE,
+            (13, 2),
+            true,
+            F32TriadPolicy::ExactScalarFmaV1,
+        ));
+    }
+
+    #[test]
+    fn fixed_sm120_tma_fma_force_gate_admits_only_unbiased_hot_rows() {
+        for (m, k, n) in [
+            (4621, 384, 1928),
+            (4621, 768, 2304),
+            (4621, 1928, 384),
+            (2048, 768, 2304),
+            (2048, 2304, 768),
+        ] {
+            let shape = FixedShape { m, k, n };
+            assert!(fixed_sm120_tma_fma_force_eligible(
+                operands(false),
+                shape,
+                DEVICE,
+                (13, 2),
+                true,
+                F32TriadPolicy::ExactScalarFmaV1,
+            ));
+            assert!(!fixed_sm120_tma_fma_force_eligible(
+                operands(true),
+                shape,
+                DEVICE,
+                (13, 2),
+                true,
+                F32TriadPolicy::ExactScalarFmaV1,
+            ));
+        }
+        for shape in [
+            FixedShape {
+                m: 2047,
+                k: 768,
+                n: 2304,
+            },
+            FixedShape {
+                m: 2049,
+                k: 768,
+                n: 2304,
+            },
+            FixedShape {
+                m: 2048,
+                k: 767,
+                n: 2304,
+            },
+            FixedShape {
+                m: 2048,
+                k: 768,
+                n: 2303,
+            },
+        ] {
+            assert!(!fixed_sm120_tma_fma_force_eligible(
+                operands(false),
+                shape,
+                DEVICE,
+                (13, 2),
+                true,
+                F32TriadPolicy::ExactScalarFmaV1,
+            ));
+        }
+    }
+
+    #[test]
+    fn fixed_sm120_tma_fma_force_declines_identity_neighbors_and_operand_drift() {
         let shape = FixedShape {
             m: 4621,
             k: 768,
@@ -2819,7 +3027,7 @@ mod sm120_exact_n64_auto_tests {
         };
         let ops = operands(false);
         let accept = |ops, shape, device, nvrtc, known, policy| {
-            fixed_sm120_tma_fma_b0_auto_eligible(ops, shape, device, nvrtc, known, policy)
+            fixed_sm120_tma_fma_force_eligible(ops, shape, device, nvrtc, known, policy)
         };
         for (device, nvrtc, known, policy) in [
             (
@@ -2915,7 +3123,13 @@ mod sm120_exact_n64_auto_tests {
                 ));
             }
         }
-        for bias in [Some(0), Some(0x4000), Some(0x4004)] {
+        for bias in [
+            Some(0),
+            Some(0x4000),
+            Some(0x4001),
+            Some(0x4002),
+            Some(0x4003),
+        ] {
             assert!(!accept(
                 FixedFwdOperands {
                     bias_ptr: bias,

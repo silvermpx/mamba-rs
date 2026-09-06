@@ -458,7 +458,9 @@ fn expected_auto(phase: &str, shape: FixedShape, has_bias: bool) -> Result<Fixed
         } else {
             FixedTile::Legacy
         }),
-        "promoted" => Ok(if dims == (4621, 768, 2304) && !has_bias {
+        "promoted" => Ok(if dims == (4621, 384, 1928) && !has_bias {
+            FixedTile::F32Sm120TmaFmaM64N128
+        } else if dims == (4621, 768, 2304) && !has_bias {
             FixedTile::F32Sm120TmaFmaM128N64
         } else if matches!(dims, (4621, 768, 2304) | (2048, 2304, 768)) {
             FixedTile::F32Sm120N64CopyPlan
@@ -598,6 +600,7 @@ fn exact_n64_admission_cpu_auto_phase_is_explicit_and_fail_closed() {
             FixedTile::F32N128S2,
             FixedTile::F32Sm120N64CopyPlan,
             FixedTile::F32Sm120TmaFmaM128N64,
+            FixedTile::F32Sm120TmaFmaM64N128,
         ] {
             if wrong != expected {
                 assert!(auto_phase(None, shape, false, wrong).is_err());
@@ -610,6 +613,7 @@ fn exact_n64_admission_cpu_auto_phase_is_explicit_and_fail_closed() {
             FixedTile::F32N128S2,
             FixedTile::F32Sm120N64CopyPlan,
             FixedTile::F32Sm120TmaFmaM128N64,
+            FixedTile::F32Sm120TmaFmaM64N128,
         ] {
             if wrong != promoted {
                 assert!(auto_phase(Some("promoted"), shape, false, wrong).is_err());
@@ -1567,6 +1571,9 @@ fn own_kernel_for_candidate(
         (1, Some(FixedTile::F32Sm120TmaFmaM128N64)) => {
             Ok(("gemm_bi_nn_sm120_tma_fma_v1_m128n64_bk16_s2", 64, 128))
         }
+        (1, Some(FixedTile::F32Sm120TmaFmaM64N128)) => {
+            Ok(("gemm_bi_nn_sm120_tma_fma_v1_m64n128_bk16_s2", 128, 128))
+        }
         (1, Some(FixedTile::F32N128S2)) => Ok((N128, 128, 256)),
         (1, Some(FixedTile::Legacy)) | (2, _) => Ok((LEGACY, 64, 128)),
         (4, _) => Ok((ORACLE, 64, 256)),
@@ -1588,6 +1595,10 @@ fn exact_n64_admission_cpu_n128_graph_geometry_is_not_legacy() {
     assert_eq!(
         own_kernel(1, Some(FixedTile::F32Sm120N64CopyPlan)).unwrap(),
         (CANDIDATE, 64, 128)
+    );
+    assert_eq!(
+        own_kernel(1, Some(FixedTile::F32Sm120TmaFmaM64N128)).unwrap(),
+        ("gemm_bi_nn_sm120_tma_fma_v1_m64n128_bk16_s2", 128, 128)
     );
     assert!(own_kernel(1, None).is_err());
     let expected = LaunchProof {
@@ -1627,7 +1638,8 @@ fn exact_n64_sliced_cpu_promoted_route_retains_copyplan_and_graph_compact() {
         (4621, 768, 2304, true, FixedTile::F32Sm120N64CopyPlan),
         (2048, 2304, 768, false, FixedTile::F32Sm120N64CopyPlan),
         (2048, 2304, 768, true, FixedTile::F32Sm120N64CopyPlan),
-        (4621, 384, 1928, false, FixedTile::F32N128S2),
+        (4621, 384, 1928, false, FixedTile::F32Sm120TmaFmaM64N128),
+        (4621, 384, 1928, true, FixedTile::F32N128S2),
         (4620, 768, 2304, false, FixedTile::Legacy),
         (4622, 768, 2304, false, FixedTile::Legacy),
     ] {
@@ -1700,7 +1712,12 @@ fn own_graph(graph: &CudaGraph, case: &Case, arm: usize) -> Result<String, Strin
     let (symbol, params) = kernel_params(nodes[0])?;
     let (expected_symbol, tile_n, threads) =
         own_kernel_for_candidate(arm, case.auto.get(), case.candidate)?;
-    if expected_symbol == "gemm_bi_nn_sm120_tma_fma_v1_m128n64_bk16_s2" {
+    let exact_tma_tile = match expected_symbol {
+        "gemm_bi_nn_sm120_tma_fma_v1_m128n64_bk16_s2" => Some((128usize, 64usize)),
+        "gemm_bi_nn_sm120_tma_fma_v1_m64n128_bk16_s2" => Some((64, 128)),
+        _ => None,
+    };
+    if let Some((tile_m, tile_n)) = exact_tma_tile {
         let expected_abi = vec![
             (0, 8),
             (8, 8),
@@ -1723,7 +1740,7 @@ fn own_graph(graph: &CudaGraph, case: &Case, arm: usize) -> Result<String, Strin
         let values: [u32; 8] = captured(&params, 6)?;
         let s = case.shape;
         let ops = case.operands(arm);
-        let expected_grid = ((s.m.div_ceil(128) * s.n.div_ceil(64)) as u32, 1, 1);
+        let expected_grid = ((s.m.div_ceil(tile_m) * s.n.div_ceil(tile_n)) as u32, 1, 1);
         let actual_grid = (params.gridDimX, params.gridDimY, params.gridDimZ);
         let actual_block = (params.blockDimX, params.blockDimY, params.blockDimZ);
         let expected_values = [
