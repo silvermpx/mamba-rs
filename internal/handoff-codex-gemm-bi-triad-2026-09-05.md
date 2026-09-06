@@ -906,6 +906,50 @@ selectors and hashes. Actual AUTO boundary/graph/bits and post-AUTO paired
 confirmation remain required. Do not remove any superseded route: it remains
 an ordinary fallback or a candidate for other architectures/toolkits.
 
+### Ada Fixed RNA-wide AUTO checkpoint (2026-09-06)
+
+The ten measured A-E/bias0,1 cells now select the Fixed-owned RNA-wide symbol
+through actual AUTO on CC8.9/142SM/known NVRTC13.2 under deterministic TF32.
+The guard also requires the admitted holder, homogeneous F32, C/A/B16 and
+optional bias4. Every decline keeps the old picker unchanged. Global routing
+epoch39->40 invalidates old graphs; CUDA/compiler/composer/numeric/schedule
+identities and unrelated Triad/SM120 selectors are unchanged. All three Ada
+cache blobs match the frozen force checkpoint byte-for-byte by main's hashes.
+
+Quiet post-AUTO101:40/40 unique records, zero rejections, exact actual RNA
+versus forced old M64S2 graph symbols/geometry, all raw/repeat/applicable graph
+bits pass. Samplewise actual AUTO/old worst paired p95 ranges
+0.626263--0.913177: all ten own wins. Actual AUTO/FAST robust wins remain
+A1 and B1 only, worst paired p95 respectively0.904797 and0.980568. Remaining
+eight cases still lose FAST; worst ratio1.342478. This is not all-inference
+closure and is not an extrapolation to CUDA12.8/13.0 or another physical GPU.
+
+Evidence: `internal/perf/ada-rna-wide-auto-20260906/README.md`, raw logs,
+summary, integration report and manifest. Final101 log SHA256
+`3dbb8754b651706d67c83ab1f96fb26ed66a63bc161e8ced015f36ef50831f46`;
+frozen performance binary SHA256
+`2dfbc274dfc1773939491fe2fbc0eb86d6536c7bb6f380720b448898d1cc68e2`.
+Main independently verified all records and nine local/remote source hashes,
+reran633 library tests and actual hot-A AUTO/graph1/1. Full AUTO GPU matrix2/2,
+retained C prefix1/1 and both actual Ada Triad cohorts pass. Static review and
+the subsequent test-fixture amendment review are clean.
+
+Full architecture run:56 passed/1 baseline failure. All actual compile,
+assembly and resource gates passed; the lone obsolete PairStore enum-absence
+assertion also fails at82fc. It was corrected without touching production;
+focused1/1 GREEN followed. Do not claim a new full57/57 rerun. Other stale
+revision/composition fixtures were corrected and full633 lib tests then pass.
+The first post-AUTO timing overlapped host compilation and is retained as
+explicitly inadmissible, never used in performance conclusions.
+
+Next bounded work: matching-build RNA census on installed CUDA12.8 and
+side-by-side CUDA13.0, then full exceptional/prefix/view qualification before
+any toolkit AUTO widening. Forced RNA has no toolkit lock, but current AUTO
+admission is13.2-only. Existing forced tests cover tail/hot-A; B-E exceptional
+coverage is currently tied to the13.2 actual-AUTO helper and must be decoupled
+before promoting those toolkits. The half-swizzle prototype remains the next
+separate kernel integration candidate. Preserve all old routes and evidence.
+
 ### Precision and determinism terminology
 
 TF32 is a compute mode for F32 tensors; it is not a distinct tensor storage

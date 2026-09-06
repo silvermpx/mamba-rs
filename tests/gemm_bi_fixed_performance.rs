@@ -1432,7 +1432,7 @@ fn fixed_sm89_tf32_c_auto_prefix_special_bias_graph_bits() {
                 (shape.m, shape.k, shape.n),
             )
             .and_then(|tile| {
-                (tile == FixedTile::Tf32M64S2)
+                (tile == FixedTile::Tf32RnaM128N128S3)
                     .then_some(())
                     .ok_or_else(|| format!("unexpected Ada C AUTO tile {tile:?}"))
             })
@@ -1457,7 +1457,7 @@ fn fixed_sm89_tf32_c_auto_prefix_special_bias_graph_bits() {
             .expect("capture Ada C AUTO graph");
         assert_eq!(
             single_graph_kernel_name(&graph, "Ada C AUTO"),
-            "gemm_bi_nn_tf32_v1_m64n64_bk32_s2",
+            "gemm_bi_nn_fixed_rna_wide_tf32_v1_m128n128_bk32_s3",
         );
         graph.launch().expect("replay Ada C AUTO graph");
         ctx.stream.synchronize().expect("Ada C graph sync");

@@ -15,7 +15,7 @@ Different architecture, compiler, bias, shape and numeric policy are separate.
 | Candidate / incumbent | Scope | Evidence | Status / disposition |
 | --- | --- | --- | --- |
 | Fixed half Tc128 -> pipeline_v1 | Ada BF16/FP16, exact hot A-E, bias 0/1, CC8.9/142SM/NVRTC13.2, ABC16 | `internal/perf/fixed-half-production-20260905/`:80 pre+80 post-promotion NVRTC records, eager+graph, both orders101windows,20/20 old wins (post worst p95 0.8993),12/20 robust nativecuBLAS wins; all raw gates PASS | AUTO actual hot-boundary and final paired graph-symbol proof PASS; Tc128 removed from AUTO only in these20 cells, not delete-ready |
-| Old Fixed TF32 -> RNA wide | Ada TF32 hot A bias1 | `internal/perf/nn-rna-probe-20260905/`:134.14 ->124.47, FAST131.69, strict conversion/prefix/view/replay gates | screened; needs production NVRTC cross-rung admission; old rungs remain essential for decode |
+| Old Fixed TF32 -> Fixed-owned RNA wide | Ada TF32 hot A-E, bias0/1, CC8.9/142SM/known NVRTC13.2, admitted holder, C/A/B16, bias4 | force integration `82fc400f`; `internal/perf/ada-rna-wide-auto-20260906/`: actual AUTO all-five-rung/prefix/view/replay gates,40/40 quiet post-AUTO101 records; AUTO/old worst p95 0.626263--0.913177, FAST wins A1/B1 only | AUTO with routing epoch40; old M64S2 removed only from these ten qualified aligned cells. Original add-based Triad wide remains distinct; ordinary rungs remain essential for decode, C4 and other shapes/alignments/devices/toolkits. Nothing deletion-ready |
 | RNA wide fastfinite twin | Ada TF32 hot A bias1 | `internal/perf/nn-rna-fastfinite-probe-20260905/`:145.45 vs explicit RNA112.94, FAST131.78 in one build; all bits passed | rejected performance candidate; never wired into production; keep ignored experiment as negative evidence |
 | TN Parts4 align16 -> align128 | Ada TF32 TN large beta1 | `internal/perf/tn-wide-probe-20260905/`:214.68 ->185.83 vs FAST141.58; exact same Parts4 output | screened own improvement, still loses vendor; no production replacement yet |
 | Original half baseline/vec/pipe experiment arms | Ada standalone comparative controls | same-build half census above | keep evidence controls; only pipe_vec proposed for production, not four redundant exports |
@@ -30,13 +30,24 @@ Different architecture, compiler, bias, shape and numeric policy are separate.
 
 ## Production AUTO replacements already implemented
 
-- Ada ordinary TF32 C0/C1 `(4621,1928,384)`, CC8.9/142SM/knownNVRTC13.2:
+- Ada Fixed explicit-RNA wide: actual AUTO at A-E/bias0,1 under the guard
+  above; one256-thread/98304-shared launch with five-argument32-byte bundle.
+  Post-AUTO101 SHA `3dbb8754b651706d67c83ab1f96fb26ed66a63bc161e8ced015f36ef50831f46`,
+  all ten own wins; A1/B1 FAST worst p950.904797/0.980568. Old M64S2,
+  M128S2 and the other rungs remain live outside the exact admission. Global
+  epoch40 requires recapture; all three Ada compiled cache blobs unchanged.
+  Evidence `internal/perf/ada-rna-wide-auto-20260906/`.
+
+- Earlier Ada ordinary TF32 C0/C1 `(4621,1928,384)`, CC8.9/142SM/knownNVRTC13.2:
   M128S2 -> M64S2. Actual AUTO post101 passes all8bias/path/order records and
   strict bits; old/new paired p50 1.036022--1.042052, p95
   1.038318--1.045031. Prefix/specialbias/graph gate1/1 PASS. FAST remains
   1.912826--2.121482x faster by the AUTO/vendor median-time ratio. Existing
   M128S2 remains essential for other cells/toolchains; not deletion-ready.
-  Evidence `internal/perf/fixed-tf32-c-postauto-ada-20260906/`.
+  Evidence `internal/perf/fixed-tf32-c-postauto-ada-20260906/`. The newer RNA
+  AUTO checkpoint supersedes this M64 choice on qualified C16 calls; C4 and
+  other declines still use the ordinary picker. These older FAST ratios are
+  historical, not the current RNA AUTO result.
 
 - `6e7ed213` expands Ada exact-F32 CopyPlan from B/E to A/B/D/E,
   bothbias, CC8.9/142SM/knownNVRTC13.2 and existing aligned/loaded/policy gates.

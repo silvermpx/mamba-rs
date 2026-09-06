@@ -1,0 +1,76 @@
+   Compiling proc-macro2 v1.0.106
+   Compiling unicode-ident v1.0.24
+   Compiling quote v1.0.46
+   Compiling version_check v0.9.5
+   Compiling cfg-if v1.0.4
+   Compiling crossbeam-utils v0.8.22
+   Compiling serde_core v1.0.228
+   Compiling autocfg v1.5.1
+   Compiling typenum v1.20.1
+   Compiling libc v0.2.186
+   Compiling crossbeam-epoch v0.9.20
+   Compiling bitflags v2.13.1
+   Compiling zmij v1.0.23
+   Compiling getrandom v0.4.3
+   Compiling rustix v1.1.4
+   Compiling crossbeam-deque v0.8.7
+   Compiling rayon-core v1.13.0
+   Compiling libm v0.2.16
+   Compiling serde_json v1.0.150
+   Compiling paste v1.0.15
+   Compiling linux-raw-sys v0.12.1
+   Compiling zerocopy v0.8.54
+   Compiling serde v1.0.228
+   Compiling once_cell v1.21.4
+   Compiling equivalent v1.0.2
+   Compiling allocator-api2 v0.2.21
+   Compiling memchr v2.8.3
+   Compiling fastrand v2.4.1
+   Compiling itoa v1.0.18
+   Compiling cudarc v0.19.9
+   Compiling foldhash v0.2.0
+   Compiling cpufeatures v0.2.17
+   Compiling pulp-wasm-simd-flag v0.1.1
+   Compiling reborrow v0.5.5
+   Compiling either v1.16.0
+   Compiling libloading v0.9.0
+   Compiling raw-cpuid v11.6.0
+   Compiling generic-array v0.14.7
+   Compiling pulp v0.22.3
+   Compiling num-traits v0.2.19
+   Compiling syn v2.0.119
+   Compiling block-buffer v0.10.4
+   Compiling crypto-common v0.1.7
+   Compiling digest v0.10.7
+   Compiling sha2 v0.10.9
+   Compiling rayon v1.12.0
+   Compiling tempfile v3.27.0
+   Compiling hashbrown v0.16.1
+   Compiling bytemuck_derive v1.11.0
+   Compiling zerocopy-derive v0.8.54
+   Compiling serde_derive v1.0.228
+   Compiling bytemuck v1.25.1
+   Compiling num-complex v0.4.6
+   Compiling safetensors v0.8.0
+   Compiling half v2.7.1
+   Compiling mamba-rs v0.6.9 (/root/mamba-ada-rna-wide-auto-20260906)
+    Finished `release` profile [optimized] target(s) in 56.75s
+     Running unittests src/lib.rs (/root/target-ada-rna-wide-auto-20260906/release/deps/mamba_rs-87c2fddad15adab2)
+
+running 1 test
+test mamba_ssm::gpu::kernel_identity::cache_and_header_tests::only_the_tuning_table_revision_moved ... 
+thread 'mamba_ssm::gpu::kernel_identity::cache_and_header_tests::only_the_tuning_table_revision_moved' (275407) panicked at src/mamba_ssm/gpu/kernel_identity.rs:5574:9:
+assertion `left == right` failed
+  left: 39
+ right: 40
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+
+failures:
+    mamba_ssm::gpu::kernel_identity::cache_and_header_tests::only_the_tuning_table_revision_moved
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 676 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--lib`

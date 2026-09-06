@@ -42,7 +42,7 @@ pub enum FixedTile {
     /// Force-only Triad TF32 wide tile, 128x128 CTA, three-stage mainloop.
     /// Uses the wide route's half-ulp operand conversion, including its NaN behavior.
     Tf32M128N128S3,
-    /// Fixed-owned force-only 128x128/S3 twin with explicit RNA conversion.
+    /// Fixed-owned 128x128/S3 twin with explicit RNA conversion; narrow Ada AUTO.
     Tf32RnaM128N128S3,
     /// Portable deterministic TF32, 64x64 CTA, two-stage mainloop.
     Tf32M64S2,
@@ -2861,6 +2861,200 @@ fn arch_rung_self_check(ctx: &GpuCtx, tile: FixedTile) -> Result<(), String> {
     Ok(())
 }
 
+// Production NVRTC13.2 / 142-SM Ada, A-E and both bias states. All ten cells
+// beat the prior M64S2 AUTO in both paired p50/p95 across eager/graph/orders:
+// internal/perf/ada-rna-wide-force-20260906/confirm101-rna-all5-both-paths-final.log
+// SHA256 4983d29fa241538f170e087372c70baa92858033a7b075c7e53945088ba6d910.
+// Only A1/B1 also beat FAST. C16 is the measured output alignment; forced
+// RNA supports C4, but those views retain the unchanged ordinary AUTO picker.
+fn fixed_sm89_rna_wide_auto_eligible(
+    operands: FixedFwdOperands,
+    shape: FixedShape,
+    device: FixedTileDevice,
+    nvrtc_version: (i32, i32),
+    nvrtc_library_known: bool,
+    admitted: bool,
+    policy: super::context::F32TriadPolicy,
+) -> bool {
+    admitted
+        && policy == super::context::F32TriadPolicy::AllowDeterministicTf32V1
+        && device.compute_capability == (8, 9)
+        && device.multiprocessors == 142
+        && nvrtc_version == (13, 2)
+        && nvrtc_library_known
+        && [operands.c.dtype, operands.x.dtype, operands.w.dtype]
+            .into_iter()
+            .all(|dtype| dtype == WeightDtype::F32)
+        && [operands.c.ptr, operands.x.ptr, operands.w.ptr]
+            .into_iter()
+            .all(|ptr| ptr != 0 && ptr.is_multiple_of(16))
+        && operands.bias_ptr.unwrap_or(0).is_multiple_of(4)
+        && matches!(
+            (shape.m, shape.k, shape.n),
+            (4621, 384, 1928)
+                | (4621, 768, 2304)
+                | (4621, 1928, 384)
+                | (2048, 768, 2304)
+                | (2048, 2304, 768)
+        )
+}
+
+#[cfg(test)]
+mod sm89_rna_auto_tests {
+    use super::super::context::F32TriadPolicy;
+    use super::*;
+
+    #[test]
+    fn fixed_sm89_rna_auto_exact_cells_and_independent_declines() {
+        let ptr = |ptr| TypedPtr {
+            ptr,
+            dtype: WeightDtype::F32,
+        };
+        let base = FixedFwdOperands {
+            c: ptr(0x1000),
+            x: ptr(0x2000),
+            w: ptr(0x3000),
+            bias_ptr: None,
+        };
+        let device = FixedTileDevice {
+            multiprocessors: 142,
+            compute_capability: (8, 9),
+        };
+        let policy = F32TriadPolicy::AllowDeterministicTf32V1;
+        let eligible = |o, s, d, v, known, admitted, p| {
+            fixed_sm89_rna_wide_auto_eligible(o, s, d, v, known, admitted, p)
+        };
+        for (m, k, n) in [
+            (4621, 384, 1928),
+            (4621, 768, 2304),
+            (4621, 1928, 384),
+            (2048, 768, 2304),
+            (2048, 2304, 768),
+        ] {
+            let shape = FixedShape { m, k, n };
+            for bias_ptr in [None, Some(0x4000)] {
+                let operands = FixedFwdOperands { bias_ptr, ..base };
+                assert!(eligible(
+                    operands,
+                    shape,
+                    device,
+                    (13, 2),
+                    true,
+                    true,
+                    policy
+                ));
+                assert!(
+                    !eligible(operands, shape, device, (13, 2), true, false, policy),
+                    "missing holder"
+                );
+                assert!(
+                    !eligible(operands, shape, device, (13, 2), false, true, policy),
+                    "unknown library"
+                );
+                assert!(!eligible(
+                    operands,
+                    shape,
+                    device,
+                    (13, 2),
+                    true,
+                    true,
+                    F32TriadPolicy::ExactScalarFmaV1
+                ));
+                for cc in [(8, 0), (8, 6), (9, 0), (10, 0), (12, 0), (12, 1)] {
+                    assert!(!eligible(
+                        operands,
+                        shape,
+                        FixedTileDevice {
+                            compute_capability: cc,
+                            ..device
+                        },
+                        (13, 2),
+                        true,
+                        true,
+                        policy
+                    ));
+                }
+                for sms in [141, 143] {
+                    assert!(!eligible(
+                        operands,
+                        shape,
+                        FixedTileDevice {
+                            multiprocessors: sms,
+                            ..device
+                        },
+                        (13, 2),
+                        true,
+                        true,
+                        policy
+                    ));
+                }
+                for nvrtc in [(12, 8), (13, 0), (13, 1), (13, 3)] {
+                    assert!(!eligible(
+                        operands, shape, device, nvrtc, true, true, policy
+                    ));
+                }
+                for field in 0..3 {
+                    for dtype in [WeightDtype::F16, WeightDtype::Bf16] {
+                        let mut bad = operands;
+                        match field {
+                            0 => bad.c.dtype = dtype,
+                            1 => bad.x.dtype = dtype,
+                            _ => bad.w.dtype = dtype,
+                        }
+                        assert!(
+                            !eligible(bad, shape, device, (13, 2), true, true, policy),
+                            "wrong dtype field={field}"
+                        );
+                    }
+                    for address in [0, 0x1001, 0x1004, 0x1008, 0x100c] {
+                        let mut bad = operands;
+                        match field {
+                            0 => bad.c.ptr = address,
+                            1 => bad.x.ptr = address,
+                            _ => bad.w.ptr = address,
+                        }
+                        assert!(
+                            !eligible(bad, shape, device, (13, 2), true, true, policy),
+                            "null/misaligned field={field} address={address:x}"
+                        );
+                    }
+                }
+                for bias in [0x4001, 0x4002, 0x4003] {
+                    assert!(!eligible(
+                        FixedFwdOperands {
+                            bias_ptr: Some(bias),
+                            ..operands
+                        },
+                        shape,
+                        device,
+                        (13, 2),
+                        true,
+                        true,
+                        policy
+                    ));
+                }
+                for bad in [
+                    FixedShape { m: m - 1, ..shape },
+                    FixedShape { m: m + 1, ..shape },
+                    FixedShape { k: k - 1, ..shape },
+                    FixedShape { k: k + 1, ..shape },
+                    FixedShape { n: n - 1, ..shape },
+                    FixedShape { n: n + 1, ..shape },
+                    FixedShape { m: 0, ..shape },
+                    FixedShape { m: 1, ..shape },
+                    FixedShape { m: 16, ..shape },
+                    FixedShape { k: 0, ..shape },
+                ] {
+                    assert!(
+                        !eligible(operands, bad, device, (13, 2), true, true, policy),
+                        "unqualified shape {bad:?}"
+                    );
+                }
+            }
+        }
+    }
+}
+
 /// The fixed family's NN forward: `C[M,N] = A[M,K] @ B[K,N] (+ bias)`,
 /// deterministic and batch-invariant for every covered operand triple.
 /// Returns the tile that actually launched.
@@ -2892,18 +3086,34 @@ pub fn fixed_forward(
             && w.ptr.is_multiple_of(16)
             && n_in.is_multiple_of(4)
             && n_out.is_multiple_of(4);
-        let tile = fixed_pick_tf32(
-            batch,
-            n_in,
-            n_out,
-            ctx.kernels.multiprocessor_count(),
-            ctx.compute_capability(),
-            ctx.kernels.compiler_identity().nvrtc_version,
-            sm120_tma,
-            operands.bias_ptr.is_some(),
-            operands.c.ptr.is_multiple_of(8),
-            ctx.kernels.compiler_identity().nvrtc_library_known,
-        );
+        let compiler = ctx.kernels.compiler_identity();
+        let tile = if fixed_sm89_rna_wide_auto_eligible(
+            operands,
+            shape,
+            FixedTileDevice {
+                multiprocessors: ctx.kernels.multiprocessor_count(),
+                compute_capability: ctx.compute_capability(),
+            },
+            compiler.nvrtc_version,
+            compiler.nvrtc_library_known,
+            ctx.kernels.fixed_sm89_tf32_rna_wide.is_some(),
+            ctx.f32_triad_policy(),
+        ) {
+            FixedTile::Tf32RnaM128N128S3
+        } else {
+            fixed_pick_tf32(
+                batch,
+                n_in,
+                n_out,
+                ctx.kernels.multiprocessor_count(),
+                ctx.compute_capability(),
+                ctx.kernels.compiler_identity().nvrtc_version,
+                sm120_tma,
+                operands.bias_ptr.is_some(),
+                operands.c.ptr.is_multiple_of(8),
+                ctx.kernels.compiler_identity().nvrtc_library_known,
+            )
+        };
         launch_tf32(ctx, tile, &args, true)?;
         return Ok(tile);
     }
@@ -5689,7 +5899,7 @@ mod tests {
                 TUNING_TABLE_REVISION,
                 SCHEDULE_REVISION,
             ),
-            (5, 39, 8),
+            (5, 40, 8),
             "the release compiler identity must remain explicitly pinned"
         );
         let mut promoted = Vec::new();

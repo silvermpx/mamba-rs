@@ -204,7 +204,7 @@ fn sm120_tf32_fresh_595_58_03_auto_symbols_graphs_and_bits() {
                 evidence.eager_graph_equal(),
                 "actual captured/eager nodes differ"
             );
-            assert_eq!(evidence.route_identity().tuning_table_revision, 39);
+            assert_eq!(evidence.route_identity().tuning_table_revision, 40);
             let [node] = evidence.nodes() else {
                 panic!("one actual GEMM expected");
             };

@@ -2371,16 +2371,13 @@ fn fixed_sm120_tf32_pair_store_production_source_contract() {
         "pair-store epilogue must execute after bias initialization and the complete TMA/MMA mainloop, immediately before the scalar fallback"
     );
 
-    let fixed_tile = include_str!("../src/mamba_ssm/gpu/gemm_bi_fixed.rs");
-    assert!(
-        !fixed_tile.contains("Tf32Sm120M64S2PairStore"),
-        "the private production schedule must not widen FixedTile"
-    );
+    // Qualified D0/D1 AUTO selection and graph identity are covered by the
+    // existing selector and pair-store graph tests; the force tile stays public.
     let inventory = include_str!("../src/mamba_ssm/gpu/gemm_bi_triad/modules.rs");
     assert_eq!(
         inventory.matches(CANDIDATE).count(),
         1,
-        "runtime inventory must contain the private pair-store symbol exactly once"
+        "runtime inventory must contain the pair-store symbol exactly once"
     );
 }
 

@@ -1,0 +1,7 @@
+
+running 2 tests
+test fixed_sm89_rna_wide_actual_auto_all_cells_prefix_views_and_graph_bits ... ok
+test fixed_sm89_rna_wide_actual_auto_hot_a_route_and_graph ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 38.95s
+

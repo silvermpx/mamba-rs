@@ -1,0 +1,17 @@
+
+running 1 test
+
+thread 'mamba_ssm::gpu::gemm_bi_triad::modules::tests::module_sources_have_exact_deterministic_boundaries' (281837) panicked at src/mamba_ssm/gpu/gemm_bi_triad/modules.rs:10050:9:
+assertion `left == right` failed
+  left: ["kernels/_typed_prelude.cuh", "kernels/mamba_ssm.cu", "kernels/mamba_ssm_parallel.cu", "kernels/conv1d.cu", "kernels/activations.cu", "kernels/norms.cu", "kernels/elementwise.cu", "kernels/loss_scaler.cu", "kernels/grad_clip.cu", "kernels/adamw.cu", "kernels/gemm_bi_fixed/common.cuh", "kernels/gemm_bi_fixed/ffma.cu", "kernels/gemm_bi_fixed/tf32.cu", "kernels/gemm_bi_fixed/tf32_sm120.cu", "kernels/gemm_bi_fixed/sm120_tma.cu", "kernels/gemm_bi_fixed/wmma_legacy.cu", "kernels/gemm_bi_fixed/matvec.cu", "kernels/gemm_bi_fixed/mma16.cu", "kernels/gemm_bi_fixed/tcw64.cu", "kernels/gemm_bi_fixed/sm90_wgmma.cu", "kernels/gemm_bi_fixed/sm100_tcgen05.cu", "kernels/gemm_bi_fixed/sm120_f32_n64_copyplan.cu", "kernels/gemm_bi_fixed/sm120_f32_n64_sliced.cu", "kernels/gemm_bi_fixed/sm120_f32_postbias.cu"]
+ right: ["kernels/_typed_prelude.cuh", "kernels/mamba_ssm.cu", "kernels/mamba_ssm_parallel.cu", "kernels/conv1d.cu", "kernels/activations.cu", "kernels/norms.cu", "kernels/elementwise.cu", "kernels/loss_scaler.cu", "kernels/grad_clip.cu", "kernels/adamw.cu", "kernels/gemm_bi_fixed/common.cuh", "kernels/gemm_bi_fixed/ffma.cu", "kernels/gemm_bi_fixed/tf32.cu", "kernels/gemm_bi_fixed/tf32_sm120.cu", "kernels/gemm_bi_fixed/sm120_tma.cu", "kernels/gemm_bi_fixed/wmma_legacy.cu", "kernels/gemm_bi_fixed/matvec.cu", "kernels/gemm_bi_fixed/mma16.cu", "kernels/gemm_bi_fixed/tcw64.cu", "kernels/gemm_bi_fixed/sm90_wgmma.cu", "kernels/gemm_bi_fixed/sm100_tcgen05.cu", "kernels/gemm_bi_fixed/sm89_half_pipeline.cu", "kernels/gemm_bi_fixed/sm120_f32_n64_copyplan.cu", "kernels/gemm_bi_fixed/sm120_f32_n64_sliced.cu", "kernels/gemm_bi_fixed/sm120_f32_postbias.cu"]
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test mamba_ssm::gpu::gemm_bi_triad::modules::tests::module_sources_have_exact_deterministic_boundaries ... FAILED
+
+failures:
+
+failures:
+    mamba_ssm::gpu::gemm_bi_triad::modules::tests::module_sources_have_exact_deterministic_boundaries
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 676 filtered out; finished in 0.00s
+

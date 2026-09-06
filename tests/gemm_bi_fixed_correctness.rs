@@ -9,11 +9,11 @@
 
 use mamba_rs::mamba_ssm::gpu::blas::{TypedPtr, gpu_gemm_bi_forward_raw};
 use mamba_rs::mamba_ssm::gpu::buffers::GpuBuffer;
-use mamba_rs::mamba_ssm::gpu::context::{BiGemmFamily, GpuCtx};
+use mamba_rs::mamba_ssm::gpu::context::{BiGemmFamily, F32TriadPolicy, GpuCtx};
 use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
 use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
 use mamba_rs::mamba_ssm::gpu::gemm_bi_fixed::{
-    FixedFwdOperands, FixedShape, FixedTile, fixed_forward_with_tile,
+    FixedFwdOperands, FixedShape, FixedTile, fixed_forward, fixed_forward_with_tile,
 };
 use mamba_rs::mamba_ssm::gpu::graph_capture::capture_into_graph;
 
@@ -119,6 +119,43 @@ fn output_bits(ctx: &GpuCtx, output: &GpuBuffer) -> Vec<u32> {
         .into_iter()
         .map(f32::to_bits)
         .collect()
+}
+
+#[test]
+#[ignore = "requires exclusive CC8.9 Ada with the Fixed RNA-wide symbol admitted"]
+fn fixed_sm89_rna_wide_actual_auto_hot_a_route_and_graph() {
+    let device = GpuDevice::new(0).expect("CUDA device");
+    assert_eq!(device.compute_capability, (8, 9));
+    assert_eq!(device.multiprocessor_count(), 142);
+    let ctx = GpuCtx::new(&device).expect("GPU context");
+    ctx.set_f32_triad_policy(F32TriadPolicy::AllowDeterministicTf32V1);
+    let shape = FixedShape {
+        m: 4621,
+        k: 384,
+        n: 1928,
+    };
+    let a = GpuBuffer::from_cpu(&ctx.stream, &synth(shape.m * shape.k, 71)).unwrap();
+    let b = GpuBuffer::from_cpu(&ctx.stream, &synth(shape.k * shape.n, 73)).unwrap();
+    let c = GpuBuffer::zeros(&ctx.stream, shape.m * shape.n).unwrap();
+    let launch = || {
+        let tile = fixed_forward(
+            &ctx,
+            f32_pointer(c.cached_ptr()),
+            f32_pointer(a.cached_ptr()),
+            f32_pointer(b.cached_ptr()),
+            None,
+            (shape.m, shape.k, shape.n),
+        )?;
+        assert_eq!(tile, FixedTile::Tf32RnaM128N128S3);
+        Ok::<(), String>(())
+    };
+    launch().expect("hot A actual AUTO");
+    let graph = unsafe { capture_into_graph(&ctx.stream, launch) }.expect("AUTO capture");
+    assert_wide_graph(
+        &graph,
+        b"gemm_bi_nn_fixed_rna_wide_tf32_v1_m128n128_bk32_s3",
+        shape,
+    );
 }
 
 fn assert_wide_graph(graph: &cudarc::driver::CudaGraph, symbol: &[u8], shape: FixedShape) {
@@ -464,12 +501,23 @@ fn fixed_tf32_forced_wide_rejects_unsafe_loads_and_handles_zero_reduction() {
 #[test]
 #[ignore = "requires exclusive CC8.9 Ada with the Fixed RNA-wide symbol admitted"]
 fn fixed_tf32_rna_wide_matches_all_fixed_rungs_prefix_views_and_graph_bits() {
+    check_rna_wide_prefix_views_and_graph_bits(false);
+}
+
+#[test]
+#[ignore = "requires exclusive CC8.9 Ada with the Fixed RNA-wide symbol admitted"]
+fn fixed_sm89_rna_wide_actual_auto_all_cells_prefix_views_and_graph_bits() {
+    check_rna_wide_prefix_views_and_graph_bits(true);
+}
+
+fn check_rna_wide_prefix_views_and_graph_bits(actual_auto: bool) {
     let device = GpuDevice::new(0).expect("CUDA device");
     assert_eq!(device.compute_capability, (8, 9));
     assert_eq!(device.multiprocessor_count(), 142);
     let ctx = GpuCtx::new(&device).expect("GPU context");
+    ctx.set_f32_triad_policy(F32TriadPolicy::AllowDeterministicTf32V1);
     let tile = FixedTile::Tf32RnaM128N128S3;
-    let shape_cases = [
+    let mut shape_cases = vec![
         (
             "tail",
             FixedShape {
@@ -487,6 +535,42 @@ fn fixed_tf32_rna_wide_matches_all_fixed_rungs_prefix_views_and_graph_bits() {
             },
         ),
     ];
+    if actual_auto {
+        shape_cases.extend([
+            (
+                "hot_b_boundary",
+                FixedShape {
+                    m: 4622,
+                    k: 768,
+                    n: 2304,
+                },
+            ),
+            (
+                "hot_c_boundary",
+                FixedShape {
+                    m: 4622,
+                    k: 1928,
+                    n: 384,
+                },
+            ),
+            (
+                "hot_d_boundary",
+                FixedShape {
+                    m: 2049,
+                    k: 768,
+                    n: 2304,
+                },
+            ),
+            (
+                "hot_e_boundary",
+                FixedShape {
+                    m: 2049,
+                    k: 2304,
+                    n: 768,
+                },
+            ),
+        ]);
+    }
     let fixed_rungs = [
         FixedTile::Tf32M128S2,
         FixedTile::Tf32M128S3,
@@ -604,11 +688,26 @@ fn fixed_tf32_rna_wide_matches_all_fixed_rungs_prefix_views_and_graph_bits() {
                         (6017, 0),
                         (6018, 0),
                     ]
+                } else if actual_auto {
+                    vec![
+                        (1, 0),
+                        (16, 0),
+                        (17, 0),
+                        (shape.m - 2, 0),
+                        (shape.m - 1, 0),
+                        (shape.m, 0),
+                        (shape.m - 1, 1),
+                    ]
                 } else {
                     vec![(4620, 0), (4621, 0), (4622, 0)]
                 };
-                for (m, row_offset) in view_cases {
-                    let output_offset = 1;
+                for (m, row_offset, output_offset) in view_cases.into_iter().flat_map(|(m, row)| {
+                    if actual_auto {
+                        vec![(m, row, 1), (m, row, 4)]
+                    } else {
+                        vec![(m, row, 1)]
+                    }
+                }) {
                     let initial = vec![-819.25; output_offset + m * shape.n + 7];
                     let mut output =
                         GpuBuffer::from_cpu(&ctx.stream, &initial).expect("guarded RNA output");
@@ -672,6 +771,151 @@ fn fixed_tf32_rna_wide_matches_all_fixed_rungs_prefix_views_and_graph_bits() {
                             "RNA graph prefix/view drift case={case} M={m} row={row_offset} bias={has_bias} exceptional={exceptional} replay={replay}"
                         );
                     }
+                    if actual_auto {
+                        let admitted = case != "tail" && m == shape.m - 1 && output_offset == 4;
+                        let launch_auto = || {
+                            let selected = fixed_forward(
+                                &ctx,
+                                view_operands.c,
+                                view_operands.x,
+                                view_operands.w,
+                                view_operands.bias_ptr,
+                                (m, shape.k, shape.n),
+                            )?;
+                            assert_eq!(
+                                selected == tile,
+                                admitted,
+                                "actual AUTO case={case} M={m} row={row_offset} C-offset={output_offset}"
+                            );
+                            Ok::<(), String>(())
+                        };
+                        for repeat in 0..2 {
+                            output
+                                .upload(&ctx.stream, &initial)
+                                .expect("poison AUTO eager");
+                            launch_auto().expect("actual AUTO eager");
+                            assert_eq!(
+                                output_bits(&ctx, &output),
+                                expected,
+                                "AUTO eager bits case={case} M={m} bias={has_bias} exceptional={exceptional} repeat={repeat}"
+                            );
+                        }
+                        let auto_graph = unsafe { capture_into_graph(&ctx.stream, launch_auto) }
+                            .expect("actual AUTO graph");
+                        if admitted {
+                            assert_wide_graph(
+                                &auto_graph,
+                                b"gemm_bi_nn_fixed_rna_wide_tf32_v1_m128n128_bk32_s3",
+                                view_shape,
+                            );
+                        }
+                        for replay in 0..2 {
+                            output
+                                .upload(&ctx.stream, &initial)
+                                .expect("poison AUTO graph");
+                            auto_graph.launch().expect("AUTO replay");
+                            assert_eq!(
+                                output_bits(&ctx, &output),
+                                expected,
+                                "AUTO graph bits case={case} M={m} bias={has_bias} exceptional={exceptional} replay={replay}"
+                            );
+                        }
+                    }
+                }
+            }
+            if actual_auto && case != "tail" {
+                let hot = FixedShape {
+                    m: shape.m - 1,
+                    ..shape
+                };
+                for misalign_a in [false, true] {
+                    let input_host = if misalign_a { &a_host } else { &b_host };
+                    let mut guarded_input = vec![-917.25];
+                    guarded_input.extend_from_slice(input_host);
+                    guarded_input.push(-917.25);
+                    let shifted = GpuBuffer::from_cpu(&ctx.stream, &guarded_input).unwrap();
+                    for has_bias in [false, true] {
+                        let initial = vec![-819.25; 4 + hot.m * hot.n + 7];
+                        let mut output = GpuBuffer::from_cpu(&ctx.stream, &initial).unwrap();
+                        let operands = FixedFwdOperands {
+                            c: f32_pointer(output.cached_ptr() + 16),
+                            x: f32_pointer(if misalign_a {
+                                shifted.cached_ptr() + 4
+                            } else {
+                                a.cached_ptr()
+                            }),
+                            w: f32_pointer(if misalign_a {
+                                b.cached_ptr()
+                            } else {
+                                shifted.cached_ptr() + 4
+                            }),
+                            bias_ptr: has_bias.then_some(bias.cached_ptr()),
+                        };
+                        fixed_forward_with_tile(
+                            &ctx,
+                            FixedFwdOperands {
+                                x: f32_pointer(a.cached_ptr()),
+                                w: f32_pointer(b.cached_ptr()),
+                                ..operands
+                            },
+                            hot,
+                            tile,
+                        )
+                        .expect("aligned RNA view reference");
+                        let expected = output_bits(&ctx, &output);
+                        output.upload(&ctx.stream, &initial).unwrap();
+                        fixed_forward_with_tile(&ctx, operands, hot, FixedTile::Tf32M64S2)
+                            .expect("misaligned old AUTO control");
+                        assert_eq!(
+                            output_bits(&ctx, &output),
+                            expected,
+                            "misaligned control/RNA bits"
+                        );
+                        let launch_auto = || {
+                            let selected = fixed_forward(
+                                &ctx,
+                                operands.c,
+                                operands.x,
+                                operands.w,
+                                operands.bias_ptr,
+                                (hot.m, hot.k, hot.n),
+                            )?;
+                            assert_eq!(
+                                selected,
+                                FixedTile::Tf32M64S2,
+                                "misaligned A/B must retain old AUTO"
+                            );
+                            Ok::<(), String>(())
+                        };
+                        for _ in 0..2 {
+                            output.upload(&ctx.stream, &initial).unwrap();
+                            launch_auto().expect("misaligned AUTO eager");
+                            assert_eq!(
+                                output_bits(&ctx, &output),
+                                expected,
+                                "misaligned AUTO/RNA eager bits"
+                            );
+                        }
+                        let graph =
+                            unsafe { capture_into_graph(&ctx.stream, launch_auto) }.unwrap();
+                        for _ in 0..2 {
+                            output.upload(&ctx.stream, &initial).unwrap();
+                            graph.launch().unwrap();
+                            assert_eq!(
+                                output_bits(&ctx, &output),
+                                expected,
+                                "misaligned AUTO/RNA graph bits"
+                            );
+                        }
+                    }
+                    assert_eq!(
+                        output_bits(&ctx, &shifted),
+                        guarded_input
+                            .into_iter()
+                            .map(f32::to_bits)
+                            .collect::<Vec<_>>(),
+                        "misaligned AUTO modified guarded input"
+                    );
                 }
             }
             assert_eq!(

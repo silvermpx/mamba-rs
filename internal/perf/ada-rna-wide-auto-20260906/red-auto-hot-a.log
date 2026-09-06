@@ -1,0 +1,21 @@
+   Compiling mamba-rs v0.6.9 (/root/mamba-ada-rna-wide-auto-20260906)
+    Finished `release` profile [optimized] target(s) in 36.03s
+     Running tests/gemm_bi_fixed_correctness.rs (/root/target-ada-rna-wide-auto-20260906/release/deps/gemm_bi_fixed_correctness-7860b14bbe37841d)
+
+running 1 test
+test fixed_sm89_rna_wide_actual_auto_hot_a_route_and_graph ... 
+thread 'fixed_sm89_rna_wide_actual_auto_hot_a_route_and_graph' (276380) panicked at tests/gemm_bi_fixed_correctness.rs:139:9:
+assertion `left == right` failed
+  left: Tf32M64S2
+ right: Tf32RnaM128N128S3
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+
+failures:
+    fixed_sm89_rna_wide_actual_auto_hot_a_route_and_graph
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 5 filtered out; finished in 65.66s
+
+error: test failed, to rerun pass `--test gemm_bi_fixed_correctness`

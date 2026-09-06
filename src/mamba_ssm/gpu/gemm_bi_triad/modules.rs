@@ -10043,7 +10043,18 @@ mod tests {
             .lines()
             .filter_map(|line| line.strip_prefix("#line 1 \"")?.strip_suffix('"'))
             .collect();
-        let mut expected_fixed_cc12 = FIXED_FRAGMENTS[..FIXED_FRAGMENTS.len() - 2].to_vec();
+        let mut expected_fixed_cc12 = FIXED_FRAGMENTS
+            .iter()
+            .copied()
+            .filter(|name| {
+                !matches!(
+                    *name,
+                    "kernels/gemm_bi_fixed/sm89_half_pipeline.cu"
+                        | "kernels/gemm_bi_fixed/sm89_f32_n64_copyplan.cu"
+                        | "kernels/gemm_bi_fixed/tf32_rna_wide.cu"
+                )
+            })
+            .collect::<Vec<_>>();
         expected_fixed_cc12.push("kernels/gemm_bi_fixed/sm120_f32_n64_copyplan.cu");
         expected_fixed_cc12.push("kernels/gemm_bi_fixed/sm120_f32_n64_sliced.cu");
         expected_fixed_cc12.push("kernels/gemm_bi_fixed/sm120_f32_postbias.cu");
