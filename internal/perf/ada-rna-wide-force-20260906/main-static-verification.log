@@ -1,0 +1,28 @@
+db3dbafb1b1ccf3c0ea422d2860e8a7789e1eca9b9c14f51480711f18ac5dde1  /root/target-ada-rna-wide-force-20260906/release/deps/gemm_bi_fixed_performance-429f558dd590762a
+
+running 12 tests
+test fixed_explicit_vendor_cc_admission_is_fail_closed ... ok
+test fixed_explicit_vendor_pair_store_force_filter_is_sm120_only ... ok
+test fixed_explicit_vendor_exact_rows_keep_distinct_denominators_and_tolerances ... ok
+test fixed_explicit_vendor_fast_exact_row_reuses_every_exact_force_spec_once ... ok
+test fixed_explicit_vendor_pair_store_graph_contract_is_exact ... ok
+test fixed_explicit_vendor_rna_wide_graph_contract_is_exact ... ok
+test fixed_explicit_vendor_rung_inventory_is_arch_specific ... ok
+test fixed_explicit_vendor_paths_default_to_full_eager_and_graph ... ok
+test fixed_explicit_vendor_tile_filter_is_strict_and_row_scoped ... ok
+test fixed_explicit_vendor_rna_wide_force_filter_is_ada_tf32_only ... ok
+test fixed_explicit_vendor_pipeline_graph_contract_rejects_wrong_physical_launch ... ok
+test fixed_explicit_vendor_rna_wide_eager_needs_identity_graph ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 93 filtered out; finished in 0.00s
+
+
+running 6 tests
+test fixed_force_bias_contract_requires_disallowed_launch_to_fail ... ok
+test fixed_force_disallowed_candidate_is_invoked_exactly_once ... ok
+test fixed_force_specs_bind_mixed_and_exact_tiles_to_physical_symbols ... ok
+test fixed_force_specs_cover_every_inventory_entry_exactly_once ... ok
+test fixed_force_specs_reject_foreign_arch_and_dtype_pairs ... ok
+test fixed_force_enum_registry_is_reverse_complete_for_every_row_and_architecture ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 99 filtered out; finished in 0.00s

@@ -10676,6 +10676,7 @@ define_fixed_force_plain_tile_registry!(
     Tf32M128S2,
     Tf32M128S3,
     Tf32M128N128S3,
+    Tf32RnaM128N128S3,
     Tf32M64S2,
     Tf32M64S3,
     Tf32M16S4,
@@ -10799,6 +10800,10 @@ fn fixed_force_spec(
             "gemm_bi_nn_sm80_mma_tf32_v1_m128n128_bk32_s3"
         }
         FixedTile::Tf32M128N128S3 => return Err(invalid()),
+        FixedTile::Tf32RnaM128N128S3 if row == "tf32" && cc == (8, 9) => {
+            "gemm_bi_nn_fixed_rna_wide_tf32_v1_m128n128_bk32_s3"
+        }
+        FixedTile::Tf32RnaM128N128S3 => return Err(invalid()),
         FixedTile::Tf32M64S2 if row == "tf32" => "gemm_bi_nn_tf32_v1_m64n64_bk32_s2",
         FixedTile::Tf32M64S2 => return Err(invalid()),
         FixedTile::Tf32M64S3 if row == "tf32" => "gemm_bi_nn_tf32_v1_m64n64_bk32_s3",
@@ -11096,6 +11101,7 @@ fn fixed_explicit_vendor_tiles(row: &str, cc: (u32, u32)) -> Vec<FixedTile> {
     } else if row == "tf32" {
         // The wide symbol is not bound in the committed CC12 module cohort.
         tiles.insert(2, FixedTile::Tf32M128N128S3);
+        tiles.insert(3, FixedTile::Tf32RnaM128N128S3);
     } else if matches!(row, "bf16" | "f16") {
         tiles.push(FixedTile::Tc128Sm89Pipeline);
     } else if matches!(row, "f32_exact" | "f32_exact_fast") {
@@ -11184,6 +11190,130 @@ fn fixed_explicit_vendor_pair_store_graph_contract(
         ));
     }
     Ok(())
+}
+
+fn fixed_explicit_vendor_needs_identity_graph(paths: &[&str], tile: FixedTile) -> bool {
+    paths.contains(&"graph") || tile == FixedTile::Tf32RnaM128N128S3
+}
+
+#[test]
+fn fixed_explicit_vendor_rna_wide_eager_needs_identity_graph() {
+    assert!(fixed_explicit_vendor_needs_identity_graph(
+        &["eager"],
+        FixedTile::Tf32RnaM128N128S3,
+    ));
+    for tile in [FixedTile::Tf32RnaM128N128S3, FixedTile::Tf32M64S2] {
+        for paths in [&["graph"][..], &["eager", "graph"][..]] {
+            assert!(fixed_explicit_vendor_needs_identity_graph(paths, tile));
+        }
+    }
+    assert!(!fixed_explicit_vendor_needs_identity_graph(
+        &["eager"],
+        FixedTile::Tf32M64S2,
+    ));
+}
+
+fn fixed_explicit_vendor_rna_wide_graph_contract(
+    node_count: usize,
+    symbol: &str,
+    grid: (u32, u32, u32),
+    block: (u32, u32, u32),
+    shared_bytes: u32,
+    bundle: [u32; 8],
+) -> Result<(), String> {
+    let m = bundle[2] as i32;
+    let k = bundle[3] as i32;
+    let n = bundle[4] as i32;
+    if node_count != 1
+        || symbol != "gemm_bi_nn_fixed_rna_wide_tf32_v1_m128n128_bk32_s3"
+        || block != (256, 1, 1)
+        || shared_bytes != 98_304
+        || bundle[0] != 1.0f32.to_bits()
+        || bundle[1] != 0.0f32.to_bits()
+        || m <= 0
+        || k < 0
+        || n <= 0
+        || n > i32::MAX - 127
+        || k % 4 != 0
+        || n % 4 != 0
+        || bundle[5] != bundle[3]
+        || bundle[6] != bundle[4]
+        || bundle[7] != bundle[4]
+    {
+        return Err(format!(
+            "wrong physical Fixed RNA wide: nodes={node_count} symbol={symbol:?} grid={grid:?} block={block:?} shared={shared_bytes} bundle={bundle:?}"
+        ));
+    }
+    let expected_grid = (m as u32)
+        .div_ceil(128)
+        .checked_mul((n as u32).div_ceil(128))
+        .filter(|count| *count <= i32::MAX as u32)
+        .map(|count| (count, 1, 1));
+    if Some(grid) != expected_grid {
+        return Err(format!(
+            "wrong Fixed RNA wide grid {grid:?} for M={m} N={n}"
+        ));
+    }
+    Ok(())
+}
+
+#[test]
+fn fixed_explicit_vendor_rna_wide_graph_contract_is_exact() {
+    let symbol = "gemm_bi_nn_fixed_rna_wide_tf32_v1_m128n128_bk32_s3";
+    let bundle = [1.0f32.to_bits(), 0, 4621, 384, 1928, 384, 1928, 1928];
+    let valid = |nodes, name, grid, block, shared, params| {
+        fixed_explicit_vendor_rna_wide_graph_contract(nodes, name, grid, block, shared, params)
+    };
+    assert!(valid(1, symbol, (592, 1, 1), (256, 1, 1), 98_304, bundle).is_ok());
+    assert!(
+        valid(
+            1,
+            symbol,
+            (2, 1, 1),
+            (256, 1, 1),
+            98_304,
+            [1.0f32.to_bits(), 0, 17, 0, 132, 0, 132, 132],
+        )
+        .is_ok(),
+        "K0 with partial M/N tiles keeps the same launch ABI",
+    );
+    for (nodes, name, grid, block, shared) in [
+        (2, symbol, (592, 1, 1), (256, 1, 1), 98_304),
+        (
+            1,
+            "gemm_bi_nn_sm80_mma_tf32_v1_m128n128_bk32_s3",
+            (592, 1, 1),
+            (256, 1, 1),
+            98_304,
+        ),
+        (1, symbol, (591, 1, 1), (256, 1, 1), 98_304),
+        (1, symbol, (592, 2, 1), (256, 1, 1), 98_304),
+        (1, symbol, (592, 1, 1), (128, 1, 1), 98_304),
+        (1, symbol, (592, 1, 1), (256, 1, 1), 55_296),
+    ] {
+        assert!(valid(nodes, name, grid, block, shared, bundle).is_err());
+    }
+    for (index, value) in [
+        (0, 0),
+        (1, (-0.0f32).to_bits()),
+        (2, 0),
+        (2, u32::MAX),
+        (3, u32::MAX),
+        (3, 383),
+        (4, 0),
+        (4, 1929),
+        (4, 2_147_483_644),
+        (5, 1928),
+        (6, 384),
+        (7, 384),
+    ] {
+        let mut wrong = bundle;
+        wrong[index] = value;
+        assert!(
+            valid(1, symbol, (592, 1, 1), (256, 1, 1), 98_304, wrong).is_err(),
+            "wrong captured parameter {index}={value} must be rejected",
+        );
+    }
 }
 
 #[test]
@@ -11302,6 +11432,43 @@ fn fixed_explicit_vendor_graph_inventory(
             .to_str()
             .expect("UTF-8 graph symbol");
         let block = (params.blockDimX, params.blockDimY, params.blockDimZ);
+        if label == "Tf32RnaM128N128S3"
+            || symbol == "gemm_bi_nn_fixed_rna_wide_tf32_v1_m128n128_bk32_s3"
+        {
+            for (index, expected) in [(0, 8), (8, 8), (16, 8), (24, 8), (32, 32)]
+                .into_iter()
+                .enumerate()
+            {
+                let mut offset = 0;
+                let mut size = 0;
+                assert_eq!(
+                    unsafe { sys::cuFuncGetParamInfo(params.func, index, &mut offset, &mut size) },
+                    sys::CUresult::CUDA_SUCCESS,
+                    "{label} RNA wide Driver parameter {index}",
+                );
+                assert_eq!((offset, size), expected, "{label} RNA wide 32-byte ABI");
+            }
+            let mut offset = 0;
+            let mut size = 0;
+            assert_eq!(
+                unsafe { sys::cuFuncGetParamInfo(params.func, 5, &mut offset, &mut size) },
+                sys::CUresult::CUDA_ERROR_INVALID_VALUE,
+                "{label} RNA wide must not have a sixth argument",
+            );
+            assert!(!params.kernelParams.is_null());
+            let bundle_pointer = unsafe { *params.kernelParams.add(4) };
+            assert!(!bundle_pointer.is_null());
+            let bundle = unsafe { bundle_pointer.cast::<[u32; 8]>().read_unaligned() };
+            fixed_explicit_vendor_rna_wide_graph_contract(
+                count,
+                symbol,
+                (params.gridDimX, params.gridDimY, params.gridDimZ),
+                block,
+                params.sharedMemBytes,
+                bundle,
+            )
+            .unwrap_or_else(|error| panic!("{label}: {error}"));
+        }
         if label == "Tf32Sm120M64S2PairStore" {
             fixed_explicit_vendor_pair_store_graph_contract(
                 count,
@@ -11408,6 +11575,31 @@ fn fixed_explicit_vendor_cc_admission_is_fail_closed() {
 }
 
 #[test]
+fn fixed_explicit_vendor_rna_wide_force_filter_is_ada_tf32_only() {
+    let name = "Tf32RnaM128N128S3";
+    let selected = fixed_explicit_vendor_filter_tiles(
+        &fixed_explicit_vendor_tiles("tf32", (8, 9)),
+        Some(name),
+    )
+    .expect("RNA-compatible wide must be reachable through the Ada TF32 census");
+    assert_eq!(selected.len(), 1);
+    assert_eq!(format!("{:?}", selected[0]), name);
+    assert_eq!(
+        fixed_force_spec("tf32", (8, 9), selected[0])
+            .expect("RNA wide physical force identity")
+            .expected_symbol,
+        "gemm_bi_nn_fixed_rna_wide_tf32_v1_m128n128_bk32_s3",
+    );
+    for (row, cc) in [("tf32", (12, 0)), ("f32_exact", (8, 9)), ("bf16", (8, 9))] {
+        assert!(
+            fixed_explicit_vendor_filter_tiles(&fixed_explicit_vendor_tiles(row, cc), Some(name))
+                .is_err(),
+            "RNA wide must not leak into {row}/CC{cc:?}",
+        );
+    }
+}
+
+#[test]
 fn fixed_explicit_vendor_pair_store_force_filter_is_sm120_only() {
     let name = "Tf32Sm120M64S2PairStore";
     let selected = fixed_explicit_vendor_filter_tiles(
@@ -11447,6 +11639,7 @@ fn fixed_explicit_vendor_rung_inventory_is_arch_specific() {
     let sm120 = fixed_explicit_vendor_tiles("tf32", (12, 0));
     assert_eq!(sm120.len(), 12);
     assert!(!sm120.contains(&FixedTile::Tf32M128N128S3));
+    assert!(!sm120.contains(&FixedTile::Tf32RnaM128N128S3));
     for tile in [
         FixedTile::Tf32Sm120M128S2,
         FixedTile::Tf32Sm120M128S3,
@@ -11459,8 +11652,9 @@ fn fixed_explicit_vendor_rung_inventory_is_arch_specific() {
         assert!(sm120.contains(&tile));
     }
     let ada = fixed_explicit_vendor_tiles("tf32", (8, 9));
-    assert_eq!(ada.len(), 6);
+    assert_eq!(ada.len(), 7);
     assert!(ada.contains(&FixedTile::Tf32M128N128S3));
+    assert!(ada.contains(&FixedTile::Tf32RnaM128N128S3));
     assert!(!ada.contains(&FixedTile::Tc128Sm89Pipeline));
     assert_eq!(
         fixed_explicit_vendor_tiles("f32_exact", (8, 9)),
@@ -12444,26 +12638,38 @@ fn fixed_ada_forced_rungs_paired_precision_cublas() {
                         fixed_forward_with_tile(&ctx, forced_ops, shape, tile)
                             .unwrap_or_else(|error| panic!("{label}: {error}"));
                     };
-                    // Establish the physical graph identity for every runnable
-                    // force candidate, even when it is later rejected for using
-                    // a different deterministic numeric family than AUTO.
-                    let forced_identity_graph = if paths.contains(&"graph") {
-                        let graph = unsafe {
-                            capture_into_graph(&ctx.stream, || {
-                                forced_launch();
-                                Ok(())
-                            })
-                        }
-                        .expect("capture forced physical-identity graph");
-                        assert_eq!(
-                            single_graph_kernel_name(&graph, &label),
-                            force_spec.expected_symbol,
-                            "{label} physical graph symbol"
-                        );
-                        Some(graph)
-                    } else {
-                        None
-                    };
+                    // Establish physical identity before timing or numeric-family
+                    // rejection. RNA admission is mandatory even when graph timing
+                    // is disabled: an eager-only filter must not bypass its ABI gate.
+                    let forced_identity_graph =
+                        if fixed_explicit_vendor_needs_identity_graph(&paths, tile) {
+                            let graph = unsafe {
+                                capture_into_graph(&ctx.stream, || {
+                                    forced_launch();
+                                    Ok(())
+                                })
+                            }
+                            .expect("capture forced physical-identity graph");
+                            assert_eq!(
+                                single_graph_kernel_name(&graph, &label),
+                                force_spec.expected_symbol,
+                                "{label} physical graph symbol"
+                            );
+                            Some(graph)
+                        } else {
+                            None
+                        };
+                    let rna_identity_inventory =
+                        (tile == FixedTile::Tf32RnaM128N128S3).then(|| {
+                            fixed_explicit_vendor_graph_inventory(
+                                forced_identity_graph
+                                    .as_ref()
+                                    .expect("RNA always captures an untimed identity graph"),
+                                "Tf32RnaM128N128S3",
+                                None,
+                                None,
+                            )
+                        });
                     // A retune between M-dependent Fixed rungs is only eligible
                     // when it retains AUTO's per-element numeric family.
                     if first_raw != auto_raw {
@@ -12525,6 +12731,8 @@ fn fixed_ada_forced_rungs_paired_precision_cublas() {
                             forced_graph,
                             if tile == FixedTile::Tf32Sm120M64S2PairStore {
                                 "Tf32Sm120M64S2PairStore"
+                            } else if tile == FixedTile::Tf32RnaM128N128S3 {
+                                "Tf32RnaM128N128S3"
                             } else {
                                 "forced"
                             },
@@ -12545,6 +12753,8 @@ fn fixed_ada_forced_rungs_paired_precision_cublas() {
                         format!(
                             "{{\"auto\":{auto_inventory},\"forced\":{forced_inventory},\"vendor\":{vendor_inventory}}}"
                         )
+                    } else if let Some(forced_inventory) = &rna_identity_inventory {
+                        format!("{{\"auto\":null,\"forced\":{forced_inventory},\"vendor\":null}}")
                     } else {
                         "null".to_owned()
                     };

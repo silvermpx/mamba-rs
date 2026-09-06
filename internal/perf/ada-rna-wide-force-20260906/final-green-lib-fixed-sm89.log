@@ -1,0 +1,44 @@
+   Compiling mamba-rs v0.6.9 (/root/mamba-ada-rna-wide-force-20260906)
+    Finished `release` profile [optimized] target(s) in 45.67s
+     Running unittests src/lib.rs (/root/target-ada-rna-wide-force-20260906/release/deps/mamba_rs-87c2fddad15adab2)
+
+running 36 tests
+test mamba_ssm::gpu::gemm_bi_fixed::sm89_exact_n64_auto_tests::fixed_sm89_exact_n64_auto_admits_only_eight_measured_positive_rows ... ok
+test mamba_ssm::gpu::gemm_bi_fixed::sm89_exact_n64_auto_tests::fixed_sm89_exact_n64_auto_declines_adjacent_unmeasured_and_thin_shapes ... ok
+test mamba_ssm::gpu::gemm_bi_fixed::sm89_exact_n64_auto_tests::fixed_sm89_exact_n64_auto_declines_invalid_alignment_null_bias_and_dtype ... ok
+test mamba_ssm::gpu::gemm_bi_fixed::sm89_exact_n64_auto_tests::fixed_sm89_exact_n64_auto_declines_unknown_device_toolchain_holder_and_policy ... ok
+test mamba_ssm::gpu::gemm_bi_fixed::sm89_exact_n64_auto_tests::fixed_sm89_exact_n64_auto_keeps_old_cc12_exact_selector_cells ... ok
+test mamba_ssm::gpu::gemm_bi_fixed::sm89_exact_n64_auto_tests::fixed_sm89_exact_n64_auto_routes_a_and_d_copyplan_winners ... ok
+test mamba_ssm::gpu::gemm_bi_fixed::sm89_exact_n64_request_tests::fixed_sm89_exact_n64_empty_and_k0_requests_do_not_require_inputs ... ok
+test mamba_ssm::gpu::gemm_bi_fixed::sm89_exact_n64_request_tests::fixed_sm89_exact_n64_forward_bundle_has_exact_m_n_k_and_stride_words ... ok
+test mamba_ssm::gpu::gemm_bi_fixed::sm89_exact_n64_request_tests::fixed_sm89_exact_n64_operand_and_arch_guards_are_fail_closed ... ok
+test mamba_ssm::gpu::gemm_bi_fixed::sm89_exact_n64_request_tests::fixed_sm89_exact_n64_operand_byte_endpoints_cannot_wrap ... ok
+test mamba_ssm::gpu::gemm_bi_fixed::sm89_exact_n64_request_tests::fixed_sm89_exact_n64_signed_padding_and_grid_boundaries ... ok
+test mamba_ssm::gpu::gemm_bi_triad::modules::tests::fixed_sm89_exact_n64_composition_is_target_scoped ... ok
+test mamba_ssm::gpu::gemm_bi_triad::modules::tests::fixed_sm89_exact_n64_driver_abi_requires_five_offsets_and_terminal_probe ... ok
+test mamba_ssm::gpu::gemm_bi_triad::modules::tests::fixed_sm89_exact_n64_live_resource_gate_is_strict ... ok
+test mamba_ssm::gpu::gemm_bi_triad::modules::tests::fixed_sm89_exact_n64_ptx_rejects_cc12_exports_without_nvrtc ... ok
+test mamba_ssm::gpu::gemm_bi_triad::modules::tests::fixed_sm89_exact_n64_ptx_rejects_export_on_other_portable_targets ... ok
+test mamba_ssm::gpu::gemm_bi_triad::modules::tests::fixed_sm89_exact_n64_ptx_rejects_local_tensor_reduction_and_ftz_work ... ok
+test mamba_ssm::gpu::gemm_bi_triad::modules::tests::fixed_sm89_exact_n64_ptx_rejects_wrong_pointer_and_bundle_abi ... ok
+test mamba_ssm::gpu::gemm_bi_triad::modules::tests::fixed_sm89_exact_n64_ptx_requires_async_fma_and_launch_bounds ... ok
+test mamba_ssm::gpu::gemm_bi_triad::modules::tests::fixed_sm89_exact_n64_ptx_requires_its_unique_export ... ok
+test mamba_ssm::gpu::gemm_bi_triad::modules::tests::fixed_sm89_exact_n64_retains_all_other_fixed_composed_bytes ... ok
+test mamba_ssm::gpu::gemm_bi_triad::modules::tests::fixed_sm89_exact_n64_retains_every_triad_composition ... ok
+test mamba_ssm::gpu::gemm_bi_triad::modules::tests::fixed_sm89_half_pipeline_composes_the_ada_only_extension ... ok
+test mamba_ssm::gpu::gemm_bi_triad::modules::tests::fixed_sm89_half_pipeline_does_not_enter_any_triad_composition ... ok
+test mamba_ssm::gpu::gemm_bi_triad::modules::tests::fixed_sm89_half_pipeline_driver_abi_requires_exact_offsets_sizes_and_terminal_probe ... ok
+test mamba_ssm::gpu::gemm_bi_triad::modules::tests::fixed_sm89_half_pipeline_preserves_non_ada_fixed_composed_bytes ... ok
+test mamba_ssm::gpu::gemm_bi_triad::modules::tests::fixed_sm89_half_pipeline_ptx_rejects_duplicate_or_foreign_exports ... ok
+test mamba_ssm::gpu::gemm_bi_triad::modules::tests::fixed_sm89_half_pipeline_ptx_rejects_exports_on_non_ada_targets ... ok
+test mamba_ssm::gpu::gemm_bi_triad::modules::tests::fixed_sm89_half_pipeline_ptx_rejects_numeric_atomics_and_reductions ... ok
+test mamba_ssm::gpu::gemm_bi_triad::modules::tests::fixed_sm89_half_pipeline_ptx_rejects_pointer_or_bundle_abi_drift ... ok
+test mamba_ssm::gpu::gemm_bi_triad::modules::tests::fixed_sm89_half_pipeline_ptx_requires_both_typed_exports ... ok
+test mamba_ssm::gpu::gemm_bi_triad::modules::tests::fixed_sm89_half_pipeline_ptx_requires_native_typed_mma_and_async_staging ... ok
+test mamba_ssm::gpu::gemm_bi_triad::modules::tests::fixed_sm89_rna_wide_composer_requires_the_ada_only_fragment ... ok
+test mamba_ssm::gpu::gemm_bi_triad::modules::tests::fixed_sm89_rna_wide_driver_abi_and_resource_gates_are_strict ... ok
+test mamba_ssm::gpu::gemm_bi_triad::modules::tests::fixed_sm89_rna_wide_validator_accepts_the_exact_rna_pipeline_entry ... ok
+test mamba_ssm::gpu::gemm_bi_triad::modules::tests::fixed_sm89_rna_wide_validator_rejects_inventory_abi_and_body_drift ... ok
+
+test result: ok. 36 passed; 0 failed; 0 ignored; 0 measured; 641 filtered out; finished in 0.09s
+

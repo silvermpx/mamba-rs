@@ -121,7 +121,7 @@ fn output_bits(ctx: &GpuCtx, output: &GpuBuffer) -> Vec<u32> {
         .collect()
 }
 
-fn assert_wide_graph_symbol(graph: &cudarc::driver::CudaGraph) {
+fn assert_wide_graph(graph: &cudarc::driver::CudaGraph, symbol: &[u8], shape: FixedShape) {
     use cudarc::driver::sys;
     let mut count = 0;
     assert_eq!(
@@ -146,9 +146,60 @@ fn assert_wide_graph_symbol(graph: &cudarc::driver::CudaGraph) {
     );
     assert_eq!(
         unsafe { std::ffi::CStr::from_ptr(name) }.to_bytes(),
-        b"gemm_bi_nn_sm80_mma_tf32_v1_m128n128_bk32_s3",
+        symbol,
         "forced Fixed wide silently captured another route",
     );
+    for (index, expected) in [(0, 8), (8, 8), (16, 8), (24, 8), (32, 32)]
+        .into_iter()
+        .enumerate()
+    {
+        let mut offset = 0;
+        let mut size = 0;
+        assert_eq!(
+            unsafe { sys::cuFuncGetParamInfo(params.func, index, &mut offset, &mut size) },
+            sys::CUresult::CUDA_SUCCESS,
+            "wide Driver parameter {index}",
+        );
+        assert_eq!((offset, size), expected, "wide 32-byte Driver ABI");
+    }
+    let mut offset = 0;
+    let mut size = 0;
+    assert_eq!(
+        unsafe { sys::cuFuncGetParamInfo(params.func, 5, &mut offset, &mut size) },
+        sys::CUresult::CUDA_ERROR_INVALID_VALUE,
+        "wide launch must not have a sixth argument",
+    );
+    assert!(!params.kernelParams.is_null());
+    let bundle_pointer = unsafe { *params.kernelParams.add(4) };
+    assert!(!bundle_pointer.is_null());
+    let bundle = unsafe { bundle_pointer.cast::<[u32; 8]>().read_unaligned() };
+    assert_eq!(
+        bundle,
+        [
+            1.0f32.to_bits(),
+            0.0f32.to_bits(),
+            shape.m as u32,
+            shape.k as u32,
+            shape.n as u32,
+            shape.k as u32,
+            shape.n as u32,
+            shape.n as u32,
+        ],
+        "wide graph captured the wrong 32-byte parameter bundle",
+    );
+    let grid = (shape.m as u32)
+        .div_ceil(128)
+        .checked_mul((shape.n as u32).div_ceil(128))
+        .unwrap();
+    assert_eq!(
+        (params.gridDimX, params.gridDimY, params.gridDimZ),
+        (grid, 1, 1)
+    );
+    assert_eq!(
+        (params.blockDimX, params.blockDimY, params.blockDimZ),
+        (256, 1, 1)
+    );
+    assert_eq!(params.sharedMemBytes, 98_304);
 }
 
 #[test]
@@ -269,7 +320,11 @@ fn fixed_tf32_forced_wide_preserves_numeric_prefix_subview_and_graph_bits() {
                     // All captured buffers and the context outlive every replay.
                     let graph = unsafe { capture_into_graph(&ctx.stream, run) }
                         .expect("wide graph capture");
-                    assert_wide_graph_symbol(&graph);
+                    assert_wide_graph(
+                        &graph,
+                        b"gemm_bi_nn_sm80_mma_tf32_v1_m128n128_bk32_s3",
+                        shape,
+                    );
                     for replay in 0..2 {
                         output
                             .upload(&ctx.stream, &initial)
@@ -404,4 +459,427 @@ fn fixed_tf32_forced_wide_rejects_unsafe_loads_and_handles_zero_reduction() {
             "wide zero reduction bias={has_bias}"
         );
     }
+}
+
+#[test]
+#[ignore = "requires exclusive CC8.9 Ada with the Fixed RNA-wide symbol admitted"]
+fn fixed_tf32_rna_wide_matches_all_fixed_rungs_prefix_views_and_graph_bits() {
+    let device = GpuDevice::new(0).expect("CUDA device");
+    assert_eq!(device.compute_capability, (8, 9));
+    assert_eq!(device.multiprocessor_count(), 142);
+    let ctx = GpuCtx::new(&device).expect("GPU context");
+    let tile = FixedTile::Tf32RnaM128N128S3;
+    let shape_cases = [
+        (
+            "tail",
+            FixedShape {
+                m: 6018,
+                k: 36,
+                n: 132,
+            },
+        ),
+        (
+            "hot_a_boundary",
+            FixedShape {
+                m: 4622,
+                k: 384,
+                n: 1928,
+            },
+        ),
+    ];
+    let fixed_rungs = [
+        FixedTile::Tf32M128S2,
+        FixedTile::Tf32M128S3,
+        FixedTile::Tf32M64S2,
+        FixedTile::Tf32M64S3,
+        FixedTile::Tf32M16S4,
+    ];
+    let special_bits = [
+        0x0000_0000,
+        0x8000_0000,
+        0x0000_0001,
+        0x8000_0001,
+        0x007f_ffff,
+        0x0080_0000,
+        0x3f80_1001,
+        0xbf80_1001,
+        0x7f80_0000,
+        0xff80_0000,
+        0x7f80_0001,
+        0x7f80_1000,
+        0x7fff_ffff,
+        0xffff_ffff,
+    ];
+
+    for (case, shape) in shape_cases {
+        for exceptional in [false, true] {
+            let mut a_host = synth(shape.m * shape.k, 0x89a0_0001);
+            let mut b_host = synth(shape.k * shape.n, 0x89b0_0001);
+            let mut bias_host = synth(shape.n, 0x89c0_0001);
+            if exceptional {
+                for (index, bits) in special_bits
+                    .into_iter()
+                    .cycle()
+                    .take(a_host.len())
+                    .enumerate()
+                {
+                    if index % 37 == 0 {
+                        a_host[index] = f32::from_bits(bits);
+                    }
+                }
+                for (index, bits) in special_bits
+                    .into_iter()
+                    .cycle()
+                    .take(b_host.len())
+                    .enumerate()
+                {
+                    if index % 29 == 0 {
+                        b_host[index] = f32::from_bits(bits);
+                    }
+                }
+                for (index, value) in bias_host.iter_mut().enumerate() {
+                    *value = f32::from_bits(special_bits[index % special_bits.len()]);
+                }
+            } else {
+                a_host[0] = f32::from_bits(0x3f80_1001);
+                b_host[0] = f32::from_bits(0xbf80_1001);
+            }
+            let a = GpuBuffer::from_cpu(&ctx.stream, &a_host).expect("RNA A upload");
+            let b = GpuBuffer::from_cpu(&ctx.stream, &b_host).expect("RNA B upload");
+            let bias = GpuBuffer::from_cpu(&ctx.stream, &bias_host).expect("RNA bias upload");
+
+            for has_bias in [false, true] {
+                let reference =
+                    GpuBuffer::zeros(&ctx.stream, shape.m * shape.n).expect("RNA reference output");
+                let operands = FixedFwdOperands {
+                    c: f32_pointer(reference.cached_ptr()),
+                    x: f32_pointer(a.cached_ptr()),
+                    w: f32_pointer(b.cached_ptr()),
+                    bias_ptr: has_bias.then_some(bias.cached_ptr()),
+                };
+                fixed_forward_with_tile(&ctx, operands, shape, tile)
+                    .expect("RNA-wide full reference launch");
+                let reference_bits = output_bits(&ctx, &reference);
+                for incumbent in fixed_rungs {
+                    let output =
+                        GpuBuffer::zeros(&ctx.stream, shape.m * shape.n).expect("incumbent output");
+                    fixed_forward_with_tile(
+                        &ctx,
+                        FixedFwdOperands {
+                            c: f32_pointer(output.cached_ptr()),
+                            ..operands
+                        },
+                        shape,
+                        incumbent,
+                    )
+                    .unwrap_or_else(|error| panic!("{incumbent:?} launch: {error}"));
+                    assert_eq!(
+                        output_bits(&ctx, &output),
+                        reference_bits,
+                        "RNA-wide differs from {incumbent:?}; case={case} bias={has_bias} exceptional={exceptional}"
+                    );
+                }
+
+                let view_cases: Vec<_> = if case == "tail" {
+                    vec![
+                        (1, 0),
+                        (15, 0),
+                        (16, 0),
+                        (17, 0),
+                        (31, 0),
+                        (32, 0),
+                        (33, 0),
+                        (63, 0),
+                        (64, 0),
+                        (65, 0),
+                        (127, 0),
+                        (128, 0),
+                        (129, 0),
+                        (255, 0),
+                        (256, 0),
+                        (257, 0),
+                        (257, 17),
+                        (4621, 0),
+                        (6016, 0),
+                        (6017, 0),
+                        (6018, 0),
+                    ]
+                } else {
+                    vec![(4620, 0), (4621, 0), (4622, 0)]
+                };
+                for (m, row_offset) in view_cases {
+                    let output_offset = 1;
+                    let initial = vec![-819.25; output_offset + m * shape.n + 7];
+                    let mut output =
+                        GpuBuffer::from_cpu(&ctx.stream, &initial).expect("guarded RNA output");
+                    let view_shape = FixedShape {
+                        m,
+                        k: shape.k,
+                        n: shape.n,
+                    };
+                    let view_operands = FixedFwdOperands {
+                        c: f32_pointer(output.cached_ptr() + (output_offset * 4) as u64),
+                        x: f32_pointer(a.cached_ptr() + (row_offset * shape.k * 4) as u64),
+                        w: operands.w,
+                        bias_ptr: operands.bias_ptr,
+                    };
+                    let mut expected: Vec<_> =
+                        initial.iter().map(|value| value.to_bits()).collect();
+                    expected[output_offset..output_offset + m * shape.n].copy_from_slice(
+                        &reference_bits[row_offset * shape.n..(row_offset + m) * shape.n],
+                    );
+                    for incumbent in fixed_rungs {
+                        output
+                            .upload(&ctx.stream, &initial)
+                            .expect("poison incumbent prefix/view C");
+                        fixed_forward_with_tile(&ctx, view_operands, view_shape, incumbent)
+                            .unwrap_or_else(|error| {
+                                panic!("{incumbent:?} prefix/view launch: {error}")
+                            });
+                        assert_eq!(
+                            output_bits(&ctx, &output),
+                            expected,
+                            "RNA prefix differs from {incumbent:?}; case={case} M={m} row={row_offset} bias={has_bias} exceptional={exceptional}"
+                        );
+                    }
+                    let launch = || fixed_forward_with_tile(&ctx, view_operands, view_shape, tile);
+                    for repeat in 0..2 {
+                        output
+                            .upload(&ctx.stream, &initial)
+                            .expect("poison RNA eager C");
+                        launch().expect("RNA-wide eager view launch");
+                        assert_eq!(
+                            output_bits(&ctx, &output),
+                            expected,
+                            "RNA eager prefix/view drift case={case} M={m} row={row_offset} bias={has_bias} exceptional={exceptional} repeat={repeat}"
+                        );
+                    }
+                    let graph = unsafe { capture_into_graph(&ctx.stream, launch) }
+                        .expect("RNA-wide graph capture");
+                    assert_wide_graph(
+                        &graph,
+                        b"gemm_bi_nn_fixed_rna_wide_tf32_v1_m128n128_bk32_s3",
+                        view_shape,
+                    );
+                    for replay in 0..2 {
+                        output
+                            .upload(&ctx.stream, &initial)
+                            .expect("poison RNA graph C");
+                        graph.launch().expect("RNA-wide graph replay");
+                        assert_eq!(
+                            output_bits(&ctx, &output),
+                            expected,
+                            "RNA graph prefix/view drift case={case} M={m} row={row_offset} bias={has_bias} exceptional={exceptional} replay={replay}"
+                        );
+                    }
+                }
+            }
+            assert_eq!(
+                output_bits(&ctx, &a),
+                a_host.into_iter().map(f32::to_bits).collect::<Vec<_>>(),
+                "RNA-wide modified A"
+            );
+            assert_eq!(
+                output_bits(&ctx, &b),
+                b_host.into_iter().map(f32::to_bits).collect::<Vec<_>>(),
+                "RNA-wide modified B"
+            );
+            assert_eq!(
+                output_bits(&ctx, &bias),
+                bias_host.into_iter().map(f32::to_bits).collect::<Vec<_>>(),
+                "RNA-wide modified bias"
+            );
+        }
+    }
+}
+
+#[test]
+#[ignore = "requires exclusive CC8.9 Ada with the Fixed RNA-wide symbol admitted"]
+fn fixed_tf32_rna_wide_rejects_unsafe_inputs_and_handles_k0() {
+    let device = GpuDevice::new(0).expect("CUDA device");
+    assert_eq!(device.compute_capability, (8, 9));
+    assert_eq!(device.multiprocessor_count(), 142);
+    let ctx = GpuCtx::new(&device).expect("GPU context");
+    let tile = FixedTile::Tf32RnaM128N128S3;
+    let null_operands = FixedFwdOperands {
+        c: f32_pointer(0),
+        x: f32_pointer(0),
+        w: f32_pointer(0),
+        bias_ptr: Some(1),
+    };
+    for empty in [
+        FixedShape {
+            m: 0,
+            k: usize::MAX,
+            n: usize::MAX,
+        },
+        FixedShape {
+            m: usize::MAX,
+            k: usize::MAX,
+            n: 0,
+        },
+    ] {
+        fixed_forward_with_tile(&ctx, null_operands, empty, tile)
+            .unwrap_or_else(|error| panic!("RNA empty output {empty:?}: {error}"));
+    }
+    let shape = FixedShape {
+        m: 17,
+        k: 36,
+        n: 132,
+    };
+    let a = GpuBuffer::zeros(&ctx.stream, shape.m * shape.k + 4).expect("RNA A");
+    let b = GpuBuffer::zeros(&ctx.stream, shape.k * shape.n + 4).expect("RNA B");
+    let output = GpuBuffer::zeros(&ctx.stream, shape.m * shape.n).expect("RNA C");
+    let operands = FixedFwdOperands {
+        c: f32_pointer(output.cached_ptr()),
+        x: f32_pointer(a.cached_ptr()),
+        w: f32_pointer(b.cached_ptr()),
+        bias_ptr: None,
+    };
+    for bad in [
+        FixedFwdOperands {
+            x: f32_pointer(a.cached_ptr() + 4),
+            ..operands
+        },
+        FixedFwdOperands {
+            w: f32_pointer(b.cached_ptr() + 4),
+            ..operands
+        },
+        FixedFwdOperands {
+            x: f32_pointer(0),
+            ..operands
+        },
+        FixedFwdOperands {
+            w: f32_pointer(0),
+            ..operands
+        },
+        FixedFwdOperands {
+            c: f32_pointer(0),
+            ..operands
+        },
+        FixedFwdOperands {
+            c: f32_pointer(output.cached_ptr() + 1),
+            ..operands
+        },
+        FixedFwdOperands {
+            bias_ptr: Some(1),
+            ..operands
+        },
+    ] {
+        assert!(
+            fixed_forward_with_tile(&ctx, bad, shape, tile).is_err(),
+            "unsafe RNA-wide pointer admitted"
+        );
+    }
+    for bad in [
+        FixedShape {
+            k: shape.k - 1,
+            ..shape
+        },
+        FixedShape {
+            n: shape.n - 1,
+            ..shape
+        },
+        FixedShape {
+            n: i32::MAX as usize - 3,
+            ..shape
+        },
+        FixedShape {
+            m: i32::MAX as usize,
+            n: 1 << 20,
+            ..shape
+        },
+    ] {
+        assert!(
+            fixed_forward_with_tile(&ctx, operands, bad, tile).is_err(),
+            "unsafe RNA-wide shape admitted: {bad:?}"
+        );
+    }
+
+    let bias_host: Vec<_> = (0..shape.n)
+        .map(|index| f32::from_bits([0, 0x8000_0000, 0x7f80_0001, 0xffff_ffff][index % 4]))
+        .collect();
+    let bias = GpuBuffer::from_cpu(&ctx.stream, &bias_host).expect("RNA K0 bias");
+    let fixed_rungs = [
+        FixedTile::Tf32M128S2,
+        FixedTile::Tf32M128S3,
+        FixedTile::Tf32M64S2,
+        FixedTile::Tf32M64S3,
+        FixedTile::Tf32M16S4,
+    ];
+    let k0_shape = FixedShape { k: 0, ..shape };
+    for has_bias in [false, true] {
+        let output_offset = 1;
+        let output_elements = shape.m * shape.n;
+        let mut initial = vec![-819.25; output_offset + output_elements + 7];
+        initial[output_offset..output_offset + output_elements].fill(f32::from_bits(0x7fc0_1234));
+        let mut k0_output =
+            GpuBuffer::from_cpu(&ctx.stream, &initial).expect("guarded RNA K0 output");
+        let k0_operands = FixedFwdOperands {
+            c: f32_pointer(k0_output.cached_ptr() + (output_offset * 4) as u64),
+            x: f32_pointer(0),
+            w: f32_pointer(0),
+            bias_ptr: has_bias.then_some(bias.cached_ptr()),
+        };
+        let mut expected: Vec<_> = initial.iter().map(|value| value.to_bits()).collect();
+        for index in 0..output_elements {
+            expected[output_offset + index] = if has_bias {
+                bias_host[index % shape.n]
+            } else {
+                0.0
+            }
+            .to_bits();
+        }
+
+        for incumbent in fixed_rungs {
+            for repeat in 0..2 {
+                k0_output
+                    .upload(&ctx.stream, &initial)
+                    .expect("poison incumbent K0 output");
+                fixed_forward_with_tile(&ctx, k0_operands, k0_shape, incumbent)
+                    .unwrap_or_else(|error| panic!("{incumbent:?} K0 launch: {error}"));
+                assert_eq!(
+                    output_bits(&ctx, &k0_output),
+                    expected,
+                    "RNA K0 differs from {incumbent:?}; bias={has_bias} repeat={repeat}"
+                );
+            }
+        }
+
+        let launch = || fixed_forward_with_tile(&ctx, k0_operands, k0_shape, tile);
+        for repeat in 0..2 {
+            k0_output
+                .upload(&ctx.stream, &initial)
+                .expect("poison RNA K0 eager output");
+            launch().expect("RNA-wide K0 eager with null inputs");
+            assert_eq!(
+                output_bits(&ctx, &k0_output),
+                expected,
+                "RNA K0 eager drift bias={has_bias} repeat={repeat}"
+            );
+        }
+        let graph =
+            unsafe { capture_into_graph(&ctx.stream, launch) }.expect("RNA-wide K0 graph capture");
+        assert_wide_graph(
+            &graph,
+            b"gemm_bi_nn_fixed_rna_wide_tf32_v1_m128n128_bk32_s3",
+            k0_shape,
+        );
+        for replay in 0..2 {
+            k0_output
+                .upload(&ctx.stream, &initial)
+                .expect("poison RNA K0 graph output");
+            graph.launch().expect("RNA-wide K0 graph replay");
+            assert_eq!(
+                output_bits(&ctx, &k0_output),
+                expected,
+                "RNA K0 graph drift bias={has_bias} replay={replay}"
+            );
+        }
+    }
+    assert_eq!(
+        output_bits(&ctx, &bias),
+        bias_host.into_iter().map(f32::to_bits).collect::<Vec<_>>(),
+        "RNA-wide K0 modified bias"
+    );
 }

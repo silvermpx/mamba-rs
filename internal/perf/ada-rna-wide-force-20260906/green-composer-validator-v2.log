@@ -1,0 +1,12 @@
+   Compiling mamba-rs v0.6.9 (/root/mamba-ada-rna-wide-force-20260906)
+    Finished `release` profile [optimized] target(s) in 46.04s
+     Running unittests src/lib.rs (/root/target-ada-rna-wide-force-20260906/release/deps/mamba_rs-87c2fddad15adab2)
+
+running 4 tests
+test mamba_ssm::gpu::gemm_bi_triad::modules::tests::fixed_sm89_rna_wide_composer_requires_the_ada_only_fragment ... ok
+test mamba_ssm::gpu::gemm_bi_triad::modules::tests::fixed_sm89_rna_wide_driver_abi_and_resource_gates_are_strict ... ok
+test mamba_ssm::gpu::gemm_bi_triad::modules::tests::fixed_sm89_rna_wide_validator_accepts_the_exact_rna_pipeline_entry ... ok
+test mamba_ssm::gpu::gemm_bi_triad::modules::tests::fixed_sm89_rna_wide_validator_rejects_inventory_abi_and_body_drift ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 673 filtered out; finished in 0.03s
+

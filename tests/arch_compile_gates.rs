@@ -158,6 +158,8 @@ fn fixed_blob_for(arch: &str) -> String {
         source.push_str(include_str!(
             "../kernels/gemm_bi_fixed/sm89_f32_n64_copyplan.cu"
         ));
+        source.push('\n');
+        source.push_str(include_str!("../kernels/gemm_bi_fixed/tf32_rna_wide.cu"));
     }
     if arch == "compute_120" {
         source.push('\n');
@@ -2725,6 +2727,7 @@ fn fixed_f32_n128_s2_source_and_ptx_contract() {
 }
 
 const FIXED_SM89_EXACT_N64_COPYPLAN: &str = "gemm_bi_nn_fixed_sm89_f32_n64_copyplan_v1";
+const FIXED_SM89_RNA_WIDE: &str = "gemm_bi_nn_fixed_rna_wide_tf32_v1_m128n128_bk32_s3";
 const FIXED_SM120_EXACT_N64_COPYPLAN: &str = "gemm_bi_nn_fixed_sm120_f32_n64_copyplan_v1";
 const FIXED_SM120_N64_SLICED: &str = "gemm_bi_nn_fixed_sm120_f32_n64_sliced_v1";
 
@@ -2873,10 +2876,62 @@ fn fixed_sm89_exact_n64_copyplan_source_contract_and_target_boundary() {
         "../kernels/gemm_bi_fixed/sm89_half_pipeline.cu"
     ));
     let ada = fixed_blob_for("sm_89");
+    let rna_wide = include_str!("../kernels/gemm_bi_fixed/tf32_rna_wide.cu");
     assert_eq!(
         ada.strip_prefix(&retained).unwrap(),
-        format!("\n{candidate}")
+        format!("\n{candidate}\n{rna_wide}")
     );
+}
+
+#[test]
+fn fixed_sm89_rna_wide_source_contract_and_target_boundary() {
+    let candidate = include_str!("../kernels/gemm_bi_fixed/tf32_rna_wide.cu");
+    assert_eq!(
+        candidate
+            .matches(&format!("void {FIXED_SM89_RNA_WIDE}("))
+            .count(),
+        1
+    );
+    for required in [
+        "sizeof(GbfTf32WideParams) == 32",
+        "alignof(GbfTf32WideParams) == 4",
+        "__launch_bounds__(256, 1)",
+        "cvt.rna.tf32.f32",
+        "gbf_tf32_copy_cg",
+        "gbf_tf32_mma_m16n8k8",
+        "tf32wrc_zero_reduction<128, 128>",
+    ] {
+        assert!(
+            candidate.contains(required),
+            "RNA-wide source omitted {required}"
+        );
+    }
+    for forbidden in ["gemm_bi_nn_sm89_experimental", "SgbTf32", "Sm80Tf32"] {
+        assert!(
+            !candidate.contains(forbidden),
+            "RNA-wide source retained foreign dependency {forbidden}"
+        );
+    }
+    for arch in [
+        "sm_80",
+        "sm_86",
+        "sm_87",
+        "compute_89",
+        "sm_90a",
+        "sm_100a",
+        "sm_103a",
+        "sm_110a",
+        "sm_120",
+        "sm_121",
+        "compute_120",
+        "compute_121",
+    ] {
+        assert!(
+            !fixed_blob_for(arch).contains(FIXED_SM89_RNA_WIDE),
+            "foreign target {arch} composed Fixed RNA-wide"
+        );
+    }
+    assert!(fixed_blob_for("sm_89").contains(FIXED_SM89_RNA_WIDE));
 }
 
 #[test]
@@ -2982,6 +3037,43 @@ fn fixed_sm89_exact_n64_copyplan_nvrtc_ptx_and_zero_spill_resources() {
     );
     println!(
         "SM89 Fixed exact N64 copy-plan: registers={registers} static_shared={shared} stack=0 spills=0"
+    );
+
+    let rna_resources = function_resource_report(&report, FIXED_SM89_RNA_WIDE);
+    assert_zero_local_resources(rna_resources, "SM89 Fixed RNA-wide");
+    let rna_registers = rna_resources
+        .lines()
+        .find_map(|line| metric_before(line, " registers"))
+        .expect("RNA-wide register report");
+    assert!(
+        (1..=224).contains(&rna_registers),
+        "RNA-wide registers {rna_registers} exceed 224"
+    );
+    let rna_static_shared = rna_resources
+        .lines()
+        .find_map(|line| metric_before(line, " bytes smem"))
+        .unwrap_or(0);
+    assert_eq!(
+        rna_static_shared, 0,
+        "RNA-wide must use only dynamic shared"
+    );
+    let rna_sass = sass_entry(&sass, FIXED_SM89_RNA_WIDE);
+    for forbidden in ["LDL", "STL", "ATOM", "RED", "REDUX"] {
+        assert!(
+            !contains_opcode_prefix(rna_sass, forbidden),
+            "RNA-wide SASS contains {forbidden}"
+        );
+    }
+    assert!(
+        contains_opcode_prefix(rna_sass, "HMMA"),
+        "RNA-wide SASS omitted tensor MMA"
+    );
+    assert!(
+        contains_opcode_prefix(rna_sass, "LDGSTS"),
+        "RNA-wide SASS omitted asynchronous copy"
+    );
+    println!(
+        "SM89 Fixed RNA-wide: registers={rna_registers} static_shared={rna_static_shared} stack=0 spills=0"
     );
 }
 
@@ -3193,8 +3285,73 @@ fn assert_fixed_sm89_half_pipeline_ptx(arch: &str, ptx: &str) {
     }
 }
 
+fn assert_fixed_sm89_rna_wide_ptx(arch: &str, ptx: &str) {
+    let parsed = parse_compile_gate_ptx(ptx).expect("parse Fixed RNA-wide PTX");
+    let actual: Vec<_> = parsed
+        .entries
+        .iter()
+        .filter(|entry| entry.symbol.contains("_fixed_rna_wide_tf32_v1_"))
+        .collect();
+    assert_eq!(actual.len(), usize::from(arch == "sm_89"));
+    if arch != "sm_89" {
+        return;
+    }
+    let entry = actual[0];
+    assert_eq!(entry.symbol, FIXED_SM89_RNA_WIDE);
+    assert!(has_exact_maxntid(&entry.text, 256));
+    assert!(has_exact_minnctapersm(&entry.text, 1));
+    let parameters = ptx_parameters(&entry.text, FIXED_SM89_RNA_WIDE);
+    let declarations: Vec<_> = parameters
+        .lines()
+        .map(str::trim)
+        .filter(|line| line.starts_with(".param "))
+        .collect();
+    assert_eq!(declarations.len(), 5, "RNA-wide five-argument ABI");
+    assert!(
+        declarations[..4]
+            .iter()
+            .all(|line| line.starts_with(".param .u64 "))
+    );
+    assert!(
+        declarations[4].starts_with(".param .align 4 .b8 ") && declarations[4].contains("[32]")
+    );
+    assert_compile_gate_entry_tokens(
+        "Fixed SM89 RNA-wide",
+        entry,
+        &[
+            "cvt.rna.tf32.f32",
+            "mma.sync.aligned.m16n8k8.row.col.f32.tf32.tf32.f32",
+            "cp.async.commit_group",
+            "cp.async.wait_group",
+            "ldmatrix.sync.aligned.m8n8.x4.shared.b16",
+        ],
+    );
+    let tokens = compile_gate_ptx_tokens(&entry.body);
+    assert!(
+        tokens
+            .iter()
+            .any(|token| token.text.starts_with("cp.async.cg.shared.global")),
+        "RNA-wide asynchronous staging missing"
+    );
+    for token in tokens {
+        assert!(
+            token.text != ".local"
+                && !token.text.starts_with("ld.local")
+                && !token.text.starts_with("st.local")
+                && !token.text.starts_with("atom.")
+                && !token.text.starts_with("atom::")
+                && !token.text.starts_with("red.")
+                && !token.text.starts_with("red::")
+                && !token.text.starts_with("redux."),
+            "RNA-wide forbidden PTX token {}",
+            token.text,
+        );
+    }
+}
+
 fn assert_fixed_tf32_ptx(arch: &str, ptx: &str) {
     assert_fixed_sm89_half_pipeline_ptx(arch, ptx);
+    assert_fixed_sm89_rna_wide_ptx(arch, ptx);
     assert_fixed_exact_n64_copyplan_ptx(
         arch,
         "sm_89",
@@ -3305,6 +3462,9 @@ fn assert_fixed_tf32_ptx(arch: &str, ptx: &str) {
     }
     let owns_sm120 = matches!(arch, "sm_120" | "sm_121" | "compute_120" | "compute_121");
     let mut expected = PORTABLE.to_vec();
+    if arch == "sm_89" {
+        expected.push(FIXED_SM89_RNA_WIDE);
+    }
     if owns_sm120 {
         expected.extend(SM120);
     }

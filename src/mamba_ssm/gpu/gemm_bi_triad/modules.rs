@@ -486,6 +486,7 @@ pub(crate) struct CompiledModule {
     /// Separate from Triad TF32 qualification: the optional Ada Fixed half
     /// extension has the same generic Driver layout representation only.
     fixed_sm89_half_driver_abi: Result<BTreeMap<&'static str, Tf32DriverAbi>, String>,
+    fixed_sm89_rna_wide_driver_abi: Result<Tf32DriverAbi, String>,
     fixed_sm89_exact_n64_driver_abi: Result<BTreeMap<&'static str, Tf32DriverAbi>, String>,
     fixed_sm120_exact_n64_driver_abi: Result<BTreeMap<&'static str, Tf32DriverAbi>, String>,
     fixed_sm120_sliced_driver_abi: Result<BTreeMap<&'static str, Tf32DriverAbi>, String>,
@@ -660,6 +661,12 @@ pub(crate) fn compile_module(request: CompileModuleRequest<'_>) -> Result<Compil
         let census = census_all_tf32_driver_abi(request.ctx, request.module_kind, extensions, &src);
         let fixed_half_abi =
             census_fixed_sm89_half_driver_abi(request.ctx, request.module_kind, request.arch, &src);
+        let fixed_rna_wide_abi = census_fixed_sm89_rna_wide_driver_abi(
+            request.ctx,
+            request.module_kind,
+            request.arch,
+            &src,
+        );
         let fixed_exact_n64_abi = census_fixed_sm89_exact_n64_driver_abi(
             request.ctx,
             request.module_kind,
@@ -700,6 +707,7 @@ pub(crate) fn compile_module(request: CompileModuleRequest<'_>) -> Result<Compil
             tf32_qualification_error,
             tf32_driver_abi,
             fixed_half_abi,
+            fixed_rna_wide_abi,
             fixed_exact_n64_abi,
             fixed_sm120_exact_n64_abi,
             fixed_sm120_sliced_abi,
@@ -713,6 +721,7 @@ pub(crate) fn compile_module(request: CompileModuleRequest<'_>) -> Result<Compil
         tf32_qualification_error,
         tf32_driver_abi,
         fixed_sm89_half_driver_abi,
+        fixed_sm89_rna_wide_driver_abi,
         fixed_sm89_exact_n64_driver_abi,
         fixed_sm120_exact_n64_driver_abi,
         fixed_sm120_sliced_driver_abi,
@@ -741,6 +750,12 @@ pub(crate) fn compile_module(request: CompileModuleRequest<'_>) -> Result<Compil
                 &ptx_source,
             );
             let fixed_half_abi = census_fixed_sm89_half_driver_abi(
+                request.ctx,
+                request.module_kind,
+                request.arch,
+                &ptx_source,
+            );
+            let fixed_rna_wide_abi = census_fixed_sm89_rna_wide_driver_abi(
                 request.ctx,
                 request.module_kind,
                 request.arch,
@@ -834,6 +849,7 @@ pub(crate) fn compile_module(request: CompileModuleRequest<'_>) -> Result<Compil
                 tf32_qualification_error,
                 tf32_driver_abi,
                 fixed_half_abi,
+                fixed_rna_wide_abi,
                 fixed_exact_n64_abi,
                 fixed_sm120_exact_n64_abi,
                 fixed_sm120_sliced_abi,
@@ -873,6 +889,7 @@ pub(crate) fn compile_module(request: CompileModuleRequest<'_>) -> Result<Compil
         tf32_qualification_error,
         tf32_driver_abi,
         fixed_sm89_half_driver_abi,
+        fixed_sm89_rna_wide_driver_abi,
         fixed_sm89_exact_n64_driver_abi,
         fixed_sm120_exact_n64_driver_abi,
         fixed_sm120_sliced_driver_abi,
@@ -1472,6 +1489,7 @@ fn validate_module_ptx(module_kind: ModuleKind, arch: &str, ptx: &str) -> Result
     match module_kind {
         ModuleKind::Fixed => {
             validate_fixed_tf32_ptx(arch, ptx)?;
+            validate_fixed_sm89_rna_wide_ptx(arch, ptx)?;
             validate_fixed_sm89_half_ptx(arch, ptx)?;
             validate_fixed_sm89_exact_n64_ptx(arch, ptx)?;
             validate_fixed_sm120_exact_n64_ptx(arch, ptx)?;
@@ -1502,6 +1520,119 @@ const FIXED_TF32_SYMBOLS: [&str; 5] = [
     "gemm_bi_nn_tf32_v1_m64n64_bk32_s3",
     "gemm_bi_nn_tf32_v1_m16n32_bk32_s4",
 ];
+
+pub(crate) const FIXED_SM89_RNA_WIDE_SYMBOL: &str =
+    "gemm_bi_nn_fixed_rna_wide_tf32_v1_m128n128_bk32_s3";
+const FIXED_SM89_RNA_WIDE_SHARED_BYTES: u32 = 98_304;
+const FIXED_SM89_RNA_WIDE_THREADS: u32 = 256;
+const FIXED_SM89_RNA_WIDE_REGISTER_CAP: u32 = 224;
+
+fn fixed_sm89_rna_wide_composed(arch: &str) -> bool {
+    arch == "sm_89"
+}
+
+fn validate_fixed_sm89_rna_wide_ptx(arch: &str, ptx: &str) -> Result<(), String> {
+    let parsed = parse_ptx(ptx)?;
+    let actual: Vec<_> = parsed
+        .entries
+        .iter()
+        .filter(|entry| entry.symbol.contains("_fixed_rna_wide_tf32_v1_"))
+        .collect();
+    let expected = usize::from(fixed_sm89_rna_wide_composed(arch));
+    if actual.len() != expected || (expected == 1 && actual[0].symbol != FIXED_SM89_RNA_WIDE_SYMBOL)
+    {
+        return Err(format!(
+            "Fixed SM89 RNA-wide PTX inventory is incomplete, duplicated, or foreign on {arch}"
+        ));
+    }
+    if expected == 0 {
+        return Ok(());
+    }
+    if super::super::gemm_bi_fixed::FIXED_TF32_WIDE_PARAMS_SIZE != 32 {
+        return Err("Fixed RNA-wide host parameter ABI drifted".into());
+    }
+    let entry = actual[0];
+    let header = entry
+        .text
+        .split_once('{')
+        .map(|(header, _)| header)
+        .ok_or_else(|| format!("{} has no PTX body", entry.symbol))?;
+    let tokens = ptx_tokens(header);
+    let text: Vec<_> = tokens.iter().map(|token| token.text).collect();
+    let begin = text
+        .iter()
+        .position(|token| *token == "(")
+        .ok_or_else(|| format!("{} has no PTX parameters", entry.symbol))?;
+    let end = text
+        .iter()
+        .position(|token| *token == ")")
+        .ok_or_else(|| format!("{} has no PTX parameter end", entry.symbol))?;
+    let declarations: Vec<_> = text[begin + 1..end].split(|token| *token == ",").collect();
+    let pointer = |declaration: &&[&str]| {
+        (declaration.len() == 3 && declaration[..2] == [".param", ".u64"])
+            || (declaration.len() == 6
+                && declaration[..5] == [".param", ".u64", ".ptr", ".align", "1"])
+    };
+    if declarations.len() != 5
+        || !declarations[..4].iter().all(pointer)
+        || declarations[4].len() != 8
+        || declarations[4][..4] != [".param", ".align", "4", ".b8"]
+        || declarations[4][5..] != ["[", "32", "]"]
+    {
+        return Err(format!(
+            "{} requires four pointers and an align-4 32-byte bundle",
+            entry.symbol
+        ));
+    }
+    for (directive, expected_value) in [(".maxntid", "256"), (".minnctapersm", "1")] {
+        let positions: Vec<_> = text
+            .iter()
+            .enumerate()
+            .filter_map(|(index, token)| (*token == directive).then_some(index))
+            .collect();
+        if positions.len() != 1 || text.get(positions[0] + 1).copied() != Some(expected_value) {
+            return Err(format!(
+                "{} has the wrong {directive} launch bound",
+                entry.symbol
+            ));
+        }
+    }
+    for required in [
+        "cvt.rna.tf32.f32",
+        "mma.sync.aligned.m16n8k8.row.col.f32.tf32.tf32.f32",
+        "cp.async.commit_group",
+        "cp.async.wait_group",
+        "ldmatrix.sync.aligned.m8n8.x4.shared.b16",
+    ] {
+        if !ptx_has_unquoted_token(&entry.body, |token| token == required) {
+            return Err(format!("{} is missing {required}", entry.symbol));
+        }
+    }
+    if !ptx_has_unquoted_token(&entry.body, |token| {
+        token.starts_with("cp.async.cg.shared.global")
+    }) {
+        return Err(format!(
+            "{} is missing cp.async.cg.shared.global",
+            entry.symbol
+        ));
+    }
+    if ptx_has_unquoted_token(&entry.body, |token| {
+        token == ".local"
+            || token.starts_with("ld.local")
+            || token.starts_with("st.local")
+            || token.starts_with("atom.")
+            || token.starts_with("atom::")
+            || token.starts_with("red.")
+            || token.starts_with("red::")
+            || token.starts_with("redux.")
+    }) {
+        return Err(format!(
+            "{} contains local memory, a numeric atomic, or a reduction",
+            entry.symbol
+        ));
+    }
+    Ok(())
+}
 
 const FIXED_SM120_TF32_SYMBOLS: [&str; 7] = [
     "gemm_bi_nn_sm120_tma_tf32_v1_m128n64_bk32_s2",
@@ -1657,6 +1788,179 @@ fn census_fixed_sm89_half_driver_abi(
     }
     module.unload()?;
     Ok(census)
+}
+
+fn validate_fixed_sm89_rna_wide_driver_abi(abi: &Tf32DriverAbi) -> Result<(), String> {
+    const EXPECTED: [(usize, usize); 5] = [(0, 8), (8, 8), (16, 8), (24, 8), (32, 32)];
+    if super::super::gemm_bi_fixed::FIXED_TF32_WIDE_PARAMS_SIZE != 32 {
+        return Err("Fixed SM89 RNA-wide host parameter ABI drifted".into());
+    }
+    if abi.parameter_count() != EXPECTED.len()
+        || !abi
+            .parameters()
+            .iter()
+            .zip(EXPECTED)
+            .all(|(actual, expected)| (actual.offset(), actual.size()) == expected)
+    {
+        return Err(format!(
+            "{FIXED_SM89_RNA_WIDE_SYMBOL} has the wrong live five-argument/64-byte Driver ABI"
+        ));
+    }
+    Ok(())
+}
+
+fn census_fixed_sm89_rna_wide_driver_abi(
+    ctx: &CudaContext,
+    kind: ModuleKind,
+    arch: &str,
+    ptx: &str,
+) -> Result<Tf32DriverAbi, String> {
+    if kind != ModuleKind::Fixed || !fixed_sm89_rna_wide_composed(arch) {
+        return Err("Fixed SM89 RNA-wide is not composed for this module/target".into());
+    }
+    type GetParamInfo = unsafe extern "C" fn(
+        cudarc::driver::sys::CUfunction,
+        usize,
+        *mut usize,
+        *mut usize,
+    ) -> cudarc::driver::sys::CUresult;
+    let module = DriverModule::load(ctx, ptx)?;
+    let get: GetParamInfo =
+        unsafe { std::mem::transmute(driver_proc_address("cuFuncGetParamInfo", 12_040)?) };
+    let function = unsafe {
+        cudarc::driver::result::module::get_function(
+            module.raw(),
+            CString::new(FIXED_SM89_RNA_WIDE_SYMBOL).unwrap(),
+        )
+    }
+    .map_err(|error| {
+        format!("load Fixed/{FIXED_SM89_RNA_WIDE_SYMBOL} for Driver ABI: {error:?}")
+    })?;
+    let abi = query_driver_parameter_abi(
+        FIXED_SM89_RNA_WIDE_SYMBOL,
+        5,
+        |index, offset, size| unsafe { get(function, index, offset, size) },
+    )?;
+    validate_fixed_sm89_rna_wide_driver_abi(&abi)?;
+    module.unload()?;
+    Ok(abi)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct FixedSm89RnaWideResources {
+    local_bytes: u32,
+    registers: u32,
+    static_shared_bytes: u32,
+    max_threads: i32,
+    active_blocks: u32,
+}
+
+fn validate_fixed_sm89_rna_wide_resources(
+    resources: FixedSm89RnaWideResources,
+) -> Result<(), String> {
+    tf32_symbol_admission(
+        FIXED_SM89_RNA_WIDE_SYMBOL,
+        resources.local_bytes,
+        resources.registers,
+        FIXED_SM89_RNA_WIDE_REGISTER_CAP,
+        resources.max_threads,
+        FIXED_SM89_RNA_WIDE_THREADS as i32,
+    )?;
+    if resources.static_shared_bytes != 0 {
+        return Err(format!(
+            "{FIXED_SM89_RNA_WIDE_SYMBOL} uses {} static shared bytes, expected zero",
+            resources.static_shared_bytes
+        ));
+    }
+    if resources.active_blocks < 1 {
+        return Err(format!(
+            "{FIXED_SM89_RNA_WIDE_SYMBOL} has no resident CTA at {} dynamic shared bytes",
+            FIXED_SM89_RNA_WIDE_SHARED_BYTES
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn load_fixed_sm89_rna_wide(
+    ctx: &CudaContext,
+    module: &CompiledModule,
+) -> (Option<CudaFunction>, Option<String>) {
+    let admitted = (|| -> Result<CudaFunction, String> {
+        if module.artifact_identity.module_kind != ModuleKind::Fixed
+            || !fixed_sm89_rna_wide_composed(module.compiler_identity.target.as_str())
+            || ctx
+                .compute_capability()
+                .map_err(|error| format!("query Fixed RNA-wide CC: {error:?}"))?
+                != (8, 9)
+        {
+            return Err("Fixed SM89 RNA-wide is only composed and admitted on sm_89/CC8.9".into());
+        }
+        let shared_cap = ctx.attribute(
+            cudarc::driver::sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK_OPTIN,
+        ).map_err(|error| format!("query Fixed RNA-wide opt-in shared capacity: {error:?}"))?;
+        if shared_cap < FIXED_SM89_RNA_WIDE_SHARED_BYTES as i32 {
+            return Err(format!(
+                "Fixed SM89 RNA-wide requires {} shared bytes, device permits {shared_cap}",
+                FIXED_SM89_RNA_WIDE_SHARED_BYTES
+            ));
+        }
+        validate_fixed_sm89_rna_wide_driver_abi(
+            module
+                .fixed_sm89_rna_wide_driver_abi
+                .as_ref()
+                .map_err(Clone::clone)?,
+        )?;
+        let function = load_function(
+            &module.module,
+            ModuleKind::Fixed,
+            FIXED_SM89_RNA_WIDE_SYMBOL,
+        )?;
+        set_dynamic_shared(
+            &function,
+            FIXED_SM89_RNA_WIDE_SYMBOL,
+            FIXED_SM89_RNA_WIDE_SHARED_BYTES as i32,
+        )?;
+        let local_bytes = u32::try_from(
+            function
+                .local_size_bytes()
+                .map_err(|error| format!("query RNA-wide local bytes: {error:?}"))?,
+        )
+        .map_err(|_| "Fixed SM89 RNA-wide returned negative local memory")?;
+        let registers = u32::try_from(
+            function
+                .num_regs()
+                .map_err(|error| format!("query RNA-wide registers: {error:?}"))?,
+        )
+        .map_err(|_| "Fixed SM89 RNA-wide returned negative registers")?;
+        let static_shared_bytes = u32::try_from(
+            function
+                .shared_size_bytes()
+                .map_err(|error| format!("query RNA-wide static shared bytes: {error:?}"))?,
+        )
+        .map_err(|_| "Fixed SM89 RNA-wide returned negative static shared memory")?;
+        let max_threads = function
+            .max_threads_per_block()
+            .map_err(|error| format!("query RNA-wide max threads: {error:?}"))?;
+        let active_blocks = function
+            .occupancy_max_active_blocks_per_multiprocessor(
+                FIXED_SM89_RNA_WIDE_THREADS,
+                FIXED_SM89_RNA_WIDE_SHARED_BYTES as usize,
+                None,
+            )
+            .map_err(|error| format!("query RNA-wide occupancy: {error:?}"))?;
+        validate_fixed_sm89_rna_wide_resources(FixedSm89RnaWideResources {
+            local_bytes,
+            registers,
+            static_shared_bytes,
+            max_threads,
+            active_blocks,
+        })?;
+        Ok(function)
+    })();
+    match admitted {
+        Ok(function) => (Some(function), None),
+        Err(reason) => (None, Some(reason)),
+    }
 }
 
 /// Admit both homogeneous-half exports together. Unknown targets, ABI drift,
@@ -2971,6 +3275,9 @@ pub(crate) fn load_fixed_sm120_f32_n64_sliced(
 fn validate_fixed_tf32_ptx(arch: &str, ptx: &str) -> Result<(), String> {
     let owns_sm120 = matches!(arch, "sm_120" | "sm_121" | "compute_120" | "compute_121");
     let mut expected = FIXED_TF32_SYMBOLS.to_vec();
+    if fixed_sm89_rna_wide_composed(arch) {
+        expected.push(FIXED_SM89_RNA_WIDE_SYMBOL);
+    }
     if owns_sm120 {
         expected.extend(FIXED_SM120_TF32_SYMBOLS);
     }
@@ -5153,6 +5460,12 @@ const FIXED_SM89_EXACT_N64_SOURCE_FRAGMENT: SourceFragment = SourceFragment {
     allowed_quoted_includes: &[],
 };
 
+const FIXED_SM89_RNA_WIDE_SOURCE_FRAGMENT: SourceFragment = SourceFragment {
+    logical_name: "kernels/gemm_bi_fixed/tf32_rna_wide.cu",
+    source: include_str!("../../../../kernels/gemm_bi_fixed/tf32_rna_wide.cu"),
+    allowed_quoted_includes: &[],
+};
+
 const FIXED_SM120_EXACT_N64_SOURCE_FRAGMENT: SourceFragment = SourceFragment {
     logical_name: "kernels/gemm_bi_fixed/sm120_f32_n64_copyplan.cu",
     source: include_str!("../../../../kernels/gemm_bi_fixed/sm120_f32_n64_copyplan.cu"),
@@ -5461,6 +5774,7 @@ fn compose_module_source_for(kind: ModuleKind, arch: &str) -> Result<String, Str
         let mut fragments = base.to_vec();
         fragments.push(FIXED_SM89_HALF_SOURCE_FRAGMENT);
         fragments.push(FIXED_SM89_EXACT_N64_SOURCE_FRAGMENT);
+        fragments.push(FIXED_SM89_RNA_WIDE_SOURCE_FRAGMENT);
         return compose_fragments(&fragments);
     }
     if kind == ModuleKind::Fixed && arch == "compute_120" {
@@ -9576,6 +9890,7 @@ mod tests {
         "kernels/gemm_bi_fixed/sm100_tcgen05.cu",
         "kernels/gemm_bi_fixed/sm89_half_pipeline.cu",
         "kernels/gemm_bi_fixed/sm89_f32_n64_copyplan.cu",
+        "kernels/gemm_bi_fixed/tf32_rna_wide.cu",
     ];
 
     const SCALAR_FRAGMENTS: &[&str] = &[
@@ -10671,6 +10986,7 @@ mod tests {
         ptx.push_str(&fixed_sm89_exact_n64_test_entry(
             FIXED_SM89_EXACT_N64_TEST_SYMBOL,
         ));
+        ptx.push_str(&fixed_sm89_rna_wide_test_entry());
         ptx
     }
 
@@ -10689,7 +11005,8 @@ mod tests {
             boundaries,
             [
                 "kernels/gemm_bi_fixed/sm89_half_pipeline.cu",
-                "kernels/gemm_bi_fixed/sm89_f32_n64_copyplan.cu"
+                "kernels/gemm_bi_fixed/sm89_f32_n64_copyplan.cu",
+                "kernels/gemm_bi_fixed/tf32_rna_wide.cu",
             ],
             "Ada must retain the half extension before the exact N64 extension"
         );
@@ -10890,10 +11207,194 @@ mod tests {
         .expect_err("a sixth successful Driver parameter query must reject");
     }
 
+    const FIXED_SM89_RNA_WIDE_TEST_SYMBOL: &str =
+        "gemm_bi_nn_fixed_rna_wide_tf32_v1_m128n128_bk32_s3";
     const FIXED_SM89_EXACT_N64_TEST_SYMBOL: &str = "gemm_bi_nn_fixed_sm89_f32_n64_copyplan_v1";
     const FIXED_SM120_EXACT_N64_TEST_SYMBOL: &str = "gemm_bi_nn_fixed_sm120_f32_n64_copyplan_v1";
     const FIXED_SM120_COPYPLAN_T256_TEST_SYMBOL: &str =
         "gemm_bi_nn_fixed_sm120_f32_n64_copyplan_t256_v1";
+
+    fn fixed_sm89_rna_wide_test_entry() -> String {
+        format!(
+            ".visible .entry {FIXED_SM89_RNA_WIDE_TEST_SYMBOL}(\n\
+             .param .u64 c,\n.param .u64 a,\n.param .u64 b,\n.param .u64 bias,\n\
+             .param .align 4 .b8 params[32]\n)\n\
+             .maxntid 256, 1, 1\n.minnctapersm 1\n{{\n\
+             .extern .shared .align 16 .b8 dynamic_smem[];\n\
+             cp.async.cg.shared.global [%r0], [%rd0], 16, %r1;\n\
+             cp.async.commit_group;\ncp.async.wait_group 0;\nbar.sync 0;\n\
+             ldmatrix.sync.aligned.m8n8.x4.shared.b16 {{%r0,%r1,%r2,%r3}}, [%r4];\n\
+             cvt.rna.tf32.f32 %r0, %f0;\n\
+             mma.sync.aligned.m16n8k8.row.col.f32.tf32.tf32.f32\n\
+             {{%f0,%f1,%f2,%f3}}, {{%r0,%r1,%r2,%r3}}, {{%r4,%r5}}, {{%f0,%f1,%f2,%f3}};\n\
+             mul.rn.f32 %f0, %f0, %f4;\nfma.rn.f32 %f0, %f1, %f2, %f0;\n\
+             st.global.f32 [%rd0], %f0;\nret;\n}}\n"
+        )
+    }
+
+    #[test]
+    fn fixed_sm89_rna_wide_composer_requires_the_ada_only_fragment() {
+        let source = compose_module_source_for(ModuleKind::Fixed, "sm_89").unwrap();
+        assert!(
+            source.contains(FIXED_SM89_RNA_WIDE_TEST_SYMBOL),
+            "production Fixed/sm_89 composition is missing the RNA-wide export"
+        );
+        let mut retained = super::FIXED_SOURCE_FRAGMENTS.to_vec();
+        retained.extend([
+            super::FIXED_SM89_HALF_SOURCE_FRAGMENT,
+            super::FIXED_SM89_EXACT_N64_SOURCE_FRAGMENT,
+        ]);
+        let before = compose_fragments(&retained).unwrap();
+        assert_eq!(
+            source.strip_prefix(&before).unwrap(),
+            compose_fragments(&[super::FIXED_SM89_RNA_WIDE_SOURCE_FRAGMENT]).unwrap(),
+            "RNA-wide must be the only suffix appended to the prior Ada Fixed bytes"
+        );
+        for target in [
+            "sm_80",
+            "sm_86",
+            "sm_87",
+            "compute_89",
+            "sm_90a",
+            "sm_100a",
+            "sm_103a",
+            "sm_110a",
+            "sm_120",
+            "sm_121",
+            "compute_120",
+            "compute_121",
+        ] {
+            assert!(
+                !compose_module_source_for(ModuleKind::Fixed, target)
+                    .unwrap()
+                    .contains(FIXED_SM89_RNA_WIDE_TEST_SYMBOL),
+                "RNA-wide leaked into Fixed/{target}"
+            );
+        }
+        for target in ["sm_89", "sm_120", "compute_120", "sm_121", "compute_121"] {
+            for kind in [
+                ModuleKind::TriadScalar,
+                ModuleKind::TriadSm80,
+                ModuleKind::TriadSm90a,
+                ModuleKind::TriadSm100,
+                ModuleKind::TriadSm120,
+            ] {
+                assert!(
+                    !compose_module_source_for(kind, target)
+                        .unwrap()
+                        .contains(FIXED_SM89_RNA_WIDE_TEST_SYMBOL),
+                    "RNA-wide leaked into {kind:?}/{target}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn fixed_sm89_rna_wide_validator_accepts_the_exact_rna_pipeline_entry() {
+        let ptx = fixed_sm89_half_test_ptx();
+        validate_module_ptx(ModuleKind::Fixed, "sm_89", &ptx)
+            .expect("the exact five-argument RNA-wide entry must be admitted on Fixed/sm_89");
+    }
+
+    #[test]
+    fn fixed_sm89_rna_wide_validator_rejects_inventory_abi_and_body_drift() {
+        let baseline = fixed_sm89_half_test_ptx();
+        let entry = fixed_sm89_rna_wide_test_entry();
+        for malformed in [
+            baseline.replacen(&entry, "", 1),
+            format!("{baseline}{entry}"),
+            baseline.replacen(
+                &entry,
+                &entry.replacen("fixed_rna_wide_tf32_v1", "fixed_rna_wide_tf32_v2", 1),
+                1,
+            ),
+        ] {
+            validate_module_ptx(ModuleKind::Fixed, "sm_89", &malformed)
+                .expect_err("missing, duplicate, or foreign RNA-wide inventory must reject");
+        }
+        for malformed_entry in [
+            entry.replacen(".param .u64 a,", ".param .u32 a,", 1),
+            entry.replacen("params[32]", "params[24]", 1),
+            entry.replacen(".align 4 .b8 params", ".align 8 .b8 params", 1),
+            entry.replacen("params[32]\n)", "params[32],\n.param .u64 scratch\n)", 1),
+            entry.replacen("cvt.rna.tf32.f32", "cvt.rn.f32.f32", 1),
+            entry.replacen(
+                "mma.sync.aligned.m16n8k8.row.col.f32.tf32.tf32.f32",
+                "not_the_required_mma",
+                1,
+            ),
+            entry.replacen("cp.async.cg.shared.global", "not_the_required_async", 1),
+            entry.replacen("cp.async.commit_group", "not_the_required_commit", 1),
+            entry.replacen("cp.async.wait_group", "not_the_required_wait", 1),
+            entry.replacen(
+                "ldmatrix.sync.aligned.m8n8.x4.shared.b16",
+                "not_the_required_ldmatrix",
+                1,
+            ),
+            entry.replacen(".maxntid 256", ".maxntid 128", 1),
+            entry.replacen("ret;", ".local .b8 spill[16]; ret;", 1),
+            entry.replacen("ret;", "atom.global.add.f32 %f0, [%rd0], %f1; ret;", 1),
+            entry.replacen("ret;", "red.global.add.f32 [%rd0], %f1; ret;", 1),
+            entry.replacen("ret;", "redux.sync.add.s32 %r0, %r1, -1; ret;", 1),
+        ] {
+            let malformed = baseline.replacen(&entry, &malformed_entry, 1);
+            validate_module_ptx(ModuleKind::Fixed, "sm_89", &malformed)
+                .expect_err("RNA-wide inventory, ABI, pipeline, and reduction drift must reject");
+        }
+        for target in ["sm_80", "compute_89", "sm_90a", "sm_120", "compute_120"] {
+            super::validate_fixed_sm89_rna_wide_ptx(target, &entry)
+                .expect_err("RNA-wide entry is foreign outside exact sm_89");
+        }
+    }
+
+    #[test]
+    fn fixed_sm89_rna_wide_driver_abi_and_resource_gates_are_strict() {
+        let abi =
+            Tf32DriverAbi::checked(5, vec![(0, 8), (8, 8), (16, 8), (24, 8), (32, 32)]).unwrap();
+        super::validate_fixed_sm89_rna_wide_driver_abi(&abi).unwrap();
+        for layout in [
+            vec![(0, 8), (8, 8), (16, 8), (24, 8)],
+            vec![(0, 8), (8, 8), (16, 8), (24, 8), (32, 28)],
+            vec![(0, 8), (8, 8), (16, 8), (24, 8), (36, 32)],
+            vec![(0, 4), (8, 8), (16, 8), (24, 8), (32, 32)],
+            vec![(0, 8), (8, 8), (16, 8), (24, 8), (32, 32), (64, 4)],
+        ] {
+            let malformed = Tf32DriverAbi::checked(layout.len(), layout).unwrap();
+            super::validate_fixed_sm89_rna_wide_driver_abi(&malformed).unwrap_err();
+        }
+        let admitted = super::FixedSm89RnaWideResources {
+            local_bytes: 0,
+            registers: 224,
+            static_shared_bytes: 0,
+            max_threads: 256,
+            active_blocks: 1,
+        };
+        super::validate_fixed_sm89_rna_wide_resources(admitted).unwrap();
+        for rejected in [
+            super::FixedSm89RnaWideResources {
+                local_bytes: 1,
+                ..admitted
+            },
+            super::FixedSm89RnaWideResources {
+                registers: 225,
+                ..admitted
+            },
+            super::FixedSm89RnaWideResources {
+                static_shared_bytes: 1,
+                ..admitted
+            },
+            super::FixedSm89RnaWideResources {
+                max_threads: 255,
+                ..admitted
+            },
+            super::FixedSm89RnaWideResources {
+                active_blocks: 0,
+                ..admitted
+            },
+        ] {
+            super::validate_fixed_sm89_rna_wide_resources(rejected).unwrap_err();
+        }
+    }
 
     fn fixed_sm120_copyplan_t256_test_entry() -> String {
         fixed_sm89_exact_n64_test_entry(FIXED_SM120_COPYPLAN_T256_TEST_SYMBOL)
@@ -11545,7 +12046,10 @@ mod tests {
             .collect();
         assert_eq!(
             boundaries,
-            ["kernels/gemm_bi_fixed/sm89_f32_n64_copyplan.cu"]
+            [
+                "kernels/gemm_bi_fixed/sm89_f32_n64_copyplan.cu",
+                "kernels/gemm_bi_fixed/tf32_rna_wide.cu",
+            ]
         );
     }
 

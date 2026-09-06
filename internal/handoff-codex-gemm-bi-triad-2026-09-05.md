@@ -870,6 +870,42 @@ performance justify a promotion. Frozen Triad and CC12 source compositions
 must remain unchanged. Ada and expired-5090 Triad baselines remain saved;
 Triad optimization is not yet the active implementation stage.
 
+### Ada Fixed RNA-wide production qualification (2026-09-06)
+
+The explicit-RNA wide candidate is now integrated as the distinct
+`Tf32RnaM128N128S3` force route in the Fixed sm89 module, with strict optional
+PTX/Driver/resource admission. The original Triad wide route is unchanged.
+The new symbol uses a five-argument/32-byte bundle, block 256, 98,304 bytes
+dynamic shared, 153 registers and no local memory/spills. Composed Triad and
+CC12 source bytes are retained; no claim of unmeasured artifact equality.
+
+Reviewed GPU gates cover all five ordinary TF32 rungs, finite/exceptional
+inputs, both biases, actual hot-A M4620/4621/4622, underfill M6016/6017/6018,
+all-prefix cross-route bits, aligned row views/C4 output, repeat/poisoned graph,
+K0 and empty/no-op/unsafe input rejection. The eager-only benchmark filter now
+also verifies real physical function/ABI/geometry before timing.
+
+Production 21-window and final 101-window screens each pass all 40 records
+(A-E, bias0/1, eager/graph, two orders), no rejections. Every cohort wins
+against incumbent AUTO at paired p50 and p95. A1 and B1 also win against
+explicit cuBLAS FAST at both quantiles in every cohort. Final worst p95
+RNA/FAST is 0.887512 for A1 and 0.976818 for B1; remaining cells still lose
+FAST. This is not all-precision inference closure.
+
+Evidence: `internal/perf/ada-rna-wide-force-20260906/README.md` and its
+integration report, raw logs and manifest. Final 101 log SHA256
+`4983d29fa241538f170e087372c70baa92858033a7b075c7e53945088ba6d910`;
+frozen test binary SHA256
+`db3dbafb1b1ccf3c0ea422d2860e8a7789e1eca9b9c14f51480711f18ac5dde1`.
+
+Next bounded task: promote the ten measured Ada/142-SM/known-NVRTC13.2
+shape-bias cells through a pre-launch availability/alignment guard, leaving
+the old picker unchanged on decline. Increment routing revision 39->40;
+preserve CUDA sources/identities and unrelated Triad/SM120 qualification
+selectors and hashes. Actual AUTO boundary/graph/bits and post-AUTO paired
+confirmation remain required. Do not remove any superseded route: it remains
+an ordinary fallback or a candidate for other architectures/toolkits.
+
 ### Precision and determinism terminology
 
 TF32 is a compute mode for F32 tensors; it is not a distinct tensor storage

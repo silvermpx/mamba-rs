@@ -1,0 +1,20 @@
+   Compiling mamba-rs v0.6.9 (/root/mamba-ada-rna-wide-force-20260906)
+    Finished `release` profile [optimized] target(s) in 9.04s
+     Running tests/gemm_bi_fixed_performance.rs (/root/target-ada-rna-wide-force-20260906/release/deps/gemm_bi_fixed_performance-429f558dd590762a)
+
+running 1 test
+test fixed_explicit_vendor_rna_wide_eager_needs_identity_graph ... 
+thread 'fixed_explicit_vendor_rna_wide_eager_needs_identity_graph' (252593) panicked at tests/gemm_bi_fixed_performance.rs:11201:5:
+assertion failed: fixed_explicit_vendor_needs_identity_graph(&["eager"],
+    FixedTile::Tf32RnaM128N128S3)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+
+failures:
+    fixed_explicit_vendor_rna_wide_eager_needs_identity_graph
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 104 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--test gemm_bi_fixed_performance`

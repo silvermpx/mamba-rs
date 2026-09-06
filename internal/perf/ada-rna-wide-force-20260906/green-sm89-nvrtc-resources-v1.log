@@ -1,0 +1,11 @@
+   Compiling mamba-rs v0.6.9 (/root/mamba-ada-rna-wide-force-20260906)
+    Finished `release` profile [optimized] target(s) in 39.40s
+     Running tests/arch_compile_gates.rs (/root/target-ada-rna-wide-force-20260906/release/deps/arch_compile_gates-4a95865368ee0138)
+
+running 1 test
+test fixed_sm89_exact_n64_copyplan_nvrtc_ptx_and_zero_spill_resources ... SM89 Fixed exact N64 copy-plan: registers=135 static_shared=32768 stack=0 spills=0
+SM89 Fixed RNA-wide: registers=153 static_shared=0 stack=0 spills=0
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 56 filtered out; finished in 32.63s
+

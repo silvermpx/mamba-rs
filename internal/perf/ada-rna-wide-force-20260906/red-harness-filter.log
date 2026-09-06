@@ -1,0 +1,20 @@
+   Compiling cudarc v0.19.9
+   Compiling mamba-rs v0.6.9 (/root/mamba-ada-rna-harness-red-d5jlA2)
+    Finished `release` profile [optimized] target(s) in 45.67s
+     Running tests/gemm_bi_fixed_performance.rs (/root/target-ada-rna-harness-red-d5jlA2/release/deps/gemm_bi_fixed_performance-429f558dd590762a)
+
+running 1 test
+test fixed_explicit_vendor_rna_wide_force_filter_is_ada_tf32_only ... 
+thread 'fixed_explicit_vendor_rna_wide_force_filter_is_ada_tf32_only' (242850) panicked at tests/gemm_bi_fixed_performance.rs:11417:6:
+RNA-compatible wide must be reachable through the Ada TF32 census: "unknown MAMBA_FIXED_VENDOR_TILES entry \"Tf32RnaM128N128S3\"; expected [Tf32M128S2, Tf32M128S3, Tf32M128N128S3, Tf32M64S2, Tf32M64S3, Tf32M16S4]"
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+
+failures:
+    fixed_explicit_vendor_rna_wide_force_filter_is_ada_tf32_only
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 102 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--test gemm_bi_fixed_performance`

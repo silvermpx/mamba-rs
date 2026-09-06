@@ -1,0 +1,18 @@
+    Finished `release` profile [optimized] target(s) in 0.07s
+     Running tests/gemm_bi_fixed_performance.rs (/root/target-ada-rna-wide-force-20260906/release/deps/gemm_bi_fixed_performance-429f558dd590762a)
+
+running 1 test
+test fixed_ada_forced_rungs_paired_precision_cublas ... 
+thread 'fixed_ada_forced_rungs_paired_precision_cublas' (253904) panicked at tests/gemm_bi_fixed_performance.rs:10430:29:
+unknown MAMBA_FIXED_ADA_CELLS entry "A"; expected ["hot_a", "hot_b", "hot_c", "hot_d", "hot_e"]
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+
+failures:
+    fixed_ada_forced_rungs_paired_precision_cublas
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 104 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--test gemm_bi_fixed_performance`

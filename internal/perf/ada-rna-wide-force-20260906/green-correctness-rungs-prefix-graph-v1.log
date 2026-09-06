@@ -1,0 +1,12 @@
+
+running 1 test
+test fixed_tf32_rna_wide_matches_all_fixed_rungs_prefix_views_and_graph_bits ... mamba-rs cache trace: Fixed arch=sm_89 key=4e99acb556ad1f6bb2aafa382f1618db9c9ecf37286fa7da37a62d86399c14ce path=Some("/root/mamba-kcache-ada-rna-wide-force-20260906/mamba-kernels-v1-4e99acb556ad1f6bb2aafa382f1618db9c9ecf37286fa7da37a62d86399c14ce.bin") source_len=669594
+mamba-rs cache trace: Fixed hit artifact=c6dc1ee707ceceb512b58f226f8b5288097162c5257c41ef89a2e235fda1945f
+mamba-rs cache trace: TriadScalar arch=sm_89 key=822ebf0dda7dcf9c4f5c5a2213884dde42ab45f5cf238479a81856042c302b7c path=Some("/root/mamba-kcache-ada-rna-wide-force-20260906/mamba-kernels-v1-822ebf0dda7dcf9c4f5c5a2213884dde42ab45f5cf238479a81856042c302b7c.bin") source_len=360564
+mamba-rs cache trace: TriadScalar hit artifact=7229de42e3562611fe451092c3a92d540e2908920b1fbac49a37cfe81e682096
+mamba-rs cache trace: TriadSm80 arch=sm_89 key=3809af034718aa08dfdfc1b6baeb407715436dc7db87ef39825b033c2fd72541 path=Some("/root/mamba-kcache-ada-rna-wide-force-20260906/mamba-kernels-v1-3809af034718aa08dfdfc1b6baeb407715436dc7db87ef39825b033c2fd72541.bin") source_len=268383
+mamba-rs cache trace: TriadSm80 hit artifact=c5cbde99978b9656cfbd824d9d13b35c7573554f240ef5e38e8775d013704e0c
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 2.77s
+
