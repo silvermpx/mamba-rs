@@ -417,6 +417,7 @@ pub struct GpuCtx {
     sm100_prepared_launches: RefCell<Sm100PreparedLaunchCache>,
     sm90a_prepared_launches: RefCell<Sm90aPreparedLaunchCache>,
     pub(crate) fixed_tf32_maps: RefCell<super::gemm_bi_fixed::FixedTf32MapCache>,
+    pub(crate) fixed_postbias_maps: RefCell<super::gemm_bi_fixed::FixedPostBiasMapCache>,
     pub(crate) fixed_half_maps: RefCell<super::gemm_bi_fixed::FixedHalfMapCache>,
     /// Opt-in flag for deterministic batch-invariant GEMM dispatch.
     /// Default: `false` uses cuBLAS. Set via `set_batch_invariant(true)` or
@@ -644,6 +645,9 @@ impl GpuCtx {
             sm100_prepared_launches: RefCell::new(Sm100PreparedLaunchCache::default()),
             sm90a_prepared_launches: RefCell::new(Sm90aPreparedLaunchCache::default()),
             fixed_tf32_maps: RefCell::new(super::gemm_bi_fixed::FixedTf32MapCache::default()),
+            fixed_postbias_maps: RefCell::new(
+                super::gemm_bi_fixed::FixedPostBiasMapCache::default(),
+            ),
             fixed_half_maps: RefCell::new(super::gemm_bi_fixed::FixedHalfMapCache::default()),
             batch_invariant: std::cell::Cell::new(false),
             bi_tensor_cores: std::cell::Cell::new(false),

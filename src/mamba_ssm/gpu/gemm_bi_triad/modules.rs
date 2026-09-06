@@ -17,7 +17,8 @@ use crate::mamba_ssm::gpu::kernel_identity::{
 
 use super::super::buffers::{cu_memcpy_dtoh_raw, cu_memcpy_htod_raw};
 use super::super::kernels::{
-    CudaModuleAnchors, HalfKernel, cuda_include_paths, kernel_cache_dir, nvrtc_version,
+    CudaModuleAnchors, FixedSm120FmaPostbiasKernels, HalfKernel, cuda_include_paths,
+    kernel_cache_dir, nvrtc_version,
 };
 
 const TF32_EXCEPTIONAL_PROBE_BITS: [u32; 10] = [
@@ -488,6 +489,7 @@ pub(crate) struct CompiledModule {
     fixed_sm89_exact_n64_driver_abi: Result<BTreeMap<&'static str, Tf32DriverAbi>, String>,
     fixed_sm120_exact_n64_driver_abi: Result<BTreeMap<&'static str, Tf32DriverAbi>, String>,
     fixed_sm120_sliced_driver_abi: Result<BTreeMap<&'static str, Tf32DriverAbi>, String>,
+    fixed_sm120_postbias_driver_abi: Result<BTreeMap<&'static str, Tf32DriverAbi>, String>,
 }
 
 /// A TF32 symbol the loaded module cannot serve on this toolkit: the
@@ -676,6 +678,12 @@ pub(crate) fn compile_module(request: CompileModuleRequest<'_>) -> Result<Compil
             request.arch,
             &src,
         );
+        let fixed_sm120_postbias_abi = census_fixed_sm120_postbias_driver_abi(
+            request.ctx,
+            request.module_kind,
+            request.arch,
+            &src,
+        );
         let validation = validate_tf32_specialization(request.module_kind, request.arch, &src);
         let (tf32_driver_abi, tf32_qualification_error) =
             tf32_qualification_verdict(request.module_kind, extensions, census, validation);
@@ -695,6 +703,7 @@ pub(crate) fn compile_module(request: CompileModuleRequest<'_>) -> Result<Compil
             fixed_exact_n64_abi,
             fixed_sm120_exact_n64_abi,
             fixed_sm120_sliced_abi,
+            fixed_sm120_postbias_abi,
         ));
     }
 
@@ -707,6 +716,7 @@ pub(crate) fn compile_module(request: CompileModuleRequest<'_>) -> Result<Compil
         fixed_sm89_exact_n64_driver_abi,
         fixed_sm120_exact_n64_driver_abi,
         fixed_sm120_sliced_driver_abi,
+        fixed_sm120_postbias_driver_abi,
     ) = match loaded {
         Some(value) => value,
         None => {
@@ -749,6 +759,12 @@ pub(crate) fn compile_module(request: CompileModuleRequest<'_>) -> Result<Compil
                 &ptx_source,
             );
             let fixed_sm120_sliced_abi = census_fixed_sm120_sliced_driver_abi(
+                request.ctx,
+                request.module_kind,
+                request.arch,
+                &ptx_source,
+            );
+            let fixed_sm120_postbias_abi = census_fixed_sm120_postbias_driver_abi(
                 request.ctx,
                 request.module_kind,
                 request.arch,
@@ -821,6 +837,7 @@ pub(crate) fn compile_module(request: CompileModuleRequest<'_>) -> Result<Compil
                 fixed_exact_n64_abi,
                 fixed_sm120_exact_n64_abi,
                 fixed_sm120_sliced_abi,
+                fixed_sm120_postbias_abi,
             )
         }
     };
@@ -859,6 +876,7 @@ pub(crate) fn compile_module(request: CompileModuleRequest<'_>) -> Result<Compil
         fixed_sm89_exact_n64_driver_abi,
         fixed_sm120_exact_n64_driver_abi,
         fixed_sm120_sliced_driver_abi,
+        fixed_sm120_postbias_driver_abi,
     })
 }
 
@@ -1457,7 +1475,8 @@ fn validate_module_ptx(module_kind: ModuleKind, arch: &str, ptx: &str) -> Result
             validate_fixed_sm89_half_ptx(arch, ptx)?;
             validate_fixed_sm89_exact_n64_ptx(arch, ptx)?;
             validate_fixed_sm120_exact_n64_ptx(arch, ptx)?;
-            validate_fixed_sm120_sliced_ptx(arch, ptx)
+            validate_fixed_sm120_sliced_ptx(arch, ptx)?;
+            validate_fixed_sm120_postbias_ptx(arch, ptx)
         }
         ModuleKind::TriadScalar => {
             validate_exact_ptx_exports("TriadScalar", SCALAR_SYMBOLS.len(), SCALAR_SYMBOLS, ptx)?;
@@ -1737,12 +1756,218 @@ fn fixed_sm89_exact_n64_composed(arch: &str) -> bool {
 }
 
 const FIXED_SM120_EXACT_N64_SYMBOL: &str = "gemm_bi_nn_fixed_sm120_f32_n64_copyplan_v1";
+const FIXED_SM120_COPYPLAN_T256_SYMBOL: &str = "gemm_bi_nn_fixed_sm120_f32_n64_copyplan_t256_v1";
+const FIXED_SM120_COPYPLAN_M128_T256_SYMBOL: &str =
+    "gemm_bi_nn_fixed_sm120_f32_n64_copyplan_m128n64_t256_v1";
 
 fn fixed_sm120_exact_n64_composed(arch: &str) -> bool {
     arch == "compute_120"
 }
 
 const FIXED_SM120_SLICED_SYMBOL: &str = "gemm_bi_nn_fixed_sm120_f32_n64_sliced_v1";
+const FIXED_SM120_POSTBIAS_SYMBOLS: [&str; 6] = [
+    "gemm_bi_nn_sm120_tma_fma_v1_fixed_postbias_m128n64_bk16_s2",
+    "gemm_bi_nn_sm120_tma_fma_v1_fixed_postbias_m64n128_bk16_s2",
+    "gemm_bi_nn_sm120_tma_fma_v1_fixed_postbias_m128n96_bk16_s2",
+    "gemm_bi_nn_sm120_tma_fma_v1_fixed_postbias_m128n64_bk16_s2_k4",
+    "gemm_bi_nn_sm120_tma_fma_v1_fixed_postbias_m128n64_t256_bk16_s2",
+    "gemm_bi_nn_sm120_tma_fma_v1_fixed_nobias_m128n64_t256_bk16_s2",
+];
+const FIXED_SM120_POSTBIAS_REGISTER_CAP: i32 = 168;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct FixedSm120PostbiasLaunchContract {
+    threads: u32,
+    dynamic_shared: usize,
+    min_active_blocks: u32,
+}
+
+fn fixed_sm120_postbias_launch_contract(
+    symbol: &str,
+) -> Result<FixedSm120PostbiasLaunchContract, String> {
+    match symbol {
+        "gemm_bi_nn_sm120_tma_fma_v1_fixed_postbias_m128n64_bk16_s2"
+        | "gemm_bi_nn_sm120_tma_fma_v1_fixed_postbias_m128n64_bk16_s2_k4"
+        | "gemm_bi_nn_sm120_tma_fma_v1_fixed_postbias_m64n128_bk16_s2" => {
+            Ok(FixedSm120PostbiasLaunchContract {
+                threads: 128,
+                dynamic_shared: 24_592,
+                min_active_blocks: 3,
+            })
+        }
+        "gemm_bi_nn_sm120_tma_fma_v1_fixed_postbias_m128n64_t256_bk16_s2"
+        | "gemm_bi_nn_sm120_tma_fma_v1_fixed_nobias_m128n64_t256_bk16_s2" => {
+            Ok(FixedSm120PostbiasLaunchContract {
+                threads: 256,
+                dynamic_shared: 24_592,
+                min_active_blocks: 3,
+            })
+        }
+        "gemm_bi_nn_sm120_tma_fma_v1_fixed_postbias_m128n96_bk16_s2" => {
+            Ok(FixedSm120PostbiasLaunchContract {
+                threads: 256,
+                dynamic_shared: 28_688,
+                min_active_blocks: 3,
+            })
+        }
+        _ => Err(format!(
+            "{symbol} has no Fixed SM120 post-dot-bias launch contract"
+        )),
+    }
+}
+
+fn fixed_sm120_tensor_map_alignment_for_cuda_major(cuda_major: i32) -> Result<usize, String> {
+    match cuda_major {
+        12 => Ok(64),
+        13 => Ok(128),
+        major => Err(format!("unsupported CUDA tensor-map ABI major {major}")),
+    }
+}
+
+fn validate_fixed_sm120_postbias_ptx_for_cuda_major(
+    arch: &str,
+    ptx: &str,
+    cuda_major: i32,
+) -> Result<(), String> {
+    let parsed = parse_ptx(ptx)?;
+    let actual: Vec<_> = parsed
+        .entries
+        .iter()
+        .filter(|entry| entry.symbol.contains("_sm120_tma_fma_v1_fixed_"))
+        .collect();
+    if !fixed_sm120_exact_n64_composed(arch) {
+        return if actual.is_empty() {
+            Ok(())
+        } else {
+            Err(format!(
+                "Fixed SM120 post-dot-bias exports are foreign on {arch}"
+            ))
+        };
+    }
+    let expected: BTreeSet<_> = FIXED_SM120_POSTBIAS_SYMBOLS.into_iter().collect();
+    let symbols: Vec<_> = actual.iter().map(|entry| entry.symbol.as_str()).collect();
+    let unique: BTreeSet<_> = symbols.iter().copied().collect();
+    if symbols.len() != expected.len() || unique != expected {
+        return Err("Fixed SM120 exact-FMA requires exactly its six unique v1 exports".into());
+    }
+    let tensor_map_alignment =
+        fixed_sm120_tensor_map_alignment_for_cuda_major(cuda_major)?.to_string();
+
+    for entry in actual {
+        let symbol = entry.symbol.as_str();
+        let launch = fixed_sm120_postbias_launch_contract(symbol)?;
+        let header = entry
+            .text
+            .split_once('{')
+            .map(|(header, _)| header)
+            .ok_or_else(|| format!("{symbol} has no PTX body"))?;
+        let tokens = ptx_tokens(header);
+        let text: Vec<_> = tokens.iter().map(|token| token.text).collect();
+        let begin = text
+            .iter()
+            .position(|token| *token == "(")
+            .ok_or_else(|| format!("{symbol} has no PTX parameters"))?;
+        let end = text
+            .iter()
+            .position(|token| *token == ")")
+            .ok_or_else(|| format!("{symbol} has no PTX parameter end"))?;
+        if end <= begin {
+            return Err(format!("{symbol} has malformed PTX parameters"));
+        }
+        let declarations: Vec<_> = text[begin + 1..end].split(|token| *token == ",").collect();
+        let u64_pointer = |decl: &&[&str]| {
+            (decl.len() == 3 && decl[..2] == [".param", ".u64"])
+                || (decl.len() == 6 && decl[..5] == [".param", ".u64", ".ptr", ".align", "1"])
+        };
+        let tensor_map = |decl: &&[&str]| {
+            decl.len() == 8
+                && decl[0] == ".param"
+                && decl[1] == ".align"
+                && decl[2] == tensor_map_alignment
+                && decl[3] == ".b8"
+                && decl[5..] == ["[", "128", "]"]
+        };
+        let bundle = |decl: &&[&str]| {
+            decl.len() == 8
+                && decl[..4] == [".param", ".align", "4", ".b8"]
+                && decl[5..] == ["[", "32", "]"]
+        };
+        if declarations.len() != 7
+            || !declarations[..3].iter().all(u64_pointer)
+            || !declarations[3..5].iter().all(tensor_map)
+            || !u64_pointer(&declarations[5])
+            || !bundle(&declarations[6])
+        {
+            return Err(format!(
+                "{symbol} requires three pointers, two by-value tensor maps, a bias pointer, and an align-4 32-byte bundle"
+            ));
+        }
+        for directive in [".maxntid", ".minnctapersm"] {
+            let positions: Vec<_> = text
+                .iter()
+                .enumerate()
+                .filter_map(|(index, token)| (*token == directive).then_some(index))
+                .collect();
+            if positions.len() != 1 {
+                return Err(format!("{symbol} has the wrong {directive} launch bound"));
+            }
+            let values: Vec<_> = text[positions[0] + 1..]
+                .iter()
+                .copied()
+                .take_while(|token| !token.starts_with('.'))
+                .collect();
+            let valid = match directive {
+                ".maxntid" => {
+                    let threads = launch.threads.to_string();
+                    values == [threads.as_str()] || values == [threads.as_str(), ",", "1", ",", "1"]
+                }
+                _ => values == [launch.min_active_blocks.to_string().as_str()],
+            };
+            if !valid {
+                return Err(format!("{symbol} has the wrong {directive} launch bound"));
+            }
+        }
+        for required in [
+            "cp.async.bulk.tensor.2d.shared::cta.global.tile.mbarrier::complete_tx::bytes",
+            "fma.rn.f32",
+            "mul.rn.f32",
+        ] {
+            if !ptx_has_unquoted_token(&entry.body, |token| token == required) {
+                return Err(format!("{symbol} is missing {required}"));
+            }
+        }
+        let has_bias = !symbol.contains("_fixed_nobias_");
+        if has_bias != ptx_has_unquoted_token(&entry.body, |token| token == "add.rn.f32") {
+            return Err(format!("{symbol} has the wrong bias epilogue"));
+        }
+        if ptx_has_unquoted_token(&entry.body, |token| {
+            token == ".local"
+                || token.starts_with("ld.local")
+                || token.starts_with("st.local")
+                || token.starts_with("mma.")
+                || token.starts_with("wmma.")
+                || token.split('.').any(|part| part == "tf32" || part == "ftz")
+                || token.starts_with("atom.")
+                || token.starts_with("atom::")
+                || token.starts_with("red.")
+                || token.starts_with("red::")
+                || token.starts_with("redux.")
+                || token == "call"
+                || token.starts_with("call.")
+                || token == ".callprototype"
+                || token == ".calltargets"
+        }) {
+            return Err(format!(
+                "{symbol} contains local, tensor, reduction, FTZ, or device-call work"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_fixed_sm120_postbias_ptx(arch: &str, ptx: &str) -> Result<(), String> {
+    validate_fixed_sm120_postbias_ptx_for_cuda_major(arch, ptx, nvrtc_version().0)
+}
 
 fn validate_fixed_sm120_sliced_ptx(arch: &str, ptx: &str) -> Result<(), String> {
     let parsed = parse_ptx(ptx)?;
@@ -1874,92 +2099,115 @@ fn validate_fixed_sm120_exact_n64_ptx(arch: &str, ptx: &str) -> Result<(), Strin
             ))
         };
     }
-    if actual.len() != 1 || actual[0].symbol != FIXED_SM120_EXACT_N64_SYMBOL {
-        return Err("Fixed SM120 exact N64 requires exactly its unique v1 export".into());
-    }
-    let entry = actual[0];
-    let symbol = FIXED_SM120_EXACT_N64_SYMBOL;
-    let header = entry
-        .text
-        .split_once('{')
-        .map(|(header, _)| header)
-        .ok_or_else(|| format!("{symbol} has no PTX body"))?;
-    let tokens = ptx_tokens(header);
-    let text: Vec<_> = tokens.iter().map(|token| token.text).collect();
-    let begin = text
-        .iter()
-        .position(|token| *token == "(")
-        .ok_or_else(|| format!("{symbol} has no PTX parameters"))?;
-    let end = text
-        .iter()
-        .position(|token| *token == ")")
-        .ok_or_else(|| format!("{symbol} has no PTX parameter end"))?;
-    if end <= begin {
-        return Err(format!("{symbol} has malformed PTX parameters"));
-    }
-    let declarations: Vec<_> = text[begin + 1..end].split(|token| *token == ",").collect();
-    let pointer_decl = |decl: &&[&str]| {
-        (decl.len() == 3 && decl[..2] == [".param", ".u64"])
-            || (decl.len() == 6 && decl[..5] == [".param", ".u64", ".ptr", ".align", "1"])
-    };
-    if declarations.len() != 5
-        || !declarations[..4].iter().all(pointer_decl)
-        || declarations[4].len() != 8
-        || declarations[4][..4] != [".param", ".align", "4", ".b8"]
-        || declarations[4][5..] != ["[", "32", "]"]
+    let expected: BTreeSet<_> = [
+        FIXED_SM120_EXACT_N64_SYMBOL,
+        FIXED_SM120_COPYPLAN_T256_SYMBOL,
+        FIXED_SM120_COPYPLAN_M128_T256_SYMBOL,
+    ]
+    .into_iter()
+    .collect();
+    if actual.len() != 3
+        || actual
+            .iter()
+            .map(|entry| entry.symbol.as_str())
+            .collect::<BTreeSet<_>>()
+            != expected
     {
-        return Err(format!(
-            "{symbol} requires four pointers and an align-4 32-byte bundle"
-        ));
+        return Err(
+            "Fixed SM120 exact N64 requires exactly its control and two T256 exports".into(),
+        );
     }
-    for directive in [".maxntid", ".minnctapersm"] {
-        let positions: Vec<_> = text
-            .iter()
-            .enumerate()
-            .filter_map(|(index, token)| (*token == directive).then_some(index))
-            .collect();
-        if positions.len() != 1 {
-            return Err(format!("{symbol} has the wrong {directive} launch bound"));
-        }
-        let values: Vec<_> = text[positions[0] + 1..]
-            .iter()
-            .copied()
-            .take_while(|token| !token.starts_with('.'))
-            .collect();
-        let valid = match directive {
-            ".maxntid" => values == ["128"] || values == ["128", ",", "1", ",", "1"],
-            _ => values == ["2"],
+    for entry in actual {
+        let symbol = entry.symbol.as_str();
+        let (threads, min_blocks) = if symbol == FIXED_SM120_COPYPLAN_T256_SYMBOL {
+            ("256", "3")
+        } else if symbol == FIXED_SM120_COPYPLAN_M128_T256_SYMBOL {
+            ("256", "2")
+        } else {
+            ("128", "2")
         };
-        if !valid {
-            return Err(format!("{symbol} has the wrong {directive} launch bound"));
+        let header = entry
+            .text
+            .split_once('{')
+            .map(|(header, _)| header)
+            .ok_or_else(|| format!("{symbol} has no PTX body"))?;
+        let tokens = ptx_tokens(header);
+        let text: Vec<_> = tokens.iter().map(|token| token.text).collect();
+        let begin = text
+            .iter()
+            .position(|token| *token == "(")
+            .ok_or_else(|| format!("{symbol} has no PTX parameters"))?;
+        let end = text
+            .iter()
+            .position(|token| *token == ")")
+            .ok_or_else(|| format!("{symbol} has no PTX parameter end"))?;
+        if end <= begin {
+            return Err(format!("{symbol} has malformed PTX parameters"));
         }
-    }
-    for required in [
-        "fma.rn.f32",
-        "cp.async.cg.shared.global",
-        "cp.async.commit_group",
-        "cp.async.wait_group",
-    ] {
-        if !ptx_has_unquoted_token(&entry.body, |token| token == required) {
-            return Err(format!("{symbol} is missing {required}"));
+        let declarations: Vec<_> = text[begin + 1..end].split(|token| *token == ",").collect();
+        let pointer_decl = |decl: &&[&str]| {
+            (decl.len() == 3 && decl[..2] == [".param", ".u64"])
+                || (decl.len() == 6 && decl[..5] == [".param", ".u64", ".ptr", ".align", "1"])
+        };
+        if declarations.len() != 5
+            || !declarations[..4].iter().all(pointer_decl)
+            || declarations[4].len() != 8
+            || declarations[4][..4] != [".param", ".align", "4", ".b8"]
+            || declarations[4][5..] != ["[", "32", "]"]
+        {
+            return Err(format!(
+                "{symbol} requires four pointers and an align-4 32-byte bundle"
+            ));
         }
-    }
-    if ptx_has_unquoted_token(&entry.body, |token| {
-        token == ".local"
-            || token.starts_with("ld.local")
-            || token.starts_with("st.local")
-            || token.starts_with("mma.")
-            || token.starts_with("wmma.")
-            || token.split('.').any(|part| part == "tf32" || part == "ftz")
-            || token.starts_with("atom.")
-            || token.starts_with("atom::")
-            || token.starts_with("red.")
-            || token.starts_with("red::")
-            || token.starts_with("redux.")
-    }) {
-        return Err(format!(
-            "{symbol} contains local, tensor, reduction, or FTZ work"
-        ));
+        for directive in [".maxntid", ".minnctapersm"] {
+            let positions: Vec<_> = text
+                .iter()
+                .enumerate()
+                .filter_map(|(index, token)| (*token == directive).then_some(index))
+                .collect();
+            if positions.len() != 1 {
+                return Err(format!("{symbol} has the wrong {directive} launch bound"));
+            }
+            let values: Vec<_> = text[positions[0] + 1..]
+                .iter()
+                .copied()
+                .take_while(|token| !token.starts_with('.'))
+                .collect();
+            let valid = match directive {
+                ".maxntid" => values == [threads] || values == [threads, ",", "1", ",", "1"],
+                _ => values == [min_blocks],
+            };
+            if !valid {
+                return Err(format!("{symbol} has the wrong {directive} launch bound"));
+            }
+        }
+        for required in [
+            "fma.rn.f32",
+            "cp.async.cg.shared.global",
+            "cp.async.commit_group",
+            "cp.async.wait_group",
+        ] {
+            if !ptx_has_unquoted_token(&entry.body, |token| token == required) {
+                return Err(format!("{symbol} is missing {required}"));
+            }
+        }
+        if ptx_has_unquoted_token(&entry.body, |token| {
+            token == ".local"
+                || token.starts_with("ld.local")
+                || token.starts_with("st.local")
+                || token.starts_with("mma.")
+                || token.starts_with("wmma.")
+                || token.split('.').any(|part| part == "tf32" || part == "ftz")
+                || token.starts_with("atom.")
+                || token.starts_with("atom::")
+                || token.starts_with("red.")
+                || token.starts_with("red::")
+                || token.starts_with("redux.")
+        }) {
+            return Err(format!(
+                "{symbol} contains local, tensor, reduction, or FTZ work"
+            ));
+        }
     }
     Ok(())
 }
@@ -2141,17 +2389,27 @@ fn census_fixed_sm120_exact_n64_driver_abi(
     let module = DriverModule::load(ctx, ptx)?;
     let get: GetParamInfo =
         unsafe { std::mem::transmute(driver_proc_address("cuFuncGetParamInfo", 12_040)?) };
-    let symbol = FIXED_SM120_EXACT_N64_SYMBOL;
-    let function = unsafe {
-        cudarc::driver::result::module::get_function(module.raw(), CString::new(symbol).unwrap())
+    let mut census = BTreeMap::new();
+    for symbol in [
+        FIXED_SM120_EXACT_N64_SYMBOL,
+        FIXED_SM120_COPYPLAN_T256_SYMBOL,
+        FIXED_SM120_COPYPLAN_M128_T256_SYMBOL,
+    ] {
+        let function = unsafe {
+            cudarc::driver::result::module::get_function(
+                module.raw(),
+                CString::new(symbol).unwrap(),
+            )
+        }
+        .map_err(|error| format!("load Fixed/{symbol} for Driver ABI: {error:?}"))?;
+        let abi = query_driver_parameter_abi(symbol, 5, |index, offset, size| unsafe {
+            get(function, index, offset, size)
+        })?;
+        validate_fixed_sm89_exact_n64_driver_abi(symbol, &abi)?;
+        census.insert(symbol, abi);
     }
-    .map_err(|error| format!("load Fixed/{symbol} for Driver ABI: {error:?}"))?;
-    let abi = query_driver_parameter_abi(symbol, 5, |index, offset, size| unsafe {
-        get(function, index, offset, size)
-    })?;
-    validate_fixed_sm89_exact_n64_driver_abi(symbol, &abi)?;
     module.unload()?;
-    Ok(BTreeMap::from([(symbol, abi)]))
+    Ok(census)
 }
 
 fn census_fixed_sm120_sliced_driver_abi(
@@ -2185,6 +2443,92 @@ fn census_fixed_sm120_sliced_driver_abi(
     Ok(BTreeMap::from([(symbol, abi)]))
 }
 
+fn validate_fixed_sm120_postbias_driver_abi_for_cuda_major(
+    symbol: &str,
+    abi: &Tf32DriverAbi,
+    cuda_major: i32,
+) -> Result<(), String> {
+    const CUDA_12: [(usize, usize); 7] = [
+        (0, 8),
+        (8, 8),
+        (16, 8),
+        (64, 128),
+        (192, 128),
+        (320, 8),
+        (328, 32),
+    ];
+    const CUDA_13: [(usize, usize); 7] = [
+        (0, 8),
+        (8, 8),
+        (16, 8),
+        (128, 128),
+        (256, 128),
+        (384, 8),
+        (392, 32),
+    ];
+    let (expected, terminal_bytes) = match cuda_major {
+        12 => (&CUDA_12, 360),
+        13 => (&CUDA_13, 424),
+        major => return Err(format!("unsupported CUDA tensor-map ABI major {major}")),
+    };
+    if abi.parameter_count() != expected.len()
+        || !abi
+            .parameters()
+            .iter()
+            .zip(expected)
+            .all(|(actual, expected)| (actual.offset(), actual.size()) == *expected)
+    {
+        return Err(format!(
+            "{symbol} has the wrong live seven-argument/{terminal_bytes}-byte Driver ABI"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_fixed_sm120_postbias_driver_abi(
+    symbol: &str,
+    abi: &Tf32DriverAbi,
+) -> Result<(), String> {
+    validate_fixed_sm120_postbias_driver_abi_for_cuda_major(symbol, abi, nvrtc_version().0)
+}
+
+fn census_fixed_sm120_postbias_driver_abi(
+    ctx: &CudaContext,
+    kind: ModuleKind,
+    arch: &str,
+    ptx: &str,
+) -> Result<BTreeMap<&'static str, Tf32DriverAbi>, String> {
+    if kind != ModuleKind::Fixed || !fixed_sm120_exact_n64_composed(arch) {
+        return Ok(BTreeMap::new());
+    }
+    type GetParamInfo = unsafe extern "C" fn(
+        cudarc::driver::sys::CUfunction,
+        usize,
+        *mut usize,
+        *mut usize,
+    ) -> cudarc::driver::sys::CUresult;
+    let module = DriverModule::load(ctx, ptx)?;
+    let get: GetParamInfo =
+        unsafe { std::mem::transmute(driver_proc_address("cuFuncGetParamInfo", 12_040)?) };
+    let mut census = BTreeMap::new();
+    for symbol in FIXED_SM120_POSTBIAS_SYMBOLS {
+        let function = unsafe {
+            cudarc::driver::result::module::get_function(
+                module.raw(),
+                CString::new(symbol).unwrap(),
+            )
+        }
+        .map_err(|error| format!("load Fixed/{symbol} for Driver ABI: {error:?}"))?;
+        let abi = query_driver_parameter_abi(symbol, 7, |index, offset, size| unsafe {
+            get(function, index, offset, size)
+        })?;
+        validate_fixed_sm120_postbias_driver_abi(symbol, &abi)?;
+        census.insert(symbol, abi);
+    }
+    module.unload()?;
+    Ok(census)
+}
+
 #[derive(Clone, Copy)]
 struct FixedSm89ExactN64Resources {
     local_bytes: i32,
@@ -2193,6 +2537,41 @@ struct FixedSm89ExactN64Resources {
     max_threads: i32,
     active_blocks: u32,
     preferred_carveout: i32,
+}
+
+#[derive(Clone, Copy)]
+struct FixedSm120PostbiasResources {
+    local_bytes: i32,
+    registers: i32,
+    max_threads: i32,
+    active_blocks: u32,
+}
+
+fn validate_fixed_sm120_postbias_resources(
+    symbol: &str,
+    resources: FixedSm120PostbiasResources,
+) -> Result<(), String> {
+    let launch = fixed_sm120_postbias_launch_contract(symbol)?;
+    let register_cap = match symbol {
+        // Three 256-thread CTAs must fit within 65,536 registers.
+        "gemm_bi_nn_sm120_tma_fma_v1_fixed_postbias_m128n64_t256_bk16_s2"
+        | "gemm_bi_nn_sm120_tma_fma_v1_fixed_nobias_m128n64_t256_bk16_s2" => 85,
+        _ => FIXED_SM120_POSTBIAS_REGISTER_CAP,
+    };
+    if resources.local_bytes != 0
+        || !(1..=register_cap).contains(&resources.registers)
+        || resources.max_threads < launch.threads as i32
+        || resources.active_blocks < launch.min_active_blocks
+    {
+        return Err(format!(
+            "{symbol} resource admission declined: local={} registers={} max_threads={} active_blocks={}",
+            resources.local_bytes,
+            resources.registers,
+            resources.max_threads,
+            resources.active_blocks,
+        ));
+    }
+    Ok(())
 }
 
 fn validate_fixed_sm89_exact_n64_resources(
@@ -2219,6 +2598,7 @@ fn validate_fixed_sm89_exact_n64_resources(
     Ok(())
 }
 
+#[cfg(test)]
 fn validate_fixed_sm120_exact_n64_resources(
     resources: FixedSm89ExactN64Resources,
 ) -> Result<(), String> {
@@ -2229,11 +2609,20 @@ fn validate_fixed_sm120_exact_n64_resources_for(
     symbol: &str,
     resources: FixedSm89ExactN64Resources,
 ) -> Result<(), String> {
+    let (register_cap, threads, shared, blocks) = if symbol == FIXED_SM120_COPYPLAN_M128_T256_SYMBOL
+    {
+        // Prefer <=120; hard two-CTA budget: 2 * 256 * 128 = 65,536 registers.
+        (128, 256, 49_152, 2)
+    } else if symbol == FIXED_SM120_COPYPLAN_T256_SYMBOL {
+        (85, 256, 32_768, 3)
+    } else {
+        (160, 128, 32_768, 3)
+    };
     if resources.local_bytes != 0
-        || !(1..=160).contains(&resources.registers)
-        || resources.static_shared_bytes != FIXED_SM89_EXACT_N64_STATIC_SHARED
-        || resources.max_threads < FIXED_SM89_EXACT_N64_THREADS as i32
-        || resources.active_blocks < 3
+        || !(1..=register_cap).contains(&resources.registers)
+        || resources.static_shared_bytes != shared
+        || resources.max_threads < threads
+        || resources.active_blocks < blocks
         || resources.preferred_carveout != 100
     {
         return Err(format!(
@@ -2248,6 +2637,103 @@ fn validate_fixed_sm120_exact_n64_resources_for(
         ));
     }
     Ok(())
+}
+
+/// Optional Fixed-owned SM120 exact-FMA post-dot-bias tiles. ABI and control
+/// resource failures decline this holder without affecting mandatory Fixed
+/// kernels or exact copy-plan routes. K4 and T256 resource failures decline
+/// only the corresponding force-only twin.
+pub(crate) fn load_fixed_sm120_fma_postbias(
+    ctx: &CudaContext,
+    module: &CompiledModule,
+) -> (Option<FixedSm120FmaPostbiasKernels>, Option<String>) {
+    let admitted = (|| -> Result<FixedSm120FmaPostbiasKernels, String> {
+        if module.artifact_identity.module_kind != ModuleKind::Fixed
+            || module.compiler_identity.target.as_str() != "compute_120"
+            || ctx
+                .compute_capability()
+                .map_err(|error| format!("query Fixed SM120 postbias CC: {error:?}"))?
+                != (12, 0)
+        {
+            return Err(
+                "Fixed SM120 post-dot-bias is only composed for compute_120 and admitted on CC12.0"
+                    .into(),
+            );
+        }
+        let census = module
+            .fixed_sm120_postbias_driver_abi
+            .as_ref()
+            .map_err(Clone::clone)?;
+        let load = |symbol| -> Result<CudaFunction, String> {
+            let launch = fixed_sm120_postbias_launch_contract(symbol)?;
+            validate_fixed_sm120_postbias_driver_abi(
+                symbol,
+                census
+                    .get(symbol)
+                    .ok_or_else(|| format!("{symbol} has no live Driver ABI census"))?,
+            )?;
+            let function = load_function(&module.module, ModuleKind::Fixed, symbol)?;
+            set_dynamic_shared(
+                &function,
+                symbol,
+                i32::try_from(launch.dynamic_shared)
+                    .map_err(|_| format!("{symbol} dynamic shared memory exceeds i32::MAX"))?,
+            )?;
+            let query_error = |label, error| format!("query {symbol} {label}: {error:?}");
+            let resources = FixedSm120PostbiasResources {
+                local_bytes: function
+                    .local_size_bytes()
+                    .map_err(|error| query_error("local", error))?,
+                registers: function
+                    .num_regs()
+                    .map_err(|error| query_error("registers", error))?,
+                max_threads: function
+                    .max_threads_per_block()
+                    .map_err(|error| query_error("threads", error))?,
+                active_blocks: function
+                    .occupancy_max_active_blocks_per_multiprocessor(
+                        launch.threads,
+                        launch.dynamic_shared,
+                        None,
+                    )
+                    .map_err(|error| query_error("occupancy", error))?,
+            };
+            validate_fixed_sm120_postbias_resources(symbol, resources)?;
+            Ok(function)
+        };
+        let m128n64 = load(FIXED_SM120_POSTBIAS_SYMBOLS[0])?;
+        let m64n128 = load(FIXED_SM120_POSTBIAS_SYMBOLS[1])?;
+        let m128n96 = load(FIXED_SM120_POSTBIAS_SYMBOLS[2])?;
+        // A force-only candidate resource miss must not disable qualified AUTO.
+        let (m128n64_k4, m128n64_k4_rejection) = match load(FIXED_SM120_POSTBIAS_SYMBOLS[3]) {
+            Ok(function) => (Some(function), None),
+            Err(reason) => (None, Some(reason)),
+        };
+        let (m128n64_t256, m128n64_t256_rejection) = match load(FIXED_SM120_POSTBIAS_SYMBOLS[4]) {
+            Ok(function) => (Some(function), None),
+            Err(reason) => (None, Some(reason)),
+        };
+        let (nobias_m128n64_t256, nobias_m128n64_t256_rejection) =
+            match load(FIXED_SM120_POSTBIAS_SYMBOLS[5]) {
+                Ok(function) => (Some(function), None),
+                Err(reason) => (None, Some(reason)),
+            };
+        Ok(FixedSm120FmaPostbiasKernels {
+            m128n64,
+            m64n128,
+            m128n96,
+            m128n64_k4,
+            m128n64_k4_rejection,
+            m128n64_t256,
+            m128n64_t256_rejection,
+            nobias_m128n64_t256,
+            nobias_m128n64_t256_rejection,
+        })
+    })();
+    match admitted {
+        Ok(kernels) => (Some(kernels), None),
+        Err(reason) => (None, Some(reason)),
+    }
 }
 
 /// Candidate-only admission/configuration; never changes incumbent attributes.
@@ -2327,6 +2813,29 @@ pub(crate) fn load_fixed_sm120_f32_n64_copyplan(
     ctx: &CudaContext,
     module: &CompiledModule,
 ) -> (Option<CudaFunction>, Option<String>) {
+    load_fixed_sm120_f32_n64_copyplan_for(ctx, module, FIXED_SM120_EXACT_N64_SYMBOL, 128)
+}
+
+pub(crate) fn load_fixed_sm120_f32_n64_copyplan_t256(
+    ctx: &CudaContext,
+    module: &CompiledModule,
+) -> (Option<CudaFunction>, Option<String>) {
+    load_fixed_sm120_f32_n64_copyplan_for(ctx, module, FIXED_SM120_COPYPLAN_T256_SYMBOL, 256)
+}
+
+pub(crate) fn load_fixed_sm120_f32_m128n64_copyplan_t256(
+    ctx: &CudaContext,
+    module: &CompiledModule,
+) -> (Option<CudaFunction>, Option<String>) {
+    load_fixed_sm120_f32_n64_copyplan_for(ctx, module, FIXED_SM120_COPYPLAN_M128_T256_SYMBOL, 256)
+}
+
+fn load_fixed_sm120_f32_n64_copyplan_for(
+    ctx: &CudaContext,
+    module: &CompiledModule,
+    symbol: &'static str,
+    threads: u32,
+) -> (Option<CudaFunction>, Option<String>) {
     let admitted = (|| -> Result<CudaFunction, String> {
         if module.artifact_identity.module_kind != ModuleKind::Fixed
             || !fixed_sm120_exact_n64_composed(module.compiler_identity.target.as_str())
@@ -2340,7 +2849,6 @@ pub(crate) fn load_fixed_sm120_f32_n64_copyplan(
                     .into(),
             );
         }
-        let symbol = FIXED_SM120_EXACT_N64_SYMBOL;
         let census = module
             .fixed_sm120_exact_n64_driver_abi
             .as_ref()
@@ -2374,17 +2882,13 @@ pub(crate) fn load_fixed_sm120_f32_n64_copyplan(
                 .max_threads_per_block()
                 .map_err(|e| query_error("threads", e))?,
             active_blocks: function
-                .occupancy_max_active_blocks_per_multiprocessor(
-                    FIXED_SM89_EXACT_N64_THREADS,
-                    0,
-                    None,
-                )
+                .occupancy_max_active_blocks_per_multiprocessor(threads, 0, None)
                 .map_err(|e| query_error("occupancy", e))?,
             preferred_carveout: function
                 .get_attribute(carveout)
                 .map_err(|e| query_error("carveout", e))?,
         };
-        validate_fixed_sm120_exact_n64_resources(resources)?;
+        validate_fixed_sm120_exact_n64_resources_for(symbol, resources)?;
         Ok(function)
     })();
     match admitted {
@@ -4661,6 +5165,12 @@ const FIXED_SM120_SLICED_SOURCE_FRAGMENT: SourceFragment = SourceFragment {
     allowed_quoted_includes: &[],
 };
 
+const FIXED_SM120_POSTBIAS_SOURCE_FRAGMENT: SourceFragment = SourceFragment {
+    logical_name: "kernels/gemm_bi_fixed/sm120_f32_postbias.cu",
+    source: include_str!("../../../../kernels/gemm_bi_fixed/sm120_f32_postbias.cu"),
+    allowed_quoted_includes: &[],
+};
+
 const TRIAD_CONTRACT: SourceFragment = SourceFragment {
     logical_name: "kernels/gemm_bi_triad/contract.cuh",
     source: include_str!("../../../../kernels/gemm_bi_triad/contract.cuh"),
@@ -4957,6 +5467,7 @@ fn compose_module_source_for(kind: ModuleKind, arch: &str) -> Result<String, Str
         let mut fragments = base.to_vec();
         fragments.push(FIXED_SM120_EXACT_N64_SOURCE_FRAGMENT);
         fragments.push(FIXED_SM120_SLICED_SOURCE_FRAGMENT);
+        fragments.push(FIXED_SM120_POSTBIAS_SOURCE_FRAGMENT);
         return compose_fragments(&fragments);
     }
     if kind == ModuleKind::TriadSm80 && sm80_target_composes_streamk(arch) {
@@ -9220,6 +9731,7 @@ mod tests {
         let mut expected_fixed_cc12 = FIXED_FRAGMENTS[..FIXED_FRAGMENTS.len() - 2].to_vec();
         expected_fixed_cc12.push("kernels/gemm_bi_fixed/sm120_f32_n64_copyplan.cu");
         expected_fixed_cc12.push("kernels/gemm_bi_fixed/sm120_f32_n64_sliced.cu");
+        expected_fixed_cc12.push("kernels/gemm_bi_fixed/sm120_f32_postbias.cu");
         assert_eq!(fixed_boundaries, expected_fixed_cc12);
         assert_composition(ModuleKind::TriadScalar, SCALAR_FRAGMENTS);
         assert_composition(ModuleKind::TriadSm80, SM80_FRAGMENTS);
@@ -10380,6 +10892,555 @@ mod tests {
 
     const FIXED_SM89_EXACT_N64_TEST_SYMBOL: &str = "gemm_bi_nn_fixed_sm89_f32_n64_copyplan_v1";
     const FIXED_SM120_EXACT_N64_TEST_SYMBOL: &str = "gemm_bi_nn_fixed_sm120_f32_n64_copyplan_v1";
+    const FIXED_SM120_COPYPLAN_T256_TEST_SYMBOL: &str =
+        "gemm_bi_nn_fixed_sm120_f32_n64_copyplan_t256_v1";
+
+    fn fixed_sm120_copyplan_t256_test_entry() -> String {
+        fixed_sm89_exact_n64_test_entry(FIXED_SM120_COPYPLAN_T256_TEST_SYMBOL)
+            .replace(".maxntid 128", ".maxntid 256")
+            .replace(".minnctapersm 2", ".minnctapersm 3")
+    }
+
+    fn fixed_sm120_copyplan_m128_test_entry() -> String {
+        fixed_sm89_exact_n64_test_entry("gemm_bi_nn_fixed_sm120_f32_n64_copyplan_m128n64_t256_v1")
+            .replace(".maxntid 128", ".maxntid 256")
+    }
+
+    #[test]
+    fn fixed_sm120_copyplan_m128n64_t256_requires_own_export_and_two_cta_resources() {
+        let symbol = "gemm_bi_nn_fixed_sm120_f32_n64_copyplan_m128n64_t256_v1";
+        let source = compose_module_source_for(ModuleKind::Fixed, "compute_120").unwrap();
+        assert!(
+            source.contains(symbol),
+            "missing M128N64 T256 CopyPlan export"
+        );
+    }
+
+    #[test]
+    fn fixed_sm120_copyplan_m128n64_t256_resource_contract_is_independent() {
+        let symbol = "gemm_bi_nn_fixed_sm120_f32_n64_copyplan_m128n64_t256_v1";
+        let admitted = super::FixedSm89ExactN64Resources {
+            local_bytes: 0,
+            registers: 128,
+            static_shared_bytes: 49_152,
+            max_threads: 256,
+            active_blocks: 2,
+            preferred_carveout: 100,
+        };
+        super::validate_fixed_sm120_exact_n64_resources_for(symbol, admitted).unwrap();
+        for resources in [
+            super::FixedSm89ExactN64Resources {
+                registers: 129,
+                ..admitted
+            },
+            super::FixedSm89ExactN64Resources {
+                local_bytes: 1,
+                ..admitted
+            },
+            super::FixedSm89ExactN64Resources {
+                static_shared_bytes: 32_768,
+                ..admitted
+            },
+            super::FixedSm89ExactN64Resources {
+                max_threads: 128,
+                ..admitted
+            },
+            super::FixedSm89ExactN64Resources {
+                active_blocks: 1,
+                ..admitted
+            },
+        ] {
+            assert!(
+                super::validate_fixed_sm120_exact_n64_resources_for(symbol, resources).is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn fixed_sm120_copyplan_t256_resources_require_three_ctas_without_spills() {
+        let admitted = super::FixedSm89ExactN64Resources {
+            local_bytes: 0,
+            registers: 85,
+            static_shared_bytes: 32_768,
+            max_threads: 256,
+            active_blocks: 3,
+            preferred_carveout: 100,
+        };
+        super::validate_fixed_sm120_exact_n64_resources_for(
+            FIXED_SM120_COPYPLAN_T256_TEST_SYMBOL,
+            admitted,
+        )
+        .unwrap();
+        for resources in [
+            super::FixedSm89ExactN64Resources {
+                registers: 86,
+                ..admitted
+            },
+            super::FixedSm89ExactN64Resources {
+                local_bytes: 1,
+                ..admitted
+            },
+            super::FixedSm89ExactN64Resources {
+                max_threads: 128,
+                ..admitted
+            },
+            super::FixedSm89ExactN64Resources {
+                active_blocks: 2,
+                ..admitted
+            },
+        ] {
+            assert!(
+                super::validate_fixed_sm120_exact_n64_resources_for(
+                    FIXED_SM120_COPYPLAN_T256_TEST_SYMBOL,
+                    resources
+                )
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn fixed_sm120_copyplan_t256_has_own_fixed_export_and_launch_bounds() {
+        let source = compose_module_source_for(ModuleKind::Fixed, "compute_120").unwrap();
+        assert!(
+            source.contains(FIXED_SM120_COPYPLAN_T256_TEST_SYMBOL),
+            "missing T256 CopyPlan export"
+        );
+    }
+
+    #[test]
+    fn fixed_sm120_copyplan_t256_ptx_retains_control_and_requires_twin() {
+        let control = fixed_sm89_exact_n64_test_entry(FIXED_SM120_EXACT_N64_TEST_SYMBOL);
+        let twin = fixed_sm120_copyplan_t256_test_entry();
+        let wide = fixed_sm120_copyplan_m128_test_entry();
+        let valid = format!("{control}{twin}{wide}");
+        super::validate_fixed_sm120_exact_n64_ptx("compute_120", &valid).unwrap();
+        for malformed in [
+            control.clone(),
+            twin.clone(),
+            valid.replace(&wide, ""),
+            valid.replace(&wide, &wide.replace(".maxntid 256", ".maxntid 128")),
+            valid.replace(&wide, &wide.replace(".minnctapersm 2", ".minnctapersm 3")),
+            format!("{valid}{twin}"),
+            valid.replace(&twin, &twin.replace(".maxntid 256", ".maxntid 128")),
+            format!(
+                "{control}{wide}{}",
+                twin.replace(".minnctapersm 3", ".minnctapersm 2")
+            ),
+        ] {
+            assert!(super::validate_fixed_sm120_exact_n64_ptx("compute_120", &malformed).is_err());
+        }
+        for arch in ["sm_89", "sm_120", "compute_121"] {
+            assert!(super::validate_fixed_sm120_exact_n64_ptx(arch, &twin).is_err());
+        }
+    }
+    const FIXED_SM120_POSTBIAS_TEST_SYMBOLS: [&str; 6] = [
+        "gemm_bi_nn_sm120_tma_fma_v1_fixed_postbias_m128n64_bk16_s2",
+        "gemm_bi_nn_sm120_tma_fma_v1_fixed_postbias_m64n128_bk16_s2",
+        "gemm_bi_nn_sm120_tma_fma_v1_fixed_postbias_m128n96_bk16_s2",
+        "gemm_bi_nn_sm120_tma_fma_v1_fixed_postbias_m128n64_bk16_s2_k4",
+        "gemm_bi_nn_sm120_tma_fma_v1_fixed_postbias_m128n64_t256_bk16_s2",
+        "gemm_bi_nn_sm120_tma_fma_v1_fixed_nobias_m128n64_t256_bk16_s2",
+    ];
+
+    fn fixed_sm120_postbias_test_entry(symbol: &str, tensor_map_alignment: usize) -> String {
+        let threads = if symbol.contains("_m128n96_") || symbol.contains("_t256_") {
+            256
+        } else {
+            128
+        };
+        let epilogue = if symbol.contains("_fixed_nobias_") {
+            "st.global.f32 [%rd0], %f3;"
+        } else {
+            "add.rn.f32 %f5, %f3, %f6;\nst.global.f32 [%rd0], %f5;"
+        };
+        format!(
+            ".visible .entry {symbol}(\n\
+             .param .u64 output,\n.param .u64 slabs,\n.param .u64 flags,\n\
+             .param .align {tensor_map_alignment} .b8 a_map[128],\n\
+             .param .align {tensor_map_alignment} .b8 b_map[128],\n.param .u64 bias,\n\
+             .param .align 4 .b8 params[32]\n)\n\
+             .maxntid {threads}, 1, 1\n.minnctapersm 3\n{{\n\
+             cp.async.bulk.tensor.2d.shared::cta.global.tile.mbarrier::complete_tx::bytes;\n\
+             fma.rn.f32 %f0, %f1, %f2, %f0;\n\
+             mul.rn.f32 %f3, %f0, %f4;\n{epilogue}\nret;\n}}\n"
+        )
+    }
+
+    fn fixed_sm120_postbias_test_ptx(tensor_map_alignment: usize) -> String {
+        FIXED_SM120_POSTBIAS_TEST_SYMBOLS
+            .iter()
+            .map(|symbol| fixed_sm120_postbias_test_entry(symbol, tensor_map_alignment))
+            .collect()
+    }
+
+    #[test]
+    fn fixed_sm120_postbias_composition_is_fixed_owned() {
+        let compute120 = compose_module_source_for(ModuleKind::Fixed, "compute_120").unwrap();
+        for symbol in FIXED_SM120_POSTBIAS_TEST_SYMBOLS {
+            assert_eq!(
+                compute120
+                    .split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_'))
+                    .filter(|token| *token == symbol)
+                    .count(),
+                1,
+                "missing or duplicate Fixed export {symbol}"
+            );
+        }
+        for target in ["sm_89", "sm_120", "sm_121", "compute_121"] {
+            let source = compose_module_source_for(ModuleKind::Fixed, target).unwrap();
+            for symbol in FIXED_SM120_POSTBIAS_TEST_SYMBOLS {
+                assert!(
+                    !source.contains(symbol),
+                    "foreign Fixed target {target} exports {symbol}"
+                );
+            }
+        }
+        for kind in [
+            ModuleKind::TriadScalar,
+            ModuleKind::TriadSm80,
+            ModuleKind::TriadSm90a,
+            ModuleKind::TriadSm100,
+            ModuleKind::TriadSm120,
+        ] {
+            let source = compose_module_source_for(kind, "compute_120").unwrap();
+            for symbol in FIXED_SM120_POSTBIAS_TEST_SYMBOLS {
+                assert!(!source.contains(symbol), "foreign {kind:?} export {symbol}");
+            }
+        }
+    }
+
+    #[test]
+    fn fixed_sm120_postbias_ptx_is_exact_target_scoped_and_fail_closed() {
+        let valid = fixed_sm120_postbias_test_ptx(128);
+        super::validate_fixed_sm120_postbias_ptx_for_cuda_major("compute_120", &valid, 13).unwrap();
+        for arch in ["sm_89", "sm_120", "compute_121", "sm_121"] {
+            super::validate_fixed_sm120_postbias_ptx_for_cuda_major(arch, "", 13).unwrap();
+            super::validate_fixed_sm120_postbias_ptx_for_cuda_major(arch, &valid, 13).unwrap_err();
+        }
+        let first = fixed_sm120_postbias_test_entry(FIXED_SM120_POSTBIAS_TEST_SYMBOLS[0], 128);
+        let t256 = fixed_sm120_postbias_test_entry(FIXED_SM120_POSTBIAS_TEST_SYMBOLS[4], 128);
+        for malformed in [
+            valid.replacen(&first, "", 1),
+            valid.replacen(&t256, "", 1),
+            valid.replacen(&t256, &t256.replace(".maxntid 256", ".maxntid 128"), 1),
+            valid.replacen(&t256, &t256.replace(".u64 bias", ".u32 bias"), 1),
+            format!("{valid}{first}"),
+            valid.replacen("fixed_postbias_m128n64", "fixed_postbias_m128n64_v2", 1),
+            valid.replacen("gemm_bi_nn_sm120", "gemm_bi_tn_sm120", 1),
+            valid.replacen(".param .u64 flags", ".param .u32 flags", 1),
+            valid.replacen(".align 128 .b8 a_map", ".align 64 .b8 a_map", 1),
+            valid.replacen(".align 128 .b8 a_map[128]", ".align 128 .b8 a_map[64]", 1),
+            valid.replacen(".align 4 .b8 params[32]", ".align 8 .b8 params[32]", 1),
+            valid.replacen(".maxntid 128, 1, 1", ".maxntid 64, 1, 1", 1),
+            valid.replacen(".maxntid 256, 1, 1", ".maxntid 128, 1, 1", 1),
+            valid.replacen(".minnctapersm 3", ".minnctapersm 2", 1),
+        ] {
+            super::validate_fixed_sm120_postbias_ptx_for_cuda_major("compute_120", &malformed, 13)
+                .unwrap_err();
+        }
+        for (from, to) in [
+            (
+                "cp.async.bulk.tensor.2d.shared::cta.global.tile.mbarrier::complete_tx::bytes",
+                "mov.u32",
+            ),
+            ("fma.rn.f32", "mad.rn.f32"),
+            ("mul.rn.f32", "mul.rz.f32"),
+            ("add.rn.f32", "add.rz.f32"),
+        ] {
+            let malformed = valid.replacen(from, to, 1);
+            super::validate_fixed_sm120_postbias_ptx_for_cuda_major("compute_120", &malformed, 13)
+                .unwrap_err();
+        }
+        for forbidden in [
+            ".local .align 4 .b8 spill[16];",
+            "ld.local.f32 %f0, [%rd0];",
+            "st.local.f32 [%rd0], %f0;",
+            "mma.sync.aligned.m16n8k8.row.col.f32.tf32.tf32.f32;",
+            "wmma.mma.sync.aligned.row.col.f32.f32;",
+            "cvt.rna.tf32.f32 %r0, %f0;",
+            "add.rn.ftz.f32 %f0, %f1, %f2;",
+            "atom.global.add.f32 %f0, [%rd0], %f1;",
+            "red.global.add.f32 [%rd0], %f1;",
+            "redux.sync.add.s32 %r0, %r1, -1;",
+            "call.uni helper, ();",
+        ] {
+            let malformed = valid.replacen("ret;", &format!("{forbidden}\nret;"), 1);
+            super::validate_fixed_sm120_postbias_ptx_for_cuda_major("compute_120", &malformed, 13)
+                .unwrap_err();
+        }
+    }
+
+    #[test]
+    fn fixed_sm120_postbias_ptx_tracks_cuda_12_and_13_tensor_map_alignment() {
+        let cuda12 = fixed_sm120_postbias_test_ptx(64);
+        let cuda13 = fixed_sm120_postbias_test_ptx(128);
+        super::validate_fixed_sm120_postbias_ptx_for_cuda_major("compute_120", &cuda12, 12)
+            .unwrap();
+        super::validate_fixed_sm120_postbias_ptx_for_cuda_major("compute_120", &cuda13, 13)
+            .unwrap();
+        assert!(
+            super::validate_fixed_sm120_postbias_ptx_for_cuda_major("compute_120", &cuda12, 13)
+                .is_err()
+        );
+        assert!(
+            super::validate_fixed_sm120_postbias_ptx_for_cuda_major("compute_120", &cuda13, 12)
+                .is_err()
+        );
+        assert!(
+            super::validate_fixed_sm120_postbias_ptx_for_cuda_major("compute_120", &cuda13, 14)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn fixed_sm120_nobias_ptx_requires_own_export_and_scale_only_epilogue() {
+        let valid = fixed_sm120_postbias_test_ptx(128);
+        let symbol = "gemm_bi_nn_sm120_tma_fma_v1_fixed_nobias_m128n64_t256_bk16_s2";
+        let entry = fixed_sm120_postbias_test_entry(symbol, 128);
+        super::validate_fixed_sm120_postbias_ptx_for_cuda_major("compute_120", &valid, 13).unwrap();
+        for malformed in [
+            valid.replace(&entry, ""),
+            format!("{valid}{entry}"),
+            valid.replace(&entry, &entry.replace(".maxntid 256", ".maxntid 128")),
+            valid.replace(&entry, &entry.replace(".u64 bias", ".u32 bias")),
+            valid.replace(&entry, &entry.replace("mul.rn.f32", "mul.rz.f32")),
+            valid.replace(
+                &entry,
+                &entry.replace("ret;", "add.rn.f32 %f0, %f1, %f2;\nret;"),
+            ),
+        ] {
+            assert!(
+                super::validate_fixed_sm120_postbias_ptx_for_cuda_major(
+                    "compute_120",
+                    &malformed,
+                    13,
+                )
+                .is_err()
+            );
+        }
+        for arch in ["sm_89", "sm_120", "compute_121"] {
+            assert!(
+                super::validate_fixed_sm120_postbias_ptx_for_cuda_major(arch, &entry, 13).is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn fixed_sm120_postbias_t256_requires_three_ctas_within_register_budget() {
+        use super::{
+            FixedSm120PostbiasResources, fixed_sm120_postbias_launch_contract,
+            validate_fixed_sm120_postbias_resources,
+        };
+        let symbol = "gemm_bi_nn_sm120_tma_fma_v1_fixed_postbias_m128n64_t256_bk16_s2";
+        let launch = fixed_sm120_postbias_launch_contract(symbol).unwrap();
+        assert_eq!(launch.threads, 256);
+        assert_eq!(launch.dynamic_shared, 24_592);
+        assert_eq!(launch.min_active_blocks, 3);
+        let admitted = FixedSm120PostbiasResources {
+            local_bytes: 0,
+            registers: 85,
+            max_threads: 256,
+            active_blocks: 3,
+        };
+        validate_fixed_sm120_postbias_resources(symbol, admitted).unwrap();
+        for rejected in [
+            FixedSm120PostbiasResources {
+                registers: 86,
+                ..admitted
+            },
+            FixedSm120PostbiasResources {
+                registers: 0,
+                ..admitted
+            },
+            FixedSm120PostbiasResources {
+                local_bytes: 1,
+                ..admitted
+            },
+            FixedSm120PostbiasResources {
+                max_threads: 128,
+                ..admitted
+            },
+            FixedSm120PostbiasResources {
+                active_blocks: 2,
+                ..admitted
+            },
+        ] {
+            assert!(validate_fixed_sm120_postbias_resources(symbol, rejected).is_err());
+        }
+    }
+
+    #[test]
+    fn fixed_sm120_postbias_driver_abi_and_resources_are_strict() {
+        use super::{
+            FixedSm120PostbiasLaunchContract, FixedSm120PostbiasResources,
+            fixed_sm120_postbias_launch_contract, validate_fixed_sm120_postbias_resources,
+        };
+        use cudarc::driver::sys::CUresult;
+
+        assert_eq!(
+            super::FIXED_SM120_POSTBIAS_REGISTER_CAP as u32,
+            super::super::contract::SM120_FMA_REGISTER_CAP
+        );
+        let layout = vec![
+            (0, 8),
+            (8, 8),
+            (16, 8),
+            (128, 128),
+            (256, 128),
+            (384, 8),
+            (392, 32),
+        ];
+        let mut queried = Vec::new();
+        let abi = super::query_driver_parameter_abi("Fixed/postbias", 7, |index, offset, size| {
+            queried.push(index);
+            if let Some((parameter_offset, parameter_size)) = layout.get(index) {
+                *offset = *parameter_offset;
+                *size = *parameter_size;
+                CUresult::CUDA_SUCCESS
+            } else {
+                CUresult::CUDA_ERROR_INVALID_VALUE
+            }
+        })
+        .unwrap();
+        assert_eq!(queried, [0, 1, 2, 3, 4, 5, 6, 7]);
+        for symbol in FIXED_SM120_POSTBIAS_TEST_SYMBOLS {
+            let expected_launch = if symbol.contains("_m128n96_") {
+                FixedSm120PostbiasLaunchContract {
+                    threads: 256,
+                    dynamic_shared: 28_688,
+                    min_active_blocks: 3,
+                }
+            } else if symbol.contains("_t256_") {
+                FixedSm120PostbiasLaunchContract {
+                    threads: 256,
+                    dynamic_shared: 24_592,
+                    min_active_blocks: 3,
+                }
+            } else {
+                FixedSm120PostbiasLaunchContract {
+                    threads: 128,
+                    dynamic_shared: 24_592,
+                    min_active_blocks: 3,
+                }
+            };
+            assert_eq!(
+                fixed_sm120_postbias_launch_contract(symbol).unwrap(),
+                expected_launch
+            );
+            let admitted = FixedSm120PostbiasResources {
+                local_bytes: 0,
+                registers: if symbol.contains("_t256_") { 85 } else { 168 },
+                max_threads: expected_launch.threads as i32,
+                active_blocks: expected_launch.min_active_blocks,
+            };
+            super::validate_fixed_sm120_postbias_driver_abi_for_cuda_major(symbol, &abi, 13)
+                .unwrap();
+            validate_fixed_sm120_postbias_resources(symbol, admitted).unwrap();
+            for resources in [
+                FixedSm120PostbiasResources {
+                    local_bytes: 1,
+                    ..admitted
+                },
+                FixedSm120PostbiasResources {
+                    registers: 0,
+                    ..admitted
+                },
+                FixedSm120PostbiasResources {
+                    registers: admitted.registers + 1,
+                    ..admitted
+                },
+                FixedSm120PostbiasResources {
+                    max_threads: expected_launch.threads as i32 - 1,
+                    ..admitted
+                },
+                FixedSm120PostbiasResources {
+                    active_blocks: expected_launch.min_active_blocks - 1,
+                    ..admitted
+                },
+            ] {
+                assert!(validate_fixed_sm120_postbias_resources(symbol, resources).is_err());
+            }
+        }
+        assert!(fixed_sm120_postbias_launch_contract("unknown").is_err());
+        for layout in [
+            vec![(0, 8), (8, 8), (16, 8), (128, 128), (256, 128), (384, 8)],
+            vec![
+                (0, 8),
+                (8, 8),
+                (16, 8),
+                (128, 128),
+                (256, 128),
+                (384, 8),
+                (392, 28),
+            ],
+            vec![
+                (0, 8),
+                (8, 8),
+                (16, 8),
+                (128, 128),
+                (256, 128),
+                (384, 8),
+                (396, 32),
+            ],
+        ] {
+            let malformed = Tf32DriverAbi::checked(layout.len(), layout).unwrap();
+            super::validate_fixed_sm120_postbias_driver_abi_for_cuda_major(
+                FIXED_SM120_POSTBIAS_TEST_SYMBOLS[0],
+                &malformed,
+                13,
+            )
+            .unwrap_err();
+        }
+    }
+
+    #[test]
+    fn fixed_sm120_postbias_driver_abi_tracks_cuda_12_and_13_tensor_map_alignment() {
+        let symbol = FIXED_SM120_POSTBIAS_TEST_SYMBOLS[0];
+        let cuda12 = Tf32DriverAbi::checked(
+            7,
+            vec![
+                (0, 8),
+                (8, 8),
+                (16, 8),
+                (64, 128),
+                (192, 128),
+                (320, 8),
+                (328, 32),
+            ],
+        )
+        .unwrap();
+        let cuda13 = Tf32DriverAbi::checked(
+            7,
+            vec![
+                (0, 8),
+                (8, 8),
+                (16, 8),
+                (128, 128),
+                (256, 128),
+                (384, 8),
+                (392, 32),
+            ],
+        )
+        .unwrap();
+
+        super::validate_fixed_sm120_postbias_driver_abi_for_cuda_major(symbol, &cuda12, 12)
+            .unwrap();
+        super::validate_fixed_sm120_postbias_driver_abi_for_cuda_major(symbol, &cuda13, 13)
+            .unwrap();
+        assert!(
+            super::validate_fixed_sm120_postbias_driver_abi_for_cuda_major(symbol, &cuda12, 13)
+                .is_err()
+        );
+        assert!(
+            super::validate_fixed_sm120_postbias_driver_abi_for_cuda_major(symbol, &cuda13, 12)
+                .is_err()
+        );
+        assert!(
+            super::validate_fixed_sm120_postbias_driver_abi_for_cuda_major(symbol, &cuda13, 14)
+                .is_err()
+        );
+    }
 
     #[test]
     fn fixed_sm120_sliced_composition_is_fixed_compute120_only() {
@@ -10394,7 +11455,11 @@ mod tests {
         let old = compose_fragments(&retained).unwrap();
         assert_eq!(
             before.strip_prefix(&old).unwrap(),
-            compose_fragments(&[super::FIXED_SM120_SLICED_SOURCE_FRAGMENT]).unwrap()
+            compose_fragments(&[
+                super::FIXED_SM120_SLICED_SOURCE_FRAGMENT,
+                super::FIXED_SM120_POSTBIAS_SOURCE_FRAGMENT,
+            ])
+            .unwrap()
         );
         assert_ne!(
             super::FramedSha256::bytes(before.as_bytes()),
@@ -10518,7 +11583,12 @@ mod tests {
 
     #[test]
     fn fixed_sm120_exact_n64_ptx_requires_unique_five_argument_exact_body() {
-        let valid = fixed_sm89_exact_n64_test_entry(FIXED_SM120_EXACT_N64_TEST_SYMBOL);
+        let valid = format!(
+            "{}{}{}",
+            fixed_sm89_exact_n64_test_entry(FIXED_SM120_EXACT_N64_TEST_SYMBOL),
+            fixed_sm120_copyplan_t256_test_entry(),
+            fixed_sm120_copyplan_m128_test_entry()
+        );
         super::validate_fixed_sm120_exact_n64_ptx("compute_120", &valid).unwrap();
         let nvrtc_pointer_qualified = valid.replace(".param .u64 ", ".param .u64 .ptr .align 1 ");
         super::validate_fixed_sm120_exact_n64_ptx("compute_120", &nvrtc_pointer_qualified)
@@ -10564,7 +11634,8 @@ mod tests {
             compute_120.strip_prefix(&before).unwrap(),
             compose_fragments(&[
                 super::FIXED_SM120_EXACT_N64_SOURCE_FRAGMENT,
-                super::FIXED_SM120_SLICED_SOURCE_FRAGMENT
+                super::FIXED_SM120_SLICED_SOURCE_FRAGMENT,
+                super::FIXED_SM120_POSTBIAS_SOURCE_FRAGMENT,
             ])
             .unwrap(),
             "the SM120 extension is the only intended compute_120 Fixed suffix"

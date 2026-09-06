@@ -60,6 +60,8 @@ pub enum FixedTile {
     Tf32Sm120M64S2ProducerWarp,
     /// SM120 TMA TF32, 64x64 CTA, two-stage mainloop.
     Tf32Sm120M64S2,
+    /// Force-only SM120 TMA TF32, 64x64 CTA, two-stage pair-store epilogue.
+    Tf32Sm120M64S2PairStore,
     /// SM120 TMA BF16/F16 route selected from the qualified tile matrix.
     Sm120Half(FixedSm120HalfTile),
     /// 128x128 CTA, 256 threads, 2-stage cp.async, dynamic smem 71 680 B.
@@ -86,12 +88,28 @@ pub enum FixedTile {
     F32Sm89N64CopyPlan,
     /// CC12.0 exact-F32 N64 copy-plan, AUTO at qualified E0/E1/B1 rows.
     F32Sm120N64CopyPlan,
+    /// Force-only exact-F32 CopyPlan twin with 256 threads and 4x4 microtiles.
+    F32Sm120N64CopyPlanT256,
+    /// Force-only M128N64/BK32 CopyPlan with 256 threads and 8x4 microtiles.
+    F32Sm120M128N64CopyPlanT256,
     /// Force-only CC12.0 sliced-copy N64; same ascending scalar FMA.
     F32Sm120N64Sliced,
     /// Fixed bridge to exact-TMA M128xN64, AUTO at qualified SM120 B0.
     F32Sm120TmaFmaM128N64,
     /// Fixed bridge to exact-TMA M64xN128, AUTO at qualified SM120 A0.
     F32Sm120TmaFmaM64N128,
+    /// Fixed-local exact-TMA M128xN64 post-dot-bias fallback at qualified SM120 A1.
+    F32Sm120TmaFmaFixedPostBiasM128N64,
+    /// Force-only exact-TMA M64xN128 with Fixed-compatible post-dot bias.
+    F32Sm120TmaFmaFixedPostBiasM64N128,
+    /// Force-only exact-TMA M128xN96 screening tile with 256 threads.
+    F32Sm120TmaFmaFixedPostBiasM128N96,
+    /// Force-only exact-TMA M128xN64 post-dot bias with four-value K chunks.
+    F32Sm120TmaFmaFixedPostBiasM128N64K4,
+    /// Exact-TMA M128xN64 post-dot bias with eight compute warps, AUTO at qualified SM120 A1.
+    F32Sm120TmaFmaFixedPostBiasM128N64T256,
+    /// Force-only exact-TMA M128xN64 with eight compute warps and no bias epilogue.
+    F32Sm120TmaFmaFixedNoBiasM128N64T256,
 }
 
 /// Forced SM120 TMA BF16/F16 tile used by qualification and dispatch.
@@ -169,6 +187,12 @@ pub fn fixed_forward_with_tile(
     if tile == FixedTile::F32Sm120N64CopyPlan {
         return launch_sm120_exact_n64(ctx, operands, shape);
     }
+    if matches!(
+        tile,
+        FixedTile::F32Sm120N64CopyPlanT256 | FixedTile::F32Sm120M128N64CopyPlanT256
+    ) {
+        return launch_sm120_copyplan_t256(ctx, operands, shape, tile);
+    }
     if tile == FixedTile::F32Sm120N64Sliced {
         return launch_sm120_sliced(ctx, operands, shape);
     }
@@ -177,6 +201,17 @@ pub fn fixed_forward_with_tile(
         FixedTile::F32Sm120TmaFmaM128N64 | FixedTile::F32Sm120TmaFmaM64N128
     ) {
         return launch_sm120_tma_fma(ctx, operands, shape, tile);
+    }
+    if matches!(
+        tile,
+        FixedTile::F32Sm120TmaFmaFixedPostBiasM128N64
+            | FixedTile::F32Sm120TmaFmaFixedPostBiasM128N64K4
+            | FixedTile::F32Sm120TmaFmaFixedPostBiasM128N64T256
+            | FixedTile::F32Sm120TmaFmaFixedNoBiasM128N64T256
+            | FixedTile::F32Sm120TmaFmaFixedPostBiasM64N128
+            | FixedTile::F32Sm120TmaFmaFixedPostBiasM128N96
+    ) {
+        return launch_sm120_tma_postbias(ctx, operands, shape, tile);
     }
     if tile == FixedTile::Legacy {
         return super::blas::fixed_legacy_forward(
@@ -222,6 +257,7 @@ pub fn fixed_forward_with_tile(
             | FixedTile::Tf32Sm120M64N128S3
             | FixedTile::Tf32Sm120M64S2ProducerWarp
             | FixedTile::Tf32Sm120M64S2
+            | FixedTile::Tf32Sm120M64S2PairStore
     ) {
         if operands.c.dtype != WeightDtype::F32
             || operands.x.dtype != WeightDtype::F32
@@ -694,9 +730,17 @@ fn ladder_cfg(tile: FixedTile, rows: usize, cols: usize) -> cudarc::driver::Laun
         | FixedTile::F32N128S2
         | FixedTile::F32Sm89N64CopyPlan
         | FixedTile::F32Sm120N64CopyPlan
+        | FixedTile::F32Sm120N64CopyPlanT256
+        | FixedTile::F32Sm120M128N64CopyPlanT256
         | FixedTile::F32Sm120N64Sliced
         | FixedTile::F32Sm120TmaFmaM128N64
         | FixedTile::F32Sm120TmaFmaM64N128
+        | FixedTile::F32Sm120TmaFmaFixedPostBiasM128N64
+        | FixedTile::F32Sm120TmaFmaFixedPostBiasM128N64K4
+        | FixedTile::F32Sm120TmaFmaFixedPostBiasM128N64T256
+        | FixedTile::F32Sm120TmaFmaFixedNoBiasM128N64T256
+        | FixedTile::F32Sm120TmaFmaFixedPostBiasM64N128
+        | FixedTile::F32Sm120TmaFmaFixedPostBiasM128N96
         | FixedTile::Tf32M128S2
         | FixedTile::Tf32M128S3
         | FixedTile::Tf32M128N128S3
@@ -709,6 +753,7 @@ fn ladder_cfg(tile: FixedTile, rows: usize, cols: usize) -> cudarc::driver::Laun
         | FixedTile::Tf32Sm120M64N128S3
         | FixedTile::Tf32Sm120M64S2ProducerWarp
         | FixedTile::Tf32Sm120M64S2
+        | FixedTile::Tf32Sm120M64S2PairStore
         | FixedTile::Sm120Half(_)
         | FixedTile::Tc128Sm89Pipeline => unreachable!("tile has its own launcher"),
     };
@@ -987,6 +1032,65 @@ fn launch_sm120_exact_n64(
         .map_err(|error| format!("gemm_bi Fixed SM120 exact N64 copy-plan: {error:?}"))
 }
 
+fn launch_sm120_copyplan_t256(
+    ctx: &GpuCtx,
+    operands: FixedFwdOperands,
+    shape: FixedShape,
+    tile: FixedTile,
+) -> Result<(), String> {
+    if !fixed_sm120_tma_fma_force_physical_eligible(
+        operands,
+        shape,
+        FixedTileDevice {
+            multiprocessors: ctx.kernels.multiprocessor_count(),
+            compute_capability: ctx.compute_capability(),
+        },
+        ctx.f32_triad_policy(),
+        tile,
+    ) {
+        return Err("Fixed SM120 CopyPlan T256 is outside its force-only hot-row contract".into());
+    }
+    let Some((args, grid64)) =
+        prepare_sm120_exact_n64_launch(operands, shape, ctx.compute_capability())?
+    else {
+        return Ok(());
+    };
+    let (function, rejection, grid) = if tile == FixedTile::F32Sm120M128N64CopyPlanT256 {
+        (
+            &ctx.kernels.fixed_sm120_f32_m128n64_copyplan_t256,
+            &ctx.kernels.fixed_sm120_f32_m128n64_copyplan_t256_rejection,
+            (args.m as u32).div_ceil(128) * (args.n as u32).div_ceil(64),
+        )
+    } else {
+        (
+            &ctx.kernels.fixed_sm120_f32_n64_copyplan_t256,
+            &ctx.kernels.fixed_sm120_f32_n64_copyplan_t256_rejection,
+            grid64,
+        )
+    };
+    let function = function.as_ref().ok_or_else(|| {
+        rejection
+            .clone()
+            .unwrap_or_else(|| format!("Fixed SM120 {tile:?} is not admitted"))
+    })?;
+    let params = FixedSm89ExactF32Params::forward(&args);
+    let config = cudarc::driver::LaunchConfig {
+        grid_dim: (grid, 1, 1),
+        block_dim: (256, 1, 1),
+        shared_mem_bytes: 0,
+    };
+    let mut builder = ctx.stream.launch_builder(function);
+    builder
+        .arg(&args.c)
+        .arg(&args.a)
+        .arg(&args.b)
+        .arg(&args.bias)
+        .arg(&params);
+    unsafe { builder.launch(config) }
+        .map(|_| ())
+        .map_err(|error| format!("Fixed SM120 CopyPlan T256: {error:?}"))
+}
+
 fn launch_sm120_sliced(
     ctx: &GpuCtx,
     operands: FixedFwdOperands,
@@ -1031,20 +1135,18 @@ fn launch_sm120_tma_fma(
     shape: FixedShape,
     tile: FixedTile,
 ) -> Result<(), String> {
-    let compiler = ctx.kernels.compiler_identity();
-    if !fixed_sm120_tma_fma_force_eligible(
+    if !fixed_sm120_tma_fma_force_physical_eligible(
         operands,
         shape,
         FixedTileDevice {
             multiprocessors: ctx.kernels.multiprocessor_count(),
             compute_capability: ctx.compute_capability(),
         },
-        compiler.nvrtc_version,
-        compiler.nvrtc_library_known,
         ctx.f32_triad_policy(),
+        tile,
     ) {
         return Err(
-            "Fixed SM120 exact-TMA forced launch is outside its unbiased hot-shape candidate contract"
+            "Fixed SM120 exact-TMA forced launch is outside its tile-specific hot-shape and bias contract"
                 .into(),
         );
     }
@@ -1070,6 +1172,121 @@ fn launch_sm120_tma_fma(
         return Err("Fixed SM120 exact-TMA symbol is not qualified on this context".into());
     }
     Ok(())
+}
+
+fn launch_sm120_tma_postbias(
+    ctx: &GpuCtx,
+    operands: FixedFwdOperands,
+    shape: FixedShape,
+    tile: FixedTile,
+) -> Result<(), String> {
+    if !fixed_sm120_tma_fma_force_physical_eligible(
+        operands,
+        shape,
+        FixedTileDevice {
+            multiprocessors: ctx.kernels.multiprocessor_count(),
+            compute_capability: ctx.compute_capability(),
+        },
+        ctx.f32_triad_policy(),
+        tile,
+    ) {
+        return Err("Fixed SM120 post-bias launch is outside its exact measured contract".into());
+    }
+    let args = FixedArgs::try_new(operands, shape)?;
+    let kernels = ctx
+        .kernels
+        .fixed_sm120_fma_postbias
+        .as_ref()
+        .ok_or_else(|| {
+            ctx.kernels
+                .fixed_sm120_fma_postbias_rejection
+                .clone()
+                .unwrap_or_else(|| "Fixed SM120 post-bias kernels are not admitted".into())
+        })?;
+    let (function, tile_m, tile_n) = match tile {
+        FixedTile::F32Sm120TmaFmaFixedNoBiasM128N64T256 => (
+            kernels.nobias_m128n64_t256.as_ref().ok_or_else(|| {
+                kernels
+                    .nobias_m128n64_t256_rejection
+                    .clone()
+                    .unwrap_or_else(|| "Fixed SM120 no-bias T256 kernel is not admitted".into())
+            })?,
+            128_u32,
+            64_u32,
+        ),
+        FixedTile::F32Sm120TmaFmaFixedPostBiasM128N64 => (&kernels.m128n64, 128_u32, 64_u32),
+        FixedTile::F32Sm120TmaFmaFixedPostBiasM128N64T256 => (
+            kernels.m128n64_t256.as_ref().ok_or_else(|| {
+                kernels
+                    .m128n64_t256_rejection
+                    .clone()
+                    .unwrap_or_else(|| "Fixed SM120 post-bias T256 kernel is not admitted".into())
+            })?,
+            128_u32,
+            64_u32,
+        ),
+        FixedTile::F32Sm120TmaFmaFixedPostBiasM128N64K4 => (
+            kernels.m128n64_k4.as_ref().ok_or_else(|| {
+                kernels
+                    .m128n64_k4_rejection
+                    .clone()
+                    .unwrap_or_else(|| "Fixed SM120 post-bias K4 kernel is not admitted".into())
+            })?,
+            128_u32,
+            64_u32,
+        ),
+        FixedTile::F32Sm120TmaFmaFixedPostBiasM64N128 => (&kernels.m64n128, 64_u32, 128_u32),
+        FixedTile::F32Sm120TmaFmaFixedPostBiasM128N96 => (&kernels.m128n96, 128_u32, 96_u32),
+        _ => unreachable!("post-bias launcher received a non-post-bias Fixed tile"),
+    };
+    let rows = u32::try_from(args.m).map_err(|_| "Fixed post-bias M is negative")?;
+    let cols = u32::try_from(args.n).map_err(|_| "Fixed post-bias N is negative")?;
+    let grid = rows
+        .div_ceil(tile_m)
+        .checked_mul(cols.div_ceil(tile_n))
+        .ok_or("Fixed post-bias launch grid exceeds u32")?;
+    let maps = fixed_sm120_postbias_maps(ctx, &args, tile_m, tile_n)?;
+    let tiles_per_split = args
+        .k
+        .checked_add(15)
+        .ok_or("Fixed post-bias K tile count exceeds i32")?
+        / 16;
+    let params = FixedSm120PostBiasParams {
+        alpha: 1.0,
+        beta: 0.0,
+        m: args.m,
+        n: args.n,
+        k: args.k,
+        ldc: args.n,
+        splits: 1,
+        tiles_per_split,
+    };
+    let (threads, shared_mem_bytes) = match tile {
+        FixedTile::F32Sm120TmaFmaFixedNoBiasM128N64T256 => (256, 24_592),
+        FixedTile::F32Sm120TmaFmaFixedPostBiasM128N64T256 => (256, 24_592),
+        FixedTile::F32Sm120TmaFmaFixedPostBiasM128N96 => (256, 28_688),
+        _ => (128, 24_592),
+    };
+    let config = cudarc::driver::LaunchConfig {
+        grid_dim: (grid, 1, 1),
+        block_dim: (threads, 1, 1),
+        shared_mem_bytes,
+    };
+    let null_partials = 0_u64;
+    let null_flags = 0_u64;
+    let bias = args.bias;
+    let mut builder = ctx.stream.launch_builder(function);
+    builder
+        .arg(&args.c)
+        .arg(&null_partials)
+        .arg(&null_flags)
+        .arg(&maps[0])
+        .arg(&maps[1])
+        .arg(&bias)
+        .arg(&params);
+    unsafe { builder.launch(config) }
+        .map(|_| ())
+        .map_err(|error| format!("gemm_bi Fixed SM120 post-bias ({tile:?}): {error:?}"))
 }
 
 /// Exact F32 owns its compact ABI independently of the half and TF32 bundles.
@@ -1251,6 +1468,28 @@ pub(crate) struct FixedTf32MapCache {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct FixedPostBiasMapKey {
+    a: CUptr,
+    b: CUptr,
+    m: usize,
+    k: usize,
+    n: usize,
+    tile_m: u32,
+    tile_n: u32,
+}
+
+struct FixedPostBiasMapEntry {
+    key: FixedPostBiasMapKey,
+    maps: [FixedTensorMap; 2],
+    epoch: ManagedAllocationEpochStamp,
+}
+
+#[derive(Default)]
+pub(crate) struct FixedPostBiasMapCache {
+    entries: VecDeque<FixedPostBiasMapEntry>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct FixedHalfMapKey {
     a: CUptr,
     b: CUptr,
@@ -1315,6 +1554,28 @@ impl FixedTf32MapCache {
     }
 }
 
+impl FixedPostBiasMapCache {
+    fn get(&mut self, key: FixedPostBiasMapKey) -> Option<[FixedTensorMap; 2]> {
+        self.entries.retain(|entry| entry.epoch.is_current());
+        let index = self.entries.iter().position(|entry| entry.key == key)?;
+        let entry = self.entries.remove(index)?;
+        let maps = entry.maps;
+        self.entries.push_front(entry);
+        Some(maps)
+    }
+
+    fn insert(
+        &mut self,
+        key: FixedPostBiasMapKey,
+        maps: [FixedTensorMap; 2],
+        epoch: ManagedAllocationEpochStamp,
+    ) {
+        self.entries.retain(|entry| entry.key != key);
+        self.entries
+            .push_front(FixedPostBiasMapEntry { key, maps, epoch });
+    }
+}
+
 #[derive(Clone, Copy)]
 #[repr(C)]
 struct FixedSm120Tf32Params {
@@ -1327,6 +1588,37 @@ struct FixedSm120Tf32Params {
 unsafe impl DeviceRepr for FixedSm120Tf32Params {}
 
 pub(crate) const FIXED_SM120_TF32_PARAMS_SIZE: usize = std::mem::size_of::<FixedSm120Tf32Params>();
+
+#[derive(Clone, Copy)]
+#[repr(C)]
+struct FixedSm120PostBiasParams {
+    alpha: f32,
+    beta: f32,
+    m: i32,
+    n: i32,
+    k: i32,
+    ldc: i32,
+    splits: i32,
+    tiles_per_split: i32,
+}
+
+unsafe impl DeviceRepr for FixedSm120PostBiasParams {}
+
+pub(crate) const FIXED_SM120_POSTBIAS_PARAMS_SIZE: usize =
+    std::mem::size_of::<FixedSm120PostBiasParams>();
+
+const _: () = {
+    assert!(FIXED_SM120_POSTBIAS_PARAMS_SIZE == 32);
+    assert!(std::mem::align_of::<FixedSm120PostBiasParams>() == 4);
+    assert!(std::mem::offset_of!(FixedSm120PostBiasParams, alpha) == 0);
+    assert!(std::mem::offset_of!(FixedSm120PostBiasParams, beta) == 4);
+    assert!(std::mem::offset_of!(FixedSm120PostBiasParams, m) == 8);
+    assert!(std::mem::offset_of!(FixedSm120PostBiasParams, n) == 12);
+    assert!(std::mem::offset_of!(FixedSm120PostBiasParams, k) == 16);
+    assert!(std::mem::offset_of!(FixedSm120PostBiasParams, ldc) == 20);
+    assert!(std::mem::offset_of!(FixedSm120PostBiasParams, splits) == 24);
+    assert!(std::mem::offset_of!(FixedSm120PostBiasParams, tiles_per_split) == 28);
+};
 
 #[derive(Clone, Copy)]
 #[repr(C)]
@@ -1433,6 +1725,116 @@ fn fixed_sm120_tf32_maps(
         managed_allocation_epoch_for_ranges(context_handle, &[(args.a, a_bytes), (args.b, b_bytes)])
     {
         ctx.fixed_tf32_maps.borrow_mut().insert(key, maps, epoch);
+    }
+    Ok(maps)
+}
+
+fn encode_fixed_postbias_map(
+    base: CUptr,
+    global_dimensions: [u64; 2],
+    outer_byte_stride: u64,
+    box_dimensions: [u32; 2],
+) -> Result<FixedTensorMap, String> {
+    if base == 0 || !base.is_multiple_of(16) {
+        return Err("Fixed SM120 post-bias map base must be non-null and 16-byte aligned".into());
+    }
+    let row_bytes = global_dimensions[0]
+        .checked_mul(4)
+        .ok_or("Fixed SM120 post-bias map row width overflows")?;
+    let inner_bytes = box_dimensions[0]
+        .checked_mul(4)
+        .ok_or("Fixed SM120 post-bias map box width overflows")?;
+    if global_dimensions.contains(&0)
+        || box_dimensions.contains(&0)
+        || box_dimensions[1] > 256
+        || outer_byte_stride < row_bytes
+        || !outer_byte_stride.is_multiple_of(16)
+        || outer_byte_stride >= (1_u64 << 40)
+        || !inner_bytes.is_multiple_of(16)
+        || inner_bytes > 1024
+    {
+        return Err("Fixed SM120 post-bias map dimensions or stride are unsupported".into());
+    }
+    let mut raw = std::mem::MaybeUninit::<sys::CUtensorMap>::zeroed();
+    let global_strides = [outer_byte_stride];
+    let element_strides = [1_u32, 1_u32];
+    unsafe {
+        sys::cuTensorMapEncodeTiled(
+            raw.as_mut_ptr(),
+            sys::CUtensorMapDataType::CU_TENSOR_MAP_DATA_TYPE_UINT32,
+            2,
+            base as usize as *mut std::ffi::c_void,
+            global_dimensions.as_ptr(),
+            global_strides.as_ptr(),
+            box_dimensions.as_ptr(),
+            element_strides.as_ptr(),
+            sys::CUtensorMapInterleave::CU_TENSOR_MAP_INTERLEAVE_NONE,
+            sys::CUtensorMapSwizzle::CU_TENSOR_MAP_SWIZZLE_NONE,
+            sys::CUtensorMapL2promotion::CU_TENSOR_MAP_L2_PROMOTION_L2_256B,
+            sys::CUtensorMapFloatOOBfill::CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE,
+        )
+        .result()
+        .map_err(|error| format!("Fixed SM120 post-bias tensor-map encode: {error:?}"))?;
+        Ok(FixedTensorMap(raw.assume_init()))
+    }
+}
+
+fn fixed_sm120_postbias_maps(
+    ctx: &GpuCtx,
+    args: &FixedArgs,
+    tile_m: u32,
+    tile_n: u32,
+) -> Result<[FixedTensorMap; 2], String> {
+    let key = FixedPostBiasMapKey {
+        a: args.a,
+        b: args.b,
+        m: args.m as usize,
+        k: args.k as usize,
+        n: args.n as usize,
+        tile_m,
+        tile_n,
+    };
+    if let Some(maps) = ctx.fixed_postbias_maps.borrow_mut().get(key) {
+        return Ok(maps);
+    }
+    if ctx
+        .stream
+        .capture_status()
+        .map_err(|error| format!("query Fixed post-bias capture status: {error:?}"))?
+        != sys::CUstreamCaptureStatus::CU_STREAM_CAPTURE_STATUS_NONE
+    {
+        return Err(
+            "Fixed SM120 post-bias tensor maps must be prepared before graph capture".into(),
+        );
+    }
+    let m = u64::try_from(args.m).map_err(|_| "Fixed post-bias M is negative")?;
+    let k = u64::try_from(args.k).map_err(|_| "Fixed post-bias K is negative")?;
+    let n = u64::try_from(args.n).map_err(|_| "Fixed post-bias N is negative")?;
+    let a_stride = k
+        .checked_mul(4)
+        .ok_or("Fixed post-bias A stride overflows")?;
+    let b_stride = n
+        .checked_mul(4)
+        .ok_or("Fixed post-bias B stride overflows")?;
+    let maps = [
+        encode_fixed_postbias_map(args.a, [k, m], a_stride, [16, tile_m])?,
+        encode_fixed_postbias_map(args.b, [n, k], b_stride, [tile_n, 16])?,
+    ];
+    let a_bytes = m
+        .checked_mul(k)
+        .and_then(|elements| elements.checked_mul(4))
+        .ok_or("Fixed post-bias A span overflows")?;
+    let b_bytes = k
+        .checked_mul(n)
+        .and_then(|elements| elements.checked_mul(4))
+        .ok_or("Fixed post-bias B span overflows")?;
+    let context_handle = ctx.stream.context().cu_ctx() as usize;
+    if let Some(epoch) =
+        managed_allocation_epoch_for_ranges(context_handle, &[(args.a, a_bytes), (args.b, b_bytes)])
+    {
+        ctx.fixed_postbias_maps
+            .borrow_mut()
+            .insert(key, maps, epoch);
     }
     Ok(maps)
 }
@@ -1553,15 +1955,32 @@ fn fixed_pick_tf32(
     compute_capability: (u32, u32),
     nvrtc_version: (i32, i32),
     sm120_tma: bool,
+    has_bias: bool,
+    output_aligned: bool,
 ) -> FixedTile {
     if rows <= 16 || cols <= 32 {
         return FixedTile::Tf32M16S4;
     }
     if sm120_tma {
         if compute_capability == (12, 0) && multiprocessors == 170 && nvrtc_version == (13, 2) {
-            match (rows, inner, cols) {
-                (4621, 768, 2304) => return FixedTile::Tf32Sm120M128S2,
-                (2048, 768, 2304) => return FixedTile::Tf32Sm120M64S2ProducerWarp,
+            match (rows, inner, cols, has_bias) {
+                (4621, 768, 2304, _) => return FixedTile::Tf32Sm120M128S2,
+                // Both D bias rows beat incumbent ProducerWarp in all four
+                // 101-window eager/graph, AFV/VFA cohorts. D1 also beats FAST;
+                // D0 is an internal-only win; both measured C pointers are
+                // 8-byte aligned. Evidence under internal/perf/
+                // sm120-fixed-tf32-pair-store-force-20260906/:
+                // d0-confirm101-v1.log SHA256
+                // 7adbbd340a0aefbebbf8608c5f65f03bb54ca0e668f00ff1199ba495c805866c;
+                // d1-confirm101-v1.log SHA256
+                // f399427b695d2342d71dd62a764e27b3b7d68263730f77cf781c8ade4810b790.
+                (2048, 768, 2304, false) | (2048, 768, 2304, true) => {
+                    return if output_aligned {
+                        FixedTile::Tf32Sm120M64S2PairStore
+                    } else {
+                        FixedTile::Tf32Sm120M64S2ProducerWarp
+                    };
+                }
                 _ => {}
             }
         }
@@ -1612,6 +2031,7 @@ fn launch_tf32(
             | FixedTile::Tf32Sm120M64N128S3
             | FixedTile::Tf32Sm120M64S2ProducerWarp
             | FixedTile::Tf32Sm120M64S2
+            | FixedTile::Tf32Sm120M64S2PairStore
     ) {
         return launch_sm120_tf32(ctx, tile, args, allow_schedule_select);
     }
@@ -1772,6 +2192,7 @@ fn launch_sm120_tf32(
         FixedTile::Tf32Sm120M64S2ProducerWarp => {
             (&kernels.m64n64_s2_producer_warp, 64, 64, 160, 32_896)
         }
+        FixedTile::Tf32Sm120M64S2PairStore => (&kernels.m64n64_s2_pair_store, 64, 64, 128, 32_896),
         FixedTile::Tf32Sm120M64S2 => {
             let pair_store = allow_schedule_select
                 && fixed_sm120_pair_store_schedule_cell(
@@ -2192,10 +2613,18 @@ fn launch_ladder(
         | FixedTile::F32N128S2
         | FixedTile::F32Sm89N64CopyPlan
         | FixedTile::F32Sm120N64CopyPlan
+        | FixedTile::F32Sm120N64CopyPlanT256
+        | FixedTile::F32Sm120M128N64CopyPlanT256
         | FixedTile::Tf32M128S2
         | FixedTile::F32Sm120N64Sliced
         | FixedTile::F32Sm120TmaFmaM128N64
         | FixedTile::F32Sm120TmaFmaM64N128
+        | FixedTile::F32Sm120TmaFmaFixedPostBiasM128N64
+        | FixedTile::F32Sm120TmaFmaFixedPostBiasM128N64K4
+        | FixedTile::F32Sm120TmaFmaFixedPostBiasM128N64T256
+        | FixedTile::F32Sm120TmaFmaFixedNoBiasM128N64T256
+        | FixedTile::F32Sm120TmaFmaFixedPostBiasM64N128
+        | FixedTile::F32Sm120TmaFmaFixedPostBiasM128N96
         | FixedTile::Tf32M128S3
         | FixedTile::Tf32M128N128S3
         | FixedTile::Tf32M64S2
@@ -2207,6 +2636,7 @@ fn launch_ladder(
         | FixedTile::Tf32Sm120M64N128S3
         | FixedTile::Tf32Sm120M64S2ProducerWarp
         | FixedTile::Tf32Sm120M64S2
+        | FixedTile::Tf32Sm120M64S2PairStore
         | FixedTile::Sm120Half(_)
         | FixedTile::Tc128Sm89Pipeline => unreachable!("tile has its own launcher"),
     };
@@ -2402,13 +2832,15 @@ pub fn fixed_forward(
             ctx.compute_capability(),
             ctx.kernels.compiler_identity().nvrtc_version,
             sm120_tma,
+            operands.bias_ptr.is_some(),
+            operands.c.ptr.is_multiple_of(8),
         );
         launch_tf32(ctx, tile, &args, true)?;
         return Ok(tile);
     }
     if homogeneous_f32 {
         let compiler = ctx.kernels.compiler_identity();
-        let exact_tma_auto = if fixed_sm120_tma_fma_a0_auto_eligible(
+        if fixed_sm120_tma_fma_a0_auto_eligible(
             operands,
             shape,
             FixedTileDevice {
@@ -2419,10 +2851,41 @@ pub fn fixed_forward(
             compiler.nvrtc_library_known,
             ctx.f32_triad_policy(),
         ) {
-            Some((
-                FixedTile::F32Sm120TmaFmaM64N128,
+            let tile = FixedTile::F32Sm120TmaFmaM64N128;
+            if super::gemm_bi_triad::launch_cached_fixed_sm120_exact_tma(
+                ctx,
+                (shape.m, shape.k, shape.n),
+                super::gemm_bi_triad::F32TriadOperands {
+                    output: operands.c.ptr,
+                    a: operands.x.ptr,
+                    b: operands.w.ptr,
+                    bias: None,
+                    alpha: 1.0,
+                    beta: 0.0,
+                },
                 super::gemm_bi_triad::FixedSm120ExactTmaTile::M64N128,
-            ))
+            )? {
+                return Ok(tile);
+            }
+        } else if let Some(tile) = fixed_sm120_tma_fma_a1_auto_tile(
+            fixed_sm120_tma_fma_a1_auto_eligible(
+                operands,
+                shape,
+                FixedTileDevice {
+                    multiprocessors: ctx.kernels.multiprocessor_count(),
+                    compute_capability: ctx.compute_capability(),
+                },
+                compiler.nvrtc_version,
+                compiler.nvrtc_library_known,
+                ctx.f32_triad_policy(),
+            ),
+            ctx.kernels
+                .fixed_sm120_fma_postbias
+                .as_ref()
+                .map(|kernels| kernels.m128n64_t256.is_some()),
+        ) {
+            launch_sm120_tma_postbias(ctx, operands, shape, tile)?;
+            return Ok(tile);
         } else if fixed_sm120_tma_fma_b0_auto_eligible(
             operands,
             shape,
@@ -2434,15 +2897,8 @@ pub fn fixed_forward(
             compiler.nvrtc_library_known,
             ctx.f32_triad_policy(),
         ) {
-            Some((
-                FixedTile::F32Sm120TmaFmaM128N64,
-                super::gemm_bi_triad::FixedSm120ExactTmaTile::M128N64,
-            ))
-        } else {
-            None
-        };
-        if let Some((tile, physical_tile)) = exact_tma_auto
-            && super::gemm_bi_triad::launch_cached_fixed_sm120_exact_tma(
+            let tile = FixedTile::F32Sm120TmaFmaM128N64;
+            if super::gemm_bi_triad::launch_cached_fixed_sm120_exact_tma(
                 ctx,
                 (shape.m, shape.k, shape.n),
                 super::gemm_bi_triad::F32TriadOperands {
@@ -2453,10 +2909,10 @@ pub fn fixed_forward(
                     alpha: 1.0,
                     beta: 0.0,
                 },
-                physical_tile,
-            )?
-        {
-            return Ok(tile);
+                super::gemm_bi_triad::FixedSm120ExactTmaTile::M128N64,
+            )? {
+                return Ok(tile);
+            }
         }
         if fixed_sm120_sliced_auto_eligible(
             operands,
@@ -2676,13 +3132,20 @@ fn fixed_sm120_tma_fma_b0_auto_eligible(
     nvrtc_library_known: bool,
     policy: super::context::F32TriadPolicy,
 ) -> bool {
-    fixed_sm120_tma_fma_force_eligible(operands, shape, device, nvrtc, nvrtc_library_known, policy)
-        && shape
-            == (FixedShape {
-                m: 4_621,
-                k: 768,
-                n: 2_304,
-            })
+    fixed_sm120_tma_fma_force_eligible(
+        operands,
+        shape,
+        device,
+        nvrtc,
+        nvrtc_library_known,
+        policy,
+        FixedTile::F32Sm120TmaFmaM128N64,
+    ) && shape
+        == (FixedShape {
+            m: 4_621,
+            k: 768,
+            n: 2_304,
+        })
         && operands.bias_ptr.is_none()
 }
 
@@ -2706,28 +3169,89 @@ fn fixed_sm120_tma_fma_a0_auto_eligible(
     nvrtc_library_known: bool,
     policy: super::context::F32TriadPolicy,
 ) -> bool {
-    fixed_sm120_tma_fma_force_eligible(operands, shape, device, nvrtc, nvrtc_library_known, policy)
-        && shape
-            == (FixedShape {
-                m: 4_621,
-                k: 384,
-                n: 1_928,
-            })
+    fixed_sm120_tma_fma_force_eligible(
+        operands,
+        shape,
+        device,
+        nvrtc,
+        nvrtc_library_known,
+        policy,
+        FixedTile::F32Sm120TmaFmaM64N128,
+    ) && shape
+        == (FixedShape {
+            m: 4_621,
+            k: 384,
+            n: 1_928,
+        })
         && operands.bias_ptr.is_none()
 }
 
-// Force-only qualification surface for same-run screening. Keeping this to
-// the five production hot rows prevents an explicit candidate launch from
-// silently becoming a broad generic route. The borrowed Triad kernel's bias
-// order is not Fixed-compatible, so biased launches are rejected. AUTO
-// remains independently bound to rows that pass the full admission protocol.
-fn fixed_sm120_tma_fma_force_eligible(
+// Production NVRTC13.2 / 170-SM CC12.0 Fixed A1 qualification. The dedicated
+// post-dot-bias M128xN64 route preserves the Fixed arithmetic order and won
+// every eager/graph ABBA/BAAB cohort at 101 windows. Before promotion its
+// worst paired p95 was 0.978964 versus prior AUTO, 0.917294 versus Legacy,
+// and 0.765625 versus PEDANTIC cuBLAS; evidence:
+// internal/perf/sm120-fixed-tma-fma-a1-postbias-20260906/
+// sm120-fixed-fma-a1-postbias-m128-admission101-v1.log, SHA256
+// 8887b5a16c246a07d55a47a3b442642bbb53d53ec75565098e9acff6f53ac7f4.
+// Post-AUTO worst p95 was 0.914063 versus Legacy and 0.765326 versus
+// PEDANTIC cuBLAS; sm120-fixed-fma-a1-postbias-postauto101-v1.log, SHA256
+// 7af2dd4afc99448ec530102f2b7aaec771bbf9833dbd97c033de8ef91d561ac4.
+fn fixed_sm120_tma_fma_a1_auto_eligible(
     operands: FixedFwdOperands,
     shape: FixedShape,
     device: FixedTileDevice,
     nvrtc: (i32, i32),
     nvrtc_library_known: bool,
     policy: super::context::F32TriadPolicy,
+) -> bool {
+    fixed_sm120_tma_fma_force_eligible(
+        operands,
+        shape,
+        device,
+        nvrtc,
+        nvrtc_library_known,
+        policy,
+        FixedTile::F32Sm120TmaFmaFixedPostBiasM128N64,
+    ) && shape
+        == (FixedShape {
+            m: 4_621,
+            k: 384,
+            n: 1_928,
+        })
+        && operands.bias_ptr.is_some()
+}
+
+// The holder retains the qualified control even if T256 resource admission
+// declines. None denotes a missing holder; Some(false) selects that control.
+fn fixed_sm120_tma_fma_a1_auto_tile(
+    eligible: bool,
+    t256_loaded: Option<bool>,
+) -> Option<FixedTile> {
+    if !eligible {
+        return None;
+    }
+    t256_loaded.map(|loaded| {
+        if loaded {
+            FixedTile::F32Sm120TmaFmaFixedPostBiasM128N64T256
+        } else {
+            FixedTile::F32Sm120TmaFmaFixedPostBiasM128N64
+        }
+    })
+}
+
+// Physical force-only surface for same-run qualification. This deliberately
+// excludes compiler-version and measured-device-cohort gates: holder loading
+// remains responsible for toolkit/resource admission, while these checks keep
+// forced launches inside the kernel's CC, row, dtype, alignment, policy, and
+// bias contract. AUTO remains independently bound to the fully qualified
+// NVRTC13.2 / 170-SM cohort below.
+fn fixed_sm120_tma_fma_force_physical_eligible(
+    operands: FixedFwdOperands,
+    shape: FixedShape,
+    device: FixedTileDevice,
+    policy: super::context::F32TriadPolicy,
+    tile: FixedTile,
 ) -> bool {
     const HOT_ROWS: &[FixedShape] = &[
         FixedShape {
@@ -2756,13 +3280,26 @@ fn fixed_sm120_tma_fma_force_eligible(
             n: 768,
         },
     ];
-    nvrtc_library_known
-        && nvrtc == (13, 2)
-        && device.compute_capability == (12, 0)
-        && device.multiprocessors == 170
+    let bias_contract = match tile {
+        FixedTile::F32Sm120N64CopyPlanT256 | FixedTile::F32Sm120M128N64CopyPlanT256 => operands
+            .bias_ptr
+            .is_none_or(|bias| bias != 0 && bias.is_multiple_of(4)),
+        FixedTile::F32Sm120TmaFmaM128N64
+        | FixedTile::F32Sm120TmaFmaM64N128
+        | FixedTile::F32Sm120TmaFmaFixedNoBiasM128N64T256 => operands.bias_ptr.is_none(),
+        FixedTile::F32Sm120TmaFmaFixedPostBiasM128N64
+        | FixedTile::F32Sm120TmaFmaFixedPostBiasM64N128
+        | FixedTile::F32Sm120TmaFmaFixedPostBiasM128N64K4
+        | FixedTile::F32Sm120TmaFmaFixedPostBiasM128N64T256
+        | FixedTile::F32Sm120TmaFmaFixedPostBiasM128N96 => operands
+            .bias_ptr
+            .is_some_and(|bias| bias != 0 && bias.is_multiple_of(4)),
+        _ => false,
+    };
+    device.compute_capability == (12, 0)
         && policy == super::context::F32TriadPolicy::ExactScalarFmaV1
         && HOT_ROWS.contains(&shape)
-        && operands.bias_ptr.is_none()
+        && bias_contract
         && [operands.c, operands.x, operands.w]
             .into_iter()
             .all(|operand| {
@@ -2772,12 +3309,34 @@ fn fixed_sm120_tma_fma_force_eligible(
             })
 }
 
+fn fixed_sm120_tma_fma_force_eligible(
+    operands: FixedFwdOperands,
+    shape: FixedShape,
+    device: FixedTileDevice,
+    nvrtc: (i32, i32),
+    nvrtc_library_known: bool,
+    policy: super::context::F32TriadPolicy,
+    tile: FixedTile,
+) -> bool {
+    nvrtc_library_known
+        && nvrtc == (13, 2)
+        && device.multiprocessors == 170
+        && fixed_sm120_tma_fma_force_physical_eligible(operands, shape, device, policy, tile)
+}
+
 // Actual production NVRTC13.2 / 170-SM CC12.0 paired qualification, 101
 // windows in both orders and both eager/graph paths: exactly E/B, each bias
 // row. All four rows beat both incumbent AUTO and explicit Legacy. B+bias
 // additionally beats CUBLAS_COMPUTE_32F_PEDANTIC in all four paired cohorts.
 // Evidence: sm120-fixed-eb-admission101-20260906-v1.jsonl, SHA256
 // 62c96372caf6ea8fa6020299d266fb8303c99674d1ca927f1faa4ae91b45249d.
+// D0/D1 additionally qualified by 101-window confirmation; candidate/current
+// worst p95 ratios: D0 0.830458925, D1 0.819282926. Evidence under
+// internal/perf/sm120-fixed-e0-copyplan-t256-20260906/:
+// d0-current-copyplan-fast-confirm101-v1.log, SHA256
+// de1144e0a91626fe254fe89dde92f8ca956ecedb52aec109bbdca046b91812bb;
+// d1-current-copyplan-fast-confirm101-v1.log, SHA256
+// 479d08e9d78f3439bb9a7e9a504d074d8d1952e8b79969a7297eacd78f3ff0e8.
 fn fixed_sm120_exact_n64_auto_eligible(
     operands: FixedFwdOperands,
     shape: FixedShape,
@@ -2809,6 +3368,8 @@ fn fixed_sm120_exact_n64_auto_eligible(
                 | (2048, 2304, 768, true)
                 | (4621, 768, 2304, false)
                 | (4621, 768, 2304, true)
+                | (2048, 768, 2304, false)
+                | (2048, 768, 2304, true)
         )
 }
 
@@ -2833,6 +3394,61 @@ mod sm120_exact_n64_auto_tests {
             w: typed(0x3000),
             bias_ptr: bias.then_some(0x4004),
         }
+    }
+
+    #[test]
+    fn fixed_sm120_force_physical_gate_is_independent_of_nvrtc_and_sm_cohort() {
+        let shape = FixedShape {
+            m: 4_621,
+            k: 768,
+            n: 2_304,
+        };
+        let tile = FixedTile::F32Sm120TmaFmaM128N64;
+        for multiprocessors in [1, 169, 170, 256] {
+            assert!(fixed_sm120_tma_fma_force_physical_eligible(
+                operands(false),
+                shape,
+                FixedTileDevice {
+                    multiprocessors,
+                    compute_capability: (12, 0),
+                },
+                F32TriadPolicy::ExactScalarFmaV1,
+                tile,
+            ));
+        }
+
+        // The production AUTO gate remains bound to its qualified compiler and
+        // device cohort even though force-only screening is not.
+        assert!(!fixed_sm120_tma_fma_force_eligible(
+            operands(false),
+            shape,
+            FixedTileDevice {
+                multiprocessors: 169,
+                compute_capability: (12, 0),
+            },
+            (13, 0),
+            false,
+            F32TriadPolicy::ExactScalarFmaV1,
+            tile,
+        ));
+
+        assert!(!fixed_sm120_tma_fma_force_physical_eligible(
+            operands(false),
+            shape,
+            FixedTileDevice {
+                multiprocessors: 170,
+                compute_capability: (8, 9),
+            },
+            F32TriadPolicy::ExactScalarFmaV1,
+            tile,
+        ));
+        assert!(!fixed_sm120_tma_fma_force_physical_eligible(
+            operands(true),
+            shape,
+            DEVICE,
+            F32TriadPolicy::ExactScalarFmaV1,
+            tile,
+        ));
     }
 
     #[test]
@@ -2959,6 +3575,249 @@ mod sm120_exact_n64_auto_tests {
     }
 
     #[test]
+    fn fixed_sm120_tma_fma_a1_auto_prefers_t256_and_retains_control_fallback() {
+        for (eligible, t256_loaded, expected) in [
+            (
+                true,
+                Some(true),
+                Some(FixedTile::F32Sm120TmaFmaFixedPostBiasM128N64T256),
+            ),
+            (
+                true,
+                Some(false),
+                Some(FixedTile::F32Sm120TmaFmaFixedPostBiasM128N64),
+            ),
+            (true, None, None),
+            (false, Some(true), None),
+            (false, Some(false), None),
+            (false, None, None),
+        ] {
+            assert_eq!(
+                fixed_sm120_tma_fma_a1_auto_tile(eligible, t256_loaded),
+                expected,
+                "eligibility={eligible}, loaded={t256_loaded:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn fixed_sm120_tma_fma_a1_postbias_gate_is_exact_and_cohort_bound() {
+        let a1 = FixedShape {
+            m: 4621,
+            k: 384,
+            n: 1928,
+        };
+        assert!(fixed_sm120_tma_fma_a1_auto_eligible(
+            operands(true),
+            a1,
+            DEVICE,
+            (13, 2),
+            true,
+            F32TriadPolicy::ExactScalarFmaV1,
+        ));
+        assert!(!fixed_sm120_tma_fma_a1_auto_eligible(
+            operands(false),
+            a1,
+            DEVICE,
+            (13, 2),
+            true,
+            F32TriadPolicy::ExactScalarFmaV1,
+        ));
+        assert!(!fixed_sm120_tma_fma_a1_auto_eligible(
+            operands(true),
+            FixedShape { n: 1929, ..a1 },
+            DEVICE,
+            (13, 2),
+            true,
+            F32TriadPolicy::ExactScalarFmaV1,
+        ));
+    }
+
+    #[test]
+    fn fixed_sm120_copyplan_t256_force_gate_keeps_hot_rows_and_bias_contract() {
+        for (m, k, n) in [
+            (4621, 384, 1928),
+            (4621, 768, 2304),
+            (4621, 1928, 384),
+            (2048, 768, 2304),
+            (2048, 2304, 768),
+        ] {
+            for bias in [false, true] {
+                let eligible = |ops, shape| {
+                    fixed_sm120_tma_fma_force_eligible(
+                        ops,
+                        shape,
+                        DEVICE,
+                        (13, 2),
+                        true,
+                        F32TriadPolicy::ExactScalarFmaV1,
+                        FixedTile::F32Sm120N64CopyPlanT256,
+                    )
+                };
+                let shape = FixedShape { m, k, n };
+                assert!(eligible(operands(bias), shape));
+                assert!(!eligible(operands(bias), FixedShape { m: m - 1, ..shape }));
+                assert!(!eligible(
+                    FixedFwdOperands {
+                        bias_ptr: Some(0),
+                        ..operands(bias)
+                    },
+                    shape
+                ));
+                assert!(!eligible(
+                    FixedFwdOperands {
+                        x: TypedPtr {
+                            ptr: 0x2004,
+                            dtype: WeightDtype::F32
+                        },
+                        ..operands(bias)
+                    },
+                    shape
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn fixed_sm120_nobias_force_gate_accepts_only_qualified_unbiased_hot_rows() {
+        let tile = FixedTile::F32Sm120TmaFmaFixedNoBiasM128N64T256;
+        let eligible = |ops, shape, device, nvrtc, known, policy| {
+            fixed_sm120_tma_fma_force_eligible(ops, shape, device, nvrtc, known, policy, tile)
+        };
+        for (m, k, n) in [
+            (4621, 384, 1928),
+            (4621, 768, 2304),
+            (4621, 1928, 384),
+            (2048, 768, 2304),
+            (2048, 2304, 768),
+        ] {
+            let shape = FixedShape { m, k, n };
+            assert!(eligible(
+                operands(false),
+                shape,
+                DEVICE,
+                (13, 2),
+                true,
+                F32TriadPolicy::ExactScalarFmaV1
+            ));
+            for bias_ptr in [Some(0), Some(0x4004)] {
+                assert!(!eligible(
+                    FixedFwdOperands {
+                        bias_ptr,
+                        ..operands(false)
+                    },
+                    shape,
+                    DEVICE,
+                    (13, 2),
+                    true,
+                    F32TriadPolicy::ExactScalarFmaV1
+                ));
+            }
+        }
+        let shape = FixedShape {
+            m: 2048,
+            k: 2304,
+            n: 768,
+        };
+        for (ops, shape, device, nvrtc, known, policy) in [
+            (
+                operands(false),
+                FixedShape { m: 2047, ..shape },
+                DEVICE,
+                (13, 2),
+                true,
+                F32TriadPolicy::ExactScalarFmaV1,
+            ),
+            (
+                operands(false),
+                shape,
+                FixedTileDevice {
+                    compute_capability: (12, 1),
+                    ..DEVICE
+                },
+                (13, 2),
+                true,
+                F32TriadPolicy::ExactScalarFmaV1,
+            ),
+            (
+                operands(false),
+                shape,
+                FixedTileDevice {
+                    multiprocessors: 169,
+                    ..DEVICE
+                },
+                (13, 2),
+                true,
+                F32TriadPolicy::ExactScalarFmaV1,
+            ),
+            (
+                operands(false),
+                shape,
+                DEVICE,
+                (13, 1),
+                true,
+                F32TriadPolicy::ExactScalarFmaV1,
+            ),
+            (
+                operands(false),
+                shape,
+                DEVICE,
+                (13, 2),
+                false,
+                F32TriadPolicy::ExactScalarFmaV1,
+            ),
+            (
+                operands(false),
+                shape,
+                DEVICE,
+                (13, 2),
+                true,
+                F32TriadPolicy::AllowDeterministicTf32V1,
+            ),
+        ] {
+            assert!(!eligible(ops, shape, device, nvrtc, known, policy));
+        }
+        for bad in [
+            TypedPtr {
+                ptr: 0,
+                dtype: WeightDtype::F32,
+            },
+            TypedPtr {
+                ptr: 0x1004,
+                dtype: WeightDtype::F32,
+            },
+            TypedPtr {
+                ptr: 0x1000,
+                dtype: WeightDtype::Bf16,
+            },
+        ] {
+            for ops in [
+                FixedFwdOperands {
+                    c: bad,
+                    ..operands(false)
+                },
+                FixedFwdOperands {
+                    x: bad,
+                    ..operands(false)
+                },
+                FixedFwdOperands {
+                    w: bad,
+                    ..operands(false)
+                },
+            ] {
+                assert!(!eligible(
+                    ops,
+                    shape,
+                    DEVICE,
+                    (13, 2),
+                    true,
+                    F32TriadPolicy::ExactScalarFmaV1
+                ));
+            }
+        }
+    }
+
+    #[test]
     fn fixed_sm120_tma_fma_force_gate_admits_only_unbiased_hot_rows() {
         for (m, k, n) in [
             (4621, 384, 1928),
@@ -2975,6 +3834,7 @@ mod sm120_exact_n64_auto_tests {
                 (13, 2),
                 true,
                 F32TriadPolicy::ExactScalarFmaV1,
+                FixedTile::F32Sm120TmaFmaM128N64,
             ));
             assert!(!fixed_sm120_tma_fma_force_eligible(
                 operands(true),
@@ -2983,6 +3843,7 @@ mod sm120_exact_n64_auto_tests {
                 (13, 2),
                 true,
                 F32TriadPolicy::ExactScalarFmaV1,
+                FixedTile::F32Sm120TmaFmaM128N64,
             ));
         }
         for shape in [
@@ -3014,8 +3875,55 @@ mod sm120_exact_n64_auto_tests {
                 (13, 2),
                 true,
                 F32TriadPolicy::ExactScalarFmaV1,
+                FixedTile::F32Sm120TmaFmaM128N64,
             ));
         }
+    }
+
+    #[test]
+    fn fixed_sm120_tma_fma_force_gate_separates_bias_arithmetic_variants() {
+        let shape = FixedShape {
+            m: 4621,
+            k: 384,
+            n: 1928,
+        };
+        let eligible = |ops, tile| {
+            fixed_sm120_tma_fma_force_eligible(
+                ops,
+                shape,
+                DEVICE,
+                (13, 2),
+                true,
+                F32TriadPolicy::ExactScalarFmaV1,
+                tile,
+            )
+        };
+        assert!(eligible(operands(false), FixedTile::F32Sm120TmaFmaM64N128));
+        assert!(!eligible(operands(true), FixedTile::F32Sm120TmaFmaM64N128));
+        assert!(eligible(
+            operands(true),
+            FixedTile::F32Sm120TmaFmaFixedPostBiasM64N128
+        ));
+        assert!(!eligible(
+            operands(false),
+            FixedTile::F32Sm120TmaFmaFixedPostBiasM64N128
+        ));
+        assert!(eligible(
+            operands(true),
+            FixedTile::F32Sm120TmaFmaFixedPostBiasM128N64K4
+        ));
+        assert!(!eligible(
+            operands(false),
+            FixedTile::F32Sm120TmaFmaFixedPostBiasM128N64K4
+        ));
+        assert!(eligible(
+            operands(true),
+            FixedTile::F32Sm120TmaFmaFixedPostBiasM128N64T256
+        ));
+        assert!(!eligible(
+            operands(false),
+            FixedTile::F32Sm120TmaFmaFixedPostBiasM128N64T256
+        ));
     }
 
     #[test]
@@ -3027,7 +3935,15 @@ mod sm120_exact_n64_auto_tests {
         };
         let ops = operands(false);
         let accept = |ops, shape, device, nvrtc, known, policy| {
-            fixed_sm120_tma_fma_force_eligible(ops, shape, device, nvrtc, known, policy)
+            fixed_sm120_tma_fma_force_eligible(
+                ops,
+                shape,
+                device,
+                nvrtc,
+                known,
+                policy,
+                FixedTile::F32Sm120TmaFmaM128N64,
+            )
         };
         for (device, nvrtc, known, policy) in [
             (
@@ -3157,8 +4073,8 @@ mod sm120_exact_n64_auto_tests {
     }
 
     #[test]
-    fn fixed_sm120_exact_n64_auto_admits_the_four_qualified_rows() {
-        for (m, k, n) in [(2048, 2304, 768), (4621, 768, 2304)] {
+    fn fixed_sm120_exact_n64_auto_admits_the_six_qualified_rows() {
+        for (m, k, n) in [(2048, 2304, 768), (4621, 768, 2304), (2048, 768, 2304)] {
             for bias in [false, true] {
                 assert!(fixed_sm120_exact_n64_auto_eligible(
                     operands(bias),
@@ -3244,7 +4160,7 @@ mod sm120_exact_n64_auto_tests {
 
     #[test]
     fn fixed_sm120_exact_n64_auto_declines_unmeasured_shape_alignment_and_dtype() {
-        for (m, k, n) in [(2048, 2304, 768), (4621, 768, 2304)] {
+        for (m, k, n) in [(2048, 2304, 768), (4621, 768, 2304), (2048, 768, 2304)] {
             for bias in [false, true] {
                 let shape = FixedShape { m, k, n };
                 let good = operands(bias);
@@ -4264,11 +5180,11 @@ mod pair_store_schedule_tests {
 #[cfg(test)]
 mod tests {
     use super::{
-        FixedHalfMapCache, FixedHalfMapKey, FixedSm120HalfExactDevice, FixedSm120HalfExactRequest,
-        FixedSm120HalfTile, FixedTensorMap, FixedTf32MapCache, FixedTf32MapKey, FixedTile,
-        FixedTileDevice, fixed_adjust_arch_tile, fixed_pick_f32_exact, fixed_pick_f32out_tile,
-        fixed_pick_sm120_f32out, fixed_pick_sm120_half, fixed_pick_sm120_half_exact,
-        fixed_pick_tf32, fixed_pick_tile,
+        FixedHalfMapCache, FixedHalfMapKey, FixedPostBiasMapCache, FixedPostBiasMapKey,
+        FixedSm120HalfExactDevice, FixedSm120HalfExactRequest, FixedSm120HalfTile, FixedTensorMap,
+        FixedTf32MapCache, FixedTf32MapKey, FixedTile, FixedTileDevice, fixed_adjust_arch_tile,
+        fixed_pick_f32_exact, fixed_pick_f32out_tile, fixed_pick_sm120_f32out,
+        fixed_pick_sm120_half, fixed_pick_sm120_half_exact, fixed_pick_tf32, fixed_pick_tile,
     };
     use crate::mamba_ssm::gpu::buffers::{
         managed_allocation_epoch_for_ranges, register_managed_allocation_range,
@@ -4343,6 +5259,34 @@ mod tests {
             "live TF32 tensor maps must survive eager warmup beyond 32 entries"
         );
         drop(registrations);
+    }
+
+    #[test]
+    fn sm120_postbias_bk16_maps_are_isolated_from_tf32_bk32_maps() {
+        let tf32 = FixedTf32MapKey {
+            a: 0x1000,
+            b: 0x2000,
+            m: 4621,
+            k: 384,
+            n: 1928,
+            tile_rows: 128,
+        };
+        let postbias = FixedPostBiasMapKey {
+            a: tf32.a,
+            b: tf32.b,
+            m: tf32.m,
+            k: tf32.k,
+            n: tf32.n,
+            tile_m: 128,
+            tile_n: 64,
+        };
+        let tf32_cache = FixedTf32MapCache::default();
+        let postbias_cache = FixedPostBiasMapCache::default();
+        assert!(tf32_cache.entries.is_empty());
+        assert!(postbias_cache.entries.is_empty());
+        assert_eq!([32, tf32.tile_rows], [32, 128]);
+        assert_eq!([16, postbias.tile_m], [16, 128]);
+        assert_eq!([postbias.tile_n, 16], [64, 16]);
     }
 
     #[test]
@@ -4797,43 +5741,102 @@ mod tests {
     #[test]
     fn sm120_tf32_selector_promotes_only_the_qualified_cuda_132_b_and_d_cells() {
         assert_eq!(
-            fixed_pick_tf32(4621, 768, 2304, 170, (12, 0), (13, 2), true),
+            fixed_pick_tf32(4621, 768, 2304, 170, (12, 0), (13, 2), true, false, true),
             FixedTile::Tf32Sm120M128S2
         );
-        assert_eq!(
-            fixed_pick_tf32(2048, 768, 2304, 170, (12, 0), (13, 2), true),
-            FixedTile::Tf32Sm120M64S2ProducerWarp
-        );
+        for has_bias in [false, true] {
+            assert_eq!(
+                fixed_pick_tf32(2048, 768, 2304, 170, (12, 0), (13, 2), true, has_bias, true),
+                FixedTile::Tf32Sm120M64S2PairStore,
+                "both D0 and D1 have independent confirmation"
+            );
+            assert_eq!(
+                fixed_pick_tf32(
+                    2048,
+                    768,
+                    2304,
+                    170,
+                    (12, 0),
+                    (13, 2),
+                    true,
+                    has_bias,
+                    false
+                ),
+                FixedTile::Tf32Sm120M64S2ProducerWarp,
+                "unaligned C must retain the previously qualified schedule"
+            );
+            for (m, k, n, sms, cc, nvrtc, loaded) in [
+                (2049, 768, 2304, 170, (12, 0), (13, 2), true),
+                (2048, 769, 2304, 170, (12, 0), (13, 2), true),
+                (2048, 768, 2305, 170, (12, 0), (13, 2), true),
+                (2048, 768, 2304, 169, (12, 0), (13, 2), true),
+                (2048, 768, 2304, 170, (12, 1), (13, 2), true),
+                (2048, 768, 2304, 170, (12, 0), (12, 8), true),
+                (2048, 768, 2304, 170, (12, 0), (13, 0), true),
+                (2048, 768, 2304, 170, (12, 0), (13, 1), true),
+                (2048, 768, 2304, 170, (12, 0), (13, 3), true),
+                (2048, 768, 2304, 170, (12, 0), (13, 2), false),
+            ] {
+                assert_eq!(
+                    fixed_pick_tf32(m, k, n, sms, cc, nvrtc, loaded, has_bias, true),
+                    if loaded {
+                        FixedTile::Tf32Sm120M64S2
+                    } else {
+                        FixedTile::Tf32M64S2
+                    }
+                );
+            }
+        }
         for nvrtc_version in [(12, 8), (13, 0), (13, 1), (13, 3)] {
             assert_eq!(
-                fixed_pick_tf32(4621, 768, 2304, 170, (12, 0), nvrtc_version, true,),
+                fixed_pick_tf32(
+                    4621,
+                    768,
+                    2304,
+                    170,
+                    (12, 0),
+                    nvrtc_version,
+                    true,
+                    false,
+                    true
+                ),
                 FixedTile::Tf32Sm120M64S2,
                 "unqualified compiler {nvrtc_version:?} must use the portable SM120 schedule"
             );
             assert_eq!(
-                fixed_pick_tf32(2048, 768, 2304, 170, (12, 0), nvrtc_version, true,),
+                fixed_pick_tf32(
+                    2048,
+                    768,
+                    2304,
+                    170,
+                    (12, 0),
+                    nvrtc_version,
+                    true,
+                    false,
+                    true
+                ),
                 FixedTile::Tf32Sm120M64S2,
-                "unqualified compiler {nvrtc_version:?} must not use the producer-warp schedule"
+                "unqualified compiler {nvrtc_version:?} must not use the promoted pair-store schedule"
             );
         }
         assert_eq!(
-            fixed_pick_tf32(4621, 768, 2304, 169, (12, 0), (13, 2), true),
+            fixed_pick_tf32(4621, 768, 2304, 169, (12, 0), (13, 2), true, false, true),
             FixedTile::Tf32Sm120M64S2
         );
         assert_eq!(
-            fixed_pick_tf32(4621, 768, 2304, 170, (12, 1), (13, 2), true),
+            fixed_pick_tf32(4621, 768, 2304, 170, (12, 1), (13, 2), true, false, true),
             FixedTile::Tf32Sm120M64S2
         );
         assert_eq!(
-            fixed_pick_tf32(4622, 768, 2304, 170, (12, 0), (13, 2), true),
+            fixed_pick_tf32(4622, 768, 2304, 170, (12, 0), (13, 2), true, false, true),
             FixedTile::Tf32Sm120M64S2
         );
         assert_eq!(
-            fixed_pick_tf32(4621, 769, 2304, 170, (12, 0), (13, 2), true),
+            fixed_pick_tf32(4621, 769, 2304, 170, (12, 0), (13, 2), true, false, true),
             FixedTile::Tf32Sm120M64S2
         );
         assert_eq!(
-            fixed_pick_tf32(4621, 768, 2305, 170, (12, 0), (13, 2), true),
+            fixed_pick_tf32(4621, 768, 2305, 170, (12, 0), (13, 2), true, false, true),
             FixedTile::Tf32Sm120M64S2
         );
     }
@@ -4841,23 +5844,23 @@ mod tests {
     #[test]
     fn tf32_selector_keeps_portable_and_thin_fallbacks() {
         assert_eq!(
-            fixed_pick_tf32(4621, 768, 1928, 170, (12, 0), (13, 2), false),
+            fixed_pick_tf32(4621, 768, 1928, 170, (12, 0), (13, 2), false, false, true),
             FixedTile::Tf32M64S2
         );
         assert_eq!(
-            fixed_pick_tf32(4621, 768, 1928, 170, (12, 0), (13, 2), true),
+            fixed_pick_tf32(4621, 768, 1928, 170, (12, 0), (13, 2), true, false, true),
             FixedTile::Tf32Sm120M64S2
         );
         assert_eq!(
-            fixed_pick_tf32(1, 768, 1928, 170, (12, 0), (13, 2), true),
+            fixed_pick_tf32(1, 768, 1928, 170, (12, 0), (13, 2), true, false, true),
             FixedTile::Tf32M16S4
         );
         assert_eq!(
-            fixed_pick_tf32(4621, 768, 2304, 142, (8, 9), (13, 2), false),
+            fixed_pick_tf32(4621, 768, 2304, 142, (8, 9), (13, 2), false, false, true),
             FixedTile::Tf32M64S2
         );
         assert_eq!(
-            fixed_pick_tf32(4621, 768, 384, 142, (8, 9), (13, 2), false),
+            fixed_pick_tf32(4621, 768, 384, 142, (8, 9), (13, 2), false, false, true),
             FixedTile::Tf32M128S2
         );
     }

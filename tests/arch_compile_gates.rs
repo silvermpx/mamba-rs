@@ -84,6 +84,41 @@ fn fixed_tf32_source_is_forward_only_and_self_contained() {
             "Fixed SM120 half source contains training-only token {forbidden}"
         );
     }
+    let postbias_path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/kernels/gemm_bi_fixed/sm120_f32_postbias.cu"
+    );
+    let postbias =
+        std::fs::read_to_string(postbias_path).expect("standalone Fixed SM120 post-bias source");
+    for symbol in [
+        "gemm_bi_nn_sm120_tma_fma_v1_fixed_postbias_m128n64_bk16_s2",
+        "gemm_bi_nn_sm120_tma_fma_v1_fixed_postbias_m64n128_bk16_s2",
+        "gemm_bi_nn_sm120_tma_fma_v1_fixed_postbias_m128n96_bk16_s2",
+        "gemm_bi_nn_sm120_tma_fma_v1_fixed_postbias_m128n64_bk16_s2_k4",
+        "gemm_bi_nn_sm120_tma_fma_v1_fixed_postbias_m128n64_t256_bk16_s2",
+        "gemm_bi_nn_sm120_tma_fma_v1_fixed_nobias_m128n64_t256_bk16_s2",
+    ] {
+        assert_eq!(
+            postbias
+                .split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_'))
+                .filter(|token| *token == symbol)
+                .count(),
+            1,
+            "post-bias export"
+        );
+    }
+    for required in ["__fmaf_rn(", "__fmul_rn(", "__fadd_rn("] {
+        assert!(
+            postbias.contains(required),
+            "post-bias source omitted {required}"
+        );
+    }
+    for forbidden in ["gemm_bi_tn_", "gemm_bi_nt_", "atomic", "split_k"] {
+        assert!(
+            !postbias.to_ascii_lowercase().contains(forbidden),
+            "Fixed SM120 post-bias source contains training-only token {forbidden}"
+        );
+    }
 }
 
 fn fixed_blob() -> String {
@@ -132,6 +167,10 @@ fn fixed_blob_for(arch: &str) -> String {
         source.push('\n');
         source.push_str(include_str!(
             "../kernels/gemm_bi_fixed/sm120_f32_n64_sliced.cu"
+        ));
+        source.push('\n');
+        source.push_str(include_str!(
+            "../kernels/gemm_bi_fixed/sm120_f32_postbias.cu"
         ));
     }
     source
@@ -2704,7 +2743,15 @@ fn assert_fixed_exact_n64_copyplan_ptx(
         .map(|entry| entry.symbol.as_str())
         .collect();
     let expected = if arch == admitted_arch {
-        vec![symbol]
+        if symbol == FIXED_SM120_EXACT_N64_COPYPLAN {
+            vec![
+                symbol,
+                "gemm_bi_nn_fixed_sm120_f32_n64_copyplan_t256_v1",
+                "gemm_bi_nn_fixed_sm120_f32_n64_copyplan_m128n64_t256_v1",
+            ]
+        } else {
+            vec![symbol]
+        }
     } else {
         vec![]
     };
@@ -2712,60 +2759,64 @@ fn assert_fixed_exact_n64_copyplan_ptx(
     if arch != admitted_arch {
         return;
     }
-    let entry = parsed.entry(symbol);
-    assert!(
-        has_exact_maxntid(&entry.text, 128),
-        "{arch} exact N64 maxntid"
-    );
-    assert!(
-        has_exact_minnctapersm(&entry.text, 2),
-        "{arch} exact N64 min CTAs"
-    );
-    let parameters = ptx_parameters(&entry.text, symbol);
-    let declarations: Vec<_> = parameters
-        .lines()
-        .map(str::trim)
-        .filter(|line| line.starts_with(".param "))
-        .collect();
-    assert_eq!(declarations.len(), 5, "exact N64 five-argument ABI");
-    assert!(
-        declarations[..4]
-            .iter()
-            .all(|line| line.starts_with(".param .u64 "))
-    );
-    assert!(
-        declarations[4].starts_with(".param .align 4 .b8 ") && declarations[4].contains("[32]"),
-        "exact N64 compact parameter ABI"
-    );
-    assert_compile_gate_entry_tokens(
-        "Fixed exact N64 copy-plan",
-        entry,
-        &[
-            "cp.async.cg.shared.global",
-            "cp.async.commit_group",
-            "cp.async.wait_group",
-            "fma.rn.f32",
-        ],
-    );
-    for token in compile_gate_ptx_tokens(&entry.body) {
+    for symbol in expected {
+        let t256 = symbol == "gemm_bi_nn_fixed_sm120_f32_n64_copyplan_t256_v1";
+        let m128 = symbol == "gemm_bi_nn_fixed_sm120_f32_n64_copyplan_m128n64_t256_v1";
+        let entry = parsed.entry(symbol);
         assert!(
-            token.text != ".local"
-                && !token.text.starts_with("ld.local")
-                && !token.text.starts_with("st.local")
-                && !token.text.starts_with("mma.")
-                && !token.text.starts_with("wmma.")
-                && !token
-                    .text
-                    .split('.')
-                    .any(|part| part == "tf32" || part == "ftz")
-                && !token.text.starts_with("atom.")
-                && !token.text.starts_with("atom::")
-                && !token.text.starts_with("red.")
-                && !token.text.starts_with("red::")
-                && !token.text.starts_with("redux."),
-            "exact N64 forbidden PTX token {}",
-            token.text,
+            has_exact_maxntid(&entry.text, if t256 || m128 { 256 } else { 128 }),
+            "{arch} exact N64 maxntid"
         );
+        assert!(
+            has_exact_minnctapersm(&entry.text, if t256 { 3 } else { 2 }),
+            "{arch} exact N64 min CTAs"
+        );
+        let parameters = ptx_parameters(&entry.text, symbol);
+        let declarations: Vec<_> = parameters
+            .lines()
+            .map(str::trim)
+            .filter(|line| line.starts_with(".param "))
+            .collect();
+        assert_eq!(declarations.len(), 5, "exact N64 five-argument ABI");
+        assert!(
+            declarations[..4]
+                .iter()
+                .all(|line| line.starts_with(".param .u64 "))
+        );
+        assert!(
+            declarations[4].starts_with(".param .align 4 .b8 ") && declarations[4].contains("[32]"),
+            "exact N64 compact parameter ABI"
+        );
+        assert_compile_gate_entry_tokens(
+            "Fixed exact N64 copy-plan",
+            entry,
+            &[
+                "cp.async.cg.shared.global",
+                "cp.async.commit_group",
+                "cp.async.wait_group",
+                "fma.rn.f32",
+            ],
+        );
+        for token in compile_gate_ptx_tokens(&entry.body) {
+            assert!(
+                token.text != ".local"
+                    && !token.text.starts_with("ld.local")
+                    && !token.text.starts_with("st.local")
+                    && !token.text.starts_with("mma.")
+                    && !token.text.starts_with("wmma.")
+                    && !token
+                        .text
+                        .split('.')
+                        .any(|part| part == "tf32" || part == "ftz")
+                    && !token.text.starts_with("atom.")
+                    && !token.text.starts_with("atom::")
+                    && !token.text.starts_with("red.")
+                    && !token.text.starts_with("red::")
+                    && !token.text.starts_with("redux."),
+                "exact N64 forbidden PTX token {}",
+                token.text,
+            );
+        }
     }
 }
 
@@ -2861,10 +2912,11 @@ fn fixed_sm120_exact_n64_copyplan_source_contract_and_target_boundary() {
     }
     let base = fixed_blob();
     let production = fixed_blob_for("compute_120");
+    let postbias = include_str!("../kernels/gemm_bi_fixed/sm120_f32_postbias.cu");
     let sliced = include_str!("../kernels/gemm_bi_fixed/sm120_f32_n64_sliced.cu");
     assert_eq!(
         production.strip_prefix(&base).unwrap(),
-        format!("\n{candidate}\n{sliced}")
+        format!("\n{candidate}\n{sliced}\n{postbias}")
     );
     for arch in ["sm_89", "compute_89", "sm_120", "sm_121", "compute_121"] {
         assert!(
@@ -3180,7 +3232,77 @@ fn assert_fixed_tf32_ptx(arch: &str, ptx: &str) {
         "gemm_bi_nn_sm120_tma_128x128_bk32_s2",
         "gemm_bi_nn_sm120_tma_128x128_bk32_s3",
     ];
+    const SM120_POSTBIAS: [&str; 6] = [
+        "gemm_bi_nn_sm120_tma_fma_v1_fixed_postbias_m128n64_bk16_s2",
+        "gemm_bi_nn_sm120_tma_fma_v1_fixed_postbias_m64n128_bk16_s2",
+        "gemm_bi_nn_sm120_tma_fma_v1_fixed_postbias_m128n96_bk16_s2",
+        "gemm_bi_nn_sm120_tma_fma_v1_fixed_postbias_m128n64_bk16_s2_k4",
+        "gemm_bi_nn_sm120_tma_fma_v1_fixed_postbias_m128n64_t256_bk16_s2",
+        "gemm_bi_nn_sm120_tma_fma_v1_fixed_nobias_m128n64_t256_bk16_s2",
+    ];
     let parsed = parse_compile_gate_ptx(ptx).expect("parse Fixed PTX");
+    let actual_postbias = parsed
+        .entries
+        .iter()
+        .filter(|entry| entry.symbol.contains("_tma_fma_v1_fixed_"))
+        .map(|entry| entry.symbol.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    let expected_postbias = if arch == "compute_120" {
+        SM120_POSTBIAS.into_iter().collect()
+    } else {
+        std::collections::BTreeSet::new()
+    };
+    assert_eq!(
+        actual_postbias, expected_postbias,
+        "{arch} Fixed post-bias inventory"
+    );
+    for symbol in expected_postbias {
+        let entry = parsed.entry(symbol);
+        let threads = if symbol.contains("_m128n96_") || symbol.contains("_t256_") {
+            256
+        } else {
+            128
+        };
+        assert!(
+            has_exact_maxntid(&entry.text, threads),
+            "{arch}/{symbol} maxntid"
+        );
+        assert_eq!(
+            ptx_parameters(&entry.text, symbol)
+                .matches(".param")
+                .count(),
+            7,
+            "{arch}/{symbol} Driver parameter count"
+        );
+        assert_compile_gate_entry_tokens(
+            "Fixed SM120 post-bias",
+            entry,
+            &["fma.rn.f32", "mul.rn.f32"],
+        );
+        if symbol.contains("_fixed_nobias_") {
+            assert_compile_gate_entry_excludes("Fixed SM120 no-bias", entry, &["add.rn.f32"]);
+        } else {
+            assert_compile_gate_entry_tokens("Fixed SM120 post-bias", entry, &["add.rn.f32"]);
+        }
+        assert_compile_gate_entry_excludes(
+            "Fixed SM120 post-bias",
+            entry,
+            &[
+                "mma.sync",
+                "wmma.mma",
+                "cvt.rna.tf32.f32",
+                "fma.rn.ftz.f32",
+                "mul.rn.ftz.f32",
+                "add.rn.ftz.f32",
+                "atom.",
+                "red.",
+                "redux.",
+                "call.uni",
+                "ld.local",
+                "st.local",
+            ],
+        );
+    }
     let owns_sm120 = matches!(arch, "sm_120" | "sm_121" | "compute_120" | "compute_121");
     let mut expected = PORTABLE.to_vec();
     if owns_sm120 {

@@ -89,6 +89,23 @@ pub struct FixedSm120HalfKernels {
     pub m128n128_bk32_s3: HalfKernel,
 }
 
+/// Fixed-owned exact-F32 TMA tiles with post-dot bias or no-bias epilogues,
+/// matching the deterministic inference arithmetic contract.
+pub struct FixedSm120FmaPostbiasKernels {
+    pub m128n64: CudaFunction,
+    pub m64n128: CudaFunction,
+    pub m128n96: CudaFunction,
+    /// Independently admitted force-only K4 twin; controls remain available on rejection.
+    pub m128n64_k4: Option<CudaFunction>,
+    pub m128n64_k4_rejection: Option<String>,
+    /// Independently admitted eight-warp A1 AUTO route; absent means control fallback.
+    pub m128n64_t256: Option<CudaFunction>,
+    pub m128n64_t256_rejection: Option<String>,
+    /// Independently admitted force-only no-bias eight-warp twin.
+    pub nobias_m128n64_t256: Option<CudaFunction>,
+    pub nobias_m128n64_t256_rejection: Option<String>,
+}
+
 /// All compiled CUDA kernels needed for Mamba forward/backward.
 ///
 /// Kernels are compiled once via NVRTC at startup. Grouped by pipeline stage.
@@ -438,9 +455,17 @@ pub struct MambaKernels {
     /// Optional CC12.0 exact-F32 N64 copy-plan, separate from the Ada route.
     pub fixed_sm120_f32_n64_copyplan: Option<CudaFunction>,
     pub fixed_sm120_f32_n64_copyplan_rejection: Option<String>,
+    /// Independently admitted force-only 256-thread CopyPlan twin.
+    pub fixed_sm120_f32_n64_copyplan_t256: Option<CudaFunction>,
+    pub fixed_sm120_f32_n64_copyplan_t256_rejection: Option<String>,
+    pub fixed_sm120_f32_m128n64_copyplan_t256: Option<CudaFunction>,
+    pub fixed_sm120_f32_m128n64_copyplan_t256_rejection: Option<String>,
     /// Independent compute_120 sliced exact-F32 route; no scratch.
     pub fixed_sm120_f32_n64_sliced: Option<CudaFunction>,
     pub fixed_sm120_f32_n64_sliced_rejection: Option<String>,
+    /// Optional CC12.0 exact-FMA tiles with Fixed's post-dot bias order.
+    pub fixed_sm120_fma_postbias: Option<FixedSm120FmaPostbiasKernels>,
+    pub fixed_sm120_fma_postbias_rejection: Option<String>,
 
     // -- Batch-invariant matvec (M=1 specialization) --
     /// Specialized M=1 matvec. The GEMM kernels above waste 98% of smem
@@ -650,8 +675,16 @@ impl MambaKernels {
             super::gemm_bi_triad::modules::load_fixed_sm89_f32_n64_copyplan(ctx, &fixed);
         let (fixed_sm120_f32_n64_copyplan, fixed_sm120_f32_n64_copyplan_rejection) =
             super::gemm_bi_triad::modules::load_fixed_sm120_f32_n64_copyplan(ctx, &fixed);
+        let (fixed_sm120_f32_n64_copyplan_t256, fixed_sm120_f32_n64_copyplan_t256_rejection) =
+            super::gemm_bi_triad::modules::load_fixed_sm120_f32_n64_copyplan_t256(ctx, &fixed);
+        let (
+            fixed_sm120_f32_m128n64_copyplan_t256,
+            fixed_sm120_f32_m128n64_copyplan_t256_rejection,
+        ) = super::gemm_bi_triad::modules::load_fixed_sm120_f32_m128n64_copyplan_t256(ctx, &fixed);
         let (fixed_sm120_f32_n64_sliced, fixed_sm120_f32_n64_sliced_rejection) =
             super::gemm_bi_triad::modules::load_fixed_sm120_f32_n64_sliced(ctx, &fixed);
+        let (fixed_sm120_fma_postbias, fixed_sm120_fma_postbias_rejection) =
+            super::gemm_bi_triad::modules::load_fixed_sm120_fma_postbias(ctx, &fixed);
         let triad = GemmBiKernels::load(ctx, fixed.artifact_identity, scalar, sm80, specialized)?;
         // A rejected TF32 module used to be recorded and never shown: the
         // process booted green and every TF32 request quietly ran scalar.
@@ -901,8 +934,14 @@ impl MambaKernels {
             fixed_sm89_f32_n64_copyplan_rejection,
             fixed_sm120_f32_n64_copyplan,
             fixed_sm120_f32_n64_copyplan_rejection,
+            fixed_sm120_f32_n64_copyplan_t256,
+            fixed_sm120_f32_n64_copyplan_t256_rejection,
+            fixed_sm120_f32_m128n64_copyplan_t256,
+            fixed_sm120_f32_m128n64_copyplan_t256_rejection,
             fixed_sm120_f32_n64_sliced,
             fixed_sm120_f32_n64_sliced_rejection,
+            fixed_sm120_fma_postbias,
+            fixed_sm120_fma_postbias_rejection,
             gemm_bi_nn_tf32: {
                 let kernels = FixedTf32Kernels {
                     m128n64_s2: get("gemm_bi_nn_tf32_v1_m128n64_bk32_s2")?,

@@ -450,7 +450,12 @@ fn admission(cell: &str, windows: usize, paths: &[usize], own_ratios: &[f64]) ->
 
 // Independent literals: neither phase may be inferred from the route returned
 // by production or from the selected timing subset.
-fn expected_auto(phase: &str, shape: FixedShape, has_bias: bool) -> Result<FixedTile, String> {
+fn expected_auto(
+    phase: &str,
+    shape: FixedShape,
+    has_bias: bool,
+    t256_loaded: bool,
+) -> Result<FixedTile, String> {
     let dims = (shape.m, shape.k, shape.n);
     match phase {
         "incumbent" => Ok(if matches!(dims, (4621, 384, 1928) | (4621, 768, 2304)) {
@@ -460,12 +465,17 @@ fn expected_auto(phase: &str, shape: FixedShape, has_bias: bool) -> Result<Fixed
         }),
         "promoted" => Ok(if dims == (4621, 384, 1928) && !has_bias {
             FixedTile::F32Sm120TmaFmaM64N128
+        } else if dims == (4621, 384, 1928) && t256_loaded {
+            FixedTile::F32Sm120TmaFmaFixedPostBiasM128N64T256
+        } else if dims == (4621, 384, 1928) {
+            FixedTile::F32Sm120TmaFmaFixedPostBiasM128N64
         } else if dims == (4621, 768, 2304) && !has_bias {
             FixedTile::F32Sm120TmaFmaM128N64
-        } else if matches!(dims, (4621, 768, 2304) | (2048, 2304, 768)) {
+        } else if matches!(
+            dims,
+            (4621, 768, 2304) | (2048, 2304, 768) | (2048, 768, 2304)
+        ) {
             FixedTile::F32Sm120N64CopyPlan
-        } else if dims == (4621, 384, 1928) {
-            FixedTile::F32N128S2
         } else {
             FixedTile::Legacy
         }),
@@ -479,9 +489,10 @@ fn auto_phase(
     shape: FixedShape,
     has_bias: bool,
     actual: FixedTile,
+    t256_loaded: bool,
 ) -> Result<(), String> {
     let phase = requested.unwrap_or("incumbent");
-    let expected = expected_auto(phase, shape, has_bias)?;
+    let expected = expected_auto(phase, shape, has_bias, t256_loaded)?;
     if actual != expected {
         return Err(format!(
             "SM120 AUTO mismatch: shape={shape:?}, expected={expected:?}, actual={actual:?}"
@@ -593,34 +604,40 @@ fn exact_n64_admission_cpu_auto_phase_is_explicit_and_fail_closed() {
             FixedTile::Legacy,
         ),
     ] {
-        auto_phase(None, shape, false, expected).unwrap();
-        auto_phase(Some("incumbent"), shape, false, expected).unwrap();
+        auto_phase(None, shape, false, expected, true).unwrap();
+        auto_phase(Some("incumbent"), shape, false, expected, true).unwrap();
         for wrong in [
             FixedTile::Legacy,
             FixedTile::F32N128S2,
             FixedTile::F32Sm120N64CopyPlan,
             FixedTile::F32Sm120TmaFmaM128N64,
             FixedTile::F32Sm120TmaFmaM64N128,
+            FixedTile::F32Sm120TmaFmaFixedPostBiasM128N64,
+            FixedTile::F32Sm120TmaFmaFixedPostBiasM128N64T256,
+            FixedTile::F32Sm120TmaFmaFixedPostBiasM64N128,
         ] {
             if wrong != expected {
-                assert!(auto_phase(None, shape, false, wrong).is_err());
+                assert!(auto_phase(None, shape, false, wrong, true).is_err());
             }
         }
-        let promoted = expected_auto("promoted", shape, false).unwrap();
-        auto_phase(Some("promoted"), shape, false, promoted).unwrap();
+        let promoted = expected_auto("promoted", shape, false, true).unwrap();
+        auto_phase(Some("promoted"), shape, false, promoted, true).unwrap();
         for wrong in [
             FixedTile::Legacy,
             FixedTile::F32N128S2,
             FixedTile::F32Sm120N64CopyPlan,
             FixedTile::F32Sm120TmaFmaM128N64,
             FixedTile::F32Sm120TmaFmaM64N128,
+            FixedTile::F32Sm120TmaFmaFixedPostBiasM128N64,
+            FixedTile::F32Sm120TmaFmaFixedPostBiasM128N64T256,
+            FixedTile::F32Sm120TmaFmaFixedPostBiasM64N128,
         ] {
             if wrong != promoted {
-                assert!(auto_phase(Some("promoted"), shape, false, wrong).is_err());
+                assert!(auto_phase(Some("promoted"), shape, false, wrong, true).is_err());
             }
         }
         for invalid in ["", "auto", "legacy", "candidate", "incumbent ", "promoted "] {
-            assert!(auto_phase(Some(invalid), shape, false, expected).is_err());
+            assert!(auto_phase(Some(invalid), shape, false, expected, true).is_err());
         }
     }
 }
@@ -1565,6 +1582,14 @@ fn own_kernel_for_candidate(
     match (arm, auto) {
         (0, _) => Ok((candidate.symbol(), 64, 128)),
         (1, Some(FixedTile::F32Sm120N64CopyPlan)) => Ok((CANDIDATE, 64, 128)),
+        (1, Some(FixedTile::F32Sm120M128N64CopyPlanT256)) => Ok((
+            "gemm_bi_nn_fixed_sm120_f32_n64_copyplan_m128n64_t256_v1",
+            64,
+            256,
+        )),
+        (1, Some(FixedTile::F32Sm120N64CopyPlanT256)) => {
+            Ok(("gemm_bi_nn_fixed_sm120_f32_n64_copyplan_t256_v1", 64, 256))
+        }
         (1, Some(FixedTile::F32Sm120N64Sliced)) => {
             Ok(("gemm_bi_nn_fixed_sm120_f32_n64_sliced_v1", 64, 128))
         }
@@ -1574,11 +1599,97 @@ fn own_kernel_for_candidate(
         (1, Some(FixedTile::F32Sm120TmaFmaM64N128)) => {
             Ok(("gemm_bi_nn_sm120_tma_fma_v1_m64n128_bk16_s2", 128, 128))
         }
+        (1, Some(FixedTile::F32Sm120TmaFmaFixedPostBiasM128N64)) => Ok((
+            "gemm_bi_nn_sm120_tma_fma_v1_fixed_postbias_m128n64_bk16_s2",
+            64,
+            128,
+        )),
+        (1, Some(FixedTile::F32Sm120TmaFmaFixedPostBiasM128N64K4)) => Ok((
+            "gemm_bi_nn_sm120_tma_fma_v1_fixed_postbias_m128n64_bk16_s2_k4",
+            64,
+            128,
+        )),
+        (1, Some(FixedTile::F32Sm120TmaFmaFixedPostBiasM128N64T256)) => Ok((
+            "gemm_bi_nn_sm120_tma_fma_v1_fixed_postbias_m128n64_t256_bk16_s2",
+            64,
+            256,
+        )),
+        (1, Some(FixedTile::F32Sm120TmaFmaFixedNoBiasM128N64T256)) => Ok((
+            "gemm_bi_nn_sm120_tma_fma_v1_fixed_nobias_m128n64_t256_bk16_s2",
+            64,
+            256,
+        )),
+        (1, Some(FixedTile::F32Sm120TmaFmaFixedPostBiasM128N96)) => Ok((
+            "gemm_bi_nn_sm120_tma_fma_v1_fixed_postbias_m128n96_bk16_s2",
+            96,
+            256,
+        )),
+        (1, Some(FixedTile::F32Sm120TmaFmaFixedPostBiasM64N128)) => Ok((
+            "gemm_bi_nn_sm120_tma_fma_v1_fixed_postbias_m64n128_bk16_s2",
+            128,
+            128,
+        )),
         (1, Some(FixedTile::F32N128S2)) => Ok((N128, 128, 256)),
         (1, Some(FixedTile::Legacy)) | (2, _) => Ok((LEGACY, 64, 128)),
         (4, _) => Ok((ORACLE, 64, 256)),
         _ => Err("missing or unqualified SM120 own route".into()),
     }
+}
+
+#[test]
+fn exact_n64_admission_cpu_copyplan_t256_force_mapping_preserves_auto() {
+    assert_eq!(
+        own_kernel(1, Some(FixedTile::F32Sm120M128N64CopyPlanT256)).unwrap(),
+        (
+            "gemm_bi_nn_fixed_sm120_f32_n64_copyplan_m128n64_t256_v1",
+            64,
+            256
+        )
+    );
+    assert_eq!(
+        own_kernel(1, Some(FixedTile::F32Sm120N64CopyPlanT256)).unwrap(),
+        ("gemm_bi_nn_fixed_sm120_f32_n64_copyplan_t256_v1", 64, 256)
+    );
+    assert_eq!(
+        expected_auto(
+            "promoted",
+            FixedShape {
+                m: 2048,
+                k: 2304,
+                n: 768
+            },
+            false,
+            true
+        )
+        .unwrap(),
+        FixedTile::F32Sm120N64CopyPlan
+    );
+}
+
+#[test]
+fn exact_n64_admission_cpu_nobias_t256_force_mapping_is_distinct() {
+    assert_eq!(
+        own_kernel(1, Some(FixedTile::F32Sm120TmaFmaFixedNoBiasM128N64T256)).unwrap(),
+        (
+            "gemm_bi_nn_sm120_tma_fma_v1_fixed_nobias_m128n64_t256_bk16_s2",
+            64,
+            256
+        )
+    );
+    assert_eq!(
+        expected_auto(
+            "promoted",
+            FixedShape {
+                m: 2048,
+                k: 2304,
+                n: 768
+            },
+            false,
+            true
+        )
+        .unwrap(),
+        FixedTile::F32Sm120N64CopyPlan,
+    );
 }
 
 #[test]
@@ -1600,7 +1711,31 @@ fn exact_n64_admission_cpu_n128_graph_geometry_is_not_legacy() {
         own_kernel(1, Some(FixedTile::F32Sm120TmaFmaM64N128)).unwrap(),
         ("gemm_bi_nn_sm120_tma_fma_v1_m64n128_bk16_s2", 128, 128)
     );
+    assert_eq!(
+        own_kernel(1, Some(FixedTile::F32Sm120TmaFmaFixedPostBiasM128N64K4)).unwrap(),
+        (
+            "gemm_bi_nn_sm120_tma_fma_v1_fixed_postbias_m128n64_bk16_s2_k4",
+            64,
+            128
+        )
+    );
     assert!(own_kernel(1, None).is_err());
+    assert_eq!(
+        own_kernel(1, Some(FixedTile::F32Sm120TmaFmaFixedPostBiasM128N64T256)).unwrap(),
+        (
+            "gemm_bi_nn_sm120_tma_fma_v1_fixed_postbias_m128n64_t256_bk16_s2",
+            64,
+            256
+        )
+    );
+    assert_eq!(
+        own_kernel(1, Some(FixedTile::F32Sm120TmaFmaFixedPostBiasM128N96)).unwrap(),
+        (
+            "gemm_bi_nn_sm120_tma_fma_v1_fixed_postbias_m128n96_bk16_s2",
+            96,
+            256
+        )
+    );
     let expected = LaunchProof {
         symbol: symbol.into(),
         grid: (1314, 1, 1),
@@ -1632,19 +1767,66 @@ fn exact_n64_admission_cpu_n128_graph_geometry_is_not_legacy() {
 }
 
 #[test]
+fn exact_n64_admission_cpu_a1_promotion_requires_loaded_t256_with_control_fallback() {
+    let shape = FixedShape {
+        m: 4621,
+        k: 384,
+        n: 1928,
+    };
+    for (loaded, expected, rejected) in [
+        (
+            true,
+            FixedTile::F32Sm120TmaFmaFixedPostBiasM128N64T256,
+            FixedTile::F32Sm120TmaFmaFixedPostBiasM128N64,
+        ),
+        (
+            false,
+            FixedTile::F32Sm120TmaFmaFixedPostBiasM128N64,
+            FixedTile::F32Sm120TmaFmaFixedPostBiasM128N64T256,
+        ),
+    ] {
+        assert_eq!(
+            expected_auto("promoted", shape, true, loaded).unwrap(),
+            expected
+        );
+        auto_phase(Some("promoted"), shape, true, expected, loaded).unwrap();
+        assert!(auto_phase(Some("promoted"), shape, true, rejected, loaded).is_err());
+        let (symbol, tile_n, threads) = own_kernel(1, Some(expected)).unwrap();
+        assert_eq!(tile_n, 64);
+        assert_eq!(threads, if loaded { 256 } else { 128 });
+        assert_eq!(
+            symbol,
+            if loaded {
+                "gemm_bi_nn_sm120_tma_fma_v1_fixed_postbias_m128n64_t256_bk16_s2"
+            } else {
+                "gemm_bi_nn_sm120_tma_fma_v1_fixed_postbias_m128n64_bk16_s2"
+            }
+        );
+    }
+}
+
+#[test]
 fn exact_n64_sliced_cpu_promoted_route_retains_copyplan_and_graph_compact() {
     for (m, k, n, bias, want) in [
+        (2048, 768, 2304, false, FixedTile::F32Sm120N64CopyPlan),
+        (2048, 768, 2304, true, FixedTile::F32Sm120N64CopyPlan),
         (4621, 768, 2304, false, FixedTile::F32Sm120TmaFmaM128N64),
         (4621, 768, 2304, true, FixedTile::F32Sm120N64CopyPlan),
         (2048, 2304, 768, false, FixedTile::F32Sm120N64CopyPlan),
         (2048, 2304, 768, true, FixedTile::F32Sm120N64CopyPlan),
         (4621, 384, 1928, false, FixedTile::F32Sm120TmaFmaM64N128),
-        (4621, 384, 1928, true, FixedTile::F32N128S2),
+        (
+            4621,
+            384,
+            1928,
+            true,
+            FixedTile::F32Sm120TmaFmaFixedPostBiasM128N64T256,
+        ),
         (4620, 768, 2304, false, FixedTile::Legacy),
         (4622, 768, 2304, false, FixedTile::Legacy),
     ] {
         assert_eq!(
-            expected_auto("promoted", FixedShape { m, k, n }, bias).unwrap(),
+            expected_auto("promoted", FixedShape { m, k, n }, bias, true).unwrap(),
             want
         );
     }
@@ -1715,6 +1897,12 @@ fn own_graph(graph: &CudaGraph, case: &Case, arm: usize) -> Result<String, Strin
     let exact_tma_tile = match expected_symbol {
         "gemm_bi_nn_sm120_tma_fma_v1_m128n64_bk16_s2" => Some((128usize, 64usize)),
         "gemm_bi_nn_sm120_tma_fma_v1_m64n128_bk16_s2" => Some((64, 128)),
+        "gemm_bi_nn_sm120_tma_fma_v1_fixed_postbias_m128n64_bk16_s2" => Some((128, 64)),
+        "gemm_bi_nn_sm120_tma_fma_v1_fixed_postbias_m128n64_bk16_s2_k4" => Some((128, 64)),
+        "gemm_bi_nn_sm120_tma_fma_v1_fixed_postbias_m128n64_t256_bk16_s2" => Some((128, 64)),
+        "gemm_bi_nn_sm120_tma_fma_v1_fixed_nobias_m128n64_t256_bk16_s2" => Some((128, 64)),
+        "gemm_bi_nn_sm120_tma_fma_v1_fixed_postbias_m128n96_bk16_s2" => Some((128, 96)),
+        "gemm_bi_nn_sm120_tma_fma_v1_fixed_postbias_m64n128_bk16_s2" => Some((64, 128)),
         _ => None,
     };
     if let Some((tile_m, tile_n)) = exact_tma_tile {
@@ -1743,6 +1931,7 @@ fn own_graph(graph: &CudaGraph, case: &Case, arm: usize) -> Result<String, Strin
         let expected_grid = ((s.m.div_ceil(tile_m) * s.n.div_ceil(tile_n)) as u32, 1, 1);
         let actual_grid = (params.gridDimX, params.gridDimY, params.gridDimZ);
         let actual_block = (params.blockDimX, params.blockDimY, params.blockDimZ);
+        let expected_shared = if tile_n == 96 { 28_688 } else { 24_592 };
         let expected_values = [
             1.0f32.to_bits(),
             0,
@@ -1755,8 +1944,8 @@ fn own_graph(graph: &CudaGraph, case: &Case, arm: usize) -> Result<String, Strin
         ];
         if symbol != expected_symbol
             || actual_grid != expected_grid
-            || actual_block != (128, 1, 1)
-            || params.sharedMemBytes != 24_592
+            || actual_block != (threads, 1, 1)
+            || params.sharedMemBytes != expected_shared
             || output != ops.c.ptr
             || partial != 0
             || flags != 0
@@ -1789,6 +1978,8 @@ fn own_graph(graph: &CudaGraph, case: &Case, arm: usize) -> Result<String, Strin
         ));
     }
     let compact = expected_symbol == CANDIDATE
+        || expected_symbol == "gemm_bi_nn_fixed_sm120_f32_n64_copyplan_m128n64_t256_v1"
+        || expected_symbol == "gemm_bi_nn_fixed_sm120_f32_n64_copyplan_t256_v1"
         || expected_symbol == "gemm_bi_nn_fixed_sm120_f32_n64_sliced_v1";
     let expected_abi = if compact {
         vec![(0, 8), (8, 8), (16, 8), (24, 8), (32, 32)]
@@ -1826,7 +2017,17 @@ fn own_graph(graph: &CudaGraph, case: &Case, arm: usize) -> Result<String, Strin
     let ops = case.operands(arm);
     let expected = LaunchProof {
         symbol: expected_symbol.into(),
-        grid: ((s.m.div_ceil(64) * s.n.div_ceil(tile_n)) as u32, 1, 1),
+        grid: (
+            (s.m.div_ceil(
+                if expected_symbol == "gemm_bi_nn_fixed_sm120_f32_n64_copyplan_m128n64_t256_v1" {
+                    128
+                } else {
+                    64
+                },
+            ) * s.n.div_ceil(tile_n)) as u32,
+            1,
+            1,
+        ),
         block: (threads, 1, 1),
         shared: 0,
         pointers: [ops.c.ptr, ops.x.ptr, ops.w.ptr, ops.bias_ptr.unwrap_or(0)],
@@ -2288,7 +2489,7 @@ impl Protocol {
     fn from_env() -> Result<Self, String> {
         let auto_phase = env("MAMBA_FIXED_SM120_EXACT_N64_AUTO")?;
         if let Some(value) = auto_phase.as_deref() {
-            expected_auto(value, FixedShape { m: 1, k: 1, n: 1 }, false)?;
+            expected_auto(value, FixedShape { m: 1, k: 1, n: 1 }, false, true)?;
         }
         Ok(Self {
             diagnostic_fast: false,
@@ -2638,6 +2839,10 @@ fn run_case(
         case.shape,
         case.has_bias,
         case.auto.get().ok_or("AUTO was not launched")?,
+        ctx.kernels
+            .fixed_sm120_fma_postbias
+            .as_ref()
+            .is_some_and(|kernels| kernels.m128n64_t256.is_some()),
     )?;
     let (expected, pre_numeric) = verify(case, ctx, None, evidence, "eager_first")?;
     for arm in 0..6 {
