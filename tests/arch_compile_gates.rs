@@ -129,6 +129,10 @@ fn fixed_blob_for(arch: &str) -> String {
         source.push_str(include_str!(
             "../kernels/gemm_bi_fixed/sm120_f32_n64_copyplan.cu"
         ));
+        source.push('\n');
+        source.push_str(include_str!(
+            "../kernels/gemm_bi_fixed/sm120_f32_n64_sliced.cu"
+        ));
     }
     source
 }
@@ -2683,6 +2687,7 @@ fn fixed_f32_n128_s2_source_and_ptx_contract() {
 
 const FIXED_SM89_EXACT_N64_COPYPLAN: &str = "gemm_bi_nn_fixed_sm89_f32_n64_copyplan_v1";
 const FIXED_SM120_EXACT_N64_COPYPLAN: &str = "gemm_bi_nn_fixed_sm120_f32_n64_copyplan_v1";
+const FIXED_SM120_N64_SLICED: &str = "gemm_bi_nn_fixed_sm120_f32_n64_sliced_v1";
 
 fn assert_fixed_exact_n64_copyplan_ptx(
     arch: &str,
@@ -2856,9 +2861,10 @@ fn fixed_sm120_exact_n64_copyplan_source_contract_and_target_boundary() {
     }
     let base = fixed_blob();
     let production = fixed_blob_for("compute_120");
+    let sliced = include_str!("../kernels/gemm_bi_fixed/sm120_f32_n64_sliced.cu");
     assert_eq!(
         production.strip_prefix(&base).unwrap(),
-        format!("\n{candidate}")
+        format!("\n{candidate}\n{sliced}")
     );
     for arch in ["sm_89", "compute_89", "sm_120", "sm_121", "compute_121"] {
         assert!(
@@ -2985,6 +2991,70 @@ fn fixed_sm120_exact_n64_copyplan_nvrtc_ptx_and_zero_spill_resources() {
     assert!(
         contains_opcode_prefix(entry, "LDGSTS"),
         "SM120 exact N64 omitted asynchronous copy"
+    );
+    println!(
+        "SM120 Fixed exact N64 copy-plan: registers={registers} static_shared={shared} stack=0 spills=0"
+    );
+}
+
+#[test]
+fn fixed_sm120_sliced_nvrtc_ptx_and_zero_spill_resources() {
+    let ptx = compile_fixed_for("compute_120");
+    if let Some(path) = std::env::var_os("MAMBA_FIXED_SM120_SLICED_PTX") {
+        std::fs::write(path, &ptx).expect("write requested SM120 exact-N64 PTX");
+    }
+    assert_fixed_exact_n64_copyplan_ptx(
+        "compute_120",
+        "compute_120",
+        "gemm_bi_nn_fixed_sm120_f32_n64_sliced",
+        FIXED_SM120_N64_SLICED,
+        &ptx,
+    );
+    let (report, sass) = assemble_and_disassemble_sm120(&ptx);
+    let resources = function_resource_report(&report, FIXED_SM120_N64_SLICED);
+    assert_zero_local_resources(resources, "SM120 Fixed exact N64 copy-plan");
+    for marker in [
+        " bytes stack frame",
+        " bytes spill stores",
+        " bytes spill loads",
+    ] {
+        let values: Vec<_> = resources
+            .lines()
+            .filter_map(|line| metric_before(line, marker))
+            .collect();
+        assert_eq!(
+            values,
+            [0],
+            "SM120 sliced N64 requires explicit zero{marker}"
+        );
+    }
+    let registers = resources
+        .lines()
+        .find_map(|line| metric_before(line, " registers"))
+        .unwrap();
+    assert!(
+        (1..=160).contains(&registers),
+        "SM120 sliced N64 registers {registers} exceed 160"
+    );
+    let shared = resources
+        .lines()
+        .find_map(|line| metric_before(line, " bytes smem"))
+        .unwrap();
+    assert_eq!(shared, 32_768, "SM120 sliced N64 static shared contract");
+    let entry = sass_entry(&sass, FIXED_SM120_N64_SLICED);
+    for forbidden in ["LDL", "STL", "ATOM", "RED", "REDUX", "HMMA", "IMMA", "DMMA"] {
+        assert!(
+            !contains_opcode_prefix(entry, forbidden),
+            "SM120 sliced N64 SASS contains {forbidden}"
+        );
+    }
+    assert!(
+        contains_opcode_prefix(entry, "FFMA"),
+        "SM120 sliced N64 omitted FMA"
+    );
+    assert!(
+        contains_opcode_prefix(entry, "LDGSTS"),
+        "SM120 sliced N64 omitted asynchronous copy"
     );
     println!(
         "SM120 Fixed exact N64 copy-plan: registers={registers} static_shared={shared} stack=0 spills=0"

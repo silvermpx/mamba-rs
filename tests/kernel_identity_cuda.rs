@@ -733,6 +733,26 @@ fn assert_fixed_exact_n64_optional_holders(ctx: &GpuCtx, compute_capability: (u3
             "non-SM120 rejection reason was lost"
         );
     }
+
+    let sliced_holder = ctx.kernels.fixed_sm120_f32_n64_sliced.as_ref();
+    let sliced_reason = ctx.kernels.fixed_sm120_f32_n64_sliced_rejection.as_ref();
+    let owns_sliced = ctx.kernels.compiler_identity().target.as_str() == "compute_120"
+        && compute_capability == (12, 0);
+    if owns_sliced {
+        let function =
+            sliced_holder.unwrap_or_else(|| panic!("SM120 sliced N64 missing: {sliced_reason:?}"));
+        assert!(sliced_reason.is_none());
+        assert_exact_n64_resources(function);
+    } else {
+        assert!(
+            sliced_holder.is_none(),
+            "SM120 sliced kernel loaded on a foreign device"
+        );
+        assert!(
+            sliced_reason.is_some(),
+            "non-SM120 rejection reason was lost"
+        );
+    }
 }
 
 #[test]
@@ -854,6 +874,21 @@ fn repeated_nvrtc_compiles_have_the_same_identity() {
         assert_eq!(
             sm120_exact_n64_entries, expected_sm120_exact_n64,
             "cached SM120 exact N64 inventory"
+        );
+        let sm120_sliced_entries: std::collections::BTreeSet<_> = fixed_entries
+            .iter()
+            .filter(|name| name.starts_with("gemm_bi_nn_fixed_sm120_f32_n64_sliced"))
+            .map(String::as_str)
+            .collect();
+        let expected_sm120_sliced =
+            if first.kernels.compiler_identity().target.as_str() == "compute_120" {
+                std::collections::BTreeSet::from(["gemm_bi_nn_fixed_sm120_f32_n64_sliced_v1"])
+            } else {
+                std::collections::BTreeSet::new()
+            };
+        assert_eq!(
+            sm120_sliced_entries, expected_sm120_sliced,
+            "cached SM120 sliced N64 inventory"
         );
         assert!(
             fixed_entries.iter().all(|name| !name.starts_with("sgemm_")),

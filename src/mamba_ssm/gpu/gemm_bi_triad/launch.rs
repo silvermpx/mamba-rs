@@ -532,6 +532,7 @@ impl PreparedF32TriadLaunch {
 enum F32PreparedSelection {
     Automatic,
     ExactScalar,
+    Forced(Tf32PhysicalRoute),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -4031,19 +4032,26 @@ fn prepare_sm120_fma_f32(
     let binding = f32_map_binding(ctx, route)?;
     let allocation_domain = binding.allocation_domain;
     let resources = output_resources.with_inputs(request, operands, allocation_domain)?;
-    let scratch_buffer = ctx.kernels.splitk_scratch_buf(&ctx.stream)?;
-    let (partial, _) = scratch_buffer.device_ptr(&ctx.stream);
-    let flag_buffer = ctx
-        .kernels
-        .triad_kernels()
-        .tf32_splitk_counter_buf(&ctx.stream)?;
-    let (flags, _) = flag_buffer.device_ptr(&ctx.stream);
-    let resources = resources.with_scratch(
-        Some((partial, (SPLITK_SCRATCH_CAP as u64) * 4)),
-        None,
-        Some((flags, (TF32_SPLITK_COUNTER_CAP as u64) * 4)),
-        allocation_domain,
-    )?;
+    let (resources, partial, flags) = if exact.splits == 1 {
+        debug_assert_eq!(plan.slab_elements, 0);
+        debug_assert_eq!(plan.flag_elements, 0);
+        (resources, 0, 0)
+    } else {
+        let scratch_buffer = ctx.kernels.splitk_scratch_buf(&ctx.stream)?;
+        let (partial, _) = scratch_buffer.device_ptr(&ctx.stream);
+        let flag_buffer = ctx
+            .kernels
+            .triad_kernels()
+            .tf32_splitk_counter_buf(&ctx.stream)?;
+        let (flags, _) = flag_buffer.device_ptr(&ctx.stream);
+        let resources = resources.with_scratch(
+            Some((partial, (SPLITK_SCRATCH_CAP as u64) * 4)),
+            None,
+            Some((flags, (TF32_SPLITK_COUNTER_CAP as u64) * 4)),
+            allocation_domain,
+        )?;
+        (resources, partial, flags)
+    };
     let maps = prepare_specialized_tf32_maps(ctx, request, operands, route, binding)?;
     let origins = maps.origins();
     let maps_digest = maps.identity_digest();
@@ -4323,6 +4331,9 @@ impl F32PreparedLaunchCache {
             F32PreparedSelection::ExactScalar => {
                 prepare_exact_scalar_f32_triad(ctx, request, operands)
             }
+            F32PreparedSelection::Forced(route) => {
+                prepare_f32_triad_forced(ctx, request, operands, route)
+            }
         }
     }
 
@@ -4484,6 +4495,45 @@ where
     Scalar: FnOnce(&mut ScalarLaunchControl<'_>) -> Result<(), String>,
 {
     ctx.with_f32_prepared_launches(|cache| cache.launch(ctx, selection, request, operands, scalar))
+}
+
+/// Reuses the qualified Triad SM120 exact-TMA implementation from the Fixed
+/// family without entering Triad AUTO. The prepared-cache key seals the
+/// literal physical route, pointers, policy and shape, so graph capture keeps
+/// the same descriptor binding as the eager warmup.
+pub(crate) fn launch_cached_fixed_sm120_b0_exact_tma(
+    ctx: &GpuCtx,
+    operands: F32TriadOperands,
+) -> Result<bool, String> {
+    let request = F32TriadRequest {
+        op: ResolvedGemmOp::Nn,
+        shape: F32TriadShape::contiguous(ResolvedGemmOp::Nn, (4_621, 768, 2_304)),
+    };
+    let route = Tf32PhysicalRoute::Sm120TmaFmaExactV1(Sm120FmaRoute {
+        tile: Sm120FmaTile::M128N64,
+        kvec: false,
+        splits: 1,
+    });
+    if resolve_tf32_forced(request, ctx.kernels.f32_triad_availability(), route).is_err() {
+        return Ok(false);
+    }
+    let spec = tf32_kernel_spec(request.op, route)?;
+    if ctx
+        .kernels
+        .triad_kernels()
+        .tf32_function(spec.symbol)
+        .is_none()
+    {
+        return Ok(false);
+    }
+    launch_cached_f32_triad(
+        ctx,
+        F32PreparedSelection::Forced(route),
+        request,
+        operands,
+        |_| Err("Fixed exact-TMA bridge unexpectedly entered the scalar fallback".into()),
+    )?;
+    Ok(true)
 }
 
 pub(in crate::mamba_ssm::gpu) fn with_cached_f32_triad_prepared<R>(
@@ -11729,6 +11779,40 @@ mod prepared_f32_launch_tests {
             F32PreparedSelection::ExactScalar,
             request,
             operands,
+        );
+        let forced = Tf32PhysicalRoute::Sm120TmaFmaExactV1(Sm120FmaRoute {
+            tile: Sm120FmaTile::M128N64,
+            kvec: false,
+            splits: 1,
+        });
+        assert_distinct(
+            context_token,
+            policy,
+            F32PreparedSelection::Forced(forced),
+            request,
+            operands,
+        );
+        assert_ne!(
+            PreparedF32Key::new(
+                context_token,
+                policy,
+                F32PreparedSelection::Forced(forced),
+                request,
+                operands,
+            ),
+            PreparedF32Key::new(
+                context_token,
+                policy,
+                F32PreparedSelection::Forced(Tf32PhysicalRoute::Sm120TmaFmaExactV1(
+                    Sm120FmaRoute {
+                        tile: Sm120FmaTile::M64N128,
+                        kvec: false,
+                        splits: 1,
+                    },
+                )),
+                request,
+                operands,
+            ),
         );
         let changed_request = F32TriadRequest {
             op: ResolvedGemmOp::Nt,

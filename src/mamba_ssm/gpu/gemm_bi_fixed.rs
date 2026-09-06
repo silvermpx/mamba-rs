@@ -5,10 +5,10 @@
 //! plus the legacy 64x64 WMMA tile as the narrow-N fallback and the f32
 //! FFMA tile. One dispatcher, shape-keyed:
 //!
-//!   exact f32            -> Ada/CC12.0 N64 copy-plans at their qualified
-//!                           B/E bias rows; FFMA 64x128 at the remaining
-//!                           measured CC12.0/170-SM points; portable FFMA
-//!                           64x64 elsewhere
+//!   exact f32            -> CC12.0 exact-TMA at qualified B0, Ada/CC12.0
+//!                           N64 copy-plans at the remaining qualified B/E
+//!                           rows; FFMA 64x128 at other measured CC12.0/
+//!                           170-SM points; portable FFMA 64x64 elsewhere
 //!   bf16/f16, N >= 32    -> the GBF ladder (Tc16 / Tc64 / Tc128), one
 //!                           arithmetic family, STRICT across all M
 //!   bf16/f16, N <  32    -> the legacy WMMA tile (all M, strict)
@@ -84,8 +84,12 @@ pub enum FixedTile {
     Sm100Tcgen,
     /// Ada-only exact-F32 N64 copy-plan, AUTO at qualified B/E bias rows.
     F32Sm89N64CopyPlan,
-    /// CC12.0 exact-F32 N64 copy-plan, AUTO at qualified B/E bias rows.
+    /// CC12.0 exact-F32 N64 copy-plan, AUTO at qualified E0/E1/B1 rows.
     F32Sm120N64CopyPlan,
+    /// Force-only CC12.0 sliced-copy N64; same ascending scalar FMA.
+    F32Sm120N64Sliced,
+    /// Fixed bridge to exact-TMA M128xN64, AUTO at qualified SM120 B0.
+    F32Sm120TmaFmaM128N64,
 }
 
 /// Forced SM120 TMA BF16/F16 tile used by qualification and dispatch.
@@ -162,6 +166,12 @@ pub fn fixed_forward_with_tile(
     }
     if tile == FixedTile::F32Sm120N64CopyPlan {
         return launch_sm120_exact_n64(ctx, operands, shape);
+    }
+    if tile == FixedTile::F32Sm120N64Sliced {
+        return launch_sm120_sliced(ctx, operands, shape);
+    }
+    if tile == FixedTile::F32Sm120TmaFmaM128N64 {
+        return launch_sm120_tma_fma_b0(ctx, operands, shape);
     }
     if tile == FixedTile::Legacy {
         return super::blas::fixed_legacy_forward(
@@ -679,6 +689,8 @@ fn ladder_cfg(tile: FixedTile, rows: usize, cols: usize) -> cudarc::driver::Laun
         | FixedTile::F32N128S2
         | FixedTile::F32Sm89N64CopyPlan
         | FixedTile::F32Sm120N64CopyPlan
+        | FixedTile::F32Sm120N64Sliced
+        | FixedTile::F32Sm120TmaFmaM128N64
         | FixedTile::Tf32M128S2
         | FixedTile::Tf32M128S3
         | FixedTile::Tf32M128N128S3
@@ -967,6 +979,85 @@ fn launch_sm120_exact_n64(
     unsafe { builder.launch(config) }
         .map(|_| ())
         .map_err(|error| format!("gemm_bi Fixed SM120 exact N64 copy-plan: {error:?}"))
+}
+
+fn launch_sm120_sliced(
+    ctx: &GpuCtx,
+    operands: FixedFwdOperands,
+    shape: FixedShape,
+) -> Result<(), String> {
+    let Some((args, grid)) =
+        prepare_sm120_exact_n64_launch(operands, shape, ctx.compute_capability())?
+    else {
+        return Ok(());
+    };
+    let function = ctx
+        .kernels
+        .fixed_sm120_f32_n64_sliced
+        .as_ref()
+        .ok_or_else(|| {
+            ctx.kernels
+                .fixed_sm120_f32_n64_sliced_rejection
+                .clone()
+                .unwrap_or_else(|| "Fixed SM120 sliced N64 is not admitted".into())
+        })?;
+    let params = FixedSm89ExactF32Params::forward(&args);
+    let config = cudarc::driver::LaunchConfig {
+        grid_dim: (grid, 1, 1),
+        block_dim: (128, 1, 1),
+        shared_mem_bytes: 0,
+    };
+    let mut builder = ctx.stream.launch_builder(function);
+    builder
+        .arg(&args.c)
+        .arg(&args.a)
+        .arg(&args.b)
+        .arg(&args.bias)
+        .arg(&params);
+    unsafe { builder.launch(config) }
+        .map(|_| ())
+        .map_err(|error| format!("gemm_bi Fixed SM120 sliced N64: {error:?}"))
+}
+
+fn launch_sm120_tma_fma_b0(
+    ctx: &GpuCtx,
+    operands: FixedFwdOperands,
+    shape: FixedShape,
+) -> Result<(), String> {
+    let compiler = ctx.kernels.compiler_identity();
+    if !fixed_sm120_tma_fma_b0_auto_eligible(
+        operands,
+        shape,
+        FixedTileDevice {
+            multiprocessors: ctx.kernels.multiprocessor_count(),
+            compute_capability: ctx.compute_capability(),
+        },
+        compiler.nvrtc_version,
+        compiler.nvrtc_library_known,
+        ctx.f32_triad_policy(),
+    ) {
+        return Err(
+            "Fixed SM120 exact-TMA M128xN64 forced launch is outside its B0 candidate contract"
+                .into(),
+        );
+    }
+    let launched = super::gemm_bi_triad::launch_cached_fixed_sm120_b0_exact_tma(
+        ctx,
+        super::gemm_bi_triad::F32TriadOperands {
+            output: operands.c.ptr,
+            a: operands.x.ptr,
+            b: operands.w.ptr,
+            bias: operands.bias_ptr,
+            alpha: 1.0,
+            beta: 0.0,
+        },
+    )?;
+    if !launched {
+        return Err(
+            "Fixed SM120 exact-TMA M128xN64 symbol is not qualified on this context".into(),
+        );
+    }
+    Ok(())
 }
 
 /// Exact F32 owns its compact ABI independently of the half and TF32 bundles.
@@ -2090,6 +2181,8 @@ fn launch_ladder(
         | FixedTile::F32Sm89N64CopyPlan
         | FixedTile::F32Sm120N64CopyPlan
         | FixedTile::Tf32M128S2
+        | FixedTile::F32Sm120N64Sliced
+        | FixedTile::F32Sm120TmaFmaM128N64
         | FixedTile::Tf32M128S3
         | FixedTile::Tf32M128N128S3
         | FixedTile::Tf32M64S2
@@ -2302,6 +2395,44 @@ pub fn fixed_forward(
     }
     if homogeneous_f32 {
         let compiler = ctx.kernels.compiler_identity();
+        if fixed_sm120_tma_fma_b0_auto_eligible(
+            operands,
+            shape,
+            FixedTileDevice {
+                multiprocessors: ctx.kernels.multiprocessor_count(),
+                compute_capability: ctx.compute_capability(),
+            },
+            compiler.nvrtc_version,
+            compiler.nvrtc_library_known,
+            ctx.f32_triad_policy(),
+        ) && super::gemm_bi_triad::launch_cached_fixed_sm120_b0_exact_tma(
+            ctx,
+            super::gemm_bi_triad::F32TriadOperands {
+                output: operands.c.ptr,
+                a: operands.x.ptr,
+                b: operands.w.ptr,
+                bias: None,
+                alpha: 1.0,
+                beta: 0.0,
+            },
+        )? {
+            return Ok(FixedTile::F32Sm120TmaFmaM128N64);
+        }
+        if fixed_sm120_sliced_auto_eligible(
+            operands,
+            shape,
+            FixedTileDevice {
+                multiprocessors: ctx.kernels.multiprocessor_count(),
+                compute_capability: ctx.compute_capability(),
+            },
+            compiler.nvrtc_version,
+            compiler.nvrtc_library_known,
+            ctx.kernels.fixed_sm120_f32_n64_sliced.is_some(),
+            ctx.f32_triad_policy(),
+        ) {
+            launch_sm120_sliced(ctx, operands, shape)?;
+            return Ok(FixedTile::F32Sm120N64Sliced);
+        }
         if fixed_sm120_exact_n64_auto_eligible(
             operands,
             shape,
@@ -2461,6 +2592,71 @@ pub fn fixed_forward(
     Ok(FixedTile::Legacy)
 }
 
+// No sliced AUTO rows are currently admitted. Standalone NVCC won B0, but
+// production NVRTC 101-window PEDANTIC p95 was 1.005009/1.000447 eager and
+// 1.013953/1.013734 graph. Retain force qualification only; the separately
+// qualified exact-TMA bridge owns B0. Any future sliced admission must pass
+// the production paired gate afresh.
+fn fixed_sm120_sliced_auto_eligible(
+    operands: FixedFwdOperands,
+    shape: FixedShape,
+    device: FixedTileDevice,
+    nvrtc: (i32, i32),
+    nvrtc_library_known: bool,
+    loaded: bool,
+    policy: super::context::F32TriadPolicy,
+) -> bool {
+    const QUALIFIED_ROWS: &[FixedShape] = &[];
+    QUALIFIED_ROWS.contains(&shape)
+        && operands.bias_ptr.is_none()
+        && fixed_sm120_exact_n64_auto_eligible(
+            operands,
+            shape,
+            device,
+            nvrtc,
+            nvrtc_library_known,
+            loaded,
+            policy,
+        )
+}
+
+// Production NVRTC13.2 / 170-SM CC12.0 Fixed B0 qualification. The forced
+// bridge retained exact scalar-FMA bits and beat both the prior copy-plan and
+// CUBLAS_COMPUTE_32F_PEDANTIC in all eager/graph ABBA/BAAB cohorts at 101
+// windows. Worst paired p95: 0.894265 versus copy-plan, 0.909778 versus
+// cuBLAS. Evidence: internal/perf/sm120-fixed-tma-fma-b0-20260906/
+// sm120-fixed-auto-b0-post101-v1.log, SHA256
+// 20245b1fe378434130f0e74bdfe3117790506afccf34224c27fd516bdf480932.
+// Bias remains on the copy-plan until it receives an independent admission.
+fn fixed_sm120_tma_fma_b0_auto_eligible(
+    operands: FixedFwdOperands,
+    shape: FixedShape,
+    device: FixedTileDevice,
+    nvrtc: (i32, i32),
+    nvrtc_library_known: bool,
+    policy: super::context::F32TriadPolicy,
+) -> bool {
+    nvrtc_library_known
+        && nvrtc == (13, 2)
+        && device.compute_capability == (12, 0)
+        && device.multiprocessors == 170
+        && policy == super::context::F32TriadPolicy::ExactScalarFmaV1
+        && shape
+            == (FixedShape {
+                m: 4_621,
+                k: 768,
+                n: 2_304,
+            })
+        && operands.bias_ptr.is_none()
+        && [operands.c, operands.x, operands.w]
+            .into_iter()
+            .all(|operand| {
+                operand.dtype == WeightDtype::F32
+                    && operand.ptr != 0
+                    && operand.ptr.is_multiple_of(16)
+            })
+}
+
 // Actual production NVRTC13.2 / 170-SM CC12.0 paired qualification, 101
 // windows in both orders and both eager/graph paths: exactly E/B, each bias
 // row. All four rows beat both incumbent AUTO and explicit Legacy. B+bias
@@ -2521,6 +2717,216 @@ mod sm120_exact_n64_auto_tests {
             x: typed(0x2000),
             w: typed(0x3000),
             bias_ptr: bias.then_some(0x4004),
+        }
+    }
+
+    #[test]
+    fn fixed_sm120_sliced_auto_is_withdrawn_and_copyplan_retained() {
+        for (m, k, n, bias, want) in [
+            (4621, 768, 2304, false, false),
+            (4621, 768, 2304, true, false),
+            (2048, 2304, 768, false, false),
+            (2048, 2304, 768, true, false),
+            (4621, 384, 1928, false, false),
+            (4621, 1928, 384, false, false),
+            (2048, 768, 2304, false, false),
+        ] {
+            assert_eq!(
+                fixed_sm120_sliced_auto_eligible(
+                    operands(bias),
+                    FixedShape { m, k, n },
+                    DEVICE,
+                    (13, 2),
+                    true,
+                    true,
+                    F32TriadPolicy::ExactScalarFmaV1
+                ),
+                want,
+                "{m}/{k}/{n}/{bias}"
+            );
+        }
+        assert!(
+            fixed_sm120_exact_n64_auto_eligible(
+                operands(false),
+                FixedShape {
+                    m: 4621,
+                    k: 768,
+                    n: 2304
+                },
+                DEVICE,
+                (13, 2),
+                true,
+                true,
+                F32TriadPolicy::ExactScalarFmaV1
+            ),
+            "B0 copyplan must remain available as the qualified fallback"
+        );
+    }
+
+    #[test]
+    fn fixed_sm120_tma_fma_b0_gate_is_exact_and_cohort_bound() {
+        let b0 = FixedShape {
+            m: 4621,
+            k: 768,
+            n: 2304,
+        };
+        assert!(fixed_sm120_tma_fma_b0_auto_eligible(
+            operands(false),
+            b0,
+            DEVICE,
+            (13, 2),
+            true,
+            F32TriadPolicy::ExactScalarFmaV1,
+        ));
+        assert!(!fixed_sm120_tma_fma_b0_auto_eligible(
+            operands(true),
+            b0,
+            DEVICE,
+            (13, 2),
+            true,
+            F32TriadPolicy::ExactScalarFmaV1,
+        ));
+        for shape in [
+            FixedShape { m: 4620, ..b0 },
+            FixedShape { m: 4622, ..b0 },
+            FixedShape { k: 767, ..b0 },
+            FixedShape { k: 769, ..b0 },
+            FixedShape { n: 2303, ..b0 },
+            FixedShape { n: 2305, ..b0 },
+            FixedShape {
+                m: 2048,
+                k: 2304,
+                n: 768,
+            },
+        ] {
+            assert!(!fixed_sm120_tma_fma_b0_auto_eligible(
+                operands(false),
+                shape,
+                DEVICE,
+                (13, 2),
+                true,
+                F32TriadPolicy::ExactScalarFmaV1,
+            ));
+        }
+    }
+
+    #[test]
+    fn fixed_sm120_tma_fma_declines_identity_neighbors_and_operand_drift() {
+        let shape = FixedShape {
+            m: 4621,
+            k: 768,
+            n: 2304,
+        };
+        let ops = operands(false);
+        let accept = |ops, shape, device, nvrtc, known, policy| {
+            fixed_sm120_tma_fma_b0_auto_eligible(ops, shape, device, nvrtc, known, policy)
+        };
+        for (device, nvrtc, known, policy) in [
+            (
+                FixedTileDevice {
+                    compute_capability: (12, 1),
+                    ..DEVICE
+                },
+                (13, 2),
+                true,
+                F32TriadPolicy::ExactScalarFmaV1,
+            ),
+            (
+                FixedTileDevice {
+                    compute_capability: (8, 9),
+                    ..DEVICE
+                },
+                (13, 2),
+                true,
+                F32TriadPolicy::ExactScalarFmaV1,
+            ),
+            (
+                FixedTileDevice {
+                    multiprocessors: 169,
+                    ..DEVICE
+                },
+                (13, 2),
+                true,
+                F32TriadPolicy::ExactScalarFmaV1,
+            ),
+            (
+                FixedTileDevice {
+                    multiprocessors: 171,
+                    ..DEVICE
+                },
+                (13, 2),
+                true,
+                F32TriadPolicy::ExactScalarFmaV1,
+            ),
+            (DEVICE, (12, 8), true, F32TriadPolicy::ExactScalarFmaV1),
+            (DEVICE, (13, 3), true, F32TriadPolicy::ExactScalarFmaV1),
+            (DEVICE, (13, 2), false, F32TriadPolicy::ExactScalarFmaV1),
+            (
+                DEVICE,
+                (13, 2),
+                true,
+                F32TriadPolicy::AllowDeterministicTf32V1,
+            ),
+        ] {
+            assert!(!accept(ops, shape, device, nvrtc, known, policy));
+        }
+        for bad in [
+            FixedShape { m: 4620, ..shape },
+            FixedShape { m: 4622, ..shape },
+            FixedShape { k: 767, ..shape },
+            FixedShape { k: 769, ..shape },
+            FixedShape { n: 2303, ..shape },
+            FixedShape { n: 2305, ..shape },
+            FixedShape { m: 1, ..shape },
+            FixedShape { k: 0, ..shape },
+        ] {
+            assert!(!accept(
+                ops,
+                bad,
+                DEVICE,
+                (13, 2),
+                true,
+                F32TriadPolicy::ExactScalarFmaV1
+            ));
+        }
+        for index in 0..3 {
+            for ptr in [0, 0x1001, 0x1004, 0x1008, 0x100c] {
+                let mut bad = ops;
+                [&mut bad.c, &mut bad.x, &mut bad.w][index].ptr = ptr;
+                assert!(!accept(
+                    bad,
+                    shape,
+                    DEVICE,
+                    (13, 2),
+                    true,
+                    F32TriadPolicy::ExactScalarFmaV1
+                ));
+            }
+            for dtype in [WeightDtype::Bf16, WeightDtype::F16] {
+                let mut bad = ops;
+                [&mut bad.c, &mut bad.x, &mut bad.w][index].dtype = dtype;
+                assert!(!accept(
+                    bad,
+                    shape,
+                    DEVICE,
+                    (13, 2),
+                    true,
+                    F32TriadPolicy::ExactScalarFmaV1
+                ));
+            }
+        }
+        for bias in [Some(0), Some(0x4000), Some(0x4004)] {
+            assert!(!accept(
+                FixedFwdOperands {
+                    bias_ptr: bias,
+                    ..ops
+                },
+                shape,
+                DEVICE,
+                (13, 2),
+                true,
+                F32TriadPolicy::ExactScalarFmaV1
+            ));
         }
     }
 

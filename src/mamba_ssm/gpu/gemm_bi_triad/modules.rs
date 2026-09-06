@@ -487,6 +487,7 @@ pub(crate) struct CompiledModule {
     fixed_sm89_half_driver_abi: Result<BTreeMap<&'static str, Tf32DriverAbi>, String>,
     fixed_sm89_exact_n64_driver_abi: Result<BTreeMap<&'static str, Tf32DriverAbi>, String>,
     fixed_sm120_exact_n64_driver_abi: Result<BTreeMap<&'static str, Tf32DriverAbi>, String>,
+    fixed_sm120_sliced_driver_abi: Result<BTreeMap<&'static str, Tf32DriverAbi>, String>,
 }
 
 /// A TF32 symbol the loaded module cannot serve on this toolkit: the
@@ -669,6 +670,12 @@ pub(crate) fn compile_module(request: CompileModuleRequest<'_>) -> Result<Compil
             request.arch,
             &src,
         );
+        let fixed_sm120_sliced_abi = census_fixed_sm120_sliced_driver_abi(
+            request.ctx,
+            request.module_kind,
+            request.arch,
+            &src,
+        );
         let validation = validate_tf32_specialization(request.module_kind, request.arch, &src);
         let (tf32_driver_abi, tf32_qualification_error) =
             tf32_qualification_verdict(request.module_kind, extensions, census, validation);
@@ -687,6 +694,7 @@ pub(crate) fn compile_module(request: CompileModuleRequest<'_>) -> Result<Compil
             fixed_half_abi,
             fixed_exact_n64_abi,
             fixed_sm120_exact_n64_abi,
+            fixed_sm120_sliced_abi,
         ));
     }
 
@@ -698,6 +706,7 @@ pub(crate) fn compile_module(request: CompileModuleRequest<'_>) -> Result<Compil
         fixed_sm89_half_driver_abi,
         fixed_sm89_exact_n64_driver_abi,
         fixed_sm120_exact_n64_driver_abi,
+        fixed_sm120_sliced_driver_abi,
     ) = match loaded {
         Some(value) => value,
         None => {
@@ -734,6 +743,12 @@ pub(crate) fn compile_module(request: CompileModuleRequest<'_>) -> Result<Compil
                 &ptx_source,
             );
             let fixed_sm120_exact_n64_abi = census_fixed_sm120_exact_n64_driver_abi(
+                request.ctx,
+                request.module_kind,
+                request.arch,
+                &ptx_source,
+            );
+            let fixed_sm120_sliced_abi = census_fixed_sm120_sliced_driver_abi(
                 request.ctx,
                 request.module_kind,
                 request.arch,
@@ -805,6 +820,7 @@ pub(crate) fn compile_module(request: CompileModuleRequest<'_>) -> Result<Compil
                 fixed_half_abi,
                 fixed_exact_n64_abi,
                 fixed_sm120_exact_n64_abi,
+                fixed_sm120_sliced_abi,
             )
         }
     };
@@ -842,6 +858,7 @@ pub(crate) fn compile_module(request: CompileModuleRequest<'_>) -> Result<Compil
         fixed_sm89_half_driver_abi,
         fixed_sm89_exact_n64_driver_abi,
         fixed_sm120_exact_n64_driver_abi,
+        fixed_sm120_sliced_driver_abi,
     })
 }
 
@@ -1439,7 +1456,8 @@ fn validate_module_ptx(module_kind: ModuleKind, arch: &str, ptx: &str) -> Result
             validate_fixed_tf32_ptx(arch, ptx)?;
             validate_fixed_sm89_half_ptx(arch, ptx)?;
             validate_fixed_sm89_exact_n64_ptx(arch, ptx)?;
-            validate_fixed_sm120_exact_n64_ptx(arch, ptx)
+            validate_fixed_sm120_exact_n64_ptx(arch, ptx)?;
+            validate_fixed_sm120_sliced_ptx(arch, ptx)
         }
         ModuleKind::TriadScalar => {
             validate_exact_ptx_exports("TriadScalar", SCALAR_SYMBOLS.len(), SCALAR_SYMBOLS, ptx)?;
@@ -1722,6 +1740,118 @@ const FIXED_SM120_EXACT_N64_SYMBOL: &str = "gemm_bi_nn_fixed_sm120_f32_n64_copyp
 
 fn fixed_sm120_exact_n64_composed(arch: &str) -> bool {
     arch == "compute_120"
+}
+
+const FIXED_SM120_SLICED_SYMBOL: &str = "gemm_bi_nn_fixed_sm120_f32_n64_sliced_v1";
+
+fn validate_fixed_sm120_sliced_ptx(arch: &str, ptx: &str) -> Result<(), String> {
+    let parsed = parse_ptx(ptx)?;
+    let actual: Vec<_> = parsed
+        .entries
+        .iter()
+        .filter(|entry| {
+            entry
+                .symbol
+                .starts_with("gemm_bi_nn_fixed_sm120_f32_n64_sliced")
+        })
+        .collect();
+    if !fixed_sm120_exact_n64_composed(arch) {
+        return if actual.is_empty() {
+            Ok(())
+        } else {
+            Err(format!(
+                "Fixed SM120 sliced N64 copy-plan export is foreign on {arch}"
+            ))
+        };
+    }
+    if actual.len() != 1 || actual[0].symbol != FIXED_SM120_SLICED_SYMBOL {
+        return Err("Fixed SM120 sliced N64 requires exactly its unique v1 export".into());
+    }
+    let entry = actual[0];
+    let symbol = FIXED_SM120_SLICED_SYMBOL;
+    let header = entry
+        .text
+        .split_once('{')
+        .map(|(header, _)| header)
+        .ok_or_else(|| format!("{symbol} has no PTX body"))?;
+    let tokens = ptx_tokens(header);
+    let text: Vec<_> = tokens.iter().map(|token| token.text).collect();
+    let begin = text
+        .iter()
+        .position(|token| *token == "(")
+        .ok_or_else(|| format!("{symbol} has no PTX parameters"))?;
+    let end = text
+        .iter()
+        .position(|token| *token == ")")
+        .ok_or_else(|| format!("{symbol} has no PTX parameter end"))?;
+    if end <= begin {
+        return Err(format!("{symbol} has malformed PTX parameters"));
+    }
+    let declarations: Vec<_> = text[begin + 1..end].split(|token| *token == ",").collect();
+    let pointer_decl = |decl: &&[&str]| {
+        (decl.len() == 3 && decl[..2] == [".param", ".u64"])
+            || (decl.len() == 6 && decl[..5] == [".param", ".u64", ".ptr", ".align", "1"])
+    };
+    if declarations.len() != 5
+        || !declarations[..4].iter().all(pointer_decl)
+        || declarations[4].len() != 8
+        || declarations[4][..4] != [".param", ".align", "4", ".b8"]
+        || declarations[4][5..] != ["[", "32", "]"]
+    {
+        return Err(format!(
+            "{symbol} requires four pointers and an align-4 32-byte bundle"
+        ));
+    }
+    for directive in [".maxntid", ".minnctapersm"] {
+        let positions: Vec<_> = text
+            .iter()
+            .enumerate()
+            .filter_map(|(index, token)| (*token == directive).then_some(index))
+            .collect();
+        if positions.len() != 1 {
+            return Err(format!("{symbol} has the wrong {directive} launch bound"));
+        }
+        let values: Vec<_> = text[positions[0] + 1..]
+            .iter()
+            .copied()
+            .take_while(|token| !token.starts_with('.'))
+            .collect();
+        let valid = match directive {
+            ".maxntid" => values == ["128"] || values == ["128", ",", "1", ",", "1"],
+            _ => values == ["2"],
+        };
+        if !valid {
+            return Err(format!("{symbol} has the wrong {directive} launch bound"));
+        }
+    }
+    for required in [
+        "fma.rn.f32",
+        "cp.async.cg.shared.global",
+        "cp.async.commit_group",
+        "cp.async.wait_group",
+    ] {
+        if !ptx_has_unquoted_token(&entry.body, |token| token == required) {
+            return Err(format!("{symbol} is missing {required}"));
+        }
+    }
+    if ptx_has_unquoted_token(&entry.body, |token| {
+        token == ".local"
+            || token.starts_with("ld.local")
+            || token.starts_with("st.local")
+            || token.starts_with("mma.")
+            || token.starts_with("wmma.")
+            || token.split('.').any(|part| part == "tf32" || part == "ftz")
+            || token.starts_with("atom.")
+            || token.starts_with("atom::")
+            || token.starts_with("red.")
+            || token.starts_with("red::")
+            || token.starts_with("redux.")
+    }) {
+        return Err(format!(
+            "{symbol} contains local, tensor, reduction, or FTZ work"
+        ));
+    }
+    Ok(())
 }
 
 fn validate_fixed_sm120_exact_n64_ptx(arch: &str, ptx: &str) -> Result<(), String> {
@@ -2024,6 +2154,37 @@ fn census_fixed_sm120_exact_n64_driver_abi(
     Ok(BTreeMap::from([(symbol, abi)]))
 }
 
+fn census_fixed_sm120_sliced_driver_abi(
+    ctx: &CudaContext,
+    kind: ModuleKind,
+    arch: &str,
+    ptx: &str,
+) -> Result<BTreeMap<&'static str, Tf32DriverAbi>, String> {
+    if kind != ModuleKind::Fixed || !fixed_sm120_exact_n64_composed(arch) {
+        return Ok(BTreeMap::new());
+    }
+    type GetParamInfo = unsafe extern "C" fn(
+        cudarc::driver::sys::CUfunction,
+        usize,
+        *mut usize,
+        *mut usize,
+    ) -> cudarc::driver::sys::CUresult;
+    let module = DriverModule::load(ctx, ptx)?;
+    let get: GetParamInfo =
+        unsafe { std::mem::transmute(driver_proc_address("cuFuncGetParamInfo", 12_040)?) };
+    let symbol = FIXED_SM120_SLICED_SYMBOL;
+    let function = unsafe {
+        cudarc::driver::result::module::get_function(module.raw(), CString::new(symbol).unwrap())
+    }
+    .map_err(|error| format!("load Fixed/{symbol} for Driver ABI: {error:?}"))?;
+    let abi = query_driver_parameter_abi(symbol, 5, |index, offset, size| unsafe {
+        get(function, index, offset, size)
+    })?;
+    validate_fixed_sm89_exact_n64_driver_abi(symbol, &abi)?;
+    module.unload()?;
+    Ok(BTreeMap::from([(symbol, abi)]))
+}
+
 #[derive(Clone, Copy)]
 struct FixedSm89ExactN64Resources {
     local_bytes: i32,
@@ -2061,6 +2222,13 @@ fn validate_fixed_sm89_exact_n64_resources(
 fn validate_fixed_sm120_exact_n64_resources(
     resources: FixedSm89ExactN64Resources,
 ) -> Result<(), String> {
+    validate_fixed_sm120_exact_n64_resources_for(FIXED_SM120_EXACT_N64_SYMBOL, resources)
+}
+
+fn validate_fixed_sm120_exact_n64_resources_for(
+    symbol: &str,
+    resources: FixedSm89ExactN64Resources,
+) -> Result<(), String> {
     if resources.local_bytes != 0
         || !(1..=160).contains(&resources.registers)
         || resources.static_shared_bytes != FIXED_SM89_EXACT_N64_STATIC_SHARED
@@ -2070,7 +2238,7 @@ fn validate_fixed_sm120_exact_n64_resources(
     {
         return Err(format!(
             "{} resource admission declined: local={} registers={} static_shared={} max_threads={} active_blocks={} carveout={}",
-            FIXED_SM120_EXACT_N64_SYMBOL,
+            symbol,
             resources.local_bytes,
             resources.registers,
             resources.static_shared_bytes,
@@ -2217,6 +2385,77 @@ pub(crate) fn load_fixed_sm120_f32_n64_copyplan(
                 .map_err(|e| query_error("carveout", e))?,
         };
         validate_fixed_sm120_exact_n64_resources(resources)?;
+        Ok(function)
+    })();
+    match admitted {
+        Ok(function) => (Some(function), None),
+        Err(reason) => (None, Some(reason)),
+    }
+}
+
+/// Independent optional sliced route; configures only its own function.
+pub(crate) fn load_fixed_sm120_f32_n64_sliced(
+    ctx: &CudaContext,
+    module: &CompiledModule,
+) -> (Option<CudaFunction>, Option<String>) {
+    let admitted = (|| -> Result<CudaFunction, String> {
+        if module.artifact_identity.module_kind != ModuleKind::Fixed
+            || !fixed_sm120_exact_n64_composed(module.compiler_identity.target.as_str())
+            || ctx
+                .compute_capability()
+                .map_err(|error| format!("query Fixed SM120 sliced N64 CC: {error:?}"))?
+                != (12, 0)
+        {
+            return Err(
+                "Fixed SM120 sliced N64 copy-plan is only composed for compute_120 and admitted on CC12.0"
+                    .into(),
+            );
+        }
+        let symbol = FIXED_SM120_SLICED_SYMBOL;
+        let census = module
+            .fixed_sm120_sliced_driver_abi
+            .as_ref()
+            .map_err(Clone::clone)?;
+        validate_fixed_sm89_exact_n64_driver_abi(
+            symbol,
+            census
+                .get(symbol)
+                .ok_or_else(|| format!("{symbol} has no live Driver ABI census"))?,
+        )?;
+        let function = load_function(&module.module, ModuleKind::Fixed, symbol)?;
+        let carveout = cudarc::driver::sys::CUfunction_attribute::CU_FUNC_ATTRIBUTE_PREFERRED_SHARED_MEMORY_CARVEOUT;
+        function
+            .set_attribute(
+                carveout,
+                cudarc::driver::sys::CUshared_carveout::CU_SHAREDMEM_CARVEOUT_MAX_SHARED as i32,
+            )
+            .map_err(|error| format!("configure {symbol} MaxShared: {error:?}"))?;
+        let query_error = |label, error| format!("query {symbol} {label}: {error:?}");
+        let resources = FixedSm89ExactN64Resources {
+            local_bytes: function
+                .local_size_bytes()
+                .map_err(|e| query_error("local", e))?,
+            registers: function
+                .num_regs()
+                .map_err(|e| query_error("registers", e))?,
+            static_shared_bytes: function
+                .shared_size_bytes()
+                .map_err(|e| query_error("static shared", e))?,
+            max_threads: function
+                .max_threads_per_block()
+                .map_err(|e| query_error("threads", e))?,
+            active_blocks: function
+                .occupancy_max_active_blocks_per_multiprocessor(
+                    FIXED_SM89_EXACT_N64_THREADS,
+                    0,
+                    None,
+                )
+                .map_err(|e| query_error("occupancy", e))?,
+            preferred_carveout: function
+                .get_attribute(carveout)
+                .map_err(|e| query_error("carveout", e))?,
+        };
+        validate_fixed_sm120_exact_n64_resources_for(FIXED_SM120_SLICED_SYMBOL, resources)?;
         Ok(function)
     })();
     match admitted {
@@ -4416,6 +4655,12 @@ const FIXED_SM120_EXACT_N64_SOURCE_FRAGMENT: SourceFragment = SourceFragment {
     allowed_quoted_includes: &[],
 };
 
+const FIXED_SM120_SLICED_SOURCE_FRAGMENT: SourceFragment = SourceFragment {
+    logical_name: "kernels/gemm_bi_fixed/sm120_f32_n64_sliced.cu",
+    source: include_str!("../../../../kernels/gemm_bi_fixed/sm120_f32_n64_sliced.cu"),
+    allowed_quoted_includes: &[],
+};
+
 const TRIAD_CONTRACT: SourceFragment = SourceFragment {
     logical_name: "kernels/gemm_bi_triad/contract.cuh",
     source: include_str!("../../../../kernels/gemm_bi_triad/contract.cuh"),
@@ -4711,6 +4956,7 @@ fn compose_module_source_for(kind: ModuleKind, arch: &str) -> Result<String, Str
     if kind == ModuleKind::Fixed && arch == "compute_120" {
         let mut fragments = base.to_vec();
         fragments.push(FIXED_SM120_EXACT_N64_SOURCE_FRAGMENT);
+        fragments.push(FIXED_SM120_SLICED_SOURCE_FRAGMENT);
         return compose_fragments(&fragments);
     }
     if kind == ModuleKind::TriadSm80 && sm80_target_composes_streamk(arch) {
@@ -8973,6 +9219,7 @@ mod tests {
             .collect();
         let mut expected_fixed_cc12 = FIXED_FRAGMENTS[..FIXED_FRAGMENTS.len() - 2].to_vec();
         expected_fixed_cc12.push("kernels/gemm_bi_fixed/sm120_f32_n64_copyplan.cu");
+        expected_fixed_cc12.push("kernels/gemm_bi_fixed/sm120_f32_n64_sliced.cu");
         assert_eq!(fixed_boundaries, expected_fixed_cc12);
         assert_composition(ModuleKind::TriadScalar, SCALAR_FRAGMENTS);
         assert_composition(ModuleKind::TriadSm80, SM80_FRAGMENTS);
@@ -10134,6 +10381,70 @@ mod tests {
     const FIXED_SM89_EXACT_N64_TEST_SYMBOL: &str = "gemm_bi_nn_fixed_sm89_f32_n64_copyplan_v1";
     const FIXED_SM120_EXACT_N64_TEST_SYMBOL: &str = "gemm_bi_nn_fixed_sm120_f32_n64_copyplan_v1";
 
+    #[test]
+    fn fixed_sm120_sliced_composition_is_fixed_compute120_only() {
+        let symbol = "gemm_bi_nn_fixed_sm120_f32_n64_sliced_v1";
+        let before = compose_module_source_for(ModuleKind::Fixed, "compute_120").unwrap();
+        assert!(
+            before.contains(symbol),
+            "new sliced export is missing from actual production composition"
+        );
+        let mut retained = super::FIXED_SOURCE_FRAGMENTS.to_vec();
+        retained.push(super::FIXED_SM120_EXACT_N64_SOURCE_FRAGMENT);
+        let old = compose_fragments(&retained).unwrap();
+        assert_eq!(
+            before.strip_prefix(&old).unwrap(),
+            compose_fragments(&[super::FIXED_SM120_SLICED_SOURCE_FRAGMENT]).unwrap()
+        );
+        assert_ne!(
+            super::FramedSha256::bytes(before.as_bytes()),
+            super::FramedSha256::bytes(old.as_bytes()),
+            "Fixed source identity must invalidate old cached graphs"
+        );
+        for arch in ["sm_80", "sm_89", "sm_120", "sm_121", "compute_121"] {
+            assert!(
+                !compose_module_source_for(ModuleKind::Fixed, arch)
+                    .unwrap()
+                    .contains(symbol)
+            );
+        }
+        for kind in [
+            ModuleKind::TriadScalar,
+            ModuleKind::TriadSm80,
+            ModuleKind::TriadSm120,
+        ] {
+            assert!(
+                !compose_module_source_for(kind, "compute_120")
+                    .unwrap()
+                    .contains(symbol)
+            );
+        }
+    }
+
+    #[test]
+    fn fixed_sm120_sliced_ptx_fails_closed_on_abi_body_inventory_and_target() {
+        let symbol = "gemm_bi_nn_fixed_sm120_f32_n64_sliced_v1";
+        let valid = fixed_sm89_exact_n64_test_entry(symbol);
+        super::validate_fixed_sm120_sliced_ptx("compute_120", &valid).unwrap();
+        for malformed in [
+            String::new(),
+            format!("{valid}{valid}"),
+            valid.replace("sliced_v1", "sliced_v2"),
+            valid.replace("params[32]", "params[36]"),
+            valid.replace("fma.rn.f32", "add.rn.f32"),
+            valid.replace("cp.async.wait_group", "mov.u32"),
+            valid.replace("ret;", ".local .b8 spill[16]; ret;"),
+        ] {
+            super::validate_fixed_sm120_sliced_ptx("compute_120", &malformed)
+                .expect_err("sliced ABI/body/inventory drift must reject");
+        }
+        for arch in ["sm_89", "sm_120", "compute_121"] {
+            super::validate_fixed_sm120_sliced_ptx(arch, &valid)
+                .expect_err("foreign sliced target");
+            super::validate_fixed_sm120_sliced_ptx(arch, "").unwrap();
+        }
+    }
+
     fn fixed_sm89_exact_n64_test_entry(symbol: &str) -> String {
         format!(
             ".visible .entry {symbol}(\n\
@@ -10251,7 +10562,11 @@ mod tests {
         let compute_120 = compose_module_source_for(ModuleKind::Fixed, "compute_120").unwrap();
         assert_eq!(
             compute_120.strip_prefix(&before).unwrap(),
-            compose_fragments(&[super::FIXED_SM120_EXACT_N64_SOURCE_FRAGMENT]).unwrap(),
+            compose_fragments(&[
+                super::FIXED_SM120_EXACT_N64_SOURCE_FRAGMENT,
+                super::FIXED_SM120_SLICED_SOURCE_FRAGMENT
+            ])
+            .unwrap(),
             "the SM120 extension is the only intended compute_120 Fixed suffix"
         );
     }
@@ -10514,6 +10829,90 @@ mod tests {
         ] {
             let reason = validate_fixed_sm89_exact_n64_resources(resources).unwrap_err();
             assert!(reason.contains(FIXED_SM89_EXACT_N64_TEST_SYMBOL));
+        }
+    }
+
+    #[test]
+    fn fixed_sm120_sliced_live_resource_gate_is_strict() {
+        use super::{FixedSm89ExactN64Resources, validate_fixed_sm120_exact_n64_resources};
+        let admitted = FixedSm89ExactN64Resources {
+            local_bytes: 0,
+            registers: 113,
+            static_shared_bytes: 32_768,
+            max_threads: 128,
+            active_blocks: 3,
+            preferred_carveout: 100,
+        };
+        validate_fixed_sm120_exact_n64_resources(admitted).unwrap();
+        validate_fixed_sm120_exact_n64_resources(FixedSm89ExactN64Resources {
+            registers: 160,
+            ..admitted
+        })
+        .unwrap();
+        for resources in [
+            FixedSm89ExactN64Resources {
+                local_bytes: -1,
+                ..admitted
+            },
+            FixedSm89ExactN64Resources {
+                local_bytes: 1,
+                ..admitted
+            },
+            FixedSm89ExactN64Resources {
+                registers: -1,
+                ..admitted
+            },
+            FixedSm89ExactN64Resources {
+                registers: 0,
+                ..admitted
+            },
+            FixedSm89ExactN64Resources {
+                registers: 161,
+                ..admitted
+            },
+            FixedSm89ExactN64Resources {
+                static_shared_bytes: -1,
+                ..admitted
+            },
+            FixedSm89ExactN64Resources {
+                static_shared_bytes: 32_767,
+                ..admitted
+            },
+            FixedSm89ExactN64Resources {
+                static_shared_bytes: 32_769,
+                ..admitted
+            },
+            FixedSm89ExactN64Resources {
+                max_threads: -1,
+                ..admitted
+            },
+            FixedSm89ExactN64Resources {
+                max_threads: 127,
+                ..admitted
+            },
+            FixedSm89ExactN64Resources {
+                active_blocks: 0,
+                ..admitted
+            },
+            FixedSm89ExactN64Resources {
+                active_blocks: 2,
+                ..admitted
+            },
+            FixedSm89ExactN64Resources {
+                preferred_carveout: -1,
+                ..admitted
+            },
+            FixedSm89ExactN64Resources {
+                preferred_carveout: 0,
+                ..admitted
+            },
+            FixedSm89ExactN64Resources {
+                preferred_carveout: 101,
+                ..admitted
+            },
+        ] {
+            let reason = validate_fixed_sm120_exact_n64_resources(resources).unwrap_err();
+            assert!(reason.contains(FIXED_SM120_EXACT_N64_TEST_SYMBOL));
         }
     }
 

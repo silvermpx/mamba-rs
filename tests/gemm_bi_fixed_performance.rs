@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 
 use cudarc::driver::{CudaGraph, PushKernelArg};
 use mamba_rs::mamba_ssm::gpu::blas::{TypedPtr, gpu_gemm_typed_forward_raw};
-use mamba_rs::mamba_ssm::gpu::buffers::DtypedBuf;
+use mamba_rs::mamba_ssm::gpu::buffers::{DtypedBuf, GpuBuffer};
 use mamba_rs::mamba_ssm::gpu::context::{BiGemmFamily, F32TriadPolicy, GpuCtx};
 use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
 use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
@@ -165,6 +165,82 @@ fn single_graph_kernel_name(graph: &CudaGraph, label: &str) -> String {
         .to_str()
         .expect("UTF-8 CUDA function name")
         .to_owned()
+}
+
+fn assert_sm120_exact_tma_b0_graph_contract(graph: &CudaGraph, output: u64) {
+    use cudarc::driver::sys;
+
+    let mut node_count = 0usize;
+    assert_eq!(
+        unsafe { sys::cuGraphGetNodes(graph.cu_graph(), std::ptr::null_mut(), &mut node_count) },
+        sys::CUresult::CUDA_SUCCESS
+    );
+    assert_eq!(node_count, 1);
+    let mut nodes = vec![std::ptr::null_mut(); node_count];
+    assert_eq!(
+        unsafe { sys::cuGraphGetNodes(graph.cu_graph(), nodes.as_mut_ptr(), &mut node_count) },
+        sys::CUresult::CUDA_SUCCESS
+    );
+    let mut params: sys::CUDA_KERNEL_NODE_PARAMS_v2 = unsafe { std::mem::zeroed() };
+    assert_eq!(
+        unsafe { sys::cuGraphKernelNodeGetParams_v2(nodes[0], &mut params) },
+        sys::CUresult::CUDA_SUCCESS
+    );
+    assert_eq!(
+        (params.gridDimX, params.gridDimY, params.gridDimZ),
+        (1332, 1, 1)
+    );
+    assert_eq!(
+        (params.blockDimX, params.blockDimY, params.blockDimZ),
+        (128, 1, 1)
+    );
+    assert_eq!(params.sharedMemBytes, 24_592);
+    let mut layout = Vec::new();
+    for index in 0..7 {
+        let mut offset = 0usize;
+        let mut size = 0usize;
+        assert_eq!(
+            unsafe { sys::cuFuncGetParamInfo(params.func, index, &mut offset, &mut size) },
+            sys::CUresult::CUDA_SUCCESS
+        );
+        layout.push((offset, size));
+    }
+    assert_eq!(
+        layout,
+        vec![
+            (0, 8),
+            (8, 8),
+            (16, 8),
+            (128, 128),
+            (256, 128),
+            (384, 8),
+            (392, 32),
+        ]
+    );
+    let captured = |index: usize| unsafe { *params.kernelParams.add(index) };
+    let pointer = |index: usize| unsafe { *(captured(index) as *const u64) };
+    assert_eq!(pointer(0), output);
+    assert_eq!(
+        pointer(1),
+        0,
+        "single-split exact TMA must not bind scratch"
+    );
+    assert_eq!(pointer(2), 0, "single-split exact TMA must not bind flags");
+    assert!(
+        unsafe { *(captured(3) as *const [u8; 128]) }
+            .iter()
+            .any(|byte| *byte != 0)
+    );
+    assert!(
+        unsafe { *(captured(4) as *const [u8; 128]) }
+            .iter()
+            .any(|byte| *byte != 0)
+    );
+    assert_eq!(pointer(5), 0);
+    assert_eq!(
+        unsafe { *(captured(6) as *const [u32; 8]) },
+        [1.0f32.to_bits(), 0, 4621, 2304, 768, 2304, 1, 48]
+    );
 }
 
 #[test]
@@ -9099,6 +9175,492 @@ fn fixed_ada_event_window_us(ctx: &GpuCtx, iterations: usize, mut launch: impl F
         "invalid Ada timing: {elapsed}"
     );
     elapsed
+}
+
+#[test]
+#[ignore = "requires a quiet RTX5090 and screens the production exact SM120 TMA-FMA route on Fixed B0"]
+fn fixed_sm120_exact_tma_fma_b0_spike() {
+    use cudarc::cublas::sys::cublasComputeType_t;
+
+    assert_eq!(
+        std::env::var("MAMBA_FIXED_SM120_FMA_SPIKE").as_deref(),
+        Ok("1"),
+        "set MAMBA_FIXED_SM120_FMA_SPIKE=1 for the explicit B0 spike"
+    );
+    assert!(!cfg!(debug_assertions), "B0 spike requires --release");
+    let device = GpuDevice::new(0).expect("B0 spike CUDA device");
+    assert_eq!(device.compute_capability, (12, 0));
+    assert_eq!(device.multiprocessor_count(), 170);
+    let ctx = GpuCtx::new(&device).expect("B0 spike GPU context");
+    assert_eq!(ctx.kernels.compiler_identity().nvrtc_version, (13, 2));
+    assert!(ctx.kernels.compiler_identity().nvrtc_library_known);
+    ctx.set_batch_invariant(true);
+    ctx.set_bi_gemm_family(BiGemmFamily::Fixed);
+    ctx.set_fast_gemm(false);
+    ctx.set_f32_triad_policy(F32TriadPolicy::ExactScalarFmaV1);
+
+    let dims = (4_621usize, 768usize, 2_304usize);
+    let shape = FixedShape {
+        m: dims.0,
+        k: dims.1,
+        n: dims.2,
+    };
+    let mut a = GpuBuffer::from_cpu(&ctx.stream, &synth(shape.m * shape.k, 0xf120_a001))
+        .expect("B0 spike A");
+    let mut b = GpuBuffer::from_cpu(&ctx.stream, &synth(shape.k * shape.n, 0xf120_b001))
+        .expect("B0 spike B");
+    let candidate = GpuBuffer::zeros(&ctx.stream, shape.m * shape.n).expect("candidate C");
+    let copyplan = GpuBuffer::zeros(&ctx.stream, shape.m * shape.n).expect("copyplan C");
+    let vendor = GpuBuffer::zeros(&ctx.stream, shape.m * shape.n).expect("vendor C");
+    let candidate_operands = FixedFwdOperands {
+        c: TypedPtr {
+            ptr: candidate.cached_ptr(),
+            dtype: WeightDtype::F32,
+        },
+        x: TypedPtr {
+            ptr: a.cached_ptr(),
+            dtype: WeightDtype::F32,
+        },
+        w: TypedPtr {
+            ptr: b.cached_ptr(),
+            dtype: WeightDtype::F32,
+        },
+        bias_ptr: None,
+    };
+    let copyplan_operands = FixedFwdOperands {
+        c: TypedPtr {
+            ptr: copyplan.cached_ptr(),
+            dtype: WeightDtype::F32,
+        },
+        ..candidate_operands
+    };
+    let vendor_operands = FixedFwdOperands {
+        c: TypedPtr {
+            ptr: vendor.cached_ptr(),
+            dtype: WeightDtype::F32,
+        },
+        ..copyplan_operands
+    };
+
+    let launch_candidate = || {
+        let tile = mamba_rs::mamba_ssm::gpu::gemm_bi_fixed::fixed_forward(
+            &ctx,
+            candidate_operands.c,
+            candidate_operands.x,
+            candidate_operands.w,
+            candidate_operands.bias_ptr,
+            dims,
+        )
+        .expect("Fixed exact SM120 TMA-FMA B0 AUTO launch");
+        assert_eq!(tile, FixedTile::F32Sm120TmaFmaM128N64);
+    };
+    let launch_copyplan = || {
+        fixed_forward_with_tile(
+            &ctx,
+            copyplan_operands,
+            shape,
+            FixedTile::F32Sm120N64CopyPlan,
+        )
+        .expect("B0 copyplan launch");
+    };
+    let launch_vendor = || {
+        fixed_ada_vendor_launch(
+            &ctx,
+            vendor_operands,
+            shape,
+            cublasComputeType_t::CUBLAS_COMPUTE_32F_PEDANTIC,
+        );
+    };
+
+    launch_candidate();
+    launch_copyplan();
+    launch_vendor();
+    ctx.stream
+        .synchronize()
+        .expect("B0 initial synchronization");
+    let candidate_bits = candidate
+        .to_cpu(&ctx.stream)
+        .expect("candidate download")
+        .into_iter()
+        .map(f32::to_bits)
+        .collect::<Vec<_>>();
+    let copyplan_bits = copyplan
+        .to_cpu(&ctx.stream)
+        .expect("copyplan download")
+        .into_iter()
+        .map(f32::to_bits)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        candidate_bits, copyplan_bits,
+        "TMA-FMA must retain Fixed B0 bits"
+    );
+
+    for _ in 0..128 {
+        launch_candidate();
+        launch_copyplan();
+        launch_vendor();
+    }
+    ctx.stream
+        .synchronize()
+        .expect("B0 eager warmup synchronization");
+    let candidate_graph = unsafe {
+        capture_into_graph(&ctx.stream, || {
+            launch_candidate();
+            Ok(())
+        })
+    }
+    .expect("capture exact SM120 TMA-FMA B0 graph");
+    let copyplan_graph = unsafe {
+        capture_into_graph(&ctx.stream, || {
+            launch_copyplan();
+            Ok(())
+        })
+    }
+    .expect("capture copyplan B0 graph");
+    let vendor_graph = unsafe {
+        capture_into_graph(&ctx.stream, || {
+            launch_vendor();
+            Ok(())
+        })
+    }
+    .expect("capture PEDANTIC B0 graph");
+    let candidate_symbol = single_graph_kernel_name(&candidate_graph, "TMA-FMA B0");
+    assert_eq!(
+        candidate_symbol,
+        "gemm_bi_nn_sm120_tma_fma_v1_m128n64_bk16_s2"
+    );
+    assert_sm120_exact_tma_b0_graph_contract(&candidate_graph, candidate.cached_ptr());
+    assert_eq!(
+        single_graph_kernel_name(&copyplan_graph, "copyplan B0"),
+        "gemm_bi_nn_fixed_sm120_f32_n64_copyplan_v1"
+    );
+    for _ in 0..128 {
+        candidate_graph.launch().expect("candidate graph warmup");
+        copyplan_graph.launch().expect("copyplan graph warmup");
+        vendor_graph.launch().expect("vendor graph warmup");
+    }
+    ctx.stream
+        .synchronize()
+        .expect("B0 graph warmup synchronization");
+    let graph_bits = candidate
+        .to_cpu(&ctx.stream)
+        .expect("candidate graph download")
+        .into_iter()
+        .map(f32::to_bits)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        graph_bits, candidate_bits,
+        "Fixed exact-TMA AUTO graph replay changed B0 bits"
+    );
+
+    let windows = std::env::var("MAMBA_FIXED_SM120_FMA_SPIKE_WINDOWS")
+        .map_or(21, |value| value.parse::<usize>().expect("spike windows"));
+    assert!((1..=101).contains(&windows));
+    for path in ["eager", "graph"] {
+        for (comparator_name, comparator_graph) in [
+            ("copyplan", &copyplan_graph),
+            ("cublas_pedantic", &vendor_graph),
+        ] {
+            for candidate_outside in [true, false] {
+                let candidate_pilot = fixed_ada_event_window_us(&ctx, 16, || {
+                    if path == "graph" {
+                        candidate_graph.launch().expect("candidate graph pilot");
+                    } else {
+                        launch_candidate();
+                    }
+                });
+                let comparator_pilot = fixed_ada_event_window_us(&ctx, 16, || {
+                    if path == "graph" {
+                        comparator_graph.launch().expect("comparator graph pilot");
+                    } else if comparator_name == "copyplan" {
+                        launch_copyplan();
+                    } else {
+                        launch_vendor();
+                    }
+                });
+                let candidate_iterations = fixed_auto_vendor_iterations(candidate_pilot);
+                let comparator_iterations = fixed_auto_vendor_iterations(comparator_pilot);
+                let mut ratios = Vec::with_capacity(windows);
+                let mut candidate_us = Vec::with_capacity(windows);
+                let mut comparator_us = Vec::with_capacity(windows);
+                for _ in 0..windows {
+                    let time_candidate = || {
+                        fixed_ada_event_window_us(&ctx, candidate_iterations, || {
+                            if path == "graph" {
+                                candidate_graph.launch().expect("candidate graph timing");
+                            } else {
+                                launch_candidate();
+                            }
+                        })
+                    };
+                    let time_comparator = || {
+                        fixed_ada_event_window_us(&ctx, comparator_iterations, || {
+                            if path == "graph" {
+                                comparator_graph.launch().expect("comparator graph timing");
+                            } else if comparator_name == "copyplan" {
+                                launch_copyplan();
+                            } else {
+                                launch_vendor();
+                            }
+                        })
+                    };
+                    let (candidate_elapsed, comparator_elapsed) = if candidate_outside {
+                        let candidate_first = time_candidate();
+                        let comparator_first = time_comparator();
+                        let comparator_second = time_comparator();
+                        let candidate_second = time_candidate();
+                        (
+                            (candidate_first + candidate_second) * 0.5,
+                            (comparator_first + comparator_second) * 0.5,
+                        )
+                    } else {
+                        let comparator_first = time_comparator();
+                        let candidate_first = time_candidate();
+                        let candidate_second = time_candidate();
+                        let comparator_second = time_comparator();
+                        (
+                            (candidate_first + candidate_second) * 0.5,
+                            (comparator_first + comparator_second) * 0.5,
+                        )
+                    };
+                    candidate_us.push(candidate_elapsed);
+                    comparator_us.push(comparator_elapsed);
+                    ratios.push(candidate_elapsed / comparator_elapsed);
+                }
+                candidate_us.sort_by(f64::total_cmp);
+                comparator_us.sort_by(f64::total_cmp);
+                ratios.sort_by(f64::total_cmp);
+                println!(
+                    concat!(
+                        "{{\"schema\":\"MambaBiFixedSm120FmaB0SpikeV1\",",
+                        "\"path\":\"{}\",\"comparator\":\"{}\",\"order\":\"{}\",",
+                        "\"windows\":{},\"candidate_symbol\":\"{}\",",
+                        "\"candidate_p50_us\":{:.9},\"candidate_p95_us\":{:.9},",
+                        "\"comparator_p50_us\":{:.9},\"comparator_p95_us\":{:.9},",
+                        "\"ratio_p50\":{:.9},\"ratio_p95\":{:.9}}}"
+                    ),
+                    path,
+                    comparator_name,
+                    if candidate_outside { "abba" } else { "baab" },
+                    windows,
+                    candidate_symbol,
+                    percentile(&candidate_us, 0.50),
+                    percentile(&candidate_us, 0.95),
+                    percentile(&comparator_us, 0.50),
+                    percentile(&comparator_us, 0.95),
+                    percentile(&ratios, 0.50),
+                    percentile(&ratios, 0.95),
+                );
+            }
+        }
+    }
+
+    // Keep the managed input allocations live through every graph replay.
+    a.zero(&ctx.stream).expect("keep A live");
+    b.zero(&ctx.stream).expect("keep B live");
+}
+
+#[test]
+#[ignore = "requires a quiet RTX5090 and balances all exact TMA-FMA B0 tile orders"]
+fn fixed_sm120_exact_tma_fma_b0_tile_tournament() {
+    assert_eq!(
+        std::env::var("MAMBA_FIXED_SM120_FMA_TOURNAMENT").as_deref(),
+        Ok("1"),
+        "set MAMBA_FIXED_SM120_FMA_TOURNAMENT=1 for the explicit B0 tournament"
+    );
+    assert!(!cfg!(debug_assertions), "B0 tournament requires --release");
+    let device = GpuDevice::new(0).expect("B0 tournament CUDA device");
+    assert_eq!(device.compute_capability, (12, 0));
+    assert_eq!(device.multiprocessor_count(), 170);
+    let contexts = [
+        GpuCtx::new(&device).expect("M128N64 context"),
+        GpuCtx::new(&device).expect("M64N128 context"),
+        GpuCtx::new(&device).expect("M64N64 context"),
+    ];
+    let symbols = [
+        "gemm_bi_nn_sm120_tma_fma_v1_m128n64_bk16_s2",
+        "gemm_bi_nn_sm120_tma_fma_v1_m64n128_bk16_s2",
+        "gemm_bi_nn_sm120_tma_fma_v1_m64n64_bk16_s2",
+    ];
+    let requests = symbols.map(|symbol| {
+        let route = tf32_route_specs(ModuleKind::TriadSm120)
+            .iter()
+            .find(|spec| spec.symbol == symbol)
+            .unwrap_or_else(|| panic!("missing exact TMA-FMA route {symbol}"))
+            .route;
+        assert!(route.is_exact_fma());
+        PhysicalQualificationRequest::contiguous(
+            ResolvedGemmOp::Nn,
+            (4_621, 768, 2_304),
+            PhysicalQualificationRoute::Tf32Forced(route),
+        )
+    });
+    let mut h0 = qualify_physical_launch(&contexts[0], requests[0]).expect("qualify M128N64");
+    let mut h1 = qualify_physical_launch(&contexts[1], requests[1]).expect("qualify M64N128");
+    let mut h2 = qualify_physical_launch(&contexts[2], requests[2]).expect("qualify M64N64");
+    for (holder, ctx) in [
+        (&mut h0, &contexts[0]),
+        (&mut h1, &contexts[1]),
+        (&mut h2, &contexts[2]),
+    ] {
+        holder
+            .seed_f32_operands(ctx, 0xf120_7001)
+            .expect("seed B0 tournament operands");
+        holder
+            .measure_prevalidated_forced_eager_window_ms(ctx, 1)
+            .expect("B0 eager bit launch");
+    }
+    let eager_bits = [
+        h0.f32_output_bits(&contexts[0])
+            .expect("M128N64 eager bits"),
+        h1.f32_output_bits(&contexts[1])
+            .expect("M64N128 eager bits"),
+        h2.f32_output_bits(&contexts[2]).expect("M64N64 eager bits"),
+    ];
+    assert_eq!(
+        eager_bits[0], eager_bits[1],
+        "M64N128 changed exact B0 bits"
+    );
+    assert_eq!(eager_bits[0], eager_bits[2], "M64N64 changed exact B0 bits");
+    for (holder, ctx) in [
+        (&h0, &contexts[0]),
+        (&h1, &contexts[1]),
+        (&h2, &contexts[2]),
+    ] {
+        holder
+            .measure_graph_window_ms(ctx, 1)
+            .expect("B0 graph bit launch");
+    }
+    assert_eq!(
+        eager_bits[0],
+        h0.f32_output_bits(&contexts[0])
+            .expect("M128N64 graph bits")
+    );
+    assert_eq!(
+        eager_bits[0],
+        h1.f32_output_bits(&contexts[1])
+            .expect("M64N128 graph bits")
+    );
+    assert_eq!(
+        eager_bits[0],
+        h2.f32_output_bits(&contexts[2]).expect("M64N64 graph bits")
+    );
+    for (holder, symbol) in [(&h0, symbols[0]), (&h1, symbols[1]), (&h2, symbols[2])] {
+        assert_eq!(holder.evidence().single_launch_symbol(), Some(symbol));
+        assert_eq!(holder.evidence().launch_count(), 1);
+    }
+
+    let eager_pilots = [
+        h0.measure_prevalidated_forced_eager_window_ms(&contexts[0], 16)
+            .expect("M128N64 eager pilot")
+            * 1_000.0
+            / 16.0,
+        h1.measure_prevalidated_forced_eager_window_ms(&contexts[1], 16)
+            .expect("M64N128 eager pilot")
+            * 1_000.0
+            / 16.0,
+        h2.measure_prevalidated_forced_eager_window_ms(&contexts[2], 16)
+            .expect("M64N64 eager pilot")
+            * 1_000.0
+            / 16.0,
+    ];
+    let graph_pilots = [
+        h0.measure_graph_window_ms(&contexts[0], 16)
+            .expect("M128N64 graph pilot")
+            * 1_000.0
+            / 16.0,
+        h1.measure_graph_window_ms(&contexts[1], 16)
+            .expect("M64N128 graph pilot")
+            * 1_000.0
+            / 16.0,
+        h2.measure_graph_window_ms(&contexts[2], 16)
+            .expect("M64N64 graph pilot")
+            * 1_000.0
+            / 16.0,
+    ];
+    let eager_iterations = eager_pilots.map(fixed_auto_vendor_iterations);
+    let graph_iterations = graph_pilots.map(fixed_auto_vendor_iterations);
+    let windows = std::env::var("MAMBA_FIXED_SM120_FMA_TOURNAMENT_WINDOWS").map_or(21, |value| {
+        value.parse::<usize>().expect("tournament windows")
+    });
+    assert!((1..=101).contains(&windows));
+    let permutations = [
+        [0usize, 1usize, 2usize],
+        [0, 2, 1],
+        [1, 0, 2],
+        [1, 2, 0],
+        [2, 0, 1],
+        [2, 1, 0],
+    ];
+    for path in ["eager", "graph"] {
+        let mut samples: [Vec<f64>; 3] = std::array::from_fn(|_| {
+            Vec::with_capacity(windows.checked_mul(permutations.len()).unwrap())
+        });
+        for _ in 0..windows {
+            for order in permutations {
+                for index in order {
+                    let elapsed_ms = match (path, index) {
+                        ("eager", 0) => h0
+                            .measure_prevalidated_forced_eager_window_ms(
+                                &contexts[0],
+                                eager_iterations[0],
+                            )
+                            .expect("M128N64 eager window"),
+                        ("eager", 1) => h1
+                            .measure_prevalidated_forced_eager_window_ms(
+                                &contexts[1],
+                                eager_iterations[1],
+                            )
+                            .expect("M64N128 eager window"),
+                        ("eager", 2) => h2
+                            .measure_prevalidated_forced_eager_window_ms(
+                                &contexts[2],
+                                eager_iterations[2],
+                            )
+                            .expect("M64N64 eager window"),
+                        ("graph", 0) => h0
+                            .measure_graph_window_ms(&contexts[0], graph_iterations[0])
+                            .expect("M128N64 graph window"),
+                        ("graph", 1) => h1
+                            .measure_graph_window_ms(&contexts[1], graph_iterations[1])
+                            .expect("M64N128 graph window"),
+                        ("graph", 2) => h2
+                            .measure_graph_window_ms(&contexts[2], graph_iterations[2])
+                            .expect("M64N64 graph window"),
+                        _ => unreachable!(),
+                    };
+                    let iterations = if path == "eager" {
+                        eager_iterations[index]
+                    } else {
+                        graph_iterations[index]
+                    };
+                    samples[index].push(elapsed_ms * 1_000.0 / iterations as f64);
+                }
+            }
+        }
+        for (index, sample) in samples.iter_mut().enumerate() {
+            sample.sort_by(f64::total_cmp);
+            println!(
+                concat!(
+                    "{{\"schema\":\"MambaBiFixedSm120FmaB0TileTournamentV1\",",
+                    "\"path\":\"{}\",\"symbol\":\"{}\",\"windows_per_permutation\":{},",
+                    "\"balanced_samples\":{},\"iterations\":{},",
+                    "\"p50_us\":{:.9},\"p95_us\":{:.9}}}"
+                ),
+                path,
+                symbols[index],
+                windows,
+                sample.len(),
+                if path == "eager" {
+                    eager_iterations[index]
+                } else {
+                    graph_iterations[index]
+                },
+                percentile(sample, 0.50),
+                percentile(sample, 0.95),
+            );
+        }
+    }
 }
 
 fn fixed_ada_filter(name: &str, inventory: &[&str]) -> Vec<usize> {

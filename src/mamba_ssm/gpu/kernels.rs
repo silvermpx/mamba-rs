@@ -438,6 +438,9 @@ pub struct MambaKernels {
     /// Optional CC12.0 exact-F32 N64 copy-plan, separate from the Ada route.
     pub fixed_sm120_f32_n64_copyplan: Option<CudaFunction>,
     pub fixed_sm120_f32_n64_copyplan_rejection: Option<String>,
+    /// Independent compute_120 sliced exact-F32 route; no scratch.
+    pub fixed_sm120_f32_n64_sliced: Option<CudaFunction>,
+    pub fixed_sm120_f32_n64_sliced_rejection: Option<String>,
 
     // -- Batch-invariant matvec (M=1 specialization) --
     /// Specialized M=1 matvec. The GEMM kernels above waste 98% of smem
@@ -647,6 +650,8 @@ impl MambaKernels {
             super::gemm_bi_triad::modules::load_fixed_sm89_f32_n64_copyplan(ctx, &fixed);
         let (fixed_sm120_f32_n64_copyplan, fixed_sm120_f32_n64_copyplan_rejection) =
             super::gemm_bi_triad::modules::load_fixed_sm120_f32_n64_copyplan(ctx, &fixed);
+        let (fixed_sm120_f32_n64_sliced, fixed_sm120_f32_n64_sliced_rejection) =
+            super::gemm_bi_triad::modules::load_fixed_sm120_f32_n64_sliced(ctx, &fixed);
         let triad = GemmBiKernels::load(ctx, fixed.artifact_identity, scalar, sm80, specialized)?;
         // A rejected TF32 module used to be recorded and never shown: the
         // process booted green and every TF32 request quietly ran scalar.
@@ -896,6 +901,8 @@ impl MambaKernels {
             fixed_sm89_f32_n64_copyplan_rejection,
             fixed_sm120_f32_n64_copyplan,
             fixed_sm120_f32_n64_copyplan_rejection,
+            fixed_sm120_f32_n64_sliced,
+            fixed_sm120_f32_n64_sliced_rejection,
             gemm_bi_nn_tf32: {
                 let kernels = FixedTf32Kernels {
                     m128n64_s2: get("gemm_bi_nn_tf32_v1_m128n64_bk32_s2")?,
