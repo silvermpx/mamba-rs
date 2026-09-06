@@ -1,0 +1,76 @@
+2026-09-06T17:51:33+02:00
+0, NVIDIA RTX 6000 Ada Generation, GPU-d1edd7be-e88d-aed6-047d-622163306f0e, 8.9, 595.45.04, P5, 0 %, 0 %, 90 MiB, 49140 MiB, 58, 1800 MHz, 810 MHz, 46.27 W, 300.00 W, 300.00 W
+
+==============NVSMI LOG==============
+
+Timestamp                                              : Sun Sep  6 17:51:33 2026
+Driver Version                                         : 595.45.04
+CUDA Version                                           : 13.2
+
+Attached GPUs                                          : 1
+GPU 00000000:6F:00.0
+    GPU Power Readings
+        Average Power Draw                             : 46.27 W
+        Instantaneous Power Draw                       : 46.19 W
+        Current Power Limit                            : 300.00 W
+        Requested Power Limit                          : 300.00 W
+        Default Power Limit                            : 300.00 W
+        Min Power Limit                                : 100.00 W
+        Max Power Limit                                : 300.00 W
+    Power Samples
+        Duration                                       : 33.75 sec
+        Number of Samples                              : 119
+        Max                                            : 315.04 W
+        Min                                            : 46.19 W
+        Avg                                            : 54.87 W
+    GPU Memory Power Readings 
+        Average Power Draw                             : N/A
+        Instantaneous Power Draw                       : N/A
+    Module Power Readings
+        Average Power Draw                             : N/A
+        Instantaneous Power Draw                       : N/A
+        Current Power Limit                            : N/A
+        Requested Power Limit                          : N/A
+        Default Power Limit                            : N/A
+        Min Power Limit                                : N/A
+        Max Power Limit                                : N/A
+    EDPp Multiplier                                    : N/A
+    Clocks
+        Graphics                                       : 1800 MHz
+        SM                                             : 1800 MHz
+        Memory                                         : 810 MHz
+        Video                                          : 1545 MHz
+    Applications Clocks
+        Graphics                                       : Requested functionality has been deprecated
+        Memory                                         : Requested functionality has been deprecated
+    Default Applications Clocks
+        Graphics                                       : Requested functionality has been deprecated
+        Memory                                         : Requested functionality has been deprecated
+    Deferred Clocks
+        Memory                                         : N/A
+    Max Clocks
+        Graphics                                       : 3105 MHz
+        SM                                             : 3105 MHz
+        Memory                                         : 10001 MHz
+        Video                                          : 2415 MHz
+    Max Customer Boost Clocks
+        Graphics                                       : N/A
+    SM Clock Samples
+        Duration                                       : Not Found
+        Number of Samples                              : Not Found
+        Max                                            : Not Found
+        Min                                            : Not Found
+        Avg                                            : Not Found
+    Memory Clock Samples
+        Duration                                       : Not Found
+        Number of Samples                              : Not Found
+        Max                                            : Not Found
+        Min                                            : Not Found
+        Avg                                            : Not Found
+    Clock Policy
+        Auto Boost                                     : N/A
+        Auto Boost Default                             : N/A
+
+global_cuda=/usr/local/cuda-13.2
+performance_executable=fff28eb3aef0ba4375ac0583cde0927af734410623f51904941fc40bddb7413b  /root/target-ada-rna-cuda130-20260906/release/deps/gemm_bi_fixed_performance-28fdf8ce2728ddd5
+cache_stat=drwx------ 700 root:root /root/mamba-kcache-ada-rna-cuda130-20260906

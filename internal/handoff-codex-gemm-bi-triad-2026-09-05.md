@@ -50,7 +50,7 @@ The owner's target for release 0.7 (see the release order in section 8):
   - `ada`: `ssh ada`, RTX 6000 Ada (SM89, 142 SMs, power cap 300 W; under a
     sustained GEMM the SM clock holds 1800 MHz, so every harness number is at
     1800 MHz). Synced tree at `/root/mamba-rs-triad`; toolkit env in
-    `/root/triad-env.sh` (CUDA 13.2; 12.8 also installed). Scripts in
+    `/root/triad-env.sh` (CUDA 13.2; 12.8 and13.0 also installed). Scripts in
     `/root/run-*.sh`, logs in `/root/logs`, SASS blobs in `/root/wide-check`.
   - RTX 5090 (SM120, 170 SMs): rented by the owner's word only; the last
     rental ended 2026-09-04 09:15Z. Its scripts and evidence are in
@@ -949,6 +949,34 @@ admission is13.2-only. Existing forced tests cover tail/hot-A; B-E exceptional
 coverage is currently tied to the13.2 actual-AUTO helper and must be decoupled
 before promoting those toolkits. The half-swizzle prototype remains the next
 separate kernel integration candidate. Preserve all old routes and evidence.
+
+### Ada RNA-wide CUDA12.8/13.0 census checkpoint (2026-09-06)
+
+Completed on frozen208c740c with distinct matching builds, source/targets and
+private0700 caches. CUDA13.0 was installed side-by-side; no GPU driver upgrade,
+package removal or default CUDA13.2 change. Both builds and cold/warm force
+correctness pairs pass2/2. The first12.8 build was a preserved sync-omission
+failure, then passed after supplying the required test-support file.
+
+Both21/101 runs per toolkit complete40/40 unique records with zero rejection.
+Main independently verified all160 raw records, exact physical RNA graph,
+samplewise quantiles, repeat/raw/applicable graph bits, matching NVRTC domains
+and explicit FAST/bias denominator;167 local/remote source hashes,4 live
+binary hashes and6 cache blobs were checked. Production source is unchanged.
+
+At101 windows all ten shape/bias cells beat current ordinary AUTO for both
+toolkits. FAST wins are only A+bias: worst paired p950.955545 on12.8 and
+0.973033 on13.0. B+bias still loses FAST at1.063045/1.063894; worst remaining
+FAST ratio is E without bias at1.496884/1.498848. CUDA13.2's separate B+bias
+win cannot be extrapolated to these builds. Evidence and manifest:
+`internal/perf/ada-rna-toolkit-census-20260906/README.md`.
+
+This census does not promote AUTO. The frozen force helper's B–E exceptional/
+prefix/views were coupled to13.2 actual-AUTO assumptions. A test-only task
+now separates that corpus and will rerun full qualification on all three
+toolkits before the separate dispatch/epoch/post-AUTO confirmation step.
+Keep all old candidates and frozen evidence; no cleanup or other-architecture
+qualification was performed here. Half/mixed and Triad gaps remain open.
 
 ### Precision and determinism terminology
 

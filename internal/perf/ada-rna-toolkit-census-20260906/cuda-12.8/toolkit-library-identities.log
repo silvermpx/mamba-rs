@@ -1,0 +1,33 @@
+nvcc: NVIDIA (R) Cuda compiler driver
+Copyright (c) 2005-2025 NVIDIA Corporation
+Built on Fri_Feb_21_20:23:50_PST_2025
+Cuda compilation tools, release 12.8, V12.8.93
+Build cuda_12.8.r12.8/compiler.35583870_0
+/usr/local/cuda-12.8/lib64/stubs/libnvrtc.so
+dc6376d6b9a4b3b830dadedb4362af1225ac94b9e90a636dd380515fb351a8be  /usr/local/cuda-12.8/lib64/stubs/libnvrtc.so
+/usr/local/cuda-12.8/lib64/libnvrtc.so.12.8.93
+2bb82d1a34b9fefa46aca357299aed66763d4d6613d015d5a591224c00fa7e5a  /usr/local/cuda-12.8/lib64/libnvrtc.so.12.8.93
+/usr/local/cuda-12.8/lib64/libnvrtc.so
+2bb82d1a34b9fefa46aca357299aed66763d4d6613d015d5a591224c00fa7e5a  /usr/local/cuda-12.8/lib64/libnvrtc.so
+/usr/local/cuda-12.8/lib64/libnvrtc.so.12
+2bb82d1a34b9fefa46aca357299aed66763d4d6613d015d5a591224c00fa7e5a  /usr/local/cuda-12.8/lib64/libnvrtc.so.12
+/usr/local/cuda-12.8/targets/x86_64-linux/lib/stubs/libnvrtc.so
+dc6376d6b9a4b3b830dadedb4362af1225ac94b9e90a636dd380515fb351a8be  /usr/local/cuda-12.8/targets/x86_64-linux/lib/stubs/libnvrtc.so
+/usr/local/cuda-12.8/targets/x86_64-linux/lib/libnvrtc.so.12.8.93
+2bb82d1a34b9fefa46aca357299aed66763d4d6613d015d5a591224c00fa7e5a  /usr/local/cuda-12.8/targets/x86_64-linux/lib/libnvrtc.so.12.8.93
+/usr/local/cuda-12.8/targets/x86_64-linux/lib/libnvrtc.so
+2bb82d1a34b9fefa46aca357299aed66763d4d6613d015d5a591224c00fa7e5a  /usr/local/cuda-12.8/targets/x86_64-linux/lib/libnvrtc.so
+/usr/local/cuda-12.8/targets/x86_64-linux/lib/libnvrtc.so.12
+2bb82d1a34b9fefa46aca357299aed66763d4d6613d015d5a591224c00fa7e5a  /usr/local/cuda-12.8/targets/x86_64-linux/lib/libnvrtc.so.12
+/usr/local/cuda-12.8/lib64/libnvrtc-builtins.so.12.8.93
+eccaa824230ee7858a94a3055cb01f1cb634df05d313880d0bdcf195161fcb4e  /usr/local/cuda-12.8/lib64/libnvrtc-builtins.so.12.8.93
+/usr/local/cuda-12.8/lib64/libnvrtc-builtins.so
+eccaa824230ee7858a94a3055cb01f1cb634df05d313880d0bdcf195161fcb4e  /usr/local/cuda-12.8/lib64/libnvrtc-builtins.so
+/usr/local/cuda-12.8/lib64/libnvrtc-builtins.so.12.8
+eccaa824230ee7858a94a3055cb01f1cb634df05d313880d0bdcf195161fcb4e  /usr/local/cuda-12.8/lib64/libnvrtc-builtins.so.12.8
+/usr/local/cuda-12.8/targets/x86_64-linux/lib/libnvrtc-builtins.so.12.8.93
+eccaa824230ee7858a94a3055cb01f1cb634df05d313880d0bdcf195161fcb4e  /usr/local/cuda-12.8/targets/x86_64-linux/lib/libnvrtc-builtins.so.12.8.93
+/usr/local/cuda-12.8/targets/x86_64-linux/lib/libnvrtc-builtins.so
+eccaa824230ee7858a94a3055cb01f1cb634df05d313880d0bdcf195161fcb4e  /usr/local/cuda-12.8/targets/x86_64-linux/lib/libnvrtc-builtins.so
+/usr/local/cuda-12.8/targets/x86_64-linux/lib/libnvrtc-builtins.so.12.8
+eccaa824230ee7858a94a3055cb01f1cb634df05d313880d0bdcf195161fcb4e  /usr/local/cuda-12.8/targets/x86_64-linux/lib/libnvrtc-builtins.so.12.8

@@ -1,0 +1,15 @@
+branch=codex/gemm-bi-triad-sm80
+commit=208c740c3f24c71f8bc090dbf597f7ee1a129fbd
+source_manifest_sha256=d6d3467bd6a5d86f452433f158c728f6b48dd616650a4d38a6fcfe0e69de5b00
+CUDA_HOME=/usr/local/cuda-12.8
+CUDA_PATH=/usr/local/cuda-12.8
+LD_LIBRARY_PATH=/usr/local/cuda-12.8/lib64
+PATH=/usr/local/cuda-12.8/bin:/root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+CARGO_TARGET_DIR=/root/target-ada-rna-cuda128-20260906
+MAMBA_RS_KERNEL_CACHE=/root/mamba-kcache-ada-rna-cuda128-20260906
+command=cargo test --release --features cuda,cudarc/cuda-12080 --test gemm_bi_fixed_correctness --test gemm_bi_fixed_performance --no-run
+   Compiling mamba-rs v0.6.9 (/root/mamba-ada-rna-toolkit-census-20260906)
+    Finished `release` profile [optimized] target(s) in 9.05s
+  Executable tests/gemm_bi_fixed_correctness.rs (/root/target-ada-rna-cuda128-20260906/release/deps/gemm_bi_fixed_correctness-e745b7cbbfaa93fe)
+  Executable tests/gemm_bi_fixed_performance.rs (/root/target-ada-rna-cuda128-20260906/release/deps/gemm_bi_fixed_performance-e01d837be76567b7)
+exit_status=0
