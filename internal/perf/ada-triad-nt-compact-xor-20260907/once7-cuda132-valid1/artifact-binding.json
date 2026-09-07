@@ -1,0 +1,26 @@
+{
+  "binary": "/root/target-ada-exact-toolkit-auto-triad-nt-compact-xor1-cuda132-20260907/release/deps/gemm_bi_tf32_nt_compact_xor-72f43542cd9e6a2e",
+  "binary_sha256": "6f083ae8be2d7910d31129473c7abd03bc6258c5fa77831d026000ecc4002a66",
+  "cache": "/root/mamba-kcache-ada-exact-toolkit-auto-triad-nt-compact-xor1-cuda132-20260907",
+  "cache_artifacts": {
+    "/root/mamba-kcache-ada-exact-toolkit-auto-triad-nt-compact-xor1-cuda132-20260907/mamba-kernels-v1-3809af034718aa08dfdfc1b6baeb407715436dc7db87ef39825b033c2fd72541.bin": "5851ebd49595a0b2ef665073289e52f903eec3266deadfc5ad5d9f2096ce6d16",
+    "/root/mamba-kcache-ada-exact-toolkit-auto-triad-nt-compact-xor1-cuda132-20260907/mamba-kernels-v1-822ebf0dda7dcf9c4f5c5a2213884dde42ab45f5cf238479a81856042c302b7c.bin": "5035921fc8e078e5454c9c5392f9e9ee6ca6a3de54c1e08cb54bba432fa37546",
+    "/root/mamba-kcache-ada-exact-toolkit-auto-triad-nt-compact-xor1-cuda132-20260907/mamba-kernels-v1-e4f76515e441adc28862775000fce218e2d2cca61b47ce484e15eb1144c40fb3.bin": "f0be052fc160b9e5f4b6a897878781327968c0015d551128415a94b85e6fc0aa"
+  },
+  "cache_mode": "0o700",
+  "environment_constructor": "/root/evidence-ada-exact-toolkit-auto-20260907/run.py::env_for",
+  "feature": "cuda,cudarc/cuda-13020",
+  "generation": "triad-nt-compact-xor1",
+  "head": "311e3435607bdb36c0c45c290c77e82f0439edb1",
+  "libraries": {
+    "/lib/x86_64-linux-gnu/libc.so.6": "8db37cf3f2169f59a0f07ef1fea308c35656668c64c8ff294e1860f4121eb161",
+    "/lib/x86_64-linux-gnu/libgcc_s.so.1": "d93224d2b0dab4247598be683adca02f5cf00586f99c187579cd7e92058fb7cb",
+    "/lib/x86_64-linux-gnu/libm.so.6": "e9c4b28d340e415b8137480ec442662f981e1399386c5931dae0e886e3639e91",
+    "/lib64/ld-linux-x86-64.so.2": "cd4df4f3c7b83673d61189bf2eaebd33ca4f2853ab9772b8a25e025ef99b1e81"
+  },
+  "schema": "MambaTriadNtCompactXorArtifactBindingV1",
+  "source_count": 369,
+  "source_manifest": "/root/evidence-ada-triad-nt-compact-xor-20260907/build-cuda132/source-manifest.json",
+  "source_manifest_sha256": "cf249699558d2e8ac7c5af17b5a66f2febf4903bf2957ae725b333e4d89f0a37",
+  "toolkit": "13.2"
+}

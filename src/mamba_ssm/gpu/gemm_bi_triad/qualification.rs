@@ -1052,9 +1052,55 @@ fn upload_f32_guarded(ctx: &GpuCtx, buffer: &mut GpuBuffer, active: &[f32]) -> R
         .map_err(|error| format!("synchronize F32 guarded upload: {error:?}"))
 }
 
+fn validate_exact_unbiased_f32_word_lengths(
+    active: [usize; 4],
+    has_bias: bool,
+    output: usize,
+    a: usize,
+    b: usize,
+) -> Result<(), String> {
+    if has_bias || active[3] != 0 {
+        return Err("exact unbiased F32 word upload does not accept a bias allocation".into());
+    }
+    for (label, actual, expected) in [
+        ("output", output, active[0]),
+        ("A", a, active[1]),
+        ("B", b, active[2]),
+    ] {
+        if actual != expected {
+            return Err(format!(
+                "exact unbiased F32 {label} word length {actual} differs from active extent {expected}"
+            ));
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod f32_trailing_guard_tests {
     use super::*;
+
+    #[test]
+    fn exact_unbiased_f32_word_upload_rejects_bias_and_each_wrong_length() {
+        validate_exact_unbiased_f32_word_lengths([0, 0, 0, 0], false, 0, 0, 0).unwrap();
+        let active = [6, 8, 12, 0];
+        validate_exact_unbiased_f32_word_lengths(active, false, 6, 8, 12).unwrap();
+        assert!(validate_exact_unbiased_f32_word_lengths(active, true, 6, 8, 12).is_err());
+        assert!(validate_exact_unbiased_f32_word_lengths([6, 8, 12, 4], false, 6, 8, 12).is_err());
+        for (output, a, b) in [
+            (5, 8, 12),
+            (7, 8, 12),
+            (6, 7, 12),
+            (6, 9, 12),
+            (6, 8, 11),
+            (6, 8, 13),
+        ] {
+            assert!(
+                validate_exact_unbiased_f32_word_lengths(active, false, output, a, b).is_err(),
+                "accepted output/A/B lengths {output}/{a}/{b}"
+            );
+        }
+    }
 
     #[test]
     fn f32_guarded_storage_keeps_active_bits_and_covers_empty_operands() {
@@ -1782,6 +1828,45 @@ impl QualifiedPhysicalLaunch<'_> {
         ctx.stream
             .synchronize()
             .map_err(|error| format!("synchronize F32 qualification seeding: {error:?}"))
+    }
+
+    /// Uploads exact caller-provided IEEE words to an unbiased F32 request.
+    ///
+    /// This qualification-only hook retains facade-owned red zones and rejects
+    /// every non-exact active extent. It is intentionally unavailable to NN
+    /// bias requests so a caller cannot silently omit a live operand.
+    pub fn upload_exact_unbiased_f32_words(
+        &mut self,
+        ctx: &GpuCtx,
+        output: &[u32],
+        a: &[u32],
+        b: &[u32],
+    ) -> Result<(), String> {
+        self.policy.validate(ctx)?;
+        self.resources.validate()?;
+        let QualifiedPhysicalResources::F32(resources) = &mut self.resources else {
+            return Err("exact F32 word upload requires an F32 qualification route".into());
+        };
+        validate_exact_unbiased_f32_word_lengths(
+            resources.active,
+            resources.bias.is_some(),
+            output.len(),
+            a.len(),
+            b.len(),
+        )?;
+        let output = output
+            .iter()
+            .copied()
+            .map(f32::from_bits)
+            .collect::<Vec<_>>();
+        let a = a.iter().copied().map(f32::from_bits).collect::<Vec<_>>();
+        let b = b.iter().copied().map(f32::from_bits).collect::<Vec<_>>();
+        upload_f32_guarded(ctx, &mut resources.output, &output)?;
+        upload_f32_guarded(ctx, &mut resources.a, &a)?;
+        upload_f32_guarded(ctx, &mut resources.b, &b)?;
+        ctx.stream
+            .synchronize()
+            .map_err(|error| format!("synchronize exact F32 word upload: {error:?}"))
     }
 
     /// Seeds an NN route with one exactly representable active K term.

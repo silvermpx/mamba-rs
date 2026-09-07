@@ -9,6 +9,24 @@ the dated progress log, 900 lines), then `internal/agent-operational-rules.md`
 
 ## 1. What the work is
 
+Latest Triad discovery (2026-09-07): NT compact-XOR preserves the bounded
+finite target/tail/eager/graph bits and has155regs/0local/73728shared/1CTA,
+but loses to actual AUTO in all4once7 strata: p501.034743..1.038873,
+p951.035072..1.039089. STOP, no retry/21/101/production promotion. Exactly
+one real GPU test passes44.67s; the earlier wrong-filter zero-test attempt
+is preserved and explicitly invalid. Raw/replay/source binding:
+`internal/perf/ada-triad-nt-compact-xor-20260907/README.md`.
+Next bounded batch designs use the original padded36 layout: precomputed
+copy plans and ldmatrix fragment loads, separate mechanisms, same RNA/MMA
+association. Reuse the discovery harness. Do not restart the six old direct
+tile losses or treat the rejected compact layout as a retained finalist.
+The current60-cell audit found no measured compatible Ada champion omitted
+from AUTO. Stream-K has connected winners on other training dimensions under
+its distinct policy; SM120 TMA winners are not Ada-compatible. RTX5090's
+preserved current21 fingerprint independently replays17/60 both-quantile
+Fast wins (Exact1,TF324,BF166,F166), versus Ada3/60; not same-binary or new
+RTX5090 measurements. Older profile/state checkpoints below remain valid.
+
 Fresh Ada Triad state and two-cell profiles are complete (2026-09-07), using
 the unchanged CUDA13.2 binary built at59f1a949. Once21 raw snapshot independently
 replays120 custom eager/graph +90 vendor Fast/Pedantic records. Against Fast

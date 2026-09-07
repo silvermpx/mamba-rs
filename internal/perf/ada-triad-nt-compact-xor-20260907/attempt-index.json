@@ -1,0 +1,61 @@
+{
+  "schema": "MambaTriadNtCompactXorAttemptIndexV1",
+  "head": "311e3435607bdb36c0c45c290c77e82f0439edb1",
+  "frozen_source_sha256": {
+    "src/mamba_ssm/gpu/gemm_bi_triad/qualification.rs": "5a84ce112bc50d264c8c019fe7aae1f4e40b98949e438add3de92d40e7fab7e9",
+    "tests/gemm_bi_tf32_nt_compact_xor.cu": "0c3907f60f4f6f47abafdc3d476bb1956172c443acfd10b11481fd1121117b76",
+    "tests/gemm_bi_tf32_nt_compact_xor.rs": "f9feece07feda4b9bac2679fe4c340a617050e8f82edb276a3174e30329a5be4"
+  },
+  "attempts": [
+    {
+      "kind": "pre_wrapper",
+      "valid": false,
+      "reason": "SSH stripped inline Python quoting; remote Python, CUDA and GPU work never started",
+      "outer_ssh_exit": 2,
+      "raw": "build-cuda132/pre-attempt1-wrapper-failure.log",
+      "raw_sha256": "5ce39347825468cd54a1ff1e5ec4d97542e3635c885e6c594ca79d8d7938344c"
+    },
+    {
+      "kind": "build",
+      "valid": true,
+      "exit": 0,
+      "source_count": 369,
+      "source_manifest_sha256": "cf249699558d2e8ac7c5af17b5a66f2febf4903bf2957ae725b333e4d89f0a37",
+      "binary_sha256": "6f083ae8be2d7910d31129473c7abd03bc6258c5fa77831d026000ecc4002a66",
+      "command": "build-cuda132/command.json",
+      "command_sha256": "5cd17d965e3a8955fc496df5605df2d9f760fc24bfd230500a98a7210e6b8ba4"
+    },
+    {
+      "kind": "once7",
+      "valid": false,
+      "reason": "wrong exact module prefix selected zero tests; no CUDA context, candidate compile, resource check, bit check or timing ran",
+      "exit": 0,
+      "executed_tests": 0,
+      "test_log": "once7-cuda132/test.log",
+      "test_log_sha256": "0ab3841a5797ffba0a783d2aeea0f2711094272b254c39642eef3391c2ba22c0",
+      "command_sha256": "bfed2b38e9ec9096e17fe0c5330ab4200f326bf12b1002bb69fe0908c4b43025",
+      "artifact_binding_sha256": "a79c34845d8adf6634b1a0b1114faa254f4b786241e755d02c0147a53167fb54"
+    },
+    {
+      "kind": "once7",
+      "valid": true,
+      "exit": 0,
+      "executed_tests": 1,
+      "resource_records": 1,
+      "screen_records": 4,
+      "decision_records": 1,
+      "decision": "stop_no_retry",
+      "promotion": false,
+      "test_log": "once7-cuda132-valid1/test.log",
+      "test_log_sha256": "b50c7f9bdc44471ac4a45b066091b1a1d444f362dfa7e796e23a508379cdae56",
+      "command_sha256": "b5f3289608da3f7abdd1444eba7e7c8033c9ab89ae88eb876f84f29fc9008a82",
+      "artifact_binding_sha256": "93430608e4a01c66252ce5a74346a5d2d82c7dc4d6abbe3b9860f504bc8783b1",
+      "immediate_release_quiet": false,
+      "separate_drain_quiet": true
+    }
+  ],
+  "binding_limits": {
+    "libraries": "artifact-binding.json records only direct ldd-resolved libraries, not CUDA libraries opened dynamically at runtime",
+    "candidate_artifact": "candidate PTX was compiled and loaded in memory but was not persisted; evidence binds the composed candidate source SHA emitted by the test, the test binary and the production cache artifacts only"
+  }
+}
