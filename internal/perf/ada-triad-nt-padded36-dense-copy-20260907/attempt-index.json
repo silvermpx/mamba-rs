@@ -1,0 +1,30 @@
+{
+  "schema": "MambaTriadNtPadded36DenseCopyAttemptIndexV1",
+  "attempts": [
+    {
+      "kind": "build",
+      "valid": true,
+      "exit": 0,
+      "expected_test_listed": true,
+      "source_manifest_sha256": "860fb1ee864b847d7f1d7ddb641aed66be2fc7c229f24911bb14a4e93c9e948b",
+      "binary_sha256": "4f94cba429630aab0f1ee3964b1f5c64d141d02e9286582703b5576683b73bb5",
+      "command_sha256": "5d5f726f323f6a4110eafdcddccb3e3593671c2994b87438471a0d87dd6e3616"
+    },
+    {
+      "kind": "once7",
+      "variant": "padded_dense_copy",
+      "valid": true,
+      "exit": 0,
+      "executed_tests": 1,
+      "resource_records": 1,
+      "screen_records": 4,
+      "decision_records": 1,
+      "test_log_sha256": "e837429a04c8593a558afa8721e68ef6c0cc416898b38eee4dad2b54dbc4134a",
+      "command_sha256": "dded08ffd69a4ca0f3f83f13ca8896481daba71a14f1540f3156de7d548ffe77",
+      "decision": "advance_to_full_qualification",
+      "promotion": false,
+      "immediate_release_quiet": false,
+      "separate_drain_quiet": true
+    }
+  ]
+}

@@ -10,10 +10,13 @@ const PADDED_LDMATRIX_SYMBOL: &str =
     "gemm_bi_nt_test_padded_ldmatrix_sm80_mma_tf32_v1_m128n64_bk32_s3";
 const PADDED_EIGHT_WARP_SYMBOL: &str =
     "gemm_bi_nt_test_padded_eight_warp_sm80_mma_tf32_v1_m128n64_bk32_s3";
+const PADDED_DENSE_COPY_SYMBOL: &str =
+    "gemm_bi_nt_test_padded_dense_copy_sm80_mma_tf32_v1_m128n64_bk32_s3";
 const PRODUCTION_CUDA: &str = include_str!("../kernels/gemm_bi_triad/sm80.cu");
 const CANDIDATE_CUDA: &str = include_str!("gemm_bi_tf32_nt_compact_xor.cu");
 const PADDED_COPY_PLAN_CUDA: &str = include_str!("gemm_bi_tf32_nt_padded_copy_plan.cuh");
 const PADDED_LDMATRIX_CUDA: &str = include_str!("gemm_bi_tf32_nt_padded_ldmatrix.cuh");
+const PADDED_DENSE_COPY_CUDA: &str = include_str!("gemm_bi_tf32_nt_padded_dense_copy.cuh");
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum CandidateVariant {
@@ -21,6 +24,7 @@ enum CandidateVariant {
     PaddedCopyPlan,
     PaddedLdmatrix,
     PaddedEightWarp,
+    PaddedDenseCopy,
 }
 
 impl CandidateVariant {
@@ -30,6 +34,7 @@ impl CandidateVariant {
             Self::PaddedCopyPlan => "padded_copy_plan",
             Self::PaddedLdmatrix => "padded_ldmatrix",
             Self::PaddedEightWarp => "padded_eight_warp",
+            Self::PaddedDenseCopy => "padded_dense_copy",
         }
     }
 
@@ -39,13 +44,17 @@ impl CandidateVariant {
             Self::PaddedCopyPlan => PADDED_COPY_PLAN_SYMBOL,
             Self::PaddedLdmatrix => PADDED_LDMATRIX_SYMBOL,
             Self::PaddedEightWarp => PADDED_EIGHT_WARP_SYMBOL,
+            Self::PaddedDenseCopy => PADDED_DENSE_COPY_SYMBOL,
         }
     }
 
     const fn shared_bytes(self) -> u32 {
         match self {
             Self::CompactXor => 73_728,
-            Self::PaddedCopyPlan | Self::PaddedLdmatrix | Self::PaddedEightWarp => 82_944,
+            Self::PaddedCopyPlan
+            | Self::PaddedLdmatrix
+            | Self::PaddedEightWarp
+            | Self::PaddedDenseCopy => 82_944,
         }
     }
 
@@ -55,6 +64,7 @@ impl CandidateVariant {
             Self::PaddedCopyPlan => padded_copy_plan_candidate_source(),
             Self::PaddedLdmatrix => padded_ldmatrix_candidate_source(),
             Self::PaddedEightWarp => padded_eight_warp_candidate_source(),
+            Self::PaddedDenseCopy => padded_dense_copy_candidate_source(),
         }
     }
 }
@@ -476,6 +486,132 @@ fn padded_eight_warp_candidate_source() -> Result<String, String> {
     Ok(source)
 }
 
+fn padded_dense_target_guard(
+    dims: (usize, usize, usize),
+    strides: (usize, usize, usize),
+    wide_a: bool,
+    wide_b: bool,
+) -> bool {
+    dims == (2_048, 768, 3_072) && strides == (3_072, 3_072, 768) && wide_a && wide_b
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DenseOperand {
+    A,
+    B,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct DenseCopy {
+    operand: DenseOperand,
+    global_float: usize,
+    shared_float: usize,
+}
+
+fn padded_dense_copy(
+    operand: DenseOperand,
+    thread: usize,
+    slice: usize,
+    stage: usize,
+    tile_row: usize,
+    tile_column: usize,
+    reduction_base: usize,
+) -> DenseCopy {
+    let linear = thread + slice * 256;
+    let axis = linear >> 3;
+    let reduction = (linear & 7) * 4;
+    const A_STAGE_FLOATS: usize = BM * PADDED_STRIDE;
+    const B_STAGE_FLOATS: usize = BN * PADDED_STRIDE;
+    const B_SHARED_BASE: usize = STAGES * A_STAGE_FLOATS;
+    match operand {
+        DenseOperand::A => DenseCopy {
+            operand,
+            global_float: (tile_row + axis) * 3_072 + reduction_base + reduction,
+            shared_float: stage * A_STAGE_FLOATS + axis * PADDED_STRIDE + reduction,
+        },
+        DenseOperand::B => DenseCopy {
+            operand,
+            global_float: (tile_column + axis) * 3_072 + reduction_base + reduction,
+            shared_float: B_SHARED_BASE + stage * B_STAGE_FLOATS + axis * PADDED_STRIDE + reduction,
+        },
+    }
+}
+
+fn padded_dense_copy_candidate_source() -> Result<String, String> {
+    let mut source = PRODUCTION_CUDA.to_owned();
+    let thread_plan = concat!(
+        "struct SgbTf32ThreadPlan {\n",
+        "    bool compute;\n",
+        "    int warp_m;\n",
+        "    int warp_n;\n",
+        "    int group;\n",
+        "    int thread;\n",
+        "};"
+    );
+    replace_exact(
+        &mut source,
+        thread_plan,
+        &format!("{thread_plan}\n\n{PADDED_DENSE_COPY_CUDA}"),
+        1,
+        "padded dense-copy helper insertion",
+    )?;
+    let wide_branch = concat!(
+        "    if (wide_a && wide_b) {\n",
+        "        gemm_bi_tf32_async_mainloop<\n",
+        "            Op, BM, BN, Stages, MAtoms, NAtoms, false, false>(\n",
+        "            storage, problem, tile_count, thread_plan, accumulators);\n",
+        "    } else if (gemm_bi_tf32_can_stage_async_4(a, b, params)) {"
+    );
+    let candidate_branch = concat!(
+        "    if (wide_a && wide_b) {\n",
+        "        if constexpr (Op == SgbTf32Nt && BM == 128 && BN == 64 && Stages == 3) {\n",
+        "            if (gemm_bi_tf32_nt_test_padded_dense_target(params)) {\n",
+        "                gemm_bi_tf32_nt_test_padded_dense_mainloop<MAtoms, NAtoms>(\n",
+        "                    storage, problem, tile_count, thread_plan, accumulators);\n",
+        "            } else {\n",
+        "                gemm_bi_tf32_async_mainloop<\n",
+        "                    Op, BM, BN, Stages, MAtoms, NAtoms, false, false>(\n",
+        "                    storage, problem, tile_count, thread_plan, accumulators);\n",
+        "            }\n",
+        "        } else {\n",
+        "            gemm_bi_tf32_async_mainloop<\n",
+        "                Op, BM, BN, Stages, MAtoms, NAtoms, false, false>(\n",
+        "                storage, problem, tile_count, thread_plan, accumulators);\n",
+        "        }\n",
+        "    } else if (gemm_bi_tf32_can_stage_async_4(a, b, params)) {"
+    );
+    replace_exact(
+        &mut source,
+        wide_branch,
+        candidate_branch,
+        1,
+        "padded dense-copy target branch",
+    )?;
+    replace_exact(
+        &mut source,
+        concat!(
+            "GEMM_BI_TF32_DEFINE_KERNEL(",
+            "gemm_bi_nt_sm80_mma_tf32_v1_m128n64_bk32_s3, ",
+            "SgbTf32Nt, 128, 64, 3, 256, 1)"
+        ),
+        concat!(
+            "GEMM_BI_TF32_DEFINE_KERNEL(",
+            "gemm_bi_nt_test_padded_dense_copy_sm80_mma_tf32_v1_m128n64_bk32_s3, ",
+            "SgbTf32Nt, 128, 64, 3, 256, 1)"
+        ),
+        1,
+        "padded dense-copy target symbol",
+    )?;
+    replace_exact(
+        &mut source,
+        "TF32_ASSERT_KERNEL_SIGNATURE(gemm_bi_nt_sm80_mma_tf32_v1_m128n64_bk32_s3);",
+        "TF32_ASSERT_KERNEL_SIGNATURE(gemm_bi_nt_test_padded_dense_copy_sm80_mma_tf32_v1_m128n64_bk32_s3);",
+        1,
+        "padded dense-copy target signature",
+    )?;
+    Ok(source)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct WarpTile {
     warp_m: usize,
@@ -646,21 +782,163 @@ fn candidate_variants_have_independent_sources_symbols_and_shared_extents() {
     let copy_plan = CandidateVariant::PaddedCopyPlan;
     let ldmatrix = CandidateVariant::PaddedLdmatrix;
     let eight_warp = CandidateVariant::PaddedEightWarp;
+    let dense_copy = CandidateVariant::PaddedDenseCopy;
     assert_eq!(compact.shared_bytes(), 73_728);
     assert_eq!(copy_plan.shared_bytes(), 82_944);
     assert_eq!(ldmatrix.shared_bytes(), 82_944);
     assert_eq!(eight_warp.shared_bytes(), 82_944);
+    assert_eq!(dense_copy.shared_bytes(), 82_944);
     assert_ne!(compact.symbol(), copy_plan.symbol());
     assert_ne!(compact.symbol(), ldmatrix.symbol());
     assert_ne!(copy_plan.symbol(), ldmatrix.symbol());
     assert_ne!(copy_plan.symbol(), eight_warp.symbol());
     assert_ne!(ldmatrix.symbol(), eight_warp.symbol());
-    for variant in [copy_plan, ldmatrix, eight_warp] {
+    assert_ne!(eight_warp.symbol(), dense_copy.symbol());
+    for variant in [copy_plan, ldmatrix, eight_warp, dense_copy] {
         let source = variant.source().unwrap();
         assert!(source.contains(variant.symbol()));
         assert!(source.contains("NT M128N64 s3 storage"));
         assert_eq!(variant.name().starts_with("padded_"), true);
     }
+}
+
+#[test]
+fn padded_dense_guard_accepts_only_the_full_aligned_target_contract() {
+    let target = (2_048, 768, 3_072);
+    let strides = (3_072, 3_072, 768);
+    assert!(padded_dense_target_guard(target, strides, true, true));
+    for dims in [
+        (2_047, 768, 3_072),
+        (2_048, 767, 3_072),
+        (2_048, 768, 3_071),
+    ] {
+        assert!(!padded_dense_target_guard(dims, strides, true, true));
+    }
+    for bad_strides in [
+        (3_071, 3_072, 768),
+        (3_072, 3_071, 768),
+        (3_072, 3_072, 767),
+    ] {
+        assert!(!padded_dense_target_guard(target, bad_strides, true, true));
+    }
+    assert!(!padded_dense_target_guard(target, strides, false, true));
+    assert!(!padded_dense_target_guard(target, strides, true, false));
+}
+
+#[test]
+fn padded_dense_six_copy_ownership_is_unique_aligned_and_in_range() {
+    const M: usize = 2_048;
+    const K: usize = 768;
+    const N: usize = 3_072;
+    const LDA: usize = N;
+    const LDB: usize = N;
+    const A_STAGE_FLOATS: usize = BM * PADDED_STRIDE;
+    const B_STAGE_FLOATS: usize = BN * PADDED_STRIDE;
+    const B_SHARED_BASE: usize = STAGES * A_STAGE_FLOATS;
+    const SHARED_FLOATS: usize = STAGES * (A_STAGE_FLOATS + B_STAGE_FLOATS);
+
+    for tile_row in (0..M).step_by(BM) {
+        for tile_column in (0..K).step_by(BN) {
+            for reduction_base in (0..N).step_by(BK) {
+                for stage in 0..STAGES {
+                    let mut a_seen = vec![false; BM * (BK / 4)];
+                    let mut b_seen = vec![false; BN * (BK / 4)];
+                    for thread in 0..256 {
+                        for slice in 0..4 {
+                            let got = padded_dense_copy(
+                                DenseOperand::A,
+                                thread,
+                                slice,
+                                stage,
+                                tile_row,
+                                tile_column,
+                                reduction_base,
+                            );
+                            let linear = thread + slice * 256;
+                            let row = linear >> 3;
+                            let reduction = (linear & 7) * 4;
+                            assert_eq!(got.operand, DenseOperand::A);
+                            assert_eq!(
+                                got.global_float,
+                                (tile_row + row) * LDA + reduction_base + reduction
+                            );
+                            assert_eq!(
+                                got.shared_float,
+                                stage * A_STAGE_FLOATS + row * PADDED_STRIDE + reduction
+                            );
+                            assert_eq!(got.global_float % 4, 0);
+                            assert_eq!(got.shared_float % 4, 0);
+                            assert!(got.global_float + 4 <= M * N);
+                            assert!(got.shared_float + 4 <= B_SHARED_BASE);
+                            let slot = row * (BK / 4) + reduction / 4;
+                            assert!(!a_seen[slot]);
+                            a_seen[slot] = true;
+                        }
+                        for slice in 0..2 {
+                            let got = padded_dense_copy(
+                                DenseOperand::B,
+                                thread,
+                                slice,
+                                stage,
+                                tile_row,
+                                tile_column,
+                                reduction_base,
+                            );
+                            let linear = thread + slice * 256;
+                            let column = linear >> 3;
+                            let reduction = (linear & 7) * 4;
+                            assert_eq!(got.operand, DenseOperand::B);
+                            assert_eq!(
+                                got.global_float,
+                                (tile_column + column) * LDB + reduction_base + reduction
+                            );
+                            assert_eq!(
+                                got.shared_float,
+                                B_SHARED_BASE
+                                    + stage * B_STAGE_FLOATS
+                                    + column * PADDED_STRIDE
+                                    + reduction
+                            );
+                            assert_eq!(got.global_float % 4, 0);
+                            assert_eq!(got.shared_float % 4, 0);
+                            assert!(got.global_float + 4 <= K * N);
+                            assert!(got.shared_float + 4 <= SHARED_FLOATS);
+                            let slot = column * (BK / 4) + reduction / 4;
+                            assert!(!b_seen[slot]);
+                            b_seen[slot] = true;
+                        }
+                    }
+                    assert!(a_seen.into_iter().all(|seen| seen));
+                    assert!(b_seen.into_iter().all(|seen| seen));
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn padded_dense_source_isolates_target_and_preserves_generic_tail_path() {
+    let source = padded_dense_copy_candidate_source().unwrap();
+    assert!(source.contains(PADDED_DENSE_COPY_SYMBOL));
+    assert!(source.contains(&format!(
+        "TF32_ASSERT_KERNEL_SIGNATURE({PADDED_DENSE_COPY_SYMBOL});"
+    )));
+    assert!(
+        !source
+            .contains("TF32_ASSERT_KERNEL_SIGNATURE(gemm_bi_nt_sm80_mma_tf32_v1_m128n64_bk32_s3);")
+    );
+    assert!(source.contains("gemm_bi_tf32_nt_test_padded_dense_target"));
+    assert!(source.contains("gemm_bi_tf32_nt_test_padded_dense_mainloop"));
+    assert!(source.contains(
+        "gemm_bi_tf32_async_mainloop<\n                    Op, BM, BN, Stages, MAtoms, NAtoms, false, false>"
+    ));
+    assert!(source.contains("static constexpr int AStride = Op == SgbTf32Tn ? BM + 8 : 36;"));
+    assert!(source.contains("static constexpr int BStride = Op == SgbTf32Nt ? 36"));
+    assert!(source.contains("const int k_offsets[4] = {0, 8, 16, 24};"));
+    assert!(!source.contains("gemm_bi_tf32_nt_test_padded_copy_plan_mainloop"));
+    assert!(!source.contains("gemm_bi_tf32_nt_padded_ldmatrix_fragments"));
+    assert!(!source.contains("eight_compute_warps"));
+    assert!(!source.contains("gemm_bi_nt_test_compact_xor_k"));
 }
 
 #[test]
@@ -1664,5 +1942,11 @@ mod cuda_suite {
     #[ignore = "requires exclusive Ada CC8.9 CUDA13.2; padded eight-compute-warp NT discovery"]
     fn ada_tf32_nt_padded_eight_warp_discovery_once7() {
         run(CandidateVariant::PaddedEightWarp);
+    }
+
+    #[test]
+    #[ignore = "requires exclusive Ada CC8.9 CUDA13.2; padded dense full-tile NT discovery"]
+    fn ada_tf32_nt_padded_dense_copy_discovery_once7() {
+        run(CandidateVariant::PaddedDenseCopy);
     }
 }

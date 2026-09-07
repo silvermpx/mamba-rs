@@ -9,6 +9,34 @@ the dated progress log, 900 lines), then `internal/agent-operational-rules.md`
 
 ## 1. What the work is
 
+Latest NT dense full-tile copy screen (2026-09-07): ADVANCE finalist, not
+production promotion. Same four-compute-warp/padded36/S3 layout, RNA/MMA
+order and epilogue, but exact full target uses six unconditional16B copies
+per thread; all other cases keep generic staging. Target(2048,768,3072),
+strides(3072,3072,768), existing wide-alignment eligibility required.
+All four paired once7 strata beat actual AUTO: eager ABBA p50/p95
+0.902877339/0.904695784, eager BAAB0.903320353/0.904387367,
+graph ABBA0.904951208/0.906080434, graph BAAB0.902442164/0.903388426.
+Median times: eager248.22-248.27us vs274.84-274.87us; graph246.96-247.65us
+vs273.66-273.74us. This is about9.5-9.8% lower runtime versus our AUTO,
+NOT a new cuBLAS Fast comparison/win. Resource154regs/0local/0static/
+82944dynamic/1CTA. Bounded finite target+forced-generic-tail eager/graph
+bits and input/guard checks PASS; exactly one GPU test48.49s. Root replays
+373source hashes and28rawbrackets; native17tests plus actual-header
+28,311,552copy tuples/seven negative guards/three behavioral mutations PASS.
+Source rs3d433d7b..., header5aa5d735..., binary4f94cba4...,
+composed CUDAb256264c..., raw e837429a.... Evidence:
+`internal/perf/ada-triad-nt-padded36-dense-copy-20260907/README.md`.
+Retain=true, promotion=false: keep this finalist for frozen-batch qualification.
+Next bounded design crosses a different resource threshold: compact32/S2
+plus eight compute warps, exact NT128x64/S2 specialization,49152dynamic;
+require actual occupancy>=2 and zero local memory before bits/timing.
+The separate S3 compact/eight-warp losses do not establish this joint regime.
+Explicit register pingpong was skipped after existing rolling LDS/HMMA
+interleaving was observed. Many FSETP are RNA Inf checks, not copy bounds;
+do not attribute the entire profile FSETP count to staging predicates.
+Older checkpoints and their then-next steps below are historical.
+
 Latest NT eight-compute-warp screen (2026-09-07): finite target/forced-tail
 eager/graph bitsPASS,100regs versus profiled154,0local/82944shared/1CTA,
 but all4once7 strata lose: p501.080783..1.083239,p951.081299..1.083544.
