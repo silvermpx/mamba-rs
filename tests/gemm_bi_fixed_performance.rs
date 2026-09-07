@@ -11792,12 +11792,78 @@ fn fixed_force_registry_contains_selectable_ada_s3() {
     );
 }
 
+#[test]
+fn fixed_force_registry_and_inventory_include_all_three_ada_finalists() {
+    for (name, row, symbol, bias_contract) in [
+        (
+            "Tf32RnaM128N96S3",
+            "tf32",
+            "gemm_bi_nn_fixed_sm89_rna_tf32_v1_m128n96_bk32_s3",
+            FixedForceBiasContract::Either,
+        ),
+        (
+            "TcM64N64Sm89S3",
+            "f16",
+            "gemm_bi_nn_fixed_sm89_m64n64_bk64_s3_v1_f16",
+            FixedForceBiasContract::NoBias,
+        ),
+        (
+            "TcM128N64Sm89S2",
+            "f16",
+            "gemm_bi_nn_fixed_sm89_m128n64_bk64_s2_v1_f16",
+            FixedForceBiasContract::NoBias,
+        ),
+    ] {
+        assert!(
+            fixed_force_tile_universe()
+                .iter()
+                .any(|tile| format!("{tile:?}") == name),
+            "force registry omitted {name}"
+        );
+        let selected = fixed_explicit_vendor_filter_tiles(
+            &fixed_explicit_vendor_tiles(row, (8, 9)),
+            Some(name),
+        )
+        .expect("finalist is selectable from the Ada force inventory");
+        assert_eq!(selected.len(), 1);
+        let spec = fixed_force_spec(row, (8, 9), selected[0]).expect("physical finalist spec");
+        assert_eq!(spec.expected_symbol, symbol);
+        assert_eq!(spec.bias_contract, bias_contract);
+        assert!(fixed_explicit_vendor_needs_identity_graph(
+            &["eager"],
+            selected[0]
+        ));
+        for bad_row in [
+            "bf16",
+            "f16",
+            "tf32",
+            "bf16_f32",
+            "f16_f32",
+            "f32_exact",
+            "f32_exact_fast",
+        ] {
+            if bad_row != row {
+                assert!(fixed_force_spec(bad_row, (8, 9), selected[0]).is_err());
+            }
+        }
+        assert!(
+            fixed_explicit_vendor_filter_tiles(
+                &fixed_explicit_vendor_tiles(row, (12, 0)),
+                Some(name),
+            )
+            .is_err()
+        );
+        assert!(fixed_force_spec(row, (12, 0), selected[0]).is_err());
+    }
+}
+
 define_fixed_force_plain_tile_registry!(
     F32N128S2,
     Tf32M128S2,
     Tf32M128S3,
     Tf32M128N128S3,
     Tf32RnaM128N128S3,
+    Tf32RnaM128N96S3,
     Tf32M64S2,
     Tf32M64S3,
     Tf32M16S4,
@@ -11812,6 +11878,8 @@ define_fixed_force_plain_tile_registry!(
     Tc128Sm89Pipeline,
     Tc128Sm89Swizzle,
     Tc128Sm89S3,
+    TcM64N64Sm89S3,
+    TcM128N64Sm89S2,
     TcWn64,
     TcW64,
     Tc64,
@@ -11927,6 +11995,10 @@ fn fixed_force_spec(
             "gemm_bi_nn_fixed_rna_wide_tf32_v1_m128n128_bk32_s3"
         }
         FixedTile::Tf32RnaM128N128S3 => return Err(invalid()),
+        FixedTile::Tf32RnaM128N96S3 if row == "tf32" && cc == (8, 9) => {
+            "gemm_bi_nn_fixed_sm89_rna_tf32_v1_m128n96_bk32_s3"
+        }
+        FixedTile::Tf32RnaM128N96S3 => return Err(invalid()),
         FixedTile::Tf32M64S2 if row == "tf32" => "gemm_bi_nn_tf32_v1_m64n64_bk32_s2",
         FixedTile::Tf32M64S2 => return Err(invalid()),
         FixedTile::Tf32M64S3 if row == "tf32" => "gemm_bi_nn_tf32_v1_m64n64_bk32_s3",
@@ -12046,6 +12118,13 @@ fn fixed_force_spec(
             "gemm_bi_nn_fixed_sm89_tc128_s3_v1_f16"
         }
         FixedTile::Tc128Sm89S3 => return Err(invalid()),
+        FixedTile::TcM64N64Sm89S3 if cc == (8, 9) && row == "f16" => {
+            "gemm_bi_nn_fixed_sm89_m64n64_bk64_s3_v1_f16"
+        }
+        FixedTile::TcM128N64Sm89S2 if cc == (8, 9) && row == "f16" => {
+            "gemm_bi_nn_fixed_sm89_m128n64_bk64_s2_v1_f16"
+        }
+        FixedTile::TcM64N64Sm89S3 | FixedTile::TcM128N64Sm89S2 => return Err(invalid()),
         FixedTile::TcWn64 if row == "bf16" => "gemm_bi_nn_tcwn64_bf16",
         FixedTile::TcWn64 if row == "f16" => "gemm_bi_nn_tcwn64_f16",
         FixedTile::TcWn64 => return Err(invalid()),
@@ -12159,7 +12238,9 @@ fn fixed_force_spec(
     let bias_contract = match tile {
         FixedTile::F32Sm120TmaFmaM128N64
         | FixedTile::F32Sm120TmaFmaM64N128
-        | FixedTile::F32Sm120TmaFmaFixedNoBiasM128N64T256 => FixedForceBiasContract::NoBias,
+        | FixedTile::F32Sm120TmaFmaFixedNoBiasM128N64T256
+        | FixedTile::TcM64N64Sm89S3
+        | FixedTile::TcM128N64Sm89S2 => FixedForceBiasContract::NoBias,
         FixedTile::F32Sm120TmaFmaFixedPostBiasM128N64
         | FixedTile::F32Sm120TmaFmaFixedPostBiasM64N128
         | FixedTile::F32Sm120TmaFmaFixedPostBiasM128N96
@@ -12239,10 +12320,14 @@ fn fixed_explicit_vendor_tiles(row: &str, cc: (u32, u32)) -> Vec<FixedTile> {
         // The wide symbol is not bound in the committed CC12 module cohort.
         tiles.insert(2, FixedTile::Tf32M128N128S3);
         tiles.insert(3, FixedTile::Tf32RnaM128N128S3);
+        tiles.insert(4, FixedTile::Tf32RnaM128N96S3);
     } else if matches!(row, "bf16" | "f16") {
         tiles.push(FixedTile::Tc128Sm89Pipeline);
         tiles.push(FixedTile::Tc128Sm89Swizzle);
         tiles.push(FixedTile::Tc128Sm89S3);
+        if row == "f16" {
+            tiles.extend([FixedTile::TcM64N64Sm89S3, FixedTile::TcM128N64Sm89S2]);
+        }
     } else if matches!(row, "f32_exact" | "f32_exact_fast") {
         tiles.push(FixedTile::F32Sm89N64CopyPlan);
     }
@@ -12308,6 +12393,26 @@ fn fixed_explicit_vendor_pipeline_graph_contract(
     bundle: [u32; 8],
     shape: FixedShape,
 ) -> Result<(), String> {
+    if matches!(
+        tile,
+        FixedTile::Tf32RnaM128N96S3 | FixedTile::TcM64N64Sm89S3 | FixedTile::TcM128N64Sm89S2
+    ) {
+        return fixed_explicit_vendor_finalist_graph_contract(
+            tile,
+            dtype,
+            node_count,
+            symbol,
+            grid,
+            block,
+            shared_bytes,
+            driver_abi,
+            terminal_sixth_rejected,
+            pointers,
+            expected_pointers,
+            bundle,
+            shape,
+        );
+    }
     let suffix = match dtype {
         WeightDtype::Bf16 => "bf16",
         WeightDtype::F16 => "f16",
@@ -12372,13 +12477,331 @@ fn fixed_explicit_vendor_pair_store_graph_contract(
 
 fn fixed_explicit_vendor_needs_identity_graph(paths: &[&str], tile: FixedTile) -> bool {
     paths.contains(&"graph")
-        || matches!(
-            tile,
-            FixedTile::Tf32RnaM128N128S3
-                | FixedTile::Tc128Sm89Pipeline
-                | FixedTile::Tc128Sm89Swizzle
-                | FixedTile::Tc128Sm89S3
-        )
+        || fixed_explicit_vendor_ada_descriptor(tile)
+        || tile == FixedTile::Tf32RnaM128N128S3
+}
+
+fn fixed_explicit_vendor_ada_descriptor(tile: FixedTile) -> bool {
+    matches!(
+        tile,
+        FixedTile::Tc128Sm89Pipeline
+            | FixedTile::Tc128Sm89Swizzle
+            | FixedTile::Tc128Sm89S3
+            | FixedTile::Tf32RnaM128N96S3
+            | FixedTile::TcM64N64Sm89S3
+            | FixedTile::TcM128N64Sm89S2
+    )
+}
+
+fn fixed_explicit_vendor_finalist_graph_contract(
+    tile: FixedTile,
+    dtype: WeightDtype,
+    node_count: usize,
+    symbol: &str,
+    grid: (u32, u32, u32),
+    block: (u32, u32, u32),
+    shared_bytes: u32,
+    driver_abi: Vec<(usize, usize)>,
+    terminal_sixth_rejected: bool,
+    pointers: [u64; 4],
+    expected_pointers: [u64; 4],
+    bundle: [u32; 8],
+    shape: FixedShape,
+) -> Result<(), String> {
+    let (row, bm, bn, threads, shared, tf32) = match tile {
+        FixedTile::Tf32RnaM128N96S3 => ("tf32", 128usize, 96usize, 256, 86_016, true),
+        FixedTile::TcM64N64Sm89S3 => ("f16", 64, 64, 128, 49_152, false),
+        FixedTile::TcM128N64Sm89S2 => ("f16", 128, 64, 128, 49_152, false),
+        _ => return Err(format!("{tile:?} is not an Ada finalist descriptor")),
+    };
+    let spec = fixed_force_spec(row, (8, 9), tile)?;
+    let legal_shape = if tf32 {
+        shape.m > 0
+            && shape.k <= i32::MAX as usize - 31
+            && shape.k % 4 == 0
+            && shape.n > 0
+            && shape.n <= i32::MAX as usize - 95
+            && shape.n % 4 == 0
+            && expected_pointers[0] != 0
+            && expected_pointers[0] % 4 == 0
+            && expected_pointers[3] % 4 == 0
+            && (shape.k == 0
+                || expected_pointers[1..3]
+                    .iter()
+                    .all(|pointer| *pointer != 0 && pointer % 16 == 0))
+    } else {
+        (1..=2048).contains(&shape.m)
+            && (shape.k, shape.n) == if bm == 64 { (768, 2304) } else { (2304, 768) }
+            && expected_pointers[3] == 0
+            && expected_pointers[..3]
+                .iter()
+                .all(|pointer| *pointer != 0 && pointer % 16 == 0)
+    };
+    let expected_grid = shape
+        .m
+        .div_ceil(bm)
+        .checked_mul(shape.n.div_ceil(bn))
+        .filter(|count| *count <= i32::MAX as usize)
+        .and_then(|count| u32::try_from(count).ok())
+        .map(|count| (count, 1, 1));
+    let (middle, last) = if tf32 {
+        (shape.k, shape.n)
+    } else {
+        (shape.n, shape.k)
+    };
+    let expected_bundle = [
+        1.0f32.to_bits(),
+        0,
+        shape.m as u32,
+        middle as u32,
+        last as u32,
+        shape.k as u32,
+        shape.n as u32,
+        shape.n as u32,
+    ];
+    if !legal_shape
+        || shape.m > i32::MAX as usize
+        || dtype != spec.input_dtype
+        || node_count != 1
+        || symbol != spec.expected_symbol
+        || Some(grid) != expected_grid
+        || block != (threads, 1, 1)
+        || shared_bytes != shared
+        || driver_abi != [(0, 8), (8, 8), (16, 8), (24, 8), (32, 32)]
+        || !terminal_sixth_rejected
+        || pointers != expected_pointers
+        || bundle != expected_bundle
+    {
+        return Err(format!(
+            "wrong physical Ada finalist {tile:?}: dtype={dtype:?} nodes={node_count} symbol={symbol:?} grid={grid:?} block={block:?} shared={shared_bytes} abi={driver_abi:?} sixth_rejected={terminal_sixth_rejected} pointers={pointers:?} expected_pointers={expected_pointers:?} bundle={bundle:?} shape={shape:?}"
+        ));
+    }
+    Ok(())
+}
+
+#[test]
+fn fixed_explicit_vendor_finalist_graph_contracts_reject_physical_mutations() {
+    for (tile, dtype, shape, grid, block, shared) in [
+        (
+            FixedTile::Tf32RnaM128N96S3,
+            WeightDtype::F32,
+            FixedShape {
+                m: 2048,
+                k: 2304,
+                n: 768,
+            },
+            (128, 1, 1),
+            (256, 1, 1),
+            86_016,
+        ),
+        (
+            FixedTile::TcM64N64Sm89S3,
+            WeightDtype::F16,
+            FixedShape {
+                m: 2048,
+                k: 768,
+                n: 2304,
+            },
+            (1152, 1, 1),
+            (128, 1, 1),
+            49_152,
+        ),
+        (
+            FixedTile::TcM128N64Sm89S2,
+            WeightDtype::F16,
+            FixedShape {
+                m: 2048,
+                k: 2304,
+                n: 768,
+            },
+            (192, 1, 1),
+            (128, 1, 1),
+            49_152,
+        ),
+    ] {
+        let tf32 = dtype == WeightDtype::F32;
+        let row = if tf32 { "tf32" } else { "f16" };
+        let symbol = fixed_force_spec(row, (8, 9), tile).unwrap().expected_symbol;
+        let abi = vec![(0, 8), (8, 8), (16, 8), (24, 8), (32, 32)];
+        let pointers = [0x1000, 0x2000, 0x3000, 0];
+        let bundle = [
+            1.0f32.to_bits(),
+            0,
+            shape.m as u32,
+            if tf32 { shape.k } else { shape.n } as u32,
+            if tf32 { shape.n } else { shape.k } as u32,
+            shape.k as u32,
+            shape.n as u32,
+            shape.n as u32,
+        ];
+        let check = |nodes,
+                     name,
+                     actual_grid,
+                     actual_block,
+                     actual_shared,
+                     actual_abi,
+                     terminal,
+                     actual_ptrs,
+                     actual_bundle| {
+            fixed_explicit_vendor_finalist_graph_contract(
+                tile,
+                dtype,
+                nodes,
+                name,
+                actual_grid,
+                actual_block,
+                actual_shared,
+                actual_abi,
+                terminal,
+                actual_ptrs,
+                pointers,
+                actual_bundle,
+                shape,
+            )
+        };
+        assert!(
+            check(
+                1,
+                symbol,
+                grid,
+                block,
+                shared,
+                abi.clone(),
+                true,
+                pointers,
+                bundle
+            )
+            .is_ok()
+        );
+        assert!(
+            check(
+                2,
+                symbol,
+                grid,
+                block,
+                shared,
+                abi.clone(),
+                true,
+                pointers,
+                bundle
+            )
+            .is_err()
+        );
+        assert!(
+            check(
+                1,
+                "wrong",
+                grid,
+                block,
+                shared,
+                abi.clone(),
+                true,
+                pointers,
+                bundle
+            )
+            .is_err()
+        );
+        assert!(
+            check(
+                1,
+                symbol,
+                (grid.0, 2, 1),
+                block,
+                shared,
+                abi.clone(),
+                true,
+                pointers,
+                bundle
+            )
+            .is_err()
+        );
+        assert!(
+            check(
+                1,
+                symbol,
+                grid,
+                (block.0, 2, 1),
+                shared,
+                abi.clone(),
+                true,
+                pointers,
+                bundle
+            )
+            .is_err()
+        );
+        assert!(
+            check(
+                1,
+                symbol,
+                grid,
+                block,
+                shared - 16,
+                abi.clone(),
+                true,
+                pointers,
+                bundle
+            )
+            .is_err()
+        );
+        assert!(
+            check(
+                1,
+                symbol,
+                grid,
+                block,
+                shared,
+                abi.clone(),
+                false,
+                pointers,
+                bundle
+            )
+            .is_err()
+        );
+        let mut bad_abi = abi.clone();
+        bad_abi[4].1 = 28;
+        assert!(
+            check(
+                1, symbol, grid, block, shared, bad_abi, true, pointers, bundle
+            )
+            .is_err()
+        );
+        for index in 0..4 {
+            let mut bad = pointers;
+            bad[index] ^= 16;
+            assert!(
+                check(
+                    1,
+                    symbol,
+                    grid,
+                    block,
+                    shared,
+                    abi.clone(),
+                    true,
+                    bad,
+                    bundle
+                )
+                .is_err()
+            );
+        }
+        for index in 0..8 {
+            let mut bad = bundle;
+            bad[index] ^= 1;
+            assert!(
+                check(
+                    1,
+                    symbol,
+                    grid,
+                    block,
+                    shared,
+                    abi.clone(),
+                    true,
+                    pointers,
+                    bad
+                )
+                .is_err()
+            );
+        }
+    }
 }
 
 #[test]
@@ -12577,7 +13000,7 @@ fn fixed_explicit_vendor_poison_output(ctx: &GpuCtx, buffer: &DtypedBuf) {
 fn fixed_explicit_vendor_graph_inventory(
     graph: &CudaGraph,
     label: &str,
-    half_descriptor: Option<(FixedTile, WeightDtype, FixedFwdOperands, FixedShape)>,
+    ada_descriptor: Option<(FixedTile, WeightDtype, FixedFwdOperands, FixedShape)>,
     bias_symbol: Option<&str>,
 ) -> String {
     use cudarc::driver::sys;
@@ -12605,7 +13028,7 @@ fn fixed_explicit_vendor_graph_inventory(
         );
         if kind != sys::CUgraphNodeType::CU_GRAPH_NODE_TYPE_KERNEL {
             assert!(
-                half_descriptor.is_none(),
+                ada_descriptor.is_none(),
                 "{label} pipeline captured non-kernel work"
             );
             non_kernel_nodes += 1;
@@ -12709,7 +13132,7 @@ fn fixed_explicit_vendor_graph_inventory(
                 )
             );
         }
-        if let Some((tile, dtype, operands, shape)) = half_descriptor {
+        if let Some((tile, dtype, operands, shape)) = ada_descriptor {
             let mut driver_abi = Vec::with_capacity(5);
             for index in 0..5 {
                 let mut offset = 0;
@@ -12867,11 +13290,15 @@ fn fixed_explicit_vendor_rung_inventory_is_arch_specific() {
         assert!(!sm120.contains(&FixedTile::Tc128Sm89Swizzle));
         assert!(!sm120.contains(&FixedTile::Tc128Sm89S3));
         let ada = fixed_explicit_vendor_tiles(row, (8, 9));
-        assert_eq!(ada.len(), 9);
+        assert_eq!(ada.len(), if row == "f16" { 11 } else { 9 });
         assert!(ada.contains(&FixedTile::Legacy));
         assert!(ada.contains(&FixedTile::Tc128Sm89Pipeline));
         assert!(ada.contains(&FixedTile::Tc128Sm89Swizzle));
         assert!(ada.contains(&FixedTile::Tc128Sm89S3));
+        for tile in [FixedTile::TcM64N64Sm89S3, FixedTile::TcM128N64Sm89S2] {
+            assert_eq!(ada.contains(&tile), row == "f16");
+            assert!(!sm120.contains(&tile));
+        }
         assert!(
             ada.iter()
                 .all(|tile| !matches!(tile, FixedTile::Sm120Half(_)))
@@ -12893,9 +13320,11 @@ fn fixed_explicit_vendor_rung_inventory_is_arch_specific() {
         assert!(sm120.contains(&tile));
     }
     let ada = fixed_explicit_vendor_tiles("tf32", (8, 9));
-    assert_eq!(ada.len(), 7);
+    assert_eq!(ada.len(), 8);
     assert!(ada.contains(&FixedTile::Tf32M128N128S3));
     assert!(ada.contains(&FixedTile::Tf32RnaM128N128S3));
+    assert!(ada.contains(&FixedTile::Tf32RnaM128N96S3));
+    assert!(!sm120.contains(&FixedTile::Tf32RnaM128N96S3));
     assert!(!ada.contains(&FixedTile::Tc128Sm89Pipeline));
     assert_eq!(
         fixed_explicit_vendor_tiles("f32_exact", (8, 9)),
@@ -14063,29 +14492,19 @@ fn fixed_ada_forced_rungs_paired_precision_cublas() {
                         } else {
                             None
                         };
-                    let auto_identity_inventory = matches!(
-                        selected,
-                        FixedTile::Tc128Sm89Pipeline
-                            | FixedTile::Tc128Sm89Swizzle
-                            | FixedTile::Tc128Sm89S3
-                    )
-                    .then(|| {
-                        fixed_explicit_vendor_graph_inventory(
-                            auto_identity_graph
-                                .as_ref()
-                                .expect("Ada half AUTO always captures an identity graph"),
-                            "AUTO",
-                            Some((selected, input_dtype, auto_ops, shape)),
-                            None,
-                        )
-                    });
-                    let forced_identity_inventory = matches!(
-                        tile,
-                        FixedTile::Tf32RnaM128N128S3
-                            | FixedTile::Tc128Sm89Pipeline
-                            | FixedTile::Tc128Sm89Swizzle
-                            | FixedTile::Tc128Sm89S3
-                    )
+                    let auto_identity_inventory = fixed_explicit_vendor_ada_descriptor(selected)
+                        .then(|| {
+                            fixed_explicit_vendor_graph_inventory(
+                                auto_identity_graph
+                                    .as_ref()
+                                    .expect("Ada half AUTO always captures an identity graph"),
+                                "AUTO",
+                                Some((selected, input_dtype, auto_ops, shape)),
+                                None,
+                            )
+                        });
+                    let forced_identity_inventory = (tile == FixedTile::Tf32RnaM128N128S3
+                        || fixed_explicit_vendor_ada_descriptor(tile))
                     .then(|| {
                         fixed_explicit_vendor_graph_inventory(
                             forced_identity_graph
@@ -14096,13 +14515,7 @@ fn fixed_ada_forced_rungs_paired_precision_cublas() {
                             } else {
                                 "forced"
                             },
-                            matches!(
-                                tile,
-                                FixedTile::Tc128Sm89Pipeline
-                                    | FixedTile::Tc128Sm89Swizzle
-                                    | FixedTile::Tc128Sm89S3
-                            )
-                            .then_some((
+                            fixed_explicit_vendor_ada_descriptor(tile).then_some((
                                 tile,
                                 input_dtype,
                                 forced_ops,
@@ -14160,13 +14573,7 @@ fn fixed_ada_forced_rungs_paired_precision_cublas() {
                         let auto_inventory = fixed_explicit_vendor_graph_inventory(
                             auto_graph,
                             "AUTO",
-                            matches!(
-                                selected,
-                                FixedTile::Tc128Sm89Pipeline
-                                    | FixedTile::Tc128Sm89Swizzle
-                                    | FixedTile::Tc128Sm89S3
-                            )
-                            .then_some((
+                            fixed_explicit_vendor_ada_descriptor(selected).then_some((
                                 selected,
                                 input_dtype,
                                 auto_ops,
@@ -14183,13 +14590,7 @@ fn fixed_ada_forced_rungs_paired_precision_cublas() {
                             } else {
                                 "forced"
                             },
-                            matches!(
-                                tile,
-                                FixedTile::Tc128Sm89Pipeline
-                                    | FixedTile::Tc128Sm89Swizzle
-                                    | FixedTile::Tc128Sm89S3
-                            )
-                            .then_some((
+                            fixed_explicit_vendor_ada_descriptor(tile).then_some((
                                 tile,
                                 input_dtype,
                                 forced_ops,

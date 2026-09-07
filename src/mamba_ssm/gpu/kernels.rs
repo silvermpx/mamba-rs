@@ -459,6 +459,15 @@ pub struct MambaKernels {
     /// Fixed-owned Ada RNA-wide TF32 candidate; force-only until qualified.
     pub fixed_sm89_tf32_rna_wide: Option<CudaFunction>,
     pub fixed_sm89_tf32_rna_wide_rejection: Option<String>,
+    /// Fixed-owned Ada RNA M128xN96 TF32 finalist; forced-only in revision 44.
+    pub fixed_sm89_tf32_rna_n96: Option<CudaFunction>,
+    pub fixed_sm89_tf32_rna_n96_rejection: Option<String>,
+    /// Independently admitted Ada F16 D finalist; forced-only in revision 44.
+    pub fixed_sm89_half_m64n64_s3_f16: Option<CudaFunction>,
+    pub fixed_sm89_half_m64n64_s3_f16_rejection: Option<String>,
+    /// Independently admitted Ada F16 E finalist; forced-only in revision 44.
+    pub fixed_sm89_half_m128n64_s2_f16: Option<CudaFunction>,
+    pub fixed_sm89_half_m128n64_s2_f16_rejection: Option<String>,
     /// Optional Ada exact-F32 N64 copy-plan; admitted independently of incumbents.
     pub fixed_sm89_f32_n64_copyplan: Option<CudaFunction>,
     pub fixed_sm89_f32_n64_copyplan_rejection: Option<String>,
@@ -687,6 +696,12 @@ impl MambaKernels {
             super::gemm_bi_triad::modules::load_fixed_sm89_half_s3(ctx, &fixed);
         let (fixed_sm89_tf32_rna_wide, fixed_sm89_tf32_rna_wide_rejection) =
             super::gemm_bi_triad::modules::load_fixed_sm89_rna_wide(ctx, &fixed);
+        let (fixed_sm89_tf32_rna_n96, fixed_sm89_tf32_rna_n96_rejection) =
+            super::gemm_bi_triad::modules::load_fixed_sm89_rna_n96(ctx, &fixed);
+        let (fixed_sm89_half_m64n64_s3_f16, fixed_sm89_half_m64n64_s3_f16_rejection) =
+            super::gemm_bi_triad::modules::load_fixed_sm89_half_m64n64_s3(ctx, &fixed);
+        let (fixed_sm89_half_m128n64_s2_f16, fixed_sm89_half_m128n64_s2_f16_rejection) =
+            super::gemm_bi_triad::modules::load_fixed_sm89_half_m128n64_s2(ctx, &fixed);
         let (fixed_sm89_f32_n64_copyplan, fixed_sm89_f32_n64_copyplan_rejection) =
             super::gemm_bi_triad::modules::load_fixed_sm89_f32_n64_copyplan(ctx, &fixed);
         let (fixed_sm120_f32_n64_copyplan, fixed_sm120_f32_n64_copyplan_rejection) =
@@ -952,6 +967,12 @@ impl MambaKernels {
             fixed_sm89_half_s3_rejection,
             fixed_sm89_tf32_rna_wide,
             fixed_sm89_tf32_rna_wide_rejection,
+            fixed_sm89_tf32_rna_n96,
+            fixed_sm89_tf32_rna_n96_rejection,
+            fixed_sm89_half_m64n64_s3_f16,
+            fixed_sm89_half_m64n64_s3_f16_rejection,
+            fixed_sm89_half_m128n64_s2_f16,
+            fixed_sm89_half_m128n64_s2_f16_rejection,
             fixed_sm89_f32_n64_copyplan,
             fixed_sm89_f32_n64_copyplan_rejection,
             fixed_sm120_f32_n64_copyplan,

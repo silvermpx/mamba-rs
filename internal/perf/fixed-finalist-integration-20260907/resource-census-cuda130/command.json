@@ -1,0 +1,22 @@
+{
+  "cache": "/root/mamba-kcache-ada-exact-toolkit-auto-finalistphase1green2-cuda130-20260907",
+  "command": [
+    "/root/.cargo/bin/cargo",
+    "test",
+    "--release",
+    "--features",
+    "cuda,cudarc/cuda-13000",
+    "--test",
+    "gemm_bi_fixed_sm89_pipeline",
+    "fixed_sm89_half_swizzle_and_pipeline_holders_are_independently_live",
+    "--",
+    "--ignored",
+    "--exact",
+    "--nocapture"
+  ],
+  "generation": "finalistphase1green2",
+  "runner": "/root/evidence-ada-exact-toolkit-auto-20260907/run.py",
+  "runner_sha256": "d753757a717bfe18b3a28a8480f31104e252271576e45d7e53fc16396008475a",
+  "target": "/root/target-ada-exact-toolkit-auto-finalistphase1green2-cuda130-20260907",
+  "toolkit": "13.0"
+}

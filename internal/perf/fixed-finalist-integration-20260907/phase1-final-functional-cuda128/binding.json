@@ -1,0 +1,45 @@
+{
+  "binaries": {
+    "gemm_bi_fixed_correctness": {
+      "path": "/root/target-ada-exact-toolkit-auto-finalistphase1green2-cuda128-20260907/release/deps/gemm_bi_fixed_correctness-bb38dc807b901804",
+      "sha256": "0e5c96b279350b051111785564daecc1e08c488b14ecb371e2a2bdf14fe1b199"
+    },
+    "gemm_bi_fixed_performance": {
+      "path": "/root/target-ada-exact-toolkit-auto-finalistphase1green2-cuda128-20260907/release/deps/gemm_bi_fixed_performance-adf126b1f35855e0",
+      "sha256": "fe9a1b4237f5ff51538fd1e8cffe80faa2565338ebd11305bd8fecf2373c3d38"
+    },
+    "gemm_bi_fixed_sm89_pipeline": {
+      "path": "/root/target-ada-exact-toolkit-auto-finalistphase1green2-cuda128-20260907/release/deps/gemm_bi_fixed_sm89_pipeline-275dff2d2ec8e1fd",
+      "sha256": "57ef9b65d2264b51aec7b0362612821214ebc83d7cc038f3c7e52e5300bec8e7"
+    }
+  },
+  "cache_artifacts": [
+    {
+      "bytes": 7285870,
+      "path": "/root/mamba-kcache-ada-exact-toolkit-auto-finalistphase1green2-cuda128-20260907/mamba-kernels-v1-204d091e16a1a56557598108ff023f625687865365a0f778ddbd8891bc2cf1e2.bin",
+      "sha256": "0c35fa355f43ca1d01341df2c76f3655487bce1cfa57e1ec784835e8dfd87aaf"
+    },
+    {
+      "bytes": 14018434,
+      "path": "/root/mamba-kcache-ada-exact-toolkit-auto-finalistphase1green2-cuda128-20260907/mamba-kernels-v1-73fbec7557a95462a555e39f1b3c94e8d2bcc7047a14f8f3e3fa51a768ec5b9a.bin",
+      "sha256": "c02fb7a0ef6a50cb52dc3fec2e83ebb1eb6b4015a9f200d48d65fd4493d489c9"
+    },
+    {
+      "bytes": 2437269,
+      "path": "/root/mamba-kcache-ada-exact-toolkit-auto-finalistphase1green2-cuda128-20260907/mamba-kernels-v1-da5dabeff55570d1fb6ca43a1d4a8aa7a2a9d25efb6436ed7f03c4a28a73d986.bin",
+      "sha256": "48a388fc610d110bb884ea3cd0f49eda299c0c7ce0c8e2beb24d34a925198a54"
+    }
+  ],
+  "sources": {
+    "kernels/gemm_bi_fixed/sm89_half_n64.cu": "5a4c85184fb4a0263ae03cbe7f2b5e8f954b32ce3138012ad8505274d3769681",
+    "kernels/gemm_bi_fixed/tf32_rna_n96.cu": "966372d0e8cb89c1ed32ceda45e6fa3e1e3df40ae42e8cbbd7aaccbdf96b6215",
+    "src/mamba_ssm/gpu/gemm_bi_fixed.rs": "ee56619cb3c308b5e224bac185be48600bdd3bd385b2af752cea54faa4b4bf97",
+    "src/mamba_ssm/gpu/gemm_bi_triad/modules.rs": "aad5439ca7c6952c9bf7a5af0896c5e39f55de984d811c925ea5dac8793da181",
+    "src/mamba_ssm/gpu/kernels.rs": "9aae153beba6976273064385bef3d438c83ee826986459844b9a46f3948dc138",
+    "tests/gemm_bi_fixed_correctness.rs": "83d261680287b06421ef9dca1db71c2880a6629a90009c438e59a293ea013854",
+    "tests/gemm_bi_fixed_performance.rs": "bd73a7389536732f08162abc043f092964f9124cc92d03dfd762335befa6fe42",
+    "tests/gemm_bi_fixed_sm89_pipeline.rs": "5b88b96e707f962a15dea8edae3948150553aab87e5a831e411a613203d796be",
+    "tests/support/fixed_full_mantissa.rs": "234d4d87dd479780a3cacee34e5f7f1e868e0465536caba3866a46a16a39cb22"
+  },
+  "toolkit": "12.8"
+}

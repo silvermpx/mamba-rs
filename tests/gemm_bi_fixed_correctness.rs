@@ -17,6 +17,9 @@ use mamba_rs::mamba_ssm::gpu::gemm_bi_fixed::{
 };
 use mamba_rs::mamba_ssm::gpu::graph_capture::capture_into_graph;
 
+#[path = "support/fixed_full_mantissa.rs"]
+mod fixed_full_mantissa;
+
 fn synth(n: usize, seed: u64) -> Vec<f32> {
     let mut s = seed;
     (0..n)
@@ -230,9 +233,15 @@ fn assert_wide_graph(graph: &cudarc::driver::CudaGraph, symbol: &[u8], shape: Fi
         ],
         "wide graph captured the wrong 32-byte parameter bundle",
     );
+    let (tile_n, shared_bytes) = if symbol == rna_qualification_symbol(FixedTile::Tf32RnaM128N96S3)
+    {
+        (96, 86_016)
+    } else {
+        (128, 98_304)
+    };
     let grid = (shape.m as u32)
         .div_ceil(128)
-        .checked_mul((shape.n as u32).div_ceil(128))
+        .checked_mul((shape.n as u32).div_ceil(tile_n))
         .unwrap();
     assert_eq!(
         (params.gridDimX, params.gridDimY, params.gridDimZ),
@@ -242,7 +251,7 @@ fn assert_wide_graph(graph: &cudarc::driver::CudaGraph, symbol: &[u8], shape: Fi
         (params.blockDimX, params.blockDimY, params.blockDimZ),
         (256, 1, 1)
     );
-    assert_eq!(params.sharedMemBytes, 98_304);
+    assert_eq!(params.sharedMemBytes, shared_bytes);
 }
 
 #[test]
@@ -507,7 +516,68 @@ fn fixed_tf32_forced_wide_rejects_unsafe_loads_and_handles_zero_reduction() {
 #[test]
 #[ignore = "requires exclusive CC8.9 Ada with the Fixed RNA-wide symbol admitted"]
 fn fixed_tf32_rna_wide_matches_all_fixed_rungs_prefix_views_and_graph_bits() {
-    check_rna_wide_prefix_views_and_graph_bits(false);
+    check_rna_wide_prefix_views_and_graph_bits(false, FixedTile::Tf32RnaM128N128S3);
+}
+
+#[test]
+#[ignore = "requires CC8.9 Ada and a qualified forced N96 holder; all-three-toolkit finalist gate"]
+fn fixed_sm89_rna_n96_forced_prefix_views_and_graph_bits() {
+    check_rna_wide_prefix_views_and_graph_bits(false, FixedTile::Tf32RnaM128N96S3);
+}
+
+fn rna_qualification_symbol(tile: FixedTile) -> &'static [u8] {
+    match tile {
+        FixedTile::Tf32RnaM128N128S3 => b"gemm_bi_nn_fixed_rna_wide_tf32_v1_m128n128_bk32_s3",
+        FixedTile::Tf32RnaM128N96S3 => b"gemm_bi_nn_fixed_sm89_rna_tf32_v1_m128n96_bk32_s3",
+        _ => panic!("not an RNA qualification tile: {tile:?}"),
+    }
+}
+
+fn rna_qualification_shapes(tile: FixedTile) -> Vec<(&'static str, FixedShape)> {
+    let mut shapes = rna_wide_qualification_shapes();
+    if tile == FixedTile::Tf32RnaM128N96S3 {
+        shapes.retain(|(label, _)| matches!(*label, "tail" | "hot_e_boundary"));
+    }
+    shapes
+}
+
+fn rna_qualification_rungs(tile: FixedTile) -> Vec<FixedTile> {
+    let mut rungs = vec![
+        FixedTile::Tf32M128S2,
+        FixedTile::Tf32M128S3,
+        FixedTile::Tf32M64S2,
+        FixedTile::Tf32M64S3,
+        FixedTile::Tf32M16S4,
+    ];
+    if tile == FixedTile::Tf32RnaM128N96S3 {
+        rungs.push(FixedTile::Tf32RnaM128N128S3);
+    }
+    rungs
+}
+
+#[test]
+fn rna_n96_qualification_targets_e_boundary_and_masked_tail_only() {
+    let shapes: Vec<_> = rna_qualification_shapes(FixedTile::Tf32RnaM128N96S3)
+        .into_iter()
+        .map(|(label, s)| (label, s.m, s.k, s.n))
+        .collect();
+    assert_eq!(
+        shapes,
+        [("tail", 6018, 36, 132), ("hot_e_boundary", 2049, 2304, 768)]
+    );
+    assert_eq!(
+        rna_qualification_shapes(FixedTile::Tf32RnaM128N128S3).len(),
+        6
+    );
+    assert_ne!(
+        rna_qualification_symbol(FixedTile::Tf32RnaM128N96S3),
+        rna_qualification_symbol(FixedTile::Tf32RnaM128N128S3)
+    );
+    assert!(
+        rna_qualification_rungs(FixedTile::Tf32RnaM128N96S3)
+            .contains(&FixedTile::Tf32RnaM128N128S3),
+        "N96 must compare directly with current RNA"
+    );
 }
 
 fn rna_wide_qualification_shapes() -> Vec<(&'static str, FixedShape)> {
@@ -583,10 +653,10 @@ fn rna_wide_force_corpus_contains_every_hot_shape_family() {
 #[test]
 #[ignore = "requires exclusive CC8.9 Ada with the Fixed RNA-wide symbol admitted"]
 fn fixed_sm89_rna_wide_actual_auto_all_cells_prefix_views_and_graph_bits() {
-    check_rna_wide_prefix_views_and_graph_bits(true);
+    check_rna_wide_prefix_views_and_graph_bits(true, FixedTile::Tf32RnaM128N128S3);
 }
 
-fn check_rna_wide_prefix_views_and_graph_bits(actual_auto: bool) {
+fn check_rna_wide_prefix_views_and_graph_bits(actual_auto: bool, tile: FixedTile) {
     let device = GpuDevice::new(0).expect("CUDA device");
     assert_eq!(device.compute_capability, (8, 9));
     assert_eq!(device.multiprocessor_count(), 142);
@@ -598,15 +668,10 @@ fn check_rna_wide_prefix_views_and_graph_bits(actual_auto: bool) {
         matches!(compiler.nvrtc_version, (12, 8) | (13, 0) | (13, 2)),
         "qualified RNA AUTO toolkit required"
     );
-    let tile = FixedTile::Tf32RnaM128N128S3;
-    let shape_cases = rna_wide_qualification_shapes();
-    let fixed_rungs = [
-        FixedTile::Tf32M128S2,
-        FixedTile::Tf32M128S3,
-        FixedTile::Tf32M64S2,
-        FixedTile::Tf32M64S3,
-        FixedTile::Tf32M16S4,
-    ];
+    let shape_cases = rna_qualification_shapes(tile);
+    let n96 = tile == FixedTile::Tf32RnaM128N96S3;
+    let symbol = rna_qualification_symbol(tile);
+    let fixed_rungs = rna_qualification_rungs(tile);
     let special_bits = [
         0x0000_0000,
         0x8000_0000,
@@ -626,9 +691,16 @@ fn check_rna_wide_prefix_views_and_graph_bits(actual_auto: bool) {
 
     for (case, shape) in shape_cases {
         for exceptional in [false, true] {
-            let mut a_host = synth(shape.m * shape.k, 0x89a0_0001);
-            let mut b_host = synth(shape.k * shape.n, 0x89b0_0001);
-            let mut bias_host = synth(shape.n, 0x89c0_0001);
+            let corpus = |len, seed| {
+                if n96 {
+                    fixed_full_mantissa::finite_full_mantissa_values(len, seed)
+                } else {
+                    synth(len, seed)
+                }
+            };
+            let mut a_host = corpus(shape.m * shape.k, 0x89a0_0001);
+            let mut b_host = corpus(shape.k * shape.n, 0x89b0_0001);
+            let mut bias_host = corpus(shape.n, 0x89c0_0001);
             if exceptional {
                 for (index, bits) in special_bits
                     .into_iter()
@@ -673,7 +745,7 @@ fn check_rna_wide_prefix_views_and_graph_bits(actual_auto: bool) {
                 fixed_forward_with_tile(&ctx, operands, shape, tile)
                     .expect("RNA-wide full reference launch");
                 let reference_bits = output_bits(&ctx, &reference);
-                for incumbent in fixed_rungs {
+                for &incumbent in &fixed_rungs {
                     let output =
                         GpuBuffer::zeros(&ctx.stream, shape.m * shape.n).expect("incumbent output");
                     fixed_forward_with_tile(
@@ -751,7 +823,7 @@ fn check_rna_wide_prefix_views_and_graph_bits(actual_auto: bool) {
                     expected[output_offset..output_offset + m * shape.n].copy_from_slice(
                         &reference_bits[row_offset * shape.n..(row_offset + m) * shape.n],
                     );
-                    for incumbent in fixed_rungs {
+                    for &incumbent in &fixed_rungs {
                         output
                             .upload(&ctx.stream, &initial)
                             .expect("poison incumbent prefix/view C");
@@ -779,11 +851,7 @@ fn check_rna_wide_prefix_views_and_graph_bits(actual_auto: bool) {
                     }
                     let graph = unsafe { capture_into_graph(&ctx.stream, launch) }
                         .expect("RNA-wide graph capture");
-                    assert_wide_graph(
-                        &graph,
-                        b"gemm_bi_nn_fixed_rna_wide_tf32_v1_m128n128_bk32_s3",
-                        view_shape,
-                    );
+                    assert_wide_graph(&graph, symbol, view_shape);
                     for replay in 0..2 {
                         output
                             .upload(&ctx.stream, &initial)
@@ -796,7 +864,10 @@ fn check_rna_wide_prefix_views_and_graph_bits(actual_auto: bool) {
                         );
                     }
                     if actual_auto {
-                        let admitted = case != "tail" && m == shape.m - 1 && output_offset == 4;
+                        let admitted = case != "tail"
+                            && m == shape.m - 1
+                            && output_offset == 4
+                            && (!n96 || (case == "hot_e_boundary" && !has_bias));
                         let launch_auto = || {
                             let selected = fixed_forward(
                                 &ctx,
@@ -827,11 +898,7 @@ fn check_rna_wide_prefix_views_and_graph_bits(actual_auto: bool) {
                         let auto_graph = unsafe { capture_into_graph(&ctx.stream, launch_auto) }
                             .expect("actual AUTO graph");
                         if admitted {
-                            assert_wide_graph(
-                                &auto_graph,
-                                b"gemm_bi_nn_fixed_rna_wide_tf32_v1_m128n128_bk32_s3",
-                                view_shape,
-                            );
+                            assert_wide_graph(&auto_graph, symbol, view_shape);
                         }
                         for replay in 0..2 {
                             output
@@ -846,7 +913,7 @@ fn check_rna_wide_prefix_views_and_graph_bits(actual_auto: bool) {
                         }
                     }
                     println!(
-                        "RNA_WIDE_QUALIFIED_GROUP case={case} shape_m={} k={} n={} \
+                        "RNA_WIDE_QUALIFIED_GROUP tile={tile:?} case={case} shape_m={} k={} n={} \
                          view_m={m} exceptional={exceptional} bias={has_bias} \
                          row_offset={row_offset} output_offset={output_offset} \
                          actual_auto={actual_auto}",
@@ -977,11 +1044,20 @@ fn check_rna_wide_prefix_views_and_graph_bits(actual_auto: bool) {
 #[test]
 #[ignore = "requires exclusive CC8.9 Ada with the Fixed RNA-wide symbol admitted"]
 fn fixed_tf32_rna_wide_rejects_unsafe_inputs_and_handles_k0() {
+    check_rna_rejects_unsafe_inputs_and_handles_k0(FixedTile::Tf32RnaM128N128S3);
+}
+
+#[test]
+#[ignore = "requires CC8.9 Ada and the independently admitted forced N96 holder"]
+fn fixed_sm89_rna_n96_rejects_unsafe_inputs_and_handles_k0() {
+    check_rna_rejects_unsafe_inputs_and_handles_k0(FixedTile::Tf32RnaM128N96S3);
+}
+
+fn check_rna_rejects_unsafe_inputs_and_handles_k0(tile: FixedTile) {
     let device = GpuDevice::new(0).expect("CUDA device");
     assert_eq!(device.compute_capability, (8, 9));
     assert_eq!(device.multiprocessor_count(), 142);
     let ctx = GpuCtx::new(&device).expect("GPU context");
-    let tile = FixedTile::Tf32RnaM128N128S3;
     let null_operands = FixedFwdOperands {
         c: f32_pointer(0),
         x: f32_pointer(0),
@@ -1081,13 +1157,7 @@ fn fixed_tf32_rna_wide_rejects_unsafe_inputs_and_handles_k0() {
         .map(|index| f32::from_bits([0, 0x8000_0000, 0x7f80_0001, 0xffff_ffff][index % 4]))
         .collect();
     let bias = GpuBuffer::from_cpu(&ctx.stream, &bias_host).expect("RNA K0 bias");
-    let fixed_rungs = [
-        FixedTile::Tf32M128S2,
-        FixedTile::Tf32M128S3,
-        FixedTile::Tf32M64S2,
-        FixedTile::Tf32M64S3,
-        FixedTile::Tf32M16S4,
-    ];
+    let fixed_rungs = rna_qualification_rungs(tile);
     let k0_shape = FixedShape { k: 0, ..shape };
     for has_bias in [false, true] {
         let output_offset = 1;
@@ -1112,7 +1182,7 @@ fn fixed_tf32_rna_wide_rejects_unsafe_inputs_and_handles_k0() {
             .to_bits();
         }
 
-        for incumbent in fixed_rungs {
+        for &incumbent in &fixed_rungs {
             for repeat in 0..2 {
                 k0_output
                     .upload(&ctx.stream, &initial)
@@ -1141,11 +1211,7 @@ fn fixed_tf32_rna_wide_rejects_unsafe_inputs_and_handles_k0() {
         }
         let graph =
             unsafe { capture_into_graph(&ctx.stream, launch) }.expect("RNA-wide K0 graph capture");
-        assert_wide_graph(
-            &graph,
-            b"gemm_bi_nn_fixed_rna_wide_tf32_v1_m128n128_bk32_s3",
-            k0_shape,
-        );
+        assert_wide_graph(&graph, rna_qualification_symbol(tile), k0_shape);
         for replay in 0..2 {
             k0_output
                 .upload(&ctx.stream, &initial)

@@ -1,0 +1,54 @@
+{
+  "binary": {
+    "path": "/root/target-ada-exact-toolkit-auto-finalistphase1green2-cuda132-20260907/release/deps/gemm_bi_fixed_performance-46090335b71731a6",
+    "sha256": "fc0ba04d65bc164913f719febe6a93c34c784af8665445865fab2f86b31c0b89"
+  },
+  "cache_artifacts": [
+    {
+      "bytes": 13437599,
+      "path": "/root/mamba-kcache-ada-exact-toolkit-auto-finalistphase1green2-cuda132-20260907/mamba-kernels-v1-3809af034718aa08dfdfc1b6baeb407715436dc7db87ef39825b033c2fd72541.bin",
+      "sha256": "5851ebd49595a0b2ef665073289e52f903eec3266deadfc5ad5d9f2096ce6d16"
+    },
+    {
+      "bytes": 2395145,
+      "path": "/root/mamba-kcache-ada-exact-toolkit-auto-finalistphase1green2-cuda132-20260907/mamba-kernels-v1-822ebf0dda7dcf9c4f5c5a2213884dde42ab45f5cf238479a81856042c302b7c.bin",
+      "sha256": "5035921fc8e078e5454c9c5392f9e9ee6ca6a3de54c1e08cb54bba432fa37546"
+    },
+    {
+      "bytes": 7248389,
+      "path": "/root/mamba-kcache-ada-exact-toolkit-auto-finalistphase1green2-cuda132-20260907/mamba-kernels-v1-e4f76515e441adc28862775000fce218e2d2cca61b47ce484e15eb1144c40fb3.bin",
+      "sha256": "f0be052fc160b9e5f4b6a897878781327968c0015d551128415a94b85e6fc0aa"
+    }
+  ],
+  "command": [
+    "/root/target-ada-exact-toolkit-auto-finalistphase1green2-cuda132-20260907/release/deps/gemm_bi_fixed_performance-46090335b71731a6",
+    "fixed_ada_forced_rungs_paired_precision_cublas",
+    "--ignored",
+    "--exact",
+    "--nocapture"
+  ],
+  "filters": {
+    "MAMBA_FIXED_ADA_BIAS": "0",
+    "MAMBA_FIXED_ADA_CELLS": "hot_e",
+    "MAMBA_FIXED_ADA_ROWS": "tf32",
+    "MAMBA_FIXED_ADA_WINDOWS": "21",
+    "MAMBA_FIXED_VENDOR_EXACT_CC": "8.9",
+    "MAMBA_FIXED_VENDOR_PATHS": "eager,graph",
+    "MAMBA_FIXED_VENDOR_TILES": "Tf32RnaM128N96S3"
+  },
+  "generation": "finalistphase1green2",
+  "runner": "/root/evidence-ada-exact-toolkit-auto-20260907/run.py",
+  "runner_sha256": "d753757a717bfe18b3a28a8480f31104e252271576e45d7e53fc16396008475a",
+  "sources": {
+    "kernels/gemm_bi_fixed/sm89_half_n64.cu": "5a4c85184fb4a0263ae03cbe7f2b5e8f954b32ce3138012ad8505274d3769681",
+    "kernels/gemm_bi_fixed/tf32_rna_n96.cu": "966372d0e8cb89c1ed32ceda45e6fa3e1e3df40ae42e8cbbd7aaccbdf96b6215",
+    "src/mamba_ssm/gpu/gemm_bi_fixed.rs": "ee56619cb3c308b5e224bac185be48600bdd3bd385b2af752cea54faa4b4bf97",
+    "src/mamba_ssm/gpu/gemm_bi_triad/modules.rs": "aad5439ca7c6952c9bf7a5af0896c5e39f55de984d811c925ea5dac8793da181",
+    "src/mamba_ssm/gpu/kernels.rs": "9aae153beba6976273064385bef3d438c83ee826986459844b9a46f3948dc138",
+    "tests/gemm_bi_fixed_correctness.rs": "83d261680287b06421ef9dca1db71c2880a6629a90009c438e59a293ea013854",
+    "tests/gemm_bi_fixed_performance.rs": "bd73a7389536732f08162abc043f092964f9124cc92d03dfd762335befa6fe42",
+    "tests/gemm_bi_fixed_sm89_pipeline.rs": "5b88b96e707f962a15dea8edae3948150553aab87e5a831e411a613203d796be",
+    "tests/support/fixed_full_mantissa.rs": "234d4d87dd479780a3cacee34e5f7f1e868e0465536caba3866a46a16a39cb22"
+  },
+  "toolkit": "13.2"
+}

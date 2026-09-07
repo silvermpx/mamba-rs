@@ -1,0 +1,12 @@
+{
+  "cache": "/root/mamba-kcache-ada-exact-toolkit-auto-finalistphase1green2-cuda128-20260907",
+  "census_sha256": "345679ffcc0670f8868fb917cc46051c9629c5bc1f9133ecfdc99e7e8e892d86",
+  "command": [
+    "/usr/bin/python3",
+    "/root/resource_census.py"
+  ],
+  "generation": "finalistphase1green2",
+  "runner": "/root/evidence-ada-exact-toolkit-auto-20260907/run.py",
+  "runner_sha256": "d753757a717bfe18b3a28a8480f31104e252271576e45d7e53fc16396008475a",
+  "toolkit": "12.8"
+}

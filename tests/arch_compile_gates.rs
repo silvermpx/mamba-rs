@@ -54,6 +54,50 @@ fn fixed_sm89_half_s3_production_source_contract() {
 }
 
 #[test]
+fn fixed_sm89_finalist_production_source_contract() {
+    let n96 = include_str!("../kernels/gemm_bi_fixed/tf32_rna_n96.cu");
+    for required in [
+        "gemm_bi_nn_fixed_sm89_rna_tf32_v1_m128n96_bk32_s3",
+        "__launch_bounds__(256, 1)",
+        "cvt.rna.tf32.f32",
+        "(static_cast<unsigned>(params.k) + 31U) / 32U",
+        "if (params.k == 0)",
+    ] {
+        assert!(n96.contains(required), "N96 source omitted {required}");
+    }
+    let half = include_str!("../kernels/gemm_bi_fixed/sm89_half_n64.cu");
+    for required in [
+        "gemm_bi_nn_fixed_sm89_m64n64_bk64_s3_v1_f16",
+        "gemm_bi_nn_fixed_sm89_m128n64_bk64_s2_v1_f16",
+        "__launch_bounds__(128, 2)",
+        "cp.async.cg.shared.global [%0], [%1], 16, %2",
+        "source_row = M_TAIL && global_row >= M ? 0 : global_row",
+        "rect_kernel<64, 3, true, false>",
+        "rect_kernel<128, 2, false, false>",
+        "params.k != 768 || params.n != 2304",
+        "params.lda != 768 || params.ldb != 2304 || params.ldc != 2304",
+        "params.k != 2304 || params.n != 768",
+        "params.lda != 2304 || params.ldb != 768 || params.ldc != 768",
+        "params.m, 2304, 768, 768, 2304, 2304",
+        "params.m, 768, 2304, 2304, 768, 768",
+    ] {
+        assert!(
+            half.contains(required),
+            "half N64 source omitted {required}"
+        );
+    }
+    for source in [n96, half] {
+        let lower = source.to_ascii_lowercase();
+        for forbidden in ["gemm_bi_tn_", "gemm_bi_nt_", "atomic", "split_k"] {
+            assert!(
+                !lower.contains(forbidden),
+                "finalist source contains forbidden token {forbidden}"
+            );
+        }
+    }
+}
+
+#[test]
 fn fixed_sm89_half_swizzle_production_source_and_layout_contract() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     let host_proof =
@@ -270,6 +314,10 @@ fn fixed_blob_for(arch: &str) -> String {
         )]));
         source.push('\n');
         source.push_str(include_str!("../kernels/gemm_bi_fixed/sm89_half_s3.cu"));
+        source.push('\n');
+        source.push_str(include_str!("../kernels/gemm_bi_fixed/tf32_rna_n96.cu"));
+        source.push('\n');
+        source.push_str(include_str!("../kernels/gemm_bi_fixed/sm89_half_n64.cu"));
     }
     if arch == "compute_120" {
         source.push('\n');
@@ -2835,6 +2883,9 @@ fn fixed_f32_n128_s2_source_and_ptx_contract() {
 
 const FIXED_SM89_EXACT_N64_COPYPLAN: &str = "gemm_bi_nn_fixed_sm89_f32_n64_copyplan_v1";
 const FIXED_SM89_RNA_WIDE: &str = "gemm_bi_nn_fixed_rna_wide_tf32_v1_m128n128_bk32_s3";
+const FIXED_SM89_RNA_N96: &str = "gemm_bi_nn_fixed_sm89_rna_tf32_v1_m128n96_bk32_s3";
+const FIXED_SM89_HALF_M64N64_S3: &str = "gemm_bi_nn_fixed_sm89_m64n64_bk64_s3_v1_f16";
+const FIXED_SM89_HALF_M128N64_S2: &str = "gemm_bi_nn_fixed_sm89_m128n64_bk64_s2_v1_f16";
 const FIXED_SM120_EXACT_N64_COPYPLAN: &str = "gemm_bi_nn_fixed_sm120_f32_n64_copyplan_v1";
 const FIXED_SM120_N64_SLICED: &str = "gemm_bi_nn_fixed_sm120_f32_n64_sliced_v1";
 
@@ -2984,9 +3035,11 @@ fn fixed_sm89_exact_n64_copyplan_source_contract_and_target_boundary() {
     ));
     let ada = fixed_blob_for("sm_89");
     let rna_wide = include_str!("../kernels/gemm_bi_fixed/tf32_rna_wide.cu");
-    assert_eq!(
-        ada.strip_prefix(&retained).unwrap(),
-        format!("\n{candidate}\n{rna_wide}")
+    assert!(
+        ada.strip_prefix(&retained)
+            .unwrap()
+            .starts_with(&format!("\n{candidate}\n{rna_wide}")),
+        "Ada must preserve the exact pre-finalist N64/RNA-wide prefix"
     );
 }
 
@@ -3623,11 +3676,104 @@ fn assert_fixed_sm89_rna_wide_ptx(arch: &str, ptx: &str) {
     }
 }
 
+fn assert_fixed_sm89_finalist_ptx(arch: &str, ptx: &str) {
+    let parsed = parse_compile_gate_ptx(ptx).expect("parse Fixed SM89 finalist PTX");
+    let specs = [
+        (
+            FIXED_SM89_RNA_N96,
+            256,
+            1,
+            "mma.sync.aligned.m16n8k8.row.col.f32.tf32.tf32.f32",
+        ),
+        (
+            FIXED_SM89_HALF_M64N64_S3,
+            128,
+            2,
+            "mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32",
+        ),
+        (
+            FIXED_SM89_HALF_M128N64_S2,
+            128,
+            2,
+            "mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32",
+        ),
+    ];
+    for (symbol, threads, min_ctas, mma) in specs {
+        let matches: Vec<_> = parsed
+            .entries
+            .iter()
+            .filter(|entry| entry.symbol == symbol)
+            .collect();
+        assert_eq!(
+            matches.len(),
+            usize::from(arch == "sm_89"),
+            "{arch}/{symbol}"
+        );
+        if arch != "sm_89" {
+            continue;
+        }
+        let entry = matches[0];
+        assert!(has_exact_maxntid(&entry.text, threads), "{symbol} maxntid");
+        assert!(
+            has_exact_minnctapersm(&entry.text, min_ctas),
+            "{symbol} minnctapersm"
+        );
+        let parameters = ptx_parameters(&entry.text, symbol);
+        let declarations: Vec<_> = parameters
+            .lines()
+            .map(str::trim)
+            .filter(|line| line.starts_with(".param "))
+            .collect();
+        assert_eq!(declarations.len(), 5, "{symbol} five-argument ABI");
+        assert!(
+            declarations[..4]
+                .iter()
+                .all(|line| line.starts_with(".param .u64 "))
+        );
+        assert!(
+            declarations[4].starts_with(".param .align 4 .b8 ") && declarations[4].contains("[32]")
+        );
+        assert_compile_gate_entry_tokens(
+            "Fixed SM89 finalist",
+            entry,
+            &[mma, "cp.async.commit_group", "cp.async.wait_group"],
+        );
+        if symbol == FIXED_SM89_RNA_N96 {
+            assert_compile_gate_entry_tokens(
+                "Fixed SM89 RNA N96 finalist",
+                entry,
+                &["cvt.rna.tf32.f32"],
+            );
+        }
+        let tokens = compile_gate_ptx_tokens(&entry.body);
+        assert!(
+            tokens
+                .iter()
+                .any(|token| token.text.starts_with("cp.async.cg.shared.global")),
+            "{symbol} asynchronous staging missing"
+        );
+        assert!(
+            !tokens.iter().any(|token| {
+                token.text == ".local"
+                    || token.text.starts_with("ld.local")
+                    || token.text.starts_with("st.local")
+                    || token.text.starts_with("atom.")
+                    || token.text.starts_with("atom::")
+                    || token.text.starts_with("red.")
+                    || token.text.starts_with("red::")
+                    || token.text.starts_with("redux.")
+            }),
+            "{symbol} contains local memory, an atomic, or a reduction"
+        );
+    }
+}
+
 fn assert_fixed_tf32_ptx(arch: &str, ptx: &str) {
     assert_fixed_sm89_half_pipeline_ptx(arch, ptx);
     assert_fixed_sm89_half_swizzle_ptx(arch, ptx);
     assert_fixed_sm89_half_s3_ptx(arch, ptx);
     assert_fixed_sm89_rna_wide_ptx(arch, ptx);
+    assert_fixed_sm89_finalist_ptx(arch, ptx);
     assert_fixed_exact_n64_copyplan_ptx(
         arch,
         "sm_89",

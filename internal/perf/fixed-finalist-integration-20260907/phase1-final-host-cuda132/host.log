@@ -1,0 +1,9 @@
+   Compiling mamba-rs v0.6.9 (/root/mamba-ada-exact-toolkit-auto-20260907)
+    Finished `release` profile [optimized] target(s) in 49.35s
+     Running unittests src/lib.rs (/root/target-ada-exact-toolkit-auto-finalistphase1green2-cuda132-20260907/release/deps/mamba_rs-029e0500e5246408)
+
+running 1 test
+test mamba_ssm::gpu::gemm_bi_triad::modules::tests::fixed_sm89_finalist_ptx_abi_and_resources_fail_per_symbol ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 693 filtered out; finished in 0.00s
+

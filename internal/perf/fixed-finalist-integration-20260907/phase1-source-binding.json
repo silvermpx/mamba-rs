@@ -1,0 +1,91 @@
+{
+  "schema": "MambaBiFixedFinalistPhase1SourceBindingV1",
+  "generation": "finalistphase1green2",
+  "production_state": "forced-availability-only-auto44",
+  "source_freeze": {
+    "kernels/gemm_bi_fixed/sm89_half_n64.cu": "5a4c85184fb4a0263ae03cbe7f2b5e8f954b32ce3138012ad8505274d3769681",
+    "kernels/gemm_bi_fixed/tf32_rna_n96.cu": "966372d0e8cb89c1ed32ceda45e6fa3e1e3df40ae42e8cbbd7aaccbdf96b6215",
+    "src/mamba_ssm/gpu/gemm_bi_fixed.rs": "ee56619cb3c308b5e224bac185be48600bdd3bd385b2af752cea54faa4b4bf97",
+    "src/mamba_ssm/gpu/gemm_bi_triad/modules.rs": "aad5439ca7c6952c9bf7a5af0896c5e39f55de984d811c925ea5dac8793da181",
+    "src/mamba_ssm/gpu/kernels.rs": "9aae153beba6976273064385bef3d438c83ee826986459844b9a46f3948dc138",
+    "tests/arch_compile_gates.rs": "3bc72a3b4b9c79fe1c85a1085eec1adba4e4d62d3f17ea8c624077342149a3c0",
+    "tests/gemm_bi_fixed_correctness.rs": "83d261680287b06421ef9dca1db71c2880a6629a90009c438e59a293ea013854",
+    "tests/gemm_bi_fixed_performance.rs": "bd73a7389536732f08162abc043f092964f9124cc92d03dfd762335befa6fe42",
+    "tests/gemm_bi_fixed_sm89_pipeline.rs": "5b88b96e707f962a15dea8edae3948150553aab87e5a831e411a613203d796be",
+    "tests/support/fixed_full_mantissa.rs": "234d4d87dd479780a3cacee34e5f7f1e868e0465536caba3866a46a16a39cb22"
+  },
+  "toolkits": {
+    "12.8": {
+      "command_receipt": {
+        "path": "internal/perf/fixed-finalist-integration-20260907/phase1-final-functional-cuda128/command.json",
+        "sha256": "bbd4e3069611018bbbfee1e091811ea2ec1e3f4299750195a975e9fcebc96c74",
+        "source_count": 9
+      },
+      "observed_binding": {
+        "path": "internal/perf/fixed-finalist-integration-20260907/phase1-final-functional-cuda128/binding.json",
+        "sha256": "398900cc02993742380f4cf973545b9e3b2b96561388ed439bfaed1f3b125400",
+        "source_count": 9
+      },
+      "binaries": {
+        "gemm_bi_fixed_correctness": "0e5c96b279350b051111785564daecc1e08c488b14ecb371e2a2bdf14fe1b199",
+        "gemm_bi_fixed_performance": "fe9a1b4237f5ff51538fd1e8cffe80faa2565338ebd11305bd8fecf2373c3d38",
+        "gemm_bi_fixed_sm89_pipeline": "57ef9b65d2264b51aec7b0362612821214ebc83d7cc038f3c7e52e5300bec8e7"
+      },
+      "cache_artifacts": [
+        "0c35fa355f43ca1d01341df2c76f3655487bce1cfa57e1ec784835e8dfd87aaf",
+        "c02fb7a0ef6a50cb52dc3fec2e83ebb1eb6b4015a9f200d48d65fd4493d489c9",
+        "48a388fc610d110bb884ea3cd0f49eda299c0c7ce0c8e2beb24d34a925198a54"
+      ]
+    },
+    "13.0": {
+      "command_receipt": {
+        "path": "internal/perf/fixed-finalist-integration-20260907/phase1-final-functional-cuda130/command.json",
+        "sha256": "eee9eb287f477f0332be6b75b44fdc0cd4e81f07527cb7311319d44a54baf74f",
+        "source_count": 9
+      },
+      "observed_binding": {
+        "path": "internal/perf/fixed-finalist-integration-20260907/phase1-final-functional-cuda130/binding.json",
+        "sha256": "5b2d2a1b53a882dfa5eaacf24d85bd31d022a47eb7a9693268a3ee0516b56c55",
+        "source_count": 9
+      },
+      "binaries": {
+        "gemm_bi_fixed_correctness": "704e7837f57583a6c2ebc52572ac5b9526e191de6b95634bae908d9568d5530a",
+        "gemm_bi_fixed_performance": "6c21de187a7451ed81e74e01f2a2c815ad8cc516e418fca0a329c063e6b52bfa",
+        "gemm_bi_fixed_sm89_pipeline": "01643324d245245ccdfcffe8b1165057c06c96c1cc3712927ae2e71baa3edf5a"
+      },
+      "cache_artifacts": [
+        "5d04d22d16514ae24c7fb21b8eb2fe22045f76e90386a3f9fbfdf712db4729dd",
+        "c599a8b8807dd944ae79238241b36f77599cb5cab0511d3ab4f8716bc7545c3c",
+        "32e61498d102e2343b2c3b65ec062af81b1351b1039a2503c0657628b4d3a9c0"
+      ]
+    },
+    "13.2": {
+      "command_receipt": {
+        "path": "internal/perf/fixed-finalist-integration-20260907/phase1-final-functional-cuda132/command.json",
+        "sha256": "7a365ffd459cc50d87e4a0857ac13f369749d59d5f59b7c86992208cb85fa840",
+        "source_count": 7
+      },
+      "observed_supplemental_binding": {
+        "path": "internal/perf/fixed-finalist-integration-20260907/phase1-final-functional-cuda132/binding-supplemental.json",
+        "sha256": "a967f121d8c221242ba3cbfc44028d6fc6e63b70ce4f1efc43e4584f34f83bd2",
+        "source_count": 10,
+        "observed_after_run": true
+      },
+      "binaries": {
+        "gemm_bi_fixed_correctness": "52b07822e14b07984ffd753406eb352fe7a3b8105a7bb907e712c886da41bad7",
+        "gemm_bi_fixed_performance": "fc0ba04d65bc164913f719febe6a93c34c784af8665445865fab2f86b31c0b89",
+        "gemm_bi_fixed_sm89_pipeline": "2b735fcf783d9e25c546f1bd1f51cfb2da02d8c7ce22e6362340a26ffaec094d"
+      },
+      "cache_artifacts": [
+        "5851ebd49595a0b2ef665073289e52f903eec3266deadfc5ad5d9f2096ce6d16",
+        "5035921fc8e078e5454c9c5392f9e9ee6ca6a3de54c1e08cb54bba432fa37546",
+        "f0be052fc160b9e5f4b6a897878781327968c0015d551128415a94b85e6fc0aa"
+      ]
+    }
+  },
+  "provenance": {
+    "runtime_source_set": "The CUDA12.8 and CUDA13.0 command and observed binding receipts each bind the nine runtime/test sources compiled by their three binaries.",
+    "host_only_source": "tests/arch_compile_gates.rs is the tenth phase1 freeze source and is covered by the separate exact host source-contract receipt; it is not an input to the three runtime test binaries.",
+    "cuda132_supplement": "The CUDA13.2 command receipt originally listed seven direct sources. binding-supplemental.json was observed after the run and records the complete ten-file freeze plus actual binary and cache hashes; it is supplemental provenance, not a rewritten pre-run claim."
+  }
+}

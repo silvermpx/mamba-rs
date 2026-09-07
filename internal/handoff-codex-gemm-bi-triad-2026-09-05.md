@@ -9,6 +9,22 @@ the dated progress log, 900 lines), then `internal/agent-operational-rules.md`
 
 ## 1. What the work is
 
+Fixed finalist integration phase1 (2026-09-07) is now qualified on all three
+CUDA versions. Three independent forced holders (TF32 RNA N96, F16 D N64/S3,
+F16 E N64/S2) pass resource/ABI/bit/prefix/view checks; 18/18 focused functional
+tests pass. All nine once21 measurements are preserved and independently
+replayed. Exact five AUTO promotion rows: TF32 E0/no-bias on12.8/13.0/13.2;
+F16 D0/E0/no-bias only13.2. TF32 own median improves22.6%/22.6%/14.7%;
+F16 D/E13.2 improve at least4.85%/2.96%. N96 and D remain slower than Fast;
+E is ahead of native-half Fast in this fresh integration protocol. Lower
+toolkit D/E losses retain their old AUTO and are not retried. Production
+still AUTO44 at this checkpoint: immediately implement these five rows as45,
+verify actual AUTO and once101, then Triad. Numerical ABI5/schedule8 unchanged.
+Source, all losses, metadata supplements and raw receipts are under
+internal/perf/fixed-finalist-integration-20260907/README.md. Do not repeat
+unchanged phase1 gates or restart discovery sweeps. Prepared Triad WIP remains
+untouched and uncommitted separately.
+
 Exact-F32 B0 profile follow-up (2026-09-07): current frozen AUTO44 CopyPlan
 has no excessive shared-memory wavefronts in the measured generated SASS;
 258.63M of302.46M executed warp instructions are scalar FFMA. One-window

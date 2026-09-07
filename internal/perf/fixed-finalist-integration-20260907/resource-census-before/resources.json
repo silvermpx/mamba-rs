@@ -1,0 +1,38 @@
+{
+  "cache_path": "/root/mamba-kcache-ada-exact-toolkit-auto-finalistphase1green1-cuda132-20260907/mamba-kernels-v1-3aff23c1ec27aeb5582ded1f08446940780f5481964c03eafe20b19fb22244d2.bin",
+  "cache_sha256": "a63ef9714a69a4962affd0bf3688dba028a446e21105903836213f982c6399b0",
+  "driver_version": 13020,
+  "ptx_sha256": "902fa237970e28eee6a9763952b96259ac1a90598882cf49b69d1b7590c9dbd4",
+  "records": {
+    "half_m128n64_s2_f16": {
+      "active_blocks": 2,
+      "dynamic_shared_bytes": 49152,
+      "local_bytes": 0,
+      "max_threads": 128,
+      "registers": 152,
+      "static_shared_bytes": 0,
+      "symbol": "gemm_bi_nn_fixed_sm89_m128n64_bk64_s2_v1_f16",
+      "threads": 128
+    },
+    "half_m64n64_s3_f16": {
+      "active_blocks": 2,
+      "dynamic_shared_bytes": 49152,
+      "local_bytes": 0,
+      "max_threads": 128,
+      "registers": 114,
+      "static_shared_bytes": 0,
+      "symbol": "gemm_bi_nn_fixed_sm89_m64n64_bk64_s3_v1_f16",
+      "threads": 128
+    },
+    "rna_n96": {
+      "active_blocks": 1,
+      "dynamic_shared_bytes": 86016,
+      "local_bytes": 0,
+      "max_threads": 256,
+      "registers": 128,
+      "static_shared_bytes": 0,
+      "symbol": "gemm_bi_nn_fixed_sm89_rna_tf32_v1_m128n96_bk32_s3",
+      "threads": 256
+    }
+  }
+}

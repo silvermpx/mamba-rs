@@ -1,0 +1,62 @@
+{
+  "schema": "MambaBiFixedFinalistPhase1EvidenceSummaryV1",
+  "production_state": "forced-availability-only-auto44",
+  "qualification": {
+    "toolkits": ["12.8", "13.0", "13.2"],
+    "focused_functional_exits": 18,
+    "focused_functional_failures": 0,
+    "forced21_rows": 9,
+    "forced21_records_per_row": 4,
+    "forced21_rejected_rows": 0,
+    "admission_limits": {
+      "worst_forced_over_auto_p50": 0.985,
+      "worst_forced_over_auto_p95": 1.0
+    }
+  },
+  "resources": {
+    "12.8": {
+      "Tf32RnaM128N96S3": {"registers": 136, "local_bytes": 0, "static_shared_bytes": 0, "dynamic_shared_bytes": 86016, "threads": 256, "active_ctas_per_sm": 1},
+      "TcM64N64Sm89S3": {"registers": 110, "local_bytes": 0, "static_shared_bytes": 0, "dynamic_shared_bytes": 49152, "threads": 128, "active_ctas_per_sm": 2},
+      "TcM128N64Sm89S2": {"registers": 130, "local_bytes": 0, "static_shared_bytes": 0, "dynamic_shared_bytes": 49152, "threads": 128, "active_ctas_per_sm": 2}
+    },
+    "13.0": {
+      "Tf32RnaM128N96S3": {"registers": 136, "local_bytes": 0, "static_shared_bytes": 0, "dynamic_shared_bytes": 86016, "threads": 256, "active_ctas_per_sm": 1},
+      "TcM64N64Sm89S3": {"registers": 110, "local_bytes": 0, "static_shared_bytes": 0, "dynamic_shared_bytes": 49152, "threads": 128, "active_ctas_per_sm": 2},
+      "TcM128N64Sm89S2": {"registers": 130, "local_bytes": 0, "static_shared_bytes": 0, "dynamic_shared_bytes": 49152, "threads": 128, "active_ctas_per_sm": 2}
+    },
+    "13.2": {
+      "Tf32RnaM128N96S3": {"registers": 128, "local_bytes": 0, "static_shared_bytes": 0, "dynamic_shared_bytes": 86016, "threads": 256, "active_ctas_per_sm": 1},
+      "TcM64N64Sm89S3": {"registers": 110, "local_bytes": 0, "static_shared_bytes": 0, "dynamic_shared_bytes": 49152, "threads": 128, "active_ctas_per_sm": 2},
+      "TcM128N64Sm89S2": {"registers": 132, "local_bytes": 0, "static_shared_bytes": 0, "dynamic_shared_bytes": 49152, "threads": 128, "active_ctas_per_sm": 2}
+    }
+  },
+  "forced21": [
+    {"toolkit": "12.8", "row": "tf32", "cell": "hot_e", "tile": "Tf32RnaM128N96S3", "admitted": true, "worst_forced_over_auto_p50": 0.7735588631969327, "worst_forced_over_auto_p95": 0.7738755685881968, "worst_forced_over_fast_p50": 1.1084884777455761, "worst_forced_over_fast_p95": 1.1087165209180256, "evidence": "forced21-cuda128-n96"},
+    {"toolkit": "12.8", "row": "f16", "cell": "hot_d", "tile": "TcM64N64Sm89S3", "admitted": false, "worst_forced_over_auto_p50": 0.9770160587174247, "worst_forced_over_auto_p95": 1.010232693934157, "worst_forced_over_fast_p50": 1.0540401179367045, "worst_forced_over_fast_p95": 1.0655686422151789, "evidence": "forced21-cuda128-d"},
+    {"toolkit": "12.8", "row": "f16", "cell": "hot_e", "tile": "TcM128N64Sm89S2", "admitted": false, "worst_forced_over_auto_p50": 1.0397320812878028, "worst_forced_over_auto_p95": 1.0399963471210614, "worst_forced_over_fast_p50": 0.9583048967727553, "worst_forced_over_fast_p95": 0.9593232908583988, "evidence": "forced21-cuda128-e"},
+    {"toolkit": "13.0", "row": "tf32", "cell": "hot_e", "tile": "Tf32RnaM128N96S3", "admitted": true, "worst_forced_over_auto_p50": 0.7735479316075562, "worst_forced_over_auto_p95": 0.7739218398233142, "worst_forced_over_fast_p50": 1.1085267896169186, "worst_forced_over_fast_p95": 1.1088036260612835, "evidence": "forced21-cuda130-n96"},
+    {"toolkit": "13.0", "row": "f16", "cell": "hot_d", "tile": "TcM64N64Sm89S3", "admitted": false, "worst_forced_over_auto_p50": 0.9879903937317291, "worst_forced_over_auto_p95": 1.0055494446348996, "worst_forced_over_fast_p50": 1.0446000619777898, "worst_forced_over_fast_p95": 1.061296267896895, "evidence": "forced21-cuda130-d"},
+    {"toolkit": "13.0", "row": "f16", "cell": "hot_e", "tile": "TcM128N64Sm89S2", "admitted": false, "worst_forced_over_auto_p50": 1.040017520821023, "worst_forced_over_auto_p95": 1.04044378947458, "worst_forced_over_fast_p50": 0.9579241135012727, "worst_forced_over_fast_p95": 0.9597218251307162, "evidence": "forced21-cuda130-e"},
+    {"toolkit": "13.2", "row": "tf32", "cell": "hot_e", "tile": "Tf32RnaM128N96S3", "admitted": true, "worst_forced_over_auto_p50": 0.8528963453654772, "worst_forced_over_auto_p95": 0.8530959980063191, "worst_forced_over_fast_p50": 1.1143582604590128, "worst_forced_over_fast_p95": 1.1148085580322629, "evidence": "forced21-cuda132-n96"},
+    {"toolkit": "13.2", "row": "f16", "cell": "hot_d", "tile": "TcM64N64Sm89S3", "admitted": true, "worst_forced_over_auto_p50": 0.9514819567761105, "worst_forced_over_auto_p95": 0.9565992828112521, "worst_forced_over_fast_p50": 1.0567903700191341, "worst_forced_over_fast_p95": 1.0645027321921687, "evidence": "forced21-cuda132-d"},
+    {"toolkit": "13.2", "row": "f16", "cell": "hot_e", "tile": "TcM128N64Sm89S2", "admitted": true, "worst_forced_over_auto_p50": 0.9704213590308172, "worst_forced_over_auto_p95": 0.9712470171245634, "worst_forced_over_fast_p50": 0.9657069189579216, "worst_forced_over_fast_p95": 0.9667176276858985, "evidence": "forced21-cuda132-e"}
+  ],
+  "phase2_promotions": [
+    {"toolkit": "12.8", "row": "tf32", "cell": "hot_e", "tile": "Tf32RnaM128N96S3"},
+    {"toolkit": "13.0", "row": "tf32", "cell": "hot_e", "tile": "Tf32RnaM128N96S3"},
+    {"toolkit": "13.2", "row": "tf32", "cell": "hot_e", "tile": "Tf32RnaM128N96S3"},
+    {"toolkit": "13.2", "row": "f16", "cell": "hot_d", "tile": "TcM64N64Sm89S3"},
+    {"toolkit": "13.2", "row": "f16", "cell": "hot_e", "tile": "TcM128N64Sm89S2"}
+  ],
+  "preserved_losses": [
+    {"toolkit": "12.8", "row": "f16", "cell": "hot_d", "tile": "TcM64N64Sm89S3"},
+    {"toolkit": "12.8", "row": "f16", "cell": "hot_e", "tile": "TcM128N64Sm89S2"},
+    {"toolkit": "13.0", "row": "f16", "cell": "hot_d", "tile": "TcM64N64Sm89S3"},
+    {"toolkit": "13.0", "row": "f16", "cell": "hot_e", "tile": "TcM128N64Sm89S2"}
+  ],
+  "notes": [
+    "Forced21 uses paired A-F-V / V-F-A orders on eager and graph paths; it is not ABBA.",
+    "Fast ratios are reported separately and are not AUTO admission criteria.",
+    "This summary records phase1 forced availability and measured promotion rows; actual-AUTO revision45 closure is phase2 evidence."
+  ]
+}

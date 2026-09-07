@@ -1,0 +1,12 @@
+{
+  "results": [
+    {
+      "exit": 0,
+      "name": "gemm_bi_fixed_correctness"
+    },
+    {
+      "exit": 0,
+      "name": "gemm_bi_fixed_sm89_pipeline"
+    }
+  ]
+}

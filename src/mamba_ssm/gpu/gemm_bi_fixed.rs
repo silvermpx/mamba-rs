@@ -44,6 +44,8 @@ pub enum FixedTile {
     Tf32M128N128S3,
     /// Fixed-owned 128x128/S3 twin with explicit RNA conversion; narrow Ada AUTO.
     Tf32RnaM128N128S3,
+    /// Ada explicit-RNA 128x96/S3 finalist; force-only in tuning revision 44.
+    Tf32RnaM128N96S3,
     /// Portable deterministic TF32, 64x64 CTA, two-stage mainloop.
     Tf32M64S2,
     /// Portable deterministic TF32, 64x64 CTA, three-stage mainloop.
@@ -74,6 +76,10 @@ pub enum FixedTile {
     Tc128Sm89Swizzle,
     /// Ada-only three-stage packed/XOR Tc128, independently qualified force route.
     Tc128Sm89S3,
+    /// Ada F16 M64xN64/BK64/S3 finalist; force-only in tuning revision 44.
+    TcM64N64Sm89S3,
+    /// Ada F16 M128xN64/BK64/S2 finalist; force-only in tuning revision 44.
+    TcM128N64Sm89S2,
     /// 128x256 CTA, 256 threads, 64x64 warp tiles (fragment reuse),
     /// XOR-swizzled dynamic smem 98 304 B. Bit-identical to Tc128.
     TcWn64,
@@ -259,6 +265,16 @@ pub fn fixed_forward_with_tile(
         let args = FixedArgs::try_new(operands, shape)?;
         return launch_sm89_half_s3(ctx, operands.x.dtype, &args);
     }
+    if matches!(tile, FixedTile::TcM64N64Sm89S3 | FixedTile::TcM128N64Sm89S2) {
+        if operands.x.dtype != WeightDtype::F16
+            || operands.w.dtype != WeightDtype::F16
+            || operands.c.dtype != WeightDtype::F16
+        {
+            return Err("Fixed Ada N64 finalists require matching f16 operands".into());
+        }
+        let args = FixedArgs::try_new(operands, shape)?;
+        return launch_sm89_half_n64(ctx, tile, &args);
+    }
     if tile == FixedTile::F32N128S2 {
         if operands.c.dtype != WeightDtype::F32
             || operands.x.dtype != WeightDtype::F32
@@ -275,6 +291,7 @@ pub fn fixed_forward_with_tile(
             | FixedTile::Tf32M128S3
             | FixedTile::Tf32M128N128S3
             | FixedTile::Tf32RnaM128N128S3
+            | FixedTile::Tf32RnaM128N96S3
             | FixedTile::Tf32M64S2
             | FixedTile::Tf32M64S3
             | FixedTile::Tf32M16S4
@@ -292,7 +309,11 @@ pub fn fixed_forward_with_tile(
         {
             return Err("forced Fixed TF32 launch requires f32 operands".into());
         }
-        if tile == FixedTile::Tf32RnaM128N128S3 && (shape.m == 0 || shape.n == 0) {
+        if matches!(
+            tile,
+            FixedTile::Tf32RnaM128N128S3 | FixedTile::Tf32RnaM128N96S3
+        ) && (shape.m == 0 || shape.n == 0)
+        {
             return Ok(());
         }
         let args = FixedArgs::try_new(operands, shape)?;
@@ -1008,6 +1029,7 @@ fn ladder_cfg(tile: FixedTile, rows: usize, cols: usize) -> cudarc::driver::Laun
         | FixedTile::Tf32M128S3
         | FixedTile::Tf32M128N128S3
         | FixedTile::Tf32RnaM128N128S3
+        | FixedTile::Tf32RnaM128N96S3
         | FixedTile::Tf32M64S2
         | FixedTile::Tf32M64S3
         | FixedTile::Tf32M16S4
@@ -1021,7 +1043,9 @@ fn ladder_cfg(tile: FixedTile, rows: usize, cols: usize) -> cudarc::driver::Laun
         | FixedTile::Sm120Half(_)
         | FixedTile::Tc128Sm89Pipeline
         | FixedTile::Tc128Sm89Swizzle
-        | FixedTile::Tc128Sm89S3 => unreachable!("tile has its own launcher"),
+        | FixedTile::Tc128Sm89S3
+        | FixedTile::TcM64N64Sm89S3
+        | FixedTile::TcM128N64Sm89S2 => unreachable!("tile has its own launcher"),
     };
     let grid = (rows as u32).div_ceil(bm) * (cols as u32).div_ceil(bn);
     cudarc::driver::LaunchConfig {
@@ -2331,6 +2355,9 @@ fn launch_tf32(
     if args.m == 0 || args.n == 0 {
         return Ok(());
     }
+    if tile == FixedTile::Tf32RnaM128N96S3 {
+        return launch_tf32_rna_n96(ctx, args);
+    }
     if matches!(
         tile,
         FixedTile::Tf32M128N128S3 | FixedTile::Tf32RnaM128N128S3
@@ -2397,6 +2424,76 @@ fn launch_tf32(
     unsafe { builder.launch(config) }
         .map(|_| ())
         .map_err(|error| format!("gemm_bi Fixed TF32 ({tile:?}): {error:?}"))
+}
+
+fn launch_tf32_rna_n96(ctx: &GpuCtx, args: &FixedArgs) -> Result<(), String> {
+    if ctx.compute_capability() != (8, 9) {
+        return Err("Fixed Ada TF32 RNA N96 requires CC8.9".into());
+    }
+    if args.k % 4 != 0 || args.n % 4 != 0 {
+        return Err("Fixed Ada TF32 RNA N96 requires K and N divisible by four".into());
+    }
+    args.k
+        .checked_add(31)
+        .ok_or("Fixed Ada TF32 RNA N96 padded K exceeds i32")?;
+    if args.k != 0
+        && [args.a, args.b]
+            .into_iter()
+            .any(|pointer| pointer == 0 || !pointer.is_multiple_of(16))
+    {
+        return Err("Fixed Ada TF32 RNA N96 requires non-null, 16-byte-aligned A and B".into());
+    }
+    if args.c == 0 || !args.c.is_multiple_of(4) || !args.bias.is_multiple_of(4) {
+        return Err(
+            "Fixed Ada TF32 RNA N96 requires non-null f32-aligned C and f32-aligned bias".into(),
+        );
+    }
+    let rows = u32::try_from(args.m).map_err(|_| "Fixed Ada TF32 RNA N96 M is negative")?;
+    let padded_columns = args
+        .n
+        .checked_add(95)
+        .ok_or("Fixed Ada TF32 RNA N96 padded N exceeds i32")?;
+    let column_tiles =
+        u32::try_from(padded_columns).map_err(|_| "Fixed Ada TF32 RNA N96 N is negative")? / 96;
+    let grid = rows
+        .div_ceil(128)
+        .checked_mul(column_tiles)
+        .filter(|grid| *grid <= i32::MAX as u32)
+        .ok_or("Fixed Ada TF32 RNA N96 launch grid exceeds i32")?;
+    let function = ctx
+        .kernels
+        .fixed_sm89_tf32_rna_n96
+        .as_ref()
+        .ok_or_else(|| {
+            ctx.kernels
+                .fixed_sm89_tf32_rna_n96_rejection
+                .clone()
+                .unwrap_or_else(|| "Fixed Ada TF32 RNA N96 symbol is not admitted".into())
+        })?;
+    let params = FixedTf32WideParams {
+        alpha: 1.0,
+        beta: 0.0,
+        m: args.m,
+        k: args.k,
+        n: args.n,
+        lda: args.k,
+        ldb: args.n,
+        ldc: args.n,
+    };
+    let config = cudarc::driver::LaunchConfig {
+        grid_dim: (grid, 1, 1),
+        block_dim: (256, 1, 1),
+        shared_mem_bytes: 86_016,
+    };
+    let mut builder = ctx.stream.launch_builder(function);
+    builder.arg(&args.c);
+    builder.arg(&args.a);
+    builder.arg(&args.b);
+    builder.arg(&args.bias);
+    builder.arg(&params);
+    unsafe { builder.launch(config) }
+        .map(|_| ())
+        .map_err(|error| format!("gemm_bi forced Fixed Ada TF32 RNA N96: {error:?}"))
 }
 
 fn launch_tf32_wide(ctx: &GpuCtx, args: &FixedArgs, fixed_rna: bool) -> Result<(), String> {
@@ -3071,6 +3168,84 @@ fn launch_sm89_half_s3(ctx: &GpuCtx, dtype: WeightDtype, args: &FixedArgs) -> Re
         .map_err(|error| format!("gemm_bi Fixed Ada half s3: {error:?}"))
 }
 
+fn launch_sm89_half_n64(ctx: &GpuCtx, tile: FixedTile, args: &FixedArgs) -> Result<(), String> {
+    if ctx.compute_capability() != (8, 9) {
+        return Err("Fixed Ada half N64 finalist requires CC8.9".into());
+    }
+    if args.bias != 0 {
+        return Err("Fixed Ada half N64 finalist does not admit bias".into());
+    }
+    if !(1..=2048).contains(&args.m) {
+        return Err("Fixed Ada half N64 finalist requires 1 <= M <= 2048".into());
+    }
+    if [args.c, args.a, args.b]
+        .into_iter()
+        .any(|pointer| pointer == 0 || !pointer.is_multiple_of(16))
+    {
+        return Err(
+            "Fixed Ada half N64 finalist requires non-null, 16-byte-aligned C, A, and B".into(),
+        );
+    }
+    let (function, rejection, bm, k, n) = match tile {
+        FixedTile::TcM64N64Sm89S3 => (
+            ctx.kernels.fixed_sm89_half_m64n64_s3_f16.as_ref(),
+            &ctx.kernels.fixed_sm89_half_m64n64_s3_f16_rejection,
+            64_u32,
+            768,
+            2304,
+        ),
+        FixedTile::TcM128N64Sm89S2 => (
+            ctx.kernels.fixed_sm89_half_m128n64_s2_f16.as_ref(),
+            &ctx.kernels.fixed_sm89_half_m128n64_s2_f16_rejection,
+            128_u32,
+            2304,
+            768,
+        ),
+        _ => return Err(format!("{tile:?} is not a Fixed Ada half N64 finalist")),
+    };
+    if args.k != k || args.n != n {
+        return Err(format!(
+            "Fixed Ada half N64 finalist {tile:?} requires exact K={k}, N={n}"
+        ));
+    }
+    let function = function.ok_or_else(|| {
+        rejection
+            .clone()
+            .unwrap_or_else(|| format!("Fixed Ada half N64 finalist {tile:?} is not admitted"))
+    })?;
+    let rows = u32::try_from(args.m).map_err(|_| "Fixed Ada half N64 M is negative")?;
+    let columns = u32::try_from(args.n).map_err(|_| "Fixed Ada half N64 N is negative")?;
+    let grid = rows
+        .div_ceil(bm)
+        .checked_mul(columns / 64)
+        .filter(|grid| *grid <= i32::MAX as u32)
+        .ok_or("Fixed Ada half N64 launch grid exceeds i32")?;
+    let params = FixedSm89HalfParams {
+        alpha: 1.0,
+        beta: 0.0,
+        m: args.m,
+        n: args.n,
+        k: args.k,
+        lda: args.k,
+        ldb: args.n,
+        ldc: args.n,
+    };
+    let config = cudarc::driver::LaunchConfig {
+        grid_dim: (grid, 1, 1),
+        block_dim: (128, 1, 1),
+        shared_mem_bytes: 49_152,
+    };
+    let mut builder = ctx.stream.launch_builder(function);
+    builder.arg(&args.c);
+    builder.arg(&args.a);
+    builder.arg(&args.b);
+    builder.arg(&args.bias);
+    builder.arg(&params);
+    unsafe { builder.launch(config) }
+        .map(|_| ())
+        .map_err(|error| format!("gemm_bi forced Fixed Ada half N64 ({tile:?}): {error:?}"))
+}
+
 fn launch_ladder(
     ctx: &GpuCtx,
     tile: FixedTile,
@@ -3114,6 +3289,7 @@ fn launch_ladder(
         | FixedTile::Tf32M128S3
         | FixedTile::Tf32M128N128S3
         | FixedTile::Tf32RnaM128N128S3
+        | FixedTile::Tf32RnaM128N96S3
         | FixedTile::Tf32M64S2
         | FixedTile::Tf32M64S3
         | FixedTile::Tf32M16S4
@@ -3127,7 +3303,9 @@ fn launch_ladder(
         | FixedTile::Sm120Half(_)
         | FixedTile::Tc128Sm89Pipeline
         | FixedTile::Tc128Sm89Swizzle
-        | FixedTile::Tc128Sm89S3 => unreachable!("tile has its own launcher"),
+        | FixedTile::Tc128Sm89S3
+        | FixedTile::TcM64N64Sm89S3
+        | FixedTile::TcM128N64Sm89S2 => unreachable!("tile has its own launcher"),
     };
     let cfg = ladder_cfg(tile, args.m as usize, args.n as usize);
     let alpha: f32 = 1.0;

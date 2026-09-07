@@ -1,0 +1,20 @@
+{
+  "results": [
+    {
+      "exit": 0,
+      "name": "module-composition"
+    },
+    {
+      "exit": 0,
+      "name": "module-finalist-contract"
+    },
+    {
+      "exit": 0,
+      "name": "arch-source-contract"
+    },
+    {
+      "exit": 0,
+      "name": "performance-registry"
+    }
+  ]
+}

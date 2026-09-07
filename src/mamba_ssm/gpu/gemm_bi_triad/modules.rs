@@ -475,6 +475,22 @@ pub(crate) struct CompileModuleRequest<'a> {
     pub module_kind: ModuleKind,
 }
 
+struct FixedSm89FinalistDriverAbi {
+    rna_n96: Result<Tf32DriverAbi, String>,
+    half_m64n64_s3: Result<Tf32DriverAbi, String>,
+    half_m128n64_s2: Result<Tf32DriverAbi, String>,
+}
+
+impl FixedSm89FinalistDriverAbi {
+    fn rejected(reason: String) -> Self {
+        Self {
+            rna_n96: Err(reason.clone()),
+            half_m64n64_s3: Err(reason.clone()),
+            half_m128n64_s2: Err(reason),
+        }
+    }
+}
+
 pub(crate) struct CompiledModule {
     pub module: Arc<CudaModule>,
     pub compiler_identity: CompilerIdentity,
@@ -489,6 +505,7 @@ pub(crate) struct CompiledModule {
     fixed_sm89_half_swizzle_driver_abi: Result<BTreeMap<&'static str, Tf32DriverAbi>, String>,
     fixed_sm89_half_s3_driver_abi: Result<BTreeMap<&'static str, Tf32DriverAbi>, String>,
     fixed_sm89_rna_wide_driver_abi: Result<Tf32DriverAbi, String>,
+    fixed_sm89_finalist_driver_abi: FixedSm89FinalistDriverAbi,
     fixed_sm89_exact_n64_driver_abi: Result<BTreeMap<&'static str, Tf32DriverAbi>, String>,
     fixed_sm120_exact_n64_driver_abi: Result<BTreeMap<&'static str, Tf32DriverAbi>, String>,
     fixed_sm120_sliced_driver_abi: Result<BTreeMap<&'static str, Tf32DriverAbi>, String>,
@@ -681,6 +698,12 @@ pub(crate) fn compile_module(request: CompileModuleRequest<'_>) -> Result<Compil
             request.arch,
             &src,
         );
+        let fixed_finalist_abi = census_fixed_sm89_finalist_driver_abi(
+            request.ctx,
+            request.module_kind,
+            request.arch,
+            &src,
+        );
         let fixed_exact_n64_abi = census_fixed_sm89_exact_n64_driver_abi(
             request.ctx,
             request.module_kind,
@@ -724,6 +747,7 @@ pub(crate) fn compile_module(request: CompileModuleRequest<'_>) -> Result<Compil
             fixed_half_swizzle_abi,
             fixed_half_s3_abi,
             fixed_rna_wide_abi,
+            fixed_finalist_abi,
             fixed_exact_n64_abi,
             fixed_sm120_exact_n64_abi,
             fixed_sm120_sliced_abi,
@@ -740,6 +764,7 @@ pub(crate) fn compile_module(request: CompileModuleRequest<'_>) -> Result<Compil
         fixed_sm89_half_swizzle_driver_abi,
         fixed_sm89_half_s3_driver_abi,
         fixed_sm89_rna_wide_driver_abi,
+        fixed_sm89_finalist_driver_abi,
         fixed_sm89_exact_n64_driver_abi,
         fixed_sm120_exact_n64_driver_abi,
         fixed_sm120_sliced_driver_abi,
@@ -786,6 +811,12 @@ pub(crate) fn compile_module(request: CompileModuleRequest<'_>) -> Result<Compil
                 &ptx_source,
             );
             let fixed_rna_wide_abi = census_fixed_sm89_rna_wide_driver_abi(
+                request.ctx,
+                request.module_kind,
+                request.arch,
+                &ptx_source,
+            );
+            let fixed_finalist_abi = census_fixed_sm89_finalist_driver_abi(
                 request.ctx,
                 request.module_kind,
                 request.arch,
@@ -882,6 +913,7 @@ pub(crate) fn compile_module(request: CompileModuleRequest<'_>) -> Result<Compil
                 fixed_half_swizzle_abi,
                 fixed_half_s3_abi,
                 fixed_rna_wide_abi,
+                fixed_finalist_abi,
                 fixed_exact_n64_abi,
                 fixed_sm120_exact_n64_abi,
                 fixed_sm120_sliced_abi,
@@ -924,6 +956,7 @@ pub(crate) fn compile_module(request: CompileModuleRequest<'_>) -> Result<Compil
         fixed_sm89_half_swizzle_driver_abi,
         fixed_sm89_half_s3_driver_abi,
         fixed_sm89_rna_wide_driver_abi,
+        fixed_sm89_finalist_driver_abi,
         fixed_sm89_exact_n64_driver_abi,
         fixed_sm120_exact_n64_driver_abi,
         fixed_sm120_sliced_driver_abi,
@@ -1524,6 +1557,7 @@ fn validate_module_ptx(module_kind: ModuleKind, arch: &str, ptx: &str) -> Result
         ModuleKind::Fixed => {
             validate_fixed_tf32_ptx(arch, ptx)?;
             validate_fixed_sm89_rna_wide_ptx(arch, ptx)?;
+            validate_fixed_sm89_finalist_ptx(arch, ptx)?;
             validate_fixed_sm89_half_ptx(arch, ptx)?;
             validate_fixed_sm89_half_swizzle_ptx(arch, ptx)?;
             validate_fixed_sm89_half_s3_ptx(arch, ptx)?;
@@ -1562,6 +1596,21 @@ pub(crate) const FIXED_SM89_RNA_WIDE_SYMBOL: &str =
 const FIXED_SM89_RNA_WIDE_SHARED_BYTES: u32 = 98_304;
 const FIXED_SM89_RNA_WIDE_THREADS: u32 = 256;
 const FIXED_SM89_RNA_WIDE_REGISTER_CAP: u32 = 224;
+
+pub(crate) const FIXED_SM89_RNA_N96_SYMBOL: &str =
+    "gemm_bi_nn_fixed_sm89_rna_tf32_v1_m128n96_bk32_s3";
+pub(crate) const FIXED_SM89_HALF_M64N64_S3_SYMBOL: &str =
+    "gemm_bi_nn_fixed_sm89_m64n64_bk64_s3_v1_f16";
+pub(crate) const FIXED_SM89_HALF_M128N64_S2_SYMBOL: &str =
+    "gemm_bi_nn_fixed_sm89_m128n64_bk64_s2_v1_f16";
+
+const FIXED_SM89_RNA_N96_SHARED_BYTES: u32 = 86_016;
+const FIXED_SM89_RNA_N96_THREADS: u32 = 256;
+const FIXED_SM89_RNA_N96_REGISTER_CAP: u32 = 136;
+const FIXED_SM89_HALF_N64_SHARED_BYTES: u32 = 49_152;
+const FIXED_SM89_HALF_N64_THREADS: u32 = 128;
+const FIXED_SM89_HALF_M64N64_S3_REGISTER_CAP: u32 = 110;
+const FIXED_SM89_HALF_M128N64_S2_REGISTER_CAP: u32 = 132;
 
 fn fixed_sm89_rna_wide_composed(arch: &str) -> bool {
     arch == "sm_89"
@@ -1665,6 +1714,123 @@ fn validate_fixed_sm89_rna_wide_ptx(arch: &str, ptx: &str) -> Result<(), String>
         return Err(format!(
             "{} contains local memory, a numeric atomic, or a reduction",
             entry.symbol
+        ));
+    }
+    Ok(())
+}
+
+fn validate_fixed_sm89_finalist_ptx(arch: &str, ptx: &str) -> Result<(), String> {
+    let parsed = parse_ptx(ptx)?;
+    let expected: BTreeSet<_> = if arch == "sm_89" {
+        [
+            FIXED_SM89_RNA_N96_SYMBOL,
+            FIXED_SM89_HALF_M64N64_S3_SYMBOL,
+            FIXED_SM89_HALF_M128N64_S2_SYMBOL,
+        ]
+        .into_iter()
+        .collect()
+    } else {
+        BTreeSet::new()
+    };
+    let actual: Vec<_> = parsed
+        .entries
+        .iter()
+        .map(|entry| entry.symbol.as_str())
+        .filter(|symbol| {
+            symbol.contains("_sm89_rna_tf32_v1_m128n96_")
+                || symbol.contains("_sm89_m64n64_bk64_s3_")
+                || symbol.contains("_sm89_m128n64_bk64_s2_")
+        })
+        .collect();
+    let unique: BTreeSet<_> = actual.iter().copied().collect();
+    if actual.len() != unique.len() || unique != expected {
+        return Err(format!(
+            "Fixed SM89 finalist PTX inventory is incomplete, duplicated, or foreign on {arch}"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_fixed_sm89_finalist_entry_ptx(
+    parsed: &ParsedPtx,
+    symbol: &'static str,
+) -> Result<(), String> {
+    let entry = parsed_ptx_entry_ref(parsed, symbol)?;
+    let header = entry
+        .text
+        .split_once('{')
+        .map(|(header, _)| header)
+        .ok_or_else(|| format!("{symbol} has no PTX body"))?;
+    let tokens = ptx_tokens(header);
+    let text: Vec<_> = tokens.iter().map(|token| token.text).collect();
+    let begin = text
+        .iter()
+        .position(|token| *token == "(")
+        .ok_or_else(|| format!("{symbol} has no PTX parameters"))?;
+    let end = text
+        .iter()
+        .position(|token| *token == ")")
+        .ok_or_else(|| format!("{symbol} has no PTX parameter end"))?;
+    let declarations: Vec<_> = text[begin + 1..end].split(|token| *token == ",").collect();
+    let pointer = |declaration: &&[&str]| {
+        (declaration.len() == 3 && declaration[..2] == [".param", ".u64"])
+            || (declaration.len() == 6
+                && declaration[..5] == [".param", ".u64", ".ptr", ".align", "1"])
+    };
+    if declarations.len() != 5
+        || !declarations[..4].iter().all(pointer)
+        || declarations[4].len() != 8
+        || declarations[4][..4] != [".param", ".align", "4", ".b8"]
+        || declarations[4][5..] != ["[", "32", "]"]
+    {
+        return Err(format!(
+            "{symbol} requires four pointers and an align-4 32-byte bundle"
+        ));
+    }
+    let n96 = symbol == FIXED_SM89_RNA_N96_SYMBOL;
+    for (directive, expected_value) in [
+        (".maxntid", if n96 { "256" } else { "128" }),
+        (".minnctapersm", if n96 { "1" } else { "2" }),
+    ] {
+        let positions: Vec<_> = text
+            .iter()
+            .enumerate()
+            .filter_map(|(index, token)| (*token == directive).then_some(index))
+            .collect();
+        if positions.len() != 1 || text.get(positions[0] + 1).copied() != Some(expected_value) {
+            return Err(format!("{symbol} has the wrong {directive} launch bound"));
+        }
+    }
+    let mma = if n96 {
+        "mma.sync.aligned.m16n8k8.row.col.f32.tf32.tf32.f32"
+    } else {
+        "mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32"
+    };
+    for required in [mma, "cp.async.commit_group", "cp.async.wait_group"] {
+        if !ptx_has_unquoted_token(&entry.body, |token| token == required) {
+            return Err(format!("{symbol} is missing {required}"));
+        }
+    }
+    if n96 && !ptx_has_unquoted_token(&entry.body, |token| token == "cvt.rna.tf32.f32") {
+        return Err(format!("{symbol} is missing cvt.rna.tf32.f32"));
+    }
+    if !ptx_has_unquoted_token(&entry.body, |token| {
+        token.starts_with("cp.async.cg.shared.global")
+    }) {
+        return Err(format!("{symbol} is missing cp.async.cg.shared.global"));
+    }
+    if ptx_has_unquoted_token(&entry.body, |token| {
+        token == ".local"
+            || token.starts_with("ld.local")
+            || token.starts_with("st.local")
+            || token.starts_with("atom.")
+            || token.starts_with("atom::")
+            || token.starts_with("red.")
+            || token.starts_with("red::")
+            || token.starts_with("redux.")
+    }) {
+        return Err(format!(
+            "{symbol} contains local memory, a numeric atomic, or a reduction"
         ));
     }
     Ok(())
@@ -2174,6 +2340,264 @@ fn census_fixed_sm89_rna_wide_driver_abi(
     validate_fixed_sm89_rna_wide_driver_abi(&abi)?;
     module.unload()?;
     Ok(abi)
+}
+
+fn census_fixed_sm89_finalist_driver_abi(
+    ctx: &CudaContext,
+    kind: ModuleKind,
+    arch: &str,
+    ptx: &str,
+) -> FixedSm89FinalistDriverAbi {
+    if kind != ModuleKind::Fixed || arch != "sm_89" {
+        return FixedSm89FinalistDriverAbi::rejected(
+            "Fixed SM89 finalists are not composed for this module/target".into(),
+        );
+    }
+    type GetParamInfo = unsafe extern "C" fn(
+        cudarc::driver::sys::CUfunction,
+        usize,
+        *mut usize,
+        *mut usize,
+    ) -> cudarc::driver::sys::CUresult;
+    let module = match DriverModule::load(ctx, ptx) {
+        Ok(module) => module,
+        Err(error) => return FixedSm89FinalistDriverAbi::rejected(error),
+    };
+    let get: GetParamInfo = match driver_proc_address("cuFuncGetParamInfo", 12_040) {
+        Ok(get) => unsafe { std::mem::transmute(get) },
+        Err(error) => {
+            let _ = module.unload();
+            return FixedSm89FinalistDriverAbi::rejected(error);
+        }
+    };
+    let parsed = match parse_ptx(ptx) {
+        Ok(parsed) => parsed,
+        Err(error) => {
+            let _ = module.unload();
+            return FixedSm89FinalistDriverAbi::rejected(error);
+        }
+    };
+    let query = |symbol: &'static str| -> Result<Tf32DriverAbi, String> {
+        validate_fixed_sm89_finalist_entry_ptx(&parsed, symbol)?;
+        let function = unsafe {
+            cudarc::driver::result::module::get_function(
+                module.raw(),
+                CString::new(symbol).unwrap(),
+            )
+        }
+        .map_err(|error| format!("load Fixed/{symbol} for Driver ABI: {error:?}"))?;
+        let abi = query_driver_parameter_abi(symbol, 5, |index, offset, size| unsafe {
+            get(function, index, offset, size)
+        })?;
+        validate_fixed_sm89_finalist_driver_abi(symbol, &abi)?;
+        Ok(abi)
+    };
+    let census = FixedSm89FinalistDriverAbi {
+        rna_n96: query(FIXED_SM89_RNA_N96_SYMBOL),
+        half_m64n64_s3: query(FIXED_SM89_HALF_M64N64_S3_SYMBOL),
+        half_m128n64_s2: query(FIXED_SM89_HALF_M128N64_S2_SYMBOL),
+    };
+    if let Err(error) = module.unload() {
+        return FixedSm89FinalistDriverAbi::rejected(format!(
+            "unload Fixed SM89 finalist ABI census: {error}"
+        ));
+    }
+    census
+}
+
+fn validate_fixed_sm89_finalist_driver_abi(
+    symbol: &str,
+    abi: &Tf32DriverAbi,
+) -> Result<(), String> {
+    const EXPECTED: [(usize, usize); 5] = [(0, 8), (8, 8), (16, 8), (24, 8), (32, 32)];
+    let host_size = if symbol == FIXED_SM89_RNA_N96_SYMBOL {
+        super::super::gemm_bi_fixed::FIXED_TF32_WIDE_PARAMS_SIZE
+    } else {
+        super::super::gemm_bi_fixed::FIXED_SM89_HALF_PARAMS_SIZE
+    };
+    if host_size != 32 {
+        return Err(format!(
+            "{symbol} host parameter ABI drifted to {host_size} bytes"
+        ));
+    }
+    if abi.parameter_count() != EXPECTED.len()
+        || !abi
+            .parameters()
+            .iter()
+            .zip(EXPECTED)
+            .all(|(actual, expected)| (actual.offset(), actual.size()) == expected)
+    {
+        return Err(format!(
+            "{symbol} has the wrong live five-argument/64-byte Driver ABI"
+        ));
+    }
+    Ok(())
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct FixedSm89FinalistResources {
+    local_bytes: u32,
+    registers: u32,
+    static_shared_bytes: u32,
+    max_threads: i32,
+    active_blocks: u32,
+}
+
+fn validate_fixed_sm89_finalist_resources(
+    symbol: &str,
+    resources: FixedSm89FinalistResources,
+) -> Result<(), String> {
+    let (register_cap, threads, expected_blocks, shared_bytes) = match symbol {
+        FIXED_SM89_RNA_N96_SYMBOL => (
+            FIXED_SM89_RNA_N96_REGISTER_CAP,
+            FIXED_SM89_RNA_N96_THREADS,
+            1,
+            FIXED_SM89_RNA_N96_SHARED_BYTES,
+        ),
+        FIXED_SM89_HALF_M64N64_S3_SYMBOL => (
+            FIXED_SM89_HALF_M64N64_S3_REGISTER_CAP,
+            FIXED_SM89_HALF_N64_THREADS,
+            2,
+            FIXED_SM89_HALF_N64_SHARED_BYTES,
+        ),
+        FIXED_SM89_HALF_M128N64_S2_SYMBOL => (
+            FIXED_SM89_HALF_M128N64_S2_REGISTER_CAP,
+            FIXED_SM89_HALF_N64_THREADS,
+            2,
+            FIXED_SM89_HALF_N64_SHARED_BYTES,
+        ),
+        _ => return Err(format!("unknown Fixed SM89 finalist {symbol}")),
+    };
+    tf32_symbol_admission(
+        symbol,
+        resources.local_bytes,
+        resources.registers,
+        register_cap,
+        resources.max_threads,
+        threads as i32,
+    )?;
+    if resources.static_shared_bytes != 0 {
+        return Err(format!(
+            "{symbol} uses {} static shared bytes, expected zero",
+            resources.static_shared_bytes
+        ));
+    }
+    if resources.active_blocks != expected_blocks {
+        return Err(format!(
+            "{symbol} has {} active CTAs at {shared_bytes} dynamic shared bytes, expected {expected_blocks}",
+            resources.active_blocks
+        ));
+    }
+    Ok(())
+}
+
+fn load_fixed_sm89_finalist(
+    ctx: &CudaContext,
+    module: &CompiledModule,
+    symbol: &'static str,
+) -> (Option<CudaFunction>, Option<String>) {
+    let admitted = (|| -> Result<CudaFunction, String> {
+        if module.artifact_identity.module_kind != ModuleKind::Fixed
+            || module.compiler_identity.target.as_str() != "sm_89"
+            || ctx
+                .compute_capability()
+                .map_err(|error| format!("query {symbol} CC: {error:?}"))?
+                != (8, 9)
+        {
+            return Err(format!(
+                "Fixed SM89 finalist {symbol} is only composed and admitted on sm_89/CC8.9"
+            ));
+        }
+        let (abi, shared_bytes, threads) = match symbol {
+            FIXED_SM89_RNA_N96_SYMBOL => (
+                &module.fixed_sm89_finalist_driver_abi.rna_n96,
+                FIXED_SM89_RNA_N96_SHARED_BYTES,
+                FIXED_SM89_RNA_N96_THREADS,
+            ),
+            FIXED_SM89_HALF_M64N64_S3_SYMBOL => (
+                &module.fixed_sm89_finalist_driver_abi.half_m64n64_s3,
+                FIXED_SM89_HALF_N64_SHARED_BYTES,
+                FIXED_SM89_HALF_N64_THREADS,
+            ),
+            FIXED_SM89_HALF_M128N64_S2_SYMBOL => (
+                &module.fixed_sm89_finalist_driver_abi.half_m128n64_s2,
+                FIXED_SM89_HALF_N64_SHARED_BYTES,
+                FIXED_SM89_HALF_N64_THREADS,
+            ),
+            _ => return Err(format!("unknown Fixed SM89 finalist {symbol}")),
+        };
+        let shared_cap = ctx
+            .attribute(
+                cudarc::driver::sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK_OPTIN,
+            )
+            .map_err(|error| format!("query {symbol} opt-in shared capacity: {error:?}"))?;
+        if shared_cap < shared_bytes as i32 {
+            return Err(format!(
+                "{symbol} requires {shared_bytes} shared bytes, device permits {shared_cap}"
+            ));
+        }
+        validate_fixed_sm89_finalist_driver_abi(symbol, abi.as_ref().map_err(Clone::clone)?)?;
+        let function = load_function(&module.module, ModuleKind::Fixed, symbol)?;
+        set_dynamic_shared(&function, symbol, shared_bytes as i32)?;
+        let query_error = |label, error| format!("query {symbol} {label}: {error:?}");
+        let resources = FixedSm89FinalistResources {
+            local_bytes: u32::try_from(
+                function
+                    .local_size_bytes()
+                    .map_err(|e| query_error("local bytes", e))?,
+            )
+            .map_err(|_| format!("{symbol} returned negative local memory"))?,
+            registers: u32::try_from(
+                function
+                    .num_regs()
+                    .map_err(|e| query_error("registers", e))?,
+            )
+            .map_err(|_| format!("{symbol} returned negative registers"))?,
+            static_shared_bytes: u32::try_from(
+                function
+                    .shared_size_bytes()
+                    .map_err(|e| query_error("static shared bytes", e))?,
+            )
+            .map_err(|_| format!("{symbol} returned negative static shared memory"))?,
+            max_threads: function
+                .max_threads_per_block()
+                .map_err(|e| query_error("max threads", e))?,
+            active_blocks: function
+                .occupancy_max_active_blocks_per_multiprocessor(
+                    threads,
+                    shared_bytes as usize,
+                    None,
+                )
+                .map_err(|e| query_error("occupancy", e))?,
+        };
+        validate_fixed_sm89_finalist_resources(symbol, resources)?;
+        Ok(function)
+    })();
+    match admitted {
+        Ok(function) => (Some(function), None),
+        Err(reason) => (None, Some(reason)),
+    }
+}
+
+pub(crate) fn load_fixed_sm89_rna_n96(
+    ctx: &CudaContext,
+    module: &CompiledModule,
+) -> (Option<CudaFunction>, Option<String>) {
+    load_fixed_sm89_finalist(ctx, module, FIXED_SM89_RNA_N96_SYMBOL)
+}
+
+pub(crate) fn load_fixed_sm89_half_m64n64_s3(
+    ctx: &CudaContext,
+    module: &CompiledModule,
+) -> (Option<CudaFunction>, Option<String>) {
+    load_fixed_sm89_finalist(ctx, module, FIXED_SM89_HALF_M64N64_S3_SYMBOL)
+}
+
+pub(crate) fn load_fixed_sm89_half_m128n64_s2(
+    ctx: &CudaContext,
+    module: &CompiledModule,
+) -> (Option<CudaFunction>, Option<String>) {
+    load_fixed_sm89_finalist(ctx, module, FIXED_SM89_HALF_M128N64_S2_SYMBOL)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -3875,6 +4299,7 @@ fn validate_fixed_tf32_ptx(arch: &str, ptx: &str) -> Result<(), String> {
     let mut expected = FIXED_TF32_SYMBOLS.to_vec();
     if fixed_sm89_rna_wide_composed(arch) {
         expected.push(FIXED_SM89_RNA_WIDE_SYMBOL);
+        expected.push(FIXED_SM89_RNA_N96_SYMBOL);
     }
     if owns_sm120 {
         expected.extend(FIXED_SM120_TF32_SYMBOLS);
@@ -6082,6 +6507,18 @@ const FIXED_SM89_HALF_S3_SOURCE_FRAGMENT: SourceFragment = SourceFragment {
     allowed_quoted_includes: &[],
 };
 
+const FIXED_SM89_RNA_N96_SOURCE_FRAGMENT: SourceFragment = SourceFragment {
+    logical_name: "kernels/gemm_bi_fixed/tf32_rna_n96.cu",
+    source: include_str!("../../../../kernels/gemm_bi_fixed/tf32_rna_n96.cu"),
+    allowed_quoted_includes: &[],
+};
+
+const FIXED_SM89_HALF_N64_SOURCE_FRAGMENT: SourceFragment = SourceFragment {
+    logical_name: "kernels/gemm_bi_fixed/sm89_half_n64.cu",
+    source: include_str!("../../../../kernels/gemm_bi_fixed/sm89_half_n64.cu"),
+    allowed_quoted_includes: &[],
+};
+
 const FIXED_SM120_EXACT_N64_SOURCE_FRAGMENT: SourceFragment = SourceFragment {
     logical_name: "kernels/gemm_bi_fixed/sm120_f32_n64_copyplan.cu",
     source: include_str!("../../../../kernels/gemm_bi_fixed/sm120_f32_n64_copyplan.cu"),
@@ -6394,6 +6831,8 @@ fn compose_module_source_for(kind: ModuleKind, arch: &str) -> Result<String, Str
         fragments.push(FIXED_SM89_HALF_SWIZZLE_LAYOUT_FRAGMENT);
         fragments.push(FIXED_SM89_HALF_SWIZZLE_SOURCE_FRAGMENT);
         fragments.push(FIXED_SM89_HALF_S3_SOURCE_FRAGMENT);
+        fragments.push(FIXED_SM89_RNA_N96_SOURCE_FRAGMENT);
+        fragments.push(FIXED_SM89_HALF_N64_SOURCE_FRAGMENT);
         return compose_fragments(&fragments);
     }
     if kind == ModuleKind::Fixed && arch == "compute_120" {
@@ -11577,6 +12016,12 @@ mod tests {
         "gemm_bi_nn_fixed_sm89_tc128_s3_v1_bf16",
         "gemm_bi_nn_fixed_sm89_tc128_s3_v1_f16",
     ];
+    const FIXED_SM89_RNA_N96_TEST_SYMBOL: &str =
+        "gemm_bi_nn_fixed_sm89_rna_tf32_v1_m128n96_bk32_s3";
+    const FIXED_SM89_HALF_M64N64_S3_TEST_SYMBOL: &str =
+        "gemm_bi_nn_fixed_sm89_m64n64_bk64_s3_v1_f16";
+    const FIXED_SM89_HALF_M128N64_S2_TEST_SYMBOL: &str =
+        "gemm_bi_nn_fixed_sm89_m128n64_bk64_s2_v1_f16";
 
     fn fixed_sm89_half_test_base_ptx() -> String {
         let mut ptx = ".version 8.7\n.target sm_89\n.address_size 64\n".to_string();
@@ -11624,6 +12069,15 @@ mod tests {
         )
     }
 
+    fn fixed_sm89_finalist_half_test_entry(symbol: &str, s3: bool) -> String {
+        let entry = if s3 {
+            fixed_sm89_half_s3_test_entry(symbol, "f16")
+        } else {
+            fixed_sm89_half_test_entry(symbol, "f16")
+        };
+        entry.replacen(") {\n", ")\n.maxntid 128, 1, 1\n.minnctapersm 2\n{\n", 1)
+    }
+
     fn fixed_sm89_half_test_ptx() -> String {
         let mut ptx = fixed_sm89_half_test_base_ptx();
         ptx.push_str(&fixed_sm89_half_test_entry(
@@ -11652,6 +12106,18 @@ mod tests {
         {
             ptx.push_str(&fixed_sm89_half_s3_test_entry(symbol, dtype));
         }
+        ptx.push_str(&fixed_sm89_rna_wide_test_entry().replace(
+            FIXED_SM89_RNA_WIDE_TEST_SYMBOL,
+            FIXED_SM89_RNA_N96_TEST_SYMBOL,
+        ));
+        ptx.push_str(&fixed_sm89_finalist_half_test_entry(
+            FIXED_SM89_HALF_M64N64_S3_TEST_SYMBOL,
+            true,
+        ));
+        ptx.push_str(&fixed_sm89_finalist_half_test_entry(
+            FIXED_SM89_HALF_M128N64_S2_TEST_SYMBOL,
+            false,
+        ));
         ptx
     }
 
@@ -11675,22 +12141,31 @@ mod tests {
                 "kernels/gemm_bi_fixed/sm89_half_swizzle_layout.cuh",
                 "kernels/gemm_bi_fixed/sm89_half_swizzle.cu",
                 "kernels/gemm_bi_fixed/sm89_half_s3.cu",
+                "kernels/gemm_bi_fixed/tf32_rna_n96.cu",
+                "kernels/gemm_bi_fixed/sm89_half_n64.cu",
             ],
             "Ada must retain the half extension before the exact N64 extension"
         );
-        assert_eq!(
-            extension,
-            compose_fragments(&[
-                super::FIXED_SM89_HALF_SOURCE_FRAGMENT,
-                super::FIXED_SM89_EXACT_N64_SOURCE_FRAGMENT,
-                super::FIXED_SM89_RNA_WIDE_SOURCE_FRAGMENT,
-                super::FIXED_SM89_HALF_SWIZZLE_LAYOUT_FRAGMENT,
-                super::FIXED_SM89_HALF_SWIZZLE_SOURCE_FRAGMENT,
-                super::FIXED_SM89_HALF_S3_SOURCE_FRAGMENT,
-            ])
-            .unwrap(),
-            "Ada composition must preserve every old suffix byte and append only the two swizzle fragments"
+        let prior_suffix = compose_fragments(&[
+            super::FIXED_SM89_HALF_SOURCE_FRAGMENT,
+            super::FIXED_SM89_EXACT_N64_SOURCE_FRAGMENT,
+            super::FIXED_SM89_RNA_WIDE_SOURCE_FRAGMENT,
+            super::FIXED_SM89_HALF_SWIZZLE_LAYOUT_FRAGMENT,
+            super::FIXED_SM89_HALF_SWIZZLE_SOURCE_FRAGMENT,
+            super::FIXED_SM89_HALF_S3_SOURCE_FRAGMENT,
+        ])
+        .unwrap();
+        assert!(
+            extension.starts_with(&prior_suffix),
+            "Ada composition must preserve every pre-finalist suffix byte"
         );
+        for symbol in [
+            "gemm_bi_nn_fixed_sm89_rna_tf32_v1_m128n96_bk32_s3",
+            "gemm_bi_nn_fixed_sm89_m64n64_bk64_s3_v1_f16",
+            "gemm_bi_nn_fixed_sm89_m128n64_bk64_s2_v1_f16",
+        ] {
+            assert!(ada.contains(symbol), "Fixed/sm_89 omitted {symbol}");
+        }
     }
 
     #[test]
@@ -12197,15 +12672,18 @@ mod tests {
             super::FIXED_SM89_EXACT_N64_SOURCE_FRAGMENT,
         ]);
         let before = compose_fragments(&retained).unwrap();
-        assert_eq!(
-            source.strip_prefix(&before).unwrap(),
-            compose_fragments(&[
-                super::FIXED_SM89_RNA_WIDE_SOURCE_FRAGMENT,
-                super::FIXED_SM89_HALF_SWIZZLE_LAYOUT_FRAGMENT,
-                super::FIXED_SM89_HALF_SWIZZLE_SOURCE_FRAGMENT,
-                super::FIXED_SM89_HALF_S3_SOURCE_FRAGMENT,
-            ])
-            .unwrap(),
+        let old_suffix = compose_fragments(&[
+            super::FIXED_SM89_RNA_WIDE_SOURCE_FRAGMENT,
+            super::FIXED_SM89_HALF_SWIZZLE_LAYOUT_FRAGMENT,
+            super::FIXED_SM89_HALF_SWIZZLE_SOURCE_FRAGMENT,
+            super::FIXED_SM89_HALF_S3_SOURCE_FRAGMENT,
+        ])
+        .unwrap();
+        assert!(
+            source
+                .strip_prefix(&before)
+                .unwrap()
+                .starts_with(&old_suffix),
             "RNA-wide and the later swizzle twin must follow the prior Ada Fixed bytes"
         );
         for target in [
@@ -12351,6 +12829,112 @@ mod tests {
             },
         ] {
             super::validate_fixed_sm89_rna_wide_resources(rejected).unwrap_err();
+        }
+    }
+
+    #[test]
+    fn fixed_sm89_finalist_ptx_abi_and_resources_fail_per_symbol() {
+        let baseline = fixed_sm89_half_test_ptx();
+        super::validate_fixed_sm89_finalist_ptx("sm_89", &baseline).unwrap();
+        let parsed = super::parse_ptx(&baseline).unwrap();
+        for symbol in [
+            FIXED_SM89_RNA_N96_TEST_SYMBOL,
+            FIXED_SM89_HALF_M64N64_S3_TEST_SYMBOL,
+            FIXED_SM89_HALF_M128N64_S2_TEST_SYMBOL,
+        ] {
+            super::validate_fixed_sm89_finalist_entry_ptx(&parsed, symbol).unwrap();
+        }
+        let n96_entry = fixed_sm89_rna_wide_test_entry().replace(
+            FIXED_SM89_RNA_WIDE_TEST_SYMBOL,
+            FIXED_SM89_RNA_N96_TEST_SYMBOL,
+        );
+        for invalid_inventory in [
+            baseline.replacen(&n96_entry, "", 1),
+            format!("{baseline}{n96_entry}"),
+            baseline.replacen(
+                FIXED_SM89_RNA_N96_TEST_SYMBOL,
+                "gemm_bi_nn_fixed_sm89_rna_tf32_v2_m128n96_bk32_s3",
+                1,
+            ),
+        ] {
+            super::validate_fixed_sm89_finalist_ptx("sm_89", &invalid_inventory)
+                .expect_err("missing, duplicate, or foreign finalist inventory must reject");
+        }
+
+        let d_entry =
+            fixed_sm89_finalist_half_test_entry(FIXED_SM89_HALF_M64N64_S3_TEST_SYMBOL, true);
+        let malformed_d = d_entry.replacen(
+            "mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32",
+            ".local .b8 spill[16]",
+            1,
+        );
+        let one_bad = baseline.replacen(&d_entry, &malformed_d, 1);
+        super::validate_fixed_sm89_finalist_ptx("sm_89", &one_bad)
+            .expect("global integrity owns inventory, not optional per-symbol eligibility");
+        let parsed = super::parse_ptx(&one_bad).unwrap();
+        super::validate_fixed_sm89_finalist_entry_ptx(
+            &parsed,
+            FIXED_SM89_HALF_M64N64_S3_TEST_SYMBOL,
+        )
+        .expect_err("one malformed optional entry must reject itself");
+        for sibling in [
+            FIXED_SM89_RNA_N96_TEST_SYMBOL,
+            FIXED_SM89_HALF_M128N64_S2_TEST_SYMBOL,
+        ] {
+            super::validate_fixed_sm89_finalist_entry_ptx(&parsed, sibling)
+                .expect("one malformed optional entry must retain its siblings");
+        }
+
+        let abi =
+            Tf32DriverAbi::checked(5, vec![(0, 8), (8, 8), (16, 8), (24, 8), (32, 32)]).unwrap();
+        let malformed_abi =
+            Tf32DriverAbi::checked(5, vec![(0, 8), (8, 8), (16, 8), (24, 8), (32, 28)]).unwrap();
+        super::validate_fixed_sm89_finalist_driver_abi(
+            FIXED_SM89_HALF_M64N64_S3_TEST_SYMBOL,
+            &malformed_abi,
+        )
+        .expect_err("one malformed live ABI must reject that holder");
+        super::validate_fixed_sm89_finalist_driver_abi(FIXED_SM89_RNA_N96_TEST_SYMBOL, &abi)
+            .expect("an independent sibling ABI remains admitted");
+
+        for (symbol, registers, active_blocks) in [
+            (FIXED_SM89_RNA_N96_TEST_SYMBOL, 136, 1),
+            (FIXED_SM89_HALF_M64N64_S3_TEST_SYMBOL, 110, 2),
+            (FIXED_SM89_HALF_M128N64_S2_TEST_SYMBOL, 132, 2),
+        ] {
+            let admitted = super::FixedSm89FinalistResources {
+                local_bytes: 0,
+                registers,
+                static_shared_bytes: 0,
+                max_threads: if active_blocks == 1 { 256 } else { 128 },
+                active_blocks,
+            };
+            super::validate_fixed_sm89_finalist_resources(symbol, admitted).unwrap();
+            for rejected in [
+                super::FixedSm89FinalistResources {
+                    local_bytes: 1,
+                    ..admitted
+                },
+                super::FixedSm89FinalistResources {
+                    registers: registers + 1,
+                    ..admitted
+                },
+                super::FixedSm89FinalistResources {
+                    static_shared_bytes: 1,
+                    ..admitted
+                },
+                super::FixedSm89FinalistResources {
+                    max_threads: admitted.max_threads - 1,
+                    ..admitted
+                },
+                super::FixedSm89FinalistResources {
+                    active_blocks: active_blocks + 1,
+                    ..admitted
+                },
+            ] {
+                super::validate_fixed_sm89_finalist_resources(symbol, rejected)
+                    .expect_err("each optional holder resource gate must reject independently");
+            }
         }
     }
 

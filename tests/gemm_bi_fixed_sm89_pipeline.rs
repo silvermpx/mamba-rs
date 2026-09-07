@@ -16,6 +16,8 @@ use mamba_rs::mamba_ssm::gpu::kernel_identity::TUNING_TABLE_REVISION;
 const CANDIDATE: FixedTile = FixedTile::Tc128Sm89Pipeline;
 const SWIZZLE_CANDIDATE: FixedTile = FixedTile::Tc128Sm89Swizzle;
 const S3_CANDIDATE: FixedTile = FixedTile::Tc128Sm89S3;
+const D_FINALIST: FixedTile = FixedTile::TcM64N64Sm89S3;
+const E_FINALIST: FixedTile = FixedTile::TcM128N64Sm89S2;
 const RUNGS: [FixedTile; 5] = [
     FixedTile::Tc16,
     FixedTile::Tc64,
@@ -155,27 +157,171 @@ fn fixed_sm89_half_swizzle_and_pipeline_holders_are_independently_live() {
             occupancy
         );
     }
+    for (label, function, rejection, register_cap, threads, shared, active_blocks) in [
+        (
+            "rna_n96",
+            ctx.kernels.fixed_sm89_tf32_rna_n96.as_ref(),
+            &ctx.kernels.fixed_sm89_tf32_rna_n96_rejection,
+            136,
+            256,
+            86_016,
+            1,
+        ),
+        (
+            "half_m64n64_s3_f16",
+            ctx.kernels.fixed_sm89_half_m64n64_s3_f16.as_ref(),
+            &ctx.kernels.fixed_sm89_half_m64n64_s3_f16_rejection,
+            110,
+            128,
+            49_152,
+            2,
+        ),
+        (
+            "half_m128n64_s2_f16",
+            ctx.kernels.fixed_sm89_half_m128n64_s2_f16.as_ref(),
+            &ctx.kernels.fixed_sm89_half_m128n64_s2_f16_rejection,
+            132,
+            128,
+            49_152,
+            2,
+        ),
+    ] {
+        let function = function.unwrap_or_else(|| panic!("{label} rejected: {rejection:?}"));
+        assert!(rejection.is_none());
+        let local = function.local_size_bytes().expect("local bytes");
+        let registers = function.num_regs().expect("registers");
+        let static_shared = function.shared_size_bytes().expect("static shared");
+        let max_threads = function.max_threads_per_block().expect("max threads");
+        let occupancy = function
+            .occupancy_max_active_blocks_per_multiprocessor(threads, shared, None)
+            .expect("occupancy");
+        assert_eq!(local, 0);
+        assert_eq!(static_shared, 0);
+        assert!((1..=register_cap).contains(&registers));
+        assert!(max_threads >= threads as i32);
+        assert_eq!(occupancy, active_blocks);
+        println!(
+            "FINALIST_RESOURCE label={label} local={local} registers={registers} static_shared={static_shared} max_threads={max_threads} active_blocks={occupancy} dynamic_shared={shared}"
+        );
+    }
 }
 
 #[test]
 #[ignore = "requires exact Ada 142SM CUDA12.8/13.0/13.2 and qualified hot-cell AUTO promotion"]
 fn fixed_sm89_half_pipeline_auto_hot_cell_prefix_view_graph_bits() {
-    fixed_sm89_half_hot_cell_prefix_view_graph_bits(None);
+    fixed_sm89_half_hot_cell_prefix_view_graph_bits(None, None);
 }
 
 #[test]
 #[ignore = "requires exact Ada CC8.9 and the admitted forced half swizzle"]
 fn fixed_sm89_half_swizzle_forced_hot_a_e_prefix_view_graph_bits() {
-    fixed_sm89_half_hot_cell_prefix_view_graph_bits(Some(SWIZZLE_CANDIDATE));
+    fixed_sm89_half_hot_cell_prefix_view_graph_bits(Some(SWIZZLE_CANDIDATE), None);
 }
 
 #[test]
 #[ignore = "requires exact Ada CC8.9 and the admitted forced half s3"]
 fn fixed_sm89_half_s3_forced_hot_a_e_prefix_view_graph_bits() {
-    fixed_sm89_half_hot_cell_prefix_view_graph_bits(Some(S3_CANDIDATE));
+    fixed_sm89_half_hot_cell_prefix_view_graph_bits(Some(S3_CANDIDATE), None);
 }
 
-fn fixed_sm89_half_hot_cell_prefix_view_graph_bits(forced: Option<FixedTile>) {
+#[test]
+#[ignore = "requires exact Ada CC8.9 and the admitted forced F16 D finalist"]
+fn fixed_sm89_half_d_finalist_prefix_view_graph_bits() {
+    fixed_sm89_half_hot_cell_prefix_view_graph_bits(Some(D_FINALIST), Some((768, 2304)));
+}
+
+#[test]
+#[ignore = "requires exact Ada CC8.9 and the admitted forced F16 E finalist"]
+fn fixed_sm89_half_e_finalist_prefix_view_graph_bits() {
+    fixed_sm89_half_hot_cell_prefix_view_graph_bits(Some(E_FINALIST), Some((2304, 768)));
+}
+
+#[test]
+#[ignore = "requires exact Ada CC8.9; finalist launchers must reject before touching tiny buffers"]
+fn fixed_sm89_half_finalists_fail_closed_outside_exact_forced_contract() {
+    let device = GpuDevice::new(0).expect("CUDA device");
+    assert_eq!(device.compute_capability, (8, 9));
+    let ctx = GpuCtx::new(&device).expect("NVRTC context");
+    let a = upload_half(&ctx, &[0; 8]);
+    let b = upload_half(&ctx, &[0; 8]);
+    let c = upload_half(&ctx, &[0x7fff; 8]);
+    let good = FixedFwdOperands {
+        c: typed(c.cached_ptr(), WeightDtype::F16),
+        x: typed(a.cached_ptr(), WeightDtype::F16),
+        w: typed(b.cached_ptr(), WeightDtype::F16),
+        bias_ptr: None,
+    };
+    for (tile, shape) in [
+        (
+            D_FINALIST,
+            FixedShape {
+                m: 2048,
+                k: 768,
+                n: 2304,
+            },
+        ),
+        (
+            E_FINALIST,
+            FixedShape {
+                m: 2048,
+                k: 2304,
+                n: 768,
+            },
+        ),
+    ] {
+        for bad in [
+            FixedFwdOperands {
+                c: typed(c.cached_ptr() + 2, WeightDtype::F16),
+                ..good
+            },
+            FixedFwdOperands {
+                x: typed(a.cached_ptr() + 2, WeightDtype::F16),
+                ..good
+            },
+            FixedFwdOperands {
+                w: typed(b.cached_ptr() + 2, WeightDtype::F16),
+                ..good
+            },
+            FixedFwdOperands {
+                bias_ptr: Some(4),
+                ..good
+            },
+            FixedFwdOperands {
+                c: typed(c.cached_ptr(), WeightDtype::Bf16),
+                x: typed(a.cached_ptr(), WeightDtype::Bf16),
+                w: typed(b.cached_ptr(), WeightDtype::Bf16),
+                ..good
+            },
+        ] {
+            assert!(
+                fixed_forward_with_tile(&ctx, bad, shape, tile).is_err(),
+                "{tile:?} admitted an unsafe dtype/pointer/bias contract"
+            );
+        }
+        for bad_shape in [
+            FixedShape { m: 0, ..shape },
+            FixedShape { m: 2049, ..shape },
+            FixedShape {
+                k: shape.k - 64,
+                ..shape
+            },
+            FixedShape {
+                n: shape.n - 64,
+                ..shape
+            },
+        ] {
+            assert!(
+                fixed_forward_with_tile(&ctx, good, bad_shape, tile).is_err(),
+                "{tile:?} admitted out-of-contract shape {bad_shape:?}"
+            );
+        }
+    }
+}
+
+fn fixed_sm89_half_hot_cell_prefix_view_graph_bits(
+    forced: Option<FixedTile>,
+    finalist: Option<(usize, usize)>,
+) {
     let device = GpuDevice::new(0).expect("CUDA device");
     assert_eq!(device.compute_capability, (8, 9));
     assert_eq!(device.multiprocessor_count(), 142);
@@ -193,14 +339,25 @@ fn fixed_sm89_half_hot_cell_prefix_view_graph_bits(forced: Option<FixedTile>) {
         assert!(ctx.kernels.fixed_sm89_half_swizzle.is_some());
         assert!(ctx.kernels.fixed_sm89_half_swizzle_rejection.is_none());
     }
-    for dtype in [WeightDtype::Bf16, WeightDtype::F16] {
-        for (hot_m, k, n) in [
-            (4621, 384, 1928),
-            (4621, 768, 2304),
-            (4621, 1928, 384),
-            (2048, 768, 2304),
-            (2048, 2304, 768),
-        ] {
+    let dtypes = if finalist.is_some() {
+        vec![WeightDtype::F16]
+    } else {
+        vec![WeightDtype::Bf16, WeightDtype::F16]
+    };
+    let shapes = finalist.map_or_else(
+        || {
+            vec![
+                (4621, 384, 1928),
+                (4621, 768, 2304),
+                (4621, 1928, 384),
+                (2048, 768, 2304),
+                (2048, 2304, 768),
+            ]
+        },
+        |(k, n)| vec![(2048, k, n)],
+    );
+    for dtype in dtypes {
+        for &(hot_m, k, n) in &shapes {
             let rows = hot_m + 18;
             for exceptional in [false, true] {
                 let mut a_host: Vec<_> = (0..rows * k)
@@ -229,7 +386,12 @@ fn fixed_sm89_half_hot_cell_prefix_view_graph_bits(forced: Option<FixedTile>) {
                 let a = upload_half(&ctx, &a_host);
                 let b = upload_half(&ctx, &b_host);
                 let bias = GpuBuffer::from_cpu(&ctx.stream, &bias_host).expect("bias upload");
-                for has_bias in [false, true] {
+                let bias_states: &[bool] = if finalist.is_some() {
+                    &[false]
+                } else {
+                    &[false, true]
+                };
+                for &has_bias in bias_states {
                     let full = upload_half(&ctx, &vec![0x7fff; rows * n]);
                     let operands = FixedFwdOperands {
                         c: typed(full.cached_ptr(), dtype),
@@ -245,8 +407,18 @@ fn fixed_sm89_half_hot_cell_prefix_view_graph_bits(forced: Option<FixedTile>) {
                     )
                     .expect("full incumbent reference outside AUTO cells");
                     let reference = raw_half(&ctx, &full);
-                    for m in [hot_m, hot_m - 1, hot_m + 1, 1, 17, 129] {
-                        for (row_offset, output_offset) in [(0, 8), (17, 8), (17, 1)] {
+                    let prefixes = if finalist.is_some() {
+                        vec![hot_m, hot_m - 1, 1, 17, 129]
+                    } else {
+                        vec![hot_m, hot_m - 1, hot_m + 1, 1, 17, 129]
+                    };
+                    let views: &[(usize, usize)] = if finalist.is_some() {
+                        &[(0, 8), (17, 8)]
+                    } else {
+                        &[(0, 8), (17, 8), (17, 1)]
+                    };
+                    for m in prefixes {
+                        for &(row_offset, output_offset) in views {
                             let guards = vec![0x7fff; output_offset + m * n + 9];
                             let mut expected = guards.clone();
                             expected[output_offset..output_offset + m * n]
@@ -319,7 +491,14 @@ fn fixed_sm89_half_hot_cell_prefix_view_graph_bits(forced: Option<FixedTile>) {
                             let graph =
                                 unsafe { capture_into_graph(&ctx.stream, || run().map(|_| ())) }
                                     .expect("capture actual AUTO");
-                            if matches!(picked, CANDIDATE | SWIZZLE_CANDIDATE | S3_CANDIDATE) {
+                            if matches!(
+                                picked,
+                                CANDIDATE
+                                    | SWIZZLE_CANDIDATE
+                                    | S3_CANDIDATE
+                                    | D_FINALIST
+                                    | E_FINALIST
+                            ) {
                                 assert_half_graph(
                                     &graph,
                                     picked,
@@ -573,25 +752,62 @@ fn assert_half_graph_params(
         unsafe { sys::cuFuncGetName(&mut name, params.func) },
         sys::CUresult::CUDA_SUCCESS
     );
-    let (family, shared) = match tile {
-        FixedTile::Tc128Sm89Pipeline => ("pipeline", 71_680),
-        FixedTile::Tc128Sm89Swizzle => ("swizzle", 69_632),
-        FixedTile::Tc128Sm89S3 => ("s3", 98_304),
+    let (expected, threads, bm, bn, shared) = match tile {
+        FixedTile::Tc128Sm89Pipeline => (
+            format!("gemm_bi_nn_fixed_sm89_tc128_pipeline_v1_{}", dtype.as_str()),
+            256,
+            128,
+            128,
+            71_680,
+        ),
+        FixedTile::Tc128Sm89Swizzle => (
+            format!("gemm_bi_nn_fixed_sm89_tc128_swizzle_v1_{}", dtype.as_str()),
+            256,
+            128,
+            128,
+            69_632,
+        ),
+        FixedTile::Tc128Sm89S3 => (
+            format!("gemm_bi_nn_fixed_sm89_tc128_s3_v1_{}", dtype.as_str()),
+            256,
+            128,
+            128,
+            98_304,
+        ),
+        FixedTile::TcM64N64Sm89S3 => {
+            assert_eq!(dtype, WeightDtype::F16);
+            (
+                "gemm_bi_nn_fixed_sm89_m64n64_bk64_s3_v1_f16".into(),
+                128,
+                64,
+                64,
+                49_152,
+            )
+        }
+        FixedTile::TcM128N64Sm89S2 => {
+            assert_eq!(dtype, WeightDtype::F16);
+            (
+                "gemm_bi_nn_fixed_sm89_m128n64_bk64_s2_v1_f16".into(),
+                128,
+                128,
+                64,
+                49_152,
+            )
+        }
         _ => panic!("not an Ada half physical route: {tile:?}"),
     };
-    let expected = format!("gemm_bi_nn_fixed_sm89_tc128_{family}_v1_{}", dtype.as_str());
     assert_eq!(
         unsafe { std::ffi::CStr::from_ptr(name) }.to_bytes(),
         expected.as_bytes()
     );
     assert_eq!(
         (params.blockDimX, params.blockDimY, params.blockDimZ),
-        (256, 1, 1)
+        (threads, 1, 1)
     );
     assert_eq!(
         (params.gridDimX, params.gridDimY, params.gridDimZ),
         (
-            (shape.m as u32).div_ceil(128) * (shape.n as u32).div_ceil(128),
+            (shape.m as u32).div_ceil(bm) * (shape.n as u32).div_ceil(bn),
             1,
             1,
         )

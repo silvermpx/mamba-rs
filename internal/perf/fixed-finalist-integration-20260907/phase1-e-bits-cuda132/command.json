@@ -1,0 +1,44 @@
+{
+  "cache": "/root/mamba-kcache-ada-exact-toolkit-auto-finalistphase1green2-cuda132-20260907",
+  "generation": "finalistphase1green2",
+  "runner": "/root/evidence-ada-exact-toolkit-auto-20260907/run.py",
+  "runner_sha256": "d753757a717bfe18b3a28a8480f31104e252271576e45d7e53fc16396008475a",
+  "runs": [
+    [
+      "fixed_sm89_half_e_finalist_prefix_view_graph_bits",
+      [
+        "/root/.cargo/bin/cargo",
+        "test",
+        "--release",
+        "--features",
+        "cuda,cudarc/cuda-13020",
+        "--test",
+        "gemm_bi_fixed_sm89_pipeline",
+        "fixed_sm89_half_e_finalist_prefix_view_graph_bits",
+        "--",
+        "--ignored",
+        "--exact",
+        "--nocapture"
+      ]
+    ],
+    [
+      "fixed_sm89_half_finalists_fail_closed_outside_exact_forced_contract",
+      [
+        "/root/.cargo/bin/cargo",
+        "test",
+        "--release",
+        "--features",
+        "cuda,cudarc/cuda-13020",
+        "--test",
+        "gemm_bi_fixed_sm89_pipeline",
+        "fixed_sm89_half_finalists_fail_closed_outside_exact_forced_contract",
+        "--",
+        "--ignored",
+        "--exact",
+        "--nocapture"
+      ]
+    ]
+  ],
+  "target": "/root/target-ada-exact-toolkit-auto-finalistphase1green2-cuda132-20260907",
+  "toolkit": "13.2"
+}

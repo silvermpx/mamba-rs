@@ -1,0 +1,40 @@
+diff --git a/src/mamba_ssm/gpu/gemm_bi_triad/modules.rs b/src/mamba_ssm/gpu/gemm_bi_triad/modules.rs
+--- a/src/mamba_ssm/gpu/gemm_bi_triad/modules.rs
++++ b/src/mamba_ssm/gpu/gemm_bi_triad/modules.rs
+@@ -11675,12 +11675,12 @@ mod tests {
+                 "kernels/gemm_bi_fixed/sm89_half_swizzle_layout.cuh",
+                 "kernels/gemm_bi_fixed/sm89_half_swizzle.cu",
+                 "kernels/gemm_bi_fixed/sm89_half_s3.cu",
++                "kernels/gemm_bi_fixed/tf32_rna_n96.cu",
++                "kernels/gemm_bi_fixed/sm89_half_n64.cu",
+             ],
+             "Ada must retain the half extension before the exact N64 extension"
+         );
+-        assert_eq!(
+-            extension,
+-            compose_fragments(&[
++        let prior_suffix = compose_fragments(&[
+                 super::FIXED_SM89_HALF_SOURCE_FRAGMENT,
+                 super::FIXED_SM89_EXACT_N64_SOURCE_FRAGMENT,
+                 super::FIXED_SM89_RNA_WIDE_SOURCE_FRAGMENT,
+@@ -11688,9 +11688,18 @@ mod tests {
+                 super::FIXED_SM89_HALF_SWIZZLE_SOURCE_FRAGMENT,
+                 super::FIXED_SM89_HALF_S3_SOURCE_FRAGMENT,
+             ])
+-            .unwrap(),
+-            "Ada composition must preserve every old suffix byte and append only the two swizzle fragments"
++            .unwrap();
++        assert!(
++            extension.starts_with(&prior_suffix),
++            "Ada composition must preserve every pre-finalist suffix byte"
+         );
++        for symbol in [
++            "gemm_bi_nn_fixed_sm89_rna_tf32_v1_m128n96_bk32_s3",
++            "gemm_bi_nn_fixed_sm89_m64n64_bk64_s3_v1_f16",
++            "gemm_bi_nn_fixed_sm89_m128n64_bk64_s2_v1_f16",
++        ] {
++            assert!(ada.contains(symbol), "Fixed/sm_89 omitted {symbol}");
++        }
+     }
+ 
+     #[test]

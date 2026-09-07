@@ -1,0 +1,12 @@
+{
+  "results": [
+    {
+      "exit": 0,
+      "name": "arch-source-contract"
+    },
+    {
+      "exit": 0,
+      "name": "pipeline-build"
+    }
+  ]
+}
