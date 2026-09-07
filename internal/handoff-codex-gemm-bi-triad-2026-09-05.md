@@ -9,6 +9,30 @@ the dated progress log, 900 lines), then `internal/agent-operational-rules.md`
 
 ## 1. What the work is
 
+Latest compact32/eight-compute-warp/S2 NT screen (2026-09-07): ADVANCE
+finalist, about17.4-17.7% lower runtime versus actual AUTO on
+(2048,768,3072). Eager226.257-226.262us vs274.944-275.014us;
+graph225.978-226.022us vs273.687-273.752us. Allfourpairedonce7 strata win:
+eagerABBA p50/p95 .822563921/.823097796,
+eagerBAAB .822837094/.823171353,
+graphABBA .825599198/.825873428,
+graphBAAB .825800614/.826036828. Runtime confirms the intended threshold:
+121regs/0local/0static/49152dynamic/256threads/occupancy2(required2).
+Bounded finite target/tail eager/graph bitsPASS, exactly1GPUtest48.67s;
+root373source/28rawbracket replay and native20checks PASS. Actual generated
+storage/slot host proof covers all9NT specializations and alloriginalNN/TN
+extent assertions, with2compiled behavioral mutations caught.
+Source025a8f44..., binary6e8d5647..., map559ebcd8...,
+composedCUDAfd5bd92f..., rawca50cb02.... Evidence:
+`internal/perf/ada-triad-nt-compact32-eight-warp-s2-20260907/README.md`.
+Retain=true/promotion=false, no Fast/21/101/fullqualification yet. Faster
+than the earlier dense-copy screen provisionally; not a direct paired
+candidate-vs-candidate admission. Next one-build shortbatch: d768_out and
+prism, each comparing both retained mechanisms with its actual AUTO.
+Compact sibling labels reuse this exactsource/symbol and occupancy2 gate;
+dense siblings use exactguards and prism needs per-stage generic tails.
+Only frozen selected winners proceed to batch qualification/dispatcher.
+
 Latest NT dense full-tile copy screen (2026-09-07): ADVANCE finalist, not
 production promotion. Same four-compute-warp/padded36/S3 layout, RNA/MMA
 order and epilogue, but exact full target uses six unconditional16B copies

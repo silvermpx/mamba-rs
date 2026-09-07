@@ -12,6 +12,8 @@ const PADDED_EIGHT_WARP_SYMBOL: &str =
     "gemm_bi_nt_test_padded_eight_warp_sm80_mma_tf32_v1_m128n64_bk32_s3";
 const PADDED_DENSE_COPY_SYMBOL: &str =
     "gemm_bi_nt_test_padded_dense_copy_sm80_mma_tf32_v1_m128n64_bk32_s3";
+const COMPACT_EIGHT_WARP_S2_SYMBOL: &str =
+    "gemm_bi_nt_test_compact_eight_warp_sm80_mma_tf32_v1_m128n64_bk32_s2";
 const PRODUCTION_CUDA: &str = include_str!("../kernels/gemm_bi_triad/sm80.cu");
 const CANDIDATE_CUDA: &str = include_str!("gemm_bi_tf32_nt_compact_xor.cu");
 const PADDED_COPY_PLAN_CUDA: &str = include_str!("gemm_bi_tf32_nt_padded_copy_plan.cuh");
@@ -25,6 +27,7 @@ enum CandidateVariant {
     PaddedLdmatrix,
     PaddedEightWarp,
     PaddedDenseCopy,
+    CompactEightWarpS2,
 }
 
 impl CandidateVariant {
@@ -35,6 +38,7 @@ impl CandidateVariant {
             Self::PaddedLdmatrix => "padded_ldmatrix",
             Self::PaddedEightWarp => "padded_eight_warp",
             Self::PaddedDenseCopy => "padded_dense_copy",
+            Self::CompactEightWarpS2 => "compact_eight_warp_s2",
         }
     }
 
@@ -45,6 +49,7 @@ impl CandidateVariant {
             Self::PaddedLdmatrix => PADDED_LDMATRIX_SYMBOL,
             Self::PaddedEightWarp => PADDED_EIGHT_WARP_SYMBOL,
             Self::PaddedDenseCopy => PADDED_DENSE_COPY_SYMBOL,
+            Self::CompactEightWarpS2 => COMPACT_EIGHT_WARP_S2_SYMBOL,
         }
     }
 
@@ -55,6 +60,14 @@ impl CandidateVariant {
             | Self::PaddedLdmatrix
             | Self::PaddedEightWarp
             | Self::PaddedDenseCopy => 82_944,
+            Self::CompactEightWarpS2 => 49_152,
+        }
+    }
+
+    const fn required_occupancy(self) -> u32 {
+        match self {
+            Self::CompactEightWarpS2 => 2,
+            _ => 1,
         }
     }
 
@@ -65,6 +78,7 @@ impl CandidateVariant {
             Self::PaddedLdmatrix => padded_ldmatrix_candidate_source(),
             Self::PaddedEightWarp => padded_eight_warp_candidate_source(),
             Self::PaddedDenseCopy => padded_dense_copy_candidate_source(),
+            Self::CompactEightWarpS2 => compact_eight_warp_s2_candidate_source(),
         }
     }
 }
@@ -612,6 +626,141 @@ fn padded_dense_copy_candidate_source() -> Result<String, String> {
     Ok(source)
 }
 
+fn compact_eight_warp_s2_candidate_source() -> Result<String, String> {
+    let mut source = PRODUCTION_CUDA.to_owned();
+    replace_exact(
+        &mut source,
+        concat!(
+            "    static constexpr int bk32 = 32;\n",
+            "    static constexpr int ARows = Op == SgbTf32Tn ? bk32 : BM;\n",
+            "    static constexpr int AStride = Op == SgbTf32Tn ? BM + 8 : 36;\n",
+            "    static constexpr int BRows = Op == SgbTf32Nt ? BN : bk32;\n",
+            "    static constexpr int BStride = Op == SgbTf32Nt ? 36\n",
+            "        : (BN == 64 ? 72 : (BN == 32 ? 40 : 24));"
+        ),
+        concat!(
+            "    static constexpr int bk32 = 32;\n",
+            "    static constexpr bool compact_eight_warp_s2 =\n",
+            "        Op == SgbTf32Nt && BM == 128 && BN == 64 && Stages == 2;\n",
+            "    static constexpr int ARows = Op == SgbTf32Tn ? bk32 : BM;\n",
+            "    static constexpr int AStride = Op == SgbTf32Tn ? BM + 8\n",
+            "        : (compact_eight_warp_s2 ? 32 : 36);\n",
+            "    static constexpr int BRows = Op == SgbTf32Nt ? BN : bk32;\n",
+            "    static constexpr int BStride = Op == SgbTf32Nt\n",
+            "        ? (compact_eight_warp_s2 ? 32 : 36)\n",
+            "        : (BN == 64 ? 72 : (BN == 32 ? 40 : 24));"
+        ),
+        1,
+        "compact eight-warp S2 storage specialization",
+    )?;
+    replace_exact(
+        &mut source,
+        concat!(
+            "    if constexpr (Op == SgbTf32Tn) {\n",
+            "        return storage->a[stage][reduction][row];\n",
+            "    }\n",
+            "    return storage->a[stage][row][reduction];"
+        ),
+        concat!(
+            "    if constexpr (Op == SgbTf32Tn) {\n",
+            "        return storage->a[stage][reduction][row];\n",
+            "    }\n",
+            "    if constexpr (Op == SgbTf32Nt && BM == 128 && BN == 64 && Stages == 2) {\n",
+            "        return storage->a[stage][row][gemm_bi_nt_test_compact_xor_k(row, reduction)];\n",
+            "    }\n",
+            "    return storage->a[stage][row][reduction];"
+        ),
+        1,
+        "compact eight-warp S2 A slot",
+    )?;
+    replace_exact(
+        &mut source,
+        concat!(
+            "    if constexpr (Op == SgbTf32Nt) {\n",
+            "        return storage->b[stage][column][reduction];\n",
+            "    }\n",
+            "    return storage->b[stage][reduction][column];"
+        ),
+        concat!(
+            "    if constexpr (Op == SgbTf32Nt) {\n",
+            "        if constexpr (BM == 128 && BN == 64 && Stages == 2) {\n",
+            "            return storage->b[stage][column][gemm_bi_nt_test_compact_xor_k(column, reduction)];\n",
+            "        }\n",
+            "        return storage->b[stage][column][reduction];\n",
+            "    }\n",
+            "    return storage->b[stage][reduction][column];"
+        ),
+        1,
+        "compact eight-warp S2 B slot",
+    )?;
+    replace_exact(
+        &mut source,
+        "== 55296, \"NT M128N64 s2 storage\"",
+        "== 49152, \"NT compact-eight-warp M128N64 s2 storage\"",
+        1,
+        "compact eight-warp S2 extent",
+    )?;
+    replace_exact(
+        &mut source,
+        concat!(
+            "__device__ __forceinline__ void gemm_bi_tf32_kernel(\n",
+            "    float* output, const float* a, const float* b, const float* bias,\n",
+            "    Sm80Tf32KernelParams params) {\n",
+            "    constexpr int MAtoms = BM == 128 ? 4 : (BM == 64 ? 2 : 1);"
+        ),
+        concat!(
+            "__device__ __forceinline__ void gemm_bi_tf32_kernel(\n",
+            "    float* output, const float* a, const float* b, const float* bias,\n",
+            "    Sm80Tf32KernelParams params) {\n",
+            "    constexpr bool compact_eight_warp_s2 =\n",
+            "        Op == SgbTf32Nt && BM == 128 && BN == 64 && Stages == 2;\n",
+            "    constexpr int MAtoms = compact_eight_warp_s2 ? 2\n",
+            "        : (BM == 128 ? 4 : (BM == 64 ? 2 : 1));"
+        ),
+        1,
+        "compact eight-warp S2 accumulator ownership",
+    )?;
+    replace_exact(
+        &mut source,
+        concat!(
+            "    bool compute = BM != 128 || warp < 4;\n",
+            "    int warp_m = BM == 128 ? (warp >> 1) * 64\n",
+            "        : (BM == 64 ? (warp >> 1) * 32 : 0);"
+        ),
+        concat!(
+            "    bool compute = compact_eight_warp_s2 || BM != 128 || warp < 4;\n",
+            "    int warp_m = compact_eight_warp_s2 ? (warp >> 1) * 32\n",
+            "        : (BM == 128 ? (warp >> 1) * 64\n",
+            "        : (BM == 64 ? (warp >> 1) * 32 : 0));"
+        ),
+        1,
+        "compact eight-warp S2 compute and row ownership",
+    )?;
+    replace_exact(
+        &mut source,
+        concat!(
+            "GEMM_BI_TF32_DEFINE_KERNEL(",
+            "gemm_bi_nt_sm80_mma_tf32_v1_m128n64_bk32_s2, ",
+            "SgbTf32Nt, 128, 64, 2, 256, 1)"
+        ),
+        concat!(
+            "GEMM_BI_TF32_DEFINE_KERNEL(",
+            "gemm_bi_nt_test_compact_eight_warp_sm80_mma_tf32_v1_m128n64_bk32_s2, ",
+            "SgbTf32Nt, 128, 64, 2, 256, 1)"
+        ),
+        1,
+        "compact eight-warp S2 target symbol",
+    )?;
+    replace_exact(
+        &mut source,
+        "TF32_ASSERT_KERNEL_SIGNATURE(gemm_bi_nt_sm80_mma_tf32_v1_m128n64_bk32_s2);",
+        "TF32_ASSERT_KERNEL_SIGNATURE(gemm_bi_nt_test_compact_eight_warp_sm80_mma_tf32_v1_m128n64_bk32_s2);",
+        1,
+        "compact eight-warp S2 target signature",
+    )?;
+    Ok(format!("{CANDIDATE_CUDA}\n{source}"))
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct WarpTile {
     warp_m: usize,
@@ -633,6 +782,10 @@ fn padded_eight_compute_warp_tile(warp: usize) -> Option<WarpTile> {
         warp_n: (warp & 1) * 32,
         m_atoms: 2,
     })
+}
+
+fn compact_eight_warp_s2_tile(warp: usize) -> Option<WarpTile> {
+    padded_eight_compute_warp_tile(warp)
 }
 
 fn output_fragment_traces(
@@ -939,6 +1092,54 @@ fn padded_dense_source_isolates_target_and_preserves_generic_tail_path() {
     assert!(!source.contains("gemm_bi_tf32_nt_padded_ldmatrix_fragments"));
     assert!(!source.contains("eight_compute_warps"));
     assert!(!source.contains("gemm_bi_nt_test_compact_xor_k"));
+}
+
+#[test]
+fn compact_eight_warp_s2_descriptor_requires_two_resident_ctas() {
+    let variant = CandidateVariant::CompactEightWarpS2;
+    assert_eq!(variant.name(), "compact_eight_warp_s2");
+    assert_eq!(variant.symbol(), COMPACT_EIGHT_WARP_S2_SYMBOL);
+    assert_eq!(variant.shared_bytes(), 49_152);
+    assert_eq!(variant.required_occupancy(), 2);
+}
+
+#[test]
+fn compact_eight_warp_s2_preserves_each_output_and_fragment_trace() {
+    let candidate = output_fragment_traces(compact_eight_warp_s2_tile);
+    let incumbent = output_fragment_traces(old_four_compute_warp_tile);
+    assert_eq!(candidate.len(), BM * BN);
+    assert_eq!(candidate, incumbent);
+}
+
+#[test]
+fn compact_eight_warp_s2_source_is_exactly_target_scoped() {
+    let source = compact_eight_warp_s2_candidate_source().unwrap();
+    assert!(source.contains(COMPACT_EIGHT_WARP_S2_SYMBOL));
+    assert!(source.contains(&format!(
+        "TF32_ASSERT_KERNEL_SIGNATURE({COMPACT_EIGHT_WARP_S2_SYMBOL});"
+    )));
+    assert!(
+        !source
+            .contains("TF32_ASSERT_KERNEL_SIGNATURE(gemm_bi_nt_sm80_mma_tf32_v1_m128n64_bk32_s2);")
+    );
+    assert!(source.contains("constexpr bool compact_eight_warp_s2 ="));
+    assert!(source.contains("Op == SgbTf32Nt && BM == 128 && BN == 64 && Stages == 2"));
+    assert!(source.contains("== 49152, \"NT compact-eight-warp M128N64 s2 storage\""));
+    assert!(source.contains("constexpr int MAtoms = compact_eight_warp_s2 ? 2"));
+    assert!(source.contains("bool compute = compact_eight_warp_s2 || BM != 128 || warp < 4;"));
+    assert!(source.contains("int warp_m = compact_eight_warp_s2 ? (warp >> 1) * 32"));
+    assert!(source.contains("gemm_bi_nt_test_compact_xor_k(row, reduction)"));
+    assert!(source.contains("gemm_bi_nt_test_compact_xor_k(column, reduction)"));
+    assert!(
+        source.contains("GEMM_BI_TF32_DEFINE_KERNEL(gemm_bi_nt_sm80_mma_tf32_v1_m128n64_bk32_s3")
+    );
+    assert!(
+        source
+            .contains("TF32_ASSERT_KERNEL_SIGNATURE(gemm_bi_nt_sm80_mma_tf32_v1_m128n64_bk32_s3);")
+    );
+    assert!(!source.contains(PADDED_DENSE_COPY_CUDA));
+    assert!(!source.contains(PADDED_COPY_PLAN_CUDA));
+    assert!(!source.contains(PADDED_LDMATRIX_CUDA));
 }
 
 #[test]
@@ -1555,24 +1756,25 @@ mod cuda_suite {
                 None,
             )
             .map_err(|error| format!("candidate occupancy: {error:?}"))?;
+        let required_occupancy = variant.required_occupancy();
+        println!(
+            "{{\"schema\":\"MambaBiTf32NtDiscoveryResourceV1\",\"variant\":\"{}\",\"source_sha256\":\"{source_sha}\",\"symbol\":\"{}\",\"registers\":{registers},\"local_bytes\":{local},\"static_shared_bytes\":{static_shared},\"dynamic_shared_bytes\":{},\"max_dynamic_shared_bytes\":{max_dynamic},\"max_threads\":{max_threads},\"occupancy\":{occupancy},\"required_occupancy\":{required_occupancy}}}",
+            variant.name(),
+            variant.symbol(),
+            variant.shared_bytes()
+        );
         if registers <= 0
             || local != 0
             || static_shared != 0
             || max_threads < 256
             || max_dynamic < variant.shared_bytes() as i32
-            || occupancy < 1
+            || occupancy < required_occupancy
         {
             return Err(format!(
-                "{} NT resource gate failed: regs={registers} local={local} static={static_shared} max_threads={max_threads} max_dynamic={max_dynamic} occupancy={occupancy}",
+                "{} NT resource gate failed: regs={registers} local={local} static={static_shared} max_threads={max_threads} max_dynamic={max_dynamic} occupancy={occupancy} required_occupancy={required_occupancy}",
                 variant.name()
             ));
         }
-        println!(
-            "{{\"schema\":\"MambaBiTf32NtDiscoveryResourceV1\",\"variant\":\"{}\",\"source_sha256\":\"{source_sha}\",\"symbol\":\"{}\",\"registers\":{registers},\"local_bytes\":{local},\"static_shared_bytes\":{static_shared},\"dynamic_shared_bytes\":{},\"max_dynamic_shared_bytes\":{max_dynamic},\"max_threads\":{max_threads},\"occupancy\":{occupancy}}}",
-            variant.name(),
-            variant.symbol(),
-            variant.shared_bytes()
-        );
         Ok(())
     }
 
@@ -1948,5 +2150,11 @@ mod cuda_suite {
     #[ignore = "requires exclusive Ada CC8.9 CUDA13.2; padded dense full-tile NT discovery"]
     fn ada_tf32_nt_padded_dense_copy_discovery_once7() {
         run(CandidateVariant::PaddedDenseCopy);
+    }
+
+    #[test]
+    #[ignore = "requires exclusive Ada CC8.9 CUDA13.2; compact eight-warp S2 NT discovery"]
+    fn ada_tf32_nt_compact_eight_warp_s2_discovery_once7() {
+        run(CandidateVariant::CompactEightWarpS2);
     }
 }

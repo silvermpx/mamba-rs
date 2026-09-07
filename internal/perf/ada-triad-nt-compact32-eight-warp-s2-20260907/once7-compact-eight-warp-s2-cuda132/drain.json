@@ -1,0 +1,13 @@
+{
+  "apps": "",
+  "apps_exit": 0,
+  "apps_stderr": "",
+  "environment_constructor": "/root/evidence-ada-exact-toolkit-auto-20260907/run.py::env_for",
+  "gpu": "GPU-d1edd7be-e88d-aed6-047d-622163306f0e, NVIDIA RTX 6000 Ada Generation, 8.9, 0 %, 0 %\n",
+  "gpu_exit": 0,
+  "gpu_stderr": "",
+  "identity_no_apps": true,
+  "phase": "DRAIN",
+  "quiet": true,
+  "utc": "2026-09-07T17:34:47Z"
+}
