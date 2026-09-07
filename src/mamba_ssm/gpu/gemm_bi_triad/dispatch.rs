@@ -1911,7 +1911,7 @@ const SM89_TF32_EVIDENCE_COHORTS: &[Tf32AutoEvidenceCohort] = &[Tf32AutoEvidence
 /// CUDA 13.2: three independently admitted NT cells from the paired once-21
 /// run in internal/perf/ada-triad-finalist-integration-20260907/task3-once21-cuda132.
 /// Raw log SHA30041ac542f0128e2ec6f4da793eb42a9d29f93d06d8a24d71006d514ac117bb.
-/// Other toolkit identities remain unadmitted until their own qualification.
+/// Lower toolkit identities below carry their own independent qualification.
 const SM89_FINALIST_TF32_IDENTITY_CUDA_13_2: Tf32AutoQualificationIdentity =
     Tf32AutoQualificationIdentity {
         module_kind: ModuleKind::TriadSm89Finalist,
@@ -1954,6 +1954,94 @@ const SM89_FINALIST_TF32_IDENTITY_CUDA_13_2: Tf32AutoQualificationIdentity =
         ],
     };
 
+/// CUDA 12.8: all three NT cells passed their own paired current/Fast census.
+/// Raw once21 SHA908cc72be23fcea0a42446c306307f00cd10f6b4913f06f0ae68c0b96ef33a3e.
+const SM89_FINALIST_TF32_IDENTITY_CUDA_12_8: Tf32AutoQualificationIdentity =
+    Tf32AutoQualificationIdentity {
+        module_kind: ModuleKind::TriadSm89Finalist,
+        module_target: "sm_89",
+        device_target: "sm_89",
+        compute_capability: (8, 9),
+        multiprocessor_count: 142,
+        nvrtc_version: (12, 8),
+        driver_api_version: 13020,
+        driver_build_sources: 7,
+        optin_shared_bytes: 101376,
+        tensor_map_access: false,
+        compile_key: [
+            159, 134, 174, 238, 180, 151, 175, 133, 245, 92, 128, 135, 70, 88, 220, 18, 242, 19,
+            80, 130, 135, 147, 171, 66, 240, 66, 50, 49, 103, 52, 253, 54,
+        ],
+        artifact_digest: [
+            53, 41, 218, 38, 47, 24, 157, 32, 254, 249, 161, 144, 213, 14, 185, 187, 53, 135, 82,
+            170, 89, 207, 17, 107, 166, 57, 94, 90, 201, 220, 49, 229,
+        ],
+        source_digest: [
+            210, 12, 179, 159, 57, 14, 244, 81, 129, 190, 148, 228, 189, 123, 174, 181, 21, 72,
+            192, 230, 239, 172, 100, 186, 215, 42, 174, 113, 168, 137, 227, 206,
+        ],
+        invocation_digest: [
+            159, 134, 174, 238, 180, 151, 175, 133, 245, 92, 128, 135, 70, 88, 220, 18, 242, 19,
+            80, 130, 135, 147, 171, 66, 240, 66, 50, 49, 103, 52, 253, 54,
+        ],
+        header_manifest_digest: [
+            11, 119, 53, 101, 234, 35, 188, 168, 205, 140, 229, 54, 196, 83, 161, 159, 11, 193, 32,
+            100, 198, 183, 20, 252, 87, 187, 2, 2, 162, 136, 10, 144,
+        ],
+        nvrtc_library_domain: [
+            38, 176, 163, 160, 32, 68, 255, 203, 193, 105, 63, 216, 62, 146, 97, 190, 255, 166,
+            146, 164, 251, 207, 227, 172, 94, 157, 140, 135, 152, 11, 177, 85,
+        ],
+        driver_build_digest: [
+            209, 237, 197, 165, 188, 62, 16, 162, 104, 142, 33, 86, 141, 204, 189, 229, 226, 128,
+            220, 57, 20, 77, 216, 30, 133, 56, 67, 202, 152, 178, 208, 225,
+        ],
+    };
+
+/// CUDA 13.0: all three NT cells passed their own paired current/Fast census.
+/// Raw once21 SHA65601381b92b2a694ba1e271fc700514f0ef2948025f76c49553e8126208765c.
+const SM89_FINALIST_TF32_IDENTITY_CUDA_13_0: Tf32AutoQualificationIdentity =
+    Tf32AutoQualificationIdentity {
+        module_kind: ModuleKind::TriadSm89Finalist,
+        module_target: "sm_89",
+        device_target: "sm_89",
+        compute_capability: (8, 9),
+        multiprocessor_count: 142,
+        nvrtc_version: (13, 0),
+        driver_api_version: 13020,
+        driver_build_sources: 7,
+        optin_shared_bytes: 101376,
+        tensor_map_access: false,
+        compile_key: [
+            238, 242, 233, 40, 2, 240, 92, 200, 234, 191, 101, 161, 86, 213, 195, 20, 91, 18, 133,
+            94, 212, 52, 109, 117, 215, 188, 103, 16, 253, 82, 7, 120,
+        ],
+        artifact_digest: [
+            63, 138, 154, 62, 110, 186, 225, 107, 87, 187, 229, 147, 180, 141, 239, 246, 213, 123,
+            12, 249, 238, 165, 140, 59, 97, 191, 110, 155, 147, 122, 109, 107,
+        ],
+        source_digest: [
+            210, 12, 179, 159, 57, 14, 244, 81, 129, 190, 148, 228, 189, 123, 174, 181, 21, 72,
+            192, 230, 239, 172, 100, 186, 215, 42, 174, 113, 168, 137, 227, 206,
+        ],
+        invocation_digest: [
+            238, 242, 233, 40, 2, 240, 92, 200, 234, 191, 101, 161, 86, 213, 195, 20, 91, 18, 133,
+            94, 212, 52, 109, 117, 215, 188, 103, 16, 253, 82, 7, 120,
+        ],
+        header_manifest_digest: [
+            112, 180, 219, 205, 153, 156, 90, 59, 69, 18, 15, 170, 241, 78, 169, 237, 214, 211,
+            195, 174, 131, 128, 153, 197, 254, 13, 1, 146, 41, 22, 237, 178,
+        ],
+        nvrtc_library_domain: [
+            112, 155, 145, 195, 107, 251, 14, 217, 102, 238, 105, 173, 200, 214, 248, 127, 241, 16,
+            238, 207, 61, 251, 80, 96, 54, 127, 24, 60, 230, 20, 235, 13,
+        ],
+        driver_build_digest: [
+            209, 237, 197, 165, 188, 62, 16, 162, 104, 142, 33, 86, 141, 204, 189, 229, 226, 128,
+            220, 57, 20, 77, 216, 30, 133, 56, 67, 202, 152, 178, 208, 225,
+        ],
+    };
+
 const SM89_FINALIST_TF32_NT_CELLS: &[Tf32AutoCell] = &[
     sm89_tf32_route_cell(
         Nt,
@@ -1976,12 +2064,26 @@ const SM89_FINALIST_TF32_NT_CELLS: &[Tf32AutoCell] = &[
 ];
 
 /// Separate finalist evidence never rewrites the incumbent portable cohort.
-const SM89_FINALIST_TF32_EVIDENCE_COHORTS: &[Tf32AutoEvidenceCohort] = &[Tf32AutoEvidenceCohort {
-    identity: SM89_FINALIST_TF32_IDENTITY_CUDA_13_2,
-    portable: None,
-    tuning_revision: super::contract::SM89_FINALIST_TUNING_REVISION,
-    cells: SM89_FINALIST_TF32_NT_CELLS,
-}];
+const SM89_FINALIST_TF32_EVIDENCE_COHORTS: &[Tf32AutoEvidenceCohort] = &[
+    Tf32AutoEvidenceCohort {
+        identity: SM89_FINALIST_TF32_IDENTITY_CUDA_12_8,
+        portable: None,
+        tuning_revision: super::contract::SM89_FINALIST_TUNING_REVISION,
+        cells: SM89_FINALIST_TF32_NT_CELLS,
+    },
+    Tf32AutoEvidenceCohort {
+        identity: SM89_FINALIST_TF32_IDENTITY_CUDA_13_0,
+        portable: None,
+        tuning_revision: super::contract::SM89_FINALIST_TUNING_REVISION,
+        cells: SM89_FINALIST_TF32_NT_CELLS,
+    },
+    Tf32AutoEvidenceCohort {
+        identity: SM89_FINALIST_TF32_IDENTITY_CUDA_13_2,
+        portable: None,
+        tuning_revision: super::contract::SM89_FINALIST_TUNING_REVISION,
+        cells: SM89_FINALIST_TF32_NT_CELLS,
+    },
+];
 
 /// No SM90a board has frozen a TF32 cohort yet; the family declines to the
 /// portable ladder until one does.

@@ -1,0 +1,183 @@
+{
+  "artifacts": {
+    "bits": {
+      "binary": "/root/target-ada-exact-toolkit-auto-triad-nt-padded36-two-arm1-cuda128-20260907/release/deps/gemm_bi_tf32_cohort_binding-1f2a087e1494f9cc",
+      "binary_sha256": "e292d0802510f7b773f1bacc10aaff9778271a10cc4ec15e28419dd436ea5e06",
+      "listed_count": 10,
+      "target": "gemm_bi_tf32_cohort_binding",
+      "test": "sm89_nt_compact_finalist_forced_matches_portable_rna_bits"
+    },
+    "once21": {
+      "binary": "/root/target-ada-exact-toolkit-auto-triad-nt-padded36-two-arm1-cuda128-20260907/release/deps/gemm_bi_performance_matrix-a785e029c5780000",
+      "binary_sha256": "f55f1803029de9e6efd9db0ac67bf3465ae5439f20e4a943aa7d1f34afd4c688",
+      "listed_count": 63,
+      "target": "gemm_bi_performance_matrix",
+      "test": "sm89_nt_finalist_once21::gemm_bi_sm89_nt_finalist_current_fast_once21"
+    },
+    "resource": {
+      "binary": "/root/target-ada-exact-toolkit-auto-triad-nt-padded36-two-arm1-cuda128-20260907/release/deps/mamba_rs-dff4450b76bb1de5",
+      "binary_sha256": "c3c74b3b6d350968809594c81c4bb2fd97f6a134c975a73c485b27708c2195be",
+      "listed_count": 710,
+      "target": "mamba_rs",
+      "test": "mamba_ssm::gpu::gemm_bi_triad::qualification::tests::sm89_nt_compact_finalist_resources_k0_and_live_revisions"
+    }
+  },
+  "build_args": [
+    "cargo",
+    "test",
+    "--release",
+    "--features",
+    "cuda,cudarc/cuda-12080",
+    "--no-run",
+    "--lib",
+    "--test",
+    "gemm_bi_tf32_cohort_binding",
+    "--test",
+    "gemm_bi_performance_matrix",
+    "--message-format=json-render-diagnostics"
+  ],
+  "build_exit": 0,
+  "cache": "/root/mamba-kcache-ada-exact-toolkit-auto-triad-nt-padded36-two-arm1-cuda128-20260907",
+  "cache_after": {
+    "mamba-kernels-v1-204d091e16a1a56557598108ff023f625687865365a0f778ddbd8891bc2cf1e2.bin": "0c35fa355f43ca1d01341df2c76f3655487bce1cfa57e1ec784835e8dfd87aaf",
+    "mamba-kernels-v1-73fbec7557a95462a555e39f1b3c94e8d2bcc7047a14f8f3e3fa51a768ec5b9a.bin": "c02fb7a0ef6a50cb52dc3fec2e83ebb1eb6b4015a9f200d48d65fd4493d489c9",
+    "mamba-kernels-v1-9f86aeeeb497af85f55c80874658dc12f21350828793ab42f04232316734fd36.bin": "d042e7d90e756d3f58e90025f696adb32220e1176ff62a42405007e9d7008463",
+    "mamba-kernels-v1-da5dabeff55570d1fb6ca43a1d4a8aa7a2a9d25efb6436ed7f03c4a28a73d986.bin": "48a388fc610d110bb884ea3cd0f49eda299c0c7ce0c8e2beb24d34a925198a54"
+  },
+  "cache_before": {
+    "mamba-kernels-v1-204d091e16a1a56557598108ff023f625687865365a0f778ddbd8891bc2cf1e2.bin": "0c35fa355f43ca1d01341df2c76f3655487bce1cfa57e1ec784835e8dfd87aaf",
+    "mamba-kernels-v1-73fbec7557a95462a555e39f1b3c94e8d2bcc7047a14f8f3e3fa51a768ec5b9a.bin": "c02fb7a0ef6a50cb52dc3fec2e83ebb1eb6b4015a9f200d48d65fd4493d489c9",
+    "mamba-kernels-v1-da5dabeff55570d1fb6ca43a1d4a8aa7a2a9d25efb6436ed7f03c4a28a73d986.bin": "48a388fc610d110bb884ea3cd0f49eda299c0c7ce0c8e2beb24d34a925198a54"
+  },
+  "cache_mode": "0o700",
+  "cache_reused_not_cold": true,
+  "feature": "cuda,cudarc/cuda-12080",
+  "generation": "triad-nt-padded36-two-arm1",
+  "new_cache_files": [
+    "mamba-kernels-v1-9f86aeeeb497af85f55c80874658dc12f21350828793ab42f04232316734fd36.bin"
+  ],
+  "runs": {
+    "bits": {
+      "analysis": {
+        "cases": [
+          "d768_in",
+          "d768_out",
+          "prefix_alpha1",
+          "prefix_alpha_neg075",
+          "prism",
+          "tail_alpha1",
+          "tail_alpha_neg075"
+        ],
+        "rows": 7
+      },
+      "args": [
+        "/root/target-ada-exact-toolkit-auto-triad-nt-padded36-two-arm1-cuda128-20260907/release/deps/gemm_bi_tf32_cohort_binding-1f2a087e1494f9cc",
+        "sm89_nt_compact_finalist_forced_matches_portable_rna_bits",
+        "--exact",
+        "--ignored",
+        "--nocapture"
+      ],
+      "drain_complete": true,
+      "drain_samples": 6,
+      "executed_one": true,
+      "exit": 0,
+      "pre_utc": "2026-09-07T21:07:42Z",
+      "release_utc": "2026-09-07T21:08:37Z",
+      "release_was_quiet": false,
+      "started_utc": "2026-09-07T21:07:42Z"
+    },
+    "once21": {
+      "analysis": {
+        "bindings": 3,
+        "completion": {
+          "admitted_cells": 3,
+          "cells": 3,
+          "kind": "sm89_nt_finalist_once21_complete",
+          "paired_observations": 504,
+          "rows": 24,
+          "schema": "MambaBiSm89NtFinalistOnce21CompletionV1",
+          "timed_arm_windows": 1008,
+          "windows_per_row": 21
+        },
+        "decisions": {
+          "d768_in": true,
+          "d768_out": true,
+          "prism": true
+        },
+        "rows": 24
+      },
+      "args": [
+        "/root/target-ada-exact-toolkit-auto-triad-nt-padded36-two-arm1-cuda128-20260907/release/deps/gemm_bi_performance_matrix-a785e029c5780000",
+        "sm89_nt_finalist_once21::gemm_bi_sm89_nt_finalist_current_fast_once21",
+        "--exact",
+        "--ignored",
+        "--nocapture"
+      ],
+      "drain_complete": true,
+      "drain_samples": 6,
+      "executed_one": true,
+      "exit": 0,
+      "pre_utc": "2026-09-07T21:08:52Z",
+      "release_utc": "2026-09-07T21:09:41Z",
+      "release_was_quiet": false,
+      "started_utc": "2026-09-07T21:08:52Z"
+    },
+    "resource": {
+      "analysis": {
+        "resource": {
+          "artifact_digest": "3529da262f189d20fef9a190d50eb9bb358752aa59cf116ba6395e5ac9dc31e5",
+          "compile_key": "9f86aeeeb497af85f55c80874658dc12f21350828793ab42f04232316734fd36",
+          "driver_api": 13020,
+          "driver_build_digest": "d1edc5a5bc3e10a2688e21568dccbde5e280dc39144dd81e853843ca98b2d0e1",
+          "driver_build_sources": 7,
+          "dynamic_shared_bytes": 49152,
+          "header_manifest_digest": "0b773565ea23bca8cd8ce536c453a19f0bc12064c6b714fc57bb0202a2880a90",
+          "invocation_digest": "9f86aeeeb497af85f55c80874658dc12f21350828793ab42f04232316734fd36",
+          "kind": "sm89_nt_finalist_resources",
+          "launch_threads": 256,
+          "local_bytes": 0,
+          "max_threads": 256,
+          "nvrtc": [
+            12,
+            8
+          ],
+          "nvrtc_library_known": true,
+          "occupancy": 2,
+          "registers": 125,
+          "required_occupancy": 2,
+          "source_digest": "d20cb39f390ef45181be94e4bd7baeb51548c0e6efac64bad72aae71a889e3ce",
+          "static_shared_bytes": 0,
+          "symbol": "gemm_bi_nt_sm89_mma_tf32_compact8_v1_m128n64_bk32_s2",
+          "target": "sm_89"
+        },
+        "revisions": {
+          "exceptional_digest": "2f2e6fa26372128487bbcc3a38fb619facd954b906126303fa35619fc62d5c71",
+          "finalist_revision": 1,
+          "kind": "sm89_nt_finalist_k0_revisions",
+          "portable_revision": 45,
+          "shared_route_revision": 45,
+          "zero_digest": "731c3bc544994cf1d3e7624a9f0ced408627158df4980b478b702d4edb1948ce"
+        }
+      },
+      "args": [
+        "/root/target-ada-exact-toolkit-auto-triad-nt-padded36-two-arm1-cuda128-20260907/release/deps/mamba_rs-dff4450b76bb1de5",
+        "mamba_ssm::gpu::gemm_bi_triad::qualification::tests::sm89_nt_compact_finalist_resources_k0_and_live_revisions",
+        "--exact",
+        "--ignored",
+        "--nocapture"
+      ],
+      "drain_complete": true,
+      "drain_samples": 6,
+      "executed_one": true,
+      "exit": 0,
+      "pre_utc": "2026-09-07T21:08:43Z",
+      "release_utc": "2026-09-07T21:08:47Z",
+      "release_was_quiet": false,
+      "started_utc": "2026-09-07T21:08:43Z"
+    }
+  },
+  "schema": "MambaTriadAdaFinalistTask3LowerBatchReceiptV1",
+  "source_manifest_sha256": "f4b67d8af25a918504aeede58483d17049f0e2c16a688baf4fe635a845355c36",
+  "target": "/root/target-ada-exact-toolkit-auto-triad-nt-padded36-two-arm1-cuda128-20260907",
+  "toolkit": "12.8"
+}

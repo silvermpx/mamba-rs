@@ -1,0 +1,9 @@
+
+running 1 test
+{"kind":"sm89_nt_finalist_actual_auto_bits","case":"d768_in","dims":[2048,768,3072],"symbol":"gemm_bi_nt_sm89_mma_tf32_compact8_v1_m128n64_bk32_s2","digest":"2d21d1c53a0b5308f14bfc0fd14abd2b51f564b8b09f1c95a9469bde06b8f06e","launches_per_arm":4}
+{"kind":"sm89_nt_finalist_actual_auto_bits","case":"d768_out","dims":[2048,1536,768],"symbol":"gemm_bi_nt_sm89_mma_tf32_compact8_v1_m128n64_bk32_s2","digest":"92605dcb8e67fae7eef84836389d3ce94bc39c06cec8e0eca7c49330c456a9a5","launches_per_arm":4}
+{"kind":"sm89_nt_finalist_actual_auto_bits","case":"prism","dims":[4621,384,1928],"symbol":"gemm_bi_nt_sm89_mma_tf32_compact8_v1_m128n64_bk32_s2","digest":"ffccb793570f2485155333599dbe2cc1b9e07307c9ebef77440d7ec001e0d78a","launches_per_arm":4}
+test sm89_nt_compact_finalist_actual_auto_symbols_graphs_and_bits ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out; finished in 9.18s
+

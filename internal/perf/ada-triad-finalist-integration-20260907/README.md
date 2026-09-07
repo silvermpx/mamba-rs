@@ -1,15 +1,70 @@
 # Ada Triad compact8/S2 integration checkpoint
 
-The previously measured NT compact8/S2 candidate is now qualified on CUDA13.2
-and its three measured cells are wired into production AUTO. The post-admission
-actual-AUTO runtime check passes on all three; CUDA12.8/13.0 remain unadmitted
-until their own runs. This is not a cuBLAS Fast win.
+The previously measured NT compact8/S2 candidate is now qualified and wired
+into production AUTO on CUDA12.8,13.0 and13.2, for all three measured cells.
+Final-source actual-AUTO checks pass on every toolkit/cell, without skips.
+This closes this NT finalist integration, not the remaining cuBLAS Fast gap.
 
 The new route keeps the portable RNA numeric contract and one NT
 M128N64/BK32/S2 kernel: 256 threads, 49,152 dynamic shared bytes, no tensor maps.
 Its physical tuning revision is 1; the shared tuning revision remains 45,
 numeric ABI 5 and schedule revision 8. Existing CUDA sources and portable
 cohort literals are unchanged. Optional rejection retains the old routes.
+
+## Final all-toolkit closure — 2026-09-07T21:30Z
+
+Each toolkit completed its own forced portable-RNA seven-case bit check,
+Driver resource/K0/live-revision gate, and 24-cohort/504-pair once21 timing.
+All three cells win versus their actual pre-admission AUTO in every eager/
+graph and AB/BA p50 and p95 stratum. Root independently replayed the raw arrays.
+
+| CUDA | d768-in finalist/current p50 | d768-out | Prism | Registers / local / resident CTAs |
+|---|---:|---:|---:|---:|
+|12.8|.2818–.2824|.3190–.3201|.4247–.4256|125 / 0 / 2|
+|13.0|.2818–.2824|.3187–.3199|.4247–.4255|125 / 0 / 2|
+|13.2|.8240–.8242|.8756–.8821|.8369–.8375|121 / 0 / 2|
+
+The lower-toolkit prior AUTO was exact F32 (`gemm_bi_nt`/`gemm_bi_nt_slim`),
+not the forced portable RNA bit reference. Thus those larger speedups include
+restoring TF32 acceleration under the TF32 policy. Independently paired Fast
+ratios on12.8/13.0 remain about1.98x/1.59x/2.09x: no Fast win is claimed.
+All toolkits use49152 dynamic bytes,0 static bytes and256 threads. The final
+loader register cap is125, the maximum actually observed across the three.
+
+After literal admission and cap freeze, `task3-auto-batch-cuda{128,130,132}/`
+each passed663 nonignored library tests (47 ignored), three exact host tests,
+and the real AUTO symbol/manifest/eager/graph/bits check for all three cells.
+The GPU checks took9.54s/9.18s/9.85s respectively. Each arm runs twice eagerly
+and twice through a graph, checking fresh identical inputs and guards.
+All three observed output digests match across these runs; this is measured
+evidence, not an unrestricted cross-toolkit or cross-GPU bit guarantee.
+
+All three final source manifests have SHA
+`3ed80f444525bc790880ebe7f13a3b498e819fc4df618cff53a0f47791a9bf56`:
+377 rows accounted for,376 local matches plus the committed unrelated SM120
+test baseline. Final dispatch SHA`070a195eb46e60b0e6c5df214585eb164340892fed1676771c6b9e77cbcf2d8e`;
+modules SHA`ff7cfdb5e408b8c3948a2a2975ba1dff658d1ae496a02ab78154df8ae387c813`.
+Command receipts in toolkit order:
+`4cefad470a689182e3ddd3823612aa23220fd0321d74250522d54ec12bde6021`,
+`892bf0a731777f3e560a0b72241026788dd95f877210fd0a79cfbe08318e4899`,
+`2f663eeb16df731e255cb3eb36ca08d25cf878262ffc3cb4b35ca7eae6388842`.
+Actual-AUTO raw logs:
+`f5654f1ab99d7afdd396c7ba4d6e60fb58d08a04657082eba7df4ce159981bfe`,
+`8a53a3391fdbb1f75a9f63e0c98e18aa024059087f091b001a3ad86e63652e91`,
+`93b632b99852605da50bb86efe3a0676c5de776b0f9c979534a59e1072c425ab`.
+
+The reused0700 private caches retained exactly four unchanged artifacts.
+GPU tests have quiet PRE, raw nonquiet immediate RELEASE and separate completed
+quiet DRAIN. The retained `task3-auto-batch-cuda128-failed-captest/` records one
+stale host expectation255 versus the measured125:662 passed,1 failed,47 ignored,
+before any GPU launch. Only that assertion was repaired for the final pass.
+
+Lower-toolkit raw qualification: `task3-lower-batch-cuda128/once21.log` SHA
+`908cc72be23fcea0a42446c306307f00cd10f6b4913f06f0ae68c0b96ef33a3e` and
+`task3-lower-batch-cuda130/once21.log` SHA
+`65601381b92b2a694ba1e271fc700514f0ef2948025f76c49553e8126208765c`.
+Next is one test-only TN compact-packed/eight-compute-warp S2 short screen;
+it is not part of these production admissions. No experiments were deleted.
 
 ## CUDA13.2 paired qualification — 2026-09-07T20:50Z
 
@@ -105,7 +160,7 @@ synthetic PTX fixture incorrectly used the TMA/40-byte ABI for this pointer/
 was not relaxed. Final2 passed 8/8. These are integration findings, not
 candidate performance losses or proof of full behavioral TDD coverage.
 
-## Earlier forced smoke and remaining toolkit work
+## Earlier forced smoke (historical checkpoint)
 
 First real CUDA13.2 smoke is now complete in `task3-early-bits-cuda132/`:
 one exact ignored test passed in58.10s. Seven finite full-mantissa cases cover
@@ -129,8 +184,6 @@ the original three remain unchanged. PRE20:16:05Z was quiet, immediate
 RELEASE20:17:03Z was not quiet, and a separate20:17:04Z DRAIN sample was quiet.
 That is one quiet drain observation, not a claimed five-second quiet window.
 
-CUDA12.8/13.0 still require the same scoped build/load, actual Driver resources,
-forced portable-RNA bits/repeats/eager/graph/tails/prefixes/K0/input/guards and
-paired current/Fast checks before their literal admissions and AUTO postchecks.
-CUDA13.2 completed those requirements above, including live stale-revision
-rejection. No cross-GPU guarantee or new RTX5090 observation is established.
+CUDA12.8/13.0 subsequently completed the same qualification and actual-AUTO
+checks, recorded in the final closure above. No cross-GPU guarantee or new
+RTX5090 observation is established.

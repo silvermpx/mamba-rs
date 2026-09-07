@@ -19,6 +19,15 @@ physical-launch qualification and paired timing harnesses.
 checkpoint; user instructions to wire measured winners, preserve deterministic
 bits, qualify all installed toolkits, and avoid full gates per prototype.
 
+**Execution status2026-09-07T21:30Z:** Tasks1–3 complete. All three measured NT
+cells are admitted and actual-AUTO verified independently on12.8/13.0/13.2.
+Each final source batch passes663 library tests, three exact host checks and
+the three-cell actual-AUTO eager/graph/bit test. Details and raw provenance:
+`internal/perf/ada-triad-finalist-integration-20260907/README.md`.
+The original checklists below preserve the planned tests, not an outstanding
+work queue. Final report records executed coverage and limitations; no new
+whole-project release or untested-architecture qualification is claimed.
+
 ## Global constraints
 
 - Branch `codex/gemm-bi-triad-sm80`; no new worktree, push, AI/coauthor trailer.

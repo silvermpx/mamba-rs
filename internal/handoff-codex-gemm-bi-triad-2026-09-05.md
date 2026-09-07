@@ -9,6 +9,23 @@ the dated progress log, 900 lines), then `internal/agent-operational-rules.md`
 
 ## 1. What the work is
 
+Latest2026-09-07T21:30Z: compact8/S2 NT integration now closes on ALL THREE
+installed toolkits12.8/13.0/13.2. Each has its own measured identity and all
+three exact cells in real AUTO, seven forced RNA bit cases, resource/K0 and
+paired once21 qualification. Final-source batch on each:663 library passes,
+47 ignored, three exact host passes, actualAUTO three cells/no skips with
+repeat/eager/graph bit equality. Final common source map3ed80f44, all377rows
+accounted; raw commands and hashes in the README below. Lower-toolkit oldAUTO
+was exactF32; finalist/current~.282/.319/.425, versus13.2~.824/.88/.837.
+These are wins over oldAUTO, NOT Fast: Fast is still~1.6–2.1x ahead here.
+Measured register counts125/125/121 give final cap125; zero local/static,
+49152dynamic,256threads,occupancy2 on each. Physical1/global45 unchanged.
+One stale cap assertion was repaired after the final host batch caught it;
+the failed raw run is retained. No unrelated WIP or losing experiments deleted.
+Next: one test-only TN Prism compact-packed M128N64/BK32/S2 eight-compute-warp
+screen. Preserve RNA/K order/TN old-C FMA. No new TN speedup is established yet.
+Evidence: `internal/perf/ada-triad-finalist-integration-20260907/README.md`.
+
 Latest2026-09-07T20:50Z: CUDA13.2 compact8/S2 passed the integrated paired
 once21 qualification for all three target NT cells. GraphAB p50 current→new:
 d768-in274.324→226.077us, d768-out119.954→105.791us,

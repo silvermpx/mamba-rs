@@ -1,0 +1,73 @@
+{
+  "complete": true,
+  "required_consecutive_quiet": 5,
+  "samples": [
+    {
+      "apps": "",
+      "apps_exit": 0,
+      "apps_stderr": "",
+      "environment_constructor": "/root/evidence-ada-exact-toolkit-auto-20260907/run.py::env_for",
+      "gpu": "GPU-d1edd7be-e88d-aed6-047d-622163306f0e, NVIDIA RTX 6000 Ada Generation, 8.9, 11 %, 1 %, 40, 59.33 W, 1800 MHz\n",
+      "gpu_exit": 0,
+      "gpu_stderr": "",
+      "phase": "DRAIN",
+      "utc": "2026-09-07T21:28:23Z"
+    },
+    {
+      "apps": "",
+      "apps_exit": 0,
+      "apps_stderr": "",
+      "environment_constructor": "/root/evidence-ada-exact-toolkit-auto-20260907/run.py::env_for",
+      "gpu": "GPU-d1edd7be-e88d-aed6-047d-622163306f0e, NVIDIA RTX 6000 Ada Generation, 8.9, 0 %, 0 %, 40, 59.01 W, 1800 MHz\n",
+      "gpu_exit": 0,
+      "gpu_stderr": "",
+      "phase": "DRAIN",
+      "utc": "2026-09-07T21:28:24Z"
+    },
+    {
+      "apps": "",
+      "apps_exit": 0,
+      "apps_stderr": "",
+      "environment_constructor": "/root/evidence-ada-exact-toolkit-auto-20260907/run.py::env_for",
+      "gpu": "GPU-d1edd7be-e88d-aed6-047d-622163306f0e, NVIDIA RTX 6000 Ada Generation, 8.9, 0 %, 0 %, 40, 55.99 W, 1800 MHz\n",
+      "gpu_exit": 0,
+      "gpu_stderr": "",
+      "phase": "DRAIN",
+      "utc": "2026-09-07T21:28:25Z"
+    },
+    {
+      "apps": "",
+      "apps_exit": 0,
+      "apps_stderr": "",
+      "environment_constructor": "/root/evidence-ada-exact-toolkit-auto-20260907/run.py::env_for",
+      "gpu": "GPU-d1edd7be-e88d-aed6-047d-622163306f0e, NVIDIA RTX 6000 Ada Generation, 8.9, 0 %, 0 %, 40, 48.09 W, 1800 MHz\n",
+      "gpu_exit": 0,
+      "gpu_stderr": "",
+      "phase": "DRAIN",
+      "utc": "2026-09-07T21:28:26Z"
+    },
+    {
+      "apps": "",
+      "apps_exit": 0,
+      "apps_stderr": "",
+      "environment_constructor": "/root/evidence-ada-exact-toolkit-auto-20260907/run.py::env_for",
+      "gpu": "GPU-d1edd7be-e88d-aed6-047d-622163306f0e, NVIDIA RTX 6000 Ada Generation, 8.9, 0 %, 0 %, 40, 40.32 W, 1800 MHz\n",
+      "gpu_exit": 0,
+      "gpu_stderr": "",
+      "phase": "DRAIN",
+      "utc": "2026-09-07T21:28:27Z"
+    },
+    {
+      "apps": "",
+      "apps_exit": 0,
+      "apps_stderr": "",
+      "environment_constructor": "/root/evidence-ada-exact-toolkit-auto-20260907/run.py::env_for",
+      "gpu": "GPU-d1edd7be-e88d-aed6-047d-622163306f0e, NVIDIA RTX 6000 Ada Generation, 8.9, 0 %, 0 %, 40, 40.22 W, 1800 MHz\n",
+      "gpu_exit": 0,
+      "gpu_stderr": "",
+      "phase": "DRAIN",
+      "utc": "2026-09-07T21:28:28Z"
+    }
+  ],
+  "schema": "MambaTriadAdaFinalistDrainV1"
+}

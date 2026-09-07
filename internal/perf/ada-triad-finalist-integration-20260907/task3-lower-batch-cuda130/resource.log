@@ -1,0 +1,8 @@
+
+running 1 test
+{"kind":"sm89_nt_finalist_resources","symbol":"gemm_bi_nt_sm89_mma_tf32_compact8_v1_m128n64_bk32_s2","registers":125,"local_bytes":0,"static_shared_bytes":0,"dynamic_shared_bytes":49152,"launch_threads":256,"max_threads":256,"occupancy":2,"required_occupancy":2,"target":"sm_89","nvrtc":[13,0],"nvrtc_library_known":true,"source_digest":"d20cb39f390ef45181be94e4bd7baeb51548c0e6efac64bad72aae71a889e3ce","invocation_digest":"eef2e92802f05cc8eabf65a156d5c3145b12855ed4346d75d7bc6710fd520778","header_manifest_digest":"70b4dbcd999c5a3b45120faaf14ea9edd6d3c3ae838099c5fe0d01922916edb2","compile_key":"eef2e92802f05cc8eabf65a156d5c3145b12855ed4346d75d7bc6710fd520778","artifact_digest":"3f8a9a3e6ebae16b57bbe593b48deff6d57b0cf9eea58c3b61bf6e9b937a6d6b","driver_api":13020,"driver_build_sources":7,"driver_build_digest":"d1edc5a5bc3e10a2688e21568dccbde5e280dc39144dd81e853843ca98b2d0e1"}
+{"kind":"sm89_nt_finalist_k0_revisions","zero_digest":"731c3bc544994cf1d3e7624a9f0ced408627158df4980b478b702d4edb1948ce","exceptional_digest":"2f2e6fa26372128487bbcc3a38fb619facd954b906126303fa35619fc62d5c71","finalist_revision":1,"portable_revision":45,"shared_route_revision":45}
+test mamba_ssm::gpu::gemm_bi_triad::qualification::tests::sm89_nt_compact_finalist_resources_k0_and_live_revisions ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 709 filtered out; finished in 4.06s
+

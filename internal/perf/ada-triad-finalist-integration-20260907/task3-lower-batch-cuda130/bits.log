@@ -1,0 +1,13 @@
+
+running 1 test
+{"kind":"sm89_nt_finalist_bits","case":"d768_in","dims":[2048,768,3072],"digest":"81cd3eb92c89bedc25e75ed82ba76f97b015842b15a998f1ccc1dd8c5a9e16aa","launches_per_arm":4}
+{"kind":"sm89_nt_finalist_bits","case":"d768_out","dims":[2048,1536,768],"digest":"045d7ade3afe8851031c817e0cd584e94206be73a7cefbe65e17aebe13955000","launches_per_arm":4}
+{"kind":"sm89_nt_finalist_bits","case":"prism","dims":[4621,384,1928],"digest":"7011103a262ab57b42687d9180884b713886894975970a999d2be2b06a6b5a37","launches_per_arm":4}
+{"kind":"sm89_nt_finalist_bits","case":"tail_alpha1","dims":[129,65,36],"digest":"f0d606c820ca7ab1a5d3b892778c395bd6aefcb99d1ea6d5baea5a6143982032","launches_per_arm":4}
+{"kind":"sm89_nt_finalist_bits","case":"prefix_alpha1","dims":[1,65,36],"digest":"c53aa3b7642469d7cc0d27c916dee2d7c81e2a58338299404b42d94679a6c13e","launches_per_arm":4}
+{"kind":"sm89_nt_finalist_bits","case":"tail_alpha_neg075","dims":[129,65,36],"digest":"4f23f6e5232d747ca26ba9a2efd7855a482d05a71498474ef8478dd382791909","launches_per_arm":4}
+{"kind":"sm89_nt_finalist_bits","case":"prefix_alpha_neg075","dims":[1,65,36],"digest":"9422ac3113808ce17a85c51292eae26a446431644a5f40230f7c94d1adaa7f57","launches_per_arm":4}
+test sm89_nt_compact_finalist_forced_matches_portable_rna_bits ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out; finished in 51.76s
+
