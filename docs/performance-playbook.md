@@ -205,13 +205,27 @@ to prevent long sequences of plausible but causally unsupported tile changes.
    reject illegal shared memory, register overflow, local memory or spills;
    check runtime occupancy and exact function/grid/block/shared/ABI; then run
    ordinary, exceptional, tail, alignment, stride, view, redzone,
-   input-immutability, eager-repeat and graph-repeat bit gates. Only then run
-   paired alternating ABBA/BAAB timing for 21 windows. Advance to 101 windows
-   only when both p50 and p95 beat the incumbent and required cuBLAS target.
+   input-immutability, eager-repeat and graph-repeat bit gates. Before each
+   independent replay, poison every output storage word so it differs from
+   the expected bits, preserve guards, and verify the poison was uploaded.
+   A constant sentinel may equal exceptional-value output; complementing the
+   expected bits avoids that gap. Require a no-op graph negative test to fail,
+   and decode captured argument values, not merely their count. Cover both
+   bias states even when timing only the no-bias cell. For nonzero beta, the
+   graph must restore the required old C before each GEMM; poison is not a
+   substitute for that input. Only then run paired
+   alternating ABBA/BAAB timing for 21 windows. Advance to 101 windows when
+   both p50 and p95 beat the incumbent. Retain confirmed own improvements
+   even while cuBLAS remains faster; vendor victory is a separate comparison,
+   never an extra condition for preserving the owner's measured improvement.
 8. **Qualify each domain independently.** A win on CUDA 13.2 does not admit
    CUDA 13.0/12.8, and a win on SM89 does not prove SM80/SM120. Rebuild with
    separate source/target/cache identities and rerun correctness, physical
    graph and paired timing for every promoted toolkit/device/dtype/op cell.
+   A standalone NVCC win must also pass these gates after integration into
+   the actual production NVRTC module. Appending a source fragment changes
+   that module's artifact: requalify its retained routes even when their
+   individual source files remain byte-identical.
    Portable fast kernels should remain available as fallbacks on unoptimized
    architectures; architecture-specific AUTO promotion remains literal.
 9. **Preserve evidence and report every decision.** Keep raw samples,
