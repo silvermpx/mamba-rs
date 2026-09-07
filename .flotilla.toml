@@ -5,6 +5,8 @@ ident = "mamba-rs-915fb0b19265"
 provision = ["brew:cargo-deny"]
 
 [classes]
+# Installs into this checkout's .git; a worker's copy is not the one that pushes.
+local = ["make install-hooks"]
 # Every command may run on ANY worker unless a pin names the hardware
 # fact that keeps it on one kind of box (flotilla docs/20, 2026-09-07).
 # A featureless `cargo test` (15 CPU files; 87 of 102 are whole-file
