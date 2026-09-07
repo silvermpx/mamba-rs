@@ -1,0 +1,1660 @@
+{
+  "scope": "Root independent arithmetic and chronological verification, not the full source/physical/exit gate.",
+  "checker": ".superpowers/sdd/handoff-codex-gemm-bi-triad-2026-09-05/recompute-s3-pairs.rb",
+  "source_sha": "f43a2a22dea7435716ff0c99d721e1d255ad9311f18e9f0b53a15280eafb582b",
+  "runs": [
+    {
+      "path": "internal/perf/ada-half-s3-paired-20260907/cuda128-smokefinal/test.log",
+      "sha256": "a36462ab210695563f47ff21ec084242b2f5d21418bbe11061996808eb46eb3e",
+      "toolkit": "12.8",
+      "windows": 1,
+      "checked_configurations": 8,
+      "samples": 96,
+      "pairs": 24,
+      "summaries": 24,
+      "arithmetic_and_chronology": "PASS",
+      "recomputed": [
+        {
+          "dtype": "bf16",
+          "path": "eager",
+          "start_parity": 0,
+          "direction": "S3/AUTO",
+          "p50": 0.9798297398046324,
+          "p95": 0.9798297398046324
+        },
+        {
+          "dtype": "bf16",
+          "path": "eager",
+          "start_parity": 0,
+          "direction": "AUTO/Fast",
+          "p50": 1.2352222315528445,
+          "p95": 1.2352222315528445
+        },
+        {
+          "dtype": "bf16",
+          "path": "eager",
+          "start_parity": 0,
+          "direction": "S3/Fast",
+          "p50": 1.211847698903935,
+          "p95": 1.211847698903935
+        },
+        {
+          "dtype": "bf16",
+          "path": "eager",
+          "start_parity": 1,
+          "direction": "S3/AUTO",
+          "p50": 0.9628468443438766,
+          "p95": 0.9628468443438766
+        },
+        {
+          "dtype": "bf16",
+          "path": "eager",
+          "start_parity": 1,
+          "direction": "AUTO/Fast",
+          "p50": 1.2384778457339385,
+          "p95": 1.2384778457339385
+        },
+        {
+          "dtype": "bf16",
+          "path": "eager",
+          "start_parity": 1,
+          "direction": "S3/Fast",
+          "p50": 1.2111099952536455,
+          "p95": 1.2111099952536455
+        },
+        {
+          "dtype": "bf16",
+          "path": "graph",
+          "start_parity": 0,
+          "direction": "S3/AUTO",
+          "p50": 0.9828002466012752,
+          "p95": 0.9828002466012752
+        },
+        {
+          "dtype": "bf16",
+          "path": "graph",
+          "start_parity": 0,
+          "direction": "AUTO/Fast",
+          "p50": 1.232515661536433,
+          "p95": 1.232515661536433
+        },
+        {
+          "dtype": "bf16",
+          "path": "graph",
+          "start_parity": 0,
+          "direction": "S3/Fast",
+          "p50": 1.2175729790850325,
+          "p95": 1.2175729790850325
+        },
+        {
+          "dtype": "bf16",
+          "path": "graph",
+          "start_parity": 1,
+          "direction": "S3/AUTO",
+          "p50": 1.00939711666781,
+          "p95": 1.00939711666781
+        },
+        {
+          "dtype": "bf16",
+          "path": "graph",
+          "start_parity": 1,
+          "direction": "AUTO/Fast",
+          "p50": 1.2389336776312119,
+          "p95": 1.2389336776312119
+        },
+        {
+          "dtype": "bf16",
+          "path": "graph",
+          "start_parity": 1,
+          "direction": "S3/Fast",
+          "p50": 1.2155372675892755,
+          "p95": 1.2155372675892755
+        },
+        {
+          "dtype": "f16",
+          "path": "eager",
+          "start_parity": 0,
+          "direction": "S3/AUTO",
+          "p50": 0.9777878764086132,
+          "p95": 0.9777878764086132
+        },
+        {
+          "dtype": "f16",
+          "path": "eager",
+          "start_parity": 0,
+          "direction": "AUTO/Fast",
+          "p50": 1.1530480623575081,
+          "p95": 1.1530480623575081
+        },
+        {
+          "dtype": "f16",
+          "path": "eager",
+          "start_parity": 0,
+          "direction": "S3/Fast",
+          "p50": 1.1140924721351952,
+          "p95": 1.1140924721351952
+        },
+        {
+          "dtype": "f16",
+          "path": "eager",
+          "start_parity": 1,
+          "direction": "S3/AUTO",
+          "p50": 0.9787121694771781,
+          "p95": 0.9787121694771781
+        },
+        {
+          "dtype": "f16",
+          "path": "eager",
+          "start_parity": 1,
+          "direction": "AUTO/Fast",
+          "p50": 1.164520484440192,
+          "p95": 1.164520484440192
+        },
+        {
+          "dtype": "f16",
+          "path": "eager",
+          "start_parity": 1,
+          "direction": "S3/Fast",
+          "p50": 1.1394069259245696,
+          "p95": 1.1394069259245696
+        },
+        {
+          "dtype": "f16",
+          "path": "graph",
+          "start_parity": 0,
+          "direction": "S3/AUTO",
+          "p50": 0.9797165310942852,
+          "p95": 0.9797165310942852
+        },
+        {
+          "dtype": "f16",
+          "path": "graph",
+          "start_parity": 0,
+          "direction": "AUTO/Fast",
+          "p50": 1.005996299131611,
+          "p95": 1.005996299131611
+        },
+        {
+          "dtype": "f16",
+          "path": "graph",
+          "start_parity": 0,
+          "direction": "S3/Fast",
+          "p50": 0.9926336570295091,
+          "p95": 0.9926336570295091
+        },
+        {
+          "dtype": "f16",
+          "path": "graph",
+          "start_parity": 1,
+          "direction": "S3/AUTO",
+          "p50": 0.939740929352806,
+          "p95": 0.939740929352806
+        },
+        {
+          "dtype": "f16",
+          "path": "graph",
+          "start_parity": 1,
+          "direction": "AUTO/Fast",
+          "p50": 1.1466216352629348,
+          "p95": 1.1466216352629348
+        },
+        {
+          "dtype": "f16",
+          "path": "graph",
+          "start_parity": 1,
+          "direction": "S3/Fast",
+          "p50": 1.136932751819973,
+          "p95": 1.136932751819973
+        }
+      ]
+    },
+    {
+      "path": "internal/perf/ada-half-s3-paired-20260907/cuda128-screen21/test.log",
+      "sha256": "0a013c4e1ab430ccdc1e9a31b17a4d4e9ffd61ab51f4f22404cda45f8fdc9999",
+      "toolkit": "12.8",
+      "windows": 21,
+      "checked_configurations": 8,
+      "samples": 2016,
+      "pairs": 504,
+      "summaries": 24,
+      "arithmetic_and_chronology": "PASS",
+      "recomputed": [
+        {
+          "dtype": "bf16",
+          "path": "eager",
+          "start_parity": 0,
+          "direction": "S3/AUTO",
+          "p50": 0.9800590196996316,
+          "p95": 1.0044086976282782
+        },
+        {
+          "dtype": "bf16",
+          "path": "eager",
+          "start_parity": 0,
+          "direction": "AUTO/Fast",
+          "p50": 1.2434422472461175,
+          "p95": 1.2761965943594504
+        },
+        {
+          "dtype": "bf16",
+          "path": "eager",
+          "start_parity": 0,
+          "direction": "S3/Fast",
+          "p50": 1.2134796533713652,
+          "p95": 1.2396508376474258
+        },
+        {
+          "dtype": "bf16",
+          "path": "eager",
+          "start_parity": 1,
+          "direction": "S3/AUTO",
+          "p50": 0.9807538485207878,
+          "p95": 1.0051922987649105
+        },
+        {
+          "dtype": "bf16",
+          "path": "eager",
+          "start_parity": 1,
+          "direction": "AUTO/Fast",
+          "p50": 1.2427208574525967,
+          "p95": 1.2723193536863988
+        },
+        {
+          "dtype": "bf16",
+          "path": "eager",
+          "start_parity": 1,
+          "direction": "S3/Fast",
+          "p50": 1.2165051291903368,
+          "p95": 1.231414547061214
+        },
+        {
+          "dtype": "bf16",
+          "path": "graph",
+          "start_parity": 0,
+          "direction": "S3/AUTO",
+          "p50": 0.9831542096427176,
+          "p95": 1.0068675711113941
+        },
+        {
+          "dtype": "bf16",
+          "path": "graph",
+          "start_parity": 0,
+          "direction": "AUTO/Fast",
+          "p50": 1.2420657310519285,
+          "p95": 1.2759027625038295
+        },
+        {
+          "dtype": "bf16",
+          "path": "graph",
+          "start_parity": 0,
+          "direction": "S3/Fast",
+          "p50": 1.2183895572177144,
+          "p95": 1.2349753838938655
+        },
+        {
+          "dtype": "bf16",
+          "path": "graph",
+          "start_parity": 1,
+          "direction": "S3/AUTO",
+          "p50": 0.9834878466503862,
+          "p95": 1.0067782586129483
+        },
+        {
+          "dtype": "bf16",
+          "path": "graph",
+          "start_parity": 1,
+          "direction": "AUTO/Fast",
+          "p50": 1.2409229179167904,
+          "p95": 1.2733501940531038
+        },
+        {
+          "dtype": "bf16",
+          "path": "graph",
+          "start_parity": 1,
+          "direction": "S3/Fast",
+          "p50": 1.2183937532866216,
+          "p95": 1.2322733377252744
+        },
+        {
+          "dtype": "f16",
+          "path": "eager",
+          "start_parity": 0,
+          "direction": "S3/AUTO",
+          "p50": 0.9794984759888556,
+          "p95": 0.989047191952326
+        },
+        {
+          "dtype": "f16",
+          "path": "eager",
+          "start_parity": 0,
+          "direction": "AUTO/Fast",
+          "p50": 1.1822884000504883,
+          "p95": 1.1991852438957913
+        },
+        {
+          "dtype": "f16",
+          "path": "eager",
+          "start_parity": 0,
+          "direction": "S3/Fast",
+          "p50": 1.1386135657182688,
+          "p95": 1.1530619204795323
+        },
+        {
+          "dtype": "f16",
+          "path": "eager",
+          "start_parity": 1,
+          "direction": "S3/AUTO",
+          "p50": 0.9790276832718693,
+          "p95": 0.9861399479947197
+        },
+        {
+          "dtype": "f16",
+          "path": "eager",
+          "start_parity": 1,
+          "direction": "AUTO/Fast",
+          "p50": 1.183029905187232,
+          "p95": 1.21446568428094
+        },
+        {
+          "dtype": "f16",
+          "path": "eager",
+          "start_parity": 1,
+          "direction": "S3/Fast",
+          "p50": 1.1347702628684806,
+          "p95": 1.1693737018845656
+        },
+        {
+          "dtype": "f16",
+          "path": "graph",
+          "start_parity": 0,
+          "direction": "S3/AUTO",
+          "p50": 0.9817923741767801,
+          "p95": 0.9968018029506079
+        },
+        {
+          "dtype": "f16",
+          "path": "graph",
+          "start_parity": 0,
+          "direction": "AUTO/Fast",
+          "p50": 1.1852827319413564,
+          "p95": 1.2118117926037186
+        },
+        {
+          "dtype": "f16",
+          "path": "graph",
+          "start_parity": 0,
+          "direction": "S3/Fast",
+          "p50": 1.150020962545258,
+          "p95": 1.165323074198463
+        },
+        {
+          "dtype": "f16",
+          "path": "graph",
+          "start_parity": 1,
+          "direction": "S3/AUTO",
+          "p50": 0.9811338977210988,
+          "p95": 0.9974147239145329
+        },
+        {
+          "dtype": "f16",
+          "path": "graph",
+          "start_parity": 1,
+          "direction": "AUTO/Fast",
+          "p50": 1.184890174607752,
+          "p95": 1.2127689989611241
+        },
+        {
+          "dtype": "f16",
+          "path": "graph",
+          "start_parity": 1,
+          "direction": "S3/Fast",
+          "p50": 1.1438038067270107,
+          "p95": 1.1658400433867384
+        }
+      ]
+    },
+    {
+      "path": "internal/perf/ada-half-s3-paired-20260907/cuda128-confirm101/test.log",
+      "sha256": "6f3a04dfb2bef038b58110708f9e0e3df112831e77d573436fbf767de03c380a",
+      "toolkit": "12.8",
+      "windows": 101,
+      "checked_configurations": 4,
+      "samples": 4848,
+      "pairs": 1212,
+      "summaries": 12,
+      "arithmetic_and_chronology": "PASS",
+      "recomputed": [
+        {
+          "dtype": "f16",
+          "path": "eager",
+          "start_parity": 0,
+          "direction": "S3/AUTO",
+          "p50": 0.978215225925117,
+          "p95": 0.9902047790090341
+        },
+        {
+          "dtype": "f16",
+          "path": "eager",
+          "start_parity": 0,
+          "direction": "AUTO/Fast",
+          "p50": 1.1831556605450242,
+          "p95": 1.2136315073063693
+        },
+        {
+          "dtype": "f16",
+          "path": "eager",
+          "start_parity": 0,
+          "direction": "S3/Fast",
+          "p50": 1.138563688157973,
+          "p95": 1.1642926638204691
+        },
+        {
+          "dtype": "f16",
+          "path": "eager",
+          "start_parity": 1,
+          "direction": "S3/AUTO",
+          "p50": 0.9781992196665875,
+          "p95": 0.9933963374838117
+        },
+        {
+          "dtype": "f16",
+          "path": "eager",
+          "start_parity": 1,
+          "direction": "AUTO/Fast",
+          "p50": 1.1848797134508067,
+          "p95": 1.2079296537839788
+        },
+        {
+          "dtype": "f16",
+          "path": "eager",
+          "start_parity": 1,
+          "direction": "S3/Fast",
+          "p50": 1.139258350554195,
+          "p95": 1.1649471063082733
+        },
+        {
+          "dtype": "f16",
+          "path": "graph",
+          "start_parity": 0,
+          "direction": "S3/AUTO",
+          "p50": 0.9815559062883817,
+          "p95": 1.0063478446765315
+        },
+        {
+          "dtype": "f16",
+          "path": "graph",
+          "start_parity": 0,
+          "direction": "AUTO/Fast",
+          "p50": 1.1874737009871097,
+          "p95": 1.2109455115181873
+        },
+        {
+          "dtype": "f16",
+          "path": "graph",
+          "start_parity": 0,
+          "direction": "S3/Fast",
+          "p50": 1.143060004488605,
+          "p95": 1.1675502838530372
+        },
+        {
+          "dtype": "f16",
+          "path": "graph",
+          "start_parity": 1,
+          "direction": "S3/AUTO",
+          "p50": 0.9807889571167002,
+          "p95": 1.0045454893294363
+        },
+        {
+          "dtype": "f16",
+          "path": "graph",
+          "start_parity": 1,
+          "direction": "AUTO/Fast",
+          "p50": 1.1883203126837938,
+          "p95": 1.2191780808474348
+        },
+        {
+          "dtype": "f16",
+          "path": "graph",
+          "start_parity": 1,
+          "direction": "S3/Fast",
+          "p50": 1.147593570460331,
+          "p95": 1.1684277193594055
+        }
+      ]
+    },
+    {
+      "path": "internal/perf/ada-half-s3-paired-20260907/cuda130-smokefinal/test.log",
+      "sha256": "3ce99484252eba0338fd7935d29fde9d51b526d1e85a10866c87d73eca57a512",
+      "toolkit": "13.0",
+      "windows": 1,
+      "checked_configurations": 8,
+      "samples": 96,
+      "pairs": 24,
+      "summaries": 24,
+      "arithmetic_and_chronology": "PASS",
+      "recomputed": [
+        {
+          "dtype": "bf16",
+          "path": "eager",
+          "start_parity": 0,
+          "direction": "S3/AUTO",
+          "p50": 0.9804854912053913,
+          "p95": 0.9804854912053913
+        },
+        {
+          "dtype": "bf16",
+          "path": "eager",
+          "start_parity": 0,
+          "direction": "AUTO/Fast",
+          "p50": 1.2466823450208502,
+          "p95": 1.2466823450208502
+        },
+        {
+          "dtype": "bf16",
+          "path": "eager",
+          "start_parity": 0,
+          "direction": "S3/Fast",
+          "p50": 1.2114526378467343,
+          "p95": 1.2114526378467343
+        },
+        {
+          "dtype": "bf16",
+          "path": "eager",
+          "start_parity": 1,
+          "direction": "S3/AUTO",
+          "p50": 0.998789479502855,
+          "p95": 0.998789479502855
+        },
+        {
+          "dtype": "bf16",
+          "path": "eager",
+          "start_parity": 1,
+          "direction": "AUTO/Fast",
+          "p50": 1.2377630035225702,
+          "p95": 1.2377630035225702
+        },
+        {
+          "dtype": "bf16",
+          "path": "eager",
+          "start_parity": 1,
+          "direction": "S3/Fast",
+          "p50": 1.2115285922298613,
+          "p95": 1.2115285922298613
+        },
+        {
+          "dtype": "bf16",
+          "path": "graph",
+          "start_parity": 0,
+          "direction": "S3/AUTO",
+          "p50": 0.9819605344367703,
+          "p95": 0.9819605344367703
+        },
+        {
+          "dtype": "bf16",
+          "path": "graph",
+          "start_parity": 0,
+          "direction": "AUTO/Fast",
+          "p50": 1.23242839387147,
+          "p95": 1.23242839387147
+        },
+        {
+          "dtype": "bf16",
+          "path": "graph",
+          "start_parity": 0,
+          "direction": "S3/Fast",
+          "p50": 1.2192905851953997,
+          "p95": 1.2192905851953997
+        },
+        {
+          "dtype": "bf16",
+          "path": "graph",
+          "start_parity": 1,
+          "direction": "S3/AUTO",
+          "p50": 0.9660475535320995,
+          "p95": 0.9660475535320995
+        },
+        {
+          "dtype": "bf16",
+          "path": "graph",
+          "start_parity": 1,
+          "direction": "AUTO/Fast",
+          "p50": 1.2408651145349063,
+          "p95": 1.2408651145349063
+        },
+        {
+          "dtype": "bf16",
+          "path": "graph",
+          "start_parity": 1,
+          "direction": "S3/Fast",
+          "p50": 1.2143966262104842,
+          "p95": 1.2143966262104842
+        },
+        {
+          "dtype": "f16",
+          "path": "eager",
+          "start_parity": 0,
+          "direction": "S3/AUTO",
+          "p50": 0.9783455919461889,
+          "p95": 0.9783455919461889
+        },
+        {
+          "dtype": "f16",
+          "path": "eager",
+          "start_parity": 0,
+          "direction": "AUTO/Fast",
+          "p50": 1.1544082145939114,
+          "p95": 1.1544082145939114
+        },
+        {
+          "dtype": "f16",
+          "path": "eager",
+          "start_parity": 0,
+          "direction": "S3/Fast",
+          "p50": 1.1168046049722602,
+          "p95": 1.1168046049722602
+        },
+        {
+          "dtype": "f16",
+          "path": "eager",
+          "start_parity": 1,
+          "direction": "S3/AUTO",
+          "p50": 0.9785744717888748,
+          "p95": 0.9785744717888748
+        },
+        {
+          "dtype": "f16",
+          "path": "eager",
+          "start_parity": 1,
+          "direction": "AUTO/Fast",
+          "p50": 1.0178585245979397,
+          "p95": 1.0178585245979397
+        },
+        {
+          "dtype": "f16",
+          "path": "eager",
+          "start_parity": 1,
+          "direction": "S3/Fast",
+          "p50": 0.9939864239495275,
+          "p95": 0.9939864239495275
+        },
+        {
+          "dtype": "f16",
+          "path": "graph",
+          "start_parity": 0,
+          "direction": "S3/AUTO",
+          "p50": 0.9731569502709345,
+          "p95": 0.9731569502709345
+        },
+        {
+          "dtype": "f16",
+          "path": "graph",
+          "start_parity": 0,
+          "direction": "AUTO/Fast",
+          "p50": 1.1697938333410736,
+          "p95": 1.1697938333410736
+        },
+        {
+          "dtype": "f16",
+          "path": "graph",
+          "start_parity": 0,
+          "direction": "S3/Fast",
+          "p50": 1.1473175747764006,
+          "p95": 1.1473175747764006
+        },
+        {
+          "dtype": "f16",
+          "path": "graph",
+          "start_parity": 1,
+          "direction": "S3/AUTO",
+          "p50": 0.9816679854719779,
+          "p95": 0.9816679854719779
+        },
+        {
+          "dtype": "f16",
+          "path": "graph",
+          "start_parity": 1,
+          "direction": "AUTO/Fast",
+          "p50": 1.1753177848772267,
+          "p95": 1.1753177848772267
+        },
+        {
+          "dtype": "f16",
+          "path": "graph",
+          "start_parity": 1,
+          "direction": "S3/Fast",
+          "p50": 1.1481719643004997,
+          "p95": 1.1481719643004997
+        }
+      ]
+    },
+    {
+      "path": "internal/perf/ada-half-s3-paired-20260907/cuda130-screen21/test.log",
+      "sha256": "d710a7e178873647320d3f2dc194cb10e98be1c8939d0bad37cdce2a38494171",
+      "toolkit": "13.0",
+      "windows": 21,
+      "checked_configurations": 8,
+      "samples": 2016,
+      "pairs": 504,
+      "summaries": 24,
+      "arithmetic_and_chronology": "PASS",
+      "recomputed": [
+        {
+          "dtype": "bf16",
+          "path": "eager",
+          "start_parity": 0,
+          "direction": "S3/AUTO",
+          "p50": 0.9804796674871937,
+          "p95": 0.9896704760027238
+        },
+        {
+          "dtype": "bf16",
+          "path": "eager",
+          "start_parity": 0,
+          "direction": "AUTO/Fast",
+          "p50": 1.241779442349171,
+          "p95": 1.261294111237741
+        },
+        {
+          "dtype": "bf16",
+          "path": "eager",
+          "start_parity": 0,
+          "direction": "S3/Fast",
+          "p50": 1.2127388078608607,
+          "p95": 1.233082563684369
+        },
+        {
+          "dtype": "bf16",
+          "path": "eager",
+          "start_parity": 1,
+          "direction": "S3/AUTO",
+          "p50": 0.9802951849378444,
+          "p95": 1.000049304503512
+        },
+        {
+          "dtype": "bf16",
+          "path": "eager",
+          "start_parity": 1,
+          "direction": "AUTO/Fast",
+          "p50": 1.2435337006606024,
+          "p95": 1.275703889826947
+        },
+        {
+          "dtype": "bf16",
+          "path": "eager",
+          "start_parity": 1,
+          "direction": "S3/Fast",
+          "p50": 1.213907194085338,
+          "p95": 1.2337693739833058
+        },
+        {
+          "dtype": "bf16",
+          "path": "graph",
+          "start_parity": 0,
+          "direction": "S3/AUTO",
+          "p50": 0.9830979324507121,
+          "p95": 1.0110733584299374
+        },
+        {
+          "dtype": "bf16",
+          "path": "graph",
+          "start_parity": 0,
+          "direction": "AUTO/Fast",
+          "p50": 1.2414112368286043,
+          "p95": 1.2789011862571973
+        },
+        {
+          "dtype": "bf16",
+          "path": "graph",
+          "start_parity": 0,
+          "direction": "S3/Fast",
+          "p50": 1.2196792415180173,
+          "p95": 1.228558919014593
+        },
+        {
+          "dtype": "bf16",
+          "path": "graph",
+          "start_parity": 1,
+          "direction": "S3/AUTO",
+          "p50": 0.9817261846103266,
+          "p95": 0.9923116137646453
+        },
+        {
+          "dtype": "bf16",
+          "path": "graph",
+          "start_parity": 1,
+          "direction": "AUTO/Fast",
+          "p50": 1.2429861259860866,
+          "p95": 1.2999750609153993
+        },
+        {
+          "dtype": "bf16",
+          "path": "graph",
+          "start_parity": 1,
+          "direction": "S3/Fast",
+          "p50": 1.2211187693019212,
+          "p95": 1.2312978873931482
+        },
+        {
+          "dtype": "f16",
+          "path": "eager",
+          "start_parity": 0,
+          "direction": "S3/AUTO",
+          "p50": 0.9786378340769105,
+          "p95": 0.9877261694907993
+        },
+        {
+          "dtype": "f16",
+          "path": "eager",
+          "start_parity": 0,
+          "direction": "AUTO/Fast",
+          "p50": 1.1831947215518706,
+          "p95": 1.2130496665590484
+        },
+        {
+          "dtype": "f16",
+          "path": "eager",
+          "start_parity": 0,
+          "direction": "S3/Fast",
+          "p50": 1.133776067775647,
+          "p95": 1.1579741385366433
+        },
+        {
+          "dtype": "f16",
+          "path": "eager",
+          "start_parity": 1,
+          "direction": "S3/AUTO",
+          "p50": 0.9780439039216619,
+          "p95": 0.9930101458512047
+        },
+        {
+          "dtype": "f16",
+          "path": "eager",
+          "start_parity": 1,
+          "direction": "AUTO/Fast",
+          "p50": 1.185655836991068,
+          "p95": 1.2038426138024132
+        },
+        {
+          "dtype": "f16",
+          "path": "eager",
+          "start_parity": 1,
+          "direction": "S3/Fast",
+          "p50": 1.134939757075318,
+          "p95": 1.1598793514836219
+        },
+        {
+          "dtype": "f16",
+          "path": "graph",
+          "start_parity": 0,
+          "direction": "S3/AUTO",
+          "p50": 0.9815273646067177,
+          "p95": 0.9942740181811298
+        },
+        {
+          "dtype": "f16",
+          "path": "graph",
+          "start_parity": 0,
+          "direction": "AUTO/Fast",
+          "p50": 1.1847414637174456,
+          "p95": 1.2174840221835472
+        },
+        {
+          "dtype": "f16",
+          "path": "graph",
+          "start_parity": 0,
+          "direction": "S3/Fast",
+          "p50": 1.1484288386984487,
+          "p95": 1.1754116425340644
+        },
+        {
+          "dtype": "f16",
+          "path": "graph",
+          "start_parity": 1,
+          "direction": "S3/AUTO",
+          "p50": 0.9809760222180137,
+          "p95": 0.9934403577719703
+        },
+        {
+          "dtype": "f16",
+          "path": "graph",
+          "start_parity": 1,
+          "direction": "AUTO/Fast",
+          "p50": 1.1867567184006123,
+          "p95": 1.2128583911756172
+        },
+        {
+          "dtype": "f16",
+          "path": "graph",
+          "start_parity": 1,
+          "direction": "S3/Fast",
+          "p50": 1.1516364115770834,
+          "p95": 1.1667984314139612
+        }
+      ]
+    },
+    {
+      "path": "internal/perf/ada-half-s3-paired-20260907/cuda130-confirm101/test.log",
+      "sha256": "c1336d290af102df806c3b2307e9eafc32bd8e4fa1dfad2aa9a8d3ecfa56db75",
+      "toolkit": "13.0",
+      "windows": 101,
+      "checked_configurations": 4,
+      "samples": 4848,
+      "pairs": 1212,
+      "summaries": 12,
+      "arithmetic_and_chronology": "PASS",
+      "recomputed": [
+        {
+          "dtype": "f16",
+          "path": "eager",
+          "start_parity": 0,
+          "direction": "S3/AUTO",
+          "p50": 0.9780674839574968,
+          "p95": 1.0032482870473596
+        },
+        {
+          "dtype": "f16",
+          "path": "eager",
+          "start_parity": 0,
+          "direction": "AUTO/Fast",
+          "p50": 1.186659096000205,
+          "p95": 1.2062658793607486
+        },
+        {
+          "dtype": "f16",
+          "path": "eager",
+          "start_parity": 0,
+          "direction": "S3/Fast",
+          "p50": 1.1372336021354195,
+          "p95": 1.1618222839413528
+        },
+        {
+          "dtype": "f16",
+          "path": "eager",
+          "start_parity": 1,
+          "direction": "S3/AUTO",
+          "p50": 0.978144891498957,
+          "p95": 1.0037237098448515
+        },
+        {
+          "dtype": "f16",
+          "path": "eager",
+          "start_parity": 1,
+          "direction": "AUTO/Fast",
+          "p50": 1.1867181796556505,
+          "p95": 1.204163350307799
+        },
+        {
+          "dtype": "f16",
+          "path": "eager",
+          "start_parity": 1,
+          "direction": "S3/Fast",
+          "p50": 1.1399352999584846,
+          "p95": 1.1616494624828713
+        },
+        {
+          "dtype": "f16",
+          "path": "graph",
+          "start_parity": 0,
+          "direction": "S3/AUTO",
+          "p50": 0.9811513668854215,
+          "p95": 1.015680725575804
+        },
+        {
+          "dtype": "f16",
+          "path": "graph",
+          "start_parity": 0,
+          "direction": "AUTO/Fast",
+          "p50": 1.1887590455219548,
+          "p95": 1.2056825537988833
+        },
+        {
+          "dtype": "f16",
+          "path": "graph",
+          "start_parity": 0,
+          "direction": "S3/Fast",
+          "p50": 1.145417046664966,
+          "p95": 1.1682844892807196
+        },
+        {
+          "dtype": "f16",
+          "path": "graph",
+          "start_parity": 1,
+          "direction": "S3/AUTO",
+          "p50": 0.9804017668967151,
+          "p95": 1.0153078125073522
+        },
+        {
+          "dtype": "f16",
+          "path": "graph",
+          "start_parity": 1,
+          "direction": "AUTO/Fast",
+          "p50": 1.1884445377444195,
+          "p95": 1.2171042659647446
+        },
+        {
+          "dtype": "f16",
+          "path": "graph",
+          "start_parity": 1,
+          "direction": "S3/Fast",
+          "p50": 1.1444595439265357,
+          "p95": 1.1673107462179146
+        }
+      ]
+    },
+    {
+      "path": "internal/perf/ada-half-s3-paired-20260907/cuda132-smokefinal/test.log",
+      "sha256": "c08fb2bf463dc11aa021050a25463025c7489da31d385eb2aa0d27a81a7e3f61",
+      "toolkit": "13.2",
+      "windows": 1,
+      "checked_configurations": 8,
+      "samples": 96,
+      "pairs": 24,
+      "summaries": 24,
+      "arithmetic_and_chronology": "PASS",
+      "recomputed": [
+        {
+          "dtype": "bf16",
+          "path": "eager",
+          "start_parity": 0,
+          "direction": "S3/AUTO",
+          "p50": 0.9257005260016932,
+          "p95": 0.9257005260016932
+        },
+        {
+          "dtype": "bf16",
+          "path": "eager",
+          "start_parity": 0,
+          "direction": "AUTO/Fast",
+          "p50": 1.3044659144063055,
+          "p95": 1.3044659144063055
+        },
+        {
+          "dtype": "bf16",
+          "path": "eager",
+          "start_parity": 0,
+          "direction": "S3/Fast",
+          "p50": 1.209275849593331,
+          "p95": 1.209275849593331
+        },
+        {
+          "dtype": "bf16",
+          "path": "eager",
+          "start_parity": 1,
+          "direction": "S3/AUTO",
+          "p50": 0.9264789961368063,
+          "p95": 0.9264789961368063
+        },
+        {
+          "dtype": "bf16",
+          "path": "eager",
+          "start_parity": 1,
+          "direction": "AUTO/Fast",
+          "p50": 1.3074720574427945,
+          "p95": 1.3074720574427945
+        },
+        {
+          "dtype": "bf16",
+          "path": "eager",
+          "start_parity": 1,
+          "direction": "S3/Fast",
+          "p50": 1.21155351357685,
+          "p95": 1.21155351357685
+        },
+        {
+          "dtype": "bf16",
+          "path": "graph",
+          "start_parity": 0,
+          "direction": "S3/AUTO",
+          "p50": 0.930664012284712,
+          "p95": 0.930664012284712
+        },
+        {
+          "dtype": "bf16",
+          "path": "graph",
+          "start_parity": 0,
+          "direction": "AUTO/Fast",
+          "p50": 1.3001841144573616,
+          "p95": 1.3001841144573616
+        },
+        {
+          "dtype": "bf16",
+          "path": "graph",
+          "start_parity": 0,
+          "direction": "S3/Fast",
+          "p50": 1.2160738299524012,
+          "p95": 1.2160738299524012
+        },
+        {
+          "dtype": "bf16",
+          "path": "graph",
+          "start_parity": 1,
+          "direction": "S3/AUTO",
+          "p50": 0.9315481671841176,
+          "p95": 0.9315481671841176
+        },
+        {
+          "dtype": "bf16",
+          "path": "graph",
+          "start_parity": 1,
+          "direction": "AUTO/Fast",
+          "p50": 1.3094733876934057,
+          "p95": 1.3094733876934057
+        },
+        {
+          "dtype": "bf16",
+          "path": "graph",
+          "start_parity": 1,
+          "direction": "S3/Fast",
+          "p50": 1.2136232810608838,
+          "p95": 1.2136232810608838
+        },
+        {
+          "dtype": "f16",
+          "path": "eager",
+          "start_parity": 0,
+          "direction": "S3/AUTO",
+          "p50": 0.925498756425271,
+          "p95": 0.925498756425271
+        },
+        {
+          "dtype": "f16",
+          "path": "eager",
+          "start_parity": 0,
+          "direction": "AUTO/Fast",
+          "p50": 1.207387134363142,
+          "p95": 1.207387134363142
+        },
+        {
+          "dtype": "f16",
+          "path": "eager",
+          "start_parity": 0,
+          "direction": "S3/Fast",
+          "p50": 1.10694154860016,
+          "p95": 1.10694154860016
+        },
+        {
+          "dtype": "f16",
+          "path": "eager",
+          "start_parity": 1,
+          "direction": "S3/AUTO",
+          "p50": 0.9257634336087801,
+          "p95": 0.9257634336087801
+        },
+        {
+          "dtype": "f16",
+          "path": "eager",
+          "start_parity": 1,
+          "direction": "AUTO/Fast",
+          "p50": 1.2346559181775765,
+          "p95": 1.2346559181775765
+        },
+        {
+          "dtype": "f16",
+          "path": "eager",
+          "start_parity": 1,
+          "direction": "S3/Fast",
+          "p50": 1.1176079943576085,
+          "p95": 1.1176079943576085
+        },
+        {
+          "dtype": "f16",
+          "path": "graph",
+          "start_parity": 0,
+          "direction": "S3/AUTO",
+          "p50": 0.9301048492389253,
+          "p95": 0.9301048492389253
+        },
+        {
+          "dtype": "f16",
+          "path": "graph",
+          "start_parity": 0,
+          "direction": "AUTO/Fast",
+          "p50": 1.2050993284185822,
+          "p95": 1.2050993284185822
+        },
+        {
+          "dtype": "f16",
+          "path": "graph",
+          "start_parity": 0,
+          "direction": "S3/Fast",
+          "p50": 1.1229499956054962,
+          "p95": 1.1229499956054962
+        },
+        {
+          "dtype": "f16",
+          "path": "graph",
+          "start_parity": 1,
+          "direction": "S3/AUTO",
+          "p50": 0.9271723974179611,
+          "p95": 0.9271723974179611
+        },
+        {
+          "dtype": "f16",
+          "path": "graph",
+          "start_parity": 1,
+          "direction": "AUTO/Fast",
+          "p50": 1.0620346766051623,
+          "p95": 1.0620346766051623
+        },
+        {
+          "dtype": "f16",
+          "path": "graph",
+          "start_parity": 1,
+          "direction": "S3/Fast",
+          "p50": 0.9928847333053079,
+          "p95": 0.9928847333053079
+        }
+      ]
+    },
+    {
+      "path": "internal/perf/ada-half-s3-paired-20260907/cuda132-screen21/test.log",
+      "sha256": "cd9c9f3228498c876499a4f910af579f2858417d756c2a8251f2447ccf9f4815",
+      "toolkit": "13.2",
+      "windows": 21,
+      "checked_configurations": 8,
+      "samples": 2016,
+      "pairs": 504,
+      "summaries": 24,
+      "arithmetic_and_chronology": "PASS",
+      "recomputed": [
+        {
+          "dtype": "bf16",
+          "path": "eager",
+          "start_parity": 0,
+          "direction": "S3/AUTO",
+          "p50": 0.9274687838539853,
+          "p95": 0.9485580582265233
+        },
+        {
+          "dtype": "bf16",
+          "path": "eager",
+          "start_parity": 0,
+          "direction": "AUTO/Fast",
+          "p50": 1.3001401201331213,
+          "p95": 1.3125630145297011
+        },
+        {
+          "dtype": "bf16",
+          "path": "eager",
+          "start_parity": 0,
+          "direction": "S3/Fast",
+          "p50": 1.2024634445199855,
+          "p95": 1.2184186933170895
+        },
+        {
+          "dtype": "bf16",
+          "path": "eager",
+          "start_parity": 1,
+          "direction": "S3/AUTO",
+          "p50": 0.9262719905412485,
+          "p95": 0.9494840309011237
+        },
+        {
+          "dtype": "bf16",
+          "path": "eager",
+          "start_parity": 1,
+          "direction": "AUTO/Fast",
+          "p50": 1.3117902426557042,
+          "p95": 1.3342624879469773
+        },
+        {
+          "dtype": "bf16",
+          "path": "eager",
+          "start_parity": 1,
+          "direction": "S3/Fast",
+          "p50": 1.1922840086227466,
+          "p95": 1.2196296711608352
+        },
+        {
+          "dtype": "bf16",
+          "path": "graph",
+          "start_parity": 0,
+          "direction": "S3/AUTO",
+          "p50": 0.9305321634212225,
+          "p95": 0.9489567838489793
+        },
+        {
+          "dtype": "bf16",
+          "path": "graph",
+          "start_parity": 0,
+          "direction": "AUTO/Fast",
+          "p50": 1.3096506159687489,
+          "p95": 1.341640683470005
+        },
+        {
+          "dtype": "bf16",
+          "path": "graph",
+          "start_parity": 0,
+          "direction": "S3/Fast",
+          "p50": 1.2073186173345427,
+          "p95": 1.2263588559104304
+        },
+        {
+          "dtype": "bf16",
+          "path": "graph",
+          "start_parity": 1,
+          "direction": "S3/AUTO",
+          "p50": 0.9291744287160434,
+          "p95": 0.9511831611293615
+        },
+        {
+          "dtype": "bf16",
+          "path": "graph",
+          "start_parity": 1,
+          "direction": "AUTO/Fast",
+          "p50": 1.3101045837274206,
+          "p95": 1.314318257434909
+        },
+        {
+          "dtype": "bf16",
+          "path": "graph",
+          "start_parity": 1,
+          "direction": "S3/Fast",
+          "p50": 1.2181087769056862,
+          "p95": 1.22551281324639
+        },
+        {
+          "dtype": "f16",
+          "path": "eager",
+          "start_parity": 0,
+          "direction": "S3/AUTO",
+          "p50": 0.9246191998844967,
+          "p95": 0.9464339507856596
+        },
+        {
+          "dtype": "f16",
+          "path": "eager",
+          "start_parity": 0,
+          "direction": "AUTO/Fast",
+          "p50": 1.2412082318267892,
+          "p95": 1.2671706847597408
+        },
+        {
+          "dtype": "f16",
+          "path": "eager",
+          "start_parity": 0,
+          "direction": "S3/Fast",
+          "p50": 1.127744396806342,
+          "p95": 1.1469557558730379
+        },
+        {
+          "dtype": "f16",
+          "path": "eager",
+          "start_parity": 1,
+          "direction": "S3/AUTO",
+          "p50": 0.9237071668506842,
+          "p95": 0.9407965519824609
+        },
+        {
+          "dtype": "f16",
+          "path": "eager",
+          "start_parity": 1,
+          "direction": "AUTO/Fast",
+          "p50": 1.2466082908374025,
+          "p95": 1.270678130713411
+        },
+        {
+          "dtype": "f16",
+          "path": "eager",
+          "start_parity": 1,
+          "direction": "S3/Fast",
+          "p50": 1.1258254095405162,
+          "p95": 1.1554860765552093
+        },
+        {
+          "dtype": "f16",
+          "path": "graph",
+          "start_parity": 0,
+          "direction": "S3/AUTO",
+          "p50": 0.9290078767492899,
+          "p95": 0.9552168652709441
+        },
+        {
+          "dtype": "f16",
+          "path": "graph",
+          "start_parity": 0,
+          "direction": "AUTO/Fast",
+          "p50": 1.2446176852603403,
+          "p95": 1.2743190370656212
+        },
+        {
+          "dtype": "f16",
+          "path": "graph",
+          "start_parity": 0,
+          "direction": "S3/Fast",
+          "p50": 1.1348979579746563,
+          "p95": 1.1572344955085485
+        },
+        {
+          "dtype": "f16",
+          "path": "graph",
+          "start_parity": 1,
+          "direction": "S3/AUTO",
+          "p50": 0.9283646021902513,
+          "p95": 0.9507373215677203
+        },
+        {
+          "dtype": "f16",
+          "path": "graph",
+          "start_parity": 1,
+          "direction": "AUTO/Fast",
+          "p50": 1.2465546679736734,
+          "p95": 1.275800734795043
+        },
+        {
+          "dtype": "f16",
+          "path": "graph",
+          "start_parity": 1,
+          "direction": "S3/Fast",
+          "p50": 1.1349631931096815,
+          "p95": 1.1553365437439642
+        }
+      ]
+    },
+    {
+      "path": "internal/perf/ada-half-s3-paired-20260907/cuda132-confirm101/test.log",
+      "sha256": "e6267b4330d73af9fb9ecbc1065333641f45b28d6d648081a71ffbc05062bf33",
+      "toolkit": "13.2",
+      "windows": 101,
+      "checked_configurations": 8,
+      "samples": 9696,
+      "pairs": 2424,
+      "summaries": 24,
+      "arithmetic_and_chronology": "PASS",
+      "recomputed": [
+        {
+          "dtype": "bf16",
+          "path": "eager",
+          "start_parity": 0,
+          "direction": "S3/AUTO",
+          "p50": 0.925848068364462,
+          "p95": 0.9409691081133961
+        },
+        {
+          "dtype": "bf16",
+          "path": "eager",
+          "start_parity": 0,
+          "direction": "AUTO/Fast",
+          "p50": 1.311842552861844,
+          "p95": 1.3516129359559488
+        },
+        {
+          "dtype": "bf16",
+          "path": "eager",
+          "start_parity": 0,
+          "direction": "S3/Fast",
+          "p50": 1.209227168594274,
+          "p95": 1.2199650319334059
+        },
+        {
+          "dtype": "bf16",
+          "path": "eager",
+          "start_parity": 1,
+          "direction": "S3/AUTO",
+          "p50": 0.9247756956297656,
+          "p95": 0.9396212912684309
+        },
+        {
+          "dtype": "bf16",
+          "path": "eager",
+          "start_parity": 1,
+          "direction": "AUTO/Fast",
+          "p50": 1.3118176957660956,
+          "p95": 1.3434738143116092
+        },
+        {
+          "dtype": "bf16",
+          "path": "eager",
+          "start_parity": 1,
+          "direction": "S3/Fast",
+          "p50": 1.2030764785552244,
+          "p95": 1.219333505649651
+        },
+        {
+          "dtype": "bf16",
+          "path": "graph",
+          "start_parity": 0,
+          "direction": "S3/AUTO",
+          "p50": 0.9295247530517672,
+          "p95": 0.9420121237978477
+        },
+        {
+          "dtype": "bf16",
+          "path": "graph",
+          "start_parity": 0,
+          "direction": "AUTO/Fast",
+          "p50": 1.311884567609445,
+          "p95": 1.3523879744266045
+        },
+        {
+          "dtype": "bf16",
+          "path": "graph",
+          "start_parity": 0,
+          "direction": "S3/Fast",
+          "p50": 1.2139277130085135,
+          "p95": 1.2323134973208896
+        },
+        {
+          "dtype": "bf16",
+          "path": "graph",
+          "start_parity": 1,
+          "direction": "S3/AUTO",
+          "p50": 0.929639720305665,
+          "p95": 0.9450126786901062
+        },
+        {
+          "dtype": "bf16",
+          "path": "graph",
+          "start_parity": 1,
+          "direction": "AUTO/Fast",
+          "p50": 1.3119913136556798,
+          "p95": 1.351697072201514
+        },
+        {
+          "dtype": "bf16",
+          "path": "graph",
+          "start_parity": 1,
+          "direction": "S3/Fast",
+          "p50": 1.211082854091294,
+          "p95": 1.2296982365055442
+        },
+        {
+          "dtype": "f16",
+          "path": "eager",
+          "start_parity": 0,
+          "direction": "S3/AUTO",
+          "p50": 0.9230887683330804,
+          "p95": 0.9588645211369408
+        },
+        {
+          "dtype": "f16",
+          "path": "eager",
+          "start_parity": 0,
+          "direction": "AUTO/Fast",
+          "p50": 1.2343951500297725,
+          "p95": 1.263725409767735
+        },
+        {
+          "dtype": "f16",
+          "path": "eager",
+          "start_parity": 0,
+          "direction": "S3/Fast",
+          "p50": 1.1236002060401078,
+          "p95": 1.1445732408080198
+        },
+        {
+          "dtype": "f16",
+          "path": "eager",
+          "start_parity": 1,
+          "direction": "S3/AUTO",
+          "p50": 0.9237832763597859,
+          "p95": 0.9487645784951921
+        },
+        {
+          "dtype": "f16",
+          "path": "eager",
+          "start_parity": 1,
+          "direction": "AUTO/Fast",
+          "p50": 1.2352018236923907,
+          "p95": 1.2552454598855671
+        },
+        {
+          "dtype": "f16",
+          "path": "eager",
+          "start_parity": 1,
+          "direction": "S3/Fast",
+          "p50": 1.123070465895363,
+          "p95": 1.1410495885813399
+        },
+        {
+          "dtype": "f16",
+          "path": "graph",
+          "start_parity": 0,
+          "direction": "S3/AUTO",
+          "p50": 0.9265501932580784,
+          "p95": 0.9522597133248565
+        },
+        {
+          "dtype": "f16",
+          "path": "graph",
+          "start_parity": 0,
+          "direction": "AUTO/Fast",
+          "p50": 1.238263495590924,
+          "p95": 1.2679622837802826
+        },
+        {
+          "dtype": "f16",
+          "path": "graph",
+          "start_parity": 0,
+          "direction": "S3/Fast",
+          "p50": 1.1311685057052376,
+          "p95": 1.1583227369117979
+        },
+        {
+          "dtype": "f16",
+          "path": "graph",
+          "start_parity": 1,
+          "direction": "S3/AUTO",
+          "p50": 0.9273348676960568,
+          "p95": 0.9570096627916191
+        },
+        {
+          "dtype": "f16",
+          "path": "graph",
+          "start_parity": 1,
+          "direction": "AUTO/Fast",
+          "p50": 1.2437562454042475,
+          "p95": 1.2711135047066926
+        },
+        {
+          "dtype": "f16",
+          "path": "graph",
+          "start_parity": 1,
+          "direction": "S3/Fast",
+          "p50": 1.1310994984559792,
+          "p95": 1.1671744873901693
+        }
+      ]
+    }
+  ]
+}

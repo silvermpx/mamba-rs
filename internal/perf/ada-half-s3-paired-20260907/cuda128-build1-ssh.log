@@ -1,0 +1,11 @@
+COMMAND ["/usr/local/cuda-12.8/bin/nvcc", "--version"]
+COMMAND_EXIT nvcc.log 0
+COMMAND ["rustc", "-Vv"]
+COMMAND_EXIT rustc.log 0
+COMMAND ["cargo", "-V"]
+COMMAND_EXIT cargo.log 0
+COMMAND ["cargo", "test", "--release", "--features", "cuda,cudarc/cuda-12080", "--test", "gemm_bi_fixed_performance", "ada_s3_pair::", "--", "--nocapture"]
+COMMAND_EXIT focused.log 0
+COMMAND ["cargo", "test", "--release", "--features", "cuda,cudarc/cuda-12080", "--test", "gemm_bi_fixed_performance", "--", "--test-threads=1"]
+COMMAND_EXIT nonignored.log 0
+BUILD_COMPLETE {"toolkit": "12.8", "feature": "cuda,cudarc/cuda-12080", "binary": "/root/target-ada-half-s3-paired-cuda128-20260907/release/deps/gemm_bi_fixed_performance-adf126b1f35855e0", "binary_sha": "574c43f5cd1de38151a09d7604848924537c597e94e57c130e531aa7ebd7c138", "cache": "/root/mamba-kcache-ada-half-s3-paired-cuda128-20260907", "cache_mode": "0o700", "tools": {"/usr/local/cuda-12.8/bin/nvcc": "59e4e55f9a38b78c590df1e28a69dad91052958f18a03868ca4a547c043fbba7", "/usr/local/cuda-12.8/bin/ptxas": "c960a4f238b17d5c5d3c01ad2bbc1ebd2c5aecc459cb4d223bff10b45f9b8fca"}, "libraries": {"/usr/local/cuda-12.8/targets/x86_64-linux/lib/libnvrtc.so.12.8.93": "2bb82d1a34b9fefa46aca357299aed66763d4d6613d015d5a591224c00fa7e5a", "/usr/local/cuda-12.8/targets/x86_64-linux/lib/libnvrtc.so.12": "2bb82d1a34b9fefa46aca357299aed66763d4d6613d015d5a591224c00fa7e5a", "/usr/local/cuda-12.8/targets/x86_64-linux/lib/libcublas.so.12.8.5.5": "18a5df540d156e9aff0363776fefab7884b614f122847b51c3eb1da772048e5c", "/usr/local/cuda-12.8/targets/x86_64-linux/lib/libcublas.so.12": "18a5df540d156e9aff0363776fefab7884b614f122847b51c3eb1da772048e5c"}}

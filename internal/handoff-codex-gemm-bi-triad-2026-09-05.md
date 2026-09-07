@@ -45,9 +45,25 @@ unchanged; actual SM89 cohorts and SM120 compile contracts pass on13.2.
 Source review closed a near-INT_MAX lookahead overflow through an S3-only
 host K+127 guard; the CUDA body remains the tested candidate.
 See `internal/perf/ada-half-s3-force-20260907/ARCHIVE.md` and `final-report.md`.
-Next is production paired S3 / actual AUTO / cuBLAS Fast timing and only
-then measured AUTO promotion. AUTO remains revision42. Standalone NVCC
-speedups are not production NVRTC timing; BF16's old p95 margin is only0.36%.
+Production paired S3 / actual AUTO / native-half cuBLAS Fast timing is now
+complete on all three toolkits. Only CUDA13.2 B0/no-bias qualifies for S3:
+BF16 paired101 worst p50/p95 `0.929639720306/0.945012678690`,
+F16 `0.927334867696/0.958864521137` (S3/AUTO; lower is better).
+Both12.8/13.0 BF16 failedscreen21 p95, and F16 failedfresh101 p95, so those
+four cells retain the old Swizzle choice. All failed/mixed results are valid
+and preserved; no repeated screening. S3/Fast worst101 on13.2 remains
+`1.213927713009/1.232313497321` forBF16 and
+`1.131168505705/1.167174487390` forF16: own improvement, not vendor victory.
+The new measurement harness passes all3 matching builds and functionalsmokes;
+its exact same-attempt SSH/telemetry validator closes all10savedruns after
+host RED/GREEN. Original source/binaries/rawdata remain frozen and all3Fixed
+PTX identities exactly match the approved production force artifacts.
+See `internal/perf/ada-half-s3-paired-20260907/ARCHIVE.md` and`final-report.md`.
+Next is only the two measured13.2 cells in AUTO43, followed by actualAUTO
+bit/poisoned-graph and post101 proof. AUTO currently remains revision42.
+Minor preflight gaps (unused legacy control rejection and pre-warmup input
+immutability assertion) are explicitly assigned to that immediate harness
+update; current postchecks still reject corrupted final inputs.
 
 Existing cross-toolkit backlog is explicit: SM89 exact-F32 CopyPlan and TF32-C
 M64S2 load and are force-reachable on12.8/13.0, but their literal AUTO

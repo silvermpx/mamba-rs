@@ -1,0 +1,197 @@
+test_verify_run_rejects_conflicting_or_foreign_attempt_transcripts (__main__.Wrapper.test_verify_run_rejects_conflicting_or_foreign_attempt_transcripts) ... 
+  test_verify_run_rejects_conflicting_or_foreign_attempt_transcripts (__main__.Wrapper.test_verify_run_rejects_conflicting_or_foreign_attempt_transcripts) (label='conflicting_nonzero') ... FAIL
+  test_verify_run_rejects_conflicting_or_foreign_attempt_transcripts (__main__.Wrapper.test_verify_run_rejects_conflicting_or_foreign_attempt_transcripts) (label='suffix_wrapper') ... FAIL
+  test_verify_run_rejects_conflicting_or_foreign_attempt_transcripts (__main__.Wrapper.test_verify_run_rejects_conflicting_or_foreign_attempt_transcripts) (label='suffix_complete') ... FAIL
+  test_verify_run_rejects_conflicting_or_foreign_attempt_transcripts (__main__.Wrapper.test_verify_run_rejects_conflicting_or_foreign_attempt_transcripts) (label='foreign_attempt') ... FAIL
+  test_verify_run_rejects_conflicting_or_foreign_attempt_transcripts (__main__.Wrapper.test_verify_run_rejects_conflicting_or_foreign_attempt_transcripts) (label='wrong_command_binary') ... FAIL
+  test_verify_run_rejects_conflicting_or_foreign_attempt_transcripts (__main__.Wrapper.test_verify_run_rejects_conflicting_or_foreign_attempt_transcripts) (label='wrong_command_test') ... FAIL
+  test_verify_run_rejects_conflicting_or_foreign_attempt_transcripts (__main__.Wrapper.test_verify_run_rejects_conflicting_or_foreign_attempt_transcripts) (label='nonzero_command_exit') ... FAIL
+  test_verify_run_rejects_conflicting_or_foreign_attempt_transcripts (__main__.Wrapper.test_verify_run_rejects_conflicting_or_foreign_attempt_transcripts) (label='command_exit_suffix') ... FAIL
+  test_verify_run_rejects_conflicting_or_foreign_attempt_transcripts (__main__.Wrapper.test_verify_run_rejects_conflicting_or_foreign_attempt_transcripts) (label='wrong_result') ... FAIL
+  test_verify_run_rejects_conflicting_or_foreign_attempt_transcripts (__main__.Wrapper.test_verify_run_rejects_conflicting_or_foreign_attempt_transcripts) (label='wrong_pre_phase') ... FAIL
+  test_verify_run_rejects_conflicting_or_foreign_attempt_transcripts (__main__.Wrapper.test_verify_run_rejects_conflicting_or_foreign_attempt_transcripts) (label='wrong_post_phase') ... FAIL
+  test_verify_run_rejects_conflicting_or_foreign_attempt_transcripts (__main__.Wrapper.test_verify_run_rejects_conflicting_or_foreign_attempt_transcripts) (label='wrong_telemetry') ... FAIL
+  test_verify_run_rejects_conflicting_or_foreign_attempt_transcripts (__main__.Wrapper.test_verify_run_rejects_conflicting_or_foreign_attempt_transcripts) (label='failure_marker') ... FAIL
+  test_verify_run_rejects_conflicting_or_foreign_attempt_transcripts (__main__.Wrapper.test_verify_run_rejects_conflicting_or_foreign_attempt_transcripts) (label='swapped_telemetry') ... FAIL
+test_verify_run_binds_saved_telemetry_phase_and_result_to_transcript (__main__.Wrapper.test_verify_run_binds_saved_telemetry_phase_and_result_to_transcript) ... 
+  test_verify_run_binds_saved_telemetry_phase_and_result_to_transcript (__main__.Wrapper.test_verify_run_binds_saved_telemetry_phase_and_result_to_transcript) (filename='pre.json', field='phase') ... FAIL
+  test_verify_run_binds_saved_telemetry_phase_and_result_to_transcript (__main__.Wrapper.test_verify_run_binds_saved_telemetry_phase_and_result_to_transcript) (filename='post.json', field='phase') ... FAIL
+  test_verify_run_binds_saved_telemetry_phase_and_result_to_transcript (__main__.Wrapper.test_verify_run_binds_saved_telemetry_phase_and_result_to_transcript) (filename='pre.json', field='utc') ... FAIL
+  test_verify_run_binds_saved_telemetry_phase_and_result_to_transcript (__main__.Wrapper.test_verify_run_binds_saved_telemetry_phase_and_result_to_transcript) (filename='post.json', field='utc') ... FAIL
+  test_verify_run_binds_saved_telemetry_phase_and_result_to_transcript (__main__.Wrapper.test_verify_run_binds_saved_telemetry_phase_and_result_to_transcript) (filename='result.json', field='cache_files') ... FAIL
+
+======================================================================
+FAIL: test_verify_run_rejects_conflicting_or_foreign_attempt_transcripts (__main__.Wrapper.test_verify_run_rejects_conflicting_or_foreign_attempt_transcripts) (label='conflicting_nonzero')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/silvermpx/IdeaProjects/mamba-rs/internal/worktrees/gemm-bi-triad-sm80/internal/perf/ada-half-s3-paired-20260907/test_validation.py", line 155, in test_verify_run_rejects_conflicting_or_foreign_attempt_transcripts
+    with self.assertRaises(ValueError):
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: ValueError not raised
+
+======================================================================
+FAIL: test_verify_run_rejects_conflicting_or_foreign_attempt_transcripts (__main__.Wrapper.test_verify_run_rejects_conflicting_or_foreign_attempt_transcripts) (label='suffix_wrapper')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/silvermpx/IdeaProjects/mamba-rs/internal/worktrees/gemm-bi-triad-sm80/internal/perf/ada-half-s3-paired-20260907/test_validation.py", line 155, in test_verify_run_rejects_conflicting_or_foreign_attempt_transcripts
+    with self.assertRaises(ValueError):
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: ValueError not raised
+
+======================================================================
+FAIL: test_verify_run_rejects_conflicting_or_foreign_attempt_transcripts (__main__.Wrapper.test_verify_run_rejects_conflicting_or_foreign_attempt_transcripts) (label='suffix_complete')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/silvermpx/IdeaProjects/mamba-rs/internal/worktrees/gemm-bi-triad-sm80/internal/perf/ada-half-s3-paired-20260907/test_validation.py", line 155, in test_verify_run_rejects_conflicting_or_foreign_attempt_transcripts
+    with self.assertRaises(ValueError):
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: ValueError not raised
+
+======================================================================
+FAIL: test_verify_run_rejects_conflicting_or_foreign_attempt_transcripts (__main__.Wrapper.test_verify_run_rejects_conflicting_or_foreign_attempt_transcripts) (label='foreign_attempt')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/silvermpx/IdeaProjects/mamba-rs/internal/worktrees/gemm-bi-triad-sm80/internal/perf/ada-half-s3-paired-20260907/test_validation.py", line 155, in test_verify_run_rejects_conflicting_or_foreign_attempt_transcripts
+    with self.assertRaises(ValueError):
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: ValueError not raised
+
+======================================================================
+FAIL: test_verify_run_rejects_conflicting_or_foreign_attempt_transcripts (__main__.Wrapper.test_verify_run_rejects_conflicting_or_foreign_attempt_transcripts) (label='wrong_command_binary')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/silvermpx/IdeaProjects/mamba-rs/internal/worktrees/gemm-bi-triad-sm80/internal/perf/ada-half-s3-paired-20260907/test_validation.py", line 155, in test_verify_run_rejects_conflicting_or_foreign_attempt_transcripts
+    with self.assertRaises(ValueError):
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: ValueError not raised
+
+======================================================================
+FAIL: test_verify_run_rejects_conflicting_or_foreign_attempt_transcripts (__main__.Wrapper.test_verify_run_rejects_conflicting_or_foreign_attempt_transcripts) (label='wrong_command_test')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/silvermpx/IdeaProjects/mamba-rs/internal/worktrees/gemm-bi-triad-sm80/internal/perf/ada-half-s3-paired-20260907/test_validation.py", line 155, in test_verify_run_rejects_conflicting_or_foreign_attempt_transcripts
+    with self.assertRaises(ValueError):
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: ValueError not raised
+
+======================================================================
+FAIL: test_verify_run_rejects_conflicting_or_foreign_attempt_transcripts (__main__.Wrapper.test_verify_run_rejects_conflicting_or_foreign_attempt_transcripts) (label='nonzero_command_exit')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/silvermpx/IdeaProjects/mamba-rs/internal/worktrees/gemm-bi-triad-sm80/internal/perf/ada-half-s3-paired-20260907/test_validation.py", line 155, in test_verify_run_rejects_conflicting_or_foreign_attempt_transcripts
+    with self.assertRaises(ValueError):
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: ValueError not raised
+
+======================================================================
+FAIL: test_verify_run_rejects_conflicting_or_foreign_attempt_transcripts (__main__.Wrapper.test_verify_run_rejects_conflicting_or_foreign_attempt_transcripts) (label='command_exit_suffix')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/silvermpx/IdeaProjects/mamba-rs/internal/worktrees/gemm-bi-triad-sm80/internal/perf/ada-half-s3-paired-20260907/test_validation.py", line 155, in test_verify_run_rejects_conflicting_or_foreign_attempt_transcripts
+    with self.assertRaises(ValueError):
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: ValueError not raised
+
+======================================================================
+FAIL: test_verify_run_rejects_conflicting_or_foreign_attempt_transcripts (__main__.Wrapper.test_verify_run_rejects_conflicting_or_foreign_attempt_transcripts) (label='wrong_result')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/silvermpx/IdeaProjects/mamba-rs/internal/worktrees/gemm-bi-triad-sm80/internal/perf/ada-half-s3-paired-20260907/test_validation.py", line 155, in test_verify_run_rejects_conflicting_or_foreign_attempt_transcripts
+    with self.assertRaises(ValueError):
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: ValueError not raised
+
+======================================================================
+FAIL: test_verify_run_rejects_conflicting_or_foreign_attempt_transcripts (__main__.Wrapper.test_verify_run_rejects_conflicting_or_foreign_attempt_transcripts) (label='wrong_pre_phase')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/silvermpx/IdeaProjects/mamba-rs/internal/worktrees/gemm-bi-triad-sm80/internal/perf/ada-half-s3-paired-20260907/test_validation.py", line 155, in test_verify_run_rejects_conflicting_or_foreign_attempt_transcripts
+    with self.assertRaises(ValueError):
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: ValueError not raised
+
+======================================================================
+FAIL: test_verify_run_rejects_conflicting_or_foreign_attempt_transcripts (__main__.Wrapper.test_verify_run_rejects_conflicting_or_foreign_attempt_transcripts) (label='wrong_post_phase')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/silvermpx/IdeaProjects/mamba-rs/internal/worktrees/gemm-bi-triad-sm80/internal/perf/ada-half-s3-paired-20260907/test_validation.py", line 155, in test_verify_run_rejects_conflicting_or_foreign_attempt_transcripts
+    with self.assertRaises(ValueError):
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: ValueError not raised
+
+======================================================================
+FAIL: test_verify_run_rejects_conflicting_or_foreign_attempt_transcripts (__main__.Wrapper.test_verify_run_rejects_conflicting_or_foreign_attempt_transcripts) (label='wrong_telemetry')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/silvermpx/IdeaProjects/mamba-rs/internal/worktrees/gemm-bi-triad-sm80/internal/perf/ada-half-s3-paired-20260907/test_validation.py", line 155, in test_verify_run_rejects_conflicting_or_foreign_attempt_transcripts
+    with self.assertRaises(ValueError):
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: ValueError not raised
+
+======================================================================
+FAIL: test_verify_run_rejects_conflicting_or_foreign_attempt_transcripts (__main__.Wrapper.test_verify_run_rejects_conflicting_or_foreign_attempt_transcripts) (label='failure_marker')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/silvermpx/IdeaProjects/mamba-rs/internal/worktrees/gemm-bi-triad-sm80/internal/perf/ada-half-s3-paired-20260907/test_validation.py", line 155, in test_verify_run_rejects_conflicting_or_foreign_attempt_transcripts
+    with self.assertRaises(ValueError):
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: ValueError not raised
+
+======================================================================
+FAIL: test_verify_run_rejects_conflicting_or_foreign_attempt_transcripts (__main__.Wrapper.test_verify_run_rejects_conflicting_or_foreign_attempt_transcripts) (label='swapped_telemetry')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/silvermpx/IdeaProjects/mamba-rs/internal/worktrees/gemm-bi-triad-sm80/internal/perf/ada-half-s3-paired-20260907/test_validation.py", line 155, in test_verify_run_rejects_conflicting_or_foreign_attempt_transcripts
+    with self.assertRaises(ValueError):
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: ValueError not raised
+
+======================================================================
+FAIL: test_verify_run_binds_saved_telemetry_phase_and_result_to_transcript (__main__.Wrapper.test_verify_run_binds_saved_telemetry_phase_and_result_to_transcript) (filename='pre.json', field='phase')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/silvermpx/IdeaProjects/mamba-rs/internal/worktrees/gemm-bi-triad-sm80/internal/perf/ada-half-s3-paired-20260907/test_validation.py", line 169, in test_verify_run_binds_saved_telemetry_phase_and_result_to_transcript
+    with self.assertRaises(ValueError):
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: ValueError not raised
+
+======================================================================
+FAIL: test_verify_run_binds_saved_telemetry_phase_and_result_to_transcript (__main__.Wrapper.test_verify_run_binds_saved_telemetry_phase_and_result_to_transcript) (filename='post.json', field='phase')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/silvermpx/IdeaProjects/mamba-rs/internal/worktrees/gemm-bi-triad-sm80/internal/perf/ada-half-s3-paired-20260907/test_validation.py", line 169, in test_verify_run_binds_saved_telemetry_phase_and_result_to_transcript
+    with self.assertRaises(ValueError):
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: ValueError not raised
+
+======================================================================
+FAIL: test_verify_run_binds_saved_telemetry_phase_and_result_to_transcript (__main__.Wrapper.test_verify_run_binds_saved_telemetry_phase_and_result_to_transcript) (filename='pre.json', field='utc')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/silvermpx/IdeaProjects/mamba-rs/internal/worktrees/gemm-bi-triad-sm80/internal/perf/ada-half-s3-paired-20260907/test_validation.py", line 169, in test_verify_run_binds_saved_telemetry_phase_and_result_to_transcript
+    with self.assertRaises(ValueError):
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: ValueError not raised
+
+======================================================================
+FAIL: test_verify_run_binds_saved_telemetry_phase_and_result_to_transcript (__main__.Wrapper.test_verify_run_binds_saved_telemetry_phase_and_result_to_transcript) (filename='post.json', field='utc')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/silvermpx/IdeaProjects/mamba-rs/internal/worktrees/gemm-bi-triad-sm80/internal/perf/ada-half-s3-paired-20260907/test_validation.py", line 169, in test_verify_run_binds_saved_telemetry_phase_and_result_to_transcript
+    with self.assertRaises(ValueError):
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: ValueError not raised
+
+======================================================================
+FAIL: test_verify_run_binds_saved_telemetry_phase_and_result_to_transcript (__main__.Wrapper.test_verify_run_binds_saved_telemetry_phase_and_result_to_transcript) (filename='result.json', field='cache_files')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/silvermpx/IdeaProjects/mamba-rs/internal/worktrees/gemm-bi-triad-sm80/internal/perf/ada-half-s3-paired-20260907/test_validation.py", line 169, in test_verify_run_binds_saved_telemetry_phase_and_result_to_transcript
+    with self.assertRaises(ValueError):
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: ValueError not raised
+
+----------------------------------------------------------------------
+Ran 2 tests in 0.052s
+
+FAILED (failures=19)

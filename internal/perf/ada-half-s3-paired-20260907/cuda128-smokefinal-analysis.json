@@ -1,0 +1,475 @@
+{
+  "valid": true,
+  "configurations": 8,
+  "samples": 96,
+  "pairs": 24,
+  "summaries": [
+    {
+      "dtype": "bf16",
+      "path": "eager",
+      "start_parity": 0,
+      "comparison": 0,
+      "direction": "S3/AUTO",
+      "p50": 0.9798297398046324,
+      "p95": 0.9798297398046324
+    },
+    {
+      "dtype": "bf16",
+      "path": "eager",
+      "start_parity": 0,
+      "comparison": 1,
+      "direction": "AUTO/Fast",
+      "p50": 1.2352222315528445,
+      "p95": 1.2352222315528445
+    },
+    {
+      "dtype": "bf16",
+      "path": "eager",
+      "start_parity": 0,
+      "comparison": 2,
+      "direction": "S3/Fast",
+      "p50": 1.211847698903935,
+      "p95": 1.211847698903935
+    },
+    {
+      "dtype": "bf16",
+      "path": "eager",
+      "start_parity": 1,
+      "comparison": 0,
+      "direction": "S3/AUTO",
+      "p50": 0.9628468443438766,
+      "p95": 0.9628468443438766
+    },
+    {
+      "dtype": "bf16",
+      "path": "eager",
+      "start_parity": 1,
+      "comparison": 1,
+      "direction": "AUTO/Fast",
+      "p50": 1.2384778457339385,
+      "p95": 1.2384778457339385
+    },
+    {
+      "dtype": "bf16",
+      "path": "eager",
+      "start_parity": 1,
+      "comparison": 2,
+      "direction": "S3/Fast",
+      "p50": 1.2111099952536455,
+      "p95": 1.2111099952536455
+    },
+    {
+      "dtype": "bf16",
+      "path": "graph",
+      "start_parity": 0,
+      "comparison": 0,
+      "direction": "S3/AUTO",
+      "p50": 0.9828002466012752,
+      "p95": 0.9828002466012752
+    },
+    {
+      "dtype": "bf16",
+      "path": "graph",
+      "start_parity": 0,
+      "comparison": 1,
+      "direction": "AUTO/Fast",
+      "p50": 1.232515661536433,
+      "p95": 1.232515661536433
+    },
+    {
+      "dtype": "bf16",
+      "path": "graph",
+      "start_parity": 0,
+      "comparison": 2,
+      "direction": "S3/Fast",
+      "p50": 1.2175729790850325,
+      "p95": 1.2175729790850325
+    },
+    {
+      "dtype": "bf16",
+      "path": "graph",
+      "start_parity": 1,
+      "comparison": 0,
+      "direction": "S3/AUTO",
+      "p50": 1.00939711666781,
+      "p95": 1.00939711666781
+    },
+    {
+      "dtype": "bf16",
+      "path": "graph",
+      "start_parity": 1,
+      "comparison": 1,
+      "direction": "AUTO/Fast",
+      "p50": 1.2389336776312119,
+      "p95": 1.2389336776312119
+    },
+    {
+      "dtype": "bf16",
+      "path": "graph",
+      "start_parity": 1,
+      "comparison": 2,
+      "direction": "S3/Fast",
+      "p50": 1.2155372675892755,
+      "p95": 1.2155372675892755
+    },
+    {
+      "dtype": "f16",
+      "path": "eager",
+      "start_parity": 0,
+      "comparison": 0,
+      "direction": "S3/AUTO",
+      "p50": 0.9777878764086132,
+      "p95": 0.9777878764086132
+    },
+    {
+      "dtype": "f16",
+      "path": "eager",
+      "start_parity": 0,
+      "comparison": 1,
+      "direction": "AUTO/Fast",
+      "p50": 1.1530480623575081,
+      "p95": 1.1530480623575081
+    },
+    {
+      "dtype": "f16",
+      "path": "eager",
+      "start_parity": 0,
+      "comparison": 2,
+      "direction": "S3/Fast",
+      "p50": 1.1140924721351952,
+      "p95": 1.1140924721351952
+    },
+    {
+      "dtype": "f16",
+      "path": "eager",
+      "start_parity": 1,
+      "comparison": 0,
+      "direction": "S3/AUTO",
+      "p50": 0.9787121694771781,
+      "p95": 0.9787121694771781
+    },
+    {
+      "dtype": "f16",
+      "path": "eager",
+      "start_parity": 1,
+      "comparison": 1,
+      "direction": "AUTO/Fast",
+      "p50": 1.164520484440192,
+      "p95": 1.164520484440192
+    },
+    {
+      "dtype": "f16",
+      "path": "eager",
+      "start_parity": 1,
+      "comparison": 2,
+      "direction": "S3/Fast",
+      "p50": 1.1394069259245696,
+      "p95": 1.1394069259245696
+    },
+    {
+      "dtype": "f16",
+      "path": "graph",
+      "start_parity": 0,
+      "comparison": 0,
+      "direction": "S3/AUTO",
+      "p50": 0.9797165310942852,
+      "p95": 0.9797165310942852
+    },
+    {
+      "dtype": "f16",
+      "path": "graph",
+      "start_parity": 0,
+      "comparison": 1,
+      "direction": "AUTO/Fast",
+      "p50": 1.005996299131611,
+      "p95": 1.005996299131611
+    },
+    {
+      "dtype": "f16",
+      "path": "graph",
+      "start_parity": 0,
+      "comparison": 2,
+      "direction": "S3/Fast",
+      "p50": 0.9926336570295091,
+      "p95": 0.9926336570295091
+    },
+    {
+      "dtype": "f16",
+      "path": "graph",
+      "start_parity": 1,
+      "comparison": 0,
+      "direction": "S3/AUTO",
+      "p50": 0.939740929352806,
+      "p95": 0.939740929352806
+    },
+    {
+      "dtype": "f16",
+      "path": "graph",
+      "start_parity": 1,
+      "comparison": 1,
+      "direction": "AUTO/Fast",
+      "p50": 1.1466216352629348,
+      "p95": 1.1466216352629348
+    },
+    {
+      "dtype": "f16",
+      "path": "graph",
+      "start_parity": 1,
+      "comparison": 2,
+      "direction": "S3/Fast",
+      "p50": 1.136932751819973,
+      "p95": 1.136932751819973
+    }
+  ],
+  "cells": [
+    {
+      "dtype": "bf16",
+      "toolkit": "12.8",
+      "windows": 1,
+      "valid": true,
+      "own_win": false,
+      "admission": false,
+      "advance101": false,
+      "worst_own_p50": 1.00939711666781,
+      "worst_own_p95": 1.00939711666781,
+      "constituents": [
+        {
+          "dtype": "bf16",
+          "path": "eager",
+          "start_parity": 0,
+          "comparison": 0,
+          "direction": "S3/AUTO",
+          "p50": 0.9798297398046324,
+          "p95": 0.9798297398046324
+        },
+        {
+          "dtype": "bf16",
+          "path": "eager",
+          "start_parity": 0,
+          "comparison": 1,
+          "direction": "AUTO/Fast",
+          "p50": 1.2352222315528445,
+          "p95": 1.2352222315528445
+        },
+        {
+          "dtype": "bf16",
+          "path": "eager",
+          "start_parity": 0,
+          "comparison": 2,
+          "direction": "S3/Fast",
+          "p50": 1.211847698903935,
+          "p95": 1.211847698903935
+        },
+        {
+          "dtype": "bf16",
+          "path": "eager",
+          "start_parity": 1,
+          "comparison": 0,
+          "direction": "S3/AUTO",
+          "p50": 0.9628468443438766,
+          "p95": 0.9628468443438766
+        },
+        {
+          "dtype": "bf16",
+          "path": "eager",
+          "start_parity": 1,
+          "comparison": 1,
+          "direction": "AUTO/Fast",
+          "p50": 1.2384778457339385,
+          "p95": 1.2384778457339385
+        },
+        {
+          "dtype": "bf16",
+          "path": "eager",
+          "start_parity": 1,
+          "comparison": 2,
+          "direction": "S3/Fast",
+          "p50": 1.2111099952536455,
+          "p95": 1.2111099952536455
+        },
+        {
+          "dtype": "bf16",
+          "path": "graph",
+          "start_parity": 0,
+          "comparison": 0,
+          "direction": "S3/AUTO",
+          "p50": 0.9828002466012752,
+          "p95": 0.9828002466012752
+        },
+        {
+          "dtype": "bf16",
+          "path": "graph",
+          "start_parity": 0,
+          "comparison": 1,
+          "direction": "AUTO/Fast",
+          "p50": 1.232515661536433,
+          "p95": 1.232515661536433
+        },
+        {
+          "dtype": "bf16",
+          "path": "graph",
+          "start_parity": 0,
+          "comparison": 2,
+          "direction": "S3/Fast",
+          "p50": 1.2175729790850325,
+          "p95": 1.2175729790850325
+        },
+        {
+          "dtype": "bf16",
+          "path": "graph",
+          "start_parity": 1,
+          "comparison": 0,
+          "direction": "S3/AUTO",
+          "p50": 1.00939711666781,
+          "p95": 1.00939711666781
+        },
+        {
+          "dtype": "bf16",
+          "path": "graph",
+          "start_parity": 1,
+          "comparison": 1,
+          "direction": "AUTO/Fast",
+          "p50": 1.2389336776312119,
+          "p95": 1.2389336776312119
+        },
+        {
+          "dtype": "bf16",
+          "path": "graph",
+          "start_parity": 1,
+          "comparison": 2,
+          "direction": "S3/Fast",
+          "p50": 1.2155372675892755,
+          "p95": 1.2155372675892755
+        }
+      ]
+    },
+    {
+      "dtype": "f16",
+      "toolkit": "12.8",
+      "windows": 1,
+      "valid": true,
+      "own_win": true,
+      "admission": false,
+      "advance101": false,
+      "worst_own_p50": 0.9797165310942852,
+      "worst_own_p95": 0.9797165310942852,
+      "constituents": [
+        {
+          "dtype": "f16",
+          "path": "eager",
+          "start_parity": 0,
+          "comparison": 0,
+          "direction": "S3/AUTO",
+          "p50": 0.9777878764086132,
+          "p95": 0.9777878764086132
+        },
+        {
+          "dtype": "f16",
+          "path": "eager",
+          "start_parity": 0,
+          "comparison": 1,
+          "direction": "AUTO/Fast",
+          "p50": 1.1530480623575081,
+          "p95": 1.1530480623575081
+        },
+        {
+          "dtype": "f16",
+          "path": "eager",
+          "start_parity": 0,
+          "comparison": 2,
+          "direction": "S3/Fast",
+          "p50": 1.1140924721351952,
+          "p95": 1.1140924721351952
+        },
+        {
+          "dtype": "f16",
+          "path": "eager",
+          "start_parity": 1,
+          "comparison": 0,
+          "direction": "S3/AUTO",
+          "p50": 0.9787121694771781,
+          "p95": 0.9787121694771781
+        },
+        {
+          "dtype": "f16",
+          "path": "eager",
+          "start_parity": 1,
+          "comparison": 1,
+          "direction": "AUTO/Fast",
+          "p50": 1.164520484440192,
+          "p95": 1.164520484440192
+        },
+        {
+          "dtype": "f16",
+          "path": "eager",
+          "start_parity": 1,
+          "comparison": 2,
+          "direction": "S3/Fast",
+          "p50": 1.1394069259245696,
+          "p95": 1.1394069259245696
+        },
+        {
+          "dtype": "f16",
+          "path": "graph",
+          "start_parity": 0,
+          "comparison": 0,
+          "direction": "S3/AUTO",
+          "p50": 0.9797165310942852,
+          "p95": 0.9797165310942852
+        },
+        {
+          "dtype": "f16",
+          "path": "graph",
+          "start_parity": 0,
+          "comparison": 1,
+          "direction": "AUTO/Fast",
+          "p50": 1.005996299131611,
+          "p95": 1.005996299131611
+        },
+        {
+          "dtype": "f16",
+          "path": "graph",
+          "start_parity": 0,
+          "comparison": 2,
+          "direction": "S3/Fast",
+          "p50": 0.9926336570295091,
+          "p95": 0.9926336570295091
+        },
+        {
+          "dtype": "f16",
+          "path": "graph",
+          "start_parity": 1,
+          "comparison": 0,
+          "direction": "S3/AUTO",
+          "p50": 0.939740929352806,
+          "p95": 0.939740929352806
+        },
+        {
+          "dtype": "f16",
+          "path": "graph",
+          "start_parity": 1,
+          "comparison": 1,
+          "direction": "AUTO/Fast",
+          "p50": 1.1466216352629348,
+          "p95": 1.1466216352629348
+        },
+        {
+          "dtype": "f16",
+          "path": "graph",
+          "start_parity": 1,
+          "comparison": 2,
+          "direction": "S3/Fast",
+          "p50": 1.136932751819973,
+          "p95": 1.136932751819973
+        }
+      ]
+    }
+  ],
+  "validation": {
+    "revision": "fix1-exact-same-attempt",
+    "analyzer_sha": "0c1391f47ec0253720b66733e950b8f9ad67ba112027b81e2d67eda9a1e63f30",
+    "ssh_log_sha": "ca0a8dc540193fdbbc5cfd3661df3d2ddc142df2ebeb53b541e3fe6b420a9947",
+    "binding_sha": "37382f05cf24e1fb6bbc4316cdc563217cf7e0166d05384ed0239a1fb572f646",
+    "qualification_sha": "cc8bcb94deb3307e47f312e97e68d1099ff0f01929cfbcac7c0e2b8024b47b3e"
+  }
+}

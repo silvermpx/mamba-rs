@@ -1,0 +1,15 @@
+{
+  "test_exit": 0,
+  "post_exit": 0,
+  "toolkit": "12.8",
+  "windows": 21,
+  "dtypes": "bf16,f16",
+  "binary_sha": "618a31de2bf2936ce1e1dfbab8dd3bbeca35db35b06650bfc2e346cce90233b3",
+  "source_sha": "f43a2a22dea7435716ff0c99d721e1d255ad9311f18e9f0b53a15280eafb582b",
+  "test_log_sha": "0a013c4e1ab430ccdc1e9a31b17a4d4e9ffd61ab51f4f22404cda45f8fdc9999",
+  "cache_files": {
+    "/root/mamba-kcache-ada-half-s3-paired-cuda128-20260907/mamba-kernels-v1-da5dabeff55570d1fb6ca43a1d4a8aa7a2a9d25efb6436ed7f03c4a28a73d986.bin": "48a388fc610d110bb884ea3cd0f49eda299c0c7ce0c8e2beb24d34a925198a54",
+    "/root/mamba-kcache-ada-half-s3-paired-cuda128-20260907/mamba-kernels-v1-57c3e4f2177104f137d432f19398a4a36799aca4c264634a1ab25d17dbf422ba.bin": "9af16b658fb81643b962b03da53f391d7b99e614d293195def7716d59ece401a",
+    "/root/mamba-kcache-ada-half-s3-paired-cuda128-20260907/mamba-kernels-v1-73fbec7557a95462a555e39f1b3c94e8d2bcc7047a14f8f3e3fa51a768ec5b9a.bin": "c02fb7a0ef6a50cb52dc3fec2e83ebb1eb6b4015a9f200d48d65fd4493d489c9"
+  }
+}

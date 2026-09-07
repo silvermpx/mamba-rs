@@ -1,0 +1,16 @@
+test_actual_one_window_smoke_closes (__main__.Protocol.test_actual_one_window_smoke_closes) ... ok
+test_chronology_arm_position_parity_traversal_and_finite_times (__main__.Protocol.test_chronology_arm_position_parity_traversal_and_finite_times) ... ok
+test_forged_pair_summary_or_pair_membership_fails (__main__.Protocol.test_forged_pair_summary_or_pair_membership_fails) ... ok
+test_genuine_recomputed_win_loss_and_mixed_p95_are_valid (__main__.Protocol.test_genuine_recomputed_win_loss_and_mixed_p95_are_valid) ... ok
+test_literal_cell_source_binary_compiler_revision_and_modes (__main__.Protocol.test_literal_cell_source_binary_compiler_revision_and_modes) ... ok
+test_missing_duplicate_foreign_sample_pair_and_cohort (__main__.Protocol.test_missing_duplicate_foreign_sample_pair_and_cohort) ... ok
+test_stale_missing_captured_arguments_or_twenty_node_fail (__main__.Protocol.test_stale_missing_captured_arguments_or_twenty_node_fail) ... ok
+test_preflight_rejects_wrong_device_busy_utilization_apps_and_query_failures (__main__.Wrapper.test_preflight_rejects_wrong_device_busy_utilization_apps_and_query_failures) ... ok
+test_source_binary_toolkit_and_all_exit_layers_fail_closed (__main__.Wrapper.test_source_binary_toolkit_and_all_exit_layers_fail_closed) ... ok
+test_verify_run_binds_saved_telemetry_phase_and_result_to_transcript (__main__.Wrapper.test_verify_run_binds_saved_telemetry_phase_and_result_to_transcript) ... ok
+test_verify_run_rejects_conflicting_or_foreign_attempt_transcripts (__main__.Wrapper.test_verify_run_rejects_conflicting_or_foreign_attempt_transcripts) ... ok
+
+----------------------------------------------------------------------
+Ran 11 tests in 0.653s
+
+OK

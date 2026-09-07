@@ -35,7 +35,699 @@ use sha2::{Digest, Sha256};
 const WARMUPS: usize = 10;
 const ITERS: usize = 200;
 
+// Task6B has a separate mirrored-bracket protocol; historical harnesses above
+// and below retain their original record meanings.
+mod ada_s3_pair {
+    use super::*;
+
+    fn schedule(window: usize, start: usize) -> Vec<(usize, usize, usize, usize)> {
+        assert!(start < 2);
+        let reverse = (window + start) % 2 == 1;
+        let comparisons = if reverse { [2, 1, 0] } else { [0, 1, 2] };
+        let mut observations = Vec::with_capacity(12);
+        for (traversal, comparison) in comparisons.into_iter().enumerate() {
+            let (a, b) = [(0, 1), (2, 0), (2, 1)][comparison];
+            let arms = if reverse { [b, a, a, b] } else { [a, b, b, a] };
+            for (position, arm) in arms.into_iter().enumerate() {
+                observations.push((traversal, comparison, position, arm));
+            }
+        }
+        observations
+    }
+
+    const ARMS: [&str; 3] = ["AUTO", "S3", "Fast"];
+    const RATIOS: [&str; 3] = ["S3/AUTO", "AUTO/Fast", "S3/Fast"];
+    const GUARD: usize = 256;
+
+    fn config(windows: &str, dtypes: &str) -> Result<(usize, Vec<usize>), String> {
+        let windows = match windows {
+            "1" => 1,
+            "21" => 21,
+            "101" => 101,
+            _ => return Err("windows must be exactly 1, 21 or 101".into()),
+        };
+        let dtypes = fixed_ada_direct_pair_filter("S3 dtype", &["bf16", "f16"], Some(dtypes))?;
+        if windows != 101 && dtypes != [0, 1] {
+            return Err("smoke/screen requires explicit bf16,f16".into());
+        }
+        Ok((windows, dtypes))
+    }
+
+    #[test]
+    fn configuration_cannot_mute_screen_or_accept_implicit_windows() {
+        assert_eq!(config("21", "bf16,f16").unwrap(), (21, vec![0, 1]));
+        assert_eq!(config("101", "f16").unwrap(), (101, vec![1]));
+        for w in ["", "0", "20", "021", " 21", "100", "102"] {
+            assert!(config(w, "bf16,f16").is_err());
+        }
+        for d in ["", "f32", "bf16,bf16", "bf16,", "f16"] {
+            assert!(config("21", d).is_err());
+        }
+    }
+
+    fn pair_ratio(samples: &[(usize, f64)], comparison: usize) -> Result<f64, String> {
+        let (a, b) = [(0, 1), (2, 0), (2, 1)][comparison];
+        if samples.len() != 4
+            || samples.iter().any(|(_, t)| !t.is_finite() || *t <= 0.0)
+            || samples.iter().filter(|(arm, _)| *arm == a).count() != 2
+            || samples.iter().filter(|(arm, _)| *arm == b).count() != 2
+        {
+            return Err("invalid mirrored observations".into());
+        }
+        Ok(samples
+            .iter()
+            .filter(|(arm, _)| *arm == b)
+            .map(|(_, t)| t)
+            .sum::<f64>()
+            / samples
+                .iter()
+                .filter(|(arm, _)| *arm == a)
+                .map(|(_, t)| t)
+                .sum::<f64>())
+    }
+
+    #[test]
+    fn ratios_use_sum_of_two_observations_and_reject_invalid_times() {
+        assert_eq!(
+            pair_ratio(&[(0, 10.0), (1, 4.0), (1, 8.0), (0, 20.0)], 0).unwrap(),
+            0.4
+        );
+        for t in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            assert!(pair_ratio(&[(0, 10.0), (1, t), (1, 8.0), (0, 20.0)], 0).is_err());
+        }
+        assert!(pair_ratio(&[(0, 10.0), (2, 4.0), (1, 8.0), (0, 20.0)], 0).is_err());
+        let mut loss = vec![0.8; 21];
+        loss[19] = 1.2;
+        loss[20] = 1.4;
+        assert_eq!(
+            (percentile(&loss, 0.5), percentile(&loss, 0.95)),
+            (0.8, 1.2)
+        );
+    }
+
+    fn upload(ctx: &GpuCtx, ptr: u64, bytes: &[u8]) {
+        assert_eq!(
+            unsafe {
+                cudarc::driver::sys::cuMemcpyHtoDAsync_v2(
+                    ptr,
+                    bytes.as_ptr().cast(),
+                    bytes.len(),
+                    ctx.stream.cu_stream(),
+                )
+            },
+            cudarc::driver::sys::CUresult::CUDA_SUCCESS
+        );
+        ctx.stream.synchronize().expect("S3 upload sync");
+    }
+
+    fn raw(ctx: &GpuCtx, owner: &DtypedBuf) -> Vec<u8> {
+        let all = fixed_explicit_vendor_raw_bytes(ctx, owner);
+        assert!(
+            all[..GUARD]
+                .iter()
+                .chain(all[all.len() - GUARD..].iter())
+                .all(|b| *b == 0x5a),
+            "S3 output allocation guard overwritten"
+        );
+        all[GUARD..all.len() - GUARD].to_vec()
+    }
+
+    fn poison(ctx: &GpuCtx, owner: &DtypedBuf, expected: &[u8]) {
+        let complement: Vec<_> = expected.iter().map(|b| !b).collect();
+        upload(ctx, owner.cached_ptr() + GUARD as u64, &complement);
+        let observed = raw(ctx, owner);
+        assert_eq!(observed, complement, "S3 poison upload readback");
+        assert!(
+            observed
+                .chunks_exact(2)
+                .zip(expected.chunks_exact(2))
+                .all(|(a, b)| a != b),
+            "every output storage word must differ before independent replay"
+        );
+    }
+
+    fn output_gate(
+        ctx: &GpuCtx,
+        owner: &DtypedBuf,
+        expected: &[u8],
+        replay: impl FnOnce(),
+    ) -> bool {
+        poison(ctx, owner, expected);
+        replay();
+        raw(ctx, owner) == expected
+    }
+
+    fn half_bits(raw: &[u8], dtype: WeightDtype) -> Vec<u32> {
+        raw.chunks_exact(2)
+            .map(|v| {
+                let bits = u16::from_le_bytes([v[0], v[1]]);
+                match dtype {
+                    WeightDtype::Bf16 => half::bf16::from_bits(bits).to_f32().to_bits(),
+                    WeightDtype::F16 => half::f16::from_bits(bits).to_f32().to_bits(),
+                    _ => unreachable!(),
+                }
+            })
+            .collect()
+    }
+
+    fn fast(ctx: &GpuCtx, ops: FixedFwdOperands, shape: FixedShape) {
+        use cudarc::cublas::{result, sys};
+        assert!(ops.bias_ptr.is_none());
+        let alpha = 1.0f32;
+        let beta = 0.0f32;
+        unsafe {
+            result::gemm_ex(
+                *ctx.blas.handle(),
+                sys::cublasOperation_t::CUBLAS_OP_N,
+                sys::cublasOperation_t::CUBLAS_OP_N,
+                shape.n as i32,
+                shape.m as i32,
+                shape.k as i32,
+                (&alpha as *const f32).cast(),
+                ops.w.ptr as *const _,
+                ops.w.dtype.cuda_data_type(),
+                shape.n as i32,
+                ops.x.ptr as *const _,
+                ops.x.dtype.cuda_data_type(),
+                shape.k as i32,
+                (&beta as *const f32).cast(),
+                ops.c.ptr as *mut _,
+                ops.c.dtype.cuda_data_type(),
+                shape.n as i32,
+                sys::cublasComputeType_t::CUBLAS_COMPUTE_32F,
+                sys::cublasGemmAlgo_t::CUBLAS_GEMM_DEFAULT_TENSOR_OP,
+            )
+        }
+        .expect("S3 native-half Fast GEMM");
+    }
+
+    fn modes(ctx: &GpuCtx) -> String {
+        use cudarc::cublas::sys::*;
+        let handle = *ctx.blas.handle();
+        let success = cublasStatus_t::CUBLAS_STATUS_SUCCESS;
+        let mut math = cublasMath_t::CUBLAS_DEFAULT_MATH;
+        let mut pointer = cublasPointerMode_t::CUBLAS_POINTER_MODE_HOST;
+        let mut atomics = cublasAtomicsMode_t::CUBLAS_ATOMICS_NOT_ALLOWED;
+        unsafe {
+            assert_eq!(cublasSetMathMode(handle, math), success);
+            assert_eq!(cublasSetPointerMode_v2(handle, pointer), success);
+            assert_eq!(cublasSetAtomicsMode(handle, atomics), success);
+            assert_eq!(cublasGetMathMode(handle, &mut math), success);
+            assert_eq!(cublasGetPointerMode_v2(handle, &mut pointer), success);
+            assert_eq!(cublasGetAtomicsMode(handle, &mut atomics), success);
+        }
+        assert_eq!(math, cublasMath_t::CUBLAS_DEFAULT_MATH);
+        assert_eq!(pointer, cublasPointerMode_t::CUBLAS_POINTER_MODE_HOST);
+        assert_eq!(atomics, cublasAtomicsMode_t::CUBLAS_ATOMICS_NOT_ALLOWED);
+        format!(
+            "\"compute\":\"CUBLAS_COMPUTE_32F\",\"algorithm\":\"CUBLAS_GEMM_DEFAULT_TENSOR_OP\",\"math\":\"{math:?}\",\"pointer_mode\":\"{pointer:?}\",\"atomics\":\"{atomics:?}\",\"bias_broadcast\":false"
+        )
+    }
+
+    // Inspect every actual captured node. The existing one-node contract is
+    // applied to each custom node, while the full graph count is checked here.
+    fn inventory(
+        graph: &CudaGraph,
+        arm: usize,
+        ops: FixedFwdOperands,
+        shape: FixedShape,
+        logical_ops: usize,
+        vendor_nodes_per_op: usize,
+    ) -> (String, usize) {
+        use cudarc::driver::sys;
+        let mut count = 0;
+        assert_eq!(
+            unsafe { sys::cuGraphGetNodes(graph.cu_graph(), std::ptr::null_mut(), &mut count) },
+            sys::CUresult::CUDA_SUCCESS
+        );
+        assert!(count > 0);
+        let mut nodes = vec![std::ptr::null_mut(); count];
+        assert_eq!(
+            unsafe { sys::cuGraphGetNodes(graph.cu_graph(), nodes.as_mut_ptr(), &mut count) },
+            sys::CUresult::CUDA_SUCCESS
+        );
+        if arm < 2 {
+            assert_eq!(count, logical_ops);
+        } else if vendor_nodes_per_op > 0 {
+            assert_eq!(count, logical_ops * vendor_nodes_per_op);
+        }
+        let mut entries = Vec::new();
+        for node in nodes {
+            let mut kind = sys::CUgraphNodeType::CU_GRAPH_NODE_TYPE_EMPTY;
+            assert_eq!(
+                unsafe { sys::cuGraphNodeGetType(node, &mut kind) },
+                sys::CUresult::CUDA_SUCCESS
+            );
+            assert_eq!(
+                kind,
+                sys::CUgraphNodeType::CU_GRAPH_NODE_TYPE_KERNEL,
+                "no reset/copy/empty nodes in timed graph"
+            );
+            let mut p: sys::CUDA_KERNEL_NODE_PARAMS = unsafe { std::mem::zeroed() };
+            assert_eq!(
+                unsafe { sys::cuGraphKernelNodeGetParams_v2(node, &mut p) },
+                sys::CUresult::CUDA_SUCCESS
+            );
+            let mut name = std::ptr::null();
+            assert_eq!(
+                unsafe { sys::cuFuncGetName(&mut name, p.func) },
+                sys::CUresult::CUDA_SUCCESS
+            );
+            assert!(!name.is_null());
+            let symbol = unsafe { CStr::from_ptr(name) }.to_str().unwrap();
+            let mut decoded = String::new();
+            if arm < 2 {
+                let mut abi = Vec::new();
+                for index in 0..5 {
+                    let (mut offset, mut size) = (0, 0);
+                    assert_eq!(
+                        unsafe { sys::cuFuncGetParamInfo(p.func, index, &mut offset, &mut size) },
+                        sys::CUresult::CUDA_SUCCESS
+                    );
+                    abi.push((offset, size));
+                }
+                let (mut offset, mut size) = (0, 0);
+                let terminal =
+                    unsafe { sys::cuFuncGetParamInfo(p.func, 5, &mut offset, &mut size) }
+                        == sys::CUresult::CUDA_ERROR_INVALID_VALUE;
+                assert!(!p.kernelParams.is_null());
+                let mut pointers = [0u64; 4];
+                for (index, value) in pointers.iter_mut().enumerate() {
+                    let arg = unsafe { *p.kernelParams.add(index) };
+                    assert!(!arg.is_null());
+                    *value = unsafe { arg.cast::<u64>().read_unaligned() };
+                }
+                let bundle_ptr = unsafe { *p.kernelParams.add(4) };
+                assert!(!bundle_ptr.is_null());
+                let bundle = unsafe { bundle_ptr.cast::<[u32; 8]>().read_unaligned() };
+                fixed_explicit_vendor_pipeline_graph_contract(
+                    if arm == 0 {
+                        FixedTile::Tc128Sm89Swizzle
+                    } else {
+                        FixedTile::Tc128Sm89S3
+                    },
+                    ops.x.dtype,
+                    1,
+                    symbol,
+                    (p.gridDimX, p.gridDimY, p.gridDimZ),
+                    (p.blockDimX, p.blockDimY, p.blockDimZ),
+                    p.sharedMemBytes,
+                    abi,
+                    terminal,
+                    pointers,
+                    [ops.c.ptr, ops.x.ptr, ops.w.ptr, 0],
+                    bundle,
+                    shape,
+                )
+                .unwrap();
+                decoded = format!(
+                    ",\"pointers\":{pointers:?},\"bundle\":{bundle:?},\"abi\":[[0,8],[8,8],[16,8],[24,8],[32,32]],\"sixth_rejected\":true"
+                );
+            }
+            entries.push(format!("{{\"symbol\":\"{}\",\"grid\":[{},{},{}],\"block\":[{},{},{}],\"shared_bytes\":{}{} }}",
+                fixed_sm120_tf32_bd_json_escape(symbol),p.gridDimX,p.gridDimY,p.gridDimZ,p.blockDimX,p.blockDimY,p.blockDimZ,p.sharedMemBytes,decoded));
+        }
+        (format!("[{}]", entries.join(",")), count)
+    }
+
+    pub(super) fn run() {
+        assert_eq!(
+            std::env::var("MAMBA_FIXED_ADA_S3_PAIR").as_deref(),
+            Ok("1"),
+            "explicit S3 pair enable required"
+        );
+        assert!(!cfg!(debug_assertions), "S3 pairing requires release");
+        for (key, _) in std::env::vars_os() {
+            let key = key.to_string_lossy();
+            if (key.starts_with("MAMBA_FIXED_ADA_")
+                && !matches!(
+                    key.as_ref(),
+                    "MAMBA_FIXED_ADA_S3_PAIR"
+                        | "MAMBA_FIXED_ADA_S3_WINDOWS"
+                        | "MAMBA_FIXED_ADA_S3_DTYPES"
+                ))
+                || key.starts_with("MAMBA_FIXED_VENDOR_")
+                || key == "NVIDIA_TF32_OVERRIDE"
+            {
+                panic!("stale control {key} forbidden in literal S3 experiment");
+            }
+        }
+        let dtype_text = std::env::var("MAMBA_FIXED_ADA_S3_DTYPES").expect("explicit dtypes");
+        let (windows, dtypes) = config(
+            &std::env::var("MAMBA_FIXED_ADA_S3_WINDOWS").expect("explicit windows"),
+            &dtype_text,
+        )
+        .unwrap();
+        fixed_sm120_tf32_bd_environment_preflight("Ada S3 mirrored paired").unwrap();
+        let device = GpuDevice::new(0).expect("Ada device");
+        assert_eq!(device.compute_capability, (8, 9));
+        assert_eq!(device.multiprocessor_count(), 142);
+        assert_eq!(TUNING_TABLE_REVISION, 42);
+        let ctx = GpuCtx::new(&device).expect("Ada context");
+        let compiler = ctx.kernels.compiler_identity();
+        assert!(compiler.nvrtc_library_known);
+        let toolkit = std::env::var("S3_TOOLKIT").expect("toolkit binding");
+        assert_eq!(
+            toolkit,
+            format!("{}.{}", compiler.nvrtc_version.0, compiler.nvrtc_version.1)
+        );
+        assert!(matches!(
+            compiler.nvrtc_version,
+            (12, 8) | (13, 0) | (13, 2)
+        ));
+        let artifact = ctx.kernels.artifact_set_identity().fixed;
+        let source_hash = digest_hex(
+            &Sha256::digest(std::fs::read("tests/gemm_bi_fixed_performance.rs").unwrap()).into(),
+        );
+        let binary_hash = digest_hex(
+            &Sha256::digest(std::fs::read(std::env::current_exe().unwrap()).unwrap()).into(),
+        );
+        assert_eq!(
+            source_hash,
+            std::env::var("S3_SOURCE_SHA").expect("source binding")
+        );
+        assert_eq!(
+            binary_hash,
+            std::env::var("S3_BINARY_SHA").expect("binary binding")
+        );
+        let mode = modes(&ctx);
+        let metadata = format!(
+            "\"schema\":\"MambaBiFixedAdaS3PairedV1\",\"toolkit\":\"{toolkit}\",\"shape\":[4621,768,2304],\"bias\":false,\"alpha\":1,\"beta\":0,\"revision\":42"
+        );
+        println!(
+            "{{{metadata},\"kind\":\"identity\",\"uuid\":\"GPU-d1edd7be-e88d-aed6-047d-622163306f0e\",\"cc\":\"8.9\",\"sm_count\":142,\"source_sha\":\"{source_hash}\",\"binary_sha\":\"{binary_hash}\",\"fixed_source_digest\":\"{}\",\"fixed_invocation_digest\":\"{}\",\"fixed_artifact_digest\":\"{}\",\"header_manifest_digest\":\"{}\",\"nvrtc_library_domain\":\"{}\",\"nvrtc_library_known\":true,\"dtypes\":\"{dtype_text}\",\"windows\":{windows},\"logical_ops\":20,\"warmup_eager\":128,\"percentile\":\"round((len-1)*fraction)\",{mode}}}",
+            digest_hex(&compiler.source_digest),
+            digest_hex(&compiler.invocation_digest),
+            digest_hex(&artifact.artifact_digest),
+            digest_hex(&compiler.header_manifest_digest),
+            digest_hex(&compiler.nvrtc_library_domain)
+        );
+        let shape = FixedShape {
+            m: 4621,
+            k: 768,
+            n: 2304,
+        };
+        let elements = shape.m * shape.n;
+        let rows = fixed_explicit_vendor_row_specs();
+        let mut configurations = 0;
+        for index in dtypes {
+            let row = rows[index];
+            let dtype = row.input_dtype;
+            let dtype_name = row.name;
+            configure_fixed_auto_vendor_custom(&ctx, row.policy);
+            let a = DtypedBuf::zeros(&ctx.stream, shape.m * shape.k, dtype).unwrap();
+            let b = DtypedBuf::zeros(&ctx.stream, shape.k * shape.n, dtype).unwrap();
+            a.upload_f32(&ctx.stream, &synth(shape.m * shape.k, 0x0ada_a001))
+                .unwrap();
+            b.upload_f32(&ctx.stream, &synth(shape.k * shape.n, 0x0ada_b001))
+                .unwrap();
+            let a_raw = fixed_explicit_vendor_raw_bytes(&ctx, &a);
+            let b_raw = fixed_explicit_vendor_raw_bytes(&ctx, &b);
+            let owners: Vec<_> = (0..3)
+                .map(|_| {
+                    let owner = DtypedBuf::zeros(&ctx.stream, elements + GUARD, dtype).unwrap();
+                    upload(&ctx, owner.cached_ptr(), &vec![0x5a; owner.size_bytes()]);
+                    owner
+                })
+                .collect();
+            let operands: Vec<_> = owners
+                .iter()
+                .map(|owner| FixedFwdOperands {
+                    c: TypedPtr {
+                        ptr: owner.cached_ptr() + GUARD as u64,
+                        dtype,
+                    },
+                    x: typed(&a, dtype),
+                    w: typed(&b, dtype),
+                    bias_ptr: None,
+                })
+                .collect();
+            assert!(operands.iter().all(|ops| ops.c.ptr % 256 == 0));
+            let launch = |arm: usize| match arm {
+                0 => {
+                    let actual = launch_fixed_auto_vendor_custom(&ctx, operands[0], shape);
+                    assert_eq!(
+                        actual,
+                        FixedTile::Tc128Sm89Swizzle,
+                        "actual AUTO must remain rev42 incumbent"
+                    );
+                }
+                1 => fixed_forward_with_tile(&ctx, operands[1], shape, FixedTile::Tc128Sm89S3)
+                    .expect("public S3 force"),
+                2 => fast(&ctx, operands[2], shape),
+                _ => unreachable!(),
+            };
+            for arm in 0..3 {
+                launch(arm);
+            }
+            let expected: Vec<_> = owners.iter().map(|o| raw(&ctx, o)).collect();
+            assert_eq!(
+                expected[0], expected[1],
+                "S3/AUTO exact homogeneous storage bits"
+            );
+            let reference = DtypedBuf::zeros(&ctx.stream, elements, WeightDtype::F32).unwrap();
+            fixed_ada_vendor_launch(
+                &ctx,
+                FixedFwdOperands {
+                    c: typed(&reference, WeightDtype::F32),
+                    ..operands[0]
+                },
+                shape,
+                cudarc::cublas::sys::cublasComputeType_t::CUBLAS_COMPUTE_32F_PEDANTIC,
+            );
+            let reference_bits = f32_bits(&ctx, &reference, elements);
+            let errors: Vec<_> = expected
+                .iter()
+                .map(|bytes| {
+                    fixed_ada_normalized_error(
+                        &half_bits(bytes, dtype),
+                        &reference_bits,
+                        row.custom_tolerance,
+                        "S3 paired numerical",
+                    )
+                })
+                .collect();
+            let mut one = Vec::new();
+            let mut twenty = Vec::new();
+            for arm in 0..3 {
+                for _ in 0..2 {
+                    assert!(
+                        output_gate(&ctx, &owners[arm], &expected[arm], || launch(arm)),
+                        "eager repeat storage gate"
+                    );
+                }
+                let g = unsafe {
+                    capture_into_graph(&ctx.stream, || {
+                        launch(arm);
+                        Ok(())
+                    })
+                }
+                .unwrap();
+                let (one_inventory, nodes) = inventory(&g, arm, operands[arm], shape, 1, 0);
+                let g20 = unsafe {
+                    capture_into_graph(&ctx.stream, || {
+                        for _ in 0..20 {
+                            launch(arm);
+                        }
+                        Ok(())
+                    })
+                }
+                .unwrap();
+                let (twenty_inventory, _) = inventory(&g20, arm, operands[arm], shape, 20, nodes);
+                for graph in [&g, &g20] {
+                    for _ in 0..2 {
+                        assert!(
+                            output_gate(&ctx, &owners[arm], &expected[arm], || graph
+                                .launch()
+                                .unwrap()),
+                            "independent graph overwrite/bits gate"
+                        );
+                    }
+                }
+                println!(
+                    "{{{metadata},\"kind\":\"physical\",\"dtype\":\"{dtype_name}\",\"arm\":\"{}\",\"pointers\":[{},{},{},0],\"allocation\":[{},{}],\"guard_bytes\":256,\"one\":{one_inventory},\"twenty\":{twenty_inventory},\"numerical_error\":{},\"tolerance\":{},\"reference\":\"PEDANTIC_F32\",\"eager_repeats\":2,\"graph_repeats\":2,\"poison_upload_verified\":true,\"repeat_bits\":true,\"guards\":true}}",
+                    ARMS[arm],
+                    operands[arm].c.ptr,
+                    operands[arm].x.ptr,
+                    operands[arm].w.ptr,
+                    owners[arm].cached_ptr(),
+                    owners[arm].size_bytes(),
+                    errors[arm],
+                    row.custom_tolerance
+                );
+                one.push(g);
+                twenty.push(g20);
+            }
+            let noop = unsafe { capture_into_graph(&ctx.stream, || Ok(())) }
+                .expect("empty negative graph capture");
+            assert!(
+                !output_gate(&ctx, &owners[1], &expected[1], || noop.launch().unwrap()),
+                "no-op candidate must fail overwrite/bits gate"
+            );
+            for path in ["eager", "graph"] {
+                for start in 0..2 {
+                    for arm in 0..3 {
+                        assert!(output_gate(&ctx, &owners[arm], &expected[arm], || launch(
+                            arm
+                        )));
+                        for graph in [&one[arm], &twenty[arm]] {
+                            assert!(output_gate(&ctx, &owners[arm], &expected[arm], || graph
+                                .launch()
+                                .unwrap()));
+                        }
+                    }
+                    // Allocate all collection capacity before warmup. Nothing prints,
+                    // downloads, poisons, compiles or allocates device memory until
+                    // all windows of this configuration have completed.
+                    let schedule: Vec<_> = (0..windows)
+                        .flat_map(|w| schedule(w, start).into_iter().map(move |s| (w, s)))
+                        .collect();
+                    let mut samples = Vec::with_capacity(12 * windows);
+                    for _ in 0..128 {
+                        for arm in 0..3 {
+                            launch(arm);
+                        }
+                    }
+                    for arm in 0..3 {
+                        one[arm].launch().unwrap();
+                        twenty[arm].launch().unwrap();
+                    }
+                    ctx.stream.synchronize().unwrap();
+                    for &(window, (traversal, comparison, position, arm)) in &schedule {
+                        let us = if path == "eager" {
+                            fixed_ada_event_window_us(&ctx, 20, || launch(arm))
+                        } else {
+                            fixed_ada_event_window_us(&ctx, 1, || twenty[arm].launch().unwrap())
+                                / 20.0
+                        };
+                        samples.push((window, traversal, comparison, position, arm, us));
+                    }
+                    for arm in 0..3 {
+                        assert_eq!(
+                            raw(&ctx, &owners[arm]),
+                            expected[arm],
+                            "post timing exact bits"
+                        );
+                        assert!(output_gate(&ctx, &owners[arm], &expected[arm], || launch(
+                            arm
+                        )));
+                        for graph in [&one[arm], &twenty[arm]] {
+                            assert!(output_gate(&ctx, &owners[arm], &expected[arm], || graph
+                                .launch()
+                                .unwrap()));
+                        }
+                    }
+                    assert_eq!(
+                        fixed_explicit_vendor_raw_bytes(&ctx, &a),
+                        a_raw,
+                        "immutable A"
+                    );
+                    assert_eq!(
+                        fixed_explicit_vendor_raw_bytes(&ctx, &b),
+                        b_raw,
+                        "immutable B"
+                    );
+                    let key = format!(
+                        "{metadata},\"dtype\":\"{dtype_name}\",\"path\":\"{path}\",\"start_parity\":{start}"
+                    );
+                    let mut ratios: [Vec<f64>; 3] =
+                        std::array::from_fn(|_| Vec::with_capacity(windows));
+                    for (chronology, &(w, traversal, comparison, position, arm, us)) in
+                        samples.iter().enumerate()
+                    {
+                        let order = if (w + start) % 2 == 0 { "ABBA" } else { "BAAB" };
+                        println!(
+                            "{{{key},\"kind\":\"sample\",\"chronology\":{chronology},\"window\":{w},\"comparison\":{comparison},\"traversal\":{traversal},\"order\":\"{order}\",\"position\":{position},\"arm\":\"{}\",\"logical_ops\":20,\"us\":{us}}}",
+                            ARMS[arm]
+                        );
+                    }
+                    for (bracket, observations) in samples.chunks_exact(4).enumerate() {
+                        let (w, traversal, comparison, _, _, _) = observations[0];
+                        let pair: Vec<_> = observations.iter().map(|o| (o.4, o.5)).collect();
+                        let ratio = pair_ratio(&pair, comparison).unwrap();
+                        ratios[comparison].push(ratio);
+                        println!(
+                            "{{{key},\"kind\":\"pair\",\"window\":{w},\"comparison\":{comparison},\"traversal\":{traversal},\"observations\":[{},{},{},{}],\"ratio\":{ratio}}}",
+                            bracket * 4,
+                            bracket * 4 + 1,
+                            bracket * 4 + 2,
+                            bracket * 4 + 3
+                        );
+                    }
+                    for comparison in 0..3 {
+                        ratios[comparison].sort_by(f64::total_cmp);
+                        let p50 = percentile(&ratios[comparison], 0.5);
+                        let p95 = percentile(&ratios[comparison], 0.95);
+                        println!(
+                            "{{{key},\"kind\":\"summary\",\"comparison\":{comparison},\"direction\":\"{}\",\"windows\":{windows},\"p50\":{p50},\"p95\":{p95}}}",
+                            RATIOS[comparison]
+                        );
+                    }
+                    println!(
+                        "{{{key},\"kind\":\"configuration_complete\",\"samples\":{},\"pairs\":{},\"summaries\":3,\"pre_post_bits\":true,\"pre_post_graphs\":true,\"guards\":true,\"immutable_inputs\":true,\"noop_rejected\":true}}",
+                        12 * windows,
+                        3 * windows
+                    );
+                    configurations += 1;
+                }
+            }
+        }
+        println!(
+            "{{{metadata},\"kind\":\"complete\",\"configurations\":{configurations},\"samples\":{},\"pairs\":{},\"summaries\":{},\"rejected\":0,\"passed\":true}}",
+            configurations * 12 * windows,
+            configurations * 3 * windows,
+            configurations * 3
+        );
+    }
+
+    #[test]
+    fn mirrored_brackets_reverse_both_arm_order_and_comparison_traversal() {
+        assert_eq!(
+            schedule(0, 0),
+            vec![
+                (0, 0, 0, 0),
+                (0, 0, 1, 1),
+                (0, 0, 2, 1),
+                (0, 0, 3, 0),
+                (1, 1, 0, 2),
+                (1, 1, 1, 0),
+                (1, 1, 2, 0),
+                (1, 1, 3, 2),
+                (2, 2, 0, 2),
+                (2, 2, 1, 1),
+                (2, 2, 2, 1),
+                (2, 2, 3, 2)
+            ]
+        );
+        assert_eq!(
+            schedule(0, 1),
+            vec![
+                (0, 2, 0, 1),
+                (0, 2, 1, 2),
+                (0, 2, 2, 2),
+                (0, 2, 3, 1),
+                (1, 1, 0, 0),
+                (1, 1, 1, 2),
+                (1, 1, 2, 2),
+                (1, 1, 3, 0),
+                (2, 0, 0, 1),
+                (2, 0, 1, 0),
+                (2, 0, 2, 0),
+                (2, 0, 3, 1)
+            ]
+        );
+        assert_eq!(schedule(1, 0), schedule(0, 1));
+        assert_eq!(schedule(1, 1), schedule(0, 0));
+    }
+}
+
 // Separate protocol: do not reinterpret the historical triple comparator below.
+#[test]
+#[ignore = "requires explicit MAMBA_FIXED_ADA_S3_PAIR=1 and exclusive pinned Ada; production AUTO/S3/Fast mirrored brackets"]
+fn fixed_ada_half_s3_auto_fast_paired() {
+    ada_s3_pair::run();
+}
+
 #[path = "support/fixed_sm89_exact_n64_admission.rs"]
 mod exact_n64_admission;
 
