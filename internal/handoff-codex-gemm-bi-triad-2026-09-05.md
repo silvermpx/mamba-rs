@@ -25,8 +25,17 @@ build, a small meaningful bit/repeat/eager/graph set and short paired timing;
 full qualification is for a frozen integrated finalist batch. Reuse unchanged
 evidence and rerun affected checks after fixes. Do not wait for every inference
 Fast gap to close before Triad discovery. This supersedes older per-prototype
-full-gate ordering; see docs/performance-playbook.md section9. Current GPU work
-is targeted TF32 E0 profiling, followed by bounded inference/Triad discovery.
+full-gate ordering; see docs/performance-playbook.md section9.
+
+TF32 E0 profile is now complete on the unchanged AUTO44 CUDA13.2 build:
+unprofiled one-window AB/BA is about119us AUTO versus91us cuBLAS Fast.
+Nsight finds28.822M versus15.968M instructions for the same3.538944M HMMA;
+see internal/perf/ada-tf32-e0-ncu-20260907/report.md. Both arms have96 useful
+tiles; Fast's128 physical CTAs include32 padding early exits. The next
+bounded probe is a test-only RNA M128N96/BK32/S3 candidate, with128 genuinely
+useful E0 tiles and unchanged ascending-k8/RNA arithmetic. It is not yet a
+measured improvement or production route. Next Triad probe is the existing
+TN prism split8 M64N64/S3 candidate; no new Triad timing is claimed here.
 
 Latest measured checkpoint (2026-09-07): existing exact-F32 CopyPlan passed
 paired21 and fresh101 against actualLegacy AUTO on CUDA12.8 and13.0 for

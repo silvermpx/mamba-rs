@@ -1,0 +1,53 @@
+{
+  "purpose": "counter-only-not-admission",
+  "toolkit": "13.2",
+  "generation": "final2",
+  "binding": "/root/evidence-ada-exact-toolkit-auto-20260907/cuda132-binding-final2.json",
+  "binding_sha": "486ede4eb3d5bc1c7d111d0426fbb548e0f331a868d85225c1be7ec95df2f3c6",
+  "measured_source_sha": "2ac1c93ba3e4682138a0df3341a26921438334382532d6943277268320655285",
+  "binary": "/root/target-ada-exact-toolkit-auto-final2-cuda132-20260907/release/deps/gemm_bi_fixed_performance-46090335b71731a6",
+  "binary_sha": "4ecefea9345226073e9671017bb14450ebed562be8c5c551a2e6d9de3859868d",
+  "cache": "/root/mamba-kcache-ada-exact-toolkit-auto-final2-cuda132-20260907",
+  "cache_mode": "0o700",
+  "row": "tf32",
+  "cell": "hot_e",
+  "shape_mkn": [
+    2048,
+    2304,
+    768
+  ],
+  "bias": false,
+  "windows": 1,
+  "vendor_compute": "CUBLAS_COMPUTE_32F_FAST_TF32",
+  "custom_symbol": "gemm_bi_nn_fixed_rna_wide_tf32_v1_m128n128_bk32_s3",
+  "fast_symbol": "_ZN7cutlass7Kernel2I52cutlass_80_tensorop_s1688gemm_128x128_16x5_nn_align4EEvNT_6ParamsE",
+  "launch_skip_matching": 130,
+  "launch_count": 1,
+  "replay_mode": "kernel",
+  "clock_control": "none",
+  "cache_control": "none",
+  "pipeline_boost_state": "dynamic",
+  "sections": [
+    "LaunchStats",
+    "Occupancy",
+    "SpeedOfLight",
+    "ComputeWorkloadAnalysis",
+    "SchedulerStats",
+    "WarpStateStats",
+    "MemoryWorkloadAnalysis",
+    "InstructionStats"
+  ],
+  "traffic_metrics": [
+    "dram__bytes.sum",
+    "dram__bytes_read.sum",
+    "dram__bytes_write.sum",
+    "lts__t_sectors.sum",
+    "lts__t_sectors_lookup_hit.sum",
+    "lts__t_sectors_lookup_miss.sum",
+    "lts__t_sectors_op_read.sum",
+    "lts__t_sectors_op_write.sum",
+    "l1tex__t_bytes_pipe_lsu_mem_global_op_ld.sum",
+    "l1tex__t_bytes_pipe_lsu_mem_global_op_st.sum",
+    "smsp__inst_executed_pipe_tensor_op_hmma.sum"
+  ]
+}
