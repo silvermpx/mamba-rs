@@ -14,6 +14,9 @@ const PADDED_DENSE_COPY_SYMBOL: &str =
     "gemm_bi_nt_test_padded_dense_copy_sm80_mma_tf32_v1_m128n64_bk32_s3";
 const COMPACT_EIGHT_WARP_S2_SYMBOL: &str =
     "gemm_bi_nt_test_compact_eight_warp_sm80_mma_tf32_v1_m128n64_bk32_s2";
+const TN_AUTO_NARROW_SYMBOL: &str = "gemm_bi_tn_sm80_mma_tf32_v1_m64n64_bk32_s2";
+const TN_AUTO_WIDE_SYMBOL: &str = "gemm_bi_tn_sm80_mma_tf32_v1_m128n64_bk32_s3";
+const TN_AUTO_WIDE_SHARED_BYTES: u32 = 79_872;
 const PADDED_DENSE_D768_OUT_SYMBOL: &str =
     "gemm_bi_nt_test_padded_dense_d768_out_sm80_mma_tf32_v1_m128n64_bk32_s3";
 const PADDED_DENSE_PRISM_SYMBOL: &str =
@@ -26,6 +29,8 @@ const PADDED_DENSE_COPY_CUDA: &str = include_str!("gemm_bi_tf32_nt_padded_dense_
 const PADDED_DENSE_PRISM_CUDA: &str = include_str!("gemm_bi_tf32_nt_padded_dense_prism.cuh");
 #[path = "support/triad_tn_compact_source.rs"]
 mod triad_tn_compact_source;
+#[path = "support/triad_tn_dense_source.rs"]
+mod triad_tn_dense_source;
 const PADDED_DENSE_D768_OUT_GUARD_CUDA: &str = r#"__device__ __forceinline__ bool gemm_bi_tf32_nt_test_padded_dense_d768_out_target(
     const Sm80Tf32KernelParams& params) {
     return params.m == 2048 && params.k == 1536 && params.n == 768
@@ -46,6 +51,9 @@ enum CandidateVariant {
     PaddedDensePrism,
     TnCompactEightWarpS2Prism,
     TnCompactFourWarpS2Prism,
+    TnDenseS3D768In,
+    TnDenseS3D768Out,
+    TnDenseS3Prism,
 }
 
 impl CandidateVariant {
@@ -63,6 +71,9 @@ impl CandidateVariant {
             Self::PaddedDensePrism => "padded_dense_prism",
             Self::TnCompactEightWarpS2Prism => "tn_compact_eight_warp_s2_prism",
             Self::TnCompactFourWarpS2Prism => "tn_compact_four_warp_s2_prism",
+            Self::TnDenseS3D768In => "tn_dense_s3_d768_in",
+            Self::TnDenseS3D768Out => "tn_dense_s3_d768_out",
+            Self::TnDenseS3Prism => "tn_dense_s3_prism",
         }
     }
 
@@ -81,6 +92,9 @@ impl CandidateVariant {
             Self::PaddedDensePrism => PADDED_DENSE_PRISM_SYMBOL,
             Self::TnCompactEightWarpS2Prism => triad_tn_compact_source::SYMBOL,
             Self::TnCompactFourWarpS2Prism => triad_tn_compact_source::FOUR_WARP_SYMBOL,
+            Self::TnDenseS3D768In | Self::TnDenseS3D768Out | Self::TnDenseS3Prism => {
+                triad_tn_dense_source::SYMBOL
+            }
         }
     }
 
@@ -97,6 +111,7 @@ impl CandidateVariant {
             | Self::CompactEightWarpS2D768Out
             | Self::CompactEightWarpS2Prism => 49_152,
             Self::TnCompactEightWarpS2Prism | Self::TnCompactFourWarpS2Prism => 49_152,
+            Self::TnDenseS3D768In | Self::TnDenseS3D768Out | Self::TnDenseS3Prism => 79_872,
         }
     }
 
@@ -113,11 +128,15 @@ impl CandidateVariant {
 
     const fn target_dims(self) -> (usize, usize, usize) {
         match self {
-            Self::CompactEightWarpS2D768Out | Self::PaddedDenseD768Out => (2_048, 1_536, 768),
+            Self::TnDenseS3D768In => (2_048, 768, 3_072),
+            Self::CompactEightWarpS2D768Out | Self::PaddedDenseD768Out | Self::TnDenseS3D768Out => {
+                (2_048, 1_536, 768)
+            }
             Self::CompactEightWarpS2Prism
             | Self::PaddedDensePrism
             | Self::TnCompactEightWarpS2Prism
-            | Self::TnCompactFourWarpS2Prism => (4_621, 384, 1_928),
+            | Self::TnCompactFourWarpS2Prism
+            | Self::TnDenseS3Prism => (4_621, 384, 1_928),
             _ => (2_048, 768, 3_072),
         }
     }
@@ -141,13 +160,20 @@ impl CandidateVariant {
             Self::TnCompactFourWarpS2Prism => {
                 triad_tn_compact_source::four_warp_candidate_source(PRODUCTION_CUDA)
             }
+            Self::TnDenseS3D768In | Self::TnDenseS3D768Out | Self::TnDenseS3Prism => {
+                triad_tn_dense_source::candidate_source(PRODUCTION_CUDA)
+            }
         }
     }
 
     const fn is_tn(self) -> bool {
         matches!(
             self,
-            Self::TnCompactEightWarpS2Prism | Self::TnCompactFourWarpS2Prism
+            Self::TnCompactEightWarpS2Prism
+                | Self::TnCompactFourWarpS2Prism
+                | Self::TnDenseS3D768In
+                | Self::TnDenseS3D768Out
+                | Self::TnDenseS3Prism
         )
     }
 
@@ -159,6 +185,9 @@ impl CandidateVariant {
         match self {
             Self::TnCompactEightWarpS2Prism => "MambaBiTf32TnCompact8DiscoveryScreenV1",
             Self::TnCompactFourWarpS2Prism => "MambaBiTf32TnCompact4DiscoveryScreenV1",
+            Self::TnDenseS3D768In | Self::TnDenseS3D768Out | Self::TnDenseS3Prism => {
+                "MambaBiTf32TnDenseDiscoveryScreenV1"
+            }
             _ => panic!("TN screen schema requested for NT candidate"),
         }
     }
@@ -167,6 +196,9 @@ impl CandidateVariant {
         match self {
             Self::TnCompactEightWarpS2Prism => "MambaBiTf32TnCompact8DiscoveryDecisionV1",
             Self::TnCompactFourWarpS2Prism => "MambaBiTf32TnCompact4DiscoveryDecisionV1",
+            Self::TnDenseS3D768In | Self::TnDenseS3D768Out | Self::TnDenseS3Prism => {
+                "MambaBiTf32TnDenseDiscoveryDecisionV1"
+            }
             _ => panic!("TN decision schema requested for NT candidate"),
         }
     }
@@ -175,7 +207,39 @@ impl CandidateVariant {
         match self {
             Self::TnCompactEightWarpS2Prism => "tf32-tn-compact-eight-warp-s2-prism/",
             Self::TnCompactFourWarpS2Prism => "tf32-tn-compact-four-warp-s2-prism/",
+            Self::TnDenseS3D768In => "tf32-tn-dense-s3-d768-in/",
+            Self::TnDenseS3D768Out => "tf32-tn-dense-s3-d768-out/",
+            Self::TnDenseS3Prism => "tf32-tn-dense-s3-prism/",
             _ => panic!("TN cohort requested for NT candidate"),
+        }
+    }
+
+    const fn grid_dim(self) -> (u32, u32, u32) {
+        let dims = self.target_dims();
+        let (rows, columns) = if self.is_tn() {
+            (dims.1, dims.2)
+        } else {
+            (dims.0, dims.1)
+        };
+        (rows.div_ceil(BM) as u32 * columns.div_ceil(BN) as u32, 1, 1)
+    }
+
+    const fn tn_auto_identity(self) -> (&'static str, (u32, u32, u32), (u32, u32, u32), u32) {
+        let dims = self.target_dims();
+        match self {
+            Self::TnDenseS3D768In | Self::TnDenseS3D768Out => (
+                TN_AUTO_NARROW_SYMBOL,
+                ((dims.1.div_ceil(64) * dims.2.div_ceil(64)) as u32, 1, 1),
+                (128, 1, 1),
+                36_864,
+            ),
+            _ if self.is_tn() => (
+                TN_AUTO_WIDE_SYMBOL,
+                self.grid_dim(),
+                (256, 1, 1),
+                TN_AUTO_WIDE_SHARED_BYTES,
+            ),
+            _ => panic!("TN AUTO identity requested for NT candidate"),
         }
     }
 }
@@ -1465,6 +1529,61 @@ fn tn_compact_four_warp_s2_binds_distinct_symbol_resource_gate_and_evidence_labe
 }
 
 #[test]
+fn tn_dense_s3_batch_binds_three_cells_one_symbol_and_computed_grids() {
+    for (variant, name, dims, grid) in [
+        (
+            CandidateVariant::TnDenseS3D768In,
+            "tn_dense_s3_d768_in",
+            (2_048, 768, 3_072),
+            288,
+        ),
+        (
+            CandidateVariant::TnDenseS3D768Out,
+            "tn_dense_s3_d768_out",
+            (2_048, 1_536, 768),
+            144,
+        ),
+        (
+            CandidateVariant::TnDenseS3Prism,
+            "tn_dense_s3_prism",
+            (4_621, 384, 1_928),
+            93,
+        ),
+    ] {
+        assert_eq!(variant.name(), name);
+        assert_eq!(variant.symbol(), triad_tn_dense_source::SYMBOL);
+        assert_eq!(variant.target_dims(), dims);
+        assert_eq!(variant.grid_dim(), (grid, 1, 1));
+        assert_eq!(variant.shared_bytes(), 79_872);
+        assert_eq!(variant.required_occupancy(), 1);
+        assert_eq!(
+            variant.tn_screen_schema(),
+            "MambaBiTf32TnDenseDiscoveryScreenV1"
+        );
+        assert_eq!(
+            variant.tn_decision_schema(),
+            "MambaBiTf32TnDenseDiscoveryDecisionV1"
+        );
+        assert_eq!(
+            variant.tn_cohort(),
+            format!("tf32-{}/", name.replace('_', "-"))
+        );
+    }
+    assert_eq!(
+        CandidateVariant::TnDenseS3D768In.tn_auto_identity(),
+        (TN_AUTO_NARROW_SYMBOL, (576, 1, 1), (128, 1, 1), 36_864)
+    );
+    assert_eq!(
+        CandidateVariant::TnDenseS3D768Out.tn_auto_identity(),
+        (TN_AUTO_NARROW_SYMBOL, (288, 1, 1), (128, 1, 1), 36_864)
+    );
+    assert_eq!(
+        CandidateVariant::TnDenseS3Prism.tn_auto_identity(),
+        (TN_AUTO_WIDE_SYMBOL, (93, 1, 1), (256, 1, 1), 79_872)
+    );
+}
+
+#[test]
 fn compact_eight_warp_s2_source_is_exactly_target_scoped() {
     let source = compact_eight_warp_s2_candidate_source().unwrap();
     assert!(source.contains(COMPACT_EIGHT_WARP_S2_SYMBOL));
@@ -2380,30 +2499,44 @@ mod cuda_suite {
                 evidence.launch_count()
             ));
         };
-        let (rows, columns, strides, op, symbol, shared) = if variant.is_tn() {
+        let (strides, op, symbol, shared, block, grid) = if variant.is_tn() {
+            let default_grid = (
+                (dims.1 as u32).div_ceil(BM as u32) * (dims.2 as u32).div_ceil(BN as u32),
+                1,
+                1,
+            );
+            let (symbol, grid, block, shared) = if actual_auto {
+                variant.tn_auto_identity()
+            } else {
+                (
+                    TN_AUTO_SYMBOL,
+                    default_grid,
+                    (256, 1, 1),
+                    TN_AUTO_SHARED_BYTES,
+                )
+            };
             (
-                dims.1,
-                dims.2,
                 (dims.1, dims.2, dims.2),
                 ResolvedGemmOp::Tn,
-                TN_AUTO_SYMBOL,
-                TN_AUTO_SHARED_BYTES,
+                symbol,
+                shared,
+                block,
+                grid,
             )
         } else {
             (
-                dims.0,
-                dims.1,
                 (dims.2, dims.2, dims.1),
                 ResolvedGemmOp::Nt,
                 AUTO_SYMBOL,
                 AUTO_SHARED_BYTES,
+                (256, 1, 1),
+                (
+                    (dims.0 as u32).div_ceil(BM as u32) * (dims.1 as u32).div_ceil(BN as u32),
+                    1,
+                    1,
+                ),
             )
         };
-        let grid = (
-            (rows as u32).div_ceil(BM as u32) * (columns as u32).div_ceil(BN as u32),
-            1,
-            1,
-        );
         if !evidence.eager_graph_equal()
             || evidence.single_launch_symbol() != Some(symbol)
             || evidence.uniform_module_kind() != Some(ModuleKind::TriadSm80)
@@ -2413,7 +2546,7 @@ mod cuda_suite {
             || node.shape != dims
             || node.strides != strides
             || node.launch.grid_dim != grid
-            || node.launch.block_dim != (256, 1, 1)
+            || node.launch.block_dim != block
             || node.launch.shared_mem_bytes != shared
         {
             return Err(format!(
@@ -2870,10 +3003,22 @@ mod cuda_suite {
             .collect::<Vec<_>>();
         let (m, k, n) = target;
         let schema = variant.tn_decision_schema();
+        let candidate_grid = variant.grid_dim();
+        let (actual_auto_symbol, actual_auto_grid, actual_auto_block, actual_auto_shared_bytes) =
+            variant.tn_auto_identity();
         println!(
-            "{{\"schema\":\"{schema}\",\"op\":\"TN\",\"variant\":\"{}\",\"symbol\":\"{}\",\"actual_auto_symbol\":\"{TN_AUTO_SYMBOL}\",\"candidate_grid\":[93,1,1],\"actual_auto_grid\":[93,1,1],\"candidate_dynamic_shared_bytes\":{},\"actual_auto_dynamic_shared_bytes\":{TN_AUTO_SHARED_BYTES},\"shape\":[{m},{k},{n}],\"alpha\":1.0,\"beta\":1.0,\"bias\":false,\"source_sha256\":\"{source_sha}\",\"pre\":{pre:?},\"timed_pre\":{timed_pre:?},\"post\":{post:?},\"strata_fields\":[\"ratio_p50\",\"ratio_p95\"],\"strata\":{},\"retain\":{retain},\"decision\":\"{}\",\"promotion\":false}}",
+            "{{\"schema\":\"{schema}\",\"op\":\"TN\",\"variant\":\"{}\",\"symbol\":\"{}\",\"actual_auto_symbol\":\"{actual_auto_symbol}\",\"candidate_grid\":[{},{},{}],\"actual_auto_grid\":[{},{},{}],\"candidate_block\":[256,1,1],\"actual_auto_block\":[{},{},{}],\"candidate_dynamic_shared_bytes\":{},\"actual_auto_dynamic_shared_bytes\":{actual_auto_shared_bytes},\"shape\":[{m},{k},{n}],\"alpha\":1.0,\"beta\":1.0,\"bias\":false,\"source_sha256\":\"{source_sha}\",\"pre\":{pre:?},\"timed_pre\":{timed_pre:?},\"post\":{post:?},\"strata_fields\":[\"ratio_p50\",\"ratio_p95\"],\"strata\":{},\"retain\":{retain},\"decision\":\"{}\",\"promotion\":false}}",
             variant.name(),
             variant.symbol(),
+            candidate_grid.0,
+            candidate_grid.1,
+            candidate_grid.2,
+            actual_auto_grid.0,
+            actual_auto_grid.1,
+            actual_auto_grid.2,
+            actual_auto_block.0,
+            actual_auto_block.1,
+            actual_auto_block.2,
             variant.shared_bytes(),
             json_pairs(&strata),
             if retain {
@@ -3055,5 +3200,23 @@ mod cuda_suite {
     #[ignore = "requires exclusive Ada CC8.9 CUDA13.2; TN prism compact four-warp S2 discovery"]
     fn ada_tf32_tn_prism_compact_four_warp_s2_discovery_once7() {
         run(CandidateVariant::TnCompactFourWarpS2Prism);
+    }
+
+    #[test]
+    #[ignore = "requires exclusive Ada CC8.9 CUDA13.2; TN dense S3 d768-in discovery"]
+    fn ada_tf32_tn_dense_s3_d768_in_discovery_once7() {
+        run(CandidateVariant::TnDenseS3D768In);
+    }
+
+    #[test]
+    #[ignore = "requires exclusive Ada CC8.9 CUDA13.2; TN dense S3 d768-out discovery"]
+    fn ada_tf32_tn_dense_s3_d768_out_discovery_once7() {
+        run(CandidateVariant::TnDenseS3D768Out);
+    }
+
+    #[test]
+    #[ignore = "requires exclusive Ada CC8.9 CUDA13.2; TN dense S3 prism discovery"]
+    fn ada_tf32_tn_dense_s3_prism_discovery_once7() {
+        run(CandidateVariant::TnDenseS3Prism);
     }
 }
