@@ -27,6 +27,18 @@ production by ratios 1.036883635 / 1.063118530 at p50/p95. Its report and
 59-entry integrity manifest are preserved under
 `internal/perf/ada-half-cutlass-schedule-s2-20260907/`.
 
+The following S3 experiment is a confirmed own improvement on CUDA13.2 B0:
+BF16 candidate/production paired101 p50/p95 `0.964968888968/0.996412833347`,
+F16 `0.964326220305/0.981133357944`. Candidate/cuBLAS Fast remains
+`1.267528694145/1.290857051084` and `1.187129654181/1.221770514572` respectively.
+Final corrected tests include285 functional cases per dtype,126 with bias,
+independently poisoned graph output and captured-argument checks. Source and
+final evidence review accept retention; original incomplete graph-test runs
+are excluded. See `internal/perf/ada-half-cutlass-s3-20260907/ARCHIVE.md`.
+Next is production force wiring, independent CUDA12.8/13.0/13.2 qualification,
+then measured AUTO promotion. Standalone NVCC results do not establish that
+production NVRTC work; BF16's p95 margin is only0.36%.
+
 P0 Nsight evidence under `internal/perf/ada-half-b0-ncu-20260907/` shows
 53.40% tensor-pipe activity for production versus 73.48% for cuBLAS, with
 similar requested memory traffic and substantially more executed instructions

@@ -1,0 +1,54 @@
+
+Fatbin elf code:
+================
+arch = sm_89
+code version = [1,8]
+host = linux
+compile_size = 64bit
+identifier = internal/perf/ada-half-cutlass-s3-20260907/benchmark-final.cu 
+
+Resource usage:
+ Common:
+  GLOBAL:0
+
+Fatbin elf code:
+================
+arch = sm_89
+code version = [1,8]
+host = linux
+compile_size = 64bit
+identifier = internal/perf/ada-half-cutlass-s3-20260907/benchmark-final.cu
+
+Resource usage:
+ Common:
+  GLOBAL:720 CONSTANT[4]:64
+ Function _ZN18half_swizzle_bench11vendor_seedI6__halfEEvPT_PKfiii:
+  REG:18 STACK:0 SHARED:0 LOCAL:0 CONSTANT[0]:380 TEXTURE:0 SURFACE:0 SAMPLER:0
+ Function _ZN18half_swizzle_bench9reset_oldI6__halfEEvPT_PKS2_iii:
+  REG:16 STACK:0 SHARED:0 LOCAL:0 CONSTANT[0]:380 TEXTURE:0 SURFACE:0 SAMPLER:0
+ Function _ZN18half_swizzle_bench14reference_seedI6__halfEEvPfPKT_PKfffiii:
+  REG:18 STACK:0 SHARED:0 LOCAL:0 CONSTANT[0]:396 TEXTURE:0 SURFACE:0 SAMPLER:0
+ Function _ZN18half_swizzle_bench11vendor_seedI13__nv_bfloat16EEvPT_PKfiii:
+  REG:18 STACK:0 SHARED:0 LOCAL:0 CONSTANT[0]:380 TEXTURE:0 SURFACE:0 SAMPLER:0
+ Function _ZN18half_swizzle_bench9reset_oldI13__nv_bfloat16EEvPT_PKS2_iii:
+  REG:16 STACK:0 SHARED:0 LOCAL:0 CONSTANT[0]:380 TEXTURE:0 SURFACE:0 SAMPLER:0
+ Function _ZN18half_swizzle_bench14reference_seedI13__nv_bfloat16EEvPfPKT_PKfffiii:
+  REG:18 STACK:0 SHARED:0 LOCAL:0 CONSTANT[0]:396 TEXTURE:0 SURFACE:0 SAMPLER:0
+ Function ada_half_cutlass_s3_f16:
+  REG:178 STACK:0 SHARED:0 LOCAL:0 CONSTANT[0]:416 TEXTURE:0 SURFACE:0 SAMPLER:0
+ Function ada_half_cutlass_s3_bf16:
+  REG:178 STACK:0 SHARED:0 LOCAL:0 CONSTANT[0]:416 TEXTURE:0 SURFACE:0 SAMPLER:0
+ Function gemm_bi_nn_fixed_sm89_tc128_swizzle_v1_f16:
+  REG:182 STACK:0 SHARED:0 LOCAL:0 CONSTANT[0]:416 TEXTURE:0 SURFACE:0 SAMPLER:0
+ Function gemm_bi_nn_fixed_sm89_tc128_swizzle_v1_bf16:
+  REG:182 STACK:0 SHARED:0 LOCAL:0 CONSTANT[0]:416 TEXTURE:0 SURFACE:0 SAMPLER:0
+
+Fatbin ptx code:
+================
+arch = sm_89
+code version = [9,2]
+host = linux
+compile_size = 64bit
+compressed
+identifier = internal/perf/ada-half-cutlass-s3-20260907/benchmark-final.cu
+ptxasOptions = -v  --generate-line-info 

@@ -1,0 +1,12 @@
+0c9b2345c643417406d75403df11f6fb96af7ce82f198ee551086f7c19020948  kernels/_typed_prelude.cuh
+7df0def0097b22df16e4abd6a3b9cae1d171b9f9ebf4c0bf6c50512bea8dd84c  kernels/gemm_bi_fixed/common.cuh
+1ab11e6729a5b25689dff8b978bf0cdd4676dae9425ac8286bbeb297e57d64a2  kernels/gemm_bi_fixed/sm89_half_swizzle.cu
+243e9b0680a3ecd1d34bd325244d221903adab59c35a691295ec334996115410  kernels/gemm_bi_fixed/sm89_half_swizzle_layout.cuh
+a90f504d6d2d0363908fd00d230263164105b41c6b5a6085a83ae130f2ce4222  internal/perf/ada-half-cutlass-s3-20260907/candidate.cu
+6548e67ea619588d5d5a92b91fcbf07282d13c6689036960438986902d6edf71  internal/perf/ada-half-cutlass-s3-20260907/benchmark-final.cu
+1c1e050f8cc2827194ab1111fca12dc7653404a12a3166aaed9793993c2e67f1  /root/target-ada-half-cutlass-s3-20260907-final/benchmark
+nvcc: NVIDIA (R) Cuda compiler driver
+Copyright (c) 2005-2026 NVIDIA Corporation
+Built on Mon_Mar_02_09:52:23_PM_PST_2026
+Cuda compilation tools, release 13.2, V13.2.51
+Build cuda_13.2.r13.2/compiler.37434383_0

@@ -1,0 +1,51 @@
+ptxas info    : 720 bytes gmem, 64 bytes cmem[4]
+ptxas info    : Compiling entry function '_ZN18half_swizzle_bench11vendor_seedI6__halfEEvPT_PKfiii' for 'sm_89'
+ptxas info    : Function properties for _ZN18half_swizzle_bench11vendor_seedI6__halfEEvPT_PKfiii
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 18 registers, used 0 barriers, 380 bytes cmem[0]
+ptxas info    : Compile time = 8.368 ms
+ptxas info    : Compiling entry function '_ZN18half_swizzle_bench9reset_oldI6__halfEEvPT_PKS2_iii' for 'sm_89'
+ptxas info    : Function properties for _ZN18half_swizzle_bench9reset_oldI6__halfEEvPT_PKS2_iii
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 16 registers, used 0 barriers, 380 bytes cmem[0]
+ptxas info    : Compile time = 5.071 ms
+ptxas info    : Compiling entry function '_ZN18half_swizzle_bench14reference_seedI6__halfEEvPfPKT_PKfffiii' for 'sm_89'
+ptxas info    : Function properties for _ZN18half_swizzle_bench14reference_seedI6__halfEEvPfPKT_PKfffiii
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 18 registers, used 0 barriers, 396 bytes cmem[0]
+ptxas info    : Compile time = 7.967 ms
+ptxas info    : Compiling entry function '_ZN18half_swizzle_bench11vendor_seedI13__nv_bfloat16EEvPT_PKfiii' for 'sm_89'
+ptxas info    : Function properties for _ZN18half_swizzle_bench11vendor_seedI13__nv_bfloat16EEvPT_PKfiii
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 18 registers, used 0 barriers, 380 bytes cmem[0]
+ptxas info    : Compile time = 7.192 ms
+ptxas info    : Compiling entry function '_ZN18half_swizzle_bench9reset_oldI13__nv_bfloat16EEvPT_PKS2_iii' for 'sm_89'
+ptxas info    : Function properties for _ZN18half_swizzle_bench9reset_oldI13__nv_bfloat16EEvPT_PKS2_iii
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 16 registers, used 0 barriers, 380 bytes cmem[0]
+ptxas info    : Compile time = 4.648 ms
+ptxas info    : Compiling entry function '_ZN18half_swizzle_bench14reference_seedI13__nv_bfloat16EEvPfPKT_PKfffiii' for 'sm_89'
+ptxas info    : Function properties for _ZN18half_swizzle_bench14reference_seedI13__nv_bfloat16EEvPfPKT_PKfffiii
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 18 registers, used 0 barriers, 396 bytes cmem[0]
+ptxas info    : Compile time = 7.474 ms
+ptxas info    : Compiling entry function 'ada_half_cutlass_s3_f16' for 'sm_89'
+ptxas info    : Function properties for ada_half_cutlass_s3_f16
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 178 registers, used 1 barriers, 416 bytes cmem[0]
+ptxas info    : Compile time = 317.518 ms
+ptxas info    : Compiling entry function 'ada_half_cutlass_s3_bf16' for 'sm_89'
+ptxas info    : Function properties for ada_half_cutlass_s3_bf16
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 178 registers, used 1 barriers, 416 bytes cmem[0]
+ptxas info    : Compile time = 317.091 ms
+ptxas info    : Compiling entry function 'gemm_bi_nn_fixed_sm89_tc128_swizzle_v1_f16' for 'sm_89'
+ptxas info    : Function properties for gemm_bi_nn_fixed_sm89_tc128_swizzle_v1_f16
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 182 registers, used 1 barriers, 416 bytes cmem[0]
+ptxas info    : Compile time = 196.678 ms
+ptxas info    : Compiling entry function 'gemm_bi_nn_fixed_sm89_tc128_swizzle_v1_bf16' for 'sm_89'
+ptxas info    : Function properties for gemm_bi_nn_fixed_sm89_tc128_swizzle_v1_bf16
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 182 registers, used 1 barriers, 416 bytes cmem[0]
+ptxas info    : Compile time = 201.499 ms
