@@ -9,6 +9,17 @@ the dated progress log, 900 lines), then `internal/agent-operational-rules.md`
 
 ## 1. What the work is
 
+Half discovery follow-up (2026-09-07): one CUDA13.2 batch leaves two F16
+short-screen survivors, D0 M64N64/BK64/S3 and E0 M128N64/BK64/S2. Worst-stratum
+candidate/current-AUTO median/p95 is0.957428/0.959236 and0.966673/0.970062;
+candidate/Fast worst medians remain1.053728 and1.089085. B0 compact-S3 BF16/F16
+both stop. Allfour small GPU correctness/resource checks pass; D/E each have
+two active CTAs/SM,49152 shared bytes,zero local bytes. These are not AUTO
+routes or all-toolkit/full batch-invariance qualifications. The special
+corpus is finite, not NaN/Inf. Root replayed224brackets/32strata; evidence is
+internal/perf/ada-half-batch-discovery-20260907/. Together with retained TF32
+N96 these form the discovery finalist set; inference is not closed.
+
 Latest discovery (2026-09-07): both four-warp TF32 BK16/S5 arms are rejected
 after their one CUDA13.2 screen7, despite passing the small bit-exact GPU set.
 E0 M128N96 is about121.48us, M128N128 about154.69us, current RNA119.05us,

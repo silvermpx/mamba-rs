@@ -1,0 +1,22 @@
+{
+  "schema": "MambaBiFixedHalfBatchBindingV1",
+  "toolkit": "13.2",
+  "feature": "cuda",
+  "binary": "/root/target-ada-exact-toolkit-auto-final2-cuda132-20260907/release/deps/gemm_bi_fixed_half_batch_discovery-cdc31ada095c4ba0",
+  "binary_sha256": "17cacbffbb254035205cf3f6bd1e953cd9f11d0cdcf155288b24c9a80ac40f09",
+  "sources": {
+    "tests/gemm_bi_fixed_half_batch_discovery.rs": "1604c00de80ab03a819881500b696422dfac2ef189535f12441ce20c2325f079",
+    "tests/gemm_bi_fixed_half_batch_discovery.cu": "9345a184cd50dd744a72e2ff0e784fe4440493616a03f55364f094df8e388a32",
+    "tests/support/fixed_half_batch_layout.rs": "a72b6b38bb44851ead5ec45b7fdc822842b845c218b6db5738f72435127c0ecb"
+  },
+  "task8_runner_sha256": "d753757a717bfe18b3a28a8480f31104e252271576e45d7e53fc16396008475a",
+  "drain_helper_sha256": "bf9bf045bf651e283ed4d3af348d48a0c23ac57271f14459783afd0f9a09ba25",
+  "args": [
+    "/root/target-ada-exact-toolkit-auto-final2-cuda132-20260907/release/deps/gemm_bi_fixed_half_batch_discovery-cdc31ada095c4ba0",
+    "--ignored",
+    "--exact",
+    "fixed_half_three_arm_batch_discovery",
+    "--nocapture",
+    "--test-threads=1"
+  ]
+}

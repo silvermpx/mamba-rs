@@ -1,0 +1,23 @@
+COMMAND rustc --edition=2024 --test tests/support/fixed_half_batch_layout.rs -o /tmp/fixed-half-batch-layout-review-red
+EXIT 0
+COMMAND /tmp/fixed-half-batch-layout-review-red
+
+running 8 tests
+test tests::compact_s3_never_forms_a_pointer_after_the_final_copy ... ok
+test tests::ascending_bk64_mma_order_rejects_real_reorder_mutant ... ok
+test tests::nonzero_stage_base_does_not_enter_the_a_fragment_xor ... FAILED
+test tests::ring_lifetimes_are_bounded_for_s2_and_s3 ... ok
+test tests::d_and_e_copy_maps_cover_each_stage_exactly_once ... ok
+test tests::d_and_e_warps_own_every_output_once ... ok
+test tests::compact_s3_preserves_the_independently_required_transition_order ... ok
+test tests::compact_s3_matches_generic_for_all_b0_interior_copies ... ok
+
+failures:
+---- tests::nonzero_stage_base_does_not_enter_the_a_fragment_xor stdout ----
+assertion `left == right` failed
+  left: 16
+ right: 80
+
+test result: FAILED. 7 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out
+EXIT 101
+
