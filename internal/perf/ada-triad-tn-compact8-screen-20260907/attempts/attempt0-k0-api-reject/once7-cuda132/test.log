@@ -1,0 +1,17 @@
+
+running 1 test
+GPU quiet gate tf32-tn-compact-eight-warp-s2-prism/pre: uuid=GPU-d1edd7be-e88d-aed6-047d-622163306f0e gpu_util=0% memory_util=0% used=58MiB sm_clock=1800MHz temperature=39C pstate=P5; quiet_samples=5
+{"schema":"MambaBiTf32TnDiscoveryResourceV1","op":"TN","variant":"tn_compact_eight_warp_s2_prism","source_sha256":"14bf43fb3303ee23fd5fb14ffc6f662db890f9dbf5ca97edb014cd46465d3b28","symbol":"gemm_bi_tn_test_compact_eight_warp_sm80_mma_tf32_v1_m128n64_bk32_s2","registers":104,"local_bytes":0,"static_shared_bytes":0,"dynamic_shared_bytes":49152,"max_dynamic_shared_bytes":49152,"max_threads":256,"occupancy":2,"required_occupancy":2}
+
+thread 'cuda_suite::ada_tf32_tn_prism_compact_eight_warp_s2_discovery_once7' (491346) panicked at tests/gemm_bi_tf32_nt_compact_xor.rs:2705:68:
+called `Result::unwrap()` on an `Err` value: "physical qualification requires positive M and N"
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test cuda_suite::ada_tf32_tn_prism_compact_eight_warp_s2_discovery_once7 ... FAILED
+
+failures:
+
+failures:
+    cuda_suite::ada_tf32_tn_prism_compact_eight_warp_s2_discovery_once7
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 58 filtered out; finished in 57.74s
+

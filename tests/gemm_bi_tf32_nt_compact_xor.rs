@@ -24,6 +24,8 @@ const PADDED_COPY_PLAN_CUDA: &str = include_str!("gemm_bi_tf32_nt_padded_copy_pl
 const PADDED_LDMATRIX_CUDA: &str = include_str!("gemm_bi_tf32_nt_padded_ldmatrix.cuh");
 const PADDED_DENSE_COPY_CUDA: &str = include_str!("gemm_bi_tf32_nt_padded_dense_copy.cuh");
 const PADDED_DENSE_PRISM_CUDA: &str = include_str!("gemm_bi_tf32_nt_padded_dense_prism.cuh");
+#[path = "support/triad_tn_compact_source.rs"]
+mod triad_tn_compact_source;
 const PADDED_DENSE_D768_OUT_GUARD_CUDA: &str = r#"__device__ __forceinline__ bool gemm_bi_tf32_nt_test_padded_dense_d768_out_target(
     const Sm80Tf32KernelParams& params) {
     return params.m == 2048 && params.k == 1536 && params.n == 768
@@ -42,6 +44,7 @@ enum CandidateVariant {
     CompactEightWarpS2Prism,
     PaddedDenseD768Out,
     PaddedDensePrism,
+    TnCompactEightWarpS2Prism,
 }
 
 impl CandidateVariant {
@@ -57,6 +60,7 @@ impl CandidateVariant {
             Self::CompactEightWarpS2Prism => "compact_eight_warp_s2_prism",
             Self::PaddedDenseD768Out => "padded_dense_d768_out",
             Self::PaddedDensePrism => "padded_dense_prism",
+            Self::TnCompactEightWarpS2Prism => "tn_compact_eight_warp_s2_prism",
         }
     }
 
@@ -73,6 +77,7 @@ impl CandidateVariant {
             }
             Self::PaddedDenseD768Out => PADDED_DENSE_D768_OUT_SYMBOL,
             Self::PaddedDensePrism => PADDED_DENSE_PRISM_SYMBOL,
+            Self::TnCompactEightWarpS2Prism => triad_tn_compact_source::SYMBOL,
         }
     }
 
@@ -88,6 +93,7 @@ impl CandidateVariant {
             Self::CompactEightWarpS2
             | Self::CompactEightWarpS2D768Out
             | Self::CompactEightWarpS2Prism => 49_152,
+            Self::TnCompactEightWarpS2Prism => 49_152,
         }
     }
 
@@ -96,6 +102,7 @@ impl CandidateVariant {
             Self::CompactEightWarpS2
             | Self::CompactEightWarpS2D768Out
             | Self::CompactEightWarpS2Prism => 2,
+            Self::TnCompactEightWarpS2Prism => 2,
             _ => 1,
         }
     }
@@ -103,7 +110,9 @@ impl CandidateVariant {
     const fn target_dims(self) -> (usize, usize, usize) {
         match self {
             Self::CompactEightWarpS2D768Out | Self::PaddedDenseD768Out => (2_048, 1_536, 768),
-            Self::CompactEightWarpS2Prism | Self::PaddedDensePrism => (4_621, 384, 1_928),
+            Self::CompactEightWarpS2Prism
+            | Self::PaddedDensePrism
+            | Self::TnCompactEightWarpS2Prism => (4_621, 384, 1_928),
             _ => (2_048, 768, 3_072),
         }
     }
@@ -121,7 +130,18 @@ impl CandidateVariant {
             }
             Self::PaddedDenseD768Out => padded_dense_d768_out_candidate_source(),
             Self::PaddedDensePrism => padded_dense_prism_candidate_source(),
+            Self::TnCompactEightWarpS2Prism => {
+                tn_compact_eight_warp_s2_candidate_source_from(PRODUCTION_CUDA)
+            }
         }
+    }
+
+    const fn is_tn(self) -> bool {
+        matches!(self, Self::TnCompactEightWarpS2Prism)
+    }
+
+    const fn op_name(self) -> &'static str {
+        if self.is_tn() { "TN" } else { "NT" }
     }
 }
 
@@ -931,6 +951,27 @@ fn compact_eight_warp_s2_tile(warp: usize) -> Option<WarpTile> {
     padded_eight_compute_warp_tile(warp)
 }
 
+fn tn_compact_axis(slot: usize, reduction: usize) -> usize {
+    slot ^ ((reduction & 3) << 3)
+}
+
+fn tn_compact_eight_warp_s2_candidate_source_from(production: &str) -> Result<String, String> {
+    triad_tn_compact_source::candidate_source(production)
+}
+
+fn tn_k0_fma_one_positive_zero_bits(words: &[u32]) -> Result<Vec<u32>, String> {
+    words
+        .iter()
+        .enumerate()
+        .map(|(index, word)| {
+            if word & 0x7f80_0000 == 0x7f80_0000 {
+                return Err(format!("TN K0 old-C word {index} is not finite"));
+            }
+            Ok(if word & 0x7fff_ffff == 0 { 0 } else { *word })
+        })
+        .collect()
+}
+
 fn output_fragment_traces(
     tile_for_warp: fn(usize) -> Option<WarpTile>,
 ) -> std::collections::BTreeMap<(usize, usize), Vec<[usize; 12]>> {
@@ -1252,6 +1293,121 @@ fn compact_eight_warp_s2_preserves_each_output_and_fragment_trace() {
     let incumbent = output_fragment_traces(old_four_compute_warp_tile);
     assert_eq!(candidate.len(), BM * BN);
     assert_eq!(candidate, incumbent);
+}
+
+#[test]
+fn tn_compact_axis_is_a_chunk_aligned_bijection_for_both_operands() {
+    assert_eq!(tn_compact_axis(0, 0), 0);
+    assert_eq!(tn_compact_axis(0, 1), 8);
+    assert_eq!(tn_compact_axis(0, 2), 16);
+    assert_eq!(tn_compact_axis(0, 3), 24);
+    assert_eq!(tn_compact_axis(32, 3), 56);
+    for axis_extent in [64, 128] {
+        for reduction in 0..BK {
+            let mut seen = vec![false; axis_extent];
+            for slot in 0..axis_extent {
+                let physical = tn_compact_axis(slot, reduction);
+                assert_eq!(physical, slot ^ ((reduction & 3) << 3));
+                assert!(
+                    physical < axis_extent,
+                    "extent={axis_extent} reduction={reduction}"
+                );
+                assert!(
+                    !seen[physical],
+                    "extent={axis_extent} reduction={reduction} slot={slot}"
+                );
+                seen[physical] = true;
+            }
+            assert!(seen.into_iter().all(|value| value));
+            for slot in (0..axis_extent).step_by(4) {
+                let physical = tn_compact_axis(slot, reduction);
+                assert_eq!(
+                    physical % 4,
+                    0,
+                    "extent={axis_extent} reduction={reduction} slot={slot}"
+                );
+                assert!(physical + 3 < axis_extent);
+                for element in 0..4 {
+                    assert_eq!(
+                        tn_compact_axis(slot + element, reduction),
+                        physical + element,
+                        "extent={axis_extent} reduction={reduction} slot={slot} element={element}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn tn_compact_eight_warp_s2_preserves_output_and_ascending_k8_ownership() {
+    let candidate = output_fragment_traces(compact_eight_warp_s2_tile);
+    let incumbent = output_fragment_traces(old_four_compute_warp_tile);
+    assert_eq!(candidate.len(), BM * BN);
+    assert_eq!(candidate, incumbent);
+}
+
+#[test]
+fn tn_compact_eight_warp_s2_source_is_exactly_tn_target_scoped() {
+    let source = tn_compact_eight_warp_s2_candidate_source_from(PRODUCTION_CUDA).unwrap();
+    assert!(source.contains("Op == SgbTf32Tn && BM == 128 && BN == 64 && Stages == 2"));
+    assert!(source.contains("== 49152, \"TN compact-eight-warp M128N64 s2 storage\""));
+    assert!(source.contains("gemm_bi_tf32_tn_test_compact_xor_axis(row, reduction)"));
+    assert!(source.contains("gemm_bi_tf32_tn_test_compact_xor_axis(column, reduction)"));
+    assert!(source.contains("GEMM_BI_TF32_DEFINE_KERNEL(gemm_bi_tn_test_compact_eight_warp_sm80_mma_tf32_v1_m128n64_bk32_s2, SgbTf32Tn, 128, 64, 2, 256, 1)"));
+    assert!(
+        !source
+            .contains("TF32_ASSERT_KERNEL_SIGNATURE(gemm_bi_tn_sm80_mma_tf32_v1_m128n64_bk32_s2);")
+    );
+    assert!(
+        source.contains("GEMM_BI_TF32_DEFINE_KERNEL(gemm_bi_nt_sm80_mma_tf32_v1_m128n64_bk32_s2")
+    );
+}
+
+#[test]
+fn tn_compact_source_builder_fails_closed_when_target_anchors_drift() {
+    const TARGET: &str = concat!(
+        "GEMM_BI_TF32_DEFINE_KERNEL(",
+        "gemm_bi_tn_sm80_mma_tf32_v1_m128n64_bk32_s2, ",
+        "SgbTf32Tn, 128, 64, 2, 256, 1)"
+    );
+    let missing = PRODUCTION_CUDA.replacen(TARGET, "", 1);
+    assert!(
+        tn_compact_eight_warp_s2_candidate_source_from(&missing)
+            .unwrap_err()
+            .contains("target symbol")
+    );
+    let duplicate = format!("{PRODUCTION_CUDA}\n{TARGET}");
+    assert!(
+        tn_compact_eight_warp_s2_candidate_source_from(&duplicate)
+            .unwrap_err()
+            .contains("expected 1, observed 2")
+    );
+}
+
+#[test]
+fn tn_k0_fma_one_positive_zero_oracle_preserves_finite_bits_and_canonicalizes_zero() {
+    let words = [
+        0x0000_0000,
+        0x8000_0000,
+        0x0000_0001,
+        0x8000_0001,
+        0x3f80_0000,
+        0xbf80_0000,
+    ];
+    assert_eq!(
+        tn_k0_fma_one_positive_zero_bits(&words).unwrap(),
+        [
+            0x0000_0000,
+            0x0000_0000,
+            0x0000_0001,
+            0x8000_0001,
+            0x3f80_0000,
+            0xbf80_0000,
+        ]
+    );
+    assert!(tn_k0_fma_one_positive_zero_bits(&[0x7f80_0000]).is_err());
+    assert!(tn_k0_fma_one_positive_zero_bits(&[0x7fc0_0001]).is_err());
 }
 
 #[test]
@@ -1597,12 +1753,16 @@ mod cuda_suite {
     use super::*;
 
     const TAIL: (usize, usize, usize) = (129, 65, 36);
+    const TN_K0: (usize, usize, usize) = (0, 65, 36);
     const AUTO_SYMBOL: &str = "gemm_bi_nt_sm80_mma_tf32_v1_m128n64_bk32_s3";
+    const TN_AUTO_SYMBOL: &str = "gemm_bi_tn_sm80_mma_tf32_v1_m128n64_bk32_s3";
     const AUTO_SHARED_BYTES: u32 = 82_944;
+    const TN_AUTO_SHARED_BYTES: u32 = 79_872;
     const GUARD: usize = 32;
     const GUARD_BITS: u32 = 0x7fc1_4e54;
     const WINDOWS: usize = 7;
     const WARMUPS: usize = 64;
+    const TN_WARMUPS: usize = 8;
     const PILOT: usize = 16;
     const TARGET_WINDOW_US: f64 = 5_000.0;
     const MAX_ITERATIONS: usize = 4_096;
@@ -1729,17 +1889,26 @@ mod cuda_suite {
     }
 
     fn fixture_words(
+        variant: CandidateVariant,
         dims: (usize, usize, usize),
     ) -> Result<(Vec<u32>, Vec<u32>, Vec<u32>), String> {
         let (m, k, n) = dims;
-        let output = fixed_full_mantissa::finite_full_mantissa_values(
-            checked_len(m, k, "output")?,
-            0xc040_4e54,
-        );
-        let a =
-            fixed_full_mantissa::finite_full_mantissa_values(checked_len(m, n, "A")?, 0xa040_4e54);
-        let b =
-            fixed_full_mantissa::finite_full_mantissa_values(checked_len(k, n, "B")?, 0xb040_4e54);
+        let (output_len, a_len, b_len) = if variant.is_tn() {
+            (
+                checked_len(k, n, "TN output")?,
+                checked_len(m, k, "TN A")?,
+                checked_len(m, n, "TN B")?,
+            )
+        } else {
+            (
+                checked_len(m, k, "NT output")?,
+                checked_len(m, n, "NT A")?,
+                checked_len(k, n, "NT B")?,
+            )
+        };
+        let output = fixed_full_mantissa::finite_full_mantissa_values(output_len, 0xc040_4e54);
+        let a = fixed_full_mantissa::finite_full_mantissa_values(a_len, 0xa040_4e54);
+        let b = fixed_full_mantissa::finite_full_mantissa_values(b_len, 0xb040_4e54);
         Ok((
             output.into_iter().map(f32::to_bits).collect(),
             a.into_iter().map(f32::to_bits).collect(),
@@ -1837,11 +2006,13 @@ mod cuda_suite {
             variant: CandidateVariant,
             dims: (usize, usize, usize),
             words: &(Vec<u32>, Vec<u32>, Vec<u32>),
+            alpha: f32,
         ) -> Result<(Self, String), String> {
             if size_of::<Params>() != 32 || align_of::<Params>() != 4 {
                 return Err(format!(
-                    "{} NT parameter ABI changed: size={} align={}",
+                    "{} {} parameter ABI changed: size={} align={}",
                     variant.name(),
+                    variant.op_name(),
                     size_of::<Params>(),
                     align_of::<Params>()
                 ));
@@ -1851,24 +2022,34 @@ mod cuda_suite {
             let output = GuardedBuffer::new(&ctx, words.0.clone())?;
             let a = GuardedBuffer::new(&ctx, words.1.clone())?;
             let b = GuardedBuffer::new(&ctx, words.2.clone())?;
+            let (rows, columns) = if variant.is_tn() {
+                (dims.1, dims.2)
+            } else {
+                (dims.0, dims.1)
+            };
             let config = LaunchConfig {
                 grid_dim: (
-                    (dims.0 as u32).div_ceil(BM as u32) * (dims.1 as u32).div_ceil(BN as u32),
+                    (rows as u32).div_ceil(BM as u32) * (columns as u32).div_ceil(BN as u32),
                     1,
                     1,
                 ),
                 block_dim: (256, 1, 1),
                 shared_mem_bytes: variant.shared_bytes(),
             };
+            let (lda, ldb, ldc) = if variant.is_tn() {
+                (dims.1, dims.2, dims.2)
+            } else {
+                (dims.2, dims.2, dims.1)
+            };
             let params = Params {
-                alpha: 1.0,
-                beta: 0.0,
+                alpha,
+                beta: if variant.is_tn() { 1.0 } else { 0.0 },
                 m: i32::try_from(dims.0).map_err(|_| "M exceeds i32")?,
                 k: i32::try_from(dims.1).map_err(|_| "K exceeds i32")?,
                 n: i32::try_from(dims.2).map_err(|_| "N exceeds i32")?,
-                lda: i32::try_from(dims.2).map_err(|_| "lda exceeds i32")?,
-                ldb: i32::try_from(dims.2).map_err(|_| "ldb exceeds i32")?,
-                ldc: i32::try_from(dims.1).map_err(|_| "ldc exceeds i32")?,
+                lda: i32::try_from(lda).map_err(|_| "lda exceeds i32")?,
+                ldb: i32::try_from(ldb).map_err(|_| "ldb exceeds i32")?,
+                ldc: i32::try_from(ldc).map_err(|_| "ldc exceeds i32")?,
             };
             let graph = unsafe {
                 capture_into_graph(&ctx.stream, || {
@@ -2063,8 +2244,14 @@ mod cuda_suite {
             )
             .map_err(|error| format!("candidate occupancy: {error:?}"))?;
         let required_occupancy = variant.required_occupancy();
+        let schema = if variant.is_tn() {
+            "MambaBiTf32TnDiscoveryResourceV1"
+        } else {
+            "MambaBiTf32NtDiscoveryResourceV1"
+        };
         println!(
-            "{{\"schema\":\"MambaBiTf32NtDiscoveryResourceV1\",\"variant\":\"{}\",\"source_sha256\":\"{source_sha}\",\"symbol\":\"{}\",\"registers\":{registers},\"local_bytes\":{local},\"static_shared_bytes\":{static_shared},\"dynamic_shared_bytes\":{},\"max_dynamic_shared_bytes\":{max_dynamic},\"max_threads\":{max_threads},\"occupancy\":{occupancy},\"required_occupancy\":{required_occupancy}}}",
+            "{{\"schema\":\"{schema}\",\"op\":\"{}\",\"variant\":\"{}\",\"source_sha256\":\"{source_sha}\",\"symbol\":\"{}\",\"registers\":{registers},\"local_bytes\":{local},\"static_shared_bytes\":{static_shared},\"dynamic_shared_bytes\":{},\"max_dynamic_shared_bytes\":{max_dynamic},\"max_threads\":{max_threads},\"occupancy\":{occupancy},\"required_occupancy\":{required_occupancy}}}",
+            variant.op_name(),
             variant.name(),
             variant.symbol(),
             variant.shared_bytes()
@@ -2077,8 +2264,9 @@ mod cuda_suite {
             || occupancy < required_occupancy
         {
             return Err(format!(
-                "{} NT resource gate failed: regs={registers} local={local} static={static_shared} max_threads={max_threads} max_dynamic={max_dynamic} occupancy={occupancy} required_occupancy={required_occupancy}",
-                variant.name()
+                "{} {} resource gate failed: regs={registers} local={local} static={static_shared} max_threads={max_threads} max_dynamic={max_dynamic} occupancy={occupancy} required_occupancy={required_occupancy}",
+                variant.name(),
+                variant.op_name()
             ));
         }
         Ok(())
@@ -2093,7 +2281,12 @@ mod cuda_suite {
         Ok(ctx)
     }
 
-    fn request(dims: (usize, usize, usize), actual_auto: bool) -> PhysicalQualificationRequest {
+    fn request(
+        variant: CandidateVariant,
+        dims: (usize, usize, usize),
+        actual_auto: bool,
+        alpha: f32,
+    ) -> PhysicalQualificationRequest {
         let route = if actual_auto {
             PhysicalQualificationRoute::F32Policy(F32TriadPolicy::AllowDeterministicTf32V1)
         } else {
@@ -2105,14 +2298,23 @@ mod cuda_suite {
             ))
         };
         PhysicalQualificationRequest::contiguous_f32(
-            ResolvedGemmOp::Nt,
+            if variant.is_tn() {
+                ResolvedGemmOp::Tn
+            } else {
+                ResolvedGemmOp::Nt
+            },
             dims,
             route,
-            PhysicalQualificationF32Epilogue::new(1.0, 0.0, false),
+            PhysicalQualificationF32Epilogue::new(
+                alpha,
+                if variant.is_tn() { 1.0 } else { 0.0 },
+                false,
+            ),
         )
     }
 
     fn validate_reference(
+        variant: CandidateVariant,
         dims: (usize, usize, usize),
         actual_auto: bool,
         launch: &QualifiedPhysicalLaunch<'_>,
@@ -2124,25 +2326,45 @@ mod cuda_suite {
                 evidence.launch_count()
             ));
         };
+        let (rows, columns, strides, op, symbol, shared) = if variant.is_tn() {
+            (
+                dims.1,
+                dims.2,
+                (dims.1, dims.2, dims.2),
+                ResolvedGemmOp::Tn,
+                TN_AUTO_SYMBOL,
+                TN_AUTO_SHARED_BYTES,
+            )
+        } else {
+            (
+                dims.0,
+                dims.1,
+                (dims.2, dims.2, dims.1),
+                ResolvedGemmOp::Nt,
+                AUTO_SYMBOL,
+                AUTO_SHARED_BYTES,
+            )
+        };
         let grid = (
-            (dims.0 as u32).div_ceil(BM as u32) * (dims.1 as u32).div_ceil(BN as u32),
+            (rows as u32).div_ceil(BM as u32) * (columns as u32).div_ceil(BN as u32),
             1,
             1,
         );
         if !evidence.eager_graph_equal()
-            || evidence.single_launch_symbol() != Some(AUTO_SYMBOL)
+            || evidence.single_launch_symbol() != Some(symbol)
             || evidence.uniform_module_kind() != Some(ModuleKind::TriadSm80)
             || evidence.uniform_execution_dtype() != Some(PolicyDtype::F32)
             || node.kind != PhysicalLaunchKind::Gemm
-            || node.logical_op != ResolvedGemmOp::Nt
+            || node.logical_op != op
             || node.shape != dims
-            || node.strides != (dims.2, dims.2, dims.1)
+            || node.strides != strides
             || node.launch.grid_dim != grid
             || node.launch.block_dim != (256, 1, 1)
-            || node.launch.shared_mem_bytes != AUTO_SHARED_BYTES
+            || node.launch.shared_mem_bytes != shared
         {
             return Err(format!(
-                "{} reference identity changed: {evidence:?}",
+                "{} {} reference identity changed: {evidence:?}",
+                variant.op_name(),
                 if actual_auto { "AUTO" } else { "forced" }
             ));
         }
@@ -2216,6 +2438,41 @@ mod cuda_suite {
             }
         }
         Ok(expected.unwrap())
+    }
+
+    fn check_tn_k0_bits(
+        candidate: &mut Candidate,
+        words: &(Vec<u32>, Vec<u32>, Vec<u32>),
+    ) -> Result<(), String> {
+        let expected = tn_k0_fma_one_positive_zero_bits(&words.0)?;
+        for path in [Path::Eager, Path::Graph] {
+            for repeat in 0..2 {
+                candidate.reset()?;
+                candidate.launch(path)?;
+                candidate
+                    .ctx
+                    .stream
+                    .synchronize()
+                    .map_err(|error| format!("synchronize TN K0 candidate: {error:?}"))?;
+                let actual = candidate.output_bits()?;
+                if actual != expected {
+                    let mismatch = expected
+                        .iter()
+                        .zip(&actual)
+                        .position(|(left, right)| left != right)
+                        .unwrap_or(actual.len());
+                    return Err(format!(
+                        "TN K0 direct finite old-C oracle differs at {mismatch} on {} repeat {repeat}",
+                        path.name()
+                    ));
+                }
+            }
+        }
+        println!(
+            "TN_K0_DIRECT_ORACLE_PASS op=TN alpha=1 beta=1 eager_repeats=2 graph_repeats=2 outputs={}",
+            expected.len()
+        );
+        Ok(())
     }
 
     fn positive(value: f64, label: &str) -> Result<f64, String> {
@@ -2334,7 +2591,248 @@ mod cuda_suite {
         Ok((p50, p95))
     }
 
+    fn measure_tn_reference_observation(
+        reference: &mut QualifiedPhysicalLaunch<'_>,
+        reference_ctx: &GpuCtx,
+        path: Path,
+        words: &(Vec<u32>, Vec<u32>, Vec<u32>),
+        expected: &[u32],
+    ) -> Result<f64, String> {
+        upload_reference(reference, reference_ctx, words)?;
+        let us = measure_reference(reference, reference_ctx, path, 1)?;
+        let output = reference.f32_output_bits(reference_ctx)?;
+        if output != expected {
+            return Err(format!(
+                "TN AUTO output changed after {} timing observation",
+                path.name()
+            ));
+        }
+        if reference.f32_operand_bits(reference_ctx)? != (words.1.clone(), words.2.clone()) {
+            return Err(format!(
+                "TN AUTO input changed after {} timing observation",
+                path.name()
+            ));
+        }
+        reference.validate_red_zones(reference_ctx)?;
+        Ok(us)
+    }
+
+    fn measure_tn_candidate_observation(
+        candidate: &mut Candidate,
+        path: Path,
+        expected: &[u32],
+    ) -> Result<f64, String> {
+        candidate.reset()?;
+        let us = candidate.measure(path, 1)?;
+        if candidate.output_bits()? != expected {
+            return Err(format!(
+                "TN candidate output changed after {} timing observation",
+                path.name()
+            ));
+        }
+        Ok(us)
+    }
+
+    fn screen_tn(
+        reference: &mut QualifiedPhysicalLaunch<'_>,
+        reference_ctx: &GpuCtx,
+        candidate: &mut Candidate,
+        path: Path,
+        order: Order,
+        words: &(Vec<u32>, Vec<u32>, Vec<u32>),
+        expected: &[u32],
+    ) -> Result<(f64, f64), String> {
+        for _ in 0..TN_WARMUPS {
+            measure_tn_reference_observation(reference, reference_ctx, path, words, expected)?;
+            measure_tn_candidate_observation(candidate, path, expected)?;
+        }
+        let arms = match order {
+            Order::Abba => ["AUTO", "candidate", "candidate", "AUTO"],
+            Order::Baab => ["candidate", "AUTO", "AUTO", "candidate"],
+        };
+        let mut ratios = Vec::with_capacity(WINDOWS);
+        let mut auto_samples = Vec::with_capacity(WINDOWS);
+        let mut candidate_samples = Vec::with_capacity(WINDOWS);
+        let mut observations = Vec::with_capacity(WINDOWS);
+        for _ in 0..WINDOWS {
+            let raw = match order {
+                Order::Abba => [
+                    measure_tn_reference_observation(
+                        reference,
+                        reference_ctx,
+                        path,
+                        words,
+                        expected,
+                    )?,
+                    measure_tn_candidate_observation(candidate, path, expected)?,
+                    measure_tn_candidate_observation(candidate, path, expected)?,
+                    measure_tn_reference_observation(
+                        reference,
+                        reference_ctx,
+                        path,
+                        words,
+                        expected,
+                    )?,
+                ],
+                Order::Baab => [
+                    measure_tn_candidate_observation(candidate, path, expected)?,
+                    measure_tn_reference_observation(
+                        reference,
+                        reference_ctx,
+                        path,
+                        words,
+                        expected,
+                    )?,
+                    measure_tn_reference_observation(
+                        reference,
+                        reference_ctx,
+                        path,
+                        words,
+                        expected,
+                    )?,
+                    measure_tn_candidate_observation(candidate, path, expected)?,
+                ],
+            };
+            let (auto, candidate) = match order {
+                Order::Abba => ((raw[0] + raw[3]) * 0.5, (raw[1] + raw[2]) * 0.5),
+                Order::Baab => ((raw[1] + raw[2]) * 0.5, (raw[0] + raw[3]) * 0.5),
+            };
+            auto_samples.push(auto);
+            candidate_samples.push(candidate);
+            ratios.push(candidate / auto);
+            observations.push(raw);
+        }
+        let p50 = percentile(&ratios, 0.50);
+        let p95 = percentile(&ratios, 0.95);
+        let observations = format!(
+            "[{}]",
+            observations
+                .iter()
+                .map(|raw| format!("[{:.9},{:.9},{:.9},{:.9}]", raw[0], raw[1], raw[2], raw[3]))
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        let (m, k, n) = candidate.variant.target_dims();
+        println!(
+            "{{\"schema\":\"MambaBiTf32TnCompact8DiscoveryScreenV1\",\"op\":\"TN\",\"variant\":\"{}\",\"symbol\":\"{}\",\"dynamic_shared_bytes\":{},\"shape\":[{m},{k},{n}],\"alpha\":1.0,\"beta\":1.0,\"bias\":false,\"path\":\"{}\",\"order\":\"{}\",\"windows\":{WINDOWS},\"warmups_per_arm\":{TN_WARMUPS},\"logical_gemms_per_observation\":1,\"reseed_scope\":\"C+A+B\",\"reseed_position\":\"before_start_event\",\"post_download_before_next_reset\":true,\"observation_arms\":[\"{}\",\"{}\",\"{}\",\"{}\"],\"observations_us\":{observations},\"ratio_direction\":\"candidate_over_actual_auto\",\"ratio_p50\":{p50:.9},\"ratio_p95\":{p95:.9},\"auto_samples_us\":{},\"candidate_samples_us\":{},\"ratios\":{}}}",
+            candidate.variant.name(),
+            candidate.variant.symbol(),
+            candidate.variant.shared_bytes(),
+            path.name(),
+            order.name(),
+            arms[0],
+            arms[1],
+            arms[2],
+            arms[3],
+            json_f64s(&auto_samples),
+            json_f64s(&candidate_samples),
+            json_f64s(&ratios)
+        );
+        Ok((p50, p95))
+    }
+
+    fn run_tn(variant: CandidateVariant) {
+        assert!(variant.is_tn());
+        assert!(
+            !cfg!(debug_assertions),
+            "{} TN discovery requires --release",
+            variant.name()
+        );
+        let quiet = QuietGpu::for_cuda_ordinal(0).unwrap();
+        let cohort = "tf32-tn-compact-eight-warp-s2-prism/";
+        let pre = quiet.require_pre_context(&format!("{cohort}pre")).unwrap();
+        let device = GpuDevice::new(0).unwrap();
+        assert_eq!(device.compute_capability, (8, 9));
+
+        let target = variant.target_dims();
+        let target_words = fixture_words(variant, target).unwrap();
+        let auto_ctx = configure(&device).unwrap();
+        let auto_request = request(variant, target, true, 1.0);
+        presize_physical_qualification_suite(&auto_ctx, &[auto_request]).unwrap();
+        let mut actual_auto = qualify_physical_launch(&auto_ctx, auto_request).unwrap();
+        validate_reference(variant, target, true, &actual_auto).unwrap();
+        let compiler = actual_auto.evidence().route_identity().compiler;
+        assert_eq!(compiler.nvrtc_version, (13, 2));
+        assert_eq!(compiler.target.as_str(), "sm_89");
+        assert!(compiler.nvrtc_library_known);
+        let (mut candidate, source_sha) =
+            Candidate::new(&device, variant, target, &target_words, 1.0).unwrap();
+        validate_resources(&candidate, &source_sha).unwrap();
+        let golden = check_bits(
+            &mut actual_auto,
+            &auto_ctx,
+            &mut candidate,
+            &target_words,
+            "TN target alpha1",
+        )
+        .unwrap();
+
+        for (dims, alpha, label) in [
+            (TAIL, 1.0, "TN tail alpha1"),
+            (TAIL, -0.75, "TN tail alpha-0.75"),
+        ] {
+            let words = fixture_words(variant, dims).unwrap();
+            let ctx = configure(&device).unwrap();
+            let request = request(variant, dims, false, alpha);
+            presize_physical_qualification_suite(&ctx, &[request]).unwrap();
+            let mut reference = qualify_physical_launch(&ctx, request).unwrap();
+            validate_reference(variant, dims, false, &reference).unwrap();
+            let (mut probe, probe_source_sha) =
+                Candidate::new(&device, variant, dims, &words, alpha).unwrap();
+            assert_eq!(probe_source_sha, source_sha);
+            check_bits(&mut reference, &ctx, &mut probe, &words, label).unwrap();
+        }
+
+        let k0_words = fixture_words(variant, TN_K0).unwrap();
+        let (mut k0_candidate, k0_source_sha) =
+            Candidate::new(&device, variant, TN_K0, &k0_words, 1.0).unwrap();
+        assert_eq!(k0_source_sha, source_sha);
+        check_tn_k0_bits(&mut k0_candidate, &k0_words).unwrap();
+
+        let timed_pre = quiet.require_cohort(&format!("{cohort}timed")).unwrap();
+        let mut strata = Vec::new();
+        for path in [Path::Eager, Path::Graph] {
+            for order in [Order::Abba, Order::Baab] {
+                strata.push(
+                    screen_tn(
+                        &mut actual_auto,
+                        &auto_ctx,
+                        &mut candidate,
+                        path,
+                        order,
+                        &target_words,
+                        &golden,
+                    )
+                    .unwrap(),
+                );
+            }
+        }
+        let post = quiet.verify_post_cohort(&format!("{cohort}post")).unwrap();
+        let retain = strata.iter().all(|(p50, p95)| *p50 < 0.99 && *p95 < 0.99);
+        let strata = strata
+            .into_iter()
+            .map(|(p50, p95)| [p50, p95])
+            .collect::<Vec<_>>();
+        let (m, k, n) = target;
+        println!(
+            "{{\"schema\":\"MambaBiTf32TnCompact8DiscoveryDecisionV1\",\"op\":\"TN\",\"variant\":\"{}\",\"symbol\":\"{}\",\"actual_auto_symbol\":\"{TN_AUTO_SYMBOL}\",\"candidate_grid\":[93,1,1],\"actual_auto_grid\":[93,1,1],\"candidate_dynamic_shared_bytes\":{},\"actual_auto_dynamic_shared_bytes\":{TN_AUTO_SHARED_BYTES},\"shape\":[{m},{k},{n}],\"alpha\":1.0,\"beta\":1.0,\"bias\":false,\"source_sha256\":\"{source_sha}\",\"pre\":{pre:?},\"timed_pre\":{timed_pre:?},\"post\":{post:?},\"strata_fields\":[\"ratio_p50\",\"ratio_p95\"],\"strata\":{},\"retain\":{retain},\"decision\":\"{}\",\"promotion\":false}}",
+            variant.name(),
+            variant.symbol(),
+            variant.shared_bytes(),
+            json_pairs(&strata),
+            if retain {
+                "advance_to_full_qualification"
+            } else {
+                "stop_no_retry"
+            }
+        );
+    }
+
     fn run(variant: CandidateVariant) {
+        if variant.is_tn() {
+            run_tn(variant);
+            return;
+        }
         assert!(
             !cfg!(debug_assertions),
             "{} NT discovery requires --release",
@@ -2347,18 +2845,18 @@ mod cuda_suite {
         assert_eq!(device.compute_capability, (8, 9));
 
         let target = variant.target_dims();
-        let target_words = fixture_words(target).unwrap();
+        let target_words = fixture_words(variant, target).unwrap();
         let auto_ctx = configure(&device).unwrap();
-        let auto_request = request(target, true);
+        let auto_request = request(variant, target, true, 1.0);
         presize_physical_qualification_suite(&auto_ctx, &[auto_request]).unwrap();
         let mut actual_auto = qualify_physical_launch(&auto_ctx, auto_request).unwrap();
-        validate_reference(target, true, &actual_auto).unwrap();
+        validate_reference(variant, target, true, &actual_auto).unwrap();
         let compiler = actual_auto.evidence().route_identity().compiler;
         assert_eq!(compiler.nvrtc_version, (13, 2));
         assert_eq!(compiler.target.as_str(), "sm_89");
         assert!(compiler.nvrtc_library_known);
         let (mut candidate, source_sha) =
-            Candidate::new(&device, variant, target, &target_words).unwrap();
+            Candidate::new(&device, variant, target, &target_words, 1.0).unwrap();
         validate_resources(&candidate, &source_sha).unwrap();
         let golden = check_bits(
             &mut actual_auto,
@@ -2369,14 +2867,14 @@ mod cuda_suite {
         )
         .unwrap();
 
-        let tail_words = fixture_words(TAIL).unwrap();
+        let tail_words = fixture_words(variant, TAIL).unwrap();
         let tail_ctx = configure(&device).unwrap();
-        let tail_request = request(TAIL, false);
+        let tail_request = request(variant, TAIL, false, 1.0);
         presize_physical_qualification_suite(&tail_ctx, &[tail_request]).unwrap();
         let mut tail_reference = qualify_physical_launch(&tail_ctx, tail_request).unwrap();
-        validate_reference(TAIL, false, &tail_reference).unwrap();
+        validate_reference(variant, TAIL, false, &tail_reference).unwrap();
         let (mut tail_candidate, tail_source_sha) =
-            Candidate::new(&device, variant, TAIL, &tail_words).unwrap();
+            Candidate::new(&device, variant, TAIL, &tail_words, 1.0).unwrap();
         assert_eq!(tail_source_sha, source_sha);
         check_bits(
             &mut tail_reference,
@@ -2489,5 +2987,11 @@ mod cuda_suite {
     #[ignore = "requires exclusive Ada CC8.9 CUDA13.2; padded dense prism discovery"]
     fn ada_tf32_nt_padded_dense_prism_discovery_once7() {
         run(CandidateVariant::PaddedDensePrism);
+    }
+
+    #[test]
+    #[ignore = "requires exclusive Ada CC8.9 CUDA13.2; TN prism compact eight-warp S2 discovery"]
+    fn ada_tf32_tn_prism_compact_eight_warp_s2_discovery_once7() {
+        run(CandidateVariant::TnCompactEightWarpS2Prism);
     }
 }

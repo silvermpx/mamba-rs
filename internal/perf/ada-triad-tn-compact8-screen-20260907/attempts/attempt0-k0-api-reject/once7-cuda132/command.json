@@ -1,0 +1,44 @@
+{
+  "args": [
+    "/root/target-ada-half-auto-task3a-cuda132-20260907/release/deps/gemm_bi_tf32_nt_compact_xor-72f43542cd9e6a2e",
+    "cuda_suite::ada_tf32_tn_prism_compact_eight_warp_s2_discovery_once7",
+    "--ignored",
+    "--exact",
+    "--nocapture"
+  ],
+  "binary_sha256": "e3fb733f322a0d1a36e9e21eb442dba3f9f9582a0e7429997b4ea95bde156579",
+  "cache_after": {
+    "mamba-kernels-v1-3809af034718aa08dfdfc1b6baeb407715436dc7db87ef39825b033c2fd72541.bin": "5851ebd49595a0b2ef665073289e52f903eec3266deadfc5ad5d9f2096ce6d16",
+    "mamba-kernels-v1-822ebf0dda7dcf9c4f5c5a2213884dde42ab45f5cf238479a81856042c302b7c.bin": "5035921fc8e078e5454c9c5392f9e9ee6ca6a3de54c1e08cb54bba432fa37546",
+    "mamba-kernels-v1-e4f76515e441adc28862775000fce218e2d2cca61b47ce484e15eb1144c40fb3.bin": "f0be052fc160b9e5f4b6a897878781327968c0015d551128415a94b85e6fc0aa",
+    "mamba-kernels-v1-e61681f002f8ecdd61677fc89a8f0faeac5ce494db503fcc97fd344633ec2d65.bin": "1da42f2fbc44dfd9093959831296d86de2414a6d9bb042bc1640730c68d36ac5"
+  },
+  "cache_before": {
+    "mamba-kernels-v1-3809af034718aa08dfdfc1b6baeb407715436dc7db87ef39825b033c2fd72541.bin": "5851ebd49595a0b2ef665073289e52f903eec3266deadfc5ad5d9f2096ce6d16",
+    "mamba-kernels-v1-822ebf0dda7dcf9c4f5c5a2213884dde42ab45f5cf238479a81856042c302b7c.bin": "5035921fc8e078e5454c9c5392f9e9ee6ca6a3de54c1e08cb54bba432fa37546",
+    "mamba-kernels-v1-e4f76515e441adc28862775000fce218e2d2cca61b47ce484e15eb1144c40fb3.bin": "f0be052fc160b9e5f4b6a897878781327968c0015d551128415a94b85e6fc0aa",
+    "mamba-kernels-v1-e61681f002f8ecdd61677fc89a8f0faeac5ce494db503fcc97fd344633ec2d65.bin": "1da42f2fbc44dfd9093959831296d86de2414a6d9bb042bc1640730c68d36ac5"
+  },
+  "cache_stable": true,
+  "candidate_ptx_persisted": false,
+  "complete_success": false,
+  "drain_quiet": true,
+  "drain_utc": "2026-09-07T22:01:28Z",
+  "environment_constructor": "/root/evidence-ada-exact-toolkit-auto-20260907/run.py::env_for",
+  "executed_exactly_one_test": false,
+  "exit": 101,
+  "pre_utc": "2026-09-07T22:00:25Z",
+  "release_quiet": false,
+  "release_utc": "2026-09-07T22:01:23Z",
+  "schema": "MambaBiTf32TnCompact8DiscoveryRunReceiptV1",
+  "schema_counts": {
+    "decision": 0,
+    "resource": 1,
+    "screen": 0,
+    "variant": 1
+  },
+  "source_manifest_sha256": "34644af58144f1b44e8054015654d2ac49c1a54541ba19acdaf84cdf4ad55a7a",
+  "started_utc": "2026-09-07T22:00:25Z",
+  "telemetry_runner_sha256": "b911ab2fd6459306f80fd12a9f2d5f7da2cca1260eaba940265940a26dfd0aa6",
+  "test_log_sha256": "6f58f8d8d4108f13d68306615048fd87e5683857fa420b52baddbee6ae7f5e7e"
+}

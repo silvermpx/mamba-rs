@@ -1,5 +1,11 @@
 # Ada Triad state — 2026-09-07
 
+This is the historical14:51Z snapshot, not a fresh full-matrix run after
+integration. The later three-cell TF32 NT compact8/S2 results and actual AUTO
+closure on CUDA12.8/13.0/13.2 are in
+[the finalist integration report](../ada-triad-finalist-integration-20260907/README.md).
+Do not merge their separately paired Fast samples into this table's medians.
+
 ## Result
 
 The current production AUTO routes are observed faster than cuBLAS Fast in **3/60**
