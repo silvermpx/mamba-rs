@@ -656,6 +656,12 @@ fn fixed_sm89_rna_wide_actual_auto_all_cells_prefix_views_and_graph_bits() {
     check_rna_wide_prefix_views_and_graph_bits(true, FixedTile::Tf32RnaM128N128S3);
 }
 
+#[test]
+#[ignore = "requires CC8.9/142SM Ada and qualified CUDA12.8/13.0/13.2 AUTO45"]
+fn fixed_sm89_rna_n96_actual_auto_prefix_views_and_graph_bits() {
+    check_rna_wide_prefix_views_and_graph_bits(true, FixedTile::Tf32RnaM128N96S3);
+}
+
 fn check_rna_wide_prefix_views_and_graph_bits(actual_auto: bool, tile: FixedTile) {
     let device = GpuDevice::new(0).expect("CUDA device");
     assert_eq!(device.compute_capability, (8, 9));
@@ -864,10 +870,16 @@ fn check_rna_wide_prefix_views_and_graph_bits(actual_auto: bool, tile: FixedTile
                         );
                     }
                     if actual_auto {
-                        let admitted = case != "tail"
-                            && m == shape.m - 1
-                            && output_offset == 4
-                            && (!n96 || (case == "hot_e_boundary" && !has_bias));
+                        let aligned_hot = case != "tail" && m == shape.m - 1 && output_offset == 4;
+                        // Literal AUTO45 oracle: E0 uses N96; every other
+                        // qualified wide hot case retains N128. This is
+                        // independent of the forced reference chosen above.
+                        let expected_wide =
+                            aligned_hot.then_some(if case == "hot_e_boundary" && !has_bias {
+                                FixedTile::Tf32RnaM128N96S3
+                            } else {
+                                FixedTile::Tf32RnaM128N128S3
+                            });
                         let launch_auto = || {
                             let selected = fixed_forward(
                                 &ctx,
@@ -877,11 +889,20 @@ fn check_rna_wide_prefix_views_and_graph_bits(actual_auto: bool, tile: FixedTile
                                 view_operands.bias_ptr,
                                 (m, shape.k, shape.n),
                             )?;
-                            assert_eq!(
-                                selected == tile,
-                                admitted,
-                                "actual AUTO case={case} M={m} row={row_offset} C-offset={output_offset}"
-                            );
+                            if let Some(expected_tile) = expected_wide {
+                                assert_eq!(
+                                    selected, expected_tile,
+                                    "actual AUTO case={case} M={m} row={row_offset} C-offset={output_offset}"
+                                );
+                            } else {
+                                assert!(
+                                    !matches!(
+                                        selected,
+                                        FixedTile::Tf32RnaM128N96S3 | FixedTile::Tf32RnaM128N128S3
+                                    ),
+                                    "unqualified wide AUTO case={case} M={m} C-offset={output_offset}"
+                                );
+                            }
                             Ok::<(), String>(())
                         };
                         for repeat in 0..2 {
@@ -897,8 +918,12 @@ fn check_rna_wide_prefix_views_and_graph_bits(actual_auto: bool, tile: FixedTile
                         }
                         let auto_graph = unsafe { capture_into_graph(&ctx.stream, launch_auto) }
                             .expect("actual AUTO graph");
-                        if admitted {
-                            assert_wide_graph(&auto_graph, symbol, view_shape);
+                        if let Some(expected_tile) = expected_wide {
+                            assert_wide_graph(
+                                &auto_graph,
+                                rna_qualification_symbol(expected_tile),
+                                view_shape,
+                            );
                         }
                         for replay in 0..2 {
                             output

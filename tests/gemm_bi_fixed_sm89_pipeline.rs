@@ -26,7 +26,7 @@ const RUNGS: [FixedTile; 5] = [
     FixedTile::TcWn64,
 ];
 
-fn expected_ada_half_auto_v43(
+fn expected_ada_half_auto_v45(
     nvrtc: (i32, i32),
     dtype: WeightDtype,
     shape: FixedShape,
@@ -37,6 +37,8 @@ fn expected_ada_half_auto_v43(
     };
 
     match (nvrtc, dtype, (shape.m, shape.k, shape.n), has_bias) {
+        ((13, 2), WeightDtype::F16, (2048, 768, 2304), false) => Some(D_FINALIST),
+        ((13, 2), WeightDtype::F16, (2048, 2304, 768), false) => Some(E_FINALIST),
         ((12, 8) | (13, 0), WeightDtype::Bf16, (4621, 384, 1928), false) => Some(Pipeline),
         ((12, 8) | (13, 0), WeightDtype::Bf16, (4621, 384, 1928), true) => Some(Swizzle),
         ((12, 8) | (13, 0), WeightDtype::Bf16, (4621, 768, 2304), _) => Some(Swizzle),
@@ -328,7 +330,7 @@ fn fixed_sm89_half_hot_cell_prefix_view_graph_bits(
     let ctx = GpuCtx::new(&device).expect("NVRTC context");
     if forced.is_none() {
         let compiler = ctx.kernels.compiler_identity();
-        assert_eq!(TUNING_TABLE_REVISION, 44);
+        assert_eq!(TUNING_TABLE_REVISION, 45);
         assert!(compiler.nvrtc_library_known);
         assert!(matches!(
             compiler.nvrtc_version,
@@ -461,13 +463,13 @@ fn fixed_sm89_half_hot_cell_prefix_view_graph_bits(
                             let picked = run().expect("hot-cell launch");
                             if forced.is_none() {
                                 if m == hot_m && output_offset == 8 {
-                                    let expected = expected_ada_half_auto_v43(
+                                    let expected = expected_ada_half_auto_v45(
                                         ctx.kernels.compiler_identity().nvrtc_version,
                                         dtype,
                                         FixedShape { m, k, n },
                                         has_bias,
                                     )
-                                    .expect("literal revision-43 hot-cell expectation");
+                                    .expect("literal revision-45 hot-cell expectation");
                                     assert_eq!(
                                         picked, expected,
                                         "AUTO promotion scope {dtype:?} M={m} K={k} N={n} row={row_offset} out={output_offset} bias={has_bias}"
@@ -476,7 +478,11 @@ fn fixed_sm89_half_hot_cell_prefix_view_graph_bits(
                                     assert!(
                                         !matches!(
                                             picked,
-                                            CANDIDATE | SWIZZLE_CANDIDATE | S3_CANDIDATE
+                                            CANDIDATE
+                                                | SWIZZLE_CANDIDATE
+                                                | S3_CANDIDATE
+                                                | D_FINALIST
+                                                | E_FINALIST
                                         ),
                                         "AUTO candidate escaped scope {dtype:?} M={m} K={k} N={n} row={row_offset} out={output_offset} bias={has_bias}: {picked:?}"
                                     );

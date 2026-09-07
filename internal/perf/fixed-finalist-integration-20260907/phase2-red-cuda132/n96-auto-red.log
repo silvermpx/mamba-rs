@@ -1,0 +1,197 @@
+    Finished `release` profile [optimized] target(s) in 0.07s
+     Running tests/gemm_bi_fixed_correctness.rs (/root/target-ada-exact-toolkit-auto-finalistphase2red1-cuda132-20260907/release/deps/gemm_bi_fixed_correctness-ed3d310275acf4d8)
+
+running 1 test
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=1 exceptional=false bias=false row_offset=0 output_offset=1 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=1 exceptional=false bias=false row_offset=0 output_offset=4 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=15 exceptional=false bias=false row_offset=0 output_offset=1 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=15 exceptional=false bias=false row_offset=0 output_offset=4 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=16 exceptional=false bias=false row_offset=0 output_offset=1 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=16 exceptional=false bias=false row_offset=0 output_offset=4 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=17 exceptional=false bias=false row_offset=0 output_offset=1 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=17 exceptional=false bias=false row_offset=0 output_offset=4 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=31 exceptional=false bias=false row_offset=0 output_offset=1 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=31 exceptional=false bias=false row_offset=0 output_offset=4 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=32 exceptional=false bias=false row_offset=0 output_offset=1 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=32 exceptional=false bias=false row_offset=0 output_offset=4 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=33 exceptional=false bias=false row_offset=0 output_offset=1 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=33 exceptional=false bias=false row_offset=0 output_offset=4 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=63 exceptional=false bias=false row_offset=0 output_offset=1 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=63 exceptional=false bias=false row_offset=0 output_offset=4 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=64 exceptional=false bias=false row_offset=0 output_offset=1 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=64 exceptional=false bias=false row_offset=0 output_offset=4 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=65 exceptional=false bias=false row_offset=0 output_offset=1 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=65 exceptional=false bias=false row_offset=0 output_offset=4 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=127 exceptional=false bias=false row_offset=0 output_offset=1 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=127 exceptional=false bias=false row_offset=0 output_offset=4 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=128 exceptional=false bias=false row_offset=0 output_offset=1 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=128 exceptional=false bias=false row_offset=0 output_offset=4 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=129 exceptional=false bias=false row_offset=0 output_offset=1 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=129 exceptional=false bias=false row_offset=0 output_offset=4 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=255 exceptional=false bias=false row_offset=0 output_offset=1 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=255 exceptional=false bias=false row_offset=0 output_offset=4 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=256 exceptional=false bias=false row_offset=0 output_offset=1 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=256 exceptional=false bias=false row_offset=0 output_offset=4 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=257 exceptional=false bias=false row_offset=0 output_offset=1 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=257 exceptional=false bias=false row_offset=0 output_offset=4 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=257 exceptional=false bias=false row_offset=17 output_offset=1 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=257 exceptional=false bias=false row_offset=17 output_offset=4 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=4621 exceptional=false bias=false row_offset=0 output_offset=1 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=4621 exceptional=false bias=false row_offset=0 output_offset=4 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=6016 exceptional=false bias=false row_offset=0 output_offset=1 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=6016 exceptional=false bias=false row_offset=0 output_offset=4 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=6017 exceptional=false bias=false row_offset=0 output_offset=1 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=6017 exceptional=false bias=false row_offset=0 output_offset=4 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=6018 exceptional=false bias=false row_offset=0 output_offset=1 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=6018 exceptional=false bias=false row_offset=0 output_offset=4 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=1 exceptional=false bias=true row_offset=0 output_offset=1 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=1 exceptional=false bias=true row_offset=0 output_offset=4 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=15 exceptional=false bias=true row_offset=0 output_offset=1 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=15 exceptional=false bias=true row_offset=0 output_offset=4 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=16 exceptional=false bias=true row_offset=0 output_offset=1 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=16 exceptional=false bias=true row_offset=0 output_offset=4 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=17 exceptional=false bias=true row_offset=0 output_offset=1 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=17 exceptional=false bias=true row_offset=0 output_offset=4 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=31 exceptional=false bias=true row_offset=0 output_offset=1 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=31 exceptional=false bias=true row_offset=0 output_offset=4 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=32 exceptional=false bias=true row_offset=0 output_offset=1 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=32 exceptional=false bias=true row_offset=0 output_offset=4 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=33 exceptional=false bias=true row_offset=0 output_offset=1 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=33 exceptional=false bias=true row_offset=0 output_offset=4 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=63 exceptional=false bias=true row_offset=0 output_offset=1 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=63 exceptional=false bias=true row_offset=0 output_offset=4 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=64 exceptional=false bias=true row_offset=0 output_offset=1 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=64 exceptional=false bias=true row_offset=0 output_offset=4 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=65 exceptional=false bias=true row_offset=0 output_offset=1 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=65 exceptional=false bias=true row_offset=0 output_offset=4 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=127 exceptional=false bias=true row_offset=0 output_offset=1 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=127 exceptional=false bias=true row_offset=0 output_offset=4 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=128 exceptional=false bias=true row_offset=0 output_offset=1 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=128 exceptional=false bias=true row_offset=0 output_offset=4 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=129 exceptional=false bias=true row_offset=0 output_offset=1 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=129 exceptional=false bias=true row_offset=0 output_offset=4 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=255 exceptional=false bias=true row_offset=0 output_offset=1 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=255 exceptional=false bias=true row_offset=0 output_offset=4 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=256 exceptional=false bias=true row_offset=0 output_offset=1 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=256 exceptional=false bias=true row_offset=0 output_offset=4 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=257 exceptional=false bias=true row_offset=0 output_offset=1 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=257 exceptional=false bias=true row_offset=0 output_offset=4 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=257 exceptional=false bias=true row_offset=17 output_offset=1 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=257 exceptional=false bias=true row_offset=17 output_offset=4 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=4621 exceptional=false bias=true row_offset=0 output_offset=1 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=4621 exceptional=false bias=true row_offset=0 output_offset=4 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=6016 exceptional=false bias=true row_offset=0 output_offset=1 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=6016 exceptional=false bias=true row_offset=0 output_offset=4 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=6017 exceptional=false bias=true row_offset=0 output_offset=1 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=6017 exceptional=false bias=true row_offset=0 output_offset=4 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=6018 exceptional=false bias=true row_offset=0 output_offset=1 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=6018 exceptional=false bias=true row_offset=0 output_offset=4 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=1 exceptional=true bias=false row_offset=0 output_offset=1 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=1 exceptional=true bias=false row_offset=0 output_offset=4 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=15 exceptional=true bias=false row_offset=0 output_offset=1 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=15 exceptional=true bias=false row_offset=0 output_offset=4 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=16 exceptional=true bias=false row_offset=0 output_offset=1 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=16 exceptional=true bias=false row_offset=0 output_offset=4 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=17 exceptional=true bias=false row_offset=0 output_offset=1 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=17 exceptional=true bias=false row_offset=0 output_offset=4 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=31 exceptional=true bias=false row_offset=0 output_offset=1 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=31 exceptional=true bias=false row_offset=0 output_offset=4 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=32 exceptional=true bias=false row_offset=0 output_offset=1 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=32 exceptional=true bias=false row_offset=0 output_offset=4 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=33 exceptional=true bias=false row_offset=0 output_offset=1 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=33 exceptional=true bias=false row_offset=0 output_offset=4 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=63 exceptional=true bias=false row_offset=0 output_offset=1 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=63 exceptional=true bias=false row_offset=0 output_offset=4 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=64 exceptional=true bias=false row_offset=0 output_offset=1 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=64 exceptional=true bias=false row_offset=0 output_offset=4 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=65 exceptional=true bias=false row_offset=0 output_offset=1 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=65 exceptional=true bias=false row_offset=0 output_offset=4 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=127 exceptional=true bias=false row_offset=0 output_offset=1 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=127 exceptional=true bias=false row_offset=0 output_offset=4 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=128 exceptional=true bias=false row_offset=0 output_offset=1 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=128 exceptional=true bias=false row_offset=0 output_offset=4 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=129 exceptional=true bias=false row_offset=0 output_offset=1 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=129 exceptional=true bias=false row_offset=0 output_offset=4 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=255 exceptional=true bias=false row_offset=0 output_offset=1 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=255 exceptional=true bias=false row_offset=0 output_offset=4 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=256 exceptional=true bias=false row_offset=0 output_offset=1 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=256 exceptional=true bias=false row_offset=0 output_offset=4 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=257 exceptional=true bias=false row_offset=0 output_offset=1 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=257 exceptional=true bias=false row_offset=0 output_offset=4 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=257 exceptional=true bias=false row_offset=17 output_offset=1 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=257 exceptional=true bias=false row_offset=17 output_offset=4 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=4621 exceptional=true bias=false row_offset=0 output_offset=1 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=4621 exceptional=true bias=false row_offset=0 output_offset=4 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=6016 exceptional=true bias=false row_offset=0 output_offset=1 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=6016 exceptional=true bias=false row_offset=0 output_offset=4 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=6017 exceptional=true bias=false row_offset=0 output_offset=1 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=6017 exceptional=true bias=false row_offset=0 output_offset=4 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=6018 exceptional=true bias=false row_offset=0 output_offset=1 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=6018 exceptional=true bias=false row_offset=0 output_offset=4 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=1 exceptional=true bias=true row_offset=0 output_offset=1 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=1 exceptional=true bias=true row_offset=0 output_offset=4 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=15 exceptional=true bias=true row_offset=0 output_offset=1 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=15 exceptional=true bias=true row_offset=0 output_offset=4 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=16 exceptional=true bias=true row_offset=0 output_offset=1 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=16 exceptional=true bias=true row_offset=0 output_offset=4 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=17 exceptional=true bias=true row_offset=0 output_offset=1 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=17 exceptional=true bias=true row_offset=0 output_offset=4 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=31 exceptional=true bias=true row_offset=0 output_offset=1 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=31 exceptional=true bias=true row_offset=0 output_offset=4 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=32 exceptional=true bias=true row_offset=0 output_offset=1 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=32 exceptional=true bias=true row_offset=0 output_offset=4 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=33 exceptional=true bias=true row_offset=0 output_offset=1 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=33 exceptional=true bias=true row_offset=0 output_offset=4 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=63 exceptional=true bias=true row_offset=0 output_offset=1 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=63 exceptional=true bias=true row_offset=0 output_offset=4 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=64 exceptional=true bias=true row_offset=0 output_offset=1 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=64 exceptional=true bias=true row_offset=0 output_offset=4 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=65 exceptional=true bias=true row_offset=0 output_offset=1 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=65 exceptional=true bias=true row_offset=0 output_offset=4 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=127 exceptional=true bias=true row_offset=0 output_offset=1 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=127 exceptional=true bias=true row_offset=0 output_offset=4 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=128 exceptional=true bias=true row_offset=0 output_offset=1 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=128 exceptional=true bias=true row_offset=0 output_offset=4 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=129 exceptional=true bias=true row_offset=0 output_offset=1 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=129 exceptional=true bias=true row_offset=0 output_offset=4 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=255 exceptional=true bias=true row_offset=0 output_offset=1 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=255 exceptional=true bias=true row_offset=0 output_offset=4 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=256 exceptional=true bias=true row_offset=0 output_offset=1 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=256 exceptional=true bias=true row_offset=0 output_offset=4 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=257 exceptional=true bias=true row_offset=0 output_offset=1 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=257 exceptional=true bias=true row_offset=0 output_offset=4 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=257 exceptional=true bias=true row_offset=17 output_offset=1 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=257 exceptional=true bias=true row_offset=17 output_offset=4 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=4621 exceptional=true bias=true row_offset=0 output_offset=1 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=4621 exceptional=true bias=true row_offset=0 output_offset=4 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=6016 exceptional=true bias=true row_offset=0 output_offset=1 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=6016 exceptional=true bias=true row_offset=0 output_offset=4 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=6017 exceptional=true bias=true row_offset=0 output_offset=1 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=6017 exceptional=true bias=true row_offset=0 output_offset=4 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=6018 exceptional=true bias=true row_offset=0 output_offset=1 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=tail shape_m=6018 k=36 n=132 view_m=6018 exceptional=true bias=true row_offset=0 output_offset=4 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=hot_e_boundary shape_m=2049 k=2304 n=768 view_m=1 exceptional=false bias=false row_offset=0 output_offset=1 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=hot_e_boundary shape_m=2049 k=2304 n=768 view_m=1 exceptional=false bias=false row_offset=0 output_offset=4 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=hot_e_boundary shape_m=2049 k=2304 n=768 view_m=16 exceptional=false bias=false row_offset=0 output_offset=1 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=hot_e_boundary shape_m=2049 k=2304 n=768 view_m=16 exceptional=false bias=false row_offset=0 output_offset=4 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=hot_e_boundary shape_m=2049 k=2304 n=768 view_m=17 exceptional=false bias=false row_offset=0 output_offset=1 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=hot_e_boundary shape_m=2049 k=2304 n=768 view_m=17 exceptional=false bias=false row_offset=0 output_offset=4 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=hot_e_boundary shape_m=2049 k=2304 n=768 view_m=2047 exceptional=false bias=false row_offset=0 output_offset=1 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=hot_e_boundary shape_m=2049 k=2304 n=768 view_m=2047 exceptional=false bias=false row_offset=0 output_offset=4 actual_auto=true
+RNA_WIDE_QUALIFIED_GROUP tile=Tf32RnaM128N96S3 case=hot_e_boundary shape_m=2049 k=2304 n=768 view_m=2048 exceptional=false bias=false row_offset=0 output_offset=1 actual_auto=true
+
+thread 'fixed_sm89_rna_n96_actual_auto_prefix_views_and_graph_bits' (3246500) panicked at tests/gemm_bi_fixed_correctness.rs:893:33:
+assertion `left == right` failed: actual AUTO case=hot_e_boundary M=2048 row=0 C-offset=4
+  left: Tf32RnaM128N128S3
+ right: Tf32RnaM128N96S3
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test fixed_sm89_rna_n96_actual_auto_prefix_views_and_graph_bits ... FAILED
+
+failures:
+
+failures:
+    fixed_sm89_rna_n96_actual_auto_prefix_views_and_graph_bits
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 15 filtered out; finished in 4.80s
+
+error: test failed, to rerun pass `--test gemm_bi_fixed_correctness`

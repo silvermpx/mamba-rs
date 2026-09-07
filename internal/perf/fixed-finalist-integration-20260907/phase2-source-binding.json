@@ -1,0 +1,215 @@
+{
+  "generation": "finalistphase2auto45",
+  "provenance": {
+    "cfg_test_only_delta": "Six added expected path entries across three cfg(test) arrays; runtime composer bytes are unchanged, so the already-built integration binaries are retained.",
+    "excluded_local_wip": [
+      "tests/gemm_bi_sm120_tf32_selector_qualification.rs",
+      "tests/support/triad_discovery_samples.rs"
+    ],
+    "final_modules_sha256": "2aab1470061486dbb5df1958133a119cacaf7d78012223dbf8fcc433b14c006f",
+    "invalid_zero_test_attempt": "Each cohort-revision-host integration-binary filter ran zero tests and is explicitly not counted. The intended named test passed in each full-lib transcript.",
+    "runtime_binary_modules_sha256": "aad5439ca7c6952c9bf7a5af0896c5e39f55de984d811c925ea5dac8793da181"
+  },
+  "schema": "MambaBiFixedFinalistPhase2SourceBindingV1",
+  "source_freeze": {
+    "kernels/gemm_bi_fixed/sm89_half_n64.cu": "5a4c85184fb4a0263ae03cbe7f2b5e8f954b32ce3138012ad8505274d3769681",
+    "kernels/gemm_bi_fixed/tf32_rna_n96.cu": "966372d0e8cb89c1ed32ceda45e6fa3e1e3df40ae42e8cbbd7aaccbdf96b6215",
+    "src/mamba_ssm/gpu/gemm_bi_fixed.rs": "fdc5affce1b3b9bcb181dd7245243ef472502056c1df9d2a8c64a8a44f161f46",
+    "src/mamba_ssm/gpu/gemm_bi_triad/dispatch.rs": "6bd16753f21ac01d354242f96b5bad18f3a502a12a0d55afdd18b8e8e03f86c6",
+    "src/mamba_ssm/gpu/gemm_bi_triad/launch.rs": "fd07071d738d50055fdcec9575f2eb8589ab1a23c4c67526b7aa95c857dc1bc6",
+    "src/mamba_ssm/gpu/gemm_bi_triad/modules.rs": "2aab1470061486dbb5df1958133a119cacaf7d78012223dbf8fcc433b14c006f",
+    "src/mamba_ssm/gpu/kernel_identity.rs": "eedee39202016dd6e9f2314b2e43d8fd3c3a03110a9388115ee65d1a2da30f5d",
+    "src/mamba_ssm/gpu/kernels.rs": "9aae153beba6976273064385bef3d438c83ee826986459844b9a46f3948dc138",
+    "tests/arch_compile_gates.rs": "3bc72a3b4b9c79fe1c85a1085eec1adba4e4d62d3f17ea8c624077342149a3c0",
+    "tests/gemm_bi_fixed_correctness.rs": "88eae91be3bf2e31941995fb2685cb90ba96c5f3c31df079bb4b0516f54b762e",
+    "tests/gemm_bi_fixed_performance.rs": "29456538e401f9dbd038258b1794b5af25eacdea923a2dab4ef497a4b418ae6d",
+    "tests/gemm_bi_fixed_sm89_pipeline.rs": "fc765e92bec31bb6288b033581ff9d4855e4c3a76a254681fc6b921519b659f3",
+    "tests/gemm_bi_tf32_cohort_binding.rs": "279b5dc0160f5b984b9fd1d59ad4de920a5113e36781cd046b684a98b4245517",
+    "tests/support/fixed_full_mantissa.rs": "234d4d87dd479780a3cacee34e5f7f1e868e0465536caba3866a46a16a39cb22"
+  },
+  "toolkits": {
+    "12.8": {
+      "actual_auto_functional": {
+        "binaries": {
+          "/root/target-ada-exact-toolkit-auto-finalistphase2auto45-cuda128-20260907/release/deps/gemm_bi_fixed_correctness-bb38dc807b901804": "31a4ce16a2e539b9dcd6732db238db9475f8f62b7a7018bea1071b2c1fe828c5",
+          "/root/target-ada-exact-toolkit-auto-finalistphase2auto45-cuda128-20260907/release/deps/gemm_bi_fixed_performance-adf126b1f35855e0": "97a7e31ef103861b3780111e5c8a6b5f92eac7cb2c21e46c5ebe146ef77d2e66",
+          "/root/target-ada-exact-toolkit-auto-finalistphase2auto45-cuda128-20260907/release/deps/gemm_bi_fixed_sm89_pipeline-275dff2d2ec8e1fd": "6100b08e509213d581ae2c7f4aa974d123da15dc88d77e63d78662886313a122",
+          "/root/target-ada-exact-toolkit-auto-finalistphase2auto45-cuda128-20260907/release/deps/gemm_bi_tf32_cohort_binding-1f2a087e1494f9cc": "6dfc6b325befa50d9d2dce38661961dbbc95a2a1ac2796d948ec7248212412aa"
+        },
+        "binding_sha256": "e8ca86f148ae1b052bfe8924f21413f20de6734ab7adc399a0c0ea56e0cf1e0d",
+        "cache_artifacts": {
+          "/root/mamba-kcache-ada-exact-toolkit-auto-finalistphase2auto45-cuda128-20260907/mamba-kernels-v1-204d091e16a1a56557598108ff023f625687865365a0f778ddbd8891bc2cf1e2.bin": {
+            "bytes": 7285870,
+            "sha256": "0c35fa355f43ca1d01341df2c76f3655487bce1cfa57e1ec784835e8dfd87aaf"
+          },
+          "/root/mamba-kcache-ada-exact-toolkit-auto-finalistphase2auto45-cuda128-20260907/mamba-kernels-v1-73fbec7557a95462a555e39f1b3c94e8d2bcc7047a14f8f3e3fa51a768ec5b9a.bin": {
+            "bytes": 14018434,
+            "sha256": "c02fb7a0ef6a50cb52dc3fec2e83ebb1eb6b4015a9f200d48d65fd4493d489c9"
+          },
+          "/root/mamba-kcache-ada-exact-toolkit-auto-finalistphase2auto45-cuda128-20260907/mamba-kernels-v1-da5dabeff55570d1fb6ca43a1d4a8aa7a2a9d25efb6436ed7f03c4a28a73d986.bin": {
+            "bytes": 2437269,
+            "sha256": "48a388fc610d110bb884ea3cd0f49eda299c0c7ce0c8e2beb24d34a925198a54"
+          }
+        },
+        "command_sha256": "945fae7f9e9105dfe2d328ed5248a51085a1a638244b75fc2eaea89b601ba552",
+        "execution_census_sha256": "77f4d5f8ac3ea176ffbf6b205e27ea209c307933365d2a8708ebf3ff8754b495",
+        "exit_sha256": "5c45346fff8583c115bbce092baf30bbf8e3626329a3e80edec7e173be3d03d2",
+        "phase1_cache_set_byte_identical": true
+      },
+      "cfg_test_only_lib_repair": {
+        "command": "internal/perf/fixed-finalist-integration-20260907/phase2-lib-repair-cuda128/command.json",
+        "command_sha256": "6cb95fc2baf7b48ac8faefb0435aae27a1d322224711a797175f6a8a9049627d",
+        "exit_sha256": "98236da064b14b26155080344687851306ed68ea81d587b8f660cebb7c96e961",
+        "log_sha256": "eb8c5520309fedefdbc1b41d262eba9b97cccca0bfee91c9f7a36c24f5079b8b",
+        "modules_sha256": "2aab1470061486dbb5df1958133a119cacaf7d78012223dbf8fcc433b14c006f",
+        "result": {
+          "failed": 0,
+          "ignored": 46,
+          "passed": 652
+        }
+      },
+      "integration_build": {
+        "compiled_sources": {
+          "kernels/gemm_bi_fixed/sm89_half_n64.cu": "5a4c85184fb4a0263ae03cbe7f2b5e8f954b32ce3138012ad8505274d3769681",
+          "kernels/gemm_bi_fixed/tf32_rna_n96.cu": "966372d0e8cb89c1ed32ceda45e6fa3e1e3df40ae42e8cbbd7aaccbdf96b6215",
+          "src/mamba_ssm/gpu/gemm_bi_fixed.rs": "fdc5affce1b3b9bcb181dd7245243ef472502056c1df9d2a8c64a8a44f161f46",
+          "src/mamba_ssm/gpu/gemm_bi_triad/dispatch.rs": "6bd16753f21ac01d354242f96b5bad18f3a502a12a0d55afdd18b8e8e03f86c6",
+          "src/mamba_ssm/gpu/gemm_bi_triad/launch.rs": "fd07071d738d50055fdcec9575f2eb8589ab1a23c4c67526b7aa95c857dc1bc6",
+          "src/mamba_ssm/gpu/gemm_bi_triad/modules.rs": "aad5439ca7c6952c9bf7a5af0896c5e39f55de984d811c925ea5dac8793da181",
+          "src/mamba_ssm/gpu/kernel_identity.rs": "eedee39202016dd6e9f2314b2e43d8fd3c3a03110a9388115ee65d1a2da30f5d",
+          "src/mamba_ssm/gpu/kernels.rs": "9aae153beba6976273064385bef3d438c83ee826986459844b9a46f3948dc138",
+          "tests/arch_compile_gates.rs": "3bc72a3b4b9c79fe1c85a1085eec1adba4e4d62d3f17ea8c624077342149a3c0",
+          "tests/gemm_bi_fixed_correctness.rs": "88eae91be3bf2e31941995fb2685cb90ba96c5f3c31df079bb4b0516f54b762e",
+          "tests/gemm_bi_fixed_performance.rs": "29456538e401f9dbd038258b1794b5af25eacdea923a2dab4ef497a4b418ae6d",
+          "tests/gemm_bi_fixed_sm89_pipeline.rs": "fc765e92bec31bb6288b033581ff9d4855e4c3a76a254681fc6b921519b659f3",
+          "tests/gemm_bi_tf32_cohort_binding.rs": "279b5dc0160f5b984b9fd1d59ad4de920a5113e36781cd046b684a98b4245517",
+          "tests/support/fixed_full_mantissa.rs": "234d4d87dd479780a3cacee34e5f7f1e868e0465536caba3866a46a16a39cb22"
+        },
+        "receipt": "internal/perf/fixed-finalist-integration-20260907/phase2-build-cuda128/command.json",
+        "receipt_sha256": "e46a78815394bc2185fab60b3fe80d7e4aab19cf1a4de134a020fe5e198826ef"
+      }
+    },
+    "13.0": {
+      "actual_auto_functional": {
+        "binaries": {
+          "/root/target-ada-exact-toolkit-auto-finalistphase2auto45-cuda130-20260907/release/deps/gemm_bi_fixed_correctness-f7aef6b739fe79c6": "4d0fcca7cb93513b75a7535d6cfc351faa8ad3d42470352713f5d6d8a8f0196d",
+          "/root/target-ada-exact-toolkit-auto-finalistphase2auto45-cuda130-20260907/release/deps/gemm_bi_fixed_performance-f34471822300c85c": "c23ba09033cb28ede570b67f9548bf8f341d84958cab0e82851e2f7857cf1916",
+          "/root/target-ada-exact-toolkit-auto-finalistphase2auto45-cuda130-20260907/release/deps/gemm_bi_fixed_sm89_pipeline-da9330a185edc2c1": "540f2de9faff88fba4d59542d8b30de476af627aeeff8228d76fa4dd921d74ee",
+          "/root/target-ada-exact-toolkit-auto-finalistphase2auto45-cuda130-20260907/release/deps/gemm_bi_tf32_cohort_binding-1f48a3ccb04f0698": "ac8d2868b6e22faf56f0901d89edcd13b964dafd347f4298a4019eba8dfd9b64"
+        },
+        "binding_sha256": "e77dcb2a9aea6e5b74ba72708918e6030246ce597f01c25fbcfeab89a9e5e060",
+        "cache_artifacts": {
+          "/root/mamba-kcache-ada-exact-toolkit-auto-finalistphase2auto45-cuda130-20260907/mamba-kernels-v1-2d0a66eb8af46189189b46c1fd25d2e88569ff8264420736239fc2d48cdd444c.bin": {
+            "bytes": 7284180,
+            "sha256": "5d04d22d16514ae24c7fb21b8eb2fe22045f76e90386a3f9fbfdf712db4729dd"
+          },
+          "/root/mamba-kcache-ada-exact-toolkit-auto-finalistphase2auto45-cuda130-20260907/mamba-kernels-v1-ceeda6e9d55cfd166dafd638a9055daf8a1bb044f573c3349e147bff03b8fe7b.bin": {
+            "bytes": 2437269,
+            "sha256": "c599a8b8807dd944ae79238241b36f77599cb5cab0511d3ab4f8716bc7545c3c"
+          },
+          "/root/mamba-kcache-ada-exact-toolkit-auto-finalistphase2auto45-cuda130-20260907/mamba-kernels-v1-feac83eb41fcc629d0c4bf9be1758d9e92c431728e17c1f46cfcd5c5a9ebc27d.bin": {
+            "bytes": 14018434,
+            "sha256": "32e61498d102e2343b2c3b65ec062af81b1351b1039a2503c0657628b4d3a9c0"
+          }
+        },
+        "command_sha256": "054a376652461a50bec65c35b994ff92b6bc46782f1f0600ad879058599904bf",
+        "execution_census_sha256": "da7dbec5f04e7c7e016e5526be2c17a6e3de199f802f73198675d6282a020999",
+        "exit_sha256": "f7cd9ce82f799271ad9dabe86d23e6ef03c51186992c3099a6012b097f74b148",
+        "phase1_cache_set_byte_identical": true
+      },
+      "cfg_test_only_lib_repair": {
+        "command": "internal/perf/fixed-finalist-integration-20260907/phase2-lib-repair-cuda130/command.json",
+        "command_sha256": "50367f99ca20af73ac4ce0abf02ed03e845b8e6c86afe2b39eb388dc2c9adb84",
+        "exit_sha256": "98236da064b14b26155080344687851306ed68ea81d587b8f660cebb7c96e961",
+        "log_sha256": "fdcd037fff810ef1ff3d3d0da64ecf395a331bd511694982464f38e3579e95ce",
+        "modules_sha256": "2aab1470061486dbb5df1958133a119cacaf7d78012223dbf8fcc433b14c006f",
+        "result": {
+          "failed": 0,
+          "ignored": 46,
+          "passed": 652
+        }
+      },
+      "integration_build": {
+        "compiled_sources": {
+          "kernels/gemm_bi_fixed/sm89_half_n64.cu": "5a4c85184fb4a0263ae03cbe7f2b5e8f954b32ce3138012ad8505274d3769681",
+          "kernels/gemm_bi_fixed/tf32_rna_n96.cu": "966372d0e8cb89c1ed32ceda45e6fa3e1e3df40ae42e8cbbd7aaccbdf96b6215",
+          "src/mamba_ssm/gpu/gemm_bi_fixed.rs": "fdc5affce1b3b9bcb181dd7245243ef472502056c1df9d2a8c64a8a44f161f46",
+          "src/mamba_ssm/gpu/gemm_bi_triad/dispatch.rs": "6bd16753f21ac01d354242f96b5bad18f3a502a12a0d55afdd18b8e8e03f86c6",
+          "src/mamba_ssm/gpu/gemm_bi_triad/launch.rs": "fd07071d738d50055fdcec9575f2eb8589ab1a23c4c67526b7aa95c857dc1bc6",
+          "src/mamba_ssm/gpu/gemm_bi_triad/modules.rs": "aad5439ca7c6952c9bf7a5af0896c5e39f55de984d811c925ea5dac8793da181",
+          "src/mamba_ssm/gpu/kernel_identity.rs": "eedee39202016dd6e9f2314b2e43d8fd3c3a03110a9388115ee65d1a2da30f5d",
+          "src/mamba_ssm/gpu/kernels.rs": "9aae153beba6976273064385bef3d438c83ee826986459844b9a46f3948dc138",
+          "tests/arch_compile_gates.rs": "3bc72a3b4b9c79fe1c85a1085eec1adba4e4d62d3f17ea8c624077342149a3c0",
+          "tests/gemm_bi_fixed_correctness.rs": "88eae91be3bf2e31941995fb2685cb90ba96c5f3c31df079bb4b0516f54b762e",
+          "tests/gemm_bi_fixed_performance.rs": "29456538e401f9dbd038258b1794b5af25eacdea923a2dab4ef497a4b418ae6d",
+          "tests/gemm_bi_fixed_sm89_pipeline.rs": "fc765e92bec31bb6288b033581ff9d4855e4c3a76a254681fc6b921519b659f3",
+          "tests/gemm_bi_tf32_cohort_binding.rs": "279b5dc0160f5b984b9fd1d59ad4de920a5113e36781cd046b684a98b4245517",
+          "tests/support/fixed_full_mantissa.rs": "234d4d87dd479780a3cacee34e5f7f1e868e0465536caba3866a46a16a39cb22"
+        },
+        "receipt": "internal/perf/fixed-finalist-integration-20260907/phase2-build-cuda130/command.json",
+        "receipt_sha256": "f631ab6a9ee3a37621fbff021f258c77f745d09d062ee8a395b401d6b841f5bb"
+      }
+    },
+    "13.2": {
+      "actual_auto_functional": {
+        "binaries": {
+          "/root/target-ada-exact-toolkit-auto-finalistphase2auto45-cuda132-20260907/release/deps/gemm_bi_fixed_correctness-ed3d310275acf4d8": "73849ced241d65e5d9fcabeaad547241bfc96678420e8933cb4e9c85889682da",
+          "/root/target-ada-exact-toolkit-auto-finalistphase2auto45-cuda132-20260907/release/deps/gemm_bi_fixed_performance-46090335b71731a6": "424401b2ddd64b91a9644c4ce13212144fe37cff9696490bd1003f49a3a041e7",
+          "/root/target-ada-exact-toolkit-auto-finalistphase2auto45-cuda132-20260907/release/deps/gemm_bi_fixed_sm89_pipeline-b0f5bf9e4d3ccd0f": "ec12150ae9059b8659376f3c916818b9f7ef01a3c0afa5547b4312cf23abd69c",
+          "/root/target-ada-exact-toolkit-auto-finalistphase2auto45-cuda132-20260907/release/deps/gemm_bi_tf32_cohort_binding-0676de5a4f79253f": "51bcbc8c859555fb3e4ada2d7c6e93aecbd055c820bb9aa6ee6afcd0ea7c38c3"
+        },
+        "binding_sha256": "52d051edb8ea420d83f2106ef4ddcf3261ab14320cc7a25ec1a19450209919f7",
+        "cache_artifacts": {
+          "/root/mamba-kcache-ada-exact-toolkit-auto-finalistphase2auto45-cuda132-20260907/mamba-kernels-v1-3809af034718aa08dfdfc1b6baeb407715436dc7db87ef39825b033c2fd72541.bin": {
+            "bytes": 13437599,
+            "sha256": "5851ebd49595a0b2ef665073289e52f903eec3266deadfc5ad5d9f2096ce6d16"
+          },
+          "/root/mamba-kcache-ada-exact-toolkit-auto-finalistphase2auto45-cuda132-20260907/mamba-kernels-v1-822ebf0dda7dcf9c4f5c5a2213884dde42ab45f5cf238479a81856042c302b7c.bin": {
+            "bytes": 2395145,
+            "sha256": "5035921fc8e078e5454c9c5392f9e9ee6ca6a3de54c1e08cb54bba432fa37546"
+          },
+          "/root/mamba-kcache-ada-exact-toolkit-auto-finalistphase2auto45-cuda132-20260907/mamba-kernels-v1-e4f76515e441adc28862775000fce218e2d2cca61b47ce484e15eb1144c40fb3.bin": {
+            "bytes": 7248389,
+            "sha256": "f0be052fc160b9e5f4b6a897878781327968c0015d551128415a94b85e6fc0aa"
+          }
+        },
+        "command_sha256": "e21bd80a87bfa4f7eb05a7825875e4ef000b9992039bee0eac783180f80a2ba4",
+        "execution_census_sha256": "b0fb393a4a6e9004cb70718316d8360addd2574fc1c6b41954f4959535acc3fa",
+        "exit_sha256": "50cfd2f699faf06bf01cf2eb07847f9649e06f749845d547b3e90298030307b9",
+        "phase1_cache_set_byte_identical": true
+      },
+      "cfg_test_only_lib_repair": {
+        "command": "internal/perf/fixed-finalist-integration-20260907/phase2-lib-repair-cuda132/command.json",
+        "command_sha256": "3983e7a5aed51fc0ad953843ad9aa01314c1e9f4afa83c239d54e7c884bab108",
+        "exit_sha256": "98236da064b14b26155080344687851306ed68ea81d587b8f660cebb7c96e961",
+        "log_sha256": "efb5f0dd721f1a9e9baa604fa1b45c9e04baf5f10422457c934a5c03bfbae2aa",
+        "modules_sha256": "2aab1470061486dbb5df1958133a119cacaf7d78012223dbf8fcc433b14c006f",
+        "result": {
+          "failed": 0,
+          "ignored": 46,
+          "passed": 652
+        }
+      },
+      "integration_build": {
+        "compiled_sources": {
+          "kernels/gemm_bi_fixed/sm89_half_n64.cu": "5a4c85184fb4a0263ae03cbe7f2b5e8f954b32ce3138012ad8505274d3769681",
+          "kernels/gemm_bi_fixed/tf32_rna_n96.cu": "966372d0e8cb89c1ed32ceda45e6fa3e1e3df40ae42e8cbbd7aaccbdf96b6215",
+          "src/mamba_ssm/gpu/gemm_bi_fixed.rs": "fdc5affce1b3b9bcb181dd7245243ef472502056c1df9d2a8c64a8a44f161f46",
+          "src/mamba_ssm/gpu/gemm_bi_triad/dispatch.rs": "6bd16753f21ac01d354242f96b5bad18f3a502a12a0d55afdd18b8e8e03f86c6",
+          "src/mamba_ssm/gpu/gemm_bi_triad/launch.rs": "fd07071d738d50055fdcec9575f2eb8589ab1a23c4c67526b7aa95c857dc1bc6",
+          "src/mamba_ssm/gpu/gemm_bi_triad/modules.rs": "aad5439ca7c6952c9bf7a5af0896c5e39f55de984d811c925ea5dac8793da181",
+          "src/mamba_ssm/gpu/kernel_identity.rs": "eedee39202016dd6e9f2314b2e43d8fd3c3a03110a9388115ee65d1a2da30f5d",
+          "src/mamba_ssm/gpu/kernels.rs": "9aae153beba6976273064385bef3d438c83ee826986459844b9a46f3948dc138",
+          "tests/arch_compile_gates.rs": "3bc72a3b4b9c79fe1c85a1085eec1adba4e4d62d3f17ea8c624077342149a3c0",
+          "tests/gemm_bi_fixed_correctness.rs": "88eae91be3bf2e31941995fb2685cb90ba96c5f3c31df079bb4b0516f54b762e",
+          "tests/gemm_bi_fixed_performance.rs": "29456538e401f9dbd038258b1794b5af25eacdea923a2dab4ef497a4b418ae6d",
+          "tests/gemm_bi_fixed_sm89_pipeline.rs": "fc765e92bec31bb6288b033581ff9d4855e4c3a76a254681fc6b921519b659f3",
+          "tests/gemm_bi_tf32_cohort_binding.rs": "279b5dc0160f5b984b9fd1d59ad4de920a5113e36781cd046b684a98b4245517",
+          "tests/support/fixed_full_mantissa.rs": "234d4d87dd479780a3cacee34e5f7f1e868e0465536caba3866a46a16a39cb22"
+        },
+        "receipt": "internal/perf/fixed-finalist-integration-20260907/phase2-build-cuda132/command.json",
+        "receipt_sha256": "bced41e884c242b6b116115b1ce6fc5e6c628d74461d7ad4375c307ae4511031"
+      }
+    }
+  }
+}

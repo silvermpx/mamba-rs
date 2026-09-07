@@ -1,0 +1,325 @@
+{
+  "functional": {
+    "12.8": {
+      "half_actual_auto": 1,
+      "holder_resource": 1,
+      "n96_actual_auto": 1,
+      "n96_groups": 224,
+      "triad_runtime": "not applicable"
+    },
+    "13.0": {
+      "half_actual_auto": 1,
+      "holder_resource": 1,
+      "n96_actual_auto": 1,
+      "n96_groups": 224,
+      "triad_runtime": "not applicable"
+    },
+    "13.2": {
+      "half_actual_auto": 1,
+      "holder_resource": 1,
+      "n96_actual_auto": 1,
+      "n96_groups": 224,
+      "triad_bias": 1,
+      "triad_cohort": 1
+    }
+  },
+  "host": {
+    "full_lib": {
+      "12.8": {
+        "failed": 0,
+        "ignored": 46,
+        "passed": 652
+      },
+      "13.0": {
+        "failed": 0,
+        "ignored": 46,
+        "passed": 652
+      },
+      "13.2": {
+        "failed": 0,
+        "ignored": 46,
+        "passed": 652
+      }
+    },
+    "invalid_zero_test_attempt": "cohort-revision-host in each functional2 directory matched zero tests and is not counted; the named unit passed in each corrected full-lib transcript.",
+    "performance_oracle": {
+      "12.8": 1,
+      "13.0": 1,
+      "13.2": 1
+    }
+  },
+  "notes": [
+    "Post101 ratios are computed directly per window as AUTO/forced-old and AUTO/Fast, then summarized with round((len-1)*fraction); no inverse quantiles are used.",
+    "The paired scheduler is A-F-V / V-F-A on eager and graph paths, not ABBA.",
+    "The local Triad discovery WIP test and support helper were excluded from the remote Fixed build and are not phase2 inputs."
+  ],
+  "post101": [
+    {
+      "actual_auto": "Tf32RnaM128N96S3",
+      "cell": "hot_e",
+      "evidence": "internal/perf/fixed-finalist-integration-20260907/phase2-post101-cuda128-n96",
+      "forced_old": "Tf32RnaM128N128S3",
+      "graph_path_replay_bits_equal": true,
+      "graph_records": 2,
+      "raw_storage_bits_equal": true,
+      "records": 4,
+      "repeat_bits_equal": true,
+      "row": "tf32",
+      "strata": [
+        {
+          "auto_over_fast_p50": 1.1080932563620154,
+          "auto_over_fast_p95": 1.1085252190659678,
+          "auto_over_old_p50": 0.7738621063355522,
+          "auto_over_old_p95": 0.7741896438689506,
+          "order": "auto_forced_vendor",
+          "path": "eager"
+        },
+        {
+          "auto_over_fast_p50": 1.1081652724711577,
+          "auto_over_fast_p95": 1.1085534464250435,
+          "auto_over_old_p50": 0.7737648930549091,
+          "auto_over_old_p95": 0.7740326427914702,
+          "order": "vendor_forced_auto",
+          "path": "eager"
+        },
+        {
+          "auto_over_fast_p50": 1.1083293182705183,
+          "auto_over_fast_p95": 1.1087383435393794,
+          "auto_over_old_p50": 0.7724009349224875,
+          "auto_over_old_p95": 0.7727204489354348,
+          "order": "auto_forced_vendor",
+          "path": "graph"
+        },
+        {
+          "auto_over_fast_p50": 1.108350442134609,
+          "auto_over_fast_p95": 1.1087736550733818,
+          "auto_over_old_p50": 0.7724467223876706,
+          "auto_over_old_p95": 0.7727239351305416,
+          "order": "vendor_forced_auto",
+          "path": "graph"
+        }
+      ],
+      "toolkit": "12.8",
+      "windows": 101,
+      "worst_auto_over_fast_p50": 1.108350442134609,
+      "worst_auto_over_fast_p95": 1.1087736550733818,
+      "worst_auto_over_old_p50": 0.7738621063355522,
+      "worst_auto_over_old_p95": 0.7741896438689506
+    },
+    {
+      "actual_auto": "Tf32RnaM128N96S3",
+      "cell": "hot_e",
+      "evidence": "internal/perf/fixed-finalist-integration-20260907/phase2-post101-cuda130-n96",
+      "forced_old": "Tf32RnaM128N128S3",
+      "graph_path_replay_bits_equal": true,
+      "graph_records": 2,
+      "raw_storage_bits_equal": true,
+      "records": 4,
+      "repeat_bits_equal": true,
+      "row": "tf32",
+      "strata": [
+        {
+          "auto_over_fast_p50": 1.1080948056682745,
+          "auto_over_fast_p95": 1.1084825256639244,
+          "auto_over_old_p50": 0.7737259538408583,
+          "auto_over_old_p95": 0.7740436411225023,
+          "order": "auto_forced_vendor",
+          "path": "eager"
+        },
+        {
+          "auto_over_fast_p50": 1.108302345744608,
+          "auto_over_fast_p95": 1.1087500712868275,
+          "auto_over_old_p50": 0.7737590197267726,
+          "auto_over_old_p95": 0.7740337711280447,
+          "order": "vendor_forced_auto",
+          "path": "eager"
+        },
+        {
+          "auto_over_fast_p50": 1.1083000135302177,
+          "auto_over_fast_p95": 1.1087234907759451,
+          "auto_over_old_p50": 0.772440314132881,
+          "auto_over_old_p95": 0.7727646881679678,
+          "order": "auto_forced_vendor",
+          "path": "graph"
+        },
+        {
+          "auto_over_fast_p50": 1.108399746380775,
+          "auto_over_fast_p95": 1.1087235616643747,
+          "auto_over_old_p50": 0.772451628730137,
+          "auto_over_old_p95": 0.7727513549945317,
+          "order": "vendor_forced_auto",
+          "path": "graph"
+        }
+      ],
+      "toolkit": "13.0",
+      "windows": 101,
+      "worst_auto_over_fast_p50": 1.108399746380775,
+      "worst_auto_over_fast_p95": 1.1087500712868275,
+      "worst_auto_over_old_p50": 0.7737590197267726,
+      "worst_auto_over_old_p95": 0.7740436411225023
+    },
+    {
+      "actual_auto": "Tf32RnaM128N96S3",
+      "cell": "hot_e",
+      "evidence": "internal/perf/fixed-finalist-integration-20260907/phase2-post101-cuda132-n96",
+      "forced_old": "Tf32RnaM128N128S3",
+      "graph_path_replay_bits_equal": true,
+      "graph_records": 2,
+      "raw_storage_bits_equal": true,
+      "records": 4,
+      "repeat_bits_equal": true,
+      "row": "tf32",
+      "strata": [
+        {
+          "auto_over_fast_p50": 1.113896197594188,
+          "auto_over_fast_p95": 1.1143936839918491,
+          "auto_over_old_p50": 0.8529098143843538,
+          "auto_over_old_p95": 0.8532567952521065,
+          "order": "auto_forced_vendor",
+          "path": "eager"
+        },
+        {
+          "auto_over_fast_p50": 1.11394397955013,
+          "auto_over_fast_p95": 1.1144499232292042,
+          "auto_over_old_p50": 0.8529348406833374,
+          "auto_over_old_p95": 0.8532567952521065,
+          "order": "vendor_forced_auto",
+          "path": "eager"
+        },
+        {
+          "auto_over_fast_p50": 1.1144410302318764,
+          "auto_over_fast_p95": 1.1148170524559555,
+          "auto_over_old_p50": 0.852404599260251,
+          "auto_over_old_p95": 0.8527444590795722,
+          "order": "auto_forced_vendor",
+          "path": "graph"
+        },
+        {
+          "auto_over_fast_p50": 1.114448162541375,
+          "auto_over_fast_p95": 1.1148843424667798,
+          "auto_over_old_p50": 0.8524062035465952,
+          "auto_over_old_p95": 0.8527336877418737,
+          "order": "vendor_forced_auto",
+          "path": "graph"
+        }
+      ],
+      "toolkit": "13.2",
+      "windows": 101,
+      "worst_auto_over_fast_p50": 1.114448162541375,
+      "worst_auto_over_fast_p95": 1.1148843424667798,
+      "worst_auto_over_old_p50": 0.8529348406833374,
+      "worst_auto_over_old_p95": 0.8532567952521065
+    },
+    {
+      "actual_auto": "TcM64N64Sm89S3",
+      "cell": "hot_d",
+      "evidence": "internal/perf/fixed-finalist-integration-20260907/phase2-post101-cuda132-d",
+      "forced_old": "Tc128Sm89Swizzle",
+      "graph_path_replay_bits_equal": true,
+      "graph_records": 2,
+      "raw_storage_bits_equal": true,
+      "records": 4,
+      "repeat_bits_equal": true,
+      "row": "f16",
+      "strata": [
+        {
+          "auto_over_fast_p50": 1.0306676164579933,
+          "auto_over_fast_p95": 1.0451396131572868,
+          "auto_over_old_p50": 0.9125810564757693,
+          "auto_over_old_p95": 0.9527137526476708,
+          "order": "auto_forced_vendor",
+          "path": "eager"
+        },
+        {
+          "auto_over_fast_p50": 1.0228542525687179,
+          "auto_over_fast_p95": 1.040781820233704,
+          "auto_over_old_p50": 0.8829553662957688,
+          "auto_over_old_p95": 0.9173498432319563,
+          "order": "vendor_forced_auto",
+          "path": "eager"
+        },
+        {
+          "auto_over_fast_p50": 1.0423974509540808,
+          "auto_over_fast_p95": 1.0555430752285322,
+          "auto_over_old_p50": 0.8751075421875485,
+          "auto_over_old_p95": 0.9186252769944954,
+          "order": "auto_forced_vendor",
+          "path": "graph"
+        },
+        {
+          "auto_over_fast_p50": 1.044123986892379,
+          "auto_over_fast_p95": 1.0687941613267138,
+          "auto_over_old_p50": 0.8693930953306915,
+          "auto_over_old_p95": 0.8967360124360912,
+          "order": "vendor_forced_auto",
+          "path": "graph"
+        }
+      ],
+      "toolkit": "13.2",
+      "windows": 101,
+      "worst_auto_over_fast_p50": 1.044123986892379,
+      "worst_auto_over_fast_p95": 1.0687941613267138,
+      "worst_auto_over_old_p50": 0.9125810564757693,
+      "worst_auto_over_old_p95": 0.9527137526476708
+    },
+    {
+      "actual_auto": "TcM128N64Sm89S2",
+      "cell": "hot_e",
+      "evidence": "internal/perf/fixed-finalist-integration-20260907/phase2-post101-cuda132-e",
+      "forced_old": "Tc128Sm89Pipeline",
+      "graph_path_replay_bits_equal": true,
+      "graph_records": 2,
+      "raw_storage_bits_equal": true,
+      "records": 4,
+      "repeat_bits_equal": true,
+      "row": "f16",
+      "strata": [
+        {
+          "auto_over_fast_p50": 0.9658945229309356,
+          "auto_over_fast_p95": 0.9675331257950396,
+          "auto_over_old_p50": 0.9704476928613283,
+          "auto_over_old_p95": 0.9712173290101691,
+          "order": "auto_forced_vendor",
+          "path": "eager"
+        },
+        {
+          "auto_over_fast_p50": 0.9656815908099254,
+          "auto_over_fast_p95": 0.9681256644475417,
+          "auto_over_old_p50": 0.9704064961921565,
+          "auto_over_old_p95": 0.9710490500901777,
+          "order": "vendor_forced_auto",
+          "path": "eager"
+        },
+        {
+          "auto_over_fast_p50": 0.9643132436896271,
+          "auto_over_fast_p95": 0.9847718281006826,
+          "auto_over_old_p50": 0.9636881114102426,
+          "auto_over_old_p95": 0.979662587618093,
+          "order": "auto_forced_vendor",
+          "path": "graph"
+        },
+        {
+          "auto_over_fast_p50": 0.969903644184851,
+          "auto_over_fast_p95": 0.9798278197605405,
+          "auto_over_old_p50": 0.9709850301158204,
+          "auto_over_old_p95": 0.977442554163966,
+          "order": "vendor_forced_auto",
+          "path": "graph"
+        }
+      ],
+      "toolkit": "13.2",
+      "windows": 101,
+      "worst_auto_over_fast_p50": 0.969903644184851,
+      "worst_auto_over_fast_p95": 0.9847718281006826,
+      "worst_auto_over_old_p50": 0.9709850301158204,
+      "worst_auto_over_old_p95": 0.979662587618093
+    }
+  ],
+  "production": {
+    "numeric_abi_revision": 5,
+    "schedule_revision": 8,
+    "tuning_table_revision": 45
+  },
+  "release": "Every GPU attempt had a strict quiet/no-app PRE. Immediate RELEASE samples remained active and are preserved as failures; each attempt has a distinct quiet/no-app drain RELEASE after five seconds.",
+  "schema": "MambaBiFixedFinalistPhase2EvidenceSummaryV1"
+}

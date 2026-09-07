@@ -1,0 +1,44 @@
+{
+  "generation": "finalistphase2auto45",
+  "toolkit": "13.2",
+  "arm": "n96",
+  "row": "tf32",
+  "cell": "hot_e",
+  "actual_auto": "Tf32RnaM128N96S3",
+  "forced_old": "Tf32RnaM128N128S3",
+  "windows": 101,
+  "filters": {
+    "MAMBA_FIXED_ADA_VENDOR": "1",
+    "MAMBA_FIXED_ADA_ROWS": "tf32",
+    "MAMBA_FIXED_ADA_CELLS": "hot_e",
+    "MAMBA_FIXED_ADA_BIAS": "0",
+    "MAMBA_FIXED_ADA_WINDOWS": "101",
+    "MAMBA_FIXED_VENDOR_TILES": "Tf32RnaM128N128S3",
+    "MAMBA_FIXED_VENDOR_PATHS": "eager,graph",
+    "MAMBA_FIXED_VENDOR_EXACT_CC": "8.9"
+  },
+  "runner": "/root/evidence-ada-exact-toolkit-auto-20260907/run.py",
+  "runner_sha256": "d753757a717bfe18b3a28a8480f31104e252271576e45d7e53fc16396008475a",
+  "sources": {
+    "kernels/gemm_bi_fixed/sm89_half_n64.cu": "5a4c85184fb4a0263ae03cbe7f2b5e8f954b32ce3138012ad8505274d3769681",
+    "kernels/gemm_bi_fixed/tf32_rna_n96.cu": "966372d0e8cb89c1ed32ceda45e6fa3e1e3df40ae42e8cbbd7aaccbdf96b6215",
+    "src/mamba_ssm/gpu/gemm_bi_fixed.rs": "fdc5affce1b3b9bcb181dd7245243ef472502056c1df9d2a8c64a8a44f161f46",
+    "src/mamba_ssm/gpu/gemm_bi_triad/modules.rs": "2aab1470061486dbb5df1958133a119cacaf7d78012223dbf8fcc433b14c006f",
+    "src/mamba_ssm/gpu/gemm_bi_triad/dispatch.rs": "6bd16753f21ac01d354242f96b5bad18f3a502a12a0d55afdd18b8e8e03f86c6",
+    "src/mamba_ssm/gpu/gemm_bi_triad/launch.rs": "fd07071d738d50055fdcec9575f2eb8589ab1a23c4c67526b7aa95c857dc1bc6",
+    "src/mamba_ssm/gpu/kernel_identity.rs": "eedee39202016dd6e9f2314b2e43d8fd3c3a03110a9388115ee65d1a2da30f5d",
+    "src/mamba_ssm/gpu/kernels.rs": "9aae153beba6976273064385bef3d438c83ee826986459844b9a46f3948dc138",
+    "tests/gemm_bi_fixed_performance.rs": "29456538e401f9dbd038258b1794b5af25eacdea923a2dab4ef497a4b418ae6d"
+  },
+  "binary": {
+    "path": "/root/target-ada-exact-toolkit-auto-finalistphase2auto45-cuda132-20260907/release/deps/gemm_bi_fixed_performance-46090335b71731a6",
+    "sha256": "424401b2ddd64b91a9644c4ce13212144fe37cff9696490bd1003f49a3a041e7"
+  },
+  "command": [
+    "/root/target-ada-exact-toolkit-auto-finalistphase2auto45-cuda132-20260907/release/deps/gemm_bi_fixed_performance-46090335b71731a6",
+    "fixed_ada_forced_rungs_paired_precision_cublas",
+    "--ignored",
+    "--exact",
+    "--nocapture"
+  ]
+}

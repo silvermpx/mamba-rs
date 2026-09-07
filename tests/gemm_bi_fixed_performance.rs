@@ -9786,6 +9786,98 @@ fn ada_half_auto_v43_harness_expectation_is_literal_and_fail_closed() {
     }
 }
 
+// Exactly the five rows admitted by the frozen production forced21 batch.
+// This is a test oracle, not the production selector or its helper.
+fn expected_ada_finalist_auto_v45(
+    nvrtc: (i32, i32),
+    row: &str,
+    shape: FixedShape,
+    has_bias: bool,
+) -> Option<FixedTile> {
+    match (nvrtc, row, (shape.m, shape.k, shape.n), has_bias) {
+        ((12, 8) | (13, 0) | (13, 2), "tf32", (2048, 2304, 768), false) => {
+            Some(FixedTile::Tf32RnaM128N96S3)
+        }
+        ((13, 2), "f16", (2048, 768, 2304), false) => Some(FixedTile::TcM64N64Sm89S3),
+        ((13, 2), "f16", (2048, 2304, 768), false) => Some(FixedTile::TcM128N64Sm89S2),
+        _ => None,
+    }
+}
+
+fn expected_ada_half_auto_v45(
+    nvrtc: (i32, i32),
+    dtype: WeightDtype,
+    shape: FixedShape,
+    has_bias: bool,
+) -> Option<FixedTile> {
+    expected_ada_finalist_auto_v45(nvrtc, dtype.as_str(), shape, has_bias)
+        .or_else(|| expected_ada_half_auto_v43(nvrtc, dtype, shape, has_bias))
+}
+
+#[test]
+fn ada_finalist_auto_v45_harness_oracle_has_exactly_five_promotions() {
+    let mut promotions = 0;
+    for nvrtc in [(12, 7), (12, 8), (13, 0), (13, 1), (13, 2), (13, 3)] {
+        for row in ["tf32", "f16", "bf16", "f16_f32", "f32_exact_fast"] {
+            for (index, cell) in FIXED_AUTO_VENDOR_EXACT_CELLS.into_iter().enumerate() {
+                for has_bias in [false, true] {
+                    let want = match (nvrtc, row, index, has_bias) {
+                        ((12, 8) | (13, 0) | (13, 2), "tf32", 4, false) => {
+                            Some(FixedTile::Tf32RnaM128N96S3)
+                        }
+                        ((13, 2), "f16", 3, false) => Some(FixedTile::TcM64N64Sm89S3),
+                        ((13, 2), "f16", 4, false) => Some(FixedTile::TcM128N64Sm89S2),
+                        _ => None,
+                    };
+                    assert_eq!(
+                        expected_ada_finalist_auto_v45(nvrtc, row, cell.shape, has_bias),
+                        want
+                    );
+                    promotions += usize::from(want.is_some());
+                    for shape in [
+                        FixedShape {
+                            m: cell.shape.m - 1,
+                            ..cell.shape
+                        },
+                        FixedShape {
+                            k: cell.shape.k - 1,
+                            ..cell.shape
+                        },
+                        FixedShape {
+                            n: cell.shape.n - 1,
+                            ..cell.shape
+                        },
+                    ] {
+                        assert_eq!(
+                            expected_ada_finalist_auto_v45(nvrtc, row, shape, has_bias),
+                            None
+                        );
+                    }
+                }
+            }
+        }
+    }
+    assert_eq!(promotions, 5);
+    for nvrtc in [(12, 8), (13, 0), (13, 2)] {
+        for dtype in [WeightDtype::Bf16, WeightDtype::F16] {
+            for (index, cell) in FIXED_AUTO_VENDOR_EXACT_CELLS.into_iter().enumerate() {
+                for bias in [false, true] {
+                    let old = expected_ada_half_auto_v43(nvrtc, dtype, cell.shape, bias);
+                    let want = match (nvrtc, dtype, index, bias) {
+                        ((13, 2), WeightDtype::F16, 3, false) => Some(FixedTile::TcM64N64Sm89S3),
+                        ((13, 2), WeightDtype::F16, 4, false) => Some(FixedTile::TcM128N64Sm89S2),
+                        _ => old,
+                    };
+                    assert_eq!(
+                        expected_ada_half_auto_v45(nvrtc, dtype, cell.shape, bias),
+                        want
+                    );
+                }
+            }
+        }
+    }
+}
+
 fn fixed_auto_vendor_expected_exact_tile(
     cell: FixedAutoVendorCell,
     device_cc: (u32, u32),
@@ -14361,6 +14453,36 @@ fn fixed_ada_forced_rungs_paired_precision_cublas() {
                     ..auto_ops
                 };
                 let selected = launch_fixed_auto_vendor_custom(&ctx, auto_ops, shape);
+                if device.compute_capability == (8, 9)
+                    && device.multiprocessor_count() == 142
+                    && compiler.nvrtc_library_known
+                {
+                    let expected = expected_ada_finalist_auto_v45(
+                        compiler.nvrtc_version,
+                        row,
+                        shape,
+                        has_bias,
+                    )
+                    .or_else(|| {
+                        (input_dtype == output_dtype && input_dtype.is_half())
+                            .then(|| {
+                                expected_ada_half_auto_v45(
+                                    compiler.nvrtc_version,
+                                    input_dtype,
+                                    shape,
+                                    has_bias,
+                                )
+                            })
+                            .flatten()
+                    });
+                    if let Some(expected) = expected {
+                        assert_eq!(
+                            selected, expected,
+                            "literal AUTO45 {row}/{} bias={has_bias}",
+                            cell.label
+                        );
+                    }
+                }
                 let auto_bits = f32_bits(&ctx, &auto, elements);
                 let auto_raw = fixed_explicit_vendor_raw_bytes(&ctx, &auto);
                 fixed_ada_vendor_launch(
@@ -15020,13 +15142,13 @@ fn fixed_ada_half_forced_direct_pair() {
 
             for &bias_index in &biases {
                 let has_bias = bias_index == 1;
-                let expected_auto = expected_ada_half_auto_v43(
+                let expected_auto = expected_ada_half_auto_v45(
                     compiler.nvrtc_version,
                     input_dtype,
                     shape,
                     has_bias,
                 )
-                .expect("literal revision-43 direct-pair AUTO expectation");
+                .expect("literal revision-45 direct-pair AUTO expectation");
                 let auto_ops = FixedFwdOperands {
                     c: typed(&auto, output_dtype),
                     x: typed(&a, input_dtype),

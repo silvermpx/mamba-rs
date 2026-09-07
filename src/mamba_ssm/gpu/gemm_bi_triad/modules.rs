@@ -10952,6 +10952,8 @@ mod tests {
         "kernels/gemm_bi_fixed/sm89_half_swizzle_layout.cuh",
         "kernels/gemm_bi_fixed/sm89_half_swizzle.cu",
         "kernels/gemm_bi_fixed/sm89_half_s3.cu",
+        "kernels/gemm_bi_fixed/tf32_rna_n96.cu",
+        "kernels/gemm_bi_fixed/sm89_half_n64.cu",
     ];
 
     const SCALAR_FRAGMENTS: &[&str] = &[
@@ -11116,6 +11118,8 @@ mod tests {
                         | "kernels/gemm_bi_fixed/sm89_half_swizzle_layout.cuh"
                         | "kernels/gemm_bi_fixed/sm89_half_swizzle.cu"
                         | "kernels/gemm_bi_fixed/sm89_half_s3.cu"
+                        | "kernels/gemm_bi_fixed/tf32_rna_n96.cu"
+                        | "kernels/gemm_bi_fixed/sm89_half_n64.cu"
                 )
             })
             .collect::<Vec<_>>();
@@ -13594,6 +13598,8 @@ mod tests {
                 "kernels/gemm_bi_fixed/sm89_half_swizzle_layout.cuh",
                 "kernels/gemm_bi_fixed/sm89_half_swizzle.cu",
                 "kernels/gemm_bi_fixed/sm89_half_s3.cu",
+                "kernels/gemm_bi_fixed/tf32_rna_n96.cu",
+                "kernels/gemm_bi_fixed/sm89_half_n64.cu",
             ]
         );
     }

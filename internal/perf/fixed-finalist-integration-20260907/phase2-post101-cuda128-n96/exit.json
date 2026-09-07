@@ -1,0 +1,9 @@
+{
+  "test": 0,
+  "release": 1,
+  "release_error": "RELEASE is not quiet",
+  "drain_release": 0,
+  "executed": 1,
+  "passed": 1,
+  "valid": true
+}

@@ -44,7 +44,7 @@ pub enum FixedTile {
     Tf32M128N128S3,
     /// Fixed-owned 128x128/S3 twin with explicit RNA conversion; narrow Ada AUTO.
     Tf32RnaM128N128S3,
-    /// Ada explicit-RNA 128x96/S3 finalist; force-only in tuning revision 44.
+    /// Ada explicit-RNA 128x96/S3, AUTO at measured E0 rows in revision 45.
     Tf32RnaM128N96S3,
     /// Portable deterministic TF32, 64x64 CTA, two-stage mainloop.
     Tf32M64S2,
@@ -76,9 +76,9 @@ pub enum FixedTile {
     Tc128Sm89Swizzle,
     /// Ada-only three-stage packed/XOR Tc128, independently qualified force route.
     Tc128Sm89S3,
-    /// Ada F16 M64xN64/BK64/S3 finalist; force-only in tuning revision 44.
+    /// Ada F16 M64xN64/BK64/S3, AUTO at measured D0 rows in revision 45.
     TcM64N64Sm89S3,
-    /// Ada F16 M128xN64/BK64/S2 finalist; force-only in tuning revision 44.
+    /// Ada F16 M128xN64/BK64/S2, AUTO at measured E0 rows in revision 45.
     TcM128N64Sm89S2,
     /// 128x256 CTA, 256 threads, 64x64 warp tiles (fragment reuse),
     /// XOR-swizzled dynamic smem 98 304 B. Bit-identical to Tc128.
@@ -568,6 +568,39 @@ fn fixed_select_sm89_half_auto_tile(
     }
 }
 
+// Literal phase-2 rows from the three-toolkit forced qualification. A missing
+// optional holder declines only its own row; the revision-43 selector remains
+// the independent compatibility fallback.
+fn fixed_select_sm89_half_finalist_auto_tile(
+    operands: FixedFwdOperands,
+    shape: FixedShape,
+    device: FixedTileDevice,
+    nvrtc: (i32, i32),
+    nvrtc_library_known: bool,
+    d_available: bool,
+    e_available: bool,
+) -> Option<FixedTile> {
+    if !nvrtc_library_known
+        || device.compute_capability != (8, 9)
+        || device.multiprocessors != 142
+        || nvrtc != (13, 2)
+        || operands.c.dtype != WeightDtype::F16
+        || operands.x.dtype != WeightDtype::F16
+        || operands.w.dtype != WeightDtype::F16
+        || operands.bias_ptr.is_some()
+        || [operands.c.ptr, operands.x.ptr, operands.w.ptr]
+            .into_iter()
+            .any(|ptr| ptr == 0 || !ptr.is_multiple_of(16))
+    {
+        return None;
+    }
+    match (shape.m, shape.k, shape.n) {
+        (2048, 768, 2304) if d_available => Some(FixedTile::TcM64N64Sm89S3),
+        (2048, 2304, 768) if e_available => Some(FixedTile::TcM128N64Sm89S2),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod sm89_pipeline_auto_tests {
     use super::*;
@@ -630,6 +663,166 @@ mod sm89_pipeline_auto_tests {
                 ),
                 Some(S3),
                 "CUDA13.2 {dtype:?} B0/no-bias must select the measured S3 winner"
+            );
+        }
+    }
+
+    #[test]
+    fn sm89_half_auto_v45_promotes_only_measured_cuda132_f16_n64_cells() {
+        let device = FixedTileDevice {
+            multiprocessors: 142,
+            compute_capability: (8, 9),
+        };
+        for (dims, expected) in [
+            ((2048, 768, 2304), FixedTile::TcM64N64Sm89S3),
+            ((2048, 2304, 768), FixedTile::TcM128N64Sm89S2),
+        ] {
+            let shape = FixedShape {
+                m: dims.0,
+                k: dims.1,
+                n: dims.2,
+            };
+            assert_eq!(
+                fixed_select_sm89_half_finalist_auto_tile(
+                    operands(WeightDtype::F16, false),
+                    shape,
+                    device,
+                    (13, 2),
+                    true,
+                    true,
+                    true,
+                ),
+                Some(expected),
+                "CUDA13.2 F16 no-bias {dims:?} must select its measured N64 finalist"
+            );
+        }
+    }
+
+    #[test]
+    fn sm89_half_auto_v45_declines_unmeasured_or_unavailable_finalist_rows() {
+        let device = FixedTileDevice {
+            multiprocessors: 142,
+            compute_capability: (8, 9),
+        };
+        let d = FixedShape {
+            m: 2048,
+            k: 768,
+            n: 2304,
+        };
+        let e = FixedShape {
+            m: 2048,
+            k: 2304,
+            n: 768,
+        };
+        let select_finalist = |operands, shape, device, nvrtc, known, d_available, e_available| {
+            fixed_select_sm89_half_finalist_auto_tile(
+                operands,
+                shape,
+                device,
+                nvrtc,
+                known,
+                d_available,
+                e_available,
+            )
+        };
+        let f16 = operands(WeightDtype::F16, false);
+        for (shape, own_d, own_e, expected) in [
+            (d, true, false, FixedTile::TcM64N64Sm89S3),
+            (e, false, true, FixedTile::TcM128N64Sm89S2),
+        ] {
+            assert_eq!(
+                select_finalist(f16, shape, device, (13, 2), true, own_d, own_e),
+                Some(expected),
+                "the unrelated finalist holder may be absent"
+            );
+            assert_eq!(
+                select_finalist(f16, shape, device, (13, 2), true, !own_d, !own_e),
+                None,
+                "the selected finalist's own holder is required"
+            );
+            assert_eq!(
+                select_finalist(f16, shape, device, (13, 2), false, true, true),
+                None,
+                "unknown NVRTC library must decline"
+            );
+            for nvrtc in [(12, 8), (13, 0), (13, 1), (13, 3)] {
+                assert_eq!(
+                    select_finalist(f16, shape, device, nvrtc, true, true, true),
+                    None,
+                    "unmeasured toolkit {nvrtc:?} must retain the old selector"
+                );
+            }
+            for bad_device in [
+                FixedTileDevice {
+                    compute_capability: (8, 6),
+                    ..device
+                },
+                FixedTileDevice {
+                    multiprocessors: 141,
+                    ..device
+                },
+            ] {
+                assert_eq!(
+                    select_finalist(f16, shape, bad_device, (13, 2), true, true, true),
+                    None
+                );
+            }
+            for bad in [
+                operands(WeightDtype::F16, true),
+                operands(WeightDtype::Bf16, false),
+                FixedFwdOperands {
+                    c: TypedPtr {
+                        dtype: WeightDtype::F32,
+                        ..f16.c
+                    },
+                    ..f16
+                },
+                FixedFwdOperands {
+                    x: TypedPtr {
+                        dtype: WeightDtype::F32,
+                        ..f16.x
+                    },
+                    ..f16
+                },
+                FixedFwdOperands {
+                    w: TypedPtr {
+                        dtype: WeightDtype::F32,
+                        ..f16.w
+                    },
+                    ..f16
+                },
+            ] {
+                assert_eq!(
+                    select_finalist(bad, shape, device, (13, 2), true, true, true),
+                    None
+                );
+            }
+            for field in 0..3 {
+                for ptr in [0, 0x1008] {
+                    let mut bad = f16;
+                    match field {
+                        0 => bad.c.ptr = ptr,
+                        1 => bad.x.ptr = ptr,
+                        _ => bad.w.ptr = ptr,
+                    }
+                    assert_eq!(
+                        select_finalist(bad, shape, device, (13, 2), true, true, true),
+                        None,
+                        "field {field} pointer {ptr:#x} must decline"
+                    );
+                }
+            }
+            assert_eq!(
+                select_finalist(
+                    f16,
+                    FixedShape { m: 2047, ..shape },
+                    device,
+                    (13, 2),
+                    true,
+                    true,
+                    true,
+                ),
+                None
             );
         }
     }
@@ -3504,6 +3697,30 @@ fn fixed_sm89_rna_wide_auto_eligible(
         )
 }
 
+// The N96 finalist replaces the wide RNA route only at the measured E0/no-bias
+// row. If its independently admitted holder is absent, the wide selector below
+// remains available without changing the numeric family.
+fn fixed_sm89_rna_n96_auto_eligible(
+    operands: FixedFwdOperands,
+    shape: FixedShape,
+    device: FixedTileDevice,
+    nvrtc_version: (i32, i32),
+    nvrtc_library_known: bool,
+    admitted: bool,
+    policy: super::context::F32TriadPolicy,
+) -> bool {
+    fixed_sm89_rna_wide_auto_eligible(
+        operands,
+        shape,
+        device,
+        nvrtc_version,
+        nvrtc_library_known,
+        admitted,
+        policy,
+    ) && (shape.m, shape.k, shape.n) == (2048, 2304, 768)
+        && operands.bias_ptr.is_none()
+}
+
 #[cfg(test)]
 mod sm89_rna_auto_tests {
     use super::super::context::F32TriadPolicy;
@@ -3652,6 +3869,73 @@ mod sm89_rna_auto_tests {
             }
         }
     }
+
+    #[test]
+    fn fixed_sm89_rna_n96_auto_v45_is_exactly_e0_all_three_toolkits() {
+        let ptr = |ptr| TypedPtr {
+            ptr,
+            dtype: WeightDtype::F32,
+        };
+        let operands = FixedFwdOperands {
+            c: ptr(0x1000),
+            x: ptr(0x2000),
+            w: ptr(0x3000),
+            bias_ptr: None,
+        };
+        let shape = FixedShape {
+            m: 2048,
+            k: 2304,
+            n: 768,
+        };
+        let device = FixedTileDevice {
+            multiprocessors: 142,
+            compute_capability: (8, 9),
+        };
+        let policy = F32TriadPolicy::AllowDeterministicTf32V1;
+        for nvrtc in [(12, 8), (13, 0), (13, 2)] {
+            assert!(fixed_sm89_rna_n96_auto_eligible(
+                operands, shape, device, nvrtc, true, true, policy,
+            ));
+            assert!(
+                !fixed_sm89_rna_n96_auto_eligible(
+                    operands, shape, device, nvrtc, true, false, policy,
+                ),
+                "missing N96 holder must decline independently"
+            );
+            assert!(
+                fixed_sm89_rna_wide_auto_eligible(
+                    operands, shape, device, nvrtc, true, true, policy,
+                ),
+                "missing N96 must retain the old admitted RNA-wide fallback"
+            );
+        }
+        for nvrtc in [(12, 7), (12, 9), (13, 1), (13, 3)] {
+            assert!(!fixed_sm89_rna_n96_auto_eligible(
+                operands, shape, device, nvrtc, true, true, policy,
+            ));
+        }
+        assert!(!fixed_sm89_rna_n96_auto_eligible(
+            FixedFwdOperands {
+                bias_ptr: Some(0x4000),
+                ..operands
+            },
+            shape,
+            device,
+            (13, 2),
+            true,
+            true,
+            policy,
+        ));
+        assert!(!fixed_sm89_rna_n96_auto_eligible(
+            operands,
+            FixedShape { m: 2047, ..shape },
+            device,
+            (13, 2),
+            true,
+            true,
+            policy,
+        ));
+    }
 }
 
 /// The fixed family's NN forward: `C[M,N] = A[M,K] @ B[K,N] (+ bias)`,
@@ -3686,7 +3970,20 @@ pub fn fixed_forward(
             && n_in.is_multiple_of(4)
             && n_out.is_multiple_of(4);
         let compiler = ctx.kernels.compiler_identity();
-        let tile = if fixed_sm89_rna_wide_auto_eligible(
+        let tile = if fixed_sm89_rna_n96_auto_eligible(
+            operands,
+            shape,
+            FixedTileDevice {
+                multiprocessors: ctx.kernels.multiprocessor_count(),
+                compute_capability: ctx.compute_capability(),
+            },
+            compiler.nvrtc_version,
+            compiler.nvrtc_library_known,
+            ctx.kernels.fixed_sm89_tf32_rna_n96.is_some(),
+            ctx.f32_triad_policy(),
+        ) {
+            FixedTile::Tf32RnaM128N96S3
+        } else if fixed_sm89_rna_wide_auto_eligible(
             operands,
             shape,
             FixedTileDevice {
@@ -3872,19 +4169,31 @@ pub fn fixed_forward(
         c.dtype == WeightDtype::F32 && x.dtype != WeightDtype::F32 && x.dtype == w.dtype;
     let compiler = ctx.kernels.compiler_identity();
     if homogeneous_half {
-        let selected = fixed_select_sm89_half_auto_tile(
+        let device = FixedTileDevice {
+            multiprocessors: ctx.kernels.multiprocessor_count(),
+            compute_capability: ctx.compute_capability(),
+        };
+        let selected = fixed_select_sm89_half_finalist_auto_tile(
             operands,
             shape,
-            FixedTileDevice {
-                multiprocessors: ctx.kernels.multiprocessor_count(),
-                compute_capability: ctx.compute_capability(),
-            },
+            device,
             compiler.nvrtc_version,
             compiler.nvrtc_library_known,
-            ctx.kernels.fixed_sm89_half_pipeline.is_some(),
-            ctx.kernels.fixed_sm89_half_swizzle.is_some(),
-            ctx.kernels.fixed_sm89_half_s3.is_some(),
-        );
+            ctx.kernels.fixed_sm89_half_m64n64_s3_f16.is_some(),
+            ctx.kernels.fixed_sm89_half_m128n64_s2_f16.is_some(),
+        )
+        .or_else(|| {
+            fixed_select_sm89_half_auto_tile(
+                operands,
+                shape,
+                device,
+                compiler.nvrtc_version,
+                compiler.nvrtc_library_known,
+                ctx.kernels.fixed_sm89_half_pipeline.is_some(),
+                ctx.kernels.fixed_sm89_half_swizzle.is_some(),
+                ctx.kernels.fixed_sm89_half_s3.is_some(),
+            )
+        });
         match selected {
             Some(FixedTile::Tc128Sm89Pipeline) => {
                 launch_sm89_half_pipeline(ctx, c.dtype, &args)?;
@@ -3897,6 +4206,14 @@ pub fn fixed_forward(
             Some(FixedTile::Tc128Sm89S3) => {
                 launch_sm89_half_s3(ctx, c.dtype, &args)?;
                 return Ok(FixedTile::Tc128Sm89S3);
+            }
+            Some(FixedTile::TcM64N64Sm89S3) => {
+                launch_sm89_half_n64(ctx, FixedTile::TcM64N64Sm89S3, &args)?;
+                return Ok(FixedTile::TcM64N64Sm89S3);
+            }
+            Some(FixedTile::TcM128N64Sm89S2) => {
+                launch_sm89_half_n64(ctx, FixedTile::TcM128N64Sm89S2, &args)?;
+                return Ok(FixedTile::TcM128N64Sm89S2);
             }
             Some(_) => unreachable!("Ada half AUTO selector returned a foreign tile"),
             None => {}
@@ -6546,7 +6863,7 @@ mod tests {
                 TUNING_TABLE_REVISION,
                 SCHEDULE_REVISION,
             ),
-            (5, 44, 8),
+            (5, 45, 8),
             "the release compiler identity must remain explicitly pinned"
         );
         let mut promoted = Vec::new();

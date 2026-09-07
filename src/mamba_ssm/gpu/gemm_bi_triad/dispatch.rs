@@ -10120,8 +10120,8 @@ mod tf32_tests {
 
     #[test]
     fn tf32_tn_underfill_qualification_uses_current_tuning_revision() {
-        assert_eq!(TUNING_TABLE_REVISION, 44);
-        assert_eq!(F32_TF32_TUNING_REVISION, 44);
+        assert_eq!(TUNING_TABLE_REVISION, 45);
+        assert_eq!(F32_TF32_TUNING_REVISION, 45);
     }
 
     #[test]

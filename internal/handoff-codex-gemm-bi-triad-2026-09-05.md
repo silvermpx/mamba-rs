@@ -9,6 +9,24 @@ the dated progress log, 900 lines), then `internal/agent-operational-rules.md`
 
 ## 1. What the work is
 
+Fixed AUTO45 assembly (2026-09-07) is now qualified: exact five rows are
+connected to public AUTO and all five once101 runs pass against the replaced
+route. TF32 E0 N96 on12.8/13.0/13.2: worst own p50
+0.773862/0.773759/0.852935, Fast p951.108774/1.108750/1.114884.
+F16 D0/E0 on13.2: own p500.912581/0.970985, Fast p951.068794/0.984772.
+Thus E wins Fast, N96/D still lose Fast, and inference as a whole remains
+open. No exactF32/BF16 or other-cell fresh result is implied. All three
+matching builds, corrected lib652/0/46, actualAUTO N96 corpus224/toolkit,
+half actualAUTO/holders and retained13.2 Triad cohort tests pass. Root and
+independent reviewer replay20 records/2020 raw triplets, sources/binaries,
+physical graphs and unchanged compiled module cache hashes. Numerical ABI5,
+schedule8 and CUDA bodies unchanged from phase1; tuning45 requires recapture.
+See internal/perf/fixed-finalist-integration-20260907/phase2-README.md.
+Lower-toolkit half D/E keep old AUTO; no production kernels are deleted.
+This completes the assembled finalist batch: proceed to the bounded Triad
+physical profile, not another unchanged Fixed sweep. The older checkpoints
+below are historical, not pending work or new full-survey evidence.
+
 Fixed finalist integration phase1 (2026-09-07) is now qualified on all three
 CUDA versions. Three independent forced holders (TF32 RNA N96, F16 D N64/S3,
 F16 E N64/S2) pass resource/ABI/bit/prefix/view checks; 18/18 focused functional

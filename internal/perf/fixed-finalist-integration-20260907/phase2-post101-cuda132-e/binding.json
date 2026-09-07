@@ -1,0 +1,33 @@
+{
+  "generation": "finalistphase2auto45",
+  "toolkit": "13.2",
+  "sources": {
+    "kernels/gemm_bi_fixed/sm89_half_n64.cu": "5a4c85184fb4a0263ae03cbe7f2b5e8f954b32ce3138012ad8505274d3769681",
+    "kernels/gemm_bi_fixed/tf32_rna_n96.cu": "966372d0e8cb89c1ed32ceda45e6fa3e1e3df40ae42e8cbbd7aaccbdf96b6215",
+    "src/mamba_ssm/gpu/gemm_bi_fixed.rs": "fdc5affce1b3b9bcb181dd7245243ef472502056c1df9d2a8c64a8a44f161f46",
+    "src/mamba_ssm/gpu/gemm_bi_triad/modules.rs": "2aab1470061486dbb5df1958133a119cacaf7d78012223dbf8fcc433b14c006f",
+    "src/mamba_ssm/gpu/gemm_bi_triad/dispatch.rs": "6bd16753f21ac01d354242f96b5bad18f3a502a12a0d55afdd18b8e8e03f86c6",
+    "src/mamba_ssm/gpu/gemm_bi_triad/launch.rs": "fd07071d738d50055fdcec9575f2eb8589ab1a23c4c67526b7aa95c857dc1bc6",
+    "src/mamba_ssm/gpu/kernel_identity.rs": "eedee39202016dd6e9f2314b2e43d8fd3c3a03110a9388115ee65d1a2da30f5d",
+    "src/mamba_ssm/gpu/kernels.rs": "9aae153beba6976273064385bef3d438c83ee826986459844b9a46f3948dc138",
+    "tests/gemm_bi_fixed_performance.rs": "29456538e401f9dbd038258b1794b5af25eacdea923a2dab4ef497a4b418ae6d"
+  },
+  "binary": {
+    "path": "/root/target-ada-exact-toolkit-auto-finalistphase2auto45-cuda132-20260907/release/deps/gemm_bi_fixed_performance-46090335b71731a6",
+    "sha256": "424401b2ddd64b91a9644c4ce13212144fe37cff9696490bd1003f49a3a041e7"
+  },
+  "cache_artifacts": {
+    "/root/mamba-kcache-ada-exact-toolkit-auto-finalistphase2auto45-cuda132-20260907/mamba-kernels-v1-3809af034718aa08dfdfc1b6baeb407715436dc7db87ef39825b033c2fd72541.bin": {
+      "sha256": "5851ebd49595a0b2ef665073289e52f903eec3266deadfc5ad5d9f2096ce6d16",
+      "bytes": 13437599
+    },
+    "/root/mamba-kcache-ada-exact-toolkit-auto-finalistphase2auto45-cuda132-20260907/mamba-kernels-v1-822ebf0dda7dcf9c4f5c5a2213884dde42ab45f5cf238479a81856042c302b7c.bin": {
+      "sha256": "5035921fc8e078e5454c9c5392f9e9ee6ca6a3de54c1e08cb54bba432fa37546",
+      "bytes": 2395145
+    },
+    "/root/mamba-kcache-ada-exact-toolkit-auto-finalistphase2auto45-cuda132-20260907/mamba-kernels-v1-e4f76515e441adc28862775000fce218e2d2cca61b47ce484e15eb1144c40fb3.bin": {
+      "sha256": "f0be052fc160b9e5f4b6a897878781327968c0015d551128415a94b85e6fc0aa",
+      "bytes": 7248389
+    }
+  }
+}

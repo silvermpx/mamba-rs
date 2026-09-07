@@ -1,0 +1,16 @@
+{
+  "toolkit": "13.0",
+  "generation": "finalistphase2auto45",
+  "modules_sha256": "2aab1470061486dbb5df1958133a119cacaf7d78012223dbf8fcc433b14c006f",
+  "delta_scope": "cfg(test)-only: six new path entries across FIXED_FRAGMENTS, compute_120 exclusion, and SM89 suffix expectation; runtime integration binaries retained",
+  "command": [
+    "cargo",
+    "test",
+    "--release",
+    "--features",
+    "cuda,cudarc/cuda-13000",
+    "--lib",
+    "--",
+    "--test-threads=1"
+  ]
+}

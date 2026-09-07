@@ -1,0 +1,36 @@
+{
+  "schema": "MambaBiFixedFinalistExecutionCensusV1",
+  "toolkit": "12.8",
+  "valid_exact_tests": {
+    "performance-oracle": {
+      "running": 1,
+      "passed": 1
+    },
+    "holders": {
+      "running": 1,
+      "passed": 1
+    },
+    "n96-auto": {
+      "running": 1,
+      "passed": 1
+    },
+    "half-auto": {
+      "running": 1,
+      "passed": 1
+    }
+  },
+  "invalid_attempts": {
+    "cohort-revision-host": {
+      "running": 0,
+      "counted": false
+    }
+  },
+  "full_lib": {
+    "named_cohort_revision_pass": true,
+    "result": {
+      "passed": 652,
+      "failed": 0,
+      "ignored": 46
+    }
+  }
+}

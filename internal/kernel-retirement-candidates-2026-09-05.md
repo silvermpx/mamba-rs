@@ -4,6 +4,30 @@ Owner instruction 2026-09-05: immediately route verified winners, stop choosing
 the beaten candidate in its verified cell, and retain an explicit deletion
 list. No source has been deleted by this ledger. Times below are microseconds.
 
+## Current Fixed assembly checkpoint — 2026-09-07
+
+Phase1 commit `0a95a00f` qualifies three independent forced routes on
+CUDA12.8/13.0/13.2: RNA TF32 M128N96/S3, F16 M64N64/S3 (D), and
+F16 M128N64/S2 (E). AUTO45 now connects exactly five rows: N96 E0/no-bias
+on all three toolkits, F16 D0/E0/no-bias only13.2. ActualAUTO bit/graph gates
+and all five once101 comparisons pass against their replaced routes.
+See `internal/perf/fixed-finalist-integration-20260907/phase2-README.md`.
+Old RNA N128 is no longer selected for these three exact aligned E0 rows;
+old Swizzle/Pipeline are no longer selected for the two exact13.2 F16 rows
+while their corresponding finalist holders are live. Lower-toolkit D/E
+remain unchanged because their new candidates lost the admission test.
+
+- Keep all three production finalists: each has a measured successful row.
+  D/E losses on12.8/13.0 do not make the kernels deletion candidates.
+- Keep RNA N128, Pipeline, Swizzle and generic rungs: other hot cells, bias,
+  toolkit-specific preferences and independent-holder fallbacks still use them.
+- Keep rejected W4 TF32, compact B0 half and exact-F32 T256 experiments separate
+  from production. Their tests/source/evidence remain archival cleanup
+  candidates, not active AUTO implementations. T256 stopped at local-memory
+  resources before timing; do not relabel it a measured performance loss.
+- No production CUDA deletion is authorized by this batch. Removal requires
+  a complete remaining-use audit, including the unavailable architectures.
+
 ## Rules
 
 `screened` means standalone only; `production-qualified` means actual NVRTC

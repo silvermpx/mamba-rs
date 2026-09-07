@@ -1,0 +1,14 @@
+{
+  "performance-oracle": 0,
+  "cohort-revision-host": 0,
+  "holders": 0,
+  "n96-auto": 0,
+  "half-auto": 0,
+  "release": 1,
+  "release_error": "RELEASE is not quiet",
+  "drain_release": 0,
+  "cohort-revision-host_valid": false,
+  "cohort-revision-host_reason": "exact filter matched zero tests in integration binary",
+  "cohort-revision-covered_by": "phase2-lib-repair-cuda128/lib.log named PASS",
+  "qualification_pass": true
+}
