@@ -1,0 +1,28 @@
+COMMAND ["/usr/local/cuda-13.2/bin/ncu", "--version"]
+COMMAND_EXIT ncu-version.log 0
+COMMAND ["/usr/local/cuda-13.2/bin/ncu", "--help"]
+COMMAND_EXIT ncu-help.log 0
+COMMAND ["/usr/bin/nvidia-smi", "--query-gpu=uuid,name,compute_cap,driver_version,pstate,clocks.sm,clocks.mem,temperature.gpu,power.draw,power.limit,utilization.gpu,utilization.memory,memory.used", "--format=csv,noheader"]
+COMMAND_EXIT environment-pre.log 0
+{"phase": "PRE", "utc": "2026-09-07T11:42:00Z", "gpu": "GPU-d1edd7be-e88d-aed6-047d-622163306f0e, NVIDIA RTX 6000 Ada Generation, 8.9, 0 %, 0 %\n", "gpu_stderr": "", "gpu_exit": 0, "apps": "", "apps_stderr": "", "apps_exit": 0}
+COMMAND ["/root/target-ada-exact-toolkit-auto-final2-cuda132-20260907/release/deps/gemm_bi_fixed_performance-46090335b71731a6", "fixed_ada_forced_rungs_paired_precision_cublas", "--exact", "--ignored", "--nocapture", "--test-threads=1"]
+COMMAND_EXIT unprofiled-baseline.log 0
+COMMAND ["/usr/local/cuda-13.2/bin/ncu", "--config-file", "off", "--target-processes", "application-only", "--kernel-name-base", "mangled", "--kernel-name", "regex:^gemm_bi_nn_fixed_sm89_f32_n64_copyplan_v1$", "--launch-skip", "130", "--launch-count", "1", "--replay-mode", "kernel", "--clock-control", "none", "--cache-control", "none", "--pipeline-boost-state", "dynamic", "--section", "LaunchStats", "--section", "Occupancy", "--section", "SpeedOfLight", "--section", "ComputeWorkloadAnalysis", "--section", "SchedulerStats", "--section", "WarpStateStats", "--section", "MemoryWorkloadAnalysis", "--section", "InstructionStats", "--section", "SourceCounters", "--metrics", "dram__bytes.sum,dram__bytes_read.sum,dram__bytes_write.sum,lts__t_sectors.sum,lts__t_sectors_lookup_hit.sum,lts__t_sectors_lookup_miss.sum,l1tex__t_bytes_pipe_lsu_mem_global_op_ld.sum,l1tex__t_bytes_pipe_lsu_mem_global_op_st.sum", "--export", "/root/evidence-ada-f32-b0-ncu-20260907/run2/copyplan", "/root/target-ada-exact-toolkit-auto-final2-cuda132-20260907/release/deps/gemm_bi_fixed_performance-46090335b71731a6", "fixed_ada_forced_rungs_paired_precision_cublas", "--exact", "--ignored", "--nocapture", "--test-threads=1"]
+COMMAND_EXIT ncu-copyplan.log 0
+COMMAND ["/usr/local/cuda-13.2/bin/ncu", "--config-file", "off", "--import", "/root/evidence-ada-f32-b0-ncu-20260907/run2/copyplan.ncu-rep", "--page", "details", "--csv"]
+COMMAND_EXIT copyplan-details.csv 0
+COMMAND ["/usr/local/cuda-13.2/bin/ncu", "--config-file", "off", "--import", "/root/evidence-ada-f32-b0-ncu-20260907/run2/copyplan.ncu-rep", "--page", "raw", "--csv"]
+COMMAND_EXIT copyplan-raw.csv 0
+COMMAND ["/usr/local/cuda-13.2/bin/ncu", "--config-file", "off", "--import", "/root/evidence-ada-f32-b0-ncu-20260907/run2/copyplan.ncu-rep", "--page", "source", "--print-source", "sass", "--csv"]
+COMMAND_EXIT copyplan-sass.csv 0
+COMMAND ["/usr/local/cuda-13.2/bin/ncu", "--config-file", "off", "--import", "/root/evidence-ada-f32-b0-ncu-20260907/run2/copyplan.ncu-rep", "--page", "session"]
+COMMAND_EXIT copyplan-session.txt 0
+Traceback (most recent call last):
+  File "/root/evidence-ada-f32-b0-ncu-20260907/profile.py", line 353, in <module>
+    main()
+  File "/root/evidence-ada-f32-b0-ncu-20260907/profile.py", line 316, in main
+    captures = {"copyplan": capture("copyplan", CUSTOM_SYMBOL, binary, ncu, context, commands)}
+                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/root/evidence-ada-f32-b0-ncu-20260907/profile.py", line 187, in capture
+    raise RuntimeError(f"unexpected {label} raw row count {len(rows)}")
+RuntimeError: unexpected copyplan raw row count 2

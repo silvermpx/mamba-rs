@@ -1,0 +1,10 @@
+Traceback (most recent call last):
+  File "/root/evidence-ada-f32-b0-ncu-20260907/profile.py", line 319, in <module>
+    main()
+  File "/root/evidence-ada-f32-b0-ncu-20260907/profile.py", line 206, in main
+    task8.verify_binding(binding, context)
+  File "/root/evidence-ada-exact-toolkit-auto-20260907/run.py", line 162, in verify_binding
+    require(binding["inputs"] == source_inputs(), "source/build inputs changed")
+  File "/root/evidence-ada-exact-toolkit-auto-20260907/run.py", line 37, in require
+    raise ValueError(message)
+ValueError: source/build inputs changed

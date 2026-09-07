@@ -9,6 +9,22 @@ the dated progress log, 900 lines), then `internal/agent-operational-rules.md`
 
 ## 1. What the work is
 
+Exact-F32 B0 profile follow-up (2026-09-07): current frozen AUTO44 CopyPlan
+has no excessive shared-memory wavefronts in the measured generated SASS;
+258.63M of302.46M executed warp instructions are scalar FFMA. One-window
+unprofiled diagnostic is418.05/418.24us forced versus191.92/192.84us actual
+cuBLAS FAST_TF32, not an admission run. Fast and CopyPlan physical symbols,
+resources, clocks, raw counters, the failed parser attempt and successful
+Fast-only continuation are retained in
+internal/perf/ada-f32-b0-ncu-20260907/report.md. Do not repeat the captures or
+implement the earlier unsupported A-bank-XOR idea. One test-only existing
+CopyPlan-T256 transplant tests occupancy without changing arithmetic; it is
+not yet an Ada winner. In parallel, the three retained TF32/F16 finalists
+are being assembled into forced production routes using the existing test
+harnesses, with all-three-toolkit qualification before literal AUTO changes.
+The active execution brief/ownership is in the existing SDD ledger; keep
+working autonomously without a terminal status pause while useful work remains.
+
 Half discovery follow-up (2026-09-07): one CUDA13.2 batch leaves two F16
 short-screen survivors, D0 M64N64/BK64/S3 and E0 M128N64/BK64/S2. Worst-stratum
 candidate/current-AUTO median/p95 is0.957428/0.959236 and0.966673/0.970062;

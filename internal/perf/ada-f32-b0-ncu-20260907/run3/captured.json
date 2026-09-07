@@ -1,0 +1,32 @@
+{
+  "copyplan": {
+    "Kernel Name": "gemm_bi_nn_fixed_sm89_f32_n64_copyplan_v1",
+    "Grid Size": "(2628, 1, 1)",
+    "Block Size": "(128, 1, 1)",
+    "launch__grid_dim_x": "2628",
+    "launch__grid_dim_y": "1",
+    "launch__grid_dim_z": "1",
+    "launch__block_dim_x": "128",
+    "launch__block_dim_y": "1",
+    "launch__block_dim_z": "1",
+    "launch__registers_per_thread": "135",
+    "launch__shared_mem_per_block_static": "32.768000",
+    "launch__shared_mem_per_block_dynamic": "0",
+    "gpu__time_duration.sum": "438.368000"
+  },
+  "fast": {
+    "Kernel Name": "void Kernel2<cutlass_80_tensorop_s1688gemm_256x128_16x3_nn_align4>(Params)",
+    "Grid Size": "(296, 2, 1)",
+    "Block Size": "(256, 1, 1)",
+    "launch__grid_dim_x": "296",
+    "launch__grid_dim_y": "2",
+    "launch__grid_dim_z": "1",
+    "launch__block_dim_x": "256",
+    "launch__block_dim_y": "1",
+    "launch__block_dim_z": "1",
+    "launch__registers_per_thread": "220",
+    "launch__shared_mem_per_block_static": "0",
+    "launch__shared_mem_per_block_dynamic": "73.728000",
+    "gpu__time_duration.sum": "192.704000"
+  }
+}
