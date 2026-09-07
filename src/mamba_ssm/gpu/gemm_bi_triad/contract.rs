@@ -73,6 +73,7 @@ pub const F32_TF32_TUNING_REVISION: u16 = TUNING_TABLE_REVISION;
 pub const TF32_TENSOR_MAP_REVISION: u16 = 1;
 pub const TF32_SCHEDULE_REVISION: u16 = SCHEDULE_REVISION;
 pub const TF32_PORTABLE_SCHEDULE_REVISION: u16 = SCHEDULE_REVISION;
+pub const SM89_FINALIST_TUNING_REVISION: u16 = 1;
 pub const ZERO_REDUCTION_MAP_REVISION: u16 = 1;
 pub const ZERO_REDUCTION_DIGEST_DOMAIN: &[u8] = b"tf32-zero-reduction-maps.v1";
 pub const SCALAR_BIG_NT_DYNAMIC_SHARED_BYTES: u32 = 33_376;
@@ -797,6 +798,7 @@ pub(super) fn append_tf32_route_digest(
             .required(b"tile", &[route.tile.digest_code()])
             .required(b"kvec", &[u8::from(route.kvec)])
             .required(b"splits", &[route.splits]),
+        Tf32PhysicalRoute::Sm89MmaTf32Compact8V1 => digest.required(b"route-family", &[10]),
     }
 }
 
@@ -1222,7 +1224,8 @@ pub(super) fn tf32_tensor_map_plan(
         Tf32PhysicalRoute::MmaTf32RnaV1(_)
         | Tf32PhysicalRoute::MmaTf32RnaSplitK2V1(_)
         | Tf32PhysicalRoute::MmaTf32RnaSplitK4V1(_)
-        | Tf32PhysicalRoute::MmaTf32RnaSplitK8V1(_) => {
+        | Tf32PhysicalRoute::MmaTf32RnaSplitK8V1(_)
+        | Tf32PhysicalRoute::Sm89MmaTf32Compact8V1 => {
             return Err("portable TF32 does not use tensor maps".into());
         }
     };
@@ -1737,6 +1740,9 @@ pub enum Tf32PhysicalRoute {
     /// Exact F32 through the scalar FMA chain, fed by TMA; lives in the
     /// SM120 module next to the TF32 routes but never rounds an operand.
     Sm120TmaFmaExactV1(Sm120FmaRoute),
+    /// The isolated Ada NT finalist. It retains the portable RNA/MMA
+    /// numerical contract, but owns a distinct exact-SM89 module and epoch.
+    Sm89MmaTf32Compact8V1,
 }
 
 impl Tf32PhysicalRoute {
@@ -1751,6 +1757,7 @@ impl Tf32PhysicalRoute {
             Self::Sm120TmaMmaTf32RnaV1(_)
             | Self::Sm120TmaMmaTf32RnaStreamKV1(_)
             | Self::Sm120TmaFmaExactV1(_) => ModuleKind::TriadSm120,
+            Self::Sm89MmaTf32Compact8V1 => ModuleKind::TriadSm89Finalist,
         }
     }
 
@@ -1801,6 +1808,7 @@ pub struct Tf32QualifiedModule {
 pub struct F32TriadAvailability {
     pub portable: Option<Tf32QualifiedModule>,
     pub specialized: Option<Tf32QualifiedModule>,
+    pub finalist: Option<Tf32QualifiedModule>,
 }
 
 /// Kernel parameters of the exact-F32 SM120 routes: kernel-side (M, N, K),
@@ -2625,6 +2633,24 @@ macro_rules! sm120_tf32_specs {
 const SM80_TF32_NN: [Tf32KernelSpec; 6] = portable_tf32_specs!(ResolvedGemmOp::Nn, "nn");
 const SM80_TF32_TN: [Tf32KernelSpec; 6] = portable_tf32_specs!(ResolvedGemmOp::Tn, "tn");
 const SM80_TF32_NT: [Tf32KernelSpec; 6] = portable_tf32_specs!(ResolvedGemmOp::Nt, "nt");
+
+pub const SM89_FINALIST_TF32_ROUTE_SPECS: [Tf32KernelSpec; 1] = [Tf32KernelSpec {
+    op: ResolvedGemmOp::Nt,
+    route: Tf32PhysicalRoute::Sm89MmaTf32Compact8V1,
+    symbol: super::sm89_finalist_source::SM89_FINALIST_SYMBOL,
+    module_kind: ModuleKind::TriadSm89Finalist,
+    instruction_family: ResolvedInstructionFamily::MmaSync,
+    instruction_shape: ResolvedInstructionShape { m: 16, n: 8, k: 8 },
+    operand_conversion: ResolvedOperandConversion::RegisterCvtRnaTf32F32V1,
+    tile: (128, 64),
+    bk: 32,
+    map_bk: 32,
+    stages: 2,
+    threads: 256,
+    dynamic_shared_bytes: 49_152,
+    tensor_map_revision: 0,
+    schedule_revision: TF32_SCHEDULE_REVISION,
+}];
 /// The portable extension fragment's TF32 routes: composed into the module
 /// for every sm80-family target except CC 12.x, so they sit outside
 /// [`SM80_TF32_ROUTE_SPECS`] and join it through [`tf32_route_specs_for`].
@@ -2988,6 +3014,7 @@ pub const SM120_TF32_ROUTE_SPECS: [Tf32KernelSpec; 30] = [
 pub fn tf32_route_specs(module_kind: ModuleKind) -> &'static [Tf32KernelSpec] {
     match module_kind {
         ModuleKind::TriadSm80 => &SM80_TF32_ROUTE_SPECS,
+        ModuleKind::TriadSm89Finalist => &SM89_FINALIST_TF32_ROUTE_SPECS,
         ModuleKind::TriadSm90a => &SM90A_TF32_ROUTE_SPECS,
         ModuleKind::TriadSm100 => &SM100_TF32_ROUTE_SPECS,
         ModuleKind::TriadSm120 => &SM120_TF32_ROUTE_SPECS,
@@ -7127,6 +7154,7 @@ mod tests {
     fn tf32_route_spec_inventories_are_exact_and_unique() {
         let expected = [
             (ModuleKind::TriadSm80, 18, [6, 6, 6]),
+            (ModuleKind::TriadSm89Finalist, 1, [0, 0, 1]),
             (ModuleKind::TriadSm90a, 6, [2, 2, 2]),
             (ModuleKind::TriadSm100, 36, [12, 12, 12]),
             (ModuleKind::TriadSm120, 30, [9, 10, 11]),
@@ -7154,6 +7182,7 @@ mod tests {
                     | super::Tf32PhysicalRoute::MmaTf32RnaSplitK2V1(_)
                     | super::Tf32PhysicalRoute::MmaTf32RnaSplitK4V1(_)
                     | super::Tf32PhysicalRoute::MmaTf32RnaSplitK8V1(_)
+                    | super::Tf32PhysicalRoute::Sm89MmaTf32Compact8V1
                     | super::Tf32PhysicalRoute::Sm120TmaMmaTf32RnaV1(_)
                     | super::Tf32PhysicalRoute::Sm120TmaMmaTf32RnaStreamKV1(_) => {
                         assert_eq!(spec.instruction_family, ResolvedInstructionFamily::MmaSync);
@@ -7205,6 +7234,12 @@ mod tests {
             }
         }
         assert_eq!(all_symbols.len(), expected_total);
+        for op in [ResolvedGemmOp::Nn, ResolvedGemmOp::Tn] {
+            assert!(
+                tf32_kernel_spec(op, super::Tf32PhysicalRoute::Sm89MmaTf32Compact8V1).is_err(),
+                "the NT-only finalist unexpectedly accepts {op:?}"
+            );
+        }
         assert!(tf32_route_specs(ModuleKind::Fixed).is_empty());
         assert!(tf32_route_specs(ModuleKind::TriadScalar).is_empty());
         assert!(tf32_route_specs(ModuleKind::Mamba3Combined).is_empty());

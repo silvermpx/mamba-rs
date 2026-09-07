@@ -4057,6 +4057,10 @@ fn qualify_primary_route(
     .map_err(|_| format!("{} reports negative local memory", spec.symbol))?;
     let compiler = match spec.module_kind {
         ModuleKind::TriadSm80 => ctx.kernels.triad_sm80_compiler_identity(),
+        ModuleKind::TriadSm89Finalist => ctx
+            .kernels
+            .triad_sm89_finalist_compiler_identity()
+            .ok_or_else(|| format!("{} has no finalist compiler identity", spec.symbol))?,
         ModuleKind::TriadSm90a | ModuleKind::TriadSm100 | ModuleKind::TriadSm120 => ctx
             .kernels
             .specialized_compiler_identity()

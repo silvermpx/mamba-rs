@@ -603,6 +603,7 @@ pub enum ModuleKind {
     TriadSm100 = 5,
     TriadSm120 = 6,
     Mamba3Combined = 7,
+    TriadSm89Finalist = 8,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -639,7 +640,10 @@ pub fn build_artifact_set(artifacts: &[ArtifactIdentity]) -> Result<ArtifactSetI
     if let Some(artifact) = specialized
         && !matches!(
             artifact.module_kind,
-            ModuleKind::TriadSm90a | ModuleKind::TriadSm100 | ModuleKind::TriadSm120
+            ModuleKind::TriadSm89Finalist
+                | ModuleKind::TriadSm90a
+                | ModuleKind::TriadSm100
+                | ModuleKind::TriadSm120
         )
     {
         return Err("fourth artifact must be a supported specialized triad module".into());
@@ -2881,6 +2885,7 @@ pub enum PhysicalGemmBackend {
     ScalarFmaSplitKF32ReduceV1 = 18,
     Sm120TmaMmaTf32RnaStreamKV1 = 19,
     Sm120TmaFmaExactV1 = 20,
+    Sm89MmaTf32Compact8V1 = 21,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -4978,6 +4983,50 @@ mod physical_launch_tests {
         current
             .ensure_current(current, "current Fixed AUTO graph replay")
             .unwrap();
+    }
+
+    #[test]
+    fn ada_finalist_is_an_optional_fourth_artifact_without_changing_three_module_identity() {
+        let base = physical_context().artifacts;
+        let unchanged = build_artifact_set(&[base.fixed, base.triad_scalar, base.triad_sm80])
+            .expect("three-module artifact set");
+        assert_eq!(unchanged, base);
+        let finalist = ArtifactIdentity {
+            module_kind: ModuleKind::TriadSm89Finalist,
+            artifact_kind: ArtifactKind::Ptx,
+            compile_key: [23; 32],
+            artifact_digest: [24; 32],
+        };
+        let with_finalist =
+            build_artifact_set(&[base.fixed, base.triad_scalar, base.triad_sm80, finalist])
+                .expect("Ada finalist fourth artifact");
+        assert_eq!(with_finalist.module_count, 4);
+        assert_eq!(with_finalist.specialized, Some(finalist));
+        assert_ne!(with_finalist.ordered_digest, base.ordered_digest);
+        assert_eq!(with_finalist.fixed, base.fixed);
+        assert_eq!(with_finalist.triad_scalar, base.triad_scalar);
+        assert_eq!(with_finalist.triad_sm80, base.triad_sm80);
+        let foreign = ArtifactIdentity {
+            module_kind: ModuleKind::Mamba3Combined,
+            ..finalist
+        };
+        assert!(
+            build_artifact_set(&[base.fixed, base.triad_scalar, base.triad_sm80, foreign]).is_err(),
+            "an unrelated module occupied the optional triad artifact slot"
+        );
+        assert!(
+            build_artifact_set(&[
+                base.fixed,
+                base.triad_scalar,
+                base.triad_sm80,
+                finalist,
+                foreign,
+            ])
+            .is_err(),
+            "the artifact set accepted two optional modules"
+        );
+        assert_eq!(ModuleKind::TriadSm89Finalist as u8, 8);
+        assert_eq!(PhysicalGemmBackend::Sm89MmaTf32Compact8V1 as u8, 21);
     }
 
     #[test]

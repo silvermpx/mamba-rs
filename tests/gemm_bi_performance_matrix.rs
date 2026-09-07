@@ -2923,6 +2923,7 @@ fn module_kind_name(kind: ModuleKind) -> &'static str {
         ModuleKind::Fixed => "fixed",
         ModuleKind::TriadScalar => "triad_scalar",
         ModuleKind::TriadSm80 => "triad_sm80",
+        ModuleKind::TriadSm89Finalist => "triad_sm89_finalist",
         ModuleKind::TriadSm90a => "triad_sm90a",
         ModuleKind::TriadSm100 => "triad_sm100",
         ModuleKind::TriadSm120 => "triad_sm120",

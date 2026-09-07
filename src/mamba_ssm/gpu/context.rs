@@ -1156,6 +1156,12 @@ impl GpuCtx {
                 self.kernels.artifact_set_identity().triad_sm80,
                 self.kernels.triad_sm80_compiler_identity(),
             )),
+            ModuleKind::TriadSm89Finalist => self
+                .kernels
+                .artifact_set_identity()
+                .specialized
+                .filter(|artifact| artifact.module_kind == module_kind)
+                .zip(self.kernels.triad_sm89_finalist_compiler_identity()),
             ModuleKind::TriadSm90a | ModuleKind::TriadSm100 | ModuleKind::TriadSm120 => self
                 .kernels
                 .artifact_set_identity()
@@ -1173,6 +1179,7 @@ impl GpuCtx {
         let availability = self.kernels.f32_triad_availability();
         match module_kind {
             ModuleKind::TriadSm80 => availability.portable,
+            ModuleKind::TriadSm89Finalist => availability.finalist,
             ModuleKind::TriadSm90a | ModuleKind::TriadSm100 | ModuleKind::TriadSm120 => {
                 availability.specialized
             }
@@ -1238,6 +1245,7 @@ impl GpuCtx {
             | PhysicalGemmBackend::MmaTf32RnaSplitK2V1
             | PhysicalGemmBackend::MmaTf32RnaSplitK4V1
             | PhysicalGemmBackend::MmaTf32RnaSplitK8V1 => ModuleKind::TriadSm80,
+            PhysicalGemmBackend::Sm89MmaTf32Compact8V1 => ModuleKind::TriadSm89Finalist,
             PhysicalGemmBackend::Sm90aWgmmaV1 | PhysicalGemmBackend::Sm90aWgmmaTf32TmaV1 => {
                 ModuleKind::TriadSm90a
             }
@@ -1296,7 +1304,8 @@ impl GpuCtx {
                 ));
             }
         }
-        if route.tuning_table_revision != context.tuning_table_revision
+        if route.tuning_table_revision
+            != expected_route_tuning_revision(route.backend, context.tuning_table_revision)
             || route.schedule_revision
                 != expected_route_schedule_revision(route.backend, context.schedule_set_revision)
         {
@@ -1610,6 +1619,14 @@ fn expected_route_schedule_revision(backend: PhysicalGemmBackend, generic: u16) 
     }
 }
 
+fn expected_route_tuning_revision(backend: PhysicalGemmBackend, generic: u16) -> u16 {
+    if backend == PhysicalGemmBackend::Sm89MmaTf32Compact8V1 {
+        super::gemm_bi_triad::SM89_FINALIST_TUNING_REVISION
+    } else {
+        generic
+    }
+}
+
 const fn scalar_backend_supports_logical_f32(backend: PhysicalGemmBackend) -> bool {
     matches!(
         backend,
@@ -1626,8 +1643,9 @@ const fn scalar_backend_supports_logical_f32(backend: PhysicalGemmBackend) -> bo
 mod tests {
     use super::{
         BiGemmFamily, F32TriadPolicy, bi_gemm_family_from_result, expected_route_schedule_revision,
-        f32_triad_policy_from_result, m1_mixed_graph_max_dim, scalar_backend_supports_logical_f32,
-        tier_flag_from_result, validate_multiprocessor_identity,
+        expected_route_tuning_revision, f32_triad_policy_from_result, m1_mixed_graph_max_dim,
+        scalar_backend_supports_logical_f32, tier_flag_from_result,
+        validate_multiprocessor_identity,
     };
     use crate::config::ScanMode;
     use crate::mamba_ssm::gpu::forward::GpuMambaDims;
@@ -1680,6 +1698,23 @@ mod tests {
             ),
             SCHEDULE_REVISION
         );
+    }
+
+    #[test]
+    fn sm89_finalist_routes_use_their_private_tuning_revision() {
+        let generic = super::super::gemm_bi_triad::F32_TF32_TUNING_REVISION;
+        let finalist =
+            expected_route_tuning_revision(PhysicalGemmBackend::Sm89MmaTf32Compact8V1, generic);
+        assert_eq!(
+            finalist,
+            super::super::gemm_bi_triad::SM89_FINALIST_TUNING_REVISION
+        );
+        assert_ne!(finalist, 0);
+        assert_ne!(finalist, 2);
+
+        let portable = expected_route_tuning_revision(PhysicalGemmBackend::MmaTf32RnaV1, generic);
+        assert_eq!(portable, 45);
+        assert_ne!(portable, finalist);
     }
 
     #[test]

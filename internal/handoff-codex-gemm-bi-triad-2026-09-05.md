@@ -9,6 +9,25 @@ the dated progress log, 900 lines), then `internal/agent-operational-rules.md`
 
 ## 1. What the work is
 
+Source-integration checkpoint2026-09-07: compact8/S2 production source is
+isolated and committed as04c71ebe, independently reviewed with no findings.
+Exact composed bytes match the measured candidate after only helper
+comments/names and target symbol normalization: SHA256
+`d20cb39f390ef45181be94e4bd7baeb51548c0e6efac64bad72aae71a889e3ce`,203981bytes.
+Root native28 plus CUDA-cfg-only Rust5 tests and eight frozen reference hashes
+pass; these are not NVRTC/runtime tests. Evidence:
+`internal/perf/ada-triad-sm89-finalist-source-20260907/README.md`.
+The optional module/forced route is now wired under
+`internal/gemm-bi-triad-ada-finalist-integration-2026-09-07.md`. CUDA13.2 release
+build/list and eight focused host tests pass; no NVRTC/runtime load in that
+checkpoint. Public AUTO has not admitted this candidate yet. Keep existing
+epoch45 and module bytes. The frozen all-toolkit runtime batch is next; see
+`internal/perf/ada-triad-finalist-integration-20260907/README.md` for exact scope.
+Use forced portable RNA for bit comparisons, actual AUTO and cuBLAS Fast as
+separate timing references on each toolkit. Existing NT requires beta0/no
+bias; use the internal zero-reduction qualifier for NT N0, not a public-facade
+contract expansion. No new GPU performance result is claimed by this checkpoint.
+
 Latest four-arm sibling batch (2026-09-07): complete, three ADVANCE and
 one valid STOP. Compact32/eight-compute-warp/S2 is the preferred finalist
 for all three measured heavy NT TF32 shapes, with unchanged composed CUDA
@@ -45,7 +64,8 @@ invalidate existing portable SM89/SM120 or Fixed routes: changing shared
 SM80 source changes literal cohort identities. The current bounded design
 investigation is an optional separate Ada finalist module, a distinct physical
 route identity and independently versioned selector, leaving existing module
-bytes and epoch45 intact. This is not yet implemented or admitted.
+bytes and epoch45 intact. The forced-only integration above now implements it;
+runtime qualification and AUTO admission are still pending.
 Older entries below describe their own checkpoint's then-next action.
 
 Latest compact32/eight-compute-warp/S2 NT screen (2026-09-07): ADVANCE

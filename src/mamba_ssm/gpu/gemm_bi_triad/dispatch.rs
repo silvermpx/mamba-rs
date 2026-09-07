@@ -1908,6 +1908,11 @@ const SM89_TF32_EVIDENCE_COHORTS: &[Tf32AutoEvidenceCohort] = &[Tf32AutoEvidence
     cells: SM89_TF32_EVIDENCE_CELLS,
 }];
 
+/// Task 2 exposes the Ada finalist only through the forced route. Keeping a
+/// separate empty cohort makes a later promotion explicit and leaves every
+/// portable cohort byte-for-byte independent.
+const SM89_FINALIST_TF32_EVIDENCE_COHORTS: &[Tf32AutoEvidenceCohort] = &[];
+
 /// No SM90a board has frozen a TF32 cohort yet; the family declines to the
 /// portable ladder until one does.
 const SM90A_TF32_EVIDENCE_COHORTS: &[Tf32AutoEvidenceCohort] = &[];
@@ -2010,6 +2015,14 @@ fn measured_tf32_route_with_operands(
     availability: F32TriadAvailability,
     tuning_revision: u16,
 ) -> Option<Tf32PhysicalRoute> {
+    if let Some(finalist) = availability.finalist
+        && let Some(cohort) = matching_tf32_cohort(finalist, SM89_FINALIST_TF32_EVIDENCE_COHORTS)
+        && cohort.tuning_revision == super::contract::SM89_FINALIST_TUNING_REVISION
+        && let Some(route) = measured_tf32_cell(request, operands, cohort.cells)
+        && resolve_tf32_forced(request, availability, route).is_ok()
+    {
+        return Some(route);
+    }
     // A board with a specialized module reads that family's cohorts; a
     // board without one reads the portable cohorts. Either way the cohort
     // must describe this stack whole: its identity, its tuning revision
@@ -2096,7 +2109,10 @@ fn resolve_f32_triad_auto_impl(
             Ok(exact_or_scalar_selection(request, operands, availability))
         }
         F32TriadPolicy::AllowDeterministicTf32V1 => {
-            if availability.portable.is_none() && availability.specialized.is_none() {
+            if availability.portable.is_none()
+                && availability.specialized.is_none()
+                && availability.finalist.is_none()
+            {
                 return Ok(F32TriadSelection::ScalarFmaV1);
             }
             let route = match operands {
@@ -2169,6 +2185,7 @@ pub fn resolve_tf32_forced(
         | Tf32PhysicalRoute::MmaTf32RnaSplitK2V1(_)
         | Tf32PhysicalRoute::MmaTf32RnaSplitK4V1(_)
         | Tf32PhysicalRoute::MmaTf32RnaSplitK8V1(_) => availability.portable,
+        Tf32PhysicalRoute::Sm89MmaTf32Compact8V1 => availability.finalist,
         Tf32PhysicalRoute::Sm90aWgmmaTf32TmaV1(_)
         | Tf32PhysicalRoute::Sm100Tcgen05Tf32TmaV1(_)
         | Tf32PhysicalRoute::Sm120TmaMmaTf32RnaV1(_)
@@ -2226,6 +2243,7 @@ fn ensure_tf32_binding_contract(
             | Tf32PhysicalRoute::MmaTf32RnaSplitK2V1(_)
             | Tf32PhysicalRoute::MmaTf32RnaSplitK4V1(_)
             | Tf32PhysicalRoute::MmaTf32RnaSplitK8V1(_)
+            | Tf32PhysicalRoute::Sm89MmaTf32Compact8V1
     ) && !binding.device_caps.tensor_map_access
     {
         return Err(format!(
@@ -2264,6 +2282,9 @@ fn target_admits_route(binding: Tf32QualifiedModule, route: Tf32PhysicalRoute) -
                 | ((12, 1), "compute_121", "sm_121")
                 | ((12, 1), "compute_120", "sm_120")
         ),
+        Tf32PhysicalRoute::Sm89MmaTf32Compact8V1 => {
+            (cc, target, device_target) == ((8, 9), "sm_89", "sm_89")
+        }
         Tf32PhysicalRoute::Sm90aWgmmaTf32TmaV1(_) => {
             (cc, target, device_target) == ((9, 0), "sm_90a", "sm_90a")
         }
@@ -8940,7 +8961,21 @@ mod tf32_tests {
         F32TriadAvailability {
             portable: Some(portable),
             specialized: None,
+            finalist: None,
         }
+    }
+
+    fn sm89_finalist_availability() -> F32TriadAvailability {
+        let mut availability = sm89_availability();
+        availability.finalist = Some(qualified_module(
+            ModuleKind::TriadSm89Finalist,
+            "sm_89",
+            "sm_89",
+            (8, 9),
+            false,
+            49_152,
+        ));
+        availability
     }
 
     /// TF32 fail-closed: a request or operand set that drifts off a measured
@@ -8967,6 +9002,7 @@ mod tf32_tests {
         F32TriadAvailability {
             portable: None,
             specialized: Some(specialized),
+            finalist: None,
         }
     }
 
@@ -11333,6 +11369,7 @@ mod tf32_tests {
                     99_000,
                 )),
                 specialized: None,
+                finalist: None,
             },
             F32TriadAvailability {
                 portable: Some(qualified_module(
@@ -11344,6 +11381,7 @@ mod tf32_tests {
                     99_000,
                 )),
                 specialized: None,
+                finalist: None,
             },
             F32TriadAvailability {
                 portable: Some(qualified_module(
@@ -11355,6 +11393,7 @@ mod tf32_tests {
                     99_000,
                 )),
                 specialized: None,
+                finalist: None,
             },
             F32TriadAvailability {
                 portable: Some(qualified_module(
@@ -11366,6 +11405,7 @@ mod tf32_tests {
                     99_000,
                 )),
                 specialized: None,
+                finalist: None,
             },
         ];
         for availability in cases {
@@ -12698,6 +12738,7 @@ mod tf32_tests {
                 F32TriadAvailability {
                     portable: Some(portable),
                     specialized: None,
+                    finalist: None,
                 },
             ] {
                 assert_eq!(
@@ -12740,6 +12781,7 @@ mod tf32_tests {
                         29_696,
                     )),
                     specialized: None,
+                    finalist: None,
                 },
             ),
             (
@@ -12756,6 +12798,7 @@ mod tf32_tests {
                         true,
                         73_984,
                     )),
+                    finalist: None,
                 },
             ),
             (
@@ -12774,6 +12817,7 @@ mod tf32_tests {
                         true,
                         131_328,
                     )),
+                    finalist: None,
                 },
             ),
             (
@@ -12791,6 +12835,7 @@ mod tf32_tests {
                         true,
                         73_856,
                     )),
+                    finalist: None,
                 },
             ),
         ];
@@ -12800,6 +12845,86 @@ mod tf32_tests {
                 route
             );
         }
+    }
+
+    #[test]
+    fn sm89_finalist_is_forced_only_and_uses_only_its_own_pointer_binding() {
+        let route = Tf32PhysicalRoute::Sm89MmaTf32Compact8V1;
+        let request = normalized_request(ResolvedGemmOp::Nt, 2048, 768, 3072);
+        let operands = F32TriadOperands {
+            output: 0x1000,
+            a: 0x2000,
+            b: 0x3000,
+            bias: None,
+            alpha: 1.0,
+            beta: 0.0,
+        };
+        let availability = sm89_finalist_availability();
+        assert_eq!(resolve_tf32_forced(request, availability, route), Ok(route));
+
+        let prior = F32TriadSelection::Tf32(Tf32PhysicalRoute::MmaTf32RnaV1(Tf32PortableRoute {
+            tile: Tf32PortableTile::M128N64,
+            stages: Tf32PortableStages::S3,
+        }));
+        assert_eq!(
+            resolve_f32_triad_auto_with_operands(
+                F32TriadPolicy::AllowDeterministicTf32V1,
+                request,
+                operands,
+                sm89_availability(),
+            )
+            .unwrap(),
+            prior,
+            "the incumbent portable baseline changed"
+        );
+        assert_eq!(
+            resolve_f32_triad_auto_with_operands(
+                F32TriadPolicy::AllowDeterministicTf32V1,
+                request,
+                operands,
+                availability,
+            )
+            .unwrap(),
+            prior,
+            "an empty finalist cohort changed AUTO"
+        );
+
+        let mut rejected = availability;
+        rejected.finalist = rejected.portable;
+        assert_eq!(
+            resolve_f32_triad_auto_with_operands(
+                F32TriadPolicy::AllowDeterministicTf32V1,
+                request,
+                operands,
+                rejected,
+            )
+            .unwrap(),
+            prior,
+            "a rejected finalist holder changed the portable AUTO route"
+        );
+
+        assert_eq!(
+            resolve_f32_triad_auto(
+                F32TriadPolicy::AllowDeterministicTf32V1,
+                request,
+                availability,
+            )
+            .unwrap(),
+            F32TriadSelection::ScalarFmaV1,
+            "request-only resolution must remain unable to claim TF32 evidence"
+        );
+
+        let mut missing = availability;
+        missing.finalist = None;
+        assert!(resolve_tf32_forced(request, missing, route).is_err());
+        assert!(resolve_tf32_forced(request, rejected, route).is_err());
+        let mut missing_portable = availability;
+        missing_portable.portable = None;
+        assert_eq!(
+            resolve_tf32_forced(request, missing_portable, route),
+            Ok(route),
+            "the finalist holder depends on the portable holder"
+        );
     }
 
     #[test]
@@ -12818,6 +12943,7 @@ mod tf32_tests {
                 29_696,
             )),
             specialized: None,
+            finalist: None,
         };
 
         assert_eq!(
@@ -12842,6 +12968,7 @@ mod tf32_tests {
                 29_696,
             )),
             specialized: None,
+            finalist: None,
         };
 
         assert_eq!(
@@ -12889,6 +13016,7 @@ mod tf32_tests {
                     true,
                     49_408,
                 )),
+                finalist: None,
             };
             assert_eq!(
                 resolve_tf32_forced(request(ResolvedGemmOp::Nn), availability, route).unwrap(),
@@ -12906,6 +13034,7 @@ mod tf32_tests {
                 true,
                 49_408,
             )),
+            finalist: None,
         };
         assert!(resolve_tf32_forced(request(ResolvedGemmOp::Nn), generic, route).is_err());
     }
@@ -12977,6 +13106,7 @@ mod tf32_tests {
                     F32TriadAvailability {
                         portable: None,
                         specialized: Some(invalid),
+                        finalist: None,
                     },
                     route,
                 )
@@ -13002,6 +13132,7 @@ mod tf32_tests {
                         99_000,
                     )),
                     specialized: None,
+                    finalist: None,
                 },
                 illegal,
             )

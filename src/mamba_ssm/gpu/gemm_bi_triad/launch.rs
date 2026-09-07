@@ -186,7 +186,9 @@ pub(super) const GEMM_BI_ZERO_REDUCTION_PARAMS_SIZE: usize =
 
 pub(super) const fn tf32_kernel_params_size(module_kind: ModuleKind) -> Option<usize> {
     match module_kind {
-        ModuleKind::TriadSm80 => Some(std::mem::size_of::<Sm80Tf32KernelParams>()),
+        ModuleKind::TriadSm80 | ModuleKind::TriadSm89Finalist => {
+            Some(std::mem::size_of::<Sm80Tf32KernelParams>())
+        }
         ModuleKind::TriadSm90a => Some(std::mem::size_of::<Sm90aTf32KernelParams>()),
         ModuleKind::TriadSm100 => Some(std::mem::size_of::<Sm100KernelParams>()),
         ModuleKind::TriadSm120 => Some(std::mem::size_of::<Sm120KernelParams>()),
@@ -3030,6 +3032,7 @@ fn f32_map_binding(ctx: &GpuCtx, route: Tf32PhysicalRoute) -> Result<Tf32MapBind
         | Tf32PhysicalRoute::MmaTf32RnaSplitK8V1(_) => {
             ctx.kernels.f32_triad_availability().portable
         }
+        Tf32PhysicalRoute::Sm89MmaTf32Compact8V1 => ctx.kernels.f32_triad_availability().finalist,
         _ => ctx.kernels.f32_triad_availability().specialized,
     }
     .ok_or_else(|| format!("TF32 route {route:?} has no qualified module"))?;
@@ -3091,7 +3094,8 @@ fn tf32_params(
         Tf32PhysicalRoute::MmaTf32RnaV1(_)
         | Tf32PhysicalRoute::MmaTf32RnaSplitK2V1(_)
         | Tf32PhysicalRoute::MmaTf32RnaSplitK4V1(_)
-        | Tf32PhysicalRoute::MmaTf32RnaSplitK8V1(_) => {
+        | Tf32PhysicalRoute::MmaTf32RnaSplitK8V1(_)
+        | Tf32PhysicalRoute::Sm89MmaTf32Compact8V1 => {
             PreparedTf32Params::Sm80(Sm80Tf32KernelParams {
                 alpha: operands.alpha,
                 beta: operands.beta,
@@ -3445,6 +3449,10 @@ fn tf32_resolved_route(
             PhysicalGemmBackend::MmaTf32RnaV1,
             ResolvedNumericContract::MmaTf32RnaV1,
         ),
+        Tf32PhysicalRoute::Sm89MmaTf32Compact8V1 => (
+            PhysicalGemmBackend::Sm89MmaTf32Compact8V1,
+            ResolvedNumericContract::MmaTf32RnaV1,
+        ),
         Tf32PhysicalRoute::MmaTf32RnaSplitK2V1(_) => (
             PhysicalGemmBackend::MmaTf32RnaSplitK2V1,
             ResolvedNumericContract::MmaTf32RnaSplitK2V1,
@@ -3536,7 +3544,11 @@ fn tf32_resolved_route(
         },
         tensor_maps_digest: digests.maps,
         resources_digest: digests.resources,
-        tuning_table_revision: F32_TF32_TUNING_REVISION,
+        tuning_table_revision: if spec.route == Tf32PhysicalRoute::Sm89MmaTf32Compact8V1 {
+            SM89_FINALIST_TUNING_REVISION
+        } else {
+            F32_TF32_TUNING_REVISION
+        },
         schedule_revision: spec.schedule_revision,
     }
 }
@@ -3856,7 +3868,10 @@ fn prepare_tf32_f32(
                 _ => Tf32TensorMapFormat::Tfloat32V1,
             },
         ))
-    } else if matches!(route, Tf32PhysicalRoute::MmaTf32RnaV1(_)) {
+    } else if matches!(
+        route,
+        Tf32PhysicalRoute::MmaTf32RnaV1(_) | Tf32PhysicalRoute::Sm89MmaTf32Compact8V1
+    ) {
         None
     } else {
         Some(prepare_specialized_tf32_maps(
@@ -4937,7 +4952,10 @@ pub(in crate::mamba_ssm::gpu) fn prepare_prepared_f32_direct_graph_sequence<
             ..
         } => {
             match (*physical_route, *params) {
-                (Tf32PhysicalRoute::MmaTf32RnaV1(_), PreparedTf32Params::Sm80(params)) => {
+                (
+                    Tf32PhysicalRoute::MmaTf32RnaV1(_) | Tf32PhysicalRoute::Sm89MmaTf32Compact8V1,
+                    PreparedTf32Params::Sm80(params),
+                ) => {
                     let reduction_is_zero =
                         prepared.request.shape.reduction(prepared.request.op) == 0;
                     arguments.push(output)?;
@@ -5756,7 +5774,10 @@ unsafe fn enqueue_tf32_raw<O: PhysicalLaunchObserver>(
     let output = launch.operands.output;
     let bias = launch.operands.bias.unwrap_or(0);
     match (launch.route, launch.params) {
-        (Tf32PhysicalRoute::MmaTf32RnaV1(_), PreparedTf32Params::Sm80(params)) => {
+        (
+            Tf32PhysicalRoute::MmaTf32RnaV1(_) | Tf32PhysicalRoute::Sm89MmaTf32Compact8V1,
+            PreparedTf32Params::Sm80(params),
+        ) => {
             let a = if launch.zero_reduction {
                 0
             } else {

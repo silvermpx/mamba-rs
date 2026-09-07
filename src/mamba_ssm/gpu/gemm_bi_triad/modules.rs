@@ -214,6 +214,17 @@ fn merge_tf32_driver_abi(
     Ok(portable)
 }
 
+fn merge_optional_finalist_driver_abi(
+    portable: BTreeMap<&'static str, Tf32DriverAbi>,
+    finalist: Option<BTreeMap<&'static str, Tf32DriverAbi>>,
+) -> (BTreeMap<&'static str, Tf32DriverAbi>, Option<String>) {
+    let fallback = portable.clone();
+    match merge_tf32_driver_abi(portable, finalist) {
+        Ok(merged) => (merged, None),
+        Err(error) => (fallback, Some(error)),
+    }
+}
+
 struct DriverModule {
     raw: Option<cudarc::driver::sys::CUmodule>,
 }
@@ -1505,6 +1516,11 @@ fn validate_module_target(kind: ModuleKind, arch: &str) -> Result<(), String> {
             "TriadSm90a requires exact target sm_90a, got {arch}"
         ));
     }
+    if kind == ModuleKind::TriadSm89Finalist && arch != "sm_89" {
+        return Err(format!(
+            "TriadSm89Finalist requires exact target sm_89, got {arch}"
+        ));
+    }
     if kind == ModuleKind::TriadSm100 && sm100_target_for_arch(arch).is_none() {
         return Err(format!(
             "TriadSm100 requires an admitted compute_100f/a, compute_103f/a, or compute_110f/a target, got {arch}"
@@ -1552,6 +1568,59 @@ fn validate_tf32_ptx_inventory(
     Ok(())
 }
 
+fn validate_sm89_finalist_ptx_inventory(ptx: &str) -> Result<(), String> {
+    let original = "gemm_bi_nt_sm80_mma_tf32_v1_m128n64_bk32_s2";
+    let mut expected = super::contract::tf32_module_symbols(ModuleKind::TriadSm80)
+        .filter(|&symbol| symbol != original)
+        .collect::<BTreeSet<_>>();
+    if !expected.insert(super::sm89_finalist_source::SM89_FINALIST_SYMBOL) {
+        return Err("TriadSm89Finalist contract contains a duplicate symbol".into());
+    }
+    let symbols = ptx_entry_symbols(ptx)?;
+    let actual = symbols
+        .iter()
+        .map(String::as_str)
+        .filter(|symbol| {
+            symbol.contains("_tf32_v1_")
+                || symbol.contains("_tma_fma_v1_")
+                || symbol.contains("_tf32_compact8_v1_")
+        })
+        .collect::<Vec<_>>();
+    let unique = actual.iter().copied().collect::<BTreeSet<_>>();
+    if actual.len() != unique.len() || unique != expected {
+        return Err(
+            "TriadSm89Finalist TF32 PTX inventory is incomplete, duplicated, or foreign".into(),
+        );
+    }
+    Ok(())
+}
+
+fn validate_sm89_finalist_ptx(arch: &str, ptx: &str) -> Result<(), String> {
+    if arch != "sm_89" || ptx_target(ptx)? != "sm_89" {
+        return Err("TriadSm89Finalist requires exact sm_89 source and PTX targets".into());
+    }
+    validate_sm89_finalist_ptx_inventory(ptx)?;
+    let parsed = parse_ptx(ptx)?;
+    let entry = parsed_ptx_entry_ref(&parsed, super::sm89_finalist_source::SM89_FINALIST_SYMBOL)?;
+    require_ptx_entry_tokens(
+        "TriadSm89Finalist",
+        entry,
+        &[
+            "cvt.rna.tf32.f32",
+            "mma.sync.aligned.m16n8k8.row.col.f32.tf32.tf32.f32",
+        ],
+    )?;
+    if ptx_has_unquoted_token(&entry.body, |token| {
+        token.starts_with("wgmma.")
+            || token.starts_with("tcgen05.")
+            || token.starts_with("cp.async.bulk.tensor.")
+            || token.contains("tensormap")
+    }) {
+        return Err("TriadSm89Finalist contains a foreign TMA or tensor-core family".into());
+    }
+    Ok(())
+}
+
 fn validate_module_ptx(module_kind: ModuleKind, arch: &str, ptx: &str) -> Result<(), String> {
     match module_kind {
         ModuleKind::Fixed => {
@@ -1576,6 +1645,7 @@ fn validate_module_ptx(module_kind: ModuleKind, arch: &str, ptx: &str) -> Result
             validate_tn_splitm_partial_ptx(ptx)
         }
         ModuleKind::TriadSm80 => validate_sm80_ptx(arch, ptx),
+        ModuleKind::TriadSm89Finalist => validate_sm89_finalist_ptx(arch, ptx),
         ModuleKind::TriadSm90a => validate_sm90a_ptx(ptx),
         ModuleKind::TriadSm100 => validate_sm100_ptx(arch, ptx),
         ModuleKind::TriadSm120 => validate_sm120_ptx(arch, ptx),
@@ -4705,11 +4775,16 @@ fn validate_tf32_specialization(
             | ModuleKind::TriadSm90a
             | ModuleKind::TriadSm100
             | ModuleKind::TriadSm120
+            | ModuleKind::TriadSm89Finalist
     ) {
         return Err(format!("{module_kind:?} does not own TF32 kernels"));
     }
     let extensions = module_kind == ModuleKind::TriadSm80 && sm80_target_composes_streamk(arch);
-    validate_tf32_ptx_inventory(module_kind, extensions, ptx)?;
+    if module_kind == ModuleKind::TriadSm89Finalist {
+        validate_sm89_finalist_ptx_inventory(ptx)?;
+    } else {
+        validate_tf32_ptx_inventory(module_kind, extensions, ptx)?;
+    }
     validate_tf32_parameter_abi(module_kind, extensions, ptx, nvrtc_version().0)?;
     validate_tf32_host_abi(module_kind, extensions, ptx)?;
     validate_tf32_feature_instructions(module_kind, extensions, ptx)?;
@@ -4740,7 +4815,10 @@ fn validate_tf32_host_abi(
     }
     let parameter_size = super::launch::tf32_kernel_params_size(module_kind)
         .ok_or_else(|| format!("{module_kind:?} does not own a TF32 parameter ABI"))?;
-    let expected_size = if module_kind == ModuleKind::TriadSm80 {
+    let expected_size = if matches!(
+        module_kind,
+        ModuleKind::TriadSm80 | ModuleKind::TriadSm89Finalist
+    ) {
         32
     } else {
         40
@@ -5434,7 +5512,10 @@ fn validate_tf32_parameter_abi(
             .map(str::trim)
             .filter(|line| line.starts_with(".param "))
             .collect();
-        let bundle_size = if module_kind == ModuleKind::TriadSm80 {
+        let bundle_size = if matches!(
+            module_kind,
+            ModuleKind::TriadSm80 | ModuleKind::TriadSm89Finalist
+        ) {
             32
         } else {
             40
@@ -5492,7 +5573,10 @@ fn validate_tf32_parameter_abi(
                 kernel_spec.symbol
             ));
         }
-        if module_kind == ModuleKind::TriadSm80 {
+        if matches!(
+            module_kind,
+            ModuleKind::TriadSm80 | ModuleKind::TriadSm89Finalist
+        ) {
             if !declarations[..4].iter().all(|line| is_u64(line)) {
                 return Err(format!(
                     "{} has the wrong pointer parameter ABI",
@@ -6216,7 +6300,7 @@ fn validate_tf32_feature_instructions(
     };
 
     let expected_contract = match module_kind {
-        ModuleKind::TriadSm80 => (
+        ModuleKind::TriadSm80 | ModuleKind::TriadSm89Finalist => (
             ResolvedInstructionFamily::MmaSync,
             ResolvedOperandConversion::RegisterCvtRnaTf32F32V1,
         ),
@@ -6275,7 +6359,7 @@ fn validate_tf32_feature_instructions(
         ));
     }
     let required: &[&str] = match module_kind {
-        ModuleKind::TriadSm80 | ModuleKind::TriadSm120 => &[
+        ModuleKind::TriadSm80 | ModuleKind::TriadSm89Finalist | ModuleKind::TriadSm120 => &[
             "cvt.rna.tf32.f32",
             "mma.sync.aligned.m16n8k8.row.col.f32.tf32.tf32.f32",
         ],
@@ -6822,6 +6906,10 @@ fn module_fragments(kind: ModuleKind) -> Result<&'static [SourceFragment], Strin
 /// The composed source the compiler sees for `kind` on `arch`: the module's
 /// frozen base and only that target's admitted extension fragments.
 fn compose_module_source_for(kind: ModuleKind, arch: &str) -> Result<String, String> {
+    if kind == ModuleKind::TriadSm89Finalist {
+        validate_module_target(kind, arch)?;
+        return super::sm89_finalist_source::compose_sm89_finalist_source();
+    }
     let base = module_fragments(kind)?;
     if kind == ModuleKind::Fixed && fixed_sm89_half_composed(arch) {
         let mut fragments = base.to_vec();
@@ -7168,14 +7256,17 @@ pub struct GemmBiKernels {
     multiprocessor_count: u32,
     scalar_compiler_identity: CompilerIdentity,
     sm80_compiler_identity: CompilerIdentity,
+    finalist_compiler_identity: Option<CompilerIdentity>,
     specialized_compiler_identity: Option<CompilerIdentity>,
     artifact_set_identity: crate::mamba_ssm::gpu::kernel_identity::ArtifactSetIdentity,
     f32_triad_availability: super::contract::F32TriadAvailability,
     tf32_driver_abi: BTreeMap<&'static str, Tf32DriverAbi>,
     portable_tf32_functions: HashMap<&'static str, CudaFunction>,
     tf32_splitk_functions: HashMap<&'static str, CudaFunction>,
+    finalist_tf32_functions: HashMap<&'static str, CudaFunction>,
     specialized_tf32_functions: HashMap<&'static str, CudaFunction>,
     portable_tf32_rejection: Option<String>,
+    finalist_tf32_rejection: Option<String>,
     specialized_tf32_rejection: Option<String>,
     tf32_excluded_symbols: Vec<Tf32SymbolExclusion>,
     specialized_functions: HashMap<&'static str, CudaFunction>,
@@ -7256,6 +7347,8 @@ impl GemmBiKernels {
         fixed_artifact: ArtifactIdentity,
         scalar: CompiledModule,
         sm80: CompiledModule,
+        finalist: Option<CompiledModule>,
+        finalist_compile_rejection: Option<String>,
         specialized: Option<QualifiedSpecializedModule>,
     ) -> Result<Self, String> {
         let allocation_domain = super::contract::AllocationDomain::from_context(ctx)?;
@@ -7281,13 +7374,32 @@ impl GemmBiKernels {
             scalar.artifact_identity,
             sm80.artifact_identity,
         ];
-        if let Some(specialized) = specialized.as_ref() {
+        if finalist.is_some() && specialized.is_some() {
+            return Err(
+                "finalist and architecture-specialized triad modules are mutually exclusive".into(),
+            );
+        }
+        if let Some(finalist) = finalist.as_ref() {
+            artifacts.push(finalist.artifact_identity);
+        } else if let Some(specialized) = specialized.as_ref() {
             artifacts.push(specialized.module.artifact_identity);
         }
         let artifact_set_identity =
             crate::mamba_ssm::gpu::kernel_identity::build_artifact_set(&artifacts)?;
+        let mut finalist_tf32_rejection = finalist_compile_rejection;
+        let (merged_portable_finalist_abi, finalist_abi_rejection) =
+            merge_optional_finalist_driver_abi(
+                sm80.tf32_driver_abi.clone(),
+                finalist
+                    .as_ref()
+                    .map(|finalist| finalist.tf32_driver_abi.clone()),
+            );
+        let finalist_abi_merged = finalist_abi_rejection.is_none();
+        if let Some(error) = finalist_abi_rejection {
+            finalist_tf32_rejection = Some(error);
+        }
         let tf32_driver_abi = merge_tf32_driver_abi(
-            sm80.tf32_driver_abi.clone(),
+            merged_portable_finalist_abi,
             specialized
                 .as_ref()
                 .map(|specialized| specialized.module.tf32_driver_abi.clone()),
@@ -7322,6 +7434,39 @@ impl GemmBiKernels {
         let (tf32_splitk_functions, splitk_excluded) =
             retain_forced_only_functions(load_tf32_splitk_functions(&sm80))?;
         tf32_excluded_symbols.extend(splitk_excluded);
+        let finalist_qualification = finalist
+            .as_ref()
+            .filter(|_| finalist_abi_merged)
+            .filter(|module| {
+                if module.tf32_qualified {
+                    true
+                } else {
+                    finalist_tf32_rejection = module.tf32_qualification_error.clone();
+                    false
+                }
+            })
+            .map(|module| {
+                let (functions, excluded) = load_tf32_functions(module)?;
+                tf32_excluded_symbols.extend(excluded);
+                let binding = qualify_tf32_module_binding(ctx, module)?;
+                let artifact = qualify_loaded_tf32_artifact(
+                    ctx,
+                    allocation_domain,
+                    module,
+                    binding,
+                    &functions,
+                );
+                retain_tf32_candidate(functions, binding, artifact)
+            })
+            .transpose();
+        let (finalist_tf32_functions, finalist_binding) = match finalist_qualification {
+            Ok(Some(qualified)) => qualified,
+            Ok(None) => (HashMap::new(), None),
+            Err(error) => {
+                finalist_tf32_rejection = Some(error);
+                (HashMap::new(), None)
+            }
+        };
         if let Some(specialized) = specialized.as_ref() {
             tf32_excluded_symbols.extend(specialized.tf32_excluded.iter().cloned());
         }
@@ -7356,6 +7501,7 @@ impl GemmBiKernels {
         let f32_triad_availability = super::contract::F32TriadAvailability {
             portable,
             specialized: specialized_binding,
+            finalist: finalist_binding,
         };
         let load = |name: &str| load_owned_function(name, &scalar.module, &sm80.module);
         let load_half = |base: &str| load_owned_half(base, &scalar.module, &sm80.module);
@@ -7432,6 +7578,9 @@ impl GemmBiKernels {
             .map(|specialized| specialized.sm120_resources.clone())
             .unwrap_or_default();
         let mut anchors = vec![scalar.module.clone(), sm80.module.clone()];
+        if let Some(finalist) = finalist.as_ref() {
+            anchors.push(finalist.module.clone());
+        }
         if let Some(specialized) = specialized.as_ref() {
             anchors.push(specialized.module.module.clone());
         }
@@ -7443,6 +7592,7 @@ impl GemmBiKernels {
             multiprocessor_count,
             scalar_compiler_identity: scalar.compiler_identity,
             sm80_compiler_identity: sm80.compiler_identity,
+            finalist_compiler_identity: finalist.as_ref().map(|module| module.compiler_identity),
             specialized_compiler_identity: specialized
                 .as_ref()
                 .map(|specialized| specialized.module.compiler_identity),
@@ -7451,9 +7601,11 @@ impl GemmBiKernels {
             tf32_driver_abi,
             portable_tf32_functions,
             tf32_splitk_functions,
+            finalist_tf32_functions,
             tf32_excluded_symbols,
             specialized_tf32_functions,
             portable_tf32_rejection,
+            finalist_tf32_rejection,
             specialized_tf32_rejection,
             specialized_functions,
             sm120_target,
@@ -7562,6 +7714,10 @@ impl GemmBiKernels {
         self.specialized_tf32_rejection.as_deref()
     }
 
+    pub(crate) fn finalist_tf32_rejection(&self) -> Option<&str> {
+        self.finalist_tf32_rejection.as_deref()
+    }
+
     /// Why the portable SM80 TF32 routes are not bound, if they are not.
     pub(crate) fn portable_tf32_rejection(&self) -> Option<&str> {
         self.portable_tf32_rejection.as_deref()
@@ -7586,6 +7742,7 @@ impl GemmBiKernels {
     ) -> Option<&str> {
         match route.module_kind() {
             ModuleKind::TriadSm80 => self.portable_tf32_rejection.as_deref(),
+            ModuleKind::TriadSm89Finalist => self.finalist_tf32_rejection.as_deref(),
             ModuleKind::TriadSm90a | ModuleKind::TriadSm100 | ModuleKind::TriadSm120 => {
                 self.specialized_tf32_rejection.as_deref()
             }
@@ -7601,6 +7758,7 @@ impl GemmBiKernels {
         self.tf32_driver_abi(symbol)?;
         self.portable_tf32_functions
             .get(symbol)
+            .or_else(|| self.finalist_tf32_functions.get(symbol))
             .or_else(|| self.specialized_tf32_functions.get(symbol))
     }
 
@@ -7616,6 +7774,10 @@ impl GemmBiKernels {
 
     pub fn sm80_compiler_identity(&self) -> CompilerIdentity {
         self.sm80_compiler_identity
+    }
+
+    pub fn sm89_finalist_compiler_identity(&self) -> Option<CompilerIdentity> {
+        self.finalist_compiler_identity
     }
 
     pub fn sm90a_compiler_identity(&self) -> Option<CompilerIdentity> {
@@ -7978,6 +8140,35 @@ fn load_tf32_functions(module: &CompiledModule) -> Result<Tf32LoadedFunctions, S
                 format!("query {} local memory: {error:?}", kernel_spec.symbol)
             })?)
             .map_err(|_| format!("{} returned negative local memory", kernel_spec.symbol))?;
+        let static_shared_bytes = if module_kind == ModuleKind::TriadSm89Finalist {
+            Some(
+                u32::try_from(function.shared_size_bytes().map_err(|error| {
+                    format!(
+                        "query {} static shared memory: {error:?}",
+                        kernel_spec.symbol
+                    )
+                })?)
+                .map_err(|_| {
+                    format!(
+                        "{} returned negative static shared memory",
+                        kernel_spec.symbol
+                    )
+                })?,
+            )
+        } else {
+            None
+        };
+        if static_shared_bytes.is_some_and(|bytes| bytes != 0) {
+            excluded.push(Tf32SymbolExclusion {
+                symbol: kernel_spec.symbol,
+                reason: format!(
+                    "{} uses {} bytes of static shared memory, expected zero",
+                    kernel_spec.symbol,
+                    static_shared_bytes.unwrap_or_default()
+                ),
+            });
+            continue;
+        }
         let registers = u32::try_from(
             function
                 .num_regs()
@@ -8011,12 +8202,7 @@ fn load_tf32_functions(module: &CompiledModule) -> Result<Tf32LoadedFunctions, S
                 None,
             )
             .map_err(|error| format!("query {} occupancy: {error:?}", kernel_spec.symbol))?;
-        let required_occupancy =
-            if module_kind == ModuleKind::TriadSm90a && kernel_spec.symbol.ends_with("_wg1") {
-                3
-            } else {
-                1
-            };
+        let required_occupancy = tf32_required_occupancy(module_kind, kernel_spec.symbol);
         if occupancy < required_occupancy {
             excluded.push(Tf32SymbolExclusion {
                 symbol: kernel_spec.symbol,
@@ -8135,10 +8321,27 @@ fn load_tf32_splitk_functions(module: &CompiledModule) -> Result<Tf32LoadedFunct
     Ok((functions, excluded))
 }
 
+fn tf32_required_occupancy(module_kind: ModuleKind, symbol: &str) -> u32 {
+    if module_kind == ModuleKind::TriadSm89Finalist {
+        2
+    } else if module_kind == ModuleKind::TriadSm90a && symbol.ends_with("_wg1") {
+        3
+    } else {
+        1
+    }
+}
+
 fn tf32_register_cap(module_kind: ModuleKind, symbol: &str) -> Result<u32, String> {
     const SM120_TAG33_SYMBOL: &str = "gemm_bi_nn_sm120_tma_mma_tf32_v1_m80n32_bk64_s2";
 
     match module_kind {
+        // Feasibility-only architectural ceiling. Task 2 freezes an exact
+        // cap only after the same source is censused on all three toolkits.
+        ModuleKind::TriadSm89Finalist
+            if symbol == super::sm89_finalist_source::SM89_FINALIST_SYMBOL =>
+        {
+            Ok(255)
+        }
         ModuleKind::TriadSm80 if symbol.contains("_m128n64_") => Ok(192),
         // The wide tile holds the same 64-accumulator microtile per thread as
         // the 128x64 body plus a second fragment set, on all eight warps and
@@ -8256,10 +8459,18 @@ fn qualify_loaded_tf32_artifact(
     if binding.module_kind != module_kind || binding.artifact != module.artifact_identity {
         return Err("TF32 artifact probe binding does not match its compiled module".into());
     }
-    let spec = super::contract::tf32_route_specs(module_kind)
-        .iter()
-        .find(|spec| spec.op == ResolvedGemmOp::Nn)
-        .ok_or_else(|| format!("{module_kind:?} has no NN TF32 artifact probe route"))?;
+    let finalist = module_kind == ModuleKind::TriadSm89Finalist;
+    let spec = if finalist {
+        super::contract::tf32_kernel_spec(
+            ResolvedGemmOp::Nt,
+            super::contract::Tf32PhysicalRoute::Sm89MmaTf32Compact8V1,
+        )?
+    } else {
+        super::contract::tf32_route_specs(module_kind)
+            .iter()
+            .find(|spec| spec.op == ResolvedGemmOp::Nn)
+            .ok_or_else(|| format!("{module_kind:?} has no NN TF32 artifact probe route"))?
+    };
     let function = functions.get(spec.symbol).ok_or_else(|| {
         format!(
             "{module_kind:?} TF32 artifact probe function {} is unavailable",
@@ -8268,9 +8479,45 @@ fn qualify_loaded_tf32_artifact(
     })?;
 
     let result = (|| -> Result<Sha256Digest, String> {
-        let a_host = [0x3f800000_u32, 0, 0, 0];
-        let mut b_host = [0_u32; 12];
-        b_host[..TF32_EXCEPTIONAL_PROBE_BITS.len()].copy_from_slice(&TF32_EXCEPTIONAL_PROBE_BITS);
+        let a_host = vec![0x3f800000_u32, 0, 0, 0];
+        let (b_host, request) = if finalist {
+            let mut b = vec![0_u32; TF32_EXCEPTIONAL_PROBE_BITS.len() * 4];
+            for (index, bits) in TF32_EXCEPTIONAL_PROBE_BITS.iter().copied().enumerate() {
+                b[index * 4] = bits;
+            }
+            let len = TF32_EXCEPTIONAL_PROBE_BITS.len();
+            (
+                b,
+                super::contract::F32TriadRequest {
+                    op: ResolvedGemmOp::Nt,
+                    shape: super::contract::F32TriadShape {
+                        m: 1,
+                        k: len,
+                        n: 1,
+                        lda: 4,
+                        ldb: 4,
+                        ldc: len,
+                    },
+                },
+            )
+        } else {
+            let mut b = vec![0_u32; 12];
+            b[..TF32_EXCEPTIONAL_PROBE_BITS.len()].copy_from_slice(&TF32_EXCEPTIONAL_PROBE_BITS);
+            (
+                b,
+                super::contract::F32TriadRequest {
+                    op: ResolvedGemmOp::Nn,
+                    shape: super::contract::F32TriadShape {
+                        m: 1,
+                        k: 1,
+                        n: TF32_EXCEPTIONAL_PROBE_BITS.len(),
+                        lda: 4,
+                        ldb: 12,
+                        ldc: TF32_EXCEPTIONAL_PROBE_BITS.len(),
+                    },
+                },
+            )
+        };
         let a = stream
             .clone_htod(&a_host)
             .map_err(|error| format!("allocate TF32 artifact probe A: {error:?}"))?;
@@ -8287,17 +8534,6 @@ fn qualify_loaded_tf32_artifact(
         let (a_ptr, a_guard) = a.device_ptr(&stream);
         let (b_ptr, b_guard) = b.device_ptr(&stream);
         let (output_ptr, output_guard) = output.device_ptr_mut(&stream);
-        let request = super::contract::F32TriadRequest {
-            op: ResolvedGemmOp::Nn,
-            shape: super::contract::F32TriadShape {
-                m: 1,
-                k: 1,
-                n: TF32_EXCEPTIONAL_PROBE_BITS.len(),
-                lda: 4,
-                ldb: 12,
-                ldc: TF32_EXCEPTIONAL_PROBE_BITS.len(),
-            },
-        };
         let operands = super::contract::F32TriadOperands {
             output: output_ptr,
             a: a_ptr,
@@ -8306,7 +8542,10 @@ fn qualify_loaded_tf32_artifact(
             alpha: 1.0,
             beta: 0.0,
         };
-        let maps = if module_kind == ModuleKind::TriadSm80 {
+        let maps = if matches!(
+            module_kind,
+            ModuleKind::TriadSm80 | ModuleKind::TriadSm89Finalist
+        ) {
             None
         } else {
             let map_binding = super::contract::Tf32MapBinding {
@@ -8414,10 +8653,21 @@ fn qualify_tf32_module_binding(
         cudarc::driver::sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_TENSOR_MAP_ACCESS_SUPPORTED,
     ) {
         Ok(value) => value != 0,
-        Err(_) if module_kind == ModuleKind::TriadSm80 => false,
+        Err(_)
+            if matches!(
+                module_kind,
+                ModuleKind::TriadSm80 | ModuleKind::TriadSm89Finalist
+            ) =>
+        {
+            false
+        }
         Err(error) => return Err(format!("query TF32 tensor-map support: {error:?}")),
     };
-    if module_kind != ModuleKind::TriadSm80 && !tensor_map_access {
+    if !matches!(
+        module_kind,
+        ModuleKind::TriadSm80 | ModuleKind::TriadSm89Finalist
+    ) && !tensor_map_access
+    {
         return Err(format!("{module_kind:?} requires tensor-map access"));
     }
     let target = CudaTarget::new(compiler_target)?;
@@ -8469,6 +8719,9 @@ fn qualified_ptx_target(
                 .ok_or_else(|| {
                     format!("TriadSm80 target {compiler_target} does not own CC {device_cc:?}")
                 })
+        }
+        ModuleKind::TriadSm89Finalist if device_cc == (8, 9) && compiler_target == "sm_89" => {
+            Ok("sm_89")
         }
         ModuleKind::TriadSm90a if device_cc == (9, 0) && compiler_target == "sm_90a" => {
             Ok("sm_90a")
@@ -8845,18 +9098,66 @@ mod tests {
         SCALAR_GROUP_M_MACRO, SCALAR_SYMBOLS as PRODUCTION_SCALAR_SYMBOLS,
         SM80_SYMBOLS as PRODUCTION_SM80_SYMBOLS, SM90A_SYMBOLS, SM100_PROBE_SOURCE, SourceFragment,
         TF32_DRIVER_PARAMETER_COUNT, Tf32DriverAbi, Tf32DriverJitLocalMemoryFacts,
-        compose_fragments, compose_module_source, compose_module_source_for, merge_tf32_driver_abi,
-        parse_ptx, portable_target_for_device, ptx_entry, qualified_ptx_target,
+        compose_fragments, compose_module_source, compose_module_source_for,
+        merge_optional_finalist_driver_abi, merge_tf32_driver_abi, parse_ptx,
+        portable_target_for_device, ptx_entry, qualified_ptx_target,
         qualified_scalar_resource_environment, qualify_tf32_conversion_artifact,
         query_tf32_driver_parameter_abi, resolve_owned_symbol, retain_forced_only_functions,
         retain_tf32_candidate, scalar_group_m_option, select_sm100_candidate,
         select_sm120_candidate, sm100_target_candidates, tf32_register_cap,
-        validate_exact_ptx_exports, validate_module_ptx, validate_module_target,
-        validate_sm90a_ptx, validate_sm100_probe_ptx, validate_sm100_ptx, validate_sm120_ptx,
+        tf32_required_occupancy, validate_exact_ptx_exports, validate_module_ptx,
+        validate_module_target, validate_sm89_finalist_ptx_inventory, validate_sm90a_ptx,
+        validate_sm100_probe_ptx, validate_sm100_ptx, validate_sm120_ptx,
         validate_tf32_driver_jit_local_memory_facts, validate_tf32_feature_instructions,
         validate_tf32_parameter_abi, validate_tf32_ptx_inventory, validate_tf32_splitk_ptx,
         validate_tn_narrow_splitm_partial_ptx,
     };
+
+    #[test]
+    fn sm89_finalist_inventory_replaces_one_legacy_entry_and_rejects_foreign_families() {
+        let source = compose_module_source_for(ModuleKind::TriadSm89Finalist, "sm_89").unwrap();
+        assert_eq!(
+            super::module_source_digest(ModuleKind::TriadSm89Finalist, "sm_89").unwrap(),
+            crate::mamba_ssm::gpu::kernel_identity::FramedSha256::bytes(source.as_bytes()),
+            "the finalist compiler identity must bind the complete generated source"
+        );
+        assert!(compose_module_source_for(ModuleKind::TriadSm89Finalist, "compute_89").is_err());
+
+        let original = "gemm_bi_nt_sm80_mma_tf32_v1_m128n64_bk32_s2";
+        let mut symbols = super::super::contract::tf32_module_symbols(ModuleKind::TriadSm80)
+            .filter(|&symbol| symbol != original)
+            .collect::<Vec<_>>();
+        symbols.push(super::super::sm89_finalist_source::SM89_FINALIST_SYMBOL);
+        let complete = symbols.iter().fold(
+            String::from(".version 8.9\n.target sm_89\n"),
+            |mut ptx, symbol| {
+                ptx.push_str(&format!(".visible .entry {symbol}() {{ ret; }}\n"));
+                ptx
+            },
+        );
+        validate_sm89_finalist_ptx_inventory(&complete).unwrap();
+        assert!(
+            validate_sm89_finalist_ptx_inventory(&complete.replacen(
+                super::super::sm89_finalist_source::SM89_FINALIST_SYMBOL,
+                original,
+                1,
+            ))
+            .is_err()
+        );
+        assert!(
+            validate_sm89_finalist_ptx_inventory(&format!(
+                "{complete}.visible .entry gemm_bi_nn_sm90a_wgmma_tf32_v1_foreign() {{ ret; }}\n"
+            ))
+            .is_err()
+        );
+        assert!(
+            validate_sm89_finalist_ptx_inventory(&format!(
+                "{complete}.visible .entry {}() {{ ret; }}\n",
+                super::super::sm89_finalist_source::SM89_FINALIST_SYMBOL
+            ))
+            .is_err()
+        );
+    }
 
     #[test]
     fn scalar_resource_environment_rejects_zero_identity_domains() {
@@ -8978,6 +9279,24 @@ mod tests {
     #[test]
     fn tf32_register_caps_freeze_the_rect_wide_symbol_without_weakening_generic_caps() {
         const TAG33: &str = "gemm_bi_nn_sm120_tma_mma_tf32_v1_m80n32_bk64_s2";
+
+        assert_eq!(
+            tf32_register_cap(
+                ModuleKind::TriadSm89Finalist,
+                super::super::sm89_finalist_source::SM89_FINALIST_SYMBOL,
+            ),
+            Ok(255)
+        );
+        assert_eq!(
+            tf32_required_occupancy(
+                ModuleKind::TriadSm89Finalist,
+                super::super::sm89_finalist_source::SM89_FINALIST_SYMBOL,
+            ),
+            2
+        );
+        assert!(
+            tf32_register_cap(ModuleKind::TriadSm89Finalist, "foreign_finalist_symbol").is_err()
+        );
 
         assert_eq!(tf32_register_cap(ModuleKind::TriadSm120, TAG33), Ok(80));
         assert_eq!(
@@ -9229,7 +9548,10 @@ mod tests {
         let mut ptx = String::new();
         for kernel_spec in super::super::contract::tf32_route_specs(module_kind) {
             ptx.push_str(&format!(".visible .entry {}(\n", kernel_spec.symbol));
-            if module_kind == ModuleKind::TriadSm80 {
+            if matches!(
+                module_kind,
+                ModuleKind::TriadSm80 | ModuleKind::TriadSm89Finalist
+            ) {
                 for parameter in 0..4 {
                     ptx.push_str(&format!(".param .u64 p{parameter},\n"));
                 }
@@ -10741,6 +11063,9 @@ mod tests {
         let portable = synthetic_tf32_abi_ptx(ModuleKind::TriadSm80, 64);
         validate_tf32_parameter_abi(ModuleKind::TriadSm80, false, &portable, 12).unwrap();
         validate_tf32_parameter_abi(ModuleKind::TriadSm80, false, &portable, 13).unwrap();
+        let finalist = synthetic_tf32_abi_ptx(ModuleKind::TriadSm89Finalist, 64);
+        validate_tf32_parameter_abi(ModuleKind::TriadSm89Finalist, false, &finalist, 12).unwrap();
+        validate_tf32_parameter_abi(ModuleKind::TriadSm89Finalist, false, &finalist, 13).unwrap();
 
         for module_kind in [
             ModuleKind::TriadSm90a,
@@ -10921,7 +11246,20 @@ mod tests {
             "portable",
             Tf32DriverAbi::checked(1, vec![(0, 8)]).unwrap(),
         )]);
-        assert!(merge_tf32_driver_abi(portable, Some(duplicate)).is_err());
+        assert!(merge_tf32_driver_abi(portable.clone(), Some(duplicate.clone())).is_err());
+
+        let (retained, finalist_rejection) =
+            merge_optional_finalist_driver_abi(portable.clone(), Some(duplicate));
+        assert_eq!(
+            retained, portable,
+            "an optional ABI conflict removed portable"
+        );
+        assert!(
+            finalist_rejection
+                .as_deref()
+                .is_some_and(|reason| reason.contains("belongs to more than one module")),
+            "the optional finalist conflict was not recorded"
+        );
     }
 
     const FIXED_FRAGMENTS: &[&str] = &[
