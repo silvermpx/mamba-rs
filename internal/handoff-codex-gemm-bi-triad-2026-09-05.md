@@ -9,6 +9,15 @@ the dated progress log, 900 lines), then `internal/agent-operational-rules.md`
 
 ## 1. What the work is
 
+Assembled Fixed AUTO45 source and evidence are committed as `b221b71e`
+(`promote qualified Ada Fixed AUTO45 routes`), human identity/no trailers.
+The 131-entry phase2 manifest verifies against that commit; immutable raw logs
+retain their harmless terminal blank lines. The subsequent holder-comment
+cleanup changes Rust documentation only and is not a new GPU qualification.
+Prepared Triad discovery WIP remains separate and uncommitted. Next executable
+task: the two-cell current-AUTO diagnostic profile in
+`internal/perf/ada-triad-two-cell-ncu-20260907/plan.md`.
+
 Fixed AUTO45 assembly (2026-09-07) is now qualified: exact five rows are
 connected to public AUTO and all five once101 runs pass against the replaced
 route. TF32 E0 N96 on12.8/13.0/13.2: worst own p50

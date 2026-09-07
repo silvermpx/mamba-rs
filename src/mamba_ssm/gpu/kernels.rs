@@ -445,7 +445,7 @@ pub struct MambaKernels {
     pub gemm_bi_nn_half_sm120: Option<FixedSm120HalfKernels>,
     /// SM120 TMA BF16/F16-input, F32-output inference candidates.
     pub gemm_bi_nn_half_sm120_f32out: Option<FixedSm120HalfKernels>,
-    /// Ada-only homogeneous-half Tc128 pipeline; force-only until qualified.
+    /// Independently admitted Ada Tc128 half pipeline; used by qualified AUTO rows.
     pub fixed_sm89_half_pipeline: Option<HalfKernel>,
     /// Why the optional Ada pipeline is absent (including non-Ada targets).
     pub fixed_sm89_half_pipeline_rejection: Option<String>,
@@ -456,16 +456,16 @@ pub struct MambaKernels {
     /// Independently admitted Ada three-stage homogeneous-half pair.
     pub fixed_sm89_half_s3: Option<HalfKernel>,
     pub fixed_sm89_half_s3_rejection: Option<String>,
-    /// Fixed-owned Ada RNA-wide TF32 candidate; force-only until qualified.
+    /// Fixed-owned Ada RNA-wide TF32 route; retains qualified AUTO rows and fallbacks.
     pub fixed_sm89_tf32_rna_wide: Option<CudaFunction>,
     pub fixed_sm89_tf32_rna_wide_rejection: Option<String>,
-    /// Fixed-owned Ada RNA M128xN96 TF32 finalist; forced-only in revision 44.
+    /// Fixed-owned Ada RNA M128xN96 TF32; qualified E0 AUTO since revision 45.
     pub fixed_sm89_tf32_rna_n96: Option<CudaFunction>,
     pub fixed_sm89_tf32_rna_n96_rejection: Option<String>,
-    /// Independently admitted Ada F16 D finalist; forced-only in revision 44.
+    /// Independently admitted Ada F16 D route; qualified CUDA13.2 AUTO since revision 45.
     pub fixed_sm89_half_m64n64_s3_f16: Option<CudaFunction>,
     pub fixed_sm89_half_m64n64_s3_f16_rejection: Option<String>,
-    /// Independently admitted Ada F16 E finalist; forced-only in revision 44.
+    /// Independently admitted Ada F16 E route; qualified CUDA13.2 AUTO since revision 45.
     pub fixed_sm89_half_m128n64_s2_f16: Option<CudaFunction>,
     pub fixed_sm89_half_m128n64_s2_f16_rejection: Option<String>,
     /// Optional Ada exact-F32 N64 copy-plan; admitted independently of incumbents.
