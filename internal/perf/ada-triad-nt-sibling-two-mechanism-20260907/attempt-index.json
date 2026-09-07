@@ -1,0 +1,83 @@
+{
+  "schema": "MambaTriadNtSiblingTwoMechanismAttemptIndexV1",
+  "attempts": [
+    {
+      "kind": "build",
+      "valid": true,
+      "exit": 0,
+      "expected_tests_listed": 4,
+      "source_manifest_sha256": "b4a7d40dde86a31fc82cc808aa955b11dc8dea8d437b3e3805b89fb90fd37910",
+      "binary_sha256": "a9e7b2c3d39e42cdf254f2c013e9e39ce9930a54df58ca715ae40b8ebdbab0ab",
+      "command_sha256": "58cc186658e9a6d762f1bca86f5a7604085f0f12f47706d24fa74d42c26f6a98"
+    },
+    {
+      "kind": "once7",
+      "variant": "padded_dense_d768_out",
+      "valid": true,
+      "exit": 0,
+      "executed_tests": 1,
+      "resource_records": 1,
+      "screen_records": 4,
+      "decision_records": 1,
+      "test_log_sha256": "27714b2d6f94eccd90b870f2e1810c54162206480d02a79bfccac6af6fa6a640",
+      "command_sha256": "2b32f13c990478a5a3caa72aeafcc09c2036bd1a6544ebd291c4cd7146579ec3",
+      "decision": "advance_to_full_qualification",
+      "promotion": false,
+      "immediate_release_quiet": false,
+      "separate_drain_quiet": true
+    },
+    {
+      "kind": "once7",
+      "variant": "padded_dense_prism",
+      "valid": true,
+      "exit": 0,
+      "executed_tests": 1,
+      "resource_records": 1,
+      "screen_records": 4,
+      "decision_records": 1,
+      "test_log_sha256": "2633b9a7f8e4a46d7310373c5e8fa2fbbd1dae6ad0d57bca90730a703ec384c5",
+      "command_sha256": "58e9f93a090a4b04531b056f448f0da887b1c9d007d148045a80c5a4a7ecc78c",
+      "decision": "stop_no_retry",
+      "promotion": false,
+      "immediate_release_quiet": false,
+      "separate_drain_quiet": true
+    },
+    {
+      "kind": "once7",
+      "variant": "compact_eight_warp_s2_d768_out",
+      "valid": true,
+      "exit": 0,
+      "executed_tests": 1,
+      "resource_records": 1,
+      "screen_records": 4,
+      "decision_records": 1,
+      "test_log_sha256": "cb69a0740e126a719488f2ef9199d1ff89777a5f33fdc91b94a73db76a45e242",
+      "command_sha256": "5423626b540edec8eb3c5e4db72cbf5fe60b0a661eac969d8a231c6cc9329512",
+      "decision": "advance_to_full_qualification",
+      "promotion": false,
+      "immediate_release_quiet": false,
+      "separate_drain_quiet": true
+    },
+    {
+      "kind": "once7",
+      "variant": "compact_eight_warp_s2_prism",
+      "valid": true,
+      "exit": 0,
+      "executed_tests": 1,
+      "resource_records": 1,
+      "screen_records": 4,
+      "decision_records": 1,
+      "test_log_sha256": "ae9a7bdc95e651b61b722ce92145787b69423918bad2af68c0f4bc834044a383",
+      "command_sha256": "40e45a16856a953c5eec231e996295d5b22e3bdb66ad324fbad504e1abd9258c",
+      "decision": "advance_to_full_qualification",
+      "promotion": false,
+      "immediate_release_quiet": false,
+      "separate_drain_quiet": true
+    }
+  ],
+  "host_replay_correction": {
+    "scope": "metadata-only",
+    "description": "replaced an incorrect transformed-body/full-composed digest comparison with the actual runtime composition hash",
+    "gpu_run_affected": false
+  }
+}

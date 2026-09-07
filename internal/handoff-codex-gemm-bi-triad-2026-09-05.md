@@ -9,6 +9,45 @@ the dated progress log, 900 lines), then `internal/agent-operational-rules.md`
 
 ## 1. What the work is
 
+Latest four-arm sibling batch (2026-09-07): complete, three ADVANCE and
+one valid STOP. Compact32/eight-compute-warp/S2 is the preferred finalist
+for all three measured heavy NT TF32 shapes, with unchanged composed CUDA
+`fd5bd92f7cc56276a1b95b24b59319142b247f7ddedb14d6b06cac91843205b4`.
+New siblings use the same source/symbol as the earlier d768-in finalist:
+
+| NT case / candidate | AUTO eager median us | Candidate eager median us | paired p50 range, eager + graph | Decision |
+|---|---:|---:|---:|---|
+| d768-out / dense S3 | 120.912-121.149 | 110.283-110.490 | .911986-.919154 | ADVANCE, slower than compact in discovery |
+| Prism / dense S3 | 191.941-192.649 | 194.560-195.289 | 1.013413-1.015495 | STOP, no retry |
+| d768-out / compact S2 | 120.994-121.082 | 105.810-105.940 | .874592-.882708 | preferred ADVANCE |
+| Prism / compact S2 | 191.787-192.413 | 160.816-160.834 | .835888-.840650 | preferred ADVANCE |
+
+All four actual GPU tests pass bounded finite full-mantissa target/tail
+eager/graph bit equality, repeated execution, input immutability and guards.
+Compact remains121regs/0local/49152dynamic/occupancy2; dense remains
+154regs/0local/82944dynamic/occupancy1. Root and independent reviewer replay
+374 source hashes,112 raw paired brackets and16 strata. Each arm ran once7
+exactly once; one shared fresh build/list, reused private cache, no cold-cache
+claim. Immediate RELEASE is retained as nonquiet; separate five-second DRAIN
+is quiet for each arm. Source rs4643558f..., new Prism header790bb241...,
+binarya9e7b2c3..., manifestb4a7d40d.... Root native23 checks and actual-header
+host stage replay34,062,336 dense-copy tuples,12 negative guards and two
+compiled tail mutations PASS. Evidence and durable replayers:
+`internal/perf/ada-triad-nt-sibling-two-mechanism-20260907/README.md`.
+
+These are improvements over actual AUTO, NOT cuBLAS Fast wins. No21/101,
+full qualification, new5090 run or production promotion in this checkpoint.
+Cross-arm rank is provisional discovery, not direct candidate-vs-candidate
+admission. Freeze compact S2 for the three NT cells, then batch qualify and
+wire only admitted cells/toolkits. Keep experiments separate; do not delete
+dense kernels globally on one cell's loss. Production integration must not
+invalidate existing portable SM89/SM120 or Fixed routes: changing shared
+SM80 source changes literal cohort identities. The current bounded design
+investigation is an optional separate Ada finalist module, a distinct physical
+route identity and independently versioned selector, leaving existing module
+bytes and epoch45 intact. This is not yet implemented or admitted.
+Older entries below describe their own checkpoint's then-next action.
+
 Latest compact32/eight-compute-warp/S2 NT screen (2026-09-07): ADVANCE
 finalist, about17.4-17.7% lower runtime versus actual AUTO on
 (2048,768,3072). Eager226.257-226.262us vs274.944-275.014us;

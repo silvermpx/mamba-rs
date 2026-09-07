@@ -14,11 +14,21 @@ const PADDED_DENSE_COPY_SYMBOL: &str =
     "gemm_bi_nt_test_padded_dense_copy_sm80_mma_tf32_v1_m128n64_bk32_s3";
 const COMPACT_EIGHT_WARP_S2_SYMBOL: &str =
     "gemm_bi_nt_test_compact_eight_warp_sm80_mma_tf32_v1_m128n64_bk32_s2";
+const PADDED_DENSE_D768_OUT_SYMBOL: &str =
+    "gemm_bi_nt_test_padded_dense_d768_out_sm80_mma_tf32_v1_m128n64_bk32_s3";
+const PADDED_DENSE_PRISM_SYMBOL: &str =
+    "gemm_bi_nt_test_padded_dense_prism_sm80_mma_tf32_v1_m128n64_bk32_s3";
 const PRODUCTION_CUDA: &str = include_str!("../kernels/gemm_bi_triad/sm80.cu");
 const CANDIDATE_CUDA: &str = include_str!("gemm_bi_tf32_nt_compact_xor.cu");
 const PADDED_COPY_PLAN_CUDA: &str = include_str!("gemm_bi_tf32_nt_padded_copy_plan.cuh");
 const PADDED_LDMATRIX_CUDA: &str = include_str!("gemm_bi_tf32_nt_padded_ldmatrix.cuh");
 const PADDED_DENSE_COPY_CUDA: &str = include_str!("gemm_bi_tf32_nt_padded_dense_copy.cuh");
+const PADDED_DENSE_PRISM_CUDA: &str = include_str!("gemm_bi_tf32_nt_padded_dense_prism.cuh");
+const PADDED_DENSE_D768_OUT_GUARD_CUDA: &str = r#"__device__ __forceinline__ bool gemm_bi_tf32_nt_test_padded_dense_d768_out_target(
+    const Sm80Tf32KernelParams& params) {
+    return params.m == 2048 && params.k == 1536 && params.n == 768
+        && params.lda == 768 && params.ldb == 768 && params.ldc == 1536;
+}"#;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum CandidateVariant {
@@ -28,6 +38,10 @@ enum CandidateVariant {
     PaddedEightWarp,
     PaddedDenseCopy,
     CompactEightWarpS2,
+    CompactEightWarpS2D768Out,
+    CompactEightWarpS2Prism,
+    PaddedDenseD768Out,
+    PaddedDensePrism,
 }
 
 impl CandidateVariant {
@@ -39,6 +53,10 @@ impl CandidateVariant {
             Self::PaddedEightWarp => "padded_eight_warp",
             Self::PaddedDenseCopy => "padded_dense_copy",
             Self::CompactEightWarpS2 => "compact_eight_warp_s2",
+            Self::CompactEightWarpS2D768Out => "compact_eight_warp_s2_d768_out",
+            Self::CompactEightWarpS2Prism => "compact_eight_warp_s2_prism",
+            Self::PaddedDenseD768Out => "padded_dense_d768_out",
+            Self::PaddedDensePrism => "padded_dense_prism",
         }
     }
 
@@ -50,6 +68,11 @@ impl CandidateVariant {
             Self::PaddedEightWarp => PADDED_EIGHT_WARP_SYMBOL,
             Self::PaddedDenseCopy => PADDED_DENSE_COPY_SYMBOL,
             Self::CompactEightWarpS2 => COMPACT_EIGHT_WARP_S2_SYMBOL,
+            Self::CompactEightWarpS2D768Out | Self::CompactEightWarpS2Prism => {
+                COMPACT_EIGHT_WARP_S2_SYMBOL
+            }
+            Self::PaddedDenseD768Out => PADDED_DENSE_D768_OUT_SYMBOL,
+            Self::PaddedDensePrism => PADDED_DENSE_PRISM_SYMBOL,
         }
     }
 
@@ -59,15 +82,29 @@ impl CandidateVariant {
             Self::PaddedCopyPlan
             | Self::PaddedLdmatrix
             | Self::PaddedEightWarp
-            | Self::PaddedDenseCopy => 82_944,
-            Self::CompactEightWarpS2 => 49_152,
+            | Self::PaddedDenseCopy
+            | Self::PaddedDenseD768Out
+            | Self::PaddedDensePrism => 82_944,
+            Self::CompactEightWarpS2
+            | Self::CompactEightWarpS2D768Out
+            | Self::CompactEightWarpS2Prism => 49_152,
         }
     }
 
     const fn required_occupancy(self) -> u32 {
         match self {
-            Self::CompactEightWarpS2 => 2,
+            Self::CompactEightWarpS2
+            | Self::CompactEightWarpS2D768Out
+            | Self::CompactEightWarpS2Prism => 2,
             _ => 1,
+        }
+    }
+
+    const fn target_dims(self) -> (usize, usize, usize) {
+        match self {
+            Self::CompactEightWarpS2D768Out | Self::PaddedDenseD768Out => (2_048, 1_536, 768),
+            Self::CompactEightWarpS2Prism | Self::PaddedDensePrism => (4_621, 384, 1_928),
+            _ => (2_048, 768, 3_072),
         }
     }
 
@@ -79,6 +116,11 @@ impl CandidateVariant {
             Self::PaddedEightWarp => padded_eight_warp_candidate_source(),
             Self::PaddedDenseCopy => padded_dense_copy_candidate_source(),
             Self::CompactEightWarpS2 => compact_eight_warp_s2_candidate_source(),
+            Self::CompactEightWarpS2D768Out | Self::CompactEightWarpS2Prism => {
+                compact_eight_warp_s2_candidate_source()
+            }
+            Self::PaddedDenseD768Out => padded_dense_d768_out_candidate_source(),
+            Self::PaddedDensePrism => padded_dense_prism_candidate_source(),
         }
     }
 }
@@ -761,6 +803,107 @@ fn compact_eight_warp_s2_candidate_source() -> Result<String, String> {
     Ok(format!("{CANDIDATE_CUDA}\n{source}"))
 }
 
+fn padded_dense_d768_out_candidate_source() -> Result<String, String> {
+    let mut source = padded_dense_copy_candidate_source()?;
+    replace_exact(
+        &mut source,
+        PADDED_DENSE_COPY_CUDA,
+        &format!("{PADDED_DENSE_COPY_CUDA}\n\n{PADDED_DENSE_D768_OUT_GUARD_CUDA}"),
+        1,
+        "padded dense d768-out guard insertion",
+    )?;
+    replace_exact(
+        &mut source,
+        "gemm_bi_tf32_nt_test_padded_dense_target(params)",
+        "gemm_bi_tf32_nt_test_padded_dense_d768_out_target(params)",
+        1,
+        "padded dense d768-out target selection",
+    )?;
+    replace_exact(
+        &mut source,
+        PADDED_DENSE_COPY_SYMBOL,
+        PADDED_DENSE_D768_OUT_SYMBOL,
+        2,
+        "padded dense d768-out symbol pair",
+    )?;
+    Ok(source)
+}
+
+fn padded_dense_prism_candidate_source() -> Result<String, String> {
+    let mut source = padded_dense_copy_candidate_source()?;
+    replace_exact(
+        &mut source,
+        PADDED_DENSE_COPY_CUDA,
+        &format!("{PADDED_DENSE_COPY_CUDA}\n\n{PADDED_DENSE_PRISM_CUDA}"),
+        1,
+        "padded dense prism stage dispatcher insertion",
+    )?;
+    replace_exact(
+        &mut source,
+        "gemm_bi_tf32_nt_test_padded_dense_target(params)",
+        "gemm_bi_tf32_nt_test_padded_dense_prism_target(params)",
+        1,
+        "padded dense prism target selection",
+    )?;
+    replace_exact(
+        &mut source,
+        "gemm_bi_tf32_nt_test_padded_dense_mainloop<MAtoms, NAtoms>(",
+        "gemm_bi_tf32_nt_test_padded_dense_prism_mainloop<MAtoms, NAtoms>(",
+        1,
+        "padded dense prism target mainloop",
+    )?;
+    replace_exact(
+        &mut source,
+        PADDED_DENSE_COPY_SYMBOL,
+        PADDED_DENSE_PRISM_SYMBOL,
+        2,
+        "padded dense prism symbol pair",
+    )?;
+    Ok(source)
+}
+
+fn padded_dense_prism_stage_is_full(
+    dims: (usize, usize, usize),
+    tile_row: usize,
+    tile_column: usize,
+    reduction_base: usize,
+) -> bool {
+    dims == (4_621, 384, 1_928)
+        && tile_row + BM <= dims.0
+        && tile_column + BN <= dims.1
+        && reduction_base + BK <= dims.2
+}
+
+fn padded_dense_sibling_copy(
+    dims: (usize, usize, usize),
+    operand: DenseOperand,
+    thread: usize,
+    slice: usize,
+    stage: usize,
+    tile_row: usize,
+    tile_column: usize,
+    reduction_base: usize,
+) -> DenseCopy {
+    let linear = thread + slice * 256;
+    let axis = linear >> 3;
+    let reduction = (linear & 7) * 4;
+    const A_STAGE_FLOATS: usize = BM * PADDED_STRIDE;
+    const B_STAGE_FLOATS: usize = BN * PADDED_STRIDE;
+    const B_SHARED_BASE: usize = STAGES * A_STAGE_FLOATS;
+    match operand {
+        DenseOperand::A => DenseCopy {
+            operand,
+            global_float: (tile_row + axis) * dims.2 + reduction_base + reduction,
+            shared_float: stage * A_STAGE_FLOATS + axis * PADDED_STRIDE + reduction,
+        },
+        DenseOperand::B => DenseCopy {
+            operand,
+            global_float: (tile_column + axis) * dims.2 + reduction_base + reduction,
+            shared_float: B_SHARED_BASE + stage * B_STAGE_FLOATS + axis * PADDED_STRIDE + reduction,
+        },
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct WarpTile {
     warp_m: usize,
@@ -1143,6 +1286,170 @@ fn compact_eight_warp_s2_source_is_exactly_target_scoped() {
 }
 
 #[test]
+fn sibling_variants_bind_exact_targets_symbols_shared_and_occupancy() {
+    let cases = [
+        (
+            CandidateVariant::CompactEightWarpS2D768Out,
+            (2_048, 1_536, 768),
+            COMPACT_EIGHT_WARP_S2_SYMBOL,
+            49_152,
+            2,
+        ),
+        (
+            CandidateVariant::CompactEightWarpS2Prism,
+            (4_621, 384, 1_928),
+            COMPACT_EIGHT_WARP_S2_SYMBOL,
+            49_152,
+            2,
+        ),
+        (
+            CandidateVariant::PaddedDenseD768Out,
+            (2_048, 1_536, 768),
+            PADDED_DENSE_D768_OUT_SYMBOL,
+            82_944,
+            1,
+        ),
+        (
+            CandidateVariant::PaddedDensePrism,
+            (4_621, 384, 1_928),
+            PADDED_DENSE_PRISM_SYMBOL,
+            82_944,
+            1,
+        ),
+    ];
+    for (variant, dims, symbol, shared, occupancy) in cases {
+        assert_eq!(variant.target_dims(), dims);
+        assert_eq!(variant.symbol(), symbol);
+        assert_eq!(variant.shared_bytes(), shared);
+        assert_eq!(variant.required_occupancy(), occupancy);
+    }
+    assert_eq!(
+        CandidateVariant::CompactXor.target_dims(),
+        (2_048, 768, 3_072)
+    );
+    assert_eq!(
+        CandidateVariant::PaddedDenseCopy.target_dims(),
+        (2_048, 768, 3_072)
+    );
+}
+
+#[test]
+fn prism_stage_classification_and_dense_copy_ranges_are_exhaustive() {
+    let dims = (4_621, 384, 1_928);
+    let mut dense = 0;
+    let mut generic = 0;
+    for tile_row in (0..dims.0).step_by(BM) {
+        for tile_column in (0..dims.1).step_by(BN) {
+            for reduction_base in (0..dims.2).step_by(BK) {
+                if padded_dense_prism_stage_is_full(dims, tile_row, tile_column, reduction_base) {
+                    dense += 1;
+                    let stage = (reduction_base / BK) % STAGES;
+                    for thread in 0..256 {
+                        for slice in 0..4 {
+                            let got = padded_dense_sibling_copy(
+                                dims,
+                                DenseOperand::A,
+                                thread,
+                                slice,
+                                stage,
+                                tile_row,
+                                tile_column,
+                                reduction_base,
+                            );
+                            assert_eq!(got.operand, DenseOperand::A);
+                            assert_eq!(got.global_float % 4, 0);
+                            assert_eq!(got.shared_float % 4, 0);
+                            assert!(got.global_float + 4 <= dims.0 * dims.2);
+                            assert!(got.shared_float + 4 <= STAGES * BM * PADDED_STRIDE);
+                        }
+                        for slice in 0..2 {
+                            let got = padded_dense_sibling_copy(
+                                dims,
+                                DenseOperand::B,
+                                thread,
+                                slice,
+                                stage,
+                                tile_row,
+                                tile_column,
+                                reduction_base,
+                            );
+                            assert_eq!(got.operand, DenseOperand::B);
+                            assert_eq!(got.global_float % 4, 0);
+                            assert_eq!(got.shared_float % 4, 0);
+                            assert!(got.global_float + 4 <= dims.1 * dims.2);
+                            assert!(got.shared_float + 4 <= 82_944 / size_of::<f32>());
+                        }
+                    }
+                } else {
+                    generic += 1;
+                }
+            }
+        }
+    }
+    assert_eq!(dense, 12_960);
+    assert_eq!(generic, 582);
+    assert!(!padded_dense_prism_stage_is_full(dims, 4_608, 0, 0));
+    assert!(!padded_dense_prism_stage_is_full(dims, 0, 0, 1_920));
+    assert!(!padded_dense_prism_stage_is_full(dims, 0, 384, 0));
+    assert!(!padded_dense_prism_stage_is_full((129, 65, 36), 0, 0, 0));
+}
+
+#[test]
+fn sibling_sources_reuse_frozen_compact_and_isolate_dense_exports() {
+    let compact = compact_eight_warp_s2_candidate_source().unwrap();
+    for variant in [
+        CandidateVariant::CompactEightWarpS2D768Out,
+        CandidateVariant::CompactEightWarpS2Prism,
+    ] {
+        assert_eq!(variant.source().unwrap(), compact);
+        assert_eq!(variant.symbol(), COMPACT_EIGHT_WARP_S2_SYMBOL);
+    }
+    let out = padded_dense_d768_out_candidate_source().unwrap();
+    let prism = padded_dense_prism_candidate_source().unwrap();
+    for (source, symbol) in [
+        (&out, PADDED_DENSE_D768_OUT_SYMBOL),
+        (&prism, PADDED_DENSE_PRISM_SYMBOL),
+    ] {
+        assert!(source.contains(symbol));
+        assert!(source.contains(&format!("TF32_ASSERT_KERNEL_SIGNATURE({symbol});")));
+        assert!(!source.contains(
+            "TF32_ASSERT_KERNEL_SIGNATURE(gemm_bi_nt_sm80_mma_tf32_v1_m128n64_bk32_s3);"
+        ));
+        assert!(source.contains(PADDED_DENSE_COPY_CUDA));
+        assert!(!source.contains(PADDED_COPY_PLAN_CUDA));
+        assert!(!source.contains(PADDED_LDMATRIX_CUDA));
+        assert!(!source.contains("compact_eight_warp_s2"));
+    }
+    assert!(out.contains("params.m == 2048 && params.k == 1536 && params.n == 768"));
+    assert!(out.contains("params.lda == 768 && params.ldb == 768 && params.ldc == 1536"));
+    assert!(prism.contains("params.m == 4621 && params.k == 384 && params.n == 1928"));
+    assert!(prism.contains("params.lda == 1928 && params.ldb == 1928 && params.ldc == 384"));
+    assert!(prism.contains("gemm_bi_tf32_nt_test_padded_dense_prism_stage"));
+    assert!(prism.contains("gemm_bi_tf32_stage_async<"));
+    assert!(!out.contains(PADDED_DENSE_PRISM_CUDA));
+    assert!(prism.contains(PADDED_DENSE_PRISM_CUDA));
+
+    let mainloop_marker = "template <int MAtoms, int NAtoms>\n";
+    let dense_mainloop = PADDED_DENSE_COPY_CUDA
+        .split_once(mainloop_marker)
+        .unwrap()
+        .1;
+    let prism_mainloop = PADDED_DENSE_PRISM_CUDA
+        .split_once(mainloop_marker)
+        .unwrap()
+        .1
+        .replace(
+            "gemm_bi_tf32_nt_test_padded_dense_prism_mainloop",
+            "gemm_bi_tf32_nt_test_padded_dense_mainloop",
+        )
+        .replace(
+            "gemm_bi_tf32_nt_test_padded_dense_prism_stage",
+            "gemm_bi_tf32_nt_test_padded_dense_stage",
+        );
+    assert_eq!(prism_mainloop, dense_mainloop);
+}
+
+#[test]
 fn padded_eight_warp_mapping_covers_each_m128n64_output_once() {
     let traces = output_fragment_traces(padded_eight_compute_warp_tile);
     assert_eq!(traces.len(), BM * BN);
@@ -1289,7 +1596,6 @@ mod cuda_suite {
 
     use super::*;
 
-    const TARGET: (usize, usize, usize) = (2_048, 768, 3_072);
     const TAIL: (usize, usize, usize) = (129, 65, 36);
     const AUTO_SYMBOL: &str = "gemm_bi_nt_sm80_mma_tf32_v1_m128n64_bk32_s3";
     const AUTO_SHARED_BYTES: u32 = 82_944;
@@ -2005,6 +2311,7 @@ mod cuda_suite {
         let p50 = percentile(&ratios, 0.50);
         let p95 = percentile(&ratios, 0.95);
         let variant = candidate.variant;
+        let (m, k, n) = variant.target_dims();
         let brackets = format!(
             "[{}]",
             brackets
@@ -2014,7 +2321,7 @@ mod cuda_suite {
                 .join(",")
         );
         println!(
-            "{{\"schema\":\"MambaBiTf32NtDiscoveryScreenV1\",\"variant\":\"{}\",\"symbol\":\"{}\",\"dynamic_shared_bytes\":{},\"path\":\"{}\",\"order\":\"{}\",\"windows\":{WINDOWS},\"iterations\":{iterations},\"bracket_fields\":[\"auto0_us\",\"candidate0_us\",\"candidate1_us\",\"auto1_us\"],\"brackets\":{brackets},\"ratio_direction\":\"candidate_over_actual_auto\",\"ratio_p50\":{p50:.9},\"ratio_p95\":{p95:.9},\"auto_samples_us\":{},\"candidate_samples_us\":{},\"ratios\":{}}}",
+            "{{\"schema\":\"MambaBiTf32NtDiscoveryScreenV1\",\"variant\":\"{}\",\"symbol\":\"{}\",\"dynamic_shared_bytes\":{},\"shape\":[{m},{k},{n}],\"path\":\"{}\",\"order\":\"{}\",\"windows\":{WINDOWS},\"iterations\":{iterations},\"bracket_fields\":[\"auto0_us\",\"candidate0_us\",\"candidate1_us\",\"auto1_us\"],\"brackets\":{brackets},\"ratio_direction\":\"candidate_over_actual_auto\",\"ratio_p50\":{p50:.9},\"ratio_p95\":{p95:.9},\"auto_samples_us\":{},\"candidate_samples_us\":{},\"ratios\":{}}}",
             variant.name(),
             variant.symbol(),
             variant.shared_bytes(),
@@ -2039,18 +2346,19 @@ mod cuda_suite {
         let device = GpuDevice::new(0).unwrap();
         assert_eq!(device.compute_capability, (8, 9));
 
-        let target_words = fixture_words(TARGET).unwrap();
+        let target = variant.target_dims();
+        let target_words = fixture_words(target).unwrap();
         let auto_ctx = configure(&device).unwrap();
-        let auto_request = request(TARGET, true);
+        let auto_request = request(target, true);
         presize_physical_qualification_suite(&auto_ctx, &[auto_request]).unwrap();
         let mut actual_auto = qualify_physical_launch(&auto_ctx, auto_request).unwrap();
-        validate_reference(TARGET, true, &actual_auto).unwrap();
+        validate_reference(target, true, &actual_auto).unwrap();
         let compiler = actual_auto.evidence().route_identity().compiler;
         assert_eq!(compiler.nvrtc_version, (13, 2));
         assert_eq!(compiler.target.as_str(), "sm_89");
         assert!(compiler.nvrtc_library_known);
         let (mut candidate, source_sha) =
-            Candidate::new(&device, variant, TARGET, &target_words).unwrap();
+            Candidate::new(&device, variant, target, &target_words).unwrap();
         validate_resources(&candidate, &source_sha).unwrap();
         let golden = check_bits(
             &mut actual_auto,
@@ -2108,8 +2416,9 @@ mod cuda_suite {
             .into_iter()
             .map(|(p50, p95)| [p50, p95])
             .collect::<Vec<_>>();
+        let (m, k, n) = target;
         println!(
-            "{{\"schema\":\"MambaBiTf32NtDiscoveryDecisionV1\",\"variant\":\"{}\",\"symbol\":\"{}\",\"dynamic_shared_bytes\":{},\"shape\":[2048,768,3072],\"source_sha256\":\"{source_sha}\",\"pre\":{pre:?},\"timed_pre\":{timed_pre:?},\"post\":{post:?},\"strata_fields\":[\"ratio_p50\",\"ratio_p95\"],\"strata\":{},\"retain\":{retain},\"decision\":\"{}\",\"promotion\":false}}",
+            "{{\"schema\":\"MambaBiTf32NtDiscoveryDecisionV1\",\"variant\":\"{}\",\"symbol\":\"{}\",\"dynamic_shared_bytes\":{},\"shape\":[{m},{k},{n}],\"source_sha256\":\"{source_sha}\",\"pre\":{pre:?},\"timed_pre\":{timed_pre:?},\"post\":{post:?},\"strata_fields\":[\"ratio_p50\",\"ratio_p95\"],\"strata\":{},\"retain\":{retain},\"decision\":\"{}\",\"promotion\":false}}",
             variant.name(),
             variant.symbol(),
             variant.shared_bytes(),
@@ -2156,5 +2465,29 @@ mod cuda_suite {
     #[ignore = "requires exclusive Ada CC8.9 CUDA13.2; compact eight-warp S2 NT discovery"]
     fn ada_tf32_nt_compact_eight_warp_s2_discovery_once7() {
         run(CandidateVariant::CompactEightWarpS2);
+    }
+
+    #[test]
+    #[ignore = "requires exclusive Ada CC8.9 CUDA13.2; compact eight-warp S2 d768-out discovery"]
+    fn ada_tf32_nt_compact_eight_warp_s2_d768_out_discovery_once7() {
+        run(CandidateVariant::CompactEightWarpS2D768Out);
+    }
+
+    #[test]
+    #[ignore = "requires exclusive Ada CC8.9 CUDA13.2; compact eight-warp S2 prism discovery"]
+    fn ada_tf32_nt_compact_eight_warp_s2_prism_discovery_once7() {
+        run(CandidateVariant::CompactEightWarpS2Prism);
+    }
+
+    #[test]
+    #[ignore = "requires exclusive Ada CC8.9 CUDA13.2; padded dense d768-out discovery"]
+    fn ada_tf32_nt_padded_dense_d768_out_discovery_once7() {
+        run(CandidateVariant::PaddedDenseD768Out);
+    }
+
+    #[test]
+    #[ignore = "requires exclusive Ada CC8.9 CUDA13.2; padded dense prism discovery"]
+    fn ada_tf32_nt_padded_dense_prism_discovery_once7() {
+        run(CandidateVariant::PaddedDensePrism);
     }
 }
