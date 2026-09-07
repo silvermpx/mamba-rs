@@ -160,3 +160,77 @@ this codebase; apply them in order.
   the failure pattern (every GPU test failing at context creation)
   pointed at an NVRTC syntax error, not a numeric defect.
 
+## 9. Kernel optimization protocol: diagnose before designing
+
+Use this protocol for Fixed inference and Triad NN/TN/NT work. Its purpose is
+to prevent long sequences of plausible but causally unsupported tile changes.
+
+1. **Freeze the exact cell contract from machine-readable evidence.** Read the
+   current production census/raw JSONL and record operation, dtype, M/K/N,
+   strides, bias, alpha/beta, CUDA toolkit, CC/SM count, dispatcher revision,
+   selected symbol, grid/block/shared bytes, and the exact cuBLAS compute/math
+   mode. Treat prose and copied task briefs as hints only. The Ada half pass
+   caught a stale `K=256` brief only by checking the authoritative B0 record,
+   where `K=768`; the wrong-shape timing remains useful evidence but is not an
+   admission result.
+2. **Inventory before inventing.** Enumerate every existing kernel, loader
+   holder, force route, AUTO selector cell, graph identity, supported CUDA
+   toolkit and architecture fallback. Run a full census to find unwired
+   champions before writing another kernel. A candidate is not production
+   work until the dispatcher, loader, tests and graph route all select it.
+3. **Define the comparator literally.** `CUBLAS_COMPUTE_32F`,
+   `CUBLAS_COMPUTE_32F_FAST_TF32` and PEDANTIC are different denominators.
+   Record algorithm, math mode, bias work and graph/eager semantics in every
+   result. Never infer a FAST victory from a PEDANTIC comparison.
+4. **Diagnose the bottleneck before changing geometry.** Capture an isolated
+   full-shape baseline. When the mechanism is unclear, consult authoritative
+   NVIDIA/PTX/CUTLASS sources and profile with Nsight Compute (SpeedOfLight,
+   SchedulerStats, WarpStateStats, MemoryWorkload, Occupancy, LaunchStats and
+   InstructionStats). Rank experiments from measured barrier/scoreboard/MIO,
+   eligible-warp, tensor-pipe, cache/DRAM and tail-wave evidence. If profiling
+   is unavailable, use physical graph/resource/SASS evidence and paired
+   microbenchmarks, but label the causal inference.
+5. **Change one mechanism per experiment.** Examples are stage schedule,
+   stage count, warp tile, CTA tile, copy plan, raster order or epilogue—not
+   several at once. Write a short hypothesis with the expected counter change
+   and a stop condition. Preserve architecture limits explicitly; Hopper
+   TMA/WGMMA or warp-specialized recipes do not apply to SM80/SM89.
+6. **Prove the schedule on the host first.** Before CUDA, write an exhaustive
+   RED/GREEN model for copy coverage, shared ranges, fragment addresses,
+   stage-ring lifetime, output ownership and tail/drain behavior. For
+   deterministic GEMM, also prove one CTA per output and the unchanged
+   ascending MMA/reduction order. Host layout success is necessary, not a
+   performance claim.
+7. **Use fail-closed GPU gates in increasing cost order.** Compile/PTXAS and
+   reject illegal shared memory, register overflow, local memory or spills;
+   check runtime occupancy and exact function/grid/block/shared/ABI; then run
+   ordinary, exceptional, tail, alignment, stride, view, redzone,
+   input-immutability, eager-repeat and graph-repeat bit gates. Only then run
+   paired alternating ABBA/BAAB timing for 21 windows. Advance to 101 windows
+   only when both p50 and p95 beat the incumbent and required cuBLAS target.
+8. **Qualify each domain independently.** A win on CUDA 13.2 does not admit
+   CUDA 13.0/12.8, and a win on SM89 does not prove SM80/SM120. Rebuild with
+   separate source/target/cache identities and rerun correctness, physical
+   graph and paired timing for every promoted toolkit/device/dtype/op cell.
+   Portable fast kernels should remain available as fallbacks on unoptimized
+   architectures; architecture-specific AUTO promotion remains literal.
+9. **Preserve evidence and report every decision.** Keep raw samples,
+   analyzer plus synthetic rejection tests, source snapshots, telemetry and a
+   rooted SHA256 manifest. Never overwrite a wrong-shape or losing run; mark
+   why it is non-admissible. After each robust victory report exact p50/p95,
+   resources and promoted dispatcher cells. Keep measured losers until the
+   release cleanup pass, where only proven duplicate/unreachable candidates
+   are removed.
+10. **Split roles without splitting truth.** One owner controls the GPU lane;
+    read-only agents may audit sources/evidence or authoritative external
+    references in parallel; one implementer owns an isolated candidate; an
+    independent reviewer checks any production promotion. The root owner
+    verifies manifests and full gates, updates the decision ledger, and makes
+    small green commits with human repository identity.
+
+For Triad, begin with a complete matrix of NN/TN/NT × dtype × shape × bias ×
+toolkit × architecture and profile the worst release-weighted cells first.
+Reuse the deterministic arithmetic contract and this gate order, but do not
+assume a Fixed NN schedule transfers to transposed operand layouts: copy
+coalescing, shared layout, raster order and cuBLAS's selected kernel must be
+measured separately for each operation.
