@@ -1,0 +1,482 @@
+{
+  "valid": true,
+  "configurations": 8,
+  "samples": 96,
+  "pairs": 24,
+  "summaries": [
+    {
+      "dtype": "bf16",
+      "path": "eager",
+      "start_parity": 0,
+      "comparison": 0,
+      "direction": "AUTO/Swizzle",
+      "p50": 0.9235136084302278,
+      "p95": 0.9235136084302278
+    },
+    {
+      "dtype": "bf16",
+      "path": "eager",
+      "start_parity": 0,
+      "comparison": 1,
+      "direction": "Swizzle/Fast",
+      "p50": 1.293450248179577,
+      "p95": 1.293450248179577
+    },
+    {
+      "dtype": "bf16",
+      "path": "eager",
+      "start_parity": 0,
+      "comparison": 2,
+      "direction": "AUTO/Fast",
+      "p50": 1.208102939881853,
+      "p95": 1.208102939881853
+    },
+    {
+      "dtype": "bf16",
+      "path": "eager",
+      "start_parity": 1,
+      "comparison": 0,
+      "direction": "AUTO/Swizzle",
+      "p50": 0.9672250349199407,
+      "p95": 0.9672250349199407
+    },
+    {
+      "dtype": "bf16",
+      "path": "eager",
+      "start_parity": 1,
+      "comparison": 1,
+      "direction": "Swizzle/Fast",
+      "p50": 1.301293922345477,
+      "p95": 1.301293922345477
+    },
+    {
+      "dtype": "bf16",
+      "path": "eager",
+      "start_parity": 1,
+      "comparison": 2,
+      "direction": "AUTO/Fast",
+      "p50": 1.208778855953073,
+      "p95": 1.208778855953073
+    },
+    {
+      "dtype": "bf16",
+      "path": "graph",
+      "start_parity": 0,
+      "comparison": 0,
+      "direction": "AUTO/Swizzle",
+      "p50": 0.9308256416195456,
+      "p95": 0.9308256416195456
+    },
+    {
+      "dtype": "bf16",
+      "path": "graph",
+      "start_parity": 0,
+      "comparison": 1,
+      "direction": "Swizzle/Fast",
+      "p50": 1.3012067591703336,
+      "p95": 1.3012067591703336
+    },
+    {
+      "dtype": "bf16",
+      "path": "graph",
+      "start_parity": 0,
+      "comparison": 2,
+      "direction": "AUTO/Fast",
+      "p50": 1.2142840091139264,
+      "p95": 1.2142840091139264
+    },
+    {
+      "dtype": "bf16",
+      "path": "graph",
+      "start_parity": 1,
+      "comparison": 0,
+      "direction": "AUTO/Swizzle",
+      "p50": 0.9318604837540722,
+      "p95": 0.9318604837540722
+    },
+    {
+      "dtype": "bf16",
+      "path": "graph",
+      "start_parity": 1,
+      "comparison": 1,
+      "direction": "Swizzle/Fast",
+      "p50": 1.3093214897897167,
+      "p95": 1.3093214897897167
+    },
+    {
+      "dtype": "bf16",
+      "path": "graph",
+      "start_parity": 1,
+      "comparison": 2,
+      "direction": "AUTO/Fast",
+      "p50": 1.2140517889399438,
+      "p95": 1.2140517889399438
+    },
+    {
+      "dtype": "f16",
+      "path": "eager",
+      "start_parity": 0,
+      "comparison": 0,
+      "direction": "AUTO/Swizzle",
+      "p50": 0.9261801887578555,
+      "p95": 0.9261801887578555
+    },
+    {
+      "dtype": "f16",
+      "path": "eager",
+      "start_parity": 0,
+      "comparison": 1,
+      "direction": "Swizzle/Fast",
+      "p50": 1.201472526504355,
+      "p95": 1.201472526504355
+    },
+    {
+      "dtype": "f16",
+      "path": "eager",
+      "start_parity": 0,
+      "comparison": 2,
+      "direction": "AUTO/Fast",
+      "p50": 1.1120863543089432,
+      "p95": 1.1120863543089432
+    },
+    {
+      "dtype": "f16",
+      "path": "eager",
+      "start_parity": 1,
+      "comparison": 0,
+      "direction": "AUTO/Swizzle",
+      "p50": 0.9264545739494633,
+      "p95": 0.9264545739494633
+    },
+    {
+      "dtype": "f16",
+      "path": "eager",
+      "start_parity": 1,
+      "comparison": 1,
+      "direction": "Swizzle/Fast",
+      "p50": 1.2044026213941812,
+      "p95": 1.2044026213941812
+    },
+    {
+      "dtype": "f16",
+      "path": "eager",
+      "start_parity": 1,
+      "comparison": 2,
+      "direction": "AUTO/Fast",
+      "p50": 1.115576140971467,
+      "p95": 1.115576140971467
+    },
+    {
+      "dtype": "f16",
+      "path": "graph",
+      "start_parity": 0,
+      "comparison": 0,
+      "direction": "AUTO/Swizzle",
+      "p50": 0.9305025949874499,
+      "p95": 0.9305025949874499
+    },
+    {
+      "dtype": "f16",
+      "path": "graph",
+      "start_parity": 0,
+      "comparison": 1,
+      "direction": "Swizzle/Fast",
+      "p50": 1.2025680842231543,
+      "p95": 1.2025680842231543
+    },
+    {
+      "dtype": "f16",
+      "path": "graph",
+      "start_parity": 0,
+      "comparison": 2,
+      "direction": "AUTO/Fast",
+      "p50": 1.123669299067976,
+      "p95": 1.123669299067976
+    },
+    {
+      "dtype": "f16",
+      "path": "graph",
+      "start_parity": 1,
+      "comparison": 0,
+      "direction": "AUTO/Swizzle",
+      "p50": 0.9284727047267438,
+      "p95": 0.9284727047267438
+    },
+    {
+      "dtype": "f16",
+      "path": "graph",
+      "start_parity": 1,
+      "comparison": 1,
+      "direction": "Swizzle/Fast",
+      "p50": 1.0853143488153254,
+      "p95": 1.0853143488153254
+    },
+    {
+      "dtype": "f16",
+      "path": "graph",
+      "start_parity": 1,
+      "comparison": 2,
+      "direction": "AUTO/Fast",
+      "p50": 1.0110655527275128,
+      "p95": 1.0110655527275128
+    }
+  ],
+  "cells": [
+    {
+      "dtype": "bf16",
+      "toolkit": "13.2",
+      "windows": 1,
+      "valid": true,
+      "own_win": true,
+      "admission": false,
+      "advance101": false,
+      "worst_own_p50": 0.9672250349199407,
+      "worst_own_p95": 0.9672250349199407,
+      "constituents": [
+        {
+          "dtype": "bf16",
+          "path": "eager",
+          "start_parity": 0,
+          "comparison": 0,
+          "direction": "AUTO/Swizzle",
+          "p50": 0.9235136084302278,
+          "p95": 0.9235136084302278
+        },
+        {
+          "dtype": "bf16",
+          "path": "eager",
+          "start_parity": 0,
+          "comparison": 1,
+          "direction": "Swizzle/Fast",
+          "p50": 1.293450248179577,
+          "p95": 1.293450248179577
+        },
+        {
+          "dtype": "bf16",
+          "path": "eager",
+          "start_parity": 0,
+          "comparison": 2,
+          "direction": "AUTO/Fast",
+          "p50": 1.208102939881853,
+          "p95": 1.208102939881853
+        },
+        {
+          "dtype": "bf16",
+          "path": "eager",
+          "start_parity": 1,
+          "comparison": 0,
+          "direction": "AUTO/Swizzle",
+          "p50": 0.9672250349199407,
+          "p95": 0.9672250349199407
+        },
+        {
+          "dtype": "bf16",
+          "path": "eager",
+          "start_parity": 1,
+          "comparison": 1,
+          "direction": "Swizzle/Fast",
+          "p50": 1.301293922345477,
+          "p95": 1.301293922345477
+        },
+        {
+          "dtype": "bf16",
+          "path": "eager",
+          "start_parity": 1,
+          "comparison": 2,
+          "direction": "AUTO/Fast",
+          "p50": 1.208778855953073,
+          "p95": 1.208778855953073
+        },
+        {
+          "dtype": "bf16",
+          "path": "graph",
+          "start_parity": 0,
+          "comparison": 0,
+          "direction": "AUTO/Swizzle",
+          "p50": 0.9308256416195456,
+          "p95": 0.9308256416195456
+        },
+        {
+          "dtype": "bf16",
+          "path": "graph",
+          "start_parity": 0,
+          "comparison": 1,
+          "direction": "Swizzle/Fast",
+          "p50": 1.3012067591703336,
+          "p95": 1.3012067591703336
+        },
+        {
+          "dtype": "bf16",
+          "path": "graph",
+          "start_parity": 0,
+          "comparison": 2,
+          "direction": "AUTO/Fast",
+          "p50": 1.2142840091139264,
+          "p95": 1.2142840091139264
+        },
+        {
+          "dtype": "bf16",
+          "path": "graph",
+          "start_parity": 1,
+          "comparison": 0,
+          "direction": "AUTO/Swizzle",
+          "p50": 0.9318604837540722,
+          "p95": 0.9318604837540722
+        },
+        {
+          "dtype": "bf16",
+          "path": "graph",
+          "start_parity": 1,
+          "comparison": 1,
+          "direction": "Swizzle/Fast",
+          "p50": 1.3093214897897167,
+          "p95": 1.3093214897897167
+        },
+        {
+          "dtype": "bf16",
+          "path": "graph",
+          "start_parity": 1,
+          "comparison": 2,
+          "direction": "AUTO/Fast",
+          "p50": 1.2140517889399438,
+          "p95": 1.2140517889399438
+        }
+      ]
+    },
+    {
+      "dtype": "f16",
+      "toolkit": "13.2",
+      "windows": 1,
+      "valid": true,
+      "own_win": true,
+      "admission": false,
+      "advance101": false,
+      "worst_own_p50": 0.9305025949874499,
+      "worst_own_p95": 0.9305025949874499,
+      "constituents": [
+        {
+          "dtype": "f16",
+          "path": "eager",
+          "start_parity": 0,
+          "comparison": 0,
+          "direction": "AUTO/Swizzle",
+          "p50": 0.9261801887578555,
+          "p95": 0.9261801887578555
+        },
+        {
+          "dtype": "f16",
+          "path": "eager",
+          "start_parity": 0,
+          "comparison": 1,
+          "direction": "Swizzle/Fast",
+          "p50": 1.201472526504355,
+          "p95": 1.201472526504355
+        },
+        {
+          "dtype": "f16",
+          "path": "eager",
+          "start_parity": 0,
+          "comparison": 2,
+          "direction": "AUTO/Fast",
+          "p50": 1.1120863543089432,
+          "p95": 1.1120863543089432
+        },
+        {
+          "dtype": "f16",
+          "path": "eager",
+          "start_parity": 1,
+          "comparison": 0,
+          "direction": "AUTO/Swizzle",
+          "p50": 0.9264545739494633,
+          "p95": 0.9264545739494633
+        },
+        {
+          "dtype": "f16",
+          "path": "eager",
+          "start_parity": 1,
+          "comparison": 1,
+          "direction": "Swizzle/Fast",
+          "p50": 1.2044026213941812,
+          "p95": 1.2044026213941812
+        },
+        {
+          "dtype": "f16",
+          "path": "eager",
+          "start_parity": 1,
+          "comparison": 2,
+          "direction": "AUTO/Fast",
+          "p50": 1.115576140971467,
+          "p95": 1.115576140971467
+        },
+        {
+          "dtype": "f16",
+          "path": "graph",
+          "start_parity": 0,
+          "comparison": 0,
+          "direction": "AUTO/Swizzle",
+          "p50": 0.9305025949874499,
+          "p95": 0.9305025949874499
+        },
+        {
+          "dtype": "f16",
+          "path": "graph",
+          "start_parity": 0,
+          "comparison": 1,
+          "direction": "Swizzle/Fast",
+          "p50": 1.2025680842231543,
+          "p95": 1.2025680842231543
+        },
+        {
+          "dtype": "f16",
+          "path": "graph",
+          "start_parity": 0,
+          "comparison": 2,
+          "direction": "AUTO/Fast",
+          "p50": 1.123669299067976,
+          "p95": 1.123669299067976
+        },
+        {
+          "dtype": "f16",
+          "path": "graph",
+          "start_parity": 1,
+          "comparison": 0,
+          "direction": "AUTO/Swizzle",
+          "p50": 0.9284727047267438,
+          "p95": 0.9284727047267438
+        },
+        {
+          "dtype": "f16",
+          "path": "graph",
+          "start_parity": 1,
+          "comparison": 1,
+          "direction": "Swizzle/Fast",
+          "p50": 1.0853143488153254,
+          "p95": 1.0853143488153254
+        },
+        {
+          "dtype": "f16",
+          "path": "graph",
+          "start_parity": 1,
+          "comparison": 2,
+          "direction": "AUTO/Fast",
+          "p50": 1.0110655527275128,
+          "p95": 1.0110655527275128
+        }
+      ]
+    }
+  ],
+  "schema": "MambaBiFixedAdaS3PostAutoPairedV1",
+  "stage": "post_auto",
+  "compiled_identity_revision": 42,
+  "routing_revision": 43,
+  "validation": {
+    "revision": "post-auto43-exact-same-attempt-adapter-v1",
+    "analyzer_sha": "0a8c16dffa7fe7226fce975a252408fac6a751832ee032b9b731eeb17819e71a",
+    "frozen_pre_analyzer_sha": "0c1391f47ec0253720b66733e950b8f9ad67ba112027b81e2d67eda9a1e63f30",
+    "frozen_pre_wrapper_sha": "ce0de6882fa45835ba81b90d02a6cc085ed32226e2462b72260ce9cacd0fd713",
+    "ssh_log_sha": "9fc9d7f3a41a5025569a66d5849c844bb93f5e772b6b0d21fcd790b9e8c22375",
+    "binding_sha": "04a86811267df0676c2e3386bed52395b2fc0ed5e81974a548c65346b4b6ad33",
+    "qualification_sha": "28421e40a58c71e0410015a9a78ceb6ad0f6b42c327a9e3cf985f684bb381841"
+  }
+}
+ANALYZER_EXIT=0

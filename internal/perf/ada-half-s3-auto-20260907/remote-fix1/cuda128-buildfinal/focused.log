@@ -1,0 +1,12 @@
+    Finished `release` profile [optimized] target(s) in 0.07s
+     Running tests/gemm_bi_fixed_performance.rs (/root/target-ada-half-s3-auto-fix1-cuda128-20260907/release/deps/gemm_bi_fixed_performance-adf126b1f35855e0)
+
+running 5 tests
+test ada_s3_pair::mirrored_brackets_reverse_both_arm_order_and_comparison_traversal ... ok
+test ada_s3_pair::pre42_and_post43_configuration_cannot_mute_screen_or_accept_implicit_windows ... ok
+test ada_s3_pair::pre42_and_post43_stage_controls_and_directions_are_disjoint ... ok
+test ada_s3_pair::pre_timing_input_gate_rejects_changed_a_or_b_bytes ... ok
+test ada_s3_pair::ratios_use_sum_of_two_observations_and_reject_invalid_times ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 113 filtered out; finished in 0.00s
+

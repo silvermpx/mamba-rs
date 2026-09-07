@@ -1,0 +1,418 @@
+{
+  "status": "PASS",
+  "checker": ".superpowers/sdd/handoff-codex-gemm-bi-triad-2026-09-05/recompute-s3-post-pairs.rb",
+  "checker_sha256": "8dc4327e7810bfd8bbfe79dd1b2984c829e3c68675cee5fc7a413f79a2ea3843",
+  "scope": "Independent arithmetic, raw sample chronology, mirrored arm order, exact post43 schema/toolkit/configuration and rounded quantiles; physical and same-attempt closure checked separately by analyzer.",
+  "runs": [
+    {
+      "path": "internal/perf/ada-half-s3-auto-20260907/remote-fix1/cuda132-postsmoke1/test.log",
+      "sha256": "c1179e50c5a1cd3e7427f7c893d4f386b94304395ad09a664fdf87fd7a9fe3b2",
+      "toolkit": "13.2",
+      "windows": 1,
+      "checked_configurations": 8,
+      "samples": 96,
+      "pairs": 24,
+      "summaries": 24,
+      "arithmetic_and_chronology": "PASS",
+      "recomputed": [
+        {
+          "dtype": "bf16",
+          "path": "eager",
+          "start_parity": 0,
+          "direction": "AUTO/Swizzle",
+          "p50": 0.9235136084302278,
+          "p95": 0.9235136084302278
+        },
+        {
+          "dtype": "bf16",
+          "path": "eager",
+          "start_parity": 0,
+          "direction": "Swizzle/Fast",
+          "p50": 1.293450248179577,
+          "p95": 1.293450248179577
+        },
+        {
+          "dtype": "bf16",
+          "path": "eager",
+          "start_parity": 0,
+          "direction": "AUTO/Fast",
+          "p50": 1.208102939881853,
+          "p95": 1.208102939881853
+        },
+        {
+          "dtype": "bf16",
+          "path": "eager",
+          "start_parity": 1,
+          "direction": "AUTO/Swizzle",
+          "p50": 0.9672250349199407,
+          "p95": 0.9672250349199407
+        },
+        {
+          "dtype": "bf16",
+          "path": "eager",
+          "start_parity": 1,
+          "direction": "Swizzle/Fast",
+          "p50": 1.301293922345477,
+          "p95": 1.301293922345477
+        },
+        {
+          "dtype": "bf16",
+          "path": "eager",
+          "start_parity": 1,
+          "direction": "AUTO/Fast",
+          "p50": 1.208778855953073,
+          "p95": 1.208778855953073
+        },
+        {
+          "dtype": "bf16",
+          "path": "graph",
+          "start_parity": 0,
+          "direction": "AUTO/Swizzle",
+          "p50": 0.9308256416195456,
+          "p95": 0.9308256416195456
+        },
+        {
+          "dtype": "bf16",
+          "path": "graph",
+          "start_parity": 0,
+          "direction": "Swizzle/Fast",
+          "p50": 1.3012067591703336,
+          "p95": 1.3012067591703336
+        },
+        {
+          "dtype": "bf16",
+          "path": "graph",
+          "start_parity": 0,
+          "direction": "AUTO/Fast",
+          "p50": 1.2142840091139264,
+          "p95": 1.2142840091139264
+        },
+        {
+          "dtype": "bf16",
+          "path": "graph",
+          "start_parity": 1,
+          "direction": "AUTO/Swizzle",
+          "p50": 0.9318604837540722,
+          "p95": 0.9318604837540722
+        },
+        {
+          "dtype": "bf16",
+          "path": "graph",
+          "start_parity": 1,
+          "direction": "Swizzle/Fast",
+          "p50": 1.3093214897897167,
+          "p95": 1.3093214897897167
+        },
+        {
+          "dtype": "bf16",
+          "path": "graph",
+          "start_parity": 1,
+          "direction": "AUTO/Fast",
+          "p50": 1.2140517889399438,
+          "p95": 1.2140517889399438
+        },
+        {
+          "dtype": "f16",
+          "path": "eager",
+          "start_parity": 0,
+          "direction": "AUTO/Swizzle",
+          "p50": 0.9261801887578555,
+          "p95": 0.9261801887578555
+        },
+        {
+          "dtype": "f16",
+          "path": "eager",
+          "start_parity": 0,
+          "direction": "Swizzle/Fast",
+          "p50": 1.201472526504355,
+          "p95": 1.201472526504355
+        },
+        {
+          "dtype": "f16",
+          "path": "eager",
+          "start_parity": 0,
+          "direction": "AUTO/Fast",
+          "p50": 1.1120863543089432,
+          "p95": 1.1120863543089432
+        },
+        {
+          "dtype": "f16",
+          "path": "eager",
+          "start_parity": 1,
+          "direction": "AUTO/Swizzle",
+          "p50": 0.9264545739494633,
+          "p95": 0.9264545739494633
+        },
+        {
+          "dtype": "f16",
+          "path": "eager",
+          "start_parity": 1,
+          "direction": "Swizzle/Fast",
+          "p50": 1.2044026213941812,
+          "p95": 1.2044026213941812
+        },
+        {
+          "dtype": "f16",
+          "path": "eager",
+          "start_parity": 1,
+          "direction": "AUTO/Fast",
+          "p50": 1.115576140971467,
+          "p95": 1.115576140971467
+        },
+        {
+          "dtype": "f16",
+          "path": "graph",
+          "start_parity": 0,
+          "direction": "AUTO/Swizzle",
+          "p50": 0.9305025949874499,
+          "p95": 0.9305025949874499
+        },
+        {
+          "dtype": "f16",
+          "path": "graph",
+          "start_parity": 0,
+          "direction": "Swizzle/Fast",
+          "p50": 1.2025680842231543,
+          "p95": 1.2025680842231543
+        },
+        {
+          "dtype": "f16",
+          "path": "graph",
+          "start_parity": 0,
+          "direction": "AUTO/Fast",
+          "p50": 1.123669299067976,
+          "p95": 1.123669299067976
+        },
+        {
+          "dtype": "f16",
+          "path": "graph",
+          "start_parity": 1,
+          "direction": "AUTO/Swizzle",
+          "p50": 0.9284727047267438,
+          "p95": 0.9284727047267438
+        },
+        {
+          "dtype": "f16",
+          "path": "graph",
+          "start_parity": 1,
+          "direction": "Swizzle/Fast",
+          "p50": 1.0853143488153254,
+          "p95": 1.0853143488153254
+        },
+        {
+          "dtype": "f16",
+          "path": "graph",
+          "start_parity": 1,
+          "direction": "AUTO/Fast",
+          "p50": 1.0110655527275128,
+          "p95": 1.0110655527275128
+        }
+      ]
+    },
+    {
+      "path": "internal/perf/ada-half-s3-auto-20260907/remote-fix1/cuda132-postconfirm101/test.log",
+      "sha256": "b6d0fca4305b6846a427c9dc8432e727dfa5434e68f380ca29511916a8c7d620",
+      "toolkit": "13.2",
+      "windows": 101,
+      "checked_configurations": 8,
+      "samples": 9696,
+      "pairs": 2424,
+      "summaries": 24,
+      "arithmetic_and_chronology": "PASS",
+      "recomputed": [
+        {
+          "dtype": "bf16",
+          "path": "eager",
+          "start_parity": 0,
+          "direction": "AUTO/Swizzle",
+          "p50": 0.9274580383710863,
+          "p95": 0.9522697871194866
+        },
+        {
+          "dtype": "bf16",
+          "path": "eager",
+          "start_parity": 0,
+          "direction": "Swizzle/Fast",
+          "p50": 1.3083925836604458,
+          "p95": 1.3482905172723965
+        },
+        {
+          "dtype": "bf16",
+          "path": "eager",
+          "start_parity": 0,
+          "direction": "AUTO/Fast",
+          "p50": 1.2051732002723936,
+          "p95": 1.2260802296783255
+        },
+        {
+          "dtype": "bf16",
+          "path": "eager",
+          "start_parity": 1,
+          "direction": "AUTO/Swizzle",
+          "p50": 0.9272740155615736,
+          "p95": 0.9535540886865607
+        },
+        {
+          "dtype": "bf16",
+          "path": "eager",
+          "start_parity": 1,
+          "direction": "Swizzle/Fast",
+          "p50": 1.3119232091493531,
+          "p95": 1.3534526998291345
+        },
+        {
+          "dtype": "bf16",
+          "path": "eager",
+          "start_parity": 1,
+          "direction": "AUTO/Fast",
+          "p50": 1.2028392106119934,
+          "p95": 1.2289311221800054
+        },
+        {
+          "dtype": "bf16",
+          "path": "graph",
+          "start_parity": 0,
+          "direction": "AUTO/Swizzle",
+          "p50": 0.929889194840401,
+          "p95": 0.9537005553763895
+        },
+        {
+          "dtype": "bf16",
+          "path": "graph",
+          "start_parity": 0,
+          "direction": "Swizzle/Fast",
+          "p50": 1.310876938076644,
+          "p95": 1.3634863850630579
+        },
+        {
+          "dtype": "bf16",
+          "path": "graph",
+          "start_parity": 0,
+          "direction": "AUTO/Fast",
+          "p50": 1.207046379000009,
+          "p95": 1.2312232185394065
+        },
+        {
+          "dtype": "bf16",
+          "path": "graph",
+          "start_parity": 1,
+          "direction": "AUTO/Swizzle",
+          "p50": 0.9297051928280385,
+          "p95": 0.946809960723235
+        },
+        {
+          "dtype": "bf16",
+          "path": "graph",
+          "start_parity": 1,
+          "direction": "Swizzle/Fast",
+          "p50": 1.3096775406625238,
+          "p95": 1.359965630389709
+        },
+        {
+          "dtype": "bf16",
+          "path": "graph",
+          "start_parity": 1,
+          "direction": "AUTO/Fast",
+          "p50": 1.201205859606426,
+          "p95": 1.2276483384985526
+        },
+        {
+          "dtype": "f16",
+          "path": "eager",
+          "start_parity": 0,
+          "direction": "AUTO/Swizzle",
+          "p50": 0.9246176477290434,
+          "p95": 0.9453087026696987
+        },
+        {
+          "dtype": "f16",
+          "path": "eager",
+          "start_parity": 0,
+          "direction": "Swizzle/Fast",
+          "p50": 1.2411129465769994,
+          "p95": 1.2737519708762137
+        },
+        {
+          "dtype": "f16",
+          "path": "eager",
+          "start_parity": 0,
+          "direction": "AUTO/Fast",
+          "p50": 1.1243727149714473,
+          "p95": 1.1591925200143105
+        },
+        {
+          "dtype": "f16",
+          "path": "eager",
+          "start_parity": 1,
+          "direction": "AUTO/Swizzle",
+          "p50": 0.9253112176207988,
+          "p95": 0.9478767293248364
+        },
+        {
+          "dtype": "f16",
+          "path": "eager",
+          "start_parity": 1,
+          "direction": "Swizzle/Fast",
+          "p50": 1.238443357701205,
+          "p95": 1.2716883270883526
+        },
+        {
+          "dtype": "f16",
+          "path": "eager",
+          "start_parity": 1,
+          "direction": "AUTO/Fast",
+          "p50": 1.1256152742219785,
+          "p95": 1.1578876689340787
+        },
+        {
+          "dtype": "f16",
+          "path": "graph",
+          "start_parity": 0,
+          "direction": "AUTO/Swizzle",
+          "p50": 0.9290184432388275,
+          "p95": 0.9559939091095274
+        },
+        {
+          "dtype": "f16",
+          "path": "graph",
+          "start_parity": 0,
+          "direction": "Swizzle/Fast",
+          "p50": 1.247498019619767,
+          "p95": 1.2761323232088495
+        },
+        {
+          "dtype": "f16",
+          "path": "graph",
+          "start_parity": 0,
+          "direction": "AUTO/Fast",
+          "p50": 1.1317845432212559,
+          "p95": 1.1565776126808915
+        },
+        {
+          "dtype": "f16",
+          "path": "graph",
+          "start_parity": 1,
+          "direction": "AUTO/Swizzle",
+          "p50": 0.9285279296380083,
+          "p95": 0.9532888604852436
+        },
+        {
+          "dtype": "f16",
+          "path": "graph",
+          "start_parity": 1,
+          "direction": "Swizzle/Fast",
+          "p50": 1.2475184973744473,
+          "p95": 1.2746058805757394
+        },
+        {
+          "dtype": "f16",
+          "path": "graph",
+          "start_parity": 1,
+          "direction": "AUTO/Fast",
+          "p50": 1.1334733382925226,
+          "p95": 1.1577498647574902
+        }
+      ]
+    }
+  ]
+}

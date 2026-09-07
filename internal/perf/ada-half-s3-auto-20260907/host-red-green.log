@@ -1,0 +1,41 @@
+Task6C host RED/GREEN transcript (commands executed through ssh alias ada)
+
+RED1 command:
+env CUDA_HOME=/usr/local/cuda-13.2 CUDA_PATH=/usr/local/cuda-13.2 PATH=/usr/local/cuda-13.2/bin:/root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin LD_LIBRARY_PATH=/usr/local/cuda-13.2/lib64 CARGO_TARGET_DIR=/root/target-ada-half-s3-auto-cuda132-20260907 MAMBA_RS_KERNEL_CACHE=/root/mamba-kcache-ada-half-s3-auto-cuda132-20260907 cargo test --release --features cuda,cudarc/cuda-13020 --lib sm89_half_auto_v43_promotes_only_measured_cuda132_b0_no_bias_cells -- --nocapture
+RED1 exit: 101
+RED1 output:
+thread 'mamba_ssm::gpu::gemm_bi_fixed::sm89_pipeline_auto_tests::sm89_half_auto_v43_promotes_only_measured_cuda132_b0_no_bias_cells' panicked at src/mamba_ssm/gpu/gemm_bi_fixed.rs:586:13:
+assertion `left == right` failed: CUDA13.2 Bf16 B0/no-bias must select the measured S3 winner
+  left: Some(Tc128Sm89Swizzle)
+ right: Some(Tc128Sm89S3)
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 690 filtered out
+
+RED2 command:
+env CUDA_HOME=/usr/local/cuda-13.2 CUDA_PATH=/usr/local/cuda-13.2 PATH=/usr/local/cuda-13.2/bin:/root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin LD_LIBRARY_PATH=/usr/local/cuda-13.2/lib64 CARGO_TARGET_DIR=/root/target-ada-half-s3-auto-cuda132-20260907 MAMBA_RS_KERNEL_CACHE=/root/mamba-kcache-ada-half-s3-auto-cuda132-20260907 cargo test --release --features cuda,cudarc/cuda-13020 --lib ada_half_s3_auto_epoch_rejects_revision42_graph_identity -- --nocapture
+RED2 exit: 101
+RED2 output:
+thread 'mamba_ssm::gpu::kernel_identity::physical_launch_tests::ada_half_s3_auto_epoch_rejects_revision42_graph_identity' panicked at src/mamba_ssm/gpu/kernel_identity.rs:5048:9:
+assertion `left == right` failed
+  left: 42
+ right: 43
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 690 filtered out
+
+GREEN selector command: same CUDA13.2 environment, cargo test --release --features cuda,cudarc/cuda-13020 --lib sm89_half_auto_v43 -- --nocapture
+GREEN selector exit: 0
+GREEN selector output: 3 passed; 0 failed; 688 filtered out
+  sm89_half_auto_v43_declines_every_common_gate_failure ... ok
+  sm89_half_auto_v43_matches_all_literal_cells_and_availability_states ... ok
+  sm89_half_auto_v43_promotes_only_measured_cuda132_b0_no_bias_cells ... ok
+
+GREEN identity command: same CUDA13.2 environment, cargo test --release --features cuda,cudarc/cuda-13020 --lib ada_half_s3_auto_epoch_rejects_revision42_graph_identity -- --nocapture
+GREEN identity exit: 0
+GREEN identity output: 1 passed; 0 failed; 690 filtered out
+
+GREEN shared-stage harness command: same CUDA13.2 environment, cargo test --release --features cuda,cudarc/cuda-13020 --test gemm_bi_fixed_performance ada_s3_pair:: -- --nocapture
+GREEN shared-stage harness exit: 0
+GREEN shared-stage harness output: 5 passed; 0 failed; 113 filtered out
+
+GREEN validator command:
+env PYTHONDONTWRITEBYTECODE=1 python3 internal/perf/ada-half-s3-auto-20260907/test_validation.py
+GREEN validator exit: 0
+GREEN validator output: Ran 7 tests ... OK

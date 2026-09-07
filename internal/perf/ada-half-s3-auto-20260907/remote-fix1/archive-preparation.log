@@ -1,0 +1,8 @@
+d90cc387433547f5d9af9fe8d15d99a0c89df6c1f86920897d561d529a9188c4  /root/evidence-ada-half-s3-auto-fix1-20260907/source-final.tar.gz
+2df2a1d098af0c8971f3854b7aa7fd776b6de56cdc457ccc32263df0eaa53475  /root/evidence-ada-half-s3-auto-fix1-20260907/cuda128-final-binary-cache.tar.gz
+51c609d6346117ad04096050dc4e206cf30cc86d70388915326da552743551ba  /root/evidence-ada-half-s3-auto-fix1-20260907/cuda130-final-binary-cache.tar.gz
+e2de16e4788c206d1346ac00c32e223f7100dc08acf9b158432263d794a1ba73  /root/evidence-ada-half-s3-auto-fix1-20260907/cuda132-final-binary-cache.tar.gz
+ARCHIVE /root/evidence-ada-half-s3-auto-fix1-20260907/source-final.tar.gz members=356
+ARCHIVE /root/evidence-ada-half-s3-auto-fix1-20260907/cuda128-final-binary-cache.tar.gz members=4
+ARCHIVE /root/evidence-ada-half-s3-auto-fix1-20260907/cuda130-final-binary-cache.tar.gz members=4
+ARCHIVE /root/evidence-ada-half-s3-auto-fix1-20260907/cuda132-final-binary-cache.tar.gz members=4

@@ -9,11 +9,14 @@ the dated progress log, 900 lines), then `internal/agent-operational-rules.md`
 
 ## 1. What the work is
 
-Latest checkpoint (2026-09-07): Ada half production AUTO is promoted at
-`b508805e`, tuning revision 42, after three-toolkit functional qualification
-and independent review. `c8244b52` adds the reusable profile-guided kernel
+Latest checkpoint (2026-09-07): Ada half production AUTO now uses tuning
+revision43, selecting S3 for the two qualified CUDA13.2 B0/no-bias BF16/F16
+cells. Matching three-toolkit functional tests, a single actual-AUTO post101
+confirmation, artifact checks and independent source/evidence reviews pass.
+The local commit is recorded at the top of the active SDD ledger.
+`c8244b52` adds the reusable profile-guided kernel
 optimization protocol to `docs/performance-playbook.md` section 9.
-Post-AUTO paired101 versus native-half cuBLAS Fast reports 15 wins / 4 losses /
+The earlier full60-cell AUTO42 paired101 versus native-half cuBLAS Fast reports 15 wins / 4 losses /
 1 mixed result on each of CUDA 12.8 and 13.0, and 13 wins / 7 losses on 13.2.
 This is 43 wins, 15 losses, and 2 mixed results across 60 BF16/F16 cells;
 inference and Triad are not fully closed. Authoritative report:
@@ -59,11 +62,29 @@ its exact same-attempt SSH/telemetry validator closes all10savedruns after
 host RED/GREEN. Original source/binaries/rawdata remain frozen and all3Fixed
 PTX identities exactly match the approved production force artifacts.
 See `internal/perf/ada-half-s3-paired-20260907/ARCHIVE.md` and`final-report.md`.
-Next is only the two measured13.2 cells in AUTO43, followed by actualAUTO
-bit/poisoned-graph and post101 proof. AUTO currently remains revision42.
-Minor preflight gaps (unused legacy control rejection and pre-warmup input
-immutability assertion) are explicitly assigned to that immediate harness
-update; current postchecks still reject corrupted final inputs.
+Those two measured13.2 cells are now selected by production AUTO43. All other
+literal preferences and the old fallback table remain unchanged, including
+12.8/13.0 B0 Swizzle and S3-unavailable behavior. The selector oracle covers
+all60 cells across8 independent holder-availability states. All3 full libraries
+pass645 tests, focused stage tests5, nonignored performance53, and the three
+AUTO/forced-Swizzle/forced-S3 hot-corpus GPU tests per toolkit pass bit gates.
+The compiled CUDA modules remain byte-identical to Task6A; only the host
+tuning epoch changes, and captured42 graphs correctly reject for re-capture.
+
+ActualAUTO43 post101 on13.2 has8 complete dtype/path/start-parity strata,
+9696 raw samples and2424 paired ratios. BF16 AUTO/old-Swizzle worst p50/p95
+is `0.929889194840/0.953700555376`; F16 is `0.929018443239/0.955993909110`.
+Every stratum wins both own quantiles. AUTO/cuBLAS Fast still loses: BF16
+worst p50/p95 `1.207046379000/1.231223218539`, F16
+`1.133473338293/1.159192520014`. This is at least7.01%/7.10% lower median
+time than the old route, not a Fast victory or a new global60-cell sweep.
+Raw post101 SHA is
+`b6d0fca4305b6846a427c9dc8432e727dfa5434e68f380ca29511916a8c7d620`.
+See `internal/perf/ada-half-s3-auto-20260907/`; raw numerical/physical/poison/
+guard/immutable-input gates and exact same-attempt exit closure pass. Previous
+preflight gaps (unused legacy controls and pre-warmup input checks) are closed.
+The host analyzer's shared-summary label bug was fixed and reviewed without
+changing or repeating the measured GPU run; original reports are preserved.
 
 Existing cross-toolkit backlog is explicit: SM89 exact-F32 CopyPlan and TF32-C
 M64S2 load and are force-reachable on12.8/13.0, but their literal AUTO

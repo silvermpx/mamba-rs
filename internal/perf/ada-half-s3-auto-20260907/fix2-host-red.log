@@ -1,0 +1,46 @@
+test_bad_revision_stage_auto_arm_direction_and_identity_fail (__main__.Protocol.test_bad_revision_stage_auto_arm_direction_and_identity_fail) ... ok
+test_direct_chronology_physical_and_numerical_mutations_fail (__main__.Protocol.test_direct_chronology_physical_and_numerical_mutations_fail) ... ok
+test_exact_post_smoke_adapter_closes_all_eight_configurations (__main__.Protocol.test_exact_post_smoke_adapter_closes_all_eight_configurations) ... ok
+test_genuine_own_win_loss_and_mixed_p95_are_preserved (__main__.Protocol.test_genuine_own_win_loss_and_mixed_p95_are_preserved) ... ok
+test_malformed_physical_args_symbol_poison_and_closure_flags_fail (__main__.Protocol.test_malformed_physical_args_symbol_poison_and_closure_flags_fail) ... ok
+test_post_rejects_window21_and_every_dtype_subset (__main__.Protocol.test_post_rejects_window21_and_every_dtype_subset) ... ok
+test_all_exit_layers_fail_closed (__main__.WrapperPolicy.test_all_exit_layers_fail_closed) ... ok
+test_exact_same_attempt_transcript_and_mutations (__main__.WrapperPolicy.test_exact_same_attempt_transcript_and_mutations) ... ok
+test_foreign_bound_frozen_wrapper_digest_is_rejected (__main__.WrapperPolicy.test_foreign_bound_frozen_wrapper_digest_is_rejected) ... FAIL
+test_imported_frozen_modules_are_checked_before_execution (__main__.WrapperPolicy.test_imported_frozen_modules_are_checked_before_execution) ... 
+  test_imported_frozen_modules_are_checked_before_execution (__main__.WrapperPolicy.test_imported_frozen_modules_are_checked_before_execution) (module='post_auto_analyze') ... ERROR
+  test_imported_frozen_modules_are_checked_before_execution (__main__.WrapperPolicy.test_imported_frozen_modules_are_checked_before_execution) (module='post_auto_run') ... ERROR
+test_stale_and_cross_stage_controls_are_rejected (__main__.WrapperPolicy.test_stale_and_cross_stage_controls_are_rejected) ... ok
+
+======================================================================
+ERROR: test_imported_frozen_modules_are_checked_before_execution (__main__.WrapperPolicy.test_imported_frozen_modules_are_checked_before_execution) (module='post_auto_analyze')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/silvermpx/IdeaProjects/mamba-rs/internal/worktrees/gemm-bi-triad-sm80/internal/perf/ada-half-s3-auto-20260907/test_validation.py", line 220, in test_imported_frozen_modules_are_checked_before_execution
+    module.load_pinned('foreign_dependency', foreign, '0' * 64)
+    ^^^^^^^^^^^^^^^^^^
+AttributeError: module 'post_auto_analyze' has no attribute 'load_pinned'
+
+======================================================================
+ERROR: test_imported_frozen_modules_are_checked_before_execution (__main__.WrapperPolicy.test_imported_frozen_modules_are_checked_before_execution) (module='post_auto_run')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/silvermpx/IdeaProjects/mamba-rs/internal/worktrees/gemm-bi-triad-sm80/internal/perf/ada-half-s3-auto-20260907/test_validation.py", line 220, in test_imported_frozen_modules_are_checked_before_execution
+    module.load_pinned('foreign_dependency', foreign, '0' * 64)
+    ^^^^^^^^^^^^^^^^^^
+AttributeError: module 'post_auto_run' has no attribute 'load_pinned'
+
+======================================================================
+FAIL: test_foreign_bound_frozen_wrapper_digest_is_rejected (__main__.WrapperPolicy.test_foreign_bound_frozen_wrapper_digest_is_rejected)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Users/silvermpx/IdeaProjects/mamba-rs/internal/worktrees/gemm-bi-triad-sm80/internal/perf/ada-half-s3-auto-20260907/test_validation.py", line 226, in test_foreign_bound_frozen_wrapper_digest_is_rejected
+    with self.assertRaises(ValueError):
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: ValueError not raised
+
+----------------------------------------------------------------------
+Ran 11 tests in 2.199s
+
+FAILED (failures=1, errors=2)
+COMMAND_EXIT=1

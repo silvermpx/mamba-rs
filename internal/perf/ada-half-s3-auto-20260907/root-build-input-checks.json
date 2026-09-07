@@ -1,0 +1,60 @@
+{
+  "status": "PASS",
+  "base": "4386e41a43f1b3b95baa829b1e7ab2b470eecf29",
+  "toolkits": [
+    {
+      "toolkit": "12.8",
+      "input_count": 356,
+      "binding_sha": "1800e594d00bfea680d0a00a1ee07012dcf3028e31a5b581979456e35eb62d49",
+      "binary_sha": "48ccd2956deb650d65b79c547bcf1591b44e025c5738069ba8162c9d9f793ede",
+      "only_seven_authorized_changes": [
+        "src/mamba_ssm/gpu/gemm_bi_fixed.rs",
+        "src/mamba_ssm/gpu/gemm_bi_triad/dispatch.rs",
+        "src/mamba_ssm/gpu/gemm_bi_triad/launch.rs",
+        "src/mamba_ssm/gpu/kernel_identity.rs",
+        "tests/gemm_bi_fixed_performance.rs",
+        "tests/gemm_bi_fixed_sm89_pipeline.rs",
+        "tests/gemm_bi_tf32_cohort_binding.rs"
+      ],
+      "local_input_hashes_match": true,
+      "tool_and_library_hashes_unchanged": true,
+      "cache_mode": "0o700"
+    },
+    {
+      "toolkit": "13.0",
+      "input_count": 356,
+      "binding_sha": "607393cd298fc6da851c0948d440a6ebdb24b5ef526e45a19ab5d83b68a2a56b",
+      "binary_sha": "99acb666d50cf79ed954c09e03a9490c0dfc037443eced5111b75832888d724b",
+      "only_seven_authorized_changes": [
+        "src/mamba_ssm/gpu/gemm_bi_fixed.rs",
+        "src/mamba_ssm/gpu/gemm_bi_triad/dispatch.rs",
+        "src/mamba_ssm/gpu/gemm_bi_triad/launch.rs",
+        "src/mamba_ssm/gpu/kernel_identity.rs",
+        "tests/gemm_bi_fixed_performance.rs",
+        "tests/gemm_bi_fixed_sm89_pipeline.rs",
+        "tests/gemm_bi_tf32_cohort_binding.rs"
+      ],
+      "local_input_hashes_match": true,
+      "tool_and_library_hashes_unchanged": true,
+      "cache_mode": "0o700"
+    },
+    {
+      "toolkit": "13.2",
+      "input_count": 356,
+      "binding_sha": "04a86811267df0676c2e3386bed52395b2fc0ed5e81974a548c65346b4b6ad33",
+      "binary_sha": "a6c29a2dc4bb6ab2f9fbde8a4ed2ae82625ae85e9471d7321af449305170eb91",
+      "only_seven_authorized_changes": [
+        "src/mamba_ssm/gpu/gemm_bi_fixed.rs",
+        "src/mamba_ssm/gpu/gemm_bi_triad/dispatch.rs",
+        "src/mamba_ssm/gpu/gemm_bi_triad/launch.rs",
+        "src/mamba_ssm/gpu/kernel_identity.rs",
+        "tests/gemm_bi_fixed_performance.rs",
+        "tests/gemm_bi_fixed_sm89_pipeline.rs",
+        "tests/gemm_bi_tf32_cohort_binding.rs"
+      ],
+      "local_input_hashes_match": true,
+      "tool_and_library_hashes_unchanged": true,
+      "cache_mode": "0o700"
+    }
+  ]
+}

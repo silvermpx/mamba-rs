@@ -1,0 +1,2 @@
+env: ‘cargo’: No such file or directory
+COMMAND_EXIT=127

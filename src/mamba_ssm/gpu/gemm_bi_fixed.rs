@@ -482,8 +482,11 @@ fn fixed_select_sm89_half_auto_tile(
     nvrtc_library_known: bool,
     pipeline_available: bool,
     swizzle_available: bool,
+    s3_available: bool,
 ) -> Option<FixedTile> {
-    use FixedTile::{Tc128Sm89Pipeline as Pipeline, Tc128Sm89Swizzle as Swizzle};
+    use FixedTile::{
+        Tc128Sm89Pipeline as Pipeline, Tc128Sm89S3 as S3, Tc128Sm89Swizzle as Swizzle,
+    };
 
     if !nvrtc_library_known
         || device.compute_capability != (8, 9)
@@ -506,6 +509,14 @@ fn fixed_select_sm89_half_auto_tile(
         )
     {
         return None;
+    }
+
+    if s3_available
+        && nvrtc == (13, 2)
+        && (shape.m, shape.k, shape.n) == (4621, 768, 2304)
+        && operands.bias_ptr.is_none()
+    {
+        return Some(S3);
     }
 
     let dims = (shape.m, shape.k, shape.n);
@@ -542,6 +553,7 @@ mod sm89_pipeline_auto_tests {
 
     const P: FixedTile = FixedTile::Tc128Sm89Pipeline;
     const S: FixedTile = FixedTile::Tc128Sm89Swizzle;
+    const S3: FixedTile = FixedTile::Tc128Sm89S3;
 
     fn operands(dtype: WeightDtype, has_bias: bool) -> FixedFwdOperands {
         FixedFwdOperands {
@@ -560,6 +572,7 @@ mod sm89_pipeline_auto_tests {
         known_library: bool,
         pipeline_available: bool,
         swizzle_available: bool,
+        s3_available: bool,
     ) -> Option<FixedTile> {
         fixed_select_sm89_half_auto_tile(
             operands(dtype, has_bias),
@@ -576,11 +589,32 @@ mod sm89_pipeline_auto_tests {
             known_library,
             pipeline_available,
             swizzle_available,
+            s3_available,
         )
     }
 
     #[test]
-    fn sm89_half_auto_v42_matches_all_literal_preferred_cells() {
+    fn sm89_half_auto_v43_promotes_only_measured_cuda132_b0_no_bias_cells() {
+        for dtype in [WeightDtype::Bf16, WeightDtype::F16] {
+            assert_eq!(
+                select(
+                    (13, 2),
+                    dtype,
+                    (4621, 768, 2304),
+                    false,
+                    true,
+                    true,
+                    true,
+                    true,
+                ),
+                Some(S3),
+                "CUDA13.2 {dtype:?} B0/no-bias must select the measured S3 winner"
+            );
+        }
+    }
+
+    #[test]
+    fn sm89_half_auto_v43_matches_all_literal_cells_and_availability_states() {
         let cases = [
             ((12, 8), WeightDtype::Bf16, (4621, 384, 1928), false, P),
             ((12, 8), WeightDtype::Bf16, (4621, 384, 1928), true, S),
@@ -624,7 +658,7 @@ mod sm89_pipeline_auto_tests {
             ((13, 0), WeightDtype::F16, (2048, 2304, 768), true, S),
             ((13, 2), WeightDtype::Bf16, (4621, 384, 1928), false, P),
             ((13, 2), WeightDtype::Bf16, (4621, 384, 1928), true, P),
-            ((13, 2), WeightDtype::Bf16, (4621, 768, 2304), false, S),
+            ((13, 2), WeightDtype::Bf16, (4621, 768, 2304), false, S3),
             ((13, 2), WeightDtype::Bf16, (4621, 768, 2304), true, S),
             ((13, 2), WeightDtype::Bf16, (4621, 1928, 384), false, P),
             ((13, 2), WeightDtype::Bf16, (4621, 1928, 384), true, P),
@@ -634,7 +668,7 @@ mod sm89_pipeline_auto_tests {
             ((13, 2), WeightDtype::Bf16, (2048, 2304, 768), true, S),
             ((13, 2), WeightDtype::F16, (4621, 384, 1928), false, P),
             ((13, 2), WeightDtype::F16, (4621, 384, 1928), true, P),
-            ((13, 2), WeightDtype::F16, (4621, 768, 2304), false, S),
+            ((13, 2), WeightDtype::F16, (4621, 768, 2304), false, S3),
             ((13, 2), WeightDtype::F16, (4621, 768, 2304), true, S),
             ((13, 2), WeightDtype::F16, (4621, 1928, 384), false, P),
             ((13, 2), WeightDtype::F16, (4621, 1928, 384), true, P),
@@ -644,98 +678,73 @@ mod sm89_pipeline_auto_tests {
             ((13, 2), WeightDtype::F16, (2048, 2304, 768), true, P),
         ];
         assert_eq!(cases.len(), 60);
-        for (nvrtc, dtype, dims, has_bias, expected) in cases {
-            assert_eq!(
-                select(nvrtc, dtype, dims, has_bias, true, true, true),
-                Some(expected),
-                "{nvrtc:?} {dtype:?} {dims:?} bias={has_bias}"
-            );
+        for (nvrtc, dtype, dims, has_bias, preferred) in cases {
+            for pipeline_available in [false, true] {
+                for swizzle_available in [false, true] {
+                    for s3_available in [false, true] {
+                        let old_preferred = if preferred == S3 { S } else { preferred };
+                        let expected = if preferred == S3 && s3_available {
+                            Some(S3)
+                        } else {
+                            match (nvrtc, old_preferred, pipeline_available, swizzle_available) {
+                                ((12, 8) | (13, 0), P, true, _) => Some(P),
+                                ((12, 8) | (13, 0), P, false, true) => Some(S),
+                                ((12, 8) | (13, 0), S, _, true) => Some(S),
+                                ((12, 8) | (13, 0), S, true, false) => Some(P),
+                                ((13, 2), P, true, _) => Some(P),
+                                ((13, 2), S, _, true) => Some(S),
+                                ((13, 2), S, true, false) => Some(P),
+                                _ => None,
+                            }
+                        };
+                        assert_eq!(
+                            select(
+                                nvrtc,
+                                dtype,
+                                dims,
+                                has_bias,
+                                true,
+                                pipeline_available,
+                                swizzle_available,
+                                s3_available,
+                            ),
+                            expected,
+                            "{nvrtc:?} {dtype:?} {dims:?} bias={has_bias} pipeline={pipeline_available} swizzle={swizzle_available} s3={s3_available}"
+                        );
+                    }
+                }
+            }
         }
     }
 
     #[test]
-    fn sm89_half_auto_v42_applies_independent_availability_fallbacks() {
-        let a = (4621, 384, 1928);
-        let b = (4621, 768, 2304);
-        let c = (4621, 1928, 384);
-        let e = (2048, 2304, 768);
-
-        for nvrtc in [(12, 8), (13, 0)] {
-            assert_eq!(
-                select(nvrtc, WeightDtype::Bf16, a, false, true, true, false),
-                Some(P)
-            );
-            assert_eq!(
-                select(nvrtc, WeightDtype::Bf16, a, false, true, false, true),
-                Some(S)
-            );
-            assert_eq!(
-                select(nvrtc, WeightDtype::Bf16, a, true, true, true, false),
-                Some(P)
-            );
-            assert_eq!(
-                select(nvrtc, WeightDtype::Bf16, a, true, true, false, true),
-                Some(S)
-            );
-            assert_eq!(
-                select(nvrtc, WeightDtype::Bf16, b, false, true, true, false),
-                Some(P)
-            );
-            assert_eq!(
-                select(nvrtc, WeightDtype::Bf16, b, false, true, false, false),
-                None
-            );
-        }
-
-        assert_eq!(
-            select((13, 2), WeightDtype::Bf16, b, false, true, true, false),
-            Some(P)
-        );
-        assert_eq!(
-            select((13, 2), WeightDtype::Bf16, b, false, true, false, true),
-            Some(S)
-        );
-        assert_eq!(
-            select((13, 2), WeightDtype::Bf16, a, false, true, false, true),
-            None
-        );
-        assert_eq!(
-            select((13, 2), WeightDtype::Bf16, c, true, true, false, true),
-            None
-        );
-        assert_eq!(
-            select((13, 2), WeightDtype::F16, e, false, true, false, true),
-            None
-        );
-        assert_eq!(
-            select((13, 2), WeightDtype::F16, e, true, true, true, false),
-            Some(P)
-        );
-        assert_eq!(
-            select((13, 2), WeightDtype::F16, e, true, true, false, false),
-            None
-        );
-    }
-
-    #[test]
-    fn sm89_half_auto_v42_declines_every_common_gate_failure() {
+    fn sm89_half_auto_v43_declines_every_common_gate_failure() {
         let device = FixedTileDevice {
             multiprocessors: 142,
             compute_capability: (8, 9),
         };
         let shape = FixedShape {
             m: 4621,
-            k: 384,
-            n: 1928,
+            k: 768,
+            n: 2304,
         };
         let ops = operands(WeightDtype::Bf16, false);
         let choose = |o, s, d, v, known, pipeline, swizzle| {
-            fixed_select_sm89_half_auto_tile(o, s, d, v, known, pipeline, swizzle)
+            fixed_select_sm89_half_auto_tile(o, s, d, v, known, pipeline, swizzle, true)
         };
 
         assert_eq!(choose(ops, shape, device, (13, 2), false, true, true), None);
         assert_eq!(
-            choose(ops, shape, device, (13, 2), true, false, false),
+            fixed_select_sm89_half_auto_tile(
+                ops,
+                shape,
+                device,
+                (13, 2),
+                true,
+                false,
+                false,
+                false,
+            ),
             None
         );
         for version in [(12, 7), (12, 9), (13, 1), (13, 3), (14, 0)] {
@@ -3696,6 +3705,7 @@ pub fn fixed_forward(
             compiler.nvrtc_library_known,
             ctx.kernels.fixed_sm89_half_pipeline.is_some(),
             ctx.kernels.fixed_sm89_half_swizzle.is_some(),
+            ctx.kernels.fixed_sm89_half_s3.is_some(),
         );
         match selected {
             Some(FixedTile::Tc128Sm89Pipeline) => {
@@ -3705,6 +3715,10 @@ pub fn fixed_forward(
             Some(FixedTile::Tc128Sm89Swizzle) => {
                 launch_sm89_half_swizzle(ctx, c.dtype, &args)?;
                 return Ok(FixedTile::Tc128Sm89Swizzle);
+            }
+            Some(FixedTile::Tc128Sm89S3) => {
+                launch_sm89_half_s3(ctx, c.dtype, &args)?;
+                return Ok(FixedTile::Tc128Sm89S3);
             }
             Some(_) => unreachable!("Ada half AUTO selector returned a foreign tile"),
             None => {}
@@ -6322,7 +6336,7 @@ mod tests {
                 TUNING_TABLE_REVISION,
                 SCHEDULE_REVISION,
             ),
-            (5, 42, 8),
+            (5, 43, 8),
             "the release compiler identity must remain explicitly pinned"
         );
         let mut promoted = Vec::new();

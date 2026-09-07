@@ -40,6 +40,57 @@ const ITERS: usize = 200;
 mod ada_s3_pair {
     use super::*;
 
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub(super) enum Stage {
+        PrePromotion42,
+        PostAuto43,
+    }
+
+    impl Stage {
+        fn schema(self) -> &'static str {
+            match self {
+                Self::PrePromotion42 => "MambaBiFixedAdaS3PairedV1",
+                Self::PostAuto43 => "MambaBiFixedAdaS3PostAutoPairedV1",
+            }
+        }
+
+        fn revision(self) -> u16 {
+            match self {
+                Self::PrePromotion42 => 42,
+                Self::PostAuto43 => 43,
+            }
+        }
+
+        fn controls(self) -> [&'static str; 3] {
+            match self {
+                Self::PrePromotion42 => [
+                    "MAMBA_FIXED_ADA_S3_PAIR",
+                    "MAMBA_FIXED_ADA_S3_WINDOWS",
+                    "MAMBA_FIXED_ADA_S3_DTYPES",
+                ],
+                Self::PostAuto43 => [
+                    "MAMBA_FIXED_ADA_S3_POST_PAIR",
+                    "MAMBA_FIXED_ADA_S3_POST_WINDOWS",
+                    "MAMBA_FIXED_ADA_S3_POST_DTYPES",
+                ],
+            }
+        }
+
+        fn arms(self) -> [&'static str; 3] {
+            match self {
+                Self::PrePromotion42 => ["AUTO", "S3", "Fast"],
+                Self::PostAuto43 => ["Swizzle", "AUTO", "Fast"],
+            }
+        }
+
+        fn ratios(self) -> [&'static str; 3] {
+            match self {
+                Self::PrePromotion42 => ["S3/AUTO", "AUTO/Fast", "S3/Fast"],
+                Self::PostAuto43 => ["AUTO/Swizzle", "Swizzle/Fast", "AUTO/Fast"],
+            }
+        }
+    }
+
     fn schedule(window: usize, start: usize) -> Vec<(usize, usize, usize, usize)> {
         assert!(start < 2);
         let reverse = (window + start) % 2 == 1;
@@ -55,11 +106,39 @@ mod ada_s3_pair {
         observations
     }
 
-    const ARMS: [&str; 3] = ["AUTO", "S3", "Fast"];
-    const RATIOS: [&str; 3] = ["S3/AUTO", "AUTO/Fast", "S3/Fast"];
     const GUARD: usize = 256;
 
-    fn config(windows: &str, dtypes: &str) -> Result<(usize, Vec<usize>), String> {
+    fn control_allowed(stage: Stage, key: &str) -> bool {
+        if stage.controls().contains(&key) {
+            return true;
+        }
+        !key.starts_with("MAMBA_FIXED_ADA_")
+            && !key.starts_with("MAMBA_FIXED_VENDOR_")
+            && !matches!(
+                key,
+                "MAMBA_FIXED_AUTO_VENDOR_ROW"
+                    | "MAMBA_FIXED_AUTO_VENDOR_CELL"
+                    | "MAMBA_FIXED_AUTO_VENDOR_BIAS"
+                    | "MAMBA_FIXED_HALF_TILE_CANDIDATE"
+                    | "NVIDIA_TF32_OVERRIDE"
+            )
+    }
+
+    fn validate_controls<'a>(
+        stage: Stage,
+        controls: impl IntoIterator<Item = &'a str>,
+    ) -> Result<(), String> {
+        for key in controls {
+            if !control_allowed(stage, key) {
+                return Err(format!(
+                    "stale control {key} forbidden in literal S3 experiment"
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn config(stage: Stage, windows: &str, dtypes: &str) -> Result<(usize, Vec<usize>), String> {
         let windows = match windows {
             "1" => 1,
             "21" => 21,
@@ -67,22 +146,104 @@ mod ada_s3_pair {
             _ => return Err("windows must be exactly 1, 21 or 101".into()),
         };
         let dtypes = fixed_ada_direct_pair_filter("S3 dtype", &["bf16", "f16"], Some(dtypes))?;
-        if windows != 101 && dtypes != [0, 1] {
-            return Err("smoke/screen requires explicit bf16,f16".into());
+        match stage {
+            Stage::PrePromotion42 if windows != 101 && dtypes != [0, 1] => {
+                return Err("historical smoke/screen requires explicit bf16,f16".into());
+            }
+            Stage::PostAuto43 if !matches!(windows, 1 | 101) || dtypes != [0, 1] => {
+                return Err("post-AUTO requires windows1/101 and explicit bf16,f16".into());
+            }
+            _ => {}
         }
         Ok((windows, dtypes))
     }
 
     #[test]
-    fn configuration_cannot_mute_screen_or_accept_implicit_windows() {
-        assert_eq!(config("21", "bf16,f16").unwrap(), (21, vec![0, 1]));
-        assert_eq!(config("101", "f16").unwrap(), (101, vec![1]));
+    fn pre42_and_post43_configuration_cannot_mute_screen_or_accept_implicit_windows() {
+        assert_eq!(
+            config(Stage::PrePromotion42, "21", "bf16,f16").unwrap(),
+            (21, vec![0, 1])
+        );
+        assert_eq!(
+            config(Stage::PrePromotion42, "101", "f16").unwrap(),
+            (101, vec![1])
+        );
+        assert_eq!(
+            config(Stage::PostAuto43, "1", "bf16,f16").unwrap(),
+            (1, vec![0, 1])
+        );
+        assert_eq!(
+            config(Stage::PostAuto43, "101", "bf16,f16").unwrap(),
+            (101, vec![0, 1])
+        );
+        assert!(config(Stage::PostAuto43, "21", "bf16,f16").is_err());
+        assert!(config(Stage::PostAuto43, "101", "bf16").is_err());
+        assert!(config(Stage::PostAuto43, "101", "f16").is_err());
         for w in ["", "0", "20", "021", " 21", "100", "102"] {
-            assert!(config(w, "bf16,f16").is_err());
+            assert!(config(Stage::PrePromotion42, w, "bf16,f16").is_err());
         }
         for d in ["", "f32", "bf16,bf16", "bf16,", "f16"] {
-            assert!(config("21", d).is_err());
+            assert!(config(Stage::PrePromotion42, "21", d).is_err());
         }
+    }
+
+    #[test]
+    fn pre42_and_post43_stage_controls_and_directions_are_disjoint() {
+        let pre = Stage::PrePromotion42;
+        let post = Stage::PostAuto43;
+        assert_eq!(pre.schema(), "MambaBiFixedAdaS3PairedV1");
+        assert_eq!(post.schema(), "MambaBiFixedAdaS3PostAutoPairedV1");
+        assert_eq!(pre.revision(), 42);
+        assert_eq!(post.revision(), 43);
+        assert_eq!(pre.arms(), ["AUTO", "S3", "Fast"]);
+        assert_eq!(post.arms(), ["Swizzle", "AUTO", "Fast"]);
+        assert_eq!(pre.ratios(), ["S3/AUTO", "AUTO/Fast", "S3/Fast"]);
+        assert_eq!(post.ratios(), ["AUTO/Swizzle", "Swizzle/Fast", "AUTO/Fast"]);
+        assert!(validate_controls(pre, pre.controls()).is_ok());
+        assert!(validate_controls(post, post.controls()).is_ok());
+        assert!(validate_controls(pre, post.controls()).is_err());
+        assert!(validate_controls(post, pre.controls()).is_err());
+        for stale in [
+            "MAMBA_FIXED_AUTO_VENDOR_ROW",
+            "MAMBA_FIXED_AUTO_VENDOR_CELL",
+            "MAMBA_FIXED_AUTO_VENDOR_BIAS",
+            "MAMBA_FIXED_HALF_TILE_CANDIDATE",
+            "MAMBA_FIXED_VENDOR_LEGACY_CONTROL",
+            "NVIDIA_TF32_OVERRIDE",
+        ] {
+            assert!(
+                validate_controls(pre, [stale]).is_err(),
+                "pre accepted {stale}"
+            );
+            assert!(
+                validate_controls(post, [stale]).is_err(),
+                "post accepted {stale}"
+            );
+        }
+    }
+
+    fn unchanged_inputs(
+        saved_a: &[u8],
+        saved_b: &[u8],
+        observed_a: &[u8],
+        observed_b: &[u8],
+    ) -> Result<(), String> {
+        if observed_a != saved_a {
+            return Err("immutable A changed before timing".into());
+        }
+        if observed_b != saved_b {
+            return Err("immutable B changed before timing".into());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn pre_timing_input_gate_rejects_changed_a_or_b_bytes() {
+        let saved_a = [1, 2, 3, 4];
+        let saved_b = [5, 6, 7, 8];
+        assert!(unchanged_inputs(&saved_a, &saved_b, &saved_a, &saved_b).is_ok());
+        assert!(unchanged_inputs(&saved_a, &saved_b, &[1, 2, 0, 4], &saved_b).is_err());
+        assert!(unchanged_inputs(&saved_a, &saved_b, &saved_a, &[5, 6, 0, 8]).is_err());
     }
 
     fn pair_ratio(samples: &[(usize, f64)], comparison: usize) -> Result<f64, String> {
@@ -350,31 +511,22 @@ mod ada_s3_pair {
         (format!("[{}]", entries.join(",")), count)
     }
 
-    pub(super) fn run() {
+    pub(super) fn run(stage: Stage) {
+        let controls = stage.controls();
         assert_eq!(
-            std::env::var("MAMBA_FIXED_ADA_S3_PAIR").as_deref(),
+            std::env::var(controls[0]).as_deref(),
             Ok("1"),
-            "explicit S3 pair enable required"
+            "explicit stage-specific S3 pair enable required"
         );
         assert!(!cfg!(debug_assertions), "S3 pairing requires release");
-        for (key, _) in std::env::vars_os() {
-            let key = key.to_string_lossy();
-            if (key.starts_with("MAMBA_FIXED_ADA_")
-                && !matches!(
-                    key.as_ref(),
-                    "MAMBA_FIXED_ADA_S3_PAIR"
-                        | "MAMBA_FIXED_ADA_S3_WINDOWS"
-                        | "MAMBA_FIXED_ADA_S3_DTYPES"
-                ))
-                || key.starts_with("MAMBA_FIXED_VENDOR_")
-                || key == "NVIDIA_TF32_OVERRIDE"
-            {
-                panic!("stale control {key} forbidden in literal S3 experiment");
-            }
-        }
-        let dtype_text = std::env::var("MAMBA_FIXED_ADA_S3_DTYPES").expect("explicit dtypes");
+        let environment: Vec<_> = std::env::vars_os()
+            .map(|(key, _)| key.to_string_lossy().into_owned())
+            .collect();
+        validate_controls(stage, environment.iter().map(String::as_str)).unwrap();
+        let dtype_text = std::env::var(controls[2]).expect("explicit dtypes");
         let (windows, dtypes) = config(
-            &std::env::var("MAMBA_FIXED_ADA_S3_WINDOWS").expect("explicit windows"),
+            stage,
+            &std::env::var(controls[1]).expect("explicit windows"),
             &dtype_text,
         )
         .unwrap();
@@ -382,7 +534,7 @@ mod ada_s3_pair {
         let device = GpuDevice::new(0).expect("Ada device");
         assert_eq!(device.compute_capability, (8, 9));
         assert_eq!(device.multiprocessor_count(), 142);
-        assert_eq!(TUNING_TABLE_REVISION, 42);
+        assert_eq!(TUNING_TABLE_REVISION, stage.revision());
         let ctx = GpuCtx::new(&device).expect("Ada context");
         let compiler = ctx.kernels.compiler_identity();
         assert!(compiler.nvrtc_library_known);
@@ -395,6 +547,13 @@ mod ada_s3_pair {
             compiler.nvrtc_version,
             (12, 8) | (13, 0) | (13, 2)
         ));
+        if stage == Stage::PostAuto43 {
+            assert_eq!(
+                compiler.nvrtc_version,
+                (13, 2),
+                "post-AUTO qualification is CUDA13.2-only"
+            );
+        }
         let artifact = ctx.kernels.artifact_set_identity().fixed;
         let source_hash = digest_hex(
             &Sha256::digest(std::fs::read("tests/gemm_bi_fixed_performance.rs").unwrap()).into(),
@@ -411,9 +570,16 @@ mod ada_s3_pair {
             std::env::var("S3_BINARY_SHA").expect("binary binding")
         );
         let mode = modes(&ctx);
-        let metadata = format!(
-            "\"schema\":\"MambaBiFixedAdaS3PairedV1\",\"toolkit\":\"{toolkit}\",\"shape\":[4621,768,2304],\"bias\":false,\"alpha\":1,\"beta\":0,\"revision\":42"
-        );
+        let arms = stage.arms();
+        let directions = stage.ratios();
+        let metadata = match stage {
+            Stage::PrePromotion42 => format!(
+                "\"schema\":\"MambaBiFixedAdaS3PairedV1\",\"toolkit\":\"{toolkit}\",\"shape\":[4621,768,2304],\"bias\":false,\"alpha\":1,\"beta\":0,\"revision\":42"
+            ),
+            Stage::PostAuto43 => format!(
+                "\"schema\":\"MambaBiFixedAdaS3PostAutoPairedV1\",\"stage\":\"post_auto\",\"toolkit\":\"{toolkit}\",\"shape\":[4621,768,2304],\"bias\":false,\"alpha\":1,\"beta\":0,\"revision\":43"
+            ),
+        };
         println!(
             "{{{metadata},\"kind\":\"identity\",\"uuid\":\"GPU-d1edd7be-e88d-aed6-047d-622163306f0e\",\"cc\":\"8.9\",\"sm_count\":142,\"source_sha\":\"{source_hash}\",\"binary_sha\":\"{binary_hash}\",\"fixed_source_digest\":\"{}\",\"fixed_invocation_digest\":\"{}\",\"fixed_artifact_digest\":\"{}\",\"header_manifest_digest\":\"{}\",\"nvrtc_library_domain\":\"{}\",\"nvrtc_library_known\":true,\"dtypes\":\"{dtype_text}\",\"windows\":{windows},\"logical_ops\":20,\"warmup_eager\":128,\"percentile\":\"round((len-1)*fraction)\",{mode}}}",
             digest_hex(&compiler.source_digest),
@@ -465,15 +631,36 @@ mod ada_s3_pair {
             assert!(operands.iter().all(|ops| ops.c.ptr % 256 == 0));
             let launch = |arm: usize| match arm {
                 0 => {
-                    let actual = launch_fixed_auto_vendor_custom(&ctx, operands[0], shape);
-                    assert_eq!(
-                        actual,
-                        FixedTile::Tc128Sm89Swizzle,
-                        "actual AUTO must remain rev42 incumbent"
-                    );
+                    if stage == Stage::PrePromotion42 {
+                        let actual = launch_fixed_auto_vendor_custom(&ctx, operands[0], shape);
+                        assert_eq!(
+                            actual,
+                            FixedTile::Tc128Sm89Swizzle,
+                            "historical actual AUTO must remain rev42 incumbent"
+                        );
+                    } else {
+                        fixed_forward_with_tile(
+                            &ctx,
+                            operands[0],
+                            shape,
+                            FixedTile::Tc128Sm89Swizzle,
+                        )
+                        .expect("public forced Swizzle control");
+                    }
                 }
-                1 => fixed_forward_with_tile(&ctx, operands[1], shape, FixedTile::Tc128Sm89S3)
-                    .expect("public S3 force"),
+                1 => {
+                    if stage == Stage::PrePromotion42 {
+                        fixed_forward_with_tile(&ctx, operands[1], shape, FixedTile::Tc128Sm89S3)
+                            .expect("public S3 force");
+                    } else {
+                        let actual = launch_fixed_auto_vendor_custom(&ctx, operands[1], shape);
+                        assert_eq!(
+                            actual,
+                            FixedTile::Tc128Sm89S3,
+                            "post-AUTO must use actual public S3 selection"
+                        );
+                    }
+                }
                 2 => fast(&ctx, operands[2], shape),
                 _ => unreachable!(),
             };
@@ -483,7 +670,7 @@ mod ada_s3_pair {
             let expected: Vec<_> = owners.iter().map(|o| raw(&ctx, o)).collect();
             assert_eq!(
                 expected[0], expected[1],
-                "S3/AUTO exact homogeneous storage bits"
+                "S3 and Swizzle exact homogeneous storage bits"
             );
             let reference = DtypedBuf::zeros(&ctx.stream, elements, WeightDtype::F32).unwrap();
             fixed_ada_vendor_launch(
@@ -546,7 +733,7 @@ mod ada_s3_pair {
                 }
                 println!(
                     "{{{metadata},\"kind\":\"physical\",\"dtype\":\"{dtype_name}\",\"arm\":\"{}\",\"pointers\":[{},{},{},0],\"allocation\":[{},{}],\"guard_bytes\":256,\"one\":{one_inventory},\"twenty\":{twenty_inventory},\"numerical_error\":{},\"tolerance\":{},\"reference\":\"PEDANTIC_F32\",\"eager_repeats\":2,\"graph_repeats\":2,\"poison_upload_verified\":true,\"repeat_bits\":true,\"guards\":true}}",
-                    ARMS[arm],
+                    arms[arm],
                     operands[arm].c.ptr,
                     operands[arm].x.ptr,
                     operands[arm].w.ptr,
@@ -576,7 +763,15 @@ mod ada_s3_pair {
                                 .unwrap()));
                         }
                     }
-                    // Allocate all collection capacity before warmup. Nothing prints,
+                    unchanged_inputs(
+                        &a_raw,
+                        &b_raw,
+                        &fixed_explicit_vendor_raw_bytes(&ctx, &a),
+                        &fixed_explicit_vendor_raw_bytes(&ctx, &b),
+                    )
+                    .expect("pre-timing immutable input gate");
+                    // The required input readback gate is the final action before
+                    // timing preparation. After capacity is reserved, nothing prints,
                     // downloads, poisons, compiles or allocates device memory until
                     // all windows of this configuration have completed.
                     let schedule: Vec<_> = (0..windows)
@@ -638,7 +833,7 @@ mod ada_s3_pair {
                         let order = if (w + start) % 2 == 0 { "ABBA" } else { "BAAB" };
                         println!(
                             "{{{key},\"kind\":\"sample\",\"chronology\":{chronology},\"window\":{w},\"comparison\":{comparison},\"traversal\":{traversal},\"order\":\"{order}\",\"position\":{position},\"arm\":\"{}\",\"logical_ops\":20,\"us\":{us}}}",
-                            ARMS[arm]
+                            arms[arm]
                         );
                     }
                     for (bracket, observations) in samples.chunks_exact(4).enumerate() {
@@ -660,7 +855,7 @@ mod ada_s3_pair {
                         let p95 = percentile(&ratios[comparison], 0.95);
                         println!(
                             "{{{key},\"kind\":\"summary\",\"comparison\":{comparison},\"direction\":\"{}\",\"windows\":{windows},\"p50\":{p50},\"p95\":{p95}}}",
-                            RATIOS[comparison]
+                            directions[comparison]
                         );
                     }
                     println!(
@@ -725,7 +920,13 @@ mod ada_s3_pair {
 #[test]
 #[ignore = "requires explicit MAMBA_FIXED_ADA_S3_PAIR=1 and exclusive pinned Ada; production AUTO/S3/Fast mirrored brackets"]
 fn fixed_ada_half_s3_auto_fast_paired() {
-    ada_s3_pair::run();
+    ada_s3_pair::run(ada_s3_pair::Stage::PrePromotion42);
+}
+
+#[test]
+#[ignore = "requires explicit MAMBA_FIXED_ADA_S3_POST_PAIR=1 and exclusive pinned Ada CUDA13.2; forced Swizzle/actual AUTO43/Fast mirrored brackets"]
+fn fixed_ada_half_s3_post_auto_fast_paired() {
+    ada_s3_pair::run(ada_s3_pair::Stage::PostAuto43);
 }
 
 #[path = "support/fixed_sm89_exact_n64_admission.rs"]
@@ -9485,13 +9686,15 @@ const FIXED_AUTO_VENDOR_EXACT_CELLS: &[FixedAutoVendorCell] = &[
     },
 ];
 
-fn expected_ada_half_auto_v42(
+fn expected_ada_half_auto_v43(
     nvrtc: (i32, i32),
     dtype: WeightDtype,
     shape: FixedShape,
     has_bias: bool,
 ) -> Option<FixedTile> {
-    use FixedTile::{Tc128Sm89Pipeline as Pipeline, Tc128Sm89Swizzle as Swizzle};
+    use FixedTile::{
+        Tc128Sm89Pipeline as Pipeline, Tc128Sm89S3 as S3, Tc128Sm89Swizzle as Swizzle,
+    };
 
     match (nvrtc, dtype, (shape.m, shape.k, shape.n), has_bias) {
         ((12, 8) | (13, 0), WeightDtype::Bf16, (4621, 384, 1928), false) => Some(Pipeline),
@@ -9506,12 +9709,14 @@ fn expected_ada_half_auto_v42(
         ((12, 8) | (13, 0), WeightDtype::F16, (2048, 768, 2304), _) => Some(Swizzle),
         ((12, 8) | (13, 0), WeightDtype::F16, (2048, 2304, 768), _) => Some(Swizzle),
         ((13, 2), WeightDtype::Bf16, (4621, 384, 1928), _) => Some(Pipeline),
-        ((13, 2), WeightDtype::Bf16, (4621, 768, 2304), _) => Some(Swizzle),
+        ((13, 2), WeightDtype::Bf16, (4621, 768, 2304), false) => Some(S3),
+        ((13, 2), WeightDtype::Bf16, (4621, 768, 2304), true) => Some(Swizzle),
         ((13, 2), WeightDtype::Bf16, (4621, 1928, 384), _) => Some(Pipeline),
         ((13, 2), WeightDtype::Bf16, (2048, 768, 2304), _) => Some(Swizzle),
         ((13, 2), WeightDtype::Bf16, (2048, 2304, 768), _) => Some(Swizzle),
         ((13, 2), WeightDtype::F16, (4621, 384, 1928), _) => Some(Pipeline),
-        ((13, 2), WeightDtype::F16, (4621, 768, 2304), _) => Some(Swizzle),
+        ((13, 2), WeightDtype::F16, (4621, 768, 2304), false) => Some(S3),
+        ((13, 2), WeightDtype::F16, (4621, 768, 2304), true) => Some(Swizzle),
         ((13, 2), WeightDtype::F16, (4621, 1928, 384), _) => Some(Pipeline),
         ((13, 2), WeightDtype::F16, (2048, 768, 2304), _) => Some(Swizzle),
         ((13, 2), WeightDtype::F16, (2048, 2304, 768), _) => Some(Pipeline),
@@ -9520,13 +9725,13 @@ fn expected_ada_half_auto_v42(
 }
 
 #[test]
-fn ada_half_auto_v42_harness_expectation_is_literal_and_fail_closed() {
+fn ada_half_auto_v43_harness_expectation_is_literal_and_fail_closed() {
     for &nvrtc in &[(12, 8), (13, 0), (13, 2)] {
         for dtype in [WeightDtype::Bf16, WeightDtype::F16] {
             for cell in FIXED_AUTO_VENDOR_EXACT_CELLS {
                 for has_bias in [false, true] {
                     assert!(
-                        expected_ada_half_auto_v42(nvrtc, dtype, cell.shape, has_bias).is_some(),
+                        expected_ada_half_auto_v43(nvrtc, dtype, cell.shape, has_bias).is_some(),
                         "{nvrtc:?} {dtype:?} {} bias={has_bias}",
                         cell.label
                     );
@@ -9536,25 +9741,25 @@ fn ada_half_auto_v42_harness_expectation_is_literal_and_fail_closed() {
     }
     let hot_a = FIXED_AUTO_VENDOR_EXACT_CELLS[0].shape;
     assert_eq!(
-        expected_ada_half_auto_v42((12, 8), WeightDtype::Bf16, hot_a, false),
+        expected_ada_half_auto_v43((12, 8), WeightDtype::Bf16, hot_a, false),
         Some(FixedTile::Tc128Sm89Pipeline)
     );
     assert_eq!(
-        expected_ada_half_auto_v42((12, 8), WeightDtype::Bf16, hot_a, true),
+        expected_ada_half_auto_v43((12, 8), WeightDtype::Bf16, hot_a, true),
         Some(FixedTile::Tc128Sm89Swizzle)
     );
     for nvrtc in [(12, 7), (13, 1), (13, 3), (14, 0)] {
         assert_eq!(
-            expected_ada_half_auto_v42(nvrtc, WeightDtype::Bf16, hot_a, false),
+            expected_ada_half_auto_v43(nvrtc, WeightDtype::Bf16, hot_a, false),
             None
         );
     }
     assert_eq!(
-        expected_ada_half_auto_v42((13, 2), WeightDtype::F32, hot_a, false),
+        expected_ada_half_auto_v43((13, 2), WeightDtype::F32, hot_a, false),
         None
     );
     assert_eq!(
-        expected_ada_half_auto_v42(
+        expected_ada_half_auto_v43(
             (13, 2),
             WeightDtype::F16,
             FixedShape {
@@ -9565,6 +9770,17 @@ fn ada_half_auto_v42_harness_expectation_is_literal_and_fail_closed() {
         ),
         None
     );
+    let hot_b = FIXED_AUTO_VENDOR_EXACT_CELLS[1].shape;
+    for dtype in [WeightDtype::Bf16, WeightDtype::F16] {
+        assert_eq!(
+            expected_ada_half_auto_v43((13, 2), dtype, hot_b, false),
+            Some(FixedTile::Tc128Sm89S3)
+        );
+        assert_eq!(
+            expected_ada_half_auto_v43((13, 2), dtype, hot_b, true),
+            Some(FixedTile::Tc128Sm89Swizzle)
+        );
+    }
 }
 
 fn fixed_auto_vendor_expected_exact_tile(
@@ -14376,13 +14592,13 @@ fn fixed_ada_half_forced_direct_pair() {
 
             for &bias_index in &biases {
                 let has_bias = bias_index == 1;
-                let expected_auto = expected_ada_half_auto_v42(
+                let expected_auto = expected_ada_half_auto_v43(
                     compiler.nvrtc_version,
                     input_dtype,
                     shape,
                     has_bias,
                 )
-                .expect("literal revision-42 direct-pair AUTO expectation");
+                .expect("literal revision-43 direct-pair AUTO expectation");
                 let auto_ops = FixedFwdOperands {
                     c: typed(&auto, output_dtype),
                     x: typed(&a, input_dtype),

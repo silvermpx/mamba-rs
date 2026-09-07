@@ -1,0 +1,37 @@
+{
+  "status": "PASS",
+  "method": "Independent Python tarfile inventory and SHA-256 validation without extracting or modifying archives. Each cache envelope checked for magic, version, PTX kind, filename/compile key, payload length and payload SHA-256, then byte-compared in full with the corresponding preserved Task6B cache.",
+  "source_archive_sha256": "d90cc387433547f5d9af9fe8d15d99a0c89df6c1f86920897d561d529a9188c4",
+  "exact_source_inputs_per_binding": 356,
+  "source_archive_matches_all_three_build_bindings": true,
+  "all_three_actual_binaries_match_bound_sha256": true,
+  "all_nine_cache_envelopes_valid_and_byte_identical_to_task6b": true,
+  "all_three_fixed_payloads_match_task6a": true,
+  "smoke_and_post101_saved_cache_hashes_match_archived_files": true,
+  "toolkits": [
+    {
+      "toolkit": "12.8",
+      "archive_sha256": "2df2a1d098af0c8971f3854b7aa7fd776b6de56cdc457ccc32263df0eaa53475",
+      "binary_sha256": "48ccd2956deb650d65b79c547bcf1591b44e025c5738069ba8162c9d9f793ede",
+      "fixed_ptx_sha256": "60977db33de28d807ac7dd3dafe2d176914f7b7eab589917a47988050712352c",
+      "archive_members": 4,
+      "valid_cache_envelopes": 3
+    },
+    {
+      "toolkit": "13.0",
+      "archive_sha256": "51c609d6346117ad04096050dc4e206cf30cc86d70388915326da552743551ba",
+      "binary_sha256": "99acb666d50cf79ed954c09e03a9490c0dfc037443eced5111b75832888d724b",
+      "fixed_ptx_sha256": "d1aa6e33a612d99cd44a1e9c7eebe495c05eeef2212bf2cf4296db55eedb86a9",
+      "archive_members": 4,
+      "valid_cache_envelopes": 3
+    },
+    {
+      "toolkit": "13.2",
+      "archive_sha256": "e2de16e4788c206d1346ac00c32e223f7100dc08acf9b158432263d794a1ba73",
+      "binary_sha256": "a6c29a2dc4bb6ab2f9fbde8a4ed2ae82625ae85e9471d7321af449305170eb91",
+      "fixed_ptx_sha256": "8b89aadf7d456b78ab249ff614568730946006eefd7143e35bce1e158741aff1",
+      "archive_members": 4,
+      "valid_cache_envelopes": 3
+    }
+  ]
+}

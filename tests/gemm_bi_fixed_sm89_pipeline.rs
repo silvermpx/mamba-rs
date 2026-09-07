@@ -24,13 +24,15 @@ const RUNGS: [FixedTile; 5] = [
     FixedTile::TcWn64,
 ];
 
-fn expected_ada_half_auto_v42(
+fn expected_ada_half_auto_v43(
     nvrtc: (i32, i32),
     dtype: WeightDtype,
     shape: FixedShape,
     has_bias: bool,
 ) -> Option<FixedTile> {
-    use FixedTile::{Tc128Sm89Pipeline as Pipeline, Tc128Sm89Swizzle as Swizzle};
+    use FixedTile::{
+        Tc128Sm89Pipeline as Pipeline, Tc128Sm89S3 as S3, Tc128Sm89Swizzle as Swizzle,
+    };
 
     match (nvrtc, dtype, (shape.m, shape.k, shape.n), has_bias) {
         ((12, 8) | (13, 0), WeightDtype::Bf16, (4621, 384, 1928), false) => Some(Pipeline),
@@ -45,12 +47,14 @@ fn expected_ada_half_auto_v42(
         ((12, 8) | (13, 0), WeightDtype::F16, (2048, 768, 2304), _) => Some(Swizzle),
         ((12, 8) | (13, 0), WeightDtype::F16, (2048, 2304, 768), _) => Some(Swizzle),
         ((13, 2), WeightDtype::Bf16, (4621, 384, 1928), _) => Some(Pipeline),
-        ((13, 2), WeightDtype::Bf16, (4621, 768, 2304), _) => Some(Swizzle),
+        ((13, 2), WeightDtype::Bf16, (4621, 768, 2304), false) => Some(S3),
+        ((13, 2), WeightDtype::Bf16, (4621, 768, 2304), true) => Some(Swizzle),
         ((13, 2), WeightDtype::Bf16, (4621, 1928, 384), _) => Some(Pipeline),
         ((13, 2), WeightDtype::Bf16, (2048, 768, 2304), _) => Some(Swizzle),
         ((13, 2), WeightDtype::Bf16, (2048, 2304, 768), _) => Some(Swizzle),
         ((13, 2), WeightDtype::F16, (4621, 384, 1928), _) => Some(Pipeline),
-        ((13, 2), WeightDtype::F16, (4621, 768, 2304), _) => Some(Swizzle),
+        ((13, 2), WeightDtype::F16, (4621, 768, 2304), false) => Some(S3),
+        ((13, 2), WeightDtype::F16, (4621, 768, 2304), true) => Some(Swizzle),
         ((13, 2), WeightDtype::F16, (4621, 1928, 384), _) => Some(Pipeline),
         ((13, 2), WeightDtype::F16, (2048, 768, 2304), _) => Some(Swizzle),
         ((13, 2), WeightDtype::F16, (2048, 2304, 768), _) => Some(Pipeline),
@@ -178,7 +182,7 @@ fn fixed_sm89_half_hot_cell_prefix_view_graph_bits(forced: Option<FixedTile>) {
     let ctx = GpuCtx::new(&device).expect("NVRTC context");
     if forced.is_none() {
         let compiler = ctx.kernels.compiler_identity();
-        assert_eq!(TUNING_TABLE_REVISION, 42);
+        assert_eq!(TUNING_TABLE_REVISION, 43);
         assert!(compiler.nvrtc_library_known);
         assert!(matches!(
             compiler.nvrtc_version,
@@ -285,13 +289,13 @@ fn fixed_sm89_half_hot_cell_prefix_view_graph_bits(forced: Option<FixedTile>) {
                             let picked = run().expect("hot-cell launch");
                             if forced.is_none() {
                                 if m == hot_m && output_offset == 8 {
-                                    let expected = expected_ada_half_auto_v42(
+                                    let expected = expected_ada_half_auto_v43(
                                         ctx.kernels.compiler_identity().nvrtc_version,
                                         dtype,
                                         FixedShape { m, k, n },
                                         has_bias,
                                     )
-                                    .expect("literal revision-42 hot-cell expectation");
+                                    .expect("literal revision-43 hot-cell expectation");
                                     assert_eq!(
                                         picked, expected,
                                         "AUTO promotion scope {dtype:?} M={m} K={k} N={n} row={row_offset} out={output_offset} bias={has_bias}"
