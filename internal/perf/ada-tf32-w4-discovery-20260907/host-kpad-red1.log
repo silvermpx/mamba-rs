@@ -1,0 +1,26 @@
+   Compiling mamba-rs v0.6.9 (/root/mamba-ada-exact-toolkit-auto-20260907)
+    Finished `release` profile [optimized] target(s) in 0.52s
+     Running tests/gemm_bi_fixed_tf32_w4_discovery.rs (/root/target-ada-exact-toolkit-auto-final2-cuda132-20260907/release/deps/gemm_bi_fixed_tf32_w4_discovery-010bd96e78b7edd9)
+
+running 6 tests
+test asymmetric_b_layout_and_copy_slices_cover_n96_and_n128 ... ok
+test bk16_a_mask3_layout_and_four_copy_slices_are_bijective ... ok
+test bk16_slab_count_preserves_production_k32_padding ... 
+thread 'bk16_slab_count_preserves_production_k32_padding' (2619411) panicked at tests/gemm_bi_fixed_tf32_w4_discovery.rs:245:5:
+assertion `left == right` failed
+  left: 1
+ right: 2
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+test five_stage_ring_reads_each_tile_before_reusing_its_slot ... ok
+test four_warps_own_every_output_once_for_both_widths ... ok
+test zero_reduction_does_not_require_operand_pointers ... ok
+
+failures:
+
+failures:
+    bk16_slab_count_preserves_production_k32_padding
+
+test result: FAILED. 5 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--test gemm_bi_fixed_tf32_w4_discovery`

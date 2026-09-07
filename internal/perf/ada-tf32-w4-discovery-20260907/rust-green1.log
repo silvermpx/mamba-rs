@@ -1,0 +1,15 @@
+   Compiling mamba-rs v0.6.9 (/root/mamba-ada-exact-toolkit-auto-20260907)
+error[E0716]: temporary value dropped while borrowed
+   --> tests/gemm_bi_fixed_tf32_w4_discovery.rs:781:26
+    |
+781 |             builder.arg(&operands.bias_ptr.unwrap_or(0));
+    |                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ - temporary value is freed at the end of this statement
+    |                          |
+    |                          creates a temporary value which is freed while still in use
+782 |             builder.arg(&params);
+    |             ------- borrow later used here
+    |
+    = note: consider using a `let` binding to create a longer lived value
+
+For more information about this error, try `rustc --explain E0716`.
+error: could not compile `mamba-rs` (test "gemm_bi_fixed_tf32_w4_discovery") due to 1 previous error

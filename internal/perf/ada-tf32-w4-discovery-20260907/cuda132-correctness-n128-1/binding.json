@@ -1,0 +1,17 @@
+{
+  "schema": "MambaBiFixedTf32W4DiscoveryBindingV1",
+  "operation": "correctness-n128",
+  "toolkit": "13.2",
+  "feature": "cuda,cudarc/cuda-13020",
+  "binary": "/root/target-ada-exact-toolkit-auto-final2-cuda132-20260907/release/deps/gemm_bi_fixed_tf32_w4_discovery-010bd96e78b7edd9",
+  "binary_sha256": "9957c23cd5209469d0f375c2075384f2708bfa0f851bc52a88257c07a658a4c8",
+  "sources": {
+    "tests/gemm_bi_fixed_tf32_w4_discovery.rs": "0c35d1acd49a0227403cdfc51125e468ac6f72a93118613ac132ef25263c32b9",
+    "tests/gemm_bi_fixed_tf32_w4_discovery.cu": "24b81b8146f504e539d1050ba1479056c33e08fed22fe75d2516a7837d248163",
+    "tests/gemm_bi_fixed_tf32_n96_discovery.cu": "7858a51d9f726121183ebc295f217427004e7400a291ff606b9ee66468552896"
+  },
+  "tools": {
+    "/root/evidence-ada-tf32-w4-discovery-20260907/run.py": "bf9bf045bf651e283ed4d3af348d48a0c23ac57271f14459783afd0f9a09ba25",
+    "/root/evidence-ada-exact-toolkit-auto-20260907/run.py": "d753757a717bfe18b3a28a8480f31104e252271576e45d7e53fc16396008475a"
+  }
+}

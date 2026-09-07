@@ -9,6 +9,15 @@ the dated progress log, 900 lines), then `internal/agent-operational-rules.md`
 
 ## 1. What the work is
 
+Latest discovery (2026-09-07): both four-warp TF32 BK16/S5 arms are rejected
+after their one CUDA13.2 screen7, despite passing the small bit-exact GPU set.
+E0 M128N96 is about121.48us, M128N128 about154.69us, current RNA119.05us,
+Fast91.06us. Worst-order candidate/RNA p95 is1.020896/1.299583. No21,101,
+retry or production promotion for these losers; the earlier eight-warp N96
+at about101.5us remains the retained finalist, not yet AUTO. See
+internal/perf/ada-tf32-w4-discovery-20260907/README.md and its integrity
+manifest. The separate three-arm half batch follows; Triad remains deferred.
+
 Latest integration (2026-09-07): actual Fixed AUTO44 now selects the qualified
 exact-F32 CopyPlan for A/B/D/E, bias/no-bias, on CUDA12.8/13.0 as well as13.2.
 All16 new toolkit-literals pass once-only post101 p50 AND p95 against former
