@@ -9,20 +9,31 @@ the dated progress log, 900 lines), then `internal/agent-operational-rules.md`
 
 ## 1. What the work is
 
-Latest checkpoint (2026-09-07): the three-toolkit Ada half production census is
-committed as `98ee1c26`; the direct-pair harness partial checkpoint is
-`21eebcd1`. The follow-up two-forced-arm harness has matching CUDA
-12.8/13.0/13.2 functional passes (46 nonignored tests, 8-record eager and
-80-record full smokes per toolkit), with static review approved. Evidence and
-the corrected timing wrapper are in
-`internal/perf/ada-half-direct-pair-20260906/`. This is a PARTIAL checkpoint:
-three original timing attempts remain excluded because telemetry failed. Access
-was restored and four fresh fail-closed whole runs completed: CUDA 12.8 and 13.0
-each have the same robust result, swizzle in 17/20 BF16/F16 row/cell/bias
-cohorts; BF16 A0, F16 A0 and F16 A1 have no direct winner and retain pipeline
-conservatively. Final source/binary/control/cache reconciliation and independent
-evidence review pass. New half candidates remain force-selectable, AUTO and
-tuning revision 41 are unchanged until Task 3 promotes this reviewed matrix.
+Latest checkpoint (2026-09-07): Ada half production AUTO is promoted at
+`b508805e`, tuning revision 42, after three-toolkit functional qualification
+and independent review. `c8244b52` adds the reusable profile-guided kernel
+optimization protocol to `docs/performance-playbook.md` section 9.
+Post-AUTO paired101 versus native-half cuBLAS Fast reports 15 wins / 4 losses /
+1 mixed result on each of CUDA 12.8 and 13.0, and 13 wins / 7 losses on 13.2.
+This is 43 wins, 15 losses, and 2 mixed results across 60 BF16/F16 cells;
+inference and Triad are not fully closed. Authoritative report:
+`internal/perf/ada-half-auto-post101-20260907/final-report.md`.
+
+Subsequent D0 small-tile, B0 16-warp, F16 B0 rectangular, and schedule-only S2
+experiments did not qualify for production. The release B0 shape is exactly
+`(M,K,N)=(4621,768,2304)`; the historical K256 16-warp screen is not B0 evidence.
+The latest S2 experiment passed exactness and physical gates, then lost to
+production by ratios 1.036883635 / 1.063118530 at p50/p95. Its report and
+59-entry integrity manifest are preserved under
+`internal/perf/ada-half-cutlass-schedule-s2-20260907/`.
+
+P0 Nsight evidence under `internal/perf/ada-half-b0-ncu-20260907/` shows
+53.40% tensor-pipe activity for production versus 73.48% for cuBLAS, with
+similar requested memory traffic and substantially more executed instructions
+in production. Resume from the current entry at the top of
+`.superpowers/sdd/handoff-codex-gemm-bi-triad-2026-09-05/progress.md`; it records
+the sole Ada owner and the profile-driven next experiment. Historical active
+task paragraphs farther down that ledger are not the current execution state.
 
 mamba-rs ships two GEMM families: the Fixed (inference) family
 (`src/mamba_ssm/gpu/gemm_bi_fixed.rs`, tuned to the maximum earlier) and the
