@@ -1,0 +1,30 @@
+{
+  "schema": "MambaTriadNtPadded36EightWarpAttemptIndexV1",
+  "attempts": [
+    {
+      "kind": "build",
+      "valid": true,
+      "exit": 0,
+      "expected_test_listed": true,
+      "source_manifest_sha256": "94a6e459d47b1bced440b76607af444e7e7e6b9c6d0da27765a44c2d7aedd758",
+      "binary_sha256": "11b99112c4de62e0e5644fb7711f61a944343286f1c4890a54cc4693d24b4869",
+      "command_sha256": "986c62e5acc95cacaec4cb5220a9abe065918e52071d5edddef4335c34231dd9"
+    },
+    {
+      "kind": "once7",
+      "variant": "padded_eight_warp",
+      "valid": true,
+      "exit": 0,
+      "executed_tests": 1,
+      "resource_records": 1,
+      "screen_records": 4,
+      "decision_records": 1,
+      "test_log_sha256": "89c6bd600cbe593da44a6ff7e68973b4c8f59e8e41c59fa27a086cc7593cd9fe",
+      "command_sha256": "c2aee3cc76fa47d305d15d5de871ff6f45cd3e743cc6cb477aba0d793ded8bc1",
+      "decision": "stop_no_retry",
+      "promotion": false,
+      "immediate_release_quiet": false,
+      "separate_drain_quiet": true
+    }
+  ]
+}

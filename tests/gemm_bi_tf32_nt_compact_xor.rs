@@ -8,6 +8,8 @@ const PADDED_COPY_PLAN_SYMBOL: &str =
     "gemm_bi_nt_test_padded_copy_plan_sm80_mma_tf32_v1_m128n64_bk32_s3";
 const PADDED_LDMATRIX_SYMBOL: &str =
     "gemm_bi_nt_test_padded_ldmatrix_sm80_mma_tf32_v1_m128n64_bk32_s3";
+const PADDED_EIGHT_WARP_SYMBOL: &str =
+    "gemm_bi_nt_test_padded_eight_warp_sm80_mma_tf32_v1_m128n64_bk32_s3";
 const PRODUCTION_CUDA: &str = include_str!("../kernels/gemm_bi_triad/sm80.cu");
 const CANDIDATE_CUDA: &str = include_str!("gemm_bi_tf32_nt_compact_xor.cu");
 const PADDED_COPY_PLAN_CUDA: &str = include_str!("gemm_bi_tf32_nt_padded_copy_plan.cuh");
@@ -18,6 +20,7 @@ enum CandidateVariant {
     CompactXor,
     PaddedCopyPlan,
     PaddedLdmatrix,
+    PaddedEightWarp,
 }
 
 impl CandidateVariant {
@@ -26,6 +29,7 @@ impl CandidateVariant {
             Self::CompactXor => "compact_xor",
             Self::PaddedCopyPlan => "padded_copy_plan",
             Self::PaddedLdmatrix => "padded_ldmatrix",
+            Self::PaddedEightWarp => "padded_eight_warp",
         }
     }
 
@@ -34,13 +38,14 @@ impl CandidateVariant {
             Self::CompactXor => CANDIDATE_SYMBOL,
             Self::PaddedCopyPlan => PADDED_COPY_PLAN_SYMBOL,
             Self::PaddedLdmatrix => PADDED_LDMATRIX_SYMBOL,
+            Self::PaddedEightWarp => PADDED_EIGHT_WARP_SYMBOL,
         }
     }
 
     const fn shared_bytes(self) -> u32 {
         match self {
             Self::CompactXor => 73_728,
-            Self::PaddedCopyPlan | Self::PaddedLdmatrix => 82_944,
+            Self::PaddedCopyPlan | Self::PaddedLdmatrix | Self::PaddedEightWarp => 82_944,
         }
     }
 
@@ -49,6 +54,7 @@ impl CandidateVariant {
             Self::CompactXor => compact_candidate_source(),
             Self::PaddedCopyPlan => padded_copy_plan_candidate_source(),
             Self::PaddedLdmatrix => padded_ldmatrix_candidate_source(),
+            Self::PaddedEightWarp => padded_eight_warp_candidate_source(),
         }
     }
 }
@@ -407,6 +413,141 @@ fn padded_ldmatrix_candidate_source() -> Result<String, String> {
     Ok(source)
 }
 
+fn padded_eight_warp_candidate_source() -> Result<String, String> {
+    let mut source = PRODUCTION_CUDA.to_owned();
+    replace_exact(
+        &mut source,
+        concat!(
+            "__device__ __forceinline__ void gemm_bi_tf32_kernel(\n",
+            "    float* output, const float* a, const float* b, const float* bias,\n",
+            "    Sm80Tf32KernelParams params) {\n",
+            "    constexpr int MAtoms = BM == 128 ? 4 : (BM == 64 ? 2 : 1);"
+        ),
+        concat!(
+            "__device__ __forceinline__ void gemm_bi_tf32_kernel(\n",
+            "    float* output, const float* a, const float* b, const float* bias,\n",
+            "    Sm80Tf32KernelParams params) {\n",
+            "    constexpr bool eight_compute_warps =\n",
+            "        Op == SgbTf32Nt && BM == 128 && BN == 64 && Stages == 3;\n",
+            "    constexpr int MAtoms = eight_compute_warps ? 2\n",
+            "        : (BM == 128 ? 4 : (BM == 64 ? 2 : 1));"
+        ),
+        1,
+        "padded eight-warp accumulator ownership",
+    )?;
+    replace_exact(
+        &mut source,
+        concat!(
+            "    bool compute = BM != 128 || warp < 4;\n",
+            "    int warp_m = BM == 128 ? (warp >> 1) * 64\n",
+            "        : (BM == 64 ? (warp >> 1) * 32 : 0);"
+        ),
+        concat!(
+            "    bool compute = eight_compute_warps || BM != 128 || warp < 4;\n",
+            "    int warp_m = eight_compute_warps ? (warp >> 1) * 32\n",
+            "        : (BM == 128 ? (warp >> 1) * 64\n",
+            "        : (BM == 64 ? (warp >> 1) * 32 : 0));"
+        ),
+        1,
+        "padded eight-warp compute and row ownership",
+    )?;
+    replace_exact(
+        &mut source,
+        concat!(
+            "GEMM_BI_TF32_DEFINE_KERNEL(",
+            "gemm_bi_nt_sm80_mma_tf32_v1_m128n64_bk32_s3, ",
+            "SgbTf32Nt, 128, 64, 3, 256, 1)"
+        ),
+        concat!(
+            "GEMM_BI_TF32_DEFINE_KERNEL(",
+            "gemm_bi_nt_test_padded_eight_warp_sm80_mma_tf32_v1_m128n64_bk32_s3, ",
+            "SgbTf32Nt, 128, 64, 3, 256, 1)"
+        ),
+        1,
+        "padded eight-warp target symbol",
+    )?;
+    replace_exact(
+        &mut source,
+        "TF32_ASSERT_KERNEL_SIGNATURE(gemm_bi_nt_sm80_mma_tf32_v1_m128n64_bk32_s3);",
+        "TF32_ASSERT_KERNEL_SIGNATURE(gemm_bi_nt_test_padded_eight_warp_sm80_mma_tf32_v1_m128n64_bk32_s3);",
+        1,
+        "padded eight-warp target signature",
+    )?;
+    Ok(source)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct WarpTile {
+    warp_m: usize,
+    warp_n: usize,
+    m_atoms: usize,
+}
+
+fn old_four_compute_warp_tile(warp: usize) -> Option<WarpTile> {
+    (warp < 4).then_some(WarpTile {
+        warp_m: (warp >> 1) * 64,
+        warp_n: (warp & 1) * 32,
+        m_atoms: 4,
+    })
+}
+
+fn padded_eight_compute_warp_tile(warp: usize) -> Option<WarpTile> {
+    Some(WarpTile {
+        warp_m: (warp >> 1) * 32,
+        warp_n: (warp & 1) * 32,
+        m_atoms: 2,
+    })
+}
+
+fn output_fragment_traces(
+    tile_for_warp: fn(usize) -> Option<WarpTile>,
+) -> std::collections::BTreeMap<(usize, usize), Vec<[usize; 12]>> {
+    let mut traces = std::collections::BTreeMap::new();
+    for warp in 0..8 {
+        let Some(tile) = tile_for_warp(warp) else {
+            continue;
+        };
+        for lane in 0..32 {
+            let group = lane >> 2;
+            let thread = lane & 3;
+            for m_atom in 0..tile.m_atoms {
+                for n_atom in 0..4 {
+                    for element in 0..4 {
+                        let a_row = tile.warp_m + m_atom * 16 + group;
+                        let b_column = tile.warp_n + n_atom * 8 + group;
+                        let row = a_row + usize::from(element >= 2) * 8;
+                        let column = tile.warp_n + n_atom * 8 + 2 * thread + (element & 1);
+                        let trace = [0, 8, 16, 24]
+                            .into_iter()
+                            .map(|k8| {
+                                [
+                                    a_row,
+                                    k8 + thread,
+                                    a_row + 8,
+                                    k8 + thread,
+                                    a_row,
+                                    k8 + thread + 4,
+                                    a_row + 8,
+                                    k8 + thread + 4,
+                                    k8 + thread,
+                                    b_column,
+                                    k8 + thread + 4,
+                                    b_column,
+                                ]
+                            })
+                            .collect::<Vec<_>>();
+                        assert!(
+                            traces.insert((row, column), trace).is_none(),
+                            "duplicate output ({row},{column})"
+                        );
+                    }
+                }
+            }
+        }
+    }
+    traces
+}
+
 #[test]
 fn padded_copy_plan_preserves_six_production_assignments_per_thread() {
     let mut a_seen = vec![false; BM * (BK / 4)];
@@ -504,18 +645,72 @@ fn candidate_variants_have_independent_sources_symbols_and_shared_extents() {
     let compact = CandidateVariant::CompactXor;
     let copy_plan = CandidateVariant::PaddedCopyPlan;
     let ldmatrix = CandidateVariant::PaddedLdmatrix;
+    let eight_warp = CandidateVariant::PaddedEightWarp;
     assert_eq!(compact.shared_bytes(), 73_728);
     assert_eq!(copy_plan.shared_bytes(), 82_944);
     assert_eq!(ldmatrix.shared_bytes(), 82_944);
+    assert_eq!(eight_warp.shared_bytes(), 82_944);
     assert_ne!(compact.symbol(), copy_plan.symbol());
     assert_ne!(compact.symbol(), ldmatrix.symbol());
     assert_ne!(copy_plan.symbol(), ldmatrix.symbol());
-    for variant in [copy_plan, ldmatrix] {
+    assert_ne!(copy_plan.symbol(), eight_warp.symbol());
+    assert_ne!(ldmatrix.symbol(), eight_warp.symbol());
+    for variant in [copy_plan, ldmatrix, eight_warp] {
         let source = variant.source().unwrap();
         assert!(source.contains(variant.symbol()));
         assert!(source.contains("NT M128N64 s3 storage"));
         assert_eq!(variant.name().starts_with("padded_"), true);
     }
+}
+
+#[test]
+fn padded_eight_warp_mapping_covers_each_m128n64_output_once() {
+    let traces = output_fragment_traces(padded_eight_compute_warp_tile);
+    assert_eq!(traces.len(), BM * BN);
+    assert_eq!(traces.keys().next(), Some(&(0, 0)));
+    assert_eq!(traces.keys().next_back(), Some(&(BM - 1, BN - 1)));
+}
+
+#[test]
+fn padded_eight_warp_preserves_each_outputs_ascending_fragment_trace() {
+    for old_warp in 0..4 {
+        for old_m_atom in 0..4 {
+            let new_warp = 2 * (2 * (old_warp >> 1) + (old_m_atom >> 1)) + (old_warp & 1);
+            let new_m_atom = old_m_atom & 1;
+            let old = old_four_compute_warp_tile(old_warp).unwrap();
+            let new = padded_eight_compute_warp_tile(new_warp).unwrap();
+            assert_eq!(old.warp_m + old_m_atom * 16, new.warp_m + new_m_atom * 16);
+            assert_eq!(old.warp_n, new.warp_n);
+        }
+    }
+    assert_eq!(
+        output_fragment_traces(padded_eight_compute_warp_tile),
+        output_fragment_traces(old_four_compute_warp_tile)
+    );
+}
+
+#[test]
+fn padded_eight_warp_source_changes_only_target_mapping_and_symbol_pair() {
+    let source = padded_eight_warp_candidate_source().unwrap();
+    assert!(source.contains(PADDED_EIGHT_WARP_SYMBOL));
+    assert!(source.contains(&format!(
+        "TF32_ASSERT_KERNEL_SIGNATURE({PADDED_EIGHT_WARP_SYMBOL});"
+    )));
+    assert!(
+        !source
+            .contains("TF32_ASSERT_KERNEL_SIGNATURE(gemm_bi_nt_sm80_mma_tf32_v1_m128n64_bk32_s3);")
+    );
+    assert!(source.contains(
+        "constexpr bool eight_compute_warps =\n        Op == SgbTf32Nt && BM == 128 && BN == 64 && Stages == 3;"
+    ));
+    assert!(source.contains("constexpr int MAtoms = eight_compute_warps ? 2"));
+    assert!(source.contains("bool compute = eight_compute_warps || BM != 128 || warp < 4;"));
+    assert!(source.contains("int warp_m = eight_compute_warps ? (warp >> 1) * 32"));
+    assert!(source.contains("static constexpr int AStride = Op == SgbTf32Tn ? BM + 8 : 36;"));
+    assert!(source.contains("static constexpr int BStride = Op == SgbTf32Nt ? 36"));
+    assert!(!source.contains("gemm_bi_tf32_nt_test_padded_copy_plan_mainloop"));
+    assert!(!source.contains("gemm_bi_tf32_nt_padded_ldmatrix_fragments"));
+    assert!(!source.contains("gemm_bi_nt_test_compact_xor_k"));
 }
 
 #[test]
@@ -1463,5 +1658,11 @@ mod cuda_suite {
     #[ignore = "requires exclusive Ada CC8.9 CUDA13.2; padded ldmatrix NT discovery"]
     fn ada_tf32_nt_padded_ldmatrix_discovery_once7() {
         run(CandidateVariant::PaddedLdmatrix);
+    }
+
+    #[test]
+    #[ignore = "requires exclusive Ada CC8.9 CUDA13.2; padded eight-compute-warp NT discovery"]
+    fn ada_tf32_nt_padded_eight_warp_discovery_once7() {
+        run(CandidateVariant::PaddedEightWarp);
     }
 }

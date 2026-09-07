@@ -9,6 +9,18 @@ the dated progress log, 900 lines), then `internal/agent-operational-rules.md`
 
 ## 1. What the work is
 
+Latest NT eight-compute-warp screen (2026-09-07): finite target/forced-tail
+eager/graph bitsPASS,100regs versus profiled154,0local/82944shared/1CTA,
+but all4once7 strata lose: p501.080783..1.083239,p951.081299..1.083544.
+STOP_NO_RETRY, no21/101/Fast/production promotion. Oneactualtest49.52s,
+rootreplay372sources/28brackets and native14checksPASS. Source989acbcf...,
+binary11b99112..., raw89c6bd60.... Evidence:
+`internal/perf/ada-triad-nt-padded36-eight-warp-20260907/README.md`.
+Four recent NT mechanisms now screened without a retained winner (compact,
+copyplan,ldmatrix,eightwarp); production AUTO remains unchanged. Next bounded
+research is existing full-tile staging adaptation and warp-fragment pipelining,
+not another retry of these losses. Old checkpoints below are historical.
+
 Latest padded36 two-arm NT screen (2026-09-07): both candidates pass bounded
 finite target/tail eager/graph bits but are STOP_NO_RETRY, no promotion.
 Copy-plan185regs loses all4strata, p501.093789..1.095568 and
