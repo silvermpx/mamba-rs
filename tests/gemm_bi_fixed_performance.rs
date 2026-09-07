@@ -28,7 +28,8 @@ use mamba_rs::mamba_ssm::gpu::gemm_bi_triad::{
 };
 use mamba_rs::mamba_ssm::gpu::graph_capture::capture_into_graph;
 use mamba_rs::mamba_ssm::gpu::kernel_identity::{
-    ModuleKind, ResolvedGemmOp, TUNING_TABLE_REVISION, digest_hex,
+    ModuleKind, NUMERIC_ABI_REVISION, ResolvedGemmOp, SCHEDULE_REVISION, TUNING_TABLE_REVISION,
+    digest_hex,
 };
 use sha2::{Digest, Sha256};
 
@@ -931,6 +932,9 @@ fn fixed_ada_half_s3_post_auto_fast_paired() {
 
 #[path = "support/fixed_sm89_exact_n64_admission.rs"]
 mod exact_n64_admission;
+
+#[path = "support/fixed_sm89_toolkit_admission.rs"]
+mod toolkit_admission;
 
 #[test]
 #[ignore = "requires exclusive pinned Ada, actual NVRTC candidate admission and paired evidence output"]
@@ -13779,6 +13783,19 @@ fn fixed_ada_production_auto_paired_precision_cublas() {
 #[ignore = "requires MAMBA_FIXED_ADA_VENDOR=1 and an explicitly admitted quiet CC8.9/12.0 GPU (default 8.9); emits forced-rung/AUTO/vendor evidence"]
 fn fixed_ada_forced_rungs_paired_precision_cublas() {
     use cudarc::cublas::sys::cublasComputeType_t;
+
+    match std::env::var("MAMBA_FIXED_ADA_TOOLKIT_ADMISSION") {
+        Ok(value) => {
+            assert_eq!(
+                value, "1",
+                "MAMBA_FIXED_ADA_TOOLKIT_ADMISSION must be exactly 1 when present"
+            );
+            toolkit_admission::run();
+            return;
+        }
+        Err(std::env::VarError::NotPresent) => {}
+        Err(error) => panic!("read MAMBA_FIXED_ADA_TOOLKIT_ADMISSION: {error}"),
+    }
 
     assert_eq!(
         std::env::var("MAMBA_FIXED_ADA_VENDOR").as_deref(),

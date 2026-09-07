@@ -1,0 +1,90 @@
+{
+  "eligible": [],
+  "family": "tf32",
+  "identity": {
+    "binary_sha": "60000e18c652dbee7b651c6c07a5efacb77fd6a72237e08d20c25476daf6b699",
+    "cc": "8.9",
+    "compiler_target": "sm_89",
+    "family": "tf32",
+    "fixed_artifact_digest": "60977db33de28d807ac7dd3dafe2d176914f7b7eab589917a47988050712352c",
+    "fixed_invocation_digest": "57c3e4f2177104f137d432f19398a4a36799aca4c264634a1ab25d17dbf422ba",
+    "fixed_source_digest": "205f58b56429b8e74f3ac1e7ab9f0cf6a9bf193ffeb87b254bd3ab00e6b02ca5",
+    "header_manifest_digest": "93da3d651789a26680b5af0ad03008c21ddcef2fa256d5439994b16442cde0ab",
+    "kind": "identity",
+    "literal_control": "hot_c:0,hot_c:1",
+    "logical_ops": 20,
+    "nvrtc_library_domain": "26b0a3a02044ffcbc1693fd83e9261beffa692a4fbcfe3ac5e9d8c87980bb155",
+    "nvrtc_library_known": true,
+    "paths": [
+      "eager",
+      "graph"
+    ],
+    "schema": "MambaBiFixedAdaToolkitAdmissionV1",
+    "screen_artifact_sha": null,
+    "screen_sha": null,
+    "sm_count": 142,
+    "source_sha": "e1b7175c93554e45f99f5b0a2ba999509655aed493d8d5d52737a4cbe392a64a",
+    "stage": "smoke1",
+    "start_parities": [
+      0,
+      1
+    ],
+    "toolkit": "12.8",
+    "tuning_revision": 43,
+    "uuid": "GPU-d1edd7be-e88d-aed6-047d-622163306f0e",
+    "vendor_algorithm": "CUBLAS_GEMM_DEFAULT",
+    "vendor_atomics": "CUBLAS_ATOMICS_NOT_ALLOWED",
+    "vendor_compute": "CUBLAS_COMPUTE_32F_FAST_TF32",
+    "vendor_math": "CUBLAS_DEFAULT_MATH",
+    "vendor_pointer_mode": "CUBLAS_POINTER_MODE_HOST",
+    "warmup_eager": 128,
+    "windows": 1
+  },
+  "jsonl_sha": "d6df0cac45a54c2cb17202b7b999cad43e82ea9008f09cbd5f3a278e53aa2d4c",
+  "literals": [
+    "hot_c:0",
+    "hot_c:1"
+  ],
+  "own_strata": {
+    "hot_c:0": [
+      [
+        1.490456350808926,
+        1.490456350808926
+      ],
+      [
+        1.4906143285612097,
+        1.4906143285612097
+      ],
+      [
+        1.4955166497645465,
+        1.4955166497645465
+      ],
+      [
+        1.5003567432749085,
+        1.5003567432749085
+      ]
+    ],
+    "hot_c:1": [
+      [
+        1.4889752279278097,
+        1.4889752279278097
+      ],
+      [
+        1.4935966944514893,
+        1.4935966944514893
+      ],
+      [
+        1.4942041611884034,
+        1.4942041611884034
+      ],
+      [
+        1.5006883409657759,
+        1.5006883409657759
+      ]
+    ]
+  },
+  "stage": "smoke1",
+  "toolkit": "12.8",
+  "valid": true,
+  "windows": 1
+}

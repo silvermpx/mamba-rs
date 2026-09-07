@@ -1,0 +1,73 @@
+   Compiling mamba-rs v0.6.9 (/root/mamba-ada-f32-tf32-toolkit-20260907)
+error: struct literals are not allowed here
+    --> tests/support/fixed_sm89_toolkit_admission.rs:1073:54
+     |
+1073 |         if config.family == Family::Tf32 && shape != FixedShape { m: 4621, k: 1928, n: 384 } {
+     |                                                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+help: surround the struct literal with parentheses
+     |
+1073 |         if config.family == Family::Tf32 && shape != (FixedShape { m: 4621, k: 1928, n: 384 }) {
+     |                                                      +                                       +
+
+error: there is no argument named `configurations`
+   --> tests/support/fixed_sm89_toolkit_admission.rs:421:13
+    |
+421 | /             concat!(
+422 | |                 "\"kind\":\"complete\",\"configurations\":{configurations},",
+423 | |                 "\"expected_configurations\":{},\"samples\":{},\"pairs\":{},",
+424 | |                 "\"summaries\":{},\"literals\":{literals},\"rejected\":0,",
+425 | |                 "\"preceding_lines\":{},\"preceding_jsonl_sha256\":\"{digest}\",",
+426 | |                 "\"all_gates_passed\":true,\"passed\":true"
+427 | |             ),
+    | |_____________^
+    |
+    = note: did you intend to capture a variable `configurations` from the surrounding scope?
+    = note: to avoid ambiguity, `format_args!` cannot capture variables when the format string is expanded from a macro
+
+error: there is no argument named `literals`
+   --> tests/support/fixed_sm89_toolkit_admission.rs:421:13
+    |
+421 | /             concat!(
+422 | |                 "\"kind\":\"complete\",\"configurations\":{configurations},",
+423 | |                 "\"expected_configurations\":{},\"samples\":{},\"pairs\":{},",
+424 | |                 "\"summaries\":{},\"literals\":{literals},\"rejected\":0,",
+425 | |                 "\"preceding_lines\":{},\"preceding_jsonl_sha256\":\"{digest}\",",
+426 | |                 "\"all_gates_passed\":true,\"passed\":true"
+427 | |             ),
+    | |_____________^
+    |
+    = note: did you intend to capture a variable `literals` from the surrounding scope?
+    = note: to avoid ambiguity, `format_args!` cannot capture variables when the format string is expanded from a macro
+
+error: there is no argument named `digest`
+   --> tests/support/fixed_sm89_toolkit_admission.rs:421:13
+    |
+421 | /             concat!(
+422 | |                 "\"kind\":\"complete\",\"configurations\":{configurations},",
+423 | |                 "\"expected_configurations\":{},\"samples\":{},\"pairs\":{},",
+424 | |                 "\"summaries\":{},\"literals\":{literals},\"rejected\":0,",
+425 | |                 "\"preceding_lines\":{},\"preceding_jsonl_sha256\":\"{digest}\",",
+426 | |                 "\"all_gates_passed\":true,\"passed\":true"
+427 | |             ),
+    | |_____________^
+    |
+    = note: did you intend to capture a variable `digest` from the surrounding scope?
+    = note: to avoid ambiguity, `format_args!` cannot capture variables when the format string is expanded from a macro
+
+error: there is no argument named `chronology`
+    --> tests/support/fixed_sm89_toolkit_admission.rs:1253:25
+     |
+1253 | /                         concat!(
+1254 | |                             "\"kind\":\"sample\",\"family\":\"{}\",\"stage\":\"{}\",",
+1255 | |                             "\"literal\":\"{}\",\"path\":\"{}\",\"start_parity\":{},",
+1256 | |                             "\"chronology\":{chronology},\"window\":{},\"traversal\":{},",
+1257 | |                             "\"comparison\":{},\"position\":{},\"arm\":\"{}\",",
+1258 | |                             "\"logical_ops\":20,\"us\":{}"
+1259 | |                         ),
+     | |_________________________^
+     |
+     = note: did you intend to capture a variable `chronology` from the surrounding scope?
+     = note: to avoid ambiguity, `format_args!` cannot capture variables when the format string is expanded from a macro
+
+error: could not compile `mamba-rs` (test "gemm_bi_fixed_performance") due to 5 previous errors

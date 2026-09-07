@@ -1,0 +1,215 @@
+{
+  "eligible": [
+    "hot_a:0",
+    "hot_a:1",
+    "hot_b:0",
+    "hot_b:1",
+    "hot_d:0",
+    "hot_d:1",
+    "hot_e:0",
+    "hot_e:1"
+  ],
+  "family": "f32_exact_fast",
+  "identity": {
+    "binary_sha": "cf90b10de3cb8afb0a4a68575a1c9db9597750ff3b929dfff85864a423009154",
+    "cc": "8.9",
+    "compiler_target": "sm_89",
+    "family": "f32_exact_fast",
+    "fixed_artifact_digest": "d1aa6e33a612d99cd44a1e9c7eebe495c05eeef2212bf2cf4296db55eedb86a9",
+    "fixed_invocation_digest": "adee1f8b255bacfce8921820d9397a0a22a0dbaac735759fdcd222a453176155",
+    "fixed_source_digest": "205f58b56429b8e74f3ac1e7ab9f0cf6a9bf193ffeb87b254bd3ab00e6b02ca5",
+    "header_manifest_digest": "5b0d4c9a293604e0e025a4f57004cdbb7a870a7076bc97d2eaa5c06d7617eb78",
+    "kind": "identity",
+    "literal_control": "hot_a:0,hot_a:1,hot_b:0,hot_b:1,hot_d:0,hot_d:1,hot_e:0,hot_e:1",
+    "logical_ops": 20,
+    "numeric_abi_revision": 5,
+    "nvrtc_library_domain": "709b91c36bfb0ed966ee69adc8d6f87ff110eecf3dfb5060367f183ce614eb0d",
+    "nvrtc_library_known": true,
+    "paths": [
+      "eager",
+      "graph"
+    ],
+    "schedule_revision": 8,
+    "schema": "MambaBiFixedAdaToolkitAdmissionV1",
+    "screen_artifact_sha": "d1aa6e33a612d99cd44a1e9c7eebe495c05eeef2212bf2cf4296db55eedb86a9",
+    "screen_sha": "cae9db1864bd64700ee3033196eae4c6f8a0abd7a3a1cf09a407889cb7727682",
+    "sm_count": 142,
+    "source_sha": "97f3d43fc315c96238f41f9f39bc15418518b5493e216fb9bc0a8f03a46e5bc7",
+    "stage": "confirm101",
+    "start_parities": [
+      0,
+      1
+    ],
+    "toolkit": "13.0",
+    "tuning_revision": 43,
+    "uuid": "GPU-d1edd7be-e88d-aed6-047d-622163306f0e",
+    "vendor_algorithm": "CUBLAS_GEMM_DEFAULT",
+    "vendor_atomics": "CUBLAS_ATOMICS_NOT_ALLOWED",
+    "vendor_compute": "CUBLAS_COMPUTE_32F_FAST_TF32",
+    "vendor_math": "CUBLAS_DEFAULT_MATH",
+    "vendor_pointer_mode": "CUBLAS_POINTER_MODE_HOST",
+    "warmup_eager": 128,
+    "windows": 101
+  },
+  "jsonl_sha": "0b27351512f3265b156a29aaf7fadcaf4a84870cac06e1c1b36ce3e358f20711",
+  "literals": [
+    "hot_a:0",
+    "hot_a:1",
+    "hot_b:0",
+    "hot_b:1",
+    "hot_d:0",
+    "hot_d:1",
+    "hot_e:0",
+    "hot_e:1"
+  ],
+  "own_strata": {
+    "hot_a:0": [
+      [
+        0.8422433087990985,
+        0.8747009806273952
+      ],
+      [
+        0.8425527552377003,
+        0.8770763236829618
+      ],
+      [
+        0.8444542613511921,
+        0.8755117498411242
+      ],
+      [
+        0.8445888215290256,
+        0.8753892405705431
+      ]
+    ],
+    "hot_a:1": [
+      [
+        0.8406432334293995,
+        0.8874840865843119
+      ],
+      [
+        0.8415105195069312,
+        0.8819880677229004
+      ],
+      [
+        0.8428347729893909,
+        0.8886922016860447
+      ],
+      [
+        0.8422389203518985,
+        0.8889768444135295
+      ]
+    ],
+    "hot_b:0": [
+      [
+        0.8269294912012457,
+        0.8451072560936377
+      ],
+      [
+        0.8158326512126164,
+        0.8457394688268552
+      ],
+      [
+        0.8168522866739014,
+        0.844058351581308
+      ],
+      [
+        0.8158244628115284,
+        0.8432914493902846
+      ]
+    ],
+    "hot_b:1": [
+      [
+        0.81215293734903,
+        0.8430097227066273
+      ],
+      [
+        0.8148902942068927,
+        0.8386432282329769
+      ],
+      [
+        0.8122768611690908,
+        0.8366076093206277
+      ],
+      [
+        0.815470744616455,
+        0.8374155197067443
+      ]
+    ],
+    "hot_d:0": [
+      [
+        0.8269403870465207,
+        0.8452316652574001
+      ],
+      [
+        0.8269778071152083,
+        0.8456728427253021
+      ],
+      [
+        0.8268425116608714,
+        0.844805852983362
+      ],
+      [
+        0.8258712612785367,
+        0.8423060059435645
+      ]
+    ],
+    "hot_d:1": [
+      [
+        0.8273400798789107,
+        0.8540852417767456
+      ],
+      [
+        0.8291385725588909,
+        0.8568658670572983
+      ],
+      [
+        0.8278818060849301,
+        0.8537261429405872
+      ],
+      [
+        0.8272133201472426,
+        0.848097937751575
+      ]
+    ],
+    "hot_e:0": [
+      [
+        0.8130707366734522,
+        0.8306327857145993
+      ],
+      [
+        0.8136624961090216,
+        0.8285416192821771
+      ],
+      [
+        0.8138389888266134,
+        0.8274792784402499
+      ],
+      [
+        0.8143241865218225,
+        0.8286269227508642
+      ]
+    ],
+    "hot_e:1": [
+      [
+        0.8152268094973366,
+        0.8365457901869159
+      ],
+      [
+        0.813677440618332,
+        0.8348972436884771
+      ],
+      [
+        0.815081177785432,
+        0.8334392764576763
+      ],
+      [
+        0.8142823762920036,
+        0.8362059878875213
+      ]
+    ]
+  },
+  "stage": "confirm101",
+  "toolkit": "13.0",
+  "valid": true,
+  "windows": 101
+}

@@ -1,0 +1,18 @@
+{
+  "schema": "MambaBiFixedAdaToolkitEvidenceManifestV1",
+  "created_utc": "2026-09-07T06:56:16Z",
+  "worktree_base": "e1d503c78694936b46ee79ca6b1a320a494ce7f5",
+  "timing_source_sha256": "97f3d43fc315c96238f41f9f39bc15418518b5493e216fb9bc0a8f03a46e5bc7",
+  "manifest": "internal/perf/ada-f32-tf32-toolkit-20260907/manifest-files.sha256",
+  "manifest_sha256": "95c8356fa8546ce343c3946e9ab9fd1f4432ca6999cc18ab027362803d69c537",
+  "file_count": 243,
+  "path_root": "worktree",
+  "hash_algorithm": "SHA-256",
+  "selection": [
+    "all files in internal/perf/ada-f32-tf32-toolkit-20260907 except manifest-files.sha256 and manifest-root.json",
+    "all ada-f32-tf32-toolkit-task7-* ledger files beside the binding brief",
+    "tests/gemm_bi_fixed_performance.rs",
+    "tests/support/fixed_sm89_toolkit_admission.rs"
+  ],
+  "self_reference": "manifest-files.sha256 and manifest-root.json are intentionally outside the file list; this root object binds the list by digest"
+}

@@ -1,0 +1,14 @@
+test_actual_rust_json_parses_and_abi_is_json_arrays (__main__.Task7ValidationTests.test_actual_rust_json_parses_and_abi_is_json_arrays) ... ok
+test_confirm_gate_requires_exact_recomputed_subset_and_identity (__main__.Task7ValidationTests.test_confirm_gate_requires_exact_recomputed_subset_and_identity) ... ok
+test_failed_inner_outer_and_binding_closure_reject (__main__.Task7ValidationTests.test_failed_inner_outer_and_binding_closure_reject) ... ok
+test_honestly_recomputed_loss_is_valid_and_siblings_survive (__main__.Task7ValidationTests.test_honestly_recomputed_loss_is_valid_and_siblings_survive) ... ok
+test_malformed_identity_vendor_and_physical_contracts_reject (__main__.Task7ValidationTests.test_malformed_identity_vendor_and_physical_contracts_reject) ... ok
+test_missing_duplicate_foreign_literal_and_raw_records_reject (__main__.Task7ValidationTests.test_missing_duplicate_foreign_literal_and_raw_records_reject) ... ok
+test_mixed_p95_is_valid_loss (__main__.Task7ValidationTests.test_mixed_p95_is_valid_loss) ... ok
+test_raw_schedule_arithmetic_and_completion_forgery_reject (__main__.Task7ValidationTests.test_raw_schedule_arithmetic_and_completion_forgery_reject) ... ok
+test_tf32_analyzer_expects_rna_auto_not_old_portable_bundle (__main__.Task7ValidationTests.test_tf32_analyzer_expects_rna_auto_not_old_portable_bundle) ... ok
+
+----------------------------------------------------------------------
+Ran 9 tests in 0.320s
+
+OK

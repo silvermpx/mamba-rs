@@ -1,0 +1,25 @@
+   Compiling mamba-rs v0.6.9 (/root/mamba-ada-f32-tf32-toolkit-20260907)
+error[E0433]: cannot find module or crate `serde_json` in this scope
+    --> tests/support/fixed_sm89_toolkit_admission.rs:1869:45
+     |
+1869 |         assert_eq!(parsed["driver_abi"][4], serde_json::json!([32, 24]));
+     |                                             ^^^^^^^^^^ use of unresolved module or unlinked crate `serde_json`
+
+error[E0433]: cannot find module or crate `serde_json` in this scope
+    --> tests/support/fixed_sm89_toolkit_admission.rs:1868:41
+     |
+1868 |         let parsed: serde_json::Value = serde_json::from_str(&encoded).unwrap();
+     |                                         ^^^^^^^^^^ use of unresolved module or unlinked crate `serde_json`
+     |
+     = help: if you wanted to use a crate named `serde_json`, use `cargo add serde_json` to add it to your `Cargo.toml`
+
+error[E0433]: cannot find module or crate `serde_json` in this scope
+    --> tests/support/fixed_sm89_toolkit_admission.rs:1868:21
+     |
+1868 |         let parsed: serde_json::Value = serde_json::from_str(&encoded).unwrap();
+     |                     ^^^^^^^^^^ use of unresolved module or unlinked crate `serde_json`
+     |
+     = help: if you wanted to use a crate named `serde_json`, use `cargo add serde_json` to add it to your `Cargo.toml`
+
+For more information about this error, try `rustc --explain E0433`.
+error: could not compile `mamba-rs` (test "gemm_bi_fixed_performance") due to 3 previous errors

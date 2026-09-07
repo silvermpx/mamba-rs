@@ -1,0 +1,509 @@
+# Task7 fix round1-only diff, final4 -> final5b
+
+HEAD remains e1d503c78694936b46ee79ca6b1a320a494ce7f5; authorized uncommitted WIP.
+Fix-base files are root byte-identical final4 freeze, hashes in original source review.
+Parent includes only new imports; original reviewed16-line admission entry addition is unchanged and omitted.
+Current final5b source hashes independently matched by root; both Rust rustfmt checks PASS.
+
+2 additions / 1 deletion / tests/gemm_bi_fixed_performance.rs (new import only; prior16 additions unchanged)
+114	24	{.superpowers/sdd/handoff-codex-gemm-bi-triad-2026-09-05/task7-final4-freeze/tests => tests}/support/fixed_sm89_toolkit_admission.rs
+3	3	{.superpowers/sdd/handoff-codex-gemm-bi-triad-2026-09-05/task7-final4-freeze/internal => internal}/perf/ada-f32-tf32-toolkit-20260907/run.py
+2	0	{.superpowers/sdd/handoff-codex-gemm-bi-triad-2026-09-05/task7-final4-freeze/internal => internal}/perf/ada-f32-tf32-toolkit-20260907/analyze.py
+unchanged / internal/perf/ada-f32-tf32-toolkit-20260907/remote.py
+9	2	{.superpowers/sdd/handoff-codex-gemm-bi-triad-2026-09-05/task7-final4-freeze/internal => internal}/perf/ada-f32-tf32-toolkit-20260907/test_validation.py
+
+diff --git a/tests/gemm_bi_fixed_performance.rs b/tests/gemm_bi_fixed_performance.rs
+index 53e2196e..0f3bb602 100644
+--- a/tests/gemm_bi_fixed_performance.rs
++++ b/tests/gemm_bi_fixed_performance.rs
+@@ -21,21 +21,22 @@ use mamba_rs::mamba_ssm::gpu::gemm_bi_fixed::{
+ use mamba_rs::mamba_ssm::gpu::gemm_bi_triad::{
+     PhysicalQualificationRequest, PhysicalQualificationRoute, Sm120Bk, Sm120ForcedRoute,
+     Sm120LaunchOperands, Sm120MapRequest, Sm120Op, Sm120PhysicalRoute, Sm120Schedule, Sm120Shape,
+     Sm120Stages, Sm120Tile, TcTile, Tf32PhysicalRoute, Tf32PortableRoute, Tf32PortableStages,
+     Tf32PortableTile, Tf32Sm120Route, Tf32Sm120Stages, Tf32Sm120Tile, launch_sm120_tma_prepared,
+     prepare_sm120_tensor_maps, prepare_sm120_tma_forced, presize_physical_qualification_suite,
+     qualify_physical_launch, resolve_sm120_forced, tf32_route_specs,
+ };
+ use mamba_rs::mamba_ssm::gpu::graph_capture::capture_into_graph;
+ use mamba_rs::mamba_ssm::gpu::kernel_identity::{
+-    ModuleKind, ResolvedGemmOp, TUNING_TABLE_REVISION, digest_hex,
++    ModuleKind, NUMERIC_ABI_REVISION, ResolvedGemmOp, SCHEDULE_REVISION, TUNING_TABLE_REVISION,
++    digest_hex,
+ };
+ use sha2::{Digest, Sha256};
+ 
+ const WARMUPS: usize = 10;
+ const ITERS: usize = 200;
+ 
+ // Task6B has a separate mirrored-bracket protocol; historical harnesses above
+ // and below retain their original record meanings.
+ mod ada_s3_pair {
+     use super::*;
+diff --git a/tests/support/fixed_sm89_toolkit_admission.rs b/tests/support/fixed_sm89_toolkit_admission.rs
+index 48cd20b7..a4aa874b 100644
+--- a/tests/support/fixed_sm89_toolkit_admission.rs
++++ b/tests/support/fixed_sm89_toolkit_admission.rs
+@@ -711,24 +711,32 @@ impl Case {
+         self.bias.unchanged(ctx)?;
+         for arm in 0..4 {
+             let operands = self.operands(arm);
+             if operands.x.ptr != self.a.ptr()
+                 || operands.w.ptr != self.b.ptr()
+                 || operands.bias_ptr != self.has_bias.then(|| self.bias.ptr())
+             {
+                 return Err("Task7 common input pointer contract differs".into());
+             }
+         }
+         Ok(())
+     }
++
++    fn timing_boundary(&self, ctx: &GpuCtx) -> Result<(), String> {
++        self.inputs(ctx)?;
++        for output in &self.outputs {
++            output.words(ctx)?;
++        }
++        Ok(())
++    }
+ }
+ 
+ fn cuda(result: cudarc::driver::sys::CUresult, label: &str) -> Result<(), String> {
+     if result == cudarc::driver::sys::CUresult::CUDA_SUCCESS {
+         Ok(())
+     } else {
+         Err(format!("{label}: {result:?}"))
+     }
+ }
+ 
+ fn graph_nodes(graph: &CudaGraph) -> Result<Vec<cudarc::driver::sys::CUgraphNode>, String> {
+     use cudarc::driver::sys;
+@@ -1215,24 +1223,52 @@ fn finite_order_control(case: &Case, outputs: &[Vec<u32>]) -> Result<(), String>
+             .has_bias
+             .then(|| f32::from_bits(case.bias.initial[GUARD_WORDS + column]));
+         let ordered = ordered_dot(&a, &b, bias)?;
+         if outputs[0][index] != ordered || outputs[1][index] != ordered {
+             return Err(format!(
+                 "Task7 exact ascending-FMA certificate failed at output {index}"
+             ));
+         }
+     }
+     Ok(())
+ }
+ 
++fn prelaunch_gate<T>(
++    numeric_abi_revision: u16,
++    schedule_revision: u16,
++    expected_artifact: Option<&str>,
++    actual_artifact: &str,
++    launch: impl FnOnce() -> Result<T, String>,
++) -> Result<T, String> {
++    if numeric_abi_revision != 5 || schedule_revision != 8 {
++        return Err(format!(
++            "Task7 compiler revisions differ: numeric={numeric_abi_revision} schedule={schedule_revision}"
++        ));
++    }
++    if expected_artifact.is_some_and(|expected| expected != actual_artifact) {
++        return Err(format!(
++            "Task7 Fixed artifact differs from bound screen: {actual_artifact}"
++        ));
++    }
++    launch()
++}
++
++fn timing_boundary_gate<T>(
++    check: impl FnOnce() -> Result<(), String>,
++    post_timing_workflows: impl FnOnce() -> Result<T, String>,
++) -> Result<T, String> {
++    check()?;
++    post_timing_workflows()
++}
++
+ fn run_inner() -> Result<(), String> {
+     let environment = std::env::vars().collect::<BTreeMap<_, _>>();
+     let config = parse_config(&environment)?;
+     if cfg!(debug_assertions) {
+         return Err("Task7 toolkit admission requires --release".into());
+     }
+     if TUNING_TABLE_REVISION != 43 {
+         return Err(format!(
+             "Task7 requires tuning revision43, got {TUNING_TABLE_REVISION}"
+         ));
+     }
+     let measured_source_sha = source_sha()?;
+@@ -1256,53 +1292,53 @@ fn run_inner() -> Result<(), String> {
+     let actual_toolkit = format!("{}.{}", compiler.nvrtc_version.0, compiler.nvrtc_version.1);
+     if actual_toolkit != config.toolkit
+         || !compiler.nvrtc_library_known
+         || compiler.target.as_str() != "sm_89"
+     {
+         return Err(format!(
+             "Task7 compiler identity mismatch toolkit={actual_toolkit} known={} target={:?}",
+             compiler.nvrtc_library_known, compiler.target
+         ));
+     }
+     configure_fixed_auto_vendor_custom(&ctx, config.family.policy());
+     let modes = cublas_modes(&ctx)?;
+-    single_term_controls(&ctx, config.family)?;
+     let artifact = ctx.kernels.artifact_set_identity().fixed;
+     let artifact_sha = digest_hex(&artifact.artifact_digest);
+-    if config
+-        .screen_artifact_sha
+-        .as_deref()
+-        .is_some_and(|expected| expected != artifact_sha)
+-    {
+-        return Err(format!(
+-            "Task7 Fixed artifact differs from bound screen: {artifact_sha}"
+-        ));
+-    }
++    prelaunch_gate(
++        compiler.numeric_abi_revision,
++        compiler.schedule_revision,
++        config.screen_artifact_sha.as_deref(),
++        &artifact_sha,
++        || single_term_controls(&ctx, config.family),
++    )?;
+     output.emit(&format!(
+         concat!(
+             "\"kind\":\"identity\",\"family\":\"{}\",\"stage\":\"{}\",",
+             "\"windows\":{},\"toolkit\":\"{}\",\"tuning_revision\":43,",
++            "\"numeric_abi_revision\":{},\"schedule_revision\":{},",
+             "\"uuid\":\"{}\",\"cc\":\"8.9\",\"sm_count\":142,",
+             "\"compiler_target\":\"sm_89\",\"nvrtc_library_known\":true,",
+             "\"source_sha\":\"{}\",\"binary_sha\":\"{}\",",
+             "\"screen_sha\":{},\"screen_artifact_sha\":{},\"fixed_source_digest\":\"{}\",",
+             "\"fixed_invocation_digest\":\"{}\",\"fixed_artifact_digest\":\"{}\",",
+             "\"header_manifest_digest\":\"{}\",\"nvrtc_library_domain\":\"{}\",",
+             "\"literal_control\":\"{}\",\"paths\":[\"eager\",\"graph\"],",
+             "\"start_parities\":[0,1],\"warmup_eager\":128,\"logical_ops\":20,{}"
+         ),
+         config.family.name(),
+         config.stage.name(),
+         config.windows,
+         config.toolkit,
++        compiler.numeric_abi_revision,
++        compiler.schedule_revision,
+         "GPU-d1edd7be-e88d-aed6-047d-622163306f0e",
+         measured_source_sha,
+         measured_binary_sha,
+         config
+             .screen_sha
+             .as_deref()
+             .map(|sha| format!("\"{sha}\""))
+             .unwrap_or_else(|| "null".into()),
+         config
+             .screen_artifact_sha
+             .as_deref()
+             .map(|sha| format!("\"{sha}\""))
+@@ -1479,38 +1515,44 @@ fn run_inner() -> Result<(), String> {
+                     let arm = observation.arm;
+                     observation.us = if path == "eager" {
+                         fixed_ada_event_window_us(&ctx, 20, || {
+                             case.launch(&ctx, arm).expect("Task7 timed eager launch")
+                         })
+                     } else {
+                         fixed_ada_event_window_us(&ctx, 1, || {
+                             twenty[arm].launch().expect("Task7 timed graph launch")
+                         }) / 20.0
+                     };
+                     observations.push(observation);
+                 }
+-                for arm in 0..3 {
+-                    if case.outputs[arm].read(&ctx)? != expected[arm] {
+-                        return Err("Task7 post-timing output bits differ".into());
+-                    }
+-                    case.outputs[arm]
+-                        .output_gate(&ctx, &expected[arm], || case.launch(&ctx, arm))?;
+-                    for replay in [&one[arm], &twenty[arm]] {
+-                        case.outputs[arm].output_gate(&ctx, &expected[arm], || {
+-                            replay
+-                                .launch()
+-                                .map_err(|error| format!("Task7 post-timing graph: {error}"))
+-                        })?;
+-                    }
+-                }
++                timing_boundary_gate(
++                    || case.timing_boundary(&ctx),
++                    || {
++                        for arm in 0..3 {
++                            if case.outputs[arm].read(&ctx)? != expected[arm] {
++                                return Err("Task7 post-timing output bits differ".into());
++                            }
++                            case.outputs[arm]
++                                .output_gate(&ctx, &expected[arm], || case.launch(&ctx, arm))?;
++                            for replay in [&one[arm], &twenty[arm]] {
++                                case.outputs[arm].output_gate(&ctx, &expected[arm], || {
++                                    replay.launch().map_err(|error| {
++                                        format!("Task7 post-timing graph: {error}")
++                                    })
++                                })?;
++                            }
++                        }
++                        Ok(())
++                    },
++                )?;
+                 case.inputs(&ctx)?;
+                 let mut ratio_sets: [Vec<f64>; 3] =
+                     std::array::from_fn(|_| Vec::with_capacity(config.windows));
+                 let mut pair_records = Vec::with_capacity(3 * config.windows);
+                 for (chronology, observation) in observations.iter().enumerate() {
+                     output.emit(&format!(
+                         concat!(
+                             "\"kind\":\"sample\",\"family\":\"{}\",\"stage\":\"{}\",",
+                             "\"literal\":\"{}\",\"path\":\"{}\",\"start_parity\":{},",
+                             "\"chronology\":{},\"window\":{},\"traversal\":{},",
+                             "\"comparison\":{},\"position\":{},\"arm\":\"{}\",",
+                             "\"logical_ops\":20,\"us\":{}"
+@@ -1939,24 +1981,72 @@ mod tests {
+                 1,
+                 expected.symbol,
+                 expected.grid,
+                 expected.block,
+                 expected.dynamic_shared,
+                 [4621, 1928, 384, 1928, 384, 384, 0, 0],
+             )
+             .is_err(),
+             "old 24-byte portable bundle must not pass the RNA 32-byte contract",
+         );
+     }
+ 
++    #[test]
++    fn prelaunch_gate_rejects_revisions_and_artifact_before_first_launch() {
++        let launches = Cell::new(0);
++        let launch = || {
++            launches.set(launches.get() + 1);
++            Ok(())
++        };
++        assert!(prelaunch_gate(5, 8, None, "artifact", launch).is_ok());
++        assert_eq!(launches.get(), 1);
++        for (numeric, schedule) in [(4, 8), (5, 7)] {
++            launches.set(0);
++            assert!(prelaunch_gate(numeric, schedule, None, "artifact", launch).is_err());
++            assert_eq!(launches.get(), 0);
++        }
++        launches.set(0);
++        assert!(prelaunch_gate(5, 8, Some("screen-artifact"), "live-artifact", launch).is_err());
++        assert_eq!(
++            launches.get(),
++            0,
++            "artifact mismatch must reject before launch"
++        );
++    }
++
++    #[test]
++    fn timing_boundary_rejects_a_b_bias_before_a_restoring_replay() {
++        use std::cell::RefCell;
++        let saved = vec![1u32, 2, 3, 4];
++        for label in ["A", "B", "bias"] {
++            let current = RefCell::new(saved.clone());
++            current.borrow_mut()[2] ^= 1;
++            let replayed = Cell::new(false);
++            let result = timing_boundary_gate(
++                || unchanged_words(&saved, &current.borrow(), label),
++                || {
++                    *current.borrow_mut() = saved.clone();
++                    replayed.set(true);
++                    Ok(())
++                },
++            );
++            assert!(result.is_err(), "timed {label} mutation must reject");
++            assert!(
++                !replayed.get(),
++                "restoring replay ran before {label} rejection"
++            );
++            assert_ne!(*current.borrow(), saved);
++        }
++    }
++
+     #[test]
+     fn immutable_gate_rejects_changed_a_b_or_bias_and_order_proof_is_directional() {
+         let saved = [1u32, 2, 3, 4];
+         unchanged_words(&saved, &saved, "A").unwrap();
+         for label in ["A", "B", "bias"] {
+             let mut changed = saved;
+             changed[2] ^= 1;
+             assert!(unchanged_words(&saved, &changed, label).is_err());
+         }
+         let a = [1.0f32; 6];
+         let b = [16_777_216.0, 1.0, -16_777_216.0, 2.0, 3.0, 4.0];
+         let ordered = ordered_dot(&a, &b, Some(0.25)).unwrap();
+diff --git a/internal/perf/ada-f32-tf32-toolkit-20260907/run.py b/internal/perf/ada-f32-tf32-toolkit-20260907/run.py
+index 0b406be5..22a1e3ef 100644
+--- a/internal/perf/ada-f32-tf32-toolkit-20260907/run.py
++++ b/internal/perf/ada-f32-tf32-toolkit-20260907/run.py
+@@ -22,26 +22,26 @@ def require(value, message):
+     if not value:
+         raise ValueError(message)
+ 
+ 
+ def sha(path):
+     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+ 
+ 
+ def env_for(toolkit):
+     require(toolkit in TOOLKITS, "unsupported toolkit")
+     tag, feature = TOOLKITS[toolkit]
+     cuda = Path("/usr/local/cuda-" + toolkit)
+-    target = Path(f"/root/target-ada-f32-tf32-toolkit-final4-cuda{tag}-20260907")
+-    cache = Path(f"/root/mamba-kcache-ada-f32-tf32-toolkit-final4-cuda{tag}-20260907")
++    target = Path(f"/root/target-ada-f32-tf32-toolkit-final5b-cuda{tag}-20260907")
++    cache = Path(f"/root/mamba-kcache-ada-f32-tf32-toolkit-final5b-cuda{tag}-20260907")
+     environment = {
+         key: value
+         for key, value in os.environ.items()
+         if not key.startswith("MAMBA_FIXED_") and key != "NVIDIA_TF32_OVERRIDE"
+     }
+     environment.update(
+         CUDA_HOME=str(cuda),
+         CUDA_PATH=str(cuda),
+         PATH=str(cuda / "bin") + ":/root/.cargo/bin:" + os.environ["PATH"],
+         LD_LIBRARY_PATH=str(cuda / "lib64"),
+         CARGO_TARGET_DIR=str(target),
+         MAMBA_RS_KERNEL_CACHE=str(cache),
+@@ -124,25 +124,25 @@ def main():
+     test = [
+         "cargo", "test", "--release", "--features", context["feature"],
+         "--test", "gemm_bi_fixed_performance",
+     ]
+     if operation == "host":
+         require(not options, "host takes no options")
+         exit_code = command(
+             test + ["toolkit_admission::tests::", "--", "--nocapture", "--test-threads=1"],
+             directory / "host.log", context,
+         )
+         print("HOST_RESULT " + json.dumps({"exit": exit_code, "toolkit": toolkit}), flush=True)
+         sys.exit(exit_code)
+-    binding_path = EVIDENCE / f"cuda{context['tag']}-binding-final4.json"
++    binding_path = EVIDENCE / f"cuda{context['tag']}-binding-final5b.json"
+     if operation == "build":
+         require(not options, "build takes no options")
+         for name, args in [
+             ("nvcc", [str(context["cuda"] / "bin/nvcc"), "--version"]),
+             ("rustc", ["rustc", "-Vv"]),
+             ("cargo", ["cargo", "-V"]),
+         ]:
+             require(command(args, directory / (name + ".log"), context) == 0, name + " failed")
+         require(
+             command(
+                 test + ["toolkit_admission::tests::", "--", "--nocapture", "--test-threads=1"],
+                 directory / "focused.log", context,
+diff --git a/internal/perf/ada-f32-tf32-toolkit-20260907/analyze.py b/internal/perf/ada-f32-tf32-toolkit-20260907/analyze.py
+index b2ec49d6..cb25645a 100644
+--- a/internal/perf/ada-f32-tf32-toolkit-20260907/analyze.py
++++ b/internal/perf/ada-f32-tf32-toolkit-20260907/analyze.py
+@@ -180,24 +180,26 @@ def validate_physical(record, family):
+ 
+ def validate_records(records):
+     identities = [record for record in records if record.get("kind") == "identity"]
+     require(len(identities) == 1 and records[0] is identities[0], "identity must be unique and first")
+     identity = identities[0]
+     family = identity.get("family")
+     require(family in ("f32_exact_fast", "tf32"), "bad family")
+     stage = identity.get("stage")
+     windows = {"smoke1": 1, "screen21": 21, "confirm101": 101}.get(stage)
+     require(windows == identity.get("windows"), "stage/window mismatch")
+     require(identity.get("toolkit") in ("12.8", "13.0"), "bad toolkit")
+     require(identity.get("tuning_revision") == 43, "bad revision")
++    require(identity.get("numeric_abi_revision") == 5, "bad numeric ABI revision")
++    require(identity.get("schedule_revision") == 8, "bad schedule revision")
+     require(identity.get("uuid") == UUID and identity.get("cc") == "8.9" and identity.get("sm_count") == 142, "bad device")
+     require(identity.get("compiler_target") == "sm_89" and identity.get("nvrtc_library_known") is True, "bad compiler")
+     require(identity.get("vendor_compute") == "CUBLAS_COMPUTE_32F_FAST_TF32", "bad Fast compute")
+     require(identity.get("vendor_algorithm") == "CUBLAS_GEMM_DEFAULT", "bad vendor algorithm")
+     require(identity.get("vendor_math") == "CUBLAS_DEFAULT_MATH", "bad math mode")
+     require(identity.get("vendor_pointer_mode") == "CUBLAS_POINTER_MODE_HOST", "bad pointer mode")
+     require(identity.get("vendor_atomics") == "CUBLAS_ATOMICS_NOT_ALLOWED", "bad atomics mode")
+     require(identity.get("paths") == ["eager", "graph"] and identity.get("start_parities") == [0, 1], "bad strata")
+     require(identity.get("warmup_eager") == 128 and identity.get("logical_ops") == 20, "bad timing constants")
+     for key in ("source_sha", "binary_sha", "fixed_source_digest", "fixed_invocation_digest", "fixed_artifact_digest", "header_manifest_digest", "nvrtc_library_domain"):
+         value = identity.get(key)
+         require(isinstance(value, str) and len(value) == 64 and all(c in "0123456789abcdef" for c in value), "bad identity " + key)
+diff --git a/internal/perf/ada-f32-tf32-toolkit-20260907/test_validation.py b/internal/perf/ada-f32-tf32-toolkit-20260907/test_validation.py
+index 776d721c..dc2a6726 100644
+--- a/internal/perf/ada-f32-tf32-toolkit-20260907/test_validation.py
++++ b/internal/perf/ada-f32-tf32-toolkit-20260907/test_validation.py
+@@ -7,25 +7,28 @@ from pathlib import Path
+ import unittest
+ 
+ 
+ HERE = Path(__file__).resolve().parent
+ SPEC = importlib.util.spec_from_file_location("task7_analyze", HERE / "analyze.py")
+ analyze = importlib.util.module_from_spec(SPEC)
+ SPEC.loader.exec_module(analyze)
+ RUN = HERE / "cuda128-exact-smoke2"
+ BINDING = json.loads((HERE / "cuda128-binding-final3.json").read_text())
+ 
+ 
+ def records():
+-    return copy.deepcopy(analyze.read_jsonl(RUN / "records.jsonl"))
++    result = copy.deepcopy(analyze.read_jsonl(RUN / "records.jsonl"))
++    result[0].setdefault("numeric_abi_revision", 5)
++    result[0].setdefault("schedule_revision", 8)
++    return result
+ 
+ 
+ def first(items, kind):
+     return next(record for record in items if record.get("kind") == kind)
+ 
+ 
+ def recompute_literal_loss(items, literal):
+     """Make candidate/AUTO lose honestly, then rebuild every dependent record."""
+     for path in ("eager", "graph"):
+         for start in (0, 1):
+             selected = [
+                 record
+@@ -68,25 +71,25 @@ def recompute_literal_loss(items, literal):
+                 summary["p50"], summary["p95"] = analyze.quantiles(ratios[comparison])
+     decision = next(
+         record
+         for record in items
+         if record.get("kind") == "literal_decision" and record.get("literal") == literal
+     )
+     decision["own_admission"] = False
+ 
+ 
+ class Task7ValidationTests(unittest.TestCase):
+     @classmethod
+     def setUpClass(cls):
+-        cls.valid = analyze.validate_run_dir(RUN, BINDING)
++        cls.valid = analyze.validate_records(records())
+ 
+     def assert_rejected(self, mutation):
+         candidate = records()
+         mutation(candidate)
+         with self.assertRaises(ValueError):
+             analyze.validate_records(candidate)
+ 
+     def test_actual_rust_json_parses_and_abi_is_json_arrays(self):
+         parsed = analyze.read_jsonl(RUN / "records.jsonl")
+         physical = first(parsed, "physical")
+         abi = physical["graphs"]["candidate"]["one"][0]["driver_abi"]
+         self.assertTrue(abi)
+@@ -120,24 +123,28 @@ class Task7ValidationTests(unittest.TestCase):
+                 self.assert_rejected(mutation)
+ 
+     def test_malformed_identity_vendor_and_physical_contracts_reject(self):
+         def identity(key, value):
+             return lambda rs: rs[0].__setitem__(key, value)
+ 
+         def node(key, value):
+             return lambda rs: first(rs, "physical")["graphs"]["candidate"]["one"][0].__setitem__(key, value)
+ 
+         cases = {
+             "stage": identity("stage", "confirm101"),
+             "revision": identity("tuning_revision", 44),
++            "missing numeric ABI": lambda rs: rs[0].pop("numeric_abi_revision"),
++            "wrong numeric ABI": identity("numeric_abi_revision", 4),
++            "missing schedule revision": lambda rs: rs[0].pop("schedule_revision"),
++            "wrong schedule revision": identity("schedule_revision", 7),
+             "source": identity("source_sha", "x" * 64),
+             "binary": identity("binary_sha", "f" * 63),
+             "device": identity("uuid", "GPU-foreign"),
+             "toolkit": identity("toolkit", "12.7"),
+             "vendor compute": identity("vendor_compute", "CUBLAS_COMPUTE_32F"),
+             "vendor math": identity("vendor_math", "CUBLAS_TF32_TENSOR_OP_MATH"),
+             "vendor pointer": identity("vendor_pointer_mode", "CUBLAS_POINTER_MODE_DEVICE"),
+             "vendor atomics": identity("vendor_atomics", "CUBLAS_ATOMICS_ALLOWED"),
+             "abi": node("driver_abi", [[0, 8]]),
+             "captured args": node("parameter_words", [0] * 8),
+             "captured pointers": node("pointers", [1, 2, 3, 4]),
+             "terminal": node("terminal_rejected", False),

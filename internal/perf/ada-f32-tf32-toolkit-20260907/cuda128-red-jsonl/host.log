@@ -1,0 +1,43 @@
+   Compiling mamba-rs v0.6.9 (/root/mamba-ada-f32-tf32-toolkit-20260907)
+warning: unused import: `super`
+ --> tests/support/fixed_sm89_toolkit_admission.rs:1:5
+  |
+1 | use super::*;
+  |     ^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: `mamba-rs` (test "gemm_bi_fixed_performance") generated 1 warning
+    Finished `release` profile [optimized] target(s) in 9.65s
+     Running tests/gemm_bi_fixed_performance.rs (/root/target-ada-f32-tf32-toolkit-cuda128-20260907/release/deps/gemm_bi_fixed_performance-adf126b1f35855e0)
+
+running 8 tests
+test toolkit_admission::tests::launch_contract_rejects_every_physical_field ... ok
+test toolkit_admission::tests::literal_inventory_is_exact_for_smoke_and_screen_and_subset_only_for_confirm ... 
+thread 'toolkit_admission::tests::literal_inventory_is_exact_for_smoke_and_screen_and_subset_only_for_confirm' (1981929) panicked at tests/support/fixed_sm89_toolkit_admission.rs:462:43:
+called `Result::unwrap()` on an `Err` value: "stale or foreign Task7 control MAMBA_FIXED_ADA_JSONL"
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+test toolkit_admission::tests::mirrored_schedule_reverses_comparison_traversal_and_four_positions ... ok
+test toolkit_admission::tests::raw_closure_recomputes_pairs_and_summaries_and_rejects_forgery ... ok
+test toolkit_admission::tests::raw_ratio_is_sum_b_over_sum_a_and_rejects_wrong_or_invalid_records ... ok
+test toolkit_admission::tests::real_loss_or_mixed_p95_is_valid_evidence_but_not_admission ... ok
+test toolkit_admission::tests::strict_controls_bind_family_stage_toolkit_source_binary_and_literals ... 
+thread 'toolkit_admission::tests::strict_controls_bind_family_stage_toolkit_source_binary_and_literals' (1981934) panicked at tests/support/fixed_sm89_toolkit_admission.rs:363:52:
+called `Result::unwrap()` on an `Err` value: "stale or foreign Task7 control MAMBA_FIXED_ADA_JSONL"
+FAILED
+test toolkit_admission::tests::strict_controls_reject_missing_malformed_stale_or_cartesian_inputs ... 
+thread 'toolkit_admission::tests::strict_controls_reject_missing_malformed_stale_or_cartesian_inputs' (1981935) panicked at tests/support/fixed_sm89_toolkit_admission.rs:409:13:
+accepted missing MAMBA_FIXED_ADA_JSONL
+FAILED
+
+failures:
+
+failures:
+    toolkit_admission::tests::literal_inventory_is_exact_for_smoke_and_screen_and_subset_only_for_confirm
+    toolkit_admission::tests::strict_controls_bind_family_stage_toolkit_source_binary_and_literals
+    toolkit_admission::tests::strict_controls_reject_missing_malformed_stale_or_cartesian_inputs
+
+test result: FAILED. 5 passed; 3 failed; 0 ignored; 0 measured; 118 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `--test gemm_bi_fixed_performance`

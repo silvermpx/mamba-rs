@@ -1,0 +1,15 @@
+
+running 1 test
+test fixed_ada_forced_rungs_paired_precision_cublas ... 
+thread 'fixed_ada_forced_rungs_paired_precision_cublas' (1995917) panicked at tests/support/fixed_sm89_toolkit_admission.rs:1599:40:
+Task7 toolkit admission rejected: Task7 compiler identity mismatch toolkit=12.8 known=true target=CudaTarget { bytes: [115, 109, 95, 56, 57, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], len: 5 }
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+
+failures:
+    fixed_ada_forced_rungs_paired_precision_cublas
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 126 filtered out; finished in 74.23s
+

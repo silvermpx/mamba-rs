@@ -1,0 +1,18 @@
+{
+  "test_exit": 0,
+  "post_exit": 0,
+  "toolkit": "12.8",
+  "family": "f32_exact_fast",
+  "stage": "smoke1",
+  "windows": 1,
+  "literals": "hot_a:0,hot_a:1,hot_b:0,hot_b:1,hot_d:0,hot_d:1,hot_e:0,hot_e:1",
+  "source_sha": "4936366b8cdd9e9fa02669b0a329b6e563e0407bb99b4db59268a6e01c13bda5",
+  "binary_sha": "e8c8197e911cc191e565298a9798ea9726ac4843863c591a865d369604bd1cc1",
+  "jsonl_sha": "aeb401cb872f4f42934d8e1825f0f9cb68d01671b9c116a9d59cfb4643938af1",
+  "test_log_sha": "5f55003dbb4023e9ad98160737296dd6aa33592c999009a3e6efb645135540be",
+  "cache_files": {
+    "/root/mamba-kcache-ada-f32-tf32-toolkit-cuda128-20260907/mamba-kernels-v1-57c3e4f2177104f137d432f19398a4a36799aca4c264634a1ab25d17dbf422ba.bin": "9af16b658fb81643b962b03da53f391d7b99e614d293195def7716d59ece401a",
+    "/root/mamba-kcache-ada-f32-tf32-toolkit-cuda128-20260907/mamba-kernels-v1-73fbec7557a95462a555e39f1b3c94e8d2bcc7047a14f8f3e3fa51a768ec5b9a.bin": "c02fb7a0ef6a50cb52dc3fec2e83ebb1eb6b4015a9f200d48d65fd4493d489c9",
+    "/root/mamba-kcache-ada-f32-tf32-toolkit-cuda128-20260907/mamba-kernels-v1-da5dabeff55570d1fb6ca43a1d4a8aa7a2a9d25efb6436ed7f03c4a28a73d986.bin": "48a388fc610d110bb884ea3cd0f49eda299c0c7ce0c8e2beb24d34a925198a54"
+  }
+}

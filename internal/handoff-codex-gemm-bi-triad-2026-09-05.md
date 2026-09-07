@@ -9,7 +9,19 @@ the dated progress log, 900 lines), then `internal/agent-operational-rules.md`
 
 ## 1. What the work is
 
-Latest checkpoint (2026-09-07): Ada half production AUTO now uses tuning
+Latest measured checkpoint (2026-09-07): existing exact-F32 CopyPlan passed
+paired21 and fresh101 against actualLegacy AUTO on CUDA12.8 and13.0 for
+A/B/D/E, bothbias: all16toolkit-literals win p50 ANDp95 in every eager/graph
+and start-parity stratum. Worst-per-cell median ratios are0.814324..0.844589;
+worstp95 ratios0.828924..0.891455. cuBLAS Fast still wins these F32cells:
+worst-per-cell candidate/Fastp95 is1.543210..2.239997. TF32 M64 C0/C1 loses
+against actualRNA AUTO onboth toolkits (worstp95~1.518), so noTF32101 or
+promotion. This measurement-only Task7 changes no selector or epoch; the
+next integration connects the16exact winners with actualpostAUTO proof.
+All20decisions, rawdata, source/binary/cache bindings and reviews are preserved
+in `internal/perf/ada-f32-tf32-toolkit-20260907/ARCHIVE.md` and `final-report.md`.
+
+Latest production checkpoint: Ada half production AUTO now uses tuning
 revision43, selecting S3 for the two qualified CUDA13.2 B0/no-bias BF16/F16
 cells. Matching three-toolkit functional tests, a single actual-AUTO post101
 confirmation, artifact checks and independent source/evidence reviews pass.
@@ -86,11 +98,21 @@ preflight gaps (unused legacy controls and pre-warmup input checks) are closed.
 The host analyzer's shared-summary label bug was fixed and reviewed without
 changing or repeating the measured GPU run; original reports are preserved.
 
-Existing cross-toolkit backlog is explicit: SM89 exact-F32 CopyPlan and TF32-C
-M64S2 load and are force-reachable on12.8/13.0, but their literal AUTO
-promotions remain13.2-only pending paired measurements on those toolkits.
-These are qualification gaps, not missing loaders. See
-`internal/perf/ada-half-s3-force-20260907/existing-toolkit-auto-gaps.md`.
+Cross-toolkit backlog correction (2026-09-07): exact-F32 CopyPlan loads and is
+force-reachable on12.8/13.0, but its literal AUTO promotion remains13.2-only
+until the separate Task7-winner integration. The paired measurements above
+are now complete. TF32 is different: commit86fd7f56 already enabled
+the faster RNA-wide AUTO for all aligned A-E/bias cells on all three toolkits.
+It takes precedence over the ordinary TF32 picker. The M64S2 C preference in
+that lower picker remains13.2-only, but that is a fallback-view/holder domain,
+not missing aligned-hot AUTO wiring. The earlier
+`internal/perf/ada-half-s3-force-20260907/existing-toolkit-auto-gaps.md`
+overstated the TF32 gap by omitting this precedence; retain it as history, not
+the current aligned dispatch inventory. The authoritative prior promotion is
+`internal/perf/ada-rna-toolkit-auto-20260906/`, whose49-entry manifest was freshly
+verified. Its historical C comparison uses oldM128S2 on12.8/13.0. Task7 compared
+the existing M64S2 candidate against actualRNA-wide AUTO, not against that
+obsolete aligned incumbent, and the candidate lost. No TF32 route is disabled.
 
 P0 Nsight evidence under `internal/perf/ada-half-b0-ncu-20260907/` shows
 53.40% tensor-pipe activity for production versus 73.48% for cuBLAS, with
