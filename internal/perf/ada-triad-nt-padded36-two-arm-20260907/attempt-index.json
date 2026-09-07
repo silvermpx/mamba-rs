@@ -1,0 +1,60 @@
+{
+  "schema": "MambaTriadNtPadded36TwoArmAttemptIndexV1",
+  "attempts": [
+    {
+      "kind": "build_wrapper",
+      "valid": false,
+      "reason": "Python metadata used a lowercase JSON boolean after exact cache preseed; failure occurred before PRE, cargo and GPU work",
+      "raw": "build-cuda132/ssh-attempt1-wrapper-failure.log",
+      "raw_sha256": "7132bd2b01302b32898eec6e6794f6e87e15d51762c842f5ba593f37991c0102"
+    },
+    {
+      "kind": "pre_repair_build",
+      "valid_for_runtime": false,
+      "build_exit": 0,
+      "reason": "compile-only Rust binary retained a generated-CUDA target-signature assertion naming the replaced production export; no GPU test ran",
+      "source_manifest_sha256": "9baddf6554ca2793f83107464d91969054f860f0bd83098cebc8dc0de6de9fa9",
+      "binary_sha256": "087e608ebdc5efbb57d982939be3912f395fccdb2f9fb330cb6e5b16cc07961e",
+      "source_snapshot": "build-cuda132/gemm_bi_tf32_nt_compact_xor.pre-repair.rs",
+      "source_snapshot_sha256": "e92648d277340262cfd446bb769c11947981ac18ab1cd6f4e6427d15bb000a37"
+    },
+    {
+      "kind": "repair_build",
+      "valid": true,
+      "build_exit": 0,
+      "expected_tests_listed": true,
+      "source_manifest_sha256": "db00c029ed47bd6a41a3a3a096f0a101c41d4128dcbb8d2773ae3b8982ba22dc",
+      "binary_sha256": "34a67271406e49a62a1baba8765a640bb26b2c0777b339f4545ece40cd25713e"
+    },
+    {
+      "kind": "once7",
+      "variant": "padded_copy_plan",
+      "valid": true,
+      "test_exit": 0,
+      "executed_tests": 1,
+      "resource_records": 1,
+      "screen_records": 4,
+      "decision_records": 1,
+      "test_log_sha256": "84d8b5a3b5b01a1e596b534f49928983180b9cc85553ce4f019fa7566fe6f618",
+      "decision": "stop_no_retry",
+      "promotion": false,
+      "immediate_release_quiet": false,
+      "separate_drain_quiet": true
+    },
+    {
+      "kind": "once7",
+      "variant": "padded_ldmatrix",
+      "valid": true,
+      "test_exit": 0,
+      "executed_tests": 1,
+      "resource_records": 1,
+      "screen_records": 4,
+      "decision_records": 1,
+      "test_log_sha256": "448835ee03f5d89a3922fdec75c0c998474f8f82bfca8f7b4152502de3e1a9da",
+      "decision": "stop_no_retry",
+      "promotion": false,
+      "immediate_release_quiet": false,
+      "separate_drain_quiet": true
+    }
+  ]
+}

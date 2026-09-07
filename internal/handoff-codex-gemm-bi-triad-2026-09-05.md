@@ -9,6 +9,21 @@ the dated progress log, 900 lines), then `internal/agent-operational-rules.md`
 
 ## 1. What the work is
 
+Latest padded36 two-arm NT screen (2026-09-07): both candidates pass bounded
+finite target/tail eager/graph bits but are STOP_NO_RETRY, no promotion.
+Copy-plan185regs loses all4strata, p501.093789..1.095568 and
+p951.094197..1.096079. Ldmatrix160regs is eager parity and graphslower:
+p500.999331..1.001887, p950.999987..1.002079. Both0local/82944shared/1CTA.
+Root replays2actualtests/56rawbrackets/8strata and both372-source maps.
+The pre-repair Rust build was never GPU-run: stale signature-assertion names
+were caught and repaired before tests; original source/receipt are preserved.
+Measured commonrs37dec61a..., binary34a67271..., CUDA13.2only. Evidence and
+native actual-header mutation proofs:
+`internal/perf/ada-triad-nt-padded36-two-arm-20260907/README.md`.
+Next independent candidate is eight compute warps instead of four on the
+original padded36 target; not measured by this checkpoint. No retries of
+these losers, no production/dispatcher changes or Fast closure claimed.
+
 Latest Triad discovery (2026-09-07): NT compact-XOR preserves the bounded
 finite target/tail/eager/graph bits and has155regs/0local/73728shared/1CTA,
 but loses to actual AUTO in all4once7 strata: p501.034743..1.038873,

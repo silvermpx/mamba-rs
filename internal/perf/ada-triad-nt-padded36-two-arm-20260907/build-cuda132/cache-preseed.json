@@ -1,0 +1,28 @@
+{
+  "artifacts": [
+    {
+      "destination": "/root/mamba-kcache-ada-exact-toolkit-auto-triad-nt-padded36-two-arm1-cuda132-20260907/mamba-kernels-v1-3809af034718aa08dfdfc1b6baeb407715436dc7db87ef39825b033c2fd72541.bin",
+      "resumed_after_wrapper_failure": true,
+      "sha256": "5851ebd49595a0b2ef665073289e52f903eec3266deadfc5ad5d9f2096ce6d16",
+      "source": "/root/mamba-kcache-ada-exact-toolkit-auto-triad-nt-compact-xor1-cuda132-20260907/mamba-kernels-v1-3809af034718aa08dfdfc1b6baeb407715436dc7db87ef39825b033c2fd72541.bin",
+      "source_key_filename_equal": true
+    },
+    {
+      "destination": "/root/mamba-kcache-ada-exact-toolkit-auto-triad-nt-padded36-two-arm1-cuda132-20260907/mamba-kernels-v1-822ebf0dda7dcf9c4f5c5a2213884dde42ab45f5cf238479a81856042c302b7c.bin",
+      "resumed_after_wrapper_failure": true,
+      "sha256": "5035921fc8e078e5454c9c5392f9e9ee6ca6a3de54c1e08cb54bba432fa37546",
+      "source": "/root/mamba-kcache-ada-exact-toolkit-auto-triad-nt-compact-xor1-cuda132-20260907/mamba-kernels-v1-822ebf0dda7dcf9c4f5c5a2213884dde42ab45f5cf238479a81856042c302b7c.bin",
+      "source_key_filename_equal": true
+    },
+    {
+      "destination": "/root/mamba-kcache-ada-exact-toolkit-auto-triad-nt-padded36-two-arm1-cuda132-20260907/mamba-kernels-v1-e4f76515e441adc28862775000fce218e2d2cca61b47ce484e15eb1144c40fb3.bin",
+      "resumed_after_wrapper_failure": true,
+      "sha256": "f0be052fc160b9e5f4b6a897878781327968c0015d551128415a94b85e6fc0aa",
+      "source": "/root/mamba-kcache-ada-exact-toolkit-auto-triad-nt-compact-xor1-cuda132-20260907/mamba-kernels-v1-e4f76515e441adc28862775000fce218e2d2cca61b47ce484e15eb1144c40fb3.bin",
+      "source_key_filename_equal": true
+    }
+  ],
+  "cold_cache": false,
+  "schema": "MambaTriadNtPadded36CachePreseedV1",
+  "source_cache_mutated": false
+}

@@ -1,0 +1,8 @@
+Traceback (most recent call last):
+  File "/root/evidence-ada-triad-nt-padded36-two-arm-20260907/build-cuda132/run-build.py", line 232, in <module>
+    sys.exit(main())
+             ^^^^^^
+  File "/root/evidence-ada-triad-nt-padded36-two-arm-20260907/build-cuda132/run-build.py", line 149, in main
+    "cold_cache": false,
+                  ^^^^^
+NameError: name 'false' is not defined. Did you mean: 'False'?

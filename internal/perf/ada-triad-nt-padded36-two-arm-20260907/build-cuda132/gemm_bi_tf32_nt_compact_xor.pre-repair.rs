@@ -304,13 +304,6 @@ fn padded_copy_plan_candidate_source() -> Result<String, String> {
         1,
         "padded copy-plan target symbol",
     )?;
-    replace_exact(
-        &mut source,
-        "TF32_ASSERT_KERNEL_SIGNATURE(gemm_bi_nt_sm80_mma_tf32_v1_m128n64_bk32_s3);",
-        "TF32_ASSERT_KERNEL_SIGNATURE(gemm_bi_nt_test_padded_copy_plan_sm80_mma_tf32_v1_m128n64_bk32_s3);",
-        1,
-        "padded copy-plan target signature",
-    )?;
     Ok(source)
 }
 
@@ -397,13 +390,6 @@ fn padded_ldmatrix_candidate_source() -> Result<String, String> {
         1,
         "padded ldmatrix target symbol",
     )?;
-    replace_exact(
-        &mut source,
-        "TF32_ASSERT_KERNEL_SIGNATURE(gemm_bi_nt_sm80_mma_tf32_v1_m128n64_bk32_s3);",
-        "TF32_ASSERT_KERNEL_SIGNATURE(gemm_bi_nt_test_padded_ldmatrix_sm80_mma_tf32_v1_m128n64_bk32_s3);",
-        1,
-        "padded ldmatrix target signature",
-    )?;
     Ok(source)
 }
 
@@ -461,13 +447,6 @@ fn padded_copy_plan_clamps_tail_bytes_and_uses_zero_for_invalid_axes() {
 fn padded_copy_plan_source_isolates_one_symbol_without_layout_or_k_order_changes() {
     let source = padded_copy_plan_candidate_source().unwrap();
     assert!(source.contains(PADDED_COPY_PLAN_SYMBOL));
-    assert!(source.contains(&format!(
-        "TF32_ASSERT_KERNEL_SIGNATURE({PADDED_COPY_PLAN_SYMBOL});"
-    )));
-    assert!(
-        !source
-            .contains("TF32_ASSERT_KERNEL_SIGNATURE(gemm_bi_nt_sm80_mma_tf32_v1_m128n64_bk32_s3);")
-    );
     assert!(!source.contains(CANDIDATE_SYMBOL));
     assert!(!source.contains(PADDED_LDMATRIX_CUDA));
     assert!(source.contains("static constexpr int AStride = Op == SgbTf32Tn ? BM + 8 : 36;"));
@@ -483,13 +462,6 @@ fn padded_copy_plan_source_isolates_one_symbol_without_layout_or_k_order_changes
 fn padded_ldmatrix_source_isolates_one_symbol_and_only_target_fragment_loads() {
     let source = padded_ldmatrix_candidate_source().unwrap();
     assert!(source.contains(PADDED_LDMATRIX_SYMBOL));
-    assert!(source.contains(&format!(
-        "TF32_ASSERT_KERNEL_SIGNATURE({PADDED_LDMATRIX_SYMBOL});"
-    )));
-    assert!(
-        !source
-            .contains("TF32_ASSERT_KERNEL_SIGNATURE(gemm_bi_nt_sm80_mma_tf32_v1_m128n64_bk32_s3);")
-    );
     assert!(source.contains(PADDED_LDMATRIX_CUDA));
     assert!(source.contains("gemm_bi_tf32_nt_padded_ldmatrix_fragments"));
     assert!(source.contains("static constexpr int AStride = Op == SgbTf32Tn ? BM + 8 : 36;"));

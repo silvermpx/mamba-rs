@@ -1,0 +1,35 @@
+{
+  "schema": "MambaTriadNtPadded36TwoArmArtifactBindingV1",
+  "head": "32485efda68e2ad64e30ad5750407e0ba38055bc",
+  "toolkit": "13.2",
+  "feature": "cuda,cudarc/cuda-13020",
+  "environment_constructor": "/root/evidence-ada-exact-toolkit-auto-20260907/run.py::env_for",
+  "generation": "triad-nt-padded36-two-arm1",
+  "source_manifest": "build-repair-cuda132/source-manifest.json",
+  "source_manifest_sha256": "db00c029ed47bd6a41a3a3a096f0a101c41d4128dcbb8d2773ae3b8982ba22dc",
+  "source_count": 372,
+  "binary": "/root/target-ada-exact-toolkit-auto-triad-nt-padded36-two-arm1-cuda132-20260907/release/deps/gemm_bi_tf32_nt_compact_xor-72f43542cd9e6a2e",
+  "binary_sha256": "34a67271406e49a62a1baba8765a640bb26b2c0777b339f4545ece40cd25713e",
+  "cache": "/root/mamba-kcache-ada-exact-toolkit-auto-triad-nt-padded36-two-arm1-cuda132-20260907",
+  "cache_mode": "0700",
+  "cold_cache": false,
+  "cache_preseed": "build-cuda132/cache-preseed.json",
+  "cache_preseed_sha256": "f4e4803ffb267fbd5d2061b7ac43fd051320bad406109380d5a1f4b94c37f6a6",
+  "cache_artifacts": {
+    "mamba-kernels-v1-3809af034718aa08dfdfc1b6baeb407715436dc7db87ef39825b033c2fd72541.bin": "5851ebd49595a0b2ef665073289e52f903eec3266deadfc5ad5d9f2096ce6d16",
+    "mamba-kernels-v1-822ebf0dda7dcf9c4f5c5a2213884dde42ab45f5cf238479a81856042c302b7c.bin": "5035921fc8e078e5454c9c5392f9e9ee6ca6a3de54c1e08cb54bba432fa37546",
+    "mamba-kernels-v1-e4f76515e441adc28862775000fce218e2d2cca61b47ce484e15eb1144c40fb3.bin": "f0be052fc160b9e5f4b6a897878781327968c0015d551128415a94b85e6fc0aa"
+  },
+  "tests": {
+    "padded_copy_plan": "cuda_suite::ada_tf32_nt_padded_copy_plan_discovery_once7",
+    "padded_ldmatrix": "cuda_suite::ada_tf32_nt_padded_ldmatrix_discovery_once7"
+  },
+  "candidate_composed_source_sha256": {
+    "padded_copy_plan": "7a888e67ccf2fa7aa9a57357157bf12d5d98d04da3684cb3f22a482f7670957a",
+    "padded_ldmatrix": "a1c463622d4032d35243faa8152a7b4f2d046688cf3e364a37f3d3cab05119b1"
+  },
+  "binding_limits": {
+    "candidate_ptx": "compiled and loaded in memory by each test but not persisted",
+    "libraries": "no complete dlopened CUDA library inventory was captured for this stopped discovery batch"
+  }
+}

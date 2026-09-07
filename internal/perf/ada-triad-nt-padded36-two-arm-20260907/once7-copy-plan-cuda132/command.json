@@ -1,0 +1,31 @@
+{
+  "args": [
+    "/root/target-ada-exact-toolkit-auto-triad-nt-padded36-two-arm1-cuda132-20260907/release/deps/gemm_bi_tf32_nt_compact_xor-72f43542cd9e6a2e",
+    "cuda_suite::ada_tf32_nt_padded_copy_plan_discovery_once7",
+    "--ignored",
+    "--exact",
+    "--nocapture"
+  ],
+  "arm": "copy-plan",
+  "binary_sha256": "34a67271406e49a62a1baba8765a640bb26b2c0777b339f4545ece40cd25713e",
+  "candidate_ptx_persisted": false,
+  "complete_success": true,
+  "drain_quiet": true,
+  "drain_utc": "2026-09-07T16:33:25Z",
+  "executed_exactly_one_test": true,
+  "exit": 0,
+  "pre_utc": "2026-09-07T16:32:35Z",
+  "release_quiet": false,
+  "release_utc": "2026-09-07T16:33:20Z",
+  "schema": "MambaTriadNtPadded36ArmRunReceiptV1",
+  "schema_counts": {
+    "decision": 1,
+    "resource": 1,
+    "screen": 4,
+    "variant": 6
+  },
+  "source_manifest_sha256": "db00c029ed47bd6a41a3a3a096f0a101c41d4128dcbb8d2773ae3b8982ba22dc",
+  "started_utc": "2026-09-07T16:32:35Z",
+  "test_log_sha256": "84d8b5a3b5b01a1e596b534f49928983180b9cc85553ce4f019fa7566fe6f618",
+  "variant": "padded_copy_plan"
+}
