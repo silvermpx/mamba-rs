@@ -42,7 +42,14 @@ const TERMS: &[&str] = &[
 pub fn kitchen_shape(comment: &str) -> Option<&'static str> {
     let words: Vec<&str> = comment
         .split_whitespace()
-        .map(|w| w.trim_matches(|c: char| matches!(c, '(' | ')' | ',' | '.' | ';' | ':' | '`' | '\'' | '"' | '[' | ']')))
+        .map(|w| {
+            w.trim_matches(|c: char| {
+                matches!(
+                    c,
+                    '(' | ')' | ',' | '.' | ';' | ':' | '`' | '\'' | '"' | '[' | ']'
+                )
+            })
+        })
         .filter(|w| !w.is_empty())
         .collect();
     for (i, w) in words.iter().enumerate() {
@@ -50,7 +57,10 @@ pub fn kitchen_shape(comment: &str) -> Option<&'static str> {
         if is_iso_date(w) || is_dotted_date(w) {
             return Some("date");
         }
-        if is_document_number(w, next) || w.starts_with('§') && w.len() > 1 || (*w == "§" && starts_digit(next)) {
+        if is_document_number(w, next)
+            || w.starts_with('§') && w.len() > 1
+            || (*w == "§" && starts_digit(next))
+        {
             return Some("document-number");
         }
         if is_task_index(w) {
@@ -74,20 +84,26 @@ fn all_digits(w: &str) -> bool {
     !w.is_empty() && w.bytes().all(|b| b.is_ascii_digit())
 }
 
-fn is_iso_date(w: &str) -> bool {
+/// `dddd-dd-dd` or `dd.dd.dddd`: the separator sits at the given offsets
+/// and every other byte is a digit.
+fn is_date_shape(w: &str, sep: u8, at: [usize; 2]) -> bool {
     let b = w.as_bytes();
     b.len() == 10
-        && b[4] == b'-'
-        && b[7] == b'-'
-        && [0, 1, 2, 3, 5, 6, 8, 9].iter().all(|&i| b[i].is_ascii_digit())
+        && b.iter().enumerate().all(|(i, c)| {
+            if at.contains(&i) {
+                *c == sep
+            } else {
+                c.is_ascii_digit()
+            }
+        })
+}
+
+fn is_iso_date(w: &str) -> bool {
+    is_date_shape(w, b'-', [4, 7])
 }
 
 fn is_dotted_date(w: &str) -> bool {
-    let b = w.as_bytes();
-    b.len() == 10
-        && b[2] == b'.'
-        && b[5] == b'.'
-        && [0, 1, 3, 4, 6, 7, 8, 9].iter().all(|&i| b[i].is_ascii_digit())
+    is_date_shape(w, b'.', [2, 5])
 }
 
 fn is_document_number(w: &str, next: &str) -> bool {
@@ -106,12 +122,16 @@ fn is_document_number(w: &str, next: &str) -> bool {
 /// terms (the list above), not indexes.
 fn is_task_index(w: &str) -> bool {
     let segs: Vec<&str> = w.split('-').collect();
-    if segs.len() < 2 {
+    let Some((head, tail)) = segs.split_first() else {
         return false;
-    }
-    let head = segs[0];
+    };
+    let Some((last, middle)) = tail.split_last() else {
+        return false;
+    };
     let head_ok = head.bytes().next().is_some_and(|b| b.is_ascii_uppercase())
-        && head.bytes().all(|b| b.is_ascii_uppercase() || b.is_ascii_digit());
+        && head
+            .bytes()
+            .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit());
     if !head_ok {
         return false;
     }
@@ -119,7 +139,6 @@ fn is_task_index(w: &str) -> bool {
     if TERMS.contains(&letters.as_str()) {
         return false;
     }
-    let last = segs[segs.len() - 1];
     let last_ok = match last.split_once('.') {
         Some((a, b)) => all_digits(a) && all_digits(b),
         None => all_digits(last),
@@ -127,17 +146,18 @@ fn is_task_index(w: &str) -> bool {
     if !last_ok {
         return false;
     }
-    segs[1..segs.len() - 1]
-        .iter()
-        .all(|s| !s.is_empty() && s.bytes().all(|b| b.is_ascii_uppercase() || b.is_ascii_digit()))
+    middle.iter().all(|s| {
+        !s.is_empty()
+            && s.bytes()
+                .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit())
+    })
 }
 
 fn is_letter_number(w: &str, letter_max: usize) -> bool {
     let letters: String = w.chars().take_while(char::is_ascii_uppercase).collect();
     !letters.is_empty()
         && letters.len() <= letter_max
-        && w.len() > letters.len()
-        && all_digits(&w[letters.len()..])
+        && w.get(letters.len()..).is_some_and(all_digits)
 }
 
 fn is_audit_tag(w: &str, next: &str) -> bool {
@@ -147,20 +167,30 @@ fn is_audit_tag(w: &str, next: &str) -> bool {
     (is_letter_number(w, 1) && w.starts_with('R') && next_lower == "audit")
         || (lower == "audit" && is_letter_number(next, 1) && next.starts_with('P'))
         || (lower == "lens" && all_digits(next))
-        || (is_letter_number(w, 1) && is_letter_number(next, 1) && next.starts_with('R') && !w.starts_with('R'))
+        || (is_letter_number(w, 1)
+            && is_letter_number(next, 1)
+            && next.starts_with('R')
+            && !w.starts_with('R'))
 }
 
 fn is_phase_index(w: &str, next: &str) -> bool {
     let lower = w.to_ascii_lowercase();
     let number = next.strip_prefix('#').unwrap_or(next);
-    if matches!(lower.as_str(), "mig" | "migration" | "task" | "phase" | "wave" | "batch")
-        && all_digits(number)
+    if matches!(
+        lower.as_str(),
+        "mig" | "migration" | "task" | "phase" | "wave" | "batch"
+    ) && all_digits(number)
     {
         return true;
     }
     // "W2b": a wave with a letter suffix; "B4.4": a batch with a dot.
-    let b = w.as_bytes();
-    if b.len() >= 3 && b[0] == b'W' && b[1..b.len() - 1].iter().all(u8::is_ascii_digit) && b[b.len() - 1].is_ascii_lowercase() {
+    if let Some(rest) = w.strip_prefix('W')
+        && rest.len() >= 2
+        && let Some((suffix, digits)) = rest.as_bytes().split_last()
+        && !digits.is_empty()
+        && digits.iter().all(u8::is_ascii_digit)
+        && suffix.is_ascii_lowercase()
+    {
         return true;
     }
     if let Some(rest) = w.strip_prefix('B')
@@ -186,7 +216,10 @@ pub fn comment_part(line: &str, hashy: bool) -> Option<&str> {
     while let Some(rel) = line.get(from..)?.find(marker) {
         let pos = from + rel;
         let before = line.get(..pos).unwrap_or("");
-        let quotes = before.matches('"').count().saturating_sub(before.matches("\\\"").count());
+        let quotes = before
+            .matches('"')
+            .count()
+            .saturating_sub(before.matches("\\\"").count());
         if quotes % 2 == 0 {
             // A shebang and a `#[attribute]` are not comments.
             if hashy && (line.starts_with("#!") || line.trim_start().starts_with("#[")) {
@@ -254,12 +287,20 @@ pub fn scan(root: &Path, scans: &[Scan<'_>]) -> Vec<Hit> {
             };
             let sig = format!("{rel}\t{}", comment.trim());
             if has_cyrillic(comment) && !line.contains("comment-language:allow") {
-                hits.push(Hit { sig: sig.clone(), rule: "language", line: i + 1 });
+                hits.push(Hit {
+                    sig: sig.clone(),
+                    rule: "language",
+                    line: i + 1,
+                });
             }
             if !line.contains("comment-kitchen:allow")
                 && let Some(shape) = kitchen_shape(comment)
             {
-                hits.push(Hit { sig, rule: shape, line: i + 1 });
+                hits.push(Hit {
+                    sig,
+                    rule: shape,
+                    line: i + 1,
+                });
             }
         }
     }
@@ -287,10 +328,17 @@ fn count(hits: &[Hit]) -> HashMap<String, usize> {
 /// The gate. `update`: rewrite the baseline, refusing to grow it.
 /// Returns the violation lines (empty = green); `Err` when the update
 /// was refused or could not be written.
-pub fn run(root: &Path, scans: &[Scan<'_>], baseline: &Path, update: bool) -> Result<Vec<String>, String> {
+pub fn run(
+    root: &Path,
+    scans: &[Scan<'_>],
+    baseline: &Path,
+    update: bool,
+) -> Result<Vec<String>, String> {
     let hits = scan(root, scans);
     if hits.is_empty() && scans.iter().all(|s| !root.join(s.dir).exists()) {
-        return Err("the comment gate collected zero files - refusing to pass on nothing".to_owned());
+        return Err(
+            "the comment gate collected zero files - refusing to pass on nothing".to_owned(),
+        );
     }
     let current = count(&hits);
     let existing = load_baseline(baseline);
@@ -308,7 +356,13 @@ pub fn run(root: &Path, scans: &[Scan<'_>], baseline: &Path, update: bool) -> Re
             let mut lines: Vec<String> = new
                 .iter()
                 .take(20)
-                .map(|h| format!("REFUSING to ratchet UP [{}]  {}", h.rule, h.sig.replace('\t', "  ")))
+                .map(|h| {
+                    format!(
+                        "REFUSING to ratchet UP [{}]  {}",
+                        h.rule,
+                        h.sig.replace('\t', "  ")
+                    )
+                })
                 .collect();
             lines.push(format!(
                 "the comment baseline is SHRINK-ONLY: {} line(s) exceed it - rewrite the comment as plain prose (say WHY; drop the index, the date, the document number), do not baseline it",
@@ -320,7 +374,7 @@ pub fn run(root: &Path, scans: &[Scan<'_>], baseline: &Path, update: bool) -> Re
         sigs.sort();
         let mut body = String::new();
         for s in sigs {
-            for _ in 0..current[s] {
+            for _ in 0..current.get(s).copied().unwrap_or(0) {
                 body.push_str(s);
                 body.push('\n');
             }
@@ -328,7 +382,8 @@ pub fn run(root: &Path, scans: &[Scan<'_>], baseline: &Path, update: bool) -> Re
         if let Some(parent) = baseline.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        std::fs::write(baseline, body).map_err(|e| format!("cannot write {}: {e}", baseline.display()))?;
+        std::fs::write(baseline, body)
+            .map_err(|e| format!("cannot write {}: {e}", baseline.display()))?;
         let before: usize = existing.values().sum();
         eprintln!(
             "comment baseline updated (shrink-only): {} known line(s) recorded, {} removed",
@@ -370,7 +425,10 @@ mod tests {
             ("// per R2-07 the resubmit answers", Some("task-index")),
             ("// measured on 2026-09-07", Some("date")),
             ("// снято 07.09.2026", Some("date")),
-            ("// R3 audit P1: the write result was discarded", Some("audit-tag")),
+            (
+                "// R3 audit P1: the write result was discarded",
+                Some("audit-tag"),
+            ),
             ("// lens 23 R8 wanted this", Some("audit-tag")),
             ("// H4 R2: the queue bookkeeping", Some("audit-tag")),
             ("// mig 971 demoted ten families", Some("phase-index")),
@@ -383,7 +441,10 @@ mod tests {
 
     #[test]
     fn comment_part_skips_strings_shebangs_and_attributes() {
-        assert_eq!(comment_part("let s = \"http://x\"; // real", false), Some("// real"));
+        assert_eq!(
+            comment_part("let s = \"http://x\"; // real", false),
+            Some("// real")
+        );
         assert_eq!(comment_part("let s = \"a // b\";", false), None);
         assert_eq!(comment_part("#!/bin/sh", true), None);
         assert_eq!(comment_part("#[derive(Debug)]", true), None);
