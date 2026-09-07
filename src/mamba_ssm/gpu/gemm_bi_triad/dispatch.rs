@@ -1908,10 +1908,80 @@ const SM89_TF32_EVIDENCE_COHORTS: &[Tf32AutoEvidenceCohort] = &[Tf32AutoEvidence
     cells: SM89_TF32_EVIDENCE_CELLS,
 }];
 
-/// Task 2 exposes the Ada finalist only through the forced route. Keeping a
-/// separate empty cohort makes a later promotion explicit and leaves every
-/// portable cohort byte-for-byte independent.
-const SM89_FINALIST_TF32_EVIDENCE_COHORTS: &[Tf32AutoEvidenceCohort] = &[];
+/// CUDA 13.2: three independently admitted NT cells from the paired once-21
+/// run in internal/perf/ada-triad-finalist-integration-20260907/task3-once21-cuda132.
+/// Raw log SHA30041ac542f0128e2ec6f4da793eb42a9d29f93d06d8a24d71006d514ac117bb.
+/// Other toolkit identities remain unadmitted until their own qualification.
+const SM89_FINALIST_TF32_IDENTITY_CUDA_13_2: Tf32AutoQualificationIdentity =
+    Tf32AutoQualificationIdentity {
+        module_kind: ModuleKind::TriadSm89Finalist,
+        module_target: "sm_89",
+        device_target: "sm_89",
+        compute_capability: (8, 9),
+        multiprocessor_count: 142,
+        nvrtc_version: (13, 2),
+        driver_api_version: 13020,
+        driver_build_sources: 7,
+        optin_shared_bytes: 101376,
+        tensor_map_access: false,
+        compile_key: [
+            230, 22, 129, 240, 2, 248, 236, 221, 97, 103, 127, 200, 154, 143, 15, 174, 172, 92,
+            228, 148, 219, 80, 63, 204, 151, 253, 52, 70, 51, 236, 45, 101,
+        ],
+        artifact_digest: [
+            34, 228, 233, 50, 153, 177, 120, 158, 153, 218, 86, 147, 214, 169, 170, 214, 168, 255,
+            115, 54, 151, 112, 68, 71, 248, 110, 21, 33, 70, 110, 2, 239,
+        ],
+        source_digest: [
+            210, 12, 179, 159, 57, 14, 244, 81, 129, 190, 148, 228, 189, 123, 174, 181, 21, 72,
+            192, 230, 239, 172, 100, 186, 215, 42, 174, 113, 168, 137, 227, 206,
+        ],
+        invocation_digest: [
+            230, 22, 129, 240, 2, 248, 236, 221, 97, 103, 127, 200, 154, 143, 15, 174, 172, 92,
+            228, 148, 219, 80, 63, 204, 151, 253, 52, 70, 51, 236, 45, 101,
+        ],
+        header_manifest_digest: [
+            14, 22, 229, 93, 239, 192, 137, 87, 97, 202, 105, 97, 16, 22, 169, 117, 30, 167, 69,
+            27, 149, 19, 182, 125, 60, 241, 54, 248, 178, 103, 17, 5,
+        ],
+        nvrtc_library_domain: [
+            208, 49, 165, 62, 185, 114, 53, 183, 15, 98, 246, 82, 147, 45, 177, 189, 247, 40, 234,
+            34, 156, 140, 168, 9, 213, 60, 95, 253, 145, 100, 38, 135,
+        ],
+        driver_build_digest: [
+            209, 237, 197, 165, 188, 62, 16, 162, 104, 142, 33, 86, 141, 204, 189, 229, 226, 128,
+            220, 57, 20, 77, 216, 30, 133, 56, 67, 202, 152, 178, 208, 225,
+        ],
+    };
+
+const SM89_FINALIST_TF32_NT_CELLS: &[Tf32AutoCell] = &[
+    sm89_tf32_route_cell(
+        Nt,
+        (2048, 768, 3072),
+        Tf32PhysicalRoute::Sm89MmaTf32Compact8V1,
+        RequiresVectorAlignmentEvidence,
+    ),
+    sm89_tf32_route_cell(
+        Nt,
+        (2048, 1536, 768),
+        Tf32PhysicalRoute::Sm89MmaTf32Compact8V1,
+        RequiresVectorAlignmentEvidence,
+    ),
+    sm89_tf32_route_cell(
+        Nt,
+        (4621, 384, 1928),
+        Tf32PhysicalRoute::Sm89MmaTf32Compact8V1,
+        RequiresVectorAlignmentEvidence,
+    ),
+];
+
+/// Separate finalist evidence never rewrites the incumbent portable cohort.
+const SM89_FINALIST_TF32_EVIDENCE_COHORTS: &[Tf32AutoEvidenceCohort] = &[Tf32AutoEvidenceCohort {
+    identity: SM89_FINALIST_TF32_IDENTITY_CUDA_13_2,
+    portable: None,
+    tuning_revision: super::contract::SM89_FINALIST_TUNING_REVISION,
+    cells: SM89_FINALIST_TF32_NT_CELLS,
+}];
 
 /// No SM90a board has frozen a TF32 cohort yet; the family declines to the
 /// portable ladder until one does.
@@ -8839,11 +8909,11 @@ mod sm120_tests {
 #[cfg(test)]
 mod tf32_tests {
     use super::{
-        SM89_TF32_EVIDENCE_CELLS, SM89_TF32_QUALIFICATION_IDENTITY, SM120_TF32_EVIDENCE_CELLS,
-        SM120_TF32_EVIDENCE_COHORTS, SM120_TF32_RETIRED_COHORTS, Tf32AutoEvidenceCohort,
-        Tf32AutoOperandGate, matching_tf32_cohort, measured_tf32_cell,
-        measured_tf32_route_with_operands, resolve_f32_triad_auto,
-        resolve_f32_triad_auto_with_operands, resolve_tf32_forced,
+        SM89_FINALIST_TF32_EVIDENCE_COHORTS, SM89_TF32_EVIDENCE_CELLS,
+        SM89_TF32_QUALIFICATION_IDENTITY, SM120_TF32_EVIDENCE_CELLS, SM120_TF32_EVIDENCE_COHORTS,
+        SM120_TF32_RETIRED_COHORTS, Tf32AutoEvidenceCohort, Tf32AutoOperandGate,
+        matching_tf32_cohort, measured_tf32_cell, measured_tf32_route_with_operands,
+        resolve_f32_triad_auto, resolve_f32_triad_auto_with_operands, resolve_tf32_forced,
     };
     use crate::mamba_ssm::gpu::context::F32TriadPolicy;
     use crate::mamba_ssm::gpu::gemm_bi_triad::contract::{
@@ -12886,7 +12956,7 @@ mod tf32_tests {
             )
             .unwrap(),
             prior,
-            "an empty finalist cohort changed AUTO"
+            "an unmeasured finalist binding changed AUTO"
         );
 
         let mut rejected = availability;
@@ -12925,6 +12995,154 @@ mod tf32_tests {
             Ok(route),
             "the finalist holder depends on the portable holder"
         );
+    }
+
+    #[test]
+    fn sm89_finalist_measured_cohorts_select_and_decline_to_prior_routes() {
+        assert!(
+            !SM89_FINALIST_TF32_EVIDENCE_COHORTS.is_empty(),
+            "no measured finalist has been integrated into AUTO"
+        );
+        let operands = F32TriadOperands {
+            output: 0x1000,
+            a: 0x2000,
+            b: 0x3000,
+            bias: None,
+            alpha: 1.0,
+            beta: 0.0,
+        };
+        for cohort in SM89_FINALIST_TF32_EVIDENCE_COHORTS {
+            assert_eq!(cohort.identity.module_kind, ModuleKind::TriadSm89Finalist);
+            assert_eq!(
+                cohort.tuning_revision,
+                super::super::contract::SM89_FINALIST_TUNING_REVISION
+            );
+            assert!(cohort.portable.is_none());
+            assert!(!cohort.cells.is_empty());
+            assert_eq!(
+                SM89_FINALIST_TF32_EVIDENCE_COHORTS
+                    .iter()
+                    .filter(|other| other.identity == cohort.identity)
+                    .count(),
+                1,
+                "duplicate finalist identity"
+            );
+            let availability = F32TriadAvailability {
+                finalist: Some(qualified_module_for_auto_identity(cohort.identity)),
+                ..sm89_availability()
+            };
+            let select = |request, operands, availability| {
+                resolve_f32_triad_auto_with_operands(
+                    F32TriadPolicy::AllowDeterministicTf32V1,
+                    request,
+                    operands,
+                    availability,
+                )
+            };
+            let assert_prior = |request, operands, actual: F32TriadAvailability| {
+                let previous = F32TriadAvailability {
+                    finalist: None,
+                    ..actual
+                };
+                assert_eq!(
+                    select(request, operands, actual),
+                    select(request, operands, previous)
+                );
+            };
+            for cell in cohort.cells {
+                assert_eq!(cell.op, ResolvedGemmOp::Nt);
+                assert_eq!(cell.route, Tf32PhysicalRoute::Sm89MmaTf32Compact8V1);
+                assert_eq!(
+                    cohort
+                        .cells
+                        .iter()
+                        .filter(|other| other.op == cell.op && other.shape == cell.shape)
+                        .count(),
+                    1,
+                    "duplicate finalist shape"
+                );
+                let dims = [
+                    cell.shape.output_rows,
+                    cell.shape.output_columns,
+                    cell.shape.reduction,
+                ];
+                let request = normalized_request(cell.op, dims[0], dims[1], dims[2]);
+                assert_eq!(
+                    select(request, operands, availability),
+                    Ok(F32TriadSelection::Tf32(cell.route))
+                );
+
+                // The existing mutation inventory's first 28 fields are architecture-neutral;
+                // its last field sets tensor-map access false, already false on Ada.
+                for mutate in
+                    sm120_identity_mutations()
+                        .into_iter()
+                        .take(28)
+                        .chain(std::iter::once(
+                            (|module: &mut Tf32QualifiedModule| {
+                                module.device_caps.tensor_map_access = true;
+                            }) as fn(&mut Tf32QualifiedModule),
+                        ))
+                {
+                    let mut changed = availability;
+                    mutate(changed.finalist.as_mut().unwrap());
+                    assert!(
+                        matching_tf32_cohort(
+                            changed.finalist.unwrap(),
+                            SM89_FINALIST_TF32_EVIDENCE_COHORTS
+                        )
+                        .is_none()
+                    );
+                    assert_prior(request, operands, changed);
+                }
+                for axis in 0..3 {
+                    for step in [-1isize, 1] {
+                        let mut changed = dims;
+                        changed[axis] = (changed[axis] as isize + step) as usize;
+                        assert_prior(
+                            normalized_request(cell.op, changed[0], changed[1], changed[2]),
+                            operands,
+                            availability,
+                        );
+                    }
+                    let mut changed = request;
+                    match axis {
+                        0 => changed.shape.lda += 1,
+                        1 => changed.shape.ldb += 1,
+                        _ => changed.shape.ldc += 1,
+                    }
+                    assert_prior(changed, operands, availability);
+                }
+                let operand_mutations: [fn(&mut F32TriadOperands); 11] = [
+                    |value| value.output += 4,
+                    |value| value.a += 4,
+                    |value| value.b += 4,
+                    |value| value.output = 0,
+                    |value| value.a = 0,
+                    |value| value.b = 0,
+                    |value| value.alpha = -0.75,
+                    |value| value.beta = 0.5,
+                    |value| value.beta = -0.0,
+                    |value| value.bias = Some(0x4000),
+                    |value| value.bias = Some(0),
+                ];
+                for mutate in operand_mutations {
+                    let mut changed = operands;
+                    mutate(&mut changed);
+                    assert_prior(request, changed, availability);
+                }
+                for finalist in [None, availability.portable] {
+                    assert_prior(
+                        request,
+                        operands,
+                        F32TriadAvailability {
+                            finalist,
+                            ..availability
+                        },
+                    );
+                }
+            }
+        }
     }
 
     #[test]

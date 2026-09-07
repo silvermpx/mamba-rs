@@ -5105,7 +5105,8 @@ mod tests {
 
     use super::super::contract::{
         TF32_NT_SPLITK4_S3_SPEC, TF32_NT_SPLITK4_S4_SPEC, TF32_NT_SPLITK8_S3_SPEC,
-        TF32_NT_SPLITK8_S4_SPEC, TF32_SPLITK2_SPEC, TF32_SPLITK4_SPEC, Tf32SplitKSpec,
+        TF32_NT_SPLITK8_S4_SPEC, TF32_SPLITK2_SPEC, TF32_SPLITK4_SPEC, Tf32PortableRoute,
+        Tf32PortableStages, Tf32SplitKSpec,
     };
 
     #[test]
@@ -6292,6 +6293,239 @@ mod tests {
         let (_, symbols, shapes) = qualify_cross_m(&ctx, spec, 0x89_0400)
             .expect("wide guarded M=1/tile/tile+1/two-tiles+1 prefix bits");
         assert_eq!((symbols, shapes), (1, 4));
+    }
+
+    fn sm89_finalist_zero_reduction_exceptional_probe(
+        ctx: &GpuCtx,
+        spec: &'static Tf32KernelSpec,
+    ) -> Result<[u8; 32], String> {
+        let dims = (128, 64, 0);
+        let shape = F32TriadShape::contiguous(ResolvedGemmOp::Nt, dims);
+        let exceptional = [
+            0x0000_0000_u32,
+            0x8000_0000,
+            0x0000_0001,
+            0x8000_0001,
+            0x7f80_0000,
+            0xff80_0000,
+            0x7fc1_2345,
+            0xffc1_2345,
+        ];
+        let initial = (0..dims.0 * dims.1)
+            .map(|index| f32::from_bits(exceptional[index % exceptional.len()]))
+            .collect::<Vec<_>>();
+        let mut output = GpuBuffer::from_cpu(&ctx.stream, &initial)?;
+        ctx.stream
+            .synchronize()
+            .map_err(|error| format!("finish exceptional K=0 allocation: {error:?}"))?;
+        let request = F32TriadRequest {
+            op: ResolvedGemmOp::Nt,
+            shape,
+        };
+        let operands = F32TriadOperands {
+            output: output.cached_ptr(),
+            a: 0,
+            b: 0,
+            bias: None,
+            alpha: 1.0,
+            beta: 0.0,
+        };
+        let prepared = prepare_f32_triad_forced(ctx, request, operands, spec.route)?;
+        let eager_trace = ctx.record_eager_gemm_trace(|| launch_forced(ctx, &prepared))?;
+        ctx.stream
+            .synchronize()
+            .map_err(|error| format!("finish exceptional K=0 eager: {error:?}"))?;
+        let eager = output_bits(ctx, &output)?;
+        if eager != vec![0; initial.len()] {
+            return Err("finalist exceptional old-C K=0 did not normalize to positive zero".into());
+        }
+        output.upload(&ctx.stream, &initial)?;
+        let manifest = eager_trace.manifest();
+        let (graph, plan) = unsafe {
+            capture_into_graph_with_gemm_plan(ctx, manifest.route_capacity, &manifest, || {
+                launch_forced(ctx, &prepared)
+            })
+        }?;
+        let plan = plan.ok_or_else(|| "exceptional K=0 captured no route".to_string())?;
+        if plan.routes() != eager_trace.routes()
+            || plan.routes().len() != 1
+            || plan.routes()[0].symbol != spec.symbol
+        {
+            return Err("exceptional K=0 eager/graph route identity changed".into());
+        }
+        output.upload(&ctx.stream, &initial)?;
+        plan.with_validated_launch(ctx, spec.symbol, || {
+            graph
+                .launch()
+                .map_err(|error| format!("launch exceptional K=0 graph: {error:?}"))
+        })?;
+        ctx.stream
+            .synchronize()
+            .map_err(|error| format!("finish exceptional K=0 graph: {error:?}"))?;
+        let replay = output_bits(ctx, &output)?;
+        if replay != eager {
+            return Err("finalist exceptional old-C K=0 eager/graph bits differ".into());
+        }
+        Ok(words_digest(
+            b"sm89-finalist-exceptional-zero-output.v1",
+            &eager,
+        ))
+    }
+
+    fn capture_forced_route(
+        ctx: &GpuCtx,
+        spec: &'static Tf32KernelSpec,
+        dims: (usize, usize, usize),
+        salt: usize,
+    ) -> Result<ResolvedGemmRoute, String> {
+        let request = F32TriadRequest {
+            op: spec.op,
+            shape: F32TriadShape::contiguous(spec.op, dims),
+        };
+        let host = build_host_case(request, salt, primary_epilogue(spec.op));
+        let device = upload_case(ctx, &host)?;
+        ctx.stream
+            .synchronize()
+            .map_err(|error| format!("finish live-route allocations: {error:?}"))?;
+        let prepared = prepare_f32_triad_forced(ctx, request, device.operands(&host), spec.route)?;
+        let trace = ctx.record_eager_gemm_trace(|| launch_forced(ctx, &prepared))?;
+        ctx.stream
+            .synchronize()
+            .map_err(|error| format!("finish live-route launch: {error:?}"))?;
+        let [route] = trace.routes() else {
+            return Err("forced route trace did not contain exactly one route".into());
+        };
+        Ok(*route)
+    }
+
+    #[test]
+    #[ignore = "requires exact Ada CC8.9 and the bound SM89 finalist module"]
+    fn sm89_nt_compact_finalist_resources_k0_and_live_revisions() {
+        let device = crate::mamba_ssm::gpu::device::GpuDevice::new(0).expect("CUDA device");
+        assert_eq!(device.compute_capability, (8, 9));
+        assert_eq!(device.multiprocessor_count(), 142);
+        let ctx = GpuCtx::new(&device).expect("CUDA context");
+        let _policy_guard = QualificationPolicyGuard::enter(&ctx);
+        let spec = &super::super::contract::SM89_FINALIST_TF32_ROUTE_SPECS[0];
+        let binding = ctx
+            .kernels
+            .f32_triad_availability()
+            .finalist
+            .expect("bound finalist identity");
+        assert_eq!(binding.module_kind, ModuleKind::TriadSm89Finalist);
+        assert_eq!(binding.compiler.target.as_str(), "sm_89");
+        let function = ctx
+            .kernels
+            .tf32_function(spec.symbol)
+            .expect("loaded finalist symbol");
+        let registers = u32::try_from(function.num_regs().expect("register census")).unwrap();
+        let local =
+            u32::try_from(function.local_size_bytes().expect("local-memory census")).unwrap();
+        let static_shared =
+            u32::try_from(function.shared_size_bytes().expect("static-shared census")).unwrap();
+        let max_threads = function.max_threads_per_block().expect("max-thread census");
+        let occupancy = function
+            .occupancy_max_active_blocks_per_multiprocessor(
+                spec.threads,
+                spec.dynamic_shared_bytes as usize,
+                None,
+            )
+            .expect("occupancy census");
+        assert_eq!(local, 0);
+        assert_eq!(static_shared, 0);
+        assert!(max_threads >= i32::try_from(spec.threads).unwrap());
+        assert!(occupancy >= 2);
+        println!(
+            "{{\"kind\":\"sm89_nt_finalist_resources\",\"symbol\":\"{}\",\"registers\":{},\"local_bytes\":{},\"static_shared_bytes\":{},\"dynamic_shared_bytes\":{},\"launch_threads\":{},\"max_threads\":{},\"occupancy\":{},\"required_occupancy\":2,\"target\":\"{}\",\"nvrtc\":[{},{}],\"nvrtc_library_known\":{},\"source_digest\":\"{}\",\"invocation_digest\":\"{}\",\"header_manifest_digest\":\"{}\",\"compile_key\":\"{}\",\"artifact_digest\":\"{}\",\"driver_api\":{},\"driver_build_sources\":{},\"driver_build_digest\":\"{}\"}}",
+            spec.symbol,
+            registers,
+            local,
+            static_shared,
+            spec.dynamic_shared_bytes,
+            spec.threads,
+            max_threads,
+            occupancy,
+            binding.compiler.target.as_str(),
+            binding.compiler.nvrtc_version.0,
+            binding.compiler.nvrtc_version.1,
+            binding.compiler.nvrtc_library_known,
+            digest_hex(&binding.compiler.source_digest),
+            digest_hex(&binding.compiler.invocation_digest),
+            digest_hex(&binding.compiler.header_manifest_digest),
+            digest_hex(&binding.artifact.compile_key),
+            digest_hex(&binding.artifact.artifact_digest),
+            binding.device.driver.api_version,
+            binding.device.driver.build_sources,
+            digest_hex(&binding.device.driver.build_digest),
+        );
+
+        let zero = qualify_zero_reduction(&ctx, spec, 0x89c3_1000)
+            .expect("finalist K=0 eager/graph positive-zero contract");
+        let exceptional = sm89_finalist_zero_reduction_exceptional_probe(&ctx, spec)
+            .expect("finalist exceptional old-C initialization-only K=0 probe");
+
+        let finalist = capture_forced_route(&ctx, spec, (129, 65, 36), 0x89c3_2000)
+            .expect("capture actual finalist route");
+        assert_eq!(finalist.tuning_table_revision, 1);
+        ctx.validate_resolved_gemm_route(&finalist, "live finalist revision 1")
+            .unwrap();
+        for revision in [0, 2] {
+            let mut stale = finalist;
+            stale.tuning_table_revision = revision;
+            assert!(
+                ctx.validate_resolved_gemm_route(&stale, "stale finalist revision")
+                    .is_err()
+            );
+        }
+
+        let portable_spec = super::super::contract::tf32_kernel_spec(
+            ResolvedGemmOp::Nt,
+            Tf32PhysicalRoute::MmaTf32RnaV1(Tf32PortableRoute {
+                tile: Tf32PortableTile::M128N64,
+                stages: Tf32PortableStages::S2,
+            }),
+        )
+        .expect("portable RNA spec");
+        let portable = capture_forced_route(&ctx, portable_spec, (129, 65, 36), 0x89c3_3000)
+            .expect("capture actual portable route");
+        assert_eq!(
+            portable.tuning_table_revision,
+            super::super::contract::F32_TF32_TUNING_REVISION
+        );
+        ctx.validate_resolved_gemm_route(&portable, "live portable revision 45")
+            .unwrap();
+        let mut wrong_family_revision = portable;
+        wrong_family_revision.tuning_table_revision = 1;
+        assert!(
+            ctx.validate_resolved_gemm_route(&wrong_family_revision, "wrong portable revision")
+                .is_err()
+        );
+
+        for invalid in [
+            PhysicalQualificationF32Epilogue::new(1.0, 0.5, false),
+            PhysicalQualificationF32Epilogue::new(1.0, 0.0, true),
+        ] {
+            assert!(
+                qualify_physical_launch(
+                    &ctx,
+                    PhysicalQualificationRequest::contiguous_f32(
+                        ResolvedGemmOp::Nt,
+                        (128, 64, 32),
+                        PhysicalQualificationRoute::Tf32Forced(spec.route),
+                        invalid,
+                    ),
+                )
+                .is_err(),
+                "NT beta or bias must fail before kernel qualification"
+            );
+        }
+        println!(
+            "{{\"kind\":\"sm89_nt_finalist_k0_revisions\",\"zero_digest\":\"{}\",\"exceptional_digest\":\"{}\",\"finalist_revision\":1,\"portable_revision\":{},\"shared_route_revision\":{}}}",
+            digest_hex(&zero),
+            digest_hex(&exceptional),
+            portable.tuning_table_revision,
+            ctx.gemm_route().tuning_table_revision,
+        );
     }
 
     #[test]

@@ -9,7 +9,22 @@ the dated progress log, 900 lines), then `internal/agent-operational-rules.md`
 
 ## 1. What the work is
 
-Latest2026-09-07T20:17Z: the integrated compact8/S2 module has now actually
+Latest2026-09-07T20:50Z: CUDA13.2 compact8/S2 passed the integrated paired
+once21 qualification for all three target NT cells. GraphAB p50 current→new:
+d768-in274.324→226.077us, d768-out119.954→105.791us,
+Prism192.385→160.867us. Allfour eager/graph/AB/BA p50+p95 current ratios win.
+Fast remains ahead: independently paired p50 finalist/Fast about1.93x/1.59x/2.10x.
+Root replay verifies24cohorts/504pairs and all measured binding fields. Actual
+resource/K0/live-revision gate passes121regs/0local/0static/49152dynamic/256/occ2.
+Production dispatch now contains the observed13.2 identity and three exact
+NT cells; post-admission actual-AUTO eager/graph/bits and three focused host
+tests now pass (GPU9.29s, source map4ea35e39,377rows accounted). CUDA12.8/13.0 have no new
+AUTO admission yet; run those next and add only their observed identities.
+No new5090 run or new candidate search in this integration phase. Keep global45,
+physical finalist1 and unchanged portable cohorts. Evidence/commands/remaining
+scope: `internal/perf/ada-triad-finalist-integration-20260907/README.md`.
+
+Earlier2026-09-07T20:17Z: the integrated compact8/S2 module has now actually
 loaded and run on Ada/CUDA13.2. The scoped forced-route smoke passed all7
 full-mantissa target/tail/prefix cases with two eager and two graph launches
 per arm, unchanged inputs/guards and exact portable-RNA bit equality. It ran

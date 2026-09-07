@@ -195,6 +195,103 @@ fn qualify_nt_pair(
     canonical
 }
 
+fn nt_auto_request(dims: (usize, usize, usize)) -> PhysicalQualificationRequest {
+    PhysicalQualificationRequest::contiguous_f32(
+        ResolvedGemmOp::Nt,
+        dims,
+        PhysicalQualificationRoute::F32Policy(F32TriadPolicy::AllowDeterministicTf32V1),
+        PhysicalQualificationF32Epilogue::new(1.0, 0.0, false),
+    )
+}
+
+fn qualify_nt_auto_finalist_pair(
+    auto_ctx: &GpuCtx,
+    forced_ctx: &GpuCtx,
+    dims: (usize, usize, usize),
+    case: &str,
+) {
+    let auto_request = nt_auto_request(dims);
+    let forced_request =
+        nt_finalist_request(dims, PhysicalQualificationF32Epilogue::new(1.0, 0.0, false));
+    presize_physical_qualification_suite(auto_ctx, &[auto_request]).unwrap();
+    presize_physical_qualification_suite(forced_ctx, &[forced_request]).unwrap();
+    let mut auto = qualify_physical_launch(auto_ctx, auto_request)
+        .unwrap_or_else(|error| panic!("qualify actual AUTO {case}: {error}"));
+    assert_sm89_nt_finalist_manifest(&auto, dims);
+    let mut forced = qualify_physical_launch(forced_ctx, forced_request)
+        .unwrap_or_else(|error| panic!("qualify forced finalist {case}: {error}"));
+    assert_sm89_nt_finalist_manifest(&forced, dims);
+
+    let (m, k, n) = dims;
+    let output = full_mantissa_words(m * k, 0x89c3_5001);
+    let a = full_mantissa_words(m * n, 0x89c3_5002);
+    let b = full_mantissa_words(k * n, 0x89c3_5003);
+    let mut repeated = None;
+    for (path, graph) in [
+        ("eager", false),
+        ("eager", false),
+        ("graph", true),
+        ("graph", true),
+    ] {
+        let auto_bits = run_exact_words(auto_ctx, &mut auto, auto_request, &output, &a, &b, graph);
+        let forced_bits = run_exact_words(
+            forced_ctx,
+            &mut forced,
+            forced_request,
+            &output,
+            &a,
+            &b,
+            graph,
+        );
+        assert_eq!(auto_bits, forced_bits, "{case}/{path}: AUTO/forced bits");
+        if let Some(expected) = &repeated {
+            assert_eq!(&auto_bits, expected, "{case}/{path}: repeat bits");
+        } else {
+            repeated = Some(auto_bits);
+        }
+    }
+    let repeated = repeated.expect("four AUTO launches produce bits");
+    println!(
+        "{{\"kind\":\"sm89_nt_finalist_actual_auto_bits\",\"case\":\"{case}\",\"dims\":[{m},{k},{n}],\"symbol\":\"{SM89_NT_FINALIST_SYMBOL}\",\"digest\":\"{}\",\"launches_per_arm\":4}}",
+        word_digest(&repeated)
+    );
+}
+
+fn parse_sm89_finalist_admitted_cells(
+    filter: Option<&str>,
+) -> Result<Vec<(&'static str, (usize, usize, usize))>, String> {
+    const CELLS: [(&str, (usize, usize, usize)); 3] = [
+        ("d768_in", (2048, 768, 3072)),
+        ("d768_out", (2048, 1536, 768)),
+        ("prism", (4621, 384, 1928)),
+    ];
+    let Some(filter) = filter else {
+        return Ok(CELLS.to_vec());
+    };
+    if filter.is_empty() {
+        return Err("admitted-cell filter must not be empty".into());
+    }
+    let mut selected = Vec::new();
+    for name in filter.split(',') {
+        let cell = CELLS
+            .iter()
+            .copied()
+            .find(|(candidate, _)| *candidate == name)
+            .ok_or_else(|| format!("unknown admitted finalist cell {name:?}"))?;
+        if selected.iter().any(|(prior, _)| prior == &name) {
+            return Err(format!("duplicate admitted finalist cell {name:?}"));
+        }
+        selected.push(cell);
+    }
+    Ok(selected)
+}
+
+fn sm89_finalist_admitted_cells() -> Vec<(&'static str, (usize, usize, usize))> {
+    let filter = std::env::var("MAMBA_SM89_FINALIST_ADMITTED_CELLS").ok();
+    parse_sm89_finalist_admitted_cells(filter.as_deref())
+        .unwrap_or_else(|error| panic!("invalid admitted finalist cell filter: {error}"))
+}
+
 #[test]
 #[ignore = "requires a CUDA device whose TF32 cohort is frozen in the tree"]
 fn tf32_cohort_binds_on_this_board() {
@@ -482,6 +579,7 @@ fn sm89_nt_compact_finalist_forced_matches_portable_rna_bits() {
     configure_deterministic_tf32(&reference_ctx);
 
     let normal = PhysicalQualificationF32Epilogue::new(1.0, 0.0, false);
+    let mut admitted = 0;
     for (name, dims) in [
         ("d768_in", (2048, 768, 3072)),
         ("d768_out", (2048, 1536, 768)),
@@ -536,5 +634,43 @@ fn sm89_nt_compact_finalist_forced_matches_portable_rna_bits() {
             qualify_physical_launch(&candidate_ctx, request).is_err(),
             "NT beta or bias expansion must fail before kernel qualification"
         );
+    }
+}
+
+#[test]
+fn sm89_finalist_admitted_cell_filter_is_strict() {
+    assert_eq!(parse_sm89_finalist_admitted_cells(None).unwrap().len(), 3);
+    assert_eq!(
+        parse_sm89_finalist_admitted_cells(Some("prism,d768_in"))
+            .unwrap()
+            .iter()
+            .map(|(name, _)| *name)
+            .collect::<Vec<_>>(),
+        ["prism", "d768_in"]
+    );
+    for invalid in ["", "unknown", "prism,prism", "prism,"] {
+        assert!(
+            parse_sm89_finalist_admitted_cells(Some(invalid)).is_err(),
+            "accepted invalid admitted-cell filter {invalid:?}"
+        );
+    }
+}
+
+#[test]
+#[ignore = "requires an admitted Ada SM89 finalist cohort on the active toolkit"]
+fn sm89_nt_compact_finalist_actual_auto_symbols_graphs_and_bits() {
+    let auto_device = GpuDevice::new(0).expect("AUTO CUDA device");
+    let forced_device = GpuDevice::new(0).expect("forced CUDA device");
+    assert_eq!(auto_device.compute_capability, (8, 9));
+    assert_eq!(auto_device.multiprocessor_count(), 142);
+    assert_eq!(forced_device.compute_capability, (8, 9));
+    assert_eq!(forced_device.multiprocessor_count(), 142);
+    let auto_ctx = GpuCtx::new(&auto_device).expect("AUTO context");
+    let forced_ctx = GpuCtx::new(&forced_device).expect("forced context");
+    configure_deterministic_tf32(&auto_ctx);
+    configure_deterministic_tf32(&forced_ctx);
+
+    for (name, dims) in sm89_finalist_admitted_cells() {
+        qualify_nt_auto_finalist_pair(&auto_ctx, &forced_ctx, dims, name);
     }
 }

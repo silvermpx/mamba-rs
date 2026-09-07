@@ -17,11 +17,11 @@ use mamba_rs::mamba_ssm::gpu::context::{BiGemmFamily, F32TriadPolicy, GpuCtx, Ha
 use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
 use mamba_rs::mamba_ssm::gpu::dtype::WeightDtype;
 use mamba_rs::mamba_ssm::gpu::gemm_bi_triad::{
-    F32TriadShape, PhysicalPaddedNnLayout, PhysicalQualificationOffset,
-    PhysicalQualificationRequest, PhysicalQualificationRoute, QualifiedGuardValidation,
-    QualifiedPhysicalLaunch, QualifiedPhysicalLaunchEvidence, QualifiedPhysicalLaunchNode,
-    SM80_TF32_ROUTE_SPECS, TcTile, Tf32KernelSpec, Tf32PhysicalRoute, Tf32PortableRoute,
-    Tf32PortableStages, Tf32PortableTile, presize_physical_qualification_suite,
+    F32TriadShape, PhysicalPaddedNnLayout, PhysicalQualificationF32Epilogue,
+    PhysicalQualificationOffset, PhysicalQualificationRequest, PhysicalQualificationRoute,
+    QualifiedGuardValidation, QualifiedPhysicalLaunch, QualifiedPhysicalLaunchEvidence,
+    QualifiedPhysicalLaunchNode, SM80_TF32_ROUTE_SPECS, TcTile, Tf32KernelSpec, Tf32PhysicalRoute,
+    Tf32PortableRoute, Tf32PortableStages, Tf32PortableTile, presize_physical_qualification_suite,
     qualify_physical_launch, tf32_route_specs,
 };
 #[cfg(feature = "cuda-cublaslt-qualification")]
@@ -32,9 +32,13 @@ use mamba_rs::mamba_ssm::gpu::gemm_bi_triad::{
 };
 use mamba_rs::mamba_ssm::gpu::graph_capture::capture_into_graph;
 use mamba_rs::mamba_ssm::gpu::kernel_identity::{
-    FramedSha256, ModuleKind, PhysicalLaunchKind, PolicyDtype, ResolvedGemmOp, digest_hex,
+    ArtifactIdentity, FramedSha256, GemmRouteIdentity, ModuleKind, PhysicalLaunchKind, PolicyDtype,
+    ResolvedGemmOp, digest_hex,
 };
 use sha2::{Digest as _, Sha256};
+
+#[path = "support/fixed_full_mantissa.rs"]
+mod fixed_full_mantissa;
 
 const DEFAULT_WINDOWS: usize = 101;
 const TARGET_WINDOW_MS: f64 = 5.0;
@@ -9826,4 +9830,768 @@ fn sm120_paired_output_reset_metadata_distinguishes_tn_from_nt() {
     );
     assert_eq!(sm120_paired_output_reset_name(Sm120Op::Nt), "none_beta0");
     assert!(sm120_paired_output_reset_name(Sm120Op::Nn).is_empty());
+}
+
+mod sm89_nt_finalist_once21 {
+    use super::*;
+
+    const SYMBOL: &str = "gemm_bi_nt_sm89_mma_tf32_compact8_v1_m128n64_bk32_s2";
+    const WINDOWS: usize = 21;
+
+    #[derive(Clone, Copy)]
+    struct NtCell {
+        name: &'static str,
+        dims: (usize, usize, usize),
+    }
+
+    const CELLS: [NtCell; 3] = [
+        NtCell {
+            name: "d768_in",
+            dims: (2048, 768, 3072),
+        },
+        NtCell {
+            name: "d768_out",
+            dims: (2048, 1536, 768),
+        },
+        NtCell {
+            name: "prism",
+            dims: (4621, 384, 1928),
+        },
+    ];
+
+    struct Fixture {
+        output: Vec<u32>,
+        a: Vec<u32>,
+        b: Vec<u32>,
+    }
+
+    struct PairSamples {
+        candidate_us: Vec<f64>,
+        denominator_us: Vec<f64>,
+        ratios: Vec<f64>,
+        candidate_iterations: usize,
+        denominator_iterations: usize,
+    }
+
+    fn words(len: usize, seed: u64) -> Vec<u32> {
+        fixed_full_mantissa::finite_full_mantissa_values(len, seed)
+            .into_iter()
+            .map(f32::to_bits)
+            .collect()
+    }
+
+    fn fixture(cell: NtCell) -> Fixture {
+        let (m, k, n) = cell.dims;
+        Fixture {
+            output: words(m * k, 0x89c3_4101),
+            a: words(m * n, 0x89c3_4102),
+            b: words(k * n, 0x89c3_4103),
+        }
+    }
+
+    fn configure(ctx: &GpuCtx) {
+        ctx.set_batch_invariant(true);
+        ctx.set_bi_gemm_family(BiGemmFamily::Triad);
+        ctx.set_f32_triad_policy(F32TriadPolicy::AllowDeterministicTf32V1);
+    }
+
+    fn request(cell: NtCell, route: PhysicalQualificationRoute) -> PhysicalQualificationRequest {
+        PhysicalQualificationRequest::contiguous_f32(
+            ResolvedGemmOp::Nt,
+            cell.dims,
+            route,
+            PhysicalQualificationF32Epilogue::new(1.0, 0.0, false),
+        )
+    }
+
+    fn upload_physical(
+        ctx: &GpuCtx,
+        launch: &mut QualifiedPhysicalLaunch<'_>,
+        fixture: &Fixture,
+    ) -> Result<(), String> {
+        launch.upload_exact_unbiased_f32_words(ctx, &fixture.output, &fixture.a, &fixture.b)
+    }
+
+    fn upload_fast(
+        ctx: &GpuCtx,
+        buffers: &CublasDenominatorBuffers,
+        fixture: &Fixture,
+    ) -> Result<(), String> {
+        let values = |words: &[u32]| {
+            words
+                .iter()
+                .copied()
+                .map(f32::from_bits)
+                .collect::<Vec<_>>()
+        };
+        buffers
+            .output
+            .upload_f32(&ctx.stream, &values(&fixture.output))?;
+        buffers.a.upload_f32(&ctx.stream, &values(&fixture.a))?;
+        buffers.b.upload_f32(&ctx.stream, &values(&fixture.b))?;
+        ctx.stream
+            .synchronize()
+            .map_err(|error| format!("synchronize Fast fixture upload: {error:?}"))
+    }
+
+    fn snapshot_physical(
+        ctx: &GpuCtx,
+        launch: &QualifiedPhysicalLaunch<'_>,
+        fixture: &Fixture,
+        label: &str,
+    ) -> Result<String, String> {
+        let output = launch.f32_output_bits(ctx)?;
+        let (a, b) = launch.f32_operand_bits(ctx)?;
+        if a != fixture.a || b != fixture.b {
+            return Err(format!("{label} mutated a timed input"));
+        }
+        if output.iter().any(|word| !f32::from_bits(*word).is_finite()) {
+            return Err(format!("{label} produced a nonfinite output"));
+        }
+        let guards = launch.validate_red_zones(ctx)?;
+        if guards.allocation_count() != 3 {
+            return Err(format!(
+                "{label} did not validate three guarded allocations"
+            ));
+        }
+        Ok(digest_hex(&tf32_tournament_output_digest(&output)))
+    }
+
+    fn snapshot_fast(
+        ctx: &GpuCtx,
+        buffers: &CublasDenominatorBuffers,
+        fixture: &Fixture,
+    ) -> Result<String, String> {
+        let mut output = vec![0.0; fixture.output.len()];
+        let mut a = vec![0.0; fixture.a.len()];
+        let mut b = vec![0.0; fixture.b.len()];
+        buffers.output.download_f32(&ctx.stream, &mut output)?;
+        buffers.a.download_f32(&ctx.stream, &mut a)?;
+        buffers.b.download_f32(&ctx.stream, &mut b)?;
+        ctx.stream
+            .synchronize()
+            .map_err(|error| format!("synchronize Fast readback: {error:?}"))?;
+        let actual_a = a.into_iter().map(f32::to_bits).collect::<Vec<_>>();
+        let actual_b = b.into_iter().map(f32::to_bits).collect::<Vec<_>>();
+        if actual_a != fixture.a || actual_b != fixture.b {
+            return Err("Fast mutated a timed input".into());
+        }
+        if output.iter().any(|value| !value.is_finite()) {
+            return Err("Fast produced a nonfinite output".into());
+        }
+        let output = output.into_iter().map(f32::to_bits).collect::<Vec<_>>();
+        Ok(digest_hex(&tf32_tournament_output_digest(&output)))
+    }
+
+    fn measure_physical(
+        ctx: &GpuCtx,
+        launch: &mut QualifiedPhysicalLaunch<'_>,
+        path: Tf32TournamentPath,
+        iterations: usize,
+    ) -> Result<f64, String> {
+        measure_tf32_tournament_physical_window_ms(ctx, launch, path, iterations)
+    }
+
+    fn measure_fast(
+        ctx: &GpuCtx,
+        cell: CublasDenominatorCell,
+        buffers: &CublasDenominatorBuffers,
+        graph: &CudaGraph,
+        path: Tf32TournamentPath,
+        iterations: usize,
+    ) -> Result<f64, String> {
+        match path {
+            Tf32TournamentPath::Eager => measure_cublas_denominator_window_ms(
+                ctx,
+                cell,
+                CublasDenominatorMode::Fast,
+                buffers,
+                iterations,
+            ),
+            Tf32TournamentPath::Graph => {
+                measure_tf32_tournament_graph_window_ms(ctx, graph, iterations)
+            }
+        }
+    }
+
+    fn collect_pair(
+        mut candidate: impl FnMut(usize) -> Result<f64, String>,
+        mut denominator: impl FnMut(usize) -> Result<f64, String>,
+        candidate_iterations: usize,
+        denominator_iterations: usize,
+        order: PathOrder,
+    ) -> Result<PairSamples, String> {
+        let mut candidate_us = Vec::with_capacity(WINDOWS);
+        let mut denominator_us = Vec::with_capacity(WINDOWS);
+        let mut ratios = Vec::with_capacity(WINDOWS);
+        for index in 0..WINDOWS {
+            let (candidate_ms, denominator_ms) = match order {
+                PathOrder::Ab => (
+                    candidate(candidate_iterations)?,
+                    denominator(denominator_iterations)?,
+                ),
+                PathOrder::Ba => {
+                    let denominator = denominator(denominator_iterations)?;
+                    let candidate = candidate(candidate_iterations)?;
+                    (candidate, denominator)
+                }
+            };
+            let candidate = candidate_ms * 1_000.0 / candidate_iterations as f64;
+            let denominator = denominator_ms * 1_000.0 / denominator_iterations as f64;
+            validate_sample_us(candidate, index)?;
+            validate_sample_us(denominator, index)?;
+            let ratio = candidate / denominator;
+            if !ratio.is_finite() || ratio <= 0.0 {
+                return Err(format!("paired ratio {index} is invalid: {ratio}"));
+            }
+            candidate_us.push(candidate);
+            denominator_us.push(denominator);
+            ratios.push(ratio);
+        }
+        Ok(PairSamples {
+            candidate_us,
+            denominator_us,
+            ratios,
+            candidate_iterations,
+            denominator_iterations,
+        })
+    }
+
+    fn summary(values: &[f64]) -> (f64, f64) {
+        let mut values = values.to_vec();
+        values.sort_by(f64::total_cmp);
+        (percentile(&values, 0.50), percentile(&values, 0.95))
+    }
+
+    fn route_identity_json(identity: &GemmRouteIdentity) -> String {
+        let artifact = |artifact: ArtifactIdentity| {
+            format!(
+                concat!(
+                    "{{\"module_kind\":\"{}\",\"artifact_kind\":\"{:?}\",",
+                    "\"compile_key\":\"{}\",\"artifact_digest\":\"{}\"}}"
+                ),
+                module_kind_name(artifact.module_kind),
+                artifact.artifact_kind,
+                digest_hex(&artifact.compile_key),
+                digest_hex(&artifact.artifact_digest),
+            )
+        };
+        let specialized = identity
+            .artifacts
+            .specialized
+            .map_or_else(|| "null".to_owned(), artifact);
+        let accepted_target = identity.device_caps.accepted_target.map_or_else(
+            || "null".to_owned(),
+            |target| format!("\"{}\"", target.as_str()),
+        );
+        format!(
+            concat!(
+                "{{\"policy\":\"{}\",\"backend_set\":\"{}\",",
+                "\"numeric_contracts\":\"{}\",\"compiler\":{{",
+                "\"source_digest\":\"{}\",\"invocation_digest\":\"{}\",",
+                "\"header_manifest_digest\":\"{}\",\"target\":\"{}\",",
+                "\"nvrtc_version\":[{},{}],\"nvrtc_library_domain\":\"{}\",",
+                "\"nvrtc_library_known\":{},\"output_kind\":\"{:?}\",",
+                "\"composer_revision\":{},\"compiler_revision\":{},",
+                "\"numeric_abi_revision\":{},\"schedule_revision\":{}}},",
+                "\"artifacts\":{{\"module_count\":{},\"ordered_digest\":\"{}\",",
+                "\"fixed\":{},\"triad_scalar\":{},\"triad_sm80\":{},",
+                "\"specialized\":{}}},\"policy_revision\":{},",
+                "\"policy_hash\":\"{}\",\"device\":{{\"cc\":[{},{}],",
+                "\"multiprocessors\":{},\"target\":\"{}\",",
+                "\"driver_api_version\":{},\"driver_build_sources\":{},",
+                "\"driver_build_digest\":\"{}\"}},\"device_caps\":{{",
+                "\"cc\":[{},{}],\"nvrtc_version\":[{},{}],",
+                "\"accepted_target\":{},\"optin_shared_bytes\":{},",
+                "\"tensor_map_access\":{}}},\"tuning_table_revision\":{},",
+                "\"schedule_set_revision\":{},\"state_capacity\":{}}}"
+            ),
+            escape_json_string(&format!("{:?}", identity.policy)),
+            escape_json_string(&format!("{:?}", identity.backend_set)),
+            escape_json_string(&format!("{:?}", identity.numeric_contracts)),
+            digest_hex(&identity.compiler.source_digest),
+            digest_hex(&identity.compiler.invocation_digest),
+            digest_hex(&identity.compiler.header_manifest_digest),
+            identity.compiler.target.as_str(),
+            identity.compiler.nvrtc_version.0,
+            identity.compiler.nvrtc_version.1,
+            digest_hex(&identity.compiler.nvrtc_library_domain),
+            identity.compiler.nvrtc_library_known,
+            identity.compiler.output_kind,
+            identity.compiler.composer_revision,
+            identity.compiler.compiler_revision,
+            identity.compiler.numeric_abi_revision,
+            identity.compiler.schedule_revision,
+            identity.artifacts.module_count,
+            digest_hex(&identity.artifacts.ordered_digest),
+            artifact(identity.artifacts.fixed),
+            artifact(identity.artifacts.triad_scalar),
+            artifact(identity.artifacts.triad_sm80),
+            specialized,
+            identity.policy_revision,
+            digest_hex(&identity.policy_hash),
+            identity.device.compute_capability.0,
+            identity.device.compute_capability.1,
+            identity.device.multiprocessor_count,
+            identity.device.target.as_str(),
+            identity.device.driver.api_version,
+            identity.device.driver.build_sources,
+            digest_hex(&identity.device.driver.build_digest),
+            identity.device_caps.compute_capability.0,
+            identity.device_caps.compute_capability.1,
+            identity.device_caps.nvrtc_version.0,
+            identity.device_caps.nvrtc_version.1,
+            accepted_target,
+            identity.device_caps.optin_shared_bytes,
+            identity.device_caps.tensor_map_access,
+            identity.tuning_table_revision,
+            identity.schedule_set_revision,
+            identity.state_capacity,
+        )
+    }
+
+    fn emit_row(
+        cell: NtCell,
+        comparison: &str,
+        path: Tf32TournamentPath,
+        order: PathOrder,
+        samples: &PairSamples,
+        candidate_digest: &str,
+        current_digest: &str,
+        fast_digest: &str,
+        candidate: &QualifiedPhysicalLaunch<'_>,
+        current: &QualifiedPhysicalLaunch<'_>,
+        modes: &str,
+    ) -> bool {
+        let (candidate_p50, candidate_p95) = summary(&samples.candidate_us);
+        let (denominator_p50, denominator_p95) = summary(&samples.denominator_us);
+        let (ratio_p50, ratio_p95) = summary(&samples.ratios);
+        let (denominator_symbol, denominator_digest, vendor_modes) = match comparison {
+            "current" => (
+                current
+                    .evidence()
+                    .single_launch_symbol()
+                    .map_or_else(|| "null".into(), |symbol| format!("\"{symbol}\"")),
+                current_digest,
+                "null".to_owned(),
+            ),
+            "fast" => (
+                "\"cublas_gemm_ex_fast_tf32\"".to_owned(),
+                fast_digest,
+                format!("\"{}\"", escape_json_string(modes)),
+            ),
+            _ => panic!("unknown finalist comparison {comparison}"),
+        };
+        println!(
+            concat!(
+                "{{\"schema\":\"MambaBiSm89NtFinalistOnce21V1\",",
+                "\"kind\":\"sm89_nt_finalist_once21\",\"cell\":\"{}\",",
+                "\"dims\":{:?},\"comparison\":\"{}\",\"path\":\"{}\",",
+                "\"order\":\"{}\",\"windows\":21,\"candidate_symbol\":\"{}\",",
+                "\"denominator_symbol\":{},\"candidate_iterations\":{},",
+                "\"denominator_iterations\":{},\"candidate_us\":{:?},",
+                "\"denominator_us\":{:?},\"ratios\":{:?},",
+                "\"candidate_p50_us\":{:.9},\"candidate_p95_us\":{:.9},",
+                "\"denominator_p50_us\":{:.9},\"denominator_p95_us\":{:.9},",
+                "\"ratio_p50\":{:.9},\"ratio_p95\":{:.9},",
+                "\"candidate_output_digest\":\"{}\",",
+                "\"current_output_digest\":\"{}\",\"fast_output_digest\":\"{}\",",
+                "\"denominator_output_digest\":\"{}\",",
+                "\"candidate_guards\":3,\"current_guards\":3,",
+                "\"fast_guard_inventory\":\"three_exact_sized_buffers_no_redzones\",",
+                "\"vendor_modes\":{},\"candidate_physical\":{{{}}},",
+                "\"current_physical\":{{{}}},\"candidate_route_identity\":{},",
+                "\"current_route_identity\":{}}}"
+            ),
+            cell.name,
+            [cell.dims.0, cell.dims.1, cell.dims.2],
+            comparison,
+            path.as_str(),
+            order.as_str(),
+            SYMBOL,
+            denominator_symbol,
+            samples.candidate_iterations,
+            samples.denominator_iterations,
+            samples.candidate_us,
+            samples.denominator_us,
+            samples.ratios,
+            candidate_p50,
+            candidate_p95,
+            denominator_p50,
+            denominator_p95,
+            ratio_p50,
+            ratio_p95,
+            candidate_digest,
+            current_digest,
+            fast_digest,
+            denominator_digest,
+            vendor_modes,
+            render_physical_evidence_fields(candidate.evidence()),
+            render_physical_evidence_fields(current.evidence()),
+            route_identity_json(candidate.evidence().route_identity()),
+            route_identity_json(current.evidence().route_identity()),
+        );
+        ratio_p50 < 1.0 && ratio_p95 < 1.0
+    }
+
+    fn emit_finalist_binding(ctx: &GpuCtx, cell: NtCell) -> Result<(), String> {
+        let binding = ctx
+            .kernels
+            .f32_triad_availability()
+            .finalist
+            .ok_or_else(|| "SM89 finalist binding is absent".to_string())?;
+        println!(
+            concat!(
+                "{{\"schema\":\"MambaBiSm89NtFinalistBindingV1\",",
+                "\"kind\":\"sm89_nt_finalist_binding\",\"cell\":\"{}\",",
+                "\"module_kind\":\"{}\",\"target\":\"{}\",",
+                "\"artifact_kind\":\"{:?}\",\"compile_key\":\"{}\",",
+                "\"artifact_digest\":\"{}\",\"source_digest\":\"{}\",",
+                "\"invocation_digest\":\"{}\",\"header_manifest_digest\":\"{}\",",
+                "\"compiler_target\":\"{}\",\"nvrtc_version\":[{},{}],",
+                "\"nvrtc_library_domain\":\"{}\",\"nvrtc_library_known\":{},",
+                "\"output_kind\":\"{:?}\",\"composer_revision\":{},",
+                "\"compiler_revision\":{},\"numeric_abi_revision\":{},",
+                "\"schedule_revision\":{},\"device_cc\":[{},{}],",
+                "\"device_multiprocessors\":{},\"device_target\":\"{}\",",
+                "\"driver_api_version\":{},\"driver_build_sources\":{},",
+                "\"driver_build_digest\":\"{}\",\"device_optin_shared_bytes\":{},",
+                "\"device_tensor_map_access\":{}}}"
+            ),
+            cell.name,
+            module_kind_name(binding.module_kind),
+            binding.target.as_str(),
+            binding.artifact.artifact_kind,
+            digest_hex(&binding.artifact.compile_key),
+            digest_hex(&binding.artifact.artifact_digest),
+            digest_hex(&binding.compiler.source_digest),
+            digest_hex(&binding.compiler.invocation_digest),
+            digest_hex(&binding.compiler.header_manifest_digest),
+            binding.compiler.target.as_str(),
+            binding.compiler.nvrtc_version.0,
+            binding.compiler.nvrtc_version.1,
+            digest_hex(&binding.compiler.nvrtc_library_domain),
+            binding.compiler.nvrtc_library_known,
+            binding.compiler.output_kind,
+            binding.compiler.composer_revision,
+            binding.compiler.compiler_revision,
+            binding.compiler.numeric_abi_revision,
+            binding.compiler.schedule_revision,
+            binding.device.compute_capability.0,
+            binding.device.compute_capability.1,
+            binding.device.multiprocessor_count,
+            binding.device.target.as_str(),
+            binding.device.driver.api_version,
+            binding.device.driver.build_sources,
+            digest_hex(&binding.device.driver.build_digest),
+            binding.device_caps.optin_shared_bytes,
+            binding.device_caps.tensor_map_access,
+        );
+        Ok(())
+    }
+
+    fn cublas_modes(ctx: &GpuCtx) -> Result<String, String> {
+        use cudarc::cublas::sys::*;
+        let handle = *ctx.blas.handle();
+        let success = cublasStatus_t::CUBLAS_STATUS_SUCCESS;
+        let mut math = cublasMath_t::CUBLAS_DEFAULT_MATH;
+        let mut pointer = cublasPointerMode_t::CUBLAS_POINTER_MODE_HOST;
+        let mut atomics = cublasAtomicsMode_t::CUBLAS_ATOMICS_NOT_ALLOWED;
+        unsafe {
+            if cublasSetMathMode(handle, math) != success
+                || cublasSetPointerMode_v2(handle, pointer) != success
+                || cublasSetAtomicsMode(handle, atomics) != success
+                || cublasGetMathMode(handle, &mut math) != success
+                || cublasGetPointerMode_v2(handle, &mut pointer) != success
+                || cublasGetAtomicsMode(handle, &mut atomics) != success
+            {
+                return Err("query native Fast cuBLAS modes".into());
+            }
+        }
+        Ok(format!(
+            "compute=CUBLAS_COMPUTE_32F_FAST_TF32,algorithm=CUBLAS_GEMM_DEFAULT,math={math:?},pointer={pointer:?},atomics={atomics:?}"
+        ))
+    }
+
+    fn validate_candidate_manifest(
+        launch: &QualifiedPhysicalLaunch<'_>,
+        cell: NtCell,
+    ) -> Result<(), String> {
+        let evidence = launch.evidence();
+        let [node] = evidence.nodes() else {
+            return Err("finalist must retain exactly one physical node".into());
+        };
+        let grid = (
+            (cell.dims.0.div_ceil(128) * cell.dims.1.div_ceil(64)) as u32,
+            1,
+            1,
+        );
+        if !evidence.eager_graph_equal()
+            || evidence.launch_count() != 1
+            || evidence.route_identity().tuning_table_revision != 45
+            || node.module_kind != ModuleKind::TriadSm89Finalist
+            || node.symbol != SYMBOL
+            || node.shape != cell.dims
+            || node.strides != (cell.dims.2, cell.dims.2, cell.dims.1)
+            || node.tile != Some((128, 64))
+            || node.launch.grid_dim != grid
+            || node.launch.block_dim != (256, 1, 1)
+            || node.launch.shared_mem_bytes != 49_152
+        {
+            return Err(format!("finalist physical manifest changed: {node:?}"));
+        }
+        Ok(())
+    }
+
+    fn upload_all(
+        candidate_ctx: &GpuCtx,
+        candidate: &mut QualifiedPhysicalLaunch<'_>,
+        current_ctx: &GpuCtx,
+        current: &mut QualifiedPhysicalLaunch<'_>,
+        fast_ctx: &GpuCtx,
+        fast: &CublasDenominatorBuffers,
+        fixture: &Fixture,
+    ) -> Result<(), String> {
+        upload_physical(candidate_ctx, candidate, fixture)?;
+        upload_physical(current_ctx, current, fixture)?;
+        upload_fast(fast_ctx, fast, fixture)
+    }
+
+    fn run_cell(cell: NtCell) -> Result<(usize, bool), String> {
+        let candidate_device = GpuDevice::new(0)?;
+        let current_device = GpuDevice::new(0)?;
+        let fast_device = GpuDevice::new(0)?;
+        for device in [&candidate_device, &current_device, &fast_device] {
+            if device.compute_capability != (8, 9) || device.multiprocessor_count() != 142 {
+                return Err(format!(
+                    "finalist timing requires exact 142-SM CC8.9, got CC{:?}/{}SM",
+                    device.compute_capability,
+                    device.multiprocessor_count()
+                ));
+            }
+        }
+        let candidate_ctx = GpuCtx::new(&candidate_device)?;
+        let current_ctx = GpuCtx::new(&current_device)?;
+        let fast_ctx = GpuCtx::new(&fast_device)?;
+        configure(&candidate_ctx);
+        configure(&current_ctx);
+        configure(&fast_ctx);
+
+        let candidate_request = request(
+            cell,
+            PhysicalQualificationRoute::Tf32Forced(Tf32PhysicalRoute::Sm89MmaTf32Compact8V1),
+        );
+        let current_request = request(
+            cell,
+            PhysicalQualificationRoute::F32Policy(F32TriadPolicy::AllowDeterministicTf32V1),
+        );
+        presize_physical_qualification_suite(&candidate_ctx, &[candidate_request])?;
+        presize_physical_qualification_suite(&current_ctx, &[current_request])?;
+        let mut candidate = qualify_physical_launch(&candidate_ctx, candidate_request)?;
+        let mut current = qualify_physical_launch(&current_ctx, current_request)?;
+        candidate.validate_timed_request(&candidate_ctx, candidate_request)?;
+        current.validate_timed_request(&current_ctx, current_request)?;
+        validate_candidate_manifest(&candidate, cell)?;
+        if !current.evidence().eager_graph_equal() || current.evidence().launch_count() == 0 {
+            return Err("actual current route has no stable physical launch inventory".into());
+        }
+        emit_finalist_binding(&candidate_ctx, cell)?;
+        let cublas_cell = CublasDenominatorCell {
+            dtype: WeightDtype::F32,
+            op: ResolvedGemmOp::Nt,
+            shape: Shape {
+                name: cell.name,
+                dims: cell.dims,
+            },
+        };
+        let fast = allocate_cublas_denominator_buffers(&fast_ctx, cublas_cell)?;
+        let modes = cublas_modes(&fast_ctx)?;
+        let fast_graph = unsafe {
+            capture_into_graph(&fast_ctx.stream, || {
+                launch_cublas_denominator(
+                    &fast_ctx,
+                    cublas_cell,
+                    CublasDenominatorMode::Fast,
+                    &fast,
+                )
+            })
+        }?;
+        let fixture = fixture(cell);
+
+        upload_all(
+            &candidate_ctx,
+            &mut candidate,
+            &current_ctx,
+            &mut current,
+            &fast_ctx,
+            &fast,
+            &fixture,
+        )?;
+        measure_physical(&candidate_ctx, &mut candidate, Tf32TournamentPath::Eager, 1)?;
+        measure_physical(&current_ctx, &mut current, Tf32TournamentPath::Eager, 1)?;
+        launch_cublas_denominator(&fast_ctx, cublas_cell, CublasDenominatorMode::Fast, &fast)?;
+        snapshot_physical(&candidate_ctx, &candidate, &fixture, "finalist semantic")?;
+        snapshot_physical(&current_ctx, &current, &fixture, "current semantic")?;
+        snapshot_fast(&fast_ctx, &fast, &fixture)?;
+
+        let mut admitted_current = true;
+        let mut rows = 0;
+        for path in [Tf32TournamentPath::Eager, Tf32TournamentPath::Graph] {
+            for order in [PathOrder::Ab, PathOrder::Ba] {
+                upload_all(
+                    &candidate_ctx,
+                    &mut candidate,
+                    &current_ctx,
+                    &mut current,
+                    &fast_ctx,
+                    &fast,
+                    &fixture,
+                )?;
+                measure_physical(&candidate_ctx, &mut candidate, path, 128)?;
+                measure_physical(&current_ctx, &mut current, path, 128)?;
+                upload_all(
+                    &candidate_ctx,
+                    &mut candidate,
+                    &current_ctx,
+                    &mut current,
+                    &fast_ctx,
+                    &fast,
+                    &fixture,
+                )?;
+                let candidate_iterations = calibrate_measurement(|iterations| {
+                    measure_physical(&candidate_ctx, &mut candidate, path, iterations)
+                })?;
+                let current_iterations = calibrate_measurement(|iterations| {
+                    measure_physical(&current_ctx, &mut current, path, iterations)
+                })?;
+                upload_all(
+                    &candidate_ctx,
+                    &mut candidate,
+                    &current_ctx,
+                    &mut current,
+                    &fast_ctx,
+                    &fast,
+                    &fixture,
+                )?;
+                let samples = collect_pair(
+                    |iterations| measure_physical(&candidate_ctx, &mut candidate, path, iterations),
+                    |iterations| measure_physical(&current_ctx, &mut current, path, iterations),
+                    candidate_iterations,
+                    current_iterations,
+                    order,
+                )?;
+                let candidate_digest =
+                    snapshot_physical(&candidate_ctx, &candidate, &fixture, "finalist/current")?;
+                let current_digest =
+                    snapshot_physical(&current_ctx, &current, &fixture, "current/finalist")?;
+                let fast_digest = snapshot_fast(&fast_ctx, &fast, &fixture)?;
+                admitted_current &= emit_row(
+                    cell,
+                    "current",
+                    path,
+                    order,
+                    &samples,
+                    &candidate_digest,
+                    &current_digest,
+                    &fast_digest,
+                    &candidate,
+                    &current,
+                    &modes,
+                );
+                rows += 1;
+            }
+        }
+
+        for path in [Tf32TournamentPath::Eager, Tf32TournamentPath::Graph] {
+            for order in [PathOrder::Ab, PathOrder::Ba] {
+                upload_all(
+                    &candidate_ctx,
+                    &mut candidate,
+                    &current_ctx,
+                    &mut current,
+                    &fast_ctx,
+                    &fast,
+                    &fixture,
+                )?;
+                measure_physical(&candidate_ctx, &mut candidate, path, 128)?;
+                measure_fast(&fast_ctx, cublas_cell, &fast, &fast_graph, path, 128)?;
+                upload_all(
+                    &candidate_ctx,
+                    &mut candidate,
+                    &current_ctx,
+                    &mut current,
+                    &fast_ctx,
+                    &fast,
+                    &fixture,
+                )?;
+                let candidate_iterations = calibrate_measurement(|iterations| {
+                    measure_physical(&candidate_ctx, &mut candidate, path, iterations)
+                })?;
+                let fast_iterations = calibrate_measurement(|iterations| {
+                    measure_fast(&fast_ctx, cublas_cell, &fast, &fast_graph, path, iterations)
+                })?;
+                upload_all(
+                    &candidate_ctx,
+                    &mut candidate,
+                    &current_ctx,
+                    &mut current,
+                    &fast_ctx,
+                    &fast,
+                    &fixture,
+                )?;
+                let samples = collect_pair(
+                    |iterations| measure_physical(&candidate_ctx, &mut candidate, path, iterations),
+                    |iterations| {
+                        measure_fast(&fast_ctx, cublas_cell, &fast, &fast_graph, path, iterations)
+                    },
+                    candidate_iterations,
+                    fast_iterations,
+                    order,
+                )?;
+                let candidate_digest =
+                    snapshot_physical(&candidate_ctx, &candidate, &fixture, "finalist/Fast")?;
+                let current_digest =
+                    snapshot_physical(&current_ctx, &current, &fixture, "current/Fast shadow")?;
+                let fast_digest = snapshot_fast(&fast_ctx, &fast, &fixture)?;
+                emit_row(
+                    cell,
+                    "fast",
+                    path,
+                    order,
+                    &samples,
+                    &candidate_digest,
+                    &current_digest,
+                    &fast_digest,
+                    &candidate,
+                    &current,
+                    &modes,
+                );
+                rows += 1;
+            }
+        }
+        println!(
+            "{{\"schema\":\"MambaBiSm89NtFinalistCellDecisionV1\",\"kind\":\"sm89_nt_finalist_cell_decision\",\"cell\":\"{}\",\"rows\":{},\"admit_against_current\":{}}}",
+            cell.name, rows, admitted_current
+        );
+        Ok((rows, admitted_current))
+    }
+
+    #[test]
+    #[ignore = "requires exact Ada CC8.9 and a bound SM89 finalist on one toolkit"]
+    fn gemm_bi_sm89_nt_finalist_current_fast_once21() {
+        let _lock = performance_suite_lock().lock().unwrap();
+        let mut rows = 0;
+        let mut admitted_cells = 0;
+        for cell in CELLS {
+            let (cell_rows, admitted) =
+                run_cell(cell).unwrap_or_else(|error| panic!("{}: {error}", cell.name));
+            rows += cell_rows;
+            admitted_cells += usize::from(admitted);
+        }
+        assert_eq!(rows, 24);
+        println!(
+            "{{\"schema\":\"MambaBiSm89NtFinalistOnce21CompletionV1\",\"kind\":\"sm89_nt_finalist_once21_complete\",\"cells\":3,\"admitted_cells\":{},\"rows\":24,\"windows_per_row\":21,\"paired_observations\":504,\"timed_arm_windows\":1008}}",
+            admitted_cells
+        );
+    }
 }
