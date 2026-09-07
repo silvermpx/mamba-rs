@@ -1,0 +1,22 @@
+   Compiling mamba-rs v0.6.9 (/root/mamba-ada-exact-toolkit-auto-20260907)
+error: invalid format string: expected `}`, found `(`
+   --> tests/gemm_bi_fixed_tf32_n96_discovery.rs:133:40
+    |
+133 |                     "duplicate output {(row, column):?}"
+    |                                       -^ expected `}` in format string
+    |                                       |
+    |                                       because of this opening brace
+    |
+    = note: if you intended to print `{`, you can escape it using `{{`
+
+error: invalid format string: expected `}`, found `(`
+   --> tests/gemm_bi_fixed_tf32_n96_discovery.rs:696:61
+    |
+696 |             return Err(format!("N96 ABI parameter {index}: {(offset, size):?}"));
+    |                                                            -^ expected `}` in format string
+    |                                                            |
+    |                                                            because of this opening brace
+    |
+    = note: if you intended to print `{`, you can escape it using `{{`
+
+error: could not compile `mamba-rs` (test "gemm_bi_fixed_tf32_n96_discovery") due to 2 previous errors

@@ -23,19 +23,29 @@ are historical checkpoints, not missing current aligned-hot wiring.
 User-approved process correction: candidate discovery now uses one CUDA13.2
 build, a small meaningful bit/repeat/eager/graph set and short paired timing;
 full qualification is for a frozen integrated finalist batch. Reuse unchanged
-evidence and rerun affected checks after fixes. Do not wait for every inference
-Fast gap to close before Triad discovery. This supersedes older per-prototype
-full-gate ordering; see docs/performance-playbook.md section9.
+evidence and rerun affected checks after fixes. Latest user priority is now
+inference first: find a small research-informed batch, assemble its qualified
+winners into the production dispatcher, verify the assembled inference set,
+then resume Triad. This supersedes both the earlier interleaved Triad plan
+and older per-prototype full-gate ordering; see docs/performance-playbook.md
+section9. The prepared test-only Triad probe is retained, not being timed.
 
 TF32 E0 profile is now complete on the unchanged AUTO44 CUDA13.2 build:
 unprofiled one-window AB/BA is about119us AUTO versus91us cuBLAS Fast.
 Nsight finds28.822M versus15.968M instructions for the same3.538944M HMMA;
 see internal/perf/ada-tf32-e0-ncu-20260907/report.md. Both arms have96 useful
 tiles; Fast's128 physical CTAs include32 padding early exits. The next
-bounded probe is a test-only RNA M128N96/BK32/S3 candidate, with128 genuinely
-useful E0 tiles and unchanged ascending-k8/RNA arithmetic. It is not yet a
-measured improvement or production route. Next Triad probe is the existing
-TN prism split8 M64N64/S3 candidate; no new Triad timing is claimed here.
+bounded probe, test-only RNA M128N96/BK32/S3, now passes its small CUDA13.2
+bit/repeat/graph set and short7 then21 timing. E0 is about101.51us versus
+119.06us production RNA and91.07us actual Fast: about14.7% less time than
+the incumbent, still11.5% slower than Fast. Worst-order paired21 p95 ratios
+are0.852894 versus RNA and1.114887 versus Fast. Root replayed all emitted
+ratios/quantiles. Resources:128 registers, zero local bytes,86016 dynamic
+shared bytes,128 useful CTAs. This is a finalist discovery, not production
+qualification or an AUTO route. Source and evidence are under
+tests/gemm_bi_fixed_tf32_n96_discovery.{rs,cu} and
+internal/perf/ada-tf32-n96-discovery-20260907/. The next Triad probe remains
+the existing TN prism split8 M64N64/S3; no new Triad timing is claimed here.
 
 Latest measured checkpoint (2026-09-07): existing exact-F32 CopyPlan passed
 paired21 and fresh101 against actualLegacy AUTO on CUDA12.8 and13.0 for

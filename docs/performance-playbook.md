@@ -172,6 +172,9 @@ that require the entire qualification matrix before every candidate timing:
 - Discover on one representative installed toolkit (currently CUDA 13.2 on
   Ada). Reuse the current census, known losing experiments and existing test
   routes; do not rebuild the inventory for every edit.
+- Prepare a small research-informed batch of independent configurations and
+  screen them with the same discovery harness. One mechanism per candidate
+  does not mean waiting for full qualification before trying the next one.
 - For each hypothesis, check compilation/resources and the affected layout
   model, then a small meaningful bit-correctness, repeat, eager/graph and bias
   set. Use short paired timings to reject losers early. These are discovery
@@ -183,9 +186,10 @@ that require the entire qualification matrix before every candidate timing:
 - After a fix, rerun affected checks and reuse evidence whose source, binary
   and contract dependencies are unchanged. Do not automatically restart all
   toolkits, all precisions or all 101-window runs.
-- Do not hold Triad discovery until every Fixed inference cell beats cuBLAS
-  Fast. Run a bounded inference experiment, record remaining gaps, then include
-  the worst Triad cells in the next discovery cycle.
+- Latest user priority (2026-09-07): finish and assemble Fixed inference
+  first, then resume Triad. This supersedes the earlier interleaved-discovery
+  ordering. Preserve the prepared Triad probe, but do not spend the Ada lane
+  on it while the inference candidate batch is being completed.
 
 The detailed safety requirements below remain production-promotion gates;
 they are not a mandate to run every expensive gate before a prototype can be

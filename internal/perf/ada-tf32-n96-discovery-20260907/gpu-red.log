@@ -1,0 +1,9 @@
+   Compiling mamba-rs v0.6.9 (/root/mamba-ada-exact-toolkit-auto-20260907)
+error[E0425]: cannot find function `run_discovery` in this scope
+   --> tests/gemm_bi_fixed_tf32_n96_discovery.rs:108:5
+    |
+108 |     run_discovery().unwrap();
+    |     ^^^^^^^^^^^^^ not found in this scope
+
+For more information about this error, try `rustc --explain E0425`.
+error: could not compile `mamba-rs` (test "gemm_bi_fixed_tf32_n96_discovery") due to 1 previous error
