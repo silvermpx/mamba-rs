@@ -1,4 +1,6 @@
 pub const SYMBOL: &str = "gemm_bi_tn_test_compact_eight_warp_sm80_mma_tf32_v1_m128n64_bk32_s2";
+pub const FOUR_WARP_SYMBOL: &str =
+    "gemm_bi_tn_test_compact_four_warp_sm80_mma_tf32_v1_m128n64_bk32_s2";
 
 const HELPER: &str = include_str!("../gemm_bi_tf32_tn_compact_xor.cuh");
 
@@ -143,6 +145,38 @@ pub fn candidate_source(production: &str) -> Result<String, String> {
     Ok(format!("{HELPER}\n{source}"))
 }
 
+pub fn four_warp_candidate_source(production: &str) -> Result<String, String> {
+    let mut source = candidate_source(production)?;
+    for (index, label) in [
+        (4, "TN compact four-warp accumulator ownership"),
+        (5, "TN compact four-warp compute and row ownership"),
+    ] {
+        let transformation = &TRANSFORMATIONS[index];
+        replace_exact(&mut source, transformation.to, transformation.from, label)?;
+    }
+    replace_exact(
+        &mut source,
+        concat!(
+            "GEMM_BI_TF32_DEFINE_KERNEL(",
+            "gemm_bi_tn_test_compact_eight_warp_sm80_mma_tf32_v1_m128n64_bk32_s2, ",
+            "SgbTf32Tn, 128, 64, 2, 256, 1)"
+        ),
+        concat!(
+            "GEMM_BI_TF32_DEFINE_KERNEL(",
+            "gemm_bi_tn_test_compact_four_warp_sm80_mma_tf32_v1_m128n64_bk32_s2, ",
+            "SgbTf32Tn, 128, 64, 2, 256, 1)"
+        ),
+        "TN compact four-warp target symbol",
+    )?;
+    replace_exact(
+        &mut source,
+        "TF32_ASSERT_KERNEL_SIGNATURE(gemm_bi_tn_test_compact_eight_warp_sm80_mma_tf32_v1_m128n64_bk32_s2);",
+        "TF32_ASSERT_KERNEL_SIGNATURE(gemm_bi_tn_test_compact_four_warp_sm80_mma_tf32_v1_m128n64_bk32_s2);",
+        "TN compact four-warp target signature",
+    )?;
+    Ok(source)
+}
+
 fn replace_exact(source: &mut String, from: &str, to: &str, label: &str) -> Result<(), String> {
     let count = source.matches(from).count();
     if count != 1 {
@@ -205,5 +239,24 @@ mod tests {
             duplicate_error.contains("expected 1, observed 2"),
             "{duplicate_error}"
         );
+    }
+
+    #[test]
+    fn four_warp_candidate_keeps_compact_storage_and_restores_original_ownership() {
+        let source = four_warp_candidate_source(PRODUCTION).unwrap();
+        assert!(source.contains("== 49152, \"TN compact-eight-warp M128N64 s2 storage\""));
+        assert!(source.contains("gemm_bi_tf32_tn_test_compact_xor_axis(row, reduction)"));
+        assert!(source.contains("gemm_bi_tf32_tn_test_compact_xor_axis(column, reduction)"));
+        assert_eq!(source.matches(TRANSFORMATIONS[4].from).count(), 1);
+        assert_eq!(source.matches(TRANSFORMATIONS[4].to).count(), 0);
+        assert_eq!(source.matches(TRANSFORMATIONS[5].from).count(), 1);
+        assert_eq!(source.matches(TRANSFORMATIONS[5].to).count(), 0);
+        assert!(source.contains(&format!(
+            "GEMM_BI_TF32_DEFINE_KERNEL({FOUR_WARP_SYMBOL}, SgbTf32Tn, 128, 64, 2, 256, 1)"
+        )));
+        assert!(source.contains(&format!(
+            "TF32_ASSERT_KERNEL_SIGNATURE({FOUR_WARP_SYMBOL});"
+        )));
+        assert!(!source.contains(&format!("TF32_ASSERT_KERNEL_SIGNATURE({SYMBOL});")));
     }
 }

@@ -9,6 +9,36 @@ the dated progress log, 900 lines), then `internal/agent-operational-rules.md`
 
 ## 1. What the work is
 
+Latest2026-09-07T22:31Z: the distinct TN compact-four-compute-warp S2
+ablation also STOPs. Focused bits, finite K0, guards and repeats pass;
+resource156regs/0local/0static/49152dynamic/256threads/occupancy1. Paired
+once7 candidate/AUTO p50: eager1.0102/1.0220, graph1.0424/1.0434;
+p95 ranges1.0257–1.0540. Graph AUTO249.824us versus260.400/260.896us.
+This is not a Fast comparison. No production or AUTO change, no retry.
+Root verifies379 source rows and28 brackets/112 observations from raw
+624a4139cd9f134c42c0e9ad7ba272cedbc7a9139c971698d0604f3ce215d51c.
+One failed transfer-path build was repaired before GPU execution; its log is
+preserved. Runtime75.87s, source/main8b921bbb, composed22d9e88d, binary91bfbe97.
+Commit-only rustfmt wraps one host assertion: finalmainb71a9253, token-identical
+to GPU-built8b; native31/31 plus rustfmt pass. No extra GPU run for formatting.
+Independent source/runtime/runner review accepts the scoped implementation.
+Evidence: `internal/perf/ada-triad-tn-compact4-screen-20260908/`.
+Compact4 and compact8 remain test-only negative results, not a global
+rejection on other GPUs. RTX5090 winners, portable SM80 and Fixed unchanged.
+The next TN search must change mechanism; do not resweep these two variants.
+
+Latest2026-09-07T22:20Z: TN Prism compact-eight-warp S2 discovery is complete
+and committed as070a4f54: resource104regs/0local/49152dynamic/occ2 and focused
+RNA target/tail/alpha/K0 eager+graph bits pass, but candidate/AUTO p50 is
+1.045–1.064 and p95 is1.052–1.067. STOP, no production promotion and no Fast
+comparison. Evidence: `internal/perf/ada-triad-tn-compact8-screen-20260907/`.
+The initial K0 harness rejection and repaired once7 raw are both retained.
+Root native29/29 passes. Existing RTX5090 kernels/routes remain untouched.
+Next in progress: one compact-four-compute-warp S2 ablation, retaining compact
+staging while restoring original ownership; no new result yet. Contract and
+ownership: `internal/perf/ada-triad-tn-compact4-screen-20260908/brief.md`.
+No Fixed retuning, matrix resweep, deletion or new branch in this work.
+
 Latest2026-09-07T21:30Z: compact8/S2 NT integration now closes on ALL THREE
 installed toolkits12.8/13.0/13.2. Each has its own measured identity and all
 three exact cells in real AUTO, seven forced RNA bit cases, resource/K0 and

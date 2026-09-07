@@ -45,6 +45,7 @@ enum CandidateVariant {
     PaddedDenseD768Out,
     PaddedDensePrism,
     TnCompactEightWarpS2Prism,
+    TnCompactFourWarpS2Prism,
 }
 
 impl CandidateVariant {
@@ -61,6 +62,7 @@ impl CandidateVariant {
             Self::PaddedDenseD768Out => "padded_dense_d768_out",
             Self::PaddedDensePrism => "padded_dense_prism",
             Self::TnCompactEightWarpS2Prism => "tn_compact_eight_warp_s2_prism",
+            Self::TnCompactFourWarpS2Prism => "tn_compact_four_warp_s2_prism",
         }
     }
 
@@ -78,6 +80,7 @@ impl CandidateVariant {
             Self::PaddedDenseD768Out => PADDED_DENSE_D768_OUT_SYMBOL,
             Self::PaddedDensePrism => PADDED_DENSE_PRISM_SYMBOL,
             Self::TnCompactEightWarpS2Prism => triad_tn_compact_source::SYMBOL,
+            Self::TnCompactFourWarpS2Prism => triad_tn_compact_source::FOUR_WARP_SYMBOL,
         }
     }
 
@@ -93,7 +96,7 @@ impl CandidateVariant {
             Self::CompactEightWarpS2
             | Self::CompactEightWarpS2D768Out
             | Self::CompactEightWarpS2Prism => 49_152,
-            Self::TnCompactEightWarpS2Prism => 49_152,
+            Self::TnCompactEightWarpS2Prism | Self::TnCompactFourWarpS2Prism => 49_152,
         }
     }
 
@@ -103,6 +106,7 @@ impl CandidateVariant {
             | Self::CompactEightWarpS2D768Out
             | Self::CompactEightWarpS2Prism => 2,
             Self::TnCompactEightWarpS2Prism => 2,
+            Self::TnCompactFourWarpS2Prism => 1,
             _ => 1,
         }
     }
@@ -112,7 +116,8 @@ impl CandidateVariant {
             Self::CompactEightWarpS2D768Out | Self::PaddedDenseD768Out => (2_048, 1_536, 768),
             Self::CompactEightWarpS2Prism
             | Self::PaddedDensePrism
-            | Self::TnCompactEightWarpS2Prism => (4_621, 384, 1_928),
+            | Self::TnCompactEightWarpS2Prism
+            | Self::TnCompactFourWarpS2Prism => (4_621, 384, 1_928),
             _ => (2_048, 768, 3_072),
         }
     }
@@ -133,15 +138,45 @@ impl CandidateVariant {
             Self::TnCompactEightWarpS2Prism => {
                 tn_compact_eight_warp_s2_candidate_source_from(PRODUCTION_CUDA)
             }
+            Self::TnCompactFourWarpS2Prism => {
+                triad_tn_compact_source::four_warp_candidate_source(PRODUCTION_CUDA)
+            }
         }
     }
 
     const fn is_tn(self) -> bool {
-        matches!(self, Self::TnCompactEightWarpS2Prism)
+        matches!(
+            self,
+            Self::TnCompactEightWarpS2Prism | Self::TnCompactFourWarpS2Prism
+        )
     }
 
     const fn op_name(self) -> &'static str {
         if self.is_tn() { "TN" } else { "NT" }
+    }
+
+    const fn tn_screen_schema(self) -> &'static str {
+        match self {
+            Self::TnCompactEightWarpS2Prism => "MambaBiTf32TnCompact8DiscoveryScreenV1",
+            Self::TnCompactFourWarpS2Prism => "MambaBiTf32TnCompact4DiscoveryScreenV1",
+            _ => panic!("TN screen schema requested for NT candidate"),
+        }
+    }
+
+    const fn tn_decision_schema(self) -> &'static str {
+        match self {
+            Self::TnCompactEightWarpS2Prism => "MambaBiTf32TnCompact8DiscoveryDecisionV1",
+            Self::TnCompactFourWarpS2Prism => "MambaBiTf32TnCompact4DiscoveryDecisionV1",
+            _ => panic!("TN decision schema requested for NT candidate"),
+        }
+    }
+
+    const fn tn_cohort(self) -> &'static str {
+        match self {
+            Self::TnCompactEightWarpS2Prism => "tf32-tn-compact-eight-warp-s2-prism/",
+            Self::TnCompactFourWarpS2Prism => "tf32-tn-compact-four-warp-s2-prism/",
+            _ => panic!("TN cohort requested for NT candidate"),
+        }
     }
 }
 
@@ -1408,6 +1443,25 @@ fn tn_k0_fma_one_positive_zero_oracle_preserves_finite_bits_and_canonicalizes_ze
     );
     assert!(tn_k0_fma_one_positive_zero_bits(&[0x7f80_0000]).is_err());
     assert!(tn_k0_fma_one_positive_zero_bits(&[0x7fc0_0001]).is_err());
+}
+
+#[test]
+fn tn_compact_four_warp_s2_binds_distinct_symbol_resource_gate_and_evidence_labels() {
+    let variant = CandidateVariant::TnCompactFourWarpS2Prism;
+    assert_eq!(variant.name(), "tn_compact_four_warp_s2_prism");
+    assert_eq!(variant.symbol(), triad_tn_compact_source::FOUR_WARP_SYMBOL);
+    assert_eq!(variant.target_dims(), (4_621, 384, 1_928));
+    assert_eq!(variant.shared_bytes(), 49_152);
+    assert_eq!(variant.required_occupancy(), 1);
+    assert_eq!(
+        variant.tn_screen_schema(),
+        "MambaBiTf32TnCompact4DiscoveryScreenV1"
+    );
+    assert_eq!(
+        variant.tn_decision_schema(),
+        "MambaBiTf32TnCompact4DiscoveryDecisionV1"
+    );
+    assert_eq!(variant.tn_cohort(), "tf32-tn-compact-four-warp-s2-prism/");
 }
 
 #[test]
@@ -2713,8 +2767,9 @@ mod cuda_suite {
                 .join(",")
         );
         let (m, k, n) = candidate.variant.target_dims();
+        let schema = candidate.variant.tn_screen_schema();
         println!(
-            "{{\"schema\":\"MambaBiTf32TnCompact8DiscoveryScreenV1\",\"op\":\"TN\",\"variant\":\"{}\",\"symbol\":\"{}\",\"dynamic_shared_bytes\":{},\"shape\":[{m},{k},{n}],\"alpha\":1.0,\"beta\":1.0,\"bias\":false,\"path\":\"{}\",\"order\":\"{}\",\"windows\":{WINDOWS},\"warmups_per_arm\":{TN_WARMUPS},\"logical_gemms_per_observation\":1,\"reseed_scope\":\"C+A+B\",\"reseed_position\":\"before_start_event\",\"post_download_before_next_reset\":true,\"observation_arms\":[\"{}\",\"{}\",\"{}\",\"{}\"],\"observations_us\":{observations},\"ratio_direction\":\"candidate_over_actual_auto\",\"ratio_p50\":{p50:.9},\"ratio_p95\":{p95:.9},\"auto_samples_us\":{},\"candidate_samples_us\":{},\"ratios\":{}}}",
+            "{{\"schema\":\"{schema}\",\"op\":\"TN\",\"variant\":\"{}\",\"symbol\":\"{}\",\"dynamic_shared_bytes\":{},\"shape\":[{m},{k},{n}],\"alpha\":1.0,\"beta\":1.0,\"bias\":false,\"path\":\"{}\",\"order\":\"{}\",\"windows\":{WINDOWS},\"warmups_per_arm\":{TN_WARMUPS},\"logical_gemms_per_observation\":1,\"reseed_scope\":\"C+A+B\",\"reseed_position\":\"before_start_event\",\"post_download_before_next_reset\":true,\"observation_arms\":[\"{}\",\"{}\",\"{}\",\"{}\"],\"observations_us\":{observations},\"ratio_direction\":\"candidate_over_actual_auto\",\"ratio_p50\":{p50:.9},\"ratio_p95\":{p95:.9},\"auto_samples_us\":{},\"candidate_samples_us\":{},\"ratios\":{}}}",
             candidate.variant.name(),
             candidate.variant.symbol(),
             candidate.variant.shared_bytes(),
@@ -2739,7 +2794,7 @@ mod cuda_suite {
             variant.name()
         );
         let quiet = QuietGpu::for_cuda_ordinal(0).unwrap();
-        let cohort = "tf32-tn-compact-eight-warp-s2-prism/";
+        let cohort = variant.tn_cohort();
         let pre = quiet.require_pre_context(&format!("{cohort}pre")).unwrap();
         let device = GpuDevice::new(0).unwrap();
         assert_eq!(device.compute_capability, (8, 9));
@@ -2814,8 +2869,9 @@ mod cuda_suite {
             .map(|(p50, p95)| [p50, p95])
             .collect::<Vec<_>>();
         let (m, k, n) = target;
+        let schema = variant.tn_decision_schema();
         println!(
-            "{{\"schema\":\"MambaBiTf32TnCompact8DiscoveryDecisionV1\",\"op\":\"TN\",\"variant\":\"{}\",\"symbol\":\"{}\",\"actual_auto_symbol\":\"{TN_AUTO_SYMBOL}\",\"candidate_grid\":[93,1,1],\"actual_auto_grid\":[93,1,1],\"candidate_dynamic_shared_bytes\":{},\"actual_auto_dynamic_shared_bytes\":{TN_AUTO_SHARED_BYTES},\"shape\":[{m},{k},{n}],\"alpha\":1.0,\"beta\":1.0,\"bias\":false,\"source_sha256\":\"{source_sha}\",\"pre\":{pre:?},\"timed_pre\":{timed_pre:?},\"post\":{post:?},\"strata_fields\":[\"ratio_p50\",\"ratio_p95\"],\"strata\":{},\"retain\":{retain},\"decision\":\"{}\",\"promotion\":false}}",
+            "{{\"schema\":\"{schema}\",\"op\":\"TN\",\"variant\":\"{}\",\"symbol\":\"{}\",\"actual_auto_symbol\":\"{TN_AUTO_SYMBOL}\",\"candidate_grid\":[93,1,1],\"actual_auto_grid\":[93,1,1],\"candidate_dynamic_shared_bytes\":{},\"actual_auto_dynamic_shared_bytes\":{TN_AUTO_SHARED_BYTES},\"shape\":[{m},{k},{n}],\"alpha\":1.0,\"beta\":1.0,\"bias\":false,\"source_sha256\":\"{source_sha}\",\"pre\":{pre:?},\"timed_pre\":{timed_pre:?},\"post\":{post:?},\"strata_fields\":[\"ratio_p50\",\"ratio_p95\"],\"strata\":{},\"retain\":{retain},\"decision\":\"{}\",\"promotion\":false}}",
             variant.name(),
             variant.symbol(),
             variant.shared_bytes(),
@@ -2993,5 +3049,11 @@ mod cuda_suite {
     #[ignore = "requires exclusive Ada CC8.9 CUDA13.2; TN prism compact eight-warp S2 discovery"]
     fn ada_tf32_tn_prism_compact_eight_warp_s2_discovery_once7() {
         run(CandidateVariant::TnCompactEightWarpS2Prism);
+    }
+
+    #[test]
+    #[ignore = "requires exclusive Ada CC8.9 CUDA13.2; TN prism compact four-warp S2 discovery"]
+    fn ada_tf32_tn_prism_compact_four_warp_s2_discovery_once7() {
+        run(CandidateVariant::TnCompactFourWarpS2Prism);
     }
 }
