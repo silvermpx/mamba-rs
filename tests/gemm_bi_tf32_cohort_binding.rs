@@ -9,11 +9,191 @@ use mamba_rs::mamba_ssm::gpu::context::{BiGemmFamily, F32TriadPolicy, GpuCtx};
 use mamba_rs::mamba_ssm::gpu::device::GpuDevice;
 use mamba_rs::mamba_ssm::gpu::gemm_bi_triad::{
     PhysicalQualificationF32Epilogue, PhysicalQualificationRequest, PhysicalQualificationRoute,
-    Tf32PhysicalRoute, Tf32Sm120Route, Tf32Sm120Stages, Tf32Sm120Tile, qualify_physical_launch,
+    Tf32PhysicalRoute, Tf32PortableRoute, Tf32PortableStages, Tf32PortableTile, Tf32Sm120Route,
+    Tf32Sm120Stages, Tf32Sm120Tile, presize_physical_qualification_suite, qualify_physical_launch,
 };
 use mamba_rs::mamba_ssm::gpu::kernel_identity::{
     ModuleKind, ResolvedGemmOp, ResolvedNumericContract, digest_hex,
 };
+use sha2::{Digest as _, Sha256};
+
+#[path = "support/fixed_full_mantissa.rs"]
+mod fixed_full_mantissa;
+
+const SM89_NT_FINALIST_SYMBOL: &str = "gemm_bi_nt_sm89_mma_tf32_compact8_v1_m128n64_bk32_s2";
+
+fn configure_deterministic_tf32(ctx: &GpuCtx) {
+    ctx.set_batch_invariant(true);
+    ctx.set_bi_gemm_family(BiGemmFamily::Triad);
+    ctx.set_f32_triad_policy(F32TriadPolicy::AllowDeterministicTf32V1);
+}
+
+fn nt_finalist_request(
+    dims: (usize, usize, usize),
+    epilogue: PhysicalQualificationF32Epilogue,
+) -> PhysicalQualificationRequest {
+    PhysicalQualificationRequest::contiguous_f32(
+        ResolvedGemmOp::Nt,
+        dims,
+        PhysicalQualificationRoute::Tf32Forced(Tf32PhysicalRoute::Sm89MmaTf32Compact8V1),
+        epilogue,
+    )
+}
+
+fn nt_portable_request(
+    dims: (usize, usize, usize),
+    epilogue: PhysicalQualificationF32Epilogue,
+) -> PhysicalQualificationRequest {
+    PhysicalQualificationRequest::contiguous_f32(
+        ResolvedGemmOp::Nt,
+        dims,
+        PhysicalQualificationRoute::Tf32Forced(Tf32PhysicalRoute::MmaTf32RnaV1(
+            Tf32PortableRoute {
+                tile: Tf32PortableTile::M128N64,
+                stages: Tf32PortableStages::S2,
+            },
+        )),
+        epilogue,
+    )
+}
+
+fn full_mantissa_words(len: usize, seed: u64) -> Vec<u32> {
+    fixed_full_mantissa::finite_full_mantissa_values(len, seed)
+        .into_iter()
+        .map(f32::to_bits)
+        .collect()
+}
+
+fn word_digest(words: &[u32]) -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"gemm-bi-sm89-nt-finalist-output.v1");
+    for word in words {
+        digest.update(word.to_le_bytes());
+    }
+    digest_hex(&digest.finalize().into())
+}
+
+fn assert_sm89_nt_finalist_manifest(
+    launch: &mamba_rs::mamba_ssm::gpu::gemm_bi_triad::QualifiedPhysicalLaunch<'_>,
+    dims: (usize, usize, usize),
+) {
+    let evidence = launch.evidence();
+    assert_eq!(evidence.launch_count(), 1);
+    assert!(evidence.eager_graph_equal());
+    assert_eq!(evidence.route_identity().tuning_table_revision, 45);
+    let [node] = evidence.nodes() else {
+        panic!("finalist must have one physical node")
+    };
+    let expected_grid = ((dims.0.div_ceil(128) * dims.1.div_ceil(64)) as u32, 1, 1);
+    assert_eq!(node.symbol, SM89_NT_FINALIST_SYMBOL);
+    assert_eq!(node.module_kind, ModuleKind::TriadSm89Finalist);
+    assert_eq!(node.logical_op, ResolvedGemmOp::Nt);
+    assert_eq!(node.shape, dims);
+    assert_eq!(node.strides, (dims.2, dims.2, dims.1));
+    assert_eq!(node.tile, Some((128, 64)));
+    assert_eq!(
+        node.numeric_contract,
+        Some(ResolvedNumericContract::MmaTf32RnaV1)
+    );
+    assert_eq!(node.launch.grid_dim, expected_grid);
+    assert_eq!(node.launch.block_dim, (256, 1, 1));
+    assert_eq!(node.launch.shared_mem_bytes, 49_152);
+    assert_ne!(node.launch.arguments_digest, [0; 32]);
+}
+
+fn run_exact_words(
+    ctx: &GpuCtx,
+    launch: &mut mamba_rs::mamba_ssm::gpu::gemm_bi_triad::QualifiedPhysicalLaunch<'_>,
+    request: PhysicalQualificationRequest,
+    output: &[u32],
+    a: &[u32],
+    b: &[u32],
+    graph: bool,
+) -> Vec<u32> {
+    launch
+        .upload_exact_unbiased_f32_words(ctx, output, a, b)
+        .expect("upload exact full-mantissa words");
+    if graph {
+        launch
+            .measure_graph_window_ms(ctx, 1)
+            .expect("graph replay");
+    } else {
+        launch
+            .measure_eager_window_ms(ctx, 1)
+            .expect("eager launch");
+    }
+    let actual = launch.f32_output_bits(ctx).expect("download output bits");
+    let operands = launch.f32_operand_bits(ctx).expect("download operand bits");
+    assert_eq!(operands.0, a, "A changed after graph={graph}");
+    assert_eq!(operands.1, b, "B changed after graph={graph}");
+    let guards = launch.validate_red_zones(ctx).expect("validate red zones");
+    assert_eq!(guards.allocation_count(), 3);
+    launch
+        .validate_timed_request(ctx, request)
+        .expect("request identity remains frozen");
+    actual
+}
+
+fn qualify_nt_pair(
+    candidate_ctx: &GpuCtx,
+    reference_ctx: &GpuCtx,
+    dims: (usize, usize, usize),
+    epilogue: PhysicalQualificationF32Epilogue,
+    case: &str,
+) -> Vec<u32> {
+    let candidate_request = nt_finalist_request(dims, epilogue);
+    let reference_request = nt_portable_request(dims, epilogue);
+    presize_physical_qualification_suite(candidate_ctx, &[candidate_request]).unwrap();
+    presize_physical_qualification_suite(reference_ctx, &[reference_request]).unwrap();
+    let mut candidate = qualify_physical_launch(candidate_ctx, candidate_request)
+        .unwrap_or_else(|error| panic!("qualify finalist {case}: {error}"));
+    let mut reference = qualify_physical_launch(reference_ctx, reference_request)
+        .unwrap_or_else(|error| panic!("qualify portable RNA {case}: {error}"));
+    assert_sm89_nt_finalist_manifest(&candidate, dims);
+
+    let (m, k, n) = dims;
+    let output = full_mantissa_words(m * k, 0x89c3_0001);
+    let a = full_mantissa_words(m * n, 0x89c3_0002);
+    let b = full_mantissa_words(k * n, 0x89c3_0003);
+    let mut canonical = None;
+    for (path, graph) in [
+        ("eager", false),
+        ("eager", false),
+        ("graph", true),
+        ("graph", true),
+    ] {
+        let candidate_bits = run_exact_words(
+            candidate_ctx,
+            &mut candidate,
+            candidate_request,
+            &output,
+            &a,
+            &b,
+            graph,
+        );
+        let reference_bits = run_exact_words(
+            reference_ctx,
+            &mut reference,
+            reference_request,
+            &output,
+            &a,
+            &b,
+            graph,
+        );
+        assert_eq!(candidate_bits, reference_bits, "{case}/{path}: RNA bits");
+        if let Some(expected) = &canonical {
+            assert_eq!(&candidate_bits, expected, "{case}/{path}: repeat bits");
+        } else {
+            canonical = Some(candidate_bits);
+        }
+    }
+    let canonical = canonical.expect("four launches produce bits");
+    println!(
+        "{{\"kind\":\"sm89_nt_finalist_bits\",\"case\":\"{case}\",\"dims\":[{m},{k},{n}],\"digest\":\"{}\",\"launches_per_arm\":4}}",
+        word_digest(&canonical)
+    );
+    canonical
+}
 
 #[test]
 #[ignore = "requires a CUDA device whose TF32 cohort is frozen in the tree"]
@@ -283,6 +463,78 @@ fn sm120_tf32_fresh_595_58_03_auto_symbols_graphs_and_bits() {
         // retained full qualification/sanitizers own guard coverage, not this smoke.
         println!(
             "fresh595.58.03 {dims:?}: actual AUTO/forced {symbol}, dyadic numeric and eager/graph/repeat bits passed"
+        );
+    }
+}
+
+#[test]
+#[ignore = "requires exact Ada CC8.9 and one bound SM89 finalist module"]
+fn sm89_nt_compact_finalist_forced_matches_portable_rna_bits() {
+    let candidate_device = GpuDevice::new(0).expect("candidate CUDA device");
+    let reference_device = GpuDevice::new(0).expect("reference CUDA device");
+    assert_eq!(candidate_device.compute_capability, (8, 9));
+    assert_eq!(candidate_device.multiprocessor_count(), 142);
+    assert_eq!(reference_device.compute_capability, (8, 9));
+    assert_eq!(reference_device.multiprocessor_count(), 142);
+    let candidate_ctx = GpuCtx::new(&candidate_device).expect("candidate context");
+    let reference_ctx = GpuCtx::new(&reference_device).expect("portable RNA context");
+    configure_deterministic_tf32(&candidate_ctx);
+    configure_deterministic_tf32(&reference_ctx);
+
+    let normal = PhysicalQualificationF32Epilogue::new(1.0, 0.0, false);
+    for (name, dims) in [
+        ("d768_in", (2048, 768, 3072)),
+        ("d768_out", (2048, 1536, 768)),
+        ("prism", (4621, 384, 1928)),
+    ] {
+        qualify_nt_pair(&candidate_ctx, &reference_ctx, dims, normal, name);
+    }
+
+    let tail = qualify_nt_pair(
+        &candidate_ctx,
+        &reference_ctx,
+        (129, 65, 36),
+        normal,
+        "tail_alpha1",
+    );
+    let prefix = qualify_nt_pair(
+        &candidate_ctx,
+        &reference_ctx,
+        (1, 65, 36),
+        normal,
+        "prefix_alpha1",
+    );
+    assert_eq!(&tail[..65], prefix, "M1 must equal the first tail row");
+
+    let scaled = PhysicalQualificationF32Epilogue::new(-0.75, 0.0, false);
+    let scaled_tail = qualify_nt_pair(
+        &candidate_ctx,
+        &reference_ctx,
+        (129, 65, 36),
+        scaled,
+        "tail_alpha_neg075",
+    );
+    let scaled_prefix = qualify_nt_pair(
+        &candidate_ctx,
+        &reference_ctx,
+        (1, 65, 36),
+        scaled,
+        "prefix_alpha_neg075",
+    );
+    assert_eq!(
+        &scaled_tail[..65],
+        scaled_prefix,
+        "scaled M1 must equal the first tail row"
+    );
+
+    for invalid in [
+        PhysicalQualificationF32Epilogue::new(1.0, 0.5, false),
+        PhysicalQualificationF32Epilogue::new(1.0, 0.0, true),
+    ] {
+        let request = nt_finalist_request((129, 65, 36), invalid);
+        assert!(
+            qualify_physical_launch(&candidate_ctx, request).is_err(),
+            "NT beta or bias expansion must fail before kernel qualification"
         );
     }
 }

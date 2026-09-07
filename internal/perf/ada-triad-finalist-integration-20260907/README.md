@@ -43,6 +43,28 @@ candidate performance losses or proof of full behavioral TDD coverage.
 
 ## Still required before AUTO admission
 
+First real CUDA13.2 smoke is now complete in `task3-early-bits-cuda132/`:
+one exact ignored test passed in58.10s. Seven finite full-mantissa cases cover
+the three target shapes, simultaneous tails and M1 prefixes at alpha1/-0.75.
+Each arm ran eager twice and graph twice with fresh identical A/B/C; the test
+checks input immutability, three allocation guards, repeat/path equality and
+finalist-versus-forced-portable-RNA bit equality. NT beta/bias negatives reject
+through actual qualification; presizing alone does not reject forced NT beta.
+This smoke does not provide new timing or AUTO admission evidence.
+
+The377-row smoke source map is
+`d4961b0ee8505fc128fb73f22e5d58f28c302665a70636edf25e0eb03665c9fe`:
+374 files match local state at replay, while the incomplete resource/timing
+harness and unrelated SM120 WIP used their committed baseline versions.
+Binary SHA `6a2689f1c171a4a9ddc01da99492650f53c89259fd7e1d30283abf43ae7f3b38`;
+raw test SHA `8ed8db2ab710742a3c9635d7da9976af6db559228f1160ee1a50615f2f50e7ff`.
+The real load adds exactly one cache artifact, key
+`e61681f002f8ecdd61677fc89a8f0faeac5ce494db503fcc97fd344633ec2d65`,
+SHA `1da42f2fbc44dfd9093959831296d86de2414a6d9bb042bc1640730c68d36ac5`;
+the original three remain unchanged. PRE20:16:05Z was quiet, immediate
+RELEASE20:17:03Z was not quiet, and a separate20:17:04Z DRAIN sample was quiet.
+That is one quiet drain observation, not a claimed five-second quiet window.
+
 The frozen Task3 batch must compile/load on CUDA 12.8, 13.0 and 13.2, record
 actual Driver resources, pass forced portable-RNA bit equality, repeats,
 eager/graph, tails/prefixes, K0 and input/guard checks, and compare paired

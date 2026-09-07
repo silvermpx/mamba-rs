@@ -9,6 +9,16 @@ the dated progress log, 900 lines), then `internal/agent-operational-rules.md`
 
 ## 1. What the work is
 
+Latest2026-09-07T20:17Z: the integrated compact8/S2 module has now actually
+loaded and run on Ada/CUDA13.2. The scoped forced-route smoke passed all7
+full-mantissa target/tail/prefix cases with two eager and two graph launches
+per arm, unchanged inputs/guards and exact portable-RNA bit equality. It ran
+in58.10s; original three cache artifacts were preserved and exactly one new
+finalist artifact appeared. Source818b64d6 and host evidencec1faa724 are already
+committed. AUTO remains unadmitted pending paired current/Fast measurements
+and the remaining toolkit/resource checks. This is not a new speedup claim.
+See `internal/perf/ada-triad-finalist-integration-20260907/README.md`.
+
 Source-integration checkpoint2026-09-07: compact8/S2 production source is
 isolated and committed as04c71ebe, independently reviewed with no findings.
 Exact composed bytes match the measured candidate after only helper

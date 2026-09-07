@@ -1,0 +1,10 @@
+fixed_full_mantissa::tests::corpus_is_repeatable_prefix_stable_and_seed_sensitive: test
+fixed_full_mantissa::tests::edge_prefix_preserves_signed_zero_subnormals_and_tf32_ties: test
+fixed_full_mantissa::tests::finite_random_tail_exercises_all_low_tf32_rounding_bits: test
+fixed_full_mantissa::tests::seeded_tail_retains_frozen_w4_generator_bits: test
+sm120_tf32_fresh_595_58_03_auto_symbols_graphs_and_bits: test
+sm89_nt_compact_finalist_forced_matches_portable_rna_bits: test
+sm89_tf32_bias_cohort_serves_the_qualified_wide_epilogues: test
+tf32_cohort_binds_on_this_board: test
+
+8 tests, 0 benchmarks
